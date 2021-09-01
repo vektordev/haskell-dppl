@@ -1,7 +1,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE Rank2Types #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE DeriveFunctor #-}
 
 module Lib
     ( someFunc
@@ -14,12 +13,12 @@ import Linear.Matrix
 import System.Random
 import Control.Monad
 import Data.List
+import Data.Maybe
 import Control.Monad.Random
 import Control.Monad.Except
 import Control.Monad.Reader
 import Data.Reflection (Reifies)
-import Numeric.AD.Internal.Reverse (Reverse)
-import Numeric.AD.Internal.Reverse (Tape)
+import Numeric.AD.Internal.Reverse ( Reverse, Tape)
 
 --assumption about grad: Reverse s a is Num if a is Num.
 --Thererfore, grad :: (Traversable f, Num a) => (forall s. Reifies s Tape => f (Reverse s a) -> Reverse s a) -> f a -> f a
@@ -45,11 +44,11 @@ someFunc =
 --  where gradient = [sum (grad (\th -> probability th datum) thetas) | datum <- samples]
 
 --lambdathing :: forall s a2. (Num a2, Reifies s Tape) => 
-lambdathing :: Num a => Env a -> Expr a -> Value a -> [a] -> a
-lambdathing env expr sample theta = unwrapP $ probability env theta expr sample
+--lambdathing :: Num a => Env a -> Expr a -> Value a -> [a] -> a
+--lambdathing env expr sample theta = unwrapP $ probability env theta expr sample
 
-something :: Num a => Env a -> Expr a -> Value a -> [a] -> [a]
-something env expr sample = grad (\(theta) -> unwrapP $ probability (autoEnv env) theta (autoExpr expr) (autoVal sample))
+--something :: Num a => Env a -> Expr a -> Value a -> [a] -> [a]
+--something env expr sample = grad (\theta -> unwrapP $ probability (autoEnv env) theta (autoExpr expr) (autoVal sample))
 
 myGradientAscent 0 _ _ _ _ = []
 myGradientAscent n env thetas expr vals =
@@ -59,7 +58,7 @@ myGradientAscent n env thetas expr vals =
       (loss, new) = optimizeStep env expr vals thetas
 
 --TODO: can we fix this to use the Foldable theta?
-optimizeStep :: (Fractional a, Num a) => Env a -> Expr a -> [Value a] -> [a] -> (a, [a])
+optimizeStep :: (Fractional a, Num a, Ord a) => Env a -> Expr a -> [Value a] -> [a] -> (a, [a])
 optimizeStep env expr samples thetas = (loss, zipWith (+) thetas $ map (*0.0001) gradient)
   where
     -- does it make a difference if we do sum(gradients) or if we do gradient(sums)?
@@ -70,10 +69,10 @@ optimizeStep env expr samples thetas = (loss, zipWith (+) thetas $ map (*0.0001)
     loss = sum $ map fst grad_loss
 
 autoExpr :: (Num a, Reifies s Tape) => Expr a -> Expr (Reverse s a)
-autoExpr e = fmap auto e
+autoExpr = fmap auto
 
 autoEnv :: (Num a, Reifies s Tape) => Env a -> Env (Reverse s a)
-autoEnv xs = map (\(name, expr) -> (name, autoExpr expr)) xs
+autoEnv = map (\ (name, expr) -> (name, autoExpr expr))
 
 autoVal :: (Num a, Reifies s Tape) => Value a -> Value (Reverse s a)
 autoVal (VBool x) = VBool x
@@ -132,11 +131,11 @@ data PType = Deterministic
 data TExpr a = TExpr RType PType (Expr a)
            deriving (Show)
 
-type Env a = [(String, (Expr a))]
+type Env a = [(String, Expr a)]
 
 data Value a = VFloat a
            | VBool Bool
-           deriving (Show)
+           deriving (Show, Eq)
 
 instance Functor Value where
     fmap f (VFloat a) = VFloat $ f a
@@ -151,6 +150,9 @@ type Check a = ExceptT TypeError (Reader (Env a))
 data TypeError = Mismatch RType RType
                deriving (Show, Eq)
 
+--Nothing indicates low/high infinity.
+data Limits a = Limits (Maybe (Value a)) (Maybe (Value a))
+
 --TODO: Assert that downgrade Chaos Deterministic = Chaos
 downgrade :: PType -> PType -> PType
 downgrade = max
@@ -161,10 +163,14 @@ upgrade = min
 pAnd :: Num a => Probability a -> Probability a -> Probability a
 pAnd (PDF a) (PDF b) = PDF (a*b)
 pAnd (DiscreteProbability a) (DiscreteProbability b) = DiscreteProbability (a*b)
+pAnd (PDF a) (DiscreteProbability b) = PDF (a*b)
+pAnd (DiscreteProbability a) (PDF b) = PDF (a*b)
 
 pOr :: Num a => Probability a -> Probability a -> Probability a
 pOr (PDF a) (PDF b) = PDF (a+b)
 pOr (DiscreteProbability a) (DiscreteProbability b) = DiscreteProbability (a+b)
+pOr (PDF a) (DiscreteProbability b) = PDF (a+b)
+pOr (DiscreteProbability a) (PDF b) = PDF (a+b)
 
 unwrapP :: Num a => Probability a -> a
 unwrapP (PDF x) = x
@@ -233,6 +239,9 @@ inferP (Cons head tail) = do
   return $ downgrade headP tailP
 inferP (Call name) = undefined --TODO: here there be dragons
 
+detGenerate :: (Fractional a, Num a, Ord a) => Env a -> [a] -> Expr a -> Value a
+detGenerate env thetas expr = undefined --check that expr is indeed det, then run generate using const RNG
+
 generate :: (Fractional a, RandomGen g, Num a, Ord a, Random a) => Env a -> [a] -> Expr a -> Rand g (Value a)
 generate env thetas (IfThenElse cond left right) = do
   condV <- generate env thetas cond
@@ -252,14 +261,45 @@ generate env thetas Uniform = do
   return $ VFloat r
 generate env thetas (Constant x) = return x
 
-probability :: Num a => Env a -> [a] -> Expr a -> Value a -> Probability a
+probability :: (Fractional a, Ord a) => Env a -> [a] -> Expr a -> Value a -> Probability a
 -- possible problems in the probability math in there:
 probability env thetas (IfThenElse cond left right) val = pOr (pAnd pCond pLeft) (pAnd pCond pRight)
   where
     pCond = probability env thetas cond (VBool True)
     pLeft = probability env thetas left val
     pRight = probability env thetas right val
-probability env thetas (GreaterThan left right) val = undefined
+probability env thetas (GreaterThan left right) val
+  | leftP == Deterministic && rightP == Integrate = PDF $ integrate right thetas env (Limits (Just leftGen) Nothing)
+  | rightP == Deterministic && leftP == Integrate = PDF $ integrate left thetas env (Limits Nothing (Just rightGen))
+  | otherwise = error "undefined probability for greaterThan"
+  where
+    Right leftP = runReader (runExceptT (inferP left)) env
+    Right rightP = runReader (runExceptT (inferP right)) env
+    leftGen = detGenerate env thetas left
+    rightGen = detGenerate env thetas right
+probability env thetas (ThetaI x) (VFloat val) = if val == (thetas !! x) then DiscreteProbability 1 else DiscreteProbability 0
+probability env thetas (ThetaI x) _ = error "typing error in probability - ThetaI"
+probability env thetas Uniform (VFloat x) = if 0 <= x && x <= 1 then PDF 1 else PDF 0
+probability env thetas Uniform _ = error "typing error in probability - Uniform"
+probability env thetas (Constant val) val2 = if val == val2 then DiscreteProbability 1 else DiscreteProbability 0
+probability env thetas (Mult left right) (VFloat x)
+  | leftP == Deterministic = probability env thetas right (VFloat inverse)
+  | rightP == Deterministic = probability env thetas left (VFloat inverse)
+  | otherwise = error "can't solve Mult"
+  where
+    Right leftP = runReader (runExceptT (inferP left)) env
+    Right rightP = runReader (runExceptT (inferP right)) env
+    VFloat leftGen = detGenerate env thetas left
+    VFloat rightGen = detGenerate env thetas right
+    inverse = if leftP == Deterministic then x / leftGen else x / rightGen
+
+integrate :: (Num a, Ord a) => Expr a -> [a] -> Env a -> Limits a -> a
+integrate Uniform thetas env (Limits low high) = h2 - l2
+  where
+    h2 = min 1 $ maybe 1 unwrap high
+    l2 = max 0 $ maybe 0 unwrap low
+    unwrap (VFloat a) = a
+integrate expr thetas env lims = error "undefined integrate for expr"
 
 prettyPrint :: (Num a, Show a) => Env a -> Expr a -> [String]
 prettyPrint env expr = 
@@ -276,11 +316,11 @@ recurse :: Expr a -> [Expr a]
 recurse (IfThenElse a b c) = [a,b,c]
 recurse (GreaterThan a b) = [a,b]
 recurse (ThetaI _) = []
-recurse (Uniform) = []
+recurse Uniform = []
 recurse (Constant _) = []
 recurse (Mult a b) = [a,b]
 recurse (Plus a b) = [a,b]
-recurse (Null) = []
+recurse Null = []
 recurse (Cons a b) = [a,b]
 recurse (Call _) = []
 recurse (LetIn _ a b) = [a,b]
