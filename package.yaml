@@ -1,6 +1,6 @@
-name:                haskell-ad
+name:                haskell-dppl
 version:             0.1.0.0
-github:              "Github username here/haskell-ad"
+github:              "Github username here/haskell-dppl"
 license:             BSD3
 author:              "Author name here"
 maintainer:          "Author email here"
@@ -17,7 +17,7 @@ extra-source-files:
 # To avoid duplicated efforts in documentation and dealing with the
 # complications of embedding Haddock markup inside cabal files, it is
 # common to point users to the README.md file.
-description:         Please see the README on GitHub at <https://github.com/Github username here/haskell-ad#readme>
+description:         Please see the README on GitHub at <https://github.com/Github username here/haskell-dppl#readme>
 
 dependencies:
 - base >= 4.7 && < 5
@@ -26,12 +26,13 @@ dependencies:
 - random
 - MonadRandom
 - mtl
+- reflection
 
 library:
   source-dirs: src
 
 executables:
-  haskell-ad-exe:
+  haskell-dppl-exe:
     main:                Main.hs
     source-dirs:         app
     ghc-options:
@@ -39,10 +40,10 @@ executables:
     - -rtsopts
     - -with-rtsopts=-N
     dependencies:
-    - haskell-ad
+    - haskell-dppl
 
 tests:
-  haskell-ad-test:
+  haskell-dppl-test:
     main:                Spec.hs
     source-dirs:         test
     ghc-options:
@@ -50,4 +51,4 @@ tests:
     - -rtsopts
     - -with-rtsopts=-N
     dependencies:
-    - haskell-ad
+    - haskell-dppl

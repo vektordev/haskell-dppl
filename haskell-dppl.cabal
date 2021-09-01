@@ -4,16 +4,15 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 
-name:           haskell-ad
+name:           haskell-dppl
 version:        0.1.0.0
-description:    Please see the README on GitHub at <https://github.com/Github username here/haskell-ad#readme>
-homepage:       https://github.com/Github username here/haskell-ad#readme
-bug-reports:    https://github.com/Github username here/haskell-ad/issues
+description:    Please see the README on GitHub at <https://github.com/Github username here/haskell-dppl#readme>
+homepage:       https://github.com/Github username here/haskell-dppl#readme
+bug-reports:    https://github.com/Github username here/haskell-dppl/issues
 author:         Author name here
 maintainer:     Author email here
 copyright:      2019 Author name here
 license:        BSD3
-license-file:   LICENSE
 build-type:     Simple
 extra-source-files:
     README.md
@@ -21,13 +20,13 @@ extra-source-files:
 
 source-repository head
   type: git
-  location: https://github.com/Github username here/haskell-ad
+  location: https://github.com/Github username here/haskell-dppl
 
 library
   exposed-modules:
       Lib
   other-modules:
-      Paths_haskell_ad
+      Paths_haskell_dppl
   hs-source-dirs:
       src
   build-depends:
@@ -37,12 +36,13 @@ library
     , linear
     , mtl
     , random
+    , reflection
   default-language: Haskell2010
 
-executable haskell-ad-exe
+executable haskell-dppl-exe
   main-is: Main.hs
   other-modules:
-      Paths_haskell_ad
+      Paths_haskell_dppl
   hs-source-dirs:
       app
   ghc-options: -threaded -rtsopts -with-rtsopts=-N
@@ -50,17 +50,18 @@ executable haskell-ad-exe
       MonadRandom
     , ad
     , base >=4.7 && <5
-    , haskell-ad
+    , haskell-dppl
     , linear
     , mtl
     , random
+    , reflection
   default-language: Haskell2010
 
-test-suite haskell-ad-test
+test-suite haskell-dppl-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
-      Paths_haskell_ad
+      Paths_haskell_dppl
   hs-source-dirs:
       test
   ghc-options: -threaded -rtsopts -with-rtsopts=-N
@@ -68,8 +69,9 @@ test-suite haskell-ad-test
       MonadRandom
     , ad
     , base >=4.7 && <5
-    , haskell-ad
+    , haskell-dppl
     , linear
     , mtl
     , random
+    , reflection
   default-language: Haskell2010
