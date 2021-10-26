@@ -24,7 +24,11 @@ source-repository head
 
 library
   exposed-modules:
+      Lang
       Lib
+      PType
+      RType
+      Typing
   other-modules:
       Paths_haskell_dppl
   hs-source-dirs:

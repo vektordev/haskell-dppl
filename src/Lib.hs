@@ -22,6 +22,10 @@ import Numeric.AD.Internal.Reverse ( Reverse, Tape)
 --import Debug.Trace
 import Data.Function (on)
 import Data.Ord
+import Lang
+import Typing
+import RType
+import PType
 
 --assumption about grad: Reverse s a is Num if a is Num.
 --Thererfore, grad :: (Traversable f, Num a) => (forall s. Reifies s Tape => f (Reverse s a) -> Reverse s a) -> f a -> f a
@@ -118,165 +122,14 @@ autoVal (VList xs) = VList (map autoVal xs)
 --pr_ :: (Num a, Num b) => a -> Env b -> [a]
 
 
-data Expr x a = IfThenElse x (Expr x a) (Expr x a) (Expr x a)
-          | GreaterThan x (Expr x a) (Expr x a)
-          | ThetaI x Int
-          | Uniform x
-          | Constant x (Value a)
-          | Mult x (Expr x a) (Expr x a)
-          | Plus x (Expr x a) (Expr x a)
-          | Null x
-          | Cons x (Expr x a) (Expr x a)
-          | Call x String
-          | LetIn x String (Expr x a) (Expr x a)
-          | Arg x String RType (Expr x a)
-          | CallArg x String [Expr x a]
-          -- TODO: Needs Concat to achieve proper SPN-parity.
-          deriving (Show, Eq)
-
-instance Functor (Expr x) where
-  fmap = exprMap
-
-exprMap :: (a -> b) -> Expr x a -> Expr x b
-exprMap f (IfThenElse t a b c) = IfThenElse t (fmap f a) (fmap f b) (fmap f c)
-exprMap f (GreaterThan t a b) = GreaterThan t (fmap f a) (fmap f b)
-exprMap _ (ThetaI t x) = ThetaI t x
-exprMap _ (Uniform t) = Uniform t
-exprMap f (Constant t x) = Constant t $ fmap f x
-exprMap f (Mult t a b) = Mult t (fmap f a) (fmap f b)
-exprMap f (Plus t a b) = Plus t (fmap f a) (fmap f b)
-exprMap _ (Null t) = Null t
-exprMap f (Cons t a b) = Cons t (fmap f a) (fmap f b)
-exprMap _ (Call t x) = Call t x
-exprMap f (LetIn t x a b) = LetIn t x (fmap f a) (fmap f b)
-exprMap f (Arg t name r a) = Arg t name r (fmap f a)
-exprMap f (CallArg t name a) = CallArg t name (map (fmap f) a)
-
-tMapHead :: (Expr x a -> x) -> Expr x a -> Expr x a
-tMapHead f expr@(IfThenElse _ a b c) = IfThenElse (f expr) a b c
-tMapHead f expr@(GreaterThan _ a b) = GreaterThan (f expr) a b
-tMapHead f expr@(ThetaI _ x) = ThetaI (f expr) x
-tMapHead f expr@(Uniform _) = Uniform (f expr)
-tMapHead f expr@(Constant _ x) = Constant (f expr) x
-tMapHead f expr@(Mult _ a b) = Mult (f expr) a b
-tMapHead f expr@(Plus _ a b) = Plus (f expr) a b
-tMapHead f expr@(Null _) = Null (f expr)
-tMapHead f expr@(Cons _ a b) = Cons (f expr) a b
-tMapHead f expr@(Call _ x) = Call (f expr) x
-tMapHead f expr@(LetIn _ x a b) = LetIn (f expr) x a b
-tMapHead f expr@(Arg _ name r a) = Arg (f expr) name r a
-tMapHead f expr@(CallArg _ name a) = CallArg (f expr) name a
-
-tMapTails :: (Expr x a -> x) -> Expr x a -> Expr x a
-tMapTails f (IfThenElse t a b c) = IfThenElse t (tMap f a) (tMap f b) (tMap f c)
-tMapTails f (GreaterThan t a b) = GreaterThan t (tMap f a) (tMap f b)
-tMapTails _ (ThetaI t x) = ThetaI t x
-tMapTails _ (Uniform t) = Uniform t
-tMapTails _ (Constant t x) = Constant t x
-tMapTails f (Mult t a b) = Mult t (tMap f a) (tMap f b)
-tMapTails f (Plus t a b) = Plus t (tMap f a) (tMap f b)
-tMapTails _ (Null t) = Null t
-tMapTails f (Cons t a b) = Cons t (tMap f a) (tMap f b)
-tMapTails _ (Call t x) = Call t x
-tMapTails f (LetIn t x a b) = LetIn t x (tMap f a) (tMap f b)
-tMapTails f (Arg t name r a) = Arg t name r (tMap f a)
-tMapTails f (CallArg t name a) = CallArg t name (map (tMap f) a)
-
-tMap :: (Expr x a -> y) -> Expr x a -> Expr y a
-tMap f expr@(IfThenElse _ a b c) = IfThenElse (f expr) (tMap f a) (tMap f b) (tMap f c)
-tMap f expr@(GreaterThan _ a b) = GreaterThan (f expr) (tMap f a) (tMap f b)
-tMap f expr@(ThetaI _ x) = ThetaI (f expr) x
-tMap f expr@(Uniform _) = Uniform (f expr)
-tMap f expr@(Constant _ x) = Constant (f expr) x
-tMap f expr@(Mult _ a b) = Mult (f expr) (tMap f a) (tMap f b)
-tMap f expr@(Plus _ a b) = Plus (f expr) (tMap f a) (tMap f b)
-tMap f expr@(Null _) = Null (f expr)
-tMap f expr@(Cons _ a b) = Cons (f expr) (tMap f a) (tMap f b)
-tMap f expr@(Call _ x) = Call (f expr) x
-tMap f expr@(LetIn _ x a b) = LetIn (f expr) x (tMap f a) (tMap f b)
-tMap f expr@(Arg _ name r a) = Arg (f expr) name r (tMap f a)
-tMap f expr@(CallArg _ name a) = CallArg (f expr) name (map (tMap f) a)
-
-data TypeInfo = TypeInfo RType PType deriving (Show, Eq)
-
-data RType = TBool
-           | TFloat
-           | ListOf RType
-           | NullList
-           | RIdent String
-           | RConstraint String RType RType
-           | Arrow RType RType
-           deriving (Show)
-
-data PType = Deterministic
-           | Integrate
-           | Chaos
-           | PIdent String [(PType, PType)]
-           deriving (Show, Eq)
-
---data TExpr a = TExpr RType PType (Expr a)
---           deriving (Show)
-
--- Because Env will be polluted by local symbols as we evaluate, we need to reset when calling functions.
--- Therefore, we define that all functions must exist in the global namespace.
--- That way, it is sufficient to carry only the global namespace as reset point.
--- local functions are in principle possible, but they need to carry their own environment with them,
--- e.g. by expanding Env to be of [(String, Env x a, Expr x a)], where [] indicates a shorthand for the global scope.
-type Env x a = [(String, Expr x a)]
-
-data Value a = VFloat a
-           | VBool Bool
-           | VList [Value a]
-           deriving (Show, Eq)
-
-getRType :: Value a -> RType
-getRType (VFloat _) = TFloat
-getRType (VBool _) = TBool
-getRType (VList (a:_)) = ListOf $ getRType a
-getRType (VList []) = NullList
-
-instance Functor Value where
-    fmap f (VFloat a) = VFloat $ f a
-    fmap _ (VBool a) = VBool a
-    fmap f (VList x) = VList $ map (fmap f) x
 
 data Probability a = PDF a
                  | DiscreteProbability a
                  deriving (Show)
 
-type Check a = ExceptT TypeError (Reader (Env () a))
-
-data TypeError = Mismatch RType RType
-               deriving (Show, Eq)
 
 --Nothing indicates low/high infinity.
 data Limits a = Limits (Maybe (Value a)) (Maybe (Value a))
-
---TODO: Assert that downgrade Chaos Deterministic = Chaos
-downgrade :: PType -> PType -> PType
-downgrade (PIdent name assigns) right = reduce
-  (PIdent name $ map (\(nametype, exprtype) -> (nametype, downgrade right exprtype)) assigns)
-downgrade left p@(PIdent _ _) = downgrade p left
-downgrade Chaos _ = Chaos
-downgrade _ Chaos = Chaos
-downgrade Integrate Integrate = Integrate
-downgrade Integrate Deterministic = Integrate
-downgrade Deterministic Integrate = Integrate
-downgrade Deterministic Deterministic = Deterministic
-
-reduce :: PType -> PType
-reduce p@(PIdent _ [(_, x), (_,y), (_,z)]) = if x == y && y == z then x else p
-reduce x = x
-
-upgrade :: PType -> PType -> PType
-upgrade (PIdent name assigns) right = reduce
-  (PIdent name $ map (\(nametype, exprtype) -> (nametype, upgrade right exprtype)) assigns)
-upgrade left p@(PIdent _ _) = downgrade p left
-upgrade _ Deterministic = Deterministic
-upgrade Deterministic _ = Deterministic
-upgrade Chaos _ = Chaos
-upgrade _ Chaos = Chaos
-upgrade Integrate Integrate = Integrate
 
 pAnd :: Num a => Probability a -> Probability a -> Probability a
 pAnd (PDF a) (PDF b) = PDF (a*b)
@@ -302,15 +155,6 @@ matchRExpr e1 e2 = do
   --if e1R /= e2R
   ---then throwError $ Mismatch e1R e2R
   --else return e1R
-
-instance Eq RType where
-  (==) TBool TBool = True
-  (==) TFloat TFloat = True
-  (==) (ListOf x) (ListOf y) = x == y
-  (==) NullList NullList = True
-  (==) (RIdent a) (RIdent b) = a == b
-  (==) (RConstraint _ _ retT) (RConstraint _ _ retT2) = retT == retT2
-  (==) _ _ = False
 
 rIntersect :: RType -> RType -> Maybe RType
 --here be all cases where types are "equal" but one is more strict
@@ -361,20 +205,6 @@ matchTwoReturnThird a b ret =
   else return ret
     where intersection = rIntersect a b
 
-getTypeInfo :: Expr t a -> t
-getTypeInfo (IfThenElse t _ _ _) = t
-getTypeInfo (GreaterThan t _ _) = t
-getTypeInfo (ThetaI t _) = t
-getTypeInfo (Uniform t) = t
-getTypeInfo (Constant t _) = t
-getTypeInfo (Mult t _ _) = t
-getTypeInfo (Plus t _ _) = t
-getTypeInfo (Null t) = t
-getTypeInfo (Cons t _ _) = t
-getTypeInfo (Call t _) = t
-getTypeInfo (LetIn t _ _ _) = t
-getTypeInfo (Arg t _ _ _) = t
-getTypeInfo (CallArg t _ _) = t
 
 {---setTypeInfo :: Expr x a -> t -> Expr t a
 setTypeInfo (IfThenElse x a b c)  t = IfThenElse t a b c
