@@ -119,3 +119,44 @@ instance Functor Value where
   fmap f (VFloat a) = VFloat $ f a
   fmap _ (VBool a) = VBool a
   fmap f (VList x) = VList $ map (fmap f) x
+
+prettyPrint :: (Num a, Show a, Show t) => Expr t a -> [String]
+prettyPrint expr = 
+  fstLine : indented
+    where
+      childExprs = recurse expr
+      indented = map indent $ concatMap prettyPrint childExprs :: [String]
+      indent ls = "    " ++ ls
+      fstLine = printFlat expr ++ " [" ++ show (getTypeInfo expr) ++ "]"
+
+recurse :: Expr t a -> [Expr t a]
+recurse expr = case expr of 
+  (IfThenElse _ a b c) -> [a,b,c]
+  (GreaterThan _ a b) -> [a,b]
+  (ThetaI _ _) -> []
+  (Uniform _) -> []
+  (Constant _ _) -> []
+  (Mult _ a b) -> [a,b]
+  (Plus _ a b) -> [a,b]
+  (Null _) -> []
+  (Cons _ a b) -> [a,b]
+  (Call _ _) -> []
+  (LetIn _ _ a b) -> [a,b]
+  (Arg _ _ _ a) -> [a]
+  (CallArg _ _ a) -> a
+
+printFlat :: Show a => Expr t a -> String
+printFlat expr = case expr of
+  IfThenElse {} -> "IfThenElse"
+  GreaterThan {} -> "GreaterThan"
+  (ThetaI _ i) -> "Theta_" ++ show i
+  Uniform {} -> "Uniform"
+  (Constant _ x) -> "Constant (" ++ show x ++ ")"
+  Mult {} -> "Mult"
+  Plus {} -> "Plus"
+  (Null _) -> "Null"
+  Cons {} -> "Cons"
+  (Call _ a) -> "Call " ++ a
+  LetIn {} -> "LetIn"
+  (Arg _ var r _ ) -> "Bind " ++ var ++ "::" ++ show r
+  (CallArg _ a _ ) -> "CallArg" ++ a
