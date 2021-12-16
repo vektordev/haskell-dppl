@@ -121,6 +121,7 @@ inferR (GreaterThan () left right) = do
   --else return TBool
 inferR (ThetaI () _) = return TFloat
 inferR (Uniform ()) = return TFloat
+inferR (Normal ()) = return TFloat
 inferR (Constant () val) = return $ getRType val
 --inferR (Constant () (VFloat _)) = return TFloat
 --inferR (Constant () (VBool _)) = return TBool
@@ -152,18 +153,19 @@ inferP (GreaterThan _ left right) = do
 inferP (ThetaI _ _) = return Deterministic
 inferP (Constant _ _) = return Deterministic
 inferP (Uniform _) = return Integrate
+inferP (Normal _) = return Integrate
 inferP (Mult _ left right) = do
   leftP <- inferP left
   rightP <- inferP right
-  if downgrade leftP rightP == Deterministic
-  then return $ upgrade leftP rightP
+  if upgrade leftP rightP == Deterministic
+  then return $ downgrade leftP rightP
   -- we do not know how to integrate over a product
   else return Chaos
 inferP (Plus _ left right) = do
   leftP <- inferP left
   rightP <- inferP right
-  if downgrade leftP rightP == Deterministic
-  then return $ upgrade leftP rightP
+  if upgrade leftP rightP == Deterministic
+  then return $ downgrade leftP rightP
   -- we do not know how to integrate over a sum
   else return Chaos
 inferP (Null _) = return Deterministic

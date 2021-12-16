@@ -3,9 +3,9 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# OPTIONS_GHC -fwarn-incomplete-patterns #-}
 
-module Lib
-    ( someFunc
-    ) where
+module Lib where
+--    ( someFunc
+--    ) where
 
 
 import Numeric.AD
@@ -13,7 +13,6 @@ import System.Random
 --import Control.Monad
 --import Data.List (transpose, sortBy, elemIndices, nub)
 import Data.Maybe
-import Control.Monad.Random
 import Data.Reflection (Reifies)
 import Numeric.AD.Internal.Reverse ( Reverse, Tape)
 --import Data.Either (fromRight)
@@ -26,6 +25,8 @@ import Lang
 import Typing
 import RType
 import PType
+import Interpreter
+import Control.Monad.Random (evalRandIO, getRandomR, replicateM)
 
 --assumption about grad: Reverse s a is Num if a is Num.
 --Thererfore, grad :: (Traversable f, Num a) => (forall s. Reifies s Tape => f (Reverse s a) -> Reverse s a) -> f a -> f a
@@ -45,51 +46,125 @@ paramExpr = Arg () "iterations" TFloat (IfThenElse ()
   (Cons () (Constant () (VBool True)) (CallArg () "main" [Plus () (Call () "iterations") (Constant () (VFloat (-1.0)))]))
   (Null ()))
 
-weatherExpr :: Expr () a
-weatherExpr = IfThenElse ()
+variableLength :: Expr () a
+variableLength = IfThenElse ()
   (GreaterThan () (Uniform ()) (ThetaI () 0))
   (Null ())
+  --(Cons () (Normal ()) (Call () "main"))
   (Cons () (Constant () (VBool True)) (Call () "main"))
 
 --testExpr :: Num a => Expr a
-testExpr :: Expr () a
-testExpr = IfThenElse ()
+testIf :: Expr () a
+testIf = IfThenElse ()
   (GreaterThan () (Uniform ()) (ThetaI () 0))
   (Constant () (VBool True))
   (Constant () (VBool False))
+
+testGreater :: Expr () a
+testGreater = GreaterThan () (Uniform ()) (ThetaI () 0)
+
+testGreater2 :: Expr () a
+testGreater2 = GreaterThan () (ThetaI () 0) (Uniform ())
 
 testExpr2 :: Expr () a
 testExpr2 = IfThenElse ()
   (GreaterThan () (Uniform ()) (ThetaI () 0))
   (Null ())
   (Cons () (Constant () (VBool True)) (Call () "main"))
+  
+testGauss :: Expr () a
+--testGauss = Plus () (Normal ()) (ThetaI () 0)
+testGauss = Plus () (Mult () (Normal ()) (ThetaI () 0)) (ThetaI () 1)
 
-someFunc :: IO()
+testGaussianMixture :: Expr () a
+testGaussianMixture = IfThenElse ()
+  (GreaterThan () (Uniform ()) (ThetaI () 0))
+  (Cons ()
+    (Plus ()
+      (Mult () (Normal ()) (ThetaI () 1))
+      (ThetaI () 2))
+    (Cons ()
+      (Plus ()
+        (Mult () (Normal ()) (ThetaI () 3))
+        (ThetaI () 4))
+      (Null ())))
+  (Cons ()
+      (Plus ()
+        (Mult () (Normal ()) (ThetaI () 5))
+        (ThetaI () 6))
+      (Cons ()
+        (Plus ()
+          (Mult () (Normal ()) (ThetaI () 7))
+          (ThetaI () 8))
+        (Null ())))
+
+testIntractable :: Expr () a
+testIntractable = Mult ()
+  (Mult () (Normal ()) (ThetaI () 1))
+  (Mult () (Normal ()) (ThetaI () 2))
+
+failureCase :: Expr () a
+failureCase = Mult () (Normal ()) (ThetaI () 0)
+
+someFunc :: IO ()
 someFunc =
   --let env = [("main", testExpr2)] :: Env () Float
-  let env = [("main", paramExpr)] :: Env () Float
-  in testRun env
+  let env = [("main", testGaussianMixture)] :: Env () Double
+  in testRun env [0.5, 1, -1, 1, -1, 1, 1, 1, 1]
 
-myGradientAscent :: (Floating a, Ord a) => Int -> [(String, Expr TypeInfo a)] -> Thetas a -> Expr TypeInfo a -> [Value a] -> [(Thetas a, a)]
+myGradientAscent :: (Floating a, Real a) => Int -> [(String, Expr TypeInfo a)] -> Thetas a -> Expr TypeInfo a -> [Value a] -> [(Thetas a, a)]
 myGradientAscent 0 _ _ _ _ = []
 myGradientAscent n env thetas expr vals =
   (thetas, loss) : myGradientAscent (n-1) env new expr vals
     where
       (loss, new) = optimizeStep env expr vals thetas
 
+probabilityDiag :: (Floating a, Ord a, Real a, Show a) => [(String, Expr TypeInfo a)] -> [Thetas a] -> Expr TypeInfo a -> Value a -> IO ()
+probabilityDiag env thetaScan expr sample = mapM_ (\theta -> probabilityDiagAt env theta expr sample) thetaScan
+
+probabilityDiagAt :: (Floating a, Ord a, Real a, Show a) => [(String, Expr TypeInfo a)] -> Thetas a -> Expr TypeInfo a -> Value a -> IO ()
+probabilityDiagAt env theta expr sample = do
+  print theta
+  print (probability env env theta expr sample)
+
+gradientDiag :: (Floating a, Ord a, Real a, Show a) => [(String, Expr TypeInfo a)] -> [Thetas a] -> Expr TypeInfo a -> [Value a] -> IO ()
+gradientDiag env thetaScan expr samples = mapM_ (\theta -> gradientDiagAt env theta expr samples) thetaScan
+
+gradientDiagAt :: (Floating a, Ord a, Real a, Show a) => [(String, Expr TypeInfo a)] -> Thetas a -> Expr TypeInfo a -> [Value a] -> IO ()
+gradientDiagAt env tht expr samples = do
+  let grad_loss = [grad' (\theta -> log $ unwrapP $ probability (autoEnv env) (autoEnv env) theta (autoExpr expr) (autoVal sample)) tht | sample <- samples]
+  print ("gradient debug info for theta: " ++ (show tht))
+  putStrLn ("gradients: " ++ show (foldl1 addThetas $ map snd grad_loss))
+  putStrLn ("LL: " ++ show (sum $ map fst grad_loss))
+  --print "LL: "
+  --print $ sum $ map fst grad_loss
+
+
 --TODO: can we fix this to use the Foldable theta?
-optimizeStep :: (Floating a, Ord a) => Env TypeInfo a -> Expr TypeInfo a -> [Value a] -> Thetas a -> (a, Thetas a)
-optimizeStep env expr samples thetas = (loss, addThetas thetas (mult 0.00001 gradient))
+optimizeStep :: (Floating a, Real a) => Env TypeInfo a -> Expr TypeInfo a -> [Value a] -> Thetas a -> (a, Thetas a)
+optimizeStep env expr samples thetas = (loss, addThetas thetas (mult 0.0001 gradient))
   where
     -- does it make a difference if we do sum(gradients) or if we do gradient(sums)?
     -- TODO: Is it correct to apply map-sum, or do we flatten the wrong dimension here?
     --grad_loss :: [(loss :: a, grad :: Thetas a)]
-    grad_loss = [grad' (\(theta) -> log $ unwrapP $ probability (autoEnv env) (autoEnv env) theta (autoExpr expr) (autoVal sample)) thetas | sample <- samples]
+    grad_loss = [grad' (\theta -> log $ unwrapP $ probability (autoEnv env) (autoEnv env) theta (autoExpr expr) (autoVal sample)) thetas | sample <- samples]
     --grad_thetas = [Thetas a]
     grad_thetas = map snd grad_loss
     --gradient :: Thetas a
     gradient = foldl1 addThetas grad_thetas
     loss = sum $ map fst grad_loss
+
+exprDebugMetrics :: (Floating a, Real a, Show a, Enum a) => Env TypeInfo a -> Expr TypeInfo a -> [Value a] -> Thetas a -> IO ()
+exprDebugMetrics env expr samples thetas = do
+  mapM_ (\thX -> printInfo thX) [[x] | x <- [0.0, 0.1 .. 1.0]]
+    where
+      ll thX = sum [log $ unwrapP $ probability env env thX expr sample | sample <- samples]
+      grad_loss thX = [grad' (\theta -> log $ unwrapP $ probability (autoEnv env) (autoEnv env) theta (autoExpr expr) (autoVal sample)) thX | sample <- samples] 
+      grad_thetas thX = map snd (grad_loss thX)
+      gradient thX = foldl1 addThetas $ grad_thetas thX
+      printInfo thX = do
+        print (ll thX)
+        print (gradient thX)
 
 autoExpr :: (Num a, Reifies s Tape) => Expr x a -> Expr x (Reverse s a)
 autoExpr = fmap auto
@@ -101,15 +176,6 @@ autoVal :: (Num a, Reifies s Tape) => Value a -> Value (Reverse s a)
 autoVal (VBool x) = VBool x
 autoVal (VFloat y) = VFloat (auto y)
 autoVal (VList xs) = VList (map autoVal xs)
-
-type Thetas a = [a]
-
---instance Traversable Thetas where
---  traverse (Thetas a) = Thetas $ traverse a
-
-findTheta :: Expr x a -> Thetas a -> a
-findTheta (ThetaI _ i) (ts) = ts !! i
-findTheta expr (ts) = error "called FindTheta on non-theta expr."
 
 addThetas :: (Floating a) => Thetas a -> Thetas a -> Thetas a
 addThetas (x) (y) = (zipWith (+) x y)
@@ -127,32 +193,6 @@ mult x (y) = map (*x) y
 --    newHypothesis = zipWith (+) thetas $ map (\el -> 0.0001 * el) gradient
 --pr_ :: (Num a, Num b) => a -> Env b -> [a]
 
-
-
-data Probability a = PDF a
-                 | DiscreteProbability a
-                 deriving (Show)
-
-
---Nothing indicates low/high infinity.
-data Limits a = Limits (Maybe (Value a)) (Maybe (Value a))
-
-pAnd :: Num a => Probability a -> Probability a -> Probability a
-pAnd (PDF a) (PDF b) = PDF (a*b)
-pAnd (DiscreteProbability a) (DiscreteProbability b) = DiscreteProbability (a*b)
-pAnd (PDF a) (DiscreteProbability b) = PDF (a*b)
-pAnd (DiscreteProbability a) (PDF b) = PDF (a*b)
-
-pOr :: Num a => Probability a -> Probability a -> Probability a
-pOr (PDF a) (PDF b) = PDF (a+b)
-pOr (DiscreteProbability a) (DiscreteProbability b) = DiscreteProbability (a+b)
-pOr (PDF a) (DiscreteProbability b) = PDF (a+b)
-pOr (DiscreteProbability a) (PDF b) = PDF (a+b)
-
-unwrapP :: Probability a -> a
-unwrapP (PDF x) = x
-unwrapP (DiscreteProbability x) = x
-
 {---setTypeInfo :: Expr x a -> t -> Expr t a
 setTypeInfo (IfThenElse x a b c)  t = IfThenElse t a b c
 setTypeInfo (GreaterThan x a b)   t = GreaterThan t a b
@@ -166,115 +206,6 @@ setTypeInfo (Cons x a b)          t = Cons t a b
 setTypeInfo (Call x a)            t = Call t a
 setTypeInfo (LetIn x a b c)       t = LetIn t a b c--}
 
-
---note: We need detGenerate in order to be able to solve probability: Reverse s a does not have a Random instance,
--- so we have to make do without in probability. Hence if we need to generate, we need to generate deterministically.
-detGenerate :: (Fractional a, Ord a) => Env TypeInfo a -> Thetas a -> Expr TypeInfo a -> Value a
-detGenerate env thetas (IfThenElse _ cond left right) = do
-  case detGenerate env thetas cond of
-    VBool True -> detGenerate env thetas left
-    VBool False -> detGenerate env thetas right
-    _ -> error "Type error"
-detGenerate env thetas (GreaterThan _ left right) =
-  case (a,b) of
-    (VFloat af, VFloat bf) -> VBool (af > bf)
-    _ -> error "Type error"
-  where
-    a = detGenerate env thetas left
-    b = detGenerate env thetas right
-detGenerate _ thetas expr@(ThetaI _ i) = VFloat (findTheta expr thetas)
-detGenerate _ _ (Uniform _) = error "tried to detGenerate from random atom"
-detGenerate _ _ (Constant _ x) = x
-detGenerate _ _ (Null _) = VList []
-detGenerate env thetas (Cons _ hd tl) = VList (detGenerate env thetas hd : xs)
-  where VList xs = detGenerate env thetas tl
-detGenerate _ _ expr =
-  if pt /= Deterministic
-  then error "tried detGenerate on non-deterministic expr"
-  else error "detGenerate not defined for expr"
-    where TypeInfo rt pt = getTypeInfo expr
-
-generate :: (Fractional a, RandomGen g, Ord a, Random a) => Env TypeInfo a -> Env TypeInfo a -> Thetas a -> Expr TypeInfo a -> Rand g (Value a)
-generate globalEnv env thetas (IfThenElse _ cond left right) = do
-  condV <- generate globalEnv env thetas cond
-  case condV of
-    VBool True -> generate globalEnv env thetas left
-    VBool False -> generate globalEnv env thetas right
-    _ -> error "Type error"
-generate globalEnv env thetas (GreaterThan _ left right) = do
-  a <- generate globalEnv env thetas left
-  b <- generate globalEnv env thetas right
-  case (a,b) of
-    (VFloat af, VFloat bf) -> return $ VBool (af > bf)
-    _ -> error "Type error"
-generate _ _ thetas expr@(ThetaI _ i) = return $ VFloat (findTheta expr thetas)
-generate _ _ _ (Uniform _) = do
-  r <- getRandomR (0.0, 1.0) --uniformR (0.0, 1.0)
-  return $ VFloat r
-generate _ _ _ (Constant _ x) = return x
-generate _ _ _ (Null _) = return $ VList []
-generate globalEnv env thetas (Cons _ hd tl) = do
-  ls <- generate globalEnv env thetas tl
-  case ls of
-    VList xs -> do
-      x <- generate globalEnv env thetas hd
-      return $ VList (x : xs)
-    _ -> error "type error in list cons"
---Call leaves function context, pass GlobalEnv to ensure env is cleaned up.
-generate globalEnv env thetas (Call t name) = generate globalEnv globalEnv thetas expr
-  where Just expr = lookup name env
-
-probability :: (Fractional a, Ord a) => Env TypeInfo a -> Env TypeInfo a -> Thetas a -> Expr TypeInfo a -> Value a -> Probability a
--- possible problems in the probability math in there:
-probability globalEnv env thetas (IfThenElse t cond left right) val = pOr (pAnd pCond pLeft) (pAnd pCondInv pRight)
-  where
-    pCond = probability globalEnv env thetas cond (VBool True)
-    pCondInv = DiscreteProbability (1 - unwrapP pCond)
-    pLeft = probability globalEnv env thetas left val
-    pRight = probability globalEnv env thetas right val
-probability globalEnv env thetas (GreaterThan t left right) (VBool x)
-  | leftP == Deterministic && rightP == Integrate && x     = PDF $ integrate right thetas env (Limits (Just leftGen) Nothing)
-  | rightP == Deterministic && leftP == Integrate && x     = PDF $ integrate left thetas env (Limits Nothing (Just rightGen))
-  | leftP == Deterministic && rightP == Integrate && not x = PDF $ 1 - integrate right thetas env (Limits (Just leftGen) Nothing)
-  | rightP == Deterministic && leftP == Integrate && not x = PDF $ 1 - integrate left thetas env (Limits Nothing (Just rightGen))
-  | otherwise = error "undefined probability for greaterThan"
-  where
-    leftP = getP left
-    rightP = getP right
-    leftGen = detGenerate env thetas left
-    rightGen = detGenerate env thetas right
-probability _ _ thetas expr@(ThetaI _ x) (VFloat val) = if val == (findTheta expr thetas) then DiscreteProbability 1 else DiscreteProbability 0
-probability _ _ _ (ThetaI _ _) _ = error "typing error in probability - ThetaI"
-probability _ _ _ (Uniform _) (VFloat x) = if 0 <= x && x <= 1 then PDF 1 else PDF 0
-probability _ _ _ (Uniform _) _ = error "typing error in probability - Uniform"
-probability _ _ _ (Constant _ val) val2 = if val == val2 then DiscreteProbability 1 else DiscreteProbability 0
-probability globalEnv env thetas (Mult _ left right) (VFloat x)
-  | leftP == Deterministic = probability globalEnv env thetas right (VFloat inverse)
-  | rightP == Deterministic = probability globalEnv env thetas left (VFloat inverse)
-  | otherwise = error "can't solve Mult"
-  where
-    leftP = getP left
-    rightP = getP right
-    VFloat leftGen = detGenerate env thetas left
-    VFloat rightGen = detGenerate env thetas right
-    inverse = if leftP == Deterministic then x / leftGen else x / rightGen
-probability _ _ _ (Null _) (VList []) = DiscreteProbability 1
-probability _ _ _ (Null _) _ = DiscreteProbability 0
-probability _ _ _ (Cons _ _ _) (VList []) = DiscreteProbability 0
-probability globalEnv env thetas (Cons _ hd tl) (VList (x:xs)) = pAnd (probability globalEnv env thetas hd x) (probability globalEnv env thetas tl $ VList xs)
-probability globalEnv env thetas (Call _ name) val = probability globalEnv globalEnv thetas expr val
-  where Just expr = lookup name env
-
-
-integrate :: (Num a, Ord a) => Expr TypeInfo a -> Thetas a -> Env TypeInfo a -> Limits a -> a
-integrate (Uniform t) thetas env (Limits low high) = h2 - l2
-  where
-    h2 = min 1 $ maybe 1 unwrap high
-    l2 = max 0 $ maybe 0 unwrap low
-    unwrap vflt = case vflt of
-      VFloat x -> x
-      _ -> error "unexpected type-error in RT:Integrate"
-integrate _ _ _ _ = error "undefined integrate for expr"
 
 
 --Needs to resolve constrained types as a second step.
@@ -292,7 +223,6 @@ resolveConstraintsExpr env name = tMapHead (rDeconstrain env name)
                                 . tMapTails (rDeconstrain env "")
                                 . tMapTails (pDeconstrain env "")
 
---TODO: Verify Env changes are done in a sane manner.
 
 pDeconstrain ::  Env TypeInfo a -> String -> Expr TypeInfo a -> TypeInfo
 pDeconstrain env defName expr = TypeInfo rt $ case pt of
@@ -346,9 +276,27 @@ rDeconstrain env defName expr = TypeInfo rt pt
             then resType
             else RConstraint name ofType resType
 
+compile :: (Show a, Floating a, Ord a) => Env () a -> IO (Env TypeInfo a)
+compile env = do
+  let pretypedEnv = typeCheckEnv env
+  let Just pre_main = lookup "main" pretypedEnv
+  putStrLn $ unlines $ prettyPrint pre_main
+  let typedEnv = resolveConstraints pretypedEnv
+  return typedEnv
 
-testRun :: (Floating a, Ord a, Random a, Show a) => Env () a -> IO ()
-testRun env = do
+reconstructThetas :: (Floating a, Ord a, Random a, Show a, Real a) => Env () a -> Int -> Thetas a -> IO [(Thetas a, a)]
+reconstructThetas env nSamples thetas = do
+  cEnv <- compile env
+  let Just main = lookup "main" cEnv
+  samples <- mkSamples nSamples cEnv thetas main
+  --let initialGuess = replicate (length thetas) 0.5
+  initialGuess <- replicateM (length thetas) (getRandomR (0.0, 1.0))
+  let reconstructedThetas = myGradientAscent 100 cEnv initialGuess main samples
+  return reconstructedThetas
+
+testRun :: (Floating a, Ord a, Random a, Show a, Real a, Enum a) => Env () a -> Thetas a -> IO ()
+testRun env thetas = do
+  print "Hello world"
   print env
   let pretypedEnv = typeCheckEnv env
   let Just pre_main = lookup "main" pretypedEnv
@@ -360,10 +308,17 @@ testRun env = do
   print resultR
   let resultP = getP main
   print resultP
-  samples <- mkSamples 1000 typedEnv ([0.5]) main
+  samples <- mkSamples 1000 typedEnv thetas main
+  --putStrLn "exprDebugMetrics:"
+  --exprDebugMetrics typedEnv main samples ([0.1, 0.1])
+  --gradientDiag typedEnv [[x] | x <- [0, 0.01 .. 1]] main samples
+  --probabilityDiag typedEnv [[x] | x <- [0, 0.01 .. 3]] main (VFloat 0.1)
+  --putStrLn " // exprDebugMetrics:"
   mapM_ print $ count samples
-  let thetasRecovered = myGradientAscent 100 typedEnv ([0.1]) main samples
-  print thetasRecovered
+  --let initialThetas = (replicate (length thetas) 0.5)
+  initialThetas <- replicateM (length thetas) (getRandomR (0.0, 1.0))
+  let thetasRecovered = myGradientAscent 10000 typedEnv initialThetas main samples
+  mapM_ print thetasRecovered
 
 mkSamples :: (Fractional a, Ord a, Random a) => Int -> Env TypeInfo a -> Thetas a -> Expr TypeInfo a -> IO [Value a]
 mkSamples 0 _ _ _ = return []

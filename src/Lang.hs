@@ -4,20 +4,21 @@ import PType
 import RType
 
 data Expr x a = IfThenElse x (Expr x a) (Expr x a) (Expr x a)
-          | GreaterThan x (Expr x a) (Expr x a)
-          | ThetaI x Int
-          | Uniform x
-          | Constant x (Value a)
-          | Mult x (Expr x a) (Expr x a)
-          | Plus x (Expr x a) (Expr x a)
-          | Null x
-          | Cons x (Expr x a) (Expr x a)
-          | Call x String
-          | LetIn x String (Expr x a) (Expr x a)
-          | Arg x String RType (Expr x a)
-          | CallArg x String [Expr x a]
-          -- TODO: Needs Concat to achieve proper SPN-parity.
-          deriving (Show, Eq)
+              | GreaterThan x (Expr x a) (Expr x a)
+              | ThetaI x Int
+              | Uniform x
+              | Normal x
+              | Constant x (Value a)
+              | Mult x (Expr x a) (Expr x a)
+              | Plus x (Expr x a) (Expr x a)
+              | Null x
+              | Cons x (Expr x a) (Expr x a)
+              | Call x String
+              | LetIn x String (Expr x a) (Expr x a)
+              | Arg x String RType (Expr x a)
+              | CallArg x String [Expr x a]
+              -- TODO: Needs Concat to achieve proper SPN-parity.
+              deriving (Show, Eq)
 
 instance Functor (Expr x) where
   fmap = exprMap
@@ -28,6 +29,7 @@ exprMap f expr = case expr of
   (GreaterThan t a b) -> GreaterThan t (fmap f a) (fmap f b)
   (ThetaI t x) -> ThetaI t x
   (Uniform t) -> Uniform t
+  (Normal t) -> Normal t
   (Constant t x) -> Constant t $ fmap f x
   (Mult t a b) -> Mult t (fmap f a) (fmap f b)
   (Plus t a b) -> Plus t (fmap f a) (fmap f b)
@@ -44,6 +46,7 @@ tMapHead f expr = case expr of
   (GreaterThan _ a b) -> GreaterThan (f expr) a b
   (ThetaI _ x) -> ThetaI (f expr) x
   (Uniform _) -> Uniform (f expr)
+  (Normal _) -> Normal (f expr)
   (Constant _ x) -> Constant (f expr) x
   (Mult _ a b) -> Mult (f expr) a b
   (Plus _ a b) -> Plus (f expr) a b
@@ -60,6 +63,7 @@ tMapTails f expr = case expr of
   (GreaterThan t a b) -> GreaterThan t (tMap f a) (tMap f b)
   (ThetaI t x) -> ThetaI t x
   (Uniform t) -> Uniform t
+  (Normal t) -> Normal t
   (Constant t x) -> Constant t x
   (Mult t a b) -> Mult t (tMap f a) (tMap f b)
   (Plus t a b) -> Plus t (tMap f a) (tMap f b)
@@ -76,6 +80,7 @@ tMap f expr = case expr of
   (GreaterThan _ a b) -> GreaterThan (f expr) (tMap f a) (tMap f b)
   (ThetaI _ x) -> ThetaI (f expr) x
   (Uniform _) -> Uniform (f expr)
+  (Normal _) -> Normal (f expr)
   (Constant _ x) -> Constant (f expr) x
   (Mult _ a b) -> Mult (f expr) (tMap f a) (tMap f b)
   (Plus _ a b) -> Plus (f expr) (tMap f a) (tMap f b)
@@ -92,6 +97,7 @@ getTypeInfo expr = case expr of
   (GreaterThan t _ _)   -> t
   (ThetaI t _)          -> t
   (Uniform t)           -> t
+  (Normal t)            -> t
   (Constant t _)        -> t
   (Mult t _ _)          -> t
   (Plus t _ _)          -> t
@@ -135,6 +141,7 @@ recurse expr = case expr of
   (GreaterThan _ a b) -> [a,b]
   (ThetaI _ _) -> []
   (Uniform _) -> []
+  (Normal _) -> []
   (Constant _ _) -> []
   (Mult _ a b) -> [a,b]
   (Plus _ a b) -> [a,b]
@@ -151,6 +158,7 @@ printFlat expr = case expr of
   GreaterThan {} -> "GreaterThan"
   (ThetaI _ i) -> "Theta_" ++ show i
   Uniform {} -> "Uniform"
+  Normal {} -> "Normal"
   (Constant _ x) -> "Constant (" ++ show x ++ ")"
   Mult {} -> "Mult"
   Plus {} -> "Plus"

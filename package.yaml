@@ -27,6 +27,15 @@ dependencies:
 - MonadRandom
 - mtl
 - reflection
+- containers
+- pretty
+- text
+- parsec
+- repline
+- statistics
+- mwc-random
+- vector
+- QuickCheck
 
 library:
   source-dirs: src
