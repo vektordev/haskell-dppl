@@ -16,17 +16,17 @@ import Data.Maybe
 import Data.Reflection (Reifies)
 import Numeric.AD.Internal.Reverse ( Reverse, Tape)
 --import Data.Either (fromRight)
---import Debug.Trace
+import Debug.Trace
 import Data.Function (on)
 import Data.Ord
-import Data.List (elemIndices, sortBy, nub)
+import Data.List (elemIndices, sortBy, nub, intercalate)
 
 import Lang
 import Typing
 import RType
 import PType
 import Interpreter
-import Control.Monad.Random (evalRandIO, getRandomR, replicateM)
+import Control.Monad.Random (evalRandIO, getRandomR, replicateM, forM_)
 
 --assumption about grad: Reverse s a is Num if a is Num.
 --Thererfore, grad :: (Traversable f, Num a) => (forall s. Reifies s Tape => f (Reverse s a) -> Reverse s a) -> f a -> f a
@@ -71,11 +71,42 @@ testExpr2 = IfThenElse ()
   (GreaterThan () (Uniform ()) (ThetaI () 0))
   (Null ())
   (Cons () (Constant () (VBool True)) (Call () "main"))
-  
+
 testGauss :: Expr () a
 --testGauss = Plus () (Normal ()) (ThetaI () 0)
 testGauss = Plus () (Mult () (Normal ()) (ThetaI () 0)) (ThetaI () 1)
 
+--  (IfThenElse ()
+--    (GreaterThan () (Uniform ()) (ThetaI () 1))
+--    (Cons () (Constant () (VBool True)) (Call () "main"))
+--    )
+
+--testGauss = compile "Normal * theta[0] + theta[1]"
+
+{--
+MNIST_CNN_GEN :: Image -> Int (CNN yields distribution, we return sample)
+e.g. [0 -> 0.5; 1 -> 0.3, 2 -> 0.2]; when sampling: return 0 with probability 0.5
+     [0 -> 0.98; 1 -> 0.01, 2 -> 0.01]; when sampling: return 0 with probability 0.98
+MNIST_CNN_Likelihood :: Image -> Int -> Float (index into distribution)
+AutoDiff yields gradient for
+MNIST_CNN:: Image -> Int (As Softmax over probabilities)
+main =
+  let
+    x <- MNIST_CNN(imgA)
+    y <- MNIST_CNN(imgB)
+  in x + y
+
+How do we train this? We get a result... 15 and imgA and imgB.
+  MaxP(MNIST_CNN(imgA) = 6 && MNIST_CNN(imgB) = 9)
+  MaxP(MNIST_CNN(imgA) = 7 && MNIST_CNN(imgB) = 8)
+  MaxP(MNIST_CNN(imgA) = 8 && MNIST_CNN(imgB) = 7)
+  MaxP(MNIST_CNN(imgA) = 9 && MNIST_CNN(imgB) = 6)
+  
+likelihood(imgA, imgB, N) = \sum{x,y | x+y=15} (imgA == x && imgB == y)
+
+Maybe we can do Distributional MNist? (Assume for example we have a distribution of x-digit MNIST postal codes and samples from that distribution.
+Assume we know the distribution, can we find the MNIST mapping?
+ -}
 testGaussianMixture :: Expr () a
 testGaussianMixture = IfThenElse ()
   (GreaterThan () (Uniform ()) (ThetaI () 0))
@@ -89,14 +120,40 @@ testGaussianMixture = IfThenElse ()
         (ThetaI () 4))
       (Null ())))
   (Cons ()
+    (Plus ()
+      (Mult () (Normal ()) (ThetaI () 5))
+      (ThetaI () 6))
+    (Cons ()
       (Plus ()
-        (Mult () (Normal ()) (ThetaI () 5))
-        (ThetaI () 6))
+        (Mult () (Normal ()) (ThetaI () 7))
+        (ThetaI () 8))
+      (Null ())))
+
+gaussianMixture :: Expr () a
+gaussianMixture = IfThenElse ()
+  (GreaterThan () (Uniform ()) (ThetaI () 0))
+  (Cons ()
+    (Plus ()
+      (Mult () (Normal ()) (ThetaI () 1))
+      (ThetaI () 2))
+    (Cons ()
+      (Plus ()
+        (Mult () (Normal ()) (ThetaI () 3))
+        (ThetaI () 4))
       (Cons ()
-        (Plus ()
-          (Mult () (Normal ()) (ThetaI () 7))
-          (ThetaI () 8))
-        (Null ())))
+        (Constant () (VBool True))
+        (Null ()))))
+  (Cons ()
+    (Plus ()
+      (Mult () (Normal ()) (ThetaI () 5))
+      (ThetaI () 6))
+    (Cons ()
+      (Plus ()
+        (Mult () (Normal ()) (ThetaI () 7))
+        (ThetaI () 8))
+      (Cons ()
+        (Constant () (VBool True))
+        (Null ()))))
 
 testIntractable :: Expr () a
 testIntractable = Mult ()
@@ -106,11 +163,69 @@ testIntractable = Mult ()
 failureCase :: Expr () a
 failureCase = Mult () (Normal ()) (ThetaI () 0)
 
-someFunc :: IO ()
-someFunc =
-  --let env = [("main", testExpr2)] :: Env () Float
+gaussLists :: Expr () a
+gaussLists = IfThenElse ()
+  (GreaterThan () (Uniform ()) (ThetaI () 0))
+  (Null ())
+  (Cons () (Plus () (Mult () (Normal ()) (ThetaI () 1)) (ThetaI () 2)) (Call () "main"))
+
+gaussMultiLists :: Expr () a
+gaussMultiLists = IfThenElse ()
+  (GreaterThan () (Uniform ()) (ThetaI () 0))
+  (Null ())
+  (Cons ()
+    (IfThenElse ()
+      (GreaterThan () (Uniform ()) (ThetaI () 1))
+      (Plus () (Mult () (Normal ()) (ThetaI () 2)) (ThetaI () 3))
+      (Plus () (Mult () (Normal ()) (ThetaI () 4)) (ThetaI () 5)))
+    (Call () "main"))
+
+readSamples :: IO [(Double, Double)]
+readSamples = do
+  f <- readFile "./data/train_data.txt"
+  --print $ lines f
+  let res = map read $ lines f
+  --print res
+  return res
+
+map2RSamples :: (Double, Double) -> Value Double
+map2RSamples (a,b) = VList [VFloat a, VFloat b]
+
+thatGaussThing :: IO()
+thatGaussThing = do
+  --TODO: I desperately need tuple types.
+  -- Otherwise gaussianMixture won't compile because it sports a heterogeneous list.
+  untypedSamples <- readSamples
+  let samples = map map2RSamples untypedSamples
+  print samples
   let env = [("main", testGaussianMixture)] :: Env () Double
-  in testRun env [0.5, 1, -1, 1, -1, 1, 1, 1, 1]
+  initialThetas <- replicateM 9 (getRandomR (0.0, 1.0))
+  let pretypedEnv = typeCheckEnv env
+  let typedEnv = resolveConstraints pretypedEnv
+  let Just main = lookup "main" typedEnv
+  print main
+  let thetasRecovered = myGradientAscent 400 typedEnv initialThetas main samples
+  mapM_ print thetasRecovered
+  llScan typedEnv (fst $ last thetasRecovered) main
+
+llScan :: (Real a, Floating a, Show a, Enum a) => Env TypeInfo a -> Thetas a -> Expr TypeInfo a -> IO ()
+llScan tenv thetas main = do
+  let scanPts = [(x,y) | x <- [0, 0.01 .. 1], y <- [0, 0.01 .. 1]]
+  let scanRes = [(x, y, likelihood tenv tenv thetas main (VList [VFloat x, VFloat y])) | x <- [0, 0.01.. 1], y <- [0, 0.01.. 1]]
+  print scanPts
+  print scanRes
+  let fileStr = unlines $ map (\(x,y,l) -> show x ++ ", " ++ show y ++ ", " ++ (show $ unwrapP l)) scanRes
+  writeFile "./data/ll_out.txt" fileStr
+
+someFunc :: IO ()
+someFunc = --thatGaussThing
+  --let env = [("main", testExpr2)] :: Env () Float
+  let env = [("main", gaussLists)] :: Env () Double
+  --only once
+  --in testRun "gaussMultiLists" env [0.55, 0.45, 0.5, 0.8, 0.3, 0.4]
+  --repeat a bunch of times:
+  --in forM_ [1..100] (\n -> testRun ("gaussMultiLists_" ++ show n) env [0.55, 0.45, 0.5, 0.8, 0.3, 0.4])
+  in forM_ [1..100] (\n -> testRun ("gaussLists_" ++ show n) env [0.5, 0.9, 0.3])
 
 myGradientAscent :: (Floating a, Real a) => Int -> [(String, Expr TypeInfo a)] -> Thetas a -> Expr TypeInfo a -> [Value a] -> [(Thetas a, a)]
 myGradientAscent 0 _ _ _ _ = []
@@ -125,29 +240,27 @@ probabilityDiag env thetaScan expr sample = mapM_ (\theta -> probabilityDiagAt e
 probabilityDiagAt :: (Floating a, Ord a, Real a, Show a) => [(String, Expr TypeInfo a)] -> Thetas a -> Expr TypeInfo a -> Value a -> IO ()
 probabilityDiagAt env theta expr sample = do
   print theta
-  print (probability env env theta expr sample)
+  print (likelihood env env theta expr sample)
 
 gradientDiag :: (Floating a, Ord a, Real a, Show a) => [(String, Expr TypeInfo a)] -> [Thetas a] -> Expr TypeInfo a -> [Value a] -> IO ()
 gradientDiag env thetaScan expr samples = mapM_ (\theta -> gradientDiagAt env theta expr samples) thetaScan
 
 gradientDiagAt :: (Floating a, Ord a, Real a, Show a) => [(String, Expr TypeInfo a)] -> Thetas a -> Expr TypeInfo a -> [Value a] -> IO ()
 gradientDiagAt env tht expr samples = do
-  let grad_loss = [grad' (\theta -> log $ unwrapP $ probability (autoEnv env) (autoEnv env) theta (autoExpr expr) (autoVal sample)) tht | sample <- samples]
+  let grad_loss = [grad' (\theta -> log $ unwrapP $ likelihood (autoEnv env) (autoEnv env) theta (autoExpr expr) (autoVal sample)) tht | sample <- samples]
   print ("gradient debug info for theta: " ++ (show tht))
   putStrLn ("gradients: " ++ show (foldl1 addThetas $ map snd grad_loss))
   putStrLn ("LL: " ++ show (sum $ map fst grad_loss))
   --print "LL: "
   --print $ sum $ map fst grad_loss
 
-
---TODO: can we fix this to use the Foldable theta?
 optimizeStep :: (Floating a, Real a) => Env TypeInfo a -> Expr TypeInfo a -> [Value a] -> Thetas a -> (a, Thetas a)
-optimizeStep env expr samples thetas = (loss, addThetas thetas (mult 0.0001 gradient))
+optimizeStep env expr samples thetas = (loss, addThetas thetas (mult 0.00003 gradient))
   where
     -- does it make a difference if we do sum(gradients) or if we do gradient(sums)?
     -- TODO: Is it correct to apply map-sum, or do we flatten the wrong dimension here?
     --grad_loss :: [(loss :: a, grad :: Thetas a)]
-    grad_loss = [grad' (\theta -> log $ unwrapP $ probability (autoEnv env) (autoEnv env) theta (autoExpr expr) (autoVal sample)) thetas | sample <- samples]
+    grad_loss = [grad' (\theta -> log $ unwrapP $ likelihood (autoEnv env) (autoEnv env) theta (autoExpr expr) (autoVal sample)) thetas | sample <- samples]
     --grad_thetas = [Thetas a]
     grad_thetas = map snd grad_loss
     --gradient :: Thetas a
@@ -158,8 +271,8 @@ exprDebugMetrics :: (Floating a, Real a, Show a, Enum a) => Env TypeInfo a -> Ex
 exprDebugMetrics env expr samples thetas = do
   mapM_ (\thX -> printInfo thX) [[x] | x <- [0.0, 0.1 .. 1.0]]
     where
-      ll thX = sum [log $ unwrapP $ probability env env thX expr sample | sample <- samples]
-      grad_loss thX = [grad' (\theta -> log $ unwrapP $ probability (autoEnv env) (autoEnv env) theta (autoExpr expr) (autoVal sample)) thX | sample <- samples] 
+      ll thX = sum [log $ unwrapP $ likelihood env env thX expr sample | sample <- samples]
+      grad_loss thX = [grad' (\theta -> log $ unwrapP $ likelihood (autoEnv env) (autoEnv env) theta (autoExpr expr) (autoVal sample)) thX | sample <- samples]
       grad_thetas thX = map snd (grad_loss thX)
       gradient thX = foldl1 addThetas $ grad_thetas thX
       printInfo thX = do
@@ -178,10 +291,10 @@ autoVal (VFloat y) = VFloat (auto y)
 autoVal (VList xs) = VList (map autoVal xs)
 
 addThetas :: (Floating a) => Thetas a -> Thetas a -> Thetas a
-addThetas (x) (y) = (zipWith (+) x y)
+addThetas x y = zipWith (+) x y
 
 mult :: (Floating a) => a -> Thetas a -> Thetas a
-mult x (y) = map (*x) y
+mult x y = map (*x) y
 
 --myGradientAscent :: (Num a, Num b, Num c, Num d) => Int -> Env a -> [b] -> Expr a -> [Value a] -> [([c], d)]
 --myGradientAscent 0 _ _ _ _ = []
@@ -223,9 +336,10 @@ resolveConstraintsExpr env name = tMapHead (rDeconstrain env name)
                                 . tMapTails (rDeconstrain env "")
                                 . tMapTails (pDeconstrain env "")
 
-
+-- get the type info of expr. If it is a PIdent constraint, try to relax it. Does not handle recursive PIdents.
+-- in a recursive PIdent,
 pDeconstrain ::  Env TypeInfo a -> String -> Expr TypeInfo a -> TypeInfo
-pDeconstrain env defName expr = TypeInfo rt $ case pt of
+pDeconstrain env defName expr = trace (show pt) $ TypeInfo rt $ case pt of
     Deterministic -> Deterministic
     Integrate -> Integrate
     Chaos -> Chaos
@@ -246,8 +360,14 @@ fixedPointIteration :: Eq a => a -> (a -> a) -> a
 fixedPointIteration a f = if b == a then b else fixedPointIteration b f
   where b = f a
 
-fixedPointLookup :: Eq a => [(a, a)] -> a -> a
-fixedPointLookup table start = if res == start then start else fixedPointLookup table res
+recFixedPointLookup :: [(PType, PType)] -> PType -> PType
+recFixedPointLookup table = fixedPointLookup (zip (map fst table) cleanedUpSnds)
+  where
+    --TODO: Sort out any constraints in the following:
+    cleanedUpSnds = map snd table
+
+fixedPointLookup :: (Eq a, Show a) => [(a, a)] -> a -> a
+fixedPointLookup table start = trace (show table) $ trace (show start) (if res == start then start else fixedPointLookup table res)
   where
     res = fromJust $ lookup start table
 
@@ -294,8 +414,8 @@ reconstructThetas env nSamples thetas = do
   let reconstructedThetas = myGradientAscent 100 cEnv initialGuess main samples
   return reconstructedThetas
 
-testRun :: (Floating a, Ord a, Random a, Show a, Real a, Enum a) => Env () a -> Thetas a -> IO ()
-testRun env thetas = do
+testRun :: (Floating a, Ord a, Random a, Show a, Real a, Enum a) => String -> Env () a -> Thetas a -> IO ()
+testRun experimentName env thetas = do
   print "Hello world"
   print env
   let pretypedEnv = typeCheckEnv env
@@ -317,8 +437,14 @@ testRun env thetas = do
   mapM_ print $ count samples
   --let initialThetas = (replicate (length thetas) 0.5)
   initialThetas <- replicateM (length thetas) (getRandomR (0.0, 1.0))
-  let thetasRecovered = myGradientAscent 10000 typedEnv initialThetas main samples
+  let thetasRecovered = myGradientAscent 500 typedEnv initialThetas main samples
   mapM_ print thetasRecovered
+  --TODO: Handle different theta sizes
+  -- also put original thetas as first line.
+  let firstline = intercalate ", " $ map show (thetas ++ [0])
+  let dataStrs = map (\(ts, d) -> intercalate ", " $ map show (ts ++ [d])) thetasRecovered
+  let fileStr = unlines (firstline:dataStrs)
+  writeFile ("./data/thetas_out_" ++ experimentName ++ ".txt") fileStr
 
 mkSamples :: (Fractional a, Ord a, Random a) => Int -> Env TypeInfo a -> Thetas a -> Expr TypeInfo a -> IO [Value a]
 mkSamples 0 _ _ _ = return []

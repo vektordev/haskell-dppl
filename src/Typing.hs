@@ -138,7 +138,7 @@ inferR (Cons () headX tailX) = do
     _ -> matchRType tTail (ListOf tHead)
 inferR (Call () name) = return $ RIdent name
 
-
+--TODO: Find a way to statically align the result of inferP with the constraints of the likelihood function.
 inferP :: Expr () a -> Check a PType
 inferP (IfThenElse _ cond left right) = do
   condP <- inferP cond

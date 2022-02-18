@@ -98,15 +98,15 @@ generate globalEnv env thetas (Cons _ hd tl) = do
 generate globalEnv env thetas (Call t name) = generate globalEnv globalEnv thetas expr
   where Just expr = lookup name env
 
-probability :: (Fractional a, Ord a, Real a, Floating a) => Env TypeInfo a -> Env TypeInfo a -> Thetas a -> Expr TypeInfo a -> Value a -> Probability a
+likelihood :: (Fractional a, Ord a, Real a, Floating a) => Env TypeInfo a -> Env TypeInfo a -> Thetas a -> Expr TypeInfo a -> Value a -> Probability a
 -- possible problems in the probability math in there:
-probability globalEnv env thetas (IfThenElse t cond left right) val = pOr (pAnd pCond pLeft) (pAnd pCondInv pRight)
+likelihood globalEnv env thetas (IfThenElse t cond left right) val = pOr (pAnd pCond pLeft) (pAnd pCondInv pRight)
   where
-    pCond = probability globalEnv env thetas cond (VBool True)
+    pCond = likelihood globalEnv env thetas cond (VBool True)
     pCondInv = DiscreteProbability (1 - unwrapP pCond)
-    pLeft = probability globalEnv env thetas left val
-    pRight = probability globalEnv env thetas right val
-probability globalEnv env thetas (GreaterThan t left right) (VBool x)
+    pLeft = likelihood globalEnv env thetas left val
+    pRight = likelihood globalEnv env thetas right val
+likelihood globalEnv env thetas (GreaterThan t left right) (VBool x)
   --consider GreaterThan () (Uniform ()) (ThetaI () 0)
   -- the right side is deterministic. the probability of getting true out of the expr is 1 - theta
   -- rightGen will return theta. Therefore, integrating Uniform from -inf to theta will result in theta.
@@ -120,19 +120,18 @@ probability globalEnv env thetas (GreaterThan t left right) (VBool x)
     rightP = getP right
     leftGen = detGenerate env thetas left
     rightGen = detGenerate env thetas right
-probability _ _ thetas expr@(ThetaI _ x) (VFloat val) = if val == findTheta expr thetas then DiscreteProbability 1 else DiscreteProbability 0
-probability _ _ _ (ThetaI _ _) _ = error "typing error in probability - ThetaI"
-probability _ _ _ (Uniform _) (VFloat x) = if 0 <= x && x <= 1 then PDF 1 else PDF 0
-probability _ _ _ (Uniform _) _ = error "typing error in probability - Uniform"
+likelihood _ _ thetas expr@(ThetaI _ x) (VFloat val) = if val == findTheta expr thetas then DiscreteProbability 1 else DiscreteProbability 0
+likelihood _ _ _ (ThetaI _ _) _ = error "typing error in probability - ThetaI"
+likelihood _ _ _ (Uniform _) (VFloat x) = if 0 <= x && x <= 1 then PDF 1 else PDF 0
+likelihood _ _ _ (Uniform _) _ = error "typing error in probability - Uniform"
 --probability _ _ _ (Normal _) (VFloat x) = PDF $ realToFrac $ density (normalDistr 0 1) $ realToFrac x
-probability _ _ _ (Normal _) (VFloat x) = PDF myDensity
+likelihood _ _ _ (Normal _) (VFloat x) = PDF myDensity
   where myDensity = (1 / sqrt (2 * pi)) * exp (-0.5 * x * x)
-probability _ _ _ (Normal _) _ = error "typing error in probability - Uniform"
-probability _ _ _ (Constant _ val) val2 = if val == val2 then DiscreteProbability 1 else DiscreteProbability 0
-probability globalEnv env thetas (Mult _ left right) (VFloat x)
+likelihood _ _ _ (Normal _) _ = error "typing error in probability - Normal"
+likelihood _ _ _ (Constant _ val) val2 = if val == val2 then DiscreteProbability 1 else DiscreteProbability 0
+likelihood globalEnv env thetas (Mult _ left right) (VFloat x)
   -- need to divide by the deterministic sample
   | leftP == Deterministic || rightP == Deterministic = correctedProbability
-  -- | rightP == Deterministic = probability globalEnv env thetas left (VFloat inverse)
   | otherwise = error "can't solve Mult; unexpected type error"
   where
     leftP = getP left
@@ -142,12 +141,12 @@ probability globalEnv env thetas (Mult _ left right) (VFloat x)
     detSample = if leftP == Deterministic then leftGen else rightGen
     inverse = x / detSample
     PDF inverseProbability = if leftP == Deterministic
-      then probability globalEnv env thetas right (VFloat inverse)
-      else probability globalEnv env thetas left (VFloat inverse)
+      then likelihood globalEnv env thetas right (VFloat inverse)
+      else likelihood globalEnv env thetas left (VFloat inverse)
     correctedProbability = PDF (inverseProbability / detSample)
-probability globalEnv env thetas (Plus _ left right) (VFloat x)
-  | leftP == Deterministic = probability globalEnv env thetas right (VFloat inverse)
-  | rightP == Deterministic = probability globalEnv env thetas left (VFloat inverse)
+likelihood globalEnv env thetas (Plus _ left right) (VFloat x)
+  | leftP == Deterministic = likelihood globalEnv env thetas right (VFloat inverse)
+  | rightP == Deterministic = likelihood globalEnv env thetas left (VFloat inverse)
   | otherwise = error "can't solve Plus; unexpected type error"
   where
     leftP = getP left
@@ -155,13 +154,17 @@ probability globalEnv env thetas (Plus _ left right) (VFloat x)
     VFloat leftGen = detGenerate env thetas left
     VFloat rightGen = detGenerate env thetas right
     inverse = if leftP == Deterministic then x - leftGen else x - rightGen
-probability _ _ _ (Null _) (VList []) = DiscreteProbability 1
-probability _ _ _ (Null _) _ = DiscreteProbability 0
-probability _ _ _ (Cons _ _ _) (VList []) = DiscreteProbability 0
-probability globalEnv env thetas (Cons _ hd tl) (VList (x:xs)) = pAnd (probability globalEnv env thetas hd x) (probability globalEnv env thetas tl $ VList xs)
-probability globalEnv env thetas (Call _ name) val = probability globalEnv globalEnv thetas expr val
+likelihood _ _ _ (Null _) (VList []) = DiscreteProbability 1
+likelihood _ _ _ (Null _) _ = DiscreteProbability 0
+likelihood _ _ _ (Cons _ _ _) (VList []) = DiscreteProbability 0
+likelihood globalEnv env thetas (Cons _ hd tl) (VList (x:xs)) = pAnd (likelihood globalEnv env thetas hd x) (likelihood globalEnv env thetas tl $ VList xs)
+likelihood globalEnv env thetas (Call _ name) val = likelihood globalEnv globalEnv thetas expr val
   where Just expr = lookup name env
 
+-- Cons a [b,c,d] = [a,b,c,d]
+
+--likelihood([a, b, ... l], Cons subExprA subExprB)
+-- = (likelihood(a, subExprA) * (likelihood([b, ..., l], subExprB)
 
 integrate :: (Num a, Ord a) => Expr TypeInfo a -> Thetas a -> Env TypeInfo a -> Limits a -> a
 integrate (Uniform t) thetas env (Limits low high) = if l2 > 1 || h2 < 0 then 0 else h2 - l2

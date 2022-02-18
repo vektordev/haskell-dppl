@@ -71,7 +71,7 @@ discreteProbAlignment nSamples (env, thetas) = ioProperty $ case mMain of
     Just mainExpr -> do
       samples <- mkSamples nSamples typedEnv thetas mainExpr
       let sample_counts = count samples
-      let valProb = [(probability typedEnv typedEnv thetas mainExpr val, DiscreteProbability (realToFrac val_count / realToFrac nSamples))| (val_count, val) <- sample_counts]
+      let valProb = [(likelihood typedEnv typedEnv thetas mainExpr val, DiscreteProbability (realToFrac val_count / realToFrac nSamples))| (val_count, val) <- sample_counts]
       return $ conjoin (map (\(x, y) -> epsilonProb 0.05 x y) valProb)
   where
     pretypedEnv = typeCheckEnv env
