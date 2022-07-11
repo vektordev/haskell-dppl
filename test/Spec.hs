@@ -4,7 +4,7 @@
 import Test.QuickCheck
 
 import Lib
-import Lang
+import SPLL.Lang
 import Typing
 import RType
 import PType

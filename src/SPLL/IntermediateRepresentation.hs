@@ -9,7 +9,7 @@ module SPLL.IntermediateRepresentation (
 , envToIR
 ) where
 
-import Lang
+import SPLL.Lang
 import SPLL.Typing.RType
 import SPLL.Typing.PType
 import Transpiler

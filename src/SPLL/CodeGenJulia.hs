@@ -4,7 +4,7 @@ module SPLL.CodeGenJulia (
 ) where
   
 import SPLL.IntermediateRepresentation
-import Lang (Value)
+import SPLL.Lang (Value)
 import Data.List (intercalate)
 
 indentOnce :: [String] -> [String]

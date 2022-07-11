@@ -1,6 +1,6 @@
 module Transpiler where
 
-import Lang
+import SPLL.Lang
 import SPLL.Typing.PType
 import Data.Graph
 import SPLL.Typing.Typing

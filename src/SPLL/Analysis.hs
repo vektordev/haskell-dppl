@@ -5,7 +5,7 @@ module SPLL.Analysis (
 ) where
 
 import SPLL.Typing.Typing
-import Lang
+import SPLL.Lang
 import Transpiler (Algorithm, allAlgorithms, checkExprMatches, checkConstraint, constraints, likelihoodFunctionUsesTypeInfo, toStub)
 import SPLL.Typing.RType
 import SPLL.Typing.PType

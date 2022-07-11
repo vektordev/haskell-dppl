@@ -27,7 +27,6 @@ library
       CodeGen
       HMInference
       Interpreter
-      Lang
       Lib
       PLambda.Env
       PLambda.Eval
@@ -38,11 +37,12 @@ library
       PLambda.Pretty
       PLambda.Syntax
       PLambda.Type
-      PyNeuralNet
       RInfer
       SPLL.Analysis
       SPLL.CodeGenJulia
+      SPLL.Examples
       SPLL.IntermediateRepresentation
+      SPLL.Lang
       SPLL.Typing.PType
       SPLL.Typing.RType
       SPLL.Typing.Typing

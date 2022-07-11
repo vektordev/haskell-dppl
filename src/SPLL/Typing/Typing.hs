@@ -2,7 +2,7 @@
 
 module SPLL.Typing.Typing where
 
-import Lang
+import SPLL.Lang
 import SPLL.Typing.RType
 import SPLL.Typing.PType
 

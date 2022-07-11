@@ -1,6 +1,6 @@
 module CodeGen where
 
-import Lang
+import SPLL.Lang
 import SPLL.Typing.PType
 import SPLL.Typing.RType
 import SPLL.Typing.Typing

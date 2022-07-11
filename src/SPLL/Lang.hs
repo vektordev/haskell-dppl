@@ -1,4 +1,4 @@
-module Lang where
+module SPLL.Lang where
 
 import SPLL.Typing.PType
 import SPLL.Typing.RType
