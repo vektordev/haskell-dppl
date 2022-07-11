@@ -17,6 +17,8 @@ data Expr x a = IfThenElse x (Expr x a) (Expr x a) (Expr x a)
               | LetIn x String (Expr x a) (Expr x a)
               | Arg x String RType (Expr x a)
               | CallArg x String [Expr x a]
+              | Lambda x String (Expr x a)
+              | ReadNN x (Expr x a)
               -- TODO: Needs Concat to achieve proper SPN-parity.
               deriving (Show, Eq)
 
@@ -39,6 +41,8 @@ exprMap f expr = case expr of
   (LetIn t x a b) -> LetIn t x (fmap f a) (fmap f b)
   (Arg t name r a) -> Arg t name r (fmap f a)
   (CallArg t name a) -> CallArg t name (map (fmap f) a)
+  (Lambda t name a) -> Lambda t name (fmap f a)
+  (ReadNN t a) -> ReadNN t (fmap f a)
 
 tMapHead :: (Expr x a -> x) -> Expr x a -> Expr x a
 tMapHead f expr = case expr of 
@@ -56,6 +60,8 @@ tMapHead f expr = case expr of
   (LetIn _ x a b) -> LetIn (f expr) x a b
   (Arg _ name r a) -> Arg (f expr) name r a
   (CallArg _ name a) -> CallArg (f expr) name a
+--  (Lambda _ name a) -> CallArg (f expr) name a
+--  (ReadNN _ a) -> ReadNN (f expr) a
 
 tMapTails :: (Expr x a -> x) -> Expr x a -> Expr x a
 tMapTails f expr = case expr of
@@ -90,6 +96,27 @@ tMap f expr = case expr of
   (LetIn _ x a b) -> LetIn (f expr) x (tMap f a) (tMap f b)
   (Arg _ name r a) -> Arg (f expr) name r (tMap f a)
   (CallArg _ name a) -> CallArg (f expr) name (map (tMap f) a)
+  (Lambda _ name a) -> Lambda (f expr) name (tMap f a)
+  (ReadNN _ a) -> ReadNN (f expr) (tMap f a)
+
+getSubExprs :: Expr x a -> [Expr x a]
+getSubExprs expr = case expr of 
+  (IfThenElse _ a b c) -> [a,b,c]
+  (GreaterThan _ a b) -> [a,b]
+  (ThetaI _ x) -> []
+  (Uniform _) -> []
+  (Normal _) -> []
+  (Constant _ x) -> []
+  (Mult _ a b) -> [a,b]
+  (Plus _ a b) -> [a,b]
+  (Null _) -> []
+  (Cons _ a b) -> [a,b]
+  (Call _ x) -> []
+  (LetIn _ x a b) -> [a,b]
+  (Arg _ name r a) -> [a]
+  (CallArg _ name a) -> a
+  (Lambda _ _ a) -> [a]
+  (ReadNN _ a) -> [a]
 
 getTypeInfo :: Expr t a -> t
 getTypeInfo expr = case expr of
@@ -107,23 +134,32 @@ getTypeInfo expr = case expr of
   (LetIn t _ _ _)       -> t
   (Arg t _ _ _)         -> t
   (CallArg t _ _)       -> t
+  (Lambda t _ _)        -> t
+  (ReadNN t _)          -> t
 
-data Value a = VFloat a
-           | VBool Bool
+data Value a = VBool Bool
+           | VInt Int
+           | VSymbol String
+           | VFloat a
            | VList [Value a]
+           -- | Value of Arrow a b could be Expr TypeInfo a, with Expr being a Lambda?
            deriving (Show, Eq)
 
 data TypeInfo = TypeInfo RType PType deriving (Show, Eq)
 
 getRType :: Value a -> RType
-getRType (VFloat _) = TFloat
 getRType (VBool _) = TBool
+getRType (VInt _) = TInt
+getRType (VSymbol _) = TSymbol
+getRType (VFloat _) = TFloat
 getRType (VList (a:_)) = ListOf $ getRType a
 getRType (VList []) = NullList
 
 instance Functor Value where
-  fmap f (VFloat a) = VFloat $ f a
   fmap _ (VBool a) = VBool a
+  fmap _ (VInt a) = VInt a
+  fmap _ (VSymbol a) = VSymbol a
+  fmap f (VFloat a) = VFloat $ f a
   fmap f (VList x) = VList $ map (fmap f) x
 
 prettyPrint :: (Num a, Show a, Show t) => Expr t a -> [String]
@@ -133,7 +169,7 @@ prettyPrint expr =
       childExprs = recurse expr
       indented = map indent $ concatMap prettyPrint childExprs :: [String]
       indent ls = "    " ++ ls
-      fstLine = printFlat expr ++ " [" ++ show (getTypeInfo expr) ++ "]"
+      fstLine = printFlat expr ++ " :: (" ++ show (getTypeInfo expr) ++ ")"
 
 recurse :: Expr t a -> [Expr t a]
 recurse expr = case expr of 
@@ -151,6 +187,8 @@ recurse expr = case expr of
   (LetIn _ _ a b) -> [a,b]
   (Arg _ _ _ a) -> [a]
   (CallArg _ _ a) -> a
+  (Lambda _ _ a) -> [a]
+  (ReadNN _ a) -> [a]
 
 printFlat :: Show a => Expr t a -> String
 printFlat expr = case expr of
@@ -168,3 +206,5 @@ printFlat expr = case expr of
   LetIn {} -> "LetIn"
   (Arg _ var r _ ) -> "Bind " ++ var ++ "::" ++ show r
   (CallArg _ a _ ) -> "CallArg" ++ a
+  (Lambda _ name _) -> "\\" ++ name  ++ " -> "
+  (ReadNN _ _) -> "ReadNN"

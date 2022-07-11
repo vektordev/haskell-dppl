@@ -69,7 +69,7 @@ discreteProbAlignment :: (Random a, Show a, Real a, Floating a) => Int -> (Env (
 discreteProbAlignment nSamples (env, thetas) = ioProperty $ case mMain of
     Nothing -> return $ counterexample "typed main not found in discreteProbAlignment" False
     Just mainExpr -> do
-      samples <- mkSamples nSamples typedEnv thetas mainExpr
+      samples <- mkSamples nSamples typedEnv thetas [] mainExpr
       let sample_counts = count samples
       let valProb = [(likelihood typedEnv typedEnv thetas mainExpr val, DiscreteProbability (realToFrac val_count / realToFrac nSamples))| (val_count, val) <- sample_counts]
       return $ conjoin (map (\(x, y) -> epsilonProb 0.05 x y) valProb)

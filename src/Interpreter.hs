@@ -50,53 +50,60 @@ detGenerate _ _ expr =
   else error "detGenerate not defined for expr"
     where TypeInfo rt pt = getTypeInfo expr
 
-generate :: (Fractional a, RandomGen g, Ord a, Random a) => Env TypeInfo a -> Env TypeInfo a -> Thetas a -> Expr TypeInfo a -> Rand g (Value a)
-generate globalEnv env thetas (IfThenElse _ cond left right) = do
-  condV <- generate globalEnv env thetas cond
+generate :: (Fractional a, RandomGen g, Ord a, Random a) => Env TypeInfo a -> Env TypeInfo a -> Thetas a -> [Expr TypeInfo a] -> Expr TypeInfo a -> Rand g (Value a)
+generate globalEnv env thetas [] l@(Lambda _ name expr) = error "no args provided to lambda"
+generate globalEnv env thetas (arg:args) (Lambda _ name expr) = generate globalEnv ((name, arg):env ) thetas args expr
+generate _ _ _ (_:_) expr = error "args provided to non-lambda"
+generate globalEnv env thetas args (IfThenElse _ cond left right) = do
+  condV <- generate globalEnv env thetas args cond
   case condV of
-    VBool True -> generate globalEnv env thetas left
-    VBool False -> generate globalEnv env thetas right
+    VBool True -> generate globalEnv env thetas args left
+    VBool False -> generate globalEnv env thetas args right
     _ -> error "Type error"
-generate globalEnv env thetas (GreaterThan _ left right) = do
-  a <- generate globalEnv env thetas left
-  b <- generate globalEnv env thetas right
+generate globalEnv env thetas args (GreaterThan _ left right) = do
+  a <- generate globalEnv env thetas args left
+  b <- generate globalEnv env thetas args right
   case (a,b) of
     (VFloat af, VFloat bf) -> return $ VBool (af > bf)
     _ -> error "Type error"
-generate _ _ thetas expr@(ThetaI _ i) = return $ VFloat (findTheta expr thetas)
-generate _ _ _ (Uniform _) = do
+generate _ _ thetas args expr@(ThetaI _ i) = return $ VFloat (findTheta expr thetas)
+generate _ _ _ args (Uniform _) = do
   r <- getRandomR (0.0, 1.0) --uniformR (0.0, 1.0)
   return $ VFloat r
 --TODO: ghastly RNG implementation. Statistics.Distribution offers a RNG implementation that is incompatible with Rand.
-generate _ _ _ (Normal _) = do
+generate _ _ _ args (Normal _) = do
   let gauss = normalDistr 0 1
   r <- getRandomR (0.0, 1.0)
   let result = quantile gauss r
   return $ VFloat $ realToFrac result
-generate _ _ _ (Constant _ x) = return x
-generate a b c (Plus _ left right) = do
-  leftSample <- generate a b c left
-  rightSample <- generate a b c right
+generate _ _ _ args (Constant _ x) = return x
+generate a b c args (Plus _ left right) = do
+  leftSample <- generate a b c args left
+  rightSample <- generate a b c args right
   case (leftSample, rightSample) of
     (VFloat l, VFloat r) -> return $ VFloat (l + r)
     _ -> error "Type error"
-generate a b c (Mult _ left right) = do
-  leftSample <- generate a b c left
-  rightSample <- generate a b c right
+generate a b c args (Mult _ left right) = do
+  leftSample <- generate a b c args left
+  rightSample <- generate a b c args right
   case (leftSample, rightSample) of
     (VFloat l, VFloat r) -> return $ VFloat (l * r)
     _ -> error "Type error"
-generate _ _ _ (Null _) = return $ VList []
-generate globalEnv env thetas (Cons _ hd tl) = do
-  ls <- generate globalEnv env thetas tl
+generate _ _ _ args (Null _) = return $ VList []
+generate globalEnv env thetas args (Cons _ hd tl) = do
+  ls <- generate globalEnv env thetas args tl
   case ls of
     VList xs -> do
-      x <- generate globalEnv env thetas hd
+      x <- generate globalEnv env thetas args hd
       return $ VList (x : xs)
     _ -> error "type error in list cons"
 --Call leaves function context, pass GlobalEnv to ensure env is cleaned up.
-generate globalEnv env thetas (Call t name) = generate globalEnv globalEnv thetas expr
+generate globalEnv env thetas args (Call t name) = generate globalEnv globalEnv thetas args expr
   where Just expr = lookup name env
+generate globalEnv env thetas args (ReadNN _ expr) = error "NN not implemented"
+
+sigmoid :: Floating a => a -> a
+sigmoid x = 1 / (1 + exp (-x))
 
 likelihood :: (Fractional a, Ord a, Real a, Floating a) => Env TypeInfo a -> Env TypeInfo a -> Thetas a -> Expr TypeInfo a -> Value a -> Probability a
 -- possible problems in the probability math in there:
@@ -114,12 +121,16 @@ likelihood globalEnv env thetas (GreaterThan t left right) (VBool x)
   | rightP == Deterministic && leftP  == Integrate && not x = DiscreteProbability $ integrate left thetas env (Limits Nothing (Just rightGen))
   | leftP  == Deterministic && rightP == Integrate && x     = DiscreteProbability $ 1 - integrate right thetas env (Limits (Just leftGen) Nothing)
   | leftP  == Deterministic && rightP == Integrate && not x = DiscreteProbability $ integrate right thetas env (Limits (Just leftGen) Nothing)
+  | leftP  == Deterministic && rightP == Deterministic && x = DiscreteProbability $ sigmoid (leftFloat - rightFloat)
+  | leftP  == Deterministic && rightP == Deterministic && not x = DiscreteProbability $ sigmoid (rightFloat - leftFloat)
   | otherwise = error "undefined probability for greaterThan"
   where
     leftP = getP left
     rightP = getP right
     leftGen = detGenerate env thetas left
     rightGen = detGenerate env thetas right
+    VFloat leftFloat = leftGen
+    VFloat rightFloat = rightGen
 likelihood _ _ thetas expr@(ThetaI _ x) (VFloat val) = if val == findTheta expr thetas then DiscreteProbability 1 else DiscreteProbability 0
 likelihood _ _ _ (ThetaI _ _) _ = error "typing error in probability - ThetaI"
 likelihood _ _ _ (Uniform _) (VFloat x) = if 0 <= x && x <= 1 then PDF 1 else PDF 0

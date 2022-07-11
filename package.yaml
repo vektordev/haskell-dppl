@@ -36,6 +36,7 @@ dependencies:
 - mwc-random
 - vector
 - QuickCheck
+- transformers-supply
 
 library:
   source-dirs: src

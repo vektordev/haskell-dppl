@@ -1,6 +1,8 @@
 module RType where
 
 data RType = TBool
+           | TInt
+           | TSymbol
            | TFloat
            | ListOf RType
            | NullList
@@ -11,7 +13,10 @@ data RType = TBool
 
 instance Eq RType where
   (==) TBool TBool = True
+  (==) TInt TInt = True
+  (==) TSymbol TSymbol = True
   (==) TFloat TFloat = True
+  (==) (Arrow left right) (Arrow left2 right2) = left == left2 && right == right2
   (==) (ListOf x) (ListOf y) = x == y
   (==) NullList NullList = True
   (==) (RIdent a) (RIdent b) = a == b

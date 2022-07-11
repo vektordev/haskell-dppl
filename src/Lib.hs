@@ -26,7 +26,12 @@ import Typing
 import RType
 import PType
 import Interpreter
+import Transpiler
 import Control.Monad.Random (evalRandIO, getRandomR, replicateM, forM_)
+import CodeGen
+import IntermediateRepresentation
+import Analysis
+import CodeGenJulia
 
 --assumption about grad: Reverse s a is Num if a is Num.
 --Thererfore, grad :: (Traversable f, Num a) => (forall s. Reifies s Tape => f (Reverse s a) -> Reverse s a) -> f a -> f a
@@ -159,6 +164,12 @@ testIntractable :: Expr () a
 testIntractable = Mult ()
   (Mult () (Normal ()) (ThetaI () 1))
   (Mult () (Normal ()) (ThetaI () 2))
+  
+testInconsistent :: Expr () Double
+testInconsistent = IfThenElse ()
+  (GreaterThan () (Constant () (VFloat 0.0)) (ThetaI () 0))
+  (Constant () (VBool True))
+  (Constant () (VBool False))
 
 failureCase :: Expr () a
 failureCase = Mult () (Normal ()) (ThetaI () 0)
@@ -179,6 +190,30 @@ gaussMultiLists = IfThenElse ()
       (Plus () (Mult () (Normal ()) (ThetaI () 2)) (ThetaI () 3))
       (Plus () (Mult () (Normal ()) (ThetaI () 4)) (ThetaI () 5)))
     (Call () "main"))
+    
+testNNUntyped :: Expr () a
+--testNN : Lambda im1 -> (Lambda im2 -> readNN im1 + readNN im2)
+testNNUntyped = Lambda () "im1" (Lambda () "im2" (Plus () (ReadNN () (Call () "im1")) (ReadNN () (Call () "im2"))))
+
+--mNist im1 im2 = read im1 + read im2
+--p(sum | im1, im2)
+
+testNN :: Expr TypeInfo a
+testNN = Lambda (TypeInfo (Arrow TSymbol (Arrow TSymbol TInt)) Chaos) "im1"
+  (Lambda (TypeInfo (Arrow TSymbol TInt) Chaos) "im2" (Plus (TypeInfo TInt Integrate)
+    (ReadNN (TypeInfo TInt Integrate) (Call (TypeInfo TSymbol Deterministic) "im1"))
+    (ReadNN (TypeInfo TInt Integrate) (Call (TypeInfo TSymbol Deterministic) "im2"))))
+
+triMNist :: Expr TypeInfo a
+triMNist = Lambda (TypeInfo (Arrow TSymbol (Arrow TSymbol (Arrow TSymbol TInt))) Chaos) "im1"
+  (Lambda (TypeInfo (Arrow TSymbol (Arrow TSymbol TInt)) Chaos) "im2"
+    (Lambda (TypeInfo (Arrow TSymbol TInt) Chaos) "im3" (Plus (TypeInfo TInt Integrate)
+      (ReadNN (TypeInfo TInt Integrate) (Call (TypeInfo TSymbol Deterministic) "im3"))
+      (Plus (TypeInfo TInt Integrate)
+        (ReadNN (TypeInfo TInt Integrate) (Call (TypeInfo TSymbol Deterministic) "im1"))
+        (ReadNN (TypeInfo TInt Integrate) (Call (TypeInfo TSymbol Deterministic) "im2")))
+      )))
+
 
 readSamples :: IO [(Double, Double)]
 readSamples = do
@@ -217,15 +252,64 @@ llScan tenv thetas main = do
   let fileStr = unlines $ map (\(x,y,l) -> show x ++ ", " ++ show y ++ ", " ++ (show $ unwrapP l)) scanRes
   writeFile "./data/ll_out.txt" fileStr
 
+newCodeGen :: Expr TypeInfo Float -> IO ()
+newCodeGen tExpr = do
+  let annotated = Analysis.annotate tExpr
+  print annotated
+  let irGen = toIRGenerate annotated
+  print irGen
+  let gen = generateCode irGen
+  putStrLn $ unlines gen
+  let irProb = toIRProbability annotated (IRVar "input")
+  print irProb
+  let prob = generateCode irProb
+  putStrLn $ unlines prob
+
+newCodeGenAll :: Env TypeInfo Float -> IO ()
+newCodeGenAll env = do
+  let annotated = map (\(a,b) -> (a, Analysis.annotate b)) env
+  print annotated
+  let ir = envToIR annotated
+  print ir
+  let code = generateFunctions ir
+  putStrLn $ unlines code
+
 someFunc :: IO ()
-someFunc = --thatGaussThing
-  --let env = [("main", testExpr2)] :: Env () Float
-  let env = [("main", gaussLists)] :: Env () Double
+someFunc = do--thatGaussThing
+  --x <- runNNTest
+  --print x
+  --let env = [("main", testNNUntyped)] :: Env () Float
+  --cmp <- compile env triMNist
+  --let cmp = [("main", triMNist)] :: Env TypeInfo Float
+  --let cmp = [("main", testNN)] :: Env TypeInfo Float
+  let env = [("main", testGauss)] :: Env () Float
+  cmp2 <- compile env
+  newCodeGenAll cmp2
+  --let x = transpile cmp
+  --print x
+  --let y = map mkProbability x
+  --mapM_ putStrLn y
+  --let env = [("main", testInconsistent)] :: Env () Double
   --only once
   --in testRun "gaussMultiLists" env [0.55, 0.45, 0.5, 0.8, 0.3, 0.4]
+  --in testRun "testInconsistent" env [-0.5]
   --repeat a bunch of times:
   --in forM_ [1..100] (\n -> testRun ("gaussMultiLists_" ++ show n) env [0.55, 0.45, 0.5, 0.8, 0.3, 0.4])
-  in forM_ [1..100] (\n -> testRun ("gaussLists_" ++ show n) env [0.5, 0.9, 0.3])
+  --in forM_ [1..100] (\n -> testRun ("gaussLists_" ++ show n) env [0.5, 0.9, 0.3])
+
+--runNNTest :: IO ()
+runNNTest :: IO [Value Float]
+runNNTest = do
+  print "Running NN Test"
+  let typedEnv = [("main", testNN)]
+  let Just main = lookup "main" typedEnv
+  putStrLn $ unlines $ prettyPrint main
+  let resultR = getR main
+  print resultR
+  let resultP = getP main
+  print resultP
+  mkSamples 1000 typedEnv [] [Constant (TypeInfo TSymbol Deterministic) (VSymbol "image1"), Constant (TypeInfo TSymbol Deterministic) (VSymbol "image2")] main
+  
 
 myGradientAscent :: (Floating a, Real a) => Int -> [(String, Expr TypeInfo a)] -> Thetas a -> Expr TypeInfo a -> [Value a] -> [(Thetas a, a)]
 myGradientAscent 0 _ _ _ _ = []
@@ -339,7 +423,7 @@ resolveConstraintsExpr env name = tMapHead (rDeconstrain env name)
 -- get the type info of expr. If it is a PIdent constraint, try to relax it. Does not handle recursive PIdents.
 -- in a recursive PIdent,
 pDeconstrain ::  Env TypeInfo a -> String -> Expr TypeInfo a -> TypeInfo
-pDeconstrain env defName expr = trace (show pt) $ TypeInfo rt $ case pt of
+pDeconstrain env defName expr = TypeInfo rt $ case pt of
     Deterministic -> Deterministic
     Integrate -> Integrate
     Chaos -> Chaos
@@ -408,7 +492,7 @@ reconstructThetas :: (Floating a, Ord a, Random a, Show a, Real a) => Env () a -
 reconstructThetas env nSamples thetas = do
   cEnv <- compile env
   let Just main = lookup "main" cEnv
-  samples <- mkSamples nSamples cEnv thetas main
+  samples <- mkSamples nSamples cEnv thetas [] main
   --let initialGuess = replicate (length thetas) 0.5
   initialGuess <- replicateM (length thetas) (getRandomR (0.0, 1.0))
   let reconstructedThetas = myGradientAscent 100 cEnv initialGuess main samples
@@ -428,7 +512,7 @@ testRun experimentName env thetas = do
   print resultR
   let resultP = getP main
   print resultP
-  samples <- mkSamples 1000 typedEnv thetas main
+  samples <- mkSamples 1000 typedEnv thetas [] main
   --putStrLn "exprDebugMetrics:"
   --exprDebugMetrics typedEnv main samples ([0.1, 0.1])
   --gradientDiag typedEnv [[x] | x <- [0, 0.01 .. 1]] main samples
@@ -446,11 +530,11 @@ testRun experimentName env thetas = do
   let fileStr = unlines (firstline:dataStrs)
   writeFile ("./data/thetas_out_" ++ experimentName ++ ".txt") fileStr
 
-mkSamples :: (Fractional a, Ord a, Random a) => Int -> Env TypeInfo a -> Thetas a -> Expr TypeInfo a -> IO [Value a]
-mkSamples 0 _ _ _ = return []
-mkSamples n env thetas expr = do
-  sample <- evalRandIO $ generate env env thetas expr
-  remainder <- mkSamples (n-1) env thetas expr
+mkSamples :: (Fractional a, Ord a, Random a) => Int -> Env TypeInfo a -> Thetas a -> [Expr TypeInfo a] -> Expr TypeInfo a -> IO [Value a]
+mkSamples 0 _ _ _ _ = return []
+mkSamples n env thetas args expr = do
+  sample <- evalRandIO $ generate env env thetas args expr
+  remainder <- mkSamples (n-1) env thetas args expr
   return (sample:remainder)
 
 count :: Eq a => [a] -> [(Int, a)]
