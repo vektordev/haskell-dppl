@@ -1,4 +1,4 @@
-module RType where
+module SPLL.Typing.RType where
 
 data RType = TBool
            | TInt

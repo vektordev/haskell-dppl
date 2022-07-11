@@ -1,9 +1,9 @@
 module Transpiler where
 
 import Lang
-import PType
+import SPLL.Typing.PType
 import Data.Graph
-import Typing
+import SPLL.Typing.Typing
 
 data ExprStub = StubIfThenElse
               | StubGreaterThan

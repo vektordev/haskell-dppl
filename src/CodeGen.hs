@@ -1,9 +1,9 @@
 module CodeGen where
 
 import Lang
-import PType
-import RType
-import Typing
+import SPLL.Typing.PType
+import SPLL.Typing.RType
+import SPLL.Typing.Typing
 import Interpreter
 import Transpiler
 import Data.Graph

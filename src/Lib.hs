@@ -22,16 +22,16 @@ import Data.Ord
 import Data.List (elemIndices, sortBy, nub, intercalate)
 
 import Lang
-import Typing
-import RType
-import PType
+import SPLL.Typing.Typing
+import SPLL.Typing.RType
+import SPLL.Typing.PType
 import Interpreter
 import Transpiler
 import Control.Monad.Random (evalRandIO, getRandomR, replicateM, forM_)
 import CodeGen
-import IntermediateRepresentation
-import Analysis
-import CodeGenJulia
+import SPLL.IntermediateRepresentation
+import SPLL.Analysis
+import SPLL.CodeGenJulia
 
 --assumption about grad: Reverse s a is Num if a is Num.
 --Thererfore, grad :: (Traversable f, Num a) => (forall s. Reifies s Tape => f (Reverse s a) -> Reverse s a) -> f a -> f a
@@ -254,7 +254,7 @@ llScan tenv thetas main = do
 
 newCodeGen :: Expr TypeInfo Float -> IO ()
 newCodeGen tExpr = do
-  let annotated = Analysis.annotate tExpr
+  let annotated = SPLL.Analysis.annotate tExpr
   print annotated
   let irGen = toIRGenerate annotated
   print irGen
@@ -267,7 +267,7 @@ newCodeGen tExpr = do
 
 newCodeGenAll :: Env TypeInfo Float -> IO ()
 newCodeGenAll env = do
-  let annotated = map (\(a,b) -> (a, Analysis.annotate b)) env
+  let annotated = map (\(a,b) -> (a, SPLL.Analysis.annotate b)) env
   print annotated
   let ir = envToIR annotated
   print ir

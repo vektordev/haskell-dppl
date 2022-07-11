@@ -1,4 +1,4 @@
-module PType where
+module SPLL.Typing.PType where
 
 import Data.Bifunctor (second)
 

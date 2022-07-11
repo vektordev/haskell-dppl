@@ -1,9 +1,9 @@
-module CodeGenJulia (
+module SPLL.CodeGenJulia (
   generateCode
 , generateFunctions
 ) where
   
-import IntermediateRepresentation
+import SPLL.IntermediateRepresentation
 import Lang (Value)
 import Data.List (intercalate)
 

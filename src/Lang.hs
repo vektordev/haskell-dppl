@@ -1,7 +1,7 @@
 module Lang where
 
-import PType
-import RType
+import SPLL.Typing.PType
+import SPLL.Typing.RType
 
 data Expr x a = IfThenElse x (Expr x a) (Expr x a) (Expr x a)
               | GreaterThan x (Expr x a) (Expr x a)

@@ -24,11 +24,8 @@ source-repository head
 
 library
   exposed-modules:
-      Analysis
       CodeGen
-      CodeGenJulia
       HMInference
-      IntermediateRepresentation
       Interpreter
       Lang
       Lib
@@ -41,12 +38,15 @@ library
       PLambda.Pretty
       PLambda.Syntax
       PLambda.Type
-      PType
       PyNeuralNet
       RInfer
-      RType
+      SPLL.Analysis
+      SPLL.CodeGenJulia
+      SPLL.IntermediateRepresentation
+      SPLL.Typing.PType
+      SPLL.Typing.RType
+      SPLL.Typing.Typing
       Transpiler
-      Typing
   other-modules:
       Paths_haskell_dppl
   hs-source-dirs:

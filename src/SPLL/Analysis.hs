@@ -1,14 +1,14 @@
-module Analysis (
+module SPLL.Analysis (
   Tag(..)
 , StaticAnnotations(..)
 , annotate
 ) where
 
-import Typing
+import SPLL.Typing.Typing
 import Lang
 import Transpiler (Algorithm, allAlgorithms, checkExprMatches, checkConstraint, constraints, likelihoodFunctionUsesTypeInfo, toStub)
-import RType
-import PType
+import SPLL.Typing.RType
+import SPLL.Typing.PType
   
 data Tag a = EnumRange (Value a, Value a)
            | EnumList [Value a]

@@ -3,9 +3,9 @@ module Interpreter where
 import Control.Monad.Random
 
 import Lang
-import PType
-import RType
-import Typing
+import SPLL.Typing.PType
+import SPLL.Typing.RType
+import SPLL.Typing.Typing
 
 import Statistics.Distribution (ContGen, genContVar, quantile, density)
 import Statistics.Distribution.Normal

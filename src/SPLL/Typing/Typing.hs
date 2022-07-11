@@ -1,10 +1,10 @@
 {-# OPTIONS_GHC -fwarn-incomplete-patterns #-}
 
-module Typing where
+module SPLL.Typing.Typing where
 
 import Lang
-import RType
-import PType
+import SPLL.Typing.RType
+import SPLL.Typing.PType
 
 import Data.Maybe
 import Control.Monad.Reader

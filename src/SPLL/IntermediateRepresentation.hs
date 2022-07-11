@@ -1,4 +1,4 @@
-module IntermediateRepresentation (
+module SPLL.IntermediateRepresentation (
   IRExpr(..)
 , StaticAnnotations(..)
 , Tag(..)
@@ -10,11 +10,11 @@ module IntermediateRepresentation (
 ) where
 
 import Lang
-import RType
-import PType
+import SPLL.Typing.RType
+import SPLL.Typing.PType
 import Transpiler
-import Analysis
-import Typing
+import SPLL.Analysis
+import SPLL.Typing.Typing
 
 data Operand = OpPlus | OpMult | OpGreaterThan | OpDiv | OpSub deriving (Show)
 
