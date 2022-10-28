@@ -19,6 +19,8 @@ data Expr x a = IfThenElse x (Expr x a) (Expr x a) (Expr x a)
               | CallArg x String [Expr x a]
               | Lambda x String (Expr x a)
               | ReadNN x (Expr x a)
+              | Fix x (Expr x a)
+              | Var x String
               -- TODO: Needs Concat to achieve proper SPN-parity.
               deriving (Show, Eq)
 

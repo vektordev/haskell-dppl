@@ -22,12 +22,22 @@ variableLength = IfThenElse ()
   --(Cons () (Normal ()) (Call () "main"))
   (Cons () (Constant () (VBool True)) (Call () "main"))
 
+varLenFix :: Expr () a
+varLenFix = Fix () (Lambda () "main" (
+  IfThenElse ()
+    (GreaterThan () (Uniform ()) (ThetaI () 0))
+    (Null ())
+    (Cons () (Constant () (VBool True)) (Var () "main"))))
+
 --testExpr :: Num a => Expr a
 testIf :: Expr () a
 testIf = IfThenElse ()
   (GreaterThan () (Uniform ()) (ThetaI () 0))
   (Constant () (VBool True))
   (Constant () (VBool False))
+
+testPlus :: Expr () a
+testPlus = Plus () (Uniform ()) (ThetaI () 0)
 
 testGreater :: Expr () a
 testGreater = GreaterThan () (Uniform ()) (ThetaI () 0)
@@ -154,6 +164,9 @@ gaussMultiLists = IfThenElse ()
       (Plus () (Mult () (Normal ()) (ThetaI () 2)) (ThetaI () 3))
       (Plus () (Mult () (Normal ()) (ThetaI () 4)) (ThetaI () 5)))
     (Call () "main"))
+
+-- typeinfer :: Expr () a -> Expr RType a
+-- typeInferMaybe :: Expr (Maybe RType) a -> Expr RType a
 
 testNNUntyped :: Expr () a
 --testNN : Lambda im1 -> (Lambda im2 -> readNN im1 + readNN im2)

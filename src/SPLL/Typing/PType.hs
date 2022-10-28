@@ -2,10 +2,15 @@ module SPLL.Typing.PType where
 
 import Data.Bifunctor (second)
 
+newtype TVar = TV String
+  deriving (Show, Eq, Ord)
+  
 data PType = Deterministic
            | Integrate
            | Chaos
            | PIdent String [(PType, PType)]
+           | PComb PType PType
+           | TVar TVar
            deriving (Show, Eq)
 
 --TODO: Assert that downgrade Chaos Deterministic = Chaos

@@ -1,5 +1,8 @@
 module SPLL.Typing.RType where
 
+newtype TVar = TV String
+  deriving (Show, Eq, Ord)
+  
 data RType = TBool
            | TInt
            | TSymbol
@@ -9,6 +12,8 @@ data RType = TBool
            | RIdent String
            | RConstraint String RType RType
            | Arrow RType RType
+           | TVar TVar
+           | TArr RType RType
            deriving (Show)
 
 instance Eq RType where
