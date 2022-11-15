@@ -36,6 +36,7 @@ import SPLL.CodeGenJulia
 import SPLL.Examples
 import RInfer
 import PInfer
+import PInferBranched
 --assumption about grad: Reverse s a is Num if a is Num.
 --Thererfore, grad :: (Traversable f, Num a) => (forall s. Reifies s Tape => f (Reverse s a) -> Reverse s a) -> f a -> f a
 -- essentially translates to grad :: Traversable f, Num a) => (f (Reverse s a) -> Reverse s a) -> f a -> f a
@@ -113,7 +114,7 @@ someFunc = do--thatGaussThing
   --let cmp = [("main", testNN)] :: Env TypeInfo Float
   -- let env = [("main", gaussLists)] :: Env () Float
   -- cmp2 <- compile env
-  RInfer.showResults testPlus
+  PInferBranched.showResultsProg $ makeMain testIf
   -- newCodeGenAll cmp2
   --let x = transpile cmp
   --print x

@@ -14,6 +14,7 @@ data RType = TBool
            | Arrow RType RType
            | TVar TVar
            | TArr RType RType
+           | GreaterType RType RType
            deriving (Show)
 
 instance Eq RType where
@@ -26,4 +27,11 @@ instance Eq RType where
   (==) NullList NullList = True
   (==) (RIdent a) (RIdent b) = a == b
   (==) (RConstraint _ _ retT) (RConstraint _ _ retT2) = retT == retT2
+  (==) (GreaterType t1 t2) (GreaterType t3 t4) = greaterType t1 t2 == greaterType t1 t2
   (==) _ _ = False
+
+greaterType :: RType -> RType -> RType
+greaterType (ListOf t1) NullList = ListOf t1
+greaterType NullList (ListOf t1)  = ListOf t1
+greaterType t1 t2 | t1 == t2 = t1
+greaterType _ _ = error "Greater Type unmatched"

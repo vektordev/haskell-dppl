@@ -2,7 +2,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 module RInfer (
-  showResults
+  showResults, showResultsProg
 ) where 
 
 import Control.Monad.Except
@@ -76,11 +76,6 @@ instance Monoid TEnv where
   mempty = empty
   mappend = (<>)
 
-type Name = String
-
-data Program x a = Program [Decl x a] (Expr x a) deriving Eq
-
-type Decl x a = (String, Expr x a)
 
 makeMain :: Expr () a -> Program () a
 makeMain expr = Program [("main", expr)] (Call () "main")
@@ -124,13 +119,16 @@ instance Substitutable RType where
   apply s (ListOf t) = ListOf $ apply s t
   apply s (TArr t1 t2) = apply s t1 `TArr` apply s t2
   apply (Subst s) t@(TVar a) = Map.findWithDefault t a s
+  apply s (GreaterType t1 t2) = apply s t1 `GreaterType` apply s t2
   -- rest of RType arent used as of now
-  apply _ t = t
+  apply _ _ = error "Missing Substitue"
 
   ftv (ListOf t) = ftv t
   ftv (TVar a)       = Set.singleton a
   ftv (t1 `TArr` t2) = ftv t1 `Set.union` ftv t2
+  ftv (t1 `GreaterType` t2) = ftv t1 `Set.union` ftv t2
   ftv _ = Set.empty
+  ftv _ = error "Missing ftv"
 
 instance Substitutable Scheme where
   apply (Subst s) (Forall as t)   = Forall as $ apply s' t
@@ -151,7 +149,7 @@ instance Substitutable TEnv where
 
 showResultsProg :: Program () a -> IO ()
 showResultsProg p@(Program decls expr) = do
-  case constraintsExprProg empty expr of
+  case constraintsExprProg empty p of
     Left x -> print x
     Right (cs, subst, ty, scheme) -> do
       putStrLn "Constraints: "
@@ -161,15 +159,6 @@ showResultsProg p@(Program decls expr) = do
       putStrLn $ "Top-level Scheme: " ++ show scheme
       putStrLn "-----"
 
--- | Return the internal constraints used in solving for the type of an expression
-constraintsExprProg :: TEnv -> Expr () a -> Either RTypeError ([Constraint], Subst, RType, Scheme)
-constraintsExprProg env ex = case runInfer env (infer ex) of
-  Left err -> Left err
-  Right (ty, cs) -> case runSolve cs of
-    Left err -> Left err
-    Right subst -> Right (cs, subst, ty, sc)
-      where
-        sc = closeOver $ apply subst ty
 showResults :: Expr () a -> IO ()
 showResults expr = do
   case constraintsExpr empty expr of
@@ -216,6 +205,17 @@ constraintsExpr env ex = case runInfer env (infer ex) of
       where
         sc = closeOver $ apply subst ty
 
+-- | Return the internal constraints used in solving for the type of an expression
+constraintsExprProg :: TEnv -> Program () a -> Either RTypeError ([Constraint], Subst, RType, Scheme)
+constraintsExprProg env p@(Program decls expr) =
+  case runInfer env (inferProg p) of
+    Left err -> Left err
+    Right (ty, cs) -> case runSolve cs of
+      Left err -> Left err
+      Right subst -> Right (cs, subst, ty, sc)
+        where
+          sc = closeOver $ apply subst ty
+
 -- | Canonicalize and return the polymorphic toplevel type.
 closeOver :: RType -> Scheme
 closeOver = normalize . generalize empty
@@ -223,8 +223,17 @@ closeOver = normalize . generalize empty
 -- | Extend type TEnvironment
 inTEnv :: (Name, Scheme) -> Infer a -> Infer a
 inTEnv (x, sc) m = do
-  let scope e = (remove e x) `extend` (x, sc)
+  let scope e = remove e x `extend` (x, sc)
   local scope m
+
+-- | Extend type TEnvironment
+inTEnvF :: [(Name, Scheme)] -> Infer a -> Infer a
+inTEnvF ((x, sc): []) m = do
+  let scope e = remove e x `extend` (x, sc)
+  local scope m
+inTEnvF ((x, sc): r) m = do
+  let scope e = remove e x `extend` (x, sc)
+  inTEnvF r (local scope m)
 
 -- | Lookup type in the TEnvironment
 lookupTEnv :: Name -> Infer RType
@@ -244,6 +253,14 @@ fresh = do
     put s{var_count = var_count s + 1}
     return $ TVar $ TV (letters !! var_count s)
 
+freshVars :: Int -> [RType] -> Infer [RType]
+freshVars 0 rts = do
+    return $ rts
+freshVars n rts = do
+    s <- get
+    put s{var_count = var_count s + 1}
+    freshVars (n - 1)  (TVar (TV (letters !! var_count s)):rts)
+
 instantiate ::  Scheme -> Infer RType
 instantiate (Forall as t) = do
     as' <- mapM (const fresh) as
@@ -258,6 +275,27 @@ getListType :: RType -> RType -> RType
 getListType t1 NullList = t1
 getListType _ (ListOf t2) = t2
 
+rtFromScheme :: Scheme -> RType
+rtFromScheme (Forall _ rt) = rt
+
+inferProg :: Program () a -> Infer (RType, [Constraint])
+inferProg (Program decls expr) = do
+  -- init type variable for all function decls beforehand so we can build constraints for
+  -- calls between these functions
+  tv_rev <- freshVars (length decls) []
+  let tvs = reverse tv_rev
+  -- env building with (name, scheme) for infer methods
+  let func_tvs = zip (map fst decls) (map (Forall []) tvs)
+  -- infer the type and constraints of the declaration expressions
+  cts <- mapM ((inTEnvF func_tvs . infer) . snd) decls
+  -- inferring the type of the top level expression
+  (t1, c1) <- inTEnvF func_tvs (infer expr)
+  -- building the constraints that the built type variables of the functions equal
+  -- the inferred function type
+  let tcs = zip (map (rtFromScheme . snd) func_tvs) (map fst cts)
+  -- combine all constraints
+  return (t1, tcs ++ concatMap snd cts ++ c1)
+
 -- TODO Make greater number type for type instance constraint ("Overloaded operator")
 infer :: Expr () a -> Infer (RType, [Constraint])
 infer expr = case expr of
@@ -265,6 +303,9 @@ infer expr = case expr of
   Uniform ()  -> return (TFloat, [])
   Normal ()  -> return (TFloat, [])
   Constant () val  -> return (getRType val, [])
+  Call () name -> do
+      t <- lookupTEnv name
+      return (t, [])
 
   Plus x e1 e2 -> do
     (t1, c1) <- infer e1
@@ -294,7 +335,8 @@ infer expr = case expr of
     (t1, c1) <- infer cond
     (t2, c2) <- infer tr
     (t3, c3) <- infer fl
-    return (t2, c1 ++ c2 ++ c3 ++ [(t1, TBool), (t2, t3)])
+    tv <- fresh
+    return (tv, c1 ++ c2 ++ c3 ++ [(t1, TBool), (tv, GreaterType t2 t3)])
 
   Null x -> return (NullList, [])
 
@@ -336,8 +378,10 @@ normalize (Forall _ body) = Forall (map snd ord) (normtype body)
     fv TSymbol = []
     fv TFloat = []
     fv NullList = []
+    fv (GreaterType a b) = fv a ++ fv b
 
     normtype (TArr a b) = TArr (normtype a) (normtype b)
+    normtype (GreaterType a b) = normtype $ greaterType a b
     normtype (ListOf a) = ListOf (normtype a)
     normtype TBool = TBool
     normtype TInt = TInt
@@ -381,6 +425,8 @@ unifies NullList (ListOf t) = return emptySubst
 unifies (TVar v) t = v `bind` t
 unifies t (TVar v) = v `bind` t
 unifies (TArr t1 t2) (TArr t3 t4) = unifyMany [t1, t2] [t3, t4]
+unifies (GreaterType t1 t2) t3 = unifies (greaterType t1 t2) t3
+unifies t1 (GreaterType t2 t3) = unifies t1 (greaterType t2 t3)
 unifies t1 t2 = throwError $ UnificationFail t1 t2
 
 -- Unification solver

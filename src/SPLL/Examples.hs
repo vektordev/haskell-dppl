@@ -22,12 +22,31 @@ variableLength = IfThenElse ()
   --(Cons () (Normal ()) (Call () "main"))
   (Cons () (Constant () (VBool True)) (Call () "main"))
 
+testProg :: Program () a
+testProg = Program [("main", ThetaI () 0), ("b", ThetaI () 1)]
+             (Call () "main")
+             
+-- Mutual recursion 
+testProgFix :: Program () a
+testProgFix = Program [("main", IfThenElse ()
+                                    (GreaterThan () (Uniform ()) (Call () "b"))
+                                    (Null ())
+                                    (Cons () (Constant () (VBool True)) (Call () "main"))),
+                       ("b", ThetaI () 1)]
+              (Call () "main")
 varLenFix :: Expr () a
 varLenFix = Fix () (Lambda () "main" (
   IfThenElse ()
     (GreaterThan () (Uniform ()) (ThetaI () 0))
     (Null ())
     (Cons () (Constant () (VBool True)) (Var () "main"))))
+    
+nullIf :: Expr () a
+nullIf =  IfThenElse ()
+    (GreaterThan () (Uniform ()) (ThetaI () 0))
+    (Null ())
+    (Cons () (GreaterThan () (Uniform ()) (ThetaI () 1)) 
+    (Null ()))
 
 --testExpr :: Num a => Expr a
 testIf :: Expr () a
@@ -35,9 +54,15 @@ testIf = IfThenElse ()
   (GreaterThan () (Uniform ()) (ThetaI () 0))
   (Constant () (VBool True))
   (Constant () (VBool False))
+  
+testP :: Expr () a
+testP = Uniform ()
 
 testPlus :: Expr () a
-testPlus = Plus () (Uniform ()) (ThetaI () 0)
+testPlus = Plus () (Uniform ()) testPlus2
+
+testPlus2 :: Expr () a
+testPlus2 = Plus () (ThetaI () 0) (ThetaI () 0)
 
 testGreater :: Expr () a
 testGreater = GreaterThan () (Uniform ()) (ThetaI () 0)

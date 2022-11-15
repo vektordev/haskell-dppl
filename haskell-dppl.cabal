@@ -28,6 +28,7 @@ library
       Interpreter
       Lib
       PInfer
+      PInferBranched
       RInfer
       SPLL.Analysis
       SPLL.CodeGenJulia

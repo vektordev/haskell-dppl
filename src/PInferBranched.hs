@@ -1,9 +1,9 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
-module PInfer (
-    showResults
-) where 
+module PInferBranched (
+    showResults, showResultsProg, makeMain
+) where
 
 import Control.Monad.Except
 import Control.Monad.State
@@ -35,6 +35,9 @@ data Scheme = Forall [TVar] PType
 data TEnv = TypeEnv { types :: Map.Map Name Scheme }
   deriving (Eq, Show)
 
+
+defValue :: ([Constraint], Subst, PType, Scheme)
+defValue = ([], mempty, TVar $ TV "None", Forall [] (TVar $ TV "None"))
 
 empty :: TEnv
 empty = TypeEnv Map.empty
@@ -75,7 +78,6 @@ instance Semigroup TEnv where
 instance Monoid TEnv where
   mempty = empty
   mappend = (<>)
-
 makeMain :: Expr () a -> Program () a
 makeMain expr = Program [("main", expr)] (Call () "main")
 
@@ -84,8 +86,7 @@ type Infer a = (ReaderT
                   TEnv             -- Typing TEnvironment
                   (StateT         -- Inference state
                   InferState
-                  (Except         -- Inference errors
-                    PTypeError))
+                  Identity)
                   a)              -- Result
 
 -- | Inference state
@@ -139,38 +140,38 @@ instance Substitutable TEnv where
   apply s (TypeEnv env) = TypeEnv $ Map.map (apply s) env
   ftv (TypeEnv env) = ftv $ Map.elems env
 
-showResultsProg :: Program () a -> IO ()
-showResultsProg p@(Program decls expr) = do
-  case constraintsExprProg empty expr of
-    Left x -> print x
-    Right (cs, subst, ty, scheme) -> do
-      putStrLn "Constraints: "
-      listConstraints cs
-      putStrLn $ "Subst: " ++ show subst
-      putStrLn $ "Type:\n" ++ show ty
-      putStrLn $ "Top-level Scheme: " ++ show scheme
-      putStrLn "-----"
-
--- | Return the internal constraints used in solving for the type of an expression
-constraintsExprProg :: TEnv -> Expr () a -> Either PTypeError ([Constraint], Subst, PType, Scheme)
-constraintsExprProg env ex = case runInfer env (infer ex) of
-  Left err -> Left err
-  Right (ty, cs) -> case runSolve cs of
-    Left err -> Left err
-    Right subst -> Right (cs, subst, ty, sc)
-      where
-        sc = closeOver $ apply subst ty
 showResults :: Expr () a -> IO ()
-showResults expr = do
-  case constraintsExpr empty expr of
-    Left x -> print x
-    Right (cs, subst, ty, scheme) -> do
+showResults e = do
+  let res = constraintsExpr empty e
+  putStrLn $ "Branches: "  ++ show (length res)
+  showResult res
+showResult :: [Either PTypeError ([Constraint], Subst, PType, Scheme)] -> IO ()
+showResult (Left err: rest)  =  do
+      print err
+      showResult rest
+showResult (Right (cs, subst, ty, scheme):rest)  =  do
+      putStrLn "-----"
       putStrLn "Constraints: "
       listConstraints cs
       putStrLn $ "Subst: " ++ show subst
       putStrLn $ "Type:\n" ++ show ty
       putStrLn $ "Top-level Scheme: " ++ show scheme
       putStrLn "-----"
+      showResult rest
+showResult [] = do
+      putStrLn "Finished"
+
+showResultsProg :: Program () a -> IO ()
+showResultsProg p@(Program decls expr) =
+  do
+       let res = constraintsExprProg empty p
+       putStrLn $ "Branches: "  ++ show (length res)
+       showResult res
+-- | Return the internal constraints used in solving for the type of an expression
+constraintsExprProg :: TEnv -> Program () a -> [Either PTypeError ([Constraint], Subst, PType, Scheme)]
+constraintsExprProg env p = map getP (runInfer env (inferProg p))
+        where getP j = case j of  Left err -> Left err
+                                  Right inf_list -> doAllSolve inf_list
 
 listConstraints :: [Constraint] -> IO ()
 listConstraints ((t1, t2):cons1) = do
@@ -185,22 +186,18 @@ listConstraints [] = putStrLn "-----"
 -------------------------------------------------------------------------------
 
 -- | Run the inference monad
-runInfer :: TEnv -> Infer (PType, [Constraint]) -> Either PTypeError (PType, [Constraint])
-runInfer env m = runExcept $ evalStateT (runReaderT m env) initInfer
+runInfer :: TEnv -> Infer [Branch] -> [Branch]
+runInfer env m = runIdentity $ evalStateT (runReaderT m env) initInfer
 
--- | Solve for the toplevel type of an expression in a given TEnvironment
-inferExpr :: TEnv -> Expr () a -> Either PTypeError Scheme
-inferExpr env ex = case runInfer env (infer ex) of
-  Left err -> Left err
-  Right (ty, cs) -> case runSolve cs of
-    Left err -> Left err
-    Right subst -> Right $ closeOver $ apply subst ty
 
 -- | Return the internal constraints used in solving for the type of an expression
-constraintsExpr :: TEnv -> Expr () a -> Either PTypeError ([Constraint], Subst, PType, Scheme)
-constraintsExpr env ex = case runInfer env (infer ex) of
-  Left err -> Left err
-  Right (ty, cs) -> case runSolve cs of
+constraintsExpr :: TEnv -> Expr () a -> [Either PTypeError ([Constraint], Subst, PType, Scheme)]
+constraintsExpr env ex = map getP (runInfer env (infer ex))
+  where getP j = case j of  Left err -> Left err
+                            Right inf_list -> doAllSolve inf_list
+
+doAllSolve :: (PType, [Constraint]) -> Either PTypeError ([Constraint], Subst, PType, Scheme)
+doAllSolve (ty, cs) = case runSolve cs of
     Left err -> Left err
     Right subst -> Right (cs, subst, ty, sc)
       where
@@ -217,13 +214,13 @@ inTEnv (x, sc) m = do
   local scope m
 
 -- | Lookup type in the TEnvironment
-lookupTEnv :: Name -> Infer PType
+lookupTEnv :: Name -> Infer (Either PTypeError PType)
 lookupTEnv x = do
   (TypeEnv env) <- ask
   case Map.lookup x env of
-      Nothing   ->  throwError $ UnboundVariable x
+      Nothing   ->  return $ Left (UnboundVariable x)
       Just s    ->  do t <- instantiate s
-                       return t
+                       return (Right t)
 
 letters :: [String]
 letters = [1..] >>= flip replicateM ['a'..'z']
@@ -243,30 +240,138 @@ instantiate (Forall as t) = do
 generalize :: TEnv -> PType -> Scheme
 generalize env t  = Forall as t
     where as = Set.toList $ ftv t `Set.difference` ftv env
--- TODO Make greater number type for type instance constraint ("Overloaded operator")
-inferBranching :: Expr () a -> Infer [(PType, [Constraint])]
-inferBranching expr = case expr of
-  ThetaI () a  -> return [(Deterministic, [])]
-  Uniform ()  -> return [(Integrate, [])]
-  Normal ()  -> return [(Integrate, [])]
-  Constant () val  -> return [(Deterministic, [])]
 
-    
+-- | Extend type TEnvironment
+inTEnvF :: [(Name, Scheme)] -> Infer a -> Infer a
+inTEnvF [] m = m
+inTEnvF ((x, sc): r) m = do
+  let scope e = remove e x `extend` (x, sc)
+  inTEnvF r (local scope m)
+
+
+freshVars :: Int -> [PType] -> Infer [PType]
+freshVars 0 rts = do
+    return $ rts
+freshVars n rts = do
+    s <- get
+    put s{var_count = var_count s + 1}
+    freshVars (n - 1)  (TVar (TV (letters !! var_count s)):rts)
+
+
+combineBranch :: Branch -> Branch -> Either PTypeError ((PType, PType), [Constraint])
+combineBranch b1 b2 = case b1 of
+  Left err1 -> Left err1
+  Right (ty1, cs1) -> case b2 of
+                      Left err2 -> Left err2
+                      Right (ty2, cs2) -> Right ((ty1, ty2), cs1 ++ cs2)
+
+combineBranches :: [Branch] -> [Branch] -> [Either PTypeError ((PType, PType), [Constraint])]
+combineBranches b1 b2 = combineBranch <$> b1 <*> b2
+
+-- here we add the function body type constraint to its passed function name
+combineBranchFunc :: PType -> Branch -> Branch -> Branch
+combineBranchFunc f_tv b1 b2 = case b1 of
+  Left err1 -> Left err1
+  Right (ty1, cs1) -> case b2 of
+                      Left err2 -> Left err2
+                      Right (ty2, cs2) -> Right (ty1, [(ty2, f_tv)] ++ cs1 ++ cs2 )
+
+combineBranchesFunc :: [Branch] -> ([Branch], PType) -> [Branch]
+combineBranchesFunc b1 (b2, f_tv) = combineBranchFunc f_tv <$> b1 <*> b2
+
+-- det is for plus/mult where integrate integrate results in chaos
+buildDet :: Either PTypeError ((PType, PType), [Constraint]) -> [Branch]
+buildDet b = case b of
+    Left err -> [Left err]
+    Right ((t1, t2), cs) -> [Right (Integrate, cs ++ [(t1, Deterministic), (t2, Integrate)]),
+                            Right (Integrate, cs ++ [(t2, Deterministic), (t1, Integrate)]),
+                            Right (Deterministic, cs ++ [(t2, Deterministic), (t1, Deterministic)])]
+
+-- this is straight downgrade method (Chaos will produce UnificationFail)
+buildInt :: Either PTypeError ((PType, PType), [Constraint]) -> [Branch]
+buildInt b = case b of
+   Left err -> [Left err]
+   Right ((Deterministic, t2), cs) -> [Right (Integrate, cs ++ [(t2, Integrate)]),
+                              Right (Deterministic, cs ++ [(t2, Deterministic)])]
+   Right ((t1, Deterministic), cs) -> [Right (Integrate, cs ++ [(t1, Integrate)]),
+                                 Right (Deterministic, cs ++ [(t1, Deterministic)])]
+   Right ((t1, t2), cs) -> [Right (Integrate, cs ++ [(t1, Deterministic), (t2, Integrate)]),
+                           Right (Integrate, cs ++ [(t2, Deterministic), (t1, Integrate)]),
+                           Right (Deterministic, cs ++ [(t2, Deterministic), (t1, Deterministic)]),
+                           Right (Integrate, cs ++ [(t2, Integrate), (t1, Integrate)])]
+
+rtFromScheme :: Scheme -> PType
+rtFromScheme (Forall _ rt) = rt
+
+type Branch = Either PTypeError (PType, [Constraint])
+
+inferProg :: Program () a -> Infer [Branch]
+inferProg (Program decls expr) = do
+  -- init type variable for all function decls beforehand so we can build constraints for
+  -- calls between these functions
+  tv_rev <- freshVars (length decls) []
+  let tvs = reverse tv_rev
+  -- env building with (name, scheme) for infer methods
+  let func_tvs = zip (map fst decls) (map (Forall []) tvs)
+  -- infer the type and constraints of the declaration expressions
+  -- [[Branch]]
+  func_branches_list <- mapM ((inTEnvF func_tvs . infer) . snd) decls
+  -- inferring the type of the top level expression
+  -- [Branch]
+  top_branches <- inTEnvF func_tvs (infer expr)
+  let f_names = map (rtFromScheme . snd) func_tvs
+  -- combine all constraints
+  return $ foldl combineBranchesFunc top_branches (zip func_branches_list f_names)
+
 -- TODO Make greater number type for type instance constraint ("Overloaded operator")
-infer :: Expr () a -> Infer (PType, [Constraint])
+infer :: Expr () a -> Infer [Branch]
 infer expr = case expr of
-  ThetaI () a  -> return (Deterministic, [])
-  Uniform ()  -> return (Integrate, [])
-  Normal ()  -> return (Integrate, [])
-  Constant () val  -> return (Deterministic, [])
+  ThetaI () a  -> return [Right (Deterministic, [])]
+  Uniform ()  -> return [Right (Integrate, [])]
+  Normal ()  -> return [Right (Integrate, [])]
+  Constant () val  -> return [Right (Deterministic, [])]
 
+  Plus x e1 e2 -> do
+      list1 <- infer e1
+      list2 <- infer e2
+      let comb = combineBranches list1 list2
+      return $ concatMap buildDet comb
 
+  Mult x e1 e2 -> do
+      list1 <- infer e1
+      list2 <- infer e2
+      let comb = combineBranches list1 list2
+      return $ concatMap buildDet comb
 
-inferTop :: TEnv -> [(String, Expr () a)] -> Either PTypeError TEnv
-inferTop env [] = Right env
-inferTop env ((name, ex):xs) = case inferExpr env ex of
-  Left err -> Left err
-  Right ty -> inferTop (extend env (name, ty)) xs
+  GreaterThan x e1 e2 -> do
+      list1 <- infer e1
+      list2 <- infer e2
+      let comb = combineBranches list1 list2
+      return $ concatMap buildInt comb
+
+  IfThenElse x cond tr fl -> do
+    list1 <- infer cond
+    list2 <- infer tr
+    list3 <- infer fl
+    let comb1 = combineBranches list2 list3
+    let b1 = concatMap buildInt comb1
+    let comb2 = combineBranches list1 b1
+    return $ concatMap buildInt comb2
+
+  Null x -> return [Right (Deterministic, [])]
+
+  Cons x e1 e2 -> do
+    list1 <- infer e1
+    list2 <- infer e2
+    let comb = combineBranches list1 list2
+    return $ concatMap buildInt comb
+
+  Call () name -> do
+      t <- lookupTEnv name
+      return (case t of
+                Left err ->  [Left err]
+                Right ty -> [Right (ty, [])])
+
 
 normalize :: Scheme -> Scheme
 normalize (Forall _ body) = Forall (map snd ord) (normtype body)
