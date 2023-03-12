@@ -16,7 +16,6 @@ import Control.Monad.Except
 -- local functions are in principle possible, but they need to carry their own environment with them,
 -- e.g. by expanding Env to be of [(String, Env x a, Expr x a)], where [] indicates a shorthand for the global scope.
 type Env x a = [(String, Expr x a)]
-
 type Check a = ExceptT TypeError (Reader (Env () a))
 
 data TypeError = Mismatch RType RType
@@ -31,6 +30,14 @@ getP :: Expr TypeInfo a -> PType
 getP expr = p
   where
     TypeInfo _ p = getTypeInfo expr
+getPW :: Expr TypeInfoWit a -> PType
+getPW expr = p
+  where
+    TypeInfoWit _ p _ = getTypeInfo expr
+getRW :: Expr TypeInfoWit a -> RType
+getRW expr = r
+  where
+    TypeInfoWit r _ _  = getTypeInfo expr
 
 rIntersect :: RType -> RType -> Maybe RType
 --here be all cases where types are "equal" but one is more strict
@@ -179,3 +186,7 @@ inferP (Call _ name) = return $ PIdent name [(Deterministic, Deterministic), (In
 --TODO: Arg needs to make sure the variable has proper type, same as let_in
 --inferP (Arg _ name inExpr) = inferP inExpr
 --inferP (CallArg _ name withExpr) = return $ PIdent name [(Deterministic, Deterministic), (Integrate, Integrate), (Chaos, Chaos)]
+
+
+progToEnv :: Program x a -> Env x a
+progToEnv (Program funcs main_expr) = ("main", main_expr): funcs

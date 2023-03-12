@@ -25,11 +25,17 @@ source-repository head
 library
   exposed-modules:
       CodeGen
+      Infer
+      InjectiveFunctions
       Interpreter
       Lib
       PInfer
+      PInfer2
       PInferBranched
+      PInferTypeclass
+      ResultTypes
       RInfer
+      SpecExamples
       SPLL.Analysis
       SPLL.CodeGenJulia
       SPLL.Examples
@@ -39,6 +45,7 @@ library
       SPLL.Typing.RType
       SPLL.Typing.Typing
       Transpiler
+      Witnessing
   other-modules:
       Paths_haskell_dppl
   hs-source-dirs:
@@ -49,6 +56,7 @@ library
     , ad
     , base >=4.7 && <5
     , containers
+    , erf
     , linear
     , mtl
     , mwc-random
@@ -76,6 +84,7 @@ executable haskell-dppl-exe
     , ad
     , base >=4.7 && <5
     , containers
+    , erf
     , haskell-dppl
     , linear
     , mtl
@@ -105,6 +114,7 @@ test-suite haskell-dppl-test
     , ad
     , base >=4.7 && <5
     , containers
+    , erf
     , haskell-dppl
     , linear
     , mtl

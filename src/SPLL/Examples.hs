@@ -15,24 +15,37 @@ paramExpr = Arg () "iterations" TFloat (IfThenElse ()
   (Cons () (Constant () (VBool True)) (CallArg () "main" [Plus () (Call () "iterations") (Constant () (VFloat (-1.0)))]))
   (Null ()))
 
+uniformProg :: Program () a
+uniformProg = Program [] (Uniform ())
+normalProg :: Program () a
+normalProg = Program [] (Normal ())
+uniformProgPlus :: Program () Double
+uniformProgPlus = Program [] (Mult () (Uniform ()) (Constant () (VFloat (-0.5))))
+
+
 variableLength :: Expr () a
 variableLength = IfThenElse ()
   (GreaterThan () (Uniform ()) (ThetaI () 0))
   (Null ())
   --(Cons () (Normal ()) (Call () "main"))
-  (Cons () (Constant () (VBool True)) (Call () "main"))
+  (Cons () (Constant () (VBool True)) (Call () "b"))
 
 testProg :: Program () a
-testProg = Program [("main", ThetaI () 0), ("b", ThetaI () 1)]
-             (Call () "main")
+testProg = Program [("b", variableLength)]
+             (Call () "b")
              
 -- Mutual recursion 
-testProgFix :: Program () a
-testProgFix = Program [("main", IfThenElse ()
-                                    (GreaterThan () (Uniform ()) (Call () "b"))
-                                    (Null ())
-                                    (Cons () (Constant () (VBool True)) (Call () "main"))),
-                       ("b", ThetaI () 1)]
+testProgFix :: Program () Float
+testProgFix = Program [
+                        ("main", IfThenElse ()
+                                    (GreaterThan () (Uniform ())(ThetaI () 1))
+                                    (Call () "term")
+                                    (Plus () (ThetaI () 1) (Call () "main"))),
+                       ("b", ThetaI () 1),
+                       ("term", IfThenElse ()
+                           (GreaterThan () (Call () "b")(ThetaI () 1))
+                           (Constant () (VFloat 0.0))
+                           (Plus () (ThetaI () 1) (Call () "term")))]
               (Call () "main")
 varLenFix :: Expr () a
 varLenFix = Fix () (Lambda () "main" (
@@ -40,7 +53,21 @@ varLenFix = Fix () (Lambda () "main" (
     (GreaterThan () (Uniform ()) (ThetaI () 0))
     (Null ())
     (Cons () (Constant () (VBool True)) (Var () "main"))))
-    
+
+dummyExpr :: Program () a
+dummyExpr = Program [("main", GreaterThan () (Uniform ()) (Call () "b")),
+                                   ("b", ThetaI () 1)]
+                          (Call () "main")
+maybeAdd :: Program () Float
+maybeAdd = Program [("maybeAddOne", IfThenElse ()
+                                (GreaterThan () (Uniform ()) (ThetaI () 0))
+                                (Constant () (VFloat 0.0))
+                                (Plus () (Constant () (VFloat 1.0)) (Call () "maybeAddTwo"))),
+                   ("maybeAddTwo", IfThenElse ()
+                               (GreaterThan () (Uniform ()) (ThetaI () 1))
+                               (Constant () (VFloat 0.0))
+                               (Plus () (Constant () (VFloat 2.0)) (Call () "maybeAddOne")))]
+                          (Call () "maybeAddOne")
 nullIf :: Expr () a
 nullIf =  IfThenElse ()
     (GreaterThan () (Uniform ()) (ThetaI () 0))
@@ -49,25 +76,181 @@ nullIf =  IfThenElse ()
     (Null ()))
 
 --testExpr :: Num a => Expr a
-testIf :: Expr () a
+testIf :: Expr () Float
 testIf = IfThenElse ()
   (GreaterThan () (Uniform ()) (ThetaI () 0))
   (Constant () (VBool True))
   (Constant () (VBool False))
-  
-testP :: Expr () a
-testP = Uniform ()
+
+--TODO Make params like Constant values (change to a type variable dynamically how?)
+testLet2 :: Program () a
+testLet2 = Program [](LetIn () "x"
+                      (Plus () (ThetaI () 0) (Normal ()))
+                      (InjF () "sig" [] (InjF () "mult" [ThetaI () 1]  (Var () "x"))))
+-- let x = theta1 + normal in theta2 + sig(x) + theta3 * normal
+-- let x = theta2 + sig(theta1 + normal) + theta3 * normal
+-- theta1 = 0.1 theta2 = 0.8 
+-- sample 1.9 -> x? sig(x) = 1.1 --> invert(sig = 1.1) = NaN
+-- theta2 = 0.2
+testLetNonInvert :: Program () Double
+testLetNonInvert = Program [] (LetIn () "x" (Plus () (ThetaI () 0) (Normal ()))
+          (Plus () (InjF () "sig" [] (Var () "x")) (ThetaI () 1)))
+          
+testLetPot :: Program () Double
+testLetPot = Program [] (LetIn () "x" (Plus () (ThetaI () 0) (Normal ())) (InjF () "mult" [ThetaI () 1] (Var () "x")))
+testList :: Program () Double
+testList = Program [] (Cons () (Plus () (ThetaI () 0) (Normal ())) (Cons () (Normal ()) (Null ())))
+
+-- If theta0 >= uniform then (True, normal) else (False, theta1 + normal)
+testTuple :: Program () Double
+testTuple = Program [] (IfThenElse () (GreaterThan () (Uniform ()) (ThetaI () 0))
+          (TCons () (Constant () (VBool True)) (TCons () (Normal ()) (TNull ())))
+          (TCons () (Constant () (VBool False)) (TCons () (Plus () (Normal ()) (ThetaI () 1)) (TNull ())))
+          )
+testInjFNot :: Program () Double
+testInjFNot  = Program [] (IfThenElse () (InjF () "not" [] (GreaterThan () (ThetaI () 0)(Uniform ())))
+                            (Normal ()) 
+                            (InjF () "plus" [ThetaI () 1] (Normal ())))
+testListPlus :: Program () Double
+testListPlus  = Program [] (InjF () "listMult" 
+    [Cons () (ThetaI () 0) (Cons () (ThetaI () 1) (Null ()))] 
+    (Cons () (Plus () (Normal ()) (Constant () (VFloat 2.0)))
+     (Cons () (Plus () (Normal ()) (Constant () (VFloat 3.0))) (Null ())))
+    )
+testHakaru :: Program () Double
+testHakaru = Program [](LetIn() "x" (Uniform ())
+                                      (LetIn ()  "y" (Uniform ())
+                                         (Cons () (Var () "x")
+                                           (Cons ()
+                                             (Var () "y")
+                                             (Cons ()
+                                                (Plus () (Mult () (Constant () (VFloat (-2.0)))(Var () "x")) (Var () "y"))
+                                                (Null ()))))))
+-- let x = normal in (if flip then x + theta else x - 0.7)
+testBranchedLetList :: Program () Double
+testBranchedLetList = Program [](LetIn() "x" (Plus () (Normal ()) (Constant () (VFloat 1.0)))
+                              (LetIn() "y" (Normal ())
+                                    (IfThenElse ()
+                                      (GreaterThan () (Uniform ())(Constant () (VFloat 0.8)))
+                                        (Cons ()
+                                          (InjF () "sig" [] (InjF () "plus" [ThetaI () 0]  (Var () "x")))
+                                          (Cons ()  (InjF () "sig" []  (Var () "y")) (Null ())))
+                                        (Cons ()
+                                          (InjF () "sig" [] (InjF () "plus" [Constant () (VFloat (-0.7))]  (Var () "x")))
+                                          (Cons ()  (InjF () "sig" [] (InjF () "plus" [ThetaI () 1]  (Var () "y"))) (Null ())))
+                                          )))
+testBranchedLetList2 :: Program () Double
+testBranchedLetList2 = Program [](LetIn() "x" (Plus () (Normal ()) (Constant () (VFloat 0.357)))
+                                        (Cons ()
+                                          (IfThenElse ()
+                                            (GreaterThan () (Uniform ())(Constant () (VFloat 0.659)))
+                                            (InjF () "sig" [] (InjF () "plus" [ThetaI () 0]  (Var () "x")))
+                                            (InjF () "sig" [] (InjF () "plus" [Constant () (VFloat (-0.358))]  (Var () "x"))))
+                                          (Cons ()(InjF () "sig" []
+                                                  (Mult () (Constant () (VFloat (-0.358)))
+                                                   (Plus () (Var () "x") (Normal ())))) (Null ()))
+                                        ))
+-- let x = normal in let y = normal in [(if flip then f(x*y) else g(x)), (if flip then f(y) else g(y)), sig(y * (x + normal))]
+-- y = VBranch val1 val2
+-- sig(y * (x + normal)) = BranchedProbability "x" (BranchedProbability "y" val1 val2) (BranchedProbability "y" val3 val4)
+-- BranchProbability "y" v1 v2
+-- BranchedProbability "x" 
+
+
+-- let x = normal in [sig(x), x+uniform]
+-- query [ < 0.5, 1]
+testBranchedLetList3 :: Program () Double
+testBranchedLetList3 = Program [](LetIn() "x" (Plus () (Normal ()) (Constant () (VFloat 0.357)))
+                                  (LetIn() "y" (Normal ())
+                                        (Cons ()
+                                          (IfThenElse ()
+                                            (GreaterThan () (Uniform ())(Constant () (VFloat 0.659)))
+                                            (InjF () "sig" [] (InjF () "plus" [ThetaI () 0]  (Var () "x")))
+                                            (InjF () "sig" [] (InjF () "plus" [Constant () (VFloat (-0.358))]  (Var () "x"))))
+                                          (Cons ()
+                                            (IfThenElse ()
+                                              (GreaterThan () (Uniform ())(Constant () (VFloat 0.659)))
+                                              (InjF () "sig" [] (InjF () "plus" [ThetaI () 0]  (Var () "y")))
+                                              (InjF () "sig" [] (InjF () "plus" [Constant () (VFloat (-0.358))]  (Var () "y"))))
+                                          
+                                          (Cons ()(InjF () "sig" []
+                                                     (Mult () (Var () "y")
+                                                      (Plus () (Var () "x") (Normal ())))) (Null ())
+                                                    ))
+                                                   )
+                                        ))
+                                        
+testBranchedLet :: Program () Double
+testBranchedLet = Program [](LetIn() "x" (Plus () (Normal ()) (Constant () (VFloat 1.0)))
+                                    (IfThenElse ()
+                                      (GreaterThan () (Uniform ())(Constant () (VFloat 0.8)))
+                                      (InjF () "sig" [] (InjF () "plus" [ThetaI () 0]  (Var () "x")))
+                                      (InjF () "sig" [] (InjF () "plus" [Constant () (VFloat (-0.7))]  (Var () "x")))))
+
+testNestedLetInDecl :: Program () Double
+testNestedLetInDecl = Program [] (LetIn() "x" (Plus () (ThetaI () 0) (Normal ()))
+                         (LetIn ()  "y" (Plus () (ThetaI () 1) (Plus () (Normal ()) (Var () "x")))
+                                  (Cons () (Var () "x")
+                                     (Cons () (Var () "y")
+                                       (Cons () (Plus () (Normal ())  (Var () "y"))
+                                        (Null ()))))))
+testInjFD :: Program () Double
+testInjFD = Program [] (InjF () "sig" [] (Plus () (ThetaI () 0) (Normal ())))
+
+testLetXYD :: Program () Double
+testLetXYD = Program [] (LetIn() "x" (Plus () (ThetaI () 0) (Normal ()))
+                          (LetIn ()  "y"  (ThetaI () 1)
+                                         (Cons () (Var () "x") 
+                                           (Cons () 
+                                             (Plus () (Normal ())(Var () "y"))
+                                             (Cons () 
+                                                (Mult () (Plus () (Normal ())(Var () "x")) (Var () "y"))
+                                                (Null ()))))))
+                                             
+testLetXY :: Program () Double
+testLetXY = Program [] (LetIn() "x" (Plus () (ThetaI () 0) (Normal ()))
+                          (LetIn ()  "y" (Plus () (ThetaI () 1) (Normal ()))
+                                         (Cons () (Var () "x") 
+                                           (Cons () 
+                                             (Var () "y")
+                                             (Cons () 
+                                                (Mult () (Plus () (Normal ())(Var () "x")) (Var () "y"))
+                                                (Null ()))))))
+                                             
+
+testLetTuple :: Program () Double
+testLetTuple = Program [] (LetIn() "x" (Plus () (ThetaI () 0) (Normal ()))
+                                              (Cons () (Var () "x") 
+                                                (Cons () 
+                                                  (Plus () (Normal ())(Var () "x")) 
+                                                  (Null ()))))
+
+testNormal :: Program () Double
+testNormal = Program [] (Normal ())
+
+testLetE :: Expr () Double
+testLetE = LetIn () "x" (Normal ()) (InjF () "plus" [Constant () (VFloat 3.0)] (Var () "x"))
+testPlusProg :: Program () Float
+testPlusProg = Program [("main", IfThenElse ()
+                                                   (GreaterThan () (ThetaI () 1)(ThetaI () 1))
+                                                   (ThetaI () 1)
+                                                   (Plus () (ThetaI () 1) (Call () "main")))]
+                             (Call () "main")
 
 testPlus :: Expr () a
-testPlus = Plus () (Uniform ()) testPlus2
+testPlus = IfThenElse ()
+             (GreaterThan () (Uniform ()) (ThetaI () 0))
+             (Null ())
+             (Cons () (Constant () (VBool True)) (Null ()))
 
-testPlus2 :: Expr () a
-testPlus2 = Plus () (ThetaI () 0) (ThetaI () 0)
+testPlus2 :: Program () a
+testPlus2 = Program [] (Plus () (Mult () (ThetaI () 0) (Uniform ())) (ThetaI () 1))
+
 
 testGreater :: Expr () a
 testGreater = GreaterThan () (Uniform ()) (ThetaI () 0)
 
-testGreater2 :: Expr () a
+testGreater2 :: Expr () Float
 testGreater2 = GreaterThan () (ThetaI () 0) (Uniform ())
 
 testExpr2 :: Expr () a

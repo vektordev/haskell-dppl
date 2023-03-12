@@ -37,6 +37,7 @@ dependencies:
 - vector
 - QuickCheck
 - transformers-supply
+- erf
 
 library:
   source-dirs: src

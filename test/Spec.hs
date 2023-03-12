@@ -5,20 +5,38 @@ import Test.QuickCheck
 
 import Lib
 import SPLL.Lang
-import Typing
-import RType
-import PType
+import SPLL.Typing.Typing
+import SPLL.Typing.PType
+import SPLL.Typing.RType
 import Interpreter
 import Data.Maybe (fromJust, catMaybes)
 import Control.Monad.Random.Lazy (Random)
+import PInferBranched
+import SPLL.Examples
+import Infer
+import Witnessing
+import SpecExamples
 
+examples :: [Program () a]
+examples = [testProg, makeMain testGreater, makeMain testGaussianMixture, makeMain testIntractable]
 main :: IO ()
 main = do
-  quickCheck $ compilesTo [("main", fst $ head expressions)] (snd $ head expressions)
-  quickCheck $ forAll expressionsGen (\expr -> compilesTo [("main", expr)] $ fromJust $ lookup expr expressions)
-  quickCheck $ forAll parametrizedGen $ discreteProbAlignment 1000
-  putStrLn "all tests done"
+   checkProgs [(variableLengthS, variableLengthT),
+               (testLetS, testLetT),
+               (testLetNonLetS, testLetNonLetT),
+               (testLetDS, testLetDT),
+               (testLetTupleS, testLetTupleT),
+               (testLetXYS, testLetXYT)]
+  -- quickCheck $ compilesTo [("main", fst $ head expressions)] (snd $ head expressions)
+  -- quickCheck $ forAll expressionsGen (\expr -> compilesTo [("main", expr)] $ fromJust $ lookup expr expressions)
+  -- quickCheck $ forAll parametrizedGen $ discreteProbAlignment 1000
+  -- putStrLn "all tests done"
 
+checkProgs ::(Eq a, Show a) => [(Program () a, Program TypeInfoWit a)] -> IO ()
+checkProgs [] = do putStrLn "finished"
+checkProgs ((a,b):progs) = do
+  quickCheck $ prop_infer a b
+  checkProgs progs
 expressionsGen :: Gen (Expr () Float)
 expressionsGen = elements (map fst expressions)
 
@@ -65,31 +83,11 @@ epsilonProb _ x y = counterexample ("Mismatched probability types: " ++ show x +
 invariantDensity :: IO()
 invariantDensity = undefined
 
-discreteProbAlignment :: (Random a, Show a, Real a, Floating a) => Int -> (Env () a, Thetas a) -> Property
-discreteProbAlignment nSamples (env, thetas) = ioProperty $ case mMain of
-    Nothing -> return $ counterexample "typed main not found in discreteProbAlignment" False
-    Just mainExpr -> do
-      samples <- mkSamples nSamples typedEnv thetas [] mainExpr
-      let sample_counts = count samples
-      let valProb = [(likelihood typedEnv typedEnv thetas mainExpr val, DiscreteProbability (realToFrac val_count / realToFrac nSamples))| (val_count, val) <- sample_counts]
-      return $ conjoin (map (\(x, y) -> epsilonProb 0.05 x y) valProb)
-  where
-    pretypedEnv = typeCheckEnv env
-    mMain = lookup "main" typedEnv
-    typedEnv = resolveConstraints pretypedEnv
-  
+
+prop_infer :: (Eq a, Show a) => Program () a -> Program TypeInfoWit a -> Property
+prop_infer a b = addWitnessesProg (addTypeInfo a) === b
 
 sumsToOne :: IO Result
 sumsToOne = undefined
 
---compilesTo :: Env () a -> TypeInfo -> Bool
-compilesTo :: Eq a => [(String, Expr () a)] -> TypeInfo -> Property
-compilesTo env t = case lookup "main" pretypedEnv of
-    Just _ -> case lookup "main" typedEnv of
-      Nothing -> counterexample "typed main not found" False
-      Just typed_main -> getTypeInfo typed_main === t
-    Nothing -> counterexample "untyped main not found" False
-  where
-    pretypedEnv = typeCheckEnv env
-    typedEnv = resolveConstraints pretypedEnv
 
