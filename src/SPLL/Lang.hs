@@ -4,6 +4,8 @@ import SPLL.Typing.PType
 import SPLL.Typing.RType
 import qualified Data.Set as Set
 
+import qualified Data.Map as Map
+
 data Expr x a = IfThenElse x (Expr x a) (Expr x a) (Expr x a)
               | GreaterThan x (Expr x a) (Expr x a)
               | ThetaI x Int
@@ -30,8 +32,22 @@ data Expr x a = IfThenElse x (Expr x a) (Expr x a) (Expr x a)
               | Var x String
               -- TODO: Needs Concat to achieve proper SPN-parity.
               deriving (Show, Eq, Ord)
-data BijectiveF a  = Function String (Params a) (BijectiveF a) | Identity
-              deriving (Show, Eq)
+
+data VEnv a
+  = ValueEnv {values :: Map.Map String (Value a), branchMap :: BranchMap a}
+  deriving (Eq, Show)
+
+
+type BranchMap a = Map.Map (Expr TypeInfoWit a) [String]
+vempty :: VEnv a
+vempty = ValueEnv {values = Map.empty, branchMap = Map.empty}
+
+vextend :: VEnv a -> (String, Value a) -> VEnv a
+vextend env (x, s) = env { values = Map.insert x s (values env) }
+
+vremove :: VEnv a -> String -> VEnv a
+vremove env var = env {values = Map.delete var (values env)}
+
 type Params a = [Value a]
 -- forward, inverse, inverse'
 newtype (Floating a) => FPair a = FPair (RType, Params a -> Value a -> Value a, Params a -> Value a -> Value a, Params a -> Value a -> a)
@@ -61,6 +77,7 @@ data Value a = VBool Bool
            | VTuple [Value a]
            | VBranch (Value a) (Value a) String
            | VRange (Limits a)
+           | VAnyList 
            -- | Value of Arrow a b could be Expr TypeInfo a, with Expr being a Lambda?
            deriving (Show, Eq, Ord)
 
@@ -86,6 +103,10 @@ valMap f (VTuple v) = VList $ map (valMap f) v
 valMap f (VBranch v1 v2 x ) = VBranch (valMap f v1) (valMap f v2) x
 valMap f (VRange v1) = VRange (limitsMap f v1) 
 valMap f (VSymbol i) = VSymbol i
+valMap f VAnyList = VAnyList
+
+vMarg :: Value a
+vMarg = VRange (Limits Nothing Nothing)
 
 checkLimits :: (Ord a) => Limits a -> Bool
 checkLimits (Limits (Just (VFloat x)) (Just (VFloat y))) = x < y
@@ -317,7 +338,7 @@ getTypeInfo expr = case expr of
 
 getVFloat :: Value a -> a
 getVFloat (VFloat v) = v
-getVFloat _ = error "not implemented"
+getVFloat _ = error "not vfloat where it should be"
 getRType :: Value a -> RType
 getRType (VBool _) = TBool
 getRType (VInt _) = TInt

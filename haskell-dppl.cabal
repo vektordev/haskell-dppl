@@ -29,6 +29,7 @@ library
       InjectiveFunctions
       Interpreter
       Lib
+      LibArchive
       PInfer
       PInfer2
       PInferBranched

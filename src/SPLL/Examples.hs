@@ -22,7 +22,8 @@ normalProg = Program [] (Normal ())
 uniformProgPlus :: Program () Double
 uniformProgPlus = Program [] (Mult () (Uniform ()) (Constant () (VFloat (-0.5))))
 
-
+flipCoin :: Expr () Double
+flipCoin = GreaterThan () (Uniform ()) (Constant () (VFloat 0.5))
 variableLength :: Expr () a
 variableLength = IfThenElse ()
   (GreaterThan () (Uniform ()) (ThetaI () 0))
@@ -33,8 +34,7 @@ variableLength = IfThenElse ()
 testProg :: Program () a
 testProg = Program [("b", variableLength)]
              (Call () "b")
-             
--- Mutual recursion 
+
 testProgFix :: Program () Float
 testProgFix = Program [
                         ("main", IfThenElse ()
@@ -47,13 +47,15 @@ testProgFix = Program [
                            (Constant () (VFloat 0.0))
                            (Plus () (ThetaI () 1) (Call () "term")))]
               (Call () "main")
-varLenFix :: Expr () a
-varLenFix = Fix () (Lambda () "main" (
-  IfThenElse ()
-    (GreaterThan () (Uniform ()) (ThetaI () 0))
-    (Null ())
-    (Cons () (Constant () (VBool True)) (Var () "main"))))
-
+testCoin :: Program () Double
+testCoin = Program [
+                      ("f", IfThenElse ()
+                                  (GreaterThan () (Uniform ()) (Call () "b"))
+                                  (Null ())
+                                  (Cons () flipCoin (Call () "f"))),
+                     ("b", ThetaI () 0)
+                     ]
+              (Call () "f")
 dummyExpr :: Program () a
 dummyExpr = Program [("main", GreaterThan () (Uniform ()) (Call () "b")),
                                    ("b", ThetaI () 1)]
@@ -194,8 +196,15 @@ testNestedLetInDecl = Program [] (LetIn() "x" (Plus () (ThetaI () 0) (Normal ())
                                      (Cons () (Var () "y")
                                        (Cons () (Plus () (Normal ())  (Var () "y"))
                                         (Null ()))))))
+testNestedLetInWit :: Program () Double
+testNestedLetInWit = Program [] (LetIn () "x" (Mult () (ThetaI () 0) (Normal ()))
+                         (LetIn ()  "y" (Mult () (Normal ()) (ThetaI () 0) )
+                                  (Cons () (Var () "x")
+                                    (Cons ()
+                                     (Plus () (Var () "y") (Var () "x"))
+                                        (Null ())))))
 testInjFD :: Program () Double
-testInjFD = Program [] (InjF () "sig" [] (Plus () (ThetaI () 0) (Normal ())))
+testInjFD = Program [] (InjF () "mult" [Constant () (VFloat (-2.0))] (Plus () (ThetaI () 0) (Normal ())))
 
 testLetXYD :: Program () Double
 testLetXYD = Program [] (LetIn() "x" (Plus () (ThetaI () 0) (Normal ()))

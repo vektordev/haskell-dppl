@@ -25,6 +25,17 @@ globalFenv = [("plus", FPair (TArr TFloat (TArr TFloat TFloat), plusFwd, plusInv
                   plusListFwd, plusListInv, plusListInvGrad)),
               ("listMult", FPair (TArr (ListOf TFloat) (TArr(ListOf TFloat) (ListOf TFloat)), 
                                 multListFwd, multListInv, multListInvGrad))  ]
+rangeSwap :: (Floating a, Ord a) => (Value a -> a) -> Value a -> Value a
+rangeSwap f l@(VRange limits) = if (f (VFloat 0.0)) < 0 then swapLimits l else l
+rangeSwap _ v = v
+
+rangeMap :: (Floating a) => (Value a -> Value a) -> Value a -> Value a
+rangeMap f (VRange (Limits v1 v2)) = VRange (Limits (fmap f v1) (fmap f v2))
+rangeMap f v = f v
+
+rangeGrad :: (Floating a) => (Value a -> a) -> Value a -> a
+rangeGrad f (VRange (Limits v1 v2)) = 1.0
+rangeGrad f v = f v
 
 plusFwd :: (Floating a) => Params a -> Value a -> Value a
 plusFwd [VFloat p] (VFloat x) = VFloat $ x + p
