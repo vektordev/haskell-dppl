@@ -100,7 +100,7 @@ generate globalEnv env thetas args (Cons _ hd tl) = do
 --Call leaves function context, pass GlobalEnv to ensure env is cleaned up.
 generate globalEnv env thetas args (Call t name) = generate globalEnv globalEnv thetas args expr
   where Just expr = lookup name env
-generate globalEnv env thetas args (ReadNN _ expr) = error "NN not implemented"
+generate globalEnv env thetas args (ReadNN _ _ expr) = error "NN not implemented"
 
 sigmoid :: Floating a => a -> a
 sigmoid x = 1 / (1 + exp (-x))
@@ -168,7 +168,10 @@ likelihood globalEnv env thetas (Plus _ left right) (VFloat x)
 likelihood _ _ _ (Null _) (VList []) = DiscreteProbability 1
 likelihood _ _ _ (Null _) _ = DiscreteProbability 0
 likelihood _ _ _ (Cons _ _ _) (VList []) = DiscreteProbability 0
-likelihood globalEnv env thetas (Cons _ hd tl) (VList (x:xs)) = pAnd (likelihood globalEnv env thetas hd x) (likelihood globalEnv env thetas tl $ VList xs)
+likelihood globalEnv env thetas (Cons _ hd tl) (VList (x:xs)) =
+  pAnd
+    (likelihood globalEnv env thetas hd x)
+    (likelihood globalEnv env thetas tl $ VList xs)
 likelihood globalEnv env thetas (Call _ name) val = likelihood globalEnv globalEnv thetas expr val
   where Just expr = lookup name env
 

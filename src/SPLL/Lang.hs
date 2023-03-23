@@ -3,6 +3,9 @@ module SPLL.Lang where
 import SPLL.Typing.PType
 import SPLL.Typing.RType
 
+--Expr x (a :: Precision)
+--data Precision = P32 | P64"
+--type family PrecisionType P32 = Float
 data Expr x a = IfThenElse x (Expr x a) (Expr x a) (Expr x a)
               | GreaterThan x (Expr x a) (Expr x a)
               | ThetaI x Int
@@ -14,11 +17,12 @@ data Expr x a = IfThenElse x (Expr x a) (Expr x a) (Expr x a)
               | Null x
               | Cons x (Expr x a) (Expr x a)
               | Call x String
+              | Var x String
               | LetIn x String (Expr x a) (Expr x a)
               | Arg x String RType (Expr x a)
               | CallArg x String [Expr x a]
               | Lambda x String (Expr x a)
-              | ReadNN x (Expr x a)
+              | ReadNN x String (Expr x a)
               -- TODO: Needs Concat to achieve proper SPN-parity.
               deriving (Show, Eq)
 
@@ -38,11 +42,12 @@ exprMap f expr = case expr of
   (Null t) -> Null t
   (Cons t a b) -> Cons t (fmap f a) (fmap f b)
   (Call t x) -> Call t x
+  (Var t x) -> Var t x
   (LetIn t x a b) -> LetIn t x (fmap f a) (fmap f b)
   (Arg t name r a) -> Arg t name r (fmap f a)
   (CallArg t name a) -> CallArg t name (map (fmap f) a)
   (Lambda t name a) -> Lambda t name (fmap f a)
-  (ReadNN t a) -> ReadNN t (fmap f a)
+  (ReadNN t n a) -> ReadNN t n (fmap f a)
 
 tMapHead :: (Expr x a -> x) -> Expr x a -> Expr x a
 tMapHead f expr = case expr of 
@@ -57,6 +62,7 @@ tMapHead f expr = case expr of
   (Null _) -> Null (f expr)
   (Cons _ a b) -> Cons (f expr) a b
   (Call _ x) -> Call (f expr) x
+  (Var _ x) -> Var (f expr) x
   (LetIn _ x a b) -> LetIn (f expr) x a b
   (Arg _ name r a) -> Arg (f expr) name r a
   (CallArg _ name a) -> CallArg (f expr) name a
@@ -76,6 +82,7 @@ tMapTails f expr = case expr of
   (Null t) -> Null t
   (Cons t a b) -> Cons t (tMap f a) (tMap f b)
   (Call t x) -> Call t x
+  (Var t x) -> Var t x
   (LetIn t x a b) -> LetIn t x (tMap f a) (tMap f b)
   (Arg t name r a) -> Arg t name r (tMap f a)
   (CallArg t name a) -> CallArg t name (map (tMap f) a)
@@ -93,11 +100,12 @@ tMap f expr = case expr of
   (Null _) -> Null (f expr)
   (Cons _ a b) -> Cons (f expr) (tMap f a) (tMap f b)
   (Call _ x) -> Call (f expr) x
+  (Var _ x) -> Var (f expr) x
   (LetIn _ x a b) -> LetIn (f expr) x (tMap f a) (tMap f b)
   (Arg _ name r a) -> Arg (f expr) name r (tMap f a)
   (CallArg _ name a) -> CallArg (f expr) name (map (tMap f) a)
   (Lambda _ name a) -> Lambda (f expr) name (tMap f a)
-  (ReadNN _ a) -> ReadNN (f expr) (tMap f a)
+  (ReadNN _ n a) -> ReadNN (f expr) n (tMap f a)
 
 getSubExprs :: Expr x a -> [Expr x a]
 getSubExprs expr = case expr of 
@@ -112,11 +120,12 @@ getSubExprs expr = case expr of
   (Null _) -> []
   (Cons _ a b) -> [a,b]
   (Call _ x) -> []
+  (Var _ x) -> []
   (LetIn _ x a b) -> [a,b]
   (Arg _ name r a) -> [a]
   (CallArg _ name a) -> a
   (Lambda _ _ a) -> [a]
-  (ReadNN _ a) -> [a]
+  (ReadNN _ _ a) -> [a]
 
 getTypeInfo :: Expr t a -> t
 getTypeInfo expr = case expr of
@@ -131,14 +140,15 @@ getTypeInfo expr = case expr of
   (Null t)              -> t
   (Cons t _ _)          -> t
   (Call t _)            -> t
+  (Var t _)             -> t
   (LetIn t _ _ _)       -> t
   (Arg t _ _ _)         -> t
   (CallArg t _ _)       -> t
   (Lambda t _ _)        -> t
-  (ReadNN t _)          -> t
+  (ReadNN t _ _)        -> t
 
 data Value a = VBool Bool
-           | VInt Int
+           | VInt Int -- | VIntRange Int Int (3..5) | VIntUnknown
            | VSymbol String
            | VFloat a
            | VList [Value a]
@@ -184,11 +194,12 @@ recurse expr = case expr of
   (Null _) -> []
   (Cons _ a b) -> [a,b]
   (Call _ _) -> []
+  (Var _ _) -> []
   (LetIn _ _ a b) -> [a,b]
   (Arg _ _ _ a) -> [a]
   (CallArg _ _ a) -> a
   (Lambda _ _ a) -> [a]
-  (ReadNN _ a) -> [a]
+  (ReadNN _ _ a) -> [a]
 
 printFlat :: Show a => Expr t a -> String
 printFlat expr = case expr of
@@ -203,8 +214,9 @@ printFlat expr = case expr of
   (Null _) -> "Null"
   Cons {} -> "Cons"
   (Call _ a) -> "Call " ++ a
+  (Var _ a) -> "Var " ++ a
   LetIn {} -> "LetIn"
   (Arg _ var r _ ) -> "Bind " ++ var ++ "::" ++ show r
   (CallArg _ a _ ) -> "CallArg" ++ a
   (Lambda _ name _) -> "\\" ++ name  ++ " -> "
-  (ReadNN _ _) -> "ReadNN"
+  ReadNN {} -> "ReadNN"

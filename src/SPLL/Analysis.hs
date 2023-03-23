@@ -9,6 +9,8 @@ import SPLL.Lang
 import Transpiler (Algorithm, allAlgorithms, checkExprMatches, checkConstraint, constraints, likelihoodFunctionUsesTypeInfo, toStub)
 import SPLL.Typing.RType
 import SPLL.Typing.PType
+import Data.Maybe (maybeToList, fromJust, isNothing)
+import Data.List (nub)
   
 data Tag a = EnumRange (Value a, Value a)
            | EnumList [Value a]
@@ -17,21 +19,32 @@ data Tag a = EnumRange (Value a, Value a)
 
 data StaticAnnotations a = StaticAnnotations RType PType [Tag a] deriving (Show)
 
-annotate :: Expr TypeInfo a -> Expr (StaticAnnotations a) a 
+annotate :: (Show a) => Expr TypeInfo a -> Expr (StaticAnnotations a) a
 annotate expr = tMap annotateLocal expr
   where
     annotateLocal e = StaticAnnotations rt pt tags
       where
         TypeInfo rt pt = getTypeInfo e
-        tags = if likelihoodFunctionUsesTypeInfo $ toStub e
-          then [Alg $ findAlgorithm e]
-          else []
+        tags =
+          [Alg $ findAlgorithm e | likelihoodFunctionUsesTypeInfo $ toStub e]
+          ++ (fmap EnumList $ maybeToList (findEnumerable e))
 
-findAlgorithm :: Expr TypeInfo a -> Algorithm
+findEnumerable :: Expr TypeInfo a -> Maybe [Value a]
+findEnumerable (ReadNN _ name (subexpr)) = Just [VInt i | i <- [0..9]]
+findEnumerable (Plus _ left right) =
+  if isNothing leftEnum || isNothing rightEnum
+    then Nothing
+    else Just $ map VInt $ nub [a + b | VInt a <- fromJust leftEnum, VInt b <- fromJust rightEnum]
+      where
+        leftEnum = findEnumerable left
+        rightEnum = findEnumerable right
+findEnumerable _ = Nothing
+
+findAlgorithm :: (Show a) => Expr TypeInfo a -> Algorithm
 findAlgorithm expr = case validAlgs of
   [alg] -> alg
-  [] -> error "no valid algorithms found"
-  [x] -> error "multiple valid algorithms found"
+  [] -> error ("no valid algorithms found in expr: " ++ show expr)
+  (_:_:_) -> error "multiple valid algorithms found" -- TODO: There might be leeway here.
   where
     validAlgs = filter (\alg -> all (checkConstraint expr alg) (constraints alg) ) correctExpr
     correctExpr = filter (checkExprMatches expr) allAlgorithms

@@ -37,6 +37,7 @@ dependencies:
 - vector
 - QuickCheck
 - transformers-supply
+- pretty-simple
 
 library:
   source-dirs: src

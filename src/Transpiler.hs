@@ -16,6 +16,7 @@ data ExprStub = StubIfThenElse
               | StubNull
               | StubCons
               | StubCall
+              | StubVar
               | StubLetIn
               | StubArg
               | StubCallArg
@@ -66,7 +67,7 @@ greaterThanLeft :: Algorithm
 greaterThanLeft = Algorithm StubGreaterThan [SubExprNIsType 0 Deterministic] "greaterThanLeft" (const Integrate)
 
 greaterThanRight :: Algorithm
-greaterThanRight = Algorithm StubGreaterThan [SubExprNIsType 0 Deterministic] "greaterThanRight" (const Integrate)
+greaterThanRight = Algorithm StubGreaterThan [SubExprNIsType 1 Deterministic] "greaterThanRight" (const Integrate)
 
 greaterThanSigmoid :: Algorithm
 greaterThanSigmoid = Algorithm StubGreaterThan [SubExprNIsType 0 Deterministic, SubExprNIsType 1 Deterministic] "greaterThanSigmoid" (const Integrate)
@@ -155,8 +156,10 @@ toStub expr = case expr of
   (Null _)       -> StubNull
   Cons {}        -> StubCons
   (Call _ _)     -> StubCall
+  (Var _ _)      -> StubVar
   LetIn {}       -> StubLetIn
   Arg {}         -> StubArg
   CallArg {}     -> StubCallArg
   Lambda {}      -> StubLambda
-  (ReadNN _ _)   -> StubReadNN
+  (ReadNN _ _ _)   -> StubReadNN
+  

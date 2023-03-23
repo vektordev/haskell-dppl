@@ -20,6 +20,7 @@ import Debug.Trace
 import Data.Function (on)
 import Data.Ord
 import Data.List (elemIndices, sortBy, nub, intercalate)
+import Text.Pretty.Simple
 
 import SPLL.Lang
 import SPLL.Typing.Typing
@@ -31,6 +32,7 @@ import Control.Monad.Random (evalRandIO, getRandomR, replicateM, forM_)
 import CodeGen
 import SPLL.IntermediateRepresentation
 import SPLL.Analysis
+import SPLL.CodeGenPyTorch
 import SPLL.CodeGenJulia
 
 import SPLL.Examples
@@ -79,40 +81,44 @@ llScan tenv thetas main = do
   print scanRes
   let fileStr = unlines $ map (\(x,y,l) -> show x ++ ", " ++ show y ++ ", " ++ (show $ unwrapP l)) scanRes
   writeFile "./data/ll_out.txt" fileStr
-
+{-
 newCodeGen :: Expr TypeInfo Float -> IO ()
 newCodeGen tExpr = do
   let annotated = SPLL.Analysis.annotate tExpr
   print annotated
   let irGen = toIRGenerate annotated
   print irGen
-  let gen = generateCode irGen
+  let gen = generateCode irGen ""
   putStrLn $ unlines gen
-  let irProb = toIRProbability annotated (IRVar "input")
+  let irProb = runSupplyVars $ toIRProbability annotated (IRVar "input")
   print irProb
-  let prob = generateCode irProb
-  putStrLn $ unlines prob
+  let prob = generateCode irProb ""
+  putStrLn $ unlines prob-}
 
 newCodeGenAll :: Env TypeInfo Float -> IO ()
 newCodeGenAll env = do
   let annotated = map (\(a,b) -> (a, SPLL.Analysis.annotate b)) env
   print annotated
   let ir = envToIR annotated
-  print ir
-  let code = generateFunctions ir
-  putStrLn $ unlines code
+  pPrint ir
+  let pycode = SPLL.CodeGenPyTorch.generateFunctions ir
+  let jlcode = SPLL.CodeGenJulia.generateFunctions ir
+  putStrLn "python code:"
+  putStrLn $ unlines pycode
+  putStrLn "julia code:"
+  putStrLn $ unlines jlcode
 
 someFunc :: IO ()
 someFunc = do--thatGaussThing
   --x <- runNNTest
   --print x
-  --let env = [("main", testNNUntyped)] :: Env () Float
-  --cmp <- compile env triMNist
-  --let cmp = [("main", triMNist)] :: Env TypeInfo Float
-  --let cmp = [("main", testNN)] :: Env TypeInfo Float
-  let env = [("main", testGauss)] :: Env () Float
+  --let env = [("main", gaussLists)] :: Env () Float
+  let env = [("main", gaussLists)] :: Env () Float
   cmp2 <- compile env
-  newCodeGenAll cmp2
+  let cmp = cmp2 ++ [("noiseMNistAdd", mNistNoise), ("expertmodel", expertModelsTyped), ("mNistAdd", testNN)] :: Env TypeInfo Float
+  --let cmp = [("main", testNN)] :: Env TypeInfo Float
+  --cmp <- compile env
+  newCodeGenAll cmp
   --let x = transpile cmp
   --print x
   --let y = map mkProbability x

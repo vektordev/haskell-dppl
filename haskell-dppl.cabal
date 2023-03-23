@@ -1,6 +1,6 @@
 cabal-version: 1.12
 
--- This file has been generated from package.yaml by hpack version 0.34.6.
+-- This file has been generated from package.yaml by hpack version 0.35.0.
 --
 -- see: https://github.com/sol/hpack
 
@@ -40,6 +40,7 @@ library
       RInfer
       SPLL.Analysis
       SPLL.CodeGenJulia
+      SPLL.CodeGenPyTorch
       SPLL.Examples
       SPLL.IntermediateRepresentation
       SPLL.Lang
@@ -62,6 +63,7 @@ library
     , mwc-random
     , parsec
     , pretty
+    , pretty-simple
     , random
     , reflection
     , repline
@@ -90,6 +92,7 @@ executable haskell-dppl-exe
     , mwc-random
     , parsec
     , pretty
+    , pretty-simple
     , random
     , reflection
     , repline
@@ -119,6 +122,7 @@ test-suite haskell-dppl-test
     , mwc-random
     , parsec
     , pretty
+    , pretty-simple
     , random
     , reflection
     , repline

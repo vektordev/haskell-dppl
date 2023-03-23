@@ -41,9 +41,13 @@ testExpr2 = IfThenElse ()
   (Null ())
   (Cons () (Constant () (VBool True)) (Call () "main"))
 
+testBool :: Expr () a
+testBool = GreaterThan () (Uniform ()) (ThetaI () 0)
+
 testGauss :: Expr () a
 --testGauss = Plus () (Normal ()) (ThetaI () 0)
 testGauss = Plus () (Mult () (Normal ()) (ThetaI () 0)) (ThetaI () 1)
+
 
 --  (IfThenElse ()
 --    (GreaterThan () (Uniform ()) (ThetaI () 1))
@@ -143,10 +147,10 @@ gaussLists = IfThenElse ()
   (GreaterThan () (Uniform ()) (ThetaI () 0))
   (Null ())
   (Cons () (Plus () (Mult () (Normal ()) (ThetaI () 1)) (ThetaI () 2)) (Call () "main"))
-
+  
 gaussMultiLists :: Expr () a
 gaussMultiLists = IfThenElse ()
-  (GreaterThan () (Uniform ()) (ThetaI () 0))
+  (GreaterThan () (Uniform ()) (ThetaI () 0) )
   (Null ())
   (Cons ()
     (IfThenElse ()
@@ -157,24 +161,57 @@ gaussMultiLists = IfThenElse ()
 
 testNNUntyped :: Expr () a
 --testNN : Lambda im1 -> (Lambda im2 -> readNN im1 + readNN im2)
-testNNUntyped = Lambda () "im1" (Lambda () "im2" (Plus () (ReadNN () (Call () "im1")) (ReadNN () (Call () "im2"))))
-
---mNist im1 im2 = read im1 + read im2
---p(sum | im1, im2)
+testNNUntyped = Lambda () "im1" (Lambda () "im2" (Plus () (ReadNN () "classifyMNist" (Var () "im1")) (ReadNN () "classifyMNist" (Var () "im2"))))
 
 testNN :: Expr TypeInfo a
 testNN = Lambda (TypeInfo (Arrow TSymbol (Arrow TSymbol TInt)) Chaos) "im1"
   (Lambda (TypeInfo (Arrow TSymbol TInt) Chaos) "im2" (Plus (TypeInfo TInt Integrate)
-    (ReadNN (TypeInfo TInt Integrate) (Call (TypeInfo TSymbol Deterministic) "im1"))
-    (ReadNN (TypeInfo TInt Integrate) (Call (TypeInfo TSymbol Deterministic) "im2"))))
+    (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im1"))
+    (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im2"))))
+    
+
+mNistNoise :: Expr TypeInfo a
+mNistNoise = Lambda (TypeInfo (Arrow TSymbol (Arrow TSymbol TInt)) Chaos) "im1"
+  (Lambda (TypeInfo (Arrow TSymbol TInt) Chaos) "im2"
+    (IfThenElse (TypeInfo TInt Integrate) (GreaterThan (TypeInfo TBool Integrate) (Uniform (TypeInfo TFloat Integrate)) (ThetaI (TypeInfo TFloat Deterministic) 0) )
+    (Plus (TypeInfo TInt Integrate)
+      (Constant (TypeInfo TInt Deterministic) (VInt 1))
+      (Plus (TypeInfo TInt Integrate)
+            (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im1"))
+            (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im2"))))
+    (Plus (TypeInfo TInt Integrate)
+      (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im1"))
+      (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im2")))))
 
 triMNist :: Expr TypeInfo a
 triMNist = Lambda (TypeInfo (Arrow TSymbol (Arrow TSymbol (Arrow TSymbol TInt))) Chaos) "im1"
   (Lambda (TypeInfo (Arrow TSymbol (Arrow TSymbol TInt)) Chaos) "im2"
     (Lambda (TypeInfo (Arrow TSymbol TInt) Chaos) "im3" (Plus (TypeInfo TInt Integrate)
-      (ReadNN (TypeInfo TInt Integrate) (Call (TypeInfo TSymbol Deterministic) "im3"))
+      (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im3"))
       (Plus (TypeInfo TInt Integrate)
-        (ReadNN (TypeInfo TInt Integrate) (Call (TypeInfo TSymbol Deterministic) "im1"))
-        (ReadNN (TypeInfo TInt Integrate) (Call (TypeInfo TSymbol Deterministic) "im2")))
+        (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im1"))
+        (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im2")))
       )))
+
+expertModels :: Expr () a
+expertModels = Lambda () "im" (IfThenElse ()
+  (ReadNN () "isMnist" (Var () "im"))
+  (ReadNN () "classifyMNist" (Var () "im"))
+  (ReadNN () "classifyCIFAR" (Var () "im")))
+  
+expertModelsTyped :: Expr TypeInfo a
+expertModelsTyped = Lambda (TypeInfo (Arrow TSymbol TInt) Integrate) "im" (IfThenElse (TypeInfo TInt Integrate)
+  (ReadNN (TypeInfo TBool Integrate) "isMnist" (Var (TypeInfo TSymbol Deterministic) "im"))
+  (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im"))
+  (ReadNN (TypeInfo TInt Integrate) "classifyCIFAR" (Var (TypeInfo TSymbol Deterministic) "im")))
+
+--expert_model_proofs image =
+--  if isMNist
+--    then (1, classifyMNist image)
+--    else (2, classifyCIFAR image)
+
+--expert_model image =
+--  if is28x28x1 image
+--    then classifyMNist image
+--    else classifyCIFAR image
 
