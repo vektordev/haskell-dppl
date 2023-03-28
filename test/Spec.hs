@@ -3,11 +3,12 @@
 
 import Test.QuickCheck
 
+import SPLL.Examples
 import Lib
 import SPLL.Lang
-import Typing
-import RType
-import PType
+import SPLL.Typing.Typing
+import SPLL.Typing.RType
+import SPLL.Typing.PType
 import Interpreter
 import Data.Maybe (fromJust, catMaybes)
 import Control.Monad.Random.Lazy (Random)

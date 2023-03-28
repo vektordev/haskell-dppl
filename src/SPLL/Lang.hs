@@ -23,8 +23,15 @@ data Expr x a = IfThenElse x (Expr x a) (Expr x a) (Expr x a)
               | CallArg x String [Expr x a]
               | Lambda x String (Expr x a)
               | ReadNN x String (Expr x a)
+              | Fix x (Expr x a)
               -- TODO: Needs Concat to achieve proper SPN-parity.
               deriving (Show, Eq)
+
+type Name = String
+
+data Program x a = Program [Decl x a] (Expr x a) deriving Eq
+
+type Decl x a = (String, Expr x a)
 
 instance Functor (Expr x) where
   fmap = exprMap
