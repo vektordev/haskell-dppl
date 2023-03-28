@@ -89,8 +89,8 @@ someFunc = do--thatGaussThing
   --let Program _ m  = prog
   --showResultsProg $ (addTypeInfo testLet2)
   --mapM_ putStrLn (prettyPrintProg prog)
-  --testDensity2d "frankTest" (testBranchedLetList2 :: Program () Double) [-0.3, -0.2]
-  testRun "frankTest" (testInjFD :: Program () Double) [1.0, 0.44]
+  --testDensity1d "frankTest" (testObserve :: Program () Double) [-0.3, -0.2]
+  testRun "frankTest" (testObserve :: Program () Double) [1.0, 0.44]
   --print $ m
   --grad_loss :: [(loss :: a, grad :: Thetas a)]
   --grad_loss thX = [grad' (\theta -> log $ unwrapP $ likelihood (autoEnv env) (autoEnv env) theta (autoExpr expr) (autoVal sample)) thX | sample <- samples]
@@ -248,8 +248,8 @@ testRun experimentName prog thetas = do
   print main
   samples <- mkSamples 1000 typedEnv thetas [] main
   print typedEnv
-  let p = runInferL typedEnv main thetas (VRange (Limits (Just (VFloat (-10.0))) (Just (VFloat (-0.5)))))
-  print p
+  let p = runInferIO typedEnv main thetas (VFloat 1.0)
+  p
   print "Avg sample "
   --print $ avgSamples samples
   --print "Likelihood 1.0 "

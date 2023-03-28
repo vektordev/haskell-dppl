@@ -28,8 +28,8 @@ library
       Infer
       InjectiveFunctions
       Interpreter
+      InterpreterDeprecated
       Lib
-      LibArchive
       PInfer
       PInfer2
       PInferBranched

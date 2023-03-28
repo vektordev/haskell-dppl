@@ -80,7 +80,7 @@ data Value a = VBool Bool
            | VAnyList 
            -- | Value of Arrow a b could be Expr TypeInfo a, with Expr being a Lambda?
            deriving (Show, Eq, Ord)
-
+-- likelihood [vMarg, vAnyList] - likelihood [vMarg, vMarg, vAnylist]
 --Nothing indicates low/high infinity.
 data Limits a = Limits (Maybe (Value a)) (Maybe (Value a))
            deriving (Show, Eq, Ord)
@@ -89,10 +89,6 @@ data Limits a = Limits (Maybe (Value a)) (Maybe (Value a))
 instance Functor Value where
   fmap = valMap
 
-instance Foldable Value where
-  foldr = valFoldr
-  foldMap = valFoldMap
- 
 valMap :: (a -> b) -> Value a -> Value b
 valMap f (VBool b) = VBool b
 valMap f (VInt i) = VInt i
@@ -121,35 +117,6 @@ swapLimits _ = error "swapLimits on non-range"
 
 limitsMap :: (a -> b) -> Limits a -> Limits b
 limitsMap f (Limits a b) = Limits (fmap (valMap f) a) (fmap (valMap f) b)
-
-valFoldr :: (a -> b -> b) -> b -> Value a -> b 
-valFoldr f ag (VBool b) = ag
-valFoldr f ag (VInt i) = ag
-valFoldr f ag (VSymbol i) = ag
-valFoldr f ag (VFloat a) = f a ag
-valFoldr f ag (VList []) = ag
-valFoldr f ag (VList ((VFloat x):rst)) = valFoldr f (f x ag) (VList rst)
-valFoldr f ag (VTuple []) = ag
-valFoldr f ag (VTuple ((VFloat x):rst)) = valFoldr f (f x ag) (VList rst)
-
-valFoldMap :: Monoid m => (a -> m) -> Value a -> m 
-valFoldMap make (VBool b) = mempty
-valFoldMap make (VInt i) = mempty
-valFoldMap make (VSymbol i) = mempty
-valFoldMap make (VFloat a) = make a
-valFoldMap make (VList []) = mempty
-valFoldMap make (VList ((VFloat x):rst)) = make x <> valFoldMap make (VList rst)
-valFoldMap make (VTuple []) = mempty
-valFoldMap make (VTuple ((VFloat x):rst)) = make x <> valFoldMap make (VTuple rst)
-
-valTraverse :: Applicative f => (a -> f b) -> Value a -> f (Value b) 
-valTraverse make (VBool b) = pure (VBool b)
-valTraverse make (VInt i) = pure (VInt i)
---valTraverse make (VSymbol i) = pure (VSymbol i)
---valTraverse make (VFloat a) = VFloat <$> make a
---valTraverse make (VList v) = VList <$> (foldr (<*>) ( id) (map (traverse make) v))
---valTraverse make (VTuple v) = VTuple <$> (foldr (<*>) ( id) (map (traverse make) v))
-
 
 setRType :: TypeInfo -> RType -> TypeInfo
 setRType (TypeInfo _ pt) rt =  TypeInfo rt pt

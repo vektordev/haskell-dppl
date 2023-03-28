@@ -196,15 +196,21 @@ testNestedLetInDecl = Program [] (LetIn() "x" (Plus () (ThetaI () 0) (Normal ())
                                      (Cons () (Var () "y")
                                        (Cons () (Plus () (Normal ())  (Var () "y"))
                                         (Null ()))))))
+-- let x = normal in let y = normal in [x, x+y]
+                                   
 testNestedLetInWit :: Program () Double
 testNestedLetInWit = Program [] (LetIn () "x" (Mult () (ThetaI () 0) (Normal ()))
                          (LetIn ()  "y" (Mult () (Normal ()) (ThetaI () 0) )
-                                  (Cons () (Var () "x")
-                                    (Cons ()
-                                     (Plus () (Var () "y") (Var () "x"))
-                                        (Null ())))))
+                                  (Cons () (Plus () (Var () "y") (Var () "x"))
+                                    (Cons ()  (Var () "x")
+                                     (Null ())))))
 testInjFD :: Program () Double
 testInjFD = Program [] (InjF () "mult" [Constant () (VFloat (-2.0))] (Plus () (ThetaI () 0) (Normal ())))
+
+testObserve :: Program () Double
+testObserve = Program [] (LetIn() "x"  (Normal ())
+                              (LetIn() "x" (Plus () (Constant () (VFloat 2.0)) (Normal ()))
+                                (Var () "x")))
 
 testLetXYD :: Program () Double
 testLetXYD = Program [] (LetIn() "x" (Plus () (ThetaI () 0) (Normal ()))
