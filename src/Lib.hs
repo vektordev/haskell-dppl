@@ -26,6 +26,8 @@ import SPLL.Lang
 import SPLL.Typing.Typing
 import SPLL.Typing.RType
 import SPLL.Typing.PType
+import Infer
+import PInfer2
 import Interpreter
 import Transpiler
 import Control.Monad.Random (evalRandIO, getRandomR, replicateM, forM_)
@@ -34,11 +36,26 @@ import SPLL.IntermediateRepresentation
 import SPLL.Analysis
 import SPLL.CodeGenPyTorch
 import SPLL.CodeGenJulia
-
+import Witnessing
 import SPLL.Examples
-import RInfer
-import PInfer
-import PInferBranched
+import PInferTypeclass
+import Debug.Trace
+import SpecExamples
+import InjectiveFunctions
+import Statistics.Sample.KernelDensity
+import Data.Vector.Generic (fromList)
+import qualified Data.Vector as V
+import Data.Bifunctor (bimap)
+import qualified Data.Map as Map
+import qualified Data.Set as Set
+import Data.Number.Erf
+
+variableLengthS2 :: Program  () Double
+variableLengthS2 = Program [("b", IfThenElse ()
+                          (GreaterThan () (Uniform ()) (ThetaI () 0))
+                          (Null ())
+                          (Cons () (Constant () (VBool True)) (Call () "b")))]
+                  (Call () "b")
 --assumption about grad: Reverse s a is Num if a is Num.
 --Thererfore, grad :: (Traversable f, Num a) => (forall s. Reifies s Tape => f (Reverse s a) -> Reverse s a) -> f a -> f a
 -- essentially translates to grad :: Traversable f, Num a) => (f (Reverse s a) -> Reverse s a) -> f a -> f a
@@ -58,6 +75,7 @@ readSamples = do
 map2RSamples :: (Double, Double) -> Value Double
 map2RSamples (a,b) = VList [VFloat a, VFloat b]
 
+{-
 thatGaussThing :: IO()
 thatGaussThing = do
   --TODO: I desperately need tuple types.
@@ -74,11 +92,12 @@ thatGaussThing = do
   let thetasRecovered = myGradientAscent 400 typedEnv initialThetas main samples
   mapM_ print thetasRecovered
   llScan typedEnv (fst $ last thetasRecovered) main
+-}
 
-llScan :: (Real a, Floating a, Show a, Enum a) => Env TypeInfo a -> Thetas a -> Expr TypeInfo a -> IO ()
+llScan :: (Erf a, Real a, Floating a, Show a, Enum a) => Env TypeInfoWit a -> Thetas a -> Expr TypeInfoWit a -> IO ()
 llScan tenv thetas main = do
   let scanPts = [(x,y) | x <- [0, 0.01 .. 1], y <- [0, 0.01 .. 1]]
-  let scanRes = [(x, y, likelihood tenv tenv thetas main (VList [VFloat x, VFloat y])) | x <- [0, 0.01.. 1], y <- [0, 0.01.. 1]]
+  let scanRes = [(x, y, runInferL tenv main thetas (VList [VFloat x, VFloat y])) | x <- [0, 0.01.. 1], y <- [0, 0.01.. 1]]
   print scanPts
   print scanRes
   let fileStr = unlines $ map (\(x,y,l) -> show x ++ ", " ++ show y ++ ", " ++ (show $ unwrapP l)) scanRes
@@ -116,8 +135,10 @@ someFunc = do--thatGaussThing
   --print x
   --let env = [("main", gaussLists)] :: Env () Float
   let env = [("main", gaussLists)] :: Env () Float
-  cmp2 <- compile env
-  let cmp = cmp2 ++ [("noiseMNistAdd", mNistNoise), ("expertmodel", expertModelsTyped), ("mNistAdd", testNN)] :: Env TypeInfo Float
+  let prog = Program env gaussLists
+  let cmp2 = progToEnv $ addTypeInfo prog
+  --cmp2 <-  env
+  let cmp = cmp2 -- ++ [("noiseMNistAdd", mNistNoise), ("expertmodel", expertModelsTyped), ("mNistAdd", testNN)] :: Env TypeInfo Float
   --let cmp = [("main", testNN)] :: Env TypeInfo Float
   --cmp <- compile env
   newCodeGenAll cmp
@@ -127,7 +148,34 @@ someFunc = do--thatGaussThing
   --let cmp = [("main", testNN)] :: Env TypeInfo Float
   -- let env = [("main", gaussLists)] :: Env () Float
   -- cmp2 <- compile env
-  PInferBranched.showResultsProg $ makeMain testIf
+  --pTypeInfoProgIO testProg
+  --let prog = addWitnessesProg (addTypeInfo testInjFD) :: Program TypeInfoWit Double
+  --let Program _ m  = prog
+  --showResultsProg $ (addTypeInfo testLet2)
+  --mapM_ putStrLn (prettyPrintProg prog)
+  --testDensity1d "frankTest" (testObserve :: Program () Double) [-0.3, -0.2]
+  testRun "frankTest" (testObserve :: Program () Double) [1.0, 0.44]
+  --print $ m
+  --grad_loss :: [(loss :: a, grad :: Thetas a)]
+  --grad_loss thX = [grad' (\theta -> log $ unwrapP $ likelihood (autoEnv env) (autoEnv env) theta (autoExpr expr) (autoVal sample)) thX | sample <- samples]
+  let pp = [VFloat $ 3.0]
+  let inverse_grad_auto = grad' (\[val] -> callInv globalFenv2 "mult" (map autoVal pp) val) [0.9]
+  print "hi"
+  print inverse_grad_auto
+  --auto_p = (map auto params_val)
+  --params_val = map (detGenerate env thetas) params
+
+  --let typedEnv = progToEnv $ typeProg prog
+  --print "Type Info"
+  --mapM_ (putStrLn . unlines . prettyPrint . snd) typedEnv
+  --typedEnv <- compile ([("main", testPlus2)] :: Env () Double )
+  --let Just main = lookup "main" typedEnv
+  --gradientDiagAt typedEnv [0.2] main [VFloat 1.0]
+
+  --pTypeInfoProgIO $ testProgFix
+  --RInfer.showResultsProg testProgFix
+
+
   -- newCodeGenAll cmp2
   --let x = transpile cmp
   --print x
@@ -140,83 +188,47 @@ someFunc = do--thatGaussThing
   --repeat a bunch of times:
   --in forM_ [1..100] (\n -> testRun ("gaussMultiLists_" ++ show n) env [0.55, 0.45, 0.5, 0.8, 0.3, 0.4])
   --in forM_ [1..100] (\n -> testRun ("gaussLists_" ++ show n) env [0.5, 0.9, 0.3])
-
 --runNNTest :: IO ()
+
 runNNTest :: IO [Value Float]
 runNNTest = do
   print "Running NN Test"
-  let typedEnv = [("main", testNN)]
+  let testNN2 = addWitnesses Set.empty testNN
+  let typedEnv = [("main", testNN2)]
+
   let Just main = lookup "main" typedEnv
   putStrLn $ unlines $ prettyPrint main
-  let resultR = getR main
+  let resultR = getRW main
   print resultR
-  let resultP = getP main
+  let resultP = getPW main
   print resultP
-  mkSamples 1000 typedEnv [] [Constant (TypeInfo TSymbol Deterministic) (VSymbol "image1"), Constant (TypeInfo TSymbol Deterministic) (VSymbol "image2")] main
+  return  [VFloat 3.0]
+  --mkSamples 1000 typedEnv [] [Constant (TypeInfo TSymbol Deterministic) (VSymbol "image1"), Constant (TypeInfo TSymbol Deterministic) (VSymbol "image2")] main
   
 
-myGradientAscent :: (Floating a, Real a) => Int -> [(String, Expr TypeInfo a)] -> Thetas a -> Expr TypeInfo a -> [Value a] -> [(Thetas a, a)]
-myGradientAscent 0 _ _ _ _ = []
-myGradientAscent n env thetas expr vals =
-  (thetas, loss) : myGradientAscent (n-1) env new expr vals
+myGradientAscent :: (Erf a, RealFloat a, Show a, Floating a, Real a) => Int -> a -> [(String, Expr TypeInfoWit a)] -> Thetas a -> Expr TypeInfoWit a -> [Value a] -> [(Thetas a, a)]
+myGradientAscent 0 _ _ _ _ _ = []
+myGradientAscent n learning_rate env thetas expr vals =
+  (thetas, loss) : myGradientAscent (n-1) learning_rate env new expr vals
     where
-      (loss, new) = optimizeStep env expr vals thetas
+      (loss, new) = optimizeStep env expr vals thetas learning_rate
 
-probabilityDiag :: (Floating a, Ord a, Real a, Show a) => [(String, Expr TypeInfo a)] -> [Thetas a] -> Expr TypeInfo a -> Value a -> IO ()
-probabilityDiag env thetaScan expr sample = mapM_ (\theta -> probabilityDiagAt env theta expr sample) thetaScan
-
-probabilityDiagAt :: (Floating a, Ord a, Real a, Show a) => [(String, Expr TypeInfo a)] -> Thetas a -> Expr TypeInfo a -> Value a -> IO ()
-probabilityDiagAt env theta expr sample = do
-  print theta
-  print (likelihood env env theta expr sample)
-
-gradientDiag :: (Floating a, Ord a, Real a, Show a) => [(String, Expr TypeInfo a)] -> [Thetas a] -> Expr TypeInfo a -> [Value a] -> IO ()
-gradientDiag env thetaScan expr samples = mapM_ (\theta -> gradientDiagAt env theta expr samples) thetaScan
-
-gradientDiagAt :: (Floating a, Ord a, Real a, Show a) => [(String, Expr TypeInfo a)] -> Thetas a -> Expr TypeInfo a -> [Value a] -> IO ()
-gradientDiagAt env tht expr samples = do
-  let grad_loss = [grad' (\theta -> log $ unwrapP $ likelihood (autoEnv env) (autoEnv env) theta (autoExpr expr) (autoVal sample)) tht | sample <- samples]
-  print ("gradient debug info for theta: " ++ (show tht))
-  putStrLn ("gradients: " ++ show (foldl1 addThetas $ map snd grad_loss))
-  putStrLn ("LL: " ++ show (sum $ map fst grad_loss))
-  --print "LL: "
-  --print $ sum $ map fst grad_loss
-
-optimizeStep :: (Floating a, Real a) => Env TypeInfo a -> Expr TypeInfo a -> [Value a] -> Thetas a -> (a, Thetas a)
-optimizeStep env expr samples thetas = (loss, addThetas thetas (mult 0.00003 gradient))
+optimizeStep :: (Erf a, Show a, RealFloat a, Floating a, Real a) => Env TypeInfoWit a -> Expr TypeInfoWit a -> [Value a] -> Thetas a -> a -> (a, Thetas a)
+optimizeStep env expr samples thetas learning_rate = (loss,
+    addThetas thetas (mult (1.0 / fromIntegral (length samples))(mult learning_rate gradient)) )
   where
     -- does it make a difference if we do sum(gradients) or if we do gradient(sums)?
     -- TODO: Is it correct to apply map-sum, or do we flatten the wrong dimension here?
     --grad_loss :: [(loss :: a, grad :: Thetas a)]
-    grad_loss = [grad' (\theta -> log $ unwrapP $ likelihood (autoEnv env) (autoEnv env) theta (autoExpr expr) (autoVal sample)) thetas | sample <- samples]
+    grad_loss = [grad' (\theta -> log $ unwrapP $ runInferL (autoEnv env) (autoExpr expr) theta (autoVal sample)) thetas | sample <- samples]
     --grad_thetas = [Thetas a]
+
     grad_thetas = map snd grad_loss
     --gradient :: Thetas a
     gradient = foldl1 addThetas grad_thetas
     loss = sum $ map fst grad_loss
 
-exprDebugMetrics :: (Floating a, Real a, Show a, Enum a) => Env TypeInfo a -> Expr TypeInfo a -> [Value a] -> Thetas a -> IO ()
-exprDebugMetrics env expr samples thetas = do
-  mapM_ (\thX -> printInfo thX) [[x] | x <- [0.0, 0.1 .. 1.0]]
-    where
-      ll thX = sum [log $ unwrapP $ likelihood env env thX expr sample | sample <- samples]
-      grad_loss thX = [grad' (\theta -> log $ unwrapP $ likelihood (autoEnv env) (autoEnv env) theta (autoExpr expr) (autoVal sample)) thX | sample <- samples]
-      grad_thetas thX = map snd (grad_loss thX)
-      gradient thX = foldl1 addThetas $ grad_thetas thX
-      printInfo thX = do
-        print (ll thX)
-        print (gradient thX)
 
-autoExpr :: (Num a, Reifies s Tape) => Expr x a -> Expr x (Reverse s a)
-autoExpr = fmap auto
-
-autoEnv :: (Num a, Reifies s Tape) => Env x a -> Env x (Reverse s a)
-autoEnv = map (\ (name, expr) -> (name, autoExpr expr))
-
-autoVal :: (Num a, Reifies s Tape) => Value a -> Value (Reverse s a)
-autoVal (VBool x) = VBool x
-autoVal (VFloat y) = VFloat (auto y)
-autoVal (VList xs) = VList (map autoVal xs)
 
 addThetas :: (Floating a) => Thetas a -> Thetas a -> Thetas a
 addThetas x y = zipWith (+) x y
@@ -224,209 +236,162 @@ addThetas x y = zipWith (+) x y
 mult :: (Floating a) => a -> Thetas a -> Thetas a
 mult x y = map (*x) y
 
---myGradientAscent :: (Num a, Num b, Num c, Num d) => Int -> Env a -> [b] -> Expr a -> [Value a] -> [([c], d)]
---myGradientAscent 0 _ _ _ _ = []
---myGradientAscent env thetas expr vals = (thetas, loss) : myGradientAscent env newHypothesis expr vals
---  where
-    --[gradient] = grad (\[th] -> sum [log $ probabilityFlip th datum | datum <- samples]) [hypothesis]
---    loss = sum $ [unwrapP (log $ probability env thetas expr val) | val <- vals]
----    gradient = [sum (grad (\ th -> log $ unwrapP $ _ env th expr datum) thetas) | datum <- vals]
---    newHypothesis = zipWith (+) thetas $ map (\el -> 0.0001 * el) gradient
---pr_ :: (Num a, Num b) => a -> Env b -> [a]
 
-{---setTypeInfo :: Expr x a -> t -> Expr t a
-setTypeInfo (IfThenElse x a b c)  t = IfThenElse t a b c
-setTypeInfo (GreaterThan x a b)   t = GreaterThan t a b
-setTypeInfo (ThetaI x a)          t = ThetaI t a
-setTypeInfo (Uniform x)           t = Uniform t
-setTypeInfo (Constant x a)        t = Constant t a
-setTypeInfo (Mult x a b)          t = Mult t a b
-setTypeInfo (Plus x a b)          t = Plus t a b
-setTypeInfo (Null x)              t = Null t
-setTypeInfo (Cons x a b)          t = Cons t a b
-setTypeInfo (Call x a)            t = Call t a
-setTypeInfo (LetIn x a b c)       t = LetIn t a b c--}
-
-
-
---Needs to resolve constrained types as a second step.
-typeCheckEnv :: Env () a -> Env TypeInfo a
-typeCheckEnv env = [(name, typeCheckExpr env expr) | (name, expr) <- env]
-
---TODO: This should iterate to a fixed point.
-resolveConstraints :: Eq a => Env TypeInfo a -> Env TypeInfo a
-resolveConstraints en = fixedPointIteration en (\env -> fmap (\(name, t) -> (name, resolveConstraintsExpr env name t)) env) --does this need (Check a ..) type?
-
---TODO: This may not pass name to subexpr. Instead, name should be left blank then.
-resolveConstraintsExpr :: Env TypeInfo a -> String -> Expr TypeInfo a -> Expr TypeInfo a
-resolveConstraintsExpr env name = tMapHead (rDeconstrain env name)
-                                . tMapHead (pDeconstrain env name)
-                                . tMapTails (rDeconstrain env "")
-                                . tMapTails (pDeconstrain env "")
-
--- get the type info of expr. If it is a PIdent constraint, try to relax it. Does not handle recursive PIdents.
--- in a recursive PIdent,
-pDeconstrain ::  Env TypeInfo a -> String -> Expr TypeInfo a -> TypeInfo
-pDeconstrain env defName expr = TypeInfo rt $ case pt of
-    Deterministic -> Deterministic
-    Integrate -> Integrate
-    Chaos -> Chaos
-    -- we're going to have to do a Fixed-point-iteration here to resolve constraints. Only use the lookup results if concrete value
-    PIdent name assigns -> if name == defName
-        -- direct recursion
-        then fixedPointLookup assigns Deterministic
-        -- depends on another symbol
-        else fromMaybe (PIdent name assigns) pResult
-      where
-        exprName = lookup name env
-        TypeInfo _ pName = getTypeInfo $ fromJust exprName
-        pResult = lookup pName assigns
-  where
-    TypeInfo rt pt = getTypeInfo expr
-
-fixedPointIteration :: Eq a => a -> (a -> a) -> a
-fixedPointIteration a f = if b == a then b else fixedPointIteration b f
-  where b = f a
-
-recFixedPointLookup :: [(PType, PType)] -> PType -> PType
-recFixedPointLookup table = fixedPointLookup (zip (map fst table) cleanedUpSnds)
-  where
-    --TODO: Sort out any constraints in the following:
-    cleanedUpSnds = map snd table
-
-fixedPointLookup :: (Eq a, Show a) => [(a, a)] -> a -> a
-fixedPointLookup table start = trace (show table) $ trace (show start) (if res == start then start else fixedPointLookup table res)
-  where
-    res = fromJust $ lookup start table
-
-rDeconstrain ::  Env TypeInfo a -> String -> Expr TypeInfo a -> TypeInfo
-rDeconstrain env defName expr = TypeInfo rt pt
-  where
-    TypeInfo rtOld pt = getTypeInfo expr
-    rt = case rtOld of
-      TBool -> TBool
-      TFloat -> TFloat
-      ListOf x -> ListOf x
-      NullList -> NullList
-      RIdent name -> rOfName
-        where 
-          TypeInfo rOfName _ = getTypeInfo $ fromJust $ lookup name env
-      RConstraint name ofType resType -> let TypeInfo rOfName _ = getTypeInfo $ fromJust $ lookup name env in
-        if defName == name
-          --simple recursion
-          then if rOfName == RConstraint name resType resType
-            --"fn is of type x as long as fn is of type x.
-            then resType
-            else if rOfName == ofType
-              then resType
-              else error ("type error in return type constraintA - " ++ show rOfName ++ show ofType)
-          else if rOfName == ofType
-            then resType
-            else RConstraint name ofType resType
-
-compile :: (Show a, Floating a, Ord a) => Env () a -> IO (Env TypeInfo a)
-compile env = do
-  let pretypedEnv = typeCheckEnv env
-  let Just pre_main = lookup "main" pretypedEnv
-  putStrLn $ unlines $ prettyPrint pre_main
-  let typedEnv = resolveConstraints pretypedEnv
-  return typedEnv
-
-reconstructThetas :: (Floating a, Ord a, Random a, Show a, Real a) => Env () a -> Int -> Thetas a -> IO [(Thetas a, a)]
-reconstructThetas env nSamples thetas = do
-  cEnv <- compile env
-  let Just main = lookup "main" cEnv
-  samples <- mkSamples nSamples cEnv thetas [] main
-  --let initialGuess = replicate (length thetas) 0.5
-  initialGuess <- replicateM (length thetas) (getRandomR (0.0, 1.0))
-  let reconstructedThetas = myGradientAscent 100 cEnv initialGuess main samples
-  return reconstructedThetas
-
-testRun :: (Floating a, Ord a, Random a, Show a, Real a, Enum a) => String -> Env () a -> Thetas a -> IO ()
-testRun experimentName env thetas = do
-  print "Hello world"
-  print env
-  let pretypedEnv = typeCheckEnv env
-  let Just pre_main = lookup "main" pretypedEnv
-  putStrLn $ unlines $ prettyPrint pre_main
-  let typedEnv = resolveConstraints pretypedEnv
+testDensity2d :: String -> Program () Double -> Thetas Double -> IO ()
+testDensity2d experimentName prog thetas = do
+  let typedEnv = progToEnv $ addWitnessesProg (addTypeInfo prog)
   let Just main = lookup "main" typedEnv
-  putStrLn $ unlines $ prettyPrint main
-  let resultR = getR main
+  print "Type Info"
+  samples <- mkSamples 10000 typedEnv thetas [] main
+  let dataStrs = map (\(VList vals) -> intercalate "," (map (\(VFloat x) -> show x) vals)) samples
+  let fileStr = unlines dataStrs
+  writeFile ("./data/gen_samples" ++ experimentName ++ ".txt") fileStr
+
+  let interval_a = (0.01, 0.99, 0.01)
+  let interval_b = (0.01, 0.99, 0.01)
+  let interval = sequence [createInputs interval_a, createInputs interval_b]
+  let valF [d1, d2] = VList [VFloat d1,  VFloat d2]
+  let likelihood_y = map (\(PDF p) -> p) (map (runInferL typedEnv main thetas  . valF) interval)
+  let dataStrsL = map show likelihood_y
+  let interval_line (a,b,c) = show a ++ "," ++ show b ++ "," ++ show c
+  let fileStrL = unlines ((interval_line interval_a):(interval_line interval_b:dataStrsL))
+  print (filter ( (> 100) . fst)(zip likelihood_y interval))
+  writeFile ("./data/likelihoods_" ++ experimentName ++ ".txt") fileStrL
+
+testDensity1d :: String -> Program () Double -> Thetas Double -> IO ()
+testDensity1d experimentName prog thetas = do
+  let typedEnv = progToEnv $ addWitnessesProg (addTypeInfo prog)
+  let Just main = lookup "main" typedEnv
+  print "Type Info"
+  samples <- mkSamples 10000 typedEnv thetas [] main
+  let dataStrs = map (\(VFloat val)-> show val) samples
+  let fileStr = unlines dataStrs
+  writeFile ("./data/gen_samples1d" ++ experimentName ++ ".txt") fileStr
+  let interval_a = (0.01, 0.99, 0.01)
+  let interval =  createInputs interval_a
+  let likelihood_y = map (\(PDF p) -> p) (map (runInferL typedEnv main thetas . VFloat) interval)
+  let dataStrsL = map show likelihood_y
+  let interval_line (a,b,c) = show a ++ "," ++ show b ++ "," ++ show c
+  let fileStrL = unlines ((interval_line interval_a):dataStrsL)
+  writeFile ("./data/likelihoods_1d" ++ experimentName ++ ".txt") fileStrL
+  
+genTheta :: ( Show a, Fractional a, Ord a, Random a, Floating a) => Program () a -> IO (a)
+genTheta p = if predicateProg isNotTheta p
+              then do
+                     let typedEnv = progToEnv $ addWitnessesProg (addTypeInfo p)
+                     let (Just main) = lookup "main" typedEnv
+                     val <- evalRandIO $ generate typedEnv typedEnv [] [] main
+                     return (getVFloat val)
+              else error "Theta in prior expression"
+              
+genThetas :: (Show a, Fractional a, Ord a, Random a, Floating a) => Program () a -> IO (Thetas a)
+genThetas p = if predicateProg isNotTheta p
+              then do
+                     let typedEnv = progToEnv $ addWitnessesProg (addTypeInfo p)
+                     let (Just main) = lookup "main" typedEnv
+                     val <- evalRandIO $ generate typedEnv typedEnv [] [] main
+                     return (valToFloatList val)
+              else error "Theta in prior expression"
+valToFloatList :: Value a -> Thetas a
+valToFloatList (VFloat x) = [x]
+valToFloatList (VList vfl) = map getVFloat vfl
+
+testRun :: (Erf a, RealFloat a, Floating a, Ord a, Random a, Show a, Real a, Enum a) => String -> Program () a -> Thetas a -> IO ()
+testRun experimentName prog thetas = do
+  print "Hello world"
+  mapM_ putStrLn (prettyPrintProg prog)
+  print "A"
+  let typedEnv = progToEnv $ addWitnessesProg (addTypeInfo prog)
+  let Just main = lookup "main" typedEnv
+  print "Type Info"
+  mapM_ (putStrLn . unlines . prettyPrint . snd) typedEnv
+  let resultR = getRW main
   print resultR
-  let resultP = getP main
+  let resultP = getPW main
   print resultP
+  print main
   samples <- mkSamples 1000 typedEnv thetas [] main
+  print typedEnv
+  let p = runInferIO typedEnv main thetas (VFloat 1.0)
+  p
+  print "Avg sample "
+  --print $ avgSamples samples
+  --print "Likelihood 1.0 "
+
+  let valF d = VList [VFloat $ head d, VFloat $ d !! 1, VFloat $ d !! 2]
+  -- (-20.0, 20.0, 0.1)
+  -- (0.01, 0.99, 0.01)
+  let integ_sizes = [(0.01, 0.99, 0.01), (0.01, 0.99, 0.01), (0.01, 0.99, 0.01)]
+  let stepsizeAll = foldl (\x (_,_,s) -> x*s) 1.0 integ_sizes
+  print stepsizeAll
+  let createInputs (start, end, stepsize) = [start, start+stepsize .. end]
+  let inputs = map createInputs integ_sizes
+  
+  let inputsS = sequence inputs
+  print $ length inputsS
+  --print sum_sig
+  --print $ length sig_lik
+  let integ = integralApprox integ_sizes valF (runInferL typedEnv main thetas)
+  let ex = expectedValue integ_sizes valF (runInferL typedEnv main thetas)
+  print "Integral of function"
+  --print integ
+  --print ex
+  --print $ likelihood typedEnv typedEnv [0.0] main (VTuple (VFloat 0.9)(VFloat 0.1))
+
   --putStrLn "exprDebugMetrics:"
   --exprDebugMetrics typedEnv main samples ([0.1, 0.1])
   --gradientDiag typedEnv [[x] | x <- [0, 0.01 .. 1]] main samples
   --probabilityDiag typedEnv [[x] | x <- [0, 0.01 .. 3]] main (VFloat 0.1)
   --putStrLn " // exprDebugMetrics:"
-  mapM_ print $ count samples
-  --let initialThetas = (replicate (length thetas) 0.5)
-  initialThetas <- replicateM (length thetas) (getRandomR (0.0, 1.0))
-  let thetasRecovered = myGradientAscent 500 typedEnv initialThetas main samples
-  mapM_ print thetasRecovered
+
+  --mapM_ print $ count samples
+
+  -- (genThetas uniformProg) (if parameters differ in prior
+  initialThetas <- replicateM (length thetas) (genTheta uniformProg)
+  let thetasRecovered = myGradientAscent 500 0.01 typedEnv initialThetas main samples
+  --mapM_ print thetasRecovered
   --TODO: Handle different theta sizes
   -- also put original thetas as first line.
   let firstline = intercalate ", " $ map show (thetas ++ [0])
   let dataStrs = map (\(ts, d) -> intercalate ", " $ map show (ts ++ [d])) thetasRecovered
   let fileStr = unlines (firstline:dataStrs)
-  writeFile ("./data/thetas_out_" ++ experimentName ++ ".txt") fileStr
+  --writeFile ("./data/thetas_out_" ++ experimentName ++ ".txt") fileStr
+  print "end of test run"
+  --gradientDiagAt typedEnv [0.1, 0.9] main samples
+  --gradientDiagAt typedEnv [-0.1, 0.9] main samples
+  --gradientDiagAt typedEnv [0.2, 0.9] main samples
+  -- [VTuple (VFloat 0.9) (VFloat 0.4)]
+expectedValue :: (Floating a, Enum a, Show a) => [(a, a, a)] -> ([a] -> Value a) -> (Value a -> Probability a) -> Probability a
+expectedValue rectangleInfo valF lkF = trace (show lk_sum ++ show (foldl pOr (PDF 0) lks)) (pAnd  (foldl pOr (PDF 0) lks)  (PDF (1/lk_sum)))
+  where createInputs (start, end, stepsize) = [start, start+stepsize .. end]
+        inputs = map createInputs rectangleInfo
+        inputsS = sequence inputs
+        stepsizeAll = foldl (\x (_,_,s) -> x*s) 1.0 rectangleInfo
+        lks_2 = map ( lkF . valF) inputsS
+        lks = zipWith pAnd lks_2 x_vals
+        x_vals =  map (DiscreteProbability . head) inputsS
+        (PDF lk_sum) = foldl pOr (PDF 0) lks_2
 
-mkSamples :: (Fractional a, Ord a, Random a) => Int -> Env TypeInfo a -> Thetas a -> [Expr TypeInfo a] -> Expr TypeInfo a -> IO [Value a]
+createInputs :: (Floating a, Enum a) => (a, a, a) -> [a]
+createInputs (start, end, stepsize) = [start, start+stepsize .. end]
+
+integralApprox :: (Floating a, Enum a, Show a) => [(a, a, a)] -> ([a] -> Value a) -> (Value a -> Probability a) -> Probability a
+integralApprox rectangleInfo valF lkF = pAnd  (DiscreteProbability stepsizeAll) (foldl pOr (PDF 0) lks)
+  where inputs = map createInputs rectangleInfo
+        inputsS = sequence inputs
+        stepsizeAll = foldl (\x (_,_,s) -> x*s) 1.0 rectangleInfo
+        lks = map ( lkF . valF) inputsS
+
+mkSamples :: (Fractional a, Ord a, Random a, Floating a) => Int -> Env TypeInfoWit a -> Thetas a -> [Expr TypeInfoWit a] -> Expr TypeInfoWit a -> IO [Value a]
 mkSamples 0 _ _ _ _ = return []
 mkSamples n env thetas args expr = do
   sample <- evalRandIO $ generate env env thetas args expr
   remainder <- mkSamples (n-1) env thetas args expr
   return (sample:remainder)
 
+avgSamples :: (Fractional a, Ord a, Random a) => [Value a] -> a
+avgSamples samples =  (1.0 / fromIntegral (length samples)) * (rec samples 0)
+  where rec ((VFloat b):[]) z = z + b
+        rec ((VFloat b):k) z = rec k (z + b)
 count :: Eq a => [a] -> [(Int, a)]
 count lst = sortBy (compare `on` (Down . fst)) [(length $ elemIndices x lst, x) | x <- nub lst]
-
-{--
-flip theta alpha = if alpha < theta then True else False
-
-probabilityFlip theta sample = if sample then 1 - theta else theta
-
---test_ad :: [Float]
-test_ad = grad (\[x,y,z] -> x*y+z) [1.0,2.0,3.0]
-
-test_ad_2 theta sample = grad (\[th] -> probabilityFlip th sample) [theta]
-
-someFunc :: IO()
-someFunc = do
-  replicateM_ 10 asdf
-  asdf2
-
-sample theta = do
-  alpha <- randomIO :: IO Float
-  return (Lib.flip theta alpha)
-
-asdf2 = do
-  let theta = 0.5
-  samples :: [Bool] <- replicateM 1000 (sample theta)
-  print samples
-  print $ nub samples
-  print [(elem, length [x | x <- samples, x == elem]) | elem <- nub samples]
-  let gdResult :: [(Float, Float)] = gaIterate 100 0.1 samples --gradientAscent (\[th] -> sum [log $ probabilityFlip th datum | datum <- samples]) [0.1]
-  mapM_ print gdResult
-
-gaIterate :: (Eq t, Num t, Floating b) => t -> b -> [Bool] -> [(b, b)]
-gaIterate 0 hypothesis samples = [(hypothesis, loss)]
-  where
-    loss = sum $ [probabilityFlip hypothesis datum | datum <- samples]
-gaIterate iterations hypothesis samples = (hypothesis, loss) : gaIterate (iterations-1 ) newHypothesis samples
-  where
-    --[gradient] = grad (\[th] -> sum [log $ probabilityFlip th datum | datum <- samples]) [hypothesis]
-    loss = sum $ [probabilityFlip hypothesis datum | datum <- samples]
-    gradient = sum $ map sum [grad (\[th] -> log $ probabilityFlip th datum) [hypothesis]| datum <- samples]
-    newHypothesis = hypothesis + 0.0001 * gradient
-
-asdf = do
-  let theta = 0.5
-  alpha <- randomIO :: IO Float
-  let sample = Lib.flip theta alpha
-  print (test_ad_2 theta sample)
---  print test_nn
---}

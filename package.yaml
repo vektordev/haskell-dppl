@@ -38,6 +38,7 @@ dependencies:
 - QuickCheck
 - transformers-supply
 - pretty-simple
+- erf
 
 library:
   source-dirs: src

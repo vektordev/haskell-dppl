@@ -1,14 +1,27 @@
+{-# LANGUAGE FlexibleContexts #-}
 module Interpreter where
 
 import Control.Monad.Random
+import Control.Monad.Except
+import Control.Monad.State
+import Control.Monad.Reader
+import Control.Monad.Identity
 
+import Numeric.AD
 import SPLL.Lang
 import SPLL.Typing.PType
 import SPLL.Typing.RType
 import SPLL.Typing.Typing
-
+import qualified Data.Set as Set
+import Debug.Trace
+import Numeric.AD (grad, auto)
 import Statistics.Distribution (ContGen, genContVar, quantile, density)
 import Statistics.Distribution.Normal
+import InjectiveFunctions
+import Numeric.AD.Internal.Reverse ( Reverse, Tape)
+import qualified Data.Map as Map
+import Data.Reflection (Reifies)
+import Data.Number.Erf
 
 type Thetas a = [a]
 
@@ -16,41 +29,99 @@ findTheta :: Expr x a -> Thetas a -> a
 findTheta (ThetaI _ i) ts = if i >= length ts then error "out of bounds in Thetas" else ts !! i
 findTheta _ _ = error "called FindTheta on non-theta expr."
 
+-- | Inference state
+data InferLState a = InferLState {global_funcs :: Env TypeInfoWit a, thetas :: Thetas a}
+-- | Initial inference state
+initInferL :: Env TypeInfoWit a -> Thetas a -> InferLState a
+initInferL env t = InferLState { global_funcs = env, thetas = t }
+data LikelihoodError a
+  = BottomError (Expr TypeInfoWit a)
+  | MismatchedValue (Value a) (Expr TypeInfoWit a)
+  deriving (Show)
 --TODO: Verify Env changes are done in a sane manner in interpreter
-
-
---instance Traversable Thetas where
---  traverse (Thetas a) = Thetas $ traverse a
+-- | Inference monad
+type InferL a b = (ReaderT
+                  (VEnv a)             -- Typing TEnvironment
+                  (StateT         -- Inference state
+                    (InferLState a)
+                    (Except (LikelihoodError a)))
+                  b)              -- Result
 
 --note: We need detGenerate in order to be able to solve probability: Reverse s a does not have a Random instance,
 -- so we have to make do without in probability. Hence if we need to generate, we need to generate deterministically.
-detGenerate :: (Fractional a, Ord a) => Env TypeInfo a -> Thetas a -> Expr TypeInfo a -> Value a
-detGenerate env thetas (IfThenElse _ cond left right) = do
-  case detGenerate env thetas cond of
-    VBool True -> detGenerate env thetas left
-    VBool False -> detGenerate env thetas right
+detGenerateM :: (Floating a, Fractional a, Ord a) => Expr TypeInfoWit a -> InferL a (Value a)
+detGenerateM (IfThenElse _ cond left right) = do
+  condVal <- detGenerateM cond
+  case condVal of
+    VBool True -> detGenerateM left
+    VBool False -> detGenerateM right
     _ -> error "Type error"
-detGenerate env thetas (GreaterThan _ left right) =
+detGenerateM (GreaterThan _ left right) = do
+  a <- detGenerateM left
+  b <- detGenerateM right
   case (a,b) of
-    (VFloat af, VFloat bf) -> VBool (af > bf)
+    (VFloat af, VFloat bf) -> return $ VBool (af > bf)
     _ -> error "Type error"
+detGenerateM (Plus _ left right) = if pt1 == Deterministic && pt2 == Deterministic
+  then (do
+    val1 <- detGenerateM left
+    val2 <- detGenerateM right
+    return $ VFloat (getVFloat val1 + getVFloat val2)
+  )
+  else error "detGenerate non-deterministic plus"
   where
-    a = detGenerate env thetas left
-    b = detGenerate env thetas right
-detGenerate _ thetas expr@(ThetaI _ i) = VFloat (findTheta expr thetas)
-detGenerate _ _ (Uniform _) = error "tried to detGenerate from random atom"
-detGenerate _ _ (Normal _) = error "tried to detGenerate from random atom"
-detGenerate _ _ (Constant _ x) = x
-detGenerate _ _ (Null _) = VList []
-detGenerate env thetas (Cons _ hd tl) = VList (detGenerate env thetas hd : xs)
-  where VList xs = detGenerate env thetas tl
-detGenerate _ _ expr =
+    (TypeInfoWit rt1 pt1 _) = getTypeInfo left
+    (TypeInfoWit rt2 pt2 _) = getTypeInfo right
+detGenerateM (Mult _ left right) = if pt1 == Deterministic && pt2 == Deterministic
+  then (do
+     val1 <- detGenerateM left
+     val2 <- detGenerateM right
+     return $ VFloat (getVFloat val1 * getVFloat val2)
+   )
+  else error "detGenerate non-deterministic mult"
+  where
+    (TypeInfoWit rt1 pt1 _) = getTypeInfo left
+    (TypeInfoWit rt2 pt2 _) = getTypeInfo right
+detGenerateM expr@(ThetaI _ i) = do
+   inf_ste <- get
+   return $ VFloat (findTheta expr (thetas inf_ste))
+detGenerateM (Uniform _) = error "tried to detGenerate from random atom"
+detGenerateM (Normal _) = error "tried to detGenerate from random atom"
+detGenerateM (Constant _ x) = return $ x
+detGenerateM (Null _) = return $ VList []
+detGenerateM (TNull _) = return $ VTuple []
+detGenerateM (Cons _ hd tl) = do
+  vs <- detGenerateM tl
+  let (VList xs) = vs
+  hs <- detGenerateM hd
+  return $ VList (hs: xs)
+detGenerateM (TCons _ hd tl) = do
+  vs <- detGenerateM tl
+  let (VTuple xs) = vs
+  hs <- detGenerateM hd
+  return $ VTuple (hs: xs)
+detGenerateM (Call t name) = do
+  env <- get
+  let Just expr = lookup name (global_funcs env)
+  -- Reset value env on call
+  local (const vempty) (detGenerateM expr)
+detGenerateM (Var t name) = do
+  env <- ask
+  let Just val = Map.lookup name (values env)
+  return val
+detGenerateM (InjF t name params expr) = do
+  innerVal <- detGenerateM expr
+  params_val <- mapM (detGenerateM) params
+  let (Just (FPair fPair)) = lookup name globalFenv
+  let (_, forward, _, _) = fPair
+  return $ forward params_val innerVal
+detGenerateM expr =
   if pt /= Deterministic
   then error "tried detGenerate on non-deterministic expr"
   else error "detGenerate not defined for expr"
-    where TypeInfo rt pt = getTypeInfo expr
+    where TypeInfoWit rt pt _ = getTypeInfo expr
 
-generate :: (Fractional a, RandomGen g, Ord a, Random a) => Env TypeInfo a -> Env TypeInfo a -> Thetas a -> [Expr TypeInfo a] -> Expr TypeInfo a -> Rand g (Value a)
+generate :: (Fractional a, RandomGen g, Ord a, Random a, Floating a) => Env TypeInfoWit a -> Env TypeInfoWit a -> Thetas a -> [Expr TypeInfoWit a] -> Expr TypeInfoWit a -> Rand g (Value a)
 generate globalEnv env thetas [] l@(Lambda _ name expr) = error "no args provided to lambda"
 generate globalEnv env thetas (arg:args) (Lambda _ name expr) = generate globalEnv ((name, arg):env ) thetas args expr
 generate _ _ _ (_:_) expr = error "args provided to non-lambda"
@@ -77,6 +148,8 @@ generate _ _ _ args (Normal _) = do
   let result = quantile gauss r
   return $ VFloat $ realToFrac result
 generate _ _ _ args (Constant _ x) = return x
+
+
 generate a b c args (Plus _ left right) = do
   leftSample <- generate a b c args left
   rightSample <- generate a b c args right
@@ -90,6 +163,7 @@ generate a b c args (Mult _ left right) = do
     (VFloat l, VFloat r) -> return $ VFloat (l * r)
     _ -> error "Type error"
 generate _ _ _ args (Null _) = return $ VList []
+generate _ _ _ args (TNull _) = return $ VTuple []
 generate globalEnv env thetas args (Cons _ hd tl) = do
   ls <- generate globalEnv env thetas args tl
   case ls of
@@ -97,119 +171,426 @@ generate globalEnv env thetas args (Cons _ hd tl) = do
       x <- generate globalEnv env thetas args hd
       return $ VList (x : xs)
     _ -> error "type error in list cons"
+generate globalEnv env thetas args (TCons _ hd tl) = do
+  ls <- generate globalEnv env thetas args tl
+  case ls of
+    VTuple xs -> do
+      x <- generate globalEnv env thetas args hd
+      return $ VTuple (x : xs)
+    _ -> error "type error in list cons"
 --Call leaves function context, pass GlobalEnv to ensure env is cleaned up.
 generate globalEnv env thetas args (Call t name) = generate globalEnv globalEnv thetas args expr
+  where Just expr = lookup name globalEnv
+generate globalEnv env thetas args (Var t name) = generate globalEnv globalEnv thetas args expr
   where Just expr = lookup name env
 generate globalEnv env thetas args (ReadNN _ _ expr) = error "NN not implemented"
+generate globalEnv env thetas args (LetIn _ name decl bij) =
+  do
+    declValue <- generate globalEnv env thetas args decl
+    let (VFloat val) = declValue
+    let extendedEnv = (name, Constant (TypeInfoWit (getRType declValue) Deterministic Set.empty) declValue):env
+    generate globalEnv extendedEnv thetas args bij
+generate globalEnv env thetas args (InjF _ name params f2) =
+  do
+    let (Just (FPair fPair)) = lookup name globalFenv
+    let (_, forward, _, _) = fPair
+    innerVal <- generate globalEnv env thetas args f2
+    params_val <- mapM (generate globalEnv env thetas args) params
+    return (forward params_val innerVal)
+
+callInv :: (Floating a) => FEnv2 a -> String -> Params a -> a -> a
+callInv fenv name pa va = idd pa va
+  where (Just (FPair2 fPair)) = lookup name fenv
+        (_, idd, _) = fPair
+
 
 sigmoid :: Floating a => a -> a
 sigmoid x = 1 / (1 + exp (-x))
 
-likelihood :: (Fractional a, Ord a, Real a, Floating a) => Env TypeInfo a -> Env TypeInfo a -> Thetas a -> Expr TypeInfo a -> Value a -> Probability a
+replaceVEnvBranch :: (Show a) => (Map.Map String (Value a), Map.Map String (Value a)) -> String -> (Map.Map String (Value a), Map.Map String (Value a))
+replaceVEnvBranch (envS1, envS2) var = (env1, env2)
+  where Just (VBranch val1 val2 bName) =  Map.lookup var envS1
+        env1 = Map.insert var val1 envS1
+        env2 = Map.insert var val2 envS2
+--TODO expand to more vars
+replaceEnvBranch :: (Show a) => (Env TypeInfoWit a, Env TypeInfoWit a)  -> String -> (Env TypeInfoWit a, Env TypeInfoWit a)
+replaceEnvBranch (envS1, envS2) var = (env1, env2)
+  where Just (Constant ti (VBranch val1 val2 bName)) =  lookup var envS1
+        envNoB1 = filter (\x -> fst x /= var) envS1
+        envNoB2 = filter (\x -> fst x /= var) envS2
+        env1 = (var, Constant ti val1):envNoB1
+        env2 = (var, Constant ti val2):envNoB2
+
+branchedCompare :: (Ord a, Eq a, Floating a) => Value a -> Value a -> Probability a
+branchedCompare (VBranch val1 val2 x) comp = BranchedProbability (branchedCompare val1 comp) (branchedCompare val2 comp) x
+branchedCompare (VFloat x) (VRange l@(Limits _ _)) = if isInRange l x then DiscreteProbability 1 else DiscreteProbability 0
+branchedCompare val1 val2 = if val1 == val2 then DiscreteProbability 1 else DiscreteProbability 0
+
+isInRange :: (Ord a) => Limits a ->  a -> Bool
+isInRange (Limits Nothing Nothing) _ = True
+isInRange (Limits Nothing (Just (VFloat x))) z = z <= x
+isInRange (Limits (Just (VFloat x)) Nothing) z = z <= x
+isInRange (Limits (Just (VFloat x)) (Just (VFloat y))) z = z <= y && z >= x
+
+applyCorBranch :: (Floating a) => Probability a -> Value a -> Probability a
+applyCorBranch (BranchedProbability p1 p2 x) (VBranch v1 v2 y)
+  | x == y = BranchedProbability (applyCorBranch p1 v1) (applyCorBranch p2 v2) x
+  | otherwise = error "wrong variables appluCor"
+applyCorBranch (BranchedProbability p1 p2 x) vv@(VFloat v) = BranchedProbability (applyCorBranch p1 vv) (applyCorBranch p2 vv) x
+applyCorBranch (PDF p) (VFloat v) = PDF (p * v)
+applyCorBranch (DiscreteProbability p) (VFloat v) = DiscreteProbability (p * v)
+
+-- -- | Run the inference monad
+runInferL ::(Erf a, Show a, Fractional a, Ord a, Real a, Floating a) =>  Env TypeInfoWit a -> Expr TypeInfoWit a -> Thetas a -> Value a -> Probability a
+runInferL env expr thetas val = case runExcept $ evalStateT (runReaderT (likelihoodM expr val) vempty) (initInferL env thetas) of
+  Left err -> error "error in likelihoodM"
+  Right p -> p
+
+runInferIO ::(Erf a, Show a, Fractional a, Ord a, Real a, Floating a) =>  Env TypeInfoWit a -> Expr TypeInfoWit a -> Thetas a -> Value a -> IO ()
+runInferIO env expr thetas val = case runExcept $ evalStateT (runReaderT (likelihoodM expr val) vempty) (initInferL env thetas) of
+  Left err -> print err
+  Right p -> print p
+
+likelihoodM :: (Erf a, Show a, Fractional a, Ord a, Real a, Floating a) => Expr TypeInfoWit a -> Value a -> InferL a (Probability a)
 -- possible problems in the probability math in there:
-likelihood globalEnv env thetas (IfThenElse t cond left right) val = pOr (pAnd pCond pLeft) (pAnd pCondInv pRight)
-  where
-    pCond = likelihood globalEnv env thetas cond (VBool True)
-    pCondInv = DiscreteProbability (1 - unwrapP pCond)
-    pLeft = likelihood globalEnv env thetas left val
-    pRight = likelihood globalEnv env thetas right val
-likelihood globalEnv env thetas (GreaterThan t left right) (VBool x)
+likelihoodM expr _
+  | getPW expr == Bottom = throwError $ BottomError expr
+likelihoodM (Call _ name) val = do
+  env <- get
+  let Just expr = lookup name (global_funcs env)
+  -- Reset value env on call
+  local (const vempty) (likelihoodM expr val)
+likelihoodM (LetIn ti name decl bij) val
+  | getPTypeW (getTypeInfo decl) == Integrate = do
+      (baseDistV, bMap) <- getInvValueM globalFenv bij name val
+      baseDistProb <- likelihoodM decl baseDistV
+      e2Dist <- local (\venv -> venv{values = Map.insert name baseDistV (values venv),
+                                     branchMap = Map.union bMap (branchMap venv)}) (likelihoodM bij val)
+      let pBr = baseDistProb `pAnd` e2Dist
+      return $ marginalizeBranches pBr name
+  | getPTypeW (getTypeInfo decl) == Deterministic = do
+      declVal <- detGenerateM decl
+      let scope e = vremove e name `vextend` (name, declVal)
+      local scope (likelihoodM bij val)
+  | otherwise = throwError $ BottomError (LetIn ti name decl bij)
+  --where -- Integrate case
+        --extendedEnvI = (name, Constant (TypeInfoWit TFloat Deterministic Set.empty) baseDistV):env
+        --e2Dist = likelihood globalEnv extendedEnvI thetas bij (Map.unionWith (++) branchMap branchMapE) val
+        -- Deterministic case
+        -- Could replace this with value env
+        --extendedEnvD = (name, Constant (TypeInfoWit TFloat Deterministic Set.empty) (detGenerate env thetas decl)):env
+likelihoodM ee@(IfThenElse t cond left right) val =
+  do
+    venv <- ask
+    pCond <- likelihoodM cond (VBool True)
+    let pCondInv = DiscreteProbability (1 - unwrapP pCond)
+    case Map.lookup ee (branchMap venv) of
+      Nothing -> do
+        pLeft <- likelihoodM left val
+        pRight <- likelihoodM right val
+        return (pOr (pAnd pCond pLeft) (pAnd pCondInv pRight))
+      (Just [branchName]) -> do
+        let (env1, env2) = foldl replaceVEnvBranch (values venv, values venv) [branchName]
+        pLeft <- local (\venv -> venv{values = env1}) (likelihoodM left val)
+        pRight <- local (\venv -> venv{values = env2}) (likelihoodM right val)
+        return $ BranchedProbability (pAnd pCond pLeft) (pAnd pCondInv pRight) branchName
+likelihoodM (Null _) (VList []) = return $ DiscreteProbability 1
+likelihoodM (Null _) (VList [VAnyList])  = return $ DiscreteProbability 1
+likelihoodM (Null _) _ = return $ DiscreteProbability 0
+likelihoodM (TNull _) (VTuple []) = return $  DiscreteProbability 1
+likelihoodM (TNull _) _ = return $ DiscreteProbability 0
+likelihoodM (Cons _ _ _) (VList [VAnyList])  = return $  DiscreteProbability 1
+likelihoodM (Cons _ _ _) (VList []) = return $  DiscreteProbability 0
+likelihoodM (Cons _ hd tl) (VList (x:xs)) = do
+    fstP <- likelihoodM hd x
+    sndP <- likelihoodM tl $ VList xs
+    let a = trace (show sndP) 1
+    return $ pAnd (pAnd fstP sndP) (DiscreteProbability a)
+likelihoodM expr VAnyList = throwError $ MismatchedValue VAnyList expr
+likelihoodM (TCons _ _ _) (VTuple []) = return $ DiscreteProbability 0
+likelihoodM (TCons _ hd tl) (VTuple (x:xs)) = do
+   fstP <- likelihoodM hd x
+   sndP <- likelihoodM tl $ VTuple xs
+   return $ pAnd fstP sndP
+likelihoodM inj@(InjF ti name params expr) val =
+  do
+    params_val <- mapM detGenerateM params
+    let invVal = rangeMap (inverse params_val) val
+    let inv_grad = inverse_grad params_val
+    -- only swaps limits if this is a range value
+    let invValSwapped = rangeSwap inv_grad invVal
+    invProb <- likelihoodM expr invValSwapped
+    return $ invProb `pAnd` (DiscreteProbability $ abs (rangeGrad inv_grad val))
+  where (Just (FPair (_, forward, inverse, inverse_grad))) = lookup name globalFenv
+        --inverse_grad_auto = grad' (\[val] -> callInv globalFenv2 name (map autoVal params_val) val) [vfloat_val]
+        --(VFloat vfloat_val) = val
+        
+likelihoodM expr (VRange (Limits Nothing Nothing)) = return $ DiscreteProbability 1.0
+
+likelihoodM (GreaterThan t left right) (VBool x)
   --consider GreaterThan () (Uniform ()) (ThetaI () 0)
   -- the right side is deterministic. the probability of getting true out of the expr is 1 - theta
   -- rightGen will return theta. Therefore, integrating Uniform from -inf to theta will result in theta.
-  | rightP == Deterministic && leftP  == Integrate && x     = DiscreteProbability $ 1 - integrate left thetas env (Limits Nothing (Just rightGen))
-  | rightP == Deterministic && leftP  == Integrate && not x = DiscreteProbability $ integrate left thetas env (Limits Nothing (Just rightGen))
-  | leftP  == Deterministic && rightP == Integrate && x     = DiscreteProbability $ 1 - integrate right thetas env (Limits (Just leftGen) Nothing)
-  | leftP  == Deterministic && rightP == Integrate && not x = DiscreteProbability $ integrate right thetas env (Limits (Just leftGen) Nothing)
-  | leftP  == Deterministic && rightP == Deterministic && x = DiscreteProbability $ sigmoid (leftFloat - rightFloat)
-  | leftP  == Deterministic && rightP == Deterministic && not x = DiscreteProbability $ sigmoid (rightFloat - leftFloat)
-  | otherwise = error "undefined probability for greaterThan"
+  | rightP == Deterministic && leftP  == Integrate && x = do
+    rightGen <- detGenerateM right
+    return $ DiscreteProbability $ 1 - integrate left (Limits Nothing (Just rightGen))
+  | rightP == Deterministic && leftP  == Integrate && not x = do
+    rightGen <- detGenerateM right
+    return $ DiscreteProbability $ integrate left (Limits Nothing (Just rightGen))
+  | rightP == Integrate && leftP  == Deterministic && x = do
+    leftGen <- detGenerateM left
+    return $ DiscreteProbability $ 1 - integrate left (Limits Nothing (Just leftGen))
+  | rightP == Integrate && leftP  == Deterministic && not x = do
+    leftGen <- detGenerateM left
+    return $ DiscreteProbability $ integrate left (Limits Nothing (Just leftGen))
+  | leftP  == Deterministic && rightP == Deterministic= do
+    rightGen <- detGenerateM right
+    leftGen <- detGenerateM left
+    let VFloat leftFloat = leftGen
+    let VFloat rightFloat = rightGen
+    return $ DiscreteProbability $ if x then sigmoid (leftFloat - rightFloat) else sigmoid(rightFloat - leftFloat)
   where
-    leftP = getP left
-    rightP = getP right
-    leftGen = detGenerate env thetas left
-    rightGen = detGenerate env thetas right
-    VFloat leftFloat = leftGen
-    VFloat rightFloat = rightGen
-likelihood _ _ thetas expr@(ThetaI _ x) (VFloat val) = if val == findTheta expr thetas then DiscreteProbability 1 else DiscreteProbability 0
-likelihood _ _ _ (ThetaI _ _) _ = error "typing error in probability - ThetaI"
-likelihood _ _ _ (Uniform _) (VFloat x) = if 0 <= x && x <= 1 then PDF 1 else PDF 0
-likelihood _ _ _ (Uniform _) _ = error "typing error in probability - Uniform"
+    leftP = getPW left
+    rightP = getPW right
+likelihoodM expr@(ThetaI _ x) val2 = do
+   inf_ste <- get
+   return $ branchedCompare (VFloat (findTheta expr (thetas inf_ste))) val2
+likelihoodM (Uniform _) (VFloat x) = return $ if 0 <= x && x <= 1 then PDF 1 else PDF 0
+likelihoodM (Uniform t) (VRange limits) = return $ DiscreteProbability $ integrate (Uniform t) limits
+
 --probability _ _ _ (Normal _) (VFloat x) = PDF $ realToFrac $ density (normalDistr 0 1) $ realToFrac x
-likelihood _ _ _ (Normal _) (VFloat x) = PDF myDensity
+likelihoodM (Normal _) (VFloat x) = return $ PDF myDensity
   where myDensity = (1 / sqrt (2 * pi)) * exp (-0.5 * x * x)
-likelihood _ _ _ (Normal _) _ = error "typing error in probability - Normal"
-likelihood _ _ _ (Constant _ val) val2 = if val == val2 then DiscreteProbability 1 else DiscreteProbability 0
-likelihood globalEnv env thetas (Mult _ left right) (VFloat x)
+likelihoodM (Normal t) (VRange limits) = return $ DiscreteProbability $ integrate (Normal t) limits
+
+likelihoodM (Constant _ val) val2 = return $ branchedCompare val val2
+likelihoodM (Mult _ left right) (VRange limits)
   -- need to divide by the deterministic sample
-  | leftP == Deterministic || rightP == Deterministic = correctedProbability
+  | leftP == Deterministic =
+    do
+      leftGen <- detGenerateM left
+      let VFloat leftFloat = leftGen
+      let inverse = fmap (flip(/) leftFloat) (VRange limits)
+      let inverse_flip = if leftFloat < 0 then swapLimits inverse else inverse
+      likelihoodM right inverse_flip
+  | rightP == Deterministic =
+      do
+        rightGen <- detGenerateM right
+        let VFloat rightFloat = rightGen
+        let inverse = fmap (flip(/) rightFloat) (VRange limits)
+        let inverse_flip = if rightFloat < 0 then swapLimits inverse else inverse
+        likelihoodM left inverse_flip
   | otherwise = error "can't solve Mult; unexpected type error"
   where
-    leftP = getP left
-    rightP = getP right
-    VFloat leftGen = detGenerate env thetas left
-    VFloat rightGen = detGenerate env thetas right
-    detSample = if leftP == Deterministic then leftGen else rightGen
-    inverse = x / detSample
-    PDF inverseProbability = if leftP == Deterministic
-      then likelihood globalEnv env thetas right (VFloat inverse)
-      else likelihood globalEnv env thetas left (VFloat inverse)
-    correctedProbability = PDF (inverseProbability / detSample)
-likelihood globalEnv env thetas (Plus _ left right) (VFloat x)
-  | leftP == Deterministic = likelihood globalEnv env thetas right (VFloat inverse)
-  | rightP == Deterministic = likelihood globalEnv env thetas left (VFloat inverse)
-  | otherwise = error "can't solve Plus; unexpected type error"
+    leftP = getPW left
+    rightP = getPW right
+
+likelihoodM (Mult ti left right) (VFloat x)
+  -- need to divide by the deterministic sample
+  | leftP == Deterministic =
+      do
+        leftGen <- detGenerateM left
+        let inverse = fmap ((*x) . ((/)1)) leftGen
+        inverseProbability <- likelihoodM right inverse
+        return $ (applyCorBranch inverseProbability (fmap (abs . ((/)1)) leftGen))
+  | rightP == Deterministic =
+      do
+        rightGen <- detGenerateM right
+        let inverse = fmap ((*x) . ((/)1)) rightGen
+        inverseProbability <- likelihoodM left inverse
+        return $ (applyCorBranch inverseProbability (fmap (abs . ((/)1)) rightGen))
+  | otherwise = throwError $ BottomError (Mult ti left right)
   where
-    leftP = getP left
-    rightP = getP right
-    VFloat leftGen = detGenerate env thetas left
-    VFloat rightGen = detGenerate env thetas right
-    inverse = if leftP == Deterministic then x - leftGen else x - rightGen
-likelihood _ _ _ (Null _) (VList []) = DiscreteProbability 1
-likelihood _ _ _ (Null _) _ = DiscreteProbability 0
-likelihood _ _ _ (Cons _ _ _) (VList []) = DiscreteProbability 0
-likelihood globalEnv env thetas (Cons _ hd tl) (VList (x:xs)) =
-  pAnd
-    (likelihood globalEnv env thetas hd x)
-    (likelihood globalEnv env thetas tl $ VList xs)
-likelihood globalEnv env thetas (Call _ name) val = likelihood globalEnv globalEnv thetas expr val
-  where Just expr = lookup name env
+    leftP = getPW left
+    rightP = getPW right
+likelihoodM (Null _) (VList []) = return $ DiscreteProbability 1
+likelihoodM (Null _) _ = return $ DiscreteProbability 0
+likelihoodM (Cons _ _ _) (VList []) = return $ DiscreteProbability 0
+likelihoodM (Cons _ hd tl) (VList (x:xs)) = do
+  p1 <- (likelihoodM hd x)
+  p2 <- (likelihoodM tl $ VList xs)
+  return $ pAnd p1 p2
 
--- Cons a [b,c,d] = [a,b,c,d]
+likelihoodM (Plus ti left right) (VFloat x)
+  | leftP == Deterministic =
+    do
+      leftGen <- detGenerateM left
+      likelihoodM right (inverse x leftGen)
+  | rightP == Deterministic =
+    do
+      rightGen <- detGenerateM right
+      likelihoodM left (inverse x rightGen)
+  | otherwise = throwError $ BottomError (Plus ti left right)
+  where
+  -- TODO: Branching for range queries
+    leftP = getPW left
+    rightP = getPW right
+    inverse x d = fmap ((+x) . (*(-1))) d
+    inverse_nob x dtl = fmap (flip(-) dtl) x
 
---likelihood([a, b, ... l], Cons subExprA subExprB)
--- = (likelihood(a, subExprA) * (likelihood([b, ..., l], subExprB)
+likelihoodM (Plus ti left right) (VRange limits)
+  | leftP == Deterministic =
+    do
+     leftGen <- detGenerateM left
+     let VFloat leftFloat = leftGen
+     likelihoodM right (inverse_nob (VRange limits) leftFloat)
+  | rightP == Deterministic =
+    do
+      rightGen <- detGenerateM right
+      let VFloat rightFloat = rightGen
+      likelihoodM left (inverse_nob (VRange limits) rightFloat)
+  | otherwise = throwError $ BottomError (Plus ti left right)
+  where
+  -- TODO: Branching for range queries
+    leftP = getPW left
+    rightP = getPW right
+    inverse x d = fmap ((+x) . (*(-1))) d
+    inverse_nob x dtl = fmap (flip(-) dtl) x
+-- TODO lists as variables with branching
 
-integrate :: (Num a, Ord a) => Expr TypeInfo a -> Thetas a -> Env TypeInfo a -> Limits a -> a
-integrate (Uniform t) thetas env (Limits low high) = if l2 > 1 || h2 < 0 then 0 else h2 - l2
+likelihoodM (Var t name) val = do
+  env <- ask
+  let Just val2 = Map.lookup name (values env)
+  return $ branchedCompare val val2
+
+likelihoodM d (VBranch v1 v2 x) = do
+   p1 <- lf v1
+   p2 <- lf v2
+   return $ BranchedProbability p1 p2 x
+  where lf = likelihoodM d
+
+
+likelihoodM e@(ThetaI _ _) v = throwError $ MismatchedValue v e
+likelihoodM e@(Cons _ _ _) v = throwError $ MismatchedValue v e
+likelihoodM e@(Normal _) v = throwError $ MismatchedValue v e
+likelihoodM e@(Uniform _) v = throwError $ MismatchedValue v e
+
+
+-- let x = normal in let y = normal in if flip then (x, y) else (x-3, normal)
+-- getinv x = branch val, val - 3 --> basedistV branchedprobability n1 n2
+-- getinv y = branch val, vmarg --> basedistV branchedprobability n3 1
+-- likelihood (x, y)
+marginalizeBranches :: (Num a, Show a) => Probability a -> String -> Probability a
+marginalizeBranches (BranchedProbability p1 p2 x) name
+  | x == name = pOr p1 p2
+  | otherwise = BranchedProbability (marginalizeBranches p1 name) (marginalizeBranches p2 name) x
+marginalizeBranches p _ = p
+likelihoodForValue :: (Num a) => (Value a -> Probability a) -> Value a -> String -> Probability a
+likelihoodForValue ll (VBranch val1 val2 y) x
+ | x == y = BranchedProbability (likelihoodForValue ll val1 x) (likelihoodForValue ll val2 x) x
+ | otherwise = error "unfitting variables likelihood for value"
+likelihoodForValue ll val _ = ll val
+
+getInvValueM :: (Floating a, Num a, Fractional a, Ord a) => FEnv a -> Expr TypeInfoWit a -> String -> Value a -> InferL a (Value a, BranchMap a)
+getInvValueM _ expr v _
+  | Set.notMember v (getWitsW expr) = error "witnessed var not in deducible"
+getInvValueM fenv  (Var _ name) var val = if name == var
+                                              then return $ (val, Map.empty)
+                                              else error "False variable in var encountered"
+getInvValueM fenv (InjF _ name params f2) var val = do
+  params_val <- mapM detGenerateM params
+  getInvValueM fenv f2 var (inverse params_val val)
+  where (Just (FPair fPair)) = lookup name fenv
+        (_, _, inverse, _) = fPair
+        --grad_loss :: [(loss :: a, grad :: Thetas a)]
+        --grad_loss thX = [grad' (\theta -> log $ unwrapP $ likelihood (autoEnv env) (autoEnv env) theta (autoExpr expr) (autoVal sample)) thX | sample <- samples]
+
+        --inverse_grad_auto = head $ grad (\[inv_val] -> inverse_p inv_val) [val]
+        --inverse_p = inverse params_val
+        --auto_p = (map auto params_val)
+
+getInvValueM fenv (Plus ti expr1 expr2) var (VFloat val)
+  | var `elem` getWitsW expr1 = do
+    val2 <- detGenerateM expr2
+    getInvValueM fenv expr1 var (VFloat $ val - (getVFloat val2))
+  | var `elem` getWitsW expr2 =  do
+    val1 <- detGenerateM expr1
+    getInvValueM fenv expr2 var (VFloat $ val - (getVFloat val1))
+getInvValueM fenv  (Mult ti expr1 expr2) var (VFloat val)
+  | notElem var (getWits ti) || getPTypeW ti == Bottom = error "Cannot calculate inverse value in this mult expression"
+  | var `elem` getWitsW  expr1 = do
+    val2 <- detGenerateM expr2
+    getInvValueM fenv expr1 var (VFloat $ val / (getVFloat val2))
+  | var `elem` getWitsW expr2 =  do
+    val1 <- detGenerateM expr1
+    getInvValueM fenv expr2 var (VFloat $ val / (getVFloat val1))
+getInvValueM fenv (Cons ti fst rst) var (VList (fst_v:rst_v))
+  | notElem var (getWits ti) || getPTypeW ti == Bottom = error "Cannot calculate inverse value in this cons expression"
+  | var `elem` getWitsW fst = getInvValueM fenv fst var fst_v
+  | var `elem` getWitsW rst = getInvValueM fenv rst var (VList rst_v)
+getInvValueM fenv (LetIn ti name decl expr) var val =
+  getInvValueM fenv expr var val
+-- Correction factor not correctly calculated since its not used atm
+getInvValueM fenv ee@(IfThenElse ti cond tr fl) var val
+  | var `elem` getWitsW tr && var `elem` getWitsW fl = do
+    (leftVal, bMap1) <- getInvValueM fenv tr var val
+    (rightVal, bMap2) <- getInvValueM fenv fl var val
+    return (VBranch leftVal rightVal var, Map.union (Map.union (Map.singleton ee [var]) bMap1) bMap2)
+  | otherwise = error "non-witnessed if-then-else branches"
+  -- TODO: What if subtrees have more branches
+getInvValueM _ _ _ _ = error "bij inv not implemented for expr here"
+
+
+integrate :: (Show a, Erf a, Num a, Ord a) => Expr TypeInfoWit a -> Limits a -> a
+integrate (Uniform t) (Limits low high)
+ | checkLimits (Limits low high) = if l2 > 1 || h2 < 0 then 0 else h2 - l2
+ | otherwise = error "Invalid value for limits"
   where
     h2 = min 1 $ maybe 1 unwrap high
     l2 = max 0 $ maybe 0 unwrap low
     unwrap vflt = case vflt of
       VFloat x -> x
       _ -> error "unexpected type-error in RT:Integrate"
-integrate _ _ _ _ = error "undefined integrate for expr"
+integrate (Normal t) (Limits low high)
+ | trace (show low ++ show high) (checkLimits (Limits low high)) =
+   case high of
+     Nothing -> 1 - unwrap_cdf low
+     (Just sth) -> unwrap_cdf high - unwrap_cdf low
+ | otherwise = error "Invalid value for limits"
+  where
+    unwrap_cdf vflt = case vflt of
+      Nothing -> 0
+      Just (VFloat x) -> cdf x
+      _ -> error "unexpected type-error in RT:Integrate"
+    cdf z = (1/2)*(1 + erf(z/sqrt(2)))
+integrate _ _ = error "undefined integrate for expr"
 
 data Probability a = PDF a
                  | DiscreteProbability a
+                 | BranchedProbability (Probability a) (Probability a) String
                  deriving (Show)
 
 
---Nothing indicates low/high infinity.
-data Limits a = Limits (Maybe (Value a)) (Maybe (Value a))
 
-pAnd :: Num a => Probability a -> Probability a -> Probability a
+pAnd :: (Num a, Show a)  => Probability a -> Probability a -> Probability a
 pAnd (PDF a) (PDF b) = PDF (a*b)
 pAnd (DiscreteProbability a) (DiscreteProbability b) = DiscreteProbability (a*b)
 pAnd (PDF a) (DiscreteProbability b) = PDF (a*b)
 pAnd (DiscreteProbability a) (PDF b) = PDF (a*b)
+pAnd (BranchedProbability p1 p2 x) pp@(DiscreteProbability p)  = BranchedProbability (pAnd p1 pp) (pAnd p2 pp) x
+pAnd pp@(DiscreteProbability p) (BranchedProbability p1 p2 x) = BranchedProbability (pAnd p1 pp) (pAnd p2 pp) x
+pAnd pp@(PDF p) (BranchedProbability p1 p2 x) = BranchedProbability (pAnd p1 pp) (pAnd p2 pp) x
+pAnd (BranchedProbability p1 p2 x)pp@(PDF p)  = BranchedProbability (pAnd p1 pp) (pAnd p2 pp) x
 
-pOr :: Num a => Probability a -> Probability a -> Probability a
+-- TODO Reordering branched probability trees
+pAnd pp2@(BranchedProbability p1 p2 x) (BranchedProbability p3 p4 y) =
+  if x == y
+  then BranchedProbability (pAnd p1 p3) (pAnd p2 p4) y
+  else BranchedProbability (pAnd pp2 p3) (pAnd pp2 p4) y
+pAnd (BranchedProbability p1 p2 x) p3 = BranchedProbability (pAnd p1 p3) (pAnd p2 p3) x
+
+pAnd p2 p4 = trace ("error p " ++ show p2 ++ show p4) ( p2)
+
+pOr :: (Show a, Num a) => Probability a -> Probability a -> Probability a
 pOr (PDF a) (PDF b) = PDF (a+b)
 pOr (DiscreteProbability a) (DiscreteProbability b) = DiscreteProbability (a+b)
 pOr (PDF a) (DiscreteProbability b) = PDF (a+b)
 pOr (DiscreteProbability a) (PDF b) = PDF (a+b)
+pOr (BranchedProbability p1 p2 x) (BranchedProbability p3 p4 y) 
+  | x == y = BranchedProbability (pOr p1 p3) (pOr p2 p4) x
+  | otherwise = error "pOr on different variable branches"
 
 unwrapP :: Probability a -> a
 unwrapP (PDF x) = x
 unwrapP (DiscreteProbability x) = x
+

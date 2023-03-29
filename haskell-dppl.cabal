@@ -26,20 +26,18 @@ library
   exposed-modules:
       CodeGen
       HMInference
+      Infer
+      InjectiveFunctions
       Interpreter
+      InterpreterDeprecated
       Lib
       PInfer
+      PInfer2
       PInferBranched
-      PLambda.Env
-      PLambda.Eval
-      PLambda.Infer
-      PLambda.Lexer
-      PLambda.Parser
-      PLambda.PLambda
-      PLambda.Pretty
-      PLambda.Syntax
-      PLambda.Type
+      PInferTypeclass
+      ResultTypes
       RInfer
+      SpecExamples
       SPLL.Analysis
       SPLL.CodeGenJulia
       SPLL.CodeGenPyTorch
@@ -50,6 +48,7 @@ library
       SPLL.Typing.RType
       SPLL.Typing.Typing
       Transpiler
+      Witnessing
   other-modules:
       Paths_haskell_dppl
   hs-source-dirs:
@@ -60,6 +59,7 @@ library
     , ad
     , base >=4.7 && <5
     , containers
+    , erf
     , linear
     , mtl
     , mwc-random
@@ -88,6 +88,7 @@ executable haskell-dppl-exe
     , ad
     , base >=4.7 && <5
     , containers
+    , erf
     , haskell-dppl
     , linear
     , mtl
@@ -118,6 +119,7 @@ test-suite haskell-dppl-test
     , ad
     , base >=4.7 && <5
     , containers
+    , erf
     , haskell-dppl
     , linear
     , mtl

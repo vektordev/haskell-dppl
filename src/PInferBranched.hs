@@ -2,7 +2,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 module PInferBranched (
-    showResults, showResultsProg, makeMain
+    showResults, showResultsProg, makeMain, inferType
 ) where
 
 import Control.Monad.Except
@@ -15,6 +15,7 @@ import qualified Data.Set as Set
 
 import Data.Monoid
 import Data.Foldable hiding (toList)
+import Data.Either
 import qualified Data.Map as Map
 import SPLL.Lang
 import SPLL.Typing.Typing
@@ -114,13 +115,13 @@ instance Substitutable PType where
   apply _ Deterministic = Deterministic
   apply _ Integrate = Integrate
   apply _ Chaos = Chaos
-  apply s (PComb p1 p2) = apply s p1 `PComb` apply s p2
+  apply s (PArr p1 p2) = apply s p1 `PArr` apply s p2
   apply (Subst s) t@(TVar a) = Map.findWithDefault t a s
   -- rest of PType arent used as of now
   apply _ t = t
 
   ftv (TVar a)       = Set.singleton a
-  ftv (PComb p1 p2) = ftv p1 `Set.union` ftv p2
+  ftv (PArr p1 p2) = ftv p1 `Set.union` ftv p2
   ftv _ = Set.empty
 
 instance Substitutable Scheme where
@@ -140,6 +141,12 @@ instance Substitutable TEnv where
   apply s (TypeEnv env) = TypeEnv $ Map.map (apply s) env
   ftv (TypeEnv env) = ftv $ Map.elems env
 
+inferType :: Program () a -> PType
+inferType prog = if length res /= 1 then error "non-unique solution"
+  else ty
+  where res = rights $ constraintsExprProg empty prog
+        (_, _, _, (Forall _ ty)) = head res
+
 showResults :: Expr () a -> IO ()
 showResults e = do
   let res = constraintsExpr empty e
@@ -147,12 +154,11 @@ showResults e = do
   showResult res
 showResult :: [Either PTypeError ([Constraint], Subst, PType, Scheme)] -> IO ()
 showResult (Left err: rest)  =  do
-      print err
       showResult rest
 showResult (Right (cs, subst, ty, scheme):rest)  =  do
       putStrLn "-----"
-      putStrLn "Constraints: "
-      listConstraints cs
+    --  putStrLn "Constraints: "
+    --  listConstraints cs
       putStrLn $ "Subst: " ++ show subst
       putStrLn $ "Type:\n" ++ show ty
       putStrLn $ "Top-level Scheme: " ++ show scheme
@@ -279,26 +285,39 @@ combineBranchFunc f_tv b1 b2 = case b1 of
 combineBranchesFunc :: [Branch] -> ([Branch], PType) -> [Branch]
 combineBranchesFunc b1 (b2, f_tv) = combineBranchFunc f_tv <$> b1 <*> b2
 
+basicTypes :: [PType]
+basicTypes = [Deterministic, Integrate, Chaos]
 -- det is for plus/mult where integrate integrate results in chaos
 buildDet :: Either PTypeError ((PType, PType), [Constraint]) -> [Branch]
 buildDet b = case b of
     Left err -> [Left err]
-    Right ((t1, t2), cs) -> [Right (Integrate, cs ++ [(t1, Deterministic), (t2, Integrate)]),
+    Right ((t1, t2), cs) -> if elem t1 basicTypes && elem t2 basicTypes then [Right (downgrade2 t1 t2, cs)] else
+                            [Right (Integrate, cs ++ [(t1, Deterministic), (t2, Integrate)]),
                             Right (Integrate, cs ++ [(t2, Deterministic), (t1, Integrate)]),
-                            Right (Deterministic, cs ++ [(t2, Deterministic), (t1, Deterministic)])]
+                            Right (Deterministic, cs ++ [(t2, Deterministic), (t1, Deterministic)]),
+                            Right (Chaos, cs ++ [(t2, Integrate), (t1, Integrate)]),
+                            Right (Chaos, cs ++ [(t2, Chaos), (t1, Chaos)]),
+                            Right (Chaos, cs ++ [(t2, Integrate), (t1, Chaos)]),
+                            Right (Chaos, cs ++ [(t2, Chaos), (t1, Integrate)]),
+                            Right (Chaos, cs ++ [(t2, Chaos), (t1, Deterministic)]),
+                            Right (Chaos, cs ++ [(t2, Deterministic), (t1, Chaos)])]
 
 -- this is straight downgrade method (Chaos will produce UnificationFail)
 buildInt :: Either PTypeError ((PType, PType), [Constraint]) -> [Branch]
 buildInt b = case b of
    Left err -> [Left err]
-   Right ((Deterministic, t2), cs) -> [Right (Integrate, cs ++ [(t2, Integrate)]),
-                              Right (Deterministic, cs ++ [(t2, Deterministic)])]
-   Right ((t1, Deterministic), cs) -> [Right (Integrate, cs ++ [(t1, Integrate)]),
-                                 Right (Deterministic, cs ++ [(t1, Deterministic)])]
-   Right ((t1, t2), cs) -> [Right (Integrate, cs ++ [(t1, Deterministic), (t2, Integrate)]),
+   
+   Right ((t1, t2), cs) -> if elem t1 basicTypes && elem t2 basicTypes then [Right (downgrade t1 t2, cs)]else
+                           [Right (Integrate, cs ++ [(t1, Deterministic), (t2, Integrate)]),
                            Right (Integrate, cs ++ [(t2, Deterministic), (t1, Integrate)]),
                            Right (Deterministic, cs ++ [(t2, Deterministic), (t1, Deterministic)]),
-                           Right (Integrate, cs ++ [(t2, Integrate), (t1, Integrate)])]
+                           Right (Integrate, cs ++ [(t2, Integrate), (t1, Integrate)]),
+                           Right (Chaos, cs ++ [(t2, Chaos), (t1, Chaos)]),
+                           Right (Chaos, cs ++ [(t2, Integrate), (t1, Chaos)]),
+                           Right (Chaos, cs ++ [(t2, Chaos), (t1, Integrate)]),
+                           Right (Chaos, cs ++ [(t2, Chaos), (t1, Deterministic)]),
+                           Right (Chaos, cs ++ [(t2, Deterministic), (t1, Chaos)])
+                           ]
 
 rtFromScheme :: Scheme -> PType
 rtFromScheme (Forall _ rt) = rt
@@ -379,12 +398,12 @@ normalize (Forall _ body) = Forall (map snd ord) (normtype body)
     ord = zip (nub $ fv body) (map TV letters)
 
     fv (TVar a)   = [a]
-    fv (PComb a b) = fv a ++ fv b
+    fv (PArr a b) = fv a ++ fv b
     fv Deterministic = []
     fv Integrate = []
     fv Chaos = []
 
-    normtype (PComb a b) = PComb (normtype a) (normtype b)
+    normtype (PArr a b) = PArr (normtype a) (normtype b)
     normtype Deterministic = Deterministic
     normtype Integrate = Integrate
     normtype Chaos = Chaos
