@@ -193,6 +193,7 @@ irMap f x = case x of
   (IRSample _) -> f x
   (IRVar _) -> f x
 
+--TODO: We can also optimize index magic, potentially here. i.e. a head tail tail x can be simplified.
 evalAll :: (Show a, Ord a, Fractional a) => IRExpr a -> IRExpr a
 evalAll expr@(IROp op leftV rightV)
   | isValue leftV && isValue rightV = IRConst (forceOp op (unval leftV) (unval rightV))
@@ -345,6 +346,7 @@ toIRProbability (Cons _ hdExpr tlExpr) sample = do
   tailP <- toIRProbability tlExpr (IRTail sample)
   return (IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (IROp OpMult headP tailP))
 toIRProbability (Null _) sample = indicator (IROp OpEq sample (IRConst $ VList []))
+toIRProbability (Constant _ value) sample = indicator (IROp OpEq sample (IRConst value))
 toIRProbability (Call _ name) sample = return $ IRCall (name ++ "_prob") [sample]
 toIRProbability x sample = error ("found no way to convert to IR: " ++ show x)
 

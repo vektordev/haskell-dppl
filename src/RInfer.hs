@@ -16,11 +16,15 @@ import qualified Data.Set as Set
 import Data.Monoid
 import Data.Foldable hiding (toList)
 import qualified Data.Map as Map
+
+import Text.Pretty.Simple
+
 import SPLL.Lang
 import SPLL.Typing.Typing
 import SPLL.Typing.RType
 import SPLL.Examples
 import SPLL.Typing.PType( PType(..) )
+
 import InjectiveFunctions
 data RTypeError
   = UnificationFail RType RType
@@ -135,7 +139,7 @@ instance Substitutable RType where
   apply (Subst s) t@(TVarR a) = Map.findWithDefault t a s
   apply s (GreaterType t1 t2) = apply s t1 `GreaterType` apply s t2
   -- rest of RType arent used as of now
-  apply _ _ = error "Missing Substitue"
+  apply _ val = error ("Missing Substitute: " ++ show val)
 
   ftv (ListOf t) = ftv t
   ftv (Tuple t1) = foldl Set.union Set.empty (map ftv t1)
@@ -161,12 +165,12 @@ instance Substitutable TEnv where
   apply s (TypeEnv env) = TypeEnv $ Map.map (apply s) env
   ftv (TypeEnv env) = ftv $ Map.elems env
   
-addRTypeInfo :: Program TypeInfo a -> Program TypeInfo a
+addRTypeInfo :: (Show a) => Program TypeInfo a -> Program TypeInfo a
 addRTypeInfo p@(Program decls expr) =
   case runInfer empty (inferProg p) of
     Left err -> error ("error in addRTypeInfo: " ++ show err)
     Right (ty, cs, p) -> case runSolve cs of
-      Left err -> error "error in addRTypeInfo"
+      Left err -> error ("error in solve addRTypeInfo: " ++ show err)
       Right subst -> apply subst p
       
 showResultsProg :: (Num a, Show a) => Program TypeInfo a -> IO ()
@@ -200,16 +204,16 @@ showResults expr = do
 listConstraints :: [Constraint] -> IO ()
 listConstraints ((t1, t2):cons1) = do
   putStrLn "1."
-  print t1
+  pPrint t1
   putStrLn "2."
-  print t2
+  pPrint t2
   listConstraints cons1
 listConstraints [] = putStrLn "-----"
 -------------------------------------------------------------------------------
 -- Inference
 -------------------------------------------------------------------------------
 
-inferRType :: Program TypeInfo a -> Either RTypeError RType
+inferRType :: (Show a) => Program TypeInfo a -> Either RTypeError RType
 inferRType prog@(Program decls expr) = do
   case runInfer mempty (inferProg prog) of
       Left err -> Left (ExprInfo $ prettyPrintProgNoReq prog)
@@ -226,7 +230,7 @@ runInfer env m = runExcept $ evalStateT (runReaderT m env) initInfer
 runInferExpr :: TEnv -> Infer (RType, [Constraint], Expr TypeInfo a) -> Either RTypeError (RType, [Constraint], Expr TypeInfo a)
 runInferExpr env m = runExcept $ evalStateT (runReaderT m env) initInfer
 -- | Solve for the toplevel type of an expression in a given TEnvironment
-inferExpr :: TEnv -> Expr TypeInfo a -> Either RTypeError Scheme
+inferExpr :: (Show a) => TEnv -> Expr TypeInfo a -> Either RTypeError Scheme
 inferExpr env ex = case runInferExpr env (infer ex) of
   Left err -> Left err
   Right (ty, cs, _) -> case runSolve cs of
@@ -234,7 +238,7 @@ inferExpr env ex = case runInferExpr env (infer ex) of
     Right subst -> Right $ closeOver $ apply subst ty
 
 -- | Return the internal constraints used in solving for the type of an expression
-constraintsExpr :: TEnv -> Expr TypeInfo a -> Either RTypeError ([Constraint], Subst, RType, Scheme, Expr TypeInfo a)
+constraintsExpr :: (Show a) => TEnv -> Expr TypeInfo a -> Either RTypeError ([Constraint], Subst, RType, Scheme, Expr TypeInfo a)
 constraintsExpr env ex = case runInferExpr env (infer ex) of
   Left err -> Left err
   Right (ty, cs, p) -> case runSolve cs of
@@ -244,7 +248,7 @@ constraintsExpr env ex = case runInferExpr env (infer ex) of
         sc = closeOver $ apply subst ty
 
 -- | Return the internal constraints used in solving for the type of an expression
-constraintsExprProg :: TEnv -> Program TypeInfo a -> Either RTypeError ([Constraint], Subst, RType, Scheme, Program TypeInfo a)
+constraintsExprProg :: (Show a) => TEnv -> Program TypeInfo a -> Either RTypeError ([Constraint], Subst, RType, Scheme, Program TypeInfo a)
 constraintsExprProg env p@(Program decls expr) =
   case runInfer env (inferProg p) of
     Left err -> Left err
@@ -318,7 +322,7 @@ getListType _ (ListOf t2) = t2
 rtFromScheme :: Scheme -> RType
 rtFromScheme (Forall _ rt) = rt
 
-inferProg :: Program TypeInfo a -> Infer (RType, [Constraint], Program TypeInfo a)
+inferProg :: (Show a) => Program TypeInfo a -> Infer (RType, [Constraint], Program TypeInfo a)
 inferProg p@(Program decls expr) = do
   -- init type variable for all function decls beforehand so we can build constraints for
   -- calls between these functions
@@ -356,7 +360,7 @@ buildFuncConstraints _ finalType _ cons name  = error "buildFuncConstraints with
 
 
 -- TODO Make greater number type for type instance constraint ("Overloaded operator")
-infer :: Expr TypeInfo a -> Infer (RType, [Constraint], Expr TypeInfo a)
+infer :: Show a =>Expr TypeInfo a -> Infer (RType, [Constraint], Expr TypeInfo a)
 infer expr = case expr of
   ThetaI ti a  -> return (TFloat, [], ThetaI (setRType ti TFloat) a)
   Uniform ti  -> return (TFloat, [], Uniform (setRType ti TFloat))
@@ -371,6 +375,7 @@ infer expr = case expr of
     (t2, c2, et2) <- infer e2
     tv <- fresh
     let u1 = t1 `TArr` (t2 `TArr` tv)
+    -- Can't handle Int and Float at same time....
         u2 = TFloat `TArr` (TFloat `TArr` TFloat)
     return (tv, c1 ++ c2 ++ [(u1, u2)], Plus (setRType x tv) et1 et2)
 
@@ -414,7 +419,14 @@ infer expr = case expr of
               let sc = generalize (apply sub env) (apply sub t1)
               (t2, c2, et2) <- inTEnv (name, sc) $ local (apply sub) (infer e2)
               return (t2, c1 ++ c2, LetIn (setRType x t2)  name et1 et2 )
-
+  
+  Lambda x name e2 -> do
+    tv <- fresh
+    let sc = Forall [] tv
+    (t1, c1, et1) <- inTEnv (name, sc) (infer e2)
+    return (tv `TArr` t1, c1, Lambda (setRType x (tv `TArr` t1)) name et1)
+    
+  
   Null x -> return (NullList, [], Null (setRType x NullList))
 
   Cons x e1 e2 -> do
@@ -431,11 +443,17 @@ infer expr = case expr of
       return (Tuple $ t1:t2t, c1 ++ c2 ++ [(BottomTuple, t2)], TCons (setRType x (Tuple $ t1:t2t)) et1 et2)
 
   Var y x -> do
-        t <- lookupTEnv x
-        return (t, [], Var (setRType y t) x)
+      t <- lookupTEnv x
+      return (t, [], Var (setRType y t) x)
+  
+  ReadNN x name e1 -> do
+      (t1, c1, et1) <- infer e1
+      return (TInt, c1 ++ [(t1, TSymbol)], ReadNN (setRType x TInt) name et1)
+  
+  _ -> error (show expr)
 
 
-inferTop :: TEnv -> [(String, Expr TypeInfo a)] -> Either RTypeError TEnv
+inferTop :: (Show a) => TEnv -> [(String, Expr TypeInfo a)] -> Either RTypeError TEnv
 inferTop env [] = Right env
 inferTop env ((name, ex):xs) = case inferExpr env ex of
   Left err -> Left err

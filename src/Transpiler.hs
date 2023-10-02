@@ -115,14 +115,14 @@ transpileExpr expr = if likelihoodFunctionUsesTypeInfo $ toStub expr
 
 annotate :: Expr TypeInfo a -> [Annotation a]
 annotate expr = case expr of 
-  ThetaI _ i -> [IIndex i]
-  Constant _ x -> [IValue x]
-  Call _ x -> [IIdentifier x]
+  ThetaI _ i    -> [IIndex i]
+  Constant _ x  -> [IValue x]
+  Call _ x      -> [IIdentifier x]
   LetIn _ x _ _ -> [IIdentifier x]
-  Arg _ x _ _ -> [IIdentifier x]
+  Arg _ x _ _   -> [IIdentifier x]
   CallArg _ x _ -> [IIdentifier x]
-  Lambda _ x _ -> [IIdentifier x]
-  _ -> []
+  Lambda _ x _  -> [IIdentifier x]
+  _             -> []
 
 checkExprMatches :: Expr TypeInfo a -> Algorithm -> Bool
 checkExprMatches e alg = toStub e == forExpression alg
@@ -161,5 +161,5 @@ toStub expr = case expr of
   Arg {}         -> StubArg
   CallArg {}     -> StubCallArg
   Lambda {}      -> StubLambda
-  (ReadNN _ _ _)   -> StubReadNN
+  (ReadNN _ _ _) -> StubReadNN
   

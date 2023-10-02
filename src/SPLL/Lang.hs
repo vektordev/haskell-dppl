@@ -101,8 +101,7 @@ valMap f (VFloat a) = VFloat $ f a
 valMap f (VList v) = VList $ map (valMap f) v
 valMap f (VTuple v) = VList $ map (valMap f) v
 valMap f (VBranch v1 v2 x ) = VBranch (valMap f v1) (valMap f v2) x
-valMap f (VRange v1) = VRange (limitsMap f v1) 
-valMap f (VSymbol i) = VSymbol i
+valMap f (VRange v1) = VRange (limitsMap f v1)
 valMap f VAnyList = VAnyList
 
 vMarg :: Value a
@@ -255,7 +254,6 @@ tMap f expr = case expr of
   (CallArg _ name a) -> CallArg (f expr) name (map (tMap f) a)
   (Lambda _ name a) -> Lambda (f expr) name (tMap f a)
   (ReadNN _ n a) -> ReadNN (f expr) n (tMap f a)
-  (Var _ name) -> Var (f expr) name
 
 tMapProg :: (Expr x a -> y) -> Program x a -> Program y a
 tMapProg f (Program decls expr) = Program (zip (map fst decls) (map (tMap f . snd) decls)) (tMap f expr)
@@ -305,7 +303,6 @@ getTypeInfo expr = case expr of
   (InjF t _ _ _)        -> t
   --(LetInD t _ _ _)      -> t
   --(LetInTuple t _ _ _ _)-> t
-  (Var t _)             -> t
   (Arg t _ _ _)         -> t
   (CallArg t _ _)       -> t
   (Lambda t _ _)        -> t
@@ -401,7 +398,6 @@ printFlat expr = case expr of
   --(LetInD {}) -> "LetInD"
   --(LetInTuple {}) -> "LetInTuple"
   (InjF t _ _ _)        -> "InjF"
-  Var _ a -> "Var " ++ a
   (Arg _ var r _ ) -> "Bind " ++ var ++ "::" ++ show r
   (CallArg _ a _ ) -> "CallArg " ++ a
   (Lambda _ name _) -> "\\" ++ name  ++ " -> "

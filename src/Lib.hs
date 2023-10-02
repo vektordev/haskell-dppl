@@ -28,6 +28,7 @@ import SPLL.Typing.RType
 import SPLL.Typing.PType
 import Infer
 import PInfer2
+import RInfer
 import Interpreter
 import Transpiler
 import Control.Monad.Random (evalRandIO, getRandomR, replicateM, forM_)
@@ -118,8 +119,9 @@ newCodeGen tExpr = do
 
 newCodeGenAll :: Env TypeInfo Float -> IO ()
 newCodeGenAll env = do
+  pPrint env
   let annotated = map (\(a,b) -> (a, SPLL.Analysis.annotate b)) env
-  print annotated
+  pPrint annotated
   let ir = envToIR annotated
   pPrint ir
   let pycode = SPLL.CodeGenPyTorch.generateFunctions ir
@@ -133,13 +135,22 @@ someFunc :: IO ()
 someFunc = do--thatGaussThing
   --x <- runNNTest
   --print x
-  --let env = [("main", gaussLists)] :: Env () Float
+  let env = [("main", compilationExample)] :: Env () Float
+  {-let fnc = gaussLists
   let env = [("main", gaussLists)] :: Env () Float
-  let prog = Program env gaussLists
-  let cmp2 = progToEnv $ addTypeInfo prog
+  let prog = Program env fnc
+  putStrLn "outputting constraints"
+  RInfer.showResultsProg $ addEmptyTypeInfo prog
+  putStrLn "now for ptypes"
+  PInfer2.showResultsProgDebug (addRTypeInfo $ addEmptyTypeInfo prog)
+  putStrLn "done outputting constraints"
+  let cmp2 = progToEnv $ addTypeInfo prog-}
+  let prog = Program env compilationExample
+  let cmp = progToEnv $ addTypeInfo prog
   --cmp2 <-  env
-  let cmp = cmp2 -- ++ [("noiseMNistAdd", mNistNoise), ("expertmodel", expertModelsTyped), ("mNistAdd", testNN)] :: Env TypeInfo Float
+  --let cmp = [] ++ [("noiseMNistAdd", mNistNoise), ("expertmodel", expertModelsTyped), ("expertmodelAnnotated", expertAnnotatedTyped), ("mNistAdd", testNN)] :: Env TypeInfo Float
   --let cmp = [("main", testNN)] :: Env TypeInfo Float
+  --let cmp = cmp2
   --cmp <- compile env
   newCodeGenAll cmp
   --let env = [("main", testNNUntyped)] :: Env () Float
@@ -154,14 +165,14 @@ someFunc = do--thatGaussThing
   --showResultsProg $ (addTypeInfo testLet2)
   --mapM_ putStrLn (prettyPrintProg prog)
   --testDensity1d "frankTest" (testObserve :: Program () Double) [-0.3, -0.2]
-  testRun "frankTest" (testObserve :: Program () Double) [1.0, 0.44]
+  --testRun "frankTest" (testObserve :: Program () Double) [1.0, 0.44]
   --print $ m
   --grad_loss :: [(loss :: a, grad :: Thetas a)]
   --grad_loss thX = [grad' (\theta -> log $ unwrapP $ likelihood (autoEnv env) (autoEnv env) theta (autoExpr expr) (autoVal sample)) thX | sample <- samples]
-  let pp = [VFloat $ 3.0]
-  let inverse_grad_auto = grad' (\[val] -> callInv globalFenv2 "mult" (map autoVal pp) val) [0.9]
-  print "hi"
-  print inverse_grad_auto
+  --let pp = [VFloat $ 3.0]
+  --let inverse_grad_auto = grad' (\[val] -> callInv globalFenv2 "mult" (map autoVal pp) val) [0.9]
+  --print "hi"
+  --print inverse_grad_auto
   --auto_p = (map auto params_val)
   --params_val = map (detGenerate env thetas) params
 

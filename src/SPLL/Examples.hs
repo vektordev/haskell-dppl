@@ -434,12 +434,27 @@ expertModels = Lambda () "im" (IfThenElse ()
   (ReadNN () "isMnist" (Var () "im"))
   (ReadNN () "classifyMNist" (Var () "im"))
   (ReadNN () "classifyCIFAR" (Var () "im")))
-  
+
 expertModelsTyped :: Expr TypeInfo a
 expertModelsTyped = Lambda (TypeInfo (Arrow TSymbol TInt) Integrate) "im" (IfThenElse (TypeInfo TInt Integrate)
   (ReadNN (TypeInfo TBool Integrate) "isMnist" (Var (TypeInfo TSymbol Deterministic) "im"))
   (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im"))
   (ReadNN (TypeInfo TInt Integrate) "classifyCIFAR" (Var (TypeInfo TSymbol Deterministic) "im")))
+
+expertAnnotated :: Expr () a
+expertAnnotated = Lambda () "im" (IfThenElse ()
+  (ReadNN () "isMnist" (Var () "im"))
+  (Cons () (Constant () (VInt 1)) (Cons () (ReadNN () "classifyMNist" (Var () "im")) (Null ())))
+  (Cons () (Constant () (VInt 2)) (Cons () (ReadNN () "classifyCIFAR" (Var () "im")) (Null ()))))
+
+expertAnnotatedTyped :: Expr TypeInfo a
+expertAnnotatedTyped = Lambda (TypeInfo (Arrow TSymbol (SPLL.Typing.RType.ListOf TInt)) Integrate) "im" (IfThenElse (TypeInfo (SPLL.Typing.RType.ListOf TInt) Integrate)
+  (ReadNN (TypeInfo TBool Integrate) "isMnist" (Var (TypeInfo TSymbol Deterministic) "im"))
+  (Cons (TypeInfo (SPLL.Typing.RType.ListOf TInt) Integrate) (Constant (TypeInfo TInt Deterministic) (VInt 1)) (Cons (TypeInfo (SPLL.Typing.RType.ListOf TInt) Integrate) (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im")) (Null (TypeInfo (SPLL.Typing.RType.ListOf TInt) Deterministic))))
+  (Cons (TypeInfo (SPLL.Typing.RType.ListOf TInt) Integrate) (Constant (TypeInfo TInt Deterministic) (VInt 2)) (Cons (TypeInfo (SPLL.Typing.RType.ListOf TInt) Integrate) (ReadNN (TypeInfo TInt Integrate) "classifyCIFAR" (Var (TypeInfo TSymbol Deterministic) "im")) (Null (TypeInfo (SPLL.Typing.RType.ListOf TInt) Deterministic)))))
+
+compilationExample :: Expr () a
+compilationExample = GreaterThan () (Uniform ()) (ThetaI () 0)
 
 --expert_model_proofs image =
 --  if isMNist

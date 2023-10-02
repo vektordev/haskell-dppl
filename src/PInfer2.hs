@@ -31,11 +31,18 @@ data PTypeError
   | InfiniteType TVar PType
   | UnboundVariable String
   deriving (Show)
+
 type Var = String
 type Infer = ExceptT PTypeError (State InferState)
+
+-- Scheme: Forall [a b c] [a=b, b=c] (a->b->c)
+--Forall vars con result
+-- vars sind die TVars in scope in Constraint und PType. Wenn Constraint, dann resultiert in PType 
 data Scheme = Forall [TVar] [Constraint] PType
   deriving (Show, Eq)
+type Constraint = (Var, PType)
 
+-- Scheme: Forall [a b c] [a=(b|c), a=(b + c)] (a->b->c)
 data DScheme = DScheme [TVar] [DConstraint] PType
   deriving (Show, Eq)
 
@@ -44,8 +51,10 @@ data ChainConstraint = PlusConstraint TypeOrChain TypeOrChain | CompConstraint T
   | LetInDConstraint TypeOrChain
   deriving (Show, Eq)
 type DowngradeChain = [Either PType ChainConstraint]
+--Downgradechain of all Left PTypes resolves into the
 
 type TypeOrChain = Either PType DowngradeChain
+
 resolveLetInDCons :: PType -> PType
 resolveLetInDCons Deterministic = Deterministic
 resolveLetInDCons _ = Bottom
@@ -79,13 +88,13 @@ showResults expr = do
       putStrLn $ unlines $ prettyPrint ee
       putStrLn "-----"
 
-inferType :: TypedProg a -> PType
+inferType :: (Show a) => TypedProg a -> PType
 inferType prog = do
   case inferProgram mempty prog of
      Left err -> error "error in infer scheme"
      Right (_, DScheme _ b ty, _) ->  ty
 
-addPTypeInfo :: Program TypeInfo a -> Program TypeInfo a
+addPTypeInfo :: (Show a) => Program TypeInfo a -> Program TypeInfo a
 addPTypeInfo p = do
     case inferProgram mempty p of
        Left err -> error "error in addPTypeInfo"
@@ -114,7 +123,6 @@ showResultsProg prog = do
       putStrLn "-----"
       putStrLn $ "Program: "
       putStrLn $ unlines $ prettyPrintProg p
-type Constraint = (Var, PType)
 
 newtype TEnv
   = TypeEnv {types :: Map.Map Name [Scheme]}
@@ -189,13 +197,13 @@ substChain dsubst (Right cs)  = [Right $ dapply dsubst cs]
 -------------------------------------------------------------------------------
 -- Inference
 -------------------------------------------------------------------------------
-inferProgram:: TEnv -> TypedProg a -> Either PTypeError ([DConstraint], DScheme, TypedProg a)
+inferProgram:: (Show a) => TEnv -> TypedProg a -> Either PTypeError ([DConstraint], DScheme, TypedProg a)
 inferProgram env = runInferProg env . inferProg env
 
-inferProgramDebug :: TEnv -> TypedProg a -> Either PTypeError ([DConstraint], DScheme, TypedProg a)
+inferProgramDebug :: (Show a) => TEnv -> TypedProg a -> Either PTypeError ([DConstraint], DScheme, TypedProg a)
 inferProgramDebug env = runInferProgDebug env . inferProg env
 
-inferExpr :: TEnv -> TypedExpr a -> Either PTypeError ([DConstraint], DScheme, TypedExpr a)
+inferExpr :: (Show a) => TEnv -> TypedExpr a -> Either PTypeError ([DConstraint], DScheme, TypedExpr a)
 inferExpr env = runInfer env . infer env
 
 runInferProgDebug :: TEnv -> Infer (Subst, [DConstraint], PType, TypedProg a) -> Either PTypeError ([DConstraint], DScheme, TypedProg a)
@@ -416,7 +424,7 @@ generalize env t  = Forall as [] t
     where as = Set.toList $ ftv t `Set.difference` ftv env
 
 -- infer an argument of a binary operator expression and build constraint + subst accordingly
-applyOpArg :: TEnv -> Expr TypeInfo a -> Subst -> [DConstraint] -> PType -> Infer (Subst, [DConstraint], PType, Expr TypeInfo a)
+applyOpArg :: (Show a) => TEnv -> Expr TypeInfo a -> Subst -> [DConstraint] -> PType -> Infer (Subst, [DConstraint], PType, Expr TypeInfo a)
 applyOpArg env expr s1 cs1 t1 = do
   (s2, cs2, t2, exprt) <- infer (apply s1 env) expr
   tv1 <- fresh
@@ -487,7 +495,7 @@ downgradeInf = do
 makeEqConstraint :: PType -> PType -> DConstraint
 makeEqConstraint t1 t2 = (t1, [Left t2])
 
-inferProg :: TEnv -> TypedProg a -> Infer (Subst, [DConstraint], PType, TypedProg a)
+inferProg :: (Show a) => TEnv -> TypedProg a -> Infer (Subst, [DConstraint], PType, TypedProg a)
 inferProg env (Program decls expr) = do
   -- init type variable for all function decls beforehand so we can build constraints for
   -- calls between these functions
@@ -506,7 +514,7 @@ inferProg env (Program decls expr) = do
   -- combine all constraints
   return (s1, cs1 ++ concatMap snd3 cts ++ tcs , t1, Program (zip (map fst decls) (map frth3 cts)) pt)
 
-infer :: TEnv -> Expr TypeInfo a -> Infer (Subst, [DConstraint], PType, Expr TypeInfo a)
+infer :: (Show a) => TEnv -> Expr TypeInfo a -> Infer (Subst, [DConstraint], PType, Expr TypeInfo a)
 infer env expr = case expr of
 
   ThetaI ti a  -> return (emptySubst, [], Deterministic, ThetaI (setPType ti Deterministic) a)
@@ -577,7 +585,11 @@ infer env expr = case expr of
     (s5, cs5, t5) <- applyOpTy env t3 (s4 `compose` s3) (cs3 ++ cs4) t4
     (s6, cs6, t6, flt) <- applyOpArg env fl s5 cs5 t5
     return (s6, cs6, t6, IfThenElse (setPType ti t6) condt trt flt)
-    
+  
+  Lambda ti name expr -> do
+    undefined
+  
+  _ -> error (show expr)
        
 
 normalize :: DScheme -> DScheme

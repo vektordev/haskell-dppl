@@ -251,15 +251,19 @@ runInferIO env expr thetas val = case runExcept $ evalStateT (runReaderT (likeli
   Left err -> print err
   Right p -> print p
 
-likelihoodM :: (Erf a, Show a, Fractional a, Ord a, Real a, Floating a) => Expr TypeInfoWit a -> Value a -> InferL a (Probability a)
--- possible problems in the probability math in there:
+likelihoodM :: (Erf a, Show a, Ord a, Real a) => Expr TypeInfoWit a -> Value a -> InferL a (Probability a)
+
+-- error cases
 likelihoodM expr _
   | getPW expr == Bottom = throwError $ BottomError expr
+likelihoodM expr VAnyList = throwError $ MismatchedValue VAnyList expr
+
 likelihoodM (Call _ name) val = do
   env <- get
   let Just expr = lookup name (global_funcs env)
   -- Reset value env on call
   local (const vempty) (likelihoodM expr val)
+
 likelihoodM (LetIn ti name decl bij) val
   | getPTypeW (getTypeInfo decl) == Integrate = do
       (baseDistV, bMap) <- getInvValueM globalFenv bij name val
@@ -279,6 +283,7 @@ likelihoodM (LetIn ti name decl bij) val
         -- Deterministic case
         -- Could replace this with value env
         --extendedEnvD = (name, Constant (TypeInfoWit TFloat Deterministic Set.empty) (detGenerate env thetas decl)):env
+
 likelihoodM ee@(IfThenElse t cond left right) val =
   do
     venv <- ask
@@ -294,19 +299,19 @@ likelihoodM ee@(IfThenElse t cond left right) val =
         pLeft <- local (\venv -> venv{values = env1}) (likelihoodM left val)
         pRight <- local (\venv -> venv{values = env2}) (likelihoodM right val)
         return $ BranchedProbability (pAnd pCond pLeft) (pAnd pCondInv pRight) branchName
+
 likelihoodM (Null _) (VList []) = return $ DiscreteProbability 1
 likelihoodM (Null _) (VList [VAnyList])  = return $ DiscreteProbability 1
 likelihoodM (Null _) _ = return $ DiscreteProbability 0
 likelihoodM (TNull _) (VTuple []) = return $  DiscreteProbability 1
 likelihoodM (TNull _) _ = return $ DiscreteProbability 0
 likelihoodM (Cons _ _ _) (VList [VAnyList])  = return $  DiscreteProbability 1
-likelihoodM (Cons _ _ _) (VList []) = return $  DiscreteProbability 0
+likelihoodM (Cons _ _ _) (VList []) = return $ DiscreteProbability 0
+likelihoodM e@(Cons _ _ _) v = throwError $ MismatchedValue v e
 likelihoodM (Cons _ hd tl) (VList (x:xs)) = do
     fstP <- likelihoodM hd x
     sndP <- likelihoodM tl $ VList xs
-    let a = trace (show sndP) 1
-    return $ pAnd (pAnd fstP sndP) (DiscreteProbability a)
-likelihoodM expr VAnyList = throwError $ MismatchedValue VAnyList expr
+    return (pAnd fstP sndP)
 likelihoodM (TCons _ _ _) (VTuple []) = return $ DiscreteProbability 0
 likelihoodM (TCons _ hd tl) (VTuple (x:xs)) = do
    fstP <- likelihoodM hd x
@@ -357,11 +362,12 @@ likelihoodM expr@(ThetaI _ x) val2 = do
    return $ branchedCompare (VFloat (findTheta expr (thetas inf_ste))) val2
 likelihoodM (Uniform _) (VFloat x) = return $ if 0 <= x && x <= 1 then PDF 1 else PDF 0
 likelihoodM (Uniform t) (VRange limits) = return $ DiscreteProbability $ integrate (Uniform t) limits
+likelihoodM e@(Uniform _) v = throwError $ MismatchedValue v e
 
---probability _ _ _ (Normal _) (VFloat x) = PDF $ realToFrac $ density (normalDistr 0 1) $ realToFrac x
 likelihoodM (Normal _) (VFloat x) = return $ PDF myDensity
   where myDensity = (1 / sqrt (2 * pi)) * exp (-0.5 * x * x)
 likelihoodM (Normal t) (VRange limits) = return $ DiscreteProbability $ integrate (Normal t) limits
+likelihoodM e@(Normal _) v = throwError $ MismatchedValue v e
 
 likelihoodM (Constant _ val) val2 = return $ branchedCompare val val2
 likelihoodM (Mult _ left right) (VRange limits)
@@ -403,13 +409,6 @@ likelihoodM (Mult ti left right) (VFloat x)
   where
     leftP = getPW left
     rightP = getPW right
-likelihoodM (Null _) (VList []) = return $ DiscreteProbability 1
-likelihoodM (Null _) _ = return $ DiscreteProbability 0
-likelihoodM (Cons _ _ _) (VList []) = return $ DiscreteProbability 0
-likelihoodM (Cons _ hd tl) (VList (x:xs)) = do
-  p1 <- (likelihoodM hd x)
-  p2 <- (likelihoodM tl $ VList xs)
-  return $ pAnd p1 p2
 
 likelihoodM (Plus ti left right) (VFloat x)
   | leftP == Deterministic =
@@ -460,10 +459,6 @@ likelihoodM d (VBranch v1 v2 x) = do
   where lf = likelihoodM d
 
 
-likelihoodM e@(ThetaI _ _) v = throwError $ MismatchedValue v e
-likelihoodM e@(Cons _ _ _) v = throwError $ MismatchedValue v e
-likelihoodM e@(Normal _) v = throwError $ MismatchedValue v e
-likelihoodM e@(Uniform _) v = throwError $ MismatchedValue v e
 
 
 -- let x = normal in let y = normal in if flip then (x, y) else (x-3, normal)

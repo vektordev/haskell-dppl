@@ -4,7 +4,7 @@
 import Test.QuickCheck
 
 import SPLL.Examples
-import Lib
+--import Lib
 import SPLL.Lang
 import SPLL.Typing.Typing
 import SPLL.Typing.RType
@@ -13,7 +13,6 @@ import Interpreter
 import Data.Maybe (fromJust, catMaybes)
 import Control.Monad.Random.Lazy (Random)
 import PInferBranched
-import SPLL.Examples
 import Infer
 import Witnessing
 import SpecExamples

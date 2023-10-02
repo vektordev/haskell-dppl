@@ -27,7 +27,7 @@ annotate expr = tMap annotateLocal expr
         TypeInfo rt pt = getTypeInfo e
         tags =
           [Alg $ findAlgorithm e | likelihoodFunctionUsesTypeInfo $ toStub e]
-          ++ (fmap EnumList $ maybeToList (findEnumerable e))
+          ++ fmap EnumList (maybeToList (findEnumerable e))
 
 findEnumerable :: Expr TypeInfo a -> Maybe [Value a]
 findEnumerable (ReadNN _ name (subexpr)) = Just [VInt i | i <- [0..9]]
