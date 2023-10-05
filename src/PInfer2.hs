@@ -538,17 +538,29 @@ infer env expr = case expr of
     return (compose s1 s_acc, cs1 ++ concatMap snd3 p_inf ++ [(tv,Left t1:p_fst)]
       , tv, InjF (setPType ti tv) name (map frth3 p_inf) xt)
 
-  Plus ti e1 e2 -> do
+  PlusF ti e1 e2 -> do
     (s1, cs1, t1) <- plusInf
     (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
     (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
-    return (s3, cs3, t3, Plus (setPType ti t3) et1 et2)
+    return (s3, cs3, t3, PlusF (setPType ti t3) et1 et2)
 
-  Mult ti e1 e2 -> do
+  PlusI ti e1 e2 -> do
+    (s1, cs1, t1) <- plusInf
+    (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
+    (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
+    return (s3, cs3, t3, PlusI (setPType ti t3) et1 et2)
+
+  MultF ti e1 e2 -> do
       (s1, cs1, t1) <- plusInf
       (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
       (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
-      return (s3, cs3, t3, Mult (setPType ti t3) et1 et2)
+      return (s3, cs3, t3, MultF (setPType ti t3) et1 et2)
+
+  MultI ti e1 e2 -> do
+      (s1, cs1, t1) <- plusInf
+      (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
+      (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
+      return (s3, cs3, t3, MultI (setPType ti t3) et1 et2)
 
   GreaterThan ti e1 e2 -> do
       (s1, cs1, t1) <- compInf

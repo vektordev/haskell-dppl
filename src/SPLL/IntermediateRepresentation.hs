@@ -294,7 +294,7 @@ toIRProbability (GreaterThan (StaticAnnotations t _ extras) left right) sample
     return $ IRLetIn var (toIRGenerate right)
       (IRLetIn var2 integrate
         (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)) (IRVar var2) ))
-toIRProbability (Mult (StaticAnnotations TFloat _ extras) left right) sample
+toIRProbability (MultF (StaticAnnotations TFloat _ extras) left right) sample
   | extras `hasAlgorithm` multLeft = do
     var <- mkVariable ""
     rightExpr <- toIRProbability right (IROp OpDiv sample (IRVar var))
@@ -305,7 +305,7 @@ toIRProbability (Mult (StaticAnnotations TFloat _ extras) left right) sample
     leftExpr <- toIRProbability left (IROp OpDiv sample (IRVar var))
     return $ IRLetIn var (toIRGenerate right)
       (IROp OpDiv leftExpr (IRVar var))
-toIRProbability (Plus (StaticAnnotations TFloat _ extras) left right) sample
+toIRProbability (PlusF (StaticAnnotations TFloat _ extras) left right) sample
   | extras `hasAlgorithm` plusLeft = do
     var <- mkVariable ""
     rightExpr <- toIRProbability right (IROp OpSub sample (IRVar var))
@@ -314,7 +314,7 @@ toIRProbability (Plus (StaticAnnotations TFloat _ extras) left right) sample
     var <- mkVariable ""
     leftExpr <- toIRProbability left (IROp OpSub sample (IRVar var))
     return $ IRLetIn var (toIRGenerate right) leftExpr
-toIRProbability (Plus (StaticAnnotations TInt _ extras) left right) sample
+toIRProbability (PlusI (StaticAnnotations TInt _ extras) left right) sample
   | extras `hasAlgorithm` enumeratePlusLeft = do
     --Solving enumPlusLeft works by enumerating all left hand side choices.
     -- We then invert the addition to infer the right hand side.
@@ -358,8 +358,10 @@ indicator condition = return $ IRIf condition (IRConst $ VFloat 1) (IRConst $ VF
 toIRGenerate :: Show a => Expr (StaticAnnotations a) a -> IRExpr a
 toIRGenerate (IfThenElse _ cond left right) = IRIf (toIRGenerate cond) (toIRGenerate left) (toIRGenerate right)
 toIRGenerate (GreaterThan _ left right) = IROp OpGreaterThan (toIRGenerate left) (toIRGenerate right)
-toIRGenerate (Plus _ left right) = IROp OpPlus (toIRGenerate left) (toIRGenerate right)
-toIRGenerate (Mult _ left right) = IROp OpMult (toIRGenerate left) (toIRGenerate right)
+toIRGenerate (PlusF _ left right) = IROp OpPlus (toIRGenerate left) (toIRGenerate right)
+toIRGenerate (PlusI _ left right) = IROp OpPlus (toIRGenerate left) (toIRGenerate right)
+toIRGenerate (MultF _ left right) = IROp OpMult (toIRGenerate left) (toIRGenerate right)
+toIRGenerate (MultI _ left right) = IROp OpMult (toIRGenerate left) (toIRGenerate right)
 toIRGenerate (ThetaI _ ix) = IRTheta ix
 toIRGenerate (Constant _ x) = IRConst x
 toIRGenerate (Null _) = IRConst (VList [])

@@ -133,8 +133,10 @@ inferR (Constant () val) = return $ getRType val
 --inferR (Constant () (VFloat _)) = return TFloat
 --inferR (Constant () (VBool _)) = return TBool
 --inferR (Constant () (VList xs)) = return $ ListOf xs
-inferR (Mult () e1 e2) = matchRExpr e1 e2
-inferR (Plus () e1 e2) = matchRExpr e1 e2
+inferR (MultF () e1 e2) = matchRExpr e1 e2
+inferR (MultI () e1 e2) = matchRExpr e1 e2
+inferR (PlusF () e1 e2) = matchRExpr e1 e2
+inferR (PlusI () e1 e2) = matchRExpr e1 e2
 inferR (Null ()) = return NullList
 inferR (Cons () headX tailX) = do
   tHead <- inferR headX
@@ -161,14 +163,15 @@ inferP (ThetaI _ _) = return Deterministic
 inferP (Constant _ _) = return Deterministic
 inferP (Uniform _) = return Integrate
 inferP (Normal _) = return Integrate
-inferP (Mult _ left right) = do
+--Integer arithmetic omitted here
+inferP (MultF _ left right) = do
   leftP <- inferP left
   rightP <- inferP right
   if upgrade leftP rightP == Deterministic
   then return $ downgrade leftP rightP
   -- we do not know how to integrate over a product
   else return Chaos
-inferP (Plus _ left right) = do
+inferP (PlusF _ left right) = do
   leftP <- inferP left
   rightP <- inferP right
   if upgrade leftP rightP == Deterministic

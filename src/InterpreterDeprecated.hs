@@ -131,7 +131,7 @@ detGenerate env thetas (GreaterThan _ left right) =
   where
     a = detGenerate env thetas left
     b = detGenerate env thetas right
-detGenerate env thetas (Plus _ left right) = if pt1 == Deterministic && pt2 == Deterministic
+detGenerate env thetas (PlusF _ left right) = if pt1 == Deterministic && pt2 == Deterministic
   then VFloat (val1 + val2)
   else error "detGenerate non-deterministic plus"
   where
@@ -139,7 +139,7 @@ detGenerate env thetas (Plus _ left right) = if pt1 == Deterministic && pt2 == D
     (TypeInfoWit rt2 pt2 _) = getTypeInfo right
     (VFloat val1) = detGenerate env thetas left
     (VFloat val2) = detGenerate env thetas right
-detGenerate env thetas (Mult _ left right) = if pt1 == Deterministic && pt2 == Deterministic
+detGenerate env thetas (MultF _ left right) = if pt1 == Deterministic && pt2 == Deterministic
   then VFloat (val1 * val2)
   else error "detGenerate non-deterministic mult"
   where
@@ -221,7 +221,7 @@ likelihood _ _ _ (Normal _) _ (VFloat x) = PDF myDensity
 likelihood _ _ thetas (Normal t) _ (VRange limits) = DiscreteProbability $ integrate (Normal t) limits
 
 likelihood _ _ _ (Constant _ val) _ val2 = branchedCompare val val2
-likelihood globalEnv env thetas (Mult _ left right) branchMap (VRange limits)
+likelihood globalEnv env thetas (MultF _ left right) branchMap (VRange limits)
   -- need to divide by the deterministic sample
   | leftP == Deterministic || rightP == Deterministic = inverseProbability
   | otherwise = error "can't solve Mult; unexpected type error"
@@ -236,7 +236,7 @@ likelihood globalEnv env thetas (Mult _ left right) branchMap (VRange limits)
     inverseProbability = if leftP == Deterministic
       then likelihood globalEnv env thetas right branchMap inverse_flip
       else likelihood globalEnv env thetas left branchMap inverse_flip
-likelihood globalEnv env thetas (Mult _ left right) branchMap (VFloat x)
+likelihood globalEnv env thetas (MultF _ left right) branchMap (VFloat x)
   -- need to divide by the deterministic sample
   | leftP == Deterministic || rightP == Deterministic = correctedProbability
   | otherwise = error "can't solve Mult; unexpected type error"
@@ -251,7 +251,7 @@ likelihood globalEnv env thetas (Mult _ left right) branchMap (VFloat x)
       then likelihood globalEnv env thetas right branchMap inverse
       else likelihood globalEnv env thetas left branchMap inverse
     correctedProbability = (applyCorBranch inverseProbability (fmap (abs . ((/)1)) detSample))
-likelihood globalEnv env thetas (Plus _ left right) branchMap val
+likelihood globalEnv env thetas (PlusF _ left right) branchMap val
   | leftP == Deterministic = case val of
     (VFloat x) -> likelihood globalEnv env thetas right branchMap (inverse x)
     (VRange limits) -> likelihood globalEnv env thetas right branchMap (inverse_nob (VRange limits))
@@ -345,12 +345,12 @@ getInvValue fenv globalEnv env thetas (InjF _ name params f2) var val cor_factor
         --auto_p = (map auto params_val)
         params_val = map (detGenerate env thetas) params
 
-getInvValue fenv globalEnv env thetas (Plus ti expr1 expr2) var (VFloat val) cor_factor
+getInvValue fenv globalEnv env thetas (PlusF ti expr1 expr2) var (VFloat val) cor_factor
   | var `elem` getWitsW expr1 = getInvValue fenv globalEnv env thetas expr1 var (VFloat $ val - val2) cor_factor
   | var `elem` getWitsW expr2 = getInvValue fenv globalEnv env thetas expr2 var (VFloat $ val - val1)  cor_factor
   where (VFloat val2) = detGenerate env thetas expr2
         (VFloat val1) = detGenerate env thetas expr1
-getInvValue fenv globalEnv env thetas (Mult ti expr1 expr2) var (VFloat val) cor_factor
+getInvValue fenv globalEnv env thetas (MultF ti expr1 expr2) var (VFloat val) cor_factor
   | notElem var (getWits ti) || getPTypeW ti == Bottom = error "Cannot calculate inverse value in this mult expression"
   | var `elem` getWitsW  expr1 = getInvValue fenv globalEnv env thetas expr1 var (VFloat $ val/ val2) (cor_factor/val2)
   | var `elem` getWitsW  expr2 = getInvValue fenv globalEnv env thetas expr2 var (VFloat $ val/ val1)  (cor_factor/val1)

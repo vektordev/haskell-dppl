@@ -62,7 +62,7 @@ detGenerateM (GreaterThan _ left right) = do
   case (a,b) of
     (VFloat af, VFloat bf) -> return $ VBool (af > bf)
     _ -> error "Type error"
-detGenerateM (Plus _ left right) = if pt1 == Deterministic && pt2 == Deterministic
+detGenerateM (PlusF _ left right) = if pt1 == Deterministic && pt2 == Deterministic
   then (do
     val1 <- detGenerateM left
     val2 <- detGenerateM right
@@ -72,7 +72,7 @@ detGenerateM (Plus _ left right) = if pt1 == Deterministic && pt2 == Determinist
   where
     (TypeInfoWit rt1 pt1 _) = getTypeInfo left
     (TypeInfoWit rt2 pt2 _) = getTypeInfo right
-detGenerateM (Mult _ left right) = if pt1 == Deterministic && pt2 == Deterministic
+detGenerateM (MultF _ left right) = if pt1 == Deterministic && pt2 == Deterministic
   then (do
      val1 <- detGenerateM left
      val2 <- detGenerateM right
@@ -150,13 +150,13 @@ generate _ _ _ args (Normal _) = do
 generate _ _ _ args (Constant _ x) = return x
 
 
-generate a b c args (Plus _ left right) = do
+generate a b c args (PlusF _ left right) = do
   leftSample <- generate a b c args left
   rightSample <- generate a b c args right
   case (leftSample, rightSample) of
     (VFloat l, VFloat r) -> return $ VFloat (l + r)
     _ -> error "Type error"
-generate a b c args (Mult _ left right) = do
+generate a b c args (MultF _ left right) = do
   leftSample <- generate a b c args left
   rightSample <- generate a b c args right
   case (leftSample, rightSample) of
@@ -370,7 +370,7 @@ likelihoodM (Normal t) (VRange limits) = return $ DiscreteProbability $ integrat
 likelihoodM e@(Normal _) v = throwError $ MismatchedValue v e
 
 likelihoodM (Constant _ val) val2 = return $ branchedCompare val val2
-likelihoodM (Mult _ left right) (VRange limits)
+likelihoodM (MultF _ left right) (VRange limits)
   -- need to divide by the deterministic sample
   | leftP == Deterministic =
     do
@@ -391,7 +391,7 @@ likelihoodM (Mult _ left right) (VRange limits)
     leftP = getPW left
     rightP = getPW right
 
-likelihoodM (Mult ti left right) (VFloat x)
+likelihoodM (MultF ti left right) (VFloat x)
   -- need to divide by the deterministic sample
   | leftP == Deterministic =
       do
@@ -405,12 +405,12 @@ likelihoodM (Mult ti left right) (VFloat x)
         let inverse = fmap ((*x) . ((/)1)) rightGen
         inverseProbability <- likelihoodM left inverse
         return $ (applyCorBranch inverseProbability (fmap (abs . ((/)1)) rightGen))
-  | otherwise = throwError $ BottomError (Mult ti left right)
+  | otherwise = throwError $ BottomError (MultF ti left right)
   where
     leftP = getPW left
     rightP = getPW right
 
-likelihoodM (Plus ti left right) (VFloat x)
+likelihoodM (PlusF ti left right) (VFloat x)
   | leftP == Deterministic =
     do
       leftGen <- detGenerateM left
@@ -419,7 +419,7 @@ likelihoodM (Plus ti left right) (VFloat x)
     do
       rightGen <- detGenerateM right
       likelihoodM left (inverse x rightGen)
-  | otherwise = throwError $ BottomError (Plus ti left right)
+  | otherwise = throwError $ BottomError (PlusF ti left right)
   where
   -- TODO: Branching for range queries
     leftP = getPW left
@@ -427,7 +427,7 @@ likelihoodM (Plus ti left right) (VFloat x)
     inverse x d = fmap ((+x) . (*(-1))) d
     inverse_nob x dtl = fmap (flip(-) dtl) x
 
-likelihoodM (Plus ti left right) (VRange limits)
+likelihoodM (PlusF ti left right) (VRange limits)
   | leftP == Deterministic =
     do
      leftGen <- detGenerateM left
@@ -438,7 +438,7 @@ likelihoodM (Plus ti left right) (VRange limits)
       rightGen <- detGenerateM right
       let VFloat rightFloat = rightGen
       likelihoodM left (inverse_nob (VRange limits) rightFloat)
-  | otherwise = throwError $ BottomError (Plus ti left right)
+  | otherwise = throwError $ BottomError (PlusF ti left right)
   where
   -- TODO: Branching for range queries
     leftP = getPW left
@@ -494,14 +494,14 @@ getInvValueM fenv (InjF _ name params f2) var val = do
         --inverse_p = inverse params_val
         --auto_p = (map auto params_val)
 
-getInvValueM fenv (Plus ti expr1 expr2) var (VFloat val)
+getInvValueM fenv (PlusF ti expr1 expr2) var (VFloat val)
   | var `elem` getWitsW expr1 = do
     val2 <- detGenerateM expr2
     getInvValueM fenv expr1 var (VFloat $ val - (getVFloat val2))
   | var `elem` getWitsW expr2 =  do
     val1 <- detGenerateM expr1
     getInvValueM fenv expr2 var (VFloat $ val - (getVFloat val1))
-getInvValueM fenv  (Mult ti expr1 expr2) var (VFloat val)
+getInvValueM fenv  (MultF ti expr1 expr2) var (VFloat val)
   | notElem var (getWits ti) || getPTypeW ti == Bottom = error "Cannot calculate inverse value in this mult expression"
   | var `elem` getWitsW  expr1 = do
     val2 <- detGenerateM expr2

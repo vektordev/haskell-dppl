@@ -25,12 +25,12 @@ variableLengthT = Program [("b", IfThenElse (TypeInfoWit (ListOf TBool) Integrat
 
 testLetS :: Program () Double
 testLetS = Program [](LetIn () "x"
-                      (Plus () (ThetaI () 0) (Normal ()))
+                      (PlusF () (ThetaI () 0) (Normal ()))
                       (InjF () "sig" [] (InjF () "mult" [ThetaI () 1]  (Var () "x"))))
 -- let x = theta + normal in sig(theta1 * x)
 testLetT :: Program TypeInfoWit Double
 testLetT = Program [](LetIn (TypeInfoWit TFloat Deterministic Set.empty) "x"
-                      (Plus (TypeInfoWit TFloat Integrate Set.empty)
+                      (PlusF (TypeInfoWit TFloat Integrate Set.empty)
                         (ThetaI (TypeInfoWit TFloat Deterministic Set.empty) 0)
                         (Normal (TypeInfoWit TFloat Integrate Set.empty)))
                       (InjF (TypeInfoWit TFloat Deterministic (Set.singleton "x")) "sig" []
@@ -39,72 +39,72 @@ testLetT = Program [](LetIn (TypeInfoWit TFloat Deterministic Set.empty) "x"
                           (Var (TypeInfoWit TFloat Deterministic (Set.singleton "x")) "x"))))
 
 testLetNonLetS :: Program () Double
-testLetNonLetS = Program [] (LetIn () "x" (Plus () (ThetaI () 0) (Normal ()))
-          (Plus () (InjF () "sig" [] (Var () "x")) (Uniform ())))
+testLetNonLetS = Program [] (LetIn () "x" (PlusF () (ThetaI () 0) (Normal ()))
+          (PlusF () (InjF () "sig" [] (Var () "x")) (Uniform ())))
 
 testLetNonLetT :: Program TypeInfoWit Double
 testLetNonLetT = Program [] (LetIn (TypeInfoWit TFloat Bottom Set.empty) "x"
-           (Plus (TypeInfoWit TFloat Integrate Set.empty)
+           (PlusF (TypeInfoWit TFloat Integrate Set.empty)
             (ThetaI (TypeInfoWit TFloat Deterministic Set.empty) 0)
             (Normal (TypeInfoWit TFloat Integrate Set.empty)))
-           (Plus (TypeInfoWit TFloat Integrate Set.empty)
+           (PlusF (TypeInfoWit TFloat Integrate Set.empty)
               (InjF (TypeInfoWit TFloat Deterministic (Set.singleton "x"))  "sig" []
                 (Var (TypeInfoWit TFloat Deterministic (Set.singleton "x")) "x"))
               (Uniform (TypeInfoWit TFloat Integrate Set.empty))))
 
 testLetDS :: Program () Double
-testLetDS = Program [] (LetIn () "x" (Plus () (ThetaI () 0) (Constant () (VFloat 3.0)))
-           (Plus () (InjF () "sig" [] (Var () "x")) (Normal ())))
+testLetDS = Program [] (LetIn () "x" (PlusF () (ThetaI () 0) (Constant () (VFloat 3.0)))
+           (PlusF () (InjF () "sig" [] (Var () "x")) (Normal ())))
            
 testLetDT :: Program TypeInfoWit Double
 testLetDT = Program [] (LetIn (TypeInfoWit TFloat Integrate Set.empty) "x"
-           (Plus (TypeInfoWit TFloat Deterministic Set.empty)
+           (PlusF (TypeInfoWit TFloat Deterministic Set.empty)
             (ThetaI (TypeInfoWit TFloat Deterministic Set.empty) 0)
              (Constant (TypeInfoWit TFloat Deterministic Set.empty) (VFloat 3.0)))
-           (Plus (TypeInfoWit TFloat Integrate Set.empty)
+           (PlusF (TypeInfoWit TFloat Integrate Set.empty)
               (InjF (TypeInfoWit TFloat Deterministic (Set.singleton "x"))  "sig" []
                 (Var (TypeInfoWit TFloat Deterministic (Set.singleton "x")) "x"))
               (Normal (TypeInfoWit TFloat Integrate Set.empty))))
 
 testLetTupleS :: Program () Double
-testLetTupleS = Program [] (LetIn() "x" (Plus () (ThetaI () 0) (Normal ()))
+testLetTupleS = Program [] (LetIn() "x" (PlusF () (ThetaI () 0) (Normal ()))
                                               (Cons () (Var () "x") 
                                                 (Cons () 
-                                                  (Plus () (Normal ())(Var () "x")) 
+                                                  (PlusF () (Normal ())(Var () "x")) 
                                                   (Null ()))))
 testLetTupleT :: Program TypeInfoWit Double
 testLetTupleT = Program [] 
   (LetIn (TypeInfoWit (ListOf TFloat) Integrate Set.empty)   "x" 
-    (Plus (TypeInfoWit TFloat Integrate Set.empty)
+    (PlusF (TypeInfoWit TFloat Integrate Set.empty)
       (ThetaI (TypeInfoWit TFloat Deterministic Set.empty) 0) 
       (Normal (TypeInfoWit TFloat Integrate Set.empty) ))
     (Cons (TypeInfoWit (ListOf TFloat) Integrate (Set.singleton "x"))  
       (Var (TypeInfoWit TFloat Deterministic (Set.singleton "x")) "x") 
       (Cons (TypeInfoWit (ListOf TFloat) Integrate Set.empty) 
-        (Plus (TypeInfoWit TFloat Integrate Set.empty) 
+        (PlusF (TypeInfoWit TFloat Integrate Set.empty) 
           (Normal (TypeInfoWit TFloat Integrate Set.empty))
           (Var (TypeInfoWit TFloat Deterministic (Set.singleton "x")) "x")) 
         (Null (TypeInfoWit NullList Deterministic Set.empty)))))
         
         
 testLetXYS :: Program () Double
-testLetXYS = Program [] (LetIn() "x" (Plus () (ThetaI () 0) (Normal ()))
-                          (LetIn ()  "y" (Plus () (ThetaI () 1) (Normal ()))
+testLetXYS = Program [] (LetIn() "x" (PlusF () (ThetaI () 0) (Normal ()))
+                          (LetIn ()  "y" (PlusF () (ThetaI () 1) (Normal ()))
                                          (Cons () (Var () "x") 
                                            (Cons () 
                                              (Var () "y")
                                              (Cons () 
-                                                (Mult () (Plus () (Normal ())(Var () "x")) (Var () "y"))
+                                                (MultF () (PlusF () (Normal ())(Var () "x")) (Var () "y"))
                                                 (Null ()))))))
                                                 
 -- Let x = theta0 + normal in let y = theta1 + normal in [x, y, y * (x + normal)]
 testLetXYT :: Program TypeInfoWit Double
 testLetXYT = Program [] (LetIn (TypeInfoWit (ListOf TFloat) Integrate Set.empty) "x"
-                            (Plus (TypeInfoWit TFloat Integrate Set.empty) 
+                            (PlusF (TypeInfoWit TFloat Integrate Set.empty) 
                                 (ThetaI (TypeInfoWit TFloat Deterministic Set.empty) 0) 
                                 (Normal (TypeInfoWit TFloat Integrate Set.empty)))
                           (LetIn (TypeInfoWit (ListOf TFloat) Integrate (Set.singleton "x")) "y" 
-                                 (Plus (TypeInfoWit TFloat Integrate Set.empty) 
+                                 (PlusF (TypeInfoWit TFloat Integrate Set.empty) 
                                     (ThetaI (TypeInfoWit TFloat Deterministic Set.empty) 1) 
                                     (Normal (TypeInfoWit TFloat Integrate Set.empty)))
                                  (Cons (TypeInfoWit (ListOf TFloat) Integrate (Set.fromList ["x", "y"])) 
@@ -112,8 +112,8 @@ testLetXYT = Program [] (LetIn (TypeInfoWit (ListOf TFloat) Integrate Set.empty)
                                    (Cons (TypeInfoWit (ListOf TFloat) Integrate (Set.singleton "y")) 
                                      (Var (TypeInfoWit TFloat Deterministic (Set.singleton "y")) "y")
                                      (Cons (TypeInfoWit (ListOf TFloat) Integrate Set.empty)
-                                        (Mult (TypeInfoWit TFloat Integrate Set.empty) 
-                                           (Plus (TypeInfoWit TFloat Integrate Set.empty)
+                                        (MultF (TypeInfoWit TFloat Integrate Set.empty) 
+                                           (PlusF (TypeInfoWit TFloat Integrate Set.empty)
                                               (Normal (TypeInfoWit TFloat Integrate Set.empty))
                                               (Var (TypeInfoWit TFloat Deterministic (Set.singleton "x")) "x")) 
                                            (Var (TypeInfoWit TFloat Deterministic (Set.singleton "y")) "y"))

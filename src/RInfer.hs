@@ -370,22 +370,39 @@ infer expr = case expr of
       t <- lookupTEnv name
       return (t, [], Call (setRType ti t) name)
 
-  Plus x e1 e2 -> do
+  PlusF x e1 e2 -> do
     (t1, c1, et1) <- infer e1
     (t2, c2, et2) <- infer e2
     tv <- fresh
     let u1 = t1 `TArr` (t2 `TArr` tv)
     -- Can't handle Int and Float at same time....
         u2 = TFloat `TArr` (TFloat `TArr` TFloat)
-    return (tv, c1 ++ c2 ++ [(u1, u2)], Plus (setRType x tv) et1 et2)
+    return (tv, c1 ++ c2 ++ [(u1, u2)], PlusF (setRType x tv) et1 et2)
 
-  Mult x e1 e2 -> do
+  PlusI x e1 e2 -> do
+    (t1, c1, et1) <- infer e1
+    (t2, c2, et2) <- infer e2
+    tv <- fresh
+    let u1 = t1 `TArr` (t2 `TArr` tv)
+    -- Can't handle Int and Float at same time....
+        u2 = TInt `TArr` (TInt `TArr` TInt)
+    return (tv, c1 ++ c2 ++ [(u1, u2)], PlusI (setRType x tv) et1 et2)
+
+  MultF x e1 e2 -> do
       (t1, c1, et1) <- infer e1
       (t2, c2, et2) <- infer e2
       tv <- fresh
       let u1 = t1 `TArr` (t2 `TArr` tv)
           u2 = TFloat `TArr` (TFloat `TArr` TFloat)
-      return (tv, c1 ++ c2 ++ [(u1, u2)], Mult (setRType x tv)  et1 et2)
+      return (tv, c1 ++ c2 ++ [(u1, u2)], MultF (setRType x tv)  et1 et2)
+
+  MultI x e1 e2 -> do
+      (t1, c1, et1) <- infer e1
+      (t2, c2, et2) <- infer e2
+      tv <- fresh
+      let u1 = t1 `TArr` (t2 `TArr` tv)
+          u2 = TInt `TArr` (TInt `TArr` TInt)
+      return (tv, c1 ++ c2 ++ [(u1, u2)], MultI (setRType x tv)  et1 et2)
 
   GreaterThan x e1 e2 -> do
       (t1, c1, et1) <- infer e1

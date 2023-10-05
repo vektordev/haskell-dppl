@@ -31,7 +31,7 @@ annotate expr = tMap annotateLocal expr
 
 findEnumerable :: Expr TypeInfo a -> Maybe [Value a]
 findEnumerable (ReadNN _ name (subexpr)) = Just [VInt i | i <- [0..9]]
-findEnumerable (Plus _ left right) =
+findEnumerable (PlusI _ left right) =
   if isNothing leftEnum || isNothing rightEnum
     then Nothing
     else Just $ map VInt $ nub [a + b | VInt a <- fromJust leftEnum, VInt b <- fromJust rightEnum]

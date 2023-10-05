@@ -11,8 +11,10 @@ data ExprStub = StubIfThenElse
               | StubUniform
               | StubNormal
               | StubConstant
-              | StubMult
-              | StubPlus
+              | StubMultF
+              | StubMultI
+              | StubPlusF
+              | StubPlusI
               | StubNull
               | StubCons
               | StubCall
@@ -72,20 +74,21 @@ greaterThanRight = Algorithm StubGreaterThan [SubExprNIsType 1 Deterministic] "g
 greaterThanSigmoid :: Algorithm
 greaterThanSigmoid = Algorithm StubGreaterThan [SubExprNIsType 0 Deterministic, SubExprNIsType 1 Deterministic] "greaterThanSigmoid" (const Integrate)
 
+--TODO: Lacking implementation of invertible arithmetic on Integers.
 plusLeft :: Algorithm
-plusLeft = Algorithm StubPlus [SubExprNIsType 0 Deterministic] "plusLeft" mostChaotic
+plusLeft = Algorithm StubPlusF [SubExprNIsType 0 Deterministic] "plusLeft" mostChaotic
 
 plusRight :: Algorithm
-plusRight = Algorithm StubPlus [SubExprNIsType 1 Deterministic] "plusRight" mostChaotic
+plusRight = Algorithm StubPlusF [SubExprNIsType 1 Deterministic] "plusRight" mostChaotic
 
 multLeft :: Algorithm
-multLeft = Algorithm StubMult [SubExprNIsType 0 Deterministic] "multLeft" mostChaotic
+multLeft = Algorithm StubMultF [SubExprNIsType 0 Deterministic] "multLeft" mostChaotic
 
 multRight :: Algorithm
-multRight = Algorithm StubMult [SubExprNIsType 1 Deterministic] "multRight" mostChaotic
+multRight = Algorithm StubMultF [SubExprNIsType 1 Deterministic] "multRight" mostChaotic
 
 enumeratePlusLeft :: Algorithm
-enumeratePlusLeft = Algorithm StubPlus [SubExprNIsNotType 0 Deterministic, SubExprNIsNotType 1 Deterministic] "enumeratePlusLeft" (const Chaos)
+enumeratePlusLeft = Algorithm StubPlusI [SubExprNIsNotType 0 Deterministic, SubExprNIsNotType 1 Deterministic] "enumeratePlusLeft" (const Chaos)
 
 allAlgorithms :: [Algorithm]
 allAlgorithms = [greaterThanLeft, greaterThanRight, greaterThanSigmoid, plusLeft, plusRight, multLeft, multRight, enumeratePlusLeft]
@@ -141,7 +144,7 @@ arity :: ExprStub -> Int
 arity = undefined
 
 likelihoodFunctionUsesTypeInfo :: ExprStub -> Bool
-likelihoodFunctionUsesTypeInfo expr = expr `elem` [StubGreaterThan, StubMult, StubPlus]
+likelihoodFunctionUsesTypeInfo expr = expr `elem` [StubGreaterThan, StubMultF, StubMultI, StubPlusF, StubPlusI]
 
 toStub :: Expr x a -> ExprStub
 toStub expr = case expr of
@@ -151,8 +154,10 @@ toStub expr = case expr of
   (Uniform _)    -> StubUniform
   (Normal _)     -> StubNormal
   (Constant _ _) -> StubConstant
-  Mult {}        -> StubMult
-  Plus {}        -> StubPlus
+  MultF {}       -> StubMultF
+  MultI {}       -> StubMultI
+  PlusF {}       -> StubPlusF
+  PlusI {}       -> StubPlusI
   (Null _)       -> StubNull
   Cons {}        -> StubCons
   (Call _ _)     -> StubCall

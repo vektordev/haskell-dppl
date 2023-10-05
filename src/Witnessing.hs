@@ -22,19 +22,37 @@ addWitnesses witVars (InjF ti f_name params expr) = InjF (setWits (createWTypeIn
   where witExpr = addWitnesses witVars expr
         paramExprs = map (addWitnesses witVars) params
         wits = getWitsW witExpr
-addWitnesses witVars (Plus ti expr1 expr2) 
-  | pt1 == Deterministic && null wit1 = Plus (getTypeInfo witExpr2) witExpr1 witExpr2
-  | pt2 == Deterministic && null wit2 = Plus (getTypeInfo witExpr1) witExpr1 witExpr2
-  | otherwise = Plus (createWTypeInfo ti) witExpr1 witExpr2
+addWitnesses witVars (PlusF ti expr1 expr2)
+  | pt1 == Deterministic && null wit1 = PlusF (getTypeInfo witExpr2) witExpr1 witExpr2
+  | pt2 == Deterministic && null wit2 = PlusF (getTypeInfo witExpr1) witExpr1 witExpr2
+  | otherwise = PlusF (createWTypeInfo ti) witExpr1 witExpr2
   where
       (TypeInfoWit _ pt1 wit1) = getTypeInfo witExpr1
       (TypeInfoWit _ pt2 wit2) = getTypeInfo witExpr2
       witExpr1 = addWitnesses witVars expr1 
-      witExpr2 = addWitnesses witVars expr2 
-addWitnesses witVars (Mult ti expr1 expr2) 
-  | pt1 == Deterministic && null wit1 = Mult (getTypeInfo witExpr2) witExpr1 witExpr2
-  | pt2 == Deterministic && null wit2 = Mult (getTypeInfo witExpr1) witExpr1 witExpr2
-  | otherwise = Mult (createWTypeInfo ti) witExpr1 witExpr2
+      witExpr2 = addWitnesses witVars expr2
+addWitnesses witVars (PlusI ti expr1 expr2)
+  | pt1 == Deterministic && null wit1 = PlusI (getTypeInfo witExpr2) witExpr1 witExpr2
+  | pt2 == Deterministic && null wit2 = PlusI (getTypeInfo witExpr1) witExpr1 witExpr2
+  | otherwise = PlusI (createWTypeInfo ti) witExpr1 witExpr2
+  where
+      (TypeInfoWit _ pt1 wit1) = getTypeInfo witExpr1
+      (TypeInfoWit _ pt2 wit2) = getTypeInfo witExpr2
+      witExpr1 = addWitnesses witVars expr1
+      witExpr2 = addWitnesses witVars expr2
+addWitnesses witVars (MultF ti expr1 expr2)
+  | pt1 == Deterministic && null wit1 = MultF (getTypeInfo witExpr2) witExpr1 witExpr2
+  | pt2 == Deterministic && null wit2 = MultF (getTypeInfo witExpr1) witExpr1 witExpr2
+  | otherwise = MultF (createWTypeInfo ti) witExpr1 witExpr2
+  where
+      (TypeInfoWit _ pt1 wit1) = getTypeInfo witExpr1
+      (TypeInfoWit _ pt2 wit2) = getTypeInfo witExpr2
+      witExpr1 = addWitnesses witVars expr1
+      witExpr2 = addWitnesses witVars expr2
+addWitnesses witVars (MultI ti expr1 expr2)
+  | pt1 == Deterministic && null wit1 = MultI (getTypeInfo witExpr2) witExpr1 witExpr2
+  | pt2 == Deterministic && null wit2 = MultI (getTypeInfo witExpr1) witExpr1 witExpr2
+  | otherwise = MultI (createWTypeInfo ti) witExpr1 witExpr2
   where
       (TypeInfoWit _ pt1 wit1) = getTypeInfo witExpr1
       (TypeInfoWit _ pt2 wit2) = getTypeInfo witExpr2

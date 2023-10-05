@@ -60,7 +60,7 @@ mkVariable suffix = do
 
 --We can also change the approach here to first boil down to another IR that directly maps to instructions.
 mkProbabilityBody :: (Show a) => String -> String -> Tree (IRNode a) -> Supply Int [String]
-mkProbabilityBody sample_name out_name (Node (Complex (Algorithm StubMult _ "multRight" _)) [rng, det]) = do
+mkProbabilityBody sample_name out_name (Node (Complex (Algorithm StubMultF _ "multRight" _)) [rng, det]) = do
   detSample <- mkVariable "detSample"
   l_inverse <- mkVariable "inverse"
   inverse_p <- mkVariable "inverse_p"
@@ -72,14 +72,14 @@ mkProbabilityBody sample_name out_name (Node (Complex (Algorithm StubMult _ "mul
   let l5 = out_name ++ " = " ++ inverse_p ++ " / " ++ detSample
   return (boxed ++ [l4] ++ boxed2 ++ [l5])
   --inverse / (det sample)
-mkProbabilityBody sample_name out_name (Node (Complex (Algorithm StubPlus _ "plusRight" _ )) [rng, det]) = do
+mkProbabilityBody sample_name out_name (Node (Complex (Algorithm StubPlusF _ "plusRight" _ )) [rng, det]) = do
   detSample <- mkVariable "detSaple"
   l_inverse <- mkVariable "inverse"
   boxed <- mkDetGenerate detSample det
   let l4 = l_inverse ++ " = " ++ sample_name ++ " - " ++ detSample
   boxed2 <- mkProbabilityBody l_inverse out_name rng
   return (boxed ++ [l4] ++ boxed2)
-mkProbabilityBody sample_name out_name (Node (Complex (Algorithm StubPlus _ "enumeratePlusLeft" _)) [nodeEnum, otherSide]) = do
+mkProbabilityBody sample_name out_name (Node (Complex (Algorithm StubPlusI _ "enumeratePlusLeft" _)) [nodeEnum, otherSide]) = do
   loop_Counter <- mkVariable "loop_Counter"
   loop_Enum <- mkVariable "loop_Enum"
   inverse <- mkVariable "inverse"

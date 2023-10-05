@@ -17,8 +17,10 @@ data Expr x a = IfThenElse x (Expr x a) (Expr x a) (Expr x a)
               | Uniform x
               | Normal x
               | Constant x (Value a)
-              | Mult x (Expr x a) (Expr x a)
-              | Plus x (Expr x a) (Expr x a)
+              | MultF x (Expr x a) (Expr x a)
+              | MultI x (Expr x a) (Expr x a)
+              | PlusF x (Expr x a) (Expr x a)
+              | PlusI x (Expr x a) (Expr x a)
               | Null x
               | Cons x (Expr x a) (Expr x a)
               | Var x String
@@ -144,8 +146,10 @@ exprMap f expr = case expr of
   (Uniform t) -> Uniform t
   (Normal t) -> Normal t
   (Constant t x) -> Constant t $ fmap f x
-  (Mult t a b) -> Mult t (fmap f a) (fmap f b)
-  (Plus t a b) -> Plus t (fmap f a) (fmap f b)
+  (MultF t a b) -> MultF t (fmap f a) (fmap f b)
+  (MultI t a b) -> MultI t (fmap f a) (fmap f b)
+  (PlusF t a b) -> PlusF t (fmap f a) (fmap f b)
+  (PlusI t a b) -> PlusI t (fmap f a) (fmap f b)
   (Null t) -> Null t
   (Cons t a b) -> Cons t (fmap f a) (fmap f b)
   (TNull t) -> TNull t
@@ -190,8 +194,10 @@ tMapHead f expr = case expr of
   (Uniform _) -> Uniform (f expr)
   (Normal _) -> Normal (f expr)
   (Constant _ x) -> Constant (f expr) x
-  (Mult _ a b) -> Mult (f expr) a b
-  (Plus _ a b) -> Plus (f expr) a b
+  (MultF _ a b) -> MultF (f expr) a b
+  (MultI _ a b) -> MultI (f expr) a b
+  (PlusF _ a b) -> PlusF (f expr) a b
+  (PlusI _ a b) -> PlusI (f expr) a b
   (Null _) -> Null (f expr)
   (Cons _ a b) -> Cons (f expr) a b
   (TNull _) -> TNull (f expr)
@@ -215,8 +221,10 @@ tMapTails f expr = case expr of
   (Uniform t) -> Uniform t
   (Normal t) -> Normal t
   (Constant t x) -> Constant t x
-  (Mult t a b) -> Mult t (tMap f a) (tMap f b)
-  (Plus t a b) -> Plus t (tMap f a) (tMap f b)
+  (MultF t a b) -> MultF t (tMap f a) (tMap f b)
+  (MultI t a b) -> MultI t (tMap f a) (tMap f b)
+  (PlusF t a b) -> PlusF t (tMap f a) (tMap f b)
+  (PlusI t a b) -> PlusI t (tMap f a) (tMap f b)
   (Null t) -> Null t
   (Cons t a b) -> Cons t (tMap f a) (tMap f b)
   (TNull t) -> TNull t
@@ -238,8 +246,10 @@ tMap f expr = case expr of
   (Uniform _) -> Uniform (f expr)
   (Normal _) -> Normal (f expr)
   (Constant _ x) -> Constant (f expr) x
-  (Mult _ a b) -> Mult (f expr) (tMap f a) (tMap f b)
-  (Plus _ a b) -> Plus (f expr) (tMap f a) (tMap f b)
+  (MultF _ a b) -> MultF (f expr) (tMap f a) (tMap f b)
+  (MultI _ a b) -> MultF (f expr) (tMap f a) (tMap f b)
+  (PlusF _ a b) -> PlusF (f expr) (tMap f a) (tMap f b)
+  (PlusI _ a b) -> PlusI (f expr) (tMap f a) (tMap f b)
   (Null _) -> Null (f expr)
   (Cons _ a b) -> Cons (f expr) (tMap f a) (tMap f b)
   (TNull _) -> TNull (f expr)
@@ -266,8 +276,10 @@ getSubExprs expr = case expr of
   (Uniform _) -> []
   (Normal _) -> []
   (Constant _ x) -> []
-  (Mult _ a b) -> [a,b]
-  (Plus _ a b) -> [a,b]
+  (MultF _ a b) -> [a,b]
+  (MultI _ a b) -> [a,b]
+  (PlusF _ a b) -> [a,b]
+  (PlusI _ a b) -> [a,b]
   (Null _) -> []
   (Cons _ a b) -> [a,b]
   (TNull _) -> []
@@ -291,12 +303,14 @@ getTypeInfo expr = case expr of
   (Uniform t)           -> t
   (Normal t)            -> t
   (Constant t _)        -> t
-  (Mult t _ _)          -> t
-  (Plus t _ _)          -> t
+  (MultF t _ _)         -> t
+  (MultI t _ _)         -> t
+  (PlusF t _ _)         -> t
+  (PlusI t _ _)         -> t
   (Null t)              -> t
   (Cons t _ _)          -> t
-  (TNull t)              -> t
-  (TCons t _ _)          -> t
+  (TNull t)             -> t
+  (TCons t _ _)         -> t
   (Call t _)            -> t
   (Var t _)             -> t
   (LetIn t _ _ _)       -> t
@@ -361,8 +375,10 @@ recurse expr = case expr of
   (Uniform _) -> []
   (Normal _) -> []
   (Constant _ _) -> []
-  (Mult _ a b) -> [a,b]
-  (Plus _ a b) -> [a,b]
+  (MultF _ a b) -> [a,b]
+  (MultI _ a b) -> [a,b]
+  (PlusF _ a b) -> [a,b]
+  (PlusI _ a b) -> [a,b]
   (Null _) -> []
   (Cons _ a b) -> [a,b]
   (TNull _) -> []
@@ -386,8 +402,10 @@ printFlat expr = case expr of
   Uniform {} -> "Uniform"
   Normal {} -> "Normal"
   (Constant _ x) -> "Constant (" ++ show x ++ ")"
-  Mult {} -> "Mult"
-  Plus {} -> "Plus"
+  MultF {} -> "MultF"
+  MultI {} -> "MultI"
+  PlusF {} -> "PlusF"
+  PlusI {} -> "PlusI"
   (Null _) -> "Null"
   Cons {} -> "Cons"
   (TNull _) -> "TNull"
@@ -411,8 +429,10 @@ printFlatNoReq expr = case expr of
   Uniform {} -> "Uniform"
   Normal {} -> "Normal"
   (Constant _ _) -> "Constant"
-  Mult {} -> "Mult"
-  Plus {} -> "Plus"
+  MultF {} -> "MultF"
+  MultI {} -> "MultI"
+  PlusF {} -> "PlusF"
+  PlusI {} -> "PlusI"
   (Null _) -> "Null"
   Cons {} -> "Cons"
   (TNull _) -> "TNull"

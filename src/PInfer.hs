@@ -377,12 +377,22 @@ infer env expr = case expr of
   Normal ()  -> return (emptySubst, [], Integrate)
   Constant () val  -> return (emptySubst, [], Deterministic)
 
-  Plus x e1 e2 -> do
+  PlusF x e1 e2 -> do
     (s1, cs1, t1) <- lookupEnv env "+"
     (s2, cs2, t2) <- applyOpArg env e1 s1 cs1 t1
     applyOpArg env e2 s2 cs2 t2
 
-  Mult x e1 e2 -> do
+  PlusI x e1 e2 -> do
+    (s1, cs1, t1) <- lookupEnv env "+"
+    (s2, cs2, t2) <- applyOpArg env e1 s1 cs1 t1
+    applyOpArg env e2 s2 cs2 t2
+
+  MultF x e1 e2 -> do
+      (s1, cs1, t1) <- lookupEnv env "+"
+      (s2, cs2, t2) <- applyOpArg env e1 s1 cs1 t1
+      applyOpArg env e2 s2 cs2 t2
+      
+  MultI x e1 e2 -> do
       (s1, cs1, t1) <- lookupEnv env "+"
       (s2, cs2, t2) <- applyOpArg env e1 s1 cs1 t1
       applyOpArg env e2 s2 cs2 t2

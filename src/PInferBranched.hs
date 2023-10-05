@@ -350,13 +350,24 @@ infer expr = case expr of
   Normal ()  -> return [Right (Integrate, [])]
   Constant () val  -> return [Right (Deterministic, [])]
 
-  Plus x e1 e2 -> do
+  PlusF x e1 e2 -> do
       list1 <- infer e1
       list2 <- infer e2
       let comb = combineBranches list1 list2
       return $ concatMap buildDet comb
 
-  Mult x e1 e2 -> do
+  PlusI x e1 e2 -> do
+      list1 <- infer e1
+      list2 <- infer e2
+      let comb = combineBranches list1 list2
+      return $ concatMap buildDet comb
+
+  MultF x e1 e2 -> do
+      list1 <- infer e1
+      list2 <- infer e2
+      let comb = combineBranches list1 list2
+      return $ concatMap buildDet comb
+  MultI x e1 e2 -> do
       list1 <- infer e1
       list2 <- infer e2
       let comb = combineBranches list1 list2
