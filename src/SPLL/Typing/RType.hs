@@ -13,9 +13,8 @@ data RType = TBool
            | BottomTuple
            | RIdent String
            | RConstraint String RType RType
-           | Arrow RType RType
+           | TArrow RType RType
            | TVarR TVarR
-           | TArr RType RType
            | GreaterType RType RType
            | NotSetYet
            deriving (Show, Ord)
@@ -26,7 +25,7 @@ instance Eq RType where
   (==) TInt TInt = True
   (==) TSymbol TSymbol = True
   (==) TFloat TFloat = True
-  (==) (Arrow left right) (Arrow left2 right2) = left == left2 && right == right2
+  (==) (TArrow left right) (TArrow left2 right2) = left == left2 && right == right2
   (==) (ListOf x) (ListOf y) = x == y
   (==) NullList NullList = True
   (==) BottomTuple BottomTuple = True

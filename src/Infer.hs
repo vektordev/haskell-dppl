@@ -21,4 +21,4 @@ addTypeInfo :: (Show a) => Program () a -> Program TypeInfo a
 addTypeInfo = addPTypeInfo . addRTypeInfo . addEmptyTypeInfo 
 
 addRTypeInfoOnly :: (Show a) => Program () a -> Program TypeInfo a
-addRTypeInfoOnly =  addRTypeInfo . addEmptyTypeInfo 
+addRTypeInfoOnly =  addRTypeInfo . addEmptyTypeInfo

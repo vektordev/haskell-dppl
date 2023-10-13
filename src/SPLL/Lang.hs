@@ -1,5 +1,3 @@
-{-# LANGUAGE DatatypeContexts #-}
-
 module SPLL.Lang where
 
 import SPLL.Typing.PType
@@ -7,6 +5,7 @@ import SPLL.Typing.RType
 import qualified Data.Set as Set
 
 import qualified Data.Map as Map
+import Control.Applicative (liftA2)
 
 --Expr x (a :: Precision)
 --data Precision = P32 | P64"
@@ -40,6 +39,31 @@ data Expr x a = IfThenElse x (Expr x a) (Expr x a) (Expr x a)
               -- TODO: Needs Concat to achieve proper SPN-parity.
               deriving (Show, Eq, Ord)
 
+-- Flipped type args newtype on Expr, so we can fmap, foldr, and traverse over types.
+newtype ExprFlip x t = ExprFlip (Expr t x)
+
+unflip :: ExprFlip x t -> Expr t x
+unflip (ExprFlip x) = x
+
+instance Functor (ExprFlip x) where
+  fmap f eflip = ExprFlip $ tMap (\e -> f (getTypeInfo (e))) (unflip eflip)
+
+instance Foldable (ExprFlip x) where
+  --foldr :: (t -> b -> b) -> b -> ExprFlip x t -> b
+  foldr f accum eflip = f (getTypeInfo $ unflip eflip) subexprfolds
+    where
+      subexprs = recurse $ unflip eflip
+      subexprfolds = foldr unflipf accum subexprs
+      -- unflipf :: Expr t x -> b -> b
+      -- unflip eflip2 :: Expr
+      unflipf eflip2 accum = f (getTypeInfo eflip2) accum
+
+instance Traversable (ExprFlip x) where
+  traverse f eflip = fmap ExprFlip traversed
+    where
+      traversed = tTraverse f unflipped
+      unflipped = unflip eflip
+
 data VEnv a
   = ValueEnv {values :: Map.Map String (Value a), branchMap :: BranchMap a}
   deriving (Eq, Show)
@@ -57,9 +81,9 @@ vremove env var = env {values = Map.delete var (values env)}
 
 type Params a = [Value a]
 -- forward, inverse, inverse'
-newtype (Floating a) => FPair a = FPair (RType, Params a -> Value a -> Value a, Params a -> Value a -> Value a, Params a -> Value a -> a)
+newtype FPair a = FPair (RType, Params a -> Value a -> Value a, Params a -> Value a -> Value a, Params a -> Value a -> a)
 type FEnv a = [(String, FPair a)]
-newtype (Floating a) => FPair2 a = FPair2 (Params a -> a -> a,  Params a -> a -> a, Params a -> a -> a)
+newtype FPair2 a = FPair2 (Params a -> a -> a,  Params a -> a -> a, Params a -> a -> a)
 type FEnv2 a = [(String, FPair2 a)]
 type Name = String
 
@@ -73,8 +97,6 @@ type TypedProg a = Program TypeInfo a
 type Decl x a = (String, Expr x a)
 
 type WitnessedVars = Set.Set String
-instance Functor (Expr x) where
-  fmap = exprMap
 
 data Value a = VBool Bool
            | VInt Int
@@ -85,7 +107,7 @@ data Value a = VBool Bool
            | VBranch (Value a) (Value a) String
            | VRange (Limits a)
            | VAnyList 
-           -- | Value of Arrow a b could be Expr TypeInfo a, with Expr being a Lambda?
+           -- | Value of TArrow a b could be Expr TypeInfo a, with Expr being a Lambda?
            deriving (Show, Eq, Ord)
 -- likelihood [vMarg, vAnyList] - likelihood [vMarg, vMarg, vAnylist]
 --Nothing indicates low/high infinity.
@@ -140,30 +162,30 @@ getPTypeW (TypeInfoWit _ pt _) = pt
 
 exprMap :: (a -> b) -> Expr x a -> Expr x b
 exprMap f expr = case expr of
-  (IfThenElse t a b c) -> IfThenElse t (fmap f a) (fmap f b) (fmap f c)
-  (GreaterThan t a b) -> GreaterThan t (fmap f a) (fmap f b)
+  (IfThenElse t a b c) -> IfThenElse t (exprMap f a) (exprMap f b) (exprMap f c)
+  (GreaterThan t a b) -> GreaterThan t (exprMap f a) (exprMap f b)
   (ThetaI t x) -> ThetaI t x
   (Uniform t) -> Uniform t
   (Normal t) -> Normal t
   (Constant t x) -> Constant t $ fmap f x
-  (MultF t a b) -> MultF t (fmap f a) (fmap f b)
-  (MultI t a b) -> MultI t (fmap f a) (fmap f b)
-  (PlusF t a b) -> PlusF t (fmap f a) (fmap f b)
-  (PlusI t a b) -> PlusI t (fmap f a) (fmap f b)
+  (MultF t a b) -> MultF t (exprMap f a) (exprMap f b)
+  (MultI t a b) -> MultI t (exprMap f a) (exprMap f b)
+  (PlusF t a b) -> PlusF t (exprMap f a) (exprMap f b)
+  (PlusI t a b) -> PlusI t (exprMap f a) (exprMap f b)
   (Null t) -> Null t
-  (Cons t a b) -> Cons t (fmap f a) (fmap f b)
+  (Cons t a b) -> Cons t (exprMap f a) (exprMap f b)
   (TNull t) -> TNull t
-  (TCons t a b) -> TCons t (fmap f a) (fmap f b)
+  (TCons t a b) -> TCons t (exprMap f a) (exprMap f b)
   (Call t x) -> Call t x
   (Var t x) -> Var t x
-  (LetIn t x a b) -> LetIn t x (fmap f a) (fmap f b)
-  (InjF t x a b) -> InjF t x (map (fmap f) a) (fmap f b)
-  --(LetInD t x a b) -> LetInD t x (fmap f a) (fmap f b)
-  --(LetInTuple t x a b c) -> LetInTuple t x (fmap f a) (biFMap f b) (fmap f c)
-  (Arg t name r a) -> Arg t name r (fmap f a)
-  (CallArg t name a) -> CallArg t name (map (fmap f) a)
-  (Lambda t name a) -> Lambda t name (fmap f a)
-  (ReadNN t n a) -> ReadNN t n (fmap f a)
+  (LetIn t x a b) -> LetIn t x (exprMap f a) (exprMap f b)
+  (InjF t x a b) -> InjF t x (map (exprMap f) a) (exprMap f b)
+  --(LetInD t x a b) -> LetInD t x (exprMap f a) (exprMap f b)
+  --(LetInTuple t x a b c) -> LetInTuple t x (exprMap f a) (biFMap f b) (exprMap f c)
+  (Arg t name r a) -> Arg t name r (exprMap f a)
+  (CallArg t name a) -> CallArg t name (map (exprMap f) a)
+  (Lambda t name a) -> Lambda t name (exprMap f a)
+  (ReadNN t n a) -> ReadNN t n (exprMap f a)
   
 predicateFlat :: (Expr x a -> Bool) -> Expr x a -> Bool
 predicateFlat f e = f e && all (predicateFlat f) (getSubExprs e)
@@ -267,6 +289,43 @@ tMap f expr = case expr of
 
 tMapProg :: (Expr x a -> y) -> Program x a -> Program y a
 tMapProg f (Program decls expr) = Program (zip (map fst decls) (map (tMap f . snd) decls)) (tMap f expr)
+
+getBinaryConstructor :: Expr x1 a1 -> (x2 -> Expr x2 a2 -> Expr x2 a2 -> Expr x2 a2)
+getBinaryConstructor GreaterThan {} = GreaterThan
+getBinaryConstructor MultF {} = MultF
+getBinaryConstructor MultI {} = MultI
+getBinaryConstructor PlusF {} = PlusF
+getBinaryConstructor PlusI {} = PlusI
+getBinaryConstructor Cons {} = Cons
+getBinaryConstructor TCons {} = TCons
+--getBinaryConstructor (LetIn t name a b) = \t2 -> \e1 -> \e2 -> LetIn t2 name e1 e2
+getBinaryConstructor (LetIn _ name _ _) = (`LetIn` name)
+getUnaryConstructor :: Expr x1 a1 -> (x2 -> Expr x2 a2 -> Expr x2 a2)
+getUnaryConstructor (Lambda _ x _) = (`Lambda` x)
+getUnaryConstructor (ReadNN _ x _) = (`ReadNN` x)
+getUnaryConstructor (Fix _ _) = Fix
+getNullaryConstructor :: Expr x1 a -> (x2 -> Expr x2 a)
+getNullaryConstructor Uniform {} = Uniform
+getNullaryConstructor Normal {} = Normal
+getNullaryConstructor (Constant t val) = (`Constant` val)
+getNullaryConstructor Null {} = Null
+getNullaryConstructor TNull {} = TNull
+getNullaryConstructor (ThetaI _ x) = (`ThetaI` x)
+getNullaryConstructor (Var _ x) = (`Var` x)
+getNullaryConstructor (Call _ x) = (`Call` x)
+
+tTraverse :: Applicative f => (a -> f b) -> Expr a v -> f (Expr b v)
+tTraverse f (IfThenElse t a b c) = IfThenElse <$> f t <*> tTraverse f a <*> tTraverse f b <*> tTraverse f c
+tTraverse f expr
+  | length (recurse expr) == 0 =
+      getNullaryConstructor expr <$> f (getTypeInfo expr)
+  | length (recurse expr) == 1 =
+      getUnaryConstructor expr <$> f (getTypeInfo expr) <*> tTraverse f (recurse expr !! 0)
+  | length (recurse expr) == 2 =
+      getBinaryConstructor expr <$> f (getTypeInfo expr) <*> tTraverse f (recurse expr !! 0) <*> tTraverse f (recurse expr !! 1)
+
+arity :: Expr x a -> Int
+arity e = length $ recurse e
 
 getSubExprs :: Expr x a -> [Expr x a]
 getSubExprs expr = case expr of 

@@ -39,6 +39,7 @@ dependencies:
 - transformers-supply
 - pretty-simple
 - erf
+- lens
 
 library:
   source-dirs: src

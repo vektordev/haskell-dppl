@@ -1,6 +1,14 @@
 {-# OPTIONS_GHC -fwarn-incomplete-patterns #-}
 
-module SPLL.Typing.Typing where
+module SPLL.Typing.Typing (
+  Env,
+  TypeError,
+  getR,
+  getP,
+  getPW,
+  getRW,
+  progToEnv
+)where
 
 import SPLL.Lang
 import SPLL.Typing.RType

@@ -17,13 +17,13 @@ invTest :: (Floating a) => Params a -> Value a ->  Value a
 invTest  [VFloat p] (VFloat x)  = VFloat $ x/ p
 -- Debug FEnv
 globalFenv :: (Floating a) => FEnv a
-globalFenv = [("plus", FPair (TArr TFloat (TArr TFloat TFloat), plusFwd, plusInv, plusInvGrad)),
-              ("mult", FPair (TArr TFloat (TArr TFloat TFloat), multFwd, multInv, multInvGrad)),
-              ("sig", FPair (TArr TFloat TFloat, sigFwd, sigInv, sigInvGrad)),
-              ("not", FPair (TArr TBool TBool, notFwd, notFwd, notInvGrad)),
-              ("listAdd", FPair (TArr (ListOf TFloat) (TArr(ListOf TFloat) (ListOf TFloat)), 
+globalFenv = [("plus", FPair (TArrow TFloat (TArrow TFloat TFloat), plusFwd, plusInv, plusInvGrad)),
+              ("mult", FPair (TArrow TFloat (TArrow TFloat TFloat), multFwd, multInv, multInvGrad)),
+              ("sig", FPair (TArrow TFloat TFloat, sigFwd, sigInv, sigInvGrad)),
+              ("not", FPair (TArrow TBool TBool, notFwd, notFwd, notInvGrad)),
+              ("listAdd", FPair (TArrow (ListOf TFloat) (TArrow (ListOf TFloat) (ListOf TFloat)),
                   plusListFwd, plusListInv, plusListInvGrad)),
-              ("listMult", FPair (TArr (ListOf TFloat) (TArr(ListOf TFloat) (ListOf TFloat)), 
+              ("listMult", FPair (TArrow (ListOf TFloat) (TArrow (ListOf TFloat) (ListOf TFloat)),
                                 multListFwd, multListInv, multListInvGrad))  ]
 rangeSwap :: (Floating a, Ord a) => (Value a -> a) -> Value a -> Value a
 rangeSwap f l@(VRange limits) = if (f (VFloat 0.0)) < 0 then swapLimits l else l
@@ -120,7 +120,7 @@ multListInvGrad _ _ = error "pluslist called with non-fitting arguments"
 
 
 autoExpr :: (Num a, Reifies s Tape) => Expr x a -> Expr x (Reverse s a)
-autoExpr = fmap auto
+autoExpr = exprMap auto
 
 autoEnv :: (Num a, Reifies s Tape) => Env x a -> Env x (Reverse s a)
 autoEnv = map (\ (name, expr) -> (name, autoExpr expr))

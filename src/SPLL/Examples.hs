@@ -400,15 +400,15 @@ testNNUntyped :: Expr () a
 testNNUntyped = Lambda () "im1" (Lambda () "im2" (PlusI () (ReadNN () "classifyMNist" (Var () "im1")) (ReadNN () "classifyMNist" (Var () "im2"))))
 
 testNN :: Expr TypeInfo a
-testNN = Lambda (TypeInfo (Arrow TSymbol (Arrow TSymbol TInt)) Chaos) "im1"
-  (Lambda (TypeInfo (Arrow TSymbol TInt) Chaos) "im2" (PlusI (TypeInfo TInt Integrate)
+testNN = Lambda (TypeInfo (TArrow TSymbol (TArrow TSymbol TInt)) Chaos) "im1"
+  (Lambda (TypeInfo (TArrow TSymbol TInt) Chaos) "im2" (PlusI (TypeInfo TInt Integrate)
     (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im1"))
     (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im2"))))
     
 
 mNistNoise :: Expr TypeInfo a
-mNistNoise = Lambda (TypeInfo (Arrow TSymbol (Arrow TSymbol TInt)) Chaos) "im1"
-  (Lambda (TypeInfo (Arrow TSymbol TInt) Chaos) "im2"
+mNistNoise = Lambda (TypeInfo (TArrow TSymbol (TArrow TSymbol TInt)) Chaos) "im1"
+  (Lambda (TypeInfo (TArrow TSymbol TInt) Chaos) "im2"
     (IfThenElse (TypeInfo TInt Integrate) (GreaterThan (TypeInfo TBool Integrate) (Uniform (TypeInfo TFloat Integrate)) (ThetaI (TypeInfo TFloat Deterministic) 0) )
     (PlusI (TypeInfo TInt Integrate)
       (Constant (TypeInfo TInt Deterministic) (VInt 1))
@@ -420,9 +420,9 @@ mNistNoise = Lambda (TypeInfo (Arrow TSymbol (Arrow TSymbol TInt)) Chaos) "im1"
       (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im2")))))
 
 triMNist :: Expr TypeInfo a
-triMNist = Lambda (TypeInfo (Arrow TSymbol (Arrow TSymbol (Arrow TSymbol TInt))) Chaos) "im1"
-  (Lambda (TypeInfo (Arrow TSymbol (Arrow TSymbol TInt)) Chaos) "im2"
-    (Lambda (TypeInfo (Arrow TSymbol TInt) Chaos) "im3" (PlusI (TypeInfo TInt Integrate)
+triMNist = Lambda (TypeInfo (TArrow TSymbol (TArrow TSymbol (TArrow TSymbol TInt))) Chaos) "im1"
+  (Lambda (TypeInfo (TArrow TSymbol (TArrow TSymbol TInt)) Chaos) "im2"
+    (Lambda (TypeInfo (TArrow TSymbol TInt) Chaos) "im3" (PlusI (TypeInfo TInt Integrate)
       (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im3"))
       (PlusI (TypeInfo TInt Integrate)
         (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im1"))
@@ -436,7 +436,7 @@ expertModels = Lambda () "im" (IfThenElse ()
   (ReadNN () "classifyCIFAR" (Var () "im")))
 
 expertModelsTyped :: Expr TypeInfo a
-expertModelsTyped = Lambda (TypeInfo (Arrow TSymbol TInt) Integrate) "im" (IfThenElse (TypeInfo TInt Integrate)
+expertModelsTyped = Lambda (TypeInfo (TArrow TSymbol TInt) Integrate) "im" (IfThenElse (TypeInfo TInt Integrate)
   (ReadNN (TypeInfo TBool Integrate) "isMnist" (Var (TypeInfo TSymbol Deterministic) "im"))
   (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im"))
   (ReadNN (TypeInfo TInt Integrate) "classifyCIFAR" (Var (TypeInfo TSymbol Deterministic) "im")))
@@ -448,7 +448,7 @@ expertAnnotated = Lambda () "im" (IfThenElse ()
   (Cons () (Constant () (VInt 2)) (Cons () (ReadNN () "classifyCIFAR" (Var () "im")) (Null ()))))
 
 expertAnnotatedTyped :: Expr TypeInfo a
-expertAnnotatedTyped = Lambda (TypeInfo (Arrow TSymbol (SPLL.Typing.RType.ListOf TInt)) Integrate) "im" (IfThenElse (TypeInfo (SPLL.Typing.RType.ListOf TInt) Integrate)
+expertAnnotatedTyped = Lambda (TypeInfo (TArrow TSymbol (SPLL.Typing.RType.ListOf TInt)) Integrate) "im" (IfThenElse (TypeInfo (SPLL.Typing.RType.ListOf TInt) Integrate)
   (ReadNN (TypeInfo TBool Integrate) "isMnist" (Var (TypeInfo TSymbol Deterministic) "im"))
   (Cons (TypeInfo (SPLL.Typing.RType.ListOf TInt) Integrate) (Constant (TypeInfo TInt Deterministic) (VInt 1)) (Cons (TypeInfo (SPLL.Typing.RType.ListOf TInt) Integrate) (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im")) (Null (TypeInfo (SPLL.Typing.RType.ListOf TInt) Deterministic))))
   (Cons (TypeInfo (SPLL.Typing.RType.ListOf TInt) Integrate) (Constant (TypeInfo TInt Deterministic) (VInt 2)) (Cons (TypeInfo (SPLL.Typing.RType.ListOf TInt) Integrate) (ReadNN (TypeInfo TInt Integrate) "classifyCIFAR" (Var (TypeInfo TSymbol Deterministic) "im")) (Null (TypeInfo (SPLL.Typing.RType.ListOf TInt) Deterministic)))))

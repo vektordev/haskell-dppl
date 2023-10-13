@@ -135,7 +135,7 @@ instance Substitutable RType where
   apply _ BottomTuple = BottomTuple
   apply s (ListOf t) = ListOf $ apply s t
   apply s (Tuple t1) = Tuple $ map (apply s) t1 
-  apply s (TArr t1 t2) = apply s t1 `TArr` apply s t2
+  apply s (TArrow t1 t2) = apply s t1 `TArrow` apply s t2
   apply (Subst s) t@(TVarR a) = Map.findWithDefault t a s
   apply s (GreaterType t1 t2) = apply s t1 `GreaterType` apply s t2
   -- rest of RType arent used as of now
@@ -144,7 +144,7 @@ instance Substitutable RType where
   ftv (ListOf t) = ftv t
   ftv (Tuple t1) = foldl Set.union Set.empty (map ftv t1)
   ftv (TVarR a)       = Set.singleton a
-  ftv (t1 `TArr` t2) = ftv t1 `Set.union` ftv t2
+  ftv (t1 `TArrow` t2) = ftv t1 `Set.union` ftv t2
   ftv (t1 `GreaterType` t2) = ftv t1 `Set.union` ftv t2
   ftv _ = Set.empty
 
@@ -348,16 +348,22 @@ trd3cts (_, _, e) = e
 
     
 buildFuncConstraints :: RType -> RType -> [RType] -> [Constraint] -> String -> Infer (RType, [Constraint])
-buildFuncConstraints (TArr inpT (TArr _ _)) _ [] cons name  = throwError $ FalseParameterFail name  
-buildFuncConstraints (TArr inpT (TArr t1 t2)) ft (rt1:rts) cons name  = 
-  buildFuncConstraints (TArr t1 t2) ft rts ((inpT, rt1):cons) name
-buildFuncConstraints (TArr inpT t1) finalType [] cons name  = return (t1, (inpT, finalType):cons)
-buildFuncConstraints (TArr inpT t1) finalType _ cons name  = throwError $ FalseParameterFail name
+buildFuncConstraints (TArrow inpT (TArrow _ _)) _ [] cons name  = throwError $ FalseParameterFail name  
+buildFuncConstraints (TArrow inpT (TArrow t1 t2)) ft (rt1:rts) cons name  = 
+  buildFuncConstraints (TArrow t1 t2) ft rts ((inpT, rt1):cons) name
+buildFuncConstraints (TArrow inpT t1) finalType [] cons name  = return (t1, (inpT, finalType):cons)
+buildFuncConstraints (TArrow inpT t1) finalType _ cons name  = throwError $ FalseParameterFail name
 buildFuncConstraints _ finalType _ cons name  = error "buildFuncConstraints with non function type"
 
-
-
-
+lookupRConstraint :: Expr TypeInfo a -> Infer RType
+lookupRConstraint (ThetaI _ _) = return TFloat
+lookupRConstraint (Uniform _ ) = return TFloat
+lookupRConstraint (Normal _  ) = return TFloat
+lookupRConstraint (PlusF _ _ _) = return $ TFloat `TArrow` (TFloat `TArrow` TFloat)
+lookupRConstraint (PlusI _ _ _) = return $ TInt   `TArrow` (TInt   `TArrow` TInt  )
+lookupRConstraint (MultF _ _ _) = return $ TFloat `TArrow` (TFloat `TArrow` TFloat)
+lookupRConstraint (MultI _ _ _) = return $ TInt   `TArrow` (TInt   `TArrow` TInt  )
+lookupRConstraint (GreaterThan _ _ _) = return $ TFloat `TArrow` (TFloat `TArrow` TBool)
 
 -- TODO Make greater number type for type instance constraint ("Overloaded operator")
 infer :: Show a =>Expr TypeInfo a -> Infer (RType, [Constraint], Expr TypeInfo a)
@@ -374,42 +380,42 @@ infer expr = case expr of
     (t1, c1, et1) <- infer e1
     (t2, c2, et2) <- infer e2
     tv <- fresh
-    let u1 = t1 `TArr` (t2 `TArr` tv)
+    let u1 = t1 `TArrow` (t2 `TArrow` tv)
     -- Can't handle Int and Float at same time....
-        u2 = TFloat `TArr` (TFloat `TArr` TFloat)
+        u2 = TFloat `TArrow` (TFloat `TArrow` TFloat)
     return (tv, c1 ++ c2 ++ [(u1, u2)], PlusF (setRType x tv) et1 et2)
 
   PlusI x e1 e2 -> do
     (t1, c1, et1) <- infer e1
     (t2, c2, et2) <- infer e2
     tv <- fresh
-    let u1 = t1 `TArr` (t2 `TArr` tv)
+    let u1 = t1 `TArrow` (t2 `TArrow` tv)
     -- Can't handle Int and Float at same time....
-        u2 = TInt `TArr` (TInt `TArr` TInt)
+        u2 = TInt `TArrow` (TInt `TArrow` TInt)
     return (tv, c1 ++ c2 ++ [(u1, u2)], PlusI (setRType x tv) et1 et2)
 
   MultF x e1 e2 -> do
       (t1, c1, et1) <- infer e1
       (t2, c2, et2) <- infer e2
       tv <- fresh
-      let u1 = t1 `TArr` (t2 `TArr` tv)
-          u2 = TFloat `TArr` (TFloat `TArr` TFloat)
+      let u1 = t1 `TArrow` (t2 `TArrow` tv)
+          u2 = TFloat `TArrow` (TFloat `TArrow` TFloat)
       return (tv, c1 ++ c2 ++ [(u1, u2)], MultF (setRType x tv)  et1 et2)
 
   MultI x e1 e2 -> do
       (t1, c1, et1) <- infer e1
       (t2, c2, et2) <- infer e2
       tv <- fresh
-      let u1 = t1 `TArr` (t2 `TArr` tv)
-          u2 = TInt `TArr` (TInt `TArr` TInt)
+      let u1 = t1 `TArrow` (t2 `TArrow` tv)
+          u2 = TInt `TArrow` (TInt `TArrow` TInt)
       return (tv, c1 ++ c2 ++ [(u1, u2)], MultI (setRType x tv)  et1 et2)
 
   GreaterThan x e1 e2 -> do
       (t1, c1, et1) <- infer e1
       (t2, c2, et2) <- infer e2
       tv <- fresh
-      let u1 = t1 `TArr` (t2 `TArr` tv)
-          u2 = TFloat `TArr` (TFloat `TArr` TBool)
+      let u1 = t1 `TArrow` (t2 `TArrow` tv)
+          u2 = TFloat `TArrow` (TFloat `TArrow` TBool)
       return (tv, c1 ++ c2 ++ [(u1, u2)], GreaterThan (setRType x tv)  et1 et2)
 
   IfThenElse x cond tr fl -> do
@@ -441,7 +447,7 @@ infer expr = case expr of
     tv <- fresh
     let sc = Forall [] tv
     (t1, c1, et1) <- inTEnv (name, sc) (infer e2)
-    return (tv `TArr` t1, c1, Lambda (setRType x (tv `TArr` t1)) name et1)
+    return (tv `TArrow` t1, c1, Lambda (setRType x (tv `TArrow` t1)) name et1)
     
   
   Null x -> return (NullList, [], Null (setRType x NullList))
@@ -482,7 +488,7 @@ normalize (Forall _ body) = Forall (map snd ord) (normtype body)
     ord = zip (nub $ fv body) (map TV letters)
 
     fv (TVarR a)   = [a]
-    fv (TArr a b) = fv a ++ fv b
+    fv (TArrow a b) = fv a ++ fv b
     fv (ListOf t)    = fv t
     fv TBool = []
     fv TInt = []
@@ -491,7 +497,7 @@ normalize (Forall _ body) = Forall (map snd ord) (normtype body)
     fv NullList = []
     fv (GreaterType a b) = fv a ++ fv b
 
-    normtype (TArr a b) = TArr (normtype a) (normtype b)
+    normtype (TArrow a b) = TArrow (normtype a) (normtype b)
     normtype (GreaterType a b) = case gt of
        Nothing -> error "normalized greater type"
        Just rt -> normtype rt
@@ -552,7 +558,7 @@ unifies t1 (GreaterType t2 t3) = if t1 == t2 && t2 == t3 then return emptySubst 
 
 unifies (TVarR v) t = v `bind` t
 unifies t (TVarR v) = v `bind` t
-unifies (TArr t1 t2) (TArr t3 t4) = unifyMany [t1, t2] [t3, t4]
+unifies (TArrow t1 t2) (TArrow t3 t4) = unifyMany [t1, t2] [t3, t4]
 unifies (Tuple []) (Tuple []) = return emptySubst
 unifies (Tuple t1) (Tuple t2) = unifyMany t1 t2
 unifies t1 t2 = throwError $ UnificationFail t1 t2
