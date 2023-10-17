@@ -1,4 +1,4 @@
-module SPLL.BruteForceSolver (
+module SPLL.Typing.BruteForceSolver (
   addRTypeInfo,
   addPTypeInfo
 ) where
@@ -8,7 +8,7 @@ import SPLL.Typing.Typing
 import SPLL.Typing.RType
 import SPLL.Typing.PType
 import Control.Applicative (liftA2)
-import Infer
+import SPLL.Typing.Infer
 
 import SPLL.Examples
 

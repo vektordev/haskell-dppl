@@ -26,20 +26,20 @@ import SPLL.Lang
 import SPLL.Typing.Typing
 import SPLL.Typing.RType
 import SPLL.Typing.PType
-import Infer
-import PInfer2
-import RInfer
+import SPLL.Typing.Infer
+import SPLL.Typing.PInfer2
+import SPLL.Typing.RInfer
 import Interpreter
-import Transpiler
+import SPLL.Transpiler
 import Control.Monad.Random (evalRandIO, getRandomR, replicateM, forM_)
-import CodeGen
+import SPLL.CodeGen
 import SPLL.IntermediateRepresentation
 import SPLL.Analysis
 import SPLL.CodeGenPyTorch
 import SPLL.CodeGenJulia
-import Witnessing
+import SPLL.Typing.Witnessing
 import SPLL.Examples
-import PInferTypeclass
+import SPLL.Typing.PInferTypeclass
 import Debug.Trace
 import SpecExamples
 import InjectiveFunctions

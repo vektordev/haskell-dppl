@@ -1,4 +1,4 @@
-module Witnessing (
+module SPLL.Typing.Witnessing (
   addWitnessesProg
 , addWitnesses
 ) where

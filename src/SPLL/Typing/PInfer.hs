@@ -1,7 +1,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
-module PInfer (
+module SPLL.Typing.PInfer (
     showResults, showResultsProg, inferType
 ) where 
 

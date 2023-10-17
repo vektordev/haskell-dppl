@@ -1,11 +1,11 @@
-module Infer where
+module SPLL.Typing.Infer where
 
 import SPLL.Lang
 import SPLL.Typing.Typing
 import SPLL.Typing.RType
 import SPLL.Typing.PType
-import RInfer
-import PInfer2
+import SPLL.Typing.RInfer
+import SPLL.Typing.PInfer2
 import SPLL.Examples
 
 createTypeInfo :: (Show a) => Expr () a -> TypeInfo

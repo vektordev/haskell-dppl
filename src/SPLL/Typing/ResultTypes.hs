@@ -2,7 +2,7 @@
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE EmptyDataDeriving #-}
 
-module ResultTypes where
+module SPLL.Typing.ResultTypes where
 
 data ClassD deriving Show
 data ClassI deriving Show

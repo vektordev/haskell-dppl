@@ -4,11 +4,11 @@
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-module PInferTypeclass (
+module SPLL.Typing.PInferTypeclass (
   showInfer
 ) where
 
-import ResultTypes
+import SPLL.Typing.ResultTypes
 
 class ListMatch a b
 instance ListMatch a ()

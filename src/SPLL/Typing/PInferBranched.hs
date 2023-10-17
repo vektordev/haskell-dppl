@@ -1,7 +1,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
-module PInferBranched (
+module SPLL.Typing.PInferBranched (
     showResults, showResultsProg, makeMain, inferType
 ) where
 

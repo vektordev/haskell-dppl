@@ -14,7 +14,7 @@ module SPLL.IntermediateRepresentation (
 import SPLL.Lang
 import SPLL.Typing.RType
 import SPLL.Typing.PType
-import Transpiler
+import SPLL.Transpiler
 import SPLL.Analysis
 import SPLL.Typing.Typing
 import Control.Monad.Supply

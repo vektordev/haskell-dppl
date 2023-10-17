@@ -1,7 +1,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
-module RInfer (
+module SPLL.Typing.RInfer (
   showResults, showResultsProg, inferRType, RTypeError, addRTypeInfo
 ) where 
 

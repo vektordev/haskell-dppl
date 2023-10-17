@@ -1,7 +1,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
-module PInfer2 (
+module SPLL.Typing.PInfer2 (
     showResults, showResultsProg, inferType, makeTmpMain, addPTypeInfo, showResultsProgDebug
 ) where
 
@@ -14,10 +14,10 @@ import Debug.Trace
 import Data.List (nub, delete)
 import qualified Data.Set as Set
 
-import RInfer hiding (showResults, showResultsProg)
+import SPLL.Typing.RInfer hiding (showResults, showResultsProg)
 import Data.Monoid
 import Data.Either (lefts)
-import RInfer (RTypeError)
+import SPLL.Typing.RInfer (RTypeError)
 import Data.Foldable hiding (toList)
 import qualified Data.Map as Map
 import SPLL.Lang

@@ -1,4 +1,4 @@
-module Transpiler where
+module SPLL.Transpiler where
 
 import SPLL.Lang
 import SPLL.Typing.PType
