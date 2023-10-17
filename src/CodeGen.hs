@@ -1,4 +1,6 @@
-module CodeGen where
+module CodeGen (
+
+) where
 
 import SPLL.Lang
 import SPLL.Typing.PType
@@ -44,7 +46,7 @@ mkProbability (name, iRtree) = "function probability_" ++ name ++ "(" ++ interca
     (argNames, strippedTree) = unwrapLambdas iRtree
 
 --take all leading lambda expressions and extract the bound identifiers. That is, convert x = \y -> \z -> w into x' = ([y,z], w)
---From recurse :: Expr -> [Expr], we know that Lambda only ever gets one child node, thus [rest] is a nonrestrictive pattern.
+--From getSubExprs :: Expr -> [Expr], we know that Lambda only ever gets one child node, thus [rest] is a nonrestrictive pattern.
 unwrapLambdas :: Tree (IRNode a) -> ([String], Tree (IRNode a))
 unwrapLambdas (Node (Simple StubLambda [IIdentifier name]) [rest]) = (name:otherNames, plainTree)
   where (otherNames, plainTree) = unwrapLambdas rest

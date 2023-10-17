@@ -109,10 +109,10 @@ transpileDefinition (name, expression) = (name, transpileExpr expression)
 transpileExpr :: Expr TypeInfo a -> Tree (IRNode a)
 transpileExpr expr = if likelihoodFunctionUsesTypeInfo $ toStub expr
   then case filter (\alg -> all (checkConstraint expr alg) (constraints alg) ) correctExpr of
-    [alg] -> Node (Complex alg) (map transpileExpr $ recurse expr)
+    [alg] -> Node (Complex alg) (map transpileExpr $ getSubExprs expr)
     [] -> error ("no algorithm found in transpiler in Expression " ++ (show $ toStub expr))
     algs -> error ("ambiguous algorithms in transpiler: " ++ show (map algName algs))
-  else Node (Simple (toStub expr) (annotate expr)) (map transpileExpr $ recurse expr)
+  else Node (Simple (toStub expr) (annotate expr)) (map transpileExpr $ getSubExprs expr)
   where
       correctExpr = filter (checkExprMatches expr) allAlgorithms
 

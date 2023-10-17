@@ -160,13 +160,13 @@ someFunc = do--thatGaussThing
   -- let env = [("main", gaussLists)] :: Env () Float
   -- cmp2 <- compile env
   --pTypeInfoProgIO testProg
-  --let prog = addWitnessesProg (addTypeInfo testInjFD) :: Program TypeInfoWit Double
-  --let Program _ m  = prog
+  let prog2 = addWitnessesProg (addTypeInfo testInjFD) :: Program TypeInfoWit Double
+  let Program _ m  = prog2
   --showResultsProg $ (addTypeInfo testLet2)
-  --mapM_ putStrLn (prettyPrintProg prog)
+  mapM_ putStrLn (prettyPrintProg prog2)
   --testDensity1d "frankTest" (testObserve :: Program () Double) [-0.3, -0.2]
   --testRun "frankTest" (testObserve :: Program () Double) [1.0, 0.44]
-  --print $ m
+  print m
   --grad_loss :: [(loss :: a, grad :: Thetas a)]
   --grad_loss thX = [grad' (\theta -> log $ unwrapP $ likelihood (autoEnv env) (autoEnv env) theta (autoExpr expr) (autoVal sample)) thX | sample <- samples]
   --let pp = [VFloat $ 3.0]

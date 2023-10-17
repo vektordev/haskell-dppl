@@ -1,4 +1,51 @@
-module SPLL.Lang where
+module SPLL.Lang (
+  Expr (..)
+, ExprFlip (..)
+, unflip
+, Value (..)
+, TypeInfo (..)
+, Program (..)
+, TypeInfoWit (..)
+, getTypeInfo
+, tMap
+, tMapProg
+, getRType
+, Name
+, Params
+, FEnv
+, FEnv2
+, Limits (..)
+, exprMap
+, swapLimits
+, FPair (..)
+, FPair2 (..)
+, prettyPrintProg
+, prettyPrint
+, prettyPrintProgNoReq
+, setRType
+, setPType
+, TypedProg
+, TypedExpr
+, VEnv (..)
+, BranchMap
+, getVFloat
+, vempty
+, getPTypeW
+, getWitsW
+, getWits
+, setWits
+, checkLimits
+, vremove
+, vextend
+, WitnessedVars
+, getSubExprs
+, containedVars
+, varsOfExpr
+, predicateExpr
+, predicateFlat
+, predicateProg
+, isNotTheta
+) where
 
 import SPLL.Typing.PType
 import SPLL.Typing.RType
@@ -52,7 +99,7 @@ instance Foldable (ExprFlip x) where
   --foldr :: (t -> b -> b) -> b -> ExprFlip x t -> b
   foldr f accum eflip = f (getTypeInfo $ unflip eflip) subexprfolds
     where
-      subexprs = recurse $ unflip eflip
+      subexprs = getSubExprs $ unflip eflip
       subexprfolds = foldr unflipf accum subexprs
       -- unflipf :: Expr t x -> b -> b
       -- unflip eflip2 :: Expr
@@ -189,6 +236,7 @@ exprMap f expr = case expr of
   
 predicateFlat :: (Expr x a -> Bool) -> Expr x a -> Bool
 predicateFlat f e = f e && all (predicateFlat f) (getSubExprs e)
+
 containedVars :: (Expr x a -> Set.Set String) -> Expr x a -> Set.Set String
 containedVars f e = Set.union (f e) (foldl Set.union Set.empty (map (containedVars f) (getSubExprs e)))
 
@@ -300,10 +348,12 @@ getBinaryConstructor Cons {} = Cons
 getBinaryConstructor TCons {} = TCons
 --getBinaryConstructor (LetIn t name a b) = \t2 -> \e1 -> \e2 -> LetIn t2 name e1 e2
 getBinaryConstructor (LetIn _ name _ _) = (`LetIn` name)
+
 getUnaryConstructor :: Expr x1 a1 -> (x2 -> Expr x2 a2 -> Expr x2 a2)
 getUnaryConstructor (Lambda _ x _) = (`Lambda` x)
 getUnaryConstructor (ReadNN _ x _) = (`ReadNN` x)
 getUnaryConstructor (Fix _ _) = Fix
+
 getNullaryConstructor :: Expr x1 a -> (x2 -> Expr x2 a)
 getNullaryConstructor Uniform {} = Uniform
 getNullaryConstructor Normal {} = Normal
@@ -317,24 +367,24 @@ getNullaryConstructor (Call _ x) = (`Call` x)
 tTraverse :: Applicative f => (a -> f b) -> Expr a v -> f (Expr b v)
 tTraverse f (IfThenElse t a b c) = IfThenElse <$> f t <*> tTraverse f a <*> tTraverse f b <*> tTraverse f c
 tTraverse f expr
-  | length (recurse expr) == 0 =
+  | length (getSubExprs expr) == 0 =
       getNullaryConstructor expr <$> f (getTypeInfo expr)
-  | length (recurse expr) == 1 =
-      getUnaryConstructor expr <$> f (getTypeInfo expr) <*> tTraverse f (recurse expr !! 0)
-  | length (recurse expr) == 2 =
-      getBinaryConstructor expr <$> f (getTypeInfo expr) <*> tTraverse f (recurse expr !! 0) <*> tTraverse f (recurse expr !! 1)
+  | length (getSubExprs expr) == 1 =
+      getUnaryConstructor expr <$> f (getTypeInfo expr) <*> tTraverse f (getSubExprs expr !! 0)
+  | length (getSubExprs expr) == 2 =
+      getBinaryConstructor expr <$> f (getTypeInfo expr) <*> tTraverse f (getSubExprs expr !! 0) <*> tTraverse f (getSubExprs expr !! 1)
 
 arity :: Expr x a -> Int
-arity e = length $ recurse e
+arity e = length $ getSubExprs e
 
 getSubExprs :: Expr x a -> [Expr x a]
 getSubExprs expr = case expr of 
   (IfThenElse _ a b c) -> [a,b,c]
   (GreaterThan _ a b) -> [a,b]
-  (ThetaI _ x) -> []
+  (ThetaI _ _) -> []
   (Uniform _) -> []
   (Normal _) -> []
-  (Constant _ x) -> []
+  (Constant _ _) -> []
   (MultF _ a b) -> [a,b]
   (MultI _ a b) -> [a,b]
   (PlusF _ a b) -> [a,b]
@@ -343,14 +393,14 @@ getSubExprs expr = case expr of
   (Cons _ a b) -> [a,b]
   (TNull _) -> []
   (TCons _ a b) -> [a,b]
-  (Call _ x) -> []
-  (LetIn _ x a b) -> [a, b]
+  (Call _ _) -> []
+  (LetIn _ _ a b) -> [a, b]
   (Var _ _) -> []
-  (InjF t x a b) -> a ++ [b]
+  (InjF _ _ a b) -> a ++ [b]
   --(LetInD t x a b) -> [a,b]
   --(LetInTuple t x a b c) -> [a,c]
-  (Arg _ name r a) -> [a]
-  (CallArg _ name a) -> a
+  (Arg _ _ _ a) -> [a]
+  (CallArg _ _ a) -> a
   (Lambda _ _ a) -> [a]
   (ReadNN _ _ a) -> [a]
 
@@ -405,7 +455,7 @@ prettyPrint :: (Num a, Show a, Show t) => Expr t a -> [String]
 prettyPrint expr = 
   fstLine : indented
     where
-      childExprs = recurse expr
+      childExprs = getSubExprs expr
       indented = map indent $ concatMap prettyPrint childExprs :: [String]
       indent ls = "    " ++ ls
       fstLine = printFlat expr ++ " :: (" ++ show (getTypeInfo expr) ++ ")"
@@ -414,7 +464,7 @@ prettyPrintNoReq :: Expr t a -> [String]
 prettyPrintNoReq expr =
   fstLine : indented
     where
-      childExprs = recurse expr
+      childExprs = getSubExprs expr
       indented = map indent $ concatMap prettyPrintNoReq childExprs :: [String]
       indent ls = "    " ++ ls
       fstLine = printFlatNoReq expr
@@ -425,33 +475,6 @@ prettyPrintProgNoReq (Program decls expr) = concatMap prettyPrintDeclNoReq decls
 
 prettyPrintDeclNoReq ::Decl t a -> [String]
 prettyPrintDeclNoReq (name, expr) = ("--- Function: " ++ name ++ "---"):prettyPrintNoReq expr
-
-recurse :: Expr t a -> [Expr t a]
-recurse expr = case expr of 
-  (IfThenElse _ a b c) -> [a,b,c]
-  (GreaterThan _ a b) -> [a,b]
-  (ThetaI _ _) -> []
-  (Uniform _) -> []
-  (Normal _) -> []
-  (Constant _ _) -> []
-  (MultF _ a b) -> [a,b]
-  (MultI _ a b) -> [a,b]
-  (PlusF _ a b) -> [a,b]
-  (PlusI _ a b) -> [a,b]
-  (Null _) -> []
-  (Cons _ a b) -> [a,b]
-  (TNull _) -> []
-  (TCons _ a b) -> [a,b]
-  (Call _ _) -> []
-  (Var _ _) -> []
-  (LetIn _ _ a b) -> [a, b]
-  (InjF t _ a b)  -> a ++ [b]
-  --(LetInD t _ a b) -> [a,b]
-  --(LetInTuple t _ a b c) -> [a, c]
-  (Arg _ _ _ a) -> [a]
-  (CallArg _ _ a) -> a
-  (Lambda _ _ a) -> [a]
-  (ReadNN _ _ a) -> [a]
 
 printFlat :: Show a => Expr t a -> String
 printFlat expr = case expr of

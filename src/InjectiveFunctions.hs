@@ -1,5 +1,13 @@
 {-# LANGUAGE FlexibleContexts #-}
-module InjectiveFunctions where
+module InjectiveFunctions (
+  globalFenv
+, rangeSwap
+, rangeMap
+, rangeGrad
+, autoEnv
+, autoExpr
+, autoVal
+) where
 
 import SPLL.Lang
 import SPLL.Typing.RType
@@ -130,3 +138,5 @@ autoVal (VBool x) = VBool x
 autoVal (VFloat y) = VFloat (auto y)
 autoVal (VList xs) = VList (map autoVal xs)
 autoVal (VTuple x1) = VTuple $ map autoVal x1
+autoVal (VInt x) = VInt x
+autoVal (VSymbol x) = VSymbol x

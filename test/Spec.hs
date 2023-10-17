@@ -58,7 +58,7 @@ genThetas = vector
 findThetas :: Expr t a -> [Expr t a]
 findThetas (ThetaI a b) = [ThetaI a b]
 findThetas expr = concatMap findThetas x
-  where x = recurse expr
+  where x = getSubExprs expr
 
 expressions :: [(Expr () Float, TypeInfo)]
 expressions = [

@@ -1,4 +1,7 @@
-module Witnessing where
+module Witnessing (
+  addWitnessesProg
+, addWitnesses
+) where
 
 import SPLL.Lang
 import SPLL.Typing.Typing

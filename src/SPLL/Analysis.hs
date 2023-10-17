@@ -4,7 +4,6 @@ module SPLL.Analysis (
 , annotate
 ) where
 
-import SPLL.Typing.Typing
 import SPLL.Lang
 import Transpiler (Algorithm, allAlgorithms, checkExprMatches, checkConstraint, constraints, likelihoodFunctionUsesTypeInfo, toStub)
 import SPLL.Typing.RType
@@ -20,7 +19,7 @@ data Tag a = EnumRange (Value a, Value a)
 data StaticAnnotations a = StaticAnnotations RType PType [Tag a] deriving (Show)
 
 annotate :: (Show a) => Expr TypeInfo a -> Expr (StaticAnnotations a) a
-annotate expr = tMap annotateLocal expr
+annotate = tMap annotateLocal
   where
     annotateLocal e = StaticAnnotations rt pt tags
       where
@@ -30,7 +29,7 @@ annotate expr = tMap annotateLocal expr
           ++ fmap EnumList (maybeToList (findEnumerable e))
 
 findEnumerable :: Expr TypeInfo a -> Maybe [Value a]
-findEnumerable (ReadNN _ name (subexpr)) = Just [VInt i | i <- [0..9]]
+findEnumerable ReadNN {} = Just [VInt i | i <- [0..9]]
 findEnumerable (PlusI _ left right) =
   if isNothing leftEnum || isNothing rightEnum
     then Nothing
