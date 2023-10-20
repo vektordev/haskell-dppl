@@ -2,7 +2,14 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 module SPLL.Typing.PInfer2 (
-    showResults, showResultsProg, inferType, makeTmpMain, addPTypeInfo, showResultsProgDebug
+  showResults
+, showResultsProg
+, inferType
+, makeTmpMain
+, addPTypeInfo
+, showResultsProgDebug
+, tryAddPTypeInfo
+, PTypeError (..)
 ) where
 
 import Control.Monad.Except
@@ -99,6 +106,11 @@ addPTypeInfo p = do
     case inferProgram mempty p of
        Left err -> error "error in addPTypeInfo"
        Right (_, _, p) ->  p
+
+tryAddPTypeInfo :: (Show a) => Program TypeInfo a -> Either PTypeError (Program TypeInfo a)
+tryAddPTypeInfo p = do
+  (_,_,p2) <- inferProgram mempty p
+  return p2
 
 showResultsProgDebug :: (Num a, Show a) => TypedProg a -> IO ()
 showResultsProgDebug prog = do

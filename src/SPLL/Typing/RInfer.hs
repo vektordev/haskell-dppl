@@ -2,7 +2,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 module SPLL.Typing.RInfer (
-  showResults, showResultsProg, inferRType, RTypeError, addRTypeInfo
+  showResults, showResultsProg, inferRType, RTypeError, addRTypeInfo, tryAddRTypeInfo
 ) where 
 
 import Control.Monad.Except
@@ -173,6 +173,12 @@ addRTypeInfo p@(Program decls expr) =
       Left err -> error ("error in solve addRTypeInfo: " ++ show err)
       Right subst -> apply subst p
       
+tryAddRTypeInfo :: (Show a) => Program TypeInfo a -> Either RTypeError (Program TypeInfo a)
+tryAddRTypeInfo p@(Program decls expr) = do
+  (ty, cs, p) <- runInfer empty (inferProg p)
+  subst <- runSolve cs
+  return $ apply subst p
+
 showResultsProg :: (Num a, Show a) => Program TypeInfo a -> IO ()
 showResultsProg p@(Program decls expr) = do
   case constraintsExprProg empty p of

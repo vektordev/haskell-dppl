@@ -9,9 +9,9 @@ import SPLL.Typing.PType
 --  then let current = randA in (current, weatherHask current)
 --  else let current = randB in (current, weatherHask current)
 
-paramExpr :: Expr () Float
+paramExpr :: Expr () Double
 paramExpr = Arg () "iterations" TFloat (IfThenElse ()
-  (GreaterThan () (Call () "iterations") (Constant () (VFloat 0.5)))
+  (GreaterThan () (Var () "iterations") (Constant () (VFloat 0.5)))
   (Cons () (Constant () (VBool True)) (CallArg () "main" [PlusF () (Call () "iterations") (Constant () (VFloat (-1.0)))]))
   (Null ()))
 
@@ -29,7 +29,7 @@ variableLength = IfThenElse ()
   (GreaterThan () (Uniform ()) (ThetaI () 0))
   (Null ())
   --(Cons () (Normal ()) (Call () "main"))
-  (Cons () (Constant () (VBool True)) (Call () "b"))
+  (Cons () (Constant () (VBool True)) (Call () "main"))
 
 testProg :: Program () a
 testProg = Program [("b", variableLength)]
@@ -278,7 +278,6 @@ testBool :: Expr () a
 testBool = GreaterThan () (Uniform ()) (ThetaI () 0)
 
 testGauss :: Expr () a
---testGauss = Plus () (Normal ()) (ThetaI () 0)
 testGauss = PlusF () (MultF () (Normal ()) (ThetaI () 0)) (ThetaI () 1)
 
 
