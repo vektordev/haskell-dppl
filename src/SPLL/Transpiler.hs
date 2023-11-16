@@ -4,32 +4,7 @@ import SPLL.Lang
 import SPLL.Typing.PType
 import Data.Graph
 import SPLL.Typing.Typing
-
-data ExprStub = StubIfThenElse
-              | StubGreaterThan
-              | StubThetaI
-              | StubUniform
-              | StubNormal
-              | StubConstant
-              | StubMultF
-              | StubMultI
-              | StubPlusF
-              | StubPlusI
-              | StubNull
-              | StubCons
-              | StubCall
-              | StubVar
-              | StubLetIn
-              | StubArg
-              | StubCallArg
-              | StubLambda
-              | StubReadNN
-              deriving (Show, Eq)
-
-data Constraint = SubExprNIsType Int PType
-                | SubExprNIsNotType Int PType
-                | ResultingTypeMatch
-                deriving Show
+import SPLL.InferenceRule
 
 data Annotation a = IIndex Int
                 | IIdentifier String
@@ -37,61 +12,10 @@ data Annotation a = IIndex Int
                 deriving (Show)
 
 data IRNode a = Simple ExprStub [Annotation a]
-              | Complex Algorithm
+              | Complex InferenceRule
               deriving (Show)
 
 type IRDefinition a = (String, Tree (IRNode a))
--- can we encode symmetries?
-data Algorithm = Algorithm { forExpression :: ExprStub
-                           , constraints :: [Constraint]
-                           , algName :: String
-                           --apply all subexpr PTypes to find PType
-                           , resultingType :: [PType] -> PType
-                           }
-
-instance Show Algorithm where
-  show (Algorithm _ _ name _ ) = name
-  
-instance Eq Algorithm where
-  a1 == a2 = algName a1 == algName a2
-
---ok, new plan: Instead of generating dumb constraintless Algorithm structs for all expressions,
--- we can have the IR Defintion be a Tree (Maybe Algorithm, Expr). That way, we can omit a lot of useless filler.
--- Algorithm structs need only be annotated, if the semantics of the likelihood function are dependent on type info.
-
-mostChaotic :: [PType] -> PType
-mostChaotic = foldl1 downgrade
-
-mostStructured :: [PType] -> PType
-mostStructured = foldl1 upgrade
-
-greaterThanLeft :: Algorithm
-greaterThanLeft = Algorithm StubGreaterThan [SubExprNIsType 0 Deterministic] "greaterThanLeft" (const Integrate)
-
-greaterThanRight :: Algorithm
-greaterThanRight = Algorithm StubGreaterThan [SubExprNIsType 1 Deterministic] "greaterThanRight" (const Integrate)
-
-greaterThanSigmoid :: Algorithm
-greaterThanSigmoid = Algorithm StubGreaterThan [SubExprNIsType 0 Deterministic, SubExprNIsType 1 Deterministic] "greaterThanSigmoid" (const Integrate)
-
---TODO: Lacking implementation of invertible arithmetic on Integers.
-plusLeft :: Algorithm
-plusLeft = Algorithm StubPlusF [SubExprNIsType 0 Deterministic] "plusLeft" mostChaotic
-
-plusRight :: Algorithm
-plusRight = Algorithm StubPlusF [SubExprNIsType 1 Deterministic] "plusRight" mostChaotic
-
-multLeft :: Algorithm
-multLeft = Algorithm StubMultF [SubExprNIsType 0 Deterministic] "multLeft" mostChaotic
-
-multRight :: Algorithm
-multRight = Algorithm StubMultF [SubExprNIsType 1 Deterministic] "multRight" mostChaotic
-
-enumeratePlusLeft :: Algorithm
-enumeratePlusLeft = Algorithm StubPlusI [SubExprNIsNotType 0 Deterministic, SubExprNIsNotType 1 Deterministic] "enumeratePlusLeft" (const Chaos)
-
-allAlgorithms :: [Algorithm]
-allAlgorithms = [greaterThanLeft, greaterThanRight, greaterThanSigmoid, plusLeft, plusRight, multLeft, multRight, enumeratePlusLeft]
 
 transpile :: Env TypeInfo a -> [IRDefinition a]
 transpile = map transpileDefinition
@@ -127,10 +51,10 @@ annotate expr = case expr of
   Lambda _ x _  -> [IIdentifier x]
   _             -> []
 
-checkExprMatches :: Expr TypeInfo a -> Algorithm -> Bool
+checkExprMatches :: Expr TypeInfo a -> InferenceRule -> Bool
 checkExprMatches e alg = toStub e == forExpression alg
 
-checkConstraint :: Expr TypeInfo a -> Algorithm -> Constraint -> Bool
+checkConstraint :: Expr TypeInfo a -> InferenceRule -> Constraint -> Bool
 checkConstraint expr _ (SubExprNIsType n ptype) = ptype == p
   where TypeInfo r p = getTypeInfo (getSubExprs expr !! n)
 checkConstraint expr _ (SubExprNIsNotType n ptype) = ptype /= p

@@ -19,6 +19,7 @@ import SPLL.Analysis
 import SPLL.Typing.Typing
 import Control.Monad.Supply
 import Debug.Trace
+import SPLL.InferenceRule
 {-
 {-# OPTIONS -Wall #-}
 import Control.Monad.Cont
@@ -263,8 +264,8 @@ mkVariable suffix = do
   varID <- demand
   return ("l_" ++ show varID ++ "_" ++ suffix)
 
-hasAlgorithm :: [Tag a] -> Algorithm -> Bool
-hasAlgorithm tags alg = alg `elem` ([a | Alg a <- tags])
+hasAlgorithm :: [Tag a] -> String -> Bool
+hasAlgorithm tags alg = alg `elem` ([algName a | Alg a <- tags])
 --hasAlgorithm tags alg = not $ null $ filter (== alg) [a | Alg a <- tags]
 
 --in this implementation, I'll forget about the distinction between PDFs and Probabilities. Might need to fix that later.
@@ -280,14 +281,14 @@ toIRProbability (IfThenElse t cond left right) sample = do
       (IROp OpMult (IROp OpSub (IRConst $ VFloat (1.0)) (IRVar var_cond_p) ) rightExpr))
 toIRProbability (GreaterThan (StaticAnnotations t _ extras) left right) sample
   --TODO: Find a better lower bound than just putting -9999999
-  | extras `hasAlgorithm` greaterThanLeft = do --p(x | const >= var)
+  | extras `hasAlgorithm` "greaterThanLeft" = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
     integrate <- toIRIntegrate right (IRConst (VFloat (-9999999))) (IRVar var)
     var2 <- mkVariable "rhs_integral"
     return $ IRLetIn var (toIRGenerate left)
       (IRLetIn var2 integrate
         (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))))
-  | extras `hasAlgorithm` greaterThanRight = do --p(x | var >= const
+  | extras `hasAlgorithm` "greaterThanRight" = do --p(x | var >= const
     var <- mkVariable "fixed_bound"
     integrate <- toIRIntegrate left (IRConst (VFloat (-9999999))) (IRVar var)
     var2 <- mkVariable "lhs_integral"
@@ -295,27 +296,27 @@ toIRProbability (GreaterThan (StaticAnnotations t _ extras) left right) sample
       (IRLetIn var2 integrate
         (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)) (IRVar var2) ))
 toIRProbability (MultF (StaticAnnotations TFloat _ extras) left right) sample
-  | extras `hasAlgorithm` multLeft = do
+  | extras `hasAlgorithm` "multLeft" = do
     var <- mkVariable ""
     rightExpr <- toIRProbability right (IROp OpDiv sample (IRVar var))
     return $ IRLetIn var (toIRGenerate left)
       (IROp OpDiv rightExpr (IRVar var))
-  | extras `hasAlgorithm` multRight = do
+  | extras `hasAlgorithm` "multRight" = do
     var <- mkVariable ""
     leftExpr <- toIRProbability left (IROp OpDiv sample (IRVar var))
     return $ IRLetIn var (toIRGenerate right)
       (IROp OpDiv leftExpr (IRVar var))
 toIRProbability (PlusF (StaticAnnotations TFloat _ extras) left right) sample
-  | extras `hasAlgorithm` plusLeft = do
+  | extras `hasAlgorithm` "plusLeft" = do
     var <- mkVariable ""
     rightExpr <- toIRProbability right (IROp OpSub sample (IRVar var))
     return $ IRLetIn var (toIRGenerate left) rightExpr
-  | extras `hasAlgorithm` plusRight = do
+  | extras `hasAlgorithm` "plusRight" = do
     var <- mkVariable ""
     leftExpr <- toIRProbability left (IROp OpSub sample (IRVar var))
     return $ IRLetIn var (toIRGenerate right) leftExpr
 toIRProbability (PlusI (StaticAnnotations TInt _ extras) left right) sample
-  | extras `hasAlgorithm` enumeratePlusLeft = do
+  | extras `hasAlgorithm` "enumeratePlusLeft" = do
     --Solving enumPlusLeft works by enumerating all left hand side choices.
     -- We then invert the addition to infer the right hand side.
     -- TODO: Theoretical assessment whether there's a performance or other difference between enumLeft and enumRight.
@@ -328,7 +329,7 @@ toIRProbability (PlusI (StaticAnnotations TInt _ extras) left right) sample
     pLeft <- toIRProbability left (IRVar enumVar)
     pRight <- toIRProbability right (IROp OpSub sample (IRVar enumVar))
     return $ IREnumSum enumVar (VList enumListL) $ IRIf (IRCall "in" [IROp OpSub sample (IRVar enumVar), IRConst (VList enumListR)]) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
-  | extras `hasAlgorithm` plusLeft = do
+  | extras `hasAlgorithm` "plusLeft" = do
     var <- mkVariable ""
     rightExpr <- toIRProbability right (IROp OpSub sample (IRVar var))
     return $ IRLetIn var (toIRGenerate left) rightExpr

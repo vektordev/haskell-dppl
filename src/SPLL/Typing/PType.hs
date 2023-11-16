@@ -54,3 +54,9 @@ upgrade Deterministic _ = Deterministic
 upgrade Chaos _ = Chaos
 upgrade _ Chaos = Chaos
 upgrade Integrate Integrate = Integrate
+
+mostChaotic :: [PType] -> PType
+mostChaotic = foldl1 downgrade
+
+mostStructured :: [PType] -> PType
+mostStructured = foldl1 upgrade

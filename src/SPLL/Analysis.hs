@@ -5,7 +5,8 @@ module SPLL.Analysis (
 ) where
 
 import SPLL.Lang
-import SPLL.Transpiler (Algorithm, allAlgorithms, checkExprMatches, checkConstraint, constraints, likelihoodFunctionUsesTypeInfo, toStub)
+import SPLL.Transpiler (checkExprMatches, checkConstraint, likelihoodFunctionUsesTypeInfo, toStub)
+import SPLL.InferenceRule
 import SPLL.Typing.RType
 import SPLL.Typing.PType
 import Data.Maybe (maybeToList, fromJust, isNothing)
@@ -13,7 +14,7 @@ import Data.List (nub)
   
 data Tag a = EnumRange (Value a, Value a)
            | EnumList [Value a]
-           | Alg Algorithm
+           | Alg InferenceRule
            deriving (Show)
 
 data StaticAnnotations a = StaticAnnotations RType PType [Tag a] deriving (Show)
@@ -39,7 +40,7 @@ findEnumerable (PlusI _ left right) =
         rightEnum = findEnumerable right
 findEnumerable _ = Nothing
 
-findAlgorithm :: (Show a) => Expr TypeInfo a -> Algorithm
+findAlgorithm :: (Show a) => Expr TypeInfo a -> InferenceRule
 findAlgorithm expr = case validAlgs of
   [alg] -> alg
   [] -> error ("no valid algorithms found in expr: " ++ show expr)
