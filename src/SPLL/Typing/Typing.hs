@@ -178,21 +178,21 @@ inferP (MultF _ left right) = do
   if upgrade leftP rightP == Deterministic
   then return $ downgrade leftP rightP
   -- we do not know how to integrate over a product
-  else return Chaos
+  else return Bottom
 inferP (PlusF _ left right) = do
   leftP <- inferP left
   rightP <- inferP right
   if upgrade leftP rightP == Deterministic
   then return $ downgrade leftP rightP
   -- we do not know how to integrate over a sum
-  else return Chaos
+  else return Bottom
 inferP (Null _) = return Deterministic
 inferP (Cons _ headX tailX) = do
   -- TODO: Assumes independence. Invalid if there exists x elem Env that is used in head and tail.
   headP <- inferP headX
   tailP <- inferP tailX
   return $ downgrade headP tailP
-inferP (Call _ name) = return $ PIdent name [(Deterministic, Deterministic), (Integrate, Integrate), (Chaos, Chaos)]--TODO: here there be dragons
+--inferP (Call _ name) = return $ PIdent name [(Deterministic, Deterministic), (Integrate, Integrate), (Chaos, Chaos)]--TODO: here there be dragons
 --inferP (LetIn _ name assignment inExpr) = inferP inExpr
 --TODO: Arg needs to make sure the variable has proper type, same as let_in
 --inferP (Arg _ name inExpr) = inferP inExpr

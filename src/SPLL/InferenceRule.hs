@@ -121,7 +121,8 @@ multRight = mirror2 multLeft
 --multRight = InferenceRule StubMultF [SubExprNIsType 1 Deterministic] "multRight" mostChaotic
 
 enumeratePlusLeft :: InferenceRule
-enumeratePlusLeft = InferenceRule StubPlusI [SubExprNIsNotType 0 Deterministic, SubExprNIsNotType 1 Deterministic] "enumeratePlusLeft" (const Chaos)
+--TODO: Introduce a new type for intractable results? Does that expand the lattice into a 2d configuration?
+enumeratePlusLeft = InferenceRule StubPlusI [SubExprNIsNotType 0 Deterministic, SubExprNIsNotType 1 Deterministic] "enumeratePlusLeft" (const Prob)
 
 ifThenElse :: InferenceRule
 ifThenElse = InferenceRule StubIfThenElse [SubExprNIsAtLeast 0 Integrate] "ifThenElse" (\[_, a, b] -> mostChaotic [a,b])

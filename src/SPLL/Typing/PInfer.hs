@@ -41,23 +41,23 @@ plus :: (Var, [Scheme])
 plus = ("+", [Forall [] [] (Deterministic `PArr` Deterministic `PArr` Deterministic),
               Forall [] [] (Integrate `PArr` Deterministic `PArr` Integrate),
               Forall [] [] (Deterministic `PArr` Integrate `PArr` Integrate),
-              Forall [] [] (Deterministic `PArr` Chaos `PArr` Chaos),
-              Forall [] [] (Chaos `PArr` Deterministic `PArr` Chaos),
-              Forall [] [] (Chaos `PArr` Integrate `PArr` Chaos),
-              Forall [] [] (Integrate `PArr` Chaos `PArr` Chaos),
-              Forall [] [] (Chaos `PArr` Chaos `PArr` Chaos),
-              Forall [] [] (Integrate `PArr` Integrate `PArr` Chaos)
+              Forall [] [] (Deterministic `PArr` Bottom `PArr` Bottom),
+              Forall [] [] (Bottom `PArr` Deterministic `PArr` Bottom),
+              Forall [] [] (Bottom `PArr` Integrate `PArr` Bottom),
+              Forall [] [] (Integrate `PArr` Bottom `PArr` Bottom),
+              Forall [] [] (Bottom `PArr` Bottom `PArr` Bottom),
+              Forall [] [] (Integrate `PArr` Integrate `PArr` Bottom)
               ])
 -- Forall [] [] (a `PArr` b `PArr` downgrade(a,b))
 greaterThan :: (Var, [Scheme])
 greaterThan = (">=", [Forall [] [] (Deterministic `PArr` Deterministic `PArr` Deterministic),
                     Forall [] [] (Integrate `PArr` Deterministic `PArr` Integrate),
                     Forall [] [] (Deterministic `PArr` Integrate `PArr` Integrate),
-                    Forall [] [] (Deterministic `PArr` Chaos `PArr` Chaos),
-                    Forall [] [] (Chaos `PArr` Deterministic `PArr` Chaos),
-                    Forall [] [] (Chaos `PArr` Integrate `PArr` Chaos),
-                    Forall [] [] (Integrate `PArr` Chaos `PArr` Chaos),
-                    Forall [] [] (Chaos `PArr` Chaos `PArr` Chaos),
+                    Forall [] [] (Deterministic `PArr` Bottom `PArr` Bottom),
+                    Forall [] [] (Bottom `PArr` Deterministic `PArr` Bottom),
+                    Forall [] [] (Bottom `PArr` Integrate `PArr` Bottom),
+                    Forall [] [] (Integrate `PArr` Bottom `PArr` Bottom),
+                    Forall [] [] (Bottom `PArr` Bottom `PArr` Bottom),
                     Forall [] [] (Integrate `PArr` Integrate `PArr` Integrate)
                     ])
 
@@ -139,7 +139,7 @@ class Substitutable a where
 instance Substitutable PType where
   apply _ Deterministic = Deterministic
   apply _ Integrate = Integrate
-  apply _ Chaos = Chaos
+  apply _ Bottom = Bottom
   apply s (PArr p1 p2) = apply s p1 `PArr` apply s p2
   apply (Subst s) t@(TVar a) = Map.findWithDefault t a s
   -- rest of PType arent used as of now
@@ -432,7 +432,7 @@ normalize (Forall _ c body) = Forall (map snd ord) (normcs c) (normtype body)
     fv (PArr a b) = fv a ++ fv b
     fv Deterministic = []
     fv Integrate = []
-    fv Chaos = []
+    fv Bottom = []
 
     fvcs ((_, ty):b) = fv ty ++ fvcs b
     fvcs [] = []
@@ -443,7 +443,7 @@ normalize (Forall _ c body) = Forall (map snd ord) (normcs c) (normtype body)
     normtype (PArr a b) = PArr (normtype a) (normtype b)
     normtype Deterministic = Deterministic
     normtype Integrate = Integrate
-    normtype Chaos = Chaos
+    normtype Bottom = Bottom
 
     normtype (TVar a)   =
       case Prelude.lookup a ord of

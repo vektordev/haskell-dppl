@@ -72,7 +72,7 @@ addPTypeInfo :: Program TypeInfo a -> Program TypeInfo a
 addPTypeInfo p = head $ filter isValidPTypingProg (allTypes (P 2) p)
 
 getPTypes :: Int -> [PType]
-getPTypes 0 = [Deterministic, Integrate, Prob, Bottom, Chaos]
+getPTypes 0 = [Deterministic, Integrate, Prob, Bottom]
 getPTypes n =
   getPTypes 0
   ++ [PArr x y | x <- getPTypes (n-1), y <- getPTypes (n-1)]

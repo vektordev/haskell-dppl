@@ -316,9 +316,9 @@ subCollapse (Right dc) = Right $ collapseChain dc Deterministic []
 
 
 getResType :: TypeOrChain -> (Bool, PType)
-getResType (Left ty) = if isBasicType ty then (True, ty) else (False, Chaos)
+getResType (Left ty) = if isBasicType ty then (True, ty) else (False, Bottom)
 getResType (Right dc) = if length nestedCollapse == 1 && length (lefts nestedCollapse) == 1
-  then (True, head (lefts nestedCollapse)) else (False, Chaos)
+  then (True, head (lefts nestedCollapse)) else (False, Bottom)
   where nestedCollapse = collapseChain dc Deterministic []
 
 collapse :: DConstraint -> DConstraint
@@ -625,7 +625,6 @@ normalize (DScheme _ c body) = DScheme (map snd ord) (normcs c) (normtype body)
     fv (PArr a b) = fv a ++ fv b
     fv Deterministic = []
     fv Integrate = []
-    fv Chaos = []
     fv Bottom = []
 
     fvcs (ty, dc) = fv ty ++ fvcd dc
@@ -651,7 +650,6 @@ normalize (DScheme _ c body) = DScheme (map snd ord) (normcs c) (normtype body)
     normtype (PArr a b) = PArr (normtype a) (normtype b)
     normtype Deterministic = Deterministic
     normtype Integrate = Integrate
-    normtype Chaos = Chaos
     normtype Bottom = Bottom
 
     normtype (TVar a)   =
@@ -684,7 +682,6 @@ instance Substitutable TypeInfo where
 instance Substitutable PType where
   apply _ Deterministic = Deterministic
   apply _ Integrate = Integrate
-  apply _ Chaos = Chaos
   apply s (PArr p1 p2) = apply s p1 `PArr` apply s p2
   apply (Subst s) t@(TVar a) = Map.findWithDefault t a s
   -- rest of PType arent used as of now

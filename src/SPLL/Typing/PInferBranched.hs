@@ -114,7 +114,7 @@ class Substitutable a where
 instance Substitutable PType where
   apply _ Deterministic = Deterministic
   apply _ Integrate = Integrate
-  apply _ Chaos = Chaos
+  apply _ Bottom = Bottom
   apply s (PArr p1 p2) = apply s p1 `PArr` apply s p2
   apply (Subst s) t@(TVar a) = Map.findWithDefault t a s
   -- rest of PType arent used as of now
@@ -286,7 +286,7 @@ combineBranchesFunc :: [Branch] -> ([Branch], PType) -> [Branch]
 combineBranchesFunc b1 (b2, f_tv) = combineBranchFunc f_tv <$> b1 <*> b2
 
 basicTypes :: [PType]
-basicTypes = [Deterministic, Integrate, Chaos]
+basicTypes = [Deterministic, Integrate, Bottom]
 -- det is for plus/mult where integrate integrate results in chaos
 buildDet :: Either PTypeError ((PType, PType), [Constraint]) -> [Branch]
 buildDet b = case b of
@@ -295,12 +295,12 @@ buildDet b = case b of
                             [Right (Integrate, cs ++ [(t1, Deterministic), (t2, Integrate)]),
                             Right (Integrate, cs ++ [(t2, Deterministic), (t1, Integrate)]),
                             Right (Deterministic, cs ++ [(t2, Deterministic), (t1, Deterministic)]),
-                            Right (Chaos, cs ++ [(t2, Integrate), (t1, Integrate)]),
-                            Right (Chaos, cs ++ [(t2, Chaos), (t1, Chaos)]),
-                            Right (Chaos, cs ++ [(t2, Integrate), (t1, Chaos)]),
-                            Right (Chaos, cs ++ [(t2, Chaos), (t1, Integrate)]),
-                            Right (Chaos, cs ++ [(t2, Chaos), (t1, Deterministic)]),
-                            Right (Chaos, cs ++ [(t2, Deterministic), (t1, Chaos)])]
+                            Right (Bottom, cs ++ [(t2, Integrate), (t1, Integrate)]),
+                            Right (Bottom, cs ++ [(t2, Bottom), (t1, Bottom)]),
+                            Right (Bottom, cs ++ [(t2, Integrate), (t1, Bottom)]),
+                            Right (Bottom, cs ++ [(t2, Bottom), (t1, Integrate)]),
+                            Right (Bottom, cs ++ [(t2, Bottom), (t1, Deterministic)]),
+                            Right (Bottom, cs ++ [(t2, Deterministic), (t1, Bottom)])]
 
 -- this is straight downgrade method (Chaos will produce UnificationFail)
 buildInt :: Either PTypeError ((PType, PType), [Constraint]) -> [Branch]
@@ -312,11 +312,11 @@ buildInt b = case b of
                            Right (Integrate, cs ++ [(t2, Deterministic), (t1, Integrate)]),
                            Right (Deterministic, cs ++ [(t2, Deterministic), (t1, Deterministic)]),
                            Right (Integrate, cs ++ [(t2, Integrate), (t1, Integrate)]),
-                           Right (Chaos, cs ++ [(t2, Chaos), (t1, Chaos)]),
-                           Right (Chaos, cs ++ [(t2, Integrate), (t1, Chaos)]),
-                           Right (Chaos, cs ++ [(t2, Chaos), (t1, Integrate)]),
-                           Right (Chaos, cs ++ [(t2, Chaos), (t1, Deterministic)]),
-                           Right (Chaos, cs ++ [(t2, Deterministic), (t1, Chaos)])
+                           Right (Bottom, cs ++ [(t2, Bottom), (t1, Bottom)]),
+                           Right (Bottom, cs ++ [(t2, Integrate), (t1, Bottom)]),
+                           Right (Bottom, cs ++ [(t2, Bottom), (t1, Integrate)]),
+                           Right (Bottom, cs ++ [(t2, Bottom), (t1, Deterministic)]),
+                           Right (Bottom, cs ++ [(t2, Deterministic), (t1, Bottom)])
                            ]
 
 rtFromScheme :: Scheme -> PType
@@ -412,12 +412,10 @@ normalize (Forall _ body) = Forall (map snd ord) (normtype body)
     fv (PArr a b) = fv a ++ fv b
     fv Deterministic = []
     fv Integrate = []
-    fv Chaos = []
 
     normtype (PArr a b) = PArr (normtype a) (normtype b)
     normtype Deterministic = Deterministic
     normtype Integrate = Integrate
-    normtype Chaos = Chaos
     normtype (TVar a)   =
       case Prelude.lookup a ord of
         Just x -> TVar x

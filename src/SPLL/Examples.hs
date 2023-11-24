@@ -399,15 +399,15 @@ testNNUntyped :: Expr () a
 testNNUntyped = Lambda () "im1" (Lambda () "im2" (PlusI () (ReadNN () "classifyMNist" (Var () "im1")) (ReadNN () "classifyMNist" (Var () "im2"))))
 
 testNN :: Expr TypeInfo a
-testNN = Lambda (TypeInfo (TArrow TSymbol (TArrow TSymbol TInt)) Chaos) "im1"
-  (Lambda (TypeInfo (TArrow TSymbol TInt) Chaos) "im2" (PlusI (TypeInfo TInt Integrate)
+testNN = Lambda (TypeInfo (TArrow TSymbol (TArrow TSymbol TInt)) Bottom) "im1"
+  (Lambda (TypeInfo (TArrow TSymbol TInt) Bottom) "im2" (PlusI (TypeInfo TInt Integrate)
     (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im1"))
     (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im2"))))
     
 
 mNistNoise :: Expr TypeInfo a
-mNistNoise = Lambda (TypeInfo (TArrow TSymbol (TArrow TSymbol TInt)) Chaos) "im1"
-  (Lambda (TypeInfo (TArrow TSymbol TInt) Chaos) "im2"
+mNistNoise = Lambda (TypeInfo (TArrow TSymbol (TArrow TSymbol TInt)) Bottom) "im1"
+  (Lambda (TypeInfo (TArrow TSymbol TInt) Bottom) "im2"
     (IfThenElse (TypeInfo TInt Integrate) (GreaterThan (TypeInfo TBool Integrate) (Uniform (TypeInfo TFloat Integrate)) (ThetaI (TypeInfo TFloat Deterministic) 0) )
     (PlusI (TypeInfo TInt Integrate)
       (Constant (TypeInfo TInt Deterministic) (VInt 1))
@@ -419,9 +419,9 @@ mNistNoise = Lambda (TypeInfo (TArrow TSymbol (TArrow TSymbol TInt)) Chaos) "im1
       (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im2")))))
 
 triMNist :: Expr TypeInfo a
-triMNist = Lambda (TypeInfo (TArrow TSymbol (TArrow TSymbol (TArrow TSymbol TInt))) Chaos) "im1"
-  (Lambda (TypeInfo (TArrow TSymbol (TArrow TSymbol TInt)) Chaos) "im2"
-    (Lambda (TypeInfo (TArrow TSymbol TInt) Chaos) "im3" (PlusI (TypeInfo TInt Integrate)
+triMNist = Lambda (TypeInfo (TArrow TSymbol (TArrow TSymbol (TArrow TSymbol TInt))) Bottom) "im1"
+  (Lambda (TypeInfo (TArrow TSymbol (TArrow TSymbol TInt)) Bottom) "im2"
+    (Lambda (TypeInfo (TArrow TSymbol TInt) Bottom) "im3" (PlusI (TypeInfo TInt Integrate)
       (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im3"))
       (PlusI (TypeInfo TInt Integrate)
         (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im1"))
