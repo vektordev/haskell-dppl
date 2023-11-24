@@ -5,7 +5,7 @@ module SPLL.Analysis (
 ) where
 
 import SPLL.Lang
-import SPLL.Transpiler (checkExprMatches, checkConstraint, likelihoodFunctionUsesTypeInfo, toStub)
+import SPLL.Transpiler (checkExprMatches, checkConstraint, likelihoodFunctionUsesTypeInfo)
 import SPLL.InferenceRule
 import SPLL.Typing.RType
 import SPLL.Typing.PType

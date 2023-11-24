@@ -69,26 +69,4 @@ arity = undefined
 
 likelihoodFunctionUsesTypeInfo :: ExprStub -> Bool
 likelihoodFunctionUsesTypeInfo expr = expr `elem` [StubGreaterThan, StubMultF, StubMultI, StubPlusF, StubPlusI]
-
-toStub :: Expr x a -> ExprStub
-toStub expr = case expr of
-  IfThenElse {}  -> StubIfThenElse
-  GreaterThan {} -> StubGreaterThan
-  (ThetaI _ _)   -> StubThetaI
-  (Uniform _)    -> StubUniform
-  (Normal _)     -> StubNormal
-  (Constant _ _) -> StubConstant
-  MultF {}       -> StubMultF
-  MultI {}       -> StubMultI
-  PlusF {}       -> StubPlusF
-  PlusI {}       -> StubPlusI
-  (Null _)       -> StubNull
-  Cons {}        -> StubCons
-  (Call _ _)     -> StubCall
-  (Var _ _)      -> StubVar
-  LetIn {}       -> StubLetIn
-  Arg {}         -> StubArg
-  CallArg {}     -> StubCallArg
-  Lambda {}      -> StubLambda
-  (ReadNN _ _ _) -> StubReadNN
   
