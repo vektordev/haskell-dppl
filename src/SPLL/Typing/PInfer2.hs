@@ -21,10 +21,9 @@ import Debug.Trace
 import Data.List (nub, delete)
 import qualified Data.Set as Set
 
-import SPLL.Typing.RInfer hiding (showResults, showResultsProg)
+import SPLL.Typing.RInfer hiding (showResults, showResultsProg, Scheme (..), RTypeError (..))
 import Data.Monoid
 import Data.Either (lefts)
-import SPLL.Typing.RInfer (RTypeError)
 import Data.Foldable hiding (toList)
 import qualified Data.Map as Map
 import SPLL.Lang
@@ -425,7 +424,7 @@ fresh = do
     return $ TVar $ TV (letters !! var_count s)
 
 -- TODO: Other Constraints?
-instantiate ::  Scheme -> Infer ([Constraint], PType)
+instantiate :: Scheme -> Infer ([Constraint], PType)
 instantiate (Forall as cs t) = do
   as' <- mapM (const fresh) as
   let s = Subst $ Map.fromList $ zip as as'

@@ -134,8 +134,9 @@ newtype FPair2 a = FPair2 (Params a -> a -> a,  Params a -> a -> a, Params a -> 
 type FEnv2 a = [(String, FPair2 a)]
 type Name = String
 
-data TypeInfo = TypeInfo RType PType deriving (Show, Eq)
+data TypeInfo = TypeInfo RType PType deriving (Show, Eq, Ord)
 data TypeInfoWit = TypeInfoWit RType PType WitnessedVars deriving (Show, Eq, Ord)
+-- only use ord instance for algorithmic convenience, not for up/downgrades / lattice work.
 
 data Program x a = Program [Decl x a] (Expr x a) deriving (Show, Eq)
 

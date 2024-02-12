@@ -51,8 +51,6 @@ annotate expr = case expr of
   Lambda _ x _  -> [IIdentifier x]
   _             -> []
 
-checkExprMatches :: Expr TypeInfo a -> InferenceRule -> Bool
-checkExprMatches e alg = toStub e == forExpression alg
 
 checkConstraint :: Expr TypeInfo a -> InferenceRule -> Constraint -> Bool
 checkConstraint expr _ (SubExprNIsType n ptype) = ptype == p
@@ -62,7 +60,7 @@ checkConstraint expr _ (SubExprNIsNotType n ptype) = ptype /= p
 checkConstraint expr alg ResultingTypeMatch = resPType == annotatedType
   where
     annotatedType = getP expr
-    resPType = resultingType alg (map getP (getSubExprs expr))
+    resPType = resultingPType alg (map getP (getSubExprs expr))
 
 arity :: ExprStub -> Int
 arity = undefined

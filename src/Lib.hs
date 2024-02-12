@@ -50,6 +50,7 @@ import Data.Bifunctor (bimap)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import Data.Number.Erf
+import SPLL.Typing.BruteForceSolver (forceAddTypeInfo, runBruteForceSolver)
 
 variableLengthS2 :: Program  () Double
 variableLengthS2 = Program [("b", IfThenElse ()
@@ -135,7 +136,15 @@ someFunc :: IO ()
 someFunc = do--thatGaussThing
   --x <- runNNTest
   --print x
-  let env = [("main", compilationExample)] :: Env () Float
+  runBruteForceSolver testBool
+  runBruteForceSolver testGauss
+  runBruteForceSolver testGreater2
+  runBruteForceSolver testGreater
+  --runBruteForceSolver testExpr2
+
+  putStrLn "--------"
+  putStrLn "--------"
+  let env = [("main", testGauss)] :: Env () Float
   {-let fnc = gaussLists
   let env = [("main", gaussLists)] :: Env () Float
   let prog = Program env fnc
@@ -145,7 +154,7 @@ someFunc = do--thatGaussThing
   PInfer2.showResultsProgDebug (addRTypeInfo $ addEmptyTypeInfo prog)
   putStrLn "done outputting constraints"
   let cmp2 = progToEnv $ addTypeInfo prog-}
-  let prog = Program env compilationExample
+  let prog = Program env testGauss
   let cmp = progToEnv $ addTypeInfo prog
   --cmp2 <-  env
   --let cmp = [] ++ [("noiseMNistAdd", mNistNoise), ("expertmodel", expertModelsTyped), ("expertmodelAnnotated", expertAnnotatedTyped), ("mNistAdd", testNN)] :: Env TypeInfo Float

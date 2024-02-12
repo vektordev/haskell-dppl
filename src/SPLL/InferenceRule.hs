@@ -6,11 +6,14 @@ module SPLL.InferenceRule (
 , ExprStub(..)
 , toStub
 , allAlgorithms
+, checkExprMatches
 ) where
 
-import SPLL.Typing.PType
+import SPLL.Typing.PType hiding (TV, NotSetYet)
 import Data.List (isInfixOf, isSuffixOf)
 import SPLL.Lang (Expr(..))
+import SPLL.Typing.RInfer (Scheme (..))
+import SPLL.Typing.RType
 
 data ExprStub = StubIfThenElse
               | StubGreaterThan
@@ -61,23 +64,28 @@ data Constraint = SubExprNIsType Int PType
                 | ResultingTypeMatch
                 deriving Show
 
-
 -- can we encode symmetries?
 data InferenceRule = InferenceRule { forExpression :: ExprStub
-                           , constraints :: [Constraint]
-                           , algName :: String
-                           --apply all subexpr PTypes to find PType
-                           , resultingType :: [PType] -> PType
-                           }
+                                   , constraints :: [Constraint]
+                                   , algName :: String
+                                   --apply all subexpr PTypes to find PType
+                                   , resultingPType :: [PType] -> PType
+                                   , assumedRType :: Scheme
+                                   }
 
 instance Show InferenceRule where
-  show (InferenceRule _ _ name _ ) = name
+  show (InferenceRule _ _ name _ _) = name
 
 instance Eq InferenceRule where
   a1 == a2 = algName a1 == algName a2
 
+checkExprMatches :: Expr x a -> InferenceRule -> Bool
+checkExprMatches e alg = toStub e == forExpression alg
+
+
+--mirror the constraints and the ptype of a 2-arg function.
 mirror2 :: InferenceRule -> InferenceRule
-mirror2 (InferenceRule stub constrs name pty) = InferenceRule stub (map mirrorC constrs) (mirrorN name) (mirrorPty pty)
+mirror2 (InferenceRule stub constrs name pty rty) = InferenceRule stub (map mirrorC constrs) (mirrorN name) (mirrorPty pty) rty
 
 mirrorN :: String -> String
 mirrorN name
@@ -97,24 +105,44 @@ mirrorC (SubExprNIsType 1 a) = SubExprNIsType 0 a
 mirrorC c = error ("can not mirror Constraint: " ++ show c)
 
 greaterThanLeft :: InferenceRule
-greaterThanLeft = InferenceRule StubGreaterThan [SubExprNIsType 0 Deterministic] "greaterThanLeft" (const Integrate)
+greaterThanLeft = InferenceRule
+                    StubGreaterThan
+                    [SubExprNIsType 0 Deterministic]
+                    "greaterThanLeft"
+                    (const Integrate)
+                    (Forall [] (TFloat `TArrow` (TFloat `TArrow` TBool)))
 
 greaterThanRight :: InferenceRule
 greaterThanRight = mirror2 greaterThanLeft --InferenceRule StubGreaterThan [SubExprNIsType 1 Deterministic] "greaterThanRight" (const Integrate)
 
 greaterThanSigmoid :: InferenceRule
-greaterThanSigmoid = InferenceRule StubGreaterThan [SubExprNIsType 0 Deterministic, SubExprNIsType 1 Deterministic] "greaterThanSigmoid" (const Integrate)
+greaterThanSigmoid = InferenceRule
+                       StubGreaterThan
+                       [SubExprNIsType 0 Deterministic, SubExprNIsType 1 Deterministic]
+                       "greaterThanSigmoid"
+                       (const Integrate)
+                       (Forall [] (TFloat `TArrow` (TFloat `TArrow` TBool)))
 
 --TODO: Lacking implementation of invertible arithmetic on Integers.
 plusLeft :: InferenceRule
-plusLeft = InferenceRule StubPlusF [SubExprNIsType 0 Deterministic] "plusLeft" mostChaotic
+plusLeft = InferenceRule
+             StubPlusF
+             [SubExprNIsType 0 Deterministic]
+             "plusLeft"
+             mostChaotic
+             (Forall [] (TFloat `TArrow` (TFloat `TArrow` TFloat)))
 
 plusRight :: InferenceRule
 plusRight = mirror2 plusLeft
 -- = InferenceRule StubPlusF [SubExprNIsType 1 Deterministic] "plusRight" mostChaotic
 
 multLeft :: InferenceRule
-multLeft = InferenceRule StubMultF [SubExprNIsType 0 Deterministic] "multLeft" mostChaotic
+multLeft = InferenceRule
+             StubMultF
+             [SubExprNIsType 0 Deterministic]
+             "multLeft"
+             mostChaotic
+             (Forall [] (TFloat `TArrow` (TFloat `TArrow` TFloat)))
 
 multRight :: InferenceRule
 multRight = mirror2 multLeft
@@ -122,28 +150,68 @@ multRight = mirror2 multLeft
 
 enumeratePlusLeft :: InferenceRule
 --TODO: Introduce a new type for intractable results? Does that expand the lattice into a 2d configuration?
-enumeratePlusLeft = InferenceRule StubPlusI [SubExprNIsNotType 0 Deterministic, SubExprNIsNotType 1 Deterministic] "enumeratePlusLeft" (const Prob)
+enumeratePlusLeft = InferenceRule
+                      StubPlusI
+                      [SubExprNIsNotType 0 Deterministic, SubExprNIsNotType 1 Deterministic]
+                      "enumeratePlusLeft"
+                      (const Prob)
+                      (Forall [] (TInt `TArrow` (TInt `TArrow` TInt)))
 
 ifThenElse :: InferenceRule
-ifThenElse = InferenceRule StubIfThenElse [SubExprNIsAtLeast 0 Integrate] "ifThenElse" (\[_, a, b] -> mostChaotic [a,b])
+ifThenElse = InferenceRule
+               StubIfThenElse
+               [SubExprNIsAtLeast 0 Integrate]
+               "ifThenElse"
+               (\[_, a, b] -> mostChaotic [a,b])
+               (Forall [TV "a"] (TBool `TArrow` (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TVarR (TV "a")))))
 
 theta :: InferenceRule
-theta = InferenceRule StubThetaI [] "theta" (const Deterministic)
+theta = InferenceRule
+          StubThetaI
+          []
+          "theta"
+          (const Deterministic)
+          (Forall [] TFloat)
 
 uniform :: InferenceRule
-uniform = InferenceRule StubUniform [] "uniform" (const Integrate)
+uniform = InferenceRule
+            StubUniform
+            []
+            "uniform"
+            (const Integrate)
+            (Forall [] TFloat)
 
 normal :: InferenceRule
-normal = InferenceRule StubNormal [] "normal" (const Integrate)
+normal = InferenceRule
+           StubNormal
+           []
+           "normal"
+           (const Integrate)
+           (Forall [] TFloat)
 
 constant :: InferenceRule
-constant = InferenceRule StubConstant [] "constant" (const Deterministic)
+constant = InferenceRule
+             StubConstant
+             []
+             "constant"
+             (const Deterministic)
+             (Forall [] NotSetYet)
 
 exprNull :: InferenceRule
-exprNull = InferenceRule StubNull [] "null" (const Deterministic)
+exprNull = InferenceRule
+             StubNull
+             []
+             "null"
+             (const Deterministic)
+             (Forall [TV "a"] (ListOf $ TVarR $ TV "a"))
 
 cons :: InferenceRule
-cons = InferenceRule StubCons [] "cons" (mostChaotic . (Prob:))
+cons = InferenceRule
+         StubCons
+         []
+         "cons"
+         (mostChaotic . (Prob:))
+         (Forall [TV "a"] ((TVarR $ TV "a") `TArrow` ((ListOf $ TVarR $ TV "a") `TArrow` (ListOf $ TVarR $ TV "a"))))
 
 allAlgorithms :: [InferenceRule]
 allAlgorithms = [ifThenElse, theta, uniform, normal, constant, exprNull, greaterThanLeft, greaterThanRight, greaterThanSigmoid, plusLeft, plusRight, multLeft, multRight, enumeratePlusLeft]

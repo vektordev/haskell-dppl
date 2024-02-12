@@ -2,7 +2,13 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 module SPLL.Typing.RInfer (
-  showResults, showResultsProg, inferRType, RTypeError, addRTypeInfo, tryAddRTypeInfo
+  showResults
+, showResultsProg
+, inferRType
+, RTypeError (..)
+, addRTypeInfo
+, tryAddRTypeInfo
+, Scheme (..)
 ) where 
 
 import Control.Monad.Except
@@ -379,8 +385,8 @@ infer expr = case expr of
   Normal ti  -> return (TFloat, [], Normal (setRType ti TFloat))
   Constant ti val  -> return (getRType val, [], Constant(setRType ti (getRType val)) val)
   Call ti name -> do
-      t <- lookupTEnv name
-      return (t, [], Call (setRType ti t) name)
+    t <- lookupTEnv name
+    return (t, [], Call (setRType ti t) name)
 
   PlusF x e1 e2 -> do
     (t1, c1, et1) <- infer e1
@@ -401,28 +407,28 @@ infer expr = case expr of
     return (tv, c1 ++ c2 ++ [(u1, u2)], PlusI (setRType x tv) et1 et2)
 
   MultF x e1 e2 -> do
-      (t1, c1, et1) <- infer e1
-      (t2, c2, et2) <- infer e2
-      tv <- fresh
-      let u1 = t1 `TArrow` (t2 `TArrow` tv)
-          u2 = TFloat `TArrow` (TFloat `TArrow` TFloat)
-      return (tv, c1 ++ c2 ++ [(u1, u2)], MultF (setRType x tv)  et1 et2)
+    (t1, c1, et1) <- infer e1
+    (t2, c2, et2) <- infer e2
+    tv <- fresh
+    let u1 = t1 `TArrow` (t2 `TArrow` tv)
+        u2 = TFloat `TArrow` (TFloat `TArrow` TFloat)
+    return (tv, c1 ++ c2 ++ [(u1, u2)], MultF (setRType x tv)  et1 et2)
 
   MultI x e1 e2 -> do
-      (t1, c1, et1) <- infer e1
-      (t2, c2, et2) <- infer e2
-      tv <- fresh
-      let u1 = t1 `TArrow` (t2 `TArrow` tv)
-          u2 = TInt `TArrow` (TInt `TArrow` TInt)
-      return (tv, c1 ++ c2 ++ [(u1, u2)], MultI (setRType x tv)  et1 et2)
+    (t1, c1, et1) <- infer e1
+    (t2, c2, et2) <- infer e2
+    tv <- fresh
+    let u1 = t1 `TArrow` (t2 `TArrow` tv)
+        u2 = TInt `TArrow` (TInt `TArrow` TInt)
+    return (tv, c1 ++ c2 ++ [(u1, u2)], MultI (setRType x tv)  et1 et2)
 
   GreaterThan x e1 e2 -> do
-      (t1, c1, et1) <- infer e1
-      (t2, c2, et2) <- infer e2
-      tv <- fresh
-      let u1 = t1 `TArrow` (t2 `TArrow` tv)
-          u2 = TFloat `TArrow` (TFloat `TArrow` TBool)
-      return (tv, c1 ++ c2 ++ [(u1, u2)], GreaterThan (setRType x tv)  et1 et2)
+    (t1, c1, et1) <- infer e1
+    (t2, c2, et2) <- infer e2
+    tv <- fresh
+    let u1 = t1 `TArrow` (t2 `TArrow` tv)
+        u2 = TFloat `TArrow` (TFloat `TArrow` TBool)
+    return (tv, c1 ++ c2 ++ [(u1, u2)], GreaterThan (setRType x tv)  et1 et2)
 
   IfThenElse x cond tr fl -> do
     (t1, c1, condt) <- infer cond
@@ -432,22 +438,22 @@ infer expr = case expr of
     return (tv, c1 ++ c2 ++ c3 ++ [(t1, TBool), (tv, GreaterType t2 t3)], IfThenElse (setRType x tv)  condt trt flt)
   
   InjF x name e1 e -> do
-      (t1, c1, et1) <- infer e
-      p_inf <- mapM infer e1
-      let (Just (FPair fPair)) = lookup name globalFenv
-      let (funcTy, _, _, _) = fPair
-      (retT, cFunc) <- buildFuncConstraints funcTy t1 (map fst3cts p_inf) [] name
-      return (retT, c1 ++ (concatMap snd3cts p_inf) ++ cFunc, InjF (setRType x retT) name (map trd3cts p_inf) et1)
+    (t1, c1, et1) <- infer e
+    p_inf <- mapM infer e1
+    let (Just (FPair fPair)) = lookup name globalFenv
+    let (funcTy, _, _, _) = fPair
+    (retT, cFunc) <- buildFuncConstraints funcTy t1 (map fst3cts p_inf) [] name
+    return (retT, c1 ++ (concatMap snd3cts p_inf) ++ cFunc, InjF (setRType x retT) name (map trd3cts p_inf) et1)
 
   LetIn x name e1 e2 -> do
-      env <- ask
-      (t1, c1, et1) <- infer e1
-      case runSolve c1 of
-          Left err -> throwError err
-          Right sub -> do
-              let sc = generalize (apply sub env) (apply sub t1)
-              (t2, c2, et2) <- inTEnv (name, sc) $ local (apply sub) (infer e2)
-              return (t2, c1 ++ c2, LetIn (setRType x t2)  name et1 et2 )
+    env <- ask
+    (t1, c1, et1) <- infer e1
+    case runSolve c1 of
+      Left err -> throwError err
+      Right sub -> do
+        let sc = generalize (apply sub env) (apply sub t1)
+        (t2, c2, et2) <- inTEnv (name, sc) $ local (apply sub) (infer e2)
+        return (t2, c1 ++ c2, LetIn (setRType x t2)  name et1 et2 )
   
   Lambda x name e2 -> do
     tv <- fresh
@@ -466,18 +472,18 @@ infer expr = case expr of
   TNull x -> return (Tuple [], [], TNull (setRType x (Tuple [])))
   
   TCons x e1 e2 -> do
-      (t1, c1, et1) <- infer e1
-      (t2, c2, et2) <- infer e2
-      let (Tuple t2t) = t2
-      return (Tuple $ t1:t2t, c1 ++ c2 ++ [(BottomTuple, t2)], TCons (setRType x (Tuple $ t1:t2t)) et1 et2)
+    (t1, c1, et1) <- infer e1
+    (t2, c2, et2) <- infer e2
+    let (Tuple t2t) = t2
+    return (Tuple $ t1:t2t, c1 ++ c2 ++ [(BottomTuple, t2)], TCons (setRType x (Tuple $ t1:t2t)) et1 et2)
 
   Var y x -> do
-      t <- lookupTEnv x
-      return (t, [], Var (setRType y t) x)
+    t <- lookupTEnv x
+    return (t, [], Var (setRType y t) x)
   
   ReadNN x name e1 -> do
-      (t1, c1, et1) <- infer e1
-      return (TInt, c1 ++ [(t1, TSymbol)], ReadNN (setRType x TInt) name et1)
+    (t1, c1, et1) <- infer e1
+    return (TInt, c1 ++ [(t1, TSymbol)], ReadNN (setRType x TInt) name et1)
   
   _ -> error (show expr)
 
@@ -505,9 +511,9 @@ normalize (Forall _ body) = Forall (map snd ord) (normtype body)
 
     normtype (TArrow a b) = TArrow (normtype a) (normtype b)
     normtype (GreaterType a b) = case gt of
-       Nothing -> error "normalized greater type"
-       Just rt -> normtype rt
-       where gt = greaterType a b
+      Nothing -> error "normalized greater type"
+      Just rt -> normtype rt
+      where gt = greaterType a b
     normtype (ListOf a) = ListOf (normtype a)
     normtype TBool = TBool
     normtype TInt = TInt
@@ -559,8 +565,8 @@ unifies (TVarR v) (GreaterType t2 t3) = case greaterType t2 t3 of
   Just t -> v `bind` t
 unifies t1 (GreaterType t2 t3) = if t1 == t2 && t2 == t3 then return emptySubst else
   (case greaterType t2 t3 of
-   Nothing -> throwError $ UnificationFail t1 (GreaterType t2 t3)
-   Just tt -> if t1 == tt then return emptySubst else throwError $  UnificationFail t1 (GreaterType t2 t3))
+    Nothing -> throwError $ UnificationFail t1 (GreaterType t2 t3)
+    Just tt -> if t1 == tt then return emptySubst else throwError $  UnificationFail t1 (GreaterType t2 t3))
 
 unifies (TVarR v) t = v `bind` t
 unifies t (TVarR v) = v `bind` t

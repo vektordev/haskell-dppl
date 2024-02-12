@@ -13,6 +13,7 @@ data PType = Deterministic
            | TVar TVar
            | NotSetYet
            deriving (Show, Eq, Ord)
+-- only use ord instance for algorithmic convenience, not for up/downgrades / lattice work.
            
 infixr `PArr`
 
@@ -36,7 +37,8 @@ partialOrd ty1 ty2
     
 
 downgrade :: PType -> PType -> PType
-downgrade ty1 ty2 = if ty1 <= ty2 then ty1 else ty2
+downgrade ty1 ty2 = maybe Bottom (\ord -> if ord == LT then ty1 else ty2) order
+  where order = partialOrd ty1 ty2
 {-downgrade Bottom _ = Bottom
 downgrade _ Bottom = Bottom
 downgrade Prob _ = Prob
@@ -51,9 +53,8 @@ downgrade2 leftP rightP = if upgrade leftP rightP == Deterministic
               else Bottom
 
 upgrade :: PType -> PType -> PType
-upgrade ty1 ty2
-  | ty1 >= ty2 = ty1
-  | otherwise = ty2
+upgrade ty1 ty2 = maybe Bottom (\ord -> if ord == GT then ty1 else ty2) order
+  where order = partialOrd ty1 ty2
 {-upgrade _ Deterministic = Deterministic
 upgrade Deterministic _ = Deterministic
 upgrade Chaos _ = Chaos
