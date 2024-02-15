@@ -4,14 +4,13 @@ This is the code repository for NeST, the Neuro-Symbolic Transpiler.
 
 ### Instructions
 
-The code herein should compile readily. The intended way of getting your libraries in order is via the haskell tool Stack. You can download it like so:
+The code herein should compile readily. The intended way of getting your libraries in order is via the haskell tool Stack. You can find it [here](https://docs.haskellstack.org/en/stable/) , or on linux download it like so:
 
 ```
 curl -sSL https://get.haskellstack.org/ | sh
 ```
 
-from there,
-
+From there,
 ```
 stack run
 ```
