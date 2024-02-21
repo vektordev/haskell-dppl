@@ -9,6 +9,7 @@ module SPLL.Lang (
 , getTypeInfo
 , tMap
 , tMapProg
+, tMapHead
 , getRType
 , Name
 , Params
@@ -39,6 +40,7 @@ module SPLL.Lang (
 , vextend
 , WitnessedVars
 , getSubExprs
+, setSubExprs
 , containedVars
 , varsOfExpr
 , predicateExpr
@@ -404,6 +406,44 @@ getSubExprs expr = case expr of
   (CallArg _ _ a) -> a
   (Lambda _ _ a) -> [a]
   (ReadNN _ _ a) -> [a]
+
+setSubExprs :: Expr x a -> [Expr x a] -> Expr x a
+setSubExprs expr [] = case expr of
+  ThetaI t x -> ThetaI t x
+  Uniform t -> Uniform t
+  Normal t -> Normal t
+  Constant t x -> Constant t x
+  Null t -> Null t
+  TNull t -> TNull t
+  Call t x -> Call t x
+  Var t x -> Var t x
+  CallArg t n _ -> CallArg t n []
+  _ -> error "unmatched expr in setSubExprs"
+setSubExprs expr [a] = case expr of
+  Arg t l n _ -> Arg t l n a
+  Lambda t l _ -> Lambda t l a
+  ReadNN t n _ -> ReadNN t n a
+  CallArg t n _ -> CallArg t n [a]
+  _ -> error "unmatched expr in setSubExprs"
+setSubExprs expr [a,b] = case expr of
+  GreaterThan t _ _ -> GreaterThan t a b
+  MultF t _ _ -> MultF t a b
+  MultI t _ _ -> MultI t a b
+  PlusF t _ _ -> PlusF t a b
+  PlusI t _ _ -> PlusI t a b
+  Cons t _ b -> Cons t a b
+  TCons t _ b -> TCons t a b
+  LetIn t x _ b -> LetIn t x a b
+  CallArg t n _ -> CallArg t n [a,b]
+  _ -> error "unmatched expr in setSubExprs"
+setSubExprs expr [a,b,c] = case expr of
+  IfThenElse t _ _ _ -> IfThenElse t a b c
+  CallArg t n _ -> CallArg t n [a,b,c]
+  _ -> error "unmatched expr in setSubExprs"
+setSubExprs expr subExprs = case expr of
+  InjF t l _ b -> InjF t l (init subExprs) (last subExprs)
+  CallArg t n _ -> CallArg t n subExprs
+  _ -> error "unmatched expr in setSubExprs"
 
 getTypeInfo :: Expr t a -> t
 getTypeInfo expr = case expr of

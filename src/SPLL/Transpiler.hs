@@ -52,7 +52,7 @@ annotate expr = case expr of
   _             -> []
 
 
-checkConstraint :: Expr TypeInfo a -> InferenceRule -> Constraint -> Bool
+checkConstraint :: Expr TypeInfo a -> InferenceRule -> RuleConstraint -> Bool
 checkConstraint expr _ (SubExprNIsType n ptype) = ptype == p
   where TypeInfo r p = getTypeInfo (getSubExprs expr !! n)
 checkConstraint expr _ (SubExprNIsNotType n ptype) = ptype /= p

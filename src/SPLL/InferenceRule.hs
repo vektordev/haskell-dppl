@@ -2,7 +2,7 @@
 
 module SPLL.InferenceRule (
   InferenceRule(..)
-, Constraint(..)
+, RuleConstraint(..)
 , ExprStub(..)
 , toStub
 , allAlgorithms
@@ -58,15 +58,15 @@ toStub expr = case expr of
   Lambda {}      -> StubLambda
   (ReadNN _ _ _) -> StubReadNN
 
-data Constraint = SubExprNIsType Int PType
-                | SubExprNIsNotType Int PType
-                | SubExprNIsAtLeast Int PType
-                | ResultingTypeMatch
-                deriving Show
+data RuleConstraint = SubExprNIsType Int PType
+                    | SubExprNIsNotType Int PType
+                    | SubExprNIsAtLeast Int PType
+                    | ResultingTypeMatch
+                    deriving Show
 
 -- can we encode symmetries?
 data InferenceRule = InferenceRule { forExpression :: ExprStub
-                                   , constraints :: [Constraint]
+                                   , constraints :: [RuleConstraint]
                                    , algName :: String
                                    --apply all subexpr PTypes to find PType
                                    , resultingPType :: [PType] -> PType
@@ -96,7 +96,7 @@ mirrorN name
 mirrorPty :: ([PType] -> PType) -> ([PType] -> PType)
 mirrorPty function subexprTypes = function (reverse subexprTypes)
 
-mirrorC :: Constraint -> Constraint
+mirrorC :: RuleConstraint -> RuleConstraint
 mirrorC ResultingTypeMatch = ResultingTypeMatch
 mirrorC (SubExprNIsNotType 0 a) = SubExprNIsNotType 1 a
 mirrorC (SubExprNIsNotType 1 a) = SubExprNIsNotType 0 a

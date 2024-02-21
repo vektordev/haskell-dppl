@@ -7,7 +7,6 @@ module SPLL.Typing.RInfer2 (
 , RTypeError (..)
 , addRTypeInfo
 , tryAddRTypeInfo
-, Scheme (..)
 ) where
 
 import Control.Monad.Except
@@ -21,6 +20,8 @@ import Data.Monoid
 import Data.Foldable hiding (toList)
 import qualified Data.Map as Map
 
+import SPLL.Typing.RInfer (Scheme (..))
+
 import Text.Pretty.Simple
 
 import SPLL.Lang
@@ -28,7 +29,7 @@ import SPLL.Typing.Typing
 import SPLL.Typing.RType
 import SPLL.Examples
 import SPLL.Typing.PType( PType(..) )
-import SPLL.InferenceRule hiding (Constraint)
+import SPLL.InferenceRule
 
 import InjectiveFunctions
 
@@ -41,9 +42,6 @@ data RTypeError
   | ExprInfo [String]
   | FalseParameterFail String
   deriving (Show)
-
-data Scheme = Forall [TVarR] RType
-  deriving (Show, Eq)
 
 data TEnv = TypeEnv { types :: Map.Map Name Scheme }
   deriving (Eq, Show)
@@ -174,7 +172,7 @@ instance Substitutable TEnv where
   ftv (TypeEnv env) = ftv $ Map.elems env
 
 addRTypeInfo :: (Show a) => Program TypeInfo a -> Program TypeInfo a
-addRTypeInfo p@(Program decls expr) =
+addRTypeInfo p =
   case runInfer empty (inferProg p) of
     Left err -> error ("error in addRTypeInfo: " ++ show err)
     Right (ty, cs, p) -> case runSolve cs of
@@ -212,18 +210,56 @@ inferProg p@(Program decls expr) = do
   -- combine all constraints
   return (t1, tcs ++ concatMap snd3cts cts ++ c1, Program (zip (map fst decls) (map trd3cts cts)) et)
 
-infer :: Show a =>Expr TypeInfo a -> Infer (RType, [Constraint], Expr TypeInfo a)
+--TODO: Error on ambiguous InferenceRule
+infer :: Show a => Expr TypeInfo a -> Infer (RType, [Constraint], Expr TypeInfo a)
 infer expr = if solvesSimply
-    then
-      -- use scheme. Instantiate each elem
-      undefined
+    then if not allSchemesEq
+      then error "unviable Inference Rule configuration"
+      else do
+        -- use ForAll scheme from InferenceRule.
+        let subexprs = getSubExprs expr
+        tuples <- mapM infer subexprs
+        let localConstraints = concatMap snd3cts tuples
+        let subExprTypes = map fst3cts tuples
+        let typedSubExprs = map trd3cts tuples
+        rescoped <- rescope scheme
+        (resultingtype, recursiveConstraints) <- inferResultingType rescoped subExprTypes
+        return (resultingtype, recursiveConstraints ++ localConstraints, reformExpr expr typedSubExprs resultingtype)
     else
-      undefined
+      error ("no inference implemented for " ++ show expr)
   where
     plausibleAlgs = filter (checkExprMatches expr) allAlgorithms
+    --since we don't care about ambiguous inference rules (i.e. multiple plausible rules)
+    -- we just make sure that they agree on resulting types.
     allSchemesEq = all (\alg -> assumedRType (head plausibleAlgs) == assumedRType alg) (tail plausibleAlgs)
-    solvesSimply = not (null plausibleAlgs) && allSchemesEq
+    solvesSimply = not (null plausibleAlgs)
     scheme = assumedRType (head plausibleAlgs)
+
+--put all new TVars into a scheme
+rescope :: Scheme -> Infer Scheme
+rescope (Forall tvars rty) = do
+  newTVars <- mapM (const fresh) tvars
+  let newvars = map unwrap newTVars
+  let substitution = Subst $ Map.fromList (zip tvars newTVars)
+  let substituted = apply substitution rty
+  return (Forall newvars substituted)
+    where unwrap (TVarR tv) = tv
+
+-- into an existing expression, replace a subexpresison and rtype.
+reformExpr :: Expr TypeInfo a -> [Expr TypeInfo a] -> RType -> Expr TypeInfo a
+reformExpr original subexprs ownTy = tMapHead (const newTy) $ setSubExprs original subexprs
+  where
+    newTy = setRType (getTypeInfo original) ownTy
+
+--take a scheme like Forall [a,b,c] (a -> b -> c) and apply a list of types Int, Float to the scheme.
+-- should yield (c, [a=Int, b=Float])
+inferResultingType :: Scheme -> [RType] -> Infer (RType, [Constraint])
+inferResultingType (Forall vars rtype) [] = return (rtype, [])
+inferResultingType (Forall vars (TArrow fromTy toTy)) (fstTy:rtypes2) =
+  do
+    let constraint = (fromTy, fstTy)
+    (resultingType, moreConstraints) <- inferResultingType (Forall vars toTy) rtypes2
+    return (resultingType, constraint:moreConstraints)
 
 
 -- | Extend type TEnvironment
@@ -255,7 +291,7 @@ fresh = do
 
 freshVars :: Int -> [RType] -> Infer [RType]
 freshVars 0 rts = do
-    return $ rts
+    return rts
 freshVars n rts = do
     s <- get
     put s{var_count = var_count s + 1}
