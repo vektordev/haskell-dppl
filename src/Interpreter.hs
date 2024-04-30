@@ -187,7 +187,6 @@ generate globalEnv env thetas args (ReadNN _ _ expr) = error "NN not implemented
 generate globalEnv env thetas args (LetIn _ name decl bij) =
   do
     declValue <- generate globalEnv env thetas args decl
-    let (VFloat val) = declValue
     let extendedEnv = (name, Constant (TypeInfoWit (getRType declValue) Deterministic Set.empty) declValue):env
     generate globalEnv extendedEnv thetas args bij
 generate globalEnv env thetas args (InjF _ name params f2) =

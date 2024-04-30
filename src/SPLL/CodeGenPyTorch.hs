@@ -115,6 +115,9 @@ generateCode (IRIf cond left right) bindto = let
   in [l1] ++ indentOnce cLeft ++ [l2] ++ indentOnce cRight
 generateCode (IROp op left right) bindto = wrapMultiBlock [bindto ++ "(", " " ++ pyOps op ++ " ", ")"] [generateCode left "", generateCode right ""]
 --generateCode (IROp op left right) bindto = lines ("(" ++ unlinesTrimLeft (generateCode left "") ++ " " ++ pyOps op ++ " " ++ unlinesTrimLeft (generateCode right "") ++ ")")
+generateCode (IRUnaryOp OpNeg expr) bindto = wrap (bindto ++ "-(") (generateCode expr "") ")"
+generateCode (IRUnaryOp OpNot expr) bindto = wrap (bindto ++ "not(") (generateCode expr "") ")"
+generateCode (IRUnaryOp OpAbs expr) bindto = wrap (bindto ++ "abs(") (generateCode expr "") ")"
 generateCode (IRTheta i) bindto = [bindto ++ "self.thetas[" ++ show i ++ "]"]
 generateCode (IRConst val) bindto = [bindto ++ pyVal val]
 generateCode (IRCons hd tl) bindto = wrapMultiBlock [bindto ++ "[", "] + ", ""] [generateCode hd "", generateCode tl ""]

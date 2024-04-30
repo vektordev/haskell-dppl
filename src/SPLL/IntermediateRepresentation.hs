@@ -3,6 +3,7 @@ module SPLL.IntermediateRepresentation (
 , StaticAnnotations(..)
 , Tag(..)
 , Operand(..)
+, UnaryOperand(..)
 , Distribution(..)
 , toIRProbability
 , toIRGenerate
@@ -116,10 +117,16 @@ data Operand = OpPlus
              | OpEq
              deriving (Show, Eq)
 
+data UnaryOperand = OpNeg
+                  | OpAbs
+                  | OpNot
+                  deriving (Show, Eq)
+
 data Distribution = IRNormal | IRUniform deriving (Show, Eq)
 
 data IRExpr a = IRIf (IRExpr a) (IRExpr a) (IRExpr a)
               | IROp Operand (IRExpr a) (IRExpr a)
+              | IRUnaryOp UnaryOperand (IRExpr a)
               | IRTheta Int
               | IRConst (Value a)
               | IRCons (IRExpr a) (IRExpr a)
@@ -178,6 +185,7 @@ irMap :: (IRExpr a -> IRExpr a) -> IRExpr a -> IRExpr a
 irMap f x = case x of
   (IRIf cond left right) -> f (IRIf (irMap f cond) (irMap f left) (irMap f right))
   (IROp op left right) -> f (IROp op (irMap f left) (irMap f right))
+  (IRUnaryOp op expr) -> f (IRUnaryOp op (irMap f expr))
   (IRCons left right) -> f (IRCons (irMap f left) (irMap f right))
   (IRHead expr) -> f (IRHead (irMap f expr))
   (IRTail expr) -> f (IRTail (irMap f expr))
@@ -195,6 +203,7 @@ irMap f x = case x of
   (IRVar _) -> f x
 
 --TODO: We can also optimize index magic, potentially here. i.e. a head tail tail x can be simplified.
+--TODO: Unary operators
 evalAll :: (Show a, Ord a, Fractional a) => IRExpr a -> IRExpr a
 evalAll expr@(IROp op leftV rightV)
   | isValue leftV && isValue rightV = IRConst (forceOp op (unval leftV) (unval rightV))
@@ -300,12 +309,12 @@ toIRProbability (MultF (StaticAnnotations TFloat _ extras) left right) sample
     var <- mkVariable ""
     rightExpr <- toIRProbability right (IROp OpDiv sample (IRVar var))
     return $ IRLetIn var (toIRGenerate left)
-      (IROp OpDiv rightExpr (IRVar var))
+      (IROp OpDiv rightExpr (IRUnaryOp OpAbs (IRVar var)))
   | extras `hasAlgorithm` "multRight" = do
     var <- mkVariable ""
     leftExpr <- toIRProbability left (IROp OpDiv sample (IRVar var))
     return $ IRLetIn var (toIRGenerate right)
-      (IROp OpDiv leftExpr (IRVar var))
+      (IROp OpDiv leftExpr (IRUnaryOp OpAbs (IRVar var)))
 toIRProbability (PlusF (StaticAnnotations TFloat _ extras) left right) sample
   | extras `hasAlgorithm` "plusLeft" = do
     var <- mkVariable ""
@@ -338,6 +347,7 @@ toIRProbability (ReadNN _ name subexpr) sample = do
   return $ IRIndex (IREvalNN name mkInput) sample
   --TODO: Assumption that subexpr is det.
 toIRProbability (Normal t) sample = return $ IRDensity IRNormal sample
+toIRProbability (Uniform t) sample = return $ IRDensity IRUniform sample
 --TODO: assumption: These will be top-level lambdas:
 toIRProbability (Lambda t name subExpr) sample = do
   subExprIR <- toIRProbability subExpr sample

@@ -2,6 +2,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 import Test.QuickCheck
 
@@ -11,14 +12,22 @@ import SPLL.Lang
 import SPLL.Typing.Typing
 import SPLL.Typing.RType
 import SPLL.Typing.PType
+import SPLL.Typing.Typing
+import SPLL.Analysis
+import SPLL.IntermediateRepresentation
 import Interpreter
+import IRInterpreter
 import Data.Maybe (fromJust, catMaybes)
-import Control.Monad.Random.Lazy (Random)
+import Control.Monad.Random.Lazy (Random, RandomGen, Rand, evalRandIO)
 import SPLL.Typing.PInferBranched
 import SPLL.Typing.Infer
 import SPLL.Typing.Witnessing
 import SpecExamples
 import ArbitrarySPLL
+import Control.Exception.Base (SomeException, try)
+import Test.QuickCheck.Monadic (monadicIO, run, assert)
+import Debug.Trace (trace)
+import SPLL.Lang (Value)
 
 -- Generalizing over different compilation stages, we can fit all "this typing is what the compiler would find" cases.
 class Recompilable a where
@@ -74,6 +83,45 @@ canCompile e = case infer e of
   Right _ -> True === True
   Left err -> counterexample (show err) False
 
+interpretables :: [Program () Double]
+interpretables = [uniformProg, uniformProgPlus]
+prop_CanInterpret :: Property
+prop_CanInterpret = forAll (elements interpretables) canInterpret
+
+canInterpret :: (Ord a, Fractional a, Show a, Eq a, Floating a, Random a) => Program () a -> Property
+canInterpret p = ioProperty $ do
+  result <- try (evalRandIO (irInterpret p []))
+  case result of
+    Left (err :: SomeException) -> return $ counterexample (show err) False
+    Right r -> return $ True === True
+
+correctProbValues :: (Ord a, Fractional a, Show a, Eq a, Floating a, Random a) => Program () Double -> ([IRExpr a], Value a)
+correctProbValues p | p == uniformProg = ([IRConst $ VFloat 0.5], VFloat 1.0)
+correctProbValues p | p == uniformProgPlus = ([IRConst $ VFloat $ -0.25], VFloat 2.0)
+
+prop_IRInterpretCorrectValues :: Property
+prop_IRInterpretCorrectValues = forAll (elements interpretables) irInterpretCorrectValue
+
+irInterpretCorrectValue :: Program () Double -> Property
+irInterpretCorrectValue p = ioProperty $ do
+  result <- try (evalRandIO (irInterpret p $ fst (correctProbValues p)))
+  case result of
+    Left (err :: SomeException) -> return $ counterexample (show err) False
+    Right v -> return $ v === snd (correctProbValues p)
+
+
+
+irInterpret :: (Ord a, Fractional a, Show a, Eq a, Floating a, RandomGen g, Random a) => Program () a -> [IRExpr a] -> Rand g (Value a)
+irInterpret p params = IRInterpreter.generate irEnv irEnv [] params main
+  where Just main = lookup "main_prob" irEnv
+        irEnv = envToIR annotated
+        annotated = map (\(a,b) -> (a, annotate b)) env
+        env = progToEnv typedProg
+        wit = addWitnessesProg typedProg
+        typedProg = addTypeInfo p
+
+progToIREnv ::(Ord a, Fractional a, Show a, Eq a, Random a) => Program () a -> [(String, IRExpr a)]
+progToIREnv p = envToIR $ map (\(a,b) -> (a, annotate b)) $ progToEnv $ addTypeInfo p
 
 --testCompile :: Expr () a -> Property
 --testCompile e = addWitnessesProg $ addTypeInfo $ makeMain e
