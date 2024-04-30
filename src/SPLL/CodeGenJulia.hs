@@ -83,6 +83,9 @@ generateCode (IRIf cond left right ) = let
   l3 = "end"
   in [l1] ++ indentOnce cLeft ++ [l2] ++ indentOnce cRight ++ [l3]
 generateCode (IROp op left right) = lines ("(" ++ unlinesTrimLeft (generateCode left) ++ " " ++ juliaOps op ++ " " ++ unlinesTrimLeft (generateCode right) ++ ")")
+generateCode (IRUnaryOp OpNeg expr) = wrap "-(" (generateCode expr) ")"
+generateCode (IRUnaryOp OpNot expr) = wrap "!(" (generateCode expr) ")"
+generateCode (IRUnaryOp OpAbs expr) = wrap "abs(" (generateCode expr) ")"
 generateCode (IRTheta i) = ["thetas[" ++ show i ++ "]"]
 generateCode (IRConst val) = [juliaVal val]
 generateCode (IRCons hd tl) = wrapMultiBlock ["hcat(", ", ", ")"] [generateCode hd, generateCode tl]
