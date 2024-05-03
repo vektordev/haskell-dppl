@@ -140,7 +140,7 @@ instance Substitutable RType where
   apply _ NullList = NullList
   apply _ BottomTuple = BottomTuple
   apply s (ListOf t) = ListOf $ apply s t
-  apply s (Tuple t1) = Tuple $ map (apply s) t1 
+  apply s (Tuple t1 t2) = Tuple (apply s t1) (apply s t2)
   apply s (TArrow t1 t2) = apply s t1 `TArrow` apply s t2
   apply (Subst s) t@(TVarR a) = Map.findWithDefault t a s
   apply s (GreaterType t1 t2) = apply s t1 `GreaterType` apply s t2
@@ -148,7 +148,7 @@ instance Substitutable RType where
   apply _ val = error ("Missing Substitute: " ++ show val)
 
   ftv (ListOf t) = ftv t
-  ftv (Tuple t1) = foldl Set.union Set.empty (map ftv t1)
+  ftv (Tuple t1 t2) = Set.union (ftv t1) (ftv t2)
   ftv (TVarR a)       = Set.singleton a
   ftv (t1 `TArrow` t2) = ftv t1 `Set.union` ftv t2
   ftv (t1 `GreaterType` t2) = ftv t1 `Set.union` ftv t2
@@ -331,8 +331,8 @@ solver (su, cs) =
 
 unifies :: RType -> RType -> Solve Subst
 unifies t1 t2 | t1 == t2 = return emptySubst
-unifies (Tuple t) BottomTuple = return emptySubst
-unifies BottomTuple (Tuple t) = return emptySubst
+unifies (Tuple t1 t2) BottomTuple = return emptySubst
+unifies BottomTuple (Tuple t1 t2) = return emptySubst
 unifies (ListOf t) NullList = return emptySubst
 unifies NullList (ListOf t) = return emptySubst
 unifies t1 (GreaterType (TVarR v) t3) = if t1 == t3 then v `bind` t1 else
@@ -349,8 +349,7 @@ unifies t1 (GreaterType t2 t3) = if t1 == t2 && t2 == t3 then return emptySubst 
 unifies (TVarR v) t = v `bind` t
 unifies t (TVarR v) = v `bind` t
 unifies (TArrow t1 t2) (TArrow t3 t4) = unifyMany [t1, t2] [t3, t4]
-unifies (Tuple []) (Tuple []) = return emptySubst
-unifies (Tuple t1) (Tuple t2) = unifyMany t1 t2
+unifies (Tuple t1 t2) (Tuple t3 t4) = unifyMany [t1, t2] [t3, t4]
 unifies t1 t2 = throwError $ UnificationFail t1 t2
 
 unifyMany :: [RType] -> [RType] -> Solve Subst

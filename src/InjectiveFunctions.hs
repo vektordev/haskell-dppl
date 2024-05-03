@@ -137,6 +137,6 @@ autoVal :: (Num a, Reifies s Tape) => Value a -> Value (Reverse s a)
 autoVal (VBool x) = VBool x
 autoVal (VFloat y) = VFloat (auto y)
 autoVal (VList xs) = VList (map autoVal xs)
-autoVal (VTuple x1) = VTuple $ map autoVal x1
+autoVal (VTuple x1 x2) = VTuple (autoVal x1) (autoVal x2)
 autoVal (VInt x) = VInt x
 autoVal (VSymbol x) = VSymbol x

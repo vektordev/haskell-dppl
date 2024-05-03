@@ -130,8 +130,11 @@ data IRExpr a = IRIf (IRExpr a) (IRExpr a) (IRExpr a)
               | IRTheta Int
               | IRConst (Value a)
               | IRCons (IRExpr a) (IRExpr a)
+              | IRTCons (IRExpr a) (IRExpr a)
               | IRHead (IRExpr a)
               | IRTail (IRExpr a)
+              | IRTFst (IRExpr a)
+              | IRTSnd (IRExpr a)
               | IRDensity Distribution (IRExpr a)
               | IRSample Distribution
               | IRLetIn Varname (IRExpr a) (IRExpr a)
@@ -187,8 +190,11 @@ irMap f x = case x of
   (IROp op left right) -> f (IROp op (irMap f left) (irMap f right))
   (IRUnaryOp op expr) -> f (IRUnaryOp op (irMap f expr))
   (IRCons left right) -> f (IRCons (irMap f left) (irMap f right))
+  (IRTCons left right) -> f (IRTCons (irMap f left) (irMap f right))
   (IRHead expr) -> f (IRHead (irMap f expr))
   (IRTail expr) -> f (IRTail (irMap f expr))
+  (IRTFst expr) -> f (IRTFst (irMap f expr))
+  (IRTSnd expr) -> f (IRTSnd (irMap f expr))
   (IRDensity a expr) -> f (IRDensity a (irMap f expr))
   (IRLetIn name left right) -> f (IRLetIn name (irMap f left) (irMap f right))
   (IRCall name args) -> f (IRCall name (map (irMap f) args))
@@ -356,6 +362,10 @@ toIRProbability (Cons _ hdExpr tlExpr) sample = do
   headP <- toIRProbability hdExpr (IRHead sample)
   tailP <- toIRProbability tlExpr (IRTail sample)
   return (IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (IROp OpMult headP tailP))
+toIRProbability (TCons _ t1Expr t2Expr) sample = do
+  t1P <- toIRProbability t1Expr (IRTFst sample)
+  t2P <- toIRProbability t2Expr (IRTSnd sample)
+  return (IROp OpMult t1P t2P)
 toIRProbability (Null _) sample = indicator (IROp OpEq sample (IRConst $ VList []))
 toIRProbability (Constant _ value) sample = indicator (IROp OpEq sample (IRConst value))
 toIRProbability (Call _ name) sample = return $ IRCall (name ++ "_prob") [sample]
@@ -377,6 +387,7 @@ toIRGenerate (ThetaI _ ix) = IRTheta ix
 toIRGenerate (Constant _ x) = IRConst x
 toIRGenerate (Null _) = IRConst (VList [])
 toIRGenerate (Cons _ hd tl) = IRCons (toIRGenerate hd) (toIRGenerate tl)
+toIRGenerate (TCons _ t1 t2) = IRTCons (toIRGenerate t1) (toIRGenerate t2)
 toIRGenerate (Uniform _) = IRSample IRUniform
 toIRGenerate (Normal _) = IRSample IRNormal
 --The following assumes that "name" refers to a function defined within the program. 

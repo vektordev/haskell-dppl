@@ -40,13 +40,13 @@ addRTypeInfo p = case filtered of
     _ -> Nothing
   where filtered = filter isValidRTypingProg (allTypes (R 0) p)
 
+--TODO Implement Tuples
 getRTypes :: Int -> [RType]
-getRTypes 0 = [TBool, TInt, TSymbol, TFloat, Tuple []]
+getRTypes 0 = [TBool, TInt, TSymbol, TFloat]
 getRTypes n =
   getRTypes 0
   ++ map ListOf (getRTypes (n-1))
   ++ [TArrow x y | x <- getRTypes (n-1), y <- getRTypes (n-1)]
-  ++ map Tuple (concat [mkTupleType x x | x <- [0..(n-2)]])
 
 --Note: the above generates a few duplicates:
 -- [(x, length $ getRTypes x, length $ nubOrd $ getRTypes x) | x <- [1..]]

@@ -591,8 +591,6 @@ infer env expr = case expr of
     (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
     return (s3, cs3, t3, Cons (setPType ti t3) et1 et2)
 
-  TNull ti -> return (emptySubst, [], Deterministic, TNull (setPType ti Deterministic))
-
   TCons ti e1 e2 -> do
     (s1, cs1, t1) <- downgradeInf
     (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1

@@ -27,6 +27,7 @@ data ExprStub = StubIfThenElse
               | StubPlusI
               | StubNull
               | StubCons
+              | StubTCons
               | StubCall
               | StubVar
               | StubLetIn
@@ -50,6 +51,7 @@ toStub expr = case expr of
   PlusI {}       -> StubPlusI
   (Null _)       -> StubNull
   Cons {}        -> StubCons
+  TCons {}       -> StubTCons
   (Call _ _)     -> StubCall
   (Var _ _)      -> StubVar
   LetIn {}       -> StubLetIn

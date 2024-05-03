@@ -8,7 +8,7 @@ data RType = TBool
            | TSymbol
            | TFloat
            | ListOf RType
-           | Tuple [RType]
+           | Tuple RType RType
            | NullList
            | BottomTuple
            | RIdent String
@@ -32,7 +32,7 @@ instance Eq RType where
   (==) (RIdent a) (RIdent b) = a == b
   (==) (RConstraint _ _ retT) (RConstraint _ _ retT2) = retT == retT2
   (==) (GreaterType t1 t2) (GreaterType t3 t4) = greaterType t1 t2 == greaterType t1 t2
-  (==) (Tuple t1) (Tuple t2) = all (\a -> fst a == snd a) (zip t1 t2)
+  (==) (Tuple t11 t12) (Tuple t21 t22) = t11 == t21 && t12 == t22
   (==) _ _ = False
 
 greaterType :: RType -> RType -> Maybe RType

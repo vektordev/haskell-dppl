@@ -28,7 +28,7 @@ import SPLL.Typing.RType
 import SPLL.Typing.PType
 import SPLL.Typing.Infer
 import SPLL.Typing.PInfer2
-import SPLL.Typing.RInfer
+import SPLL.Typing.RInfer2
 import Interpreter
 import SPLL.Transpiler
 import Control.Monad.Random (evalRandIO, getRandomR, replicateM, forM_)
@@ -136,15 +136,15 @@ someFunc :: IO ()
 someFunc = do--thatGaussThing
   --x <- runNNTest
   --print x
-  runBruteForceSolver testBool
-  runBruteForceSolver testGauss
-  runBruteForceSolver testGreater2
-  runBruteForceSolver testGreater
+  --runBruteForceSolver testBool
+  --runBruteForceSolver testGauss
+  --runBruteForceSolver testGreater2
+  --runBruteForceSolver testGreater
   --runBruteForceSolver testExpr2
 
   putStrLn "--------"
   putStrLn "--------"
-  let env = [("main", testGauss)] :: Env () Float
+  let env = [("main", simpleTuple)] :: Env () Float
   {-let fnc = gaussLists
   let env = [("main", gaussLists)] :: Env () Float
   let prog = Program env fnc
@@ -154,7 +154,7 @@ someFunc = do--thatGaussThing
   PInfer2.showResultsProgDebug (addRTypeInfo $ addEmptyTypeInfo prog)
   putStrLn "done outputting constraints"
   let cmp2 = progToEnv $ addTypeInfo prog-}
-  let prog = Program env testGauss
+  let prog = Program env simpleTuple
   let cmp = progToEnv $ addTypeInfo prog
   --cmp2 <-  env
   --let cmp = [] ++ [("noiseMNistAdd", mNistNoise), ("expertmodel", expertModelsTyped), ("expertmodelAnnotated", expertAnnotatedTyped), ("mNistAdd", testNN)] :: Env TypeInfo Float

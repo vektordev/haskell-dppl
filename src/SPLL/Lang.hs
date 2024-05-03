@@ -72,7 +72,6 @@ data Expr x a = IfThenElse x (Expr x a) (Expr x a) (Expr x a)
               | Null x
               | Cons x (Expr x a) (Expr x a)
               | Var x String
-              | TNull x
               | TCons x (Expr x a) (Expr x a)
               | Call x String 
               --  | LetInD x String (Expr x a) (Expr x a)
@@ -153,7 +152,7 @@ data Value a = VBool Bool
            | VSymbol String
            | VFloat a
            | VList [Value a]
-           | VTuple [Value a]
+           | VTuple (Value a) (Value a)
            | VBranch (Value a) (Value a) String
            | VRange (Limits a)
            | VAnyList 
@@ -173,7 +172,7 @@ valMap f (VInt i) = VInt i
 valMap f (VSymbol i) = VSymbol i
 valMap f (VFloat a) = VFloat $ f a
 valMap f (VList v) = VList $ map (valMap f) v
-valMap f (VTuple v) = VList $ map (valMap f) v
+valMap f (VTuple v1 v2) = VTuple (valMap f v1) (valMap f v2)
 valMap f (VBranch v1 v2 x ) = VBranch (valMap f v1) (valMap f v2) x
 valMap f (VRange v1) = VRange (limitsMap f v1)
 valMap f VAnyList = VAnyList
@@ -224,7 +223,6 @@ exprMap f expr = case expr of
   (PlusI t a b) -> PlusI t (exprMap f a) (exprMap f b)
   (Null t) -> Null t
   (Cons t a b) -> Cons t (exprMap f a) (exprMap f b)
-  (TNull t) -> TNull t
   (TCons t a b) -> TCons t (exprMap f a) (exprMap f b)
   (Call t x) -> Call t x
   (Var t x) -> Var t x
@@ -273,7 +271,6 @@ tMapHead f expr = case expr of
   (PlusI _ a b) -> PlusI (f expr) a b
   (Null _) -> Null (f expr)
   (Cons _ a b) -> Cons (f expr) a b
-  (TNull _) -> TNull (f expr)
   (TCons _ a b) -> TCons (f expr) a b
   (Call _ x) -> Call (f expr) x
   (Var _ x) -> Var (f expr) x
@@ -300,7 +297,6 @@ tMapTails f expr = case expr of
   (PlusI t a b) -> PlusI t (tMap f a) (tMap f b)
   (Null t) -> Null t
   (Cons t a b) -> Cons t (tMap f a) (tMap f b)
-  (TNull t) -> TNull t
   (TCons t a b) -> TCons t (tMap f a) (tMap f b)
   (Call t x) -> Call t x
   (Var t x) -> Var t x
@@ -325,7 +321,6 @@ tMap f expr = case expr of
   (PlusI _ a b) -> PlusI (f expr) (tMap f a) (tMap f b)
   (Null _) -> Null (f expr)
   (Cons _ a b) -> Cons (f expr) (tMap f a) (tMap f b)
-  (TNull _) -> TNull (f expr)
   (TCons _ a b) -> TCons (f expr) (tMap f a) (tMap f b)
   (Call _ x) -> Call (f expr) x
   (Var _ x) -> Var (f expr) x
@@ -362,7 +357,6 @@ getNullaryConstructor Uniform {} = Uniform
 getNullaryConstructor Normal {} = Normal
 getNullaryConstructor (Constant t val) = (`Constant` val)
 getNullaryConstructor Null {} = Null
-getNullaryConstructor TNull {} = TNull
 getNullaryConstructor (ThetaI _ x) = (`ThetaI` x)
 getNullaryConstructor (Var _ x) = (`Var` x)
 getNullaryConstructor (Call _ x) = (`Call` x)
@@ -394,7 +388,6 @@ getSubExprs expr = case expr of
   (PlusI _ a b) -> [a,b]
   (Null _) -> []
   (Cons _ a b) -> [a,b]
-  (TNull _) -> []
   (TCons _ a b) -> [a,b]
   (Call _ _) -> []
   (LetIn _ _ a b) -> [a, b]
@@ -414,7 +407,6 @@ setSubExprs expr [] = case expr of
   Normal t -> Normal t
   Constant t x -> Constant t x
   Null t -> Null t
-  TNull t -> TNull t
   Call t x -> Call t x
   Var t x -> Var t x
   CallArg t n _ -> CallArg t n []
@@ -459,7 +451,6 @@ getTypeInfo expr = case expr of
   (PlusI t _ _)         -> t
   (Null t)              -> t
   (Cons t _ _)          -> t
-  (TNull t)             -> t
   (TCons t _ _)         -> t
   (Call t _)            -> t
   (Var t _)             -> t
@@ -483,7 +474,7 @@ getRType (VSymbol _) = TSymbol
 getRType (VFloat _) = TFloat
 getRType (VList (a:_)) = ListOf $ getRType a
 getRType (VList []) = NullList
-getRType (VTuple t) = Tuple $ map getRType t
+getRType (VTuple t1 t2) = Tuple (getRType t1) (getRType t2)
 
 prettyPrintProg :: (Num a, Show a, Show t) => Program t a -> [String]
 prettyPrintProg (Program decls expr) = concatMap prettyPrintDecl decls ++ mainString
@@ -531,7 +522,6 @@ printFlat expr = case expr of
   PlusI {} -> "PlusI"
   (Null _) -> "Null"
   Cons {} -> "Cons"
-  (TNull _) -> "TNull"
   TCons {} -> "TCons"
   (Call _ a) -> "Call " ++ a
   (Var _ a) -> "Var " ++ a
@@ -558,7 +548,6 @@ printFlatNoReq expr = case expr of
   PlusI {} -> "PlusI"
   (Null _) -> "Null"
   Cons {} -> "Cons"
-  (TNull _) -> "TNull"
   TCons {} -> "TCons"
   (Call _ a) -> "Call " ++ a
   Var _ _ -> "Var"

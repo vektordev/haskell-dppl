@@ -140,7 +140,7 @@ instance Substitutable RType where
   apply _ NullList = NullList
   apply _ BottomTuple = BottomTuple
   apply s (ListOf t) = ListOf $ apply s t
-  apply s (Tuple t1) = Tuple $ map (apply s) t1 
+  apply s (Tuple t1 t2) = Tuple (apply s t1) (apply s t2)
   apply s (TArrow t1 t2) = apply s t1 `TArrow` apply s t2
   apply (Subst s) t@(TVarR a) = Map.findWithDefault t a s
   apply s (GreaterType t1 t2) = apply s t1 `GreaterType` apply s t2
@@ -148,7 +148,7 @@ instance Substitutable RType where
   apply _ val = error ("Missing Substitute: " ++ show val)
 
   ftv (ListOf t) = ftv t
-  ftv (Tuple t1) = foldl Set.union Set.empty (map ftv t1)
+  ftv (Tuple t1 t2) = Set.union (ftv t1) (ftv t2)
   ftv (TVarR a)       = Set.singleton a
   ftv (t1 `TArrow` t2) = ftv t1 `Set.union` ftv t2
   ftv (t1 `GreaterType` t2) = ftv t1 `Set.union` ftv t2
@@ -469,13 +469,12 @@ infer expr = case expr of
     (t2, c2, et2) <- infer e2
     return (ListOf t1, c1 ++ c2 ++ [(ListOf t1, t2)], Cons (setRType x (ListOf t1)) et1 et2)
 
-  TNull x -> return (Tuple [], [], TNull (setRType x (Tuple [])))
   
   TCons x e1 e2 -> do
     (t1, c1, et1) <- infer e1
     (t2, c2, et2) <- infer e2
-    let (Tuple t2t) = t2
-    return (Tuple $ t1:t2t, c1 ++ c2 ++ [(BottomTuple, t2)], TCons (setRType x (Tuple $ t1:t2t)) et1 et2)
+    -- TODO check this
+    return (Tuple t1 t2, c1 ++ c2, TCons (setRType x (Tuple t1 t2)) et1 et2)
 
   Var y x -> do
     t <- lookupTEnv x
@@ -552,8 +551,8 @@ unifyMany t1 t2 = throwError $ UnificationMismatch t1 t2
 
 unifies :: RType -> RType -> Solve Subst
 unifies t1 t2 | t1 == t2 = return emptySubst
-unifies (Tuple t) BottomTuple = return emptySubst
-unifies BottomTuple (Tuple t) = return emptySubst
+unifies (Tuple t1 t2) BottomTuple = return emptySubst
+unifies BottomTuple (Tuple t1 t2) = return emptySubst
 unifies (ListOf t) NullList = return emptySubst
 unifies NullList (ListOf t) = return emptySubst
 unifies t1 (GreaterType (TVarR v) t3) = if t1 == t3 then v `bind` t1 else
@@ -571,8 +570,7 @@ unifies t1 (GreaterType t2 t3) = if t1 == t2 && t2 == t3 then return emptySubst 
 unifies (TVarR v) t = v `bind` t
 unifies t (TVarR v) = v `bind` t
 unifies (TArrow t1 t2) (TArrow t3 t4) = unifyMany [t1, t2] [t3, t4]
-unifies (Tuple []) (Tuple []) = return emptySubst
-unifies (Tuple t1) (Tuple t2) = unifyMany t1 t2
+unifies (Tuple t1 t2) (Tuple t3 t4) = unifyMany [t1, t2] [t3, t4]
 unifies t1 t2 = throwError $ UnificationFail t1 t2
 
 -- Unification solver

@@ -89,17 +89,15 @@ detGenerateM (Uniform _) = error "tried to detGenerate from random atom"
 detGenerateM (Normal _) = error "tried to detGenerate from random atom"
 detGenerateM (Constant _ x) = return $ x
 detGenerateM (Null _) = return $ VList []
-detGenerateM (TNull _) = return $ VTuple []
 detGenerateM (Cons _ hd tl) = do
   vs <- detGenerateM tl
   let (VList xs) = vs
   hs <- detGenerateM hd
   return $ VList (hs: xs)
-detGenerateM (TCons _ hd tl) = do
-  vs <- detGenerateM tl
-  let (VTuple xs) = vs
-  hs <- detGenerateM hd
-  return $ VTuple (hs: xs)
+detGenerateM (TCons _ t1 t2) = do
+  v1 <- detGenerateM t1
+  v2 <- detGenerateM t2
+  return $ VTuple v1 v2
 detGenerateM (Call t name) = do
   env <- get
   let Just expr = lookup name (global_funcs env)
@@ -163,7 +161,6 @@ generate a b c args (MultF _ left right) = do
     (VFloat l, VFloat r) -> return $ VFloat (l * r)
     _ -> error "Type error"
 generate _ _ _ args (Null _) = return $ VList []
-generate _ _ _ args (TNull _) = return $ VTuple []
 generate globalEnv env thetas args (Cons _ hd tl) = do
   ls <- generate globalEnv env thetas args tl
   case ls of
@@ -171,13 +168,10 @@ generate globalEnv env thetas args (Cons _ hd tl) = do
       x <- generate globalEnv env thetas args hd
       return $ VList (x : xs)
     _ -> error "type error in list cons"
-generate globalEnv env thetas args (TCons _ hd tl) = do
-  ls <- generate globalEnv env thetas args tl
-  case ls of
-    VTuple xs -> do
-      x <- generate globalEnv env thetas args hd
-      return $ VTuple (x : xs)
-    _ -> error "type error in list cons"
+generate globalEnv env thetas args (TCons _ t1 t2) = do
+  v1 <- generate globalEnv env thetas args t1
+  v2 <- generate globalEnv env thetas args t2
+  return $ VTuple v1 v2
 --Call leaves function context, pass GlobalEnv to ensure env is cleaned up.
 generate globalEnv env thetas args (Call t name) = generate globalEnv globalEnv thetas args expr
   where Just expr = lookup name globalEnv
@@ -302,8 +296,6 @@ likelihoodM ee@(IfThenElse t cond left right) val =
 likelihoodM (Null _) (VList []) = return $ DiscreteProbability 1
 likelihoodM (Null _) (VList [VAnyList])  = return $ DiscreteProbability 1
 likelihoodM (Null _) _ = return $ DiscreteProbability 0
-likelihoodM (TNull _) (VTuple []) = return $  DiscreteProbability 1
-likelihoodM (TNull _) _ = return $ DiscreteProbability 0
 likelihoodM (Cons _ _ _) (VList [VAnyList])  = return $  DiscreteProbability 1
 likelihoodM (Cons _ _ _) (VList []) = return $ DiscreteProbability 0
 likelihoodM e@(Cons _ _ _) v = throwError $ MismatchedValue v e
@@ -311,10 +303,9 @@ likelihoodM (Cons _ hd tl) (VList (x:xs)) = do
     fstP <- likelihoodM hd x
     sndP <- likelihoodM tl $ VList xs
     return (pAnd fstP sndP)
-likelihoodM (TCons _ _ _) (VTuple []) = return $ DiscreteProbability 0
-likelihoodM (TCons _ hd tl) (VTuple (x:xs)) = do
-   fstP <- likelihoodM hd x
-   sndP <- likelihoodM tl $ VTuple xs
+likelihoodM (TCons _ t1 t2) (VTuple x1 x2) = do
+   fstP <- likelihoodM t1 x1
+   sndP <- likelihoodM t2 x2
    return $ pAnd fstP sndP
 likelihoodM inj@(InjF ti name params expr) val =
   do

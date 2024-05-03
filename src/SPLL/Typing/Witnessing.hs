@@ -83,7 +83,6 @@ addWitnesses witVars (GreaterThan ti e1 e2) =
 addWitnesses _ (Call ti f) =
   Call (createWTypeInfo ti) f
 addWitnesses _ (Null ti) = Null (createWTypeInfo ti)
-addWitnesses _ (TNull ti) = TNull (createWTypeInfo ti)
 addWitnesses witVars (Cons (TypeInfo rt pt) fst rst) = Cons (TypeInfoWit rt pt comp) witFst witRst
   where witFst = addWitnesses witVars fst
         witRst = addWitnesses witVars rst

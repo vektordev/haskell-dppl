@@ -22,6 +22,10 @@ normalProg = Program [] (Normal ())
 uniformProgPlus :: Program () Double
 uniformProgPlus = Program [] (MultF () (Uniform ()) (Constant () (VFloat (-0.5))))
 
+
+simpleTuple :: Expr () a
+simpleTuple = TCons () (Normal ()) (Uniform ())
+
 flipCoin :: Expr () Double
 flipCoin = GreaterThan () (Uniform ()) (Constant () (VFloat 0.5))
 variableLength :: Expr () a
@@ -103,12 +107,6 @@ testLetPot = Program [] (LetIn () "x" (PlusF () (ThetaI () 0) (Normal ())) (InjF
 testList :: Program () Double
 testList = Program [] (Cons () (PlusF () (ThetaI () 0) (Normal ())) (Cons () (Normal ()) (Null ())))
 
--- If theta0 >= uniform then (True, normal) else (False, theta1 + normal)
-testTuple :: Program () Double
-testTuple = Program [] (IfThenElse () (GreaterThan () (Uniform ()) (ThetaI () 0))
-          (TCons () (Constant () (VBool True)) (TCons () (Normal ()) (TNull ())))
-          (TCons () (Constant () (VBool False)) (TCons () (PlusF () (Normal ()) (ThetaI () 1)) (TNull ())))
-          )
 testInjFNot :: Program () Double
 testInjFNot  = Program [] (IfThenElse () (InjF () "not" [] (GreaterThan () (ThetaI () 0)(Uniform ())))
                             (Normal ()) 

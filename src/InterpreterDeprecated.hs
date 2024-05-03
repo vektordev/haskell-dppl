@@ -152,11 +152,9 @@ detGenerate _ _ (Uniform _) = error "tried to detGenerate from random atom"
 detGenerate _ _ (Normal _) = error "tried to detGenerate from random atom"
 detGenerate _ _ (Constant _ x) = x
 detGenerate _ _ (Null _) = VList []
-detGenerate _ _ (TNull _) = VTuple []
 detGenerate env thetas (Cons _ hd tl) = VList (detGenerate env thetas hd : xs)
   where VList xs = detGenerate env thetas tl
-detGenerate env thetas (TCons _ hd tl) = VTuple (detGenerate env thetas hd : xs)
-  where VList xs = detGenerate env thetas tl
+-- Deleted Tuple logic, does not work, will not fix
 detGenerate env thetas (Call t name) = detGenerate env thetas expr
   where Just expr = lookup name env
 detGenerate env thetas (Var t name) = detGenerate env thetas expr
@@ -273,16 +271,12 @@ likelihood globalEnv env thetas (PlusF _ left right) branchMap val
 
 likelihood _ _ _ (Null _) _ (VList []) = DiscreteProbability 1
 likelihood _ _ _ (Null _) _ _ = DiscreteProbability 0
-likelihood _ _ _ (TNull _) _ (VTuple []) = DiscreteProbability 1
-likelihood _ _ _ (TNull _) _ _ = DiscreteProbability 0
 likelihood _ _ _ (Cons _ _ _) _ (VList []) = DiscreteProbability 0
 likelihood globalEnv env thetas (Cons _ hd tl) branchMap (VList (x:xs)) =
         (pAnd (likelihood globalEnv env thetas hd branchMap x) (likelihood globalEnv env thetas tl branchMap $ VList xs) )
 
-likelihood _ _ _ (TCons _ _ _) _ (VTuple []) = DiscreteProbability 0
-likelihood globalEnv env thetas (TCons _ hd tl) branchMap (VTuple (x:xs)) =
-  pAnd (likelihood globalEnv env thetas hd branchMap x) (likelihood globalEnv env thetas tl branchMap $ VTuple xs)
 
+--Deleted Tuple logic from here, does not work, will not fix
 likelihood globalEnv env thetas (Call _ name) branchMap val = likelihood globalEnv globalEnv thetas expr branchMap val
   where Just expr = lookup name env
 likelihood globalEnv env thetas (Var _ name) branchMap val = likelihood globalEnv globalEnv thetas expr branchMap val
