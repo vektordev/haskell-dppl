@@ -69,11 +69,19 @@ generateFunctions :: (Show a) => [(String, IRExpr a)] -> [String]
 --contrary to the julia backend, we want to aggregate gen and prob into one classes. Ugly implementation, but it'll do for now.
 generateFunctions defs =
   let
-    getName str = if "_prob" `isSuffixOf` str then iterate init str !! 5 else iterate init str !! 4
+    getName str
+      | "_prob" `isSuffixOf` str = iterate init str !! 5
+      | "_integ" `isSuffixOf` str = iterate init str !! 6
+      | otherwise = iterate init str !! 4
     names = nub $ map (getName . fst) defs
-    lut = [(name ++ "_gen", onHead toLower name ++ ".generate") | name <- names] ++ [(name ++ "_prob", onHead toLower name ++ ".forward") | name <- names] ++ stdLib
-    getDef name suffix = irMap (replaceCalls lut) $ snd $ fromJust $ find (\def -> fst def == (name ++ suffix)) defs
-    groups = [(name, getDef name "_gen", getDef name "_prob") | name <- names]
+    lut = [(name ++ "_gen", onHead toLower name ++ ".generate") | name <- names]
+       ++ [(name ++ "_prob", onHead toLower name ++ ".forward") | name <- names]
+       ++ [(name ++ "_integ", onHead toLower name ++ ".integral") | name <- names] ++ stdLib
+    findDef name suffix = find (\def -> fst def == (name ++ suffix)) defs
+    getDef name suffix = case findDef name suffix of
+      Nothing -> Nothing
+      Just a -> Just $ irMap (replaceCalls lut) $ snd a
+    groups = [(name, getDef name "_gen", getDef name "_prob", getDef name "_integ")| name <- names]
   in
     concatMap generateClass groups
 
@@ -84,12 +92,17 @@ replaceCalls :: [(String, String)] -> IRExpr a -> IRExpr a
 replaceCalls lut (IRCall name args) = IRCall (fromMaybe name $ lookup name lut) args
 replaceCalls lut other = other
 
-generateClass :: (Show a ) => (String,  IRExpr a, IRExpr a) -> [String]
-generateClass (name, gen, prob) = let
-  p = generateFunction ("forward", prob)
-  g = generateFunction ("generate", gen)
+generateClass :: (Show a ) => (String, Maybe (IRExpr a), Maybe (IRExpr a), Maybe (IRExpr a)) -> [String]
+generateClass (name, gen, prob, integ) = let
+  funcStringFromMaybe name func = case func of
+    Just a -> generateFunction (name, a)
+    Nothing -> []
+  i = funcStringFromMaybe "integrate" integ
+  p = funcStringFromMaybe "forward" prob
+  g = funcStringFromMaybe "generate" gen
   initLine = "class " ++ onHead toUpper name ++ "(Module):"
-  in [initLine] ++ indentOnce p ++ [""] ++ indentOnce g
+  funcs = i ++ [""] ++ p ++ [""] ++ g
+  in [initLine] ++ indentOnce funcs
 
 generateFunction :: (Show a) => (String, IRExpr a) -> [String]
 generateFunction (name, expr) = let
@@ -142,6 +155,10 @@ generateCode (IRVar var) bindto = [bindto ++ var]
 generateCode (IRDensity dist subexpr) bindto = let
   subexprCode = generateCode subexpr ""
   block = wrap (bindto ++ "density_" ++ show dist ++ "(") subexprCode ")"
+  in block
+generateCode (IRCumulative dist subexpr) bindto = let
+  subexprCode = generateCode subexpr ""
+  block = wrap (bindto ++ "cumulative_" ++ show dist ++ "(") subexprCode ")"
   in block
 --sum $ map (\name -> subexpr name) enumRange
 generateCode (IREnumSum name enumRange subexpr) bindto = let

@@ -6,13 +6,14 @@ import SPLL.Lang (Value(..), Value)
 
 import Control.Monad.Random
 import Statistics.Distribution.Normal (normalDistr)
-import Debug.Trace (trace)
+import Data.Foldable
+import Data.Number.Erf
 
 type IRThetas a = [a]
 type IREnv a = [(String, IRExpr a)]
 
-generate :: (Ord a, Fractional a, Show a, Eq a, Floating a, RandomGen g, Random a) => IREnv a -> IREnv a -> IRThetas a -> [IRExpr a]-> IRExpr a -> Rand g (Value a)
-generate globalEnv env thetas args expr | trace (show expr) False = undefined
+generate :: (Ord a, Fractional a, Show a, Eq a, Floating a, RandomGen g, Random a, Erf a) => IREnv a -> IREnv a -> IRThetas a -> [IRExpr a]-> IRExpr a -> Rand g (Value a)
+--generate globalEnv env thetas args expr | trace (show expr) False = undefined
 generate globalEnv env thetas args (IRIf cond thenCase elseCase) = do
   condVal <- generate globalEnv env thetas args cond
   case condVal of
@@ -107,6 +108,9 @@ generate globalEnv env thetas args (IRTail listExpr) = do
 generate globalEnv env thetas args (IRDensity dist expr) = do
   x <- generate globalEnv env thetas args expr
   irPDF dist x
+generate globalEnv env thetas args (IRCumulative dist expr) = do
+  x <- generate globalEnv env thetas args expr
+  irCDF dist x
 generate globalEnv env thetas args (IRSample dist) = 
   case dist of
     IRUniform -> do
@@ -129,14 +133,31 @@ generate globalEnv env thetas args (IRCall name callArgs) = generate globalEnv g
 generate globalEnv env thetas (arg:args) (IRLambda name expr) = generate globalEnv ((name, arg):env) thetas args expr
 generate globalEnv env thetas [] (IRLambda name expr) = error "No args provided to lambda"
 --TODO: Fehler bei args für nicht lambda
-generate globalEnv env thetas args (IREnumSum varname val expr) = error "Not yet implemented"  --TODO
+generate globalEnv env thetas args (IREnumSum varname (VInt iVal) expr) = do    --TODO Untested
+  foldrM (\i acc -> do
+    x <- generate globalEnv env thetas (IRConst (VInt i):args) (IRLambda varname expr)
+    return $ sumValues x acc
+    ) (VFloat 0) range
+  where range = enumFromTo 0 (iVal-1)
+        sumValues = \(VFloat a) (VFloat b) -> VFloat $a+b
 generate globalEnv env thetas args (IREvalNN varname expr) = error "EvalNN cannot be interpreted on the IR. Please use PyTorch or Julia" --TODO
-generate globalEnv env thetas args (IRIndex expr index) = error "Not yet implemented"  --TODO
-generate globalEnv env thetas args (IRReturning expr) = error "Not yet implemented"  --TODO
+generate globalEnv env thetas args (IRIndex lstExpr idxExpr) = do 
+  lst <- generate env globalEnv thetas args lstExpr
+  idx <- generate env globalEnv thetas args idxExpr
+  case lst of
+    VList l -> case idx of
+      VInt i -> return $ l!!i
+      _ -> error "Index must be an integer"
+    _ -> error "Expression must be a list"
+generate globalEnv env thetas args (IRReturning expr) = generate globalEnv env thetas args expr
 
-irPDF :: (Ord a, Fractional a, Show a, Eq a, Floating a, Random a) => Distribution -> Value a -> Rand g (Value a)
+irPDF :: (Ord a, Fractional a, Show a, Eq a, Floating a, Random a, Erf a) => Distribution -> Value a -> Rand g (Value a)
 irPDF IRUniform (VFloat x) = if x >= 0 && x <= 1 then return $ VFloat 1 else return $ VFloat 0
 irPDF IRNormal (VFloat x) = return $ VFloat ((1 / sqrt (2 * pi)) * exp (-0.5 * x * x))
 irPDF expr _ = error "Expression must be the density of a valid distribution"
+
+irCDF :: (Ord a, Fractional a, Show a, Eq a, Floating a, Random a, Erf a) => Distribution -> Value a -> Rand g (Value a)
+irCDF IRUniform (VFloat x) = return $ VFloat $ if x < 0 then 0 else if x > 1 then 1 else x
+irCDF IRNormal (VFloat x) = return $ VFloat $ (1/2)*(1 + erf(x/sqrt(2)))
   
   

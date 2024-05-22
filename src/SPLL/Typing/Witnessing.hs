@@ -61,7 +61,9 @@ addWitnesses witVars (MultI ti expr1 expr2)
       (TypeInfoWit _ pt2 wit2) = getTypeInfo witExpr2
       witExpr1 = addWitnesses witVars expr1
       witExpr2 = addWitnesses witVars expr2
-
+addWitnesses witVars (NegF (TypeInfo rt pt) f) = NegF (TypeInfoWit rt pt fVars) witF
+  where witF = addWitnesses witVars f
+        (TypeInfoWit _ _ fVars) = getTypeInfo witF
 addWitnesses witVars (LetIn ti@(TypeInfo _ pt) var_name decl expr) 
   | ptDecl == Deterministic = LetIn tiWitNoVar var_name witDecl witExpr
   | var_name `elem` getWitsW witExpr = LetIn tiWitNoVar var_name witDecl (addWitnesses (Set.insert var_name witVars) expr)

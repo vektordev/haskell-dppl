@@ -382,12 +382,11 @@ close env cons ty tex = (cons', DScheme alph consRes  resType', tex)
         (consRes, resType', _) = if isResolved then (cons', resType, emptySubst) else
                    solveCyclicConstraints cons' resType emptySubst
 closeProg :: TEnv -> [DConstraint] -> PType -> TypedProg a -> ([DConstraint], DScheme, TypedProg a )
-closeProg env cons ty tp = trace (show cons ++ show ty ++ show su3  ++ show isResolved)
-                                    (cons', DScheme alph consRes  resType', apply finalSubst tp)
+closeProg env cons ty tp = (cons', DScheme alph consRes  resType', apply finalSubst tp)
   where alph = Set.toList $ Set.difference (Set.union (ftv cons') (ftv resType)) (ftv env)
         (cons', resType, isResolved, su) = resolveStep cons ty
-        (consRes, resType', su2) = trace (show cons' ++ show resType) (if isResolved then (cons', resType, emptySubst) else
-                   solveCyclicConstraints cons' resType emptySubst)
+        (consRes, resType', su2) = if isResolved then (cons', resType, emptySubst) else
+                   solveCyclicConstraints cons' resType emptySubst
         -- after cyclic constraints are resolved we needs subst to fill missing ptypes in expr tree
         (_, _, _, su3) = if isResolved then (cons', resType, isResolved, emptySubst) else resolveStep (apply su2 cons) resType
         finalSubst = su `compose` (su2 `compose` su3)
@@ -488,6 +487,12 @@ plusInf = do
    tv2 <- fresh
    tv3 <- fresh
    return (emptySubst, [(tv3, [Left tv1, Left tv2, Right (PlusConstraint (Left tv1) (Left tv2))])], tv1 `PArr` tv2 `PArr` tv3)
+   
+negInf :: Infer (Subst, [DConstraint], PType)
+negInf = do
+  tv1 <- fresh
+  tv2 <- fresh
+  return (emptySubst, [(tv2, [Left tv1])], tv1 `PArr` tv2)
 
 compInf :: Infer (Subst, [DConstraint], PType)
 compInf = do
@@ -572,6 +577,11 @@ infer env expr = case expr of
       (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
       (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
       return (s3, cs3, t3, MultI (setPType ti t3) et1 et2)
+      
+  NegF ti e -> do
+      (s1, cs1, t1) <- negInf
+      (s2, cs2, t2, et) <- applyOpArg env e s1 cs1 t1
+      return (s2, cs2, t2, NegF (setPType ti t2) et)
 
   GreaterThan ti e1 e2 -> do
       (s1, cs1, t1) <- compInf

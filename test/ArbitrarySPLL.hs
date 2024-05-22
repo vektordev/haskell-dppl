@@ -7,8 +7,11 @@ import Test.QuickCheck
 
 import SPLL.Lang
 
---instance (Arbitrary a, Arbitrary t) => Arbitrary (Expr t a) where
---  arbitrary = genExpr
+instance (Arbitrary a, Arbitrary t) => Arbitrary (Expr t a) where
+  arbitrary = genExpr
+  
+instance (Arbitrary a, Arbitrary t) => Arbitrary (Program t a) where
+  arbitrary = genProg
 
 -- Property based testing: Define a Generator for Expr t a and Program t a:
 genExpr :: (Arbitrary t) => Gen (Expr t a)
@@ -40,12 +43,12 @@ exprGens :: (Arbitrary t) => [(Int, [String] -> Int -> Gen (Expr t a))]
 exprGens = [
     (0, mkNormal),
     (0, mkUniform),
-    (0, mkThetaI),
-    (2, mkGreaterThan),
+    --(0, mkThetaI),
+    --(2, mkGreaterThan),
     (2, mkMultF),
-    (2, mkMultI),
+    --(2, mkMultI),
     (2, mkPlusF),
-    (2, mkPlusI),
+    --(2, mkPlusI),
     (3, mkConditional)
   ]
 

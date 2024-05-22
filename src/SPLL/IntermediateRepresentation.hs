@@ -7,6 +7,7 @@ module SPLL.IntermediateRepresentation (
 , Distribution(..)
 , toIRProbability
 , toIRGenerate
+, toIRIntegrate
 , envToIR
 , Varname
 , irMap
@@ -136,6 +137,7 @@ data IRExpr a = IRIf (IRExpr a) (IRExpr a) (IRExpr a)
               | IRTFst (IRExpr a)
               | IRTSnd (IRExpr a)
               | IRDensity Distribution (IRExpr a)
+              | IRCumulative Distribution (IRExpr a)
               | IRSample Distribution
               | IRLetIn Varname (IRExpr a) (IRExpr a)
               | IRVar Varname
@@ -156,9 +158,17 @@ data IRExpr a = IRIf (IRExpr a) (IRExpr a) (IRExpr a)
 -- TODO: How do we deal with top-level lambdas in binding here?
 --  TL-Lambdas are presumably to be treated differently than non-TL, at least as far as prob is concerned.
 envToIR :: (Ord a, Fractional a, Show a, Eq a) => Env (StaticAnnotations a) a -> [(String, IRExpr a)]
-envToIR = concatMap (\(name, binding) -> [
-  (name ++ "_prob", IRLambda "sample" (postProcess $ runSupplyVars (toIRProbability binding (IRVar "sample")))),
-  (name ++ "_gen", postProcess $ toIRGenerate binding)])
+envToIR = concatMap (\(name, binding) ->
+  let (StaticAnnotations _ pType _) = getTypeInfo binding in
+    if pType == Deterministic || pType == Integrate then
+      [(name ++ "_integ", IRLambda "low" (IRLambda "high" (postProcess $ runSupplyVars (toIRIntegrate binding (IRVar "low") (IRVar "high"))))),
+       (name ++ "_prob", IRLambda "sample" (postProcess $ runSupplyVars (toIRProbability binding (IRVar "sample")))),
+       (name ++ "_gen", postProcess $ toIRGenerate binding)]
+    else if pType == Prob then
+      [(name ++ "_prob", IRLambda "sample" (postProcess $ runSupplyVars (toIRProbability binding (IRVar "sample")))),
+       (name ++ "_gen", postProcess $ toIRGenerate binding)]
+    else
+      [(name ++ "_gen", postProcess $ toIRGenerate binding)])
 
 --strip all top-level lambdas and collect the bound names.
 --unwrapTLLambdas :: Expr t a -> ([Varname], Expr t a)
@@ -196,6 +206,7 @@ irMap f x = case x of
   (IRTFst expr) -> f (IRTFst (irMap f expr))
   (IRTSnd expr) -> f (IRTSnd (irMap f expr))
   (IRDensity a expr) -> f (IRDensity a (irMap f expr))
+  (IRCumulative a expr) -> f (IRCumulative a (irMap f expr))
   (IRLetIn name left right) -> f (IRLetIn name (irMap f left) (irMap f right))
   (IRCall name args) -> f (IRCall name (map (irMap f) args))
   (IRLambda name scope) -> f (IRLambda name (irMap f scope))
@@ -230,7 +241,7 @@ evalAll (IRHead expr) =
     then let (VList (_:xs)) = unval expr in IRConst $ VList xs
     else IRHead expr
 evalAll ex@(IRLetIn name val scope)
-  | isSimple val = trace "tracing" $ traceShow ex $ irMap (replace (IRVar name) val) scope
+  | isSimple val = irMap (replace (IRVar name) val) scope
   | scope == IRVar name = val
   | otherwise = ex
 evalAll x = x
@@ -348,6 +359,8 @@ toIRProbability (PlusI (StaticAnnotations TInt _ extras) left right) sample
     var <- mkVariable ""
     rightExpr <- toIRProbability right (IROp OpSub sample (IRVar var))
     return $ IRLetIn var (toIRGenerate left) rightExpr
+toIRProbability (NegF (StaticAnnotations TFloat _ extras) f) sample =
+  toIRProbability f (IRUnaryOp OpNeg sample)
 toIRProbability (ReadNN _ name subexpr) sample = do
   let mkInput = toIRGenerate subexpr
   return $ IRIndex (IREvalNN name mkInput) sample
@@ -383,6 +396,7 @@ toIRGenerate (PlusF _ left right) = IROp OpPlus (toIRGenerate left) (toIRGenerat
 toIRGenerate (PlusI _ left right) = IROp OpPlus (toIRGenerate left) (toIRGenerate right)
 toIRGenerate (MultF _ left right) = IROp OpMult (toIRGenerate left) (toIRGenerate right)
 toIRGenerate (MultI _ left right) = IROp OpMult (toIRGenerate left) (toIRGenerate right)
+toIRGenerate (NegF _ f) = IRUnaryOp OpNeg (toIRGenerate f)
 toIRGenerate (ThetaI _ ix) = IRTheta ix
 toIRGenerate (Constant _ x) = IRConst x
 toIRGenerate (Null _) = IRConst (VList [])
@@ -404,16 +418,35 @@ bindLocal namestring binding inEx = do
 
 toIRIntegrate :: (Show a, Num a) => Expr (StaticAnnotations a) a -> IRExpr a -> IRExpr a -> Supply Int (IRExpr a)
 toIRIntegrate (Uniform (StaticAnnotations _ _ tags)) lower higher = do
-  varlow <- mkVariable "low"
-  varhigh <- mkVariable "high"
-  let x = IRIf
-            (IROp OpOr (IROp OpGreaterThan (IRVar varlow) (IRConst $ VFloat 1)) (IROp OpGreaterThan (IRConst $ VFloat 0) (IRVar varhigh)))
-            (IRConst $ VFloat 0)
-            (IROp OpSub (IRVar varhigh) (IRVar varlow))
-  return
-    (IRLetIn varlow
-      (IRIf (IROp OpGreaterThan (IRConst $ VFloat 0) lower) (IRConst $ VFloat 0) lower)
-      (IRLetIn varhigh
-        (IRIf (IROp OpGreaterThan (IRConst $ VFloat 1) higher) higher (IRConst $ VFloat 1))
-        x))
+  return (IROp OpSub (IRCumulative IRUniform higher) (IRCumulative IRUniform lower))
+toIRIntegrate (Normal StaticAnnotations {}) lower higher = do
+  return (IROp OpSub (IRCumulative IRNormal higher) (IRCumulative IRNormal lower))
+
+toIRIntegrate (MultF (StaticAnnotations _ _ extras) left right) lower higher
+  | extras `hasAlgorithm` "multLeft" = do
+    var <- mkVariable ""
+    rightExpr <- toIRIntegrate right (IROp OpDiv lower (IRVar var)) (IROp OpDiv higher (IRVar var))
+    return $ IRLetIn var (toIRGenerate left)
+      rightExpr
+  | extras `hasAlgorithm` "multRight" = do
+      var <- mkVariable ""
+      leftExpr <- toIRIntegrate left (IROp OpDiv lower (IRVar var)) (IROp OpDiv higher (IRVar var))
+      return $ IRLetIn var (toIRGenerate right)
+        leftExpr
+toIRIntegrate (PlusF (StaticAnnotations _ _ extras) left right) lower higher
+  | extras `hasAlgorithm` "plusLeft" = do
+    var <- mkVariable ""
+    rightExpr <- toIRIntegrate right (IROp OpPlus lower (IRVar var)) (IROp OpDiv higher (IRVar var))
+    return $ IRLetIn var (toIRGenerate left)
+      rightExpr
+  | extras `hasAlgorithm` "plusRight" = do
+      var <- mkVariable ""
+      leftExpr <- toIRIntegrate left (IROp OpPlus lower (IRVar var)) (IROp OpDiv higher (IRVar var))
+      return $ IRLetIn var (toIRGenerate right)
+        leftExpr
+  {--| extras `hasAlgorithm` "multRight" = do
+    var <- mkVariable ""
+    leftExpr <- toIRProbability left (IROp OpDiv sample (IRVar var))
+    return $ IRLetIn var (toIRGenerate right)
+      (IROp OpDiv leftExpr (IRUnaryOp OpAbs (IRVar var)))-}
 toIRIntegrate x low high = error ("found no way to convert to IRIntegrate: " ++ show x)

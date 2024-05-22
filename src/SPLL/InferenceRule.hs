@@ -25,6 +25,7 @@ data ExprStub = StubIfThenElse
               | StubMultI
               | StubPlusF
               | StubPlusI
+              | StubNegF
               | StubNull
               | StubCons
               | StubTCons
@@ -49,6 +50,7 @@ toStub expr = case expr of
   MultI {}       -> StubMultI
   PlusF {}       -> StubPlusF
   PlusI {}       -> StubPlusI
+  NegF {}        -> StubNegF
   (Null _)       -> StubNull
   Cons {}        -> StubCons
   TCons {}       -> StubTCons
@@ -150,6 +152,14 @@ multRight :: InferenceRule
 multRight = mirror2 multLeft
 --multRight = InferenceRule StubMultF [SubExprNIsType 1 Deterministic] "multRight" mostChaotic
 
+negF :: InferenceRule
+negF = InferenceRule
+          StubNegF
+          []
+          "negF"
+          mostChaotic
+          (Forall [] (TFloat `TArrow` TFloat))
+
 enumeratePlusLeft :: InferenceRule
 --TODO: Introduce a new type for intractable results? Does that expand the lattice into a 2d configuration?
 enumeratePlusLeft = InferenceRule
@@ -216,4 +226,4 @@ cons = InferenceRule
          (Forall [TV "a"] ((TVarR $ TV "a") `TArrow` ((ListOf $ TVarR $ TV "a") `TArrow` (ListOf $ TVarR $ TV "a"))))
 
 allAlgorithms :: [InferenceRule]
-allAlgorithms = [ifThenElse, theta, uniform, normal, constant, exprNull, greaterThanLeft, greaterThanRight, greaterThanSigmoid, plusLeft, plusRight, multLeft, multRight, enumeratePlusLeft]
+allAlgorithms = [ifThenElse, theta, uniform, normal, constant, exprNull, greaterThanLeft, greaterThanRight, greaterThanSigmoid, plusLeft, plusRight, multLeft, multRight, negF, enumeratePlusLeft]

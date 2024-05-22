@@ -21,10 +21,20 @@ normalProg :: Program () a
 normalProg = Program [] (Normal ())
 uniformProgPlus :: Program () Double
 uniformProgPlus = Program [] (MultF () (Uniform ()) (Constant () (VFloat (-0.5))))
+normalProgPlus :: Program () Double
+normalProgPlus = Program [] (MultF () (Normal ()) (Constant () (VFloat (-0.5))))
 
+testMultLeft ::Expr () Float
+testMultLeft = MultF ()  (Constant () (VFloat 3.0)) (Normal ())
 
 simpleTuple :: Expr () a
 simpleTuple = TCons () (Normal ()) (Uniform ())
+
+testNeg :: Expr () a
+testNeg = NegF () (Uniform ())
+
+testNegFail :: Expr () a
+testNegFail = NegF () (PlusF () (Uniform ()) (Uniform ()))
 
 flipCoin :: Expr () Double
 flipCoin = GreaterThan () (Uniform ()) (Constant () (VFloat 0.5))
@@ -74,6 +84,8 @@ maybeAdd = Program [("maybeAddOne", IfThenElse ()
                                (Constant () (VFloat 0.0))
                                (PlusF () (Constant () (VFloat 2.0)) (Call () "maybeAddOne")))]
                           (Call () "maybeAddOne")
+                          
+
 nullIf :: Expr () a
 nullIf =  IfThenElse ()
     (GreaterThan () (Uniform ()) (ThetaI () 0))

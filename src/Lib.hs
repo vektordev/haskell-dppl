@@ -144,7 +144,8 @@ someFunc = do--thatGaussThing
 
   putStrLn "--------"
   putStrLn "--------"
-  let env = [("main", simpleTuple)] :: Env () Float
+  let testExpr = testMultLeft
+  let env = [("main", testExpr)] :: Env () Float
   {-let fnc = gaussLists
   let env = [("main", gaussLists)] :: Env () Float
   let prog = Program env fnc
@@ -154,14 +155,14 @@ someFunc = do--thatGaussThing
   PInfer2.showResultsProgDebug (addRTypeInfo $ addEmptyTypeInfo prog)
   putStrLn "done outputting constraints"
   let cmp2 = progToEnv $ addTypeInfo prog-}
-  let prog = Program env simpleTuple
+  let prog = Program [] testExpr
   let cmp = progToEnv $ addTypeInfo prog
   --cmp2 <-  env
   --let cmp = [] ++ [("noiseMNistAdd", mNistNoise), ("expertmodel", expertModelsTyped), ("expertmodelAnnotated", expertAnnotatedTyped), ("mNistAdd", testNN)] :: Env TypeInfo Float
   --let cmp = [("main", testNN)] :: Env TypeInfo Float
   --let cmp = cmp2
   --cmp <- compile env
-  newCodeGenAll cmp
+  trace (show prog) $ newCodeGenAll cmp
   --let env = [("main", testNNUntyped)] :: Env () Float
   --cmp <- compile env triMNist
   --let cmp = [("main", triMNist)] :: Env TypeInfo Float
@@ -382,7 +383,7 @@ testRun experimentName prog thetas = do
   --gradientDiagAt typedEnv [0.2, 0.9] main samples
   -- [VTuple (VFloat 0.9) (VFloat 0.4)]
 expectedValue :: (Floating a, Enum a, Show a) => [(a, a, a)] -> ([a] -> Value a) -> (Value a -> Probability a) -> Probability a
-expectedValue rectangleInfo valF lkF = trace (show lk_sum ++ show (foldl pOr (PDF 0) lks)) (pAnd  (foldl pOr (PDF 0) lks)  (PDF (1/lk_sum)))
+expectedValue rectangleInfo valF lkF = (pAnd  (foldl pOr (PDF 0) lks)  (PDF (1/lk_sum)))
   where createInputs (start, end, stepsize) = [start, start+stepsize .. end]
         inputs = map createInputs rectangleInfo
         inputsS = sequence inputs

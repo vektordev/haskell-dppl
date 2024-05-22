@@ -69,6 +69,7 @@ data Expr x a = IfThenElse x (Expr x a) (Expr x a) (Expr x a)
               | MultI x (Expr x a) (Expr x a)
               | PlusF x (Expr x a) (Expr x a)
               | PlusI x (Expr x a) (Expr x a)
+              | NegF x (Expr x a)
               | Null x
               | Cons x (Expr x a) (Expr x a)
               | Var x String
@@ -221,6 +222,7 @@ exprMap f expr = case expr of
   (MultI t a b) -> MultI t (exprMap f a) (exprMap f b)
   (PlusF t a b) -> PlusF t (exprMap f a) (exprMap f b)
   (PlusI t a b) -> PlusI t (exprMap f a) (exprMap f b)
+  (NegF t a) -> NegF t (exprMap f a)
   (Null t) -> Null t
   (Cons t a b) -> Cons t (exprMap f a) (exprMap f b)
   (TCons t a b) -> TCons t (exprMap f a) (exprMap f b)
@@ -269,6 +271,7 @@ tMapHead f expr = case expr of
   (MultI _ a b) -> MultI (f expr) a b
   (PlusF _ a b) -> PlusF (f expr) a b
   (PlusI _ a b) -> PlusI (f expr) a b
+  (NegF _ a) -> NegF (f expr) a
   (Null _) -> Null (f expr)
   (Cons _ a b) -> Cons (f expr) a b
   (TCons _ a b) -> TCons (f expr) a b
@@ -295,6 +298,7 @@ tMapTails f expr = case expr of
   (MultI t a b) -> MultI t (tMap f a) (tMap f b)
   (PlusF t a b) -> PlusF t (tMap f a) (tMap f b)
   (PlusI t a b) -> PlusI t (tMap f a) (tMap f b)
+  (NegF t a) -> NegF t (tMap f a)
   (Null t) -> Null t
   (Cons t a b) -> Cons t (tMap f a) (tMap f b)
   (TCons t a b) -> TCons t (tMap f a) (tMap f b)
@@ -319,6 +323,7 @@ tMap f expr = case expr of
   (MultI _ a b) -> MultF (f expr) (tMap f a) (tMap f b)
   (PlusF _ a b) -> PlusF (f expr) (tMap f a) (tMap f b)
   (PlusI _ a b) -> PlusI (f expr) (tMap f a) (tMap f b)
+  (NegF _ a) -> NegF (f expr) (tMap f a)
   (Null _) -> Null (f expr)
   (Cons _ a b) -> Cons (f expr) (tMap f a) (tMap f b)
   (TCons _ a b) -> TCons (f expr) (tMap f a) (tMap f b)
@@ -386,6 +391,7 @@ getSubExprs expr = case expr of
   (MultI _ a b) -> [a,b]
   (PlusF _ a b) -> [a,b]
   (PlusI _ a b) -> [a,b]
+  (NegF _ a) -> [a]
   (Null _) -> []
   (Cons _ a b) -> [a,b]
   (TCons _ a b) -> [a,b]
@@ -414,6 +420,7 @@ setSubExprs expr [] = case expr of
 setSubExprs expr [a] = case expr of
   Arg t l n _ -> Arg t l n a
   Lambda t l _ -> Lambda t l a
+  NegF t _ -> NegF t a
   ReadNN t n _ -> ReadNN t n a
   CallArg t n _ -> CallArg t n [a]
   _ -> error "unmatched expr in setSubExprs"
@@ -449,6 +456,7 @@ getTypeInfo expr = case expr of
   (MultI t _ _)         -> t
   (PlusF t _ _)         -> t
   (PlusI t _ _)         -> t
+  (NegF t _)            -> t
   (Null t)              -> t
   (Cons t _ _)          -> t
   (TCons t _ _)         -> t
@@ -520,6 +528,7 @@ printFlat expr = case expr of
   MultI {} -> "MultI"
   PlusF {} -> "PlusF"
   PlusI {} -> "PlusI"
+  NegF {} -> "NegF"
   (Null _) -> "Null"
   Cons {} -> "Cons"
   TCons {} -> "TCons"
@@ -546,6 +555,7 @@ printFlatNoReq expr = case expr of
   MultI {} -> "MultI"
   PlusF {} -> "PlusF"
   PlusI {} -> "PlusI"
+  NegF {} -> "NegF"
   (Null _) -> "Null"
   Cons {} -> "Cons"
   TCons {} -> "TCons"

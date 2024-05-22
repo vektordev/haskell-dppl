@@ -28,6 +28,9 @@ import Control.Exception.Base (SomeException, try)
 import Test.QuickCheck.Monadic (monadicIO, run, assert)
 import Debug.Trace (trace)
 import SPLL.Lang (Value)
+import Control.Monad.Supply
+import Data.Foldable
+import Data.Number.Erf (erf)
 
 -- Generalizing over different compilation stages, we can fit all "this typing is what the compiler would find" cases.
 class Recompilable a where
@@ -78,50 +81,106 @@ prop_CanCompile2 = forAll (elements compilables2) canCompile
 uncompilables :: [Expr () Double]
 uncompilables = [testIntractable]
 
-canCompile :: (Show a) => Program () a -> Property
+canCompile :: (Show a) => Program () a -> Bool
 canCompile e = case infer e of
-  Right _ -> True === True
-  Left err -> counterexample (show err) False
+  Right _ -> True
+  Left _ -> False
 
 interpretables :: [Program () Double]
 interpretables = [uniformProg, uniformProgPlus]
 prop_CanInterpret :: Property
-prop_CanInterpret = forAll (elements interpretables) canInterpret
+prop_CanInterpret = forAll (elements interpretables) (\p -> monadicIO $ run (canInterpret p))
 
-canInterpret :: (Ord a, Fractional a, Show a, Eq a, Floating a, Random a) => Program () a -> Property
-canInterpret p = ioProperty $ do
+canInterpret :: Program () Double -> IO Bool
+canInterpret p = do
   result <- try (evalRandIO (irInterpret p []))
   case result of
-    Left (err :: SomeException) -> return $ counterexample (show err) False
-    Right r -> return $ True === True
+    Left (err :: SomeException) -> return False
+    Right r -> return True
 
-correctProbValues :: (Ord a, Fractional a, Show a, Eq a, Floating a, Random a) => Program () Double -> ([IRExpr a], Value a)
-correctProbValues p | p == uniformProg = ([IRConst $ VFloat 0.5], VFloat 1.0)
-correctProbValues p | p == uniformProgPlus = ([IRConst $ VFloat $ -0.25], VFloat 2.0)
+normalPDF :: Double -> Double
+normalPDF x = (1 / sqrt (2 * pi)) * exp (-0.5 * x * x)
 
-prop_IRInterpretCorrectValues :: Property
-prop_IRInterpretCorrectValues = forAll (elements interpretables) irInterpretCorrectValue
+normalCDF :: Double -> Double
+normalCDF x = (1/2)*(1 + erf(x/sqrt(2)))
+    
+correctProbValuesTestCases :: [(Program () Double, Double, Value Double)]
+correctProbValuesTestCases = [(uniformProg, 0.5, VFloat 1.0),
+                              (normalProg, 0.5, VFloat $ normalPDF 0.5),
+                              (uniformProgPlus, -0.25, VFloat 2),
+                              (normalProgPlus, -1, VFloat (normalPDF (-2) * 2))]
 
-irInterpretCorrectValue :: Program () Double -> Property
-irInterpretCorrectValue p = ioProperty $ do
-  result <- try (evalRandIO (irInterpret p $ fst (correctProbValues p)))
-  case result of
-    Left (err :: SomeException) -> return $ counterexample (show err) False
-    Right v -> return $ v === snd (correctProbValues p)
+correctIntegralValuesTestCases :: [(Program () Double, Double, Double, Value Double)]
+correctIntegralValuesTestCases = [(uniformProg, 0, 1, VFloat 1.0),
+                                  (uniformProg, -1, 2, VFloat 1.0),
+                                  (normalProg, -5, 5, VFloat $ normalCDF 5 - normalCDF (-5)),
+                                  (normalProgPlus, -5, 5, VFloat $ normalCDF (-10) - normalCDF 10)]
 
+checkProbTestCase :: (Program () Double, Double,  Value Double) -> Property
+checkProbTestCase (p, inp, out) = ioProperty $ do
+  actualOutput <- evalRandIO $ irDensity p inp
+  return $ actualOutput == out
 
+prop_CheckProbTestCases :: Property
+prop_CheckProbTestCases = forAll (elements correctProbValuesTestCases) checkProbTestCase
 
-irInterpret :: (Ord a, Fractional a, Show a, Eq a, Floating a, RandomGen g, Random a) => Program () a -> [IRExpr a] -> Rand g (Value a)
+checkIntegralTestCase :: (Program () Double, Double, Double, Value Double) -> Property
+checkIntegralTestCase (p, low, high, out) = ioProperty $ do
+  actualOutput <- evalRandIO $ irIntegral p low high
+  return $ actualOutput == out
+
+prop_CheckIntegralTestCases :: Property
+prop_CheckIntegralTestCases = forAll (elements correctIntegralValuesTestCases) checkIntegralTestCase
+--prop_CheckProbTestCases = foldr (\(p, inp, out) acc -> do
+--  checkProbTestCase p inp out .&&. acc) (True===True) correctProbValuesTestCases
+
+irDensity :: RandomGen g => Program () Double -> Double -> Rand g (Value Double)
+irDensity p sample = IRInterpreter.generate [] [] [] [] irExpr
+  where irExpr = runSupply (toIRProbability main (IRConst $ VFloat sample)) (+1) 1
+        Just main = lookup "main" annotated
+        annotated = map (\(a,b) -> (a, annotate b)) env
+        env = progToEnv typedProg
+        typedProg = addTypeInfo p
+
+irIntegral :: RandomGen g => Program () Double -> Double -> Double -> Rand g (Value Double)
+irIntegral p low high = IRInterpreter.generate [] [] [] [] irExpr
+  where irExpr = runSupply (toIRIntegrate main (IRConst $ VFloat low) (IRConst $ VFloat high)) (+1) 1
+        Just main = lookup "main" annotated
+        annotated = map (\(a,b) -> (a, annotate b)) env
+        env = progToEnv typedProg
+        typedProg = addTypeInfo p
+
+irInterpret :: RandomGen g => Program () Double -> [IRExpr Double] -> Rand g (Value Double)
 irInterpret p params = IRInterpreter.generate irEnv irEnv [] params main
   where Just main = lookup "main_prob" irEnv
         irEnv = envToIR annotated
         annotated = map (\(a,b) -> (a, annotate b)) env
         env = progToEnv typedProg
-        wit = addWitnessesProg typedProg
         typedProg = addTypeInfo p
 
 progToIREnv ::(Ord a, Fractional a, Show a, Eq a, Random a) => Program () a -> [(String, IRExpr a)]
 progToIREnv p = envToIR $ map (\(a,b) -> (a, annotate b)) $ progToEnv $ addTypeInfo p
+
+prop_CompilablesInterpretable :: Program () Double -> Property
+prop_CompilablesInterpretable prog = ioProperty $ do 
+  ci <- canInterpret prog
+  return $ canCompile prog ==> ci
+
+langDensity :: Program () Double -> Double -> Value Double
+langDensity p sample = case Interpreter.runInferL [] witExpr [] (VFloat sample) of
+  PDF prob -> VFloat prob
+  DiscreteProbability prob -> VFloat prob
+  where Program _ witExpr = addWitnessesProg typedProg
+        typedProg = addTypeInfo p
+
+{-prop_interpretersEqualDensity :: Program () Double -> Double -> Property
+prop_interpretersEqualDensity p sample = do
+  let compilable = canCompile p
+  if compilable then ioProperty $ do
+      irValue <- evalRandIO $ irDensity p sample
+      return $ irValue == langDensity p sample
+  else
+    property Discard -}
 
 --testCompile :: Expr () a -> Property
 --testCompile e = addWitnessesProg $ addTypeInfo $ makeMain e

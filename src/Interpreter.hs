@@ -527,7 +527,7 @@ integrate (Uniform t) (Limits low high)
       VFloat x -> x
       _ -> error "unexpected type-error in RT:Integrate"
 integrate (Normal t) (Limits low high)
- | trace (show low ++ show high) (checkLimits (Limits low high)) =
+ | (checkLimits (Limits low high)) =
    case high of
      Nothing -> 1 - unwrap_cdf low
      (Just sth) -> unwrap_cdf high - unwrap_cdf low

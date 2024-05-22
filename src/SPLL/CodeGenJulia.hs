@@ -114,6 +114,14 @@ generateCode (IRDensity dist subexpr) = let
   in if length subexprCode > 1
     then [l1] ++ center ++ [l3]
     else ["density_" ++ show dist ++ "(" ++ spicyHead subexprCode ++ ")"]
+generateCode (IRCumulative dist subexpr) = let
+  subexprCode = generateCode subexpr
+  l1 = "cumulative_" ++ show dist ++ "(" ++ spicyHead subexprCode
+  center = tail $ init subexprCode
+  l3 = last subexprCode ++ ")"
+  in if length subexprCode > 1
+    then [l1] ++ center ++ [l3]
+    else ["cumulative_" ++ show dist ++ "(" ++ spicyHead subexprCode ++ ")"]
 --sum $ map (\name -> subexpr name) enumRange
 generateCode (IREnumSum name enumRange subexpr) = let
   function = wrap ("sum(map((" ++ name ++ " -> ") (generateCode subexpr) ("), " ++ juliaVal enumRange ++ "))")
