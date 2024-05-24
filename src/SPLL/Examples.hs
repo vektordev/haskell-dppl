@@ -19,10 +19,14 @@ uniformProg :: Program () a
 uniformProg = Program [] (Uniform ())
 normalProg :: Program () a
 normalProg = Program [] (Normal ())
+uniformProgMult :: Program () Double
+uniformProgMult = Program [] (MultF () (Uniform ()) (Constant () (VFloat (-0.5))))
+normalProgMult :: Program () Double
+normalProgMult = Program [] (MultF () (Normal ()) (Constant () (VFloat (-0.5))))
 uniformProgPlus :: Program () Double
-uniformProgPlus = Program [] (MultF () (Uniform ()) (Constant () (VFloat (-0.5))))
-normalProgPlus :: Program () Double
-normalProgPlus = Program [] (MultF () (Normal ()) (Constant () (VFloat (-0.5))))
+uniformProgPlus = Program [] (PlusF () (Uniform ()) (Constant () (VFloat 4)))
+uniformNegPlus :: Program () Double
+uniformNegPlus = Program [] (NegF () (PlusF () (Uniform ()) (Constant () (VFloat 4))))
 
 testMultLeft ::Expr () Float
 testMultLeft = MultF ()  (Constant () (VFloat 3.0)) (Normal ())
@@ -117,7 +121,7 @@ testLetNonInvert = Program [] (LetIn () "x" (PlusF () (ThetaI () 0) (Normal ()))
 testLetPot :: Program () Double
 testLetPot = Program [] (LetIn () "x" (PlusF () (ThetaI () 0) (Normal ())) (InjF () "mult" [ThetaI () 1] (Var () "x")))
 testList :: Program () Double
-testList = Program [] (Cons () (PlusF () (ThetaI () 0) (Normal ())) (Cons () (Normal ()) (Null ())))
+testList = Program [] (Cons () (MultF () (Constant () (VFloat 0.5)) (Uniform ())) (Cons () (Normal ()) (Null ())))
 
 testInjFNot :: Program () Double
 testInjFNot  = Program [] (IfThenElse () (InjF () "not" [] (GreaterThan () (ThetaI () 0)(Uniform ())))

@@ -61,6 +61,12 @@ generate globalEnv env thetas args (IROp OpOr a b) = do
   case (aVal, bVal) of
         (VBool af, VBool bf) -> return $ VBool (af || bf)
         _ -> error "Type error: Or can only evaluate on two booleans"
+generate globalEnv env thetas args (IROp OpAnd a b) = do
+  aVal <- generate globalEnv env thetas args a
+  bVal <- generate globalEnv env thetas args b
+  case (aVal, bVal) of
+        (VBool af, VBool bf) -> return $ VBool (af && bf)
+        _ -> error "Type error: Or can only evaluate on two booleans"
 generate globalEnv env thetas args (IROp OpEq a b) = do
   aVal <- generate globalEnv env thetas args a
   bVal <- generate globalEnv env thetas args b
@@ -68,6 +74,7 @@ generate globalEnv env thetas args (IROp OpEq a b) = do
     (VBool af, VBool bf) -> return $ VBool (af == bf)
     (VFloat af, VFloat bf) -> return $ VBool (af == bf)
     (VInt af, VInt bf) -> return $ VBool (af == bf)
+    (VList af, VList bf) -> return $ VBool (af == bf)
     _ -> error "Type error: Equals can only evaluate on two values"
 generate globalEnv env thetas args (IRUnaryOp OpNot a) = do
   aVal <- generate globalEnv env thetas args a

@@ -115,6 +115,7 @@ data Operand = OpPlus
              | OpDiv
              | OpSub
              | OpOr
+             | OpAnd
              | OpEq
              deriving (Show, Eq)
 
@@ -416,7 +417,7 @@ bindLocal namestring binding inEx = do
   varName <- mkVariable namestring
   return $ IRLetIn varName binding inEx
 
-toIRIntegrate :: (Show a, Num a) => Expr (StaticAnnotations a) a -> IRExpr a -> IRExpr a -> Supply Int (IRExpr a)
+toIRIntegrate :: (Show a, Num a, Fractional a) => Expr (StaticAnnotations a) a -> IRExpr a -> IRExpr a -> Supply Int (IRExpr a)
 toIRIntegrate (Uniform (StaticAnnotations _ _ tags)) lower higher = do
   return (IROp OpSub (IRCumulative IRUniform higher) (IRCumulative IRUniform lower))
 toIRIntegrate (Normal StaticAnnotations {}) lower higher = do
@@ -436,17 +437,33 @@ toIRIntegrate (MultF (StaticAnnotations _ _ extras) left right) lower higher
 toIRIntegrate (PlusF (StaticAnnotations _ _ extras) left right) lower higher
   | extras `hasAlgorithm` "plusLeft" = do
     var <- mkVariable ""
-    rightExpr <- toIRIntegrate right (IROp OpPlus lower (IRVar var)) (IROp OpDiv higher (IRVar var))
+    rightExpr <- toIRIntegrate right (IROp OpSub lower (IRVar var)) (IROp OpSub higher (IRVar var))
     return $ IRLetIn var (toIRGenerate left)
       rightExpr
   | extras `hasAlgorithm` "plusRight" = do
       var <- mkVariable ""
-      leftExpr <- toIRIntegrate left (IROp OpPlus lower (IRVar var)) (IROp OpDiv higher (IRVar var))
+      leftExpr <- toIRIntegrate left (IROp OpSub lower (IRVar var)) (IROp OpSub higher (IRVar var))
       return $ IRLetIn var (toIRGenerate right)
         leftExpr
-  {--| extras `hasAlgorithm` "multRight" = do
-    var <- mkVariable ""
-    leftExpr <- toIRProbability left (IROp OpDiv sample (IRVar var))
-    return $ IRLetIn var (toIRGenerate right)
-      (IROp OpDiv leftExpr (IRUnaryOp OpAbs (IRVar var)))-}
+toIRIntegrate (NegF _ a) low high = do
+  toIRIntegrate a (IRUnaryOp OpNeg high) (IRUnaryOp OpNeg low)
+toIRIntegrate (TCons _ t1Expr t2Expr) low high = do
+  t1P <- toIRIntegrate t1Expr (IRTFst low) (IRTFst high)
+  t2P <- toIRIntegrate t2Expr (IRTSnd low) (IRTSnd high)
+  return (IROp OpMult t1P t2P) --TODO Check this
+toIRIntegrate (IfThenElse _ cond left right) low high = do
+  var_cond_p <- mkVariable "cond"
+  condExpr <- toIRProbability cond (IRConst (VBool True))
+  leftExpr <- toIRIntegrate left low high
+  rightExpr <- toIRIntegrate right low high
+  return $ IRLetIn var_cond_p condExpr
+    (IROp OpPlus
+      (IROp OpMult (IRVar var_cond_p) leftExpr)
+      (IROp OpMult (IROp OpSub (IRConst $ VFloat (1.0)) (IRVar var_cond_p) ) rightExpr))
+toIRIntegrate (Cons _ hdExpr tlExpr) low high = do
+  headP <- toIRIntegrate hdExpr (IRHead low) (IRHead high)
+  tailP <- toIRIntegrate tlExpr (IRTail low) (IRTail high)
+  return (IRIf (IROp OpOr (IROp OpEq low (IRConst $ VList [])) (IROp OpEq high (IRConst $ VList []))) (IRConst $ VFloat 0) (IROp OpMult headP tailP))
+toIRIntegrate (Null _) low high = do
+  indicator (IROp OpAnd (IROp OpEq low (IRConst $ VList [])) (IROp OpEq high (IRConst $ VList [])))
 toIRIntegrate x low high = error ("found no way to convert to IRIntegrate: " ++ show x)

@@ -42,6 +42,7 @@ juliaOps OpGreaterThan = ">="
 juliaOps OpDiv = "/"
 juliaOps OpSub = "-"
 juliaOps OpOr = "||"
+juliaOps OpOr = "&&"
 juliaOps OpEq = "=="
 
 juliaVal :: (Show a) => Value a -> String

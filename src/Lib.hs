@@ -118,7 +118,7 @@ newCodeGen tExpr = do
   let prob = generateCode irProb ""
   putStrLn $ unlines prob-}
 
-newCodeGenAll :: Env TypeInfo Float -> IO ()
+newCodeGenAll :: (Show a, Ord a, Fractional a) => Env TypeInfo a -> IO ()
 newCodeGenAll env = do
   pPrint env
   let annotated = map (\(a,b) -> (a, SPLL.Analysis.annotate b)) env
@@ -144,8 +144,8 @@ someFunc = do--thatGaussThing
 
   putStrLn "--------"
   putStrLn "--------"
-  let testExpr = testMultLeft
-  let env = [("main", testExpr)] :: Env () Float
+  --let testExpr = testList
+  --let env = [("main", testExpr)] :: Env () Float
   {-let fnc = gaussLists
   let env = [("main", gaussLists)] :: Env () Float
   let prog = Program env fnc
@@ -155,7 +155,7 @@ someFunc = do--thatGaussThing
   PInfer2.showResultsProgDebug (addRTypeInfo $ addEmptyTypeInfo prog)
   putStrLn "done outputting constraints"
   let cmp2 = progToEnv $ addTypeInfo prog-}
-  let prog = Program [] testExpr
+  let prog = testList
   let cmp = progToEnv $ addTypeInfo prog
   --cmp2 <-  env
   --let cmp = [] ++ [("noiseMNistAdd", mNistNoise), ("expertmodel", expertModelsTyped), ("expertmodelAnnotated", expertAnnotatedTyped), ("mNistAdd", testNN)] :: Env TypeInfo Float

@@ -74,7 +74,7 @@ prop_CanCompile :: Property
 prop_CanCompile = forAll (elements $ map makeMain compilables) canCompile
 
 compilables2 :: [Program () Double]
-compilables2 = [uniformProg, normalProg, uniformProgPlus]
+compilables2 = [uniformProg, normalProg, uniformProgMult]
 prop_CanCompile2 :: Property
 prop_CanCompile2 = forAll (elements compilables2) canCompile
 
@@ -87,7 +87,7 @@ canCompile e = case infer e of
   Left _ -> False
 
 interpretables :: [Program () Double]
-interpretables = [uniformProg, uniformProgPlus]
+interpretables = [uniformProg, uniformProgMult]
 prop_CanInterpret :: Property
 prop_CanInterpret = forAll (elements interpretables) (\p -> monadicIO $ run (canInterpret p))
 
@@ -104,29 +104,34 @@ normalPDF x = (1 / sqrt (2 * pi)) * exp (-0.5 * x * x)
 normalCDF :: Double -> Double
 normalCDF x = (1/2)*(1 + erf(x/sqrt(2)))
     
-correctProbValuesTestCases :: [(Program () Double, Double, Value Double)]
-correctProbValuesTestCases = [(uniformProg, 0.5, VFloat 1.0),
-                              (normalProg, 0.5, VFloat $ normalPDF 0.5),
-                              (uniformProgPlus, -0.25, VFloat 2),
-                              (normalProgPlus, -1, VFloat (normalPDF (-2) * 2))]
+correctProbValuesTestCases :: [(Program () Double, Value Double, [Double], Value Double)]
+correctProbValuesTestCases = [(uniformProg, VFloat 0.5, [], VFloat 1.0),
+                              (normalProg, VFloat 0.5, [], VFloat $ normalPDF 0.5),
+                              (uniformProgMult, VFloat (-0.25), [], VFloat 2),
+                              (normalProgMult, VFloat (-1), [], VFloat (normalPDF (-2) * 2)),
+                              (uniformNegPlus, VFloat (-4.5), [], VFloat 1),
+                              (testList, VList [VFloat 0.25, VFloat 0], [], VFloat $ normalPDF 0 * 2)]
 
-correctIntegralValuesTestCases :: [(Program () Double, Double, Double, Value Double)]
-correctIntegralValuesTestCases = [(uniformProg, 0, 1, VFloat 1.0),
-                                  (uniformProg, -1, 2, VFloat 1.0),
-                                  (normalProg, -5, 5, VFloat $ normalCDF 5 - normalCDF (-5)),
-                                  (normalProgPlus, -5, 5, VFloat $ normalCDF (-10) - normalCDF 10)]
+correctIntegralValuesTestCases :: [(Program () Double, Value Double, Value Double, [Double], Value Double)]
+correctIntegralValuesTestCases = [(uniformProg, VFloat 0, VFloat 1, [], VFloat 1.0),
+                                  (uniformProg, VFloat  (-1), VFloat 2, [], VFloat 1.0),
+                                  (normalProg, VFloat (-5), VFloat 5, [], VFloat $ normalCDF 5 - normalCDF (-5)),
+                                  (normalProgMult, VFloat (-5), VFloat 5, [], VFloat $ normalCDF (-10) - normalCDF 10),
+                                  (uniformNegPlus, VFloat (-5), VFloat (-4.5), [], VFloat 0.5),
+                                  (uniformProgPlus, VFloat 4, VFloat 4.5, [], VFloat 0.5),
+                                  (testList, VList [VFloat 0, VFloat (-1)], VList [VFloat 0.25, VFloat 1], [], VFloat $ (normalCDF 1 - normalCDF (-1)) * 0.5)]
 
-checkProbTestCase :: (Program () Double, Double,  Value Double) -> Property
-checkProbTestCase (p, inp, out) = ioProperty $ do
-  actualOutput <- evalRandIO $ irDensity p inp
+checkProbTestCase :: (Program () Double, Value Double, [Double], Value Double) -> Property
+checkProbTestCase (p, inp, thetas, out) = ioProperty $ do
+  actualOutput <- evalRandIO $ irDensity p inp thetas
   return $ actualOutput == out
 
 prop_CheckProbTestCases :: Property
 prop_CheckProbTestCases = forAll (elements correctProbValuesTestCases) checkProbTestCase
 
-checkIntegralTestCase :: (Program () Double, Double, Double, Value Double) -> Property
-checkIntegralTestCase (p, low, high, out) = ioProperty $ do
-  actualOutput <- evalRandIO $ irIntegral p low high
+checkIntegralTestCase :: (Program () Double, Value Double, Value Double, [Double], Value Double) -> Property
+checkIntegralTestCase (p, low, high, thetas, out) = ioProperty $ do
+  actualOutput <- evalRandIO $ irIntegral p low high thetas
   return $ actualOutput == out
 
 prop_CheckIntegralTestCases :: Property
@@ -134,17 +139,17 @@ prop_CheckIntegralTestCases = forAll (elements correctIntegralValuesTestCases) c
 --prop_CheckProbTestCases = foldr (\(p, inp, out) acc -> do
 --  checkProbTestCase p inp out .&&. acc) (True===True) correctProbValuesTestCases
 
-irDensity :: RandomGen g => Program () Double -> Double -> Rand g (Value Double)
-irDensity p sample = IRInterpreter.generate [] [] [] [] irExpr
-  where irExpr = runSupply (toIRProbability main (IRConst $ VFloat sample)) (+1) 1
+irDensity :: RandomGen g => Program () Double -> Value Double -> [Double] -> Rand g (Value Double)
+irDensity p sample thetas = IRInterpreter.generate [] [] thetas [] irExpr
+  where irExpr = runSupply (toIRProbability main (IRConst sample)) (+1) 1
         Just main = lookup "main" annotated
         annotated = map (\(a,b) -> (a, annotate b)) env
         env = progToEnv typedProg
         typedProg = addTypeInfo p
 
-irIntegral :: RandomGen g => Program () Double -> Double -> Double -> Rand g (Value Double)
-irIntegral p low high = IRInterpreter.generate [] [] [] [] irExpr
-  where irExpr = runSupply (toIRIntegrate main (IRConst $ VFloat low) (IRConst $ VFloat high)) (+1) 1
+irIntegral :: RandomGen g => Program () Double -> Value Double -> Value Double -> [Double] -> Rand g (Value Double)
+irIntegral p low high thetas = IRInterpreter.generate [] [] thetas [] irExpr
+  where irExpr = runSupply (toIRIntegrate main (IRConst low) (IRConst high)) (+1) 1
         Just main = lookup "main" annotated
         annotated = map (\(a,b) -> (a, annotate b)) env
         env = progToEnv typedProg

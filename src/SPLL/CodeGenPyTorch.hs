@@ -46,6 +46,7 @@ pyOps OpGreaterThan = ">="
 pyOps OpDiv = "/"
 pyOps OpSub = "-"
 pyOps OpOr = "or"
+pyOps OpAnd = "and"
 pyOps OpEq = "=="
 
 pyVal :: (Show a) => Value a -> String
