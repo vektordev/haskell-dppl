@@ -39,6 +39,7 @@ juliaOps :: Operand -> String
 juliaOps OpPlus = "+"
 juliaOps OpMult = "*"
 juliaOps OpGreaterThan = ">="
+juliaOps OpLessThan = "<="
 juliaOps OpDiv = "/"
 juliaOps OpSub = "-"
 juliaOps OpOr = "||"

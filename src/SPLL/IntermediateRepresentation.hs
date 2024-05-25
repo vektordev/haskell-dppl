@@ -112,6 +112,7 @@ type Varname = String
 data Operand = OpPlus
              | OpMult
              | OpGreaterThan
+             | OpLessThan
              | OpDiv
              | OpSub
              | OpOr
@@ -383,6 +384,7 @@ toIRProbability (TCons _ t1Expr t2Expr) sample = do
 toIRProbability (Null _) sample = indicator (IROp OpEq sample (IRConst $ VList []))
 toIRProbability (Constant _ value) sample = indicator (IROp OpEq sample (IRConst value))
 toIRProbability (Call _ name) sample = return $ IRCall (name ++ "_prob") [sample]
+toIRProbability (ThetaI _ t) sample = indicator (IROp OpEq sample (IRTheta t))
 toIRProbability x sample = error ("found no way to convert to IR: " ++ show x)
 
 indicator :: Num a => IRExpr a -> Supply Int (IRExpr a)
@@ -450,7 +452,7 @@ toIRIntegrate (NegF _ a) low high = do
 toIRIntegrate (TCons _ t1Expr t2Expr) low high = do
   t1P <- toIRIntegrate t1Expr (IRTFst low) (IRTFst high)
   t2P <- toIRIntegrate t2Expr (IRTSnd low) (IRTSnd high)
-  return (IROp OpMult t1P t2P) --TODO Check this
+  return (IROp OpMult t1P t2P)
 toIRIntegrate (IfThenElse _ cond left right) low high = do
   var_cond_p <- mkVariable "cond"
   condExpr <- toIRProbability cond (IRConst (VBool True))
@@ -459,11 +461,16 @@ toIRIntegrate (IfThenElse _ cond left right) low high = do
   return $ IRLetIn var_cond_p condExpr
     (IROp OpPlus
       (IROp OpMult (IRVar var_cond_p) leftExpr)
-      (IROp OpMult (IROp OpSub (IRConst $ VFloat (1.0)) (IRVar var_cond_p) ) rightExpr))
+      (IROp OpMult (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var_cond_p) ) rightExpr))
 toIRIntegrate (Cons _ hdExpr tlExpr) low high = do
   headP <- toIRIntegrate hdExpr (IRHead low) (IRHead high)
   tailP <- toIRIntegrate tlExpr (IRTail low) (IRTail high)
   return (IRIf (IROp OpOr (IROp OpEq low (IRConst $ VList [])) (IROp OpEq high (IRConst $ VList []))) (IRConst $ VFloat 0) (IROp OpMult headP tailP))
 toIRIntegrate (Null _) low high = do
   indicator (IROp OpAnd (IROp OpEq low (IRConst $ VList [])) (IROp OpEq high (IRConst $ VList [])))
-toIRIntegrate x low high = error ("found no way to convert to IRIntegrate: " ++ show x)
+toIRIntegrate (Constant _ value) low high = indicator (IROp OpAnd (IROp OpLessThan low (IRConst value)) (IROp OpGreaterThan high (IRConst value))) --TODO What to do if low and high are equal?
+toIRIntegrate (Call _ name) low high = return $ IRCall (name ++ "_integ") [low, high]
+toIRIntegrate (Lambda t name subExpr) low high = do
+  subExprIR <- toIRIntegrate subExpr low high
+  return $ IRLambda name subExprIR
+toIRIntegrate x _ _ = error ("found no way to convert to IRIntegrate: " ++ show x)

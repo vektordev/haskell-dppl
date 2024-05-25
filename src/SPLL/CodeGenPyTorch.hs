@@ -43,6 +43,7 @@ pyOps :: Operand -> String
 pyOps OpPlus = "+"
 pyOps OpMult = "*"
 pyOps OpGreaterThan = ">="
+pyOps OpLessThan = "<="
 pyOps OpDiv = "/"
 pyOps OpSub = "-"
 pyOps OpOr = "or"

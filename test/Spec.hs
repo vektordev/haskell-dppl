@@ -110,7 +110,11 @@ correctProbValuesTestCases = [(uniformProg, VFloat 0.5, [], VFloat 1.0),
                               (uniformProgMult, VFloat (-0.25), [], VFloat 2),
                               (normalProgMult, VFloat (-1), [], VFloat (normalPDF (-2) * 2)),
                               (uniformNegPlus, VFloat (-4.5), [], VFloat 1),
-                              (testList, VList [VFloat 0.25, VFloat 0], [], VFloat $ normalPDF 0 * 2)]
+                              (testList, VList [VFloat 0.25, VFloat 0], [], VFloat $ normalPDF 0 * 2),
+                              (simpleTuple, VTuple (VFloat 0.25) (VFloat 0), [], VFloat $ normalPDF 0 * 2),
+                              (uniformIfProg, VFloat 0.5, [], VFloat 0.5),
+                              (constantProg, VFloat 2, [], VFloat 1),
+                              (simpleCall, VFloat 0.5, [], VFloat 1.0)]
 
 correctIntegralValuesTestCases :: [(Program () Double, Value Double, Value Double, [Double], Value Double)]
 correctIntegralValuesTestCases = [(uniformProg, VFloat 0, VFloat 1, [], VFloat 1.0),
@@ -119,7 +123,11 @@ correctIntegralValuesTestCases = [(uniformProg, VFloat 0, VFloat 1, [], VFloat 1
                                   (normalProgMult, VFloat (-5), VFloat 5, [], VFloat $ normalCDF (-10) - normalCDF 10),
                                   (uniformNegPlus, VFloat (-5), VFloat (-4.5), [], VFloat 0.5),
                                   (uniformProgPlus, VFloat 4, VFloat 4.5, [], VFloat 0.5),
-                                  (testList, VList [VFloat 0, VFloat (-1)], VList [VFloat 0.25, VFloat 1], [], VFloat $ (normalCDF 1 - normalCDF (-1)) * 0.5)]
+                                  (testList, VList [VFloat 0, VFloat (-1)], VList [VFloat 0.25, VFloat 1], [], VFloat $ (normalCDF 1 - normalCDF (-1)) * 0.5),
+                                  (simpleTuple, VTuple (VFloat 0) (VFloat (-1)), VTuple (VFloat 0.25) (VFloat 1), [], VFloat $ (normalCDF 1 - normalCDF (-1)) * 0.5),
+                                  (uniformIfProg, VFloat 0, VFloat 1, [], VFloat 0.5),
+                                  (constantProg, VFloat 1, VFloat 3, [], VFloat 1),
+                                  (simpleCall, VFloat 0, VFloat 1, [], VFloat 1.0)]
 
 checkProbTestCase :: (Program () Double, Value Double, [Double], Value Double) -> Property
 checkProbTestCase (p, inp, thetas, out) = ioProperty $ do
@@ -140,17 +148,19 @@ prop_CheckIntegralTestCases = forAll (elements correctIntegralValuesTestCases) c
 --  checkProbTestCase p inp out .&&. acc) (True===True) correctProbValuesTestCases
 
 irDensity :: RandomGen g => Program () Double -> Value Double -> [Double] -> Rand g (Value Double)
-irDensity p sample thetas = IRInterpreter.generate [] [] thetas [] irExpr
+irDensity p sample thetas = IRInterpreter.generate irEnv irEnv thetas [] irExpr
   where irExpr = runSupply (toIRProbability main (IRConst sample)) (+1) 1
         Just main = lookup "main" annotated
+        irEnv = envToIR annotated
         annotated = map (\(a,b) -> (a, annotate b)) env
         env = progToEnv typedProg
         typedProg = addTypeInfo p
 
 irIntegral :: RandomGen g => Program () Double -> Value Double -> Value Double -> [Double] -> Rand g (Value Double)
-irIntegral p low high thetas = IRInterpreter.generate [] [] thetas [] irExpr
+irIntegral p low high thetas = IRInterpreter.generate irEnv irEnv thetas [] irExpr
   where irExpr = runSupply (toIRIntegrate main (IRConst low) (IRConst high)) (+1) 1
         Just main = lookup "main" annotated
+        irEnv = envToIR annotated
         annotated = map (\(a,b) -> (a, annotate b)) env
         env = progToEnv typedProg
         typedProg = addTypeInfo p

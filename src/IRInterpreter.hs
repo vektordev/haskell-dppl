@@ -38,8 +38,15 @@ generate globalEnv env thetas args (IROp OpGreaterThan a b) = do
   aVal <- generate globalEnv env thetas args a
   bVal <- generate globalEnv env thetas args b
   case (aVal, bVal) of
-      (VFloat af, VFloat bf) -> return $ VBool (af > bf)
-      (VInt af, VInt bf) -> return $ VBool (af > bf)
+      (VFloat af, VFloat bf) -> return $ VBool (af >= bf)
+      (VInt af, VInt bf) -> return $ VBool (af >= bf)
+      _ -> error "Type error: greater than can only compare two numbers (of the same type)"
+generate globalEnv env thetas args (IROp OpLessThan a b) = do
+  aVal <- generate globalEnv env thetas args a
+  bVal <- generate globalEnv env thetas args b
+  case (aVal, bVal) of
+      (VFloat af, VFloat bf) -> return $ VBool (af <= bf)
+      (VInt af, VInt bf) -> return $ VBool (af <= bf)
       _ -> error "Type error: greater than can only compare two numbers (of the same type)"
 generate globalEnv env thetas args (IROp OpDiv a b) = do
   aVal <- generate globalEnv env thetas args a
@@ -102,6 +109,20 @@ generate globalEnv env thetas args (IRCons hd tl) = do
       x <- generate globalEnv env thetas args hd
       return $ VList (x : xs)
     _ -> error "Type error: Tail of cons is not a list"
+generate globalEnv env thetas args (IRTCons fst snd) = do
+  fstVal <- generate globalEnv env thetas args fst
+  sndVal <- generate globalEnv env thetas args snd
+  return $ VTuple fstVal sndVal
+generate globalEnv env thetas args (IRTFst expr) = do
+  val <- generate globalEnv env thetas args expr
+  case val of
+    VTuple first _ -> return first
+    _ -> error "Type error: Expression of Fst is not a tuple"
+generate globalEnv env thetas args (IRTSnd expr) = do
+  val <- generate globalEnv env thetas args expr
+  case val of
+    VTuple _ second -> return second
+    _ -> error "Type error: Expression of Fst is not a tuple"
 generate globalEnv env thetas args (IRHead listExpr) = do
   listVal <- generate globalEnv env thetas args listExpr
   case listVal of 
@@ -135,7 +156,7 @@ generate globalEnv env thetas args (IRLetIn name decl body) = do
   generate globalEnv extendedEnv thetas args body
 generate globalEnv env thetas args (IRVar name) = generate globalEnv env thetas args expr
   where Just expr = lookup name env
-generate globalEnv env thetas args (IRCall name callArgs) = generate globalEnv globalEnv thetas args expr
+generate globalEnv env thetas args (IRCall name callArgs) = generate globalEnv globalEnv thetas (callArgs ++ args) expr
   where Just expr = lookup name globalEnv
 generate globalEnv env thetas (arg:args) (IRLambda name expr) = generate globalEnv ((name, arg):env) thetas args expr
 generate globalEnv env thetas [] (IRLambda name expr) = error "No args provided to lambda"
@@ -147,7 +168,7 @@ generate globalEnv env thetas args (IREnumSum varname (VInt iVal) expr) = do    
     ) (VFloat 0) range
   where range = enumFromTo 0 (iVal-1)
         sumValues = \(VFloat a) (VFloat b) -> VFloat $a+b
-generate globalEnv env thetas args (IREvalNN varname expr) = error "EvalNN cannot be interpreted on the IR. Please use PyTorch or Julia" --TODO
+generate globalEnv env thetas args (IREvalNN varname expr) = error "EvalNN cannot be interpreted on the IR. Please use PyTorch or Julia"
 generate globalEnv env thetas args (IRIndex lstExpr idxExpr) = do 
   lst <- generate env globalEnv thetas args lstExpr
   idx <- generate env globalEnv thetas args idxExpr
@@ -157,6 +178,7 @@ generate globalEnv env thetas args (IRIndex lstExpr idxExpr) = do
       _ -> error "Index must be an integer"
     _ -> error "Expression must be a list"
 generate globalEnv env thetas args (IRReturning expr) = generate globalEnv env thetas args expr
+generate _ _ _ _ expr = error ("Expression is not yet implemented " ++ show expr)
 
 irPDF :: (Ord a, Fractional a, Show a, Eq a, Floating a, Random a, Erf a) => Distribution -> Value a -> Rand g (Value a)
 irPDF IRUniform (VFloat x) = if x >= 0 && x <= 1 then return $ VFloat 1 else return $ VFloat 0
