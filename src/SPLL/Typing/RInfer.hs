@@ -421,7 +421,14 @@ infer expr = case expr of
     let u1 = t1 `TArrow` (t2 `TArrow` tv)
         u2 = TInt `TArrow` (TInt `TArrow` TInt)
     return (tv, c1 ++ c2 ++ [(u1, u2)], MultI (setRType x tv)  et1 et2)
-    
+
+  ExpF x e -> do
+        (t, c, et) <- infer e
+        tv <- fresh
+        let u1 = t `TArrow` tv
+            u2 = TFloat `TArrow` TFloat
+        return (tv, c ++ [(u1, u2)], ExpF (setRType x tv) et)
+
   NegF x e -> do
       (t, c, et) <- infer e
       tv <- fresh

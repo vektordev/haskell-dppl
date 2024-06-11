@@ -130,6 +130,8 @@ generateCode (IRIf cond left right) bindto = let
   in [l1] ++ indentOnce cLeft ++ [l2] ++ indentOnce cRight
 generateCode (IROp op left right) bindto = wrapMultiBlock [bindto ++ "(", " " ++ pyOps op ++ " ", ")"] [generateCode left "", generateCode right ""]
 --generateCode (IROp op left right) bindto = lines ("(" ++ unlinesTrimLeft (generateCode left "") ++ " " ++ pyOps op ++ " " ++ unlinesTrimLeft (generateCode right "") ++ ")")
+generateCode (IRUnaryOp OpExp expr) bindto = wrap (bindto ++ "math.exp(") (generateCode expr "") ")"
+generateCode (IRUnaryOp OpLog expr) bindto = wrap (bindto ++ "math.log(") (generateCode expr "") ")"
 generateCode (IRUnaryOp OpNeg expr) bindto = wrap (bindto ++ "-(") (generateCode expr "") ")"
 generateCode (IRUnaryOp OpNot expr) bindto = wrap (bindto ++ "not(") (generateCode expr "") ")"
 generateCode (IRUnaryOp OpAbs expr) bindto = wrap (bindto ++ "abs(") (generateCode expr "") ")"

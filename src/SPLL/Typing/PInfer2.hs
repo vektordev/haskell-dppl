@@ -577,7 +577,12 @@ infer env expr = case expr of
       (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
       (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
       return (s3, cs3, t3, MultI (setPType ti t3) et1 et2)
-      
+  
+  ExpF ti e -> do
+        (s1, cs1, t1) <- negInf
+        (s2, cs2, t2, et) <- applyOpArg env e s1 cs1 t1
+        return (s2, cs2, t2, ExpF (setPType ti t2) et)
+  
   NegF ti e -> do
       (s1, cs1, t1) <- negInf
       (s2, cs2, t2, et) <- applyOpArg env e s1 cs1 t1

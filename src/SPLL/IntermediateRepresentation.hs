@@ -123,6 +123,8 @@ data Operand = OpPlus
 data UnaryOperand = OpNeg
                   | OpAbs
                   | OpNot
+                  | OpExp
+                  | OpLog   --Natural Logarithm
                   deriving (Show, Eq)
 
 data Distribution = IRNormal | IRUniform deriving (Show, Eq)
@@ -226,7 +228,7 @@ irMap f x = case x of
 evalAll :: (Show a, Ord a, Fractional a) => IRExpr a -> IRExpr a
 evalAll expr@(IROp op leftV rightV)
   | isValue leftV && isValue rightV = IRConst (forceOp op (unval leftV) (unval rightV))
-  | (isValue leftV || isValue rightV) && (op == OpOr) = softForceLogic op leftV rightV
+  | isValue leftV || isValue rightV = softForceLogic op leftV rightV
   | otherwise = expr
 evalAll x@(IRIf cond left right) =
   if isValue cond
@@ -262,7 +264,11 @@ softForceLogic OpOr (IRConst (VBool True)) _ = IRConst (VBool True)
 softForceLogic OpOr _ (IRConst (VBool True)) = IRConst (VBool True)
 softForceLogic OpOr (IRConst (VBool False)) right = right
 softForceLogic OpOr left (IRConst (VBool False)) = left
-softForceLogic op left right = error "tried to force logic op that can't be forced."
+softForceLogic OpAnd (IRConst (VBool True)) right = right
+softForceLogic OpAnd left (IRConst (VBool True)) = left
+softForceLogic OpAnd (IRConst (VBool False)) _ = IRConst (VBool False)
+softForceLogic OpAnd _ (IRConst (VBool False)) = IRConst (VBool False)
+softForceLogic op left right = IROp op left right     -- Nothing can be done
 
 forceOp :: (Ord a, Fractional a) => Operand -> Value a -> Value a -> Value a
 forceOp OpEq x y = VBool (x == y)
@@ -270,13 +276,15 @@ forceOp OpMult (VInt x) (VInt y) = VInt (x*y)
 forceOp OpMult (VFloat x) (VFloat y) = VFloat (x*y)
 forceOp OpPlus (VInt x) (VInt y) = VInt (x+y)
 forceOp OpPlus (VFloat x) (VFloat y) = VFloat (x+y)
-forceOp OpDiv (VInt x) (VInt y) = VInt (x-y)
-forceOp OpDiv (VFloat x) (VFloat y) = VFloat (x-y)
-forceOp OpSub (VInt _) (VInt _) = error "tried to do integer division in forceOp"
-forceOp OpSub (VFloat x) (VFloat y) = VFloat (x/y)
+forceOp OpDiv (VInt _) (VInt _) = error "tried to do integer division in forceOp"
+forceOp OpDiv (VFloat x) (VFloat y) = VFloat (x/y)
+forceOp OpSub (VInt x) (VInt y) = VInt (x-y)
+forceOp OpSub (VFloat x) (VFloat y) = VFloat (x-y)
 forceOp OpOr (VBool x) (VBool y) = VBool (x || y)
 forceOp OpGreaterThan (VInt x) (VInt y) = VBool (x >= y)
 forceOp OpGreaterThan (VFloat x) (VFloat y) = VBool (x >= y)
+forceOp OpLessThan (VInt x) (VInt y) = VBool (x <= y)
+forceOp OpLessThan (VFloat x) (VFloat y) = VBool (x <= y)
 
 returnize :: IRExpr a -> IRExpr a
 returnize (IRIf cond left right) = IRIf cond (returnize left) (returnize right)
@@ -361,6 +369,8 @@ toIRProbability (PlusI (StaticAnnotations TInt _ extras) left right) sample
     var <- mkVariable ""
     rightExpr <- toIRProbability right (IROp OpSub sample (IRVar var))
     return $ IRLetIn var (toIRGenerate left) rightExpr
+toIRProbability (ExpF (StaticAnnotations TFloat _ extras) f) sample =
+  toIRProbability f (IROp OpDiv (IRUnaryOp OpLog sample) sample)
 toIRProbability (NegF (StaticAnnotations TFloat _ extras) f) sample =
   toIRProbability f (IRUnaryOp OpNeg sample)
 toIRProbability (ReadNN _ name subexpr) sample = do
@@ -399,6 +409,7 @@ toIRGenerate (PlusF _ left right) = IROp OpPlus (toIRGenerate left) (toIRGenerat
 toIRGenerate (PlusI _ left right) = IROp OpPlus (toIRGenerate left) (toIRGenerate right)
 toIRGenerate (MultF _ left right) = IROp OpMult (toIRGenerate left) (toIRGenerate right)
 toIRGenerate (MultI _ left right) = IROp OpMult (toIRGenerate left) (toIRGenerate right)
+toIRGenerate (ExpF _ f) = IRUnaryOp OpExp (toIRGenerate f)
 toIRGenerate (NegF _ f) = IRUnaryOp OpNeg (toIRGenerate f)
 toIRGenerate (ThetaI _ ix) = IRTheta ix
 toIRGenerate (Constant _ x) = IRConst x
@@ -428,12 +439,12 @@ toIRIntegrate (Normal StaticAnnotations {}) lower higher = do
 toIRIntegrate (MultF (StaticAnnotations _ _ extras) left right) lower higher
   | extras `hasAlgorithm` "multLeft" = do
     var <- mkVariable ""
-    rightExpr <- toIRIntegrate right (IROp OpDiv lower (IRVar var)) (IROp OpDiv higher (IRVar var))
+    rightExpr <- toIRIntegrate right (IROp OpDiv lower (IRVar var)) (IRUnaryOp OpAbs (IROp OpDiv higher (IRVar var)))
     return $ IRLetIn var (toIRGenerate left)
       rightExpr
   | extras `hasAlgorithm` "multRight" = do
       var <- mkVariable ""
-      leftExpr <- toIRIntegrate left (IROp OpDiv lower (IRVar var)) (IROp OpDiv higher (IRVar var))
+      leftExpr <- toIRIntegrate left (IROp OpDiv lower (IRVar var)) (IRUnaryOp OpAbs (IROp OpDiv higher (IRVar var)))
       return $ IRLetIn var (toIRGenerate right)
         leftExpr
 toIRIntegrate (PlusF (StaticAnnotations _ _ extras) left right) lower higher
@@ -449,6 +460,8 @@ toIRIntegrate (PlusF (StaticAnnotations _ _ extras) left right) lower higher
         leftExpr
 toIRIntegrate (NegF _ a) low high = do
   toIRIntegrate a (IRUnaryOp OpNeg high) (IRUnaryOp OpNeg low)
+toIRIntegrate (ExpF _ a) low high = do
+  toIRIntegrate a (IRUnaryOp OpLog high) (IRUnaryOp OpLog low)
 toIRIntegrate (TCons _ t1Expr t2Expr) low high = do
   t1P <- toIRIntegrate t1Expr (IRTFst low) (IRTFst high)
   t2P <- toIRIntegrate t2Expr (IRTSnd low) (IRTSnd high)

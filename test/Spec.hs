@@ -3,6 +3,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 import Test.QuickCheck
 
@@ -31,6 +32,10 @@ import SPLL.Lang (Value)
 import Control.Monad.Supply
 import Data.Foldable
 import Data.Number.Erf (erf)
+import Numeric.AD (grad', auto)
+import InjectiveFunctions (autoExpr, autoEnv, autoVal)
+import Numeric.AD.Internal.Reverse (Reverse, Tape)
+import Data.Reflection (Reifies)
 
 -- Generalizing over different compilation stages, we can fit all "this typing is what the compiler would find" cases.
 class Recompilable a where
@@ -114,13 +119,14 @@ correctProbValuesTestCases = [(uniformProg, VFloat 0.5, [], VFloat 1.0),
                               (simpleTuple, VTuple (VFloat 0.25) (VFloat 0), [], VFloat $ normalPDF 0 * 2),
                               (uniformIfProg, VFloat 0.5, [], VFloat 0.5),
                               (constantProg, VFloat 2, [], VFloat 1),
-                              (simpleCall, VFloat 0.5, [], VFloat 1.0)]
+                              (simpleCall, VFloat 0.5, [], VFloat 1.0),
+                              (uniformExp, VFloat $ exp 4.5, [], VFloat 1.0)]
 
 correctIntegralValuesTestCases :: [(Program () Double, Value Double, Value Double, [Double], Value Double)]
 correctIntegralValuesTestCases = [(uniformProg, VFloat 0, VFloat 1, [], VFloat 1.0),
                                   (uniformProg, VFloat  (-1), VFloat 2, [], VFloat 1.0),
                                   (normalProg, VFloat (-5), VFloat 5, [], VFloat $ normalCDF 5 - normalCDF (-5)),
-                                  (normalProgMult, VFloat (-5), VFloat 5, [], VFloat $ normalCDF (-10) - normalCDF 10),
+                                  (normalProgMult, VFloat (-5), VFloat 5, [], VFloat $ normalCDF 10 - normalCDF (-10)),
                                   (uniformNegPlus, VFloat (-5), VFloat (-4.5), [], VFloat 0.5),
                                   (uniformProgPlus, VFloat 4, VFloat 4.5, [], VFloat 0.5),
                                   (testList, VList [VFloat 0, VFloat (-1)], VList [VFloat 0.25, VFloat 1], [], VFloat $ (normalCDF 1 - normalCDF (-1)) * 0.5),
@@ -129,21 +135,32 @@ correctIntegralValuesTestCases = [(uniformProg, VFloat 0, VFloat 1, [], VFloat 1
                                   (constantProg, VFloat 1, VFloat 3, [], VFloat 1),
                                   (simpleCall, VFloat 0, VFloat 1, [], VFloat 1.0)]
 
+prop_CheckProbTestCases :: Property
+prop_CheckProbTestCases = forAll (elements correctProbValuesTestCases) checkProbTestCase
+
+prop_CheckIntegralTestCases :: Property
+prop_CheckIntegralTestCases = forAll (elements correctIntegralValuesTestCases) checkIntegralTestCase
+
+prop_CheckIntegralConverges :: Property
+prop_CheckIntegralConverges = forAll (elements correctIntegralValuesTestCases) checkIntegralConverges
+
 checkProbTestCase :: (Program () Double, Value Double, [Double], Value Double) -> Property
 checkProbTestCase (p, inp, thetas, out) = ioProperty $ do
   actualOutput <- evalRandIO $ irDensity p inp thetas
-  return $ actualOutput == out
-
-prop_CheckProbTestCases :: Property
-prop_CheckProbTestCases = forAll (elements correctProbValuesTestCases) checkProbTestCase
+  return $ actualOutput === out
 
 checkIntegralTestCase :: (Program () Double, Value Double, Value Double, [Double], Value Double) -> Property
 checkIntegralTestCase (p, low, high, thetas, out) = ioProperty $ do
   actualOutput <- evalRandIO $ irIntegral p low high thetas
-  return $ actualOutput == out
+  return $ actualOutput === out
 
-prop_CheckIntegralTestCases :: Property
-prop_CheckIntegralTestCases = forAll (elements correctIntegralValuesTestCases) checkIntegralTestCase
+--TODO better bounds for Integral
+checkIntegralConverges :: (Program () Double, Value Double, Value Double, [Double], Value Double) -> Property
+checkIntegralConverges (p, VFloat a, VFloat b, thetas, _) = ioProperty $ do
+  actualOutput <- evalRandIO $ irIntegral p (VFloat (-9999999)) (VFloat 9999999) thetas
+  return $ trace (show actualOutput) actualOutput === VFloat 1
+checkIntegralConverges _ = False ==> False
+
 --prop_CheckProbTestCases = foldr (\(p, inp, out) acc -> do
 --  checkProbTestCase p inp out .&&. acc) (True===True) correctProbValuesTestCases
 
@@ -187,6 +204,20 @@ langDensity p sample = case Interpreter.runInferL [] witExpr [] (VFloat sample) 
   DiscreteProbability prob -> VFloat prob
   where Program _ witExpr = addWitnessesProg typedProg
         typedProg = addTypeInfo p
+        
+{-prop_CDFGradIsPDF :: Property
+prop_CDFGradIsPDF = forAll (elements correctIntegralValuesTestCases)(\(p, _, high, thetas, _) -> ioProperty $ do
+    let irExpr = runSupply (toIRIntegrate main (IRConst $ VFloat (-9999999)) (IRConst high)) (+1) 1
+        Just main = lookup "main" annotated
+        irEnv = envToIR annotated
+        annotated = map (\(a,b) -> (a, annotate b)) env
+        env = progToEnv typedProg
+        typedProg = addTypeInfo p
+    grad' $ evalRandIO $ IRInterpreter.generate (autoEnv irEnv) irEnv thetas [] (autoIRExpr irExpr))
+    
+autoIRExpr :: (Num a, Reifies s Tape) => IRExpr a -> IRExpr (Reverse s a)
+autoIRExpr e = irMap auto e-}
+
 
 {-prop_interpretersEqualDensity :: Program () Double -> Double -> Property
 prop_interpretersEqualDensity p sample = do

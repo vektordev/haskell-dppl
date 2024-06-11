@@ -26,6 +26,7 @@ data ExprStub = StubIfThenElse
               | StubPlusF
               | StubPlusI
               | StubNegF
+              | StubExpF
               | StubNull
               | StubCons
               | StubTCons
@@ -50,6 +51,7 @@ toStub expr = case expr of
   MultI {}       -> StubMultI
   PlusF {}       -> StubPlusF
   PlusI {}       -> StubPlusI
+  ExpF {}        -> StubExpF
   NegF {}        -> StubNegF
   (Null _)       -> StubNull
   Cons {}        -> StubCons
@@ -152,6 +154,14 @@ multRight :: InferenceRule
 multRight = mirror2 multLeft
 --multRight = InferenceRule StubMultF [SubExprNIsType 1 Deterministic] "multRight" mostChaotic
 
+expF :: InferenceRule
+expF = InferenceRule
+          StubNegF
+          []
+          "negF"
+          mostChaotic
+          (Forall [] (TFloat `TArrow` TFloat))
+
 negF :: InferenceRule
 negF = InferenceRule
           StubNegF
@@ -226,4 +236,4 @@ cons = InferenceRule
          (Forall [TV "a"] ((TVarR $ TV "a") `TArrow` ((ListOf $ TVarR $ TV "a") `TArrow` (ListOf $ TVarR $ TV "a"))))
 
 allAlgorithms :: [InferenceRule]
-allAlgorithms = [ifThenElse, theta, uniform, normal, constant, exprNull, greaterThanLeft, greaterThanRight, greaterThanSigmoid, plusLeft, plusRight, multLeft, multRight, negF, enumeratePlusLeft]
+allAlgorithms = [ifThenElse, theta, uniform, normal, constant, exprNull, greaterThanLeft, greaterThanRight, greaterThanSigmoid, plusLeft, plusRight, multLeft, multRight, negF, expF, enumeratePlusLeft]

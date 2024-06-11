@@ -22,7 +22,7 @@ normalProg = Program [] (Normal ())
 uniformProgMult :: Program () Double
 uniformProgMult = Program [] (MultF () (Uniform ()) (Constant () (VFloat (-0.5))))
 normalProgMult :: Program () Double
-normalProgMult = Program [] (MultF () (Normal ()) (Constant () (VFloat (-0.5))))
+normalProgMult = Program [] (MultF () (Normal ()) (Constant () (VFloat (0.5))))
 uniformProgPlus :: Program () Double
 uniformProgPlus = Program [] (PlusF () (Uniform ()) (Constant () (VFloat 4)))
 uniformNegPlus :: Program () Double
@@ -31,6 +31,8 @@ uniformIfProg :: Program () Double
 uniformIfProg = Program [] (IfThenElse () (GreaterThan () (Uniform ()) (Constant () $ VFloat 0.5))
                              (Uniform ())
                              (PlusF () (Uniform ()) (Constant () $ VFloat 5)))
+uniformExp :: Program () Double
+uniformExp = Program [] (ExpF () (PlusF () (Uniform ()) (Constant () (VFloat 4))))
 
 testMultLeft ::Expr () Float
 testMultLeft = MultF ()  (Constant () (VFloat 3.0)) (Normal ())

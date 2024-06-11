@@ -88,6 +88,16 @@ generate globalEnv env thetas args (IRUnaryOp OpNot a) = do
   case aVal of
     VBool af -> return $ VBool (not af)
     _ -> error "Type error: Not can only evaluate on a Bool"
+generate globalEnv env thetas args (IRUnaryOp OpExp a) = do
+  aVal <- generate globalEnv env thetas args a
+  case aVal of
+    VFloat af -> return $ VFloat $ exp af
+    _ -> error "Type error: Exp can only evaluate on a floating point numbers"
+generate globalEnv env thetas args (IRUnaryOp OpLog a) = do
+  aVal <- generate globalEnv env thetas args a
+  case aVal of
+    VFloat af -> return $ VFloat $ log af
+    _ -> error "Type error: Exp can only evaluate on a floating point numbers"
 generate globalEnv env thetas args (IRUnaryOp OpNeg a) = do
   aVal <- generate globalEnv env thetas args a
   case aVal of
