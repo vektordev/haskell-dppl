@@ -17,11 +17,11 @@ import Debug.Trace
 import Numeric.AD (grad, auto)
 import Statistics.Distribution (ContGen, genContVar, quantile, density)
 import Statistics.Distribution.Normal
-import InjectiveFunctions
 import Numeric.AD.Internal.Reverse ( Reverse, Tape)
 import qualified Data.Map as Map
 import Data.Reflection (Reifies)
 import Data.Number.Erf
+import PredefinedFunctions
 
 type Thetas a = [a]
 
@@ -107,12 +107,7 @@ detGenerateM (Var t name) = do
   env <- ask
   let Just val = Map.lookup name (values env)
   return val
-detGenerateM (InjF t name params expr) = do
-  innerVal <- detGenerateM expr
-  params_val <- mapM (detGenerateM) params
-  let (Just (FPair fPair)) = lookup name globalFenv
-  let (_, forward, _, _) = fPair
-  return $ forward params_val innerVal
+detGenerateM (InjF t name params) = error "Not yet implemented"
 detGenerateM expr =
   if pt /= Deterministic
   then error "tried detGenerate on non-deterministic expr"
@@ -183,18 +178,10 @@ generate globalEnv env thetas args (LetIn _ name decl bij) =
     declValue <- generate globalEnv env thetas args decl
     let extendedEnv = (name, Constant (TypeInfoWit (getRType declValue) Deterministic Set.empty) declValue):env
     generate globalEnv extendedEnv thetas args bij
-generate globalEnv env thetas args (InjF _ name params f2) =
-  do
-    let (Just (FPair fPair)) = lookup name globalFenv
-    let (_, forward, _, _) = fPair
-    innerVal <- generate globalEnv env thetas args f2
-    params_val <- mapM (generate globalEnv env thetas args) params
-    return (forward params_val innerVal)
+generate globalEnv env thetas args (InjF _ name params) = error "Not yet implemented" --TODO
 
-callInv :: (Floating a) => FEnv2 a -> String -> Params a -> a -> a
-callInv fenv name pa va = idd pa va
-  where (Just (FPair2 fPair)) = lookup name fenv
-        (_, idd, _) = fPair
+callInv :: (Floating a) => FEnv a -> String -> a -> a
+callInv fenv name pa = error "Not yet implemented" --TODO
 
 
 sigmoid :: Floating a => a -> a
@@ -307,16 +294,7 @@ likelihoodM (TCons _ t1 t2) (VTuple x1 x2) = do
    fstP <- likelihoodM t1 x1
    sndP <- likelihoodM t2 x2
    return $ pAnd fstP sndP
-likelihoodM inj@(InjF ti name params expr) val =
-  do
-    params_val <- mapM detGenerateM params
-    let invVal = rangeMap (inverse params_val) val
-    let inv_grad = inverse_grad params_val
-    -- only swaps limits if this is a range value
-    let invValSwapped = rangeSwap inv_grad invVal
-    invProb <- likelihoodM expr invValSwapped
-    return $ invProb `pAnd` (DiscreteProbability $ abs (rangeGrad inv_grad val))
-  where (Just (FPair (_, forward, inverse, inverse_grad))) = lookup name globalFenv
+likelihoodM inj@(InjF ti name params) val = error "Not yet implemented"  --TODO
         --inverse_grad_auto = grad' (\[val] -> callInv globalFenv2 name (map autoVal params_val) val) [vfloat_val]
         --(VFloat vfloat_val) = val
         
@@ -472,11 +450,7 @@ getInvValueM _ expr v _
 getInvValueM fenv  (Var _ name) var val = if name == var
                                               then return $ (val, Map.empty)
                                               else error "False variable in var encountered"
-getInvValueM fenv (InjF _ name params f2) var val = do
-  params_val <- mapM detGenerateM params
-  getInvValueM fenv f2 var (inverse params_val val)
-  where (Just (FPair fPair)) = lookup name fenv
-        (_, _, inverse, _) = fPair
+getInvValueM fenv (InjF _ name params) var val = error "Not yet implemented" --TODO
         --grad_loss :: [(loss :: a, grad :: Thetas a)]
         --grad_loss thX = [grad' (\theta -> log $ unwrapP $ likelihood (autoEnv env) (autoEnv env) theta (autoExpr expr) (autoVal sample)) thX | sample <- samples]
 

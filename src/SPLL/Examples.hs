@@ -53,6 +53,15 @@ testNeg = NegF () (Uniform ())
 testNegFail :: Expr () a
 testNegFail = NegF () (PlusF () (Uniform ()) (Uniform ()))
 
+testInjF :: Program () Double
+testInjF = Program [] (InjF () "double" [Uniform ()])
+
+--testInjF2 :: Program () Double
+--testInjF2 = Program [] (ExpF () (MultF () (Constant () (VFloat 2)) (Uniform ())))
+
+testInjF2 :: Program () Double
+testInjF2 = Program [] (ExpF () (InjF () "double" [Uniform ()]))
+
 flipCoin :: Expr () Double
 flipCoin = GreaterThan () (Uniform ()) (Constant () (VFloat 0.5))
 variableLength :: Expr () a
@@ -117,6 +126,7 @@ testIf = IfThenElse ()
   (Constant () (VBool True))
   (Constant () (VBool False))
 
+{-
 --TODO Make params like Constant values (change to a type variable dynamically how?)
 testLet2 :: Program () a
 testLet2 = Program [](LetIn () "x"
@@ -144,6 +154,7 @@ testListPlus  = Program [] (InjF () "listMult"
     (Cons () (PlusF () (Normal ()) (Constant () (VFloat 2.0)))
      (Cons () (PlusF () (Normal ()) (Constant () (VFloat 3.0))) (Null ())))
     )
+-}
 testHakaru :: Program () Double
 testHakaru = Program [](LetIn() "x" (Uniform ())
                                       (LetIn ()  "y" (Uniform ())
@@ -153,6 +164,7 @@ testHakaru = Program [](LetIn() "x" (Uniform ())
                                              (Cons ()
                                                 (PlusF () (MultF () (Constant () (VFloat (-2.0)))(Var () "x")) (Var () "y"))
                                                 (Null ()))))))
+{-
 -- let x = normal in (if flip then x + theta else x - 0.7)
 testBranchedLetList :: Program () Double
 testBranchedLetList = Program [](LetIn() "x" (PlusF () (Normal ()) (Constant () (VFloat 1.0)))
@@ -207,12 +219,14 @@ testBranchedLetList3 = Program [](LetIn() "x" (PlusF () (Normal ()) (Constant ()
                                                    )
                                         ))
                                         
+
 testBranchedLet :: Program () Double
 testBranchedLet = Program [](LetIn() "x" (PlusF () (Normal ()) (Constant () (VFloat 1.0)))
                                     (IfThenElse ()
                                       (GreaterThan () (Uniform ())(Constant () (VFloat 0.8)))
                                       (InjF () "sig" [] (InjF () "plus" [ThetaI () 0]  (Var () "x")))
                                       (InjF () "sig" [] (InjF () "plus" [Constant () (VFloat (-0.7))]  (Var () "x")))))
+-}
 
 testNestedLetInDecl :: Program () Double
 testNestedLetInDecl = Program [] (LetIn() "x" (PlusF () (ThetaI () 0) (Normal ()))
@@ -229,8 +243,8 @@ testNestedLetInWit = Program [] (LetIn () "x" (MultF () (ThetaI () 0) (Normal ()
                                   (Cons () (PlusF () (Var () "y") (Var () "x"))
                                     (Cons ()  (Var () "x")
                                      (Null ())))))
-testInjFD :: Program () Double
-testInjFD = Program [] (InjF () "mult" [Constant () (VFloat (-2.0))] (PlusF () (ThetaI () 0) (Normal ())))
+--testInjFD :: Program () Double
+--testInjFD = Program [] (InjF () "mult" [Constant () (VFloat (-2.0))] (PlusF () (ThetaI () 0) (Normal ())))
 
 testObserve :: Program () Double
 testObserve = Program [] (LetIn() "x"  (Normal ())
@@ -268,8 +282,8 @@ testLetTuple = Program [] (LetIn() "x" (PlusF () (ThetaI () 0) (Normal ()))
 testNormal :: Program () Double
 testNormal = Program [] (Normal ())
 
-testLetE :: Expr () Double
-testLetE = LetIn () "x" (Normal ()) (InjF () "plus" [Constant () (VFloat 3.0)] (Var () "x"))
+--testLetE :: Expr () Double
+--testLetE = LetIn () "x" (Normal ()) (InjF () "plus" [Constant () (VFloat 3.0)] (Var () "x"))
 testPlusProg :: Program () Float
 testPlusProg = Program [("main", IfThenElse ()
                                                    (GreaterThan () (ThetaI () 1)(ThetaI () 1))

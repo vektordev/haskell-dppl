@@ -29,7 +29,7 @@ import qualified Data.Map as Map
 import SPLL.Lang
 import SPLL.Typing.Typing
 import SPLL.Typing.PType
-import SPLL.Typing.RType hiding (TVar, TV)
+import SPLL.Typing.RType hiding (TVar, TV, Scheme, Scheme(..))
 import SPLL.Examples
 
 data PTypeError
@@ -544,15 +544,16 @@ infer env expr = case expr of
     (s2, cs2, t2, bt) <- infer env b
     return (compose s2 s1, apply s2 cs1 ++ cs2, t2, LetIn (setPType ti t2) s xt bt)
 
-  InjF ti name paramsExpr expr -> do
-    (s1, cs1, t1, xt) <- infer env expr
+  InjF ti name paramsExpr -> do
+    --(s1, cs1, t1, xt) <- infer env expr
     p_inf <- mapM (infer env) paramsExpr
     tv <- fresh
     let s_acc = foldl compose emptySubst (map fst3 p_inf)
-    let cts_d d = Right (LetInDConstraint(Left d))
+    --let cts_d d = Right (LetInDConstraint(Left d))
+    let cts_d d = Left d  --TODO Better chain constraints
     let p_fst = map (cts_d . trd3) p_inf
-    return (compose s1 s_acc, cs1 ++ concatMap snd3 p_inf ++ [(tv,Left t1:p_fst)]
-      , tv, InjF (setPType ti tv) name (map frth3 p_inf) xt)
+    return (s_acc, concatMap snd3 p_inf ++ [(tv,p_fst)] --TODO check this
+      , tv, InjF (setPType ti tv) name (map frth3 p_inf))
 
   PlusF ti e1 e2 -> do
     (s1, cs1, t1) <- plusInf

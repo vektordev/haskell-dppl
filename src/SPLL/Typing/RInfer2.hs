@@ -31,7 +31,7 @@ import SPLL.Examples
 import SPLL.Typing.PType( PType(..) )
 import SPLL.InferenceRule
 
-import InjectiveFunctions
+import PredefinedFunctions
 
 data RTypeError
   = UnificationFail RType RType

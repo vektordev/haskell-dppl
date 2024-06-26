@@ -16,6 +16,7 @@ import SPLL.Typing.PType
 import SPLL.Typing.Typing
 import SPLL.Analysis
 import SPLL.IntermediateRepresentation
+import SPLL.IRCompiler
 import Interpreter
 import IRInterpreter
 import Data.Maybe (fromJust, catMaybes)
@@ -33,7 +34,6 @@ import Control.Monad.Supply
 import Data.Foldable
 import Data.Number.Erf (erf)
 import Numeric.AD (grad', auto)
-import InjectiveFunctions (autoExpr, autoEnv, autoVal)
 import Numeric.AD.Internal.Reverse (Reverse, Tape)
 import Data.Reflection (Reifies)
 
@@ -64,7 +64,7 @@ examples :: [Program () Float]
 examples = [makeMain variableLength, makeMain testGreater, makeMain testGaussianMixture, makeMain testIntractable]
 
 testsetA :: [Program TypeInfoWit Double]
-testsetA = [variableLengthT, testLetT, testLetNonLetT, testLetDT, testLetTupleT, testLetXYT]
+testsetA = [variableLengthT, testLetTupleT, testLetXYT]
 prop_RecompileA :: Property
 prop_RecompileA = forAll (elements testsetA) testRecompile
 
@@ -120,7 +120,9 @@ correctProbValuesTestCases = [(uniformProg, VFloat 0.5, [], VFloat 1.0),
                               (uniformIfProg, VFloat 0.5, [], VFloat 0.5),
                               (constantProg, VFloat 2, [], VFloat 1),
                               (simpleCall, VFloat 0.5, [], VFloat 1.0),
-                              (uniformExp, VFloat $ exp 4.5, [], VFloat 1.0)]
+                              (uniformExp, VFloat $ exp 4.5, [], VFloat $ 1/exp 4.5),
+                              (testInjF, VFloat 1.5, [], VFloat 0.5),
+                              (testInjF2, VFloat 1.5, [], VFloat $ 1/3)]
 
 correctIntegralValuesTestCases :: [(Program () Double, Value Double, Value Double, [Double], Value Double)]
 correctIntegralValuesTestCases = [(uniformProg, VFloat 0, VFloat 1, [], VFloat 1.0),
@@ -133,7 +135,8 @@ correctIntegralValuesTestCases = [(uniformProg, VFloat 0, VFloat 1, [], VFloat 1
                                   (simpleTuple, VTuple (VFloat 0) (VFloat (-1)), VTuple (VFloat 0.25) (VFloat 1), [], VFloat $ (normalCDF 1 - normalCDF (-1)) * 0.5),
                                   (uniformIfProg, VFloat 0, VFloat 1, [], VFloat 0.5),
                                   (constantProg, VFloat 1, VFloat 3, [], VFloat 1),
-                                  (simpleCall, VFloat 0, VFloat 1, [], VFloat 1.0)]
+                                  (simpleCall, VFloat 0, VFloat 1, [], VFloat 1.0),
+                                  (testInjF, VFloat 0, VFloat 1, [], VFloat 0.5)]
 
 prop_CheckProbTestCases :: Property
 prop_CheckProbTestCases = forAll (elements correctProbValuesTestCases) checkProbTestCase
@@ -158,7 +161,7 @@ checkIntegralTestCase (p, low, high, thetas, out) = ioProperty $ do
 checkIntegralConverges :: (Program () Double, Value Double, Value Double, [Double], Value Double) -> Property
 checkIntegralConverges (p, VFloat a, VFloat b, thetas, _) = ioProperty $ do
   actualOutput <- evalRandIO $ irIntegral p (VFloat (-9999999)) (VFloat 9999999) thetas
-  return $ trace (show actualOutput) actualOutput === VFloat 1
+  return $ actualOutput === VFloat 1
 checkIntegralConverges _ = False ==> False
 
 --prop_CheckProbTestCases = foldr (\(p, inp, out) acc -> do
@@ -190,7 +193,7 @@ irInterpret p params = IRInterpreter.generate irEnv irEnv [] params main
         env = progToEnv typedProg
         typedProg = addTypeInfo p
 
-progToIREnv ::(Ord a, Fractional a, Show a, Eq a, Random a) => Program () a -> [(String, IRExpr a)]
+progToIREnv ::(Floating a, Ord a, Show a, Random a) => Program () a -> [(String, IRExpr a)]
 progToIREnv p = envToIR $ map (\(a,b) -> (a, annotate b)) $ progToEnv $ addTypeInfo p
 
 prop_CompilablesInterpretable :: Program () Double -> Property

@@ -145,7 +145,7 @@ generateCode (IRTFst t) bindto = wrap (bindto ++ "(") (generateCode t "") ")[0]"
 generateCode (IRTSnd t) bindto = wrap (bindto ++ "(") (generateCode t "") ")[1]"
 generateCode (IRSample IRNormal) bindto = [bindto ++ "randn()"]
 generateCode (IRSample IRUniform) bindto = [bindto ++ "rand()"]
-generateCode (IRLetIn name bind into) bindto = let 
+generateCode (IRLetIn name bind into) bindto = let  --TODO Letins in method calls
   l1 = "("
   bindCode = generateCode bind (name ++ " = ")
   --assignment = if length bindCode == 1 then [name ++ " = " ++ spicyHead (generateCode bind)] else undefined

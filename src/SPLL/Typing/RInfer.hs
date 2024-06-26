@@ -31,7 +31,7 @@ import SPLL.Typing.RType
 import SPLL.Examples
 import SPLL.Typing.PType( PType(..) )
 
-import InjectiveFunctions
+import PredefinedFunctions
 data RTypeError
   = UnificationFail RType RType
   | InfiniteType TVarR RType
@@ -41,9 +41,6 @@ data RTypeError
   | ExprInfo [String]
   | FalseParameterFail String
   deriving (Show)
-
-data Scheme = Forall [TVarR] RType
-  deriving (Show, Eq)
 
 data TEnv = TypeEnv { types :: Map.Map Name Scheme }
   deriving (Eq, Show)
@@ -359,13 +356,13 @@ trd3cts ::  (RType, [Constraint], Expr TypeInfo a) -> Expr TypeInfo a
 trd3cts (_, _, e) = e
 
     
-buildFuncConstraints :: RType -> RType -> [RType] -> [Constraint] -> String -> Infer (RType, [Constraint])
-buildFuncConstraints (TArrow inpT (TArrow _ _)) _ [] cons name  = throwError $ FalseParameterFail name  
-buildFuncConstraints (TArrow inpT (TArrow t1 t2)) ft (rt1:rts) cons name  = 
-  buildFuncConstraints (TArrow t1 t2) ft rts ((inpT, rt1):cons) name
-buildFuncConstraints (TArrow inpT t1) finalType [] cons name  = return (t1, (inpT, finalType):cons)
-buildFuncConstraints (TArrow inpT t1) finalType _ cons name  = throwError $ FalseParameterFail name
-buildFuncConstraints _ finalType _ cons name  = error "buildFuncConstraints with non function type"
+buildFuncConstraints :: RType -> [RType] -> [Constraint] -> String -> Infer (RType, [Constraint])
+buildFuncConstraints (TArrow inpT (TArrow _ _)) [] cons name  = throwError $ FalseParameterFail name  
+buildFuncConstraints (TArrow inpT (TArrow t1 t2)) (rt1:rts) cons name =
+  buildFuncConstraints (TArrow t1 t2) rts ((inpT, rt1):cons) name
+buildFuncConstraints (TArrow inpT t1) [rt1] cons name  = return (t1, (inpT, rt1):cons)
+buildFuncConstraints (TArrow inpT t1) _ cons name  = throwError $ FalseParameterFail name
+buildFuncConstraints _ _ cons name  = error "buildFuncConstraints with non function type"
 
 lookupRConstraint :: Expr TypeInfo a -> Infer RType
 lookupRConstraint (ThetaI _ _) = return TFloat
@@ -451,13 +448,12 @@ infer expr = case expr of
     tv <- fresh
     return (tv, c1 ++ c2 ++ c3 ++ [(t1, TBool), (tv, GreaterType t2 t3)], IfThenElse (setRType x tv)  condt trt flt)
   
-  InjF x name e1 e -> do
-    (t1, c1, et1) <- infer e
+  InjF x name e1 -> do
     p_inf <- mapM infer e1
     let (Just (FPair fPair)) = lookup name globalFenv
-    let (funcTy, _, _, _) = fPair
-    (retT, cFunc) <- buildFuncConstraints funcTy t1 (map fst3cts p_inf) [] name
-    return (retT, c1 ++ (concatMap snd3cts p_inf) ++ cFunc, InjF (setRType x retT) name (map trd3cts p_inf) et1)
+    let (FDecl (funcTy, _, _, _, _), [_]) = fPair
+    (retT, cFunc) <- buildFuncConstraints funcTy (map fst3cts p_inf) [] name
+    return (retT, concatMap snd3cts p_inf ++ cFunc, InjF (setRType x retT) name (map trd3cts p_inf))
 
   LetIn x name e1 e2 -> do
     env <- ask

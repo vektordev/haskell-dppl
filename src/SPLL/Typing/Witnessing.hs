@@ -21,10 +21,8 @@ addWitnesses _ (ThetaI ti x) = ThetaI (createWTypeInfo ti) x
 addWitnesses _ (Normal ti) = Normal (createWTypeInfo ti)
 addWitnesses _ (Uniform ti) = Uniform (createWTypeInfo ti)
 addWitnesses _ (Constant ti x) = Constant (createWTypeInfo ti) x
-addWitnesses witVars (InjF ti f_name params expr) = InjF (setWits (createWTypeInfo ti) wits) f_name paramExprs witExpr
-  where witExpr = addWitnesses witVars expr
-        paramExprs = map (addWitnesses witVars) params
-        wits = getWitsW witExpr
+addWitnesses witVars (InjF ti f_name params) = InjF (createWTypeInfo ti) f_name paramExprs
+  where paramExprs = map (addWitnesses witVars) params  -- TODO In some cases some variables can be witnessed
 addWitnesses witVars (PlusF ti expr1 expr2)
   | pt1 == Deterministic && null wit1 = PlusF (getTypeInfo witExpr2) witExpr1 witExpr2
   | pt2 == Deterministic && null wit2 = PlusF (getTypeInfo witExpr1) witExpr1 witExpr2

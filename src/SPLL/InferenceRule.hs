@@ -12,7 +12,6 @@ module SPLL.InferenceRule (
 import SPLL.Typing.PType hiding (TV, NotSetYet)
 import Data.List (isInfixOf, isSuffixOf)
 import SPLL.Lang (Expr(..))
-import SPLL.Typing.RInfer (Scheme (..))
 import SPLL.Typing.RType
 
 data ExprStub = StubIfThenElse
@@ -34,6 +33,7 @@ data ExprStub = StubIfThenElse
               | StubVar
               | StubLetIn
               | StubArg
+              | StubInjF
               | StubCallArg
               | StubLambda
               | StubReadNN
@@ -60,6 +60,7 @@ toStub expr = case expr of
   (Var _ _)      -> StubVar
   LetIn {}       -> StubLetIn
   Arg {}         -> StubArg
+  InjF {}        -> StubInjF
   CallArg {}     -> StubCallArg
   Lambda {}      -> StubLambda
   (ReadNN _ _ _) -> StubReadNN

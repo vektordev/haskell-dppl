@@ -42,7 +42,6 @@ import SPLL.Examples
 import SPLL.Typing.PInferTypeclass
 import Debug.Trace
 import SpecExamples
-import InjectiveFunctions
 import Statistics.Sample.KernelDensity
 import Data.Vector.Generic (fromList)
 import qualified Data.Vector as V
@@ -51,6 +50,7 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 import Data.Number.Erf
 import SPLL.Typing.BruteForceSolver (forceAddTypeInfo, runBruteForceSolver)
+import SPLL.IRCompiler
 
 variableLengthS2 :: Program  () Double
 variableLengthS2 = Program [("b", IfThenElse ()
@@ -118,7 +118,7 @@ newCodeGen tExpr = do
   let prob = generateCode irProb ""
   putStrLn $ unlines prob-}
 
-newCodeGenAll :: (Show a, Ord a, Fractional a) => Env TypeInfo a -> IO ()
+newCodeGenAll :: (Show a, Ord a, Floating a) => Env TypeInfo a -> IO ()
 newCodeGenAll env = do
   pPrint env
   let annotated = map (\(a,b) -> (a, SPLL.Analysis.annotate b)) env
@@ -155,7 +155,7 @@ someFunc = do--thatGaussThing
   PInfer2.showResultsProgDebug (addRTypeInfo $ addEmptyTypeInfo prog)
   putStrLn "done outputting constraints"
   let cmp2 = progToEnv $ addTypeInfo prog-}
-  let prog = uniformExp
+  let prog = testInjF2
   let cmp = progToEnv $ addTypeInfo prog
   --cmp2 <-  env
   --let cmp = [] ++ [("noiseMNistAdd", mNistNoise), ("expertmodel", expertModelsTyped), ("expertmodelAnnotated", expertAnnotatedTyped), ("mNistAdd", testNN)] :: Env TypeInfo Float
@@ -170,13 +170,13 @@ someFunc = do--thatGaussThing
   -- let env = [("main", gaussLists)] :: Env () Float
   -- cmp2 <- compile env
   --pTypeInfoProgIO testProg
-  let prog2 = addWitnessesProg (addTypeInfo testInjFD) :: Program TypeInfoWit Double
-  let Program _ m  = prog2
+  --  let prog2 = addWitnessesProg (addTypeInfo testInjFD) :: Program TypeInfoWit Double
+  --  let Program _ m  = prog2
   --showResultsProg $ (addTypeInfo testLet2)
-  mapM_ putStrLn (prettyPrintProg prog2)
+  --mapM_ putStrLn (prettyPrintProg prog2)
   --testDensity1d "frankTest" (testObserve :: Program () Double) [-0.3, -0.2]
   --testRun "frankTest" (testObserve :: Program () Double) [1.0, 0.44]
-  print m
+  -- print m
   --grad_loss :: [(loss :: a, grad :: Thetas a)]
   --grad_loss thX = [grad' (\theta -> log $ unwrapP $ likelihood (autoEnv env) (autoEnv env) theta (autoExpr expr) (autoVal sample)) thX | sample <- samples]
   --let pp = [VFloat $ 3.0]

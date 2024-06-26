@@ -13,7 +13,7 @@ import Control.Monad.Random (evalRandIO, getRandomR, replicateM, forM_)
 import Lib
 import Data.Reflection (Reifies)
 import Numeric.AD.Internal.Reverse ( Reverse, Tape)
-import InjectiveFunctions
+import PredefinedFunctions (FPair, FEnv, globalFenv)
 --myGradientAscent :: (Num a, Num b, Num c, Num d) => Int -> Env a -> [b] -> Expr a -> [Value a] -> [([c], d)]
 --myGradientAscent 0 _ _ _ _ = []
 --myGradientAscent env thetas expr vals = (thetas, loss) : myGradientAscent env newHypothesis expr vals
@@ -159,11 +159,7 @@ detGenerate env thetas (Call t name) = detGenerate env thetas expr
   where Just expr = lookup name env
 detGenerate env thetas (Var t name) = detGenerate env thetas expr
   where Just expr = lookup name env
-detGenerate env thetas (InjF t name params expr) = forward params_val innerVal
-  where (Just (FPair fPair)) = lookup name globalFenv
-        (_, forward, _, _) = fPair
-        innerVal = detGenerate env thetas expr
-        params_val = map (detGenerate env thetas) params
+detGenerate env thetas (InjF t name params) = error "Not yet implemented"
 detGenerate _ _ expr =
   if pt /= Deterministic
   then error "tried detGenerate on non-deterministic expr"
@@ -285,14 +281,7 @@ likelihood globalEnv env thetas (Var _ name) branchMap val = likelihood globalEn
 
 --likelihood([a, b, ... l], Cons subExprA subExprB)
 -- = (likelihood(a, subExprA) * (likelihood([b, ..., l], subExprB)
-likelihood globalEnv env thetas inj@(InjF ti name params expr) branchMap val =
-  likelihood globalEnv env thetas expr branchMap invVal `pAnd` (DiscreteProbability $ abs (inverse_grad params_val val))
-  where (Just (FPair (_, forward, inverse, inverse_grad))) = lookup name globalFenv
-        --inverse_grad_auto = grad' (\[val] -> callInv globalFenv2 name (map autoVal params_val) val) [vfloat_val]
-        --(VFloat vfloat_val) = val
-        params_val = map (detGenerate env thetas) params
-        invVal = inverse params_val val
-
+likelihood globalEnv env thetas inj@(InjF ti name params) branchMap val = error "Not yet implemented"
 -- expr -> let x = normal in sig(x)
 -- likelihood(0.2|expr) = (x = inverse_sig(0.2)) -->
 likelihood globalEnv env thetas (LetIn _ name decl bij) branchMap val
@@ -327,17 +316,7 @@ getInvValue _ _ _ _ expr v _ _
 getInvValue fenv globalEnv env thetas (Var _ name) var val cor_factor = if name == var
                                                                             then (val, abs cor_factor, Map.empty)
                                                                             else error "False variable in var encountered"
-getInvValue fenv globalEnv env thetas (InjF _ name params f2) var val cor_factor =
-  getInvValue fenv globalEnv env thetas f2 var (inverse params_val val) (cor_factor * inverse_grad params_val val)
-  where (Just (FPair fPair)) = lookup name fenv
-        (_, forward, inverse, inverse_grad) = fPair
-        --grad_loss :: [(loss :: a, grad :: Thetas a)]
-        --grad_loss thX = [grad' (\theta -> log $ unwrapP $ likelihood (autoEnv env) (autoEnv env) theta (autoExpr expr) (autoVal sample)) thX | sample <- samples]
-
-        --inverse_grad_auto = head $ grad (\[inv_val] -> inverse_p inv_val) [val]
-        --inverse_p = inverse params_val
-        --auto_p = (map auto params_val)
-        params_val = map (detGenerate env thetas) params
+getInvValue fenv globalEnv env thetas (InjF _ name params) var val cor_factor = error "Not yet implemented"
 
 getInvValue fenv globalEnv env thetas (PlusF ti expr1 expr2) var (VFloat val) cor_factor
   | var `elem` getWitsW expr1 = getInvValue fenv globalEnv env thetas expr1 var (VFloat $ val - val2) cor_factor

@@ -1,4 +1,5 @@
 {-# OPTIONS_GHC -fwarn-incomplete-patterns #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 module SPLL.Typing.Typing (
   Env,
@@ -7,7 +8,10 @@ module SPLL.Typing.Typing (
   getP,
   getPW,
   getRW,
-  progToEnv
+  progToEnv,
+  autoVal,
+  autoEnv,
+  autoExpr
 )where
 
 import SPLL.Lang
@@ -17,6 +21,10 @@ import SPLL.Typing.PType
 import Data.Maybe
 import Control.Monad.Reader
 import Control.Monad.Except
+
+import Numeric.AD (grad', auto)
+import Numeric.AD.Internal.Reverse ( Reverse, Tape)
+import Data.Reflection (Reifies)
 
 -- Because Env will be polluted by local symbols as we evaluate, we need to reset when calling functions.
 -- Therefore, we define that all functions must exist in the global namespace.
@@ -201,3 +209,17 @@ inferP (Cons _ headX tailX) = do
 
 progToEnv :: Program x a -> Env x a
 progToEnv (Program funcs main_expr) = ("main", main_expr): funcs
+
+autoExpr :: (Num a, Reifies s Tape) => Expr x a -> Expr x (Reverse s a)
+autoExpr = exprMap auto
+
+autoEnv :: (Num a, Reifies s Tape) => Env x a -> Env x (Reverse s a)
+autoEnv = map (\ (name, expr) -> (name, autoExpr expr))
+
+autoVal :: (Num a, Reifies s Tape) => Value a -> Value (Reverse s a)
+autoVal (VBool x) = VBool x
+autoVal (VFloat y) = VFloat (auto y)
+autoVal (VList xs) = VList (map autoVal xs)
+autoVal (VTuple x1 x2) = VTuple (autoVal x1) (autoVal x2)
+autoVal (VInt x) = VInt x
+autoVal (VSymbol x) = VSymbol x

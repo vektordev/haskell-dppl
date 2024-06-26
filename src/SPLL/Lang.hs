@@ -12,14 +12,9 @@ module SPLL.Lang (
 , tMapHead
 , getRType
 , Name
-, Params
-, FEnv
-, FEnv2
 , Limits (..)
 , exprMap
 , swapLimits
-, FPair (..)
-, FPair2 (..)
 , prettyPrintProg
 , prettyPrint
 , prettyPrintProgNoReq
@@ -53,8 +48,10 @@ import SPLL.Typing.PType
 import SPLL.Typing.RType
 import qualified Data.Set as Set
 
+
 import qualified Data.Map as Map
 import Control.Applicative (liftA2)
+
 
 --Expr x (a :: Precision)
 --data Precision = P32 | P64"
@@ -80,7 +77,7 @@ data Expr x a = IfThenElse x (Expr x a) (Expr x a) (Expr x a)
               --  | LetInTuple x String (Expr x a) (BijectiveF a) (Expr x a)
               | LetIn x String (Expr x a) (Expr x a)
              -- Change params to expr
-              | InjF x String [Expr x a] (Expr x a)
+              | InjF x String [Expr x a]
               | Arg x String RType (Expr x a)
               | CallArg x String [Expr x a]
               | Lambda x String (Expr x a)
@@ -129,12 +126,6 @@ vextend env (x, s) = env { values = Map.insert x s (values env) }
 vremove :: VEnv a -> String -> VEnv a
 vremove env var = env {values = Map.delete var (values env)}
 
-type Params a = [Value a]
--- forward, inverse, inverse'
-newtype FPair a = FPair (RType, Params a -> Value a -> Value a, Params a -> Value a -> Value a, Params a -> Value a -> a)
-type FEnv a = [(String, FPair a)]
-newtype FPair2 a = FPair2 (Params a -> a -> a,  Params a -> a -> a, Params a -> a -> a)
-type FEnv2 a = [(String, FPair2 a)]
 type Name = String
 
 data TypeInfo = TypeInfo RType PType deriving (Show, Eq, Ord)
@@ -231,7 +222,7 @@ exprMap f expr = case expr of
   (Call t x) -> Call t x
   (Var t x) -> Var t x
   (LetIn t x a b) -> LetIn t x (exprMap f a) (exprMap f b)
-  (InjF t x a b) -> InjF t x (map (exprMap f) a) (exprMap f b)
+  (InjF t x a) -> InjF t x (map (exprMap f) a)
   --(LetInD t x a b) -> LetInD t x (exprMap f a) (exprMap f b)
   --(LetInTuple t x a b c) -> LetInTuple t x (exprMap f a) (biFMap f b) (exprMap f c)
   (Arg t name r a) -> Arg t name r (exprMap f a)
@@ -281,7 +272,7 @@ tMapHead f expr = case expr of
   (Call _ x) -> Call (f expr) x
   (Var _ x) -> Var (f expr) x
   (LetIn _ x a bi) -> LetIn (f expr) x a bi
-  (InjF _ x a b) -> InjF (f expr) x a b
+  (InjF _ x a) -> InjF (f expr) x a
   --(LetInD t x a b) -> LetInD (f expr) x a b
   --(LetInTuple t x a b c) -> LetInTuple (f expr) x a b c
   (Arg _ name r a) -> Arg (f expr) name r a
@@ -309,7 +300,7 @@ tMapTails f expr = case expr of
   (Call t x) -> Call t x
   (Var t x) -> Var t x
   (LetIn t x a b) -> LetIn t x (tMap f a) (tMap f b)
-  (InjF t x a b) -> InjF t x (map (tMap f) a) (tMap f b)
+  (InjF t x a) -> InjF t x (map (tMap f) a)
   --(LetInD t x a b) -> LetInD t x (tMap f a) (tMap f b)
   --(LetInTuple t x a b c) -> LetInTuple t x (tMap f a) b (tMap f c)
   (Arg t name r a) -> Arg t name r (tMap f a)
@@ -335,7 +326,7 @@ tMap f expr = case expr of
   (Call _ x) -> Call (f expr) x
   (Var _ x) -> Var (f expr) x
   (LetIn _ x a b) -> LetIn (f expr) x (tMap f a) (tMap f b)
-  (InjF t x a b) -> InjF (f expr) x (map (tMap f) a) (tMap f b)
+  (InjF t x a) -> InjF (f expr) x (map (tMap f) a)
   --(LetInD t x a b) -> LetInD (f expr) x (tMap f a) (tMap f b)
   --(LetInTuple t x a b c) -> LetInTuple (f expr) x (tMap f a) b (tMap f c)
   (Arg _ name r a) -> Arg (f expr) name r (tMap f a)
@@ -404,7 +395,7 @@ getSubExprs expr = case expr of
   (Call _ _) -> []
   (LetIn _ _ a b) -> [a, b]
   (Var _ _) -> []
-  (InjF _ _ a b) -> a ++ [b]
+  (InjF _ _ a) -> a
   --(LetInD t x a b) -> [a,b]
   --(LetInTuple t x a b c) -> [a,c]
   (Arg _ _ _ a) -> [a]
@@ -447,7 +438,7 @@ setSubExprs expr [a,b,c] = case expr of
   CallArg t n _ -> CallArg t n [a,b,c]
   _ -> error "unmatched expr in setSubExprs"
 setSubExprs expr subExprs = case expr of
-  InjF t l _ b -> InjF t l (init subExprs) (last subExprs)
+  InjF t l _ -> InjF t l subExprs
   CallArg t n _ -> CallArg t n subExprs
   _ -> error "unmatched expr in setSubExprs"
 
@@ -471,7 +462,7 @@ getTypeInfo expr = case expr of
   (Call t _)            -> t
   (Var t _)             -> t
   (LetIn t _ _ _)       -> t
-  (InjF t _ _ _)        -> t
+  (InjF t _ _)        -> t
   --(LetInD t _ _ _)      -> t
   --(LetInTuple t _ _ _ _)-> t
   (Arg t _ _ _)         -> t
@@ -546,7 +537,7 @@ printFlat expr = case expr of
   LetIn {} -> "LetIn"
   --(LetInD {}) -> "LetInD"
   --(LetInTuple {}) -> "LetInTuple"
-  (InjF t _ _ _)        -> "InjF"
+  (InjF t _ _)        -> "InjF"
   (Arg _ var r _ ) -> "Bind " ++ var ++ "::" ++ show r
   (CallArg _ a _ ) -> "CallArg " ++ a
   (Lambda _ name _) -> "\\" ++ name  ++ " -> "
@@ -572,10 +563,11 @@ printFlatNoReq expr = case expr of
   (Call _ a) -> "Call " ++ a
   Var _ _ -> "Var"
   LetIn {} -> "LetIn"
-  (InjF t _ _ _) -> "InjF"
+  (InjF t _ _) -> "InjF"
   --(LetInD {}) -> "LetInD"
   --(LetInTuple {}) -> "LetInTuple"
   (Arg _ var r _ ) -> "Bind " ++ var ++ "::" ++ show r
   (CallArg _ a _ ) -> "CallArg" ++ a
   (Lambda _ name _) -> "\\" ++ name  ++ " -> "
   ReadNN {} -> "ReadNN"
+  

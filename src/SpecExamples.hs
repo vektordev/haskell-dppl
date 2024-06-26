@@ -22,7 +22,7 @@ variableLengthT = Program [("b", IfThenElse (TypeInfoWit (ListOf TBool) Integrat
                              (Constant (TypeInfoWit TBool Deterministic Set.empty) (VBool True))
                              (Call (TypeInfoWit (ListOf TBool) Integrate Set.empty)  "b")))]
                   (Call (TypeInfoWit (ListOf TBool) Integrate Set.empty) "b")
-
+{-
 testLetS :: Program () Double
 testLetS = Program [](LetIn () "x"
                       (PlusF () (ThetaI () 0) (Normal ()))
@@ -55,7 +55,7 @@ testLetNonLetT = Program [] (LetIn (TypeInfoWit TFloat Bottom Set.empty) "x"
 testLetDS :: Program () Double
 testLetDS = Program [] (LetIn () "x" (PlusF () (ThetaI () 0) (Constant () (VFloat 3.0)))
            (PlusF () (InjF () "sig" [] (Var () "x")) (Normal ())))
-           
+      
 testLetDT :: Program TypeInfoWit Double
 testLetDT = Program [] (LetIn (TypeInfoWit TFloat Integrate Set.empty) "x"
            (PlusF (TypeInfoWit TFloat Deterministic Set.empty)
@@ -65,7 +65,7 @@ testLetDT = Program [] (LetIn (TypeInfoWit TFloat Integrate Set.empty) "x"
               (InjF (TypeInfoWit TFloat Deterministic (Set.singleton "x"))  "sig" []
                 (Var (TypeInfoWit TFloat Deterministic (Set.singleton "x")) "x"))
               (Normal (TypeInfoWit TFloat Integrate Set.empty))))
-
+-}
 testLetTupleS :: Program () Double
 testLetTupleS = Program [] (LetIn() "x" (PlusF () (ThetaI () 0) (Normal ()))
                                               (Cons () (Var () "x") 

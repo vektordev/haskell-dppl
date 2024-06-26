@@ -8,6 +8,7 @@ import Control.Monad.Random
 import Statistics.Distribution.Normal (normalDistr)
 import Data.Foldable
 import Data.Number.Erf
+import Debug.Trace (trace)
 
 type IRThetas a = [a]
 type IREnv a = [(String, IRExpr a)]
@@ -33,7 +34,7 @@ generate globalEnv env thetas args (IROp OpMult a b) = do
   case (aVal, bVal) of
     (VFloat af, VFloat bf) -> return $ VFloat (af * bf)
     (VInt af, VInt bf) -> return $ VInt (af * bf)
-    _ -> error "Type error: ;ult can only multiply numbers (of the same type)"
+    _ -> error "Type error: Mult can only multiply numbers (of the same type)"
 generate globalEnv env thetas args (IROp OpGreaterThan a b) = do
   aVal <- generate globalEnv env thetas args a
   bVal <- generate globalEnv env thetas args b
