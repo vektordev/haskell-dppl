@@ -13,14 +13,14 @@ import SPLL.InferenceRule (algName)
 -- perhaps as an explicit lambda in the top of the expression, otherwise we'll get trouble generating code.
 -- TODO: How do we deal with top-level lambdas in binding here?
 --  TL-Lambdas are presumably to be treated differently than non-TL, at least as far as prob is concerned.
-envToIR :: (Ord a, Floating a, Show a, Eq a) => Env (StaticAnnotations a) a -> [(String, IRExpr a)]
+envToIR :: (Ord a, Floating a, Show a, Eq a) => Env (TypeInfo a) a -> [(String, IRExpr a)]
 envToIR = concatMap (\(name, binding) ->
-  let (StaticAnnotations _ pType _) = getTypeInfo binding in
-    if pType == Deterministic || pType == Integrate then
+  let pt = pType $ getTypeInfo binding in
+    if pt == Deterministic || pt == Integrate then
       [(name ++ "_integ", IRLambda "low" (IRLambda "high" (postProcess $ runSupplyVars (toIRIntegrate binding (IRVar "low") (IRVar "high"))))),
        (name ++ "_prob", IRLambda "sample" (postProcess $ runSupplyVars (toIRProbability binding (IRVar "sample")))),
        (name ++ "_gen", postProcess $ toIRGenerate binding)]
-    else if pType == Prob then
+    else if pt == Prob then
       [(name ++ "_prob", IRLambda "sample" (postProcess $ runSupplyVars (toIRProbability binding (IRVar "sample")))),
        (name ++ "_gen", postProcess $ toIRGenerate binding)]
     else
@@ -131,7 +131,7 @@ hasAlgorithm tags alg = alg `elem` ([algName a | Alg a <- tags])
 --hasAlgorithm tags alg = not $ null $ filter (== alg) [a | Alg a <- tags]
 
 --in this implementation, I'll forget about the distinction between PDFs and Probabilities. Might need to fix that later.
-toIRProbability :: (Floating a, Show a) => Expr (StaticAnnotations a) a -> IRExpr a -> Supply Int (IRExpr a)
+toIRProbability :: (Floating a, Show a) => Expr (TypeInfo a) a -> IRExpr a -> Supply Int (IRExpr a)
 toIRProbability (IfThenElse t cond left right) sample = do
   var_cond_p <- mkVariable "cond"
   condExpr <- toIRProbability cond (IRConst (VBool True))
@@ -141,7 +141,7 @@ toIRProbability (IfThenElse t cond left right) sample = do
     (IROp OpPlus
       (IROp OpMult (IRVar var_cond_p) leftExpr)
       (IROp OpMult (IROp OpSub (IRConst $ VFloat (1.0)) (IRVar var_cond_p) ) rightExpr))
-toIRProbability (GreaterThan (StaticAnnotations t _ extras) left right) sample
+toIRProbability (GreaterThan (TypeInfo {rType = t, tags = extras}) left right) sample
   --TODO: Find a better lower bound than just putting -9999999
   | extras `hasAlgorithm` "greaterThanLeft" = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
@@ -157,7 +157,7 @@ toIRProbability (GreaterThan (StaticAnnotations t _ extras) left right) sample
     return $ IRLetIn var (toIRGenerate right)
       (IRLetIn var2 integrate
         (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)) (IRVar var2) ))
-toIRProbability (MultF (StaticAnnotations TFloat _ extras) left right) sample
+toIRProbability (MultF (TypeInfo {rType = TFloat, tags = extras}) left right) sample
   | extras `hasAlgorithm` "multLeft" = do
     var <- mkVariable ""
     rightExpr <- toIRProbability right (IROp OpDiv sample (IRVar var))
@@ -168,7 +168,7 @@ toIRProbability (MultF (StaticAnnotations TFloat _ extras) left right) sample
     leftExpr <- toIRProbability left (IROp OpDiv sample (IRVar var))
     return $ IRLetIn var (toIRGenerate right)
       (IROp OpDiv leftExpr (IRUnaryOp OpAbs (IRVar var)))
-toIRProbability (PlusF (StaticAnnotations TFloat _ extras) left right) sample
+toIRProbability (PlusF (TypeInfo {rType = TFloat, tags = extras}) left right) sample
   | extras `hasAlgorithm` "plusLeft" = do
     var <- mkVariable ""
     rightExpr <- toIRProbability right (IROp OpSub sample (IRVar var))
@@ -177,13 +177,13 @@ toIRProbability (PlusF (StaticAnnotations TFloat _ extras) left right) sample
     var <- mkVariable ""
     leftExpr <- toIRProbability left (IROp OpSub sample (IRVar var))
     return $ IRLetIn var (toIRGenerate right) leftExpr
-toIRProbability (PlusI (StaticAnnotations TInt _ extras) left right) sample
+toIRProbability (PlusI (TypeInfo {rType = TInt, tags = extras}) left right) sample
   | extras `hasAlgorithm` "enumeratePlusLeft" = do
     --Solving enumPlusLeft works by enumerating all left hand side choices.
     -- We then invert the addition to infer the right hand side.
     -- TODO: Theoretical assessment whether there's a performance or other difference between enumLeft and enumRight.
-    let StaticAnnotations _ _ extrasLeft = getTypeInfo left
-    let StaticAnnotations _ _ extrasRight = getTypeInfo right
+    let extrasLeft = tags $ getTypeInfo left
+    let extrasRight = tags $ getTypeInfo right
     let enumListL = head $ [x | EnumList x <- extrasLeft]
     let enumListR = head $ [x | EnumList x <- extrasRight]
     enumVar <- mkVariable "enum"
@@ -195,10 +195,10 @@ toIRProbability (PlusI (StaticAnnotations TInt _ extras) left right) sample
     var <- mkVariable ""
     rightExpr <- toIRProbability right (IROp OpSub sample (IRVar var))
     return $ IRLetIn var (toIRGenerate left) rightExpr
-toIRProbability (ExpF (StaticAnnotations TFloat _ extras) f) sample = do
+toIRProbability (ExpF (TypeInfo {rType = TFloat, tags = extra}) f) sample = do
   logExpr <- toIRProbability f (IRUnaryOp OpLog sample)
   return $ IROp OpDiv logExpr (IRUnaryOp OpAbs sample)
-toIRProbability (NegF (StaticAnnotations TFloat _ extras) f) sample =
+toIRProbability (NegF (TypeInfo {rType = TFloat, tags = extra}) f) sample =
   toIRProbability f (IRUnaryOp OpNeg sample)
 toIRProbability (ReadNN _ name subexpr) sample = do
   let mkInput = toIRGenerate subexpr
@@ -232,7 +232,7 @@ toIRProbability (Call _ name) sample = return $ IRCall (name ++ "_prob") [sample
 toIRProbability (ThetaI _ t) sample = indicator (IROp OpEq sample (IRTheta t))
 toIRProbability x sample = error ("found no way to convert to IR: " ++ show x)
 
-packParamsIntoLetinsProb :: (Show a, Floating a) => [String] -> [Expr (StaticAnnotations a) a] -> IRExpr a -> IRExpr a -> Supply Int (IRExpr a)
+packParamsIntoLetinsProb :: (Show a, Floating a) => [String] -> [Expr (TypeInfo a) a] -> IRExpr a -> IRExpr a -> Supply Int (IRExpr a)
 --packParamsIntoLetinsProb [] [] expr _ = do
 --  return expr
 --packParamsIntoLetinsProb [] _ _ _ = error "More parameters than variables"
@@ -248,7 +248,7 @@ indicator condition = return $ IRIf condition (IRConst $ VFloat 1) (IRConst $ VF
 
 --folding detGen and Gen into one, as the distinction is one to make sure things that are det are indeed det.
 -- That's what the type system is for though.
-toIRGenerate :: (Show a, Floating a) => Expr (StaticAnnotations a) a -> IRExpr a
+toIRGenerate :: (Show a, Floating a) => Expr (TypeInfo a) a -> IRExpr a
 toIRGenerate (IfThenElse _ cond left right) = IRIf (toIRGenerate cond) (toIRGenerate left) (toIRGenerate right)
 toIRGenerate (GreaterThan _ left right) = IROp OpGreaterThan (toIRGenerate left) (toIRGenerate right)
 toIRGenerate (PlusF _ left right) = IROp OpPlus (toIRGenerate left) (toIRGenerate right)
@@ -275,7 +275,7 @@ toIRGenerate (Lambda t name subExpr) = IRLambda name (toIRGenerate subExpr)
 toIRGenerate (ReadNN t name subexpr) = IRCall "randomchoice" [IREvalNN name (toIRGenerate subexpr)]
 toIRGenerate x = error ("found no way to convert to IRGen: " ++ show x)
 
-packParamsIntoLetinsGen :: (Show a, Floating a) => [String] -> [Expr (StaticAnnotations a) a] -> IRExpr a -> IRExpr a
+packParamsIntoLetinsGen :: (Show a, Floating a) => [String] -> [Expr (TypeInfo a) a] -> IRExpr a -> IRExpr a
 packParamsIntoLetinsGen [] [] expr = expr
 packParamsIntoLetinsGen [] _ _ = error "More parameters than variables"
 packParamsIntoLetinsGen _ [] _ = error "More variables than parameters"
@@ -288,12 +288,12 @@ bindLocal namestring binding inEx = do
   varName <- mkVariable namestring
   return $ IRLetIn varName binding inEx
 
-toIRIntegrate :: (Show a, Floating a) => Expr (StaticAnnotations a) a -> IRExpr a -> IRExpr a -> Supply Int (IRExpr a)
-toIRIntegrate (Uniform (StaticAnnotations _ _ tags)) lower higher = do
+toIRIntegrate :: (Show a, Floating a) => Expr (TypeInfo a) a -> IRExpr a -> IRExpr a -> Supply Int (IRExpr a)
+toIRIntegrate (Uniform _) lower higher = do
   return (IROp OpSub (IRCumulative IRUniform higher) (IRCumulative IRUniform lower))
-toIRIntegrate (Normal StaticAnnotations {}) lower higher = do
+toIRIntegrate (Normal TypeInfo {}) lower higher = do
   return (IROp OpSub (IRCumulative IRNormal higher) (IRCumulative IRNormal lower))
-toIRIntegrate (MultF (StaticAnnotations _ _ extras) left right) lower higher
+toIRIntegrate (MultF (TypeInfo {tags = extras}) left right) lower higher
   | extras `hasAlgorithm` "multLeft" = do
     var <- mkVariable ""
     rightExpr <- toIRIntegrate right (IROp OpDiv lower (IRVar var)) (IRUnaryOp OpAbs (IROp OpDiv higher (IRVar var)))
@@ -304,7 +304,7 @@ toIRIntegrate (MultF (StaticAnnotations _ _ extras) left right) lower higher
       leftExpr <- toIRIntegrate left (IROp OpDiv lower (IRVar var)) (IRUnaryOp OpAbs (IROp OpDiv higher (IRVar var)))
       return $ IRLetIn var (toIRGenerate right)
         leftExpr
-toIRIntegrate (PlusF (StaticAnnotations _ _ extras) left right) lower higher
+toIRIntegrate (PlusF TypeInfo {tags = extras} left right) lower higher
   | extras `hasAlgorithm` "plusLeft" = do
     var <- mkVariable ""
     rightExpr <- toIRIntegrate right (IROp OpSub lower (IRVar var)) (IROp OpSub higher (IRVar var))

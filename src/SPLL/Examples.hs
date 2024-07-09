@@ -4,6 +4,7 @@ import SPLL.Lang
 
 import SPLL.Typing.RType
 import SPLL.Typing.PType
+import SPLL.Typing.Typing (TypeInfo)
 
 --weatherHask lastDay = if lastDay == rainy
 --  then let current = randA in (current, weatherHask current)
@@ -436,15 +437,15 @@ gaussMultiLists = IfThenElse ()
 testNNUntyped :: Expr () a
 --testNN : Lambda im1 -> (Lambda im2 -> readNN im1 + readNN im2)
 testNNUntyped = Lambda () "im1" (Lambda () "im2" (PlusI () (ReadNN () "classifyMNist" (Var () "im1")) (ReadNN () "classifyMNist" (Var () "im2"))))
-
-testNN :: Expr TypeInfo a
+{-
+testNN :: Expr (TypeInfo a) a
 testNN = Lambda (TypeInfo (TArrow TSymbol (TArrow TSymbol TInt)) Bottom) "im1"
   (Lambda (TypeInfo (TArrow TSymbol TInt) Bottom) "im2" (PlusI (TypeInfo TInt Integrate)
     (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im1"))
     (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im2"))))
     
 
-mNistNoise :: Expr TypeInfo a
+mNistNoise :: Expr (TypeInfo a) a
 mNistNoise = Lambda (TypeInfo (TArrow TSymbol (TArrow TSymbol TInt)) Bottom) "im1"
   (Lambda (TypeInfo (TArrow TSymbol TInt) Bottom) "im2"
     (IfThenElse (TypeInfo TInt Integrate) (GreaterThan (TypeInfo TBool Integrate) (Uniform (TypeInfo TFloat Integrate)) (ThetaI (TypeInfo TFloat Deterministic) 0) )
@@ -457,7 +458,7 @@ mNistNoise = Lambda (TypeInfo (TArrow TSymbol (TArrow TSymbol TInt)) Bottom) "im
       (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im1"))
       (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im2")))))
 
-triMNist :: Expr TypeInfo a
+triMNist :: Expr (TypeInfo a) a
 triMNist = Lambda (TypeInfo (TArrow TSymbol (TArrow TSymbol (TArrow TSymbol TInt))) Bottom) "im1"
   (Lambda (TypeInfo (TArrow TSymbol (TArrow TSymbol TInt)) Bottom) "im2"
     (Lambda (TypeInfo (TArrow TSymbol TInt) Bottom) "im3" (PlusI (TypeInfo TInt Integrate)
@@ -473,7 +474,7 @@ expertModels = Lambda () "im" (IfThenElse ()
   (ReadNN () "classifyMNist" (Var () "im"))
   (ReadNN () "classifyCIFAR" (Var () "im")))
 
-expertModelsTyped :: Expr TypeInfo a
+expertModelsTyped :: Expr (TypeInfo a) a
 expertModelsTyped = Lambda (TypeInfo (TArrow TSymbol TInt) Integrate) "im" (IfThenElse (TypeInfo TInt Integrate)
   (ReadNN (TypeInfo TBool Integrate) "isMnist" (Var (TypeInfo TSymbol Deterministic) "im"))
   (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im"))
@@ -485,12 +486,12 @@ expertAnnotated = Lambda () "im" (IfThenElse ()
   (Cons () (Constant () (VInt 1)) (Cons () (ReadNN () "classifyMNist" (Var () "im")) (Null ())))
   (Cons () (Constant () (VInt 2)) (Cons () (ReadNN () "classifyCIFAR" (Var () "im")) (Null ()))))
 
-expertAnnotatedTyped :: Expr TypeInfo a
+expertAnnotatedTyped :: Expr (TypeInfo a) a
 expertAnnotatedTyped = Lambda (TypeInfo (TArrow TSymbol (SPLL.Typing.RType.ListOf TInt)) Integrate) "im" (IfThenElse (TypeInfo (SPLL.Typing.RType.ListOf TInt) Integrate)
   (ReadNN (TypeInfo TBool Integrate) "isMnist" (Var (TypeInfo TSymbol Deterministic) "im"))
   (Cons (TypeInfo (SPLL.Typing.RType.ListOf TInt) Integrate) (Constant (TypeInfo TInt Deterministic) (VInt 1)) (Cons (TypeInfo (SPLL.Typing.RType.ListOf TInt) Integrate) (ReadNN (TypeInfo TInt Integrate) "classifyMNist" (Var (TypeInfo TSymbol Deterministic) "im")) (Null (TypeInfo (SPLL.Typing.RType.ListOf TInt) Deterministic))))
   (Cons (TypeInfo (SPLL.Typing.RType.ListOf TInt) Integrate) (Constant (TypeInfo TInt Deterministic) (VInt 2)) (Cons (TypeInfo (SPLL.Typing.RType.ListOf TInt) Integrate) (ReadNN (TypeInfo TInt Integrate) "classifyCIFAR" (Var (TypeInfo TSymbol Deterministic) "im")) (Null (TypeInfo (SPLL.Typing.RType.ListOf TInt) Deterministic)))))
-
+-}
 compilationExample :: Expr () a
 compilationExample = GreaterThan () (Uniform ()) (ThetaI () 0)
 

@@ -47,13 +47,10 @@ untypeP (Program defs main) = Program (map (\(a,b) -> (a, untypeE b)) defs) (unt
 untypeE :: Expr t a -> Expr () a
 untypeE = tMap (const ())
 
-instance Show a => Recompilable (Program TypeInfoWit a) where
+instance Show a => Recompilable (Program (TypeInfo a) a) where
   recompile = infer . untypeP
 
-instance Show a => Recompilable (Program TypeInfo a) where
-  recompile = inferNoWit . untypeP
-
-instance Show a => Recompilable (Expr TypeInfo a) where
+instance Show a => Recompilable (Expr (TypeInfo a) a) where
   recompile e = case inferNoWit $ makeMain $ untypeE e of
     Right (Program [("main", d)] _) -> Right d
     Left x -> Left x
@@ -63,11 +60,12 @@ instance Show a => Recompilable (Expr TypeInfo a) where
 examples :: [Program () Float]
 examples = [makeMain variableLength, makeMain testGreater, makeMain testGaussianMixture, makeMain testIntractable]
 
-testsetA :: [Program TypeInfoWit Double]
+{-
+testsetA :: [Program (TypeInfo a) Double]
 testsetA = [variableLengthT, testLetTupleT, testLetXYT]
 prop_RecompileA :: Property
 prop_RecompileA = forAll (elements testsetA) testRecompile
-
+-}
 --testsetB :: [Expr TypeInfo Double]
 --testsetB = [triMNist]
 --prop_RecompileB :: Property
@@ -262,11 +260,11 @@ findThetas (ThetaI a b) = [ThetaI a b]
 findThetas expr = concatMap findThetas x
   where x = getSubExprs expr
 
-expressions :: [(Expr () Float, TypeInfo)]
+expressions :: [(Expr () Float, TypeInfo a)]
 expressions = [
-    (testIf, TypeInfo TBool Integrate),
-    (testGreater, TypeInfo TBool Integrate),
-    (testGreater2, TypeInfo TBool Integrate)
+    (testIf, makeTypeInfo {rType = TBool, pType = Integrate}),
+    (testGreater, makeTypeInfo {rType = TBool, pType = Integrate}),
+    (testGreater2, makeTypeInfo {rType = TBool, pType = Integrate})
   ]
 
 epsilon :: (Show a, Ord a, Num a) => a -> a -> a -> Property
@@ -286,7 +284,7 @@ invariantDensity :: IO()
 invariantDensity = undefined
 
 
-propInfer :: (Eq a, Show a) => Program () a -> Program TypeInfoWit a -> Property
+propInfer :: (Eq a, Show a) => Program () a -> Program (TypeInfo a) a -> Property
 propInfer a b = addWitnessesProg (addTypeInfo a) === b
 
 sumsToOne :: IO Result

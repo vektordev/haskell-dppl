@@ -3,11 +3,11 @@ module SPLL.Lang (
 , ExprFlip (..)
 , unflip
 , Value (..)
-, TypeInfo (..)
 , Program (..)
-, TypeInfoWit (..)
 , getTypeInfo
+, setTypeInfo
 , tMap
+, tMapM
 , tMapProg
 , tMapHead
 , getRType
@@ -18,21 +18,8 @@ module SPLL.Lang (
 , prettyPrintProg
 , prettyPrint
 , prettyPrintProgNoReq
-, setRType
-, setPType
-, TypedProg
-, TypedExpr
-, VEnv (..)
-, BranchMap
 , getVFloat
-, vempty
-, getPTypeW
-, getWitsW
-, getWits
-, setWits
 , checkLimits
-, vremove
-, vextend
 , WitnessedVars
 , getSubExprs
 , setSubExprs
@@ -111,31 +98,11 @@ instance Traversable (ExprFlip x) where
       traversed = tTraverse f unflipped
       unflipped = unflip eflip
 
-data VEnv a
-  = ValueEnv {values :: Map.Map String (Value a), branchMap :: BranchMap a}
-  deriving (Eq, Show)
-
-
-type BranchMap a = Map.Map (Expr TypeInfoWit a) [String]
-vempty :: VEnv a
-vempty = ValueEnv {values = Map.empty, branchMap = Map.empty}
-
-vextend :: VEnv a -> (String, Value a) -> VEnv a
-vextend env (x, s) = env { values = Map.insert x s (values env) }
-
-vremove :: VEnv a -> String -> VEnv a
-vremove env var = env {values = Map.delete var (values env)}
 
 type Name = String
 
-data TypeInfo = TypeInfo RType PType deriving (Show, Eq, Ord)
-data TypeInfoWit = TypeInfoWit RType PType WitnessedVars deriving (Show, Eq, Ord)
--- only use ord instance for algorithmic convenience, not for up/downgrades / lattice work.
-
 data Program x a = Program [Decl x a] (Expr x a) deriving (Show, Eq)
 
-type TypedExpr a = Expr TypeInfo a
-type TypedProg a = Program TypeInfo a
 type Decl x a = (String, Expr x a)
 
 type WitnessedVars = Set.Set String
@@ -186,21 +153,6 @@ swapLimits _ = error "swapLimits on non-range"
 
 limitsMap :: (a -> b) -> Limits a -> Limits b
 limitsMap f (Limits a b) = Limits (fmap (valMap f) a) (fmap (valMap f) b)
-
-setRType :: TypeInfo -> RType -> TypeInfo
-setRType (TypeInfo _ pt) rt =  TypeInfo rt pt
-getPType :: TypeInfo -> PType 
-getPType (TypeInfo _ pt) = pt
-setPType :: TypeInfo -> PType -> TypeInfo
-setPType (TypeInfo rt _) pt =  TypeInfo rt pt
-getWits :: TypeInfoWit  -> WitnessedVars
-getWits (TypeInfoWit _ _ a) =  a
-setWits :: TypeInfoWit  -> WitnessedVars -> TypeInfoWit
-setWits (TypeInfoWit a b _) = TypeInfoWit a b
-getWitsW :: Expr TypeInfoWit a -> WitnessedVars
-getWitsW e = getWits (getTypeInfo e)
-getPTypeW :: TypeInfoWit -> PType 
-getPTypeW (TypeInfoWit _ pt _) = pt
 
 exprMap :: (a -> b) -> Expr x a -> Expr x b
 exprMap f expr = case expr of
@@ -372,6 +324,21 @@ tTraverse f expr
   | length (getSubExprs expr) == 2 =
       getBinaryConstructor expr <$> f (getTypeInfo expr) <*> tTraverse f (getSubExprs expr !! 0) <*> tTraverse f (getSubExprs expr !! 1)
 
+tMapM :: Monad m => (Expr x a -> m y) -> Expr x a -> m (Expr y a)
+tMapM f expr
+  | length (getSubExprs expr) == 0 = do
+      t <- f expr
+      return $ getNullaryConstructor expr t
+  | length (getSubExprs expr) == 1 = do
+       t <- f expr
+       subExpr <- tMapM f (getSubExprs expr !! 0)
+       return $ getUnaryConstructor expr t subExpr
+  | length (getSubExprs expr) == 2 =do
+       t <- f expr
+       subExpr0 <- tMapM f (getSubExprs expr !! 0)
+       subExpr1 <- tMapM f (getSubExprs expr !! 1)
+       return $ getBinaryConstructor expr t subExpr0 subExpr1
+
 arity :: Expr x a -> Int
 arity e = length $ getSubExprs e
 
@@ -469,6 +436,34 @@ getTypeInfo expr = case expr of
   (CallArg t _ _)       -> t
   (Lambda t _ _)        -> t
   (ReadNN t _ _)        -> t
+  
+setTypeInfo :: Expr t a -> t -> Expr t a
+setTypeInfo expr t = case expr of
+  (IfThenElse _ a b c)  -> (IfThenElse t a b c)
+  (GreaterThan _ a b)   -> (GreaterThan t a b)
+  (ThetaI _ a)          -> (ThetaI t a)
+  (Uniform _)           -> (Uniform t)
+  (Normal _)            -> (Normal t)
+  (Constant _ a)        -> (Constant t a)
+  (MultF _ a b)         -> (MultF t a b)
+  (MultI _ a b)         -> (MultI t a b)
+  (PlusF _ a b)         -> (PlusF t a b)
+  (PlusI _ a b)         -> (PlusI t a b)
+  (ExpF _ a)            -> (ExpF t a)
+  (NegF _ a)            -> (NegF t a)
+  (Null _)              -> (Null t)
+  (Cons _ a b)          -> (Cons t a b)
+  (TCons _ a b)         -> (TCons t a b)
+  (Call _ a)            -> (Call t a)
+  (Var _ a)             -> (Var t a)
+  (LetIn _ a b c)       -> (LetIn t a b c)
+  (InjF _ a b)          -> (InjF t a b)
+  --(LetInD _ a b c)     -> (LetInD t a b c)
+  --(LetInTuple _ a b c d) -> (LetInTuple t a b c d)
+  (Arg _ a b c)         -> (Arg t a b c)
+  (CallArg _ a b)       -> (CallArg t a b)
+  (Lambda _ a b)        -> (Lambda t a b)
+  (ReadNN _ a b)        -> (ReadNN t a b)
 
 getVFloat :: Value a -> a
 getVFloat (VFloat v) = v

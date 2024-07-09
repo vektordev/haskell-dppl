@@ -1,7 +1,5 @@
 module SPLL.Analysis (
-  Tag(..)
-, StaticAnnotations(..)
-, annotate
+  annotate
 ) where
 
 import SPLL.Lang
@@ -11,25 +9,19 @@ import SPLL.Typing.RType
 import SPLL.Typing.PType
 import Data.Maybe (maybeToList, fromJust, isNothing)
 import Data.List (nub)
-  
-data Tag a = EnumRange (Value a, Value a)
-           | EnumList [Value a]
-           | Alg InferenceRule
-           deriving (Show)
-
-data StaticAnnotations a = StaticAnnotations RType PType [Tag a] deriving (Show)
-
-annotate :: (Show a) => Expr TypeInfo a -> Expr (StaticAnnotations a) a
+import SPLL.Typing.Typing (TypeInfo, TypeInfo(..), makeTypeInfo, Tag(..))
+annotate :: (Show a) => Expr (TypeInfo a) a -> Expr (TypeInfo a) a
 annotate = tMap annotateLocal
   where
-    annotateLocal e = StaticAnnotations rt pt tags
+    annotateLocal e = makeTypeInfo  {rType = rt, pType = pt, tags = tags}
       where
-        TypeInfo rt pt = getTypeInfo e
+        rt = rType $ getTypeInfo e
+        pt = pType $ getTypeInfo e
         tags =
           [Alg $ findAlgorithm e | likelihoodFunctionUsesTypeInfo $ toStub e]
           ++ fmap EnumList (maybeToList (findEnumerable e))
 
-findEnumerable :: Expr TypeInfo a -> Maybe [Value a]
+findEnumerable :: Expr (TypeInfo a) a -> Maybe [Value a]
 findEnumerable ReadNN {} = Just [VInt i | i <- [0..9]]
 findEnumerable (PlusI _ left right) =
   if isNothing leftEnum || isNothing rightEnum
@@ -40,7 +32,7 @@ findEnumerable (PlusI _ left right) =
         rightEnum = findEnumerable right
 findEnumerable _ = Nothing
 
-findAlgorithm :: (Show a) => Expr TypeInfo a -> InferenceRule
+findAlgorithm :: (Show a) => Expr (TypeInfo a) a -> InferenceRule
 findAlgorithm expr = case validAlgs of
   [alg] -> alg
   [] -> error ("no valid algorithms found in expr: " ++ show expr)

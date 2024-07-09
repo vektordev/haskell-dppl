@@ -17,10 +17,10 @@ data IRNode a = Simple ExprStub [Annotation a]
 
 type IRDefinition a = (String, Tree (IRNode a))
 
-transpile :: Env TypeInfo a -> [IRDefinition a]
+transpile :: Env (TypeInfo a) a -> [IRDefinition a]
 transpile = map transpileDefinition
 
-transpileDefinition :: (String, Expr TypeInfo a) -> IRDefinition a
+transpileDefinition :: (String, Expr (TypeInfo a) a) -> IRDefinition a
 transpileDefinition (name, expression) = (name, transpileExpr expression)
 
 -- OK, static analysis is amazing and just converted this lambda
@@ -30,7 +30,7 @@ transpileDefinition (name, expression) = (name, transpileExpr expression)
 -- into this
 -- (all (checkConstraint expr) . constraints )
 
-transpileExpr :: Expr TypeInfo a -> Tree (IRNode a)
+transpileExpr :: Expr (TypeInfo a) a -> Tree (IRNode a)
 transpileExpr expr = if likelihoodFunctionUsesTypeInfo $ toStub expr
   then case filter (\alg -> all (checkConstraint expr alg) (constraints alg) ) correctExpr of
     [alg] -> Node (Complex alg) (map transpileExpr $ getSubExprs expr)
@@ -40,7 +40,7 @@ transpileExpr expr = if likelihoodFunctionUsesTypeInfo $ toStub expr
   where
       correctExpr = filter (checkExprMatches expr) allAlgorithms
 
-annotate :: Expr TypeInfo a -> [Annotation a]
+annotate :: Expr (TypeInfo a) a -> [Annotation a]
 annotate expr = case expr of 
   ThetaI _ i    -> [IIndex i]
   Constant _ x  -> [IValue x]
@@ -52,15 +52,15 @@ annotate expr = case expr of
   _             -> []
 
 
-checkConstraint :: Expr TypeInfo a -> InferenceRule -> RuleConstraint -> Bool
+checkConstraint :: Expr (TypeInfo a) a -> InferenceRule -> RuleConstraint -> Bool
 checkConstraint expr _ (SubExprNIsType n ptype) = ptype == p
-  where TypeInfo r p = getTypeInfo (getSubExprs expr !! n)
+  where p = pType $ getTypeInfo (getSubExprs expr !! n)
 checkConstraint expr _ (SubExprNIsNotType n ptype) = ptype /= p
-  where TypeInfo r p = getTypeInfo (getSubExprs expr !! n)
+  where p = pType $ getTypeInfo (getSubExprs expr !! n)
 checkConstraint expr alg ResultingTypeMatch = resPType == annotatedType
   where
-    annotatedType = getP expr
-    resPType = resultingPType alg (map getP (getSubExprs expr))
+    annotatedType = pType $ getTypeInfo expr
+    resPType = resultingPType alg (map (pType . getTypeInfo) (getSubExprs expr))
 
 arity :: ExprStub -> Int
 arity = undefined

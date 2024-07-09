@@ -69,7 +69,7 @@ data RuleConstraint = SubExprNIsType Int PType
                     | SubExprNIsNotType Int PType
                     | SubExprNIsAtLeast Int PType
                     | ResultingTypeMatch
-                    deriving Show
+                    deriving (Show, Eq, Ord)
 
 -- can we encode symmetries?
 data InferenceRule = InferenceRule { forExpression :: ExprStub
@@ -85,6 +85,9 @@ instance Show InferenceRule where
 
 instance Eq InferenceRule where
   a1 == a2 = algName a1 == algName a2
+  
+instance Ord InferenceRule where
+  a1 `compare` a2 = algName a1 `compare` algName a2
 
 checkExprMatches :: Expr x a -> InferenceRule -> Bool
 checkExprMatches e alg = toStub e == forExpression alg

@@ -1,6 +1,5 @@
 module SPLL.IntermediateRepresentation (
   IRExpr(..)
-, StaticAnnotations(..)
 , Tag(..)
 , Operand(..)
 , UnaryOperand(..)

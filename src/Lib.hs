@@ -51,6 +51,7 @@ import qualified Data.Set as Set
 import Data.Number.Erf
 import SPLL.Typing.BruteForceSolver (forceAddTypeInfo, runBruteForceSolver)
 import SPLL.IRCompiler
+import SPLL.Typing.ForwardChaining
 
 variableLengthS2 :: Program  () Double
 variableLengthS2 = Program [("b", IfThenElse ()
@@ -96,7 +97,7 @@ thatGaussThing = do
   llScan typedEnv (fst $ last thetasRecovered) main
 -}
 
-llScan :: (Erf a, Real a, Floating a, Show a, Enum a) => Env TypeInfoWit a -> Thetas a -> Expr TypeInfoWit a -> IO ()
+llScan :: (Erf a, Real a, Floating a, Show a, Enum a) => Env (TypeInfo a) a -> Thetas a -> Expr (TypeInfo a) a -> IO ()
 llScan tenv thetas main = do
   let scanPts = [(x,y) | x <- [0, 0.01 .. 1], y <- [0, 0.01 .. 1]]
   let scanRes = [(x, y, runInferL tenv main thetas (VList [VFloat x, VFloat y])) | x <- [0, 0.01.. 1], y <- [0, 0.01.. 1]]
@@ -118,7 +119,7 @@ newCodeGen tExpr = do
   let prob = generateCode irProb ""
   putStrLn $ unlines prob-}
 
-newCodeGenAll :: (Show a, Ord a, Floating a) => Env TypeInfo a -> IO ()
+newCodeGenAll :: (Show a, Ord a, Floating a) => Env (TypeInfo a) a -> IO ()
 newCodeGenAll env = do
   pPrint env
   let annotated = map (\(a,b) -> (a, SPLL.Analysis.annotate b)) env
@@ -155,13 +156,15 @@ someFunc = do--thatGaussThing
   PInfer2.showResultsProgDebug (addRTypeInfo $ addEmptyTypeInfo prog)
   putStrLn "done outputting constraints"
   let cmp2 = progToEnv $ addTypeInfo prog-}
-  let prog = testInjF2
-  let cmp = progToEnv $ addTypeInfo prog
+  let prog = uniformProgPlus
+  let typedProg = addTypeInfo prog
+  let cmp = trace progToEnv typedProg
   --cmp2 <-  env
   --let cmp = [] ++ [("noiseMNistAdd", mNistNoise), ("expertmodel", expertModelsTyped), ("expertmodelAnnotated", expertAnnotatedTyped), ("mNistAdd", testNN)] :: Env TypeInfo Float
   --let cmp = [("main", testNN)] :: Env TypeInfo Float
   --let cmp = cmp2
   --cmp <- compile env
+  
   trace (show prog) $ newCodeGenAll cmp
   --let env = [("main", testNNUntyped)] :: Env () Float
   --cmp <- compile env triMNist
@@ -210,7 +213,7 @@ someFunc = do--thatGaussThing
   --in forM_ [1..100] (\n -> testRun ("gaussMultiLists_" ++ show n) env [0.55, 0.45, 0.5, 0.8, 0.3, 0.4])
   --in forM_ [1..100] (\n -> testRun ("gaussLists_" ++ show n) env [0.5, 0.9, 0.3])
 --runNNTest :: IO ()
-
+{-
 runNNTest :: IO [Value Float]
 runNNTest = do
   print "Running NN Test"
@@ -219,22 +222,22 @@ runNNTest = do
 
   let Just main = lookup "main" typedEnv
   putStrLn $ unlines $ prettyPrint main
-  let resultR = getRW main
+  let resultR = rType $ getTypeInfo main
   print resultR
-  let resultP = getPW main
+  let resultP = pType $ getTypeInfo main
   print resultP
   return  [VFloat 3.0]
   --mkSamples 1000 typedEnv [] [Constant (TypeInfo TSymbol Deterministic) (VSymbol "image1"), Constant (TypeInfo TSymbol Deterministic) (VSymbol "image2")] main
-  
+-}
 
-myGradientAscent :: (Erf a, RealFloat a, Show a, Floating a, Real a) => Int -> a -> [(String, Expr TypeInfoWit a)] -> Thetas a -> Expr TypeInfoWit a -> [Value a] -> [(Thetas a, a)]
+myGradientAscent :: (Erf a, RealFloat a, Show a, Floating a, Real a) => Int -> a -> [(String, Expr (TypeInfo a) a)] -> Thetas a -> Expr (TypeInfo a) a -> [Value a] -> [(Thetas a, a)]
 myGradientAscent 0 _ _ _ _ _ = []
 myGradientAscent n learning_rate env thetas expr vals =
   (thetas, loss) : myGradientAscent (n-1) learning_rate env new expr vals
     where
       (loss, new) = optimizeStep env expr vals thetas learning_rate
 
-optimizeStep :: (Erf a, Show a, RealFloat a, Floating a, Real a) => Env TypeInfoWit a -> Expr TypeInfoWit a -> [Value a] -> Thetas a -> a -> (a, Thetas a)
+optimizeStep :: (Erf a, Show a, RealFloat a, Floating a, Real a) => Env (TypeInfo a) a -> Expr (TypeInfo a) a -> [Value a] -> Thetas a -> a -> (a, Thetas a)
 optimizeStep env expr samples thetas learning_rate = (loss,
     addThetas thetas (mult (1.0 / fromIntegral (length samples))(mult learning_rate gradient)) )
   where
@@ -326,9 +329,9 @@ testRun experimentName prog thetas = do
   let Just main = lookup "main" typedEnv
   print "Type Info"
   mapM_ (putStrLn . unlines . prettyPrint . snd) typedEnv
-  let resultR = getRW main
+  let resultR = rType $ getTypeInfo main
   print resultR
-  let resultP = getPW main
+  let resultP = pType $ getTypeInfo main
   print resultP
   print main
   samples <- mkSamples 1000 typedEnv thetas [] main
@@ -403,7 +406,7 @@ integralApprox rectangleInfo valF lkF = pAnd  (DiscreteProbability stepsizeAll) 
         stepsizeAll = foldl (\x (_,_,s) -> x*s) 1.0 rectangleInfo
         lks = map ( lkF . valF) inputsS
 
-mkSamples :: (Fractional a, Ord a, Random a, Floating a) => Int -> Env TypeInfoWit a -> Thetas a -> [Expr TypeInfoWit a] -> Expr TypeInfoWit a -> IO [Value a]
+mkSamples :: (Fractional a, Ord a, Random a, Floating a) => Int -> Env (TypeInfo a) a -> Thetas a -> [Expr (TypeInfo a) a] -> Expr (TypeInfo a) a -> IO [Value a]
 mkSamples 0 _ _ _ _ = return []
 mkSamples n env thetas args expr = do
   sample <- evalRandIO $ generate env env thetas args expr

@@ -25,19 +25,39 @@ import PredefinedFunctions
 
 type Thetas a = [a]
 
+data VEnv a
+  = ValueEnv {values :: Map.Map String (Value a), branchMap :: BranchMap a}
+  deriving (Eq, Show)
+
+
+type BranchMap a = Map.Map (Expr (TypeInfo a) a) [String]
+vempty :: VEnv a
+vempty = ValueEnv {values = Map.empty, branchMap = Map.empty}
+
+vextend :: VEnv a -> (String, Value a) -> VEnv a
+vextend env (x, s) = env { values = Map.insert x s (values env) }
+
+vremove :: VEnv a -> String -> VEnv a
+vremove env var = env {values = Map.delete var (values env)}
+
+
 findTheta :: Expr x a -> Thetas a -> a
 findTheta (ThetaI _ i) ts = if i >= length ts then error "out of bounds in Thetas" else ts !! i
 findTheta _ _ = error "called FindTheta on non-theta expr."
 
 -- | Inference state
-data InferLState a = InferLState {global_funcs :: Env TypeInfoWit a, thetas :: Thetas a}
+data InferLState a = InferLState {global_funcs :: Env (TypeInfo a) a, thetas :: Thetas a}
 -- | Initial inference state
-initInferL :: Env TypeInfoWit a -> Thetas a -> InferLState a
+initInferL :: Env (TypeInfo a) a -> Thetas a -> InferLState a
 initInferL env t = InferLState { global_funcs = env, thetas = t }
+
+
 data LikelihoodError a
-  = BottomError (Expr TypeInfoWit a)
-  | MismatchedValue (Value a) (Expr TypeInfoWit a)
+  = BottomError (Expr (TypeInfo a) a)
+  | MismatchedValue (Value a) (Expr (TypeInfo a) a)
   deriving (Show)
+
+
 --TODO: Verify Env changes are done in a sane manner in interpreter
 -- | Inference monad
 type InferL a b = (ReaderT
@@ -49,7 +69,7 @@ type InferL a b = (ReaderT
 
 --note: We need detGenerate in order to be able to solve probability: Reverse s a does not have a Random instance,
 -- so we have to make do without in probability. Hence if we need to generate, we need to generate deterministically.
-detGenerateM :: (Floating a, Fractional a, Ord a) => Expr TypeInfoWit a -> InferL a (Value a)
+detGenerateM :: (Floating a, Fractional a, Ord a) => Expr (TypeInfo a) a -> InferL a (Value a)
 detGenerateM (IfThenElse _ cond left right) = do
   condVal <- detGenerateM cond
   case condVal of
@@ -70,8 +90,10 @@ detGenerateM (PlusF _ left right) = if pt1 == Deterministic && pt2 == Determinis
   )
   else error "detGenerate non-deterministic plus"
   where
-    (TypeInfoWit rt1 pt1 _) = getTypeInfo left
-    (TypeInfoWit rt2 pt2 _) = getTypeInfo right
+    rt1 = rType $ getTypeInfo left
+    pt1 = pType $ getTypeInfo left
+    rt2 = rType $ getTypeInfo right
+    pt2 = pType $ getTypeInfo right
 detGenerateM (MultF _ left right) = if pt1 == Deterministic && pt2 == Deterministic
   then (do
      val1 <- detGenerateM left
@@ -80,8 +102,10 @@ detGenerateM (MultF _ left right) = if pt1 == Deterministic && pt2 == Determinis
    )
   else error "detGenerate non-deterministic mult"
   where
-    (TypeInfoWit rt1 pt1 _) = getTypeInfo left
-    (TypeInfoWit rt2 pt2 _) = getTypeInfo right
+    rt1 = rType $ getTypeInfo left
+    pt1 = pType $ getTypeInfo left
+    rt2 = rType $ getTypeInfo right
+    pt2 = pType $ getTypeInfo right
 detGenerateM expr@(ThetaI _ i) = do
    inf_ste <- get
    return $ VFloat (findTheta expr (thetas inf_ste))
@@ -112,9 +136,10 @@ detGenerateM expr =
   if pt /= Deterministic
   then error "tried detGenerate on non-deterministic expr"
   else error "detGenerate not defined for expr"
-    where TypeInfoWit rt pt _ = getTypeInfo expr
+    where rt = rType $ getTypeInfo expr
+          pt = pType $ getTypeInfo expr
 
-generate :: (Fractional a, RandomGen g, Ord a, Random a, Floating a) => Env TypeInfoWit a -> Env TypeInfoWit a -> Thetas a -> [Expr TypeInfoWit a] -> Expr TypeInfoWit a -> Rand g (Value a)
+generate :: (Fractional a, RandomGen g, Ord a, Random a, Floating a) => Env (TypeInfo a) a -> Env (TypeInfo a) a -> Thetas a -> [Expr (TypeInfo a) a] -> Expr (TypeInfo a) a -> Rand g (Value a)
 generate globalEnv env thetas [] l@(Lambda _ name expr) = error "no args provided to lambda"
 generate globalEnv env thetas (arg:args) (Lambda _ name expr) = generate globalEnv ((name, arg):env ) thetas args expr
 generate _ _ _ (_:_) expr = error "args provided to non-lambda"
@@ -176,7 +201,7 @@ generate globalEnv env thetas args (ReadNN _ _ expr) = error "NN not implemented
 generate globalEnv env thetas args (LetIn _ name decl bij) =
   do
     declValue <- generate globalEnv env thetas args decl
-    let extendedEnv = (name, Constant (TypeInfoWit (getRType declValue) Deterministic Set.empty) declValue):env
+    let extendedEnv = (name, Constant (makeTypeInfo { rType = (getRType declValue), pType = Deterministic}) declValue):env
     generate globalEnv extendedEnv thetas args bij
 generate globalEnv env thetas args (InjF _ name params) = error "Not yet implemented" --TODO
 
@@ -193,7 +218,7 @@ replaceVEnvBranch (envS1, envS2) var = (env1, env2)
         env1 = Map.insert var val1 envS1
         env2 = Map.insert var val2 envS2
 --TODO expand to more vars
-replaceEnvBranch :: (Show a) => (Env TypeInfoWit a, Env TypeInfoWit a)  -> String -> (Env TypeInfoWit a, Env TypeInfoWit a)
+replaceEnvBranch :: (Show a) => (Env (TypeInfo a) a, Env (TypeInfo a) a)  -> String -> (Env (TypeInfo a) a, Env (TypeInfo a) a)
 replaceEnvBranch (envS1, envS2) var = (env1, env2)
   where Just (Constant ti (VBranch val1 val2 bName)) =  lookup var envS1
         envNoB1 = filter (\x -> fst x /= var) envS1
@@ -221,21 +246,21 @@ applyCorBranch (PDF p) (VFloat v) = PDF (p * v)
 applyCorBranch (DiscreteProbability p) (VFloat v) = DiscreteProbability (p * v)
 
 -- -- | Run the inference monad
-runInferL ::(Erf a, Show a, Fractional a, Ord a, Real a, Floating a) =>  Env TypeInfoWit a -> Expr TypeInfoWit a -> Thetas a -> Value a -> Probability a
+runInferL ::(Erf a, Show a, Fractional a, Ord a, Real a, Floating a) =>  Env (TypeInfo a) a -> Expr (TypeInfo a) a -> Thetas a -> Value a -> Probability a
 runInferL env expr thetas val = case runExcept $ evalStateT (runReaderT (likelihoodM expr val) vempty) (initInferL env thetas) of
   Left err -> error "error in likelihoodM"
   Right p -> p
 
-runInferIO ::(Erf a, Show a, Fractional a, Ord a, Real a, Floating a) =>  Env TypeInfoWit a -> Expr TypeInfoWit a -> Thetas a -> Value a -> IO ()
+runInferIO ::(Erf a, Show a, Fractional a, Ord a, Real a, Floating a) =>  Env (TypeInfo a) a -> Expr (TypeInfo a) a -> Thetas a -> Value a -> IO ()
 runInferIO env expr thetas val = case runExcept $ evalStateT (runReaderT (likelihoodM expr val) vempty) (initInferL env thetas) of
   Left err -> print err
   Right p -> print p
 
-likelihoodM :: (Erf a, Show a, Ord a, Real a) => Expr TypeInfoWit a -> Value a -> InferL a (Probability a)
+likelihoodM :: (Erf a, Show a, Ord a, Real a) => Expr (TypeInfo a) a -> Value a -> InferL a (Probability a)
 
 -- error cases
 likelihoodM expr _
-  | getPW expr == Bottom = throwError $ BottomError expr
+  | pType (getTypeInfo expr) == Bottom = throwError $ BottomError expr
 likelihoodM expr VAnyList = throwError $ MismatchedValue VAnyList expr
 
 likelihoodM (Call _ name) val = do
@@ -245,14 +270,14 @@ likelihoodM (Call _ name) val = do
   local (const vempty) (likelihoodM expr val)
 
 likelihoodM (LetIn ti name decl bij) val
-  | getPTypeW (getTypeInfo decl) == Integrate = do
+  | pType (getTypeInfo decl) == Integrate = do
       (baseDistV, bMap) <- getInvValueM globalFenv bij name val
       baseDistProb <- likelihoodM decl baseDistV
       e2Dist <- local (\venv -> venv{values = Map.insert name baseDistV (values venv),
                                      branchMap = Map.union bMap (branchMap venv)}) (likelihoodM bij val)
       let pBr = baseDistProb `pAnd` e2Dist
       return $ marginalizeBranches pBr name
-  | getPTypeW (getTypeInfo decl) == Deterministic = do
+  | pType (getTypeInfo decl) == Deterministic = do
       declVal <- detGenerateM decl
       let scope e = vremove e name `vextend` (name, declVal)
       local scope (likelihoodM bij val)
@@ -323,8 +348,8 @@ likelihoodM (GreaterThan t left right) (VBool x)
     let VFloat rightFloat = rightGen
     return $ DiscreteProbability $ if x then sigmoid (leftFloat - rightFloat) else sigmoid(rightFloat - leftFloat)
   where
-    leftP = getPW left
-    rightP = getPW right
+    leftP = pType $ getTypeInfo left
+    rightP = pType $ getTypeInfo right
 likelihoodM expr@(ThetaI _ x) val2 = do
    inf_ste <- get
    return $ branchedCompare (VFloat (findTheta expr (thetas inf_ste))) val2
@@ -356,8 +381,8 @@ likelihoodM (MultF _ left right) (VRange limits)
         likelihoodM left inverse_flip
   | otherwise = error "can't solve Mult; unexpected type error"
   where
-    leftP = getPW left
-    rightP = getPW right
+    leftP = pType $ getTypeInfo left
+    rightP = pType $ getTypeInfo right
 
 likelihoodM (MultF ti left right) (VFloat x)
   -- need to divide by the deterministic sample
@@ -375,8 +400,8 @@ likelihoodM (MultF ti left right) (VFloat x)
         return $ (applyCorBranch inverseProbability (fmap (abs . ((/)1)) rightGen))
   | otherwise = throwError $ BottomError (MultF ti left right)
   where
-    leftP = getPW left
-    rightP = getPW right
+    leftP = pType $ getTypeInfo left
+    rightP = pType $ getTypeInfo right
 
 likelihoodM (PlusF ti left right) (VFloat x)
   | leftP == Deterministic =
@@ -390,8 +415,8 @@ likelihoodM (PlusF ti left right) (VFloat x)
   | otherwise = throwError $ BottomError (PlusF ti left right)
   where
   -- TODO: Branching for range queries
-    leftP = getPW left
-    rightP = getPW right
+    leftP = pType $ getTypeInfo left
+    rightP = pType $ getTypeInfo right
     inverse x d = fmap ((+x) . (*(-1))) d
     inverse_nob x dtl = fmap (flip(-) dtl) x
 
@@ -409,8 +434,8 @@ likelihoodM (PlusF ti left right) (VRange limits)
   | otherwise = throwError $ BottomError (PlusF ti left right)
   where
   -- TODO: Branching for range queries
-    leftP = getPW left
-    rightP = getPW right
+    leftP = pType $ getTypeInfo left
+    rightP = pType $ getTypeInfo right
     inverse x d = fmap ((+x) . (*(-1))) d
     inverse_nob x dtl = fmap (flip(-) dtl) x
 -- TODO lists as variables with branching
@@ -444,9 +469,9 @@ likelihoodForValue ll (VBranch val1 val2 y) x
  | otherwise = error "unfitting variables likelihood for value"
 likelihoodForValue ll val _ = ll val
 
-getInvValueM :: (Floating a, Num a, Fractional a, Ord a) => FEnv a -> Expr TypeInfoWit a -> String -> Value a -> InferL a (Value a, BranchMap a)
+getInvValueM :: (Floating a, Num a, Fractional a, Ord a) => FEnv a -> Expr (TypeInfo a) a -> String -> Value a -> InferL a (Value a, BranchMap a)
 getInvValueM _ expr v _
-  | Set.notMember v (getWitsW expr) = error "witnessed var not in deducible"
+  | Set.notMember v (witnessedVars (getTypeInfo expr)) = error "witnessed var not in deducible"
 getInvValueM fenv  (Var _ name) var val = if name == var
                                               then return $ (val, Map.empty)
                                               else error "False variable in var encountered"
@@ -459,29 +484,29 @@ getInvValueM fenv (InjF _ name params) var val = error "Not yet implemented" --T
         --auto_p = (map auto params_val)
 
 getInvValueM fenv (PlusF ti expr1 expr2) var (VFloat val)
-  | var `elem` getWitsW expr1 = do
+  | var `elem` witnessedVars (getTypeInfo expr1) = do
     val2 <- detGenerateM expr2
     getInvValueM fenv expr1 var (VFloat $ val - (getVFloat val2))
-  | var `elem` getWitsW expr2 =  do
+  | var `elem` witnessedVars (getTypeInfo expr2) =  do
     val1 <- detGenerateM expr1
     getInvValueM fenv expr2 var (VFloat $ val - (getVFloat val1))
 getInvValueM fenv  (MultF ti expr1 expr2) var (VFloat val)
-  | notElem var (getWits ti) || getPTypeW ti == Bottom = error "Cannot calculate inverse value in this mult expression"
-  | var `elem` getWitsW  expr1 = do
+  | notElem var (witnessedVars ti) || pType ti == Bottom = error "Cannot calculate inverse value in this mult expression"
+  | var `elem` witnessedVars (getTypeInfo expr1) = do
     val2 <- detGenerateM expr2
     getInvValueM fenv expr1 var (VFloat $ val / (getVFloat val2))
-  | var `elem` getWitsW expr2 =  do
+  | var `elem` witnessedVars (getTypeInfo expr2) =  do
     val1 <- detGenerateM expr1
     getInvValueM fenv expr2 var (VFloat $ val / (getVFloat val1))
 getInvValueM fenv (Cons ti fst rst) var (VList (fst_v:rst_v))
-  | notElem var (getWits ti) || getPTypeW ti == Bottom = error "Cannot calculate inverse value in this cons expression"
-  | var `elem` getWitsW fst = getInvValueM fenv fst var fst_v
-  | var `elem` getWitsW rst = getInvValueM fenv rst var (VList rst_v)
+  | notElem var (witnessedVars ti) || pType ti == Bottom = error "Cannot calculate inverse value in this cons expression"
+  | var `elem` witnessedVars (getTypeInfo fst) = getInvValueM fenv fst var fst_v
+  | var `elem` witnessedVars (getTypeInfo rst) = getInvValueM fenv rst var (VList rst_v)
 getInvValueM fenv (LetIn ti name decl expr) var val =
   getInvValueM fenv expr var val
 -- Correction factor not correctly calculated since its not used atm
 getInvValueM fenv ee@(IfThenElse ti cond tr fl) var val
-  | var `elem` getWitsW tr && var `elem` getWitsW fl = do
+  | var `elem` witnessedVars (getTypeInfo tr) && var `elem` witnessedVars (getTypeInfo fl) = do
     (leftVal, bMap1) <- getInvValueM fenv tr var val
     (rightVal, bMap2) <- getInvValueM fenv fl var val
     return (VBranch leftVal rightVal var, Map.union (Map.union (Map.singleton ee [var]) bMap1) bMap2)
@@ -490,7 +515,7 @@ getInvValueM fenv ee@(IfThenElse ti cond tr fl) var val
 getInvValueM _ _ _ _ = error "bij inv not implemented for expr here"
 
 
-integrate :: (Show a, Erf a, Num a, Ord a) => Expr TypeInfoWit a -> Limits a -> a
+integrate :: (Show a, Erf a, Num a, Ord a) => Expr (TypeInfo a) a -> Limits a -> a
 integrate (Uniform t) (Limits low high)
  | checkLimits (Limits low high) = if l2 > 1 || h2 < 0 then 0 else h2 - l2
  | otherwise = error "Invalid value for limits"

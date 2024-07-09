@@ -4,10 +4,21 @@
 module SPLL.Typing.Typing (
   Env,
   TypeError,
-  getR,
-  getP,
-  getPW,
-  getRW,
+  TypeInfo,
+  TypeInfo(..),
+  ChainName,
+  Tag(..),
+  rType,
+  pType,
+  witnessedVars,
+  chainName,
+  tags,
+  makeTypeInfo,
+  setRType,
+  setPType,
+  setWitnessedVars,
+  setChainName,
+  setTags,
   progToEnv,
   autoVal,
   autoEnv,
@@ -17,14 +28,55 @@ module SPLL.Typing.Typing (
 import SPLL.Lang
 import SPLL.Typing.RType
 import SPLL.Typing.PType
+import SPLL.InferenceRule
+import GHC.Records
 
 import Data.Maybe
+import Data.Set (empty)
 import Control.Monad.Reader
 import Control.Monad.Except
 
 import Numeric.AD (grad', auto)
 import Numeric.AD.Internal.Reverse ( Reverse, Tape)
 import Data.Reflection (Reifies)
+
+data Tag a = EnumRange (Value a, Value a)
+           | EnumList [Value a]
+           | Alg InferenceRule
+           deriving (Show, Eq, Ord)
+
+type ChainName = String
+
+--Do not use this constructor, use makeTypeInfo instead
+data TypeInfo a = TypeInfo
+  { rType :: RType
+  , pType :: PType
+  , witnessedVars :: WitnessedVars
+  , chainName :: ChainName
+  , tags :: [Tag a]} deriving (Show, Eq, Ord)
+-- only use ord instance for algorithmic convenience, not for up/downgrades / lattice work.
+
+makeTypeInfo = TypeInfo
+    { rType = SPLL.Typing.RType.NotSetYet
+    , pType = SPLL.Typing.PType.NotSetYet
+    , witnessedVars = empty
+    , chainName = ""
+    , tags = []}
+
+setRType :: TypeInfo a -> RType -> TypeInfo a
+setRType t rt = t {rType = rt}
+
+setPType :: TypeInfo a -> PType -> TypeInfo a
+setPType t pt = t {pType = pt}
+
+setWitnessedVars :: TypeInfo a-> WitnessedVars -> TypeInfo a
+setWitnessedVars t wit = t {witnessedVars = wit}
+
+setChainName:: TypeInfo a -> ChainName -> TypeInfo a
+setChainName t name = t {chainName = name}
+
+setTags:: TypeInfo a -> [Tag b] -> TypeInfo b
+setTags t tgs = t {tags = tgs}
 
 -- Because Env will be polluted by local symbols as we evaluate, we need to reset when calling functions.
 -- Therefore, we define that all functions must exist in the global namespace.
@@ -37,23 +89,6 @@ type Check a = ExceptT TypeError (Reader (Env () a))
 data TypeError = Mismatch RType RType
                deriving (Show, Eq)
 
-getR :: Expr TypeInfo a -> RType
-getR expr = r
-  where
-    TypeInfo r _ = getTypeInfo expr
-
-getP :: Expr TypeInfo a -> PType
-getP expr = p
-  where
-    TypeInfo _ p = getTypeInfo expr
-getPW :: Expr TypeInfoWit a -> PType
-getPW expr = p
-  where
-    TypeInfoWit _ p _ = getTypeInfo expr
-getRW :: Expr TypeInfoWit a -> RType
-getRW expr = r
-  where
-    TypeInfoWit r _ _  = getTypeInfo expr
 
 rIntersect :: RType -> RType -> Maybe RType
 --here be all cases where types are "equal" but one is more strict
@@ -111,21 +146,21 @@ matchTwoReturnThird a b ret =
     where intersection = rIntersect a b
 
 --TODO: if Expr is Let_in or otherwise affects Env.
-typeCheckExpr :: Env () a -> Expr () a -> Expr TypeInfo a
+typeCheckExpr :: Env () a -> Expr () a -> Expr (TypeInfo a) a
 typeCheckExpr env = tMap (mkTypeInfo2 env)
 
-mkTypeInfo2 :: Env () a -> Expr () a -> TypeInfo
+mkTypeInfo2 :: Env () a -> Expr () a -> TypeInfo a
 mkTypeInfo2 env expr =
   case mkTypeInfo env expr of
     Left err -> error $ show err
     Right result -> result
 
-mkTypeInfo :: Env () a -> Expr () a -> Either TypeError TypeInfo
+mkTypeInfo :: Env () a -> Expr () a -> Either TypeError (TypeInfo a)
 mkTypeInfo env expr =
   do
     pType <- runReader (runExceptT (inferP expr)) env
     rType <- runReader (runExceptT (inferR expr)) env
-    return $ TypeInfo rType pType
+    return $ TypeInfo {rType = rType, pType = pType}
 
 inferR :: Expr () a -> Check a RType
 inferR (IfThenElse () cond left right) = do
@@ -207,13 +242,21 @@ inferP (Cons _ headX tailX) = do
 --inferP (CallArg _ name withExpr) = return $ PIdent name [(Deterministic, Deterministic), (Integrate, Integrate), (Chaos, Chaos)]
 
 
-progToEnv :: Program x a -> Env x a
+progToEnv :: Program (TypeInfo a) a -> Env (TypeInfo a) a
 progToEnv (Program funcs main_expr) = ("main", main_expr): funcs
 
-autoExpr :: (Num a, Reifies s Tape) => Expr x a -> Expr x (Reverse s a)
-autoExpr = exprMap auto
+autoExpr :: (Num a, Reifies s Tape) => Expr (TypeInfo a) a -> Expr (TypeInfo (Reverse s a)) (Reverse s a)
+autoExpr e = tMap (autoTypeInfo . getTypeInfo) $ exprMap auto e
 
-autoEnv :: (Num a, Reifies s Tape) => Env x a -> Env x (Reverse s a)
+autoTypeInfo :: (Num a, Reifies s Tape) =>TypeInfo a ->TypeInfo (Reverse s a)
+autoTypeInfo t = setTags t (map autoTag (tags t))
+
+autoTag :: (Num a, Reifies s Tape) => Tag a -> Tag (Reverse s a)
+autoTag (EnumRange (a, b))= EnumRange (autoVal a, autoVal b)
+autoTag (EnumList l) = EnumList (map autoVal l)
+autoTag (Alg a) = Alg a
+
+autoEnv :: (Num a, Reifies s Tape) => Env (TypeInfo a) a -> Env (TypeInfo (Reverse s a)) (Reverse s a)
 autoEnv = map (\ (name, expr) -> (name, autoExpr expr))
 
 autoVal :: (Num a, Reifies s Tape) => Value a -> Value (Reverse s a)
