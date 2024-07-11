@@ -63,6 +63,11 @@ testInjF = Program [] (InjF () "double" [Uniform ()])
 testInjF2 :: Program () Double
 testInjF2 = Program [] (ExpF () (InjF () "double" [Uniform ()]))
 
+testPlus3 :: Program () Double
+testPlus3 = Program [] (LetIn () "a" (Uniform ()) (PlusF () (Var () "a") (Var () "a"))) 
+
+
+
 flipCoin :: Expr () Double
 flipCoin = GreaterThan () (Uniform ()) (Constant () (VFloat 0.5))
 variableLength :: Expr () a

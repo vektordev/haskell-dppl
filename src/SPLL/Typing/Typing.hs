@@ -7,6 +7,7 @@ module SPLL.Typing.Typing (
   TypeInfo,
   TypeInfo(..),
   ChainName,
+  HornClause,
   Tag(..),
   rType,
   pType,
@@ -32,7 +33,7 @@ import SPLL.InferenceRule
 import GHC.Records
 
 import Data.Maybe
-import Data.Set (empty)
+import Data.Set (empty, Set)
 import Control.Monad.Reader
 import Control.Monad.Except
 
@@ -46,6 +47,7 @@ data Tag a = EnumRange (Value a, Value a)
            deriving (Show, Eq, Ord)
 
 type ChainName = String
+type HornClause = (Set ChainName, Set ChainName)
 
 --Do not use this constructor, use makeTypeInfo instead
 data TypeInfo a = TypeInfo
