@@ -156,16 +156,16 @@ someFunc = do--thatGaussThing
   PInfer2.showResultsProgDebug (addRTypeInfo $ addEmptyTypeInfo prog)
   putStrLn "done outputting constraints"
   let cmp2 = progToEnv $ addTypeInfo prog-}
-  let prog = testPlus3
-  let typedProg = addTypeInfo prog
-  let cmp = trace (show (inferProg typedProg)) $ progToEnv typedProg
+  let prog = testInjF
+  let typedProg = inferProg (addTypeInfo prog)
+  let cmp = progToEnv typedProg
   --cmp2 <-  env
   --let cmp = [] ++ [("noiseMNistAdd", mNistNoise), ("expertmodel", expertModelsTyped), ("expertmodelAnnotated", expertAnnotatedTyped), ("mNistAdd", testNN)] :: Env TypeInfo Float
   --let cmp = [("main", testNN)] :: Env TypeInfo Float
   --let cmp = cmp2
   --cmp <- compile env
   
-  trace (show prog) $ newCodeGenAll cmp
+  trace (show typedProg) $ newCodeGenAll cmp
   --let env = [("main", testNNUntyped)] :: Env () Float
   --cmp <- compile env triMNist
   --let cmp = [("main", triMNist)] :: Env TypeInfo Float

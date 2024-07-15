@@ -32,7 +32,7 @@ inferNoWit p = do
 
 
 createTypeInfo :: (Show a) => Expr () a -> TypeInfo a
-createTypeInfo _ = makeTypeInfo {rType = SPLL.Typing.RType.NotSetYet, pType = SPLL.Typing.PType.NotSetYet}
+createTypeInfo _ = makeTypeInfo
 
 addEmptyTypeInfoExpr :: (Show a) => Expr () a -> Expr (TypeInfo a) a
 addEmptyTypeInfoExpr = tMap createTypeInfo

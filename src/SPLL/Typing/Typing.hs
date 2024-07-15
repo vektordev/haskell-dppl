@@ -9,6 +9,7 @@ module SPLL.Typing.Typing (
   ChainName,
   HornClause,
   Tag(..),
+  CType(..),
   rType,
   pType,
   witnessedVars,
@@ -17,6 +18,7 @@ module SPLL.Typing.Typing (
   makeTypeInfo,
   setRType,
   setPType,
+  setCType,
   setWitnessedVars,
   setChainName,
   setTags,
@@ -47,12 +49,31 @@ data Tag a = EnumRange (Value a, Value a)
            deriving (Show, Eq, Ord)
 
 type ChainName = String
-type HornClause = (Set ChainName, Set ChainName)
+
+-- (Set of Preconditions, set of Inferable variables with attached CType
+type HornClause = (Set ChainName, Set (ChainName, CType))
+
+data CType = CDeterministic
+           | CInferDeterministic
+           -- | CConstrainedTo a a
+           | CBottom
+           | CNotSetYet
+           deriving (Show, Eq)
+           
+instance Ord CType where
+  compare x y = compare (rank x) (rank y)
+    where
+      rank CDeterministic = 10
+      rank CInferDeterministic = 9
+      rank CBottom = 1
+      rank CNotSetYet = -1
 
 --Do not use this constructor, use makeTypeInfo instead
 data TypeInfo a = TypeInfo
   { rType :: RType
   , pType :: PType
+  , cType :: CType
+  , derivingHornClause :: Maybe HornClause
   , witnessedVars :: WitnessedVars
   , chainName :: ChainName
   , tags :: [Tag a]} deriving (Show, Eq, Ord)
@@ -61,6 +82,8 @@ data TypeInfo a = TypeInfo
 makeTypeInfo = TypeInfo
     { rType = SPLL.Typing.RType.NotSetYet
     , pType = SPLL.Typing.PType.NotSetYet
+    , cType = CNotSetYet
+    , derivingHornClause = Nothing
     , witnessedVars = empty
     , chainName = ""
     , tags = []}
@@ -70,6 +93,12 @@ setRType t rt = t {rType = rt}
 
 setPType :: TypeInfo a -> PType -> TypeInfo a
 setPType t pt = t {pType = pt}
+
+setCType :: TypeInfo a -> CType -> TypeInfo a
+setCType t ct = t {cType = ct}
+
+setDerivingHornClause :: TypeInfo a -> HornClause -> TypeInfo a
+setDerivingHornClause t dhc = t {derivingHornClause = Just dhc}
 
 setWitnessedVars :: TypeInfo a-> WitnessedVars -> TypeInfo a
 setWitnessedVars t wit = t {witnessedVars = wit}
@@ -90,7 +119,6 @@ type Check a = ExceptT TypeError (Reader (Env () a))
 
 data TypeError = Mismatch RType RType
                deriving (Show, Eq)
-
 
 rIntersect :: RType -> RType -> Maybe RType
 --here be all cases where types are "equal" but one is more strict

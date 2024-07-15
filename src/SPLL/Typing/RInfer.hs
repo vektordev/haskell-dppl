@@ -126,7 +126,7 @@ instance Substitutable (Expr (TypeInfo a) a) where
   apply s = tMap (apply s . getTypeInfo)
   ftv _ = Set.empty
 instance Substitutable (TypeInfo a) where
-  apply s (TypeInfo {rType=rt, pType=pt}) = makeTypeInfo {rType = (apply s rt), pType = pt}
+  apply s ti@(TypeInfo {rType=rt}) = setRType ti (apply s rt)
   ftv _ = Set.empty
 
 instance Substitutable RType where

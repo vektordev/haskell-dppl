@@ -78,16 +78,13 @@ addWitnesses witVars (LetIn ti var_name decl expr)
   | var_name `elem` witnessedVars (getTypeInfo witExpr) = LetIn tiWitNoVar var_name witDecl (addWitnesses (Set.insert var_name witVars) expr)
   | otherwise = LetIn tiWitNoVarBottom var_name witDecl witExpr
   where
-        pt = pType ti
-        rtE = rType $ getTypeInfo witExpr
-        ptE = pType $ getTypeInfo witExpr
+        tiWit = getTypeInfo witExpr
         wit_vars = witnessedVars $ getTypeInfo witExpr
-        rtDecl = rType $ getTypeInfo decl
         ptDecl = pType $ getTypeInfo decl
         witDecl = addWitnesses witVars decl
         witExpr = addWitnesses witVars expr
-        tiWitNoVar = makeTypeInfo { rType = rtE, pType = ptE, witnessedVars = Set.delete var_name wit_vars}
-        tiWitNoVarBottom = makeTypeInfo { rType = rtE, pType = Bottom, witnessedVars = Set.delete var_name wit_vars}
+        tiWitNoVar = setWitnessedVars tiWit (Set.delete var_name wit_vars)
+        tiWitNoVarBottom = setPType (setWitnessedVars tiWit (Set.delete var_name wit_vars)) Bottom
 addWitnesses witVars (IfThenElse ti cond tr fl) =
   IfThenElse (setWitnessedVars ti wits) condW trW flW
   -- TODO What if we dont witness a variable in a branch but its also not used? let x = normal in if flip then x else normal

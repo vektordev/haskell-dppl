@@ -9,14 +9,13 @@ import SPLL.Typing.RType
 import SPLL.Typing.PType
 import Data.Maybe (maybeToList, fromJust, isNothing)
 import Data.List (nub)
-import SPLL.Typing.Typing (TypeInfo, TypeInfo(..), makeTypeInfo, Tag(..))
+import SPLL.Typing.Typing (TypeInfo, TypeInfo(..), Tag(..), setTags)
 annotate :: (Show a) => Expr (TypeInfo a) a -> Expr (TypeInfo a) a
 annotate = tMap annotateLocal
   where
-    annotateLocal e = makeTypeInfo  {rType = rt, pType = pt, tags = tags}
+    annotateLocal e = setTags ti tags
       where
-        rt = rType $ getTypeInfo e
-        pt = pType $ getTypeInfo e
+        ti = getTypeInfo e
         tags =
           [Alg $ findAlgorithm e | likelihoodFunctionUsesTypeInfo $ toStub e]
           ++ fmap EnumList (maybeToList (findEnumerable e))

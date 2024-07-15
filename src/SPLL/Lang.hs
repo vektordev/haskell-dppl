@@ -325,6 +325,16 @@ tTraverse f expr
       getBinaryConstructor expr <$> f (getTypeInfo expr) <*> tTraverse f (getSubExprs expr !! 0) <*> tTraverse f (getSubExprs expr !! 1)
 
 tMapM :: Monad m => (Expr x a -> m y) -> Expr x a -> m (Expr y a)
+tMapM f expr@(IfThenElse _ a b c) = do
+  t <- f expr
+  fa <- tMapM f a
+  fb <- tMapM f b
+  fc <- tMapM f c
+  return $ IfThenElse t fa fb fc
+tMapM f expr@(InjF _ name p) = do
+  fp <- mapM (tMapM f) p
+  t <- f expr
+  return $ InjF t name fp
 tMapM f expr
   | length (getSubExprs expr) == 0 = do
       t <- f expr
