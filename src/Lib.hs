@@ -119,12 +119,12 @@ newCodeGen tExpr = do
   let prob = generateCode irProb ""
   putStrLn $ unlines prob-}
 
-newCodeGenAll :: (Show a, Ord a, Floating a) => Env (TypeInfo a) a -> IO ()
-newCodeGenAll env = do
+newCodeGenAll :: (Show a, Ord a, Floating a) => CompilerConfig a -> Env (TypeInfo a) a -> IO ()
+newCodeGenAll conf env = do
   pPrint env
   let annotated = map (\(a,b) -> (a, SPLL.Analysis.annotate b)) env
   pPrint annotated
-  let ir = envToIR annotated
+  let ir = envToIR conf annotated
   pPrint ir
   let pycode = SPLL.CodeGenPyTorch.generateFunctions ir
   let jlcode = SPLL.CodeGenJulia.generateFunctions ir
@@ -156,8 +156,9 @@ someFunc = do--thatGaussThing
   PInfer2.showResultsProgDebug (addRTypeInfo $ addEmptyTypeInfo prog)
   putStrLn "done outputting constraints"
   let cmp2 = progToEnv $ addTypeInfo prog-}
-  let prog = testInjF
-  let typedProg = inferProg (addTypeInfo prog)
+  let conf = CompilerConfig {topKThreshold = Just 0.1}
+  let prog = testTopK
+  let typedProg = {-inferProg -} (addTypeInfo prog)
   let cmp = progToEnv typedProg
   --cmp2 <-  env
   --let cmp = [] ++ [("noiseMNistAdd", mNistNoise), ("expertmodel", expertModelsTyped), ("expertmodelAnnotated", expertAnnotatedTyped), ("mNistAdd", testNN)] :: Env TypeInfo Float
@@ -165,7 +166,7 @@ someFunc = do--thatGaussThing
   --let cmp = cmp2
   --cmp <- compile env
   
-  trace (show typedProg) $ newCodeGenAll cmp
+  trace (show typedProg) $ newCodeGenAll conf cmp
   --let env = [("main", testNNUntyped)] :: Env () Float
   --cmp <- compile env triMNist
   --let cmp = [("main", triMNist)] :: Env TypeInfo Float

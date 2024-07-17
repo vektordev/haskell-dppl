@@ -136,6 +136,9 @@ correctIntegralValuesTestCases = [(uniformProg, VFloat 0, VFloat 1, [], VFloat 1
                                   (simpleCall, VFloat 0, VFloat 1, [], VFloat 1.0),
                                   (testInjF, VFloat 0, VFloat 1, [], VFloat 0.5)]
 
+noTopKConfig :: CompilerConfig a
+noTopKConfig = CompilerConfig Nothing
+
 prop_CheckProbTestCases :: Property
 prop_CheckProbTestCases = forAll (elements correctProbValuesTestCases) checkProbTestCase
 
@@ -162,23 +165,38 @@ checkIntegralConverges (p, VFloat a, VFloat b, thetas, _) = ioProperty $ do
   return $ actualOutput === VFloat 1
 checkIntegralConverges _ = False ==> False
 
+prop_TopK :: Property
+prop_TopK = ioProperty $ do
+  actualOutput0 <- evalRandIO $ irDensityTopK testTopK 0.1 (VFloat 0) []
+  actualOutput1 <- evalRandIO $ irDensityTopK testTopK 0.1 (VFloat 1) []
+  trace ("Actual Output: " ++ show actualOutput0 ++ "  " ++ show actualOutput1) (return $ (actualOutput1 == VFloat 0.95) && (actualOutput0 == VFloat 0))
+
 --prop_CheckProbTestCases = foldr (\(p, inp, out) acc -> do
 --  checkProbTestCase p inp out .&&. acc) (True===True) correctProbValuesTestCases
 
+irDensityTopK :: RandomGen g => Program () Double -> Double -> Value Double -> [Double] -> Rand g (Value Double)
+irDensityTopK p thresh sample thetas = IRInterpreter.generate irEnv irEnv thetas [] irExpr
+  where irExpr = runSupply (toIRProbability (CompilerConfig (Just thresh)) main (IRConst sample)) (+1) 1
+        Just main = lookup "main" annotated
+        irEnv = envToIR (CompilerConfig (Just thresh)) annotated
+        annotated = map (\(a,b) -> (a, annotate b)) env
+        env = progToEnv typedProg
+        typedProg = addTypeInfo p
+
 irDensity :: RandomGen g => Program () Double -> Value Double -> [Double] -> Rand g (Value Double)
 irDensity p sample thetas = IRInterpreter.generate irEnv irEnv thetas [] irExpr
-  where irExpr = runSupply (toIRProbability main (IRConst sample)) (+1) 1
+  where irExpr = runSupply (toIRProbability noTopKConfig main (IRConst sample)) (+1) 1
         Just main = lookup "main" annotated
-        irEnv = envToIR annotated
+        irEnv = envToIR noTopKConfig annotated
         annotated = map (\(a,b) -> (a, annotate b)) env
         env = progToEnv typedProg
         typedProg = addTypeInfo p
 
 irIntegral :: RandomGen g => Program () Double -> Value Double -> Value Double -> [Double] -> Rand g (Value Double)
 irIntegral p low high thetas = IRInterpreter.generate irEnv irEnv thetas [] irExpr
-  where irExpr = runSupply (toIRIntegrate main (IRConst low) (IRConst high)) (+1) 1
+  where irExpr = runSupply (toIRIntegrate noTopKConfig main (IRConst low) (IRConst high)) (+1) 1
         Just main = lookup "main" annotated
-        irEnv = envToIR annotated
+        irEnv = envToIR noTopKConfig annotated
         annotated = map (\(a,b) -> (a, annotate b)) env
         env = progToEnv typedProg
         typedProg = addTypeInfo p
@@ -186,13 +204,13 @@ irIntegral p low high thetas = IRInterpreter.generate irEnv irEnv thetas [] irEx
 irInterpret :: RandomGen g => Program () Double -> [IRExpr Double] -> Rand g (Value Double)
 irInterpret p params = IRInterpreter.generate irEnv irEnv [] params main
   where Just main = lookup "main_prob" irEnv
-        irEnv = envToIR annotated
+        irEnv = envToIR noTopKConfig annotated
         annotated = map (\(a,b) -> (a, annotate b)) env
         env = progToEnv typedProg
         typedProg = addTypeInfo p
 
 progToIREnv ::(Floating a, Ord a, Show a, Random a) => Program () a -> [(String, IRExpr a)]
-progToIREnv p = envToIR $ map (\(a,b) -> (a, annotate b)) $ progToEnv $ addTypeInfo p
+progToIREnv p = envToIR noTopKConfig (map (\(a,b) -> (a, annotate b)) $ progToEnv $ addTypeInfo p)
 
 prop_CompilablesInterpretable :: Program () Double -> Property
 prop_CompilablesInterpretable prog = ioProperty $ do 

@@ -5,6 +5,7 @@ module SPLL.IntermediateRepresentation (
 , UnaryOperand(..)
 , Distribution(..)
 , Varname
+, CompilerConfig(..)
 , irMap
 ) where
 
@@ -146,6 +147,12 @@ data IRExpr a = IRIf (IRExpr a) (IRExpr a) (IRExpr a)
               | IRIndex (IRExpr a) (IRExpr a)
               | IRReturning (IRExpr a) -- only used to wrap statements that act as exit point of the expression.
               deriving (Show, Eq)
+
+data CompilerConfig a = CompilerConfig {
+  -- If set to Just x: All branches with likelihood less than x are discarded.
+  --  Uses local probability of the branch,given that the execution arrives at that branching point
+  topKThreshold :: Maybe a
+} deriving (Show)
 --3: convert algortihm-and-type-annotated Exprs into abstract representation of explicit computation:
 --    Fold enum ranges, algorithms, etc. into a representation of computation that can be directly converted into code.
 

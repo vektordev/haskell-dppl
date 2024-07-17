@@ -13,18 +13,18 @@ import SPLL.InferenceRule (algName)
 -- perhaps as an explicit lambda in the top of the expression, otherwise we'll get trouble generating code.
 -- TODO: How do we deal with top-level lambdas in binding here?
 --  TL-Lambdas are presumably to be treated differently than non-TL, at least as far as prob is concerned.
-envToIR :: (Ord a, Floating a, Show a, Eq a) => Env (TypeInfo a) a -> [(String, IRExpr a)]
-envToIR = concatMap (\(name, binding) ->
+envToIR :: (Ord a, Floating a, Show a, Eq a) => CompilerConfig a -> Env (TypeInfo a) a -> [(String, IRExpr a)]
+envToIR conf env = concatMap (\(name, binding) ->
   let pt = pType $ getTypeInfo binding in
     if pt == Deterministic || pt == Integrate then
-      [(name ++ "_integ", IRLambda "low" (IRLambda "high" (postProcess $ runSupplyVars (toIRIntegrate binding (IRVar "low") (IRVar "high"))))),
-       (name ++ "_prob", IRLambda "sample" (postProcess $ runSupplyVars (toIRProbability binding (IRVar "sample")))),
+      [(name ++ "_integ", IRLambda "low" (IRLambda "high" (postProcess $ runSupplyVars (toIRIntegrate conf binding (IRVar "low") (IRVar "high"))))),
+       (name ++ "_prob", IRLambda "sample" (postProcess $ runSupplyVars (toIRProbability conf binding (IRVar "sample")))),
        (name ++ "_gen", postProcess $ toIRGenerate binding)]
     else if pt == Prob then
-      [(name ++ "_prob", IRLambda "sample" (postProcess $ runSupplyVars (toIRProbability binding (IRVar "sample")))),
+      [(name ++ "_prob", IRLambda "sample" (postProcess $ runSupplyVars (toIRProbability conf binding (IRVar "sample")))),
        (name ++ "_gen", postProcess $ toIRGenerate binding)]
     else
-      [(name ++ "_gen", postProcess $ toIRGenerate binding)])
+      [(name ++ "_gen", postProcess $ toIRGenerate binding)]) env
       
 isValue :: IRExpr a -> Bool
 isValue (IRConst val) = True
@@ -131,53 +131,67 @@ hasAlgorithm tags alg = alg `elem` ([algName a | Alg a <- tags])
 --hasAlgorithm tags alg = not $ null $ filter (== alg) [a | Alg a <- tags]
 
 --in this implementation, I'll forget about the distinction between PDFs and Probabilities. Might need to fix that later.
-toIRProbability :: (Floating a, Show a) => Expr (TypeInfo a) a -> IRExpr a -> Supply Int (IRExpr a)
-toIRProbability (IfThenElse t cond left right) sample = do
+toIRProbability :: (Floating a, Show a) => CompilerConfig a -> Expr (TypeInfo a) a -> IRExpr a -> Supply Int (IRExpr a)
+toIRProbability conf (IfThenElse t cond left right) sample = do
   var_cond_p <- mkVariable "cond"
-  condExpr <- toIRProbability cond (IRConst (VBool True))
-  leftExpr <- toIRProbability left sample
-  rightExpr <- toIRProbability right sample
-  return $ IRLetIn var_cond_p condExpr
-    (IROp OpPlus
-      (IROp OpMult (IRVar var_cond_p) leftExpr)
-      (IROp OpMult (IROp OpSub (IRConst $ VFloat (1.0)) (IRVar var_cond_p) ) rightExpr))
-toIRProbability (GreaterThan (TypeInfo {rType = t, tags = extras}) left right) sample
+  condExpr <- toIRProbability conf cond (IRConst (VBool True))
+  leftExpr <- toIRProbability conf left sample
+  rightExpr <- toIRProbability conf right sample
+  -- p(y) = if p_cond < thresh then p_else(y) * (1-p_cond(y)) else if p_cond > 1 - thresh then p_then(y) * p_cond(y) else p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
+  let thr = topKThreshold conf
+  case thr of
+    Just thresh -> do
+      return $ IRLetIn var_cond_p condExpr
+        (IRIf (IROp OpLessThan (IRVar var_cond_p) (IRConst (VFloat thresh)))
+          (IROp OpMult (IROp OpSub (IRConst $ VFloat (1.0)) (IRVar var_cond_p) ) rightExpr)
+          (IRIf (IROp OpGreaterThan (IRVar var_cond_p) (IRConst (VFloat (1-thresh))))
+            (IROp OpMult (IRVar var_cond_p) leftExpr)
+            (IROp OpPlus
+              (IROp OpMult (IRVar var_cond_p) leftExpr)
+              (IROp OpMult (IROp OpSub (IRConst $ VFloat (1.0)) (IRVar var_cond_p) ) rightExpr))))
+    -- p(y) = p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
+    Nothing -> do
+      return $ IRLetIn var_cond_p condExpr
+        (IROp OpPlus
+          (IROp OpMult (IRVar var_cond_p) leftExpr)
+          (IROp OpMult (IROp OpSub (IRConst $ VFloat (1.0)) (IRVar var_cond_p) ) rightExpr))
+toIRProbability conf (GreaterThan (TypeInfo {rType = t, tags = extras}) left right) sample
   --TODO: Find a better lower bound than just putting -9999999
   | extras `hasAlgorithm` "greaterThanLeft" = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
-    integrate <- toIRIntegrate right (IRConst (VFloat (-9999999))) (IRVar var)
+    integrate <- toIRIntegrate conf right (IRConst (VFloat (-9999999))) (IRVar var)
     var2 <- mkVariable "rhs_integral"
     return $ IRLetIn var (toIRGenerate left)
       (IRLetIn var2 integrate
         (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))))
   | extras `hasAlgorithm` "greaterThanRight" = do --p(x | var >= const
     var <- mkVariable "fixed_bound"
-    integrate <- toIRIntegrate left (IRConst (VFloat (-9999999))) (IRVar var)
+    integrate <- toIRIntegrate conf left (IRConst (VFloat (-9999999))) (IRVar var)
     var2 <- mkVariable "lhs_integral"
     return $ IRLetIn var (toIRGenerate right)
       (IRLetIn var2 integrate
         (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)) (IRVar var2) ))
-toIRProbability (MultF (TypeInfo {rType = TFloat, tags = extras}) left right) sample
+toIRProbability conf (MultF (TypeInfo {rType = TFloat, tags = extras}) left right) sample
   | extras `hasAlgorithm` "multLeft" = do
     var <- mkVariable ""
-    rightExpr <- toIRProbability right (IROp OpDiv sample (IRVar var))
+    rightExpr <- toIRProbability conf right (IROp OpDiv sample (IRVar var))
     return $ IRLetIn var (toIRGenerate left)
       (IROp OpDiv rightExpr (IRUnaryOp OpAbs (IRVar var)))
   | extras `hasAlgorithm` "multRight" = do
     var <- mkVariable ""
-    leftExpr <- toIRProbability left (IROp OpDiv sample (IRVar var))
+    leftExpr <- toIRProbability conf left (IROp OpDiv sample (IRVar var))
     return $ IRLetIn var (toIRGenerate right)
       (IROp OpDiv leftExpr (IRUnaryOp OpAbs (IRVar var)))
-toIRProbability (PlusF (TypeInfo {rType = TFloat, tags = extras}) left right) sample
+toIRProbability conf (PlusF (TypeInfo {rType = TFloat, tags = extras}) left right) sample
   | extras `hasAlgorithm` "plusLeft" = do
     var <- mkVariable ""
-    rightExpr <- toIRProbability right (IROp OpSub sample (IRVar var))
+    rightExpr <- toIRProbability conf right (IROp OpSub sample (IRVar var))
     return $ IRLetIn var (toIRGenerate left) rightExpr
   | extras `hasAlgorithm` "plusRight" = do
     var <- mkVariable ""
-    leftExpr <- toIRProbability left (IROp OpSub sample (IRVar var))
+    leftExpr <- toIRProbability conf left (IROp OpSub sample (IRVar var))
     return $ IRLetIn var (toIRGenerate right) leftExpr
-toIRProbability (PlusI (TypeInfo {rType = TInt, tags = extras}) left right) sample
+toIRProbability conf (PlusI (TypeInfo {rType = TInt, tags = extras}) left right) sample
   | extras `hasAlgorithm` "enumeratePlusLeft" = do
     --Solving enumPlusLeft works by enumerating all left hand side choices.
     -- We then invert the addition to infer the right hand side.
@@ -188,49 +202,49 @@ toIRProbability (PlusI (TypeInfo {rType = TInt, tags = extras}) left right) samp
     let enumListR = head $ [x | EnumList x <- extrasRight]
     enumVar <- mkVariable "enum"
     --the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
-    pLeft <- toIRProbability left (IRVar enumVar)
-    pRight <- toIRProbability right (IROp OpSub sample (IRVar enumVar))
+    pLeft <- toIRProbability conf left (IRVar enumVar)
+    pRight <- toIRProbability conf right (IROp OpSub sample (IRVar enumVar))
     return $ IREnumSum enumVar (VList enumListL) $ IRIf (IRCall "in" [IROp OpSub sample (IRVar enumVar), IRConst (VList enumListR)]) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
   | extras `hasAlgorithm` "plusLeft" = do
     var <- mkVariable ""
-    rightExpr <- toIRProbability right (IROp OpSub sample (IRVar var))
+    rightExpr <- toIRProbability conf right (IROp OpSub sample (IRVar var))
     return $ IRLetIn var (toIRGenerate left) rightExpr
-toIRProbability (ExpF (TypeInfo {rType = TFloat, tags = extra}) f) sample = do
-  logExpr <- toIRProbability f (IRUnaryOp OpLog sample)
+toIRProbability conf (ExpF (TypeInfo {rType = TFloat, tags = extra}) f) sample = do
+  logExpr <- toIRProbability conf f (IRUnaryOp OpLog sample)
   return $ IROp OpDiv logExpr (IRUnaryOp OpAbs sample)
-toIRProbability (NegF (TypeInfo {rType = TFloat, tags = extra}) f) sample =
-  toIRProbability f (IRUnaryOp OpNeg sample)
-toIRProbability (ReadNN _ name subexpr) sample = do
+toIRProbability conf (NegF (TypeInfo {rType = TFloat, tags = extra}) f) sample =
+  toIRProbability conf f (IRUnaryOp OpNeg sample)
+toIRProbability conf (ReadNN _ name subexpr) sample = do
   let mkInput = toIRGenerate subexpr
   return $ IRIndex (IREvalNN name mkInput) sample
   --TODO: Assumption that subexpr is det.
-toIRProbability (Normal t) sample = return $ IRDensity IRNormal sample
-toIRProbability (Uniform t) sample = return $ IRDensity IRUniform sample
+toIRProbability conf (Normal t) sample = return $ IRDensity IRNormal sample
+toIRProbability conf (Uniform t) sample = return $ IRDensity IRUniform sample
 --TODO: assumption: These will be top-level lambdas:
-toIRProbability (Lambda t name subExpr) sample = do
-  subExprIR <- toIRProbability subExpr sample
+toIRProbability conf (Lambda t name subExpr) sample = do
+  subExprIR <- toIRProbability conf subExpr sample
   return $ IRLambda name subExprIR
-toIRProbability (Cons _ hdExpr tlExpr) sample = do
-  headP <- toIRProbability hdExpr (IRHead sample)
-  tailP <- toIRProbability tlExpr (IRTail sample)
+toIRProbability conf (Cons _ hdExpr tlExpr) sample = do
+  headP <- toIRProbability conf hdExpr (IRHead sample)
+  tailP <- toIRProbability conf tlExpr (IRTail sample)
   return (IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (IROp OpMult headP tailP))
-toIRProbability (TCons _ t1Expr t2Expr) sample = do
-  t1P <- toIRProbability t1Expr (IRTFst sample)
-  t2P <- toIRProbability t2Expr (IRTSnd sample)
+toIRProbability conf (TCons _ t1Expr t2Expr) sample = do
+  t1P <- toIRProbability conf t1Expr (IRTFst sample)
+  t2P <- toIRProbability conf t2Expr (IRTSnd sample)
   return (IROp OpMult t1P t2P)
-toIRProbability (InjF _ name params@[param]) sample = do  --TODO Multivariable
+toIRProbability conf (InjF _ name params@[param]) sample = do  --TODO Multivariable
   let letInBlock = IRLetIn v sample invExpr
-  paramExpr <- toIRProbability param letInBlock
+  paramExpr <- toIRProbability conf param letInBlock
   return $ IROp OpMult paramExpr invDerivExpr
   where Just fPair = lookup name globalFenv
         FPair (_, [inv]) = fPair
         FDecl (_, [v], _, invExpr, [(_, invDerivExpr)]) = inv
         [param] = params
-toIRProbability (Null _) sample = indicator (IROp OpEq sample (IRConst $ VList []))
-toIRProbability (Constant _ value) sample = indicator (IROp OpEq sample (IRConst value))
-toIRProbability (Call _ name) sample = return $ IRCall (name ++ "_prob") [sample]
-toIRProbability (ThetaI _ t) sample = indicator (IROp OpEq sample (IRTheta t))
-toIRProbability x sample = error ("found no way to convert to IR: " ++ show x)
+toIRProbability conf (Null _) sample = indicator (IROp OpEq sample (IRConst $ VList []))
+toIRProbability conf (Constant _ value) sample = indicator (IROp OpEq sample (IRConst value))
+toIRProbability conf (Call _ name) sample = return $ IRCall (name ++ "_prob") [sample]
+toIRProbability conf (ThetaI _ t) sample = indicator (IROp OpEq sample (IRTheta t))
+toIRProbability conf x sample = error ("found no way to convert to IR: " ++ show x)
 
 packParamsIntoLetinsProb :: (Show a, Floating a) => [String] -> [Expr (TypeInfo a) a] -> IRExpr a -> IRExpr a -> Supply Int (IRExpr a)
 --packParamsIntoLetinsProb [] [] expr _ = do
@@ -288,69 +302,82 @@ bindLocal namestring binding inEx = do
   varName <- mkVariable namestring
   return $ IRLetIn varName binding inEx
 
-toIRIntegrate :: (Show a, Floating a) => Expr (TypeInfo a) a -> IRExpr a -> IRExpr a -> Supply Int (IRExpr a)
-toIRIntegrate (Uniform _) lower higher = do
+toIRIntegrate :: (Show a, Floating a) => CompilerConfig a -> Expr (TypeInfo a) a -> IRExpr a -> IRExpr a -> Supply Int (IRExpr a)
+toIRIntegrate _ (Uniform _) lower higher = do
   return (IROp OpSub (IRCumulative IRUniform higher) (IRCumulative IRUniform lower))
-toIRIntegrate (Normal TypeInfo {}) lower higher = do
+toIRIntegrate _ (Normal TypeInfo {}) lower higher = do
   return (IROp OpSub (IRCumulative IRNormal higher) (IRCumulative IRNormal lower))
-toIRIntegrate (MultF (TypeInfo {tags = extras}) left right) lower higher
+toIRIntegrate conf (MultF (TypeInfo {tags = extras}) left right) lower higher
   | extras `hasAlgorithm` "multLeft" = do
     var <- mkVariable ""
-    rightExpr <- toIRIntegrate right (IROp OpDiv lower (IRVar var)) (IRUnaryOp OpAbs (IROp OpDiv higher (IRVar var)))
+    rightExpr <- toIRIntegrate conf right (IROp OpDiv lower (IRVar var)) (IRUnaryOp OpAbs (IROp OpDiv higher (IRVar var)))
     return $ IRLetIn var (toIRGenerate left)
       rightExpr
   | extras `hasAlgorithm` "multRight" = do
       var <- mkVariable ""
-      leftExpr <- toIRIntegrate left (IROp OpDiv lower (IRVar var)) (IRUnaryOp OpAbs (IROp OpDiv higher (IRVar var)))
+      leftExpr <- toIRIntegrate conf left (IROp OpDiv lower (IRVar var)) (IRUnaryOp OpAbs (IROp OpDiv higher (IRVar var)))
       return $ IRLetIn var (toIRGenerate right)
         leftExpr
-toIRIntegrate (PlusF TypeInfo {tags = extras} left right) lower higher
+toIRIntegrate conf (PlusF TypeInfo {tags = extras} left right) lower higher
   | extras `hasAlgorithm` "plusLeft" = do
     var <- mkVariable ""
-    rightExpr <- toIRIntegrate right (IROp OpSub lower (IRVar var)) (IROp OpSub higher (IRVar var))
+    rightExpr <- toIRIntegrate conf right (IROp OpSub lower (IRVar var)) (IROp OpSub higher (IRVar var))
     return $ IRLetIn var (toIRGenerate left)
       rightExpr
   | extras `hasAlgorithm` "plusRight" = do
       var <- mkVariable ""
-      leftExpr <- toIRIntegrate left (IROp OpSub lower (IRVar var)) (IROp OpSub higher (IRVar var))
+      leftExpr <- toIRIntegrate conf left (IROp OpSub lower (IRVar var)) (IROp OpSub higher (IRVar var))
       return $ IRLetIn var (toIRGenerate right)
         leftExpr
-toIRIntegrate (NegF _ a) low high = do
-  toIRIntegrate a (IRUnaryOp OpNeg high) (IRUnaryOp OpNeg low)
-toIRIntegrate (ExpF _ a) low high = do
-  toIRIntegrate a (IRUnaryOp OpLog high) (IRUnaryOp OpLog low)
-toIRIntegrate (TCons _ t1Expr t2Expr) low high = do
-  t1P <- toIRIntegrate t1Expr (IRTFst low) (IRTFst high)
-  t2P <- toIRIntegrate t2Expr (IRTSnd low) (IRTSnd high)
+toIRIntegrate conf (NegF _ a) low high = do
+  toIRIntegrate conf a (IRUnaryOp OpNeg high) (IRUnaryOp OpNeg low)
+toIRIntegrate conf (ExpF _ a) low high = do
+  toIRIntegrate conf a (IRUnaryOp OpLog high) (IRUnaryOp OpLog low)
+toIRIntegrate conf (TCons _ t1Expr t2Expr) low high = do
+  t1P <- toIRIntegrate conf t1Expr (IRTFst low) (IRTFst high)
+  t2P <- toIRIntegrate conf t2Expr (IRTSnd low) (IRTSnd high)
   return (IROp OpMult t1P t2P)
-toIRIntegrate (IfThenElse _ cond left right) low high = do
+toIRIntegrate conf (IfThenElse _ cond left right) low high = do
   var_cond_p <- mkVariable "cond"
-  condExpr <- toIRProbability cond (IRConst (VBool True))
-  leftExpr <- toIRIntegrate left low high
-  rightExpr <- toIRIntegrate right low high
-  return $ IRLetIn var_cond_p condExpr
-    (IROp OpPlus
-      (IROp OpMult (IRVar var_cond_p) leftExpr)
-      (IROp OpMult (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var_cond_p) ) rightExpr))
-toIRIntegrate (Cons _ hdExpr tlExpr) low high = do
-  headP <- toIRIntegrate hdExpr (IRHead low) (IRHead high)
-  tailP <- toIRIntegrate tlExpr (IRTail low) (IRTail high)
+  condExpr <- toIRProbability conf cond (IRConst (VBool True))
+  leftExpr <- toIRIntegrate conf left low high
+  rightExpr <- toIRIntegrate conf right low high
+  let thr = topKThreshold conf
+  case thr of
+    Just thresh -> 
+      return $ IRLetIn var_cond_p condExpr
+        (IRIf (IROp OpLessThan (IRVar var_cond_p) (IRConst (VFloat thresh)))
+          (IROp OpMult (IROp OpSub (IRConst $ VFloat (1.0)) (IRVar var_cond_p) ) rightExpr)
+          (IRIf (IROp OpGreaterThan (IRVar var_cond_p) (IRConst (VFloat (1-thresh))))
+            (IROp OpMult (IRVar var_cond_p) leftExpr)
+            (IROp OpPlus
+              (IROp OpMult (IRVar var_cond_p) leftExpr)
+              (IROp OpMult (IROp OpSub (IRConst $ VFloat (1.0)) (IRVar var_cond_p) ) rightExpr))))
+    -- p(y) = p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
+    Nothing -> 
+      return $ IRLetIn var_cond_p condExpr
+        (IROp OpPlus
+          (IROp OpMult (IRVar var_cond_p) leftExpr)
+          (IROp OpMult (IROp OpSub (IRConst $ VFloat (1.0)) (IRVar var_cond_p) ) rightExpr))
+toIRIntegrate conf (Cons _ hdExpr tlExpr) low high = do
+  headP <- toIRIntegrate conf hdExpr (IRHead low) (IRHead high)
+  tailP <- toIRIntegrate conf tlExpr (IRTail low) (IRTail high)
   return (IRIf (IROp OpOr (IROp OpEq low (IRConst $ VList [])) (IROp OpEq high (IRConst $ VList []))) (IRConst $ VFloat 0) (IROp OpMult headP tailP))
-toIRIntegrate (Null _) low high = do
+toIRIntegrate conf (Null _) low high = do
   indicator (IROp OpAnd (IROp OpEq low (IRConst $ VList [])) (IROp OpEq high (IRConst $ VList [])))
-toIRIntegrate (Constant _ value) low high = indicator (IROp OpAnd (IROp OpLessThan low (IRConst value)) (IROp OpGreaterThan high (IRConst value))) --TODO What to do if low and high are equal?
-toIRIntegrate (InjF _ name params) low high = do  --TODO Multivariable
+toIRIntegrate conf (Constant _ value) low high = indicator (IROp OpAnd (IROp OpLessThan low (IRConst value)) (IROp OpGreaterThan high (IRConst value))) --TODO What to do if low and high are equal?
+toIRIntegrate conf (InjF _ name params) low high = do  --TODO Multivariable
   let letInBlockLow = IRLetIn v low invExpr
   let letInBlockHigh = IRLetIn v high invExpr
-  paramExpr <- toIRIntegrate param letInBlockLow letInBlockHigh
+  paramExpr <- toIRIntegrate conf param letInBlockLow letInBlockHigh
   return $ paramExpr
   where Just fPair = lookup name globalFenv
         FPair (_, [inv]) = fPair
         FDecl (_, [v], _, invExpr, _) = inv
         [param] = params
-toIRIntegrate (Call _ name) low high = return $ IRCall (name ++ "_integ") [low, high]
-toIRIntegrate (Lambda t name subExpr) low high = do
-  subExprIR <- toIRIntegrate subExpr low high
+toIRIntegrate conf (Call _ name) low high = return $ IRCall (name ++ "_integ") [low, high]
+toIRIntegrate conf (Lambda t name subExpr) low high = do
+  subExprIR <- toIRIntegrate conf subExpr low high
   return $ IRLambda name subExprIR
-toIRIntegrate x _ _ = error ("found no way to convert to IRIntegrate: " ++ show x)
+toIRIntegrate _ x _ _ = error ("found no way to convert to IRIntegrate: " ++ show x)
 

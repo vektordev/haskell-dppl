@@ -64,7 +64,10 @@ testInjF2 :: Program () Double
 testInjF2 = Program [] (ExpF () (InjF () "double" [Uniform ()]))
 
 testPlus3 :: Program () Double
-testPlus3 = Program [] (LetIn () "a" (Uniform ()) (PlusF () (Var () "a") (Var () "a"))) 
+testPlus3 = Program [] (LetIn () "a" (Uniform ()) (PlusF () (Var () "a") (Var () "a")))
+
+testTopK :: Program () Double
+testTopK = Program [] (IfThenElse () (GreaterThan () (Uniform ()) (Constant () (VFloat 0.05))) (Constant () (VFloat 1)) (Constant () (VFloat 0)))
 
 
 
