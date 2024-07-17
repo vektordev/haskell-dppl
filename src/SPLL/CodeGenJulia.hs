@@ -43,8 +43,9 @@ juliaOps OpLessThan = "<="
 juliaOps OpDiv = "/"
 juliaOps OpSub = "-"
 juliaOps OpOr = "||"
-juliaOps OpOr = "&&"
+juliaOps OpAnd = "&&"
 juliaOps OpEq = "=="
+juliaOps x = error ("Unknown Julia operator: " ++ show x)
 
 juliaVal :: (Show a) => Value a -> String
 juliaVal (VList xs) = "[" ++ (intercalate "," $ map juliaVal xs) ++ "]"
