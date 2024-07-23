@@ -207,7 +207,8 @@ inferR (GreaterThan () left right) = do
   --if e1R /= e2R
   --then throwError $ Mismatch e1R e2R
   --else return TBool
-inferR (ThetaI () _) = return TFloat
+inferR (ThetaI () a _) = return TFloat        -- TODO I don't know what this is for. Might6 be incorrect
+inferR (Subtree () a _) = return TThetaTree
 inferR (Uniform ()) = return TFloat
 inferR (Normal ()) = return TFloat
 inferR (Constant () val) = return $ getRType val
@@ -240,7 +241,8 @@ inferP (GreaterThan _ left right) = do
   leftP <- inferP left
   rightP <- inferP right
   return $ downgrade leftP rightP
-inferP (ThetaI _ _) = return Deterministic
+inferP (ThetaI _ _ _) = return Deterministic
+inferP (Subtree _ _ _) = return Deterministic
 inferP (Constant _ _) = return Deterministic
 inferP (Uniform _) = return Integrate
 inferP (Normal _) = return Integrate

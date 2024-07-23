@@ -52,13 +52,15 @@ import Data.Number.Erf
 import SPLL.Typing.BruteForceSolver (forceAddTypeInfo, runBruteForceSolver)
 import SPLL.IRCompiler
 import SPLL.Typing.ForwardChaining
+import IRInterpreter (constructVisitationTree)
 
-variableLengthS2 :: Program  () Double
+{-variableLengthS2 :: Program  () Double
 variableLengthS2 = Program [("b", IfThenElse ()
                           (GreaterThan () (Uniform ()) (ThetaI () 0))
                           (Null ())
                           (Cons () (Constant () (VBool True)) (Call () "b")))]
                   (Call () "b")
+-}
 --assumption about grad: Reverse s a is Num if a is Num.
 --Thererfore, grad :: (Traversable f, Num a) => (forall s. Reifies s Tape => f (Reverse s a) -> Reverse s a) -> f a -> f a
 -- essentially translates to grad :: Traversable f, Num a) => (f (Reverse s a) -> Reverse s a) -> f a -> f a
@@ -156,8 +158,8 @@ someFunc = do--thatGaussThing
   PInfer2.showResultsProgDebug (addRTypeInfo $ addEmptyTypeInfo prog)
   putStrLn "done outputting constraints"
   let cmp2 = progToEnv $ addTypeInfo prog-}
-  let conf = CompilerConfig {topKThreshold = Just 0.1}
-  let prog = testTopK
+  let conf = CompilerConfig {topKThreshold = Nothing}
+  let prog = testPlus3
   let typedProg = {-inferProg -} (addTypeInfo prog)
   let cmp = progToEnv typedProg
   --cmp2 <-  env
@@ -165,7 +167,6 @@ someFunc = do--thatGaussThing
   --let cmp = [("main", testNN)] :: Env TypeInfo Float
   --let cmp = cmp2
   --cmp <- compile env
-  
   trace (show typedProg) $ newCodeGenAll conf cmp
   --let env = [("main", testNNUntyped)] :: Env () Float
   --cmp <- compile env triMNist

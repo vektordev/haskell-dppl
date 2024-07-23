@@ -42,7 +42,7 @@ transpileExpr expr = if likelihoodFunctionUsesTypeInfo $ toStub expr
 
 annotate :: Expr (TypeInfo a) a -> [Annotation a]
 annotate expr = case expr of 
-  ThetaI _ i    -> [IIndex i]
+  ThetaI _ a i  -> [IIndex i]
   Constant _ x  -> [IValue x]
   Call _ x      -> [IIdentifier x]
   LetIn _ x _ _ -> [IIdentifier x]

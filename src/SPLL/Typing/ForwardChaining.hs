@@ -98,7 +98,7 @@ findFulfilledHornClause clauses satisfied = find allSatisfied clauses
 
 findDeterminism :: Expr (TypeInfo a) a -> [ChainName]
 findDeterminism (Constant t _) = [chainName t]
-findDeterminism (ThetaI t _) = [chainName t]
+findDeterminism (ThetaI t _ _) = [chainName t]
 findDeterminism e = concatMap findDeterminism (getSubExprs e)
 
 -- To the person that wants to implement weaker CTypes:

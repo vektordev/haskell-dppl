@@ -69,8 +69,21 @@ testPlus3 = Program [] (LetIn () "a" (Uniform ()) (PlusF () (Var () "a") (Var ()
 testTopK :: Program () Double
 testTopK = Program [] (IfThenElse () (GreaterThan () (Uniform ()) (Constant () (VFloat 0.05))) (Constant () (VFloat 1)) (Constant () (VFloat 0)))
 
+testTheta :: Program () Double
+testTheta = Program [] (Lambda () "thetas" (ThetaI () (Var () "thetas") 0))
 
+testThetaTree :: Program () Double
+testThetaTree = Program [] (Lambda () "thetas" (PlusF () (ThetaI () (Var () "thetas") 2) (ThetaI () (Subtree () (Var () "thetas") 1) 1)))
 
+testAnd :: Program () Double
+testAnd = Program [] (And () (LessThan () (Normal ()) (Constant () (VFloat 0))) (GreaterThan () (Uniform ()) (Constant () (VFloat 0.5))))
+
+testOr :: Program () Double
+testOr = Program [] (Or () (LessThan () (Normal ()) (Constant () (VFloat 0))) (GreaterThan () (Uniform ()) (Constant () (VFloat 0.5))))
+
+testNot :: Program () Double
+testNot = Program [] (Not () (LessThan () (Normal ()) (Constant () (VFloat 0))))
+{-
 flipCoin :: Expr () Double
 flipCoin = GreaterThan () (Uniform ()) (Constant () (VFloat 0.5))
 variableLength :: Expr () a
@@ -512,4 +525,4 @@ compilationExample = GreaterThan () (Uniform ()) (ThetaI () 0)
 --  if is28x28x1 image
 --    then classifyMNist image
 --    else classifyCIFAR image
-
+-}

@@ -17,6 +17,7 @@ import SPLL.Typing.RType
 data ExprStub = StubIfThenElse
               | StubGreaterThan
               | StubThetaI
+              | StubSubtree
               | StubUniform
               | StubNormal
               | StubConstant
@@ -43,7 +44,8 @@ toStub :: Expr x a -> ExprStub
 toStub expr = case expr of
   IfThenElse {}  -> StubIfThenElse
   GreaterThan {} -> StubGreaterThan
-  (ThetaI _ _)   -> StubThetaI
+  (ThetaI _ _ _)   -> StubThetaI
+  (Subtree _ _ _)   -> StubSubtree
   (Uniform _)    -> StubUniform
   (Normal _)     -> StubNormal
   (Constant _ _) -> StubConstant

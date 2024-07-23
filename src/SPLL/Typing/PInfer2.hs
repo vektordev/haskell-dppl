@@ -533,7 +533,8 @@ inferProg env (Program decls expr) = do
 infer :: (Show a) => TEnv -> Expr (TypeInfo a) a -> Infer (Subst, [DConstraint], PType, Expr (TypeInfo a) a)
 infer env expr = case expr of
 
-  ThetaI ti a  -> return (emptySubst, [], Deterministic, ThetaI (setPType ti Deterministic) a)
+  ThetaI ti a i  -> return (emptySubst, [], Deterministic, ThetaI (setPType ti Deterministic) a i)
+  Subtree ti a i  -> return (emptySubst, [], Deterministic, Subtree (setPType ti Deterministic) a i)
   Uniform ti  -> return (emptySubst, [], Integrate, Uniform (setPType ti Integrate))
   Normal ti  -> return (emptySubst, [], Integrate, Normal (setPType ti Integrate))
   Constant ti val  -> return (emptySubst, [], Deterministic, Constant (setPType ti Deterministic) val)
@@ -578,12 +579,12 @@ infer env expr = case expr of
       (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
       (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
       return (s3, cs3, t3, MultI (setPType ti t3) et1 et2)
-  
+
   ExpF ti e -> do
         (s1, cs1, t1) <- negInf
         (s2, cs2, t2, et) <- applyOpArg env e s1 cs1 t1
         return (s2, cs2, t2, ExpF (setPType ti t2) et)
-  
+
   NegF ti e -> do
       (s1, cs1, t1) <- negInf
       (s2, cs2, t2, et) <- applyOpArg env e s1 cs1 t1
@@ -622,9 +623,10 @@ infer env expr = case expr of
     (s5, cs5, t5) <- applyOpTy env t3 (s4 `compose` s3) (cs3 ++ cs4) t4
     (s6, cs6, t6, flt) <- applyOpArg env fl s5 cs5 t5
     return (s6, cs6, t6, IfThenElse (setPType ti t6) condt trt flt)
-  
-  Lambda ti name expr -> do
-    undefined
+
+  Lambda ti name e -> do
+    (s, cs, t, et) <- infer env e -- TODO Check this
+    return (s, cs, t, Lambda (setPType ti t) name et)
   
   _ -> error (show expr)
        

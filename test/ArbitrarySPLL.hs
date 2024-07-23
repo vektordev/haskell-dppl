@@ -62,9 +62,10 @@ mkUniform varnames size = do
   
 mkThetaI :: Arbitrary x => [String] -> Int -> Gen (Expr x a)
 mkThetaI varnames size = do
-  t <- arbitrary
+  t0 <- arbitrary
+  t1 <- arbitrary
   ix <- arbitrary
-  return $ ThetaI t ix
+  return $ ThetaI t0 (Var t1 "thetas") ix
   
 mkGreaterThan :: Arbitrary x => [String] -> Int -> Gen (Expr x a)
 mkGreaterThan varnames size = do

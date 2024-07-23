@@ -10,6 +10,9 @@ import Data.List (intercalate)
 --TODO: On the topic of memoization: Ideally we would want to optimize away redundant calls within a loop.
 -- e.g. in MNist-Addition
 
+-- Expected format format of ThetaTrees:
+--    ThetaTree = ([Float], [ThetaTree])
+
 filet :: [a] -> [a]
 filet = init . tail
 
@@ -91,14 +94,15 @@ generateCode (IRUnaryOp OpLog expr) = wrap "log(" (generateCode expr) ")"
 generateCode (IRUnaryOp OpNeg expr) = wrap "-(" (generateCode expr) ")"
 generateCode (IRUnaryOp OpNot expr) = wrap "!(" (generateCode expr) ")"
 generateCode (IRUnaryOp OpAbs expr) = wrap "abs(" (generateCode expr) ")"
-generateCode (IRTheta i) = ["thetas[" ++ show i ++ "]"]
+generateCode (IRTheta expr i) = wrap "(" (generateCode expr) (")[1][" ++ show (i + 1) ++ "]")
+generateCode (IRSubtree expr i) = wrap "(" (generateCode expr) (")[2][" ++ show (i + 1) ++ "]")
 generateCode (IRConst val) = [juliaVal val]
 generateCode (IRCons hd tl) = wrapMultiBlock ["hcat(", ", ", ")"] [generateCode hd, generateCode tl]
 generateCode (IRTCons t1 t2) = wrapMultiBlock ["(", ", ", ")"] [generateCode t1, generateCode t2]
 generateCode (IRHead lst) = wrap "(" (generateCode lst) ")[1]"
 generateCode (IRTail lst) = wrap "(" (generateCode lst) ")[2:end]"
-generateCode (IRTFst t) = wrap "(" (generateCode t) ")[0]"
-generateCode (IRTSnd t) = wrap "(" (generateCode t) ")[1]"
+generateCode (IRTFst t) = wrap "(" (generateCode t) ")[1]"
+generateCode (IRTSnd t) = wrap "(" (generateCode t) ")[2]"
 generateCode (IRSample IRNormal) = ["randn()"]
 generateCode (IRSample IRUniform) = ["rand()"]
 generateCode (IRLetIn name bind into) = let --TODO letins within method calls

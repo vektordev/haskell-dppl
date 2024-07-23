@@ -17,7 +17,8 @@ addWitnessesProg (Program funcs expr) = Program (zip (map fst funcs) (map (addWi
 
 addWitnesses :: (Show a) => Set.Set String -> Expr (TypeInfo a) a ->  Expr (TypeInfo a) a
 addWitnesses _ (Var ti name) = Var (addWitnessTypeInfo name ti) name
-addWitnesses _ (ThetaI ti x) = ThetaI ti x
+addWitnesses _ (ThetaI ti a x) = ThetaI ti a x  -- TODO definately wrong. but sufficent as long as you dont do crazy things with thetas
+addWitnesses _ (Subtree ti a x) = Subtree ti a x  -- TODO definately wrong. but sufficent as long as you dont do crazy things with thetas
 addWitnesses _ (Normal ti) = Normal ti
 addWitnesses _ (Uniform ti) = Uniform ti
 addWitnesses _ (Constant ti x) = Constant ti x

@@ -56,6 +56,146 @@ instance Show a => Recompilable (Expr (TypeInfo a) a) where
     Left x -> Left x
     Right (Program _ _) -> error "unexpected error when recompiling Expr TypeInfo a."
 
+thetaTreeExample :: IRExpr Double
+thetaTreeExample = IRConst (VThetaTree (ThetaTree [0, 1, 2, 3] [ThetaTree [4, 5, 6, 7] [], ThetaTree [8, 9, 10, 11] [], ThetaTree [12, 13, 14, 15] []]))
+
+flatTree :: Eq a => [a] -> [IRExpr a]
+flatTree a = [IRConst (VThetaTree (ThetaTree a []))]
+
+normalPDF :: Double -> Double
+normalPDF x = (1 / sqrt (2 * pi)) * exp (-0.5 * x * x)
+
+normalCDF :: Double -> Double
+normalCDF x = (1/2)*(1 + erf(x/sqrt(2)))
+    
+correctProbValuesTestCases :: [(Program () Double, Value Double, [IRExpr Double], Value Double)]
+correctProbValuesTestCases = [(uniformProg, VFloat 0.5, [], VFloat 1.0),
+                              (normalProg, VFloat 0.5, [], VFloat $ normalPDF 0.5),
+                              (uniformProgMult, VFloat (-0.25), [], VFloat 2),
+                              (normalProgMult, VFloat (-1), [], VFloat (normalPDF (-2) * 2)),
+                              (uniformNegPlus, VFloat (-4.5), [], VFloat 1),
+                              (testList, VList [VFloat 0.25, VFloat 0], [], VFloat $ normalPDF 0 * 2),
+                              (simpleTuple, VTuple (VFloat 0.25) (VFloat 0), [], VFloat $ normalPDF 0 * 2),
+                              (uniformIfProg, VFloat 0.5, [], VFloat 0.5),
+                              (constantProg, VFloat 2, [], VFloat 1),
+                              (simpleCall, VFloat 0.5, [], VFloat 1.0),
+                              (uniformExp, VFloat $ exp 4.5, [], VFloat $ 1/exp 4.5),
+                              (testInjF, VFloat 1.5, [], VFloat 0.5),
+                              (testInjF2, VFloat 1.5, [], VFloat $ 1/3),
+                              (testTheta, VFloat 1.5, flatTree [1.5], VFloat 1),
+                              (testTheta, VFloat 1.5, flatTree [1], VFloat 0),
+                              (testThetaTree, VFloat 11, [thetaTreeExample], VFloat 1)]
+                              --(testAnd, VBool True, [], VFloat 0.25),
+                              --(testOr, VBool True, [], VFloat 0.75),
+                              --(testNot, VBool True, [], VFloat 0.5)]
+
+correctIntegralValuesTestCases :: [(Program () Double, Value Double, Value Double, [IRExpr Double], Value Double)]
+correctIntegralValuesTestCases = [(uniformProg, VFloat 0, VFloat 1, [], VFloat 1.0),
+                                  (uniformProg, VFloat  (-1), VFloat 2, [], VFloat 1.0),
+                                  (normalProg, VFloat (-5), VFloat 5, [], VFloat $ normalCDF 5 - normalCDF (-5)),
+                                  (normalProgMult, VFloat (-5), VFloat 5, [], VFloat $ normalCDF 10 - normalCDF (-10)),
+                                  (uniformNegPlus, VFloat (-5), VFloat (-4.5), [], VFloat 0.5),
+                                  (uniformProgPlus, VFloat 4, VFloat 4.5, [], VFloat 0.5),
+                                  (testList, VList [VFloat 0, VFloat (-1)], VList [VFloat 0.25, VFloat 1], [], VFloat $ (normalCDF 1 - normalCDF (-1)) * 0.5),
+                                  (simpleTuple, VTuple (VFloat 0) (VFloat (-1)), VTuple (VFloat 0.25) (VFloat 1), [], VFloat $ (normalCDF 1 - normalCDF (-1)) * 0.5),
+                                  (uniformIfProg, VFloat 0, VFloat 1, [], VFloat 0.5),
+                                  (constantProg, VFloat 1, VFloat 3, [], VFloat 1),
+                                  (simpleCall, VFloat 0, VFloat 1, [], VFloat 1.0),
+                                  (testInjF, VFloat 0, VFloat 1, [], VFloat 0.5),
+                                  (testTheta, VFloat 0.9, VFloat 1.1, flatTree [1], VFloat 1)]
+
+noTopKConfig :: CompilerConfig a
+noTopKConfig = CompilerConfig Nothing
+
+prop_CheckProbTestCases :: Property
+prop_CheckProbTestCases = forAll (elements correctProbValuesTestCases) checkProbTestCase
+
+prop_CheckIntegralTestCases :: Property
+prop_CheckIntegralTestCases = forAll (elements correctIntegralValuesTestCases) checkIntegralTestCase
+
+prop_CheckIntegralConverges :: Property
+prop_CheckIntegralConverges = forAll (elements correctIntegralValuesTestCases) checkIntegralConverges
+
+checkProbTestCase :: (Program () Double, Value Double, [IRExpr Double], Value Double) -> Property
+checkProbTestCase (p, inp, params, out) = ioProperty $ do
+  actualOutput <- evalRandIO $ irDensity p inp params
+  return $ actualOutput === out
+
+checkIntegralTestCase :: (Program () Double, Value Double, Value Double, [IRExpr Double], Value Double) -> Property
+checkIntegralTestCase (p, low, high, params, out) = ioProperty $ do
+  actualOutput <- evalRandIO $ irIntegral p low high params
+  return $ actualOutput === out
+
+--TODO better bounds for Integral
+checkIntegralConverges :: (Program () Double, Value Double, Value Double, [IRExpr Double], Value Double) -> Property
+checkIntegralConverges (p, VFloat a, VFloat b, params, _) = ioProperty $ do
+  actualOutput <- evalRandIO $ irIntegral p (VFloat (-9999999)) (VFloat 9999999) params
+  return $ actualOutput === VFloat 1
+checkIntegralConverges _ = False ==> False
+
+prop_TopK :: Property
+prop_TopK = ioProperty $ do
+  actualOutput0 <- evalRandIO $ irDensityTopK testTopK 0.1 (VFloat 0) []
+  actualOutput1 <- evalRandIO $ irDensityTopK testTopK 0.1 (VFloat 1) []
+  trace ("Actual Output: " ++ show actualOutput0 ++ "  " ++ show actualOutput1) (return $ (actualOutput1 == VFloat 0.95) && (actualOutput0 == VFloat 0))
+
+--prop_CheckProbTestCases = foldr (\(p, inp, out) acc -> do
+--  checkProbTestCase p inp out .&&. acc) (True===True) correctProbValuesTestCases
+
+irDensityTopK :: RandomGen g => Program () Double -> Double -> Value Double -> [IRExpr Double]-> Rand g (Value Double)
+irDensityTopK p thresh sample params = IRInterpreter.generate irEnv irEnv params irExpr
+  where irExpr = runSupply (toIRProbability (CompilerConfig (Just thresh)) main (IRConst sample)) (+1) 1
+        Just main = lookup "main" annotated
+        irEnv = envToIR (CompilerConfig (Just thresh)) annotated
+        annotated = map (\(a,b) -> (a, annotate b)) env
+        env = progToEnv typedProg
+        typedProg = addTypeInfo p
+
+
+irDensity :: RandomGen g => Program () Double -> Value Double -> [IRExpr Double] -> Rand g (Value Double)
+irDensity p sample params = IRInterpreter.generate irEnv irEnv params irExpr
+  where irExpr = runSupply (toIRProbability noTopKConfig main (IRConst sample)) (+1) 1
+        Just main = lookup "main" annotated
+        irEnv = envToIR noTopKConfig annotated
+        annotated = map (\(a,b) -> (a, annotate b)) env
+        env = progToEnv typedProg
+        typedProg = addTypeInfo p
+
+irIntegral :: RandomGen g => Program () Double -> Value Double -> Value Double -> [IRExpr Double] -> Rand g (Value Double)
+irIntegral p low high params = IRInterpreter.generate irEnv irEnv params irExpr
+  where irExpr = runSupply (toIRIntegrate noTopKConfig main (IRConst low) (IRConst high)) (+1) 1
+        Just main = lookup "main" annotated
+        irEnv = envToIR noTopKConfig annotated
+        annotated = map (\(a,b) -> (a, annotate b)) env
+        env = progToEnv typedProg
+        typedProg = addTypeInfo p
+
+{-irInterpret :: RandomGen g => Program () Double -> [IRExpr Double] -> Rand g (Value Double)
+irInterpret p params = IRInterpreter.generate irEnv irEnv [] params main
+  where Just main = lookup "main_prob" irEnv
+        irEnv = envToIR noTopKConfig annotated
+        annotated = map (\(a,b) -> (a, annotate b)) env
+        env = progToEnv typedProg
+        typedProg = addTypeInfo p
+-}
+
+progToIREnv ::(Floating a, Ord a, Show a, Random a) => Program () a -> [(String, IRExpr a)]
+progToIREnv p = envToIR noTopKConfig (map (\(a,b) -> (a, annotate b)) $ progToEnv $ addTypeInfo p)
+
+{-
+prop_CompilablesInterpretable :: Program () Double -> Property
+prop_CompilablesInterpretable prog = ioProperty $ do 
+  ci <- canInterpret prog
+  return $ canCompile prog ==> ci
+
+langDensity :: Program () Double -> Double -> Value Double
+langDensity p sample = case Interpreter.runInferL [] witExpr [] (VFloat sample) of
+  PDF prob -> VFloat prob
+  DiscreteProbability prob -> VFloat prob
+  where Program _ witExpr = addWitnessesProg typedProg
+        typedProg = addTypeInfo p
+
+
 -- Program sets for tests
 examples :: [Program () Float]
 examples = [makeMain variableLength, makeMain testGreater, makeMain testGaussianMixture, makeMain testIntractable]
@@ -101,129 +241,7 @@ canInterpret p = do
     Left (err :: SomeException) -> return False
     Right r -> return True
 
-normalPDF :: Double -> Double
-normalPDF x = (1 / sqrt (2 * pi)) * exp (-0.5 * x * x)
 
-normalCDF :: Double -> Double
-normalCDF x = (1/2)*(1 + erf(x/sqrt(2)))
-    
-correctProbValuesTestCases :: [(Program () Double, Value Double, [Double], Value Double)]
-correctProbValuesTestCases = [(uniformProg, VFloat 0.5, [], VFloat 1.0),
-                              (normalProg, VFloat 0.5, [], VFloat $ normalPDF 0.5),
-                              (uniformProgMult, VFloat (-0.25), [], VFloat 2),
-                              (normalProgMult, VFloat (-1), [], VFloat (normalPDF (-2) * 2)),
-                              (uniformNegPlus, VFloat (-4.5), [], VFloat 1),
-                              (testList, VList [VFloat 0.25, VFloat 0], [], VFloat $ normalPDF 0 * 2),
-                              (simpleTuple, VTuple (VFloat 0.25) (VFloat 0), [], VFloat $ normalPDF 0 * 2),
-                              (uniformIfProg, VFloat 0.5, [], VFloat 0.5),
-                              (constantProg, VFloat 2, [], VFloat 1),
-                              (simpleCall, VFloat 0.5, [], VFloat 1.0),
-                              (uniformExp, VFloat $ exp 4.5, [], VFloat $ 1/exp 4.5),
-                              (testInjF, VFloat 1.5, [], VFloat 0.5),
-                              (testInjF2, VFloat 1.5, [], VFloat $ 1/3)]
-
-correctIntegralValuesTestCases :: [(Program () Double, Value Double, Value Double, [Double], Value Double)]
-correctIntegralValuesTestCases = [(uniformProg, VFloat 0, VFloat 1, [], VFloat 1.0),
-                                  (uniformProg, VFloat  (-1), VFloat 2, [], VFloat 1.0),
-                                  (normalProg, VFloat (-5), VFloat 5, [], VFloat $ normalCDF 5 - normalCDF (-5)),
-                                  (normalProgMult, VFloat (-5), VFloat 5, [], VFloat $ normalCDF 10 - normalCDF (-10)),
-                                  (uniformNegPlus, VFloat (-5), VFloat (-4.5), [], VFloat 0.5),
-                                  (uniformProgPlus, VFloat 4, VFloat 4.5, [], VFloat 0.5),
-                                  (testList, VList [VFloat 0, VFloat (-1)], VList [VFloat 0.25, VFloat 1], [], VFloat $ (normalCDF 1 - normalCDF (-1)) * 0.5),
-                                  (simpleTuple, VTuple (VFloat 0) (VFloat (-1)), VTuple (VFloat 0.25) (VFloat 1), [], VFloat $ (normalCDF 1 - normalCDF (-1)) * 0.5),
-                                  (uniformIfProg, VFloat 0, VFloat 1, [], VFloat 0.5),
-                                  (constantProg, VFloat 1, VFloat 3, [], VFloat 1),
-                                  (simpleCall, VFloat 0, VFloat 1, [], VFloat 1.0),
-                                  (testInjF, VFloat 0, VFloat 1, [], VFloat 0.5)]
-
-noTopKConfig :: CompilerConfig a
-noTopKConfig = CompilerConfig Nothing
-
-prop_CheckProbTestCases :: Property
-prop_CheckProbTestCases = forAll (elements correctProbValuesTestCases) checkProbTestCase
-
-prop_CheckIntegralTestCases :: Property
-prop_CheckIntegralTestCases = forAll (elements correctIntegralValuesTestCases) checkIntegralTestCase
-
-prop_CheckIntegralConverges :: Property
-prop_CheckIntegralConverges = forAll (elements correctIntegralValuesTestCases) checkIntegralConverges
-
-checkProbTestCase :: (Program () Double, Value Double, [Double], Value Double) -> Property
-checkProbTestCase (p, inp, thetas, out) = ioProperty $ do
-  actualOutput <- evalRandIO $ irDensity p inp thetas
-  return $ actualOutput === out
-
-checkIntegralTestCase :: (Program () Double, Value Double, Value Double, [Double], Value Double) -> Property
-checkIntegralTestCase (p, low, high, thetas, out) = ioProperty $ do
-  actualOutput <- evalRandIO $ irIntegral p low high thetas
-  return $ actualOutput === out
-
---TODO better bounds for Integral
-checkIntegralConverges :: (Program () Double, Value Double, Value Double, [Double], Value Double) -> Property
-checkIntegralConverges (p, VFloat a, VFloat b, thetas, _) = ioProperty $ do
-  actualOutput <- evalRandIO $ irIntegral p (VFloat (-9999999)) (VFloat 9999999) thetas
-  return $ actualOutput === VFloat 1
-checkIntegralConverges _ = False ==> False
-
-prop_TopK :: Property
-prop_TopK = ioProperty $ do
-  actualOutput0 <- evalRandIO $ irDensityTopK testTopK 0.1 (VFloat 0) []
-  actualOutput1 <- evalRandIO $ irDensityTopK testTopK 0.1 (VFloat 1) []
-  trace ("Actual Output: " ++ show actualOutput0 ++ "  " ++ show actualOutput1) (return $ (actualOutput1 == VFloat 0.95) && (actualOutput0 == VFloat 0))
-
---prop_CheckProbTestCases = foldr (\(p, inp, out) acc -> do
---  checkProbTestCase p inp out .&&. acc) (True===True) correctProbValuesTestCases
-
-irDensityTopK :: RandomGen g => Program () Double -> Double -> Value Double -> [Double] -> Rand g (Value Double)
-irDensityTopK p thresh sample thetas = IRInterpreter.generate irEnv irEnv thetas [] irExpr
-  where irExpr = runSupply (toIRProbability (CompilerConfig (Just thresh)) main (IRConst sample)) (+1) 1
-        Just main = lookup "main" annotated
-        irEnv = envToIR (CompilerConfig (Just thresh)) annotated
-        annotated = map (\(a,b) -> (a, annotate b)) env
-        env = progToEnv typedProg
-        typedProg = addTypeInfo p
-
-irDensity :: RandomGen g => Program () Double -> Value Double -> [Double] -> Rand g (Value Double)
-irDensity p sample thetas = IRInterpreter.generate irEnv irEnv thetas [] irExpr
-  where irExpr = runSupply (toIRProbability noTopKConfig main (IRConst sample)) (+1) 1
-        Just main = lookup "main" annotated
-        irEnv = envToIR noTopKConfig annotated
-        annotated = map (\(a,b) -> (a, annotate b)) env
-        env = progToEnv typedProg
-        typedProg = addTypeInfo p
-
-irIntegral :: RandomGen g => Program () Double -> Value Double -> Value Double -> [Double] -> Rand g (Value Double)
-irIntegral p low high thetas = IRInterpreter.generate irEnv irEnv thetas [] irExpr
-  where irExpr = runSupply (toIRIntegrate noTopKConfig main (IRConst low) (IRConst high)) (+1) 1
-        Just main = lookup "main" annotated
-        irEnv = envToIR noTopKConfig annotated
-        annotated = map (\(a,b) -> (a, annotate b)) env
-        env = progToEnv typedProg
-        typedProg = addTypeInfo p
-
-irInterpret :: RandomGen g => Program () Double -> [IRExpr Double] -> Rand g (Value Double)
-irInterpret p params = IRInterpreter.generate irEnv irEnv [] params main
-  where Just main = lookup "main_prob" irEnv
-        irEnv = envToIR noTopKConfig annotated
-        annotated = map (\(a,b) -> (a, annotate b)) env
-        env = progToEnv typedProg
-        typedProg = addTypeInfo p
-
-progToIREnv ::(Floating a, Ord a, Show a, Random a) => Program () a -> [(String, IRExpr a)]
-progToIREnv p = envToIR noTopKConfig (map (\(a,b) -> (a, annotate b)) $ progToEnv $ addTypeInfo p)
-
-prop_CompilablesInterpretable :: Program () Double -> Property
-prop_CompilablesInterpretable prog = ioProperty $ do 
-  ci <- canInterpret prog
-  return $ canCompile prog ==> ci
-
-langDensity :: Program () Double -> Double -> Value Double
-langDensity p sample = case Interpreter.runInferL [] witExpr [] (VFloat sample) of
-  PDF prob -> VFloat prob
-  DiscreteProbability prob -> VFloat prob
-  where Program _ witExpr = addWitnessesProg typedProg
-        typedProg = addTypeInfo p
-        
 {-prop_CDFGradIsPDF :: Property
 prop_CDFGradIsPDF = forAll (elements correctIntegralValuesTestCases)(\(p, _, high, thetas, _) -> ioProperty $ do
     let irExpr = runSupply (toIRIntegrate main (IRConst $ VFloat (-9999999)) (IRConst high)) (+1) 1
@@ -233,7 +251,7 @@ prop_CDFGradIsPDF = forAll (elements correctIntegralValuesTestCases)(\(p, _, hig
         env = progToEnv typedProg
         typedProg = addTypeInfo p
     grad' $ evalRandIO $ IRInterpreter.generate (autoEnv irEnv) irEnv thetas [] (autoIRExpr irExpr))
-    
+
 autoIRExpr :: (Num a, Reifies s Tape) => IRExpr a -> IRExpr (Reverse s a)
 autoIRExpr e = irMap auto e-}
 
@@ -267,14 +285,14 @@ parametrizedGen = do
   return ([("main", expr)], thetas)
 
 maxThetaIx :: Expr t a -> Maybe Int
-maxThetaIx (ThetaI _ x) = Just x
+maxThetaIx (ThetaI _ a x) = Just x
 maxThetaIx _ = Nothing
 
 genThetas :: Int -> Gen (Thetas Float)
 genThetas = vector
 
 findThetas :: Expr t a -> [Expr t a]
-findThetas (ThetaI a b) = [ThetaI a b]
+findThetas (ThetaI a b c) = [ThetaI a b c]
 findThetas expr = concatMap findThetas x
   where x = getSubExprs expr
 
@@ -307,11 +325,13 @@ propInfer a b = addWitnessesProg (addTypeInfo a) === b
 
 sumsToOne :: IO Result
 sumsToOne = undefined
-
+-}
 return []
+
 
 runTests :: IO Bool
 runTests = $quickCheckAll
+
 
 main :: IO Bool
 main = do

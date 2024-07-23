@@ -7,6 +7,7 @@ data RType = TBool
            | TInt
            | TSymbol
            | TFloat
+           | TThetaTree
            | ListOf RType
            | Tuple RType RType
            | NullList
@@ -25,6 +26,7 @@ instance Eq RType where
   (==) TInt TInt = True
   (==) TSymbol TSymbol = True
   (==) TFloat TFloat = True
+  (==) TThetaTree TThetaTree = True
   (==) (TArrow left right) (TArrow left2 right2) = left == left2 && right == right2
   (==) (ListOf x) (ListOf y) = x == y
   (==) NullList NullList = True

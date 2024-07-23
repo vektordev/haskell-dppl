@@ -136,6 +136,7 @@ instance Substitutable RType where
   apply _ TFloat = TFloat
   apply _ NullList = NullList
   apply _ BottomTuple = BottomTuple
+  apply _ TThetaTree = TThetaTree
   apply s (ListOf t) = ListOf $ apply s t
   apply s (Tuple t1 t2) = Tuple (apply s t1) (apply s t2)
   apply s (TArrow t1 t2) = apply s t1 `TArrow` apply s t2
@@ -365,7 +366,8 @@ buildFuncConstraints (TArrow inpT t1) _ cons name  = throwError $ FalseParameter
 buildFuncConstraints _ _ cons name  = error "buildFuncConstraints with non function type"
 
 lookupRConstraint :: Expr (TypeInfo a) a -> Infer RType
-lookupRConstraint (ThetaI _ _) = return TFloat
+lookupRConstraint (ThetaI _ _ _) = return $ TThetaTree `TArrow` TFloat
+lookupRConstraint (Subtree _ _ _) = return $ TThetaTree `TArrow` TThetaTree
 lookupRConstraint (Uniform _ ) = return TFloat
 lookupRConstraint (Normal _  ) = return TFloat
 lookupRConstraint (PlusF _ _ _) = return $ TFloat `TArrow` (TFloat `TArrow` TFloat)
@@ -377,7 +379,18 @@ lookupRConstraint (GreaterThan _ _ _) = return $ TFloat `TArrow` (TFloat `TArrow
 -- TODO Make greater number type for type instance constraint ("Overloaded operator")
 infer :: Show a =>Expr (TypeInfo a) a -> Infer (RType, [Constraint], Expr (TypeInfo a) a)
 infer expr = case expr of
-  ThetaI ti a  -> return (TFloat, [], ThetaI (setRType ti TFloat) a)
+  ThetaI ti a i  -> do
+    (t1, c1, et1) <- infer a
+    tv <- fresh
+    let u1 = t1 `TArrow` tv
+    let u2 = TThetaTree `TArrow` TFloat
+    return (tv, c1 ++ [(u1, u2)], ThetaI (setRType ti tv) et1 i)
+  Subtree ti a i  -> do
+      (t1, c1, et1) <- infer a
+      tv <- fresh
+      let u1 = t1 `TArrow` tv
+      let u2 = TThetaTree `TArrow` TThetaTree
+      return (tv, c1 ++ [(u1, u2)], Subtree (setRType ti tv) et1 i)
   Uniform ti  -> return (TFloat, [], Uniform (setRType ti TFloat))
   Normal ti  -> return (TFloat, [], Normal (setRType ti TFloat))
   Constant ti val  -> return (getRType val, [], Constant(setRType ti (getRType val)) val)
@@ -418,13 +431,36 @@ infer expr = case expr of
     let u1 = t1 `TArrow` (t2 `TArrow` tv)
         u2 = TInt `TArrow` (TInt `TArrow` TInt)
     return (tv, c1 ++ c2 ++ [(u1, u2)], MultI (setRType x tv)  et1 et2)
+    
+  And x e1 e2 -> do
+      (t1, c1, et1) <- infer e1
+      (t2, c2, et2) <- infer e2
+      tv <- fresh
+      let u1 = t1 `TArrow` (t2 `TArrow` tv)
+          u2 = TBool `TArrow` (TBool `TArrow` TBool)
+      return (tv, c1 ++ c2 ++ [(u1, u2)], And (setRType x tv)  et1 et2)
+  
+  Or x e1 e2 -> do
+      (t1, c1, et1) <- infer e1
+      (t2, c2, et2) <- infer e2
+      tv <- fresh
+      let u1 = t1 `TArrow` (t2 `TArrow` tv)
+          u2 = TBool `TArrow` (TBool `TArrow` TBool)
+      return (tv, c1 ++ c2 ++ [(u1, u2)], Or (setRType x tv)  et1 et2)
+      
+  Not x e -> do
+      (t, c, et) <- infer e
+      tv <- fresh
+      let u1 = t `TArrow` tv
+          u2 = TBool `TArrow` TBool
+      return (tv, c ++ [(u1, u2)], Not (setRType x tv) et)
 
   ExpF x e -> do
-        (t, c, et) <- infer e
-        tv <- fresh
-        let u1 = t `TArrow` tv
-            u2 = TFloat `TArrow` TFloat
-        return (tv, c ++ [(u1, u2)], ExpF (setRType x tv) et)
+      (t, c, et) <- infer e
+      tv <- fresh
+      let u1 = t `TArrow` tv
+          u2 = TFloat `TArrow` TFloat
+      return (tv, c ++ [(u1, u2)], ExpF (setRType x tv) et)
 
   NegF x e -> do
       (t, c, et) <- infer e
@@ -440,6 +476,14 @@ infer expr = case expr of
     let u1 = t1 `TArrow` (t2 `TArrow` tv)
         u2 = TFloat `TArrow` (TFloat `TArrow` TBool)
     return (tv, c1 ++ c2 ++ [(u1, u2)], GreaterThan (setRType x tv)  et1 et2)
+    
+  LessThan x e1 e2 -> do
+      (t1, c1, et1) <- infer e1
+      (t2, c2, et2) <- infer e2
+      tv <- fresh
+      let u1 = t1 `TArrow` (t2 `TArrow` tv)
+          u2 = TFloat `TArrow` (TFloat `TArrow` TBool)
+      return (tv, c1 ++ c2 ++ [(u1, u2)], LessThan (setRType x tv)  et1 et2)
 
   IfThenElse x cond tr fl -> do
     (t1, c1, condt) <- infer cond

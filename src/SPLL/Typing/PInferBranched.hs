@@ -345,7 +345,7 @@ inferProg (Program decls expr) = do
 -- TODO Make greater number type for type instance constraint ("Overloaded operator")
 infer :: Expr () a -> Infer [Branch]
 infer expr = case expr of
-  ThetaI () a  -> return [Right (Deterministic, [])]
+  ThetaI () a i  -> return [Right (Deterministic, [])]
   Uniform ()  -> return [Right (Integrate, [])]
   Normal ()  -> return [Right (Integrate, [])]
   Constant () val  -> return [Right (Deterministic, [])]

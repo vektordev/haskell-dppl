@@ -14,6 +14,9 @@ import Data.Maybe (fromJust, fromMaybe)
 
 --TODO: Recursive calls should be phrased as self.forward rather than (modulename).forward.
 
+-- Expected format format of ThetaTrees:
+--    ThetaTree = ([Float], [ThetaTree])
+
 filet :: [a] -> [a]
 filet = init . tail
 
@@ -135,7 +138,8 @@ generateCode (IRUnaryOp OpLog expr) bindto = wrap (bindto ++ "math.log(") (gener
 generateCode (IRUnaryOp OpNeg expr) bindto = wrap (bindto ++ "-(") (generateCode expr "") ")"
 generateCode (IRUnaryOp OpNot expr) bindto = wrap (bindto ++ "not(") (generateCode expr "") ")"
 generateCode (IRUnaryOp OpAbs expr) bindto = wrap (bindto ++ "abs(") (generateCode expr "") ")"
-generateCode (IRTheta i) bindto = [bindto ++ "self.thetas[" ++ show i ++ "]"]
+generateCode (IRTheta expr i) bindto = wrap (bindto ++ "(") (generateCode expr "") (")[0][" ++ show i ++ "]")
+generateCode (IRSubtree expr i) bindto = wrap (bindto ++ "(") (generateCode expr "") (")[1][" ++ show i ++ "]")
 generateCode (IRConst val) bindto = [bindto ++ pyVal val]
 generateCode (IRCons hd tl) bindto = wrapMultiBlock [bindto ++ "[", "] + ", ""] [generateCode hd "", generateCode tl ""]
 generateCode (IRTCons t1 t2) bindto = wrapMultiBlock [bindto ++ "(", ", ", ")"] [generateCode t1 "", generateCode t2 ""]

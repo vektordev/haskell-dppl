@@ -147,7 +147,7 @@ detGenerate env thetas (MultF _ left right) = if pt1 == Deterministic && pt2 == 
     (TypeInfo {rType = rt2, pType = pt2}) = getTypeInfo right
     (VFloat val1) = detGenerate env thetas left
     (VFloat val2) = detGenerate env thetas right
-detGenerate _ thetas expr@(ThetaI _ i) = VFloat (findTheta expr thetas)
+detGenerate _ thetas expr@(ThetaI _ a i) = VFloat (findTheta expr thetas)
 detGenerate _ _ (Uniform _) = error "tried to detGenerate from random atom"
 detGenerate _ _ (Normal _) = error "tried to detGenerate from random atom"
 detGenerate _ _ (Constant _ x) = x
@@ -201,7 +201,7 @@ likelihood globalEnv env thetas (GreaterThan t left right) branchMap (VBool x)
     rightGen = detGenerate env thetas right
     VFloat leftFloat = leftGen
     VFloat rightFloat = rightGen
-likelihood _ _ thetas expr@(ThetaI _ x) _ val2 = branchedCompare (VFloat (findTheta expr thetas)) val2
+likelihood _ _ thetas expr@(ThetaI _ a x) _ val2 = branchedCompare (VFloat (findTheta expr thetas)) val2
 likelihood _ _ _ (Uniform _) _ (VFloat x) = if 0 <= x && x <= 1 then PDF 1 else PDF 0
 likelihood _ _ thetas (Uniform t) _ (VRange limits) = DiscreteProbability $ integrate (Uniform t) limits
 --likelihood _ _ _ (Uniform _) _ (VRange OpenInterval (VFloat x)) = DiscreteProbability
@@ -303,7 +303,7 @@ likelihood globalEnv env thetas (LetIn _ name decl bij) branchMap val
 likelihood globalEnv env thetas d branchMap (VBranch v1 v2 x) = BranchedProbability (lf v1) (lf v2) x
   where lf = likelihood globalEnv env thetas d branchMap
 
-likelihood _ _ _ (ThetaI _ _) _ _ = error "typing error in probability - ThetaI"
+likelihood _ _ _ (ThetaI _ _ _) _ _ = error "typing error in probability - ThetaI"
 likelihood _ _ _ (Cons _ _ _) _ _ = error "typing error in probability - Cons (maybe value is not list)"
 likelihood _ _ _ (Normal _) _ _ = error "typing error in probability - Normal"
 likelihood _ _ _ (Uniform _) _ _ = error "typing error in probability - Uniform"

@@ -77,7 +77,7 @@ evalAll ex@(IRLetIn name val scope)
 evalAll x = x
 
 isSimple :: IRExpr a -> Bool
-isSimple (IRTheta a) = True
+--isSimple (IRTheta a) = True
 isSimple (IRVar a) = True
 isSimple (IRConst a) = True
 isSimple _ = False
@@ -243,7 +243,8 @@ toIRProbability conf (InjF _ name params@[param]) sample = do  --TODO Multivaria
 toIRProbability conf (Null _) sample = indicator (IROp OpEq sample (IRConst $ VList []))
 toIRProbability conf (Constant _ value) sample = indicator (IROp OpEq sample (IRConst value))
 toIRProbability conf (Call _ name) sample = return $ IRCall (name ++ "_prob") [sample]
-toIRProbability conf (ThetaI _ t) sample = indicator (IROp OpEq sample (IRTheta t))
+toIRProbability conf (ThetaI _ a i) sample = indicator (IROp OpEq sample (IRTheta (toIRGenerate a) i))
+toIRProbability conf (Subtree _ a i) sample = error "Cannot infer prob on subtree expression. Please check your syntax"
 toIRProbability conf x sample = error ("found no way to convert to IR: " ++ show x)
 
 packParamsIntoLetinsProb :: (Show a, Floating a) => [String] -> [Expr (TypeInfo a) a] -> IRExpr a -> IRExpr a -> Supply Int (IRExpr a)
@@ -271,7 +272,8 @@ toIRGenerate (MultF _ left right) = IROp OpMult (toIRGenerate left) (toIRGenerat
 toIRGenerate (MultI _ left right) = IROp OpMult (toIRGenerate left) (toIRGenerate right)
 toIRGenerate (ExpF _ f) = IRUnaryOp OpExp (toIRGenerate f)
 toIRGenerate (NegF _ f) = IRUnaryOp OpNeg (toIRGenerate f)
-toIRGenerate (ThetaI _ ix) = IRTheta ix
+toIRGenerate (ThetaI _ a ix) = IRTheta (toIRGenerate a) ix
+toIRGenerate (Subtree _ a ix) = IRSubtree (toIRGenerate a) ix
 toIRGenerate (Constant _ x) = IRConst x
 toIRGenerate (Null _) = IRConst (VList [])
 toIRGenerate (Cons _ hd tl) = IRCons (toIRGenerate hd) (toIRGenerate tl)
@@ -366,6 +368,9 @@ toIRIntegrate conf (Cons _ hdExpr tlExpr) low high = do
 toIRIntegrate conf (Null _) low high = do
   indicator (IROp OpAnd (IROp OpEq low (IRConst $ VList [])) (IROp OpEq high (IRConst $ VList [])))
 toIRIntegrate conf (Constant _ value) low high = indicator (IROp OpAnd (IROp OpLessThan low (IRConst value)) (IROp OpGreaterThan high (IRConst value))) --TODO What to do if low and high are equal?
+toIRIntegrate conf (ThetaI _ a i) low high = do
+  let val = IRTheta (toIRGenerate a) i
+  indicator (IROp OpAnd (IROp OpLessThan low val) (IROp OpGreaterThan high val)) --TODO What to do if low and high are equal?
 toIRIntegrate conf (InjF _ name params) low high = do  --TODO Multivariable
   let letInBlockLow = IRLetIn v low invExpr
   let letInBlockHigh = IRLetIn v high invExpr

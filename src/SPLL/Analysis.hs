@@ -35,7 +35,8 @@ findAlgorithm :: (Show a) => Expr (TypeInfo a) a -> InferenceRule
 findAlgorithm expr = case validAlgs of
   [alg] -> alg
   [] -> error ("no valid algorithms found in expr: " ++ show expr)
-  (_:_:_) -> error "multiple valid algorithms found" -- TODO: There might be leeway here.
+  --(_:_:_) -> error "multiple valid algorithms found" -- TODO: There might be leeway here.
+  alg:_ -> alg  --If multiple choose the first one TODO: Check if correct
   where
     validAlgs = filter (\alg -> all (checkConstraint expr alg) (constraints alg) ) correctExpr
     correctExpr = filter (checkExprMatches expr) allAlgorithms

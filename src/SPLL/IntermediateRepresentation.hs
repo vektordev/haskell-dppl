@@ -7,6 +7,8 @@ module SPLL.IntermediateRepresentation (
 , Varname
 , CompilerConfig(..)
 , irMap
+, getIRSubExprs
+, irPrintFlat
 ) where
 
 import SPLL.Lang
@@ -14,6 +16,7 @@ import SPLL.Typing.RType
 import SPLL.Typing.PType
 import SPLL.Analysis
 import SPLL.Typing.Typing
+import Data.Data
 
 {-
 {-# OPTIONS -Wall #-}
@@ -125,7 +128,8 @@ data Distribution = IRNormal | IRUniform deriving (Show, Eq)
 data IRExpr a = IRIf (IRExpr a) (IRExpr a) (IRExpr a)
               | IROp Operand (IRExpr a) (IRExpr a)
               | IRUnaryOp UnaryOperand (IRExpr a)
-              | IRTheta Int
+              | IRTheta (IRExpr a) Int
+              | IRSubtree (IRExpr a) Int
               | IRConst (Value a)
               | IRCons (IRExpr a) (IRExpr a)
               | IRTCons (IRExpr a) (IRExpr a)
@@ -156,6 +160,32 @@ data CompilerConfig a = CompilerConfig {
 --3: convert algortihm-and-type-annotated Exprs into abstract representation of explicit computation:
 --    Fold enum ranges, algorithms, etc. into a representation of computation that can be directly converted into code.
 
+getIRSubExprs :: (Show a) => IRExpr a -> [IRExpr a]
+getIRSubExprs (IRIf a b c) = [a, b, c]
+getIRSubExprs (IROp _ a b) = [a, b]
+getIRSubExprs (IRUnaryOp _ a) = [a]
+getIRSubExprs (IRTheta a _) = [a]
+getIRSubExprs (IRSubtree a _) = [a]
+getIRSubExprs (IRConst _) = []
+getIRSubExprs (IRCons a b) = [a, b]
+getIRSubExprs (IRTCons a b) = [a, b]
+getIRSubExprs (IRHead a) = [a]
+getIRSubExprs (IRTail a) = [a]
+getIRSubExprs (IRTFst a) = [a]
+getIRSubExprs (IRTSnd a) = [a]
+getIRSubExprs (IRDensity _ a) = [a]
+getIRSubExprs (IRCumulative _ a) = [a]
+getIRSubExprs (IRSample _) = []
+getIRSubExprs (IRLetIn _ a b) = [a, b]
+getIRSubExprs (IRVar _) = []
+getIRSubExprs (IRCall _ a) = a
+getIRSubExprs (IRLambda _ a) = [a]
+getIRSubExprs (IREnumSum _ _ a) = [a]
+getIRSubExprs (IREvalNN _ a) = [a]
+getIRSubExprs (IRIndex a b) = [a, b]
+getIRSubExprs (IRReturning a) = [a]
+getIRSubExprs x = error ("Unknown expression: " ++ show x)
+
 irMap :: (IRExpr a -> IRExpr a) -> IRExpr a -> IRExpr a
 irMap f x = case x of
   (IRIf cond left right) -> f (IRIf (irMap f cond) (irMap f left) (irMap f right))
@@ -176,8 +206,34 @@ irMap f x = case x of
   (IREvalNN name arg) -> f (IREvalNN name (irMap f arg))
   (IRIndex left right) -> f (IRIndex (irMap f left) (irMap f right))
   (IRReturning expr) -> f (IRReturning (irMap f expr))
-  (IRTheta _) -> f x
+  (IRTheta a i) -> f (IRTheta (irMap f a) i)
+  (IRSubtree a i) -> f (IRSubtree (irMap f a) i)
   (IRConst _) -> f x
   (IRSample _) -> f x
   (IRVar _) -> f x
+
+irPrintFlat :: IRExpr a -> String
+irPrintFlat (IRIf _ _ _) = "IRIf"
+irPrintFlat (IROp _ _ _) = "IROp"
+irPrintFlat (IRUnaryOp _ _) = "IRUnaryOp"
+irPrintFlat (IRTheta _ _) = "IRTheta"
+irPrintFlat (IRSubtree _ _) = "IRSubtree"
+irPrintFlat (IRConst _) = "IRConst"
+irPrintFlat (IRCons _ _) = "IRCons"
+irPrintFlat (IRTCons _ _) = "IRTCons"
+irPrintFlat (IRHead _) = "IRHead"
+irPrintFlat (IRTail _) = "IRTail"
+irPrintFlat (IRTFst _) = "IRTFst"
+irPrintFlat (IRTSnd _) = "IRTSnd"
+irPrintFlat (IRDensity _ _) = "IRDensity"
+irPrintFlat (IRCumulative _ _) = "IRCumulative"
+irPrintFlat (IRSample _) = "IRSample"
+irPrintFlat (IRLetIn _ _ _) = "IRLetIn"
+irPrintFlat (IRVar _) = "IRVar"
+irPrintFlat (IRCall name _) = "IRCall " ++ name
+irPrintFlat (IRLambda _ _) = "IRLambda"
+irPrintFlat (IREnumSum _ _ _) = "IREnumSum"
+irPrintFlat (IREvalNN name _) = "IREvalNN " ++ name
+irPrintFlat (IRIndex _ _) = "IRIndex"
+irPrintFlat (IRReturning _) = "IRReturning"
 

@@ -372,7 +372,8 @@ inferProg env (Program decls expr) = do
 infer :: TEnv -> Expr () a -> Infer (Subst, [Constraint], PType)
 infer env expr = case expr of
 
-  ThetaI () a  -> return (emptySubst, [], Deterministic)
+  ThetaI () a i  -> return (emptySubst, [], Deterministic)
+  Subtree () a i  -> return (emptySubst, [], Deterministic)
   Uniform ()  -> return (emptySubst, [], Integrate)
   Normal ()  -> return (emptySubst, [], Integrate)
   Constant () val  -> return (emptySubst, [], Deterministic)

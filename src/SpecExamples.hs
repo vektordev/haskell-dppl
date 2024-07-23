@@ -5,7 +5,7 @@ import SPLL.Lang
 import SPLL.Typing.RType
 import SPLL.Typing.PType
 import qualified Data.Set as Set
-
+{-
 variableLengthS :: Program  () Double
 variableLengthS = Program [("b", IfThenElse ()
                           (GreaterThan () (Uniform ()) (ThetaI () 0))
@@ -118,4 +118,4 @@ testLetXYS = Program [] (LetIn() "x" (PlusF () (ThetaI () 0) (Normal ()))
                                                 (Var (TypeInfoWit TFloat Deterministic (Set.singleton "x")) "x")) 
                                              (Var (TypeInfoWit TFloat Deterministic (Set.singleton "y")) "y"))
                                           (Null (TypeInfoWit NullList Deterministic Set.empty)))))))-}
-                                     
+-}

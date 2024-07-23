@@ -4,6 +4,7 @@ module SPLL.Lang (
 , unflip
 , Value (..)
 , Program (..)
+, ThetaTree (..)
 , getTypeInfo
 , setTypeInfo
 , tMap
@@ -43,31 +44,41 @@ import Control.Applicative (liftA2)
 --Expr x (a :: Precision)
 --data Precision = P32 | P64"
 --type family PrecisionType P32 = Float
-data Expr x a = IfThenElse x (Expr x a) (Expr x a) (Expr x a)
-              | GreaterThan x (Expr x a) (Expr x a)
-              | ThetaI x Int
-              | Uniform x
-              | Normal x
-              | Constant x (Value a)
+data Expr x a =
+              -- Flow Control
+                IfThenElse x (Expr x a) (Expr x a) (Expr x a)
+              | Call x String
+              | CallArg x String [Expr x a]
+              | InjF x String [Expr x a]
+              -- Arithmetic
               | MultF x (Expr x a) (Expr x a)
               | MultI x (Expr x a) (Expr x a)
               | PlusF x (Expr x a) (Expr x a)
               | PlusI x (Expr x a) (Expr x a)
               | ExpF x (Expr x a)
               | NegF x (Expr x a)
-              | Null x
-              | Cons x (Expr x a) (Expr x a)
-              | Var x String
-              | TCons x (Expr x a) (Expr x a)
-              | Call x String 
-              --  | LetInD x String (Expr x a) (Expr x a)
-              --  | LetInTuple x String (Expr x a) (BijectiveF a) (Expr x a)
+              -- Variables
               | LetIn x String (Expr x a) (Expr x a)
-             -- Change params to expr
-              | InjF x String [Expr x a]
-              | Arg x String RType (Expr x a)
-              | CallArg x String [Expr x a]
+              | Var x String
+              | Constant x (Value a)
               | Lambda x String (Expr x a)
+              -- Distributions
+              | Uniform x
+              | Normal x
+              | ThetaI x (Expr x a) Int
+              | Subtree x (Expr x a) Int
+              -- Lists/Tuples
+              | Cons x (Expr x a) (Expr x a)
+              | TCons x (Expr x a) (Expr x a)
+              | Null x
+              -- Boolean Operations
+              | GreaterThan x (Expr x a) (Expr x a)
+              | LessThan x (Expr x a) (Expr x a)
+              | And x (Expr x a) (Expr x a)
+              | Or x (Expr x a) (Expr x a)
+              | Not x (Expr x a)
+              -- Other
+              | Arg x String RType (Expr x a)
               | ReadNN x String (Expr x a)
               | Fix x (Expr x a)
               -- TODO: Needs Concat to achieve proper SPN-parity.
@@ -107,6 +118,8 @@ type Decl x a = (String, Expr x a)
 
 type WitnessedVars = Set.Set String
 
+data ThetaTree a = ThetaTree [a] [ThetaTree a] deriving (Show, Eq, Ord)
+
 data Value a = VBool Bool
            | VInt Int
            | VSymbol String
@@ -115,6 +128,7 @@ data Value a = VBool Bool
            | VTuple (Value a) (Value a)
            | VBranch (Value a) (Value a) String
            | VRange (Limits a)
+           | VThetaTree (ThetaTree a)
            | VAnyList 
            -- | Value of TArrow a b could be Expr TypeInfo a, with Expr being a Lambda?
            deriving (Show, Eq, Ord)
@@ -125,6 +139,8 @@ data Limits a = Limits (Maybe (Value a)) (Maybe (Value a))
 
 instance Functor Value where
   fmap = valMap
+
+
 
 valMap :: (a -> b) -> Value a -> Value b
 valMap f (VBool b) = VBool b
@@ -158,7 +174,9 @@ exprMap :: (a -> b) -> Expr x a -> Expr x b
 exprMap f expr = case expr of
   (IfThenElse t a b c) -> IfThenElse t (exprMap f a) (exprMap f b) (exprMap f c)
   (GreaterThan t a b) -> GreaterThan t (exprMap f a) (exprMap f b)
-  (ThetaI t x) -> ThetaI t x
+  (LessThan t a b) -> LessThan t (exprMap f a) (exprMap f b)
+  (ThetaI t a x) -> ThetaI t (exprMap f a) x
+  (Subtree t a x) -> Subtree t (exprMap f a) x
   (Uniform t) -> Uniform t
   (Normal t) -> Normal t
   (Constant t x) -> Constant t $ fmap f x
@@ -168,6 +186,9 @@ exprMap f expr = case expr of
   (PlusI t a b) -> PlusI t (exprMap f a) (exprMap f b)
   (ExpF t a) -> ExpF t (exprMap f a)
   (NegF t a) -> NegF t (exprMap f a)
+  (And t a b) -> And t (exprMap f a) (exprMap f b)
+  (Or t a b) -> Or t (exprMap f a) (exprMap f b)
+  (Not t a) -> Not t (exprMap f a)
   (Null t) -> Null t
   (Cons t a b) -> Cons t (exprMap f a) (exprMap f b)
   (TCons t a b) -> TCons t (exprMap f a) (exprMap f b)
@@ -201,14 +222,16 @@ varsOfExpr expr = case expr of
 
 isNotTheta :: Expr x a -> Bool
 isNotTheta expr = case expr of
-  (ThetaI _ name) -> False
+  (ThetaI _ _ name) -> False
   _ -> True
   
 tMapHead :: (Expr x a -> x) -> Expr x a -> Expr x a
 tMapHead f expr = case expr of 
   (IfThenElse _ a b c) -> IfThenElse (f expr) a b c
   (GreaterThan _ a b) -> GreaterThan (f expr) a b
-  (ThetaI _ x) -> ThetaI (f expr) x
+  (LessThan _ a b) -> LessThan (f expr) a b
+  (ThetaI _ a x) -> ThetaI (f expr) a x
+  (Subtree _ a x) -> Subtree (f expr) a x
   (Uniform _) -> Uniform (f expr)
   (Normal _) -> Normal (f expr)
   (Constant _ x) -> Constant (f expr) x
@@ -218,6 +241,9 @@ tMapHead f expr = case expr of
   (PlusI _ a b) -> PlusI (f expr) a b
   (ExpF _ a) -> ExpF(f expr) a
   (NegF _ a) -> NegF (f expr) a
+  (And _ a b) -> And (f expr) a b
+  (Or _ a b) -> Or (f expr) a b
+  (Not _ a) -> Not (f expr) a
   (Null _) -> Null (f expr)
   (Cons _ a b) -> Cons (f expr) a b
   (TCons _ a b) -> TCons (f expr) a b
@@ -236,7 +262,9 @@ tMapTails :: (Expr x a -> x) -> Expr x a -> Expr x a
 tMapTails f expr = case expr of
   (IfThenElse t a b c) -> IfThenElse t (tMap f a) (tMap f b) (tMap f c)
   (GreaterThan t a b) -> GreaterThan t (tMap f a) (tMap f b)
-  (ThetaI t x) -> ThetaI t x
+  (LessThan t a b) -> LessThan t (tMap f a) (tMap f b)
+  (ThetaI t a x) -> ThetaI t (tMap f a) x
+  (Subtree t a x) -> Subtree t (tMap f a) x
   (Uniform t) -> Uniform t
   (Normal t) -> Normal t
   (Constant t x) -> Constant t x
@@ -246,6 +274,9 @@ tMapTails f expr = case expr of
   (PlusI t a b) -> PlusI t (tMap f a) (tMap f b)
   (ExpF t a) -> ExpF t (tMap f a)
   (NegF t a) -> NegF t (tMap f a)
+  (And t a b) -> And t (tMap f a) (tMap f b)
+  (Or t a b) -> Or t (tMap f a) (tMap f b)
+  (Not t a) -> Not t (tMap f a)
   (Null t) -> Null t
   (Cons t a b) -> Cons t (tMap f a) (tMap f b)
   (TCons t a b) -> TCons t (tMap f a) (tMap f b)
@@ -262,7 +293,9 @@ tMap :: (Expr x a -> y) -> Expr x a -> Expr y a
 tMap f expr = case expr of 
   (IfThenElse _ a b c) -> IfThenElse (f expr) (tMap f a) (tMap f b) (tMap f c)
   (GreaterThan _ a b) -> GreaterThan (f expr) (tMap f a) (tMap f b)
-  (ThetaI _ x) -> ThetaI (f expr) x
+  (LessThan _ a b) -> LessThan (f expr) (tMap f a) (tMap f b)
+  (ThetaI _ a x) -> ThetaI (f expr) (tMap f a) x
+  (Subtree _ a x) -> Subtree (f expr) (tMap f a) x
   (Uniform _) -> Uniform (f expr)
   (Normal _) -> Normal (f expr)
   (Constant _ x) -> Constant (f expr) x
@@ -272,6 +305,9 @@ tMap f expr = case expr of
   (PlusI _ a b) -> PlusI (f expr) (tMap f a) (tMap f b)
   (ExpF _ a) -> ExpF (f expr) (tMap f a) 
   (NegF _ a) -> NegF (f expr) (tMap f a)
+  (And _ a b) -> And (f expr) (tMap f a) (tMap f b)
+  (Or _ a b) -> Or (f expr) (tMap f a) (tMap f b)
+  (Not _ a) -> Not (f expr) (tMap f a)
   (Null _) -> Null (f expr)
   (Cons _ a b) -> Cons (f expr) (tMap f a) (tMap f b)
   (TCons _ a b) -> TCons (f expr) (tMap f a) (tMap f b)
@@ -291,26 +327,32 @@ tMapProg f (Program decls expr) = Program (zip (map fst decls) (map (tMap f . sn
 
 getBinaryConstructor :: Expr x1 a1 -> (x2 -> Expr x2 a2 -> Expr x2 a2 -> Expr x2 a2)
 getBinaryConstructor GreaterThan {} = GreaterThan
+getBinaryConstructor LessThan {} = GreaterThan
 getBinaryConstructor MultF {} = MultF
 getBinaryConstructor MultI {} = MultI
 getBinaryConstructor PlusF {} = PlusF
 getBinaryConstructor PlusI {} = PlusI
 getBinaryConstructor Cons {} = Cons
 getBinaryConstructor TCons {} = TCons
+getBinaryConstructor And {} = And
+getBinaryConstructor Or {} = Or
 --getBinaryConstructor (LetIn t name a b) = \t2 -> \e1 -> \e2 -> LetIn t2 name e1 e2
 getBinaryConstructor (LetIn _ name _ _) = (`LetIn` name)
 
 getUnaryConstructor :: Expr x1 a1 -> (x2 -> Expr x2 a2 -> Expr x2 a2)
+getUnaryConstructor (ThetaI _ _ i) = \t a -> ThetaI t a i
+getUnaryConstructor (Subtree _ _ i) = \t a -> Subtree t a i
 getUnaryConstructor (Lambda _ x _) = (`Lambda` x)
 getUnaryConstructor (ReadNN _ x _) = (`ReadNN` x)
 getUnaryConstructor (Fix _ _) = Fix
+getUnaryConstructor (Not _ _) = Not
+getUnaryConstructor (ExpF _ _) = ExpF
 
 getNullaryConstructor :: Expr x1 a -> (x2 -> Expr x2 a)
 getNullaryConstructor Uniform {} = Uniform
 getNullaryConstructor Normal {} = Normal
 getNullaryConstructor (Constant t val) = (`Constant` val)
 getNullaryConstructor Null {} = Null
-getNullaryConstructor (ThetaI _ x) = (`ThetaI` x)
 getNullaryConstructor (Var _ x) = (`Var` x)
 getNullaryConstructor (Call _ x) = (`Call` x)
 
@@ -356,7 +398,9 @@ getSubExprs :: Expr x a -> [Expr x a]
 getSubExprs expr = case expr of 
   (IfThenElse _ a b c) -> [a,b,c]
   (GreaterThan _ a b) -> [a,b]
-  (ThetaI _ _) -> []
+  (LessThan _ a b) -> [a,b]
+  (ThetaI _ a _) -> [a]
+  (Subtree _ a _) -> [a]
   (Uniform _) -> []
   (Normal _) -> []
   (Constant _ _) -> []
@@ -366,6 +410,9 @@ getSubExprs expr = case expr of
   (PlusI _ a b) -> [a,b]
   (ExpF _ a) -> [a]
   (NegF _ a) -> [a]
+  (And _ a b) -> [a,b]
+  (Or _ a b) -> [a,b]
+  (Not _ a) -> [a]
   (Null _) -> []
   (Cons _ a b) -> [a,b]
   (TCons _ a b) -> [a,b]
@@ -382,7 +429,6 @@ getSubExprs expr = case expr of
 
 setSubExprs :: Expr x a -> [Expr x a] -> Expr x a
 setSubExprs expr [] = case expr of
-  ThetaI t x -> ThetaI t x
   Uniform t -> Uniform t
   Normal t -> Normal t
   Constant t x -> Constant t x
@@ -392,19 +438,25 @@ setSubExprs expr [] = case expr of
   CallArg t n _ -> CallArg t n []
   _ -> error "unmatched expr in setSubExprs"
 setSubExprs expr [a] = case expr of
+  ThetaI t _ x -> ThetaI t a x
+  Subtree t _ x -> Subtree t a x
   Arg t l n _ -> Arg t l n a
   Lambda t l _ -> Lambda t l a
   ExpF t _ -> ExpF t a
   NegF t _ -> NegF t a
+  Not t _ -> Not t a
   ReadNN t n _ -> ReadNN t n a
   CallArg t n _ -> CallArg t n [a]
   _ -> error "unmatched expr in setSubExprs"
 setSubExprs expr [a,b] = case expr of
   GreaterThan t _ _ -> GreaterThan t a b
+  LessThan t _ _ -> LessThan t a b
   MultF t _ _ -> MultF t a b
   MultI t _ _ -> MultI t a b
   PlusF t _ _ -> PlusF t a b
   PlusI t _ _ -> PlusI t a b
+  And t _ _ -> And t a b
+  Or t _ _ -> Or t a b
   Cons t _ b -> Cons t a b
   TCons t _ b -> TCons t a b
   LetIn t x _ b -> LetIn t x a b
@@ -423,7 +475,9 @@ getTypeInfo :: Expr t a -> t
 getTypeInfo expr = case expr of
   (IfThenElse t _ _ _)  -> t
   (GreaterThan t _ _)   -> t
-  (ThetaI t _)          -> t
+  (LessThan t _ _)      -> t
+  (ThetaI t _ _)        -> t
+  (Subtree t _ _)       -> t
   (Uniform t)           -> t
   (Normal t)            -> t
   (Constant t _)        -> t
@@ -433,13 +487,16 @@ getTypeInfo expr = case expr of
   (PlusI t _ _)         -> t
   (ExpF t _)            -> t
   (NegF t _)            -> t
+  (And t _ _)           -> t
+  (Or t _ _)            -> t
+  (Not t _)             -> t
   (Null t)              -> t
   (Cons t _ _)          -> t
   (TCons t _ _)         -> t
   (Call t _)            -> t
   (Var t _)             -> t
   (LetIn t _ _ _)       -> t
-  (InjF t _ _)        -> t
+  (InjF t _ _)          -> t
   --(LetInD t _ _ _)      -> t
   --(LetInTuple t _ _ _ _)-> t
   (Arg t _ _ _)         -> t
@@ -451,7 +508,9 @@ setTypeInfo :: Expr t a -> t -> Expr t a
 setTypeInfo expr t = case expr of
   (IfThenElse _ a b c)  -> (IfThenElse t a b c)
   (GreaterThan _ a b)   -> (GreaterThan t a b)
-  (ThetaI _ a)          -> (ThetaI t a)
+  (LessThan _ a b)      -> (LessThan t a b)
+  (ThetaI _ a b)        -> (ThetaI t a b)
+  (Subtree _ a b)       -> (Subtree t a b)
   (Uniform _)           -> (Uniform t)
   (Normal _)            -> (Normal t)
   (Constant _ a)        -> (Constant t a)
@@ -461,6 +520,9 @@ setTypeInfo expr t = case expr of
   (PlusI _ a b)         -> (PlusI t a b)
   (ExpF _ a)            -> (ExpF t a)
   (NegF _ a)            -> (NegF t a)
+  (And _ a b)           -> (And t a b)
+  (Or _ a b)            -> (Or t a b)
+  (Not _ a)             -> (Not t a)
   (Null _)              -> (Null t)
   (Cons _ a b)          -> (Cons t a b)
   (TCons _ a b)         -> (TCons t a b)
@@ -524,7 +586,9 @@ printFlat :: Show a => Expr t a -> String
 printFlat expr = case expr of
   IfThenElse {} -> "IfThenElse"
   GreaterThan {} -> "GreaterThan"
-  (ThetaI _ i) -> "Theta_" ++ show i
+  LessThan {} -> "LessThan"
+  (ThetaI _ _ i) -> "Theta_" ++ show i
+  (Subtree _ _ i) -> "Subtree_" ++ show i
   Uniform {} -> "Uniform"
   Normal {} -> "Normal"
   (Constant _ x) -> "Constant (" ++ show x ++ ")"
@@ -534,6 +598,9 @@ printFlat expr = case expr of
   PlusI {} -> "PlusI"
   ExpF {} -> "ExpF"
   NegF {} -> "NegF"
+  And {} -> "And"
+  Or {} -> "Or"
+  Not {} -> "Not"
   (Null _) -> "Null"
   Cons {} -> "Cons"
   TCons {} -> "TCons"
@@ -552,7 +619,9 @@ printFlatNoReq :: Expr t a -> String
 printFlatNoReq expr = case expr of
   IfThenElse {} -> "IfThenElse"
   GreaterThan {} -> "GreaterThan"
-  (ThetaI _ i) -> "Theta_" ++ show i
+  LessThan {} -> "LessThan"
+  (ThetaI _ _ i) -> "Theta_" ++ show i
+  (Subtree _ _ i) -> "Subtree_" ++ show i
   Uniform {} -> "Uniform"
   Normal {} -> "Normal"
   (Constant _ _) -> "Constant"
@@ -562,6 +631,9 @@ printFlatNoReq expr = case expr of
   PlusI {} -> "PlusI"
   ExpF {} -> "ExpF"
   NegF {} -> "NegF"
+  And {} -> "And"
+  Or {} -> "Or"
+  Not {} -> "Not"
   (Null _) -> "Null"
   Cons {} -> "Cons"
   TCons {} -> "TCons"

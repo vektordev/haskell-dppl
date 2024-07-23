@@ -42,7 +42,7 @@ vremove env var = env {values = Map.delete var (values env)}
 
 
 findTheta :: Expr x a -> Thetas a -> a
-findTheta (ThetaI _ i) ts = if i >= length ts then error "out of bounds in Thetas" else ts !! i
+findTheta (ThetaI _ a i) ts = if i >= length ts then error "out of bounds in Thetas" else ts !! i
 findTheta _ _ = error "called FindTheta on non-theta expr."
 
 -- | Inference state
@@ -106,7 +106,7 @@ detGenerateM (MultF _ left right) = if pt1 == Deterministic && pt2 == Determinis
     pt1 = pType $ getTypeInfo left
     rt2 = rType $ getTypeInfo right
     pt2 = pType $ getTypeInfo right
-detGenerateM expr@(ThetaI _ i) = do
+detGenerateM expr@(ThetaI _ a i) = do
    inf_ste <- get
    return $ VFloat (findTheta expr (thetas inf_ste))
 detGenerateM (Uniform _) = error "tried to detGenerate from random atom"
@@ -155,7 +155,7 @@ generate globalEnv env thetas args (GreaterThan _ left right) = do
   case (a,b) of
     (VFloat af, VFloat bf) -> return $ VBool (af > bf)
     _ -> error "Type error"
-generate _ _ thetas args expr@(ThetaI _ i) = return $ VFloat (findTheta expr thetas)
+generate _ _ thetas args expr@(ThetaI _ a i) = return $ VFloat (findTheta expr thetas)
 generate _ _ _ args (Uniform _) = do
   r <- getRandomR (0.0, 1.0) --uniformR (0.0, 1.0)
   return $ VFloat r
@@ -350,7 +350,7 @@ likelihoodM (GreaterThan t left right) (VBool x)
   where
     leftP = pType $ getTypeInfo left
     rightP = pType $ getTypeInfo right
-likelihoodM expr@(ThetaI _ x) val2 = do
+likelihoodM expr@(ThetaI _ a x) val2 = do
    inf_ste <- get
    return $ branchedCompare (VFloat (findTheta expr (thetas inf_ste))) val2
 likelihoodM (Uniform _) (VFloat x) = return $ if 0 <= x && x <= 1 then PDF 1 else PDF 0
