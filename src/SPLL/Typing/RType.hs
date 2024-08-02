@@ -45,3 +45,12 @@ greaterType (ListOf t1) NullList = Just $ ListOf t1
 greaterType NullList (ListOf t1)  = Just $ ListOf t1
 greaterType t1 t2 | t1 == t2 =  Just t1
 greaterType _ _ = Nothing
+
+isOnlyNumbers :: RType -> Bool
+isOnlyNumbers TFloat = True
+isOnlyNumbers TInt = True
+isOnlyNumbers (a `TArrow` b) = isOnlyNumbers b
+isOnlyNumbers (ListOf t) = isOnlyNumbers t
+isOnlyNumbers (Tuple a b) = isOnlyNumbers a && isOnlyNumbers b
+isOnlyNumbers _ = False
+

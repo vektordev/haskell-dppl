@@ -66,5 +66,5 @@ arity :: ExprStub -> Int
 arity = undefined
 
 likelihoodFunctionUsesTypeInfo :: ExprStub -> Bool
-likelihoodFunctionUsesTypeInfo expr = expr `elem` [StubGreaterThan, StubMultF, StubMultI, StubPlusF, StubPlusI]
+likelihoodFunctionUsesTypeInfo expr = expr `elem` [StubGreaterThan, StubLessThan, StubMultF, StubMultI, StubPlusF, StubPlusI]
   

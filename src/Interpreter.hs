@@ -310,11 +310,11 @@ likelihoodM (Null _) (VList [VAnyList])  = return $ DiscreteProbability 1
 likelihoodM (Null _) _ = return $ DiscreteProbability 0
 likelihoodM (Cons _ _ _) (VList [VAnyList])  = return $  DiscreteProbability 1
 likelihoodM (Cons _ _ _) (VList []) = return $ DiscreteProbability 0
-likelihoodM e@(Cons _ _ _) v = throwError $ MismatchedValue v e
 likelihoodM (Cons _ hd tl) (VList (x:xs)) = do
     fstP <- likelihoodM hd x
     sndP <- likelihoodM tl $ VList xs
     return (pAnd fstP sndP)
+likelihoodM e@(Cons _ _ _) v = throwError $ MismatchedValue v e
 likelihoodM (TCons _ t1 t2) (VTuple x1 x2) = do
    fstP <- likelihoodM t1 x1
    sndP <- likelihoodM t2 x2
@@ -562,8 +562,6 @@ pAnd pp2@(BranchedProbability p1 p2 x) (BranchedProbability p3 p4 y) =
   then BranchedProbability (pAnd p1 p3) (pAnd p2 p4) y
   else BranchedProbability (pAnd pp2 p3) (pAnd pp2 p4) y
 pAnd (BranchedProbability p1 p2 x) p3 = BranchedProbability (pAnd p1 p3) (pAnd p2 p3) x
-
-pAnd p2 p4 = trace ("error p " ++ show p2 ++ show p4) ( p2)
 
 pOr :: (Show a, Num a) => Probability a -> Probability a -> Probability a
 pOr (PDF a) (PDF b) = PDF (a+b)

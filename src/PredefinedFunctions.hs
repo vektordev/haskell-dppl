@@ -28,7 +28,7 @@ doubleInv = FDecl (TArrow TFloat TFloat, ["b"], ["a"], IROp OpDiv (IRVar "b") (I
 globalFenv :: (Floating a) => FEnv a
 globalFenv = [("double", FPair (doubleFwd, [doubleInv]))]
 
-getHornClause :: Expr (TypeInfo a) a -> [HornClause]
+getHornClause :: (Eq a, Floating a) => Expr (TypeInfo a) a -> [HornClause a]
 getHornClause e = case e of
   InjF t name params -> (constructHornClause subst eFwd): map (constructHornClause subst) eInv
     where
@@ -38,8 +38,8 @@ getHornClause e = case e of
       Just (FPair (eFwd, eInv)) = lookup name globalFenv
   _ -> error "Cannot get horn clause of non-predefined function"
 
-constructHornClause :: [(String, ChainName)] -> FDecl a -> HornClause
-constructHornClause subst decl = (fromList (map lookupSubst inV), fromList (map lookUpSubstAddDet outV))
+constructHornClause :: (Eq a) => [(String, ChainName)] -> FDecl a -> HornClause a
+constructHornClause subst decl = (map lookUpSubstAddDet inV, map lookUpSubstAddDet outV, (StubInjF, 0)) --FIXME correct inversion parameters 
   where
     FDecl (_, inV, outV, _, _) = decl
     lookupSubst v = fromJust (lookup v subst)

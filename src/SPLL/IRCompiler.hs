@@ -8,6 +8,7 @@ import PredefinedFunctions
 import Control.Monad.Supply
 import SPLL.Typing.PType 
 import SPLL.InferenceRule (algName)
+import Debug.Trace
 
 
 -- perhaps as an explicit lambda in the top of the expression, otherwise we'll get trouble generating code.
@@ -15,12 +16,13 @@ import SPLL.InferenceRule (algName)
 --  TL-Lambdas are presumably to be treated differently than non-TL, at least as far as prob is concerned.
 envToIR :: (Ord a, Floating a, Show a, Eq a) => CompilerConfig a -> Env (TypeInfo a) a -> [(String, IRExpr a)]
 envToIR conf env = concatMap (\(name, binding) ->
-  let pt = pType $ getTypeInfo binding in
-    if pt == Deterministic || pt == Integrate then
+  let pt = pType $ getTypeInfo binding
+      rt = rType $ getTypeInfo binding in
+    if (pt == Deterministic || pt == Integrate) && (isOnlyNumbers rt) then
       [(name ++ "_integ", IRLambda "low" (IRLambda "high" (postProcess $ runSupplyVars (toIRIntegrate conf binding (IRVar "low") (IRVar "high"))))),
        (name ++ "_prob", IRLambda "sample" (postProcess $ runSupplyVars (toIRProbability conf binding (IRVar "sample")))),
        (name ++ "_gen", postProcess $ toIRGenerate binding)]
-    else if pt == Prob then
+    else if pt == Deterministic || pt == Integrate || pt == Prob then
       [(name ++ "_prob", IRLambda "sample" (postProcess $ runSupplyVars (toIRProbability conf binding (IRVar "sample")))),
        (name ++ "_gen", postProcess $ toIRGenerate binding)]
     else
@@ -171,6 +173,22 @@ toIRProbability conf (GreaterThan (TypeInfo {rType = t, tags = extras}) left rig
     return $ IRLetIn var (toIRGenerate right)
       (IRLetIn var2 integrate
         (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)) (IRVar var2) ))
+toIRProbability conf (LessThan (TypeInfo {rType = t, tags = extras}) left right) sample
+  --TODO: Find a better lower bound than just putting -9999999
+  | extras `hasAlgorithm` "lessThanLeft" = do --p(x | const >= var)
+    var <- mkVariable "fixed_bound"
+    integrate <- toIRIntegrate conf right (IRVar var) (IRConst (VFloat (9999999)))
+    var2 <- mkVariable "rhs_integral"
+    return $ IRLetIn var (toIRGenerate left)
+      (IRLetIn var2 integrate
+        (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))))
+  | extras `hasAlgorithm` "lessThanRight" = do --p(x | var >= const
+    var <- mkVariable "fixed_bound"
+    integrate <- toIRIntegrate conf left (IRVar var) (IRConst (VFloat (9999999)))
+    var2 <- mkVariable "lhs_integral"
+    return $ IRLetIn var (toIRGenerate right)
+      (IRLetIn var2 integrate
+        (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))  (IRVar var2)))
 toIRProbability conf (MultF (TypeInfo {rType = TFloat, tags = extras}) left right) sample
   | extras `hasAlgorithm` "multLeft" = do
     var <- mkVariable ""
@@ -214,6 +232,8 @@ toIRProbability conf (ExpF (TypeInfo {rType = TFloat, tags = extra}) f) sample =
   return $ IROp OpDiv logExpr (IRUnaryOp OpAbs sample)
 toIRProbability conf (NegF (TypeInfo {rType = TFloat, tags = extra}) f) sample =
   toIRProbability conf f (IRUnaryOp OpNeg sample)
+toIRProbability conf (Not (TypeInfo {rType = TBool}) f) sample =
+  toIRProbability conf f (IRUnaryOp OpNot sample)
 toIRProbability conf (ReadNN _ name subexpr) sample = do
   let mkInput = toIRGenerate subexpr
   return $ IRIndex (IREvalNN name mkInput) sample
@@ -224,6 +244,10 @@ toIRProbability conf (Uniform t) sample = return $ IRDensity IRUniform sample
 toIRProbability conf (Lambda t name subExpr) sample = do
   subExprIR <- toIRProbability conf subExpr sample
   return $ IRLambda name subExprIR
+toIRProbability conf (CallLambda _ v l) sample = do
+  let vIR = toIRGenerate v
+  lIR <- toIRProbability conf l sample
+  return $ IRCallLambda vIR lIR
 toIRProbability conf (Cons _ hdExpr tlExpr) sample = do
   headP <- toIRProbability conf hdExpr (IRHead sample)
   tailP <- toIRProbability conf tlExpr (IRTail sample)
@@ -265,13 +289,16 @@ indicator condition = return $ IRIf condition (IRConst $ VFloat 1) (IRConst $ VF
 -- That's what the type system is for though.
 toIRGenerate :: (Show a, Floating a) => Expr (TypeInfo a) a -> IRExpr a
 toIRGenerate (IfThenElse _ cond left right) = IRIf (toIRGenerate cond) (toIRGenerate left) (toIRGenerate right)
+toIRGenerate (LetIn _ n v b) = IRLetIn n (toIRGenerate v) (toIRGenerate b)
 toIRGenerate (GreaterThan _ left right) = IROp OpGreaterThan (toIRGenerate left) (toIRGenerate right)
+toIRGenerate (LessThan _ left right) = IROp OpLessThan (toIRGenerate left) (toIRGenerate right)
 toIRGenerate (PlusF _ left right) = IROp OpPlus (toIRGenerate left) (toIRGenerate right)
 toIRGenerate (PlusI _ left right) = IROp OpPlus (toIRGenerate left) (toIRGenerate right)
 toIRGenerate (MultF _ left right) = IROp OpMult (toIRGenerate left) (toIRGenerate right)
 toIRGenerate (MultI _ left right) = IROp OpMult (toIRGenerate left) (toIRGenerate right)
 toIRGenerate (ExpF _ f) = IRUnaryOp OpExp (toIRGenerate f)
 toIRGenerate (NegF _ f) = IRUnaryOp OpNeg (toIRGenerate f)
+toIRGenerate (Not _ f) = IRUnaryOp OpNot (toIRGenerate f)
 toIRGenerate (ThetaI _ a ix) = IRTheta (toIRGenerate a) ix
 toIRGenerate (Subtree _ a ix) = IRSubtree (toIRGenerate a) ix
 toIRGenerate (Constant _ x) = IRConst x
@@ -288,6 +315,7 @@ toIRGenerate (InjF _  name params) = packParamsIntoLetinsGen vars params fwdExpr
         FDecl (_, vars, _, fwdExpr, _) = fwd
 toIRGenerate (Var _ name) = IRVar name
 toIRGenerate (Lambda t name subExpr) = IRLambda name (toIRGenerate subExpr)
+toIRGenerate (CallLambda _ v l) = IRCallLambda (toIRGenerate v) (toIRGenerate l)
 toIRGenerate (ReadNN t name subexpr) = IRCall "randomchoice" [IREvalNN name (toIRGenerate subexpr)]
 toIRGenerate x = error ("found no way to convert to IRGen: " ++ show x)
 
@@ -384,5 +412,10 @@ toIRIntegrate conf (Call _ name) low high = return $ IRCall (name ++ "_integ") [
 toIRIntegrate conf (Lambda t name subExpr) low high = do
   subExprIR <- toIRIntegrate conf subExpr low high
   return $ IRLambda name subExprIR
+toIRIntegrate conf (CallLambda _ v l) low high = do
+  let vIR = toIRGenerate v
+  lIR <- toIRIntegrate conf l low high
+  return $ IRCallLambda vIR lIR
+toIRIntegrate conf (Var _ n) _ _ = return $ IRVar n
 toIRIntegrate _ x _ _ = error ("found no way to convert to IRIntegrate: " ++ show x)
 

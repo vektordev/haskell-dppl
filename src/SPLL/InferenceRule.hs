@@ -11,61 +11,9 @@ module SPLL.InferenceRule (
 
 import SPLL.Typing.PType hiding (TV, NotSetYet)
 import Data.List (isInfixOf, isSuffixOf)
-import SPLL.Lang (Expr(..))
+import SPLL.Lang (Expr(..), ExprStub(..), toStub)
 import SPLL.Typing.RType
 
-data ExprStub = StubIfThenElse
-              | StubGreaterThan
-              | StubThetaI
-              | StubSubtree
-              | StubUniform
-              | StubNormal
-              | StubConstant
-              | StubMultF
-              | StubMultI
-              | StubPlusF
-              | StubPlusI
-              | StubNegF
-              | StubExpF
-              | StubNull
-              | StubCons
-              | StubTCons
-              | StubCall
-              | StubVar
-              | StubLetIn
-              | StubArg
-              | StubInjF
-              | StubCallArg
-              | StubLambda
-              | StubReadNN
-              deriving (Show, Eq)
-
-toStub :: Expr x a -> ExprStub
-toStub expr = case expr of
-  IfThenElse {}  -> StubIfThenElse
-  GreaterThan {} -> StubGreaterThan
-  (ThetaI _ _ _)   -> StubThetaI
-  (Subtree _ _ _)   -> StubSubtree
-  (Uniform _)    -> StubUniform
-  (Normal _)     -> StubNormal
-  (Constant _ _) -> StubConstant
-  MultF {}       -> StubMultF
-  MultI {}       -> StubMultI
-  PlusF {}       -> StubPlusF
-  PlusI {}       -> StubPlusI
-  ExpF {}        -> StubExpF
-  NegF {}        -> StubNegF
-  (Null _)       -> StubNull
-  Cons {}        -> StubCons
-  TCons {}       -> StubTCons
-  (Call _ _)     -> StubCall
-  (Var _ _)      -> StubVar
-  LetIn {}       -> StubLetIn
-  Arg {}         -> StubArg
-  InjF {}        -> StubInjF
-  CallArg {}     -> StubCallArg
-  Lambda {}      -> StubLambda
-  (ReadNN _ _ _) -> StubReadNN
 
 data RuleConstraint = SubExprNIsType Int PType
                     | SubExprNIsNotType Int PType
@@ -126,6 +74,17 @@ greaterThanLeft = InferenceRule
 
 greaterThanRight :: InferenceRule
 greaterThanRight = mirror2 greaterThanLeft --InferenceRule StubGreaterThan [SubExprNIsType 1 Deterministic] "greaterThanRight" (const Integrate)
+
+lessThanLeft :: InferenceRule
+lessThanLeft = InferenceRule
+                    StubLessThan
+                    [SubExprNIsType 0 Deterministic]
+                    "lessThanLeft"
+                    (const Integrate)
+                    (Forall [] (TFloat `TArrow` (TFloat `TArrow` TBool)))
+
+lessThanRight :: InferenceRule
+lessThanRight = mirror2 lessThanLeft
 
 greaterThanSigmoid :: InferenceRule
 greaterThanSigmoid = InferenceRule
@@ -242,4 +201,4 @@ cons = InferenceRule
          (Forall [TV "a"] ((TVarR $ TV "a") `TArrow` ((ListOf $ TVarR $ TV "a") `TArrow` (ListOf $ TVarR $ TV "a"))))
 
 allAlgorithms :: [InferenceRule]
-allAlgorithms = [ifThenElse, theta, uniform, normal, constant, exprNull, greaterThanLeft, greaterThanRight, greaterThanSigmoid, plusLeft, plusRight, multLeft, multRight, negF, expF, enumeratePlusLeft]
+allAlgorithms = [ifThenElse, theta, uniform, normal, constant, exprNull, greaterThanLeft, greaterThanRight, lessThanLeft, lessThanRight, greaterThanSigmoid, plusLeft, plusRight, multLeft, multRight, negF, expF, enumeratePlusLeft]

@@ -82,7 +82,17 @@ testOr :: Program () Double
 testOr = Program [] (Or () (LessThan () (Normal ()) (Constant () (VFloat 0))) (GreaterThan () (Uniform ()) (Constant () (VFloat 0.5))))
 
 testNot :: Program () Double
-testNot = Program [] (Not () (LessThan () (Normal ()) (Constant () (VFloat 0))))
+testNot = Program [] (Not () (LessThan () (Uniform ()) (Constant () (VFloat 0.75))))
+
+testCallLambda :: Program () Double
+testCallLambda = Program [] (CallLambda () (Constant () (VFloat 2)) (Lambda () "a" (PlusF () (Var () "a") (Uniform ()))))
+
+testCallLambdaAdvanced :: Program () Double
+testCallLambdaAdvanced = Program [] (LetIn () "l" (Lambda () "a" (PlusF () (Var () "a") (Uniform ()))) (CallLambda () (Constant () (VFloat 2)) (Var () "l")))
+
+testLetIn :: Program () Double
+testLetIn = Program [] (LetIn () "u" (Uniform ()) (PlusF () (Var () "u") (Constant () (VFloat 1))))
+--testCallLambda = Program [] (CallLambda () (Uniform ()) (Lambda () "a" (PlusF () (Var () "a") (Uniform ()))))
 {-
 flipCoin :: Expr () Double
 flipCoin = GreaterThan () (Uniform ()) (Constant () (VFloat 0.5))

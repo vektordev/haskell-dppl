@@ -17,6 +17,10 @@ type IREnv a = [(String, IRExpr a)]
 
 generate :: (Ord a, Fractional a, Show a, Floating a, RandomGen g, Random a, Erf a) => IREnv a -> IREnv a -> [IRExpr a]-> IRExpr a -> Rand g (Value a)
 --generate globalEnv env args expr | trace (show expr) False = undefined
+generate globalEnv env (arg:args) (IRLambda name expr) = generate globalEnv ((name, arg):env) args expr
+generate globalEnv env [] (IRLambda name expr) = error "No args provided to lambda"
+generate globalEnv env args (IRCallLambda val expr) = generate globalEnv env (val:args) expr
+generate globalEnv env (x:args) _ = error "Arguments provided to non-lamda related expression"
 generate globalEnv env args (IRIf cond thenCase elseCase) = do
   condVal <- generate globalEnv env args cond
   case condVal of
@@ -176,11 +180,12 @@ generate globalEnv env args (IRLetIn name decl body) = do
   generate globalEnv extendedEnv args body
 generate globalEnv env args (IRVar name) = generate globalEnv env args expr
   where Just expr = lookup name env
-generate globalEnv env args (IRCall name callArgs) = generate globalEnv globalEnv (callArgs ++ args) expr
-  where Just expr = lookup name globalEnv
-generate globalEnv env (arg:args) (IRLambda name expr) = generate globalEnv ((name, arg):env) args expr
-generate globalEnv env [] (IRLambda name expr) = error "No args provided to lambda"
---TODO: Fehler bei args für nicht lambda
+generate globalEnv env args (IRCall name callArgs) = do
+  let Just expr = lookup name globalEnv
+  -- Evaluate the expressions here if value passed would be a local variable. TODO: This breaks passing of lambda functions as arguments
+  evalCa <- mapM (generate globalEnv env args) (callArgs ++ args)
+  let ca = map IRConst evalCa
+  generate globalEnv globalEnv ca expr
 generate globalEnv env args (IREnumSum varname (VInt iVal) expr) = do    --TODO Untested
   foldrM (\i acc -> do
     x <- generate globalEnv env (IRConst (VInt i):args) (IRLambda varname expr)

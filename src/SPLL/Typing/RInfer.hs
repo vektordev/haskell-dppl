@@ -515,6 +515,13 @@ infer expr = case expr of
     (t1, c1, et1) <- inTEnv (name, sc) (infer e2)
     return (tv `TArrow` t1, c1, Lambda (setRType x (tv `TArrow` t1)) name et1)
     
+  CallLambda x v l -> do
+    tv <- fresh
+    (t1, c1, et1) <- infer v
+    (t2, c2, et2) <- infer l
+    let u1 = t1 `TArrow` (t2 `TArrow` tv)
+    let u2 = t1 `TArrow` ((t1 `TArrow` tv) `TArrow` tv)
+    return (tv, c1 ++ c2 ++ [(u1, u2)], CallLambda (setRType x tv) et1 et2)
   
   Null x -> return (NullList, [], Null (setRType x NullList))
 

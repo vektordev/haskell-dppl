@@ -144,6 +144,7 @@ data IRExpr a = IRIf (IRExpr a) (IRExpr a) (IRExpr a)
               | IRVar Varname
               | IRCall String [IRExpr a]
               | IRLambda String (IRExpr a)
+              | IRCallLambda (IRExpr a) (IRExpr a)
               -- auxiliary construct to aid enumeration: bind each enumerated Value to the Varname and evaluate the subexpr. Sum results.
               -- maybe we can instead move this into some kind of standard library.
               | IREnumSum Varname (Value a) (IRExpr a)
@@ -180,6 +181,7 @@ getIRSubExprs (IRLetIn _ a b) = [a, b]
 getIRSubExprs (IRVar _) = []
 getIRSubExprs (IRCall _ a) = a
 getIRSubExprs (IRLambda _ a) = [a]
+getIRSubExprs (IRCallLambda a b) = [a, b]
 getIRSubExprs (IREnumSum _ _ a) = [a]
 getIRSubExprs (IREvalNN _ a) = [a]
 getIRSubExprs (IRIndex a b) = [a, b]
@@ -202,6 +204,7 @@ irMap f x = case x of
   (IRLetIn name left right) -> f (IRLetIn name (irMap f left) (irMap f right))
   (IRCall name args) -> f (IRCall name (map (irMap f) args))
   (IRLambda name scope) -> f (IRLambda name (irMap f scope))
+  (IRCallLambda a b) -> f (IRCallLambda (irMap f a) (irMap f b))
   (IREnumSum name val scope) -> f (IREnumSum name val (irMap f scope))
   (IREvalNN name arg) -> f (IREvalNN name (irMap f arg))
   (IRIndex left right) -> f (IRIndex (irMap f left) (irMap f right))
@@ -232,6 +235,7 @@ irPrintFlat (IRLetIn _ _ _) = "IRLetIn"
 irPrintFlat (IRVar _) = "IRVar"
 irPrintFlat (IRCall name _) = "IRCall " ++ name
 irPrintFlat (IRLambda _ _) = "IRLambda"
+irPrintFlat (IRCallLambda _ _) = "IRCallLambda"
 irPrintFlat (IREnumSum _ _ _) = "IREnumSum"
 irPrintFlat (IREvalNN name _) = "IREvalNN " ++ name
 irPrintFlat (IRIndex _ _) = "IRIndex"

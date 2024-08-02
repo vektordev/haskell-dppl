@@ -159,15 +159,17 @@ someFunc = do--thatGaussThing
   putStrLn "done outputting constraints"
   let cmp2 = progToEnv $ addTypeInfo prog-}
   let conf = CompilerConfig {topKThreshold = Nothing}
-  let prog = testPlus3
-  let typedProg = {-inferProg -} (addTypeInfo prog)
+  let prog = Program [] (LetIn () "a" (Uniform ()) (PlusF () (Var () "a") (Constant () (VFloat 5))))
+  let typedProg = inferProg (addTypeInfo prog)
   let cmp = progToEnv typedProg
   --cmp2 <-  env
   --let cmp = [] ++ [("noiseMNistAdd", mNistNoise), ("expertmodel", expertModelsTyped), ("expertmodelAnnotated", expertAnnotatedTyped), ("mNistAdd", testNN)] :: Env TypeInfo Float
   --let cmp = [("main", testNN)] :: Env TypeInfo Float
   --let cmp = cmp2
   --cmp <- compile env
-  trace (show typedProg) $ newCodeGenAll conf cmp
+  pPrint (inferProbProg typedProg)
+  putStrLn "========="
+  newCodeGenAll conf cmp
   --let env = [("main", testNNUntyped)] :: Env () Float
   --cmp <- compile env triMNist
   --let cmp = [("main", triMNist)] :: Env TypeInfo Float

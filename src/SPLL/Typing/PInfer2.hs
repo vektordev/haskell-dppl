@@ -580,10 +580,15 @@ infer env expr = case expr of
       (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
       return (s3, cs3, t3, MultI (setPType ti t3) et1 et2)
 
+  Not ti e -> do
+      (s1, cs1, t1) <- negInf
+      (s2, cs2, t2, et) <- applyOpArg env e s1 cs1 t1
+      return (s2, cs2, t2, Not (setPType ti t2) et)
+
   ExpF ti e -> do
-        (s1, cs1, t1) <- negInf
-        (s2, cs2, t2, et) <- applyOpArg env e s1 cs1 t1
-        return (s2, cs2, t2, ExpF (setPType ti t2) et)
+      (s1, cs1, t1) <- negInf
+      (s2, cs2, t2, et) <- applyOpArg env e s1 cs1 t1
+      return (s2, cs2, t2, ExpF (setPType ti t2) et)
 
   NegF ti e -> do
       (s1, cs1, t1) <- negInf
@@ -595,6 +600,12 @@ infer env expr = case expr of
       (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
       (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
       return (s3, cs3, t3, GreaterThan (setPType ti t3) et1 et2)
+
+  LessThan ti e1 e2 -> do
+      (s1, cs1, t1) <- compInf
+      (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
+      (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
+      return (s3, cs3, t3, LessThan (setPType ti t3) et1 et2)
 
   Call ti name -> do
       (s1, cs, t1) <- lookupEnv env name
@@ -627,6 +638,13 @@ infer env expr = case expr of
   Lambda ti name e -> do
     (s, cs, t, et) <- infer env e -- TODO Check this
     return (s, cs, t, Lambda (setPType ti t) name et)
+
+  CallLambda ti v l -> do
+      (s1, cs1, t1, et1) <- infer env v
+      (s2, cs2, t2, et2) <- infer env l
+      -- FIXME How is it possible to set the downgrade chain to Det directly?
+      -- TODO v may not be det at all, this is just for simplification
+      return (compose s1 s2, cs1 ++ cs2 ++ [(t1, [Left Deterministic])], t2, CallLambda (setPType ti t2) et1 et2)
   
   _ -> error (show expr)
        

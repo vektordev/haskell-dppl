@@ -4,17 +4,11 @@
 module SPLL.Typing.Typing (
   Env,
   TypeError,
-  TypeInfo,
   TypeInfo(..),
   ChainName,
   HornClause,
   Tag(..),
   CType(..),
-  rType,
-  pType,
-  witnessedVars,
-  chainName,
-  tags,
   makeTypeInfo,
   setRType,
   setPType,
@@ -35,14 +29,13 @@ import SPLL.InferenceRule
 import GHC.Records
 
 import Data.Maybe
-import Data.Set (empty, Set)
+import Data.Set (empty)
 import Control.Monad.Reader
 import Control.Monad.Except
 
 import Numeric.AD (grad', auto)
 import Numeric.AD.Internal.Reverse ( Reverse, Tape)
 import Data.Reflection (Reifies)
-
 data Tag a = EnumRange (Value a, Value a)
            | EnumList [Value a]
            | Alg InferenceRule
@@ -50,21 +43,22 @@ data Tag a = EnumRange (Value a, Value a)
 
 type ChainName = String
 
--- (Set of Preconditions, set of Inferable variables with attached CType
-type HornClause = (Set ChainName, Set (ChainName, CType))
+-- (Set of Preconditions with CType, set of Inferable variables with attached CType, Expression this HornClause originates from with its inversion number
+type HornClause a = ([(ChainName, CType a)], [(ChainName, CType a)], (ExprStub, Int))
 
-data CType = CDeterministic
-           | CInferDeterministic
-           -- | CConstrainedTo a a
-           | CBottom
-           | CNotSetYet
-           deriving (Show, Eq)
+data CType a = CDeterministic
+             | CInferDeterministic
+             | CConstrainedTo a a
+             | CBottom
+             | CNotSetYet
+             deriving (Show, Eq)
            
-instance Ord CType where
+instance Eq a => Ord (CType a) where
   compare x y = compare (rank x) (rank y)
     where
       rank CDeterministic = 10
       rank CInferDeterministic = 9
+      rank (CConstrainedTo _ _) = 5
       rank CBottom = 1
       rank CNotSetYet = -1
 
@@ -72,8 +66,8 @@ instance Ord CType where
 data TypeInfo a = TypeInfo
   { rType :: RType
   , pType :: PType
-  , cType :: CType
-  , derivingHornClause :: Maybe HornClause
+  , cType :: CType a
+  , derivingHornClause :: Maybe (HornClause a)
   , witnessedVars :: WitnessedVars
   , chainName :: ChainName
   , tags :: [Tag a]} deriving (Show, Eq, Ord)
@@ -94,10 +88,10 @@ setRType t rt = t {rType = rt}
 setPType :: TypeInfo a -> PType -> TypeInfo a
 setPType t pt = t {pType = pt}
 
-setCType :: TypeInfo a -> CType -> TypeInfo a
+setCType :: TypeInfo a -> CType a -> TypeInfo a
 setCType t ct = t {cType = ct}
 
-setDerivingHornClause :: TypeInfo a -> HornClause -> TypeInfo a
+setDerivingHornClause :: TypeInfo a -> HornClause a -> TypeInfo a
 setDerivingHornClause t dhc = t {derivingHornClause = Just dhc}
 
 setWitnessedVars :: TypeInfo a-> WitnessedVars -> TypeInfo a
@@ -106,7 +100,7 @@ setWitnessedVars t wit = t {witnessedVars = wit}
 setChainName:: TypeInfo a -> ChainName -> TypeInfo a
 setChainName t name = t {chainName = name}
 
-setTags:: TypeInfo a -> [Tag b] -> TypeInfo b
+setTags:: TypeInfo a -> [Tag a] -> TypeInfo a
 setTags t tgs = t {tags = tgs}
 
 -- Because Env will be polluted by local symbols as we evaluate, we need to reset when calling functions.
@@ -155,7 +149,7 @@ rIntersect (ListOf x) NullList = Just $ ListOf x
 rIntersect NullList (ListOf x) = Just $ ListOf x
 rIntersect left right = if left == right then Just left else Nothing
 
-matchRExpr :: Expr () a -> Expr () a -> Check a RType
+matchRExpr :: (Show a) => Expr () a -> Expr () a -> Check a RType
 matchRExpr e1 e2 = do
   e1R <- inferR e1
   e2R <- inferR e2
@@ -176,23 +170,23 @@ matchTwoReturnThird a b ret =
     where intersection = rIntersect a b
 
 --TODO: if Expr is Let_in or otherwise affects Env.
-typeCheckExpr :: Env () a -> Expr () a -> Expr (TypeInfo a) a
+typeCheckExpr :: (Show a) => Env () a -> Expr () a -> Expr (TypeInfo a) a
 typeCheckExpr env = tMap (mkTypeInfo2 env)
 
-mkTypeInfo2 :: Env () a -> Expr () a -> TypeInfo a
+mkTypeInfo2 :: (Show a) => Env () a -> Expr () a -> TypeInfo a
 mkTypeInfo2 env expr =
   case mkTypeInfo env expr of
     Left err -> error $ show err
     Right result -> result
 
-mkTypeInfo :: Env () a -> Expr () a -> Either TypeError (TypeInfo a)
+mkTypeInfo :: (Show a) => Env () a -> Expr () a -> Either TypeError (TypeInfo a)
 mkTypeInfo env expr =
   do
     pType <- runReader (runExceptT (inferP expr)) env
     rType <- runReader (runExceptT (inferR expr)) env
-    return $ TypeInfo {rType = rType, pType = pType}
+    return $ makeTypeInfo {rType = rType, pType = pType}
 
-inferR :: Expr () a -> Check a RType
+inferR :: (Show a) => Expr () a -> Check a RType
 inferR (IfThenElse () cond left right) = do
   condR <- inferR cond
   ret <- matchRExpr left right
@@ -228,9 +222,10 @@ inferR (Cons () headX tailX) = do
     NullList -> return (ListOf tHead)
     _ -> matchRType tTail (ListOf tHead)
 inferR (Call () name) = return $ RIdent name
+inferR e = error $ "RType inference failed for: " ++ show e
 
 --TODO: Find a way to statically align the result of inferP with the constraints of the likelihood function.
-inferP :: Expr () a -> Check a PType
+inferP :: (Show a) => Expr () a -> Check a PType
 inferP (IfThenElse _ cond left right) = do
   condP <- inferP cond
   leftP <- inferP left
@@ -272,29 +267,45 @@ inferP (Cons _ headX tailX) = do
 --TODO: Arg needs to make sure the variable has proper type, same as let_in
 --inferP (Arg _ name inExpr) = inferP inExpr
 --inferP (CallArg _ name withExpr) = return $ PIdent name [(Deterministic, Deterministic), (Integrate, Integrate), (Chaos, Chaos)]
+inferP e = error $ "PType inference failed for: " ++ show e
 
 
 progToEnv :: Program (TypeInfo a) a -> Env (TypeInfo a) a
 progToEnv (Program funcs main_expr) = ("main", main_expr): funcs
 
-autoExpr :: (Num a, Reifies s Tape) => Expr (TypeInfo a) a -> Expr (TypeInfo (Reverse s a)) (Reverse s a)
+autoExpr :: (Eq a, Num a, Reifies s Tape) => Expr (TypeInfo a) a -> Expr (TypeInfo (Reverse s a)) (Reverse s a)
 autoExpr e = tMap (autoTypeInfo . getTypeInfo) $ exprMap auto e
 
-autoTypeInfo :: (Num a, Reifies s Tape) =>TypeInfo a ->TypeInfo (Reverse s a)
-autoTypeInfo t = setTags t (map autoTag (tags t))
+autoTypeInfo :: (Eq a, Num a, Reifies s Tape) =>TypeInfo a ->TypeInfo (Reverse s a)
+autoTypeInfo t = t {tags = Prelude.map autoTag (tags t), cType = autoCType (cType t), derivingHornClause = do
+  hc <- derivingHornClause t
+  return (autoHornClause hc)}
+
+autoHornClause :: (Eq a, Num a, Reifies s Tape) => HornClause a -> HornClause (Reverse s a)
+autoHornClause (cn, hc, inv) =  (map (\(cn1, ct) -> (cn1, autoCType ct)) cn, map (\(cn1, ct) -> (cn1, autoCType ct)) hc, inv)
+
+autoCType :: (Num a, Reifies s Tape) => CType a -> CType (Reverse s a)
+autoCType (CConstrainedTo a b) = CConstrainedTo (auto a) (auto b)
+autoCType CDeterministic = CDeterministic
+autoCType CInferDeterministic = CInferDeterministic
+autoCType CBottom = CBottom
+autoCType CNotSetYet = CNotSetYet
+
 
 autoTag :: (Num a, Reifies s Tape) => Tag a -> Tag (Reverse s a)
 autoTag (EnumRange (a, b))= EnumRange (autoVal a, autoVal b)
-autoTag (EnumList l) = EnumList (map autoVal l)
+autoTag (EnumList l) = EnumList (Prelude.map autoVal l)
 autoTag (Alg a) = Alg a
+autoTag _ = error "Failed to convert to auto tag"
 
-autoEnv :: (Num a, Reifies s Tape) => Env (TypeInfo a) a -> Env (TypeInfo (Reverse s a)) (Reverse s a)
-autoEnv = map (\ (name, expr) -> (name, autoExpr expr))
+autoEnv :: (Eq a, Num a, Reifies s Tape) => Env (TypeInfo a) a -> Env (TypeInfo (Reverse s a)) (Reverse s a)
+autoEnv = Prelude.map (\ (name, expr) -> (name, autoExpr expr))
 
 autoVal :: (Num a, Reifies s Tape) => Value a -> Value (Reverse s a)
 autoVal (VBool x) = VBool x
 autoVal (VFloat y) = VFloat (auto y)
-autoVal (VList xs) = VList (map autoVal xs)
+autoVal (VList xs) = VList (Prelude.map autoVal xs)
 autoVal (VTuple x1 x2) = VTuple (autoVal x1) (autoVal x2)
 autoVal (VInt x) = VInt x
 autoVal (VSymbol x) = VSymbol x
+autoVal _ = error "Failed to convert to auto value"
