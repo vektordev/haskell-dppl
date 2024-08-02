@@ -53,6 +53,7 @@ import SPLL.Typing.BruteForceSolver (forceAddTypeInfo, runBruteForceSolver)
 import SPLL.IRCompiler
 import SPLL.Typing.ForwardChaining
 import IRInterpreter (constructVisitationTree)
+import PrettyPrint
 
 {-variableLengthS2 :: Program  () Double
 variableLengthS2 = Program [("b", IfThenElse ()
@@ -159,7 +160,7 @@ someFunc = do--thatGaussThing
   putStrLn "done outputting constraints"
   let cmp2 = progToEnv $ addTypeInfo prog-}
   let conf = CompilerConfig {topKThreshold = Nothing}
-  let prog = Program [] (LetIn () "a" (Uniform ()) (PlusF () (Var () "a") (Constant () (VFloat 5))))
+  let prog = simpleCall
   let typedProg = inferProg (addTypeInfo prog)
   let cmp = progToEnv typedProg
   --cmp2 <-  env
@@ -167,6 +168,8 @@ someFunc = do--thatGaussThing
   --let cmp = [("main", testNN)] :: Env TypeInfo Float
   --let cmp = cmp2
   --cmp <- compile env
+  putStrLn (pPrintProg prog)
+  putStrLn "========="
   pPrint (inferProbProg typedProg)
   putStrLn "========="
   newCodeGenAll conf cmp
