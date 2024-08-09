@@ -32,6 +32,7 @@ import SPLL.Examples
 import SPLL.Typing.PType( PType(..) )
 
 import PredefinedFunctions
+import Debug.Trace (trace)
 data RTypeError
   = UnificationFail RType RType
   | InfiniteType TVarR RType
@@ -515,13 +516,13 @@ infer expr = case expr of
     (t1, c1, et1) <- inTEnv (name, sc) (infer e2)
     return (tv `TArrow` t1, c1, Lambda (setRType x (tv `TArrow` t1)) name et1)
     
-  CallLambda x v l -> do
+  Apply x l v -> do
     tv <- fresh
-    (t1, c1, et1) <- infer v
-    (t2, c2, et2) <- infer l
+    (t1, c1, et1) <- infer l
+    (t2, c2, et2) <- infer v
     let u1 = t1 `TArrow` (t2 `TArrow` tv)
-    let u2 = t1 `TArrow` ((t1 `TArrow` tv) `TArrow` tv)
-    return (tv, c1 ++ c2 ++ [(u1, u2)], CallLambda (setRType x tv) et1 et2)
+    let u2 = (t2 `TArrow` tv) `TArrow` (t2 `TArrow` tv)
+    return (tv, c1 ++ c2 ++ [(u1, u2)], Apply (setRType x tv) et1 et2)
   
   Null x -> return (NullList, [], Null (setRType x NullList))
 
@@ -611,6 +612,7 @@ unifyMany (t1 : ts1) (t2 : ts2) =
 unifyMany t1 t2 = throwError $ UnificationMismatch t1 t2
 
 unifies :: RType -> RType -> Solve Subst
+--unifies t1 t2 | trace (show t1 ++ show t2) False = undefined
 unifies t1 t2 | t1 == t2 = return emptySubst
 unifies (Tuple t1 t2) BottomTuple = return emptySubst
 unifies BottomTuple (Tuple t1 t2) = return emptySubst
@@ -636,6 +638,7 @@ unifies t1 t2 = throwError $ UnificationFail t1 t2
 
 -- Unification solver
 solver :: Unifier -> Solve Subst
+--solver (su, cs) | trace (show (su, cs)) False = undefined
 solver (su, cs) =
   case cs of
     [] -> return su

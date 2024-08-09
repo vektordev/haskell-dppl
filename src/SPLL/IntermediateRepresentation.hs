@@ -144,7 +144,7 @@ data IRExpr a = IRIf (IRExpr a) (IRExpr a) (IRExpr a)
               | IRVar Varname
               | IRCall String [IRExpr a]
               | IRLambda String (IRExpr a)
-              | IRCallLambda (IRExpr a) (IRExpr a)
+              | IRApply (IRExpr a) (IRExpr a)
               -- auxiliary construct to aid enumeration: bind each enumerated Value to the Varname and evaluate the subexpr. Sum results.
               -- maybe we can instead move this into some kind of standard library.
               | IREnumSum Varname (Value a) (IRExpr a)
@@ -161,7 +161,7 @@ data CompilerConfig a = CompilerConfig {
 --3: convert algortihm-and-type-annotated Exprs into abstract representation of explicit computation:
 --    Fold enum ranges, algorithms, etc. into a representation of computation that can be directly converted into code.
 
-getIRSubExprs :: (Show a) => IRExpr a -> [IRExpr a]
+getIRSubExprs :: IRExpr a -> [IRExpr a]
 getIRSubExprs (IRIf a b c) = [a, b, c]
 getIRSubExprs (IROp _ a b) = [a, b]
 getIRSubExprs (IRUnaryOp _ a) = [a]
@@ -181,12 +181,11 @@ getIRSubExprs (IRLetIn _ a b) = [a, b]
 getIRSubExprs (IRVar _) = []
 getIRSubExprs (IRCall _ a) = a
 getIRSubExprs (IRLambda _ a) = [a]
-getIRSubExprs (IRCallLambda a b) = [a, b]
+getIRSubExprs (IRApply a b) = [a, b]
 getIRSubExprs (IREnumSum _ _ a) = [a]
 getIRSubExprs (IREvalNN _ a) = [a]
 getIRSubExprs (IRIndex a b) = [a, b]
 getIRSubExprs (IRReturning a) = [a]
-getIRSubExprs x = error ("Unknown expression: " ++ show x)
 
 irMap :: (IRExpr a -> IRExpr a) -> IRExpr a -> IRExpr a
 irMap f x = case x of
@@ -204,7 +203,7 @@ irMap f x = case x of
   (IRLetIn name left right) -> f (IRLetIn name (irMap f left) (irMap f right))
   (IRCall name args) -> f (IRCall name (map (irMap f) args))
   (IRLambda name scope) -> f (IRLambda name (irMap f scope))
-  (IRCallLambda a b) -> f (IRCallLambda (irMap f a) (irMap f b))
+  (IRApply a b) -> f (IRApply (irMap f a) (irMap f b))
   (IREnumSum name val scope) -> f (IREnumSum name val (irMap f scope))
   (IREvalNN name arg) -> f (IREvalNN name (irMap f arg))
   (IRIndex left right) -> f (IRIndex (irMap f left) (irMap f right))
@@ -235,7 +234,7 @@ irPrintFlat (IRLetIn _ _ _) = "IRLetIn"
 irPrintFlat (IRVar _) = "IRVar"
 irPrintFlat (IRCall name _) = "IRCall " ++ name
 irPrintFlat (IRLambda _ _) = "IRLambda"
-irPrintFlat (IRCallLambda _ _) = "IRCallLambda"
+irPrintFlat (IRApply _ _) = "IRCallLambda"
 irPrintFlat (IREnumSum _ _ _) = "IREnumSum"
 irPrintFlat (IREvalNN name _) = "IREvalNN " ++ name
 irPrintFlat (IRIndex _ _) = "IRIndex"

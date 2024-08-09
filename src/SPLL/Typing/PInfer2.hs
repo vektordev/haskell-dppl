@@ -639,12 +639,12 @@ infer env expr = case expr of
     (s, cs, t, et) <- infer env e -- TODO Check this
     return (s, cs, t, Lambda (setPType ti t) name et)
 
-  CallLambda ti v l -> do
-      (s1, cs1, t1, et1) <- infer env v
-      (s2, cs2, t2, et2) <- infer env l
+  Apply ti l v -> do
+      (s1, cs1, t1, et1) <- infer env l
+      (s2, cs2, t2, et2) <- infer env v
       -- FIXME How is it possible to set the downgrade chain to Det directly?
       -- TODO v may not be det at all, this is just for simplification
-      return (compose s1 s2, cs1 ++ cs2 ++ [(t1, [Left Deterministic])], t2, CallLambda (setPType ti t2) et1 et2)
+      return (compose s1 s2, cs1 ++ cs2, t2, Apply (setPType ti t2) et1 et2)
   
   _ -> error (show expr)
        

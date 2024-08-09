@@ -85,10 +85,10 @@ testNot :: Program () Double
 testNot = Program [] (Not () (LessThan () (Uniform ()) (Constant () (VFloat 0.75))))
 
 testCallLambda :: Program () Double
-testCallLambda = Program [] (CallLambda () (Constant () (VFloat 2)) (Lambda () "a" (PlusF () (Var () "a") (Uniform ()))))
+testCallLambda = Program [] (Apply () (Lambda () "a" (PlusF () (Var () "a") (Uniform ()))) (Constant () (VFloat 2)))
 
 testCallLambdaAdvanced :: Program () Double
-testCallLambdaAdvanced = Program [] (LetIn () "l" (Lambda () "a" (PlusF () (Var () "a") (Uniform ()))) (CallLambda () (Constant () (VFloat 2)) (Var () "l")))
+testCallLambdaAdvanced = Program [] (LetIn () "l" (Lambda () "a" (PlusF () (Var () "a") (Uniform ()))) (Apply () (Var () "l") (Constant () (VFloat 2))))
 
 testLetIn :: Program () Double
 testLetIn = Program [] (LetIn () "u" (Uniform ()) (PlusF () (Var () "u") (Constant () (VFloat 1))))

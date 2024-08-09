@@ -9,6 +9,7 @@ import Control.Monad.Supply
 import SPLL.Typing.PType 
 import SPLL.InferenceRule (algName)
 import Debug.Trace
+import Data.Maybe
 
 
 -- perhaps as an explicit lambda in the top of the expression, otherwise we'll get trouble generating code.
@@ -19,14 +20,14 @@ envToIR conf env = concatMap (\(name, binding) ->
   let pt = pType $ getTypeInfo binding
       rt = rType $ getTypeInfo binding in
     if (pt == Deterministic || pt == Integrate) && (isOnlyNumbers rt) then
-      [(name ++ "_integ", IRLambda "low" (IRLambda "high" (postProcess $ runSupplyVars (toIRIntegrate conf binding (IRVar "low") (IRVar "high"))))),
-       (name ++ "_prob", IRLambda "sample" (postProcess $ runSupplyVars (toIRProbability conf binding (IRVar "sample")))),
-       (name ++ "_gen", postProcess $ toIRGenerate binding)]
+      [(name ++ "_integ", pullOutLetIns (IRLambda "low" (IRLambda "high" (returnize (postProcess $ runSupplyVars (toIRIntegrate conf binding (IRVar "low") (IRVar "high"))))))),
+       (name ++ "_prob", pullOutLetIns (IRLambda "sample" (returnize (postProcess $ runSupplyVars (toIRProbability conf binding (IRVar "sample")))))),
+       (name ++ "_gen", pullOutLetIns (returnize (postProcess $ toIRGenerate binding)))]
     else if pt == Deterministic || pt == Integrate || pt == Prob then
-      [(name ++ "_prob", IRLambda "sample" (postProcess $ runSupplyVars (toIRProbability conf binding (IRVar "sample")))),
-       (name ++ "_gen", postProcess $ toIRGenerate binding)]
+      [(name ++ "_prob", pullOutLetIns (IRLambda "sample" (returnize (postProcess $ runSupplyVars (toIRProbability conf binding (IRVar "sample")))))),
+       (name ++ "_gen", pullOutLetIns (returnize (postProcess $ toIRGenerate binding)))]
     else
-      [(name ++ "_gen", postProcess $ toIRGenerate binding)]) env
+      [(name ++ "_gen", pullOutLetIns (returnize (postProcess $ toIRGenerate binding)))]) env
       
 isValue :: IRExpr a -> Bool
 isValue (IRConst val) = True
@@ -119,6 +120,34 @@ returnize (IRIf cond left right) = IRIf cond (returnize left) (returnize right)
 returnize (IRReturning expr) = error "called returnize on return statement"
 returnize (IRLetIn name binding scope) = IRLetIn name binding (returnize scope)
 returnize other = IRReturning other
+
+pullOutLetIns :: IRExpr a -> IRExpr a
+pullOutLetIns (IRLambda n b) = IRLambda n (pullOutLetIns b)
+pullOutLetIns (IRLetIn n v b) = IRLetIn n v (pullOutLetIns b)
+pullOutLetIns e = runSupplyVars $ do
+  case findLetIn e of
+    Just (IRLetIn n v b) -> do
+      i <- demand
+      let newName = n ++ show i
+      let newBody = pullOutLetIns (removeAndSubstituteLetIns b n newName)
+      return (IRLetIn newName v newBody)
+    Nothing -> return e
+
+-- TODO: We currently dont handle inner lambdas here
+findLetIn :: IRExpr a -> Maybe (IRExpr a)
+findLetIn IRLambda {} = Nothing
+findLetIn e@(IRLetIn _ _ _) = Just e
+findLetIn e = firstJusts (map findLetIn (getIRSubExprs e))
+  where firstJusts l = foldr (\a b -> if isJust a then a else b) Nothing l
+
+removeAndSubstituteLetIns :: IRExpr a -> Varname -> Varname -> IRExpr a
+removeAndSubstituteLetIns (IRVar a) old new | old == a = IRVar new
+removeAndSubstituteLetIns e old new = irMap (removeSubst old new) e
+  where
+    removeSubst oldN newN (IRVar n) | n == oldN = IRVar newN
+    removeSubst oldN _ (IRLetIn n _ b) | n == oldN = b
+    removeSubst _ _ ex = ex
+
 
 runSupplyVars :: Supply Int a -> a
 runSupplyVars codeGen = runSupply codeGen (+1) 1
@@ -244,10 +273,10 @@ toIRProbability conf (Uniform t) sample = return $ IRDensity IRUniform sample
 toIRProbability conf (Lambda t name subExpr) sample = do
   subExprIR <- toIRProbability conf subExpr sample
   return $ IRLambda name subExprIR
-toIRProbability conf (CallLambda _ v l) sample = do
+toIRProbability conf (Apply _ l v) sample = do
   let vIR = toIRGenerate v
   lIR <- toIRProbability conf l sample
-  return $ IRCallLambda vIR lIR
+  return $ IRApply lIR vIR
 toIRProbability conf (Cons _ hdExpr tlExpr) sample = do
   headP <- toIRProbability conf hdExpr (IRHead sample)
   tailP <- toIRProbability conf tlExpr (IRTail sample)
@@ -315,7 +344,7 @@ toIRGenerate (InjF _  name params) = packParamsIntoLetinsGen vars params fwdExpr
         FDecl (_, vars, _, fwdExpr, _) = fwd
 toIRGenerate (Var _ name) = IRVar name
 toIRGenerate (Lambda t name subExpr) = IRLambda name (toIRGenerate subExpr)
-toIRGenerate (CallLambda _ v l) = IRCallLambda (toIRGenerate v) (toIRGenerate l)
+toIRGenerate (Apply _ l v) = IRApply (toIRGenerate l) (toIRGenerate v)
 toIRGenerate (ReadNN t name subexpr) = IRCall "randomchoice" [IREvalNN name (toIRGenerate subexpr)]
 toIRGenerate x = error ("found no way to convert to IRGen: " ++ show x)
 
@@ -412,10 +441,10 @@ toIRIntegrate conf (Call _ name) low high = return $ IRCall (name ++ "_integ") [
 toIRIntegrate conf (Lambda t name subExpr) low high = do
   subExprIR <- toIRIntegrate conf subExpr low high
   return $ IRLambda name subExprIR
-toIRIntegrate conf (CallLambda _ v l) low high = do
+toIRIntegrate conf (Apply _ l v) low high = do
   let vIR = toIRGenerate v
   lIR <- toIRIntegrate conf l low high
-  return $ IRCallLambda vIR lIR
+  return $ IRApply lIR vIR
 toIRIntegrate conf (Var _ n) _ _ = return $ IRVar n
 toIRIntegrate _ x _ _ = error ("found no way to convert to IRIntegrate: " ++ show x)
 

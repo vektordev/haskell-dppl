@@ -66,7 +66,7 @@ data Expr x a =
               | Var x String
               | Constant x (Value a)
               | Lambda x String (Expr x a)    -- (Currently) must use local context
-              | CallLambda x (Expr x a) (Expr x a)
+              | Apply x (Expr x a) (Expr x a)
               -- Distributions
               | Uniform x
               | Normal x
@@ -115,7 +115,7 @@ data ExprStub = StubIfThenElse
               | StubInjF
               | StubCallArg
               | StubLambda
-              | StubCallLambda
+              | StubApply
               | StubReadNN
               deriving (Show, Eq, Ord)
 
@@ -146,7 +146,7 @@ toStub expr = case expr of
   InjF {}        -> StubInjF
   CallArg {}     -> StubCallArg
   Lambda {}      -> StubLambda
-  CallLambda {}  -> StubCallLambda
+  Apply {}  -> StubApply
   (ReadNN _ _ _) -> StubReadNN
 
 -- Flipped type args newtype on Expr, so we can fmap, foldr, and traverse over types.
@@ -264,7 +264,7 @@ exprMap f expr = case expr of
   (Arg t name r a) -> Arg t name r (exprMap f a)
   (CallArg t name a) -> CallArg t name (map (exprMap f) a)
   (Lambda t name a) -> Lambda t name (exprMap f a)
-  (CallLambda t a b) -> CallLambda t (exprMap f a) (exprMap f b)
+  (Apply t a b) -> Apply t (exprMap f a) (exprMap f b)
   (ReadNN t n a) -> ReadNN t n (exprMap f a)
   
 predicateFlat :: (Expr x a -> Bool) -> Expr x a -> Bool
@@ -320,7 +320,7 @@ tMapHead f expr = case expr of
   (Arg _ name r a) -> Arg (f expr) name r a
   (CallArg _ name a) -> CallArg (f expr) name a
   (Lambda _ name a) -> Lambda (f expr) name a
-  (CallLambda _ a b) -> CallLambda (f expr) a b
+  (Apply _ a b) -> Apply (f expr) a b
 --  (ReadNN _ a) -> ReadNN (f expr) a
 
 tMapTails :: (Expr x a -> x) -> Expr x a -> Expr x a
@@ -353,7 +353,7 @@ tMapTails f expr = case expr of
   --(LetInTuple t x a b c) -> LetInTuple t x (tMap f a) b (tMap f c)
   (Arg t name r a) -> Arg t name r (tMap f a)
   (Lambda t name a) -> Lambda t name (tMap f a)
-  (CallLambda t a b) -> CallLambda t (tMap f a) (tMap f b)
+  (Apply t a b) -> Apply t (tMap f a) (tMap f b)
   (CallArg t name a) -> CallArg t name (map (tMap f) a)
 
 tMap :: (Expr x a -> y) -> Expr x a -> Expr y a
@@ -387,7 +387,7 @@ tMap f expr = case expr of
   (Arg _ name r a) -> Arg (f expr) name r (tMap f a)
   (CallArg _ name a) -> CallArg (f expr) name (map (tMap f) a)
   (Lambda _ name a) -> Lambda (f expr) name (tMap f a)
-  (CallLambda _ a b) -> CallLambda (f expr) (tMap f a) (tMap f b)
+  (Apply _ a b) -> Apply (f expr) (tMap f a) (tMap f b)
   (ReadNN _ n a) -> ReadNN (f expr) n (tMap f a)
 
 tMapProg :: (Expr x a -> y) -> Program x a -> Program y a
@@ -404,7 +404,7 @@ getBinaryConstructor Cons {} = Cons
 getBinaryConstructor TCons {} = TCons
 getBinaryConstructor And {} = And
 getBinaryConstructor Or {} = Or
-getBinaryConstructor CallLambda {} = CallLambda
+getBinaryConstructor Apply {} = Apply
 --getBinaryConstructor (LetIn t name a b) = \t2 -> \e1 -> \e2 -> LetIn t2 name e1 e2
 getBinaryConstructor (LetIn _ name _ _) = (`LetIn` name)
 
@@ -494,7 +494,7 @@ getSubExprs expr = case expr of
   (Arg _ _ _ a) -> [a]
   (CallArg _ _ a) -> a
   (Lambda _ _ a) -> [a]
-  (CallLambda _ a b) -> [a, b]
+  (Apply _ a b) -> [a, b]
   (ReadNN _ _ a) -> [a]
 
 setSubExprs :: Expr x a -> [Expr x a] -> Expr x a
@@ -531,7 +531,7 @@ setSubExprs expr [a,b] = case expr of
   TCons t _ b -> TCons t a b
   LetIn t x _ b -> LetIn t x a b
   CallArg t n _ -> CallArg t n [a,b]
-  CallLambda t _ _ -> CallLambda t a b
+  Apply t _ _ -> Apply t a b
   _ -> error "unmatched expr in setSubExprs"
 setSubExprs expr [a,b,c] = case expr of
   IfThenElse t _ _ _ -> IfThenElse t a b c
@@ -573,7 +573,7 @@ getTypeInfo expr = case expr of
   (Arg t _ _ _)         -> t
   (CallArg t _ _)       -> t
   (Lambda t _ _)        -> t
-  (CallLambda t _ _)    -> t
+  (Apply t _ _)    -> t
   (ReadNN t _ _)        -> t
   
 setTypeInfo :: Expr t a -> t -> Expr t a
@@ -607,7 +607,7 @@ setTypeInfo expr t = case expr of
   (Arg _ a b c)         -> (Arg t a b c)
   (CallArg _ a b)       -> (CallArg t a b)
   (Lambda _ a b)        -> (Lambda t a b)
-  (CallLambda _ a b)    -> (CallLambda t a b)
+  (Apply _ a b)    -> (Apply t a b)
   (ReadNN _ a b)        -> (ReadNN t a b)
 
 getVFloat :: Value a -> a
@@ -686,7 +686,7 @@ printFlat expr = case expr of
   (Arg _ var r _ ) -> "Bind " ++ var ++ "::" ++ show r
   (CallArg _ a _ ) -> "CallArg " ++ a
   (Lambda _ name _) -> "\\" ++ name  ++ " -> "
-  CallLambda {} -> "CallLambda"
+  Apply {} -> "CallLambda"
   (ReadNN _ name _) -> "ReadNN " ++ name
 
 printFlatNoReq :: Expr t a -> String
@@ -720,6 +720,6 @@ printFlatNoReq expr = case expr of
   (Arg _ var r _ ) -> "Bind " ++ var ++ "::" ++ show r
   (CallArg _ a _ ) -> "CallArg" ++ a
   (Lambda _ name _) -> "\\" ++ name  ++ " -> "
-  CallLambda {} -> "CallLambda"
+  Apply {} -> "CallLambda"
   ReadNN {} -> "ReadNN"
   

@@ -3,7 +3,6 @@ module SPLL.Analysis (
 ) where
 
 import SPLL.Lang
-import SPLL.Transpiler (checkConstraint, likelihoodFunctionUsesTypeInfo)
 import SPLL.InferenceRule
 import SPLL.Typing.RType
 import SPLL.Typing.PType
@@ -41,6 +40,18 @@ findAlgorithm expr = case validAlgs of
     validAlgs = filter (\alg -> all (checkConstraint expr alg) (constraints alg) ) correctExpr
     correctExpr = filter (checkExprMatches expr) allAlgorithms
 
+checkConstraint :: Expr (TypeInfo a) a -> InferenceRule -> RuleConstraint -> Bool
+checkConstraint expr _ (SubExprNIsType n ptype) = ptype == p
+  where p = pType $ getTypeInfo (getSubExprs expr !! n)
+checkConstraint expr _ (SubExprNIsNotType n ptype) = ptype /= p
+  where p = pType $ getTypeInfo (getSubExprs expr !! n)
+checkConstraint expr alg ResultingTypeMatch = resPType == annotatedType
+  where
+    annotatedType = pType $ getTypeInfo expr
+    resPType = resultingPType alg (map (pType . getTypeInfo) (getSubExprs expr))
+
+likelihoodFunctionUsesTypeInfo :: ExprStub -> Bool
+likelihoodFunctionUsesTypeInfo expr = expr `elem` [StubGreaterThan, StubLessThan, StubMultF, StubMultI, StubPlusF, StubPlusI]
 --2A: do static analysis to determine various statically known properties we're interested in.
 --2A.1: For now, that's exclusively Enum Ranges.
 --2B: using those type annotations, decide on algorithms to use. We can reuse the list of all algorithms from Transpiler.

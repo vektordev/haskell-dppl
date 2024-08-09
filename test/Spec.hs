@@ -151,7 +151,7 @@ prop_TopK = ioProperty $ do
 --  checkProbTestCase p inp out .&&. acc) (True===True) correctProbValuesTestCases
 
 irDensityTopK :: RandomGen g => Program () Double -> Double -> Value Double -> [IRExpr Double]-> Rand g (Value Double)
-irDensityTopK p thresh s params = IRInterpreter.generate irEnv irEnv (sampleExpr:params) irExpr
+irDensityTopK p thresh s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params) irExpr
   where Just irExpr = lookup "main_prob" irEnv
         sampleExpr = IRConst s
         irEnv = envToIR (CompilerConfig (Just thresh)) annotated
@@ -161,7 +161,7 @@ irDensityTopK p thresh s params = IRInterpreter.generate irEnv irEnv (sampleExpr
 
 
 irDensity :: RandomGen g => Program () Double -> Value Double -> [IRExpr Double] -> Rand g (Value Double)
-irDensity p s params = IRInterpreter.generate irEnv irEnv (sampleExpr:params) irExpr
+irDensity p s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params) irExpr
   where Just irExpr = lookup "main_prob" irEnv
         sampleExpr = IRConst s
         irEnv = envToIR noTopKConfig annotated
@@ -170,7 +170,7 @@ irDensity p s params = IRInterpreter.generate irEnv irEnv (sampleExpr:params) ir
         typedProg = addTypeInfo p
 
 irIntegral :: RandomGen g => Program () Double -> Value Double -> Value Double -> [IRExpr Double] -> Rand g (Value Double)
-irIntegral p low high params = IRInterpreter.generate irEnv irEnv (lowExpr:highExpr:params) irExpr
+irIntegral p low high params = IRInterpreter.generateRand irEnv irEnv (lowExpr:highExpr:params) irExpr
   where Just irExpr = lookup "main_integ" irEnv
         lowExpr = IRConst low
         highExpr = IRConst high

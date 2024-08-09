@@ -30,9 +30,7 @@ import SPLL.Typing.Infer
 import SPLL.Typing.PInfer2
 import SPLL.Typing.RInfer2
 import Interpreter
-import SPLL.Transpiler
 import Control.Monad.Random (evalRandIO, getRandomR, replicateM, forM_)
-import SPLL.CodeGen
 import SPLL.IntermediateRepresentation
 import SPLL.Analysis
 import SPLL.CodeGenPyTorch
@@ -52,9 +50,9 @@ import Data.Number.Erf
 import SPLL.Typing.BruteForceSolver (forceAddTypeInfo, runBruteForceSolver)
 import SPLL.IRCompiler
 import SPLL.Typing.ForwardChaining
-import IRInterpreter (constructVisitationTree)
+import IRInterpreter
 import PrettyPrint
-
+import Data.Bifunctor (second)
 {-variableLengthS2 :: Program  () Double
 variableLengthS2 = Program [("b", IfThenElse ()
                           (GreaterThan () (Uniform ()) (ThetaI () 0))
@@ -160,19 +158,35 @@ someFunc = do--thatGaussThing
   putStrLn "done outputting constraints"
   let cmp2 = progToEnv $ addTypeInfo prog-}
   let conf = CompilerConfig {topKThreshold = Nothing}
-  let prog = simpleCall
+  let prog = testInjF2
+  putStrLn (pPrintProg prog)
   let typedProg = inferProg (addTypeInfo prog)
-  let cmp = progToEnv typedProg
+  let env = progToEnv typedProg
+
+  --let fwdInfer = inferProbProg typedProg
+  --pPrint fwdInfer
+
+  pPrint env
+  let annotated = map (\(a,b) -> (a, SPLL.Analysis.annotate b)) env
+  pPrint annotated
+  let irOld = envToIR conf annotated
+  let ir = map (Data.Bifunctor.second pullOutLetIns) irOld
+  pPrint ir
+  let pycode = SPLL.CodeGenPyTorch.generateFunctions ir
+  let jlcode = SPLL.CodeGenJulia.generateFunctions ir
+  putStrLn "python code:"
+  putStrLn $ unlines pycode
+  putStrLn "julia code:"
+  putStrLn $ unlines jlcode
+  output <- evalRandIO (IRInterpreter.generateRand ir ir [] (fromJust (lookup "main_gen" ir)))
+  putStrLn ("Output: " ++ show output)
   --cmp2 <-  env
   --let cmp = [] ++ [("noiseMNistAdd", mNistNoise), ("expertmodel", expertModelsTyped), ("expertmodelAnnotated", expertAnnotatedTyped), ("mNistAdd", testNN)] :: Env TypeInfo Float
   --let cmp = [("main", testNN)] :: Env TypeInfo Float
   --let cmp = cmp2
   --cmp <- compile env
-  putStrLn (pPrintProg prog)
+  --pPrint (inferProbProg typedProg)
   putStrLn "========="
-  pPrint (inferProbProg typedProg)
-  putStrLn "========="
-  newCodeGenAll conf cmp
   --let env = [("main", testNNUntyped)] :: Env () Float
   --cmp <- compile env triMNist
   --let cmp = [("main", triMNist)] :: Env TypeInfo Float
@@ -311,7 +325,7 @@ genTheta p = if predicateProg isNotTheta p
               then do
                      let typedEnv = progToEnv $ addWitnessesProg (addTypeInfo p)
                      let (Just main) = lookup "main" typedEnv
-                     val <- evalRandIO $ generate typedEnv typedEnv [] [] main
+                     val <- evalRandIO $ Interpreter.generate typedEnv typedEnv [] [] main
                      return (getVFloat val)
               else error "Theta in prior expression"
               
@@ -320,7 +334,7 @@ genThetas p = if predicateProg isNotTheta p
               then do
                      let typedEnv = progToEnv $ addWitnessesProg (addTypeInfo p)
                      let (Just main) = lookup "main" typedEnv
-                     val <- evalRandIO $ generate typedEnv typedEnv [] [] main
+                     val <- evalRandIO $ Interpreter.generate typedEnv typedEnv [] [] main
                      return (valToFloatList val)
               else error "Theta in prior expression"
 valToFloatList :: Value a -> Thetas a
@@ -416,7 +430,7 @@ integralApprox rectangleInfo valF lkF = pAnd  (DiscreteProbability stepsizeAll) 
 mkSamples :: (Fractional a, Ord a, Random a, Floating a) => Int -> Env (TypeInfo a) a -> Thetas a -> [Expr (TypeInfo a) a] -> Expr (TypeInfo a) a -> IO [Value a]
 mkSamples 0 _ _ _ _ = return []
 mkSamples n env thetas args expr = do
-  sample <- evalRandIO $ generate env env thetas args expr
+  sample <- evalRandIO $ Interpreter.generate env env thetas args expr
   remainder <- mkSamples (n-1) env thetas args expr
   return (sample:remainder)
 
