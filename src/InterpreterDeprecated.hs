@@ -1,5 +1,5 @@
 module InterpreterDeprecated where
-import SPLL.Lang
+import SPLL.Lang.Lang
 import SPLL.Typing.Typing
 import SPLL.Typing.RType
 import SPLL.Typing.PType

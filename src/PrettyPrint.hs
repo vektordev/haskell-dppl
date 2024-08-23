@@ -1,6 +1,6 @@
 module PrettyPrint where
 
-import SPLL.Lang
+import SPLL.Lang.Lang
 import Data.List (intercalate)
 
 pPrintProg :: (Show a) => Program t a -> String

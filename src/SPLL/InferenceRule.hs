@@ -11,33 +11,9 @@ module SPLL.InferenceRule (
 
 import SPLL.Typing.PType hiding (TV, NotSetYet)
 import Data.List (isInfixOf, isSuffixOf)
-import SPLL.Lang (Expr(..), ExprStub(..), toStub)
+import SPLL.Lang.Lang (Expr(..), ExprStub(..), toStub)
 import SPLL.Typing.RType
-
-
-data RuleConstraint = SubExprNIsType Int PType
-                    | SubExprNIsNotType Int PType
-                    | SubExprNIsAtLeast Int PType
-                    | ResultingTypeMatch
-                    deriving (Show, Eq, Ord)
-
--- can we encode symmetries?
-data InferenceRule = InferenceRule { forExpression :: ExprStub
-                                   , constraints :: [RuleConstraint]
-                                   , algName :: String
-                                   --apply all subexpr PTypes to find PType
-                                   , resultingPType :: [PType] -> PType
-                                   , assumedRType :: Scheme
-                                   }
-
-instance Show InferenceRule where
-  show (InferenceRule _ _ name _ _) = name
-
-instance Eq InferenceRule where
-  a1 == a2 = algName a1 == algName a2
-  
-instance Ord InferenceRule where
-  a1 `compare` a2 = algName a1 `compare` algName a2
+import SPLL.Lang.Types
 
 checkExprMatches :: Expr x a -> InferenceRule -> Bool
 checkExprMatches e alg = toStub e == forExpression alg

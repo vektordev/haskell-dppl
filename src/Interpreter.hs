@@ -8,7 +8,7 @@ import Control.Monad.Reader
 import Control.Monad.Identity
 
 import Numeric.AD
-import SPLL.Lang
+import SPLL.Lang.Lang
 import SPLL.Typing.PType
 import SPLL.Typing.RType
 import SPLL.Typing.Typing

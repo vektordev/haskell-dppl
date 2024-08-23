@@ -8,7 +8,7 @@ FEnv
 
 import SPLL.Typing.RType (RType(..))
 import SPLL.IntermediateRepresentation (IRExpr, IRExpr(..), Operand(..)) --FIXME
-import SPLL.Lang
+import SPLL.Lang.Lang
 import SPLL.Typing.Typing
 import Data.Set (fromList)
 import Data.Maybe (fromJust)

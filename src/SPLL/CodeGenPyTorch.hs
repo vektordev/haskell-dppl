@@ -4,7 +4,7 @@ module SPLL.CodeGenPyTorch (
 ) where
   
 import SPLL.IntermediateRepresentation
-import SPLL.Lang
+import SPLL.Lang.Lang
 import Data.List (intercalate, isSuffixOf, nub, find)
 import Data.Char (toUpper, toLower)
 import Data.Maybe (fromJust, fromMaybe)

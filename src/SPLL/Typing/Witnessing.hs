@@ -3,7 +3,7 @@ module SPLL.Typing.Witnessing (
 , addWitnesses
 ) where
 
-import SPLL.Lang
+import SPLL.Lang.Lang
 import SPLL.Typing.Typing
 import SPLL.Typing.PType
 import Data.List

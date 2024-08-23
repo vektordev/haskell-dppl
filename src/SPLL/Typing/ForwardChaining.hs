@@ -1,6 +1,6 @@
 module SPLL.Typing.ForwardChaining where
 
-import SPLL.Lang
+import SPLL.Lang.Lang
 import SPLL.Typing.Typing
 import Control.Monad.Supply
 

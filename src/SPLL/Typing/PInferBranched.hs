@@ -17,7 +17,7 @@ import Data.Monoid
 import Data.Foldable hiding (toList)
 import Data.Either
 import qualified Data.Map as Map
-import SPLL.Lang
+import SPLL.Lang.Lang
 import SPLL.Typing.Typing
 import SPLL.Typing.PType
 import SPLL.Examples

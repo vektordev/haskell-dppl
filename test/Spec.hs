@@ -9,7 +9,7 @@ import Test.QuickCheck
 
 import SPLL.Examples
 --import Lib
-import SPLL.Lang
+import SPLL.Lang.Lang
 import SPLL.Typing.Typing
 import SPLL.Typing.RType
 import SPLL.Typing.PType
@@ -29,7 +29,7 @@ import ArbitrarySPLL
 import Control.Exception.Base (SomeException, try)
 import Test.QuickCheck.Monadic (monadicIO, run, assert)
 import Debug.Trace (trace)
-import SPLL.Lang (Value)
+import SPLL.Lang.Lang (Value)
 import Control.Monad.Supply
 import Data.Foldable
 import Data.Number.Erf (erf)

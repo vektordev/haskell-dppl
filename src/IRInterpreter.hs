@@ -5,7 +5,7 @@ generateRand,
   
 import Statistics.Distribution (ContGen, genContVar, quantile, density)
 import SPLL.IntermediateRepresentation
-import SPLL.Lang (Value(..), Value, ThetaTree(..), Program)
+import SPLL.Lang.Lang (Value(..), Value, ThetaTree(..), Program)
 
 import Control.Monad.Random
 import Statistics.Distribution.Normal (normalDistr)

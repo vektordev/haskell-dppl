@@ -4,7 +4,7 @@ module SPLL.CodeGenJulia (
 ) where
   
 import SPLL.IntermediateRepresentation
-import SPLL.Lang
+import SPLL.Lang.Lang
 import Data.List (intercalate)
 
 --TODO: On the topic of memoization: Ideally we would want to optimize away redundant calls within a loop.

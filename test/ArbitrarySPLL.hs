@@ -5,7 +5,7 @@ module ArbitrarySPLL (
 
 import Test.QuickCheck
 
-import SPLL.Lang
+import SPLL.Lang.Lang
 
 instance (Arbitrary a, Arbitrary t) => Arbitrary (Expr t a) where
   arbitrary = genExpr

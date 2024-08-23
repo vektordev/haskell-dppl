@@ -22,7 +22,8 @@ module SPLL.Typing.Typing (
   autoExpr
 )where
 
-import SPLL.Lang
+import SPLL.Lang.Types
+import SPLL.Lang.Lang
 import SPLL.Typing.RType
 import SPLL.Typing.PType
 import SPLL.InferenceRule
@@ -36,51 +37,6 @@ import Control.Monad.Except
 import Numeric.AD (grad', auto)
 import Numeric.AD.Internal.Reverse ( Reverse, Tape)
 import Data.Reflection (Reifies)
-data Tag a = EnumRange (Value a, Value a)
-           | EnumList [Value a]
-           | Alg InferenceRule
-           deriving (Show, Eq, Ord)
-
-type ChainName = String
-
--- (Set of Preconditions with CType, set of Inferable variables with attached CType, Expression this HornClause originates from with its inversion number
-type HornClause a = ([(ChainName, CType a)], [(ChainName, CType a)], (ExprStub, Int))
-
-data CType a = CDeterministic
-             | CInferDeterministic
-             | CConstrainedTo a a
-             | CBottom
-             | CNotSetYet
-             deriving (Show, Eq)
-           
-instance Eq a => Ord (CType a) where
-  compare x y = compare (rank x) (rank y)
-    where
-      rank CDeterministic = 10
-      rank CInferDeterministic = 9
-      rank (CConstrainedTo _ _) = 5
-      rank CBottom = 1
-      rank CNotSetYet = -1
-
---Do not use this constructor, use makeTypeInfo instead
-data TypeInfo a = TypeInfo
-  { rType :: RType
-  , pType :: PType
-  , cType :: CType a
-  , derivingHornClause :: Maybe (HornClause a)
-  , witnessedVars :: WitnessedVars
-  , chainName :: ChainName
-  , tags :: [Tag a]} deriving (Show, Eq, Ord)
--- only use ord instance for algorithmic convenience, not for up/downgrades / lattice work.
-
-makeTypeInfo = TypeInfo
-    { rType = SPLL.Typing.RType.NotSetYet
-    , pType = SPLL.Typing.PType.NotSetYet
-    , cType = CNotSetYet
-    , derivingHornClause = Nothing
-    , witnessedVars = empty
-    , chainName = ""
-    , tags = []}
 
 setRType :: TypeInfo a -> RType -> TypeInfo a
 setRType t rt = t {rType = rt}

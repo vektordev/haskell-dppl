@@ -11,7 +11,7 @@ module SPLL.IntermediateRepresentation (
 , irPrintFlat
 ) where
 
-import SPLL.Lang
+import SPLL.Lang.Types
 import SPLL.Typing.RType
 import SPLL.Typing.PType
 import SPLL.Analysis

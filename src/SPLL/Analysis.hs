@@ -2,7 +2,8 @@ module SPLL.Analysis (
   annotate
 ) where
 
-import SPLL.Lang
+import SPLL.Lang.Types
+import SPLL.Lang.Lang
 import SPLL.InferenceRule
 import SPLL.Typing.RType
 import SPLL.Typing.PType

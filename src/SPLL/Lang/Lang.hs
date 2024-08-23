@@ -1,4 +1,4 @@
-module SPLL.Lang (
+module SPLL.Lang.Lang (
   Expr (..)
 , ExprStub(..)
 , toStub
@@ -34,6 +34,7 @@ module SPLL.Lang (
 , isNotTheta
 ) where
 
+import SPLL.Lang.Types
 import SPLL.Typing.PType
 import SPLL.Typing.RType
 import qualified Data.Set as Set
@@ -44,80 +45,6 @@ import Control.Applicative (liftA2)
 import Control.Monad.Random.Lazy (Random)
 import Data.Number.Erf (Erf)
 
-
---Expr x (a :: Precision)
---data Precision = P32 | P64"
---type family PrecisionType P32 = Float
-data Expr x a =
-              -- Flow Control
-                IfThenElse x (Expr x a) (Expr x a) (Expr x a)
-              | Call x String
-              | CallArg x String [Expr x a]
-              | InjF x String [Expr x a]
-              -- Arithmetic
-              | MultF x (Expr x a) (Expr x a)
-              | MultI x (Expr x a) (Expr x a)
-              | PlusF x (Expr x a) (Expr x a)
-              | PlusI x (Expr x a) (Expr x a)
-              | ExpF x (Expr x a)
-              | NegF x (Expr x a)
-              -- Variables
-              | LetIn x String (Expr x a) (Expr x a)
-              | Var x String
-              | Constant x (Value a)
-              | Lambda x String (Expr x a)    -- (Currently) must use local context
-              | Apply x (Expr x a) (Expr x a)
-              -- Distributions
-              | Uniform x
-              | Normal x
-              | ThetaI x (Expr x a) Int
-              | Subtree x (Expr x a) Int
-              -- Lists/Tuples
-              | Cons x (Expr x a) (Expr x a)
-              | TCons x (Expr x a) (Expr x a)
-              | Null x
-              -- Boolean Operations
-              | GreaterThan x (Expr x a) (Expr x a)
-              | LessThan x (Expr x a) (Expr x a)
-              | And x (Expr x a) (Expr x a)
-              | Or x (Expr x a) (Expr x a)
-              | Not x (Expr x a)
-              -- Other
-              | Arg x String RType (Expr x a)
-              | ReadNN x String (Expr x a)
-              | Fix x (Expr x a)
-              -- TODO: Needs Concat to achieve proper SPN-parity.
-              deriving (Show, Eq, Ord)
-
-
-data ExprStub = StubIfThenElse
-              | StubGreaterThan
-              | StubLessThan
-              | StubThetaI
-              | StubSubtree
-              | StubUniform
-              | StubNormal
-              | StubConstant
-              | StubMultF
-              | StubMultI
-              | StubPlusF
-              | StubPlusI
-              | StubNegF
-              | StubNot
-              | StubExpF
-              | StubNull
-              | StubCons
-              | StubTCons
-              | StubCall
-              | StubVar
-              | StubLetIn
-              | StubArg
-              | StubInjF
-              | StubCallArg
-              | StubLambda
-              | StubApply
-              | StubReadNN
-              deriving (Show, Eq, Ord)
 
 toStub :: Expr x a -> ExprStub
 toStub expr = case expr of
@@ -175,47 +102,6 @@ instance Traversable (ExprFlip x) where
       unflipped = unflip eflip
 
 
-type Name = String
-
-data Program x a = Program [Decl x a] (Expr x a) deriving (Show, Eq)
-
-type Decl x a = (String, Expr x a)
-
-type WitnessedVars = Set.Set String
-
-data ThetaTree a = ThetaTree [a] [ThetaTree a] deriving (Show, Eq, Ord)
-
-data Value a = VBool Bool
-           | VInt Int
-           | VSymbol String
-           | VFloat a
-           | VList [Value a]
-           | VTuple (Value a) (Value a)
-           | VBranch (Value a) (Value a) String
-           | VRange (Limits a)
-           | VThetaTree (ThetaTree a)
-           | VAnyList 
-           -- | Value of TArrow a b could be Expr TypeInfo a, with Expr being a Lambda?
-           deriving (Show, Eq, Ord)
--- likelihood [vMarg, vAnyList] - likelihood [vMarg, vMarg, vAnylist]
---Nothing indicates low/high infinity.
-data Limits a = Limits (Maybe (Value a)) (Maybe (Value a))
-           deriving (Show, Eq, Ord)
-
-instance Functor Value where
-  fmap = valMap
-
-valMap :: (a -> b) -> Value a -> Value b
-valMap f (VBool b) = VBool b
-valMap f (VInt i) = VInt i
-valMap f (VSymbol i) = VSymbol i
-valMap f (VFloat a) = VFloat $ f a
-valMap f (VList v) = VList $ map (valMap f) v
-valMap f (VTuple v1 v2) = VTuple (valMap f v1) (valMap f v2)
-valMap f (VBranch v1 v2 x ) = VBranch (valMap f v1) (valMap f v2) x
-valMap f (VRange v1) = VRange (limitsMap f v1)
-valMap f VAnyList = VAnyList
-
 vMarg :: Value a
 vMarg = VRange (Limits Nothing Nothing)
 
@@ -230,8 +116,6 @@ swapLimits :: Value a -> Value a
 swapLimits (VRange (Limits a b)) = VRange (Limits b a)
 swapLimits _ = error "swapLimits on non-range"
 
-limitsMap :: (a -> b) -> Limits a -> Limits b
-limitsMap f (Limits a b) = Limits (fmap (valMap f) a) (fmap (valMap f) b)
 
 exprMap :: (a -> b) -> Expr x a -> Expr x b
 exprMap f expr = case expr of
