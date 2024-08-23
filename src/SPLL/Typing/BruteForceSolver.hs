@@ -21,7 +21,7 @@ import Data.List (groupBy)
 -- what types to fill into the type info of an expression, and how deep to generate recursive types
 data TypeAnnotation = P Int | R Int
 
-runBruteForceSolver :: Expr () Float -> IO ()
+runBruteForceSolver :: Expr Float -> IO ()
 runBruteForceSolver expr = do
   let env = [("main", expr)]
   let prog = Program env expr
@@ -31,10 +31,10 @@ runBruteForceSolver expr = do
   let test = forceAddTypeInfo prog
   print test
 
-forceAddTypeInfo :: (Show a) => Program () a -> Maybe (Program (TypeInfo a) a)
+forceAddTypeInfo :: (Show a) => Program a -> Maybe (Program a)
 forceAddTypeInfo prog = addPTypeInfo =<< addRTypeInfo (addEmptyTypeInfo prog)
 
-addRTypeInfo :: (Show a) => Program (TypeInfo a) a -> Maybe (Program (TypeInfo a) a)
+addRTypeInfo :: (Show a) => Program a -> Maybe (Program a)
 addRTypeInfo p = case filtered of
     [x] -> Just x
     _ -> Nothing
@@ -64,24 +64,24 @@ mkTupleType depth len =
       prevresult = mkTupleType depth (len - 1)
       fillerList = getRTypes (depth - 1)
 
-allTypes :: TypeAnnotation ->  Program (TypeInfo a) a -> [Program (TypeInfo a) a]
+allTypes :: TypeAnnotation ->  Program a -> [Program a]
 allTypes depth (Program defs main) = liftA2 (Program) (allTypesDef depth defs) (allTypesExpr depth main)
 
-allTypesDef :: TypeAnnotation -> [(a1, Expr (TypeInfo a2) a2)] -> [[(a1, Expr (TypeInfo a2) a2)]]
+allTypesDef :: TypeAnnotation -> [(a1, Expr a2)] -> [[(a1, Expr a2)]]
 allTypesDef depth [] = [[]]
 allTypesDef depth ((name, expr) : defs) = liftA2 (:) (map (\x -> (name, x)) (allTypesExpr depth expr)) (allTypesDef depth defs)
 
-allTypesExpr :: TypeAnnotation -> Expr (TypeInfo a) a -> [Expr (TypeInfo a) a]
-allTypesExpr depth def = map unflip $ traverse (replaceTypeAnnotation depth) (ExprFlip def)
+allTypesExpr :: TypeAnnotation -> Expr a -> [Expr a]
+allTypesExpr depth def = tTraverse (replaceTypeAnnotation depth) def
 
 replaceTypeAnnotation :: TypeAnnotation -> TypeInfo a -> [TypeInfo a]
 replaceTypeAnnotation (R depth) ti = map (setRType ti) $ getRTypes depth
 replaceTypeAnnotation (P depth) ti = map (setPType ti) $ getPTypes depth
 
-isValidRTypingProg :: (Show a) => Program (TypeInfo a) a -> Bool
+isValidRTypingProg :: (Show a) => Program a -> Bool
 isValidRTypingProg (Program defs main) = isValidRTypingE main && all (isValidRTypingE . snd) defs
 
-isValidRTypingE :: (Show a) => Expr (TypeInfo a) a -> Bool
+isValidRTypingE :: (Show a) => Expr a -> Bool
 isValidRTypingE expr = matchingAlgs /= [] && all isValidRTypingE (getSubExprs expr)
   where
     plausibleAlgs = filter (checkExprMatches expr) allAlgorithms
@@ -94,7 +94,7 @@ isConsistent substitutions _ =
       groups = map (map snd) $ groupBy (\a b -> fst a == fst b) substitutions
       grpIsEqual (item:grprest) = all (item==) grprest
 
-rTypeMatch :: (Show a) => Scheme -> Expr (TypeInfo a) a -> Bool
+rTypeMatch :: (Show a) => Scheme -> Expr a -> Bool
 rTypeMatch (Forall vars rty) expr = result && isConsistent subst vars
   where 
     (subst, result) = matchCombine (map (rType . getTypeInfo) (getSubExprs expr) ++ [rType (getTypeInfo expr)]) rty
@@ -117,20 +117,20 @@ matchCombine [ty] t1 = (substitutions, tyMatch)
     tyMatch = if null substitutions then ty == t1 else True
 matchCombine a b = error ("unexpected error in MatchCombine" ++ show a ++ show b)
 
-isValidPTypingProg :: (Show a) => Program (TypeInfo a) a -> Bool
+isValidPTypingProg :: (Show a) => Program a -> Bool
 isValidPTypingProg (Program defs main) = isValidPTypingE main && all (isValidPTypingE . snd) defs
 
-isValidPTypingE :: Expr (TypeInfo a) a -> Bool
+isValidPTypingE :: Expr a -> Bool
 --isValidPTypingE (Uniform (TypeInfo a b)) = b == Integrate
 isValidPTypingE expr = matchingAlgs /= [] && all isValidPTypingE (getSubExprs expr)
   where
     plausibleAlgs = filter (checkExprMatches expr) allAlgorithms
     matchingAlgs = filter (\alg -> applyAlg alg expr == pType (getTypeInfo expr)) plausibleAlgs
 
-applyAlg :: InferenceRule -> Expr (TypeInfo a) a -> PType
+applyAlg :: InferenceRule -> Expr a -> PType
 applyAlg alg expr = resultingPType alg (map (pType . getTypeInfo) $ getSubExprs expr)
 
-addPTypeInfo :: (Show a) => Program (TypeInfo a) a -> Maybe (Program (TypeInfo a) a)
+addPTypeInfo :: (Show a) => Program a -> Maybe (Program a)
 --addPTypeInfo p = head $ filter isValidPTypingProg (allTypes (P 2) p)
 addPTypeInfo p = case filtered of
     [x] -> Just x

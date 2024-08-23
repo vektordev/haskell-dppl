@@ -30,7 +30,7 @@ data VEnv a
   deriving (Eq, Show)
 
 
-type BranchMap a = Map.Map (Expr (TypeInfo a) a) [String]
+type BranchMap a = Map.Map (Expr a) [String]
 vempty :: VEnv a
 vempty = ValueEnv {values = Map.empty, branchMap = Map.empty}
 
@@ -41,20 +41,20 @@ vremove :: VEnv a -> String -> VEnv a
 vremove env var = env {values = Map.delete var (values env)}
 
 
-findTheta :: Expr x a -> Thetas a -> a
+findTheta :: Expr a -> Thetas a -> a
 findTheta (ThetaI _ a i) ts = if i >= length ts then error "out of bounds in Thetas" else ts !! i
 findTheta _ _ = error "called FindTheta on non-theta expr."
 
 -- | Inference state
-data InferLState a = InferLState {global_funcs :: Env (TypeInfo a) a, thetas :: Thetas a}
+data InferLState a = InferLState {global_funcs :: Env a, thetas :: Thetas a}
 -- | Initial inference state
-initInferL :: Env (TypeInfo a) a -> Thetas a -> InferLState a
+initInferL :: Env a -> Thetas a -> InferLState a
 initInferL env t = InferLState { global_funcs = env, thetas = t }
 
 
 data LikelihoodError a
-  = BottomError (Expr (TypeInfo a) a)
-  | MismatchedValue (Value a) (Expr (TypeInfo a) a)
+  = BottomError (Expr a)
+  | MismatchedValue (Value a) (Expr a)
   deriving (Show)
 
 
@@ -69,7 +69,7 @@ type InferL a b = (ReaderT
 
 --note: We need detGenerate in order to be able to solve probability: Reverse s a does not have a Random instance,
 -- so we have to make do without in probability. Hence if we need to generate, we need to generate deterministically.
-detGenerateM :: (Floating a, Fractional a, Ord a) => Expr (TypeInfo a) a -> InferL a (Value a)
+detGenerateM :: (Floating a, Fractional a, Ord a) => Expr a -> InferL a (Value a)
 detGenerateM (IfThenElse _ cond left right) = do
   condVal <- detGenerateM cond
   case condVal of
@@ -139,7 +139,7 @@ detGenerateM expr =
     where rt = rType $ getTypeInfo expr
           pt = pType $ getTypeInfo expr
 
-generate :: (Fractional a, RandomGen g, Ord a, Random a, Floating a) => Env (TypeInfo a) a -> Env (TypeInfo a) a -> Thetas a -> [Expr (TypeInfo a) a] -> Expr (TypeInfo a) a -> Rand g (Value a)
+generate :: (Fractional a, RandomGen g, Ord a, Random a, Floating a) => Env a -> Env a -> Thetas a -> [Expr a] -> Expr a -> Rand g (Value a)
 generate globalEnv env thetas [] l@(Lambda _ name expr) = error "no args provided to lambda"
 generate globalEnv env thetas (arg:args) (Lambda _ name expr) = generate globalEnv ((name, arg):env ) thetas args expr
 generate _ _ _ (_:_) expr = error "args provided to non-lambda"
@@ -218,7 +218,7 @@ replaceVEnvBranch (envS1, envS2) var = (env1, env2)
         env1 = Map.insert var val1 envS1
         env2 = Map.insert var val2 envS2
 --TODO expand to more vars
-replaceEnvBranch :: (Show a) => (Env (TypeInfo a) a, Env (TypeInfo a) a)  -> String -> (Env (TypeInfo a) a, Env (TypeInfo a) a)
+replaceEnvBranch :: (Show a) => (Env a, Env a)  -> String -> (Env a, Env a)
 replaceEnvBranch (envS1, envS2) var = (env1, env2)
   where Just (Constant ti (VBranch val1 val2 bName)) =  lookup var envS1
         envNoB1 = filter (\x -> fst x /= var) envS1
@@ -246,17 +246,17 @@ applyCorBranch (PDF p) (VFloat v) = PDF (p * v)
 applyCorBranch (DiscreteProbability p) (VFloat v) = DiscreteProbability (p * v)
 
 -- -- | Run the inference monad
-runInferL ::(Erf a, Show a, Fractional a, Ord a, Real a, Floating a) =>  Env (TypeInfo a) a -> Expr (TypeInfo a) a -> Thetas a -> Value a -> Probability a
+runInferL ::(Erf a, Show a, Fractional a, Ord a, Real a, Floating a) =>  Env a -> Expr a -> Thetas a -> Value a -> Probability a
 runInferL env expr thetas val = case runExcept $ evalStateT (runReaderT (likelihoodM expr val) vempty) (initInferL env thetas) of
   Left err -> error "error in likelihoodM"
   Right p -> p
 
-runInferIO ::(Erf a, Show a, Fractional a, Ord a, Real a, Floating a) =>  Env (TypeInfo a) a -> Expr (TypeInfo a) a -> Thetas a -> Value a -> IO ()
+runInferIO ::(Erf a, Show a, Fractional a, Ord a, Real a, Floating a) =>  Env a -> Expr a -> Thetas a -> Value a -> IO ()
 runInferIO env expr thetas val = case runExcept $ evalStateT (runReaderT (likelihoodM expr val) vempty) (initInferL env thetas) of
   Left err -> print err
   Right p -> print p
 
-likelihoodM :: (Erf a, Show a, Ord a, Real a) => Expr (TypeInfo a) a -> Value a -> InferL a (Probability a)
+likelihoodM :: (Erf a, Show a, Ord a, Real a) => Expr a -> Value a -> InferL a (Probability a)
 
 -- error cases
 likelihoodM expr _
@@ -469,7 +469,7 @@ likelihoodForValue ll (VBranch val1 val2 y) x
  | otherwise = error "unfitting variables likelihood for value"
 likelihoodForValue ll val _ = ll val
 
-getInvValueM :: (Floating a, Num a, Fractional a, Ord a) => FEnv a -> Expr (TypeInfo a) a -> String -> Value a -> InferL a (Value a, BranchMap a)
+getInvValueM :: (Floating a, Num a, Fractional a, Ord a) => FEnv a -> Expr a -> String -> Value a -> InferL a (Value a, BranchMap a)
 getInvValueM _ expr v _
   | Set.notMember v (witnessedVars (getTypeInfo expr)) = error "witnessed var not in deducible"
 getInvValueM fenv  (Var _ name) var val = if name == var
@@ -515,7 +515,7 @@ getInvValueM fenv ee@(IfThenElse ti cond tr fl) var val
 getInvValueM _ _ _ _ = error "bij inv not implemented for expr here"
 
 
-integrate :: (Show a, Erf a, Num a, Ord a) => Expr (TypeInfo a) a -> Limits a -> a
+integrate :: (Show a, Erf a, Num a, Ord a) => Expr a -> Limits a -> a
 integrate (Uniform t) (Limits low high)
  | checkLimits (Limits low high) = if l2 > 1 || h2 < 0 then 0 else h2 - l2
  | otherwise = error "Invalid value for limits"

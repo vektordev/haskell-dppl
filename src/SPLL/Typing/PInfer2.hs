@@ -81,7 +81,7 @@ resolveCompCons Prob Deterministic = Bottom
 resolveCompCons Deterministic Prob = Bottom
 resolveCompCons ty1 ty2 = Deterministic
 
-showResults :: (Num a, Show a) => Expr (TypeInfo a) a -> IO ()
+showResults :: (Num a, Show a) => Expr a -> IO ()
 showResults expr = do
   case inferExpr mempty expr of
     Left err -> print err
@@ -94,24 +94,24 @@ showResults expr = do
       putStrLn $ unlines $ prettyPrint ee
       putStrLn "-----"
 
-inferType :: (Show a) => Program (TypeInfo a) a -> PType
+inferType :: (Show a) => Program a -> PType
 inferType prog = do
   case inferProgram mempty prog of
      Left err -> error "error in infer scheme"
      Right (_, DScheme _ b ty, _) ->  ty
 
-addPTypeInfo :: (Show a) => Program (TypeInfo a) a -> Program (TypeInfo a) a
+addPTypeInfo :: (Show a) => Program a -> Program a
 addPTypeInfo p = do
     case inferProgram mempty p of
        Left err -> error "error in addPTypeInfo"
        Right (_, _, p) ->  p
 
-tryAddPTypeInfo :: (Show a) => Program (TypeInfo a) a -> Either PTypeError (Program (TypeInfo a) a)
+tryAddPTypeInfo :: (Show a) => Program a -> Either PTypeError (Program a)
 tryAddPTypeInfo p = do
   (_,_,p2) <- inferProgram mempty p
   return p2
 
-showResultsProgDebug :: (Num a, Show a) => Program (TypeInfo a) a -> IO ()
+showResultsProgDebug :: (Num a, Show a) => Program a -> IO ()
 showResultsProgDebug prog = do
   case inferProgramDebug mempty prog of
     Left err -> print err
@@ -123,7 +123,7 @@ showResultsProgDebug prog = do
       putStrLn $ "Program: "
       putStrLn $ unlines $ prettyPrintProg p
 
-showResultsProg :: (Num a, Show a) => Program (TypeInfo a) a -> IO ()
+showResultsProg :: (Num a, Show a) => Program a -> IO ()
 showResultsProg prog = do
   case inferProgram mempty prog of
     Left err -> print err
@@ -146,11 +146,11 @@ instance Monoid TEnv where
   mempty = TypeEnv Map.empty
   mappend = (<>)
 
-makeMain :: Expr () a -> Program () a
-makeMain expr = Program [("main", expr)] (Call () "main")
+makeMain :: Expr a -> Program a
+makeMain expr = Program [("main", expr)] (Call makeTypeInfo "main")
 -- TODO: Why does order of functions matter?
-makeTmpMain :: Expr () a -> Program () a -> Program () a
-makeTmpMain expr (Program decls _) = Program (decls ++ [("tmp_main", expr)]) (Call () "tmp_main")
+makeTmpMain :: Expr a -> Program a -> Program a
+makeTmpMain expr (Program decls _) = Program (decls ++ [("tmp_main", expr)]) (Call makeTypeInfo "tmp_main")
 -- | Inference state
 data InferState = InferState { var_count :: Int }
 
@@ -208,21 +208,21 @@ substChain dsubst (Right cs)  = [Right $ dapply dsubst cs]
 -------------------------------------------------------------------------------
 -- Inference
 -------------------------------------------------------------------------------
-inferProgram:: (Show a) => TEnv -> Program (TypeInfo a) a -> Either PTypeError ([DConstraint], DScheme, Program (TypeInfo a) a)
+inferProgram:: (Show a) => TEnv -> Program a -> Either PTypeError ([DConstraint], DScheme, Program a)
 inferProgram env = runInferProg env . inferProg env
 
-inferProgramDebug :: (Show a) => TEnv -> Program (TypeInfo a) a -> Either PTypeError ([DConstraint], DScheme, Program (TypeInfo a) a)
+inferProgramDebug :: (Show a) => TEnv -> Program a -> Either PTypeError ([DConstraint], DScheme, Program a)
 inferProgramDebug env = runInferProgDebug env . inferProg env
 
-inferExpr :: (Show a) => TEnv -> Expr (TypeInfo a) a -> Either PTypeError ([DConstraint], DScheme, Expr (TypeInfo a) a)
+inferExpr :: (Show a) => TEnv -> Expr a -> Either PTypeError ([DConstraint], DScheme, Expr a)
 inferExpr env = runInfer env . infer env
 
-runInferProgDebug :: TEnv -> Infer (Subst, [DConstraint], PType, Program (TypeInfo a) a) -> Either PTypeError ([DConstraint], DScheme, Program (TypeInfo a) a)
+runInferProgDebug :: TEnv -> Infer (Subst, [DConstraint], PType, Program a) -> Either PTypeError ([DConstraint], DScheme, Program a)
 runInferProgDebug env m = case evalState (runExceptT m) initInfer of
   Left err  -> Left err
   Right (s, c, t, p) -> Right $ (c, DScheme [] [] t, p)
 
-runInferProg :: TEnv -> Infer (Subst, [DConstraint], PType, Program (TypeInfo a) a) -> Either PTypeError ([DConstraint], DScheme, Program (TypeInfo a) a)
+runInferProg :: TEnv -> Infer (Subst, [DConstraint], PType, Program a) -> Either PTypeError ([DConstraint], DScheme, Program a)
 runInferProg env m = case evalState (runExceptT m) initInfer of
   Left err  -> Left err
   Right (s, c, t, p) -> Right $ closeProg env c t (apply s p)
@@ -230,7 +230,7 @@ runInferProg env m = case evalState (runExceptT m) initInfer of
 -- Right (c, (Forall [] [] t, Forall [] [] t))
 --  Right $ simpleClose env c t
 
-runInfer :: TEnv -> Infer (Subst, [DConstraint], PType, Expr (TypeInfo a) a) -> Either PTypeError ([DConstraint], DScheme, Expr (TypeInfo a) a)
+runInfer :: TEnv -> Infer (Subst, [DConstraint], PType, Expr a) -> Either PTypeError ([DConstraint], DScheme, Expr a)
 runInfer env m = case evalState (runExceptT m) initInfer of
   Left err  -> Left err
   Right (_, c, t, p) -> Right $ close env c t p
@@ -375,13 +375,13 @@ solveCyclicConstraints dcons pty s = case nextCons of
     solveCyclicConstraints (apply fixSubst (delete d dcons))(apply fixSubst pty)(compose s fixSubst)
   where nextCons = find isRecType dcons
 
-close :: TEnv -> [DConstraint] -> PType -> Expr (TypeInfo a) a -> ([DConstraint], DScheme, Expr (TypeInfo a) a)
+close :: TEnv -> [DConstraint] -> PType -> Expr a -> ([DConstraint], DScheme, Expr a)
 close env cons ty tex = (cons', DScheme alph consRes  resType', tex)
   where alph = Set.toList $ Set.difference (Set.union (ftv cons') (ftv resType)) (ftv env)
         (cons', resType, isResolved, _) = resolveStep cons ty
         (consRes, resType', _) = if isResolved then (cons', resType, emptySubst) else
                    solveCyclicConstraints cons' resType emptySubst
-closeProg :: TEnv -> [DConstraint] -> PType -> Program (TypeInfo a) a -> ([DConstraint], DScheme, Program (TypeInfo a) a )
+closeProg :: TEnv -> [DConstraint] -> PType -> Program a -> ([DConstraint], DScheme, Program a )
 closeProg env cons ty tp = (cons', DScheme alph consRes  resType', apply finalSubst tp)
   where alph = Set.toList $ Set.difference (Set.union (ftv cons') (ftv resType)) (ftv env)
         (cons', resType, isResolved, su) = resolveStep cons ty
@@ -434,7 +434,7 @@ generalize env t  = Forall as [] t
     where as = Set.toList $ ftv t `Set.difference` ftv env
 
 -- infer an argument of a binary operator expression and build constraint + subst accordingly
-applyOpArg :: (Show a) => TEnv -> Expr (TypeInfo a) a -> Subst -> [DConstraint] -> PType -> Infer (Subst, [DConstraint], PType, Expr (TypeInfo a) a)
+applyOpArg :: (Show a) => TEnv -> Expr a -> Subst -> [DConstraint] -> PType -> Infer (Subst, [DConstraint], PType, Expr a)
 applyOpArg env expr s1 cs1 t1 = do
   (s2, cs2, t2, exprt) <- infer (apply s1 env) expr
   tv1 <- fresh
@@ -464,13 +464,13 @@ freshVars n rts = do
 rtFromScheme :: Scheme -> PType
 rtFromScheme (Forall _ _ rt) = rt
 
-fst3 :: (Subst, [DConstraint], PType, Expr (TypeInfo a) a ) -> Subst
+fst3 :: (Subst, [DConstraint], PType, Expr a ) -> Subst
 fst3 (x, _, _, _) = x
-snd3 :: (Subst, [DConstraint], PType, Expr (TypeInfo a) a ) -> [DConstraint]
+snd3 :: (Subst, [DConstraint], PType, Expr a ) -> [DConstraint]
 snd3 (_, x, _, _) = x
-trd3 :: (Subst, [DConstraint], PType, Expr (TypeInfo a) a ) -> PType
+trd3 :: (Subst, [DConstraint], PType, Expr a ) -> PType
 trd3 (_, _, x, _) = x
-frth3 :: (Subst, [DConstraint], PType, Expr (TypeInfo a) a ) ->  Expr (TypeInfo a) a
+frth3 :: (Subst, [DConstraint], PType, Expr a ) ->  Expr a
 frth3 (_, _, _, x) = x
 
 lookupEnv :: TEnv -> Var -> Infer (Subst, [DConstraint], PType)
@@ -511,7 +511,7 @@ downgradeInf = do
 makeEqConstraint :: PType -> PType -> DConstraint
 makeEqConstraint t1 t2 = (t1, [Left t2])
 
-inferProg :: (Show a) => TEnv -> Program (TypeInfo a) a -> Infer (Subst, [DConstraint], PType, Program (TypeInfo a) a)
+inferProg :: (Show a) => TEnv -> Program a -> Infer (Subst, [DConstraint], PType, Program a)
 inferProg env (Program decls expr) = do
   -- init type variable for all function decls beforehand so we can build constraints for
   -- calls between these functions
@@ -530,7 +530,7 @@ inferProg env (Program decls expr) = do
   -- combine all constraints
   return (s1, cs1 ++ concatMap snd3 cts ++ tcs , t1, Program (zip (map fst decls) (map frth3 cts)) pt)
 
-infer :: (Show a) => TEnv -> Expr (TypeInfo a) a -> Infer (Subst, [DConstraint], PType, Expr (TypeInfo a) a)
+infer :: (Show a) => TEnv -> Expr a -> Infer (Subst, [DConstraint], PType, Expr a)
 infer env expr = case expr of
 
   ThetaI ti a i  -> return (emptySubst, [], Deterministic, ThetaI (setPType ti Deterministic) a i)
@@ -703,10 +703,10 @@ class Substitutable a where
   apply :: Subst -> a -> a
   ftv   :: a -> Set.Set TVar
 
-instance Substitutable (Program (TypeInfo a) a) where
+instance Substitutable (Program a) where
   apply s (Program decls expr) = Program (zip (map fst decls) (map (apply s . snd) decls)) (apply s expr)
   ftv _ = Set.empty
-instance Substitutable (Expr (TypeInfo a) a) where
+instance Substitutable (Expr a) where
   apply s = tMap (apply s . getTypeInfo)
   ftv _ = Set.empty
 instance Substitutable (TypeInfo a) where

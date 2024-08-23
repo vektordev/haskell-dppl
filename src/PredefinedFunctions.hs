@@ -28,7 +28,7 @@ doubleInv = FDecl (TArrow TFloat TFloat, ["b"], ["a"], IROp OpDiv (IRVar "b") (I
 globalFenv :: (Floating a) => FEnv a
 globalFenv = [("double", FPair (doubleFwd, [doubleInv]))]
 
-getHornClause :: (Eq a, Floating a) => Expr (TypeInfo a) a -> [HornClause a]
+getHornClause :: (Eq a, Floating a) => Expr a -> [HornClause a]
 getHornClause e = case e of
   InjF t name params -> (constructHornClause subst eFwd): map (constructHornClause subst) eInv
     where
@@ -46,5 +46,5 @@ constructHornClause subst decl = (map lookUpSubstAddDet inV, map lookUpSubstAddD
     lookUpSubstAddDet v = (lookupSubst v, CInferDeterministic)
 
 
-getInputChainNames :: Expr (TypeInfo a) a -> [ChainName]
+getInputChainNames :: Expr a -> [ChainName]
 getInputChainNames e = map (chainName . getTypeInfo) (getSubExprs e)

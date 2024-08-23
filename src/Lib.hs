@@ -98,7 +98,7 @@ thatGaussThing = do
   llScan typedEnv (fst $ last thetasRecovered) main
 -}
 
-llScan :: (Erf a, Real a, Floating a, Show a, Enum a) => Env (TypeInfo a) a -> Thetas a -> Expr (TypeInfo a) a -> IO ()
+llScan :: (Erf a, Real a, Floating a, Show a, Enum a) => Env a -> Thetas a -> Expr a -> IO ()
 llScan tenv thetas main = do
   let scanPts = [(x,y) | x <- [0, 0.01 .. 1], y <- [0, 0.01 .. 1]]
   let scanRes = [(x, y, runInferL tenv main thetas (VList [VFloat x, VFloat y])) | x <- [0, 0.01.. 1], y <- [0, 0.01.. 1]]
@@ -120,7 +120,7 @@ newCodeGen tExpr = do
   let prob = generateCode irProb ""
   putStrLn $ unlines prob-}
 
-newCodeGenAll :: (Show a, Ord a, Floating a) => CompilerConfig a -> Env (TypeInfo a) a -> IO ()
+newCodeGenAll :: (Show a, Ord a, Floating a) => CompilerConfig a -> Env a -> IO ()
 newCodeGenAll conf env = do
   pPrint env
   let annotated = map (\(a,b) -> (a, SPLL.Analysis.annotate b)) env
@@ -251,14 +251,14 @@ runNNTest = do
   --mkSamples 1000 typedEnv [] [Constant (TypeInfo TSymbol Deterministic) (VSymbol "image1"), Constant (TypeInfo TSymbol Deterministic) (VSymbol "image2")] main
 -}
 
-myGradientAscent :: (Erf a, RealFloat a, Show a, Floating a, Real a) => Int -> a -> [(String, Expr (TypeInfo a) a)] -> Thetas a -> Expr (TypeInfo a) a -> [Value a] -> [(Thetas a, a)]
+myGradientAscent :: (Erf a, RealFloat a, Show a, Floating a, Real a) => Int -> a -> [(String, Expr a)] -> Thetas a -> Expr a -> [Value a] -> [(Thetas a, a)]
 myGradientAscent 0 _ _ _ _ _ = []
 myGradientAscent n learning_rate env thetas expr vals =
   (thetas, loss) : myGradientAscent (n-1) learning_rate env new expr vals
     where
       (loss, new) = optimizeStep env expr vals thetas learning_rate
 
-optimizeStep :: (Erf a, Show a, RealFloat a, Floating a, Real a) => Env (TypeInfo a) a -> Expr (TypeInfo a) a -> [Value a] -> Thetas a -> a -> (a, Thetas a)
+optimizeStep :: (Erf a, Show a, RealFloat a, Floating a, Real a) => Env a -> Expr a -> [Value a] -> Thetas a -> a -> (a, Thetas a)
 optimizeStep env expr samples thetas learning_rate = (loss,
     addThetas thetas (mult (1.0 / fromIntegral (length samples))(mult learning_rate gradient)) )
   where
@@ -282,7 +282,7 @@ mult :: (Floating a) => a -> Thetas a -> Thetas a
 mult x y = map (*x) y
 
 
-testDensity2d :: String -> Program () Double -> Thetas Double -> IO ()
+testDensity2d :: String -> Program Double -> Thetas Double -> IO ()
 testDensity2d experimentName prog thetas = do
   let typedEnv = progToEnv $ addWitnessesProg (addTypeInfo prog)
   let Just main = lookup "main" typedEnv
@@ -303,7 +303,7 @@ testDensity2d experimentName prog thetas = do
   print (filter ( (> 100) . fst)(zip likelihood_y interval))
   writeFile ("./data/likelihoods_" ++ experimentName ++ ".txt") fileStrL
 
-testDensity1d :: String -> Program () Double -> Thetas Double -> IO ()
+testDensity1d :: String -> Program Double -> Thetas Double -> IO ()
 testDensity1d experimentName prog thetas = do
   let typedEnv = progToEnv $ addWitnessesProg (addTypeInfo prog)
   let Just main = lookup "main" typedEnv
@@ -320,7 +320,7 @@ testDensity1d experimentName prog thetas = do
   let fileStrL = unlines ((interval_line interval_a):dataStrsL)
   writeFile ("./data/likelihoods_1d" ++ experimentName ++ ".txt") fileStrL
   
-genTheta :: ( Show a, Fractional a, Ord a, Random a, Floating a) => Program () a -> IO (a)
+genTheta :: ( Show a, Fractional a, Ord a, Random a, Floating a) => Program a -> IO (a)
 genTheta p = if predicateProg isNotTheta p
               then do
                      let typedEnv = progToEnv $ addWitnessesProg (addTypeInfo p)
@@ -329,7 +329,7 @@ genTheta p = if predicateProg isNotTheta p
                      return (getVFloat val)
               else error "Theta in prior expression"
               
-genThetas :: (Show a, Fractional a, Ord a, Random a, Floating a) => Program () a -> IO (Thetas a)
+genThetas :: (Show a, Fractional a, Ord a, Random a, Floating a) => Program a -> IO (Thetas a)
 genThetas p = if predicateProg isNotTheta p
               then do
                      let typedEnv = progToEnv $ addWitnessesProg (addTypeInfo p)
@@ -341,7 +341,7 @@ valToFloatList :: Value a -> Thetas a
 valToFloatList (VFloat x) = [x]
 valToFloatList (VList vfl) = map getVFloat vfl
 
-testRun :: (Erf a, RealFloat a, Floating a, Ord a, Random a, Show a, Real a, Enum a) => String -> Program () a -> Thetas a -> IO ()
+testRun :: (Erf a, RealFloat a, Floating a, Ord a, Random a, Show a, Real a, Enum a) => String -> Program a -> Thetas a -> IO ()
 testRun experimentName prog thetas = do
   print "Hello world"
   mapM_ putStrLn (prettyPrintProg prog)
@@ -427,7 +427,7 @@ integralApprox rectangleInfo valF lkF = pAnd  (DiscreteProbability stepsizeAll) 
         stepsizeAll = foldl (\x (_,_,s) -> x*s) 1.0 rectangleInfo
         lks = map ( lkF . valF) inputsS
 
-mkSamples :: (Fractional a, Ord a, Random a, Floating a) => Int -> Env (TypeInfo a) a -> Thetas a -> [Expr (TypeInfo a) a] -> Expr (TypeInfo a) a -> IO [Value a]
+mkSamples :: (Fractional a, Ord a, Random a, Floating a) => Int -> Env a -> Thetas a -> [Expr a] -> Expr a -> IO [Value a]
 mkSamples 0 _ _ _ _ = return []
 mkSamples n env thetas args expr = do
   sample <- evalRandIO $ Interpreter.generate env env thetas args expr

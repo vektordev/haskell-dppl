@@ -10,7 +10,7 @@ import SPLL.Typing.PType
 import Data.Maybe (maybeToList, fromJust, isNothing)
 import Data.List (nub)
 import SPLL.Typing.Typing (TypeInfo, TypeInfo(..), Tag(..), setTags)
-annotate :: (Show a) => Expr (TypeInfo a) a -> Expr (TypeInfo a) a
+annotate :: (Show a) => Expr a -> Expr a
 annotate = tMap annotateLocal
   where
     annotateLocal e = setTags ti tags
@@ -20,7 +20,7 @@ annotate = tMap annotateLocal
           [Alg $ findAlgorithm e | likelihoodFunctionUsesTypeInfo $ toStub e]
           ++ fmap EnumList (maybeToList (findEnumerable e))
 
-findEnumerable :: Expr (TypeInfo a) a -> Maybe [Value a]
+findEnumerable :: Expr a -> Maybe [Value a]
 findEnumerable ReadNN {} = Just [VInt i | i <- [0..9]]
 findEnumerable (PlusI _ left right) =
   if isNothing leftEnum || isNothing rightEnum
@@ -31,7 +31,7 @@ findEnumerable (PlusI _ left right) =
         rightEnum = findEnumerable right
 findEnumerable _ = Nothing
 
-findAlgorithm :: (Show a) => Expr (TypeInfo a) a -> InferenceRule
+findAlgorithm :: (Show a) => Expr a -> InferenceRule
 findAlgorithm expr = case validAlgs of
   [alg] -> alg
   [] -> error ("no valid algorithms found in expr: " ++ show expr)
@@ -41,7 +41,7 @@ findAlgorithm expr = case validAlgs of
     validAlgs = filter (\alg -> all (checkConstraint expr alg) (constraints alg) ) correctExpr
     correctExpr = filter (checkExprMatches expr) allAlgorithms
 
-checkConstraint :: Expr (TypeInfo a) a -> InferenceRule -> RuleConstraint -> Bool
+checkConstraint :: Expr a -> InferenceRule -> RuleConstraint -> Bool
 checkConstraint expr _ (SubExprNIsType n ptype) = ptype == p
   where p = pType $ getTypeInfo (getSubExprs expr !! n)
 checkConstraint expr _ (SubExprNIsNotType n ptype) = ptype /= p

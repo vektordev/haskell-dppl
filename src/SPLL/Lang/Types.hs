@@ -25,7 +25,7 @@ data CType a = CDeterministic
              | CBottom
              | CNotSetYet
              deriving (Show, Eq)
-           
+
 instance Eq a => Ord (CType a) where
   compare x y = compare (rank x) (rank y)
     where
@@ -40,44 +40,44 @@ instance Eq a => Ord (CType a) where
 --Expr x (a :: Precision)
 --data Precision = P32 | P64"
 --type family PrecisionType P32 = Float
-data Expr x a =
+data Expr a =
               -- Flow Control
-                IfThenElse x (Expr x a) (Expr x a) (Expr x a)
-              | Call x String
-              | CallArg x String [Expr x a]
-              | InjF x String [Expr x a]
+                IfThenElse (TypeInfo a) (Expr a) (Expr a) (Expr a)
+              | Call (TypeInfo a) String
+              | CallArg (TypeInfo a) String [Expr a]
+              | InjF (TypeInfo a) String [Expr a]
               -- Arithmetic
-              | MultF x (Expr x a) (Expr x a)
-              | MultI x (Expr x a) (Expr x a)
-              | PlusF x (Expr x a) (Expr x a)
-              | PlusI x (Expr x a) (Expr x a)
-              | ExpF x (Expr x a)
-              | NegF x (Expr x a)
+              | MultF (TypeInfo a) (Expr a) (Expr a)
+              | MultI (TypeInfo a) (Expr a) (Expr a)
+              | PlusF (TypeInfo a) (Expr a) (Expr a)
+              | PlusI (TypeInfo a) (Expr a) (Expr a)
+              | ExpF (TypeInfo a) (Expr a)
+              | NegF (TypeInfo a) (Expr a)
               -- Variables
-              | LetIn x String (Expr x a) (Expr x a)
-              | Var x String
-              | Constant x (Value a)
-              | Lambda x String (Expr x a)    -- (Currently) must use local context
-              | Apply x (Expr x a) (Expr x a)
+              | LetIn (TypeInfo a) String (Expr a) (Expr a)
+              | Var (TypeInfo a) String
+              | Constant (TypeInfo a) (Value a)
+              | Lambda (TypeInfo a) String (Expr a)    -- (Currently) must use local context
+              | Apply (TypeInfo a) (Expr a) (Expr a)
               -- Distributions
-              | Uniform x
-              | Normal x
-              | ThetaI x (Expr x a) Int
-              | Subtree x (Expr x a) Int
+              | Uniform (TypeInfo a)
+              | Normal (TypeInfo a)
+              | ThetaI (TypeInfo a) (Expr a) Int
+              | Subtree (TypeInfo a) (Expr a) Int
               -- Lists/Tuples
-              | Cons x (Expr x a) (Expr x a)
-              | TCons x (Expr x a) (Expr x a)
-              | Null x
+              | Cons (TypeInfo a) (Expr a) (Expr a)
+              | TCons (TypeInfo a) (Expr a) (Expr a)
+              | Null (TypeInfo a)
               -- Boolean Operations
-              | GreaterThan x (Expr x a) (Expr x a)
-              | LessThan x (Expr x a) (Expr x a)
-              | And x (Expr x a) (Expr x a)
-              | Or x (Expr x a) (Expr x a)
-              | Not x (Expr x a)
+              | GreaterThan (TypeInfo a) (Expr a) (Expr a)
+              | LessThan (TypeInfo a) (Expr a) (Expr a)
+              | And (TypeInfo a) (Expr a) (Expr a)
+              | Or (TypeInfo a) (Expr a) (Expr a)
+              | Not (TypeInfo a) (Expr a)
               -- Other
-              | Arg x String RType (Expr x a)
-              | ReadNN x String (Expr x a)
-              | Fix x (Expr x a)
+              | Arg (TypeInfo a) String RType (Expr a)
+              | ReadNN (TypeInfo a) String (Expr a)
+              | Fix (TypeInfo a) (Expr a)
               -- TODO: Needs Concat to achieve proper SPN-parity.
               deriving (Show, Eq, Ord)
 
@@ -134,9 +134,9 @@ makeTypeInfo = TypeInfo
 
 type Name = String
 
-data Program x a = Program [Decl x a] (Expr x a) deriving (Show, Eq)
+data Program a = Program [Decl a] (Expr a) deriving (Show, Eq)
 
-type Decl x a = (String, Expr x a)
+type Decl a = (String, Expr a)
 
 type WitnessedVars = Set.Set String
 
@@ -151,7 +151,7 @@ data Value a = VBool Bool
            | VBranch (Value a) (Value a) String
            | VRange (Limits a)
            | VThetaTree (ThetaTree a)
-           | VAnyList 
+           | VAnyList
            -- | Value of TArrow a b could be Expr TypeInfo a, with Expr being a Lambda?
            deriving (Show, Eq, Ord)
 -- likelihood [vMarg, vAnyList] - likelihood [vMarg, vMarg, vAnylist]
@@ -201,6 +201,6 @@ instance Show InferenceRule where
 
 instance Eq InferenceRule where
   a1 == a2 = algName a1 == algName a2
-  
+
 instance Ord InferenceRule where
   a1 `compare` a2 = algName a1 `compare` algName a2

@@ -25,7 +25,7 @@ import SPLL.Typing.PInferBranched
 import SPLL.Typing.Infer
 import SPLL.Typing.Witnessing
 import SpecExamples
-import ArbitrarySPLL
+--import ArbitrarySPLL
 import Control.Exception.Base (SomeException, try)
 import Test.QuickCheck.Monadic (monadicIO, run, assert)
 import Debug.Trace (trace)
@@ -41,16 +41,16 @@ import Data.Reflection (Reifies)
 class Recompilable a where
   recompile :: a -> Either CompileError a
 
-untypeP :: Program t a -> Program () a
+untypeP :: Program a -> Program a
 untypeP (Program defs main) = Program (map (\(a,b) -> (a, untypeE b)) defs) (untypeE main)
 
-untypeE :: Expr t a -> Expr () a
-untypeE = tMap (const ())
+untypeE :: Expr a -> Expr a
+untypeE = tMap (const makeTypeInfo)
 
-instance Show a => Recompilable (Program (TypeInfo a) a) where
+instance Show a => Recompilable (Program a) where
   recompile = infer . untypeP
 
-instance Show a => Recompilable (Expr (TypeInfo a) a) where
+instance Show a => Recompilable (Expr a) where
   recompile e = case inferNoWit $ makeMain $ untypeE e of
     Right (Program [("main", d)] _) -> Right d
     Left x -> Left x
@@ -68,7 +68,7 @@ normalPDF x = (1 / sqrt (2 * pi)) * exp (-0.5 * x * x)
 normalCDF :: Double -> Double
 normalCDF x = (1/2)*(1 + erf(x/sqrt(2)))
     
-correctProbValuesTestCases :: [(Program () Double, Value Double, [IRExpr Double], Value Double)]
+correctProbValuesTestCases :: [(Program Double, Value Double, [IRExpr Double], Value Double)]
 correctProbValuesTestCases = [(uniformProg, VFloat 0.5, [], VFloat 1.0),
                               (normalProg, VFloat 0.5, [], VFloat $ normalPDF 0.5),
                               (uniformProgMult, VFloat (-0.25), [], VFloat 2),
@@ -93,7 +93,7 @@ correctProbValuesTestCases = [(uniformProg, VFloat 0.5, [], VFloat 1.0),
                               --(testCallLambdaAdvanced, VFloat 2.5, [], VFloat 1.0),
                               --(testLetIn, VFloat 1.5, [], VFloat 1.0)]
 
-correctIntegralValuesTestCases :: [(Program () Double, Value Double, Value Double, [IRExpr Double], Value Double)]
+correctIntegralValuesTestCases :: [(Program Double, Value Double, Value Double, [IRExpr Double], Value Double)]
 correctIntegralValuesTestCases = [(uniformProg, VFloat 0, VFloat 1, [], VFloat 1.0),
                                   (uniformProg, VFloat  (-1), VFloat 2, [], VFloat 1.0),
                                   (normalProg, VFloat (-5), VFloat 5, [], VFloat $ normalCDF 5 - normalCDF (-5)),
@@ -124,18 +124,18 @@ prop_CheckIntegralTestCases = forAll (elements correctIntegralValuesTestCases) c
 prop_CheckIntegralConverges :: Property
 prop_CheckIntegralConverges = forAll (elements correctIntegralValuesTestCases) checkIntegralConverges
 
-checkProbTestCase :: (Program () Double, Value Double, [IRExpr Double], Value Double) -> Property
+checkProbTestCase :: (Program Double, Value Double, [IRExpr Double], Value Double) -> Property
 checkProbTestCase (p, inp, params, out) = ioProperty $ do
   actualOutput <- evalRandIO $ irDensity p inp params
   return $ actualOutput === out
 
-checkIntegralTestCase :: (Program () Double, Value Double, Value Double, [IRExpr Double], Value Double) -> Property
+checkIntegralTestCase :: (Program Double, Value Double, Value Double, [IRExpr Double], Value Double) -> Property
 checkIntegralTestCase (p, low, high, params, out) = ioProperty $ do
   actualOutput <- evalRandIO $ irIntegral p low high params
   return $ actualOutput === out
 
 --TODO better bounds for Integral
-checkIntegralConverges :: (Program () Double, Value Double, Value Double, [IRExpr Double], Value Double) -> Property
+checkIntegralConverges :: (Program Double, Value Double, Value Double, [IRExpr Double], Value Double) -> Property
 checkIntegralConverges (p, VFloat a, VFloat b, params, _) = ioProperty $ do
   actualOutput <- evalRandIO $ irIntegral p (VFloat (-9999999)) (VFloat 9999999) params
   return $ actualOutput === VFloat 1
@@ -150,7 +150,7 @@ prop_TopK = ioProperty $ do
 --prop_CheckProbTestCases = foldr (\(p, inp, out) acc -> do
 --  checkProbTestCase p inp out .&&. acc) (True===True) correctProbValuesTestCases
 
-irDensityTopK :: RandomGen g => Program () Double -> Double -> Value Double -> [IRExpr Double]-> Rand g (Value Double)
+irDensityTopK :: RandomGen g => Program Double -> Double -> Value Double -> [IRExpr Double]-> Rand g (Value Double)
 irDensityTopK p thresh s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params) irExpr
   where Just irExpr = lookup "main_prob" irEnv
         sampleExpr = IRConst s
@@ -160,7 +160,7 @@ irDensityTopK p thresh s params = IRInterpreter.generateRand irEnv irEnv (sample
         typedProg = addTypeInfo p
 
 
-irDensity :: RandomGen g => Program () Double -> Value Double -> [IRExpr Double] -> Rand g (Value Double)
+irDensity :: RandomGen g => Program Double -> Value Double -> [IRExpr Double] -> Rand g (Value Double)
 irDensity p s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params) irExpr
   where Just irExpr = lookup "main_prob" irEnv
         sampleExpr = IRConst s
@@ -169,7 +169,7 @@ irDensity p s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params
         env = progToEnv typedProg
         typedProg = addTypeInfo p
 
-irIntegral :: RandomGen g => Program () Double -> Value Double -> Value Double -> [IRExpr Double] -> Rand g (Value Double)
+irIntegral :: RandomGen g => Program Double -> Value Double -> Value Double -> [IRExpr Double] -> Rand g (Value Double)
 irIntegral p low high params = IRInterpreter.generateRand irEnv irEnv (lowExpr:highExpr:params) irExpr
   where Just irExpr = lookup "main_integ" irEnv
         lowExpr = IRConst low
@@ -230,7 +230,7 @@ prop_CanCompile2 = forAll (elements compilables2) canCompile
 uncompilables :: [Expr () Double]
 uncompilables = [testIntractable]
 
-canCompile :: (Show a) => Program () a -> Bool
+canCompile :: (Show a) => Program a -> Bool
 canCompile e = case infer e of
   Right _ -> True
   Left _ -> False
@@ -271,7 +271,7 @@ prop_interpretersEqualDensity p sample = do
   else
     property Discard -}
 
---testCompile :: Expr () a -> Property
+--testCompile :: Expr a -> Property
 --testCompile e = addWitnessesProg $ addTypeInfo $ makeMain e
 
 testRecompile :: (Eq a, Show a, Recompilable a) => a -> Property
@@ -326,7 +326,7 @@ invariantDensity :: IO()
 invariantDensity = undefined
 
 
-propInfer :: (Eq a, Show a) => Program () a -> Program (TypeInfo a) a -> Property
+propInfer :: (Eq a, Show a) => Program a -> Program a -> Property
 propInfer a b = addWitnessesProg (addTypeInfo a) === b
 
 sumsToOne :: IO Result

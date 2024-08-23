@@ -3,15 +3,15 @@ module PrettyPrint where
 import SPLL.Lang.Lang
 import Data.List (intercalate)
 
-pPrintProg :: (Show a) => Program t a -> String
+pPrintProg :: (Show a) => Program a -> String
 pPrintProg (Program decls main) = intercalate "\n\n" (map (\f -> wrapInFunctionDeclaration (snd f) (fst f) []) env)
   where env = ("main", main):decls
 
-wrapInFunctionDeclaration :: (Show a) => Expr t a -> String -> [String] -> String
+wrapInFunctionDeclaration :: (Show a) => Expr a -> String -> [String] -> String
 wrapInFunctionDeclaration (Lambda _ n b) fName params = wrapInFunctionDeclaration b fName (n:params)
 wrapInFunctionDeclaration e fName params = "def " ++ fName ++ "(" ++ intercalate ", " params ++ "):\n" ++ indent 1 ++ pPrintExpr e 1 ++"\n"
 
-pPrintExpr :: (Show a) => Expr t a -> Int -> String
+pPrintExpr :: (Show a) => Expr a -> Int -> String
 pPrintExpr (LetIn _ n v b) i = "let " ++ n ++ " = " ++ pPrintExpr v (i+1) ++ " in\n" ++ indent (i+1) ++ pPrintExpr b (i+1)
 pPrintExpr (PlusF _ a b) i = "(" ++ pPrintExpr a i ++ " + " ++ pPrintExpr b i ++ ")"
 pPrintExpr (PlusI _ a b) i = "(" ++ pPrintExpr a i ++ " + " ++ pPrintExpr b i ++ ")"

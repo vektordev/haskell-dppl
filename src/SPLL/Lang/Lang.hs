@@ -2,8 +2,6 @@ module SPLL.Lang.Lang (
   Expr (..)
 , ExprStub(..)
 , toStub
-, ExprFlip (..)
-, unflip
 , Value (..)
 , Program (..)
 , ThetaTree (..)
@@ -32,6 +30,7 @@ module SPLL.Lang.Lang (
 , predicateFlat
 , predicateProg
 , isNotTheta
+, tTraverse
 ) where
 
 import SPLL.Lang.Types
@@ -46,7 +45,7 @@ import Control.Monad.Random.Lazy (Random)
 import Data.Number.Erf (Erf)
 
 
-toStub :: Expr x a -> ExprStub
+toStub :: Expr a -> ExprStub
 toStub expr = case expr of
   IfThenElse {}  -> StubIfThenElse
   GreaterThan {} -> StubGreaterThan
@@ -76,32 +75,6 @@ toStub expr = case expr of
   Apply {}  -> StubApply
   (ReadNN _ _ _) -> StubReadNN
 
--- Flipped type args newtype on Expr, so we can fmap, foldr, and traverse over types.
-newtype ExprFlip x t = ExprFlip (Expr t x)
-
-unflip :: ExprFlip x t -> Expr t x
-unflip (ExprFlip x) = x
-
-instance Functor (ExprFlip x) where
-  fmap f eflip = ExprFlip $ tMap (\e -> f (getTypeInfo (e))) (unflip eflip)
-
-instance Foldable (ExprFlip x) where
-  --foldr :: (t -> b -> b) -> b -> ExprFlip x t -> b
-  foldr f accum eflip = f (getTypeInfo $ unflip eflip) subexprfolds
-    where
-      subexprs = getSubExprs $ unflip eflip
-      subexprfolds = foldr unflipf accum subexprs
-      -- unflipf :: Expr t x -> b -> b
-      -- unflip eflip2 :: Expr
-      unflipf eflip2 accum = f (getTypeInfo eflip2) accum
-
-instance Traversable (ExprFlip x) where
-  traverse f eflip = fmap ExprFlip traversed
-    where
-      traversed = tTraverse f unflipped
-      unflipped = unflip eflip
-
-
 vMarg :: Value a
 vMarg = VRange (Limits Nothing Nothing)
 
@@ -116,64 +89,66 @@ swapLimits :: Value a -> Value a
 swapLimits (VRange (Limits a b)) = VRange (Limits b a)
 swapLimits _ = error "swapLimits on non-range"
 
+tInfoMap :: (a -> b) -> TypeInfo a -> TypeInfo b
+tInfoMap f t = undefined
 
-exprMap :: (a -> b) -> Expr x a -> Expr x b
+exprMap :: (a -> b) -> Expr a -> Expr b
 exprMap f expr = case expr of
-  (IfThenElse t a b c) -> IfThenElse t (exprMap f a) (exprMap f b) (exprMap f c)
-  (GreaterThan t a b) -> GreaterThan t (exprMap f a) (exprMap f b)
-  (LessThan t a b) -> LessThan t (exprMap f a) (exprMap f b)
-  (ThetaI t a x) -> ThetaI t (exprMap f a) x
-  (Subtree t a x) -> Subtree t (exprMap f a) x
-  (Uniform t) -> Uniform t
-  (Normal t) -> Normal t
-  (Constant t x) -> Constant t $ fmap f x
-  (MultF t a b) -> MultF t (exprMap f a) (exprMap f b)
-  (MultI t a b) -> MultI t (exprMap f a) (exprMap f b)
-  (PlusF t a b) -> PlusF t (exprMap f a) (exprMap f b)
-  (PlusI t a b) -> PlusI t (exprMap f a) (exprMap f b)
-  (ExpF t a) -> ExpF t (exprMap f a)
-  (NegF t a) -> NegF t (exprMap f a)
-  (And t a b) -> And t (exprMap f a) (exprMap f b)
-  (Or t a b) -> Or t (exprMap f a) (exprMap f b)
-  (Not t a) -> Not t (exprMap f a)
-  (Null t) -> Null t
-  (Cons t a b) -> Cons t (exprMap f a) (exprMap f b)
-  (TCons t a b) -> TCons t (exprMap f a) (exprMap f b)
-  (Call t x) -> Call t x
-  (Var t x) -> Var t x
-  (LetIn t x a b) -> LetIn t x (exprMap f a) (exprMap f b)
-  (InjF t x a) -> InjF t x (map (exprMap f) a)
+  (IfThenElse t a b c) -> IfThenElse (tInfoMap f t) (exprMap f b) (exprMap f b) (exprMap f c)
+  (GreaterThan t a b) -> GreaterThan (tInfoMap f t) (exprMap f a) (exprMap f b)
+  (LessThan t a b) -> LessThan (tInfoMap f t) (exprMap f a) (exprMap f b)
+  (ThetaI t a x) -> ThetaI (tInfoMap f t) (exprMap f a) x
+  (Subtree t a x) -> Subtree (tInfoMap f t) (exprMap f a) x
+  (Uniform t) -> Uniform (tInfoMap f t)
+  (Normal t) -> Normal (tInfoMap f t)
+  (Constant t x) -> Constant (tInfoMap f t) $ fmap f x
+  (MultF t a b) -> MultF (tInfoMap f t) (exprMap f a) (exprMap f b)
+  (MultI t a b) -> MultI (tInfoMap f t) (exprMap f a) (exprMap f b)
+  (PlusF t a b) -> PlusF (tInfoMap f t) (exprMap f a) (exprMap f b)
+  (PlusI t a b) -> PlusI (tInfoMap f t) (exprMap f a) (exprMap f b)
+  (ExpF t a) -> ExpF (tInfoMap f t) (exprMap f a)
+  (NegF t a) -> NegF (tInfoMap f t) (exprMap f a)
+  (And t a b) -> And (tInfoMap f t) (exprMap f a) (exprMap f b)
+  (Or t a b) -> Or (tInfoMap f t) (exprMap f a) (exprMap f b)
+  (Not t a) -> Not (tInfoMap f t) (exprMap f a)
+  (Null t) -> Null (tInfoMap f t)
+  (Cons t a b) -> Cons (tInfoMap f t) (exprMap f a) (exprMap f b)
+  (TCons t a b) -> TCons (tInfoMap f t) (exprMap f a) (exprMap f b)
+  (Call t x) -> Call (tInfoMap f t) x
+  (Var t x) -> Var (tInfoMap f t) x
+  (LetIn t x a b) -> LetIn (tInfoMap f t) x (exprMap f a) (exprMap f b)
+  (InjF t x a) -> InjF (tInfoMap f t) x (map (exprMap f) a)
   --(LetInD t x a b) -> LetInD t x (exprMap f a) (exprMap f b)
   --(LetInTuple t x a b c) -> LetInTuple t x (exprMap f a) (biFMap f b) (exprMap f c)
-  (Arg t name r a) -> Arg t name r (exprMap f a)
-  (CallArg t name a) -> CallArg t name (map (exprMap f) a)
-  (Lambda t name a) -> Lambda t name (exprMap f a)
-  (Apply t a b) -> Apply t (exprMap f a) (exprMap f b)
-  (ReadNN t n a) -> ReadNN t n (exprMap f a)
+  (Arg t name r a) -> Arg (tInfoMap f t) name r (exprMap f a)
+  (CallArg t name a) -> CallArg (tInfoMap f t) name (map (exprMap f) a)
+  (Lambda t name a) -> Lambda (tInfoMap f t) name (exprMap f a)
+  (Apply t a b) -> Apply (tInfoMap f t) (exprMap f a) (exprMap f b)
+  (ReadNN t n a) -> ReadNN (tInfoMap f t) n (exprMap f a)
   
-predicateFlat :: (Expr x a -> Bool) -> Expr x a -> Bool
+predicateFlat :: (Expr a -> Bool) -> Expr a -> Bool
 predicateFlat f e = f e && all (predicateFlat f) (getSubExprs e)
 
-containedVars :: (Expr x a -> Set.Set String) -> Expr x a -> Set.Set String
+containedVars :: (Expr a -> Set.Set String) -> Expr a -> Set.Set String
 containedVars f e = Set.union (f e) (foldl Set.union Set.empty (map (containedVars f) (getSubExprs e)))
 
-predicateProg :: (Expr x a -> Bool) -> Program x a -> Bool
+predicateProg :: (Expr a -> Bool) -> Program a -> Bool
 predicateProg f (Program decls expr) = and (map (predicateExpr f . snd) decls) && predicateExpr f expr
 
-predicateExpr :: (Expr x a -> Bool) -> Expr x a -> Bool
+predicateExpr :: (Expr a -> Bool) -> Expr a -> Bool
 predicateExpr f e = f e && and (map (predicateExpr f) (getSubExprs e))
 
-varsOfExpr :: Expr x a -> Set.Set String
+varsOfExpr :: Expr a -> Set.Set String
 varsOfExpr expr = case expr of
   (Var _ name) -> Set.singleton name
   _ -> Set.empty
 
-isNotTheta :: Expr x a -> Bool
+isNotTheta :: Expr a -> Bool
 isNotTheta expr = case expr of
   (ThetaI _ _ name) -> False
   _ -> True
   
-tMapHead :: (Expr x a -> x) -> Expr x a -> Expr x a
+tMapHead :: (Expr a -> (TypeInfo a)) -> Expr a -> Expr a
 tMapHead f expr = case expr of 
   (IfThenElse _ a b c) -> IfThenElse (f expr) a b c
   (GreaterThan _ a b) -> GreaterThan (f expr) a b
@@ -207,7 +182,7 @@ tMapHead f expr = case expr of
   (Apply _ a b) -> Apply (f expr) a b
 --  (ReadNN _ a) -> ReadNN (f expr) a
 
-tMapTails :: (Expr x a -> x) -> Expr x a -> Expr x a
+tMapTails :: (Expr a -> (TypeInfo a)) -> Expr a -> Expr a
 tMapTails f expr = case expr of
   (IfThenElse t a b c) -> IfThenElse t (tMap f a) (tMap f b) (tMap f c)
   (GreaterThan t a b) -> GreaterThan t (tMap f a) (tMap f b)
@@ -240,7 +215,7 @@ tMapTails f expr = case expr of
   (Apply t a b) -> Apply t (tMap f a) (tMap f b)
   (CallArg t name a) -> CallArg t name (map (tMap f) a)
 
-tMap :: (Expr x a -> y) -> Expr x a -> Expr y a
+tMap :: (Expr a -> (TypeInfo a)) -> Expr a -> Expr a
 tMap f expr = case expr of 
   (IfThenElse _ a b c) -> IfThenElse (f expr) (tMap f a) (tMap f b) (tMap f c)
   (GreaterThan _ a b) -> GreaterThan (f expr) (tMap f a) (tMap f b)
@@ -274,10 +249,10 @@ tMap f expr = case expr of
   (Apply _ a b) -> Apply (f expr) (tMap f a) (tMap f b)
   (ReadNN _ n a) -> ReadNN (f expr) n (tMap f a)
 
-tMapProg :: (Expr x a -> y) -> Program x a -> Program y a
+tMapProg :: (Expr a -> (TypeInfo a)) -> Program a -> Program a
 tMapProg f (Program decls expr) = Program (zip (map fst decls) (map (tMap f . snd) decls)) (tMap f expr)
 
-getBinaryConstructor :: Expr x1 a1 -> (x2 -> Expr x2 a2 -> Expr x2 a2 -> Expr x2 a2)
+getBinaryConstructor :: Expr a1 -> ((TypeInfo a2) -> Expr a2 -> Expr a2 -> Expr a2)
 getBinaryConstructor GreaterThan {} = GreaterThan
 getBinaryConstructor LessThan {} = GreaterThan
 getBinaryConstructor MultF {} = MultF
@@ -292,7 +267,7 @@ getBinaryConstructor Apply {} = Apply
 --getBinaryConstructor (LetIn t name a b) = \t2 -> \e1 -> \e2 -> LetIn t2 name e1 e2
 getBinaryConstructor (LetIn _ name _ _) = (`LetIn` name)
 
-getUnaryConstructor :: Expr x1 a1 -> (x2 -> Expr x2 a2 -> Expr x2 a2)
+getUnaryConstructor :: Expr a1 -> (TypeInfo a2 -> Expr a2 -> Expr a2)
 getUnaryConstructor (ThetaI _ _ i) = \t a -> ThetaI t a i
 getUnaryConstructor (Subtree _ _ i) = \t a -> Subtree t a i
 getUnaryConstructor (Lambda _ x _) = (`Lambda` x)
@@ -301,7 +276,7 @@ getUnaryConstructor (Fix _ _) = Fix
 getUnaryConstructor (Not _ _) = Not
 getUnaryConstructor (ExpF _ _) = ExpF
 
-getNullaryConstructor :: Expr x1 a -> (x2 -> Expr x2 a)
+getNullaryConstructor :: Expr a -> (TypeInfo a -> Expr a)
 getNullaryConstructor Uniform {} = Uniform
 getNullaryConstructor Normal {} = Normal
 getNullaryConstructor (Constant t val) = (`Constant` val)
@@ -309,17 +284,11 @@ getNullaryConstructor Null {} = Null
 getNullaryConstructor (Var _ x) = (`Var` x)
 getNullaryConstructor (Call _ x) = (`Call` x)
 
-tTraverse :: Applicative f => (a -> f b) -> Expr a v -> f (Expr b v)
-tTraverse f (IfThenElse t a b c) = IfThenElse <$> f t <*> tTraverse f a <*> tTraverse f b <*> tTraverse f c
-tTraverse f expr
-  | length (getSubExprs expr) == 0 =
-      getNullaryConstructor expr <$> f (getTypeInfo expr)
-  | length (getSubExprs expr) == 1 =
-      getUnaryConstructor expr <$> f (getTypeInfo expr) <*> tTraverse f (getSubExprs expr !! 0)
-  | length (getSubExprs expr) == 2 =
-      getBinaryConstructor expr <$> f (getTypeInfo expr) <*> tTraverse f (getSubExprs expr !! 0) <*> tTraverse f (getSubExprs expr !! 1)
+tTraverse :: Applicative f => (TypeInfo v -> f (TypeInfo v)) -> Expr v -> f (Expr v)
+tTraverse f expr = fmap (\t -> setTypeInfo expr t) typeinfos
+  where typeinfos = f $ getTypeInfo expr
 
-tMapM :: Monad m => (Expr x a -> m y) -> Expr x a -> m (Expr y a)
+tMapM :: Monad m => (Expr a -> m (TypeInfo a)) -> Expr a -> m (Expr a)
 tMapM f expr@(IfThenElse _ a b c) = do
   t <- f expr
   fa <- tMapM f a
@@ -344,10 +313,10 @@ tMapM f expr
        subExpr1 <- tMapM f (getSubExprs expr !! 1)
        return $ getBinaryConstructor expr t subExpr0 subExpr1
 
-arity :: Expr x a -> Int
+arity :: Expr a -> Int
 arity e = length $ getSubExprs e
 
-getSubExprs :: Expr x a -> [Expr x a]
+getSubExprs :: Expr a -> [Expr a]
 getSubExprs expr = case expr of 
   (IfThenElse _ a b c) -> [a,b,c]
   (GreaterThan _ a b) -> [a,b]
@@ -381,7 +350,7 @@ getSubExprs expr = case expr of
   (Apply _ a b) -> [a, b]
   (ReadNN _ _ a) -> [a]
 
-setSubExprs :: Expr x a -> [Expr x a] -> Expr x a
+setSubExprs :: Expr a -> [Expr a] -> Expr a
 setSubExprs expr [] = case expr of
   Uniform t -> Uniform t
   Normal t -> Normal t
@@ -426,7 +395,7 @@ setSubExprs expr subExprs = case expr of
   CallArg t n _ -> CallArg t n subExprs
   _ -> error "unmatched expr in setSubExprs"
 
-getTypeInfo :: Expr t a -> t
+getTypeInfo :: Expr a -> TypeInfo a
 getTypeInfo expr = case expr of
   (IfThenElse t _ _ _)  -> t
   (GreaterThan t _ _)   -> t
@@ -460,7 +429,7 @@ getTypeInfo expr = case expr of
   (Apply t _ _)    -> t
   (ReadNN t _ _)        -> t
   
-setTypeInfo :: Expr t a -> t -> Expr t a
+setTypeInfo :: Expr a -> TypeInfo a -> Expr a
 setTypeInfo expr t = case expr of
   (IfThenElse _ a b c)  -> (IfThenElse t a b c)
   (GreaterThan _ a b)   -> (GreaterThan t a b)
@@ -507,14 +476,14 @@ getRType (VList (a:_)) = ListOf $ getRType a
 getRType (VList []) = NullList
 getRType (VTuple t1 t2) = Tuple (getRType t1) (getRType t2)
 
-prettyPrintProg :: (Num a, Show a, Show t) => Program t a -> [String]
+prettyPrintProg :: (Num a, Show a) => Program a -> [String]
 prettyPrintProg (Program decls expr) = concatMap prettyPrintDecl decls ++ mainString
   where mainString = ("--- Main Expression ---"):(prettyPrint expr:: [String])
 
-prettyPrintDecl :: (Num a, Show a, Show t) => Decl t a -> [String]
+prettyPrintDecl :: (Num a, Show a) => Decl a -> [String]
 prettyPrintDecl (name, expr) = ("--- Function: " ++ name ++ "---"):prettyPrint expr
 
-prettyPrint :: (Num a, Show a, Show t) => Expr t a -> [String]
+prettyPrint :: (Num a, Show a) => Expr a -> [String]
 prettyPrint expr = 
   fstLine : indented
     where
@@ -523,7 +492,7 @@ prettyPrint expr =
       indent ls = "    " ++ ls
       fstLine = printFlat expr ++ " :: (" ++ show (getTypeInfo expr) ++ ")"
 
-prettyPrintNoReq :: Expr t a -> [String]
+prettyPrintNoReq :: Expr a -> [String]
 prettyPrintNoReq expr =
   fstLine : indented
     where
@@ -532,14 +501,14 @@ prettyPrintNoReq expr =
       indent ls = "    " ++ ls
       fstLine = printFlatNoReq expr
 
-prettyPrintProgNoReq ::Program t a -> [String]
+prettyPrintProgNoReq ::Program a -> [String]
 prettyPrintProgNoReq (Program decls expr) = concatMap prettyPrintDeclNoReq decls ++ mainString
   where mainString = ("--- Main Expression ---"):(prettyPrintNoReq expr:: [String])
 
-prettyPrintDeclNoReq ::Decl t a -> [String]
+prettyPrintDeclNoReq ::Decl a -> [String]
 prettyPrintDeclNoReq (name, expr) = ("--- Function: " ++ name ++ "---"):prettyPrintNoReq expr
 
-printFlat :: Show a => Expr t a -> String
+printFlat :: Show a => Expr a -> String
 printFlat expr = case expr of
   IfThenElse {} -> "IfThenElse"
   GreaterThan {} -> "GreaterThan"
@@ -573,7 +542,7 @@ printFlat expr = case expr of
   Apply {} -> "CallLambda"
   (ReadNN _ name _) -> "ReadNN " ++ name
 
-printFlatNoReq :: Expr t a -> String
+printFlatNoReq :: Expr a -> String
 printFlatNoReq expr = case expr of
   IfThenElse {} -> "IfThenElse"
   GreaterThan {} -> "GreaterThan"

@@ -63,9 +63,9 @@ setTags t tgs = t {tags = tgs}
 -- Therefore, we define that all functions must exist in the global namespace.
 -- That way, it is sufficient to carry only the global namespace as reset point.
 -- local functions are in principle possible, but they need to carry their own environment with them,
--- e.g. by expanding Env to be of [(String, Env x a, Expr x a)], where [] indicates a shorthand for the global scope.
-type Env x a = [(String, Expr x a)]
-type Check a = ExceptT TypeError (Reader (Env () a))
+-- e.g. by expanding Env to be of [(String, Env x a, Expr a)], where [] indicates a shorthand for the global scope.
+type Env a = [(String, Expr a)]
+type Check a = ExceptT TypeError (Reader (Env a))
 
 data TypeError = Mismatch RType RType
                deriving (Show, Eq)
@@ -105,13 +105,14 @@ rIntersect (ListOf x) NullList = Just $ ListOf x
 rIntersect NullList (ListOf x) = Just $ ListOf x
 rIntersect left right = if left == right then Just left else Nothing
 
-progToEnv :: Program (TypeInfo a) a -> Env (TypeInfo a) a
+progToEnv :: Program a -> Env a
 progToEnv (Program funcs main_expr) = ("main", main_expr): funcs
 
-autoExpr :: (Eq a, Num a, Reifies s Tape) => Expr (TypeInfo a) a -> Expr (TypeInfo (Reverse s a)) (Reverse s a)
-autoExpr e = tMap (autoTypeInfo . getTypeInfo) $ exprMap auto e
+autoExpr :: (Eq a, Num a, Reifies s Tape) => Expr a -> Expr (Reverse s a)
+autoExpr e = exprMap auto e
 
-autoTypeInfo :: (Eq a, Num a, Reifies s Tape) =>TypeInfo a ->TypeInfo (Reverse s a)
+--TODO: Maybe we should genericize this to be (a -> b) -> TI a -> TI b
+autoTypeInfo :: (Eq a, Num a, Reifies s Tape) =>TypeInfo a -> TypeInfo (Reverse s a)
 autoTypeInfo t = t {tags = Prelude.map autoTag (tags t), cType = autoCType (cType t), derivingHornClause = do
   hc <- derivingHornClause t
   return (autoHornClause hc)}
@@ -133,7 +134,7 @@ autoTag (EnumList l) = EnumList (Prelude.map autoVal l)
 autoTag (Alg a) = Alg a
 autoTag _ = error "Failed to convert to auto tag"
 
-autoEnv :: (Eq a, Num a, Reifies s Tape) => Env (TypeInfo a) a -> Env (TypeInfo (Reverse s a)) (Reverse s a)
+autoEnv :: (Eq a, Num a, Reifies s Tape) => Env a -> Env (Reverse s a)
 autoEnv = Prelude.map (\ (name, expr) -> (name, autoExpr expr))
 
 autoVal :: (Num a, Reifies s Tape) => Value a -> Value (Reverse s a)

@@ -1,6 +1,7 @@
 module SPLL.Typing.ForwardChaining where
 
 import SPLL.Lang.Lang
+import SPLL.Lang.Types
 import SPLL.Typing.Typing
 import Control.Monad.Supply
 
@@ -17,14 +18,14 @@ type ChainInferState a = ([[HornClause a]], [HornClause a])
 snd3 :: (a, b, c) -> b
 snd3 (_, b, _) = b
 
-addChainName :: ChainName -> Expr (TypeInfo a) a -> TypeInfo a
+addChainName :: ChainName -> Expr a -> TypeInfo a
 addChainName s e = setChainName (getTypeInfo e) s
 
-getChainName :: Expr (TypeInfo a) a -> ChainName
+getChainName :: Expr a -> ChainName
 getChainName = chainName . getTypeInfo
 
 --Give each node on the AST a chainName first. Then annotate the value clauses of the LetIns correctly, as this cannot be done in the first step
-annotateSyntaxTree :: (Show a) => Expr (TypeInfo a) a -> Chain (Expr (TypeInfo a) a)
+annotateSyntaxTree :: (Show a) => Expr a -> Chain (Expr a)
 annotateSyntaxTree expr = do
   annotatedExprs <- do
     tMapM (\e -> do
@@ -49,7 +50,7 @@ annotateSyntaxTree expr = do
       ) expr
   setLetInChainNames annotatedExprs
 
-setLetInChainNames :: (Show a) => Expr (TypeInfo a) a -> Chain (Expr (TypeInfo a) a)
+setLetInChainNames :: (Show a) => Expr a -> Chain (Expr a)
 setLetInChainNames e@(LetIn t n v b) = lift $ do
   state <- get
   let Just correctChainName = lookup n state
@@ -57,7 +58,7 @@ setLetInChainNames e@(LetIn t n v b) = lift $ do
   return $ LetIn t n updatedVal b
 setLetInChainNames e = return e
 
-annotateChainNamesProg :: (Show a) => Program (TypeInfo a) a -> Chain (Program (TypeInfo a) a)
+annotateChainNamesProg :: (Show a) => Program a -> Chain (Program a)
 annotateChainNamesProg (Program decls e) = do
   eAn <- annotateSyntaxTree e
   declsAn <- Prelude.mapM (\(n, ex) -> do
@@ -65,7 +66,7 @@ annotateChainNamesProg (Program decls e) = do
     return (n, exAn)) decls
   return $ Program declsAn eAn
 
-inferProg :: (Eq a, Floating a, Show a) => Program (TypeInfo a) a -> Program (TypeInfo a) a
+inferProg :: (Eq a, Floating a, Show a) => Program a -> Program a
 inferProg p = Program finishedDecls finishedExpr
   where
     (annotatedProg, _) = runState (runSupplyT (annotateChainNamesProg p) (+1) 1) []
@@ -81,7 +82,7 @@ inferProg p = Program finishedDecls finishedExpr
     finishedExpr = tMap (annotateMaximumCType finishedState) eAn
     
 
-annotateMaximumCType :: (Eq a) => ChainInferState a -> Expr (TypeInfo a) a -> TypeInfo a
+annotateMaximumCType :: (Eq a) => ChainInferState a -> Expr a -> TypeInfo a
 annotateMaximumCType (_, used) e = t {cType=ct, derivingHornClause=hc}
   where
     t = getTypeInfo e
@@ -96,7 +97,7 @@ annotateMaximumCType (_, used) e = t {cType=ct, derivingHornClause=hc}
     hc = if isNothing maxCT then Nothing else Just maxHC
 
 
-constructHornClause :: (Eq a, Floating a) => Expr (TypeInfo a) a -> [HornClause a]
+constructHornClause :: (Eq a, Floating a) => Expr a -> [HornClause a]
 constructHornClause e = case e of
   PlusF _ a b -> rotatedHornClauses ( [(getChainName a, CInferDeterministic), (getChainName b, CInferDeterministic)],  [(getChainName e, CInferDeterministic)], (StubPlusF, 0))
   MultF _ a b -> rotatedHornClauses ( [(getChainName a, CInferDeterministic), (getChainName b, CInferDeterministic)],  [(getChainName e, CInferDeterministic)], (StubMultF, 0))
@@ -109,7 +110,7 @@ constructHornClause e = case e of
   InjF {} -> getHornClause e
   _ -> []
 
-constructHornClauses :: (Eq a, Floating a) => Expr (TypeInfo a) a -> [[HornClause a]]
+constructHornClauses :: (Eq a, Floating a) => Expr a -> [[HornClause a]]
 constructHornClauses e = constructHornClause e:concatMap constructHornClauses (getSubExprs e)
 
 -- TODO Constrained Hornclauses
@@ -134,7 +135,7 @@ findFulfilledHornClause clauses satisfied = find allSatisfied (concat clauses)
     cTypeOf name = fromMaybe CNotSetYet (lookup name satisfied)
     
 
-findDeterminism :: Expr (TypeInfo a) a -> [ChainName]
+findDeterminism :: Expr a -> [ChainName]
 findDeterminism (Constant t _) = [chainName t]
 findDeterminism (ThetaI t _ _) = [chainName t]
 findDeterminism e = concatMap findDeterminism (getSubExprs e)
@@ -168,23 +169,23 @@ fixpointIteration (clauses, used) = if newDetVars == detVars
 
 newtype Inversion a = Inversion (ChainName, IRExpr a) deriving (Show, Eq)
 
-inferProbProg :: (Show a, Num a, Eq a) => Program (TypeInfo a) a -> IRExpr a
+inferProbProg :: (Show a, Num a, Eq a) => Program a -> IRExpr a
 inferProbProg (Program [] main) = inferProbExpr main
 inferProbProg _  = error "Programs with function declararions are not yet implemented"
 
-inferProbExpr :: (Show a, Num a, Eq a) => Expr (TypeInfo a) a -> IRExpr a
+inferProbExpr :: (Show a, Num a, Eq a) => Expr a -> IRExpr a
 inferProbExpr = inversionsToProb . exprToInversions
 
 inversionsToProb :: (Show a) => ([Inversion a], [IRExpr a]) -> IRExpr a
 inversionsToProb (inversions, firstR:randoms) = Prelude.foldr (\(Inversion (cn, val)) body -> IRLetIn cn val body) randomsProduct inversions
   where randomsProduct = Prelude.foldr (\expr body -> IROp OpMult expr body) firstR randoms
 
-exprToInversions :: (Show a, Num a, Eq a) => Expr (TypeInfo a) a -> ([Inversion a], [IRExpr a])
+exprToInversions :: (Show a, Num a, Eq a) => Expr a -> ([Inversion a], [IRExpr a])
 exprToInversions e@(Uniform _) = (hornClauseToIRExpr e, [IRDensity IRUniform (IRVar (getChainName e))])
 exprToInversions e@(Normal _) = (hornClauseToIRExpr e, [IRDensity IRNormal (IRVar (getChainName e))])
 exprToInversions e = Prelude.foldr (\(a1, b1) (a, b) -> (nub (a1++a), b1++b)) ([], []) ((hornClauseToIRExpr e, []):Prelude.map exprToInversions (getSubExprs e))
 
-hornClauseToIRExpr :: (Show a, Num a) => Expr (TypeInfo a) a -> [Inversion a]
+hornClauseToIRExpr :: (Show a, Num a) => Expr a -> [Inversion a]
 hornClauseToIRExpr e | isNothing (derivingHornClause (getTypeInfo e)) = error "Cannot convert to IR without a horn clause"
 hornClauseToIRExpr e = case stub of
   StubPlusF | inversion == 0 -> [Inversion (cn, IROp OpPlus (IRVar (preVars!!0)) (IRVar (preVars!!1)))]
@@ -214,5 +215,5 @@ hornClauseToIRExpr e = case stub of
 
 
 
-chainVarOfSubExpr :: Expr (TypeInfo a) a -> Int -> IRExpr a
+chainVarOfSubExpr :: Expr a -> Int -> IRExpr a
 chainVarOfSubExpr e n = IRVar (getChainName (getSubExprs e !! n))

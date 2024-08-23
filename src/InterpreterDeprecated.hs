@@ -24,18 +24,18 @@ import PredefinedFunctions (FPair, FEnv, globalFenv)
 --    newHypothesis = zipWith (+) thetas $ map (\el -> 0.0001 * el) gradient
 --pr_ :: (Num a, Num b) => a -> Env b -> [a]
 
-probabilityDiag :: (Erf a, Floating a, Ord a, Real a, Show a) => [(String, Expr (TypeInfo a) a)] -> [Thetas a] -> Expr (TypeInfo a) a -> Value a -> IO ()
+probabilityDiag :: (Erf a, Floating a, Ord a, Real a, Show a) => [(String, Expr a)] -> [Thetas a] -> Expr a -> Value a -> IO ()
 probabilityDiag env thetaScan expr sample = mapM_ (\theta -> probabilityDiagAt env theta expr sample) thetaScan
 
-probabilityDiagAt :: (Erf a, Floating a, Ord a, Real a, Show a) => [(String, Expr (TypeInfo a) a)] -> Thetas a -> Expr (TypeInfo a) a -> Value a -> IO ()
+probabilityDiagAt :: (Erf a, Floating a, Ord a, Real a, Show a) => [(String, Expr a)] -> Thetas a -> Expr a -> Value a -> IO ()
 probabilityDiagAt env theta expr sample = do
   print theta
   print (likelihood env env theta expr Map.empty sample)
 
-gradientDiag :: (Erf a, RealFloat a, Floating a, Ord a, Real a, Show a) => [(String, Expr (TypeInfo a) a)] -> [Thetas a] -> Expr (TypeInfo a) a -> [Value a] -> IO ()
+gradientDiag :: (Erf a, RealFloat a, Floating a, Ord a, Real a, Show a) => [(String, Expr a)] -> [Thetas a] -> Expr a -> [Value a] -> IO ()
 gradientDiag env thetaScan expr samples = mapM_ (\theta -> gradientDiagAt env theta expr samples) thetaScan
 
-gradientDiagAt :: (Erf a, RealFloat a, Floating a, Ord a, Real a, Show a) => [(String, Expr (TypeInfo a) a)] -> Thetas a -> Expr (TypeInfo a) a -> [Value a] -> IO ()
+gradientDiagAt :: (Erf a, RealFloat a, Floating a, Ord a, Real a, Show a) => [(String, Expr a)] -> Thetas a -> Expr a -> [Value a] -> IO ()
 gradientDiagAt env tht expr samples = do
   let grad_lossPre = [grad' (\theta -> log $ unwrapP $ likelihood (autoEnv env) (autoEnv env) theta (autoExpr expr) Map.empty (autoVal sample)) tht | sample <- samples]
   print ("gradient debug info for theta: " ++ (show tht))
@@ -47,7 +47,7 @@ gradientDiagAt env tht expr samples = do
   --print "LL: "
   --print $ sum $ map fst grad_loss
 
-exprDebugMetrics :: (Erf a, Floating a, Real a, Show a, Enum a) => Env (TypeInfo a) a -> Expr (TypeInfo a) a -> [Value a] -> Thetas a -> IO ()
+exprDebugMetrics :: (Erf a, Floating a, Real a, Show a, Enum a) => Env a -> Expr a -> [Value a] -> Thetas a -> IO ()
 exprDebugMetrics env expr samples thetas = do
   mapM_ (\thX -> printInfo thX) [[x] | x <- [0.0, 0.1 .. 1.0]]
     where
@@ -59,7 +59,7 @@ exprDebugMetrics env expr samples thetas = do
         print (ll thX)
         print (gradient thX)
 
-reconstructThetas :: (Erf a, RealFloat a, Floating a, Ord a, Random a, Show a, Real a) => Env (TypeInfo a) a -> Int -> Thetas a -> IO [(Thetas a, a)]
+reconstructThetas :: (Erf a, RealFloat a, Floating a, Ord a, Random a, Show a, Real a) => Env a -> Int -> Thetas a -> IO [(Thetas a, a)]
 reconstructThetas cEnv nSamples thetas = do
   let Just main = lookup "main" cEnv
   samples <- mkSamples nSamples cEnv thetas [] main
@@ -118,7 +118,7 @@ asdf = do
 
 --instance Traversable Thetas where
 --  traverse (Thetas a) = Thetas $ traverse a
-detGenerate :: (Floating a, Fractional a, Ord a) => Env (TypeInfo a) a -> Thetas a -> Expr (TypeInfo a) a -> Value a
+detGenerate :: (Floating a, Fractional a, Ord a) => Env a -> Thetas a -> Expr a -> Value a
 detGenerate env thetas (IfThenElse _ cond left right) = do
   case detGenerate env thetas cond of
     VBool True -> detGenerate env thetas left
@@ -167,7 +167,7 @@ detGenerate _ _ expr =
     where TypeInfo {rType = rt, pType = pt} = getTypeInfo expr
 
 
-likelihood :: (Erf a, Show a, Fractional a, Ord a, Real a, Floating a) => Env (TypeInfo a) a -> Env (TypeInfo a) a -> Thetas a -> Expr (TypeInfo a) a -> BranchMap a -> Value a -> Probability a
+likelihood :: (Erf a, Show a, Fractional a, Ord a, Real a, Floating a) => Env a -> Env a -> Thetas a -> Expr a -> BranchMap a -> Value a -> Probability a
 -- possible problems in the probability math in there:
 likelihood _ _ _ expr _ _
   | pType (getTypeInfo expr) == Bottom = error "cannot calculate likelihood for bottom type"
@@ -310,7 +310,7 @@ likelihood _ _ _ (Uniform _) _ _ = error "typing error in probability - Uniform"
 
 
 -- TODO change to venv lookup
-getInvValue :: (Floating a, Num a, Fractional a, Ord a) => FEnv a -> Env (TypeInfo a) a -> Env (TypeInfo a) a -> Thetas a -> Expr (TypeInfo a) a -> String -> Value a -> a -> (Value a, a, BranchMap a)
+getInvValue :: (Floating a, Num a, Fractional a, Ord a) => FEnv a -> Env a -> Env a -> Thetas a -> Expr a -> String -> Value a -> a -> (Value a, a, BranchMap a)
 getInvValue _ _ _ _ expr v _ _
   | Set.notMember v (witnessedVars (getTypeInfo expr)) = error "witnessed var not in deducible"
 getInvValue fenv globalEnv env thetas (Var _ name) var val cor_factor = if name == var

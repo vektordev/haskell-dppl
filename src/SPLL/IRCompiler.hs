@@ -15,7 +15,7 @@ import Data.Maybe
 -- perhaps as an explicit lambda in the top of the expression, otherwise we'll get trouble generating code.
 -- TODO: How do we deal with top-level lambdas in binding here?
 --  TL-Lambdas are presumably to be treated differently than non-TL, at least as far as prob is concerned.
-envToIR :: (Ord a, Floating a, Show a, Eq a) => CompilerConfig a -> Env (TypeInfo a) a -> [(String, IRExpr a)]
+envToIR :: (Ord a, Floating a, Show a, Eq a) => CompilerConfig a -> Env a -> [(String, IRExpr a)]
 envToIR conf env = concatMap (\(name, binding) ->
   let pt = pType $ getTypeInfo binding
       rt = rType $ getTypeInfo binding in
@@ -162,7 +162,7 @@ hasAlgorithm tags alg = alg `elem` ([algName a | Alg a <- tags])
 --hasAlgorithm tags alg = not $ null $ filter (== alg) [a | Alg a <- tags]
 
 --in this implementation, I'll forget about the distinction between PDFs and Probabilities. Might need to fix that later.
-toIRProbability :: (Floating a, Show a) => CompilerConfig a -> Expr (TypeInfo a) a -> IRExpr a -> Supply Int (IRExpr a)
+toIRProbability :: (Floating a, Show a) => CompilerConfig a -> Expr a -> IRExpr a -> Supply Int (IRExpr a)
 toIRProbability conf (IfThenElse t cond left right) sample = do
   var_cond_p <- mkVariable "cond"
   condExpr <- toIRProbability conf cond (IRConst (VBool True))
@@ -300,7 +300,7 @@ toIRProbability conf (ThetaI _ a i) sample = indicator (IROp OpEq sample (IRThet
 toIRProbability conf (Subtree _ a i) sample = error "Cannot infer prob on subtree expression. Please check your syntax"
 toIRProbability conf x sample = error ("found no way to convert to IR: " ++ show x)
 
-packParamsIntoLetinsProb :: (Show a, Floating a) => [String] -> [Expr (TypeInfo a) a] -> IRExpr a -> IRExpr a -> Supply Int (IRExpr a)
+packParamsIntoLetinsProb :: (Show a, Floating a) => [String] -> [Expr a] -> IRExpr a -> IRExpr a -> Supply Int (IRExpr a)
 --packParamsIntoLetinsProb [] [] expr _ = do
 --  return expr
 --packParamsIntoLetinsProb [] _ _ _ = error "More parameters than variables"
@@ -316,7 +316,7 @@ indicator condition = return $ IRIf condition (IRConst $ VFloat 1) (IRConst $ VF
 
 --folding detGen and Gen into one, as the distinction is one to make sure things that are det are indeed det.
 -- That's what the type system is for though.
-toIRGenerate :: (Show a, Floating a) => Expr (TypeInfo a) a -> IRExpr a
+toIRGenerate :: (Show a, Floating a) => Expr a -> IRExpr a
 toIRGenerate (IfThenElse _ cond left right) = IRIf (toIRGenerate cond) (toIRGenerate left) (toIRGenerate right)
 toIRGenerate (LetIn _ n v b) = IRLetIn n (toIRGenerate v) (toIRGenerate b)
 toIRGenerate (GreaterThan _ left right) = IROp OpGreaterThan (toIRGenerate left) (toIRGenerate right)
@@ -348,7 +348,7 @@ toIRGenerate (Apply _ l v) = IRApply (toIRGenerate l) (toIRGenerate v)
 toIRGenerate (ReadNN t name subexpr) = IRCall "randomchoice" [IREvalNN name (toIRGenerate subexpr)]
 toIRGenerate x = error ("found no way to convert to IRGen: " ++ show x)
 
-packParamsIntoLetinsGen :: (Show a, Floating a) => [String] -> [Expr (TypeInfo a) a] -> IRExpr a -> IRExpr a
+packParamsIntoLetinsGen :: (Show a, Floating a) => [String] -> [Expr a] -> IRExpr a -> IRExpr a
 packParamsIntoLetinsGen [] [] expr = expr
 packParamsIntoLetinsGen [] _ _ = error "More parameters than variables"
 packParamsIntoLetinsGen _ [] _ = error "More variables than parameters"
@@ -361,7 +361,7 @@ bindLocal namestring binding inEx = do
   varName <- mkVariable namestring
   return $ IRLetIn varName binding inEx
 
-toIRIntegrate :: (Show a, Floating a) => CompilerConfig a -> Expr (TypeInfo a) a -> IRExpr a -> IRExpr a -> Supply Int (IRExpr a)
+toIRIntegrate :: (Show a, Floating a) => CompilerConfig a -> Expr a -> IRExpr a -> IRExpr a -> Supply Int (IRExpr a)
 toIRIntegrate _ (Uniform _) lower higher = do
   return (IROp OpSub (IRCumulative IRUniform higher) (IRCumulative IRUniform lower))
 toIRIntegrate _ (Normal TypeInfo {}) lower higher = do
