@@ -59,18 +59,18 @@ setLetInChainNames e@(LetIn t n v b) = lift $ do
 setLetInChainNames e = return e
 
 annotateChainNamesProg :: (Show a) => Program a -> Chain (Program a)
-annotateChainNamesProg (Program decls e) = do
+annotateChainNamesProg (Program decls nns e) = do
   eAn <- annotateSyntaxTree e
   declsAn <- Prelude.mapM (\(n, ex) -> do
     exAn <- annotateSyntaxTree ex
     return (n, exAn)) decls
-  return $ Program declsAn eAn
+  return $ Program declsAn nns eAn
 
 inferProg :: (Eq a, Floating a, Show a) => Program a -> Program a
-inferProg p = Program finishedDecls finishedExpr
+inferProg p = Program finishedDecls nns finishedExpr
   where
     (annotatedProg, _) = runState (runSupplyT (annotateChainNamesProg p) (+1) 1) []
-    Program declsAn eAn = annotatedProg
+    Program declsAn nns eAn = annotatedProg
     annotatedExprs = eAn:Prelude.map snd declsAn
     startDetVars = concatMap findDeterminism annotatedExprs
     detVarHornClauses = map (\n -> ([], [(n, CDeterministic)], (StubConstant, 0))) startDetVars
@@ -170,8 +170,8 @@ fixpointIteration (clauses, used) = if newDetVars == detVars
 newtype Inversion a = Inversion (ChainName, IRExpr a) deriving (Show, Eq)
 
 inferProbProg :: (Show a, Num a, Eq a) => Program a -> IRExpr a
-inferProbProg (Program [] main) = inferProbExpr main
-inferProbProg _  = error "Programs with function declararions are not yet implemented"
+inferProbProg (Program [] nns main) = inferProbExpr main
+inferProbProg _  = error "Programs with function declarations are not yet implemented"
 
 inferProbExpr :: (Show a, Num a, Eq a) => Expr a -> IRExpr a
 inferProbExpr = inversionsToProb . exprToInversions

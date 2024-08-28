@@ -80,7 +80,7 @@ instance Monoid TEnv where
   mempty = empty
   mappend = (<>)
 makeMain :: Expr a -> Program a
-makeMain expr = Program [("main", expr)] (Call makeTypeInfo "main")
+makeMain expr = Program [("main", expr)] [] (Call makeTypeInfo "main")
 
 -- | Inference monad
 type Infer a = (ReaderT
@@ -168,7 +168,7 @@ showResult [] = do
       putStrLn "Finished"
 
 showResultsProg :: Program a -> IO ()
-showResultsProg p@(Program decls expr) =
+showResultsProg p@(Program decls _ expr) =
   do
        let res = constraintsExprProg empty p
        putStrLn $ "Branches: "  ++ show (length res)
@@ -325,7 +325,7 @@ rtFromScheme (Forall _ rt) = rt
 type Branch = Either PTypeError (PType, [Constraint])
 
 inferProg :: Program a -> Infer [Branch]
-inferProg (Program decls expr) = do
+inferProg (Program decls _ expr) = do
   -- init type variable for all function decls beforehand so we can build constraints for
   -- calls between these functions
   tv_rev <- freshVars (length decls) []

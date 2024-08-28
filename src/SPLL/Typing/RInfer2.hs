@@ -88,7 +88,7 @@ instance Monoid TEnv where
 
 
 makeMain :: Expr a -> Program a
-makeMain expr = Program [("main", expr)] (Call (getTypeInfo expr) "main")
+makeMain expr = Program [("main", expr)] [] (Call (getTypeInfo expr) "main")
 
 -- | Inference monad
 type Infer a = (ReaderT
@@ -121,7 +121,7 @@ class Substitutable a where
   ftv   :: a -> Set.Set TVarR
 
 instance Substitutable (Program a) where
-  apply s (Program decls expr) = Program (zip (map fst decls) (map (apply s . snd) decls)) (apply s expr)
+  apply s (Program decls nns expr) = Program (zip (map fst decls) (map (apply s . snd) decls)) nns (apply s expr)
   ftv _ = Set.empty
 
 instance Substitutable (Expr a) where
@@ -180,7 +180,7 @@ addRTypeInfo p =
       Right subst -> apply subst p
 
 tryAddRTypeInfo :: (Show a) => Program a -> Either RTypeError (Program a)
-tryAddRTypeInfo p@(Program decls expr) = do
+tryAddRTypeInfo p@(Program decls _ expr) = do
   (ty, cs, p) <- runInfer empty (inferProg p)
   subst <- runSolve cs
   return $ apply subst p
@@ -193,7 +193,7 @@ rtFromScheme (Forall _ rt) = rt
 
 --TODO: Simply give everything a fresh var as a unified first pass.
 inferProg :: (Show a) => Program a -> Infer (RType, [Constraint], Program a)
-inferProg p@(Program decls expr) = do
+inferProg p@(Program decls nns expr) = do
   -- init type variable for all function decls beforehand so we can build constraints for
   -- calls between these functions
   tv_rev <- freshVars (length decls) []
@@ -208,7 +208,7 @@ inferProg p@(Program decls expr) = do
   -- the inferred function type
   let tcs = zip (map (rtFromScheme . snd) func_tvs) (map fst3cts cts)
   -- combine all constraints
-  return (t1, tcs ++ concatMap snd3cts cts ++ c1, Program (zip (map fst decls) (map trd3cts cts)) et)
+  return (t1, tcs ++ concatMap snd3cts cts ++ c1, Program (zip (map fst decls) (map trd3cts cts)) nns et)
 
 --TODO: Error on ambiguous InferenceRule
 infer :: Show a => Expr a -> Infer (RType, [Constraint], Expr a)

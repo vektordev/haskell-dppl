@@ -133,7 +133,7 @@ containedVars :: (Expr a -> Set.Set String) -> Expr a -> Set.Set String
 containedVars f e = Set.union (f e) (foldl Set.union Set.empty (map (containedVars f) (getSubExprs e)))
 
 predicateProg :: (Expr a -> Bool) -> Program a -> Bool
-predicateProg f (Program decls expr) = and (map (predicateExpr f . snd) decls) && predicateExpr f expr
+predicateProg f (Program decls _ expr) = and (map (predicateExpr f . snd) decls) && predicateExpr f expr
 
 predicateExpr :: (Expr a -> Bool) -> Expr a -> Bool
 predicateExpr f e = f e && and (map (predicateExpr f) (getSubExprs e))
@@ -250,7 +250,7 @@ tMap f expr = case expr of
   (ReadNN _ n a) -> ReadNN (f expr) n (tMap f a)
 
 tMapProg :: (Expr a -> (TypeInfo a)) -> Program a -> Program a
-tMapProg f (Program decls expr) = Program (zip (map fst decls) (map (tMap f . snd) decls)) (tMap f expr)
+tMapProg f (Program decls neural expr) = Program (zip (map fst decls) (map (tMap f . snd) decls)) neural (tMap f expr)
 
 getBinaryConstructor :: Expr a1 -> ((TypeInfo a2) -> Expr a2 -> Expr a2 -> Expr a2)
 getBinaryConstructor GreaterThan {} = GreaterThan
@@ -477,10 +477,12 @@ getRType (VList []) = NullList
 getRType (VTuple t1 t2) = Tuple (getRType t1) (getRType t2)
 
 prettyPrintProg :: (Num a, Show a) => Program a -> [String]
-prettyPrintProg (Program decls expr) = concatMap prettyPrintDecl decls ++ mainString
+prettyPrintProg (Program decls neurals expr) = concatMap prettyPrintDecl decls ++ concatMap prettyPrintNeural neurals ++ mainString
   where mainString = ("--- Main Expression ---"):(prettyPrint expr:: [String])
 
-prettyPrintDecl :: (Num a, Show a) => Decl a -> [String]
+prettyPrintNeural = undefined
+
+prettyPrintDecl :: (Num a, Show a) => FnDecl a -> [String]
 prettyPrintDecl (name, expr) = ("--- Function: " ++ name ++ "---"):prettyPrint expr
 
 prettyPrint :: (Num a, Show a) => Expr a -> [String]
@@ -501,11 +503,20 @@ prettyPrintNoReq expr =
       indent ls = "    " ++ ls
       fstLine = printFlatNoReq expr
 
-prettyPrintProgNoReq ::Program a -> [String]
-prettyPrintProgNoReq (Program decls expr) = concatMap prettyPrintDeclNoReq decls ++ mainString
+prettyPrintProgNoReq :: Program a -> [String]
+prettyPrintProgNoReq (Program fdecls ndecls expr) = concatMap prettyPrintDeclNoReq fdecls ++ concatMap prettyPrintNeuralNoReq ndecls ++ mainString
   where mainString = ("--- Main Expression ---"):(prettyPrintNoReq expr:: [String])
 
-prettyPrintDeclNoReq ::Decl a -> [String]
+prettyPrintNeuralNoReq :: NeuralDecl a -> [String]
+prettyPrintNeuralNoReq (name, ty, range) = l1:l2:(l3 range):[]
+  where
+    l1 = ("--- Neural: " ++ name ++ "---")
+    l2 = ("\t :: " ++ show ty)
+    l3 (EnumList lst) = ("\t" ++ (show $ length lst))
+    l3 _ = "prettyprint not implemented"
+
+
+prettyPrintDeclNoReq :: FnDecl a -> [String]
 prettyPrintDeclNoReq (name, expr) = ("--- Function: " ++ name ++ "---"):prettyPrintNoReq expr
 
 printFlat :: Show a => Expr a -> String

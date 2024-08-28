@@ -105,7 +105,7 @@ instance Monoid TEnv where
   mappend = (<>)
 
 makeMain :: Expr a -> Program a
-makeMain expr = Program [("main", expr)] (Call makeTypeInfo "main")
+makeMain expr = Program [("main", expr)] [] (Call makeTypeInfo "main")
 
 -- | Inference state
 data InferState = InferState { var_count :: Int }
@@ -350,7 +350,7 @@ trd3 (_, _, x) = x
 makeEqConstraint :: PType -> PType -> (Var, PType)
 makeEqConstraint t1 t2 = ("eq", PArr t1 t2)
 inferProg :: TEnv -> Program a -> Infer (Subst, [Constraint], PType)
-inferProg env (Program decls expr) = do
+inferProg env (Program decls _ expr) = do
   -- init type variable for all function decls beforehand so we can build constraints for
   -- calls between these functions
   tv_rev <- freshVars (length decls) []
