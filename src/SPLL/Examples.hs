@@ -17,36 +17,37 @@ paramExpr = Arg makeTypeInfo "iterations" TFloat (IfThenElse makeTypeInfo
   (Null makeTypeInfo))
 
 uniformProg :: Program a
-uniformProg = Program [] (Uniform makeTypeInfo)
+uniformProg = Program [] [] (Uniform makeTypeInfo)
 normalProg :: Program a
-normalProg = Program [] (Normal makeTypeInfo)
+normalProg = Program [] [] (Normal makeTypeInfo)
 uniformProgMult :: Program Double
-uniformProgMult = Program [] (MultF makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat (-0.5))))
+uniformProgMult = Program [] [] (MultF makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat (-0.5))))
 normalProgMult :: Program Double
-normalProgMult = Program [] (MultF makeTypeInfo (Normal makeTypeInfo) (Constant makeTypeInfo (VFloat (0.5))))
+normalProgMult = Program [] [] (MultF makeTypeInfo (Normal makeTypeInfo) (Constant makeTypeInfo (VFloat (0.5))))
 uniformProgPlus :: Program Double
-uniformProgPlus = Program [] (PlusF makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 4)))
+uniformProgPlus = Program [] [] (PlusF makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 4)))
 uniformNegPlus :: Program Double
-uniformNegPlus = Program [] (NegF makeTypeInfo (PlusF makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 4))))
+uniformNegPlus = Program [] [] (NegF makeTypeInfo (PlusF makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 4))))
 uniformIfProg :: Program Double
-uniformIfProg = Program [] (IfThenElse makeTypeInfo (GreaterThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo $ VFloat 0.5))
+uniformIfProg = Program [] [] (IfThenElse makeTypeInfo (GreaterThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo $ VFloat 0.5))
                              (Uniform makeTypeInfo)
                              (PlusF makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo $ VFloat 5)))
 uniformExp :: Program Double
-uniformExp = Program [] (InjF makeTypeInfo "exp" [PlusF makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 4))])
+uniformExp = Program [] [] (InjF makeTypeInfo "exp" [PlusF makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 4))])
+
 
 testMultLeft ::Expr Float
 testMultLeft = MultF makeTypeInfo  (Constant makeTypeInfo (VFloat 3.0)) (Normal makeTypeInfo)
 
 testList :: Program Double
-testList = Program [] (Cons makeTypeInfo (MultF makeTypeInfo (Constant makeTypeInfo (VFloat 0.5)) (Uniform makeTypeInfo)) (Cons makeTypeInfo (Normal makeTypeInfo) (Null makeTypeInfo)))
+testList = Program [] [] (Cons makeTypeInfo (MultF makeTypeInfo (Constant makeTypeInfo (VFloat 0.5)) (Uniform makeTypeInfo)) (Cons makeTypeInfo (Normal makeTypeInfo) (Null makeTypeInfo)))
 
 simpleTuple :: Program Double
-simpleTuple = Program [] (TCons makeTypeInfo (MultF makeTypeInfo (Constant makeTypeInfo (VFloat 0.5)) (Uniform makeTypeInfo)) (Normal makeTypeInfo))
+simpleTuple = Program [] [] (TCons makeTypeInfo (MultF makeTypeInfo (Constant makeTypeInfo (VFloat 0.5)) (Uniform makeTypeInfo)) (Normal makeTypeInfo))
 constantProg :: Program Double
-constantProg = Program [] (Constant makeTypeInfo $ VFloat 2)
+constantProg = Program [] [] (Constant makeTypeInfo $ VFloat 2)
 simpleCall :: Program Double
-simpleCall = Program [("unif", Uniform makeTypeInfo) ] (Call makeTypeInfo "unif")
+simpleCall = Program [("unif", Uniform makeTypeInfo) ] [] (Call makeTypeInfo "unif")
 
 testNeg :: Expr a
 testNeg = NegF makeTypeInfo (Uniform makeTypeInfo)
@@ -55,47 +56,47 @@ testNegFail :: Expr a
 testNegFail = NegF makeTypeInfo (PlusF makeTypeInfo (Uniform makeTypeInfo) (Uniform makeTypeInfo))
 
 testInjF :: Program Double
-testInjF = Program [] (InjF makeTypeInfo "double" [Uniform makeTypeInfo])
+testInjF = Program [] [] (InjF makeTypeInfo "double" [Uniform makeTypeInfo])
 
 testInjFPlus :: Program Double
-testInjFPlus = Program [] (InjF makeTypeInfo "plus" [Constant makeTypeInfo (VFloat 1), Uniform makeTypeInfo])
+testInjFPlus = Program [] [] (InjF makeTypeInfo "plus" [Constant makeTypeInfo (VFloat 1), Uniform makeTypeInfo])
 
 --testInjF2 :: Program Double
---testInjF2 = Program [] (ExpF makeTypeInfo (MultF makeTypeInfo (Constant makeTypeInfo (VFloat 2)) (Uniform makeTypeInfo)))
+--testInjF2 = Program [] [] (ExpF makeTypeInfo (MultF makeTypeInfo (Constant makeTypeInfo (VFloat 2)) (Uniform makeTypeInfo)))
 
 testInjF2 :: Program Double
-testInjF2 = Program [] (ExpF makeTypeInfo (InjF makeTypeInfo "double" [Uniform makeTypeInfo]))
+testInjF2 = Program [] [] (ExpF makeTypeInfo (InjF makeTypeInfo "double" [Uniform makeTypeInfo]))
 
 testPlus3 :: Program Double
-testPlus3 = Program [] (LetIn makeTypeInfo "a" (Uniform makeTypeInfo) (PlusF makeTypeInfo (Var makeTypeInfo "a") (Var makeTypeInfo "a")))
+testPlus3 = Program [] [] (LetIn makeTypeInfo "a" (Uniform makeTypeInfo) (PlusF makeTypeInfo (Var makeTypeInfo "a") (Var makeTypeInfo "a")))
 
 testTopK :: Program Double
-testTopK = Program [] (IfThenElse makeTypeInfo (GreaterThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 0.05))) (Constant makeTypeInfo (VFloat 1)) (Constant makeTypeInfo (VFloat 0)))
+testTopK = Program [] [] (IfThenElse makeTypeInfo (GreaterThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 0.05))) (Constant makeTypeInfo (VFloat 1)) (Constant makeTypeInfo (VFloat 0)))
 
 testTheta :: Program Double
-testTheta = Program [] (Lambda makeTypeInfo "thetas" (ThetaI makeTypeInfo (Var makeTypeInfo "thetas") 0))
+testTheta = Program [] [] (Lambda makeTypeInfo "thetas" (ThetaI makeTypeInfo (Var makeTypeInfo "thetas") 0))
 
 testThetaTree :: Program Double
-testThetaTree = Program [] (Lambda makeTypeInfo "thetas" (PlusF makeTypeInfo (ThetaI makeTypeInfo (Var makeTypeInfo "thetas") 2) (ThetaI makeTypeInfo (Subtree makeTypeInfo (Var makeTypeInfo "thetas") 1) 1)))
+testThetaTree = Program [] [] (Lambda makeTypeInfo "thetas" (PlusF makeTypeInfo (ThetaI makeTypeInfo (Var makeTypeInfo "thetas") 2) (ThetaI makeTypeInfo (Subtree makeTypeInfo (Var makeTypeInfo "thetas") 1) 1)))
 
 testAnd :: Program Double
-testAnd = Program [] (And makeTypeInfo (LessThan makeTypeInfo (Normal makeTypeInfo) (Constant makeTypeInfo (VFloat 0))) (GreaterThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 0.5))))
+testAnd = Program [] [] (And makeTypeInfo (LessThan makeTypeInfo (Normal makeTypeInfo) (Constant makeTypeInfo (VFloat 0))) (GreaterThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 0.5))))
 
 testOr :: Program Double
-testOr = Program [] (Or makeTypeInfo (LessThan makeTypeInfo (Normal makeTypeInfo) (Constant makeTypeInfo (VFloat 0))) (GreaterThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 0.5))))
+testOr = Program [] [] (Or makeTypeInfo (LessThan makeTypeInfo (Normal makeTypeInfo) (Constant makeTypeInfo (VFloat 0))) (GreaterThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 0.5))))
 
 testNot :: Program Double
-testNot = Program [] (Not makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 0.75))))
+testNot = Program [] [] (Not makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 0.75))))
 
 testCallLambda :: Program Double
-testCallLambda = Program [] (Apply makeTypeInfo (Lambda makeTypeInfo "a" (PlusF makeTypeInfo (Var makeTypeInfo "a") (Uniform makeTypeInfo))) (Constant makeTypeInfo (VFloat 2)))
+testCallLambda = Program [] [] (Apply makeTypeInfo (Lambda makeTypeInfo "a" (PlusF makeTypeInfo (Var makeTypeInfo "a") (Uniform makeTypeInfo))) (Constant makeTypeInfo (VFloat 2)))
 
 testCallLambdaAdvanced :: Program Double
-testCallLambdaAdvanced = Program [] (LetIn makeTypeInfo "l" (Lambda makeTypeInfo "a" (PlusF makeTypeInfo (Var makeTypeInfo "a") (Uniform makeTypeInfo))) (Apply makeTypeInfo (Var makeTypeInfo "l") (Constant makeTypeInfo (VFloat 2))))
+testCallLambdaAdvanced = Program [] [] (LetIn makeTypeInfo "l" (Lambda makeTypeInfo "a" (PlusF makeTypeInfo (Var makeTypeInfo "a") (Uniform makeTypeInfo))) (Apply makeTypeInfo (Var makeTypeInfo "l") (Constant makeTypeInfo (VFloat 2))))
 
 testLetIn :: Program Double
-testLetIn = Program [] (LetIn makeTypeInfo "u" (Uniform makeTypeInfo) (PlusF makeTypeInfo (Var makeTypeInfo "u") (Constant makeTypeInfo (VFloat 1))))
---testCallLambda = Program [] (CallLambda makeTypeInfo (Uniform makeTypeInfo) (Lambda makeTypeInfo "a" (PlusF makeTypeInfo (Var makeTypeInfo "a") (Uniform makeTypeInfo))))
+testLetIn = Program [] [] (LetIn makeTypeInfo "u" (Uniform makeTypeInfo) (PlusF makeTypeInfo (Var makeTypeInfo "u") (Constant makeTypeInfo (VFloat 1))))
+--testCallLambda = Program [] [] (CallLambda makeTypeInfo (Uniform makeTypeInfo) (Lambda makeTypeInfo "a" (PlusF makeTypeInfo (Var makeTypeInfo "a") (Uniform makeTypeInfo))))
 {-
 flipCoin :: Expr Double
 flipCoin = GreaterThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 0.5))
@@ -173,18 +174,18 @@ testLet2 = Program [](LetIn makeTypeInfo "x"
 -- sample 1.9 -> x? sig(x) = 1.1 --> invert(sig = 1.1) = NaN
 -- theta2 = 0.2
 testLetNonInvert :: Program Double
-testLetNonInvert = Program [] (LetIn makeTypeInfo "x" (PlusF makeTypeInfo (ThetaI makeTypeInfo 0) (Normal makeTypeInfo))
+testLetNonInvert = Program [] [] (LetIn makeTypeInfo "x" (PlusF makeTypeInfo (ThetaI makeTypeInfo 0) (Normal makeTypeInfo))
           (PlusF makeTypeInfo (InjF makeTypeInfo "sig" [] (Var makeTypeInfo "x")) (ThetaI makeTypeInfo 1)))
           
 testLetPot :: Program Double
-testLetPot = Program [] (LetIn makeTypeInfo "x" (PlusF makeTypeInfo (ThetaI makeTypeInfo 0) (Normal makeTypeInfo)) (InjF makeTypeInfo "mult" [ThetaI makeTypeInfo 1] (Var makeTypeInfo "x")))
+testLetPot = Program [] [] (LetIn makeTypeInfo "x" (PlusF makeTypeInfo (ThetaI makeTypeInfo 0) (Normal makeTypeInfo)) (InjF makeTypeInfo "mult" [ThetaI makeTypeInfo 1] (Var makeTypeInfo "x")))
 
 testInjFNot :: Program Double
-testInjFNot  = Program [] (IfThenElse makeTypeInfo (InjF makeTypeInfo "not" [] (GreaterThan makeTypeInfo (ThetaI makeTypeInfo 0)(Uniform makeTypeInfo)))
+testInjFNot  = Program [] [] (IfThenElse makeTypeInfo (InjF makeTypeInfo "not" [] (GreaterThan makeTypeInfo (ThetaI makeTypeInfo 0)(Uniform makeTypeInfo)))
                             (Normal makeTypeInfo) 
                             (InjF makeTypeInfo "plus" [ThetaI makeTypeInfo 1] (Normal makeTypeInfo)))
 testListPlus :: Program Double
-testListPlus  = Program [] (InjF makeTypeInfo "listMult" 
+testListPlus  = Program [] [] (InjF makeTypeInfo "listMult" 
     [Cons makeTypeInfo (ThetaI makeTypeInfo 0) (Cons makeTypeInfo (ThetaI makeTypeInfo 1) (Null makeTypeInfo))] 
     (Cons makeTypeInfo (PlusF makeTypeInfo (Normal makeTypeInfo) (Constant makeTypeInfo (VFloat 2.0)))
      (Cons makeTypeInfo (PlusF makeTypeInfo (Normal makeTypeInfo) (Constant makeTypeInfo (VFloat 3.0))) (Null makeTypeInfo)))
@@ -264,7 +265,7 @@ testBranchedLet = Program [](LetInmakeTypeInfo "x" (PlusF makeTypeInfo (Normal m
 -}
 
 testNestedLetInDecl :: Program Double
-testNestedLetInDecl = Program [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (ThetaI makeTypeInfo 0) (Normal makeTypeInfo))
+testNestedLetInDecl = Program [] [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (ThetaI makeTypeInfo 0) (Normal makeTypeInfo))
                          (LetIn makeTypeInfo  "y" (PlusF makeTypeInfo (ThetaI makeTypeInfo 1) (PlusF makeTypeInfo (Normal makeTypeInfo) (Var makeTypeInfo "x")))
                                   (Cons makeTypeInfo (Var makeTypeInfo "x")
                                      (Cons makeTypeInfo (Var makeTypeInfo "y")
@@ -273,21 +274,21 @@ testNestedLetInDecl = Program [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (The
 -- let x = normal in let y = normal in [x, x+y]
                                    
 testNestedLetInWit :: Program Double
-testNestedLetInWit = Program [] (LetIn makeTypeInfo "x" (MultF makeTypeInfo (ThetaI makeTypeInfo 0) (Normal makeTypeInfo))
+testNestedLetInWit = Program [] [] (LetIn makeTypeInfo "x" (MultF makeTypeInfo (ThetaI makeTypeInfo 0) (Normal makeTypeInfo))
                          (LetIn makeTypeInfo  "y" (MultF makeTypeInfo (Normal makeTypeInfo) (ThetaI makeTypeInfo 0) )
                                   (Cons makeTypeInfo (PlusF makeTypeInfo (Var makeTypeInfo "y") (Var makeTypeInfo "x"))
                                     (Cons makeTypeInfo  (Var makeTypeInfo "x")
                                      (Null makeTypeInfo)))))
 --testInjFD :: Program Double
---testInjFD = Program [] (InjF makeTypeInfo "mult" [Constant makeTypeInfo (VFloat (-2.0))] (PlusF makeTypeInfo (ThetaI makeTypeInfo 0) (Normal makeTypeInfo)))
+--testInjFD = Program [] [] (InjF makeTypeInfo "mult" [Constant makeTypeInfo (VFloat (-2.0))] (PlusF makeTypeInfo (ThetaI makeTypeInfo 0) (Normal makeTypeInfo)))
 
 testObserve :: Program Double
-testObserve = Program [] (LetInmakeTypeInfo "x"  (Normal makeTypeInfo)
+testObserve = Program [] [] (LetInmakeTypeInfo "x"  (Normal makeTypeInfo)
                               (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (Constant makeTypeInfo (VFloat 2.0)) (Normal makeTypeInfo))
                                 (Var makeTypeInfo "x")))
 
 testLetXYD :: Program Double
-testLetXYD = Program [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (ThetaI makeTypeInfo 0) (Normal makeTypeInfo))
+testLetXYD = Program [] [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (ThetaI makeTypeInfo 0) (Normal makeTypeInfo))
                           (LetIn makeTypeInfo  "y"  (ThetaI makeTypeInfo 1)
                                          (Cons makeTypeInfo (Var makeTypeInfo "x") 
                                            (Cons makeTypeInfo 
@@ -297,7 +298,7 @@ testLetXYD = Program [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (ThetaI makeT
                                                 (Null makeTypeInfo))))))
                                              
 testLetXY :: Program Double
-testLetXY = Program [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (ThetaI makeTypeInfo 0) (Normal makeTypeInfo))
+testLetXY = Program [] [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (ThetaI makeTypeInfo 0) (Normal makeTypeInfo))
                           (LetIn makeTypeInfo  "y" (PlusF makeTypeInfo (ThetaI makeTypeInfo 1) (Normal makeTypeInfo))
                                          (Cons makeTypeInfo (Var makeTypeInfo "x") 
                                            (Cons makeTypeInfo 
@@ -308,14 +309,14 @@ testLetXY = Program [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (ThetaI makeTy
                                              
 
 testLetTuple :: Program Double
-testLetTuple = Program [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (ThetaI makeTypeInfo 0) (Normal makeTypeInfo))
+testLetTuple = Program [] [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (ThetaI makeTypeInfo 0) (Normal makeTypeInfo))
                                               (Cons makeTypeInfo (Var makeTypeInfo "x") 
                                                 (Cons makeTypeInfo 
                                                   (PlusF makeTypeInfo (Normal makeTypeInfo)(Var makeTypeInfo "x")) 
                                                   (Null makeTypeInfo))))
 
 testNormal :: Program Double
-testNormal = Program [] (Normal makeTypeInfo)
+testNormal = Program [] [] (Normal makeTypeInfo)
 
 --testLetE :: Expr Double
 --testLetE = LetIn makeTypeInfo "x" (Normal makeTypeInfo) (InjF makeTypeInfo "plus" [Constant makeTypeInfo (VFloat 3.0)] (Var makeTypeInfo "x"))
@@ -333,7 +334,7 @@ testPlus = IfThenElse makeTypeInfo
              (Cons makeTypeInfo (Constant makeTypeInfo (VBool True)) (Null makeTypeInfo))
 
 testPlus2 :: Program a
-testPlus2 = Program [] (PlusF makeTypeInfo (MultF makeTypeInfo (ThetaI makeTypeInfo 0) (Uniform makeTypeInfo)) (ThetaI makeTypeInfo 1))
+testPlus2 = Program [] [] (PlusF makeTypeInfo (MultF makeTypeInfo (ThetaI makeTypeInfo 0) (Uniform makeTypeInfo)) (ThetaI makeTypeInfo 1))
 
 
 testGreater :: Expr makeTypeInfo a

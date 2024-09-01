@@ -122,6 +122,7 @@ data TypeInfo a = TypeInfo
   , tags :: [Tag a]} deriving (Show, Eq, Ord)
 -- only use ord instance for algorithmic convenience, not for up/downgrades / lattice work.
 
+makeTypeInfo :: TypeInfo a
 makeTypeInfo = TypeInfo
     { rType = SPLL.Typing.RType.NotSetYet
     , pType = SPLL.Typing.PType.NotSetYet
@@ -134,9 +135,15 @@ makeTypeInfo = TypeInfo
 
 type Name = String
 
-data Program a = Program [Decl a] (Expr a) deriving (Show, Eq)
+data Program a = Program {
+                    functions :: [FnDecl a],
+                    neurals :: [NeuralDecl a],
+                    main :: (Expr a)
+                    } deriving (Show, Eq)
 
-type Decl a = (String, Expr a)
+type FnDecl a = (String, Expr a)
+
+type NeuralDecl a = (String, RType, Tag a)
 
 type WitnessedVars = Set.Set String
 

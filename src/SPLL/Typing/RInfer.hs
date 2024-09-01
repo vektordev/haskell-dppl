@@ -89,7 +89,7 @@ instance Monoid TEnv where
 
 
 makeMain :: Expr a -> Program a
-makeMain expr = Program [("main", expr)] (Call (getTypeInfo expr) "main")
+makeMain expr = Program [("main", expr)] [] (Call (getTypeInfo expr) "main")
 
 -- | Inference monad
 type Infer a = (ReaderT
@@ -121,7 +121,7 @@ class Substitutable a where
   apply :: Subst -> a -> a
   ftv   :: a -> Set.Set TVarR
 instance Substitutable (Program a) where
-  apply s (Program decls expr) = Program (zip (map fst decls) (map (apply s . snd) decls)) (apply s expr)
+  apply s (Program decls nns expr) = Program (zip (map fst decls) (map (apply s . snd) decls)) nns (apply s expr)
   ftv _ = Set.empty
 instance Substitutable (Expr a) where
   apply s = tMap (apply s . getTypeInfo)
@@ -171,7 +171,7 @@ instance Substitutable TEnv where
   ftv (TypeEnv env) = ftv $ Map.elems env
   
 addRTypeInfo :: (Show a) => Program a -> Program a
-addRTypeInfo p@(Program decls expr) =
+addRTypeInfo p@(Program decls _ expr) =
   case runInfer empty (inferProg p) of
     Left err -> error ("error in addRTypeInfo: " ++ show err)
     Right (ty, cs, p) -> case runSolve cs of
@@ -179,13 +179,13 @@ addRTypeInfo p@(Program decls expr) =
       Right subst -> apply subst p
       
 tryAddRTypeInfo :: (Show a) => Program a -> Either RTypeError (Program a)
-tryAddRTypeInfo p@(Program decls expr) = do
+tryAddRTypeInfo p@(Program decls _ expr) = do
   (ty, cs, p) <- runInfer empty (inferProg p)
   subst <- runSolve cs
   return $ apply subst p
 
 showResultsProg :: (Num a, Show a) => Program a -> IO ()
-showResultsProg p@(Program decls expr) = do
+showResultsProg p@(Program decls _ expr) = do
   case constraintsExprProg empty p of
     Left x -> print x
     Right (cs, subst, ty, scheme, p) -> do
@@ -225,7 +225,7 @@ listConstraints [] = putStrLn "-----"
 -------------------------------------------------------------------------------
 
 inferRType :: (Show a) => Program a -> Either RTypeError RType
-inferRType prog@(Program decls expr) = do
+inferRType prog@(Program decls _ expr) = do
   case runInfer mempty (inferProg prog) of
       Left err -> Left (ExprInfo $ prettyPrintProgNoReq prog)
       Right (ty, cs, p) -> case runSolve cs of
@@ -260,7 +260,7 @@ constraintsExpr env ex = case runInferExpr env (infer ex) of
 
 -- | Return the internal constraints used in solving for the type of an expression
 constraintsExprProg :: (Show a) => TEnv -> Program a -> Either RTypeError ([Constraint], Subst, RType, Scheme, Program a)
-constraintsExprProg env p@(Program decls expr) =
+constraintsExprProg env p@(Program decls _ expr) =
   case runInfer env (inferProg p) of
     Left err -> Left err
     Right (ty, cs, p) -> case runSolve cs of
@@ -334,7 +334,7 @@ rtFromScheme :: Scheme -> RType
 rtFromScheme (Forall _ rt) = rt
 
 inferProg :: (Show a) => Program a -> Infer (RType, [Constraint], Program a)
-inferProg p@(Program decls expr) = do
+inferProg p@(Program decls nns expr) = do
   -- init type variable for all function decls beforehand so we can build constraints for
   -- calls between these functions
   tv_rev <- freshVars (length decls) []
@@ -349,7 +349,7 @@ inferProg p@(Program decls expr) = do
   -- the inferred function type
   let tcs = zip (map (rtFromScheme . snd) func_tvs) (map fst3cts cts)
   -- combine all constraints
-  return (t1, tcs ++ concatMap snd3cts cts ++ c1, Program (zip (map fst decls) (map trd3cts cts)) et)
+  return (t1, tcs ++ concatMap snd3cts cts ++ c1, Program (zip (map fst decls) (map trd3cts cts)) nns et)
 fst3cts ::  (RType, [Constraint], Expr a) -> RType
 fst3cts (t, _, _) = t
 snd3cts ::  (RType, [Constraint], Expr a) -> [Constraint]

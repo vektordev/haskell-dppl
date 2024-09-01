@@ -188,4 +188,26 @@ cons = InferenceRule
          (Forall [TV "a"] ((TVarR $ TV "a") `TArrow` ((ListOf $ TVarR $ TV "a") `TArrow` (ListOf $ TVarR $ TV "a"))))
 
 allAlgorithms :: [InferenceRule]
-allAlgorithms = [ifThenElse, theta, uniform, normal, constant, exprNull, greaterThanLeft, greaterThanRight, lessThanLeft, lessThanRight, greaterThanSigmoid, plusLeft, plusRight, multLeft, multRight, injF2Left, injF2Right, negF, expF, enumeratePlusLeft]
+allAlgorithms = [
+  ifThenElse,
+  theta,
+  uniform,
+  normal,
+  constant,
+  exprNull,
+  greaterThanLeft,
+  greaterThanRight,
+  lessThanLeft,
+  lessThanRight,
+  greaterThanSigmoid,
+  plusLeft,
+  plusRight,
+  multLeft,
+  multRight,
+  injF2Left, 
+  injF2Right,
+  negF,
+  expF,
+  enumeratePlusLeft,
+  cons
+  ]

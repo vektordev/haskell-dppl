@@ -105,8 +105,9 @@ rIntersect (ListOf x) NullList = Just $ ListOf x
 rIntersect NullList (ListOf x) = Just $ ListOf x
 rIntersect left right = if left == right then Just left else Nothing
 
+--TODO: fit neurals into the Env here.
 progToEnv :: Program a -> Env a
-progToEnv (Program funcs main_expr) = ("main", main_expr): funcs
+progToEnv (Program funcs neural main_expr) = ("main", main_expr): funcs
 
 autoExpr :: (Eq a, Num a, Reifies s Tape) => Expr a -> Expr (Reverse s a)
 autoExpr e = exprMap auto e
