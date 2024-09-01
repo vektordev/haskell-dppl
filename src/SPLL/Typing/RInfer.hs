@@ -496,7 +496,7 @@ infer expr = case expr of
   InjF x name e1 -> do
     p_inf <- mapM infer e1
     let (Just (FPair fPair)) = lookup name globalFenv
-    let (FDecl (funcTy, _, _, _, _), [_]) = fPair
+    let (FDecl (funcTy, _, _, _, _), _) = fPair
     (retT, cFunc) <- buildFuncConstraints funcTy (map fst3cts p_inf) [] name
     return (retT, concatMap snd3cts p_inf ++ cFunc, InjF (setRType x retT) name (map trd3cts p_inf))
 

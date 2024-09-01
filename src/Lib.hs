@@ -157,8 +157,8 @@ someFunc = do--thatGaussThing
   PInfer2.showResultsProgDebug (addRTypeInfo $ addEmptyTypeInfo prog)
   putStrLn "done outputting constraints"
   let cmp2 = progToEnv $ addTypeInfo prog-}
-  let conf = CompilerConfig {topKThreshold = Nothing}
-  let prog = testInjF2
+  let conf = CompilerConfig {topKThreshold = Nothing, countBranches = False}
+  let prog = testInjFPlus
   putStrLn (pPrintProg prog)
   let typedProg = inferProg (addTypeInfo prog)
   let env = progToEnv typedProg
@@ -169,9 +169,7 @@ someFunc = do--thatGaussThing
   pPrint env
   let annotated = map (\(a,b) -> (a, SPLL.Analysis.annotate b)) env
   pPrint annotated
-  let irOld = envToIR conf annotated
-  let ir = map (Data.Bifunctor.second pullOutLetIns) irOld
-  pPrint ir
+  let ir = envToIR conf annotated
   let pycode = SPLL.CodeGenPyTorch.generateFunctions ir
   let jlcode = SPLL.CodeGenJulia.generateFunctions ir
   putStrLn "python code:"
@@ -180,6 +178,8 @@ someFunc = do--thatGaussThing
   putStrLn $ unlines jlcode
   output <- evalRandIO (IRInterpreter.generateRand ir ir [] (fromJust (lookup "main_gen" ir)))
   putStrLn ("Output: " ++ show output)
+  output <- evalRandIO (IRInterpreter.generateRand ir ir [IRConst $ VFloat (90)] (fromJust (lookup "main_prob" ir)))
+  putStrLn ("PDF@90: " ++ show output)
   --cmp2 <-  env
   --let cmp = [] ++ [("noiseMNistAdd", mNistNoise), ("expertmodel", expertModelsTyped), ("expertmodelAnnotated", expertAnnotatedTyped), ("mNistAdd", testNN)] :: Env TypeInfo Float
   --let cmp = [("main", testNN)] :: Env TypeInfo Float

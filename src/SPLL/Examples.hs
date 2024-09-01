@@ -33,7 +33,7 @@ uniformIfProg = Program [] (IfThenElse makeTypeInfo (GreaterThan makeTypeInfo (U
                              (Uniform makeTypeInfo)
                              (PlusF makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo $ VFloat 5)))
 uniformExp :: Program Double
-uniformExp = Program [] (ExpF makeTypeInfo (PlusF makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 4))))
+uniformExp = Program [] (InjF makeTypeInfo "exp" [PlusF makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 4))])
 
 testMultLeft ::Expr Float
 testMultLeft = MultF makeTypeInfo  (Constant makeTypeInfo (VFloat 3.0)) (Normal makeTypeInfo)
@@ -56,6 +56,9 @@ testNegFail = NegF makeTypeInfo (PlusF makeTypeInfo (Uniform makeTypeInfo) (Unif
 
 testInjF :: Program Double
 testInjF = Program [] (InjF makeTypeInfo "double" [Uniform makeTypeInfo])
+
+testInjFPlus :: Program Double
+testInjFPlus = Program [] (InjF makeTypeInfo "plus" [Constant makeTypeInfo (VFloat 1), Uniform makeTypeInfo])
 
 --testInjF2 :: Program Double
 --testInjF2 = Program [] (ExpF makeTypeInfo (MultF makeTypeInfo (Constant makeTypeInfo (VFloat 2)) (Uniform makeTypeInfo)))

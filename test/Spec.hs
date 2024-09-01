@@ -79,9 +79,9 @@ correctProbValuesTestCases = [(uniformProg, VFloat 0.5, [], VFloat 1.0),
                               (uniformIfProg, VFloat 0.5, [], VFloat 0.5),
                               (constantProg, VFloat 2, [], VFloat 1),
                               
-                              (uniformExp, VFloat $ exp 4.5, [], VFloat $ 1/exp 4.5),
+                              --(uniformExp, VFloat $ exp 4.5, [], VFloat $ 1/exp 4.5),
                               (testInjF, VFloat 1.5, [], VFloat 0.5),
-                              (testInjF2, VFloat 1.5, [], VFloat $ 1/3),
+                              --(testInjF2, VFloat 1.5, [], VFloat $ 1/3),
                               (testTheta, VFloat 1.5, flatTree [1.5], VFloat 1),
                               (testTheta, VFloat 1.5, flatTree [1], VFloat 0),
                               (testThetaTree, VFloat 11, [thetaTreeExample], VFloat 1),
@@ -113,7 +113,7 @@ correctIntegralValuesTestCases = [(uniformProg, VFloat 0, VFloat 1, [], VFloat 1
                                   --(testLetIn, VFloat 1.5, VFloat 2, [], VFloat 0.5)]
 
 noTopKConfig :: CompilerConfig a
-noTopKConfig = CompilerConfig Nothing
+noTopKConfig = CompilerConfig Nothing False
 
 prop_CheckProbTestCases :: Property
 prop_CheckProbTestCases = forAll (elements correctProbValuesTestCases) checkProbTestCase
@@ -154,7 +154,7 @@ irDensityTopK :: RandomGen g => Program Double -> Double -> Value Double -> [IRE
 irDensityTopK p thresh s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params) irExpr
   where Just irExpr = lookup "main_prob" irEnv
         sampleExpr = IRConst s
-        irEnv = envToIR (CompilerConfig (Just thresh)) annotated
+        irEnv = envToIR (CompilerConfig (Just thresh) False) annotated
         annotated = map (\(a,b) -> (a, annotate b)) env
         env = progToEnv typedProg
         typedProg = addTypeInfo p

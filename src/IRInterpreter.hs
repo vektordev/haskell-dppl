@@ -198,8 +198,10 @@ generate f globalEnv env args (IRLetIn name decl body) = do
   declVal <- generate f globalEnv env args decl
   let extendedEnv = (name, IRConst declVal):env
   generate f globalEnv extendedEnv args body
-generate f globalEnv env args (IRVar name) = generate f globalEnv env args expr
-  where Just expr = lookup name env
+generate f globalEnv env args (IRVar name) = 
+  case lookup name env of 
+    Just expr -> generate f globalEnv env args expr
+    Nothing -> error ("Variable " ++ name ++ " not declared")
 generate f globalEnv env args (IRCall name callArgs) = do
   let Just expr = lookup name globalEnv
   -- Evaluate the expressions here if value passed would be a local variable. TODO: This breaks passing of lambda functions as arguments

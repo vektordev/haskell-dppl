@@ -95,6 +95,17 @@ multRight :: InferenceRule
 multRight = mirror2 multLeft
 --multRight = InferenceRule StubMultF [SubExprNIsType 1 Deterministic] "multRight" mostChaotic
 
+injF2Left :: InferenceRule
+injF2Left = InferenceRule
+             StubInjF
+             [SubExprNIsType 0 Deterministic]
+             "injF2Left"
+             mostChaotic
+             (Forall [] (TFloat `TArrow` (TFloat `TArrow` TFloat)))
+            
+injF2Right :: InferenceRule
+injF2Right = mirror2 injF2Left
+
 expF :: InferenceRule
 expF = InferenceRule
           StubNegF
@@ -177,4 +188,4 @@ cons = InferenceRule
          (Forall [TV "a"] ((TVarR $ TV "a") `TArrow` ((ListOf $ TVarR $ TV "a") `TArrow` (ListOf $ TVarR $ TV "a"))))
 
 allAlgorithms :: [InferenceRule]
-allAlgorithms = [ifThenElse, theta, uniform, normal, constant, exprNull, greaterThanLeft, greaterThanRight, lessThanLeft, lessThanRight, greaterThanSigmoid, plusLeft, plusRight, multLeft, multRight, negF, expF, enumeratePlusLeft]
+allAlgorithms = [ifThenElse, theta, uniform, normal, constant, exprNull, greaterThanLeft, greaterThanRight, lessThanLeft, lessThanRight, greaterThanSigmoid, plusLeft, plusRight, multLeft, multRight, injF2Left, injF2Right, negF, expF, enumeratePlusLeft]
