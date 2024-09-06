@@ -133,7 +133,7 @@ containedVars :: (Expr a -> Set.Set String) -> Expr a -> Set.Set String
 containedVars f e = Set.union (f e) (foldl Set.union Set.empty (map (containedVars f) (getSubExprs e)))
 
 predicateProg :: (Expr a -> Bool) -> Program a -> Bool
-predicateProg f (Program decls _ expr) = and (map (predicateExpr f . snd) decls) && predicateExpr f expr
+predicateProg f (Program decls _) = and (map (predicateExpr f . snd) decls)
 
 predicateExpr :: (Expr a -> Bool) -> Expr a -> Bool
 predicateExpr f e = f e && and (map (predicateExpr f) (getSubExprs e))
@@ -250,7 +250,7 @@ tMap f expr = case expr of
   (ReadNN _ n a) -> ReadNN (f expr) n (tMap f a)
 
 tMapProg :: (Expr a -> (TypeInfo a)) -> Program a -> Program a
-tMapProg f (Program decls neural expr) = Program (zip (map fst decls) (map (tMap f . snd) decls)) neural (tMap f expr)
+tMapProg f (Program decls neural) = Program (zip (map fst decls) (map (tMap f . snd) decls)) neural
 
 getBinaryConstructor :: Expr a1 -> ((TypeInfo a2) -> Expr a2 -> Expr a2 -> Expr a2)
 getBinaryConstructor GreaterThan {} = GreaterThan
@@ -477,8 +477,7 @@ getRType (VList []) = NullList
 getRType (VTuple t1 t2) = Tuple (getRType t1) (getRType t2)
 
 prettyPrintProg :: (Num a, Show a) => Program a -> [String]
-prettyPrintProg (Program decls neurals expr) = concatMap prettyPrintDecl decls ++ concatMap prettyPrintNeural neurals ++ mainString
-  where mainString = ("--- Main Expression ---"):(prettyPrint expr:: [String])
+prettyPrintProg (Program decls neurals) = concatMap prettyPrintDecl decls ++ concatMap prettyPrintNeural neurals
 
 prettyPrintNeural = undefined
 
@@ -504,8 +503,7 @@ prettyPrintNoReq expr =
       fstLine = printFlatNoReq expr
 
 prettyPrintProgNoReq :: Program a -> [String]
-prettyPrintProgNoReq (Program fdecls ndecls expr) = concatMap prettyPrintDeclNoReq fdecls ++ concatMap prettyPrintNeuralNoReq ndecls ++ mainString
-  where mainString = ("--- Main Expression ---"):(prettyPrintNoReq expr:: [String])
+prettyPrintProgNoReq (Program fdecls ndecls) = concatMap prettyPrintDeclNoReq fdecls ++ concatMap prettyPrintNeuralNoReq ndecls
 
 prettyPrintNeuralNoReq :: NeuralDecl a -> [String]
 prettyPrintNeuralNoReq (name, ty, range) = l1:l2:(l3 range):[]

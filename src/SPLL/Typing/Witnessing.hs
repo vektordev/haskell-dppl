@@ -11,8 +11,7 @@ import qualified Data.Set as Set
 import Debug.Trace
 -- TODO What about multiple let ins
 addWitnessesProg :: (Show a) => Program a -> Program a
-addWitnessesProg (Program [] nns expr) = Program [] nns (addWitnesses Set.empty expr)
-addWitnessesProg (Program funcs nns expr) = Program (zip (map fst funcs) (map (addWitnesses Set.empty. snd) funcs)) nns (addWitnesses Set.empty expr)
+addWitnessesProg (Program funcs nns) = Program (zip (map fst funcs) (map (addWitnesses Set.empty. snd) funcs)) nns
 
 addWitnesses :: (Show a) => Set.Set String -> Expr a ->  Expr a
 addWitnesses _ (Var ti name) = Var (addWitnessTypeInfo name ti) name

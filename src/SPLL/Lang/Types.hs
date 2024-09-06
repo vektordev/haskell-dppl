@@ -137,8 +137,7 @@ type Name = String
 
 data Program a = Program {
                     functions :: [FnDecl a],
-                    neurals :: [NeuralDecl a],
-                    main :: (Expr a)
+                    neurals :: [NeuralDecl a]
                     } deriving (Show, Eq)
 
 type FnDecl a = (String, Expr a)

@@ -2,7 +2,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 
 module SPLL.Typing.Typing (
-  Env,
   TypeError,
   TypeInfo(..),
   ChainName,
@@ -16,9 +15,7 @@ module SPLL.Typing.Typing (
   setWitnessedVars,
   setChainName,
   setTags,
-  progToEnv,
   autoVal,
-  autoEnv,
   autoExpr
 )where
 
@@ -59,14 +56,6 @@ setChainName t name = t {chainName = name}
 setTags:: TypeInfo a -> [Tag a] -> TypeInfo a
 setTags t tgs = t {tags = tgs}
 
--- Because Env will be polluted by local symbols as we evaluate, we need to reset when calling functions.
--- Therefore, we define that all functions must exist in the global namespace.
--- That way, it is sufficient to carry only the global namespace as reset point.
--- local functions are in principle possible, but they need to carry their own environment with them,
--- e.g. by expanding Env to be of [(String, Env x a, Expr a)], where [] indicates a shorthand for the global scope.
-type Env a = [(String, Expr a)]
-type Check a = ExceptT TypeError (Reader (Env a))
-
 data TypeError = Mismatch RType RType
                deriving (Show, Eq)
 
@@ -105,12 +94,14 @@ rIntersect (ListOf x) NullList = Just $ ListOf x
 rIntersect NullList (ListOf x) = Just $ ListOf x
 rIntersect left right = if left == right then Just left else Nothing
 
---TODO: fit neurals into the Env here.
-progToEnv :: Program a -> Env a
-progToEnv (Program funcs neural main_expr) = ("main", main_expr): funcs
+autoProg :: (Eq a, Num a, Reifies s Tape) => Program a -> Program (Reverse s a)
+autoProg p = Program (map (\(n, f) -> (n, autoExpr f)) (functions p)) (map autoNeuralDecl (neurals p))
 
 autoExpr :: (Eq a, Num a, Reifies s Tape) => Expr a -> Expr (Reverse s a)
 autoExpr e = exprMap auto e
+
+autoNeuralDecl :: (Eq a, Num a, Reifies s Tape) => NeuralDecl a -> NeuralDecl (Reverse s a)
+autoNeuralDecl (n, rt, t) = (n, rt, autoTag t)
 
 --TODO: Maybe we should genericize this to be (a -> b) -> TI a -> TI b
 autoTypeInfo :: (Eq a, Num a, Reifies s Tape) =>TypeInfo a -> TypeInfo (Reverse s a)
@@ -135,8 +126,6 @@ autoTag (EnumList l) = EnumList (Prelude.map autoVal l)
 autoTag (Alg a) = Alg a
 autoTag _ = error "Failed to convert to auto tag"
 
-autoEnv :: (Eq a, Num a, Reifies s Tape) => Env a -> Env (Reverse s a)
-autoEnv = Prelude.map (\ (name, expr) -> (name, autoExpr expr))
 
 autoVal :: (Num a, Reifies s Tape) => Value a -> Value (Reverse s a)
 autoVal (VBool x) = VBool x

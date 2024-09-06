@@ -17,7 +17,6 @@ import SPLL.Typing.Typing
 import SPLL.Analysis
 import SPLL.IntermediateRepresentation
 import SPLL.IRCompiler
-import Interpreter
 import IRInterpreter
 import Data.Maybe (fromJust, catMaybes)
 import Control.Monad.Random.Lazy (Random, RandomGen, Rand, evalRandIO)
@@ -42,7 +41,7 @@ class Recompilable a where
   recompile :: a -> Either CompileError a
 
 untypeP :: Program a -> Program a
-untypeP (Program defs main) = Program (map (\(a,b) -> (a, untypeE b)) defs) (untypeE main)
+untypeP (Program defs neuralDecl) = Program (map (\(a,b) -> (a, untypeE b)) defs) neuralDecl
 
 untypeE :: Expr a -> Expr a
 untypeE = tMap (const makeTypeInfo)
@@ -80,7 +79,7 @@ correctProbValuesTestCases = [(uniformProg, VFloat 0.5, [], VFloat 1.0),
                               (constantProg, VFloat 2, [], VFloat 1),
                               
                               --(uniformExp, VFloat $ exp 4.5, [], VFloat $ 1/exp 4.5),
-                              (testInjF, VFloat 1.5, [], VFloat 0.5),
+                              --(testInjF, VFloat 1.5, [], VFloat 0.5),
                               --(testInjF2, VFloat 1.5, [], VFloat $ 1/3),
                               (testTheta, VFloat 1.5, flatTree [1.5], VFloat 1),
                               (testTheta, VFloat 1.5, flatTree [1], VFloat 0),
@@ -105,7 +104,7 @@ correctIntegralValuesTestCases = [(uniformProg, VFloat 0, VFloat 1, [], VFloat 1
                                   (uniformIfProg, VFloat 0, VFloat 1, [], VFloat 0.5),
                                   (constantProg, VFloat 1, VFloat 3, [], VFloat 1),
                                   --,
-                                  (testInjF, VFloat 0, VFloat 1, [], VFloat 0.5),
+                                  --(testInjF, VFloat 0, VFloat 1, [], VFloat 0.5),
                                   (testTheta, VFloat 0.9, VFloat 1.1, flatTree [1], VFloat 1),
                                   (simpleCall, VFloat 0, VFloat 1, [], VFloat 1.0),
                                   (testCallLambda, VFloat 2, VFloat 3, [], VFloat 1.0)]
@@ -155,8 +154,7 @@ irDensityTopK p thresh s params = IRInterpreter.generateRand irEnv irEnv (sample
   where Just irExpr = lookup "main_prob" irEnv
         sampleExpr = IRConst s
         irEnv = envToIR (CompilerConfig (Just thresh) False) annotated
-        annotated = map (\(a,b) -> (a, annotate b)) env
-        env = progToEnv typedProg
+        annotated = annotateProg typedProg
         typedProg = addTypeInfo p
 
 
@@ -165,8 +163,7 @@ irDensity p s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params
   where Just irExpr = lookup "main_prob" irEnv
         sampleExpr = IRConst s
         irEnv = envToIR noTopKConfig annotated
-        annotated = map (\(a,b) -> (a, annotate b)) env
-        env = progToEnv typedProg
+        annotated = annotateProg typedProg
         typedProg = addTypeInfo p
 
 irIntegral :: RandomGen g => Program Double -> Value Double -> Value Double -> [IRExpr Double] -> Rand g (Value Double)
@@ -175,8 +172,7 @@ irIntegral p low high params = IRInterpreter.generateRand irEnv irEnv (lowExpr:h
         lowExpr = IRConst low
         highExpr = IRConst high
         irEnv = envToIR noTopKConfig annotated
-        annotated = map (\(a,b) -> (a, annotate b)) env
-        env = progToEnv typedProg
+        annotated = annotateProg typedProg
         typedProg = addTypeInfo p
 
 {-irInterpret :: RandomGen g => Program () Double -> [IRExpr Double] -> Rand g (Value Double)

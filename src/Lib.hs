@@ -29,7 +29,6 @@ import SPLL.Typing.PType
 import SPLL.Typing.Infer
 import SPLL.Typing.PInfer2
 import SPLL.Typing.RInfer2
-import Interpreter
 import Control.Monad.Random (evalRandIO, getRandomR, replicateM, forM_)
 import SPLL.IntermediateRepresentation
 import SPLL.Analysis
@@ -98,14 +97,16 @@ thatGaussThing = do
   llScan typedEnv (fst $ last thetasRecovered) main
 -}
 
-llScan :: (Erf a, Real a, Floating a, Show a, Enum a) => Env a -> Thetas a -> Expr a -> IO ()
-llScan tenv thetas main = do
+{-
+llScan :: (Erf a, Real a, Floating a, Show a, Enum a) => Program a -> Thetas a -> Expr a -> IO ()
+llScan p thetas main = do
   let scanPts = [(x,y) | x <- [0, 0.01 .. 1], y <- [0, 0.01 .. 1]]
-  let scanRes = [(x, y, runInferL tenv main thetas (VList [VFloat x, VFloat y])) | x <- [0, 0.01.. 1], y <- [0, 0.01.. 1]]
+  let scanRes = [(x, y, runInferL p main thetas (VList [VFloat x, VFloat y])) | x <- [0, 0.01.. 1], y <- [0, 0.01.. 1]]
   print scanPts
   print scanRes
   let fileStr = unlines $ map (\(x,y,l) -> show x ++ ", " ++ show y ++ ", " ++ (show $ unwrapP l)) scanRes
   writeFile "./data/ll_out.txt" fileStr
+  -}
 {-
 newCodeGen :: Expr TypeInfo Float -> IO ()
 newCodeGen tExpr = do
@@ -120,10 +121,10 @@ newCodeGen tExpr = do
   let prob = generateCode irProb ""
   putStrLn $ unlines prob-}
 
-newCodeGenAll :: (Show a, Ord a, Floating a) => CompilerConfig a -> Env a -> IO ()
-newCodeGenAll conf env = do
-  pPrint env
-  let annotated = map (\(a,b) -> (a, SPLL.Analysis.annotate b)) env
+newCodeGenAll :: (Show a, Ord a, Floating a) => CompilerConfig a -> Program a -> IO ()
+newCodeGenAll conf p = do
+  pPrint p
+  let annotated = annotateProg p
   pPrint annotated
   let ir = envToIR conf annotated
   pPrint ir
@@ -158,16 +159,15 @@ someFunc = do--thatGaussThing
   putStrLn "done outputting constraints"
   let cmp2 = progToEnv $ addTypeInfo prog-}
   let conf = CompilerConfig {topKThreshold = Nothing, countBranches = False}
-  let prog = testInjFPlus
+  let prog = Program [("main", Lambda makeTypeInfo "symbol" (ReadNN makeTypeInfo "MNist" (Var makeTypeInfo "symbol")))] [("MNist", TFloat, EnumRange (VInt 0, VInt 10))] :: Program Float
   putStrLn (pPrintProg prog)
-  let typedProg = inferProg (addTypeInfo prog)
-  let env = progToEnv typedProg
+  let typedProg = {-inferProg-} (addTypeInfo prog)
 
   --let fwdInfer = inferProbProg typedProg
   --pPrint fwdInfer
 
-  pPrint env
-  let annotated = map (\(a,b) -> (a, SPLL.Analysis.annotate b)) env
+  pPrint prog
+  let annotated = annotateProg typedProg
   pPrint annotated
   let ir = envToIR conf annotated
   let pycode = SPLL.CodeGenPyTorch.generateFunctions ir
@@ -251,21 +251,22 @@ runNNTest = do
   --mkSamples 1000 typedEnv [] [Constant (TypeInfo TSymbol Deterministic) (VSymbol "image1"), Constant (TypeInfo TSymbol Deterministic) (VSymbol "image2")] main
 -}
 
-myGradientAscent :: (Erf a, RealFloat a, Show a, Floating a, Real a) => Int -> a -> [(String, Expr a)] -> Thetas a -> Expr a -> [Value a] -> [(Thetas a, a)]
+{-
+myGradientAscent :: (Erf a, RealFloat a, Show a, Floating a, Real a) => Int -> a -> Program a -> Thetas a -> Expr a -> [Value a] -> [(Thetas a, a)]
 myGradientAscent 0 _ _ _ _ _ = []
-myGradientAscent n learning_rate env thetas expr vals =
-  (thetas, loss) : myGradientAscent (n-1) learning_rate env new expr vals
+myGradientAscent n learning_rate p thetas expr vals =
+  (thetas, loss) : myGradientAscent (n-1) learning_rate p new expr vals
     where
-      (loss, new) = optimizeStep env expr vals thetas learning_rate
+      (loss, new) = optimizeStep p expr vals thetas learning_rate
 
-optimizeStep :: (Erf a, Show a, RealFloat a, Floating a, Real a) => Env a -> Expr a -> [Value a] -> Thetas a -> a -> (a, Thetas a)
-optimizeStep env expr samples thetas learning_rate = (loss,
+optimizeStep :: (Erf a, Show a, RealFloat a, Floating a, Real a) => Program a -> Expr a -> [Value a] -> Thetas a -> a -> (a, Thetas a)
+optimizeStep p expr samples thetas learning_rate = (loss,
     addThetas thetas (mult (1.0 / fromIntegral (length samples))(mult learning_rate gradient)) )
   where
     -- does it make a difference if we do sum(gradients) or if we do gradient(sums)?
     -- TODO: Is it correct to apply map-sum, or do we flatten the wrong dimension here?
     --grad_loss :: [(loss :: a, grad :: Thetas a)]
-    grad_loss = [grad' (\theta -> log $ unwrapP $ runInferL (autoEnv env) (autoExpr expr) theta (autoVal sample)) thetas | sample <- samples]
+    grad_loss = [grad' (\theta -> log $ unwrapP $ runInferL (autoProg p) (autoExpr expr) theta (autoVal sample)) thetas | sample <- samples]
     --grad_thetas = [Thetas a]
 
     grad_thetas = map snd grad_loss
@@ -273,9 +274,9 @@ optimizeStep env expr samples thetas learning_rate = (loss,
     gradient = foldl1 addThetas grad_thetas
     loss = sum $ map fst grad_loss
 
+-}
 
-
-addThetas :: (Floating a) => Thetas a -> Thetas a -> Thetas a
+{-addThetas :: (Floating a) => Thetas a -> Thetas a -> Thetas a
 addThetas x y = zipWith (+) x y
 
 mult :: (Floating a) => a -> Thetas a -> Thetas a
@@ -284,10 +285,10 @@ mult x y = map (*x) y
 
 testDensity2d :: String -> Program Double -> Thetas Double -> IO ()
 testDensity2d experimentName prog thetas = do
-  let typedEnv = progToEnv $ addWitnessesProg (addTypeInfo prog)
-  let Just main = lookup "main" typedEnv
+  let typedProg = addWitnessesProg (addTypeInfo prog)
+  let Just main = lookup "main" typedProg
   print "Type Info"
-  samples <- mkSamples 10000 typedEnv thetas [] main
+  samples <- mkSamples 10000 typedProg thetas [] main
   let dataStrs = map (\(VList vals) -> intercalate "," (map (\(VFloat x) -> show x) vals)) samples
   let fileStr = unlines dataStrs
   writeFile ("./data/gen_samples" ++ experimentName ++ ".txt") fileStr
@@ -296,7 +297,7 @@ testDensity2d experimentName prog thetas = do
   let interval_b = (0.01, 0.99, 0.01)
   let interval = sequence [createInputs interval_a, createInputs interval_b]
   let valF [d1, d2] = VList [VFloat d1,  VFloat d2]
-  let likelihood_y = map (\(PDF p) -> p) (map (runInferL typedEnv main thetas  . valF) interval)
+  let likelihood_y = map (\(PDF p) -> p) (map (runInferL typedProg main thetas  . valF) interval)
   let dataStrsL = map show likelihood_y
   let interval_line (a,b,c) = show a ++ "," ++ show b ++ "," ++ show c
   let fileStrL = unlines ((interval_line interval_a):(interval_line interval_b:dataStrsL))
@@ -305,26 +306,27 @@ testDensity2d experimentName prog thetas = do
 
 testDensity1d :: String -> Program Double -> Thetas Double -> IO ()
 testDensity1d experimentName prog thetas = do
-  let typedEnv = progToEnv $ addWitnessesProg (addTypeInfo prog)
-  let Just main = lookup "main" typedEnv
+  let typedProg = addWitnessesProg (addTypeInfo prog)
+  let Just main = lookup "main" typedProg
   print "Type Info"
-  samples <- mkSamples 10000 typedEnv thetas [] main
+  samples <- mkSamples 10000 typedProg thetas [] main
   let dataStrs = map (\(VFloat val)-> show val) samples
   let fileStr = unlines dataStrs
   writeFile ("./data/gen_samples1d" ++ experimentName ++ ".txt") fileStr
   let interval_a = (0.01, 0.99, 0.01)
   let interval =  createInputs interval_a
-  let likelihood_y = map (\(PDF p) -> p) (map (runInferL typedEnv main thetas . VFloat) interval)
+  let likelihood_y = map (\(PDF p) -> p) (map (runInferL typedProg main thetas . VFloat) interval)
   let dataStrsL = map show likelihood_y
   let interval_line (a,b,c) = show a ++ "," ++ show b ++ "," ++ show c
   let fileStrL = unlines ((interval_line interval_a):dataStrsL)
   writeFile ("./data/likelihoods_1d" ++ experimentName ++ ".txt") fileStrL
+  -}
   
-genTheta :: ( Show a, Fractional a, Ord a, Random a, Floating a) => Program a -> IO (a)
+{-genTheta :: ( Show a, Fractional a, Ord a, Random a, Floating a) => Program a -> IO (a)
 genTheta p = if predicateProg isNotTheta p
               then do
-                     let typedEnv = progToEnv $ addWitnessesProg (addTypeInfo p)
-                     let (Just main) = lookup "main" typedEnv
+                     let typedProg = addWitnessesProg (addTypeInfo p)
+                     let (Just main) = lookup "main" typedProg
                      val <- evalRandIO $ Interpreter.generate typedEnv typedEnv [] [] main
                      return (getVFloat val)
               else error "Theta in prior expression"
@@ -340,7 +342,8 @@ genThetas p = if predicateProg isNotTheta p
 valToFloatList :: Value a -> Thetas a
 valToFloatList (VFloat x) = [x]
 valToFloatList (VList vfl) = map getVFloat vfl
-
+-}
+{-
 testRun :: (Erf a, RealFloat a, Floating a, Ord a, Random a, Show a, Real a, Enum a) => String -> Program a -> Thetas a -> IO ()
 testRun experimentName prog thetas = do
   print "Hello world"
@@ -440,3 +443,4 @@ avgSamples samples =  (1.0 / fromIntegral (length samples)) * (rec samples 0)
         rec ((VFloat b):k) z = rec k (z + b)
 count :: Eq a => [a] -> [(Int, a)]
 count lst = sortBy (compare `on` (Down . fst)) [(length $ elemIndices x lst, x) | x <- nub lst]
+-}

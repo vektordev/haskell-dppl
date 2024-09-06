@@ -59,19 +59,18 @@ setLetInChainNames e@(LetIn t n v b) = lift $ do
 setLetInChainNames e = return e
 
 annotateChainNamesProg :: (Show a) => Program a -> Chain (Program a)
-annotateChainNamesProg (Program decls nns e) = do
-  eAn <- annotateSyntaxTree e
+annotateChainNamesProg (Program decls nns) = do
   declsAn <- Prelude.mapM (\(n, ex) -> do
     exAn <- annotateSyntaxTree ex
     return (n, exAn)) decls
-  return $ Program declsAn nns eAn
+  return $ Program declsAn nns
 
 inferProg :: (Eq a, Floating a, Show a) => Program a -> Program a
-inferProg p = Program finishedDecls nns finishedExpr
+inferProg p = Program finishedDecls nns
   where
     (annotatedProg, _) = runState (runSupplyT (annotateChainNamesProg p) (+1) 1) []
-    Program declsAn nns eAn = annotatedProg
-    annotatedExprs = eAn:Prelude.map snd declsAn
+    Program declsAn nns = annotatedProg
+    annotatedExprs = Prelude.map snd declsAn
     startDetVars = concatMap findDeterminism annotatedExprs
     detVarHornClauses = map (\n -> ([], [(n, CDeterministic)], (StubConstant, 0))) startDetVars
     hornClauses = concatMap constructHornClauses annotatedExprs
@@ -79,7 +78,6 @@ inferProg p = Program finishedDecls nns finishedExpr
     startClause = ([],  [(startExprName, CInferDeterministic)], (StubConstant, 0))
     finishedState = fixpointIteration (hornClauses, startClause:detVarHornClauses)
     finishedDecls = Prelude.map (Data.Bifunctor.second (tMap (annotateMaximumCType finishedState))) declsAn
-    finishedExpr = tMap (annotateMaximumCType finishedState) eAn
     
 
 annotateMaximumCType :: (Eq a) => ChainInferState a -> Expr a -> TypeInfo a
@@ -170,7 +168,7 @@ fixpointIteration (clauses, used) = if newDetVars == detVars
 newtype Inversion a = Inversion (ChainName, IRExpr a) deriving (Show, Eq)
 
 inferProbProg :: (Show a, Num a, Eq a) => Program a -> IRExpr a
-inferProbProg (Program [] nns main) = inferProbExpr main
+inferProbProg (Program [("main", main)] nns) = inferProbExpr main
 inferProbProg _  = error "Programs with function declarations are not yet implemented"
 
 inferProbExpr :: (Show a, Num a, Eq a) => Expr a -> IRExpr a

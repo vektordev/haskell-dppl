@@ -1,5 +1,6 @@
 module SPLL.Analysis (
-  annotate
+  annotate,
+  annotateProg
 ) where
 
 import SPLL.Lang.Types
@@ -9,27 +10,41 @@ import SPLL.Typing.RType
 import SPLL.Typing.PType
 import Data.Maybe (maybeToList, fromJust, isNothing)
 import Data.List (nub)
+import Data.Bifunctor
 import SPLL.Typing.Typing (TypeInfo, TypeInfo(..), Tag(..), setTags)
-annotate :: (Show a) => Expr a -> Expr a
-annotate = tMap annotateLocal
+
+
+annotateProg :: (Show a) => Program a -> Program a
+annotateProg p@Program {functions=f} = p{functions = map (second (annotate p)) f}
+
+annotate :: (Show a) => Program a -> Expr a -> Expr a
+annotate p = tMap annotateLocal
   where
     annotateLocal e = setTags ti tags
       where
         ti = getTypeInfo e
         tags =
           [Alg $ findAlgorithm e | likelihoodFunctionUsesTypeInfo $ toStub e]
-          ++ fmap EnumList (maybeToList (findEnumerable e))
+          ++ fmap EnumList (maybeToList (findEnumerable p e))
 
-findEnumerable :: Expr a -> Maybe [Value a]
-findEnumerable ReadNN {} = Just [VInt i | i <- [0..9]]
-findEnumerable (PlusI _ left right) =
+findEnumerable :: Program a -> Expr a -> Maybe [Value a]
+findEnumerable p (ReadNN _ name _) = case getNeuralDeclTag name (neurals p) of
+  (EnumList l) -> return l
+  (EnumRange (VInt a, VInt b)) -> return [VInt i | i <- [a..b]]
+  _ -> error $ "Invalid Neural declaration for " ++ name
+findEnumerable p (PlusI _ left right) =
   if isNothing leftEnum || isNothing rightEnum
     then Nothing
     else Just $ map VInt $ nub [a + b | VInt a <- fromJust leftEnum, VInt b <- fromJust rightEnum]
       where
-        leftEnum = findEnumerable left
-        rightEnum = findEnumerable right
-findEnumerable _ = Nothing
+        leftEnum = findEnumerable p left
+        rightEnum = findEnumerable p right
+findEnumerable p _ = Nothing
+
+getNeuralDeclTag :: String -> [NeuralDecl a] -> Tag a
+getNeuralDeclTag name ((n, _, tag):_) | n == name = tag
+getNeuralDeclTag name (_:rest) = getNeuralDeclTag name rest
+getNeuralDeclTag name [] = error $ "No neural declaration found for name: " ++ name
 
 findAlgorithm :: (Show a) => Expr a -> InferenceRule
 findAlgorithm expr = case validAlgs of

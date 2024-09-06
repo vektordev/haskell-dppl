@@ -4,8 +4,7 @@ import SPLL.Lang.Lang
 import Data.List (intercalate)
 
 pPrintProg :: (Show a) => Program a -> String
-pPrintProg (Program decls neurals main) = intercalate "\n\n" (map (\f -> wrapInFunctionDeclaration (snd f) (fst f) []) env)
-  where env = ("main", main):decls
+pPrintProg (Program decls neurals) = intercalate "\n\n" (map (\f -> wrapInFunctionDeclaration (snd f) (fst f) []) decls)
 
 wrapInFunctionDeclaration :: (Show a) => Expr a -> String -> [String] -> String
 wrapInFunctionDeclaration (Lambda _ n b) fName params = wrapInFunctionDeclaration b fName (n:params)

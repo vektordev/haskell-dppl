@@ -120,5 +120,4 @@ genProgNames names = do
   defs <- mapM (\name -> do
     expr <- genExprNames names
     return (name, expr)) (take def_names names)
-  main <- genExprNames names
-  return (Program defs main)
+  return (Program defs [])

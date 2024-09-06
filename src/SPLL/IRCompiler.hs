@@ -16,8 +16,8 @@ import Data.Maybe
 -- TODO: How do we deal with top-level lambdas in binding here?
 --  TL-Lambdas are presumably to be treated differently than non-TL, at least as far as prob is concerned.
 --TODO Pull out LetIns
-envToIR :: (Ord a, Floating a, Show a, Eq a) => CompilerConfig a -> Env a -> [(String, IRExpr a)]
-envToIR conf env = concatMap (\(name, binding) ->
+envToIR :: (Ord a, Floating a, Show a, Eq a) => CompilerConfig a -> Program a -> [(String, IRExpr a)]
+envToIR conf p = concatMap (\(name, binding) ->
   let pt = pType $ getTypeInfo binding
       rt = rType $ getTypeInfo binding in
     if (pt == Deterministic || pt == Integrate) && (isOnlyNumbers rt) then
@@ -28,7 +28,7 @@ envToIR conf env = concatMap (\(name, binding) ->
       [(name ++ "_prob", (IRLambda "sample" (returnize (postProcess $ runSupplyVars (toIRProbability conf binding (IRVar "sample")))))),
        (name ++ "_gen", (returnize (postProcess $ toIRGenerate binding)))]
     else
-      [(name ++ "_gen", (returnize (postProcess $ toIRGenerate binding)))]) env
+      [(name ++ "_gen", (returnize (postProcess $ toIRGenerate binding)))]) (functions p)
       
 isValue :: IRExpr a -> Bool
 isValue (IRConst val) = True
@@ -120,6 +120,7 @@ returnize :: IRExpr a -> IRExpr a
 returnize (IRIf cond left right) = IRIf cond (returnize left) (returnize right)
 returnize (IRReturning expr) = error "called returnize on return statement"
 returnize (IRLetIn name binding scope) = IRLetIn name binding (returnize scope)
+returnize (IRLambda name expr) = IRLambda name (returnize expr)
 returnize other = IRReturning other
 
 pullOutLetIns :: IRExpr a -> IRExpr a

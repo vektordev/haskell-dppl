@@ -5,7 +5,6 @@ module SPLL.Typing.PInfer2 (
   showResults
 , showResultsProg
 , inferType
-, makeTmpMain
 , addPTypeInfo
 , showResultsProgDebug
 , tryAddPTypeInfo
@@ -147,10 +146,7 @@ instance Monoid TEnv where
   mappend = (<>)
 
 makeMain :: Expr a -> Program a
-makeMain expr = Program [("main", expr)] [] (Call makeTypeInfo "main")
--- TODO: Why does order of functions matter?
-makeTmpMain :: Expr a -> Program a -> Program a
-makeTmpMain expr (Program decls nns _) = Program (decls ++ [("tmp_main", expr)]) nns (Call makeTypeInfo "tmp_main")
+makeMain expr = Program [("main", expr)] []
 -- | Inference state
 data InferState = InferState { var_count :: Int }
 
@@ -512,7 +508,7 @@ makeEqConstraint :: PType -> PType -> DConstraint
 makeEqConstraint t1 t2 = (t1, [Left t2])
 
 inferProg :: (Show a) => TEnv -> Program a -> Infer (Subst, [DConstraint], PType, Program a)
-inferProg env (Program decls nns expr) = do
+inferProg env (Program decls nns) = do
   -- init type variable for all function decls beforehand so we can build constraints for
   -- calls between these functions
   tv_rev <- freshVars (length decls) []
@@ -522,13 +518,14 @@ inferProg env (Program decls nns expr) = do
   let fenv = foldl extend env func_tvs
   -- infer the type and constraints of the declaration expressions
   cts <- mapM (infer fenv . snd) decls
+  let Just expr = lookup "main" decls
   -- inferring the type of the top level expression
   (s1, cs1, t1, pt) <- infer fenv expr
   -- building the constraints that the built type variables of the functions equal
   -- the inferred function type
   let tcs = zipWith makeEqConstraint tvs (map trd3 cts)
   -- combine all constraints
-  return (s1, cs1 ++ concatMap snd3 cts ++ tcs , t1, Program (zip (map fst decls) (map frth3 cts)) nns pt)
+  return (s1, cs1 ++ concatMap snd3 cts ++ tcs , t1, Program (zip (map fst decls) (map frth3 cts)) nns)
 
 infer :: (Show a) => TEnv -> Expr a -> Infer (Subst, [DConstraint], PType, Expr a)
 infer env expr = case expr of
@@ -645,6 +642,10 @@ infer env expr = case expr of
       -- FIXME How is it possible to set the downgrade chain to Det directly?
       -- TODO v may not be det at all, this is just for simplification
       return (compose s1 s2, cs1 ++ cs2, t2, Apply (setPType ti t2) et1 et2)
+      
+  ReadNN ti name e -> do
+      (s, cs, t, et) <- infer env e 
+      return (s, cs, Prob, ReadNN (setPType ti Prob) name et)
   
   _ -> error (show expr)
        
@@ -704,7 +705,7 @@ class Substitutable a where
   ftv   :: a -> Set.Set TVar
 
 instance Substitutable (Program a) where
-  apply s (Program decls nns expr) = Program (zip (map fst decls) (map (apply s . snd) decls)) nns (apply s expr)
+  apply s (Program decls nns) = Program (zip (map fst decls) (map (apply s . snd) decls)) nns
   ftv _ = Set.empty
 instance Substitutable (Expr a) where
   apply s = tMap (apply s . getTypeInfo)
