@@ -40,6 +40,7 @@ dependencies:
 - pretty-simple
 - erf
 - lens
+- optparse-applicative
 
 library:
   source-dirs: src

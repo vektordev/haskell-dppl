@@ -16,10 +16,10 @@ paramExpr = Arg makeTypeInfo "iterations" TFloat (IfThenElse makeTypeInfo
   (Cons makeTypeInfo (Constant makeTypeInfo (VBool True)) (CallArg makeTypeInfo "main" [PlusF makeTypeInfo (Call makeTypeInfo "iterations") (Constant makeTypeInfo (VFloat (-1.0)))]))
   (Null makeTypeInfo))
 
-uniformProg :: Program a
+uniformProg :: Program Double
 uniformProg = Program [("main", Uniform makeTypeInfo)] [] 
 
-normalProg :: Program a
+normalProg :: Program Double
 normalProg = Program [("main", Normal makeTypeInfo)] [] 
 
 uniformProgMult :: Program Double

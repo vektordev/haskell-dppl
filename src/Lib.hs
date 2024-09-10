@@ -67,6 +67,8 @@ variableLengthS2 = Program [("b", IfThenElse ()
 
 --someFunc = print "Hello world"
 
+data Language = Python | Julia deriving Show
+
 readSamples :: IO [(Double, Double)]
 readSamples = do
   f <- readFile "./data/train_data.txt"
@@ -135,6 +137,15 @@ newCodeGenAll conf p = do
   putStrLn "julia code:"
   putStrLn $ unlines jlcode
 
+codeGenToLang :: (Show a, Ord a, Floating a) => Language -> CompilerConfig a -> Program a -> String
+codeGenToLang lang conf prog = do
+  let typed = addTypeInfo prog
+  let annotated = annotateProg typed
+  let ir = envToIR conf annotated
+  case lang of
+    Python -> intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions ir)
+    Julia -> intercalate "\n" (SPLL.CodeGenJulia.generateFunctions ir)
+
 someFunc :: IO ()
 someFunc = do--thatGaussThing
   --x <- runNNTest
@@ -159,7 +170,7 @@ someFunc = do--thatGaussThing
   putStrLn "done outputting constraints"
   let cmp2 = progToEnv $ addTypeInfo prog-}
   let conf = CompilerConfig {topKThreshold = Nothing, countBranches = False}
-  let prog = Program [("main", Lambda makeTypeInfo "symbol" (ReadNN makeTypeInfo "MNist" (Var makeTypeInfo "symbol")))] [("MNist", TFloat, EnumRange (VInt 0, VInt 10))] :: Program Float
+  let prog = uniformProg
   putStrLn (pPrintProg prog)
   let typedProg = {-inferProg-} (addTypeInfo prog)
 
