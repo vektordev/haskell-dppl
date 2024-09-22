@@ -8,6 +8,7 @@ import SPLL.Lang.Lang
 import Data.List (intercalate, isSuffixOf, nub, find)
 import Data.Char (toUpper, toLower)
 import Data.Maybe (fromJust, fromMaybe)
+import Debug.Trace (trace)
 
 --TODO: On the topic of memoization: Ideally we would want to optimize away redundant calls within a loop.
 -- e.g. in MNist-Addition
@@ -57,7 +58,7 @@ pyVal :: (Show a) => Value a -> String
 pyVal (VList xs) = "[" ++ (intercalate "," $ map pyVal xs) ++ "]"
 pyVal (VInt i) = show i
 pyVal (VFloat f) = show f
-pyVal (VBool f) = if f then "true" else "false"
+pyVal (VBool f) = if f then "True" else "False"
 pyVal x = error ("unknown pyVal for " ++ show x)
 
 unlinesTrimLeft :: [String] -> String
@@ -71,6 +72,7 @@ onLast f [x] = [f x]
 onLast f (x:xs) = x : onLast f xs
 
 generateFunctions :: (Show a) => [(String, IRExpr a)] -> [String]
+generateFunctions defs | trace (show defs) False = undefined
 --contrary to the julia backend, we want to aggregate gen and prob into one classes. Ugly implementation, but it'll do for now.
 generateFunctions defs =
   let
@@ -178,7 +180,8 @@ generateCode (IRIndex arrExpr indexExpr) bindto = let
   indexCode = spicyHead $ generateCode indexExpr ""
   in [arrCode ++ "[" ++ indexCode ++ "]"]
 generateCode (IREvalNN funcName argExpr) bindto = [funcName ++ "(" ++ spicyHead (generateCode argExpr "") ++ ")"]
-generateCode (IRCall funcName argExprs) bindto = [funcName ++ "(" ++ (intercalate "," (map (\expr -> spicyHead $ generateCode expr "") argExprs)) ++ ")"]
+generateCode (IRCall funcName argExprs) bindto = [bindto ++ funcName ++ "(" ++ (intercalate "," (map (\expr -> spicyHead $ generateCode expr "") argExprs)) ++ ")"]
+generateCode (IRApply lambda argExpr) bindto = [bindto ++ spicyHead (generateCode lambda "") ++ "(" ++ spicyHead (generateCode argExpr "") ++ ")"]
 generateCode (IRReturning expr) bindto = let
   arrCode = generateCode expr ""
   in onLast ("return " ++) arrCode

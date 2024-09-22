@@ -613,7 +613,7 @@ unifyMany (t1 : ts1) (t2 : ts2) =
 unifyMany t1 t2 = throwError $ UnificationMismatch t1 t2
 
 unifies :: RType -> RType -> Solve Subst
---unifies t1 t2 | trace (show t1 ++ show t2) False = undefined
+--unifies t1 t2 | trace (show t1 ++ " with " ++ show t2) False = undefined
 unifies t1 t2 | t1 == t2 = return emptySubst
 unifies (Tuple t1 t2) BottomTuple = return emptySubst
 unifies BottomTuple (Tuple t1 t2) = return emptySubst
@@ -630,7 +630,7 @@ unifies t1 (GreaterType t2 t3) = if t1 == t2 && t2 == t3 then return emptySubst 
   (case greaterType t2 t3 of
     Nothing -> throwError $ UnificationFail t1 (GreaterType t2 t3)
     Just tt -> if t1 == tt then return emptySubst else throwError $  UnificationFail t1 (GreaterType t2 t3))
-
+unifies (TVarR v) (TVarR t) | v == t = return emptySubst
 unifies (TVarR v) t = v `bind` t
 unifies t (TVarR v) = v `bind` t
 unifies (TArrow t1 t2) (TArrow t3 t4) = unifyMany [t1, t2] [t3, t4]

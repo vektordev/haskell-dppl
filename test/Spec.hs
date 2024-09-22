@@ -78,9 +78,9 @@ correctProbValuesTestCases = [(uniformProg, VFloat 0.5, [], VFloat 1.0),
                               (uniformIfProg, VFloat 0.5, [], VFloat 0.5),
                               (constantProg, VFloat 2, [], VFloat 1),
                               
-                              --(uniformExp, VFloat $ exp 4.5, [], VFloat $ 1/exp 4.5),
-                              --(testInjF, VFloat 1.5, [], VFloat 0.5),
-                              --(testInjF2, VFloat 1.5, [], VFloat $ 1/3),
+                              (uniformExp, VFloat $ exp 4.5, [], VFloat $ 1/exp 4.5),
+                              (testInjF, VFloat 1.5, [], VFloat 0.5),
+                              (testInjF2, VFloat 3, [], VFloat 0.5),
                               (testTheta, VFloat 1.5, flatTree [1.5], VFloat 1),
                               (testTheta, VFloat 1.5, flatTree [1], VFloat 0),
                               (testThetaTree, VFloat 11, [thetaTreeExample], VFloat 1),
@@ -88,9 +88,11 @@ correctProbValuesTestCases = [(uniformProg, VFloat 0.5, [], VFloat 1.0),
                               --(testOr, VBool True, [], VFloat 0.75),
                               (testNot, VBool True, [], VFloat 0.25),
                               (simpleCall, VFloat 0.5, [], VFloat 1.0),
-                              (testCallLambda, VFloat 2.5, [], VFloat 1.0)]
+                              (testCallLambda, VFloat 2.5, [], VFloat 1.0),
                               --(testCallLambdaAdvanced, VFloat 2.5, [], VFloat 1.0),
                               --(testLetIn, VFloat 1.5, [], VFloat 1.0)]
+                              (testInjFPlusLeft, VFloat 1.5, [], VFloat 1.0),
+                              (testInjFPlusRight, VFloat 1.5, [], VFloat 1.0)]
 
 correctIntegralValuesTestCases :: [(Program Double, Value Double, Value Double, [IRExpr Double], Value Double)]
 correctIntegralValuesTestCases = [(uniformProg, VFloat 0, VFloat 1, [], VFloat 1.0),
@@ -104,7 +106,10 @@ correctIntegralValuesTestCases = [(uniformProg, VFloat 0, VFloat 1, [], VFloat 1
                                   (uniformIfProg, VFloat 0, VFloat 1, [], VFloat 0.5),
                                   (constantProg, VFloat 1, VFloat 3, [], VFloat 1),
                                   --,
-                                  --(testInjF, VFloat 0, VFloat 1, [], VFloat 0.5),
+                                  (testInjF, VFloat 0, VFloat 1, [], VFloat 0.5),
+                                  (testInjF2, VFloat 2, VFloat 3, [], VFloat 0.5),
+                                  (testInjFPlusLeft, VFloat 1, VFloat 1.5, [], VFloat 0.5),
+                                  (testInjFPlusRight, VFloat 1, VFloat 1.5, [], VFloat 0.5),
                                   (testTheta, VFloat 0.9, VFloat 1.1, flatTree [1], VFloat 1),
                                   (simpleCall, VFloat 0, VFloat 1, [], VFloat 1.0),
                                   (testCallLambda, VFloat 2, VFloat 3, [], VFloat 1.0)]

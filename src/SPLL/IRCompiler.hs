@@ -15,20 +15,19 @@ import Data.Maybe
 -- perhaps as an explicit lambda in the top of the expression, otherwise we'll get trouble generating code.
 -- TODO: How do we deal with top-level lambdas in binding here?
 --  TL-Lambdas are presumably to be treated differently than non-TL, at least as far as prob is concerned.
---TODO Pull out LetIns
-envToIR :: (Ord a, Floating a, Show a, Eq a) => CompilerConfig a -> Program a -> [(String, IRExpr a)]
+envToIR :: (Ord a, Floating a, Show a, Eq a) => CompilerConfig a -> Program a -> [(String, IRExpr a)] --FIXME add postProcess
 envToIR conf p = concatMap (\(name, binding) ->
   let pt = pType $ getTypeInfo binding
       rt = rType $ getTypeInfo binding in
     if (pt == Deterministic || pt == Integrate) && (isOnlyNumbers rt) then
-      [(name ++ "_integ", (IRLambda "low" (IRLambda "high" (returnize (postProcess $ runSupplyVars (toIRIntegrate conf binding (IRVar "low") (IRVar "high"))))))),
-       (name ++ "_prob",(IRLambda "sample" (returnize (postProcess $ runSupplyVars (toIRProbability conf binding (IRVar "sample")))))),
-       (name ++ "_gen", (returnize (postProcess $ toIRGenerate binding)))]
+      [(name ++ "_integ", runSupplyVars (pullOutLetIns (IRLambda "low" (IRLambda "high" (returnize (runSupplyVars (toIRIntegrate conf binding (IRVar "low") (IRVar "high")))))))),
+       (name ++ "_prob",runSupplyVars (pullOutLetIns (IRLambda "sample" (returnize (runSupplyVars (toIRProbability conf binding (IRVar "sample"))))))),
+       (name ++ "_gen", runSupplyVars (pullOutLetIns (returnize (runSupplyVars $ toIRGenerate binding))))]
     else if pt == Deterministic || pt == Integrate || pt == Prob then
-      [(name ++ "_prob", (IRLambda "sample" (returnize (postProcess $ runSupplyVars (toIRProbability conf binding (IRVar "sample")))))),
-       (name ++ "_gen", (returnize (postProcess $ toIRGenerate binding)))]
+      [(name ++ "_prob",runSupplyVars (pullOutLetIns (IRLambda "sample" (returnize (runSupplyVars (toIRProbability conf binding (IRVar "sample"))))))),
+       (name ++ "_gen", runSupplyVars (pullOutLetIns (returnize (runSupplyVars $ toIRGenerate binding))))]
     else
-      [(name ++ "_gen", (returnize (postProcess $ toIRGenerate binding)))]) (functions p)
+      [(name ++ "_gen", runSupplyVars (pullOutLetIns (returnize (runSupplyVars $ toIRGenerate binding))))]) (functions p)
       
 isValue :: IRExpr a -> Bool
 isValue (IRConst val) = True
@@ -123,16 +122,33 @@ returnize (IRLetIn name binding scope) = IRLetIn name binding (returnize scope)
 returnize (IRLambda name expr) = IRLambda name (returnize expr)
 returnize other = IRReturning other
 
-pullOutLetIns :: IRExpr a -> IRExpr a
-pullOutLetIns (IRLambda n b) = IRLambda n (pullOutLetIns b)
-pullOutLetIns (IRLetIn n v b) = IRLetIn n v (pullOutLetIns b)
-pullOutLetIns e = runSupplyVars $ do
-  case findLetIn e of
-    Just (IRLetIn n v b) -> do
+pullOutLetIns :: (Show a, Eq a) => IRExpr a -> Supply Int (IRExpr a)  --FIXME  LetIns can still be in the value expression of another letIn. Pull these out too
+--pullOutLetIns e | trace (show e) False = undefined
+pullOutLetIns (IRLambda n b) = do
+  rec <- pullOutLetIns b
+  return $ IRLambda n rec
+-- Let a = (Let b = 5 in b*2) in a
+--   --> Let b = 5 in Let a = b*2 in a 
+pullOutLetIns e@(IRLetIn n v b) = do
+  case findLetIn v of
+    Just li@(IRLetIn nSub vSub _) -> do
       i <- demand
+      let newName = nSub ++ show i
+      let removed = irMap (removeLetInAndReplaceVars li newName) e
+      pullOutLetIns (IRLetIn newName vSub removed)
+    Nothing -> do
+      -- No more LetIns in value. Continue with in-block
+      rec <- pullOutLetIns b
+      return $ IRLetIn n v rec
+-- f(Let a = 5 in a) 
+--  --> let a = 5 in f(a)
+pullOutLetIns e = do
+  case findLetIn e of
+    Just li@(IRLetIn n v _) -> do
+      i <-demand
       let newName = n ++ show i
-      let newBody = pullOutLetIns (removeAndSubstituteLetIns b n newName)
-      return (IRLetIn newName v newBody)
+      let removed = irMap (removeLetInAndReplaceVars li newName) e
+      pullOutLetIns (IRLetIn newName v removed)
     Nothing -> return e
 
 -- TODO: We currently dont handle inner lambdas here
@@ -142,13 +158,14 @@ findLetIn e@(IRLetIn _ _ _) = Just e
 findLetIn e = firstJusts (map findLetIn (getIRSubExprs e))
   where firstJusts l = foldr (\a b -> if isJust a then a else b) Nothing l
 
-removeAndSubstituteLetIns :: IRExpr a -> Varname -> Varname -> IRExpr a
-removeAndSubstituteLetIns (IRVar a) old new | old == a = IRVar new
-removeAndSubstituteLetIns e old new = irMap (removeSubst old new) e
-  where
-    removeSubst oldN newN (IRVar n) | n == oldN = IRVar newN
-    removeSubst oldN _ (IRLetIn n _ b) | n == oldN = b
-    removeSubst _ _ ex = ex
+-- Has to be called with irMap
+-- Finds the LetInblock given as argument, removes it and replaces all occurrences of the bound variable with a new VarName
+removeLetInAndReplaceVars :: (Eq a) => IRExpr a -> Varname -> IRExpr a  -> IRExpr a
+removeLetInAndReplaceVars li@(IRLetIn {}) newVar li'@(IRLetIn lVar _ b)  | li == li' = irMap (replace (IRVar lVar) (IRVar newVar)) b
+removeLetInAndReplaceVars (IRLetIn {}) _ e = e
+removeLetInAndReplaceVars _ _ _ = error "First argument must be a letIn block"
+
+
 
 
 runSupplyVars :: Supply Int a -> a
@@ -229,30 +246,34 @@ toIRProbability conf (GreaterThan (TypeInfo {rType = t, tags = extras}) left rig
     var <- mkVariable "fixed_bound"
     integrate <- toIRIntegrate conf right (IRConst (VFloat (-9999999))) (IRVar var)
     var2 <- mkVariable "rhs_integral"
+    l <- toIRGenerate left
     propagated <- propagateBranchCount1 conf (\p -> (IRLetIn var2 p
       (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))))) integrate
-    return $ IRLetIn var (toIRGenerate left) propagated
+    return $ IRLetIn var l propagated
   | extras `hasAlgorithm` "greaterThanRight" = do --p(x | var >= const
     var <- mkVariable "fixed_bound"
     integrate <- toIRIntegrate conf left (IRConst (VFloat (-9999999))) (IRVar var)
     var2 <- mkVariable "lhs_integral"
+    r <- toIRGenerate right
     propagated <- propagateBranchCount1 conf (\p -> (IRLetIn var2 p
       (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)) (IRVar var2) ))) integrate
-    return $  IRLetIn var (toIRGenerate right) propagated
+    return $  IRLetIn var r propagated
 toIRProbability conf (LessThan (TypeInfo {rType = t, tags = extras}) left right) sample
   --TODO: Find a better lower bound than just putting -9999999
   | extras `hasAlgorithm` "lessThanLeft" = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
     integrate <- toIRIntegrate conf right (IRVar var) (IRConst (VFloat (9999999)))
     var2 <- mkVariable "rhs_integral"
-    propagateBranchCount1 conf (\p -> IRLetIn var (toIRGenerate left)
+    l <- toIRGenerate left
+    propagateBranchCount1 conf (\p -> IRLetIn var l
       (IRLetIn var2 p
         (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))))) integrate
   | extras `hasAlgorithm` "lessThanRight" = do --p(x | var >= const
     var <- mkVariable "fixed_bound"
     integrate <- toIRIntegrate conf left (IRVar var) (IRConst (VFloat (9999999)))
     var2 <- mkVariable "lhs_integral"
-    propagateBranchCount1 conf (\p -> IRLetIn var (toIRGenerate right)
+    r <- toIRGenerate right
+    propagateBranchCount1 conf (\p -> IRLetIn var r
       (IRLetIn var2 p
         (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))  (IRVar var2)))) integrate
 toIRProbability conf (MultF (TypeInfo {rType = TFloat, tags = extras}) left right) sample
@@ -260,23 +281,27 @@ toIRProbability conf (MultF (TypeInfo {rType = TFloat, tags = extras}) left righ
     var <- mkVariable ""
     rightExpr <- toIRProbability conf right (IROp OpDiv sample (IRVar var))
     propagated <- propagateBranchCount1 conf (\p -> IROp OpDiv p (IRUnaryOp OpAbs (IRVar var))) rightExpr
-    return $ IRLetIn var (toIRGenerate left) propagated
+    l <- toIRGenerate left
+    return $ IRLetIn var l propagated
   | extras `hasAlgorithm` "multRight" = do
     var <- mkVariable ""
     leftExpr <- toIRProbability conf left (IROp OpDiv sample (IRVar var))
+    r <- toIRGenerate right
     propagated <- propagateBranchCount1 conf (\p -> IROp OpDiv p (IRUnaryOp OpAbs (IRVar var))) leftExpr
-    return $ IRLetIn var (toIRGenerate right) propagated
+    return $ IRLetIn var r propagated
 toIRProbability conf (PlusF (TypeInfo {rType = TFloat, tags = extras}) left right) sample
   | extras `hasAlgorithm` "plusLeft" = do
     var <- mkVariable ""
     rightExpr <- toIRProbability conf right (IROp OpSub sample (IRVar var))
     propagated <- propagateBranchCount1 conf id rightExpr
-    return $ IRLetIn var (toIRGenerate left) propagated
+    l <- toIRGenerate left
+    return $ IRLetIn var l propagated
   | extras `hasAlgorithm` "plusRight" = do
     var <- mkVariable ""
     leftExpr <- toIRProbability conf left (IROp OpSub sample (IRVar var))
+    r <- toIRGenerate right
     propagated <- propagateBranchCount1 conf id leftExpr
-    return $ IRLetIn var (toIRGenerate right) propagated
+    return $ IRLetIn var r propagated
 toIRProbability conf (PlusI (TypeInfo {rType = TInt, tags = extras}) left right) sample
   | extras `hasAlgorithm` "enumeratePlusLeft" = do
     --Solving enumPlusLeft works by enumerating all left hand side choices.
@@ -296,7 +321,8 @@ toIRProbability conf (PlusI (TypeInfo {rType = TInt, tags = extras}) left right)
     var <- mkVariable ""
     rightExpr <- toIRProbability conf right (IROp OpSub sample (IRVar var))
     propagated <- propagateBranchCount1 conf id rightExpr
-    return $ IRLetIn var (toIRGenerate left) propagated
+    l <- toIRGenerate left
+    return $ IRLetIn var l propagated
 toIRProbability conf (ExpF TypeInfo {rType = TFloat} f) sample = do --FIXME correct Inference
   error "deprecated: Use InjF instead"
 toIRProbability conf (NegF (TypeInfo {rType = TFloat, tags = extra}) f) sample =
@@ -304,7 +330,7 @@ toIRProbability conf (NegF (TypeInfo {rType = TFloat, tags = extra}) f) sample =
 toIRProbability conf (Not (TypeInfo {rType = TBool}) f) sample =
   toIRProbability conf f (IRUnaryOp OpNot sample)
 toIRProbability conf (ReadNN _ name subexpr) sample = do
-  let mkInput = toIRGenerate subexpr
+  mkInput <- toIRGenerate subexpr
   propagateBranchCount0 conf (IRIndex (IREvalNN name mkInput) sample)
   --TODO: Assumption that subexpr is det.
 toIRProbability conf (Normal t) sample = propagateBranchCount0 conf (IRDensity IRNormal sample)
@@ -312,11 +338,13 @@ toIRProbability conf (Uniform t) sample = propagateBranchCount0 conf (IRDensity 
 --TODO: assumption: These will be top-level lambdas:
 toIRProbability conf (Lambda t name subExpr) sample = do
   subExprIR <- toIRProbability conf subExpr sample
-  propagateBranchCount1 conf (\p -> IRLambda name p) subExprIR
+  propagated <- propagateBranchCount1 conf id subExprIR
+  return (IRLambda name propagated)
 toIRProbability conf (Apply _ l v) sample = do
-  let vIR = toIRGenerate v
+  vIR <- toIRGenerate v
   lIR <- toIRProbability conf l sample
-  propagateBranchCount1 conf (\p -> IRApply p vIR) lIR
+  --propagateBranchCount1 conf (\p -> IRApply p vIR) lIR
+  return $ IRApply lIR vIR
 toIRProbability conf (Cons _ hdExpr tlExpr) sample = do
   headP <- toIRProbability conf hdExpr (IRHead sample)
   tailP <- toIRProbability conf tlExpr (IRTail sample)
@@ -325,8 +353,9 @@ toIRProbability conf (TCons _ t1Expr t2Expr) sample = do
   t1P <- toIRProbability conf t1Expr (IRTFst sample)
   t2P <- toIRProbability conf t2Expr (IRTSnd sample)
   propagateBranchCount2 conf (\p1 p2 -> IROp OpMult p1 p2) t1P t2P
-toIRProbability conf (InjF _ name [param]) sample = do  --TODO Multivariable
-  let letInBlock = IRLetIn v sample invExpr
+toIRProbability conf (InjF _ name [param]) sample = do
+  prefix <- mkVariable ""
+  let letInBlock = irMap (uniqueify [v] prefix) (IRLetIn v sample invExpr)
   paramExpr <- toIRProbability conf param letInBlock
   propagateBranchCount1 conf (\p -> IRLetIn v sample (IROp OpMult p invDerivExpr)) paramExpr
   where Just fPair = lookup name globalFenv   --TODO error handling if nor found
@@ -334,17 +363,34 @@ toIRProbability conf (InjF _ name [param]) sample = do  --TODO Multivariable
         FDecl (_, [v], _, invExpr, [(_, invDerivExpr)]) = inv
 toIRProbability conf (InjF TypeInfo {rType=TFloat, tags=extras} name [param1, param2]) sample
   | extras `hasAlgorithm` "injF2Left" = do  --FIXME Left
-  let Just fPair = lookup name globalFenv   --TODO error handling if nor found
+  let Just fPair = lookup name globalFenv   --TODO error handling if not found
   let FPair (fwd, inversions) = fPair
   let FDecl (_, [v2, v3], [v1], _, _) = fwd
   let [invDecl] = filter (\(FDecl (_, _, [w1], _, _)) -> v3==w1) inversions   --This should only return one inversion
   let FDecl (_, [x2, x3], _, invExpr, invDerivs) = invDecl
   let Just invDeriv = lookup v1 invDerivs
-  let leftExpr = toIRGenerate param1
+  leftExpr <- toIRGenerate param1
   let (detVar, sampleVar) = if x2 == v2 then (x2, x3) else (x3, x2)
   let letInBlock = IRLetIn detVar leftExpr (IRLetIn sampleVar sample invExpr)
   paramExpr <- toIRProbability conf param2 letInBlock
-  propagateBranchCount1 conf (\p -> IRLetIn detVar leftExpr (IRLetIn sampleVar sample (IROp OpMult p invDeriv))) paramExpr
+  ret <- propagateBranchCount1 conf (\p -> IRLetIn detVar leftExpr (IRLetIn sampleVar sample (IROp OpMult p invDeriv))) paramExpr
+  uniquePrefix <- mkVariable ""
+  return $ irMap (uniqueify [v1, v2, v3] uniquePrefix) ret
+toIRProbability conf (InjF TypeInfo {rType=TFloat, tags=extras} name [param1, param2]) sample
+  | extras `hasAlgorithm` "injF2Right" = do  --FIXME Left
+  let Just fPair = lookup name globalFenv   --TODO error handling if not found
+  let FPair (fwd, inversions) = fPair
+  let FDecl (_, [v2, v3], [v1], _, _) = fwd
+  let [invDecl] = filter (\(FDecl (_, _, [w1], _, _)) -> v2==w1) inversions   --This should only return one inversion
+  let FDecl (_, [x2, x3], _, invExpr, invDerivs) = invDecl
+  let Just invDeriv = lookup v1 invDerivs
+  leftExpr <- toIRGenerate param2
+  let (detVar, sampleVar) = if x2 == v3 then (x2, x3) else (x3, x2)
+  let letInBlock = IRLetIn detVar leftExpr (IRLetIn sampleVar sample invExpr)
+  paramExpr <- toIRProbability conf param1 letInBlock
+  ret <- propagateBranchCount1 conf (\p -> IRLetIn detVar leftExpr (IRLetIn sampleVar sample (IROp OpMult p invDeriv))) paramExpr
+  uniquePrefix <- mkVariable ""
+  return $ irMap (uniqueify [v1, v2, v3] uniquePrefix) ret
 toIRProbability conf (Null _) sample = do
   expr <- indicator (IROp OpEq sample (IRConst $ VList []))
   propagateBranchCount0 conf expr
@@ -353,7 +399,8 @@ toIRProbability conf (Constant _ value) sample = do
   propagateBranchCount0 conf expr
 toIRProbability conf (Call _ name) sample = return $ IRCall (name ++ "_prob") [sample]
 toIRProbability conf (ThetaI _ a i) sample = do
-  expr <- indicator (IROp OpEq sample (IRTheta (toIRGenerate a) i))
+  a' <- toIRGenerate a
+  expr <- indicator (IROp OpEq sample (IRTheta a' i))
   propagateBranchCount0 conf expr
 toIRProbability conf (Subtree _ a i) sample = error "Cannot infer prob on subtree expression. Please check your syntax"
 toIRProbability conf x sample = error ("found no way to convert to IR: " ++ show x)
@@ -395,47 +442,107 @@ packParamsIntoLetinsProb [v] [p] expr sample = do
 indicator :: Num a => IRExpr a -> Supply Int (IRExpr a)
 indicator condition = return $ IRIf condition (IRConst $ VFloat 1) (IRConst $ VFloat 0)
 
+-- Must be used in conjunction with irMap, as it does not recurse
+uniqueify :: [Varname] -> String -> IRExpr a -> IRExpr a
+uniqueify vars prefix (IRVar name) | name `elem` vars = IRVar (prefix ++ name)
+uniqueify vars prefix (IRLetIn name boundExpr bodyExpr) | name `elem` vars = IRLetIn (prefix ++ name) (uniqueify vars prefix boundExpr) (uniqueify vars prefix bodyExpr)
+uniqueify _ _ e = e
+
 --folding detGen and Gen into one, as the distinction is one to make sure things that are det are indeed det.
 -- That's what the type system is for though.
-toIRGenerate :: (Show a, Floating a) => Expr a -> IRExpr a
-toIRGenerate (IfThenElse _ cond left right) = IRIf (toIRGenerate cond) (toIRGenerate left) (toIRGenerate right)
-toIRGenerate (LetIn _ n v b) = IRLetIn n (toIRGenerate v) (toIRGenerate b)
-toIRGenerate (GreaterThan _ left right) = IROp OpGreaterThan (toIRGenerate left) (toIRGenerate right)
-toIRGenerate (LessThan _ left right) = IROp OpLessThan (toIRGenerate left) (toIRGenerate right)
-toIRGenerate (PlusF _ left right) = IROp OpPlus (toIRGenerate left) (toIRGenerate right)
-toIRGenerate (PlusI _ left right) = IROp OpPlus (toIRGenerate left) (toIRGenerate right)
-toIRGenerate (MultF _ left right) = IROp OpMult (toIRGenerate left) (toIRGenerate right)
-toIRGenerate (MultI _ left right) = IROp OpMult (toIRGenerate left) (toIRGenerate right)
-toIRGenerate (ExpF _ f) = IRUnaryOp OpExp (toIRGenerate f)
-toIRGenerate (NegF _ f) = IRUnaryOp OpNeg (toIRGenerate f)
-toIRGenerate (Not _ f) = IRUnaryOp OpNot (toIRGenerate f)
-toIRGenerate (ThetaI _ a ix) = IRTheta (toIRGenerate a) ix
-toIRGenerate (Subtree _ a ix) = IRSubtree (toIRGenerate a) ix
-toIRGenerate (Constant _ x) = IRConst x
-toIRGenerate (Null _) = IRConst (VList [])
-toIRGenerate (Cons _ hd tl) = IRCons (toIRGenerate hd) (toIRGenerate tl)
-toIRGenerate (TCons _ t1 t2) = IRTCons (toIRGenerate t1) (toIRGenerate t2)
-toIRGenerate (Uniform _) = IRSample IRUniform
-toIRGenerate (Normal _) = IRSample IRNormal
---The following assumes that "name" refers to a function defined within the program.
-toIRGenerate (Call _ name) = IRCall (name ++ "_gen") []
-toIRGenerate (InjF _  name params) = packParamsIntoLetinsGen vars params fwdExpr 
-  where Just fPair = lookup name globalFenv
-        FPair (fwd, _) = fPair
-        FDecl (_, vars, _, fwdExpr, _) = fwd
-toIRGenerate (Var _ name) = IRVar name
-toIRGenerate (Lambda t name subExpr) = IRLambda name (toIRGenerate subExpr)
-toIRGenerate (Apply _ l v) = IRApply (toIRGenerate l) (toIRGenerate v)
-toIRGenerate (ReadNN t name subexpr) = IRCall "randomchoice" [IREvalNN name (toIRGenerate subexpr)]
+toIRGenerate :: (Show a, Floating a) => Expr a -> Supply Int (IRExpr a)
+toIRGenerate (IfThenElse _ cond left right) = do
+  c <- toIRGenerate cond
+  l <- toIRGenerate left
+  r <- toIRGenerate right
+  return $ IRIf c l r
+toIRGenerate (LetIn _ n v b) = do
+  v' <- toIRGenerate v
+  b' <- toIRGenerate b
+  return $ IRLetIn n v' b'
+toIRGenerate (GreaterThan _ left right) = do
+  l <- toIRGenerate left
+  r <- toIRGenerate right
+  return $ IROp OpGreaterThan l r
+toIRGenerate (LessThan _ left right) = do
+  l <- toIRGenerate left
+  r <- toIRGenerate right
+  return $ IROp OpLessThan l r
+toIRGenerate (PlusF _ left right) = do
+  l <- toIRGenerate left
+  r <- toIRGenerate right
+  return $ IROp OpPlus l r
+toIRGenerate (PlusI _ left right) = do
+  l <- toIRGenerate left
+  r <- toIRGenerate right
+  return $ IROp OpPlus l r
+toIRGenerate (MultF _ left right) = do
+  l <- toIRGenerate left
+  r <- toIRGenerate right
+  return $ IROp OpMult l r
+toIRGenerate (MultI _ left right) = do
+  l <- toIRGenerate left
+  r <- toIRGenerate right
+  return $ IROp OpMult l r
+toIRGenerate (ExpF _ f) = do
+  f' <- toIRGenerate f
+  return $ IRUnaryOp OpExp f'
+toIRGenerate (NegF _ f) = do
+  f' <- toIRGenerate f
+  return $ IRUnaryOp OpNeg f'
+toIRGenerate (Not _ f) = do
+  f' <- toIRGenerate f
+  return $ IRUnaryOp OpNot f'
+toIRGenerate (ThetaI _ a ix) = do
+  a' <- toIRGenerate a
+  return $ IRTheta a' ix
+toIRGenerate (Subtree _ a ix) = do
+  a' <- toIRGenerate a
+  return $ IRSubtree a' ix
+toIRGenerate (Constant _ x) = return $ IRConst x
+toIRGenerate (Null _) = return $ IRConst (VList [])
+toIRGenerate (Cons _ hd tl) = do
+  h <- toIRGenerate hd
+  t <- toIRGenerate tl
+  return $ IRCons h t
+toIRGenerate (TCons _ t1 t2) = do
+  t1' <- toIRGenerate t1
+  t2' <- toIRGenerate t2
+  return $ IRTCons t1' t2'
+toIRGenerate (Uniform _) = return $ IRSample IRUniform
+toIRGenerate (Normal _) = return $ IRSample IRNormal
+toIRGenerate (Call _ name) = return $ IRCall (name ++ "_gen") []
+toIRGenerate (InjF _ name params) = do
+  -- Assuming that the logic within packParamsIntoLetinsGen is correct.
+  -- You will need to process vars and params, followed by recursive calls to fwdExpr.
+  prefix <- mkVariable ""
+  letInBlock <- packParamsIntoLetinsGen vars params fwdExpr
+  return $ irMap (uniqueify vars prefix) letInBlock
+  where
+    Just fPair = lookup name globalFenv
+    FPair (fwd, _) = fPair
+    FDecl (_, vars, _, fwdExpr, _) = fwd
+toIRGenerate (Var _ name) = return $ IRVar name
+toIRGenerate (Lambda _ name subExpr) = do
+  subExpr' <- toIRGenerate subExpr
+  return $ IRLambda name subExpr'
+toIRGenerate (Apply _ l v) = do
+  l' <- toIRGenerate l
+  v' <- toIRGenerate v
+  return $ IRApply l' v'
+toIRGenerate (ReadNN _ name subexpr) = do
+  subexpr' <- toIRGenerate subexpr
+  return $ IRCall "randomchoice" [IREvalNN name subexpr']
 toIRGenerate x = error ("found no way to convert to IRGen: " ++ show x)
 
-packParamsIntoLetinsGen :: (Show a, Floating a) => [String] -> [Expr a] -> IRExpr a -> IRExpr a
-packParamsIntoLetinsGen [] [] expr = expr
+packParamsIntoLetinsGen :: (Show a, Floating a) => [String] -> [Expr a] -> IRExpr a -> Supply Int (IRExpr a)
+packParamsIntoLetinsGen [] [] expr = return $ expr
 packParamsIntoLetinsGen [] _ _ = error "More parameters than variables"
 packParamsIntoLetinsGen _ [] _ = error "More variables than parameters"
-packParamsIntoLetinsGen (v:vars) (p:params) expr = IRLetIn v pExpr e
-  where pExpr = toIRGenerate p
-        e = packParamsIntoLetinsGen vars params expr
+packParamsIntoLetinsGen (v:vars) (p:params) expr = do
+  pExpr <- toIRGenerate p
+  e <- packParamsIntoLetinsGen vars params expr
+  return $ IRLetIn v pExpr e
 
 bindLocal :: String -> IRExpr a -> IRExpr a -> Supply Int (IRExpr a)
 bindLocal namestring binding inEx = do
@@ -451,20 +558,24 @@ toIRIntegrate conf (MultF (TypeInfo {tags = extras}) left right) lower higher
   | extras `hasAlgorithm` "multLeft" = do
     var <- mkVariable ""
     rightExpr <- toIRIntegrate conf right (IROp OpDiv lower (IRVar var)) (IRUnaryOp OpAbs (IROp OpDiv higher (IRVar var)))
-    propagateBranchCount1 conf (\p -> IRLetIn var (toIRGenerate left) p) rightExpr
+    l <- toIRGenerate left
+    propagateBranchCount1 conf (\p -> IRLetIn var l p) rightExpr
   | extras `hasAlgorithm` "multRight" = do
       var <- mkVariable ""
       leftExpr <- toIRIntegrate conf left (IROp OpDiv lower (IRVar var)) (IRUnaryOp OpAbs (IROp OpDiv higher (IRVar var)))
-      propagateBranchCount1 conf (\p -> IRLetIn var (toIRGenerate right) p) leftExpr
+      r <- toIRGenerate right
+      propagateBranchCount1 conf (\p -> IRLetIn var r p) leftExpr
 toIRIntegrate conf (PlusF TypeInfo {tags = extras} left right) lower higher
   | extras `hasAlgorithm` "plusLeft" = do
     var <- mkVariable ""
     rightExpr <- toIRIntegrate conf right (IROp OpSub lower (IRVar var)) (IROp OpSub higher (IRVar var))
-    propagateBranchCount1 conf (\p -> IRLetIn var (toIRGenerate left) p) rightExpr
+    l <- toIRGenerate left
+    propagateBranchCount1 conf (\p -> IRLetIn var l p) rightExpr
   | extras `hasAlgorithm` "plusRight" = do
       var <- mkVariable ""
       leftExpr <- toIRIntegrate conf left (IROp OpSub lower (IRVar var)) (IROp OpSub higher (IRVar var))
-      propagateBranchCount1 conf (\p -> IRLetIn var (toIRGenerate right) p) leftExpr
+      r <- toIRGenerate right
+      propagateBranchCount1 conf (\p -> IRLetIn var r p) leftExpr
 toIRIntegrate conf (NegF _ a) low high = do
   toIRIntegrate conf a (IRUnaryOp OpNeg high) (IRUnaryOp OpNeg low)
 toIRIntegrate conf (ExpF _ a) low high = do
@@ -541,26 +652,61 @@ toIRIntegrate conf (Constant _ value) low high = do
   ind <- indicator (IROp OpAnd (IROp OpLessThan low (IRConst value)) (IROp OpGreaterThan high (IRConst value))) --TODO What to do if low and high are equal?
   propagateBranchCount0 conf ind
 toIRIntegrate conf (ThetaI _ a i) low high = do
-  let val = IRTheta (toIRGenerate a) i
+  a' <-  toIRGenerate a
+  let val = IRTheta a' i
   ind <- indicator (IROp OpAnd (IROp OpLessThan low val) (IROp OpGreaterThan high val)) --TODO What to do if low and high are equal?
   propagateBranchCount0 conf ind
-toIRIntegrate conf (InjF _ name params) low high = do  --TODO Multivariable
-  let letInBlockLow = IRLetIn v low invExpr
-  let letInBlockHigh = IRLetIn v high invExpr
+toIRIntegrate conf (InjF _ name [param]) low high = do  --TODO Multivariable
+  prefix <- mkVariable ""
+  let letInBlockLow = irMap (uniqueify [v] prefix) (IRLetIn v low invExpr)
+  let letInBlockHigh = irMap (uniqueify [v] prefix) (IRLetIn v high invExpr)
   paramExpr <- toIRIntegrate conf param letInBlockLow letInBlockHigh
-  propagateBranchCount1 conf id paramExpr
-  where Just fPair = lookup name globalFenv
+  propagateBranchCount1 conf (id) paramExpr
+  where Just fPair = lookup name globalFenv   --TODO error handling if nor found
         FPair (_, [inv]) = fPair
-        FDecl (_, [v], _, invExpr, _) = inv
-        [param] = params
+        FDecl (_, [v], _, invExpr, [(_, invDerivExpr)]) = inv
+toIRIntegrate conf (InjF TypeInfo {rType=TFloat, tags=extras} name [param1, param2]) low high
+  | extras `hasAlgorithm` "injF2Left" = do  --FIXME Left
+  let Just fPair = lookup name globalFenv   --TODO error handling if not found
+  let FPair (fwd, inversions) = fPair
+  let FDecl (_, [v2, v3], [v1], _, _) = fwd
+  let [invDecl] = filter (\(FDecl (_, _, [w1], _, _)) -> v3==w1) inversions   --This should only return one inversion
+  let FDecl (_, [x2, x3], _, invExpr, invDerivs) = invDecl
+  let Just invDeriv = lookup v1 invDerivs
+  leftExpr <- toIRGenerate param1
+  let (detVar, sampleVar) = if x2 == v2 then (x2, x3) else (x3, x2)
+  let letInBlockLow = IRLetIn detVar leftExpr (IRLetIn sampleVar low invExpr)
+  let letInBlockHigh = IRLetIn detVar leftExpr (IRLetIn sampleVar high invExpr)
+  paramExpr <- toIRIntegrate conf param2 letInBlockLow letInBlockHigh
+  ret <- propagateBranchCount1 conf (id) paramExpr
+  uniquePrefix <- mkVariable ""
+  return $ irMap (uniqueify [v1, v2, v3] uniquePrefix) ret
+toIRIntegrate conf (InjF TypeInfo {rType=TFloat, tags=extras} name [param1, param2]) low high
+  | extras `hasAlgorithm` "injF2Right" = do  --FIXME Left
+  let Just fPair = lookup name globalFenv   --TODO error handling if not found
+  let FPair (fwd, inversions) = fPair
+  let FDecl (_, [v2, v3], [v1], _, _) = fwd
+  let [invDecl] = filter (\(FDecl (_, _, [w1], _, _)) -> v2==w1) inversions   --This should only return one inversion
+  let FDecl (_, [x2, x3], _, invExpr, invDerivs) = invDecl
+  let Just invDeriv = lookup v1 invDerivs
+  leftExpr <- toIRGenerate param2
+  let (detVar, sampleVar) = if x2 == v3 then (x2, x3) else (x3, x2)
+  let letInBlockLow = IRLetIn detVar leftExpr (IRLetIn sampleVar low invExpr)
+  let letInBlockHigh = IRLetIn detVar leftExpr (IRLetIn sampleVar high invExpr)
+  paramExpr <- toIRIntegrate conf param1 letInBlockLow letInBlockHigh
+  ret <- propagateBranchCount1 conf (id) paramExpr
+  uniquePrefix <- mkVariable ""
+  return $ irMap (uniqueify [v1, v2, v3] uniquePrefix) ret
 toIRIntegrate conf (Call _ name) low high = propagateBranchCount0 conf (IRCall (name ++ "_integ") [low, high])
 toIRIntegrate conf (Lambda t name subExpr) low high = do
   subExprIR <- toIRIntegrate conf subExpr low high
-  propagateBranchCount1 conf (\p -> IRLambda name p) subExprIR
+  propagated <- propagateBranchCount1 conf id subExprIR
+  return (IRLambda name propagated)
 toIRIntegrate conf (Apply _ l v) low high = do
-  let vIR = toIRGenerate v
+  vIR <- toIRGenerate v
   lIR <- toIRIntegrate conf l low high
-  propagateBranchCount1 conf (\p -> IRApply p vIR) lIR
+  --propagateBranchCount1 conf (\p -> IRApply p vIR) lIR
+  return $ IRApply lIR vIR
 toIRIntegrate conf (Var _ n) _ _ = propagateBranchCount0 conf (IRVar n)
 toIRIntegrate _ x _ _ = error ("found no way to convert to IRIntegrate: " ++ show x)
 

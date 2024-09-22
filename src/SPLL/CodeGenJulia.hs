@@ -142,5 +142,6 @@ generateCode (IRIndex arrExpr indexExpr) = let
   in [arrCode ++ "[1 + " ++ indexCode ++ "]"]
 generateCode (IREvalNN funcName argExpr) = [funcName ++ "(" ++ spicyHead (generateCode argExpr) ++ ")"]
 generateCode (IRCall funcName argExprs) = [funcName ++ "(" ++ (intercalate "," (map (spicyHead . generateCode) argExprs)) ++ ")"]
+generateCode (IRApply lambda argExpr) = [spicyHead (generateCode lambda) ++ "(" ++ spicyHead (generateCode argExpr) ++ ")"]
 generateCode (IRReturning expr) = generateCode expr
 generateCode x = error ("No Julia CodeGen for IR: " ++ show x)
