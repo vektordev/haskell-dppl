@@ -14,14 +14,15 @@ From there,
 ```
 stack run
 ```
-should run the software.
+should run the compiler. Use -- to pass arguments to NeST rather than the build system. You can use
 
-Currently, the transpiler lacks convenience features such as a front end. Use the Lib or Main files to hard-code the program you wish, then observe stdout for the transpiled program. See the Examples file for example programs.
+```
+stack run -- -i yourCode.spll -o output.py -l python
+```
+to generate python inference code from the code in the input file. 
 
 ### About
 
-Some of the features of NeST we have described are implemented in a Proof of Concept manner and may not work as intended in all cases. If you believe you have encountered such a case, feel free to reach out. Contribuations are of course also welcome.
+Some of the features of NeST we have described are implemented in a Proof of Concept manner and may not work as intended in all cases. If you believe you have encountered such a case, feel free to reach out or create an issue. Contribuations are of course also welcome.
 
 You can cite this work as such: Viktor Pfanschilling, Hikaru Shindo, Devendra Singh Dhami, Kristian Kersting (2022): Sum-Product Loop Programming: From Probabilistic Circuits to Loop Programming. In Proceedings of the 19th International Conference on Principles of Knowledge Representation and Reasoning (KR).
-
-This repository is somewhat temporary. We intend to move the repository soon.
