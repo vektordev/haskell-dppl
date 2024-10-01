@@ -23,6 +23,7 @@ readLanguage = str >>= \s -> case map toLower s of
   "p" -> return Python
   "julia" -> return Julia
   "jul" -> return Julia
+  "jl" -> return Julia
   "j" -> return Julia
   _ -> readerError "Only python or julia are supported as languages"
 
