@@ -81,11 +81,14 @@ testNegFail = NegF makeTypeInfo (PlusF makeTypeInfo (Uniform makeTypeInfo) (Unif
 testInjF :: Program Double
 testInjF = Program [("main", InjF makeTypeInfo "double" [Uniform makeTypeInfo])] [] 
 
-testInjFPlus :: Program Double
-testInjFPlus = Program [("main", InjF makeTypeInfo "plus" [Constant makeTypeInfo (VFloat 1), Uniform makeTypeInfo])] [] 
+testInjFPlusLeft :: Program Double
+testInjFPlusLeft = Program [("main", InjF makeTypeInfo "plus" [Constant makeTypeInfo (VFloat 1), Uniform makeTypeInfo])] []
+
+testInjFPlusRight :: Program Double
+testInjFPlusRight = Program [("main", InjF makeTypeInfo "plus" [Uniform makeTypeInfo, Constant makeTypeInfo (VFloat 1)])] []
 
 testInjF2 :: Program Double
-testInjF2 = Program [("main", ExpF makeTypeInfo (InjF makeTypeInfo "double" [Uniform makeTypeInfo]))] [] 
+testInjF2 = Program [("main", InjF makeTypeInfo "double" [InjF makeTypeInfo "plus" [Constant makeTypeInfo (VFloat 1), Uniform makeTypeInfo]])] [] 
 
 testPlus3 :: Program Double
 testPlus3 = Program [("main", LetIn makeTypeInfo "a" (Uniform makeTypeInfo) (PlusF makeTypeInfo (Var makeTypeInfo "a") (Var makeTypeInfo "a")))] [] 
@@ -117,6 +120,25 @@ testCallLambdaAdvanced = Program [("main", LetIn makeTypeInfo "l" (Lambda makeTy
 testLetIn :: Program Double
 testLetIn = Program [("main", LetIn makeTypeInfo "u" (Uniform makeTypeInfo) (PlusF makeTypeInfo (Var makeTypeInfo "u") (Constant makeTypeInfo (VFloat 1))))] [] 
 --testCallLambda = Program [] [] (CallLambda makeTypeInfo (Uniform makeTypeInfo) (Lambda makeTypeInfo "a" (PlusF makeTypeInfo (Var makeTypeInfo "a") (Uniform makeTypeInfo))))
+
+testRecursion :: Program Double
+testRecursion = Program [("main", Apply makeTypeInfo (Call makeTypeInfo "rec") (Constant makeTypeInfo (VFloat 64))), 
+                         ("rec", Lambda makeTypeInfo "x" (IfThenElse makeTypeInfo (GreaterThan makeTypeInfo (Var makeTypeInfo "x") (Constant makeTypeInfo (VFloat 1))) (MultF makeTypeInfo (Constant makeTypeInfo (VFloat 3)) (Apply makeTypeInfo (Call makeTypeInfo "rec") (MultF makeTypeInfo (Var makeTypeInfo "x") (Constant makeTypeInfo (VFloat 0.5))))) (Uniform makeTypeInfo)))] []
+
+testNN :: Expr a
+testNN = Lambda makeTypeInfo "im1"
+  (Lambda makeTypeInfo "im2" (PlusI makeTypeInfo
+    (ReadNN makeTypeInfo "classifyMNist" (Var makeTypeInfo "im1"))
+    (ReadNN makeTypeInfo "classifyMNist" (Var makeTypeInfo "im2"))))
+
+gaussLists :: Program a
+gaussLists = Program [("main", Lambda makeTypeInfo "thetas"
+  (IfThenElse makeTypeInfo
+    (GreaterThan makeTypeInfo (Uniform makeTypeInfo) (ThetaI makeTypeInfo (Var makeTypeInfo "thetas") 0))
+    (Null makeTypeInfo)
+    (Cons makeTypeInfo
+      (PlusF makeTypeInfo (MultF makeTypeInfo (Normal makeTypeInfo) (ThetaI makeTypeInfo (Var makeTypeInfo "thetas") 1)) (ThetaI makeTypeInfo (Var makeTypeInfo "thetas") 2))
+      (Apply makeTypeInfo (Call makeTypeInfo "main") (Var makeTypeInfo "thetas")))))] []
 {-
 flipCoin :: Expr Double
 flipCoin = GreaterThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 0.5))
