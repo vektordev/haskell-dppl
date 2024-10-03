@@ -16,14 +16,6 @@ import SPLL.Typing.Typing (TypeInfo, makeTypeInfo)
 --  (Null makeTypeInfo)
 --  (Cons makeTypeInfo (PlusF makeTypeInfo (MultF makeTypeInfo (Normal makeTypeInfo) (ThetaI makeTypeInfo 1)) (ThetaI makeTypeInfo 2)) (Call makeTypeInfo "main"))
 
-gaussLists :: Program a
-gaussLists = Program [("main", Lambda makeTypeInfo "thetas"
-  (IfThenElse makeTypeInfo
-    (GreaterThan makeTypeInfo (Uniform makeTypeInfo) (ThetaI makeTypeInfo (Var makeTypeInfo "thetas") 0))
-    (Null makeTypeInfo)
-    (Cons makeTypeInfo
-      (PlusF makeTypeInfo (MultF makeTypeInfo (Normal makeTypeInfo) (ThetaI makeTypeInfo (Var makeTypeInfo "thetas") 1)) (ThetaI makeTypeInfo (Var makeTypeInfo "thetas") 2))
-      (CallArg makeTypeInfo "main" [(Var makeTypeInfo "thetas")]))))] []
 
 paramExpr :: Expr Double
 paramExpr = Arg makeTypeInfo "iterations" TFloat (IfThenElse makeTypeInfo
@@ -139,6 +131,7 @@ gaussLists = Program [("main", Lambda makeTypeInfo "thetas"
     (Cons makeTypeInfo
       (PlusF makeTypeInfo (MultF makeTypeInfo (Normal makeTypeInfo) (ThetaI makeTypeInfo (Var makeTypeInfo "thetas") 1)) (ThetaI makeTypeInfo (Var makeTypeInfo "thetas") 2))
       (Apply makeTypeInfo (Call makeTypeInfo "main") (Var makeTypeInfo "thetas")))))] []
+
 {-
 flipCoin :: Expr Double
 flipCoin = GreaterThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 0.5))
