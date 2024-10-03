@@ -19,7 +19,6 @@ import qualified Data.Map as Map
 import SPLL.Lang.Lang
 import SPLL.Typing.Typing
 import SPLL.Typing.PType
-import SPLL.Examples
 
 data PTypeError
   = UnificationFail PType PType

@@ -299,6 +299,10 @@ tMapM f expr@(InjF _ name p) = do
   fp <- mapM (tMapM f) p
   t <- f expr
   return $ InjF t name fp
+tMapM f expr@(CallArg _ name p) = do
+  fp <- mapM (tMapM f) p
+  t <- f expr
+  return $ CallArg t name fp
 tMapM f expr
   | length (getSubExprs expr) == 0 = do
       t <- f expr
@@ -479,7 +483,13 @@ getRType (VTuple t1 t2) = Tuple (getRType t1) (getRType t2)
 prettyPrintProg :: (Num a, Show a) => Program a -> [String]
 prettyPrintProg (Program decls neurals) = concatMap prettyPrintDecl decls ++ concatMap prettyPrintNeural neurals
 
-prettyPrintNeural = undefined
+prettyPrintNeural :: NeuralDecl a -> [String]
+prettyPrintNeural (name, ty, range) = l1:l2:(l3 range):[]
+  where
+    l1 = ("--- Neural: " ++ name ++ "---")
+    l2 = ("\t :: " ++ show ty)
+    l3 (EnumList lst) = ("\t" ++ (show $ length lst))
+    l3 _ = "prettyprint not implemented"
 
 prettyPrintDecl :: (Num a, Show a) => FnDecl a -> [String]
 prettyPrintDecl (name, expr) = ("--- Function: " ++ name ++ "---"):prettyPrint expr

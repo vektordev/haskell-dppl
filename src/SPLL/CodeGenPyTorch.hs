@@ -116,9 +116,12 @@ generateFunction (name, expr) = let
   block = generateCode reducedExpr "return "
   --TODO Use returnize to find all exprs to attach returns to.
   in [l1] ++ indentOnce block
-  
+
+-- IRReturning should be transparent here.
 unwrapLambdas :: IRExpr a -> ([String], IRExpr a)
 unwrapLambdas (IRLambda name rest) = (name:otherNames, plainTree)
+  where (otherNames, plainTree) = unwrapLambdas rest
+unwrapLambdas (IRReturning rest) = (otherNames, IRReturning plainTree)
   where (otherNames, plainTree) = unwrapLambdas rest
 unwrapLambdas anyNode = ([], anyNode)
 

@@ -28,7 +28,6 @@ import Text.Pretty.Simple
 import SPLL.Lang.Lang
 import SPLL.Typing.Typing
 import SPLL.Typing.RType
-import SPLL.Examples
 import SPLL.Typing.PType( PType(..) )
 
 import PredefinedFunctions
