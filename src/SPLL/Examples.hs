@@ -10,6 +10,13 @@ import SPLL.Typing.Typing (TypeInfo, makeTypeInfo)
 --  then let current = randA in (current, weatherHask current)
 --  else let current = randB in (current, weatherHask current)
 
+--gaussLists :: Expr a
+--gaussLists = IfThenElse makeTypeInfo
+--  (GreaterThan makeTypeInfo (Uniform makeTypeInfo) (ThetaI makeTypeInfo 0))
+--  (Null makeTypeInfo)
+--  (Cons makeTypeInfo (PlusF makeTypeInfo (MultF makeTypeInfo (Normal makeTypeInfo) (ThetaI makeTypeInfo 1)) (ThetaI makeTypeInfo 2)) (Call makeTypeInfo "main"))
+
+
 paramExpr :: Expr Double
 paramExpr = Arg makeTypeInfo "iterations" TFloat (IfThenElse makeTypeInfo
   (GreaterThan makeTypeInfo (Var makeTypeInfo "iterations") (Constant makeTypeInfo (VFloat 0.5)))
@@ -124,6 +131,7 @@ gaussLists = Program [("main", Lambda makeTypeInfo "thetas"
     (Cons makeTypeInfo
       (PlusF makeTypeInfo (MultF makeTypeInfo (Normal makeTypeInfo) (ThetaI makeTypeInfo (Var makeTypeInfo "thetas") 1)) (ThetaI makeTypeInfo (Var makeTypeInfo "thetas") 2))
       (Apply makeTypeInfo (Call makeTypeInfo "main") (Var makeTypeInfo "thetas")))))] []
+
 {-
 flipCoin :: Expr Double
 flipCoin = GreaterThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 0.5))
@@ -476,12 +484,7 @@ testInconsistent = IfThenElse makeTypeInfo
 failureCase :: Expr makeTypeInfo a
 failureCase = MultF makeTypeInfo (Normal makeTypeInfo) (ThetaI makeTypeInfo 0)
 
-gaussLists :: Expr makeTypeInfo a
-gaussLists = IfThenElse makeTypeInfo
-  (GreaterThan makeTypeInfo (Uniform makeTypeInfo) (ThetaI makeTypeInfo 0))
-  (Null makeTypeInfo)
-  (Cons makeTypeInfo (PlusF makeTypeInfo (MultF makeTypeInfo (Normal makeTypeInfo) (ThetaI makeTypeInfo 1)) (ThetaI makeTypeInfo 2)) (Call makeTypeInfo "main"))
-  
+
 gaussMultiLists :: Expr makeTypeInfo a
 gaussMultiLists = IfThenElse makeTypeInfo
   (GreaterThan makeTypeInfo (Uniform makeTypeInfo) (ThetaI makeTypeInfo 0) )

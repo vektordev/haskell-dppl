@@ -7,7 +7,6 @@ import SPLL.Typing.PType
 import SPLL.Typing.RInfer
 import SPLL.Typing.PInfer2
 import SPLL.Typing.Witnessing
-import SPLL.Examples
 
 data CompileError = RErr RTypeError | PErr PTypeError deriving (Show)
 

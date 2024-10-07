@@ -29,7 +29,6 @@ import SPLL.Lang.Lang
 import SPLL.Typing.Typing
 import SPLL.Typing.PType
 import SPLL.Typing.RType hiding (TVar, TV, Scheme, Scheme(..))
-import SPLL.Examples
 
 data PTypeError
   = UnificationFail PType PType

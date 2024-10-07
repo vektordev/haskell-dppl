@@ -7,6 +7,9 @@ import SPLL.Examples
 import System.IO
 import SPLL.IntermediateRepresentation
 import Data.Char (toLower)
+import SPLL.Parser
+import System.Exit (exitFailure)
+import Text.Megaparsec.Error (errorBundlePretty)
 
 data Opts = Opts {
   inputFile :: String,
@@ -23,6 +26,7 @@ readLanguage = str >>= \s -> case map toLower s of
   "p" -> return Python
   "julia" -> return Julia
   "jul" -> return Julia
+  "jl" -> return Julia
   "j" -> return Julia
   _ -> readerError "Only python or julia are supported as languages"
 
@@ -56,6 +60,7 @@ parseOpts = Opts
 -- Entry point for the program, parse CLI arguments and pass execution to transpile
 main :: IO ()
 --main = someFunc
+--main = testParse
 main = transpile =<< execParser opts
          where
            opts = info (parseOpts <**> helper)
@@ -66,16 +71,20 @@ main = transpile =<< execParser opts
 transpile :: Opts -> IO ()
 transpile options = do
   print options
-  content <- readInputFile (inputFile options)
-  let prog = parseProgram content
+  prog <- parseProgram (inputFile options)
   let transpiled = codeGenToLang (language options) (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = Main.countBranches options, topKThreshold = topKCutoff options}) prog
   writeOutputFile (outputFile options) transpiled
 
-readInputFile :: String -> IO String
-readInputFile = readFile
-
-parseProgram :: String -> Program Double
-parseProgram inp = uniformProg  --TODO Real parse
+parseProgram :: FilePath -> IO (Program Double)
+parseProgram path = do
+  content <- readFile path
+  let maybeError = tryParseProgram path content
+  case maybeError of
+    Left err -> do
+      putStrLn "### Parse Error ###"
+      putStrLn (errorBundlePretty err)
+      exitFailure 
+    Right prog -> return prog
 
 writeOutputFile :: String -> String -> IO()
 writeOutputFile = writeFile

@@ -62,6 +62,7 @@ data Expr a =
               -- Distributions
               | Uniform (TypeInfo a)
               | Normal (TypeInfo a)
+              -- Parameters
               | ThetaI (TypeInfo a) (Expr a) Int
               | Subtree (TypeInfo a) (Expr a) Int
               -- Lists/Tuples

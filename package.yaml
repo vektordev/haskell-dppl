@@ -30,7 +30,7 @@ dependencies:
 - containers
 - pretty
 - text
-- parsec
+- megaparsec
 - repline
 - statistics
 - mwc-random
