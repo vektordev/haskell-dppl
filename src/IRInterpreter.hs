@@ -40,7 +40,7 @@ generate f globalEnv env (arg:args) (IRLambda name expr) = generate f globalEnv 
 generate f globalEnv env [] (IRLambda name expr) = error "No args provided to lambda"
 generate f globalEnv env args (IRApply expr val) = generate f globalEnv env (val:args) expr
 --generate f globalEnv env (x:args) expr | trace ((show expr) ++ (show x)) False = undefined
-generate f globalEnv env (x:args) _ = error "Arguments provided to non-lamda related expression"
+generate f globalEnv env (x:args) expr = error ("Arguments provided to non-lamda related expression: " ++ irPrintFlat expr)
 generate f globalEnv env args (IRIf cond thenCase elseCase) = do
   condVal <- generate f globalEnv env args cond
   case condVal of

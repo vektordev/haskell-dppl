@@ -157,7 +157,8 @@ data CompilerConfig a = CompilerConfig {
   -- If set to Just x: All branches with likelihood less than x are discarded.
   --  Uses local probability of the branch,given that the execution arrives at that branching point
   topKThreshold :: Maybe a,
-  countBranches :: Bool
+  countBranches :: Bool,
+  verbose :: Int
 } deriving (Show)
 --3: convert algortihm-and-type-annotated Exprs into abstract representation of explicit computation:
 --    Fold enum ranges, algorithms, etc. into a representation of computation that can be directly converted into code.

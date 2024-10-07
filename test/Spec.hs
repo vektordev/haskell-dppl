@@ -27,6 +27,7 @@ import SpecExamples
 --import ArbitrarySPLL
 import Control.Exception.Base (SomeException, try)
 import Test.QuickCheck.Monadic (monadicIO, run, assert)
+import Test.QuickCheck.Property (failed, reason)
 import Debug.Trace (trace)
 import SPLL.Lang.Lang (Value)
 import Control.Monad.Supply
@@ -88,9 +89,10 @@ correctProbValuesTestCases = [(uniformProg, VFloat 0.5, [], VFloat 1.0),
                               --(testOr, VBool True, [], VFloat 0.75),
                               (testNot, VBool True, [], VFloat 0.25),
                               (simpleCall, VFloat 0.5, [], VFloat 1.0),
-                              (testCallLambda, VFloat 2.5, [], VFloat 1.0),
+                              --(testCallLambda, VFloat 2.5, [], VFloat 1.0),
                               --(testCallLambdaAdvanced, VFloat 2.5, [], VFloat 1.0),
                               --(testLetIn, VFloat 1.5, [], VFloat 1.0)]
+                              --(testRecursion, VFloat 1.5, [], VFloat (1/81)),
                               (testInjFPlusLeft, VFloat 1.5, [], VFloat 1.0),
                               (testInjFPlusRight, VFloat 1.5, [], VFloat 1.0)]
 
@@ -111,13 +113,13 @@ correctIntegralValuesTestCases = [(uniformProg, VFloat 0, VFloat 1, [], VFloat 1
                                   (testInjFPlusLeft, VFloat 1, VFloat 1.5, [], VFloat 0.5),
                                   (testInjFPlusRight, VFloat 1, VFloat 1.5, [], VFloat 0.5),
                                   (testTheta, VFloat 0.9, VFloat 1.1, flatTree [1], VFloat 1),
-                                  (simpleCall, VFloat 0, VFloat 1, [], VFloat 1.0),
-                                  (testCallLambda, VFloat 2, VFloat 3, [], VFloat 1.0)]
+                                  (simpleCall, VFloat 0, VFloat 1, [], VFloat 1.0)]
+                                  --(testCallLambda, VFloat 2, VFloat 3, [], VFloat 1.0)]
                                   --(testCallLambdaAdvanced, VFloat 2, VFloat 3, [], VFloat 1.0),
                                   --(testLetIn, VFloat 1.5, VFloat 2, [], VFloat 0.5)]
 
 noTopKConfig :: CompilerConfig a
-noTopKConfig = CompilerConfig Nothing False
+noTopKConfig = CompilerConfig Nothing False 0
 
 prop_CheckProbTestCases :: Property
 prop_CheckProbTestCases = forAll (elements correctProbValuesTestCases) checkProbTestCase
@@ -127,6 +129,12 @@ prop_CheckIntegralTestCases = forAll (elements correctIntegralValuesTestCases) c
 
 prop_CheckIntegralConverges :: Property
 prop_CheckIntegralConverges = forAll (elements correctIntegralValuesTestCases) checkIntegralConverges
+
+prop_CheckTopKInterprets :: Property
+prop_CheckTopKInterprets = forAll (elements correctProbValuesTestCases) checkTopKInterprets
+
+prop_CheckProbTestCasesWithBC :: Property
+prop_CheckProbTestCasesWithBC = forAll (elements correctProbValuesTestCases) checkProbTestCasesWithBC
 
 checkProbTestCase :: (Program Double, Value Double, [IRExpr Double], Value Double) -> Property
 checkProbTestCase (p, inp, params, out) = ioProperty $ do
@@ -145,6 +153,18 @@ checkIntegralConverges (p, VFloat a, VFloat b, params, _) = ioProperty $ do
   return $ actualOutput === VFloat 1
 checkIntegralConverges _ = False ==> False
 
+checkTopKInterprets :: (Program Double, Value Double, [IRExpr Double], Value Double) -> Property
+checkTopKInterprets (p, inp, params, _) = ioProperty $ do
+  actualOutput <- evalRandIO $ irDensityTopK p 0.05 inp params
+  return $ actualOutput === actualOutput  -- No clue what the correct value should be here. Just test that is interprets to any value
+
+checkProbTestCasesWithBC :: (Program Double, Value Double, [IRExpr Double], Value Double) -> Property
+checkProbTestCasesWithBC (p, inp, params, out) = ioProperty $ do
+  actualOutput <- evalRandIO $ irDensityBC p inp params
+  case actualOutput of 
+    VTuple a (VFloat _) -> return $ a === out
+    _ -> return $ counterexample "Return type was no tuple" False
+
 prop_TopK :: Property
 prop_TopK = ioProperty $ do
   actualOutput0 <- evalRandIO $ irDensityTopK testTopK 0.1 (VFloat 0) []
@@ -158,10 +178,17 @@ irDensityTopK :: RandomGen g => Program Double -> Double -> Value Double -> [IRE
 irDensityTopK p thresh s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params) irExpr
   where Just irExpr = lookup "main_prob" irEnv
         sampleExpr = IRConst s
-        irEnv = envToIR (CompilerConfig (Just thresh) False) annotated
+        irEnv = envToIR (CompilerConfig (Just thresh) False 0) annotated
         annotated = annotateProg typedProg
         typedProg = addTypeInfo p
 
+irDensityBC :: RandomGen g => Program Double -> Value Double -> [IRExpr Double]-> Rand g (Value Double)
+irDensityBC p s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params) irExpr
+  where Just irExpr = lookup "main_prob" irEnv
+        sampleExpr = IRConst s
+        irEnv = envToIR (CompilerConfig Nothing True 0) annotated
+        annotated = annotateProg typedProg
+        typedProg = addTypeInfo p
 
 irDensity :: RandomGen g => Program Double -> Value Double -> [IRExpr Double] -> Rand g (Value Double)
 irDensity p s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params) irExpr

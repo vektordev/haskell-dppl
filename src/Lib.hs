@@ -137,14 +137,31 @@ newCodeGenAll conf p = do
   putStrLn "julia code:"
   putStrLn $ unlines jlcode
 
-codeGenToLang :: (Show a, Ord a, Floating a) => Language -> CompilerConfig a -> Program a -> String
+codeGenToLang :: (Show a, Ord a, Floating a) => Language -> CompilerConfig a -> Program a -> IO String
 codeGenToLang lang conf prog = do
+  printIfVerbose conf "=== Parsed Program ===\n"
+  printIfVerbose conf (pPrintProg prog)
+  
   let typed = addTypeInfo prog
+  printIfMoreVerbose conf "\n\n=== Typed Program ===\n"
+  if verbose conf >= 2 then pPrint typed else return ()
+  
   let annotated = annotateProg typed
+  printIfMoreVerbose conf "\n\n=== Annotated Program ===\n"
+  if verbose conf >= 2 then pPrint annotated else return ()
+  
   let ir = envToIR conf annotated
+  printIfVerbose conf "\n\n=== Compiled Program ===\n"
+  printIfVerbose conf (pPrintIREnv ir)
   case lang of
-    Python -> intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions ir)
-    Julia -> intercalate "\n" (SPLL.CodeGenJulia.generateFunctions ir)
+    Python -> return $ intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions ir)
+    Julia -> return $ intercalate "\n" (SPLL.CodeGenJulia.generateFunctions ir)
+
+printIfVerbose :: CompilerConfig a -> String -> IO ()
+printIfVerbose CompilerConfig {verbose=v} s = if v >= 1 then putStrLn s else return ()
+
+printIfMoreVerbose :: CompilerConfig a -> String -> IO ()
+printIfMoreVerbose CompilerConfig {verbose=v} s = if v >= 2 then putStrLn s else return ()
 
 someFunc :: IO ()
 someFunc = do--thatGaussThing

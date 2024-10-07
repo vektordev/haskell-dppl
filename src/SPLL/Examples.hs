@@ -107,7 +107,7 @@ testLetIn = Program [("main", LetIn makeTypeInfo "u" (Uniform makeTypeInfo) (Plu
 --testCallLambda = Program [] [] (CallLambda makeTypeInfo (Uniform makeTypeInfo) (Lambda makeTypeInfo "a" (PlusF makeTypeInfo (Var makeTypeInfo "a") (Uniform makeTypeInfo))))
 
 testRecursion :: Program Double
-testRecursion = Program [("main", Apply makeTypeInfo (Call makeTypeInfo "rec") (Constant makeTypeInfo (VFloat 64))), 
+testRecursion = Program [("main", Apply makeTypeInfo (Call makeTypeInfo "rec") (Constant makeTypeInfo (VFloat 8))), 
                          ("rec", Lambda makeTypeInfo "x" (IfThenElse makeTypeInfo (GreaterThan makeTypeInfo (Var makeTypeInfo "x") (Constant makeTypeInfo (VFloat 1))) (MultF makeTypeInfo (Constant makeTypeInfo (VFloat 3)) (Apply makeTypeInfo (Call makeTypeInfo "rec") (MultF makeTypeInfo (Var makeTypeInfo "x") (Constant makeTypeInfo (VFloat 0.5))))) (Uniform makeTypeInfo)))] []
 
 testNN :: Expr a
