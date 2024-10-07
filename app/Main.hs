@@ -15,6 +15,7 @@ data Opts = Opts {
   inputFile :: String,
   outputFile :: String,
   language :: Language,
+  verbosity :: Int,
   countBranches :: Bool,
   topKCutoff :: Maybe Double
 } deriving Show
@@ -29,6 +30,9 @@ readLanguage = str >>= \s -> case map toLower s of
   "jl" -> return Julia
   "j" -> return Julia
   _ -> readerError "Only python or julia are supported as languages"
+  
+verbosityParser :: Parser Int
+verbosityParser = length <$> many (flag' () (short 'v' <> help "Increases verbosity"))
 
 parseOpts :: Parser Opts
 parseOpts = Opts
@@ -47,6 +51,7 @@ parseOpts = Opts
             <> short 'l'
             <> metavar "LANG"
             <> help "Language the program is transpiled to. Either python or julia")
+        <*> verbosityParser
         <*> switch
             ( long "countBranches"
             <> short 'c'
@@ -72,7 +77,7 @@ transpile :: Opts -> IO ()
 transpile options = do
   print options
   prog <- parseProgram (inputFile options)
-  let transpiled = codeGenToLang (language options) (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = Main.countBranches options, topKThreshold = topKCutoff options}) prog
+  transpiled <- codeGenToLang (language options) (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = Main.countBranches options, topKThreshold = topKCutoff options, verbose=verbosity options}) prog
   writeOutputFile (outputFile options) transpiled
 
 parseProgram :: FilePath -> IO (Program Double)
