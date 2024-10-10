@@ -18,24 +18,27 @@ data RType = TBool
            | TVarR TVarR
            | GreaterType RType RType
            | NotSetYet
-           deriving (Show, Ord)
+           deriving (Show, Eq, Ord)
 
-
-instance Eq RType where
-  (==) TBool TBool = True
-  (==) TInt TInt = True
-  (==) TSymbol TSymbol = True
-  (==) TFloat TFloat = True
-  (==) TThetaTree TThetaTree = True
-  (==) (TArrow left right) (TArrow left2 right2) = left == left2 && right == right2
-  (==) (ListOf x) (ListOf y) = x == y
-  (==) NullList NullList = True
-  (==) BottomTuple BottomTuple = True
-  (==) (RIdent a) (RIdent b) = a == b
-  (==) (RConstraint _ _ retT) (RConstraint _ _ retT2) = retT == retT2
-  (==) (GreaterType t1 t2) (GreaterType t3 t4) = greaterType t1 t2 == greaterType t1 t2
-  (==) (Tuple t11 t12) (Tuple t21 t22) = t11 == t21 && t12 == t22
-  (==) _ _ = False
+matches :: RType -> RType -> Bool
+matches TBool TBool = True
+matches TInt TInt = True
+matches TSymbol TSymbol = True
+matches TFloat TFloat = True
+matches TThetaTree TThetaTree = True
+matches (TArrow left right) (TArrow left2 right2) = left `matches` left2 && right `matches` right2
+matches (ListOf x) (ListOf y) = x `matches` y
+matches NullList NullList = True
+matches BottomTuple BottomTuple = True
+matches (RIdent a) (RIdent b) = a == b
+matches (RConstraint _ _ retT) (RConstraint _ _ retT2) = retT `matches` retT2
+matches (GreaterType t1 t2) (GreaterType t3 t4) = case (greaterType t1 t2, greaterType t1 t2)
+  of
+    (Just a, Just b) -> a `matches` b
+    (Nothing, Nothing) -> True
+    (x, y) -> False
+matches (Tuple t11 t12) (Tuple t21 t22) = t11 `matches` t21 && t12 `matches` t22
+matches _ _ = False -- TODO: This might be too aggressive, or it might not break when RType changes.
   
 data Scheme = Forall [TVarR] RType
   deriving (Show, Eq)
@@ -43,7 +46,7 @@ data Scheme = Forall [TVarR] RType
 greaterType :: RType -> RType -> Maybe RType
 greaterType (ListOf t1) NullList = Just $ ListOf t1
 greaterType NullList (ListOf t1)  = Just $ ListOf t1
-greaterType t1 t2 | t1 == t2 =  Just t1
+greaterType t1 t2 | t1 `matches` t2 =  Just t1
 greaterType _ _ = Nothing
 
 isOnlyNumbers :: RType -> Bool

@@ -613,22 +613,22 @@ unifyMany t1 t2 = throwError $ UnificationMismatch t1 t2
 
 unifies :: RType -> RType -> Solve Subst
 --unifies t1 t2 | trace (show t1 ++ " with " ++ show t2) False = undefined
-unifies t1 t2 | t1 == t2 = return emptySubst
+unifies t1 t2 | t1 `matches` t2 = return emptySubst
 unifies (Tuple t1 t2) BottomTuple = return emptySubst
 unifies BottomTuple (Tuple t1 t2) = return emptySubst
 unifies (ListOf t) NullList = return emptySubst
 unifies NullList (ListOf t) = return emptySubst
-unifies t1 (GreaterType (TVarR v) t3) = if t1 == t3 then v `bind` t1 else
+unifies t1 (GreaterType (TVarR v) t3) = if t1 `matches` t3 then v `bind` t1 else
   throwError $ UnificationFail t1 t3
-unifies t1 (GreaterType t3 (TVarR v)) = if t1 == t3 then v `bind` t1 else
+unifies t1 (GreaterType t3 (TVarR v)) = if t1 `matches` t3 then v `bind` t1 else
   throwError $ UnificationFail t1 t3
 unifies (TVarR v) (GreaterType t2 t3) = case greaterType t2 t3 of
   Nothing -> throwError $ UnificationFail t2 t3
   Just t -> v `bind` t
-unifies t1 (GreaterType t2 t3) = if t1 == t2 && t2 == t3 then return emptySubst else
+unifies t1 (GreaterType t2 t3) = if t1 `matches` t2 && t2 `matches` t3 then return emptySubst else
   (case greaterType t2 t3 of
     Nothing -> throwError $ UnificationFail t1 (GreaterType t2 t3)
-    Just tt -> if t1 == tt then return emptySubst else throwError $  UnificationFail t1 (GreaterType t2 t3))
+    Just tt -> if t1 `matches` tt then return emptySubst else throwError $  UnificationFail t1 (GreaterType t2 t3))
 unifies (TVarR v) (TVarR t) | v == t = return emptySubst
 unifies (TVarR v) t = v `bind` t
 unifies t (TVarR v) = v `bind` t
@@ -647,7 +647,7 @@ solver (su, cs) =
       solver (su1 `compose` su, apply su1 cs0)
 
 bind ::  TVarR -> RType -> Solve Subst
-bind a t | t == TVarR a     = return emptySubst
+bind a t | t `matches` TVarR a     = return emptySubst
          | occursCheck a t = throwError $ InfiniteType a t
          | otherwise       = return (Subst $ Map.singleton a t)
 
