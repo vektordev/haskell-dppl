@@ -46,8 +46,8 @@ spicyHead x = error "overfull list in head"
 pyOps :: Operand -> String
 pyOps OpPlus = "+"
 pyOps OpMult = "*"
-pyOps OpGreaterThan = ">="
-pyOps OpLessThan = "<="
+pyOps OpGreaterThan = ">"
+pyOps OpLessThan = "<"
 pyOps OpDiv = "/"
 pyOps OpSub = "-"
 pyOps OpOr = "or"
@@ -72,7 +72,7 @@ onLast f [x] = [f x]
 onLast f (x:xs) = x : onLast f xs
 
 generateFunctions :: (Show a) => [(String, IRExpr a)] -> [String]
-generateFunctions defs | trace (show defs) False = undefined
+--generateFunctions defs | trace (show defs) False = undefined
 --contrary to the julia backend, we want to aggregate gen and prob into one classes. Ugly implementation, but it'll do for now.
 generateFunctions defs =
   let

@@ -94,7 +94,9 @@ correctProbValuesTestCases = [(uniformProg, VFloat 0.5, [], VFloat 1.0),
                               --(testLetIn, VFloat 1.5, [], VFloat 1.0)]
                               --(testRecursion, VFloat 1.5, [], VFloat (1/81)),
                               (testInjFPlusLeft, VFloat 1.5, [], VFloat 1.0),
-                              (testInjFPlusRight, VFloat 1.5, [], VFloat 1.0)]
+                              (testInjFPlusRight, VFloat 1.5, [], VFloat 1.0),
+                              (testDim, VFloat 3, [], VFloat 0.5),
+                              (testDim, VFloat 0.4, [], VFloat 0.25)]
 
 correctIntegralValuesTestCases :: [(Program Double, Value Double, Value Double, [IRExpr Double], Value Double)]
 correctIntegralValuesTestCases = [(uniformProg, VFloat 0, VFloat 1, [], VFloat 1.0),
@@ -139,18 +141,24 @@ prop_CheckProbTestCasesWithBC = forAll (elements correctProbValuesTestCases) che
 checkProbTestCase :: (Program Double, Value Double, [IRExpr Double], Value Double) -> Property
 checkProbTestCase (p, inp, params, out) = ioProperty $ do
   actualOutput <- evalRandIO $ irDensity p inp params
-  return $ actualOutput === out
+  case actualOutput of 
+    VTuple a (VFloat _) -> return $ a === out
+    _ -> return $ counterexample "Return type was no tuple" False
 
 checkIntegralTestCase :: (Program Double, Value Double, Value Double, [IRExpr Double], Value Double) -> Property
 checkIntegralTestCase (p, low, high, params, out) = ioProperty $ do
   actualOutput <- evalRandIO $ irIntegral p low high params
-  return $ actualOutput === out
+  case actualOutput of 
+    VTuple a (VFloat _) -> return $ a === out
+    _ -> return $ counterexample "Return type was no tuple" False
 
 --TODO better bounds for Integral
 checkIntegralConverges :: (Program Double, Value Double, Value Double, [IRExpr Double], Value Double) -> Property
 checkIntegralConverges (p, VFloat a, VFloat b, params, _) = ioProperty $ do
   actualOutput <- evalRandIO $ irIntegral p (VFloat (-9999999)) (VFloat 9999999) params
-  return $ actualOutput === VFloat 1
+  case actualOutput of 
+    VTuple a (VFloat _) -> return $ a === VFloat 1
+    _ -> return $ counterexample "Return type was no tuple" False
 checkIntegralConverges _ = False ==> False
 
 checkTopKInterprets :: (Program Double, Value Double, [IRExpr Double], Value Double) -> Property
@@ -162,14 +170,16 @@ checkProbTestCasesWithBC :: (Program Double, Value Double, [IRExpr Double], Valu
 checkProbTestCasesWithBC (p, inp, params, out) = ioProperty $ do
   actualOutput <- evalRandIO $ irDensityBC p inp params
   case actualOutput of 
-    VTuple a (VFloat _) -> return $ a === out
+    VTuple a (VTuple (VFloat _) (VFloat _)) -> return $ a === out
     _ -> return $ counterexample "Return type was no tuple" False
 
 prop_TopK :: Property
 prop_TopK = ioProperty $ do
   actualOutput0 <- evalRandIO $ irDensityTopK testTopK 0.1 (VFloat 0) []
   actualOutput1 <- evalRandIO $ irDensityTopK testTopK 0.1 (VFloat 1) []
-  return $ (actualOutput1 == VFloat 0.95) && (actualOutput0 == VFloat 0)
+  case (actualOutput0, actualOutput1) of
+    (VTuple a (VFloat _), VTuple b (VFloat _)) -> return $ (b == VFloat 0.95) && (a == VFloat 0)
+    _ -> return False
 
 --prop_CheckProbTestCases = foldr (\(p, inp, out) acc -> do
 --  checkProbTestCase p inp out .&&. acc) (True===True) correctProbValuesTestCases

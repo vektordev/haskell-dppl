@@ -65,15 +65,15 @@ generate f globalEnv env args (IROp OpGreaterThan a b) = do
   aVal <- generate f globalEnv env args a
   bVal <- generate f globalEnv env args b
   case (aVal, bVal) of
-      (VFloat af, VFloat bf) -> return $ VBool (af >= bf)
-      (VInt af, VInt bf) -> return $ VBool (af >= bf)
+      (VFloat af, VFloat bf) -> return $ VBool (af > bf)
+      (VInt af, VInt bf) -> return $ VBool (af > bf)
       _ -> error "Type error: greater than can only compare two numbers (of the same type)"
 generate f globalEnv env args (IROp OpLessThan a b) = do
   aVal <- generate f globalEnv env args a
   bVal <- generate f globalEnv env args b
   case (aVal, bVal) of
-      (VFloat af, VFloat bf) -> return $ VBool (af <= bf)
-      (VInt af, VInt bf) -> return $ VBool (af <= bf)
+      (VFloat af, VFloat bf) -> return $ VBool (af < bf)
+      (VInt af, VInt bf) -> return $ VBool (af < bf)
       _ -> error "Type error: greater than can only compare two numbers (of the same type)"
 generate f globalEnv env args (IROp OpDiv a b) = do
   aVal <- generate f globalEnv env args a

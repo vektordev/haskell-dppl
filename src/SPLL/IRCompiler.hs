@@ -41,11 +41,14 @@ runCompile conf codeGen = generateLetInBlock conf (runWriterT codeGen)
   
 generateLetInBlock :: (Show a) => CompilerConfig a -> (SupplyT Int Identity) (CompilationResult a, [(String, IRExpr a)]) -> IRExpr a
 generateLetInBlock conf codeGen = 
-  if countBranches conf && not (isLambda m) then
-    returnize (foldr (\(var, val) expr  -> IRLetIn var val expr) (IRTCons m bc) binds)
-  else
-    returnize (foldr (\(var, val) expr  -> IRLetIn var val expr) m binds)
+  case m of 
+    (IRLambda _ _) -> returnize (foldr (\(var, val) expr  -> IRLetIn var val expr) m binds) --Dont make tuple out of lambdas, as the snd (and thr) element don't contain information anyway
+    _ -> if countBranches conf && not (isLambda m) then
+            returnize (foldr (\(var, val) expr  -> IRLetIn var val expr) (IRTCons m (IRTCons dim bc)) binds)
+          else
+            returnize (foldr (\(var, val) expr  -> IRLetIn var val expr) (IRTCons m dim) binds)
   where ((m, dim, bc), binds) = runIdentity $ runSupplyVars codeGen
+
   
 runSupplyVars :: (Monad m) => SupplyT Int m a -> m a
 runSupplyVars codeGen = runSupplyT codeGen (+1) 1
@@ -85,6 +88,7 @@ evalAll expr@(IROp op leftV rightV)
   | isValue leftV && isValue rightV = IRConst (forceOp op (unval leftV) (unval rightV))
   | isValue leftV || isValue rightV = softForceLogic op leftV rightV
   | otherwise = expr
+evalAll (IRIf _ left right) | left == right = left
 evalAll x@(IRIf cond left right) =
   if isValue cond
     then if unval cond == VBool True
@@ -102,7 +106,9 @@ evalAll (IRHead expr) =
 evalAll ex@(IRLetIn name val scope)
   | isSimple val = irMap (replace (IRVar name) val) scope
   | countUses name scope == 1 = irMap (replace (IRVar name) val) scope
+  | countUses name scope == 0 = scope
   | otherwise = ex
+evalAll (IRTCons (IRLambda n a) (IRLambda m b)) | n == m = IRLambda n (IRTCons a b)
 evalAll x = x
   
 countUses :: String -> IRExpr a -> Int
@@ -170,30 +176,39 @@ const0 = IRConst (VFloat 0)
 toIRProbability :: (Floating a, Show a) => CompilerConfig a -> Expr a -> IRExpr a -> CompilerMonad a (CompilationResult a)
 toIRProbability conf (IfThenElse t cond left right) sample = do
   var_cond_p <- mkVariable "cond"
-  (condExpr, _, condBranches) <- toIRProbability conf cond (IRConst (VBool True))
-  (leftExpr, _, leftBranches) <- toIRProbability conf left sample
-  (rightExpr, _, rightBranches) <- toIRProbability conf right sample
+  (condExpr, condDim, condBranches) <- toIRProbability conf cond (IRConst (VBool True))
+  (leftExpr, leftDim, leftBranches) <- toIRProbability conf left sample
+  (rightExpr, rightDim, rightBranches) <- toIRProbability conf right sample
   -- p(y) = if p_cond < thresh then p_else(y) * (1-p_cond(y)) else if p_cond > 1 - thresh then p_then(y) * p_cond(y) else p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
   let thr = topKThreshold conf
   case thr of
     Just thresh -> do
-      let returnExpr = (IRIf
+      mul1 <- (condExpr, condDim) `multP` (leftExpr, leftDim)
+      sub <- (IRConst (VFloat 1), const0) `subP` (condExpr, condDim)
+      mul2 <- sub `multP` (rightExpr, rightDim)
+      add <- mul1 `addP` mul2
+      let returnExpr = IRIf
             (IROp OpLessThan (IRVar var_cond_p) (IRConst (VFloat thresh)))
-            (IROp OpMult (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var_cond_p) ) rightExpr)
+            (fst mul2)
             (IRIf (IROp OpGreaterThan (IRVar var_cond_p) (IRConst (VFloat (1-thresh))))
-              (IROp OpMult (IRVar var_cond_p) leftExpr)
-              (IROp OpPlus
-                (IROp OpMult (IRVar var_cond_p) leftExpr)
-                (IROp OpMult (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var_cond_p) ) rightExpr))))
+              (fst mul1)
+              (fst add))
+      let returnDim = IRIf
+            (IROp OpLessThan (IRVar var_cond_p) (IRConst (VFloat thresh)))
+            (snd mul2)
+            (IRIf (IROp OpGreaterThan (IRVar var_cond_p) (IRConst (VFloat (1-thresh))))
+              (snd mul1)
+              (snd add))
       tell [(var_cond_p, condExpr)]
-      return (returnExpr, const0, IROp OpPlus condExpr (IROp OpPlus leftExpr rightExpr))
+      return (returnExpr, returnDim, IROp OpPlus condExpr (IROp OpPlus leftExpr rightExpr))
     -- p(y) = p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
     Nothing -> do
-      let returnExpr = (IROp OpPlus
-            (IROp OpMult (IRVar var_cond_p) leftExpr)
-            (IROp OpMult (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var_cond_p) ) rightExpr))
+      mul1 <- (condExpr, condDim) `multP` (leftExpr, leftDim)
+      sub <- (IRConst (VFloat 1), const0) `subP` (condExpr, condDim)
+      mul2 <- sub `multP` (rightExpr, rightDim)
+      returnExpr <- mul1 `addP` mul2
       tell [(var_cond_p, condExpr)]
-      return (returnExpr, const0, IROp OpPlus condExpr (IROp OpPlus leftExpr rightExpr))
+      return (fst returnExpr, snd returnExpr, IROp OpPlus condExpr (IROp OpPlus leftExpr rightExpr))
 toIRProbability conf (GreaterThan (TypeInfo {rType = t, tags = extras}) left right) sample
   --TODO: Find a better lower bound than just putting -9999999
   | extras `hasAlgorithm` "greaterThanLeft" = do --p(x | const >= var)
@@ -234,31 +249,31 @@ toIRProbability conf (LessThan (TypeInfo {rType = t, tags = extras}) left right)
 toIRProbability conf (MultF (TypeInfo {rType = TFloat, tags = extras}) left right) sample
   | extras `hasAlgorithm` "multLeft" = do
     var <- mkVariable ""
-    (rightExpr, _, rightBranches) <- toIRProbability conf right (IROp OpDiv sample (IRVar var))
+    (rightExpr, rightDim, rightBranches) <- toIRProbability conf right (IROp OpDiv sample (IRVar var))
     let returnExpr = IROp OpDiv rightExpr (IRUnaryOp OpAbs (IRVar var)) 
     l <- toIRGenerate left
     tell [(var, l)]
-    return (returnExpr, const0, rightBranches)
+    return (returnExpr, rightDim, rightBranches)
   | extras `hasAlgorithm` "multRight" = do
     var <- mkVariable ""
-    (leftExpr, _, leftBranches) <- toIRProbability conf left (IROp OpDiv sample (IRVar var))
+    (leftExpr, leftDim, leftBranches) <- toIRProbability conf left (IROp OpDiv sample (IRVar var))
     r <- toIRGenerate right
     let returnExpr = IROp OpDiv leftExpr (IRUnaryOp OpAbs (IRVar var))
     tell [(var, r)]
-    return (returnExpr, const0, leftBranches)
+    return (returnExpr, leftDim, leftBranches)
 toIRProbability conf (PlusF (TypeInfo {rType = TFloat, tags = extras}) left right) sample
   | extras `hasAlgorithm` "plusLeft" = do
     var <- mkVariable ""
-    (rightExpr, _, rightBranches) <- toIRProbability conf right (IROp OpSub sample (IRVar var))
+    (rightExpr, rightDim, rightBranches) <- toIRProbability conf right (IROp OpSub sample (IRVar var))
     l <- toIRGenerate left
     tell [(var, l)]
-    return (rightExpr, const0, rightBranches)
+    return (rightExpr, rightDim, rightBranches)
   | extras `hasAlgorithm` "plusRight" = do
     var <- mkVariable ""
-    (leftExpr, _, leftBranches) <- toIRProbability conf left (IROp OpSub sample (IRVar var))
+    (leftExpr, leftDim, leftBranches) <- toIRProbability conf left (IROp OpSub sample (IRVar var))
     r <- toIRGenerate right
     tell [(var, r)]
-    return (leftExpr, const0, leftBranches)
+    return (leftExpr, leftDim, leftBranches)
 toIRProbability conf (PlusI (TypeInfo {rType = TInt, tags = extras}) left right) sample
   | extras `hasAlgorithm` "enumeratePlusLeft" = do
     --Solving enumPlusLeft works by enumerating all left hand side choices.
@@ -292,8 +307,8 @@ toIRProbability conf (ReadNN _ name subexpr) sample = do
   let returnExpr = (IRIndex (IREvalNN name mkInput) sample)
   return (returnExpr, const0, const0)
   --TODO: Assumption that subexpr is det.
-toIRProbability conf (Normal t) sample = return (IRDensity IRNormal sample, const0, const0)
-toIRProbability conf (Uniform t) sample = return (IRDensity IRUniform sample, const0, const0)
+toIRProbability conf (Normal t) sample = return (IRDensity IRNormal sample, IRConst $ VFloat 1, const0)
+toIRProbability conf (Uniform t) sample = return (IRDensity IRUniform sample, IRConst $ VFloat 1, const0)
 --TODO: assumption: These will be top-level lambdas:
 toIRProbability conf (Lambda t name subExpr) sample = do
   irTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRProbability conf subExpr sample))
@@ -302,17 +317,19 @@ toIRProbability conf (Apply _ l v) sample = do
   vIR <- toIRGenerate v
   (lIR, _, _) <- toIRProbability conf l sample -- Dim and BC are irrelevant here. We need to extract these from the return tuple
   if countBranches conf then
-    return (IRTFst (IRApply lIR vIR), const0, IRTSnd (IRApply lIR vIR))
+    return (IRTFst (IRApply lIR vIR), IRTFst (IRTSnd (IRApply lIR vIR)), IRTSnd (IRTSnd (IRApply lIR vIR)))
   else
-    return (IRApply lIR vIR, const0, const0)
+    return (IRTFst (IRApply lIR vIR), IRTSnd (IRApply lIR vIR), const0)
 toIRProbability conf (Cons _ hdExpr tlExpr) sample = do
-  (headP, _, headBranches) <- toIRProbability conf hdExpr (IRHead sample)
-  (tailP, _, tailBranches) <- toIRProbability conf tlExpr (IRTail sample)
-  return (IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (IROp OpMult headP tailP), const0, IROp OpPlus headBranches tailBranches)
+  (headP, headDim, headBranches) <- toIRProbability conf hdExpr (IRHead sample)
+  (tailP, tailDim, tailBranches) <- toIRProbability conf tlExpr (IRTail sample)
+  mult <- (headP, headDim)  `multP` (tailP, tailDim)
+  return (IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (fst mult), IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (snd mult), IROp OpPlus headBranches tailBranches)
 toIRProbability conf (TCons _ t1Expr t2Expr) sample = do
-  (t1P, _, t1Branches) <- toIRProbability conf t1Expr (IRTFst sample)
-  (t2P, _, t2Branches) <- toIRProbability conf t2Expr (IRTSnd sample)
-  return (IROp OpMult t1P t2P, const0, IROp OpPlus t1Branches t2Branches)
+  (t1P, t1Dim, t1Branches) <- toIRProbability conf t1Expr (IRTFst sample)
+  (t2P, t2Dim, t2Branches) <- toIRProbability conf t2Expr (IRTSnd sample)
+  mult <- (t1P, t1Dim) `multP` (t2P, t2Dim)
+  return (fst mult, snd mult, IROp OpPlus t1Branches t2Branches)
 toIRProbability conf (InjF _ name [param]) sample = do
   prefix <- mkVariable ""
   let letInBlock = irMap (uniqueify [v] prefix) (IRLetIn v sample invExpr)
@@ -362,9 +379,9 @@ toIRProbability conf (Call _ name) sample = do
   var <- mkVariable "call"
   tell [(var, IRCall (name ++ "_prob") [sample])]
   if countBranches conf then
-      return (IRTFst (IRVar var), const0, IRTSnd (IRVar var))
+      return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
     else
-      return (IRVar var, const0, const0)
+      return (IRTFst (IRVar var), IRTSnd (IRVar var), const0)
 toIRProbability conf (ThetaI _ a i) sample = do
   a' <- toIRGenerate a
   expr <- indicator (IROp OpEq sample (IRTheta a' i))
@@ -372,6 +389,46 @@ toIRProbability conf (ThetaI _ a i) sample = do
 toIRProbability conf (Subtree _ a i) sample = error "Cannot infer prob on subtree expression. Please check your syntax"
 toIRProbability conf x sample = error ("found no way to convert to IR: " ++ show x)
 
+multP :: (IRExpr a, IRExpr a) -> (IRExpr a, IRExpr a) -> CompilerMonad a (IRExpr a, IRExpr a)
+multP (aM, aDim) (bM, bDim) = return (IROp OpMult aM bM, IROp OpPlus aDim bDim)
+
+addP :: (Num a) => (IRExpr a, IRExpr a) -> (IRExpr a, IRExpr a) -> CompilerMonad a (IRExpr a, IRExpr a)
+addP (aM, aDim) (bM, bDim) = do
+  pVarA <- mkVariable "pA"
+  pVarB <- mkVariable "pB"
+  dimVarA <- mkVariable "dimA"
+  dimVarB <- mkVariable "dimB"
+  tell [(pVarA, aM), (pVarB, bM), (dimVarA, aDim), (dimVarB, bDim)]
+  return (IRIf (IROp OpEq (IRVar pVarA) (IRConst (VFloat 0))) (IRVar pVarB)
+           (IRIf (IROp OpEq (IRVar pVarB) (IRConst (VFloat 0))) (IRVar pVarA)
+           (IRIf (IROp OpGreaterThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar pVarA)
+           (IRIf (IROp OpGreaterThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar pVarB)
+           (IROp OpPlus (IRVar pVarA) (IRVar pVarB))))),
+           -- Dim
+           IRIf (IROp OpEq (IRVar pVarA) (IRConst (VFloat 0))) (IRVar dimVarB)
+           (IRIf (IROp OpEq (IRVar pVarB) (IRConst (VFloat 0))) (IRVar dimVarA)
+           (IRIf (IROp OpGreaterThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar dimVarA)
+           (IRIf (IROp OpGreaterThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar dimVarB)
+           (IRVar dimVarA)))))
+
+subP :: (Num a) => (IRExpr a, IRExpr a) -> (IRExpr a, IRExpr a) -> CompilerMonad a (IRExpr a, IRExpr a)
+subP (aM, aDim) (bM, bDim) = do
+  pVarA <- mkVariable "pA"
+  pVarB <- mkVariable "pB"
+  dimVarA <- mkVariable "dimA"
+  dimVarB <- mkVariable "dimB"
+  tell [(pVarA, aM), (pVarB, bM), (dimVarA, aDim), (dimVarB, bDim)]
+  return (IRIf (IROp OpEq (IRVar pVarA) (IRConst (VFloat 0))) (IRVar pVarB)
+         (IRIf (IROp OpEq (IRVar pVarB) (IRConst (VFloat 0))) (IRVar pVarA)
+         (IRIf (IROp OpGreaterThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar pVarA)
+         (IRIf (IROp OpGreaterThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar pVarB)
+         (IROp OpSub (IRVar pVarA) (IRVar pVarB))))),
+         -- Dim
+         IRIf (IROp OpEq (IRVar pVarA) (IRConst (VFloat 0))) (IRVar dimVarB)
+         (IRIf (IROp OpEq (IRVar pVarB) (IRConst (VFloat 0))) (IRVar dimVarA)
+         (IRIf (IROp OpGreaterThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar dimVarA)
+         (IRIf (IROp OpGreaterThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar dimVarB)
+         (IRVar dimVarA)))))
 
 packParamsIntoLetinsProb :: (Show a, Floating a) => [String] -> [Expr a] -> IRExpr a -> IRExpr a -> Supply Int (IRExpr a)
 --packParamsIntoLetinsProb [] [] expr _ = do
@@ -611,7 +668,13 @@ toIRIntegrate conf (InjF TypeInfo {rType=TFloat, tags=extras} name [param1, para
   (paramExpr, _, paramBranches) <- toIRIntegrate conf param1 letInBlockLow letInBlockHigh
   uniquePrefix <- mkVariable ""
   return (irMap (uniqueify [v1, v2, v3] uniquePrefix) paramExpr, const0, paramBranches)
-toIRIntegrate conf (Call _ name) low high = return (IRCall (name ++ "_integ") [low, high], const0, const0)
+toIRIntegrate conf (Call _ name) low high = do
+  var <- mkVariable "call"
+  tell [(var, IRCall (name ++ "_integ") [low, high])]
+  if countBranches conf then
+      return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
+    else
+      return (IRTFst (IRVar var), IRTSnd (IRVar var), const0)
 toIRIntegrate conf (Lambda t name subExpr) low high = do
     irTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRIntegrate conf subExpr low high))
     return (IRLambda name irTuple, const0, const0)
@@ -619,9 +682,9 @@ toIRIntegrate conf (Apply _ l v) low high = do
   vIR <- toIRGenerate v
   (lIR, _, _) <- toIRIntegrate conf l low high -- Dim and BC are irrelevant here. We need to extract these from the return tuple
   if countBranches conf then
-    return (IRTFst (IRApply lIR vIR), const0, IRTSnd (IRApply lIR vIR))
+    return (IRTFst (IRApply lIR vIR), IRTFst (IRTSnd (IRApply lIR vIR)), IRTSnd (IRTSnd (IRApply lIR vIR)))
   else
-    return (IRApply lIR vIR, const0, const0)
+    return (IRTFst (IRApply lIR vIR), IRTSnd (IRApply lIR vIR), const0)
 toIRIntegrate conf (Var _ n) _ _ = return (IRVar n, const0, const0)
 toIRIntegrate _ x _ _ = error ("found no way to convert to IRIntegrate: " ++ show x)
 

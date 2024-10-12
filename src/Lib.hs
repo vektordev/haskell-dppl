@@ -140,6 +140,7 @@ newCodeGenAll conf p = do
 codeGenToLang :: (Show a, Ord a, Floating a) => Language -> CompilerConfig a -> Program a -> IO String
 codeGenToLang lang conf prog = do
   printIfVerbose conf "=== Parsed Program ===\n"
+  if verbose conf >= 2 then pPrint prog else return ()
   printIfVerbose conf (pPrintProg prog)
   
   let typed = addTypeInfo prog
@@ -153,6 +154,7 @@ codeGenToLang lang conf prog = do
   let ir = envToIR conf annotated
   printIfVerbose conf "\n\n=== Compiled Program ===\n"
   printIfVerbose conf (pPrintIREnv ir)
+  if verbose conf >= 2 then pPrint ir else return ()
   case lang of
     Python -> return $ intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions ir)
     Julia -> return $ intercalate "\n" (SPLL.CodeGenJulia.generateFunctions ir)

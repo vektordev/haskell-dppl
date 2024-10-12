@@ -132,6 +132,12 @@ gaussLists = Program [("main", Lambda makeTypeInfo "thetas"
       (PlusF makeTypeInfo (MultF makeTypeInfo (Normal makeTypeInfo) (ThetaI makeTypeInfo (Var makeTypeInfo "thetas") 1)) (ThetaI makeTypeInfo (Var makeTypeInfo "thetas") 2))
       (Apply makeTypeInfo (Call makeTypeInfo "main") (Var makeTypeInfo "thetas")))))] []
 
+testTopLevelLambda :: (Num a) => Program a
+testTopLevelLambda = Program [("main", Lambda makeTypeInfo "a" (PlusF makeTypeInfo (Var makeTypeInfo "a") (Uniform makeTypeInfo)))] []
+
+testDim :: Program Double
+testDim = Program [("main", IfThenElse makeTypeInfo (GreaterThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo $ VFloat 0.5)) (MultF makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo $ VFloat 2)) (Constant makeTypeInfo $ VFloat 3))] []
+
 {-
 flipCoin :: Expr Double
 flipCoin = GreaterThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 0.5))

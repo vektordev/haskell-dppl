@@ -340,6 +340,11 @@ inferProg p@(Program decls nns) = do
   let tvs = reverse tv_rev
   -- env building with (name, scheme) for infer methods
   let func_tvs = zip (map fst decls) (map (Forall []) tvs)
+  -- set the rtype for neurals
+  --tv_nns_rev <- freshVars (length nns) []
+  --let tvs_nns = reverse tv_nns_rev
+  --let nns_tvs = zip (map fst3 nns) (map (Forall []) tvs_nns)
+  
   -- infer the type and constraints of the declaration expressions
   cts <- mapM ((inTEnvF func_tvs . infer) . snd) decls
   let Just expr = lookup "main" decls
@@ -347,15 +352,16 @@ inferProg p@(Program decls nns) = do
   (t1, c1, et) <- inTEnvF func_tvs (infer expr)
   -- building the constraints that the built type variables of the functions equal
   -- the inferred function type
-  let tcs = zip (map (rtFromScheme . snd) func_tvs) (map fst3cts cts)
+  let tcs = zip (map (rtFromScheme . snd) func_tvs) (map fst3 cts)
   -- combine all constraints
-  return (t1, tcs ++ concatMap snd3cts cts ++ c1, Program (zip (map fst decls) (map trd3cts cts)) nns)
-fst3cts ::  (RType, [Constraint], Expr a) -> RType
-fst3cts (t, _, _) = t
-snd3cts ::  (RType, [Constraint], Expr a) -> [Constraint]
-snd3cts (_, cts, _) = cts
-trd3cts ::  (RType, [Constraint], Expr a) -> Expr a
-trd3cts (_, _, e) = e
+  return (t1, tcs ++ concatMap snd3 cts ++ c1, Program (zip (map fst decls) (map trd3 cts)) nns)
+fst3 ::  (a, b, c) -> a
+fst3 (t, _, _) = t
+snd3 ::  (a, b, c) -> b
+snd3 (_, cts, _) = cts
+trd3 ::  (a, b, c) -> c
+trd3 (_, _, e) = e
+
 
     
 buildFuncConstraints :: RType -> [RType] -> [Constraint] -> String -> Infer (RType, [Constraint])
@@ -497,8 +503,8 @@ infer expr = case expr of
     p_inf <- mapM infer e1
     let (Just (FPair fPair)) = lookup name globalFenv
     let (FDecl (funcTy, _, _, _, _), _) = fPair
-    (retT, cFunc) <- buildFuncConstraints funcTy (map fst3cts p_inf) [] name
-    return (retT, concatMap snd3cts p_inf ++ cFunc, InjF (setRType x retT) name (map trd3cts p_inf))
+    (retT, cFunc) <- buildFuncConstraints funcTy (map fst3 p_inf) [] name
+    return (retT, concatMap snd3 p_inf ++ cFunc, InjF (setRType x retT) name (map trd3 p_inf))
 
   LetIn x name e1 e2 -> do
     env <- ask
