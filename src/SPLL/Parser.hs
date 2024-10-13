@@ -23,7 +23,7 @@ dbg :: symbol -> result -> result
 dbg a b = b
 
 --TODO: This can't parse type annotations.
--- its type signature doesn't have a space to put them (Program () a instead of Program TypeInfo a)
+-- its type signature doesn't have a space to put them (Program () a instead of Program TypeInfo)
 -- At some point this deserves fixing.
 
 type Parser = Parsec Void String
@@ -48,12 +48,12 @@ pIdentifier = lexeme $ do
   xs <- many alphaNumChar
   return (x:xs)
 
-pUniform :: Parser (Expr a)
+pUniform :: Parser (Expr)
 pUniform = do
   _ <- symbol "uniform"
   return (Uniform makeTypeInfo)
 
-pIfThenElse :: RealFloat a => Parser (Expr a)
+pIfThenElse :: Parser (Expr)
 pIfThenElse = do
   _ <- symbol "if"
   a <- pExpr
@@ -63,7 +63,7 @@ pIfThenElse = do
   c <- pExpr
   return (IfThenElse makeTypeInfo a b c)
 
-pLetIn :: RealFloat a => Parser (Expr a)
+pLetIn :: Parser (Expr)
 pLetIn = do
   _ <- symbol "let"
   name <- lexeme pIdentifier
@@ -76,7 +76,7 @@ pLetIn = do
 parens :: Parser a -> Parser a
 parens = between (symbol "(") (symbol ")")
 
-pExpr :: RealFloat a => Parser (Expr a)
+pExpr :: Parser (Expr)
 pExpr = choice [
   parens pExpr,
   pIfThenElse,
@@ -89,7 +89,7 @@ pExpr = choice [
   ]
 
 -- TODO: I think this parser should accept any pExpr instead of identifiers. Might get ambiguous parses though.
-pApply :: Parser (Expr a)
+pApply :: Parser (Expr)
 pApply = do
   function <- pIdentifier
   args <- some pIdentifier
@@ -97,15 +97,15 @@ pApply = do
     Nothing -> return (applyN (Var makeTypeInfo function) (map (Var makeTypeInfo) args))
     Just constructor -> return (construct2 constructor (map (Var makeTypeInfo) args))
 
-applyN :: Expr a -> [Expr a] -> Expr a
+applyN :: Expr -> [Expr] -> Expr
 applyN function [] = function
 applyN function (arg:args) = applyN (Apply makeTypeInfo function arg) args -- $ foldl (\a f -> Apply makeTypeInfo f a) (Var makeTypeInfo function) (map (Var makeTypeInfo) args)
 
-construct2 :: (TypeInfo a -> Expr a -> Expr a -> Expr a) -> [Expr a] -> Expr a
+construct2 :: (TypeInfo -> Expr -> Expr -> Expr) -> [Expr] -> Expr
 construct2 constructor [arg1, arg2] = constructor makeTypeInfo arg2 arg2
 construct2 _ _ = error "tried to apply the wrong number of arguments."
 
-pVar :: Parser (Expr a)
+pVar :: Parser (Expr)
 pVar = do
   varname <- lexeme pIdentifier
   return $ Var makeTypeInfo varname
@@ -117,20 +117,20 @@ binaryFs = [
   ("plusI", PlusI)
   ]
 
-pConst :: RealFloat a => Parser (Expr a)
+pConst :: Parser (Expr)
 pConst = choice [pFloat, pInt]
 
-pFloat :: RealFloat a => Parser (Expr a)
+pFloat :: Parser (Expr)
 pFloat = do
   f <- lexeme L.float
   return $ Constant makeTypeInfo (VFloat f)
 
-pInt :: Parser (Expr a)
+pInt :: Parser (Expr)
 pInt = do
   i <- lexeme L.decimal
   return $ Constant makeTypeInfo (VInt i)
 
-pBinaryF :: RealFloat a => Parser (Expr a)
+pBinaryF :: Parser (Expr)
 pBinaryF = do
   op <- choice (map (symbol . fst) binaryFs)
   left <- pExpr
@@ -151,25 +151,25 @@ rTypes = [("Int", TInt), ("Float", TFloat)]
 pType :: Parser RType
 pType = parseFromList rTypes
 
-pList :: Parser [Value a]
+pList :: Parser [Value]
 pList = do
   (symbol "[")
   values <- pCSV
   (symbol "]")
   return values
 
-valueParser :: Parser (Value a)
+valueParser :: Parser (Value)
 valueParser = do
   x <- L.decimal
   return (VInt x)
 
-pCSV :: Parser [Value a]  
+pCSV :: Parser [Value]  
 pCSV = valueParser `sepBy` (symbol ",")
 
-pDefinition :: (Show a, RealFloat a) => Parser (Either (FnDecl a) (NeuralDecl a))
+pDefinition :: Parser (Either (FnDecl) (NeuralDecl))
 pDefinition = choice [try pFunction, pNeural]
 
-pNeural :: Parser (Either (FnDecl a) (NeuralDecl a))
+pNeural :: Parser (Either (FnDecl) (NeuralDecl))
 pNeural = do
   _ <- keyword "neural"
   name <- pIdentifier
@@ -179,7 +179,7 @@ pNeural = do
   range <- pList
   return  (Right (name, ty, (EnumList range)))
 
-pFunction :: (Show a, RealFloat a) => Parser (Either (FnDecl a) (NeuralDecl a))
+pFunction :: Parser (Either (FnDecl) (NeuralDecl))
 pFunction = dbg "function" $ do
   name <- pIdentifier
   args <- many pIdentifier
@@ -188,13 +188,13 @@ pFunction = dbg "function" $ do
   let lambdas = foldr (Lambda makeTypeInfo) e args
   return (Left (name, lambdas))
 
-pProg :: (Show a, RealFloat a) => Parser (Program a)
+pProg :: Parser Program
 pProg = do
   defs <- dbg "trying definition" (many pDefinition)
   _ <- eof
   return (aggregateDefinitions defs)
 
-aggregateDefinitions :: [Either (FnDecl a) (NeuralDecl a)] -> Program a
+aggregateDefinitions :: [Either (FnDecl) (NeuralDecl)] -> Program
 aggregateDefinitions (Left fn : tail) = Program (fn:fns) neurals
   where
     Program fns neurals = aggregateDefinitions tail
@@ -203,14 +203,14 @@ aggregateDefinitions (Right nr : tail) = Program fns (nr:neurals)
     Program fns neurals = aggregateDefinitions tail
 aggregateDefinitions [] = Program [] []
 
-tryParseProgram :: (Show a, RealFloat a) => FilePath -> String -> Either (ParseErrorBundle String Void) (Program a)
+tryParseProgram :: FilePath -> String -> Either (ParseErrorBundle String Void) Program
 tryParseProgram filename src = runParser pProg filename src
 
 testParse :: IO ()
 testParse = do
   let filename = "../../test.spll"
   source <- readFile filename
-  let result = runParser (pProg :: Parser (Program Float)) filename source
+  let result = runParser (pProg :: Parser Program) filename source
   case result of
     Left err -> putStrLn (errorBundlePretty err)
     Right prog -> do
@@ -278,6 +278,6 @@ factor =
 --program :: Parsec s () a
 --program
 
-parseSPLL :: String -> Program (TypeInfo a) a
+parseSPLL :: String -> Program TypeInfo a
 parseSPLL = parse program "filename"
 -}

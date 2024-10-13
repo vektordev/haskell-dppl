@@ -13,14 +13,15 @@ import Data.Maybe
 import Control.Monad.Writer.Lazy
 import Control.Monad.Reader
 import Data.Functor.Identity
+import Data.Number.Erf (erf)
 
 -- SupplyT needs to be a transformer, because Supply does not implement Functor correctly
-type CompilerMonad a b = WriterT [(String, IRExpr a)] (SupplyT Int Identity) b
+type CompilerMonad a = WriterT [(String, IRExpr)] (SupplyT Int Identity) a
 
 -- perhaps as an explicit lambda in the top of the expression, otherwise we'll get trouble generating code.
 -- TODO: How do we deal with top-level lambdas in binding here?
 --  TL-Lambdas are presumably to be treated differently than non-TL, at least as far as prob is concerned.
-envToIR :: (Ord a, Floating a, Show a, Eq a) => CompilerConfig a -> Program a -> [(String, IRExpr a)] --FIXME add postProcess
+envToIR :: CompilerConfig -> Program -> [(String, IRExpr)] --FIXME add postProcess
 envToIR conf p = concatMap (\(name, binding) ->
   let pt = pType $ getTypeInfo binding
       rt = rType $ getTypeInfo binding in
@@ -34,12 +35,12 @@ envToIR conf p = concatMap (\(name, binding) ->
     else
       [(name ++ "_gen", postProcess ( fst $ runIdentity $ runSupplyVars $ runWriterT $ toIRGenerate binding))]) (functions p)
 
-type CompilationResult a = (IRExpr a, IRExpr a, IRExpr a)
+type CompilationResult = (IRExpr, IRExpr, IRExpr)
 
-runCompile :: (Show a) => CompilerConfig a -> CompilerMonad a (CompilationResult a) -> IRExpr a
+runCompile :: CompilerConfig -> CompilerMonad (CompilationResult) -> IRExpr
 runCompile conf codeGen = generateLetInBlock conf (runWriterT codeGen)
   
-generateLetInBlock :: (Show a) => CompilerConfig a -> (SupplyT Int Identity) (CompilationResult a, [(String, IRExpr a)]) -> IRExpr a
+generateLetInBlock :: CompilerConfig -> (SupplyT Int Identity) (CompilationResult, [(String, IRExpr)]) -> IRExpr
 generateLetInBlock conf codeGen = 
   case m of 
     (IRLambda _ _) -> returnize (foldr (\(var, val) expr  -> IRLetIn var val expr) m binds) --Dont make tuple out of lambdas, as the snd (and thr) element don't contain information anyway
@@ -53,15 +54,15 @@ generateLetInBlock conf codeGen =
 runSupplyVars :: (Monad m) => SupplyT Int m a -> m a
 runSupplyVars codeGen = runSupplyT codeGen (+1) 1
 
-isValue :: IRExpr a -> Bool
+isValue :: IRExpr -> Bool
 isValue (IRConst _) = True
 isValue _ = False
 
-isLambda :: IRExpr a -> Bool
+isLambda :: IRExpr -> Bool
 isLambda IRLambda {} = True
 isLambda _ = False
 
-unval :: IRExpr a -> Value a
+unval :: IRExpr -> Value
 unval (IRConst val) = val
 unval _ = error "tried to unval a non-val"
 
@@ -71,23 +72,23 @@ unval _ = error "tried to unval a non-val"
 --  where (innerNames, unwrappedExpr) = unwrapTLLambdas subExpr
 --unwrapTLLambdas expr = ([], expr)
 
-postProcess :: (Show a, Ord a, Fractional a) => IRExpr a -> IRExpr a
-postProcess = id
---postProcess = fixedPointIteration optimize
+postProcess :: IRExpr -> IRExpr
+--postProcess = id
+postProcess = fixedPointIteration optimize
 
-fixedPointIteration :: (Eq a) => (a -> a) -> a -> a
+fixedPointIteration :: (Eq a, Show a) => (a -> a) -> a -> a
 fixedPointIteration f x = if fx == x then x else fixedPointIteration f fx
   where fx = f x
 
-optimize :: (Show a, Ord a, Fractional a) => IRExpr a -> IRExpr a
+optimize :: IRExpr -> IRExpr
 optimize = irMap evalAll
 --TODO: We can also optimize index magic, potentially here. i.e. a head tail tail x can be simplified.
 --TODO: Unary operators
-evalAll :: (Show a, Ord a, Fractional a) => IRExpr a -> IRExpr a
+evalAll :: IRExpr -> IRExpr
 evalAll expr@(IROp op leftV rightV)
   | isValue leftV && isValue rightV = IRConst (forceOp op (unval leftV) (unval rightV))
   | isValue leftV || isValue rightV = softForceLogic op leftV rightV
-  | otherwise = expr
+  | otherwise = expr 
 evalAll (IRIf _ left right) | left == right = left
 evalAll x@(IRIf cond left right) =
   if isValue cond
@@ -109,13 +110,17 @@ evalAll ex@(IRLetIn name val scope)
   | countUses name scope == 0 = scope
   | otherwise = ex
 evalAll (IRTCons (IRLambda n a) (IRLambda m b)) | n == m = IRLambda n (IRTCons a b)
+evalAll (IRDensity IRNormal (IRConst (VFloat x))) = IRConst (VFloat ((1 / sqrt (2 * pi)) * exp (-0.5 * x * x)))
+evalAll (IRCumulative IRNormal (IRConst (VFloat x))) = IRConst (VFloat ((1/2) * (1 + erf(x/sqrt(2)))))
+evalAll (IRDensity IRUniform (IRConst (VFloat x))) = IRConst (VFloat (if x >= 0 && x <= 1 then 1 else 0))
+evalAll (IRCumulative IRUniform (IRConst (VFloat x))) = IRConst (VFloat (if x < 0 then 0 else if x > 1 then 1 else x))
 evalAll x = x
   
-countUses :: String -> IRExpr a -> Int
+countUses :: String -> IRExpr -> Int
 countUses var (IRVar a) | a == var = 1
 countUses var expr = sum (map (countUses var) (getIRSubExprs expr))
 
-isSimple :: IRExpr a -> Bool
+isSimple :: IRExpr -> Bool
 --isSimple (IRTheta a) = True
 isSimple (IRVar a) = True
 isSimple (IRConst a) = True
@@ -124,7 +129,7 @@ isSimple _ = False
 replace :: Eq p => p -> p -> p -> p
 replace find replace' expr = if find == expr then replace' else expr
 
-softForceLogic :: Operand -> IRExpr a -> IRExpr a -> IRExpr a
+softForceLogic :: Operand -> IRExpr -> IRExpr -> IRExpr
 softForceLogic OpOr (IRConst (VBool True)) _ = IRConst (VBool True)
 softForceLogic OpOr _ (IRConst (VBool True)) = IRConst (VBool True)
 softForceLogic OpOr (IRConst (VBool False)) right = right
@@ -135,7 +140,7 @@ softForceLogic OpAnd (IRConst (VBool False)) _ = IRConst (VBool False)
 softForceLogic OpAnd _ (IRConst (VBool False)) = IRConst (VBool False)
 softForceLogic op left right = IROp op left right     -- Nothing can be done
 
-forceOp :: (Ord a, Fractional a) => Operand -> Value a -> Value a -> Value a
+forceOp :: Operand -> Value -> Value -> Value
 forceOp OpEq x y = VBool (x == y)
 forceOp OpMult (VInt x) (VInt y) = VInt (x*y)
 forceOp OpMult (VFloat x) (VFloat y) = VFloat (x*y)
@@ -146,13 +151,13 @@ forceOp OpDiv (VFloat x) (VFloat y) = VFloat (x/y)
 forceOp OpSub (VInt x) (VInt y) = VInt (x-y)
 forceOp OpSub (VFloat x) (VFloat y) = VFloat (x-y)
 forceOp OpOr (VBool x) (VBool y) = VBool (x || y)
-forceOp OpGreaterThan (VInt x) (VInt y) = VBool (x >= y)
-forceOp OpGreaterThan (VFloat x) (VFloat y) = VBool (x >= y)
-forceOp OpLessThan (VInt x) (VInt y) = VBool (x <= y)
-forceOp OpLessThan (VFloat x) (VFloat y) = VBool (x <= y)
+forceOp OpGreaterThan (VInt x) (VInt y) = VBool (x > y)
+forceOp OpGreaterThan (VFloat x) (VFloat y) = VBool (x > y)
+forceOp OpLessThan (VInt x) (VInt y) = VBool (x < y)
+forceOp OpLessThan (VFloat x) (VFloat y) = VBool (x < y)
 forceOp OpAnd (VBool x) (VBool y) = VBool (x && y)
 
-returnize :: (Show a) => IRExpr a -> IRExpr a
+returnize :: IRExpr -> IRExpr
 --returnize e | trace (show e) False = undefined
 returnize (IRIf cond left right) = IRIf cond (returnize left) (returnize right)
 returnize (IRReturning expr) = IRReturning expr
@@ -160,20 +165,20 @@ returnize (IRLetIn name binding scope) = IRLetIn name binding (returnize scope)
 returnize (IRLambda name expr) = IRLambda name (returnize expr)
 returnize other = IRReturning other
 
-mkVariable :: String -> CompilerMonad a  Varname
+mkVariable :: String -> CompilerMonad  Varname
 mkVariable suffix = do
   varID <- demand
   return ("l_" ++ show varID ++ "_" ++ suffix)
 
-hasAlgorithm :: [Tag a] -> String -> Bool
+hasAlgorithm :: [Tag] -> String -> Bool
 hasAlgorithm tags alg = alg `elem` ([algName a | Alg a <- tags])
 --hasAlgorithm tags alg = not $ null $ filter (== alg) [a | Alg a <- tags]
 
-const0 :: (Num a) => IRExpr a
+const0 :: IRExpr
 const0 = IRConst (VFloat 0)
 
 --in this implementation, I'll forget about the distinction between PDFs and Probabilities. Might need to fix that later.
-toIRProbability :: (Floating a, Show a) => CompilerConfig a -> Expr a -> IRExpr a -> CompilerMonad a (CompilationResult a)
+toIRProbability :: CompilerConfig -> Expr -> IRExpr -> CompilerMonad (CompilationResult)
 toIRProbability conf (IfThenElse t cond left right) sample = do
   var_cond_p <- mkVariable "cond"
   (condExpr, condDim, condBranches) <- toIRProbability conf cond (IRConst (VBool True))
@@ -389,10 +394,10 @@ toIRProbability conf (ThetaI _ a i) sample = do
 toIRProbability conf (Subtree _ a i) sample = error "Cannot infer prob on subtree expression. Please check your syntax"
 toIRProbability conf x sample = error ("found no way to convert to IR: " ++ show x)
 
-multP :: (IRExpr a, IRExpr a) -> (IRExpr a, IRExpr a) -> CompilerMonad a (IRExpr a, IRExpr a)
+multP :: (IRExpr, IRExpr) -> (IRExpr, IRExpr) -> CompilerMonad (IRExpr, IRExpr)
 multP (aM, aDim) (bM, bDim) = return (IROp OpMult aM bM, IROp OpPlus aDim bDim)
 
-addP :: (Num a) => (IRExpr a, IRExpr a) -> (IRExpr a, IRExpr a) -> CompilerMonad a (IRExpr a, IRExpr a)
+addP :: (IRExpr, IRExpr) -> (IRExpr, IRExpr) -> CompilerMonad (IRExpr, IRExpr)
 addP (aM, aDim) (bM, bDim) = do
   pVarA <- mkVariable "pA"
   pVarB <- mkVariable "pB"
@@ -411,7 +416,7 @@ addP (aM, aDim) (bM, bDim) = do
            (IRIf (IROp OpGreaterThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar dimVarB)
            (IRVar dimVarA)))))
 
-subP :: (Num a) => (IRExpr a, IRExpr a) -> (IRExpr a, IRExpr a) -> CompilerMonad a (IRExpr a, IRExpr a)
+subP :: (IRExpr, IRExpr) -> (IRExpr, IRExpr) -> CompilerMonad (IRExpr, IRExpr)
 subP (aM, aDim) (bM, bDim) = do
   pVarA <- mkVariable "pA"
   pVarB <- mkVariable "pB"
@@ -430,7 +435,7 @@ subP (aM, aDim) (bM, bDim) = do
          (IRIf (IROp OpGreaterThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar dimVarB)
          (IRVar dimVarA)))))
 
-packParamsIntoLetinsProb :: (Show a, Floating a) => [String] -> [Expr a] -> IRExpr a -> IRExpr a -> Supply Int (IRExpr a)
+packParamsIntoLetinsProb :: [String] -> [Expr] -> IRExpr -> IRExpr -> Supply Int (IRExpr)
 --packParamsIntoLetinsProb [] [] expr _ = do
 --  return expr
 --packParamsIntoLetinsProb [] _ _ _ = error "More parameters than variables"
@@ -441,18 +446,18 @@ packParamsIntoLetinsProb :: (Show a, Floating a) => [String] -> [Expr a] -> IREx
 packParamsIntoLetinsProb [v] [p] expr sample = do
   return $ IRLetIn v sample expr    --FIXME sample to auch toIRProbt werden
 
-indicator :: Num a => IRExpr a -> CompilerMonad a  (IRExpr a)
+indicator :: IRExpr -> CompilerMonad  (IRExpr)
 indicator condition = return $ IRIf condition (IRConst $ VFloat 1) (IRConst $ VFloat 0)
 
 -- Must be used in conjunction with irMap, as it does not recurse
-uniqueify :: [Varname] -> String -> IRExpr a -> IRExpr a
+uniqueify :: [Varname] -> String -> IRExpr -> IRExpr
 uniqueify vars prefix (IRVar name) | name `elem` vars = IRVar (prefix ++ name)
 uniqueify vars prefix (IRLetIn name boundExpr bodyExpr) | name `elem` vars = IRLetIn (prefix ++ name) (uniqueify vars prefix boundExpr) (uniqueify vars prefix bodyExpr)
 uniqueify _ _ e = e
 
 --folding detGen and Gen into one, as the distinction is one to make sure things that are det are indeed det.
 -- That's what the type system is for though.
-toIRGenerate :: (Show a, Floating a) => Expr a -> CompilerMonad a  (IRExpr a)
+toIRGenerate :: Expr -> CompilerMonad  (IRExpr)
 toIRGenerate (IfThenElse _ cond left right) = do
   c <- toIRGenerate cond
   l <- toIRGenerate left
@@ -537,7 +542,7 @@ toIRGenerate (ReadNN _ name subexpr) = do
   return $ IRCall "randomchoice" [IREvalNN name subexpr']
 toIRGenerate x = error ("found no way to convert to IRGen: " ++ show x)
 
-packParamsIntoLetinsGen :: (Show a, Floating a) => [String] -> [Expr a] -> IRExpr a -> CompilerMonad a  (IRExpr a)
+packParamsIntoLetinsGen :: [String] -> [Expr] -> IRExpr -> CompilerMonad  (IRExpr)
 packParamsIntoLetinsGen [] [] expr = return $ expr
 packParamsIntoLetinsGen [] _ _ = error "More parameters than variables"
 packParamsIntoLetinsGen _ [] _ = error "More variables than parameters"
@@ -546,12 +551,12 @@ packParamsIntoLetinsGen (v:vars) (p:params) expr = do
   e <- packParamsIntoLetinsGen vars params expr
   return $ IRLetIn v pExpr e
 
-bindLocal :: String -> IRExpr a -> IRExpr a -> CompilerMonad a  (IRExpr a)
+bindLocal :: String -> IRExpr -> IRExpr -> CompilerMonad  (IRExpr)
 bindLocal namestring binding inEx = do
   varName <- mkVariable namestring
   return $ IRLetIn varName binding inEx
 
-toIRIntegrate :: (Show a, Floating a) => CompilerConfig a -> Expr a -> IRExpr a -> IRExpr a -> CompilerMonad a (CompilationResult a)
+toIRIntegrate :: CompilerConfig -> Expr -> IRExpr -> IRExpr -> CompilerMonad (CompilationResult)
 toIRIntegrate conf (Uniform _) lower higher = do
   return (IROp OpSub (IRCumulative IRUniform higher) (IRCumulative IRUniform lower), const0, const0)
 toIRIntegrate conf (Normal TypeInfo {}) lower higher = do

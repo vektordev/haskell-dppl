@@ -14,10 +14,10 @@ import Data.Bifunctor
 import SPLL.Typing.Typing (TypeInfo, TypeInfo(..), Tag(..), setTags)
 
 
-annotateProg :: (Show a) => Program a -> Program a
+annotateProg :: Program -> Program
 annotateProg p@Program {functions=f} = p{functions = map (second (annotate p)) f}
 
-annotate :: (Show a) => Program a -> Expr a -> Expr a
+annotate :: Program -> Expr -> Expr
 annotate p = tMap annotateLocal
   where
     annotateLocal e = setTags ti tags
@@ -27,7 +27,7 @@ annotate p = tMap annotateLocal
           [Alg $ findAlgorithm e | likelihoodFunctionUsesTypeInfo $ toStub e]
           ++ fmap EnumList (maybeToList (findEnumerable p e))
 
-findEnumerable :: Program a -> Expr a -> Maybe [Value a]
+findEnumerable :: Program -> Expr -> Maybe [Value]
 findEnumerable p (ReadNN _ name _) = case getNeuralDeclTag name (neurals p) of
   (EnumList l) -> return l
   (EnumRange (VInt a, VInt b)) -> return [VInt i | i <- [a..b]]
@@ -41,12 +41,12 @@ findEnumerable p (PlusI _ left right) =
         rightEnum = findEnumerable p right
 findEnumerable p _ = Nothing
 
-getNeuralDeclTag :: String -> [NeuralDecl a] -> Tag a
+getNeuralDeclTag :: String -> [NeuralDecl] -> Tag
 getNeuralDeclTag name ((n, _, tag):_) | n == name = tag
 getNeuralDeclTag name (_:rest) = getNeuralDeclTag name rest
 getNeuralDeclTag name [] = error $ "No neural declaration found for name: " ++ name
 
-findAlgorithm :: (Show a) => Expr a -> InferenceRule
+findAlgorithm :: Expr -> InferenceRule
 findAlgorithm expr = case validAlgs of
   [alg] -> alg
   [] -> error ("no valid algorithms found in expr: " ++ show expr)
@@ -56,7 +56,7 @@ findAlgorithm expr = case validAlgs of
     validAlgs = filter (\alg -> all (checkConstraint expr alg) (constraints alg) ) correctExpr
     correctExpr = filter (checkExprMatches expr) allAlgorithms
 
-checkConstraint :: Expr a -> InferenceRule -> RuleConstraint -> Bool
+checkConstraint :: Expr -> InferenceRule -> RuleConstraint -> Bool
 checkConstraint expr _ (SubExprNIsType n ptype) = ptype == p
   where p = pType $ getTypeInfo (getSubExprs expr !! n)
 checkConstraint expr _ (SubExprNIsNotType n ptype) = ptype /= p

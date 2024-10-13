@@ -4,21 +4,21 @@ import SPLL.Lang.Lang
 import Data.List (intercalate)
 import SPLL.IntermediateRepresentation
 
-pPrintProg :: (Show a) => Program a -> String
+pPrintProg :: Program -> String
 pPrintProg (Program decls neurals) = intercalate "\n\n" (map (\f -> wrapInFunctionDeclaration (snd f) (fst f) []) decls)
 
-pPrintIREnv :: (Show a) => [(String, IRExpr a)] -> String
+pPrintIREnv :: [(String, IRExpr)] -> String
 pPrintIREnv env = intercalate "\n\n" (map (\f -> wrapInFunctionDeclarationIR (snd f) (fst f) []) env)
 
-wrapInFunctionDeclaration :: (Show a) => Expr a -> String -> [String] -> String
+wrapInFunctionDeclaration :: Expr -> String -> [String] -> String
 wrapInFunctionDeclaration (Lambda _ n b) fName params = wrapInFunctionDeclaration b fName (n:params)
 wrapInFunctionDeclaration e fName params = "def " ++ fName ++ "(" ++ intercalate ", " params ++ "):\n" ++ indent 1 ++ pPrintExpr e 1 ++"\n"
 
-wrapInFunctionDeclarationIR :: (Show a) => IRExpr a -> String -> [String] -> String
+wrapInFunctionDeclarationIR :: IRExpr -> String -> [String] -> String
 wrapInFunctionDeclarationIR (IRLambda n b) fName params = wrapInFunctionDeclarationIR b fName (n:params)
 wrapInFunctionDeclarationIR e fName params = "def " ++ fName ++ "(" ++ intercalate ", " params ++ "):\n" ++ indent 1 ++ pPrintIRExpr e 1 ++"\n"
 
-pPrintExpr :: (Show a) => Expr a -> Int -> String
+pPrintExpr :: Expr -> Int -> String
 pPrintExpr (LetIn _ n v b) i = "let " ++ n ++ " = " ++ pPrintExpr v (i+1) ++ " in\n" ++ indent (i+1) ++ pPrintExpr b (i+1)
 pPrintExpr (PlusF _ a b) i = "(" ++ pPrintExpr a i ++ " + " ++ pPrintExpr b i ++ ")"
 pPrintExpr (PlusI _ a b) i = "(" ++ pPrintExpr a i ++ " + " ++ pPrintExpr b i ++ ")"
@@ -50,7 +50,7 @@ pPrintExpr (Arg _ n t e) i = n ++ ": " ++ show t ++ " = " ++ pPrintExpr e i
 pPrintExpr (ReadNN _ n e) i = "readNN(" ++ n ++ ", " ++ pPrintExpr e i ++ ")"
 pPrintExpr (Fix _ e) i = "fix(" ++ pPrintExpr e i ++ ")"
 
-pPrintIRExpr :: (Show a) => IRExpr a -> Int -> String
+pPrintIRExpr :: IRExpr -> Int -> String
 pPrintIRExpr (IRIf cond thenExpr elseExpr) n =
     "\n" ++ indent n ++ "if " ++ pPrintIRExpr cond (n + 1) ++ " then\n" ++
     indent (n + 1) ++ pPrintIRExpr thenExpr (n + 1) ++ "\n" ++
@@ -92,7 +92,7 @@ pPrintIRExpr (IRIndex e1 e2) n = "index (" ++ pPrintIRExpr e1 (n + 1) ++ ", " ++
 pPrintIRExpr (IRReturning e) n = "return (" ++ pPrintIRExpr e (n + 1) ++ ")"
 
 
-pPrintValue :: (Show a) => Value a -> String
+pPrintValue :: Value -> String
 pPrintValue (VBool a) = show a
 pPrintValue (VFloat a) = show a
 pPrintValue (VList xs) = "[" ++ intercalate "," (map pPrintValue xs) ++ "]"

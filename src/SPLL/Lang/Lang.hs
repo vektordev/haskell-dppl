@@ -45,7 +45,7 @@ import Control.Monad.Random.Lazy (Random)
 import Data.Number.Erf (Erf)
 
 
-toStub :: Expr a -> ExprStub
+toStub :: Expr -> ExprStub
 toStub expr = case expr of
   IfThenElse {}  -> StubIfThenElse
   GreaterThan {} -> StubGreaterThan
@@ -75,24 +75,24 @@ toStub expr = case expr of
   Apply {}  -> StubApply
   (ReadNN _ _ _) -> StubReadNN
 
-vMarg :: Value a
+vMarg :: Value
 vMarg = VRange (Limits Nothing Nothing)
 
-checkLimits :: (Ord a) => Limits a -> Bool
+checkLimits :: Limits -> Bool
 checkLimits (Limits (Just (VFloat x)) (Just (VFloat y))) = x < y
 checkLimits (Limits (Just (VFloat _)) Nothing) = True
 checkLimits (Limits Nothing (Just (VFloat _))) = True
 checkLimits (Limits Nothing Nothing) = True
 checkLimits _ = False
 
-swapLimits :: Value a -> Value a
+swapLimits :: Value -> Value
 swapLimits (VRange (Limits a b)) = VRange (Limits b a)
 swapLimits _ = error "swapLimits on non-range"
 
-tInfoMap :: (a -> b) -> TypeInfo a -> TypeInfo b
+tInfoMap :: (a -> b) -> TypeInfo -> TypeInfo
 tInfoMap f t = undefined
 
-exprMap :: (a -> b) -> Expr a -> Expr b
+exprMap :: (a -> b) -> Expr -> Expr
 exprMap f expr = case expr of
   (IfThenElse t a b c) -> IfThenElse (tInfoMap f t) (exprMap f b) (exprMap f b) (exprMap f c)
   (GreaterThan t a b) -> GreaterThan (tInfoMap f t) (exprMap f a) (exprMap f b)
@@ -101,7 +101,7 @@ exprMap f expr = case expr of
   (Subtree t a x) -> Subtree (tInfoMap f t) (exprMap f a) x
   (Uniform t) -> Uniform (tInfoMap f t)
   (Normal t) -> Normal (tInfoMap f t)
-  (Constant t x) -> Constant (tInfoMap f t) $ fmap f x
+  (Constant t x) -> Constant (tInfoMap f t) x
   (MultF t a b) -> MultF (tInfoMap f t) (exprMap f a) (exprMap f b)
   (MultI t a b) -> MultI (tInfoMap f t) (exprMap f a) (exprMap f b)
   (PlusF t a b) -> PlusF (tInfoMap f t) (exprMap f a) (exprMap f b)
@@ -126,29 +126,29 @@ exprMap f expr = case expr of
   (Apply t a b) -> Apply (tInfoMap f t) (exprMap f a) (exprMap f b)
   (ReadNN t n a) -> ReadNN (tInfoMap f t) n (exprMap f a)
   
-predicateFlat :: (Expr a -> Bool) -> Expr a -> Bool
+predicateFlat :: (Expr -> Bool) -> Expr -> Bool
 predicateFlat f e = f e && all (predicateFlat f) (getSubExprs e)
 
-containedVars :: (Expr a -> Set.Set String) -> Expr a -> Set.Set String
+containedVars :: (Expr -> Set.Set String) -> Expr -> Set.Set String
 containedVars f e = Set.union (f e) (foldl Set.union Set.empty (map (containedVars f) (getSubExprs e)))
 
-predicateProg :: (Expr a -> Bool) -> Program a -> Bool
+predicateProg :: (Expr -> Bool) -> Program -> Bool
 predicateProg f (Program decls _) = and (map (predicateExpr f . snd) decls)
 
-predicateExpr :: (Expr a -> Bool) -> Expr a -> Bool
+predicateExpr :: (Expr -> Bool) -> Expr -> Bool
 predicateExpr f e = f e && and (map (predicateExpr f) (getSubExprs e))
 
-varsOfExpr :: Expr a -> Set.Set String
+varsOfExpr :: Expr -> Set.Set String
 varsOfExpr expr = case expr of
   (Var _ name) -> Set.singleton name
   _ -> Set.empty
 
-isNotTheta :: Expr a -> Bool
+isNotTheta :: Expr -> Bool
 isNotTheta expr = case expr of
   (ThetaI _ _ name) -> False
   _ -> True
   
-tMapHead :: (Expr a -> (TypeInfo a)) -> Expr a -> Expr a
+tMapHead :: (Expr -> TypeInfo) -> Expr -> Expr
 tMapHead f expr = case expr of 
   (IfThenElse _ a b c) -> IfThenElse (f expr) a b c
   (GreaterThan _ a b) -> GreaterThan (f expr) a b
@@ -182,7 +182,7 @@ tMapHead f expr = case expr of
   (Apply _ a b) -> Apply (f expr) a b
 --  (ReadNN _ a) -> ReadNN (f expr) a
 
-tMapTails :: (Expr a -> (TypeInfo a)) -> Expr a -> Expr a
+tMapTails :: (Expr -> TypeInfo) -> Expr -> Expr
 tMapTails f expr = case expr of
   (IfThenElse t a b c) -> IfThenElse t (tMap f a) (tMap f b) (tMap f c)
   (GreaterThan t a b) -> GreaterThan t (tMap f a) (tMap f b)
@@ -215,7 +215,7 @@ tMapTails f expr = case expr of
   (Apply t a b) -> Apply t (tMap f a) (tMap f b)
   (CallArg t name a) -> CallArg t name (map (tMap f) a)
 
-tMap :: (Expr a -> (TypeInfo a)) -> Expr a -> Expr a
+tMap :: (Expr -> TypeInfo) -> Expr -> Expr
 tMap f expr = case expr of 
   (IfThenElse _ a b c) -> IfThenElse (f expr) (tMap f a) (tMap f b) (tMap f c)
   (GreaterThan _ a b) -> GreaterThan (f expr) (tMap f a) (tMap f b)
@@ -249,10 +249,10 @@ tMap f expr = case expr of
   (Apply _ a b) -> Apply (f expr) (tMap f a) (tMap f b)
   (ReadNN _ n a) -> ReadNN (f expr) n (tMap f a)
 
-tMapProg :: (Expr a -> (TypeInfo a)) -> Program a -> Program a
+tMapProg :: (Expr -> TypeInfo) -> Program -> Program
 tMapProg f (Program decls neural) = Program (zip (map fst decls) (map (tMap f . snd) decls)) neural
 
-getBinaryConstructor :: Expr a1 -> ((TypeInfo a2) -> Expr a2 -> Expr a2 -> Expr a2)
+getBinaryConstructor :: Expr -> (TypeInfo -> Expr -> Expr -> Expr)
 getBinaryConstructor GreaterThan {} = GreaterThan
 getBinaryConstructor LessThan {} = GreaterThan
 getBinaryConstructor MultF {} = MultF
@@ -267,7 +267,7 @@ getBinaryConstructor Apply {} = Apply
 --getBinaryConstructor (LetIn t name a b) = \t2 -> \e1 -> \e2 -> LetIn t2 name e1 e2
 getBinaryConstructor (LetIn _ name _ _) = (`LetIn` name)
 
-getUnaryConstructor :: Expr a1 -> (TypeInfo a2 -> Expr a2 -> Expr a2)
+getUnaryConstructor :: Expr -> (TypeInfo -> Expr -> Expr)
 getUnaryConstructor (ThetaI _ _ i) = \t a -> ThetaI t a i
 getUnaryConstructor (Subtree _ _ i) = \t a -> Subtree t a i
 getUnaryConstructor (Lambda _ x _) = (`Lambda` x)
@@ -276,7 +276,7 @@ getUnaryConstructor (Fix _ _) = Fix
 getUnaryConstructor (Not _ _) = Not
 getUnaryConstructor (ExpF _ _) = ExpF
 
-getNullaryConstructor :: Expr a -> (TypeInfo a -> Expr a)
+getNullaryConstructor :: Expr -> (TypeInfo -> Expr)
 getNullaryConstructor Uniform {} = Uniform
 getNullaryConstructor Normal {} = Normal
 getNullaryConstructor (Constant t val) = (`Constant` val)
@@ -284,11 +284,11 @@ getNullaryConstructor Null {} = Null
 getNullaryConstructor (Var _ x) = (`Var` x)
 getNullaryConstructor (Call _ x) = (`Call` x)
 
-tTraverse :: Applicative f => (TypeInfo v -> f (TypeInfo v)) -> Expr v -> f (Expr v)
+tTraverse :: Applicative f => (TypeInfo -> f TypeInfo) -> Expr -> f (Expr)
 tTraverse f expr = fmap (\t -> setTypeInfo expr t) typeinfos
   where typeinfos = f $ getTypeInfo expr
 
-tMapM :: Monad m => (Expr a -> m (TypeInfo a)) -> Expr a -> m (Expr a)
+tMapM :: Monad m => (Expr -> m TypeInfo) -> Expr -> m (Expr)
 tMapM f expr@(IfThenElse _ a b c) = do
   t <- f expr
   fa <- tMapM f a
@@ -317,10 +317,10 @@ tMapM f expr
        subExpr1 <- tMapM f (getSubExprs expr !! 1)
        return $ getBinaryConstructor expr t subExpr0 subExpr1
 
-arity :: Expr a -> Int
+arity :: Expr -> Int
 arity e = length $ getSubExprs e
 
-getSubExprs :: Expr a -> [Expr a]
+getSubExprs :: Expr -> [Expr]
 getSubExprs expr = case expr of 
   (IfThenElse _ a b c) -> [a,b,c]
   (GreaterThan _ a b) -> [a,b]
@@ -354,7 +354,7 @@ getSubExprs expr = case expr of
   (Apply _ a b) -> [a, b]
   (ReadNN _ _ a) -> [a]
 
-setSubExprs :: Expr a -> [Expr a] -> Expr a
+setSubExprs :: Expr -> [Expr] -> Expr
 setSubExprs expr [] = case expr of
   Uniform t -> Uniform t
   Normal t -> Normal t
@@ -399,7 +399,7 @@ setSubExprs expr subExprs = case expr of
   CallArg t n _ -> CallArg t n subExprs
   _ -> error "unmatched expr in setSubExprs"
 
-getTypeInfo :: Expr a -> TypeInfo a
+getTypeInfo :: Expr -> TypeInfo
 getTypeInfo expr = case expr of
   (IfThenElse t _ _ _)  -> t
   (GreaterThan t _ _)   -> t
@@ -433,45 +433,45 @@ getTypeInfo expr = case expr of
   (Apply t _ _)    -> t
   (ReadNN t _ _)        -> t
   
-setTypeInfo :: Expr a -> TypeInfo a -> Expr a
+setTypeInfo :: Expr -> TypeInfo -> Expr
 setTypeInfo expr t = case expr of
-  (IfThenElse _ a b c)  -> (IfThenElse t a b c)
-  (GreaterThan _ a b)   -> (GreaterThan t a b)
-  (LessThan _ a b)      -> (LessThan t a b)
-  (ThetaI _ a b)        -> (ThetaI t a b)
-  (Subtree _ a b)       -> (Subtree t a b)
-  (Uniform _)           -> (Uniform t)
-  (Normal _)            -> (Normal t)
-  (Constant _ a)        -> (Constant t a)
-  (MultF _ a b)         -> (MultF t a b)
-  (MultI _ a b)         -> (MultI t a b)
-  (PlusF _ a b)         -> (PlusF t a b)
-  (PlusI _ a b)         -> (PlusI t a b)
-  (ExpF _ a)            -> (ExpF t a)
-  (NegF _ a)            -> (NegF t a)
-  (And _ a b)           -> (And t a b)
-  (Or _ a b)            -> (Or t a b)
-  (Not _ a)             -> (Not t a)
-  (Null _)              -> (Null t)
-  (Cons _ a b)          -> (Cons t a b)
-  (TCons _ a b)         -> (TCons t a b)
-  (Call _ a)            -> (Call t a)
-  (Var _ a)             -> (Var t a)
-  (LetIn _ a b c)       -> (LetIn t a b c)
-  (InjF _ a b)          -> (InjF t a b)
+  (IfThenElse _ a b c)  -> IfThenElse t a b c
+  (GreaterThan _ a b)   -> GreaterThan t a b
+  (LessThan _ a b)      -> LessThan t a b
+  (ThetaI _ a b)        -> ThetaI t a b
+  (Subtree _ a b)       -> Subtree t a b
+  (Uniform _)           -> Uniform t
+  (Normal _)            -> Normal t
+  (Constant _ a)        -> Constant t a
+  (MultF _ a b)         -> MultF t a b
+  (MultI _ a b)         -> MultI t a b
+  (PlusF _ a b)         -> PlusF t a b
+  (PlusI _ a b)         -> PlusI t a b
+  (ExpF _ a)            -> ExpF t a
+  (NegF _ a)            -> NegF t a
+  (And _ a b)           -> And t a b
+  (Or _ a b)            -> Or t a b
+  (Not _ a)             -> Not t a
+  (Null _)              -> Null t
+  (Cons _ a b)          -> Cons t a b
+  (TCons _ a b)         -> TCons t a b
+  (Call _ a)            -> Call t a
+  (Var _ a)             -> Var t a
+  (LetIn _ a b c)       -> LetIn t a b c
+  (InjF _ a b)          -> InjF t a b
   --(LetInD _ a b c)     -> (LetInD t a b c)
   --(LetInTuple _ a b c d) -> (LetInTuple t a b c d)
-  (Arg _ a b c)         -> (Arg t a b c)
-  (CallArg _ a b)       -> (CallArg t a b)
-  (Lambda _ a b)        -> (Lambda t a b)
-  (Apply _ a b)    -> (Apply t a b)
-  (ReadNN _ a b)        -> (ReadNN t a b)
+  (Arg _ a b c)         -> Arg t a b c
+  (CallArg _ a b)       -> CallArg t a b
+  (Lambda _ a b)        -> Lambda t a b
+  (Apply _ a b)         -> Apply t a b
+  (ReadNN _ a b)        -> ReadNN t a b
 
-getVFloat :: Value a -> a
+getVFloat :: Value -> Float
 getVFloat (VFloat v) = v
 getVFloat _ = error "not vfloat where it should be"
 
-getRType :: Value a -> RType
+getRType :: Value -> RType
 getRType (VBool _) = TBool
 getRType (VInt _) = TInt
 getRType (VSymbol _) = TSymbol
@@ -480,10 +480,10 @@ getRType (VList (a:_)) = ListOf $ getRType a
 getRType (VList []) = NullList
 getRType (VTuple t1 t2) = Tuple (getRType t1) (getRType t2)
 
-prettyPrintProg :: (Num a, Show a) => Program a -> [String]
+prettyPrintProg :: Program -> [String]
 prettyPrintProg (Program decls neurals) = concatMap prettyPrintDecl decls ++ concatMap prettyPrintNeural neurals
 
-prettyPrintNeural :: NeuralDecl a -> [String]
+prettyPrintNeural :: NeuralDecl -> [String]
 prettyPrintNeural (name, ty, range) = l1:l2:(l3 range):[]
   where
     l1 = ("--- Neural: " ++ name ++ "---")
@@ -491,10 +491,10 @@ prettyPrintNeural (name, ty, range) = l1:l2:(l3 range):[]
     l3 (EnumList lst) = ("\t" ++ (show $ length lst))
     l3 _ = "prettyprint not implemented"
 
-prettyPrintDecl :: (Num a, Show a) => FnDecl a -> [String]
+prettyPrintDecl :: FnDecl -> [String]
 prettyPrintDecl (name, expr) = ("--- Function: " ++ name ++ "---"):prettyPrint expr
 
-prettyPrint :: (Num a, Show a) => Expr a -> [String]
+prettyPrint :: Expr -> [String]
 prettyPrint expr = 
   fstLine : indented
     where
@@ -503,7 +503,7 @@ prettyPrint expr =
       indent ls = "    " ++ ls
       fstLine = printFlat expr ++ " :: (" ++ show (getTypeInfo expr) ++ ")"
 
-prettyPrintNoReq :: Expr a -> [String]
+prettyPrintNoReq :: Expr -> [String]
 prettyPrintNoReq expr =
   fstLine : indented
     where
@@ -512,10 +512,10 @@ prettyPrintNoReq expr =
       indent ls = "    " ++ ls
       fstLine = printFlatNoReq expr
 
-prettyPrintProgNoReq :: Program a -> [String]
+prettyPrintProgNoReq :: Program -> [String]
 prettyPrintProgNoReq (Program fdecls ndecls) = concatMap prettyPrintDeclNoReq fdecls ++ concatMap prettyPrintNeuralNoReq ndecls
 
-prettyPrintNeuralNoReq :: NeuralDecl a -> [String]
+prettyPrintNeuralNoReq :: NeuralDecl -> [String]
 prettyPrintNeuralNoReq (name, ty, range) = l1:l2:(l3 range):[]
   where
     l1 = ("--- Neural: " ++ name ++ "---")
@@ -524,10 +524,10 @@ prettyPrintNeuralNoReq (name, ty, range) = l1:l2:(l3 range):[]
     l3 _ = "prettyprint not implemented"
 
 
-prettyPrintDeclNoReq :: FnDecl a -> [String]
+prettyPrintDeclNoReq :: FnDecl -> [String]
 prettyPrintDeclNoReq (name, expr) = ("--- Function: " ++ name ++ "---"):prettyPrintNoReq expr
 
-printFlat :: Show a => Expr a -> String
+printFlat :: Expr -> String
 printFlat expr = case expr of
   IfThenElse {} -> "IfThenElse"
   GreaterThan {} -> "GreaterThan"
@@ -561,7 +561,7 @@ printFlat expr = case expr of
   Apply {} -> "CallLambda"
   (ReadNN _ name _) -> "ReadNN " ++ name
 
-printFlatNoReq :: Expr a -> String
+printFlatNoReq :: Expr -> String
 printFlatNoReq expr = case expr of
   IfThenElse {} -> "IfThenElse"
   GreaterThan {} -> "GreaterThan"

@@ -20,32 +20,32 @@ instance Const Int where
 instance (Const a) => Const [a] where
   value lst = VList (map value lst)
 -}
-ite :: (Num a, Show a) => Expr a -> Expr a -> Expr a -> Expr a
+ite :: Expr -> Expr -> Expr -> Expr
 ite = IfThenElse makeTypeInfo
 
-(>=) :: (Num a, Show a) => Expr a -> Expr a -> Expr a
+(>=) :: Expr -> Expr -> Expr
 (>=) = GreaterThan makeTypeInfo
 
-theta :: (Num a, Show a) => Int -> Expr a
+theta :: Int -> Expr
 theta = undefined -- ThetaI makeTypeInfo 
 
-uniform :: (Num a, Show a) => Expr a
+uniform :: Expr
 uniform = Uniform makeTypeInfo
 
-normal :: (Num a, Show a) => Expr a
+normal :: Expr
 normal = Normal makeTypeInfo
 
-(*) :: (Num a, Show a) => Expr a -> Expr a -> Expr a
+(*) :: Expr -> Expr -> Expr
 (*) = MultF makeTypeInfo
 
-(+) :: (Num a, Show a) => Expr a -> Expr a -> Expr a
+(+) :: Expr -> Expr -> Expr
 (+) = PlusF makeTypeInfo
 
-null :: (Num a, Show a) => Expr a
+null :: Expr
 null = Null makeTypeInfo
 
-cons :: (Num a, Show a) => Expr a -> Expr a -> Expr a
+cons :: Expr -> Expr -> Expr
 cons = Cons makeTypeInfo
 
-(<:>) :: (Num a, Show a) => Expr a -> Expr a -> Expr a
+(<:>) :: Expr -> Expr -> Expr
 (<:>) = cons

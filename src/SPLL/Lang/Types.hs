@@ -17,16 +17,16 @@ import Data.Set (empty)
 type ChainName = String
 
 -- (Set of Preconditions with CType, set of Inferable variables with attached CType, Expression this HornClause originates from with its inversion number
-type HornClause a = ([(ChainName, CType a)], [(ChainName, CType a)], (ExprStub, Int))
+type HornClause = ([(ChainName, CType)], [(ChainName, CType)], (ExprStub, Int))
 
-data CType a = CDeterministic
+data CType = CDeterministic
              | CInferDeterministic
-             | CConstrainedTo a a
+             | CConstrainedTo Float Float
              | CBottom
              | CNotSetYet
              deriving (Show, Eq)
 
-instance Eq a => Ord (CType a) where
+instance Ord CType where
   compare x y = compare (rank x) (rank y)
     where
       rank CDeterministic = 10
@@ -40,45 +40,45 @@ instance Eq a => Ord (CType a) where
 --Expr x (a :: Precision)
 --data Precision = P32 | P64"
 --type family PrecisionType P32 = Float
-data Expr a =
+data Expr =
               -- Flow Control
-                IfThenElse (TypeInfo a) (Expr a) (Expr a) (Expr a)
-              | Call (TypeInfo a) String
-              | CallArg (TypeInfo a) String [Expr a]
-              | InjF (TypeInfo a) String [Expr a]
+                IfThenElse TypeInfo (Expr) (Expr) (Expr)
+              | Call TypeInfo String
+              | CallArg TypeInfo String [Expr]
+              | InjF TypeInfo String [Expr]
               -- Arithmetic
-              | MultF (TypeInfo a) (Expr a) (Expr a)
-              | MultI (TypeInfo a) (Expr a) (Expr a)
-              | PlusF (TypeInfo a) (Expr a) (Expr a)
-              | PlusI (TypeInfo a) (Expr a) (Expr a)
-              | ExpF (TypeInfo a) (Expr a)
-              | NegF (TypeInfo a) (Expr a)
+              | MultF TypeInfo (Expr) (Expr)
+              | MultI TypeInfo (Expr) (Expr)
+              | PlusF TypeInfo (Expr) (Expr)
+              | PlusI TypeInfo (Expr) (Expr)
+              | ExpF TypeInfo (Expr)
+              | NegF TypeInfo (Expr)
               -- Variables
-              | LetIn (TypeInfo a) String (Expr a) (Expr a)
-              | Var (TypeInfo a) String
-              | Constant (TypeInfo a) (Value a)
-              | Lambda (TypeInfo a) String (Expr a)    -- (Currently) must use local context
-              | Apply (TypeInfo a) (Expr a) (Expr a)
+              | LetIn TypeInfo String (Expr) (Expr)
+              | Var TypeInfo String
+              | Constant TypeInfo (Value)
+              | Lambda TypeInfo String (Expr)    -- (Currently) must use local context
+              | Apply TypeInfo (Expr) (Expr)
               -- Distributions
-              | Uniform (TypeInfo a)
-              | Normal (TypeInfo a)
+              | Uniform TypeInfo
+              | Normal TypeInfo
               -- Parameters
-              | ThetaI (TypeInfo a) (Expr a) Int
-              | Subtree (TypeInfo a) (Expr a) Int
+              | ThetaI TypeInfo (Expr) Int
+              | Subtree TypeInfo (Expr) Int
               -- Lists/Tuples
-              | Cons (TypeInfo a) (Expr a) (Expr a)
-              | TCons (TypeInfo a) (Expr a) (Expr a)
-              | Null (TypeInfo a)
+              | Cons TypeInfo (Expr) (Expr)
+              | TCons TypeInfo (Expr) (Expr)
+              | Null TypeInfo
               -- Boolean Operations
-              | GreaterThan (TypeInfo a) (Expr a) (Expr a)
-              | LessThan (TypeInfo a) (Expr a) (Expr a)
-              | And (TypeInfo a) (Expr a) (Expr a)
-              | Or (TypeInfo a) (Expr a) (Expr a)
-              | Not (TypeInfo a) (Expr a)
+              | GreaterThan TypeInfo (Expr) (Expr)
+              | LessThan TypeInfo (Expr) (Expr)
+              | And TypeInfo (Expr) (Expr)
+              | Or TypeInfo (Expr) (Expr)
+              | Not TypeInfo (Expr)
               -- Other
-              | Arg (TypeInfo a) String RType (Expr a)
-              | ReadNN (TypeInfo a) String (Expr a)
-              | Fix (TypeInfo a) (Expr a)
+              | Arg TypeInfo String RType (Expr)
+              | ReadNN TypeInfo String (Expr)
+              | Fix TypeInfo (Expr)
               -- TODO: Needs Concat to achieve proper SPN-parity.
               deriving (Show, Eq, Ord)
 
@@ -113,17 +113,17 @@ data ExprStub = StubIfThenElse
               deriving (Show, Eq, Ord)
 
 --Do not use this constructor, use makeTypeInfo instead
-data TypeInfo a = TypeInfo
+data TypeInfo = TypeInfo
   { rType :: RType
   , pType :: PType
-  , cType :: CType a
-  , derivingHornClause :: Maybe (HornClause a)
+  , cType :: CType
+  , derivingHornClause :: Maybe (HornClause)
   , witnessedVars :: WitnessedVars
   , chainName :: ChainName
-  , tags :: [Tag a]} deriving (Show, Eq, Ord)
+  , tags :: [Tag]} deriving (Show, Eq, Ord)
 -- only use ord instance for algorithmic convenience, not for up/downgrades / lattice work.
 
-makeTypeInfo :: TypeInfo a
+makeTypeInfo :: TypeInfo
 makeTypeInfo = TypeInfo
     { rType = SPLL.Typing.RType.NotSetYet
     , pType = SPLL.Typing.PType.NotSetYet
@@ -136,55 +136,39 @@ makeTypeInfo = TypeInfo
 
 type Name = String
 
-data Program a = Program {
-                    functions :: [FnDecl a],
-                    neurals :: [NeuralDecl a]
+data Program = Program {
+                    functions :: [FnDecl],
+                    neurals :: [NeuralDecl]
                     } deriving (Show, Eq)
 
-type FnDecl a = (String, Expr a)
+type FnDecl = (String, Expr)
 
-type NeuralDecl a = (String, RType, Tag a)
+type NeuralDecl = (String, RType, Tag)
 
 type WitnessedVars = Set.Set String
 
-data ThetaTree a = ThetaTree [a] [ThetaTree a] deriving (Show, Eq, Ord)
+data ThetaTree = ThetaTree [Float] [ThetaTree] deriving (Show, Eq, Ord)
 
-data Value a = VBool Bool
+data Value = VBool Bool
            | VInt Int
            | VSymbol String
-           | VFloat a
-           | VList [Value a]
-           | VTuple (Value a) (Value a)
-           | VBranch (Value a) (Value a) String
-           | VRange (Limits a)
-           | VThetaTree (ThetaTree a)
+           | VFloat Float
+           | VList [Value]
+           | VTuple (Value) (Value)
+           | VBranch (Value) (Value) String
+           | VRange (Limits)
+           | VThetaTree (ThetaTree)
            | VAnyList
-           -- | Value of TArrow a b could be Expr TypeInfo a, with Expr being a Lambda?
+           -- | Value of TArrow a b could be Expr TypeInfo, with Expr being a Lambda?
            deriving (Show, Eq, Ord)
 -- likelihood [vMarg, vAnyList] - likelihood [vMarg, vMarg, vAnylist]
 --Nothing indicates low/high infinity.
-data Limits a = Limits (Maybe (Value a)) (Maybe (Value a))
+data Limits = Limits (Maybe (Value)) (Maybe (Value))
            deriving (Show, Eq, Ord)
+           
 
-instance Functor Value where
-  fmap = valMap
-
-valMap :: (a -> b) -> Value a -> Value b
-valMap f (VBool b) = VBool b
-valMap f (VInt i) = VInt i
-valMap f (VSymbol i) = VSymbol i
-valMap f (VFloat a) = VFloat $ f a
-valMap f (VList v) = VList $ map (valMap f) v
-valMap f (VTuple v1 v2) = VTuple (valMap f v1) (valMap f v2)
-valMap f (VBranch v1 v2 x ) = VBranch (valMap f v1) (valMap f v2) x
-valMap f (VRange v1) = VRange (limitsMap f v1)
-valMap f VAnyList = VAnyList
-
-limitsMap :: (a -> b) -> Limits a -> Limits b
-limitsMap f (Limits a b) = Limits (fmap (valMap f) a) (fmap (valMap f) b)
-
-data Tag a = EnumRange (Value a, Value a)
-           | EnumList [Value a]
+data Tag = EnumRange (Value, Value)
+           | EnumList [Value]
            | Alg InferenceRule
            deriving (Show, Eq, Ord)
 

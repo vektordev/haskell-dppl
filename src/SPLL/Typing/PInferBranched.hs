@@ -79,7 +79,7 @@ instance Semigroup TEnv where
 instance Monoid TEnv where
   mempty = empty
   mappend = (<>)
-makeMain :: Expr a -> Program a
+makeMain :: Expr -> Program
 makeMain expr = Program [("main", expr)] []
 
 -- | Inference monad
@@ -141,13 +141,13 @@ instance Substitutable TEnv where
   apply s (TypeEnv env) = TypeEnv $ Map.map (apply s) env
   ftv (TypeEnv env) = ftv $ Map.elems env
 
-inferType :: Program a -> PType
+inferType :: Program -> PType
 inferType prog = if length res /= 1 then error "non-unique solution"
   else ty
   where res = rights $ constraintsExprProg empty prog
         (_, _, _, (Forall _ ty)) = head res
 
-showResults :: Expr a -> IO ()
+showResults :: Expr -> IO ()
 showResults e = do
   let res = constraintsExpr empty e
   putStrLn $ "Branches: "  ++ show (length res)
@@ -167,14 +167,14 @@ showResult (Right (cs, subst, ty, scheme):rest)  =  do
 showResult [] = do
       putStrLn "Finished"
 
-showResultsProg :: Program a -> IO ()
+showResultsProg :: Program -> IO ()
 showResultsProg p@(Program decls _) =
   do
        let res = constraintsExprProg empty p
        putStrLn $ "Branches: "  ++ show (length res)
        showResult res
 -- | Return the internal constraints used in solving for the type of an expression
-constraintsExprProg :: TEnv -> Program a -> [Either PTypeError ([Constraint], Subst, PType, Scheme)]
+constraintsExprProg :: TEnv -> Program -> [Either PTypeError ([Constraint], Subst, PType, Scheme)]
 constraintsExprProg env p = map getP (runInfer env (inferProg p))
         where getP j = case j of  Left err -> Left err
                                   Right inf_list -> doAllSolve inf_list
@@ -197,7 +197,7 @@ runInfer env m = runIdentity $ evalStateT (runReaderT m env) initInfer
 
 
 -- | Return the internal constraints used in solving for the type of an expression
-constraintsExpr :: TEnv -> Expr a -> [Either PTypeError ([Constraint], Subst, PType, Scheme)]
+constraintsExpr :: TEnv -> Expr -> [Either PTypeError ([Constraint], Subst, PType, Scheme)]
 constraintsExpr env ex = map getP (runInfer env (infer ex))
   where getP j = case j of  Left err -> Left err
                             Right inf_list -> doAllSolve inf_list
@@ -324,7 +324,7 @@ rtFromScheme (Forall _ rt) = rt
 
 type Branch = Either PTypeError (PType, [Constraint])
 
-inferProg :: Program a -> Infer [Branch]
+inferProg :: Program -> Infer [Branch]
 inferProg (Program decls _) = do
   -- init type variable for all function decls beforehand so we can build constraints for
   -- calls between these functions
@@ -344,7 +344,7 @@ inferProg (Program decls _) = do
   return $ foldl combineBranchesFunc top_branches (zip func_branches_list f_names)
 
 -- TODO Make greater number type for type instance constraint ("Overloaded operator")
-infer :: Expr a -> Infer [Branch]
+infer :: Expr -> Infer [Branch]
 infer expr = case expr of
   ThetaI _ a i  -> return [Right (Deterministic, [])]
   Uniform _  -> return [Right (Integrate, [])]

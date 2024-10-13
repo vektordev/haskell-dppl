@@ -50,7 +50,7 @@ juliaOps OpAnd = "&&"
 juliaOps OpEq = "=="
 juliaOps x = error ("Unknown Julia operator: " ++ show x)
 
-juliaVal :: (Show a) => Value a -> String
+juliaVal :: Value -> String
 juliaVal (VList xs) = "[" ++ (intercalate "," $ map juliaVal xs) ++ "]"
 juliaVal (VInt i) = show i
 juliaVal (VFloat f) = show f
@@ -63,10 +63,10 @@ unlinesTrimLeft = intercalate "\n"
 onHead :: (a -> a) -> [a] -> [a]
 onHead f (x:xs) = (f x : xs)
 
-generateFunctions :: (Show a) => [(String, IRExpr a)] -> [String]
+generateFunctions :: [(String, IRExpr)] -> [String]
 generateFunctions = concatMap generateFunction
 
-generateFunction :: (Show a) => (String, IRExpr a) -> [String]
+generateFunction :: (String, IRExpr) -> [String]
 generateFunction (name, expr) = let
   (args, reducedExpr) = unwrapLambdas expr
   l1 = "function " ++ name ++ "(" ++ intercalate ", " ("thetas" : args) ++ ")"
@@ -74,12 +74,12 @@ generateFunction (name, expr) = let
   lEnd = "end"
   in [l1] ++ indentOnce block ++ [lEnd] 
   
-unwrapLambdas :: IRExpr a -> ([String], IRExpr a)
+unwrapLambdas :: IRExpr -> ([String], IRExpr)
 unwrapLambdas (IRLambda name rest) = (name:otherNames, plainTree)
   where (otherNames, plainTree) = unwrapLambdas rest
 unwrapLambdas anyNode = ([], anyNode)
 
-generateCode :: (Show a) => IRExpr a -> [String]
+generateCode :: IRExpr -> [String]
 generateCode (IRIf cond left right ) = let
   [cCond] = generateCode cond
   cLeft = generateCode left

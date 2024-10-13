@@ -15,7 +15,7 @@ import SPLL.Lang.Lang (Expr(..), ExprStub(..), toStub)
 import SPLL.Typing.RType
 import SPLL.Lang.Types
 
-checkExprMatches :: Expr a -> InferenceRule -> Bool
+checkExprMatches :: Expr -> InferenceRule -> Bool
 checkExprMatches e alg = toStub e == forExpression alg
 
 

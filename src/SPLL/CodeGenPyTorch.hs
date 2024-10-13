@@ -54,7 +54,7 @@ pyOps OpOr = "or"
 pyOps OpAnd = "and"
 pyOps OpEq = "=="
 
-pyVal :: (Show a) => Value a -> String
+pyVal :: Value -> String
 pyVal (VList xs) = "[" ++ (intercalate "," $ map pyVal xs) ++ "]"
 pyVal (VInt i) = show i
 pyVal (VFloat f) = show f
@@ -71,7 +71,7 @@ onLast :: (a -> a) -> [a] -> [a]
 onLast f [x] = [f x]
 onLast f (x:xs) = x : onLast f xs
 
-generateFunctions :: (Show a) => [(String, IRExpr a)] -> [String]
+generateFunctions :: [(String, IRExpr)] -> [String]
 --generateFunctions defs | trace (show defs) False = undefined
 --contrary to the julia backend, we want to aggregate gen and prob into one classes. Ugly implementation, but it'll do for now.
 generateFunctions defs =
@@ -95,11 +95,11 @@ generateFunctions defs =
 stdLib :: [(String, String)]
 stdLib = [("in", "contains")]
 
-replaceCalls :: [(String, String)] -> IRExpr a -> IRExpr a
+replaceCalls :: [(String, String)] -> IRExpr -> IRExpr
 replaceCalls lut (IRCall name args) = IRCall (fromMaybe name $ lookup name lut) args
 replaceCalls lut other = other
 
-generateClass :: (Show a ) => (String, Maybe (IRExpr a), Maybe (IRExpr a), Maybe (IRExpr a)) -> [String]
+generateClass :: (String, Maybe (IRExpr), Maybe (IRExpr), Maybe (IRExpr)) -> [String]
 generateClass (name, gen, prob, integ) = let
   funcStringFromMaybe name func = case func of
     Just a -> generateFunction (name, a)
@@ -111,7 +111,7 @@ generateClass (name, gen, prob, integ) = let
   funcs = i ++ [""] ++ p ++ [""] ++ g
   in [initLine] ++ indentOnce funcs
 
-generateFunction :: (Show a) => (String, IRExpr a) -> [String]
+generateFunction :: (String, IRExpr) -> [String]
 generateFunction (name, expr) = let
   (args, reducedExpr) = unwrapLambdas expr
   l1 = "def " ++ name ++ "(" ++ intercalate ", " ("self" : args) ++ "):"
@@ -120,14 +120,14 @@ generateFunction (name, expr) = let
   in [l1] ++ indentOnce block
 
 -- IRReturning should be transparent here.
-unwrapLambdas :: IRExpr a -> ([String], IRExpr a)
+unwrapLambdas :: IRExpr -> ([String], IRExpr)
 unwrapLambdas (IRLambda name rest) = (name:otherNames, plainTree)
   where (otherNames, plainTree) = unwrapLambdas rest
 unwrapLambdas (IRReturning rest) = (otherNames, IRReturning plainTree)
   where (otherNames, plainTree) = unwrapLambdas rest
 unwrapLambdas anyNode = ([], anyNode)
 
-generateCode :: (Show a) => IRExpr a -> String -> [String]
+generateCode :: IRExpr -> String -> [String]
 generateCode (IRIf cond left right) "" = wrapMultiBlock ["(", " if ", " else ", ")"] [generateCode left "", generateCode cond "", generateCode right ""]
 generateCode (IRIf cond left right) bindto = let
   [cCond] = generateCode cond ""

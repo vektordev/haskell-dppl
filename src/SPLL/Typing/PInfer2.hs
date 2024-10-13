@@ -79,7 +79,7 @@ resolveCompCons Prob Deterministic = Bottom
 resolveCompCons Deterministic Prob = Bottom
 resolveCompCons ty1 ty2 = Deterministic
 
-showResults :: (Num a, Show a) => Expr a -> IO ()
+showResults :: Expr -> IO ()
 showResults expr = do
   case inferExpr mempty expr of
     Left err -> print err
@@ -92,24 +92,24 @@ showResults expr = do
       putStrLn $ unlines $ prettyPrint ee
       putStrLn "-----"
 
-inferType :: (Show a) => Program a -> PType
+inferType :: Program -> PType
 inferType prog = do
   case inferProgram mempty prog of
      Left err -> error "error in infer scheme"
      Right (_, DScheme _ b ty, _) ->  ty
 
-addPTypeInfo :: (Show a) => Program a -> Program a
+addPTypeInfo :: Program -> Program
 addPTypeInfo p = do
     case inferProgram mempty p of
        Left err -> error "error in addPTypeInfo"
        Right (_, _, p) ->  p
 
-tryAddPTypeInfo :: (Show a) => Program a -> Either PTypeError (Program a)
+tryAddPTypeInfo :: Program -> Either PTypeError Program
 tryAddPTypeInfo p = do
   (_,_,p2) <- inferProgram mempty p
   return p2
 
-showResultsProgDebug :: (Num a, Show a) => Program a -> IO ()
+showResultsProgDebug :: Program -> IO ()
 showResultsProgDebug prog = do
   case inferProgramDebug mempty prog of
     Left err -> print err
@@ -121,7 +121,7 @@ showResultsProgDebug prog = do
       putStrLn $ "Program: "
       putStrLn $ unlines $ prettyPrintProg p
 
-showResultsProg :: (Num a, Show a) => Program a -> IO ()
+showResultsProg :: Program -> IO ()
 showResultsProg prog = do
   case inferProgram mempty prog of
     Left err -> print err
@@ -144,7 +144,7 @@ instance Monoid TEnv where
   mempty = TypeEnv Map.empty
   mappend = (<>)
 
-makeMain :: Expr a -> Program a
+makeMain :: Expr -> Program
 makeMain expr = Program [("main", expr)] []
 -- | Inference state
 data InferState = InferState { var_count :: Int }
@@ -203,21 +203,21 @@ substChain dsubst (Right cs)  = [Right $ dapply dsubst cs]
 -------------------------------------------------------------------------------
 -- Inference
 -------------------------------------------------------------------------------
-inferProgram:: (Show a) => TEnv -> Program a -> Either PTypeError ([DConstraint], DScheme, Program a)
+inferProgram::  TEnv -> Program -> Either PTypeError ([DConstraint], DScheme, Program)
 inferProgram env = runInferProg env . inferProg env
 
-inferProgramDebug :: (Show a) => TEnv -> Program a -> Either PTypeError ([DConstraint], DScheme, Program a)
+inferProgramDebug :: TEnv -> Program -> Either PTypeError ([DConstraint], DScheme, Program)
 inferProgramDebug env = runInferProgDebug env . inferProg env
 
-inferExpr :: (Show a) => TEnv -> Expr a -> Either PTypeError ([DConstraint], DScheme, Expr a)
+inferExpr :: TEnv -> Expr -> Either PTypeError ([DConstraint], DScheme, Expr)
 inferExpr env = runInfer env . infer env
 
-runInferProgDebug :: TEnv -> Infer (Subst, [DConstraint], PType, Program a) -> Either PTypeError ([DConstraint], DScheme, Program a)
+runInferProgDebug :: TEnv -> Infer (Subst, [DConstraint], PType, Program) -> Either PTypeError ([DConstraint], DScheme, Program)
 runInferProgDebug env m = case evalState (runExceptT m) initInfer of
   Left err  -> Left err
   Right (s, c, t, p) -> Right $ (c, DScheme [] [] t, p)
 
-runInferProg :: TEnv -> Infer (Subst, [DConstraint], PType, Program a) -> Either PTypeError ([DConstraint], DScheme, Program a)
+runInferProg :: TEnv -> Infer (Subst, [DConstraint], PType, Program) -> Either PTypeError ([DConstraint], DScheme, Program)
 runInferProg env m = case evalState (runExceptT m) initInfer of
   Left err  -> Left err
   Right (s, c, t, p) -> Right $ closeProg env c t (apply s p)
@@ -225,7 +225,7 @@ runInferProg env m = case evalState (runExceptT m) initInfer of
 -- Right (c, (Forall [] [] t, Forall [] [] t))
 --  Right $ simpleClose env c t
 
-runInfer :: TEnv -> Infer (Subst, [DConstraint], PType, Expr a) -> Either PTypeError ([DConstraint], DScheme, Expr a)
+runInfer :: TEnv -> Infer (Subst, [DConstraint], PType, Expr) -> Either PTypeError ([DConstraint], DScheme, Expr)
 runInfer env m = case evalState (runExceptT m) initInfer of
   Left err  -> Left err
   Right (_, c, t, p) -> Right $ close env c t p
@@ -370,13 +370,13 @@ solveCyclicConstraints dcons pty s = case nextCons of
     solveCyclicConstraints (apply fixSubst (delete d dcons))(apply fixSubst pty)(compose s fixSubst)
   where nextCons = find isRecType dcons
 
-close :: TEnv -> [DConstraint] -> PType -> Expr a -> ([DConstraint], DScheme, Expr a)
+close :: TEnv -> [DConstraint] -> PType -> Expr -> ([DConstraint], DScheme, Expr)
 close env cons ty tex = (cons', DScheme alph consRes  resType', tex)
   where alph = Set.toList $ Set.difference (Set.union (ftv cons') (ftv resType)) (ftv env)
         (cons', resType, isResolved, _) = resolveStep cons ty
         (consRes, resType', _) = if isResolved then (cons', resType, emptySubst) else
                    solveCyclicConstraints cons' resType emptySubst
-closeProg :: TEnv -> [DConstraint] -> PType -> Program a -> ([DConstraint], DScheme, Program a )
+closeProg :: TEnv -> [DConstraint] -> PType -> Program -> ([DConstraint], DScheme, Program )
 closeProg env cons ty tp = (cons', DScheme alph consRes  resType', apply finalSubst tp)
   where alph = Set.toList $ Set.difference (Set.union (ftv cons') (ftv resType)) (ftv env)
         (cons', resType, isResolved, su) = resolveStep cons ty
@@ -429,7 +429,7 @@ generalize env t  = Forall as [] t
     where as = Set.toList $ ftv t `Set.difference` ftv env
 
 -- infer an argument of a binary operator expression and build constraint + subst accordingly
-applyOpArg :: (Show a) => TEnv -> Expr a -> Subst -> [DConstraint] -> PType -> Infer (Subst, [DConstraint], PType, Expr a)
+applyOpArg :: TEnv -> Expr -> Subst -> [DConstraint] -> PType -> Infer (Subst, [DConstraint], PType, Expr)
 applyOpArg env expr s1 cs1 t1 = do
   (s2, cs2, t2, exprt) <- infer (apply s1 env) expr
   tv1 <- fresh
@@ -459,13 +459,13 @@ freshVars n rts = do
 rtFromScheme :: Scheme -> PType
 rtFromScheme (Forall _ _ rt) = rt
 
-fst3 :: (Subst, [DConstraint], PType, Expr a ) -> Subst
+fst3 :: (Subst, [DConstraint], PType, Expr ) -> Subst
 fst3 (x, _, _, _) = x
-snd3 :: (Subst, [DConstraint], PType, Expr a ) -> [DConstraint]
+snd3 :: (Subst, [DConstraint], PType, Expr ) -> [DConstraint]
 snd3 (_, x, _, _) = x
-trd3 :: (Subst, [DConstraint], PType, Expr a ) -> PType
+trd3 :: (Subst, [DConstraint], PType, Expr ) -> PType
 trd3 (_, _, x, _) = x
-frth3 :: (Subst, [DConstraint], PType, Expr a ) ->  Expr a
+frth3 :: (Subst, [DConstraint], PType, Expr ) ->  Expr
 frth3 (_, _, _, x) = x
 
 lookupEnv :: TEnv -> Var -> Infer (Subst, [DConstraint], PType)
@@ -506,7 +506,7 @@ downgradeInf = do
 makeEqConstraint :: PType -> PType -> DConstraint
 makeEqConstraint t1 t2 = (t1, [Left t2])
 
-inferProg :: (Show a) => TEnv -> Program a -> Infer (Subst, [DConstraint], PType, Program a)
+inferProg :: TEnv -> Program -> Infer (Subst, [DConstraint], PType, Program)
 inferProg env (Program decls nns) = do
   -- init type variable for all function decls beforehand so we can build constraints for
   -- calls between these functions
@@ -526,7 +526,7 @@ inferProg env (Program decls nns) = do
   -- combine all constraints
   return (s1, cs1 ++ concatMap snd3 cts ++ tcs , t1, Program (zip (map fst decls) (map frth3 cts)) nns)
 
-infer :: (Show a) => TEnv -> Expr a -> Infer (Subst, [DConstraint], PType, Expr a)
+infer :: TEnv -> Expr -> Infer (Subst, [DConstraint], PType, Expr)
 infer env expr = case expr of
 
   ThetaI ti a i  -> return (emptySubst, [], Deterministic, ThetaI (setPType ti Deterministic) a i)
@@ -703,13 +703,13 @@ class Substitutable a where
   apply :: Subst -> a -> a
   ftv   :: a -> Set.Set TVar
 
-instance Substitutable (Program a) where
+instance Substitutable Program where
   apply s (Program decls nns) = Program (zip (map fst decls) (map (apply s . snd) decls)) nns
   ftv _ = Set.empty
-instance Substitutable (Expr a) where
+instance Substitutable (Expr) where
   apply s = tMap (apply s . getTypeInfo)
   ftv _ = Set.empty
-instance Substitutable (TypeInfo a) where
+instance Substitutable TypeInfo where
   apply s ti@(TypeInfo {pType = pt}) = setPType ti (apply s pt)
   ftv _ = Set.empty
 instance Substitutable PType where

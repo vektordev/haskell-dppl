@@ -10,10 +10,10 @@ import Data.List
 import qualified Data.Set as Set
 import Debug.Trace
 -- TODO What about multiple let ins
-addWitnessesProg :: (Show a) => Program a -> Program a
+addWitnessesProg :: Program -> Program
 addWitnessesProg (Program funcs nns) = Program (zip (map fst funcs) (map (addWitnesses Set.empty. snd) funcs)) nns
 
-addWitnesses :: (Show a) => Set.Set String -> Expr a ->  Expr a
+addWitnesses :: Set.Set String -> Expr ->  Expr
 addWitnesses _ (Var ti name) = Var (addWitnessTypeInfo name ti) name
 addWitnesses _ (ThetaI ti a x) = ThetaI ti a x  -- TODO definately wrong. but sufficent as long as you dont do crazy things with thetas
 addWitnesses _ (Subtree ti a x) = Subtree ti a x  -- TODO definately wrong. but sufficent as long as you dont do crazy things with thetas
@@ -104,8 +104,8 @@ addWitnesses witVars (TCons t fst rst) = TCons (setWitnessedVars t comp) witFst 
         witRst = addWitnesses witVars rst
         comp = composeWitnessed (getTypeInfo witFst) (getTypeInfo witRst)
 
-addWitnessTypeInfo :: String -> TypeInfo a ->  TypeInfo a
+addWitnessTypeInfo :: String -> TypeInfo -> TypeInfo
 addWitnessTypeInfo a t = setWitnessedVars t (Set.insert a (witnessedVars t))
 
-composeWitnessed :: TypeInfo a -> TypeInfo a -> WitnessedVars
+composeWitnessed :: TypeInfo -> TypeInfo -> WitnessedVars
 composeWitnessed t1 t2 = Set.union (witnessedVars t1) (witnessedVars t2)

@@ -41,34 +41,34 @@ import Data.Reflection (Reifies)
 class Recompilable a where
   recompile :: a -> Either CompileError a
 
-untypeP :: Program a -> Program a
+untypeP :: Program -> Program
 untypeP (Program defs neuralDecl) = Program (map (\(a,b) -> (a, untypeE b)) defs) neuralDecl
 
-untypeE :: Expr a -> Expr a
+untypeE :: Expr -> Expr
 untypeE = tMap (const makeTypeInfo)
 
-instance Show a => Recompilable (Program a) where
+instance Recompilable Program where
   recompile = infer . untypeP
 
-instance Show a => Recompilable (Expr a) where
+instance Recompilable (Expr) where
   recompile e = case inferNoWit $ makeMain $ untypeE e of
     Right (Program [("main", d)] _) -> Right d
     Left x -> Left x
-    Right (Program _ _) -> error "unexpected error when recompiling Expr TypeInfo a."
+    Right (Program _ _) -> error "unexpected error when recompiling Expr TypeInfo."
 
-thetaTreeExample :: IRExpr Double
+thetaTreeExample :: IRExpr
 thetaTreeExample = IRConst (VThetaTree (ThetaTree [0, 1, 2, 3] [ThetaTree [4, 5, 6, 7] [], ThetaTree [8, 9, 10, 11] [], ThetaTree [12, 13, 14, 15] []]))
 
-flatTree :: Eq a => [a] -> [IRExpr a]
+flatTree :: [Float] -> [IRExpr]
 flatTree a = [IRConst (VThetaTree (ThetaTree a []))]
 
-normalPDF :: Double -> Double
+normalPDF :: Float -> Float
 normalPDF x = (1 / sqrt (2 * pi)) * exp (-0.5 * x * x)
 
-normalCDF :: Double -> Double
+normalCDF :: Float -> Float
 normalCDF x = (1/2)*(1 + erf(x/sqrt(2)))
     
-correctProbValuesTestCases :: [(Program Double, Value Double, [IRExpr Double], Value Double)]
+correctProbValuesTestCases :: [(Program, Value, [IRExpr], Value)]
 correctProbValuesTestCases = [(uniformProg, VFloat 0.5, [], VFloat 1.0),
                               (normalProg, VFloat 0.5, [], VFloat $ normalPDF 0.5),
                               (uniformProgMult, VFloat (-0.25), [], VFloat 2),
@@ -98,7 +98,7 @@ correctProbValuesTestCases = [(uniformProg, VFloat 0.5, [], VFloat 1.0),
                               (testDim, VFloat 3, [], VFloat 0.5),
                               (testDim, VFloat 0.4, [], VFloat 0.25)]
 
-correctIntegralValuesTestCases :: [(Program Double, Value Double, Value Double, [IRExpr Double], Value Double)]
+correctIntegralValuesTestCases :: [(Program, Value, Value, [IRExpr], Value)]
 correctIntegralValuesTestCases = [(uniformProg, VFloat 0, VFloat 1, [], VFloat 1.0),
                                   (uniformProg, VFloat  (-1), VFloat 2, [], VFloat 1.0),
                                   (normalProg, VFloat (-5), VFloat 5, [], VFloat $ normalCDF 5 - normalCDF (-5)),
@@ -120,7 +120,7 @@ correctIntegralValuesTestCases = [(uniformProg, VFloat 0, VFloat 1, [], VFloat 1
                                   --(testCallLambdaAdvanced, VFloat 2, VFloat 3, [], VFloat 1.0),
                                   --(testLetIn, VFloat 1.5, VFloat 2, [], VFloat 0.5)]
 
-noTopKConfig :: CompilerConfig a
+noTopKConfig :: CompilerConfig
 noTopKConfig = CompilerConfig Nothing False 0
 
 prop_CheckProbTestCases :: Property
@@ -138,14 +138,14 @@ prop_CheckTopKInterprets = forAll (elements correctProbValuesTestCases) checkTop
 prop_CheckProbTestCasesWithBC :: Property
 prop_CheckProbTestCasesWithBC = forAll (elements correctProbValuesTestCases) checkProbTestCasesWithBC
 
-checkProbTestCase :: (Program Double, Value Double, [IRExpr Double], Value Double) -> Property
+checkProbTestCase :: (Program, Value, [IRExpr], Value) -> Property
 checkProbTestCase (p, inp, params, out) = ioProperty $ do
   actualOutput <- evalRandIO $ irDensity p inp params
   case actualOutput of 
     VTuple a (VFloat _) -> return $ a === out
     _ -> return $ counterexample "Return type was no tuple" False
 
-checkIntegralTestCase :: (Program Double, Value Double, Value Double, [IRExpr Double], Value Double) -> Property
+checkIntegralTestCase :: (Program, Value, Value, [IRExpr], Value) -> Property
 checkIntegralTestCase (p, low, high, params, out) = ioProperty $ do
   actualOutput <- evalRandIO $ irIntegral p low high params
   case actualOutput of 
@@ -153,7 +153,7 @@ checkIntegralTestCase (p, low, high, params, out) = ioProperty $ do
     _ -> return $ counterexample "Return type was no tuple" False
 
 --TODO better bounds for Integral
-checkIntegralConverges :: (Program Double, Value Double, Value Double, [IRExpr Double], Value Double) -> Property
+checkIntegralConverges :: (Program, Value, Value, [IRExpr], Value) -> Property
 checkIntegralConverges (p, VFloat a, VFloat b, params, _) = ioProperty $ do
   actualOutput <- evalRandIO $ irIntegral p (VFloat (-9999999)) (VFloat 9999999) params
   case actualOutput of 
@@ -161,12 +161,12 @@ checkIntegralConverges (p, VFloat a, VFloat b, params, _) = ioProperty $ do
     _ -> return $ counterexample "Return type was no tuple" False
 checkIntegralConverges _ = False ==> False
 
-checkTopKInterprets :: (Program Double, Value Double, [IRExpr Double], Value Double) -> Property
+checkTopKInterprets :: (Program, Value, [IRExpr], Value) -> Property
 checkTopKInterprets (p, inp, params, _) = ioProperty $ do
   actualOutput <- evalRandIO $ irDensityTopK p 0.05 inp params
   return $ actualOutput === actualOutput  -- No clue what the correct value should be here. Just test that is interprets to any value
 
-checkProbTestCasesWithBC :: (Program Double, Value Double, [IRExpr Double], Value Double) -> Property
+checkProbTestCasesWithBC :: (Program, Value, [IRExpr], Value) -> Property
 checkProbTestCasesWithBC (p, inp, params, out) = ioProperty $ do
   actualOutput <- evalRandIO $ irDensityBC p inp params
   case actualOutput of 
@@ -184,7 +184,7 @@ prop_TopK = ioProperty $ do
 --prop_CheckProbTestCases = foldr (\(p, inp, out) acc -> do
 --  checkProbTestCase p inp out .&&. acc) (True===True) correctProbValuesTestCases
 
-irDensityTopK :: RandomGen g => Program Double -> Double -> Value Double -> [IRExpr Double]-> Rand g (Value Double)
+irDensityTopK :: RandomGen g => Program -> Float -> Value -> [IRExpr]-> Rand g (Value)
 irDensityTopK p thresh s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params) irExpr
   where Just irExpr = lookup "main_prob" irEnv
         sampleExpr = IRConst s
@@ -192,7 +192,7 @@ irDensityTopK p thresh s params = IRInterpreter.generateRand irEnv irEnv (sample
         annotated = annotateProg typedProg
         typedProg = addTypeInfo p
 
-irDensityBC :: RandomGen g => Program Double -> Value Double -> [IRExpr Double]-> Rand g (Value Double)
+irDensityBC :: RandomGen g => Program -> Value -> [IRExpr]-> Rand g (Value)
 irDensityBC p s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params) irExpr
   where Just irExpr = lookup "main_prob" irEnv
         sampleExpr = IRConst s
@@ -200,7 +200,7 @@ irDensityBC p s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:para
         annotated = annotateProg typedProg
         typedProg = addTypeInfo p
 
-irDensity :: RandomGen g => Program Double -> Value Double -> [IRExpr Double] -> Rand g (Value Double)
+irDensity :: RandomGen g => Program -> Value -> [IRExpr] -> Rand g (Value)
 irDensity p s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params) irExpr
   where Just irExpr = lookup "main_prob" irEnv
         sampleExpr = IRConst s
@@ -208,7 +208,7 @@ irDensity p s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params
         annotated = annotateProg typedProg
         typedProg = addTypeInfo p
 
-irIntegral :: RandomGen g => Program Double -> Value Double -> Value Double -> [IRExpr Double] -> Rand g (Value Double)
+irIntegral :: RandomGen g => Program -> Value -> Value -> [IRExpr] -> Rand g (Value)
 irIntegral p low high params = IRInterpreter.generateRand irEnv irEnv (lowExpr:highExpr:params) irExpr
   where Just irExpr = lookup "main_integ" irEnv
         lowExpr = IRConst low
@@ -217,7 +217,7 @@ irIntegral p low high params = IRInterpreter.generateRand irEnv irEnv (lowExpr:h
         annotated = annotateProg typedProg
         typedProg = addTypeInfo p
 
-{-irInterpret :: RandomGen g => Program () Double -> [IRExpr Double] -> Rand g (Value Double)
+{-irInterpret :: RandomGen g => Program () Double -> [IRExpr] -> Rand g (Value)
 irInterpret p params = IRInterpreter.generate irEnv irEnv [] params main
   where Just main = lookup "main_prob" irEnv
         irEnv = envToIR noTopKConfig annotated
@@ -232,7 +232,7 @@ prop_CompilablesInterpretable prog = ioProperty $ do
   ci <- canInterpret prog
   return $ canCompile prog ==> ci
 
-langDensity :: Program () Double -> Double -> Value Double
+langDensity :: Program () Double -> Double -> Value
 langDensity p sample = case Interpreter.runInferL [] witExpr [] (VFloat sample) of
   PDF prob -> VFloat prob
   DiscreteProbability prob -> VFloat prob
@@ -245,7 +245,7 @@ examples :: [Program () Float]
 examples = [makeMain variableLength, makeMain testGreater, makeMain testGaussianMixture, makeMain testIntractable]
 
 {-
-testsetA :: [Program (TypeInfo a) Double]
+testsetA :: [Program TypeInfo Double]
 testsetA = [variableLengthT, testLetTupleT, testLetXYT]
 prop_RecompileA :: Property
 prop_RecompileA = forAll (elements testsetA) testRecompile
@@ -268,7 +268,7 @@ prop_CanCompile2 = forAll (elements compilables2) canCompile
 uncompilables :: [Expr () Double]
 uncompilables = [testIntractable]
 
-canCompile :: (Show a) => Program a -> Bool
+canCompile :: (Show a) => Program -> Bool
 canCompile e = case infer e of
   Right _ -> True
   Left _ -> False
@@ -296,7 +296,7 @@ prop_CDFGradIsPDF = forAll (elements correctIntegralValuesTestCases)(\(p, _, hig
         typedProg = addTypeInfo p
     grad' $ evalRandIO $ IRInterpreter.generate (autoEnv irEnv) irEnv thetas [] (autoIRExpr irExpr))
 
-autoIRExpr :: (Num a, Reifies s Tape) => IRExpr a -> IRExpr (Reverse s a)
+autoIRExpr :: (Num a, Reifies s Tape) => IRExpr -> IRExpr (Reverse s a)
 autoIRExpr e = irMap auto e-}
 
 
@@ -309,7 +309,7 @@ prop_interpretersEqualDensity p sample = do
   else
     property Discard -}
 
---testCompile :: Expr a -> Property
+--testCompile :: Expr -> Property
 --testCompile e = addWitnessesProg $ addTypeInfo $ makeMain e
 
 testRecompile :: (Eq a, Show a, Recompilable a) => a -> Property
@@ -340,7 +340,7 @@ findThetas (ThetaI a b c) = [ThetaI a b c]
 findThetas expr = concatMap findThetas x
   where x = getSubExprs expr
 
-expressions :: [(Expr () Float, TypeInfo a)]
+expressions :: [(Expr () Float, TypeInfo)]
 expressions = [
     (testIf, makeTypeInfo {rType = TBool, pType = Integrate}),
     (testGreater, makeTypeInfo {rType = TBool, pType = Integrate}),
@@ -364,8 +364,8 @@ invariantDensity :: IO()
 invariantDensity = undefined
 
 
-propInfer :: (Eq a, Show a) => Program a -> Program a -> Property
-propInfer a b = addWitnessesProg (addTypeInfo a) === b
+propInfer :: (Eq a, Show a) => Program -> Program -> Property
+propInfer a b = addWitnessesProg (addTypeInfo) === b
 
 sumsToOne :: IO Result
 sumsToOne = undefined

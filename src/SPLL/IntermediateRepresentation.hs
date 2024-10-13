@@ -74,9 +74,9 @@ import Control.Monad.State.Strict
 
 type Varname = String
 
-type M a = ContT Int (State (IRExpr a))
+type M a = ContT Int (State (IRExpr))
 
---runM :: M a (IRExpr a) -> IRExpr a
+--runM :: M a (IRExpr) -> IRExpr
 runM m = evalState (runContT m return) 0
 
 genName :: String -> M a Varname
@@ -86,19 +86,19 @@ genName base = do
   put (i + 1)
   return name
 
-letin :: String -> IRExpr a -> M a Varname
+letin :: String -> IRExpr -> M a Varname
 letin base rhs = do
   name <- genName base
   ContT (\f -> IRLetIn name rhs <$> f name)
 -}
---generateCode :: M a (IRExpr a)
+--generateCode :: M a (IRExpr)
 --generateCode = do
 --  varName <- letin "some_string" (IRLit 10)
 --  subex <- subCode varName
 --  return (IRAdd (IRVar varName) subex)
 
 -- returs var + 3, using a let binding
---subCode :: Varname -> M a (IRExpr a)
+--subCode :: Varname -> M a (IRExpr)
 --subCode v = do
 --  a <- letin "a" (IRLit 3)
 --  return (IRAdd (IRVar a) (IRVar v))
@@ -125,45 +125,45 @@ data UnaryOperand = OpNeg
 
 data Distribution = IRNormal | IRUniform deriving (Show, Eq)
 
-data IRExpr a = IRIf (IRExpr a) (IRExpr a) (IRExpr a)
-              | IROp Operand (IRExpr a) (IRExpr a)
-              | IRUnaryOp UnaryOperand (IRExpr a)
-              | IRTheta (IRExpr a) Int
-              | IRSubtree (IRExpr a) Int
-              | IRConst (Value a)
-              | IRCons (IRExpr a) (IRExpr a)
-              | IRTCons (IRExpr a) (IRExpr a)
-              | IRHead (IRExpr a)
-              | IRTail (IRExpr a)
-              | IRTFst (IRExpr a)
-              | IRTSnd (IRExpr a)
-              | IRDensity Distribution (IRExpr a)
-              | IRCumulative Distribution (IRExpr a)
+data IRExpr = IRIf (IRExpr) (IRExpr) (IRExpr)
+              | IROp Operand (IRExpr) (IRExpr)
+              | IRUnaryOp UnaryOperand (IRExpr)
+              | IRTheta (IRExpr) Int
+              | IRSubtree (IRExpr) Int
+              | IRConst (Value)
+              | IRCons (IRExpr) (IRExpr)
+              | IRTCons (IRExpr) (IRExpr)
+              | IRHead (IRExpr)
+              | IRTail (IRExpr)
+              | IRTFst (IRExpr)
+              | IRTSnd (IRExpr)
+              | IRDensity Distribution (IRExpr)
+              | IRCumulative Distribution (IRExpr)
               | IRSample Distribution
-              | IRLetIn Varname (IRExpr a) (IRExpr a)
+              | IRLetIn Varname (IRExpr) (IRExpr)
               | IRVar Varname
-              | IRCall String [IRExpr a]
-              | IRLambda String (IRExpr a)
-              | IRApply (IRExpr a) (IRExpr a)
+              | IRCall String [IRExpr]
+              | IRLambda String (IRExpr)
+              | IRApply (IRExpr) (IRExpr)
               -- auxiliary construct to aid enumeration: bind each enumerated Value to the Varname and evaluate the subexpr. Sum results.
               -- maybe we can instead move this into some kind of standard library.
-              | IREnumSum Varname (Value a) (IRExpr a)
-              | IREvalNN Varname (IRExpr a)
-              | IRIndex (IRExpr a) (IRExpr a)
-              | IRReturning (IRExpr a) -- only used to wrap statements that act as exit point of the expression.
+              | IREnumSum Varname (Value) (IRExpr)
+              | IREvalNN Varname (IRExpr)
+              | IRIndex (IRExpr) (IRExpr)
+              | IRReturning (IRExpr) -- only used to wrap statements that act as exit point of the expression.
               deriving (Show, Eq)
 
-data CompilerConfig a = CompilerConfig {
+data CompilerConfig = CompilerConfig {
   -- If set to Just x: All branches with likelihood less than x are discarded.
   --  Uses local probability of the branch,given that the execution arrives at that branching point
-  topKThreshold :: Maybe a,
+  topKThreshold :: Maybe Float,
   countBranches :: Bool,
   verbose :: Int
 } deriving (Show)
 --3: convert algortihm-and-type-annotated Exprs into abstract representation of explicit computation:
 --    Fold enum ranges, algorithms, etc. into a representation of computation that can be directly converted into code.
 
-getIRSubExprs :: IRExpr a -> [IRExpr a]
+getIRSubExprs :: IRExpr -> [IRExpr]
 getIRSubExprs (IRIf a b c) = [a, b, c]
 getIRSubExprs (IROp _ a b) = [a, b]
 getIRSubExprs (IRUnaryOp _ a) = [a]
@@ -189,7 +189,7 @@ getIRSubExprs (IREvalNN _ a) = [a]
 getIRSubExprs (IRIndex a b) = [a, b]
 getIRSubExprs (IRReturning a) = [a]
 
-irMap :: (IRExpr a -> IRExpr a) -> IRExpr a -> IRExpr a
+irMap :: (IRExpr -> IRExpr) -> IRExpr -> IRExpr
 irMap f x = case x of
   (IRIf cond left right) -> f (IRIf (irMap f cond) (irMap f left) (irMap f right))
   (IROp op left right) -> f (IROp op (irMap f left) (irMap f right))
@@ -216,7 +216,7 @@ irMap f x = case x of
   (IRSample _) -> f x
   (IRVar _) -> f x
 
-irPrintFlat :: IRExpr a -> String
+irPrintFlat :: IRExpr -> String
 irPrintFlat (IRIf _ _ _) = "IRIf"
 irPrintFlat (IROp _ _ _) = "IROp"
 irPrintFlat (IRUnaryOp _ _) = "IRUnaryOp"

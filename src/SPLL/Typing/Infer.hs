@@ -18,29 +18,29 @@ wrapPErr :: Either PTypeError a -> Either CompileError a
 wrapPErr (Left err) = Left (PErr err)
 wrapPErr (Right x) = Right x
 
-infer :: (Show a) => Program a -> Either CompileError (Program a)
+infer :: Program -> Either CompileError Program
 infer p = do
   x <- wrapRErr $ tryAddRTypeInfo (addEmptyTypeInfo p)
   y <- wrapPErr $ tryAddPTypeInfo x
   return $ addWitnessesProg y
 
-inferNoWit :: (Show a) => Program a -> Either CompileError (Program a)
+inferNoWit :: Program -> Either CompileError Program
 inferNoWit p = do
   x <- wrapRErr $ tryAddRTypeInfo (addEmptyTypeInfo p)
   wrapPErr $ tryAddPTypeInfo x
 
 
-createTypeInfo :: (Show a) => Expr a -> TypeInfo a
+createTypeInfo :: Expr -> TypeInfo
 createTypeInfo _ = makeTypeInfo
 
-addEmptyTypeInfoExpr :: (Show a) => Expr a -> Expr a
+addEmptyTypeInfoExpr :: Expr -> Expr
 addEmptyTypeInfoExpr = tMap createTypeInfo
 
-addEmptyTypeInfo :: (Show a) => Program a -> Program a
+addEmptyTypeInfo :: Program -> Program
 addEmptyTypeInfo = tMapProg createTypeInfo
 
-addTypeInfo :: (Show a) => Program a -> Program a
+addTypeInfo :: Program -> Program
 addTypeInfo = addPTypeInfo . addRTypeInfo . addEmptyTypeInfo 
 
-addRTypeInfoOnly :: (Show a) => Program a -> Program a
+addRTypeInfoOnly :: Program -> Program
 addRTypeInfoOnly =  addRTypeInfo . addEmptyTypeInfo

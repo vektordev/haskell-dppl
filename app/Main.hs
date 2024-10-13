@@ -17,7 +17,7 @@ data Opts = Opts {
   language :: Language,
   verbosity :: Int,
   countBranches :: Bool,
-  topKCutoff :: Maybe Double
+  topKCutoff :: Maybe Float
 } deriving Show
 
 readLanguage :: ReadM Language
@@ -80,7 +80,8 @@ transpile options = do
   transpiled <- codeGenToLang (language options) (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = Main.countBranches options, topKThreshold = topKCutoff options, verbose=verbosity options}) prog
   writeOutputFile (outputFile options) transpiled
 
-parseProgram :: FilePath -> IO (Program Double)
+parseProgram :: FilePath -> IO Program
+--parseProgram path = return testDim
 parseProgram path = do
   content <- readFile path
   let maybeError = tryParseProgram path content

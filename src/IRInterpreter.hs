@@ -17,23 +17,23 @@ import Data.Either (fromRight)
 
 newtype VisitationTree = VisitationTree (String, [VisitationTree]) deriving (Show, Eq)
 
-type IREnv a = [(String, IRExpr a)]
+type IREnv a = [(String, IRExpr)]
 
-data RandomFunctions m a = RandomFunctions {uniformGen:: m (Value a), normalGen:: m (Value a)}
+data RandomFunctions m a = RandomFunctions {uniformGen:: m (Value), normalGen:: m (Value)}
 
-generateRand :: (Ord a, Fractional a, Show a, Floating a, Random a, Erf a, RandomGen g) => IREnv a -> IREnv a -> [IRExpr a]-> IRExpr a -> Rand g (Value a)
+generateRand :: (RandomGen g) => IREnv a -> IREnv a -> [IRExpr]-> IRExpr -> Rand g (Value)
 generateRand = generate f
   where f = RandomFunctions {
     uniformGen = irSample IRUniform, 
     normalGen= irSample IRNormal}
   
-generateDet :: (Ord a, Fractional a, Show a, Floating a, Random a, Erf a) => IREnv a -> IREnv a -> [IRExpr a]-> IRExpr a -> Either String (Value a)
+generateDet :: IREnv a -> IREnv a -> [IRExpr]-> IRExpr -> Either String (Value)
 generateDet = generate f
   where f = RandomFunctions {
     uniformGen = Left "Uniform Gen is not det", 
     normalGen = Left "Uniform Gen is not det"}
 
-generate :: (Ord a, Fractional a, Show a, Floating a, Random a, Erf a, Monad m) => RandomFunctions m a -> IREnv a -> IREnv a -> [IRExpr a]-> IRExpr a -> m (Value a)
+generate :: (Monad m) => RandomFunctions m a -> IREnv a -> IREnv a -> [IRExpr]-> IRExpr -> m (Value)
 --generate f globalEnv env args expr | trace ((show expr) ++ (show args)) False = undefined
 generate f globalEnv env args (IRReturning e) = generate f globalEnv env args e
 generate f globalEnv env (arg:args) (IRLambda name expr) = generate f globalEnv ((name, arg):env) args expr
@@ -227,7 +227,7 @@ generate f globalEnv env args (IRIndex lstExpr idxExpr) = do
 generate f _ _ _ expr = error ("Expression is not yet implemented " ++ show expr)
 
 
-irSample :: (Ord a, Fractional a, Show a, Eq a, Floating a, Random a, Erf a, RandomGen g) => Distribution -> Rand g (Value a)
+irSample :: (RandomGen g) => Distribution -> Rand g (Value)
 irSample IRUniform = do
   r <- getRandomR (0.0, 1.0) --uniformR (0.0, 1.0)
   return $ VFloat r
@@ -237,12 +237,12 @@ irSample IRNormal = do
   let result = quantile gauss r
   return $ VFloat $ realToFrac result
 
-irPDF :: (Ord a, Fractional a, Show a, Eq a, Floating a, Random a, Erf a) => Distribution -> Value a -> Value a
+irPDF :: Distribution -> Value -> Value
 irPDF IRUniform (VFloat x) = if x >= 0 && x <= 1 then VFloat 1 else VFloat 0
-irPDF IRNormal (VFloat x) =VFloat ((1 / sqrt (2 * pi)) * exp (-0.5 * x * x))
+irPDF IRNormal (VFloat x) = VFloat ((1 / sqrt (2 * pi)) * exp (-0.5 * x * x))
 irPDF expr _ = error "Expression must be the density of a valid distribution"
 
-irCDF :: (Ord a, Fractional a, Show a, Eq a, Floating a, Random a, Erf a) => Distribution -> Value a -> Value a
+irCDF :: Distribution -> Value -> Value
 irCDF IRUniform (VFloat x) = VFloat $ if x < 0 then 0 else if x > 1 then 1 else x
 irCDF IRNormal (VFloat x) = VFloat $ (1/2)*(1 + erf(x/sqrt(2)))
   

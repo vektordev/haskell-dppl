@@ -69,7 +69,7 @@ variableLengthS2 = Program [("b", IfThenElse ()
 
 data Language = Python | Julia deriving Show
 
-readSamples :: IO [(Double, Double)]
+readSamples :: IO [(Float, Float)]
 readSamples = do
   f <- readFile "./data/train_data.txt"
   --print $ lines f
@@ -77,7 +77,7 @@ readSamples = do
   --print res
   return res
 
-map2RSamples :: (Double, Double) -> Value Double
+map2RSamples :: (Float, Float) -> Value
 map2RSamples (a,b) = VList [VFloat a, VFloat b]
 
 {-
@@ -100,7 +100,7 @@ thatGaussThing = do
 -}
 
 {-
-llScan :: (Erf a, Real a, Floating a, Show a, Enum a) => Program a -> Thetas a -> Expr a -> IO ()
+llScan :: (Erf a, Real a, Floating a, Show a, Enum a) => Program -> Thetas a -> Expr -> IO ()
 llScan p thetas main = do
   let scanPts = [(x,y) | x <- [0, 0.01 .. 1], y <- [0, 0.01 .. 1]]
   let scanRes = [(x, y, runInferL p main thetas (VList [VFloat x, VFloat y])) | x <- [0, 0.01.. 1], y <- [0, 0.01.. 1]]
@@ -123,7 +123,7 @@ newCodeGen tExpr = do
   let prob = generateCode irProb ""
   putStrLn $ unlines prob-}
 
-newCodeGenAll :: (Show a, Ord a, Floating a) => CompilerConfig a -> Program a -> IO ()
+newCodeGenAll :: CompilerConfig -> Program -> IO ()
 newCodeGenAll conf p = do
   pPrint p
   let annotated = annotateProg p
@@ -137,7 +137,7 @@ newCodeGenAll conf p = do
   putStrLn "julia code:"
   putStrLn $ unlines jlcode
 
-codeGenToLang :: (Show a, Ord a, Floating a) => Language -> CompilerConfig a -> Program a -> IO String
+codeGenToLang :: Language -> CompilerConfig -> Program -> IO String
 codeGenToLang lang conf prog = do
   printIfVerbose conf "=== Parsed Program ===\n"
   if verbose conf >= 2 then pPrint prog else return ()
@@ -159,10 +159,10 @@ codeGenToLang lang conf prog = do
     Python -> return $ intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions ir)
     Julia -> return $ intercalate "\n" (SPLL.CodeGenJulia.generateFunctions ir)
 
-printIfVerbose :: CompilerConfig a -> String -> IO ()
+printIfVerbose :: CompilerConfig -> String -> IO ()
 printIfVerbose CompilerConfig {verbose=v} s = if v >= 1 then putStrLn s else return ()
 
-printIfMoreVerbose :: CompilerConfig a -> String -> IO ()
+printIfMoreVerbose :: CompilerConfig -> String -> IO ()
 printIfMoreVerbose CompilerConfig {verbose=v} s = if v >= 2 then putStrLn s else return ()
 
 someFunc :: IO ()
@@ -282,14 +282,14 @@ runNNTest = do
 -}
 
 {-
-myGradientAscent :: (Erf a, RealFloat a, Show a, Floating a, Real a) => Int -> a -> Program a -> Thetas a -> Expr a -> [Value a] -> [(Thetas a, a)]
+myGradientAscent :: (Erf a, RealFloat a, Show a, Floating a, Real a) => Int -> a -> Program -> Thetas a -> Expr -> [Value] -> [(Thetas a, a)]
 myGradientAscent 0 _ _ _ _ _ = []
 myGradientAscent n learning_rate p thetas expr vals =
   (thetas, loss) : myGradientAscent (n-1) learning_rate p new expr vals
     where
       (loss, new) = optimizeStep p expr vals thetas learning_rate
 
-optimizeStep :: (Erf a, Show a, RealFloat a, Floating a, Real a) => Program a -> Expr a -> [Value a] -> Thetas a -> a -> (a, Thetas a)
+optimizeStep :: (Erf a, Show a, RealFloat a, Floating a, Real a) => Program -> Expr -> [Value] -> Thetas a -> a -> (a, Thetas a)
 optimizeStep p expr samples thetas learning_rate = (loss,
     addThetas thetas (mult (1.0 / fromIntegral (length samples))(mult learning_rate gradient)) )
   where
@@ -352,7 +352,7 @@ testDensity1d experimentName prog thetas = do
   writeFile ("./data/likelihoods_1d" ++ experimentName ++ ".txt") fileStrL
   -}
   
-{-genTheta :: ( Show a, Fractional a, Ord a, Random a, Floating a) => Program a -> IO (a)
+{-genTheta :: ( Show a, Fractional a, Ord a, Random a, Floating a) => Program -> IO (a)
 genTheta p = if predicateProg isNotTheta p
               then do
                      let typedProg = addWitnessesProg (addTypeInfo p)
@@ -361,7 +361,7 @@ genTheta p = if predicateProg isNotTheta p
                      return (getVFloat val)
               else error "Theta in prior expression"
               
-genThetas :: (Show a, Fractional a, Ord a, Random a, Floating a) => Program a -> IO (Thetas a)
+genThetas :: (Show a, Fractional a, Ord a, Random a, Floating a) => Program -> IO (Thetas a)
 genThetas p = if predicateProg isNotTheta p
               then do
                      let typedEnv = progToEnv $ addWitnessesProg (addTypeInfo p)
@@ -369,12 +369,12 @@ genThetas p = if predicateProg isNotTheta p
                      val <- evalRandIO $ Interpreter.generate typedEnv typedEnv [] [] main
                      return (valToFloatList val)
               else error "Theta in prior expression"
-valToFloatList :: Value a -> Thetas a
+valToFloatList :: Value -> Thetas a
 valToFloatList (VFloat x) = [x]
 valToFloatList (VList vfl) = map getVFloat vfl
 -}
 {-
-testRun :: (Erf a, RealFloat a, Floating a, Ord a, Random a, Show a, Real a, Enum a) => String -> Program a -> Thetas a -> IO ()
+testRun :: (Erf a, RealFloat a, Floating a, Ord a, Random a, Show a, Real a, Enum a) => String -> Program -> Thetas a -> IO ()
 testRun experimentName prog thetas = do
   print "Hello world"
   mapM_ putStrLn (prettyPrintProg prog)
@@ -439,7 +439,7 @@ testRun experimentName prog thetas = do
   --gradientDiagAt typedEnv [-0.1, 0.9] main samples
   --gradientDiagAt typedEnv [0.2, 0.9] main samples
   -- [VTuple (VFloat 0.9) (VFloat 0.4)]
-expectedValue :: (Floating a, Enum a, Show a) => [(a, a, a)] -> ([a] -> Value a) -> (Value a -> Probability a) -> Probability a
+expectedValue :: (Floating a, Enum a, Show a) => [(a, a, a)] -> ([a] -> Value) -> (Value -> Probability a) -> Probability a
 expectedValue rectangleInfo valF lkF = (pAnd  (foldl pOr (PDF 0) lks)  (PDF (1/lk_sum)))
   where createInputs (start, end, stepsize) = [start, start+stepsize .. end]
         inputs = map createInputs rectangleInfo
@@ -453,21 +453,21 @@ expectedValue rectangleInfo valF lkF = (pAnd  (foldl pOr (PDF 0) lks)  (PDF (1/l
 createInputs :: (Floating a, Enum a) => (a, a, a) -> [a]
 createInputs (start, end, stepsize) = [start, start+stepsize .. end]
 
-integralApprox :: (Floating a, Enum a, Show a) => [(a, a, a)] -> ([a] -> Value a) -> (Value a -> Probability a) -> Probability a
+integralApprox :: (Floating a, Enum a, Show a) => [(a, a, a)] -> ([a] -> Value) -> (Value -> Probability a) -> Probability a
 integralApprox rectangleInfo valF lkF = pAnd  (DiscreteProbability stepsizeAll) (foldl pOr (PDF 0) lks)
   where inputs = map createInputs rectangleInfo
         inputsS = sequence inputs
         stepsizeAll = foldl (\x (_,_,s) -> x*s) 1.0 rectangleInfo
         lks = map ( lkF . valF) inputsS
 
-mkSamples :: (Fractional a, Ord a, Random a, Floating a) => Int -> Env a -> Thetas a -> [Expr a] -> Expr a -> IO [Value a]
+mkSamples :: (Fractional a, Ord a, Random a, Floating a) => Int -> Env a -> Thetas a -> [Expr] -> Expr -> IO [Value]
 mkSamples 0 _ _ _ _ = return []
 mkSamples n env thetas args expr = do
   sample <- evalRandIO $ Interpreter.generate env env thetas args expr
   remainder <- mkSamples (n-1) env thetas args expr
   return (sample:remainder)
 
-avgSamples :: (Fractional a, Ord a, Random a) => [Value a] -> a
+avgSamples :: (Fractional a, Ord a, Random a) => [Value] -> a
 avgSamples samples =  (1.0 / fromIntegral (length samples)) * (rec samples 0)
   where rec ((VFloat b):[]) z = z + b
         rec ((VFloat b):k) z = rec k (z + b)

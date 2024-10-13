@@ -86,7 +86,7 @@ instance Monoid TEnv where
   mappend = (<>)
 
 
-makeMain :: Expr a -> Program a
+makeMain :: Expr -> Program
 makeMain expr = Program [("main", expr)] []
 
 -- | Inference monad
@@ -119,15 +119,15 @@ class Substitutable a where
   apply :: Subst -> a -> a
   ftv   :: a -> Set.Set TVarR
 
-instance Substitutable (Program a) where
+instance Substitutable Program where
   apply s (Program decls nns) = Program (zip (map fst decls) (map (apply s . snd) decls)) nns
   ftv _ = Set.empty
 
-instance Substitutable (Expr a) where
+instance Substitutable (Expr) where
   apply s = tMap (apply s . getTypeInfo)
   ftv _ = Set.empty
 
-instance Substitutable (TypeInfo a) where
+instance Substitutable TypeInfo where
   apply s ti@(TypeInfo {rType=rt}) = setRType ti (apply s rt)
   ftv _ = Set.empty
 
@@ -170,7 +170,7 @@ instance Substitutable TEnv where
   apply s (TypeEnv env) = TypeEnv $ Map.map (apply s) env
   ftv (TypeEnv env) = ftv $ Map.elems env
 
-addRTypeInfo :: (Show a) => Program a -> Program a
+addRTypeInfo :: Program -> Program
 addRTypeInfo p =
   case runInfer empty (inferProg p) of
     Left err -> error ("error in addRTypeInfo: " ++ show err)
@@ -178,20 +178,20 @@ addRTypeInfo p =
       Left err -> error ("error in solve addRTypeInfo: " ++ show err)
       Right subst -> apply subst p
 
-tryAddRTypeInfo :: (Show a) => Program a -> Either RTypeError (Program a)
+tryAddRTypeInfo :: Program -> Either RTypeError Program
 tryAddRTypeInfo p@(Program decls _) = do
   (ty, cs, p) <- runInfer empty (inferProg p)
   subst <- runSolve cs
   return $ apply subst p
 
-inferRType :: (Show a) => Program a -> Either RTypeError RType
+inferRType :: Program -> Either RTypeError RType
 inferRType = undefined
 
 rtFromScheme :: Scheme -> RType
 rtFromScheme (Forall _ rt) = rt
 
 --TODO: Simply give everything a fresh var as a unified first pass.
-inferProg :: (Show a) => Program a -> Infer (RType, [Constraint], Program a)
+inferProg :: Program -> Infer (RType, [Constraint], Program)
 inferProg p@(Program decls nns) = do
   -- init type variable for all function decls beforehand so we can build constraints for
   -- calls between these functions
@@ -211,7 +211,7 @@ inferProg p@(Program decls nns) = do
   return (t1, tcs ++ concatMap snd3cts cts ++ c1, Program (zip (map fst decls) (map trd3cts cts)) nns)
 
 --TODO: Error on ambiguous InferenceRule
-infer :: Show a => Expr a -> Infer (RType, [Constraint], Expr a)
+infer :: Expr -> Infer (RType, [Constraint], Expr)
 infer expr = if solvesSimply
     then if not allSchemesEq
       then error "unviable Inference Rule configuration"
@@ -246,7 +246,7 @@ rescope (Forall tvars rty) = do
     where unwrap (TVarR tv) = tv
 
 -- into an existing expression, replace a subexpresison and rtype.
-reformExpr :: Expr a -> [Expr a] -> RType -> Expr a
+reformExpr :: Expr -> [Expr] -> RType -> Expr
 reformExpr original subexprs ownTy = tMapHead (const newTy) $ setSubExprs original subexprs
   where
     newTy = setRType (getTypeInfo original) ownTy
@@ -272,11 +272,11 @@ inTEnvF ((x, sc): r) m = do
   let scope e = remove e x `extend` (x, sc)
   inTEnvF r (local scope m)
 
-fst3cts ::  (RType, [Constraint], Expr a) -> RType
+fst3cts ::  (RType, [Constraint], Expr) -> RType
 fst3cts (t, _, _) = t
-snd3cts ::  (RType, [Constraint], Expr a) -> [Constraint]
+snd3cts ::  (RType, [Constraint], Expr) -> [Constraint]
 snd3cts (_, cts, _) = cts
-trd3cts ::  (RType, [Constraint], Expr a) -> Expr a
+trd3cts ::  (RType, [Constraint], Expr) -> Expr
 trd3cts (_, _, e) = e
 
 
@@ -299,7 +299,7 @@ freshVars n rts = do
 
 
 -- | Run the inference monad
-runInfer :: TEnv -> Infer (RType, [Constraint], Program a) -> Either RTypeError (RType, [Constraint], Program a)
+runInfer :: TEnv -> Infer (RType, [Constraint], Program) -> Either RTypeError (RType, [Constraint], Program)
 runInfer env m = runExcept $ evalStateT (runReaderT m env) initInfer
 
 

@@ -60,7 +60,7 @@ greaterThan = (">=", [Forall [] [] (Deterministic `PArr` Deterministic `PArr` De
                     Forall [] [] (Integrate `PArr` Integrate `PArr` Integrate)
                     ])
 
-showResults :: Expr a -> IO ()
+showResults :: Expr -> IO ()
 showResults expr = do
   case inferExpr plusEnv expr of
     Left err -> print err
@@ -71,13 +71,13 @@ showResults expr = do
       putStrLn $ "Type:\n" ++ show (normalize schemeRes)
       putStrLn "-----"
 
-inferType :: Program a -> PType
+inferType :: Program -> PType
 inferType prog = do
   case inferProgram plusEnv prog of
      Left err -> error "error in infer scheme"
      Right (_, (_, Forall _ b ty)) -> if null b then ty else error "non-empty constraints inferred"
      
-showResultsProg :: Program a -> IO ()
+showResultsProg :: Program -> IO ()
 showResultsProg prog = do
   case inferProgram plusEnv prog of
     Left err -> print err
@@ -103,7 +103,7 @@ instance Monoid TEnv where
   mempty = TypeEnv Map.empty
   mappend = (<>)
 
-makeMain :: Expr a -> Program a
+makeMain :: Expr -> Program
 makeMain expr = Program [("main", expr)] []
 
 -- | Inference state
@@ -168,10 +168,10 @@ instance Substitutable TEnv where
 -------------------------------------------------------------------------------
 -- Inference
 -------------------------------------------------------------------------------
-inferProgram:: TEnv -> Program a -> Either PTypeError ([Constraint], (Scheme, Scheme))
+inferProgram:: TEnv -> Program -> Either PTypeError ([Constraint], (Scheme, Scheme))
 inferProgram env = runInfer env . inferProg env
 
-inferExpr :: TEnv -> Expr a -> Either PTypeError ([Constraint], (Scheme, Scheme))
+inferExpr :: TEnv -> Expr -> Either PTypeError ([Constraint], (Scheme, Scheme))
 inferExpr env = runInfer env . infer env
 
 runInfer :: TEnv -> Infer (Subst, [Constraint], PType) -> Either PTypeError ([Constraint], (Scheme, Scheme))
@@ -293,7 +293,7 @@ fresh = do
     put s{var_count = var_count s + 1}
     return $ TVar $ TV (letters !! var_count s)
 
-instantiate ::  Scheme -> Infer ([Constraint], PType)
+instantiate :: Scheme -> Infer ([Constraint], PType)
 instantiate (Forall as cs t) = do
   as' <- mapM (const fresh) as
   let s = Subst $ Map.fromList $ zip as as'
@@ -312,7 +312,7 @@ lookupEnv (TypeEnv env) x =
     Just s -> do t <- lcg s
                  return (emptySubst, [(x, t)], t)
 
-applyOpArg :: TEnv -> Expr a -> Subst -> [Constraint] -> PType -> Infer (Subst, [Constraint], PType)
+applyOpArg :: TEnv -> Expr -> Subst -> [Constraint] -> PType -> Infer (Subst, [Constraint], PType)
 applyOpArg env expr s1 cs1 t1 = do
   (s2, cs2, t2) <- infer (apply s1 env) expr
   tv1 <- fresh
@@ -348,7 +348,7 @@ trd3 (_, _, x) = x
 
 makeEqConstraint :: PType -> PType -> (Var, PType)
 makeEqConstraint t1 t2 = ("eq", PArr t1 t2)
-inferProg :: TEnv -> Program a -> Infer (Subst, [Constraint], PType)
+inferProg :: TEnv -> Program -> Infer (Subst, [Constraint], PType)
 inferProg env (Program decls _) = do
   -- init type variable for all function decls beforehand so we can build constraints for
   -- calls between these functions
@@ -369,7 +369,7 @@ inferProg env (Program decls _) = do
   -- ++ tcs
   return (s1, cs1 ++ concatMap snd3 cts ++ tcs  , t1)
 
-infer :: TEnv -> Expr a -> Infer (Subst, [Constraint], PType)
+infer :: TEnv -> Expr -> Infer (Subst, [Constraint], PType)
 infer env expr = case expr of
 
   ThetaI _ a i  -> return (emptySubst, [], Deterministic)
