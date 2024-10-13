@@ -99,7 +99,7 @@ replaceCalls :: [(String, String)] -> IRExpr -> IRExpr
 replaceCalls lut (IRCall name args) = IRCall (fromMaybe name $ lookup name lut) args
 replaceCalls lut other = other
 
-generateClass :: (String, Maybe (IRExpr), Maybe (IRExpr), Maybe (IRExpr)) -> [String]
+generateClass :: (String, Maybe IRExpr, Maybe IRExpr, Maybe IRExpr) -> [String]
 generateClass (name, gen, prob, integ) = let
   funcStringFromMaybe name func = case func of
     Just a -> generateFunction (name, a)

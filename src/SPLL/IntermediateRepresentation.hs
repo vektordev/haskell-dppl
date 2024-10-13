@@ -74,9 +74,9 @@ import Control.Monad.State.Strict
 
 type Varname = String
 
-type M a = ContT Int (State (IRExpr))
+type M a = ContT Int (State IRExpr)
 
---runM :: M a (IRExpr) -> IRExpr
+--runM :: M a IRExpr -> IRExpr
 runM m = evalState (runContT m return) 0
 
 genName :: String -> M a Varname
@@ -91,14 +91,14 @@ letin base rhs = do
   name <- genName base
   ContT (\f -> IRLetIn name rhs <$> f name)
 -}
---generateCode :: M a (IRExpr)
+--generateCode :: M a IRExpr
 --generateCode = do
 --  varName <- letin "some_string" (IRLit 10)
 --  subex <- subCode varName
 --  return (IRAdd (IRVar varName) subex)
 
 -- returs var + 3, using a let binding
---subCode :: Varname -> M a (IRExpr)
+--subCode :: Varname -> M a IRExpr
 --subCode v = do
 --  a <- letin "a" (IRLit 3)
 --  return (IRAdd (IRVar a) (IRVar v))
@@ -125,32 +125,32 @@ data UnaryOperand = OpNeg
 
 data Distribution = IRNormal | IRUniform deriving (Show, Eq)
 
-data IRExpr = IRIf (IRExpr) (IRExpr) (IRExpr)
-              | IROp Operand (IRExpr) (IRExpr)
-              | IRUnaryOp UnaryOperand (IRExpr)
-              | IRTheta (IRExpr) Int
-              | IRSubtree (IRExpr) Int
-              | IRConst (Value)
-              | IRCons (IRExpr) (IRExpr)
-              | IRTCons (IRExpr) (IRExpr)
-              | IRHead (IRExpr)
-              | IRTail (IRExpr)
-              | IRTFst (IRExpr)
-              | IRTSnd (IRExpr)
-              | IRDensity Distribution (IRExpr)
-              | IRCumulative Distribution (IRExpr)
+data IRExpr = IRIf IRExpr IRExpr IRExpr
+              | IROp Operand IRExpr IRExpr
+              | IRUnaryOp UnaryOperand IRExpr
+              | IRTheta IRExpr Int
+              | IRSubtree IRExpr Int
+              | IRConst Value
+              | IRCons IRExpr IRExpr
+              | IRTCons IRExpr IRExpr
+              | IRHead IRExpr
+              | IRTail IRExpr
+              | IRTFst IRExpr
+              | IRTSnd IRExpr
+              | IRDensity Distribution IRExpr
+              | IRCumulative Distribution IRExpr
               | IRSample Distribution
-              | IRLetIn Varname (IRExpr) (IRExpr)
+              | IRLetIn Varname IRExpr IRExpr
               | IRVar Varname
               | IRCall String [IRExpr]
-              | IRLambda String (IRExpr)
-              | IRApply (IRExpr) (IRExpr)
+              | IRLambda String IRExpr
+              | IRApply IRExpr IRExpr
               -- auxiliary construct to aid enumeration: bind each enumerated Value to the Varname and evaluate the subexpr. Sum results.
               -- maybe we can instead move this into some kind of standard library.
-              | IREnumSum Varname (Value) (IRExpr)
-              | IREvalNN Varname (IRExpr)
-              | IRIndex (IRExpr) (IRExpr)
-              | IRReturning (IRExpr) -- only used to wrap statements that act as exit point of the expression.
+              | IREnumSum Varname Value IRExpr
+              | IREvalNN Varname IRExpr
+              | IRIndex IRExpr IRExpr
+              | IRReturning IRExpr -- only used to wrap statements that act as exit point of the expression.
               deriving (Show, Eq)
 
 data CompilerConfig = CompilerConfig {

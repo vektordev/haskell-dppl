@@ -19,21 +19,21 @@ newtype VisitationTree = VisitationTree (String, [VisitationTree]) deriving (Sho
 
 type IREnv a = [(String, IRExpr)]
 
-data RandomFunctions m a = RandomFunctions {uniformGen:: m (Value), normalGen:: m (Value)}
+data RandomFunctions m a = RandomFunctions {uniformGen:: m Value, normalGen:: m Value}
 
-generateRand :: (RandomGen g) => IREnv a -> IREnv a -> [IRExpr]-> IRExpr -> Rand g (Value)
+generateRand :: (RandomGen g) => IREnv a -> IREnv a -> [IRExpr]-> IRExpr -> Rand g Value
 generateRand = generate f
   where f = RandomFunctions {
     uniformGen = irSample IRUniform, 
     normalGen= irSample IRNormal}
   
-generateDet :: IREnv a -> IREnv a -> [IRExpr]-> IRExpr -> Either String (Value)
+generateDet :: IREnv a -> IREnv a -> [IRExpr]-> IRExpr -> Either String Value
 generateDet = generate f
   where f = RandomFunctions {
     uniformGen = Left "Uniform Gen is not det", 
     normalGen = Left "Uniform Gen is not det"}
 
-generate :: (Monad m) => RandomFunctions m a -> IREnv a -> IREnv a -> [IRExpr]-> IRExpr -> m (Value)
+generate :: (Monad m) => RandomFunctions m a -> IREnv a -> IREnv a -> [IRExpr]-> IRExpr -> m Value
 --generate f globalEnv env args expr | trace ((show expr) ++ (show args)) False = undefined
 generate f globalEnv env args (IRReturning e) = generate f globalEnv env args e
 generate f globalEnv env (arg:args) (IRLambda name expr) = generate f globalEnv ((name, arg):env) args expr
@@ -227,7 +227,7 @@ generate f globalEnv env args (IRIndex lstExpr idxExpr) = do
 generate f _ _ _ expr = error ("Expression is not yet implemented " ++ show expr)
 
 
-irSample :: (RandomGen g) => Distribution -> Rand g (Value)
+irSample :: (RandomGen g) => Distribution -> Rand g Value
 irSample IRUniform = do
   r <- getRandomR (0.0, 1.0) --uniformR (0.0, 1.0)
   return $ VFloat r

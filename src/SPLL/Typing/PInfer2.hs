@@ -706,7 +706,7 @@ class Substitutable a where
 instance Substitutable Program where
   apply s (Program decls nns) = Program (zip (map fst decls) (map (apply s . snd) decls)) nns
   ftv _ = Set.empty
-instance Substitutable (Expr) where
+instance Substitutable Expr where
   apply s = tMap (apply s . getTypeInfo)
   ftv _ = Set.empty
 instance Substitutable TypeInfo where

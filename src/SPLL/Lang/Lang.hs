@@ -284,11 +284,11 @@ getNullaryConstructor Null {} = Null
 getNullaryConstructor (Var _ x) = (`Var` x)
 getNullaryConstructor (Call _ x) = (`Call` x)
 
-tTraverse :: Applicative f => (TypeInfo -> f TypeInfo) -> Expr -> f (Expr)
+tTraverse :: Applicative f => (TypeInfo -> f TypeInfo) -> Expr -> f Expr
 tTraverse f expr = fmap (\t -> setTypeInfo expr t) typeinfos
   where typeinfos = f $ getTypeInfo expr
 
-tMapM :: Monad m => (Expr -> m TypeInfo) -> Expr -> m (Expr)
+tMapM :: Monad m => (Expr -> m TypeInfo) -> Expr -> m Expr
 tMapM f expr@(IfThenElse _ a b c) = do
   t <- f expr
   fa <- tMapM f a

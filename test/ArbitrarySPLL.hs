@@ -8,7 +8,7 @@ import Test.QuickCheck
 import SPLL.Lang.Lang
 import SPLL.Lang.Types (TypeInfo, makeTypeInfo)
 
-instance Arbitrary (Expr) where
+instance Arbitrary Expr where
   arbitrary = genExpr
 
 instance Arbitrary Program where
@@ -38,7 +38,7 @@ varNames = do
 genExprNames :: [String] -> Gen Expr
 genExprNames names = sized (genExprNames' names)
 
-genExprNames' :: [String] -> Int -> Gen (Expr)
+genExprNames' :: [String] -> Int -> Gen Expr
 genExprNames' varnames size = do
   generator <- elements $ map snd (filter (\(sizeReq, gen) -> sizeReq <= size) exprGens)
   generator varnames size

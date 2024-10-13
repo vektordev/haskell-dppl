@@ -37,7 +37,7 @@ envToIR conf p = concatMap (\(name, binding) ->
 
 type CompilationResult = (IRExpr, IRExpr, IRExpr)
 
-runCompile :: CompilerConfig -> CompilerMonad (CompilationResult) -> IRExpr
+runCompile :: CompilerConfig -> CompilerMonad CompilationResult -> IRExpr
 runCompile conf codeGen = generateLetInBlock conf (runWriterT codeGen)
   
 generateLetInBlock :: CompilerConfig -> (SupplyT Int Identity) (CompilationResult, [(String, IRExpr)]) -> IRExpr
@@ -178,7 +178,7 @@ const0 :: IRExpr
 const0 = IRConst (VFloat 0)
 
 --in this implementation, I'll forget about the distinction between PDFs and Probabilities. Might need to fix that later.
-toIRProbability :: CompilerConfig -> Expr -> IRExpr -> CompilerMonad (CompilationResult)
+toIRProbability :: CompilerConfig -> Expr -> IRExpr -> CompilerMonad CompilationResult
 toIRProbability conf (IfThenElse t cond left right) sample = do
   var_cond_p <- mkVariable "cond"
   (condExpr, condDim, condBranches) <- toIRProbability conf cond (IRConst (VBool True))
@@ -435,7 +435,7 @@ subP (aM, aDim) (bM, bDim) = do
          (IRIf (IROp OpGreaterThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar dimVarB)
          (IRVar dimVarA)))))
 
-packParamsIntoLetinsProb :: [String] -> [Expr] -> IRExpr -> IRExpr -> Supply Int (IRExpr)
+packParamsIntoLetinsProb :: [String] -> [Expr] -> IRExpr -> IRExpr -> Supply Int IRExpr
 --packParamsIntoLetinsProb [] [] expr _ = do
 --  return expr
 --packParamsIntoLetinsProb [] _ _ _ = error "More parameters than variables"
@@ -446,7 +446,7 @@ packParamsIntoLetinsProb :: [String] -> [Expr] -> IRExpr -> IRExpr -> Supply Int
 packParamsIntoLetinsProb [v] [p] expr sample = do
   return $ IRLetIn v sample expr    --FIXME sample to auch toIRProbt werden
 
-indicator :: IRExpr -> CompilerMonad  (IRExpr)
+indicator :: IRExpr -> CompilerMonad  IRExpr
 indicator condition = return $ IRIf condition (IRConst $ VFloat 1) (IRConst $ VFloat 0)
 
 -- Must be used in conjunction with irMap, as it does not recurse
@@ -457,7 +457,7 @@ uniqueify _ _ e = e
 
 --folding detGen and Gen into one, as the distinction is one to make sure things that are det are indeed det.
 -- That's what the type system is for though.
-toIRGenerate :: Expr -> CompilerMonad  (IRExpr)
+toIRGenerate :: Expr -> CompilerMonad  IRExpr
 toIRGenerate (IfThenElse _ cond left right) = do
   c <- toIRGenerate cond
   l <- toIRGenerate left
@@ -542,7 +542,7 @@ toIRGenerate (ReadNN _ name subexpr) = do
   return $ IRCall "randomchoice" [IREvalNN name subexpr']
 toIRGenerate x = error ("found no way to convert to IRGen: " ++ show x)
 
-packParamsIntoLetinsGen :: [String] -> [Expr] -> IRExpr -> CompilerMonad  (IRExpr)
+packParamsIntoLetinsGen :: [String] -> [Expr] -> IRExpr -> CompilerMonad  IRExpr
 packParamsIntoLetinsGen [] [] expr = return $ expr
 packParamsIntoLetinsGen [] _ _ = error "More parameters than variables"
 packParamsIntoLetinsGen _ [] _ = error "More variables than parameters"
@@ -551,12 +551,12 @@ packParamsIntoLetinsGen (v:vars) (p:params) expr = do
   e <- packParamsIntoLetinsGen vars params expr
   return $ IRLetIn v pExpr e
 
-bindLocal :: String -> IRExpr -> IRExpr -> CompilerMonad  (IRExpr)
+bindLocal :: String -> IRExpr -> IRExpr -> CompilerMonad  IRExpr
 bindLocal namestring binding inEx = do
   varName <- mkVariable namestring
   return $ IRLetIn varName binding inEx
 
-toIRIntegrate :: CompilerConfig -> Expr -> IRExpr -> IRExpr -> CompilerMonad (CompilationResult)
+toIRIntegrate :: CompilerConfig -> Expr -> IRExpr -> IRExpr -> CompilerMonad CompilationResult
 toIRIntegrate conf (Uniform _) lower higher = do
   return (IROp OpSub (IRCumulative IRUniform higher) (IRCumulative IRUniform lower), const0, const0)
 toIRIntegrate conf (Normal TypeInfo {}) lower higher = do

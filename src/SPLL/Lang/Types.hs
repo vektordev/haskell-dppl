@@ -42,43 +42,43 @@ instance Ord CType where
 --type family PrecisionType P32 = Float
 data Expr =
               -- Flow Control
-                IfThenElse TypeInfo (Expr) (Expr) (Expr)
+                IfThenElse TypeInfo Expr Expr Expr
               | Call TypeInfo String
               | CallArg TypeInfo String [Expr]
               | InjF TypeInfo String [Expr]
               -- Arithmetic
-              | MultF TypeInfo (Expr) (Expr)
-              | MultI TypeInfo (Expr) (Expr)
-              | PlusF TypeInfo (Expr) (Expr)
-              | PlusI TypeInfo (Expr) (Expr)
-              | ExpF TypeInfo (Expr)
-              | NegF TypeInfo (Expr)
+              | MultF TypeInfo Expr Expr
+              | MultI TypeInfo Expr Expr
+              | PlusF TypeInfo Expr Expr
+              | PlusI TypeInfo Expr Expr
+              | ExpF TypeInfo Expr
+              | NegF TypeInfo Expr
               -- Variables
-              | LetIn TypeInfo String (Expr) (Expr)
+              | LetIn TypeInfo String Expr Expr
               | Var TypeInfo String
-              | Constant TypeInfo (Value)
-              | Lambda TypeInfo String (Expr)    -- (Currently) must use local context
-              | Apply TypeInfo (Expr) (Expr)
+              | Constant TypeInfo Value
+              | Lambda TypeInfo String Expr    -- (Currently) must use local context
+              | Apply TypeInfo Expr Expr
               -- Distributions
               | Uniform TypeInfo
               | Normal TypeInfo
               -- Parameters
-              | ThetaI TypeInfo (Expr) Int
-              | Subtree TypeInfo (Expr) Int
+              | ThetaI TypeInfo Expr Int
+              | Subtree TypeInfo Expr Int
               -- Lists/Tuples
-              | Cons TypeInfo (Expr) (Expr)
-              | TCons TypeInfo (Expr) (Expr)
+              | Cons TypeInfo Expr Expr
+              | TCons TypeInfo Expr Expr
               | Null TypeInfo
               -- Boolean Operations
-              | GreaterThan TypeInfo (Expr) (Expr)
-              | LessThan TypeInfo (Expr) (Expr)
-              | And TypeInfo (Expr) (Expr)
-              | Or TypeInfo (Expr) (Expr)
-              | Not TypeInfo (Expr)
+              | GreaterThan TypeInfo Expr Expr
+              | LessThan TypeInfo Expr Expr
+              | And TypeInfo Expr Expr
+              | Or TypeInfo Expr Expr
+              | Not TypeInfo Expr
               -- Other
-              | Arg TypeInfo String RType (Expr)
-              | ReadNN TypeInfo String (Expr)
-              | Fix TypeInfo (Expr)
+              | Arg TypeInfo String RType Expr
+              | ReadNN TypeInfo String Expr
+              | Fix TypeInfo Expr
               -- TODO: Needs Concat to achieve proper SPN-parity.
               deriving (Show, Eq, Ord)
 
@@ -117,7 +117,7 @@ data TypeInfo = TypeInfo
   { rType :: RType
   , pType :: PType
   , cType :: CType
-  , derivingHornClause :: Maybe (HornClause)
+  , derivingHornClause :: Maybe HornClause
   , witnessedVars :: WitnessedVars
   , chainName :: ChainName
   , tags :: [Tag]} deriving (Show, Eq, Ord)
@@ -154,16 +154,16 @@ data Value = VBool Bool
            | VSymbol String
            | VFloat Float
            | VList [Value]
-           | VTuple (Value) (Value)
-           | VBranch (Value) (Value) String
-           | VRange (Limits)
-           | VThetaTree (ThetaTree)
+           | VTuple Value Value
+           | VBranch Value Value String
+           | VRange Limits
+           | VThetaTree ThetaTree
            | VAnyList
            -- | Value of TArrow a b could be Expr TypeInfo, with Expr being a Lambda?
            deriving (Show, Eq, Ord)
 -- likelihood [vMarg, vAnyList] - likelihood [vMarg, vMarg, vAnylist]
 --Nothing indicates low/high infinity.
-data Limits = Limits (Maybe (Value)) (Maybe (Value))
+data Limits = Limits (Maybe Value) (Maybe Value)
            deriving (Show, Eq, Ord)
            
 

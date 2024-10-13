@@ -25,7 +25,7 @@ getChainName :: Expr -> ChainName
 getChainName = chainName . getTypeInfo
 
 --Give each node on the AST a chainName first. Then annotate the value clauses of the LetIns correctly, as this cannot be done in the first step
-annotateSyntaxTree :: Expr -> Chain (Expr)
+annotateSyntaxTree :: Expr -> Chain Expr
 annotateSyntaxTree expr = do
   annotatedExprs <- do
     tMapM (\e -> do
@@ -50,7 +50,7 @@ annotateSyntaxTree expr = do
       ) expr
   setLetInChainNames annotatedExprs
 
-setLetInChainNames :: Expr -> Chain (Expr)
+setLetInChainNames :: Expr -> Chain Expr
 setLetInChainNames e@(LetIn t n v b) = lift $ do
   state <- get
   let Just correctChainName = lookup n state
@@ -125,7 +125,7 @@ rotatedHornClauses clause@(cond, res, (stub, i)) | i == 0 = case (cond, res) of
       ( [c, d],  [a, b], (stub, 5))] --TODO is this a good order
   _ -> [clause]
 
-findFulfilledHornClause :: [[HornClause]] -> [(ChainName, CType)] -> Maybe (HornClause)
+findFulfilledHornClause :: [[HornClause]] -> [(ChainName, CType)] -> Maybe HornClause
 --findFulfilledHornClause clauses satisfied | trace (show satisfied) False = undefined
 findFulfilledHornClause clauses satisfied = find allSatisfied (concat clauses)
   where 

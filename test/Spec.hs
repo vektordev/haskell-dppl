@@ -50,7 +50,7 @@ untypeE = tMap (const makeTypeInfo)
 instance Recompilable Program where
   recompile = infer . untypeP
 
-instance Recompilable (Expr) where
+instance Recompilable Expr where
   recompile e = case inferNoWit $ makeMain $ untypeE e of
     Right (Program [("main", d)] _) -> Right d
     Left x -> Left x
@@ -184,7 +184,7 @@ prop_TopK = ioProperty $ do
 --prop_CheckProbTestCases = foldr (\(p, inp, out) acc -> do
 --  checkProbTestCase p inp out .&&. acc) (True===True) correctProbValuesTestCases
 
-irDensityTopK :: RandomGen g => Program -> Float -> Value -> [IRExpr]-> Rand g (Value)
+irDensityTopK :: RandomGen g => Program -> Float -> Value -> [IRExpr]-> Rand g Value
 irDensityTopK p thresh s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params) irExpr
   where Just irExpr = lookup "main_prob" irEnv
         sampleExpr = IRConst s
@@ -192,7 +192,7 @@ irDensityTopK p thresh s params = IRInterpreter.generateRand irEnv irEnv (sample
         annotated = annotateProg typedProg
         typedProg = addTypeInfo p
 
-irDensityBC :: RandomGen g => Program -> Value -> [IRExpr]-> Rand g (Value)
+irDensityBC :: RandomGen g => Program -> Value -> [IRExpr]-> Rand g Value
 irDensityBC p s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params) irExpr
   where Just irExpr = lookup "main_prob" irEnv
         sampleExpr = IRConst s
@@ -200,7 +200,7 @@ irDensityBC p s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:para
         annotated = annotateProg typedProg
         typedProg = addTypeInfo p
 
-irDensity :: RandomGen g => Program -> Value -> [IRExpr] -> Rand g (Value)
+irDensity :: RandomGen g => Program -> Value -> [IRExpr] -> Rand g Value
 irDensity p s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params) irExpr
   where Just irExpr = lookup "main_prob" irEnv
         sampleExpr = IRConst s
@@ -208,7 +208,7 @@ irDensity p s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params
         annotated = annotateProg typedProg
         typedProg = addTypeInfo p
 
-irIntegral :: RandomGen g => Program -> Value -> Value -> [IRExpr] -> Rand g (Value)
+irIntegral :: RandomGen g => Program -> Value -> Value -> [IRExpr] -> Rand g Value
 irIntegral p low high params = IRInterpreter.generateRand irEnv irEnv (lowExpr:highExpr:params) irExpr
   where Just irExpr = lookup "main_integ" irEnv
         lowExpr = IRConst low
@@ -217,7 +217,7 @@ irIntegral p low high params = IRInterpreter.generateRand irEnv irEnv (lowExpr:h
         annotated = annotateProg typedProg
         typedProg = addTypeInfo p
 
-{-irInterpret :: RandomGen g => Program () Double -> [IRExpr] -> Rand g (Value)
+{-irInterpret :: RandomGen g => Program () Double -> [IRExpr] -> Rand g Value
 irInterpret p params = IRInterpreter.generate irEnv irEnv [] params main
   where Just main = lookup "main_prob" irEnv
         irEnv = envToIR noTopKConfig annotated

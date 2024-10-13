@@ -48,12 +48,12 @@ pIdentifier = lexeme $ do
   xs <- many alphaNumChar
   return (x:xs)
 
-pUniform :: Parser (Expr)
+pUniform :: Parser Expr
 pUniform = do
   _ <- symbol "uniform"
   return (Uniform makeTypeInfo)
 
-pIfThenElse :: Parser (Expr)
+pIfThenElse :: Parser Expr
 pIfThenElse = do
   _ <- symbol "if"
   a <- pExpr
@@ -63,7 +63,7 @@ pIfThenElse = do
   c <- pExpr
   return (IfThenElse makeTypeInfo a b c)
 
-pLetIn :: Parser (Expr)
+pLetIn :: Parser Expr
 pLetIn = do
   _ <- symbol "let"
   name <- lexeme pIdentifier
@@ -76,7 +76,7 @@ pLetIn = do
 parens :: Parser a -> Parser a
 parens = between (symbol "(") (symbol ")")
 
-pExpr :: Parser (Expr)
+pExpr :: Parser Expr
 pExpr = choice [
   parens pExpr,
   pIfThenElse,
@@ -89,7 +89,7 @@ pExpr = choice [
   ]
 
 -- TODO: I think this parser should accept any pExpr instead of identifiers. Might get ambiguous parses though.
-pApply :: Parser (Expr)
+pApply :: Parser Expr
 pApply = do
   function <- pIdentifier
   args <- some pIdentifier
@@ -105,7 +105,7 @@ construct2 :: (TypeInfo -> Expr -> Expr -> Expr) -> [Expr] -> Expr
 construct2 constructor [arg1, arg2] = constructor makeTypeInfo arg2 arg2
 construct2 _ _ = error "tried to apply the wrong number of arguments."
 
-pVar :: Parser (Expr)
+pVar :: Parser Expr
 pVar = do
   varname <- lexeme pIdentifier
   return $ Var makeTypeInfo varname
@@ -117,20 +117,20 @@ binaryFs = [
   ("plusI", PlusI)
   ]
 
-pConst :: Parser (Expr)
+pConst :: Parser Expr
 pConst = choice [pFloat, pInt]
 
-pFloat :: Parser (Expr)
+pFloat :: Parser Expr
 pFloat = do
   f <- lexeme L.float
   return $ Constant makeTypeInfo (VFloat f)
 
-pInt :: Parser (Expr)
+pInt :: Parser Expr
 pInt = do
   i <- lexeme L.decimal
   return $ Constant makeTypeInfo (VInt i)
 
-pBinaryF :: Parser (Expr)
+pBinaryF :: Parser Expr
 pBinaryF = do
   op <- choice (map (symbol . fst) binaryFs)
   left <- pExpr
@@ -158,7 +158,7 @@ pList = do
   (symbol "]")
   return values
 
-valueParser :: Parser (Value)
+valueParser :: Parser Value
 valueParser = do
   x <- L.decimal
   return (VInt x)
@@ -166,10 +166,10 @@ valueParser = do
 pCSV :: Parser [Value]  
 pCSV = valueParser `sepBy` (symbol ",")
 
-pDefinition :: Parser (Either (FnDecl) (NeuralDecl))
+pDefinition :: Parser (Either FnDecl NeuralDecl)
 pDefinition = choice [try pFunction, pNeural]
 
-pNeural :: Parser (Either (FnDecl) (NeuralDecl))
+pNeural :: Parser (Either FnDecl NeuralDecl)
 pNeural = do
   _ <- keyword "neural"
   name <- pIdentifier
@@ -179,7 +179,7 @@ pNeural = do
   range <- pList
   return  (Right (name, ty, (EnumList range)))
 
-pFunction :: Parser (Either (FnDecl) (NeuralDecl))
+pFunction :: Parser (Either FnDecl NeuralDecl)
 pFunction = dbg "function" $ do
   name <- pIdentifier
   args <- many pIdentifier
@@ -194,7 +194,7 @@ pProg = do
   _ <- eof
   return (aggregateDefinitions defs)
 
-aggregateDefinitions :: [Either (FnDecl) (NeuralDecl)] -> Program
+aggregateDefinitions :: [Either FnDecl NeuralDecl] -> Program
 aggregateDefinitions (Left fn : tail) = Program (fn:fns) neurals
   where
     Program fns neurals = aggregateDefinitions tail
