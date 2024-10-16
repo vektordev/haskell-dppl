@@ -92,8 +92,7 @@ rIntersect (ListOf x) NullList = Just $ ListOf x
 rIntersect NullList (ListOf x) = Just $ ListOf x
 rIntersect left right = if left == right then Just left else Nothing
 
-{-
-autoProg :: (Reifies s Tape) => Program -> Program
+{--
 autoProg p = Program (map (\(n, f) -> (n, autoExpr f)) (functions p)) (map autoNeuralDecl (neurals p))
 
 autoExpr :: (Reifies s Tape) => Expr -> Expr
