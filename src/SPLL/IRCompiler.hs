@@ -340,9 +340,9 @@ toIRProbability conf (TCons _ t1Expr t2Expr) sample = do
 toIRProbability conf (InjF _ name [param]) sample = do
   prefix <- mkVariable ""
   let letInBlock = irMap (uniqueify [v] prefix) (IRLetIn v sample invExpr)
-  (paramExpr, _, paramBranches) <- toIRProbability conf param letInBlock
+  (paramExpr, paramDim, paramBranches) <- toIRProbability conf param letInBlock
   let returnExpr = IRLetIn v sample (IROp OpMult paramExpr invDerivExpr)
-  return (returnExpr, const0, paramBranches)
+  return (returnExpr, paramDim, paramBranches)
   where Just fPair = lookup name globalFenv   --TODO error handling if nor found
         FPair (_, [inv]) = fPair
         FDecl (_, [v], _, invExpr, [(_, invDerivExpr)]) = inv
@@ -357,10 +357,10 @@ toIRProbability conf (InjF TypeInfo {rType=TFloat, tags=extras} name [param1, pa
   leftExpr <- toIRGenerate param1
   let (detVar, sampleVar) = if x2 == v2 then (x2, x3) else (x3, x2)
   let letInBlock = IRLetIn detVar leftExpr (IRLetIn sampleVar sample invExpr)
-  (paramExpr, _, paramBranches) <- toIRProbability conf param2 letInBlock
+  (paramExpr, paramDim, paramBranches) <- toIRProbability conf param2 letInBlock
   let returnExpr = IRLetIn detVar leftExpr (IRLetIn sampleVar sample (IROp OpMult paramExpr invDeriv))
   uniquePrefix <- mkVariable ""
-  return (irMap (uniqueify [v1, v2, v3] uniquePrefix) returnExpr, const0, paramBranches) --FIXME
+  return (irMap (uniqueify [v1, v2, v3] uniquePrefix) returnExpr, paramDim, paramBranches) --FIXME
 toIRProbability conf (InjF TypeInfo {rType=TFloat, tags=extras} name [param1, param2]) sample
   | extras `hasAlgorithm` "injF2Right" = do  --FIXME Left
   let Just fPair = lookup name globalFenv   --TODO error handling if not found
@@ -372,10 +372,10 @@ toIRProbability conf (InjF TypeInfo {rType=TFloat, tags=extras} name [param1, pa
   leftExpr <- toIRGenerate param2
   let (detVar, sampleVar) = if x2 == v3 then (x2, x3) else (x3, x2)
   let letInBlock = IRLetIn detVar leftExpr (IRLetIn sampleVar sample invExpr)
-  (paramExpr, _, paramBranches) <- toIRProbability conf param1 letInBlock
+  (paramExpr, paramDim, paramBranches) <- toIRProbability conf param1 letInBlock
   let returnExpr = IRLetIn detVar leftExpr (IRLetIn sampleVar sample (IROp OpMult paramExpr invDeriv))
   uniquePrefix <- mkVariable ""
-  return (irMap (uniqueify [v1, v2, v3] uniquePrefix) returnExpr, const0, paramBranches)
+  return (irMap (uniqueify [v1, v2, v3] uniquePrefix) returnExpr, paramDim, paramBranches)
 toIRProbability conf (Null _) sample = do
   expr <- indicator (IROp OpEq sample (IRConst $ VList []))
   return (expr, const0, const0)
