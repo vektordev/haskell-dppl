@@ -96,7 +96,12 @@ correctProbValuesTestCases = [(uniformProg, VFloat 0.5, [], VFloat 1.0),
                               (testInjFPlusLeft, VFloat 1.5, [], VFloat 1.0),
                               (testInjFPlusRight, VFloat 1.5, [], VFloat 1.0),
                               (testDim, VFloat 3, [], VFloat 0.5),
-                              (testDim, VFloat 0.4, [], VFloat 0.25)]
+                              (testDim, VFloat 0.4, [], VFloat 0.25),
+                              (testCoin, VInt 1, [], VFloat 0.5),
+                              (testCoin, VInt 3, [], VFloat 0.0),
+                              (testDice, VInt 2, [], VFloat 0.16666666),
+                              (testDice, VInt 7, [], VFloat 0)]
+                              --(testDiceAdd, VInt 2, [], VFloat (1/36))]
 
 correctIntegralValuesTestCases :: [(Program, Value, Value, [IRExpr], Value)]
 correctIntegralValuesTestCases = [(uniformProg, VFloat 0, VFloat 1, [], VFloat 1.0),

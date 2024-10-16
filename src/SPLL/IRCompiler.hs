@@ -292,7 +292,9 @@ toIRProbability conf (PlusI (TypeInfo {rType = TInt, tags = extras}) left right)
     --the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
     (pLeft, _, leftBranches) <- toIRProbability conf left (IRVar enumVar)
     (pRight, _, rightBranches) <- toIRProbability conf right (IROp OpSub sample (IRVar enumVar))
-    let returnExpr = IREnumSum enumVar (VList enumListL) $ IRIf (IRCall "in" [IROp OpSub sample (IRVar enumVar), IRConst (VList enumListR)]) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
+    let returnExpr = case topKThreshold conf of
+          Nothing -> IREnumSum enumVar (VList enumListL) $ IRIf (IRCall "in" [IROp OpSub sample (IRVar enumVar), IRConst (VList enumListR)]) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
+          Just thr -> IREnumSum enumVar (VList enumListL) $ IRIf (IROp OpAnd (IRCall "in" [IROp OpSub sample (IRVar enumVar), IRConst (VList enumListR)]) (IROp OpGreaterThan pLeft (IRConst (VFloat thr)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
     -- TODO correct branch counting
     return (returnExpr, const0, IROp OpPlus leftBranches rightBranches)
   | extras `hasAlgorithm` "plusLeft" = do

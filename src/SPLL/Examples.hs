@@ -138,6 +138,25 @@ testTopLevelLambda = Program [("main", Lambda makeTypeInfo "a" (PlusF makeTypeIn
 testDim :: Program
 testDim = Program [("main", IfThenElse makeTypeInfo (GreaterThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo $ VFloat 0.5)) (MultF makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo $ VFloat 2)) (Constant makeTypeInfo $ VFloat 3))] []
 
+testCoin :: Program
+testCoin = Program [("main", IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat (1/2)))) (Constant makeTypeInfo (VInt 1)) (Constant makeTypeInfo (VInt 2)))] []
+
+testDice :: Program
+testDice = Program [("main", IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat (1/6)))) (Constant makeTypeInfo (VInt 1)) 
+                      (IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat (1/5)))) (Constant makeTypeInfo (VInt 2))
+                        (IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat (1/4)))) (Constant makeTypeInfo (VInt 3))
+                          (IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat (1/3)))) (Constant makeTypeInfo (VInt 4))
+                            (IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat (1/2)))) (Constant makeTypeInfo (VInt 5)) (Constant makeTypeInfo (VInt 6)))))))] []
+                            
+testDiceAdd :: Program
+testDiceAdd = Program [ ("main", PlusI makeTypeInfo (Call makeTypeInfo "dice") (Call makeTypeInfo "dice")),
+                        ("dice", IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat (1/6)))) (Constant makeTypeInfo (VInt 1)) 
+                        (IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat (1/5)))) (Constant makeTypeInfo (VInt 2))
+                          (IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat (1/4)))) (Constant makeTypeInfo (VInt 3))
+                            (IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat (1/3)))) (Constant makeTypeInfo (VInt 4))
+                              (IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat (1/2)))) (Constant makeTypeInfo (VInt 5)) (Constant makeTypeInfo (VInt 6)))))))] []
+                            
+                            
 {-
 flipCoin :: Expr Double
 flipCoin = GreaterThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 0.5))
