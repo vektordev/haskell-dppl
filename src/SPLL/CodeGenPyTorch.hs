@@ -16,7 +16,7 @@ import Debug.Trace (trace)
 --TODO: Recursive calls should be phrased as self.forward rather than (modulename).forward.
 
 -- Expected format format of ThetaTrees:
---    ThetaTree = ([Float], [ThetaTree])
+--    ThetaTree = ([Double], [ThetaTree])
 
 filet :: [a] -> [a]
 filet = init . tail
@@ -150,6 +150,7 @@ generateCode (IRCons hd tl) bindto = wrapMultiBlock [bindto ++ "[", "] + ", ""] 
 generateCode (IRTCons t1 t2) bindto = wrapMultiBlock [bindto ++ "(", ", ", ")"] [generateCode t1 "", generateCode t2 ""]
 generateCode (IRHead lst) bindto = wrap (bindto ++ "(") (generateCode lst "") ")[0]"
 generateCode (IRTail lst) bindto = wrap (bindto ++ "(") (generateCode lst "") ")[1:]"
+generateCode (IRElementOf ele lst) bindto = wrapMultiBlock [bindto ++ "(", " in ", ")"] [generateCode ele "", generateCode lst ""]
 generateCode (IRTFst t) bindto = wrap (bindto ++ "(") (generateCode t "") ")[0]"
 generateCode (IRTSnd t) bindto = wrap (bindto ++ "(") (generateCode t "") ")[1]"
 generateCode (IRSample IRNormal) bindto = [bindto ++ "randn()"]

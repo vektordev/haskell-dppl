@@ -11,7 +11,7 @@ import Data.List (intercalate)
 -- e.g. in MNist-Addition
 
 -- Expected format format of ThetaTrees:
---    ThetaTree = ([Float], [ThetaTree])
+--    ThetaTree = ([Double], [ThetaTree])
 
 filet :: [a] -> [a]
 filet = init . tail
@@ -101,6 +101,7 @@ generateCode (IRCons hd tl) = wrapMultiBlock ["hcat(", ", ", ")"] [generateCode 
 generateCode (IRTCons t1 t2) = wrapMultiBlock ["(", ", ", ")"] [generateCode t1, generateCode t2]
 generateCode (IRHead lst) = wrap "(" (generateCode lst) ")[1]"
 generateCode (IRTail lst) = wrap "(" (generateCode lst) ")[2:end]"
+generateCode (IRElementOf ele lst) = wrapMultiBlock ["(", " in ", ")"] [generateCode ele, generateCode lst]
 generateCode (IRTFst t) = wrap "(" (generateCode t) ")[1]"
 generateCode (IRTSnd t) = wrap "(" (generateCode t) ")[2]"
 generateCode (IRSample IRNormal) = ["randn()"]

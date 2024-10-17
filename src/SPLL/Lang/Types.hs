@@ -21,7 +21,7 @@ type HornClause = ([(ChainName, CType)], [(ChainName, CType)], (ExprStub, Int))
 
 data CType = CDeterministic
              | CInferDeterministic
-             | CConstrainedTo Float Float
+             | CConstrainedTo Double Double
              | CBottom
              | CNotSetYet
              deriving (Show, Eq)
@@ -36,10 +36,6 @@ instance Ord CType where
       rank CNotSetYet = -1
 
 
-
---Expr x (a :: Precision)
---data Precision = P32 | P64"
---type family PrecisionType P32 = Float
 data Expr =
               -- Flow Control
                 IfThenElse TypeInfo Expr Expr Expr
@@ -147,12 +143,12 @@ type NeuralDecl = (String, RType, Tag)
 
 type WitnessedVars = Set.Set String
 
-data ThetaTree = ThetaTree [Float] [ThetaTree] deriving (Show, Eq, Ord)
+data ThetaTree = ThetaTree [Double] [ThetaTree] deriving (Show, Eq, Ord)
 
 data Value = VBool Bool
            | VInt Int
            | VSymbol String
-           | VFloat Float
+           | VFloat Double
            | VList [Value]
            | VTuple Value Value
            | VBranch Value Value String

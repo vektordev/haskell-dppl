@@ -14,6 +14,7 @@ import Data.Number.Erf
 import Debug.Trace (trace)
 import Data.Data
 import Data.Either (fromRight)
+import Data.Maybe (fromMaybe)
 
 newtype VisitationTree = VisitationTree (String, [VisitationTree]) deriving (Show, Eq)
 
@@ -177,6 +178,12 @@ generate f globalEnv env args (IRTail listExpr) = do
   case listVal of
     VList (_:a) -> return $ VList a
     _ -> error "Type error: tail must be called on a non-empty list"
+generate f globalEnv env args (IRElementOf elemExpr listExpr) = do
+  elemVal <- generate f globalEnv env args elemExpr
+  listVal <- generate f globalEnv env args listExpr
+  case listVal of
+    VList a -> return $ VBool (elemVal `elem` a)
+    _ -> error "Type error: ElementOf must be called on a list"
 generate f globalEnv env args (IRDensity IRUniform expr) = do
   x <- generate f globalEnv env args expr
   return $ irPDF IRUniform x
@@ -203,18 +210,17 @@ generate f globalEnv env args (IRVar name) =
     Just expr -> generate f globalEnv env args expr
     Nothing -> error ("Variable " ++ name ++ " not declared")
 generate f globalEnv env args (IRCall name callArgs) = do
-  let Just expr = lookup name globalEnv
+  let expr = fromMaybe (error ("function not found: " ++ name)) (lookup name globalEnv)
   -- Evaluate the expressions here if value passed would be a local variable. TODO: This breaks passing of lambda functions as arguments
   evalCa <- mapM (generate f globalEnv env args) (callArgs ++ args)
   let ca = map IRConst evalCa
   generate f globalEnv globalEnv ca expr
-generate f globalEnv env args (IREnumSum varname (VInt iVal) expr) = do    --TODO Untested
-  foldrM (\i acc -> do
+generate f globalEnv env args (IREnumSum varname (VList values) expr) = do    --TODO Untested
+  foldrM (\(VInt i) acc -> do
     x <- generate f globalEnv env (IRConst (VInt i):args) (IRLambda varname expr)
     return $ sumValues x acc
-    ) (VFloat 0) range
-  where range = enumFromTo 0 (iVal-1)
-        sumValues = \(VFloat a) (VFloat b) -> VFloat $a+b
+    ) (VFloat 0) values
+  where sumValues = \(VFloat a) (VFloat b) -> VFloat $a+b
 generate f globalEnv env args (IREvalNN varname expr) = error "EvalNN cannot be interpreted on the IR. Please use PyTorch or Julia"
 generate f globalEnv env args (IRIndex lstExpr idxExpr) = do
   lst <- generate f env globalEnv args lstExpr

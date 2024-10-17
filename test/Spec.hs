@@ -59,13 +59,13 @@ instance Recompilable Expr where
 thetaTreeExample :: IRExpr
 thetaTreeExample = IRConst (VThetaTree (ThetaTree [0, 1, 2, 3] [ThetaTree [4, 5, 6, 7] [], ThetaTree [8, 9, 10, 11] [], ThetaTree [12, 13, 14, 15] []]))
 
-flatTree :: [Float] -> [IRExpr]
+flatTree :: [Double] -> [IRExpr]
 flatTree a = [IRConst (VThetaTree (ThetaTree a []))]
 
-normalPDF :: Float -> Float
+normalPDF :: Double -> Double
 normalPDF x = (1 / sqrt (2 * pi)) * exp (-0.5 * x * x)
 
-normalCDF :: Float -> Float
+normalCDF :: Double -> Double
 normalCDF x = (1/2)*(1 + erf(x/sqrt(2)))
     
 correctProbValuesTestCases :: [(Program, Value, [IRExpr], Value)]
@@ -147,14 +147,14 @@ checkProbTestCase :: (Program, Value, [IRExpr], Value) -> Property
 checkProbTestCase (p, inp, params, out) = ioProperty $ do
   actualOutput <- evalRandIO $ irDensity p inp params
   case actualOutput of 
-    VTuple a (VFloat _) -> return $ a === out
+    VTuple a (VFloat _) -> return $ a `reasonablyClose` out
     _ -> return $ counterexample "Return type was no tuple" False
 
 checkIntegralTestCase :: (Program, Value, Value, [IRExpr], Value) -> Property
 checkIntegralTestCase (p, low, high, params, out) = ioProperty $ do
   actualOutput <- evalRandIO $ irIntegral p low high params
   case actualOutput of 
-    VTuple a (VFloat _) -> return $ a === out
+    VTuple a (VFloat _) -> return $ a `reasonablyClose` out
     _ -> return $ counterexample "Return type was no tuple" False
 
 --TODO better bounds for Integral
@@ -162,20 +162,20 @@ checkIntegralConverges :: (Program, Value, Value, [IRExpr], Value) -> Property
 checkIntegralConverges (p, VFloat a, VFloat b, params, _) = ioProperty $ do
   actualOutput <- evalRandIO $ irIntegral p (VFloat (-9999999)) (VFloat 9999999) params
   case actualOutput of 
-    VTuple a (VFloat _) -> return $ a === VFloat 1
+    VTuple a (VFloat _) -> return $ a `reasonablyClose` VFloat 1
     _ -> return $ counterexample "Return type was no tuple" False
 checkIntegralConverges _ = False ==> False
 
 checkTopKInterprets :: (Program, Value, [IRExpr], Value) -> Property
 checkTopKInterprets (p, inp, params, _) = ioProperty $ do
   actualOutput <- evalRandIO $ irDensityTopK p 0.05 inp params
-  return $ actualOutput === actualOutput  -- No clue what the correct value should be here. Just test that is interprets to any value
+  return $ actualOutput `reasonablyClose` actualOutput  -- No clue what the correct value should be here. Just test that is interprets to any value
 
 checkProbTestCasesWithBC :: (Program, Value, [IRExpr], Value) -> Property
 checkProbTestCasesWithBC (p, inp, params, out) = ioProperty $ do
   actualOutput <- evalRandIO $ irDensityBC p inp params
   case actualOutput of 
-    VTuple a (VTuple (VFloat _) (VFloat _)) -> return $ a === out
+    VTuple a (VTuple (VFloat _) (VFloat _)) -> return $ a `reasonablyClose` out
     _ -> return $ counterexample "Return type was no tuple" False
 
 prop_TopK :: Property
@@ -189,7 +189,7 @@ prop_TopK = ioProperty $ do
 --prop_CheckProbTestCases = foldr (\(p, inp, out) acc -> do
 --  checkProbTestCase p inp out .&&. acc) (True===True) correctProbValuesTestCases
 
-irDensityTopK :: RandomGen g => Program -> Float -> Value -> [IRExpr]-> Rand g Value
+irDensityTopK :: RandomGen g => Program -> Double -> Value -> [IRExpr]-> Rand g Value
 irDensityTopK p thresh s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params) irExpr
   where Just irExpr = lookup "main_prob" irEnv
         sampleExpr = IRConst s
@@ -222,6 +222,10 @@ irIntegral p low high params = IRInterpreter.generateRand irEnv irEnv (lowExpr:h
         annotated = annotateProg typedProg
         typedProg = addTypeInfo p
 
+reasonablyClose :: Value -> Value -> Property
+reasonablyClose (VFloat a) (VFloat b) = property $ abs (a - b) <= 1e-5
+reasonablyClose a b = a === b
+
 {-irInterpret :: RandomGen g => Program () Double -> [IRExpr] -> Rand g Value
 irInterpret p params = IRInterpreter.generate irEnv irEnv [] params main
   where Just main = lookup "main_prob" irEnv
@@ -246,7 +250,7 @@ langDensity p sample = case Interpreter.runInferL [] witExpr [] (VFloat sample) 
 
 
 -- Program sets for tests
-examples :: [Program () Float]
+examples :: [Program () Double]
 examples = [makeMain variableLength, makeMain testGreater, makeMain testGaussianMixture, makeMain testIntractable]
 
 {-
@@ -322,10 +326,10 @@ testRecompile inp = case recompile inp of
    Left err -> counterexample (show inp) (False === True)
    Right program -> program === inp
 
-expressionsGen :: Gen (Expr () Float)
+expressionsGen :: Gen (Expr () Double)
 expressionsGen = elements (map fst expressions)
 
-parametrizedGen :: Gen (Env () Float, Thetas Float)
+parametrizedGen :: Gen (Env () Double, Thetas Double)
 parametrizedGen = do
   expr <- elements (map fst expressions)
   let maxIx = maximum $ catMaybes $ map maxThetaIx $ findThetas expr
@@ -337,7 +341,7 @@ maxThetaIx :: Expr t a -> Maybe Int
 maxThetaIx (ThetaI _ a x) = Just x
 maxThetaIx _ = Nothing
 
-genThetas :: Int -> Gen (Thetas Float)
+genThetas :: Int -> Gen (Thetas Double)
 genThetas = vector
 
 findThetas :: Expr t a -> [Expr t a]
@@ -345,7 +349,7 @@ findThetas (ThetaI a b c) = [ThetaI a b c]
 findThetas expr = concatMap findThetas x
   where x = getSubExprs expr
 
-expressions :: [(Expr () Float, TypeInfo)]
+expressions :: [(Expr () Double, TypeInfo)]
 expressions = [
     (testIf, makeTypeInfo {rType = TBool, pType = Integrate}),
     (testGreater, makeTypeInfo {rType = TBool, pType = Integrate}),

@@ -69,7 +69,7 @@ variableLengthS2 = Program [("b", IfThenElse ()
 
 data Language = Python | Julia deriving Show
 
-readSamples :: IO [(Float, Float)]
+readSamples :: IO [(Double, Double)]
 readSamples = do
   f <- readFile "./data/train_data.txt"
   --print $ lines f
@@ -77,7 +77,7 @@ readSamples = do
   --print res
   return res
 
-map2RSamples :: (Float, Float) -> Value
+map2RSamples :: (Double, Double) -> Value
 map2RSamples (a,b) = VList [VFloat a, VFloat b]
 
 {-

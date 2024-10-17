@@ -363,6 +363,7 @@ setSubExprs expr [] = case expr of
   Call t x -> Call t x
   Var t x -> Var t x
   CallArg t n _ -> CallArg t n []
+  InjF t n _ -> InjF t n []
   _ -> error "unmatched expr in setSubExprs"
 setSubExprs expr [a] = case expr of
   ThetaI t _ x -> ThetaI t a x
@@ -374,6 +375,7 @@ setSubExprs expr [a] = case expr of
   Not t _ -> Not t a
   ReadNN t n _ -> ReadNN t n a
   CallArg t n _ -> CallArg t n [a]
+  InjF t n _ -> InjF t n [a]
   _ -> error "unmatched expr in setSubExprs"
 setSubExprs expr [a,b] = case expr of
   GreaterThan t _ _ -> GreaterThan t a b
@@ -389,14 +391,17 @@ setSubExprs expr [a,b] = case expr of
   LetIn t x _ b -> LetIn t x a b
   CallArg t n _ -> CallArg t n [a,b]
   Apply t _ _ -> Apply t a b
+  InjF t n _ -> InjF t n [a, b]
   _ -> error "unmatched expr in setSubExprs"
 setSubExprs expr [a,b,c] = case expr of
   IfThenElse t _ _ _ -> IfThenElse t a b c
   CallArg t n _ -> CallArg t n [a,b,c]
+  InjF t n _ -> InjF t n [a, b, c]
   _ -> error "unmatched expr in setSubExprs"
 setSubExprs expr subExprs = case expr of
   InjF t l _ -> InjF t l subExprs
   CallArg t n _ -> CallArg t n subExprs
+  InjF t n _ -> InjF t n subExprs
   _ -> error "unmatched expr in setSubExprs"
 
 getTypeInfo :: Expr -> TypeInfo
@@ -467,7 +472,7 @@ setTypeInfo expr t = case expr of
   (Apply _ a b)         -> Apply t a b
   (ReadNN _ a b)        -> ReadNN t a b
 
-getVFloat :: Value -> Float
+getVFloat :: Value -> Double
 getVFloat (VFloat v) = v
 getVFloat _ = error "not vfloat where it should be"
 

@@ -132,6 +132,7 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               | IRSubtree IRExpr Int
               | IRConst Value
               | IRCons IRExpr IRExpr
+              | IRElementOf IRExpr IRExpr
               | IRTCons IRExpr IRExpr
               | IRHead IRExpr
               | IRTail IRExpr
@@ -156,7 +157,7 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
 data CompilerConfig = CompilerConfig {
   -- If set to Just x: All branches with likelihood less than x are discarded.
   --  Uses local probability of the branch,given that the execution arrives at that branching point
-  topKThreshold :: Maybe Float,
+  topKThreshold :: Maybe Double,
   countBranches :: Bool,
   verbose :: Int
 } deriving (Show)
@@ -174,6 +175,7 @@ getIRSubExprs (IRCons a b) = [a, b]
 getIRSubExprs (IRTCons a b) = [a, b]
 getIRSubExprs (IRHead a) = [a]
 getIRSubExprs (IRTail a) = [a]
+getIRSubExprs (IRElementOf a b) = [a, b]
 getIRSubExprs (IRTFst a) = [a]
 getIRSubExprs (IRTSnd a) = [a]
 getIRSubExprs (IRDensity _ a) = [a]
@@ -198,6 +200,7 @@ irMap f x = case x of
   (IRTCons left right) -> f (IRTCons (irMap f left) (irMap f right))
   (IRHead expr) -> f (IRHead (irMap f expr))
   (IRTail expr) -> f (IRTail (irMap f expr))
+  (IRElementOf ele lst) -> f (IRElementOf (irMap f ele) (irMap f lst))
   (IRTFst expr) -> f (IRTFst (irMap f expr))
   (IRTSnd expr) -> f (IRTSnd (irMap f expr))
   (IRDensity a expr) -> f (IRDensity a (irMap f expr))
@@ -227,6 +230,7 @@ irPrintFlat (IRCons _ _) = "IRCons"
 irPrintFlat (IRTCons _ _) = "IRTCons"
 irPrintFlat (IRHead _) = "IRHead"
 irPrintFlat (IRTail _) = "IRTail"
+irPrintFlat (IRElementOf _ _) = "IRElementOf"
 irPrintFlat (IRTFst _) = "IRTFst"
 irPrintFlat (IRTSnd _) = "IRTSnd"
 irPrintFlat (IRDensity _ _) = "IRDensity"

@@ -289,14 +289,18 @@ toIRProbability conf (PlusI (TypeInfo {rType = TInt, tags = extras}) left right)
     let enumListL = head $ [x | EnumList x <- extrasLeft]
     let enumListR = head $ [x | EnumList x <- extrasRight]
     enumVar <- mkVariable "enum"
-    --the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
-    (pLeft, _, leftBranches) <- toIRProbability conf left (IRVar enumVar)
-    (pRight, _, rightBranches) <- toIRProbability conf right (IROp OpSub sample (IRVar enumVar))
-    let returnExpr = case topKThreshold conf of
-          Nothing -> IREnumSum enumVar (VList enumListL) $ IRIf (IRCall "in" [IROp OpSub sample (IRVar enumVar), IRConst (VList enumListR)]) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
-          Just thr -> IREnumSum enumVar (VList enumListL) $ IRIf (IROp OpAnd (IRCall "in" [IROp OpSub sample (IRVar enumVar), IRConst (VList enumListR)]) (IROp OpGreaterThan pLeft (IRConst (VFloat thr)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
-    -- TODO correct branch counting
-    return (returnExpr, const0, IROp OpPlus leftBranches rightBranches)
+  
+    -- We need to unfold the monad stack, because the EnumSum Works like a lambda expression and has a local scope
+    irTuple <- lift $ return $ generateLetInBlock conf (runWriterT (do
+      --the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
+      (pLeft, _, _) <- toIRProbability conf left (IRVar enumVar)
+      (pRight, _, _) <- toIRProbability conf right (IROp OpSub sample (IRVar enumVar))
+      let returnExpr = case topKThreshold conf of
+            Nothing -> IRIf (IRElementOf (IROp OpSub sample (IRVar enumVar)) (IRConst (VList enumListR))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
+            Just thr -> IRIf (IROp OpAnd (IRElementOf (IROp OpSub sample (IRVar enumVar)) (IRConst (VList enumListR))) (IROp OpGreaterThan pLeft (IRConst (VFloat thr)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
+      -- TODO correct branch counting
+      return (returnExpr, const0, const0)))
+    return (IREnumSum enumVar (VList enumListL) $ IRTFst irTuple, const0, const0)
   | extras `hasAlgorithm` "plusLeft" = do
     var <- mkVariable ""
     (rightExpr, _, rightBranches) <- toIRProbability conf right (IROp OpSub sample (IRVar var))

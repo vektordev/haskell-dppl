@@ -17,7 +17,7 @@ data Opts = Opts {
   language :: Language,
   verbosity :: Int,
   countBranches :: Bool,
-  topKCutoff :: Maybe Float
+  topKCutoff :: Maybe Double
 } deriving Show
 
 readLanguage :: ReadM Language
