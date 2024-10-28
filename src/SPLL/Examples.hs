@@ -5,6 +5,7 @@ import SPLL.Lang.Lang
 import SPLL.Typing.RType
 import SPLL.Typing.PType
 import SPLL.Typing.Typing (TypeInfo, makeTypeInfo)
+import SPLL.Lang.Types
 
 --weatherHask lastDay = if lastDay == rainy
 --  then let current = randA in (current, weatherHask current)
@@ -109,12 +110,15 @@ testCallLambda = Program [("main", Apply makeTypeInfo (Lambda makeTypeInfo "a" (
 testCallLambdaAdvanced :: Program
 testCallLambdaAdvanced = Program [("main", LetIn makeTypeInfo "l" (Lambda makeTypeInfo "a" (PlusF makeTypeInfo (Var makeTypeInfo "a") (Uniform makeTypeInfo))) (Apply makeTypeInfo (Var makeTypeInfo "l") (Constant makeTypeInfo (VFloat 2))))] [] 
 
+testLambdaParameter :: Program
+testLambdaParameter = Program [("main", Apply makeTypeInfo (Call makeTypeInfo "other") (Lambda makeTypeInfo "x" (MultF makeTypeInfo (Var makeTypeInfo "x") (Constant makeTypeInfo (VFloat 2)))) ), ("other", Lambda makeTypeInfo "f" (Apply makeTypeInfo (Var makeTypeInfo "f") (Constant makeTypeInfo (VFloat 5))))] [] 
+
 testLetIn :: Program
 testLetIn = Program [("main", LetIn makeTypeInfo "u" (Uniform makeTypeInfo) (PlusF makeTypeInfo (Var makeTypeInfo "u") (Constant makeTypeInfo (VFloat 1))))] [] 
 --testCallLambda = Program [] [] (CallLambda makeTypeInfo (Uniform makeTypeInfo) (Lambda makeTypeInfo "a" (PlusF makeTypeInfo (Var makeTypeInfo "a") (Uniform makeTypeInfo))))
 
 testRecursion :: Program
-testRecursion = Program [("main", Apply makeTypeInfo (Call makeTypeInfo "rec") (Constant makeTypeInfo (VFloat 8))), 
+testRecursion = Program [("main", Apply makeTypeInfo (Call makeTypeInfo "rec") (Constant makeTypeInfo (VFloat 8))),
                          ("rec", Lambda makeTypeInfo "x" (IfThenElse makeTypeInfo (GreaterThan makeTypeInfo (Var makeTypeInfo "x") (Constant makeTypeInfo (VFloat 1))) (MultF makeTypeInfo (Constant makeTypeInfo (VFloat 3)) (Apply makeTypeInfo (Call makeTypeInfo "rec") (MultF makeTypeInfo (Var makeTypeInfo "x") (Constant makeTypeInfo (VFloat 0.5))))) (Uniform makeTypeInfo)))] []
 
 testNN :: Expr

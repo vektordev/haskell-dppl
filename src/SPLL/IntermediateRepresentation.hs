@@ -5,6 +5,7 @@ module SPLL.IntermediateRepresentation (
 , UnaryOperand(..)
 , Distribution(..)
 , Varname
+, IRValue
 , CompilerConfig(..)
 , irMap
 , getIRSubExprs
@@ -130,7 +131,7 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               | IRUnaryOp UnaryOperand IRExpr
               | IRTheta IRExpr Int
               | IRSubtree IRExpr Int
-              | IRConst Value
+              | IRConst IRValue
               | IRCons IRExpr IRExpr
               | IRElementOf IRExpr IRExpr
               | IRTCons IRExpr IRExpr
@@ -148,11 +149,14 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               | IRApply IRExpr IRExpr
               -- auxiliary construct to aid enumeration: bind each enumerated Value to the Varname and evaluate the subexpr. Sum results.
               -- maybe we can instead move this into some kind of standard library.
-              | IREnumSum Varname Value IRExpr
+              | IREnumSum Varname IRValue IRExpr
               | IREvalNN Varname IRExpr
               | IRIndex IRExpr IRExpr
               | IRReturning IRExpr -- only used to wrap statements that act as exit point of the expression.
               deriving (Show, Eq)
+              
+type IRValue = GenericValue IRExpr
+
 
 data CompilerConfig = CompilerConfig {
   -- If set to Just x: All branches with likelihood less than x are discarded.

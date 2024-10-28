@@ -6,6 +6,7 @@ module SPLL.CodeGenJulia (
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Lang
 import Data.List (intercalate)
+import SPLL.Lang.Types
 
 --TODO: On the topic of memoization: Ideally we would want to optimize away redundant calls within a loop.
 -- e.g. in MNist-Addition
@@ -50,7 +51,7 @@ juliaOps OpAnd = "&&"
 juliaOps OpEq = "=="
 juliaOps x = error ("Unknown Julia operator: " ++ show x)
 
-juliaVal :: Value -> String
+juliaVal :: IRValue -> String
 juliaVal (VList xs) = "[" ++ (intercalate "," $ map juliaVal xs) ++ "]"
 juliaVal (VInt i) = show i
 juliaVal (VFloat f) = show f
@@ -144,5 +145,6 @@ generateCode (IRIndex arrExpr indexExpr) = let
 generateCode (IREvalNN funcName argExpr) = [funcName ++ "(" ++ spicyHead (generateCode argExpr) ++ ")"]
 generateCode (IRCall funcName argExprs) = [funcName ++ "(" ++ (intercalate "," (map (spicyHead . generateCode) argExprs)) ++ ")"]
 generateCode (IRApply lambda argExpr) = [spicyHead (generateCode lambda) ++ "(" ++ spicyHead (generateCode argExpr) ++ ")"]
+generateCode (IRLambda varName expr) = ["(" ++ varName ++ " -> " ++ spicyHead (generateCode expr) ++ ")"]
 generateCode (IRReturning expr) = generateCode expr
 generateCode x = error ("No Julia CodeGen for IR: " ++ show x)

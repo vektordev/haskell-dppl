@@ -202,9 +202,9 @@ hornClauseToIRExpr e = case stub of
 
   StubLetIn | inversion == 0 -> [Inversion (cn, IRVar (preVars!!0))]
   StubLetIn | inversion == 1 -> [Inversion (cn, IRVar (preVars!!0))] --FIXME This seems wrong?
-
+  
   StubConstant | inversion == 0 -> case e of
-    (Constant _ v) -> [Inversion (cn, IRConst v)]
+    (Constant _ v) -> [Inversion (cn, IRConst (fmap (error "Cannot convert VClosure") v))]
     _ -> [] -- There are places anntotated with constant that are not a constant. For example the returning value is assumed constant for the sake of forward chaining
   where
     (pre, _, (stub, inversion)) = fromJust (derivingHornClause (getTypeInfo e))

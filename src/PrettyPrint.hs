@@ -3,6 +3,7 @@ module PrettyPrint where
 import SPLL.Lang.Lang
 import Data.List (intercalate)
 import SPLL.IntermediateRepresentation
+import SPLL.Lang.Types
 
 pPrintProg :: Program -> String
 pPrintProg (Program decls neurals) = intercalate "\n\n" (map (\f -> wrapInFunctionDeclaration (snd f) (fst f) []) decls)

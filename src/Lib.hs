@@ -23,6 +23,7 @@ import Data.List (elemIndices, sortBy, nub, intercalate)
 import Text.Pretty.Simple
 
 import SPLL.Lang.Lang
+import SPLL.Lang.Types
 import SPLL.Typing.Typing
 import SPLL.Typing.RType
 import SPLL.Typing.PType

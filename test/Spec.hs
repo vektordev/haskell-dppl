@@ -10,6 +10,7 @@ import Test.QuickCheck
 import SPLL.Examples
 --import Lib
 import SPLL.Lang.Lang
+import SPLL.Lang.Types
 import SPLL.Typing.Typing
 import SPLL.Typing.RType
 import SPLL.Typing.PType
@@ -68,7 +69,7 @@ normalPDF x = (1 / sqrt (2 * pi)) * exp (-0.5 * x * x)
 normalCDF :: Double -> Double
 normalCDF x = (1/2)*(1 + erf(x/sqrt(2)))
     
-correctProbValuesTestCases :: [(Program, Value, [IRExpr], Value)]
+correctProbValuesTestCases :: [(Program, IRValue, [IRExpr], IRValue)]
 correctProbValuesTestCases = [(uniformProg, VFloat 0.5, [], VFloat 1.0),
                               (normalProg, VFloat 0.5, [], VFloat $ normalPDF 0.5),
                               (uniformProgMult, VFloat (-0.25), [], VFloat 2),
@@ -78,7 +79,6 @@ correctProbValuesTestCases = [(uniformProg, VFloat 0.5, [], VFloat 1.0),
                               (simpleTuple, VTuple (VFloat 0.25) (VFloat 0), [], VFloat $ normalPDF 0 * 2),
                               (uniformIfProg, VFloat 0.5, [], VFloat 0.5),
                               (constantProg, VFloat 2, [], VFloat 1),
-                              
                               (uniformExp, VFloat $ exp 4.5, [], VFloat $ 1/exp 4.5),
                               (testInjF, VFloat 1.5, [], VFloat 0.5),
                               (testInjF2, VFloat 3, [], VFloat 0.5),
@@ -100,13 +100,15 @@ correctProbValuesTestCases = [(uniformProg, VFloat 0.5, [], VFloat 1.0),
                               (testCoin, VInt 1, [], VFloat 0.5),
                               (testCoin, VInt 3, [], VFloat 0.0),
                               (testDice, VInt 2, [], VFloat 0.16666666),
-                              (testDice, VInt 7, [], VFloat 0)]
-                              --(testDiceAdd, VInt 2, [], VFloat (1/36))]
+                              (testDice, VInt 7, [], VFloat 0),
+                              (testDiceAdd, VInt 2, [], VFloat (1/36))]
+                              --(testLambdaParameter, VFloat 10, [], VFloat 1.0)]
 
-correctIntegralValuesTestCases :: [(Program, Value, Value, [IRExpr], Value)]
+correctIntegralValuesTestCases :: [(Program, IRValue, IRValue, [IRExpr], IRValue)]
 correctIntegralValuesTestCases = [(uniformProg, VFloat 0, VFloat 1, [], VFloat 1.0),
                                   (uniformProg, VFloat  (-1), VFloat 2, [], VFloat 1.0),
                                   (normalProg, VFloat (-5), VFloat 5, [], VFloat $ normalCDF 5 - normalCDF (-5)),
+                                  --(normalProg, VFloat 0, VFloat 0, [], VFloat $ normalPDF 0),
                                   (normalProgMult, VFloat (-5), VFloat 5, [], VFloat $ normalCDF 10 - normalCDF (-10)),
                                   (uniformNegPlus, VFloat (-5), VFloat (-4.5), [], VFloat 0.5),
                                   (uniformProgPlus, VFloat 4, VFloat 4.5, [], VFloat 0.5),
@@ -120,8 +122,9 @@ correctIntegralValuesTestCases = [(uniformProg, VFloat 0, VFloat 1, [], VFloat 1
                                   (testInjFPlusLeft, VFloat 1, VFloat 1.5, [], VFloat 0.5),
                                   (testInjFPlusRight, VFloat 1, VFloat 1.5, [], VFloat 0.5),
                                   (testTheta, VFloat 0.9, VFloat 1.1, flatTree [1], VFloat 1),
-                                  (simpleCall, VFloat 0, VFloat 1, [], VFloat 1.0)]
-                                  --(testCallLambda, VFloat 2, VFloat 3, [], VFloat 1.0)]
+                                  (simpleCall, VFloat 0, VFloat 1, [], VFloat 1.0),
+                                  (testCallLambda, VFloat 2, VFloat 3, [], VFloat 1.0)]
+                                  --(testLambdaParameter, VFloat 9, VFloat 11, [], VFloat 1.0)]
                                   --(testCallLambdaAdvanced, VFloat 2, VFloat 3, [], VFloat 1.0),
                                   --(testLetIn, VFloat 1.5, VFloat 2, [], VFloat 0.5)]
 
@@ -143,14 +146,14 @@ prop_CheckTopKInterprets = forAll (elements correctProbValuesTestCases) checkTop
 prop_CheckProbTestCasesWithBC :: Property
 prop_CheckProbTestCasesWithBC = forAll (elements correctProbValuesTestCases) checkProbTestCasesWithBC
 
-checkProbTestCase :: (Program, Value, [IRExpr], Value) -> Property
+checkProbTestCase :: (Program, IRValue, [IRExpr], IRValue) -> Property
 checkProbTestCase (p, inp, params, out) = ioProperty $ do
   actualOutput <- evalRandIO $ irDensity p inp params
   case actualOutput of 
     VTuple a (VFloat _) -> return $ a `reasonablyClose` out
     _ -> return $ counterexample "Return type was no tuple" False
 
-checkIntegralTestCase :: (Program, Value, Value, [IRExpr], Value) -> Property
+checkIntegralTestCase :: (Program, IRValue, IRValue, [IRExpr], IRValue) -> Property
 checkIntegralTestCase (p, low, high, params, out) = ioProperty $ do
   actualOutput <- evalRandIO $ irIntegral p low high params
   case actualOutput of 
@@ -158,7 +161,7 @@ checkIntegralTestCase (p, low, high, params, out) = ioProperty $ do
     _ -> return $ counterexample "Return type was no tuple" False
 
 --TODO better bounds for Integral
-checkIntegralConverges :: (Program, Value, Value, [IRExpr], Value) -> Property
+checkIntegralConverges :: (Program, IRValue, IRValue, [IRExpr], IRValue) -> Property
 checkIntegralConverges (p, VFloat a, VFloat b, params, _) = ioProperty $ do
   actualOutput <- evalRandIO $ irIntegral p (VFloat (-9999999)) (VFloat 9999999) params
   case actualOutput of 
@@ -166,12 +169,12 @@ checkIntegralConverges (p, VFloat a, VFloat b, params, _) = ioProperty $ do
     _ -> return $ counterexample "Return type was no tuple" False
 checkIntegralConverges _ = False ==> False
 
-checkTopKInterprets :: (Program, Value, [IRExpr], Value) -> Property
+checkTopKInterprets :: (Program, IRValue, [IRExpr], IRValue) -> Property
 checkTopKInterprets (p, inp, params, _) = ioProperty $ do
   actualOutput <- evalRandIO $ irDensityTopK p 0.05 inp params
   return $ actualOutput `reasonablyClose` actualOutput  -- No clue what the correct value should be here. Just test that is interprets to any value
 
-checkProbTestCasesWithBC :: (Program, Value, [IRExpr], Value) -> Property
+checkProbTestCasesWithBC :: (Program, IRValue, [IRExpr], IRValue) -> Property
 checkProbTestCasesWithBC (p, inp, params, out) = ioProperty $ do
   actualOutput <- evalRandIO $ irDensityBC p inp params
   case actualOutput of 
@@ -189,7 +192,7 @@ prop_TopK = ioProperty $ do
 --prop_CheckProbTestCases = foldr (\(p, inp, out) acc -> do
 --  checkProbTestCase p inp out .&&. acc) (True===True) correctProbValuesTestCases
 
-irDensityTopK :: RandomGen g => Program -> Double -> Value -> [IRExpr]-> Rand g Value
+irDensityTopK :: RandomGen g => Program -> Double -> IRValue -> [IRExpr]-> Rand g IRValue
 irDensityTopK p thresh s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params) irExpr
   where Just irExpr = lookup "main_prob" irEnv
         sampleExpr = IRConst s
@@ -197,7 +200,7 @@ irDensityTopK p thresh s params = IRInterpreter.generateRand irEnv irEnv (sample
         annotated = annotateProg typedProg
         typedProg = addTypeInfo p
 
-irDensityBC :: RandomGen g => Program -> Value -> [IRExpr]-> Rand g Value
+irDensityBC :: RandomGen g => Program -> IRValue -> [IRExpr]-> Rand g IRValue
 irDensityBC p s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params) irExpr
   where Just irExpr = lookup "main_prob" irEnv
         sampleExpr = IRConst s
@@ -205,7 +208,7 @@ irDensityBC p s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:para
         annotated = annotateProg typedProg
         typedProg = addTypeInfo p
 
-irDensity :: RandomGen g => Program -> Value -> [IRExpr] -> Rand g Value
+irDensity :: RandomGen g => Program -> IRValue -> [IRExpr] -> Rand g IRValue
 irDensity p s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params) irExpr
   where Just irExpr = lookup "main_prob" irEnv
         sampleExpr = IRConst s
@@ -213,7 +216,7 @@ irDensity p s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params
         annotated = annotateProg typedProg
         typedProg = addTypeInfo p
 
-irIntegral :: RandomGen g => Program -> Value -> Value -> [IRExpr] -> Rand g Value
+irIntegral :: RandomGen g => Program -> IRValue -> IRValue -> [IRExpr] -> Rand g IRValue
 irIntegral p low high params = IRInterpreter.generateRand irEnv irEnv (lowExpr:highExpr:params) irExpr
   where Just irExpr = lookup "main_integ" irEnv
         lowExpr = IRConst low
@@ -222,7 +225,7 @@ irIntegral p low high params = IRInterpreter.generateRand irEnv irEnv (lowExpr:h
         annotated = annotateProg typedProg
         typedProg = addTypeInfo p
 
-reasonablyClose :: Value -> Value -> Property
+reasonablyClose :: IRValue -> IRValue -> Property
 reasonablyClose (VFloat a) (VFloat b) = property $ abs (a - b) <= 1e-5
 reasonablyClose a b = a === b
 

@@ -15,7 +15,6 @@ module SPLL.Lang.Lang (
 , Name
 , Limits (..)
 , exprMap
-, swapLimits
 , prettyPrintProg
 , prettyPrint
 , prettyPrintProgNoReq
@@ -85,9 +84,6 @@ checkLimits (Limits Nothing (Just (VFloat _))) = True
 checkLimits (Limits Nothing Nothing) = True
 checkLimits _ = False
 
-swapLimits :: Value -> Value
-swapLimits (VRange (Limits a b)) = VRange (Limits b a)
-swapLimits _ = error "swapLimits on non-range"
 
 tInfoMap :: (a -> b) -> TypeInfo -> TypeInfo
 tInfoMap f t = undefined

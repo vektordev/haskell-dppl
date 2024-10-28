@@ -101,7 +101,7 @@ inferType prog = do
 addPTypeInfo :: Program -> Program
 addPTypeInfo p = do
     case inferProgram mempty p of
-       Left err -> error "error in addPTypeInfo"
+       Left err -> error ("error in addPTypeInfo: " ++ show err)
        Right (_, _, p) ->  p
 
 tryAddPTypeInfo :: Program -> Either PTypeError Program
@@ -562,7 +562,8 @@ infer env expr = case expr of
     (s1, cs1, t1) <- plusInf
     (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
     (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
-    return (s3, cs3, t3, PlusI (setPType ti t3) et1 et2)
+    -- return (s3, cs3, t3, PlusI (setPType ti t3) et1 et2)
+    return (s3, cs3, t3, PlusI (setPType ti Prob) et1 et2)
 
   MultF ti e1 e2 -> do
       (s1, cs1, t1) <- plusInf
@@ -574,7 +575,8 @@ infer env expr = case expr of
       (s1, cs1, t1) <- plusInf
       (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
       (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
-      return (s3, cs3, t3, MultI (setPType ti t3) et1 et2)
+      -- return (s3, cs3, t3, MultI (setPType ti t3) et1 et2)
+      return (s3, cs3, t3, MultI (setPType ti Prob) et1 et2)
 
   Not ti e -> do
       (s1, cs1, t1) <- negInf

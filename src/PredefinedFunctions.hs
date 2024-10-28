@@ -12,6 +12,7 @@ import SPLL.Lang.Lang
 import SPLL.Typing.Typing
 import Data.Set (fromList)
 import Data.Maybe (fromJust)
+import SPLL.Lang.Types
 
 -- InputVars, OutputVars, fwd, grad
 newtype FDecl = FDecl (RType, [String], [String], IRExpr, [(String, IRExpr)]) deriving (Show, Eq)
