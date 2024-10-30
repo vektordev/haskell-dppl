@@ -36,6 +36,8 @@ import Data.Number.Erf (erf)
 import Numeric.AD (grad', auto)
 import Numeric.AD.Internal.Reverse (Reverse, Tape)
 import Data.Reflection (Reifies)
+import SPLL.Parser
+import TestParser
 
 -- Generalizing over different compilation stages, we can fit all "this typing is what the compiler would find" cases.
 class Recompilable a where
@@ -384,7 +386,9 @@ runTests = $quickCheckAll
 
 main :: IO Bool
 main = do
-  x <- runTests
+  a <- runTests
+  b <- test_parser
+  let x = a && b
   print x
   return x
   --mapM_ (quickCheck . not . canCompile) uncompilables

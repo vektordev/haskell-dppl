@@ -41,6 +41,7 @@ dependencies:
 - erf
 - lens
 - optparse-applicative
+- parser-combinators
 
 library:
   source-dirs: src

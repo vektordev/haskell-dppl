@@ -1,27 +1,83 @@
 module ArbitrarySPLL (
   genExpr
 , genProg
+, genIdentifier
+, genValidIdentifier
 )where
 
 import Test.QuickCheck
 
 import SPLL.Lang.Lang
-import SPLL.Lang.Types (TypeInfo, makeTypeInfo)
+import SPLL.Lang.Types
+import SPLL.Typing.RType
+import SPLL.Parser (reserved)
 
+-- Arbitrary instances for generating test data
+instance Arbitrary Value where
+  arbitrary = oneof [
+    VInt <$> arbitrary,
+    VFloat <$> choose (-100, 100)
+    ]
+
+-- Generate simple identifiers
+genIdentifier :: Gen String
+genIdentifier = do
+  first <- elements ['a'..'z']
+  rest <- listOf (elements $ ['a'..'z'] ++ ['0'..'9'])
+  return (first:rest)
+  
+-- Generator for valid identifiers (not in reserved list)
+genValidIdentifier :: Gen String
+genValidIdentifier = do
+  ident <- genIdentifier
+  if ident `elem` reserved
+    then genValidIdentifier  -- try again
+    else return ident
+
+-- Generate simple expressions
 instance Arbitrary Expr where
-  arbitrary = genExpr
+  arbitrary = sized genExpr
 
+-- TODO: Missing a bunch of patterns.
+genExpr :: Int -> Gen Expr
+genExpr 0 = oneof [
+  Constant makeTypeInfo <$> arbitrary,
+  Var makeTypeInfo <$> genIdentifier
+  ]
+genExpr n = oneof [
+  genExpr 0,
+  Apply makeTypeInfo <$> genExpr (n `div` 2) <*> genExpr (n `div` 2),
+  IfThenElse makeTypeInfo <$> genExpr (n `div` 3) <*> genExpr (n `div` 3) <*> genExpr (n `div` 3),
+  Lambda makeTypeInfo <$> genIdentifier <*> genExpr (n-1)
+  ]
+
+-- Additional Arbitrary instances
 instance Arbitrary Program where
-  arbitrary = genProg
+  arbitrary = do
+    numFuncs <- choose (0, 5)  -- reasonable limit for test cases
+    numNeurals <- choose (0, 5)
+    funcs <- vectorOf numFuncs genFunctionDecl
+    neurals <- vectorOf numNeurals genNeuralDecl
+    return $ Program funcs neurals
+
+genFunctionDecl :: Gen FnDecl
+genFunctionDecl = do
+  name <- genIdentifier
+  numArgs <- choose (0, 3)  -- reasonable limit for test cases
+  args <- vectorOf numArgs genIdentifier
+  body <- arbitrary
+  let expr = foldr (Lambda makeTypeInfo) body args
+  return (name, expr)
+
+genNeuralDecl :: Gen NeuralDecl
+genNeuralDecl = do
+  name <- genIdentifier
+  -- For now just using TInt, could expand to arbitrary RType if needed
+  values <- listOf1 (VInt <$> arbitrary)
+  return (name, TInt, EnumList values)
 
 instance Arbitrary TypeInfo where
   arbitrary = return makeTypeInfo -- TODO: generates untyped programs for now.
-
--- Property based testing: Define a Generator for Expr t a and Program t a:
-genExpr :: Gen Expr
-genExpr = do
-  names <- varNames
-  genExprNames names
 
 genProg :: Gen Program
 genProg = do
