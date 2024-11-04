@@ -19,6 +19,7 @@ module SPLL.Lang.Lang (
 , prettyPrintProg
 , prettyPrint
 , prettyPrintProgNoReq
+, prettyPrintNoReq
 , getVFloat
 , checkLimits
 , WitnessedVars
@@ -558,7 +559,7 @@ printFlat expr = case expr of
   (Arg _ var r _ ) -> "Bind " ++ var ++ "::" ++ show r
   (CallArg _ a _ ) -> "CallArg " ++ a
   (Lambda _ name _) -> "\\" ++ name  ++ " -> "
-  Apply {} -> "CallLambda"
+  Apply {} -> "Apply"
   (ReadNN _ name _) -> "ReadNN " ++ name
 
 printFlatNoReq :: Expr -> String
@@ -592,6 +593,6 @@ printFlatNoReq expr = case expr of
   (Arg _ var r _ ) -> "Bind " ++ var ++ "::" ++ show r
   (CallArg _ a _ ) -> "CallArg" ++ a
   (Lambda _ name _) -> "\\" ++ name  ++ " -> "
-  Apply {} -> "CallLambda"
+  Apply {} -> "Apply"
   ReadNN {} -> "ReadNN"
   

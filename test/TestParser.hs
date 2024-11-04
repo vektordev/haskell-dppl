@@ -244,6 +244,7 @@ prop_inverseParsing =
                   where debug = unlines ["original program:", show program, pPrintProg program, "parsed program", show reconstructed, pPrintProg reconstructed, "String input:", programToString program]
                 Left err -> counterexample ("Failed to parse: " ++ programStr ++ "\n" ++ errorBundlePretty err) False
 
+
 matchProg :: Program -> Program -> Property
 matchProg p1 p2
     -- Check if programs are directly equal
@@ -270,7 +271,7 @@ matchProg p1 p2
 
 matchFn :: FnDecl -> FnDecl -> Property
 matchFn (name1, expr1) (name2, expr2)
-    | name1 == name2 = counterexample (unlines ["In function " ++ name1 ++ ": ", pPrintExpr expr1 0, pPrintExpr expr2 0]) (matchExpr expr1 expr2)
+    | name1 == name2 = counterexample (unlines ["In function " ++ name1 ++ ": ", unlines $ prettyPrintNoReq expr1, unlines $ prettyPrintNoReq expr2]) (matchExpr expr1 expr2)
     | otherwise = counterexample ("Function name mismatch: " ++ show name1 ++ " /= " ++ show name2) False
 
 matchNeural :: NeuralDecl -> NeuralDecl -> Property

@@ -15,16 +15,23 @@ import Data.Void
 import Text.Megaparsec hiding (State)
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
-import SPLL.Lang.Types
-import SPLL.Lang.Lang
-import SPLL.Typing.Typing
-import SPLL.Typing.RType
 import PrettyPrint
 import Text.Pretty.Simple (pPrint)
+
+import Data.Either (Either(..))
+import qualified Data.Map as Map
+import qualified Data.Set as Set
 
 import Control.Monad.Combinators.Expr
 import Data.Void
 import Control.Monad (void)
+import Data.List.NonEmpty (NonEmpty (..))
+
+import SPLL.Lang.Types
+import SPLL.Lang.Lang
+import SPLL.Typing.Typing
+import SPLL.Typing.RType
+import PredefinedFunctions (globalFenv)
 
 --import Text.Megaparsec.Debug (dbg)
 dbg x y = y
@@ -291,7 +298,14 @@ tryParseExpr :: FilePath -> String -> Either (ParseErrorBundle String Void) Expr
 tryParseExpr filename src = runParser parseExpr filename src
 
 tryParseProgram :: FilePath -> String -> Either (ParseErrorBundle String Void) Program
-tryParseProgram filename src = runParser pProg filename src
+tryParseProgram filename src = do
+  prog <- runParser pProg filename src
+  case normalize prog of
+    Right prog -> Right prog
+    Left err -> Left $ ParseErrorBundle ((FancyError 0 (Set.singleton (ErrorFail err))) :| []) emptyPosState
+
+emptyPosState :: PosState String
+emptyPosState = PosState "" 0 (SourcePos "" (mkPos 0)(mkPos 0)) (mkPos 0) ""
 
 testParse :: IO ()
 testParse = do
@@ -445,3 +459,90 @@ expressionParser = sc *> expr <* eof
 testParser :: String -> Either (ParseErrorBundle String Void) Expr
 testParser input = parse expressionParser "" input
 
+
+
+type ExprBuilder = TypeInfo -> [Expr] -> Either String Expr
+type BuilderMap = Map.Map String ExprBuilder
+
+-- | Normalize a Program
+--  After normalization, all Vars should be properly resolved as either a ReadNN, a InjF, or a plain Var.
+normalize :: Program -> Either String Program
+normalize prog =
+  let neuralMap = buildNeuralMap (neurals prog)
+      invMap = buildInvMap globalFenv
+      functionMap = globalFunctions prog
+      --benignVars = collectBenignVars prog
+      builderMap = Map.unions [neuralMap, invMap]  -- neural builders take precedence
+  in if Map.disjoint invMap neuralMap && Map.disjoint invMap functionMap && Map.disjoint neuralMap functionMap
+    then mapExprInProgram (normalizeExpr (builderMap, functionMap, Set.empty)) prog
+    else Left $ "Found identifiers that are in multiple scopes."
+
+-- Build maps from identifiers to expression builders
+buildNeuralMap :: [NeuralDecl] -> BuilderMap
+buildNeuralMap decls = Map.fromList
+  [(name, \ti [arg] -> Right $ ReadNN ti name arg) | (name, _, _) <- decls]
+
+buildInvMap :: [(String, a)] -> BuilderMap
+buildInvMap fenv = Map.fromList
+  [(name, \ti args -> case args of
+    [] -> Left $ name ++ " requires arguments"
+    --[_] -> Left $ name ++ " requires multiple arguments"
+    _ -> Right $ InjF ti name args)
+   | (name, _) <- fenv]
+
+globalFunctions :: Program -> BuilderMap
+globalFunctions prog = Map.fromList [(name, \ti [] -> Right $ Call ti name) | (name, _) <- functions prog]
+
+-- Collect all variables that should not be transformed
+collectBenignVars :: Program -> Set.Set String
+collectBenignVars prog = Set.fromList [name | (name, _) <- functions prog]
+
+-- Main expression normalization function
+normalizeExpr :: (BuilderMap, BuilderMap, Set.Set String) -> Expr -> Either String Expr
+normalizeExpr env@(parametricBuilders, atomicBuilders, benign) expr =
+  case expr of
+    -- Handle scopes first, adding bound variables before processing sub-expressions
+    Lambda ti name body ->
+      normalizeExpr (parametricBuilders, atomicBuilders, Set.insert name benign) body
+      >>= \body' -> Right $ Lambda ti name body'
+
+    LetIn ti name def body -> do
+      -- def is normalized with current scope
+      def' <- normalizeExpr env def
+      -- body is normalized with name added to scope
+      body' <- normalizeExpr (parametricBuilders, atomicBuilders, Set.insert name benign) body
+      Right $ LetIn ti name def' body'
+
+    -- For all other expressions, normalize sub-expressions first then check for Apply pattern
+    _ -> do
+      subExprs <- mapM (normalizeExpr env) (getSubExprs expr)
+      let expr' = setSubExprs expr subExprs
+      case expr' of
+        -- Start of an Apply chain
+        Apply ti (Apply _ _ _) _ ->
+          -- Need to collect all args in the chain and find base function
+          let (base, args) = collectApplyChain expr
+          in case base of
+            Var _ fname | Just builder <- Map.lookup fname parametricBuilders ->
+              builder ti args  -- builder now takes [Expr]
+            _ -> Right expr
+        Apply ti (Var _ fname) arg
+          | not (Set.member fname benign)
+          , Just builder <- Map.lookup fname parametricBuilders -> builder ti [arg]
+        Var ti fname
+          | not (Set.member fname benign)
+          , Just builder <- Map.lookup fname atomicBuilders -> builder ti []
+        _ -> Right expr'
+
+-- Returns (base expression, arguments in application order)
+collectApplyChain :: Expr -> (Expr, [Expr])
+collectApplyChain (Apply _ left arg) =
+  let (base, args) = collectApplyChain left
+  in (base, args ++ [arg])  -- maintain order of application
+collectApplyChain e = (e, [])
+
+-- Helper to map over all expressions in a program
+mapExprInProgram :: (Expr -> Either String Expr) -> Program -> Either String Program
+mapExprInProgram f prog = do
+  newFuncs <- mapM (\(name, expr) -> f expr >>= \e -> Right (name, e)) (functions prog)
+  Right $ prog { functions = newFuncs }
