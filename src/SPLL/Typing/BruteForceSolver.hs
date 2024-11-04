@@ -25,14 +25,14 @@ runBruteForceSolver :: Expr -> IO ()
 runBruteForceSolver expr = do
   let env = [("main", expr)]
   let prog = Program env []
-  let p = addEmptyTypeInfo prog
+  let p = prog
   let ntypings = length (allTypes (R 0) p)
   print ntypings
   let test = forceAddTypeInfo prog
   print test
 
 forceAddTypeInfo :: Program -> Maybe Program
-forceAddTypeInfo prog = addPTypeInfo =<< addRTypeInfo (addEmptyTypeInfo prog)
+forceAddTypeInfo prog = addPTypeInfo =<< addRTypeInfo prog
 
 addRTypeInfo :: Program -> Maybe Program
 addRTypeInfo p = case filtered of

@@ -1,6 +1,5 @@
 module SPLL.CodeGenPyTorch (
-  generateCode
-, generateFunctions
+  generateFunctions
 ) where
   
 import SPLL.IntermediateRepresentation
@@ -53,6 +52,13 @@ pyOps OpSub = "-"
 pyOps OpOr = "or"
 pyOps OpAnd = "and"
 pyOps OpEq = "=="
+
+pyUnaryOps :: UnaryOperand -> String
+pyUnaryOps OpNeg = "-"
+pyUnaryOps OpExp = "math.exp"
+pyUnaryOps OpAbs = "abs"
+pyUnaryOps OpNot = "not"
+pyUnaryOps OpLog = "math.log"
 
 pyVal :: IRValue -> String
 pyVal (VList xs) = "[" ++ (intercalate "," $ map pyVal xs) ++ "]"
@@ -115,79 +121,53 @@ generateFunction :: (String, IRExpr) -> [String]
 generateFunction (name, expr) = let
   (args, reducedExpr) = unwrapLambdas expr
   l1 = "def " ++ name ++ "(" ++ intercalate ", " ("self" : args) ++ "):"
-  block = generateCode reducedExpr "return "
+  block = generateStatementBlock reducedExpr
   --TODO Use returnize to find all exprs to attach returns to.
   in [l1] ++ indentOnce block
 
--- IRReturning should be transparent here.
 unwrapLambdas :: IRExpr -> ([String], IRExpr)
 unwrapLambdas (IRLambda name rest) = (name:otherNames, plainTree)
   where (otherNames, plainTree) = unwrapLambdas rest
-unwrapLambdas (IRReturning rest) = (otherNames, IRReturning plainTree)
-  where (otherNames, plainTree) = unwrapLambdas rest
 unwrapLambdas anyNode = ([], anyNode)
 
-generateCode :: IRExpr -> String -> [String]
-generateCode (IRIf cond left right) "" = wrapMultiBlock ["(", " if ", " else ", ")"] [generateCode left "", generateCode cond "", generateCode right ""]
-generateCode (IRIf cond left right) bindto = let
-  [cCond] = generateCode cond ""
-  cLeft = generateCode left bindto
-  cRight = generateCode right bindto
+generateStatementBlock :: IRExpr -> [String]
+generateStatementBlock (IRLetIn name lmd@(IRLambda _ _) body) = generateFunction (name, lmd) ++ generateStatementBlock body
+generateStatementBlock (IRLetIn name val body) = (name ++ " = " ++ generateExpression val):generateStatementBlock body
+generateStatementBlock (IRIf cond left right) = let
+  cCond = generateExpression cond
+  cLeft = generateStatementBlock left
+  cRight = generateStatementBlock right
   l1 = "if " ++ cCond ++ ":"
   l2 = "else:"
   in [l1] ++ indentOnce cLeft ++ [l2] ++ indentOnce cRight
-generateCode (IROp op left right) bindto = wrapMultiBlock [bindto ++ "(", " " ++ pyOps op ++ " ", ")"] [generateCode left "", generateCode right ""]
---generateCode (IROp op left right) bindto = lines ("(" ++ unlinesTrimLeft (generateCode left "") ++ " " ++ pyOps op ++ " " ++ unlinesTrimLeft (generateCode right "") ++ ")")
-generateCode (IRUnaryOp OpExp expr) bindto = wrap (bindto ++ "math.exp(") (generateCode expr "") ")"
-generateCode (IRUnaryOp OpLog expr) bindto = wrap (bindto ++ "math.log(") (generateCode expr "") ")"
-generateCode (IRUnaryOp OpNeg expr) bindto = wrap (bindto ++ "-(") (generateCode expr "") ")"
-generateCode (IRUnaryOp OpNot expr) bindto = wrap (bindto ++ "not(") (generateCode expr "") ")"
-generateCode (IRUnaryOp OpAbs expr) bindto = wrap (bindto ++ "abs(") (generateCode expr "") ")"
-generateCode (IRTheta expr i) bindto = wrap (bindto ++ "(") (generateCode expr "") (")[0][" ++ show i ++ "]")
-generateCode (IRSubtree expr i) bindto = wrap (bindto ++ "(") (generateCode expr "") (")[1][" ++ show i ++ "]")
-generateCode (IRConst val) bindto = [bindto ++ pyVal val]
-generateCode (IRCons hd tl) bindto = wrapMultiBlock [bindto ++ "[", "] + ", ""] [generateCode hd "", generateCode tl ""]
-generateCode (IRTCons t1 t2) bindto = wrapMultiBlock [bindto ++ "(", ", ", ")"] [generateCode t1 "", generateCode t2 ""]
-generateCode (IRHead lst) bindto = wrap (bindto ++ "(") (generateCode lst "") ")[0]"
-generateCode (IRTail lst) bindto = wrap (bindto ++ "(") (generateCode lst "") ")[1:]"
-generateCode (IRElementOf ele lst) bindto = wrapMultiBlock [bindto ++ "(", " in ", ")"] [generateCode ele "", generateCode lst ""]
-generateCode (IRTFst t) bindto = wrap (bindto ++ "(") (generateCode t "") ")[0]"
-generateCode (IRTSnd t) bindto = wrap (bindto ++ "(") (generateCode t "") ")[1]"
-generateCode (IRSample IRNormal) bindto = [bindto ++ "randn()"]
-generateCode (IRSample IRUniform) bindto = [bindto ++ "rand()"]
-generateCode (IRLetIn name bind into) bindto = let  --TODO Letins in method calls
-  l1 = "("
-  bindCode = generateCode bind (name ++ " = ")
-  --assignment = if length bindCode == 1 then [name ++ " = " ++ spicyHead (generateCode bind)] else undefined
-  assignment = bindCode
-  rest = generateCode into bindto
-  block = indentOnce (assignment ++ rest)
-  lend = ")"
-  --in [l1] ++ block ++ [lend]
-  in assignment ++ rest
-generateCode (IRVar var) bindto = [bindto ++ var]
-generateCode (IRDensity dist subexpr) bindto = let
-  subexprCode = generateCode subexpr ""
-  block = wrap (bindto ++ "density_" ++ show dist ++ "(") subexprCode ")"
-  in block
-generateCode (IRCumulative dist subexpr) bindto = let
-  subexprCode = generateCode subexpr ""
-  block = wrap (bindto ++ "cumulative_" ++ show dist ++ "(") subexprCode ")"
-  in block
---sum $ map (\name -> subexpr name) enumRange
-generateCode (IREnumSum name enumRange subexpr) bindto = let
-  function = wrap ("sum(map((lambda " ++ name ++ ": ") (generateCode subexpr "") ("), " ++ pyVal enumRange ++ "))")
-  --l2 = "sum(map(" ++ function ++ ", " ++ juliaVal enumRange ++ "))"
-  in function
-generateCode (IRIndex arrExpr indexExpr) bindto = let
-  arrCode = spicyHead $ generateCode arrExpr ""
-  indexCode = spicyHead $ generateCode indexExpr ""
-  in [arrCode ++ "[" ++ indexCode ++ "]"]
-generateCode (IREvalNN funcName argExpr) bindto = [funcName ++ "(" ++ spicyHead (generateCode argExpr "") ++ ")"]
-generateCode (IRCall funcName argExprs) bindto = [bindto ++ funcName ++ "(" ++ (intercalate "," (map (\expr -> spicyHead $ generateCode expr "") argExprs)) ++ ")"]
-generateCode (IRApply lambda argExpr) bindto = [bindto ++ spicyHead (generateCode lambda "") ++ "(" ++ spicyHead (generateCode argExpr "") ++ ")"]
-generateCode (IRLambda varName expr) bindto = [bindto ++ "(lambda " ++ varName ++ ": " ++ spicyHead (generateCode expr "") ++ ")"]
-generateCode (IRReturning expr) bindto = let
-  arrCode = generateCode expr ""
-  in onLast ("return " ++) arrCode
-generateCode x y = error ("No PyTorch CodeGen for IR: " ++ show x)
+generateStatementBlock expr = ["return " ++ generateExpression expr]
+
+
+generateExpression :: IRExpr -> String
+generateExpression (IRIf cond left right) = "(" ++ generateExpression left ++ " if " ++ generateExpression cond ++ " else " ++ generateExpression right ++ ")"
+generateExpression (IROp op left right) = "((" ++ generateExpression left ++ ") " ++ pyOps op ++ " (" ++ generateExpression right ++"))" 
+generateExpression (IRUnaryOp op expr) = pyUnaryOps op ++ "(" ++ generateExpression expr ++ ")"
+generateExpression (IRTheta x i) = "(" ++ generateExpression x ++ ")[0][" ++ show i ++ "]" 
+generateExpression (IRSubtree x i) = "(" ++ generateExpression x ++ ")[1][" ++ show i ++ "]" 
+generateExpression (IRConst v) = pyVal v
+generateExpression (IRCons hd tl) = "[" ++ generateExpression hd ++ "] + " ++ generateExpression tl
+generateExpression (IRElementOf el lst) = "(" ++ generateExpression el ++ " in " ++ generateExpression lst ++ ")"
+generateExpression (IRTCons fs sn) = "(" ++ generateExpression fs ++ ", " ++ generateExpression sn ++ ")"
+generateExpression (IRHead x) = "(" ++ generateExpression x ++ ")[0]" 
+generateExpression (IRTail x) = "(" ++ generateExpression x ++ ")[1:]" 
+generateExpression (IRTFst x) = "(" ++ generateExpression x ++ ")[0]" 
+generateExpression (IRTSnd x) = "(" ++ generateExpression x ++ ")[1]" 
+generateExpression (IRDensity dist x) = "density_" ++ show dist ++ "(" ++ generateExpression x ++ ")"
+generateExpression (IRCumulative dist x) = "cumulative_" ++ show dist ++ "(" ++ generateExpression x ++ ")"
+generateExpression (IRSample IRNormal) = "randn()"
+generateExpression (IRSample IRUniform) = "rand()"
+generateExpression (IRVar name) = name
+generateExpression (IRCall name params) = name ++ "(" ++ intercalate ", " (map generateExpression params) ++ ")"
+generateExpression (IRLambda name x) = "(lambda " ++ name  ++ ": " ++ generateExpression x ++ ")"
+generateExpression (IRApply f val) = "(" ++ generateExpression f ++ ")(" ++ generateExpression val ++ ")" 
+generateExpression (IREnumSum name enumRange expr) = "sum(map((lambda " ++ name ++ ": " ++ generateExpression expr ++ "), " ++ pyVal enumRange ++ "))"
+generateExpression (IREvalNN name arg) = name ++ "(" ++ generateExpression arg ++ ")"
+generateExpression (IRIndex lst idx) = "(" ++ generateExpression lst ++ ")[" ++ generateExpression idx ++ "]" 
+-- I personally hate this code. I constructs a tuple with an assignment expression in the first element and discards the first element
+generateExpression (IRLetIn name val body) = "((" ++ name ++ ":=" ++ generateExpression val ++ "), " ++ generateExpression body ++ ")[1]"
+generateExpression x = error ("Unknown expression in PyTorch codegen: " ++ show x)

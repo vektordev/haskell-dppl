@@ -525,6 +525,13 @@ inferProg env (Program decls nns) = do
   let tcs = zipWith makeEqConstraint tvs (map trd3 cts)
   -- combine all constraints
   return (s1, cs1 ++ concatMap snd3 cts ++ tcs , t1, Program (zip (map fst decls) (map frth3 cts)) nns)
+  
+isEnumerable :: Expr -> Bool
+isEnumerable e = foldr (\tag b -> b || isEnum tag) False (tags (getTypeInfo e))
+  where isEnum (EnumList _) = True
+        isEnum (EnumRange _) = True
+        isEnum _ = False
+
 
 infer :: TEnv -> Expr -> Infer (Subst, [DConstraint], PType, Expr)
 infer env expr = case expr of
@@ -563,7 +570,8 @@ infer env expr = case expr of
     (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
     (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
     -- return (s3, cs3, t3, PlusI (setPType ti t3) et1 et2)
-    return (s3, cs3, t3, PlusI (setPType ti Prob) et1 et2)
+    let pt = if isEnumerable e1 && isEnumerable e2 then Prob else t3
+    return (s3, cs3, pt, PlusI (setPType ti pt) et1 et2)
 
   MultF ti e1 e2 -> do
       (s1, cs1, t1) <- plusInf
@@ -576,7 +584,8 @@ infer env expr = case expr of
       (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
       (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
       -- return (s3, cs3, t3, MultI (setPType ti t3) et1 et2)
-      return (s3, cs3, t3, MultI (setPType ti Prob) et1 et2)
+      let pt = if isEnumerable e1 && isEnumerable e2 then Prob else t3
+      return (s3, cs3, pt, MultI (setPType ti pt) et1 et2)
 
   Not ti e -> do
       (s1, cs1, t1) <- negInf

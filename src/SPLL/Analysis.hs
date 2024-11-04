@@ -1,13 +1,12 @@
 module SPLL.Analysis (
   annotate,
-  annotateProg
+  annotateEnumsProg,
+  annotateAlgsProg
 ) where
 
 import SPLL.Lang.Types
 import SPLL.Lang.Lang
 import SPLL.InferenceRule
-import SPLL.Typing.RType
-import SPLL.Typing.PType
 import Data.Maybe (maybeToList, fromJust, isNothing, fromMaybe)
 import Data.List (nub)
 import Data.Bifunctor
@@ -16,8 +15,8 @@ import Data.Set (fromList, toList)
 import Data.Set.Internal (merge, empty)
 
 
-annotateProg :: Program -> Program
-annotateProg p@Program {functions=f} = p{functions = map (second (annotate env)) f}
+annotateEnumsProg :: Program -> Program
+annotateEnumsProg p@Program {functions=f} = p{functions = map (second (annotate env)) f}
   --TODO this is really unclean. It does the the job of initializing the environment with correct tags, and also prevents infinite recursion, by only evaluating twice, but annotates the program twice
   where env = map (second (tags . getTypeInfo . annotate [])) f 
 
@@ -29,8 +28,7 @@ annotate env e = withNewTypeInfo
       (LetIn _ n v _) -> (n, tags $ getTypeInfo v):env
       _ -> env
     withNewSubExpr = setSubExprs e (map (annotate newEnv) (getSubExprs e))
-    tgs = EnumList (toList values):algs
-    algs = [Alg $ findAlgorithm e | likelihoodFunctionUsesTypeInfo $ toStub e]
+    tgs = [EnumList (toList values)]
     values = case withNewSubExpr of
       (Constant _ a@(VInt _)) -> fromList [a]
       (ReadNN _ name _) -> case lookup name env of
@@ -64,6 +62,17 @@ valuesOfTag tag = case tag of
   EnumList l -> l
   EnumRange (VInt a, VInt b) -> [VInt i | i <- [a..b]]
   _ -> []
+  
+annotateAlgsProg :: Program -> Program
+annotateAlgsProg p@Program {functions=fs} = p{functions=map (Data.Bifunctor.second (tMap tagAlgsExpression)) fs}
+
+tagAlgsExpression :: Expr -> TypeInfo
+tagAlgsExpression (InjF ti _ [_]) = ti
+tagAlgsExpression expr = 
+  if likelihoodFunctionUsesTypeInfo (toStub expr) then
+    setTags (getTypeInfo expr) (Alg (findAlgorithm expr):tags (getTypeInfo expr))
+  else
+    getTypeInfo expr
 
 findAlgorithm :: Expr -> InferenceRule
 findAlgorithm expr = case validAlgs of
@@ -76,14 +85,15 @@ findAlgorithm expr = case validAlgs of
     correctExpr = filter (checkExprMatches expr) allAlgorithms
 
 checkConstraint :: Expr -> InferenceRule -> RuleConstraint -> Bool
-checkConstraint expr _ (SubExprNIsType n ptype) = ptype == p
+checkConstraint expr _ (SubExprNIsType n ptype) | length (getSubExprs expr) > n = ptype == p
   where p = pType $ getTypeInfo (getSubExprs expr !! n)
-checkConstraint expr _ (SubExprNIsNotType n ptype) = ptype /= p
+checkConstraint expr _ (SubExprNIsNotType n ptype) | length (getSubExprs expr) > n = ptype /= p
   where p = pType $ getTypeInfo (getSubExprs expr !! n)
 checkConstraint expr alg ResultingTypeMatch = resPType == annotatedType
   where
     annotatedType = pType $ getTypeInfo expr
     resPType = resultingPType alg (map (pType . getTypeInfo) (getSubExprs expr))
+checkConstraint _ _ _ = False
 
 likelihoodFunctionUsesTypeInfo :: ExprStub -> Bool
 likelihoodFunctionUsesTypeInfo expr = expr `elem` [StubGreaterThan, StubLessThan, StubMultF, StubMultI, StubPlusF, StubPlusI, StubInjF]

@@ -72,7 +72,7 @@ testNegFail :: Expr
 testNegFail = NegF makeTypeInfo (PlusF makeTypeInfo (Uniform makeTypeInfo) (Uniform makeTypeInfo))
 
 testInjF :: Program
-testInjF = Program [("main", InjF makeTypeInfo "double" [Uniform makeTypeInfo])] [] 
+testInjF = Program [("main", InjF makeTypeInfo "double" [Uniform makeTypeInfo])] []
 
 testInjFPlusLeft :: Program
 testInjFPlusLeft = Program [("main", InjF makeTypeInfo "plus" [Constant makeTypeInfo (VFloat 1), Uniform makeTypeInfo])] []
