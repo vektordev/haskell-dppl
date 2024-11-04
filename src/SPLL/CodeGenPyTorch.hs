@@ -4,7 +4,7 @@ module SPLL.CodeGenPyTorch (
 ) where
   
 import SPLL.IntermediateRepresentation
-import SPLL.Lang.Lang
+import SPLL.Lang.Types
 import Data.List (intercalate, isSuffixOf, nub, find)
 import Data.Char (toUpper, toLower)
 import Data.Maybe (fromJust, fromMaybe)
@@ -16,7 +16,7 @@ import Debug.Trace (trace)
 --TODO: Recursive calls should be phrased as self.forward rather than (modulename).forward.
 
 -- Expected format format of ThetaTrees:
---    ThetaTree = ([Float], [ThetaTree])
+--    ThetaTree = ([Double], [ThetaTree])
 
 filet :: [a] -> [a]
 filet = init . tail
@@ -54,7 +54,7 @@ pyOps OpOr = "or"
 pyOps OpAnd = "and"
 pyOps OpEq = "=="
 
-pyVal :: Value -> String
+pyVal :: IRValue -> String
 pyVal (VList xs) = "[" ++ (intercalate "," $ map pyVal xs) ++ "]"
 pyVal (VInt i) = show i
 pyVal (VFloat f) = show f
@@ -83,7 +83,7 @@ generateFunctions defs =
     names = nub $ map (getName . fst) defs
     lut = [(name ++ "_gen", onHead toLower name ++ ".generate") | name <- names]
        ++ [(name ++ "_prob", onHead toLower name ++ ".forward") | name <- names]
-       ++ [(name ++ "_integ", onHead toLower name ++ ".integral") | name <- names] ++ stdLib
+       ++ [(name ++ "_integ", onHead toLower name ++ ".integrate") | name <- names] ++ stdLib
     findDef name suffix = find (\def -> fst def == (name ++ suffix)) defs
     getDef name suffix = case findDef name suffix of
       Nothing -> Nothing
@@ -150,6 +150,7 @@ generateCode (IRCons hd tl) bindto = wrapMultiBlock [bindto ++ "[", "] + ", ""] 
 generateCode (IRTCons t1 t2) bindto = wrapMultiBlock [bindto ++ "(", ", ", ")"] [generateCode t1 "", generateCode t2 ""]
 generateCode (IRHead lst) bindto = wrap (bindto ++ "(") (generateCode lst "") ")[0]"
 generateCode (IRTail lst) bindto = wrap (bindto ++ "(") (generateCode lst "") ")[1:]"
+generateCode (IRElementOf ele lst) bindto = wrapMultiBlock [bindto ++ "(", " in ", ")"] [generateCode ele "", generateCode lst ""]
 generateCode (IRTFst t) bindto = wrap (bindto ++ "(") (generateCode t "") ")[0]"
 generateCode (IRTSnd t) bindto = wrap (bindto ++ "(") (generateCode t "") ")[1]"
 generateCode (IRSample IRNormal) bindto = [bindto ++ "randn()"]
@@ -185,6 +186,7 @@ generateCode (IRIndex arrExpr indexExpr) bindto = let
 generateCode (IREvalNN funcName argExpr) bindto = [funcName ++ "(" ++ spicyHead (generateCode argExpr "") ++ ")"]
 generateCode (IRCall funcName argExprs) bindto = [bindto ++ funcName ++ "(" ++ (intercalate "," (map (\expr -> spicyHead $ generateCode expr "") argExprs)) ++ ")"]
 generateCode (IRApply lambda argExpr) bindto = [bindto ++ spicyHead (generateCode lambda "") ++ "(" ++ spicyHead (generateCode argExpr "") ++ ")"]
+generateCode (IRLambda varName expr) bindto = [bindto ++ "(lambda " ++ varName ++ ": " ++ spicyHead (generateCode expr "") ++ ")"]
 generateCode (IRReturning expr) bindto = let
   arrCode = generateCode expr ""
   in onLast ("return " ++) arrCode

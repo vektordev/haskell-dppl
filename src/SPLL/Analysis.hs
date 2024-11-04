@@ -8,43 +8,62 @@ import SPLL.Lang.Lang
 import SPLL.InferenceRule
 import SPLL.Typing.RType
 import SPLL.Typing.PType
-import Data.Maybe (maybeToList, fromJust, isNothing)
+import Data.Maybe (maybeToList, fromJust, isNothing, fromMaybe)
 import Data.List (nub)
 import Data.Bifunctor
 import SPLL.Typing.Typing (TypeInfo, TypeInfo(..), Tag(..), setTags)
+import Data.Set (fromList, toList)
+import Data.Set.Internal (merge, empty)
 
 
 annotateProg :: Program -> Program
-annotateProg p@Program {functions=f} = p{functions = map (second (annotate p)) f}
+annotateProg p@Program {functions=f} = p{functions = map (second (annotate env)) f}
+  --TODO this is really unclean. It does the the job of initializing the environment with correct tags, and also prevents infinite recursion, by only evaluating twice, but annotates the program twice
+  where env = map (second (tags . getTypeInfo . annotate [])) f 
 
-annotate :: Program -> Expr -> Expr
-annotate p = tMap annotateLocal
-  where
-    annotateLocal e = setTags ti tags
-      where
-        ti = getTypeInfo e
-        tags =
-          [Alg $ findAlgorithm e | likelihoodFunctionUsesTypeInfo $ toStub e]
-          ++ fmap EnumList (maybeToList (findEnumerable p e))
+annotate :: [(String, [Tag])] -> Expr -> Expr
+annotate env e = withNewTypeInfo
+  where 
+    withNewTypeInfo = setTypeInfo withNewSubExpr (setTags (getTypeInfo withNewSubExpr) tgs)
+    newEnv = case withNewSubExpr of 
+      (LetIn _ n v _) -> (n, tags $ getTypeInfo v):env
+      _ -> env
+    withNewSubExpr = setSubExprs e (map (annotate newEnv) (getSubExprs e))
+    tgs = EnumList (toList values):algs
+    algs = [Alg $ findAlgorithm e | likelihoodFunctionUsesTypeInfo $ toStub e]
+    values = case withNewSubExpr of
+      (Constant _ a@(VInt _)) -> fromList [a]
+      (ReadNN _ name _) -> case lookup name env of
+        (Just [EnumList l]) -> fromList l
+        (Just [EnumRange (VInt a, VInt b)]) -> fromList [VInt i | i <- [a..b]]
+        _ -> error $ "Invalid Neural declaration for " ++ name
+      (PlusI _ left right) -> do
+        let valuesLeft = getValuesFromExpr left
+        let valuesRight = getValuesFromExpr right
+        fromList [VInt (a + b) | VInt a <- valuesLeft, VInt b <- valuesRight]
+      (MultI _ left right) -> do
+        let valuesLeft = getValuesFromExpr left
+        let valuesRight = getValuesFromExpr right
+        fromList [VInt (a * b) | VInt a <- valuesLeft, VInt b <- valuesRight]
+      (IfThenElse _ _ left right) -> do
+        let valuesLeft = fromList $ getValuesFromExpr left
+        let valuesRight = fromList $ getValuesFromExpr right
+        merge valuesLeft  valuesRight
+      (LetIn _ _ _ a) -> fromList $ getValuesFromExpr a
+      (Call _ name) -> case (lookup name env) of
+        Just tags -> fromList $ concatMap valuesOfTag tags 
+        Nothing -> empty
+      _ -> empty
+    
 
-findEnumerable :: Program -> Expr -> Maybe [Value]
-findEnumerable p (ReadNN _ name _) = case getNeuralDeclTag name (neurals p) of
-  (EnumList l) -> return l
-  (EnumRange (VInt a, VInt b)) -> return [VInt i | i <- [a..b]]
-  _ -> error $ "Invalid Neural declaration for " ++ name
-findEnumerable p (PlusI _ left right) =
-  if isNothing leftEnum || isNothing rightEnum
-    then Nothing
-    else Just $ map VInt $ nub [a + b | VInt a <- fromJust leftEnum, VInt b <- fromJust rightEnum]
-      where
-        leftEnum = findEnumerable p left
-        rightEnum = findEnumerable p right
-findEnumerable p _ = Nothing
-
-getNeuralDeclTag :: String -> [NeuralDecl] -> Tag
-getNeuralDeclTag name ((n, _, tag):_) | n == name = tag
-getNeuralDeclTag name (_:rest) = getNeuralDeclTag name rest
-getNeuralDeclTag name [] = error $ "No neural declaration found for name: " ++ name
+getValuesFromExpr :: Expr ->  [Value]
+getValuesFromExpr e = concatMap valuesOfTag (tags $ getTypeInfo e)
+      
+valuesOfTag :: Tag -> [Value]
+valuesOfTag tag = case tag of
+  EnumList l -> l
+  EnumRange (VInt a, VInt b) -> [VInt i | i <- [a..b]]
+  _ -> []
 
 findAlgorithm :: Expr -> InferenceRule
 findAlgorithm expr = case validAlgs of

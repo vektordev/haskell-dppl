@@ -23,6 +23,7 @@ import Data.List (elemIndices, sortBy, nub, intercalate)
 import Text.Pretty.Simple
 
 import SPLL.Lang.Lang
+import SPLL.Lang.Types
 import SPLL.Typing.Typing
 import SPLL.Typing.RType
 import SPLL.Typing.PType
@@ -69,7 +70,7 @@ variableLengthS2 = Program [("b", IfThenElse ()
 
 data Language = Python | Julia deriving Show
 
-readSamples :: IO [(Float, Float)]
+readSamples :: IO [(Double, Double)]
 readSamples = do
   f <- readFile "./data/train_data.txt"
   --print $ lines f
@@ -77,7 +78,7 @@ readSamples = do
   --print res
   return res
 
-map2RSamples :: (Float, Float) -> Value
+map2RSamples :: (Double, Double) -> Value
 map2RSamples (a,b) = VList [VFloat a, VFloat b]
 
 {-

@@ -2,6 +2,7 @@ module SPLL.IRCompiler where
 
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Lang
+import SPLL.Lang.Types
 import SPLL.Typing.Typing
 import SPLL.Typing.RType
 import PredefinedFunctions
@@ -62,7 +63,7 @@ isLambda :: IRExpr -> Bool
 isLambda IRLambda {} = True
 isLambda _ = False
 
-unval :: IRExpr -> Value
+unval :: IRExpr -> IRValue
 unval (IRConst val) = val
 unval _ = error "tried to unval a non-val"
 
@@ -129,6 +130,9 @@ isSimple _ = False
 replace :: Eq p => p -> p -> p -> p
 replace find replace' expr = if find == expr then replace' else expr
 
+failConversion :: Expr -> IRExpr
+failConversion = error "Cannot convert VClosure"
+
 softForceLogic :: Operand -> IRExpr -> IRExpr -> IRExpr
 softForceLogic OpOr (IRConst (VBool True)) _ = IRConst (VBool True)
 softForceLogic OpOr _ (IRConst (VBool True)) = IRConst (VBool True)
@@ -140,7 +144,7 @@ softForceLogic OpAnd (IRConst (VBool False)) _ = IRConst (VBool False)
 softForceLogic OpAnd _ (IRConst (VBool False)) = IRConst (VBool False)
 softForceLogic op left right = IROp op left right     -- Nothing can be done
 
-forceOp :: Operand -> Value -> Value -> Value
+forceOp :: Operand -> IRValue -> IRValue -> IRValue
 forceOp OpEq x y = VBool (x == y)
 forceOp OpMult (VInt x) (VInt y) = VInt (x*y)
 forceOp OpMult (VFloat x) (VFloat y) = VFloat (x*y)
@@ -218,66 +222,70 @@ toIRProbability conf (GreaterThan (TypeInfo {rType = t, tags = extras}) left rig
   --TODO: Find a better lower bound than just putting -9999999
   | extras `hasAlgorithm` "greaterThanLeft" = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
+    l <- toIRGenerate left
+    tell [(var, l)]
     (integrate, _, integrateBranches) <- toIRIntegrate conf right (IRConst (VFloat (-9999999))) (IRVar var)
     var2 <- mkVariable "rhs_integral"
-    l <- toIRGenerate left
     let returnExpr = 
           (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)))
-    tell [(var, l), (var2, integrate)]
+    tell [(var2, integrate)]
     return (returnExpr, const0, integrateBranches)
   | extras `hasAlgorithm` "greaterThanRight" = do --p(x | var >= const
     var <- mkVariable "fixed_bound"
+    r <- toIRGenerate right
+    tell [(var, r)]
     (integrate, _, integrateBranches) <- toIRIntegrate conf left (IRConst (VFloat (-9999999))) (IRVar var)
     var2 <- mkVariable "lhs_integral"
-    r <- toIRGenerate right
     let returnExpr = (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)) (IRVar var2))
-    tell [(var, r), (var2, integrate)]
+    tell [(var2, integrate)]
     return (returnExpr, const0, integrateBranches)
 toIRProbability conf (LessThan (TypeInfo {rType = t, tags = extras}) left right) sample
   --TODO: Find a better lower bound than just putting -9999999
   | extras `hasAlgorithm` "lessThanLeft" = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
+    l <- toIRGenerate left
+    tell [(var, l)]
     (integrate, _, integrateBranches) <- toIRIntegrate conf right (IRVar var) (IRConst (VFloat (9999999)))
     var2 <- mkVariable "rhs_integral"
-    l <- toIRGenerate left
     let returnExpr = (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)))
-    tell [(var, l), (var2, integrate)]
+    tell [(var2, integrate)]
     return (returnExpr, const0, integrateBranches)
   | extras `hasAlgorithm` "lessThanRight" = do --p(x | var >= const
     var <- mkVariable "fixed_bound"
+    r <- toIRGenerate right
+    tell [(var, r)]
     (integrate, _, integrateBranches) <- toIRIntegrate conf left (IRVar var) (IRConst (VFloat (9999999)))
     var2 <- mkVariable "lhs_integral"
-    r <- toIRGenerate right
+    tell [(var2, integrate)]
     let returnExpr = (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))  (IRVar var2))
-    tell [(var, r), (var2, integrate)]
     return (returnExpr, const0, integrateBranches)
 toIRProbability conf (MultF (TypeInfo {rType = TFloat, tags = extras}) left right) sample
   | extras `hasAlgorithm` "multLeft" = do
     var <- mkVariable ""
-    (rightExpr, rightDim, rightBranches) <- toIRProbability conf right (IROp OpDiv sample (IRVar var))
-    let returnExpr = IROp OpDiv rightExpr (IRUnaryOp OpAbs (IRVar var)) 
     l <- toIRGenerate left
     tell [(var, l)]
+    (rightExpr, rightDim, rightBranches) <- toIRProbability conf right (IROp OpDiv sample (IRVar var))
+    let returnExpr = IROp OpDiv rightExpr (IRUnaryOp OpAbs (IRVar var)) 
     return (returnExpr, rightDim, rightBranches)
   | extras `hasAlgorithm` "multRight" = do
     var <- mkVariable ""
-    (leftExpr, leftDim, leftBranches) <- toIRProbability conf left (IROp OpDiv sample (IRVar var))
     r <- toIRGenerate right
-    let returnExpr = IROp OpDiv leftExpr (IRUnaryOp OpAbs (IRVar var))
     tell [(var, r)]
+    (leftExpr, leftDim, leftBranches) <- toIRProbability conf left (IROp OpDiv sample (IRVar var))
+    let returnExpr = IROp OpDiv leftExpr (IRUnaryOp OpAbs (IRVar var))
     return (returnExpr, leftDim, leftBranches)
 toIRProbability conf (PlusF (TypeInfo {rType = TFloat, tags = extras}) left right) sample
   | extras `hasAlgorithm` "plusLeft" = do
     var <- mkVariable ""
-    (rightExpr, rightDim, rightBranches) <- toIRProbability conf right (IROp OpSub sample (IRVar var))
     l <- toIRGenerate left
     tell [(var, l)]
+    (rightExpr, rightDim, rightBranches) <- toIRProbability conf right (IROp OpSub sample (IRVar var))
     return (rightExpr, rightDim, rightBranches)
   | extras `hasAlgorithm` "plusRight" = do
     var <- mkVariable ""
-    (leftExpr, leftDim, leftBranches) <- toIRProbability conf left (IROp OpSub sample (IRVar var))
     r <- toIRGenerate right
     tell [(var, r)]
+    (leftExpr, leftDim, leftBranches) <- toIRProbability conf left (IROp OpSub sample (IRVar var))
     return (leftExpr, leftDim, leftBranches)
 toIRProbability conf (PlusI (TypeInfo {rType = TInt, tags = extras}) left right) sample
   | extras `hasAlgorithm` "enumeratePlusLeft" = do
@@ -289,14 +297,18 @@ toIRProbability conf (PlusI (TypeInfo {rType = TInt, tags = extras}) left right)
     let enumListL = head $ [x | EnumList x <- extrasLeft]
     let enumListR = head $ [x | EnumList x <- extrasRight]
     enumVar <- mkVariable "enum"
-    --the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
-    (pLeft, _, leftBranches) <- toIRProbability conf left (IRVar enumVar)
-    (pRight, _, rightBranches) <- toIRProbability conf right (IROp OpSub sample (IRVar enumVar))
-    let returnExpr = case topKThreshold conf of
-          Nothing -> IREnumSum enumVar (VList enumListL) $ IRIf (IRCall "in" [IROp OpSub sample (IRVar enumVar), IRConst (VList enumListR)]) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
-          Just thr -> IREnumSum enumVar (VList enumListL) $ IRIf (IROp OpAnd (IRCall "in" [IROp OpSub sample (IRVar enumVar), IRConst (VList enumListR)]) (IROp OpGreaterThan pLeft (IRConst (VFloat thr)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
-    -- TODO correct branch counting
-    return (returnExpr, const0, IROp OpPlus leftBranches rightBranches)
+  
+    -- We need to unfold the monad stack, because the EnumSum Works like a lambda expression and has a local scope
+    irTuple <- lift $ return $ generateLetInBlock conf (runWriterT (do
+      --the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
+      (pLeft, _, _) <- toIRProbability conf left (IRVar enumVar)
+      (pRight, _, _) <- toIRProbability conf right (IROp OpSub sample (IRVar enumVar))
+      let returnExpr = case topKThreshold conf of
+            Nothing -> IRIf (IRElementOf (IROp OpSub sample (IRVar enumVar)) (IRConst (fmap failConversion (VList enumListR)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
+            Just thr -> IRIf (IROp OpAnd (IRElementOf (IROp OpSub sample (IRVar enumVar)) (IRConst (fmap failConversion (VList enumListR)))) (IROp OpGreaterThan pLeft (IRConst (VFloat thr)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
+      -- TODO correct branch counting
+      return (returnExpr, const0, const0)))
+    return (IREnumSum enumVar (fmap failConversion (VList enumListL)) $ IRTFst irTuple, const0, const0)
   | extras `hasAlgorithm` "plusLeft" = do
     var <- mkVariable ""
     (rightExpr, _, rightBranches) <- toIRProbability conf right (IROp OpSub sample (IRVar var))
@@ -380,8 +392,9 @@ toIRProbability conf (Null _) sample = do
   expr <- indicator (IROp OpEq sample (IRConst $ VList []))
   return (expr, const0, const0)
 toIRProbability conf (Constant _ value) sample = do
-  expr <- indicator (IROp OpEq sample (IRConst value))
+  expr <- indicator (IROp OpEq sample (IRConst (fmap failConversion value)))
   return (expr, const0, const0)
+toIRProbability conf (Var _ n) _ = return (IRVar n, const0, const0) -- TODO check this. This should rarely happen
 toIRProbability conf (Call _ name) sample = do
   var <- mkVariable "call"
   tell [(var, IRCall (name ++ "_prob") [sample])]
@@ -508,7 +521,7 @@ toIRGenerate (ThetaI _ a ix) = do
 toIRGenerate (Subtree _ a ix) = do
   a' <- toIRGenerate a
   return $ IRSubtree a' ix
-toIRGenerate (Constant _ x) = return $ IRConst x
+toIRGenerate (Constant _ x) = return (IRConst (fmap failConversion x))
 toIRGenerate (Null _) = return $ IRConst (VList [])
 toIRGenerate (Cons _ hd tl) = do
   h <- toIRGenerate hd
@@ -553,12 +566,8 @@ packParamsIntoLetinsGen (v:vars) (p:params) expr = do
   e <- packParamsIntoLetinsGen vars params expr
   return $ IRLetIn v pExpr e
 
-bindLocal :: String -> IRExpr -> IRExpr -> CompilerMonad  IRExpr
-bindLocal namestring binding inEx = do
-  varName <- mkVariable namestring
-  return $ IRLetIn varName binding inEx
-
 toIRIntegrate :: CompilerConfig -> Expr -> IRExpr -> IRExpr -> CompilerMonad CompilationResult
+toIRIntegrate conf expr lower higher | lower == higher = toIRProbability conf expr lower
 toIRIntegrate conf (Uniform _) lower higher = do
   return (IROp OpSub (IRCumulative IRUniform higher) (IRCumulative IRUniform lower), const0, const0)
 toIRIntegrate conf (Normal TypeInfo {}) lower higher = do
@@ -571,11 +580,11 @@ toIRIntegrate conf (MultF (TypeInfo {tags = extras}) left right) lower higher
     tell [(var, l)]
     return (rightExpr, const0, rightBranches)
   | extras `hasAlgorithm` "multRight" = do
-      var <- mkVariable ""
-      (leftExpr, _, leftBranches) <- toIRIntegrate conf left (IROp OpDiv lower (IRVar var)) (IRUnaryOp OpAbs (IROp OpDiv higher (IRVar var)))
-      r <- toIRGenerate right
-      tell [(var, r)]
-      return (leftExpr, const0, leftBranches)
+    var <- mkVariable ""
+    (leftExpr, _, leftBranches) <- toIRIntegrate conf left (IROp OpDiv lower (IRVar var)) (IRUnaryOp OpAbs (IROp OpDiv higher (IRVar var)))
+    r <- toIRGenerate right
+    tell [(var, r)]
+    return (leftExpr, const0, leftBranches)
 toIRIntegrate conf (PlusF TypeInfo {tags = extras} left right) lower higher
   | extras `hasAlgorithm` "plusLeft" = do
     var <- mkVariable ""
@@ -584,11 +593,11 @@ toIRIntegrate conf (PlusF TypeInfo {tags = extras} left right) lower higher
     tell [(var, l)]
     return (rightExpr, const0, rightBranches)
   | extras `hasAlgorithm` "plusRight" = do
-      var <- mkVariable ""
-      (leftExpr, _, leftBranches) <- toIRIntegrate conf left (IROp OpSub lower (IRVar var)) (IROp OpSub higher (IRVar var))
-      r <- toIRGenerate right
-      tell [(var, r)]
-      return (leftExpr, const0, leftBranches)
+    var <- mkVariable ""
+    (leftExpr, _, leftBranches) <- toIRIntegrate conf left (IROp OpSub lower (IRVar var)) (IROp OpSub higher (IRVar var))
+    r <- toIRGenerate right
+    tell [(var, r)]
+    return (leftExpr, const0, leftBranches)
 toIRIntegrate conf (NegF _ a) low high = do
   toIRIntegrate conf a (IRUnaryOp OpNeg high) (IRUnaryOp OpNeg low)
 toIRIntegrate conf (ExpF _ a) low high = do
@@ -629,7 +638,7 @@ toIRIntegrate conf (Null _) low high = do
   ind <- indicator (IROp OpAnd (IROp OpEq low (IRConst $ VList [])) (IROp OpEq high (IRConst $ VList [])))
   return (ind, const0, const0)
 toIRIntegrate conf (Constant _ value) low high = do
-  ind <- indicator (IROp OpAnd (IROp OpLessThan low (IRConst value)) (IROp OpGreaterThan high (IRConst value))) --TODO What to do if low and high are equal?
+  ind <- indicator (IROp OpAnd (IROp OpLessThan low (IRConst (fmap failConversion value))) (IROp OpGreaterThan high (IRConst (fmap failConversion value)))) --TODO What to do if low and high are equal?
   return (ind, const0, const0)
 toIRIntegrate conf (ThetaI _ a i) low high = do
   a' <-  toIRGenerate a

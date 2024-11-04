@@ -3,6 +3,7 @@ module PrettyPrint where
 import SPLL.Lang.Lang
 import Data.List (intercalate)
 import SPLL.IntermediateRepresentation
+import SPLL.Lang.Types
 
 pPrintProg :: Program -> String
 pPrintProg (Program decls neurals) = intercalate "\n\n" (map (\f -> wrapInFunctionDeclaration (snd f) (fst f) []) decls)
@@ -76,6 +77,7 @@ pPrintIRExpr (IRCons e1 e2) n = pPrintIRExpr e1 (n + 1) ++ ":" ++ pPrintIRExpr e
 pPrintIRExpr (IRTCons e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ ", " ++ pPrintIRExpr e2 (n + 1) ++ ")"
 pPrintIRExpr (IRHead e) n = "head (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRTail e) n = "tail (" ++ pPrintIRExpr e (n + 1) ++ ")"
+pPrintIRExpr (IRElementOf e lst) n = "(" ++ pPrintIRExpr e (n + 1) ++ ") in (" ++ pPrintIRExpr lst (n + 1) ++ ")"
 pPrintIRExpr (IRTFst e) n = "fst (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRTSnd e) n = "snd (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRDensity dist e) n = "density " ++ show dist ++ " (" ++ pPrintIRExpr e (n + 1) ++ ")"

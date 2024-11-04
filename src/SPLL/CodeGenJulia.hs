@@ -6,12 +6,13 @@ module SPLL.CodeGenJulia (
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Lang
 import Data.List (intercalate)
+import SPLL.Lang.Types
 
 --TODO: On the topic of memoization: Ideally we would want to optimize away redundant calls within a loop.
 -- e.g. in MNist-Addition
 
 -- Expected format format of ThetaTrees:
---    ThetaTree = ([Float], [ThetaTree])
+--    ThetaTree = ([Double], [ThetaTree])
 
 filet :: [a] -> [a]
 filet = init . tail
@@ -50,7 +51,7 @@ juliaOps OpAnd = "&&"
 juliaOps OpEq = "=="
 juliaOps x = error ("Unknown Julia operator: " ++ show x)
 
-juliaVal :: Value -> String
+juliaVal :: IRValue -> String
 juliaVal (VList xs) = "[" ++ (intercalate "," $ map juliaVal xs) ++ "]"
 juliaVal (VInt i) = show i
 juliaVal (VFloat f) = show f
@@ -101,6 +102,7 @@ generateCode (IRCons hd tl) = wrapMultiBlock ["hcat(", ", ", ")"] [generateCode 
 generateCode (IRTCons t1 t2) = wrapMultiBlock ["(", ", ", ")"] [generateCode t1, generateCode t2]
 generateCode (IRHead lst) = wrap "(" (generateCode lst) ")[1]"
 generateCode (IRTail lst) = wrap "(" (generateCode lst) ")[2:end]"
+generateCode (IRElementOf ele lst) = wrapMultiBlock ["(", " in ", ")"] [generateCode ele, generateCode lst]
 generateCode (IRTFst t) = wrap "(" (generateCode t) ")[1]"
 generateCode (IRTSnd t) = wrap "(" (generateCode t) ")[2]"
 generateCode (IRSample IRNormal) = ["randn()"]
@@ -143,5 +145,6 @@ generateCode (IRIndex arrExpr indexExpr) = let
 generateCode (IREvalNN funcName argExpr) = [funcName ++ "(" ++ spicyHead (generateCode argExpr) ++ ")"]
 generateCode (IRCall funcName argExprs) = [funcName ++ "(" ++ (intercalate "," (map (spicyHead . generateCode) argExprs)) ++ ")"]
 generateCode (IRApply lambda argExpr) = [spicyHead (generateCode lambda) ++ "(" ++ spicyHead (generateCode argExpr) ++ ")"]
+generateCode (IRLambda varName expr) = ["(" ++ varName ++ " -> " ++ spicyHead (generateCode expr) ++ ")"]
 generateCode (IRReturning expr) = generateCode expr
 generateCode x = error ("No Julia CodeGen for IR: " ++ show x)

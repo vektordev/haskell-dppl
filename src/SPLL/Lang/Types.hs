@@ -10,6 +10,7 @@ import qualified Data.Map as Map
 import Control.Applicative (liftA2)
 import Control.Monad.Random.Lazy (Random)
 import Data.Number.Erf (Erf)
+import Data.Bifunctor (second)
 
 import Data.Set (empty)
 
@@ -21,7 +22,7 @@ type HornClause = ([(ChainName, CType)], [(ChainName, CType)], (ExprStub, Int))
 
 data CType = CDeterministic
              | CInferDeterministic
-             | CConstrainedTo Float Float
+             | CConstrainedTo Double Double
              | CBottom
              | CNotSetYet
              deriving (Show, Eq)
@@ -36,10 +37,6 @@ instance Ord CType where
       rank CNotSetYet = -1
 
 
-
---Expr x (a :: Precision)
---data Precision = P32 | P64"
---type family PrecisionType P32 = Float
 data Expr =
               -- Flow Control
                 IfThenElse TypeInfo Expr Expr Expr
@@ -147,20 +144,37 @@ type NeuralDecl = (String, RType, Tag)
 
 type WitnessedVars = Set.Set String
 
-data ThetaTree = ThetaTree [Float] [ThetaTree] deriving (Show, Eq, Ord)
+data ThetaTree = ThetaTree [Double] [ThetaTree] deriving (Show, Eq, Ord)
 
-data Value = VBool Bool
+type Value = GenericValue Expr
+
+data GenericValue a = VBool Bool
            | VInt Int
            | VSymbol String
-           | VFloat Float
-           | VList [Value]
-           | VTuple Value Value
-           | VBranch Value Value String
+           | VFloat Double
+           | VList [GenericValue a]
+           | VTuple (GenericValue a) (GenericValue a)
+           | VBranch (GenericValue a) (GenericValue a) String
            | VRange Limits
            | VThetaTree ThetaTree
            | VAnyList
+           | VClosure [(String, a)] String a 
            -- | Value of TArrow a b could be Expr TypeInfo, with Expr being a Lambda?
            deriving (Show, Eq, Ord)
+           
+instance Functor GenericValue where
+  fmap _ (VInt x) = VInt x
+  fmap _ (VBool x) = VBool x
+  fmap _ (VSymbol x) = VSymbol x
+  fmap _ (VFloat x) = VFloat x
+  fmap f (VList x) = VList (map (fmap f) x)
+  fmap f (VTuple x y) = VTuple (fmap f x) (fmap f y)
+  fmap f (VBranch x y s) = VBranch (fmap f x) (fmap f y) s
+  fmap _ (VRange x) = VRange x
+  fmap _ (VThetaTree x) = VThetaTree x
+  fmap _ VAnyList = VAnyList
+  fmap f (VClosure e n ex) = VClosure (map (Data.Bifunctor.second f) e) n (f ex)
+
 -- likelihood [vMarg, vAnyList] - likelihood [vMarg, vMarg, vAnylist]
 --Nothing indicates low/high infinity.
 data Limits = Limits (Maybe Value) (Maybe Value)
@@ -171,6 +185,8 @@ data Tag = EnumRange (Value, Value)
            | EnumList [Value]
            | Alg InferenceRule
            deriving (Show, Eq, Ord)
+           
+
 
 data RuleConstraint = SubExprNIsType Int PType
                     | SubExprNIsNotType Int PType
