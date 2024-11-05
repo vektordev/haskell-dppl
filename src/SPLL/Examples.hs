@@ -17,6 +17,44 @@ import SPLL.Lang.Types
 --  (Null makeTypeInfo)
 --  (Cons makeTypeInfo (PlusF makeTypeInfo (MultF makeTypeInfo (Normal makeTypeInfo) (ThetaI makeTypeInfo 1)) (ThetaI makeTypeInfo 2)) (Call makeTypeInfo "main"))
 
+exampleList :: [(String, Program)]
+exampleList = [
+              ("simpleList", simpleList),
+              ("simpleAdd", simpleAdd),
+              ("uniformProg", uniformProg),
+              ("normalProg", normalProg),
+              ("uniformProgMult", uniformProgMult),
+              ("normalProgMult", normalProgMult),
+              ("uniformProgPlus", uniformProgPlus),
+              ("uniformNegPlus", uniformNegPlus),
+              ("uniformIfProg", uniformIfProg),
+              ("uniformExp", uniformExp),
+              ("testList", testList),
+              ("simpleTuple", simpleTuple),
+              ("constantProg", constantProg),
+              ("simpleCall", simpleCall),
+              ("testInjF", testInjF),
+              ("testInjFPlusLeft", testInjFPlusLeft),
+              ("testInjFPlusRight", testInjFPlusRight),
+              ("testInjF2", testInjF2),
+              ("testPlus3", testPlus3),
+              ("testTopK", testTopK),
+              ("testTheta", testTheta),
+              ("testThetaTree", testThetaTree),
+              ("testAnd", testAnd),
+              ("testOr", testOr),
+              ("testNot", testNot),
+              ("testCallLambda", testCallLambda),
+              ("testCallLambdaAdvanced", testCallLambdaAdvanced),
+              ("testLambdaParameter", testLambdaParameter),
+              ("testLetIn", testLetIn),
+              ("testRecursion", testRecursion),
+              ("gaussLists", gaussLists),
+              ("testTopLevelLambda", testTopLevelLambda),
+              ("testDim", testDim),
+              ("testCoin", testCoin),
+              ("testDice", testDice)
+              ]
 
 paramExpr :: Expr
 paramExpr = Arg makeTypeInfo "iterations" TFloat (IfThenElse makeTypeInfo
@@ -127,8 +165,11 @@ testRecursion :: Program
 testRecursion = Program [("main", Apply makeTypeInfo (Call makeTypeInfo "rec") (Constant makeTypeInfo (VFloat 8))),
                          ("rec", Lambda makeTypeInfo "x" (IfThenElse makeTypeInfo (GreaterThan makeTypeInfo (Var makeTypeInfo "x") (Constant makeTypeInfo (VFloat 1))) (MultF makeTypeInfo (Constant makeTypeInfo (VFloat 3)) (Apply makeTypeInfo (Call makeTypeInfo "rec") (MultF makeTypeInfo (Var makeTypeInfo "x") (Constant makeTypeInfo (VFloat 0.5))))) (Uniform makeTypeInfo)))] []
 
-testNN :: Expr
-testNN = Lambda makeTypeInfo "im1"
+testNN :: Program
+testNN = Program [("main", mNistAddExpr)] [("classifyMNist", TInt, EnumList $ map VInt [0,1,2,3,4,5,6,7,8,9])]
+
+mNistAddExpr :: Expr
+mNistAddExpr = Lambda makeTypeInfo "im1"
   (Lambda makeTypeInfo "im2" (PlusI makeTypeInfo
     (ReadNN makeTypeInfo "classifyMNist" (Var makeTypeInfo "im1"))
     (ReadNN makeTypeInfo "classifyMNist" (Var makeTypeInfo "im2"))))
