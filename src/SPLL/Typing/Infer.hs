@@ -20,27 +20,17 @@ wrapPErr (Right x) = Right x
 
 infer :: Program -> Either CompileError Program
 infer p = do
-  x <- wrapRErr $ tryAddRTypeInfo (addEmptyTypeInfo p)
+  x <- wrapRErr $ tryAddRTypeInfo p
   y <- wrapPErr $ tryAddPTypeInfo x
   return $ addWitnessesProg y
 
 inferNoWit :: Program -> Either CompileError Program
 inferNoWit p = do
-  x <- wrapRErr $ tryAddRTypeInfo (addEmptyTypeInfo p)
+  x <- wrapRErr $ tryAddRTypeInfo p
   wrapPErr $ tryAddPTypeInfo x
 
-
-createTypeInfo :: Expr -> TypeInfo
-createTypeInfo _ = makeTypeInfo
-
-addEmptyTypeInfoExpr :: Expr -> Expr
-addEmptyTypeInfoExpr = tMap createTypeInfo
-
-addEmptyTypeInfo :: Program -> Program
-addEmptyTypeInfo = tMapProg createTypeInfo
-
 addTypeInfo :: Program -> Program
-addTypeInfo = addPTypeInfo . addRTypeInfo . addEmptyTypeInfo 
+addTypeInfo = addPTypeInfo . addRTypeInfo
 
 addRTypeInfoOnly :: Program -> Program
-addRTypeInfoOnly =  addRTypeInfo . addEmptyTypeInfo
+addRTypeInfoOnly =  addRTypeInfo

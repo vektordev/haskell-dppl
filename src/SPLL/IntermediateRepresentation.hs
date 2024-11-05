@@ -152,7 +152,6 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               | IREnumSum Varname IRValue IRExpr
               | IREvalNN Varname IRExpr
               | IRIndex IRExpr IRExpr
-              | IRReturning IRExpr -- only used to wrap statements that act as exit point of the expression.
               deriving (Show, Eq)
               
 type IRValue = GenericValue IRExpr
@@ -193,7 +192,6 @@ getIRSubExprs (IRApply a b) = [a, b]
 getIRSubExprs (IREnumSum _ _ a) = [a]
 getIRSubExprs (IREvalNN _ a) = [a]
 getIRSubExprs (IRIndex a b) = [a, b]
-getIRSubExprs (IRReturning a) = [a]
 
 irMap :: (IRExpr -> IRExpr) -> IRExpr -> IRExpr
 irMap f x = case x of
@@ -216,7 +214,6 @@ irMap f x = case x of
   (IREnumSum name val scope) -> f (IREnumSum name val (irMap f scope))
   (IREvalNN name arg) -> f (IREvalNN name (irMap f arg))
   (IRIndex left right) -> f (IRIndex (irMap f left) (irMap f right))
-  (IRReturning expr) -> f (IRReturning (irMap f expr))
   (IRTheta a i) -> f (IRTheta (irMap f a) i)
   (IRSubtree a i) -> f (IRSubtree (irMap f a) i)
   (IRConst _) -> f x
@@ -248,5 +245,4 @@ irPrintFlat (IRApply _ _) = "IRCallLambda"
 irPrintFlat (IREnumSum _ _ _) = "IREnumSum"
 irPrintFlat (IREvalNN name _) = "IREvalNN " ++ name
 irPrintFlat (IRIndex _ _) = "IRIndex"
-irPrintFlat (IRReturning _) = "IRReturning"
 

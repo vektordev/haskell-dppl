@@ -127,7 +127,8 @@ newCodeGen tExpr = do
 newCodeGenAll :: CompilerConfig -> Program -> IO ()
 newCodeGenAll conf p = do
   pPrint p
-  let annotated = annotateProg p
+  let preAnnotated = annotateEnumsProg p
+  let annotated = annotateAlgsProg preAnnotated
   pPrint annotated
   let ir = envToIR conf annotated
   pPrint ir
@@ -144,18 +145,23 @@ codeGenToLang lang conf prog = do
   if verbose conf >= 2 then pPrint prog else return ()
   printIfVerbose conf (pPrintProg prog)
   
-  let typed = addTypeInfo prog
+  let preAnnotated = annotateEnumsProg prog
+  printIfMoreVerbose conf "\n\n=== Annotated Program ===\n"
+  if verbose conf >= 2 then pPrint preAnnotated else return ()
+
+  let typed = addTypeInfo preAnnotated
   printIfMoreVerbose conf "\n\n=== Typed Program ===\n"
   if verbose conf >= 2 then pPrint typed else return ()
-  
-  let annotated = annotateProg typed
+
+  let annotated = annotateAlgsProg typed
   printIfMoreVerbose conf "\n\n=== Annotated Program ===\n"
   if verbose conf >= 2 then pPrint annotated else return ()
-  
+
   let ir = envToIR conf annotated
   printIfVerbose conf "\n\n=== Compiled Program ===\n"
   printIfVerbose conf (pPrintIREnv ir)
   if verbose conf >= 2 then pPrint ir else return ()
+  
   case lang of
     Python -> return $ intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions ir)
     Julia -> return $ intercalate "\n" (SPLL.CodeGenJulia.generateFunctions ir)
@@ -198,7 +204,8 @@ someFunc = do--thatGaussThing
   --pPrint fwdInfer
 
   pPrint prog
-  let annotated = annotateProg typedProg
+  let preAnnotated = annotateEnumsProg typedProg
+  let annotated = annotateAlgsProg preAnnotated
   pPrint annotated
   let ir = envToIR conf annotated
   let pycode = SPLL.CodeGenPyTorch.generateFunctions ir
