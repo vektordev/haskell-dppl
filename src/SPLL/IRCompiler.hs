@@ -113,8 +113,8 @@ evalAll (IRHead expr) =
     then let (VList (_:xs)) = unval expr in IRConst $ VList xs
     else IRHead expr
 evalAll ex@(IRLetIn name val scope)
-  | isSimple val = irMap (replace (IRVar name) val) scope
-  | countUses name scope == 1 = irMap (replace (IRVar name) val) scope
+  | isSimple val = replaceAll (IRVar name) val scope
+  | countUses name scope == 1 = replaceAll (IRVar name) val scope
   | countUses name scope == 0 = scope
   | otherwise = ex
 evalAll (IRTCons (IRLambda n a) (IRLambda m b)) | n == m = IRLambda n (IRTCons a b)
