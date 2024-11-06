@@ -82,9 +82,16 @@ fixedPointIteration f x = if fx == x then x else fixedPointIteration f fx
   where fx = f x
 
 optimize :: IRExpr -> IRExpr
-optimize = irMap evalAll
+optimize = irMap (evalAll . applyConstant)
 --TODO: We can also optimize index magic, potentially here. i.e. a head tail tail x can be simplified.
 --TODO: Unary operators
+
+-- | Simplify terms that apply a constant to a lambda expression
+-- if we build a lambda expression and immediately apply a constant, replace mentions of the lambda'd variable with the constant.
+applyConstant :: IRExpr -> IRExpr
+applyConstant (IRApply (IRLambda varname inExpr) v@(IRConst _)) = replaceAll (IRVar varname) v inExpr
+applyConstant x = x
+
 evalAll :: IRExpr -> IRExpr
 evalAll expr@(IROp op leftV rightV)
   | isValue leftV && isValue rightV = IRConst (forceOp op (unval leftV) (unval rightV))
@@ -126,6 +133,9 @@ isSimple :: IRExpr -> Bool
 isSimple (IRVar a) = True
 isSimple (IRConst a) = True
 isSimple _ = False
+
+replaceAll :: IRExpr -> IRExpr -> IRExpr -> IRExpr
+replaceAll find replaceWith scope = irMap (replace find replaceWith) scope
 
 replace :: Eq p => p -> p -> p -> p
 replace find replace' expr = if find == expr then replace' else expr
