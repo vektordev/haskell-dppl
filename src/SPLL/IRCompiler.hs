@@ -86,6 +86,20 @@ optimize = irMap evalAll
 --TODO: We can also optimize index magic, potentially here. i.e. a head tail tail x can be simplified.
 --TODO: Unary operators
 evalAll :: IRExpr -> IRExpr
+-- Associative Addition
+evalAll (IROp OpPlus leftV (IROp OpPlus rightV1 rightV2)) 
+  | isValue leftV && isValue rightV1 = IROp OpPlus (IRConst (forceOp OpPlus (unval leftV) (unval rightV1))) rightV2   -- a + (b + c) = (a + b) + c
+  | isValue leftV && isValue rightV2 = IROp OpPlus (IRConst (forceOp OpPlus (unval leftV) (unval rightV2))) rightV1   -- a + (b + c) = b + (a + c)
+evalAll (IROp OpPlus (IROp OpPlus leftV1 leftV2) rightV ) 
+  | isValue leftV1 && isValue rightV = IROp OpPlus (IRConst (forceOp OpPlus (unval leftV1) (unval rightV))) leftV2   -- a + (b + c) = (a + b) + c
+  | isValue leftV2 && isValue rightV = IROp OpPlus (IRConst (forceOp OpPlus (unval leftV2) (unval rightV))) leftV1   -- a + (b + c) = b + (a + c)
+-- Associative Multiplication
+evalAll (IROp OpMult leftV (IROp OpMult rightV1 rightV2)) 
+  | isValue leftV && isValue rightV1 = IROp OpMult (IRConst (forceOp OpMult (unval leftV) (unval rightV1))) rightV2   -- a * (b * c) = (a * b) * c
+  | isValue leftV && isValue rightV2 = IROp OpMult (IRConst (forceOp OpMult (unval leftV) (unval rightV2))) rightV1   -- a * (b * c) = (a * c) * b
+evalAll (IROp OpMult (IROp OpMult leftV1 leftV2) rightV ) 
+  | isValue leftV1 && isValue rightV = IROp OpMult (IRConst (forceOp OpMult (unval leftV1) (unval rightV))) leftV2   -- a + (b + c) = (a + b) + c
+  | isValue leftV2 && isValue rightV = IROp OpMult (IRConst (forceOp OpMult (unval leftV2) (unval rightV))) leftV1   -- a + (b + c) = b + (a + c)
 evalAll expr@(IROp op leftV rightV)
   | isValue leftV && isValue rightV = IRConst (forceOp op (unval leftV) (unval rightV))
   | isValue leftV || isValue rightV = softForceLogic op leftV rightV
