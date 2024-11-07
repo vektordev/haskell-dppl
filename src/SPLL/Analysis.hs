@@ -16,9 +16,10 @@ import Data.Set.Internal (merge, empty)
 
 
 annotateEnumsProg :: Program -> Program
-annotateEnumsProg p@Program {functions=f} = p{functions = map (second (annotate env)) f}
+annotateEnumsProg p@Program {functions=f, neurals=n} = p{functions = map (second (annotate (exprEnv++neuralEnv))) f}
   --TODO this is really unclean. It does the the job of initializing the environment with correct tags, and also prevents infinite recursion, by only evaluating twice, but annotates the program twice
-  where env = map (second (tags . getTypeInfo . annotate [])) f 
+  where exprEnv = map (second (tags . getTypeInfo . annotate [])) f
+        neuralEnv = map (\(n, _, t) -> (n, [t])) n
 
 annotate :: [(String, [Tag])] -> Expr -> Expr
 annotate env e = withNewTypeInfo
