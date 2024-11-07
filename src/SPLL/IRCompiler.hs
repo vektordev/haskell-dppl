@@ -82,9 +82,16 @@ fixedPointIteration f x = if fx == x then x else fixedPointIteration f fx
   where fx = f x
 
 optimize :: IRExpr -> IRExpr
-optimize = irMap evalAll
+optimize = irMap (evalAll . applyConstant)
 --TODO: We can also optimize index magic, potentially here. i.e. a head tail tail x can be simplified.
 --TODO: Unary operators
+
+-- | Simplify terms that apply a constant to a lambda expression
+-- if we build a lambda expression and immediately apply a constant, replace mentions of the lambda'd variable with the constant.
+applyConstant :: IRExpr -> IRExpr
+applyConstant (IRApply (IRLambda varname inExpr) v@(IRConst _)) = replaceAll (IRVar varname) v inExpr
+applyConstant x = x
+
 evalAll :: IRExpr -> IRExpr
 -- Associative Addition
 evalAll (IROp OpPlus leftV (IROp OpPlus rightV1 rightV2)) 
@@ -120,8 +127,8 @@ evalAll (IRHead expr) =
     then let (VList (_:xs)) = unval expr in IRConst $ VList xs
     else IRHead expr
 evalAll ex@(IRLetIn name val scope)
-  | isSimple val = irMap (replace (IRVar name) val) scope
-  | countUses name scope == 1 = irMap (replace (IRVar name) val) scope
+  | isSimple val = replaceAll (IRVar name) val scope
+  | countUses name scope == 1 = replaceAll (IRVar name) val scope
   | countUses name scope == 0 = scope
   | otherwise = ex
 evalAll (IRTCons (IRLambda n a) (IRLambda m b)) | n == m = IRLambda n (IRTCons a b)
@@ -140,6 +147,9 @@ isSimple :: IRExpr -> Bool
 isSimple (IRVar a) = True
 isSimple (IRConst a) = True
 isSimple _ = False
+
+replaceAll :: IRExpr -> IRExpr -> IRExpr -> IRExpr
+replaceAll find replaceWith scope = irMap (replace find replaceWith) scope
 
 replace :: Eq p => p -> p -> p -> p
 replace find replace' expr = if find == expr then replace' else expr

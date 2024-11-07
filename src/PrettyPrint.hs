@@ -13,7 +13,7 @@ pPrintIREnv env = intercalate "\n\n" (map (\f -> wrapInFunctionDeclarationIR (sn
 
 wrapInFunctionDeclaration :: Expr -> String -> [String] -> String
 wrapInFunctionDeclaration (Lambda _ n b) fName params = wrapInFunctionDeclaration b fName (n:params)
-wrapInFunctionDeclaration e fName params = "def " ++ fName ++ "(" ++ intercalate ", " params ++ "):\n" ++ indent 1 ++ pPrintExpr e 1 ++"\n"
+wrapInFunctionDeclaration e fName params = "def " ++ fName ++ "(" ++ intercalate ", " (reverse params) ++ "):\n" ++ indent 1 ++ pPrintExpr e 1 ++"\n"
 
 wrapInFunctionDeclarationIR :: IRExpr -> String -> [String] -> String
 wrapInFunctionDeclarationIR (IRLambda n b) fName params = wrapInFunctionDeclarationIR b fName (n:params)
