@@ -130,6 +130,7 @@ generate f globalEnv env [] (IROp OpEq a b) = do
     (VFloat af, VFloat bf) -> return $ VBool (af == bf)
     (VInt af, VInt bf) -> return $ VBool (af == bf)
     (VList af, VList bf) -> return $ VBool (af == bf)
+    (VTuple af1 af2, VTuple bf1 bf2) -> return $ VBool (af1 == bf1 && af2 == bf2)
     _ -> error ("Type error: Equals can only evaluate on two values: " ++ show (aVal, bVal))
 generate f globalEnv env [] (IRUnaryOp OpNot a) = do
   aVal <- generate f globalEnv env [] a

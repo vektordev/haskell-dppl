@@ -102,27 +102,30 @@ correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat
 
                               --(testLambdaParameter, VFloat 10, [], VFloat 1.0)]
 
-correctIntegralValuesTestCases :: [(Program, IRValue, IRValue, [IRExpr], IRValue)]
-correctIntegralValuesTestCases = [(uniformProg, VFloat 0, VFloat 1, [], VFloat 1.0),
-                                  (uniformProg, VFloat  (-1), VFloat 2, [], VFloat 1.0),
-                                  (normalProg, VFloat (-5), VFloat 5, [], VFloat $ normalCDF 5 - normalCDF (-5)),
-                                  --(normalProg, VFloat 0, VFloat 0, [], VFloat $ normalPDF 0),
-                                  (normalProgMult, VFloat (-5), VFloat 5, [], VFloat $ normalCDF 10 - normalCDF (-10)),
-                                  (normalProgMult, VFloat (-10), VFloat (-5), [], VFloat $ normalCDF (-10) - normalCDF (-20)),
-                                  (uniformNegPlus, VFloat (-5), VFloat (-4.5), [], VFloat 0.5),
-                                  (uniformProgPlus, VFloat 4, VFloat 4.5, [], VFloat 0.5),
-                                  (testList, VList [VFloat 0, VFloat (-1)], VList [VFloat 0.25, VFloat 1], [], VFloat $ (normalCDF 1 - normalCDF (-1)) * 0.5),
-                                  (simpleTuple, VTuple (VFloat 0) (VFloat (-1)), VTuple (VFloat 0.25) (VFloat 1), [], VFloat $ (normalCDF 1 - normalCDF (-1)) * 0.5),
-                                  (uniformIfProg, VFloat 0, VFloat 1, [], VFloat 0.5),
-                                  (constantProg, VFloat 1, VFloat 3, [], VFloat 1),
-                                  --,
-                                  (testInjF, VFloat 0, VFloat 1, [], VFloat 0.5),
-                                  (testInjF2, VFloat 2, VFloat 3, [], VFloat 0.5),
-                                  (testInjFPlusLeft, VFloat 1, VFloat 1.5, [], VFloat 0.5),
-                                  (testInjFPlusRight, VFloat 1, VFloat 1.5, [], VFloat 0.5),
-                                  (testTheta, VFloat 0.9, VFloat 1.1, flatTree [1], VFloat 1),
-                                  (simpleCall, VFloat 0, VFloat 1, [], VFloat 1.0),
-                                  (testCallLambda, VFloat 2, VFloat 3, [], VFloat 1.0)]
+correctIntegralValuesTestCases :: [(Program, IRValue, IRValue, [IRExpr], (IRValue, IRValue))]
+correctIntegralValuesTestCases =[(uniformProg, VFloat 0, VFloat 1, [], (VFloat 1.0, VFloat 0)),
+                                (uniformProg, VFloat (-1), VFloat 2, [], (VFloat 1.0, VFloat 0)),
+                                (normalProg, VFloat (-5), VFloat 5, [], (VFloat $ normalCDF 5 - normalCDF (-5), VFloat 0)),
+                                --(normalProg, VFloat 0, VFloat 0, [], (VFloat $ normalPDF 0, VFloat 0)),
+                                (normalProgMult, VFloat (-5), VFloat 5, [], (VFloat $ normalCDF 10 - normalCDF (-10), VFloat 0)),
+                                (normalProgMult, VFloat (-10), VFloat (-5), [], (VFloat $ normalCDF (-10) - normalCDF (-20), VFloat 0)),
+                                (uniformNegPlus, VFloat (-5), VFloat (-4.5), [], (VFloat 0.5, VFloat 0)),
+                                (uniformProgPlus, VFloat 4, VFloat 4.5, [], (VFloat 0.5, VFloat 0)),
+                                (testList, VList [VFloat 0, VFloat (-1)], VList [VFloat 0.25, VFloat 1], [], (VFloat $ (normalCDF 1 - normalCDF (-1)) * 0.5, VFloat 0)),
+                                (simpleTuple, VTuple (VFloat 0) (VFloat (-1)), VTuple (VFloat 0.25) (VFloat 1), [], (VFloat $ (normalCDF 1 - normalCDF (-1)) * 0.5, VFloat 0)),
+                                (simpleTuple, VTuple (VFloat 0) (VFloat 0), VTuple (VFloat 0.25) (VFloat 0), [], (VFloat $ normalPDF 0 * 0.5, VFloat 1)),
+                                (simpleTuple, VTuple (VFloat 0) (VFloat 0), VTuple (VFloat 0) (VFloat 1), [], (VFloat $ (normalCDF 1 - normalCDF 0) * 2, VFloat 1)),
+                                (uniformIfProg, VFloat 0, VFloat 1, [], (VFloat 0.5, VFloat 0)),
+                                (constantProg, VFloat 1, VFloat 3, [], (VFloat 1, VFloat 0)),
+                                --,
+                                (testInjF, VFloat 0, VFloat 1, [], (VFloat 0.5, VFloat 0)),
+                                (testInjF2, VFloat 2, VFloat 3, [], (VFloat 0.5, VFloat 0)),
+                                (testInjFPlusLeft, VFloat 1, VFloat 1.5, [], (VFloat 0.5, VFloat 0)),
+                                (testInjFPlusRight, VFloat 1, VFloat 1.5, [], (VFloat 0.5, VFloat 0)),
+                                (testTheta, VFloat 0.9, VFloat 1.1, flatTree [1], (VFloat 1, VFloat 0)),
+                                (simpleCall, VFloat 0, VFloat 1, [], (VFloat 1.0, VFloat 0)),
+                                (testCallLambda, VFloat 2, VFloat 3, [], (VFloat 1.0, VFloat 0))]
+
                                   --(testLambdaParameter, VFloat 9, VFloat 11, [], VFloat 1.0)]
                                   --(testCallLambdaAdvanced, VFloat 2, VFloat 3, [], VFloat 1.0),
                                   --(testLetIn, VFloat 1.5, VFloat 2, [], VFloat 0.5)]
@@ -140,8 +143,8 @@ prop_CheckIntegralConverges :: Property
 prop_CheckIntegralConverges = forAll (elements correctIntegralValuesTestCases) checkIntegralConverges
 
 --Not yet working
---prop_CheckZeroWidthIntegrals :: Property
---prop_CheckZeroWidthIntegrals = forAll (elements [(testInjF, VFloat 0, VFloat 1, [], VFloat 0.5)]) checkZeroWidthIntegral
+prop_CheckZeroWidthIntegrals :: Property
+prop_CheckZeroWidthIntegrals = forAll (elements [(testInjF, VFloat 0, VFloat 1, [], VFloat 0.5)]) checkZeroWidthIntegral
 
 prop_CheckTopKInterprets :: Property
 prop_CheckTopKInterprets = forAll (elements correctProbValuesTestCases) checkTopKInterprets
@@ -156,15 +159,15 @@ checkProbTestCase (p, inp, params, (out, VFloat outDim)) = ioProperty $ do
     VTuple a (VFloat d) -> return $ a `reasonablyClose` out .&&. d === outDim
     _ -> return $ counterexample "Return type was no tuple" False
 
-checkIntegralTestCase :: (Program, IRValue, IRValue, [IRExpr], IRValue) -> Property
-checkIntegralTestCase (p, low, high, params, out) = ioProperty $ do
+checkIntegralTestCase :: (Program, IRValue, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
+checkIntegralTestCase (p, low, high, params, (out, outDim)) = ioProperty $ do
   actualOutput <- evalRandIO $ irIntegral p low high params
   case actualOutput of 
-    VTuple a (VFloat _) -> return $ a `reasonablyClose` out
+    VTuple a aDim -> return $ a `reasonablyClose` out .&&. aDim === outDim
     _ -> return $ counterexample "Return type was no tuple" False
 
 --TODO better bounds for Integral
-checkIntegralConverges :: (Program, IRValue, IRValue, [IRExpr], IRValue) -> Property
+checkIntegralConverges :: (Program, IRValue, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
 checkIntegralConverges (p, VFloat a, VFloat b, params, _) = ioProperty $ do
   actualOutput <- evalRandIO $ irIntegral p (VFloat (-9999999)) (VFloat 9999999) params
   case actualOutput of 

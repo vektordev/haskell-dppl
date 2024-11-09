@@ -27,7 +27,7 @@ envToIR conf p = concatMap (\(name, binding) ->
   let pt = pType $ getTypeInfo binding
       rt = rType $ getTypeInfo binding in
     if (pt == Deterministic || pt == Integrate) && (isOnlyNumbers rt) then
-      [(name ++ "_integ", postProcess (IRLambda "low" (IRLambda "high" (runCompile conf (toIRIntegrate conf binding (IRVar "low") (IRVar "high")))))),
+      [(name ++ "_integ", postProcess (IRLambda "low" (IRLambda "high" (runCompile conf (toIRIntegrateSave conf binding (IRVar "low") (IRVar "high")))))),
        (name ++ "_prob",postProcess (IRLambda "sample" (runCompile conf (toIRProbability conf binding (IRVar "sample"))))),
        (name ++ "_gen", postProcess (fst $ runIdentity $ runSupplyVars $ runWriterT (toIRGenerate binding)))]
     else if pt == Deterministic || pt == Integrate || pt == Prob then
@@ -583,9 +583,20 @@ packParamsIntoLetinsGen (v:vars) (p:params) expr = do
   pExpr <- toIRGenerate p
   e <- packParamsIntoLetinsGen vars params expr
   return $ IRLetIn v pExpr e
+ 
+--Adds an additional check that the bounds are not equal
+--We need this bounds check only once, because no invertible transformation can make the bounds be equal when they were not
+--TODO: Some InjF could lead to CoV, which would make the bounds check at the to wrong
+toIRIntegrateSave :: CompilerConfig -> Expr -> IRExpr -> IRExpr -> CompilerMonad CompilationResult
+toIRIntegrateSave conf (Lambda _ n e) lower higher = do
+  integ <- lift $ return $ generateLetInBlock conf (runWriterT (toIRIntegrateSave conf e lower higher))
+  return (IRLambda n integ, const0, const0)
+toIRIntegrateSave conf expr lower higher = do 
+  (prob, probDim, probBC) <- toIRProbability conf expr lower
+  (integ, integDim, integBC) <- toIRIntegrate conf expr lower higher
+  return (IRIf (IROp OpEq lower higher) prob integ, IRIf (IROp OpEq lower higher) probDim integDim, IRIf (IROp OpEq lower higher) probBC integBC)
 
 toIRIntegrate :: CompilerConfig -> Expr -> IRExpr -> IRExpr -> CompilerMonad CompilationResult
-toIRIntegrate conf expr lower higher | lower == higher = toIRProbability conf expr lower
 toIRIntegrate conf expr@(Uniform _) lower higher = do
   (density, _, _) <- toIRProbability conf expr lower
   --let expr = IRIf (IROp OpEq lower higher) density (IROp OpSub (IRCumulative IRUniform higher) (IRCumulative IRUniform lower))
@@ -627,9 +638,10 @@ toIRIntegrate conf (NegF _ a) low high = do
 toIRIntegrate conf (ExpF _ a) low high = do
   error "deprecated: Use InjF instead"
 toIRIntegrate conf (TCons _ t1Expr t2Expr) low high = do
-  (t1P, _,  t1Branches) <- toIRIntegrate conf t1Expr (IRTFst low) (IRTFst high)
-  (t2P, _,  t2Branches) <- toIRIntegrate conf t2Expr (IRTSnd low) (IRTSnd high)
-  return (IROp OpMult t1P t2P, const0, IROp OpPlus t1Branches t2Branches)
+  (t1P, t1Dim,  t1Branches) <- toIRIntegrateSave conf t1Expr (IRTFst low) (IRTFst high)
+  (t2P, t2Dim,  t2Branches) <- toIRIntegrateSave conf t2Expr (IRTSnd low) (IRTSnd high)
+  (productP, productDim) <- (t1P, t1Dim) `multP` (t2P, t2Dim)
+  return (productP, productDim, IROp OpPlus t1Branches t2Branches)
 toIRIntegrate conf (IfThenElse _ cond left right) low high = do
   var_cond_p <- mkVariable "cond"
   (condExpr, _, condBranches) <- toIRProbability conf cond (IRConst (VBool True))
