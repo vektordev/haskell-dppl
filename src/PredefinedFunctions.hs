@@ -30,6 +30,11 @@ expFwd = FDecl (TArrow TFloat TFloat, ["a"], ["b"], IRUnaryOp OpExp (IRVar "a") 
 expInv :: FDecl
 expInv = FDecl (TArrow TFloat TFloat, ["b"], ["a"], IRUnaryOp OpLog (IRVar "b") , [("b", IROp OpDiv (IRConst (VFloat 1)) (IRVar "b"))])
 
+negFwd :: FDecl
+negFwd = FDecl (TArrow TFloat TFloat, ["a"], ["b"], IRUnaryOp OpNeg (IRVar "a") , [("a", IRConst (VFloat (-1)))])
+negInv :: FDecl
+negInv = FDecl (TArrow TFloat TFloat, ["b"], ["a"], IRUnaryOp OpNeg (IRVar "b") , [("b", IRConst (VFloat (-1)))])
+
 plusFwd :: FDecl
 plusFwd = FDecl (TFloat `TArrow` (TFloat `TArrow` TFloat), ["a", "b"], ["c"], IROp OpPlus (IRVar "a") (IRVar "b"), [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))])
 plusInv1 :: FDecl
@@ -37,10 +42,40 @@ plusInv1 = FDecl (TFloat `TArrow` (TFloat `TArrow` TFloat), ["a", "c"], ["b"], I
 plusInv2 :: FDecl
 plusInv2 = FDecl (TFloat `TArrow` (TFloat `TArrow` TFloat), ["b", "c"], ["a"], IROp OpSub (IRVar "c") (IRVar "b"), [("b", IRConst (VFloat (-1))), ("c", IRConst (VFloat 1))])
 
+multFwd :: FDecl
+multFwd = FDecl (TFloat `TArrow` (TFloat `TArrow` TFloat), ["a", "b"], ["c"], IROp OpMult (IRVar "a") (IRVar "b"), [("a", IRVar "b"), ("b", IRVar "a")])
+multInv1 :: FDecl
+multInv1 = FDecl (TFloat `TArrow` (TFloat `TArrow` TFloat), ["a", "c"], ["b"], IROp OpDiv (IRVar "c") (IRVar "a"), [("a", IRUnaryOp OpNeg (IROp OpDiv (IRVar "c") (IROp OpMult (IRVar "a") (IRVar "a")))), ("c", IROp OpDiv (IRConst (VFloat 1)) (IRVar "a"))])
+multInv2 :: FDecl
+multInv2 = FDecl (TFloat `TArrow` (TFloat `TArrow` TFloat), ["b", "c"], ["a"], IROp OpDiv (IRVar "c") (IRVar "b"), [("b", IRUnaryOp OpNeg (IROp OpDiv (IRVar "c") (IROp OpMult (IRVar "b") (IRVar "b")))), ("c", IROp OpDiv (IRConst (VFloat 1)) (IRVar "b"))])
+
+plusIFwd :: FDecl
+plusIFwd = FDecl (TInt `TArrow` (TInt `TArrow` TInt), ["a", "b"], ["c"], IROp OpPlus (IRVar "a") (IRVar "b"), [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))])
+plusIInv1 :: FDecl
+plusIInv1 = FDecl (TInt `TArrow` (TInt `TArrow` TInt), ["a", "c"], ["b"], IROp OpSub (IRVar "c") (IRVar "a"), [("a", IRConst (VFloat (-1))), ("c", IRConst (VFloat 1))])
+plusIInv2 :: FDecl
+plusIInv2 = FDecl (TInt `TArrow` (TInt `TArrow` TInt), ["b", "c"], ["a"], IROp OpSub (IRVar "c") (IRVar "b"), [("b", IRConst (VFloat (-1))), ("c", IRConst (VFloat 1))])
+
+multIFwd :: FDecl
+multIFwd = FDecl (TInt `TArrow` (TInt `TArrow` TInt), ["a", "b"], ["c"], IROp OpMult (IRVar "a") (IRVar "b"), [("a", IRVar "b"), ("b", IRVar "a")])
+multIInv1 :: FDecl
+multIInv1 = FDecl (TInt `TArrow` (TInt `TArrow` TInt), ["a", "c"], ["b"], IROp OpDiv (IRVar "c") (IRVar "a"), [("a", IRUnaryOp OpNeg (IROp OpDiv (IRVar "c") (IROp OpMult (IRVar "a") (IRVar "a")))), ("c", IROp OpDiv (IRConst (VFloat 1)) (IRVar "a"))])
+multIInv2 :: FDecl
+multIInv2 = FDecl (TInt `TArrow` (TInt `TArrow` TInt), ["b", "c"], ["a"], IROp OpDiv (IRVar "c") (IRVar "b"), [("b", IRUnaryOp OpNeg (IROp OpDiv (IRVar "c") (IROp OpMult (IRVar "b") (IRVar "b")))), ("c", IROp OpDiv (IRConst (VFloat 1)) (IRVar "b"))])
+
+
+tConsFwd :: FDecl
+tConsFwd = FDecl (TFloat `TArrow` (TFloat `TArrow` Tuple TFloat TFloat), ["a", "b"], ["c", "d"], IRTCons (IRVar "a") (IRVar "b"), [("a", IRTCons (IRConst (VFloat 1)) (IRVar "b")), ("b", IRTCons (IRVar "a") (IRConst (VFloat 1)))])
+-- Cannot declare a backward pass here
+
 globalFenv :: FEnv
 globalFenv = [("double", FPair (doubleFwd, [doubleInv])),
               ("exp", FPair (expFwd, [expInv])),
-              ("plus", FPair (plusFwd, [plusInv1, plusInv2]))]
+              ("neg", FPair (negFwd, [negInv])),
+              ("plus", FPair (plusFwd, [plusInv1, plusInv2])),
+              ("plusI", FPair (plusIFwd, [plusIInv1, plusIInv2])),
+              ("mult", FPair (multFwd, [multInv1, multInv2])),
+              ("multI", FPair (multIFwd, [multIInv1, multIInv2]))]
 
 getHornClause :: Expr -> [HornClause]
 getHornClause e = case e of

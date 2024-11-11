@@ -37,6 +37,7 @@ import Data.Number.Erf (erf)
 import Numeric.AD (grad', auto)
 import Numeric.AD.Internal.Reverse (Reverse, Tape)
 import Data.Reflection (Reifies)
+import Data.Bifunctor (second)
 import SPLL.Parser
 import TestParser
 
@@ -152,6 +153,17 @@ prop_CheckTopKInterprets = forAll (elements correctProbValuesTestCases) checkTop
 prop_CheckProbTestCasesWithBC :: Property
 prop_CheckProbTestCasesWithBC = forAll (elements correctProbValuesTestCases) checkProbTestCasesWithBC
 
+prop_CheckInjFEqual :: Property
+prop_CheckInjFEqual = forAll (elements correctProbValuesTestCases) checkInjFEqual
+
+prop_TopK :: Property
+prop_TopK = ioProperty $ do
+  actualOutput0 <- evalRandIO $ irDensityTopK testTopK 0.1 (VFloat 0) []
+  actualOutput1 <- evalRandIO $ irDensityTopK testTopK 0.1 (VFloat 1) []
+  case (actualOutput0, actualOutput1) of
+    (VTuple a (VFloat _), VTuple b (VFloat _)) -> return $ (b == VFloat 0.95) && (a == VFloat 0)
+    _ -> return False
+
 checkProbTestCase :: (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
 checkProbTestCase (p, inp, params, (out, VFloat outDim)) = ioProperty $ do
   actualOutput <- evalRandIO $ irDensity p inp params
@@ -194,14 +206,14 @@ checkProbTestCasesWithBC (p, inp, params, (out, VFloat outDim)) = ioProperty $ d
   case actualOutput of 
     VTuple a (VTuple (VFloat d) (VFloat _)) -> return $ a `reasonablyClose` out .&&. d === outDim
     _ -> return $ counterexample "Return type was no tuple" False
-
-prop_TopK :: Property
-prop_TopK = ioProperty $ do
-  actualOutput0 <- evalRandIO $ irDensityTopK testTopK 0.1 (VFloat 0) []
-  actualOutput1 <- evalRandIO $ irDensityTopK testTopK 0.1 (VFloat 1) []
-  case (actualOutput0, actualOutput1) of
-    (VTuple a (VFloat _), VTuple b (VFloat _)) -> return $ (b == VFloat 0.95) && (a == VFloat 0)
-    _ -> return False
+    
+checkInjFEqual :: (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
+checkInjFEqual (p, inp, params, (_, _)) = ioProperty $ do
+  actualOutput <- evalRandIO $ irDensityBC p inp params
+  actualOutputInjF <- evalRandIO $ irDensityBC (preprocessToInjFProg p) inp params
+  case (actualOutput, actualOutputInjF) of 
+    (VTuple a aDim, VTuple b bDim) -> return $ a `reasonablyClose` b .&&. aDim === bDim
+    _ -> return $ counterexample "Return type was no tuple" False
 
 --prop_CheckProbTestCases = foldr (\(p, inp, out) acc -> do
 --  checkProbTestCase p inp out .&&. acc) (True===True) correctProbValuesTestCases
@@ -242,6 +254,17 @@ irIntegral p low high params = IRInterpreter.generateRand irEnv irEnv (lowExpr:h
         annotated = annotateAlgsProg typedProg
         typedProg = addTypeInfo preAnnotated
         preAnnotated = annotateEnumsProg p
+
+preprocessToInjFProg :: Program -> Program
+preprocessToInjFProg p@Program{functions=f} = p{functions=map (second preprocessToInjF) f} 
+        
+preprocessToInjF :: Expr -> Expr
+preprocessToInjF (PlusF t a b) = InjF t "plus" [preprocessToInjF a, preprocessToInjF b]
+--preprocessToInjF (PlusI t a b) = InjF t "plusI" [preprocessToInjF a, preprocessToInjF b]
+preprocessToInjF (MultF t a b) = InjF t "mult" [preprocessToInjF a, preprocessToInjF b]
+--preprocessToInjF (MultI t a b) = InjF t "multI" [preprocessToInjF a, preprocessToInjF b]
+preprocessToInjF (NegF t a) = InjF t "neg" [preprocessToInjF a]
+preprocessToInjF x = x
 
 reasonablyClose :: IRValue -> IRValue -> Property
 reasonablyClose (VFloat a) (VFloat b) = counterexample (show a ++ "/=" ++ show b) (property $ abs (a - b) <= 1e-5)

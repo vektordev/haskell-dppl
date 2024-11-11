@@ -369,7 +369,7 @@ toIRProbability conf (InjF _ name [param]) sample = do
   prefix <- mkVariable ""
   let letInBlock = irMap (uniqueify [v] prefix) (IRLetIn v sample invExpr)
   (paramExpr, paramDim, paramBranches) <- toIRProbability conf param letInBlock
-  let returnExpr = IRLetIn v sample (IROp OpMult paramExpr invDerivExpr)
+  let returnExpr = IRLetIn v sample (IROp OpMult paramExpr (IRUnaryOp OpAbs invDerivExpr))
   return (returnExpr, paramDim, paramBranches)
   where Just fPair = lookup name globalFenv   --TODO error handling if nor found
         FPair (_, [inv]) = fPair
@@ -386,7 +386,7 @@ toIRProbability conf (InjF TypeInfo {rType=TFloat, tags=extras} name [param1, pa
   let (detVar, sampleVar) = if x2 == v2 then (x2, x3) else (x3, x2)
   let letInBlock = IRLetIn detVar leftExpr (IRLetIn sampleVar sample invExpr)
   (paramExpr, paramDim, paramBranches) <- toIRProbability conf param2 letInBlock
-  let returnExpr = IRLetIn detVar leftExpr (IRLetIn sampleVar sample (IROp OpMult paramExpr invDeriv))
+  let returnExpr = IRLetIn detVar leftExpr (IRLetIn sampleVar sample (IROp OpMult paramExpr (IRUnaryOp OpAbs invDeriv)))
   uniquePrefix <- mkVariable ""
   return (irMap (uniqueify [v1, v2, v3] uniquePrefix) returnExpr, paramDim, paramBranches) --FIXME
 toIRProbability conf (InjF TypeInfo {rType=TFloat, tags=extras} name [param1, param2]) sample
@@ -401,7 +401,7 @@ toIRProbability conf (InjF TypeInfo {rType=TFloat, tags=extras} name [param1, pa
   let (detVar, sampleVar) = if x2 == v3 then (x2, x3) else (x3, x2)
   let letInBlock = IRLetIn detVar leftExpr (IRLetIn sampleVar sample invExpr)
   (paramExpr, paramDim, paramBranches) <- toIRProbability conf param1 letInBlock
-  let returnExpr = IRLetIn detVar leftExpr (IRLetIn sampleVar sample (IROp OpMult paramExpr invDeriv))
+  let returnExpr = IRLetIn detVar leftExpr (IRLetIn sampleVar sample (IROp OpMult paramExpr (IRUnaryOp OpAbs invDeriv)))
   uniquePrefix <- mkVariable ""
   return (irMap (uniqueify [v1, v2, v3] uniquePrefix) returnExpr, paramDim, paramBranches)
 toIRProbability conf (Null _) sample = do
