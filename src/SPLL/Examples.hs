@@ -181,7 +181,7 @@ gaussLists = Program [("main", Lambda makeTypeInfo "thetas"
     (Null makeTypeInfo)
     (Cons makeTypeInfo
       (PlusF makeTypeInfo (MultF makeTypeInfo (Normal makeTypeInfo) (ThetaI makeTypeInfo (Var makeTypeInfo "thetas") 1)) (ThetaI makeTypeInfo (Var makeTypeInfo "thetas") 2))
-      (Apply makeTypeInfo (Call makeTypeInfo "main") (Var makeTypeInfo "thetas")))))] []
+      (Apply makeTypeInfo (Var makeTypeInfo "main") (Var makeTypeInfo "thetas")))))] []
 
 testTopLevelLambda :: Program
 testTopLevelLambda = Program [("main", Lambda makeTypeInfo "a" (PlusF makeTypeInfo (Var makeTypeInfo "a") (Uniform makeTypeInfo)))] []

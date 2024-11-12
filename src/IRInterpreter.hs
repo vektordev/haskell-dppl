@@ -42,6 +42,7 @@ generate f globalEnv env args expr | args /= [] = do
   let reverseArgs = reverse args
   let newExpr = foldr (flip IRApply) expr reverseArgs 
   generate f globalEnv env [] newExpr 
+generate f globalEnv env [] (IRInvoke expr) = generate f globalEnv env [] expr
 generate f globalEnv env [] (IRLambda name expr) = do
   return $ VClosure env name expr
 generate f globalEnv env [] (IRApply expr val) = do

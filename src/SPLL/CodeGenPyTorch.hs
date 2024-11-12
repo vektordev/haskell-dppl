@@ -142,7 +142,6 @@ generateStatementBlock (IRIf cond left right) = let
   in [l1] ++ indentOnce cLeft ++ [l2] ++ indentOnce cRight
 generateStatementBlock expr = ["return " ++ generateExpression expr]
 
-
 generateExpression :: IRExpr -> String
 generateExpression (IRIf cond left right) = "(" ++ generateExpression left ++ " if " ++ generateExpression cond ++ " else " ++ generateExpression right ++ ")"
 generateExpression (IROp op left right) = "((" ++ generateExpression left ++ ") " ++ pyOps op ++ " (" ++ generateExpression right ++"))" 
@@ -164,10 +163,17 @@ generateExpression (IRSample IRUniform) = "rand()"
 generateExpression (IRVar name) = name
 generateExpression (IRCall name params) = name ++ "(" ++ intercalate ", " (map generateExpression params) ++ ")"
 generateExpression (IRLambda name x) = "(lambda " ++ name  ++ ": " ++ generateExpression x ++ ")"
-generateExpression (IRApply f val) = "(" ++ generateExpression f ++ ")(" ++ generateExpression val ++ ")" 
+generateExpression (IRApply f val) = "functools.partial(" ++ generateExpression f ++ ", " ++ generateExpression val ++ ")"
+generateExpression expr@(IRInvoke _) = generateInvokeExpression expr
 generateExpression (IREnumSum name enumRange expr) = "sum(map((lambda " ++ name ++ ": " ++ generateExpression expr ++ "), " ++ pyVal enumRange ++ "))"
 generateExpression (IREvalNN name arg) = name ++ "(" ++ generateExpression arg ++ ")"
 generateExpression (IRIndex lst idx) = "(" ++ generateExpression lst ++ ")[" ++ generateExpression idx ++ "]" 
 -- I personally hate this code. I constructs a tuple with an assignment expression in the first element and discards the first element
 generateExpression (IRLetIn name val body) = "((" ++ name ++ ":=" ++ generateExpression val ++ "), " ++ generateExpression body ++ ")[1]"
 generateExpression x = error ("Unknown expression in PyTorch codegen: " ++ show x)
+
+generateInvokeExpression :: IRExpr -> String
+generateInvokeExpression (IRInvoke expr) = generateInvokeExpression expr ++ ")"
+generateInvokeExpression (IRApply f@(IRApply _ _) val) = generateInvokeExpression f ++ ", " ++ generateExpression val
+generateInvokeExpression (IRApply f val) = generateInvokeExpression f ++ generateExpression val
+generateInvokeExpression expr = "(" ++ generateExpression expr ++ ")("

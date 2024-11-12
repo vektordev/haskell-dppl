@@ -147,6 +147,7 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               | IRCall String [IRExpr]
               | IRLambda String IRExpr
               | IRApply IRExpr IRExpr
+              | IRInvoke IRExpr -- Only relevant for CodeGen. States that the last argument has been applied to a function
               -- auxiliary construct to aid enumeration: bind each enumerated Value to the Varname and evaluate the subexpr. Sum results.
               -- maybe we can instead move this into some kind of standard library.
               | IREnumSum Varname IRValue IRExpr
@@ -187,6 +188,7 @@ getIRSubExprs (IRSample _) = []
 getIRSubExprs (IRLetIn _ a b) = [a, b]
 getIRSubExprs (IRVar _) = []
 getIRSubExprs (IRCall _ a) = a
+getIRSubExprs (IRInvoke a) = [a]
 getIRSubExprs (IRLambda _ a) = [a]
 getIRSubExprs (IRApply a b) = [a, b]
 getIRSubExprs (IREnumSum _ _ a) = [a]
@@ -211,6 +213,7 @@ irMap f x = case x of
   (IRCall name args) -> f (IRCall name (map (irMap f) args))
   (IRLambda name scope) -> f (IRLambda name (irMap f scope))
   (IRApply a b) -> f (IRApply (irMap f a) (irMap f b))
+  (IRInvoke expr) -> f (IRInvoke (irMap f expr))
   (IREnumSum name val scope) -> f (IREnumSum name val (irMap f scope))
   (IREvalNN name arg) -> f (IREvalNN name (irMap f arg))
   (IRIndex left right) -> f (IRIndex (irMap f left) (irMap f right))
@@ -242,6 +245,7 @@ irPrintFlat (IRVar _) = "IRVar"
 irPrintFlat (IRCall name _) = "IRCall " ++ name
 irPrintFlat (IRLambda _ _) = "IRLambda"
 irPrintFlat (IRApply _ _) = "IRCallLambda"
+irPrintFlat (IRInvoke _) = "IRInvoke"
 irPrintFlat (IREnumSum _ _ _) = "IREnumSum"
 irPrintFlat (IREvalNN name _) = "IREvalNN " ++ name
 irPrintFlat (IRIndex _ _) = "IRIndex"
