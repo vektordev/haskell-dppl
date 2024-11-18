@@ -16,12 +16,18 @@ import Data.Set.Internal (merge, empty)
 
 
 annotateEnumsProg :: Program -> Program
-annotateEnumsProg p@Program {functions=f, neurals=n} = p{functions = map (second (annotate (exprEnv++neuralEnv))) f}
+annotateEnumsProg p@Program {functions=f, neurals=n} = p{functions = map (\(name, expr) -> (name, annotateIfNotRecursive name (exprEnv++neuralEnv) expr)) f}
   --TODO this is really unclean. It does the the job of initializing the environment with correct tags, and also prevents infinite recursion, by only evaluating twice, but annotates the program twice
-  where exprEnv = map (second (tags . getTypeInfo . annotate [])) f
-        neuralEnv = map (\(n, _, t) -> (n, [t])) n
+  where
+    exprEnv = map (second (tags . getTypeInfo . annotate [])) f
+    neuralEnv = map (\(n, _, t) -> (n, [t])) n
+
+annotateIfNotRecursive :: String -> [(String, [Tag])] -> Expr -> Expr
+annotateIfNotRecursive name _ e | isRecursive name e = e
+annotateIfNotRecursive _ env e = annotate env e
 
 annotate :: [(String, [Tag])] -> Expr -> Expr
+--annotate _ e | trace ((show e)) False = undefined
 annotate env e = withNewTypeInfo
   where 
     withNewTypeInfo = setTypeInfo withNewSubExpr (setTags (getTypeInfo withNewSubExpr) tgs)
@@ -63,6 +69,12 @@ valuesOfTag tag = case tag of
   EnumList l -> l
   EnumRange (VInt a, VInt b) -> [VInt i | i <- [a..b]]
   _ -> []
+
+isRecursive :: String -> Expr -> Bool
+isRecursive name (Var _ n) | name == n = True
+isRecursive name (Call _ n) | name == n = True
+isRecursive name (CallArg _ n _) | name == n = True
+isRecursive n e = any (isRecursive n) (getSubExprs e)
   
 annotateAlgsProg :: Program -> Program
 annotateAlgsProg p@Program {functions=fs} = p{functions=map (Data.Bifunctor.second (tMap tagAlgsExpression)) fs}

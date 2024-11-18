@@ -624,10 +624,9 @@ unifies (Tuple t1 t2) BottomTuple = return emptySubst
 unifies BottomTuple (Tuple t1 t2) = return emptySubst
 unifies (ListOf t) NullList = return emptySubst
 unifies NullList (ListOf t) = return emptySubst
-unifies t1 (GreaterType (TVarR v) t3) = if t1 `matches` t3 then v `bind` t1 else
-  throwError $ UnificationFail t1 t3
-unifies t1 (GreaterType t3 (TVarR v)) = if t1 `matches` t3 then v `bind` t1 else
-  throwError $ UnificationFail t1 t3
+unifies t1 (GreaterType (TVarR v) t3) | t1 `matches` t3 = v `bind` t1
+unifies t1 (GreaterType t3 (TVarR v)) | t1 `matches` t3 = v `bind` t1
+unifies (TVarR v) (GreaterType t1 (TVarR w)) | v == w = v `bind` t1
 unifies (TVarR v) (GreaterType t2 t3) = case greaterType t2 t3 of
   Nothing -> throwError $ UnificationFail t2 t3
   Just t -> v `bind` t
