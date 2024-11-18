@@ -21,7 +21,7 @@ type CompilerMonad a = WriterT [(String, IRExpr)] (SupplyT Int Identity) a
 
 type CompilationResult = (IRExpr, IRExpr, IRExpr)
 
-type TypeEnv = [(String, RType)]
+type TypeEnv = [(String, (RType, Bool))]
 
 -- perhaps as an explicit lambda in the top of the expression, otherwise we'll get trouble generating code.
 -- TODO: How do we deal with top-level lambdas in binding here?
@@ -54,11 +54,12 @@ generateLetInBlock conf codeGen =
           else
             (foldr (\(var, val) expr  -> IRLetIn var val expr) (IRTCons m dim) binds)
   where ((m, dim, bc), binds) = runIdentity $ runSupplyVars codeGen
-  
-getGlobalTypeEnv :: Program -> [(String, RType)]
+
+-- Return type (name, rType, hasInferenceFunctions)
+getGlobalTypeEnv :: Program -> TypeEnv
 getGlobalTypeEnv p = funcEnv ++ neuralEnv
-  where funcEnv = map (\(name, expr) -> (name, rType (getTypeInfo expr))) (functions p)
-        neuralEnv = map (\(name, rt, _) -> (name, rt)) (neurals p)
+  where funcEnv = map (\(name, expr) -> (name, (rType (getTypeInfo expr), True))) (functions p)
+        neuralEnv = map (\(name, rt, _) -> (name, (rt, False))) (neurals p)
 
 runSupplyVars :: (Monad m) => SupplyT Int m a -> m a
 runSupplyVars codeGen = runSupplyT codeGen (+1) 1
@@ -355,24 +356,25 @@ toIRProbability conf typeEnv (Uniform t) sample = return (IRDensity IRUniform sa
 --TODO: assumption: These will be top-level lambdas:
 toIRProbability conf typeEnv (Lambda t name subExpr) sample = do
   let (TArrow paramRType _) = rType t
-  let newTypeEnv = (name, paramRType):typeEnv
   case paramRType of
     TArrow (TArrow _ _) _ -> do
+      let newTypeEnv = (name, (paramRType, True)):typeEnv
       irTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRProbability conf newTypeEnv subExpr sample))
       return (IRLambda name irTuple, const0, const0)
     _ -> do
+      let newTypeEnv = (name, (paramRType, False)):typeEnv
       irTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRProbability conf newTypeEnv subExpr sample))
       return (IRLambda name irTuple, const0, const0)
 toIRProbability conf typeEnv (Apply TypeInfo{rType=rt} l v) sample = do
   vIR <- toIRGenerate v
   (lIR, _, _) <- toIRProbability conf typeEnv l sample -- Dim and BC are irrelevant here. We need to extract these from the return tuple
-  let applyExpr = case rt of
-        TArrow _ _ -> IRApply lIR vIR
-        _ -> IRInvoke (IRApply lIR vIR)
-  if countBranches conf then
-    return (IRTFst applyExpr, IRTFst (IRTSnd applyExpr), IRTSnd (IRTSnd applyExpr))
-  else
-    return (IRTFst applyExpr, IRTSnd applyExpr, const0)
+  -- The result is not a tuple if the return value is a closure
+  case rt of
+    TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
+    _ -> if countBranches conf then
+           return (IRTFst (IRInvoke (IRApply lIR vIR)), IRTFst (IRTSnd (IRInvoke (IRApply lIR vIR))), IRTSnd (IRTSnd (IRInvoke (IRApply lIR vIR))))
+         else
+           return (IRTFst (IRInvoke (IRApply lIR vIR)), IRTSnd (IRInvoke (IRApply lIR vIR)), const0)
 toIRProbability conf typeEnv (Cons _ hdExpr tlExpr) sample = do
   (headP, headDim, headBranches) <- toIRProbability conf typeEnv hdExpr (IRHead sample)
   (tailP, tailDim, tailBranches) <- toIRProbability conf typeEnv tlExpr (IRTail sample)
@@ -431,14 +433,22 @@ toIRProbability conf typeEnv (Constant _ value) sample = do
 toIRProbability conf typeEnv (Var _ n) sample = do
   -- Variable might be a function
   case lookup n typeEnv of
-    Just (TArrow _ _) -> do
+    -- Var is a function
+    Just(TArrow _ _, _) -> do
       var <- mkVariable "call"
       tell [(var, IRApply (IRVar (n ++ "_prob")) sample)]
+      -- The return value is still a function. No need to do dim and branch counting here
+      return (IRVar var, const0, const0)
+    -- Var is a top level declaration (an therefor has a _prob function)
+    Just (_, True) -> do
+      var <- mkVariable "call"
+      tell [(var, IRInvoke (IRApply (IRVar (n ++ "_prob")) sample))]
       if countBranches conf then
           return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
         else
           return (IRTFst (IRVar var), IRTSnd (IRVar var), const0)
-    Just _ -> do
+    -- Var is a local variable
+    Just (_, False) -> do
       expr <- indicator (IROp OpEq sample (IRVar n))
       return (expr, const0, const0)
     Nothing -> error ("Could not find name in TypeEnv: " ++ n)
@@ -767,6 +777,27 @@ toIRIntegrate conf typeEnv (Apply _ l v) low high = do
     return (IRTFst (IRApply lIR vIR), IRTFst (IRTSnd (IRApply lIR vIR)), IRTSnd (IRTSnd (IRApply lIR vIR)))
   else
     return (IRTFst (IRApply lIR vIR), IRTSnd (IRApply lIR vIR), const0)
-toIRIntegrate conf typeEnv (Var _ n) _ _ = return (IRVar n, const0, const0)
+toIRIntegrate conf typeEnv (Var _ n) low high = do
+  -- Variable might be a function
+  case lookup n typeEnv of
+   -- Var is a function
+   Just(TArrow _ _, _) -> do
+     var <- mkVariable "call"
+     tell [(var, IRApply (IRApply (IRVar (n ++ "_integ")) low) high)]
+     -- The return value is still a function. No need to do dim and branch counting here
+     return (IRVar var, const0, const0)
+   -- Var is a top level declaration (an therefor has a _prob function)
+   Just (_, True) -> do
+     var <- mkVariable "call"
+     tell [(var, IRInvoke (IRApply (IRApply (IRVar (n ++ "_integ")) low) high))]
+     if countBranches conf then
+         return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
+       else
+         return (IRTFst (IRVar var), IRTSnd (IRVar var), const0)
+   -- Var is a local variable
+   Just (_, False) -> do
+    ind <- indicator (IROp OpAnd (IROp OpLessThan low (IRVar n)) (IROp OpGreaterThan high (IRVar n))) --TODO What to do if low and high are equal?
+    return (ind, const0, const0)
+   Nothing -> error ("Could not find name in TypeEnv: " ++ n)
 toIRIntegrate _ _ x _ _ = error ("found no way to convert to IRIntegrate: " ++ show x)
 

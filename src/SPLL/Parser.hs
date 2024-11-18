@@ -491,7 +491,7 @@ buildInvMap fenv = Map.fromList
    | (name, _) <- fenv]
 
 globalFunctions :: Program -> BuilderMap
-globalFunctions prog = Map.fromList [(name, \ti [] -> Right $ Call ti name) | (name, _) <- functions prog]
+globalFunctions prog = Map.fromList [(name, \ti [] -> Right $ Var ti name) | (name, _) <- functions prog]
 
 -- Collect all variables that should not be transformed
 collectBenignVars :: Program -> Set.Set String

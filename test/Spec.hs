@@ -90,6 +90,7 @@ correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat
                                (testThetaTree, VFloat 11, [thetaTreeExample], (VFloat 1, VFloat 0)),
                                (testNot, VBool True, [], (VFloat 0.25, VFloat 0)),
                                (simpleCall, VFloat 0.5, [], (VFloat 1.0, VFloat 1)),
+                               (testCallArg, VFloat 3.5, [], (VFloat 1.0, VFloat 1)),
                                (testInjFPlusLeft, VFloat 1.5, [], (VFloat 1.0, VFloat 1)),
                                (testInjFPlusRight, VFloat 1.5, [], (VFloat 1.0, VFloat 1)),
                                (testDim, VFloat 3, [], (VFloat 0.5, VFloat 0)),
@@ -125,6 +126,7 @@ correctIntegralValuesTestCases =[(uniformProg, VFloat 0, VFloat 1, [], (VFloat 1
                                 (testInjFPlusRight, VFloat 1, VFloat 1.5, [], (VFloat 0.5, VFloat 0)),
                                 (testTheta, VFloat 0.9, VFloat 1.1, flatTree [1], (VFloat 1, VFloat 0)),
                                 (simpleCall, VFloat 0, VFloat 1, [], (VFloat 1.0, VFloat 0)),
+                                (testCallArg, VFloat 3.5, VFloat 4.5, [], (VFloat 0.5, VFloat 0)),
                                 (testCallLambda, VFloat 2, VFloat 3, [], (VFloat 1.0, VFloat 0))]
 
                                   --(testLambdaParameter, VFloat 9, VFloat 11, [], VFloat 1.0)]

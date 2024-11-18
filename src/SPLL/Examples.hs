@@ -107,7 +107,10 @@ constantProg :: Program
 constantProg = Program [("main", Constant makeTypeInfo $ VFloat 2)] [] 
 
 simpleCall :: Program
-simpleCall = Program [("unif", Uniform makeTypeInfo), ("main", Call makeTypeInfo "unif")] [] 
+simpleCall = Program [("unif", Uniform makeTypeInfo), ("main", Var makeTypeInfo "unif")] [] 
+
+testCallArg :: Program
+testCallArg = Program [("unif", Lambda makeTypeInfo "x" (PlusF makeTypeInfo (Var makeTypeInfo "x") (Uniform makeTypeInfo))), ("main", Apply makeTypeInfo (Var makeTypeInfo "unif") (Constant makeTypeInfo (VFloat 3)))] [] 
 
 testNeg :: Expr
 testNeg = NegF makeTypeInfo (Uniform makeTypeInfo)

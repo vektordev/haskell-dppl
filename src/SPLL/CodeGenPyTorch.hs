@@ -103,7 +103,8 @@ stdLib = [("in", "contains")]
 
 replaceCalls :: [(String, String)] -> IRExpr -> IRExpr
 replaceCalls lut (IRCall name args) = IRCall (fromMaybe name $ lookup name lut) args
-replaceCalls lut other = other
+replaceCalls lut (IRVar name) = IRVar (fromMaybe name $ lookup name lut)
+replaceCalls _ other = other
 
 generateClass :: (String, Maybe IRExpr, Maybe IRExpr, Maybe IRExpr) -> [String]
 generateClass (name, gen, prob, integ) = let
