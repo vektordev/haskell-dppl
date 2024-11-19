@@ -452,17 +452,18 @@ toIRProbability conf typeEnv (Var _ n) sample = do
       expr <- indicator (IROp OpEq sample (IRVar n))
       return (expr, const0, const0)
     Nothing -> error ("Could not find name in TypeEnv: " ++ n)
-toIRProbability conf typeEnv (Call _ name) sample = do
+{-toIRProbability conf typeEnv (Call _ name) sample = do
   var <- mkVariable "call"
   tell [(var, IRApply (IRVar (name ++ "_prob")) sample)]
   if countBranches conf then
       return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
     else
-      return (IRTFst (IRVar var), IRTSnd (IRVar var), const0)
+      return (IRTFst (IRVar var), IRTSnd (IRVar var), const0)-}
 toIRProbability conf typeEnv (ThetaI _ a i) sample = do
   a' <- toIRGenerate a
   expr <- indicator (IROp OpEq sample (IRTheta a' i))
   return (expr, const0, const0)
+toIRProbability conf typeEnv (Call _ name) sample = error "Call has been deprecated in favor of Apply with Var"
 toIRProbability conf typeEnv (Subtree _ a i) sample = error "Cannot infer prob on subtree expression. Please check your syntax"
 toIRProbability conf typeEnv x sample = error ("found no way to convert to IR: " ++ show x)
 
@@ -590,7 +591,8 @@ toIRGenerate (TCons _ t1 t2) = do
   return $ IRTCons t1' t2'
 toIRGenerate (Uniform _) = return $ IRSample IRUniform
 toIRGenerate (Normal _) = return $ IRSample IRNormal
-toIRGenerate (Call _ name) = return $ IRCall (name ++ "_gen") []
+--toIRGenerate (Call _ name) = return $ IRCall (name ++ "_gen") []
+toIRGenerate (Call _ name) = error "Call has been deprecated in favor of Apply with Var"
 toIRGenerate (InjF _ name params) = do
   -- Assuming that the logic within packParamsIntoLetinsGen is correct.
   -- You will need to process vars and params, followed by recursive calls to fwdExpr.
@@ -760,13 +762,13 @@ toIRIntegrate conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [para
   (paramExpr, _, paramBranches) <- toIRIntegrate conf typeEnv param1 letInBlockLow letInBlockHigh
   uniquePrefix <- mkVariable ""
   return (irMap (uniqueify [v1, v2, v3] uniquePrefix) paramExpr, const0, paramBranches)
-toIRIntegrate conf typeEnv (Call _ name) low high = do
+{-toIRIntegrate conf typeEnv (Call _ name) low high = do
   var <- mkVariable "call"
   tell [(var, IRApply (IRApply (IRVar (name ++ "_integ")) high) low)]
   if countBranches conf then
       return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
     else
-      return (IRTFst (IRVar var), IRTSnd (IRVar var), const0)
+      return (IRTFst (IRVar var), IRTSnd (IRVar var), const0)-}
 toIRIntegrate conf typeEnv (Lambda t name subExpr) low high = do
     irTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRIntegrate conf typeEnv subExpr low high))
     return (IRLambda name irTuple, const0, const0)
@@ -777,6 +779,7 @@ toIRIntegrate conf typeEnv (Apply _ l v) low high = do
     return (IRTFst (IRApply lIR vIR), IRTFst (IRTSnd (IRApply lIR vIR)), IRTSnd (IRTSnd (IRApply lIR vIR)))
   else
     return (IRTFst (IRApply lIR vIR), IRTSnd (IRApply lIR vIR), const0)
+toIRIntegrate conf typeEnv (Call _ name) low high = error "Call has been deprecated in favor of Apply with Var"
 toIRIntegrate conf typeEnv (Var _ n) low high = do
   -- Variable might be a function
   case lookup n typeEnv of

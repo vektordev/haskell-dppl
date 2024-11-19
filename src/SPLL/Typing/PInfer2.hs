@@ -542,7 +542,7 @@ infer env expr = case expr of
   Normal ti  -> return (emptySubst, [], Integrate, Normal (setPType ti Integrate))
   Constant ti val  -> return (emptySubst, [], Deterministic, Constant (setPType ti Deterministic) val)
   -- Assuming unbound variables are caught in RInfer (laziness tbh)
-  Var ti s -> return (emptySubst, [], Deterministic, Var (setPType ti Deterministic) s)
+  --Var ti s -> return (emptySubst, [], Deterministic, Var (setPType ti Deterministic) s)
   LetIn ti s x b -> do
     (s1, cs1, t1, xt) <- infer env x
     (s2, cs2, t2, bt) <- infer env b
@@ -614,9 +614,14 @@ infer env expr = case expr of
       (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
       return (s3, cs3, t3, LessThan (setPType ti t3) et1 et2)
 
-  Call ti name -> do
-      (s1, cs, t1) <- lookupEnv env name
-      return (s1, cs, t1, Call (setPType ti t1) name)
+  Var ti name -> do
+      let (TypeEnv envMap) = env
+      case Map.lookup name envMap of
+          Nothing -> return (emptySubst, [], Deterministic, Var (setPType ti Deterministic) name)
+          Just [s] -> do
+            (_, t) <- instantiate s
+            return (emptySubst, [], t, Var (setPType ti t) name)
+          Just _ -> error "unresolved function call"
 
   Null ti -> return (emptySubst, [], Deterministic, Null (setPType ti Deterministic))
 
@@ -643,6 +648,7 @@ infer env expr = case expr of
     return (s6, cs6, t6, IfThenElse (setPType ti t6) condt trt flt)
 
   Lambda ti name e -> do
+    n <- fresh
     (s, cs, t, et) <- infer env e -- TODO Check this
     return (s, cs, t, Lambda (setPType ti t) name et)
 

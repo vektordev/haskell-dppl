@@ -13,6 +13,7 @@ import Data.Bifunctor
 import SPLL.Typing.Typing (TypeInfo, TypeInfo(..), Tag(..), setTags)
 import Data.Set (fromList, toList)
 import Data.Set.Internal (merge, empty)
+import Debug.Trace (trace)
 
 
 annotateEnumsProg :: Program -> Program
@@ -55,7 +56,7 @@ annotate env e = withNewTypeInfo
         let valuesRight = fromList $ getValuesFromExpr right
         merge valuesLeft  valuesRight
       (LetIn _ _ _ a) -> fromList $ getValuesFromExpr a
-      (Call _ name) -> case (lookup name env) of
+      (Var _ name) -> trace (name ++ show (lookup name env)) $ case (lookup name env) of
         Just tags -> fromList $ concatMap valuesOfTag tags 
         Nothing -> empty
       _ -> empty
@@ -88,6 +89,7 @@ tagAlgsExpression expr =
     getTypeInfo expr
 
 findAlgorithm :: Expr -> InferenceRule
+findAlgorithm expr | trace (show expr) False = undefined
 findAlgorithm expr = case validAlgs of
   [alg] -> alg
   [] -> error ("no valid algorithms found in expr: " ++ show expr)

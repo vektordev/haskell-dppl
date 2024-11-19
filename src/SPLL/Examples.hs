@@ -59,7 +59,7 @@ exampleList = [
 paramExpr :: Expr
 paramExpr = Arg makeTypeInfo "iterations" TFloat (IfThenElse makeTypeInfo
   (GreaterThan makeTypeInfo (Var makeTypeInfo "iterations") (Constant makeTypeInfo (VFloat 0.5)))
-  (Cons makeTypeInfo (Constant makeTypeInfo (VBool True)) (CallArg makeTypeInfo "main" [PlusF makeTypeInfo (Call makeTypeInfo "iterations") (Constant makeTypeInfo (VFloat (-1.0)))]))
+  (Cons makeTypeInfo (Constant makeTypeInfo (VBool True)) (Apply makeTypeInfo (Call makeTypeInfo "main") (PlusF makeTypeInfo (Call makeTypeInfo "iterations") (Constant makeTypeInfo (VFloat (-1.0))))))
   (Null makeTypeInfo))
 
 simpleList :: Program
@@ -158,15 +158,15 @@ testCallLambdaAdvanced :: Program
 testCallLambdaAdvanced = Program [("main", LetIn makeTypeInfo "l" (Lambda makeTypeInfo "a" (PlusF makeTypeInfo (Var makeTypeInfo "a") (Uniform makeTypeInfo))) (Apply makeTypeInfo (Var makeTypeInfo "l") (Constant makeTypeInfo (VFloat 2))))] [] 
 
 testLambdaParameter :: Program
-testLambdaParameter = Program [("main", Apply makeTypeInfo (Call makeTypeInfo "other") (Lambda makeTypeInfo "x" (MultF makeTypeInfo (Var makeTypeInfo "x") (Constant makeTypeInfo (VFloat 2)))) ), ("other", Lambda makeTypeInfo "f" (Apply makeTypeInfo (Var makeTypeInfo "f") (Constant makeTypeInfo (VFloat 5))))] [] 
+testLambdaParameter = Program [("main", Apply makeTypeInfo (Var makeTypeInfo "other") (Lambda makeTypeInfo "x" (MultF makeTypeInfo (Var makeTypeInfo "x") (Constant makeTypeInfo (VFloat 2)))) ), ("other", Lambda makeTypeInfo "f" (Apply makeTypeInfo (Var makeTypeInfo "f") (Constant makeTypeInfo (VFloat 5))))] []
 
 testLetIn :: Program
 testLetIn = Program [("main", LetIn makeTypeInfo "u" (Uniform makeTypeInfo) (PlusF makeTypeInfo (Var makeTypeInfo "u") (Constant makeTypeInfo (VFloat 1))))] [] 
 --testCallLambda = Program [] [] (CallLambda makeTypeInfo (Uniform makeTypeInfo) (Lambda makeTypeInfo "a" (PlusF makeTypeInfo (Var makeTypeInfo "a") (Uniform makeTypeInfo))))
 
 testRecursion :: Program
-testRecursion = Program [("main", Apply makeTypeInfo (Call makeTypeInfo "rec") (Constant makeTypeInfo (VFloat 8))),
-                         ("rec", Lambda makeTypeInfo "x" (IfThenElse makeTypeInfo (GreaterThan makeTypeInfo (Var makeTypeInfo "x") (Constant makeTypeInfo (VFloat 1))) (MultF makeTypeInfo (Constant makeTypeInfo (VFloat 3)) (Apply makeTypeInfo (Call makeTypeInfo "rec") (MultF makeTypeInfo (Var makeTypeInfo "x") (Constant makeTypeInfo (VFloat 0.5))))) (Uniform makeTypeInfo)))] []
+testRecursion = Program [("main", Apply makeTypeInfo (Var makeTypeInfo "rec") (Constant makeTypeInfo (VFloat 8))),
+                         ("rec", Lambda makeTypeInfo "x" (IfThenElse makeTypeInfo (GreaterThan makeTypeInfo (Var makeTypeInfo "x") (Constant makeTypeInfo (VFloat 1))) (MultF makeTypeInfo (Constant makeTypeInfo (VFloat 3)) (Apply makeTypeInfo (Var makeTypeInfo "rec") (MultF makeTypeInfo (Var makeTypeInfo "x") (Constant makeTypeInfo (VFloat 0.5))))) (Uniform makeTypeInfo)))] []
 
 testNN :: Program
 testNN = Program [("main", mNistAddExpr)] [("classifyMNist", TInt, EnumList $ map VInt [0,1,2,3,4,5,6,7,8,9])]
@@ -203,7 +203,7 @@ testDice = Program [("main", IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uni
                             (IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat (1/2)))) (Constant makeTypeInfo (VInt 5)) (Constant makeTypeInfo (VInt 6)))))))] []
                             
 testDiceAdd :: Program
-testDiceAdd = Program [ ("main", PlusI makeTypeInfo (Call makeTypeInfo "dice") (Call makeTypeInfo "dice")),
+testDiceAdd = Program [ ("main", PlusI makeTypeInfo (Var makeTypeInfo "dice") (Var makeTypeInfo "dice")),
                         ("dice", IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat (1/6)))) (Constant makeTypeInfo (VInt 1)) 
                         (IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat (1/5)))) (Constant makeTypeInfo (VInt 2))
                           (IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat (1/4)))) (Constant makeTypeInfo (VInt 3))
