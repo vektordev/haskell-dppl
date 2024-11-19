@@ -53,16 +53,6 @@ generate f globalEnv env [] (IRApply expr val) = do
       let constClosEnv = (name, IRConst valVal):closEnv
       generate f globalEnv constClosEnv [] lambda
     _ -> error ("Type error: Expression is not a closure: " ++ show exprVal)
-generate f globalEnv env [] (IRCall name callArgs) = do
-  let expr = fromMaybe (error ("function not found: " ++ name)) (lookup name env)
-  -- Evaluate the expressions here if value passed would be a local variable.
-  let reverseArgs = reverse callArgs
-  evalCa <- mapM (generate f globalEnv env []) reverseArgs
-  let ca = map IRConst evalCa
-  let appliedArgs = foldr (flip IRApply) expr ca
-  generate f globalEnv globalEnv [] appliedArgs --TODO Multi parameter Tests
---generate f globalEnv env (x:args) expr | trace ((show expr) ++ (show x)) False = undefined
--- generate f globalEnv env (x:args) expr = error ("Arguments provided to non-lamda related expression: " ++ irPrintFlat expr)
 generate f globalEnv env args (IRIf cond thenCase elseCase) = do
   condVal <- generate f globalEnv env args cond
   case condVal of

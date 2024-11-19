@@ -91,8 +91,6 @@ addWitnesses witVars (IfThenElse ti cond tr fl) =
         wits = Set.difference (Set.intersection (witnessedVars $ getTypeInfo trW)(witnessedVars $ getTypeInfo flW)) (containedVars varsOfExpr cond)
 addWitnesses witVars (GreaterThan ti e1 e2) =
   GreaterThan ti (addWitnesses witVars e1) (addWitnesses witVars e2)
-addWitnesses _ (Call ti f) =
-  Call ti f
 addWitnesses _ (Null ti) = Null ti
 addWitnesses witVars (Cons t fst rst) = Cons (setWitnessedVars t comp) witFst witRst
   where witFst = addWitnesses witVars fst

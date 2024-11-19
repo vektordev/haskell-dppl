@@ -56,7 +56,7 @@ annotate env e = withNewTypeInfo
         let valuesRight = fromList $ getValuesFromExpr right
         merge valuesLeft  valuesRight
       (LetIn _ _ _ a) -> fromList $ getValuesFromExpr a
-      (Var _ name) -> trace (name ++ show (lookup name env)) $ case (lookup name env) of
+      (Var _ name) -> case (lookup name env) of
         Just tags -> fromList $ concatMap valuesOfTag tags 
         Nothing -> empty
       _ -> empty
@@ -73,8 +73,6 @@ valuesOfTag tag = case tag of
 
 isRecursive :: String -> Expr -> Bool
 isRecursive name (Var _ n) | name == n = True
-isRecursive name (Call _ n) | name == n = True
-isRecursive name (CallArg _ n _) | name == n = True
 isRecursive n e = any (isRecursive n) (getSubExprs e)
   
 annotateAlgsProg :: Program -> Program
@@ -89,7 +87,6 @@ tagAlgsExpression expr =
     getTypeInfo expr
 
 findAlgorithm :: Expr -> InferenceRule
-findAlgorithm expr | trace (show expr) False = undefined
 findAlgorithm expr = case validAlgs of
   [alg] -> alg
   [] -> error ("no valid algorithms found in expr: " ++ show expr)

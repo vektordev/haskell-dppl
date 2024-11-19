@@ -403,11 +403,6 @@ infer env expr = case expr of
       (s2, cs2, t2) <- applyOpArg env e1 s1 cs1 t1
       applyOpArg env e2 s2 cs2 t2
 
-
-  Call _ name -> do
-      (s1, cs, t1) <- lookupEnv env name
-      return (s1, cs, t1)
-
   Null _ -> return (emptySubst, [], Deterministic)
 
   Cons _ e1 e2 -> do

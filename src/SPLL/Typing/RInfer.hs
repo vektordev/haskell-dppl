@@ -401,9 +401,6 @@ infer expr = case expr of
   Uniform ti  -> return (TFloat, [], Uniform (setRType ti TFloat))
   Normal ti  -> return (TFloat, [], Normal (setRType ti TFloat))
   Constant ti val  -> return (getRType val, [], Constant(setRType ti (getRType val)) val)
-  Call ti name -> do
-    t <- lookupTEnv name
-    return (t, [], Call (setRType ti t) name)
 
   PlusF x e1 e2 -> do
     (t1, c1, et1) <- infer e1

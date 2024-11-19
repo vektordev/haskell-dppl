@@ -102,7 +102,6 @@ stdLib :: [(String, String)]
 stdLib = [("in", "contains")]
 
 replaceCalls :: [(String, String)] -> IRExpr -> IRExpr
-replaceCalls lut (IRCall name args) = IRCall (fromMaybe name $ lookup name lut) args
 replaceCalls lut (IRVar name) = IRVar (fromMaybe name $ lookup name lut)
 replaceCalls _ other = other
 
@@ -162,7 +161,6 @@ generateExpression (IRCumulative dist x) = "cumulative_" ++ show dist ++ "(" ++ 
 generateExpression (IRSample IRNormal) = "randn()"
 generateExpression (IRSample IRUniform) = "rand()"
 generateExpression (IRVar name) = name
-generateExpression (IRCall name params) = name ++ "(" ++ intercalate ", " (map generateExpression params) ++ ")"
 generateExpression (IRLambda name x) = "(lambda " ++ name  ++ ": " ++ generateExpression x ++ ")"
 generateExpression (IRApply f val) = "functools.partial(" ++ generateExpression f ++ ", " ++ generateExpression val ++ ")"
 generateExpression expr@(IRInvoke _) = generateInvokeExpression expr

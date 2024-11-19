@@ -46,8 +46,6 @@ bracket e = "(" ++ exprToString e ++ ")"
 exprToString :: Expr -> String
 exprToString (IfThenElse _ cond tBranch fBranch) =
     "if " ++ bracket cond ++ " then " ++ bracket tBranch ++ " else " ++ bracket fBranch
-exprToString (Call _ name) = name
-exprToString (CallArg _ name args) = name ++ " " ++ unwords (map bracket args)
 exprToString (InjF _ name args) = name ++ " " ++ unwords (map bracket args)
 exprToString (MultF _ e1 e2) = "multF " ++ bracket e1 ++ " " ++ bracket e2
 exprToString (MultI _ e1 e2) = "multI " ++ bracket e1 ++ " " ++ bracket e2

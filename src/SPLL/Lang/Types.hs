@@ -40,8 +40,6 @@ instance Ord CType where
 data Expr =
               -- Flow Control
                 IfThenElse TypeInfo Expr Expr Expr
-              | Call TypeInfo String
-              | CallArg TypeInfo String [Expr]
               | InjF TypeInfo String [Expr]
               -- Arithmetic
               | MultF TypeInfo Expr Expr
@@ -98,12 +96,10 @@ data ExprStub = StubIfThenElse
               | StubNull
               | StubCons
               | StubTCons
-              | StubCall
               | StubVar
               | StubLetIn
               | StubArg
               | StubInjF
-              | StubCallArg
               | StubLambda
               | StubApply
               | StubReadNN

@@ -65,12 +65,10 @@ toStub expr = case expr of
   (Null _)       -> StubNull
   Cons {}        -> StubCons
   TCons {}       -> StubTCons
-  (Call _ _)     -> StubCall
   (Var _ _)      -> StubVar
   LetIn {}       -> StubLetIn
   Arg {}         -> StubArg
   InjF {}        -> StubInjF
-  CallArg {}     -> StubCallArg
   Lambda {}      -> StubLambda
   Apply {}  -> StubApply
   (ReadNN _ _ _) -> StubReadNN
@@ -111,14 +109,12 @@ exprMap f expr = case expr of
   (Null t) -> Null (tInfoMap f t)
   (Cons t a b) -> Cons (tInfoMap f t) (exprMap f a) (exprMap f b)
   (TCons t a b) -> TCons (tInfoMap f t) (exprMap f a) (exprMap f b)
-  (Call t x) -> Call (tInfoMap f t) x
   (Var t x) -> Var (tInfoMap f t) x
   (LetIn t x a b) -> LetIn (tInfoMap f t) x (exprMap f a) (exprMap f b)
   (InjF t x a) -> InjF (tInfoMap f t) x (map (exprMap f) a)
   --(LetInD t x a b) -> LetInD t x (exprMap f a) (exprMap f b)
   --(LetInTuple t x a b c) -> LetInTuple t x (exprMap f a) (biFMap f b) (exprMap f c)
   (Arg t name r a) -> Arg (tInfoMap f t) name r (exprMap f a)
-  (CallArg t name a) -> CallArg (tInfoMap f t) name (map (exprMap f) a)
   (Lambda t name a) -> Lambda (tInfoMap f t) name (exprMap f a)
   (Apply t a b) -> Apply (tInfoMap f t) (exprMap f a) (exprMap f b)
   (ReadNN t n a) -> ReadNN (tInfoMap f t) n (exprMap f a)
@@ -167,14 +163,12 @@ tMapHead f expr = case expr of
   (Null _) -> Null (f expr)
   (Cons _ a b) -> Cons (f expr) a b
   (TCons _ a b) -> TCons (f expr) a b
-  (Call _ x) -> Call (f expr) x
   (Var _ x) -> Var (f expr) x
   (LetIn _ x a bi) -> LetIn (f expr) x a bi
   (InjF _ x a) -> InjF (f expr) x a
   --(LetInD t x a b) -> LetInD (f expr) x a b
   --(LetInTuple t x a b c) -> LetInTuple (f expr) x a b c
   (Arg _ name r a) -> Arg (f expr) name r a
-  (CallArg _ name a) -> CallArg (f expr) name a
   (Lambda _ name a) -> Lambda (f expr) name a
   (Apply _ a b) -> Apply (f expr) a b
 --  (ReadNN _ a) -> ReadNN (f expr) a
@@ -201,7 +195,6 @@ tMapTails f expr = case expr of
   (Null t) -> Null t
   (Cons t a b) -> Cons t (tMap f a) (tMap f b)
   (TCons t a b) -> TCons t (tMap f a) (tMap f b)
-  (Call t x) -> Call t x
   (Var t x) -> Var t x
   (LetIn t x a b) -> LetIn t x (tMap f a) (tMap f b)
   (InjF t x a) -> InjF t x (map (tMap f) a)
@@ -210,7 +203,6 @@ tMapTails f expr = case expr of
   (Arg t name r a) -> Arg t name r (tMap f a)
   (Lambda t name a) -> Lambda t name (tMap f a)
   (Apply t a b) -> Apply t (tMap f a) (tMap f b)
-  (CallArg t name a) -> CallArg t name (map (tMap f) a)
 
 tMap :: (Expr -> TypeInfo) -> Expr -> Expr
 tMap f expr = case expr of 
@@ -234,14 +226,12 @@ tMap f expr = case expr of
   (Null _) -> Null (f expr)
   (Cons _ a b) -> Cons (f expr) (tMap f a) (tMap f b)
   (TCons _ a b) -> TCons (f expr) (tMap f a) (tMap f b)
-  (Call _ x) -> Call (f expr) x
   (Var _ x) -> Var (f expr) x
   (LetIn _ x a b) -> LetIn (f expr) x (tMap f a) (tMap f b)
   (InjF t x a) -> InjF (f expr) x (map (tMap f) a)
   --(LetInD t x a b) -> LetInD (f expr) x (tMap f a) (tMap f b)
   --(LetInTuple t x a b c) -> LetInTuple (f expr) x (tMap f a) b (tMap f c)
   (Arg _ name r a) -> Arg (f expr) name r (tMap f a)
-  (CallArg _ name a) -> CallArg (f expr) name (map (tMap f) a)
   (Lambda _ name a) -> Lambda (f expr) name (tMap f a)
   (Apply _ a b) -> Apply (f expr) (tMap f a) (tMap f b)
   (ReadNN _ n a) -> ReadNN (f expr) n (tMap f a)
@@ -279,7 +269,6 @@ getNullaryConstructor Normal {} = Normal
 getNullaryConstructor (Constant t val) = (`Constant` val)
 getNullaryConstructor Null {} = Null
 getNullaryConstructor (Var _ x) = (`Var` x)
-getNullaryConstructor (Call _ x) = (`Call` x)
 
 tTraverse :: Applicative f => (TypeInfo -> f TypeInfo) -> Expr -> f Expr
 tTraverse f expr = fmap (\t -> setTypeInfo expr t) typeinfos
@@ -296,10 +285,6 @@ tMapM f expr@(InjF _ name p) = do
   fp <- mapM (tMapM f) p
   t <- f expr
   return $ InjF t name fp
-tMapM f expr@(CallArg _ name p) = do
-  fp <- mapM (tMapM f) p
-  t <- f expr
-  return $ CallArg t name fp
 tMapM f expr
   | length (getSubExprs expr) == 0 = do
       t <- f expr
@@ -339,14 +324,12 @@ getSubExprs expr = case expr of
   (Null _) -> []
   (Cons _ a b) -> [a,b]
   (TCons _ a b) -> [a,b]
-  (Call _ _) -> []
   (LetIn _ _ a b) -> [a, b]
   (Var _ _) -> []
   (InjF _ _ a) -> a
   --(LetInD t x a b) -> [a,b]
   --(LetInTuple t x a b c) -> [a,c]
   (Arg _ _ _ a) -> [a]
-  (CallArg _ _ a) -> a
   (Lambda _ _ a) -> [a]
   (Apply _ a b) -> [a, b]
   (ReadNN _ _ a) -> [a]
@@ -357,9 +340,7 @@ setSubExprs expr [] = case expr of
   Normal t -> Normal t
   Constant t x -> Constant t x
   Null t -> Null t
-  Call t x -> Call t x
   Var t x -> Var t x
-  CallArg t n _ -> CallArg t n []
   InjF t n _ -> InjF t n []
   _ -> error "unmatched expr in setSubExprs"
 setSubExprs expr [a] = case expr of
@@ -371,7 +352,6 @@ setSubExprs expr [a] = case expr of
   NegF t _ -> NegF t a
   Not t _ -> Not t a
   ReadNN t n _ -> ReadNN t n a
-  CallArg t n _ -> CallArg t n [a]
   InjF t n _ -> InjF t n [a]
   _ -> error "unmatched expr in setSubExprs"
 setSubExprs expr [a,b] = case expr of
@@ -386,18 +366,15 @@ setSubExprs expr [a,b] = case expr of
   Cons t _ b -> Cons t a b
   TCons t _ b -> TCons t a b
   LetIn t x _ b -> LetIn t x a b
-  CallArg t n _ -> CallArg t n [a,b]
   Apply t _ _ -> Apply t a b
   InjF t n _ -> InjF t n [a, b]
   _ -> error "unmatched expr in setSubExprs"
 setSubExprs expr [a,b,c] = case expr of
   IfThenElse t _ _ _ -> IfThenElse t a b c
-  CallArg t n _ -> CallArg t n [a,b,c]
   InjF t n _ -> InjF t n [a, b, c]
   _ -> error "unmatched expr in setSubExprs"
 setSubExprs expr subExprs = case expr of
   InjF t l _ -> InjF t l subExprs
-  CallArg t n _ -> CallArg t n subExprs
   InjF t n _ -> InjF t n subExprs
   _ -> error "unmatched expr in setSubExprs"
 
@@ -423,14 +400,12 @@ getTypeInfo expr = case expr of
   (Null t)              -> t
   (Cons t _ _)          -> t
   (TCons t _ _)         -> t
-  (Call t _)            -> t
   (Var t _)             -> t
   (LetIn t _ _ _)       -> t
   (InjF t _ _)          -> t
   --(LetInD t _ _ _)      -> t
   --(LetInTuple t _ _ _ _)-> t
   (Arg t _ _ _)         -> t
-  (CallArg t _ _)       -> t
   (Lambda t _ _)        -> t
   (Apply t _ _)    -> t
   (ReadNN t _ _)        -> t
@@ -457,14 +432,12 @@ setTypeInfo expr t = case expr of
   (Null _)              -> Null t
   (Cons _ a b)          -> Cons t a b
   (TCons _ a b)         -> TCons t a b
-  (Call _ a)            -> Call t a
   (Var _ a)             -> Var t a
   (LetIn _ a b c)       -> LetIn t a b c
   (InjF _ a b)          -> InjF t a b
   --(LetInD _ a b c)     -> (LetInD t a b c)
   --(LetInTuple _ a b c d) -> (LetInTuple t a b c d)
   (Arg _ a b c)         -> Arg t a b c
-  (CallArg _ a b)       -> CallArg t a b
   (Lambda _ a b)        -> Lambda t a b
   (Apply _ a b)         -> Apply t a b
   (ReadNN _ a b)        -> ReadNN t a b
@@ -551,14 +524,12 @@ printFlat expr = case expr of
   (Null _) -> "Null"
   Cons {} -> "Cons"
   TCons {} -> "TCons"
-  (Call _ a) -> "Call " ++ a
   (Var _ a) -> "Var " ++ a
   LetIn {} -> "LetIn"
   --(LetInD {}) -> "LetInD"
   --(LetInTuple {}) -> "LetInTuple"
   (InjF t _ _)        -> "InjF"
   (Arg _ var r _ ) -> "Bind " ++ var ++ "::" ++ show r
-  (CallArg _ a _ ) -> "CallArg " ++ a
   (Lambda _ name _) -> "\\" ++ name  ++ " -> "
   Apply {} -> "Apply"
   (ReadNN _ name _) -> "ReadNN " ++ name
@@ -585,14 +556,12 @@ printFlatNoReq expr = case expr of
   (Null _) -> "Null"
   Cons {} -> "Cons"
   TCons {} -> "TCons"
-  (Call _ a) -> "Call " ++ a
   Var _ _ -> "Var"
   LetIn {} -> "LetIn"
   (InjF t _ _) -> "InjF"
   --(LetInD {}) -> "LetInD"
   --(LetInTuple {}) -> "LetInTuple"
   (Arg _ var r _ ) -> "Bind " ++ var ++ "::" ++ show r
-  (CallArg _ a _ ) -> "CallArg" ++ a
   (Lambda _ name _) -> "\\" ++ name  ++ " -> "
   Apply {} -> "Apply"
   ReadNN {} -> "ReadNN"

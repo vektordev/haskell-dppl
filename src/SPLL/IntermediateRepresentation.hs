@@ -144,7 +144,6 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               | IRSample Distribution
               | IRLetIn Varname IRExpr IRExpr
               | IRVar Varname
-              | IRCall String [IRExpr]
               | IRLambda String IRExpr
               | IRApply IRExpr IRExpr
               | IRInvoke IRExpr -- Only relevant for CodeGen. States that the last argument has been applied to a function
@@ -187,7 +186,6 @@ getIRSubExprs (IRCumulative _ a) = [a]
 getIRSubExprs (IRSample _) = []
 getIRSubExprs (IRLetIn _ a b) = [a, b]
 getIRSubExprs (IRVar _) = []
-getIRSubExprs (IRCall _ a) = a
 getIRSubExprs (IRInvoke a) = [a]
 getIRSubExprs (IRLambda _ a) = [a]
 getIRSubExprs (IRApply a b) = [a, b]
@@ -210,7 +208,6 @@ irMap f x = case x of
   (IRDensity a expr) -> f (IRDensity a (irMap f expr))
   (IRCumulative a expr) -> f (IRCumulative a (irMap f expr))
   (IRLetIn name left right) -> f (IRLetIn name (irMap f left) (irMap f right))
-  (IRCall name args) -> f (IRCall name (map (irMap f) args))
   (IRLambda name scope) -> f (IRLambda name (irMap f scope))
   (IRApply a b) -> f (IRApply (irMap f a) (irMap f b))
   (IRInvoke expr) -> f (IRInvoke (irMap f expr))
@@ -242,9 +239,8 @@ irPrintFlat (IRCumulative _ _) = "IRCumulative"
 irPrintFlat (IRSample _) = "IRSample"
 irPrintFlat (IRLetIn _ _ _) = "IRLetIn"
 irPrintFlat (IRVar _) = "IRVar"
-irPrintFlat (IRCall name _) = "IRCall " ++ name
 irPrintFlat (IRLambda _ _) = "IRLambda"
-irPrintFlat (IRApply _ _) = "IRCallLambda"
+irPrintFlat (IRApply _ _) = "IRApply"
 irPrintFlat (IRInvoke _) = "IRInvoke"
 irPrintFlat (IREnumSum _ _ _) = "IREnumSum"
 irPrintFlat (IREvalNN name _) = "IREvalNN " ++ name

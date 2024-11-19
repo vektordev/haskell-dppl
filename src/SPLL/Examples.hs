@@ -59,7 +59,7 @@ exampleList = [
 paramExpr :: Expr
 paramExpr = Arg makeTypeInfo "iterations" TFloat (IfThenElse makeTypeInfo
   (GreaterThan makeTypeInfo (Var makeTypeInfo "iterations") (Constant makeTypeInfo (VFloat 0.5)))
-  (Cons makeTypeInfo (Constant makeTypeInfo (VBool True)) (Apply makeTypeInfo (Call makeTypeInfo "main") (PlusF makeTypeInfo (Call makeTypeInfo "iterations") (Constant makeTypeInfo (VFloat (-1.0))))))
+  (Cons makeTypeInfo (Constant makeTypeInfo (VBool True)) (Apply makeTypeInfo (Var makeTypeInfo "main") (PlusF makeTypeInfo (Var makeTypeInfo "iterations") (Constant makeTypeInfo (VFloat (-1.0))))))
   (Null makeTypeInfo))
 
 simpleList :: Program

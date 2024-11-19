@@ -30,8 +30,6 @@ pPrintExpr (Var _ a) _ = a
 pPrintExpr (Uniform _) _ = "Uniform"
 pPrintExpr (Normal _) _ = "Normal"
 pPrintExpr (IfThenElse _ c t e) i = "if " ++ pPrintExpr c i ++ " then\n" ++ indent (i+1) ++ pPrintExpr t (i+1) ++"\n" ++ indent i ++ "else\n" ++ indent (i+1) ++ pPrintExpr e (i+1)
-pPrintExpr (Call _ f) _ = f ++ "()"
-pPrintExpr (CallArg _ f args) i = f ++ "(" ++ intercalate ", " (map (`pPrintExpr` i) args) ++ ")"
 pPrintExpr (InjF _ f args) i = f ++ "(" ++ intercalate ", " (map (`pPrintExpr` i) args) ++ ")"
 pPrintExpr (ExpF _ e) i = "exp(" ++ pPrintExpr e i ++ ")"
 pPrintExpr (NegF _ e) i =  "-(" ++ pPrintExpr e i ++ ")"
@@ -85,7 +83,6 @@ pPrintIRExpr (IRCumulative dist e) n = "cumulative " ++ show dist ++ " (" ++ pPr
 pPrintIRExpr (IRSample dist) n = "sample " ++ show dist
 pPrintIRExpr (IRLetIn varname e1 e2) n = "let " ++ varname ++ " = (" ++ pPrintIRExpr e1 (n + 1) ++ ") in \n" ++ indent (n + 1) ++ pPrintIRExpr e2 (n + 2) ++ ""
 pPrintIRExpr (IRVar varname) n = varname
-pPrintIRExpr (IRCall fn args) n = fn ++ " (" ++ concatMap (\arg -> pPrintIRExpr arg (n + 1) ++ ", ") args ++ ")"
 pPrintIRExpr (IRLambda varname body) n = "\\" ++ varname ++ " -> (" ++ pPrintIRExpr body (n + 1) ++ ")"
 pPrintIRExpr (IRApply e1 e2) n = pPrintIRExpr e1 (n + 1) ++ "(" ++ pPrintIRExpr e2 (n + 1) ++ ")"
 pPrintIRExpr (IRInvoke expr) n = pPrintIRExpr expr (n + 1) ++ "()"

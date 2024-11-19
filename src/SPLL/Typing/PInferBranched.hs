@@ -397,12 +397,6 @@ infer expr = case expr of
     let comb = combineBranches list1 list2
     return $ concatMap buildInt comb
 
-  Call _ name -> do
-      t <- lookupTEnv name
-      return (case t of
-                Left err ->  [Left err]
-                Right ty -> [Right (ty, [])])
-
 
 normalize :: Scheme -> Scheme
 normalize (Forall _ body) = Forall (map snd ord) (normtype body)
