@@ -208,6 +208,7 @@ const0 = IRConst (VFloat 0)
 
 --in this implementation, I'll forget about the distinction between PDFs and Probabilities. Might need to fix that later.
 toIRProbability :: CompilerConfig -> TypeEnv -> Expr -> IRExpr -> CompilerMonad CompilationResult
+--toIRProbability conf typeEnv expr sample | trace (show expr) False = undefined
 toIRProbability conf typeEnv (IfThenElse t cond left right) sample = do
   var_condT_p <- mkVariable "condT"
   var_condF_p <- mkVariable "condF"
@@ -215,6 +216,7 @@ toIRProbability conf typeEnv (IfThenElse t cond left right) sample = do
   (condFalseExpr, condFalseDim, condFalseBranches) <- toIRProbability conf typeEnv cond (IRConst (VBool False))
   (leftExpr, leftDim, leftBranches) <- toIRProbability conf typeEnv left sample
   (rightExpr, rightDim, rightBranches) <- toIRProbability conf typeEnv right sample
+  let branches = (IROp OpPlus condTrueBranches ((IROp OpPlus leftBranches rightBranches)))
   -- p(y) = if p_cond < thresh then p_else(y) * (1-p_cond(y)) else if p_cond > 1 - thresh then p_then(y) * p_cond(y) else p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
   let thr = topKThreshold conf
   case thr of
@@ -235,14 +237,14 @@ toIRProbability conf typeEnv (IfThenElse t cond left right) sample = do
               (snd mul1)
               (snd add))
       tell [(var_condT_p, condTrueExpr), (var_condF_p, condFalseExpr)]
-      return (returnExpr, returnDim, IROp OpPlus (IROp OpPlus condTrueBranches condFalseBranches) (IROp OpPlus leftBranches rightBranches))
+      return (returnExpr, returnDim, branches)
     -- p(y) = p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
     Nothing -> do
       mul1 <- (condTrueExpr, condTrueDim) `multP` (leftExpr, leftDim)
       mul2 <- (condFalseExpr, condFalseDim) `multP` (rightExpr, rightDim)
       returnExpr <- mul1 `addP` mul2
       tell [(var_condT_p, condTrueExpr), (var_condF_p, condFalseExpr)]
-      return (fst returnExpr, snd returnExpr, IROp OpPlus (IROp OpPlus condTrueBranches condFalseBranches) (IROp OpPlus leftBranches rightBranches))
+      return (fst returnExpr, snd returnExpr, branches)
 toIRProbability conf typeEnv (GreaterThan (TypeInfo {rType = t, tags = extras}) left right) sample
   --TODO: Find a better lower bound than just putting -9999999
   | extras `hasAlgorithm` "greaterThanLeft" = do --p(x | const >= var)
@@ -379,7 +381,8 @@ toIRProbability conf typeEnv (Cons _ hdExpr tlExpr) sample = do
   (headP, headDim, headBranches) <- toIRProbability conf typeEnv hdExpr (IRHead sample)
   (tailP, tailDim, tailBranches) <- toIRProbability conf typeEnv tlExpr (IRTail sample)
   mult <- (headP, headDim)  `multP` (tailP, tailDim)
-  return (IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (fst mult), IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (snd mult), IROp OpPlus headBranches tailBranches)
+  return (IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (fst mult), IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (snd mult), IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (IROp OpPlus headBranches tailBranches))
+  --return (IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (fst mult), IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (snd mult), IROp OpPlus headBranches tailBranches)
 toIRProbability conf typeEnv (TCons _ t1Expr t2Expr) sample = do
   (t1P, t1Dim, t1Branches) <- toIRProbability conf typeEnv t1Expr (IRTFst sample)
   (t2P, t2Dim, t2Branches) <- toIRProbability conf typeEnv t2Expr (IRTSnd sample)
@@ -699,9 +702,10 @@ toIRIntegrate conf typeEnv (IfThenElse _ cond left right) low high = do
             (IROp OpMult (IRVar var_cond_p) leftExpr)
             (IROp OpMult (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var_cond_p) ) rightExpr), const0, IROp OpPlus condBranches (IROp OpPlus leftBranches rightBranches) )
 toIRIntegrate conf typeEnv (Cons _ hdExpr tlExpr) low high = do
-  (headP, _, headBranches) <- toIRIntegrate conf typeEnv hdExpr (IRHead low) (IRHead high)
-  (tailP, _, tailBranches) <- toIRIntegrate conf typeEnv tlExpr (IRTail low) (IRTail high)
-  return (IRIf (IROp OpOr (IROp OpEq low (IRConst $ VList [])) (IROp OpEq high (IRConst $ VList []))) (IRConst $ VFloat 0) (IROp OpMult headP tailP), const0, IROp OpPlus headBranches tailBranches)
+    (headP, headDim, headBranches) <- toIRIntegrateSave conf typeEnv hdExpr (IRHead low) (IRHead high)
+    (tailP, tailDim, tailBranches) <- toIRIntegrate conf typeEnv tlExpr (IRTail low) (IRTail high)
+    (multP, multDim) <- (headP, headDim) `multP` (tailP, tailDim)
+    return (IRIf (IROp OpOr (IROp OpEq low (IRConst $ VList [])) (IROp OpEq high (IRConst $ VList []))) (IRConst $ VFloat 0) multP, multDim, IROp OpPlus headBranches tailBranches)
 toIRIntegrate conf typeEnv (Null _) low high = do
   ind <- indicator (IROp OpAnd (IROp OpEq low (IRConst $ VList [])) (IROp OpEq high (IRConst $ VList [])))
   return (ind, const0, const0)

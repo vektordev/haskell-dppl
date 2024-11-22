@@ -100,7 +100,8 @@ correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat
                                (testDice, VInt 2, [], (VFloat 0.16666666, VFloat 0)),
                                (testDice, VInt 7, [], (VFloat 0, VFloat 0)),
                                (testDiceAdd, VInt 2, [], (VFloat (1 / 36), VFloat 0)),
-                               (testDiceAdd, VInt 1, [], (VFloat 0, VFloat 0))]
+                               (testDiceAdd, VInt 1, [], (VFloat 0, VFloat 0)),
+                               (gaussLists, VList [VFloat 0, VFloat 0, VFloat 0], [IRConst $ VThetaTree (ThetaTree [0.5, 1, 0] [])], (VFloat $ (normalPDF 0) * (normalPDF 0) * (normalPDF 0) / 16, VFloat 3))]
 
                               --(testLambdaParameter, VFloat 10, [], VFloat 1.0)]
 
@@ -127,7 +128,8 @@ correctIntegralValuesTestCases =[(uniformProg, VFloat 0, VFloat 1, [], (VFloat 1
                                 (testTheta, VFloat 0.9, VFloat 1.1, flatTree [1], (VFloat 1, VFloat 0)),
                                 (simpleCall, VFloat 0, VFloat 1, [], (VFloat 1.0, VFloat 0)),
                                 (testCallArg, VFloat 3.5, VFloat 4.5, [], (VFloat 0.5, VFloat 0)),
-                                (testCallLambda, VFloat 2, VFloat 3, [], (VFloat 1.0, VFloat 0))]
+                                (testCallLambda, VFloat 2, VFloat 3, [], (VFloat 1.0, VFloat 0)),
+                                (gaussLists, VList [VFloat 0, VFloat 0, VFloat 0], VList [VFloat 1, VFloat 2, VFloat 3], [IRConst $ VThetaTree (ThetaTree [0.5, 1, 0] [])], (VFloat $ ((normalCDF 1) - (normalCDF 0)) * ((normalCDF 2) - (normalCDF 0)) * ((normalCDF 3) - (normalCDF 0)) / 16, VFloat 0))]
 
                                   --(testLambdaParameter, VFloat 9, VFloat 11, [], VFloat 1.0)]
                                   --(testCallLambdaAdvanced, VFloat 2, VFloat 3, [], VFloat 1.0),
