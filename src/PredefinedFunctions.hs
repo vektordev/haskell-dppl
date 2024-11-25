@@ -3,7 +3,8 @@ globalFenv,
 getHornClause,
 FPair(..),
 FDecl(..),
-FEnv
+FEnv,
+propagateValues
 ) where
 
 import SPLL.Typing.RType (RType(..))
@@ -13,6 +14,8 @@ import SPLL.Typing.Typing
 import Data.Set (fromList)
 import Data.Maybe (fromJust)
 import SPLL.Lang.Types
+import IRInterpreter
+import Control.Monad
 
 -- InputVars, OutputVars, fwd, grad
 newtype FDecl = FDecl (RType, [String], [String], IRExpr, [(String, IRExpr)]) deriving (Show, Eq)
@@ -97,3 +100,21 @@ constructHornClause subst decl = (map lookUpSubstAddDet inV, map lookUpSubstAddD
 
 getInputChainNames :: Expr -> [ChainName]
 getInputChainNames e = map (chainName . getTypeInfo) (getSubExprs e)
+
+propagateValues :: String -> [[Value]] -> [Value]
+propagateValues name values = case results of
+  Left s -> []
+  Right l -> map (fmap failConversionRev) l
+  where
+    results = sequence (map (generateDet [] [] []) letInBlocks)
+    letInBlocks = map (foldr (\(n, p) e -> IRLetIn n (IRConst (fmap failConversionFwd p)) e) fwdExpr) namedParams
+    namedParams = map (zip paramNames) valueProd
+    valueProd = sequence values
+    Just (FPair (FDecl (_, paramNames, _, fwdExpr, _), _)) = lookup name globalFenv
+
+
+failConversionFwd :: Expr -> IRExpr
+failConversionFwd = error "Error during value conversion. This should not happen"
+
+failConversionRev :: IRExpr -> Expr
+failConversionRev = error "Error during value conversion. This should not happen"

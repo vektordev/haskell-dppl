@@ -14,6 +14,7 @@ import SPLL.Typing.Typing (TypeInfo, TypeInfo(..), Tag(..), setTags)
 import Data.Set (fromList, toList)
 import Data.Set.Internal (merge, empty)
 import Debug.Trace (trace)
+import PredefinedFunctions
 
 
 annotateEnumsProg :: Program -> Program
@@ -51,10 +52,13 @@ annotate env e = withNewTypeInfo
         let valuesLeft = getValuesFromExpr left
         let valuesRight = getValuesFromExpr right
         fromList [VInt (a * b) | VInt a <- valuesLeft, VInt b <- valuesRight]
+      (InjF _ name params) -> do
+        let paramValues = map getValuesFromExpr params
+        fromList (propagateValues name paramValues)
       (IfThenElse _ _ left right) -> do
         let valuesLeft = fromList $ getValuesFromExpr left
         let valuesRight = fromList $ getValuesFromExpr right
-        merge valuesLeft  valuesRight
+        merge valuesLeft valuesRight
       (LetIn _ _ _ a) -> fromList $ getValuesFromExpr a
       (Var _ name) -> case (lookup name env) of
         Just tags -> fromList $ concatMap valuesOfTag tags 
@@ -105,7 +109,16 @@ checkConstraint expr alg ResultingTypeMatch = resPType == annotatedType
   where
     annotatedType = pType $ getTypeInfo expr
     resPType = resultingPType alg (map (pType . getTypeInfo) (getSubExprs expr))
+checkConstraint expr _ (SubExprNIsEnumerable n) | length (getSubExprs expr) > n =
+  isEnumerable (tags (getTypeInfo (getSubExprs expr !! n)))
 checkConstraint _ _ _ = False
+
+isEnumerable :: [Tag] -> Bool
+isEnumerable =
+  any (\t -> case t of
+    EnumList _ -> True
+    EnumRange _ -> True
+    _ -> False)
 
 likelihoodFunctionUsesTypeInfo :: ExprStub -> Bool
 likelihoodFunctionUsesTypeInfo expr = expr `elem` [StubGreaterThan, StubLessThan, StubMultF, StubMultI, StubPlusF, StubPlusI, StubInjF]

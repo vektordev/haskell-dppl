@@ -38,6 +38,8 @@ mirrorC (SubExprNIsNotType 0 a) = SubExprNIsNotType 1 a
 mirrorC (SubExprNIsNotType 1 a) = SubExprNIsNotType 0 a
 mirrorC (SubExprNIsType 0 a) = SubExprNIsType 1 a
 mirrorC (SubExprNIsType 1 a) = SubExprNIsType 0 a
+mirrorC (SubExprNIsEnumerable 0) = SubExprNIsEnumerable 1
+mirrorC (SubExprNIsEnumerable 1) = SubExprNIsEnumerable 0
 mirrorC c = error ("can not mirror Constraint: " ++ show c)
 
 greaterThanLeft :: InferenceRule
@@ -105,6 +107,14 @@ injF2Left = InferenceRule
             
 injF2Right :: InferenceRule
 injF2Right = mirror2 injF2Left
+
+injF2Enumerable :: InferenceRule
+injF2Enumerable = InferenceRule
+             StubInjF
+             [SubExprNIsEnumerable 0, SubExprNIsEnumerable 1]
+             "injF2Enumerable"
+             (const Prob)
+             (Forall [] (TInt `TArrow` (TInt `TArrow` TInt)))
 
 expF :: InferenceRule
 expF = InferenceRule
@@ -206,6 +216,7 @@ allAlgorithms = [
   multRight,
   injF2Left, 
   injF2Right,
+  injF2Enumerable,
   negF,
   expF,
   enumeratePlusLeft,

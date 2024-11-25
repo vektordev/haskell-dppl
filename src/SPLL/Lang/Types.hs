@@ -187,6 +187,7 @@ data Tag = EnumRange (Value, Value)
 data RuleConstraint = SubExprNIsType Int PType
                     | SubExprNIsNotType Int PType
                     | SubExprNIsAtLeast Int PType
+                    | SubExprNIsEnumerable Int
                     | ResultingTypeMatch
                     deriving (Show, Eq, Ord)
 
