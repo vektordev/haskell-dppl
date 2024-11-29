@@ -6,6 +6,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 
 import Test.QuickCheck
+import System.Exit (exitWith, ExitCode(ExitFailure))
 
 import SPLL.Examples
 --import Lib
@@ -434,13 +435,16 @@ runTests :: IO Bool
 runTests = $quickCheckAll
 
 
-main :: IO Bool
+main :: IO ()
 main = do
   a <- runTests
   b <- test_parser
   let x = a && b
-  print x
-  return x
+  if x then
+    putStrLn "Test successful!"
+  else do
+    putStrLn "Test failed!"
+    exitWith (ExitFailure 1) --Exit with error code to let the tests fail
   --mapM_ (quickCheck . not . canCompile) uncompilables
   --checkProgs [(variableLengthS, variableLengthT),
   --             (testLetS, testLetT),
