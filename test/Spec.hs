@@ -265,9 +265,9 @@ preprocessToInjFProg p@Program{functions=f} = p{functions=map (second preprocess
         
 preprocessToInjF :: Expr -> Expr
 preprocessToInjF (PlusF t a b) = InjF t "plus" [preprocessToInjF a, preprocessToInjF b]
---preprocessToInjF (PlusI t a b) = InjF t "plusI" [preprocessToInjF a, preprocessToInjF b]
+preprocessToInjF (PlusI t a b) = InjF t "plusI" [preprocessToInjF a, preprocessToInjF b]
 preprocessToInjF (MultF t a b) = InjF t "mult" [preprocessToInjF a, preprocessToInjF b]
---preprocessToInjF (MultI t a b) = InjF t "multI" [preprocessToInjF a, preprocessToInjF b]
+preprocessToInjF (MultI t a b) = InjF t "multI" [preprocessToInjF a, preprocessToInjF b]
 preprocessToInjF (NegF t a) = InjF t "neg" [preprocessToInjF a]
 preprocessToInjF x = x
 
