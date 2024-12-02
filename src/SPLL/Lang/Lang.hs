@@ -16,9 +16,11 @@ module SPLL.Lang.Lang (
 , Limits (..)
 , exprMap
 , prettyPrintProg
+, prettyPrintProgRTyOnly
 , prettyPrint
 , prettyPrintProgNoReq
 , prettyPrintNoReq
+, prettyRType
 , getVFloat
 , checkLimits
 , WitnessedVars
@@ -241,7 +243,7 @@ tMapProg f (Program decls neural) = Program (zip (map fst decls) (map (tMap f . 
 
 getBinaryConstructor :: Expr -> (TypeInfo -> Expr -> Expr -> Expr)
 getBinaryConstructor GreaterThan {} = GreaterThan
-getBinaryConstructor LessThan {} = GreaterThan
+getBinaryConstructor LessThan {} = LessThan
 getBinaryConstructor MultF {} = MultF
 getBinaryConstructor MultI {} = MultI
 getBinaryConstructor PlusF {} = PlusF
@@ -262,6 +264,8 @@ getUnaryConstructor (ReadNN _ x _) = (`ReadNN` x)
 getUnaryConstructor (Fix _ _) = Fix
 getUnaryConstructor (Not _ _) = Not
 getUnaryConstructor (ExpF _ _) = ExpF
+getUnaryConstructor (NegF _ _) = NegF
+getUnaryConstructor x = error ("getUnaryConstructor undefined for " ++ show x)
 
 getNullaryConstructor :: Expr -> (TypeInfo -> Expr)
 getNullaryConstructor Uniform {} = Uniform
@@ -456,7 +460,13 @@ getRType (VList []) = NullList
 getRType (VTuple t1 t2) = Tuple (getRType t1) (getRType t2)
 
 prettyPrintProg :: Program -> [String]
-prettyPrintProg (Program decls neurals) = concatMap prettyPrintDecl decls ++ concatMap prettyPrintNeural neurals
+prettyPrintProg = prettyPrintProgCustomTI prettyFullTypeInfo
+
+prettyPrintProgRTyOnly :: Program -> [String]
+prettyPrintProgRTyOnly = prettyPrintProgCustomTI prettyRTypeOnly
+
+prettyPrintProgCustomTI :: (TypeInfo -> String) -> Program -> [String]
+prettyPrintProgCustomTI fn (Program decls neurals) = concatMap (prettyPrintDecl fn) decls ++ concatMap prettyPrintNeural neurals
 
 prettyPrintNeural :: NeuralDecl -> [String]
 prettyPrintNeural (name, ty, range) = l1:l2:(l3 range):[]
@@ -466,17 +476,31 @@ prettyPrintNeural (name, ty, range) = l1:l2:(l3 range):[]
     l3 (EnumList lst) = ("\t" ++ (show $ length lst))
     l3 _ = "prettyprint not implemented"
 
-prettyPrintDecl :: FnDecl -> [String]
-prettyPrintDecl (name, expr) = ("--- Function: " ++ name ++ "---"):prettyPrint expr
+prettyPrintDecl :: (TypeInfo -> String) -> FnDecl -> [String]
+prettyPrintDecl fn (name, expr) = ("--- Function: " ++ name ++ "---") : prettyPrintCustomTI fn expr
+
+prettyFullTypeInfo :: TypeInfo -> String
+prettyFullTypeInfo ti = show ti
+
+prettyRTypeOnly :: TypeInfo -> String
+prettyRTypeOnly ti = prettyRType (rType ti)
+
+prettyRType :: RType -> String
+prettyRType (TArrow a b) = "(" ++ prettyRType a ++ ") -> (" ++ prettyRType b ++ ")"
+prettyRType (TVarR (SPLL.Typing.RType.TV name)) = name
+prettyRType other = show other
 
 prettyPrint :: Expr -> [String]
-prettyPrint expr = 
+prettyPrint = prettyPrintCustomTI prettyFullTypeInfo
+
+prettyPrintCustomTI :: (TypeInfo -> String) -> Expr -> [String]
+prettyPrintCustomTI fn expr =
   fstLine : indented
     where
       childExprs = getSubExprs expr
-      indented = map indent $ concatMap prettyPrint childExprs :: [String]
+      indented = map indent $ concatMap (prettyPrintCustomTI fn) childExprs :: [String]
       indent ls = "    " ++ ls
-      fstLine = printFlat expr ++ " :: (" ++ show (getTypeInfo expr) ++ ")"
+      fstLine = printFlat expr ++ " :: (" ++ fn (getTypeInfo expr) ++ ")"
 
 prettyPrintNoReq :: Expr -> [String]
 prettyPrintNoReq expr =

@@ -27,7 +27,6 @@ annotateEnumsProg p@Program {functions=f, neurals=n} = p{functions = map (\(name
 annotateIfNotRecursive :: String -> [(String, [Tag])] -> Expr -> Expr
 annotateIfNotRecursive name _ e | isRecursive name e = e
 annotateIfNotRecursive _ env e = annotate env e
-
 annotate :: [(String, [Tag])] -> Expr -> Expr
 --annotate _ e | trace ((show e)) False = undefined
 annotate env e = withNewTypeInfo
@@ -43,7 +42,7 @@ annotate env e = withNewTypeInfo
       (ReadNN _ name _) -> case lookup name env of
         (Just [EnumList l]) -> fromList l
         (Just [EnumRange (VInt a, VInt b)]) -> fromList [VInt i | i <- [a..b]]
-        _ -> error $ "Invalid Neural declaration for " ++ name
+        _ -> error $ "Invalid Neural declaration for " ++ name ++ ".\n    found:" ++ show env
       (PlusI _ left right) -> do
         let valuesLeft = getValuesFromExpr left
         let valuesRight = getValuesFromExpr right

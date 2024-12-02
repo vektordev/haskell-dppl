@@ -40,7 +40,7 @@ data RTypeError
   | UnificationMismatch [RType] [RType]
   | ExprInfo [String]
   | FalseParameterFail String
-  deriving (Show)
+  deriving (Show, Eq)
 
 data TEnv = TypeEnv { types :: Map.Map Name Scheme }
   deriving (Eq, Show)
@@ -298,6 +298,9 @@ lookupTEnv x = do
       Just s    ->  do t <- instantiate s
                        return t
 
+-------------------------------------------------------------------------------
+-- Type Variable management
+-------------------------------------------------------------------------------
 letters :: [String]
 letters = [1..] >>= flip replicateM ['a'..'z']
 
@@ -615,7 +618,6 @@ unifyMany (t1 : ts1) (t2 : ts2) =
 unifyMany t1 t2 = throwError $ UnificationMismatch t1 t2
 
 unifies :: RType -> RType -> Solve Subst
---unifies t1 t2 | trace (show t1 ++ " with " ++ show t2) False = undefined
 unifies t1 t2 | t1 `matches` t2 = return emptySubst
 unifies (Tuple t1 t2) BottomTuple = return emptySubst
 unifies BottomTuple (Tuple t1 t2) = return emptySubst

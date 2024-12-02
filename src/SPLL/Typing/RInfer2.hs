@@ -3,10 +3,10 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 module SPLL.Typing.RInfer2 (
-  inferRType
-, RTypeError (..)
+  RTypeError (..)
 , addRTypeInfo
 , tryAddRTypeInfo
+, testFunction
 ) where
 
 import Control.Monad.Except
@@ -16,32 +16,28 @@ import Control.Monad.Identity
 
 import Data.List (nub)
 import qualified Data.Set as Set
+
 import Data.Monoid
 import Data.Foldable hiding (toList)
 import qualified Data.Map as Map
 
-import SPLL.Typing.RInfer (Scheme (..))
+import SPLL.Typing.RInfer (Scheme (..), RTypeError (..))
 
 import Text.Pretty.Simple
 
 import SPLL.Lang.Lang
 import SPLL.Typing.Typing
 import SPLL.Typing.RType
-import SPLL.Typing.PType( PType(..) )
+--import SPLL.Typing.PType( PType(..) )
 import SPLL.InferenceRule
+import Debug.Trace
 
 import PredefinedFunctions
+import SPLL.Lang.Types (FnDecl)
 
-data RTypeError
-  = UnificationFail RType RType
-  | InfiniteType TVarR RType
-  | UnboundVariable String
-  | Ambigious [Constraint]
-  | UnificationMismatch [RType] [RType]
-  | ExprInfo [String]
-  | FalseParameterFail String
-  deriving (Show)
+-- changes: in infer and inferProg; also changed TypeSigs to remove RType of main expression.
 
+-- unchanged:
 data TEnv = TypeEnv { types :: Map.Map Name Scheme }
   deriving (Eq, Show)
 
@@ -138,6 +134,7 @@ instance Substitutable RType where
   apply _ TFloat = TFloat
   apply _ NullList = NullList
   apply _ BottomTuple = BottomTuple
+  apply _ TThetaTree = TThetaTree
   apply s (ListOf t) = ListOf $ apply s t
   apply s (Tuple t1 t2) = Tuple (apply s t1) (apply s t2)
   apply s (TArrow t1 t2) = apply s t1 `TArrow` apply s t2
@@ -170,29 +167,57 @@ instance Substitutable TEnv where
   apply s (TypeEnv env) = TypeEnv $ Map.map (apply s) env
   ftv (TypeEnv env) = ftv $ Map.elems env
 
+showConstraint :: Constraint -> String
+showConstraint (a, b) = prettyRType a ++ " :==: " ++ prettyRType b
+
 addRTypeInfo :: Program -> Program
 addRTypeInfo p =
   case runInfer empty (inferProg p) of
     Left err -> error ("error in addRTypeInfo: " ++ show err)
-    Right (ty, cs, p) -> case runSolve cs of
-      Left err -> error ("error in solve addRTypeInfo: " ++ show err)
-      Right subst -> apply subst p
+    Right (cs, p2) -> case runSolve cs of
+      Left err -> error ("error in solve addRTypeInfo: " ++ show err ++ "\n\nprog = \n" ++ (unlines $ prettyPrintProgRTyOnly p2) ++ "\n\nconstraints = \n" ++ (unlines $ map showConstraint cs))
+      Right subst -> apply subst p2
 
 tryAddRTypeInfo :: Program -> Either RTypeError Program
 tryAddRTypeInfo p@(Program decls _) = do
-  (ty, cs, p) <- runInfer empty (inferProg p)
+  (cs, p) <- runInfer empty (inferProg p)
   subst <- runSolve cs
   return $ apply subst p
 
-inferRType :: Program -> Either RTypeError RType
-inferRType = undefined
+--TODO Remove
+testFunction :: Program -> IO ()
+testFunction p@(Program decls _) = do
+  let res2 = runExcept $ evalStateT (runReaderT (testInferProg p) empty) initInfer
+  pPrint res2
+
+testInferProg :: Program -> Infer ([Constraint], Program)
+testInferProg p = do
+  Program decls nns <- addTVarsEverywhere p
+  -- init type variable for all function decls beforehand so we can build constraints for
+  -- calls between these functions
+  tv_rev <- trace ("\n decl:\n" ++ show decls ++ "\n\n") freshVars (length decls) []
+  let tvs = reverse tv_rev
+  -- env building with (name, scheme) for infer methods
+  let func_tvs = zip (map fst decls) (map (Forall []) tvs)
+  -- infer the type and constraints of the declaration expressions
+  cts <- trace ("func_tvs:" ++ show func_tvs) $ mapM ((inTEnvF func_tvs . infer) . snd) decls
+  -- building the constraints that the built type variables of the functions equal
+  -- the inferred function type
+  let tcs = zip (map (rtFromScheme . snd) func_tvs) (map fst3cts cts)
+  -- combine all constraints
+  return (tcs ++ concatMap snd3cts cts, Program (zip (map fst decls) (map trd3cts cts)) nns)
+
+--unchanged up to here.
+
 
 rtFromScheme :: Scheme -> RType
 rtFromScheme (Forall _ rt) = rt
 
 --TODO: Simply give everything a fresh var as a unified first pass.
-inferProg :: Program -> Infer (RType, [Constraint], Program)
-inferProg p@(Program decls nns) = do
+inferProg :: Program -> Infer ([Constraint], Program)
+inferProg p = do
+  Program decls nns <- addTVarsEverywhere p
+
   -- init type variable for all function decls beforehand so we can build constraints for
   -- calls between these functions
   tv_rev <- freshVars (length decls) []
@@ -201,41 +226,91 @@ inferProg p@(Program decls nns) = do
   let func_tvs = zip (map fst decls) (map (Forall []) tvs)
   -- infer the type and constraints of the declaration expressions
   cts <- mapM ((inTEnvF func_tvs . infer) . snd) decls
-  let Just expr = lookup "main" decls
-  -- inferring the type of the top level expression
-  (t1, c1, et) <- inTEnvF func_tvs (infer expr)
   -- building the constraints that the built type variables of the functions equal
   -- the inferred function type
   let tcs = zip (map (rtFromScheme . snd) func_tvs) (map fst3cts cts)
   -- combine all constraints
-  return (t1, tcs ++ concatMap snd3cts cts ++ c1, Program (zip (map fst decls) (map trd3cts cts)) nns)
+  return (tcs ++ concatMap snd3cts cts, Program (zip (map fst decls) (map trd3cts cts)) nns)
+
+addTVarsEverywhere :: Program -> Infer Program
+addTVarsEverywhere (Program decls nns) = do
+    newdecls <- mapM addTVarsToDecl decls
+    return (Program newdecls nns)
+  where
+    addTVarsToDecl :: FnDecl -> Infer FnDecl
+    addTVarsToDecl (name, expr) = do
+      e2 <- tMapM replaceIfUnset expr
+      return (name, e2)
+    replaceIfUnset :: Expr -> Infer TypeInfo
+    replaceIfUnset expr = case rType $ getTypeInfo expr  of
+      NotSetYet -> do
+        tvar <- fresh
+        return $ setRType (getTypeInfo expr) tvar
+      _ -> return $ getTypeInfo expr
+
+specialTreatment :: Expr -> Bool
+specialTreatment e = toStub e `elem` [StubConstant, StubLambda, StubVar, StubApply]
 
 --TODO: Error on ambiguous InferenceRule
 infer :: Expr -> Infer (RType, [Constraint], Expr)
-infer expr = if solvesSimply
-    then if not allSchemesEq
-      then error "unviable Inference Rule configuration"
-      else do
-        -- use ForAll scheme from InferenceRule.
-        let subexprs = getSubExprs expr
-        tuples <- mapM infer subexprs
-        let localConstraints = concatMap snd3cts tuples
-        let subExprTypes = map fst3cts tuples
-        let typedSubExprs = map trd3cts tuples
-        rescoped <- rescope scheme
-        (resultingtype, recursiveConstraints) <- inferResultingType rescoped subExprTypes
-        return (resultingtype, recursiveConstraints ++ localConstraints, reformExpr expr typedSubExprs resultingtype)
-    else
-      error ("no inference implemented for " ++ show expr)
+infer expr
+    | specialTreatment expr =
+      --we're dealing with StubConstant here.
+      case expr of
+        (Constant ty val) -> do
+          let tVal = getRType val
+          let constraint = (rType ty, tVal)
+          return (rType ty, [constraint], expr)
+        (Lambda ti name inExpr) -> do
+          -- rare case of needing an extra TV, because the var doesn't get one initially
+          tv <- fresh
+          -- give the lambda var a tv, with that TEnv infer the lambda expression
+          (functionTy, cs, inExprTy) <- inTEnvF [(name, Forall [] tv)] (infer inExpr)
+          -- resulting type is tv -> functionTy; propagate constraints from inner Expr.
+          return (tv `TArrow` functionTy, cs, Lambda (setRType ti (tv `TArrow` functionTy)) name inExprTy)
+        (Var ti name) -> do
+          t <- lookupTEnv name
+          return (t, [], Var (setRType ti t) name)
+        e@(Apply ti func arg) -> do
+          (funcTy, c1, funcExprTy) <- infer func
+          (argTy, c2, argExprTy) <- infer arg
+          let argConstraint = (funcTy, argTy `TArrow` (rType ti))
+          return (rType ti, [argConstraint] ++ c1 ++ c2, Apply ti funcExprTy argExprTy)
+          --expr `usingScheme` (Forall [TV "a", TV "b"] (((TVarR $ TV "a") `TArrow` (TVarR $ TV "b")) `TArrow` (TVarR $ TV "a") `TArrow` (TVarR $ TV "b")))
+    | solvesSimply expr =
+        let
+          plausibleAlgs = filter (checkExprMatches expr) allAlgorithms
+          --since we don't care about ambiguous inference rules (i.e. multiple plausible rules)
+          -- we just make sure that they agree on resulting types.
+          allSchemesEq = all (\alg -> assumedRType (head plausibleAlgs) == assumedRType alg) (tail plausibleAlgs)
+          scheme = assumedRType (head plausibleAlgs)
+        in
+          if not allSchemesEq
+            then error "unviable Inference Rule configuration"
+            else
+              -- use ForAll scheme from InferenceRule.
+              expr `usingScheme` scheme
+    | otherwise = error ("no inference implemented for " ++ show expr)
+
+usingScheme :: Expr -> Scheme -> Infer (RType, [Constraint], Expr)
+usingScheme expr scheme = do
+  -- use ForAll scheme from InferenceRule.
+  let subexprs = getSubExprs expr
+  tuples <- mapM infer subexprs
+  let localConstraints = concatMap snd3cts tuples
+  let subExprTypes = map fst3cts tuples
+  let typedSubExprs = map trd3cts tuples
+  rescoped <- rescope scheme
+  (resultingtype, recursiveConstraints) <- inferResultingType rescoped subExprTypes
+  return (resultingtype, recursiveConstraints ++ localConstraints, reformExpr expr typedSubExprs resultingtype)
+
+solvesSimply :: Expr -> Bool
+solvesSimply e = (not (null plausibleAlgs)) && (not ((toStub e) == StubConstant))
   where
-    plausibleAlgs = filter (checkExprMatches expr) allAlgorithms
-    --since we don't care about ambiguous inference rules (i.e. multiple plausible rules)
-    -- we just make sure that they agree on resulting types.
-    allSchemesEq = all (\alg -> assumedRType (head plausibleAlgs) == assumedRType alg) (tail plausibleAlgs)
-    solvesSimply = not (null plausibleAlgs)
-    scheme = assumedRType (head plausibleAlgs)
+    plausibleAlgs = filter (checkExprMatches e) allAlgorithms
 
 --put all new TVars into a scheme
+--TODO: could probably be reduced to instantiate, depending on context.
 rescope :: Scheme -> Infer Scheme
 rescope (Forall tvars rty) = do
   newTVars <- mapM (const fresh) tvars
@@ -244,6 +319,13 @@ rescope (Forall tvars rty) = do
   let substituted = apply substitution rty
   return (Forall newvars substituted)
     where unwrap (TVarR tv) = tv
+
+-- instantiate a Scheme: Substitute each ForAll'd TV with a fresh var.
+instantiate :: Scheme -> Infer RType
+instantiate (Forall as t) = do
+    as2 <- mapM (const fresh) as
+    let s = Subst $ Map.fromList $ zip as as2
+    return $ apply s t
 
 -- into an existing expression, replace a subexpresison and rtype.
 reformExpr :: Expr -> [Expr] -> RType -> Expr
@@ -260,6 +342,13 @@ inferResultingType (Forall vars (TArrow fromTy toTy)) (fstTy:rtypes2) =
     let constraint = (fromTy, fstTy)
     (resultingType, moreConstraints) <- inferResultingType (Forall vars toTy) rtypes2
     return (resultingType, constraint:moreConstraints)
+inferResultingType (Forall vars fTy) (fstTy:rtypes2) = do
+  --introduce a new TV for the result.
+  resultingTV <- fresh
+  let constraint = (fTy, fstTy `TArrow` (resultingTV))
+  (resultingType, moreConstraints) <- inferResultingType (Forall vars resultingTV) rtypes2
+  return (resultingType, constraint:moreConstraints)
+--inferResultingType a b = error ("undefined inferResulting from " ++ show a ++ " //// " ++ show b)
 
 
 -- | Extend type TEnvironment
@@ -272,6 +361,15 @@ inTEnvF ((x, sc): r) m = do
   let scope e = remove e x `extend` (x, sc)
   inTEnvF r (local scope m)
 
+-- | Lookup type in the TEnvironment
+lookupTEnv :: Name -> Infer RType
+lookupTEnv x = do
+  (TypeEnv env) <- ask
+  case Map.lookup x env of
+      Nothing   ->  throwError $ UnboundVariable x
+      Just s    ->  do t <- instantiate s
+                       return t
+
 fst3cts ::  (RType, [Constraint], Expr) -> RType
 fst3cts (t, _, _) = t
 snd3cts ::  (RType, [Constraint], Expr) -> [Constraint]
@@ -279,7 +377,9 @@ snd3cts (_, cts, _) = cts
 trd3cts ::  (RType, [Constraint], Expr) -> Expr
 trd3cts (_, _, e) = e
 
-
+-------------------------------------------------------------------------------
+-- Type Variable management
+-------------------------------------------------------------------------------
 letters :: [String]
 letters = [1..] >>= flip replicateM ['a'..'z']
 
@@ -299,7 +399,7 @@ freshVars n rts = do
 
 
 -- | Run the inference monad
-runInfer :: TEnv -> Infer (RType, [Constraint], Program) -> Either RTypeError (RType, [Constraint], Program)
+runInfer :: TEnv -> Infer ([Constraint], Program) -> Either RTypeError ([Constraint], Program)
 runInfer env m = runExcept $ evalStateT (runReaderT m env) initInfer
 
 
@@ -335,6 +435,7 @@ unifies (Tuple t1 t2) BottomTuple = return emptySubst
 unifies BottomTuple (Tuple t1 t2) = return emptySubst
 unifies (ListOf t) NullList = return emptySubst
 unifies NullList (ListOf t) = return emptySubst
+unifies (ListOf t1) (ListOf t2) = unifies t1 t2
 unifies t1 (GreaterType (TVarR v) t3) = if t1 `matches` t3 then v `bind` t1 else
   throwError $ UnificationFail t1 t3
 unifies t1 (GreaterType t3 (TVarR v)) = if t1 `matches` t3 then v `bind` t1 else

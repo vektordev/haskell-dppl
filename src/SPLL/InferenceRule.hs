@@ -155,7 +155,16 @@ theta = InferenceRule
           []
           "theta"
           (const Deterministic)
-          (Forall [] TFloat)
+          (Forall [] (TThetaTree `TArrow` TFloat))
+
+
+thetaSubTree :: InferenceRule
+thetaSubTree = InferenceRule
+          StubSubtree
+          []
+          "thetaSubTree"
+          (const Deterministic)
+          (Forall [] (TThetaTree `TArrow` TThetaTree))
 
 uniform :: InferenceRule
 uniform = InferenceRule
@@ -179,7 +188,7 @@ constant = InferenceRule
              []
              "constant"
              (const Deterministic)
-             (Forall [] NotSetYet)
+             (Forall [TV "a"] $ TVarR $ TV "a")
 
 exprNull :: InferenceRule
 exprNull = InferenceRule
@@ -197,10 +206,27 @@ cons = InferenceRule
          (mostChaotic . (Prob:))
          (Forall [TV "a"] ((TVarR $ TV "a") `TArrow` ((ListOf $ TVarR $ TV "a") `TArrow` (ListOf $ TVarR $ TV "a"))))
 
+tcons :: InferenceRule
+tcons = InferenceRule
+          StubTCons
+          []
+          "tcons"
+          (mostChaotic . (Prob:))
+          (Forall [TV "a", TV "b"] ((TVarR $ TV "a") `TArrow` ((TVarR $ TV "b") `TArrow` (Tuple (TVarR $ TV "a") (TVarR $ TV "b")))))
+
+exprNot :: InferenceRule
+exprNot = InferenceRule
+            StubNot
+            []
+            "tcons"
+            mostChaotic
+            (Forall [] (TBool `TArrow` TBool))
+
 allAlgorithms :: [InferenceRule]
 allAlgorithms = [
   ifThenElse,
   theta,
+  thetaSubTree,
   uniform,
   normal,
   constant,
@@ -220,5 +246,7 @@ allAlgorithms = [
   negF,
   expF,
   enumeratePlusLeft,
-  cons
+  cons,
+  tcons,
+  exprNot
   ]

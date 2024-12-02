@@ -4,7 +4,7 @@ import SPLL.Lang.Lang
 import SPLL.Typing.Typing
 import SPLL.Typing.RType
 import SPLL.Typing.PType
-import SPLL.Typing.RInfer
+import SPLL.Typing.RInfer2
 import SPLL.Typing.PInfer2
 import SPLL.Typing.Witnessing
 
