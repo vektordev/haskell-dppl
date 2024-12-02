@@ -16,6 +16,7 @@ import SPLL.Typing.Typing
 import SPLL.Typing.RType
 import SPLL.Typing.PType
 import SPLL.Typing.Typing
+import SPLL.Typing.RInfer2
 import SPLL.Analysis
 import SPLL.IntermediateRepresentation
 import SPLL.IRCompiler
@@ -41,6 +42,7 @@ import Data.Reflection (Reifies)
 import Data.Bifunctor (second)
 import SPLL.Parser
 import TestParser
+import TestInternals
 
 -- Generalizing over different compilation stages, we can fit all "this typing is what the compiler would find" cases.
 class Recompilable a where
@@ -439,7 +441,8 @@ main :: IO ()
 main = do
   a <- runTests
   b <- test_parser
-  let x = a && b
+  c <- test_internals
+  let x = a && b && c
   if x then
     putStrLn "Test successful!"
   else do
