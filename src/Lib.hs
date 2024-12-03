@@ -29,7 +29,7 @@ import SPLL.Typing.RType
 import SPLL.Typing.PType
 import SPLL.Typing.Infer
 import SPLL.Typing.PInfer2
-import SPLL.Typing.RInfer2
+import SPLL.Typing.RInfer
 import Control.Monad.Random (evalRandIO, getRandomR, replicateM, forM_)
 import SPLL.IntermediateRepresentation
 import SPLL.Analysis
@@ -142,135 +142,46 @@ newCodeGenAll conf p = do
 codeGenToLang :: Language -> CompilerConfig -> Program -> IO String
 codeGenToLang lang conf prog = do
   printIfVerbose conf "=== Parsed Program ===\n"
-  if verbose conf >= 2 then pPrint prog else return ()
+  doVerbose 2 conf (pPrint prog)
   printIfVerbose conf (pPrintProg prog)
-  
-  let preAnnotated = annotateEnumsProg prog
-  printIfMoreVerbose conf "\n\n=== Annotated Program ===\n"
-  if verbose conf >= 2 then pPrint preAnnotated else return ()
 
-  let typed = addTypeInfo preAnnotated
-  printIfMoreVerbose conf "\n\n=== Typed Program ===\n"
-  if verbose conf >= 2 then pPrint typed else return ()
+  let preAnnotated = annotateEnumsProg prog
+  doVerbose 2 conf (putStrLn "\n\n=== Annotated Program (1) ===\n" >> pPrint preAnnotated)
+
+  let typed = addTypeInfo prog
+  doVerbose 2 conf (putStrLn "\n\n=== Typed Program ===\n" >> pPrint typed)
 
   let annotated = annotateAlgsProg typed
-  printIfMoreVerbose conf "\n\n=== Annotated Program ===\n"
-  if verbose conf >= 2 then pPrint annotated else return ()
+  doVerbose 2 conf (putStrLn "\n\n=== Annotated Program (2) ===\n" >> pPrint annotated)
 
   let ir = envToIR conf annotated
   printIfVerbose conf "\n\n=== Compiled Program ===\n"
   printIfVerbose conf (pPrintIREnv ir)
-  if verbose conf >= 2 then pPrint ir else return ()
-  
+  doVerbose 2 conf (pPrint ir)
+
   case lang of
     Python -> return $ intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions ir)
     Julia -> return $ intercalate "\n" (SPLL.CodeGenJulia.generateFunctions ir)
 
+doVerbose :: Int -> CompilerConfig -> IO () -> IO()
+doVerbose level CompilerConfig{verbose=v} action = if v >= level then action else return ()
+
 printIfVerbose :: CompilerConfig -> String -> IO ()
-printIfVerbose CompilerConfig {verbose=v} s = if v >= 1 then putStrLn s else return ()
+printIfVerbose conf s = doVerbose 1 conf (putStrLn s)
 
 printIfMoreVerbose :: CompilerConfig -> String -> IO ()
-printIfMoreVerbose CompilerConfig {verbose=v} s = if v >= 2 then putStrLn s else return ()
+printIfMoreVerbose conf s = doVerbose 2 conf (putStrLn s)
 
 someFunc :: IO ()
-someFunc = do--thatGaussThing
-  --x <- runNNTest
-  --print x
-  --runBruteForceSolver testBool
-  --runBruteForceSolver testGauss
-  --runBruteForceSolver testGreater2
-  --runBruteForceSolver testGreater
-  --runBruteForceSolver testExpr2
-
+someFunc = do
   putStrLn "--------"
   putStrLn "--------"
-  --let testExpr = testList
-  --let env = [("main", testExpr)] :: Env () Float
-  {-let fnc = gaussLists
-  let env = [("main", gaussLists)] :: Env () Float
-  let prog = Program env fnc
-  putStrLn "outputting constraints"
-  RInfer.showResultsProg $ addEmptyTypeInfo prog
-  putStrLn "now for ptypes"
-  PInfer2.showResultsProgDebug (addRTypeInfo $ addEmptyTypeInfo prog)
-  putStrLn "done outputting constraints"
-  let cmp2 = progToEnv $ addTypeInfo prog-}
-  let conf = CompilerConfig {topKThreshold = Nothing, countBranches = False}
-  let prog = uniformProg
-  putStrLn (pPrintProg prog)
-  let typedProg = {-inferProg-} (addTypeInfo prog)
-
-  --let fwdInfer = inferProbProg typedProg
-  --pPrint fwdInfer
-
-  pPrint prog
-  let preAnnotated = annotateEnumsProg typedProg
-  let annotated = annotateAlgsProg preAnnotated
-  pPrint annotated
-  let ir = envToIR conf annotated
-  let pycode = SPLL.CodeGenPyTorch.generateFunctions ir
-  let jlcode = SPLL.CodeGenJulia.generateFunctions ir
-  putStrLn "python code:"
-  putStrLn $ unlines pycode
-  putStrLn "julia code:"
-  putStrLn $ unlines jlcode
-  output <- evalRandIO (IRInterpreter.generateRand ir ir [] (fromJust (lookup "main_gen" ir)))
-  putStrLn ("Output: " ++ show output)
-  output <- evalRandIO (IRInterpreter.generateRand ir ir [IRConst $ VFloat (90)] (fromJust (lookup "main_prob" ir)))
-  putStrLn ("PDF@90: " ++ show output)
-  --cmp2 <-  env
-  --let cmp = [] ++ [("noiseMNistAdd", mNistNoise), ("expertmodel", expertModelsTyped), ("expertmodelAnnotated", expertAnnotatedTyped), ("mNistAdd", testNN)] :: Env TypeInfo Float
-  --let cmp = [("main", testNN)] :: Env TypeInfo Float
-  --let cmp = cmp2
-  --cmp <- compile env
-  --pPrint (inferProbProg typedProg)
+  let conf = CompilerConfig{topKThreshold = Nothing, countBranches = True, verbose=2}
+  let lang = Python
+  let prog = testCallLambda --testDiceAdd --testNN
+  someString <- codeGenToLang lang conf prog
+  putStrLn someString
   putStrLn "========="
-  --let env = [("main", testNNUntyped)] :: Env () Float
-  --cmp <- compile env triMNist
-  --let cmp = [("main", triMNist)] :: Env TypeInfo Float
-  --let cmp = [("main", testNN)] :: Env TypeInfo Float
-  -- let env = [("main", gaussLists)] :: Env () Float
-  -- cmp2 <- compile env
-  --pTypeInfoProgIO testProg
-  --  let prog2 = addWitnessesProg (addTypeInfo testInjFD) :: Program TypeInfoWit Double
-  --  let Program _ m  = prog2
-  --showResultsProg $ (addTypeInfo testLet2)
-  --mapM_ putStrLn (prettyPrintProg prog2)
-  --testDensity1d "frankTest" (testObserve :: Program () Double) [-0.3, -0.2]
-  --testRun "frankTest" (testObserve :: Program () Double) [1.0, 0.44]
-  -- print m
-  --grad_loss :: [(loss :: a, grad :: Thetas a)]
-  --grad_loss thX = [grad' (\theta -> log $ unwrapP $ likelihood (autoEnv env) (autoEnv env) theta (autoExpr expr) (autoVal sample)) thX | sample <- samples]
-  --let pp = [VFloat $ 3.0]
-  --let inverse_grad_auto = grad' (\[val] -> callInv globalFenv2 "mult" (map autoVal pp) val) [0.9]
-  --print "hi"
-  --print inverse_grad_auto
-  --auto_p = (map auto params_val)
-  --params_val = map (detGenerate env thetas) params
-
-  --let typedEnv = progToEnv $ typeProg prog
-  --print "Type Info"
-  --mapM_ (putStrLn . unlines . prettyPrint . snd) typedEnv
-  --typedEnv <- compile ([("main", testPlus2)] :: Env () Double )
-  --let Just main = lookup "main" typedEnv
-  --gradientDiagAt typedEnv [0.2] main [VFloat 1.0]
-
-  --pTypeInfoProgIO $ testProgFix
-  --RInfer.showResultsProg testProgFix
-
-
-  -- newCodeGenAll cmp2
-  --let x = transpile cmp
-  --print x
-  --let y = map mkProbability x
-  --mapM_ putStrLn y
-  --let env = [("main", testInconsistent)] :: Env () Double
-  --only once
-  --in testRun "gaussMultiLists" env [0.55, 0.45, 0.5, 0.8, 0.3, 0.4]
-  --in testRun "testInconsistent" env [-0.5]
-  --repeat a bunch of times:
-  --in forM_ [1..100] (\n -> testRun ("gaussMultiLists_" ++ show n) env [0.55, 0.45, 0.5, 0.8, 0.3, 0.4])
-  --in forM_ [1..100] (\n -> testRun ("gaussLists_" ++ show n) env [0.5, 0.9, 0.3])
 --runNNTest :: IO ()
 {-
 runNNTest :: IO [Value Float]
