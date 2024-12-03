@@ -16,7 +16,7 @@ import SPLL.Typing.Typing
 import SPLL.Typing.RType
 import SPLL.Typing.PType
 import SPLL.Typing.Typing
-import SPLL.Typing.RInfer2
+import SPLL.Typing.RInfer
 import SPLL.Analysis
 import SPLL.IntermediateRepresentation
 import SPLL.IRCompiler

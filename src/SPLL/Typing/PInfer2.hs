@@ -20,7 +20,6 @@ import Debug.Trace
 import Data.List (nub, delete)
 import qualified Data.Set as Set
 
---import SPLL.Typing.RInfer2 hiding (showResults, showResultsProg, Scheme (..), RTypeError (..))
 import Data.Monoid
 import Data.Either (lefts)
 import Data.Foldable hiding (toList)

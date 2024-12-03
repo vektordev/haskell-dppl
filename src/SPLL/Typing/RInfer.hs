@@ -2,7 +2,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
-module SPLL.Typing.RInfer2 (
+module SPLL.Typing.RInfer (
   RTypeError (..)
 , addRTypeInfo
 , tryAddRTypeInfo
