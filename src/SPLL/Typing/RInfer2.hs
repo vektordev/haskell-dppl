@@ -21,8 +21,6 @@ import Data.Monoid
 import Data.Foldable hiding (toList)
 import qualified Data.Map as Map
 
-import SPLL.Typing.RInfer (Scheme (..), RTypeError (..))
-
 import Text.Pretty.Simple
 
 import SPLL.Lang.Lang
@@ -85,6 +83,16 @@ instance Monoid TEnv where
 
 makeMain :: Expr -> Program
 makeMain expr = Program [("main", expr)] []
+
+data RTypeError
+  = UnificationFail RType RType
+  | InfiniteType TVarR RType
+  | UnboundVariable String
+  | Ambigious [Constraint]
+  | UnificationMismatch [RType] [RType]
+  | ExprInfo [String]
+  | FalseParameterFail String
+  deriving (Show, Eq)
 
 -- | Inference monad
 type Infer a = (ReaderT

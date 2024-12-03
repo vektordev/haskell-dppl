@@ -12,7 +12,6 @@ import SPLL.Typing.PType
 import Control.Applicative (liftA2, liftA3)
 import SPLL.Typing.Infer
 import SPLL.InferenceRule
-import SPLL.Typing.RInfer (Scheme (..))
 import Debug.Trace
 
 import SPLL.Examples
