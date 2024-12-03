@@ -2,7 +2,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 module SPLL.Typing.PInferBranched (
-    showResults, showResultsProg, makeMain, inferType
+    showResults, showResultsProg, inferType
 ) where
 
 import Control.Monad.Except
@@ -79,8 +79,6 @@ instance Semigroup TEnv where
 instance Monoid TEnv where
   mempty = empty
   mappend = (<>)
-makeMain :: Expr -> Program
-makeMain expr = Program [("main", expr)] []
 
 -- | Inference monad
 type Infer a = (ReaderT

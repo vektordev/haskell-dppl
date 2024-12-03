@@ -37,7 +37,6 @@ import SPLL.CodeGenPyTorch
 import SPLL.CodeGenJulia
 import SPLL.Typing.Witnessing
 import SPLL.Examples
-import SPLL.Typing.PInferTypeclass
 import Debug.Trace
 import SpecExamples
 import Statistics.Sample.KernelDensity

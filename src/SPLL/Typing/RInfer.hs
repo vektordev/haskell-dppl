@@ -80,10 +80,6 @@ instance Monoid TEnv where
   mempty = empty
   mappend = (<>)
 
-
-makeMain :: Expr -> Program
-makeMain expr = Program [("main", expr)] []
-
 data RTypeError
   = UnificationFail RType RType
   | InfiniteType TVarR RType

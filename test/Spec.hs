@@ -23,7 +23,6 @@ import SPLL.IRCompiler
 import IRInterpreter
 import Data.Maybe (fromJust, catMaybes)
 import Control.Monad.Random.Lazy (Random, RandomGen, Rand, evalRandIO)
-import SPLL.Typing.PInferBranched
 import SPLL.Typing.Infer
 import SPLL.Typing.Witnessing
 import SpecExamples

@@ -152,8 +152,6 @@ instance Monoid TEnv where
   mempty = TypeEnv Map.empty
   mappend = (<>)
 
-makeMain :: Expr -> Program
-makeMain expr = Program [("main", expr)] []
 -- | Inference state
 data InferState = InferState { var_count :: Int }
 

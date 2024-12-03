@@ -10,6 +10,7 @@ module SPLL.Lang.Lang (
 , tMap
 , tMapM
 , tMapProg
+, makeMain
 , tMapHead
 , getRType
 , Name
@@ -237,6 +238,9 @@ tMap f expr = case expr of
   (Lambda _ name a) -> Lambda (f expr) name (tMap f a)
   (Apply _ a b) -> Apply (f expr) (tMap f a) (tMap f b)
   (ReadNN _ n a) -> ReadNN (f expr) n (tMap f a)
+
+makeMain :: Expr -> Program
+makeMain expr = Program [("main", expr)] []
 
 tMapProg :: (Expr -> TypeInfo) -> Program -> Program
 tMapProg f (Program decls neural) = Program (zip (map fst decls) (map (tMap f . snd) decls)) neural
