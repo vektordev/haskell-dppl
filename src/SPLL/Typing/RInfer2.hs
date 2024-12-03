@@ -286,7 +286,7 @@ infer expr
           scheme = assumedRType (head plausibleAlgs)
         in
           if not allSchemesEq
-            then error "unviable Inference Rule configuration"
+            then error ("unviable Inference Rule configuration" ++ (show $ map algName plausibleAlgs))
             else
               -- use ForAll scheme from InferenceRule.
               expr `usingScheme` scheme

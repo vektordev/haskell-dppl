@@ -103,7 +103,7 @@ injF2Left = InferenceRule
              [SubExprNIsType 0 Deterministic]
              "injF2Left"
              mostChaotic
-             (Forall [] (TFloat `TArrow` (TFloat `TArrow` TFloat)))
+             (Forall [TV "a"] (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TVarR (TV "a"))))
             
 injF2Right :: InferenceRule
 injF2Right = mirror2 injF2Left
@@ -111,10 +111,10 @@ injF2Right = mirror2 injF2Left
 injF2Enumerable :: InferenceRule
 injF2Enumerable = InferenceRule
              StubInjF
-             [SubExprNIsEnumerable 0, SubExprNIsEnumerable 1]
+             [SubExprNIsEnumerable 0, SubExprNIsEnumerable 1, SubExprNIsNotType 0 Deterministic, SubExprNIsNotType 1 Deterministic]
              "injF2Enumerable"
              (const Prob)
-             (Forall [] (TInt `TArrow` (TInt `TArrow` TInt)))
+             (Forall [TV "a"] (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TVarR (TV "a"))))
 
 expF :: InferenceRule
 expF = InferenceRule
