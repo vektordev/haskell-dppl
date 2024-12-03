@@ -398,7 +398,7 @@ toIRProbability conf typeEnv (InjF _ name [param]) sample = do
         FPair (_, [inv]) = fPair
         FDecl (_, [v], _, invExpr, [(_, invDerivExpr)]) = inv
 toIRProbability conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [param1, param2]) sample
-  | extras `hasAlgorithm` "injF2Left" = do  --FIXME Left
+  | extras `hasAlgorithm` "injF2Left" = do
   let Just fPair = lookup name globalFenv   --TODO error handling if not found
   let FPair (fwd, inversions) = fPair
   let FDecl (_, [v2, v3], [v1], _, _) = fwd
@@ -413,7 +413,7 @@ toIRProbability conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [pa
   uniquePrefix <- mkVariable ""
   return (irMap (uniqueify [v1, v2, v3] uniquePrefix) returnExpr, paramDim, paramBranches) --FIXME
 toIRProbability conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [param1, param2]) sample
-  | extras `hasAlgorithm` "injF2Right" = do  --FIXME Left
+  | extras `hasAlgorithm` "injF2Right" = do
   let Just fPair = lookup name globalFenv   --TODO error handling if not found
   let FPair (fwd, inversions) = fPair
   let FDecl (_, [v2, v3], [v1], _, _) = fwd
@@ -427,6 +427,39 @@ toIRProbability conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [pa
   let returnExpr = IRLetIn detVar leftExpr (IRLetIn sampleVar sample (IROp OpMult paramExpr (IRUnaryOp OpAbs invDeriv)))
   uniquePrefix <- mkVariable ""
   return (irMap (uniqueify [v1, v2, v3] uniquePrefix) returnExpr, paramDim, paramBranches)
+toIRProbability conf typeEnv (InjF TypeInfo {tags=extras} name [left, right]) sample
+  | extras `hasAlgorithm` "injF2Enumerable" = do
+  -- Get all possible values for subexpressions
+  let extrasLeft = tags $ getTypeInfo left
+  let extrasRight = tags $ getTypeInfo right
+  let enumListL = head $ [x | EnumList x <- extrasLeft]
+  let enumListR = head $ [x | EnumList x <- extrasRight]
+
+  let Just fPair = lookup name globalFenv   --TODO error handling if not found
+  let FPair (fwd, inversions) = fPair
+  let FDecl (_, [v2, v3], [v1], _, _) = fwd
+  -- We get the inversion to the right side
+  let [invDecl] = filter (\(FDecl (_, _, [w1], _, _)) -> v3==w1) inversions   --This should only return one inversion
+  let FDecl (_, [x2, x3], _, invExpr, _) = invDecl
+
+  -- We now compute
+  -- for each e in leftEnum:
+  --   sum += if invExpr(e, sample) in rightEnum then pLeft(e) * pRight(sample - e) else 0
+  -- For that we name e like the lhs of
+  -- We need to unfold the monad stack, because the EnumSum Works like a lambda expression and has a local scope
+  irTuple <- lift $ return $ generateLetInBlock conf (runWriterT (do
+    --the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
+    (pLeft, _, _) <- toIRProbability conf typeEnv left (IRVar x2)
+    (pRight, _, _) <- toIRProbability conf typeEnv right (IROp OpSub sample (IRVar x2))
+    tell [(x3, sample)]
+    let returnExpr = case topKThreshold conf of
+          Nothing -> IRIf (IRElementOf invExpr (IRConst (fmap failConversion (VList enumListR)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
+          Just thr -> IRIf (IROp OpAnd (IRElementOf invExpr (IRConst (fmap failConversion (VList enumListR)))) (IROp OpGreaterThan pLeft (IRConst (VFloat thr)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
+    -- TODO correct branch counting
+    return (returnExpr, const0, const0)))
+  uniquePrefix <- mkVariable ""
+  let enumSumExpr = IREnumSum x2 (fmap failConversion (VList enumListL)) $ IRTFst irTuple
+  return (irMap (uniqueify [x2, x3] uniquePrefix) enumSumExpr, const0, const0)
 toIRProbability conf typeEnv (Null _) sample = do
   expr <- indicator (IROp OpEq sample (IRConst $ VList []))
   return (expr, const0, const0)
@@ -521,6 +554,7 @@ indicator condition = return $ IRIf condition (IRConst $ VFloat 1) (IRConst $ VF
 uniqueify :: [Varname] -> String -> IRExpr -> IRExpr
 uniqueify vars prefix (IRVar name) | name `elem` vars = IRVar (prefix ++ name)
 uniqueify vars prefix (IRLetIn name boundExpr bodyExpr) | name `elem` vars = IRLetIn (prefix ++ name) (uniqueify vars prefix boundExpr) (uniqueify vars prefix bodyExpr)
+uniqueify vars prefix (IREnumSum name lst bodyExpr) | name `elem` vars = IREnumSum (prefix ++ name) lst (uniqueify vars prefix bodyExpr)
 uniqueify _ _ e = e
 
 --folding detGen and Gen into one, as the distinction is one to make sure things that are det are indeed det.

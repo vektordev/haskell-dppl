@@ -203,7 +203,7 @@ testDice = Program [("main", IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uni
                             (IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat (1/2)))) (Constant makeTypeInfo (VInt 5)) (Constant makeTypeInfo (VInt 6)))))))] []
                             
 testDiceAdd :: Program
-testDiceAdd = Program [ ("main", PlusI makeTypeInfo (Var makeTypeInfo "dice") (Var makeTypeInfo "dice")),
+testDiceAdd = Program [ ("main", InjF makeTypeInfo "plusI" [(Var makeTypeInfo "dice"), (Var makeTypeInfo "dice")]),
                         ("dice", IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat (1/6)))) (Constant makeTypeInfo (VInt 1)) 
                         (IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat (1/5)))) (Constant makeTypeInfo (VInt 2))
                           (IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat (1/4)))) (Constant makeTypeInfo (VInt 3))

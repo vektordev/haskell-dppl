@@ -29,6 +29,7 @@ import SPLL.Lang.Lang
 import SPLL.Typing.Typing
 import SPLL.Typing.PType
 import SPLL.Typing.RType hiding (TVar, TV, Scheme, Scheme(..))
+import SPLL.Examples (paramExpr)
 
 data PTypeError
   = UnificationFail PType PType
@@ -51,7 +52,7 @@ data DScheme = DScheme [TVar] [DConstraint] PType
   deriving (Show, Eq)
 
 type DConstraint = (PType, DowngradeChain)
-data ChainConstraint = PlusConstraint TypeOrChain TypeOrChain | CompConstraint TypeOrChain TypeOrChain
+data ChainConstraint = PlusConstraint TypeOrChain TypeOrChain | EnumPlusConstraint TypeOrChain TypeOrChain | CompConstraint TypeOrChain TypeOrChain
   | LetInDConstraint TypeOrChain
   deriving (Show, Eq)
 type DowngradeChain = [Either PType ChainConstraint]
@@ -69,6 +70,14 @@ resolvePlusCons Integrate Prob = Bottom
 resolvePlusCons Prob Integrate = Bottom
 resolvePlusCons Prob Prob = Bottom
 resolvePlusCons ty1 ty2 = Deterministic
+
+-- Enumerability allows us to still infer prob in cases in which normal inference would fail
+resolveEnumPlusCons :: PType -> PType -> PType
+resolveEnumPlusCons Integrate Integrate = Prob
+resolveEnumPlusCons Integrate Prob = Prob
+resolveEnumPlusCons Prob Integrate = Prob
+resolveEnumPlusCons Prob Prob = Prob
+resolveEnumPlusCons ty1 ty2 = Deterministic
 
 resolveCompCons :: PType -> PType -> PType
 resolveCompCons Integrate Integrate = Bottom
@@ -179,6 +188,7 @@ instance DSubstitutable DowngradeChain where
 
 instance DSubstitutable ChainConstraint where
   dapply s (PlusConstraint ty1 ty2) = PlusConstraint (dapply s ty1) (dapply s ty2)
+  dapply s (EnumPlusConstraint ty1 ty2) = EnumPlusConstraint (dapply s ty1) (dapply s ty2)
   dapply s (CompConstraint ty1 ty2) = CompConstraint (dapply s ty1) (dapply s ty2)
 
 
@@ -291,6 +301,12 @@ collapseChain ((Right (PlusConstraint ty1 ty2)):b) ty3 dcOut = if isResolved
    where (b1, rty1) = getResType ty1
          (b2, rty2) = getResType ty2
          isResolved = b1 && b2
+collapseChain ((Right (EnumPlusConstraint ty1 ty2)):b) ty3 dcOut = if isResolved
+   then collapseChain b (downgrade (resolveEnumPlusCons rty1 rty2) ty3) dcOut
+   else collapseChain b ty3 dcOut ++ [Right (EnumPlusConstraint (subCollapse ty1) (subCollapse ty2))]
+   where (b1, rty1) = getResType ty1
+         (b2, rty2) = getResType ty2
+         isResolved = b1 && b2
 collapseChain ((Right (CompConstraint ty1 ty2)):b) ty3 dcOut =
     if isResolved
     then collapseChain b (downgrade (resolveCompCons rty1 rty2) ty3) dcOut
@@ -334,7 +350,7 @@ resolveStep cons ty = (consRes, resType, isResolvedRes, substRes)
         topConsB =  extractType ty cons'
         consNoTopB = delete topConsB cons'
         consBundles = map collapse $ bundleConstraints topConsB consNoTopB
-        
+
         noCycleType = apply subst1  ty
         (consRes, resType, isResolvedRes, substRes) =
           if null cons'
@@ -482,7 +498,7 @@ plusInf = do
    tv2 <- fresh
    tv3 <- fresh
    return (emptySubst, [(tv3, [Left tv1, Left tv2, Right (PlusConstraint (Left tv1) (Left tv2))])], tv1 `PArr` tv2 `PArr` tv3)
-   
+
 negInf :: Infer (Subst, [DConstraint], PType)
 negInf = do
   tv1 <- fresh
@@ -525,7 +541,7 @@ inferProg env (Program decls nns) = do
   let tcs = zipWith makeEqConstraint tvs (map trd3 cts)
   -- combine all constraints
   return (s1, cs1 ++ concatMap snd3 cts ++ tcs , t1, Program (zip (map fst decls) (map frth3 cts)) nns)
-  
+
 isEnumerable :: Expr -> Bool
 isEnumerable e = foldr (\tag b -> b || isEnum tag) False (tags (getTypeInfo e))
   where isEnum (EnumList _) = True
@@ -551,12 +567,15 @@ infer env expr = case expr of
   InjF ti name paramsExpr -> do
     --(s1, cs1, t1, xt) <- infer env expr
     p_inf <- mapM (infer env) paramsExpr
+    -- If all parameters are enumerable, we can use weaker constarints
+    let constraint = if all isEnumerable paramsExpr then EnumPlusConstraint else PlusConstraint
     tv <- fresh
     let s_acc = foldl compose emptySubst (map fst3 p_inf)
     --let cts_d d = Right (LetInDConstraint(Left d))
-    let cts_d d = Left d  --TODO Better chain constraints
-    let p_fst = map (cts_d . trd3) p_inf
-    return (s_acc, concatMap snd3 p_inf ++ [(tv,p_fst)] --TODO check this
+    let p_fst:p_rst = map trd3 p_inf
+    -- Fold all pTypes into a series of Plus Constraints (p1 + (p2 + (p3 + p4)))
+    let cs = foldr (\p acc -> [Right $ constraint (Left p) (Right acc)]) [Left p_fst] p_rst
+    return (s_acc, concatMap snd3 p_inf ++ [(tv,cs)] --TODO check this
       , tv, InjF (setPType ti tv) name (map frth3 p_inf))
 
   PlusF ti e1 e2 -> do
@@ -570,7 +589,7 @@ infer env expr = case expr of
     (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
     (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
     -- return (s3, cs3, t3, PlusI (setPType ti t3) et1 et2)
-    let pt = if isEnumerable e1 && isEnumerable e2 then Prob else t3
+    let pt = if isEnumerable e1 && isEnumerable e2 then upgrade Prob t3 else t3
     return (s3, cs3, pt, PlusI (setPType ti pt) et1 et2)
 
   MultF ti e1 e2 -> do
@@ -658,13 +677,13 @@ infer env expr = case expr of
       -- FIXME How is it possible to set the downgrade chain to Det directly?
       -- TODO v may not be det at all, this is just for simplification
       return (compose s1 s2, cs1 ++ cs2, t2, Apply (setPType ti t2) et1 et2)
-      
+
   ReadNN ti name e -> do
-      (s, cs, t, et) <- infer env e 
+      (s, cs, t, et) <- infer env e
       return (s, cs, Prob, ReadNN (setPType ti Prob) name et)
-  
+
   _ -> error (show expr)
-       
+
 
 normalize :: DScheme -> DScheme
 normalize (DScheme _ c body) = DScheme (map snd ord) (normcs c) (normtype body)
@@ -683,6 +702,7 @@ normalize (DScheme _ c body) = DScheme (map snd ord) (normcs c) (normtype body)
     fvOr (Right cd) = fvcd cd
     fvcd ((Left ty):b) = fv ty ++ fvcd b
     fvcd (Right(PlusConstraint ty1 ty2):b) = fvOr ty1 ++ fvOr ty2 ++ fvcd b
+    fvcd (Right(EnumPlusConstraint ty1 ty2):b) = fvOr ty1 ++ fvOr ty2 ++ fvcd b
     fvcd (Right(CompConstraint ty1 ty2):b) = fvOr ty1 ++ fvOr ty2 ++ fvcd b
     fvcd [] = []
 
@@ -759,10 +779,12 @@ instance Substitutable (Either PType DowngradeChain) where
 instance Substitutable (Either PType ChainConstraint) where
    apply s (Left pt) = Left (apply s pt)
    apply s (Right (PlusConstraint pt1 pt2)) = Right (PlusConstraint (apply s pt1) (apply s pt2))
+   apply s (Right (EnumPlusConstraint pt1 pt2)) = Right (EnumPlusConstraint (apply s pt1) (apply s pt2))
    apply s (Right (CompConstraint pt1 pt2)) = Right (CompConstraint (apply s pt1) (apply s pt2))
    apply s (Right (LetInDConstraint pt1)) = Right (LetInDConstraint (apply s pt1))
    ftv (Left pt) = ftv pt
    ftv (Right (PlusConstraint pt1 pt2)) = ftv pt1 `Set.union` ftv pt2
+   ftv (Right (EnumPlusConstraint pt1 pt2)) = ftv pt1 `Set.union` ftv pt2
    ftv (Right (CompConstraint pt1 pt2)) = ftv pt1 `Set.union` ftv pt2
    ftv (Right (LetInDConstraint pt1)) = ftv pt1
 
