@@ -18,6 +18,7 @@ import IRInterpreter
 import Control.Monad
 
 -- InputVars, OutputVars, fwd, grad
+-- Note: Perhaps this RType deserves an upgrade to Scheme, whenever we upgrade to typeclasses.
 newtype FDecl = FDecl (RType, [String], [String], IRExpr, [(String, IRExpr)]) deriving (Show, Eq)
 -- Forward, inverse
 newtype FPair = FPair (FDecl, [FDecl]) deriving (Show, Eq)

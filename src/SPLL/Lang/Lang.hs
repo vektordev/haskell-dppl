@@ -552,7 +552,7 @@ printFlat expr = case expr of
   LetIn {} -> "LetIn"
   --(LetInD {}) -> "LetInD"
   --(LetInTuple {}) -> "LetInTuple"
-  (InjF t _ _)        -> "InjF"
+  (InjF t fname _)        -> "InjF (" ++ fname ++ ")"
   (Arg _ var r _ ) -> "Bind " ++ var ++ "::" ++ show r
   (Lambda _ name _) -> "\\" ++ name  ++ " -> "
   Apply {} -> "Apply"
@@ -582,7 +582,7 @@ printFlatNoReq expr = case expr of
   TCons {} -> "TCons"
   Var _ _ -> "Var"
   LetIn {} -> "LetIn"
-  (InjF t _ _) -> "InjF"
+  (InjF t fname _) -> "InjF (" ++ fname ++ ")"
   --(LetInD {}) -> "LetInD"
   --(LetInTuple {}) -> "LetInTuple"
   (Arg _ var r _ ) -> "Bind " ++ var ++ "::" ++ show r

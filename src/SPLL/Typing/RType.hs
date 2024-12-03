@@ -26,6 +26,7 @@ matches TInt TInt = True
 matches TSymbol TSymbol = True
 matches TFloat TFloat = True
 matches TThetaTree TThetaTree = True
+matches (TVarR x) (TVarR y) = x == y
 matches (TArrow left right) (TArrow left2 right2) = left `matches` left2 && right `matches` right2
 matches (ListOf x) (ListOf y) = x `matches` y
 matches NullList NullList = True

@@ -30,6 +30,7 @@ import SPLL.Typing.Typing
 import SPLL.Typing.RType
 --import SPLL.Typing.PType( PType(..) )
 import SPLL.InferenceRule
+import PredefinedFunctions (globalFenv)
 import Debug.Trace
 
 import PredefinedFunctions
@@ -170,17 +171,35 @@ instance Substitutable TEnv where
 showConstraint :: Constraint -> String
 showConstraint (a, b) = prettyRType a ++ " :==: " ++ prettyRType b
 
+--build the basic type environment: Take all invertible functions; ignore their inverses
+basicTEnv :: TEnv
+basicTEnv = TypeEnv $ Map.fromList $ map (\(name, FPair (FDecl (ty, _, _, _, _), _)) -> (name, toScheme ty)) globalFenv
+  where
+    -- plain RTypes as they exist in globalFEnv are implicitly forall'd. Make it explicit.
+    toScheme :: RType -> Scheme
+    toScheme rty = Forall freeVars rty
+      where
+        freeVars :: [TVarR]
+        freeVars = Set.toList $ ftv rty
+
 addRTypeInfo :: Program -> Program
 addRTypeInfo p =
-  case runInfer empty (inferProg p) of
+  case runInfer basicTEnv (inferProg p) of
     Left err -> error ("error in addRTypeInfo: " ++ show err)
     Right (cs, p2) -> case runSolve cs of
-      Left err -> error ("error in solve addRTypeInfo: " ++ show err ++ "\n\nprog = \n" ++ (unlines $ prettyPrintProgRTyOnly p2) ++ "\n\nconstraints = \n" ++ (unlines $ map showConstraint cs))
+      Left err -> error (
+        "error in solve addRTypeInfo: " ++ show err
+        ++ "\n\nprog = \n" ++ (unlines $ prettyPrintProgRTyOnly p2)
+        ++ "\n\nconstraints = \n" ++ (unlines $ map showConstraint cs)
+        ++ "\n\nsimplified prog = \n" ++ (unlines $ prettyPrintProgRTyOnly (subst `apply` p2))
+        ++ "\n\nleftover constraints = \n" ++ (unlines $ map showConstraint leftoverConstraints))
+          where
+            (subst, leftoverConstraints) = simplify (emptySubst, cs)
       Right subst -> apply subst p2
 
 tryAddRTypeInfo :: Program -> Either RTypeError Program
 tryAddRTypeInfo p@(Program decls _) = do
-  (cs, p) <- runInfer empty (inferProg p)
+  (cs, p) <- runInfer basicTEnv (inferProg p)
   subst <- runSolve cs
   return $ apply subst p
 
@@ -419,6 +438,20 @@ compose :: Subst -> Subst -> Subst
 runSolve :: [Constraint] -> Either RTypeError Subst
 runSolve cs = runIdentity $ runExceptT $ solver st
   where st = (emptySubst, cs)
+
+-- same logic as a constraint solver,
+-- except it skips but records all failing constraints
+-- and produces a somewhat-informative substitution
+simplify :: Unifier -> Unifier
+simplify (su, []) = (su, [])
+simplify (su, ((t1, t2): cs0)) =
+  case runIdentity $ runExceptT $ unifies t1 t2 of
+    -- can't simplify the t1, t2 constraint, put it in the unusable bin.
+    Left err -> addLeftoverConstraint (simplify (su, cs0)) (t1, t2)
+    Right newSubst -> simplify (newSubst `compose` su, apply newSubst cs0)
+  where
+    addLeftoverConstraint :: Unifier -> Constraint -> Unifier
+    addLeftoverConstraint (su, cs) cs2 = (su, cs2:cs)
 
 -- Unification solver
 solver :: Unifier -> Solve Subst
