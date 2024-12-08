@@ -177,7 +177,7 @@ showConstraint (a, b) = prettyRType a ++ " :==: " ++ prettyRType b
 
 --build the basic type environment: Take all invertible functions; ignore their inverses
 basicTEnv :: TEnv
-basicTEnv = TypeEnv $ Map.fromList $ map (\(name, FPair (FDecl (ty, _, _, _, _), _)) -> (name, toScheme ty)) globalFenv
+basicTEnv = TypeEnv $ Map.fromList $ map (\(name, FPair (FDecl (ty, _, _, _, _), _)) -> (name, ty)) globalFenv
   where
     -- plain RTypes as they exist in globalFEnv are implicitly forall'd. Make it explicit.
     toScheme :: RType -> Scheme
@@ -272,10 +272,11 @@ addTVarsEverywhere (Program decls nns) = do
       _ -> return $ getTypeInfo expr
 
 specialTreatment :: Expr -> Bool
-specialTreatment e = toStub e `elem` [StubConstant, StubLambda, StubVar, StubApply]
+specialTreatment e = toStub e `elem` [StubConstant, StubLambda, StubVar, StubApply, StubInjF]
 
 --TODO: Error on ambiguous InferenceRule
 infer :: Expr -> Infer (RType, [Constraint], Expr)
+--infer expr | trace (show expr ++ show (specialTreatment expr) ++ show (solvesSimply expr)) False = undefined
 infer expr
     | specialTreatment expr =
       --we're dealing with StubConstant here.
@@ -300,6 +301,9 @@ infer expr
           let argConstraint = (funcTy, argTy `TArrow` (rType ti))
           return (rType ti, [argConstraint] ++ c1 ++ c2, Apply ti funcExprTy argExprTy)
           --expr `usingScheme` (Forall [TV "a", TV "b"] (((TVarR $ TV "a") `TArrow` (TVarR $ TV "b")) `TArrow` (TVarR $ TV "a") `TArrow` (TVarR $ TV "b")))
+        e@(InjF ti name params) -> do
+          let Just (FPair (FDecl (scheme, _, _, _, _), _)) = lookup name globalFenv
+          e `usingScheme` scheme
     | solvesSimply expr =
         let
           plausibleAlgs = filter (checkExprMatches expr) allAlgorithms
