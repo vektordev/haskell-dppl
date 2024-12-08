@@ -14,7 +14,6 @@ module SPLL.Lang.Lang (
 , tMapHead
 , getRType
 , Name
-, Limits (..)
 , exprMap
 , prettyPrintProg
 , prettyPrintProgRTyOnly
@@ -23,7 +22,6 @@ module SPLL.Lang.Lang (
 , prettyPrintNoReq
 , prettyRType
 , getVFloat
-, checkLimits
 , WitnessedVars
 , getSubExprs
 , setSubExprs
@@ -76,15 +74,6 @@ toStub expr = case expr of
   Apply {}  -> StubApply
   (ReadNN _ _ _) -> StubReadNN
 
-vMarg :: Value
-vMarg = VRange (Limits Nothing Nothing)
-
-checkLimits :: Limits -> Bool
-checkLimits (Limits (Just (VFloat x)) (Just (VFloat y))) = x < y
-checkLimits (Limits (Just (VFloat _)) Nothing) = True
-checkLimits (Limits Nothing (Just (VFloat _))) = True
-checkLimits (Limits Nothing Nothing) = True
-checkLimits _ = False
 
 
 tInfoMap :: (a -> b) -> TypeInfo -> TypeInfo

@@ -151,7 +151,6 @@ data GenericValue a = VBool Bool
            | VList [GenericValue a]
            | VTuple (GenericValue a) (GenericValue a)
            | VBranch (GenericValue a) (GenericValue a) String
-           | VRange Limits
            | VThetaTree ThetaTree
            | VAnyList
            | VClosure [(String, a)] String a 
@@ -166,16 +165,10 @@ instance Functor GenericValue where
   fmap f (VList x) = VList (map (fmap f) x)
   fmap f (VTuple x y) = VTuple (fmap f x) (fmap f y)
   fmap f (VBranch x y s) = VBranch (fmap f x) (fmap f y) s
-  fmap _ (VRange x) = VRange x
   fmap _ (VThetaTree x) = VThetaTree x
   fmap _ VAnyList = VAnyList
   fmap f (VClosure e n ex) = VClosure (map (Data.Bifunctor.second f) e) n (f ex)
 
--- likelihood [vMarg, vAnyList] - likelihood [vMarg, vMarg, vAnylist]
---Nothing indicates low/high infinity.
-data Limits = Limits (Maybe Value) (Maybe Value)
-           deriving (Show, Eq, Ord)
-           
 
 data Tag = EnumRange (Value, Value)
            | EnumList [Value]
