@@ -142,6 +142,7 @@ instance Substitutable RType where
   apply _ TThetaTree = TThetaTree
   apply s (ListOf t) = ListOf $ apply s t
   apply s (Tuple t1 t2) = Tuple (apply s t1) (apply s t2)
+  apply s (TEither t1 t2) = TEither (apply s t1) (apply s t2)
   apply s (TArrow t1 t2) = apply s t1 `TArrow` apply s t2
   apply (Subst s) t@(TVarR a) = Map.findWithDefault t a s
   apply s (GreaterType t1 t2) = apply s t1 `GreaterType` apply s t2
@@ -150,6 +151,7 @@ instance Substitutable RType where
 
   ftv (ListOf t) = ftv t
   ftv (Tuple t1 t2) = Set.union (ftv t1) (ftv t2)
+  ftv (TEither t1 t2) = Set.union (ftv t1) (ftv t2)
   ftv (TVarR a)       = Set.singleton a
   ftv (t1 `TArrow` t2) = ftv t1 `Set.union` ftv t2
   ftv (t1 `GreaterType` t2) = ftv t1 `Set.union` ftv t2
@@ -177,7 +179,7 @@ showConstraint (a, b) = prettyRType a ++ " :==: " ++ prettyRType b
 
 --build the basic type environment: Take all invertible functions; ignore their inverses
 basicTEnv :: TEnv
-basicTEnv = TypeEnv $ Map.fromList $ map (\(name, FPair (FDecl (ty, _, _, _, _), _)) -> (name, ty)) globalFenv
+basicTEnv = TypeEnv $ Map.fromList $ map (\(name, FPair (FDecl {contract=ty}, _)) -> (name, ty)) globalFenv
   where
     -- plain RTypes as they exist in globalFEnv are implicitly forall'd. Make it explicit.
     toScheme :: RType -> Scheme
@@ -302,7 +304,7 @@ infer expr
           return (rType ti, [argConstraint] ++ c1 ++ c2, Apply ti funcExprTy argExprTy)
           --expr `usingScheme` (Forall [TV "a", TV "b"] (((TVarR $ TV "a") `TArrow` (TVarR $ TV "b")) `TArrow` (TVarR $ TV "a") `TArrow` (TVarR $ TV "b")))
         e@(InjF ti name params) -> do
-          let Just (FPair (FDecl (scheme, _, _, _, _), _)) = lookup name globalFenv
+          let Just (FPair (FDecl {contract=scheme}, _)) = lookup name globalFenv
           e `usingScheme` scheme
     | solvesSimply expr =
         let
@@ -492,6 +494,7 @@ unifies (TVarR v) t = v `bind` t
 unifies t (TVarR v) = v `bind` t
 unifies (TArrow t1 t2) (TArrow t3 t4) = unifyMany [t1, t2] [t3, t4]
 unifies (Tuple t1 t2) (Tuple t3 t4) = unifyMany [t1, t2] [t3, t4]
+unifies (TEither t1 t2) (TEither t3 t4) = unifyMany [t1, t2] [t3, t4]
 unifies t1 t2 = throwError $ UnificationFail t1 t2
 
 unifyMany :: [RType] -> [RType] -> Solve Subst

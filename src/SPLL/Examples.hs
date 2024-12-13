@@ -209,6 +209,12 @@ testDiceAdd = Program [ ("main", InjF makeTypeInfo "plusI" [(Var makeTypeInfo "d
                           (IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat (1/4)))) (Constant makeTypeInfo (VInt 3))
                             (IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat (1/3)))) (Constant makeTypeInfo (VInt 4))
                               (IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat (1/2)))) (Constant makeTypeInfo (VInt 5)) (Constant makeTypeInfo (VInt 6)))))))] []
+
+testLeft :: Program
+testLeft = Program [("main", (InjF makeTypeInfo "fromLeft" [InjF makeTypeInfo "left" [Constant makeTypeInfo $ VFloat 2]]))] []
+
+testEither :: Program
+testEither = Program [("main", IfThenElse makeTypeInfo (GreaterThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 0.5))) (InjF makeTypeInfo "left" [Uniform makeTypeInfo]) (InjF makeTypeInfo "right" [Constant makeTypeInfo (VInt 1)]))] []
                             
                             
 {-

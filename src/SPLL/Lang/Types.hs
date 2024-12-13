@@ -150,6 +150,7 @@ data GenericValue a = VBool Bool
            | VFloat Double
            | VList [GenericValue a]
            | VTuple (GenericValue a) (GenericValue a)
+           | VEither (Either (GenericValue a) (GenericValue a))
            | VBranch (GenericValue a) (GenericValue a) String
            | VThetaTree ThetaTree
            | VAnyList
@@ -164,6 +165,8 @@ instance Functor GenericValue where
   fmap _ (VFloat x) = VFloat x
   fmap f (VList x) = VList (map (fmap f) x)
   fmap f (VTuple x y) = VTuple (fmap f x) (fmap f y)
+  fmap f (VEither (Left x)) = VEither (Left (fmap f x))
+  fmap f (VEither (Right x)) = VEither (Right (fmap f x))
   fmap f (VBranch x y s) = VBranch (fmap f x) (fmap f y) s
   fmap _ (VThetaTree x) = VThetaTree x
   fmap _ VAnyList = VAnyList

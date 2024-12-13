@@ -121,6 +121,8 @@ evalAll expr@(IROp op leftV rightV)
   | isValue leftV && isValue rightV = IRConst (forceOp op (unval leftV) (unval rightV))
   | isValue leftV || isValue rightV = softForceLogic op leftV rightV
   | otherwise = expr 
+evalAll (IRUnaryOp op expr)
+  | isValue expr = IRConst (forceUnaryOp op (unval expr))
 evalAll (IRIf _ left right) | left == right = left
 evalAll x@(IRIf cond left right) =
   if isValue cond
@@ -194,6 +196,15 @@ forceOp OpGreaterThan (VFloat x) (VFloat y) = VBool (x > y)
 forceOp OpLessThan (VInt x) (VInt y) = VBool (x < y)
 forceOp OpLessThan (VFloat x) (VFloat y) = VBool (x < y)
 forceOp OpAnd (VBool x) (VBool y) = VBool (x && y)
+
+forceUnaryOp :: UnaryOperand -> IRValue -> IRValue
+forceUnaryOp OpAbs (VFloat x) = VFloat (abs x)
+forceUnaryOp OpAbs (VInt x) = VInt (abs x)
+forceUnaryOp OpLog (VFloat x) = VFloat (log x)
+forceUnaryOp OpExp (VFloat x) = VFloat (exp x)
+forceUnaryOp OpNeg (VFloat x) = VFloat (-x)
+forceUnaryOp OpNeg (VInt x) = VInt (-x)
+forceUnaryOp OpNot (VBool x) = VBool (not x)
 
 mkVariable :: String -> CompilerMonad  Varname
 mkVariable suffix = do
@@ -396,14 +407,14 @@ toIRProbability conf typeEnv (InjF _ name [param]) sample = do
   return (returnExpr, paramDim, paramBranches)
   where Just fPair = lookup name globalFenv   --TODO error handling if nor found
         FPair (_, [inv]) = fPair
-        FDecl (_, [v], _, invExpr, [(_, invDerivExpr)]) = inv
+        FDecl {inputVars=[v], body=invExpr, derivatives=[(_, invDerivExpr)]} = inv
 toIRProbability conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [param1, param2]) sample
   | extras `hasAlgorithm` "injF2Left" = do
   let Just fPair = lookup name globalFenv   --TODO error handling if not found
   let FPair (fwd, inversions) = fPair
-  let FDecl (_, [v2, v3], [v1], _, _) = fwd
-  let [invDecl] = filter (\(FDecl (_, _, [w1], _, _)) -> v3==w1) inversions   --This should only return one inversion
-  let FDecl (_, [x2, x3], _, invExpr, invDerivs) = invDecl
+  let FDecl{inputVars=[v2, v3], outputVars=[v1]} = fwd
+  let [invDecl] = filter (\(FDecl {outputVars=[w1]}) -> v3==w1) inversions   --This should only return one inversion
+  let FDecl {inputVars=[x2, x3], body=invExpr, derivatives=invDerivs} = invDecl
   let Just invDeriv = lookup v1 invDerivs
   leftExpr <- toIRGenerate typeEnv param1
   let (detVar, sampleVar) = if x2 == v2 then (x2, x3) else (x3, x2)
@@ -416,9 +427,9 @@ toIRProbability conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [pa
   | extras `hasAlgorithm` "injF2Right" = do
   let Just fPair = lookup name globalFenv   --TODO error handling if not found
   let FPair (fwd, inversions) = fPair
-  let FDecl (_, [v2, v3], [v1], _, _) = fwd
-  let [invDecl] = filter (\(FDecl (_, _, [w1], _, _)) -> v2==w1) inversions   --This should only return one inversion
-  let FDecl (_, [x2, x3], _, invExpr, invDerivs) = invDecl
+  let FDecl {inputVars=[v2, v3], outputVars=[v1]} = fwd
+  let [invDecl] = filter (\(FDecl {outputVars=[w1]}) -> v2==w1) inversions   --This should only return one inversion
+  let FDecl {inputVars=[x2, x3], body=invExpr, derivatives=invDerivs} = invDecl
   let Just invDeriv = lookup v1 invDerivs
   leftExpr <- toIRGenerate typeEnv param2
   let (detVar, sampleVar) = if x2 == v3 then (x2, x3) else (x3, x2)
@@ -437,10 +448,10 @@ toIRProbability conf typeEnv (InjF TypeInfo {tags=extras} name [left, right]) sa
 
   let Just fPair = lookup name globalFenv   --TODO error handling if not found
   let FPair (fwd, inversions) = fPair
-  let FDecl (_, [v2, v3], [v1], _, _) = fwd
+  let FDecl {inputVars=[v2, v3], outputVars=[v1]} = fwd
   -- We get the inversion to the right side
-  let [invDecl] = filter (\(FDecl (_, _, [w1], _, _)) -> v3==w1) inversions   --This should only return one inversion
-  let FDecl (_, [x2, x3], _, invExpr, _) = invDecl
+  let [invDecl] = filter (\(FDecl {outputVars=[w1]}) -> v3==w1) inversions   --This should only return one inversion
+  let FDecl {inputVars=[x2, x3], body=invExpr} = invDecl
 
   -- We now compute
   -- for each e in leftEnum:
@@ -629,7 +640,7 @@ toIRGenerate typeEnv (InjF _ name params) = do
   where
     Just fPair = lookup name globalFenv
     FPair (fwd, _) = fPair
-    FDecl (_, vars, _, fwdExpr, _) = fwd
+    FDecl {inputVars=vars, body=fwdExpr} = fwd
 toIRGenerate typeEnv (Var _ name) = do
   case lookup name typeEnv of
     -- Var is a function
@@ -786,14 +797,14 @@ toIRIntegrate conf typeEnv (InjF _ name [param]) low high = do  --TODO Multivari
   return (paramExpr, const0, paramBranches)
   where Just fPair = lookup name globalFenv   --TODO error handling if nor found
         FPair (_, [inv]) = fPair
-        FDecl (_, [v], _, invExpr, [(_, invDerivExpr)]) = inv
+        FDecl {inputVars=[v], body=invExpr, derivatives=[(_, invDerivExpr)]} = inv
 toIRIntegrate conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [param1, param2]) low high
   | extras `hasAlgorithm` "injF2Left" = do  --FIXME Left
   let Just fPair = lookup name globalFenv   --TODO error handling if not found
   let FPair (fwd, inversions) = fPair
-  let FDecl (_, [v2, v3], [v1], _, _) = fwd
-  let [invDecl] = filter (\(FDecl (_, _, [w1], _, _)) -> v3==w1) inversions   --This should only return one inversion
-  let FDecl (_, [x2, x3], _, invExpr, invDerivs) = invDecl
+  let FDecl {inputVars=[v2, v3], outputVars=[v1]} = fwd
+  let [invDecl] = filter (\(FDecl {outputVars=[w1]}) -> v3==w1) inversions   --This should only return one inversion
+  let FDecl {inputVars=[x2, x3], body=invExpr, derivatives=invDerivs} = invDecl
   let Just invDeriv = lookup v1 invDerivs
   leftExpr <- toIRGenerate typeEnv param1
   let (detVar, sampleVar) = if x2 == v2 then (x2, x3) else (x3, x2)
@@ -806,9 +817,9 @@ toIRIntegrate conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [para
   | extras `hasAlgorithm` "injF2Right" = do  --FIXME Left
   let Just fPair = lookup name globalFenv   --TODO error handling if not found
   let FPair (fwd, inversions) = fPair
-  let FDecl (_, [v2, v3], [v1], _, _) = fwd
-  let [invDecl] = filter (\(FDecl (_, _, [w1], _, _)) -> v2==w1) inversions   --This should only return one inversion
-  let FDecl (_, [x2, x3], _, invExpr, invDerivs) = invDecl
+  let FDecl {inputVars=[v2, v3], outputVars=[v1]} = fwd
+  let [invDecl] = filter (\(FDecl {outputVars=[w1]}) -> v2==w1) inversions   --This should only return one inversion
+  let FDecl {inputVars=[x2, x3], body=invExpr, derivatives=invDerivs} = invDecl
   let Just invDeriv = lookup v1 invDerivs
   leftExpr <- toIRGenerate typeEnv param2
   let (detVar, sampleVar) = if x2 == v3 then (x2, x3) else (x3, x2)
