@@ -35,7 +35,7 @@ doubleInv = FDecl (Forall [] (TArrow TFloat TFloat)) ["b"] ["a"] (IROp OpDiv (IR
 expFwd :: FDecl
 expFwd = FDecl (Forall [] (TArrow TFloat TFloat)) ["a"] ["b"] (IRUnaryOp OpExp (IRVar "a")) (IRConst (VBool True)) [("a", IRUnaryOp OpExp (IRVar "a"))]
 expInv :: FDecl
-expInv = FDecl (Forall [] (TArrow TFloat TFloat)) ["b"] ["a"] (IRUnaryOp OpLog (IRVar "b")) (IRConst (VBool True)) [("b", IROp OpDiv (IRConst (VFloat 1)) (IRVar "b"))]
+expInv = FDecl (Forall [] (TArrow TFloat TFloat)) ["b"] ["a"] (IRUnaryOp OpLog (IRVar "b")) (IROp OpGreaterThan (IRVar "b") (IRConst $ VFloat 0)) [("b", IROp OpDiv (IRConst (VFloat 1)) (IRVar "b"))]
 
 negFwd :: FDecl
 negFwd = FDecl (Forall [] (TArrow TFloat TFloat)) ["a"] ["b"] (IRUnaryOp OpNeg (IRVar "a")) (IRConst (VBool True)) [("a", IRConst (VFloat (-1)))]
@@ -45,12 +45,12 @@ negInv = FDecl (Forall [] (TArrow TFloat TFloat)) ["b"] ["a"] (IRUnaryOp OpNeg (
 leftFwd :: FDecl
 leftFwd = FDecl (Forall [TV "a", TV "b"] (TVarR (TV "a") `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b")))) ["a"] ["b"] (IRLeft (IRVar "a")) (IRConst (VBool True)) [("a", IRConst (VFloat 1))]
 fromLeftFwd :: FDecl
-fromLeftFwd = FDecl (Forall [TV "a", TV "b"] (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "a"))) ["b"] ["a"] (IRFromLeft (IRVar "b")) (IRConst (VBool True)) [("a", IRConst (VFloat 1))]
+fromLeftFwd = FDecl (Forall [TV "a", TV "b"] (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "a"))) ["b"] ["a"] (IRFromLeft (IRVar "b")) (IRIsLeft (IRVar "b")) [("a", IRConst (VFloat 1))]
 
 rightFwd :: FDecl
 rightFwd = FDecl (Forall [TV "a", TV "b"] (TVarR (TV "b") `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b")))) ["a"] ["b"] (IRRight (IRVar "a")) (IRConst (VBool True)) [("a", IRConst (VFloat 1))]
 fromRightFwd :: FDecl
-fromRightFwd = FDecl (Forall [TV "a", TV "b"] (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "b"))) ["b"] ["a"] (IRFromRight (IRVar "b")) (IRConst (VBool True)) [("a", IRConst (VFloat 1))]
+fromRightFwd = FDecl (Forall [TV "a", TV "b"] (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "b"))) ["b"] ["a"] (IRFromRight (IRVar "b")) (IRIsRight (IRVar "b")) [("a", IRConst (VFloat 1))]
 
 plusFwd :: FDecl
 plusFwd = FDecl (Forall [] (TFloat `TArrow` (TFloat `TArrow` TFloat))) ["a", "b"] ["c"] (IROp OpPlus (IRVar "a") (IRVar "b")) (IRConst (VBool True)) [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))]

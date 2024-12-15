@@ -85,6 +85,7 @@ correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat
                                (uniformIfProg, VFloat 0.5, [], (VFloat 0.5, VFloat 1)),
                                (constantProg, VFloat 2, [], (VFloat 1, VFloat 0)),
                                (uniformExp, VFloat $ exp 4.5, [], (VFloat $ 1 / exp 4.5, VFloat 1)),
+                               (uniformExp, VFloat (-1), [], (VFloat 0, VFloat 1)),
                                (testInjF, VFloat 1.5, [], (VFloat 0.5, VFloat 1)),
                                (testInjF2, VFloat 3, [], (VFloat 0.5, VFloat 1)),
                                (testTheta, VFloat 1.5, flatTree [1.5], (VFloat 1, VFloat 0)),
@@ -104,9 +105,11 @@ correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat
                                (testDiceAdd, VInt 2, [], (VFloat (1 / 36), VFloat 0)),
                                (testDiceAdd, VInt 1, [], (VFloat 0, VFloat 0)),
                                (gaussLists, VList [VFloat 0, VFloat 0, VFloat 0], [IRConst $ VThetaTree (ThetaTree [0.5, 1, 0] [])], (VFloat $ (normalPDF 0) * (normalPDF 0) * (normalPDF 0) / 16, VFloat 3)),
-                               (testLeft, VFloat 2, [], (VFloat 1.0, VFloat 0))]
-                               --(testEither, VEither (Left (VFloat 0.5)), [], (VFloat 0.5, VFloat 1)),
-                               --(testEither, VEither (Right (VFloat 1)), [], (VFloat 0.5, VFloat 0))]
+                               (testLeft, VFloat 2, [], (VFloat 1.0, VFloat 0)),
+                               (testLeft, VFloat 3, [], (VFloat 0, VFloat 0)),
+                               (testEither, VEither (Left (VFloat 0.5)), [], (VFloat 0.5, VFloat 1)),
+                               (testEither, VEither (Right (VInt 2)), [], (VFloat 0, VFloat 0)),
+                               (testEither, VEither (Right (VInt 1)), [], (VFloat 0.5, VFloat 0))]
 
                               --(testLambdaParameter, VFloat 10, [], VFloat 1.0)]
 
