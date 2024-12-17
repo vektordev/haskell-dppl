@@ -30,7 +30,7 @@ import SpecExamples
 import Control.Exception.Base (SomeException, try)
 import Test.QuickCheck.Monadic (monadicIO, run, assert)
 import Test.QuickCheck.Property (failed, reason)
-import Debug.Trace (trace)
+import Debug.Trace (trace, traceShowId, traceId)
 import SPLL.Lang.Lang (Value)
 import Control.Monad.Supply
 import Data.Foldable
@@ -42,6 +42,7 @@ import Data.Bifunctor (second)
 import SPLL.Parser
 import TestParser
 import TestInternals
+
 
 -- Generalizing over different compilation stages, we can fit all "this typing is what the compiler would find" cases.
 class Recompilable a where
@@ -72,9 +73,10 @@ normalPDF :: Double -> Double
 normalPDF x = (1 / sqrt (2 * pi)) * exp (-0.5 * x * x)
 
 normalCDF :: Double -> Double
-normalCDF x = (1/2)*(1 + erf(x/sqrt(2)))
-    
+normalCDF x = (1/2)*(1 + erf (x/sqrt (2)))
+
 correctProbValuesTestCases :: [(Program, IRValue, [IRExpr], (IRValue, IRValue))]
+--correctProbValuesTestCases = [(uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat 1))]
 correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat 1)),
                                (normalProg, VFloat 0.5, [], (VFloat $ normalPDF 0.5, VFloat 1)),
                                (uniformProgMult, VFloat (-0.25), [], (VFloat 2, VFloat 1)),
@@ -143,6 +145,9 @@ noTopKConfig = CompilerConfig Nothing False 0
 prop_CheckProbTestCases :: Property
 prop_CheckProbTestCases = forAll (elements correctProbValuesTestCases) checkProbTestCase
 
+prop_CheckProbTestCasesSample :: Property
+prop_CheckProbTestCasesSample = forAll (elements correctProbValuesTestCases) (testSamplingProb 0.05 10000 5)
+
 prop_CheckIntegralTestCases :: Property
 prop_CheckIntegralTestCases = forAll (elements correctIntegralValuesTestCases) checkIntegralTestCase
 
@@ -173,14 +178,14 @@ prop_TopK = ioProperty $ do
 checkProbTestCase :: (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
 checkProbTestCase (p, inp, params, (out, VFloat outDim)) = ioProperty $ do
   actualOutput <- evalRandIO $ irDensity p inp params
-  case actualOutput of 
+  case actualOutput of
     VTuple a (VFloat d) -> return $ a `reasonablyClose` out .&&. d === outDim
     _ -> return $ counterexample "Return type was no tuple" False
 
 checkIntegralTestCase :: (Program, IRValue, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
 checkIntegralTestCase (p, low, high, params, (out, outDim)) = ioProperty $ do
   actualOutput <- evalRandIO $ irIntegral p low high params
-  case actualOutput of 
+  case actualOutput of
     VTuple a aDim -> return $ a `reasonablyClose` out .&&. aDim === outDim
     _ -> return $ counterexample "Return type was no tuple" False
 
@@ -188,7 +193,7 @@ checkIntegralTestCase (p, low, high, params, (out, outDim)) = ioProperty $ do
 checkIntegralConverges :: (Program, IRValue, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
 checkIntegralConverges (p, VFloat a, VFloat b, params, _) = ioProperty $ do
   actualOutput <- evalRandIO $ irIntegral p (VFloat (-9999999)) (VFloat 9999999) params
-  case actualOutput of 
+  case actualOutput of
     VTuple a (VFloat _) -> return $ a `reasonablyClose` VFloat 1
     _ -> return $ counterexample "Return type was no tuple" False
 checkIntegralConverges _ = False ==> False
@@ -197,7 +202,7 @@ checkZeroWidthIntegral :: (Program, IRValue, IRValue, [IRExpr], IRValue) -> Prop
 checkZeroWidthIntegral (p, lower, _, params, _) = ioProperty $ do
   integralOutput <- evalRandIO $ irIntegral p lower lower params
   probOutput <- evalRandIO $ irDensity p lower params
-  case (integralOutput, probOutput) of 
+  case (integralOutput, probOutput) of
     (VTuple a (VFloat _), VTuple b (VFloat _)) -> return $ a `reasonablyClose` b
     _ -> return $ counterexample "Return type was no tuple" False
 
@@ -209,15 +214,15 @@ checkTopKInterprets (p, inp, params, _) = ioProperty $ do
 checkProbTestCasesWithBC :: (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
 checkProbTestCasesWithBC (p, inp, params, (out, VFloat outDim)) = ioProperty $ do
   actualOutput <- evalRandIO $ irDensityBC p inp params
-  case actualOutput of 
+  case actualOutput of
     VTuple a (VTuple (VFloat d) (VFloat _)) -> return $ a `reasonablyClose` out .&&. d === outDim
     _ -> return $ counterexample "Return type was no tuple" False
-    
+
 checkInjFEqual :: (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
 checkInjFEqual (p, inp, params, (_, _)) = ioProperty $ do
   actualOutput <- evalRandIO $ irDensityBC p inp params
   actualOutputInjF <- evalRandIO $ irDensityBC (preprocessToInjFProg p) inp params
-  case (actualOutput, actualOutputInjF) of 
+  case (actualOutput, actualOutputInjF) of
     (VTuple a aDim, VTuple b bDim) -> return $ a `reasonablyClose` b .&&. aDim === bDim
     _ -> return $ counterexample "Return type was no tuple" False
 
@@ -261,9 +266,17 @@ irIntegral p low high params = IRInterpreter.generateRand irEnv irEnv (lowExpr:h
         typedProg = addTypeInfo preAnnotated
         preAnnotated = annotateEnumsProg p
 
+irGen :: RandomGen g => Program -> [IRExpr] -> Rand g IRValue
+irGen p params = IRInterpreter.generateRand irEnv irEnv params irExpr
+  where Just irExpr = lookup "main_gen" irEnv
+        irEnv = envToIR noTopKConfig annotated
+        annotated = annotateAlgsProg typedProg
+        typedProg = addTypeInfo preAnnotated
+        preAnnotated = annotateEnumsProg p
+
 preprocessToInjFProg :: Program -> Program
-preprocessToInjFProg p@Program{functions=f} = p{functions=map (second preprocessToInjF) f} 
-        
+preprocessToInjFProg p@Program{functions=f} = p{functions=map (second preprocessToInjF) f}
+
 preprocessToInjF :: Expr -> Expr
 preprocessToInjF (PlusF t a b) = InjF t "plus" [preprocessToInjF a, preprocessToInjF b]
 preprocessToInjF (PlusI t a b) = InjF t "plusI" [preprocessToInjF a, preprocessToInjF b]
@@ -275,6 +288,70 @@ preprocessToInjF x = x
 reasonablyClose :: IRValue -> IRValue -> Property
 reasonablyClose (VFloat a) (VFloat b) = counterexample (show a ++ "/=" ++ show b) (property $ abs (a - b) <= 1e-5)
 reasonablyClose a b = a === b
+
+--Sample PDF against expected PDF. Retiry specific number of times with double the samples each time
+testSamplingProb :: Double -> Int -> Int -> (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
+testSamplingProb epsilon samples retries (p, VFloat inp, params, (VFloat out, VFloat outDim))  = ioProperty $ evalRandIO $ do
+  endlessSamples <- sequence (repeat (irGen p params >>= \(VFloat x) -> return x)) -- Generates an endless stream of samples
+  let samplesInRange = map (\x -> abs (x - inp) <= epsilon/2) endlessSamples
+  let countInside = foldr (\b acc -> if b then acc + 1 else acc) 0 (take samples samplesInRange)
+  let ratioInside = fromIntegral countInside / fromIntegral samples
+  let estimatePDF = ratioInside / (epsilon ** outDim) -- outDim is either 1 or 0 here. For dimensionality 0 we dont need to divide by epsilon
+  let valid = abs (estimatePDF - out) <= 0.1
+  if valid then
+    return $ property True
+  else
+    if retries > 0 then
+      return $ testSamplingProb epsilon (samples * 2) (retries - 1) (p, VFloat inp, params, (VFloat out, VFloat outDim))
+    else
+      return $ counterexample ("Sampled PDF is: " ++ show estimatePDF ++ ", but should be: " ++ show out) (property valid)
+testSamplingProb _ samples retries (p, VInt inp, params, (VFloat out, VFloat outDim))  = ioProperty $ evalRandIO $ do
+  endlessSamples <- sequence (repeat (irGen p params >>= \(VInt x) -> return x)) -- Generates an endless stream of samples
+  let samplesInRange = map (==inp) endlessSamples
+  let countInside = foldr (\b acc -> if b then acc + 1 else acc) 0 (take samples samplesInRange)
+  let ratioInside = fromIntegral countInside / fromIntegral samples
+  let estimatePDF = ratioInside
+  let valid = abs (estimatePDF - out) <= 0.1
+  if valid then
+    return $ property True
+  else
+    if retries > 0 then
+      return $ testSamplingProb 0 (samples * 2) (retries - 1) (p, VInt inp, params, (VFloat out, VFloat outDim))
+    else
+      return $ counterexample ("Sampled PDF is: " ++ show estimatePDF ++ ", but should be: " ++ show out) (property valid)
+testSamplingProb epsilon samples retries (p, VTuple (VFloat inp1) (VFloat inp2), params, (VFloat out, VFloat outDim)) = ioProperty $ evalRandIO $ do
+  endlessSamples <- sequence (repeat (irGen p params >>= \(VTuple (VFloat x1) (VFloat x2)) -> return (x1, x2))) -- Generates an endless stream of samples
+  let samplesInRange = map (\(x1, x2) -> (abs (x1 - inp1) <= epsilon/2) && (abs (x2 - inp2) <= epsilon/2)) endlessSamples   -- Use the maximum norm
+  let countInside = foldr (\b acc -> if b then acc + 1 else acc) 0 (take samples samplesInRange)
+  let ratioInside = fromIntegral countInside / fromIntegral samples
+  let estimatePDF = ratioInside / (epsilon ** outDim) -- The maximum norm creates a outDim-dimensional hypercube. In this boring case its either a point, a line or a square depending on the dimension
+  let valid = abs (estimatePDF - out) <= 0.1
+  if valid then
+    return $ property True
+  else
+    if retries > 0 then
+      return $ testSamplingProb epsilon (samples * 2) (retries - 1) (p, VTuple (VFloat inp1) (VFloat inp2), params, (VFloat out, VFloat outDim))
+    else
+      return $ counterexample ("Sampled PDF is: " ++ show estimatePDF ++ ", but should be: " ++ show out) (property valid)
+testSamplingProb epsilon samples retries (p, VList inp, params, (VFloat out, VFloat outDim))
+  | all isVFloat inp = ioProperty $ evalRandIO $ do
+  endlessSamples <- sequence (repeat (irGen p params >>= \(VList l) -> return l)) -- Generates an endless stream of samples
+  let samplesInRange = map (\l -> length l == length inp && all (\(VFloat x, VFloat y) -> abs (x - y) <= epsilon/2 ) (zip l inp)) endlessSamples   -- Use the maximum norm
+  let countInside = foldr (\b acc -> if b then acc + 1 else acc) 0 (take samples samplesInRange)
+  let ratioInside = fromIntegral countInside / fromIntegral samples
+  let estimatePDF = ratioInside / (epsilon ** outDim) -- The maximum norm creates a outDim-dimensional hypercube. In this boring case its either a point, a line or a square depending on the dimension
+  let valid = abs (estimatePDF - out) <= 0.1
+  if valid then
+    return $ property True
+  else
+    if retries > 0 then
+      return $ testSamplingProb epsilon (samples * 2) (retries - 1) (p, VList inp, params, (VFloat out, VFloat outDim))
+    else
+      return $ counterexample ("Sampled PDF is: " ++ show estimatePDF ++ ", but should be: " ++ show out) (property valid)
+testSamplingProb _ _ _ _ = False ==> False
+
+
+
 
 {-irInterpret :: RandomGen g => Program () Double -> [IRExpr] -> Rand g Value
 irInterpret p params = IRInterpreter.generate irEnv irEnv [] params main
