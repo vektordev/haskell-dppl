@@ -701,6 +701,7 @@ normalize (DScheme _ c body) = DScheme (map snd ord) (normcs c) (normtype body)
     fvcd (Right(PlusConstraint ty1 ty2):b) = fvOr ty1 ++ fvOr ty2 ++ fvcd b
     fvcd (Right(EnumPlusConstraint ty1 ty2):b) = fvOr ty1 ++ fvOr ty2 ++ fvcd b
     fvcd (Right(CompConstraint ty1 ty2):b) = fvOr ty1 ++ fvOr ty2 ++ fvcd b
+    fvcd (Right(LetInDConstraint ty):b) = fvOr ty ++ fvcd b
     fvcd [] = []
 
     normcs ((ty, dc): b) = (normtype ty, normdc dc):normcs b
@@ -708,7 +709,9 @@ normalize (DScheme _ c body) = DScheme (map snd ord) (normcs c) (normtype body)
 
     normdc ((Left ty):b) =  Left (normtype ty): normdc b
     normdc (Right(PlusConstraint ty1 ty2):b) = Right(PlusConstraint (normOr ty1) (normOr ty2)): normdc b
+    normdc (Right(EnumPlusConstraint ty1 ty2):b) = Right(EnumPlusConstraint (normOr ty1) (normOr ty2)): normdc b
     normdc (Right(CompConstraint ty1 ty2):b) = Right(CompConstraint (normOr ty1) (normOr ty2)): normdc b
+    normdc (Right(LetInDConstraint ty):b) = Right(LetInDConstraint (normOr ty)): normdc b
     normdc [] = []
 
     normOr (Left ty) = Left $ normtype ty
