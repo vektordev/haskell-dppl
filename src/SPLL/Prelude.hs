@@ -18,11 +18,17 @@ injF = InjF makeTypeInfo
 (#+#) :: Expr -> Expr -> Expr
 (#+#) = PlusF makeTypeInfo
 
+(#-#) :: Expr -> Expr -> Expr
+(#-#) a b = a #+# (neg b)
+
 (#<*>#) :: Expr -> Expr -> Expr
 (#<*>#) = MultI makeTypeInfo
 
 (#<+>#) :: Expr -> Expr -> Expr
 (#<+>#) = PlusI makeTypeInfo
+
+(#<->#) :: Expr -> Expr -> Expr
+(#<->#) a b = undefined
 
 neg :: Expr -> Expr
 neg = NegF makeTypeInfo
@@ -30,7 +36,10 @@ neg = NegF makeTypeInfo
 -- Variables
 
 letIn :: String -> Expr -> Expr -> Expr
-letIn = LetIn makeTypeInfo
+--letIn = LetIn makeTypeInfo
+-- We can not infer probabilities on letIns. So we rewrite them as lambdas
+-- We don't have full inference logic on lambdas yet, but we have none at all on LetIns
+letIn s val body = apply (s #-># body) val
 
 var :: String -> Expr
 var = Var makeTypeInfo
@@ -60,6 +69,16 @@ uniform = Uniform makeTypeInfo
 
 normal :: Expr
 normal = Normal makeTypeInfo
+
+bernoulli :: Double -> Expr
+bernoulli p = uniform #<# constF p
+
+binomial :: Int -> Double -> Expr
+binomial n p = ifThenElse (bernoulli p) (constI 1) (constI 1) #+# binomial (n-1) p
+
+dice :: Int -> Expr
+dice 1 = constI 1
+dice sides = ifThenElse (bernoulli (1/fromIntegral sides)) (constI sides)  (dice (sides-1))
 
 -- Parameters
 
@@ -99,5 +118,14 @@ tuple = TCons makeTypeInfo
 
 (#!#) :: Expr -> Expr
 (#!#) = Not makeTypeInfo
+
+-- Other
+
+-- This is a Z-Combinator
+-- TODO: Our typesystem is not ready for that yet 
+fix :: Expr
+fix = "f" #->#
+  apply ("u" #-># apply (var "f") ("n" #-># apply (apply (var "u") (var "u")) (var "n")))
+    ("v" #-># apply (var "f") ("n" #-># apply (apply (var "v") (var "v")) (var "n")))
 
 

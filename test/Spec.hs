@@ -42,6 +42,7 @@ import Data.Bifunctor (second)
 import SPLL.Parser
 import TestParser
 import TestInternals
+import SPLL.Prelude
 
 
 -- Generalizing over different compilation stages, we can fit all "this typing is what the compiler would find" cases.
@@ -105,6 +106,7 @@ correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat
                                (testDice, VInt 7, [], (VFloat 0, VFloat 0)),
                                (testDiceAdd, VInt 2, [], (VFloat (1 / 36), VFloat 0)),
                                (testDiceAdd, VInt 1, [], (VFloat 0, VFloat 0)),
+                               --(testFibonacci, VFloat 5, [IRConst $ VFloat 4], (VFloat 3, VFloat 0)),
                                (gaussLists, VList [VFloat 0, VFloat 0, VFloat 0], [IRConst $ VThetaTree (ThetaTree [0.5, 1, 0] [])], (VFloat $ (normalPDF 0) * (normalPDF 0) * (normalPDF 0) / 16, VFloat 3))]
 
                               --(testLambdaParameter, VFloat 10, [], VFloat 1.0)]

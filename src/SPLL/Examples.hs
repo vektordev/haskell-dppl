@@ -114,10 +114,10 @@ testCallArg :: Program
 testCallArg = Program [("unif", "x" #-># (var "x" #+# uniform)), ("main", apply (var "unif") (constF 3))] []
 
 testNeg :: Expr
-testNeg = NegF makeTypeInfo uniform
+testNeg = neg uniform
 
 testNegFail :: Expr
-testNegFail = NegF makeTypeInfo (PlusF makeTypeInfo uniform uniform)
+testNegFail = neg (uniform #+# uniform)
 
 testInjF :: Program
 testInjF = Program [("main", injF "double" [uniform])] []
@@ -135,7 +135,7 @@ testPlus3 :: Program
 testPlus3 = Program [("main", letIn "a" uniform (var "a" #+# var "a"))] []
 
 testTopK :: Program
-testTopK = Program [("main", ifThenElse (GreaterThan makeTypeInfo uniform (constF 0.05)) (constF 1) (constF 0))] []
+testTopK = Program [("main", ifThenElse (bernoulli 0.95) (constF 1) (constF 0))] []
 
 testTheta :: Program
 testTheta = Program [("main", "thetas" #-># theta (var "thetas") 0)] []
@@ -167,13 +167,13 @@ testLetIn = Program [("main", letIn "u" uniform (var "u" #+# constF 1))] []
 
 testRecursion :: Program
 testRecursion = Program [("main", apply (var "rec") (constF 8)),
-                         ("rec", "x" #-># ifThenElse (var "x" #># constF 1) (constF 3 #*# apply (var "rec") ((var "x") #*# (constF 0.5))) uniform)] []
+                         ("rec", "x" #-># ifThenElse (var "x" #># constF 1) (constF 3 #*# apply (var "rec") (var "x" #*# constF 0.5)) uniform)] []
 
 testNN :: Program
 testNN = Program [("main", mNistAddExpr)] [("classifyMNist", TInt, EnumList $ map VInt [0,1,2,3,4,5,6,7,8,9])]
 
 mNistAddExpr :: Expr
-mNistAddExpr = "im1" #-># Lambda makeTypeInfo "im2" (ReadNN makeTypeInfo "classifyMNist" (var "im1") #+# ReadNN makeTypeInfo "classifyMNist" (var "im2"))
+mNistAddExpr = "im1" #-># ("im2" #-># (ReadNN makeTypeInfo "classifyMNist" (var "im1") #+# ReadNN makeTypeInfo "classifyMNist" (var "im2")))
 
 gaussLists :: Program
 gaussLists = Program [("main", "thetas" #->#
@@ -187,25 +187,22 @@ testTopLevelLambda :: Program
 testTopLevelLambda = Program [("main", "a" #-># (var "a" #+# uniform))] []
 
 testDim :: Program
-testDim = Program [("main", ifThenElse (GreaterThan makeTypeInfo uniform (constF 0.5)) (uniform #*# constF 2) (constF 3))] []
+testDim = Program [("main", ifThenElse (bernoulli 0.5) (uniform #*# constF 2) (constF 3))] []
 
 testCoin :: Program
-testCoin = Program [("main", ifThenElse (LessThan makeTypeInfo uniform (constF (1/2))) (constI 1) (constI 2))] []
+testCoin = Program [("main", ifThenElse (bernoulli 0.5) (constI 1) (constI 2))] []
 
 testDice :: Program
-testDice = Program [("main", ifThenElse (LessThan makeTypeInfo uniform (constF (1/6))) (constI 1)
-                      (ifThenElse (LessThan makeTypeInfo uniform (constF (1/5))) (constI 2)
-                        (ifThenElse (LessThan makeTypeInfo uniform (constF (1/4))) (constI 3)
-                          (ifThenElse (LessThan makeTypeInfo uniform (constF (1/3))) (constI 4)
-                            (ifThenElse (LessThan makeTypeInfo uniform (constF (1/2))) (constI 5) (constI 6))))))] []
+testDice = Program [("main", dice 6)] []
 
 testDiceAdd :: Program
 testDiceAdd = Program [ ("main", injF "plusI" [var "dice", var "dice"]),
-                        ("dice", ifThenElse (LessThan makeTypeInfo uniform (constF (1/6))) (constI 1)
-                        (ifThenElse (LessThan makeTypeInfo uniform (constF (1/5))) (constI 2)
-                          (ifThenElse (LessThan makeTypeInfo uniform (constF (1/4))) (constI 3)
-                            (ifThenElse (LessThan makeTypeInfo uniform (constF (1/3))) (constI 4)
-                              (ifThenElse (LessThan makeTypeInfo uniform (constF (1/2))) (constI 5) (constI 6))))))] []
+                        ("dice", dice 6)] []
+
+-- Not working
+testFibonacci :: Program
+testFibonacci = Program [ ("main","idx" #-># apply (apply fix (var "fibonacci")) (var "idx")),
+                          ("fibonacci", "fib" #-># ("n" #-># ifThenElse (var "n" #<# constF 2) (var "n") (apply (var "fib") (var "n" #-# constF 1) #+# apply (var "fib") (var "n" #-# constF 2))) )] []
 
 
 {-
