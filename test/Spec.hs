@@ -77,7 +77,7 @@ normalCDF :: Double -> Double
 normalCDF x = (1/2)*(1 + erf (x/sqrt (2)))
 
 correctProbValuesTestCases :: [(Program, IRValue, [IRExpr], (IRValue, IRValue))]
---correctProbValuesTestCases = [(uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat 1))]
+--correctProbValuesTestCases = [(testDiceAdd, VInt 2, [], (VFloat (1 / 36), VFloat 0))]
 correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat 1)),
                                (normalProg, VFloat 0.5, [], (VFloat $ normalPDF 0.5, VFloat 1)),
                                (uniformProgMult, VFloat (-0.25), [], (VFloat 2, VFloat 1)),

@@ -7,7 +7,7 @@ import SPLL.Typing.Typing
 import SPLL.Typing.RType
 import PredefinedFunctions
 import Control.Monad.Supply
-import SPLL.Typing.PType 
+import SPLL.Typing.PType
 import SPLL.InferenceRule (algName)
 import Debug.Trace
 import Data.Maybe
@@ -44,7 +44,7 @@ fixedPointIteration f x = if fx == x then x else fixedPointIteration f fx
   where fx = f x
 
 optimize :: IRExpr -> IRExpr
-optimize = irMap (evalAll . applyConstant)
+optimize = irMap (optimizeCommonSubexpr . evalAll . applyConstant)
 --TODO: We can also optimize index magic, potentially here. i.e. a head tail tail x can be simplified.
 --TODO: Unary operators
 
@@ -56,23 +56,23 @@ applyConstant x = x
 
 evalAll :: IRExpr -> IRExpr
 -- Associative Addition
-evalAll (IROp OpPlus leftV (IROp OpPlus rightV1 rightV2)) 
+evalAll (IROp OpPlus leftV (IROp OpPlus rightV1 rightV2))
   | isValue leftV && isValue rightV1 = IROp OpPlus (IRConst (forceOp OpPlus (unval leftV) (unval rightV1))) rightV2   -- a + (b + c) = (a + b) + c
   | isValue leftV && isValue rightV2 = IROp OpPlus (IRConst (forceOp OpPlus (unval leftV) (unval rightV2))) rightV1   -- a + (b + c) = b + (a + c)
-evalAll (IROp OpPlus (IROp OpPlus leftV1 leftV2) rightV ) 
+evalAll (IROp OpPlus (IROp OpPlus leftV1 leftV2) rightV )
   | isValue leftV1 && isValue rightV = IROp OpPlus (IRConst (forceOp OpPlus (unval leftV1) (unval rightV))) leftV2   -- a + (b + c) = (a + b) + c
   | isValue leftV2 && isValue rightV = IROp OpPlus (IRConst (forceOp OpPlus (unval leftV2) (unval rightV))) leftV1   -- a + (b + c) = b + (a + c)
 -- Associative Multiplication
-evalAll (IROp OpMult leftV (IROp OpMult rightV1 rightV2)) 
+evalAll (IROp OpMult leftV (IROp OpMult rightV1 rightV2))
   | isValue leftV && isValue rightV1 = IROp OpMult (IRConst (forceOp OpMult (unval leftV) (unval rightV1))) rightV2   -- a * (b * c) = (a * b) * c
   | isValue leftV && isValue rightV2 = IROp OpMult (IRConst (forceOp OpMult (unval leftV) (unval rightV2))) rightV1   -- a * (b * c) = (a * c) * b
-evalAll (IROp OpMult (IROp OpMult leftV1 leftV2) rightV ) 
+evalAll (IROp OpMult (IROp OpMult leftV1 leftV2) rightV )
   | isValue leftV1 && isValue rightV = IROp OpMult (IRConst (forceOp OpMult (unval leftV1) (unval rightV))) leftV2   -- a + (b + c) = (a + b) + c
   | isValue leftV2 && isValue rightV = IROp OpMult (IRConst (forceOp OpMult (unval leftV2) (unval rightV))) leftV1   -- a + (b + c) = b + (a + c)
 evalAll expr@(IROp op leftV rightV)
   | isValue leftV && isValue rightV = IRConst (forceOp op (unval leftV) (unval rightV))
   | isValue leftV || isValue rightV = softForceLogic op leftV rightV
-  | otherwise = expr 
+  | otherwise = expr
 evalAll (IRIf _ left right) | left == right = left
 evalAll x@(IRIf cond left right) =
   if isValue cond
@@ -95,11 +95,11 @@ evalAll ex@(IRLetIn name val scope)
   | otherwise = ex
 evalAll (IRTCons (IRLambda n a) (IRLambda m b)) | n == m = IRLambda n (IRTCons a b)
 evalAll (IRDensity IRNormal (IRConst (VFloat x))) = IRConst (VFloat ((1 / sqrt (2 * pi)) * exp (-0.5 * x * x)))
-evalAll (IRCumulative IRNormal (IRConst (VFloat x))) = IRConst (VFloat ((1/2) * (1 + erf(x/sqrt(2)))))
+evalAll (IRCumulative IRNormal (IRConst (VFloat x))) = IRConst (VFloat ((1/2) * (1 + erf (x/sqrt (2)))))
 evalAll (IRDensity IRUniform (IRConst (VFloat x))) = IRConst (VFloat (if x >= 0 && x <= 1 then 1 else 0))
 evalAll (IRCumulative IRUniform (IRConst (VFloat x))) = IRConst (VFloat (if x < 0 then 0 else if x > 1 then 1 else x))
 evalAll x = x
-  
+
 countUses :: String -> IRExpr -> Int
 countUses var (IRVar a) | a == var = 1
 countUses var expr = sum (map (countUses var) (getIRSubExprs expr))
@@ -111,7 +111,7 @@ isSimple (IRConst a) = True
 isSimple _ = False
 
 replaceAll :: IRExpr -> IRExpr -> IRExpr -> IRExpr
-replaceAll find replaceWith scope = irMap (replace find replaceWith) scope
+replaceAll find replaceWith = irMap (replace find replaceWith)
 
 replace :: Eq p => p -> p -> p -> p
 replace find replace' expr = if find == expr then replace' else expr
@@ -146,3 +146,29 @@ forceOp OpGreaterThan (VFloat x) (VFloat y) = VBool (x > y)
 forceOp OpLessThan (VInt x) (VInt y) = VBool (x < y)
 forceOp OpLessThan (VFloat x) (VFloat y) = VBool (x < y)
 forceOp OpAnd (VBool x) (VBool y) = VBool (x && y)
+
+exprSize :: IRExpr -> Int
+exprSize expr | null (getIRSubExprs expr) = 1
+exprSize expr = sum (map exprSize (getIRSubExprs expr))
+
+numOccurances :: IRExpr -> IRExpr -> Int
+numOccurances ref expr | ref == expr = 1
+numOccurances ref expr = sum (map (numOccurances ref) (getIRSubExprs expr))
+
+findCommonSubexpr :: IRExpr -> IRExpr -> [IRExpr]
+findCommonSubexpr _ ref | exprSize ref < 3 = []
+findCommonSubexpr _ (IRLambda _ _) = []
+findCommonSubexpr fullScope ref | numOccurances ref fullScope >= 2 = [ref]
+findCommonSubexpr fullScope ref = concatMap (findCommonSubexpr fullScope) (getIRSubExprs ref)
+-- FIXME random distributions are not equal
+
+optimizeCommonSubexpr :: IRExpr -> IRExpr
+optimizeCommonSubexpr (IRLambda n b) = IRLambda n (optimizeCommonSubexpr b)
+optimizeCommonSubexpr (IRLetIn n v b) = IRLetIn n v (optimizeCommonSubexpr b)
+optimizeCommonSubexpr expr = letInBlock
+  where
+    commonSubs = findCommonSubexpr expr expr
+    optimNames = map (\i -> "opt" ++ show i) [0..(length commonSubs - 1)]
+    namedCommonSubs = zip commonSubs optimNames
+    replacedBody = foldr (\(sub, name) body -> replaceAll sub (IRVar name) body) expr namedCommonSubs
+    letInBlock = foldr (\(sub, name) block -> IRLetIn name sub block) replacedBody namedCommonSubs
