@@ -45,13 +45,13 @@ instance Arbitrary Expr where
 genExpr :: Int -> Gen Expr
 genExpr 0 = oneof [
   Constant makeTypeInfo <$> arbitrary,
-  Var makeTypeInfo <$> genIdentifier
+  Var makeTypeInfo <$> genValidIdentifier
   ]
 genExpr n = oneof [
   genExpr 0,
   Apply makeTypeInfo <$> genExpr (n `div` 2) <*> genExpr (n `div` 2),
   IfThenElse makeTypeInfo <$> genExpr (n `div` 3) <*> genExpr (n `div` 3) <*> genExpr (n `div` 3),
-  Lambda makeTypeInfo <$> genIdentifier <*> genExpr (n-1)
+  Lambda makeTypeInfo <$> genValidIdentifier <*> genExpr (n-1)
   ]
 
 -- Additional Arbitrary instances
@@ -65,16 +65,16 @@ instance Arbitrary Program where
 
 genFunctionDecl :: Gen FnDecl
 genFunctionDecl = do
-  name <- genIdentifier
+  name <- genValidIdentifier
   numArgs <- choose (0, 3)  -- reasonable limit for test cases
-  args <- vectorOf numArgs genIdentifier
+  args <- vectorOf numArgs genValidIdentifier
   body <- arbitrary
   let expr = foldr (Lambda makeTypeInfo) body args
   return (name, expr)
 
 genNeuralDecl :: Gen NeuralDecl
 genNeuralDecl = do
-  name <- genIdentifier
+  name <- genValidIdentifier
   -- For now just using TInt, could expand to arbitrary RType if needed
   values <- listOf1 (VInt <$> arbitrary)
   return (name, TInt, EnumList values)
