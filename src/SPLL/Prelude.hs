@@ -2,6 +2,12 @@ module SPLL.Prelude where
 
 import SPLL.Lang.Lang
 import SPLL.Lang.Types (makeTypeInfo, GenericValue (..))
+import SPLL.IntermediateRepresentation
+import SPLL.Analysis
+import SPLL.Typing.Infer (addTypeInfo)
+import IRInterpreter (generateRand, generateDet)
+import Control.Monad.Random (Rand, RandomGen)
+import SPLL.IRCompiler
 
 -- Flow control
 ifThenElse :: Expr -> Expr -> Expr -> Expr
@@ -128,4 +134,38 @@ fix = "f" #->#
   apply ("u" #-># apply (var "f") ("n" #-># apply (apply (var "u") (var "u")) (var "n")))
     ("v" #-># apply (var "f") ("n" #-># apply (apply (var "v") (var "v")) (var "n")))
 
+
+compile :: CompilerConfig -> Program -> [(String, IRExpr)]
+compile conf p = do
+  let preAnnotated = annotateEnumsProg p
+  let typed = addTypeInfo preAnnotated
+  let annotated = annotateAlgsProg typed
+  envToIR conf annotated
+
+runGen :: (RandomGen g) => CompilerConfig -> Program -> [IRValue] -> Rand g IRValue
+runGen conf p args = do
+  let compiled = compile conf p
+  let (Just gen) = lookup "main_gen" compiled
+  let constArgs = map IRConst args
+  generateRand compiled compiled constArgs gen
+
+runProb :: CompilerConfig -> Program -> [IRValue] -> IRValue -> IRValue
+runProb conf p args x = do
+  let compiled = compile conf p
+  let (Just prob) = lookup "main_prob" compiled
+  let constArgs = map IRConst (x:args)
+  let val = generateDet compiled compiled constArgs prob
+  case val of
+    Right v -> v
+    Left err -> error err
+
+runInteg :: CompilerConfig -> Program -> [IRValue] -> IRValue -> IRValue -> IRValue
+runInteg conf p args low high = do
+  let compiled = compile conf p
+  let (Just integ) = lookup "main_integ" compiled
+  let constArgs = map IRConst (low:high:args)
+  let val = generateDet compiled compiled constArgs integ
+  case val of
+    Right v -> v
+    Left err -> error err
 
