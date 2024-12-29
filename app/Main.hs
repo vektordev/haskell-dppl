@@ -81,7 +81,7 @@ transpile options = do
   writeOutputFile (outputFile options) transpiled
 
 parseProgram :: FilePath -> IO Program
-parseProgram path = return testLambdaParameter
+--parseProgram path = return testLambdaParameter
 parseProgram path = do
   content <- readFile path
   let maybeError = tryParseProgram path content
