@@ -10,15 +10,32 @@ import Data.Char (toLower)
 import SPLL.Parser
 import System.Exit (exitFailure)
 import Text.Megaparsec.Error (errorBundlePretty)
+import SPLL.Lang.Types (Value(..), GenericValue (..))
+import Text.Read
+import SPLL.Prelude (runProb, runInteg, runGen)
+import Control.Monad.Random (randomIO, evalRandIO)
 
-data Opts = Opts {
+data GlobalOpts = GlobalOpts {
   inputFile :: String,
-  outputFile :: String,
-  language :: Language,
   verbosity :: Int,
   countBranches :: Bool,
-  topKCutoff :: Maybe Double
-} deriving Show
+  topKCutoff :: Maybe Double,
+  commandOpts :: CommandOpts
+}
+
+data CommandOpts =
+  CompileOpts {
+    outputFile :: String,
+    language :: Language
+  }
+  | GenerateOpts
+  | ProbabilityOpts{
+    pos :: IRValue
+  }
+  | IntegrateOpts {
+    low :: IRValue,
+    high :: IRValue
+  } deriving Show
 
 readLanguage :: ReadM Language
 readLanguage = str >>= \s -> case map toLower s of
@@ -30,27 +47,27 @@ readLanguage = str >>= \s -> case map toLower s of
   "jl" -> return Julia
   "j" -> return Julia
   _ -> readerError "Only python or julia are supported as languages"
-  
+
 verbosityParser :: Parser Int
 verbosityParser = length <$> many (flag' () (short 'v' <> help "Increases verbosity"))
 
-parseOpts :: Parser Opts
-parseOpts = Opts
+readValue :: ReadM IRValue
+readValue = eitherReader $ \s -> 
+  case asum [
+        VInt <$> readMaybe s,
+        VFloat <$> readMaybe s,
+        VBool <$> readMaybe s
+      ] of
+    Just val -> Right val
+    Nothing -> Left "Could not parse value"
+
+parseGlobalOpts :: Parser GlobalOpts
+parseGlobalOpts = GlobalOpts
         <$> strOption
             ( long "inputFile"
             <> short 'i'
             <> metavar "INPUT_FILE"
             <> help "Input file to read the source code from")
-        <*> strOption
-            ( long "outputFile"
-            <> short 'o'
-            <> metavar "OUTPUT_FILE"
-            <> help "Output file the transpiled code is written into")
-        <*> option readLanguage
-            ( long "language"
-            <> short 'l'
-            <> metavar "LANG"
-            <> help "Language the program is transpiled to. Either python or julia")
         <*> verbosityParser
         <*> switch
             ( long "countBranches"
@@ -61,6 +78,48 @@ parseOpts = Opts
             <> short 'k'
             <> help "Probabilities lower than the cutoff will not be considered. Range from 0-1"
             <> metavar "CUTOFF" ))
+        <*> hsubparser (
+          command "compile" (info parseCompileOpts (progDesc "Compiles the program with inference interface into target language"))
+          <> command "generate" (info parseGenerateOpts (progDesc "Runs the generate pass of the program"))
+          <> command "probability" (info parseProbabilityOpts (progDesc "Runs probabilistic inference on the program. Returns the probability of a given value to be the output of the program"))
+          <> command "integrate" (info parseIntegrateOpts (progDesc "Runs probabilistic inference on the program. Returns the probability of the program output to be in the given bounds"))
+        )
+
+parseCompileOpts :: Parser CommandOpts
+parseCompileOpts = CompileOpts
+        <$> strOption
+            ( long "outputFile"
+            <> short 'o'
+            <> metavar "OUTPUT_FILE"
+            <> help "Output file the transpiled code is written into")
+        <*> option readLanguage
+            ( long "language"
+            <> short 'l'
+            <> metavar "LANG"
+            <> help "Language the program is transpiled to. Either python or julia")
+
+parseGenerateOpts :: Parser CommandOpts
+parseGenerateOpts = pure GenerateOpts
+
+parseProbabilityOpts :: Parser CommandOpts
+parseProbabilityOpts = ProbabilityOpts
+        <$> option readValue
+            ( short 'x'
+            <> metavar "POSTERIOR"
+            <> help "Posterior value to calculate inference for")
+
+parseIntegrateOpts :: Parser CommandOpts
+parseIntegrateOpts = IntegrateOpts
+        <$> option readValue
+            ( long "low"
+            <> short 'l'
+            <> metavar "LOW"
+            <> help "Lower bound of the integral")
+        <*> option readValue
+            ( long "high"
+            <> short 'h'
+            <> metavar "HIGH"
+            <> help "Upper bound of the integral")
 
 -- Entry point for the program, parse CLI arguments and pass execution to transpile
 main :: IO ()
@@ -68,17 +127,29 @@ main :: IO ()
 --main = testParse
 main = transpile =<< execParser opts
          where
-           opts = info (parseOpts <**> helper)
+           opts = info (parseGlobalOpts <**> helper)
              ( fullDesc
-            <> progDesc "Print a greeting for TARGET"
-            <> header "hello - a test for optparse-applicative" )
+            <> progDesc "Compiles or computes probabilistic programs"
+            <> header "Haskell DPPL" )
 
-transpile :: Opts -> IO ()
-transpile options = do
-  print options
-  prog <- parseProgram (inputFile options)
-  transpiled <- codeGenToLang (language options) (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = Main.countBranches options, topKThreshold = topKCutoff options, verbose=verbosity options}) prog
-  writeOutputFile (outputFile options) transpiled
+transpile :: GlobalOpts -> IO ()
+transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options}) = do
+  prog <- parseProgram inFile
+  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb})
+  case options of
+    CompileOpts{language=lang, outputFile=outFile} -> do
+      transpiled <- codeGenToLang lang conf prog
+      writeOutputFile outFile transpiled
+    GenerateOpts -> do
+      -- TODO: Nicer Output
+      val <- evalRandIO (runGen conf prog [])
+      print ("X=" ++ show val)
+    ProbabilityOpts{pos=x} ->
+      -- TODO: Nicer Output
+      print ("p(X="++ show x ++ ")=" ++ show (runProb conf prog [] x))
+    IntegrateOpts{low=l, high=h} ->
+      -- TODO: Nicer Output
+      print ("p("++ show l ++ "<= X <=" ++ show h ++ ")=" ++ show (runInteg conf prog [] l h))
 
 parseProgram :: FilePath -> IO Program
 --parseProgram path = return testLambdaParameter
@@ -89,7 +160,7 @@ parseProgram path = do
     Left err -> do
       putStrLn "### Parse Error ###"
       putStrLn (errorBundlePretty err)
-      exitFailure 
+      exitFailure
     Right prog -> return prog
 
 writeOutputFile :: String -> String -> IO()
