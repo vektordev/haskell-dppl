@@ -44,7 +44,7 @@ fixedPointIteration f x = if fx == x then x else fixedPointIteration f fx
   where fx = f x
 
 optimize :: IRExpr -> IRExpr
-optimize = irMap (optimizeCommonSubexpr . evalAll . applyConstant)
+optimize = irMap ({-optimizeCommonSubexpr .-} evalAll . applyConstant)
 --TODO: We can also optimize index magic, potentially here. i.e. a head tail tail x can be simplified.
 --TODO: Unary operators
 
