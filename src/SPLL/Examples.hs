@@ -172,6 +172,10 @@ testRecursion = Program [("main", apply (var "rec") (constF 8)),
 testNN :: Program
 testNN = Program [("main", mNistAddExpr)] [("classifyMNist", TInt, EnumList $ map VInt [0,1,2,3,4,5,6,7,8,9])]
 
+testDimProb :: Program
+testDimProb = Program [("main", IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 0.4))) (Constant makeTypeInfo $ VFloat 0.5) (Normal makeTypeInfo))] []
+
+
 mNistAddExpr :: Expr
 mNistAddExpr = "im1" #-># ("im2" #-># (ReadNN makeTypeInfo "classifyMNist" (var "im1") #+# ReadNN makeTypeInfo "classifyMNist" (var "im2")))
 
