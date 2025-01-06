@@ -169,6 +169,28 @@ instance Functor GenericValue where
   fmap _ VAnyList = VAnyList
   fmap f (VClosure e n ex) = VClosure (map (Data.Bifunctor.second f) e) n (f ex)
 
+isVInt, isVBool, isVSymbol, isVFloat, isVList, isVTuple, isVBranch, isVThetaTree, isVAnyList, isVClosure :: GenericValue a -> Bool
+isVInt (VInt _) = True
+isVInt _ = False
+isVBool (VBool _) = True
+isVBool _ = False
+isVSymbol (VSymbol _) = True
+isVSymbol _ = False
+isVFloat (VFloat _) = True
+isVFloat _ = False
+isVList (VList _) = True
+isVList _ = False
+isVTuple (VTuple _ _) = True
+isVTuple _ = False
+isVBranch (VBranch _ _ _) = True
+isVBranch _ = False
+isVThetaTree (VThetaTree _) = True
+isVThetaTree _ = False
+isVAnyList (VAnyList) = True
+isVAnyList _ = False
+isVClosure (VClosure _ _ _) = True
+isVClosure _ = False
+
 
 data Tag = EnumRange (Value, Value)
            | EnumList [Value]

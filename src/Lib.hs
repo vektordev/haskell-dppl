@@ -147,7 +147,7 @@ codeGenToLang lang conf prog = do
   let preAnnotated = annotateEnumsProg prog
   doVerbose 2 conf (putStrLn "\n\n=== Annotated Program (1) ===\n" >> pPrint preAnnotated)
 
-  let typed = addTypeInfo prog
+  let typed = addTypeInfo preAnnotated
   doVerbose 2 conf (putStrLn "\n\n=== Typed Program ===\n" >> pPrint typed)
 
   let annotated = annotateAlgsProg typed

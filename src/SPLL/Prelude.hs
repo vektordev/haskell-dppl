@@ -1,33 +1,74 @@
 module SPLL.Prelude where
 
 import SPLL.Lang.Lang
-import SPLL.Lang.Types (makeTypeInfo)
-{-
-class (Num b, Show b) => Const a where
-  value :: a -> Value b
-  const :: a -> Expr () b
-  const x = Constant () (value x)
+import SPLL.Lang.Types (makeTypeInfo, GenericValue (..))
+import SPLL.IntermediateRepresentation
+import SPLL.Analysis
+import SPLL.Typing.Infer (addTypeInfo)
+import IRInterpreter (generateRand, generateDet)
+import Control.Monad.Random (Rand, RandomGen)
+import SPLL.IRCompiler
 
-instance Const Bool where
-  value bl = VBool bl
+-- Flow control
+ifThenElse :: Expr -> Expr -> Expr -> Expr
+ifThenElse = IfThenElse makeTypeInfo
 
---instance Const Float where
---  const bl = Constant () (VFloat bl)
+injF :: String -> [Expr] -> Expr
+injF = InjF makeTypeInfo
 
-instance Const Int where
-  value i = VInt i
+--Arithmetic
 
-instance (Const a) => Const [a] where
-  value lst = VList (map value lst)
--}
-ite :: Expr -> Expr -> Expr -> Expr
-ite = IfThenElse makeTypeInfo
+(#*#) :: Expr -> Expr -> Expr
+(#*#) = MultF makeTypeInfo
 
-(>=) :: Expr -> Expr -> Expr
-(>=) = GreaterThan makeTypeInfo
+(#+#) :: Expr -> Expr -> Expr
+(#+#) = PlusF makeTypeInfo
 
-theta :: Int -> Expr
-theta = undefined -- ThetaI makeTypeInfo 
+(#-#) :: Expr -> Expr -> Expr
+(#-#) a b = a #+# (neg b)
+
+(#<*>#) :: Expr -> Expr -> Expr
+(#<*>#) = MultI makeTypeInfo
+
+(#<+>#) :: Expr -> Expr -> Expr
+(#<+>#) = PlusI makeTypeInfo
+
+(#<->#) :: Expr -> Expr -> Expr
+(#<->#) a b = undefined
+
+neg :: Expr -> Expr
+neg = NegF makeTypeInfo
+
+-- Variables
+
+letIn :: String -> Expr -> Expr -> Expr
+--letIn = LetIn makeTypeInfo
+-- We can not infer probabilities on letIns. So we rewrite them as lambdas
+-- We don't have full inference logic on lambdas yet, but we have none at all on LetIns
+letIn s val body = apply (s #-># body) val
+
+var :: String -> Expr
+var = Var makeTypeInfo
+
+constF :: Double -> Expr
+constF = Constant makeTypeInfo . VFloat
+
+constI :: Int -> Expr
+constI = Constant makeTypeInfo . VInt
+
+constB :: Bool -> Expr
+constB = Constant makeTypeInfo . VBool
+
+constL :: [Value] -> Expr
+constL = Constant makeTypeInfo . VList
+
+(#->#) :: String -> Expr -> Expr
+(#->#) = Lambda makeTypeInfo
+
+apply :: Expr -> Expr -> Expr
+apply = Apply makeTypeInfo
+
+-- Distributions
 
 uniform :: Expr
 uniform = Uniform makeTypeInfo
@@ -35,17 +76,96 @@ uniform = Uniform makeTypeInfo
 normal :: Expr
 normal = Normal makeTypeInfo
 
-(*) :: Expr -> Expr -> Expr
-(*) = MultF makeTypeInfo
+bernoulli :: Double -> Expr
+bernoulli p = uniform #<# constF p
 
-(+) :: Expr -> Expr -> Expr
-(+) = PlusF makeTypeInfo
+binomial :: Int -> Double -> Expr
+binomial n p = ifThenElse (bernoulli p) (constI 1) (constI 1) #+# binomial (n-1) p
 
-null :: Expr
-null = Null makeTypeInfo
+dice :: Int -> Expr
+dice 1 = constI 1
+dice sides = ifThenElse (bernoulli (1/fromIntegral sides)) (constI sides)  (dice (sides-1))
+
+-- Parameters
+
+theta :: Expr -> Int -> Expr
+theta = ThetaI makeTypeInfo
+
+subtree :: Expr -> Int -> Expr
+subtree = ThetaI makeTypeInfo
+
+-- Product Types
 
 cons :: Expr -> Expr -> Expr
 cons = Cons makeTypeInfo
 
-(<:>) :: Expr -> Expr -> Expr
-(<:>) = cons
+(#:#) :: Expr -> Expr -> Expr
+(#:#) = cons
+
+nul :: Expr
+nul = Null makeTypeInfo
+
+tuple :: Expr -> Expr -> Expr
+tuple = TCons makeTypeInfo
+
+-- Boolean Algebra
+
+(#>#) :: Expr -> Expr -> Expr
+(#>#) = GreaterThan makeTypeInfo
+
+(#<#) :: Expr -> Expr -> Expr
+(#<#) = LessThan makeTypeInfo
+
+(#&&#) :: Expr -> Expr -> Expr
+(#&&#) = And makeTypeInfo
+
+(#||#) :: Expr -> Expr -> Expr
+(#||#) = Or makeTypeInfo
+
+(#!#) :: Expr -> Expr
+(#!#) = Not makeTypeInfo
+
+-- Other
+
+-- This is a Z-Combinator
+-- TODO: Our typesystem is not ready for that yet 
+fix :: Expr
+fix = "f" #->#
+  apply ("u" #-># apply (var "f") ("n" #-># apply (apply (var "u") (var "u")) (var "n")))
+    ("v" #-># apply (var "f") ("n" #-># apply (apply (var "v") (var "v")) (var "n")))
+
+
+compile :: CompilerConfig -> Program -> [(String, IRExpr)]
+compile conf p = do
+  let preAnnotated = annotateEnumsProg p
+  let typed = addTypeInfo preAnnotated
+  let annotated = annotateAlgsProg typed
+  envToIR conf annotated
+
+runGen :: (RandomGen g) => CompilerConfig -> Program -> [IRValue] -> Rand g IRValue
+runGen conf p args = do
+  let compiled = compile conf p
+  let (Just gen) = lookup "main_gen" compiled
+  let constArgs = map IRConst args
+  generateRand compiled compiled constArgs gen
+
+runProb :: CompilerConfig -> Program -> [IRValue] -> IRValue -> IRValue
+runProb conf p args x = do
+  let compiled = compile conf p
+  let (Just prob) = lookup "main_prob" compiled
+  let constArgs = map IRConst (x:args)
+  let val = generateDet compiled compiled constArgs prob
+  case val of
+    Right v -> v
+    Left err -> error err
+
+runInteg :: CompilerConfig -> Program -> [IRValue] -> IRValue -> IRValue -> IRValue
+runInteg conf p args low high = do
+  let compiled = compile conf p
+  let (Just integ) = lookup "main_integ" compiled
+  let constArgs = map IRConst (low:high:args)
+  let val = generateDet compiled compiled constArgs integ
+  case val of
+    Right v -> v
+    Left err -> error err
+

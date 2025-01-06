@@ -17,9 +17,19 @@ stack run
 should run the compiler. Use -- to pass arguments to NeST rather than the build system. You can use
 
 ```
-stack run -- -i yourCode.spll -o output.py -l python
+stack run -- -i yourCode.spll compile -o output.py -l python
 ```
 to generate python inference code from the code in the input file. 
+
+You can also run the program directly from the command line using the built-in interpreter:
+
+```
+stack run -- -i yourCode.spll generate
+stack run -- -i yourCode.spll probability -x 0.5
+stack run -- -i yourCode.spll integrate -l 0 -h 1
+```
+
+to run the program in the forward direction, the prior distribution at x=0.5 and integrate the prior distribution from 0 to 1.
 
 ### About
 
