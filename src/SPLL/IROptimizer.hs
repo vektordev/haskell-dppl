@@ -16,9 +16,9 @@ import Control.Monad.Reader
 import Data.Functor.Identity
 import Data.Number.Erf (erf)
 
-postProcess :: IRExpr -> IRExpr
+postProcess :: CompilerConfig -> IRExpr -> IRExpr
 --postProcess = id
-postProcess = fixedPointIteration optimize
+postProcess conf = fixedPointIteration (optimize conf)
 
 isValue :: IRExpr -> Bool
 isValue (IRConst _) = True
@@ -43,8 +43,17 @@ fixedPointIteration :: (Eq a, Show a) => (a -> a) -> a -> a
 fixedPointIteration f x = if fx == x then x else fixedPointIteration f fx
   where fx = f x
 
-optimize :: IRExpr -> IRExpr
-optimize = irMap ({-optimizeCommonSubexpr .-} evalAll . applyConstant)
+optimize :: CompilerConfig -> IRExpr -> IRExpr
+optimize conf = irMap (commonSubexprStage . applyConstStage . assiciativityStage . letInStage . constantDistrStage . simplifyStage)
+  where
+    oLvl = optimizerLevel conf
+    commonSubexprStage = if False then optimizeCommonSubexpr else id -- Too buggy to use
+    applyConstStage = if oLvl >= 2 then applyConstant else id
+    assiciativityStage = if oLvl >= 2 then optimizeAssociativity else id
+    letInStage = if oLvl >= 2 then optimizeLetIns else id
+    constantDistrStage = if oLvl >= 2 then evalConstantDistr else id
+    simplifyStage = if oLvl >= 1 then simplify else id
+
 --TODO: We can also optimize index magic, potentially here. i.e. a head tail tail x can be simplified.
 --TODO: Unary operators
 
@@ -54,51 +63,59 @@ applyConstant :: IRExpr -> IRExpr
 applyConstant (IRApply (IRLambda varname inExpr) v@(IRConst _)) = replaceAll (IRVar varname) v inExpr
 applyConstant x = x
 
-evalAll :: IRExpr -> IRExpr
+optimizeAssociativity :: IRExpr -> IRExpr
 -- Associative Addition
-evalAll (IROp OpPlus leftV (IROp OpPlus rightV1 rightV2))
+optimizeAssociativity (IROp OpPlus leftV (IROp OpPlus rightV1 rightV2))
   | isValue leftV && isValue rightV1 = IROp OpPlus (IRConst (forceOp OpPlus (unval leftV) (unval rightV1))) rightV2   -- a + (b + c) = (a + b) + c
   | isValue leftV && isValue rightV2 = IROp OpPlus (IRConst (forceOp OpPlus (unval leftV) (unval rightV2))) rightV1   -- a + (b + c) = b + (a + c)
-evalAll (IROp OpPlus (IROp OpPlus leftV1 leftV2) rightV )
+optimizeAssociativity (IROp OpPlus (IROp OpPlus leftV1 leftV2) rightV )
   | isValue leftV1 && isValue rightV = IROp OpPlus (IRConst (forceOp OpPlus (unval leftV1) (unval rightV))) leftV2   -- a + (b + c) = (a + b) + c
   | isValue leftV2 && isValue rightV = IROp OpPlus (IRConst (forceOp OpPlus (unval leftV2) (unval rightV))) leftV1   -- a + (b + c) = b + (a + c)
 -- Associative Multiplication
-evalAll (IROp OpMult leftV (IROp OpMult rightV1 rightV2))
+optimizeAssociativity (IROp OpMult leftV (IROp OpMult rightV1 rightV2))
   | isValue leftV && isValue rightV1 = IROp OpMult (IRConst (forceOp OpMult (unval leftV) (unval rightV1))) rightV2   -- a * (b * c) = (a * b) * c
   | isValue leftV && isValue rightV2 = IROp OpMult (IRConst (forceOp OpMult (unval leftV) (unval rightV2))) rightV1   -- a * (b * c) = (a * c) * b
-evalAll (IROp OpMult (IROp OpMult leftV1 leftV2) rightV )
+optimizeAssociativity (IROp OpMult (IROp OpMult leftV1 leftV2) rightV )
   | isValue leftV1 && isValue rightV = IROp OpMult (IRConst (forceOp OpMult (unval leftV1) (unval rightV))) leftV2   -- a + (b + c) = (a + b) + c
   | isValue leftV2 && isValue rightV = IROp OpMult (IRConst (forceOp OpMult (unval leftV2) (unval rightV))) leftV1   -- a + (b + c) = b + (a + c)
-evalAll expr@(IROp op leftV rightV)
+optimizeAssociativity x = x
+
+optimizeLetIns :: IRExpr -> IRExpr
+optimizeLetIns ex@(IRLetIn name val scope)
+  | isSimple val = replaceAll (IRVar name) val scope
+  | countUses name scope == 1 = replaceAll (IRVar name) val scope
+  | countUses name scope == 0 = scope
+optimizeLetIns ex = ex
+
+evalConstantDistr :: IRExpr -> IRExpr
+evalConstantDistr (IRDensity IRNormal (IRConst (VFloat x))) = IRConst (VFloat ((1 / sqrt (2 * pi)) * exp (-0.5 * x * x)))
+evalConstantDistr (IRCumulative IRNormal (IRConst (VFloat x))) = IRConst (VFloat ((1/2) * (1 + erf (x/sqrt (2)))))
+evalConstantDistr (IRDensity IRUniform (IRConst (VFloat x))) = IRConst (VFloat (if x >= 0 && x <= 1 then 1 else 0))
+evalConstantDistr (IRCumulative IRUniform (IRConst (VFloat x))) = IRConst (VFloat (if x < 0 then 0 else if x > 1 then 1 else x))
+evalConstantDistr x = x
+
+simplify :: IRExpr -> IRExpr
+simplify expr@(IROp op leftV rightV)
   | isValue leftV && isValue rightV = IRConst (forceOp op (unval leftV) (unval rightV))
   | isValue leftV || isValue rightV = softForceLogic op leftV rightV
   | otherwise = expr
-evalAll (IRIf _ left right) | left == right = left
-evalAll x@(IRIf cond left right) =
+simplify (IRIf _ left right) | left == right = left
+simplify x@(IRIf cond left right) =
   if isValue cond
     then if unval cond == VBool True
       then left
       else right
     else x
-evalAll x@(IRCons left right) =
+simplify x@(IRCons left right) =
   if isValue left && isValue right
     then let (VList tl) = unval right in IRConst (VList (unval left : tl))
     else x
-evalAll (IRHead expr) =
+simplify (IRHead expr) =
   if isValue expr
     then let (VList (_:xs)) = unval expr in IRConst $ VList xs
     else IRHead expr
-evalAll ex@(IRLetIn name val scope)
-  | isSimple val = replaceAll (IRVar name) val scope
-  | countUses name scope == 1 = replaceAll (IRVar name) val scope
-  | countUses name scope == 0 = scope
-  | otherwise = ex
-evalAll (IRTCons (IRLambda n a) (IRLambda m b)) | n == m = IRLambda n (IRTCons a b)
-evalAll (IRDensity IRNormal (IRConst (VFloat x))) = IRConst (VFloat ((1 / sqrt (2 * pi)) * exp (-0.5 * x * x)))
-evalAll (IRCumulative IRNormal (IRConst (VFloat x))) = IRConst (VFloat ((1/2) * (1 + erf (x/sqrt (2)))))
-evalAll (IRDensity IRUniform (IRConst (VFloat x))) = IRConst (VFloat (if x >= 0 && x <= 1 then 1 else 0))
-evalAll (IRCumulative IRUniform (IRConst (VFloat x))) = IRConst (VFloat (if x < 0 then 0 else if x > 1 then 1 else x))
-evalAll x = x
+simplify (IRTCons (IRLambda n a) (IRLambda m b)) | n == m = IRLambda n (IRTCons a b)
+simplify x = x
 
 countUses :: String -> IRExpr -> Int
 countUses var (IRVar a) | a == var = 1

@@ -34,14 +34,14 @@ envToIR conf p = concatMap (\(name, binding) ->
       pt = pType $ getTypeInfo binding
       rt = rType $ getTypeInfo binding in
     if (pt == Deterministic || pt == Integrate) && (isOnlyNumbers rt) then
-      [(name ++ "_integ", postProcess (IRLambda "low" (IRLambda "high" (runCompile conf (toIRIntegrateSave conf typeEnv binding (IRVar "low") (IRVar "high")))))),
-       (name ++ "_prob",postProcess (IRLambda "sample" (runCompile conf (toIRProbability conf typeEnv binding (IRVar "sample"))))),
-       (name ++ "_gen", postProcess (fst $ runIdentity $ runSupplyVars $ runWriterT (toIRGenerate typeEnv binding)))]
+      [(name ++ "_integ", postProcess conf (IRLambda "low" (IRLambda "high" (runCompile conf (toIRIntegrateSave conf typeEnv binding (IRVar "low") (IRVar "high")))))),
+       (name ++ "_prob",postProcess conf (IRLambda "sample" (runCompile conf (toIRProbability conf typeEnv binding (IRVar "sample"))))),
+       (name ++ "_gen", postProcess conf (fst $ runIdentity $ runSupplyVars $ runWriterT (toIRGenerate typeEnv binding)))]
     else if pt == Deterministic || pt == Integrate || pt == Prob then
-      [(name ++ "_prob",postProcess  ((IRLambda "sample" (runCompile conf (toIRProbability conf typeEnv binding (IRVar "sample")))))),
-       (name ++ "_gen", postProcess (fst $ runIdentity $ runSupplyVars $ runWriterT $ toIRGenerate typeEnv binding))]
+      [(name ++ "_prob",postProcess conf ((IRLambda "sample" (runCompile conf (toIRProbability conf typeEnv binding (IRVar "sample")))))),
+       (name ++ "_gen", postProcess conf (fst $ runIdentity $ runSupplyVars $ runWriterT $ toIRGenerate typeEnv binding))]
     else
-      [(name ++ "_gen", postProcess ( fst $ runIdentity $ runSupplyVars $ runWriterT $ toIRGenerate typeEnv binding))]) (functions p)
+      [(name ++ "_gen", postProcess conf ( fst $ runIdentity $ runSupplyVars $ runWriterT $ toIRGenerate typeEnv binding))]) (functions p)
 
 
 runCompile :: CompilerConfig -> CompilerMonad CompilationResult -> IRExpr

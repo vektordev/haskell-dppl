@@ -145,7 +145,7 @@ correctIntegralValuesTestCases =[(uniformProg, VFloat 0, VFloat 1, [], (VFloat 1
                                   --(testLetIn, VFloat 1.5, VFloat 2, [], VFloat 0.5)]
 
 noTopKConfig :: CompilerConfig
-noTopKConfig = CompilerConfig Nothing False 0
+noTopKConfig = CompilerConfig Nothing False 0 2
 
 prop_CheckProbTestCases :: Property
 prop_CheckProbTestCases = forAll (elements correctProbValuesTestCases) checkProbTestCase
@@ -238,7 +238,7 @@ irDensityTopK :: RandomGen g => Program -> Double -> IRValue -> [IRExpr]-> Rand 
 irDensityTopK p thresh s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params) irExpr
   where Just irExpr = lookup "main_prob" irEnv
         sampleExpr = IRConst s
-        irEnv = envToIR (CompilerConfig (Just thresh) False 0) annotated
+        irEnv = envToIR (CompilerConfig (Just thresh) False 0 2) annotated
         annotated = annotateAlgsProg typedProg
         typedProg = addTypeInfo preAnnotated
         preAnnotated = annotateEnumsProg p
@@ -247,7 +247,7 @@ irDensityBC :: RandomGen g => Program -> IRValue -> [IRExpr]-> Rand g IRValue
 irDensityBC p s params = IRInterpreter.generateRand irEnv irEnv (sampleExpr:params) irExpr
   where Just irExpr = lookup "main_prob" irEnv
         sampleExpr = IRConst s
-        irEnv = envToIR (CompilerConfig Nothing True 0) annotated
+        irEnv = envToIR (CompilerConfig Nothing True 0 2) annotated
         annotated = annotateAlgsProg typedProg
         typedProg = addTypeInfo preAnnotated
         preAnnotated = annotateEnumsProg p

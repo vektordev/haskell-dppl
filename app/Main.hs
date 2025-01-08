@@ -14,12 +14,14 @@ import SPLL.Lang.Types (Value(..), GenericValue (..))
 import Text.Read
 import SPLL.Prelude (runProb, runInteg, runGen)
 import Control.Monad.Random (randomIO, evalRandIO)
+import SPLL.IntermediateRepresentation (CompilerConfig(..))
 
 data GlobalOpts = GlobalOpts {
   inputFile :: String,
   verbosity :: Int,
   countBranches :: Bool,
   topKCutoff :: Maybe Double,
+  optimiziationLevel :: Int,
   commandOpts :: CommandOpts
 }
 
@@ -78,6 +80,13 @@ parseGlobalOpts = GlobalOpts
             <> short 'k'
             <> help "Probabilities lower than the cutoff will not be considered. Range from 0-1"
             <> metavar "CUTOFF" ))
+        <*> option auto
+            ( long "optimizationLevel"
+            <> short 'O'
+            <> help "Level of optimization. 0: None, 1: Basic, 2: Advanced"
+            <> showDefault
+            <> value 2
+            <> metavar "OPTIMIZATION" )
         <*> hsubparser (
           command "compile" (info parseCompileOpts (progDesc "Compiles the program with inference interface into target language"))
           <> command "generate" (info parseGenerateOpts (progDesc "Runs the generate pass of the program"))
@@ -133,9 +142,9 @@ main = transpile =<< execParser opts
             <> header "Haskell DPPL" )
 
 transpile :: GlobalOpts -> IO ()
-transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options}) = do
+transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl}) = do
   prog <- parseProgram inFile
-  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb})
+  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl})
   case options of
     CompileOpts{language=lang, outputFile=outFile} -> do
       transpiled <- codeGenToLang lang conf prog
