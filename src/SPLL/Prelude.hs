@@ -8,6 +8,7 @@ import SPLL.Typing.Infer (addTypeInfo)
 import IRInterpreter (generateRand, generateDet)
 import Control.Monad.Random (Rand, RandomGen)
 import SPLL.IRCompiler
+import Debug.Trace
 
 -- Flow control
 ifThenElse :: Expr -> Expr -> Expr -> Expr
@@ -19,19 +20,21 @@ injF = InjF makeTypeInfo
 --Arithmetic
 
 (#*#) :: Expr -> Expr -> Expr
-(#*#) = MultF makeTypeInfo
+(#*#) a b = injF "mult" [a, b]
+--(#*#) = MultF makeTypeInfo
 
 (#+#) :: Expr -> Expr -> Expr
-(#+#) = PlusF makeTypeInfo
+(#+#) a b = injF "plus" [a, b]
+--(#+#) = PlusF makeTypeInfo
 
 (#-#) :: Expr -> Expr -> Expr
 (#-#) a b = a #+# (neg b)
 
 (#<*>#) :: Expr -> Expr -> Expr
-(#<*>#) = MultI makeTypeInfo
+(#<*>#) a b = injF "multI" [a, b]
 
 (#<+>#) :: Expr -> Expr -> Expr
-(#<+>#) = PlusI makeTypeInfo
+(#<+>#) a b = injF "plusI" [a, b]
 
 (#<->#) :: Expr -> Expr -> Expr
 (#<->#) a b = undefined
@@ -152,7 +155,7 @@ runGen conf p args = do
 runProb :: CompilerConfig -> Program -> [IRValue] -> IRValue -> IRValue
 runProb conf p args x = do
   let compiled = compile conf p
-  let (Just prob) = lookup "main_prob" compiled
+  let (Just prob) = traceShowId $ lookup "main_prob" compiled
   let constArgs = map IRConst (x:args)
   let val = generateDet compiled compiled constArgs prob
   case val of
@@ -168,4 +171,6 @@ runInteg conf p args low high = do
   case val of
     Right v -> v
     Left err -> error err
+
+
 

@@ -43,6 +43,7 @@ import SPLL.Parser
 import TestParser
 import TestInternals
 import SPLL.Prelude
+import SPLL.Examples (normalProgMultPlus)
 
 
 -- Generalizing over different compilation stages, we can fit all "this typing is what the compiler would find" cases.
@@ -82,6 +83,7 @@ correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat
                                (normalProg, VFloat 0.5, [], (VFloat $ normalPDF 0.5, VFloat 1)),
                                (uniformProgMult, VFloat (-0.25), [], (VFloat 2, VFloat 1)),
                                (normalProgMult, VFloat (-1), [], (VFloat (normalPDF (-2) * 2), VFloat 1)),
+                               (normalProgMultPlus, VFloat (-2), [], (VFloat ((normalPDF (-1.5)) / 2), VFloat 1)),
                                (uniformNegPlus, VFloat (-4.5), [], (VFloat 1, VFloat 1)),
                                (testList, VList [VFloat 0.25, VFloat 0], [], (VFloat $ normalPDF 0 * 2, VFloat 2)),
                                (simpleTuple, VTuple (VFloat 0.25) (VFloat 0), [], (VFloat $ normalPDF 0 * 2, VFloat 2)),

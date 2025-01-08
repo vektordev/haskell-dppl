@@ -568,9 +568,10 @@ infer env expr = case expr of
     tv <- fresh
     let s_acc = foldl compose emptySubst (map fst3 p_inf)
     --let cts_d d = Right (LetInDConstraint(Left d))
-    let p_fst:p_rst = map trd3 p_inf
+    let pt@(p_fst:p_rst) = map trd3 p_inf
+    let lefts = map Left pt
     -- Fold all pTypes into a series of Plus Constraints (p1 + (p2 + (p3 + p4)))
-    let cs = foldr (\p acc -> [Right $ constraint (Left p) (Right acc)]) [Left p_fst] p_rst
+    let cs = lefts ++ foldr (\p acc -> [Right $ constraint (Left p) (Right acc)]) [Left p_fst] p_rst
     return (s_acc, concatMap snd3 p_inf ++ [(tv,cs)] --TODO check this
       , tv, InjF (setPType ti tv) name (map frth3 p_inf))
 
