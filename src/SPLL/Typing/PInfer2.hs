@@ -158,9 +158,6 @@ data InferState = InferState { var_count :: Int }
 initInfer :: InferState
 initInfer = InferState { var_count = 0 }
 
-
-type Unifier = (Subst, [Constraint])
-
 -- | Constraint solver monad
 type Solve a = ExceptT PTypeError Identity a
 
@@ -275,6 +272,8 @@ getSubstFromCons :: DConstraint -> Subst
 getSubstFromCons cons = subst
   where (_, subst, _) = isConsResolved [cons]
 
+--collapses the constraint and checks if is resolved.
+-- A constraint is resolved if it collapses to var = basicType
 isConsResolvable :: DConstraint -> Bool
 isConsResolvable dcons =  ret
   where (cons', _, ret) = isConsResolved [collapsedCons]
@@ -284,6 +283,11 @@ extractType :: PType -> [DConstraint] -> DConstraint
 extractType ty [] = error "Could not find top type"
 extractType ty ((pty, dc):b) = if ty == pty then (pty, dc) else extractType ty b
 
+-- we iterate through the DowngradeChain.
+--  whenever we find a Left BasicType, we downgrade the "resulting type" (snd arg)
+--  whenever we find a Left non-basic, we put it in the third argument, the output chain.
+--  whenever we find a constraint, we try to force it down to two simple types, which we resolve and continue.
+--    if we can not force it, we eventually return the constraint. 
 collapseChain :: DowngradeChain -> PType -> DowngradeChain -> DowngradeChain
 collapseChain [] ty dcOut = [Left ty] ++ dcOut
 collapseChain ((Left ty1):b) ty2 dcOut = if isBasicType ty1
@@ -320,7 +324,7 @@ subCollapse :: TypeOrChain -> TypeOrChain
 subCollapse (Left ty) = Left  ty
 subCollapse (Right dc) = Right $ collapseChain dc Deterministic []
 
-
+-- tries to force a chain down to a single basictype element.
 getResType :: TypeOrChain -> (Bool, PType)
 getResType (Left ty) = if isBasicType ty then (True, ty) else (False, Bottom)
 getResType (Right dc) = if length nestedCollapse == 1 && length (lefts nestedCollapse) == 1

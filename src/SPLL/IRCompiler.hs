@@ -379,14 +379,14 @@ addP (aM, aDim) (bM, bDim) = do
   tell [(pVarA, aM), (pVarB, bM), (dimVarA, aDim), (dimVarB, bDim)]
   return (IRIf (IROp OpEq (IRVar pVarA) (IRConst (VFloat 0))) (IRVar pVarB)
            (IRIf (IROp OpEq (IRVar pVarB) (IRConst (VFloat 0))) (IRVar pVarA)
-           (IRIf (IROp OpGreaterThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar pVarA)
-           (IRIf (IROp OpGreaterThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar pVarB)
+           (IRIf (IROp OpLessThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar pVarA)
+           (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar pVarB)
            (IROp OpPlus (IRVar pVarA) (IRVar pVarB))))),
            -- Dim
            IRIf (IROp OpEq (IRVar pVarA) (IRConst (VFloat 0))) (IRVar dimVarB)
            (IRIf (IROp OpEq (IRVar pVarB) (IRConst (VFloat 0))) (IRVar dimVarA)
-           (IRIf (IROp OpGreaterThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar dimVarA)
-           (IRIf (IROp OpGreaterThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar dimVarB)
+           (IRIf (IROp OpLessThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar dimVarA)
+           (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar dimVarB)
            (IRVar dimVarA)))))
 
 subP :: (IRExpr, IRExpr) -> (IRExpr, IRExpr) -> CompilerMonad (IRExpr, IRExpr)
@@ -398,14 +398,14 @@ subP (aM, aDim) (bM, bDim) = do
   tell [(pVarA, aM), (pVarB, bM), (dimVarA, aDim), (dimVarB, bDim)]
   return (IRIf (IROp OpEq (IRVar pVarA) (IRConst (VFloat 0))) (IRVar pVarB)
          (IRIf (IROp OpEq (IRVar pVarB) (IRConst (VFloat 0))) (IRVar pVarA)
-         (IRIf (IROp OpGreaterThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar pVarA)
-         (IRIf (IROp OpGreaterThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar pVarB)
+         (IRIf (IROp OpLessThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar pVarA)
+         (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar pVarB)
          (IROp OpSub (IRVar pVarA) (IRVar pVarB))))),
          -- Dim
          IRIf (IROp OpEq (IRVar pVarA) (IRConst (VFloat 0))) (IRVar dimVarB)
          (IRIf (IROp OpEq (IRVar pVarB) (IRConst (VFloat 0))) (IRVar dimVarA)
-         (IRIf (IROp OpGreaterThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar dimVarA)
-         (IRIf (IROp OpGreaterThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar dimVarB)
+         (IRIf (IROp OpLessThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar dimVarA)
+         (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar dimVarB)
          (IRVar dimVarA)))))
 
 packParamsIntoLetinsProb :: [String] -> [Expr] -> IRExpr -> IRExpr -> Supply Int IRExpr
