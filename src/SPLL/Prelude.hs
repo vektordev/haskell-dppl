@@ -155,7 +155,7 @@ runGen conf p args = do
 runProb :: CompilerConfig -> Program -> [IRValue] -> IRValue -> IRValue
 runProb conf p args x = do
   let compiled = compile conf p
-  let (Just prob) = traceShowId $ lookup "main_prob" compiled
+  let (Just prob) = lookup "main_prob" compiled
   let constArgs = map IRConst (x:args)
   let val = generateDet compiled compiled constArgs prob
   case val of
