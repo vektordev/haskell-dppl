@@ -84,6 +84,10 @@ normalProgMult = Program [("main", normal #*# constF 0.5)] []
 uniformProgPlus :: Program
 uniformProgPlus = Program [("main", uniform #+# constF 4)] []
 
+normalProgMultPlus :: Program
+normalProgMultPlus = Program [("main", normal #*# constF 2 #+# constF 1)] []
+
+
 uniformNegPlus :: Program
 uniformNegPlus = Program [("main", neg (uniform #+#constF 4))] []
 
@@ -153,7 +157,7 @@ testNot :: Program
 testNot = Program [("main", (#!#) (uniform #<# constF 0.75))] []
 
 testCallLambda :: Program
-testCallLambda = Program [("main", apply ("a" #-># (var "a" #+# uniform)) (constF 2))] []
+testCallLambda = Program [("main", apply ("x" #-># (var "x" #+# uniform)) (constF 2))] []
 
 testCallLambdaAdvanced :: Program
 testCallLambdaAdvanced = Program [("main", letIn "l" ("a" #-># (var "a" #+# uniform)) (apply (var "l") (constF 2)))] []

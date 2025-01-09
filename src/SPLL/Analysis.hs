@@ -30,13 +30,13 @@ annotateIfNotRecursive _ env e = annotate env e
 annotate :: [(String, [Tag])] -> Expr -> Expr
 --annotate _ e | trace ((show e)) False = undefined
 annotate env e = withNewTypeInfo
-  where 
+  where
     withNewTypeInfo = setTypeInfo withNewSubExpr (setTags (getTypeInfo withNewSubExpr) tgs)
-    newEnv = case withNewSubExpr of 
+    newEnv = case withNewSubExpr of
       (LetIn _ n v _) -> (n, tags $ getTypeInfo v):env
       _ -> env
     withNewSubExpr = setSubExprs e (map (annotate newEnv) (getSubExprs e))
-    tgs = [EnumList (toList values)]
+    tgs = [EnumList (toList values) | not (null (toList values))]
     values = case withNewSubExpr of
       (Constant _ a@(VInt _)) -> fromList [a]
       (ReadNN _ name _) -> case lookup name env of
@@ -60,14 +60,14 @@ annotate env e = withNewTypeInfo
         merge valuesLeft valuesRight
       (LetIn _ _ _ a) -> fromList $ getValuesFromExpr a
       (Var _ name) -> case (lookup name env) of
-        Just tags -> fromList $ concatMap valuesOfTag tags 
+        Just tags -> fromList $ concatMap valuesOfTag tags
         Nothing -> empty
       _ -> empty
-    
+
 
 getValuesFromExpr :: Expr ->  [Value]
 getValuesFromExpr e = concatMap valuesOfTag (tags $ getTypeInfo e)
-      
+
 valuesOfTag :: Tag -> [Value]
 valuesOfTag tag = case tag of
   EnumList l -> l
@@ -77,13 +77,13 @@ valuesOfTag tag = case tag of
 isRecursive :: String -> Expr -> Bool
 isRecursive name (Var _ n) | name == n = True
 isRecursive n e = any (isRecursive n) (getSubExprs e)
-  
+
 annotateAlgsProg :: Program -> Program
 annotateAlgsProg p@Program {functions=fs} = p{functions=map (Data.Bifunctor.second (tMap tagAlgsExpression)) fs}
 
 tagAlgsExpression :: Expr -> TypeInfo
 tagAlgsExpression (InjF ti _ [_]) = ti
-tagAlgsExpression expr = 
+tagAlgsExpression expr =
   if likelihoodFunctionUsesTypeInfo (toStub expr) then
     setTags (getTypeInfo expr) (Alg (findAlgorithm expr):tags (getTypeInfo expr))
   else

@@ -162,7 +162,8 @@ data CompilerConfig = CompilerConfig {
   --  Uses local probability of the branch,given that the execution arrives at that branching point
   topKThreshold :: Maybe Double,
   countBranches :: Bool,
-  verbose :: Int
+  verbose :: Int,
+  optimizerLevel :: Int
 } deriving (Show)
 --3: convert algortihm-and-type-annotated Exprs into abstract representation of explicit computation:
 --    Fold enum ranges, algorithms, etc. into a representation of computation that can be directly converted into code.
