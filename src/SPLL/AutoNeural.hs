@@ -5,6 +5,7 @@ module SPLL.AutoNeural(
 import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType
+import PrettyPrint
 
 -- basic strucutre:
 --  get the partition plan.
@@ -16,7 +17,8 @@ import SPLL.Typing.RType
 --implicit assumption: Neural Decl accepts a "TSymbol"-typed thing.
 makeAutoNeural :: NeuralDecl -> [(String, IRExpr)]
 makeAutoNeural (name, (TArrow TSymbol target), tag) =
-  [(name ++ "_" ++ show (getSize plan) ++ "_gen", makeGen plan name)]
+  [(name ++ "_" ++ show (getSize plan) ++ "_gen" , makeGen  plan name),
+   (name ++ "_" ++ show (getSize plan) ++ "_prob", makeProb plan name)]
     where plan = makePartitionPlan target tag
 
 data PartitionPlan = TuplePlan PartitionPlan PartitionPlan
@@ -26,6 +28,17 @@ data PartitionPlan = TuplePlan PartitionPlan PartitionPlan
 
 vector :: String
 vector = "l_x_neural_out"
+
+makeProb :: PartitionPlan -> String -> IRExpr
+makeProb plan nn_name = IRLambda "sample" $ IRLetIn vector (IRVar nn_name) (IRTCons m (IRTCons dim bc))
+  where (m, dim, bc) = (makeProbRec plan 0)
+
+
+--TODO: Add "decorators" here for Dimcounting? Probably don't need branch counting though.
+makeProbRec :: PartitionPlan -> Int -> (IRExpr, IRExpr, IRExpr)
+makeProbRec (Discretes rty tag) ix = (p, IRConst $ VFloat 0, IRConst (VFloat 0))
+  where
+    p = IRIndex (IRVar vector) (IRVar "sample")
 
 --FIXME: Use IREvalNN here maybe?
 makeGen :: PartitionPlan -> String ->  IRExpr
@@ -105,7 +118,8 @@ tupleFromValue (VTuple a b) = (a,b)
 tupelFromValue _non_tuple = error "supplied non-tuple value to tuple-shaped NN type."
 
 
-test = makeAutoNeural ("readMNist", TArrow TSymbol TInt, EnumRange ((VInt 0), (VInt 9)))
-
+test = do
+  let irdefs = makeAutoNeural ("readMNist", TArrow TSymbol TInt, EnumRange ((VInt 0), (VInt 9)))
+  putStrLn (pPrintIREnv irdefs)
 
 
