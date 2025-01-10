@@ -15,6 +15,7 @@ import Text.Read
 import SPLL.Prelude (runProb, runInteg, runGen)
 import Control.Monad.Random (randomIO, evalRandIO)
 import SPLL.IntermediateRepresentation (CompilerConfig(..))
+import Data.Foldable (asum)
 
 data GlobalOpts = GlobalOpts {
   inputFile :: String,
