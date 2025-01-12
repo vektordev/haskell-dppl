@@ -28,10 +28,8 @@ import SPLL.Typing.Typing
 import SPLL.Typing.RType
 --import SPLL.Typing.PType( PType(..) )
 import SPLL.InferenceRule
-import PredefinedFunctions (globalFenv)
+import PredefinedFunctions (globalFenv, FPair(..), FDecl(..))
 import Debug.Trace
-
-import PredefinedFunctions
 import SPLL.Lang.Types (FnDecl)
 
 -- changes: in infer and inferProg; also changed TypeSigs to remove RType of main expression.

@@ -261,17 +261,16 @@ toIRProbability conf typeEnv (TCons _ t1Expr t2Expr) sample = do
   mult <- (t1P, t1Dim) `multP` (t2P, t2Dim)
   return (fst mult, snd mult, IROp OpPlus t1Branches t2Branches)
 toIRProbability conf typeEnv (InjF _ name [param]) sample = do
-  prefix <- mkVariable ""
-  let letInBlock = irMap (uniqueify [v] prefix) (IRLetIn v sample invExpr)
+  fPair <- instantiate mkVariable name  -- FPair of the InjF with unique names
+  let FPair (_, [inv]) = fPair
+  let FDecl (_, [v], _, invExpr, [(_, invDerivExpr)]) = inv
+  let letInBlock = IRLetIn v sample invExpr
   (paramExpr, paramDim, paramBranches) <- toIRProbability conf typeEnv param letInBlock
   let returnExpr = IRLetIn v sample (IROp OpMult paramExpr (IRUnaryOp OpAbs invDerivExpr))
   return (returnExpr, paramDim, paramBranches)
-  where Just fPair = lookup name globalFenv   --TODO error handling if nor found
-        FPair (_, [inv]) = fPair
-        FDecl (_, [v], _, invExpr, [(_, invDerivExpr)]) = inv
 toIRProbability conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [param1, param2]) sample
   | extras `hasAlgorithm` "injF2Left" = do
-  let Just fPair = lookup name globalFenv   --TODO error handling if not found
+  fPair <- instantiate mkVariable name -- FPair of the InjF with unique names
   let FPair (fwd, inversions) = fPair
   let FDecl (_, [v2, v3], [v1], _, _) = fwd
   let [invDecl] = filter (\(FDecl (_, _, [w1], _, _)) -> v3==w1) inversions   --This should only return one inversion
@@ -282,12 +281,11 @@ toIRProbability conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [pa
   let letInBlock = IRLetIn detVar leftExpr (IRLetIn sampleVar sample invExpr)
   (paramExpr, paramDim, paramBranches) <- toIRProbability conf typeEnv param2 letInBlock
   let returnExpr = IRLetIn detVar leftExpr (IRLetIn sampleVar sample (IROp OpMult paramExpr (IRUnaryOp OpAbs invDeriv)))
-  uniquePrefix <- mkVariable ""
-  return (irMap (uniqueify [v1, v2, v3] uniquePrefix) returnExpr, paramDim, paramBranches) --FIXME
+  return (returnExpr, paramDim, paramBranches) --FIXME
 toIRProbability conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [param1, param2]) sample
   | extras `hasAlgorithm` "injF2Right" = do
-  let Just fPair = lookup name globalFenv   --TODO error handling if not found
-  let FPair (fwd, inversions) = fPair
+  fPair <- instantiate mkVariable name -- FPair of the InjF with unique names
+  let FPair (fwd, inversions) = fPair 
   let FDecl (_, [v2, v3], [v1], _, _) = fwd
   let [invDecl] = filter (\(FDecl (_, _, [w1], _, _)) -> v2==w1) inversions   --This should only return one inversion
   let FDecl (_, [x2, x3], _, invExpr, invDerivs) = invDecl
@@ -297,8 +295,7 @@ toIRProbability conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [pa
   let letInBlock = IRLetIn detVar leftExpr (IRLetIn sampleVar sample invExpr)
   (paramExpr, paramDim, paramBranches) <- toIRProbability conf typeEnv param1 letInBlock
   let returnExpr = IRLetIn detVar leftExpr (IRLetIn sampleVar sample (IROp OpMult paramExpr (IRUnaryOp OpAbs invDeriv)))
-  uniquePrefix <- mkVariable ""
-  return (irMap (uniqueify [v1, v2, v3] uniquePrefix) returnExpr, paramDim, paramBranches)
+  return (returnExpr, paramDim, paramBranches)
 toIRProbability conf typeEnv (InjF TypeInfo {tags=extras} name [left, right]) sample
   | extras `hasAlgorithm` "injF2Enumerable" = do
   -- Get all possible values for subexpressions
@@ -307,7 +304,7 @@ toIRProbability conf typeEnv (InjF TypeInfo {tags=extras} name [left, right]) sa
   let enumListL = head $ [x | EnumList x <- extrasLeft]
   let enumListR = head $ [x | EnumList x <- extrasRight]
 
-  let Just fPair = lookup name globalFenv   --TODO error handling if not found
+  fPair <- instantiate mkVariable name -- FPair of the InjF with unique names
   let FPair (fwd, inversions) = fPair
   let FDecl (_, [v2, v3], [v1], _, _) = fwd
   -- We get the inversion to the right side
@@ -495,13 +492,11 @@ toIRGenerate typeEnv (Normal _) = return $ IRSample IRNormal
 toIRGenerate typeEnv (InjF _ name params) = do
   -- Assuming that the logic within packParamsIntoLetinsGen typeEnv is correct.
   -- You will need to process vars and params, followed by recursive calls to fwdExpr.
+  fPair <- instantiate mkVariable name
+  let FPair (fwd, _) = fPair
+  let FDecl (_, vars, _, fwdExpr, _) = fwd
   prefix <- mkVariable ""
-  letInBlock <- packParamsIntoLetinsGen typeEnv vars params fwdExpr
-  return $ irMap (uniqueify vars prefix) letInBlock
-  where
-    Just fPair = lookup name globalFenv
-    FPair (fwd, _) = fPair
-    FDecl (_, vars, _, fwdExpr, _) = fwd
+  packParamsIntoLetinsGen typeEnv vars params fwdExpr
 toIRGenerate typeEnv (Var _ name) = do
   case lookup name typeEnv of
     -- Var is a function
@@ -651,17 +646,17 @@ toIRIntegrate conf typeEnv (ThetaI _ a i) low high = do
   ind <- indicator (IROp OpAnd (IROp OpLessThan low val) (IROp OpGreaterThan high val)) --TODO What to do if low and high are equal?
   return (ind, const0, const0)
 toIRIntegrate conf typeEnv (InjF _ name [param]) low high = do  --TODO Multivariable
+  fPair <- instantiate mkVariable name  
+  let FPair (_, [inv]) = fPair
+  let FDecl (_, [v], _, invExpr, [(_, invDerivExpr)]) = inv
   prefix <- mkVariable ""
-  let letInBlockLow = irMap (uniqueify [v] prefix) (IRLetIn v low invExpr)
-  let letInBlockHigh = irMap (uniqueify [v] prefix) (IRLetIn v high invExpr)
+  let letInBlockLow = IRLetIn v low invExpr
+  let letInBlockHigh = IRLetIn v high invExpr
   (paramExpr, _, paramBranches) <- toIRIntegrate conf typeEnv param letInBlockLow letInBlockHigh
   return (paramExpr, const0, paramBranches)
-  where Just fPair = lookup name globalFenv   --TODO error handling if nor found
-        FPair (_, [inv]) = fPair
-        FDecl (_, [v], _, invExpr, [(_, invDerivExpr)]) = inv
 toIRIntegrate conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [param1, param2]) low high
-  | extras `hasAlgorithm` "injF2Left" = do  --FIXME Left
-  let Just fPair = lookup name globalFenv   --TODO error handling if not found
+  | extras `hasAlgorithm` "injF2Left" = do  
+  fPair <- instantiate mkVariable name  
   let FPair (fwd, inversions) = fPair
   let FDecl (_, [v2, v3], [v1], _, _) = fwd
   let [invDecl] = filter (\(FDecl (_, _, [w1], _, _)) -> v3==w1) inversions   --This should only return one inversion
@@ -672,11 +667,10 @@ toIRIntegrate conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [para
   let letInBlockLow = IRLetIn detVar leftExpr (IRLetIn sampleVar low invExpr)
   let letInBlockHigh = IRLetIn detVar leftExpr (IRLetIn sampleVar high invExpr)
   (paramExpr, _, paramBranches) <- toIRIntegrate conf typeEnv param2 letInBlockLow letInBlockHigh
-  uniquePrefix <- mkVariable ""
-  return (irMap (uniqueify [v1, v2, v3] uniquePrefix) paramExpr, const0, paramBranches)
+  return (paramExpr, const0, paramBranches)
 toIRIntegrate conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [param1, param2]) low high
-  | extras `hasAlgorithm` "injF2Right" = do  --FIXME Left
-  let Just fPair = lookup name globalFenv   --TODO error handling if not found
+  | extras `hasAlgorithm` "injF2Right" = do 
+  fPair <- instantiate mkVariable name
   let FPair (fwd, inversions) = fPair
   let FDecl (_, [v2, v3], [v1], _, _) = fwd
   let [invDecl] = filter (\(FDecl (_, _, [w1], _, _)) -> v2==w1) inversions   --This should only return one inversion
@@ -687,8 +681,7 @@ toIRIntegrate conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [para
   let letInBlockLow = IRLetIn detVar leftExpr (IRLetIn sampleVar low invExpr)
   let letInBlockHigh = IRLetIn detVar leftExpr (IRLetIn sampleVar high invExpr)
   (paramExpr, _, paramBranches) <- toIRIntegrate conf typeEnv param1 letInBlockLow letInBlockHigh
-  uniquePrefix <- mkVariable ""
-  return (irMap (uniqueify [v1, v2, v3] uniquePrefix) paramExpr, const0, paramBranches)
+  return (paramExpr, const0, paramBranches)
 toIRIntegrate conf typeEnv (Lambda t name subExpr) low high = do
   let (TArrow paramRType _) = rType t
   case paramRType of

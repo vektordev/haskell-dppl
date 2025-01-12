@@ -4,11 +4,12 @@ getHornClause,
 FPair(..),
 FDecl(..),
 FEnv,
+instantiate,
 propagateValues
 ) where
 
 import SPLL.Typing.RType (RType(..), Scheme(..))
-import SPLL.IntermediateRepresentation (IRExpr, IRExpr(..), Operand(..), UnaryOperand(..)) --FIXME
+import SPLL.IntermediateRepresentation (IRExpr, IRExpr(..), Operand(..), UnaryOperand(..), irMap) --FIXME
 import SPLL.Lang.Lang
 import SPLL.Typing.Typing
 import Data.Set (fromList)
@@ -16,6 +17,8 @@ import Data.Maybe (fromJust)
 import SPLL.Lang.Types
 import IRInterpreter
 import Control.Monad
+import Control.Monad.Supply (MonadSupply)
+import qualified Data.Bifunctor
 
 -- InputVars, OutputVars, fwd, grad
 -- Note: Perhaps this RType deserves an upgrade to Scheme, whenever we upgrade to typeclasses.
@@ -80,6 +83,33 @@ globalFenv = [("double", FPair (doubleFwd, [doubleInv])),
               ("plusI", FPair (plusIFwd, [plusIInv1, plusIInv2])),
               ("mult", FPair (multFwd, [multInv1, multInv2])),
               ("multI", FPair (multIFwd, [multIInv1, multIInv2]))]
+
+-- Creates a instance of a FPair, that has identifier names given by a monadic function. m should be a supply monad
+-- Works by having each identifier renamed using this function
+instantiate :: (Monad m) => (String -> m String) -> String -> m FPair
+instantiate gen n = do
+  let (FPair (fwd, inv)) = case lookup n globalFenv of
+                             Just f -> f
+                             Nothing -> error ("InjF " ++ n ++ " not found!")
+  let (FDecl (_, v1, v2, _, _)) = fwd
+  let allVarNames = v1 ++ v2  -- All indentifier names in the InjF
+  newVarNames <- mapM gen allVarNames -- These are the new names given by the gen function
+  let instantiateDecl d = foldr (\(old, new) decl -> renameDecl old new decl) d (zip allVarNames newVarNames) -- Rename all identifiers with the new names
+  return (FPair (instantiateDecl fwd, map instantiateDecl inv))
+
+rename :: String -> String -> IRExpr -> IRExpr
+rename old new (IRVar n) | n == old = IRVar new
+rename old new expr = expr
+
+renameAll :: String -> String -> IRExpr -> IRExpr
+renameAll old new = irMap (rename old new)
+
+renameDecl :: String -> String -> FDecl -> FDecl
+renameDecl old new (FDecl (sig, inVars, outVars, expr, derivs)) =
+  FDecl (sig, map renS inVars, map renS outVars, ren expr, map (Data.Bifunctor.bimap renS ren) derivs)
+  where
+    ren = renameAll old new -- A function that renames old to new
+    renS s = if s == old then new else s  -- A function that replaces old string with new strings
 
 getHornClause :: Expr -> [HornClause]
 getHornClause e = case e of

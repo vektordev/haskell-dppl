@@ -212,6 +212,12 @@ testFibonacci :: Program
 testFibonacci = Program [ ("main","idx" #-># apply (apply fix (var "fibonacci")) (var "idx")),
                           ("fibonacci", "fib" #-># ("n" #-># ifThenElse (var "n" #<# constF 2) (var "n") (apply (var "fib") (var "n" #-# constF 1) #+# apply (var "fib") (var "n" #-# constF 2))) )] []
 
+testPartialInjF :: Program
+testPartialInjF = Program [("main", apply (injF "plus" [uniform]) (constF 5))] []
+
+testInjFRenaming :: Program
+testInjFRenaming = Program [("main", apply ("a" #-># (var "a" #+# uniform)) (constF 5))] []
+
 
 {-
 flipCoin :: Expr Double
