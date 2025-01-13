@@ -520,10 +520,12 @@ toIRGenerate typeEnv (Lambda t name subExpr) = do
       let newTypeEnv = (name, (paramRType, False)):typeEnv
       irTuple <- toIRGenerate newTypeEnv subExpr
       return $ IRLambda name irTuple
-toIRGenerate typeEnv (Apply _ l v) = do
+toIRGenerate typeEnv (Apply TypeInfo {rType=rt} l v) = do
   l' <- toIRGenerate typeEnv l
   v' <- toIRGenerate typeEnv v
-  return $ IRApply l' v'
+  case rt of
+    TArrow _ _ -> return $ IRApply l' v'
+    _ -> return $ IRInvoke $ IRApply l' v'
 toIRGenerate typeEnv (ReadNN _ name subexpr) = do
   subexpr' <- toIRGenerate typeEnv subexpr
   return $ IRApply (IRVar "randomchoice") (IREvalNN name subexpr')
@@ -693,13 +695,15 @@ toIRIntegrate conf typeEnv (Lambda t name subExpr) low high = do
       let newTypeEnv = (name, (paramRType, False)):typeEnv
       irTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRIntegrate conf newTypeEnv subExpr low high))
       return (IRLambda name irTuple, const0, const0)
-toIRIntegrate conf typeEnv (Apply _ l v) low high = do
+toIRIntegrate conf typeEnv (Apply TypeInfo{rType=rt} l v) low high = do
   vIR <- toIRGenerate typeEnv v
   (lIR, _, _) <- toIRIntegrate conf typeEnv l low high -- Dim and BC are irrelevant here. We need to extract these from the return tuple
-  if countBranches conf then
-    return (IRTFst (IRApply lIR vIR), IRTFst (IRTSnd (IRApply lIR vIR)), IRTSnd (IRTSnd (IRApply lIR vIR)))
-  else
-    return (IRTFst (IRApply lIR vIR), IRTSnd (IRApply lIR vIR), const0)
+  case rt of
+    TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
+    _ -> if countBranches conf then
+           return (IRTFst (IRInvoke (IRApply lIR vIR)), IRTFst (IRTSnd (IRInvoke (IRApply lIR vIR))), IRTSnd (IRTSnd (IRInvoke (IRApply lIR vIR))))
+         else
+           return (IRTFst (IRInvoke (IRApply lIR vIR)), IRTSnd (IRInvoke (IRApply lIR vIR)), const0)
 toIRIntegrate conf typeEnv (Var _ n) low high = do
   -- Variable might be a function
   case lookup n typeEnv of
