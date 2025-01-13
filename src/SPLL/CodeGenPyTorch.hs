@@ -172,7 +172,12 @@ generateExpression (IRLetIn name val body) = "((" ++ name ++ ":=" ++ generateExp
 generateExpression x = error ("Unknown expression in PyTorch codegen: " ++ show x)
 
 generateInvokeExpression :: IRExpr -> String
+-- IRInvoke is always the outermost expression of the block compiled here. Compile the function and the parameters first, then end it all with an ")"
 generateInvokeExpression (IRInvoke expr) = generateInvokeExpression expr ++ ")"
+-- Not that the parameters are in reverse order. The innermost parameter is applied first
+-- We have more parameters
 generateInvokeExpression (IRApply f@(IRApply _ _) val) = generateInvokeExpression f ++ ", " ++ generateExpression val
+-- This is the last parameter
 generateInvokeExpression (IRApply f val) = generateInvokeExpression f ++ generateExpression val
+-- No more parameters, compile the fucntion
 generateInvokeExpression expr = "(" ++ generateExpression expr ++ ")("
