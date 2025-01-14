@@ -31,7 +31,7 @@ import SPLL.Lang.Types
 import SPLL.Lang.Lang
 import SPLL.Typing.Typing
 import SPLL.Typing.RType
-import PredefinedFunctions (globalFenv)
+import PredefinedFunctions (globalFenv, parameterCount)
 
 --import Text.Megaparsec.Debug (dbg)
 dbg x y = y
@@ -137,7 +137,9 @@ pApply = dbg "apply" $ do
       Just constructor -> return (construct2 constructor args)
       Nothing -> case lookup name unaryFs of
         Just constructor -> return (construct1 constructor args)
-        Nothing -> return (applyN function args)
+        Nothing -> case lookup name injFs of
+          Just (expectedParams, constructor) -> return (constructN expectedParams constructor args)
+          Nothing -> return (applyN function args)
     otherwise -> return (applyN function args)
 
 pTheta :: Parser Expr
@@ -179,6 +181,10 @@ construct2 :: (TypeInfo -> Expr -> Expr -> Expr) -> [Expr] -> Expr
 construct2 constructor [arg1, arg2] = constructor makeTypeInfo arg2 arg2
 construct2 _ _ = error "tried to apply the wrong number of arguments."
 
+constructN :: Int -> (TypeInfo -> [Expr] -> Expr) -> [Expr] -> Expr
+constructN n constructor args | n == length args = constructor makeTypeInfo args
+constructN _ _ _ = error "tried to apply the wrong number of arguments."
+
 pVar :: Parser Expr
 pVar = do
   varname <- lexeme pIdentifier
@@ -191,11 +197,14 @@ binaryFs = [
   ("plusF", PlusF),
   ("plusI", PlusI)
   ]
-  
+
 unaryFs :: [(String, TypeInfo -> Expr -> Expr)]
 unaryFs = [
   ("negate", NegF)
   ]
+
+injFs :: [(String, (Int, TypeInfo -> [Expr] -> Expr))]
+injFs = [(name, (parameterCount name, (`InjF` name))) | (name, _) <- globalFenv]
 
 pConst :: Parser Expr
 pConst = choice [try pFloat, pIntVal]
@@ -247,7 +256,7 @@ valueParser = do
   x <- L.decimal
   return (VInt x)
 
-pCSV :: Parser [Value]  
+pCSV :: Parser [Value]
 pCSV = valueParser `sepBy` (symbol ",")
 
 pDefinition :: Parser (Either FnDecl NeuralDecl)
@@ -376,14 +385,12 @@ application = do
     args <- many (try atom <|> try (parens expr))
     case func of
         Var _ name -> case lookup name binaryFs of
-            Just constructor -> case args of
-                [arg1, arg2] -> return $ constructor makeTypeInfo arg1 arg2
-                _ -> fail $ "Binary function " ++ name ++ " requires exactly 2 arguments"
+            Just constructor -> return (construct2 constructor args)
             Nothing -> case lookup name unaryFs of
-                Just constructor -> case args of
-                    [arg] -> return $ constructor makeTypeInfo arg
-                    _ -> fail $ "Unary function " ++ name ++ " requires exactly 1 argument"
-                Nothing -> return $ foldl (Apply makeTypeInfo) func args
+                Just constructor -> return (construct1 constructor args)
+                Nothing -> case lookup name injFs of
+                  Just (expectedParams, constructor) -> return (constructN expectedParams constructor args)
+                  Nothing -> return $ foldl (Apply makeTypeInfo) func args
         _ -> return $ foldl (Apply makeTypeInfo) func args
 
 
@@ -443,7 +450,7 @@ mkOp = do
   case lookup op opList of
     Just constructor -> return $ constructor makeTypeInfo
     Nothing -> fail $ "unknown operator: " ++ op
-  
+
 
 -- | Operator table (precedence and associativity)
 opTable :: [[Operator Parser Expr]]

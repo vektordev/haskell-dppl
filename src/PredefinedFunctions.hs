@@ -5,7 +5,8 @@ FPair(..),
 FDecl(..),
 FEnv,
 instantiate,
-propagateValues
+propagateValues,
+parameterCount
 ) where
 
 import SPLL.Typing.RType (RType(..), Scheme(..))
@@ -143,6 +144,11 @@ propagateValues name values = case results of
     valueProd = sequence values
     Just (FPair (FDecl (_, paramNames, _, fwdExpr, _), _)) = lookup name globalFenv
 
+parameterCount :: String -> Int
+parameterCount name = do
+  case lookup name globalFenv of
+    Just (FPair (FDecl (_, params, _, _, _), _)) -> length params
+    _ -> error $ "Unknown InjF: " ++ name
 
 failConversionFwd :: Expr -> IRExpr
 failConversionFwd = error "Error during value conversion. This should not happen"
