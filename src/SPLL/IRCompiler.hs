@@ -16,6 +16,7 @@ import Control.Monad.Writer.Lazy
 import Control.Monad.Reader
 import Data.Functor.Identity
 import Data.Number.Erf (erf)
+import PredefinedFunctions (FDecl(applicability))
 
 -- SupplyT needs to be a transformer, because Supply does not implement Functor correctly
 type CompilerMonad a = WriterT [(String, IRExpr)] (SupplyT Int Identity) a
@@ -271,10 +272,10 @@ toIRProbability conf typeEnv (TCons _ t1Expr t2Expr) sample = do
 toIRProbability conf typeEnv (InjF _ name [param]) sample = do
   fPair <- instantiate mkVariable name  -- FPair of the InjF with unique names
   let FPair (_, [inv]) = fPair
-  let FDecl {inputVars=[v], body=invExpr, derivatives=[(_, invDerivExpr)]} = inv
+  let FDecl {inputVars=[v], body=invExpr, applicability=appTest, derivatives=[(_, invDerivExpr)]} = inv
   let letInBlock = IRLetIn v sample invExpr
   (paramExpr, paramDim, paramBranches) <- toIRProbability conf typeEnv param letInBlock
-  let returnExpr = IRLetIn v sample (IROp OpMult paramExpr (IRUnaryOp OpAbs invDerivExpr))
+  let returnExpr = IRLetIn v sample (IRIf appTest (IROp OpMult paramExpr (IRUnaryOp OpAbs invDerivExpr)) const0)
   return (returnExpr, paramDim, paramBranches)
 toIRProbability conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [param1, param2]) sample
   | extras `hasAlgorithm` "injF2Left" = do
@@ -282,13 +283,13 @@ toIRProbability conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [pa
   let FPair (fwd, inversions) = fPair
   let FDecl{inputVars=[v2, v3], outputVars=[v1]} = fwd
   let [invDecl] = filter (\(FDecl {outputVars=[w1]}) -> v3==w1) inversions   --This should only return one inversion
-  let FDecl {inputVars=[x2, x3], body=invExpr, derivatives=invDerivs} = invDecl
+  let FDecl {inputVars=[x2, x3], body=invExpr, applicability=appTest, derivatives=invDerivs} = invDecl
   let Just invDeriv = lookup v1 invDerivs
   leftExpr <- toIRGenerate typeEnv param1
   let (detVar, sampleVar) = if x2 == v2 then (x2, x3) else (x3, x2)
   let letInBlock = IRLetIn detVar leftExpr (IRLetIn sampleVar sample invExpr)
   (paramExpr, paramDim, paramBranches) <- toIRProbability conf typeEnv param2 letInBlock
-  let returnExpr = IRLetIn detVar leftExpr (IRLetIn sampleVar sample (IROp OpMult paramExpr (IRUnaryOp OpAbs invDeriv)))
+  let returnExpr = IRLetIn detVar leftExpr (IRLetIn sampleVar sample (IRIf appTest (IROp OpMult paramExpr (IRUnaryOp OpAbs invDeriv)) const0))
   return (returnExpr, paramDim, paramBranches) --FIXME
 toIRProbability conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [param1, param2]) sample
   | extras `hasAlgorithm` "injF2Right" = do
@@ -296,13 +297,13 @@ toIRProbability conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [pa
   let FPair (fwd, inversions) = fPair 
   let FDecl {inputVars=[v2, v3], outputVars=[v1]} = fwd
   let [invDecl] = filter (\(FDecl {outputVars=[w1]}) -> v2==w1) inversions   --This should only return one inversion
-  let FDecl {inputVars=[x2, x3], body=invExpr, derivatives=invDerivs} = invDecl
+  let FDecl {inputVars=[x2, x3], body=invExpr, applicability=appTest, derivatives=invDerivs} = invDecl
   let Just invDeriv = lookup v1 invDerivs
   leftExpr <- toIRGenerate typeEnv param2
   let (detVar, sampleVar) = if x2 == v3 then (x2, x3) else (x3, x2)
   let letInBlock = IRLetIn detVar leftExpr (IRLetIn sampleVar sample invExpr)
   (paramExpr, paramDim, paramBranches) <- toIRProbability conf typeEnv param1 letInBlock
-  let returnExpr = IRLetIn detVar leftExpr (IRLetIn sampleVar sample (IROp OpMult paramExpr (IRUnaryOp OpAbs invDeriv)))
+  let returnExpr = IRLetIn detVar leftExpr (IRLetIn sampleVar sample (IRIf appTest (IROp OpMult paramExpr (IRUnaryOp OpAbs invDeriv)) const0))
   return (returnExpr, paramDim, paramBranches)
 toIRProbability conf typeEnv (InjF TypeInfo {tags=extras} name [left, right]) sample
   | extras `hasAlgorithm` "injF2Enumerable" = do
