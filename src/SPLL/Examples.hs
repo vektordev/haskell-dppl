@@ -219,6 +219,12 @@ testInjFRenaming :: Program
 testInjFRenaming = Program [("main", apply ("a" #-># (var "a" #+# uniform)) (constF 5))] []
 
 
+testLeft :: Program
+testLeft = Program [("main", injF "fromLeft" [injF "left" [constF 2]])] []
+
+testEither :: Program
+testEither = Program [("main", ifThenElse (bernoulli 0.5) (injF "left" [uniform]) (injF "right" [constI 1]))] []
+
 {-
 flipCoin :: Expr Double
 flipCoin = GreaterThan makeTypeInfo uniform (constF 0.5))

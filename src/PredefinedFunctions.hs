@@ -9,7 +9,7 @@ propagateValues,
 parameterCount
 ) where
 
-import SPLL.Typing.RType (RType(..), Scheme(..))
+import SPLL.Typing.RType (RType(..), Scheme(..), TVarR(..))
 import SPLL.IntermediateRepresentation (IRExpr, IRExpr(..), Operand(..), UnaryOperand(..), irMap) --FIXME
 import SPLL.Lang.Lang
 import SPLL.Typing.Typing
@@ -23,63 +23,77 @@ import qualified Data.Bifunctor
 
 -- InputVars, OutputVars, fwd, grad
 -- Note: Perhaps this RType deserves an upgrade to Scheme, whenever we upgrade to typeclasses.
-newtype FDecl = FDecl (Scheme, [String], [String], IRExpr, [(String, IRExpr)]) deriving (Show, Eq)
+data FDecl = FDecl {contract :: Scheme, inputVars :: [String], outputVars :: [String], body :: IRExpr, applicability :: IRExpr, derivatives :: [(String, IRExpr)]} deriving (Show, Eq)
 -- Forward, inverse
 newtype FPair = FPair (FDecl, [FDecl]) deriving (Show, Eq)
 type FEnv = [(String, FPair)]
 
+-- ============================ UNARY ARITHMETIC ============================
+
 doubleFwd :: FDecl
-doubleFwd = FDecl (Forall [] (TArrow TFloat TFloat), ["a"], ["b"], IROp OpMult (IRVar "a") (IRConst $ VFloat 2) , [("a", IRConst $ VFloat 2)])
+doubleFwd = FDecl (Forall [] (TArrow TFloat TFloat)) ["a"] ["b"] (IROp OpMult (IRVar "a") (IRConst $ VFloat 2)) (IRConst (VBool True)) [("a", IRConst $ VFloat 2)]
 doubleInv :: FDecl
-doubleInv = FDecl (Forall [] (TArrow TFloat TFloat), ["b"], ["a"], IROp OpDiv (IRVar "b") (IRConst $ VFloat 2) , [("b", IRConst $ VFloat 0.5)])
+doubleInv = FDecl (Forall [] (TArrow TFloat TFloat)) ["b"] ["a"] (IROp OpDiv (IRVar "b") (IRConst $ VFloat 2)) (IRConst (VBool True)) [("b", IRConst $ VFloat 0.5)]
 
 expFwd :: FDecl
-expFwd = FDecl (Forall [] (TArrow TFloat TFloat), ["a"], ["b"], IRUnaryOp OpExp (IRVar "a") , [("a", IRUnaryOp OpExp (IRVar "a"))])
+expFwd = FDecl (Forall [] (TArrow TFloat TFloat)) ["a"] ["b"] (IRUnaryOp OpExp (IRVar "a")) (IRConst (VBool True)) [("a", IRUnaryOp OpExp (IRVar "a"))]
 expInv :: FDecl
-expInv = FDecl (Forall [] (TArrow TFloat TFloat), ["b"], ["a"], IRUnaryOp OpLog (IRVar "b") , [("b", IROp OpDiv (IRConst (VFloat 1)) (IRVar "b"))])
+expInv = FDecl (Forall [] (TArrow TFloat TFloat)) ["b"] ["a"] (IRUnaryOp OpLog (IRVar "b")) (IRConst (VBool True)) [("b", IROp OpDiv (IRConst (VFloat 1)) (IRVar "b"))]
 
 negFwd :: FDecl
-negFwd = FDecl (Forall [] (TArrow TFloat TFloat), ["a"], ["b"], IRUnaryOp OpNeg (IRVar "a") , [("a", IRConst (VFloat (-1)))])
+negFwd = FDecl (Forall [] (TArrow TFloat TFloat)) ["a"] ["b"] (IRUnaryOp OpNeg (IRVar "a")) (IRConst (VBool True)) [("a", IRConst (VFloat (-1)))]
 negInv :: FDecl
-negInv = FDecl (Forall [] (TArrow TFloat TFloat), ["b"], ["a"], IRUnaryOp OpNeg (IRVar "b") , [("b", IRConst (VFloat (-1)))])
+negInv = FDecl (Forall [] (TArrow TFloat TFloat)) ["b"] ["a"] (IRUnaryOp OpNeg (IRVar "b")) (IRConst (VBool True)) [("b", IRConst (VFloat (-1)))]
+
+leftFwd :: FDecl
+leftFwd = FDecl (Forall [TV "a", TV "b"] (TVarR (TV "a") `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b")))) ["a"] ["b"] (IRLeft (IRVar "a")) (IRConst (VBool True)) [("a", IRConst (VFloat 1))]
+fromLeftFwd :: FDecl
+fromLeftFwd = FDecl (Forall [TV "a", TV "b"] (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "a"))) ["b"] ["a"] (IRFromLeft (IRVar "b")) (IRConst (VBool True)) [("a", IRConst (VFloat 1))]
+
+rightFwd :: FDecl
+rightFwd = FDecl (Forall [TV "a", TV "b"] (TVarR (TV "b") `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b")))) ["a"] ["b"] (IRRight (IRVar "a")) (IRConst (VBool True)) [("a", IRConst (VFloat 1))]
+fromRightFwd :: FDecl
+fromRightFwd = FDecl (Forall [TV "a", TV "b"] (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "b"))) ["b"] ["a"] (IRFromRight (IRVar "b")) (IRConst (VBool True)) [("a", IRConst (VFloat 1))]
 
 plusFwd :: FDecl
-plusFwd = FDecl (Forall [] (TFloat `TArrow` (TFloat `TArrow` TFloat)), ["a", "b"], ["c"], IROp OpPlus (IRVar "a") (IRVar "b"), [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))])
+plusFwd = FDecl (Forall [] (TFloat `TArrow` (TFloat `TArrow` TFloat))) ["a", "b"] ["c"] (IROp OpPlus (IRVar "a") (IRVar "b")) (IRConst (VBool True)) [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))]
 plusInv1 :: FDecl
-plusInv1 = FDecl (Forall [] (TFloat `TArrow` (TFloat `TArrow` TFloat)), ["a", "c"], ["b"], IROp OpSub (IRVar "c") (IRVar "a"), [("a", IRConst (VFloat (-1))), ("c", IRConst (VFloat 1))])
+plusInv1 = FDecl (Forall [] (TFloat `TArrow` (TFloat `TArrow` TFloat))) ["a", "c"] ["b"] (IROp OpSub (IRVar "c") (IRVar "a")) (IRConst (VBool True)) [("a", IRConst (VFloat (-1))), ("c", IRConst (VFloat 1))]
 plusInv2 :: FDecl
-plusInv2 = FDecl (Forall [] (TFloat `TArrow` (TFloat `TArrow` TFloat)), ["b", "c"], ["a"], IROp OpSub (IRVar "c") (IRVar "b"), [("b", IRConst (VFloat (-1))), ("c", IRConst (VFloat 1))])
+plusInv2 = FDecl (Forall [] (TFloat `TArrow` (TFloat `TArrow` TFloat))) ["b", "c"] ["a"] (IROp OpSub (IRVar "c") (IRVar "b")) (IRConst (VBool True)) [("b", IRConst (VFloat (-1))), ("c", IRConst (VFloat 1))]
 
 multFwd :: FDecl
-multFwd = FDecl (Forall [] (TFloat `TArrow` (TFloat `TArrow` TFloat)), ["a", "b"], ["c"], IROp OpMult (IRVar "a") (IRVar "b"), [("a", IRVar "b"), ("b", IRVar "a")])
+multFwd = FDecl (Forall [] (TFloat `TArrow` (TFloat `TArrow` TFloat))) ["a", "b"] ["c"] (IROp OpMult (IRVar "a") (IRVar "b")) (IRConst (VBool True)) [("a", IRVar "b"), ("b", IRVar "a")]
 multInv1 :: FDecl
-multInv1 = FDecl (Forall [] (TFloat `TArrow` (TFloat `TArrow` TFloat)), ["a", "c"], ["b"], IROp OpDiv (IRVar "c") (IRVar "a"), [("a", IRUnaryOp OpNeg (IROp OpDiv (IRVar "c") (IROp OpMult (IRVar "a") (IRVar "a")))), ("c", IROp OpDiv (IRConst (VFloat 1)) (IRVar "a"))])
+multInv1 = FDecl (Forall [] (TFloat `TArrow` (TFloat `TArrow` TFloat))) ["a", "c"] ["b"] (IROp OpDiv (IRVar "c") (IRVar "a")) (IRConst (VBool True)) [("a", IRUnaryOp OpNeg (IROp OpDiv (IRVar "c") (IROp OpMult (IRVar "a") (IRVar "a")))), ("c", IROp OpDiv (IRConst (VFloat 1)) (IRVar "a"))]
 multInv2 :: FDecl
-multInv2 = FDecl (Forall [] (TFloat `TArrow` (TFloat `TArrow` TFloat)), ["b", "c"], ["a"], IROp OpDiv (IRVar "c") (IRVar "b"), [("b", IRUnaryOp OpNeg (IROp OpDiv (IRVar "c") (IROp OpMult (IRVar "b") (IRVar "b")))), ("c", IROp OpDiv (IRConst (VFloat 1)) (IRVar "b"))])
+multInv2 = FDecl (Forall [] (TFloat `TArrow` (TFloat `TArrow` TFloat))) ["b", "c"] ["a"] (IROp OpDiv (IRVar "c") (IRVar "b")) (IRConst (VBool True)) [("b", IRUnaryOp OpNeg (IROp OpDiv (IRVar "c") (IROp OpMult (IRVar "b") (IRVar "b")))), ("c", IROp OpDiv (IRConst (VFloat 1)) (IRVar "b"))]
 
 plusIFwd :: FDecl
-plusIFwd = FDecl (Forall [] (TInt `TArrow` (TInt `TArrow` TInt)), ["a", "b"], ["c"], IROp OpPlus (IRVar "a") (IRVar "b"), [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))])
+plusIFwd = FDecl (Forall [] (TInt `TArrow` (TInt `TArrow` TInt))) ["a", "b"] ["c"] (IROp OpPlus (IRVar "a") (IRVar "b")) (IRConst (VBool True)) [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))]
 plusIInv1 :: FDecl
-plusIInv1 = FDecl (Forall [] (TInt `TArrow` (TInt `TArrow` TInt)), ["a", "c"], ["b"], IROp OpSub (IRVar "c") (IRVar "a"), [("a", IRConst (VFloat (-1))), ("c", IRConst (VFloat 1))])
+plusIInv1 = FDecl (Forall [] (TInt `TArrow` (TInt `TArrow` TInt))) ["a", "c"] ["b"] (IROp OpSub (IRVar "c") (IRVar "a")) (IRConst (VBool True)) [("a", IRConst (VFloat (-1))), ("c", IRConst (VFloat 1))]
 plusIInv2 :: FDecl
-plusIInv2 = FDecl (Forall [] (TInt `TArrow` (TInt `TArrow` TInt)), ["b", "c"], ["a"], IROp OpSub (IRVar "c") (IRVar "b"), [("b", IRConst (VFloat (-1))), ("c", IRConst (VFloat 1))])
+plusIInv2 = FDecl (Forall [] (TInt `TArrow` (TInt `TArrow` TInt))) ["b", "c"] ["a"] (IROp OpSub (IRVar "c") (IRVar "b")) (IRConst (VBool True)) [("b", IRConst (VFloat (-1))), ("c", IRConst (VFloat 1))]
 
 multIFwd :: FDecl
-multIFwd = FDecl (Forall [] (TInt `TArrow` (TInt `TArrow` TInt)), ["a", "b"], ["c"], IROp OpMult (IRVar "a") (IRVar "b"), [("a", IRVar "b"), ("b", IRVar "a")])
+multIFwd = FDecl (Forall [] (TInt `TArrow` (TInt `TArrow` TInt))) ["a", "b"] ["c"] (IROp OpMult (IRVar "a") (IRVar "b")) (IRConst (VBool True)) [("a", IRVar "b"), ("b", IRVar "a")]
 multIInv1 :: FDecl
-multIInv1 = FDecl (Forall [] (TInt `TArrow` (TInt `TArrow` TInt)), ["a", "c"], ["b"], IROp OpDiv (IRVar "c") (IRVar "a"), [("a", IRUnaryOp OpNeg (IROp OpDiv (IRVar "c") (IROp OpMult (IRVar "a") (IRVar "a")))), ("c", IROp OpDiv (IRConst (VFloat 1)) (IRVar "a"))])
+multIInv1 = FDecl (Forall [] (TInt `TArrow` (TInt `TArrow` TInt))) ["a", "c"] ["b"] (IROp OpDiv (IRVar "c") (IRVar "a")) (IRConst (VBool True)) [("a", IRUnaryOp OpNeg (IROp OpDiv (IRVar "c") (IROp OpMult (IRVar "a") (IRVar "a")))), ("c", IROp OpDiv (IRConst (VFloat 1)) (IRVar "a"))]
 multIInv2 :: FDecl
-multIInv2 = FDecl (Forall [] (TInt `TArrow` (TInt `TArrow` TInt)), ["b", "c"], ["a"], IROp OpDiv (IRVar "c") (IRVar "b"), [("b", IRUnaryOp OpNeg (IROp OpDiv (IRVar "c") (IROp OpMult (IRVar "b") (IRVar "b")))), ("c", IROp OpDiv (IRConst (VFloat 1)) (IRVar "b"))])
-
+multIInv2 = FDecl (Forall [] (TInt `TArrow` (TInt `TArrow` TInt))) ["b", "c"] ["a"] (IROp OpDiv (IRVar "c") (IRVar "b")) (IRConst (VBool True)) [("b", IRUnaryOp OpNeg (IROp OpDiv (IRVar "c") (IROp OpMult (IRVar "b") (IRVar "b")))), ("c", IROp OpDiv (IRConst (VFloat 1)) (IRVar "b"))]
 
 tConsFwd :: FDecl
-tConsFwd = FDecl (Forall [] (TFloat `TArrow` (TFloat `TArrow` Tuple TFloat TFloat)), ["a", "b"], ["c", "d"], IRTCons (IRVar "a") (IRVar "b"), [("a", IRTCons (IRConst (VFloat 1)) (IRVar "b")), ("b", IRTCons (IRVar "a") (IRConst (VFloat 1)))])
--- Cannot declare a backward pass here
+tConsFwd = FDecl (Forall [] (TFloat `TArrow` (TFloat `TArrow` Tuple TFloat TFloat))) ["a", "b"] ["c", "d"] (IRTCons (IRVar "a") (IRVar "b")) (IRConst (VBool True)) [("a", IRTCons (IRConst (VFloat 1)) (IRVar "b")), ("b", IRTCons (IRVar "a") (IRConst (VFloat 1)))]-- Cannot declare a backward pass here
 
 globalFenv :: FEnv
 globalFenv = [("double", FPair (doubleFwd, [doubleInv])),
               ("exp", FPair (expFwd, [expInv])),
               ("neg", FPair (negFwd, [negInv])),
+              ("left", FPair(leftFwd, [fromLeftFwd])),
+              ("right", FPair(rightFwd, [fromRightFwd])),
+              ("fromLeft", FPair(fromLeftFwd, [leftFwd])),
+              ("fromRight", FPair(fromRightFwd, [rightFwd])),
               ("plus", FPair (plusFwd, [plusInv1, plusInv2])),
               ("plusI", FPair (plusIFwd, [plusIInv1, plusIInv2])),
               ("mult", FPair (multFwd, [multInv1, multInv2])),
@@ -92,7 +106,7 @@ instantiate gen n = do
   let (FPair (fwd, inv)) = case lookup n globalFenv of
                              Just f -> f
                              Nothing -> error ("InjF " ++ n ++ " not found!")
-  let (FDecl (_, v1, v2, _, _)) = fwd
+  let FDecl {inputVars=v1, outputVars=v2} = fwd
   let allVarNames = v1 ++ v2  -- All indentifier names in the InjF
   newVarNames <- mapM gen allVarNames -- These are the new names given by the gen function
   let instantiateDecl d = foldr (\(old, new) decl -> renameDecl old new decl) d (zip allVarNames newVarNames) -- Rename all identifiers with the new names
@@ -106,8 +120,8 @@ renameAll :: String -> String -> IRExpr -> IRExpr
 renameAll old new = irMap (rename old new)
 
 renameDecl :: String -> String -> FDecl -> FDecl
-renameDecl old new (FDecl (sig, inVars, outVars, expr, derivs)) =
-  FDecl (sig, map renS inVars, map renS outVars, ren expr, map (Data.Bifunctor.bimap renS ren) derivs)
+renameDecl old new FDecl {contract=sig, inputVars=inVars, outputVars=outVars, body=expr, applicability=app,  derivatives=derivs} =
+  FDecl {contract=sig, inputVars=map renS inVars, outputVars=map renS outVars, body=ren expr, applicability=ren app, derivatives=map (Data.Bifunctor.bimap renS ren) derivs}
   where
     ren = renameAll old new -- A function that renames old to new
     renS s = if s == old then new else s  -- A function that replaces old string with new strings
@@ -118,14 +132,14 @@ getHornClause e = case e of
     where
       subst = (outV, eCN):zip inV (getInputChainNames e)
       eCN = chainName $ getTypeInfo e
-      FDecl (_, inV, [outV], _, _) = eFwd
+      FDecl {inputVars = inV, outputVars = [outV]} = eFwd
       Just (FPair (eFwd, eInv)) = lookup name globalFenv
   _ -> error "Cannot get horn clause of non-predefined function"
 
 constructHornClause :: [(String, ChainName)] -> FDecl -> HornClause
 constructHornClause subst decl = (map lookUpSubstAddDet inV, map lookUpSubstAddDet outV, (StubInjF, 0)) --FIXME correct inversion parameters 
   where
-    FDecl (_, inV, outV, _, _) = decl
+    FDecl {inputVars = inV, outputVars = outV} = decl
     lookupSubst v = fromJust (lookup v subst)
     lookUpSubstAddDet v = (lookupSubst v, CInferDeterministic)
 
@@ -142,12 +156,12 @@ propagateValues name values = case results of
     letInBlocks = map (foldr (\(n, p) e -> IRLetIn n (IRConst (fmap failConversionFwd p)) e) fwdExpr) namedParams
     namedParams = map (zip paramNames) valueProd
     valueProd = sequence values
-    Just (FPair (FDecl (_, paramNames, _, fwdExpr, _), _)) = lookup name globalFenv
+    Just (FPair (FDecl {inputVars = paramNames, body = fwdExpr}, _)) = lookup name globalFenv
 
 parameterCount :: String -> Int
 parameterCount name = do
   case lookup name globalFenv of
-    Just (FPair (FDecl (_, params, _, _, _), _)) -> length params
+    Just (FPair (FDecl {inputVars=params}, _)) -> length params
     _ -> error $ "Unknown InjF: " ++ name
 
 failConversionFwd :: Expr -> IRExpr

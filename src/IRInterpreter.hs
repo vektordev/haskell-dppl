@@ -198,6 +198,34 @@ generate f globalEnv env [] (IRElementOf elemExpr listExpr) = do
   case listVal of
     VList a -> return $ VBool (elemVal `elem` a)
     _ -> error "Type error: ElementOf must be called on a list"
+generate f globalEnv env [] (IRLeft expr) = do
+  x <- generate f globalEnv env [] expr
+  return $ VEither (Left x)
+generate f globalEnv env [] (IRRight expr) = do
+  x <- generate f globalEnv env [] expr
+  return $ VEither (Right x)
+generate f globalEnv env [] (IRFromLeft expr) = do
+  x <- generate f globalEnv env [] expr
+  case x of
+    VEither (Left l) -> return l
+    _ -> error $ "Type error: fromLeftrequires an either left: " ++ show x
+generate f globalEnv env [] (IRFromRight expr) = do
+  x <- generate f globalEnv env [] expr
+  case x of
+    VEither (Right r) -> return r
+    _ -> error $ "Type error: fromRight requires an either right: " ++ show x
+generate f globalEnv env [] (IRIsLeft expr) = do
+  x <- generate f globalEnv env [] expr
+  case x of
+    VEither (Left r) -> return (VBool True)
+    VEither (Right r) -> return (VBool False)
+    _ -> error $ "Type error: isLeft requires an either: " ++ show x
+generate f globalEnv env [] (IRIsRight expr) = do
+  x <- generate f globalEnv env [] expr
+  case x of
+    VEither (Left r) -> return (VBool False)
+    VEither (Right r) -> return (VBool True)
+    _ -> error $ "Type error: isLeft requires an either: " ++ show x
 generate f globalEnv env [] (IRDensity IRUniform expr) = do
   x <- generate f globalEnv env [] expr
   return $ irPDF IRUniform x

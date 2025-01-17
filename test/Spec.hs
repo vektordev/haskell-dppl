@@ -111,7 +111,9 @@ correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat
                                (testDimProb, VFloat 0.0, [], (VFloat (0.6 * 0.39894228040143265), VFloat 1)),
                                (gaussLists, VList [VFloat 0, VFloat 0, VFloat 0], [IRConst $ VThetaTree (ThetaTree [0.5, 1, 0] [])], (VFloat $ (normalPDF 0) * (normalPDF 0) * (normalPDF 0) / 16, VFloat 3)),
                                --(testPartialInjF, VFloat 5.5, [], (VFloat 1, VFloat 1))]
-                               (testInjFRenaming, VFloat 5.5, [], (VFloat 1, VFloat 1))]
+                               (testInjFRenaming, VFloat 5.5, [], (VFloat 1, VFloat 1)),
+                               (gaussLists, VList [VFloat 0, VFloat 0, VFloat 0], [IRConst $ VThetaTree (ThetaTree [0.5, 1, 0] [])], (VFloat $ (normalPDF 0) * (normalPDF 0) * (normalPDF 0) / 16, VFloat 3)),
+                               (testLeft, VFloat 2, [], (VFloat 1.0, VFloat 0))]
 
                               --(testLambdaParameter, VFloat 10, [], VFloat 1.0)]
 

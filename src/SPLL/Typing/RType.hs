@@ -10,6 +10,7 @@ data RType = TBool
            | TThetaTree
            | ListOf RType
            | Tuple RType RType
+           | TEither RType RType
            | NullList
            | BottomTuple
            | RIdent String
@@ -39,6 +40,7 @@ matches (GreaterType t1 t2) (GreaterType t3 t4) = case (greaterType t1 t2, great
     (Nothing, Nothing) -> True
     (x, y) -> False
 matches (Tuple t11 t12) (Tuple t21 t22) = t11 `matches` t21 && t12 `matches` t22
+matches (TEither t11 t12) (TEither t21 t22) = t11 `matches` t21 && t12 `matches` t22
 matches _ _ = False -- TODO: This might be too aggressive, or it might not break when RType changes.
   
 data Scheme = Forall [TVarR] RType
@@ -56,5 +58,6 @@ isOnlyNumbers TInt = True
 isOnlyNumbers (a `TArrow` b) = isOnlyNumbers b
 isOnlyNumbers (ListOf t) = isOnlyNumbers t
 isOnlyNumbers (Tuple a b) = isOnlyNumbers a && isOnlyNumbers b
+isOnlyNumbers (TEither a b) = isOnlyNumbers a && isOnlyNumbers b
 isOnlyNumbers _ = False
 

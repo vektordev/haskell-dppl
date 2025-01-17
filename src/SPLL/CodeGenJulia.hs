@@ -18,7 +18,7 @@ filet = init . tail
 
 wrap :: String -> [String] -> String -> [String]
 wrap hd [singleline] tl = [hd ++ singleline ++ tl]
-wrap hd (block) tl = [hd ++ head block] ++ indentOnce (filet block ++ [last block ++ tl])
+wrap hd block tl = (hd ++ head block) : indentOnce (filet block ++ [last block ++ tl])
 wrap _ [] _ = undefined
 
 indentOnce :: [String] -> [String]
@@ -45,7 +45,7 @@ juliaUnaryOps OpLog = "log"
 juliaUnaryOps x = error ("Unknown Julia operator: " ++ show x)
 
 juliaVal :: IRValue -> String
-juliaVal (VList xs) = "[" ++ (intercalate "," $ map juliaVal xs) ++ "]"
+juliaVal (VList xs) = "[" ++ intercalate "," (map juliaVal xs) ++ "]"
 juliaVal (VInt i) = show i
 juliaVal (VFloat f) = show f
 juliaVal (VBool f) = if f then "true" else "false"
@@ -55,7 +55,7 @@ unlinesTrimLeft :: [String] -> String
 unlinesTrimLeft = intercalate "\n"
 
 onHead :: (a -> a) -> [a] -> [a]
-onHead f (x:xs) = (f x : xs)
+onHead f (x:xs) = f x : xs
 
 generateFunctions :: [(String, IRExpr)] -> [String]
 generateFunctions = concatMap generateFunction
@@ -100,6 +100,12 @@ generateExpression (IRHead x) = "(" ++ generateExpression x ++ ")[1]"
 generateExpression (IRTail x) = "(" ++ generateExpression x ++ ")[2:end]"
 generateExpression (IRTFst x) = "(" ++ generateExpression x ++ ")[1]"
 generateExpression (IRTSnd x) = "(" ++ generateExpression x ++ ")[2]"
+generateExpression (IRLeft x) = "(false, " ++ generateExpression x ++ ", nothing)"
+generateExpression (IRRight x) = "(true, nothing, " ++ generateExpression x ++ ")"
+generateExpression (IRFromLeft x) = "(" ++ generateExpression x ++ ")[2]"
+generateExpression (IRFromRight x) = "(" ++ generateExpression x ++ ")[3]"
+generateExpression (IRIsLeft x) = "!(" ++ generateExpression x ++ ")[1]"
+generateExpression (IRIsRight x) = "(" ++ generateExpression x ++ ")[1]"
 generateExpression (IRDensity dist x) = "density_" ++ show dist ++ "(" ++ generateExpression x ++ ")"
 generateExpression (IRCumulative dist x) = "cumulative_" ++ show dist ++ "(" ++ generateExpression x ++ ")"
 generateExpression (IRSample IRNormal) = "randn()"
@@ -125,5 +131,3 @@ generateInvokeExpression (IRApply f@(IRApply _ _) val) = generateInvokeExpressio
 generateInvokeExpression (IRApply f val) = generateInvokeExpression f ++ generateExpression val
 -- No more parameters, compile the fucntion
 generateInvokeExpression expr = "(" ++ generateExpression expr ++ ")("
-
-
