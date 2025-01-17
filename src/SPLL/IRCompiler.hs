@@ -67,15 +67,6 @@ getGlobalTypeEnv p = funcEnv ++ neuralEnv
 runSupplyVars :: (Monad m) => SupplyT Int m a -> m a
 runSupplyVars codeGen = runSupplyT codeGen (+1) 1
 
-forceUnaryOp :: UnaryOperand -> IRValue -> IRValue
-forceUnaryOp OpAbs (VFloat x) = VFloat (abs x)
-forceUnaryOp OpAbs (VInt x) = VInt (abs x)
-forceUnaryOp OpLog (VFloat x) = VFloat (log x)
-forceUnaryOp OpExp (VFloat x) = VFloat (exp x)
-forceUnaryOp OpNeg (VFloat x) = VFloat (-x)
-forceUnaryOp OpNeg (VInt x) = VInt (-x)
-forceUnaryOp OpNot (VBool x) = VBool (not x)
-
 mkVariable :: String -> CompilerMonad  Varname
 mkVariable suffix = do
   varID <- demand
