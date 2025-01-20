@@ -5,7 +5,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE FlexibleContexts #-}
 
-import Test.QuickCheck
+import Test.QuickCheck hiding (verbose)
 import System.Exit (exitWith, ExitCode(ExitFailure))
 
 import SPLL.Examples
@@ -30,7 +30,7 @@ import SpecExamples
 import Control.Exception.Base (SomeException, try)
 import Test.QuickCheck.Monadic (monadicIO, run, assert)
 import Test.QuickCheck.Property (failed, reason)
-import Debug.Trace (trace, traceShowId, traceId)
+import Debug.Trace (trace, traceShowId, traceId, traceShow)
 import SPLL.Lang.Lang (Value)
 import Control.Monad.Supply
 import Data.Foldable
@@ -106,6 +106,7 @@ correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat
                                (testDice, VInt 2, [], (VFloat 0.16666666, VFloat 0)),
                                (testDice, VInt 7, [], (VFloat 0, VFloat 0)),
                                (testDiceAdd, VInt 2, [], (VFloat (1 / 36), VFloat 0)),
+                               (testDiceAdd, VInt 7, [], (VFloat (6 / 36), VFloat 0)),
                                (testDiceAdd, VInt 1, [], (VFloat 0, VFloat 0)),
                                (testDimProb, VFloat 0.5, [], (VFloat 0.4, VFloat 0)),
                                (testDimProb, VFloat 0.0, [], (VFloat (0.6 * 0.39894228040143265), VFloat 1)),
@@ -181,6 +182,42 @@ prop_TopK = ioProperty $ do
   case (actualOutput0, actualOutput1) of
     (VTuple a (VFloat _), VTuple b (VFloat _)) -> return $ (b == VFloat 0.95) && (a == VFloat 0)
     _ -> return False
+
+
+-- DO NOT CHANGE THIS CODE WITHOUT ALSO CHANGING THE CODE IN THE README
+prop_CheckReadmeCodeListing1 :: Property
+prop_CheckReadmeCodeListing1 = ioProperty $ do
+  let twoDice = Program [("main", dice 6 #<+># dice 6)] []
+  let conf = CompilerConfig {verbose=0, topKThreshold=Nothing, countBranches=False, optimizerLevel=2}
+  gen <- evalRandIO (runGen conf twoDice [])
+  let VTuple (VFloat prob) (VFloat dim) = runProb conf twoDice [] gen
+  -- Original Listing above, Tests below
+  if gen == (VInt 2) || gen == (VInt 12) then
+    return $ (VFloat prob) `reasonablyClose` (VFloat $ 1/36)
+  else if gen == (VInt 3) || gen == (VInt 11) then
+    return $ (VFloat prob) `reasonablyClose` (VFloat $ 2/36)
+  else if gen == (VInt 4) || gen == (VInt 10) then
+    return $ (VFloat prob) `reasonablyClose` (VFloat $ 3/36)
+  else if gen == (VInt 5) || gen == (VInt 9) then
+    return $ (VFloat prob) `reasonablyClose` (VFloat $ 4/36)
+  else if gen == (VInt 6) || gen == (VInt 8) then
+    return $ (VFloat prob) `reasonablyClose` (VFloat $ 5/36)
+  else if gen == (VInt 7) then
+    return $ (VFloat prob) `reasonablyClose` (VFloat $ 6/36)
+  else
+    return $ counterexample ("No valid dice roll " ++ show gen) False
+
+-- DO NOT CHANGE THIS CODE WITHOUT ALSO CHANGING THE CODE IN THE README
+prop_CheckReadmeCodeListing2 :: Property
+prop_CheckReadmeCodeListing2 = ioProperty $ do
+  let dist = Program [("main", normal #*# constF 2 #+# constF 1)] []
+  let conf = CompilerConfig {verbose=2, topKThreshold=Nothing, countBranches=False, optimizerLevel=2}
+  gen <- evalRandIO (runGen conf dist [])
+  let VTuple (VFloat prob) (VFloat dim) = runProb conf dist [] gen
+  -- Original Listing above, Tests below
+  let (VFloat genF) = gen
+  return $ (VFloat prob) `reasonablyClose` (VFloat (normalPDF ((genF - 1) / 2) / 2))
+
 
 checkProbTestCase :: (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
 checkProbTestCase (p, inp, params, (out, VFloat outDim)) = ioProperty $ do
