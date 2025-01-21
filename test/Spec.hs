@@ -189,6 +189,9 @@ prop_TopK = ioProperty $ do
     (VTuple a (VFloat _), VTuple b (VFloat _)) -> return $ (b == VFloat 0.95) && (a == VFloat 0)
     _ -> return False
 
+prop_any :: Property
+prop_any = forAll (elements correctProbValuesTestCases) checkProbAny
+
 checkProbTestCase :: (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
 checkProbTestCase (p, inp, params, (out, VFloat outDim)) = ioProperty $ do
   actualOutput <- evalRandIO $ irDensity p inp params
@@ -238,6 +241,13 @@ checkInjFEqual (p, inp, params, (_, _)) = ioProperty $ do
   actualOutputInjF <- evalRandIO $ irDensityBC (preprocessToInjFProg p) inp params
   case (actualOutput, actualOutputInjF) of
     (VTuple a aDim, VTuple b bDim) -> return $ a `reasonablyClose` b .&&. aDim === bDim
+    _ -> return $ counterexample "Return type was no tuple" False
+
+checkProbAny :: (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
+checkProbAny (p, _, params, _) = ioProperty $ do
+  actualOutput <- evalRandIO $ irDensity p VAny params
+  case actualOutput of
+    VTuple a (VFloat d) -> return $ a === VFloat 1
     _ -> return $ counterexample "Return type was no tuple" False
 
 --prop_CheckProbTestCases = foldr (\(p, inp, out) acc -> do

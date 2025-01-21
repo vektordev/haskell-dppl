@@ -155,6 +155,7 @@ data GenericValue a = VBool Bool
            | VThetaTree ThetaTree
            | VAnyList
            | VClosure [(String, a)] String a 
+           | VAny -- Only used for marginal queries
            -- | Value of TArrow a b could be Expr TypeInfo, with Expr being a Lambda?
            deriving (Show, Eq, Ord)
            
