@@ -20,6 +20,7 @@ import SPLL.Typing.RInfer
 import SPLL.Analysis
 import SPLL.IntermediateRepresentation
 import SPLL.IRCompiler
+import SPLL.Validator
 import IRInterpreter
 import Data.Maybe (fromJust, catMaybes)
 import Control.Monad.Random.Lazy (Random, RandomGen, Rand, evalRandIO)
@@ -143,12 +144,22 @@ correctIntegralValuesTestCases =[(uniformProg, VFloat 0, VFloat 1, [], (VFloat 1
                                 (gaussLists, VList [VFloat 0, VFloat 0, VFloat 0], VList [VFloat 1, VFloat 2, VFloat 3], [IRConst $ VThetaTree (ThetaTree [0.5, 1, 0] [])], (VFloat $ ((normalCDF 1) - (normalCDF 0)) * ((normalCDF 2) - (normalCDF 0)) * ((normalCDF 3) - (normalCDF 0)) / 16, VFloat 0)),
                                 (testInjFRenaming, VFloat 5, VFloat 5.5, [], (VFloat 0.5, VFloat 0))]
 
+invalidTestCases :: [Program]
+invalidTestCases = [invalidDuplicateDecl1, invalidDuplicateDecl2, invalidDuplicateDecl3, invalidDuplicateDecl4, invalidDuplicateDecl5, invalidMissingDecl, invalidMissingInjF, invalidReservedName, invalidReservedName2, invalidWrongArgCount]
+
                                   --(testLambdaParameter, VFloat 9, VFloat 11, [], VFloat 1.0)]
                                   --(testCallLambdaAdvanced, VFloat 2, VFloat 3, [], VFloat 1.0),
                                   --(testLetIn, VFloat 1.5, VFloat 2, [], VFloat 0.5)]
 
 noTopKConfig :: CompilerConfig
 noTopKConfig = CompilerConfig Nothing False 0 2
+
+prop_CheckValidPrograms :: Property
+prop_CheckValidPrograms = forAll (elements correctProbValuesTestCases) checkValidPrograms
+
+prop_CheckInvalidPrograms :: Property
+prop_CheckInvalidPrograms = forAll (elements invalidTestCases) checkInvalidPrograms
+
 
 prop_CheckProbTestCases :: Property
 prop_CheckProbTestCases = forAll (elements correctProbValuesTestCases) checkProbTestCase
@@ -217,6 +228,16 @@ prop_CheckReadmeCodeListing2 = ioProperty $ do
   -- Original Listing above, Tests below
   let (VFloat genF) = gen
   return $ (VFloat prob) `reasonablyClose` (VFloat (normalPDF ((genF - 1) / 2) / 2))
+
+checkValidPrograms :: (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
+checkValidPrograms (p, _, _, _) = case validateProgram p of
+  Right _ -> property True
+  Left err -> counterexample err False
+
+checkInvalidPrograms :: Program -> Property
+checkInvalidPrograms p = case validateProgram p of
+  Left _ -> property True
+  Right _ -> counterexample "Program validates even though it should not" False
 
 
 checkProbTestCase :: (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property

@@ -219,6 +219,42 @@ testInjFRenaming :: Program
 testInjFRenaming = Program [("main", apply ("a" #-># (var "a" #+# uniform)) (constF 5))] []
 
 
+-- ======================================= INVALID PROGRAMS ============================================
+
+invalidMissingDecl :: Program
+invalidMissingDecl = Program [("main", var "x")] []
+
+invalidMissingInjF :: Program
+invalidMissingInjF = Program [("main", injF "x" [])] []
+
+invalidWrongArgCount :: Program
+invalidWrongArgCount = Program [("main", injF "plus" [uniform])] []
+
+invalidDuplicateDecl1 :: Program
+invalidDuplicateDecl1 = Program [("main", letIn "x" (letIn "x" uniform uniform) uniform)] []
+
+invalidDuplicateDecl2 :: Program
+invalidDuplicateDecl2 = Program [("main", letIn "x" uniform (letIn "x" uniform uniform))] []
+
+invalidDuplicateDecl3 :: Program
+invalidDuplicateDecl3 = Program [("main", letIn "x" uniform (var "x")), ("x", uniform)] []
+
+invalidDuplicateDecl4 :: Program
+invalidDuplicateDecl4 = Program [("main", "x" #-># ("x" #-># uniform))] []
+
+invalidDuplicateDecl5 :: Program
+invalidDuplicateDecl5 = Program [("main", "x" #-># (var "x")), ("x", uniform)] []
+
+invalidReservedName :: Program
+invalidReservedName = Program [("main", letIn "plus" uniform uniform)] []
+
+invalidReservedName2 :: Program
+invalidReservedName2 = Program [("main", "plus" #-># uniform)] []
+
+
+
+
+
 {-
 flipCoin :: Expr Double
 flipCoin = GreaterThan makeTypeInfo uniform (constF 0.5))
