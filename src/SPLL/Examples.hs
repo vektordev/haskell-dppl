@@ -225,6 +225,11 @@ testLeft = Program [("main", injF "fromLeft" [injF "left" [constF 2]])] []
 testEither :: Program
 testEither = Program [("main", ifThenElse (bernoulli 0.5) (injF "left" [uniform]) (injF "right" [constI 1]))] []
 
+testIsEither :: Program
+testIsEither = Program [("main", ifThenElse (injF "isLeft" [ifThenElse (bernoulli 0.5) (injF "left" [uniform]) (injF "right" [constI 1])])
+                                  (constF 1)
+                                  (constF 2))] []
+
 {-
 flipCoin :: Expr Double
 flipCoin = GreaterThan makeTypeInfo uniform (constF 0.5))

@@ -65,8 +65,8 @@ generate f globalEnv env [] (IROp OpPlus a b) = do
   case (aVal, bVal) of
     (VFloat af, VFloat bf) -> return $ VFloat (af + bf)
     (VInt af, VInt bf) -> return $ VInt (af + bf)
-    (VAny, _) -> return VAny
-    (_, VAny) -> return VAny
+    --(VAny, _) -> return VAny
+    --(_, VAny) -> return VAny
     _ -> error ("Type error: Plus can only add up numbers (of the same type): " ++ show (aVal, bVal))
 generate f globalEnv env [] (IROp OpMult a b) = do
   aVal <- generate f globalEnv env [] a
@@ -74,8 +74,8 @@ generate f globalEnv env [] (IROp OpMult a b) = do
   case (aVal, bVal) of
     (VFloat af, VFloat bf) -> return $ VFloat (af * bf)
     (VInt af, VInt bf) -> return $ VInt (af * bf)
-    (VAny, _) -> return VAny
-    (_, VAny) -> return VAny
+    --(VAny, _) -> return VAny
+    --(_, VAny) -> return VAny
     _ -> error ("Type error: Mult can only multiply numbers (of the same type): " ++ show (aVal, bVal))
 generate f globalEnv env [] (IROp OpGreaterThan a b) = do
   aVal <- generate f globalEnv env [] a
@@ -83,8 +83,8 @@ generate f globalEnv env [] (IROp OpGreaterThan a b) = do
   case (aVal, bVal) of
     (VFloat af, VFloat bf) -> return $ VBool (af > bf)
     (VInt af, VInt bf) -> return $ VBool (af > bf)
-    (VAny, _) -> return $ VBool True
-    (_, VAny) -> return $ VBool True
+    --(VAny, _) -> return $ VBool True
+    --(_, VAny) -> return $ VBool True
     _ -> error ("Type error: greater than can only compare two numbers (of the same type): " ++ show (aVal, bVal))
 generate f globalEnv env [] (IROp OpLessThan a b) = do
   aVal <- generate f globalEnv env [] a
@@ -92,16 +92,16 @@ generate f globalEnv env [] (IROp OpLessThan a b) = do
   case (aVal, bVal) of
     (VFloat af, VFloat bf) -> return $ VBool (af < bf)
     (VInt af, VInt bf) -> return $ VBool (af < bf)
-    (VAny, _) -> return $ VBool True
-    (_, VAny) -> return $ VBool True
+    --(VAny, _) -> return $ VBool True
+    --(_, VAny) -> return $ VBool True
     _ -> error ("Type error: greater than can only compare two numbers (of the same type): " ++ show (aVal, bVal))
 generate f globalEnv env [] (IROp OpDiv a b) = do
   aVal <- generate f globalEnv env [] a
   bVal <- generate f globalEnv env [] b
   case (aVal, bVal) of
     (VFloat af, VFloat bf) -> return $ VFloat (af / bf)
-    (VAny, _) -> return VAny
-    (_, VAny) -> return VAny
+    --(VAny, _) -> return VAny
+    --(_, VAny) -> return VAny
     _ -> error ("Type error: Divide can only divide two numbers (of the same type): " ++ show (aVal, bVal))
 generate f globalEnv env [] (IROp OpSub a b) = do
   aVal <- generate f globalEnv env [] a
@@ -117,16 +117,16 @@ generate f globalEnv env [] (IROp OpOr a b) = do
   bVal <- generate f globalEnv env [] b
   case (aVal, bVal) of
     (VBool af, VBool bf) -> return $ VBool (af || bf)
-    (VAny, _) -> return VAny
-    (_, VAny) -> return VAny
+    --(VAny, _) -> return VAny
+    --(_, VAny) -> return VAny
     _ -> error ("Type error: Or can only evaluate on two booleans: " ++ show (aVal, bVal))
 generate f globalEnv env [] (IROp OpAnd a b) = do
   aVal <- generate f globalEnv env [] a
   bVal <- generate f globalEnv env [] b
   case (aVal, bVal) of
     (VBool af, VBool bf) -> return $ VBool (af && bf)
-    (VAny, _) -> return VAny
-    (_, VAny) -> return VAny
+    --(VAny, _) -> return VAny
+    --(_, VAny) -> return VAny
     _ -> error ("Type error: Or can only evaluate on two booleans: " ++ show (aVal, bVal))
 generate f globalEnv env [] (IROp OpEq a b) = do
   aVal <- generate f globalEnv env [] a
@@ -137,33 +137,33 @@ generate f globalEnv env [] (IROp OpEq a b) = do
     (VInt af, VInt bf) -> return $ VBool (af == bf)
     (VList af, VList bf) -> return $ VBool (af == bf)
     (VTuple af1 af2, VTuple bf1 bf2) -> return $ VBool (af1 == bf1 && af2 == bf2)
-    (VAny, _) -> return $ VBool True
-    (_, VAny) -> return $ VBool True
+    (VAny, b) -> return $ VBool (b == VAny)
+    (a, VAny) -> return $ VBool (a == VAny)
     _ -> error ("Type error: Equals can only evaluate on two values: " ++ show (aVal, bVal))
 generate f globalEnv env [] (IRUnaryOp OpNot a) = do
   aVal <- generate f globalEnv env [] a
   case aVal of
     VBool af -> return $ VBool (not af)
-    VAny -> return VAny
+    --VAny -> return VAny
     _ -> error "Type error: Not can only evaluate on a Bool"
 generate f globalEnv env [] (IRUnaryOp OpExp a) = do
   aVal <- generate f globalEnv env [] a
   case aVal of
     VFloat af -> return $ VFloat $ exp af
-    VAny -> return VAny
+    --VAny -> return VAny
     _ -> error "Type error: Exp can only evaluate on a floating point numbers"
 generate f globalEnv env [] (IRUnaryOp OpLog a) = do
   aVal <- generate f globalEnv env [] a
   case aVal of
     VFloat af -> return $ VFloat $ log af
-    VAny -> return VAny
+    --VAny -> return VAny
     _ -> error "Type error: Exp can only evaluate on a floating point numbers"
 generate f globalEnv env [] (IRUnaryOp OpNeg a) = do
   aVal <- generate f globalEnv env [] a
   case aVal of
     VFloat af -> return $ VFloat (-af)
     VInt af -> return $ VInt (-af)
-    VAny -> return VAny
+    --VAny -> return VAny
     _ -> error "Type error: Neg can only evaluate on a number"
 
 generate f globalEnv env [] (IRUnaryOp OpAbs a) = do
@@ -171,7 +171,7 @@ generate f globalEnv env [] (IRUnaryOp OpAbs a) = do
   case aVal of
     VFloat af -> return $ VFloat (abs af)
     VInt af -> return $ VInt (abs af)
-    VAny -> return VAny
+    --VAny -> return VAny
     _ -> error "Type error: Abs can only evaluate on a number"
 generate f globalEnv env [] (IRTheta a i) = do
   tt <- generate f globalEnv env [] a

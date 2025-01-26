@@ -65,6 +65,9 @@ pyVal (VList xs) = "[" ++ (intercalate "," $ map pyVal xs) ++ "]"
 pyVal (VInt i) = show i
 pyVal (VFloat f) = show f
 pyVal (VBool f) = if f then "True" else "False"
+pyVal (VEither (Left a)) = "(False, " ++ pyVal a ++ ", None)"
+pyVal (VEither (Right a)) = "(True, None, " ++ pyVal a ++ ")"
+pyVal (VAny) = "'ANY'"
 pyVal x = error ("unknown pyVal for " ++ show x)
 
 unlinesTrimLeft :: [String] -> String

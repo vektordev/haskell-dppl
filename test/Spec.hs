@@ -118,7 +118,10 @@ correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat
                                (testLeft, VFloat 3, [], (VFloat 0, VFloat 0)),
                                (testEither, VEither (Left (VFloat 0.5)), [], (VFloat 0.5, VFloat 1)),
                                (testEither, VEither (Right (VInt 2)), [], (VFloat 0, VFloat 0)),
-                               (testEither, VEither (Right (VInt 1)), [], (VFloat 0.5, VFloat 0))]
+                               (testEither, VEither (Right (VInt 1)), [], (VFloat 0.5, VFloat 0)),
+                               (testIsEither, VFloat 1, [], (VFloat 0.5, VFloat 0)),
+                               (testIsEither, VFloat 2, [], (VFloat 0.5, VFloat 0)),
+                               (testIsEither, VFloat 0, [], (VFloat 0, VFloat 0))]
 
                               --(testLambdaParameter, VFloat 10, [], VFloat 1.0)]
 

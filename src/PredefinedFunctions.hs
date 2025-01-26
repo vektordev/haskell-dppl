@@ -55,6 +55,12 @@ rightFwd = FDecl (Forall [TV "a", TV "b"] (TVarR (TV "b") `TArrow` TEither (TVar
 fromRightFwd :: FDecl
 fromRightFwd = FDecl (Forall [TV "a", TV "b"] (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "b"))) ["b"] ["a"] (IRFromRight (IRVar "b")) (IRIsRight (IRVar "b")) [("a", IRConst (VFloat 1))]
 
+isLeftFwd :: FDecl
+isLeftFwd = FDecl (Forall [TV "a", TV "b"] (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TBool)) ["a"] ["b"] (IRIsLeft (IRVar "a")) (IRConst (VBool True)) [("a", IRConst (VFloat 1))]
+isLeftInv :: FDecl
+isLeftInv = FDecl (Forall [TV "a", TV "b"] (TBool `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b")))) ["b"] ["a"] (IRIf (IRVar "b") (IRConst $ VEither (Left VAny)) (IRConst $ VEither (Right VAny))) (IRConst (VBool True)) [("b", IRConst (VFloat 1))]
+
+
 plusFwd :: FDecl
 plusFwd = FDecl (Forall [] (TFloat `TArrow` (TFloat `TArrow` TFloat))) ["a", "b"] ["c"] (IROp OpPlus (IRVar "a") (IRVar "b")) (IRConst (VBool True)) [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))]
 plusInv1 :: FDecl
@@ -94,6 +100,7 @@ globalFenv = [("double", FPair (doubleFwd, [doubleInv])),
               ("right", FPair(rightFwd, [fromRightFwd])),
               ("fromLeft", FPair(fromLeftFwd, [leftFwd])),
               ("fromRight", FPair(fromRightFwd, [rightFwd])),
+              ("isLeft", FPair(isLeftFwd, [isLeftInv])),
               ("plus", FPair (plusFwd, [plusInv1, plusInv2])),
               ("plusI", FPair (plusIFwd, [plusIInv1, plusIInv2])),
               ("mult", FPair (multFwd, [multInv1, multInv2])),

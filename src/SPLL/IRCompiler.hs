@@ -36,10 +36,10 @@ envToIR conf p = concatMap (\(name, binding) ->
       rt = rType $ getTypeInfo binding in
     if (pt == Deterministic || pt == Integrate) && (isOnlyNumbers rt) then
       [(name ++ "_integ", postProcess conf (IRLambda "low" (IRLambda "high" (runCompile conf (toIRIntegrateSave conf typeEnv binding (IRVar "low") (IRVar "high")))))),
-       (name ++ "_prob",postProcess conf (IRLambda "sample" (runCompile conf (toIRProbability conf typeEnv binding (IRVar "sample"))))),
+       (name ++ "_prob",postProcess conf (IRLambda "sample" (runCompile conf (toIRProbabilitySave conf typeEnv binding (IRVar "sample"))))),
        (name ++ "_gen", postProcess conf (fst $ runIdentity $ runSupplyVars $ runWriterT (toIRGenerate typeEnv binding)))]
     else if pt == Deterministic || pt == Integrate || pt == Prob then
-      [(name ++ "_prob",postProcess conf ((IRLambda "sample" (runCompile conf (toIRProbability conf typeEnv binding (IRVar "sample")))))),
+      [(name ++ "_prob",postProcess conf ((IRLambda "sample" (runCompile conf (toIRProbabilitySave conf typeEnv binding (IRVar "sample")))))),
        (name ++ "_gen", postProcess conf (fst $ runIdentity $ runSupplyVars $ runWriterT $ toIRGenerate typeEnv binding))]
     else
       [(name ++ "_gen", postProcess conf ( fst $ runIdentity $ runSupplyVars $ runWriterT $ toIRGenerate typeEnv binding))]) (functions p)
@@ -78,6 +78,22 @@ hasAlgorithm tags alg = alg `elem` ([algName a | Alg a <- tags])
 
 const0 :: IRExpr
 const0 = IRConst (VFloat 0)
+
+toIRProbabilitySave :: CompilerConfig -> TypeEnv -> Expr -> IRExpr -> CompilerMonad CompilationResult
+toIRProbabilitySave conf typeEnv (Lambda t name subExpr) sample = do
+  let (TArrow paramRType _) = rType t
+  case paramRType of
+    TArrow (TArrow _ _) _ -> do
+      let newTypeEnv = (name, (paramRType, True)):typeEnv
+      irTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRProbabilitySave conf newTypeEnv subExpr sample))
+      return (IRLambda name irTuple, const0, const0)
+    _ -> do
+      let newTypeEnv = (name, (paramRType, False)):typeEnv
+      irTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRProbabilitySave conf newTypeEnv subExpr sample))
+      return (IRLambda name irTuple, const0, const0)
+toIRProbabilitySave conf typeEnv expr sample = do
+  (probExpr, probDim, probBranches) <- toIRProbability conf typeEnv expr sample
+  return $ (IRIf (IROp OpEq sample (IRConst VAny)) (IRConst (VFloat 1)) probExpr, IRIf (IROp OpEq sample (IRConst VAny)) const0 probDim, IRIf (IROp OpEq sample (IRConst VAny)) const0 probBranches)
 
 --in this implementation, I'll forget about the distinction between PDFs and Probabilities. Might need to fix that later.
 toIRProbability :: CompilerConfig -> TypeEnv -> Expr -> IRExpr -> CompilerMonad CompilationResult
@@ -265,7 +281,7 @@ toIRProbability conf typeEnv (InjF _ name [param]) sample = do
   let FPair (_, [inv]) = fPair
   let FDecl {inputVars=[v], body=invExpr, applicability=appTest, derivatives=[(_, invDerivExpr)]} = inv
   let letInBlock = IRLetIn v sample invExpr
-  (paramExpr, paramDim, paramBranches) <- toIRProbability conf typeEnv param letInBlock
+  (paramExpr, paramDim, paramBranches) <- toIRProbabilitySave conf typeEnv param letInBlock
   let returnExpr = IRLetIn v sample (IRIf appTest (IROp OpMult paramExpr (IRUnaryOp OpAbs invDerivExpr)) const0)
   return (returnExpr, paramDim, paramBranches)
 toIRProbability conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [param1, param2]) sample
@@ -279,7 +295,7 @@ toIRProbability conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [pa
   leftExpr <- toIRGenerate typeEnv param1
   let (detVar, sampleVar) = if x2 == v2 then (x2, x3) else (x3, x2)
   let letInBlock = IRLetIn detVar leftExpr (IRLetIn sampleVar sample invExpr)
-  (paramExpr, paramDim, paramBranches) <- toIRProbability conf typeEnv param2 letInBlock
+  (paramExpr, paramDim, paramBranches) <- toIRProbabilitySave conf typeEnv param2 letInBlock
   let returnExpr = IRLetIn detVar leftExpr (IRLetIn sampleVar sample (IRIf appTest (IROp OpMult paramExpr (IRUnaryOp OpAbs invDeriv)) const0))
   return (returnExpr, paramDim, paramBranches) --FIXME
 toIRProbability conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [param1, param2]) sample
@@ -293,7 +309,7 @@ toIRProbability conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name [pa
   leftExpr <- toIRGenerate typeEnv param2
   let (detVar, sampleVar) = if x2 == v3 then (x2, x3) else (x3, x2)
   let letInBlock = IRLetIn detVar leftExpr (IRLetIn sampleVar sample invExpr)
-  (paramExpr, paramDim, paramBranches) <- toIRProbability conf typeEnv param1 letInBlock
+  (paramExpr, paramDim, paramBranches) <- toIRProbabilitySave conf typeEnv param1 letInBlock
   let returnExpr = IRLetIn detVar leftExpr (IRLetIn sampleVar sample (IRIf appTest (IROp OpMult paramExpr (IRUnaryOp OpAbs invDeriv)) const0))
   return (returnExpr, paramDim, paramBranches)
 toIRProbability conf typeEnv (InjF TypeInfo {tags=extras} name [left, right]) sample
