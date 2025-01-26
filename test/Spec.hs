@@ -113,6 +113,7 @@ correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat
                                (gaussLists, VList [VFloat 0, VFloat 0, VFloat 0], [IRConst $ VThetaTree (ThetaTree [0.5, 1, 0] [])], (VFloat $ (normalPDF 0) * (normalPDF 0) * (normalPDF 0) / 16, VFloat 3)),
                                --(testPartialInjF, VFloat 5.5, [], (VFloat 1, VFloat 1))]
                                (testInjFRenaming, VFloat 5.5, [], (VFloat 1, VFloat 1))]
+                               --(testLambdaChoice, VFloat 1.5, [], (VFloat ((1 + normalPDF 0.5) / 2), VFloat 1))]
 
                               --(testLambdaParameter, VFloat 10, [], VFloat 1.0)]
 

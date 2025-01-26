@@ -218,6 +218,9 @@ testPartialInjF = Program [("main", apply (injF "plus" [uniform]) (constF 5))] [
 testInjFRenaming :: Program
 testInjFRenaming = Program [("main", apply ("a" #-># (var "a" #+# uniform)) (constF 5))] []
 
+testLambdaChoice :: Program
+testLambdaChoice = Program [("main", apply (ifThenElse (bernoulli 0.5) ("x" #-># (normal #+# var "x")) ("y" #-># (uniform #+# var "y"))) (constF 1))] []
+
 
 {-
 flipCoin :: Expr Double
