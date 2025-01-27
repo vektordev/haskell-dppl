@@ -49,6 +49,9 @@ juliaVal (VList xs) = "[" ++ intercalate "," (map juliaVal xs) ++ "]"
 juliaVal (VInt i) = show i
 juliaVal (VFloat f) = show f
 juliaVal (VBool f) = if f then "true" else "false"
+juliaVal (VEither (Left a)) = "(false, " ++ juliaVal a ++ ", nothing)"
+juliaVal (VEither (Right a)) = "(true, nothing, " ++ juliaVal a ++ ")"
+juliaVal VAny = "\"ANY\""
 juliaVal x = error ("unknown juliaVal for " ++ show x)
 
 unlinesTrimLeft :: [String] -> String
