@@ -225,8 +225,13 @@ testLeft = Program [("main", injF "fromLeft" [injF "left" [constF 2]])] []
 testEither :: Program
 testEither = Program [("main", ifThenElse (bernoulli 0.5) (injF "left" [uniform]) (injF "right" [constI 1]))] []
 
-testIsEither :: Program
-testIsEither = Program [("main", ifThenElse (injF "isLeft" [ifThenElse (bernoulli 0.5) (injF "left" [uniform]) (injF "right" [constI 1])])
+testIsLeft :: Program
+testIsLeft = Program [("main", ifThenElse (injF "isLeft" [ifThenElse (bernoulli 0.4) (injF "left" [uniform]) (injF "right" [constI 1])])
+                                  (constF 1)
+                                  (constF 2))] []
+
+testIsRight :: Program
+testIsRight = Program [("main", ifThenElse (injF "isRight" [ifThenElse (bernoulli 0.4) (injF "left" [uniform]) (injF "right" [constI 1])])
                                   (constF 1)
                                   (constF 2))] []
 

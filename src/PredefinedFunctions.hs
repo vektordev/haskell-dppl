@@ -22,7 +22,6 @@ import Control.Monad.Supply (MonadSupply)
 import qualified Data.Bifunctor
 
 -- InputVars, OutputVars, fwd, grad
--- Note: Perhaps this RType deserves an upgrade to Scheme, whenever we upgrade to typeclasses.
 data FDecl = FDecl {contract :: Scheme, inputVars :: [String], outputVars :: [String], body :: IRExpr, applicability :: IRExpr, derivatives :: [(String, IRExpr)]} deriving (Show, Eq)
 -- Forward, inverse
 newtype FPair = FPair (FDecl, [FDecl]) deriving (Show, Eq)
@@ -60,6 +59,10 @@ isLeftFwd = FDecl (Forall [TV "a", TV "b"] (TEither (TVarR (TV "a")) (TVarR (TV 
 isLeftInv :: FDecl
 isLeftInv = FDecl (Forall [TV "a", TV "b"] (TBool `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b")))) ["b"] ["a"] (IRIf (IRVar "b") (IRConst $ VEither (Left VAny)) (IRConst $ VEither (Right VAny))) (IRConst (VBool True)) [("b", IRConst (VFloat 1))]
 
+isRightFwd :: FDecl
+isRightFwd = FDecl (Forall [TV "a", TV "b"] (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TBool)) ["a"] ["b"] (IRIsRight (IRVar "a")) (IRConst (VBool True)) [("a", IRConst (VFloat 1))]
+isRightInv :: FDecl
+isRightInv = FDecl (Forall [TV "a", TV "b"] (TBool `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b")))) ["b"] ["a"] (IRIf (IRVar "b") (IRConst $ VEither (Right VAny)) (IRConst $ VEither (Left VAny))) (IRConst (VBool True)) [("b", IRConst (VFloat 1))]
 
 plusFwd :: FDecl
 plusFwd = FDecl (Forall [] (TFloat `TArrow` (TFloat `TArrow` TFloat))) ["a", "b"] ["c"] (IROp OpPlus (IRVar "a") (IRVar "b")) (IRConst (VBool True)) [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))]
@@ -101,6 +104,7 @@ globalFenv = [("double", FPair (doubleFwd, [doubleInv])),
               ("fromLeft", FPair(fromLeftFwd, [leftFwd])),
               ("fromRight", FPair(fromRightFwd, [rightFwd])),
               ("isLeft", FPair(isLeftFwd, [isLeftInv])),
+              ("isRight", FPair(isRightFwd, [isRightInv])),
               ("plus", FPair (plusFwd, [plusInv1, plusInv2])),
               ("plusI", FPair (plusIFwd, [plusIInv1, plusIInv2])),
               ("mult", FPair (multFwd, [multInv1, multInv2])),
