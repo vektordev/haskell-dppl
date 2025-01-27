@@ -92,8 +92,18 @@ multIInv1 = FDecl (Forall [] (TInt `TArrow` (TInt `TArrow` TInt))) ["a", "c"] ["
 multIInv2 :: FDecl
 multIInv2 = FDecl (Forall [] (TInt `TArrow` (TInt `TArrow` TInt))) ["b", "c"] ["a"] (IROp OpDiv (IRVar "c") (IRVar "b")) (IRConst (VBool True)) [("b", IRUnaryOp OpNeg (IROp OpDiv (IRVar "c") (IROp OpMult (IRVar "b") (IRVar "b")))), ("c", IROp OpDiv (IRConst (VFloat 1)) (IRVar "b"))]
 
-tConsFwd :: FDecl
-tConsFwd = FDecl (Forall [] (TFloat `TArrow` (TFloat `TArrow` Tuple TFloat TFloat))) ["a", "b"] ["c", "d"] (IRTCons (IRVar "a") (IRVar "b")) (IRConst (VBool True)) [("a", IRTCons (IRConst (VFloat 1)) (IRVar "b")), ("b", IRTCons (IRVar "a") (IRConst (VFloat 1)))]-- Cannot declare a backward pass here
+--tConsFwd :: FDecl
+--tConsFwd = FDecl (Forall [] (TFloat `TArrow` (TFloat `TArrow` Tuple TFloat TFloat))) ["a", "b"] ["c", "d"] (IRTCons (IRVar "a") (IRVar "b")) (IRConst (VBool True)) [("a", IRTCons (IRConst (VFloat 1)) (IRVar "b")), ("b", IRTCons (IRVar "a") (IRConst (VFloat 1)))]-- Cannot declare a backward pass here
+
+fstFwd :: FDecl
+fstFwd = FDecl (Forall [TV "a", TV "b"] (Tuple (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "a"))) ["a"] ["b"] (IRTFst (IRVar "a")) (IRConst (VBool True)) [("a", IRConst (VFloat 1))]
+fstInv :: FDecl
+fstInv = FDecl (Forall [TV "a", TV "b"] (TVarR (TV "a") `TArrow` Tuple (TVarR (TV "a")) (TVarR (TV "b")))) ["b"] ["a"] (IRTCons (IRVar "b") (IRConst VAny)) (IRConst (VBool True)) [("b", IRConst (VFloat 1))]
+sndFwd :: FDecl
+sndFwd = FDecl (Forall [TV "a", TV "b"] (Tuple (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "b"))) ["a"] ["b"] (IRTSnd (IRVar "a")) (IRConst (VBool True)) [("a", IRConst (VFloat 1))]
+sndInv :: FDecl
+sndInv = FDecl (Forall [TV "a", TV "b"] (TVarR (TV "b") `TArrow` Tuple (TVarR (TV "a")) (TVarR (TV "b")))) ["b"] ["a"] (IRTCons (IRConst VAny) (IRVar "b")) (IRConst (VBool True)) [("b", IRConst (VFloat 1))]
+
 
 globalFenv :: FEnv
 globalFenv = [("double", FPair (doubleFwd, [doubleInv])),
@@ -108,7 +118,9 @@ globalFenv = [("double", FPair (doubleFwd, [doubleInv])),
               ("plus", FPair (plusFwd, [plusInv1, plusInv2])),
               ("plusI", FPair (plusIFwd, [plusIInv1, plusIInv2])),
               ("mult", FPair (multFwd, [multInv1, multInv2])),
-              ("multI", FPair (multIFwd, [multIInv1, multIInv2]))]
+              ("multI", FPair (multIFwd, [multIInv1, multIInv2])),
+              ("fst", FPair (fstFwd, [fstInv])),
+              ("snd", FPair (sndFwd, [sndInv]))]
 
 -- Creates a instance of a FPair, that has identifier names given by a monadic function. m should be a supply monad
 -- Works by having each identifier renamed using this function

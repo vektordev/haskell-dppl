@@ -7,6 +7,7 @@ import SPLL.Typing.PType
 import SPLL.Typing.Typing (TypeInfo, makeTypeInfo)
 import SPLL.Lang.Types
 import SPLL.Prelude
+import SPLL.Lang.Types (Program(Program))
 
 --weatherHask lastDay = if lastDay == rainy
 --  then let current = randA in (current, weatherHask current)
@@ -234,6 +235,9 @@ testIsRight :: Program
 testIsRight = Program [("main", ifThenElse (injF "isRight" [ifThenElse (bernoulli 0.4) (injF "left" [uniform]) (injF "right" [constI 1])])
                                   (constF 1)
                                   (constF 2))] []
+
+testFst :: Program
+testFst = Program [("main", tfst (tuple uniform normal))] []
 
 {-
 flipCoin :: Expr Double

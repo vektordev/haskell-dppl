@@ -241,8 +241,8 @@ toIRProbability conf typeEnv (ReadNN _ name subexpr) sample = do
   mkInput <- toIRGenerate typeEnv subexpr
   let returnExpr = (IRIndex (IREvalNN name mkInput) sample)
   return (returnExpr, const0, const0)
-toIRProbability conf typeEnv (Normal t) sample = return (IRDensity IRNormal sample, IRConst $ VFloat 1, const0)
-toIRProbability conf typeEnv (Uniform t) sample = return (IRDensity IRUniform sample, IRConst $ VFloat 1, const0)
+toIRProbability conf typeEnv (Normal t) sample = return (IRDensity IRNormal sample, IRIf (IROp OpEq sample (IRConst VAny)) const0 (IRConst $ VFloat 1), const0)
+toIRProbability conf typeEnv (Uniform t) sample = return (IRDensity IRUniform sample, IRIf (IROp OpEq sample (IRConst VAny)) const0 (IRConst $ VFloat 1), const0)
 toIRProbability conf typeEnv (Lambda t name subExpr) sample = do
   let (TArrow paramRType _) = rType t
   case paramRType of

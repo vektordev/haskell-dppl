@@ -111,6 +111,12 @@ nul = Null makeTypeInfo
 tuple :: Expr -> Expr -> Expr
 tuple = TCons makeTypeInfo
 
+tfst :: Expr -> Expr
+tfst x = injF "fst" [x]
+
+tsnd :: Expr -> Expr
+tsnd x = injF "snd" [x]
+
 -- Boolean Algebra
 
 (#>#) :: Expr -> Expr -> Expr

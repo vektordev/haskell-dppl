@@ -124,7 +124,8 @@ correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat
                                (testIsLeft, VFloat 0, [], (VFloat 0, VFloat 0)),
                                (testIsRight, VFloat 1, [], (VFloat 0.6, VFloat 0)),
                                (testIsRight, VFloat 2, [], (VFloat 0.4, VFloat 0)),
-                               (testIsRight, VFloat 0, [], (VFloat 0, VFloat 0))]
+                               (testIsRight, VFloat 0, [], (VFloat 0, VFloat 0)),
+                               (testFst, VFloat 0.5, [], (VFloat 1, VFloat 1))]
 
                               --(testLambdaParameter, VFloat 10, [], VFloat 1.0)]
 
@@ -157,7 +158,8 @@ correctIntegralValuesTestCases =[(uniformProg, VFloat 0, VFloat 1, [], (VFloat 1
                                 (testIsLeft, VFloat 0, VFloat 3, [], (VFloat 1, VFloat 0)),
                                 (testIsLeft, VFloat 1.5, VFloat 3, [], (VFloat 0.6, VFloat 0)),
                                 (testIsRight, VFloat 0, VFloat 3, [], (VFloat 1, VFloat 0)),
-                                (testIsRight, VFloat 1.5, VFloat 3, [], (VFloat 0.4, VFloat 0))]
+                                (testIsRight, VFloat 1.5, VFloat 3, [], (VFloat 0.4, VFloat 0)),
+                                (testFst, VFloat 0.4, VFloat 3, [], (VFloat 0.6, VFloat 0))]
 
                                   --(testLambdaParameter, VFloat 9, VFloat 11, [], VFloat 1.0)]
                                   --(testCallLambdaAdvanced, VFloat 2, VFloat 3, [], VFloat 1.0),
