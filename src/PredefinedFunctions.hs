@@ -24,7 +24,7 @@ import qualified Data.Bifunctor
 -- InputVars, OutputVars, fwd, grad
 data FDecl = FDecl {contract :: Scheme, inputVars :: [String], outputVars :: [String], body :: IRExpr, applicability :: IRExpr, deconstructing :: Bool, derivatives :: [(String, IRExpr)]} deriving (Show, Eq)
 -- Forward, inverse
-newtype FPair = FPair (FDecl, [FDecl]) deriving (Show, Eq)
+data FPair = FPair {forwardDecl :: FDecl, inverseDecl :: [FDecl]} deriving (Show, Eq)
 type FEnv = [(String, FPair)]
 
 -- ============================ UNARY ARITHMETIC ============================
@@ -112,35 +112,35 @@ headInv = FDecl (Forall [TV "a"] (TVarR (TV "a") `TArrow` ListOf (TVarR (TV "a")
 
 
 globalFenv :: FEnv
-globalFenv = [("double", FPair (doubleFwd, [doubleInv])),
-              ("exp", FPair (expFwd, [expInv])),
-              ("neg", FPair (negFwd, [negInv])),
-              ("left", FPair(leftFwd, [fromLeftFwd])),
-              ("right", FPair(rightFwd, [fromRightFwd])),
-              ("fromLeft", FPair(fromLeftFwd, [leftFwd])),
-              ("fromRight", FPair(fromRightFwd, [rightFwd])),
-              ("isLeft", FPair(isLeftFwd, [isLeftInv])),
-              ("isRight", FPair(isRightFwd, [isRightInv])),
-              ("plus", FPair (plusFwd, [plusInv1, plusInv2])),
-              ("plusI", FPair (plusIFwd, [plusIInv1, plusIInv2])),
-              ("mult", FPair (multFwd, [multInv1, multInv2])),
-              ("multI", FPair (multIFwd, [multIInv1, multIInv2])),
-              ("fst", FPair (fstFwd, [fstInv])),
-              ("snd", FPair (sndFwd, [sndInv])),
-              ("head", FPair (headFwd, [headInv]))]
+globalFenv = [("double", FPair doubleFwd [doubleInv]),
+              ("exp", FPair expFwd [expInv]),
+              ("neg", FPair negFwd [negInv]),
+              ("left", FPair leftFwd [fromLeftFwd]),
+              ("right", FPair rightFwd [fromRightFwd]),
+              ("fromLeft", FPair fromLeftFwd [leftFwd]),
+              ("fromRight", FPair fromRightFwd [rightFwd]),
+              ("isLeft", FPair isLeftFwd [isLeftInv]),
+              ("isRight", FPair isRightFwd [isRightInv]),
+              ("plus", FPair plusFwd [plusInv1, plusInv2]),
+              ("plusI", FPair plusIFwd [plusIInv1, plusIInv2]),
+              ("mult", FPair multFwd [multInv1, multInv2]),
+              ("multI", FPair multIFwd [multIInv1, multIInv2]),
+              ("fst", FPair fstFwd [fstInv]),
+              ("snd", FPair sndFwd [sndInv]),
+              ("head", FPair headFwd [headInv])]
 
 -- Creates a instance of a FPair, that has identifier names given by a monadic function. m should be a supply monad
 -- Works by having each identifier renamed using this function
 instantiate :: (Monad m) => (String -> m String) -> String -> m FPair
 instantiate gen n = do
-  let (FPair (fwd, inv)) = case lookup n globalFenv of
+  let (FPair fwd inv) = case lookup n globalFenv of
                              Just f -> f
                              Nothing -> error ("InjF " ++ n ++ " not found!")
   let FDecl {inputVars=v1, outputVars=v2} = fwd
   let allVarNames = v1 ++ v2  -- All indentifier names in the InjF
   newVarNames <- mapM gen allVarNames -- These are the new names given by the gen function
   let instantiateDecl d = foldr (\(old, new) decl -> renameDecl old new decl) d (zip allVarNames newVarNames) -- Rename all identifiers with the new names
-  return (FPair (instantiateDecl fwd, map instantiateDecl inv))
+  return (FPair (instantiateDecl fwd) (map instantiateDecl inv))
 
 rename :: String -> String -> IRExpr -> IRExpr
 rename old new (IRVar n) | n == old = IRVar new
@@ -163,7 +163,7 @@ getHornClause e = case e of
       subst = (outV, eCN):zip inV (getInputChainNames e)
       eCN = chainName $ getTypeInfo e
       FDecl {inputVars = inV, outputVars = [outV]} = eFwd
-      Just (FPair (eFwd, eInv)) = lookup name globalFenv
+      Just (FPair eFwd eInv) = lookup name globalFenv
   _ -> error "Cannot get horn clause of non-predefined function"
 
 constructHornClause :: [(String, ChainName)] -> FDecl -> HornClause
@@ -186,12 +186,12 @@ propagateValues name values = case results of
     letInBlocks = map (foldr (\(n, p) e -> IRLetIn n (IRConst (fmap failConversionFwd p)) e) fwdExpr) namedParams
     namedParams = map (zip paramNames) valueProd
     valueProd = sequence values
-    Just (FPair (FDecl {inputVars = paramNames, body = fwdExpr}, _)) = lookup name globalFenv
+    Just (FPair FDecl {inputVars = paramNames, body = fwdExpr} _) = lookup name globalFenv
 
 parameterCount :: String -> Int
 parameterCount name = do
   case lookup name globalFenv of
-    Just (FPair (FDecl {inputVars=params}, _)) -> length params
+    Just (FPair FDecl {inputVars=params} _) -> length params
     _ -> error $ "Unknown InjF: " ++ name
 
 failConversionFwd :: Expr -> IRExpr

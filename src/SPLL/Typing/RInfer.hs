@@ -177,7 +177,7 @@ showConstraint (a, b) = prettyRType a ++ " :==: " ++ prettyRType b
 
 --build the basic type environment: Take all invertible functions; ignore their inverses
 basicTEnv :: TEnv
-basicTEnv = TypeEnv $ Map.fromList $ map (\(name, FPair (FDecl {contract=ty}, _)) -> (name, ty)) globalFenv
+basicTEnv = TypeEnv $ Map.fromList $ map (\(name, FPair FDecl {contract=ty} _) -> (name, ty)) globalFenv
   where
     -- plain RTypes as they exist in globalFEnv are implicitly forall'd. Make it explicit.
     toScheme :: RType -> Scheme
@@ -302,7 +302,7 @@ infer expr
           return (rType ti, [argConstraint] ++ c1 ++ c2, Apply ti funcExprTy argExprTy)
           --expr `usingScheme` (Forall [TV "a", TV "b"] (((TVarR $ TV "a") `TArrow` (TVarR $ TV "b")) `TArrow` (TVarR $ TV "a") `TArrow` (TVarR $ TV "b")))
         e@(InjF ti name params) -> do
-          let Just (FPair (FDecl {contract=scheme}, _)) = lookup name globalFenv
+          let Just (FPair FDecl {contract=scheme} _) = lookup name globalFenv
           e `usingScheme` scheme
     | solvesSimply expr =
         let
