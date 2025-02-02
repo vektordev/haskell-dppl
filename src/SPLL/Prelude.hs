@@ -63,7 +63,7 @@ constB :: Bool -> Expr
 constB = Constant makeTypeInfo . VBool
 
 constL :: [Value] -> Expr
-constL = Constant makeTypeInfo . VList
+constL lst = Constant makeTypeInfo (constructVList lst)
 
 (#->#) :: String -> Expr -> Expr
 (#->#) = Lambda makeTypeInfo

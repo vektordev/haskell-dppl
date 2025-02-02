@@ -220,11 +220,11 @@ toIRProbability conf typeEnv (PlusI (TypeInfo {rType = TInt, tags = extras}) lef
       (pLeft, _, _) <- toIRProbability conf typeEnv left (IRVar enumVar)
       (pRight, _, _) <- toIRProbability conf typeEnv right (IROp OpSub sample (IRVar enumVar))
       let returnExpr = case topKThreshold conf of
-            Nothing -> IRIf (IRElementOf (IROp OpSub sample (IRVar enumVar)) (IRConst (fmap failConversion (VList enumListR)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
-            Just thr -> IRIf (IROp OpAnd (IRElementOf (IROp OpSub sample (IRVar enumVar)) (IRConst (fmap failConversion (VList enumListR)))) (IROp OpGreaterThan pLeft (IRConst (VFloat thr)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
+            Nothing -> IRIf (IRElementOf (IROp OpSub sample (IRVar enumVar)) (IRConst (fmap failConversion (constructVList enumListR)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
+            Just thr -> IRIf (IROp OpAnd (IRElementOf (IROp OpSub sample (IRVar enumVar)) (IRConst (fmap failConversion (constructVList enumListR)))) (IROp OpGreaterThan pLeft (IRConst (VFloat thr)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
       -- TODO correct branch counting
       return (returnExpr, const0, const0)))
-    return (IREnumSum enumVar (fmap failConversion (VList enumListL)) $ IRTFst irTuple, const0, const0)
+    return (IREnumSum enumVar (fmap failConversion (constructVList enumListL)) $ IRTFst irTuple, const0, const0)
   | extras `hasAlgorithm` "plusLeft" = do
     var <- mkVariable ""
     (rightExpr, _, rightBranches) <- toIRProbability conf typeEnv right (IROp OpSub sample (IRVar var))
@@ -266,14 +266,14 @@ toIRProbability conf typeEnv (Apply TypeInfo{rType=rt} l v) sample = do
          else
            return (IRTFst (IRInvoke (IRApply lIR vIR)), IRTSnd (IRInvoke (IRApply lIR vIR)), const0)
 toIRProbability conf typeEnv (Cons _ hdExpr tlExpr) sample = do
-  (headP, headDim, headBranches) <- toIRProbability conf typeEnv hdExpr (IRHead sample)
-  (tailP, tailDim, tailBranches) <- toIRProbability conf typeEnv tlExpr (IRTail sample)
+  (headP, headDim, headBranches) <- toIRProbabilitySave conf typeEnv hdExpr (IRHead sample)
+  (tailP, tailDim, tailBranches) <- toIRProbabilitySave conf typeEnv tlExpr (IRTail sample)
   mult <- (headP, headDim)  `multP` (tailP, tailDim)
-  return (IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (fst mult), IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (snd mult), IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (IROp OpPlus headBranches tailBranches))
+  return (IRIf (IROp OpEq sample (IRConst $ VList EmptyList)) (IRConst $ VFloat 0) (fst mult), IRIf (IROp OpEq sample (IRConst $ VList EmptyList)) (IRConst $ VFloat 0) (snd mult), IRIf (IROp OpEq sample (IRConst $ VList EmptyList)) (IRConst $ VFloat 0) (IROp OpPlus headBranches tailBranches))
   --return (IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (fst mult), IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (snd mult), IROp OpPlus headBranches tailBranches)
 toIRProbability conf typeEnv (TCons _ t1Expr t2Expr) sample = do
-  (t1P, t1Dim, t1Branches) <- toIRProbability conf typeEnv t1Expr (IRTFst sample)
-  (t2P, t2Dim, t2Branches) <- toIRProbability conf typeEnv t2Expr (IRTSnd sample)
+  (t1P, t1Dim, t1Branches) <- toIRProbabilitySave conf typeEnv t1Expr (IRTFst sample)
+  (t2P, t2Dim, t2Branches) <- toIRProbabilitySave conf typeEnv t2Expr (IRTSnd sample)
   mult <- (t1P, t1Dim) `multP` (t2P, t2Dim)
   return (fst mult, snd mult, IROp OpPlus t1Branches t2Branches)
 toIRProbability conf typeEnv (InjF _ name [param]) sample = do
@@ -338,15 +338,15 @@ toIRProbability conf typeEnv (InjF TypeInfo {tags=extras} name [left, right]) sa
     (pRight, _, _) <- toIRProbability conf typeEnv right (IROp OpSub sample (IRVar x2))
     tell [(x3, sample)]
     let returnExpr = case topKThreshold conf of
-          Nothing -> IRIf (IRElementOf invExpr (IRConst (fmap failConversion (VList enumListR)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
-          Just thr -> IRIf (IROp OpAnd (IRElementOf invExpr (IRConst (fmap failConversion (VList enumListR)))) (IROp OpGreaterThan pLeft (IRConst (VFloat thr)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
+          Nothing -> IRIf (IRElementOf invExpr (IRConst (fmap failConversion (constructVList enumListR)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
+          Just thr -> IRIf (IROp OpAnd (IRElementOf invExpr (IRConst (fmap failConversion (constructVList enumListR)))) (IROp OpGreaterThan pLeft (IRConst (VFloat thr)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
     -- TODO correct branch counting
     return (returnExpr, const0, const0)))
   uniquePrefix <- mkVariable ""
-  let enumSumExpr = IREnumSum x2 (fmap failConversion (VList enumListL)) $ IRTFst irTuple
+  let enumSumExpr = IREnumSum x2 (fmap failConversion (constructVList enumListL)) $ IRTFst irTuple
   return (irMap (uniqueify [x2, x3] uniquePrefix) enumSumExpr, const0, const0)
 toIRProbability conf typeEnv (Null _) sample = do
-  expr <- indicator (IROp OpEq sample (IRConst $ VList []))
+  expr <- indicator (IROp OpEq sample (IRConst $ VList EmptyList))
   return (expr, const0, const0)
 toIRProbability conf typeEnv (Constant _ value) sample = do
   expr <- indicator (IROp OpEq sample (IRConst (fmap failConversion value)))
@@ -494,7 +494,7 @@ toIRGenerate typeEnv (Subtree _ a ix) = do
   a' <- toIRGenerate typeEnv a
   return $ IRSubtree a' ix
 toIRGenerate typeEnv (Constant _ x) = return (IRConst (fmap failConversion x))
-toIRGenerate typeEnv (Null _) = return $ IRConst (VList [])
+toIRGenerate typeEnv (Null _) = return $ IRConst (VList EmptyList)
 toIRGenerate typeEnv (Cons _ hd tl) = do
   h <- toIRGenerate typeEnv hd
   t <- toIRGenerate typeEnv tl
@@ -656,9 +656,9 @@ toIRIntegrate conf typeEnv (Cons _ hdExpr tlExpr) low high = do
     (headP, headDim, headBranches) <- toIRIntegrateSave conf typeEnv hdExpr (IRHead low) (IRHead high)
     (tailP, tailDim, tailBranches) <- toIRIntegrate conf typeEnv tlExpr (IRTail low) (IRTail high)
     (multP, multDim) <- (headP, headDim) `multP` (tailP, tailDim)
-    return (IRIf (IROp OpOr (IROp OpEq low (IRConst $ VList [])) (IROp OpEq high (IRConst $ VList []))) (IRConst $ VFloat 0) multP, multDim, IROp OpPlus headBranches tailBranches)
+    return (IRIf (IROp OpOr (IROp OpEq low (IRConst $ VList EmptyList)) (IROp OpEq high (IRConst $ VList EmptyList))) (IRConst $ VFloat 0) multP, multDim, IROp OpPlus headBranches tailBranches)
 toIRIntegrate conf typeEnv (Null _) low high = do
-  ind <- indicator (IROp OpAnd (IROp OpEq low (IRConst $ VList [])) (IROp OpEq high (IRConst $ VList [])))
+  ind <- indicator (IROp OpAnd (IROp OpEq low (IRConst $ VList EmptyList)) (IROp OpEq high (IRConst $ VList EmptyList)))
   return (ind, const0, const0)
 toIRIntegrate conf typeEnv (Constant _ value) low high = do
   ind <- indicator (IROp OpAnd (IROp OpLessThan low (IRConst (fmap failConversion value))) (IROp OpGreaterThan high (IRConst (fmap failConversion value)))) --TODO What to do if low and high are equal?

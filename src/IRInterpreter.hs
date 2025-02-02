@@ -5,7 +5,7 @@ generateRand,
 
 import Statistics.Distribution (ContGen, genContVar, quantile, density)
 import SPLL.IntermediateRepresentation
-import SPLL.Lang.Lang (Value(..), ThetaTree(..), Program)
+import SPLL.Lang.Lang (Value(..), ThetaTree(..), Program, elementAt)
 
 import Control.Monad.Random
 import Statistics.Distribution.Normal (normalDistr)
@@ -187,7 +187,10 @@ generate f globalEnv env [] (IRCons hd tl) = do
   case ls of
     VList xs -> do
       x <- generate f globalEnv env [] hd
-      return $ VList (x : xs)
+      return $ VList $ ListCont x xs
+    VAny -> do
+      x <- generate f globalEnv env [] hd
+      return $ VList $ ListCont x AnyList
     _ -> error "Type error: Tail of cons is not a list"
 generate f globalEnv env [] (IRTCons fst snd) = do
   fstVal <- generate f globalEnv env [] fst
@@ -208,12 +211,13 @@ generate f globalEnv env args (IRTSnd expr) = do
 generate f globalEnv env args (IRHead listExpr) = do
   listVal <- generate f globalEnv env args listExpr
   case listVal of
-    VList (a:_) -> return a
+    VList (ListCont a _) -> return a
     _ -> error "Type error: head must be called on a non-empty list"
 generate f globalEnv env args (IRTail listExpr) = do
   listVal <- generate f globalEnv env args listExpr
   case listVal of
-    VList (_:a) -> return $ VList a
+    VList (ListCont _ AnyList) -> return VAny
+    VList (ListCont _ a) -> return $ VList a
     _ -> error "Type error: tail must be called on a non-empty list"
 generate f globalEnv env [] (IRElementOf elemExpr listExpr) = do
   elemVal <- generate f globalEnv env [] elemExpr
@@ -286,7 +290,7 @@ generate f globalEnv env args (IRIndex lstExpr idxExpr) = do
   idx <- generate f env globalEnv args idxExpr
   case lst of
     VList l -> case idx of
-      VInt i -> return $ l!!i
+      VInt i -> return $ l `elementAt` i
       _ -> error "Index must be an integer"
     _ -> error "Expression must be a list"
 generate f _ _ _ expr = error ("Expression is not yet implemented " ++ show expr)

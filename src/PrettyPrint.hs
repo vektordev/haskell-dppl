@@ -4,6 +4,7 @@ import SPLL.Lang.Lang
 import Data.List (intercalate)
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types
+import Data.Foldable
 
 pPrintProg :: Program -> String
 pPrintProg (Program decls neurals) = intercalate "\n\n" (map (\f -> wrapInFunctionDeclaration (snd f) (fst f) []) decls)
@@ -101,7 +102,7 @@ pPrintIRExpr (IRIndex e1 e2) n = "index (" ++ pPrintIRExpr e1 (n + 1) ++ ", " ++
 pPrintValue :: Value -> String
 pPrintValue (VBool a) = show a
 pPrintValue (VFloat a) = show a
-pPrintValue (VList xs) = "[" ++ intercalate "," (map pPrintValue xs) ++ "]"
+pPrintValue (VList xs) = "[" ++ intercalate "," (map pPrintValue (toList xs)) ++ "]"
 pPrintValue (VTuple a b) = "(" ++ pPrintValue a ++ ", " ++ pPrintValue b ++ ")"
 pPrintValue (VInt a) = show a
 pPrintValue (VSymbol a) = a

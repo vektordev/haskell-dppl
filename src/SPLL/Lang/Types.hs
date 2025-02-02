@@ -142,13 +142,26 @@ type WitnessedVars = Set.Set String
 
 data ThetaTree = ThetaTree [Double] [ThetaTree] deriving (Show, Eq, Ord)
 
+data GenericList a = EmptyList | ListCont a (GenericList a) | AnyList deriving (Show, Eq, Ord)
+type ValueList a = GenericList (GenericValue a)
+
+instance Functor GenericList where
+  fmap _ EmptyList = EmptyList
+  fmap f (ListCont x xs) = ListCont (f x) (fmap f xs) 
+  fmap _ AnyList = AnyList
+
+instance Foldable GenericList where
+  foldMap f EmptyList = mempty
+  foldMap f (ListCont x xs) = f x `mappend` foldMap f xs
+  foldMap f AnyList = error "Cannot fold AnyLists"
+
 type Value = GenericValue Expr
 
 data GenericValue a = VBool Bool
            | VInt Int
            | VSymbol String
            | VFloat Double
-           | VList [GenericValue a]
+           | VList (GenericList (GenericValue a))
            | VTuple (GenericValue a) (GenericValue a)
            | VEither (Either (GenericValue a) (GenericValue a))
            | VBranch (GenericValue a) (GenericValue a) String
@@ -158,13 +171,13 @@ data GenericValue a = VBool Bool
            | VAny -- Only used for marginal queries
            -- | Value of TArrow a b could be Expr TypeInfo, with Expr being a Lambda?
            deriving (Show, Eq, Ord)
-           
+
 instance Functor GenericValue where
   fmap _ (VInt x) = VInt x
   fmap _ (VBool x) = VBool x
   fmap _ (VSymbol x) = VSymbol x
   fmap _ (VFloat x) = VFloat x
-  fmap f (VList x) = VList (map (fmap f) x)
+  fmap f (VList x) = VList (fmap (fmap f) x)
   fmap f (VTuple x y) = VTuple (fmap f x) (fmap f y)
   fmap f (VEither (Left x)) = VEither (Left (fmap f x))
   fmap f (VEither (Right x)) = VEither (Right (fmap f x))
@@ -172,6 +185,8 @@ instance Functor GenericValue where
   fmap _ (VThetaTree x) = VThetaTree x
   fmap _ VAnyList = VAnyList
   fmap f (VClosure e n ex) = VClosure (map (Data.Bifunctor.second f) e) n (f ex)
+  fmap _ VAny = VAny
+
 
 isVInt, isVBool, isVSymbol, isVFloat, isVList, isVTuple, isVBranch, isVThetaTree, isVAnyList, isVClosure :: GenericValue a -> Bool
 isVInt (VInt _) = True

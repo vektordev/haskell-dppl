@@ -239,6 +239,16 @@ testIsRight = Program [("main", ifThenElse (injF "isRight" [ifThenElse (bernoull
 testFst :: Program
 testFst = Program [("main", tfst (tuple uniform normal))] []
 
+testHead :: Program
+testHead = Program [("main", injF "head" [cons uniform nul])] []
+
+testFstCall :: Program
+testFstCall = Program [("main", tfst (var "bivariate")), ("bivariate", (tuple uniform normal))] []
+
+testFstDiscrete :: Program
+testFstDiscrete = Program [("main", tfst (tuple uniform  (bernoulli 0.4)))] []
+
+
 {-
 flipCoin :: Expr Double
 flipCoin = GreaterThan makeTypeInfo uniform (constF 0.5))

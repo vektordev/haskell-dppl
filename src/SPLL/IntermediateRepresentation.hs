@@ -175,16 +175,7 @@ data CompilerConfig = CompilerConfig {
 --    Fold enum ranges, algorithms, etc. into a representation of computation that can be directly converted into code.
 
 valueToIR :: GenericValue a -> GenericValue b
-valueToIR (VBool b) = VBool b
-valueToIR (VInt i) = VInt i
-valueToIR (VSymbol s) = VSymbol s
-valueToIR (VFloat d) = VFloat d
-valueToIR (VList xs) = VList (map valueToIR xs)
-valueToIR (VTuple x y) = VTuple (valueToIR x) (valueToIR y)
-valueToIR (VBranch x y s) = VBranch (valueToIR x) (valueToIR y) s
-valueToIR (VThetaTree t) = VThetaTree t
-valueToIR VAnyList = VAnyList
-valueToIR VClosure{} = error "Cannot convert VClosure to IR"
+valueToIR = fmap (error "Cannot convert VClosure to IR")
 
 getIRSubExprs :: IRExpr -> [IRExpr]
 getIRSubExprs (IRIf a b c) = [a, b, c]

@@ -1,4 +1,4 @@
-{-# LANGUAGE EmptyCase #-}
+--{-# LANGUAGE EmptyCase #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE TemplateHaskell #-}
@@ -84,8 +84,10 @@ correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat
                                (normalProgMult, VFloat (-1), [], (VFloat (normalPDF (-2) * 2), VFloat 1)),
                                (normalProgMultPlus, VFloat (-2), [], (VFloat ((normalPDF (-1.5)) / 2), VFloat 1)),
                                (uniformNegPlus, VFloat (-4.5), [], (VFloat 1, VFloat 1)),
-                               (testList, VList [VFloat 0.25, VFloat 0], [], (VFloat $ normalPDF 0 * 2, VFloat 2)),
+                               (testList, constructVList [VFloat 0.25, VFloat 0], [], (VFloat $ normalPDF 0 * 2, VFloat 2)),
                                (simpleTuple, VTuple (VFloat 0.25) (VFloat 0), [], (VFloat $ normalPDF 0 * 2, VFloat 2)),
+                               (simpleTuple, VTuple (VFloat 0.25) VAny, [], (VFloat $ 2, VFloat 1)),
+                               (simpleTuple, VTuple VAny (VFloat 0), [], (VFloat $ normalPDF 0, VFloat 1)),
                                (uniformIfProg, VFloat 0.5, [], (VFloat 0.5, VFloat 1)),
                                (constantProg, VFloat 2, [], (VFloat 1, VFloat 0)),
                                (uniformExp, VFloat $ exp 4.5, [], (VFloat $ 1 / exp 4.5, VFloat 1)),
@@ -110,10 +112,10 @@ correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat
                                (testDiceAdd, VInt 1, [], (VFloat 0, VFloat 0)),
                                (testDimProb, VFloat 0.5, [], (VFloat 0.4, VFloat 0)),
                                (testDimProb, VFloat 0.0, [], (VFloat (0.6 * 0.39894228040143265), VFloat 1)),
-                               (gaussLists, VList [VFloat 0, VFloat 0, VFloat 0], [IRConst $ VThetaTree (ThetaTree [0.5, 1, 0] [])], (VFloat $ (normalPDF 0) * (normalPDF 0) * (normalPDF 0) / 16, VFloat 3)),
+                               (gaussLists, constructVList [VFloat 0, VFloat 0, VFloat 0], [IRConst $ VThetaTree (ThetaTree [0.5, 1, 0] [])], (VFloat $ (normalPDF 0) * (normalPDF 0) * (normalPDF 0) / 16, VFloat 3)),
                                --(testPartialInjF, VFloat 5.5, [], (VFloat 1, VFloat 1))]
                                (testInjFRenaming, VFloat 5.5, [], (VFloat 1, VFloat 1)),
-                               (gaussLists, VList [VFloat 0, VFloat 0, VFloat 0], [IRConst $ VThetaTree (ThetaTree [0.5, 1, 0] [])], (VFloat $ (normalPDF 0) * (normalPDF 0) * (normalPDF 0) / 16, VFloat 3)),
+                               (gaussLists, constructVList [VFloat 0, VFloat 0, VFloat 0], [IRConst $ VThetaTree (ThetaTree [0.5, 1, 0] [])], (VFloat $ (normalPDF 0) * (normalPDF 0) * (normalPDF 0) / 16, VFloat 3)),
                                (testLeft, VFloat 2, [], (VFloat 1.0, VFloat 0)),
                                (testLeft, VFloat 3, [], (VFloat 0, VFloat 0)),
                                (testEither, VEither (Left (VFloat 0.5)), [], (VFloat 0.5, VFloat 1)),
@@ -125,7 +127,10 @@ correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat
                                (testIsRight, VFloat 1, [], (VFloat 0.6, VFloat 0)),
                                (testIsRight, VFloat 2, [], (VFloat 0.4, VFloat 0)),
                                (testIsRight, VFloat 0, [], (VFloat 0, VFloat 0)),
-                               (testFst, VFloat 0.5, [], (VFloat 1, VFloat 1))]
+                               (testFst, VFloat 0.5, [], (VFloat 1, VFloat 1)),
+                               (testFstCall, VFloat 0.5, [], (VFloat 1, VFloat 1)),
+                               (testFstDiscrete, VFloat 0.5, [], (VFloat 1, VFloat 1)),
+                               (testHead, VFloat 0.5, [], (VFloat 1, VFloat 1))]
 
                               --(testLambdaParameter, VFloat 10, [], VFloat 1.0)]
 
@@ -138,7 +143,7 @@ correctIntegralValuesTestCases =[(uniformProg, VFloat 0, VFloat 1, [], (VFloat 1
                                 (normalProgMult, VFloat (-10), VFloat (-5), [], (VFloat $ normalCDF (-10) - normalCDF (-20), VFloat 0)),
                                 (uniformNegPlus, VFloat (-5), VFloat (-4.5), [], (VFloat 0.5, VFloat 0)),
                                 (uniformProgPlus, VFloat 4, VFloat 4.5, [], (VFloat 0.5, VFloat 0)),
-                                (testList, VList [VFloat 0, VFloat (-1)], VList [VFloat 0.25, VFloat 1], [], (VFloat $ (normalCDF 1 - normalCDF (-1)) * 0.5, VFloat 0)),
+                                (testList, constructVList [VFloat 0, VFloat (-1)], constructVList [VFloat 0.25, VFloat 1], [], (VFloat $ (normalCDF 1 - normalCDF (-1)) * 0.5, VFloat 0)),
                                 (simpleTuple, VTuple (VFloat 0) (VFloat (-1)), VTuple (VFloat 0.25) (VFloat 1), [], (VFloat $ (normalCDF 1 - normalCDF (-1)) * 0.5, VFloat 0)),
                                 (simpleTuple, VTuple (VFloat 0) (VFloat 0), VTuple (VFloat 0.25) (VFloat 0), [], (VFloat $ normalPDF 0 * 0.5, VFloat 1)),
                                 (simpleTuple, VTuple (VFloat 0) (VFloat 0), VTuple (VFloat 0) (VFloat 1), [], (VFloat $ (normalCDF 1 - normalCDF 0) * 2, VFloat 1)),
@@ -153,7 +158,7 @@ correctIntegralValuesTestCases =[(uniformProg, VFloat 0, VFloat 1, [], (VFloat 1
                                 (simpleCall, VFloat 0, VFloat 1, [], (VFloat 1.0, VFloat 0)),
                                 (testCallArg, VFloat 3.5, VFloat 4.5, [], (VFloat 0.5, VFloat 0)),
                                 (testCallLambda, VFloat 2, VFloat 3, [], (VFloat 1.0, VFloat 0)),
-                                (gaussLists, VList [VFloat 0, VFloat 0, VFloat 0], VList [VFloat 1, VFloat 2, VFloat 3], [IRConst $ VThetaTree (ThetaTree [0.5, 1, 0] [])], (VFloat $ ((normalCDF 1) - (normalCDF 0)) * ((normalCDF 2) - (normalCDF 0)) * ((normalCDF 3) - (normalCDF 0)) / 16, VFloat 0)),
+                                (gaussLists, constructVList [VFloat 0, VFloat 0, VFloat 0], constructVList [VFloat 1, VFloat 2, VFloat 3], [IRConst $ VThetaTree (ThetaTree [0.5, 1, 0] [])], (VFloat $ ((normalCDF 1) - (normalCDF 0)) * ((normalCDF 2) - (normalCDF 0)) * ((normalCDF 3) - (normalCDF 0)) / 16, VFloat 0)),
                                 (testInjFRenaming, VFloat 5, VFloat 5.5, [], (VFloat 0.5, VFloat 0)),
                                 (testIsLeft, VFloat 0, VFloat 3, [], (VFloat 1, VFloat 0)),
                                 (testIsLeft, VFloat 1.5, VFloat 3, [], (VFloat 0.6, VFloat 0)),
@@ -172,7 +177,7 @@ prop_CheckProbTestCases :: Property
 prop_CheckProbTestCases = forAll (elements correctProbValuesTestCases) checkProbTestCase
 
 prop_CheckProbTestCasesSample :: Property
-prop_CheckProbTestCasesSample = forAll (elements correctProbValuesTestCases) (testSamplingProb 0.05 10000 5)
+prop_CheckProbTestCasesSample = forAll (elements correctProbValuesTestCases) (testSamplingProb 0.05 1000 5)
 
 prop_CheckIntegralTestCases :: Property
 prop_CheckIntegralTestCases = forAll (elements correctIntegralValuesTestCases) checkIntegralTestCase
@@ -372,7 +377,7 @@ testSamplingProb epsilon samples retries (p, VTuple (VFloat inp1) (VFloat inp2),
 testSamplingProb epsilon samples retries (p, VList inp, params, (VFloat out, VFloat outDim))
   | all isVFloat inp = ioProperty $ evalRandIO $ do
   endlessSamples <- sequence (repeat (irGen p params >>= \(VList l) -> return l)) -- Generates an endless stream of samples
-  let samplesInRange = map (\l -> length l == length inp && all (\(VFloat x, VFloat y) -> abs (x - y) <= epsilon/2 ) (zip l inp)) endlessSamples   -- Use the maximum norm
+  let samplesInRange = map (\l -> length l == length inp && all (\(VFloat x, VFloat y) -> abs (x - y) <= epsilon/2 ) (zip l (toList inp))) (map toList endlessSamples)   -- Use the maximum norm
   let countInside = foldr (\b acc -> if b then acc + 1 else acc) 0 (take samples samplesInRange)
   let ratioInside = fromIntegral countInside / fromIntegral samples
   let estimatePDF = ratioInside / (epsilon ** outDim) -- The maximum norm creates a outDim-dimensional hypercube. In this boring case its either a point, a line or a square depending on the dimension

@@ -108,11 +108,11 @@ simplify x@(IRIf cond left right) =
     else x
 simplify x@(IRCons left right) =
   if isValue left && isValue right
-    then let (VList tl) = unval right in IRConst (VList (unval left : tl))
+    then let (VList tl) = unval right in IRConst (VList (ListCont (unval left) tl))
     else x
 simplify (IRHead expr) =
   if isValue expr
-    then let (VList (_:xs)) = unval expr in IRConst $ VList xs
+    then let (VList (ListCont _ xs)) = unval expr in IRConst $ VList xs
     else IRHead expr
 simplify (IRTCons (IRLambda n a) (IRLambda m b)) | n == m = IRLambda n (IRTCons a b)
 simplify x = x

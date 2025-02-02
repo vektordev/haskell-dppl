@@ -6,6 +6,7 @@ import SPLL.IntermediateRepresentation
 import SPLL.Lang.Lang
 import Data.List (intercalate)
 import SPLL.Lang.Types
+import Data.Foldable
 
 --TODO: On the topic of memoization: Ideally we would want to optimize away redundant calls within a loop.
 -- e.g. in MNist-Addition
@@ -45,7 +46,7 @@ juliaUnaryOps OpLog = "log"
 juliaUnaryOps x = error ("Unknown Julia operator: " ++ show x)
 
 juliaVal :: IRValue -> String
-juliaVal (VList xs) = "[" ++ intercalate "," (map juliaVal xs) ++ "]"
+juliaVal (VList xs) = "[" ++ intercalate "," (map juliaVal (toList xs)) ++ "]"
 juliaVal (VInt i) = show i
 juliaVal (VFloat f) = show f
 juliaVal (VBool f) = if f then "true" else "false"

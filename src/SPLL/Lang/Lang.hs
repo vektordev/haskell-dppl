@@ -32,6 +32,8 @@ module SPLL.Lang.Lang (
 , predicateProg
 , isNotTheta
 , tTraverse
+, constructVList
+, elementAt
 ) where
 
 import SPLL.Lang.Types
@@ -439,6 +441,15 @@ setTypeInfo expr t = case expr of
   (Apply _ a b)         -> Apply t a b
   (ReadNN _ a b)        -> ReadNN t a b
 
+constructVList :: [GenericValue a] -> GenericValue a
+constructVList xs = VList $ foldr ListCont EmptyList xs
+
+elementAt :: ValueList a -> Int -> GenericValue a
+elementAt (ListCont x _) 0 = x
+elementAt (ListCont _ xs) i = elementAt xs (i-1)
+elementAt EmptyList _ = error "Index out of bounds"
+elementAt AnyList _ = error "Cannot iterate AnyLists"
+
 getVFloat :: Value -> Double
 getVFloat (VFloat v) = v
 getVFloat _ = error "not vfloat where it should be"
@@ -448,9 +459,10 @@ getRType (VBool _) = TBool
 getRType (VInt _) = TInt
 getRType (VSymbol _) = TSymbol
 getRType (VFloat _) = TFloat
-getRType (VList (a:_)) = ListOf $ getRType a
-getRType (VList []) = NullList
+getRType (VList (ListCont a _)) = ListOf $ getRType a
+getRType (VList EmptyList) = NullList
 getRType (VTuple t1 t2) = Tuple (getRType t1) (getRType t2)
+getRType (VEither (Left a)) = TEither (getRType a) SPLL.Typing.RType.NotSetYet 
 
 prettyPrintProg :: Program -> [String]
 prettyPrintProg = prettyPrintProgCustomTI prettyFullTypeInfo
