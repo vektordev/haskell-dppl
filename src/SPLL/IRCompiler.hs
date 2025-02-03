@@ -293,7 +293,7 @@ toIRProbability conf typeEnv (InjF _ name [param]) sample = do
   return (returnExpr, paramDim, paramBranches)
 toIRProbability conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name params) sample
   | extras `hasAlgorithm` "injF2Left" || extras `hasAlgorithm` "injF2Right" = do
-  -- Index of the deterministic and the probabilistic parameter
+  -- Index of the deterministic and the probabilistic parameter (Left -> 0, Right -> 1)
   let detIdx = if extras `hasAlgorithm` "injF2Left" then 0 else 1
   let probIdx = 1 - detIdx
   -- FPair of the InjF with unique names
@@ -681,7 +681,8 @@ toIRIntegrate conf typeEnv (InjF _ name [param]) low high = do  --TODO Multivari
   let letInBlockLow = IRLetIn v low invExpr
   let letInBlockHigh = IRLetIn v high invExpr
   (paramExpr, _, paramBranches) <- toIRIntegrate conf typeEnv param letInBlockLow letInBlockHigh
-  return (paramExpr, const0, paramBranches)
+  let returnExpr = IROp OpMult paramExpr (IRUnaryOp OpSign invDerivExpr)
+  return (returnExpr, const0, paramBranches)
 toIRIntegrate conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name params) low high
   | extras `hasAlgorithm` "injF2Left" || extras `hasAlgorithm` "injF2Right" = do
   let detIdx = if extras `hasAlgorithm` "injF2Left" then 0 else 1
@@ -694,10 +695,12 @@ toIRIntegrate conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name param
   let Just invDeriv = lookup v1 invDerivs
   leftExpr <- toIRGenerate typeEnv (params !! detIdx)
   let (detVar, sampleVar) = if x2 == (inVars !! detIdx) then (x2, x3) else (x3, x2)
-  let letInBlockLow = IRLetIn detVar leftExpr (IRLetIn sampleVar low invExpr)
-  let letInBlockHigh = IRLetIn detVar leftExpr (IRLetIn sampleVar high invExpr)
+  tell [(detVar, leftExpr)]
+  let letInBlockLow = (IRLetIn sampleVar low invExpr)
+  let letInBlockHigh = (IRLetIn sampleVar high invExpr)
   (paramExpr, _, paramBranches) <- toIRIntegrate conf typeEnv (params !! probIdx) letInBlockLow letInBlockHigh
-  return (paramExpr, const0, paramBranches)
+  let returnExpr = IROp OpMult paramExpr (IRUnaryOp OpSign invDeriv)
+  return (returnExpr, const0, paramBranches)
 toIRIntegrate conf typeEnv (Lambda t name subExpr) low high = do
   let (TArrow paramRType _) = rType t
   case paramRType of

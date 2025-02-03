@@ -165,7 +165,17 @@ generate f globalEnv env [] (IRUnaryOp OpNeg a) = do
     VInt af -> return $ VInt (-af)
     --VAny -> return VAny
     _ -> error "Type error: Neg can only evaluate on a number"
-
+generate f globalEnv env [] (IRUnaryOp OpSign a) = do
+  aVal <- generate f globalEnv env [] a
+  case aVal of
+    VFloat af | af < 0 -> return $ VFloat (-1)
+    VFloat af | af == 0 -> return $ VFloat (0)
+    VFloat af | af > 0 -> return $ VFloat (1)
+    VInt af | af < 0 -> return $ VInt (-1)
+    VInt af | af == 0 -> return $ VInt (0)
+    VInt af | af > 0 -> return $ VInt (1)
+    --VAny -> return VAny
+    _ -> error "Type error: Neg can only evaluate on a number"
 generate f globalEnv env [] (IRUnaryOp OpAbs a) = do
   aVal <- generate f globalEnv env [] a
   case aVal of

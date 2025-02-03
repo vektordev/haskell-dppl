@@ -90,7 +90,7 @@ normalProgMultPlus = Program [("main", normal #*# constF 2 #+# constF 1)] []
 
 
 uniformNegPlus :: Program
-uniformNegPlus = Program [("main", neg (uniform #+#constF 4))] []
+uniformNegPlus = Program [("main", negF (uniform #+#constF 4))] []
 
 uniformIfProg :: Program
 uniformIfProg = Program [("main", ifThenElse (GreaterThan makeTypeInfo uniform (constF 0.5))
@@ -119,10 +119,10 @@ testCallArg :: Program
 testCallArg = Program [("unif", "x" #-># (var "x" #+# uniform)), ("main", apply (var "unif") (constF 3))] []
 
 testNeg :: Expr
-testNeg = neg uniform
+testNeg = negF uniform
 
 testNegFail :: Expr
-testNegFail = neg (uniform #+# uniform)
+testNegFail = negF (uniform #+# uniform)
 
 testInjF :: Program
 testInjF = Program [("main", injF "double" [uniform])] []

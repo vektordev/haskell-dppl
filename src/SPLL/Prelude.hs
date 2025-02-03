@@ -28,7 +28,7 @@ injF = InjF makeTypeInfo
 --(#+#) = PlusF makeTypeInfo
 
 (#-#) :: Expr -> Expr -> Expr
-(#-#) a b = a #+# (neg b)
+(#-#) a b = a #+# negF b
 
 (#<*>#) :: Expr -> Expr -> Expr
 (#<*>#) a b = injF "multI" [a, b]
@@ -39,8 +39,11 @@ injF = InjF makeTypeInfo
 (#<->#) :: Expr -> Expr -> Expr
 (#<->#) a b = undefined
 
-neg :: Expr -> Expr
-neg = NegF makeTypeInfo
+negF :: Expr -> Expr
+negF x = injF "neg" [x]
+
+expF :: Expr -> Expr
+expF x = injF "exp" [x]
 
 -- Variables
 

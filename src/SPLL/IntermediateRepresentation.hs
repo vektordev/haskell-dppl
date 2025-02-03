@@ -118,6 +118,7 @@ data Operand = OpPlus
              deriving (Show, Eq)
 
 data UnaryOperand = OpNeg
+                  | OpSign
                   | OpAbs
                   | OpNot
                   | OpExp
