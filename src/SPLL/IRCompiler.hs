@@ -8,7 +8,7 @@ import SPLL.Typing.RType
 import SPLL.IROptimizer
 import PredefinedFunctions
 import Control.Monad.Supply
-import SPLL.Typing.PType 
+import SPLL.Typing.PType
 import SPLL.InferenceRule (algName)
 import Debug.Trace
 import Data.Maybe
@@ -47,10 +47,10 @@ envToIR conf p = concatMap (\(name, binding) ->
 
 runCompile :: CompilerConfig -> CompilerMonad CompilationResult -> IRExpr
 runCompile conf codeGen = generateLetInBlock conf (runWriterT codeGen)
-  
+
 generateLetInBlock :: CompilerConfig -> (SupplyT Int Identity) (CompilationResult, [(String, IRExpr)]) -> IRExpr
-generateLetInBlock conf codeGen = 
-  case m of 
+generateLetInBlock conf codeGen =
+  case m of
     (IRLambda _ _) -> (foldr (\(var, val) expr  -> IRLetIn var val expr) m binds) --Dont make tuple out of lambdas, as the snd (and thr) element don't contain information anyway
     _ -> if countBranches conf && not (isLambda m) then
             (foldr (\(var, val) expr  -> IRLetIn var val expr) (IRTCons m (IRTCons dim bc)) binds)
@@ -142,7 +142,7 @@ toIRProbability conf typeEnv (GreaterThan (TypeInfo {rType = t, tags = extras}) 
     tell [(var, l)]
     (integrate, _, integrateBranches) <- toIRIntegrate conf typeEnv right (IRConst (VFloat (-9999999))) (IRVar var)
     var2 <- mkVariable "rhs_integral"
-    let returnExpr = 
+    let returnExpr =
           (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)))
     tell [(var2, integrate)]
     return (returnExpr, const0, integrateBranches)
@@ -181,7 +181,7 @@ toIRProbability conf typeEnv (MultF (TypeInfo {rType = TFloat, tags = extras}) l
     l <- toIRGenerate typeEnv left
     tell [(var, l)]
     (rightExpr, rightDim, rightBranches) <- toIRProbability conf typeEnv right (IROp OpDiv sample (IRVar var))
-    let returnExpr = IROp OpDiv rightExpr (IRUnaryOp OpAbs (IRVar var)) 
+    let returnExpr = IROp OpDiv rightExpr (IRUnaryOp OpAbs (IRVar var))
     return (returnExpr, rightDim, rightBranches)
   | extras `hasAlgorithm` "multRight" = do
     var <- mkVariable ""
@@ -213,7 +213,7 @@ toIRProbability conf typeEnv (PlusI (TypeInfo {rType = TInt, tags = extras}) lef
     let enumListL = head $ [x | EnumList x <- extrasLeft]
     let enumListR = head $ [x | EnumList x <- extrasRight]
     enumVar <- mkVariable "enum"
-  
+
     -- We need to unfold the monad stack, because the EnumSum Works like a lambda expression and has a local scope
     irTuple <- lift $ return $ generateLetInBlock conf (runWriterT (do
       --the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
@@ -277,31 +277,46 @@ toIRProbability conf typeEnv (TCons _ t1Expr t2Expr) sample = do
   mult <- (t1P, t1Dim) `multP` (t2P, t2Dim)
   return (fst mult, snd mult, IROp OpPlus t1Branches t2Branches)
 toIRProbability conf typeEnv (InjF _ name [param]) sample = do
-  fPair <- instantiate mkVariable name  -- FPair of the InjF with unique names
+  -- FPair of the InjF with unique names
+  fPair <- instantiate mkVariable name 
+  -- Unary InjF has a single inversion
   let FPair _ [inv] = fPair
   let FDecl {inputVars=[v], body=invExpr, applicability=appTest, deconstructing=decons, derivatives=[(_, invDerivExpr)]} = inv
-  let letInBlock = IRLetIn v sample invExpr
+  -- Set sample value to the variable name in the InjF
+  tell [(v, sample)]
+  -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
   let probF = if decons then toIRProbabilitySave else toIRProbability
-  (paramExpr, paramDim, paramBranches) <- probF conf typeEnv param letInBlock
-  let returnExpr = IRLetIn v sample (IRIf appTest (IROp OpMult paramExpr (IRUnaryOp OpAbs invDerivExpr)) const0)
+  -- Get the probabilistic inference code for the parameter
+  (paramExpr, paramDim, paramBranches) <- probF conf typeEnv param invExpr
+  -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
+  let returnExpr = IRIf appTest (IROp OpMult paramExpr (IRUnaryOp OpAbs invDerivExpr)) const0
   return (returnExpr, paramDim, paramBranches)
 toIRProbability conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name params) sample
   | extras `hasAlgorithm` "injF2Left" || extras `hasAlgorithm` "injF2Right" = do
+  -- Index of the deterministic and the probabilistic parameter
   let detIdx = if extras `hasAlgorithm` "injF2Left" then 0 else 1
   let probIdx = 1 - detIdx
-  fPair <- instantiate mkVariable name -- FPair of the InjF with unique names
-  let FPair fwd inversions = fPair
+  -- FPair of the InjF with unique names
+  FPair fwd inversions <- instantiate mkVariable name
   let FDecl{inputVars=inVars, outputVars=[v1]} = fwd
-  let [invDecl] = filter (\(FDecl {outputVars=[w1]}) -> (inVars !! probIdx)==w1) inversions   --This should only return one inversion
+  -- Find the inversion with all deterministic input parameters
+  let [invDecl] = filter (\FDecl {outputVars=[w1]} -> (inVars !! probIdx)==w1) inversions   --This should only return one inversion
   let FDecl {inputVars=[x2, x3], body=invExpr, applicability=appTest, deconstructing=decons, derivatives=invDerivs} = invDecl
+  -- Find the relevant derivative of the inversion
   let Just invDeriv = lookup v1 invDerivs
-  leftExpr <- toIRGenerate typeEnv (params !! detIdx)
+  -- Generate the probabilistic sub expressions
+  detExpr <- toIRGenerate typeEnv (params !! detIdx)
+  -- Get the variable names of the detetministic subexpression and the result of the fwd expression
   let (detVar, sampleVar) = if x2 == (inVars !! detIdx) then (x2, x3) else (x3, x2)
-  let letInBlock = IRLetIn detVar leftExpr (IRLetIn sampleVar sample invExpr)
+  -- Set all known values to their variable names in the InjF
+  tell [(detVar, detExpr), (sampleVar, sample)]
+  -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
   let probF = if decons then toIRProbabilitySave else toIRProbability
-  (paramExpr, paramDim, paramBranches) <- probF conf typeEnv (params !! probIdx) letInBlock
-  let returnExpr = IRLetIn detVar leftExpr (IRLetIn sampleVar sample (IRIf appTest (IROp OpMult paramExpr (IRUnaryOp OpAbs invDeriv)) const0))
-  return (returnExpr, paramDim, paramBranches) --FIXME
+  -- Get the probabilistic inference expression of the non-deterministic subexpression
+  (paramExpr, paramDim, paramBranches) <- probF conf typeEnv (params !! probIdx) invExpr
+  -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
+  let returnExpr = IRIf appTest (IROp OpMult paramExpr (IRUnaryOp OpAbs invDeriv)) const0
+  return (returnExpr, paramDim, paramBranches)
 toIRProbability conf typeEnv (InjF TypeInfo {tags=extras} name [left, right]) sample
   | extras `hasAlgorithm` "injF2Enumerable" = do
   -- Get all possible values for subexpressions
@@ -550,7 +565,7 @@ packParamsIntoLetinsGen typeEnv (v:vars) (p:params) expr = do
   pExpr <- toIRGenerate typeEnv p
   e <- packParamsIntoLetinsGen typeEnv vars params expr
   return $ IRLetIn v pExpr e
- 
+
 --Adds an additional check that the bounds are not equal
 --We need this bounds check only once, because no invertible transformation can make the bounds be equal when they were not
 --TODO: Some InjF could lead to CoV, which would make the bounds check at the to wrong
@@ -566,7 +581,7 @@ toIRIntegrateSave conf typeEnv (Lambda t name subExpr) low high = do
       let newTypeEnv = (name, (paramRType, False)):typeEnv
       irTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRIntegrateSave conf newTypeEnv subExpr low high))
       return (IRLambda name irTuple, const0, const0)
-toIRIntegrateSave conf typeEnv expr lower higher = do 
+toIRIntegrateSave conf typeEnv expr lower higher = do
   (prob, probDim, probBC) <- toIRProbability conf typeEnv expr lower
   (integ, integDim, integBC) <- toIRIntegrate conf typeEnv expr lower higher
   return (IRIf (IROp OpEq lower higher) prob integ, IRIf (IROp OpEq lower higher) probDim integDim, IRIf (IROp OpEq lower higher) probBC integBC)
@@ -659,7 +674,7 @@ toIRIntegrate conf typeEnv (ThetaI _ a i) low high = do
   ind <- indicator (IROp OpAnd (IROp OpLessThan low val) (IROp OpGreaterThan high val)) --TODO What to do if low and high are equal?
   return (ind, const0, const0)
 toIRIntegrate conf typeEnv (InjF _ name [param]) low high = do  --TODO Multivariable
-  fPair <- instantiate mkVariable name  
+  fPair <- instantiate mkVariable name
   let FPair _ [inv] = fPair
   let FDecl {inputVars=[v], body=invExpr, derivatives=[(_, invDerivExpr)]} = inv
   prefix <- mkVariable ""
@@ -668,10 +683,10 @@ toIRIntegrate conf typeEnv (InjF _ name [param]) low high = do  --TODO Multivari
   (paramExpr, _, paramBranches) <- toIRIntegrate conf typeEnv param letInBlockLow letInBlockHigh
   return (paramExpr, const0, paramBranches)
 toIRIntegrate conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name params) low high
-  | extras `hasAlgorithm` "injF2Left" || extras `hasAlgorithm` "injF2Right" = do 
+  | extras `hasAlgorithm` "injF2Left" || extras `hasAlgorithm` "injF2Right" = do
   let detIdx = if extras `hasAlgorithm` "injF2Left" then 0 else 1
   let probIdx = 1 - detIdx  -- Other Variable is prob
-  fPair <- instantiate mkVariable name  
+  fPair <- instantiate mkVariable name
   let FPair fwd inversions = fPair
   let FDecl {inputVars=inVars, outputVars=[v1]} = fwd
   let [invDecl] = filter (\(FDecl {outputVars=[w1]}) -> (inVars !! probIdx)==w1) inversions   --This should only return one inversion
