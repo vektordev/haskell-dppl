@@ -7,7 +7,7 @@ module SPLL.Analysis (
 import SPLL.Lang.Types
 import SPLL.Lang.Lang
 import SPLL.InferenceRule
-import Data.Maybe (maybeToList, fromJust, isNothing, fromMaybe)
+import Data.Maybe (maybeToList, fromJust, isNothing, fromMaybe, isJust)
 import Data.List (nub)
 import Data.Bifunctor
 import SPLL.Typing.Typing (TypeInfo, TypeInfo(..), Tag(..), setTags)
@@ -22,7 +22,7 @@ annotateEnumsProg p@Program {functions=f, neurals=n} = p{functions = map (\(name
   --TODO this is really unclean. It does the the job of initializing the environment with correct tags, and also prevents infinite recursion, by only evaluating twice, but annotates the program twice
   where
     exprEnv = map (second (tags . getTypeInfo . annotate [])) f
-    neuralEnv = map (\(n, _, t) -> (n, [t])) n
+    neuralEnv = map (\(n, _, Just t) -> (n, [t])) (filter (\(_, _, mTag) -> isJust mTag) n)
 
 annotateIfNotRecursive :: String -> [(String, [Tag])] -> Expr -> Expr
 annotateIfNotRecursive name _ e | isRecursive name e = e

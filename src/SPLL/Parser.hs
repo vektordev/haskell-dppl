@@ -265,6 +265,7 @@ pDefinition = do
   doesNotContinue
   return x
 
+--TODO: Make Tag optional, add validation via AutoNeural.
 pNeural :: Parser (Either FnDecl NeuralDecl)
 pNeural = dbg "neural" $ do
   _ <- keyword "neural"
@@ -273,7 +274,7 @@ pNeural = dbg "neural" $ do
   ty <- SPLL.Parser.pType
   _ <- symbol "of"
   range <- pList
-  return  (Right (name, ty, (EnumList range)))
+  return  (Right (name, ty, Just (EnumList range)))
 
 pFunction :: Parser (Either FnDecl NeuralDecl)
 pFunction = dbg "function" $ do
