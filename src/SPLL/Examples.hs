@@ -239,7 +239,10 @@ testFst :: Program
 testFst = Program [("main", tfst (tuple uniform normal))] []
 
 testHead :: Program
-testHead = Program [("main", injF "head" [cons uniform nul])] []
+testHead = Program [("main", lhead (cons uniform nul))] []
+
+testTail :: Program
+testTail = Program [("main", lhead (ltail (cons normal (cons uniform nul))))] []
 
 testFstCall :: Program
 testFstCall = Program [("main", tfst (var "bivariate")), ("bivariate", tuple uniform normal)] []

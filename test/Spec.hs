@@ -130,7 +130,8 @@ correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat
                                (testFst, VFloat 0.5, [], (VFloat 1, VFloat 1)),
                                (testFstCall, VFloat 0.5, [], (VFloat 1, VFloat 1)),
                                (testFstDiscrete, VFloat 0.5, [], (VFloat 1, VFloat 1)),
-                               (testHead, VFloat 0.5, [], (VFloat 1, VFloat 1))]
+                               (testHead, VFloat 0.5, [], (VFloat 1, VFloat 1)),
+                               (testTail, VFloat 0.5, [], (VFloat 1, VFloat 1))]
 
                               --(testLambdaParameter, VFloat 10, [], VFloat 1.0)]
 

@@ -111,6 +111,12 @@ cons = Cons makeTypeInfo
 nul :: Expr
 nul = Null makeTypeInfo
 
+lhead :: Expr -> Expr
+lhead x = injF "head" [x]
+
+ltail :: Expr -> Expr
+ltail x = injF "tail" [x]
+
 tuple :: Expr -> Expr -> Expr
 tuple = TCons makeTypeInfo
 
