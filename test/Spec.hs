@@ -165,6 +165,7 @@ correctIntegralValuesTestCases =[(uniformProg, VFloat 0, VFloat 1, [], (VFloat 1
                                 (testIsRight, VFloat 0, VFloat 3, [], (VFloat 1, VFloat 0)),
                                 (testIsRight, VFloat 1.5, VFloat 3, [], (VFloat 0.4, VFloat 0)),
                                 (testFst, VFloat 0.4, VFloat 3, [], (VFloat 0.6, VFloat 0))]
+                                --(testHead, VFloat 0.4, VFloat 3, [], (VFloat 0.6, VFloat 0))]
 
                                   --(testLambdaParameter, VFloat 9, VFloat 11, [], VFloat 1.0)]
                                   --(testCallLambdaAdvanced, VFloat 2, VFloat 3, [], VFloat 1.0),
@@ -194,9 +195,6 @@ prop_CheckTopKInterprets = forAll (elements correctProbValuesTestCases) checkTop
 
 prop_CheckProbTestCasesWithBC :: Property
 prop_CheckProbTestCasesWithBC = forAll (elements correctProbValuesTestCases) checkProbTestCasesWithBC
-
-prop_CheckInjFEqual :: Property
-prop_CheckInjFEqual = forAll (elements correctProbValuesTestCases) checkInjFEqual
 
 prop_TopK :: Property
 prop_TopK = ioProperty $ do
@@ -250,14 +248,6 @@ checkProbTestCasesWithBC (p, inp, params, (out, VFloat outDim)) = ioProperty $ d
   actualOutput <- evalRandIO $ irDensityBC p inp params
   case actualOutput of
     VTuple a (VTuple (VFloat d) (VFloat _)) -> return $ a `reasonablyClose` out .&&. d === outDim
-    _ -> return $ counterexample "Return type was no tuple" False
-
-checkInjFEqual :: (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
-checkInjFEqual (p, inp, params, (_, _)) = ioProperty $ do
-  actualOutput <- evalRandIO $ irDensityBC p inp params
-  actualOutputInjF <- evalRandIO $ irDensityBC (preprocessToInjFProg p) inp params
-  case (actualOutput, actualOutputInjF) of
-    (VTuple a aDim, VTuple b bDim) -> return $ a `reasonablyClose` b .&&. aDim === bDim
     _ -> return $ counterexample "Return type was no tuple" False
 
 checkProbAny :: (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
@@ -314,17 +304,6 @@ irGen p params = IRInterpreter.generateRand irEnv irEnv params irExpr
         annotated = annotateAlgsProg typedProg
         typedProg = addTypeInfo preAnnotated
         preAnnotated = annotateEnumsProg p
-
-preprocessToInjFProg :: Program -> Program
-preprocessToInjFProg p@Program{functions=f} = p{functions=map (second preprocessToInjF) f}
-
-preprocessToInjF :: Expr -> Expr
-preprocessToInjF (PlusF t a b) = InjF t "plus" [preprocessToInjF a, preprocessToInjF b]
-preprocessToInjF (PlusI t a b) = InjF t "plusI" [preprocessToInjF a, preprocessToInjF b]
-preprocessToInjF (MultF t a b) = InjF t "mult" [preprocessToInjF a, preprocessToInjF b]
-preprocessToInjF (MultI t a b) = InjF t "multI" [preprocessToInjF a, preprocessToInjF b]
-preprocessToInjF (NegF t a) = InjF t "neg" [preprocessToInjF a]
-preprocessToInjF x = x
 
 reasonablyClose :: IRValue -> IRValue -> Property
 reasonablyClose (VFloat a) (VFloat b) = counterexample (show a ++ "/=" ++ show b) (property $ abs (a - b) <= 1e-5)

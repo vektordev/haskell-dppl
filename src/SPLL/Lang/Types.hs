@@ -41,13 +41,6 @@ data Expr =
               -- Flow Control
                 IfThenElse TypeInfo Expr Expr Expr
               | InjF TypeInfo String [Expr]
-              -- Arithmetic
-              | MultF TypeInfo Expr Expr
-              | MultI TypeInfo Expr Expr
-              | PlusF TypeInfo Expr Expr
-              | PlusI TypeInfo Expr Expr
-              | ExpF TypeInfo Expr
-              | NegF TypeInfo Expr
               -- Variables
               | LetIn TypeInfo String Expr Expr
               | Var TypeInfo String
@@ -71,9 +64,7 @@ data Expr =
               | Or TypeInfo Expr Expr
               | Not TypeInfo Expr
               -- Other
-              | Arg TypeInfo String RType Expr
               | ReadNN TypeInfo String Expr
-              | Fix TypeInfo Expr
               -- TODO: Needs Concat to achieve proper SPN-parity.
               deriving (Show, Eq, Ord)
 

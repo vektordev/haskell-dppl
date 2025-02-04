@@ -58,19 +58,12 @@ toStub expr = case expr of
   (Uniform _)    -> StubUniform
   (Normal _)     -> StubNormal
   (Constant _ _) -> StubConstant
-  MultF {}       -> StubMultF
-  MultI {}       -> StubMultI
-  PlusF {}       -> StubPlusF
-  PlusI {}       -> StubPlusI
-  ExpF {}        -> StubExpF
-  NegF {}        -> StubNegF
   Not {}         -> StubNot
   (Null _)       -> StubNull
   Cons {}        -> StubCons
   TCons {}       -> StubTCons
   (Var _ _)      -> StubVar
   LetIn {}       -> StubLetIn
-  Arg {}         -> StubArg
   InjF {}        -> StubInjF
   Lambda {}      -> StubLambda
   Apply {}  -> StubApply
@@ -91,12 +84,6 @@ exprMap f expr = case expr of
   (Uniform t) -> Uniform (tInfoMap f t)
   (Normal t) -> Normal (tInfoMap f t)
   (Constant t x) -> Constant (tInfoMap f t) x
-  (MultF t a b) -> MultF (tInfoMap f t) (exprMap f a) (exprMap f b)
-  (MultI t a b) -> MultI (tInfoMap f t) (exprMap f a) (exprMap f b)
-  (PlusF t a b) -> PlusF (tInfoMap f t) (exprMap f a) (exprMap f b)
-  (PlusI t a b) -> PlusI (tInfoMap f t) (exprMap f a) (exprMap f b)
-  (ExpF t a) -> ExpF (tInfoMap f t) (exprMap f a)
-  (NegF t a) -> NegF (tInfoMap f t) (exprMap f a)
   (And t a b) -> And (tInfoMap f t) (exprMap f a) (exprMap f b)
   (Or t a b) -> Or (tInfoMap f t) (exprMap f a) (exprMap f b)
   (Not t a) -> Not (tInfoMap f t) (exprMap f a)
@@ -108,7 +95,6 @@ exprMap f expr = case expr of
   (InjF t x a) -> InjF (tInfoMap f t) x (map (exprMap f) a)
   --(LetInD t x a b) -> LetInD t x (exprMap f a) (exprMap f b)
   --(LetInTuple t x a b c) -> LetInTuple t x (exprMap f a) (biFMap f b) (exprMap f c)
-  (Arg t name r a) -> Arg (tInfoMap f t) name r (exprMap f a)
   (Lambda t name a) -> Lambda (tInfoMap f t) name (exprMap f a)
   (Apply t a b) -> Apply (tInfoMap f t) (exprMap f a) (exprMap f b)
   (ReadNN t n a) -> ReadNN (tInfoMap f t) n (exprMap f a)
@@ -145,12 +131,6 @@ tMapHead f expr = case expr of
   (Uniform _) -> Uniform (f expr)
   (Normal _) -> Normal (f expr)
   (Constant _ x) -> Constant (f expr) x
-  (MultF _ a b) -> MultF (f expr) a b
-  (MultI _ a b) -> MultI (f expr) a b
-  (PlusF _ a b) -> PlusF (f expr) a b
-  (PlusI _ a b) -> PlusI (f expr) a b
-  (ExpF _ a) -> ExpF(f expr) a
-  (NegF _ a) -> NegF (f expr) a
   (And _ a b) -> And (f expr) a b
   (Or _ a b) -> Or (f expr) a b
   (Not _ a) -> Not (f expr) a
@@ -162,7 +142,6 @@ tMapHead f expr = case expr of
   (InjF _ x a) -> InjF (f expr) x a
   --(LetInD t x a b) -> LetInD (f expr) x a b
   --(LetInTuple t x a b c) -> LetInTuple (f expr) x a b c
-  (Arg _ name r a) -> Arg (f expr) name r a
   (Lambda _ name a) -> Lambda (f expr) name a
   (Apply _ a b) -> Apply (f expr) a b
 --  (ReadNN _ a) -> ReadNN (f expr) a
@@ -177,12 +156,6 @@ tMapTails f expr = case expr of
   (Uniform t) -> Uniform t
   (Normal t) -> Normal t
   (Constant t x) -> Constant t x
-  (MultF t a b) -> MultF t (tMap f a) (tMap f b)
-  (MultI t a b) -> MultI t (tMap f a) (tMap f b)
-  (PlusF t a b) -> PlusF t (tMap f a) (tMap f b)
-  (PlusI t a b) -> PlusI t (tMap f a) (tMap f b)
-  (ExpF t a) -> ExpF t (tMap f a)
-  (NegF t a) -> NegF t (tMap f a)
   (And t a b) -> And t (tMap f a) (tMap f b)
   (Or t a b) -> Or t (tMap f a) (tMap f b)
   (Not t a) -> Not t (tMap f a)
@@ -194,7 +167,6 @@ tMapTails f expr = case expr of
   (InjF t x a) -> InjF t x (map (tMap f) a)
   --(LetInD t x a b) -> LetInD t x (tMap f a) (tMap f b)
   --(LetInTuple t x a b c) -> LetInTuple t x (tMap f a) b (tMap f c)
-  (Arg t name r a) -> Arg t name r (tMap f a)
   (Lambda t name a) -> Lambda t name (tMap f a)
   (Apply t a b) -> Apply t (tMap f a) (tMap f b)
 
@@ -208,12 +180,6 @@ tMap f expr = case expr of
   (Uniform _) -> Uniform (f expr)
   (Normal _) -> Normal (f expr)
   (Constant _ x) -> Constant (f expr) x
-  (MultF _ a b) -> MultF (f expr) (tMap f a) (tMap f b)
-  (MultI _ a b) -> MultF (f expr) (tMap f a) (tMap f b)
-  (PlusF _ a b) -> PlusF (f expr) (tMap f a) (tMap f b)
-  (PlusI _ a b) -> PlusI (f expr) (tMap f a) (tMap f b)
-  (ExpF _ a) -> ExpF (f expr) (tMap f a) 
-  (NegF _ a) -> NegF (f expr) (tMap f a)
   (And _ a b) -> And (f expr) (tMap f a) (tMap f b)
   (Or _ a b) -> Or (f expr) (tMap f a) (tMap f b)
   (Not _ a) -> Not (f expr) (tMap f a)
@@ -225,7 +191,6 @@ tMap f expr = case expr of
   (InjF t x a) -> InjF (f expr) x (map (tMap f) a)
   --(LetInD t x a b) -> LetInD (f expr) x (tMap f a) (tMap f b)
   --(LetInTuple t x a b c) -> LetInTuple (f expr) x (tMap f a) b (tMap f c)
-  (Arg _ name r a) -> Arg (f expr) name r (tMap f a)
   (Lambda _ name a) -> Lambda (f expr) name (tMap f a)
   (Apply _ a b) -> Apply (f expr) (tMap f a) (tMap f b)
   (ReadNN _ n a) -> ReadNN (f expr) n (tMap f a)
@@ -239,10 +204,6 @@ tMapProg f (Program decls neural) = Program (zip (map fst decls) (map (tMap f . 
 getBinaryConstructor :: Expr -> (TypeInfo -> Expr -> Expr -> Expr)
 getBinaryConstructor GreaterThan {} = GreaterThan
 getBinaryConstructor LessThan {} = LessThan
-getBinaryConstructor MultF {} = MultF
-getBinaryConstructor MultI {} = MultI
-getBinaryConstructor PlusF {} = PlusF
-getBinaryConstructor PlusI {} = PlusI
 getBinaryConstructor Cons {} = Cons
 getBinaryConstructor TCons {} = TCons
 getBinaryConstructor And {} = And
@@ -256,10 +217,7 @@ getUnaryConstructor (ThetaI _ _ i) = \t a -> ThetaI t a i
 getUnaryConstructor (Subtree _ _ i) = \t a -> Subtree t a i
 getUnaryConstructor (Lambda _ x _) = (`Lambda` x)
 getUnaryConstructor (ReadNN _ x _) = (`ReadNN` x)
-getUnaryConstructor (Fix _ _) = Fix
 getUnaryConstructor (Not _ _) = Not
-getUnaryConstructor (ExpF _ _) = ExpF
-getUnaryConstructor (NegF _ _) = NegF
 getUnaryConstructor x = error ("getUnaryConstructor undefined for " ++ show x)
 
 getNullaryConstructor :: Expr -> (TypeInfo -> Expr)
@@ -311,12 +269,6 @@ getSubExprs expr = case expr of
   (Uniform _) -> []
   (Normal _) -> []
   (Constant _ _) -> []
-  (MultF _ a b) -> [a,b]
-  (MultI _ a b) -> [a,b]
-  (PlusF _ a b) -> [a,b]
-  (PlusI _ a b) -> [a,b]
-  (ExpF _ a) -> [a]
-  (NegF _ a) -> [a]
   (And _ a b) -> [a,b]
   (Or _ a b) -> [a,b]
   (Not _ a) -> [a]
@@ -328,7 +280,6 @@ getSubExprs expr = case expr of
   (InjF _ _ a) -> a
   --(LetInD t x a b) -> [a,b]
   --(LetInTuple t x a b c) -> [a,c]
-  (Arg _ _ _ a) -> [a]
   (Lambda _ _ a) -> [a]
   (Apply _ a b) -> [a, b]
   (ReadNN _ _ a) -> [a]
@@ -345,10 +296,7 @@ setSubExprs expr [] = case expr of
 setSubExprs expr [a] = case expr of
   ThetaI t _ x -> ThetaI t a x
   Subtree t _ x -> Subtree t a x
-  Arg t l n _ -> Arg t l n a
   Lambda t l _ -> Lambda t l a
-  ExpF t _ -> ExpF t a
-  NegF t _ -> NegF t a
   Not t _ -> Not t a
   ReadNN t n _ -> ReadNN t n a
   InjF t n _ -> InjF t n [a]
@@ -356,10 +304,6 @@ setSubExprs expr [a] = case expr of
 setSubExprs expr [a,b] = case expr of
   GreaterThan t _ _ -> GreaterThan t a b
   LessThan t _ _ -> LessThan t a b
-  MultF t _ _ -> MultF t a b
-  MultI t _ _ -> MultI t a b
-  PlusF t _ _ -> PlusF t a b
-  PlusI t _ _ -> PlusI t a b
   And t _ _ -> And t a b
   Or t _ _ -> Or t a b
   Cons t _ b -> Cons t a b
@@ -387,12 +331,6 @@ getTypeInfo expr = case expr of
   (Uniform t)           -> t
   (Normal t)            -> t
   (Constant t _)        -> t
-  (MultF t _ _)         -> t
-  (MultI t _ _)         -> t
-  (PlusF t _ _)         -> t
-  (PlusI t _ _)         -> t
-  (ExpF t _)            -> t
-  (NegF t _)            -> t
   (And t _ _)           -> t
   (Or t _ _)            -> t
   (Not t _)             -> t
@@ -404,7 +342,6 @@ getTypeInfo expr = case expr of
   (InjF t _ _)          -> t
   --(LetInD t _ _ _)      -> t
   --(LetInTuple t _ _ _ _)-> t
-  (Arg t _ _ _)         -> t
   (Lambda t _ _)        -> t
   (Apply t _ _)    -> t
   (ReadNN t _ _)        -> t
@@ -419,12 +356,6 @@ setTypeInfo expr t = case expr of
   (Uniform _)           -> Uniform t
   (Normal _)            -> Normal t
   (Constant _ a)        -> Constant t a
-  (MultF _ a b)         -> MultF t a b
-  (MultI _ a b)         -> MultI t a b
-  (PlusF _ a b)         -> PlusF t a b
-  (PlusI _ a b)         -> PlusI t a b
-  (ExpF _ a)            -> ExpF t a
-  (NegF _ a)            -> NegF t a
   (And _ a b)           -> And t a b
   (Or _ a b)            -> Or t a b
   (Not _ a)             -> Not t a
@@ -436,7 +367,6 @@ setTypeInfo expr t = case expr of
   (InjF _ a b)          -> InjF t a b
   --(LetInD _ a b c)     -> (LetInD t a b c)
   --(LetInTuple _ a b c d) -> (LetInTuple t a b c d)
-  (Arg _ a b c)         -> Arg t a b c
   (Lambda _ a b)        -> Lambda t a b
   (Apply _ a b)         -> Apply t a b
   (ReadNN _ a b)        -> ReadNN t a b
@@ -541,12 +471,6 @@ printFlat expr = case expr of
   Uniform {} -> "Uniform"
   Normal {} -> "Normal"
   (Constant _ x) -> "Constant (" ++ show x ++ ")"
-  MultF {} -> "MultF"
-  MultI {} -> "MultI"
-  PlusF {} -> "PlusF"
-  PlusI {} -> "PlusI"
-  ExpF {} -> "ExpF"
-  NegF {} -> "NegF"
   And {} -> "And"
   Or {} -> "Or"
   Not {} -> "Not"
@@ -558,7 +482,6 @@ printFlat expr = case expr of
   --(LetInD {}) -> "LetInD"
   --(LetInTuple {}) -> "LetInTuple"
   (InjF t fname _)        -> "InjF (" ++ fname ++ ")"
-  (Arg _ var r _ ) -> "Bind " ++ var ++ "::" ++ show r
   (Lambda _ name _) -> "\\" ++ name  ++ " -> "
   Apply {} -> "Apply"
   (ReadNN _ name _) -> "ReadNN " ++ name
@@ -573,12 +496,6 @@ printFlatNoReq expr = case expr of
   Uniform {} -> "Uniform"
   Normal {} -> "Normal"
   (Constant _ _) -> "Constant"
-  MultF {} -> "MultF"
-  MultI {} -> "MultI"
-  PlusF {} -> "PlusF"
-  PlusI {} -> "PlusI"
-  ExpF {} -> "ExpF"
-  NegF {} -> "NegF"
   And {} -> "And"
   Or {} -> "Or"
   Not {} -> "Not"
@@ -590,7 +507,6 @@ printFlatNoReq expr = case expr of
   (InjF t fname _) -> "InjF (" ++ fname ++ ")"
   --(LetInD {}) -> "LetInD"
   --(LetInTuple {}) -> "LetInTuple"
-  (Arg _ var r _ ) -> "Bind " ++ var ++ "::" ++ show r
   (Lambda _ name _) -> "\\" ++ name  ++ " -> "
   Apply {} -> "Apply"
   ReadNN {} -> "ReadNN"

@@ -192,15 +192,15 @@ pVar = do
 
 binaryFs :: [(String, TypeInfo -> Expr -> Expr -> Expr)]
 binaryFs = [
-  ("multF", MultF),
-  ("multI", MultI),
-  ("plusF", PlusF),
-  ("plusI", PlusI)
+  ("multF", \ti p1 p2 -> InjF ti "mult" [p1, p2]),
+  ("multI", \ti p1 p2 -> InjF ti "multI" [p1, p2]),
+  ("plusF", \ti p1 p2 -> InjF ti "plus" [p1, p2]),
+  ("plusI", \ti p1 p2 -> InjF ti "plusI" [p1, p2])
   ]
 
 unaryFs :: [(String, TypeInfo -> Expr -> Expr)]
 unaryFs = [
-  ("negate", NegF)
+  ("negate", \ti p -> InjF ti "neg" [p])
   ]
 
 injFs :: [(String, (Int, TypeInfo -> [Expr] -> Expr))]
@@ -442,7 +442,7 @@ appTable = do
   args <- many term
   return $ foldl (Apply makeTypeInfo) f args
 
-opList = [(">", GreaterThan), ("++", PlusI), ("**", MultI), ("+", PlusF), ("*", MultF), (":", Cons)]
+opList = [(">", GreaterThan), ("++", \ti p1 p2 -> InjF ti "plusI" [p1, p2]), ("**", \ti p1 p2 -> InjF ti "multI" [p1, p2]), ("+", \ti p1 p2 -> InjF ti "plus" [p1, p2]), ("*", \ti p1 p2 -> InjF ti "mult" [p1, p2]), (":", Cons)]
 
 mkOp :: Parser (Expr -> Expr -> Expr)
 mkOp = do

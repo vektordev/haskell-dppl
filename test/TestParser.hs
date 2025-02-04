@@ -47,11 +47,6 @@ exprToString :: Expr -> String
 exprToString (IfThenElse _ cond tBranch fBranch) =
     "if " ++ bracket cond ++ " then " ++ bracket tBranch ++ " else " ++ bracket fBranch
 exprToString (InjF _ name args) = name ++ " " ++ unwords (map bracket args)
-exprToString (MultF _ e1 e2) = "multF " ++ bracket e1 ++ " " ++ bracket e2
-exprToString (MultI _ e1 e2) = "multI " ++ bracket e1 ++ " " ++ bracket e2
-exprToString (PlusF _ e1 e2) = "" ++ bracket e1 ++ " + " ++ bracket e2
-exprToString (PlusI _ e1 e2) = "plusI " ++ bracket e1 ++ " " ++ bracket e2
-exprToString (NegF _ e) = "negate " ++ bracket e
 exprToString (LetIn _ name val body) = "let " ++ name ++ " = " ++ bracket val ++ " in " ++ bracket body
 exprToString (Var _ name) = name
 exprToString (Constant _ value) = valToString value
@@ -69,9 +64,7 @@ exprToString (LessThan _ e1 e2) = bracket e1 ++ " < " ++ bracket e2
 exprToString (And _ e1 e2) = bracket e1 ++ " && " ++ bracket e2
 exprToString (Or _ e1 e2) = bracket e1 ++ " || " ++ bracket e2
 exprToString (Not _ e) = "not " ++ bracket e
-exprToString (Arg _ name rtype body) = name ++ " :: " ++ rTypeToString rtype ++ " -> " ++ bracket body
 exprToString (ReadNN _ name expr) = "readNN " ++ name ++ " " ++ bracket expr
-exprToString (Fix _ expr) = "fix " ++ bracket expr
 
 fnDeclToString :: FnDecl -> String
 fnDeclToString (name, expr) = name ++ " = " ++ exprToString expr

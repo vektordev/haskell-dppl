@@ -7,7 +7,6 @@ import SPLL.Typing.PType
 import SPLL.Typing.Typing (TypeInfo, makeTypeInfo)
 import SPLL.Lang.Types
 import SPLL.Prelude
-import SPLL.Lang.Types (Program(Program))
 
 --weatherHask lastDay = if lastDay == rainy
 --  then let current = randA in (current, weatherHask current)
@@ -59,16 +58,16 @@ exampleList = [
               ]
 
 paramExpr :: Expr
-paramExpr = Arg makeTypeInfo "iterations" TFloat (ifThenElse
+paramExpr = "iterations" #-># ifThenElse
   (GreaterThan makeTypeInfo (var "iterations") (constF 0.5))
-  (Cons makeTypeInfo (Constant makeTypeInfo (VBool True)) (apply (var "main") (PlusF makeTypeInfo (var "iterations") (constF (-1.0)))))
-  (Null makeTypeInfo))
+  (Cons makeTypeInfo (Constant makeTypeInfo (VBool True)) (apply (var "main") (var "iterations" #+# constF (-1.0))))
+  (Null makeTypeInfo)
 
 simpleList :: Program
 simpleList = Program [("main", constF 0.0 #:# Null makeTypeInfo)] []
 
 simpleAdd :: Program
-simpleAdd = Program [("main", PlusF makeTypeInfo (constF 0.0) (constF 1.0))] []
+simpleAdd = Program [("main", constF 0.0 #+# constF 1.0)] []
 
 uniformProg :: Program
 uniformProg = Program [("main", uniform)] []
@@ -243,7 +242,7 @@ testHead :: Program
 testHead = Program [("main", injF "head" [cons uniform nul])] []
 
 testFstCall :: Program
-testFstCall = Program [("main", tfst (var "bivariate")), ("bivariate", (tuple uniform normal))] []
+testFstCall = Program [("main", tfst (var "bivariate")), ("bivariate", tuple uniform normal)] []
 
 testFstDiscrete :: Program
 testFstDiscrete = Program [("main", tfst (tuple uniform  (bernoulli 0.4)))] []

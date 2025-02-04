@@ -579,48 +579,10 @@ infer env expr = case expr of
     return (s_acc, concatMap snd3 p_inf ++ [(tv,cs)] --TODO check this
       , tv, InjF (setPType ti tv) name (map frth3 p_inf))
 
-  PlusF ti e1 e2 -> do
-    (s1, cs1, t1) <- plusInf
-    (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
-    (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
-    return (s3, cs3, t3, PlusF (setPType ti t3) et1 et2)
-
-  PlusI ti e1 e2 -> do
-    (s1, cs1, t1) <- plusInf
-    (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
-    (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
-    -- return (s3, cs3, t3, PlusI (setPType ti t3) et1 et2)
-    let pt = if isEnumerable e1 && isEnumerable e2 then upgrade Prob t3 else t3
-    return (s3, cs3, pt, PlusI (setPType ti pt) et1 et2)
-
-  MultF ti e1 e2 -> do
-      (s1, cs1, t1) <- plusInf
-      (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
-      (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
-      return (s3, cs3, t3, MultF (setPType ti t3) et1 et2)
-
-  MultI ti e1 e2 -> do
-      (s1, cs1, t1) <- plusInf
-      (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
-      (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
-      -- return (s3, cs3, t3, MultI (setPType ti t3) et1 et2)
-      let pt = if isEnumerable e1 && isEnumerable e2 then Prob else t3
-      return (s3, cs3, pt, MultI (setPType ti pt) et1 et2)
-
   Not ti e -> do
       (s1, cs1, t1) <- negInf
       (s2, cs2, t2, et) <- applyOpArg env e s1 cs1 t1
       return (s2, cs2, t2, Not (setPType ti t2) et)
-
-  ExpF ti e -> do
-      (s1, cs1, t1) <- negInf
-      (s2, cs2, t2, et) <- applyOpArg env e s1 cs1 t1
-      return (s2, cs2, t2, ExpF (setPType ti t2) et)
-
-  NegF ti e -> do
-      (s1, cs1, t1) <- negInf
-      (s2, cs2, t2, et) <- applyOpArg env e s1 cs1 t1
-      return (s2, cs2, t2, NegF (setPType ti t2) et)
 
   GreaterThan ti e1 e2 -> do
       (s1, cs1, t1) <- compInf

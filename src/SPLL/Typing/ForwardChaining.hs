@@ -97,11 +97,6 @@ annotateMaximumCType (_, used) e = t {cType=ct, derivingHornClause=hc}
 
 constructHornClause :: Expr -> [HornClause]
 constructHornClause e = case e of
-  PlusF _ a b -> rotatedHornClauses ( [(getChainName a, CInferDeterministic), (getChainName b, CInferDeterministic)],  [(getChainName e, CInferDeterministic)], (StubPlusF, 0))
-  MultF _ a b -> rotatedHornClauses ( [(getChainName a, CInferDeterministic), (getChainName b, CInferDeterministic)],  [(getChainName e, CInferDeterministic)], (StubMultF, 0))
-  PlusI _ a b -> rotatedHornClauses ( [(getChainName a, CInferDeterministic), (getChainName b, CInferDeterministic)],  [(getChainName e, CInferDeterministic)], (StubPlusI, 0))
-  MultI _ a b -> rotatedHornClauses ( [(getChainName a, CInferDeterministic), (getChainName b, CInferDeterministic)],  [(getChainName e, CInferDeterministic)], (StubMultI, 0))
-  NegF _ a -> rotatedHornClauses ( [(getChainName a, CInferDeterministic)],  [(getChainName e, CInferDeterministic)], (StubNegF, 0))
   Not _ a -> rotatedHornClauses ( [(getChainName a, CInferDeterministic)],  [(getChainName e, CInferDeterministic)], (StubNot, 0))
   -- The bound expression is det if the
   LetIn _ _ v b -> [([(getChainName b, CInferDeterministic)],  [(getChainName e, CInferDeterministic)], (StubLetIn, 0)), ([(getChainName e, CInferDeterministic)],  [(getChainName b, CInferDeterministic)], (StubLetIn, 1))]

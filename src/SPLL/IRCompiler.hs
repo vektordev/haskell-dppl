@@ -175,66 +175,6 @@ toIRProbability conf typeEnv (LessThan (TypeInfo {rType = t, tags = extras}) lef
     tell [(var2, integrate)]
     let returnExpr = (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))  (IRVar var2))
     return (returnExpr, const0, integrateBranches)
-toIRProbability conf typeEnv (MultF (TypeInfo {rType = TFloat, tags = extras}) left right) sample
-  | extras `hasAlgorithm` "multLeft" = do
-    var <- mkVariable ""
-    l <- toIRGenerate typeEnv left
-    tell [(var, l)]
-    (rightExpr, rightDim, rightBranches) <- toIRProbability conf typeEnv right (IROp OpDiv sample (IRVar var))
-    let returnExpr = IROp OpDiv rightExpr (IRUnaryOp OpAbs (IRVar var))
-    return (returnExpr, rightDim, rightBranches)
-  | extras `hasAlgorithm` "multRight" = do
-    var <- mkVariable ""
-    r <- toIRGenerate typeEnv right
-    tell [(var, r)]
-    (leftExpr, leftDim, leftBranches) <- toIRProbability conf typeEnv left (IROp OpDiv sample (IRVar var))
-    let returnExpr = IROp OpDiv leftExpr (IRUnaryOp OpAbs (IRVar var))
-    return (returnExpr, leftDim, leftBranches)
-toIRProbability conf typeEnv (PlusF (TypeInfo {rType = TFloat, tags = extras}) left right) sample
-  | extras `hasAlgorithm` "plusLeft" = do
-    var <- mkVariable ""
-    l <- toIRGenerate typeEnv left
-    tell [(var, l)]
-    (rightExpr, rightDim, rightBranches) <- toIRProbability conf typeEnv right (IROp OpSub sample (IRVar var))
-    return (rightExpr, rightDim, rightBranches)
-  | extras `hasAlgorithm` "plusRight" = do
-    var <- mkVariable ""
-    r <- toIRGenerate typeEnv right
-    tell [(var, r)]
-    (leftExpr, leftDim, leftBranches) <- toIRProbability conf typeEnv left (IROp OpSub sample (IRVar var))
-    return (leftExpr, leftDim, leftBranches)
-toIRProbability conf typeEnv (PlusI (TypeInfo {rType = TInt, tags = extras}) left right) sample
-  | extras `hasAlgorithm` "enumeratePlusLeft" = do
-    --Solving enumPlusLeft works by enumerating all left hand side choices.
-    -- We then invert the addition to infer the right hand side.
-    -- TODO: Theoretical assessment whether there's a performance or other difference between enumLeft and enumRight.
-    let extrasLeft = tags $ getTypeInfo left
-    let extrasRight = tags $ getTypeInfo right
-    let enumListL = head $ [x | EnumList x <- extrasLeft]
-    let enumListR = head $ [x | EnumList x <- extrasRight]
-    enumVar <- mkVariable "enum"
-
-    -- We need to unfold the monad stack, because the EnumSum Works like a lambda expression and has a local scope
-    irTuple <- lift $ return $ generateLetInBlock conf (runWriterT (do
-      --the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
-      (pLeft, _, _) <- toIRProbability conf typeEnv left (IRVar enumVar)
-      (pRight, _, _) <- toIRProbability conf typeEnv right (IROp OpSub sample (IRVar enumVar))
-      let returnExpr = case topKThreshold conf of
-            Nothing -> IRIf (IRElementOf (IROp OpSub sample (IRVar enumVar)) (IRConst (fmap failConversion (constructVList enumListR)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
-            Just thr -> IRIf (IROp OpAnd (IRElementOf (IROp OpSub sample (IRVar enumVar)) (IRConst (fmap failConversion (constructVList enumListR)))) (IROp OpGreaterThan pLeft (IRConst (VFloat thr)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
-      -- TODO correct branch counting
-      return (returnExpr, const0, const0)))
-    return (IREnumSum enumVar (fmap failConversion (constructVList enumListL)) $ IRTFst irTuple, const0, const0)
-  | extras `hasAlgorithm` "plusLeft" = do
-    var <- mkVariable ""
-    (rightExpr, _, rightBranches) <- toIRProbability conf typeEnv right (IROp OpSub sample (IRVar var))
-    l <- toIRGenerate typeEnv left
-    tell [(var, l)]
-    return (rightExpr, const0, rightBranches)
-toIRProbability conf typeEnv (ExpF TypeInfo {rType = TFloat} f) sample = do --FIXME correct Inference
-  error "deprecated: Use InjF instead"
-toIRProbability conf typeEnv (NegF (TypeInfo {rType = TFloat, tags = extra}) f) sample =
-  toIRProbability conf typeEnv f (IRUnaryOp OpNeg sample)
 toIRProbability conf typeEnv (Not (TypeInfo {rType = TBool}) f) sample =
   toIRProbability conf typeEnv f (IRUnaryOp OpNot sample)
 toIRProbability conf typeEnv (ReadNN _ name subexpr) sample = do
@@ -467,28 +407,6 @@ toIRGenerate typeEnv (LessThan _ left right) = do
   l <- toIRGenerate typeEnv left
   r <- toIRGenerate typeEnv right
   return $ IROp OpLessThan l r
-toIRGenerate typeEnv (PlusF _ left right) = do
-  l <- toIRGenerate typeEnv left
-  r <- toIRGenerate typeEnv right
-  return $ IROp OpPlus l r
-toIRGenerate typeEnv (PlusI _ left right) = do
-  l <- toIRGenerate typeEnv left
-  r <- toIRGenerate typeEnv right
-  return $ IROp OpPlus l r
-toIRGenerate typeEnv (MultF _ left right) = do
-  l <- toIRGenerate typeEnv left
-  r <- toIRGenerate typeEnv right
-  return $ IROp OpMult l r
-toIRGenerate typeEnv (MultI _ left right) = do
-  l <- toIRGenerate typeEnv left
-  r <- toIRGenerate typeEnv right
-  return $ IROp OpMult l r
-toIRGenerate typeEnv (ExpF _ f) = do
-  f' <- toIRGenerate typeEnv f
-  return $ IRUnaryOp OpExp f'
-toIRGenerate typeEnv (NegF _ f) = do
-  f' <- toIRGenerate typeEnv f
-  return $ IRUnaryOp OpNeg f'
 toIRGenerate typeEnv (Not _ f) = do
   f' <- toIRGenerate typeEnv f
   return $ IRUnaryOp OpNot f'
@@ -598,36 +516,6 @@ toIRIntegrate conf typeEnv expr@(Normal _) lower higher = do
   --let expr = IRIf (IROp OpEq lower higher) density (IROp OpSub (IRCumulative IRNormal higher) (IRCumulative IRNormal lower))
   let expr = (IROp OpSub (IRCumulative IRNormal higher) (IRCumulative IRNormal lower))
   return (expr, IRIf (IROp OpEq lower higher) (IRConst $ VFloat 1) const0, const0)
-toIRIntegrate conf typeEnv (MultF (TypeInfo {tags = extras}) left right) lower higher
-  | extras `hasAlgorithm` "multLeft" = do
-    var <- mkVariable ""
-    (rightExpr, _, rightBranches) <- toIRIntegrate conf typeEnv right (IROp OpDiv lower (IRVar var)) (IROp OpDiv higher (IRVar var))
-    l <- toIRGenerate typeEnv left
-    tell [(var, l)]
-    return (rightExpr, const0, rightBranches)
-  | extras `hasAlgorithm` "multRight" = do
-    var <- mkVariable ""
-    (leftExpr, _, leftBranches) <- toIRIntegrate conf typeEnv left (IROp OpDiv lower (IRVar var)) (IROp OpDiv higher (IRVar var))
-    r <- toIRGenerate typeEnv right
-    tell [(var, r)]
-    return (leftExpr, const0, leftBranches)
-toIRIntegrate conf typeEnv (PlusF TypeInfo {tags = extras} left right) lower higher
-  | extras `hasAlgorithm` "plusLeft" = do
-    var <- mkVariable ""
-    (rightExpr, _, rightBranches) <- toIRIntegrate conf typeEnv right (IROp OpSub lower (IRVar var)) (IROp OpSub higher (IRVar var))
-    l <- toIRGenerate typeEnv left
-    tell [(var, l)]
-    return (rightExpr, const0, rightBranches)
-  | extras `hasAlgorithm` "plusRight" = do
-    var <- mkVariable ""
-    (leftExpr, _, leftBranches) <- toIRIntegrate conf typeEnv left (IROp OpSub lower (IRVar var)) (IROp OpSub higher (IRVar var))
-    r <- toIRGenerate typeEnv right
-    tell [(var, r)]
-    return (leftExpr, const0, leftBranches)
-toIRIntegrate conf typeEnv (NegF _ a) low high = do
-  toIRIntegrate conf typeEnv a (IRUnaryOp OpNeg high) (IRUnaryOp OpNeg low)
-toIRIntegrate conf typeEnv (ExpF _ a) low high = do
-  error "deprecated: Use InjF instead"
 toIRIntegrate conf typeEnv (TCons _ t1Expr t2Expr) low high = do
   (t1P, t1Dim,  t1Branches) <- toIRIntegrateSave conf typeEnv t1Expr (IRTFst low) (IRTFst high)
   (t2P, t2Dim,  t2Branches) <- toIRIntegrateSave conf typeEnv t2Expr (IRTSnd low) (IRTSnd high)

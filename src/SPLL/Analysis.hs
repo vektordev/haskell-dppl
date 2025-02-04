@@ -43,14 +43,6 @@ annotate env e = withNewTypeInfo
         (Just [EnumList l]) -> fromList l
         (Just [EnumRange (VInt a, VInt b)]) -> fromList [VInt i | i <- [a..b]]
         _ -> error $ "Invalid Neural declaration for " ++ name ++ ".\n    found:" ++ show env
-      (PlusI _ left right) -> do
-        let valuesLeft = getValuesFromExpr left
-        let valuesRight = getValuesFromExpr right
-        fromList [VInt (a + b) | VInt a <- valuesLeft, VInt b <- valuesRight]
-      (MultI _ left right) -> do
-        let valuesLeft = getValuesFromExpr left
-        let valuesRight = getValuesFromExpr right
-        fromList [VInt (a * b) | VInt a <- valuesLeft, VInt b <- valuesRight]
       (InjF _ name params) -> do
         let paramValues = map getValuesFromExpr params
         fromList (propagateValues name paramValues)

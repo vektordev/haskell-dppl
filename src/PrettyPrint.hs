@@ -22,18 +22,12 @@ wrapInFunctionDeclarationIR e fName params = "def " ++ fName ++ "(" ++ intercala
 
 pPrintExpr :: Expr -> Int -> String
 pPrintExpr (LetIn _ n v b) i = "let " ++ n ++ " = " ++ pPrintExpr v (i+1) ++ " in\n" ++ indent (i+1) ++ pPrintExpr b (i+1)
-pPrintExpr (PlusF _ a b) i = "(" ++ pPrintExpr a i ++ " + " ++ pPrintExpr b i ++ ")"
-pPrintExpr (PlusI _ a b) i = "(" ++ pPrintExpr a i ++ " + " ++ pPrintExpr b i ++ ")"
-pPrintExpr (MultF _ a b) i = "(" ++ pPrintExpr a i ++ " * " ++ pPrintExpr b i ++ ")"
-pPrintExpr (MultI _ a b) i = "(" ++ pPrintExpr a i ++ " * " ++ pPrintExpr b i ++ ")"
 pPrintExpr (Constant _ a) _ = pPrintValue a
 pPrintExpr (Var _ a) _ = a
 pPrintExpr (Uniform _) _ = "Uniform"
 pPrintExpr (Normal _) _ = "Normal"
 pPrintExpr (IfThenElse _ c t e) i = "if " ++ pPrintExpr c i ++ " then\n" ++ indent (i+1) ++ pPrintExpr t (i+1) ++"\n" ++ indent i ++ "else\n" ++ indent (i+1) ++ pPrintExpr e (i+1)
 pPrintExpr (InjF _ f args) i = f ++ "(" ++ intercalate ", " (map (`pPrintExpr` i) args) ++ ")"
-pPrintExpr (ExpF _ e) i = "exp(" ++ pPrintExpr e i ++ ")"
-pPrintExpr (NegF _ e) i =  "-(" ++ pPrintExpr e i ++ ")"
 pPrintExpr (Lambda _ n e) i = "\\" ++ n ++ " -> " ++ pPrintExpr e (i+1)
 pPrintExpr (Apply _ f v) i = pPrintExpr f i ++ "(" ++ pPrintExpr v i ++ ")"
 pPrintExpr (ThetaI _ e n) i = "Theta_" ++ show n ++ "(" ++ pPrintExpr e i ++ ")"
@@ -46,9 +40,7 @@ pPrintExpr (LessThan _ a b) i = "(" ++ pPrintExpr a i ++ " < " ++ pPrintExpr b i
 pPrintExpr (And _ a b) i = "(" ++ pPrintExpr a i ++ " && " ++ pPrintExpr b i ++ ")"
 pPrintExpr (Or _ a b) i = "(" ++ pPrintExpr a i ++ " || " ++ pPrintExpr b i ++ ")"
 pPrintExpr (Not _ e) i = "!(" ++ pPrintExpr e i ++ ")"
-pPrintExpr (Arg _ n t e) i = n ++ ": " ++ show t ++ " = " ++ pPrintExpr e i
 pPrintExpr (ReadNN _ n e) i = "readNN(" ++ n ++ ", " ++ pPrintExpr e i ++ ")"
-pPrintExpr (Fix _ e) i = "fix(" ++ pPrintExpr e i ++ ")"
 
 pPrintIRExpr :: IRExpr -> Int -> String
 pPrintIRExpr (IRIf cond thenExpr elseExpr) n =
@@ -70,6 +62,7 @@ pPrintIRExpr (IRUnaryOp OpAbs e) n = "abs(" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRUnaryOp OpNot e) n = "!(" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRUnaryOp OpExp e) n = "(e^(" ++ pPrintIRExpr e (n + 1) ++ "))"
 pPrintIRExpr (IRUnaryOp OpLog e) n = "log(" ++ pPrintIRExpr e (n + 1) ++ ")"
+pPrintIRExpr (IRUnaryOp OpSign e) n = "sign(" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRTheta e i) n = "theta (" ++ pPrintIRExpr e (n + 1) ++ ")@" ++ show i
 pPrintIRExpr (IRSubtree e i) n = "subtree (" ++ pPrintIRExpr e (n + 1) ++ ")@" ++ show i
 pPrintIRExpr (IRConst val) n = "const " ++ show val
