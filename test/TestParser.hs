@@ -77,8 +77,9 @@ fnDeclToString :: FnDecl -> String
 fnDeclToString (name, expr) = name ++ " = " ++ exprToString expr
 
 neuralDeclToString :: NeuralDecl -> String
-neuralDeclToString (name, rType, tag) =
-    "neural " ++ name ++ " :: " ++ rTypeToString rType ++ " of " ++ tagToString tag
+neuralDeclToString (name, rty, Nothing) = "neural " ++ name ++ " :: " ++ rTypeToString rty
+neuralDeclToString (name, rty, Just tag) =
+    "neural " ++ name ++ " :: " ++ rTypeToString rty ++ " of " ++ tagToString tag
 
 programToString :: Program -> String
 programToString (Program fnDecls neuralDecls) =
