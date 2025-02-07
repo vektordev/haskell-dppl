@@ -40,7 +40,6 @@ dbg x y = y
 -- like InjF
 
 --TODO: This can't parse type annotations.
--- its type signature doesn't have a space to put them (Program () a instead of Program TypeInfo)
 -- At some point this deserves fixing.
 
 type Parser = Parsec Void String
@@ -207,7 +206,12 @@ injFs :: [(String, (Int, TypeInfo -> [Expr] -> Expr))]
 injFs = [(name, (parameterCount name, (`InjF` name))) | (name, _) <- globalFenv]
 
 pConst :: Parser Expr
-pConst = choice [try pFloat, pIntVal]
+pConst = choice [pBool, try pFloat, pIntVal]
+
+pBool :: Parser Expr
+pBool = do
+  b <- choice [keyword "True" >> return True, keyword "False" >> return False]
+  return $ Constant makeTypeInfo (VBool b)
 
 pFloat :: Parser Expr
 pFloat = do
