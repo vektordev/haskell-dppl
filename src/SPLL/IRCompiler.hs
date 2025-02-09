@@ -79,6 +79,12 @@ hasAlgorithm tags alg = alg `elem` ([algName a | Alg a <- tags])
 const0 :: IRExpr
 const0 = IRConst (VFloat 0)
 
+negInf :: IRExpr
+negInf = IRConst (VFloat (-9999999))
+
+posInf :: IRExpr
+posInf = IRConst (VFloat 9999999)
+
 toIRProbabilitySave :: CompilerConfig -> TypeEnv -> Expr -> IRExpr -> CompilerMonad CompilationResult
 toIRProbabilitySave conf typeEnv (Lambda t name subExpr) sample = do
   let (TArrow paramRType _) = rType t
@@ -93,7 +99,7 @@ toIRProbabilitySave conf typeEnv (Lambda t name subExpr) sample = do
       return (IRLambda name irTuple, const0, const0)
 toIRProbabilitySave conf typeEnv expr sample = do
   (probExpr, probDim, probBranches) <- toIRProbability conf typeEnv expr sample
-  return $ (IRIf (IROp OpEq sample (IRConst VAny)) (IRConst (VFloat 1)) probExpr, IRIf (IROp OpEq sample (IRConst VAny)) const0 probDim, IRIf (IROp OpEq sample (IRConst VAny)) const0 probBranches)
+  return $ (IRIf (IRUnaryOp OpIsAny sample) (IRConst (VFloat 1)) probExpr, IRIf (IRUnaryOp OpIsAny sample) const0 probDim, IRIf (IRUnaryOp OpIsAny sample) const0 probBranches)
 
 --in this implementation, I'll forget about the distinction between PDFs and Probabilities. Might need to fix that later.
 toIRProbability :: CompilerConfig -> TypeEnv -> Expr -> IRExpr -> CompilerMonad CompilationResult
@@ -135,12 +141,11 @@ toIRProbability conf typeEnv (IfThenElse t cond left right) sample = do
       tell [(var_condT_p, condTrueExpr), (var_condF_p, condFalseExpr)]
       return (fst returnExpr, snd returnExpr, branches)
 toIRProbability conf typeEnv (GreaterThan (TypeInfo {rType = t, tags = extras}) left right) sample
-  --TODO: Find a better lower bound than just putting -9999999
   | extras `hasAlgorithm` "greaterThanLeft" = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
     l <- toIRGenerate typeEnv left
     tell [(var, l)]
-    (integrate, _, integrateBranches) <- toIRIntegrate conf typeEnv right (IRConst (VFloat (-9999999))) (IRVar var)
+    (integrate, _, integrateBranches) <- toIRIntegrate conf typeEnv right negInf (IRVar var)
     var2 <- mkVariable "rhs_integral"
     let returnExpr =
           (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)))
@@ -150,18 +155,17 @@ toIRProbability conf typeEnv (GreaterThan (TypeInfo {rType = t, tags = extras}) 
     var <- mkVariable "fixed_bound"
     r <- toIRGenerate typeEnv right
     tell [(var, r)]
-    (integrate, _, integrateBranches) <- toIRIntegrate conf typeEnv left (IRConst (VFloat (-9999999))) (IRVar var)
+    (integrate, _, integrateBranches) <- toIRIntegrate conf typeEnv left negInf (IRVar var)
     var2 <- mkVariable "lhs_integral"
     let returnExpr = (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)) (IRVar var2))
     tell [(var2, integrate)]
     return (returnExpr, const0, integrateBranches)
 toIRProbability conf typeEnv (LessThan (TypeInfo {rType = t, tags = extras}) left right) sample
-  --TODO: Find a better lower bound than just putting -9999999
   | extras `hasAlgorithm` "lessThanLeft" = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
     l <- toIRGenerate typeEnv left
     tell [(var, l)]
-    (integrate, _, integrateBranches) <- toIRIntegrate conf typeEnv right (IRVar var) (IRConst (VFloat (9999999)))
+    (integrate, _, integrateBranches) <- toIRIntegrate conf typeEnv right (IRVar var) posInf
     var2 <- mkVariable "rhs_integral"
     let returnExpr = (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)))
     tell [(var2, integrate)]
@@ -170,7 +174,7 @@ toIRProbability conf typeEnv (LessThan (TypeInfo {rType = t, tags = extras}) lef
     var <- mkVariable "fixed_bound"
     r <- toIRGenerate typeEnv right
     tell [(var, r)]
-    (integrate, _, integrateBranches) <- toIRIntegrate conf typeEnv left (IRVar var) (IRConst (VFloat (9999999)))
+    (integrate, _, integrateBranches) <- toIRIntegrate conf typeEnv left (IRVar var) posInf
     var2 <- mkVariable "lhs_integral"
     tell [(var2, integrate)]
     let returnExpr = (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))  (IRVar var2))
@@ -181,8 +185,8 @@ toIRProbability conf typeEnv (ReadNN _ name subexpr) sample = do
   mkInput <- toIRGenerate typeEnv subexpr
   let returnExpr = (IRIndex (IREvalNN name mkInput) sample)
   return (returnExpr, const0, const0)
-toIRProbability conf typeEnv (Normal t) sample = return (IRDensity IRNormal sample, IRIf (IROp OpEq sample (IRConst VAny)) const0 (IRConst $ VFloat 1), const0)
-toIRProbability conf typeEnv (Uniform t) sample = return (IRDensity IRUniform sample, IRIf (IROp OpEq sample (IRConst VAny)) const0 (IRConst $ VFloat 1), const0)
+toIRProbability conf typeEnv (Normal t) sample = return (IRDensity IRNormal sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), const0)
+toIRProbability conf typeEnv (Uniform t) sample = return (IRDensity IRUniform sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), const0)
 toIRProbability conf typeEnv (Lambda t name subExpr) sample = do
   let (TArrow paramRType _) = rType t
   case paramRType of
@@ -502,7 +506,9 @@ toIRIntegrateSave conf typeEnv (Lambda t name subExpr) low high = do
 toIRIntegrateSave conf typeEnv expr lower higher = do
   (prob, probDim, probBC) <- toIRProbability conf typeEnv expr lower
   (integ, integDim, integBC) <- toIRIntegrate conf typeEnv expr lower higher
-  return (IRIf (IROp OpEq lower higher) prob integ, IRIf (IROp OpEq lower higher) probDim integDim, IRIf (IROp OpEq lower higher) probBC integBC)
+  let eqCheck = IRIf (IROp OpEq lower higher)
+  let anyCheck = IRIf (IROp OpAnd (IRUnaryOp OpIsAny lower) (IRUnaryOp OpIsAny higher))
+  return (anyCheck (IRConst $ VFloat 1) (eqCheck prob integ), anyCheck (IRConst $ VFloat 0) (eqCheck probDim integDim), anyCheck (IRConst $ VFloat 0) (eqCheck probBC integBC))
 
 
 toIRIntegrate :: CompilerConfig -> TypeEnv -> Expr -> IRExpr -> IRExpr -> CompilerMonad CompilationResult
@@ -547,7 +553,7 @@ toIRIntegrate conf typeEnv (IfThenElse _ cond left right) low high = do
             (IROp OpMult (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var_cond_p) ) rightExpr), const0, IROp OpPlus condBranches (IROp OpPlus leftBranches rightBranches) )
 toIRIntegrate conf typeEnv (Cons _ hdExpr tlExpr) low high = do
     (headP, headDim, headBranches) <- toIRIntegrateSave conf typeEnv hdExpr (IRHead low) (IRHead high)
-    (tailP, tailDim, tailBranches) <- toIRIntegrate conf typeEnv tlExpr (IRTail low) (IRTail high)
+    (tailP, tailDim, tailBranches) <- toIRIntegrateSave conf typeEnv tlExpr (IRTail low) (IRTail high)
     (multP, multDim) <- (headP, headDim) `multP` (tailP, tailDim)
     return (IRIf (IROp OpOr (IROp OpEq low (IRConst $ VList EmptyList)) (IROp OpEq high (IRConst $ VList EmptyList))) (IRConst $ VFloat 0) multP, multDim, IROp OpPlus headBranches tailBranches)
 toIRIntegrate conf typeEnv (Null _) low high = do

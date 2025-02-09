@@ -112,7 +112,7 @@ isEnumerable =
     _ -> False)
 
 likelihoodFunctionUsesTypeInfo :: ExprStub -> Bool
-likelihoodFunctionUsesTypeInfo expr = expr `elem` [StubGreaterThan, StubLessThan, StubMultF, StubMultI, StubPlusF, StubPlusI, StubInjF]
+likelihoodFunctionUsesTypeInfo expr = expr `elem` [StubGreaterThan, StubLessThan, StubInjF]
 --2A: do static analysis to determine various statically known properties we're interested in.
 --2A.1: For now, that's exclusively Enum Ranges.
 --2B: using those type annotations, decide on algorithms to use. We can reuse the list of all algorithms from Transpiler.

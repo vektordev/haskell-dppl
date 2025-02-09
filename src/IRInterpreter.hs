@@ -37,7 +37,7 @@ generateDet = generate f
     normalGen = Left "Uniform Gen is not det"}
 
 generate :: (Monad m) => RandomFunctions m a -> IREnv a -> IREnv a -> [IRExpr]-> IRExpr -> m IRValue
---generate f globalEnv env args expr | trace ((show expr) ++ " Args: " ++ (show args) {--++ "Env: " ++ show (env++globalEnv)-}) False = undefined
+--generate f globalEnv env args expr | trace ((show expr)) False = undefined
 generate f globalEnv env args expr | args /= [] = do
   let reverseArgs = reverse args
   let newExpr = foldr (flip IRApply) expr reverseArgs
@@ -109,8 +109,8 @@ generate f globalEnv env [] (IROp OpSub a b) = do
   case (aVal, bVal) of
     (VFloat af, VFloat bf) -> return $ VFloat (af - bf)
     (VInt af, VInt bf) -> return $ VInt (af - bf)
-    (VAny, _) -> return VAny
-    (_, VAny) -> return VAny
+    --(VAny, _) -> return VAny
+    --(_, VAny) -> return VAny
     _ -> error ("Type error: Minus can only subtract two numbers (of the same type): " ++ show (aVal, bVal))
 generate f globalEnv env [] (IROp OpOr a b) = do
   aVal <- generate f globalEnv env [] a
@@ -137,8 +137,9 @@ generate f globalEnv env [] (IROp OpEq a b) = do
     (VInt af, VInt bf) -> return $ VBool (af == bf)
     (VList af, VList bf) -> return $ VBool (af == bf)
     (VTuple af1 af2, VTuple bf1 bf2) -> return $ VBool (af1 == bf1 && af2 == bf2)
-    (VAny, b) -> return $ VBool (b == VAny)
-    (a, VAny) -> return $ VBool (a == VAny)
+    -- Any is not equal to anything
+    (VAny, b) -> return $ VBool False
+    (a, VAny) -> return $ VBool False
     _ -> error ("Type error: Equals can only evaluate on two values: " ++ show (aVal, bVal))
 generate f globalEnv env [] (IRUnaryOp OpNot a) = do
   aVal <- generate f globalEnv env [] a
@@ -183,6 +184,11 @@ generate f globalEnv env [] (IRUnaryOp OpAbs a) = do
     VInt af -> return $ VInt (abs af)
     --VAny -> return VAny
     _ -> error "Type error: Abs can only evaluate on a number"
+generate f globalEnv env [] (IRUnaryOp OpIsAny a) = do
+  aVal <- generate f globalEnv env [] a
+  case aVal of
+    VAny -> return $ VBool True
+    _ -> return $ VBool False
 generate f globalEnv env [] (IRTheta a i) = do
   tt <- generate f globalEnv env [] a
   let VThetaTree (ThetaTree thetas _) = tt
@@ -316,7 +322,7 @@ irSample IRNormal = do
   return $ VFloat $ realToFrac result
 
 irPDF :: Distribution -> IRValue -> IRValue
-irPDF _ VAny = VFloat 1
+--irPDF _ VAny = VFloat 1
 irPDF IRUniform (VFloat x) = if x >= 0 && x <= 1 then VFloat 1 else VFloat 0
 irPDF IRNormal (VFloat x) = VFloat ((1 / sqrt (2 * pi)) * exp (-0.5 * x * x))
 irPDF expr _ = error "Expression must be the density of a valid distribution"

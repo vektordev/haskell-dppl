@@ -72,29 +72,6 @@ greaterThanSigmoid = InferenceRule
                        (const Integrate)
                        (Forall [] (TFloat `TArrow` (TFloat `TArrow` TBool)))
 
---TODO: Lacking implementation of invertible arithmetic on Integers.
-plusLeft :: InferenceRule
-plusLeft = InferenceRule
-             StubPlusF
-             [SubExprNIsType 0 Deterministic]
-             "plusLeft"
-             mostChaotic
-             (Forall [] (TFloat `TArrow` (TFloat `TArrow` TFloat)))
-
-plusRight :: InferenceRule
-plusRight = mirror2 plusLeft
--- = InferenceRule StubPlusF [SubExprNIsType 1 Deterministic] "plusRight" mostChaotic
-
-multLeft :: InferenceRule
-multLeft = InferenceRule
-             StubMultF
-             [SubExprNIsType 0 Deterministic]
-             "multLeft"
-             mostChaotic
-             (Forall [] (TFloat `TArrow` (TFloat `TArrow` TFloat)))
-
-multRight :: InferenceRule
-multRight = mirror2 multLeft
 --multRight = InferenceRule StubMultF [SubExprNIsType 1 Deterministic] "multRight" mostChaotic
 
 injF2Left :: InferenceRule
@@ -115,31 +92,6 @@ injF2Enumerable = InferenceRule
              "injF2Enumerable"
              (const Prob)
              (Forall [TV "a"] (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TVarR (TV "a"))))
-
-expF :: InferenceRule
-expF = InferenceRule
-          StubNegF
-          []
-          "negF"
-          mostChaotic
-          (Forall [] (TFloat `TArrow` TFloat))
-
-negF :: InferenceRule
-negF = InferenceRule
-          StubNegF
-          []
-          "negF"
-          mostChaotic
-          (Forall [] (TFloat `TArrow` TFloat))
-
-enumeratePlusLeft :: InferenceRule
---TODO: Introduce a new type for intractable results? Does that expand the lattice into a 2d configuration?
-enumeratePlusLeft = InferenceRule
-                      StubPlusI
-                      [SubExprNIsNotType 0 Deterministic, SubExprNIsNotType 1 Deterministic]
-                      "enumeratePlusLeft"
-                      (const Prob)
-                      (Forall [] (TInt `TArrow` (TInt `TArrow` TInt)))
 
 ifThenElse :: InferenceRule
 ifThenElse = InferenceRule
@@ -236,16 +188,9 @@ allAlgorithms = [
   lessThanLeft,
   lessThanRight,
   greaterThanSigmoid,
-  plusLeft,
-  plusRight,
-  multLeft,
-  multRight,
   injF2Left, 
   injF2Right,
   injF2Enumerable,
-  negF,
-  expF,
-  enumeratePlusLeft,
   cons,
   tcons,
   exprNot

@@ -165,8 +165,9 @@ correctIntegralValuesTestCases =[(uniformProg, VFloat 0, VFloat 1, [], (VFloat 1
                                 (testIsLeft, VFloat 1.5, VFloat 3, [], (VFloat 0.6, VFloat 0)),
                                 (testIsRight, VFloat 0, VFloat 3, [], (VFloat 1, VFloat 0)),
                                 (testIsRight, VFloat 1.5, VFloat 3, [], (VFloat 0.4, VFloat 0)),
-                                (testFst, VFloat 0.4, VFloat 3, [], (VFloat 0.6, VFloat 0))]
-                                --(testHead, VFloat 0.4, VFloat 3, [], (VFloat 0.6, VFloat 0))]
+                                (testFst, VFloat 0.4, VFloat 3, [], (VFloat 0.6, VFloat 0)),
+                                (testHead, VFloat 0.4, VFloat 3, [], (VFloat 0.6, VFloat 0)),
+                                (testTail, VFloat 0.4, VFloat 3, [], (VFloat 0.6, VFloat 0))]
 
                                   --(testLambdaParameter, VFloat 9, VFloat 11, [], VFloat 1.0)]
                                   --(testCallLambdaAdvanced, VFloat 2, VFloat 3, [], VFloat 1.0),

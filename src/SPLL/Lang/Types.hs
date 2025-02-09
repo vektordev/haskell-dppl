@@ -77,19 +77,12 @@ data ExprStub = StubIfThenElse
               | StubUniform
               | StubNormal
               | StubConstant
-              | StubMultF
-              | StubMultI
-              | StubPlusF
-              | StubPlusI
-              | StubNegF
               | StubNot
-              | StubExpF
               | StubNull
               | StubCons
               | StubTCons
               | StubVar
               | StubLetIn
-              | StubArg
               | StubInjF
               | StubLambda
               | StubApply

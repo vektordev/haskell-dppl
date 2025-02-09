@@ -123,6 +123,7 @@ data UnaryOperand = OpNeg
                   | OpNot
                   | OpExp
                   | OpLog   --Natural Logarithm
+                  | OpIsAny
                   deriving (Show, Eq)
 
 data Distribution = IRNormal | IRUniform deriving (Show, Eq)

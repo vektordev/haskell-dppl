@@ -63,6 +63,7 @@ pPrintIRExpr (IRUnaryOp OpNot e) n = "!(" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRUnaryOp OpExp e) n = "(e^(" ++ pPrintIRExpr e (n + 1) ++ "))"
 pPrintIRExpr (IRUnaryOp OpLog e) n = "log(" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRUnaryOp OpSign e) n = "sign(" ++ pPrintIRExpr e (n + 1) ++ ")"
+pPrintIRExpr (IRUnaryOp OpIsAny e) n = "isAny(" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRTheta e i) n = "theta (" ++ pPrintIRExpr e (n + 1) ++ ")@" ++ show i
 pPrintIRExpr (IRSubtree e i) n = "subtree (" ++ pPrintIRExpr e (n + 1) ++ ")@" ++ show i
 pPrintIRExpr (IRConst val) n = "const " ++ show val

@@ -181,18 +181,6 @@ exprToInversions e = Prelude.foldr (\(a1, b1) (a, b) -> (nub (a1++a), b1++b)) ([
 hornClauseToIRExpr :: Expr -> [Inversion a]
 hornClauseToIRExpr e | isNothing (derivingHornClause (getTypeInfo e)) = error "Cannot convert to IR without a horn clause"
 hornClauseToIRExpr e = case stub of
-  StubPlusF | inversion == 0 -> [Inversion (cn, IROp OpPlus (IRVar (preVars!!0)) (IRVar (preVars!!1)))]
-  StubPlusF | inversion >= 1 -> [Inversion (cn, IROp OpSub (IRVar (preVars!!0)) (IRVar (preVars!!1)))]
-
-  StubPlusI | inversion == 0 -> [Inversion (cn, IROp OpPlus (IRVar (preVars!!0)) (IRVar (preVars!!1)))]
-  StubPlusI | inversion >= 1 -> [Inversion (cn, IROp OpSub (IRVar (preVars!!0)) (IRVar (preVars!!1)))]
-
-  StubMultF | inversion == 0 -> [Inversion (cn, IROp OpMult (IRVar (preVars!!0)) (IRVar (preVars!!1)))]
-  StubMultF | inversion >= 1 -> [Inversion (cn, IROp OpDiv (IRVar (preVars!!0)) (IRVar (preVars!!1)))]
-
-  StubMultI | inversion == 0 -> [Inversion (cn, IROp OpMult (IRVar (preVars!!0)) (IRVar (preVars!!1)))]
-  StubMultI | inversion >= 1 -> [Inversion (cn, IROp OpDiv (IRVar (preVars!!0)) (IRVar (preVars!!1)))]
-
   --TODO InjF hier
 
   StubLetIn | inversion == 0 -> [Inversion (cn, IRVar (preVars!!0))]
