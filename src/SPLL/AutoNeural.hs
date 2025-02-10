@@ -15,10 +15,10 @@ import PrettyPrint
 --  provide sampling and inference.
 
 --implicit assumption: Neural Decl accepts a "TSymbol"-typed thing.
-makeAutoNeural :: NeuralDecl -> [(String, IRExpr)]
-makeAutoNeural (name, (TArrow TSymbol target), tag) =
+makeAutoNeural :: CompilerConfig -> NeuralDecl -> [(String, IRExpr)]
+makeAutoNeural conf (name, (TArrow TSymbol target), tag) =
   [(name ++ "_" ++ show (getSize plan) ++ "_gen" , makeGen  plan name),
-   (name ++ "_" ++ show (getSize plan) ++ "_prob", makeProb plan name)]
+   (name ++ "_" ++ show (getSize plan) ++ "_prob", makeProb conf plan name)]
     where plan = makePartitionPlan target tag
 
 data PartitionPlan = TuplePlan PartitionPlan PartitionPlan
@@ -29,9 +29,11 @@ data PartitionPlan = TuplePlan PartitionPlan PartitionPlan
 vector :: String
 vector = "l_x_neural_out"
 
-makeProb :: PartitionPlan -> String -> IRExpr
-makeProb plan nn_name = IRLambda "sample" $ IRLetIn vector (IRVar nn_name) (IRTCons m (IRTCons dim bc))
-  where (m, dim, bc) = (makeProbRec plan 0)
+makeProb :: CompilerConfig -> PartitionPlan -> String -> IRExpr
+makeProb conf plan nn_name = IRLambda "sample" $ IRLetIn vector (IRVar nn_name) (IRTCons m sndRet)
+  where
+    (m, dim, bc) = makeProbRec plan 0
+    sndRet = if countBranches conf then IRTCons dim bc else dim
 
 
 --TODO: Add "decorators" here for Dimcounting? Probably don't need branch counting though.
@@ -45,7 +47,7 @@ makeGen :: PartitionPlan -> String ->  IRExpr
 makeGen plan nn_name = IRLetIn vector (IRVar nn_name) (makeGenRec plan 0)
 
 makeGenRec :: PartitionPlan -> Int -> IRExpr
-makeGenRec (TuplePlan a b) ix = IRTCons (makeGenRec a ix) (makeGenRec b (ix + getSize a)) 
+makeGenRec (TuplePlan a b) ix = IRTCons (makeGenRec a ix) (makeGenRec b (ix + getSize a))
 makeGenRec (EitherPlan a b) ix = undefined
 makeGenRec (Discretes rty tag) ix = lottery (tagToValues tag) ix
 makeGenRec Continuous ix = IROp OpPlus
@@ -119,7 +121,8 @@ tupelFromValue _non_tuple = error "supplied non-tuple value to tuple-shaped NN t
 
 
 test = do
-  let irdefs = makeAutoNeural ("readMNist", TArrow TSymbol TInt, EnumRange ((VInt 0), (VInt 9)))
+  let conf = CompilerConfig {topKThreshold=Nothing, countBranches=False, verbose=2, optimizerLevel=2}
+  let irdefs = makeAutoNeural conf ("readMNist", TArrow TSymbol TInt, EnumRange ((VInt 0), (VInt 9)))
   putStrLn (pPrintIREnv irdefs)
 
 
