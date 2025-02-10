@@ -16,6 +16,7 @@ import Control.Monad.Writer.Lazy
 import Control.Monad.Reader
 import Data.Functor.Identity
 import Data.Number.Erf (erf)
+import SPLL.AutoNeural
 
 -- SupplyT needs to be a transformer, because Supply does not implement Functor correctly
 type CompilerMonad a = WriterT [(String, IRExpr)] (SupplyT Int Identity) a
@@ -28,20 +29,22 @@ type TypeEnv = [(String, (RType, Bool))]
 -- perhaps as an explicit lambda in the top of the expression, otherwise we'll get trouble generating code.
 -- TODO: How do we deal with top-level lambdas in binding here?
 --  TL-Lambdas are presumably to be treated differently than non-TL, at least as far as prob is concerned.
-envToIR :: CompilerConfig -> Program -> [(String, IRExpr)] --FIXME add postProcess
-envToIR conf p = concatMap (\(name, binding) ->
-  let typeEnv = getGlobalTypeEnv p
-      pt = pType $ getTypeInfo binding
-      rt = rType $ getTypeInfo binding in
-    if (pt == Deterministic || pt == Integrate) && (isOnlyNumbers rt) then
-      [(name ++ "_integ", postProcess conf (IRLambda "low" (IRLambda "high" (runCompile conf (toIRIntegrateSave conf typeEnv binding (IRVar "low") (IRVar "high")))))),
-       (name ++ "_prob",postProcess conf (IRLambda "sample" (runCompile conf (toIRProbability conf typeEnv binding (IRVar "sample"))))),
-       (name ++ "_gen", postProcess conf (fst $ runIdentity $ runSupplyVars $ runWriterT (toIRGenerate typeEnv binding)))]
-    else if pt == Deterministic || pt == Integrate || pt == Prob then
-      [(name ++ "_prob",postProcess conf ((IRLambda "sample" (runCompile conf (toIRProbability conf typeEnv binding (IRVar "sample")))))),
-       (name ++ "_gen", postProcess conf (fst $ runIdentity $ runSupplyVars $ runWriterT $ toIRGenerate typeEnv binding))]
-    else
-      [(name ++ "_gen", postProcess conf ( fst $ runIdentity $ runSupplyVars $ runWriterT $ toIRGenerate typeEnv binding))]) (functions p)
+envToIR :: CompilerConfig -> Program -> [(String, IRExpr)]
+envToIR conf p = 
+  concatMap (makeAutoNeural conf) (neurals p) ++ 
+  concatMap (\(name, binding) ->
+    let typeEnv = getGlobalTypeEnv p
+        pt = pType $ getTypeInfo binding
+        rt = rType $ getTypeInfo binding in
+      if (pt == Deterministic || pt == Integrate) && (isOnlyNumbers rt) then
+        [(name ++ "_integ", postProcess conf (IRLambda "low" (IRLambda "high" (runCompile conf (toIRIntegrateSave conf typeEnv binding (IRVar "low") (IRVar "high")))))),
+        (name ++ "_prob",postProcess conf (IRLambda "sample" (runCompile conf (toIRProbability conf typeEnv binding (IRVar "sample"))))),
+        (name ++ "_gen", postProcess conf (fst $ runIdentity $ runSupplyVars $ runWriterT (toIRGenerate typeEnv binding)))]
+      else if pt == Deterministic || pt == Integrate || pt == Prob then
+        [(name ++ "_prob",postProcess conf ((IRLambda "sample" (runCompile conf (toIRProbability conf typeEnv binding (IRVar "sample")))))),
+        (name ++ "_gen", postProcess conf (fst $ runIdentity $ runSupplyVars $ runWriterT $ toIRGenerate typeEnv binding))]
+      else
+        [(name ++ "_gen", postProcess conf ( fst $ runIdentity $ runSupplyVars $ runWriterT $ toIRGenerate typeEnv binding))]) (functions p)
 
 
 runCompile :: CompilerConfig -> CompilerMonad CompilationResult -> IRExpr
@@ -221,10 +224,15 @@ toIRProbability conf typeEnv (NegF (TypeInfo {rType = TFloat, tags = extra}) f) 
   toIRProbability conf typeEnv f (IRUnaryOp OpNeg sample)
 toIRProbability conf typeEnv (Not (TypeInfo {rType = TBool}) f) sample =
   toIRProbability conf typeEnv f (IRUnaryOp OpNot sample)
-toIRProbability conf typeEnv (ReadNN _ name subexpr) sample = do
-  mkInput <- toIRGenerate typeEnv subexpr
-  let returnExpr = (IRIndex (IREvalNN name mkInput) sample)
-  return (returnExpr, const0, const0)
+toIRProbability conf typeEnv (ReadNN _ name symbol) sample = do
+  -- Same code as for calling a top level function
+  var <- mkVariable "callNN"
+  sym <- toIRGenerate typeEnv symbol
+  tell [(var, IRInvoke (IRApply (IRApply (IRVar (name ++ "_prob")) sym) sample))]
+  if countBranches conf then
+    return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
+  else
+    return (IRTFst (IRVar var), IRTSnd (IRVar var), const0)
 toIRProbability conf typeEnv (Normal t) sample = return (IRDensity IRNormal sample, IRConst $ VFloat 1, const0)
 toIRProbability conf typeEnv (Uniform t) sample = return (IRDensity IRUniform sample, IRConst $ VFloat 1, const0)
 toIRProbability conf typeEnv (Lambda t name subExpr) sample = do
@@ -527,8 +535,8 @@ toIRGenerate typeEnv (Apply TypeInfo {rType=rt} l v) = do
     TArrow _ _ -> return $ IRApply l' v'
     _ -> return $ IRInvoke $ IRApply l' v'
 toIRGenerate typeEnv (ReadNN _ name subexpr) = do
-  subexpr' <- toIRGenerate typeEnv subexpr
-  return $ IRApply (IRVar "randomchoice") (IREvalNN name subexpr')
+  sub <- toIRGenerate typeEnv subexpr
+  return $ IRInvoke (IRApply (IRVar (name ++ "_gen")) sub)
 toIRGenerate typeEnv x = error ("found no way to convert to IRGen: " ++ show x)
 
 packParamsIntoLetinsGen :: TypeEnv -> [String] -> [Expr] -> IRExpr -> CompilerMonad  IRExpr

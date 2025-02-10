@@ -243,13 +243,16 @@ inferProg p = do
   -- calls between these functions
   tv_rev <- freshVars (length decls) []
   let tvs = reverse tv_rev
+  -- build env from neurals
+  let neurals_tvs = map (\(a, b, c) -> (a, Forall [] b)) (neurals p)
   -- env building with (name, scheme) for infer methods
   let func_tvs = zip (map fst decls) (map (Forall []) tvs)
+  let typeEnv = neurals_tvs ++ func_tvs
   -- infer the type and constraints of the declaration expressions
-  cts <- mapM ((inTEnvF func_tvs . infer) . snd) decls
+  cts <- mapM ((inTEnvF typeEnv . infer) . snd) decls
   -- building the constraints that the built type variables of the functions equal
   -- the inferred function type
-  let tcs = zip (map (rtFromScheme . snd) func_tvs) (map fst3cts cts)
+  let tcs = zip (map (rtFromScheme . snd) typeEnv) (map fst3cts cts)
   -- combine all constraints
   return (tcs ++ concatMap snd3cts cts, Program (zip (map fst decls) (map trd3cts cts)) nns)
 
@@ -270,7 +273,7 @@ addTVarsEverywhere (Program decls nns) = do
       _ -> return $ getTypeInfo expr
 
 specialTreatment :: Expr -> Bool
-specialTreatment e = toStub e `elem` [StubConstant, StubLambda, StubVar, StubApply, StubInjF]
+specialTreatment e = toStub e `elem` [StubConstant, StubLambda, StubVar, StubApply, StubInjF, StubReadNN]
 
 --TODO: Error on ambiguous InferenceRule
 infer :: Expr -> Infer (RType, [Constraint], Expr)
@@ -302,6 +305,11 @@ infer expr
         e@(InjF ti name params) -> do
           let Just (FPair (FDecl (scheme, _, _, _, _), _)) = lookup name globalFenv
           e `usingScheme` scheme
+        e@(ReadNN ti name sym) -> do
+          t <- lookupTEnv name
+          (symTy, c1, symTyExpr) <- infer sym
+          let argConstraint = (t, symTy `TArrow` (rType ti))
+          return (rType ti, [argConstraint] ++ c1, ReadNN ti name symTyExpr)
     | solvesSimply expr =
         let
           plausibleAlgs = filter (checkExprMatches expr) allAlgorithms

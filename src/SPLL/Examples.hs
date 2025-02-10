@@ -221,6 +221,9 @@ testInjFRenaming = Program [("main", apply ("a" #-># (var "a" #+# uniform)) (con
 testLambdaChoice :: Program
 testLambdaChoice = Program [("main", apply (ifThenElse (bernoulli 0.5) ("x" #-># (normal #+# var "x")) ("y" #-># (uniform #+# var "y"))) (constF 1))] []
 
+testAutoNeural :: Program
+testAutoNeural = Program [("main", "sym" #-># ReadNN makeTypeInfo "readMNist" (var "sym"))] [("readMNist", TArrow TSymbol TInt, Just (EnumRange ((VInt 0), (VInt 9))))]
+
 
 {-
 flipCoin :: Expr Double

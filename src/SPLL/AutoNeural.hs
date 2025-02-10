@@ -17,8 +17,8 @@ import PrettyPrint
 --implicit assumption: Neural Decl accepts a "TSymbol"-typed thing.
 makeAutoNeural :: CompilerConfig -> NeuralDecl -> [(String, IRExpr)]
 makeAutoNeural conf (name, (TArrow TSymbol target), tag) =
-  [(name ++ "_" ++ show (getSize plan) ++ "_gen" , IRLambda symbol $ makeGen  plan name),
-   (name ++ "_" ++ show (getSize plan) ++ "_prob", IRLambda symbol $ makeProb conf plan name)]
+  [(name ++ "_gen" , IRLambda symbol $ makeGen  plan name),
+   (name ++ "_prob", IRLambda symbol $ makeProb conf plan name)]
     where plan = makePartitionPlan target tag
 
 data PartitionPlan = TuplePlan PartitionPlan PartitionPlan
