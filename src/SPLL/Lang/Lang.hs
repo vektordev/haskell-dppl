@@ -466,7 +466,8 @@ prettyPrintNeural (name, ty, range) = l1:l2:(l3 range):[]
   where
     l1 = ("--- Neural: " ++ name ++ "---")
     l2 = ("\t :: " ++ show ty)
-    l3 (EnumList lst) = ("\t" ++ (show $ length lst))
+    l3 (Just (EnumList lst)) = ("\t" ++ (show $ length lst))
+    l3 (Nothing) = ("\t" ++ (show $ 0))
     l3 _ = "prettyprint not implemented"
 
 prettyPrintDecl :: (TypeInfo -> String) -> FnDecl -> [String]
@@ -512,7 +513,8 @@ prettyPrintNeuralNoReq (name, ty, range) = l1:l2:(l3 range):[]
   where
     l1 = ("--- Neural: " ++ name ++ "---")
     l2 = ("\t :: " ++ show ty)
-    l3 (EnumList lst) = ("\t" ++ (show $ length lst))
+    l3 (Just (EnumList lst)) = ("\t" ++ (show $ length lst))
+    l3 (Nothing) = ("\t" ++ (show $ 0))
     l3 _ = "prettyprint not implemented"
 
 

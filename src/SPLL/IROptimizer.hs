@@ -1,4 +1,7 @@
-module SPLL.IROptimizer where
+module SPLL.IROptimizer (
+  postProcess
+, failConversion
+) where
 
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Lang
@@ -15,6 +18,9 @@ import Control.Monad.Writer.Lazy
 import Control.Monad.Reader
 import Data.Functor.Identity
 import Data.Number.Erf (erf)
+import Data.List (nub)
+import Control.Monad.Supply
+import PrettyPrint
 
 postProcess :: CompilerConfig -> IRExpr -> IRExpr
 --postProcess = id
@@ -23,10 +29,6 @@ postProcess conf = fixedPointIteration (optimize conf)
 isValue :: IRExpr -> Bool
 isValue (IRConst _) = True
 isValue _ = False
-
-isLambda :: IRExpr -> Bool
-isLambda IRLambda {} = True
-isLambda _ = False
 
 unval :: IRExpr -> IRValue
 unval (IRConst val) = val
@@ -137,6 +139,7 @@ failConversion :: Expr -> IRExpr
 failConversion = error "Cannot convert VClosure"
 
 softForceLogic :: Operand -> IRExpr -> IRExpr -> IRExpr
+--logic operands: or and and
 softForceLogic OpOr (IRConst (VBool True)) _ = IRConst (VBool True)
 softForceLogic OpOr _ (IRConst (VBool True)) = IRConst (VBool True)
 softForceLogic OpOr (IRConst (VBool False)) right = right
@@ -145,6 +148,31 @@ softForceLogic OpAnd (IRConst (VBool True)) right = right
 softForceLogic OpAnd left (IRConst (VBool True)) = left
 softForceLogic OpAnd (IRConst (VBool False)) _ = IRConst (VBool False)
 softForceLogic OpAnd _ (IRConst (VBool False)) = IRConst (VBool False)
+-- integer arithmetic:
+softForceLogic OpPlus (IRConst (VInt 0)) right = right
+softForceLogic OpPlus left (IRConst (VInt 0)) = left
+softForceLogic OpMult (IRConst (VInt 0)) _ = IRConst (VInt 0)
+softForceLogic OpMult _ (IRConst (VInt 0)) = IRConst (VInt 0)
+softForceLogic OpMult (IRConst (VInt 1)) right = right
+softForceLogic OpMult left (IRConst (VInt 1)) = left
+softForceLogic OpDiv left (IRConst (VInt 1)) = left
+softForceLogic OpDiv left (IRConst (VInt 0)) = error "tried to divide by zero in softForceArithmetic"
+softForceLogic OpDiv (IRConst (VInt 0)) _ = IRConst (VInt 0)
+softForceLogic OpSub left (IRConst (VInt 0)) = left
+softForceLogic OpSub left right | left == right = IRConst (VInt 0)
+--float arithmetic:
+softForceLogic OpPlus (IRConst (VFloat 0)) right = right
+softForceLogic OpPlus left (IRConst (VFloat 0)) = left
+softForceLogic OpMult (IRConst (VFloat 0)) _ = IRConst (VFloat 0)
+softForceLogic OpMult _ (IRConst (VFloat 0)) = IRConst (VFloat 0)
+softForceLogic OpMult (IRConst (VFloat 1)) right = right
+softForceLogic OpMult left (IRConst (VFloat 1)) = left
+softForceLogic OpDiv left (IRConst (VFloat 1)) = left
+softForceLogic OpDiv left (IRConst (VFloat 0)) = error "tried to divide by zero in softForceArithmetic"
+softForceLogic OpDiv (IRConst (VFloat 0)) _ = IRConst (VFloat 0)
+softForceLogic OpSub left (IRConst (VFloat 0)) = left
+softForceLogic OpSub left right | left == right = IRConst (VFloat 0)
+softForceLogic op left right = IROp op left right
 softForceLogic op left right = IROp op left right     -- Nothing can be done
 
 forceOp :: Operand -> IRValue -> IRValue -> IRValue
@@ -168,16 +196,30 @@ exprSize :: IRExpr -> Int
 exprSize expr | null (getIRSubExprs expr) = 1
 exprSize expr = sum (map exprSize (getIRSubExprs expr))
 
-numOccurances :: IRExpr -> IRExpr -> Int
-numOccurances ref expr | ref == expr = 1
-numOccurances ref expr = sum (map (numOccurances ref) (getIRSubExprs expr))
+--slightly strict matching: Do not match if random sampling is contained.
+-- otherwise, defer to (==)
+matchExprs :: IRExpr -> IRExpr -> Bool
+matchExprs a b = if samples a then False else a == b
+
+--FIXME: a function call to a sampling function does itself also sample.
+samples :: IRExpr -> Bool
+samples (IRSample _) = True
+samples x = any samples (getIRSubExprs x)
+
+numOccurrences :: IRExpr -> IRExpr -> Int
+numOccurrences ref expr | ref `matchExprs` expr = 1
+numOccurrences ref expr = sum (map (numOccurrences ref) (getIRSubExprs expr))
+
+findExprs :: IRExpr -> [IRExpr]
+findExprs (IRLambda _ _) = []
+findExprs expr = expr : (concatMap findExprs (getIRSubExprs expr))
 
 findCommonSubexpr :: IRExpr -> IRExpr -> [IRExpr]
-findCommonSubexpr _ ref | exprSize ref < 3 = []
-findCommonSubexpr _ (IRLambda _ _) = []
-findCommonSubexpr fullScope ref | numOccurances ref fullScope >= 2 = [ref]
-findCommonSubexpr fullScope ref = concatMap (findCommonSubexpr fullScope) (getIRSubExprs ref)
--- FIXME random distributions are not equal
+--findCommonSubexpr _ ref | exprSize ref < 3 = []
+findCommonSubexpr scope _ = filter (\x -> numOccurrences x scope >= 2 && exprSize x > 1) (nub (findExprs scope))
+--findCommonSubexpr _ (IRLambda _ _) = []
+--findCommonSubexpr fullScope ref | numOccurrences ref fullScope >= 2 = [ref]
+--findCommonSubexpr fullScope ref = concatMap (findCommonSubexpr fullScope) (getIRSubExprs ref)
 
 optimizeCommonSubexpr :: IRExpr -> IRExpr
 optimizeCommonSubexpr (IRLambda n b) = IRLambda n (optimizeCommonSubexpr b)
@@ -185,7 +227,12 @@ optimizeCommonSubexpr (IRLetIn n v b) = IRLetIn n v (optimizeCommonSubexpr b)
 optimizeCommonSubexpr expr = letInBlock
   where
     commonSubs = findCommonSubexpr expr expr
-    optimNames = map (\i -> "opt" ++ show i) [0..(length commonSubs - 1)]
+    optimNames = map (\i -> "opt_" ++ show i ++ "_common") [1..]
     namedCommonSubs = zip commonSubs optimNames
-    replacedBody = foldr (\(sub, name) body -> replaceAll sub (IRVar name) body) expr namedCommonSubs
-    letInBlock = foldr (\(sub, name) block -> IRLetIn name sub block) replacedBody namedCommonSubs
+    letInBlock = foldl extractSubexpr expr namedCommonSubs
+
+extractSubexpr :: IRExpr -> (IRExpr, Varname) -> IRExpr
+extractSubexpr body (sub, name) = trace report $ IRLetIn name sub newBody
+  where
+    newBody = replaceAll sub (IRVar name) body
+    report = "Extracted subexpression: \n" ++ pPrintIRExpr sub 2 ++ "\n ##### as " ++ name ++ ", now: \n" ++ pPrintIRExpr newBody 2
