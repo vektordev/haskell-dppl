@@ -44,6 +44,7 @@ juliaUnaryOps OpAbs = "abs"
 juliaUnaryOps OpNot = "!"
 juliaUnaryOps OpLog = "log"
 juliaUnaryOps OpSign = "sign"
+juliaUnaryOps OpIsAny = "isAny"
 juliaUnaryOps x = error ("Unknown Julia operator: " ++ show x)
 
 juliaVal :: IRValue -> String

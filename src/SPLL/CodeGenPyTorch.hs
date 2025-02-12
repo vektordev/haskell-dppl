@@ -61,6 +61,7 @@ pyUnaryOps OpAbs = "abs"
 pyUnaryOps OpNot = "not"
 pyUnaryOps OpLog = "math.log"
 pyUnaryOps OpSign = "torch.sign"
+pyUnaryOps OpIsAny = "isAny"
 
 pyVal :: IRValue -> String
 pyVal (VList xs) = "[" ++ intercalate "," (map pyVal (toList xs)) ++ "]"
