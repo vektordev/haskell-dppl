@@ -145,6 +145,9 @@ tsnd x = injF "snd" [x]
 
 -- Other
 
+readNN :: String -> Expr -> Expr 
+readNN = ReadNN makeTypeInfo
+
 -- This is a Z-Combinator
 -- TODO: Our typesystem is not ready for that yet 
 fix :: Expr
