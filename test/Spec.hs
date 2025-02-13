@@ -42,6 +42,7 @@ import Data.Bifunctor (second)
 import SPLL.Parser
 import TestParser
 import TestInternals
+import End2EndTesting
 import SPLL.Prelude
 
 
@@ -563,7 +564,8 @@ main = do
   a <- runTests
   b <- test_parser
   c <- test_internals
-  let x = a && b && c
+  d <- test_end2end
+  let x = a && b && c && d
   if x then
     putStrLn "Test successful!"
   else do
