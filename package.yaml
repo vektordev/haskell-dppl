@@ -44,6 +44,7 @@ dependencies:
 - parser-combinators
 - directory
 - filepath
+- process
 
 library:
   source-dirs: src

@@ -5,15 +5,19 @@ module End2EndTesting where
 import System.Exit (exitWith, ExitCode(ExitFailure))
 import System.Directory (listDirectory)
 import System.FilePath (stripExtension, isExtensionOf)
+import System.Process
+import System.Exit
 import Data.Maybe
-import Data.Bifunctor (bimap)
+import Data.List (intercalate)
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
 import SPLL.Prelude
 import SPLL.Parser (tryParseProgram)
+import SPLL.CodeGenJulia 
 import Text.Megaparsec (errorBundlePretty)
 import SPLL.IntermediateRepresentation
 import Test.QuickCheck hiding (verbose)
+import Debug.Trace
 
 type ProbTestCase = (IRValue, [IRValue], (IRValue, IRValue))
 
@@ -37,7 +41,23 @@ parseProgram fp = do
     Right p -> return p
 
 parseProbTestCases :: FilePath -> IO [ProbTestCase]
-parseProbTestCases fp = return [(VFloat 0.5, [], (VFloat 1, VFloat 1))]
+parseProbTestCases fp = do
+  content <- readFile fp
+  let lines = split '\n' content
+  let valueStrs = map (split ';') lines
+  let values =  map (map parseValue) valueStrs
+  return $ map (\vals ->
+    let (outDim, notDim) = (last vals, init vals)
+        (outProb, notOut) = (last notDim, init notDim)
+        sample:params = notOut in
+          (sample, params, (outProb, outDim))
+    ) values
+  where split delim str = case break (==delim) str of
+                      (a, delim:b) -> a : split delim b
+                      (a, "")    -> [a]
+
+parseValue :: String -> IRValue
+parseValue s = VFloat (read s)
 
 testProbProgramInterpreter :: Program -> ProbTestCase -> Property
 testProbProgramInterpreter p (sample, params, (VFloat expectedProb, VFloat expectedDim)) = do
@@ -45,11 +65,43 @@ testProbProgramInterpreter p (sample, params, (VFloat expectedProb, VFloat expec
   counterexample "Probability differs" (outProb === expectedProb) .&&.
     counterexample "Dimensionality differs" (outDim === expectedDim)
 
+testProbJulia :: Program -> [ProbTestCase] -> Property
+testProbJulia p tc = ioProperty $ do
+  let src = intercalate "\n" (SPLL.CodeGenJulia.generateFunctions (compile standardCompiler p))
+  (_, _, _, handle) <- createProcess (proc "julia" ["-e", juliaProbTestCode src tc])
+  code <- waitForProcess handle
+  case code of
+    ExitSuccess -> return $ True === True
+    ExitFailure _ -> return $ counterexample "Julia test failed. See Julia error message" False
+
+
+juliaProbTestCode :: String -> [ProbTestCase] -> String
+juliaProbTestCode src tcs = 
+  "function density_IRUniform(x)\n\
+  \  return x < 0 ? 0 : (x > 1 ? 0 : 1)\n\
+  \end\n\
+  \function cumulative_IRUniform(x)\n\
+  \  return 1\n\
+  \end\n\
+  \" ++ src ++ "\n" ++ 
+  concat (map (\(sample, params, (outProb, outDim)) -> "tmp = main_prob(" ++ juliaVal sample ++ intercalate ", " (map juliaVal params) ++ ")\n\
+  \if tmp[1] != " ++ juliaVal outProb ++ "\n\
+  \  error(\"Probability wrong: \" * string(tmp[1]) * \"/=\" * string(" ++ juliaVal outProb ++ "))\n\
+  \end\n\
+  \if tmp[2] != " ++ juliaVal outDim ++ "\n\
+  \  error(\"Dimensionality wrong: \" * string(tmp[2]) * \"/=\" * string(" ++ juliaVal outDim ++ "))\n\
+  \end\n") tcs) ++ 
+  "exit(0)" 
+
+
 prop_end2endTests :: Property
 prop_end2endTests = ioProperty $ do
   files <- getAllTestFiles
   cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseProbTestCases tc >>= \t2 -> return (t1, t2)) files
-  return $ conjoin (map (\(p, tcs) -> conjoin $ map (testProbProgramInterpreter p) tcs) cases)
+  let interpProp = conjoin (map (\(p, tcs) -> conjoin $ map (testProbProgramInterpreter p) tcs) cases)
+  let juliaProp = conjoin (map (\(p, tcs) -> testProbJulia p tcs) cases)
+  return $  juliaProp
+
 
 return []
 test_end2end = $quickCheckAll
