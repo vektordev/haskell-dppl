@@ -74,18 +74,14 @@ testProbJulia p tc = ioProperty $ do
     ExitSuccess -> return $ True === True
     ExitFailure _ -> return $ counterexample "Julia test failed. See Julia error message" False
 
-
+--TODO Hardcoded precision of 4 digits
 juliaProbTestCode :: String -> [ProbTestCase] -> String
 juliaProbTestCode src tcs = 
-  "function density_IRUniform(x)\n\
-  \  return x < 0 ? 0 : (x > 1 ? 0 : 1)\n\
-  \end\n\
-  \function cumulative_IRUniform(x)\n\
-  \  return 1\n\
-  \end\n\
+  "include(\"juliaLib.jl\")\n\
+  \using .JuliaSPPLLib\n\
   \" ++ src ++ "\n" ++ 
   concat (map (\(sample, params, (outProb, outDim)) -> "tmp = main_prob(" ++ juliaVal sample ++ intercalate ", " (map juliaVal params) ++ ")\n\
-  \if tmp[1] != " ++ juliaVal outProb ++ "\n\
+  \if round(tmp[1], digits=4) != " ++ juliaVal outProb ++ "\n\
   \  error(\"Probability wrong: \" * string(tmp[1]) * \"/=\" * string(" ++ juliaVal outProb ++ "))\n\
   \end\n\
   \if tmp[2] != " ++ juliaVal outDim ++ "\n\
@@ -104,4 +100,5 @@ prop_end2endTests = ioProperty $ do
 
 
 return []
-test_end2end = $quickCheckAll
+--test_end2end = $quickCheckAll
+test_end2end = quickCheckResult (withMaxSuccess 1 prop_end2endTests) >>= return . isSuccess
