@@ -250,12 +250,12 @@ inferProg p = do
   let neurals_tvs = map (\(a, b, c) -> (a, Forall [] b)) (neurals p)
   -- env building with (name, scheme) for infer methods
   let func_tvs = zip (map fst decls) (map (Forall []) tvs)
-  let typeEnv = neurals_tvs ++ func_tvs
+  let typeEnv = func_tvs ++ neurals_tvs 
   -- infer the type and constraints of the declaration expressions
   cts <- mapM ((inTEnvF typeEnv . infer) . snd) decls
   -- building the constraints that the built type variables of the functions equal
   -- the inferred function type
-  let tcs = zipWith (\t1 t2 -> Constraint t1 t2 (Just "TopLevel")) (map (rtFromScheme . snd) typeEnv) (map fst3cts cts)
+  let tcs = zipWith (\t1 t2 -> Constraint t1 t2 (Just "TopLevel")) (map (rtFromScheme . snd) func_tvs) (map fst3cts cts)
   -- combine all constraints
   return (tcs ++ concatMap snd3cts cts, Program (zip (map fst decls) (map trd3cts cts)) nns)
 
