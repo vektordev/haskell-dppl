@@ -243,10 +243,26 @@ parseFromList kvlist = do
     Just value -> return value
 
 rTypes :: [(String, RType)]
-rTypes = [("Int", TInt), ("Float", TFloat)]
+rTypes = [("Int", TInt), ("Float", TFloat), ("Symbol", TSymbol)]
 
+-- this function needs to handle compound types such as "Int -> Float" as well 
+-- first, we want to try parsing a compound type, and if that fails assume that a simple type is there instead.
 pType :: Parser RType
-pType = parseFromList rTypes
+pType = dbg "type" $ do
+  t <- choice [pCompoundType, pSimpleType]
+  return t
+
+pCompoundType :: Parser RType
+pCompoundType = parens $ do
+  left <- pSimpleType
+  _ <- symbol "->"
+  right <- SPLL.Parser.pType
+  return $ TArrow left right
+
+pSimpleType :: Parser RType
+pSimpleType = 
+  parseFromList rTypes
+
 
 pList :: Parser [Value]
 pList = do
