@@ -104,7 +104,8 @@ data InferState = InferState { var_count :: Int }
 initInfer :: InferState
 initInfer = InferState { var_count = 0 }
 
-type Constraint = (RType, RType)
+data Constraint = Constraint RType RType (Maybe String)
+  deriving (Eq, Show)
 
 type Unifier = (Subst, [Constraint])
 
@@ -159,8 +160,8 @@ instance Substitutable Scheme where
   ftv (Forall as t) = ftv t `Set.difference` Set.fromList as
 
 instance Substitutable Constraint where
-   apply s (t1, t2) = (apply s t1, apply s t2)
-   ftv (t1, t2) = ftv t1 `Set.union` ftv t2
+   apply s (Constraint t1 t2 c) = Constraint (apply s t1) (apply s t2) c
+   ftv (Constraint t1 t2 _) = ftv t1 `Set.union` ftv t2
 
 instance Substitutable a => Substitutable [a] where
   apply = map . apply
@@ -171,7 +172,9 @@ instance Substitutable TEnv where
   ftv (TypeEnv env) = ftv $ Map.elems env
 
 showConstraint :: Constraint -> String
-showConstraint (a, b) = prettyRType a ++ " :==: " ++ prettyRType b
+showConstraint (Constraint a b Nothing) = prettyRType a ++ " :==: " ++ prettyRType b
+showConstraint (Constraint a b (Just c)) = prettyRType a ++ " :==: " ++ prettyRType b ++ " (from " ++ c ++ ")"
+
 
 --build the basic type environment: Take all invertible functions; ignore their inverses
 basicTEnv :: TEnv
@@ -224,7 +227,7 @@ testInferProg p = do
   cts <- trace ("func_tvs:" ++ show func_tvs) $ mapM ((inTEnvF func_tvs . infer) . snd) decls
   -- building the constraints that the built type variables of the functions equal
   -- the inferred function type
-  let tcs = zip (map (rtFromScheme . snd) func_tvs) (map fst3cts cts)
+  let tcs = zipWith (\t1 t2 -> Constraint t1 t2 (Just "TopLevel")) (map (rtFromScheme . snd) func_tvs) (map fst3cts cts)
   -- combine all constraints
   return (tcs ++ concatMap snd3cts cts, Program (zip (map fst decls) (map trd3cts cts)) nns)
 
@@ -252,7 +255,7 @@ inferProg p = do
   cts <- mapM ((inTEnvF typeEnv . infer) . snd) decls
   -- building the constraints that the built type variables of the functions equal
   -- the inferred function type
-  let tcs = zip (map (rtFromScheme . snd) typeEnv) (map fst3cts cts)
+  let tcs = zipWith (\t1 t2 -> Constraint t1 t2 (Just "TopLevel")) (map (rtFromScheme . snd) typeEnv) (map fst3cts cts)
   -- combine all constraints
   return (tcs ++ concatMap snd3cts cts, Program (zip (map fst decls) (map trd3cts cts)) nns)
 
@@ -284,7 +287,7 @@ infer expr
       case expr of
         (Constant ty val) -> do
           let tVal = getRType val
-          let constraint = (rType ty, tVal)
+          let constraint = Constraint (rType ty) tVal (Just "Constant")
           return (rType ty, [constraint], expr)
         (Lambda ti name inExpr) -> do
           -- rare case of needing an extra TV, because the var doesn't get one initially
@@ -299,7 +302,7 @@ infer expr
         e@(Apply ti func arg) -> do
           (funcTy, c1, funcExprTy) <- infer func
           (argTy, c2, argExprTy) <- infer arg
-          let argConstraint = (funcTy, argTy `TArrow` (rType ti))
+          let argConstraint = Constraint funcTy (argTy `TArrow` (rType ti)) (Just "Apply")
           return (rType ti, [argConstraint] ++ c1 ++ c2, Apply ti funcExprTy argExprTy)
           --expr `usingScheme` (Forall [TV "a", TV "b"] (((TVarR $ TV "a") `TArrow` (TVarR $ TV "b")) `TArrow` (TVarR $ TV "a") `TArrow` (TVarR $ TV "b")))
         e@(InjF ti name params) -> do
@@ -308,8 +311,8 @@ infer expr
         e@(ReadNN ti name sym) -> do
           t <- lookupTEnv name
           (symTy, c1, symTyExpr) <- infer sym
-          let argConstraint = (t, symTy `TArrow` (rType ti))
-          return (rType ti, [argConstraint] ++ c1, ReadNN ti name symTyExpr)
+          let argConstraint = Constraint t (symTy `TArrow` (rType ti)) (Just "ReadNN")
+          return (trace ("argConstraint: " ++ show argConstraint) $ rType ti, [argConstraint] ++ c1, ReadNN ti name symTyExpr)
     | solvesSimply expr =
         let
           plausibleAlgs = filter (checkExprMatches expr) allAlgorithms
@@ -372,13 +375,13 @@ inferResultingType :: Scheme -> [RType] -> Infer (RType, [Constraint])
 inferResultingType (Forall vars rtype) [] = return (rtype, [])
 inferResultingType (Forall vars (TArrow fromTy toTy)) (fstTy:rtypes2) =
   do
-    let constraint = (fromTy, fstTy)
+    let constraint = Constraint fromTy fstTy (Just "inferResultingType")
     (resultingType, moreConstraints) <- inferResultingType (Forall vars toTy) rtypes2
     return (resultingType, constraint:moreConstraints)
 inferResultingType (Forall vars fTy) (fstTy:rtypes2) = do
   --introduce a new TV for the result.
   resultingTV <- fresh
-  let constraint = (fTy, fstTy `TArrow` (resultingTV))
+  let constraint = Constraint fTy (fstTy `TArrow` (resultingTV)) (Just "inferResultingType")
   (resultingType, moreConstraints) <- inferResultingType (Forall vars resultingTV) rtypes2
   return (resultingType, constraint:moreConstraints)
 --inferResultingType a b = error ("undefined inferResulting from " ++ show a ++ " //// " ++ show b)
@@ -458,10 +461,10 @@ runSolve cs = runIdentity $ runExceptT $ solver st
 -- and produces a somewhat-informative substitution
 simplify :: Unifier -> Unifier
 simplify (su, []) = (su, [])
-simplify (su, ((t1, t2): cs0)) =
+simplify (su, ((Constraint t1 t2 c): cs0)) =
   case runIdentity $ runExceptT $ unifies t1 t2 of
     -- can't simplify the t1, t2 constraint, put it in the unusable bin.
-    Left err -> addLeftoverConstraint (simplify (su, cs0)) (t1, t2)
+    Left err -> addLeftoverConstraint (simplify (su, cs0)) (Constraint t1 t2 c)
     Right newSubst -> simplify (newSubst `compose` su, apply newSubst cs0)
   where
     addLeftoverConstraint :: Unifier -> Constraint -> Unifier
@@ -472,7 +475,7 @@ solver :: Unifier -> Solve Subst
 solver (su, cs) =
   case cs of
     [] -> return su
-    ((t1, t2): cs0) -> do
+    ((Constraint t1 t2 _): cs0) -> do
       su1  <- unifies t1 t2
       solver (su1 `compose` su, apply su1 cs0)
 
