@@ -1,5 +1,6 @@
 module SPLL.CodeGenJulia (
-  generateFunctions
+  generateFunctions,
+  juliaVal
 ) where
 
 import SPLL.IntermediateRepresentation
