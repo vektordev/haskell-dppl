@@ -45,10 +45,10 @@ neg = NegF makeTypeInfo
 -- Variables
 
 letIn :: String -> Expr -> Expr -> Expr
---letIn = LetIn makeTypeInfo
+letIn = LetIn makeTypeInfo
 -- We can not infer probabilities on letIns. So we rewrite them as lambdas
 -- We don't have full inference logic on lambdas yet, but we have none at all on LetIns
-letIn s val body = apply (s #-># body) val
+--letIn s val body = apply (s #-># body) val
 
 var :: String -> Expr
 var = Var makeTypeInfo

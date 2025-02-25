@@ -32,6 +32,7 @@ module SPLL.Lang.Lang (
 , predicateProg
 , isNotTheta
 , tTraverse
+, getFunctionNames
 ) where
 
 import SPLL.Lang.Types
@@ -451,6 +452,9 @@ getRType (VFloat _) = TFloat
 getRType (VList (a:_)) = ListOf $ getRType a
 getRType (VList []) = NullList
 getRType (VTuple t1 t2) = Tuple (getRType t1) (getRType t2)
+
+getFunctionNames :: Program -> [String]
+getFunctionNames p = map fst (functions p)
 
 prettyPrintProg :: Program -> [String]
 prettyPrintProg = prettyPrintProgCustomTI prettyFullTypeInfo
