@@ -1,6 +1,20 @@
 from typing import Iterable
 
+def sign(x):
+  return -1 if x < 0 else 0 if x == 0 else 1
 
+def density_IRUniform(x):
+  return 1 if 0 <= x <= 1 else 0
+
+def cumulative_IRUniform(x):
+  return 0 if x < 0 else x if x <= 1 else 1
+
+def isAny(x):
+  if x == "ANY":
+    return True
+  if isinstance(x, AnyInferenceList):
+    return True
+  return False
 
 class InferenceList:
   def __init__(self, value = None):
@@ -23,7 +37,7 @@ class InferenceList:
   def __getitem__(self, index):
     if isinstance(index, slice):
       # Tail lists
-      if index.start > 0 and index.stop == -1 and (index.step == 1 or index.step is None):
+      if index.start > 0 and (index.stop == -1 or index.stop is None) and (index.step == 1 or index.step is None):
         current = self
         for _ in range(index.start - 1):
           current = current.next
@@ -54,7 +68,10 @@ class AnyInferenceList(InferenceList):
 
 class ConsInferenceList(InferenceList):
   def __init__(self, value, tail: InferenceList):
-    self.next = tail
+    if tail == "ANY":
+      self.next = AnyInferenceList()
+    else:
+      self.next = tail
     self.value = value
 
 def toList(lst):
@@ -62,7 +79,3 @@ def toList(lst):
   for x in reversed(lst):
     back = back.prepend(x)
   return back
-
-l = toList([1, 2, 3, 4, 5])
-print(l[0])
-print(l[1:-1][0])
