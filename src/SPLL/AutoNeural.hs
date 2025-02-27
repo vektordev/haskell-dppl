@@ -38,10 +38,20 @@ makeProb conf plan nn_name = IRLambda "sample" $ IRLetIn vector (IREvalNN nn_nam
     (m, dim, bc) = (makeProbRec plan 0 (IRVar "sample"))
     sndRet = if countBranches conf then IRTCons dim bc else dim
 
+-- Takes a Tag from a Discretes type and a sample, and builds code that returns the index of the sample in the tag.
+-- step 1: turn the tag into a list of values.
+-- step 2: Use IRApply "indexOf" to find the index of the value in the list
+indexOf :: Tag -> IRExpr -> IRExpr
+indexOf tag sample =
+  IRApply
+    (IRApply (IRVar "indexOf") (IRVar "sample"))
+    (IRConst (valueToIR (VList (tagToValues tag))))
+
+
 makeProbRec :: PartitionPlan -> Int -> IRExpr -> (IRExpr, IRExpr, IRExpr)
 makeProbRec (Discretes rty tag) ix sample = (p, IRConst $ VFloat 0, IRConst (VFloat 0))
   where
-    p = IRIndex (IRVar vector) sample
+    p = IRIndex (IRVar vector) (IROp OpPlus (indexOf tag sample) (IRConst (VInt ix)))
 makeProbRec Continuous ix sample = (p, IRConst $ VFloat 0, IRConst (VFloat 0))
   where
     p = IRDensity IRNormal (IROp OpSub
@@ -69,6 +79,7 @@ makeGenRec Continuous ix = IROp OpPlus
   (IROp OpMult (IRSample IRNormal) (IRIndex (IRVar vector) (IRConst (VInt $ ix + 1))))
   (IRIndex (IRVar vector) (IRConst (VInt ix)))
 
+totalWeight :: Int -> Int -> IRExpr
 totalWeight nValues startIx = foldl (\rest ix -> IROp OpPlus rest (vecAt ix)) (IRConst (VInt 0)) [startIx.. startIx + nValues-1]
 
 vecAt :: Int -> IRExpr
