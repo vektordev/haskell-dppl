@@ -30,21 +30,21 @@ type TypeEnv = [(String, (RType, Bool))]
 -- TODO: How do we deal with top-level lambdas in binding here?
 --  TL-Lambdas are presumably to be treated differently than non-TL, at least as far as prob is concerned.
 envToIR :: CompilerConfig -> Program -> [(String, IRExpr)]
-envToIR conf p = 
-  concatMap (makeAutoNeural conf) (neurals p) ++ 
+envToIR conf p = fmap (fmap (postProcess conf) ) $ -- map optimizer over all second elements of the tuples
+  concatMap (makeAutoNeural conf) (neurals p) ++
   concatMap (\(name, binding) ->
     let typeEnv = getGlobalTypeEnv p
         pt = pType $ getTypeInfo binding
         rt = rType $ getTypeInfo binding in
       if (pt == Deterministic || pt == Integrate) && (isOnlyNumbers rt) then
-        [(name ++ "_integ", postProcess conf (IRLambda "low" (IRLambda "high" (runCompile conf (toIRIntegrateSave conf typeEnv binding (IRVar "low") (IRVar "high")))))),
-        (name ++ "_prob",postProcess conf (IRLambda "sample" (runCompile conf (toIRProbability conf typeEnv binding (IRVar "sample"))))),
-        (name ++ "_gen", postProcess conf (fst $ runIdentity $ runSupplyVars $ runWriterT (toIRGenerate typeEnv binding)))]
+        [(name ++ "_integ", IRLambda "low" (IRLambda "high" (runCompile conf (toIRIntegrateSave conf typeEnv binding (IRVar "low") (IRVar "high"))))),
+        (name ++ "_prob",IRLambda "sample" (runCompile conf (toIRProbability conf typeEnv binding (IRVar "sample")))),
+        (name ++ "_gen", fst $ runIdentity $ runSupplyVars $ runWriterT (toIRGenerate typeEnv binding))]
       else if pt == Deterministic || pt == Integrate || pt == Prob then
-        [(name ++ "_prob",postProcess conf ((IRLambda "sample" (runCompile conf (toIRProbability conf typeEnv binding (IRVar "sample")))))),
-        (name ++ "_gen", postProcess conf (fst $ runIdentity $ runSupplyVars $ runWriterT $ toIRGenerate typeEnv binding))]
+        [(name ++ "_prob", (IRLambda "sample" (runCompile conf (toIRProbability conf typeEnv binding (IRVar "sample"))))),
+        (name ++ "_gen", fst $ runIdentity $ runSupplyVars $ runWriterT $ toIRGenerate typeEnv binding)]
       else
-        [(name ++ "_gen", postProcess conf ( fst $ runIdentity $ runSupplyVars $ runWriterT $ toIRGenerate typeEnv binding))]) (functions p)
+        [(name ++ "_gen", fst $ runIdentity $ runSupplyVars $ runWriterT $ toIRGenerate typeEnv binding)]) (functions p)
 
 
 runCompile :: CompilerConfig -> CompilerMonad CompilationResult -> IRExpr
