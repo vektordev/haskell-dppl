@@ -59,9 +59,14 @@ pyUnaryOps OpExp = "math.exp"
 pyUnaryOps OpAbs = "abs"
 pyUnaryOps OpNot = "not"
 pyUnaryOps OpLog = "math.log"
+--pyUnaryOps OpSign = "sign"
+--pyUnaryOps OpIsAny = "isAny"
 
 pyVal :: IRValue -> String
 pyVal (VList xs) = "[" ++ (intercalate "," $ map pyVal xs) ++ "]"
+--pyVal (VList EmptyList) = "EmptyInferenceList()"
+--pyVal (VList AnyList) = "AnyInferenceList()"
+--pyVal (VList (ListCont x xs)) = "ConsInferenceList(" ++ pyVal x ++ ", " ++ pyVal (VList xs) ++ ")"
 pyVal (VInt i) = show i
 pyVal (VFloat f) = show f
 pyVal (VBool f) = if f then "True" else "False"
@@ -96,7 +101,7 @@ generateFunctions defs =
       Just a -> Just $ irMap (replaceCalls lut) $ snd a
     groups = [(name, getDef name "_gen", getDef name "_prob", getDef name "_integ")| name <- names]
   in
-    concatMap generateClass groups
+    concatMap generateClass groups ++ ["", "# Example Initialization"] ++ [onHead toLower name ++ " = " ++ onHead toUpper name ++ "()" | name <- names]
 
 stdLib :: [(String, String)]
 stdLib = [("in", "contains")]
@@ -149,7 +154,7 @@ generateExpression (IRUnaryOp op expr) = pyUnaryOps op ++ "(" ++ generateExpress
 generateExpression (IRTheta x i) = "(" ++ generateExpression x ++ ")[0][" ++ show i ++ "]" 
 generateExpression (IRSubtree x i) = "(" ++ generateExpression x ++ ")[1][" ++ show i ++ "]" 
 generateExpression (IRConst v) = pyVal v
-generateExpression (IRCons hd tl) = "[" ++ generateExpression hd ++ "] + " ++ generateExpression tl
+generateExpression (IRCons hd tl) = "ConsInferenceList(" ++ generateExpression hd ++ ", " ++ generateExpression tl ++ ")"
 generateExpression (IRElementOf el lst) = "(" ++ generateExpression el ++ " in " ++ generateExpression lst ++ ")"
 generateExpression (IRTCons fs sn) = "(" ++ generateExpression fs ++ ", " ++ generateExpression sn ++ ")"
 generateExpression (IRHead x) = "(" ++ generateExpression x ++ ")[0]" 
