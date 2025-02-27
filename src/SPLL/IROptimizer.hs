@@ -46,7 +46,7 @@ fixedPointIteration f x = if fx == x then x else fixedPointIteration f fx
   where fx = f x
 
 optimize :: CompilerConfig -> IRExpr -> IRExpr
-optimize conf = irMap (commonSubexprStage . applyConstStage . assiciativityStage . letInStage . constantDistrStage . simplifyStage)
+optimize conf = irMap (commonSubexprStage . applyConstStage . assiciativityStage . letInStage . constantDistrStage . simplifyStage . indexStage)
   where
     oLvl = optimizerLevel conf
     commonSubexprStage = if False then optimizeCommonSubexpr else id -- Too buggy to use
@@ -55,6 +55,17 @@ optimize conf = irMap (commonSubexprStage . applyConstStage . assiciativityStage
     letInStage = if oLvl >= 2 then optimizeLetIns else id
     constantDistrStage = if oLvl >= 2 then evalConstantDistr else id
     simplifyStage = if oLvl >= 1 then simplify else id
+    indexStage = if oLvl >= 1 then indexmagic else id
+
+indexmagic :: IRExpr -> IRExpr
+-- if calling Apply ("indexOf") elem [0..], replace with elem
+indexmagic (IRApply (IRApply (IRVar "indexOf") elem) (IRConst (VList list))) | isNaturals list = elem
+  where
+    isNaturals lst = and (zipWith (==) [0..] (map toNatural lst))
+    toNatural (VInt x) = x
+    toNatural _ = -1 -- not a natural number, should fail the above.
+indexmagic x = x
+
 
 --TODO: We can also optimize index magic, potentially here. i.e. a head tail tail x can be simplified.
 --TODO: Unary operators
