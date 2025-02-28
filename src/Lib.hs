@@ -131,15 +131,15 @@ newCodeGenAll conf p = do
   pPrint annotated
   let ir = envToIR conf annotated
   pPrint ir
-  let pycode = SPLL.CodeGenPyTorch.generateFunctions ir
+  let pycode = SPLL.CodeGenPyTorch.generateFunctions True ir
   let jlcode = SPLL.CodeGenJulia.generateFunctions ir
   putStrLn "python code:"
   putStrLn $ unlines pycode
   putStrLn "julia code:"
   putStrLn $ unlines jlcode
 
-codeGenToLang :: Language -> CompilerConfig -> Program -> IO String
-codeGenToLang lang conf prog = do
+codeGenToLang :: Language -> Bool -> CompilerConfig -> Program -> IO String
+codeGenToLang lang trunc conf prog = do
   printIfVerbose conf "=== Parsed Program ===\n"
   doVerbose 2 conf (pPrint prog)
   printIfVerbose conf (pPrintProg prog)
@@ -159,7 +159,7 @@ codeGenToLang lang conf prog = do
   doVerbose 2 conf (pPrint ir)
 
   case lang of
-    Python -> return $ intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions ir)
+    Python -> return $ intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions (not trunc) ir)
     Julia -> return $ intercalate "\n" (SPLL.CodeGenJulia.generateFunctions ir)
 
 doVerbose :: Int -> CompilerConfig -> IO () -> IO()
@@ -178,7 +178,7 @@ someFunc = do
   let conf = CompilerConfig{topKThreshold = Nothing, countBranches = True, verbose=2}
   let lang = Python
   let prog = testCallLambda --testDiceAdd --testNN
-  someString <- codeGenToLang lang conf prog
+  someString <- codeGenToLang lang True conf prog
   putStrLn someString
   putStrLn "========="
 --runNNTest :: IO ()

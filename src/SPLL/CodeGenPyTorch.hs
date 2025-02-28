@@ -82,10 +82,10 @@ onLast :: (a -> a) -> [a] -> [a]
 onLast f [x] = [f x]
 onLast f (x:xs) = x : onLast f xs
 
-generateFunctions :: [(String, IRExpr)] -> [String]
+generateFunctions :: Bool -> [(String, IRExpr)] -> [String]
 --generateFunctions defs | trace (show defs) False = undefined
 --contrary to the julia backend, we want to aggregate gen and prob into one classes. Ugly implementation, but it'll do for now.
-generateFunctions defs =
+generateFunctions genBoil defs =
   let
     getName str
       | "_prob" `isSuffixOf` str = iterate init str !! 5
@@ -101,7 +101,15 @@ generateFunctions defs =
       Just a -> Just $ irMap (replaceCalls lut) $ snd a
     groups = [(name, getDef name "_gen", getDef name "_prob", getDef name "_integ")| name <- names]
   in
-    concatMap generateClass groups ++ ["", "# Example Initialization"] ++ [onHead toLower name ++ " = " ++ onHead toUpper name ++ "()" | name <- names]
+    if genBoil then
+      ["from pythonLib import *",
+      "from random import random as rand",
+      "from random import gauss as normal", ""] ++
+      concatMap generateClass groups ++ 
+      ["", "# Example Initialization"] ++ 
+      [onHead toLower name ++ " = " ++ onHead toUpper name ++ "()" | name <- names]
+    else
+      concatMap generateClass groups
 
 stdLib :: [(String, String)]
 stdLib = [("in", "contains")]
