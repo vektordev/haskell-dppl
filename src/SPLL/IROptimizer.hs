@@ -46,7 +46,7 @@ fixedPointIteration f x = if fx == x then x else fixedPointIteration f fx
   where fx = f x
 
 optimize :: CompilerConfig -> IRExpr -> IRExpr
-optimize conf = irMap (commonSubexprStage . applyConstStage . assiciativityStage . letInStage . constantDistrStage . simplifyStage . indexStage)
+optimize conf = irMap (commonSubexprStage . applyConstStage . assiciativityStage . letInStage . constantDistrStage . simplifyStage . indexStage . distributeConditionals)
   where
     oLvl = optimizerLevel conf
     commonSubexprStage = if False then optimizeCommonSubexpr else id -- Too buggy to use
@@ -56,6 +56,7 @@ optimize conf = irMap (commonSubexprStage . applyConstStage . assiciativityStage
     constantDistrStage = if oLvl >= 2 then evalConstantDistr else id
     simplifyStage = if oLvl >= 1 then simplify else id
     indexStage = if oLvl >= 1 then indexmagic else id
+    distributeConditionals = if oLvl >= 2 then distributeIf else id
 
 indexmagic :: IRExpr -> IRExpr
 -- if calling Apply ("indexOf") elem [0..], replace with elem
@@ -66,6 +67,17 @@ indexmagic (IRApply (IRApply (IRVar "indexOf") elem) (IRConst (VList list))) | i
     toNatural _ = -1 -- not a natural number, should fail the above.
 indexmagic x = x
 
+-- (if cond then x else y, if cond then z else w) can be simplified to if cond then (x, z) else (y, w).
+-- basically, law of distribution.
+distributeIf :: IRExpr -> IRExpr
+distributeIf (IRTCons (IRIf cond1 x1 x2) (IRIf cond2 y1 y2)) | cond1 == cond2 = IRIf cond1 (IRTCons x1 y1) (IRTCons x2 y2)
+-- now for ((x, y), z):
+distributeIf (IRTCons (IRTCons (IRIf cond1 x1 x2) (IRIf cond2 y1 y2)) (IRIf cond3 z1 z2)) | cond1 == cond2 && cond1 == cond3 =
+  IRIf cond1 (IRTCons (IRTCons x1 y1) z1) (IRTCons (IRTCons x2 y2) z2)
+-- now for (x, (y, z)):
+distributeIf (IRTCons (IRIf cond1 x1 x2) (IRTCons (IRIf cond2 y1 y2) (IRIf cond3 z1 z2))) | cond1 == cond2 && cond1 == cond3 =
+  IRIf cond1 (IRTCons x1 (IRTCons y1 z1)) (IRTCons x2 (IRTCons y2 z2))
+distributeIf x = x
 
 --TODO: We can also optimize index magic, potentially here. i.e. a head tail tail x can be simplified.
 --TODO: Unary operators
