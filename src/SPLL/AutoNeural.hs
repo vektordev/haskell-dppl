@@ -1,5 +1,6 @@
 module SPLL.AutoNeural(
   makeAutoNeural
+, makeForwardDecl
 ) where
 
 import SPLL.Lang.Types
@@ -21,10 +22,23 @@ makeAutoNeural conf (name, (TArrow TSymbol target), tag) =
    (name ++ "_prob", IRLambda symbol $ makeProb conf plan name)]
     where plan = makePartitionPlan target tag
 
-data PartitionPlan = TuplePlan PartitionPlan PartitionPlan
-                   | EitherPlan PartitionPlan PartitionPlan
-                   | Discretes RType Tag
-                   | Continuous -- Mu, Sigma
+--TODO: Output this into the output file somehow.
+-- yields a forward declaration of a neural network:
+-- includes a string representation of the partition plan, including constraints about outputted logits.
+makeForwardDecl :: NeuralDecl -> String
+makeForwardDecl (name, (TArrow TSymbol target), tag) = "neural Network " ++ name ++ " :: (" ++ show target ++ ")\n  with layout: " ++ plan_string plan ++ ",\n  dimensionality=" ++ show (getSize plan) ++ ".\n"
+  where
+    plan = makePartitionPlan target tag
+    plan_string (TuplePlan first second) = plan_string first ++ " x " ++ plan_string second
+    plan_string (EitherPlan left right) = "[1](0..1)" ++ plan_string left ++ " + " ++ plan_string right
+    plan_string p@(Discretes ty tag) = "[" ++ show (getSize p) ++ "](softmax'ed)"
+    plan_string Continuous = "[1],[1](>0)"
+
+
+data PartitionPlan = TuplePlan PartitionPlan PartitionPlan -- Logit layout: first, then second.
+                   | EitherPlan PartitionPlan PartitionPlan -- Logit layout: flag, then left, then right
+                   | Discretes RType Tag -- Logit layout: Enumerated values in order of "tagToValues"
+                   | Continuous -- Logit layout: Mu, Sigma
 
 vector :: String
 vector = "l_x_neural_out"
@@ -167,6 +181,10 @@ test4 = do
   putStrLn (pPrintIREnv irdefs)
 
 test5 = do
-  let irdefs = makeAutoNeural testConf ("tuple", TArrow TSymbol (Tuple TInt TInt), Just $ EnumList [(VTuple (VInt 7) (VInt 3)), (VTuple (VInt 9) (VInt 5))])
+  let decl = ("tuple", TArrow TSymbol (Tuple TInt TInt), Just $ EnumList [(VTuple (VInt 7) (VInt 3)), (VTuple (VInt 9) (VInt 5))])
+  let irdefs = makeAutoNeural testConf decl
   putStrLn (pPrintIREnv irdefs)
+  let commentstring = makeForwardDecl decl
+  putStrLn commentstring
+
 
