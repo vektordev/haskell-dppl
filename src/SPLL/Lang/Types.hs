@@ -120,7 +120,7 @@ data Program = Program {
 
 type FnDecl = (String, Expr)
 
-type NeuralDecl = (String, RType, Tag)
+type NeuralDecl = (String, RType, Maybe Tag)
 
 type WitnessedVars = Set.Set String
 

@@ -5,7 +5,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE FlexibleContexts #-}
 
-import Test.QuickCheck
+import Test.QuickCheck hiding (verbose)
 import System.Exit (exitWith, ExitCode(ExitFailure))
 
 import SPLL.Examples
@@ -20,6 +20,7 @@ import SPLL.Typing.RInfer
 import SPLL.Analysis
 import SPLL.IntermediateRepresentation
 import SPLL.IRCompiler
+import SPLL.Validator
 import IRInterpreter
 import Data.Maybe (fromJust, catMaybes)
 import Control.Monad.Random.Lazy (Random, RandomGen, Rand, evalRandIO)
@@ -30,7 +31,7 @@ import SpecExamples
 import Control.Exception.Base (SomeException, try)
 import Test.QuickCheck.Monadic (monadicIO, run, assert)
 import Test.QuickCheck.Property (failed, reason)
-import Debug.Trace (trace, traceShowId, traceId)
+import Debug.Trace (trace, traceShowId, traceId, traceShow)
 import SPLL.Lang.Lang (Value)
 import Control.Monad.Supply
 import Data.Foldable
@@ -42,6 +43,7 @@ import Data.Bifunctor (second)
 import SPLL.Parser
 import TestParser
 import TestInternals
+import End2EndTesting
 import SPLL.Prelude
 
 
@@ -109,6 +111,7 @@ correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat
                                (testDice, VInt 2, [], (VFloat 0.16666666, VFloat 0)),
                                (testDice, VInt 7, [], (VFloat 0, VFloat 0)),
                                (testDiceAdd, VInt 2, [], (VFloat (1 / 36), VFloat 0)),
+                               (testDiceAdd, VInt 7, [], (VFloat (6 / 36), VFloat 0)),
                                (testDiceAdd, VInt 1, [], (VFloat 0, VFloat 0)),
                                (testDimProb, VFloat 0.5, [], (VFloat 0.4, VFloat 0)),
                                (testDimProb, VFloat 0.0, [], (VFloat (0.6 * 0.39894228040143265), VFloat 1)),
@@ -131,7 +134,9 @@ correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat
                                (testFstCall, VFloat 0.5, [], (VFloat 1, VFloat 1)),
                                (testFstDiscrete, VFloat 0.5, [], (VFloat 1, VFloat 1)),
                                (testHead, VFloat 0.5, [], (VFloat 1, VFloat 1)),
-                               (testTail, VFloat 0.5, [], (VFloat 1, VFloat 1))]
+                               (testTail, VFloat 0.5, [], (VFloat 1, VFloat 1)),
+                               (testInjFRenaming, VFloat 5.5, [], (VFloat 1, VFloat 1))]
+                               --(testLambdaChoice, VFloat 1.5, [], (VFloat ((1 + normalPDF 0.5) / 2), VFloat 1))]
 
                               --(testLambdaParameter, VFloat 10, [], VFloat 1.0)]
 
@@ -169,12 +174,22 @@ correctIntegralValuesTestCases =[(uniformProg, VFloat 0, VFloat 1, [], (VFloat 1
                                 (testHead, VFloat 0.4, VFloat 3, [], (VFloat 0.6, VFloat 0)),
                                 (testTail, VFloat 0.4, VFloat 3, [], (VFloat 0.6, VFloat 0))]
 
+invalidTestCases :: [Program]
+invalidTestCases = [invalidDuplicateDecl1, invalidDuplicateDecl2, invalidDuplicateDecl3, invalidDuplicateDecl4, invalidDuplicateDecl5, invalidMissingDecl, invalidMissingInjF, invalidReservedName, invalidReservedName2, invalidWrongArgCount]
+
                                   --(testLambdaParameter, VFloat 9, VFloat 11, [], VFloat 1.0)]
                                   --(testCallLambdaAdvanced, VFloat 2, VFloat 3, [], VFloat 1.0),
                                   --(testLetIn, VFloat 1.5, VFloat 2, [], VFloat 0.5)]
 
 noTopKConfig :: CompilerConfig
 noTopKConfig = CompilerConfig Nothing False 0 2
+
+prop_CheckValidPrograms :: Property
+prop_CheckValidPrograms = forAll (elements correctProbValuesTestCases) checkValidPrograms
+
+prop_CheckInvalidPrograms :: Property
+prop_CheckInvalidPrograms = forAll (elements invalidTestCases) checkInvalidPrograms
+
 
 prop_CheckProbTestCases :: Property
 prop_CheckProbTestCases = forAll (elements correctProbValuesTestCases) checkProbTestCase
@@ -208,6 +223,51 @@ prop_TopK = ioProperty $ do
 
 prop_any :: Property
 prop_any = forAll (elements correctProbValuesTestCases) checkProbAny
+
+-- DO NOT CHANGE THIS CODE WITHOUT ALSO CHANGING THE CODE IN THE README
+prop_CheckReadmeCodeListing1 :: Property
+prop_CheckReadmeCodeListing1 = ioProperty $ do
+  let twoDice = Program [("main", dice 6 #<+># dice 6)] []
+  let conf = CompilerConfig {verbose=0, topKThreshold=Nothing, countBranches=False, optimizerLevel=2}
+  gen <- evalRandIO (runGen conf twoDice [])
+  let VTuple (VFloat prob) (VFloat dim) = runProb conf twoDice [] gen
+  -- Original Listing above, Tests below
+  if gen == (VInt 2) || gen == (VInt 12) then
+    return $ (VFloat prob) `reasonablyClose` (VFloat $ 1/36)
+  else if gen == (VInt 3) || gen == (VInt 11) then
+    return $ (VFloat prob) `reasonablyClose` (VFloat $ 2/36)
+  else if gen == (VInt 4) || gen == (VInt 10) then
+    return $ (VFloat prob) `reasonablyClose` (VFloat $ 3/36)
+  else if gen == (VInt 5) || gen == (VInt 9) then
+    return $ (VFloat prob) `reasonablyClose` (VFloat $ 4/36)
+  else if gen == (VInt 6) || gen == (VInt 8) then
+    return $ (VFloat prob) `reasonablyClose` (VFloat $ 5/36)
+  else if gen == (VInt 7) then
+    return $ (VFloat prob) `reasonablyClose` (VFloat $ 6/36)
+  else
+    return $ counterexample ("No valid dice roll " ++ show gen) False
+
+-- DO NOT CHANGE THIS CODE WITHOUT ALSO CHANGING THE CODE IN THE README
+prop_CheckReadmeCodeListing2 :: Property
+prop_CheckReadmeCodeListing2 = ioProperty $ do
+  let dist = Program [("main", normal #*# constF 2 #+# constF 1)] []
+  let conf = CompilerConfig {verbose=2, topKThreshold=Nothing, countBranches=False, optimizerLevel=2}
+  gen <- evalRandIO (runGen conf dist [])
+  let VTuple (VFloat prob) (VFloat dim) = runProb conf dist [] gen
+  -- Original Listing above, Tests below
+  let (VFloat genF) = gen
+  return $ (VFloat prob) `reasonablyClose` (VFloat (normalPDF ((genF - 1) / 2) / 2))
+
+checkValidPrograms :: (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
+checkValidPrograms (p, _, _, _) = case validateProgram p of
+  Right _ -> property True
+  Left err -> counterexample err False
+
+checkInvalidPrograms :: Program -> Property
+checkInvalidPrograms p = case validateProgram p of
+  Left _ -> property True
+  Right _ -> counterexample "Program validates even though it should not" False
+
 
 checkProbTestCase :: (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
 checkProbTestCase (p, inp, params, (out, VFloat outDim)) = ioProperty $ do
@@ -540,7 +600,8 @@ main = do
   a <- runTests
   b <- test_parser
   c <- test_internals
-  let x = a && b && c
+  d <- test_end2end
+  let x = a && b && c && d
   if x then
     putStrLn "Test successful!"
   else do

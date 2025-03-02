@@ -11,6 +11,7 @@ module SPLL.IntermediateRepresentation (
 , getIRSubExprs
 , irPrintFlat
 , valueToIR
+, isLambda
 ) where
 
 import SPLL.Lang.Types
@@ -243,6 +244,10 @@ irMap f x = case x of
   (IRConst _) -> f x
   (IRSample _) -> f x
   (IRVar _) -> f x
+
+isLambda :: IRExpr -> Bool
+isLambda IRLambda {} = True
+isLambda _ = False
 
 irPrintFlat :: IRExpr -> String
 irPrintFlat (IRIf _ _ _) = "IRIf"

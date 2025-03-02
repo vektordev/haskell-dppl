@@ -41,7 +41,6 @@ dbg x y = y
 -- like InjF
 
 --TODO: This can't parse type annotations.
--- its type signature doesn't have a space to put them (Program () a instead of Program TypeInfo)
 -- At some point this deserves fixing.
 
 type Parser = Parsec Void String
@@ -209,7 +208,12 @@ injFs :: [(String, (Int, [Expr] -> Expr))]
 injFs = [(name, (parameterCount name, injF name)) | (name, _) <- globalFenv]
 
 pConst :: Parser Expr
-pConst = choice [try pFloat, pIntVal]
+pConst = choice [pBool, try pFloat, pIntVal]
+
+pBool :: Parser Expr
+pBool = do
+  b <- choice [keyword "True" >> return True, keyword "False" >> return False]
+  return $ Constant makeTypeInfo (VBool b)
 
 pFloat :: Parser Expr
 pFloat = do
@@ -241,10 +245,26 @@ parseFromList kvlist = do
     Just value -> return value
 
 rTypes :: [(String, RType)]
-rTypes = [("Int", TInt), ("Float", TFloat)]
+rTypes = [("Int", TInt), ("Float", TFloat), ("Symbol", TSymbol)]
 
+-- this function needs to handle compound types such as "Int -> Float" as well 
+-- first, we want to try parsing a compound type, and if that fails assume that a simple type is there instead.
 pType :: Parser RType
-pType = parseFromList rTypes
+pType = dbg "type" $ do
+  t <- choice [pCompoundType, pSimpleType]
+  return t
+
+pCompoundType :: Parser RType
+pCompoundType = parens $ do
+  left <- pSimpleType
+  _ <- symbol "->"
+  right <- SPLL.Parser.pType
+  return $ TArrow left right
+
+pSimpleType :: Parser RType
+pSimpleType = 
+  parseFromList rTypes
+
 
 pList :: Parser [Value]
 pList = do
@@ -267,15 +287,15 @@ pDefinition = do
   doesNotContinue
   return x
 
+--TODO: Add validation via AutoNeural.
 pNeural :: Parser (Either FnDecl NeuralDecl)
 pNeural = dbg "neural" $ do
   _ <- keyword "neural"
   name <- pIdentifier
   _ <- symbol "::"
   ty <- SPLL.Parser.pType
-  _ <- symbol "of"
-  range <- pList
-  return  (Right (name, ty, (EnumList range)))
+  tag <- optional (symbol "of" *> pList)
+  return $ Right (name, ty, fmap (EnumList) tag)
 
 pFunction :: Parser (Either FnDecl NeuralDecl)
 pFunction = dbg "function" $ do

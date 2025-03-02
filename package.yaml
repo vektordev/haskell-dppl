@@ -42,6 +42,9 @@ dependencies:
 - lens
 - optparse-applicative
 - parser-combinators
+- directory
+- filepath
+- process
 
 library:
   source-dirs: src

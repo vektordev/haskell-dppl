@@ -29,7 +29,8 @@ data GlobalOpts = GlobalOpts {
 data CommandOpts =
   CompileOpts {
     outputFile :: String,
-    language :: Language
+    language :: Language,
+    trunc :: Bool
   }
   | GenerateOpts
   | ProbabilityOpts{
@@ -107,6 +108,10 @@ parseCompileOpts = CompileOpts
             <> short 'l'
             <> metavar "LANG"
             <> help "Language the program is transpiled to. Either python or julia")
+        <*> switch
+            (long "truncate"
+            <> short 't'
+            <> help "Truncates boilerplate from the generated code")
 
 parseGenerateOpts :: Parser CommandOpts
 parseGenerateOpts = pure GenerateOpts
@@ -147,8 +152,8 @@ transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, 
   prog <- parseProgram inFile
   let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl})
   case options of
-    CompileOpts{language=lang, outputFile=outFile} -> do
-      transpiled <- codeGenToLang lang conf prog
+    CompileOpts{language=lang, outputFile=outFile, trunc=trnc} -> do
+      transpiled <- codeGenToLang lang trnc conf prog
       writeOutputFile outFile transpiled
     GenerateOpts -> do
       -- TODO: Nicer Output

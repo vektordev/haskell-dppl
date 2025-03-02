@@ -70,8 +70,9 @@ fnDeclToString :: FnDecl -> String
 fnDeclToString (name, expr) = name ++ " = " ++ exprToString expr
 
 neuralDeclToString :: NeuralDecl -> String
-neuralDeclToString (name, rType, tag) =
-    "neural " ++ name ++ " :: " ++ rTypeToString rType ++ " of " ++ tagToString tag
+neuralDeclToString (name, rty, Nothing) = "neural " ++ name ++ " :: " ++ rTypeToString rty
+neuralDeclToString (name, rty, Just tag) =
+    "neural " ++ name ++ " :: " ++ rTypeToString rty ++ " of " ++ tagToString tag
 
 programToString :: Program -> String
 programToString (Program fnDecls neuralDecls) =
@@ -262,7 +263,7 @@ matchProg p1 p2
 
 matchFn :: FnDecl -> FnDecl -> Property
 matchFn (name1, expr1) (name2, expr2)
-    | name1 == name2 = counterexample (unlines ["In function " ++ name1 ++ ": ", unlines $ prettyPrintNoReq expr1, unlines $ prettyPrintNoReq expr2]) (matchExpr expr1 expr2)
+    | name1 == name2 = counterexample (unlines ["In function " ++ name1 ++ ": ", unlines $ prettyPrint expr1, unlines $ prettyPrint expr2]) (matchExpr expr1 expr2)
     | otherwise = counterexample ("Function name mismatch: " ++ show name1 ++ " /= " ++ show name2) False
 
 matchNeural :: NeuralDecl -> NeuralDecl -> Property

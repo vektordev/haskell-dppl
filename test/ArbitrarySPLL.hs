@@ -77,7 +77,7 @@ genNeuralDecl = do
   name <- genValidIdentifier
   -- For now just using TInt, could expand to arbitrary RType if needed
   values <- listOf1 (VInt <$> arbitrary)
-  return (name, TInt, EnumList values)
+  return (name, TInt, Just $ EnumList values)
 
 instance Arbitrary TypeInfo where
   arbitrary = return makeTypeInfo -- TODO: generates untyped programs for now.
