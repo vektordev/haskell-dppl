@@ -1,4 +1,5 @@
 from typing import Iterable
+from math import *
 
 def sign(x):
   return -1 if x < 0 else 0 if x == 0 else 1
@@ -8,6 +9,13 @@ def density_IRUniform(x):
 
 def cumulative_IRUniform(x):
   return 0 if x < 0 else x if x <= 1 else 1
+
+def density_IRNormal(x):
+  return 1 / sqrt(2 * pi) * e**(-(x**2)/2)
+
+def cumulative_IRNormal(x):
+  return (1.0 + erf(x / sqrt(2.0))) / 2.0
+
 
 def isAny(x):
   if x == "ANY":

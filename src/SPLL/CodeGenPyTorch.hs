@@ -1,5 +1,6 @@
 module SPLL.CodeGenPyTorch (
-  generateFunctions
+  generateFunctions,
+  pyVal
 ) where
 
 import SPLL.IntermediateRepresentation
@@ -107,7 +108,8 @@ generateFunctions genBoil defs =
     if genBoil then
       ["from pythonLib import *",
       "from random import random as rand",
-      "from random import gauss as normal", ""] ++
+      "from random import gauss as normal",
+      "from torch.nn import Module", ""] ++
       concatMap generateClass groups ++ 
       ["", "# Example Initialization"] ++ 
       [onHead toLower name ++ " = " ++ onHead toUpper name ++ "()" | name <- names]
