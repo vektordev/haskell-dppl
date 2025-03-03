@@ -273,6 +273,13 @@ pList = do
   (symbol "]")
   return values
 
+pListExpr :: Parser Expr
+pListExpr = do
+  (symbol "[")
+  exprs <- expr `sepBy` (symbol ",")
+  (symbol "]")
+  return (foldr cons nul exprs)
+
 valueParser :: Parser Value
 valueParser = do
   x <- L.decimal
@@ -375,6 +382,7 @@ atom :: Parser Expr
 atom = choice [
     pNull,
     try (pTuple),
+    try (pListExpr),
     try (parens expr),  -- Parenthesized expressions first
     pUniform,     -- Built-in distributions
     pNormal,
