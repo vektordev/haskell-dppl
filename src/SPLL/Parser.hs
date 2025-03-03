@@ -205,23 +205,37 @@ unaryFs = [
 injFs :: [(String, (Int, TypeInfo -> [Expr] -> Expr))]
 injFs = [(name, (parameterCount name, (`InjF` name))) | (name, _) <- globalFenv]
 
-pConst :: Parser Expr
-pConst = choice [pBool, try pFloat, pIntVal]
+pValue :: Parser Value
+pValue = choice [pBool, try pFloat, pIntVal, pTupleVal]
 
-pBool :: Parser Expr
+pTupleVal :: Parser Value
+pTupleVal = do
+  (symbol "(")
+  val1 <- pValue
+  _ <- symbol ","
+  val2 <- pValue
+  (symbol ")")
+  return (VTuple val1 val2)
+
+pConst :: Parser Expr
+pConst = do
+  val <- pValue
+  return (Constant makeTypeInfo val)
+
+pBool :: Parser Value
 pBool = do
   b <- choice [keyword "True" >> return True, keyword "False" >> return False]
-  return $ Constant makeTypeInfo (VBool b)
+  return (VBool b)
 
-pFloat :: Parser Expr
+pFloat :: Parser Value
 pFloat = do
   f <- L.signed sc (lexeme L.float)
-  return $ Constant makeTypeInfo (VFloat f)
+  return (VFloat f)
 
-pIntVal :: Parser Expr
+pIntVal :: Parser Value
 pIntVal = do
   i <- L.signed sc (lexeme L.decimal)
-  return $ Constant makeTypeInfo (VInt i)
+  return (VInt i)
 
 pInt :: Parser Int
 pInt = L.signed sc (lexeme L.decimal)
@@ -255,9 +269,12 @@ pType = dbg "type" $ do
 pCompoundType :: Parser RType
 pCompoundType = parens $ do
   left <- pSimpleType
-  _ <- symbol "->"
+  combinator <- pTypeCombinator
   right <- SPLL.Parser.pType
-  return $ TArrow left right
+  return $ combinator left right
+    where
+      pTypeCombinator = parseFromList combinators
+      combinators = [("->", TArrow), ("," , Tuple)]
 
 pSimpleType :: Parser RType
 pSimpleType = 
@@ -271,10 +288,18 @@ pList = do
   (symbol "]")
   return values
 
+pRange :: Parser (Value, Value)
+pRange = do
+  (symbol "[")
+  from <- valueParser
+  (symbol "..")
+  to <- valueParser
+  (symbol "]")
+  return (from, to)
+
+
 valueParser :: Parser Value
-valueParser = do
-  x <- L.decimal
-  return (VInt x)
+valueParser = pValue
 
 pCSV :: Parser [Value]
 pCSV = valueParser `sepBy` (symbol ",")
@@ -292,8 +317,11 @@ pNeural = dbg "neural" $ do
   name <- pIdentifier
   _ <- symbol "::"
   ty <- SPLL.Parser.pType
-  tag <- optional (symbol "of" *> pList)
-  return $ Right (name, ty, fmap (EnumList) tag)
+  tag <- optional (symbol "of" *> listOrRange)
+  return $ Right (name, ty, tag)
+    where
+      listOrRange = choice [try (pList >>= return . EnumList), pRange >>= return . EnumRange]
+
 
 pFunction :: Parser (Either FnDecl NeuralDecl)
 pFunction = dbg "function" $ do
