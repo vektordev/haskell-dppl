@@ -49,7 +49,9 @@ juliaUnaryOps OpIsAny = "isAny"
 juliaUnaryOps x = error ("Unknown Julia operator: " ++ show x)
 
 juliaVal :: IRValue -> String
-juliaVal (VList xs) = "[" ++ intercalate "," (map juliaVal (toList xs)) ++ "]"
+juliaVal (VList EmptyList) = "EmptyInferenceList()"
+juliaVal (VList AnyList) = "AnyInferenceList()"
+juliaVal (VList (ListCont x xs)) = "ConsInferenceList(" ++ juliaVal x ++ ", " ++ juliaVal (VList xs) ++ ")"
 juliaVal (VInt i) = show i
 juliaVal (VFloat f) = show f
 juliaVal (VBool f) = if f then "true" else "false"
@@ -103,8 +105,8 @@ generateExpression (IRConst v) = juliaVal v
 generateExpression (IRCons hd tl) = "hcat(" ++ generateExpression hd ++ ", " ++ generateExpression tl ++ ")"
 generateExpression (IRElementOf el lst) = "(" ++ generateExpression el ++ " in " ++ generateExpression lst ++ ")"
 generateExpression (IRTCons fs sn) = "(" ++ generateExpression fs ++ ", " ++ generateExpression sn ++ ")"
-generateExpression (IRHead x) = "(" ++ generateExpression x ++ ")[1]"
-generateExpression (IRTail x) = "(" ++ generateExpression x ++ ")[2:end]"
+generateExpression (IRHead x) = "head(" ++ generateExpression x ++ ")"
+generateExpression (IRTail x) = "tail(" ++ generateExpression x ++ ")"
 generateExpression (IRTFst x) = "(" ++ generateExpression x ++ ")[1]"
 generateExpression (IRTSnd x) = "(" ++ generateExpression x ++ ")[2]"
 generateExpression (IRLeft x) = "(false, " ++ generateExpression x ++ ", nothing)"
