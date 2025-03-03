@@ -44,13 +44,13 @@ function cumulative_IRNormal(x)
     return 0.5 * (1 + erf(x / sqrt(2)))
 end
 
-abstract type InferenceList{T} end
+abstract type InferenceList end
 
-struct EmptyInferenceList{T} <: InferenceList{T} end
-struct AnyInferenceList{T} <: InferenceList{T} end
-struct ConsInferenceList{T, U <: InferenceList} <: InferenceList{T}
-    value :: T
-    next :: U
+struct EmptyInferenceList <: InferenceList end
+struct AnyInferenceList <: InferenceList end
+struct ConsInferenceList <: InferenceList
+    value
+    next
 end
 
 Base.length(lst::EmptyInferenceList) = 0
@@ -81,7 +81,7 @@ function Base.getindex(lst::InferenceList, i::Int)
     return lst.value
 end
 
-function prepend(x :: T, xs :: InferenceList{T}) :: InferenceList{T} where T
+function prepend(x, xs :: InferenceList) :: InferenceList
     return ConsInferenceList(x, xs)
 end
 
