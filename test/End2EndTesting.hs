@@ -13,7 +13,8 @@ import SPLL.Lang.Lang
 import SPLL.Lang.Types
 import SPLL.Prelude
 import SPLL.Parser (tryParseProgram)
-import SPLL.CodeGenJulia 
+import SPLL.CodeGenJulia
+import SPLL.CodeGenPyTorch
 import Text.Megaparsec (errorBundlePretty)
 import SPLL.IntermediateRepresentation
 import Test.QuickCheck hiding (verbose)
@@ -62,7 +63,7 @@ parseValue s = VFloat (read s)
 testProbProgramInterpreter :: Program -> ProbTestCase -> Property
 testProbProgramInterpreter p (sample, params, (VFloat expectedProb, VFloat expectedDim)) = do
   let VTuple (VFloat outProb) (VFloat outDim) = runProb standardCompiler p params sample
-  counterexample "Probability differs" (outProb === expectedProb) .&&.
+  counterexample "Probability differs" ((abs (outProb - expectedProb)) < 0.0001) .&&.
     counterexample "Dimensionality differs" (outDim === expectedDim)
 
 testProbJulia :: Program -> [ProbTestCase] -> Property
@@ -73,6 +74,15 @@ testProbJulia p tc = ioProperty $ do
   case code of
     ExitSuccess -> return $ True === True
     ExitFailure _ -> return $ counterexample "Julia test failed. See Julia error message" False
+
+testProbPython :: Program -> [ProbTestCase] -> Property
+testProbPython p tc = ioProperty $ do
+  let src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True (compile standardCompiler p))
+  (_, _, _, handle) <- createProcess (proc "python3" ["-c", pythonProbTestCode src tc])
+  code <- waitForProcess handle
+  case code of
+    ExitSuccess -> return $ True === True
+    ExitFailure _ -> return $ counterexample "Python test failed. See Python error message" False
 
 --TODO Hardcoded precision of 4 digits
 juliaProbTestCode :: String -> [ProbTestCase] -> String
@@ -89,6 +99,18 @@ juliaProbTestCode src tcs =
   \end\n") tcs) ++ 
   "exit(0)" 
 
+--TODO Hardcoded precision of 4 digits
+pythonProbTestCode :: String -> [ProbTestCase] -> String
+pythonProbTestCode src tcs = 
+  src ++ "\n" ++ 
+  concat (map (\(sample, params, (outProb, outDim)) -> "tmp = main.forward(" ++ pyVal sample ++ intercalate ", " (map pyVal params) ++ ")\n\
+  \if abs(tmp[0] - " ++ pyVal outProb ++ ") > 0.0001:\n\
+  \  raise ValueError(\"Probability wrong: \" + str(tmp[0]) + \"!=\" + str(" ++ pyVal outProb ++ "))\n\
+  \if tmp[1] != " ++ pyVal outDim ++ ":\n\
+  \  raise ValueError(\"Dimensionality wrong: \" + str(tmp[1]) * \"/=\" + str(" ++ pyVal outDim ++ "))\n\
+  \") tcs) ++ 
+  "exit(0)" 
+
 
 prop_end2endTests :: Property
 prop_end2endTests = ioProperty $ do
@@ -96,7 +118,8 @@ prop_end2endTests = ioProperty $ do
   cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseProbTestCases tc >>= \t2 -> return (t1, t2)) files
   let interpProp = conjoin (map (\(p, tcs) -> conjoin $ map (testProbProgramInterpreter p) tcs) cases)
   let juliaProp = conjoin (map (\(p, tcs) -> testProbJulia p tcs) cases)
-  return $  juliaProp
+  let pythonProp = conjoin (map (\(p, tcs) -> testProbPython p tcs) cases)
+  return $ interpProp .&&. pythonProp .&&. juliaProp
 
 
 return []

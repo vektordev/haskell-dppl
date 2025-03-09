@@ -119,10 +119,12 @@ data Operand = OpPlus
              deriving (Show, Eq)
 
 data UnaryOperand = OpNeg
+                  | OpSign
                   | OpAbs
                   | OpNot
                   | OpExp
                   | OpLog   --Natural Logarithm
+                  | OpIsAny
                   deriving (Show, Eq)
 
 data Distribution = IRNormal | IRUniform deriving (Show, Eq)
@@ -140,6 +142,12 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               | IRTail IRExpr
               | IRTFst IRExpr
               | IRTSnd IRExpr
+              | IRLeft IRExpr
+              | IRRight IRExpr
+              | IRFromLeft IRExpr
+              | IRFromRight IRExpr
+              | IRIsLeft IRExpr
+              | IRIsRight IRExpr
               | IRDensity Distribution IRExpr
               | IRCumulative Distribution IRExpr
               | IRSample Distribution
@@ -170,16 +178,7 @@ data CompilerConfig = CompilerConfig {
 --    Fold enum ranges, algorithms, etc. into a representation of computation that can be directly converted into code.
 
 valueToIR :: GenericValue a -> GenericValue b
-valueToIR (VBool b) = VBool b
-valueToIR (VInt i) = VInt i
-valueToIR (VSymbol s) = VSymbol s
-valueToIR (VFloat d) = VFloat d
-valueToIR (VList xs) = VList (map valueToIR xs)
-valueToIR (VTuple x y) = VTuple (valueToIR x) (valueToIR y)
-valueToIR (VBranch x y s) = VBranch (valueToIR x) (valueToIR y) s
-valueToIR (VThetaTree t) = VThetaTree t
-valueToIR VAnyList = VAnyList
-valueToIR VClosure{} = error "Cannot convert VClosure to IR"
+valueToIR = fmap (error "Cannot convert VClosure to IR")
 
 getIRSubExprs :: IRExpr -> [IRExpr]
 getIRSubExprs (IRIf a b c) = [a, b, c]
@@ -195,6 +194,12 @@ getIRSubExprs (IRTail a) = [a]
 getIRSubExprs (IRElementOf a b) = [a, b]
 getIRSubExprs (IRTFst a) = [a]
 getIRSubExprs (IRTSnd a) = [a]
+getIRSubExprs (IRLeft a) = [a]
+getIRSubExprs (IRRight a) = [a]
+getIRSubExprs (IRFromLeft a) = [a]
+getIRSubExprs (IRFromRight a) = [a]
+getIRSubExprs (IRIsLeft a) = [a]
+getIRSubExprs (IRIsRight a) = [a]
 getIRSubExprs (IRDensity _ a) = [a]
 getIRSubExprs (IRCumulative _ a) = [a]
 getIRSubExprs (IRSample _) = []
@@ -219,6 +224,12 @@ irMap f x = case x of
   (IRElementOf ele lst) -> f (IRElementOf (irMap f ele) (irMap f lst))
   (IRTFst expr) -> f (IRTFst (irMap f expr))
   (IRTSnd expr) -> f (IRTSnd (irMap f expr))
+  (IRLeft expr) -> f (IRLeft (irMap f expr))
+  (IRRight expr) -> f (IRRight (irMap f expr))
+  (IRFromLeft expr) -> f (IRFromLeft (irMap f expr))
+  (IRFromRight expr) -> f (IRFromRight (irMap f expr))
+  (IRIsLeft expr) -> f (IRIsLeft (irMap f expr))
+  (IRIsRight expr) -> f (IRIsRight (irMap f expr))
   (IRDensity a expr) -> f (IRDensity a (irMap f expr))
   (IRCumulative a expr) -> f (IRCumulative a (irMap f expr))
   (IRLetIn name left right) -> f (IRLetIn name (irMap f left) (irMap f right))

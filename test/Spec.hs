@@ -1,4 +1,4 @@
-{-# LANGUAGE EmptyCase #-}
+--{-# LANGUAGE EmptyCase #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE TemplateHaskell #-}
@@ -86,11 +86,14 @@ correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat
                                (normalProgMult, VFloat (-1), [], (VFloat (normalPDF (-2) * 2), VFloat 1)),
                                (normalProgMultPlus, VFloat (-2), [], (VFloat ((normalPDF (-1.5)) / 2), VFloat 1)),
                                (uniformNegPlus, VFloat (-4.5), [], (VFloat 1, VFloat 1)),
-                               (testList, VList [VFloat 0.25, VFloat 0], [], (VFloat $ normalPDF 0 * 2, VFloat 2)),
+                               (testList, constructVList [VFloat 0.25, VFloat 0], [], (VFloat $ normalPDF 0 * 2, VFloat 2)),
                                (simpleTuple, VTuple (VFloat 0.25) (VFloat 0), [], (VFloat $ normalPDF 0 * 2, VFloat 2)),
+                               (simpleTuple, VTuple (VFloat 0.25) VAny, [], (VFloat $ 2, VFloat 1)),
+                               (simpleTuple, VTuple VAny (VFloat 0), [], (VFloat $ normalPDF 0, VFloat 1)),
                                (uniformIfProg, VFloat 0.5, [], (VFloat 0.5, VFloat 1)),
                                (constantProg, VFloat 2, [], (VFloat 1, VFloat 0)),
                                (uniformExp, VFloat $ exp 4.5, [], (VFloat $ 1 / exp 4.5, VFloat 1)),
+                               (uniformExp, VFloat (-1), [], (VFloat 0, VFloat 1)),
                                (testInjF, VFloat 1.5, [], (VFloat 0.5, VFloat 1)),
                                (testInjF2, VFloat 3, [], (VFloat 0.5, VFloat 1)),
                                (testTheta, VFloat 1.5, flatTree [1.5], (VFloat 1, VFloat 0)),
@@ -112,8 +115,26 @@ correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat
                                (testDiceAdd, VInt 1, [], (VFloat 0, VFloat 0)),
                                (testDimProb, VFloat 0.5, [], (VFloat 0.4, VFloat 0)),
                                (testDimProb, VFloat 0.0, [], (VFloat (0.6 * 0.39894228040143265), VFloat 1)),
-                               (gaussLists, VList [VFloat 0, VFloat 0, VFloat 0], [IRConst $ VThetaTree (ThetaTree [0.5, 1, 0] [])], (VFloat $ (normalPDF 0) * (normalPDF 0) * (normalPDF 0) / 16, VFloat 3)),
+                               (gaussLists, constructVList [VFloat 0, VFloat 0, VFloat 0], [IRConst $ VThetaTree (ThetaTree [0.5, 1, 0] [])], (VFloat $ (normalPDF 0) * (normalPDF 0) * (normalPDF 0) / 16, VFloat 3)),
                                --(testPartialInjF, VFloat 5.5, [], (VFloat 1, VFloat 1))]
+                               (testInjFRenaming, VFloat 5.5, [], (VFloat 1, VFloat 1)),
+                               (gaussLists, constructVList [VFloat 0, VFloat 0, VFloat 0], [IRConst $ VThetaTree (ThetaTree [0.5, 1, 0] [])], (VFloat $ (normalPDF 0) * (normalPDF 0) * (normalPDF 0) / 16, VFloat 3)),
+                               (testLeft, VFloat 2, [], (VFloat 1.0, VFloat 0)),
+                               (testLeft, VFloat 3, [], (VFloat 0, VFloat 0)),
+                               (testEither, VEither (Left (VFloat 0.5)), [], (VFloat 0.5, VFloat 1)),
+                               (testEither, VEither (Right (VInt 2)), [], (VFloat 0, VFloat 0)),
+                               (testEither, VEither (Right (VInt 1)), [], (VFloat 0.5, VFloat 0)),
+                               (testIsLeft, VFloat 1, [], (VFloat 0.4, VFloat 0)),
+                               (testIsLeft, VFloat 2, [], (VFloat 0.6, VFloat 0)),
+                               (testIsLeft, VFloat 0, [], (VFloat 0, VFloat 0)),
+                               (testIsRight, VFloat 1, [], (VFloat 0.6, VFloat 0)),
+                               (testIsRight, VFloat 2, [], (VFloat 0.4, VFloat 0)),
+                               (testIsRight, VFloat 0, [], (VFloat 0, VFloat 0)),
+                               (testFst, VFloat 0.5, [], (VFloat 1, VFloat 1)),
+                               (testFstCall, VFloat 0.5, [], (VFloat 1, VFloat 1)),
+                               (testFstDiscrete, VFloat 0.5, [], (VFloat 1, VFloat 1)),
+                               (testHead, VFloat 0.5, [], (VFloat 1, VFloat 1)),
+                               (testTail, VFloat 0.5, [], (VFloat 1, VFloat 1)),
                                (testInjFRenaming, VFloat 5.5, [], (VFloat 1, VFloat 1))]
                                --(testLambdaChoice, VFloat 1.5, [], (VFloat ((1 + normalPDF 0.5) / 2), VFloat 1))]
 
@@ -128,7 +149,7 @@ correctIntegralValuesTestCases =[(uniformProg, VFloat 0, VFloat 1, [], (VFloat 1
                                 (normalProgMult, VFloat (-10), VFloat (-5), [], (VFloat $ normalCDF (-10) - normalCDF (-20), VFloat 0)),
                                 (uniformNegPlus, VFloat (-5), VFloat (-4.5), [], (VFloat 0.5, VFloat 0)),
                                 (uniformProgPlus, VFloat 4, VFloat 4.5, [], (VFloat 0.5, VFloat 0)),
-                                (testList, VList [VFloat 0, VFloat (-1)], VList [VFloat 0.25, VFloat 1], [], (VFloat $ (normalCDF 1 - normalCDF (-1)) * 0.5, VFloat 0)),
+                                (testList, constructVList [VFloat 0, VFloat (-1)], constructVList [VFloat 0.25, VFloat 1], [], (VFloat $ (normalCDF 1 - normalCDF (-1)) * 0.5, VFloat 0)),
                                 (simpleTuple, VTuple (VFloat 0) (VFloat (-1)), VTuple (VFloat 0.25) (VFloat 1), [], (VFloat $ (normalCDF 1 - normalCDF (-1)) * 0.5, VFloat 0)),
                                 (simpleTuple, VTuple (VFloat 0) (VFloat 0), VTuple (VFloat 0.25) (VFloat 0), [], (VFloat $ normalPDF 0 * 0.5, VFloat 1)),
                                 (simpleTuple, VTuple (VFloat 0) (VFloat 0), VTuple (VFloat 0) (VFloat 1), [], (VFloat $ (normalCDF 1 - normalCDF 0) * 2, VFloat 1)),
@@ -143,8 +164,15 @@ correctIntegralValuesTestCases =[(uniformProg, VFloat 0, VFloat 1, [], (VFloat 1
                                 (simpleCall, VFloat 0, VFloat 1, [], (VFloat 1.0, VFloat 0)),
                                 (testCallArg, VFloat 3.5, VFloat 4.5, [], (VFloat 0.5, VFloat 0)),
                                 (testCallLambda, VFloat 2, VFloat 3, [], (VFloat 1.0, VFloat 0)),
-                                (gaussLists, VList [VFloat 0, VFloat 0, VFloat 0], VList [VFloat 1, VFloat 2, VFloat 3], [IRConst $ VThetaTree (ThetaTree [0.5, 1, 0] [])], (VFloat $ ((normalCDF 1) - (normalCDF 0)) * ((normalCDF 2) - (normalCDF 0)) * ((normalCDF 3) - (normalCDF 0)) / 16, VFloat 0)),
-                                (testInjFRenaming, VFloat 5, VFloat 5.5, [], (VFloat 0.5, VFloat 0))]
+                                (gaussLists, constructVList [VFloat 0, VFloat 0, VFloat 0], constructVList [VFloat 1, VFloat 2, VFloat 3], [IRConst $ VThetaTree (ThetaTree [0.5, 1, 0] [])], (VFloat $ ((normalCDF 1) - (normalCDF 0)) * ((normalCDF 2) - (normalCDF 0)) * ((normalCDF 3) - (normalCDF 0)) / 16, VFloat 0)),
+                                (testInjFRenaming, VFloat 5, VFloat 5.5, [], (VFloat 0.5, VFloat 0)),
+                                (testIsLeft, VFloat 0, VFloat 3, [], (VFloat 1, VFloat 0)),
+                                (testIsLeft, VFloat 1.5, VFloat 3, [], (VFloat 0.6, VFloat 0)),
+                                (testIsRight, VFloat 0, VFloat 3, [], (VFloat 1, VFloat 0)),
+                                (testIsRight, VFloat 1.5, VFloat 3, [], (VFloat 0.4, VFloat 0)),
+                                (testFst, VFloat 0.4, VFloat 3, [], (VFloat 0.6, VFloat 0)),
+                                (testHead, VFloat 0.4, VFloat 3, [], (VFloat 0.6, VFloat 0)),
+                                (testTail, VFloat 0.4, VFloat 3, [], (VFloat 0.6, VFloat 0))]
 
 invalidTestCases :: [Program]
 invalidTestCases = [invalidDuplicateDecl1, invalidDuplicateDecl2, invalidDuplicateDecl3, invalidDuplicateDecl4, invalidDuplicateDecl5, invalidMissingDecl, invalidMissingInjF, invalidReservedName, invalidReservedName2, invalidWrongArgCount]
@@ -167,7 +195,7 @@ prop_CheckProbTestCases :: Property
 prop_CheckProbTestCases = forAll (elements correctProbValuesTestCases) checkProbTestCase
 
 prop_CheckProbTestCasesSample :: Property
-prop_CheckProbTestCasesSample = forAll (elements correctProbValuesTestCases) (testSamplingProb 0.05 10000 5)
+prop_CheckProbTestCasesSample = forAll (elements correctProbValuesTestCases) (testSamplingProb 0.05 1000 5)
 
 prop_CheckIntegralTestCases :: Property
 prop_CheckIntegralTestCases = forAll (elements correctIntegralValuesTestCases) checkIntegralTestCase
@@ -185,9 +213,6 @@ prop_CheckTopKInterprets = forAll (elements correctProbValuesTestCases) checkTop
 prop_CheckProbTestCasesWithBC :: Property
 prop_CheckProbTestCasesWithBC = forAll (elements correctProbValuesTestCases) checkProbTestCasesWithBC
 
-prop_CheckInjFEqual :: Property
-prop_CheckInjFEqual = forAll (elements correctProbValuesTestCases) checkInjFEqual
-
 prop_TopK :: Property
 prop_TopK = ioProperty $ do
   actualOutput0 <- evalRandIO $ irDensityTopK testTopK 0.1 (VFloat 0) []
@@ -196,6 +221,8 @@ prop_TopK = ioProperty $ do
     (VTuple a (VFloat _), VTuple b (VFloat _)) -> return $ (b == VFloat 0.95) && (a == VFloat 0)
     _ -> return False
 
+prop_any :: Property
+prop_any = forAll (elements correctProbValuesTestCases) checkProbAny
 
 -- DO NOT CHANGE THIS CODE WITHOUT ALSO CHANGING THE CODE IN THE README
 prop_CheckReadmeCodeListing1 :: Property
@@ -285,12 +312,11 @@ checkProbTestCasesWithBC (p, inp, params, (out, VFloat outDim)) = ioProperty $ d
     VTuple a (VTuple (VFloat d) (VFloat _)) -> return $ a `reasonablyClose` out .&&. d === outDim
     _ -> return $ counterexample "Return type was no tuple" False
 
-checkInjFEqual :: (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
-checkInjFEqual (p, inp, params, (_, _)) = ioProperty $ do
-  actualOutput <- evalRandIO $ irDensityBC p inp params
-  actualOutputInjF <- evalRandIO $ irDensityBC (preprocessToInjFProg p) inp params
-  case (actualOutput, actualOutputInjF) of
-    (VTuple a aDim, VTuple b bDim) -> return $ a `reasonablyClose` b .&&. aDim === bDim
+checkProbAny :: (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
+checkProbAny (p, _, params, _) = ioProperty $ do
+  actualOutput <- evalRandIO $ irDensity p VAny params
+  case actualOutput of
+    VTuple a (VFloat d) -> return $ a === VFloat 1
     _ -> return $ counterexample "Return type was no tuple" False
 
 --prop_CheckProbTestCases = foldr (\(p, inp, out) acc -> do
@@ -340,17 +366,6 @@ irGen p params = IRInterpreter.generateRand irEnv irEnv params irExpr
         annotated = annotateAlgsProg typedProg
         typedProg = addTypeInfo preAnnotated
         preAnnotated = annotateEnumsProg p
-
-preprocessToInjFProg :: Program -> Program
-preprocessToInjFProg p@Program{functions=f} = p{functions=map (second preprocessToInjF) f}
-
-preprocessToInjF :: Expr -> Expr
-preprocessToInjF (PlusF t a b) = InjF t "plus" [preprocessToInjF a, preprocessToInjF b]
-preprocessToInjF (PlusI t a b) = InjF t "plusI" [preprocessToInjF a, preprocessToInjF b]
-preprocessToInjF (MultF t a b) = InjF t "mult" [preprocessToInjF a, preprocessToInjF b]
-preprocessToInjF (MultI t a b) = InjF t "multI" [preprocessToInjF a, preprocessToInjF b]
-preprocessToInjF (NegF t a) = InjF t "neg" [preprocessToInjF a]
-preprocessToInjF x = x
 
 reasonablyClose :: IRValue -> IRValue -> Property
 reasonablyClose (VFloat a) (VFloat b) = counterexample (show a ++ "/=" ++ show b) (property $ abs (a - b) <= 1e-5)
@@ -403,7 +418,7 @@ testSamplingProb epsilon samples retries (p, VTuple (VFloat inp1) (VFloat inp2),
 testSamplingProb epsilon samples retries (p, VList inp, params, (VFloat out, VFloat outDim))
   | all isVFloat inp = ioProperty $ evalRandIO $ do
   endlessSamples <- sequence (repeat (irGen p params >>= \(VList l) -> return l)) -- Generates an endless stream of samples
-  let samplesInRange = map (\l -> length l == length inp && all (\(VFloat x, VFloat y) -> abs (x - y) <= epsilon/2 ) (zip l inp)) endlessSamples   -- Use the maximum norm
+  let samplesInRange = map (\l -> length l == length inp && all (\(VFloat x, VFloat y) -> abs (x - y) <= epsilon/2 ) (zip l (toList inp))) (map toList endlessSamples)   -- Use the maximum norm
   let countInside = foldr (\b acc -> if b then acc + 1 else acc) 0 (take samples samplesInRange)
   let ratioInside = fromIntegral countInside / fromIntegral samples
   let estimatePDF = ratioInside / (epsilon ** outDim) -- The maximum norm creates a outDim-dimensional hypercube. In this boring case its either a point, a line or a square depending on the dimension

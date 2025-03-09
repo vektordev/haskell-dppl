@@ -1,6 +1,10 @@
 module JuliaSPPLLib
 
-export density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal
+export density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend
+
+function isAny(x)
+    x == "ANY" || x isa AnyInferenceList
+end
 
 function density_IRUniform(x)
     if 0.0 <= x <= 1.0
@@ -38,6 +42,54 @@ function cumulative_IRNormal(x)
     end
     
     return 0.5 * (1 + erf(x / sqrt(2)))
+end
+
+abstract type InferenceList end
+
+struct EmptyInferenceList <: InferenceList end
+struct AnyInferenceList <: InferenceList end
+struct ConsInferenceList <: InferenceList
+    value
+    next
+end
+
+Base.length(lst::EmptyInferenceList) = 0
+Base.length(lst::AnyInferenceList) = error("Cannot compute length of an AnyList") 
+Base.length(lst::ConsInferenceList) = begin
+    l = 0
+    while (lst isa ConsInferenceList)
+        l += 1
+        lst = lst.next  
+    end
+    if (lst isa AnyInferenceList)
+        error("Cannot compute length of an AnyList") 
+    end
+    return l
+end
+
+function Base.getindex(lst::InferenceList, i::Int)
+    if !(0 < i <= length(lst))
+        throw(BoundsError("Index $i is out of bounds"))
+    end
+
+    curr = lst
+    while i > 1
+        i -= 1
+        lst = lst.next
+    end
+
+    return lst.value
+end
+
+function prepend(x, xs :: InferenceList) :: InferenceList
+    return ConsInferenceList(x, xs)
+end
+
+function head(lst::ConsInferenceList)
+    lst.value
+end
+function tail(lst::ConsInferenceList)
+    lst.next
 end
 
 end

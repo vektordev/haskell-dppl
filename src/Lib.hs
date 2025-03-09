@@ -78,7 +78,7 @@ readSamples = do
   return res
 
 map2RSamples :: (Double, Double) -> Value
-map2RSamples (a,b) = VList [VFloat a, VFloat b]
+map2RSamples (a,b) = constructVList [VFloat a, VFloat b]
 
 {-
 thatGaussThing :: IO()

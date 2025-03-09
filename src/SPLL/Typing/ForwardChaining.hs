@@ -97,11 +97,6 @@ annotateMaximumCType (_, used) e = t {cType=ct, derivingHornClause=hc}
 
 constructHornClause :: Expr -> [HornClause]
 constructHornClause e = case e of
-  PlusF _ a b -> rotatedHornClauses ( [(getChainName a, CInferDeterministic), (getChainName b, CInferDeterministic)],  [(getChainName e, CInferDeterministic)], (StubPlusF, 0))
-  MultF _ a b -> rotatedHornClauses ( [(getChainName a, CInferDeterministic), (getChainName b, CInferDeterministic)],  [(getChainName e, CInferDeterministic)], (StubMultF, 0))
-  PlusI _ a b -> rotatedHornClauses ( [(getChainName a, CInferDeterministic), (getChainName b, CInferDeterministic)],  [(getChainName e, CInferDeterministic)], (StubPlusI, 0))
-  MultI _ a b -> rotatedHornClauses ( [(getChainName a, CInferDeterministic), (getChainName b, CInferDeterministic)],  [(getChainName e, CInferDeterministic)], (StubMultI, 0))
-  NegF _ a -> rotatedHornClauses ( [(getChainName a, CInferDeterministic)],  [(getChainName e, CInferDeterministic)], (StubNegF, 0))
   Not _ a -> rotatedHornClauses ( [(getChainName a, CInferDeterministic)],  [(getChainName e, CInferDeterministic)], (StubNot, 0))
   -- The bound expression is det if the
   LetIn _ _ v b -> [([(getChainName b, CInferDeterministic)],  [(getChainName e, CInferDeterministic)], (StubLetIn, 0)), ([(getChainName e, CInferDeterministic)],  [(getChainName b, CInferDeterministic)], (StubLetIn, 1))]
@@ -186,18 +181,6 @@ exprToInversions e = Prelude.foldr (\(a1, b1) (a, b) -> (nub (a1++a), b1++b)) ([
 hornClauseToIRExpr :: Expr -> [Inversion a]
 hornClauseToIRExpr e | isNothing (derivingHornClause (getTypeInfo e)) = error "Cannot convert to IR without a horn clause"
 hornClauseToIRExpr e = case stub of
-  StubPlusF | inversion == 0 -> [Inversion (cn, IROp OpPlus (IRVar (preVars!!0)) (IRVar (preVars!!1)))]
-  StubPlusF | inversion >= 1 -> [Inversion (cn, IROp OpSub (IRVar (preVars!!0)) (IRVar (preVars!!1)))]
-
-  StubPlusI | inversion == 0 -> [Inversion (cn, IROp OpPlus (IRVar (preVars!!0)) (IRVar (preVars!!1)))]
-  StubPlusI | inversion >= 1 -> [Inversion (cn, IROp OpSub (IRVar (preVars!!0)) (IRVar (preVars!!1)))]
-
-  StubMultF | inversion == 0 -> [Inversion (cn, IROp OpMult (IRVar (preVars!!0)) (IRVar (preVars!!1)))]
-  StubMultF | inversion >= 1 -> [Inversion (cn, IROp OpDiv (IRVar (preVars!!0)) (IRVar (preVars!!1)))]
-
-  StubMultI | inversion == 0 -> [Inversion (cn, IROp OpMult (IRVar (preVars!!0)) (IRVar (preVars!!1)))]
-  StubMultI | inversion >= 1 -> [Inversion (cn, IROp OpDiv (IRVar (preVars!!0)) (IRVar (preVars!!1)))]
-
   --TODO InjF hier
 
   StubLetIn | inversion == 0 -> [Inversion (cn, IRVar (preVars!!0))]

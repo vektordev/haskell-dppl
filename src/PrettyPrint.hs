@@ -4,6 +4,7 @@ import SPLL.Lang.Lang
 import Data.List (intercalate)
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types
+import Data.Foldable
 
 pPrintProg :: Program -> String
 pPrintProg (Program decls neurals) = intercalate "\n\n" (map (\f -> wrapInFunctionDeclaration (snd f) (fst f) []) decls)
@@ -21,18 +22,12 @@ wrapInFunctionDeclarationIR e fName params = "def " ++ fName ++ "(" ++ intercala
 
 pPrintExpr :: Expr -> Int -> String
 pPrintExpr (LetIn _ n v b) i = "let " ++ n ++ " = " ++ pPrintExpr v (i+1) ++ " in\n" ++ indent (i+1) ++ pPrintExpr b (i+1)
-pPrintExpr (PlusF _ a b) i = "(" ++ pPrintExpr a i ++ " + " ++ pPrintExpr b i ++ ")"
-pPrintExpr (PlusI _ a b) i = "(" ++ pPrintExpr a i ++ " + " ++ pPrintExpr b i ++ ")"
-pPrintExpr (MultF _ a b) i = "(" ++ pPrintExpr a i ++ " * " ++ pPrintExpr b i ++ ")"
-pPrintExpr (MultI _ a b) i = "(" ++ pPrintExpr a i ++ " * " ++ pPrintExpr b i ++ ")"
 pPrintExpr (Constant _ a) _ = pPrintValue a
 pPrintExpr (Var _ a) _ = a
 pPrintExpr (Uniform _) _ = "Uniform"
 pPrintExpr (Normal _) _ = "Normal"
 pPrintExpr (IfThenElse _ c t e) i = "if " ++ pPrintExpr c i ++ " then\n" ++ indent (i+1) ++ pPrintExpr t (i+1) ++"\n" ++ indent i ++ "else\n" ++ indent (i+1) ++ pPrintExpr e (i+1)
 pPrintExpr (InjF _ f args) i = f ++ "(" ++ intercalate ", " (map (`pPrintExpr` i) args) ++ ")"
-pPrintExpr (ExpF _ e) i = "exp(" ++ pPrintExpr e i ++ ")"
-pPrintExpr (NegF _ e) i =  "-(" ++ pPrintExpr e i ++ ")"
 pPrintExpr (Lambda _ n e) i = "\\" ++ n ++ " -> " ++ pPrintExpr e (i+1)
 pPrintExpr (Apply _ f v) i = pPrintExpr f i ++ "(" ++ pPrintExpr v i ++ ")"
 pPrintExpr (ThetaI _ e n) i = "Theta_" ++ show n ++ "(" ++ pPrintExpr e i ++ ")"
@@ -45,9 +40,7 @@ pPrintExpr (LessThan _ a b) i = "(" ++ pPrintExpr a i ++ " < " ++ pPrintExpr b i
 pPrintExpr (And _ a b) i = "(" ++ pPrintExpr a i ++ " && " ++ pPrintExpr b i ++ ")"
 pPrintExpr (Or _ a b) i = "(" ++ pPrintExpr a i ++ " || " ++ pPrintExpr b i ++ ")"
 pPrintExpr (Not _ e) i = "!(" ++ pPrintExpr e i ++ ")"
-pPrintExpr (Arg _ n t e) i = n ++ ": " ++ show t ++ " = " ++ pPrintExpr e i
 pPrintExpr (ReadNN _ n e) i = "readNN(" ++ n ++ ", " ++ pPrintExpr e i ++ ")"
-pPrintExpr (Fix _ e) i = "fix(" ++ pPrintExpr e i ++ ")"
 
 pPrintIRExpr :: IRExpr -> Int -> String
 pPrintIRExpr (IRIf cond thenExpr elseExpr) n =
@@ -68,6 +61,9 @@ pPrintIRExpr (IRUnaryOp OpNeg e) n = "-(" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRUnaryOp OpAbs e) n = "abs(" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRUnaryOp OpNot e) n = "!(" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRUnaryOp OpExp e) n = "(e^(" ++ pPrintIRExpr e (n + 1) ++ "))"
+pPrintIRExpr (IRUnaryOp OpLog e) n = "log(" ++ pPrintIRExpr e (n + 1) ++ ")"
+pPrintIRExpr (IRUnaryOp OpSign e) n = "sign(" ++ pPrintIRExpr e (n + 1) ++ ")"
+pPrintIRExpr (IRUnaryOp OpIsAny e) n = "isAny(" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRTheta e i) n = "theta (" ++ pPrintIRExpr e (n + 1) ++ ")@" ++ show i
 pPrintIRExpr (IRSubtree e i) n = "subtree (" ++ pPrintIRExpr e (n + 1) ++ ")@" ++ show i
 pPrintIRExpr (IRConst val) n = "const " ++ show val
@@ -78,6 +74,12 @@ pPrintIRExpr (IRTail e) n = "tail (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRElementOf e lst) n = "(" ++ pPrintIRExpr e (n + 1) ++ ") in (" ++ pPrintIRExpr lst (n + 1) ++ ")"
 pPrintIRExpr (IRTFst e) n = "fst (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRTSnd e) n = "snd (" ++ pPrintIRExpr e (n + 1) ++ ")"
+pPrintIRExpr (IRLeft e) n = "left (" ++ pPrintIRExpr e (n + 1) ++ ")"
+pPrintIRExpr (IRRight e) n = "right (" ++ pPrintIRExpr e (n + 1) ++ ")"
+pPrintIRExpr (IRFromLeft e) n = "fromLeft (" ++ pPrintIRExpr e (n + 1) ++ ")"
+pPrintIRExpr (IRFromRight e) n = "fromRight (" ++ pPrintIRExpr e (n + 1) ++ ")"
+pPrintIRExpr (IRIsLeft e) n = "isLeft (" ++ pPrintIRExpr e (n + 1) ++ ")"
+pPrintIRExpr (IRIsRight e) n = "isRight (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRDensity dist e) n = "density " ++ show dist ++ " (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRCumulative dist e) n = "cumulative " ++ show dist ++ " (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRSample dist) n = "sample " ++ show dist
@@ -94,7 +96,7 @@ pPrintIRExpr (IRIndex e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ ")[" ++ pPrin
 pPrintValue :: Value -> String
 pPrintValue (VBool a) = show a
 pPrintValue (VFloat a) = show a
-pPrintValue (VList xs) = "[" ++ intercalate "," (map pPrintValue xs) ++ "]"
+pPrintValue (VList xs) = "[" ++ intercalate "," (map pPrintValue (toList xs)) ++ "]"
 pPrintValue (VTuple a b) = "(" ++ pPrintValue a ++ ", " ++ pPrintValue b ++ ")"
 pPrintValue (VInt a) = show a
 pPrintValue (VSymbol a) = a

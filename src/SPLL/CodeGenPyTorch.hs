@@ -1,13 +1,15 @@
 module SPLL.CodeGenPyTorch (
-  generateFunctions
+  generateFunctions,
+  pyVal
 ) where
-  
+
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types
 import Data.List (intercalate, isSuffixOf, nub, find)
 import Data.Char (toUpper, toLower)
 import Data.Maybe (fromJust, fromMaybe)
 import Debug.Trace (trace)
+import Data.Foldable
 
 --TODO: On the topic of memoization: Ideally we would want to optimize away redundant calls within a loop.
 -- e.g. in MNist-Addition
@@ -59,17 +61,19 @@ pyUnaryOps OpExp = "math.exp"
 pyUnaryOps OpAbs = "abs"
 pyUnaryOps OpNot = "not"
 pyUnaryOps OpLog = "math.log"
---pyUnaryOps OpSign = "sign"
---pyUnaryOps OpIsAny = "isAny"
+pyUnaryOps OpSign = "sign"
+pyUnaryOps OpIsAny = "isAny"
 
 pyVal :: IRValue -> String
-pyVal (VList xs) = "[" ++ (intercalate "," $ map pyVal xs) ++ "]"
---pyVal (VList EmptyList) = "EmptyInferenceList()"
---pyVal (VList AnyList) = "AnyInferenceList()"
---pyVal (VList (ListCont x xs)) = "ConsInferenceList(" ++ pyVal x ++ ", " ++ pyVal (VList xs) ++ ")"
+pyVal (VList EmptyList) = "EmptyInferenceList()"
+pyVal (VList AnyList) = "AnyInferenceList()"
+pyVal (VList (ListCont x xs)) = "ConsInferenceList(" ++ pyVal x ++ ", " ++ pyVal (VList xs) ++ ")"
 pyVal (VInt i) = show i
 pyVal (VFloat f) = show f
 pyVal (VBool f) = if f then "True" else "False"
+pyVal (VEither (Left a)) = "(False, " ++ pyVal a ++ ", None)"
+pyVal (VEither (Right a)) = "(True, None, " ++ pyVal a ++ ")"
+pyVal (VAny) = "'ANY'"
 pyVal x = error ("unknown pyVal for " ++ show x)
 
 unlinesTrimLeft :: [String] -> String
@@ -104,7 +108,8 @@ generateFunctions genBoil defs =
     if genBoil then
       ["from pythonLib import *",
       "from random import random as rand",
-      "from random import gauss as normal", ""] ++
+      "from random import gauss as normal",
+      "from torch.nn import Module", ""] ++
       concatMap generateClass groups ++ 
       ["", "# Example Initialization"] ++ 
       [onHead toLower name ++ " = " ++ onHead toUpper name ++ "()" | name <- names]
@@ -157,18 +162,24 @@ generateStatementBlock expr = ["return " ++ generateExpression expr]
 
 generateExpression :: IRExpr -> String
 generateExpression (IRIf cond left right) = "(" ++ generateExpression left ++ " if " ++ generateExpression cond ++ " else " ++ generateExpression right ++ ")"
-generateExpression (IROp op left right) = "((" ++ generateExpression left ++ ") " ++ pyOps op ++ " (" ++ generateExpression right ++"))" 
+generateExpression (IROp op left right) = "((" ++ generateExpression left ++ ") " ++ pyOps op ++ " (" ++ generateExpression right ++"))"
 generateExpression (IRUnaryOp op expr) = pyUnaryOps op ++ "(" ++ generateExpression expr ++ ")"
-generateExpression (IRTheta x i) = "(" ++ generateExpression x ++ ")[0][" ++ show i ++ "]" 
-generateExpression (IRSubtree x i) = "(" ++ generateExpression x ++ ")[1][" ++ show i ++ "]" 
+generateExpression (IRTheta x i) = "(" ++ generateExpression x ++ ")[0][" ++ show i ++ "]"
+generateExpression (IRSubtree x i) = "(" ++ generateExpression x ++ ")[1][" ++ show i ++ "]"
 generateExpression (IRConst v) = pyVal v
 generateExpression (IRCons hd tl) = "ConsInferenceList(" ++ generateExpression hd ++ ", " ++ generateExpression tl ++ ")"
 generateExpression (IRElementOf el lst) = "(" ++ generateExpression el ++ " in " ++ generateExpression lst ++ ")"
 generateExpression (IRTCons fs sn) = "(" ++ generateExpression fs ++ ", " ++ generateExpression sn ++ ")"
-generateExpression (IRHead x) = "(" ++ generateExpression x ++ ")[0]" 
-generateExpression (IRTail x) = "(" ++ generateExpression x ++ ")[1:]" 
-generateExpression (IRTFst x) = "(" ++ generateExpression x ++ ")[0]" 
-generateExpression (IRTSnd x) = "(" ++ generateExpression x ++ ")[1]" 
+generateExpression (IRHead x) = "(" ++ generateExpression x ++ ")[0]"
+generateExpression (IRTail x) = "(" ++ generateExpression x ++ ")[1:]"
+generateExpression (IRTFst x) = "(" ++ generateExpression x ++ ")[0]"
+generateExpression (IRTSnd x) = "(" ++ generateExpression x ++ ")[1]"
+generateExpression (IRLeft x) = "(False, " ++ generateExpression x ++ ", None)"
+generateExpression (IRRight x) = "(False, None, " ++ generateExpression x ++ ")"
+generateExpression (IRFromLeft x) = "(" ++ generateExpression x ++ ")[1]"
+generateExpression (IRFromRight x) = "(" ++ generateExpression x ++ ")[2]"
+generateExpression (IRIsLeft x) = "(not(" ++ generateExpression x ++ ")[0])"
+generateExpression (IRIsRight x) = "(" ++ generateExpression x ++ ")[0]"
 generateExpression (IRDensity dist x) = "density_" ++ show dist ++ "(" ++ generateExpression x ++ ")"
 generateExpression (IRCumulative dist x) = "cumulative_" ++ show dist ++ "(" ++ generateExpression x ++ ")"
 generateExpression (IRSample IRNormal) = "randn()"
@@ -179,7 +190,7 @@ generateExpression (IRApply f val) = "functools.partial(" ++ generateExpression 
 generateExpression expr@(IRInvoke _) = generateInvokeExpression expr
 generateExpression (IREnumSum name enumRange expr) = "sum(map((lambda " ++ name ++ ": " ++ generateExpression expr ++ "), " ++ pyVal enumRange ++ "))"
 generateExpression (IREvalNN name arg) = name ++ "(" ++ generateExpression arg ++ ")"
-generateExpression (IRIndex lst idx) = "(" ++ generateExpression lst ++ ")[" ++ generateExpression idx ++ "]" 
+generateExpression (IRIndex lst idx) = "(" ++ generateExpression lst ++ ")[" ++ generateExpression idx ++ "]"
 -- I personally hate this code. I constructs a tuple with an assignment expression in the first element and discards the first element
 generateExpression (IRLetIn name val body) = "((" ++ name ++ ":=" ++ generateExpression val ++ "), " ++ generateExpression body ++ ")[1]"
 generateExpression x = error ("Unknown expression in PyTorch codegen: " ++ show x)

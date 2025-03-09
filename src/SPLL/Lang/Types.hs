@@ -41,13 +41,6 @@ data Expr =
               -- Flow Control
                 IfThenElse TypeInfo Expr Expr Expr
               | InjF TypeInfo String [Expr]
-              -- Arithmetic
-              | MultF TypeInfo Expr Expr
-              | MultI TypeInfo Expr Expr
-              | PlusF TypeInfo Expr Expr
-              | PlusI TypeInfo Expr Expr
-              | ExpF TypeInfo Expr
-              | NegF TypeInfo Expr
               -- Variables
               | LetIn TypeInfo String Expr Expr
               | Var TypeInfo String
@@ -71,9 +64,7 @@ data Expr =
               | Or TypeInfo Expr Expr
               | Not TypeInfo Expr
               -- Other
-              | Arg TypeInfo String RType Expr
               | ReadNN TypeInfo String Expr
-              | Fix TypeInfo Expr
               -- TODO: Needs Concat to achieve proper SPN-parity.
               deriving (Show, Eq, Ord)
 
@@ -86,19 +77,12 @@ data ExprStub = StubIfThenElse
               | StubUniform
               | StubNormal
               | StubConstant
-              | StubMultF
-              | StubMultI
-              | StubPlusF
-              | StubPlusI
-              | StubNegF
               | StubNot
-              | StubExpF
               | StubNull
               | StubCons
               | StubTCons
               | StubVar
               | StubLetIn
-              | StubArg
               | StubInjF
               | StubLambda
               | StubApply
@@ -142,32 +126,51 @@ type WitnessedVars = Set.Set String
 
 data ThetaTree = ThetaTree [Double] [ThetaTree] deriving (Show, Eq, Ord)
 
+data GenericList a = EmptyList | ListCont a (GenericList a) | AnyList deriving (Show, Eq, Ord)
+type ValueList a = GenericList (GenericValue a)
+
+instance Functor GenericList where
+  fmap _ EmptyList = EmptyList
+  fmap f (ListCont x xs) = ListCont (f x) (fmap f xs) 
+  fmap _ AnyList = AnyList
+
+instance Foldable GenericList where
+  foldMap f EmptyList = mempty
+  foldMap f (ListCont x xs) = f x `mappend` foldMap f xs
+  foldMap f AnyList = error "Cannot fold AnyLists"
+
 type Value = GenericValue Expr
 
 data GenericValue a = VBool Bool
            | VInt Int
            | VSymbol String
            | VFloat Double
-           | VList [GenericValue a]
+           | VList (GenericList (GenericValue a))
            | VTuple (GenericValue a) (GenericValue a)
+           | VEither (Either (GenericValue a) (GenericValue a))
            | VBranch (GenericValue a) (GenericValue a) String
            | VThetaTree ThetaTree
            | VAnyList
            | VClosure [(String, a)] String a 
+           | VAny -- Only used for marginal queries
            -- | Value of TArrow a b could be Expr TypeInfo, with Expr being a Lambda?
            deriving (Show, Eq, Ord)
-           
+
 instance Functor GenericValue where
   fmap _ (VInt x) = VInt x
   fmap _ (VBool x) = VBool x
   fmap _ (VSymbol x) = VSymbol x
   fmap _ (VFloat x) = VFloat x
-  fmap f (VList x) = VList (map (fmap f) x)
+  fmap f (VList x) = VList (fmap (fmap f) x)
   fmap f (VTuple x y) = VTuple (fmap f x) (fmap f y)
+  fmap f (VEither (Left x)) = VEither (Left (fmap f x))
+  fmap f (VEither (Right x)) = VEither (Right (fmap f x))
   fmap f (VBranch x y s) = VBranch (fmap f x) (fmap f y) s
   fmap _ (VThetaTree x) = VThetaTree x
   fmap _ VAnyList = VAnyList
   fmap f (VClosure e n ex) = VClosure (map (Data.Bifunctor.second f) e) n (f ex)
+  fmap _ VAny = VAny
+
 
 isVInt, isVBool, isVSymbol, isVFloat, isVList, isVTuple, isVBranch, isVThetaTree, isVAnyList, isVClosure :: GenericValue a -> Bool
 isVInt (VInt _) = True

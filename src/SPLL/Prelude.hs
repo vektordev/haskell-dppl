@@ -28,7 +28,7 @@ injF = InjF makeTypeInfo
 --(#+#) = PlusF makeTypeInfo
 
 (#-#) :: Expr -> Expr -> Expr
-(#-#) a b = a #+# (neg b)
+(#-#) a b = a #+# negF b
 
 (#<*>#) :: Expr -> Expr -> Expr
 (#<*>#) a b = injF "multI" [a, b]
@@ -39,8 +39,11 @@ injF = InjF makeTypeInfo
 (#<->#) :: Expr -> Expr -> Expr
 (#<->#) a b = undefined
 
-neg :: Expr -> Expr
-neg = NegF makeTypeInfo
+negF :: Expr -> Expr
+negF x = injF "neg" [x]
+
+expF :: Expr -> Expr
+expF x = injF "exp" [x]
 
 -- Variables
 
@@ -63,7 +66,7 @@ constB :: Bool -> Expr
 constB = Constant makeTypeInfo . VBool
 
 constL :: [Value] -> Expr
-constL = Constant makeTypeInfo . VList
+constL lst = Constant makeTypeInfo (constructVList lst)
 
 (#->#) :: String -> Expr -> Expr
 (#->#) = Lambda makeTypeInfo
@@ -108,8 +111,20 @@ cons = Cons makeTypeInfo
 nul :: Expr
 nul = Null makeTypeInfo
 
+lhead :: Expr -> Expr
+lhead x = injF "head" [x]
+
+ltail :: Expr -> Expr
+ltail x = injF "tail" [x]
+
 tuple :: Expr -> Expr -> Expr
 tuple = TCons makeTypeInfo
+
+tfst :: Expr -> Expr
+tfst x = injF "fst" [x]
+
+tsnd :: Expr -> Expr
+tsnd x = injF "snd" [x]
 
 -- Boolean Algebra
 
@@ -129,6 +144,9 @@ tuple = TCons makeTypeInfo
 (#!#) = Not makeTypeInfo
 
 -- Other
+
+readNN :: String -> Expr -> Expr 
+readNN = ReadNN makeTypeInfo
 
 -- This is a Z-Combinator
 -- TODO: Our typesystem is not ready for that yet 

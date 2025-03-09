@@ -7,6 +7,7 @@ import SPLL.IntermediateRepresentation
 import SPLL.Lang.Lang
 import Data.List (intercalate)
 import SPLL.Lang.Types
+import Data.Foldable
 
 --TODO: On the topic of memoization: Ideally we would want to optimize away redundant calls within a loop.
 -- e.g. in MNist-Addition
@@ -19,7 +20,7 @@ filet = init . tail
 
 wrap :: String -> [String] -> String -> [String]
 wrap hd [singleline] tl = [hd ++ singleline ++ tl]
-wrap hd (block) tl = [hd ++ head block] ++ indentOnce (filet block ++ [last block ++ tl])
+wrap hd block tl = (hd ++ head block) : indentOnce (filet block ++ [last block ++ tl])
 wrap _ [] _ = undefined
 
 indentOnce :: [String] -> [String]
@@ -43,20 +44,27 @@ juliaUnaryOps OpExp = "exp"
 juliaUnaryOps OpAbs = "abs"
 juliaUnaryOps OpNot = "!"
 juliaUnaryOps OpLog = "log"
+juliaUnaryOps OpSign = "sign"
+juliaUnaryOps OpIsAny = "isAny"
 juliaUnaryOps x = error ("Unknown Julia operator: " ++ show x)
 
 juliaVal :: IRValue -> String
-juliaVal (VList xs) = "[" ++ (intercalate "," $ map juliaVal xs) ++ "]"
+juliaVal (VList EmptyList) = "EmptyInferenceList()"
+juliaVal (VList AnyList) = "AnyInferenceList()"
+juliaVal (VList (ListCont x xs)) = "ConsInferenceList(" ++ juliaVal x ++ ", " ++ juliaVal (VList xs) ++ ")"
 juliaVal (VInt i) = show i
 juliaVal (VFloat f) = show f
 juliaVal (VBool f) = if f then "true" else "false"
+juliaVal (VEither (Left a)) = "(false, " ++ juliaVal a ++ ", nothing)"
+juliaVal (VEither (Right a)) = "(true, nothing, " ++ juliaVal a ++ ")"
+juliaVal VAny = "\"ANY\""
 juliaVal x = error ("unknown juliaVal for " ++ show x)
 
 unlinesTrimLeft :: [String] -> String
 unlinesTrimLeft = intercalate "\n"
 
 onHead :: (a -> a) -> [a] -> [a]
-onHead f (x:xs) = (f x : xs)
+onHead f (x:xs) = f x : xs
 
 generateFunctions :: [(String, IRExpr)] -> [String]
 generateFunctions = concatMap generateFunction
@@ -97,10 +105,16 @@ generateExpression (IRConst v) = juliaVal v
 generateExpression (IRCons hd tl) = "hcat(" ++ generateExpression hd ++ ", " ++ generateExpression tl ++ ")"
 generateExpression (IRElementOf el lst) = "(" ++ generateExpression el ++ " in " ++ generateExpression lst ++ ")"
 generateExpression (IRTCons fs sn) = "(" ++ generateExpression fs ++ ", " ++ generateExpression sn ++ ")"
-generateExpression (IRHead x) = "(" ++ generateExpression x ++ ")[1]"
-generateExpression (IRTail x) = "(" ++ generateExpression x ++ ")[2:end]"
+generateExpression (IRHead x) = "head(" ++ generateExpression x ++ ")"
+generateExpression (IRTail x) = "tail(" ++ generateExpression x ++ ")"
 generateExpression (IRTFst x) = "(" ++ generateExpression x ++ ")[1]"
 generateExpression (IRTSnd x) = "(" ++ generateExpression x ++ ")[2]"
+generateExpression (IRLeft x) = "(false, " ++ generateExpression x ++ ", nothing)"
+generateExpression (IRRight x) = "(true, nothing, " ++ generateExpression x ++ ")"
+generateExpression (IRFromLeft x) = "(" ++ generateExpression x ++ ")[2]"
+generateExpression (IRFromRight x) = "(" ++ generateExpression x ++ ")[3]"
+generateExpression (IRIsLeft x) = "!(" ++ generateExpression x ++ ")[1]"
+generateExpression (IRIsRight x) = "(" ++ generateExpression x ++ ")[1]"
 generateExpression (IRDensity dist x) = "density_" ++ show dist ++ "(" ++ generateExpression x ++ ")"
 generateExpression (IRCumulative dist x) = "cumulative_" ++ show dist ++ "(" ++ generateExpression x ++ ")"
 generateExpression (IRSample IRNormal) = "randn()"
@@ -126,5 +140,3 @@ generateInvokeExpression (IRApply f@(IRApply _ _) val) = generateInvokeExpressio
 generateInvokeExpression (IRApply f val) = generateInvokeExpression f ++ generateExpression val
 -- No more parameters, compile the fucntion
 generateInvokeExpression expr = "(" ++ generateExpression expr ++ ")("
-
-

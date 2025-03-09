@@ -58,16 +58,16 @@ exampleList = [
               ]
 
 paramExpr :: Expr
-paramExpr = Arg makeTypeInfo "iterations" TFloat (ifThenElse
+paramExpr = "iterations" #-># ifThenElse
   (GreaterThan makeTypeInfo (var "iterations") (constF 0.5))
-  (Cons makeTypeInfo (Constant makeTypeInfo (VBool True)) (apply (var "main") (PlusF makeTypeInfo (var "iterations") (constF (-1.0)))))
-  (Null makeTypeInfo))
+  (Cons makeTypeInfo (Constant makeTypeInfo (VBool True)) (apply (var "main") (var "iterations" #+# constF (-1.0))))
+  (Null makeTypeInfo)
 
 simpleList :: Program
 simpleList = Program [("main", constF 0.0 #:# Null makeTypeInfo)] []
 
 simpleAdd :: Program
-simpleAdd = Program [("main", PlusF makeTypeInfo (constF 0.0) (constF 1.0))] []
+simpleAdd = Program [("main", constF 0.0 #+# constF 1.0)] []
 
 uniformProg :: Program
 uniformProg = Program [("main", uniform)] []
@@ -89,7 +89,7 @@ normalProgMultPlus = Program [("main", normal #*# constF 2 #+# constF 1)] []
 
 
 uniformNegPlus :: Program
-uniformNegPlus = Program [("main", neg (uniform #+#constF 4))] []
+uniformNegPlus = Program [("main", negF (uniform #+#constF 4))] []
 
 uniformIfProg :: Program
 uniformIfProg = Program [("main", ifThenElse (GreaterThan makeTypeInfo uniform (constF 0.5))
@@ -118,10 +118,10 @@ testCallArg :: Program
 testCallArg = Program [("unif", "x" #-># (var "x" #+# uniform)), ("main", apply (var "unif") (constF 3))] []
 
 testNeg :: Expr
-testNeg = neg uniform
+testNeg = negF uniform
 
 testNegFail :: Expr
-testNegFail = neg (uniform #+# uniform)
+testNegFail = negF (uniform #+# uniform)
 
 testInjF :: Program
 testInjF = Program [("main", injF "double" [uniform])] []
@@ -259,6 +259,38 @@ invalidReservedName2 = Program [("main", "plus" #-># uniform)] []
 
 
 
+
+
+testLeft :: Program
+testLeft = Program [("main", injF "fromLeft" [injF "left" [constF 2]])] []
+
+testEither :: Program
+testEither = Program [("main", ifThenElse (bernoulli 0.5) (injF "left" [uniform]) (injF "right" [constI 1]))] []
+
+testIsLeft :: Program
+testIsLeft = Program [("main", ifThenElse (injF "isLeft" [ifThenElse (bernoulli 0.4) (injF "left" [uniform]) (injF "right" [constI 1])])
+                                  (constF 1)
+                                  (constF 2))] []
+
+testIsRight :: Program
+testIsRight = Program [("main", ifThenElse (injF "isRight" [ifThenElse (bernoulli 0.4) (injF "left" [uniform]) (injF "right" [constI 1])])
+                                  (constF 1)
+                                  (constF 2))] []
+
+testFst :: Program
+testFst = Program [("main", tfst (tuple uniform normal))] []
+
+testHead :: Program
+testHead = Program [("main", lhead (cons uniform nul))] []
+
+testTail :: Program
+testTail = Program [("main", lhead (ltail (cons normal (cons uniform nul))))] []
+
+testFstCall :: Program
+testFstCall = Program [("main", tfst (var "bivariate")), ("bivariate", tuple uniform normal)] []
+
+testFstDiscrete :: Program
+testFstDiscrete = Program [("main", tfst (tuple uniform  (bernoulli 0.4)))] []
 
 
 {-

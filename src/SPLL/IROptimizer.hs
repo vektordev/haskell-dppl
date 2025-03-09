@@ -20,6 +20,7 @@ import Data.Functor.Identity
 import Data.Number.Erf (erf)
 import Data.List (nub)
 import Control.Monad.Supply
+import Data.Foldable (toList)
 import PrettyPrint
 
 postProcess :: CompilerConfig -> IRExpr -> IRExpr
@@ -60,7 +61,7 @@ optimize conf = irMap (commonSubexprStage . applyConstStage . assiciativityStage
 
 indexmagic :: IRExpr -> IRExpr
 -- if calling Apply ("indexOf") elem [0..], replace with elem
-indexmagic (IRApply (IRApply (IRVar "indexOf") elem) (IRConst (VList list))) | isNaturals list = elem
+indexmagic (IRApply (IRApply (IRVar "indexOf") elem) (IRConst (VList list))) | isNaturals (toList list) = elem
   where
     isNaturals lst = and (zipWith (==) [0..] (map toNatural lst))
     toNatural (VInt x) = x
@@ -120,10 +121,11 @@ evalConstantDistr (IRCumulative IRUniform (IRConst (VFloat x))) = IRConst (VFloa
 evalConstantDistr x = x
 
 simplify :: IRExpr -> IRExpr
-simplify expr@(IROp op leftV rightV)
+simplify (IROp op leftV rightV)
   | isValue leftV && isValue rightV = IRConst (forceOp op (unval leftV) (unval rightV))
   | isValue leftV || isValue rightV = softForceLogic op leftV rightV
-  | otherwise = expr
+simplify (IRUnaryOp OpIsAny x) = forceAnyCheck x
+simplify (IRUnaryOp op val) | isValue val = IRConst $ forceUnaryOp op (unval val)
 simplify (IRIf _ left right) | left == right = left
 simplify x@(IRIf cond left right) =
   if isValue cond
@@ -133,12 +135,12 @@ simplify x@(IRIf cond left right) =
     else x
 simplify x@(IRCons left right) =
   if isValue left && isValue right
-    then let (VList tl) = unval right in IRConst (VList (unval left : tl))
-    else x
-simplify (IRHead expr) =
-  if isValue expr
-    then let (VList (_:xs)) = unval expr in IRConst $ VList xs
-    else IRHead expr
+    then let (VList tl) = unval right in IRConst (VList (ListCont (unval left) tl))
+    else x 
+simplify (IRHead (IRCons a _)) = a
+simplify (IRTail (IRCons _ b)) = b
+simplify (IRTFst (IRTCons a _)) = a
+simplify (IRTSnd (IRTCons _ b)) = b
 simplify (IRTCons (IRLambda n a) (IRLambda m b)) | n == m = IRLambda n (IRTCons a b)
 simplify x = x
 
@@ -171,6 +173,7 @@ softForceLogic OpAnd (IRConst (VBool True)) right = right
 softForceLogic OpAnd left (IRConst (VBool True)) = left
 softForceLogic OpAnd (IRConst (VBool False)) _ = IRConst (VBool False)
 softForceLogic OpAnd _ (IRConst (VBool False)) = IRConst (VBool False)
+softForceLogic OpEq (IRCons _ _) (IRConst (VList EmptyList)) = IRConst $ VBool False
 -- integer arithmetic:
 softForceLogic OpPlus (IRConst (VInt 0)) right = right
 softForceLogic OpPlus left (IRConst (VInt 0)) = left
@@ -214,6 +217,31 @@ forceOp OpGreaterThan (VFloat x) (VFloat y) = VBool (x > y)
 forceOp OpLessThan (VInt x) (VInt y) = VBool (x < y)
 forceOp OpLessThan (VFloat x) (VFloat y) = VBool (x < y)
 forceOp OpAnd (VBool x) (VBool y) = VBool (x && y)
+forceOp _ _ _ = error "Error during forceOp optimizer"
+
+forceUnaryOp :: UnaryOperand -> IRValue -> IRValue
+forceUnaryOp OpAbs (VFloat x) = VFloat (abs x)
+forceUnaryOp OpAbs (VInt x) = VInt (abs x)
+forceUnaryOp OpNeg (VFloat x) = VFloat (-x)
+forceUnaryOp OpNeg (VInt x) = VInt (-x)
+forceUnaryOp OpSign (VFloat x) = VFloat (signum x)
+forceUnaryOp OpSign (VInt x) = VInt (signum x)
+forceUnaryOp OpNot (VBool x) = VBool (not x)
+forceUnaryOp OpExp (VFloat x) = VFloat (exp x)
+forceUnaryOp OpLog (VFloat x) = VFloat (log x)
+forceUnaryOp _ _ = error "Error during forceUnaryOp optimizer"
+
+
+--TODO
+
+forceAnyCheck :: IRExpr -> IRExpr
+forceAnyCheck x | isValue x = IRConst $ VBool (unval x == VAny)
+forceAnyCheck (IRCons _ _) = IRConst $ VBool False  -- Lists can never be any
+forceAnyCheck (IRTCons _ _) = IRConst $ VBool False -- Tuples can never be any
+forceAnyCheck (IRLeft _) = IRConst $ VBool False -- Eithers can never be any
+forceAnyCheck (IRRight _) = IRConst $ VBool False -- Eithers can never be any
+forceAnyCheck x = IRUnaryOp OpIsAny x
+-- Maybe more, I am not quite sure
 
 exprSize :: IRExpr -> Int
 exprSize expr | null (getIRSubExprs expr) = 1

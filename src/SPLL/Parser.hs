@@ -32,6 +32,7 @@ import SPLL.Lang.Lang
 import SPLL.Typing.Typing
 import SPLL.Typing.RType
 import PredefinedFunctions (globalFenv, parameterCount)
+import SPLL.Prelude
 
 --import Text.Megaparsec.Debug (dbg)
 dbg x y = y
@@ -72,12 +73,12 @@ pIdentifier = lexeme $ do
 pUniform :: Parser Expr
 pUniform = do
   _ <- symbol "Uniform"
-  return (Uniform makeTypeInfo)
+  return uniform
 
 pNormal :: Parser Expr
 pNormal = do
   _ <- symbol "Normal"
-  return (Normal makeTypeInfo)
+  return normal
 
 pIfThenElse :: Parser Expr
 pIfThenElse = do
@@ -87,7 +88,7 @@ pIfThenElse = do
   b <- pExpr
   _ <- symbol "else"
   c <- pExpr
-  return (IfThenElse makeTypeInfo a b c)
+  return (ifThenElse a b c)
 
 pLetIn :: Parser Expr
 pLetIn = do
@@ -97,7 +98,7 @@ pLetIn = do
   definition <- pExpr
   _ <- symbol "in"
   scope <- pExpr
-  return (LetIn makeTypeInfo name definition scope)
+  return (letIn name definition scope)
 
 --parens :: Parser a -> Parser a
 --parens = between (symbol "(") (symbol ")")
@@ -147,7 +148,7 @@ pTheta = dbg "theta" $ do
   _ <- symbol "["
   ix <- pInt
   _ <- symbol "]"
-  return $ ThetaI makeTypeInfo (Var makeTypeInfo thetaName) ix
+  return $ theta (var thetaName) ix
 
 -- just to make this parser quite unambiguous, we're going to demand parens around both ops.
 pBinaryOp :: Parser Expr
@@ -156,7 +157,7 @@ pBinaryOp = dbg "binOp" $ do
   op <- pOp
   arg2 <- parens pExpr
   case op of
-    ">=" -> return $ GreaterThan makeTypeInfo arg1 arg2
+    ">=" -> return $ arg1 #># arg2
     _ -> fail $ "unknown operator: " ++ op
 
 pOp :: Parser String
@@ -171,39 +172,40 @@ pOp = lexeme $ do
 
 applyN :: Expr -> [Expr] -> Expr
 applyN function [] = function
-applyN function (arg:args) = applyN (Apply makeTypeInfo function arg) args -- $ foldl (\a f -> Apply makeTypeInfo f a) (Var makeTypeInfo function) (map (Var makeTypeInfo) args)
+applyN function (arg:args) = applyN (apply function arg) args -- $ foldl (\a f -> Apply makeTypeInfo f a) (Var makeTypeInfo function) (map (Var makeTypeInfo) args)
 
-construct1 constructor [arg] = constructor makeTypeInfo arg
+construct1 :: (Expr -> Expr) -> [Expr] -> Expr
+construct1 constructor [arg] = constructor arg
 construct1 _ _ = error "tried to apply the wrong number of arguments."
 
-construct2 :: (TypeInfo -> Expr -> Expr -> Expr) -> [Expr] -> Expr
-construct2 constructor [arg1, arg2] = constructor makeTypeInfo arg2 arg2
+construct2 :: (Expr -> Expr -> Expr) -> [Expr] -> Expr
+construct2 constructor [arg1, arg2] = constructor arg2 arg2
 construct2 _ _ = error "tried to apply the wrong number of arguments."
 
-constructN :: Int -> (TypeInfo -> [Expr] -> Expr) -> [Expr] -> Expr
-constructN n constructor args | n == length args = constructor makeTypeInfo args
+constructN :: Int -> ([Expr] -> Expr) -> [Expr] -> Expr
+constructN n constructor args | n == length args = constructor args
 constructN _ _ _ = error "tried to apply the wrong number of arguments."
 
 pVar :: Parser Expr
 pVar = do
   varname <- lexeme pIdentifier
-  return $ Var makeTypeInfo varname
+  return $ var varname
 
-binaryFs :: [(String, TypeInfo -> Expr -> Expr -> Expr)]
+binaryFs :: [(String, Expr -> Expr -> Expr)]
 binaryFs = [
-  ("multF", MultF),
-  ("multI", MultI),
-  ("plusF", PlusF),
-  ("plusI", PlusI)
+  ("multF", (#*#)),
+  ("multI", (#<*>#)),
+  ("plusF", (#+#)),
+  ("plusI", (#<+>#))
   ]
 
-unaryFs :: [(String, TypeInfo -> Expr -> Expr)]
+unaryFs :: [(String, Expr -> Expr)]
 unaryFs = [
-  ("negate", NegF)
+  ("negate", negF)
   ]
 
-injFs :: [(String, (Int, TypeInfo -> [Expr] -> Expr))]
-injFs = [(name, (parameterCount name, (`InjF` name))) | (name, _) <- globalFenv]
+injFs :: [(String, (Int, [Expr] -> Expr))]
+injFs = [(name, (parameterCount name, injF name)) | (name, _) <- globalFenv]
 
 pValue :: Parser Value
 pValue = choice [pBool, try pFloat, pIntVal, pTupleVal]
@@ -247,7 +249,7 @@ pBinaryF = do
   right <- pExpr
   case (lookup op binaryFs) of
     Nothing -> error "unexpected parse error"
-    Just opconstructor -> return (opconstructor makeTypeInfo left right )
+    Just opconstructor -> return (opconstructor left right)
 
 parseFromList :: [(String, b)] -> Parser b
 parseFromList kvlist = do
@@ -280,7 +282,6 @@ pSimpleType :: Parser RType
 pSimpleType = 
   parseFromList rTypes
 
-
 pList :: Parser [Value]
 pList = do
   (symbol "[")
@@ -297,6 +298,12 @@ pRange = do
   (symbol "]")
   return (from, to)
 
+pListExpr :: Parser Expr
+pListExpr = do
+  (symbol "[")
+  exprs <- expr `sepBy` (symbol ",")
+  (symbol "]")
+  return (foldr cons nul exprs)
 
 valueParser :: Parser Value
 valueParser = pValue
@@ -329,7 +336,7 @@ pFunction = dbg "function" $ do
   args <- many pIdentifier
   _ <- symbol "="
   e <- pExpr
-  let lambdas = foldr (Lambda makeTypeInfo) e args
+  let lambdas = foldr (#->#) e args
   return (Left (name, lambdas))
 
 doesNotContinue :: Parser ()
@@ -386,14 +393,14 @@ testParse = do
 pNull :: Parser Expr
 pNull = do
   _ <- symbol "[]"
-  return $ Null makeTypeInfo
+  return $ nul
 
 pTuple :: Parser Expr
 pTuple = parens $ do
   x <- expr
   _ <- symbol ","
   y <- expr
-  return $ TCons makeTypeInfo x y
+  return $ tuple x y
 
 
 -- | Parse atomic expressions (no recursion)
@@ -401,11 +408,12 @@ atom :: Parser Expr
 atom = choice [
     pNull,
     try (pTuple),
+    try (pListExpr),
     try (parens expr),  -- Parenthesized expressions first
     pUniform,     -- Built-in distributions
     pNormal,
     pConst,       -- Constants (numbers)
-    Var makeTypeInfo <$> pIdentifier  -- Variables last
+    var <$> pIdentifier  -- Variables last
   ] <* sc
 
 -- | Parse expressions that start with keywords
@@ -423,7 +431,7 @@ pLambda = do
     param <- pIdentifier
     _ <- symbol "->"
     body <- expr
-    return $ Lambda makeTypeInfo param body
+    return $ param #-># body
 
 -- | Parse function application
 -- This handles both normal application and built-in functions like multF
@@ -438,8 +446,8 @@ application = do
                 Just constructor -> return (construct1 constructor args)
                 Nothing -> case lookup name injFs of
                   Just (expectedParams, constructor) -> return (constructN expectedParams constructor args)
-                  Nothing -> return $ foldl (Apply makeTypeInfo) func args
-        _ -> return $ foldl (Apply makeTypeInfo) func args
+                  Nothing -> return $ foldl apply func args
+        _ -> return $ foldl apply func args
 
 
 -- | Main expression parser using makeExprParser
@@ -480,7 +488,7 @@ identifier = (:) <$> letterChar <*> many alphaNumChar <* sc
 term :: Parser Expr
 term =  parens expr
     <|> pConst
-    <|> Var makeTypeInfo <$> identifier
+    <|> var <$> identifier
 
 
 -- | Handle function application
@@ -488,15 +496,16 @@ appTable :: Parser Expr
 appTable = do
   f <- term
   args <- many term
-  return $ foldl (Apply makeTypeInfo) f args
+  return $ foldl apply f args
 
-opList = [(">", GreaterThan), ("++", PlusI), ("**", MultI), ("+", PlusF), ("*", MultF), (":", Cons)]
+opList :: [([Char], Expr -> Expr -> Expr)]
+opList = [(">", (#>#)), ("++", (#<+>#)), ("**", (#<*>#)), ("+", (#+#)), ("*", (#*#)), (":", (#:#))]
 
 mkOp :: Parser (Expr -> Expr -> Expr)
 mkOp = do
   op <- pOp
   case lookup op opList of
-    Just constructor -> return $ constructor makeTypeInfo
+    Just constructor -> return constructor
     Nothing -> fail $ "unknown operator: " ++ op
 
 
@@ -516,7 +525,7 @@ testParser input = parse expressionParser "" input
 
 
 
-type ExprBuilder = TypeInfo -> [Expr] -> Either String Expr
+type ExprBuilder = [Expr] -> Either String Expr
 type BuilderMap = Map.Map String ExprBuilder
 
 -- | Normalize a Program
@@ -535,18 +544,18 @@ normalize prog =
 -- Build maps from identifiers to expression builders
 buildNeuralMap :: [NeuralDecl] -> BuilderMap
 buildNeuralMap decls = Map.fromList
-  [(name, \ti [arg] -> Right $ ReadNN ti name arg) | (name, _, _) <- decls]
+  [(name, \[arg] -> Right $ readNN name arg) | (name, _, _) <- decls]
 
 buildInvMap :: [(String, a)] -> BuilderMap
 buildInvMap fenv = Map.fromList
-  [(name, \ti args -> case args of
+  [(name, \args -> case args of
     [] -> Left $ name ++ " requires arguments"
     --[_] -> Left $ name ++ " requires multiple arguments"
-    _ -> Right $ InjF ti name args)
+    _ -> Right $ injF name args)
    | (name, _) <- fenv]
 
 globalFunctions :: Program -> BuilderMap
-globalFunctions prog = Map.fromList [(name, \ti [] -> Right $ Var ti name) | (name, _) <- functions prog]
+globalFunctions prog = Map.fromList [(name, \[] -> Right $ var name) | (name, _) <- functions prog]
 
 -- Collect all variables that should not be transformed
 collectBenignVars :: Program -> Set.Set String
@@ -579,14 +588,14 @@ normalizeExpr env@(parametricBuilders, atomicBuilders, benign) expr =
           let (base, args) = collectApplyChain expr
           in case base of
             Var _ fname | Just builder <- Map.lookup fname parametricBuilders ->
-              builder ti args  -- builder now takes [Expr]
+              builder args  -- builder now takes [Expr]
             _ -> Right expr
         Apply ti (Var _ fname) arg
           | not (Set.member fname benign)
-          , Just builder <- Map.lookup fname parametricBuilders -> builder ti [arg]
+          , Just builder <- Map.lookup fname parametricBuilders -> builder [arg]
         Var ti fname
           | not (Set.member fname benign)
-          , Just builder <- Map.lookup fname atomicBuilders -> builder ti []
+          , Just builder <- Map.lookup fname atomicBuilders -> builder []
         _ -> Right expr'
 
 -- Returns (base expression, arguments in application order)

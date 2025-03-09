@@ -6,6 +6,7 @@ module SPLL.AutoNeural(
 import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType
+import SPLL.Lang.Lang
 import PrettyPrint
 
 -- basic strucutre:
@@ -59,7 +60,7 @@ indexOf :: Tag -> IRExpr -> IRExpr
 indexOf tag sample =
   IRApply
     (IRApply (IRVar "indexOf") (IRVar "sample"))
-    (IRConst (valueToIR (VList (tagToValues tag))))
+    (IRConst (valueToIR (constructVList (tagToValues tag))))
 
 
 makeProbRec :: PartitionPlan -> Int -> IRExpr -> (IRExpr, IRExpr, IRExpr)
