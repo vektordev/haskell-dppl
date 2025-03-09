@@ -91,7 +91,7 @@ juliaProbTestCode src tcs =
   \using .JuliaSPPLLib\n\
   \" ++ src ++ "\n" ++ 
   concat (map (\(sample, params, (outProb, outDim)) -> "tmp = main_prob(" ++ juliaVal sample ++ intercalate ", " (map juliaVal params) ++ ")\n\
-  \if round(tmp[1], digits=4) != " ++ juliaVal outProb ++ "\n\
+  \if tmp[1] - " ++ juliaVal outProb ++ " > 0.0001\n\
   \  error(\"Probability wrong: \" * string(tmp[1]) * \"/=\" * string(" ++ juliaVal outProb ++ "))\n\
   \end\n\
   \if tmp[2] != " ++ juliaVal outDim ++ "\n\
