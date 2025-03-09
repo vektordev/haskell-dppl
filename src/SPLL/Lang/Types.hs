@@ -150,7 +150,6 @@ data GenericValue a = VBool Bool
            | VEither (Either (GenericValue a) (GenericValue a))
            | VBranch (GenericValue a) (GenericValue a) String
            | VThetaTree ThetaTree
-           | VAnyList
            | VClosure [(String, a)] String a 
            | VAny -- Only used for marginal queries
            -- | Value of TArrow a b could be Expr TypeInfo, with Expr being a Lambda?
@@ -167,12 +166,11 @@ instance Functor GenericValue where
   fmap f (VEither (Right x)) = VEither (Right (fmap f x))
   fmap f (VBranch x y s) = VBranch (fmap f x) (fmap f y) s
   fmap _ (VThetaTree x) = VThetaTree x
-  fmap _ VAnyList = VAnyList
   fmap f (VClosure e n ex) = VClosure (map (Data.Bifunctor.second f) e) n (f ex)
   fmap _ VAny = VAny
 
 
-isVInt, isVBool, isVSymbol, isVFloat, isVList, isVTuple, isVBranch, isVThetaTree, isVAnyList, isVClosure :: GenericValue a -> Bool
+isVInt, isVBool, isVSymbol, isVFloat, isVList, isVTuple, isVBranch, isVThetaTree, isVClosure :: GenericValue a -> Bool
 isVInt (VInt _) = True
 isVInt _ = False
 isVBool (VBool _) = True
@@ -189,8 +187,6 @@ isVBranch (VBranch _ _ _) = True
 isVBranch _ = False
 isVThetaTree (VThetaTree _) = True
 isVThetaTree _ = False
-isVAnyList (VAnyList) = True
-isVAnyList _ = False
 isVClosure (VClosure _ _ _) = True
 isVClosure _ = False
 
