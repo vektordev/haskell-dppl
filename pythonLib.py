@@ -1,5 +1,6 @@
 from typing import Iterable
 from math import *
+from random import random, gauss
 
 def sign(x):
   return -1 if x < 0 else 0 if x == 0 else 1
@@ -16,6 +17,11 @@ def density_IRNormal(x):
 def cumulative_IRNormal(x):
   return (1.0 + erf(x / sqrt(2.0))) / 2.0
 
+def rand():
+  return random()
+
+def randn():
+  return gauss(0, 1)
 
 def isAny(x):
   if x == "ANY":

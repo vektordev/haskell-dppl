@@ -90,6 +90,7 @@ juliaProbTestCode src tcs =
   "include(\"juliaLib.jl\")\n\
   \using .JuliaSPPLLib\n\
   \" ++ src ++ "\n" ++ 
+  "main_gen(" ++ intercalate ", " (map juliaVal exampleParams) ++ ")\n" ++
   concat (map (\(sample, params, (outProb, outDim)) -> "tmp = main_prob(" ++ juliaVal sample ++ intercalate ", " (map juliaVal params) ++ ")\n\
   \if tmp[1] - " ++ juliaVal outProb ++ " > 0.0001\n\
   \  error(\"Probability wrong: \" * string(tmp[1]) * \"/=\" * string(" ++ juliaVal outProb ++ "))\n\
@@ -97,19 +98,22 @@ juliaProbTestCode src tcs =
   \if tmp[2] != " ++ juliaVal outDim ++ "\n\
   \  error(\"Dimensionality wrong: \" * string(tmp[2]) * \"/=\" * string(" ++ juliaVal outDim ++ "))\n\
   \end\n") tcs) ++ 
-  "exit(0)" 
+  "exit(0)"
+  where (_, exampleParams, _) = head tcs 
 
 --TODO Hardcoded precision of 4 digits
 pythonProbTestCode :: String -> [ProbTestCase] -> String
 pythonProbTestCode src tcs = 
-  src ++ "\n" ++ 
+  src ++ "\n" ++
+  "main.generate(" ++ intercalate ", " (map pyVal exampleParams) ++ ")\n" ++
   concat (map (\(sample, params, (outProb, outDim)) -> "tmp = main.forward(" ++ pyVal sample ++ intercalate ", " (map pyVal params) ++ ")\n\
   \if abs(tmp[0] - " ++ pyVal outProb ++ ") > 0.0001:\n\
   \  raise ValueError(\"Probability wrong: \" + str(tmp[0]) + \"!=\" + str(" ++ pyVal outProb ++ "))\n\
   \if tmp[1] != " ++ pyVal outDim ++ ":\n\
   \  raise ValueError(\"Dimensionality wrong: \" + str(tmp[1]) * \"/=\" + str(" ++ pyVal outDim ++ "))\n\
   \") tcs) ++ 
-  "exit(0)" 
+  "exit(0)"
+  where (_, exampleParams, _) = head tcs 
 
 
 prop_end2endTests :: Property
