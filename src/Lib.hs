@@ -37,6 +37,7 @@ import SPLL.CodeGenPyTorch
 import SPLL.CodeGenJulia
 import SPLL.Typing.Witnessing
 import SPLL.Examples
+import SPLL.Validator
 import Debug.Trace
 import SpecExamples
 import Statistics.Sample.KernelDensity
@@ -143,6 +144,10 @@ codeGenToLang lang trunc conf prog = do
   printIfVerbose conf "=== Parsed Program ===\n"
   doVerbose 2 conf (pPrint prog)
   printIfVerbose conf (pPrintProg prog)
+
+  case validateProgram prog of
+    Left err -> error err
+    Right _ -> return ()  -- Continue with the compilation (Not a return in the sense of exiting the function)
 
   let preAnnotated = annotateEnumsProg prog
   doVerbose 2 conf (putStrLn "\n\n=== Annotated Program (1) ===\n" >> pPrint preAnnotated)
