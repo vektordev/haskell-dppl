@@ -5,10 +5,12 @@ import SPLL.Lang.Types (makeTypeInfo, GenericValue (..))
 import SPLL.IntermediateRepresentation
 import SPLL.Analysis
 import SPLL.Typing.Infer (addTypeInfo)
+import SPLL.Validator (validateProgram)
 import IRInterpreter (generateRand, generateDet)
 import Control.Monad.Random (Rand, RandomGen)
 import SPLL.IRCompiler
 import Debug.Trace
+import Data.Either
 
 -- Flow control
 ifThenElse :: Expr -> Expr -> Expr -> Expr
@@ -157,6 +159,7 @@ fix = "f" #->#
 
 
 compile :: CompilerConfig -> Program -> [(String, IRExpr)]
+compile _ p | isLeft (validateProgram p) = error $ fromLeft "" (validateProgram p)
 compile conf p = do
   let preAnnotated = annotateEnumsProg p
   let typed = addTypeInfo preAnnotated
@@ -164,6 +167,7 @@ compile conf p = do
   envToIR conf annotated
 
 runGen :: (RandomGen g) => CompilerConfig -> Program -> [IRValue] -> Rand g IRValue
+runGen _ p _ | isLeft (validateProgram p) = error $ fromLeft "" (validateProgram p)
 runGen conf p args = do
   let compiled = compile conf p
   let (Just gen) = lookup "main_gen" compiled
@@ -171,6 +175,7 @@ runGen conf p args = do
   generateRand compiled compiled constArgs gen
 
 runProb :: CompilerConfig -> Program -> [IRValue] -> IRValue -> IRValue
+runProb _ p _ _ | isLeft (validateProgram p) = error $ fromLeft "" (validateProgram p)
 runProb conf p args x = do
   let compiled = compile conf p
   let (Just prob) = lookup "main_prob" compiled
@@ -181,6 +186,7 @@ runProb conf p args x = do
     Left err -> error err
 
 runInteg :: CompilerConfig -> Program -> [IRValue] -> IRValue -> IRValue -> IRValue
+runInteg _ p _ _ _ | isLeft (validateProgram p) = error $ fromLeft "" (validateProgram p)
 runInteg conf p args low high = do
   let compiled = compile conf p
   let (Just integ) = lookup "main_integ" compiled
