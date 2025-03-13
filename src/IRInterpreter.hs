@@ -34,7 +34,7 @@ generateDet :: IREnv a -> IREnv a -> [IRExpr]-> IRExpr -> Either String IRValue
 generateDet = generate f
   where f = RandomFunctions {
     uniformGen = Left "Uniform Gen is not det",
-    normalGen = Left "Uniform Gen is not det"}
+    normalGen = Left "Normal Gen is not det"}
 
 generate :: (Monad m) => RandomFunctions m a -> IREnv a -> IREnv a -> [IRExpr]-> IRExpr -> m IRValue
 --generate f globalEnv env args expr | trace ((show expr)) False = undefined
@@ -330,5 +330,3 @@ irPDF expr _ = error "Expression must be the density of a valid distribution"
 irCDF :: Distribution -> IRValue -> IRValue
 irCDF IRUniform (VFloat x) = VFloat $ if x < 0 then 0 else if x > 1 then 1 else x
 irCDF IRNormal (VFloat x) = VFloat $ (1/2)*(1 + erf(x/sqrt(2)))
-
-  
