@@ -93,3 +93,17 @@ def toList(lst):
   for x in reversed(lst):
     back = back.prepend(x)
   return back
+
+# ===============================
+# Start of standard lib functions
+# ===============================
+
+def indexOf(sample, lst):
+  if isinstance(lst, EmptyInferenceList) or isinstance(lst, AnyInferenceList):
+    raise ValueError("Element Not found in list")
+  elif isinstance(lst, ConsInferenceList):
+    if lst.value == sample:
+      return 0
+    else:
+      return 1 + indexOf(sample, lst.next)
+    

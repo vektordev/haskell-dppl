@@ -92,4 +92,17 @@ function tail(lst::ConsInferenceList)
     lst.next
 end
 
+function indexOf(sample, lst::InferenceList)
+    if (lst isa EmptyInferenceList || lst isa AnyInferenceList)
+        throw(ArgumentError("Element is not in list"))
+    end
+    if (sample == head(lst))
+        return 0
+    else
+        return 1 + indexOf(sample, tail(lst))
+    end
 end
+
+end
+
+
