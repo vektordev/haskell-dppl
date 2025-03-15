@@ -8,6 +8,7 @@ import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType
 import SPLL.Lang.Lang
 import PrettyPrint
+import StandardLibrary
 
 -- basic strucutre:
 --  get the partition plan.
@@ -49,7 +50,7 @@ symbol = "l_x_neural_in"
 
 makeProb :: CompilerConfig -> PartitionPlan -> String -> IRExpr
 makeProb conf plan nn_name = IRLambda "sample" $ IRLetIn vector (IREvalNN nn_name (IRVar "l_x_neural_in")) (IRTCons m (IRTCons dim bc))
-  where 
+  where
     (m, dim, bc) = (makeProbRec plan 0 (IRVar "sample"))
     sndRet = if countBranches conf then IRTCons dim bc else dim
 
@@ -57,11 +58,7 @@ makeProb conf plan nn_name = IRLambda "sample" $ IRLetIn vector (IREvalNN nn_nam
 -- step 1: turn the tag into a list of values.
 -- step 2: Use IRApply "indexOf" to find the index of the value in the list
 indexOf :: Tag -> IRExpr -> IRExpr
-indexOf tag sample =
-  IRApply
-    (IRApply (IRVar "indexOf") (IRVar "sample"))
-    (IRConst (valueToIR (constructVList (tagToValues tag))))
-
+indexOf tag sample = invokeStandardFunction stdIndexOf [IRVar "sample", IRConst (valueToIR (constructVList (tagToValues tag)))]
 
 makeProbRec :: PartitionPlan -> Int -> IRExpr -> (IRExpr, IRExpr, IRExpr)
 makeProbRec (Discretes rty tag) ix sample = (p, IRConst $ VFloat 0, IRConst (VFloat 0))
@@ -87,7 +84,7 @@ makeGen :: PartitionPlan -> String ->  IRExpr
 makeGen plan nn_name = IRLetIn vector (IREvalNN nn_name (IRVar "l_x_neural_in")) (makeGenRec plan 0)
 
 makeGenRec :: PartitionPlan -> Int -> IRExpr
-makeGenRec (TuplePlan a b) ix = IRTCons (makeGenRec a ix) (makeGenRec b (ix + getSize a)) 
+makeGenRec (TuplePlan a b) ix = IRTCons (makeGenRec a ix) (makeGenRec b (ix + getSize a))
 makeGenRec (EitherPlan a b) ix = undefined -- TODO: Waiting for sum types.
 makeGenRec (Discretes rty tag) ix = lottery (tagToValues tag) ix
 makeGenRec Continuous ix = IROp OpPlus

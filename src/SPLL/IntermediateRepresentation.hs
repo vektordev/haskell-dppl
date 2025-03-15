@@ -161,6 +161,7 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               | IREnumSum Varname IRValue IRExpr
               | IREvalNN Varname IRExpr
               | IRIndex IRExpr IRExpr
+              | IRError String
               deriving (Show, Eq)
               
 type IRValue = GenericValue IRExpr
@@ -211,6 +212,7 @@ getIRSubExprs (IRApply a b) = [a, b]
 getIRSubExprs (IREnumSum _ _ a) = [a]
 getIRSubExprs (IREvalNN _ a) = [a]
 getIRSubExprs (IRIndex a b) = [a, b]
+getIRSubExprs (IRError _) = []
 
 irMap :: (IRExpr -> IRExpr) -> IRExpr -> IRExpr
 irMap f x = case x of
@@ -244,6 +246,7 @@ irMap f x = case x of
   (IRConst _) -> f x
   (IRSample _) -> f x
   (IRVar _) -> f x
+  (IRError _) -> f x
 
 isLambda :: IRExpr -> Bool
 isLambda IRLambda {} = True
@@ -274,4 +277,5 @@ irPrintFlat (IRInvoke _) = "IRInvoke"
 irPrintFlat (IREnumSum _ _ _) = "IREnumSum"
 irPrintFlat (IREvalNN name _) = "IREvalNN " ++ name
 irPrintFlat (IRIndex _ _) = "IRIndex"
+irPrintFlat (IRError _) = "IRError"
 

@@ -1,11 +1,12 @@
 module IRInterpreter (
 generateDet,
-generateRand,
+generateRand
 ) where
 
 import Statistics.Distribution (ContGen, genContVar, quantile, density)
 import SPLL.IntermediateRepresentation
-import SPLL.Lang.Lang (Value(..), ThetaTree(..), Program, elementAt)
+import SPLL.Lang.Lang (Value(..), ThetaTree(..), Program, elementAt, constructVList)
+import StandardLibrary
 
 import Control.Monad.Random
 import Statistics.Distribution.Normal (normalDistr)
@@ -24,14 +25,14 @@ type IREnv a = [(String, IRExpr)]
 
 data RandomFunctions m a = RandomFunctions {uniformGen:: m IRValue, normalGen:: m IRValue}
 
-generateRand :: (RandomGen g) => IREnv a -> IREnv a -> [IRExpr]-> IRExpr -> Rand g IRValue
-generateRand = generate f
+generateRand :: (RandomGen g) => IREnv a -> [IRExpr]-> IRExpr -> Rand g IRValue
+generateRand env = generate f (env ++ standardEnv) (env ++ standardEnv)
   where f = RandomFunctions {
     uniformGen = irSample IRUniform,
     normalGen= irSample IRNormal}
 
-generateDet :: IREnv a -> IREnv a -> [IRExpr]-> IRExpr -> Either String IRValue
-generateDet = generate f
+generateDet :: IREnv a -> [IRExpr]-> IRExpr -> Either String IRValue
+generateDet env = generate f (env ++ standardEnv) (env ++ standardEnv)
   where f = RandomFunctions {
     uniformGen = Left "Uniform Gen is not det",
     normalGen = Left "Normal Gen is not det"}
@@ -309,6 +310,7 @@ generate f globalEnv env args (IRIndex lstExpr idxExpr) = do
       VInt i -> return $ l `elementAt` i
       _ -> error "Index must be an integer"
     _ -> error "Expression must be a list"
+generate _ _ _ _ (IRError s) = error $ "Error during interpretation: " ++ s
 generate f _ _ _ expr = error ("Expression is not yet implemented " ++ show expr)
 
 irSample :: (RandomGen g) => Distribution -> Rand g IRValue
