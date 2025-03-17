@@ -44,7 +44,7 @@ class InferenceList:
   
   def __iter__(self):
     curr = self
-    while curr is not None:
+    while curr is not None and isinstance(curr, ConsInferenceList):
       yield curr.value
       curr = curr.next
 
