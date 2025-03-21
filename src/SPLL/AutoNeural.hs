@@ -20,8 +20,8 @@ import StandardLibrary
 --implicit assumption: Neural Decl accepts a "TSymbol"-typed thing.
 makeAutoNeural :: CompilerConfig -> NeuralDecl -> [(String, IRExpr)]
 makeAutoNeural conf (name, (TArrow TSymbol target), tag) =
-  [(name ++ "_gen" , IRLambda symbol $ makeGen  plan name),
-   (name ++ "_prob", IRLambda symbol $ makeProb conf plan name)]
+  [(name ++ "_auto_gen" , IRLambda symbol $ makeGen  plan name),
+   (name ++ "_auto_prob", IRLambda symbol $ makeProb conf plan name)]
     where plan = makePartitionPlan target tag
 
 --TODO: Output this into the output file somehow.

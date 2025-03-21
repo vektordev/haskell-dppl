@@ -190,7 +190,7 @@ toIRProbability conf typeEnv (ReadNN _ name symbol) sample = do
   -- Same code as for calling a top level function
   var <- mkVariable "callNN"
   sym <- toIRGenerate typeEnv symbol
-  tell [(var, IRInvoke (IRApply (IRApply (IRVar (name ++ "_prob")) sym) sample))]
+  tell [(var, IRInvoke (IRApply (IRApply (IRVar (name ++ "_auto_prob")) sym) sample))]
   if countBranches conf then
     return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
   else
@@ -487,7 +487,7 @@ toIRGenerate typeEnv (Apply TypeInfo {rType=rt} l v) = do
     _ -> return $ IRInvoke $ IRApply l' v'
 toIRGenerate typeEnv (ReadNN _ name subexpr) = do
   sub <- toIRGenerate typeEnv subexpr
-  return $ IRInvoke (IRApply (IRVar (name ++ "_gen")) sub)
+  return $ IRInvoke (IRApply (IRVar (name ++ "_auto_gen")) sub)
 toIRGenerate typeEnv x = error ("found no way to convert to IRGen: " ++ show x)
 
 packParamsIntoLetinsGen :: TypeEnv -> [String] -> [Expr] -> IRExpr -> CompilerMonad  IRExpr

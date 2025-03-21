@@ -187,7 +187,7 @@ generateExpression (IRLambda name x) = "(lambda " ++ name  ++ ": " ++ generateEx
 generateExpression (IRApply f val) = "functools.partial(" ++ generateExpression f ++ ", " ++ generateExpression val ++ ")"
 generateExpression expr@(IRInvoke _) = generateInvokeExpression expr
 generateExpression (IREnumSum name enumRange expr) = "sum(map((lambda " ++ name ++ ": " ++ generateExpression expr ++ "), " ++ pyVal enumRange ++ "))"
-generateExpression (IREvalNN name arg) = name ++ "(" ++ generateExpression arg ++ ")"
+generateExpression (IREvalNN name arg) = name ++ "(" ++ generateExpression arg ++ ")[0]"
 generateExpression (IRIndex lst idx) = "(" ++ generateExpression lst ++ ")[" ++ generateExpression idx ++ "]"
 -- I personally hate this code. I constructs a tuple with an assignment expression in the first element and discards the first element
 generateExpression (IRLetIn name val body) = "((" ++ name ++ ":=" ++ generateExpression val ++ "), " ++ generateExpression body ++ ")[1]"
