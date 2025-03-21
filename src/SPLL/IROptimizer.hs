@@ -61,7 +61,7 @@ optimize conf = irMap (commonSubexprStage . applyConstStage . assiciativityStage
 
 indexmagic :: IRExpr -> IRExpr
 -- if calling Apply ("indexOf") elem [0..], replace with elem
-indexmagic (IRApply (IRApply (IRVar "indexOf") elem) (IRConst (VList list))) | isNaturals (toList list) = elem
+indexmagic (IRInvoke (IRApply (IRApply (IRVar "indexOf") elem) (IRConst (VList list)))) | isNaturals (toList list) = elem
   where
     isNaturals lst = and (zipWith (==) [0..] (map toNatural lst))
     toNatural (VInt x) = x
