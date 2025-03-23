@@ -174,7 +174,7 @@ testRecursion = Program [("main", apply (var "rec") (constF 8)),
                          ("rec", "x" #-># ifThenElse (var "x" #># constF 1) (constF 3 #*# apply (var "rec") (var "x" #*# constF 0.5)) uniform)] []
 
 testNN :: Program
-testNN = Program [("main", mNistAddExpr)] [("classifyMNist", TInt, Just $ EnumList $ map VInt [0,1,2,3,4,5,6,7,8,9])]
+testNN = Program [("main", mNistAddExpr)] [("classifyMNist", TArrow TSymbol TInt, Just $ EnumList $ map VInt [0,1,2,3,4,5,6,7,8,9])]
 
 testDimProb :: Program
 testDimProb = Program [("main", IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 0.4))) (Constant makeTypeInfo $ VFloat 0.5) (Normal makeTypeInfo))] []

@@ -1,6 +1,7 @@
 module SPLL.CodeGenPyTorch (
   generateFunctions,
-  pyVal
+  pyVal,
+  generateMockNeuralModule
 ) where
 
 import SPLL.IntermediateRepresentation
@@ -10,6 +11,9 @@ import Data.Char (toUpper, toLower)
 import Data.Maybe (fromJust, fromMaybe)
 import Debug.Trace (trace)
 import Data.Foldable
+import SPLL.AutoNeural
+import Control.Monad.Supply
+import SPLL.Typing.RType
 
 --TODO: On the topic of memoization: Ideally we would want to optimize away redundant calls within a loop.
 -- e.g. in MNist-Addition
@@ -107,9 +111,10 @@ generateFunctions genBoil defs =
   in
     if genBoil then
       ["from pythonLib import *",
-      "from torch.nn import Module", ""] ++
-      concatMap generateClass groups ++ 
-      ["", "# Example Initialization"] ++ 
+      "from torch.nn import Module",
+      "import torch", ""] ++
+      concatMap generateClass groups ++
+      ["", "# Example Initialization"] ++
       [onHead toLower name ++ " = " ++ onHead toUpper name ++ "()" | name <- names]
     else
       concatMap generateClass groups
@@ -203,3 +208,21 @@ generateInvokeExpression (IRApply f@(IRApply _ _) val) = generateInvokeExpressio
 generateInvokeExpression (IRApply f val) = generateInvokeExpression f ++ generateExpression val
 -- No more parameters, compile the fucntion
 generateInvokeExpression expr = "(" ++ generateExpression expr ++ ")("
+
+generateMockNeuralModule :: NeuralDecl -> String
+generateMockNeuralModule (name, (TArrow TSymbol target), tag) =
+  let plan = makePartitionPlan target tag in
+    ("class " ++ onHead toUpper name ++ "(Module):\n") ++
+    "  def forward(self, sym):\n" ++
+    "    return torch.unsqueeze(" ++ generateMockNeural plan ++ ", 0)\n" ++
+    name ++ " = " ++ onHead toUpper name ++ "()\n"
+generateMockNeuralModule (_, ty, _) = error "Invalid neural declaration for conversion to mock neural" ++ show ty
+
+generateMockNeural :: PartitionPlan -> String
+generateMockNeural (TuplePlan l r) = do
+  "torch.cat((" ++ generateMockNeural l ++ ", " ++ generateMockNeural r ++"))"
+generateMockNeural plan@(Discretes ty tag) =
+  let size = getSize plan in
+    "torch.softmax(torch.rand(" ++ show size ++ "), 0)"
+generateMockNeural Continuous =
+  "torch.rand(2)"

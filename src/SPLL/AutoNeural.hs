@@ -1,6 +1,9 @@
 module SPLL.AutoNeural(
   makeAutoNeural
 , makeForwardDecl
+, PartitionPlan(..)
+, makePartitionPlan
+, getSize
 ) where
 
 import SPLL.Lang.Types
