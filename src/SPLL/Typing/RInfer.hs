@@ -314,7 +314,7 @@ infer expr
           t <- lookupTEnv name
           (symTy, c1, symTyExpr) <- infer sym
           let argConstraint = Constraint t (symTy `TArrow` (rType ti)) (Just "ReadNN")
-          return (trace ("argConstraint: " ++ show argConstraint) $ rType ti, [argConstraint] ++ c1, ReadNN ti name symTyExpr)
+          return (rType ti, [argConstraint] ++ c1, ReadNN ti name symTyExpr)
     | solvesSimply expr =
         let
           plausibleAlgs = filter (checkExprMatches expr) allAlgorithms
