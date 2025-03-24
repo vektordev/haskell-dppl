@@ -104,7 +104,7 @@ vecAt ix = (IRIndex (IRVar vector) (IRConst (VInt ix)))
 lottery :: [IRValue] -> Int -> IRExpr
 lottery [value] _ = IRConst value
 lottery values startIx = IRIf
-  (IROp OpGreaterThan (IRSample IRUniform) (wtfirst))
+  (IROp OpLessThan (IRSample IRUniform) (wtfirst))
   (IRConst (head values))
   (lottery (tail values) (startIx + 1))
     where
