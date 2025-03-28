@@ -78,13 +78,11 @@ testProbJulia p tc = ioProperty $ do
 testProbPython :: Program -> [ProbTestCase] -> Property
 testProbPython p tc = ioProperty $ do
   let src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True (compile standardCompiler p))
-  let neuralSrc = intercalate "\n" (map generateMockNeuralModule (neurals p))
-  let pyCode = pythonProbTestCode (src ++ "\n" ++ neuralSrc) tc
-  (_, _, _, handle) <- createProcess (proc "python3" ["-c", pyCode])
+  (_, _, _, handle) <- createProcess (proc "python3" ["-c", pythonProbTestCode src tc])
   code <- waitForProcess handle
   case code of
     ExitSuccess -> return $ True === True
-    ExitFailure _ -> return $ counterexample ("Python test failed. See Python error message! Source Code: \n" ++ pyCode) False
+    ExitFailure _ -> return $ counterexample "Python test failed. See Python error message" False
 
 --TODO Hardcoded precision of 4 digits
 juliaProbTestCode :: String -> [ProbTestCase] -> String
@@ -93,7 +91,7 @@ juliaProbTestCode src tcs =
   \using .JuliaSPPLLib\n\
   \" ++ src ++ "\n" ++ 
   "main_gen(" ++ intercalate ", " (map juliaVal exampleParams) ++ ")\n" ++
-  concat (map (\(sample, params, (outProb, outDim)) -> "tmp = main_prob(" ++ juliaVal sample ++ (concatMap (\v -> ", " ++ pyVal v) params) ++ ")\n\
+  concat (map (\(sample, params, (outProb, outDim)) -> "tmp = main_prob(" ++ juliaVal sample ++ intercalate ", " (map juliaVal params) ++ ")\n\
   \if tmp[1] - " ++ juliaVal outProb ++ " > 0.0001\n\
   \  error(\"Probability wrong: \" * string(tmp[1]) * \"/=\" * string(" ++ juliaVal outProb ++ "))\n\
   \end\n\
@@ -108,11 +106,11 @@ pythonProbTestCode :: String -> [ProbTestCase] -> String
 pythonProbTestCode src tcs = 
   src ++ "\n" ++
   "main.generate(" ++ intercalate ", " (map pyVal exampleParams) ++ ")\n" ++
-  concat (map (\(sample, params, (outProb, outDim)) -> "tmp = main.forward(" ++ pyVal sample ++ (concatMap (\v -> ", " ++ pyVal v) params) ++ ")\n\
+  concat (map (\(sample, params, (outProb, outDim)) -> "tmp = main.forward(" ++ pyVal sample ++ intercalate ", " (map pyVal params) ++ ")\n\
   \if abs(tmp[0] - " ++ pyVal outProb ++ ") > 0.0001:\n\
   \  raise ValueError(\"Probability wrong: \" + str(tmp[0]) + \"!=\" + str(" ++ pyVal outProb ++ "))\n\
   \if tmp[1] != " ++ pyVal outDim ++ ":\n\
-  \  raise ValueError(\"Dimensionality wrong: \" + str(tmp[1]) + \"/=\" + str(" ++ pyVal outDim ++ "))\n\
+  \  raise ValueError(\"Dimensionality wrong: \" + str(tmp[1]) * \"/=\" + str(" ++ pyVal outDim ++ "))\n\
   \") tcs) ++ 
   "exit(0)"
   where (_, exampleParams, _) = head tcs 
@@ -122,9 +120,8 @@ prop_end2endTests :: Property
 prop_end2endTests = ioProperty $ do
   files <- getAllTestFiles
   cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseProbTestCases tc >>= \t2 -> return (t1, t2)) files
-  let nonNeurals = filter (null . neurals . fst) cases
-  let interpProp = conjoin (map (\(p, tcs) -> conjoin $ map (testProbProgramInterpreter p) tcs) nonNeurals)
-  let juliaProp = conjoin (map (\(p, tcs) -> testProbJulia p tcs) nonNeurals)
+  let interpProp = conjoin (map (\(p, tcs) -> conjoin $ map (testProbProgramInterpreter p) tcs) cases)
+  let juliaProp = conjoin (map (\(p, tcs) -> testProbJulia p tcs) cases)
   let pythonProp = conjoin (map (\(p, tcs) -> testProbPython p tcs) cases)
   return $ interpProp .&&. pythonProp .&&. juliaProp
 
