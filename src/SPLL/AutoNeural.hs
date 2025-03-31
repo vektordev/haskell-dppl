@@ -1,6 +1,9 @@
 module SPLL.AutoNeural(
   makeAutoNeural
 , makeForwardDecl
+, makePartitionPlan
+, PartitionPlan (..)
+, getSize
 ) where
 
 import SPLL.Lang.Types
@@ -8,6 +11,8 @@ import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType
 import SPLL.Lang.Lang
 import PrettyPrint
+
+import Debug.Trace
 
 -- basic strucutre:
 --  get the partition plan.

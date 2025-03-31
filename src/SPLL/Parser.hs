@@ -3,6 +3,7 @@ module SPLL.Parser (
 , pProg
 , pExpr
 , pIdentifier
+, pValue
 , tryParseProgram
 , tryParseExpr
 , testParser
@@ -208,7 +209,7 @@ injFs :: [(String, (Int, [Expr] -> Expr))]
 injFs = [(name, (parameterCount name, injF name)) | (name, _) <- globalFenv]
 
 pValue :: Parser Value
-pValue = choice [pBool, try pFloat, pIntVal, pTupleVal]
+pValue = choice [pBool, try pFloat, pIntVal, pTupleVal, pList>>=(return . constructVList)]
 
 pTupleVal :: Parser Value
 pTupleVal = do

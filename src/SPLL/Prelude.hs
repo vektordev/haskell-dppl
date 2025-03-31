@@ -172,7 +172,7 @@ runGen conf p args = do
   let compiled = compile conf p
   let (Just gen) = lookup "main_gen" compiled
   let constArgs = map IRConst args
-  generateRand compiled constArgs gen
+  generateRand (neurals p) compiled constArgs gen
 
 runProb :: CompilerConfig -> Program -> [IRValue] -> IRValue -> IRValue
 runProb _ p _ _ | isLeft (validateProgram p) = error $ fromLeft "" (validateProgram p)
@@ -180,7 +180,7 @@ runProb conf p args x = do
   let compiled = compile conf p
   let (Just prob) = lookup "main_prob" compiled
   let constArgs = map IRConst (x:args)
-  let val = generateDet compiled constArgs prob
+  let val = generateDet (neurals p) compiled constArgs prob
   case val of
     Right v -> v
     Left err -> error err
@@ -191,7 +191,7 @@ runInteg conf p args low high = do
   let compiled = compile conf p
   let (Just integ) = lookup "main_integ" compiled
   let constArgs = map IRConst (low:high:args)
-  let val = generateDet compiled constArgs integ
+  let val = generateDet (neurals p) compiled constArgs integ
   case val of
     Right v -> v
     Left err -> error err

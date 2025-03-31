@@ -35,12 +35,14 @@ module SPLL.Lang.Lang (
 , constructVList
 , elementAt
 , getFunctionNames
+, lookupNeural
 ) where
 
 import SPLL.Lang.Types
 import SPLL.Typing.PType
 import SPLL.Typing.RType
 import qualified Data.Set as Set
+import Data.Maybe
 
 
 import qualified Data.Map as Map
@@ -394,6 +396,9 @@ getRType (VList (ListCont a _)) = ListOf $ getRType a
 getRType (VList EmptyList) = NullList
 getRType (VTuple t1 t2) = Tuple (getRType t1) (getRType t2)
 getRType (VEither (Left a)) = TEither (getRType a) SPLL.Typing.RType.NotSetYet 
+
+lookupNeural :: String -> [NeuralDecl] -> Maybe (RType, Maybe Tag)
+lookupNeural name decls = foldr (\(n, r, t) ret -> if n == name then Just (r, t) else ret) Nothing decls
 
 getFunctionNames :: Program -> [String]
 getFunctionNames p = map fst (functions p)
