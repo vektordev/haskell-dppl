@@ -11,6 +11,7 @@ import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType
 import SPLL.Lang.Lang
 import PrettyPrint
+import StandardLibrary
 
 import Debug.Trace
 
@@ -24,8 +25,8 @@ import Debug.Trace
 --implicit assumption: Neural Decl accepts a "TSymbol"-typed thing.
 makeAutoNeural :: CompilerConfig -> NeuralDecl -> [(String, IRExpr)]
 makeAutoNeural conf (name, (TArrow TSymbol target), tag) =
-  [(name ++ "_gen" , IRLambda symbol $ makeGen  plan name),
-   (name ++ "_prob", IRLambda symbol $ makeProb conf plan name)]
+  [(name ++ "_auto_gen" , IRLambda symbol $ makeGen  plan name),
+   (name ++ "_auto_prob", IRLambda symbol $ makeProb conf plan name)]
     where plan = makePartitionPlan target tag
 
 --TODO: Output this into the output file somehow.
@@ -53,7 +54,7 @@ symbol :: String
 symbol = "l_x_neural_in"
 
 makeProb :: CompilerConfig -> PartitionPlan -> String -> IRExpr
-makeProb conf plan nn_name = IRLambda "sample" $ IRLetIn vector (IREvalNN nn_name (IRVar "l_x_neural_in")) (IRTCons m (IRTCons dim bc))
+makeProb conf plan nn_name = IRLambda "sample" $ IRLetIn vector (IREvalNN nn_name (IRVar "l_x_neural_in")) (IRTCons m sndRet)
   where 
     (m, dim, bc) = (makeProbRec plan 0 (IRVar "sample"))
     sndRet = if countBranches conf then IRTCons dim bc else dim
@@ -62,10 +63,7 @@ makeProb conf plan nn_name = IRLambda "sample" $ IRLetIn vector (IREvalNN nn_nam
 -- step 1: turn the tag into a list of values.
 -- step 2: Use IRApply "indexOf" to find the index of the value in the list
 indexOf :: Tag -> IRExpr -> IRExpr
-indexOf tag sample =
-  IRApply
-    (IRApply (IRVar "indexOf") (IRVar "sample"))
-    (IRConst (valueToIR (constructVList (tagToValues tag))))
+indexOf tag sample = invokeStandardFunction stdIndexOf [sample, IRConst (valueToIR (constructVList (tagToValues tag)))]
 
 
 makeProbRec :: PartitionPlan -> Int -> IRExpr -> (IRExpr, IRExpr, IRExpr)
@@ -109,7 +107,7 @@ vecAt ix = (IRIndex (IRVar vector) (IRConst (VInt ix)))
 lottery :: [IRValue] -> Int -> IRExpr
 lottery [value] _ = IRConst value
 lottery values startIx = IRIf
-  (IROp OpGreaterThan (IRSample IRUniform) (wtfirst))
+  (IROp OpLessThan (IRSample IRUniform) (wtfirst))
   (IRConst (head values))
   (lottery (tail values) (startIx + 1))
     where

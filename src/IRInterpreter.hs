@@ -14,7 +14,7 @@ import Control.Monad.Random
 import Statistics.Distribution.Normal (normalDistr)
 import Data.Foldable
 import Data.Number.Erf
-import Debug.Trace (trace)
+import Debug.Trace
 import Data.Data
 import Data.Either (fromRight)
 import Data.Bifunctor (second)
@@ -39,6 +39,7 @@ generateRand neurals env = generate f neurals startingEnv startingEnv
     startingEnv = env ++ standardEnv ++ map neuralRTypeToEnv neurals
 
 generateDet :: [NeuralDecl] -> IREnv a -> [IRExpr]-> IRExpr -> Either String IRValue
+generateDet neurals env | traceShow neurals False = undefined
 generateDet neurals env = generate f neurals startingEnv startingEnv
   where 
     f = RandomFunctions {
@@ -47,7 +48,7 @@ generateDet neurals env = generate f neurals startingEnv startingEnv
     startingEnv = env ++ standardEnv ++ map neuralRTypeToEnv neurals
 
 generate :: (Monad m) => RandomFunctions m a -> [NeuralDecl] -> IREnv a -> IREnv a -> [IRExpr]-> IRExpr -> m IRValue
---generate f neurals globalEnv env args expr | trace ((show expr)) False = undefined
+--generate f neurals globalEnv env args expr | trace ((show expr) ++ " " ++ show env) False = undefined
 generate f neurals globalEnv env args expr | args /= [] = do
   let reverseArgs = reverse args
   let newExpr = foldr (flip IRApply) expr reverseArgs
@@ -300,6 +301,7 @@ generate f neurals globalEnv env args (IRLetIn name decl body) = do
   declVal <- generate f neurals globalEnv env args decl
   let extendedEnv = (name, IRConst declVal):env
   generate f neurals globalEnv extendedEnv args body
+-- In case somebody decides to invoke neurals with IRVar
 generate f neurals globalEnv env args (IRVar name) | "_mock" `isSuffixOf` name && isJust (lookupNeural (iterate init name !! 5) neurals) = do
   let (rt, tags) = fromJust (lookupNeural (iterate init name !! 5) neurals)
   let realRT (TSymbol `TArrow` r) = r
@@ -319,10 +321,15 @@ generate f neurals globalEnv env [] (IREnumSum varname (VList values) expr) = do
     return $ sumValues x acc
     ) (VFloat 0) values
   where sumValues = \(VFloat a) (VFloat b) -> VFloat $a+b
-generate f neurals globalEnv env [] (IREvalNN varname expr) = error "EvalNN cannot be interpreted on the IR. Please use PyTorch or Julia"
+generate f neurals globalEnv env [] (IREvalNN name sym) = do
+  let (rt, tags) = fromJust (lookupNeural name neurals)
+  let realRT (TSymbol `TArrow` r) = r
+  let partPlan = makePartitionPlan (realRT rt) tags
+  symVal <- generate f neurals globalEnv env [] sym
+  return $ evaluateMockNN partPlan symVal 
 generate f neurals globalEnv env args (IRIndex lstExpr idxExpr) = do
-  lst <- generate f neurals env globalEnv args lstExpr
-  idx <- generate f neurals env globalEnv args idxExpr
+  lst <- generate f neurals globalEnv env args lstExpr
+  idx <- generate f neurals globalEnv env args idxExpr
   case lst of
     VList l -> case idx of
       VInt i -> return $ l `elementAt` i

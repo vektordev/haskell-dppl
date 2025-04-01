@@ -110,9 +110,10 @@ prop_end2endTests :: Property
 prop_end2endTests = ioProperty $ do
   files <- getAllTestFiles
   cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
+  let nonNeurals = filter (null . neurals . fst) cases
   let interpProp = conjoin (map (\(p, tcs) -> conjoin $ map (testProbProgramInterpreter p) tcs) cases)
-  let juliaProp = conjoin (map (\(p, tcs) -> testProbJulia p tcs) cases)
-  let pythonProp = conjoin (map (\(p, tcs) -> testProbPython p tcs) cases)
+  let juliaProp = conjoin (map (\(p, tcs) -> testProbJulia p tcs) nonNeurals)
+  let pythonProp = conjoin (map (\(p, tcs) -> testProbPython p tcs) nonNeurals)
   return $ interpProp .&&. pythonProp .&&. juliaProp
 
 
