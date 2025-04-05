@@ -39,7 +39,7 @@ generateRand neurals env = generate f neurals startingEnv startingEnv
     startingEnv = env ++ standardEnv ++ map neuralRTypeToEnv neurals
 
 generateDet :: [NeuralDecl] -> IREnv a -> [IRExpr]-> IRExpr -> Either String IRValue
-generateDet neurals env | traceShow neurals False = undefined
+--generateDet neurals env | traceShow neurals False = undefined
 generateDet neurals env = generate f neurals startingEnv startingEnv
   where 
     f = RandomFunctions {

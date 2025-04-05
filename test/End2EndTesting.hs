@@ -7,8 +7,10 @@ import System.Directory (listDirectory)
 import System.FilePath (stripExtension, isExtensionOf)
 import System.Process
 import System.Exit
+import Control.Monad.Random
+import System.Random (mkStdGen)
 import Data.Maybe
-import Data.List (intercalate)
+import Data.List (intercalate, nub)
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
 import SPLL.Prelude
@@ -56,6 +58,19 @@ testProbProgramInterpreter p (ProbTestCase sample params (VFloat expectedProb, V
   counterexample "Probability differs" ((abs (outProb - expectedProb)) < 0.0001) .&&.
     counterexample "Dimensionality differs" (outDim === expectedDim)
 
+-- TODO: Maybe stop sampling early if no more new samples are found
+discreteProbsNormalized :: Program -> Int -> Property
+discreteProbsNormalized p paramCnt = counterexample "Probability of randomly sampled values does not sum to 1" (sumProbSamples pSamples >= sufficientlyNormal)
+  where
+    seedList = [0 .. (paramCnt - 1)] -- List of natural numbers split into parameter count sized chunks
+    params = map (VTuple (VInt 0) . VInt) seedList  -- Made each element into a tuple with a 0 to select the random NN mock
+    sampleCnt = 1000
+    sufficientlyNormal = 0.99
+    prob (VTuple (VFloat p) _) = p
+    sumProbSamples samples = sum $ map (\sam -> prob $ runProb standardCompiler p params sam) samples
+    pSamples = nub $ evalRand ((replicateM sampleCnt randomParams) >>= mapM (runGen standardCompiler p) ) (mkStdGen 42)
+    randomParams = (replicateM paramCnt (getRandomR (1, 100000))) >>= mapM (\x -> return $ VTuple (VInt 0) (VInt x)) :: RandomGen g => Rand g [IRValue] -- Create a list of random ints and then make them into a tuple
+
 testProbJulia :: Program -> [TestCase] -> Property
 testProbJulia p tc = ioProperty $ do
   let src = intercalate "\n" (SPLL.CodeGenJulia.generateFunctions (compile standardCompiler p))
@@ -74,7 +89,6 @@ testProbPython p tc = ioProperty $ do
     ExitSuccess -> return $ True === True
     ExitFailure _ -> return $ counterexample "Python test failed. See Python error message" False
 
---TODO Hardcoded precision of 4 digits
 juliaProbTestCode :: String -> [TestCase] -> String
 juliaProbTestCode src tcs = 
   "include(\"juliaLib.jl\")\n\
@@ -91,7 +105,6 @@ juliaProbTestCode src tcs =
   "exit(0)"
   where ProbTestCase _ exampleParams _ = head tcs 
 
---TODO Hardcoded precision of 4 digits
 pythonProbTestCode :: String -> [TestCase] -> String
 pythonProbTestCode src tcs = 
   src ++ "\n" ++
@@ -111,10 +124,12 @@ prop_end2endTests = ioProperty $ do
   files <- getAllTestFiles
   cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
   let nonNeurals = filter (null . neurals . fst) cases
+  let neuralP = nub $ map fst (filter (not . null . neurals . fst) cases)
   let interpProp = conjoin (map (\(p, tcs) -> conjoin $ map (testProbProgramInterpreter p) tcs) cases)
+  let interpNormalizeProp = conjoin (map (\p -> discreteProbsNormalized p 1) neuralP)
   let juliaProp = conjoin (map (\(p, tcs) -> testProbJulia p tcs) nonNeurals)
   let pythonProp = conjoin (map (\(p, tcs) -> testProbPython p tcs) nonNeurals)
-  return $ interpProp .&&. pythonProp .&&. juliaProp
+  return $ interpProp .&&. interpNormalizeProp .&&. pythonProp .&&. juliaProp
 
 
 return []
