@@ -1,5 +1,7 @@
 module TestCaseParser (
   TestCase(..),
+  isProbTestCase,
+  isArgmaxPTestCase,
   parseTestCases,
   parseProgram
 ) where
@@ -17,14 +19,26 @@ import Debug.Trace
 
 
 data TestCase = ProbTestCase IRValue [IRValue] (IRValue, IRValue)
-              | ArgMaxPTextCase [IRValue] IRValue 
+              | ArgmaxPTestCase [IRValue] IRValue 
               deriving (Show)
+
+isProbTestCase :: TestCase -> Bool
+isProbTestCase (ProbTestCase _ _ _) = True
+isProbTestCase _ = False
+
+isArgmaxPTestCase :: TestCase -> Bool
+isArgmaxPTestCase (ArgmaxPTestCase _ _) = True
+isArgmaxPTestCase _ = False
 
 type Parser = Parsec Void String
 sc = L.space hspace1 (L.skipLineComment "--") (L.skipBlockComment "{-" "-}")
 
 symbol :: String -> Parser String
 symbol = L.symbol sc
+
+-- Either a windows or a linux newline
+pNewline :: Parser String
+pNewline = choice [symbol "\n", symbol "\r\n"] 
 
 pIRValue :: Parser IRValue
 pIRValue = pValue >>= return . valueToIR
@@ -38,14 +52,20 @@ pProbTestCase :: Parser TestCase
 pProbTestCase = do
   _ <- symbol "p("
   params <- pIRValue `sepBy` (symbol ",")
-  _ <- (symbol ")=(")
-  resP <- pIRValue
-  _ <- (symbol ",")
-  resD <- pIRValue
+  _ <- (symbol ")=")
+  VTuple resP resD <- pIRValue
   return $ ProbTestCase (head params) (tail params) (resP, resD)
 
+pArgmaxPTestCase :: Parser TestCase
+pArgmaxPTestCase = do
+  symbol "argmax_p("
+  params <- pIRValue `sepBy` (symbol ",")
+  symbol ")="
+  res <- pIRValue
+  return $ ArgmaxPTestCase params res
+
 pTestCases :: Parser [TestCase]
-pTestCases = pProbTestCase `sepBy` newline
+pTestCases = choice[pProbTestCase, pArgmaxPTestCase] `sepBy` pNewline
 
 parseTestCases :: FilePath -> IO [TestCase]
 parseTestCases fp = do

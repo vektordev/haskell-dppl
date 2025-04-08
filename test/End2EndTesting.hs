@@ -52,11 +52,23 @@ parseProbTestCases fp = do
                       (a, "")    -> [a]
 -}
 
-testProbProgramInterpreter :: Program -> TestCase -> Property
-testProbProgramInterpreter p (ProbTestCase sample params (VFloat expectedProb, VFloat expectedDim)) = do
+testInterpreter :: Program -> TestCase -> Property
+testInterpreter p (ProbTestCase sample params (VFloat expectedProb, VFloat expectedDim)) = do
   let VTuple (VFloat outProb) (VFloat outDim) = runProb standardCompiler p params sample
-  counterexample "Probability differs" ((abs (outProb - expectedProb)) < 0.0001) .&&.
-    counterexample "Dimensionality differs" (outDim === expectedDim)
+  counterexample ("Probability differs. Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < 0.0001) .&&.
+    counterexample ("Dimensionality differs. Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outDim === expectedDim)
+testInterpreter p (ArgmaxPTestCase params res) = ioProperty $ do
+  let mockedParams = map (VTuple (VInt 1)) params
+  let resP = runProb standardCompiler p mockedParams res
+  let cntSamples = 100
+  samples <- evalRandIO $ replicateM cntSamples (runGen standardCompiler p mockedParams)
+  let samplesP = map (runProb standardCompiler p mockedParams) samples
+  return $ conjoin (map (\(s, p) -> counterexample ("Sample " ++ show s ++ " has highest probability: " ++ show p ++ " instead of sample " ++ show res ++ " with probability: " ++ show resP) (p `lessEqualsProbs` resP)) (zip samples samplesP))
+
+lessEqualsProbs :: IRValue -> IRValue -> Bool
+lessEqualsProbs (VFloat a) (VFloat b) = a <= b
+lessEqualsProbs (VTuple (VFloat aP) (VFloat aD)) (VTuple (VFloat bP) (VFloat bD)) | aD == bD = aP <= bP
+lessEqualsProbs (VTuple _ (VFloat aD)) (VTuple _ (VFloat bD)) = aD > bD -- Lower dimensionality means higher probability
 
 -- TODO: Maybe stop sampling early if no more new samples are found
 discreteProbsNormalized :: Program -> Int -> Property
@@ -123,12 +135,13 @@ prop_end2endTests :: Property
 prop_end2endTests = ioProperty $ do
   files <- getAllTestFiles
   cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
-  let nonNeurals = filter (null . neurals . fst) cases
-  let neuralP = nub $ map fst (filter (not . null . neurals . fst) cases)
-  let interpProp = conjoin (map (\(p, tcs) -> conjoin $ map (testProbProgramInterpreter p) tcs) cases)
+  let probTestCases = map (\(p, tcs) -> (p, filter isProbTestCase tcs)) cases
+  let nonNeuralsProb = filter (null . neurals . fst) probTestCases
+  let neuralP = map fst (filter (not . null . neurals . fst) cases)
+  let interpProp = conjoin (map (\(p, tcs) -> conjoin $ map (testInterpreter p) tcs) cases)
   let interpNormalizeProp = conjoin (map (\p -> discreteProbsNormalized p 1) neuralP)
-  let juliaProp = conjoin (map (\(p, tcs) -> testProbJulia p tcs) nonNeurals)
-  let pythonProp = conjoin (map (\(p, tcs) -> testProbPython p tcs) nonNeurals)
+  let juliaProp = conjoin (map (\(p, tcs) -> testProbJulia p tcs) nonNeuralsProb)
+  let pythonProp = conjoin (map (\(p, tcs) -> testProbPython p tcs) nonNeuralsProb)
   return $ interpProp .&&. interpNormalizeProp .&&. pythonProp .&&. juliaProp
 
 
