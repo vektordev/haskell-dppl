@@ -20,6 +20,7 @@ import SPLL.CodeGenJulia
 import SPLL.CodeGenPyTorch
 import TestCaseParser
 import SPLL.IntermediateRepresentation
+import SPLL.Typing.RType
 import Test.QuickCheck hiding (verbose)
 import Debug.Trace
 
@@ -73,9 +74,10 @@ lessEqualsProbs (VTuple (VFloat aP) (VFloat aD)) (VTuple (VFloat bP) (VFloat bD)
 lessEqualsProbs (VTuple _ (VFloat aD)) (VTuple _ (VFloat bD)) = aD > bD -- Lower dimensionality means higher probability
 
 -- TODO: Maybe stop sampling early if no more new samples are found
-discreteProbsNormalized :: Program -> Int -> Property
-discreteProbsNormalized p paramCnt = counterexample "Probability of randomly sampled values does not sum to 1" (sumProbSamples pSamples >= sufficientlyNormal)
+discreteProbsNormalized :: Program -> Property
+discreteProbsNormalized p = counterexample "Probability of randomly sampled values does not sum to 1" (sumProbSamples pSamples >= sufficientlyNormal)
   where
+    paramCnt = progParameterCount p
     seedList = [0 .. (paramCnt - 1)] -- List of natural numbers split into parameter count sized chunks
     params = map (VTuple (VInt 0) . VInt) seedList  -- Made each element into a tuple with a 0 to select the random NN mock
     sampleCnt = 1000
@@ -84,6 +86,13 @@ discreteProbsNormalized p paramCnt = counterexample "Probability of randomly sam
     sumProbSamples samples = sum $ map (\sam -> prob $ runProb standardCompiler p params sam) samples
     pSamples = nub $ evalRand ((replicateM sampleCnt randomParams) >>= mapM (runGen standardCompiler p) ) (mkStdGen 42)
     randomParams = (replicateM paramCnt (getRandomR (1, 100000))) >>= mapM (\x -> return $ VTuple (VInt 0) (VInt x)) :: RandomGen g => Rand g [IRValue] -- Create a list of random ints and then make them into a tuple
+
+progParameterCount :: Program -> Int
+progParameterCount Program{functions=f} = countLambdas main
+  where
+    Just main = lookup "main" f
+    countLambdas (Lambda _ _ e) = 1 + countLambdas e
+    countLambdas _ = 0
 
 testProbJulia :: Program -> [TestCase] -> Property
 testProbJulia p tc = ioProperty $ do
@@ -132,7 +141,6 @@ pythonProbTestCode src tcs =
   "exit(0)"
   where ProbTestCase _ exampleParams _ = head tcs 
 
-
 prop_end2endTests :: Property
 prop_end2endTests = ioProperty $ do
   files <- getAllTestFiles
@@ -141,7 +149,7 @@ prop_end2endTests = ioProperty $ do
   let nonNeuralsProb = filter (null . neurals . fst) probTestCases
   let neuralP = map fst (filter (not . null . neurals . fst) cases)
   let interpProp = conjoin (map (\(p, tcs) -> conjoin $ map (testInterpreter p) tcs) cases)
-  let interpNormalizeProp = conjoin (map (\p -> discreteProbsNormalized p 1) neuralP)
+  let interpNormalizeProp = conjoin (map (\p -> discreteProbsNormalized p) neuralP)
   let juliaProp = conjoin (map (\(p, tcs) -> testProbJulia p tcs) nonNeuralsProb)
   let pythonProp = conjoin (map (\(p, tcs) -> testProbPython p tcs) nonNeuralsProb)
   return $ interpProp .&&. interpNormalizeProp .&&. pythonProp .&&. juliaProp

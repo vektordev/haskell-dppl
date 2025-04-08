@@ -1,0 +1,10 @@
+argmax_p(0, 2)=2
+argmax_p(1, 3)=4
+argmax_p(2, 4)=6
+argmax_p(3, 5)=8
+argmax_p(4, 6)=10
+argmax_p(5, 7)=12
+argmax_p(6, 8)=14
+argmax_p(7, 9)=16
+argmax_p(8, 0)=8
+argmax_p(9, 1)=10
