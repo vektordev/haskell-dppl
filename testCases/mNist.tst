@@ -1,0 +1,10 @@
+argmax_p(0)=0
+argmax_p(1)=1
+argmax_p(2)=2  
+argmax_p(3)=3  
+argmax_p(4)=4  
+argmax_p(5)=5  
+argmax_p(6)=6  
+argmax_p(7)=7  
+argmax_p(8)=8  
+argmax_p(9)=9

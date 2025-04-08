@@ -58,11 +58,13 @@ testInterpreter p (ProbTestCase sample params (VFloat expectedProb, VFloat expec
   counterexample ("Probability differs. Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < 0.0001) .&&.
     counterexample ("Dimensionality differs. Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outDim === expectedDim)
 testInterpreter p (ArgmaxPTestCase params res) = ioProperty $ do
-  let mockedParams = map (VTuple (VInt 1)) params
-  let resP = runProb standardCompiler p mockedParams res
+  let paramCnt = length params
+  let mockedParams seeds = map (\(par, s) -> VTuple (VInt 1) (VTuple par (VInt s))) (zip params seeds)
+  let mockedParamsList start = map mockedParams [[x .. x + (paramCnt-1)] | x <- [start, paramCnt..]]  -- [[((1, (p1, 0)), (1, (p2, 1)))], [(1, (p1, 2)), (1, (p2, 3))] ..]
+  let resP = runProb standardCompiler p (head (mockedParamsList 0)) res
   let cntSamples = 100
-  samples <- evalRandIO $ replicateM cntSamples (runGen standardCompiler p mockedParams)
-  let samplesP = map (runProb standardCompiler p mockedParams) samples
+  samples <- evalRandIO $ mapM (runGen standardCompiler p) (take cntSamples (mockedParamsList paramCnt))
+  let samplesP = map (\(par, s) -> runProb standardCompiler p par s) (zip (take cntSamples (mockedParamsList (paramCnt * cntSamples))) samples)
   return $ conjoin (map (\(s, p) -> counterexample ("Sample " ++ show s ++ " has highest probability: " ++ show p ++ " instead of sample " ++ show res ++ " with probability: " ++ show resP) (p `lessEqualsProbs` resP)) (zip samples samplesP))
 
 lessEqualsProbs :: IRValue -> IRValue -> Bool
