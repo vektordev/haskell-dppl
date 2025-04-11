@@ -141,20 +141,24 @@ pythonProbTestCode src tcs =
   "exit(0)"
   where ProbTestCase _ exampleParams _ = head tcs 
 
-prop_end2endTests :: Property
-prop_end2endTests = ioProperty $ do
+test_end2end :: IO (Bool)
+test_end2end = do
   files <- getAllTestFiles
   cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
   let probTestCases = map (\(p, tcs) -> (p, filter isProbTestCase tcs)) cases
   let nonNeuralsProb = filter (null . neurals . fst) probTestCases
   let neuralP = map fst (filter (not . null . neurals . fst) cases)
-  let interpProp = conjoin (map (\(p, tcs) -> conjoin $ map (testInterpreter p) tcs) cases)
-  let interpNormalizeProp = conjoin (map (\p -> discreteProbsNormalized p) neuralP)
-  let juliaProp = conjoin (map (\(p, tcs) -> testProbJulia p tcs) nonNeuralsProb)
-  let pythonProp = conjoin (map (\(p, tcs) -> testProbPython p tcs) nonNeuralsProb)
-  return $ interpProp .&&. interpNormalizeProp .&&. pythonProp .&&. juliaProp
+  putStrLn "=== Test End2End Interpreter ==="
+  let interprTest = label "End2End Interpreter" $ forAll (elements cases) (\(p, tcs) -> conjoin $ map (testInterpreter p) tcs)
+  interprProp <- quickCheckResult (withMaxSuccess (length cases) interprTest) >>= return . isSuccess
+  putStrLn "\n=== Test End2End Interpreter Normalization ==="
+  let interprNormalizeTest = label "End2End Interpreter Normalization" $ forAll (elements neuralP) (\p -> discreteProbsNormalized p)
+  interprNormalProp <- quickCheckResult (withMaxSuccess (length neuralP) interprNormalizeTest) >>= return . isSuccess
+  putStrLn "\n=== Test End2End Julia ==="
+  let juliaTest = label "End2End Julia" $ forAll (elements nonNeuralsProb) (\(p, tcs) -> testProbJulia p tcs)
+  juliaProp <- quickCheckResult (withMaxSuccess (length nonNeuralsProb) juliaTest) >>= return . isSuccess
+  putStrLn "\n=== Test End2End Python ==="
+  let pythonTest = label "End2End Python" $ forAll (elements nonNeuralsProb) (\(p, tcs) -> testProbPython p tcs)
+  pythonProp <- quickCheckResult (withMaxSuccess (length nonNeuralsProb) pythonTest) >>= return . isSuccess
 
-
-return []
---test_end2end = $quickCheckAll
-test_end2end = quickCheckResult (withMaxSuccess 1 prop_end2endTests) >>= return . isSuccess
+  return $ interprProp && interprNormalProp && juliaProp && pythonProp
