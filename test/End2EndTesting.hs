@@ -11,6 +11,7 @@ import Control.Monad.Random
 import System.Random (mkStdGen)
 import Data.Maybe
 import Data.List (intercalate, nub)
+import Data.Text (replace, pack, unpack)
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
 import SPLL.Prelude
@@ -130,7 +131,7 @@ juliaProbTestCode src tcs =
 
 pythonProbTestCode :: String -> [TestCase] -> String
 pythonProbTestCode src tcs = 
-  src ++ "\n" ++
+  unpack (replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n") (pack src)) ++ "\n" ++   -- Importing pyTorch is really slow and not needed
   "main.generate(" ++ intercalate ", " (map pyVal exampleParams) ++ ")\n" ++
   concat (map (\(ProbTestCase sample params (outProb, outDim)) -> "tmp = main.forward(" ++ pyVal sample ++ intercalate ", " (map pyVal params) ++ ")\n\
   \if abs(tmp[0] - " ++ pyVal outProb ++ ") > 0.0001:\n\
