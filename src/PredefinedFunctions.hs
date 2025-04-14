@@ -44,6 +44,11 @@ negFwd = FDecl (Forall [] (TArrow TFloat TFloat)) ["a"] ["b"] (IRUnaryOp OpNeg (
 negInv :: FDecl
 negInv = FDecl (Forall [] (TArrow TFloat TFloat)) ["b"] ["a"] (IRUnaryOp OpNeg (IRVar "b")) (IRConst (VBool True)) False [("b", IRConst (VFloat (-1)))]
 
+recipFwd :: FDecl
+recipFwd = FDecl (Forall [] (TArrow TFloat TFloat)) ["a"] ["b"] (IROp OpDiv (IRConst (VFloat 1)) (IRVar "a")) (IRConst (VBool True)) False [("a", IRUnaryOp OpNeg (IROp OpDiv (IRConst (VFloat 1)) (IROp OpMult (IRVar "a") (IRVar "a"))))]
+recipInv :: FDecl
+recipInv = FDecl (Forall [] (TArrow TFloat TFloat)) ["b"] ["a"] (IROp OpDiv (IRConst (VFloat 1)) (IRVar "b")) (IRConst (VBool True)) False [("b", IRUnaryOp OpNeg (IROp OpDiv (IRConst (VFloat 1)) (IROp OpMult (IRVar "b") (IRVar "b"))))]
+
 leftFwd :: FDecl
 leftFwd = FDecl (Forall [TV "a", TV "b"] (TVarR (TV "a") `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b")))) ["a"] ["b"] (IRLeft (IRVar "a")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1))]
 fromLeftFwd :: FDecl
@@ -120,6 +125,7 @@ globalFenv :: FEnv
 globalFenv = [("double", FPair doubleFwd [doubleInv]),
               ("exp", FPair expFwd [expInv]),
               ("neg", FPair negFwd [negInv]),
+              ("recip", FPair recipFwd [recipInv]),
               ("left", FPair leftFwd [fromLeftFwd]),
               ("right", FPair rightFwd [fromRightFwd]),
               ("fromLeft", FPair fromLeftFwd [leftFwd]),

@@ -500,7 +500,7 @@ appTable = do
   return $ foldl apply f args
 
 opList :: [([Char], Expr -> Expr -> Expr)]
-opList = [(">", (#>#)), ("++", (#<+>#)), ("**", (#<*>#)), ("+", (#+#)), ("*", (#*#)), (":", (#:#))]
+opList = [(">", (#>#)), ("++", (#<+>#)), ("**", (#<*>#)), ("+", (#+#)), ("*", (#*#)), ("/", (#/#)), (":", (#:#))]
 
 mkOp :: Parser (Expr -> Expr -> Expr)
 mkOp = do
