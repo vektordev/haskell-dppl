@@ -243,7 +243,7 @@ toIRProbability conf typeEnv (InjF _ name [param]) sample = do
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
   let returnExpr = IRIf appTest (IROp OpMult paramExpr (IRUnaryOp OpAbs invDerivExpr)) const0
   return (returnExpr, paramDim, paramBranches)
-toIRProbability conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name params) sample
+toIRProbability conf typeEnv (InjF TypeInfo {tags=extras} name params) sample
   | extras `hasAlgorithm` "injF2Left" || extras `hasAlgorithm` "injF2Right" = do
   -- Index of the deterministic and the probabilistic parameter (Left -> 0, Right -> 1)
   let detIdx = if extras `hasAlgorithm` "injF2Left" then 0 else 1
@@ -588,7 +588,7 @@ toIRIntegrate conf typeEnv (InjF _ name [param]) low high = do  --TODO Multivari
   (paramExpr, _, paramBranches) <- toIRIntegrate conf typeEnv param letInBlockLow letInBlockHigh
   let returnExpr = IROp OpMult paramExpr (IRUnaryOp OpSign invDerivExpr)
   return (returnExpr, const0, paramBranches)
-toIRIntegrate conf typeEnv (InjF TypeInfo {rType=TFloat, tags=extras} name params) low high
+toIRIntegrate conf typeEnv (InjF TypeInfo {tags=extras} name params) low high
   | extras `hasAlgorithm` "injF2Left" || extras `hasAlgorithm` "injF2Right" = do
   let detIdx = if extras `hasAlgorithm` "injF2Left" then 0 else 1
   let probIdx = 1 - detIdx  -- Other Variable is prob

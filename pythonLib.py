@@ -67,6 +67,11 @@ class InferenceList:
       current = current.next
     return current.value
   
+  def __eq__(self, other):
+    if not isinstance(other, InferenceList):
+      return False
+    return self.value == other.value and self.next == other.next
+
   def prepend(self, value):
     return ConsInferenceList(value, self)
 
