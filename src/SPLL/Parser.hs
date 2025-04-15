@@ -498,16 +498,23 @@ arithOpList = [("++", (#<+>#)), ("**", (#<*>#)), ("+", (#+#)), ("*", (#*#)), ("/
 cmpOpList :: [([Char], Expr -> Expr -> Expr)]
 cmpOpList = [(">", (#>#)), ("<", (#<#))]
 
+funLikeOps :: [([Char], Expr -> Expr)]
+funLikeOps = [("not", (#!#))]
 
 mkInfixOp :: [([Char], Expr -> Expr -> Expr)] -> [Operator Parser Expr]
 mkInfixOp tbl = map infx tbl
   where infx (name, f) = InfixL (f <$ symbol name)
 
+mkPrefixOp :: [([Char], Expr -> Expr)] -> [Operator Parser Expr]
+mkPrefixOp tbl = map infx tbl
+  where infx (name, f) = Prefix (f <$ symbol name)
+
 
 -- | Operator table (precedence and associativity)
 opTable :: [[Operator Parser Expr]]
 opTable =
-  [ mkInfixOp arithOpList,  -- Left-associative operators
+  [ mkPrefixOp funLikeOps,
+    mkInfixOp arithOpList,  -- Left-associative operators
     mkInfixOp cmpOpList
   ]
 
