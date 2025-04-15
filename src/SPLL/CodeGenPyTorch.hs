@@ -71,6 +71,7 @@ pyVal (VList (ListCont x xs)) = "ConsInferenceList(" ++ pyVal x ++ ", " ++ pyVal
 pyVal (VInt i) = show i
 pyVal (VFloat f) = show f
 pyVal (VBool f) = if f then "True" else "False"
+pyVal (VTuple a b) = "(" ++ pyVal a ++ ", " ++ pyVal b ++ ")"
 pyVal (VEither (Left a)) = "(False, " ++ pyVal a ++ ", None)"
 pyVal (VEither (Right a)) = "(True, None, " ++ pyVal a ++ ")"
 pyVal (VAny) = "'ANY'"

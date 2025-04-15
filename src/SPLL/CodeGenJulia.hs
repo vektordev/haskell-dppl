@@ -55,6 +55,7 @@ juliaVal (VList (ListCont x xs)) = "ConsInferenceList(" ++ juliaVal x ++ ", " ++
 juliaVal (VInt i) = show i
 juliaVal (VFloat f) = show f
 juliaVal (VBool f) = if f then "true" else "false"
+juliaVal (VTuple a b) = "(" ++ juliaVal a ++ ", " ++ juliaVal b ++ ")"
 juliaVal (VEither (Left a)) = "(false, " ++ juliaVal a ++ ", nothing)"
 juliaVal (VEither (Right a)) = "(true, nothing, " ++ juliaVal a ++ ")"
 juliaVal VAny = "\"ANY\""
