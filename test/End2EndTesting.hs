@@ -149,17 +149,21 @@ test_end2end = do
   let probTestCases = map (\(p, tcs) -> (p, filter isProbTestCase tcs)) cases
   let nonNeuralsProb = filter (null . neurals . fst) probTestCases
   let neuralP = map fst (filter (not . null . neurals . fst) cases)
+
   putStrLn "=== Test End2End Interpreter ==="
-  let interprTest = label "End2End Interpreter" $ forAll (elements cases) (\(p, tcs) -> conjoin $ map (testInterpreter p) tcs)
-  interprProp <- quickCheckResult (withMaxSuccess (length cases) interprTest) >>= return . isSuccess
+  let interprTest = label "End2End Interpreter" $ conjoin [conjoin $ map (testInterpreter p) tcs | (p, tcs) <- cases]
+  interprProp <- quickCheckResult (withMaxSuccess 1 interprTest) >>= return . isSuccess
+
   putStrLn "\n=== Test End2End Interpreter Normalization ==="
-  let interprNormalizeTest = label "End2End Interpreter Normalization" $ forAll (elements neuralP) (\p -> discreteProbsNormalized p)
-  interprNormalProp <- quickCheckResult (withMaxSuccess (length neuralP) interprNormalizeTest) >>= return . isSuccess
+  let interprNormalizeTest = label "End2End Interpreter Normalization" $ conjoin [discreteProbsNormalized p | p <- neuralP]
+  interprNormalProp <- quickCheckResult (withMaxSuccess 1 interprNormalizeTest) >>= return . isSuccess
+
   putStrLn "\n=== Test End2End Julia ==="
-  let juliaTest = label "End2End Julia" $ forAll (elements nonNeuralsProb) (\(p, tcs) -> testProbJulia p tcs)
-  juliaProp <- quickCheckResult (withMaxSuccess (length nonNeuralsProb) juliaTest) >>= return . isSuccess
+  let juliaTest = label "End2End Julia" $ conjoin [testProbJulia p tcs | (p, tcs) <- nonNeuralsProb]
+  juliaProp <- quickCheckResult (withMaxSuccess 1 juliaTest) >>= return . isSuccess
+
   putStrLn "\n=== Test End2End Python ==="
-  let pythonTest = label "End2End Python" $ forAll (elements nonNeuralsProb) (\(p, tcs) -> testProbPython p tcs)
-  pythonProp <- quickCheckResult (withMaxSuccess (length nonNeuralsProb) pythonTest) >>= return . isSuccess
+  let pythonTest = label "End2End Python" $ conjoin [testProbPython p tcs | (p, tcs) <- nonNeuralsProb]
+  pythonProp <- quickCheckResult (withMaxSuccess 1 pythonTest) >>= return . isSuccess
 
   return $ interprProp && interprNormalProp && juliaProp && pythonProp
