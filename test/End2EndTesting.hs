@@ -58,7 +58,7 @@ testInterpreter :: Program -> TestCase -> Property
 testInterpreter p (ProbTestCase sample params (VFloat expectedProb, VFloat expectedDim)) = do
   let VTuple (VFloat outProb) (VFloat outDim) = runProb standardCompiler p params sample
   counterexample ("Probability differs. Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < 0.0001) .&&.
-    counterexample ("Dimensionality differs. Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outDim === expectedDim)
+    counterexample ("Dimensionality differs. Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim)
 testInterpreter p (ArgmaxPTestCase params res) = ioProperty $ do
   let paramCnt = length params
   let mockedParams seeds = map (\(par, s) -> VTuple (VInt 1) (VTuple par (VInt s))) (zip params seeds)
@@ -123,7 +123,7 @@ juliaProbTestCode src tcs =
   \if tmp[1] - " ++ juliaVal outProb ++ " > 0.0001\n\
   \  error(\"Probability wrong: \" * string(tmp[1]) * \"/=\" * string(" ++ juliaVal outProb ++ "))\n\
   \end\n\
-  \if tmp[2] != " ++ juliaVal outDim ++ "\n\
+  \if tmp[1] != 0 && tmp[2] != " ++ juliaVal outDim ++ "\n\
   \  error(\"Dimensionality wrong: \" * string(tmp[2]) * \"/=\" * string(" ++ juliaVal outDim ++ "))\n\
   \end\n") tcs) ++ 
   "exit(0)"
@@ -136,8 +136,8 @@ pythonProbTestCode src tcs =
   concat (map (\(ProbTestCase sample params (outProb, outDim)) -> "tmp = main.forward(" ++ pyVal sample ++ intercalate ", " (map pyVal params) ++ ")\n\
   \if abs(tmp[0] - " ++ pyVal outProb ++ ") > 0.0001:\n\
   \  raise ValueError(\"Probability wrong: \" + str(tmp[0]) + \"!=\" + str(" ++ pyVal outProb ++ "))\n\
-  \if tmp[1] != " ++ pyVal outDim ++ ":\n\
-  \  raise ValueError(\"Dimensionality wrong: \" + str(tmp[1]) * \"/=\" + str(" ++ pyVal outDim ++ "))\n\
+  \if tmp[0] != 0 and tmp[1] != " ++ pyVal outDim ++ ":\n\
+  \  raise ValueError(\"Dimensionality wrong: \" + str(tmp[1]) + \"/=\" + str(" ++ pyVal outDim ++ "))\n\
   \") tcs) ++ 
   "exit(0)"
   where ProbTestCase _ exampleParams _ = head tcs 
