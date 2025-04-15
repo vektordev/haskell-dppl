@@ -453,21 +453,13 @@ application = do
 
 -- | Main expression parser using makeExprParser
 expr :: Parser Expr
-expr = makeExprParser term operatorTable
+expr = makeExprParser term opTable
   where
     term = choice [
         try application,
         try keywordExpr,
         atom
       ]
-
--- | Operator table for makeExprParser
-operatorTable :: [[Operator Parser Expr]]
-operatorTable = [
-    [ InfixL (mkOp)
-    -- Add other operators here at appropriate precedence levels
-    ]
-  ]
 
 -- | Helper for debuggable subparsers
 withDebug :: String -> Parser a -> Parser a
@@ -499,23 +491,26 @@ appTable = do
   args <- many term
   return $ foldl apply f args
 
-opList :: [([Char], Expr -> Expr -> Expr)]
-opList = [(">", (#>#)), ("++", (#<+>#)), ("**", (#<*>#)), ("+", (#+#)), ("*", (#*#)), ("/", (#/#)), (":", (#:#)),
+arithOpList :: [([Char], Expr -> Expr -> Expr)]
+arithOpList = [("++", (#<+>#)), ("**", (#<*>#)), ("+", (#+#)), ("*", (#*#)), ("/", (#/#)), (":", (#:#)),
           ("-", \a b -> a #+# (negF b))]
 
-mkOp :: Parser (Expr -> Expr -> Expr)
-mkOp = do
-  op <- pOp
-  case lookup op opList of
-    Just constructor -> return constructor
-    Nothing -> fail $ "unknown operator: " ++ op
+cmpOpList :: [([Char], Expr -> Expr -> Expr)]
+cmpOpList = [(">", (#>#)), ("<", (#<#))]
+
+
+mkInfixOp :: [([Char], Expr -> Expr -> Expr)] -> [Operator Parser Expr]
+mkInfixOp tbl = map infx tbl
+  where infx (name, f) = InfixL (f <$ symbol name)
 
 
 -- | Operator table (precedence and associativity)
 opTable :: [[Operator Parser Expr]]
 opTable =
-  [ [ InfixL (mkOp) ]  -- Left-associative operators
+  [ mkInfixOp arithOpList,  -- Left-associative operators
+    mkInfixOp cmpOpList
   ]
+
 
 -- | Top-level parser
 expressionParser :: Parser Expr
