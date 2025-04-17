@@ -75,10 +75,19 @@ function Base.getindex(lst::InferenceList, i::Int)
     curr = lst
     while i > 1
         i -= 1
-        lst = lst.next
+        curr = curr.next
     end
 
-    return lst.value
+    return curr.value
+end
+
+function Base.iterate(lst::InferenceList)
+    lst isa ConsInferenceList ? (lst.value, lst.next) : nothing
+end
+
+# Base.iterate for subsequent steps
+function Base.iterate(lst::InferenceList, state)
+    state isa ConsInferenceList ? (state.value, state.next) : nothing
 end
 
 function prepend(x, xs :: InferenceList) :: InferenceList
