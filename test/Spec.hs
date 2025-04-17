@@ -28,6 +28,7 @@ import SPLL.Typing.Infer
 import SPLL.Typing.Witnessing
 import SpecExamples
 --import ArbitrarySPLL
+import Options.Applicative
 import Control.Exception.Base (SomeException, try)
 import Test.QuickCheck.Monadic (monadicIO, run, assert)
 import Test.QuickCheck.Property (failed, reason)
@@ -594,13 +595,46 @@ return []
 runTests :: IO Bool
 runTests = $quickCheckAll
 
+data TestOpts = TestOpts {
+  disableSpec :: Bool,
+  disableInternals :: Bool,
+  disableParser :: Bool,
+  disableEnd2End :: Bool
+}
+
+parseTestOpts :: Parser TestOpts
+parseTestOpts = TestOpts
+        <$> switch
+            ( long "disableSpec"
+            <> short 'S'
+            <> help "Disables the tests in Spec")
+        <*> switch
+            ( long "disableInternals"
+            <> short 'I'
+            <> help "Disables the internal tests")
+        <*> switch
+            ( long "disableParser"
+            <> short 'P'
+            <> help "Disables the parser tests")
+        <*> switch
+            ( long "disableEnd2End"
+            <> short 'E'
+            <> help "Disables the end2end tests")
 
 main :: IO ()
-main = do
-  a <- runTests
-  b <- test_parser
-  c <- test_internals
-  d <- test_end2end
+main = runSpecifiedTests =<< execParser opts
+         where
+           opts = info (parseTestOpts <**> helper)
+             ( fullDesc
+            <> progDesc "Compiles or computes probabilistic programs"
+            <> header "Haskell DPPL" )
+
+runSpecifiedTests :: TestOpts -> IO ()
+runSpecifiedTests opts = do
+  a <- if disableSpec opts then return True else runTests
+  b <- if disableParser opts then return True else test_parser
+  c <- if disableInternals opts then return True else test_internals
+  d <- if disableEnd2End opts then return True else test_end2end
   let x = a && b && c && d
   if x then
     putStrLn "Test successful!"
