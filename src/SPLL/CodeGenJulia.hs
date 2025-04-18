@@ -128,7 +128,7 @@ generateExpression expr@(IRInvoke _) = generateInvokeExpression expr
 generateExpression (IREnumSum name enumRange expr) = "sum(map((" ++ name ++ " -> " ++ generateExpression expr ++ "), " ++ juliaVal enumRange ++ "))"
 generateExpression (IREvalNN name arg) = name ++ "(" ++ generateExpression arg ++ ")"
 generateExpression (IRIndex lst idx) = "(" ++ generateExpression lst ++ ")[" ++ generateExpression idx ++ " + 1]"
-generateExpression (IRLetIn name val body) = "(let " ++ name ++ " = " ++ generateExpression val ++ "; " ++ generateExpression body ++ ")"
+generateExpression (IRLetIn name val body) = "(let " ++ name ++ " = " ++ generateExpression val ++ "; " ++ generateExpression body ++ "end)"
 generateExpression x = error ("Unknown expression in Julia codegen: " ++ show x)
 
 generateInvokeExpression :: IRExpr -> String

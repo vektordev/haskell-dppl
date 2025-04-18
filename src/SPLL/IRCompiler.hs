@@ -218,10 +218,11 @@ toIRProbability conf typeEnv (Apply TypeInfo{rType=rt} l v) sample = do
          else
            return (IRTFst (IRInvoke (IRApply lIR vIR)), IRTSnd (IRInvoke (IRApply lIR vIR)), const0)
 toIRProbability conf typeEnv (Cons _ hdExpr tlExpr) sample = do
-  (headP, headDim, headBranches) <- toIRProbabilitySave conf typeEnv hdExpr (IRHead sample)
-  (tailP, tailDim, tailBranches) <- toIRProbabilitySave conf typeEnv tlExpr (IRTail sample)
-  mult <- (headP, headDim)  `multP` (tailP, tailDim)
-  return (IRIf (IROp OpEq sample (IRConst $ VList EmptyList)) (IRConst $ VFloat 0) (fst mult), IRIf (IROp OpEq sample (IRConst $ VList EmptyList)) (IRConst $ VFloat 0) (snd mult), IRIf (IROp OpEq sample (IRConst $ VList EmptyList)) (IRConst $ VFloat 0) (IROp OpPlus headBranches tailBranches))
+  headTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRProbabilitySave conf typeEnv hdExpr (IRHead sample)))
+  tailTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRProbabilitySave conf typeEnv tlExpr (IRTail sample)))
+  let dim = if countBranches conf then IRTFst . IRTSnd else IRTSnd
+  mult <- (IRTFst headTuple, dim headTuple)  `multP` (IRTFst tailTuple, dim tailTuple)
+  return (IRIf (IROp OpEq sample (IRConst $ VList EmptyList)) (IRConst $ VFloat 0) (fst mult), IRIf (IROp OpEq sample (IRConst $ VList EmptyList)) (IRConst $ VFloat 0) (snd mult), IRIf (IROp OpEq sample (IRConst $ VList EmptyList)) (IRConst $ VFloat 0) (IROp OpPlus (IRTSnd (IRTSnd headTuple)) (IRTSnd (IRTSnd tailTuple))))
   --return (IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (fst mult), IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (snd mult), IROp OpPlus headBranches tailBranches)
 toIRProbability conf typeEnv (TCons _ t1Expr t2Expr) sample = do
   (t1P, t1Dim, t1Branches) <- toIRProbabilitySave conf typeEnv t1Expr (IRTFst sample)
@@ -563,10 +564,11 @@ toIRIntegrate conf typeEnv (IfThenElse _ cond left right) low high = do
             (IROp OpMult (IRVar var_cond_p) leftExpr)
             (IROp OpMult (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var_cond_p) ) rightExpr), const0, IROp OpPlus condBranches (IROp OpPlus leftBranches rightBranches) )
 toIRIntegrate conf typeEnv (Cons _ hdExpr tlExpr) low high = do
-    (headP, headDim, headBranches) <- toIRIntegrateSave conf typeEnv hdExpr (IRHead low) (IRHead high)
-    (tailP, tailDim, tailBranches) <- toIRIntegrateSave conf typeEnv tlExpr (IRTail low) (IRTail high)
-    (multP, multDim) <- (headP, headDim) `multP` (tailP, tailDim)
-    return (IRIf (IROp OpOr (IROp OpEq low (IRConst $ VList EmptyList)) (IROp OpEq high (IRConst $ VList EmptyList))) (IRConst $ VFloat 0) multP, multDim, IROp OpPlus headBranches tailBranches)
+  headTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRIntegrateSave conf typeEnv hdExpr (IRHead low) (IRHead high)))
+  tailTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRIntegrateSave conf typeEnv tlExpr (IRTail low) (IRTail high)))
+  let dim = if countBranches conf then IRTFst . IRTSnd else IRTSnd
+  (multP, multDim) <- (IRTFst headTuple, dim headTuple)  `multP` (IRTFst tailTuple, dim tailTuple)
+  return (IRIf (IROp OpOr (IROp OpEq low (IRConst $ VList EmptyList)) (IROp OpEq high (IRConst $ VList EmptyList))) (IRConst $ VFloat 0) multP, multDim, IROp OpPlus (IRTSnd (IRTSnd headTuple)) (IRTSnd (IRTSnd tailTuple)))
 toIRIntegrate conf typeEnv (Null _) low high = do
   ind <- indicator (IROp OpAnd (IROp OpEq low (IRConst $ VList EmptyList)) (IROp OpEq high (IRConst $ VList EmptyList)))
   return (ind, const0, const0)
