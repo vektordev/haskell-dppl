@@ -1,7 +1,7 @@
 module SPLL.Validator (
   validateProgram
 ) where
-import SPLL.Lang.Types (Program(..))
+import SPLL.Lang.Types (Program(..), GenericValue(..))
 import SPLL.Lang.Lang (Expr(..), getSubExprs, getFunctionNames)
 import Control.Monad
 import Data.Maybe (isJust, isNothing)
@@ -29,6 +29,7 @@ validateExpression p topLevel (Var _ name) | usedBeforeDeclaration name topLevel
 validateExpression _ _ (Lambda _ name body) | declarationsCount name body > 0 = Left ("Duplicate declaration of identifier (Shawdowing is not allowed): " ++ name)
 validateExpression _ _ (Lambda _ name body) | isJust (lookup name globalFenv) = Left ("Identifier name is already used by an InjF: " ++ name)
 validateExpression p _ (Lambda _ name body) | name `elem` getFunctionNames p = Left ("Identifier is already a function name: " ++ name)
+validateExpression _ _ (Constant _ VAny) = Left "ANY may not be used in program declaration"
 validateExpression _ _ _ = Right ()
 
 declarationsCount :: String -> Expr -> Int
