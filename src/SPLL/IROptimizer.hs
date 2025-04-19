@@ -217,7 +217,10 @@ forceOp OpGreaterThan (VFloat x) (VFloat y) = VBool (x > y)
 forceOp OpLessThan (VInt x) (VInt y) = VBool (x < y)
 forceOp OpLessThan (VFloat x) (VFloat y) = VBool (x < y)
 forceOp OpAnd (VBool x) (VBool y) = VBool (x && y)
-forceOp _ _ _ = error "Error during forceOp optimizer"
+-- Operations on ANYs should not happen. This is simplifying unreachable code paths, that should be optimized away later
+forceOp _ VAny _ = VAny
+forceOp _ _ VAny = VAny
+forceOp a b c = error $ "Error during forceOp optimizer: " ++ show a ++ " " ++ show b ++ " " ++ show c
 
 forceUnaryOp :: UnaryOperand -> IRValue -> IRValue
 forceUnaryOp OpAbs (VFloat x) = VFloat (abs x)

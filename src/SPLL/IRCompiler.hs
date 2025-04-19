@@ -18,6 +18,7 @@ import Data.Functor.Identity
 import Data.Number.Erf (erf)
 import PredefinedFunctions (FDecl(applicability))
 import SPLL.AutoNeural
+import Data.Functor
 
 -- SupplyT needs to be a transformer, because Supply does not implement Functor correctly
 type CompilerMonad a = WriterT [(String, IRExpr)] (SupplyT Int Identity) a
@@ -49,9 +50,9 @@ envToIR conf p = fmap (fmap (postProcess conf) ) $ -- map optimizer over all sec
 
 
 runCompile :: CompilerConfig -> CompilerMonad CompilationResult -> IRExpr
-runCompile conf codeGen = generateLetInBlock conf (runWriterT codeGen)
+runCompile conf codeGen = generateLetInBlock conf (runIdentity $ runSupplyVars $ runWriterT $ codeGen)
 
-generateLetInBlock :: CompilerConfig -> (SupplyT Int Identity) (CompilationResult, [(String, IRExpr)]) -> IRExpr
+generateLetInBlock :: CompilerConfig -> (CompilationResult, [(String, IRExpr)]) -> IRExpr
 generateLetInBlock conf codeGen =
   case m of
     (IRLambda _ _) -> (foldr (\(var, val) expr  -> IRLetIn var val expr) m binds) --Dont make tuple out of lambdas, as the snd (and thr) element don't contain information anyway
@@ -59,7 +60,7 @@ generateLetInBlock conf codeGen =
             (foldr (\(var, val) expr  -> IRLetIn var val expr) (IRTCons m (IRTCons dim bc)) binds)
           else
             (foldr (\(var, val) expr  -> IRLetIn var val expr) (IRTCons m dim) binds)
-  where ((m, dim, bc), binds) = runIdentity $ runSupplyVars codeGen
+  where ((m, dim, bc), binds) = codeGen
 
 -- Return type (name, rType, hasInferenceFunctions)
 getGlobalTypeEnv :: Program -> TypeEnv
@@ -94,11 +95,11 @@ toIRProbabilitySave conf typeEnv (Lambda t name subExpr) sample = do
   case paramRType of
     TArrow (TArrow _ _) _ -> do
       let newTypeEnv = (name, (paramRType, True)):typeEnv
-      irTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRProbabilitySave conf newTypeEnv subExpr sample))
+      irTuple <- lift (runWriterT (toIRProbabilitySave conf newTypeEnv subExpr sample)) <&> generateLetInBlock conf
       return (IRLambda name irTuple, const0, const0)
     _ -> do
       let newTypeEnv = (name, (paramRType, False)):typeEnv
-      irTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRProbabilitySave conf newTypeEnv subExpr sample))
+      irTuple <- lift (runWriterT (toIRProbabilitySave conf newTypeEnv subExpr sample)) <&> generateLetInBlock conf
       return (IRLambda name irTuple, const0, const0)
 toIRProbabilitySave conf typeEnv expr sample = do
   (probExpr, probDim, probBranches) <- toIRProbability conf typeEnv expr sample
@@ -201,11 +202,11 @@ toIRProbability conf typeEnv (Lambda t name subExpr) sample = do
     TArrow (TArrow _ _) _ -> do
       -- Lambda parameter is a function
       let newTypeEnv = (name, (paramRType, True)):typeEnv
-      irTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRProbability conf newTypeEnv subExpr sample))
+      irTuple <- lift (runWriterT (toIRProbability conf newTypeEnv subExpr sample)) <&> generateLetInBlock conf
       return (IRLambda name irTuple, const0, const0)
     _ -> do
       let newTypeEnv = (name, (paramRType, False)):typeEnv
-      irTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRProbability conf newTypeEnv subExpr sample))
+      irTuple <- lift (runWriterT (toIRProbability conf newTypeEnv subExpr sample)) <&> generateLetInBlock conf
       return (IRLambda name irTuple, const0, const0)
 toIRProbability conf typeEnv (Apply TypeInfo{rType=rt} l v) sample = do
   vIR <- toIRGenerate typeEnv v
@@ -218,8 +219,8 @@ toIRProbability conf typeEnv (Apply TypeInfo{rType=rt} l v) sample = do
          else
            return (IRTFst (IRInvoke (IRApply lIR vIR)), IRTSnd (IRInvoke (IRApply lIR vIR)), const0)
 toIRProbability conf typeEnv (Cons _ hdExpr tlExpr) sample = do
-  headTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRProbabilitySave conf typeEnv hdExpr (IRHead sample)))
-  tailTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRProbabilitySave conf typeEnv tlExpr (IRTail sample)))
+  headTuple <- lift (runWriterT (toIRProbabilitySave conf typeEnv hdExpr (IRHead sample))) <&> generateLetInBlock conf
+  tailTuple <- lift (runWriterT (toIRProbabilitySave conf typeEnv tlExpr (IRTail sample))) <&> generateLetInBlock conf
   let dim = if countBranches conf then IRTFst . IRTSnd else IRTSnd
   mult <- (IRTFst headTuple, dim headTuple)  `multP` (IRTFst tailTuple, dim tailTuple)
   return (IRIf (IROp OpEq sample (IRConst $ VList EmptyList)) (IRConst $ VFloat 0) (fst mult), IRIf (IROp OpEq sample (IRConst $ VList EmptyList)) (IRConst $ VFloat 0) (snd mult), IRIf (IROp OpEq sample (IRConst $ VList EmptyList)) (IRConst $ VFloat 0) (IROp OpPlus (IRTSnd (IRTSnd headTuple)) (IRTSnd (IRTSnd tailTuple))))
@@ -231,7 +232,7 @@ toIRProbability conf typeEnv (TCons _ t1Expr t2Expr) sample = do
   return (fst mult, snd mult, IROp OpPlus t1Branches t2Branches)
 toIRProbability conf typeEnv (InjF _ name [param]) sample = do
   -- FPair of the InjF with unique names
-  fPair <- instantiate mkVariable name 
+  fPair <- instantiate mkVariable name
   -- Unary InjF has a single inversion
   let FPair _ [inv] = fPair
   let FDecl {inputVars=[v], body=invExpr, applicability=appTest, deconstructing=decons, derivatives=[(_, invDerivExpr)]} = inv
@@ -292,8 +293,8 @@ toIRProbability conf typeEnv (InjF TypeInfo {tags=extras} name [left, right]) sa
   --   sum += if invExpr(e, sample) in rightEnum then pLeft(e) * pRight(sample - e) else 0
   -- For that we name e like the lhs of
   -- We need to unfold the monad stack, because the EnumSum Works like a lambda expression and has a local scope
-  irTuple <- lift $ return $ generateLetInBlock conf (runWriterT (do
-    --the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
+  irTuple <- lift (runWriterT (do
+    -- the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
     (pLeft, _, _) <- toIRProbability conf typeEnv left (IRVar x2)
     (pRight, _, _) <- toIRProbability conf typeEnv right (IROp OpSub sample (IRVar x2))
     tell [(x3, sample)]
@@ -303,7 +304,8 @@ toIRProbability conf typeEnv (InjF TypeInfo {tags=extras} name [left, right]) sa
     let branchesExpr = case topKThreshold conf of
           Nothing -> IRIf (IRElementOf invExpr (IRConst (fmap failConversion (constructVList enumListR)))) (IRConst (VFloat 1)) (IRConst (VFloat 0))
           Just thr -> IRIf (IROp OpAnd (IRElementOf invExpr (IRConst (fmap failConversion (constructVList enumListR)))) (IROp OpGreaterThan pLeft (IRConst (VFloat thr)))) (IRConst (VFloat 1)) (IRConst (VFloat 0))
-    return (returnExpr, const0, branchesExpr)))
+    return (returnExpr, const0, branchesExpr)
+    )) <&> generateLetInBlock conf
   uniquePrefix <- mkVariable ""
   let enumSumExpr = IREnumSum x2 (fmap failConversion (constructVList enumListL)) $ IRTFst irTuple
   let branchCountSum = IREnumSum x2 (fmap failConversion (constructVList enumListL)) $ IRTSnd (IRTSnd irTuple)
@@ -511,11 +513,11 @@ toIRIntegrateSave conf typeEnv (Lambda t name subExpr) low high = do
   case paramRType of
     TArrow (TArrow _ _) _ -> do
       let newTypeEnv = (name, (paramRType, True)):typeEnv
-      irTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRIntegrateSave conf newTypeEnv subExpr low high))
+      irTuple <- lift (runWriterT (toIRIntegrateSave conf newTypeEnv subExpr low high)) <&> generateLetInBlock conf
       return (IRLambda name irTuple, const0, const0)
     _ -> do
       let newTypeEnv = (name, (paramRType, False)):typeEnv
-      irTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRIntegrateSave conf newTypeEnv subExpr low high))
+      irTuple <- lift (runWriterT (toIRIntegrateSave conf newTypeEnv subExpr low high)) <&> generateLetInBlock conf
       return (IRLambda name irTuple, const0, const0)
 toIRIntegrateSave conf typeEnv expr lower higher = do
   (prob, probDim, probBC) <- toIRProbability conf typeEnv expr lower
@@ -566,8 +568,8 @@ toIRIntegrate conf typeEnv (IfThenElse _ cond left right) low high = do
             (IROp OpMult (IRVar var_cond_p) leftExpr)
             (IROp OpMult (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var_cond_p) ) rightExpr), const0, IROp OpPlus condBranches (IROp OpPlus leftBranches rightBranches) )
 toIRIntegrate conf typeEnv (Cons _ hdExpr tlExpr) low high = do
-  headTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRIntegrateSave conf typeEnv hdExpr (IRHead low) (IRHead high)))
-  tailTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRIntegrateSave conf typeEnv tlExpr (IRTail low) (IRTail high)))
+  headTuple <- lift (runWriterT (toIRIntegrateSave conf typeEnv hdExpr (IRHead low) (IRHead high))) <&> generateLetInBlock conf
+  tailTuple <- lift (runWriterT (toIRIntegrateSave conf typeEnv tlExpr (IRTail low) (IRTail high))) <&> generateLetInBlock conf
   let dim = if countBranches conf then IRTFst . IRTSnd else IRTSnd
   (multP, multDim) <- (IRTFst headTuple, dim headTuple)  `multP` (IRTFst tailTuple, dim tailTuple)
   return (IRIf (IROp OpOr (IROp OpEq low (IRConst $ VList EmptyList)) (IROp OpEq high (IRConst $ VList EmptyList))) (IRConst $ VFloat 0) multP, multDim, IROp OpPlus (IRTSnd (IRTSnd headTuple)) (IRTSnd (IRTSnd tailTuple)))
@@ -615,11 +617,11 @@ toIRIntegrate conf typeEnv (Lambda t name subExpr) low high = do
   case paramRType of
     TArrow (TArrow _ _) _ -> do
       let newTypeEnv = (name, (paramRType, True)):typeEnv
-      irTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRIntegrate conf newTypeEnv subExpr low high))
+      irTuple <- lift (runWriterT (toIRIntegrate conf newTypeEnv subExpr low high)) <&> generateLetInBlock conf
       return (IRLambda name irTuple, const0, const0)
     _ -> do
       let newTypeEnv = (name, (paramRType, False)):typeEnv
-      irTuple <- lift $ return $ generateLetInBlock conf (runWriterT (toIRIntegrate conf newTypeEnv subExpr low high))
+      irTuple <- lift (runWriterT (toIRIntegrate conf newTypeEnv subExpr low high)) <&> generateLetInBlock conf
       return (IRLambda name irTuple, const0, const0)
 toIRIntegrate conf typeEnv (Apply TypeInfo{rType=rt} l v) low high = do
   vIR <- toIRGenerate typeEnv v
