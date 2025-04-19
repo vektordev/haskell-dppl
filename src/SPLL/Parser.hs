@@ -209,7 +209,7 @@ injFs :: [(String, (Int, [Expr] -> Expr))]
 injFs = [(name, (parameterCount name, injF name)) | (name, _) <- globalFenv]
 
 pValue :: Parser Value
-pValue = choice [pBool, try pFloat, pIntVal, pTupleVal, pList>>=(return . constructVList)]
+pValue = choice [pBool, try pFloat, pIntVal, pTupleVal, pEither, pList>>=(return . constructVList)]
 
 pTupleVal :: Parser Value
 pTupleVal = do
@@ -242,6 +242,15 @@ pIntVal = do
 
 pInt :: Parser Int
 pInt = L.signed sc (lexeme L.decimal)
+
+pEither :: Parser Value
+pEither = do
+  side <- choice[keyword "Left", keyword "Right"]
+  v <- pValue
+  case side of
+    "Left" -> return $ VEither (Left v)
+    "Right" -> return $ VEither (Right v)
+    s -> fail $ "Unrecognized Either constructor: " ++ s
 
 pBinaryF :: Parser Expr
 pBinaryF = do

@@ -94,7 +94,7 @@ correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat
                                (uniformIfProg, VFloat 0.5, [], (VFloat 0.5, VFloat 1)),
                                (constantProg, VFloat 2, [], (VFloat 1, VFloat 0)),
                                (uniformExp, VFloat $ exp 4.5, [], (VFloat $ 1 / exp 4.5, VFloat 1)),
-                               (uniformExp, VFloat (-1), [], (VFloat 0, VFloat 1)),
+                               (uniformExp, VFloat (-1), [], (VFloat 0, VFloat 0)),
                                (testInjF, VFloat 1.5, [], (VFloat 0.5, VFloat 1)),
                                (testInjF2, VFloat 3, [], (VFloat 0.5, VFloat 1)),
                                (testTheta, VFloat 1.5, flatTree [1.5], (VFloat 1, VFloat 0)),
