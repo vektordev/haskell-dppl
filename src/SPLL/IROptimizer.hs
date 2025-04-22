@@ -86,7 +86,7 @@ distributeIf x = x
 -- | Simplify terms that apply a constant to a lambda expression
 -- if we build a lambda expression and immediately apply a constant, replace mentions of the lambda'd variable with the constant.
 applyConstant :: IRExpr -> IRExpr
-applyConstant (IRApply (IRLambda varname inExpr) v@(IRConst _)) = replaceAll (IRVar varname) v inExpr
+applyConstant (IRInvoke (IRApply (IRLambda varname inExpr) v@(IRConst _))) = replaceAll (IRVar varname) v inExpr
 applyConstant x = x
 
 optimizeAssociativity :: IRExpr -> IRExpr
