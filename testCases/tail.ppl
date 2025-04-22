@@ -1,0 +1,1 @@
+main = tail [1.0, Uniform * 2.0, Normal]

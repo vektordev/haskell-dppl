@@ -1,0 +1,1 @@
+main=if Uniform > 0.5 then [] else Normal:main

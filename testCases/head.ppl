@@ -1,0 +1,1 @@
+main = head [Uniform, Normal, 0.1]

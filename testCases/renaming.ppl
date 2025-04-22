@@ -1,0 +1,1 @@
+main=(\a -> a + Uniform)(1.0)

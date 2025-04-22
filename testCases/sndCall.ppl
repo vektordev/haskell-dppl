@@ -1,0 +1,2 @@
+bivariate=(Normal, Uniform)
+main=snd bivariate
