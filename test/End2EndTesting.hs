@@ -114,13 +114,13 @@ testProbPython p tc = ioProperty $ do
     ExitFailure _ -> return $ counterexample "Python test failed. See Python error message" False
 
 juliaProbTestCode :: String -> [TestCase] -> String
-juliaProbTestCode src tcs = 
+juliaProbTestCode src tcs =
   "include(\"juliaLib.jl\")\n\
   \using .JuliaSPPLLib\n\
   \" ++ src ++ "\n" ++ 
   "main_gen(" ++ intercalate ", " (map juliaVal exampleParams) ++ ")\n" ++
   concat (map (\(ProbTestCase sample params (outProb, outDim)) -> "tmp = main_prob(" ++ juliaVal sample ++ intercalate ", " (map juliaVal params) ++ ")\n\
-  \if tmp[1] - " ++ juliaVal outProb ++ " > 0.0001\n\
+  \if abs(tmp[1] - " ++ juliaVal outProb ++ ") > 0.0001\n\
   \  error(\"Probability wrong: \" * string(tmp[1]) * \"/=\" * string(" ++ juliaVal outProb ++ "))\n\
   \end\n\
   \if tmp[1] != 0 && tmp[2] != " ++ juliaVal outDim ++ "\n\
