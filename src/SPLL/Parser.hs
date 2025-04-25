@@ -10,7 +10,6 @@ module SPLL.Parser (
 , reserved
 ) where
 
---import Control.Applicative
 import Control.Monad
 import Data.Void
 import Text.Megaparsec hiding (State)
@@ -34,6 +33,8 @@ import SPLL.Typing.Typing
 import SPLL.Typing.RType
 import PredefinedFunctions (globalFenv, parameterCount)
 import SPLL.Prelude
+import Debug.Trace
+import Data.Functor ((<&>))
 
 --import Text.Megaparsec.Debug (dbg)
 dbg x y = y
@@ -231,17 +232,29 @@ pBool = do
   return (VBool b)
 
 pFloat :: Parser Value
-pFloat = do
-  f <- L.signed sc (lexeme L.float)
-  return (VFloat f)
+pFloat = dbg "float" $ do
+  sign <- optional (symbol "-")
+  f <- lexeme L.float
+  case sign of 
+    Nothing -> return (VFloat f)
+    Just "-" -> return (VFloat (-f)) 
 
 pIntVal :: Parser Value
-pIntVal = do
-  i <- L.signed sc (lexeme L.decimal)
-  return (VInt i)
+pIntVal = dbg "int" $ do
+  sign <- optional (symbol "-")
+  i <- lexeme L.decimal
+  case sign of
+    Nothing -> return (VInt i)
+    Just "-" -> return (VInt (-i))
+
 
 pInt :: Parser Int
-pInt = L.signed sc (lexeme L.decimal)
+pInt = do
+  sign <- optional (symbol "-")
+  i <- lexeme L.decimal
+  case sign of
+    Nothing -> return i
+    Just "-" -> return (-i)
 
 pEither :: Parser Value
 pEither = do
@@ -294,7 +307,7 @@ pCompoundType = parens $ do
       combinators = [("->", TArrow), ("," , Tuple)]
 
 pSimpleType :: Parser RType
-pSimpleType = 
+pSimpleType =
   parseFromList rTypes
 
 pList :: Parser [Value]
@@ -453,7 +466,7 @@ pLambda = do
 application :: Parser Expr
 application = do
     func <- try atom
-    args <- many (try atom <|> try (parens expr))
+    args <- try $ many (try atom <|> try (parens expr))
     case func of
         Var _ name -> case lookup name binaryFs of
             Just constructor -> return (construct2 constructor args)
@@ -505,12 +518,17 @@ appTable = do
   args <- many term
   return $ foldl apply f args
 
-arithOpList :: [([Char], Expr -> Expr -> Expr)]
-arithOpList = [("++", (#<+>#)), ("**", (#<*>#)), ("+", (#+#)), ("*", (#*#)), ("/", (#/#)), (":", (#:#)),
-          ("-", \a b -> a #+# (negF b))]
+multLikeOpList :: [([Char], Expr -> Expr -> Expr)]
+multLikeOpList = [("**", (#<*>#)), ("*", (#*#)), ("/", (#/#))]
+
+addLikeOpList :: [([Char], Expr -> Expr -> Expr)]
+addLikeOpList = [("++", (#<+>#)), ("+", (#+#)), ("-", \a b -> a #+# (negF b))]
+
+listManipulationOpList :: [([Char], Expr -> Expr -> Expr)]
+listManipulationOpList = [(":", (#:#))]
 
 cmpOpList :: [([Char], Expr -> Expr -> Expr)]
-cmpOpList = [(">", (#>#)), ("<", (#<#))]
+cmpOpList = [(">", (#>#)), ("<", (#<#)), (":", (#:#))]
 
 funLikeOps :: [([Char], Expr -> Expr)]
 funLikeOps = [("not", (#!#))]
@@ -528,7 +546,9 @@ mkPrefixOp tbl = map infx tbl
 opTable :: [[Operator Parser Expr]]
 opTable =
   [ mkPrefixOp funLikeOps,
-    mkInfixOp arithOpList,  -- Left-associative operators
+    mkInfixOp multLikeOpList,
+    mkInfixOp addLikeOpList,
+    mkInfixOp listManipulationOpList,
     mkInfixOp cmpOpList
   ]
 
