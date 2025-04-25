@@ -243,7 +243,7 @@ toIRProbability conf typeEnv (InjF _ name [param]) sample = do
   -- Get the probabilistic inference code for the parameter
   (paramExpr, paramDim, paramBranches) <- probF conf typeEnv param invExpr
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
-  let returnP = IROp OpMult paramExpr (IRUnaryOp OpAbs invDerivExpr)
+  let returnP = IROp OpMult paramExpr (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDerivExpr))
   let appTestExpr e = IRIf appTest e const0
   return (appTestExpr returnP, appTestExpr paramDim, appTestExpr paramBranches)
 toIRProbability conf typeEnv (InjF TypeInfo {tags=extras} name params) sample
@@ -269,8 +269,8 @@ toIRProbability conf typeEnv (InjF TypeInfo {tags=extras} name params) sample
   let probF = if decons then toIRProbabilitySave else toIRProbability
   -- Get the probabilistic inference expression of the non-deterministic subexpression
   (paramExpr, paramDim, paramBranches) <- probF conf typeEnv (params !! probIdx) invExpr
-  -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
-  let returnP = IROp OpMult paramExpr (IRUnaryOp OpAbs invDeriv)
+  -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula if dim > 0
+  let returnP = IROp OpMult paramExpr (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDeriv))
   let appTestExpr e = IRIf appTest e const0
   return (appTestExpr returnP, appTestExpr paramDim, appTestExpr paramBranches)
 toIRProbability conf typeEnv (InjF TypeInfo {tags=extras} name [left, right]) sample

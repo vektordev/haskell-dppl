@@ -109,6 +109,7 @@ generateFunctions genBoil defs =
     if genBoil then
       ["from pythonLib import *",
       "import functools",
+      "import math",
       "from torch.nn import Module", ""] ++
       concatMap generateClass groups ++ 
       ["", "# Example Initialization"] ++ 
