@@ -55,11 +55,11 @@ parseProbTestCases fp = do
 -}
 
 testInterpreter :: Program -> TestCase -> Property
-testInterpreter p (ProbTestCase sample params (VFloat expectedProb, VFloat expectedDim)) = do
+testInterpreter p (ProbTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = do
   let VTuple (VFloat outProb) (VFloat outDim) = runProb standardCompiler p params sample
-  counterexample ("Probability differs. Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < 0.0001) .&&.
-    counterexample ("Dimensionality differs. Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim)
-testInterpreter p (ArgmaxPTestCase params res) = ioProperty $ do
+  counterexample ("Probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < 0.0001) .&&.
+    counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim)
+testInterpreter p (ArgmaxPTestCase name params res) = ioProperty $ do
   let paramCnt = length params
   let mockedParams seeds = map (\(par, s) -> VTuple (VInt 1) (VTuple par (VInt s))) (zip params seeds)
   let mockedParamsList start = map mockedParams [[x .. x + (paramCnt-1)] | x <- [start, paramCnt..]]  -- [[((1, (p1, 0)), (1, (p2, 1)))], [(1, (p1, 2)), (1, (p2, 3))] ..]
@@ -67,7 +67,7 @@ testInterpreter p (ArgmaxPTestCase params res) = ioProperty $ do
   let cntSamples = 100
   samples <- evalRandIO $ mapM (runGen standardCompiler p) (take cntSamples (mockedParamsList paramCnt))
   let samplesP = map (\(par, s) -> runProb standardCompiler p par s) (zip (take cntSamples (mockedParamsList (paramCnt * cntSamples))) samples)
-  return $ conjoin (map (\(s, p) -> counterexample ("Sample " ++ show s ++ " has highest probability: " ++ show p ++ " instead of sample " ++ show res ++ " with probability: " ++ show resP) (p `lessEqualsProbs` resP)) (zip samples samplesP))
+  return $ conjoin (map (\(s, p) -> counterexample ("Test Case " ++ name ++ ": Sample " ++ show s ++ " has highest probability: " ++ show p ++ " instead of sample " ++ show res ++ " with probability: " ++ show resP) (p `lessEqualsProbs` resP)) (zip samples samplesP))
 
 lessEqualsProbs :: IRValue -> IRValue -> Bool
 lessEqualsProbs (VFloat a) (VFloat b) = a <= b
@@ -119,28 +119,28 @@ juliaProbTestCode src tcs =
   \using .JuliaSPPLLib\n\
   \" ++ src ++ "\n" ++ 
   "main_gen(" ++ intercalate ", " (map juliaVal exampleParams) ++ ")\n" ++
-  concat (map (\(ProbTestCase sample params (outProb, outDim)) -> "tmp = main_prob(" ++ juliaVal sample ++ intercalate ", " (map juliaVal params) ++ ")\n\
+  concat (map (\(ProbTestCase name sample params (outProb, outDim)) -> "tmp = main_prob(" ++ juliaVal sample ++ intercalate ", " (map juliaVal params) ++ ")\n\
   \if abs(tmp[1] - " ++ juliaVal outProb ++ ") > 0.0001\n\
-  \  error(\"Probability wrong: \" * string(tmp[1]) * \"/=\" * string(" ++ juliaVal outProb ++ "))\n\
+  \  error(\"Probability wrong: \" * string(tmp[1]) * \"/=\" * string(" ++ juliaVal outProb ++ ") * \"in test case " ++ name ++ "\")\n\
   \end\n\
   \if tmp[1] != 0 && tmp[2] != " ++ juliaVal outDim ++ "\n\
-  \  error(\"Dimensionality wrong: \" * string(tmp[2]) * \"/=\" * string(" ++ juliaVal outDim ++ "))\n\
+  \  error(\"Dimensionality wrong: \" * string(tmp[2]) * \"/=\" * string(" ++ juliaVal outDim ++ ") * \"in test case " ++ name ++ "\")\n\
   \end\n") tcs) ++ 
   "exit(0)"
-  where ProbTestCase _ exampleParams _ = head tcs 
+  where ProbTestCase _ _ exampleParams _ = head tcs 
 
 pythonProbTestCode :: String -> [TestCase] -> String
 pythonProbTestCode src tcs = 
   unpack (replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n") (pack src)) ++ "\n" ++   -- Importing pyTorch is really slow and not needed
   "main.generate(" ++ intercalate ", " (map pyVal exampleParams) ++ ")\n" ++
-  concat (map (\(ProbTestCase sample params (outProb, outDim)) -> "tmp = main.forward(" ++ pyVal sample ++ intercalate ", " (map pyVal params) ++ ")\n\
+  concat (map (\(ProbTestCase name sample params (outProb, outDim)) -> "tmp = main.forward(" ++ pyVal sample ++ intercalate ", " (map pyVal params) ++ ")\n\
   \if abs(tmp[0] - " ++ pyVal outProb ++ ") > 0.0001:\n\
-  \  raise ValueError(\"Probability wrong: \" + str(tmp[0]) + \"!=\" + str(" ++ pyVal outProb ++ "))\n\
+  \  raise ValueError(\"Probability wrong: \" + str(tmp[0]) + \"!=\" + str(" ++ pyVal outProb ++ ") + \"in test case " ++ name ++ "\")\n\
   \if tmp[0] != 0 and tmp[1] != " ++ pyVal outDim ++ ":\n\
-  \  raise ValueError(\"Dimensionality wrong: \" + str(tmp[1]) + \"/=\" + str(" ++ pyVal outDim ++ "))\n\
+  \  raise ValueError(\"Dimensionality wrong: \" + str(tmp[1]) + \"/=\" + str(" ++ pyVal outDim ++ ") + \"in test case " ++ name ++ "\")\n\
   \") tcs) ++ 
   "exit(0)"
-  where ProbTestCase _ exampleParams _ = head tcs 
+  where ProbTestCase _ _ exampleParams _ = head tcs 
 
 test_end2end :: IO (Bool)
 test_end2end = do
