@@ -2,7 +2,7 @@
 
 This is the code repository for NeST, the Neuro-Symbolic Transpiler.
 
-### Instructions
+### <a name="instructions"></a>Instructions
 
 The code herein should compile readily. The intended way of getting your libraries in order is via the haskell tool Stack. You can find it [here](https://docs.haskellstack.org/en/stable/) , or on linux download it like so:
 
@@ -58,6 +58,34 @@ showcase2 = do
   let VTuple (VFloat prob) (VFloat dim) = runProb conf dist [] gen
   putStrLn ("Probability density of that value occuring: " ++ show prob)
 ```
+
+### Examples
+
+The following sections show simple examples that can be compiled and run using SPPL. To do this follow the instructions in section [above](#instructions)
+
+#### MNist Addition
+
+This example constructs a MNist neural network, evaluates it with two different symbols and adds the results
+
+```
+neural readMNist :: (Symbol -> Int) of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+main a b = readMNist(a) ++ readMNist(b)
+```
+
+#### Recursive lists
+
+The next example creates a unbound list by rolling a 0.5 probability and prepening a normally distributed value to the list if it suceeded.
+
+```
+main=if Uniform > 0.5 then [] else Normal:main
+```
+
+This example shows off some basic features using algebraic data types:
+
+```
+main=(if Uniform>0.5 then left Uniform else right Normal, Uniform)
+```
+
 
 ### About
 
