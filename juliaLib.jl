@@ -1,6 +1,7 @@
 module JuliaSPPLLib
 
-export density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend
+export density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, T,==
+
 
 function isAny(x)
     x == "ANY" || x isa AnyInferenceList
@@ -43,6 +44,37 @@ function cumulative_IRNormal(x)
     
     return 0.5 * (1 + erf(x / sqrt(2)))
 end
+
+function eq(a, b)
+    if isAny(a) || isAny(b)
+        return true
+    else
+        return a == b
+    end
+end
+
+struct T
+    t1
+    t2
+end
+
+Base.getindex(t::T, i::Int) = begin
+    if i == 1
+        return t.t1
+    elseif i == 2
+        return t.t2
+    else
+        error("Invalid tuple access at element $i")
+    end
+end
+
+Base.:(==)(other::Any, t::T) = begin
+    if !(other isa T)
+        return false
+    end
+    return eq(t.t1, other.t1) && eq(t.t2, other.t2)
+end
+
 
 abstract type InferenceList end
 

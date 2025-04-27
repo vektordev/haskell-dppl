@@ -30,6 +30,29 @@ def isAny(x):
     return True
   return False
 
+def eq(o1, o2):
+  if isAny(o1) or isAny(o2):
+    return True
+  else:
+    return o1 == o2
+
+class T:
+  def __init__(self, t1, t2):
+    self.t1 = t1
+    self.t2 = t2
+
+  def __eq__(self, other):
+    if not isinstance(other, T):
+      return False
+    return eq(self.t1, other.t1) and eq(self.t2, other.t2)
+
+  def __getitem__(self, index):
+    if index == 0:
+      return self.t1
+    if index == 1:
+      return self.t2
+    raise ValueError("Tuple only has index 0 and 1")
+
 class InferenceList:
   def __init__(self, value = None):
     return NotImplemented
@@ -70,7 +93,7 @@ class InferenceList:
   def __eq__(self, other):
     if not isinstance(other, InferenceList):
       return False
-    return self.value == other.value and self.next == other.next
+    return eq(self.value, other.value) and self.next == other.next
 
   def prepend(self, value):
     return ConsInferenceList(value, self)

@@ -147,7 +147,11 @@ generate f neurals globalEnv env [] (IROp OpEq a b) = do
     (VFloat af, VFloat bf) -> return $ VBool (af == bf)
     (VInt af, VInt bf) -> return $ VBool (af == bf)
     (VList af, VList bf) -> return $ VBool (af == bf)
-    (VTuple af1 af2, VTuple bf1 bf2) -> return $ VBool (af1 == bf1 && af2 == bf2)
+    (VTuple af1 af2, VTuple bf1 bf2) -> 
+      let eqAny VAny _ = True
+          eqAny _ VAny = True
+          eqAny a b = a == b in
+            return $ VBool (eqAny af1 bf1 && eqAny af2 bf2)
     -- Any is not equal to anything
     (VAny, b) -> return $ VBool False
     (a, VAny) -> return $ VBool False
@@ -337,6 +341,7 @@ generate f neurals globalEnv env args (IRIndex lstExpr idxExpr) = do
     _ -> error "Expression must be a list"
 generate _ _ _ _ _ (IRError s) = error $ "Error during interpretation: " ++ s
 generate f neurals _ _ _ expr = error ("Expression is not yet implemented " ++ show expr)
+
 
 irSample :: (RandomGen g) => Distribution -> Rand g IRValue
 irSample IRUniform = do
