@@ -119,7 +119,7 @@ juliaProbTestCode src tcs =
   \using .JuliaSPPLLib\n\
   \" ++ src ++ "\n" ++ 
   "main_gen(" ++ intercalate ", " (map juliaVal exampleParams) ++ ")\n" ++
-  concat (map (\(ProbTestCase name sample params (outProb, outDim)) -> "tmp = main_prob(" ++ juliaVal sample ++ intercalate ", " (map juliaVal params) ++ ")\n\
+  concat (map (\(ProbTestCase name sample params (outProb, outDim)) -> "tmp = main_prob(" ++ juliaVal sample ++ ", " ++ intercalate ", " (map juliaVal params) ++ ")\n\
   \if abs(tmp[1] - " ++ juliaVal outProb ++ ") > 0.0001\n\
   \  error(\"Probability wrong: \" * string(tmp[1]) * \"/=\" * string(" ++ juliaVal outProb ++ ") * \"in test case " ++ name ++ "\")\n\
   \end\n\
@@ -133,7 +133,7 @@ pythonProbTestCode :: String -> [TestCase] -> String
 pythonProbTestCode src tcs = 
   unpack (replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n") (pack src)) ++ "\n" ++   -- Importing pyTorch is really slow and not needed
   "main.generate(" ++ intercalate ", " (map pyVal exampleParams) ++ ")\n" ++
-  concat (map (\(ProbTestCase name sample params (outProb, outDim)) -> "tmp = main.forward(" ++ pyVal sample ++ intercalate ", " (map pyVal params) ++ ")\n\
+  concat (map (\(ProbTestCase name sample params (outProb, outDim)) -> "tmp = main.forward(" ++ pyVal sample ++ ", " ++ intercalate ", " (map pyVal params) ++ ")\n\
   \if abs(tmp[0] - " ++ pyVal outProb ++ ") > 0.0001:\n\
   \  raise ValueError(\"Probability wrong: \" + str(tmp[0]) + \"!=\" + str(" ++ pyVal outProb ++ ") + \"in test case " ++ name ++ "\")\n\
   \if tmp[0] != 0 and tmp[1] != " ++ pyVal outDim ++ ":\n\
