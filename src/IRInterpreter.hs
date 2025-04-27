@@ -24,8 +24,6 @@ import Data.Foldable (toList)
 import SPLL.Lang.Types
 import SPLL.Typing.RType
 
-newtype VisitationTree = VisitationTree (String, [VisitationTree]) deriving (Show, Eq)
-
 type IREnv a = [(String, IRExpr)]
 
 data RandomFunctions m a = RandomFunctions {uniformGen:: m IRValue, normalGen:: m IRValue}
