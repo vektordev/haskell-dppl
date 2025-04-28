@@ -106,7 +106,7 @@ theta :: Expr -> Int -> Expr
 theta = ThetaI makeTypeInfo
 
 subtree :: Expr -> Int -> Expr
-subtree = ThetaI makeTypeInfo
+subtree = Subtree makeTypeInfo
 
 -- Product Types
 

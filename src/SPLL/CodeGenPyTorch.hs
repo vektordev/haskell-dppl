@@ -74,6 +74,8 @@ pyVal (VBool f) = if f then "True" else "False"
 pyVal (VTuple a b) = "T(" ++ pyVal a ++ ", " ++ pyVal b ++ ")"
 pyVal (VEither (Left a)) = "(False, " ++ pyVal a ++ ", None)"
 pyVal (VEither (Right a)) = "(True, None, " ++ pyVal a ++ ")"
+pyVal (VThetaTree tt) = pyValTree tt
+  where pyValTree (ThetaTree val trees) = "([" ++ intercalate ", " (map show val) ++ "], [" ++ intercalate ", " (map pyValTree trees) ++ "])"
 pyVal (VAny) = "'ANY'"
 pyVal x = error ("unknown pyVal for " ++ show x)
 

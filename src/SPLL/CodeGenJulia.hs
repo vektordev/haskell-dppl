@@ -58,6 +58,8 @@ juliaVal (VBool f) = if f then "true" else "false"
 juliaVal (VTuple a b) = "T(" ++ juliaVal a ++ ", " ++ juliaVal b ++ ")"
 juliaVal (VEither (Left a)) = "(false, " ++ juliaVal a ++ ", nothing)"
 juliaVal (VEither (Right a)) = "(true, nothing, " ++ juliaVal a ++ ")"
+juliaVal (VThetaTree tt) = juliaValTree tt
+  where juliaValTree (ThetaTree val trees) = "([" ++ intercalate ", " (map show val) ++ "], [" ++ intercalate ", " (map juliaValTree trees) ++ "])"
 juliaVal VAny = "\"ANY\""
 juliaVal x = error ("unknown juliaVal for " ++ show x)
 

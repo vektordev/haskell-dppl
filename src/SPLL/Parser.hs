@@ -57,7 +57,7 @@ symbol :: String -> Parser String
 symbol = L.symbol sc
 
 reserved :: [String]
-reserved = ["if", "then", "else", "let", "in"]
+reserved = ["if", "then", "else", "let", "in", "theta", "subtree", "ThetaTree", "Left", "Right"]
 
 keyword :: String -> Parser String
 keyword = L.symbol sc
@@ -146,11 +146,19 @@ pApply = dbg "apply" $ do
 
 pTheta :: Parser Expr
 pTheta = dbg "theta" $ do
-  thetaName <- pIdentifier
-  _ <- symbol "["
+  keyword "theta"
+  thetaExpr <- pExpr
+  symbol "@"
   ix <- pInt
-  _ <- symbol "]"
-  return $ theta (var thetaName) ix
+  return $ theta thetaExpr ix
+
+pSubtree :: Parser Expr
+pSubtree = dbg "subtree" $ do
+  keyword "subtree"
+  thetaExpr <- pExpr
+  symbol "@"
+  ix <- pInt
+  return $ subtree thetaExpr ix
 
 -- just to make this parser quite unambiguous, we're going to demand parens around both ops.
 pBinaryOp :: Parser Expr
@@ -210,7 +218,7 @@ injFs :: [(String, (Int, [Expr] -> Expr))]
 injFs = [(name, (parameterCount name, injF name)) | (name, _) <- globalFenv]
 
 pValue :: Parser Value
-pValue = choice [pBool, try pFloat, pIntVal, pTupleVal, pEither, pAny, pList>>=(return . constructVList)]
+pValue = choice [pBool, try pFloat, pIntVal, pTupleVal, pEither, pAny, pList <&> constructVList, pThetaTree <&> VThetaTree]
 
 pTupleVal :: Parser Value
 pTupleVal = do
@@ -269,6 +277,17 @@ pAny :: Parser Value
 pAny = do
   keyword "ANY"
   return VAny
+
+pThetaTree :: Parser ThetaTree
+pThetaTree = do
+  keyword "ThetaTree"
+  symbol "["
+  thetas <- (L.signed sc (lexeme L.float)) `sepBy` symbol ","
+  symbol "]"
+  symbol "["
+  subtrees <- pThetaTree `sepBy` symbol ","
+  symbol "]"
+  return $ ThetaTree thetas subtrees
 
 pBinaryF :: Parser Expr
 pBinaryF = do
@@ -446,10 +465,12 @@ atom = choice [
 
 -- | Parse expressions that start with keywords
 keywordExpr :: Parser Expr
-keywordExpr = choice [
+keywordExpr = dbg "keywordExpr" $ choice [
     pIfThenElse,
     pLetIn,
-    pLambda
+    pLambda,
+    pTheta,
+    pSubtree
   ] <* sc
 
 -- | Lambda expressions
@@ -464,7 +485,7 @@ pLambda = do
 -- | Parse function application
 -- This handles both normal application and built-in functions like multF
 application :: Parser Expr
-application = do
+application = dbg "application" $do
     func <- try atom
     args <- try $ many (try atom <|> try (parens expr))
     case func of
@@ -480,7 +501,7 @@ application = do
 
 -- | Main expression parser using makeExprParser
 expr :: Parser Expr
-expr = makeExprParser term opTable
+expr = dbg "expr" $ makeExprParser term opTable
   where
     term = choice [
         try application,
