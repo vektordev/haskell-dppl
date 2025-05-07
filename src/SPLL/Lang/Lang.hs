@@ -56,8 +56,10 @@ toStub expr = case expr of
   IfThenElse {}  -> StubIfThenElse
   GreaterThan {} -> StubGreaterThan
   LessThan {}    -> StubLessThan
-  (ThetaI _ _ _)   -> StubThetaI
-  (Subtree _ _ _)   -> StubSubtree
+  And {}         -> StubAnd
+  Or {}          -> StubOr
+  (ThetaI _ _ _) -> StubThetaI
+  (Subtree _ _ _)-> StubSubtree
   (Uniform _)    -> StubUniform
   (Normal _)     -> StubNormal
   (Constant _ _) -> StubConstant
@@ -69,7 +71,7 @@ toStub expr = case expr of
   LetIn {}       -> StubLetIn
   InjF {}        -> StubInjF
   Lambda {}      -> StubLambda
-  Apply {}  -> StubApply
+  Apply {}       -> StubApply
   (ReadNN _ _ _) -> StubReadNN
 
 

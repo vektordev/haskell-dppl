@@ -1,0 +1,1 @@
+main = (Uniform > 0.5) || (Uniform > 0.5)

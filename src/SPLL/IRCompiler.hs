@@ -193,6 +193,16 @@ toIRProbability conf typeEnv (LessThan (TypeInfo {rType = t, tags = extras}) lef
     return (returnExpr, const0, integrateBranches)
 toIRProbability conf typeEnv (Not (TypeInfo {rType = TBool}) f) sample =
   toIRProbability conf typeEnv f (IRUnaryOp OpNot sample)
+toIRProbability conf typeEnv (And (TypeInfo {rType = TBool}) a b) sample = do
+  (aP, aDim, aBC) <- toIRProbability conf typeEnv a (IRConst $ VBool True)
+  (bP, bDim, bBC) <- toIRProbability conf typeEnv b (IRConst $ VBool True)
+  (resP, resDim) <- (aP, aDim) `multP` (bP, bDim)
+  return $ (IRIf sample resP (IROp OpSub (IRConst $ VFloat 1) resP), resDim, IROp OpPlus aBC bBC)
+toIRProbability conf typeEnv (Or (TypeInfo {rType = TBool}) a b) sample = do
+  (aP, aDim, aBC) <- toIRProbability conf typeEnv a (IRConst $ VBool False)
+  (bP, bDim, bBC) <- toIRProbability conf typeEnv b (IRConst $ VBool False)
+  (resP, resDim) <- (aP, aDim) `multP` (bP, bDim)
+  return $ (IRIf sample (IROp OpSub (IRConst $ VFloat 1) resP) resP, resDim, IROp OpPlus aBC bBC)  -- p(a || b == True) == 1 - p(a == False) * p(b == False)
 toIRProbability conf typeEnv (Normal t) sample = return (IRDensity IRNormal sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), const0)
 toIRProbability conf typeEnv (Uniform t) sample = return (IRDensity IRUniform sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), const0)
 toIRProbability conf typeEnv (ReadNN _ name symbol) sample = do
@@ -438,6 +448,14 @@ toIRGenerate typeEnv (LessThan _ left right) = do
 toIRGenerate typeEnv (Not _ f) = do
   f' <- toIRGenerate typeEnv f
   return $ IRUnaryOp OpNot f'
+toIRGenerate typeEnv (And _ a b) = do
+  a' <- toIRGenerate typeEnv a
+  b' <- toIRGenerate typeEnv b
+  return $ IROp OpAnd a' b'
+toIRGenerate typeEnv (Or _ a b) = do
+  a' <- toIRGenerate typeEnv a
+  b' <- toIRGenerate typeEnv b
+  return $ IROp OpOr a' b'
 toIRGenerate typeEnv (ThetaI _ a ix) = do
   a' <- toIRGenerate typeEnv a
   return $ IRTheta a' ix

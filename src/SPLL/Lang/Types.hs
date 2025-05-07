@@ -78,6 +78,8 @@ data ExprStub = StubIfThenElse
               | StubNormal
               | StubConstant
               | StubNot
+              | StubAnd
+              | StubOr
               | StubNull
               | StubCons
               | StubTCons

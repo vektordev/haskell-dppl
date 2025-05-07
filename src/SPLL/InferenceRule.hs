@@ -72,6 +72,22 @@ greaterThanSigmoid = InferenceRule
                        (const Integrate)
                        (Forall [] (TFloat `TArrow` (TFloat `TArrow` TBool)))
 
+andRule :: InferenceRule
+andRule = InferenceRule
+        StubAnd
+        [SubExprNIsType 0 Prob, SubExprNIsType 1 Prob]
+        "and"
+        (const Prob)
+        (Forall [] (TBool `TArrow` (TBool `TArrow` TBool)))
+
+orRule :: InferenceRule
+orRule = InferenceRule
+        StubOr
+        [SubExprNIsType 0 Prob, SubExprNIsType 1 Prob]
+        "or"
+        (const Prob)
+        (Forall [] (TBool `TArrow` (TBool `TArrow` TBool)))
+
 --multRight = InferenceRule StubMultF [SubExprNIsType 1 Deterministic] "multRight" mostChaotic
 
 injF2Left :: InferenceRule
@@ -188,6 +204,8 @@ allAlgorithms = [
   lessThanLeft,
   lessThanRight,
   greaterThanSigmoid,
+  andRule,
+  orRule,
   injF2Left, 
   injF2Right,
   injF2Enumerable,

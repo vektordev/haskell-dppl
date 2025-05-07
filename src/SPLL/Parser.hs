@@ -540,10 +540,10 @@ appTable = do
   return $ foldl apply f args
 
 multLikeOpList :: [([Char], Expr -> Expr -> Expr)]
-multLikeOpList = [("**", (#<*>#)), ("*", (#*#)), ("/", (#/#))]
+multLikeOpList = [("**", (#<*>#)), ("*", (#*#)), ("/", (#/#)), ("&&", (#&&#))]
 
 addLikeOpList :: [([Char], Expr -> Expr -> Expr)]
-addLikeOpList = [("++", (#<+>#)), ("+", (#+#)), ("-", \a b -> a #+# (negF b))]
+addLikeOpList = [("++", (#<+>#)), ("+", (#+#)), ("-", \a b -> a #+# (negF b)), ("||", (#||#))]
 
 listManipulationOpList :: [([Char], Expr -> Expr -> Expr)]
 listManipulationOpList = [(":", (#:#))]
