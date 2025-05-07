@@ -31,22 +31,30 @@ type TypeEnv = [(String, (RType, Bool))]
 -- perhaps as an explicit lambda in the top of the expression, otherwise we'll get trouble generating code.
 -- TODO: How do we deal with top-level lambdas in binding here?
 --  TL-Lambdas are presumably to be treated differently than non-TL, at least as far as prob is concerned.
-envToIR :: CompilerConfig -> Program -> [(String, IRExpr)]
-envToIR conf p = fmap (fmap (postProcess conf) ) $ -- map optimizer over all second elements of the tuples
-  concatMap (makeAutoNeural conf) (neurals p) ++
-  concatMap (\(name, binding) ->
+envToIR :: CompilerConfig -> Program -> IREnv
+envToIR conf p = optimizeEnv conf $ -- map optimizer over all second elements of the tuples
+  map (makeAutoNeural conf) (neurals p) ++
+  map (\(name, binding) ->
     let typeEnv = getGlobalTypeEnv p
         pt = pType $ getTypeInfo binding
         rt = rType $ getTypeInfo binding in
-      if (pt == Deterministic || pt == Integrate) && (isOnlyNumbers rt) then
-        [(name ++ "_integ", IRLambda "low" (IRLambda "high" (runCompile conf (toIRIntegrateSave conf typeEnv binding (IRVar "low") (IRVar "high"))))),
-        (name ++ "_prob",IRLambda "sample" (runCompile conf (toIRProbabilitySave conf typeEnv binding (IRVar "sample")))),
-        (name ++ "_gen", fst $ runIdentity $ runSupplyVars $ runWriterT (toIRGenerate typeEnv binding))]
-      else if pt == Deterministic || pt == Integrate || pt == Prob then
-        [(name ++ "_prob", (IRLambda "sample" (runCompile conf (toIRProbabilitySave conf typeEnv binding (IRVar "sample"))))),
-        (name ++ "_gen", fst $ runIdentity $ runSupplyVars $ runWriterT $ toIRGenerate typeEnv binding)]
-      else
-        [(name ++ "_gen", fst $ runIdentity $ runSupplyVars $ runWriterT $ toIRGenerate typeEnv binding)]) (functions p)
+      IRFunGroup {groupName=name,
+       integFun = 
+        if (pt == Deterministic || pt == Integrate) && (isOnlyNumbers rt) then
+          Just (toIntegDecl name (IRLambda "low" (IRLambda "high" (runCompile conf (toIRIntegrateSave conf typeEnv binding (IRVar "low") (IRVar "high"))))))
+        else Nothing,
+        probFun = 
+          if pt == Deterministic || pt == Integrate || pt == Prob then
+            Just (toProbDecl name (IRLambda "sample" (runCompile conf (toIRProbabilitySave conf typeEnv binding (IRVar "sample")))))
+          else Nothing,
+        genFun = toGenDecl name (fst $ runIdentity $ runSupplyVars $ runWriterT $ toIRGenerate typeEnv binding),
+        groupDoc="Function group " ++ name}) (functions p)
+        
+  where
+    toGenDecl name expr = (expr, "Generates a random sample of the " ++ name ++ " function")
+    toProbDecl name expr = 
+      (expr, "Calculates the probability of the sample parameter being returned from the " ++ name ++ "function")
+    toIntegDecl name expr = (expr, "Calculates the probability of sample of " ++ name ++ " falling in between the parameters low and high")
 
 
 runCompile :: CompilerConfig -> CompilerMonad CompilationResult -> IRExpr

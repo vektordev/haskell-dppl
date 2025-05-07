@@ -8,7 +8,7 @@ import SPLL.Lang.Types
 import Data.List (intercalate, isSuffixOf, nub, find)
 import Data.Char (toUpper, toLower)
 import Data.Maybe (fromJust, fromMaybe)
-import Debug.Trace (trace)
+import Debug.Trace (trace, traceShowId)
 import Data.Foldable
 
 --TODO: On the topic of memoization: Ideally we would want to optimize away redundant calls within a loop.
@@ -89,62 +89,74 @@ onLast :: (a -> a) -> [a] -> [a]
 onLast f [x] = [f x]
 onLast f (x:xs) = x : onLast f xs
 
-generateFunctions :: Bool -> [(String, IRExpr)] -> [String]
+generateFunctions :: Bool -> IREnv -> [String]
 --generateFunctions defs | trace (show defs) False = undefined
 --contrary to the julia backend, we want to aggregate gen and prob into one classes. Ugly implementation, but it'll do for now.
 generateFunctions genBoil defs =
-  let
+{-  let
     getName str
       | "_prob" `isSuffixOf` str = iterate init str !! 5
       | "_integ" `isSuffixOf` str = iterate init str !! 6
       | otherwise = iterate init str !! 4
-    names = nub $ map (getName . fst) defs
+    names = nub $ map (getName . fst3) defs
     lut = [(name ++ "_gen", onHead toLower name ++ ".generate") | name <- names]
        ++ [(name ++ "_prob", onHead toLower name ++ ".forward") | name <- names]
        ++ [(name ++ "_integ", onHead toLower name ++ ".integrate") | name <- names] ++ stdLib
-    findDef name suffix = find (\def -> fst def == (name ++ suffix)) defs
+    findDef name suffix = find (\def -> fst3 def == (name ++ suffix)) defs
     getDef name suffix = case findDef name suffix of
       Nothing -> Nothing
-      Just a -> Just $ irMap (replaceCalls lut) $ snd a
+      Just (name, doc, expr) -> Just $ (irMap (replaceCalls lut) expr, doc)
     groups = [(name, getDef name "_gen", getDef name "_prob", getDef name "_integ")| name <- names]
-  in
+    fst3 (a, b, c) = a -}
     if genBoil then
       ["from pythonLib import *",
       "import functools",
       "import math",
       "from torch.nn import Module", ""] ++
-      concatMap generateClass groups ++ 
-      ["", "# Example Initialization"] ++ 
-      [onHead toLower name ++ " = " ++ onHead toUpper name ++ "()" | name <- names]
+      concatMap (generateClass (envToLUT defs)) defs ++
+      ["", "# Example Initialization"] ++
+      generateInitializations defs
     else
-      concatMap generateClass groups
+      concatMap (generateClass (envToLUT defs)) defs
+  
+        
+          
+        
 
 stdLib :: [(String, String)]
 stdLib = [("in", "contains")]
+
+envToLUT :: IREnv -> [(String, String)]
+envToLUT = concatMap (\IRFunGroup {groupName=n} -> [(n ++ "_gen", n ++ ".generate"), (n ++ "_prob", n ++ ".forward"), (n ++ "_integ", n ++ ".integrate")])
 
 replaceCalls :: [(String, String)] -> IRExpr -> IRExpr
 replaceCalls lut (IRVar name) = IRVar (fromMaybe name $ lookup name lut)
 replaceCalls _ other = other
 
-generateClass :: (String, Maybe IRExpr, Maybe IRExpr, Maybe IRExpr) -> [String]
-generateClass (name, gen, prob, integ) = let
+generateInitializations :: IREnv -> [String]
+generateInitializations = map (\IRFunGroup {groupName=n} -> n ++ " = " ++ onHead toUpper n ++ "()")
+
+generateClass :: [(String, String)] -> IRFunGroup -> [String]
+generateClass lut (IRFunGroup name gen prob integ doc) = let
   funcStringFromMaybe name func = case func of
-    Just a -> generateFunction (name, a)
+    Just a -> generateFunction (name, replaceCallsDecl a)
     Nothing -> []
   i = funcStringFromMaybe "integrate" integ
   p = funcStringFromMaybe "forward" prob
-  g = funcStringFromMaybe "generate" gen
+  g = generateFunction ("generate", replaceCallsDecl gen)
+  commentLine = "# " ++ doc
   initLine = "class " ++ onHead toUpper name ++ "(Module):"
   funcs = i ++ [""] ++ p ++ [""] ++ g
-  in [initLine] ++ indentOnce funcs
+  replaceCallsDecl (e, d) = (irMap (replaceCalls lut) e, d)
+  in commentLine:initLine:indentOnce funcs
 
-generateFunction :: (String, IRExpr) -> [String]
-generateFunction (name, expr) = let
+generateFunction :: (String, IRFunDecl) -> [String]
+generateFunction (name, (expr, doc)) = let
   (args, reducedExpr) = unwrapLambdas expr
   l1 = "def " ++ name ++ "(" ++ intercalate ", " ("self" : args) ++ "):"
   block = generateStatementBlock reducedExpr
-  --TODO Use returnize to find all exprs to attach returns to.
-  in [l1] ++ indentOnce block
+  docLine = "# " ++ doc
+  in [docLine, l1] ++ indentOnce block
 
 unwrapLambdas :: IRExpr -> ([String], IRExpr)
 unwrapLambdas (IRLambda name rest) = (name:otherNames, plainTree)
@@ -152,7 +164,7 @@ unwrapLambdas (IRLambda name rest) = (name:otherNames, plainTree)
 unwrapLambdas anyNode = ([], anyNode)
 
 generateStatementBlock :: IRExpr -> [String]
-generateStatementBlock (IRLetIn name lmd@(IRLambda _ _) body) = generateFunction (name, lmd) ++ generateStatementBlock body
+generateStatementBlock (IRLetIn name lmd@(IRLambda _ _) body) = generateFunction (name, (lmd, "Inner function: " ++ name)) ++ generateStatementBlock body
 generateStatementBlock (IRLetIn name val body) = (name ++ " = " ++ generateExpression val):generateStatementBlock body
 generateStatementBlock (IRIf cond left right) = let
   cCond = generateExpression cond

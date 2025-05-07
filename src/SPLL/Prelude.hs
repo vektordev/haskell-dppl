@@ -164,7 +164,7 @@ fix = "f" #->#
     ("v" #-># apply (var "f") ("n" #-># apply (apply (var "v") (var "v")) (var "n")))
 
 
-compile :: CompilerConfig -> Program -> [(String, IRExpr)]
+compile :: CompilerConfig -> Program -> IREnv
 compile _ p | isLeft (validateProgram p) = error $ fromLeft "" (validateProgram p)
 compile conf p = do
   let preAnnotated = annotateEnumsProg p
@@ -176,7 +176,7 @@ runGen :: (RandomGen g) => CompilerConfig -> Program -> [IRValue] -> Rand g IRVa
 runGen _ p _ | isLeft (validateProgram p) = error $ fromLeft "" (validateProgram p)
 runGen conf p args = do
   let compiled = compile conf p
-  let (Just gen) = lookup "main_gen" compiled
+  let (gen, _) = genFun (lookupIREnv "main" compiled)
   let constArgs = map IRConst args
   generateRand (neurals p) compiled constArgs gen
 
@@ -184,7 +184,7 @@ runProb :: CompilerConfig -> Program -> [IRValue] -> IRValue -> IRValue
 runProb _ p _ _ | isLeft (validateProgram p) = error $ fromLeft "" (validateProgram p)
 runProb conf p args x = do
   let compiled = compile conf p
-  let (Just prob) = lookup "main_prob" compiled
+  let Just (prob, _) = probFun (lookupIREnv "main" compiled)
   let constArgs = map IRConst (x:args)
   let val = generateDet (neurals p) compiled constArgs prob
   case val of
@@ -195,7 +195,7 @@ runInteg :: CompilerConfig -> Program -> [IRValue] -> IRValue -> IRValue -> IRVa
 runInteg _ p _ _ _ | isLeft (validateProgram p) = error $ fromLeft "" (validateProgram p)
 runInteg conf p args low high = do
   let compiled = compile conf p
-  let (Just integ) = lookup "main_integ" compiled
+  let Just (integ, _) = integFun (lookupIREnv "main" compiled)
   let constArgs = map IRConst (low:high:args)
   let val = generateDet (neurals p) compiled constArgs integ
   case val of

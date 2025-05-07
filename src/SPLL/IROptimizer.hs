@@ -1,10 +1,10 @@
 module SPLL.IROptimizer (
-  postProcess
+  optimizeEnv
 , failConversion
 ) where
 
 import SPLL.IntermediateRepresentation
-import SPLL.Lang.Lang
+import SPLL.Lang.Types ( Expr )
 import SPLL.Lang.Types
 import SPLL.Typing.Typing
 import SPLL.Typing.RType
@@ -17,11 +17,17 @@ import Data.Maybe
 import Control.Monad.Writer.Lazy
 import Control.Monad.Reader
 import Data.Functor.Identity
+import Data.Functor ( (<&>) )
 import Data.Number.Erf (erf)
 import Data.List (nub)
 import Control.Monad.Supply
 import Data.Foldable (toList)
 import PrettyPrint
+
+
+optimizeEnv :: CompilerConfig -> IREnv -> IREnv
+optimizeEnv conf = map (\(IRFunGroup name gen prob integ doc) -> IRFunGroup name (pp gen) (prob <&> pp) (integ <&> pp) doc)
+  where pp (expr, doc) = (postProcess conf expr, doc)
 
 postProcess :: CompilerConfig -> IRExpr -> IRExpr
 --postProcess = id

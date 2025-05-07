@@ -8,6 +8,8 @@ import SPLL.Lang.Lang
 import Data.List (intercalate)
 import SPLL.Lang.Types
 import Data.Foldable
+import Data.Maybe (fromMaybe)
+import Data.Functor ((<&>))
 
 --TODO: On the topic of memoization: Ideally we would want to optimize away redundant calls within a loop.
 -- e.g. in MNist-Addition
@@ -69,16 +71,25 @@ unlinesTrimLeft = intercalate "\n"
 onHead :: (a -> a) -> [a] -> [a]
 onHead f (x:xs) = f x : xs
 
-generateFunctions :: [(String, IRExpr)] -> [String]
-generateFunctions = concatMap generateFunction
+generateFunctions :: IREnv -> [String]
+generateFunctions = concatMap generateFunctionGroup
 
-generateFunction :: (String, IRExpr) -> [String]
-generateFunction (name, expr) = let
+generateFunctionGroup :: IRFunGroup -> [String]
+generateFunctionGroup IRFunGroup {groupName=n, genFun=g, probFun=p, integFun=i, groupDoc=doc} = 
+  [ "# === Function Group " ++ n ++ " ===\n# " ++ doc] ++ 
+  genF n "_gen" g ++
+  fromMaybe [] (p <&> genF n "_prob") ++
+  fromMaybe [] (i <&> genF n "_integ")
+  where genF name suffix (e, d) = generateFunction (name ++ suffix) d e
+
+generateFunction :: String -> String -> IRExpr -> [String]
+generateFunction name doc expr = let
   (args, reducedExpr) = unwrapLambdas expr
+  docLine = "# " ++ doc
   l1 = "function " ++ name ++ "(" ++ intercalate ", " args ++ ")"
   block = generateStatementBlock reducedExpr
   lEnd = "end"
-  in [l1] ++ indentOnce block ++ [lEnd]
+  in [docLine, l1] ++ indentOnce block ++ [lEnd]
 
 unwrapLambdas :: IRExpr -> ([String], IRExpr)
 unwrapLambdas (IRLambda name rest) = (name:otherNames, plainTree)
@@ -86,7 +97,7 @@ unwrapLambdas (IRLambda name rest) = (name:otherNames, plainTree)
 unwrapLambdas anyNode = ([], anyNode)
 
 generateStatementBlock :: IRExpr -> [String]
-generateStatementBlock (IRLetIn name lmd@(IRLambda _ _) body) = generateFunction (name, lmd) ++ generateStatementBlock body
+generateStatementBlock (IRLetIn name lmd@(IRLambda _ _) body) = generateFunction name ("Inner function: " ++ name) lmd ++ generateStatementBlock body
 generateStatementBlock (IRLetIn name val body) = (name ++ " = " ++ generateExpression val):generateStatementBlock body
 generateStatementBlock (IRIf cond left right) = let
   cCond = generateExpression cond

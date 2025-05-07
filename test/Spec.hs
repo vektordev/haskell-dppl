@@ -325,7 +325,7 @@ checkProbAny (p, _, params, _) = ioProperty $ do
 
 irDensityTopK :: RandomGen g => Program -> Double -> IRValue -> [IRExpr]-> Rand g IRValue
 irDensityTopK p thresh s params = IRInterpreter.generateRand (neurals p) irEnv (sampleExpr:params) irExpr
-  where Just irExpr = lookup "main_prob" irEnv
+  where Just (irExpr, _) = probFun (lookupIREnv "main" irEnv)
         sampleExpr = IRConst s
         irEnv = envToIR (CompilerConfig (Just thresh) False 0 2) annotated
         annotated = annotateAlgsProg typedProg
@@ -334,7 +334,7 @@ irDensityTopK p thresh s params = IRInterpreter.generateRand (neurals p) irEnv (
 
 irDensityBC :: RandomGen g => Program -> IRValue -> [IRExpr]-> Rand g IRValue
 irDensityBC p s params = IRInterpreter.generateRand (neurals p) irEnv (sampleExpr:params) irExpr
-  where Just irExpr = lookup "main_prob" irEnv
+  where Just (irExpr, _) = probFun (lookupIREnv "main" irEnv)
         sampleExpr = IRConst s
         irEnv = envToIR (CompilerConfig Nothing True 0 2) annotated
         annotated = annotateAlgsProg typedProg
@@ -343,7 +343,7 @@ irDensityBC p s params = IRInterpreter.generateRand (neurals p) irEnv (sampleExp
 
 irDensity :: RandomGen g => Program -> IRValue -> [IRExpr] -> Rand g IRValue
 irDensity p s params = IRInterpreter.generateRand (neurals p) irEnv (sampleExpr:params) irExpr
-  where Just irExpr = lookup "main_prob" irEnv
+  where Just (irExpr, _) = probFun (lookupIREnv "main" irEnv)
         sampleExpr = IRConst s
         irEnv = envToIR noTopKConfig annotated
         annotated = annotateAlgsProg typedProg
@@ -352,7 +352,7 @@ irDensity p s params = IRInterpreter.generateRand (neurals p) irEnv (sampleExpr:
 
 irIntegral :: RandomGen g => Program -> IRValue -> IRValue -> [IRExpr] -> Rand g IRValue
 irIntegral p low high params = IRInterpreter.generateRand (neurals p) irEnv (lowExpr:highExpr:params) irExpr
-  where Just irExpr = lookup "main_integ" irEnv
+  where Just (irExpr, _) = integFun (lookupIREnv "main" irEnv)
         lowExpr = IRConst low
         highExpr = IRConst high
         irEnv = envToIR noTopKConfig annotated
@@ -362,7 +362,7 @@ irIntegral p low high params = IRInterpreter.generateRand (neurals p) irEnv (low
 
 irGen :: RandomGen g => Program -> [IRExpr] -> Rand g IRValue
 irGen p params = IRInterpreter.generateRand (neurals p) irEnv params irExpr
-  where Just irExpr = lookup "main_gen" irEnv
+  where (irExpr, _) = genFun (lookupIREnv "main" irEnv)
         irEnv = envToIR noTopKConfig annotated
         annotated = annotateAlgsProg typedProg
         typedProg = addTypeInfo preAnnotated

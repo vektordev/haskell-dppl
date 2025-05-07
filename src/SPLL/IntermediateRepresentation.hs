@@ -1,5 +1,8 @@
 module SPLL.IntermediateRepresentation (
   IRExpr(..)
+, IREnv
+, IRFunDecl
+, IRFunGroup (..)
 , Tag(..)
 , Operand(..)
 , UnaryOperand(..)
@@ -9,6 +12,7 @@ module SPLL.IntermediateRepresentation (
 , CompilerConfig(..)
 , irMap
 , getIRSubExprs
+, lookupIREnv
 , irPrintFlat
 , valueToIR
 , isLambda
@@ -166,6 +170,13 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               
 type IRValue = GenericValue IRExpr
 
+type IREnv = [IRFunGroup]
+
+
+data IRFunGroup = IRFunGroup {groupName::String, genFun::IRFunDecl, probFun::Maybe IRFunDecl, integFun::Maybe IRFunDecl, groupDoc::String} deriving (Show)
+
+-- Name, Documentation, Body
+type IRFunDecl = (IRExpr, String)
 
 data CompilerConfig = CompilerConfig {
   -- If set to Just x: All branches with likelihood less than x are discarded.
@@ -180,6 +191,13 @@ data CompilerConfig = CompilerConfig {
 
 valueToIR :: GenericValue a -> GenericValue b
 valueToIR = fmap (error "Cannot convert VClosure to IR")
+
+lookupIREnv :: String -> IREnv -> IRFunGroup
+lookupIREnv name env = 
+  case filter (\IRFunGroup{groupName=a} -> a == name) env of
+    [] -> error ("function " ++ show name ++ "not found in environment")
+    [a] -> a
+    lst -> head lst
 
 getIRSubExprs :: IRExpr -> [IRExpr]
 getIRSubExprs (IRIf a b c) = [a, b, c]

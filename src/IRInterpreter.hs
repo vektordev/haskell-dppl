@@ -18,34 +18,36 @@ import Debug.Trace
 import Data.Data
 import Data.Either (fromRight)
 import Data.Bifunctor (second)
-import Data.Maybe (fromMaybe, fromJust, isJust)
+import Data.Maybe (fromMaybe, fromJust, isJust, catMaybes)
 import Data.List (isSuffixOf)
 import Data.Foldable (toList)
 import SPLL.Lang.Types
 import SPLL.Typing.RType
-
-type IREnv a = [(String, IRExpr)]
+import Data.Functor ((<&>))
 
 data RandomFunctions m a = RandomFunctions {uniformGen:: m IRValue, normalGen:: m IRValue}
 
-generateRand :: (RandomGen g) => [NeuralDecl] -> IREnv a -> [IRExpr]-> IRExpr -> Rand g IRValue
+-- Name, Body
+type ReducedIREnv = [(String, IRExpr)]
+
+generateRand :: (RandomGen g) => [NeuralDecl] -> IREnv -> [IRExpr]-> IRExpr -> Rand g IRValue
 generateRand neurals env = generate f neurals startingEnv startingEnv
   where 
     f = RandomFunctions {
       uniformGen = irSample IRUniform,
       normalGen= irSample IRNormal}
-    startingEnv = env ++ standardEnv ++ map neuralRTypeToEnv neurals
+    startingEnv = reduceIREnv env ++ standardEnv ++ map neuralRTypeToEnv neurals
 
-generateDet :: [NeuralDecl] -> IREnv a -> [IRExpr]-> IRExpr -> Either String IRValue
+generateDet :: [NeuralDecl] -> IREnv -> [IRExpr]-> IRExpr -> Either String IRValue
 --generateDet neurals env | traceShow neurals False = undefined
 generateDet neurals env = generate f neurals startingEnv startingEnv
   where 
     f = RandomFunctions {
       uniformGen = Left "Uniform Gen is not det",
       normalGen = Left "Normal Gen is not det"}
-    startingEnv = env ++ standardEnv ++ map neuralRTypeToEnv neurals
+    startingEnv = reduceIREnv env ++ standardEnv ++ map neuralRTypeToEnv neurals
 
-generate :: (Monad m) => RandomFunctions m a -> [NeuralDecl] -> IREnv a -> IREnv a -> [IRExpr]-> IRExpr -> m IRValue
+generate :: (Monad m) => RandomFunctions m a -> [NeuralDecl] -> ReducedIREnv -> ReducedIREnv -> [IRExpr]-> IRExpr -> m IRValue
 --generate f neurals globalEnv env args expr | trace ((show expr) ++ " " ++ show env) False = undefined
 generate f neurals globalEnv env args expr | args /= [] = do
   let reverseArgs = reverse args
@@ -340,6 +342,11 @@ generate f neurals globalEnv env args (IRIndex lstExpr idxExpr) = do
 generate _ _ _ _ _ (IRError s) = error $ "Error during interpretation: " ++ s
 generate f neurals _ _ _ expr = error ("Expression is not yet implemented " ++ show expr)
 
+-- Reduces the complex data structure of an IREnv to a simpler reduced form
+-- Does this by creating a list of Maybe IRExpressions for each triple of gen, prob, and integ functions and then removes the Nothings
+reduceIREnv :: IREnv -> ReducedIREnv
+reduceIREnv = concatMap (\(IRFunGroup name gen prob integ doc) -> catMaybes [Just $ red name "_gen" gen, prob <&> red name "_prob", integ <&> red name "_integ"])
+  where red name suffix (expr, _) = (name ++ suffix, expr)
 
 irSample :: (RandomGen g) => Distribution -> Rand g IRValue
 irSample IRUniform = do
@@ -355,7 +362,7 @@ irPDF :: Distribution -> IRValue -> IRValue
 --irPDF _ VAny = VFloat 1
 irPDF IRUniform (VFloat x) = if x >= 0 && x <= 1 then VFloat 1 else VFloat 0
 irPDF IRNormal (VFloat x) = VFloat ((1 / sqrt (2 * pi)) * exp (-0.5 * x * x))
-irPDF expr _ = error "Expression must be the density of a valid distribution"
+irPDF expr x = error ("Expression must be the density of a valid distribution" ++ show x)
 
 irCDF :: Distribution -> IRValue -> IRValue
 irCDF IRUniform (VFloat x) = VFloat $ if x < 0 then 0 else if x > 1 then 1 else x

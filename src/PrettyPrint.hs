@@ -5,20 +5,23 @@ import Data.List (intercalate)
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types
 import Data.Foldable
+import Data.Functor ((<&>))
+import Data.Maybe (catMaybes)
 
 pPrintProg :: Program -> String
 pPrintProg (Program decls neurals) = intercalate "\n\n" (map (\f -> wrapInFunctionDeclaration (snd f) (fst f) []) decls)
 
-pPrintIREnv :: [(String, IRExpr)] -> String
-pPrintIREnv env = intercalate "\n\n" (map (\f -> wrapInFunctionDeclarationIR (snd f) (fst f) []) env)
+pPrintIREnv :: IREnv -> String
+pPrintIREnv env = intercalate "\n\n" (concatMap (\(IRFunGroup name gen prob integ doc) -> catMaybes [Just (wrapDecl name "_gen" gen), prob <&> wrapDecl name "_prob", integ <&> wrapDecl name "_integ"]) env)
+    where wrapDecl name suffix (expr, doc) = wrapInFunctionDeclarationIR expr (name ++ suffix) doc []
 
 wrapInFunctionDeclaration :: Expr -> String -> [String] -> String
 wrapInFunctionDeclaration (Lambda _ n b) fName params = wrapInFunctionDeclaration b fName (n:params)
 wrapInFunctionDeclaration e fName params = "def " ++ fName ++ "(" ++ intercalate ", " (reverse params) ++ "):\n" ++ indent 1 ++ pPrintExpr e 1 ++"\n"
 
-wrapInFunctionDeclarationIR :: IRExpr -> String -> [String] -> String
-wrapInFunctionDeclarationIR (IRLambda n b) fName params = wrapInFunctionDeclarationIR b fName (n:params)
-wrapInFunctionDeclarationIR e fName params = "def " ++ fName ++ "(" ++ intercalate ", " params ++ "):\n" ++ indent 1 ++ pPrintIRExpr e 1 ++"\n"
+wrapInFunctionDeclarationIR :: IRExpr -> String -> String -> [String] -> String
+wrapInFunctionDeclarationIR (IRLambda n b) fName doc params = wrapInFunctionDeclarationIR b fName doc (n:params)
+wrapInFunctionDeclarationIR e fName doc params = "-- " ++ doc ++ "\ndef " ++ fName ++ "(" ++ intercalate ", " params ++ "):\n" ++ indent 1 ++ pPrintIRExpr e 1 ++"\n"
 
 pPrintExpr :: Expr -> Int -> String
 pPrintExpr (LetIn _ n v b) i = "let " ++ n ++ " = " ++ pPrintExpr v (i+1) ++ " in\n" ++ indent (i+1) ++ pPrintExpr b (i+1)
