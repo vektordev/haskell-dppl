@@ -1,1 +1,1 @@
-main = (Uniform > 0.5) && (Uniform > 0.5)
+main = (Uniform < 0.25) && (Uniform < 0.8)
