@@ -1,0 +1,1 @@
+main = apply (\x -> x + 2) Uniform
