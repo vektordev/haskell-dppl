@@ -120,6 +120,13 @@ tailInv :: FDecl
 tailInv = FDecl (Forall [TV "a"] (ListOf (TVarR (TV "a")) `TArrow` ListOf (TVarR (TV "a")))) ["b"] ["a"] (IRCons (IRConst VAny) (IRVar "b")) (IRConst (VBool True)) False [("b", IRConst (VFloat 1))]
 
 
+-- ============================ Higher Order Functions ============================
+
+applyFwd :: FDecl
+applyFwd = FDecl (Forall [TV "a", TV "b"] ((TVarR (TV "a") `TArrow` TVarR (TV "b")) `TArrow` (TVarR (TV "a") `TArrow` TVarR (TV "b")))) ["f", "a"] ["b"] (IRApply (IRVar "f") (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1)), ("f", IRConst (VFloat 1))]
+applyInv :: FDecl
+applyInv = FDecl (Forall [TV "b", TV "a"] ((TVarR (TV "a") `TArrow` TVarR (TV "b")) `TArrow` (TVarR (TV "b") `TArrow` TVarR (TV "a")))) ["f", "b"] ["a"] (IRApply (IRVar "f") (IRVar "b")) (IRConst (VBool True)) True [("b", IRConst (VFloat 1)), ("f", IRConst (VFloat 1))]
+
 
 globalFenv :: FEnv
 globalFenv = [("double", FPair doubleFwd [doubleInv]),
@@ -139,7 +146,8 @@ globalFenv = [("double", FPair doubleFwd [doubleInv]),
               ("fst", FPair fstFwd [fstInv]),
               ("snd", FPair sndFwd [sndInv]),
               ("head", FPair headFwd [headInv]),
-              ("tail", FPair tailFwd [tailInv])]
+              ("tail", FPair tailFwd [tailInv]),
+              ("apply", FPair applyFwd [applyInv])]
 
 -- Creates a instance of a FPair, that has identifier names given by a monadic function. m should be a supply monad
 -- Works by having each identifier renamed using this function

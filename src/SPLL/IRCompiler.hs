@@ -39,20 +39,20 @@ envToIR conf p = optimizeEnv conf $ -- map optimizer over all second elements of
         pt = pType $ getTypeInfo binding
         rt = rType $ getTypeInfo binding in
       IRFunGroup {groupName=name,
-       integFun = 
+       integFun =
         if (pt == Deterministic || pt == Integrate) && (isOnlyNumbers rt) then
           Just (toIntegDecl name (IRLambda "low" (IRLambda "high" (runCompile conf (toIRIntegrateSave conf typeEnv binding (IRVar "low") (IRVar "high"))))))
         else Nothing,
-        probFun = 
+        probFun =
           if pt == Deterministic || pt == Integrate || pt == Prob then
             Just (toProbDecl name (IRLambda "sample" (runCompile conf (toIRProbabilitySave conf typeEnv binding (IRVar "sample")))))
           else Nothing,
         genFun = toGenDecl name (fst $ runIdentity $ runSupplyVars $ runWriterT $ toIRGenerate typeEnv binding),
         groupDoc="Function group " ++ name}) (functions p)
-        
+
   where
     toGenDecl name expr = (expr, "Generates a random sample of the " ++ name ++ " function")
-    toProbDecl name expr = 
+    toProbDecl name expr =
       (expr, "Calculates the probability of the sample parameter being returned from the " ++ name ++ "function")
     toIntegDecl name expr = (expr, "Calculates the probability of sample of " ++ name ++ " falling in between the parameters low and high")
 
@@ -248,6 +248,24 @@ toIRProbability conf typeEnv (TCons _ t1Expr t2Expr) sample = do
   (t2P, t2Dim, t2Branches) <- toIRProbabilitySave conf typeEnv t2Expr (IRTSnd sample)
   mult <- (t1P, t1Dim) `multP` (t2P, t2Dim)
   return (fst mult, snd mult, IROp OpPlus t1Branches t2Branches)
+toIRProbability conf typeEnv (InjF _ name [f, a]) sample | name == "apply" = do
+  -- FPair of the InjF with unique names
+  fPair <- instantiate mkVariable name
+  -- Unary InjF has a single inversion
+  let FPair _ [inv] = fPair
+  let FDecl {inputVars=[_, v], body=invExpr, applicability=appTest, deconstructing=decons, derivatives=[(_, invDerivExpr), _]} = inv
+  -- Set sample value to the variable name in the InjF
+  tell [(v, sample)]
+  -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
+  let probF = if decons then toIRProbabilitySave else toIRProbability
+  -- Get the probabilistic inference code for the parameter
+  let (Lambda _ fVar fExpr) = f
+  inverse <- toIRInverse typeEnv fVar fExpr (IRVar v)
+  (paramExpr, paramDim, paramBranches) <- probF conf typeEnv a inverse
+  -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
+  let returnP = IROp OpMult paramExpr (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDerivExpr))
+  let appTestExpr e = IRIf appTest e const0
+  return (appTestExpr returnP, appTestExpr paramDim, appTestExpr paramBranches)
 toIRProbability conf typeEnv (InjF _ name [param]) sample = do
   -- FPair of the InjF with unique names
   fPair <- instantiate mkVariable name
@@ -682,3 +700,39 @@ toIRIntegrate conf typeEnv (Var _ n) low high = do
    Nothing -> error ("Could not find name in TypeEnv: " ++ n)
 toIRIntegrate _ _ x _ _ = error ("found no way to convert to IRIntegrate: " ++ show x)
 
+toIRInverse :: TypeEnv -> String -> Expr -> IRExpr -> CompilerMonad IRExpr
+toIRInverse _ var (Var _ x) inv | var == x = return inv
+toIRInverse typeEnv var (InjF _ name [param]) sample = do
+  -- FPair of the InjF with unique names
+  fPair <- instantiate mkVariable name
+  -- Unary InjF has a single inversion
+  let FPair _ [inv] = fPair
+  let FDecl {inputVars=[v], body=invExpr} = inv
+  -- Set sample value to the variable name in the InjF
+  tell [(v, sample)]
+  toIRInverse typeEnv var param invExpr
+toIRInverse typeEnv var (InjF _ name params) sample = do
+  -- Index of the deterministic and the probabilistic parameter (Left -> 0, Right -> 1)
+  let detIdx = case (containsVar var (params !! 0), containsVar var (params !! 1)) of
+                (True, False) -> 1
+                (False, True) -> 0
+                _ -> error "There must be exacly one variable for inversion"
+  let probIdx = 1 - detIdx
+  -- FPair of the InjF with unique names
+  FPair fwd inversions <- instantiate mkVariable name
+  let FDecl{inputVars=inVars, outputVars=[v1]} = fwd
+  -- Find the inversion with all deterministic input parameters
+  let [invDecl] = filter (\FDecl {outputVars=[w1]} -> (inVars !! probIdx)==w1) inversions   --This should only return one inversion
+  let FDecl {inputVars=[x2, x3], body=invExpr} = invDecl
+  -- Generate the probabilistic sub expressions
+  detExpr <- toIRGenerate typeEnv (params !! detIdx)
+  -- Get the variable names of the detetministic subexpression and the result of the fwd expression
+  let (detVar, sampleVar) = if x2 == (inVars !! detIdx) then (x2, x3) else (x3, x2)
+  -- Set all known values to their variable names in the InjF
+  tell [(detVar, detExpr), (sampleVar, sample)]
+  toIRInverse typeEnv var (params !! probIdx) invExpr
+toIRInverse _ _ x _ = error ("Unknown inverse: " ++ show x)
+
+containsVar :: String -> Expr -> Bool
+containsVar var (Var _ x) | var == x = True
+containsVar var expr = any (containsVar var) (getSubExprs expr)
