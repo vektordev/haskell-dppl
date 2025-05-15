@@ -152,6 +152,7 @@ generate f neurals globalEnv env [] (IROp OpEq a b) = do
           eqAny _ VAny = True
           eqAny a b = a == b in
             return $ VBool (eqAny af1 bf1 && eqAny af2 bf2)
+    (VEither af, VEither bf) -> return $ VBool (af == bf)
     -- Any is not equal to anything
     (VAny, b) -> return $ VBool False
     (a, VAny) -> return $ VBool False

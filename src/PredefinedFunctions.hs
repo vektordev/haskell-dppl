@@ -6,7 +6,9 @@ FDecl(..),
 FEnv,
 instantiate,
 propagateValues,
-parameterCount
+parameterCount,
+isHigherOrder,
+getFunctionParamIdx
 ) where
 
 import SPLL.Typing.RType (RType(..), Scheme(..), TVarR(..))
@@ -20,6 +22,7 @@ import IRInterpreter
 import Control.Monad
 import Control.Monad.Supply (MonadSupply)
 import qualified Data.Bifunctor
+import Data.Either (isLeft)
 
 -- InputVars, OutputVars, fwd, grad
 data FDecl = FDecl {contract :: Scheme, inputVars :: [String], outputVars :: [String], body :: IRExpr, applicability :: IRExpr, deconstructing :: Bool, derivatives :: [(String, IRExpr)]} deriving (Show, Eq)
@@ -123,9 +126,16 @@ tailInv = FDecl (Forall [TV "a"] (ListOf (TVarR (TV "a")) `TArrow` ListOf (TVarR
 -- ============================ Higher Order Functions ============================
 
 applyFwd :: FDecl
-applyFwd = FDecl (Forall [TV "a", TV "b"] ((TVarR (TV "a") `TArrow` TVarR (TV "b")) `TArrow` (TVarR (TV "a") `TArrow` TVarR (TV "b")))) ["f", "a"] ["b"] (IRApply (IRVar "f") (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1)), ("f", IRConst (VFloat 1))]
+applyFwd = FDecl (Forall [TV "a", TV "b"] ((TVarR (TV "a") `TArrow` TVarR (TV "b")) `TArrow` (TVarR (TV "a") `TArrow` TVarR (TV "b")))) ["f", "a"] ["b"] (IRInvoke $ IRApply (IRVar "f") (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
 applyInv :: FDecl
-applyInv = FDecl (Forall [TV "b", TV "a"] ((TVarR (TV "a") `TArrow` TVarR (TV "b")) `TArrow` (TVarR (TV "b") `TArrow` TVarR (TV "a")))) ["f", "b"] ["a"] (IRApply (IRVar "f") (IRVar "b")) (IRConst (VBool True)) True [("b", IRConst (VFloat 1)), ("f", IRConst (VFloat 1))]
+applyInv = FDecl (Forall [TV "b", TV "a"] ((TVarR (TV "a") `TArrow` TVarR (TV "b")) `TArrow` (TVarR (TV "b") `TArrow` TVarR (TV "a")))) ["f", "b"] ["a"] (IRInvoke $ IRApply (IRVar "f") (IRVar "b")) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
+
+mapLeftFwd :: FDecl
+mapLeftFwd = FDecl (Forall [TV "a", TV "b", TV "c"] ((TVarR (TV "a") `TArrow` TVarR (TV "c")) `TArrow` (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TEither (TVarR (TV "c")) (TVarR (TV "b"))))) ["f", "a"] ["b"]
+              (IRIf (IRIsLeft (IRVar "a")) (IRLeft (IRInvoke $ IRApply (IRVar "f") (IRFromLeft (IRVar "a")))) (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
+mapLeftInv :: FDecl
+mapLeftInv = FDecl (Forall [TV "a", TV "b", TV "c"] ((TVarR (TV "c") `TArrow` TVarR (TV "a")) `TArrow` (TEither (TVarR (TV "c")) (TVarR (TV "b")) `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b"))))) ["f", "b"] ["a"]
+              (IRIf (IRIsLeft (IRVar "b")) (IRLeft (IRInvoke $ IRApply (IRVar "f") (IRFromLeft (IRVar "b")))) (IRVar "b")) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
 
 
 globalFenv :: FEnv
@@ -147,7 +157,8 @@ globalFenv = [("double", FPair doubleFwd [doubleInv]),
               ("snd", FPair sndFwd [sndInv]),
               ("head", FPair headFwd [headInv]),
               ("tail", FPair tailFwd [tailInv]),
-              ("apply", FPair applyFwd [applyInv])]
+              ("apply", FPair applyFwd [applyInv]),
+              ("mapLeft", FPair mapLeftFwd [mapLeftInv])]
 
 -- Creates a instance of a FPair, that has identifier names given by a monadic function. m should be a supply monad
 -- Works by having each identifier renamed using this function
@@ -193,9 +204,32 @@ constructHornClause subst decl = (map lookUpSubstAddDet inV, map lookUpSubstAddD
     lookupSubst v = fromJust (lookup v subst)
     lookUpSubstAddDet v = (lookupSubst v, CInferDeterministic)
 
-
 getInputChainNames :: Expr -> [ChainName]
 getInputChainNames e = map (chainName . getTypeInfo) (getSubExprs e)
+
+isHigherOrder :: String -> Bool
+isHigherOrder name =
+  case lookup name globalFenv of
+    Nothing -> False
+    Just (FPair FDecl {contract=Forall _ c} _) -> hasArrowParameter c
+  where
+    hasArrowParameter rt =
+      case rt of
+        TArrow (TArrow _ _) _ -> True
+        TArrow _ a -> hasArrowParameter a
+        _ -> False
+
+getFunctionParamIdx :: String -> [Int]
+getFunctionParamIdx name =
+  case lookup name globalFenv of
+    Nothing -> []
+    Just (FPair FDecl {contract=Forall _ c} _) -> findArrowParameter c
+  where
+    findArrowParameter rt =
+      case rt of
+        TArrow (TArrow _ _) _ -> [0]
+        TArrow _ a -> map (+1) (findArrowParameter a)
+        _ -> []
 
 propagateValues :: String -> [[Value]] -> [Value]
 propagateValues name values = case results of

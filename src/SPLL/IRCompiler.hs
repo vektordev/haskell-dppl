@@ -248,20 +248,28 @@ toIRProbability conf typeEnv (TCons _ t1Expr t2Expr) sample = do
   (t2P, t2Dim, t2Branches) <- toIRProbabilitySave conf typeEnv t2Expr (IRTSnd sample)
   mult <- (t1P, t1Dim) `multP` (t2P, t2Dim)
   return (fst mult, snd mult, IROp OpPlus t1Branches t2Branches)
-toIRProbability conf typeEnv (InjF _ name [f, a]) sample | name == "apply" = do
+toIRProbability conf typeEnv (InjF _ name [p0, p1]) sample | isHigherOrder name = do
   -- FPair of the InjF with unique names
   fPair <- instantiate mkVariable name
   -- Unary InjF has a single inversion
   let FPair _ [inv] = fPair
-  let FDecl {inputVars=[_, v], body=invExpr, applicability=appTest, deconstructing=decons, derivatives=[(_, invDerivExpr), _]} = inv
+  let FDecl {inputVars=inVars, body=invExpr, applicability=appTest, deconstructing=decons, derivatives=derivs} = inv
+  --Handle the function being in different positions of the signature
+  let (f, a, fVar, aVar) = case getFunctionParamIdx name of
+                [0] -> (p0, p1, head inVars, inVars !! 1)
+                [1] -> (p1, p0, inVars !! 1, head inVars)
+                _ -> error "Unrecognized higher order signature"
+  let Just invDerivExpr = lookup aVar derivs
   -- Set sample value to the variable name in the InjF
-  tell [(v, sample)]
+  tell [(aVar, sample)]
   -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
   let probF = if decons then toIRProbabilitySave else toIRProbability
   -- Get the probabilistic inference code for the parameter
-  let (Lambda _ fVar fExpr) = f
-  inverse <- toIRInverse typeEnv fVar fExpr (IRVar v)
-  (paramExpr, paramDim, paramBranches) <- probF conf typeEnv a inverse
+  let (Lambda _ fBound fExpr) = f
+  newFBound <- mkVariable "x"
+  inverseF <- toIRInverse typeEnv fBound fExpr (IRVar newFBound) <&> IRLambda newFBound
+  tell [(fVar, inverseF)]
+  (paramExpr, paramDim, paramBranches) <- probF conf typeEnv a invExpr
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
   let returnP = IROp OpMult paramExpr (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDerivExpr))
   let appTestExpr e = IRIf appTest e const0
