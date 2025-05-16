@@ -49,14 +49,18 @@ type Constraint = (Var, PType)
 data DScheme = DScheme [TVar] [DConstraint] PType
   deriving (Show, Eq)
 
-type DConstraint = (PType, DowngradeChain)
+
+-- Tree of constraints. Leafes are types and constraints connect one or more nodes
 data ChainConstraint = PlusConstraint TypeOrChain TypeOrChain | EnumPlusConstraint TypeOrChain TypeOrChain | CompConstraint TypeOrChain TypeOrChain
   | LetInDConstraint TypeOrChain
   deriving (Show, Eq)
-type DowngradeChain = [Either PType ChainConstraint]
---Downgradechain of all Left PTypes resolves into the
-
+-- Node of the tree
 type TypeOrChain = Either PType DowngradeChain
+-- Collection of children constraints of a node or a leaf
+type DowngradeChain = [Either PType ChainConstraint]
+-- A type variable with constraints on it
+-- E.g.: plusF :: a -> b -> c has constraint (c, PlusConstraint a b)
+type DConstraint = (PType, DowngradeChain)
 
 resolveLetInDCons :: PType -> PType
 resolveLetInDCons Deterministic = Deterministic
@@ -405,6 +409,7 @@ closeProg env cons ty tp = (cons', DScheme alph consRes  resType', apply finalSu
 extend :: TEnv -> (Var, Scheme) -> TEnv
 extend (TypeEnv env) (x, s) = TypeEnv $ Map.insertWith (++) x [s] env
 
+-- Substitutes such that the two types are equal
 unify ::  PType -> PType -> Infer Subst
 unify a b | a == b = return emptySubst
 unify (l `PArr` r) (l' `PArr` r')  = do
@@ -415,6 +420,7 @@ unify (TVar a) t = bind a t
 unify t (TVar a) = bind a t
 unify t1 t2 = throwError $ UnificationFail t1 t2
 
+-- Substitutes such that the variable maps to the specified type
 bind ::  TVar -> PType -> Infer Subst
 bind a t
   | t == TVar a     = return emptySubst
@@ -427,12 +433,14 @@ occursCheck t a =  a `Set.member` ftv t
 letters :: [String]
 letters = [1..] >>= flip replicateM ['a'..'z']
 
+-- Creates a fresh variable
 fresh :: Infer PType
 fresh = do
     s <- get
     put s{var_count = var_count s + 1}
     return $ TVar $ TV (letters !! var_count s)
 
+-- Replace variables in the scheme with fresh ones
 -- TODO: Other Constraints?
 instantiate :: Scheme -> Infer ([Constraint], PType)
 instantiate (Forall as cs t) = do
@@ -440,19 +448,29 @@ instantiate (Forall as cs t) = do
   let s = Subst $ Map.fromList $ zip as as'
   return ([],apply s t)
 
+-- Forall type variables free in t and not bound in env
 generalize :: TEnv -> PType -> Scheme
 generalize env t  = Forall as [] t
     where as = Set.toList $ ftv t `Set.difference` ftv env
 
--- infer an argument of a binary operator expression and build constraint + subst accordingly
+-- infer an argument of an operator (function) and applies it to the operator. Reduces the arity of the operator by one
+-- E.g. plusF with one expression yielding a float will result in a pType of Float -> Float
+-- Environment -> Expression -> (Initial substitution) -> (Initial constraints) -> (PType of the operator) -> (Resulting substitution, resulting constraints, Return type of this application, typed expresison)
 applyOpArg :: TEnv -> Expr -> Subst -> [DConstraint] -> PType -> Infer (Subst, [DConstraint], PType, Expr)
 applyOpArg env expr s1 cs1 t1 = do
+  -- Infer the argument expression
   (s2, cs2, t2, exprt) <- infer (apply s1 env) expr
+  -- This will be the return type of this application
   tv1 <- fresh
-  s3       <- unify (apply s2 t1) (PArr t2 tv1)
+  -- Unify the expected pType of the operator with this application of an argument. This will reduce the arity of the operator by one
+  s3 <- unify (apply s2 t1) (PArr t2 tv1)
+  -- Compose all the substitutions found
   return (s3 `compose` s2 `compose` s1,
+    -- Return newly found constraints
     apply (s3 `compose` s2) cs1 ++ apply s3 cs2,
+    -- The return type of the application of the argument to the operator
     apply s3 tv1,
+    -- The same expression but typed
     exprt)
 
 -- if we already know the type of the first argument in a binary operator..
@@ -716,6 +734,7 @@ compose :: Subst -> Subst -> Subst
 (Subst s1) `compose` (Subst s2) = Subst $ Map.map (apply (Subst s1)) s2 `Map.union` s1
 class Substitutable a where
   apply :: Subst -> a -> a
+  -- Free type variables
   ftv   :: a -> Set.Set TVar
 
 instance Substitutable Program where
