@@ -92,7 +92,7 @@ onLast f (x:xs) = x : onLast f xs
 generateFunctions :: Bool -> IREnv -> [String]
 --generateFunctions defs | trace (show defs) False = undefined
 --contrary to the julia backend, we want to aggregate gen and prob into one classes. Ugly implementation, but it'll do for now.
-generateFunctions genBoil defs =
+generateFunctions genBoil env@(IREnv funcs _) =
 {-  let
     getName str
       | "_prob" `isSuffixOf` str = iterate init str !! 5
@@ -113,11 +113,11 @@ generateFunctions genBoil defs =
       "import functools",
       "import math",
       "from torch.nn import Module", ""] ++
-      concatMap (generateClass (envToLUT defs)) defs ++
+      concatMap (generateClass (envToLUT env)) funcs ++
       ["", "# Example Initialization"] ++
-      generateInitializations defs
+      generateInitializations env
     else
-      concatMap (generateClass (envToLUT defs)) defs
+      concatMap (generateClass (envToLUT env)) funcs
   
         
           
@@ -127,14 +127,14 @@ stdLib :: [(String, String)]
 stdLib = [("in", "contains")]
 
 envToLUT :: IREnv -> [(String, String)]
-envToLUT = concatMap (\IRFunGroup {groupName=n} -> [(n ++ "_gen", n ++ ".generate"), (n ++ "_prob", n ++ ".forward"), (n ++ "_integ", n ++ ".integrate")])
+envToLUT (IREnv funcs _) = concatMap (\IRFunGroup {groupName=n} -> [(n ++ "_gen", n ++ ".generate"), (n ++ "_prob", n ++ ".forward"), (n ++ "_integ", n ++ ".integrate")]) funcs
 
 replaceCalls :: [(String, String)] -> IRExpr -> IRExpr
 replaceCalls lut (IRVar name) = IRVar (fromMaybe name $ lookup name lut)
 replaceCalls _ other = other
 
 generateInitializations :: IREnv -> [String]
-generateInitializations = map (\IRFunGroup {groupName=n} -> n ++ " = " ++ onHead toUpper n ++ "()")
+generateInitializations (IREnv funcs _) = map (\IRFunGroup {groupName=n} -> n ++ " = " ++ onHead toUpper n ++ "()") funcs
 
 generateClass :: [(String, String)] -> IRFunGroup -> [String]
 generateClass lut (IRFunGroup name gen prob integ doc) = let

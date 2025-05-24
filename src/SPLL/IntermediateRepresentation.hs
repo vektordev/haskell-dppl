@@ -1,6 +1,6 @@
 module SPLL.IntermediateRepresentation (
   IRExpr(..)
-, IREnv
+, IREnv(..)
 , IRFunDecl
 , IRFunGroup (..)
 , Tag(..)
@@ -170,7 +170,7 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               
 type IRValue = GenericValue IRExpr
 
-type IREnv = [IRFunGroup]
+data IREnv = IREnv [IRFunGroup] [ADTDecl] deriving (Show)
 
 
 data IRFunGroup = IRFunGroup {groupName::String, genFun::IRFunDecl, probFun::Maybe IRFunDecl, integFun::Maybe IRFunDecl, groupDoc::String} deriving (Show)
@@ -193,7 +193,7 @@ valueToIR :: GenericValue a -> GenericValue b
 valueToIR = fmap (error "Cannot convert VClosure to IR")
 
 lookupIREnv :: String -> IREnv -> IRFunGroup
-lookupIREnv name env = 
+lookupIREnv name (IREnv env _) = 
   case filter (\IRFunGroup{groupName=a} -> a == name) env of
     [] -> error ("function " ++ show name ++ "not found in environment")
     [a] -> a

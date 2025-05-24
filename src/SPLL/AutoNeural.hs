@@ -171,11 +171,11 @@ tupelFromValue _non_tuple = error "supplied non-tuple value to tuple-shaped NN t
 testConf = CompilerConfig {topKThreshold=Nothing, countBranches=False, verbose=2, optimizerLevel=2}
 
 test = do
-  let irdefs = [makeAutoNeural testConf ("readMNist", TArrow TSymbol TInt, Just $ EnumRange ((VInt 0), (VInt 9)))]
+  let irdefs = IREnv [makeAutoNeural testConf ("readMNist", TArrow TSymbol TInt, Just $ EnumRange ((VInt 0), (VInt 9)))] []
   putStrLn (pPrintIREnv irdefs)
 
 test2 = do
-  let irdefs = [makeAutoNeural testConf ("regressFloat", TArrow TSymbol TFloat, Nothing)]
+  let irdefs = IREnv [makeAutoNeural testConf ("regressFloat", TArrow TSymbol TFloat, Nothing)] []
   putStrLn (pPrintIREnv irdefs)
 
 --TODO: Needs MAR semantics for the VAny.
@@ -184,12 +184,12 @@ test2 = do
 --  putStrLn (pPrintIREnv irdefs)
 
 test4 = do
-  let irdefs = [makeAutoNeural testConf ("tuple", TArrow TSymbol (Tuple TInt TInt), Just $ EnumRange ((VTuple (VInt 7) (VInt 3)), (VTuple (VInt 9) (VInt 5))))]
+  let irdefs = IREnv [makeAutoNeural testConf ("tuple", TArrow TSymbol (Tuple TInt TInt), Just $ EnumRange ((VTuple (VInt 7) (VInt 3)), (VTuple (VInt 9) (VInt 5))))] []
   putStrLn (pPrintIREnv irdefs)
 
 test5 = do
   let decl = ("tuple", TArrow TSymbol (Tuple TInt TInt), Just $ EnumList [(VTuple (VInt 7) (VInt 3)), (VTuple (VInt 9) (VInt 5))])
-  let irdefs = [makeAutoNeural testConf decl]
+  let irdefs = IREnv [makeAutoNeural testConf decl] []
   putStrLn (pPrintIREnv irdefs)
   let commentstring = makeForwardDecl decl
   putStrLn commentstring

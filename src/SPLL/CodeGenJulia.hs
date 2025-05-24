@@ -72,7 +72,7 @@ onHead :: (a -> a) -> [a] -> [a]
 onHead f (x:xs) = f x : xs
 
 generateFunctions :: IREnv -> [String]
-generateFunctions = concatMap generateFunctionGroup
+generateFunctions (IREnv funcs _) = concatMap generateFunctionGroup funcs
 
 generateFunctionGroup :: IRFunGroup -> [String]
 generateFunctionGroup IRFunGroup {groupName=n, genFun=g, probFun=p, integFun=i, groupDoc=doc} = 

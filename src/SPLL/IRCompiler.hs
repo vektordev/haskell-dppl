@@ -33,7 +33,7 @@ type TypeEnv = [(String, (RType, Bool))]
 -- TODO: How do we deal with top-level lambdas in binding here?
 --  TL-Lambdas are presumably to be treated differently than non-TL, at least as far as prob is concerned.
 envToIR :: CompilerConfig -> Program -> IREnv
-envToIR conf p = optimizeEnv conf $ -- map optimizer over all second elements of the tuples
+envToIR conf p = optimizeEnv conf $ IREnv (-- map optimizer over all second elements of the tuples
   map (makeAutoNeural conf) (neurals p) ++
   map (\(name, binding) ->
     let typeEnv = getGlobalTypeEnv p
@@ -49,7 +49,7 @@ envToIR conf p = optimizeEnv conf $ -- map optimizer over all second elements of
             Just (toProbDecl name (IRLambda "sample" (runCompile conf (toIRProbabilitySave conf typeEnv binding (IRVar "sample")))))
           else Nothing,
         genFun = toGenDecl name (fst $ runIdentity $ runSupplyVars $ runWriterT $ toIRGenerate typeEnv binding),
-        groupDoc="Function group " ++ name}) (functions p)
+        groupDoc="Function group " ++ name}) (functions p)) (adts p)
         
   where
     toGenDecl name expr = (expr, "Generates a random sample of the " ++ name ++ " function")

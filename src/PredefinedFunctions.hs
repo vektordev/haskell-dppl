@@ -10,7 +10,7 @@ parameterCount
 ) where
 
 import SPLL.Typing.RType (RType(..), Scheme(..), TVarR(..))
-import SPLL.IntermediateRepresentation (IRExpr, IRExpr(..), Operand(..), UnaryOperand(..), irMap) --FIXME
+import SPLL.IntermediateRepresentation (IRExpr, IRExpr(..), Operand(..), UnaryOperand(..), irMap, IREnv (IREnv)) --FIXME
 import SPLL.Lang.Lang
 import SPLL.Typing.Typing
 import Data.Set (fromList)
@@ -194,7 +194,7 @@ propagateValues name values = case results of
   Left s -> []
   Right l -> map (fmap failConversionRev) l
   where
-    results = mapM (generateDet [] [] []) letInBlocks
+    results = mapM (generateDet [] (IREnv [] []) []) letInBlocks
     letInBlocks = map (foldr (\(n, p) e -> IRLetIn n (IRConst (fmap failConversionFwd p)) e) fwdExpr) namedParams
     namedParams = map (zip paramNames) valueProd
     valueProd = sequence values
