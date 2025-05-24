@@ -30,7 +30,9 @@ import SPLL.Typing.RType
 import SPLL.InferenceRule
 import PredefinedFunctions (globalFenv, FPair(..), FDecl(..))
 import Debug.Trace
-import SPLL.Lang.Types (FnDecl)
+import SPLL.Lang.Types (FnDecl, ADTDecl)
+import SPLL.Typing.AlgebraicDataTypes
+import Data.Bifunctor
 
 -- changes: in infer and inferProg; also changed TypeSigs to remove RType of main expression.
 
@@ -120,7 +122,7 @@ class Substitutable a where
   ftv   :: a -> Set.Set TVarR
 
 instance Substitutable Program where
-  apply s (Program decls nns) = Program (zip (map fst decls) (map (apply s . snd) decls)) nns
+  apply s (Program decls nns adts) = Program (zip (map fst decls) (map (apply s . snd) decls)) nns adts
   ftv _ = Set.empty
 
 instance Substitutable Expr where
@@ -139,6 +141,7 @@ instance Substitutable RType where
   apply _ NullList = NullList
   apply _ BottomTuple = BottomTuple
   apply _ TThetaTree = TThetaTree
+  apply _ (TADT ty) = TADT ty 
   apply s (ListOf t) = ListOf $ apply s t
   apply s (Tuple t1 t2) = Tuple (apply s t1) (apply s t2)
   apply s (TEither t1 t2) = TEither (apply s t1) (apply s t2)
@@ -179,9 +182,11 @@ showConstraint (Constraint a b (Just c)) = prettyRType a ++ " :==: " ++ prettyRT
 
 
 --build the basic type environment: Take all invertible functions; ignore their inverses
-basicTEnv :: TEnv
-basicTEnv = TypeEnv $ Map.fromList $ map (\(name, FPair FDecl {contract=ty} _) -> (name, ty)) globalFenv
+basicTEnv :: [ADTDecl] -> TEnv
+basicTEnv adts = TypeEnv $ Map.fromList $ (adtRTs ++ injFRTs)
   where
+    adtRTs = map (Data.Bifunctor.second toScheme) (concatMap implicitFunctionRTypes adts)
+    injFRTs = map (\(name, FPair FDecl {contract=ty} _) -> (name, ty)) globalFenv
     -- plain RTypes as they exist in globalFEnv are implicitly forall'd. Make it explicit.
     toScheme :: RType -> Scheme
     toScheme rty = Forall freeVars rty
@@ -189,9 +194,10 @@ basicTEnv = TypeEnv $ Map.fromList $ map (\(name, FPair FDecl {contract=ty} _) -
         freeVars :: [TVarR]
         freeVars = Set.toList $ ftv rty
 
+
 addRTypeInfo :: Program -> Program
 addRTypeInfo p =
-  case runInfer basicTEnv (inferProg p) of
+  case runInfer (basicTEnv (adts p)) (inferProg p) of
     Left err -> error ("error in addRTypeInfo: " ++ show err)
     Right (cs, p2) -> case runSolve cs of
       Left err -> error (
@@ -205,20 +211,20 @@ addRTypeInfo p =
       Right subst -> apply subst p2
 
 tryAddRTypeInfo :: Program -> Either RTypeError Program
-tryAddRTypeInfo p@(Program decls _) = do
-  (cs, p) <- runInfer basicTEnv (inferProg p)
+tryAddRTypeInfo p@(Program decls _ adts) = do
+  (cs, p) <- runInfer (basicTEnv adts) (inferProg p)
   subst <- runSolve cs
   return $ apply subst p
 
 --TODO Remove
 testFunction :: Program -> IO ()
-testFunction p@(Program decls _) = do
+testFunction p@(Program decls _ _) = do
   let res2 = runExcept $ evalStateT (runReaderT (testInferProg p) empty) initInfer
   pPrint res2
 
 testInferProg :: Program -> Infer ([Constraint], Program)
 testInferProg p = do
-  Program decls nns <- addTVarsEverywhere p
+  Program decls nns adts <- addTVarsEverywhere p
   -- init type variable for all function decls beforehand so we can build constraints for
   -- calls between these functions
   tv_rev <- trace ("\n decl:\n" ++ show decls ++ "\n\n") freshVars (length decls) []
@@ -231,7 +237,7 @@ testInferProg p = do
   -- the inferred function type
   let tcs = zipWith (\t1 t2 -> Constraint t1 t2 (Just "TopLevel")) (map (rtFromScheme . snd) func_tvs) (map fst3cts cts)
   -- combine all constraints
-  return (tcs ++ concatMap snd3cts cts, Program (zip (map fst decls) (map trd3cts cts)) nns)
+  return (tcs ++ concatMap snd3cts cts, Program (zip (map fst decls) (map trd3cts cts)) nns adts)
 
 --unchanged up to here.
 
@@ -242,7 +248,7 @@ rtFromScheme (Forall _ rt) = rt
 --TODO: Simply give everything a fresh var as a unified first pass.
 inferProg :: Program -> Infer ([Constraint], Program)
 inferProg p = do
-  Program decls nns <- addTVarsEverywhere p
+  Program decls nns adts <- addTVarsEverywhere p
 
   -- init type variable for all function decls beforehand so we can build constraints for
   -- calls between these functions
@@ -252,19 +258,19 @@ inferProg p = do
   let neurals_tvs = map (\(a, b, c) -> (a, Forall [] b)) (neurals p)
   -- env building with (name, scheme) for infer methods
   let func_tvs = zip (map fst decls) (map (Forall []) tvs)
-  let typeEnv = func_tvs ++ neurals_tvs 
+  let typeEnv = func_tvs ++ neurals_tvs
   -- infer the type and constraints of the declaration expressions
   cts <- mapM ((inTEnvF typeEnv . infer) . snd) decls
   -- building the constraints that the built type variables of the functions equal
   -- the inferred function type
   let tcs = zipWith (\t1 t2 -> Constraint t1 t2 (Just "TopLevel")) (map (rtFromScheme . snd) func_tvs) (map fst3cts cts)
   -- combine all constraints
-  return (tcs ++ concatMap snd3cts cts, Program (zip (map fst decls) (map trd3cts cts)) nns)
+  return (tcs ++ concatMap snd3cts cts, Program (zip (map fst decls) (map trd3cts cts)) nns adts)
 
 addTVarsEverywhere :: Program -> Infer Program
-addTVarsEverywhere (Program decls nns) = do
+addTVarsEverywhere (Program decls nns adts) = do
     newdecls <- mapM addTVarsToDecl decls
-    return (Program newdecls nns)
+    return (Program newdecls nns adts)
   where
     addTVarsToDecl :: FnDecl -> Infer FnDecl
     addTVarsToDecl (name, expr) = do
@@ -518,6 +524,6 @@ bind ::  TVarR -> RType -> Solve Subst
 bind a t | t `matches` TVarR a = return emptySubst
          | occursCheck a t     = throwError $ InfiniteType a t
          | otherwise           = return (Subst $ Map.singleton a t)
-         
+
 occursCheck ::  Substitutable a => TVarR -> a -> Bool
 occursCheck a t = a `Set.member` ftv t

@@ -9,7 +9,7 @@ import Data.Functor ((<&>))
 import Data.Maybe (catMaybes)
 
 pPrintProg :: Program -> String
-pPrintProg (Program decls neurals) = intercalate "\n\n" (map (\f -> wrapInFunctionDeclaration (snd f) (fst f) []) decls)
+pPrintProg (Program decls neurals adts) = intercalate "\n\n" (map (\f -> wrapInFunctionDeclaration (snd f) (fst f) []) decls)
 
 pPrintIREnv :: IREnv -> String
 pPrintIREnv env = intercalate "\n\n" (concatMap (\(IRFunGroup name gen prob integ doc) -> catMaybes [Just (wrapDecl name "_gen" gen), prob <&> wrapDecl name "_prob", integ <&> wrapDecl name "_integ"]) env)

@@ -19,6 +19,7 @@ import Data.Number.Erf (erf)
 import PredefinedFunctions (FDecl(applicability))
 import SPLL.AutoNeural
 import Data.Functor
+import SPLL.Typing.AlgebraicDataTypes
 
 -- SupplyT needs to be a transformer, because Supply does not implement Functor correctly
 type CompilerMonad a = WriterT [(String, IRExpr)] (SupplyT Int Identity) a
@@ -72,8 +73,9 @@ generateLetInBlock conf codeGen =
 
 -- Return type (name, rType, hasInferenceFunctions)
 getGlobalTypeEnv :: Program -> TypeEnv
-getGlobalTypeEnv p = funcEnv ++ neuralEnv
+getGlobalTypeEnv p = funcEnv ++ implicitFuncEnv ++ neuralEnv
   where funcEnv = map (\(name, expr) -> (name, (rType (getTypeInfo expr), True))) (functions p)
+        implicitFuncEnv = map (\(name, rt) -> (name, (rt, True))) (implicitFunctionsRTypeProg p)
         neuralEnv = map (\(name, rt, _) -> (name, (rt, False))) (neurals p)
 
 runSupplyVars :: (Monad m) => SupplyT Int m a -> m a

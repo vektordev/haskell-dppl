@@ -64,58 +64,58 @@ paramExpr = "iterations" #-># ifThenElse
   (Null makeTypeInfo)
 
 simpleList :: Program
-simpleList = Program [("main", constF 0.0 #:# Null makeTypeInfo)] []
+simpleList = Program [("main", constF 0.0 #:# Null makeTypeInfo)] [] []
 
 simpleAdd :: Program
-simpleAdd = Program [("main", constF 0.0 #+# constF 1.0)] []
+simpleAdd = Program [("main", constF 0.0 #+# constF 1.0)] [] []
 
 uniformProg :: Program
-uniformProg = Program [("main", uniform)] []
+uniformProg = Program [("main", uniform)] [] []
 
 normalProg :: Program
-normalProg = Program [("main", normal)] []
+normalProg = Program [("main", normal)] [] []
 
 uniformProgMult :: Program
-uniformProgMult = Program [("main", uniform #*# constF (-0.5))] []
+uniformProgMult = Program [("main", uniform #*# constF (-0.5))] [] []
 
 normalProgMult :: Program
-normalProgMult = Program [("main", normal #*# constF 0.5)] []
+normalProgMult = Program [("main", normal #*# constF 0.5)] [] []
 
 uniformProgPlus :: Program
-uniformProgPlus = Program [("main", uniform #+# constF 4)] []
+uniformProgPlus = Program [("main", uniform #+# constF 4)] [] []
 
 normalProgMultPlus :: Program
-normalProgMultPlus = Program [("main", normal #*# constF 2 #+# constF 1)] []
+normalProgMultPlus = Program [("main", normal #*# constF 2 #+# constF 1)] [] []
 
 
 uniformNegPlus :: Program
-uniformNegPlus = Program [("main", negF (uniform #+#constF 4))] []
+uniformNegPlus = Program [("main", negF (uniform #+#constF 4))] [] []
 
 uniformIfProg :: Program
 uniformIfProg = Program [("main", ifThenElse (GreaterThan makeTypeInfo uniform (constF 0.5))
                              uniform
-                             (uniform #+# constF 5))] []
+                             (uniform #+# constF 5))] [] []
 
 uniformExp :: Program
-uniformExp = Program [("main", injF "exp" [uniform #+# constF 4])] []
+uniformExp = Program [("main", injF "exp" [uniform #+# constF 4])] [] []
 
 testMultLeft :: Expr
 testMultLeft = constF 3.0 #*# normal
 
 testList :: Program
-testList = Program [("main", (constF 0.5 #*# uniform) #:# (normal #:# Null makeTypeInfo))] []
+testList = Program [("main", (constF 0.5 #*# uniform) #:# (normal #:# Null makeTypeInfo))] [] []
 
 simpleTuple :: Program
-simpleTuple = Program [("main", tuple (constF 0.5 #*# uniform) normal)] []
+simpleTuple = Program [("main", tuple (constF 0.5 #*# uniform) normal)] [] []
 
 constantProg :: Program
-constantProg = Program [("main", constF 2)] []
+constantProg = Program [("main", constF 2)] [] []
 
 simpleCall :: Program
-simpleCall = Program [("unif", uniform), ("main", var "unif")] []
+simpleCall = Program [("unif", uniform), ("main", var "unif")] [] []
 
 testCallArg :: Program
-testCallArg = Program [("unif", "x" #-># (var "x" #+# uniform)), ("main", apply (var "unif") (constF 3))] []
+testCallArg = Program [("unif", "x" #-># (var "x" #+# uniform)), ("main", apply (var "unif") (constF 3))] [] []
 
 testNeg :: Expr
 testNeg = negF uniform
@@ -124,60 +124,60 @@ testNegFail :: Expr
 testNegFail = negF (uniform #+# uniform)
 
 testInjF :: Program
-testInjF = Program [("main", injF "double" [uniform])] []
+testInjF = Program [("main", injF "double" [uniform])] [] []
 
 testInjFPlusLeft :: Program
-testInjFPlusLeft = Program [("main", injF "plus" [constF 1, uniform])] []
+testInjFPlusLeft = Program [("main", injF "plus" [constF 1, uniform])] [] []
 
 testInjFPlusRight :: Program
-testInjFPlusRight = Program [("main", injF "plus" [uniform, constF 1])] []
+testInjFPlusRight = Program [("main", injF "plus" [uniform, constF 1])] [] []
 
 testInjF2 :: Program
-testInjF2 = Program [("main", injF "double" [injF "plus" [constF 1, uniform]])] []
+testInjF2 = Program [("main", injF "double" [injF "plus" [constF 1, uniform]])] [] []
 
 testPlus3 :: Program
-testPlus3 = Program [("main", letIn "a" uniform (var "a" #+# var "a"))] []
+testPlus3 = Program [("main", letIn "a" uniform (var "a" #+# var "a"))] [] []
 
 testTopK :: Program
-testTopK = Program [("main", ifThenElse (bernoulli 0.95) (constF 1) (constF 0))] []
+testTopK = Program [("main", ifThenElse (bernoulli 0.95) (constF 1) (constF 0))] [] []
 
 testTheta :: Program
-testTheta = Program [("main", "thetas" #-># theta (var "thetas") 0)] []
+testTheta = Program [("main", "thetas" #-># theta (var "thetas") 0)] [] []
 
 testThetaTree :: Program
-testThetaTree = Program [("main", "thetas" #-># (theta (var "thetas") 2 #+# theta (Subtree makeTypeInfo (var "thetas") 1) 1))] []
+testThetaTree = Program [("main", "thetas" #-># (theta (var "thetas") 2 #+# theta (Subtree makeTypeInfo (var "thetas") 1) 1))] [] []
 
 testAnd :: Program
-testAnd = Program [("main", (normal #<# constF 0) #&&# (uniform #># constF 0.5))] []
+testAnd = Program [("main", (normal #<# constF 0) #&&# (uniform #># constF 0.5))] [] []
 
 testOr :: Program
-testOr = Program [("main", (normal #># constF 0) #||# (uniform #># constF 0.5))] []
+testOr = Program [("main", (normal #># constF 0) #||# (uniform #># constF 0.5))] [] []
 
 testNot :: Program
-testNot = Program [("main", (#!#) (uniform #<# constF 0.75))] []
+testNot = Program [("main", (#!#) (uniform #<# constF 0.75))] [] []
 
 testCallLambda :: Program
-testCallLambda = Program [("main", apply ("x" #-># (var "x" #+# uniform)) (constF 2))] []
+testCallLambda = Program [("main", apply ("x" #-># (var "x" #+# uniform)) (constF 2))] [] []
 
 testCallLambdaAdvanced :: Program
-testCallLambdaAdvanced = Program [("main", letIn "l" ("a" #-># (var "a" #+# uniform)) (apply (var "l") (constF 2)))] []
+testCallLambdaAdvanced = Program [("main", letIn "l" ("a" #-># (var "a" #+# uniform)) (apply (var "l") (constF 2)))] [] []
 
 testLambdaParameter :: Program
-testLambdaParameter = Program [("main", apply (var "other") ("x" #-># (var "x" #*# constF 2)) ), ("other", "f" #-># apply (var "f") (constF 5))] []
+testLambdaParameter = Program [("main", apply (var "other") ("x" #-># (var "x" #*# constF 2)) ), ("other", "f" #-># apply (var "f") (constF 5))] [] []
 
 testLetIn :: Program
-testLetIn = Program [("main", letIn "u" uniform (var "u" #+# constF 1))] []
---testCallLambda = Program [] [] (CallLambda makeTypeInfo uniform (Lambda makeTypeInfo "a" (PlusF makeTypeInfo (var "a") uniform)))
+testLetIn = Program [("main", letIn "u" uniform (var "u" #+# constF 1))] [] []
+--testCallLambda = Program [] [] [] [] (CallLambda makeTypeInfo uniform (Lambda makeTypeInfo "a" (PlusF makeTypeInfo (var "a") uniform)))
 
 testRecursion :: Program
 testRecursion = Program [("main", apply (var "rec") (constF 8)),
-                         ("rec", "x" #-># ifThenElse (var "x" #># constF 1) (constF 3 #*# apply (var "rec") (var "x" #*# constF 0.5)) uniform)] []
+                         ("rec", "x" #-># ifThenElse (var "x" #># constF 1) (constF 3 #*# apply (var "rec") (var "x" #*# constF 0.5)) uniform)] [] []
 
 testNN :: Program
-testNN = Program [("main", mNistAddExpr)] [("classifyMNist", TArrow TSymbol TInt, Just $ EnumList $ map VInt [0,1,2,3,4,5,6,7,8,9])]
+testNN = Program [("main", mNistAddExpr)] [("classifyMNist", TArrow TSymbol TInt, Just $ EnumList $ map VInt [0,1,2,3,4,5,6,7,8,9])] []
 
 testDimProb :: Program
-testDimProb = Program [("main", IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 0.4))) (Constant makeTypeInfo $ VFloat 0.5) (Normal makeTypeInfo))] []
+testDimProb = Program [("main", IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 0.4))) (Constant makeTypeInfo $ VFloat 0.5) (Normal makeTypeInfo))] [] []
 
 
 mNistAddExpr :: Expr
@@ -189,108 +189,108 @@ gaussLists = Program [("main", "thetas" #->#
     (uniform #># theta (var "thetas") 0)
     nul
     (((normal #*# theta (var "thetas") 1) #+# theta (var "thetas") 2) #:#
-      apply (var "main") (var "thetas")))] []
+      apply (var "main") (var "thetas")))] [] []
 
 testTopLevelLambda :: Program
-testTopLevelLambda = Program [("main", "a" #-># (var "a" #+# uniform))] []
+testTopLevelLambda = Program [("main", "a" #-># (var "a" #+# uniform))] [] []
 
 testDim :: Program
-testDim = Program [("main", ifThenElse (bernoulli 0.5) (uniform #*# constF 2) (constF 3))] []
+testDim = Program [("main", ifThenElse (bernoulli 0.5) (uniform #*# constF 2) (constF 3))] [] []
 
 testCoin :: Program
-testCoin = Program [("main", ifThenElse (bernoulli 0.5) (constI 1) (constI 2))] []
+testCoin = Program [("main", ifThenElse (bernoulli 0.5) (constI 1) (constI 2))] [] []
 
 testDice :: Program
-testDice = Program [("main", dice 6)] []
+testDice = Program [("main", dice 6)] [] []
 
 testDiceAdd :: Program
 testDiceAdd = Program [ ("main", injF "plusI" [var "dice", var "dice"]),
-                        ("dice", dice 6)] []
+                        ("dice", dice 6)] [] []
 
 -- Not working
 testFibonacci :: Program
 testFibonacci = Program [ ("main","idx" #-># apply (apply fix (var "fibonacci")) (var "idx")),
-                          ("fibonacci", "fib" #-># ("n" #-># ifThenElse (var "n" #<# constF 2) (var "n") (apply (var "fib") (var "n" #-# constF 1) #+# apply (var "fib") (var "n" #-# constF 2))) )] []
+                          ("fibonacci", "fib" #-># ("n" #-># ifThenElse (var "n" #<# constF 2) (var "n") (apply (var "fib") (var "n" #-# constF 1) #+# apply (var "fib") (var "n" #-# constF 2))) )] [] []
 
 testPartialInjF :: Program
-testPartialInjF = Program [("main", apply (injF "plus" [uniform]) (constF 5))] []
+testPartialInjF = Program [("main", apply (injF "plus" [uniform]) (constF 5))] [] []
 
 testInjFRenaming :: Program
-testInjFRenaming = Program [("main", apply ("a" #-># (var "a" #+# uniform)) (constF 5))] []
+testInjFRenaming = Program [("main", apply ("a" #-># (var "a" #+# uniform)) (constF 5))] [] []
 
 testLambdaChoice :: Program
-testLambdaChoice = Program [("main", apply (ifThenElse (bernoulli 0.5) ("x" #-># (normal #+# var "x")) ("y" #-># (uniform #+# var "y"))) (constF 1))] []
+testLambdaChoice = Program [("main", apply (ifThenElse (bernoulli 0.5) ("x" #-># (normal #+# var "x")) ("y" #-># (uniform #+# var "y"))) (constF 1))] [] []
 
 testAutoNeural :: Program
-testAutoNeural = Program [("main", "sym" #-># ReadNN makeTypeInfo "readMNist" (var "sym"))] [("readMNist", TArrow TSymbol TInt, Just (EnumRange ((VInt 0), (VInt 9))))]
+testAutoNeural = Program [("main", "sym" #-># ReadNN makeTypeInfo "readMNist" (var "sym"))] [("readMNist", TArrow TSymbol TInt, Just (EnumRange ((VInt 0), (VInt 9))))] []
 
 
 -- ======================================= INVALID PROGRAMS ============================================
 
 invalidMissingDecl :: Program
-invalidMissingDecl = Program [("main", var "x")] []
+invalidMissingDecl = Program [("main", var "x")] [] []
 
 invalidMissingInjF :: Program
-invalidMissingInjF = Program [("main", injF "x" [])] []
+invalidMissingInjF = Program [("main", injF "x" [])] [] []
 
 invalidWrongArgCount :: Program
-invalidWrongArgCount = Program [("main", injF "plus" [uniform])] []
+invalidWrongArgCount = Program [("main", injF "plus" [uniform])] [] []
 
 invalidDuplicateDecl1 :: Program
-invalidDuplicateDecl1 = Program [("main", letIn "x" (letIn "x" uniform uniform) uniform)] []
+invalidDuplicateDecl1 = Program [("main", letIn "x" (letIn "x" uniform uniform) uniform)] [] []
 
 invalidDuplicateDecl2 :: Program
-invalidDuplicateDecl2 = Program [("main", letIn "x" uniform (letIn "x" uniform uniform))] []
+invalidDuplicateDecl2 = Program [("main", letIn "x" uniform (letIn "x" uniform uniform))] [] []
 
 invalidDuplicateDecl3 :: Program
-invalidDuplicateDecl3 = Program [("main", letIn "x" uniform (var "x")), ("x", uniform)] []
+invalidDuplicateDecl3 = Program [("main", letIn "x" uniform (var "x")), ("x", uniform)] [] []
 
 invalidDuplicateDecl4 :: Program
-invalidDuplicateDecl4 = Program [("main", "x" #-># ("x" #-># uniform))] []
+invalidDuplicateDecl4 = Program [("main", "x" #-># ("x" #-># uniform))] [] []
 
 invalidDuplicateDecl5 :: Program
-invalidDuplicateDecl5 = Program [("main", "x" #-># (var "x")), ("x", uniform)] []
+invalidDuplicateDecl5 = Program [("main", "x" #-># (var "x")), ("x", uniform)] [] []
 
 invalidReservedName :: Program
-invalidReservedName = Program [("main", letIn "plus" uniform uniform)] []
+invalidReservedName = Program [("main", letIn "plus" uniform uniform)] [] []
 
 invalidReservedName2 :: Program
-invalidReservedName2 = Program [("main", "plus" #-># uniform)] []
+invalidReservedName2 = Program [("main", "plus" #-># uniform)] [] []
 
 
 
 
 
 testLeft :: Program
-testLeft = Program [("main", injF "fromLeft" [injF "left" [constF 2]])] []
+testLeft = Program [("main", injF "fromLeft" [injF "left" [constF 2]])] [] []
 
 testEither :: Program
-testEither = Program [("main", ifThenElse (bernoulli 0.5) (injF "left" [uniform]) (injF "right" [constI 1]))] []
+testEither = Program [("main", ifThenElse (bernoulli 0.5) (injF "left" [uniform]) (injF "right" [constI 1]))] [] []
 
 testIsLeft :: Program
 testIsLeft = Program [("main", ifThenElse (injF "isLeft" [ifThenElse (bernoulli 0.4) (injF "left" [uniform]) (injF "right" [constI 1])])
                                   (constF 1)
-                                  (constF 2))] []
+                                  (constF 2))] [] []
 
 testIsRight :: Program
 testIsRight = Program [("main", ifThenElse (injF "isRight" [ifThenElse (bernoulli 0.4) (injF "left" [uniform]) (injF "right" [constI 1])])
                                   (constF 1)
-                                  (constF 2))] []
+                                  (constF 2))] [] []
 
 testFst :: Program
-testFst = Program [("main", tfst (tuple uniform normal))] []
+testFst = Program [("main", tfst (tuple uniform normal))] [] []
 
 testHead :: Program
-testHead = Program [("main", lhead (cons uniform nul))] []
+testHead = Program [("main", lhead (cons uniform nul))] [] []
 
 testTail :: Program
-testTail = Program [("main", lhead (ltail (cons normal (cons uniform nul))))] []
+testTail = Program [("main", lhead (ltail (cons normal (cons uniform nul))))] [] []
 
 testFstCall :: Program
-testFstCall = Program [("main", tfst (var "bivariate")), ("bivariate", tuple uniform normal)] []
+testFstCall = Program [("main", tfst (var "bivariate")), ("bivariate", tuple uniform normal)] [] []
 
 testFstDiscrete :: Program
-testFstDiscrete = Program [("main", tfst (tuple uniform  (bernoulli 0.4)))] []
+testFstDiscrete = Program [("main", tfst (tuple uniform  (bernoulli 0.4)))] [] []
 
 
 {-
@@ -361,34 +361,34 @@ testIf = ifThenElse
 {-
 --TODO Make params like Constant values (change to a type variable dynamically how?)
 testLet2 :: Program
-testLet2 = Program [](letIn "x"
+testLet2 = Program [] [](letIn "x"
                       (PlusF makeTypeInfo (theta 0) normal)
-                      (injF "sig" [] (injF "mult" [theta 1]  (var "x"))))
+                      (injF "sig" [] [] (injF "mult" [theta 1]  (var "x"))))
 -- let x = theta1 + normal in theta2 + sig(x) + theta3 * normal
 -- let x = theta2 + sig(theta1 + normal) + theta3 * normal
 -- theta1 = 0.1 theta2 = 0.8 
 -- sample 1.9 -> x? sig(x) = 1.1 --> invert(sig = 1.1) = NaN
 -- theta2 = 0.2
 testLetNonInvert :: Program Double
-testLetNonInvert = Program [] [] (letIn "x" (PlusF makeTypeInfo (theta 0) normal)
-          (PlusF makeTypeInfo (injF "sig" [] (var "x")) (theta 1)))
+testLetNonInvert = Program [] [] [] [] (letIn "x" (PlusF makeTypeInfo (theta 0) normal)
+          (PlusF makeTypeInfo (injF "sig" [] [] (var "x")) (theta 1)))
           
 testLetPot :: Program Double
-testLetPot = Program [] [] (letIn "x" (PlusF makeTypeInfo (theta 0) normal) (injF "mult" [theta 1] (var "x")))
+testLetPot = Program [] [] [] [] (letIn "x" (PlusF makeTypeInfo (theta 0) normal) (injF "mult" [theta 1] (var "x")))
 
 testInjFNot :: Program Double
-testInjFNot  = Program [] [] (ifThenElse (injF "not" [] (GreaterThan makeTypeInfo (theta 0)uniform))
+testInjFNot  = Program [] [] [] [] (ifThenElse (injF "not" [] [] (GreaterThan makeTypeInfo (theta 0)uniform))
                             normal 
                             (injF "plus" [theta 1] normal))
 testListPlus :: Program Double
-testListPlus  = Program [] [] (injF "listMult" 
+testListPlus  = Program [] [] [] [] (injF "listMult" 
     [Cons makeTypeInfo (theta 0) (Cons makeTypeInfo (theta 1) (Null makeTypeInfo))] 
     (Cons makeTypeInfo (PlusF makeTypeInfo normal (constF 2.0)))
      (Cons makeTypeInfo (PlusF makeTypeInfo normal (constF 3.0))) (Null makeTypeInfo)))
     )
 -}
 testHakaru :: Program Double
-testHakaru = Program [](LetInmakeTypeInfo "x" uniform
+testHakaru = Program [] [](LetInmakeTypeInfo "x" uniform
                                       (letIn  "y" uniform
                                          (Cons makeTypeInfo (var "x")
                                            (Cons makeTypeInfo
@@ -399,25 +399,25 @@ testHakaru = Program [](LetInmakeTypeInfo "x" uniform
 {-
 -- let x = normal in (if flip then x + theta else x - 0.7)
 testBranchedLetList :: Program Double
-testBranchedLetList = Program [](LetInmakeTypeInfo "x" (PlusF makeTypeInfo normal (constF 1.0)))
+testBranchedLetList = Program [] [](LetInmakeTypeInfo "x" (PlusF makeTypeInfo normal (constF 1.0)))
                               (LetInmakeTypeInfo "y" normal
                                     (ifThenElse
                                       (GreaterThan makeTypeInfo uniform(constF 0.8)))
                                         (Cons makeTypeInfo
-                                          (injF "sig" [] (injF "plus" [theta 0]  (var "x")))
-                                          (Cons makeTypeInfo  (injF "sig" []  (var "y")) (Null makeTypeInfo)))
+                                          (injF "sig" [] [] (injF "plus" [theta 0]  (var "x")))
+                                          (Cons makeTypeInfo  (injF "sig" [] []  (var "y")) (Null makeTypeInfo)))
                                         (Cons makeTypeInfo
-                                          (injF "sig" [] (injF "plus" [constF (-0.7))]  (var "x")))
-                                          (Cons makeTypeInfo  (injF "sig" [] (injF "plus" [theta 1]  (var "y"))) (Null makeTypeInfo)))
+                                          (injF "sig" [] [] (injF "plus" [constF (-0.7))]  (var "x")))
+                                          (Cons makeTypeInfo  (injF "sig" [] [] (injF "plus" [theta 1]  (var "y"))) (Null makeTypeInfo)))
                                           )))
 testBranchedLetList2 :: Program Double
-testBranchedLetList2 = Program [](LetInmakeTypeInfo "x" (PlusF makeTypeInfo normal (constF 0.357)))
+testBranchedLetList2 = Program [] [](LetInmakeTypeInfo "x" (PlusF makeTypeInfo normal (constF 0.357)))
                                         (Cons makeTypeInfo
                                           (ifThenElse
                                             (GreaterThan makeTypeInfo uniform(constF 0.659)))
-                                            (injF "sig" [] (injF "plus" [theta 0]  (var "x")))
-                                            (injF "sig" [] (injF "plus" [constF (-0.358))]  (var "x"))))
-                                          (Cons makeTypeInfo(injF "sig" []
+                                            (injF "sig" [] [] (injF "plus" [theta 0]  (var "x")))
+                                            (injF "sig" [] [] (injF "plus" [constF (-0.358))]  (var "x"))))
+                                          (Cons makeTypeInfo(injF "sig" [] []
                                                   (MultF makeTypeInfo (constF (-0.358)))
                                                    (PlusF makeTypeInfo (var "x") normal))) (Null makeTypeInfo))
                                         ))
@@ -431,20 +431,20 @@ testBranchedLetList2 = Program [](LetInmakeTypeInfo "x" (PlusF makeTypeInfo norm
 -- let x = normal in [sig(x), x+uniform]
 -- query [ < 0.5, 1]
 testBranchedLetList3 :: Program Double
-testBranchedLetList3 = Program [](LetInmakeTypeInfo "x" (PlusF makeTypeInfo normal (constF 0.357)))
+testBranchedLetList3 = Program [] [](LetInmakeTypeInfo "x" (PlusF makeTypeInfo normal (constF 0.357)))
                                   (LetInmakeTypeInfo "y" normal
                                         (Cons makeTypeInfo
                                           (ifThenElse
                                             (GreaterThan makeTypeInfo uniform(constF 0.659)))
-                                            (injF "sig" [] (injF "plus" [theta 0]  (var "x")))
-                                            (injF "sig" [] (injF "plus" [constF (-0.358))]  (var "x"))))
+                                            (injF "sig" [] [] (injF "plus" [theta 0]  (var "x")))
+                                            (injF "sig" [] [] (injF "plus" [constF (-0.358))]  (var "x"))))
                                           (Cons makeTypeInfo
                                             (ifThenElse
                                               (GreaterThan makeTypeInfo uniform(constF 0.659)))
-                                              (injF "sig" [] (injF "plus" [theta 0]  (var "y")))
-                                              (injF "sig" [] (injF "plus" [constF (-0.358))]  (var "y"))))
+                                              (injF "sig" [] [] (injF "plus" [theta 0]  (var "y")))
+                                              (injF "sig" [] [] (injF "plus" [constF (-0.358))]  (var "y"))))
                                           
-                                          (Cons makeTypeInfo(injF "sig" []
+                                          (Cons makeTypeInfo(injF "sig" [] []
                                                      (MultF makeTypeInfo (var "y")
                                                       (PlusF makeTypeInfo (var "x") normal))) (Null makeTypeInfo)
                                                     ))
@@ -453,15 +453,15 @@ testBranchedLetList3 = Program [](LetInmakeTypeInfo "x" (PlusF makeTypeInfo norm
                                         
 
 testBranchedLet :: Program Double
-testBranchedLet = Program [](LetInmakeTypeInfo "x" (PlusF makeTypeInfo normal (constF 1.0)))
+testBranchedLet = Program [] [](LetInmakeTypeInfo "x" (PlusF makeTypeInfo normal (constF 1.0)))
                                     (ifThenElse
                                       (GreaterThan makeTypeInfo uniform(constF 0.8)))
-                                      (injF "sig" [] (injF "plus" [theta 0]  (var "x")))
-                                      (injF "sig" [] (injF "plus" [constF (-0.7))]  (var "x")))))
+                                      (injF "sig" [] [] (injF "plus" [theta 0]  (var "x")))
+                                      (injF "sig" [] [] (injF "plus" [constF (-0.7))]  (var "x")))))
 -}
 
 testNestedLetInDecl :: Program Double
-testNestedLetInDecl = Program [] [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (theta 0) normal)
+testNestedLetInDecl = Program [] [] [] [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (theta 0) normal)
                          (letIn  "y" (PlusF makeTypeInfo (theta 1) (PlusF makeTypeInfo normal (var "x")))
                                   (Cons makeTypeInfo (var "x")
                                      (Cons makeTypeInfo (var "y")
@@ -470,21 +470,21 @@ testNestedLetInDecl = Program [] [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (
 -- let x = normal in let y = normal in [x, x+y]
                                    
 testNestedLetInWit :: Program Double
-testNestedLetInWit = Program [] [] (letIn "x" (MultF makeTypeInfo (theta 0) normal)
+testNestedLetInWit = Program [] [] [] [] (letIn "x" (MultF makeTypeInfo (theta 0) normal)
                          (letIn  "y" (MultF makeTypeInfo normal (theta 0) )
                                   (Cons makeTypeInfo (PlusF makeTypeInfo (var "y") (var "x"))
                                     (Cons makeTypeInfo  (var "x")
                                      (Null makeTypeInfo)))))
 --testInjFD :: Program Double
---testInjFD = Program [] [] (injF "mult" [constF (-2.0))] (PlusF makeTypeInfo (theta 0) normal))
+--testInjFD = Program [] [] [] [] (injF "mult" [constF (-2.0))] (PlusF makeTypeInfo (theta 0) normal))
 
 testObserve :: Program Double
-testObserve = Program [] [] (LetInmakeTypeInfo "x"  normal
+testObserve = Program [] [] [] [] (LetInmakeTypeInfo "x"  normal
                               (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (constF 2.0)) normal)
                                 (var "x")))
 
 testLetXYD :: Program Double
-testLetXYD = Program [] [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (theta 0) normal)
+testLetXYD = Program [] [] [] [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (theta 0) normal)
                           (letIn  "y"  (theta 1)
                                          (Cons makeTypeInfo (var "x") 
                                            (Cons makeTypeInfo 
@@ -494,7 +494,7 @@ testLetXYD = Program [] [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (theta 0) 
                                                 (Null makeTypeInfo))))))
                                              
 testLetXY :: Program Double
-testLetXY = Program [] [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (theta 0) normal)
+testLetXY = Program [] [] [] [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (theta 0) normal)
                           (letIn  "y" (PlusF makeTypeInfo (theta 1) normal)
                                          (Cons makeTypeInfo (var "x") 
                                            (Cons makeTypeInfo 
@@ -505,14 +505,14 @@ testLetXY = Program [] [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (theta 0) n
                                              
 
 testLetTuple :: Program Double
-testLetTuple = Program [] [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (theta 0) normal)
+testLetTuple = Program [] [] [] [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (theta 0) normal)
                                               (Cons makeTypeInfo (var "x") 
                                                 (Cons makeTypeInfo 
                                                   (PlusF makeTypeInfo normal(var "x")) 
                                                   (Null makeTypeInfo))))
 
 testNormal :: Program Double
-testNormal = Program [] [] normal
+testNormal = Program [] [] [] [] normal
 
 --testLetE :: Expr Double
 --testLetE = letIn "x" normal (injF "plus" [constF 3.0)] (var "x"))
@@ -530,7 +530,7 @@ testPlus = ifThenElse
              (Cons makeTypeInfo (Constant makeTypeInfo (VBool True)) (Null makeTypeInfo))
 
 testPlus2 :: Program
-testPlus2 = Program [] [] (PlusF makeTypeInfo (MultF makeTypeInfo (theta 0) uniform) (theta 1))
+testPlus2 = Program [] [] [] [] (PlusF makeTypeInfo (MultF makeTypeInfo (theta 0) uniform) (theta 1))
 
 
 testGreater :: Expr makeTypeInfo

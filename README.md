@@ -38,7 +38,7 @@ The functions in [Prelude.hs](src/SPLL/Prelude.hs) provide an easy to use interf
 ```
 showcase :: IO ()
 showcase = do
-  let twoDice = Program [("main", dice 6 #<+># dice 6)] []
+  let twoDice = Program [("main", dice 6 #<+># dice 6)] [] []
   let conf = CompilerConfig {verbose=0, topKThreshold=Nothing, countBranches=False, optimizerLevel=2}
   gen <- evalRandIO (runGen conf twoDice [])
   putStrLn ("Generated value: " ++ show gen)
@@ -51,7 +51,7 @@ You can also decare continuous distributions using the ```uniform``` or ```norma
 ```
 showcase2 :: IO ()
 showcase2 = do
-  let dist = Program [("main", normal #*# constF 2 #+# constF 1)] []
+  let dist = Program [("main", normal #*# constF 2 #+# constF 1)] [] []
   let conf = CompilerConfig {verbose=2, topKThreshold=Nothing, countBranches=False, optimizerLevel=2}
   gen <- evalRandIO (runGen conf dist [])
   putStrLn ("Generated value: " ++ show gen)

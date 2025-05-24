@@ -23,7 +23,7 @@ data TypeAnnotation = P Int | R Int
 runBruteForceSolver :: Expr -> IO ()
 runBruteForceSolver expr = do
   let env = [("main", expr)]
-  let prog = Program env []
+  let prog = Program env [] []
   let p = prog
   let ntypings = length (allTypes (R 0) p)
   print ntypings
@@ -64,7 +64,7 @@ mkTupleType depth len =
       fillerList = getRTypes (depth - 1)
 
 allTypes :: TypeAnnotation ->  Program -> [Program]
-allTypes depth (Program defs nns) = liftA2 Program (allTypesDef depth defs) [nns]
+allTypes depth (Program defs nns adts) = liftA3 Program (allTypesDef depth defs) [nns] [adts]
 
 allTypesDef :: TypeAnnotation -> [(a1, Expr)] -> [[(a1, Expr)]]
 allTypesDef depth [] = [[]]
@@ -78,7 +78,7 @@ replaceTypeAnnotation (R depth) ti = map (setRType ti) $ getRTypes depth
 replaceTypeAnnotation (P depth) ti = map (setPType ti) $ getPTypes depth
 
 isValidRTypingProg :: Program -> Bool
-isValidRTypingProg (Program defs _) = all (isValidRTypingE . snd) defs
+isValidRTypingProg (Program defs _ _) = all (isValidRTypingE . snd) defs
 
 isValidRTypingE :: Expr -> Bool
 isValidRTypingE expr = matchingAlgs /= [] && all isValidRTypingE (getSubExprs expr)
@@ -117,7 +117,7 @@ matchCombine [ty] t1 = (substitutions, tyMatch)
 matchCombine a b = error ("unexpected error in MatchCombine" ++ show a ++ show b)
 
 isValidPTypingProg :: Program -> Bool
-isValidPTypingProg (Program defs _) = all (isValidPTypingE . snd) defs
+isValidPTypingProg (Program defs _ _) = all (isValidPTypingE . snd) defs
 
 isValidPTypingE :: Expr -> Bool
 --isValidPTypingE (Uniform (TypeInfo b)) = b == Integrate

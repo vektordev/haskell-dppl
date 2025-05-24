@@ -53,7 +53,7 @@ class Recompilable a where
   recompile :: a -> Either CompileError a
 
 untypeP :: Program -> Program
-untypeP (Program defs neuralDecl) = Program (map (\(a,b) -> (a, untypeE b)) defs) neuralDecl
+untypeP (Program defs neuralDecl adts) = Program (map (\(a,b) -> (a, untypeE b)) defs) neuralDecl adts
 
 untypeE :: Expr -> Expr
 untypeE = tMap (const makeTypeInfo)
@@ -63,9 +63,9 @@ instance Recompilable Program where
 
 instance Recompilable Expr where
   recompile e = case inferNoWit $ makeMain $ untypeE e of
-    Right (Program [("main", d)] _) -> Right d
+    Right (Program [("main", d)] _ _) -> Right d
     Left x -> Left x
-    Right (Program _ _) -> error "unexpected error when recompiling Expr TypeInfo."
+    Right (Program _ _ _) -> error "unexpected error when recompiling Expr TypeInfo."
 
 thetaTreeExample :: IRExpr
 thetaTreeExample = IRConst (VThetaTree (ThetaTree [0, 1, 2, 3] [ThetaTree [4, 5, 6, 7] [], ThetaTree [8, 9, 10, 11] [], ThetaTree [12, 13, 14, 15] []]))
@@ -228,7 +228,7 @@ prop_any = forAll (elements correctProbValuesTestCases) checkProbAny
 -- DO NOT CHANGE THIS CODE WITHOUT ALSO CHANGING THE CODE IN THE README
 prop_CheckReadmeCodeListing1 :: Property
 prop_CheckReadmeCodeListing1 = ioProperty $ do
-  let twoDice = Program [("main", dice 6 #<+># dice 6)] []
+  let twoDice = Program [("main", dice 6 #<+># dice 6)] [] []
   let conf = CompilerConfig {verbose=0, topKThreshold=Nothing, countBranches=False, optimizerLevel=2}
   gen <- evalRandIO (runGen conf twoDice [])
   let VTuple (VFloat prob) (VFloat dim) = runProb conf twoDice [] gen
@@ -251,7 +251,7 @@ prop_CheckReadmeCodeListing1 = ioProperty $ do
 -- DO NOT CHANGE THIS CODE WITHOUT ALSO CHANGING THE CODE IN THE README
 prop_CheckReadmeCodeListing2 :: Property
 prop_CheckReadmeCodeListing2 = ioProperty $ do
-  let dist = Program [("main", normal #*# constF 2 #+# constF 1)] []
+  let dist = Program [("main", normal #*# constF 2 #+# constF 1)] [] []
   let conf = CompilerConfig {verbose=2, topKThreshold=Nothing, countBranches=False, optimizerLevel=2}
   gen <- evalRandIO (runGen conf dist [])
   let VTuple (VFloat prob) (VFloat dim) = runProb conf dist [] gen

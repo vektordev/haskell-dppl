@@ -541,7 +541,7 @@ makeEqConstraint :: PType -> PType -> DConstraint
 makeEqConstraint t1 t2 = (t1, [Left t2])
 
 inferProg :: TEnv -> Program -> Infer (Subst, [DConstraint], PType, Program)
-inferProg env (Program decls nns) = do
+inferProg env (Program decls nns adts) = do
   -- init type variable for all function decls beforehand so we can build constraints for
   -- calls between these functions
   tv_rev <- freshVars (length decls) []
@@ -558,7 +558,7 @@ inferProg env (Program decls nns) = do
   -- the inferred function type
   let tcs = zipWith makeEqConstraint tvs (map trd3 cts)
   -- combine all constraints
-  return (s1, cs1 ++ concatMap snd3 cts ++ tcs , t1, Program (zip (map fst decls) (map frth3 cts)) nns)
+  return (s1, cs1 ++ concatMap snd3 cts ++ tcs , t1, Program (zip (map fst decls) (map frth3 cts)) nns adts)
 
 isEnumerable :: Expr -> Bool
 isEnumerable e = foldr (\tag b -> b || isEnum tag) False (tags (getTypeInfo e))
@@ -738,7 +738,7 @@ class Substitutable a where
   ftv   :: a -> Set.Set TVar
 
 instance Substitutable Program where
-  apply s (Program decls nns) = Program (zip (map fst decls) (map (apply s . snd) decls)) nns
+  apply s (Program decls nns adts) = Program (zip (map fst decls) (map (apply s . snd) decls)) nns adts
   ftv _ = Set.empty
 instance Substitutable Expr where
   apply s = tMap (apply s . getTypeInfo)
