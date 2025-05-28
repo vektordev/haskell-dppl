@@ -410,7 +410,7 @@ getFunctionNames :: Program -> [String]
 getFunctionNames p = explicitFs ++ implicitFs
   where 
     explicitFs = map fst (functions p)
-    implicitFs = implicitFunctionNames p
+    implicitFs = implicitFunctionNames (adts p)
 
 prettyPrintProg :: Program -> [String]
 prettyPrintProg = prettyPrintProgCustomTI prettyFullTypeInfo

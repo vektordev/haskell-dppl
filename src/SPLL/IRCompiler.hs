@@ -75,7 +75,7 @@ generateLetInBlock conf codeGen =
 getGlobalTypeEnv :: Program -> TypeEnv
 getGlobalTypeEnv p = funcEnv ++ implicitFuncEnv ++ neuralEnv
   where funcEnv = map (\(name, expr) -> (name, (rType (getTypeInfo expr), True))) (functions p)
-        implicitFuncEnv = map (\(name, rt) -> (name, (rt, True))) (implicitFunctionsRTypeProg p)
+        implicitFuncEnv = map (\(name, rt) -> (name, (rt, False))) (implicitFunctionsRTypeProg p)
         neuralEnv = map (\(name, rt, _) -> (name, (rt, False))) (neurals p)
 
 runSupplyVars :: (Monad m) => SupplyT Int m a -> m a
@@ -340,9 +340,15 @@ toIRProbability conf typeEnv (Var _ n) sample = do
   -- Variable might be a function
   case lookup n typeEnv of
     -- Var is a function
-    Just(TArrow _ _, _) -> do
+    Just(TArrow _ _, True) -> do
       var <- mkVariable "call"
       tell [(var, IRApply (IRVar (n ++ "_prob")) sample)]
+      -- The return value is still a function. No need to do dim and branch counting here
+      return (IRVar var, const0, const0)
+    -- var is a function without a inference function
+    Just(TArrow _ _, False) -> do
+      var <- mkVariable "call"
+      tell [(var, IRApply (IRVar n) sample)]
       -- The return value is still a function. No need to do dim and branch counting here
       return (IRVar var, const0, const0)
     -- Var is a top level declaration (an therefor has a _prob function)
@@ -492,8 +498,10 @@ toIRGenerate typeEnv (InjF _ name params) = do
 toIRGenerate typeEnv (Var _ name) = do
   case lookup name typeEnv of
     -- Var is a function
-    Just (TArrow _ _, _) ->
+    Just (TArrow _ _, True) ->
       return $ IRVar (name ++ "_gen")
+    Just (TArrow _ _, False) ->
+      return $ IRVar name
     -- Var is a top level declaration (an therefor has a _gen function)
     Just (_, True) -> do
       return $ IRInvoke (IRVar (name ++ "_gen"))
@@ -664,9 +672,14 @@ toIRIntegrate conf typeEnv (Var _ n) low high = do
   -- Variable might be a function
   case lookup n typeEnv of
    -- Var is a function
-   Just(TArrow _ _, _) -> do
+   Just(TArrow _ _, True) -> do
      var <- mkVariable "call"
      tell [(var, IRApply (IRApply (IRVar (n ++ "_integ")) low) high)]
+     -- The return value is still a function. No need to do dim and branch counting here
+     return (IRVar var, const0, const0)
+   Just(TArrow _ _, False) -> do
+     var <- mkVariable "call"
+     tell [(var, IRApply (IRApply (IRVar n) low) high)]
      -- The return value is still a function. No need to do dim and branch counting here
      return (IRVar var, const0, const0)
    -- Var is a top level declaration (an therefor has a _prob function)
