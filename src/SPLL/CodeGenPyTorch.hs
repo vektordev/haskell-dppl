@@ -92,7 +92,7 @@ onLast f (x:xs) = x : onLast f xs
 generateFunctions :: Bool -> IREnv -> [String]
 --generateFunctions defs | trace (show defs) False = undefined
 --contrary to the julia backend, we want to aggregate gen and prob into one classes. Ugly implementation, but it'll do for now.
-generateFunctions genBoil env@(IREnv funcs _) =
+generateFunctions genBoil env@(IREnv funcs adts) =
 {-  let
     getName str
       | "_prob" `isSuffixOf` str = iterate init str !! 5
@@ -113,15 +113,13 @@ generateFunctions genBoil env@(IREnv funcs _) =
       "import functools",
       "import math",
       "from torch.nn import Module", ""] ++
+      generateADTClasses adts ++ 
       concatMap (generateClass (envToLUT env)) funcs ++
       ["", "# Example Initialization"] ++
       generateInitializations env
     else
       concatMap (generateClass (envToLUT env)) funcs
-  
-        
-          
-        
+
 
 stdLib :: [(String, String)]
 stdLib = [("in", "contains")]
@@ -135,6 +133,29 @@ replaceCalls _ other = other
 
 generateInitializations :: IREnv -> [String]
 generateInitializations (IREnv funcs _) = map (\IRFunGroup {groupName=n} -> n ++ " = " ++ onHead toUpper n ++ "()") funcs
+
+generateADTClasses :: [ADTDecl] -> [String]
+generateADTClasses decls = concatMap generateADTClass (concatMap snd decls)
+
+generateADTClass :: ADTConstructorDecl -> [String]
+generateADTClass (name, fields) =
+  -- Class declaration
+  ["class " ++ name ++ ":"]++
+  indentOnce (
+    -- Constructor
+    ("def __init__(self, " ++ intercalate ", " fieldNames ++ "):") :
+    indentOnce (
+      map (\f -> "self." ++f ++ " = " ++ f) fieldNames)
+  ) ++
+  -- Is function
+  ["def is" ++ name ++ "(x):"] ++
+  indentOnce ["return isinstance(x, " ++ name ++ ")"] ++
+  -- Field acceessors
+  concatMap (\f ->
+    ("def " ++ f ++ "(x):") :
+    indentOnce ["return x." ++ f]
+  ) fieldNames
+  where fieldNames = map fst fields
 
 generateClass :: [(String, String)] -> IRFunGroup -> [String]
 generateClass lut (IRFunGroup name gen prob integ doc) = let
