@@ -10,6 +10,7 @@ import SPLL.Lang.Types
 import SPLL.Typing.RType
 import System.IO.Error.Lens (errno)
 import SPLL.IntermediateRepresentation (IRExpr (..))
+import Debug.Trace
 
 implicitFunctionsRTypeProg :: Program -> [(String, RType)]
 implicitFunctionsRTypeProg Program {adts=adts} = concatMap implicitFunctionRTypes adts
@@ -59,7 +60,7 @@ implicitFunctionImpl decls fName [param] =
         error ("Value is of the wrong ADT type. Is type: " ++ constr ++ " but should be: " ++ fName)
       else
         fields !! fIdx
-    _ -> error $ "Value mast but be an ADT type for field lookup: " ++ show param
+    _ -> error $ "Value must but be an ADT type for field lookup: " ++ show param
   where (cName, fIdx) = findField decls fName
 implicitFunctionImpl _ fName params = error $ "somethigng went wrong with implicit function implementations. function: " ++ fName ++ " parameters: " ++ show params
 

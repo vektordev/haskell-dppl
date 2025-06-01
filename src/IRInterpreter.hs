@@ -51,7 +51,7 @@ generateDet neurals env = generate f neurals adts startingEnv startingEnv
     (IREnv _ adts) = env
 
 generate :: (Monad m) => RandomFunctions m a -> [NeuralDecl] -> [ADTDecl ] -> ReducedIREnv -> ReducedIREnv -> [IRExpr]-> IRExpr -> m IRValue
---generate f neurals adts globalEnv env args expr | trace ((show expr) ++ " " ++ show env) False = undefined
+--generate f neurals adts globalEnv env args expr | trace ((show expr) {-++ " " ++ show env-}) False = undefined
 generate f neurals adts globalEnv env args expr | args /= [] = do
   let reverseArgs = reverse args
   let newExpr = foldr (flip IRApply) expr reverseArgs
@@ -325,12 +325,12 @@ generate f neurals adts globalEnv env args (IRVar name) | "_mock" `isSuffixOf` n
 generate f neurals adts globalEnv env args (IRVar name) | "_adt" `isSuffixOf` name && (iterate init name !! 4) `elem` implicitFunctionNames adts = do
   let realName = iterate init name !! 4
   let rt = lookupRType realName adts
-  let lookupParams = sequence [lookup ("x" ++ show x) env | x <- [(arity rt - 1), (arity rt - 2).. 0]]
+  let lookupParams = sequence [lookup ("x" ++ show x) env | x <- [0..(arity rt - 1)]]
   case lookupParams of
     Nothing -> error ("No parameter found for " ++ name ++ " in environment")
     Just val -> do
       paramVal <- mapM (generate f neurals adts globalEnv env args) val
-      return $ traceShowId $ implicitFunctionImpl adts realName paramVal
+      return $ implicitFunctionImpl adts realName paramVal
   where
     arity (_ `TArrow` rt) = arity rt + 1
     arity _ = 0

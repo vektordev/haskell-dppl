@@ -36,6 +36,7 @@ module SPLL.Lang.Lang (
 , elementAt
 , getFunctionNames
 , lookupNeural
+, printFlat
 ) where
 
 import SPLL.Lang.Types

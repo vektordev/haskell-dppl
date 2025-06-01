@@ -40,20 +40,20 @@ envToIR conf p = optimizeEnv conf $ IREnv (-- map optimizer over all second elem
         pt = pType $ getTypeInfo binding
         rt = rType $ getTypeInfo binding in
       IRFunGroup {groupName=name,
-       integFun = 
+       integFun =
         if (pt == Deterministic || pt == Integrate) && (isOnlyNumbers rt) then
           Just (toIntegDecl name (IRLambda "low" (IRLambda "high" (runCompile conf (toIRIntegrateSave conf typeEnv binding (IRVar "low") (IRVar "high"))))))
         else Nothing,
-        probFun = 
+        probFun =
           if pt == Deterministic || pt == Integrate || pt == Prob then
             Just (toProbDecl name (IRLambda "sample" (runCompile conf (toIRProbabilitySave conf typeEnv binding (IRVar "sample")))))
           else Nothing,
         genFun = toGenDecl name (fst $ runIdentity $ runSupplyVars $ runWriterT $ toIRGenerate typeEnv binding),
         groupDoc="Function group " ++ name}) (functions p)) (adts p)
-        
+
   where
     toGenDecl name expr = (expr, "Generates a random sample of the " ++ name ++ " function")
-    toProbDecl name expr = 
+    toProbDecl name expr =
       (expr, "Calculates the probability of the sample parameter being returned from the " ++ name ++ "function")
     toIntegDecl name expr = (expr, "Calculates the probability of sample of " ++ name ++ " falling in between the parameters low and high")
 
@@ -117,7 +117,7 @@ toIRProbabilitySave conf typeEnv expr sample = do
 
 --in this implementation, I'll forget about the distinction between PDFs and Probabilities. Might need to fix that later.
 toIRProbability :: CompilerConfig -> TypeEnv -> Expr -> IRExpr -> CompilerMonad CompilationResult
---toIRProbability conf typeEnv expr sample | trace (show expr) False = undefined
+--toIRProbability conf typeEnv expr sample | trace (printFlat expr) False = undefined
 toIRProbability conf typeEnv (IfThenElse t cond left right) sample = do
   var_condT_p <- mkVariable "condT"
   var_condF_p <- mkVariable "condF"
@@ -228,16 +228,31 @@ toIRProbability conf typeEnv (Lambda t name subExpr) sample = do
       let newTypeEnv = (name, (paramRType, False)):typeEnv
       irTuple <- lift (runWriterT (toIRProbability conf newTypeEnv subExpr sample)) <&> generateLetInBlock conf
       return (IRLambda name irTuple, const0, const0)
-toIRProbability conf typeEnv (Apply TypeInfo{rType=rt} l v) sample = do
+toIRProbability conf typeEnv (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo l) == Deterministic && pType (getTypeInfo v) == Deterministic = do
   vIR <- toIRGenerate typeEnv v
-  (lIR, _, _) <- toIRProbability conf typeEnv l sample -- Dim and BC are irrelevant here. We need to extract these from the return tuple
+  lIR <- toIRGenerate typeEnv l -- Dim and BC are irrelevant here
   -- The result is not a tuple if the return value is a closure
   case rt of
     TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
-    _ -> if countBranches conf then
-           return (IRTFst (IRInvoke (IRApply lIR vIR)), IRTFst (IRTSnd (IRInvoke (IRApply lIR vIR))), IRTSnd (IRTSnd (IRInvoke (IRApply lIR vIR))))
-         else
-           return (IRTFst (IRInvoke (IRApply lIR vIR)), IRTSnd (IRInvoke (IRApply lIR vIR)), const0)
+    _ -> do
+      retExpr <- indicator (IROp OpEq (IRInvoke (IRApply lIR vIR)) sample)
+      return (retExpr, const0, const0)
+toIRProbability conf typeEnv (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo v) == Deterministic = do
+  vIR <- toIRGenerate typeEnv v
+  (lIR, _, _) <- toIRProbability conf typeEnv l sample -- Dim and BC are irrelevant here. We need to extract these from the return tuple
+  retVal <- mkVariable "call"
+  tell [(retVal, IRInvoke (IRApply lIR vIR))]
+  -- The result is not a tuple if the return value is a closure
+  case rt of
+    TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
+    _ -> do
+      retVal <- mkVariable "call"
+      tell [(retVal, IRInvoke (IRApply lIR vIR))]
+      if countBranches conf then
+        return (IRTFst (IRVar retVal), IRTFst (IRTSnd (IRVar retVal)), IRTSnd (IRTSnd (IRVar retVal)))
+      else
+        return (IRTFst (IRVar retVal), IRTSnd (IRVar retVal), const0)
+toIRProbability conf typeEnv (Apply TypeInfo{rType=rt} l v) sample = error "This instance if apply is not yet implemented"
 toIRProbability conf typeEnv (Cons _ hdExpr tlExpr) sample = do
   headTuple <- lift (runWriterT (toIRProbabilitySave conf typeEnv hdExpr (IRHead sample))) <&> generateLetInBlock conf
   tailTuple <- lift (runWriterT (toIRProbabilitySave conf typeEnv tlExpr (IRTail sample))) <&> generateLetInBlock conf
