@@ -403,7 +403,10 @@ pADTConstructor = dbg "ADT Constr" $ do
   rts <- many $ do
     fieldName <- pIdentifier
     symbol "::"
-    fieldRT <- SPLL.Parser.pType
+    fieldType <- choice [SPLL.Parser.pType <&> Left, pIdentifier <&> Right]
+    let fieldRT = case fieldType of 
+                    Left rt -> rt
+                    Right adt -> TADT adt
     return (fieldName, fieldRT)
   return (name, rts)
 
