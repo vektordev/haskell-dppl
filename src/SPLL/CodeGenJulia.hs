@@ -71,8 +71,31 @@ unlinesTrimLeft = intercalate "\n"
 onHead :: (a -> a) -> [a] -> [a]
 onHead f (x:xs) = f x : xs
 
+generateADTClasses :: [ADTDecl] -> [String]
+generateADTClasses decls = concatMap generateADTClass (concatMap snd decls)
+
+generateADTClass :: ADTConstructorDecl -> [String]
+generateADTClass (name, fields) =
+  -- Struct declaration
+  ["struct " ++ name]++
+  indentOnce (
+    indentOnce fieldNames
+  ) ++
+  ["end"] ++
+  -- Is function
+  ["is" ++ name ++ "(x) = x isa " ++ name] ++
+  -- Field acceessors
+  concatMap (\f ->
+    ("function " ++ f ++ "(x :: " ++ name ++ ")") :
+    indentOnce ["return x." ++ f] ++
+    ["end"]
+  ) fieldNames
+  where fieldNames = map fst fields
+
 generateFunctions :: IREnv -> [String]
-generateFunctions (IREnv funcs _) = concatMap generateFunctionGroup funcs
+generateFunctions (IREnv funcs adts) = 
+  generateADTClasses adts ++
+  concatMap generateFunctionGroup funcs
 
 generateFunctionGroup :: IRFunGroup -> [String]
 generateFunctionGroup IRFunGroup {groupName=n, genFun=g, probFun=p, integFun=i, groupDoc=doc} = 
