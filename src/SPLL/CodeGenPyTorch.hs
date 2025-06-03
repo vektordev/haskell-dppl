@@ -144,8 +144,10 @@ generateADTClass (name, fields) =
   indentOnce (
     -- Constructor
     ("def __init__(self, " ++ intercalate ", " fieldNames ++ "):") :
-    indentOnce (
-      map (\f -> "self." ++f ++ " = " ++ f) fieldNames)
+    case fieldNames of 
+      [] -> indentOnce ["pass"]
+      fieldNames -> indentOnce (
+        map (\f -> "self." ++f ++ " = " ++ f) fieldNames)
   ) ++
   -- Is function
   ["def is" ++ name ++ "(x):"] ++
