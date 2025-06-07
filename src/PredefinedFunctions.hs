@@ -8,7 +8,8 @@ instantiate,
 propagateValues,
 parameterCount,
 isHigherOrder,
-getFunctionParamIdx
+getFunctionParamIdx,
+renameDecl
 ) where
 
 import SPLL.Typing.RType (RType(..), Scheme(..), TVarR(..))
@@ -189,7 +190,7 @@ renameDecl old new FDecl {contract=sig, inputVars=inVars, outputVars=outVars, bo
 
 getHornClause :: Expr -> [HornClause]
 getHornClause e = case e of
-  InjF t name params -> (constructHornClause subst eFwd): map (constructHornClause subst) eInv
+  InjF t name params -> (constructHornClause subst name eFwd): map (constructHornClause subst name) eInv
     where
       subst = (outV, eCN):zip inV (getInputChainNames e)
       eCN = chainName $ getTypeInfo e
@@ -197,8 +198,8 @@ getHornClause e = case e of
       Just (FPair eFwd eInv) = lookup name globalFenv
   _ -> error "Cannot get horn clause of non-predefined function"
 
-constructHornClause :: [(String, ChainName)] -> FDecl -> HornClause
-constructHornClause subst decl = (map lookUpSubstAddDet inV, map lookUpSubstAddDet outV, (StubInjF, 0)) --FIXME correct inversion parameters 
+constructHornClause :: [(String, ChainName)] -> String -> FDecl -> HornClause
+constructHornClause subst name decl = (map lookUpSubstAddDet inV, map lookUpSubstAddDet outV, (AnnotStub StubInjF name, 0)) --FIXME correct inversion parameters 
   where
     FDecl {inputVars = inV, outputVars = outV} = decl
     lookupSubst v = fromJust (lookup v subst)

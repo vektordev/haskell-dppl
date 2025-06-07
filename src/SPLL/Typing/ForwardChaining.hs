@@ -7,7 +7,7 @@ import Control.Monad.Supply
 
 import Data.List (delete, find, maximumBy, intersect, nub)
 import Data.Maybe
-import Debug.Trace (trace)
+import Debug.Trace (trace, traceShowId)
 import Data.Bifunctor(second)
 import Control.Monad.State.Lazy (StateT, State, runState, runStateT, get, put)
 import PredefinedFunctions
@@ -72,10 +72,10 @@ inferProg p = Program finishedDecls nns
     Program declsAn nns = annotatedProg
     annotatedExprs = Prelude.map snd declsAn
     startDetVars = concatMap findDeterminism annotatedExprs
-    detVarHornClauses = map (\n -> ([], [(n, CDeterministic)], (StubConstant, 0))) startDetVars
+    detVarHornClauses = map (\n -> ([], [(n, CDeterministic)], (Stub StubConstant, 0))) startDetVars
     hornClauses = concatMap constructHornClauses annotatedExprs
     startExprName = chainName $ getTypeInfo (head annotatedExprs)
-    startClause = ([],  [(startExprName, CInferDeterministic)], (StubConstant, 0))
+    startClause = ([],  [(startExprName, CInferDeterministic)], (Stub StubConstant, 0))
     finishedState = fixpointIteration (hornClauses, startClause:detVarHornClauses)
     finishedDecls = Prelude.map (Data.Bifunctor.second (tMap (annotateMaximumCType finishedState))) declsAn
     
@@ -97,9 +97,9 @@ annotateMaximumCType (_, used) e = t {cType=ct, derivingHornClause=hc}
 
 constructHornClause :: Expr -> [HornClause]
 constructHornClause e = case e of
-  Not _ a -> rotatedHornClauses ( [(getChainName a, CInferDeterministic)],  [(getChainName e, CInferDeterministic)], (StubNot, 0))
+  Not _ a -> rotatedHornClauses ( [(getChainName a, CInferDeterministic)],  [(getChainName e, CInferDeterministic)], (Stub StubNot, 0))
   -- The bound expression is det if the
-  LetIn _ _ v b -> [([(getChainName b, CInferDeterministic)],  [(getChainName e, CInferDeterministic)], (StubLetIn, 0)), ([(getChainName e, CInferDeterministic)],  [(getChainName b, CInferDeterministic)], (StubLetIn, 1))]
+  LetIn _ _ v b -> [([(getChainName b, CInferDeterministic)],  [(getChainName e, CInferDeterministic)], (Stub StubLetIn, 0)), ([(getChainName e, CInferDeterministic)],  [(getChainName b, CInferDeterministic)], (Stub StubLetIn, 1))]
   InjF {} -> getHornClause e
   _ -> []
 
@@ -183,12 +183,24 @@ hornClauseToIRExpr e | isNothing (derivingHornClause (getTypeInfo e)) = error "C
 hornClauseToIRExpr e = case stub of
   --TODO InjF hier
 
-  StubLetIn | inversion == 0 -> [Inversion (cn, IRVar (preVars!!0))]
-  StubLetIn | inversion == 1 -> [Inversion (cn, IRVar (preVars!!0))] --FIXME This seems wrong?
-  
-  StubConstant | inversion == 0 -> case e of
+  Stub StubLetIn | inversion == 0 -> [Inversion (cn, IRVar (preVars!!0))]
+  --Stub StubLetIn | inversion == 1 -> [Inversion (cn, IRVar (preVars!!0))] --FIXME This seems wrong?
+
+  -- inversion 0 ist the forward pass. Inversion n is the n-1'th inverse pass
+  AnnotStub StubInjF name | inversion == 0 -> do
+    let Just (FPair fwdInjF _) = lookup name globalFenv
+    let renamedF = foldr (\(old, new) decl -> renameDecl old new decl) fwdInjF (zip (inputVars fwdInjF) preVars)
+    [Inversion (cn, body renamedF)]
+  AnnotStub StubInjF name -> do
+    let Just (FPair _ invInjF) = lookup name globalFenv
+    let correctInv = invInjF !! (inversion - 1)
+    let renamedF = foldr (\(old, new) decl -> renameDecl old new decl) correctInv (zip (inputVars correctInv) preVars) 
+    [Inversion (cn, body renamedF)]
+
+  Stub StubConstant | inversion == 0 -> case e of
     (Constant _ v) -> [Inversion (cn, IRConst (fmap (error "Cannot convert VClosure") v))]
     _ -> [] -- There are places anntotated with constant that are not a constant. For example the returning value is assumed constant for the sake of forward chaining
+  _ -> error ("Found no way to invert expression: " ++ show e)
   where
     (pre, _, (stub, inversion)) = fromJust (derivingHornClause (getTypeInfo e))
     preVars = map fst pre

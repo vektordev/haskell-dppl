@@ -18,7 +18,8 @@ import Data.Set (empty)
 type ChainName = String
 
 -- (Set of Preconditions with CType, set of Inferable variables with attached CType, Expression this HornClause originates from with its inversion number
-type HornClause = ([(ChainName, CType)], [(ChainName, CType)], (ExprStub, Int))
+data ExprType = Stub ExprStub | AnnotStub ExprStub String deriving (Show, Eq, Ord)
+type HornClause = ([(ChainName, CType)], [(ChainName, CType)], (ExprType, Int))
 
 data CType = CDeterministic
              | CInferDeterministic
