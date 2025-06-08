@@ -18,7 +18,7 @@ import Data.Set (empty)
 type ChainName = String
 
 -- (Set of Preconditions with CType, set of Inferable variables with attached CType, Expression this HornClause originates from with its inversion number
-data ExprType = Stub ExprStub | AnnotStub ExprStub String deriving (Show, Eq, Ord)
+data ExprType = Stub ExprStub | AnnotStub ExprStub String deriving (Show, Eq)
 type HornClause = ([(ChainName, CType)], [(ChainName, CType)], (ExprType, Int))
 
 data CType = CDeterministic
@@ -67,7 +67,7 @@ data Expr =
               -- Other
               | ReadNN TypeInfo String Expr
               -- TODO: Needs Concat to achieve proper SPN-parity.
-              deriving (Show, Eq, Ord)
+              deriving (Show, Eq)
 
 
 data ExprStub = StubIfThenElse
@@ -90,7 +90,7 @@ data ExprStub = StubIfThenElse
               | StubLambda
               | StubApply
               | StubReadNN
-              deriving (Show, Eq, Ord)
+              deriving (Show, Eq)
 
 --Do not use this constructor, use makeTypeInfo instead
 data TypeInfo = TypeInfo
@@ -100,7 +100,7 @@ data TypeInfo = TypeInfo
   , derivingHornClause :: Maybe HornClause
   , witnessedVars :: WitnessedVars
   , chainName :: ChainName
-  , tags :: [Tag]} deriving (Show, Eq, Ord)
+  , tags :: [Tag]} deriving (Show, Eq)
 -- only use ord instance for algorithmic convenience, not for up/downgrades / lattice work.
 
 makeTypeInfo :: TypeInfo
@@ -127,9 +127,9 @@ type NeuralDecl = (String, RType, Maybe Tag)
 
 type WitnessedVars = Set.Set String
 
-data ThetaTree = ThetaTree [Double] [ThetaTree] deriving (Show, Eq, Ord)
+data ThetaTree = ThetaTree [Double] [ThetaTree] deriving (Show, Eq)
 
-data GenericList a = EmptyList | ListCont a (GenericList a) | AnyList deriving (Show, Eq, Ord)
+data GenericList a = EmptyList | ListCont a (GenericList a) | AnyList deriving (Show, Eq)
 type ValueList a = GenericList (GenericValue a)
 
 instance Functor GenericList where
@@ -156,7 +156,7 @@ data GenericValue a = VBool Bool
            | VClosure [(String, a)] String a 
            | VAny -- Only used for marginal queries
            -- | Value of TArrow a b could be Expr TypeInfo, with Expr being a Lambda?
-           deriving (Show, Eq, Ord)
+           deriving (Show, Eq)
 
 instance Functor GenericValue where
   fmap _ (VInt x) = VInt x
@@ -197,7 +197,7 @@ isVClosure _ = False
 data Tag = EnumRange (Value, Value)
            | EnumList [Value]
            | Alg InferenceRule
-           deriving (Show, Eq, Ord)
+           deriving (Show, Eq)
            
 
 
@@ -206,7 +206,7 @@ data RuleConstraint = SubExprNIsType Int PType
                     | SubExprNIsAtLeast Int PType
                     | SubExprNIsEnumerable Int
                     | ResultingTypeMatch
-                    deriving (Show, Eq, Ord)
+                    deriving (Show, Eq)
 
 -- can we encode symmetries?
 data InferenceRule = InferenceRule { forExpression :: ExprStub
@@ -222,6 +222,3 @@ instance Show InferenceRule where
 
 instance Eq InferenceRule where
   a1 == a2 = algName a1 == algName a2
-
-instance Ord InferenceRule where
-  a1 `compare` a2 = algName a1 `compare` algName a2

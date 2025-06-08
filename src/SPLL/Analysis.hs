@@ -36,25 +36,25 @@ annotate env e = withNewTypeInfo
       (LetIn _ n v _) -> (n, tags $ getTypeInfo v):env
       _ -> env
     withNewSubExpr = setSubExprs e (map (annotate newEnv) (getSubExprs e))
-    tgs = [EnumList (toList values) | not (null (toList values))]
+    tgs = if null values then [] else [EnumList values]
     values = case withNewSubExpr of
-      (Constant _ a@(VInt _)) -> fromList [a]
+      (Constant _ a@(VInt _)) -> [a]
       (ReadNN _ name _) -> case lookup name env of
-        (Just [EnumList l]) -> fromList l
-        (Just [EnumRange (VInt a, VInt b)]) -> fromList [VInt i | i <- [a..b]]
+        (Just [EnumList l]) -> l
+        (Just [EnumRange (VInt a, VInt b)]) -> [VInt i | i <- [a..b]]
         _ -> error $ "Invalid Neural declaration for " ++ name ++ ".\n    found:" ++ show env
       (InjF _ name params) -> do
         let paramValues = map getValuesFromExpr params
-        fromList (propagateValues name paramValues)
+        propagateValues name paramValues
       (IfThenElse _ _ left right) -> do
-        let valuesLeft = fromList $ getValuesFromExpr left
-        let valuesRight = fromList $ getValuesFromExpr right
-        merge valuesLeft valuesRight
-      (LetIn _ _ _ a) -> fromList $ getValuesFromExpr a
+        let valuesLeft = getValuesFromExpr left
+        let valuesRight = getValuesFromExpr right
+        nub (valuesLeft ++ valuesRight)
+      (LetIn _ _ _ a) -> getValuesFromExpr a
       (Var _ name) -> case (lookup name env) of
-        Just tags -> fromList $ concatMap valuesOfTag tags
-        Nothing -> empty
-      _ -> empty
+        Just tags -> concatMap valuesOfTag tags
+        Nothing -> []
+      _ -> []
 
 
 getValuesFromExpr :: Expr ->  [Value]
