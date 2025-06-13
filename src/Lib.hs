@@ -53,6 +53,7 @@ import SPLL.Typing.ForwardChaining
 import IRInterpreter
 import PrettyPrint
 import Data.Bifunctor (second)
+import SPLL.Typing.ForwardChaining2
 {-variableLengthS2 :: Program  () Double
 variableLengthS2 = Program [("b", IfThenElse ()
                           (GreaterThan () (Uniform ()) (ThetaI () 0))
@@ -152,9 +153,16 @@ codeGenToLang lang trunc conf prog = do
   let preAnnotated = annotateEnumsProg prog
   doVerbose 2 conf (putStrLn "\n\n=== Annotated Program (1) ===\n" >> pPrint preAnnotated)
 
+{-
   let forwardChained = inferProg preAnnotated
   doVerbose 2 conf (putStrLn "\n\n=== Chained Program (1) ===\n" >> pPrint forwardChained)
   let inverseProg = inferProbProg forwardChained
+  doVerbose 2 conf (putStrLn "\n\n=== Inverse Program (1) ===\n" >> pPrint inverseProg)
+-}
+  let forwardChained = annotateProg preAnnotated
+  let hcSet = traceShowId $ progToHornClauses forwardChained
+  doVerbose 2 conf (putStrLn "\n\n=== Chained Program (1) ===\n" >> pPrint forwardChained)
+  let inverseProg = toInvExpr hcSet ["ast2"] "ast0"
   doVerbose 2 conf (putStrLn "\n\n=== Inverse Program (1) ===\n" >> pPrint inverseProg)
 
   let typed = addTypeInfo forwardChained

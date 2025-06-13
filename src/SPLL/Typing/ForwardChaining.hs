@@ -5,13 +5,15 @@ import SPLL.Lang.Types
 import SPLL.Typing.Typing
 import Control.Monad.Supply
 
-import Data.List (delete, find, maximumBy, intersect, nub)
+import Data.List (delete, find, maximumBy, intersect, nub, (\\))
 import Data.Maybe
 import Debug.Trace (trace, traceShowId)
 import Data.Bifunctor(second)
 import Control.Monad.State.Lazy (StateT, State, runState, runStateT, get, put)
 import PredefinedFunctions
 import SPLL.IntermediateRepresentation
+import Data.PartialOrd (minima)
+import Data.Foldable
 type Chain a = SupplyT Int (State [(String, ChainName)]) a
 type ChainInferState a = ([[HornClause]], [HornClause])
 
@@ -72,34 +74,36 @@ inferProg p = Program finishedDecls nns
     Program declsAn nns = annotatedProg
     annotatedExprs = Prelude.map snd declsAn
     startDetVars = concatMap findDeterminism annotatedExprs
-    detVarHornClauses = map (\n -> ([], [(n, CDeterministic)], (Stub StubConstant, 0))) startDetVars
+    detVarHornClauses = map (\dv -> case dv of
+      (n, Nothing) -> HornClause [] [(n, CDeterministic)] (n, Stub StubConstant, 0)
+      (n, Just v) -> HornClause [] [(n, CDeterministic)] (n, AnnotValueStub StubConstant v, 0)) startDetVars
     hornClauses = concatMap constructHornClauses annotatedExprs
     startExprName = chainName $ getTypeInfo (head annotatedExprs)
-    startClause = ([],  [(startExprName, CInferDeterministic)], (Stub StubConstant, 0))
+    startClause = HornClause [] [(startExprName, CInferDeterministic)] (startExprName, Stub StubConstant, 0)
     finishedState = fixpointIteration (hornClauses, startClause:detVarHornClauses)
     finishedDecls = Prelude.map (Data.Bifunctor.second (tMap (annotateMaximumCType finishedState))) declsAn
-    
+
 
 annotateMaximumCType :: ChainInferState a -> Expr -> TypeInfo
 annotateMaximumCType (_, used) e = t {cType=ct, derivingHornClause=hc}
   where
     t = getTypeInfo e
     cn = chainName t
-    cmpHC (_, res1, _) (_, res2, _) =
+    cmpHC (HornClause _ res1 _) (HornClause _ res2 _)  =
       let cn1 = fromMaybe CNotSetYet (lookup cn res1)
           cn2 = fromMaybe CNotSetYet (lookup cn res2) in
             compare cn1 cn2
     maxHC = maximumBy cmpHC used
-    maxCT = lookup cn (snd3 maxHC)
+    maxCT = lookup cn ((\(HornClause _ b _ )-> b) maxHC)
     ct = fromMaybe CBottom maxCT
     hc = if isNothing maxCT then Nothing else Just maxHC
 
 
 constructHornClause :: Expr -> [HornClause]
 constructHornClause e = case e of
-  Not _ a -> rotatedHornClauses ( [(getChainName a, CInferDeterministic)],  [(getChainName e, CInferDeterministic)], (Stub StubNot, 0))
+  Not _ a -> rotatedHornClauses (HornClause [(getChainName a, CInferDeterministic)]  [(getChainName e, CInferDeterministic)] (getChainName e, Stub StubNot, 0))
   -- The bound expression is det if the
-  LetIn _ _ v b -> [([(getChainName b, CInferDeterministic)],  [(getChainName e, CInferDeterministic)], (Stub StubLetIn, 0)), ([(getChainName e, CInferDeterministic)],  [(getChainName b, CInferDeterministic)], (Stub StubLetIn, 1))]
+  LetIn _ _ v b -> [HornClause [(getChainName b, CInferDeterministic)]  [(getChainName e, CInferDeterministic)] (getChainName e, Stub StubLetIn, 0), HornClause [(getChainName e, CInferDeterministic)]  [(getChainName b, CInferDeterministic)] (getChainName e, Stub StubLetIn, 1)]
   InjF {} -> getHornClause e
   _ -> []
 
@@ -109,43 +113,45 @@ constructHornClauses e = constructHornClause e:concatMap constructHornClauses (g
 -- TODO Constrained Hornclauses
 -- Takes one horn clause on constructs all inverses, including the original
 rotatedHornClauses :: HornClause -> [HornClause]
-rotatedHornClauses clause@(cond, res, (stub, i)) | i == 0 = case (cond, res) of
-  ([a], [b]) -> [clause, ([b],  [a], (stub, 1))]
-  ([a, b], [c]) -> [clause, ( [c, a],  [b], (stub, 1)), ( [c, b],  [a], (stub, 2))]
-  ([a, b], [c, d]) ->
-    [clause, ( [a, c],  [b, d], (stub, 1)),
-      ( [a, d],  [b, c], (stub, 2)),
-      ( [b, c],  [a, d], (stub, 3)),
-      ( [b, d],  [a, c], (stub, 4)),
-      ( [c, d],  [a, b], (stub, 5))] --TODO is this a good order
-  _ -> [clause]
+rotatedHornClauses clause@(HornClause cond res (cn, stub, i)) | i == 0 =
+  case (cond, res) of
+    ([a], [b]) -> [clause, HornClause [b] [a] (cn, stub, 1)]
+    ([a, b], [c]) -> [clause, HornClause [c, a] [b] (cn, stub, 1), HornClause [c, b] [a] (cn, stub, 2)]
+    ([a, b], [c, d]) ->
+      [clause, HornClause [a, c] [b, d] (cn, stub, 1),
+        HornClause [a, d] [b, c] (cn, stub, 2),
+        HornClause [b, c] [a, d] (cn, stub, 3),
+        HornClause [b, d] [a, c] (cn, stub, 4),
+        HornClause [c, d] [a, b] (cn, stub, 5)] --TODO is this a good order
+    _ -> [clause]
+rotatedHornClauses _ = error "Trying to rotate inversion of a Horn clause"
 
 findFulfilledHornClause :: [[HornClause]] -> [(ChainName, CType)] -> Maybe HornClause
 --findFulfilledHornClause clauses satisfied | trace (show satisfied) False = undefined
 findFulfilledHornClause clauses satisfied = find allSatisfied (concat clauses)
-  where 
-    allSatisfied (cond, _, _) = foldr (\(name, exp) b -> b && cTypeOf name >= exp) True cond
+  where
+    allSatisfied (HornClause cond _ _) = foldr (\(name, exp) b -> b && cTypeOf name >= exp) True cond
     cTypeOf name = fromMaybe CNotSetYet (lookup name satisfied)
-    
 
-findDeterminism :: Expr -> [ChainName]
-findDeterminism (Constant t _) = [chainName t]
-findDeterminism (ThetaI t _ _) = [chainName t]
+
+findDeterminism :: Expr -> [(ChainName, Maybe Value)]
+findDeterminism (Constant t v) = [(chainName t, Just v)]
+findDeterminism (ThetaI t _ _) = [(chainName t, Nothing)]
 findDeterminism e = concatMap findDeterminism (getSubExprs e)
 
 -- To the person that wants to implement weaker CTypes:
 --  Note that this method uses the implied CType of the used HornClauses to infer the type of each variable
 --  Therefor if you want to continue using this method you need to downgrade the CTypes in the used HornClauses
 stepIteration :: ChainInferState a -> ChainInferState a
-stepIteration (clauses, used) = 
-  if isJust nextClause then 
-    (delete (fromJust (find (elem (fromJust nextClause)) clauses)) clauses, fromJust nextClause:used) 
-  else 
+stepIteration (clauses, used) =
+  if isJust nextClause then
+    (delete (fromJust (find (elem (fromJust nextClause)) clauses)) clauses, fromJust nextClause:used)
+  else
     (clauses, used)
   where nextClause = findFulfilledHornClause clauses (determinedCTypes used)
-  
+
 determinedCTypes :: [HornClause] -> [(ChainName, CType)]
-determinedCTypes = concatMap snd3
+determinedCTypes = concatMap (\(HornClause _ b _) -> b)
 
 fixpointIteration :: ChainInferState a -> ChainInferState a
 fixpointIteration (clauses, used) = if newDetVars == detVars
@@ -161,52 +167,52 @@ fixpointIteration (clauses, used) = if newDetVars == detVars
   -- =========================================================================
 
 newtype Inversion a = Inversion (ChainName, IRExpr) deriving (Show, Eq)
-
+{-
 inferProbProg :: Program -> IRExpr
-inferProbProg (Program [("main", main)] nns) = inferProbExpr main
+inferProbProg (Program [("main", main)] nns) = toInvExpr main
 inferProbProg _  = error "Programs with function declarations are not yet implemented"
-
-inferProbExpr :: Expr -> IRExpr
-inferProbExpr = inversionsToProb . exprToInversions
+-}
+--toInvExpr :: Expr -> IRExpr
+-- Chain name of the outermost expression is the sample variable. Instead of naming it sample we just renamed the lambda to the outermost chain name 
+--toInvExpr expr = IRLambda (chainName (getTypeInfo expr)) (inversionsToProb (exprToInversions expr))
 
 inversionsToProb :: ([Inversion a], [IRExpr]) -> IRExpr
 inversionsToProb (inversions, firstR:randoms) = Prelude.foldr (\(Inversion (cn, val)) body -> IRLetIn cn val body) randomsProduct inversions
   where randomsProduct = Prelude.foldr (\expr body -> IROp OpMult expr body) firstR randoms
 
 exprToInversions :: Expr -> ([Inversion a], [IRExpr])
-exprToInversions e@(Uniform _) = (hornClauseToIRExpr e, [IRDensity IRUniform (IRVar (getChainName e))])
-exprToInversions e@(Normal _) = (hornClauseToIRExpr e, [IRDensity IRNormal (IRVar (getChainName e))])
-exprToInversions e = Prelude.foldr (\(a1, b1) (a, b) -> (nub (a1++a), b1++b)) ([], []) ((hornClauseToIRExpr e, []):Prelude.map exprToInversions (getSubExprs e))
+exprToInversions e = (mapMaybe hornClauseToIRExpr hcs, irs)
+  where (hcs, irs) = combinedHornClauses e
 
-hornClauseToIRExpr :: Expr -> [Inversion a]
-hornClauseToIRExpr e | isNothing (derivingHornClause (getTypeInfo e)) = error "Cannot convert to IR without a horn clause"
-hornClauseToIRExpr e = case stub of
-  --TODO InjF hier
+combinedHornClauses :: Expr -> ([HornClause], [IRExpr])
+combinedHornClauses e@(Uniform _) = (toList (derivingHornClause (getTypeInfo e)), [IRDensity IRUniform (IRVar (getChainName e))])
+combinedHornClauses e@(Normal _) = (toList (derivingHornClause (getTypeInfo e)), [IRDensity IRNormal (IRVar (getChainName e))])
+combinedHornClauses e = Prelude.foldr (\(a1, b1) (a, b) -> (nub (a1++a), b1++b)) ([], []) ((toList (derivingHornClause (getTypeInfo e)), []):Prelude.map combinedHornClauses (getSubExprs e))
 
-  Stub StubLetIn | inversion == 0 -> [Inversion (cn, IRVar (preVars!!0))]
+hornClauseToIRExpr :: HornClause -> Maybe (Inversion a)
+hornClauseToIRExpr hc@(HornClause pre _ (cn, stub, inversion)) = case stub of
+  Stub StubLetIn | inversion == 0 -> return $ Inversion (cn, IRVar (preVars!!0))
   --Stub StubLetIn | inversion == 1 -> [Inversion (cn, IRVar (preVars!!0))] --FIXME This seems wrong?
-
   -- inversion 0 ist the forward pass. Inversion n is the n-1'th inverse pass
   AnnotStub StubInjF name | inversion == 0 -> do
     let Just (FPair fwdInjF _) = lookup name globalFenv
     let renamedF = foldr (\(old, new) decl -> renameDecl old new decl) fwdInjF (zip (inputVars fwdInjF) preVars)
-    [Inversion (cn, body renamedF)]
+    return $ Inversion (cn, body renamedF)
   AnnotStub StubInjF name -> do
     let Just (FPair _ invInjF) = lookup name globalFenv
     let correctInv = invInjF !! (inversion - 1)
-    let renamedF = foldr (\(old, new) decl -> renameDecl old new decl) correctInv (zip (inputVars correctInv) preVars) 
-    [Inversion (cn, body renamedF)]
-
-  Stub StubConstant | inversion == 0 -> case e of
-    (Constant _ v) -> [Inversion (cn, IRConst (fmap (error "Cannot convert VClosure") v))]
-    _ -> [] -- There are places anntotated with constant that are not a constant. For example the returning value is assumed constant for the sake of forward chaining
-  _ -> error ("Found no way to invert expression: " ++ show e)
+    let renamedF = foldr (\(old, new) decl -> renameDecl old new decl) correctInv (zip (inputVars correctInv) preVars)
+    return $ Inversion (cn, body renamedF)
+  AnnotValueStub StubConstant v -> return $ Inversion (cn, IRConst (fmap (error "Cannot convert VClosure") v))
+  Stub StubConstant -> Nothing
+  _ -> error ("Found no way to invert expression: " ++ show hc)
   where
-    (pre, _, (stub, inversion)) = fromJust (derivingHornClause (getTypeInfo e))
     preVars = map fst pre
-    cn = getChainName e
-
-
 
 chainVarOfSubExpr :: Expr -> Int -> IRExpr
 chainVarOfSubExpr e n = IRVar (getChainName (getSubExprs e !! n))
+
+topSortHornClauses :: [HornClause] -> [HornClause]
+topSortHornClauses clauses =
+  let maxC = minima clauses in
+    maxC ++ topSortHornClauses (clauses \\ maxC)

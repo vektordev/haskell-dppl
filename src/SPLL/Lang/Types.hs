@@ -13,13 +13,15 @@ import Data.Number.Erf (Erf)
 import Data.Bifunctor (second)
 
 import Data.Set (empty)
+import Data.PartialOrd (PartialOrd((<=)))
+import Data.Maybe
 
 
 type ChainName = String
 
 -- (Set of Preconditions with CType, set of Inferable variables with attached CType, Expression this HornClause originates from with its inversion number
-data ExprType = Stub ExprStub | AnnotStub ExprStub String deriving (Show, Eq)
-type HornClause = ([(ChainName, CType)], [(ChainName, CType)], (ExprType, Int))
+data ExprType = Stub ExprStub | AnnotStub ExprStub String | AnnotValueStub ExprStub (GenericValue Expr) deriving (Show, Eq)
+data HornClause = HornClause [(ChainName, CType)] [(ChainName, CType)] (ChainName, ExprType, Int) deriving (Show, Eq)
 
 data CType = CDeterministic
              | CInferDeterministic
@@ -222,3 +224,10 @@ instance Show InferenceRule where
 
 instance Eq InferenceRule where
   a1 == a2 = algName a1 == algName a2
+
+instance Ord InferenceRule where
+  a1 `compare` a2 = algName a1 `compare` algName a2
+
+instance PartialOrd HornClause where
+  -- They B depends on A
+  HornClause pre1 conc1 _ <= HornClause pre2 conc2 _ = any (\(cn, ct) -> isJust (lookup cn conc1) && fromJust (lookup cn conc1) >= ct) pre2

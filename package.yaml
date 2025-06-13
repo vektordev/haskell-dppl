@@ -45,6 +45,7 @@ dependencies:
 - directory
 - filepath
 - process
+- partial-order >= 0.2.0.0
 
 library:
   source-dirs: src
