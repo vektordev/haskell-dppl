@@ -5,7 +5,6 @@ module SPLL.Typing.Typing (
   TypeError,
   TypeInfo(..),
   ChainName,
-  HornClause,
   Tag(..),
   CType(..),
   makeTypeInfo,

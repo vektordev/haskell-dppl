@@ -162,8 +162,8 @@ codeGenToLang lang trunc conf prog = do
   let forwardChained = annotateProg preAnnotated
   let hcSet = traceShowId $ progToHornClauses forwardChained
   doVerbose 2 conf (putStrLn "\n\n=== Chained Program (1) ===\n" >> pPrint forwardChained)
-  let inverseProg = toInvExpr hcSet ["ast2"] "ast0"
-  doVerbose 2 conf (putStrLn "\n\n=== Inverse Program (1) ===\n" >> pPrint inverseProg)
+ -- let inverseProg = toInvExpr hcSet ["ast2"] "ast0"
+ -- doVerbose 2 conf (putStrLn "\n\n=== Inverse Program (1) ===\n" >> pPrint inverseProg)
 
   let typed = addTypeInfo forwardChained
   doVerbose 2 conf (putStrLn "\n\n=== Typed Program ===\n" >> pPrint typed)

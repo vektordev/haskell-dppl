@@ -139,21 +139,22 @@ generateInitializations = map (\IRFunGroup {groupName=n} -> n ++ " = " ++ onHead
 generateClass :: [(String, String)] -> IRFunGroup -> [String]
 generateClass lut (IRFunGroup name gen prob integ doc) = let
   funcStringFromMaybe name func = case func of
-    Just a -> generateFunction (name, replaceCallsDecl a)
+    Just a -> generateFunction True (name, replaceCallsDecl a)
     Nothing -> []
   i = funcStringFromMaybe "integrate" integ
   p = funcStringFromMaybe "forward" prob
-  g = generateFunction ("generate", replaceCallsDecl gen)
+  g = generateFunction True ("generate", replaceCallsDecl gen)
   commentLine = "# " ++ doc
   initLine = "class " ++ onHead toUpper name ++ "(Module):"
   funcs = i ++ [""] ++ p ++ [""] ++ g
   replaceCallsDecl (e, d) = (irMap (replaceCalls lut) e, d)
   in commentLine:initLine:indentOnce funcs
 
-generateFunction :: (String, IRFunDecl) -> [String]
-generateFunction (name, (expr, doc)) = let
+generateFunction :: Bool -> (String, IRFunDecl) -> [String]
+generateFunction classFunction (name, (expr, doc)) = let
   (args, reducedExpr) = unwrapLambdas expr
-  l1 = "def " ++ name ++ "(" ++ intercalate ", " ("self" : args) ++ "):"
+  args' = if classFunction then "self":args else args
+  l1 = "def " ++ name ++ "(" ++ intercalate ", " args' ++ "):"
   block = generateStatementBlock reducedExpr
   docLine = "# " ++ doc
   in [docLine, l1] ++ indentOnce block
@@ -164,7 +165,7 @@ unwrapLambdas (IRLambda name rest) = (name:otherNames, plainTree)
 unwrapLambdas anyNode = ([], anyNode)
 
 generateStatementBlock :: IRExpr -> [String]
-generateStatementBlock (IRLetIn name lmd@(IRLambda _ _) body) = generateFunction (name, (lmd, "Inner function: " ++ name)) ++ generateStatementBlock body
+generateStatementBlock (IRLetIn name lmd@(IRLambda _ _) body) = generateFunction False (name, (lmd, "Inner function: " ++ name)) ++ generateStatementBlock body
 generateStatementBlock (IRLetIn name val body) = (name ++ " = " ++ generateExpression val):generateStatementBlock body
 generateStatementBlock (IRIf cond left right) = let
   cCond = generateExpression cond

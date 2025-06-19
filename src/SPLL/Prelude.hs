@@ -11,6 +11,7 @@ import Control.Monad.Random (Rand, RandomGen)
 import SPLL.IRCompiler
 import Debug.Trace
 import Data.Either
+import SPLL.Typing.ForwardChaining2 (annotateProg)
 
 -- Flow control
 ifThenElse :: Expr -> Expr -> Expr -> Expr
@@ -168,7 +169,8 @@ compile :: CompilerConfig -> Program -> IREnv
 compile _ p | isLeft (validateProgram p) = error $ fromLeft "" (validateProgram p)
 compile conf p = do
   let preAnnotated = annotateEnumsProg p
-  let typed = addTypeInfo preAnnotated
+  let forwardChained = annotateProg preAnnotated
+  let typed = addTypeInfo forwardChained
   let annotated = annotateAlgsProg typed
   envToIR conf annotated
 

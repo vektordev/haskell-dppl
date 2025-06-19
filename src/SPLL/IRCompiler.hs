@@ -2,7 +2,7 @@ module SPLL.IRCompiler where
 
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Lang
-import SPLL.Lang.Types
+import SPLL.Lang.Types hiding (HornClause)
 import SPLL.Typing.Typing
 import SPLL.Typing.RType
 import SPLL.IROptimizer
@@ -19,6 +19,8 @@ import Data.Number.Erf (erf)
 import PredefinedFunctions (FDecl(applicability))
 import SPLL.AutoNeural
 import Data.Functor
+import SPLL.Typing.ForwardChaining2 (toInvExpr)
+import SPLL.Typing.ForwardChaining2
 
 -- SupplyT needs to be a transformer, because Supply does not implement Functor correctly
 type CompilerMonad a = WriterT [(String, IRExpr)] (SupplyT Int Identity) a
@@ -41,11 +43,11 @@ envToIR conf p = optimizeEnv conf $ -- map optimizer over all second elements of
       IRFunGroup {groupName=name,
        integFun =
         if (pt == Deterministic || pt == Integrate) && (isOnlyNumbers rt) then
-          Just (toIntegDecl name (IRLambda "low" (IRLambda "high" (runCompile conf (toIRIntegrateSave conf typeEnv binding (IRVar "low") (IRVar "high"))))))
+          Just (toIntegDecl name (IRLambda "low" (IRLambda "high" (runCompile conf (toIRIntegrateSave conf clauses typeEnv binding (IRVar "low") (IRVar "high"))))))
         else Nothing,
         probFun =
           if pt == Deterministic || pt == Integrate || pt == Prob then
-            Just (toProbDecl name (IRLambda "sample" (runCompile conf (toIRProbabilitySave conf typeEnv binding (IRVar "sample")))))
+            Just (toProbDecl name (IRLambda "sample" (runCompile conf (toIRProbabilitySave conf clauses typeEnv binding (IRVar "sample")))))
           else Nothing,
         genFun = toGenDecl name (fst $ runIdentity $ runSupplyVars $ runWriterT $ toIRGenerate typeEnv binding),
         groupDoc="Function group " ++ name}) (functions p)
@@ -55,6 +57,7 @@ envToIR conf p = optimizeEnv conf $ -- map optimizer over all second elements of
     toProbDecl name expr =
       (expr, "Calculates the probability of the sample parameter being returned from the " ++ name ++ "function")
     toIntegDecl name expr = (expr, "Calculates the probability of sample of " ++ name ++ " falling in between the parameters low and high")
+    clauses = progToHornClauses p
 
 
 runCompile :: CompilerConfig -> CompilerMonad CompilationResult -> IRExpr
@@ -97,32 +100,32 @@ negInf = IRConst (VFloat (-9999999))
 posInf :: IRExpr
 posInf = IRConst (VFloat 9999999)
 
-toIRProbabilitySave :: CompilerConfig -> TypeEnv -> Expr -> IRExpr -> CompilerMonad CompilationResult
-toIRProbabilitySave conf typeEnv (Lambda t name subExpr) sample = do
+toIRProbabilitySave :: CompilerConfig -> [[HornClause]] -> TypeEnv -> Expr -> IRExpr -> CompilerMonad CompilationResult
+toIRProbabilitySave conf clauses typeEnv (Lambda t name subExpr) sample = do
   let (TArrow paramRType _) = rType t
   case paramRType of
     TArrow (TArrow _ _) _ -> do
       let newTypeEnv = (name, (paramRType, True)):typeEnv
-      irTuple <- lift (runWriterT (toIRProbabilitySave conf newTypeEnv subExpr sample)) <&> generateLetInBlock conf
+      irTuple <- lift (runWriterT (toIRProbabilitySave conf clauses newTypeEnv subExpr sample)) <&> generateLetInBlock conf
       return (IRLambda name irTuple, const0, const0)
     _ -> do
       let newTypeEnv = (name, (paramRType, False)):typeEnv
-      irTuple <- lift (runWriterT (toIRProbabilitySave conf newTypeEnv subExpr sample)) <&> generateLetInBlock conf
+      irTuple <- lift (runWriterT (toIRProbabilitySave conf clauses newTypeEnv subExpr sample)) <&> generateLetInBlock conf
       return (IRLambda name irTuple, const0, const0)
-toIRProbabilitySave conf typeEnv expr sample = do
-  (probExpr, probDim, probBranches) <- toIRProbability conf typeEnv expr sample
+toIRProbabilitySave conf clauses typeEnv expr sample = do
+  (probExpr, probDim, probBranches) <- toIRProbability conf clauses typeEnv expr sample
   return $ (IRIf (IRUnaryOp OpIsAny sample) (IRConst (VFloat 1)) probExpr, IRIf (IRUnaryOp OpIsAny sample) const0 probDim, IRIf (IRUnaryOp OpIsAny sample) const0 probBranches)
 
 --in this implementation, I'll forget about the distinction between PDFs and Probabilities. Might need to fix that later.
-toIRProbability :: CompilerConfig -> TypeEnv -> Expr -> IRExpr -> CompilerMonad CompilationResult
---toIRProbability conf typeEnv expr sample | trace (show expr) False = undefined
-toIRProbability conf typeEnv (IfThenElse t cond left right) sample = do
+toIRProbability :: CompilerConfig -> [[HornClause]] -> TypeEnv -> Expr -> IRExpr -> CompilerMonad CompilationResult
+--toIRProbability conf clauses typeEnv expr sample | trace (show expr) False = undefined
+toIRProbability conf clauses typeEnv (IfThenElse t cond left right) sample = do
   var_condT_p <- mkVariable "condT"
   var_condF_p <- mkVariable "condF"
-  (condTrueExpr, condTrueDim, condTrueBranches) <- toIRProbability conf typeEnv cond (IRConst (VBool True))
-  (condFalseExpr, condFalseDim, condFalseBranches) <- toIRProbability conf typeEnv cond (IRConst (VBool False))
-  (leftExpr, leftDim, leftBranches) <- toIRProbability conf typeEnv left sample
-  (rightExpr, rightDim, rightBranches) <- toIRProbability conf typeEnv right sample
+  (condTrueExpr, condTrueDim, condTrueBranches) <- toIRProbability conf clauses typeEnv cond (IRConst (VBool True))
+  (condFalseExpr, condFalseDim, condFalseBranches) <- toIRProbability conf clauses typeEnv cond (IRConst (VBool False))
+  (leftExpr, leftDim, leftBranches) <- toIRProbability conf clauses typeEnv left sample
+  (rightExpr, rightDim, rightBranches) <- toIRProbability conf clauses typeEnv right sample
   let branches = (IROp OpPlus condTrueBranches ((IROp OpPlus leftBranches rightBranches)))
   -- p(y) = if p_cond < thresh then p_else(y) * (1-p_cond(y)) else if p_cond > 1 - thresh then p_then(y) * p_cond(y) else p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
   let thr = topKThreshold conf
@@ -152,12 +155,12 @@ toIRProbability conf typeEnv (IfThenElse t cond left right) sample = do
       returnExpr <- mul1 `addP` mul2
       tell [(var_condT_p, condTrueExpr), (var_condF_p, condFalseExpr)]
       return (fst returnExpr, snd returnExpr, branches)
-toIRProbability conf typeEnv (GreaterThan (TypeInfo {rType = t, tags = extras}) left right) sample
+toIRProbability conf clauses typeEnv (GreaterThan (TypeInfo {rType = t, tags = extras}) left right) sample
   | extras `hasAlgorithm` "greaterThanLeft" = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
     l <- toIRGenerate typeEnv left
     tell [(var, l)]
-    (integrate, _, integrateBranches) <- toIRIntegrate conf typeEnv right negInf (IRVar var)
+    (integrate, _, integrateBranches) <- toIRIntegrate conf clauses typeEnv right negInf (IRVar var)
     var2 <- mkVariable "rhs_integral"
     let returnExpr =
           (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)))
@@ -167,17 +170,17 @@ toIRProbability conf typeEnv (GreaterThan (TypeInfo {rType = t, tags = extras}) 
     var <- mkVariable "fixed_bound"
     r <- toIRGenerate typeEnv right
     tell [(var, r)]
-    (integrate, _, integrateBranches) <- toIRIntegrate conf typeEnv left negInf (IRVar var)
+    (integrate, _, integrateBranches) <- toIRIntegrate conf clauses typeEnv left negInf (IRVar var)
     var2 <- mkVariable "lhs_integral"
     let returnExpr = (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)) (IRVar var2))
     tell [(var2, integrate)]
     return (returnExpr, const0, integrateBranches)
-toIRProbability conf typeEnv (LessThan (TypeInfo {rType = t, tags = extras}) left right) sample
+toIRProbability conf clauses typeEnv (LessThan (TypeInfo {rType = t, tags = extras}) left right) sample
   | extras `hasAlgorithm` "lessThanLeft" = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
     l <- toIRGenerate typeEnv left
     tell [(var, l)]
-    (integrate, _, integrateBranches) <- toIRIntegrate conf typeEnv right (IRVar var) posInf
+    (integrate, _, integrateBranches) <- toIRIntegrate conf clauses typeEnv right (IRVar var) posInf
     var2 <- mkVariable "rhs_integral"
     let returnExpr = (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)))
     tell [(var2, integrate)]
@@ -186,26 +189,26 @@ toIRProbability conf typeEnv (LessThan (TypeInfo {rType = t, tags = extras}) lef
     var <- mkVariable "fixed_bound"
     r <- toIRGenerate typeEnv right
     tell [(var, r)]
-    (integrate, _, integrateBranches) <- toIRIntegrate conf typeEnv left (IRVar var) posInf
+    (integrate, _, integrateBranches) <- toIRIntegrate conf clauses typeEnv left (IRVar var) posInf
     var2 <- mkVariable "lhs_integral"
     tell [(var2, integrate)]
     let returnExpr = (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))  (IRVar var2))
     return (returnExpr, const0, integrateBranches)
-toIRProbability conf typeEnv (Not (TypeInfo {rType = TBool}) f) sample =
-  toIRProbability conf typeEnv f (IRUnaryOp OpNot sample)
-toIRProbability conf typeEnv (And (TypeInfo {rType = TBool}) a b) sample = do
-  (aP, aDim, aBC) <- toIRProbability conf typeEnv a (IRConst $ VBool True)
-  (bP, bDim, bBC) <- toIRProbability conf typeEnv b (IRConst $ VBool True)
+toIRProbability conf clauses typeEnv (Not (TypeInfo {rType = TBool}) f) sample =
+  toIRProbability conf clauses typeEnv f (IRUnaryOp OpNot sample)
+toIRProbability conf clauses typeEnv (And (TypeInfo {rType = TBool}) a b) sample = do
+  (aP, aDim, aBC) <- toIRProbability conf clauses typeEnv a (IRConst $ VBool True)
+  (bP, bDim, bBC) <- toIRProbability conf clauses typeEnv b (IRConst $ VBool True)
   (resP, resDim) <- (aP, aDim) `multP` (bP, bDim)
   return $ (IRIf sample resP (IROp OpSub (IRConst $ VFloat 1) resP), resDim, IROp OpPlus aBC bBC)
-toIRProbability conf typeEnv (Or (TypeInfo {rType = TBool}) a b) sample = do
-  (aP, aDim, aBC) <- toIRProbability conf typeEnv a (IRConst $ VBool False)
-  (bP, bDim, bBC) <- toIRProbability conf typeEnv b (IRConst $ VBool False)
+toIRProbability conf clauses typeEnv (Or (TypeInfo {rType = TBool}) a b) sample = do
+  (aP, aDim, aBC) <- toIRProbability conf clauses typeEnv a (IRConst $ VBool False)
+  (bP, bDim, bBC) <- toIRProbability conf clauses typeEnv b (IRConst $ VBool False)
   (resP, resDim) <- (aP, aDim) `multP` (bP, bDim)
   return $ (IRIf sample (IROp OpSub (IRConst $ VFloat 1) resP) resP, resDim, IROp OpPlus aBC bBC)  -- p(a || b == True) == 1 - p(a == False) * p(b == False)
-toIRProbability conf typeEnv (Normal t) sample = return (IRDensity IRNormal sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), const0)
-toIRProbability conf typeEnv (Uniform t) sample = return (IRDensity IRUniform sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), const0)
-toIRProbability conf typeEnv (ReadNN _ name symbol) sample = do
+toIRProbability conf clauses typeEnv (Normal t) sample = return (IRDensity IRNormal sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), const0)
+toIRProbability conf clauses typeEnv (Uniform t) sample = return (IRDensity IRUniform sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), const0)
+toIRProbability conf clauses typeEnv (ReadNN _ name symbol) sample = do
   -- Same code as for calling a top level function
   var <- mkVariable "callNN"
   sym <- toIRGenerate typeEnv symbol
@@ -214,21 +217,21 @@ toIRProbability conf typeEnv (ReadNN _ name symbol) sample = do
     return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
   else
     return (IRTFst (IRVar var), IRTSnd (IRVar var), const0)
-toIRProbability conf typeEnv (Lambda t name subExpr) sample = do
+toIRProbability conf clauses typeEnv (Lambda t name subExpr) sample = do
   let (TArrow paramRType _) = rType t
   case paramRType of
     TArrow (TArrow _ _) _ -> do
       -- Lambda parameter is a function
       let newTypeEnv = (name, (paramRType, True)):typeEnv
-      irTuple <- lift (runWriterT (toIRProbability conf newTypeEnv subExpr sample)) <&> generateLetInBlock conf
+      irTuple <- lift (runWriterT (toIRProbability conf clauses newTypeEnv subExpr sample)) <&> generateLetInBlock conf
       return (IRLambda name irTuple, const0, const0)
     _ -> do
       let newTypeEnv = (name, (paramRType, False)):typeEnv
-      irTuple <- lift (runWriterT (toIRProbability conf newTypeEnv subExpr sample)) <&> generateLetInBlock conf
+      irTuple <- lift (runWriterT (toIRProbability conf clauses newTypeEnv subExpr sample)) <&> generateLetInBlock conf
       return (IRLambda name irTuple, const0, const0)
-toIRProbability conf typeEnv (Apply TypeInfo{rType=rt} l v) sample = do
+toIRProbability conf clauses typeEnv (Apply TypeInfo{rType=rt} l v) sample = do
   vIR <- toIRGenerate typeEnv v
-  (lIR, _, _) <- toIRProbability conf typeEnv l sample -- Dim and BC are irrelevant here. We need to extract these from the return tuple
+  (lIR, _, _) <- toIRProbability conf clauses typeEnv l sample -- Dim and BC are irrelevant here. We need to extract these from the return tuple
   -- The result is not a tuple if the return value is a closure
   case rt of
     TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
@@ -236,19 +239,19 @@ toIRProbability conf typeEnv (Apply TypeInfo{rType=rt} l v) sample = do
            return (IRTFst (IRInvoke (IRApply lIR vIR)), IRTFst (IRTSnd (IRInvoke (IRApply lIR vIR))), IRTSnd (IRTSnd (IRInvoke (IRApply lIR vIR))))
          else
            return (IRTFst (IRInvoke (IRApply lIR vIR)), IRTSnd (IRInvoke (IRApply lIR vIR)), const0)
-toIRProbability conf typeEnv (Cons _ hdExpr tlExpr) sample = do
-  headTuple <- lift (runWriterT (toIRProbabilitySave conf typeEnv hdExpr (IRHead sample))) <&> generateLetInBlock conf
-  tailTuple <- lift (runWriterT (toIRProbabilitySave conf typeEnv tlExpr (IRTail sample))) <&> generateLetInBlock conf
+toIRProbability conf clauses typeEnv (Cons _ hdExpr tlExpr) sample = do
+  headTuple <- lift (runWriterT (toIRProbabilitySave conf clauses typeEnv hdExpr (IRHead sample))) <&> generateLetInBlock conf
+  tailTuple <- lift (runWriterT (toIRProbabilitySave conf clauses typeEnv tlExpr (IRTail sample))) <&> generateLetInBlock conf
   let dim = if countBranches conf then IRTFst . IRTSnd else IRTSnd
   mult <- (IRTFst headTuple, dim headTuple)  `multP` (IRTFst tailTuple, dim tailTuple)
   return (IRIf (IROp OpEq sample (IRConst $ VList EmptyList)) (IRConst $ VFloat 0) (fst mult), IRIf (IROp OpEq sample (IRConst $ VList EmptyList)) (IRConst $ VFloat 0) (snd mult), IRIf (IROp OpEq sample (IRConst $ VList EmptyList)) (IRConst $ VFloat 0) (IROp OpPlus (IRTSnd (IRTSnd headTuple)) (IRTSnd (IRTSnd tailTuple))))
   --return (IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (fst mult), IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (snd mult), IROp OpPlus headBranches tailBranches)
-toIRProbability conf typeEnv (TCons _ t1Expr t2Expr) sample = do
-  (t1P, t1Dim, t1Branches) <- toIRProbabilitySave conf typeEnv t1Expr (IRTFst sample)
-  (t2P, t2Dim, t2Branches) <- toIRProbabilitySave conf typeEnv t2Expr (IRTSnd sample)
+toIRProbability conf clauses typeEnv (TCons _ t1Expr t2Expr) sample = do
+  (t1P, t1Dim, t1Branches) <- toIRProbabilitySave conf clauses typeEnv t1Expr (IRTFst sample)
+  (t2P, t2Dim, t2Branches) <- toIRProbabilitySave conf clauses typeEnv t2Expr (IRTSnd sample)
   mult <- (t1P, t1Dim) `multP` (t2P, t2Dim)
   return (fst mult, snd mult, IROp OpPlus t1Branches t2Branches)
-toIRProbability conf typeEnv (InjF _ name [p0, p1]) sample | isHigherOrder name = do
+toIRProbability conf clauses typeEnv (InjF _ name [p0, p1]) sample | isHigherOrder name = do
   -- FPair of the InjF with unique names
   fPair <- instantiate mkVariable name
   -- Unary InjF has a single inversion
@@ -267,14 +270,16 @@ toIRProbability conf typeEnv (InjF _ name [p0, p1]) sample | isHigherOrder name 
   -- Get the probabilistic inference code for the parameter
   let (Lambda _ fBound fExpr) = f
   newFBound <- mkVariable "x"
-  inverseF <- toIRInverse typeEnv fBound fExpr (IRVar newFBound) <&> IRLambda newFBound
-  tell [(fVar, inverseF)]
-  (paramExpr, paramDim, paramBranches) <- probF conf typeEnv a invExpr
+  --inverseF <- toIRInverse typeEnv fBound fExpr (IRVar newFBound) <&> IRLambda newFBound
+  let inverseF = toInvExpr clauses (chainName $ getTypeInfo f)
+  let inverseLambda = IRLambda (chainName $ getTypeInfo f) inverseF
+  tell [(fVar, inverseLambda)]
+  (paramExpr, paramDim, paramBranches) <- probF conf clauses typeEnv a invExpr
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
   let returnP = IROp OpMult paramExpr (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDerivExpr))
   let appTestExpr e = IRIf appTest e const0
   return (appTestExpr returnP, appTestExpr paramDim, appTestExpr paramBranches)
-toIRProbability conf typeEnv (InjF _ name [param]) sample = do
+toIRProbability conf clauses typeEnv (InjF _ name [param]) sample = do
   -- FPair of the InjF with unique names
   fPair <- instantiate mkVariable name
   -- Unary InjF has a single inversion
@@ -285,12 +290,12 @@ toIRProbability conf typeEnv (InjF _ name [param]) sample = do
   -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
   let probF = if decons then toIRProbabilitySave else toIRProbability
   -- Get the probabilistic inference code for the parameter
-  (paramExpr, paramDim, paramBranches) <- probF conf typeEnv param invExpr
+  (paramExpr, paramDim, paramBranches) <- probF conf clauses typeEnv param invExpr
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
   let returnP = IROp OpMult paramExpr (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDerivExpr))
   let appTestExpr e = IRIf appTest e const0
   return (appTestExpr returnP, appTestExpr paramDim, appTestExpr paramBranches)
-toIRProbability conf typeEnv (InjF TypeInfo {tags=extras} name params) sample
+toIRProbability conf clauses typeEnv (InjF TypeInfo {tags=extras} name params) sample
   | extras `hasAlgorithm` "injF2Left" || extras `hasAlgorithm` "injF2Right" = do
   -- Index of the deterministic and the probabilistic parameter (Left -> 0, Right -> 1)
   let detIdx = if extras `hasAlgorithm` "injF2Left" then 0 else 1
@@ -312,12 +317,12 @@ toIRProbability conf typeEnv (InjF TypeInfo {tags=extras} name params) sample
   -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
   let probF = if decons then toIRProbabilitySave else toIRProbability
   -- Get the probabilistic inference expression of the non-deterministic subexpression
-  (paramExpr, paramDim, paramBranches) <- probF conf typeEnv (params !! probIdx) invExpr
+  (paramExpr, paramDim, paramBranches) <- probF conf clauses typeEnv (params !! probIdx) invExpr
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula if dim > 0
   let returnP = IROp OpMult paramExpr (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDeriv))
   let appTestExpr e = IRIf appTest e const0
   return (appTestExpr returnP, appTestExpr paramDim, appTestExpr paramBranches)
-toIRProbability conf typeEnv (InjF TypeInfo {tags=extras} name [left, right]) sample
+toIRProbability conf clauses typeEnv (InjF TypeInfo {tags=extras} name [left, right]) sample
   | extras `hasAlgorithm` "injF2Enumerable" = do
   -- Get all possible values for subexpressions
   let extrasLeft = tags $ getTypeInfo left
@@ -339,8 +344,8 @@ toIRProbability conf typeEnv (InjF TypeInfo {tags=extras} name [left, right]) sa
   -- We need to unfold the monad stack, because the EnumSum Works like a lambda expression and has a local scope
   irTuple <- lift (runWriterT (do
     -- the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
-    (pLeft, _, _) <- toIRProbability conf typeEnv left (IRVar x2)
-    (pRight, _, _) <- toIRProbability conf typeEnv right (IROp OpSub sample (IRVar x2))
+    (pLeft, _, _) <- toIRProbability conf clauses typeEnv left (IRVar x2)
+    (pRight, _, _) <- toIRProbability conf clauses typeEnv right (IROp OpSub sample (IRVar x2))
     tell [(x3, sample)]
     let returnExpr = case topKThreshold conf of
           Nothing -> IRIf (IRElementOf invExpr (IRConst (fmap failConversion (constructVList enumListR)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
@@ -354,13 +359,13 @@ toIRProbability conf typeEnv (InjF TypeInfo {tags=extras} name [left, right]) sa
   let enumSumExpr = IREnumSum x2 (fmap failConversion (constructVList enumListL)) $ IRTFst irTuple
   let branchCountSum = IREnumSum x2 (fmap failConversion (constructVList enumListL)) $ IRTSnd (IRTSnd irTuple)
   return (irMap (uniqueify [x2, x3] uniquePrefix) enumSumExpr, const0, irMap (uniqueify [x2, x3] uniquePrefix) branchCountSum)
-toIRProbability conf typeEnv (Null _) sample = do
+toIRProbability conf clauses typeEnv (Null _) sample = do
   expr <- indicator (IROp OpEq sample (IRConst $ VList EmptyList))
   return (expr, const0, const0)
-toIRProbability conf typeEnv (Constant _ value) sample = do
+toIRProbability conf clauses typeEnv (Constant _ value) sample = do
   expr <- indicator (IROp OpEq sample (IRConst (fmap failConversion value)))
   return (expr, const0, const0)
-toIRProbability conf typeEnv (Var _ n) sample = do
+toIRProbability conf clauses typeEnv (Var _ n) sample = do
   -- Variable might be a function
   case lookup n typeEnv of
     -- Var is a function
@@ -382,12 +387,12 @@ toIRProbability conf typeEnv (Var _ n) sample = do
       expr <- indicator (IROp OpEq sample (IRVar n))
       return (expr, const0, const0)
     Nothing -> error ("Could not find name in TypeEnv: " ++ n)
-toIRProbability conf typeEnv (ThetaI _ a i) sample = do
+toIRProbability conf clauses typeEnv (ThetaI _ a i) sample = do
   a' <- toIRGenerate typeEnv a
   expr <- indicator (IROp OpEq sample (IRTheta a' i))
   return (expr, const0, const0)
-toIRProbability conf typeEnv (Subtree _ a i) sample = error "Cannot infer prob on subtree expression. Please check your syntax"
-toIRProbability conf typeEnv x sample = error ("found no way to convert to IR: " ++ show x)
+toIRProbability conf clauses typeEnv (Subtree _ a i) sample = error "Cannot infer prob on subtree expression. Please check your syntax"
+toIRProbability conf clauses typeEnv x sample = error ("found no way to convert to IR: " ++ show x)
 
 multP :: (IRExpr, IRExpr) -> (IRExpr, IRExpr) -> CompilerMonad (IRExpr, IRExpr)
 multP (aM, aDim) (bM, bDim) = return (IROp OpMult aM bM, IROp OpPlus aDim bDim)
@@ -559,47 +564,47 @@ packParamsIntoLetinsGen typeEnv (v:vars) (p:params) expr = do
 --Adds an additional check that the bounds are not equal
 --We need this bounds check only once, because no invertible transformation can make the bounds be equal when they were not
 --TODO: Some InjF could lead to CoV, which would make the bounds check at the to wrong
-toIRIntegrateSave :: CompilerConfig -> TypeEnv -> Expr -> IRExpr -> IRExpr -> CompilerMonad CompilationResult
-toIRIntegrateSave conf typeEnv (Lambda t name subExpr) low high = do
+toIRIntegrateSave :: CompilerConfig -> [[HornClause]] -> TypeEnv -> Expr -> IRExpr -> IRExpr -> CompilerMonad CompilationResult
+toIRIntegrateSave conf clauses typeEnv (Lambda t name subExpr) low high = do
   let (TArrow paramRType _) = rType t
   case paramRType of
     TArrow (TArrow _ _) _ -> do
       let newTypeEnv = (name, (paramRType, True)):typeEnv
-      irTuple <- lift (runWriterT (toIRIntegrateSave conf newTypeEnv subExpr low high)) <&> generateLetInBlock conf
+      irTuple <- lift (runWriterT (toIRIntegrateSave conf clauses newTypeEnv subExpr low high)) <&> generateLetInBlock conf
       return (IRLambda name irTuple, const0, const0)
     _ -> do
       let newTypeEnv = (name, (paramRType, False)):typeEnv
-      irTuple <- lift (runWriterT (toIRIntegrateSave conf newTypeEnv subExpr low high)) <&> generateLetInBlock conf
+      irTuple <- lift (runWriterT (toIRIntegrateSave conf clauses newTypeEnv subExpr low high)) <&> generateLetInBlock conf
       return (IRLambda name irTuple, const0, const0)
-toIRIntegrateSave conf typeEnv expr lower higher = do
-  (prob, probDim, probBC) <- toIRProbability conf typeEnv expr lower
-  (integ, integDim, integBC) <- toIRIntegrate conf typeEnv expr lower higher
+toIRIntegrateSave conf clauses typeEnv expr lower higher = do
+  (prob, probDim, probBC) <- toIRProbability conf clauses typeEnv expr lower
+  (integ, integDim, integBC) <- toIRIntegrate conf clauses typeEnv expr lower higher
   let eqCheck = IRIf (IROp OpEq lower higher)
   let anyCheck = IRIf (IROp OpAnd (IRUnaryOp OpIsAny lower) (IRUnaryOp OpIsAny higher))
   return (anyCheck (IRConst $ VFloat 1) (eqCheck prob integ), anyCheck (IRConst $ VFloat 0) (eqCheck probDim integDim), anyCheck (IRConst $ VFloat 0) (eqCheck probBC integBC))
 
 
-toIRIntegrate :: CompilerConfig -> TypeEnv -> Expr -> IRExpr -> IRExpr -> CompilerMonad CompilationResult
-toIRIntegrate conf typeEnv expr@(Uniform _) lower higher = do
-  (density, _, _) <- toIRProbability conf typeEnv expr lower
+toIRIntegrate :: CompilerConfig -> [[HornClause]] -> TypeEnv -> Expr -> IRExpr -> IRExpr -> CompilerMonad CompilationResult
+toIRIntegrate conf clauses typeEnv expr@(Uniform _) lower higher = do
+  (density, _, _) <- toIRProbability conf clauses typeEnv expr lower
   --let expr = IRIf (IROp OpEq lower higher) density (IROp OpSub (IRCumulative IRUniform higher) (IRCumulative IRUniform lower))
   let expr = (IROp OpSub (IRCumulative IRUniform higher) (IRCumulative IRUniform lower))
   return (expr, IRIf (IROp OpEq lower higher) (IRConst $ VFloat 1) const0, const0)
-toIRIntegrate conf typeEnv expr@(Normal _) lower higher = do
-  (density, _, _) <- toIRProbability conf typeEnv expr lower
+toIRIntegrate conf clauses typeEnv expr@(Normal _) lower higher = do
+  (density, _, _) <- toIRProbability conf clauses typeEnv expr lower
   --let expr = IRIf (IROp OpEq lower higher) density (IROp OpSub (IRCumulative IRNormal higher) (IRCumulative IRNormal lower))
   let expr = (IROp OpSub (IRCumulative IRNormal higher) (IRCumulative IRNormal lower))
   return (expr, IRIf (IROp OpEq lower higher) (IRConst $ VFloat 1) const0, const0)
-toIRIntegrate conf typeEnv (TCons _ t1Expr t2Expr) low high = do
-  (t1P, t1Dim,  t1Branches) <- toIRIntegrateSave conf typeEnv t1Expr (IRTFst low) (IRTFst high)
-  (t2P, t2Dim,  t2Branches) <- toIRIntegrateSave conf typeEnv t2Expr (IRTSnd low) (IRTSnd high)
+toIRIntegrate conf clauses typeEnv (TCons _ t1Expr t2Expr) low high = do
+  (t1P, t1Dim,  t1Branches) <- toIRIntegrateSave conf clauses typeEnv t1Expr (IRTFst low) (IRTFst high)
+  (t2P, t2Dim,  t2Branches) <- toIRIntegrateSave conf clauses typeEnv t2Expr (IRTSnd low) (IRTSnd high)
   (productP, productDim) <- (t1P, t1Dim) `multP` (t2P, t2Dim)
   return (productP, productDim, IROp OpPlus t1Branches t2Branches)
-toIRIntegrate conf typeEnv (IfThenElse _ cond left right) low high = do
+toIRIntegrate conf clauses typeEnv (IfThenElse _ cond left right) low high = do
   var_cond_p <- mkVariable "cond"
-  (condExpr, _, condBranches) <- toIRProbability conf typeEnv cond (IRConst (VBool True))
-  (leftExpr, _, leftBranches) <- toIRIntegrate conf typeEnv left low high
-  (rightExpr, _, rightBranches) <- toIRIntegrate conf typeEnv right low high
+  (condExpr, _, condBranches) <- toIRProbability conf clauses typeEnv cond (IRConst (VBool True))
+  (leftExpr, _, leftBranches) <- toIRIntegrate conf clauses typeEnv left low high
+  (rightExpr, _, rightBranches) <- toIRIntegrate conf clauses typeEnv right low high
   let thr = topKThreshold conf
   case thr of
     Just thresh -> do
@@ -619,34 +624,34 @@ toIRIntegrate conf typeEnv (IfThenElse _ cond left right) low high = do
           (IROp OpPlus
             (IROp OpMult (IRVar var_cond_p) leftExpr)
             (IROp OpMult (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var_cond_p) ) rightExpr), const0, IROp OpPlus condBranches (IROp OpPlus leftBranches rightBranches) )
-toIRIntegrate conf typeEnv (Cons _ hdExpr tlExpr) low high = do
-  headTuple <- lift (runWriterT (toIRIntegrateSave conf typeEnv hdExpr (IRHead low) (IRHead high))) <&> generateLetInBlock conf
-  tailTuple <- lift (runWriterT (toIRIntegrateSave conf typeEnv tlExpr (IRTail low) (IRTail high))) <&> generateLetInBlock conf
+toIRIntegrate conf clauses typeEnv (Cons _ hdExpr tlExpr) low high = do
+  headTuple <- lift (runWriterT (toIRIntegrateSave conf clauses typeEnv hdExpr (IRHead low) (IRHead high))) <&> generateLetInBlock conf
+  tailTuple <- lift (runWriterT (toIRIntegrateSave conf clauses typeEnv tlExpr (IRTail low) (IRTail high))) <&> generateLetInBlock conf
   let dim = if countBranches conf then IRTFst . IRTSnd else IRTSnd
   (multP, multDim) <- (IRTFst headTuple, dim headTuple)  `multP` (IRTFst tailTuple, dim tailTuple)
   return (IRIf (IROp OpOr (IROp OpEq low (IRConst $ VList EmptyList)) (IROp OpEq high (IRConst $ VList EmptyList))) (IRConst $ VFloat 0) multP, multDim, IROp OpPlus (IRTSnd (IRTSnd headTuple)) (IRTSnd (IRTSnd tailTuple)))
-toIRIntegrate conf typeEnv (Null _) low high = do
+toIRIntegrate conf clauses typeEnv (Null _) low high = do
   ind <- indicator (IROp OpAnd (IROp OpEq low (IRConst $ VList EmptyList)) (IROp OpEq high (IRConst $ VList EmptyList)))
   return (ind, const0, const0)
-toIRIntegrate conf typeEnv (Constant _ value) low high = do
+toIRIntegrate conf clauses typeEnv (Constant _ value) low high = do
   ind <- indicator (IROp OpAnd (IROp OpLessThan low (IRConst (fmap failConversion value))) (IROp OpGreaterThan high (IRConst (fmap failConversion value)))) --TODO What to do if low and high are equal?
   return (ind, const0, const0)
-toIRIntegrate conf typeEnv (ThetaI _ a i) low high = do
+toIRIntegrate conf clauses typeEnv (ThetaI _ a i) low high = do
   a' <-  toIRGenerate typeEnv a
   let val = IRTheta a' i
   ind <- indicator (IROp OpAnd (IROp OpLessThan low val) (IROp OpGreaterThan high val)) --TODO What to do if low and high are equal?
   return (ind, const0, const0)
-toIRIntegrate conf typeEnv (InjF _ name [param]) low high = do  --TODO Multivariable
+toIRIntegrate conf clauses typeEnv (InjF _ name [param]) low high = do  --TODO Multivariable
   fPair <- instantiate mkVariable name
   let FPair _ [inv] = fPair
   let FDecl {inputVars=[v], body=invExpr, derivatives=[(_, invDerivExpr)]} = inv
   prefix <- mkVariable ""
   let letInBlockLow = IRLetIn v low invExpr
   let letInBlockHigh = IRLetIn v high invExpr
-  (paramExpr, _, paramBranches) <- toIRIntegrate conf typeEnv param letInBlockLow letInBlockHigh
+  (paramExpr, _, paramBranches) <- toIRIntegrate conf clauses typeEnv param letInBlockLow letInBlockHigh
   let returnExpr = IROp OpMult paramExpr (IRUnaryOp OpSign invDerivExpr)
   return (returnExpr, const0, paramBranches)
-toIRIntegrate conf typeEnv (InjF TypeInfo {tags=extras} name params) low high
+toIRIntegrate conf clauses typeEnv (InjF TypeInfo {tags=extras} name params) low high
   | extras `hasAlgorithm` "injF2Left" || extras `hasAlgorithm` "injF2Right" = do
   let detIdx = if extras `hasAlgorithm` "injF2Left" then 0 else 1
   let probIdx = 1 - detIdx  -- Other Variable is prob
@@ -661,30 +666,30 @@ toIRIntegrate conf typeEnv (InjF TypeInfo {tags=extras} name params) low high
   tell [(detVar, leftExpr)]
   let letInBlockLow = (IRLetIn sampleVar low invExpr)
   let letInBlockHigh = (IRLetIn sampleVar high invExpr)
-  (paramExpr, _, paramBranches) <- toIRIntegrate conf typeEnv (params !! probIdx) letInBlockLow letInBlockHigh
+  (paramExpr, _, paramBranches) <- toIRIntegrate conf clauses typeEnv (params !! probIdx) letInBlockLow letInBlockHigh
   let returnExpr = IROp OpMult paramExpr (IRUnaryOp OpSign invDeriv)
   return (returnExpr, const0, paramBranches)
-toIRIntegrate conf typeEnv (Lambda t name subExpr) low high = do
+toIRIntegrate conf clauses typeEnv (Lambda t name subExpr) low high = do
   let (TArrow paramRType _) = rType t
   case paramRType of
     TArrow (TArrow _ _) _ -> do
       let newTypeEnv = (name, (paramRType, True)):typeEnv
-      irTuple <- lift (runWriterT (toIRIntegrate conf newTypeEnv subExpr low high)) <&> generateLetInBlock conf
+      irTuple <- lift (runWriterT (toIRIntegrate conf clauses newTypeEnv subExpr low high)) <&> generateLetInBlock conf
       return (IRLambda name irTuple, const0, const0)
     _ -> do
       let newTypeEnv = (name, (paramRType, False)):typeEnv
-      irTuple <- lift (runWriterT (toIRIntegrate conf newTypeEnv subExpr low high)) <&> generateLetInBlock conf
+      irTuple <- lift (runWriterT (toIRIntegrate conf clauses newTypeEnv subExpr low high)) <&> generateLetInBlock conf
       return (IRLambda name irTuple, const0, const0)
-toIRIntegrate conf typeEnv (Apply TypeInfo{rType=rt} l v) low high = do
+toIRIntegrate conf clauses typeEnv (Apply TypeInfo{rType=rt} l v) low high = do
   vIR <- toIRGenerate typeEnv v
-  (lIR, _, _) <- toIRIntegrate conf typeEnv l low high -- Dim and BC are irrelevant here. We need to extract these from the return tuple
+  (lIR, _, _) <- toIRIntegrate conf clauses typeEnv l low high -- Dim and BC are irrelevant here. We need to extract these from the return tuple
   case rt of
     TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
     _ -> if countBranches conf then
            return (IRTFst (IRInvoke (IRApply lIR vIR)), IRTFst (IRTSnd (IRInvoke (IRApply lIR vIR))), IRTSnd (IRTSnd (IRInvoke (IRApply lIR vIR))))
          else
            return (IRTFst (IRInvoke (IRApply lIR vIR)), IRTSnd (IRInvoke (IRApply lIR vIR)), const0)
-toIRIntegrate conf typeEnv (Var _ n) low high = do
+toIRIntegrate conf clauses typeEnv (Var _ n) low high = do
   -- Variable might be a function
   case lookup n typeEnv of
    -- Var is a function
@@ -706,7 +711,7 @@ toIRIntegrate conf typeEnv (Var _ n) low high = do
     ind <- indicator (IROp OpAnd (IROp OpLessThan low (IRVar n)) (IROp OpGreaterThan high (IRVar n))) --TODO What to do if low and high are equal?
     return (ind, const0, const0)
    Nothing -> error ("Could not find name in TypeEnv: " ++ n)
-toIRIntegrate _ _ x _ _ = error ("found no way to convert to IRIntegrate: " ++ show x)
+toIRIntegrate _ _ _ x _ _ = error ("found no way to convert to IRIntegrate: " ++ show x)
 
 toIRInverse :: TypeEnv -> String -> Expr -> IRExpr -> CompilerMonad IRExpr
 toIRInverse _ var (Var _ x) inv | var == x = return inv

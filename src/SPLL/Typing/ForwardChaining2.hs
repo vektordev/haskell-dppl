@@ -15,7 +15,7 @@ import SPLL.Typing.Typing (setChainName)
 import Data.Foldable
 import Debug.Trace
 
-data ExprInfo = StubInfo ExprStub | InjFInfo String | ConstantInfo Value deriving (Eq, Show)
+data ExprInfo = StubInfo ExprStub | InjFInfo String | LambdaInfo String | ConstantInfo Value deriving (Eq, Show)
 data HornClause = ExprHornClause {premises' :: [ChainName], conclusion :: ChainName, exprInfo :: ExprInfo, inversion :: Int}
                 | ParameterHornClause {conclusion :: ChainName} deriving (Eq, Show)
 
@@ -23,15 +23,16 @@ premises :: HornClause -> [ChainName]
 premises ParameterHornClause {} = []
 premises ExprHornClause {premises'=p}= p
 
-toInvExpr :: [[HornClause]] -> [ChainName] -> ChainName -> IRExpr
-toInvExpr clauseSet knownSubCNs toInvertCN = irExpr
+toInvExpr :: [[HornClause]] -> ChainName -> IRExpr
+toInvExpr clauseSet startCN = irExpr
   where
     -- Add a clause without preconditions for parameters as a starting point
-    paramClauses = map (\cn -> [ParameterHornClause cn]) knownSubCNs
-    augmentedClauseSet = clauseSet ++ paramClauses
+    toInvCN = findBoundVariable clauseSet startCN
+    paramClause = ParameterHornClause startCN
+    augmentedClauseSet = [paramClause]:clauseSet
     requiredClauses = solveHCSet augmentedClauseSet
-    sortedClauses = traceShowId $ topologicalSort requiredClauses
-    relevantSortedClauses = traceShowId $ cutList sortedClauses (findConcludingHornClause sortedClauses toInvertCN)
+    sortedClauses = topologicalSort requiredClauses
+    relevantSortedClauses = cutList sortedClauses (findConcludingHornClause sortedClauses toInvCN)
     irExpr = toLetInBlock relevantSortedClauses
 
 toLetInBlock :: [HornClause] -> IRExpr
@@ -52,6 +53,8 @@ hornClauseToIRExpr clause =
       let correctInv = invInjF !! (inv - 1)
       let renamedF = foldr (\(old, new) decl -> renameDecl old new decl) correctInv (zip (inputVars correctInv) preVars)
       body renamedF
+    ExprHornClause [preVar] _ (LambdaInfo _) 0 ->
+      IRVar preVar
     ParameterHornClause conc -> IRVar conc
     _ -> error $ "Cannot convert clause to IRExpr: " ++ show clause
 
@@ -60,6 +63,29 @@ findConcludingHornClause hcs cn =
   case filter ((== cn) . conclusion) hcs of
     [] -> error $ "Found no horn clause concluding to " ++ cn
     res -> head res
+
+-- Finds the bound variable of the lambda the parameter ChainName is refferencing
+findBoundVariable :: [[HornClause]] -> ChainName -> ChainName
+findBoundVariable clauses startName = fromJust $ findBoundVariable' forwardClauses startName
+  where
+    forwardClauses = concatMap (filter ((== 0) . inversion)) clauses
+
+findBoundVariable' :: [HornClause] -> ChainName -> Maybe ChainName
+findBoundVariable' clauses name =
+  case currClauses of
+    (ExprHornClause _ _ (LambdaInfo n) _):_ -> Just n
+    _ -> firstJusts $ map (findBoundVariable' (clauses \\ headIfExists currClauses) . conclusion) nextClauses
+
+  where
+    nextClauses = filter (elem name . premises) clauses
+    currClauses = filter ((== name) . conclusion) clauses
+    firstJusts ((Just x):xs) = Just x
+    firstJusts (Nothing:xs) = firstJusts xs
+    firstJusts [] = Nothing
+    headIfExists (a:_) = [a]
+    headIfExists [] = []
+
+
 {-
 findChainNameInProg :: ChainName -> Program -> Expr
 findChainNameInProg cn Program{functions=fs} = 
@@ -83,9 +109,9 @@ exprToHornClauses e = singleExprToHornClause e:concatMap exprToHornClauses (getS
 singleExprToHornClause :: Expr -> [HornClause]
 singleExprToHornClause e = case e of
   Constant _ v -> [ExprHornClause [] (getChainName e) (ConstantInfo v) 0]
-  Uniform _ -> []
-  Normal _ -> []
+  Lambda _ n body -> [ExprHornClause [getChainName e] (getChainName body) (LambdaInfo n) 0]
   InjF {} -> injFtoHornClause e
+  _ -> []
   _ -> error $ "Forward chaining currently does not support " ++ show (toStub e)
 
 injFtoHornClause :: Expr -> [HornClause]
@@ -112,7 +138,9 @@ getInputChainNames e = map (chainName . getTypeInfo) (getSubExprs e)
 annotateProg :: Program -> Program
 annotateProg p@Program {functions=fs} = p{functions=annotFs}
   -- Map annotateExpr on all functions. The code is ugly because of monad shenanigans
-  where annotFs = runSupplyVars (mapM (\(n, f) -> annotateExpr f <&> \x -> (n, x)) fs)  -- FIXME set correct cain names for top level exprs
+  where
+    annotFs = runSupplyVars (mapM (\(n, f) -> annotateExpr f <&> \x -> (n, x)) fs)  -- FIXME set correct cain names for top level exprs
+    runSupplyVars f = runSupply f (+1) 0
 
 annotateExpr :: Expr -> Supply Int Expr
 annotateExpr e = tMapM (\ex -> do
@@ -120,11 +148,6 @@ annotateExpr e = tMapM (\ex -> do
     Var t n -> return $ setChainName t n
     _ -> demand <&> ("ast" ++) . show <&> setChainName (getTypeInfo ex)
   ) e
-
-
-
-runSupplyVars :: Supply Int a -> a
-runSupplyVars f = runSupply f (+1) 0
 
 solveHCSet :: [[HornClause]] -> [HornClause]
 solveHCSet hcs = snd (solveHCSet' hcs [])
@@ -143,7 +166,6 @@ findFulfilledClause hcs fulfilled = listToMaybe fulfilledClauses
     fulfilledClauses = filter (all (`elem` detVars) . premises) (concat hcs)
 
 topologicalSort :: (PartialOrd a, Eq a, Show a) => [a] -> [a]
-topologicalSort clauses | traceShow clauses False = undefined
 topologicalSort [] = []
 topologicalSort clauses =
   let maxC = minima clauses in
