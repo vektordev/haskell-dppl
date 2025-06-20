@@ -16,11 +16,9 @@ import Control.Monad.Writer.Lazy
 import Control.Monad.Reader
 import Data.Functor.Identity
 import Data.Number.Erf (erf)
-import PredefinedFunctions (FDecl(applicability))
 import SPLL.AutoNeural
 import Data.Functor
-import SPLL.Typing.ForwardChaining2 (toInvExpr)
-import SPLL.Typing.ForwardChaining2
+import SPLL.Typing.ForwardChaining
 
 -- SupplyT needs to be a transformer, because Supply does not implement Functor correctly
 type CompilerMonad a = WriterT [(String, IRExpr)] (SupplyT Int Identity) a

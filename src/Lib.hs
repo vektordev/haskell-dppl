@@ -53,7 +53,7 @@ import SPLL.Typing.ForwardChaining
 import IRInterpreter
 import PrettyPrint
 import Data.Bifunctor (second)
-import SPLL.Typing.ForwardChaining2
+import SPLL.Typing.ForwardChaining
 {-variableLengthS2 :: Program  () Double
 variableLengthS2 = Program [("b", IfThenElse ()
                           (GreaterThan () (Uniform ()) (ThetaI () 0))

@@ -6,11 +6,9 @@ module SPLL.Typing.Typing (
   TypeInfo(..),
   ChainName,
   Tag(..),
-  CType(..),
   makeTypeInfo,
   setRType,
   setPType,
-  setCType,
   setWitnessedVars,
   setChainName,
   setTags,
@@ -37,12 +35,6 @@ setRType t rt = t {rType = rt}
 
 setPType :: TypeInfo -> PType -> TypeInfo
 setPType t pt = t {pType = pt}
-
-setCType :: TypeInfo -> CType -> TypeInfo
-setCType t ct = t {cType = ct}
-
-setDerivingHornClause :: TypeInfo -> HornClause -> TypeInfo
-setDerivingHornClause t dhc = t {derivingHornClause = Just dhc}
 
 setWitnessedVars :: TypeInfo -> WitnessedVars -> TypeInfo
 setWitnessedVars t wit = t {witnessedVars = wit}

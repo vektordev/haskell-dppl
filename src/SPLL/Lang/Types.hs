@@ -19,27 +19,6 @@ import Data.Maybe
 
 type ChainName = String
 
--- (Set of Preconditions with CType, set of Inferable variables with attached CType, Expression this HornClause originates from with its inversion number
-data ExprType = Stub ExprStub | AnnotStub ExprStub String | AnnotValueStub ExprStub (GenericValue Expr) deriving (Show, Eq)
-data HornClause = HornClause [(ChainName, CType)] [(ChainName, CType)] (ChainName, ExprType, Int) deriving (Show, Eq)
-
-data CType = CDeterministic
-             | CInferDeterministic
-             | CConstrainedTo Double Double
-             | CBottom
-             | CNotSetYet
-             deriving (Show, Eq)
-
-instance Ord CType where
-  compare x y = compare (rank x) (rank y)
-    where
-      rank CDeterministic = 10
-      rank CInferDeterministic = 9
-      rank (CConstrainedTo _ _) = 5
-      rank CBottom = 1
-      rank CNotSetYet = -1
-
-
 data Expr =
               -- Flow Control
                 IfThenElse TypeInfo Expr Expr Expr
@@ -98,8 +77,6 @@ data ExprStub = StubIfThenElse
 data TypeInfo = TypeInfo
   { rType :: RType
   , pType :: PType
-  , cType :: CType
-  , derivingHornClause :: Maybe HornClause
   , witnessedVars :: WitnessedVars
   , chainName :: ChainName
   , tags :: [Tag]} deriving (Show, Eq)
@@ -109,8 +86,6 @@ makeTypeInfo :: TypeInfo
 makeTypeInfo = TypeInfo
     { rType = SPLL.Typing.RType.NotSetYet
     , pType = SPLL.Typing.PType.NotSetYet
-    , cType = CNotSetYet
-    , derivingHornClause = Nothing
     , witnessedVars = empty
     , chainName = ""
     , tags = []}
@@ -227,7 +202,3 @@ instance Eq InferenceRule where
 
 instance Ord InferenceRule where
   a1 `compare` a2 = algName a1 `compare` algName a2
-
-instance PartialOrd HornClause where
-  -- They B depends on A
-  HornClause pre1 conc1 _ <= HornClause pre2 conc2 _ = any (\(cn, ct) -> isJust (lookup cn conc1) && fromJust (lookup cn conc1) >= ct) pre2

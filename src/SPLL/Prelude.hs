@@ -11,7 +11,7 @@ import Control.Monad.Random (Rand, RandomGen)
 import SPLL.IRCompiler
 import Debug.Trace
 import Data.Either
-import SPLL.Typing.ForwardChaining2 (annotateProg)
+import SPLL.Typing.ForwardChaining (annotateProg)
 
 -- Flow control
 ifThenElse :: Expr -> Expr -> Expr -> Expr

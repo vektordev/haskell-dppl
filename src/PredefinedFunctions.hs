@@ -1,6 +1,5 @@
 module PredefinedFunctions (
 globalFenv,
-getHornClause,
 FPair(..),
 FDecl(..),
 FEnv,
@@ -188,25 +187,6 @@ renameDecl old new FDecl {contract=sig, inputVars=inVars, outputVars=outVars, bo
     ren = renameAll old new -- A function that renames old to new
     renS s = if s == old then new else s  -- A function that replaces old string with new strings
 
-getHornClause :: Expr -> [HornClause]
-getHornClause e = case e of
-  InjF t name params -> (constructHornClause subst eCN name eFwd): map (constructHornClause subst eCN name) eInv
-    where
-      subst = (outV, eCN):zip inV (getInputChainNames e)
-      eCN = chainName $ getTypeInfo e
-      FDecl {inputVars = inV, outputVars = [outV]} = eFwd
-      Just (FPair eFwd eInv) = lookup name globalFenv
-  _ -> error "Cannot get horn clause of non-predefined function"
-
-constructHornClause :: [(String, ChainName)] -> ChainName -> String -> FDecl -> HornClause
-constructHornClause subst cn name decl = HornClause (map lookUpSubstAddDet inV) (map lookUpSubstAddDet outV) (cn, AnnotStub StubInjF name, 0) --FIXME correct inversion parameters 
-  where
-    FDecl {inputVars = inV, outputVars = outV} = decl
-    lookupSubst v = fromJust (lookup v subst)
-    lookUpSubstAddDet v = (lookupSubst v, CInferDeterministic)
-
-getInputChainNames :: Expr -> [ChainName]
-getInputChainNames e = map (chainName . getTypeInfo) (getSubExprs e)
 
 isHigherOrder :: String -> Bool
 isHigherOrder name =
