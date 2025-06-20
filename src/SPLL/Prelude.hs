@@ -12,6 +12,9 @@ import SPLL.IRCompiler
 import Debug.Trace
 import Data.Either
 import SPLL.Typing.ForwardChaining (annotateProg)
+import Text.PrettyPrint.Annotated.HughesPJClass
+import PrettyPrint (pPrintProg, pPrintIREnv)
+import Debug.Pretty.Simple
 
 -- Flow control
 ifThenElse :: Expr -> Expr -> Expr -> Expr
@@ -168,11 +171,30 @@ fix = "f" #->#
 compile :: CompilerConfig -> Program -> IREnv
 compile _ p | isLeft (validateProgram p) = error $ fromLeft "" (validateProgram p)
 compile conf p = do
+  printIfVerbose conf "=== Parsed Program ==="
+  pPrintIfMoreVerbose conf p
+  printIfVerbose conf (pPrintProg p)
+
   let preAnnotated = annotateEnumsProg p
+  printIfMoreVerbose conf "\n=== Annotated Program (1) ==="
+  pPrintIfMoreVerbose conf preAnnotated
+
   let forwardChained = annotateProg preAnnotated
+  printIfMoreVerbose conf "\n=== Chain named Program ==="
+  pPrintIfMoreVerbose conf preAnnotated
+
   let typed = addTypeInfo forwardChained
+  printIfMoreVerbose conf "\n=== Typed Program ==="
+  pPrintIfMoreVerbose conf typed
   let annotated = annotateAlgsProg typed
-  envToIR conf annotated
+  printIfMoreVerbose conf "\n=== Annotated Program (2) ==="
+  pPrintIfMoreVerbose conf annotated
+
+  let compiled = envToIR conf annotated
+  printIfVerbose conf "\n=== Compiled Program ==="
+  pPrintIfMoreVerbose conf compiled
+  printIfVerbose conf (pPrintIREnv compiled)
+  compiled
 
 runGen :: (RandomGen g) => CompilerConfig -> Program -> [IRValue] -> Rand g IRValue
 runGen _ p _ | isLeft (validateProgram p) = error $ fromLeft "" (validateProgram p)
@@ -204,5 +226,18 @@ runInteg conf p args low high = do
     Right v -> v
     Left err -> error err
 
+printIfVerbose :: (Monad m) => CompilerConfig -> String -> m ()
+printIfVerbose CompilerConfig {verbose=v} s | v >= 1 = trace s (return ())
+printIfVerbose _ _ = return ()
 
+printIfMoreVerbose :: (Monad m) => CompilerConfig -> String -> m ()
+printIfMoreVerbose CompilerConfig {verbose=v} s | v >= 2 = trace s (return ())
+printIfMoreVerbose _ _ = return ()
 
+pPrintIfVerbose :: (Monad m, Show a) => CompilerConfig -> a -> m ()
+pPrintIfVerbose CompilerConfig {verbose=v} s | v >= 1 = pTraceShow s (return ())
+pPrintIfVerbose _ _ = return ()
+
+pPrintIfMoreVerbose :: (Monad m, Show a) => CompilerConfig -> a -> m ()
+pPrintIfMoreVerbose CompilerConfig {verbose=v} s | v >= 2 = pTraceShow s (return ())
+pPrintIfMoreVerbose _ _ = return ()

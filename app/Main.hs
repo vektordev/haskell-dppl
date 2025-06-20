@@ -1,6 +1,5 @@
 module Main where
 
-import Lib
 import Options.Applicative
 import SPLL.Lang.Lang (Program)
 import SPLL.Examples
@@ -12,10 +11,13 @@ import System.Exit (exitFailure)
 import Text.Megaparsec.Error (errorBundlePretty)
 import SPLL.Lang.Types (Value(..), GenericValue (..))
 import Text.Read
-import SPLL.Prelude (runProb, runInteg, runGen)
+import SPLL.Prelude (runProb, runInteg, runGen, compile)
 import Control.Monad.Random (randomIO, evalRandIO)
 import SPLL.IntermediateRepresentation (CompilerConfig(..))
 import Data.Foldable (asum)
+import qualified SPLL.CodeGenJulia
+import qualified SPLL.CodeGenPyTorch
+import Data.List (intercalate)
 
 data GlobalOpts = GlobalOpts {
   inputFile :: String,
@@ -40,6 +42,8 @@ data CommandOpts =
     low :: IRValue,
     high :: IRValue
   } deriving Show
+
+data Language = Python | Julia deriving Show
 
 readLanguage :: ReadM Language
 readLanguage = str >>= \s -> case map toLower s of
@@ -177,6 +181,13 @@ parseProgram path = do
       putStrLn (errorBundlePretty err)
       exitFailure
     Right prog -> return prog
+
+codeGenToLang :: Language -> Bool -> CompilerConfig -> Program -> IO String
+codeGenToLang lang trunc conf prog = do
+  let compiled = compile conf prog
+  case lang of
+    Python -> return $ intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions (not trunc) compiled)
+    Julia -> return $ intercalate "\n" (SPLL.CodeGenJulia.generateFunctions compiled)
 
 writeOutputFile :: String -> String -> IO()
 writeOutputFile = writeFile
