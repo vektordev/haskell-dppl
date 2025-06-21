@@ -15,11 +15,24 @@ import Data.Foldable
 import Debug.Trace
 
 
+-- Information on what type of expression a HornClause originated from
+data ExprInfo = StubInfo ExprStub   -- Generic Expression without additional Info
+              | InjFInfo String     -- InjF with the name of the InjF
+              | LambdaInfo String   -- Lambda with the name of the bound variable
+              | ConstantInfo Value  -- Contant with the value
+              deriving (Eq, Show)
 
-data ExprInfo = StubInfo ExprStub | InjFInfo String | LambdaInfo String | ConstantInfo Value deriving (Eq, Show)
+-- Horn clauses state: When all premises are known, we can derive the conclusion. Expression info holds information about the original expression.
+-- inversion represents which direction the HornClause represents. E.g.
+-- Original: a = b + c
+-- Inversion 0: b, c -> a
+-- Inversion 1: a, c -> b
+-- Inversion 2: a, b -> c
+-- Parameter HornClauses define a ChainName to be known. This could represent the sample passed to the top-level expression, or the parameter passed to an inverse expression
 data HornClause = ExprHornClause {premises' :: [ChainName], conclusion :: ChainName, exprInfo :: ExprInfo, inversion :: Int}
                 | ParameterHornClause {conclusion :: ChainName} deriving (Eq, Show)
 
+-- Wraps the premises field, because ParameterHornClauses have an empty set of premises by definition
 premises :: HornClause -> [ChainName]
 premises ParameterHornClause {} = []
 premises ExprHornClause {premises'=p}= p
@@ -27,6 +40,8 @@ premises ExprHornClause {premises'=p}= p
 getChainName :: Expr -> ChainName
 getChainName = chainName . getTypeInfo
 
+-- Takes multiple groups of HornClauses and a point in the AST which should be inverted.
+-- The function then searches for a Lambda statement and inverses toward the lambda
 toInvExpr :: [[HornClause]] -> ChainName -> IRExpr
 toInvExpr clauseSet startCN = irExpr
   where
