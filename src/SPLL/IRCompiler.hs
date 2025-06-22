@@ -227,7 +227,7 @@ toIRProbability conf clauses typeEnv (Lambda t name subExpr) sample = do
       let newTypeEnv = (name, (paramRType, False)):typeEnv
       irTuple <- lift (runWriterT (toIRProbability conf clauses newTypeEnv subExpr sample)) <&> generateLetInBlock conf
       return (IRLambda name irTuple, const0, const0)
-toIRProbability conf clauses typeEnv (Apply TypeInfo{rType=rt} l v) sample = do
+toIRProbability conf clauses typeEnv (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo v) == Deterministic = do
   vIR <- toIRGenerate typeEnv v
   (lIR, _, _) <- toIRProbability conf clauses typeEnv l sample -- Dim and BC are irrelevant here. We need to extract these from the return tuple
   -- The result is not a tuple if the return value is a closure
@@ -237,6 +237,11 @@ toIRProbability conf clauses typeEnv (Apply TypeInfo{rType=rt} l v) sample = do
            return (IRTFst (IRInvoke (IRApply lIR vIR)), IRTFst (IRTSnd (IRInvoke (IRApply lIR vIR))), IRTSnd (IRTSnd (IRInvoke (IRApply lIR vIR))))
          else
            return (IRTFst (IRInvoke (IRApply lIR vIR)), IRTSnd (IRInvoke (IRApply lIR vIR)), const0)
+toIRProbability conf clauses typeEnv (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo v) == Prob || pType (getTypeInfo v) == Integrate = do
+  let lChainName = chainName (getTypeInfo l)
+  let lInv = IRLambda lChainName (toInvExpr clauses lChainName)
+  let appliedSample = IRInvoke (IRApply lInv sample)
+  toIRProbability conf clauses typeEnv v appliedSample
 toIRProbability conf clauses typeEnv (Cons _ hdExpr tlExpr) sample = do
   headTuple <- lift (runWriterT (toIRProbabilitySave conf clauses typeEnv hdExpr (IRHead sample))) <&> generateLetInBlock conf
   tailTuple <- lift (runWriterT (toIRProbabilitySave conf clauses typeEnv tlExpr (IRTail sample))) <&> generateLetInBlock conf
