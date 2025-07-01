@@ -52,15 +52,15 @@ toInvExpr clauseSet startCN = irExpr
     requiredClauses = solveHCSet augmentedClauseSet
     sortedClauses = topologicalSort requiredClauses
     relevantSortedClauses = cutList sortedClauses (findConcludingHornClause sortedClauses toInvCN)
-    irExpr = toLetInBlock relevantSortedClauses
+    irExpr = toLetInBlock clauseSet relevantSortedClauses
 
-toLetInBlock :: [HornClause] -> IRExpr
-toLetInBlock [c] = hornClauseToIRExpr c
-toLetInBlock (c:cs) = IRLetIn (conclusion c) (hornClauseToIRExpr c) (toLetInBlock cs)
-toLetInBlock [] = error "Cannot convert empty clause set to LetIn block"
+toLetInBlock :: [[HornClause]] -> [HornClause] -> IRExpr
+toLetInBlock clauses [c] = hornClauseToIRExpr clauses c
+toLetInBlock clauses (c:cs) = IRLetIn (conclusion c) (hornClauseToIRExpr clauses c) (toLetInBlock clauses cs)
+toLetInBlock clauses [] = error "Cannot convert empty clause set to LetIn block"
 
-hornClauseToIRExpr :: HornClause -> IRExpr
-hornClauseToIRExpr clause =
+hornClauseToIRExpr :: [[HornClause]] -> HornClause -> IRExpr
+hornClauseToIRExpr clauses clause =
   case clause of
     ExprHornClause _ _ (ConstantInfo v) _ -> IRConst (valueToIR v)
     ExprHornClause preVars _ (InjFInfo name) inv | inv == 0 ->
@@ -72,8 +72,11 @@ hornClauseToIRExpr clause =
       let correctInv = invInjF !! (inv - 1)
       let renamedF = foldr (\(old, new) decl -> renameDecl old new decl) correctInv (zip (inputVars correctInv) preVars)
       body renamedF
-    ExprHornClause [preVar] _ (LambdaInfo _) 0 ->
+    ExprHornClause [preVar] _ (LambdaInfo _) 1 ->
       IRVar preVar
+    ExprHornClause [preExpr, preBound] conc (StubInfo StubApply) 0 -> do
+      let bound = findBoundVariable clauses preExpr
+      IRLetIn bound (IRVar preBound) (IRVar conc)
     ParameterHornClause conc -> IRVar conc
     _ -> error $ "Cannot convert clause to IRExpr: " ++ show clause
 
@@ -85,16 +88,22 @@ findConcludingHornClause hcs cn =
 
 -- Finds the bound variable of the lambda the parameter ChainName is refferencing
 findBoundVariable :: [[HornClause]] -> ChainName -> ChainName
-findBoundVariable clauses startName = fromJust $ findBoundVariable' forwardClauses startName
+findBoundVariable clauses startName = fromJust $ findBoundVariable' forwardClauses 0 startName
   where
     forwardClauses = concatMap (filter ((== 0) . inversion)) clauses
 
-findBoundVariable' :: [HornClause] -> ChainName -> Maybe ChainName
-findBoundVariable' clauses name =
-  case currClauses of
-    (ExprHornClause _ _ (LambdaInfo n) _):_ -> Just n
-    _ -> firstJusts $ map (findBoundVariable' (clauses \\ headIfExists currClauses) . conclusion) nextClauses
-
+findBoundVariable' :: [HornClause] -> Int -> ChainName -> Maybe ChainName
+--findBoundVariable' clauses applies name | trace (show name++ "|" ++ show applies ++ "|" ++ show clauses) False = undefined
+findBoundVariable' clauses applies name =
+  if applies == 0 then
+    case currClauses of
+      (ExprHornClause _ _ (LambdaInfo n) _):_ -> Just n
+      _ -> firstJusts $ map (findBoundVariable' (clauses \\ headIfExists currClauses) applies . conclusion) nextClauses
+  else
+    case currClauses of
+      (ExprHornClause _ conc (LambdaInfo n) _):cs -> findBoundVariable' cs (applies - 1) conc
+      (ExprHornClause _ conc (StubInfo StubApply) _):cs -> findBoundVariable' cs (applies + 1) conc
+      _ -> firstJusts $ map (findBoundVariable' (clauses \\ headIfExists currClauses) applies . conclusion) nextClauses
   where
     nextClauses = filter (elem name . premises) clauses
     currClauses = filter ((== name) . conclusion) clauses
@@ -128,7 +137,10 @@ exprToHornClauses e = singleExprToHornClause e:concatMap exprToHornClauses (getS
 singleExprToHornClause :: Expr -> [HornClause]
 singleExprToHornClause e = case e of
   Constant _ v -> [ExprHornClause [] (getChainName e) (ConstantInfo v) 0]
-  Lambda _ n body -> [ExprHornClause [getChainName e] (getChainName body) (LambdaInfo n) 0]
+  Lambda _ n body -> [ExprHornClause [getChainName e] (getChainName body) (LambdaInfo n) 1,
+                      ExprHornClause [getChainName body] (getChainName e) (LambdaInfo n) 0]
+  Apply _ l v -> [ExprHornClause [getChainName e, getChainName v] (getChainName l) (StubInfo StubApply) 1,
+                  ExprHornClause [getChainName l, getChainName v] (getChainName e) (StubInfo StubApply) 0]
   InjF {} -> injFtoHornClause e
   _ -> []
   _ -> error $ "Forward chaining currently does not support " ++ show (toStub e)
