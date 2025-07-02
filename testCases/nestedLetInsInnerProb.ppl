@@ -1,0 +1,1 @@
+main = let a = 1.0 in let b = Uniform in a + b

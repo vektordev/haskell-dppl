@@ -43,12 +43,13 @@ getChainName = chainName . getTypeInfo
 -- Takes multiple groups of HornClauses and a point in the AST which should be inverted.
 -- The function then searches for a Lambda statement and inverses toward the lambda
 toInvExpr :: [[HornClause]] -> ChainName -> IRExpr
+--toInvExpr clauses startCN | traceShow startCN False = undefined
 toInvExpr clauseSet startCN = irExpr
   where
     -- Add a clause without preconditions for parameters as a starting point
     toInvCN = findBoundVariable clauseSet startCN
     paramClause = ParameterHornClause startCN
-    augmentedClauseSet = [paramClause]:clauseSet
+    augmentedClauseSet =[paramClause]:clauseSet
     requiredClauses = solveHCSet augmentedClauseSet
     sortedClauses = topologicalSort requiredClauses
     relevantSortedClauses = cutList sortedClauses (findConcludingHornClause sortedClauses toInvCN)
@@ -77,10 +78,13 @@ hornClauseToIRExpr clauses clause =
     ExprHornClause [preExpr, preBound] conc (StubInfo StubApply) 0 -> do
       let bound = findBoundVariable clauses preExpr
       IRLetIn bound (IRVar preBound) (IRVar conc)
+    ExprHornClause [applied] _ (StubInfo StubApply) (-1) -> do
+      IRVar applied
     ParameterHornClause conc -> IRVar conc
     _ -> error $ "Cannot convert clause to IRExpr: " ++ show clause
 
 findConcludingHornClause :: [HornClause] -> ChainName -> HornClause
+--findConcludingHornClause hcs cn | trace ("Find " ++ cn ++ "in " ++ show hcs) False = undefined
 findConcludingHornClause hcs cn =
   case filter ((== cn) . conclusion) hcs of
     [] -> error $ "Found no horn clause concluding to " ++ cn
@@ -129,7 +133,8 @@ findChainNameInExpr cn expr = concatMap (findChainNameInExpr cn) (getSubExprs ex
 -}
 
 progToHornClauses :: Program -> [[HornClause]]
-progToHornClauses Program{functions=fs}= concatMap (exprToHornClauses . snd) fs
+progToHornClauses Program{functions=fs}= map (augmentApplyClauseSet initialRun) initialRun
+  where initialRun = concatMap (exprToHornClauses . snd) fs
 
 exprToHornClauses :: Expr -> [[HornClause]]
 exprToHornClauses e = singleExprToHornClause e:concatMap exprToHornClauses (getSubExprs e)
@@ -137,10 +142,10 @@ exprToHornClauses e = singleExprToHornClause e:concatMap exprToHornClauses (getS
 singleExprToHornClause :: Expr -> [HornClause]
 singleExprToHornClause e = case e of
   Constant _ v -> [ExprHornClause [] (getChainName e) (ConstantInfo v) 0]
-  Lambda _ n body -> [ExprHornClause [getChainName e] (getChainName body) (LambdaInfo n) 1,
-                      ExprHornClause [getChainName body] (getChainName e) (LambdaInfo n) 0]
-  Apply _ l v -> [ExprHornClause [getChainName e, getChainName v] (getChainName l) (StubInfo StubApply) 1,
-                  ExprHornClause [getChainName l, getChainName v] (getChainName e) (StubInfo StubApply) 0]
+  Lambda _ n body -> [ExprHornClause [getChainName body] (getChainName e) (LambdaInfo n) 0,
+                      ExprHornClause [getChainName e] (getChainName body) (LambdaInfo n) 1]
+  Apply _ l v -> [ExprHornClause [getChainName l, getChainName v] (getChainName e) (StubInfo StubApply) 0,
+                  ExprHornClause [getChainName e, getChainName v] (getChainName l) (StubInfo StubApply) 1]
   InjF {} -> injFtoHornClause e
   _ -> []
   _ -> error $ "Forward chaining currently does not support " ++ show (toStub e)
@@ -156,11 +161,17 @@ injFtoHornClause e = case e of
   _ -> error "Cannot get horn clause of non-predefined function"
 
 constructInjFHornClause :: [(String, ChainName)] -> ChainName -> String -> FDecl -> Int -> HornClause
-constructInjFHornClause subst cn name decl inv= ExprHornClause (map lookupSubst inV) (lookupSubst outV) (InjFInfo name) inv --FIXME correct inversion parameters 
+constructInjFHornClause subst cn name decl inv= ExprHornClause (map lookupSubst inV) (lookupSubst outV) (InjFInfo name) inv
   where
     FDecl {inputVars = inV, outputVars = [outV]} = decl
     lookupSubst v = fromJust (lookup v subst)
     lookUpSubstAddDet v = ()
+
+-- Application implies that the bound variable of the lambda expression is equal to the applied expression.
+-- This step requires knowledge of the program structure and can therefor only be done after the clause set is constructed
+augmentApplyClauseSet :: [[HornClause]] -> [HornClause] -> [HornClause]
+augmentApplyClauseSet clauses set@((ExprHornClause [l, v] cn (StubInfo StubApply) 0):_) = ExprHornClause [v] (findBoundVariable clauses l) (StubInfo StubApply) (-1):set
+augmentApplyClauseSet _ x = x 
 
 getInputChainNames :: Expr -> [ChainName]
 getInputChainNames e = map (chainName . getTypeInfo) (getSubExprs e)
