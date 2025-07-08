@@ -13,6 +13,7 @@ import Data.Maybe
 import SPLL.Typing.Typing (setChainName)
 import Data.Foldable
 import Debug.Trace
+import GHC.Stack (HasCallStack)
 
 
 -- Information on what type of expression a HornClause originated from
@@ -20,6 +21,7 @@ data ExprInfo = StubInfo ExprStub   -- Generic Expression without additional Inf
               | InjFInfo String     -- InjF with the name of the InjF
               | LambdaInfo String   -- Lambda with the name of the bound variable
               | ConstantInfo Value  -- Contant with the value
+              | AppliedInfo         -- Does not directly correlate to an expression. Via application a value is assigned to a bound variable
               deriving (Eq, Show)
 
 -- Horn clauses state: When all premises are known, we can derive the conclusion. Expression info holds information about the original expression.
@@ -103,7 +105,7 @@ hornClauseToIRExpr clauses clause =
       IRVar preExpr
     -- Outside of the normal scope of inversions, therefor a negative inversion number
     -- If a value was applied to a bound variable, that bound variable is the applied value
-    ExprHornClause [applied] _ (StubInfo StubApply) (-1) -> do
+    ExprHornClause [applied] _ AppliedInfo _ -> do
       IRVar applied
     -- Expect parameters to be known
     ParameterHornClause conc -> IRVar conc
@@ -119,16 +121,19 @@ findConcludingHornClause hcs cn =
 
 -- Finds the bound variable of the lambda the parameter ChainName is referencing
 -- Note that this needs to skip over already applied lambdas
-findBoundVariable :: [[HornClause]] -> ChainName -> ChainName
+findBoundVariable :: HasCallStack => [[HornClause]] -> ChainName -> ChainName
 findBoundVariable clauses startName = fromJust $ findBoundVariable' forwardClauses 0 startName
   where
     -- Only forward clauses (inversion == 0) are relevant for this, because we dont want cycles in our graph of horn clauses
-    forwardClauses = concatMap (filter ((== 0) . inversion)) clauses
+    -- Applied clauses are also relevant, because the lambda might be a variable applied elsewhere
+    forwardClauses = concatMap (filter (\c -> inversion c == 0 || isAppliedInfo (exprInfo c))) clauses
+    isAppliedInfo AppliedInfo = True
+    isAppliedInfo _ = False
 
 -- Finds the lambda a parameter ChainName is referencing
 -- This also needs to skip over applied lambdas. Because applications must happen before a lambda, 
 -- keep track of the number of applications seen on the way and disregard that many lambdas
-findBoundVariable' :: [HornClause] -> Int -> ChainName -> Maybe ChainName
+findBoundVariable' :: HasCallStack => [HornClause] -> Int -> ChainName -> Maybe ChainName
 --findBoundVariable' clauses applies name | trace (show name++ "|" ++ show applies ++ "|" ++ show clauses) False = undefined
 findBoundVariable' clauses applies name =
   -- The next lambda is what we are looking for
@@ -138,8 +143,10 @@ findBoundVariable' clauses applies name =
       (ExprHornClause _ _ (LambdaInfo n) _):_ -> Just n
       -- Increase the number of applications to disregard the next lambda
       (ExprHornClause _ conc (StubInfo StubApply) _):cs -> findBoundVariable' cs (applies + 1) conc
-      -- Continue looking, but without the current clause
-      _ -> firstJusts $ map (findBoundVariable' (clauses \\ headIfExists currClauses) applies . conclusion) nextClauses
+      -- Continue looking, but without the current clause. First with the same name, then with all possible next names
+      _ -> firstJusts $ if null currClauses then [] else findBoundVariable' (clauses \\ headIfExists currClauses) applies name:
+        map (findBoundVariable' (clauses \\ headIfExists currClauses) applies . conclusion) nextClauses
+
   -- Disregard the next lambda, because it is already applied
   else
     case currClauses of
@@ -147,7 +154,8 @@ findBoundVariable' clauses applies name =
       (ExprHornClause _ conc (LambdaInfo n) _):cs -> findBoundVariable' cs (applies - 1) conc
       -- Increase the number of applications to disregard the next lambda
       (ExprHornClause _ conc (StubInfo StubApply) _):cs -> findBoundVariable' cs (applies + 1) conc
-      _ -> firstJusts $ map (findBoundVariable' (clauses \\ headIfExists currClauses) applies . conclusion) nextClauses
+      _ -> firstJusts $ if null currClauses then [] else findBoundVariable' (clauses \\ headIfExists currClauses) applies name:
+        map (findBoundVariable' (clauses \\ headIfExists currClauses) applies . conclusion) nextClauses
   where
     -- Clauses with the name as premises are potential next clauses
     nextClauses = filter (elem name . premises) clauses
@@ -162,12 +170,11 @@ findBoundVariable' clauses applies name =
 
 -- Convert a Program to a set of groups of Horn clauses
 progToHornClauses :: Program -> [[HornClause]]
-progToHornClauses Program{functions=fs} = map (:[]) newApplyClauses ++ initialRun
+progToHornClauses Program{functions=fs} = foldl (\ augClauses currGroup-> augmentApplyClauseSet augClauses currGroup:augClauses) initialRun initialRun
   where
     -- We need two runs for this: first run is every expression converted into a group of Horn clauses
     initialRun = concatMap (exprToHornClauses . snd) fs
     -- Second run is a special Horn clause for applications
-    newApplyClauses = mapMaybe (augmentApplyClauseSet initialRun) initialRun
 
 -- Converts an expression with all its subexpressions into Horn clauses
 exprToHornClauses :: Expr -> [[HornClause]]
@@ -208,9 +215,12 @@ constructInjFHornClause subst cn name decl inv = ExprHornClause (map lookupSubst
 
 -- Application implies that the bound variable of the lambda expression is equal to the applied expression.
 -- This step requires knowledge of the program structure and can therefor only be done after the clause set is constructed
-augmentApplyClauseSet :: [[HornClause]] -> [HornClause] -> Maybe HornClause
-augmentApplyClauseSet clauses set@((ExprHornClause [l, v] cn (StubInfo StubApply) 0):_) = return $ ExprHornClause [v] (findBoundVariable clauses l) (StubInfo StubApply) (-1)
-augmentApplyClauseSet _ x = Nothing
+augmentApplyClauseSet :: [[HornClause]] -> [HornClause] -> [HornClause]
+augmentApplyClauseSet clauses (c@(ExprHornClause [l, v] cn (StubInfo StubApply) 0):_) =
+  [ExprHornClause [v] bound AppliedInfo 0,
+   ExprHornClause [bound] v AppliedInfo 1]
+  where bound = findBoundVariable clauses l
+augmentApplyClauseSet _ x = []
 
 -- Chain name of subexpressions
 getInputChainNames :: Expr -> [ChainName]
@@ -221,7 +231,7 @@ annotateProg :: Program -> Program
 annotateProg p@Program {functions=fs} = p{functions=annotFs}
   -- Map annotateExpr on all functions. The code is ugly because of monad shenanigans
   where
-    annotFs = runSupplyVars (mapM (\(n, f) -> annotateExpr f <&> \x -> (n, x)) fs) 
+    annotFs = runSupplyVars (mapM (\(n, f) -> annotateExpr f <&> \x -> (n, x)) fs)
     -- Sets the ChainName of the top level expression to the name of the top level expression
     -- TODO: What if the top level is just a variable access?
     correctTopLevel = map (\(n, f) -> (n, setTypeInfo f (setChainName (getTypeInfo f) n))) annotFs
