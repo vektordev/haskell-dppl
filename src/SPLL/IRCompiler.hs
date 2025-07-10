@@ -159,8 +159,7 @@ toIRProbability conf typeEnv (GreaterThan (TypeInfo {rType = t, tags = extras}) 
     tell [(var, l)]
     (integrate, _, integrateBranches) <- toIRIntegrate conf typeEnv right negInf (IRVar var)
     var2 <- mkVariable "rhs_integral"
-    let returnExpr =
-          (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)))
+    let returnExpr = IRIf sample (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))
     tell [(var2, integrate)]
     return (returnExpr, const0, integrateBranches)
   | extras `hasAlgorithm` "greaterThanRight" = do --p(x | var >= const
@@ -169,7 +168,7 @@ toIRProbability conf typeEnv (GreaterThan (TypeInfo {rType = t, tags = extras}) 
     tell [(var, r)]
     (integrate, _, integrateBranches) <- toIRIntegrate conf typeEnv left negInf (IRVar var)
     var2 <- mkVariable "lhs_integral"
-    let returnExpr = (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)) (IRVar var2))
+    let returnExpr = IRIf sample (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)) (IRVar var2)
     tell [(var2, integrate)]
     return (returnExpr, const0, integrateBranches)
 toIRProbability conf typeEnv (LessThan (TypeInfo {rType = t, tags = extras}) left right) sample
@@ -179,7 +178,7 @@ toIRProbability conf typeEnv (LessThan (TypeInfo {rType = t, tags = extras}) lef
     tell [(var, l)]
     (integrate, _, integrateBranches) <- toIRIntegrate conf typeEnv right (IRVar var) posInf
     var2 <- mkVariable "rhs_integral"
-    let returnExpr = (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)))
+    let returnExpr = IRIf sample (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))
     tell [(var2, integrate)]
     return (returnExpr, const0, integrateBranches)
   | extras `hasAlgorithm` "lessThanRight" = do --p(x | var >= const
@@ -189,7 +188,7 @@ toIRProbability conf typeEnv (LessThan (TypeInfo {rType = t, tags = extras}) lef
     (integrate, _, integrateBranches) <- toIRIntegrate conf typeEnv left (IRVar var) posInf
     var2 <- mkVariable "lhs_integral"
     tell [(var2, integrate)]
-    let returnExpr = (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))  (IRVar var2))
+    let returnExpr = IRIf sample (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))  (IRVar var2)
     return (returnExpr, const0, integrateBranches)
 toIRProbability conf typeEnv (Not (TypeInfo {rType = TBool}) f) sample =
   toIRProbability conf typeEnv f (IRUnaryOp OpNot sample)
