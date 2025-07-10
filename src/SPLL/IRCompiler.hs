@@ -372,9 +372,10 @@ toIRProbability conf clauses typeEnv (Var _ n) sample = do
   -- Variable might be a function
   case lookup n typeEnv of
     -- Var is a function
-    Just(TArrow _ _, _) -> do
+    Just(TArrow _ _, hasInference) -> do
       var <- mkVariable "call"
-      tell [(var, IRApply (IRVar (n ++ "_prob")) sample)]
+      let name = if hasInference then n ++ "_prob" else n
+      tell [(var, IRApply (IRVar name) sample)]
       -- The return value is still a function. No need to do dim and branch counting here
       return (IRVar var, const0, const0)
     -- Var is a top level declaration (an therefor has a _prob function)
@@ -524,8 +525,9 @@ toIRGenerate typeEnv (InjF _ name params) = do
 toIRGenerate typeEnv (Var _ name) = do
   case lookup name typeEnv of
     -- Var is a function
-    Just (TArrow _ _, _) ->
-      return $ IRVar (name ++ "_gen")
+    Just (TArrow _ _, hasInference) ->
+      let fullName = if hasInference then name ++ "_gen" else name in
+        return $ IRVar fullName
     -- Var is a top level declaration (an therefor has a _gen function)
     Just (_, True) -> do
       return $ IRInvoke (IRVar (name ++ "_gen"))
@@ -696,9 +698,10 @@ toIRIntegrate conf clauses typeEnv (Var _ n) low high = do
   -- Variable might be a function
   case lookup n typeEnv of
    -- Var is a function
-   Just(TArrow _ _, _) -> do
+   Just(TArrow _ _, hasInference) -> do
      var <- mkVariable "call"
-     tell [(var, IRApply (IRApply (IRVar (n ++ "_integ")) low) high)]
+     let name = if hasInference then n ++ "_integ" else n
+     tell [(var, IRApply (IRApply (IRVar name) low) high)]
      -- The return value is still a function. No need to do dim and branch counting here
      return (IRVar var, const0, const0)
    -- Var is a top level declaration (an therefor has a _prob function)
