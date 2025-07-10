@@ -160,8 +160,7 @@ toIRProbability conf clauses typeEnv (GreaterThan (TypeInfo {rType = t, tags = e
     tell [(var, l)]
     (integrate, _, integrateBranches) <- toIRIntegrate conf clauses typeEnv right negInf (IRVar var)
     var2 <- mkVariable "rhs_integral"
-    let returnExpr =
-          (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)))
+    let returnExpr = IRIf sample (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))
     tell [(var2, integrate)]
     return (returnExpr, const0, integrateBranches)
   | extras `hasAlgorithm` "greaterThanRight" = do --p(x | var >= const
@@ -170,7 +169,7 @@ toIRProbability conf clauses typeEnv (GreaterThan (TypeInfo {rType = t, tags = e
     tell [(var, r)]
     (integrate, _, integrateBranches) <- toIRIntegrate conf clauses typeEnv left negInf (IRVar var)
     var2 <- mkVariable "lhs_integral"
-    let returnExpr = (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)) (IRVar var2))
+    let returnExpr = IRIf sample (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)) (IRVar var2)
     tell [(var2, integrate)]
     return (returnExpr, const0, integrateBranches)
 toIRProbability conf clauses typeEnv (LessThan (TypeInfo {rType = t, tags = extras}) left right) sample
@@ -180,7 +179,7 @@ toIRProbability conf clauses typeEnv (LessThan (TypeInfo {rType = t, tags = extr
     tell [(var, l)]
     (integrate, _, integrateBranches) <- toIRIntegrate conf clauses typeEnv right (IRVar var) posInf
     var2 <- mkVariable "rhs_integral"
-    let returnExpr = (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)))
+    let returnExpr = IRIf sample (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))
     tell [(var2, integrate)]
     return (returnExpr, const0, integrateBranches)
   | extras `hasAlgorithm` "lessThanRight" = do --p(x | var >= const
@@ -190,7 +189,7 @@ toIRProbability conf clauses typeEnv (LessThan (TypeInfo {rType = t, tags = extr
     (integrate, _, integrateBranches) <- toIRIntegrate conf clauses typeEnv left (IRVar var) posInf
     var2 <- mkVariable "lhs_integral"
     tell [(var2, integrate)]
-    let returnExpr = (IRIf (IROp OpEq (IRConst $ VBool True) sample) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))  (IRVar var2))
+    let returnExpr = IRIf sample (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))  (IRVar var2)
     return (returnExpr, const0, integrateBranches)
 toIRProbability conf clauses typeEnv (Not (TypeInfo {rType = TBool}) f) sample =
   toIRProbability conf clauses typeEnv f (IRUnaryOp OpNot sample)
@@ -365,10 +364,13 @@ toIRProbability conf clauses typeEnv (InjF TypeInfo {tags=extras} name [left, ri
 toIRProbability conf clauses typeEnv (Null _) sample = do
   expr <- indicator (IROp OpEq sample (IRConst $ VList EmptyList))
   return (expr, const0, const0)
-toIRProbability conf clauses typeEnv (Constant _ value) sample = do
-  expr <- indicator (IROp OpEq sample (IRConst (fmap failConversion value)))
+toIRProbability conf clauses typeEnv (Constant TypeInfo {rType=rt} value) sample = do
+  let comp = case rt of
+              TFloat -> IROp OpApprox sample (IRConst (fmap failConversion value))
+              _ -> IROp OpEq sample (IRConst (fmap failConversion value))
+  expr <- indicator comp
   return (expr, const0, const0)
-toIRProbability conf clauses typeEnv (Var _ n) sample = do
+toIRProbability conf clauses typeEnv (Var TypeInfo {rType=rt} n) sample = do
   -- Variable might be a function
   case lookup n typeEnv of
     -- Var is a function
@@ -388,12 +390,15 @@ toIRProbability conf clauses typeEnv (Var _ n) sample = do
           return (IRTFst (IRVar var), IRTSnd (IRVar var), const0)
     -- Var is a local variable
     Just (_, False) -> do
-      expr <- indicator (IROp OpEq sample (IRVar n))
+      let comp = case rt of
+              TFloat -> IROp OpApprox sample (IRVar n)
+              _ -> IROp OpEq sample (IRVar n)
+      expr <- indicator comp
       return (expr, const0, const0)
     Nothing -> error ("Could not find name in TypeEnv: " ++ n)
 toIRProbability conf clauses typeEnv (ThetaI _ a i) sample = do
   a' <- toIRGenerate typeEnv a
-  expr <- indicator (IROp OpEq sample (IRTheta a' i))
+  expr <- indicator (IROp OpApprox sample (IRTheta a' i))
   return (expr, const0, const0)
 toIRProbability conf clauses typeEnv (Subtree _ a i) sample = error "Cannot infer prob on subtree expression. Please check your syntax"
 toIRProbability conf clauses typeEnv x sample = error ("found no way to convert to IR: " ++ show x)
@@ -408,14 +413,14 @@ addP (aM, aDim) (bM, bDim) = do
   dimVarA <- mkVariable "dimA"
   dimVarB <- mkVariable "dimB"
   tell [(pVarA, aM), (pVarB, bM), (dimVarA, aDim), (dimVarB, bDim)]
-  return (IRIf (IROp OpEq (IRVar pVarA) (IRConst (VFloat 0))) (IRVar pVarB)
-           (IRIf (IROp OpEq (IRVar pVarB) (IRConst (VFloat 0))) (IRVar pVarA)
+  return (IRIf (IROp OpApprox (IRVar pVarA) (IRConst (VFloat 0))) (IRVar pVarB)
+           (IRIf (IROp OpApprox (IRVar pVarB) (IRConst (VFloat 0))) (IRVar pVarA)
            (IRIf (IROp OpLessThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar pVarA)
            (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar pVarB)
            (IROp OpPlus (IRVar pVarA) (IRVar pVarB))))),
            -- Dim
-           IRIf (IROp OpEq (IRVar pVarA) (IRConst (VFloat 0))) (IRVar dimVarB)
-           (IRIf (IROp OpEq (IRVar pVarB) (IRConst (VFloat 0))) (IRVar dimVarA)
+           IRIf (IROp OpApprox (IRVar pVarA) (IRConst (VFloat 0))) (IRVar dimVarB)
+           (IRIf (IROp OpApprox (IRVar pVarB) (IRConst (VFloat 0))) (IRVar dimVarA)
            (IRIf (IROp OpLessThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar dimVarA)
            (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar dimVarB)
            (IRVar dimVarA)))))
@@ -427,14 +432,14 @@ subP (aM, aDim) (bM, bDim) = do
   dimVarA <- mkVariable "dimA"
   dimVarB <- mkVariable "dimB"
   tell [(pVarA, aM), (pVarB, bM), (dimVarA, aDim), (dimVarB, bDim)]
-  return (IRIf (IROp OpEq (IRVar pVarA) (IRConst (VFloat 0))) (IRVar pVarB)
-         (IRIf (IROp OpEq (IRVar pVarB) (IRConst (VFloat 0))) (IRVar pVarA)
+  return (IRIf (IROp OpApprox (IRVar pVarA) (IRConst (VFloat 0))) (IRVar pVarB)
+         (IRIf (IROp OpApprox (IRVar pVarB) (IRConst (VFloat 0))) (IRVar pVarA)
          (IRIf (IROp OpLessThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar pVarA)
          (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar pVarB)
          (IROp OpSub (IRVar pVarA) (IRVar pVarB))))),
          -- Dim
-         IRIf (IROp OpEq (IRVar pVarA) (IRConst (VFloat 0))) (IRVar dimVarB)
-         (IRIf (IROp OpEq (IRVar pVarB) (IRConst (VFloat 0))) (IRVar dimVarA)
+         IRIf (IROp OpApprox (IRVar pVarA) (IRConst (VFloat 0))) (IRVar dimVarB)
+         (IRIf (IROp OpApprox (IRVar pVarB) (IRConst (VFloat 0))) (IRVar dimVarA)
          (IRIf (IROp OpLessThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar dimVarA)
          (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar dimVarB)
          (IRVar dimVarA)))))

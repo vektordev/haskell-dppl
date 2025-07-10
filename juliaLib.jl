@@ -1,6 +1,6 @@
 module JuliaSPPLLib
 
-export density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, T,==
+export density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, isclose, T,==
 
 
 function isAny(x)
@@ -142,6 +142,10 @@ function indexOf(sample, lst::InferenceList)
     else
         return 1 + indexOf(sample, tail(lst))
     end
+end
+
+function isclose(a::Float64, b::Float64)
+    return abs(a - b) <= 10e-10
 end
 
 end

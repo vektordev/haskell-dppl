@@ -111,6 +111,7 @@ generateStatementBlock expr = ["return " ++ generateExpression expr]
 
 generateExpression :: IRExpr -> String
 generateExpression (IRIf cond left right ) = "(" ++ generateExpression cond ++ " ? " ++ generateExpression left ++ " : " ++ generateExpression right ++ ")"
+generateExpression (IROp OpApprox left right) = "isclose(" ++ generateExpression left ++ ", " ++ generateExpression right ++ ")"
 generateExpression (IROp op left right) = "((" ++ generateExpression left ++ ") " ++ juliaOps op ++ " (" ++ generateExpression right ++ "))"
 generateExpression (IRUnaryOp op expr) = juliaUnaryOps op ++ "(" ++ generateExpression expr ++ ")"
 generateExpression (IRTheta expr i) = "(" ++ generateExpression expr ++ ")[1][" ++ show (i + 1) ++ "]"

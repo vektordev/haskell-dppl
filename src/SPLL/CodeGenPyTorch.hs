@@ -54,6 +54,7 @@ pyOps OpSub = "-"
 pyOps OpOr = "or"
 pyOps OpAnd = "and"
 pyOps OpEq = "=="
+pyOps x = error $ "Operator has no infix representation: " ++ show x
 
 pyUnaryOps :: UnaryOperand -> String
 pyUnaryOps OpNeg = "-"
@@ -178,6 +179,7 @@ generateStatementBlock expr = ["return " ++ generateExpression expr]
 
 generateExpression :: IRExpr -> String
 generateExpression (IRIf cond left right) = "(" ++ generateExpression left ++ " if " ++ generateExpression cond ++ " else " ++ generateExpression right ++ ")"
+generateExpression (IROp OpApprox left right) = "isclose(" ++ generateExpression left ++ ", " ++ generateExpression right ++")"
 generateExpression (IROp op left right) = "((" ++ generateExpression left ++ ") " ++ pyOps op ++ " (" ++ generateExpression right ++"))"
 generateExpression (IRUnaryOp op expr) = pyUnaryOps op ++ "(" ++ generateExpression expr ++ ")"
 generateExpression (IRTheta x i) = "(" ++ generateExpression x ++ ")[0][" ++ show i ++ "]"
