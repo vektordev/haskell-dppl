@@ -120,6 +120,7 @@ data Operand = OpPlus
              | OpOr
              | OpAnd
              | OpEq
+             | OpApprox
              deriving (Show, Eq)
 
 data UnaryOperand = OpNeg

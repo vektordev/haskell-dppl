@@ -330,10 +330,13 @@ toIRProbability conf typeEnv (InjF TypeInfo {tags=extras} name [left, right]) sa
 toIRProbability conf typeEnv (Null _) sample = do
   expr <- indicator (IROp OpEq sample (IRConst $ VList EmptyList))
   return (expr, const0, const0)
-toIRProbability conf typeEnv (Constant _ value) sample = do
-  expr <- indicator (IROp OpEq sample (IRConst (fmap failConversion value)))
+toIRProbability conf typeEnv (Constant TypeInfo {rType=rt} value) sample = do
+  let comp = case rt of
+              TFloat -> IROp OpApprox sample (IRConst (fmap failConversion value))
+              _ -> IROp OpEq sample (IRConst (fmap failConversion value))
+  expr <- indicator comp
   return (expr, const0, const0)
-toIRProbability conf typeEnv (Var _ n) sample = do
+toIRProbability conf typeEnv (Var TypeInfo {rType=rt} n) sample = do
   -- Variable might be a function
   case lookup n typeEnv of
     -- Var is a function
@@ -352,12 +355,15 @@ toIRProbability conf typeEnv (Var _ n) sample = do
           return (IRTFst (IRVar var), IRTSnd (IRVar var), const0)
     -- Var is a local variable
     Just (_, False) -> do
-      expr <- indicator (IROp OpEq sample (IRVar n))
+      let comp = case rt of
+              TFloat -> IROp OpApprox sample (IRVar n)
+              _ -> IROp OpEq sample (IRVar n)
+      expr <- indicator comp
       return (expr, const0, const0)
     Nothing -> error ("Could not find name in TypeEnv: " ++ n)
 toIRProbability conf typeEnv (ThetaI _ a i) sample = do
   a' <- toIRGenerate typeEnv a
-  expr <- indicator (IROp OpEq sample (IRTheta a' i))
+  expr <- indicator (IROp OpApprox sample (IRTheta a' i))
   return (expr, const0, const0)
 toIRProbability conf typeEnv (Subtree _ a i) sample = error "Cannot infer prob on subtree expression. Please check your syntax"
 toIRProbability conf typeEnv x sample = error ("found no way to convert to IR: " ++ show x)
@@ -372,14 +378,14 @@ addP (aM, aDim) (bM, bDim) = do
   dimVarA <- mkVariable "dimA"
   dimVarB <- mkVariable "dimB"
   tell [(pVarA, aM), (pVarB, bM), (dimVarA, aDim), (dimVarB, bDim)]
-  return (IRIf (IROp OpEq (IRVar pVarA) (IRConst (VFloat 0))) (IRVar pVarB)
-           (IRIf (IROp OpEq (IRVar pVarB) (IRConst (VFloat 0))) (IRVar pVarA)
+  return (IRIf (IROp OpApprox (IRVar pVarA) (IRConst (VFloat 0))) (IRVar pVarB)
+           (IRIf (IROp OpApprox (IRVar pVarB) (IRConst (VFloat 0))) (IRVar pVarA)
            (IRIf (IROp OpLessThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar pVarA)
            (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar pVarB)
            (IROp OpPlus (IRVar pVarA) (IRVar pVarB))))),
            -- Dim
-           IRIf (IROp OpEq (IRVar pVarA) (IRConst (VFloat 0))) (IRVar dimVarB)
-           (IRIf (IROp OpEq (IRVar pVarB) (IRConst (VFloat 0))) (IRVar dimVarA)
+           IRIf (IROp OpApprox (IRVar pVarA) (IRConst (VFloat 0))) (IRVar dimVarB)
+           (IRIf (IROp OpApprox (IRVar pVarB) (IRConst (VFloat 0))) (IRVar dimVarA)
            (IRIf (IROp OpLessThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar dimVarA)
            (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar dimVarB)
            (IRVar dimVarA)))))
@@ -391,14 +397,14 @@ subP (aM, aDim) (bM, bDim) = do
   dimVarA <- mkVariable "dimA"
   dimVarB <- mkVariable "dimB"
   tell [(pVarA, aM), (pVarB, bM), (dimVarA, aDim), (dimVarB, bDim)]
-  return (IRIf (IROp OpEq (IRVar pVarA) (IRConst (VFloat 0))) (IRVar pVarB)
-         (IRIf (IROp OpEq (IRVar pVarB) (IRConst (VFloat 0))) (IRVar pVarA)
+  return (IRIf (IROp OpApprox (IRVar pVarA) (IRConst (VFloat 0))) (IRVar pVarB)
+         (IRIf (IROp OpApprox (IRVar pVarB) (IRConst (VFloat 0))) (IRVar pVarA)
          (IRIf (IROp OpLessThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar pVarA)
          (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar pVarB)
          (IROp OpSub (IRVar pVarA) (IRVar pVarB))))),
          -- Dim
-         IRIf (IROp OpEq (IRVar pVarA) (IRConst (VFloat 0))) (IRVar dimVarB)
-         (IRIf (IROp OpEq (IRVar pVarB) (IRConst (VFloat 0))) (IRVar dimVarA)
+         IRIf (IROp OpApprox (IRVar pVarA) (IRConst (VFloat 0))) (IRVar dimVarB)
+         (IRIf (IROp OpApprox (IRVar pVarB) (IRConst (VFloat 0))) (IRVar dimVarA)
          (IRIf (IROp OpLessThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar dimVarA)
          (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar dimVarB)
          (IRVar dimVarA)))))

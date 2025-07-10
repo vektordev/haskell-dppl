@@ -58,6 +58,7 @@ pPrintIRExpr (IROp OpDiv e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ " / " ++ p
 pPrintIRExpr (IROp OpGreaterThan e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ " > " ++ pPrintIRExpr e2 (n + 1) ++ ")"
 pPrintIRExpr (IROp OpLessThan e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ " < " ++ pPrintIRExpr e2 (n + 1) ++ ")"
 pPrintIRExpr (IROp OpEq e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ " == " ++ pPrintIRExpr e2 (n + 1) ++ ")"
+pPrintIRExpr (IROp OpApprox e1 e2) n = "isclose(" ++ pPrintIRExpr e1 (n + 1) ++ ", " ++ pPrintIRExpr e2 (n + 1) ++ ")"
 pPrintIRExpr (IROp OpOr e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ " || " ++ pPrintIRExpr e2 (n + 1) ++ ")"
 pPrintIRExpr (IROp OpAnd e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ " && " ++ pPrintIRExpr e2 (n + 1) ++ ")"
 pPrintIRExpr (IRUnaryOp OpNeg e) n = "-(" ++ pPrintIRExpr e (n + 1) ++ ")"

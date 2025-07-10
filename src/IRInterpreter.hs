@@ -156,6 +156,12 @@ generate f neurals globalEnv env [] (IROp OpEq a b) = do
     (VAny, b) -> return $ VBool False
     (a, VAny) -> return $ VBool False
     _ -> error ("Type error: Equals can only evaluate on two values: " ++ show (aVal, bVal))
+generate f neurals globalEnv env [] (IROp OpApprox a b) = do
+  aVal <- generate f neurals globalEnv env [] a
+  bVal <- generate f neurals globalEnv env [] b
+  case (aVal, bVal) of
+    (VFloat af, VFloat bf) -> return $ VBool $ abs (af - bf) <= 1e-10
+    _ -> error ("Type error: Approx can only evaluate on two floats: " ++ show (aVal, bVal))
 generate f neurals globalEnv env [] (IRUnaryOp OpNot a) = do
   aVal <- generate f neurals globalEnv env [] a
   case aVal of
