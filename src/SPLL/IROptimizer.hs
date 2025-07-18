@@ -53,7 +53,7 @@ fixedPointIteration f x = if fx == x then x else fixedPointIteration f fx
   where fx = f x
 
 optimize :: CompilerConfig -> IRExpr -> IRExpr
-optimize conf = irMap (commonSubexprStage . applyConstStage . assiciativityStage . letInStage . constantDistrStage . simplifyStage . indexStage . distributeConditionals)
+optimize conf = irMap (commonSubexprStage . applyConstStage . assiciativityStage . letInStage . constantDistrStage . simplifyStage . indexStage . distributeConditionals . lambdaApplicationStage)
   where
     oLvl = optimizerLevel conf
     commonSubexprStage = if False then optimizeCommonSubexpr else id -- Too buggy to use
@@ -64,6 +64,7 @@ optimize conf = irMap (commonSubexprStage . applyConstStage . assiciativityStage
     simplifyStage = if oLvl >= 1 then simplify else id
     indexStage = if oLvl >= 1 then indexmagic else id
     distributeConditionals = if oLvl >= 2 then distributeIf else id
+    lambdaApplicationStage = if oLvl >= 2 then optimizeLambdaApplication else id
 
 indexmagic :: IRExpr -> IRExpr
 -- if calling Apply ("indexOf") elem [0..], replace with elem
@@ -296,3 +297,12 @@ extractSubexpr body (sub, name) = trace report $ IRLetIn name sub newBody
   where
     newBody = replaceAll sub (IRVar name) body
     report = "Extracted subexpression: \n" ++ pPrintIRExpr sub 2 ++ "\n ##### as " ++ name ++ ", now: \n" ++ pPrintIRExpr newBody 2
+
+optimizeLambdaApplication :: IRExpr -> IRExpr
+optimizeLambdaApplication (IRInvoke (IRApply (IRLambda n body) appl)) = replaceAll (IRVar n) appl body
+optimizeLambdaApplication x = x
+
+isDet :: IRExpr  -> Bool
+isDet (IRSample _) = False
+isDet e = all isDet (getIRSubExprs e)
+
