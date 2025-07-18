@@ -128,14 +128,14 @@ tailInv = FDecl (Forall [TV "a"] (ListOf (TVarR (TV "a")) `TArrow` ListOf (TVarR
 applyFwd :: FDecl
 applyFwd = FDecl (Forall [TV "a", TV "b"] ((TVarR (TV "a") `TArrow` TVarR (TV "b")) `TArrow` (TVarR (TV "a") `TArrow` TVarR (TV "b")))) ["f", "a"] ["b"] (IRInvoke $ IRApply (IRVar "f") (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
 applyInv :: FDecl
-applyInv = FDecl (Forall [TV "b", TV "a"] ((TVarR (TV "a") `TArrow` TVarR (TV "b")) `TArrow` (TVarR (TV "b") `TArrow` TVarR (TV "a")))) ["f", "b"] ["a"] (IRInvoke $ IRApply (IRVar "f") (IRVar "b")) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
+applyInv = FDecl (Forall [TV "b", TV "a"] ((TVarR (TV "a") `TArrow` TVarR (TV "b")) `TArrow` (TVarR (TV "b") `TArrow` TVarR (TV "a")))) ["f", "b"] ["a"] (IRInvoke $ IRApply (IRVar "f^-1") (IRVar "b")) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
 
 mapLeftFwd :: FDecl
 mapLeftFwd = FDecl (Forall [TV "a", TV "b", TV "c"] ((TVarR (TV "a") `TArrow` TVarR (TV "c")) `TArrow` (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TEither (TVarR (TV "c")) (TVarR (TV "b"))))) ["f", "a"] ["b"]
               (IRIf (IRIsLeft (IRVar "a")) (IRLeft (IRInvoke $ IRApply (IRVar "f") (IRFromLeft (IRVar "a")))) (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
 mapLeftInv :: FDecl
 mapLeftInv = FDecl (Forall [TV "a", TV "b", TV "c"] ((TVarR (TV "c") `TArrow` TVarR (TV "a")) `TArrow` (TEither (TVarR (TV "c")) (TVarR (TV "b")) `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b"))))) ["f", "b"] ["a"]
-              (IRIf (IRIsLeft (IRVar "b")) (IRLeft (IRInvoke $ IRApply (IRVar "f") (IRFromLeft (IRVar "b")))) (IRVar "b")) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
+              (IRIf (IRIsLeft (IRVar "b")) (IRLeft (IRInvoke $ IRApply (IRVar "f^-1") (IRFromLeft (IRVar "b")))) (IRVar "b")) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
 
 
 globalFenv :: FEnv
@@ -175,6 +175,7 @@ instantiate gen n = do
 
 rename :: String -> String -> IRExpr -> IRExpr
 rename old new (IRVar n) | n == old = IRVar new
+rename old new (IRVar n) | n == old ++ "^-1" = IRVar (new ++ "^-1")
 rename old new expr = expr
 
 renameAll :: String -> String -> IRExpr -> IRExpr
@@ -184,7 +185,7 @@ renameDecl :: String -> String -> FDecl -> FDecl
 renameDecl old new FDecl {contract=sig, inputVars=inVars, outputVars=outVars, body=expr, applicability=app, deconstructing=decons, derivatives=derivs} =
   FDecl {contract=sig, inputVars=map renS inVars, outputVars=map renS outVars, body=ren expr, applicability=ren app, deconstructing=decons, derivatives=map (Data.Bifunctor.bimap renS ren) derivs}
   where
-    ren = renameAll old new -- A function that renames old to new
+    ren = renameAll old new-- A function that renames old to new
     renS s = if s == old then new else s  -- A function that replaces old string with new strings
 
 

@@ -19,6 +19,7 @@ import Data.Number.Erf (erf)
 import SPLL.AutoNeural
 import Data.Functor
 import SPLL.Typing.ForwardChaining
+import Data.List
 
 -- SupplyT needs to be a transformer, because Supply does not implement Functor correctly
 type CompilerMonad a = WriterT [(String, IRExpr)] (SupplyT Int Identity) a
@@ -97,6 +98,13 @@ negInf = IRConst (VFloat (-9999999))
 
 posInf :: IRExpr
 posInf = IRConst (VFloat 9999999)
+
+renameVar :: String -> String -> IRExpr -> IRExpr
+renameVar old new = irMap (renameVar' old new)
+
+renameVar' :: String -> String -> IRExpr -> IRExpr
+renameVar' old new (IRVar n) | n == old = IRVar new
+renameVar' _ _ x = x
 
 toIRProbabilitySave :: CompilerConfig -> [[HornClause]] -> TypeEnv -> Expr -> IRExpr -> CompilerMonad CompilationResult
 toIRProbabilitySave conf clauses typeEnv (Lambda t name subExpr) sample = do
@@ -253,34 +261,34 @@ toIRProbability conf clauses typeEnv (TCons _ t1Expr t2Expr) sample = do
   (t2P, t2Dim, t2Branches) <- toIRProbabilitySave conf clauses typeEnv t2Expr (IRTSnd sample)
   mult <- (t1P, t1Dim) `multP` (t2P, t2Dim)
   return (fst mult, snd mult, IROp OpPlus t1Branches t2Branches)
-toIRProbability conf clauses typeEnv (InjF _ name [p0, p1]) sample | isHigherOrder name = do
+toIRProbability conf clauses typeEnv (InjF _ name params@[p0, p1]) sample | isHigherOrder name = do
   -- FPair of the InjF with unique names
   fPair <- instantiate mkVariable name
   -- Unary InjF has a single inversion
   let FPair _ [inv] = fPair
   let FDecl {inputVars=inVars, body=invExpr, applicability=appTest, deconstructing=decons, derivatives=derivs} = inv
   --Handle the function being in different positions of the signature
-  let (f, a, fVar, aVar) = case getFunctionParamIdx name of
-                [0] -> (p0, p1, head inVars, inVars !! 1)
-                [1] -> (p1, p0, inVars !! 1, head inVars)
-                _ -> error "Unrecognized higher order signature"
+  let aPoss = [0 .. (length params - 1)] \\ getFunctionParamIdx name
+  let aPos = case aPoss of
+        [n] -> n
+        x -> error $ "Expected exectly one non-ho parameter, but got " ++ show (length x)
+  let a = params !! aPos
+  let aVar = inVars !! aPos
+  let fs = map (params !!) (getFunctionParamIdx name)
+  let fVars = map (inVars !!) (getFunctionParamIdx name)
   let Just invDerivExpr = lookup aVar derivs
   -- Set sample value to the variable name in the InjF
   tell [(aVar, sample)]
   -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
   let probF = if decons then toIRProbabilitySave else toIRProbability
-  -- Get the probabilistic inference code for the parameter
-  let (Lambda _ fBound fExpr) = f
-  newFBound <- mkVariable "x"
-  --inverseF <- toIRInverse typeEnv fBound fExpr (IRVar newFBound) <&> IRLambda newFBound
-  let inverseF = toInvExpr clauses (chainName $ getTypeInfo f)
-  let inverseLambda = IRLambda (chainName $ getTypeInfo f) inverseF
-  tell [(fVar, inverseLambda)]
+  -- Create all inverses of the ho functions and save them on the variable stack
+  -- Then create a substitution that substitutes f^-1 to f_prob. All substitutions are then composed in the fold
+  renVar <- foldM (\sub tup -> createHOInverse clauses tup <&> (.) sub) id (zip fVars fs)
   (paramExpr, paramDim, paramBranches) <- probF conf clauses typeEnv a invExpr
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
   let returnP = IROp OpMult paramExpr (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDerivExpr))
   let appTestExpr e = IRIf appTest e const0
-  return (appTestExpr returnP, appTestExpr paramDim, appTestExpr paramBranches)
+  return (renVar (appTestExpr returnP), renVar (appTestExpr paramDim), renVar (appTestExpr paramBranches))
 toIRProbability conf clauses typeEnv (InjF _ name [param]) sample = do
   -- FPair of the InjF with unique names
   fPair <- instantiate mkVariable name
@@ -443,6 +451,15 @@ subP (aM, aDim) (bM, bDim) = do
          (IRIf (IROp OpLessThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar dimVarA)
          (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar dimVarB)
          (IRVar dimVarA)))))
+
+createHOInverse :: [[HornClause]] -> (String, Expr) -> CompilerMonad (IRExpr -> IRExpr)
+createHOInverse clauses (fVar, f) = do
+  let inverseF = toInvExpr clauses (chainName $ getTypeInfo f)
+  let inverseLambda = IRLambda (chainName $ getTypeInfo f) inverseF
+  -- Rename all occurances of f^-1 from the definition to f_prob
+  let renVar = renameVar (fVar ++ "^-1") (fVar ++ "_prob")
+  tell [(fVar ++ "_prob", inverseLambda)]
+  return $ renVar
 
 packParamsIntoLetinsProb :: [String] -> [Expr] -> IRExpr -> IRExpr -> Supply Int IRExpr
 --packParamsIntoLetinsProb [] [] expr _ = do
