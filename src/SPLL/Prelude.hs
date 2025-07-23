@@ -15,6 +15,7 @@ import SPLL.Typing.ForwardChaining (annotateProg)
 import Text.PrettyPrint.Annotated.HughesPJClass
 import PrettyPrint (pPrintProg, pPrintIREnv)
 import Debug.Pretty.Simple
+import Data.Maybe (fromJust)
 
 -- Flow control
 ifThenElse :: Expr -> Expr -> Expr -> Expr
@@ -169,7 +170,7 @@ fix = "f" #->#
 
 compile :: CompilerConfig -> Program -> IREnv
 compile _ p | isLeft (validateProgram p) = error $ fromLeft "" (validateProgram p)
-compile conf p = do
+compile conf p = fromJust $ do
   printIfVerbose conf "=== Parsed Program ==="
   pPrintIfMoreVerbose conf p
   printIfVerbose conf (pPrintProg p)
@@ -193,7 +194,7 @@ compile conf p = do
   printIfVerbose conf "\n=== Compiled Program ==="
   pPrintIfMoreVerbose conf compiled
   printIfVerbose conf (pPrintIREnv compiled)
-  compiled
+  return compiled
 
 runGen :: (RandomGen g) => CompilerConfig -> Program -> [IRValue] -> Rand g IRValue
 runGen _ p _ | isLeft (validateProgram p) = error $ fromLeft "" (validateProgram p)
