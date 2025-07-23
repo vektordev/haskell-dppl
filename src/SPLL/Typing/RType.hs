@@ -11,6 +11,7 @@ data RType = TBool
            | ListOf RType
            | Tuple RType RType
            | TEither RType RType
+           | TADT String
            | NullList
            | BottomTuple
            | RIdent String
@@ -27,6 +28,7 @@ matches TInt TInt = True
 matches TSymbol TSymbol = True
 matches TFloat TFloat = True
 matches TThetaTree TThetaTree = True
+matches (TADT ty1) (TADT ty2) = ty1 == ty2
 matches (TVarR x) (TVarR y) = x == y
 matches (TArrow left right) (TArrow left2 right2) = left `matches` left2 && right `matches` right2
 matches (ListOf x) (ListOf y) = x `matches` y

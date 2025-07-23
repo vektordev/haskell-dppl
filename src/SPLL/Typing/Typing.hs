@@ -15,10 +15,8 @@ module SPLL.Typing.Typing (
 )where
 
 import SPLL.Lang.Types
-import SPLL.Lang.Lang
 import SPLL.Typing.RType
 import SPLL.Typing.PType
-import SPLL.InferenceRule
 import GHC.Records
 
 import Data.Maybe

@@ -20,6 +20,7 @@ import SPLL.AutoNeural
 import Data.Functor
 import SPLL.Typing.ForwardChaining
 import Data.List
+import SPLL.Typing.AlgebraicDataTypes
 
 -- SupplyT needs to be a transformer, because Supply does not implement Functor correctly
 type CompilerMonad a = WriterT [(String, IRExpr)] (SupplyT Int Identity) a
@@ -33,7 +34,7 @@ type TypeEnv = [(String, (RType, Bool))]
 -- TODO: How do we deal with top-level lambdas in binding here?
 --  TL-Lambdas are presumably to be treated differently than non-TL, at least as far as prob is concerned.
 envToIR :: CompilerConfig -> Program -> IREnv
-envToIR conf p = optimizeEnv conf $ -- map optimizer over all second elements of the tuples
+envToIR conf p = optimizeEnv conf $ IREnv (-- map optimizer over all second elements of the tuples
   map (makeAutoNeural conf) (neurals p) ++
   map (\(name, binding) ->
     let typeEnv = getGlobalTypeEnv p
@@ -49,7 +50,7 @@ envToIR conf p = optimizeEnv conf $ -- map optimizer over all second elements of
             Just (toProbDecl name (IRLambda "sample" (runCompile conf (toIRProbabilitySave conf clauses typeEnv binding (IRVar "sample")))))
           else Nothing,
         genFun = toGenDecl name (fst $ runIdentity $ runSupplyVars $ runWriterT $ toIRGenerate typeEnv binding),
-        groupDoc="Function group " ++ name}) (functions p)
+        groupDoc="Function group " ++ name}) (functions p)) (adts p)
 
   where
     toGenDecl name expr = (expr, "Generates a random sample of the " ++ name ++ " function")
@@ -74,8 +75,9 @@ generateLetInBlock conf codeGen =
 
 -- Return type (name, rType, hasInferenceFunctions)
 getGlobalTypeEnv :: Program -> TypeEnv
-getGlobalTypeEnv p = funcEnv ++ neuralEnv
+getGlobalTypeEnv p = funcEnv ++ implicitFuncEnv ++ neuralEnv
   where funcEnv = map (\(name, expr) -> (name, (rType (getTypeInfo expr), True))) (functions p)
+        implicitFuncEnv = map (\(name, rt) -> (name, (rt, False))) (implicitFunctionsRTypeProg p)
         neuralEnv = map (\(name, rt, _) -> (name, (rt, False))) (neurals p)
 
 runSupplyVars :: (Monad m) => SupplyT Int m a -> m a
@@ -234,21 +236,35 @@ toIRProbability conf clauses typeEnv (Lambda t name subExpr) sample = do
       let newTypeEnv = (name, (paramRType, False)):typeEnv
       irTuple <- lift (runWriterT (toIRProbability conf clauses newTypeEnv subExpr sample)) <&> generateLetInBlock conf
       return (IRLambda name irTuple, const0, const0)
+toIRProbability conf clauses typeEnv (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo l) == Deterministic && pType (getTypeInfo v) == Deterministic = do
+  vIR <- toIRGenerate typeEnv v
+  lIR <- toIRGenerate typeEnv l -- Dim and BC are irrelevant here
+  -- The result is not a tuple if the return value is a closure
+  case rt of
+    TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
+    _ -> do
+      retExpr <- indicator (IROp OpEq (IRInvoke (IRApply lIR vIR)) sample)
+      return (retExpr, const0, const0)
 toIRProbability conf clauses typeEnv (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo v) == Deterministic = do
   vIR <- toIRGenerate typeEnv v
   (lIR, _, _) <- toIRProbability conf clauses typeEnv l sample -- Dim and BC are irrelevant here. We need to extract these from the return tuple
   -- The result is not a tuple if the return value is a closure
   case rt of
     TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
-    _ -> if countBranches conf then
-           return (IRTFst (IRInvoke (IRApply lIR vIR)), IRTFst (IRTSnd (IRInvoke (IRApply lIR vIR))), IRTSnd (IRTSnd (IRInvoke (IRApply lIR vIR))))
-         else
-           return (IRTFst (IRInvoke (IRApply lIR vIR)), IRTSnd (IRInvoke (IRApply lIR vIR)), const0)
+    _ -> do
+      retVal <- mkVariable "call"
+      tell [(retVal, IRInvoke (IRApply lIR vIR))]
+      if countBranches conf then
+        return (IRTFst (IRVar retVal), IRTFst (IRTSnd (IRVar retVal)), IRTSnd (IRTSnd (IRVar retVal)))
+      else
+        return (IRTFst (IRVar retVal), IRTSnd (IRVar retVal), const0)
+
 toIRProbability conf clauses typeEnv (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo v) == Prob || pType (getTypeInfo v) == Integrate = do
   let lChainName = chainName (getTypeInfo l)
   let lInv = IRLambda lChainName (toInvExpr clauses lChainName)
   let appliedSample = IRInvoke (IRApply lInv sample)
   toIRProbability conf clauses typeEnv v appliedSample
+toIRProbability conf clauses typeEnv (Apply TypeInfo{rType=rt} l v) sample = error "This instance if apply is not yet implemented"
 toIRProbability conf clauses typeEnv (Cons _ hdExpr tlExpr) sample = do
   headTuple <- lift (runWriterT (toIRProbabilitySave conf clauses typeEnv hdExpr (IRHead sample))) <&> generateLetInBlock conf
   tailTuple <- lift (runWriterT (toIRProbabilitySave conf clauses typeEnv tlExpr (IRTail sample))) <&> generateLetInBlock conf
@@ -386,6 +402,12 @@ toIRProbability conf clauses typeEnv (Var TypeInfo {rType=rt} n) sample = do
       var <- mkVariable "call"
       let name = if hasInference then n ++ "_prob" else n
       tell [(var, IRApply (IRVar name) sample)]
+      -- The return value is still a function. No need to do dim and branch counting here
+      return (IRVar var, const0, const0)
+    -- var is a function without a inference function
+    Just(TArrow _ _, False) -> do
+      var <- mkVariable "call"
+      tell [(var, IRApply (IRVar n) sample)]
       -- The return value is still a function. No need to do dim and branch counting here
       return (IRVar var, const0, const0)
     -- Var is a top level declaration (an therefor has a _prob function)
@@ -724,6 +746,11 @@ toIRIntegrate conf clauses typeEnv (Var _ n) low high = do
      var <- mkVariable "call"
      let name = if hasInference then n ++ "_integ" else n
      tell [(var, IRApply (IRApply (IRVar name) low) high)]
+     -- The return value is still a function. No need to do dim and branch counting here
+     return (IRVar var, const0, const0)
+   Just(TArrow _ _, False) -> do
+     var <- mkVariable "call"
+     tell [(var, IRApply (IRApply (IRVar n) low) high)]
      -- The return value is still a function. No need to do dim and branch counting here
      return (IRVar var, const0, const0)
    -- Var is a top level declaration (an therefor has a _prob function)

@@ -37,7 +37,9 @@ import Debug.Trace
 import Data.Functor ((<&>))
 
 --import Text.Megaparsec.Debug (dbg)
+
 dbg x y = y
+--dbg x y = traceShow x y
 
 --TODO: This parser can by necessity not disambiguate Apply f arg from certain special-treatment builtin functions,
 -- like InjF
@@ -57,7 +59,7 @@ symbol :: String -> Parser String
 symbol = L.symbol sc
 
 reserved :: [String]
-reserved = ["if", "then", "else", "let", "in", "theta", "subtree", "ThetaTree", "Left", "Right"]
+reserved = ["data", "if", "then", "else", "let", "in", "theta", "subtree", "ThetaTree", "Left", "Right"]
 
 keyword :: String -> Parser String
 keyword = L.symbol sc
@@ -65,7 +67,7 @@ keyword = L.symbol sc
 --Note: Won't parse capitalized constructors, if ever we add those.
 pIdentifier :: Parser String
 pIdentifier = lexeme $ do
-  x <- lowerChar
+  x <- letterChar
   xs <- many alphaNumChar
   let ident = (x:xs)
   if ident `elem` reserved
@@ -306,7 +308,7 @@ parseFromList kvlist = do
     Just value -> return value
 
 rTypes :: [(String, RType)]
-rTypes = [("Int", TInt), ("Float", TFloat), ("Symbol", TSymbol)]
+rTypes = [("Int", TInt), ("Float", TFloat), ("Bool", TBool), ("Symbol", TSymbol)]
 
 -- this function needs to handle compound types such as "Int -> Float" as well 
 -- first, we want to try parsing a compound type, and if that fails assume that a simple type is there instead.
@@ -386,24 +388,47 @@ pFunction = dbg "function" $ do
   let lambdas = foldr (#->#) e args
   return (Left (name, lambdas))
 
+pADT :: Parser ADTDecl
+pADT = do
+  keyword "data"
+  name <- pIdentifier
+  symbol "="
+  constrs <- pADTConstructor `sepBy` symbol "|"
+  doesNotContinue
+  return (name, constrs)
+
+pADTConstructor :: Parser ADTConstructorDecl 
+pADTConstructor = dbg "ADT Constr" $ do
+  name <- pIdentifier
+  rts <- many $ do
+    fieldName <- pIdentifier
+    symbol "::"
+    fieldType <- choice [SPLL.Parser.pType <&> Left, pIdentifier <&> Right]
+    let fieldRT = case fieldType of 
+                    Left rt -> rt
+                    Right adt -> TADT adt
+    return (fieldName, fieldRT)
+  return (name, rts)
+
 doesNotContinue :: Parser ()
 doesNotContinue = choice [eof, void eol]
 
 pProg :: Parser Program
 pProg = do
   sc
+  adts <- dbg "trying ADTs" (many pADT)
   defs <- dbg "trying definition" (many pDefinition)
   _ <- eof
-  return (aggregateDefinitions defs)
+  return (aggregateDefinitions adts defs)
 
-aggregateDefinitions :: [Either FnDecl NeuralDecl] -> Program
-aggregateDefinitions (Left fn : tail) = Program (fn:fns) neurals
+aggregateDefinitions :: [ADTDecl] -> [Either FnDecl NeuralDecl] -> Program
+aggregateDefinitions adts (Left fn : tail) = Program (fn:fns) neurals adtz
   where
-    Program fns neurals = aggregateDefinitions tail
-aggregateDefinitions (Right nr : tail) = Program fns (nr:neurals)
+    Program fns neurals adtz = aggregateDefinitions adts tail
+aggregateDefinitions adts (Right nr : tail) = Program fns (nr:neurals) adtz
   where
-    Program fns neurals = aggregateDefinitions tail
-aggregateDefinitions [] = Program [] []
+    Program fns neurals adtz = aggregateDefinitions adts tail
+aggregateDefinitions adts [] = Program [] [] adts
 
 tryParseExpr :: FilePath -> String -> Either (ParseErrorBundle String Void) Expr
 tryParseExpr filename src = runParser parseExpr filename src

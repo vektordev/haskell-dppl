@@ -26,7 +26,7 @@ import PrettyPrint
 
 
 optimizeEnv :: CompilerConfig -> IREnv -> IREnv
-optimizeEnv conf = map (\(IRFunGroup name gen prob integ doc) -> IRFunGroup name (pp gen) (prob <&> pp) (integ <&> pp) doc)
+optimizeEnv conf (IREnv funcs adts) = IREnv (map (\(IRFunGroup name gen prob integ doc) -> IRFunGroup name (pp gen) (prob <&> pp) (integ <&> pp) doc) funcs) adts
   where pp (expr, doc) = (postProcess conf expr, doc)
 
 postProcess :: CompilerConfig -> IRExpr -> IRExpr

@@ -1,0 +1,2 @@
+data Lst = Cont hd::Float tl::Lst | Empty
+main = hd (tl (Cont 0.3 (Cont 0.2 Empty)))

@@ -36,19 +36,23 @@ module SPLL.Lang.Lang (
 , elementAt
 , getFunctionNames
 , lookupNeural
+, printFlat
 ) where
 
 import SPLL.Lang.Types
 import SPLL.Typing.PType
 import SPLL.Typing.RType
+import SPLL.Typing.AlgebraicDataTypes
+
 import qualified Data.Set as Set
 import Data.Maybe
-
-
 import qualified Data.Map as Map
 import Control.Applicative (liftA2)
 import Control.Monad.Random.Lazy (Random)
 import Data.Number.Erf (Erf)
+import Data.List (intercalate)
+import Debug.Trace
+
 
 
 toStub :: Expr -> ExprStub
@@ -103,7 +107,7 @@ exprMap f expr = case expr of
   (Lambda t name a) -> Lambda (tInfoMap f t) name (exprMap f a)
   (Apply t a b) -> Apply (tInfoMap f t) (exprMap f a) (exprMap f b)
   (ReadNN t n a) -> ReadNN (tInfoMap f t) n (exprMap f a)
-  
+
 predicateFlat :: (Expr -> Bool) -> Expr -> Bool
 predicateFlat f e = f e && all (predicateFlat f) (getSubExprs e)
 
@@ -111,7 +115,7 @@ containedVars :: (Expr -> Set.Set String) -> Expr -> Set.Set String
 containedVars f e = Set.union (f e) (foldl Set.union Set.empty (map (containedVars f) (getSubExprs e)))
 
 predicateProg :: (Expr -> Bool) -> Program -> Bool
-predicateProg f (Program decls _) = and (map (predicateExpr f . snd) decls)
+predicateProg f (Program decls _ _) = and (map (predicateExpr f . snd) decls)
 
 predicateExpr :: (Expr -> Bool) -> Expr -> Bool
 predicateExpr f e = f e && and (map (predicateExpr f) (getSubExprs e))
@@ -125,9 +129,9 @@ isNotTheta :: Expr -> Bool
 isNotTheta expr = case expr of
   (ThetaI _ _ name) -> False
   _ -> True
-  
+
 tMapHead :: (Expr -> TypeInfo) -> Expr -> Expr
-tMapHead f expr = case expr of 
+tMapHead f expr = case expr of
   (IfThenElse _ a b c) -> IfThenElse (f expr) a b c
   (GreaterThan _ a b) -> GreaterThan (f expr) a b
   (LessThan _ a b) -> LessThan (f expr) a b
@@ -176,7 +180,7 @@ tMapTails f expr = case expr of
   (Apply t a b) -> Apply t (tMap f a) (tMap f b)
 
 tMap :: (Expr -> TypeInfo) -> Expr -> Expr
-tMap f expr = case expr of 
+tMap f expr = case expr of
   (IfThenElse _ a b c) -> IfThenElse (f expr) (tMap f a) (tMap f b) (tMap f c)
   (GreaterThan _ a b) -> GreaterThan (f expr) (tMap f a) (tMap f b)
   (LessThan _ a b) -> LessThan (f expr) (tMap f a) (tMap f b)
@@ -201,10 +205,10 @@ tMap f expr = case expr of
   (ReadNN _ n a) -> ReadNN (f expr) n (tMap f a)
 
 makeMain :: Expr -> Program
-makeMain expr = Program [("main", expr)] []
+makeMain expr = Program [("main", expr)] [] []
 
 tMapProg :: (Expr -> TypeInfo) -> Program -> Program
-tMapProg f (Program decls neural) = Program (zip (map fst decls) (map (tMap f . snd) decls)) neural
+tMapProg f (Program decls neural adts) = Program (zip (map fst decls) (map (tMap f . snd) decls)) neural adts
 
 getBinaryConstructor :: Expr -> (TypeInfo -> Expr -> Expr -> Expr)
 getBinaryConstructor GreaterThan {} = GreaterThan
@@ -265,7 +269,7 @@ arity :: Expr -> Int
 arity e = length $ getSubExprs e
 
 getSubExprs :: Expr -> [Expr]
-getSubExprs expr = case expr of 
+getSubExprs expr = case expr of
   (IfThenElse _ a b c) -> [a,b,c]
   (GreaterThan _ a b) -> [a,b]
   (LessThan _ a b) -> [a,b]
@@ -350,7 +354,7 @@ getTypeInfo expr = case expr of
   (Lambda t _ _)        -> t
   (Apply t _ _)    -> t
   (ReadNN t _ _)        -> t
-  
+
 setTypeInfo :: Expr -> TypeInfo -> Expr
 setTypeInfo expr t = case expr of
   (IfThenElse _ a b c)  -> IfThenElse t a b c
@@ -397,13 +401,17 @@ getRType (VFloat _) = TFloat
 getRType (VList (ListCont a _)) = ListOf $ getRType a
 getRType (VList EmptyList) = NullList
 getRType (VTuple t1 t2) = Tuple (getRType t1) (getRType t2)
-getRType (VEither (Left a)) = TEither (getRType a) SPLL.Typing.RType.NotSetYet 
+getRType (VEither (Left a)) = TEither (getRType a) SPLL.Typing.RType.NotSetYet
 
 lookupNeural :: String -> [NeuralDecl] -> Maybe (RType, Maybe Tag)
 lookupNeural name decls = foldr (\(n, r, t) ret -> if n == name then Just (r, t) else ret) Nothing decls
 
+-- Returns explicit functions declared as well as implicit functions from ADTs
 getFunctionNames :: Program -> [String]
-getFunctionNames p = map fst (functions p)
+getFunctionNames p = explicitFs ++ implicitFs
+  where 
+    explicitFs = map fst (functions p)
+    implicitFs = implicitFunctionNames (adts p)
 
 prettyPrintProg :: Program -> [String]
 prettyPrintProg = prettyPrintProgCustomTI prettyFullTypeInfo
@@ -412,7 +420,10 @@ prettyPrintProgRTyOnly :: Program -> [String]
 prettyPrintProgRTyOnly = prettyPrintProgCustomTI prettyRTypeOnly
 
 prettyPrintProgCustomTI :: (TypeInfo -> String) -> Program -> [String]
-prettyPrintProgCustomTI fn (Program decls neurals) = concatMap (prettyPrintDecl fn) decls ++ concatMap prettyPrintNeural neurals
+prettyPrintProgCustomTI fn (Program decls neurals adts) = concatMap prettyPrintADTs adts ++  concatMap (prettyPrintDecl fn) decls ++ concatMap prettyPrintNeural neurals
+
+prettyPrintADTs :: ADTDecl  -> [String]
+prettyPrintADTs (name, constr) = ("data " ++ name ++ "::"):map (\rts -> "\n|"++ show rts) constr
 
 prettyPrintNeural :: NeuralDecl -> [String]
 prettyPrintNeural (name, ty, range) = l1:l2:(l3 range):[]
@@ -459,7 +470,7 @@ prettyPrintNoReq expr =
       fstLine = printFlatNoReq expr
 
 prettyPrintProgNoReq :: Program -> [String]
-prettyPrintProgNoReq (Program fdecls ndecls) = concatMap prettyPrintDeclNoReq fdecls ++ concatMap prettyPrintNeuralNoReq ndecls
+prettyPrintProgNoReq (Program fdecls ndecls adts) = concatMap prettyPrintADTs adts ++ concatMap prettyPrintDeclNoReq fdecls ++ concatMap prettyPrintNeuralNoReq ndecls
 
 prettyPrintNeuralNoReq :: NeuralDecl -> [String]
 prettyPrintNeuralNoReq (name, ty, range) = l1:l2:(l3 range):[]
@@ -523,4 +534,4 @@ printFlatNoReq expr = case expr of
   (Lambda _ name _) -> "\\" ++ name  ++ " -> "
   Apply {} -> "Apply"
   ReadNN {} -> "ReadNN"
-  
+

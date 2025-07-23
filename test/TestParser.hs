@@ -18,7 +18,7 @@ import ArbitrarySPLL
 import Text.Megaparsec (parse, errorBundlePretty)
 import PrettyPrint
 import Debug.Trace (trace)
-import Data.List (sortBy)
+import Data.List (sortBy, intercalate)
 import Data.Ord (comparing)
 
 
@@ -74,8 +74,14 @@ neuralDeclToString (name, rty, Nothing) = "neural " ++ name ++ " :: " ++ rTypeTo
 neuralDeclToString (name, rty, Just tag) =
     "neural " ++ name ++ " :: " ++ rTypeToString rty ++ " of " ++ tagToString tag
 
+adtDeclToString :: ADTDecl -> String
+adtDeclToString (name, constrs) = name ++ " = " ++ intercalate " | " (map adtConstructorToString constrs)
+
+adtConstructorToString :: ADTConstructorDecl -> String
+adtConstructorToString (name, rts) = name ++ " " ++ unwords (map show rts)
+
 programToString :: Program -> String
-programToString (Program fnDecls neuralDecls) =
+programToString (Program fnDecls neuralDecls adts) =
     unlines (map fnDeclToString fnDecls ++ map neuralDeclToString neuralDecls)
 
 testExpressions :: [(String, Expr)]

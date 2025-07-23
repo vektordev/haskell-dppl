@@ -1,0 +1,3 @@
+data adt = C1 f1::Float f2::Float | C2 f3::Bool f4::Float
+func x = if isC1 x then if f1 x > 0.5 then f2 x else 1.0 - f2 x else if f3 x then f4 x else 1.0 - f4 x
+main = func (C1 0.4 0.75) + func (C2 True 0.125)

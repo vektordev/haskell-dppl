@@ -61,7 +61,7 @@ instance Arbitrary Program where
     numNeurals <- choose (0, 5)
     funcs <- vectorOf numFuncs genFunctionDecl
     neurals <- vectorOf numNeurals genNeuralDecl
-    return $ Program funcs neurals
+    return $ Program funcs neurals []
 
 genFunctionDecl :: Gen FnDecl
 genFunctionDecl = do
@@ -179,4 +179,4 @@ genProgNames names = do
   defs <- mapM (\name -> do
     expr <- genExprNames names
     return (name, expr)) (take def_names names)
-  return (Program defs [])
+  return (Program defs [] [])

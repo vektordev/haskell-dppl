@@ -95,12 +95,16 @@ type Name = String
 
 data Program = Program {
                     functions :: [FnDecl],
-                    neurals :: [NeuralDecl]
+                    neurals :: [NeuralDecl],
+                    adts :: [ADTDecl]
                     } deriving (Show, Eq)
 
 type FnDecl = (String, Expr)
 
 type NeuralDecl = (String, RType, Maybe Tag)
+
+type ADTDecl = (String, [ADTConstructorDecl])
+type ADTConstructorDecl = (String, [(String, RType)])
 
 type WitnessedVars = Set.Set String
 
@@ -131,6 +135,7 @@ data GenericValue a = VBool Bool
            | VBranch (GenericValue a) (GenericValue a) String
            | VThetaTree ThetaTree
            | VClosure [(String, a)] String a 
+           | VADT String [GenericValue a]
            | VAny -- Only used for marginal queries
            -- | Value of TArrow a b could be Expr TypeInfo, with Expr being a Lambda?
            deriving (Show, Eq)
@@ -147,6 +152,7 @@ instance Functor GenericValue where
   fmap f (VBranch x y s) = VBranch (fmap f x) (fmap f y) s
   fmap _ (VThetaTree x) = VThetaTree x
   fmap f (VClosure e n ex) = VClosure (map (Data.Bifunctor.second f) e) n (f ex)
+  fmap f (VADT n adt) = VADT n (map (fmap f) adt)
   fmap _ VAny = VAny
 
 
