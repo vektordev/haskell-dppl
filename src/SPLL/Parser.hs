@@ -94,13 +94,25 @@ pIfThenElse = do
 
 pLetIn :: Parser Expr
 pLetIn = do
-  _ <- symbol "let"
-  name <- pIdentifier
-  _ <- symbol "="
+  symbol "let"
+  lhs <- pExpr
+  symbol "="
   definition <- pExpr
-  _ <- symbol "in"
+  symbol "in"
   scope <- pExpr
-  return (letIn name definition scope)
+  destr <- letInDestructor lhs
+  return $ destr definition scope
+
+-- Parses the identifier part of the letIn and constructs a accessors for letIns
+-- Return type is a \v, b -> Let n = v in b
+letInDestructor :: Expr -> Parser (Expr -> Expr -> Expr)
+letInDestructor (Var _ n) = return $ \e -> letIn n e
+letInDestructor (TCons _ a b) = do
+  a' <- letInDestructor a
+  b' <- letInDestructor b
+  return $ \v body -> a' (tfst v) (b' (tsnd v) body)
+letInDestructor _ = fail "LHS of a letIn sould be an identifier or a complex type of identifiers"
+
 
 --parens :: Parser a -> Parser a
 --parens = between (symbol "(") (symbol ")")
@@ -243,9 +255,9 @@ pFloat :: Parser Value
 pFloat = dbg "float" $ do
   sign <- optional (symbol "-")
   f <- lexeme L.float
-  case sign of 
+  case sign of
     Nothing -> return (VFloat f)
-    Just "-" -> return (VFloat (-f)) 
+    Just "-" -> return (VFloat (-f))
 
 pIntVal :: Parser Value
 pIntVal = dbg "int" $ do
