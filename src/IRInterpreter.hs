@@ -5,7 +5,7 @@ generateRand
 
 import Statistics.Distribution (ContGen, genContVar, quantile, density)
 import SPLL.IntermediateRepresentation
-import SPLL.Lang.Lang (Value(..), ThetaTree(..), Program, elementAt, constructVList, lookupNeural)
+import SPLL.Lang.Lang (Value(..), ThetaTree(..), Program, elementAt, constructVList, lookupNeural, floatApproxEqThresh)
 import StandardLibrary
 import MockNN
 import SPLL.AutoNeural
@@ -160,7 +160,7 @@ generate f neurals globalEnv env [] (IROp OpApprox a b) = do
   aVal <- generate f neurals globalEnv env [] a
   bVal <- generate f neurals globalEnv env [] b
   case (aVal, bVal) of
-    (VFloat af, VFloat bf) -> return $ VBool $ abs (af - bf) <= 1e-10
+    (VFloat af, VFloat bf) -> return $ VBool $ abs (af - bf) <= floatApproxEqThresh
     _ -> error ("Type error: Approx can only evaluate on two floats: " ++ show (aVal, bVal))
 generate f neurals globalEnv env [] (IRUnaryOp OpNot a) = do
   aVal <- generate f neurals globalEnv env [] a

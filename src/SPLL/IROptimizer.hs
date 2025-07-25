@@ -23,6 +23,7 @@ import Data.List (nub)
 import Control.Monad.Supply
 import Data.Foldable (toList)
 import PrettyPrint
+import SPLL.Lang.Lang (floatApproxEqThresh)
 
 
 optimizeEnv :: CompilerConfig -> IREnv -> IREnv
@@ -209,6 +210,7 @@ softForceLogic op left right = IROp op left right     -- Nothing can be done
 
 forceOp :: Operand -> IRValue -> IRValue -> IRValue
 forceOp OpEq x y = VBool (x == y)
+forceOp OpApprox (VFloat x) (VFloat y) = VBool $ abs (x - y) <= floatApproxEqThresh
 forceOp OpMult (VInt x) (VInt y) = VInt (x*y)
 forceOp OpMult (VFloat x) (VFloat y) = VFloat (x*y)
 forceOp OpPlus (VInt x) (VInt y) = VInt (x+y)

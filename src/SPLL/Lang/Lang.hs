@@ -5,6 +5,7 @@ module SPLL.Lang.Lang (
 , Value (..)
 , Program (..)
 , ThetaTree (..)
+, floatApproxEqThresh
 , getTypeInfo
 , setTypeInfo
 , tMap
@@ -104,6 +105,9 @@ exprMap f expr = case expr of
   (Apply t a b) -> Apply (tInfoMap f t) (exprMap f a) (exprMap f b)
   (ReadNN t n a) -> ReadNN (tInfoMap f t) n (exprMap f a)
   
+floatApproxEqThresh :: Double
+floatApproxEqThresh = 1e-10
+
 predicateFlat :: (Expr -> Bool) -> Expr -> Bool
 predicateFlat f e = f e && all (predicateFlat f) (getSubExprs e)
 
