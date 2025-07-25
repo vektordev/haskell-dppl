@@ -360,31 +360,31 @@ pCSV = valueParser `sepBy` (symbol ",")
 
 pDefinition :: Parser (Either FnDecl NeuralDecl)
 pDefinition = do
-  x <- choice [pNeural, pFunction]
+  x <- choice [fmap Right pNeural, fmap Left pFunction]
   doesNotContinue
   return x
 
 --TODO: Add validation via AutoNeural.
-pNeural :: Parser (Either FnDecl NeuralDecl)
+pNeural :: Parser NeuralDecl
 pNeural = dbg "neural" $ do
   _ <- keyword "neural"
   name <- pIdentifier
   _ <- symbol "::"
   ty <- SPLL.Parser.pType
   tag <- optional (symbol "of" *> listOrRange)
-  return $ Right (name, ty, tag)
+  return (name, ty, tag)
     where
       listOrRange = choice [try (pList >>= return . EnumList), pRange >>= return . EnumRange]
 
 
-pFunction :: Parser (Either FnDecl NeuralDecl)
+pFunction :: Parser FnDecl
 pFunction = dbg "function" $ do
   name <- pIdentifier
   args <- many pIdentifier
   _ <- symbol "="
   e <- pExpr
   let lambdas = foldr (#->#) e args
-  return (Left (name, lambdas))
+  return (name, lambdas)
 
 doesNotContinue :: Parser ()
 doesNotContinue = choice [eof, void eol]
