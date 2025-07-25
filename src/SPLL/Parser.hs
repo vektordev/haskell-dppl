@@ -111,6 +111,12 @@ letInDestructor (TCons _ a b) = do
   a' <- letInDestructor a
   b' <- letInDestructor b
   return $ \v body -> a' (tfst v) (b' (tsnd v) body)
+letInDestructor (InjF _ "left" [x]) = do
+  x' <- letInDestructor x
+  return $ \v -> x' (sfromLeft v)
+letInDestructor (InjF _ "right" [x]) = do
+  x' <- letInDestructor x
+  return $ \v -> x' (sfromRight v)
 letInDestructor _ = fail "LHS of a letIn sould be an identifier or a complex type of identifiers"
 
 
