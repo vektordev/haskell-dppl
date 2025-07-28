@@ -117,6 +117,11 @@ letInDestructor (InjF _ "left" [x]) = do
 letInDestructor (InjF _ "right" [x]) = do
   x' <- letInDestructor x
   return $ \v -> x' (sfromRight v)
+letInDestructor (Null _) = return $ \v b -> b -- FIXME Should test whether v is an empty list here
+letInDestructor (Cons _ x xs) = do
+  x' <- letInDestructor x
+  xs' <- letInDestructor xs
+  return $ \v body -> x' (lhead v) (xs' (ltail v) body)
 letInDestructor _ = fail "LHS of a letIn sould be an identifier or a complex type of identifiers"
 
 

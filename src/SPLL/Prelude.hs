@@ -122,6 +122,9 @@ cons = Cons makeTypeInfo
 nul :: Expr
 nul = Null makeTypeInfo
 
+isNull :: Expr -> Expr
+isNull e = injF "isNull" [e]
+
 lhead :: Expr -> Expr
 lhead x = injF "head" [x]
 
