@@ -1,6 +1,6 @@
 module JuliaSPPLLib
 
-export density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, isclose, T,==
+export density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, mapList, isclose, T,==
 
 
 function isAny(x)
@@ -131,6 +131,16 @@ function head(lst::ConsInferenceList)
 end
 function tail(lst::ConsInferenceList)
     lst.next
+end
+
+function mapList(f, lst::EmptyInferenceList)
+    return lst
+end
+
+function mapList(f, lst::ConsInferenceList)
+    val = f(head(lst))
+    rst = mapList(f, tail(lst))
+    return ConsInferenceList(val, rst)
 end
 
 function indexOf(sample, lst::InferenceList)

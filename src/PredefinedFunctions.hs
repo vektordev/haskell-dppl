@@ -125,10 +125,16 @@ tailInv = FDecl (Forall [TV "a"] (ListOf (TVarR (TV "a")) `TArrow` ListOf (TVarR
 
 -- ============================ Higher Order Functions ============================
 
+-- Apply is only a test function for higher order injF
 applyFwd :: FDecl
 applyFwd = FDecl (Forall [TV "a", TV "b"] ((TVarR (TV "a") `TArrow` TVarR (TV "b")) `TArrow` (TVarR (TV "a") `TArrow` TVarR (TV "b")))) ["f", "a"] ["b"] (IRInvoke $ IRApply (IRVar "f") (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
 applyInv :: FDecl
 applyInv = FDecl (Forall [TV "b", TV "a"] ((TVarR (TV "a") `TArrow` TVarR (TV "b")) `TArrow` (TVarR (TV "b") `TArrow` TVarR (TV "a")))) ["f", "b"] ["a"] (IRInvoke $ IRApply (IRVar "f^-1") (IRVar "b")) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
+
+mapFwd :: FDecl
+mapFwd = FDecl (Forall [TV "a", TV "b"] ((TVarR (TV "a") `TArrow` TVarR (TV "b")) `TArrow` (ListOf (TVarR (TV "a")) `TArrow` ListOf (TVarR (TV "b"))))) ["f", "a"] ["b"] (IRMap (IRVar "f") (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
+mapInv :: FDecl
+mapInv = FDecl (Forall [TV "a", TV "b"] ((TVarR (TV "b") `TArrow` TVarR (TV "a")) `TArrow` (ListOf (TVarR (TV "b")) `TArrow` ListOf (TVarR (TV "a"))))) ["f", "b"] ["a"] (IRMap (IRVar "f^-1") (IRVar "b")) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
 
 mapLeftFwd :: FDecl
 mapLeftFwd = FDecl (Forall [TV "a", TV "b", TV "c"] ((TVarR (TV "a") `TArrow` TVarR (TV "c")) `TArrow` (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TEither (TVarR (TV "c")) (TVarR (TV "b"))))) ["f", "a"] ["b"]
@@ -158,6 +164,7 @@ globalFenv = [("double", FPair doubleFwd [doubleInv]),
               ("head", FPair headFwd [headInv]),
               ("tail", FPair tailFwd [tailInv]),
               ("apply", FPair applyFwd [applyInv]),
+              ("map", FPair mapFwd [mapInv]),
               ("mapLeft", FPair mapLeftFwd [mapLeftInv])]
 
 -- Creates a instance of a FPair, that has identifier names given by a monadic function. m should be a supply monad

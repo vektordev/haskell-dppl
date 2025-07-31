@@ -260,6 +260,13 @@ generate f neurals adts globalEnv env args (IRTail listExpr) = do
     VList (ListCont _ AnyList) -> return VAny
     VList (ListCont _ a) -> return $ VList a
     _ -> error "Type error: tail must be called on a non-empty list"
+generate f neurals adts globalEnv env args (IRMap fExpr listExpr) = do
+  listVal <- generate f neurals adts globalEnv env args listExpr
+  case listVal of 
+    VList lst -> do
+      newLst <- mapM (\x -> generate f neurals adts globalEnv env args (IRApply fExpr (IRConst x))) lst
+      return $ VList newLst
+    _ ->  error "Type error: map must be called on a list"
 generate f neurals adts globalEnv env [] (IRElementOf elemExpr listExpr) = do
   elemVal <- generate f neurals adts globalEnv env [] elemExpr
   listVal <- generate f neurals adts globalEnv env [] listExpr

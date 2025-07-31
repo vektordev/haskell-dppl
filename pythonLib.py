@@ -125,6 +125,16 @@ def toList(lst):
     back = back.prepend(x)
   return back
 
+def mapList(f, lst):
+  if isinstance(lst, EmptyInferenceList):
+    return EmptyInferenceList()
+  if isinstance(lst, AnyInferenceList):
+    raise Exception("Cannot map AnyLists")
+  if isinstance(lst, ConsInferenceList):
+    val = f(lst[0])
+    rst = mapList(f, lst[1:])
+    return ConsInferenceList(val, rst)
+
 # ===============================
 # Start of standard lib functions
 # ===============================

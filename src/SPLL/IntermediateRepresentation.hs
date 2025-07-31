@@ -145,6 +145,7 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               | IRTCons IRExpr IRExpr
               | IRHead IRExpr
               | IRTail IRExpr
+              | IRMap IRExpr IRExpr
               | IRTFst IRExpr
               | IRTSnd IRExpr
               | IRLeft IRExpr
@@ -211,6 +212,7 @@ getIRSubExprs (IRCons a b) = [a, b]
 getIRSubExprs (IRTCons a b) = [a, b]
 getIRSubExprs (IRHead a) = [a]
 getIRSubExprs (IRTail a) = [a]
+getIRSubExprs (IRMap f a) = [f, a]
 getIRSubExprs (IRElementOf a b) = [a, b]
 getIRSubExprs (IRTFst a) = [a]
 getIRSubExprs (IRTSnd a) = [a]
@@ -242,6 +244,7 @@ irMap f x = case x of
   (IRTCons left right) -> f (IRTCons (irMap f left) (irMap f right))
   (IRHead expr) -> f (IRHead (irMap f expr))
   (IRTail expr) -> f (IRTail (irMap f expr))
+  (IRMap fe expr) -> f (IRMap (irMap f fe) (irMap f expr))
   (IRElementOf ele lst) -> f (IRElementOf (irMap f ele) (irMap f lst))
   (IRTFst expr) -> f (IRTFst (irMap f expr))
   (IRTSnd expr) -> f (IRTSnd (irMap f expr))
@@ -282,9 +285,16 @@ irPrintFlat (IRCons _ _) = "IRCons"
 irPrintFlat (IRTCons _ _) = "IRTCons"
 irPrintFlat (IRHead _) = "IRHead"
 irPrintFlat (IRTail _) = "IRTail"
+irPrintFlat (IRMap _ _) = "IRMap"
 irPrintFlat (IRElementOf _ _) = "IRElementOf"
 irPrintFlat (IRTFst _) = "IRTFst"
 irPrintFlat (IRTSnd _) = "IRTSnd"
+irPrintFlat (IRLeft _) = "IRLeft"
+irPrintFlat (IRRight _) = "IRRight"
+irPrintFlat (IRFromLeft _) = "IRFromLeft"
+irPrintFlat (IRFromRight _) = "IRFromRight"
+irPrintFlat (IRIsLeft _) = "IRIsLeft"
+irPrintFlat (IRIsRight _) = "IRIsRight"
 irPrintFlat (IRDensity _ _) = "IRDensity"
 irPrintFlat (IRCumulative _ _) = "IRCumulative"
 irPrintFlat (IRSample _) = "IRSample"

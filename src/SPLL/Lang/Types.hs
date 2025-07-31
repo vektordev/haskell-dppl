@@ -123,6 +123,11 @@ instance Foldable GenericList where
   foldMap f (ListCont x xs) = f x `mappend` foldMap f xs
   foldMap f AnyList = error "Cannot fold AnyLists"
 
+instance Traversable GenericList where
+  traverse f EmptyList = pure EmptyList
+  traverse f (ListCont x xs) = ListCont <$> f x <*> traverse f xs
+  traverse _ AnyList = error "AnyLists are not traversable"
+
 type Value = GenericValue Expr
 
 data GenericValue a = VBool Bool
