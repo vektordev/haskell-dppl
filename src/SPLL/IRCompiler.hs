@@ -277,7 +277,7 @@ toIRProbability conf clauses typeEnv (TCons _ t1Expr t2Expr) sample = do
   (t2P, t2Dim, t2Branches) <- toIRProbabilitySave conf clauses typeEnv t2Expr (IRTSnd sample)
   mult <- (t1P, t1Dim) `multP` (t2P, t2Dim)
   return (fst mult, snd mult, IROp OpPlus t1Branches t2Branches)
-toIRProbability conf clauses typeEnv (InjF _ name params@[p0, p1]) sample | isHigherOrder name = do
+toIRProbability conf clauses typeEnv (InjF _ name params) sample | isHigherOrder name = do
   -- FPair of the InjF with unique names
   fPair <- instantiate mkVariable name
   -- Unary InjF has a single inversion
@@ -690,34 +690,81 @@ toIRIntegrate conf clauses typeEnv (ThetaI _ a i) low high = do
   let val = IRTheta a' i
   ind <- indicator (IROp OpAnd (IROp OpLessThan low val) (IROp OpGreaterThan high val)) --TODO What to do if low and high are equal?
   return (ind, const0, const0)
-toIRIntegrate conf clauses typeEnv (InjF _ name [param]) low high = do  --TODO Multivariable
+toIRIntegrate conf clauses typeEnv (InjF _ name params) low high | isHigherOrder name = do
+  -- FPair of the InjF with unique names
   fPair <- instantiate mkVariable name
+  -- Unary InjF has a single inversion
   let FPair _ [inv] = fPair
-  let FDecl {inputVars=[v], body=invExpr, derivatives=[(_, invDerivExpr)]} = inv
-  prefix <- mkVariable ""
+  let FDecl {inputVars=inVars, body=invExpr, applicability=appTest, deconstructing=decons, derivatives=derivs} = inv
+  --Handle the function being in different positions of the signature
+  let aPoss = [0 .. (length params - 1)] \\ getFunctionParamIdx name
+  let aPos = case aPoss of
+        [n] -> n
+        x -> error $ "Expected exectly one non-ho parameter, but got " ++ show (length x)
+  let a = params !! aPos
+  let aVar = inVars !! aPos
+  let fs = map (params !!) (getFunctionParamIdx name)
+  let fVars = map (inVars !!) (getFunctionParamIdx name)
+  let Just invDerivExpr = lookup aVar derivs
+  -- Set sample value to the variable name in the InjF
+  let letInBlockLow = IRLetIn aVar low invExpr
+  let letInBlockHigh = IRLetIn aVar high invExpr
+  -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
+  let integF = if decons then toIRIntegrateSave else toIRIntegrate
+  -- Create all inverses of the ho functions and save them on the variable stack
+  -- Then create a substitution that substitutes f^-1 to f_prob. All substitutions are then composed in the fold
+  renVar <- foldM (\sub tup -> createHOInverse clauses tup <&> (.) sub) id (zip fVars fs)
+  (paramExpr, paramDim, paramBranches) <- integF conf clauses typeEnv a letInBlockLow letInBlockHigh
+  -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
+  let returnP = IROp OpMult paramExpr (IRUnaryOp OpSign invDerivExpr)
+  let appTestExpr e = IRIf appTest e const0
+  return (renVar (appTestExpr returnP), const0, renVar (appTestExpr paramBranches))
+toIRIntegrate conf clauses typeEnv (InjF _ name [param]) low high = do
+  -- FPair of the InjF with unique names
+  fPair <- instantiate mkVariable name
+  -- Unary InjF has a single inversion
+  let FPair _ [inv] = fPair
+  let FDecl {inputVars=[v], body=invExpr, applicability=appTest, deconstructing=decons, derivatives=[(_, invDerivExpr)]} = inv
+  -- Set sample value to the variable name in the InjF
   let letInBlockLow = IRLetIn v low invExpr
   let letInBlockHigh = IRLetIn v high invExpr
-  (paramExpr, _, paramBranches) <- toIRIntegrate conf clauses typeEnv param letInBlockLow letInBlockHigh
-  let returnExpr = IROp OpMult paramExpr (IRUnaryOp OpSign invDerivExpr)
-  return (returnExpr, const0, paramBranches)
+  -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
+  let integF = if decons then toIRIntegrateSave else toIRIntegrate
+  -- Get the probabilistic inference code for the parameter
+  (paramExpr, paramDim, paramBranches) <- integF conf clauses typeEnv param letInBlockLow letInBlockHigh
+  -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
+  let returnP = IROp OpMult paramExpr (IRUnaryOp OpSign invDerivExpr)
+  let appTestExpr e = IRIf appTest e const0
+  return (appTestExpr returnP, const0, appTestExpr paramBranches)
 toIRIntegrate conf clauses typeEnv (InjF TypeInfo {tags=extras} name params) low high
   | extras `hasAlgorithm` "injF2Left" || extras `hasAlgorithm` "injF2Right" = do
+  -- Index of the deterministic and the probabilistic parameter (Left -> 0, Right -> 1)
   let detIdx = if extras `hasAlgorithm` "injF2Left" then 0 else 1
-  let probIdx = 1 - detIdx  -- Other Variable is prob
-  fPair <- instantiate mkVariable name
-  let FPair fwd inversions = fPair
-  let FDecl {inputVars=inVars, outputVars=[v1]} = fwd
-  let [invDecl] = filter (\(FDecl {outputVars=[w1]}) -> (inVars !! probIdx)==w1) inversions   --This should only return one inversion
-  let FDecl {inputVars=[x2, x3], body=invExpr, derivatives=invDerivs} = invDecl
+  let probIdx = 1 - detIdx
+  -- FPair of the InjF with unique names
+  FPair fwd inversions <- instantiate mkVariable name
+  let FDecl{inputVars=inVars, outputVars=[v1]} = fwd
+  -- Find the inversion with all deterministic input parameters
+  let [invDecl] = filter (\FDecl {outputVars=[w1]} -> (inVars !! probIdx)==w1) inversions   --This should only return one inversion
+  let FDecl {inputVars=[x2, x3], body=invExpr, applicability=appTest, deconstructing=decons, derivatives=invDerivs} = invDecl
+  -- Find the relevant derivative of the inversion
   let Just invDeriv = lookup v1 invDerivs
-  leftExpr <- toIRGenerate typeEnv (params !! detIdx)
+  -- Generate the probabilistic sub expressions
+  detExpr <- toIRGenerate typeEnv (params !! detIdx)
+  -- Get the variable names of the detetministic subexpression and the result of the fwd expression
   let (detVar, sampleVar) = if x2 == (inVars !! detIdx) then (x2, x3) else (x3, x2)
-  tell [(detVar, leftExpr)]
-  let letInBlockLow = (IRLetIn sampleVar low invExpr)
-  let letInBlockHigh = (IRLetIn sampleVar high invExpr)
-  (paramExpr, _, paramBranches) <- toIRIntegrate conf clauses typeEnv (params !! probIdx) letInBlockLow letInBlockHigh
-  let returnExpr = IROp OpMult paramExpr (IRUnaryOp OpSign invDeriv)
-  return (returnExpr, const0, paramBranches)
+  -- Set all known values to their variable names in the InjF
+  tell [(detVar, detExpr)]
+  let letInBlockLow = IRLetIn sampleVar low invExpr
+  let letInBlockHigh = IRLetIn sampleVar high invExpr
+  -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
+  let integF = if decons then toIRIntegrateSave else toIRIntegrate
+  -- Get the probabilistic inference expression of the non-deterministic subexpression
+  (paramExpr, paramDim, paramBranches) <- integF conf clauses typeEnv (params !! probIdx) letInBlockLow letInBlockHigh
+  -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula if dim > 0
+  let returnP = IROp OpMult paramExpr (IRUnaryOp OpSign invDeriv)
+  let appTestExpr e = IRIf appTest e const0
+  return (appTestExpr returnP, const0, appTestExpr paramBranches)
 toIRIntegrate conf clauses typeEnv (Lambda t name subExpr) low high = do
   let (TArrow paramRType _) = rType t
   case paramRType of

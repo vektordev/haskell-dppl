@@ -143,6 +143,13 @@ mapLeftInv :: FDecl
 mapLeftInv = FDecl (Forall [TV "a", TV "b", TV "c"] ((TVarR (TV "c") `TArrow` TVarR (TV "a")) `TArrow` (TEither (TVarR (TV "c")) (TVarR (TV "b")) `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b"))))) ["f", "b"] ["a"]
               (IRIf (IRIsLeft (IRVar "b")) (IRLeft (IRInvoke $ IRApply (IRVar "f^-1") (IRFromLeft (IRVar "b")))) (IRVar "b")) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
 
+mapEitherFwd :: FDecl
+mapEitherFwd = FDecl (Forall [TV "a", TV "b", TV "c", TV "d"] ((TVarR (TV "a") `TArrow` TVarR (TV "c")) `TArrow` ((TVarR (TV "b") `TArrow` TVarR (TV "d")) `TArrow` (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TEither (TVarR (TV "c")) (TVarR (TV "d")))))) ["f", "g", "a"] ["b"]
+              (IRIf (IRIsLeft (IRVar "a")) (IRLeft (IRInvoke $ IRApply (IRVar "f") (IRFromLeft (IRVar "a")))) (IRRight (IRInvoke $ IRApply (IRVar "g") (IRFromRight (IRVar "a"))))) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
+mapEitherInv :: FDecl
+mapEitherInv = FDecl (Forall [TV "a", TV "b", TV "c", TV "d"] ((TVarR (TV "c") `TArrow` TVarR (TV "a")) `TArrow` ((TVarR (TV "d") `TArrow` TVarR (TV "b")) `TArrow` (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TEither (TVarR (TV "c")) (TVarR (TV "d")))))) ["f", "g", "b"] ["a"]
+              (IRIf (IRIsLeft (IRVar "b")) (IRLeft (IRInvoke $ IRApply (IRVar "f^-1") (IRFromLeft (IRVar "b")))) (IRRight (IRInvoke $ IRApply (IRVar "g^-1") (IRFromRight (IRVar "b"))))) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
+
 
 globalFenv :: FEnv
 globalFenv = [("double", FPair doubleFwd [doubleInv]),
@@ -165,7 +172,8 @@ globalFenv = [("double", FPair doubleFwd [doubleInv]),
               ("tail", FPair tailFwd [tailInv]),
               ("apply", FPair applyFwd [applyInv]),
               ("map", FPair mapFwd [mapInv]),
-              ("mapLeft", FPair mapLeftFwd [mapLeftInv])]
+              ("mapLeft", FPair mapLeftFwd [mapLeftInv]),
+              ("mapEither", FPair mapEitherFwd [mapEitherInv])]
 
 -- Creates a instance of a FPair, that has identifier names given by a monadic function. m should be a supply monad
 -- Works by having each identifier renamed using this function
@@ -216,7 +224,7 @@ getFunctionParamIdx name =
   where
     findArrowParameter rt =
       case rt of
-        TArrow (TArrow _ _) _ -> [0]
+        TArrow (TArrow _ _) a -> 0: map (+1) (findArrowParameter a)
         TArrow _ a -> map (+1) (findArrowParameter a)
         _ -> []
 
