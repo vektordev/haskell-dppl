@@ -250,3 +250,33 @@ failConversionFwd = error "Error during value conversion. This should not happen
 
 failConversionRev :: IRExpr -> Expr
 failConversionRev = error "Error during value conversion. This should not happen"
+
+fPairsFromADT :: ADTDecl -> [FPair]
+fPairsFromADT (name, constrs) = concatMap (fPairsFromADTConstructor name) constrs
+
+fPairsFromADTConstructor :: String -> ADTConstructorDecl  -> [FPair]
+fPairsFromADTConstructor adtName constr@(constrName, fields) = FPair fwdConstr (map invConstr fieldNames):map (fPairFromADTField adtRT constr) fields
+  where
+    adtRT = TADT adtName
+    fieldNames = map fst fields
+    -- Rename fields so that they don' clash with the accessor functions
+    fieldNames' = map ("f_" ++) fieldNames
+    fieldRTs = map snd fields
+    constrRT = foldr TArrow (TADT adtName) fieldRTs
+    applicationExpr = foldl (\e n -> IRApply e (IRVar n)) (IRVar constrName) fieldNames'
+    derivs = map (\n -> (n, IRConst $ VFloat 1)) fieldNames'
+    fwdConstr = FDecl (Forall [] constrRT) fieldNames' ["b"] applicationExpr (IRConst $ VBool True) False derivs
+    rtOfField f = fromJust $ lookup f fields
+    -- FIXME Probably chekc whether parameter is indeed of this constructor in applicability test
+    invConstr f = FDecl (Forall [] (adtRT `TArrow` rtOfField f)) ["b"] ["f_" ++ f] (IRApply (IRVar f) (IRVar "b")) (IRConst $ VBool True) True [(f, IRConst $ VFloat 1)]
+fPairFromADTField :: RType -> ADTConstructorDecl -> (String, RType) -> FPair
+fPairFromADTField adtRT constr (fieldName, fieldRT) = FPair fwd [inv]
+  where
+    -- FIXME Probably chekc whether parameter is indeed of this constructor in applicability test
+    fwd = FDecl (Forall [] (adtRT `TArrow` fieldRT)) ["a"] ["b"] (IRApply (IRVar fieldName) (IRVar "a")) (IRConst $ VBool True) True [("a", IRConst $ VFloat 1)]
+    inv = FDecl (Forall [] (fieldRT `TArrow` adtRT)) ["b"] ["a"] (allAnyFieldsExcept constr fieldName (IRVar "b")) (IRConst $ VBool True) False [("b", IRConst $ VFloat 1)]
+
+allAnyFieldsExcept :: ADTConstructorDecl -> String -> IRExpr -> IRExpr
+allAnyFieldsExcept (constrName, fields) toFill fillExpr = foldl IRApply (IRVar "constrName") fieldValues
+  where
+    fieldValues = map (\(fieldName, _) -> if fieldName == toFill then fillExpr else IRConst VAny) fields
