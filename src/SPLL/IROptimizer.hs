@@ -53,7 +53,7 @@ fixedPointIteration f x = if fx == x then x else fixedPointIteration f fx
   where fx = f x
 
 optimize :: CompilerConfig -> IRExpr -> IRExpr
-optimize conf = irMap (commonSubexprStage . applyConstStage . assiciativityStage . letInStage . constantDistrStage . simplifyStage . indexStage . distributeConditionals . lambdaApplicationStage)
+optimize conf = irMap (commonSubexprStage . applyConstStage . assiciativityStage . letInStage . constantDistrStage . simplifyStage . indexStage . distributeConditionals . lambdaApplicationStage . pruneAnyCkecksStage)
   where
     oLvl = optimizerLevel conf
     commonSubexprStage = if False then optimizeCommonSubexpr else id -- Too buggy to use
@@ -65,6 +65,7 @@ optimize conf = irMap (commonSubexprStage . applyConstStage . assiciativityStage
     indexStage = if oLvl >= 1 then indexmagic else id
     distributeConditionals = if oLvl >= 2 then distributeIf else id
     lambdaApplicationStage = if oLvl >= 2 then optimizeLambdaApplication else id
+    pruneAnyCkecksStage = if pruneAnyChecks conf then pruneAnyCkecksExpr else id
 
 indexmagic :: IRExpr -> IRExpr
 -- if calling Apply ("indexOf") elem [0..], replace with elem
@@ -301,6 +302,10 @@ extractSubexpr body (sub, name) = trace report $ IRLetIn name sub newBody
 optimizeLambdaApplication :: IRExpr -> IRExpr
 optimizeLambdaApplication (IRInvoke (IRApply (IRLambda n body) appl)) = replaceAll (IRVar n) appl body
 optimizeLambdaApplication x = x
+
+pruneAnyCkecksExpr :: IRExpr -> IRExpr
+pruneAnyCkecksExpr (IRUnaryOp OpIsAny _) = IRConst $ VBool False
+pruneAnyCkecksExpr x = x
 
 isDet :: IRExpr  -> Bool
 isDet (IRSample _) = False

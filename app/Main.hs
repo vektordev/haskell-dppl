@@ -25,6 +25,7 @@ data GlobalOpts = GlobalOpts {
   countBranches :: Bool,
   topKCutoff :: Maybe Double,
   optimiziationLevel :: Int,
+  pruneAnys :: Bool,
   commandOpts :: CommandOpts
 }
 
@@ -93,6 +94,9 @@ parseGlobalOpts = GlobalOpts
             <> showDefault
             <> value 2
             <> metavar "OPTIMIZATION" )
+        <*> switch
+            ( long "pruneAnyChecks"
+            <> help "Prune any-checks from compiled code. WARNING: This may lead to unexpected results. You should probably leave this off")
         <*> hsubparser (
           command "compile" (info parseCompileOpts (progDesc "Compiles the program with inference interface into target language"))
           <> command "generate" (info parseGenerateOpts (progDesc "Runs the generate pass of the program"))
@@ -152,9 +156,9 @@ main = transpile =<< execParser opts
             <> header "Haskell DPPL" )
 
 transpile :: GlobalOpts -> IO ()
-transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl}) = do
+transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl, pruneAnys=anyChecks}) = do
   prog <- parseProgram inFile
-  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl})
+  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks})
   case options of
     CompileOpts{language=lang, outputFile=outFile, trunc=trnc} -> do
       transpiled <- codeGenToLang lang trnc conf prog

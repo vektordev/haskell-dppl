@@ -10,6 +10,7 @@ module SPLL.IntermediateRepresentation (
 , Varname
 , IRValue
 , CompilerConfig(..)
+, defaultCompilerConfig
 , irMap
 , getIRSubExprs
 , lookupIREnv
@@ -186,8 +187,12 @@ data CompilerConfig = CompilerConfig {
   topKThreshold :: Maybe Double,
   countBranches :: Bool,
   verbose :: Int,
-  optimizerLevel :: Int
+  optimizerLevel :: Int,
+  pruneAnyChecks :: Bool
 } deriving (Show)
+
+defaultCompilerConfig :: CompilerConfig
+defaultCompilerConfig = CompilerConfig {countBranches = False, topKThreshold = Nothing, optimizerLevel = 2, verbose = 0, pruneAnyChecks = False}
 --3: convert algortihm-and-type-annotated Exprs into abstract representation of explicit computation:
 --    Fold enum ranges, algorithms, etc. into a representation of computation that can be directly converted into code.
 

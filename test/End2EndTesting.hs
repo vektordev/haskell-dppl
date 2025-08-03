@@ -25,9 +25,6 @@ import SPLL.Typing.RType
 import Test.QuickCheck hiding (verbose)
 import Debug.Trace
 
-standardCompiler :: CompilerConfig
-standardCompiler = CompilerConfig {countBranches = False, topKThreshold = Nothing, optimizerLevel = 2, verbose = 0}
-
 getAllTestFiles :: IO [(FilePath, FilePath)]
 getAllTestFiles = do
   files <- listDirectory "testCases"
@@ -56,17 +53,17 @@ parseProbTestCases fp = do
 
 testInterpreter :: Program -> TestCase -> Property
 testInterpreter p (ProbTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = do
-  let VTuple (VFloat outProb) (VFloat outDim) = runProb standardCompiler p params sample
+  let VTuple (VFloat outProb) (VFloat outDim) = runProb defaultCompilerConfig p params sample
   counterexample ("Probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < 0.0001) .&&.
     counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim)
 testInterpreter p (ArgmaxPTestCase name params res) = ioProperty $ do
   let paramCnt = length params
   let mockedParams seeds = map (\(par, s) -> VTuple (VInt 1) (VTuple par (VInt s))) (zip params seeds)
   let mockedParamsList start = map mockedParams [[x .. x + (paramCnt-1)] | x <- [start, paramCnt..]]  -- [[((1, (p1, 0)), (1, (p2, 1)))], [(1, (p1, 2)), (1, (p2, 3))] ..]
-  let resP = runProb standardCompiler p (head (mockedParamsList 0)) res
+  let resP = runProb defaultCompilerConfig p (head (mockedParamsList 0)) res
   let cntSamples = 100
-  samples <- evalRandIO $ mapM (runGen standardCompiler p) (take cntSamples (mockedParamsList paramCnt))
-  let samplesP = map (\(par, s) -> runProb standardCompiler p par s) (zip (take cntSamples (mockedParamsList (paramCnt * cntSamples))) samples)
+  samples <- evalRandIO $ mapM (runGen defaultCompilerConfig p) (take cntSamples (mockedParamsList paramCnt))
+  let samplesP = map (\(par, s) -> runProb defaultCompilerConfig p par s) (zip (take cntSamples (mockedParamsList (paramCnt * cntSamples))) samples)
   return $ conjoin (map (\(s, p) -> counterexample ("Test Case " ++ name ++ ": Sample " ++ show s ++ " has highest probability: " ++ show p ++ " instead of sample " ++ show res ++ " with probability: " ++ show resP) (p `lessEqualsProbs` resP)) (zip samples samplesP))
 
 lessEqualsProbs :: IRValue -> IRValue -> Bool
@@ -84,8 +81,8 @@ discreteProbsNormalized p = counterexample "Probability of randomly sampled valu
     sampleCnt = 1000
     sufficientlyNormal = 0.99
     prob (VTuple (VFloat p) _) = p
-    sumProbSamples samples = sum $ map (\sam -> prob $ runProb standardCompiler p params sam) samples
-    pSamples = nub $ evalRand ((replicateM sampleCnt randomParams) >>= mapM (runGen standardCompiler p) ) (mkStdGen 42)
+    sumProbSamples samples = sum $ map (\sam -> prob $ runProb defaultCompilerConfig p params sam) samples
+    pSamples = nub $ evalRand ((replicateM sampleCnt randomParams) >>= mapM (runGen defaultCompilerConfig p) ) (mkStdGen 42)
     randomParams = (replicateM paramCnt (getRandomR (1, 100000))) >>= mapM (\x -> return $ VTuple (VInt 0) (VInt x)) :: RandomGen g => Rand g [IRValue] -- Create a list of random ints and then make them into a tuple
 
 progParameterCount :: Program -> Int
@@ -97,7 +94,7 @@ progParameterCount Program{functions=f} = countLambdas main
 
 testProbJulia :: Program -> [TestCase] -> Property
 testProbJulia p tc = ioProperty $ do
-  let src = intercalate "\n" (SPLL.CodeGenJulia.generateFunctions (compile standardCompiler p))
+  let src = intercalate "\n" (SPLL.CodeGenJulia.generateFunctions (compile defaultCompilerConfig p))
   (_, _, _, handle) <- createProcess (proc "julia" ["-e", juliaProbTestCode src tc])
   code <- waitForProcess handle
   case code of
@@ -106,7 +103,7 @@ testProbJulia p tc = ioProperty $ do
 
 testProbPython :: Program -> [TestCase] -> Property
 testProbPython p tc = ioProperty $ do
-  let src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True (compile standardCompiler p))
+  let src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True (compile defaultCompilerConfig p))
   (_, _, _, handle) <- createProcess (proc "python3" ["-c", pythonProbTestCode src tc])
   code <- waitForProcess handle
   case code of

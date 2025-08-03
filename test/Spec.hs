@@ -182,9 +182,6 @@ invalidTestCases = [invalidDuplicateDecl1, invalidDuplicateDecl2, invalidDuplica
                                   --(testCallLambdaAdvanced, VFloat 2, VFloat 3, [], VFloat 1.0),
                                   --(testLetIn, VFloat 1.5, VFloat 2, [], VFloat 0.5)]
 
-noTopKConfig :: CompilerConfig
-noTopKConfig = CompilerConfig Nothing False 0 2
-
 prop_CheckValidPrograms :: Property
 prop_CheckValidPrograms = forAll (elements correctProbValuesTestCases) checkValidPrograms
 
@@ -229,9 +226,8 @@ prop_any = forAll (elements correctProbValuesTestCases) checkProbAny
 prop_CheckReadmeCodeListing1 :: Property
 prop_CheckReadmeCodeListing1 = ioProperty $ do
   let twoDice = Program [("main", dice 6 #<+># dice 6)] [] []
-  let conf = CompilerConfig {verbose=0, topKThreshold=Nothing, countBranches=False, optimizerLevel=2}
-  gen <- evalRandIO (runGen conf twoDice [])
-  let VTuple (VFloat prob) (VFloat dim) = runProb conf twoDice [] gen
+  gen <- evalRandIO (runGen defaultCompilerConfig twoDice [])
+  let VTuple (VFloat prob) (VFloat dim) = runProb defaultCompilerConfig twoDice [] gen
   -- Original Listing above, Tests below
   if gen == (VInt 2) || gen == (VInt 12) then
     return $ (VFloat prob) `reasonablyClose` (VFloat $ 1/36)
@@ -252,9 +248,8 @@ prop_CheckReadmeCodeListing1 = ioProperty $ do
 prop_CheckReadmeCodeListing2 :: Property
 prop_CheckReadmeCodeListing2 = ioProperty $ do
   let dist = Program [("main", normal #*# constF 2 #+# constF 1)] [] []
-  let conf = CompilerConfig {verbose=0, topKThreshold=Nothing, countBranches=False, optimizerLevel=2}
-  gen <- evalRandIO (runGen conf dist [])
-  let VTuple (VFloat prob) (VFloat dim) = runProb conf dist [] gen
+  gen <- evalRandIO (runGen defaultCompilerConfig dist [])
+  let VTuple (VFloat prob) (VFloat dim) = runProb defaultCompilerConfig dist [] gen
   -- Original Listing above, Tests below
   let (VFloat genF) = gen
   return $ (VFloat prob) `reasonablyClose` (VFloat (normalPDF ((genF - 1) / 2) / 2))
@@ -327,7 +322,7 @@ irDensityTopK :: RandomGen g => Program -> Double -> IRValue -> [IRExpr]-> Rand 
 irDensityTopK p thresh s params = IRInterpreter.generateRand (neurals p) irEnv (sampleExpr:params) irExpr
   where Just (irExpr, _) = probFun (lookupIREnv "main" irEnv)
         sampleExpr = IRConst s
-        irEnv = envToIR (CompilerConfig (Just thresh) False 0 2) annotated
+        irEnv = envToIR defaultCompilerConfig {topKThreshold = Just thresh} annotated
         annotated = annotateAlgsProg typedProg
         typedProg = addTypeInfo preAnnotated
         preAnnotated = annotateEnumsProg p
@@ -336,7 +331,7 @@ irDensityBC :: RandomGen g => Program -> IRValue -> [IRExpr]-> Rand g IRValue
 irDensityBC p s params = IRInterpreter.generateRand (neurals p) irEnv (sampleExpr:params) irExpr
   where Just (irExpr, _) = probFun (lookupIREnv "main" irEnv)
         sampleExpr = IRConst s
-        irEnv = envToIR (CompilerConfig Nothing True 0 2) annotated
+        irEnv = envToIR defaultCompilerConfig {countBranches = True} annotated
         annotated = annotateAlgsProg typedProg
         typedProg = addTypeInfo preAnnotated
         preAnnotated = annotateEnumsProg p
@@ -345,7 +340,7 @@ irDensity :: RandomGen g => Program -> IRValue -> [IRExpr] -> Rand g IRValue
 irDensity p s params = IRInterpreter.generateRand (neurals p) irEnv (sampleExpr:params) irExpr
   where Just (irExpr, _) = probFun (lookupIREnv "main" irEnv)
         sampleExpr = IRConst s
-        irEnv = envToIR noTopKConfig annotated
+        irEnv = envToIR defaultCompilerConfig annotated
         annotated = annotateAlgsProg typedProg
         typedProg = addTypeInfo preAnnotated
         preAnnotated = annotateEnumsProg p
@@ -355,7 +350,7 @@ irIntegral p low high params = IRInterpreter.generateRand (neurals p) irEnv (low
   where Just (irExpr, _) = integFun (lookupIREnv "main" irEnv)
         lowExpr = IRConst low
         highExpr = IRConst high
-        irEnv = envToIR noTopKConfig annotated
+        irEnv = envToIR defaultCompilerConfig annotated
         annotated = annotateAlgsProg typedProg
         typedProg = addTypeInfo preAnnotated
         preAnnotated = annotateEnumsProg p
@@ -363,7 +358,7 @@ irIntegral p low high params = IRInterpreter.generateRand (neurals p) irEnv (low
 irGen :: RandomGen g => Program -> [IRExpr] -> Rand g IRValue
 irGen p params = IRInterpreter.generateRand (neurals p) irEnv params irExpr
   where (irExpr, _) = genFun (lookupIREnv "main" irEnv)
-        irEnv = envToIR noTopKConfig annotated
+        irEnv = envToIR defaultCompilerConfig annotated
         annotated = annotateAlgsProg typedProg
         typedProg = addTypeInfo preAnnotated
         preAnnotated = annotateEnumsProg p
@@ -439,7 +434,7 @@ testSamplingProb _ _ _ _ = False ==> False
 {-irInterpret :: RandomGen g => Program () Double -> [IRExpr] -> Rand g Value
 irInterpret p params = IRInterpreter.generate irEnv irEnv [] params main
   where Just main = lookup "main_prob" irEnv
-        irEnv = envToIR noTopKConfig annotated
+        irEnv = envToIR defaultCompilerConfig annotated
         annotated = map (\(a,b) -> (a, annotate b)) env
         env = progToEnv typedProg
         typedProg = addTypeInfo p
