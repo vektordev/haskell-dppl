@@ -1,0 +1,1 @@
+main = map (\x -> x + 1.0) [Uniform, Uniform + 1.0, 2.0]
