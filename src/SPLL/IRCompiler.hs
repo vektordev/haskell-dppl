@@ -277,6 +277,43 @@ toIRProbability conf clauses typeEnv (TCons _ t1Expr t2Expr) sample = do
   (t2P, t2Dim, t2Branches) <- toIRProbabilitySave conf clauses typeEnv t2Expr (IRTSnd sample)
   mult <- (t1P, t1Dim) `multP` (t2P, t2Dim)
   return (fst mult, snd mult, IROp OpPlus t1Branches t2Branches)
+toIRProbability conf clauses typeEnv (InjF TypeInfo {tags=extras} name [left, right]) sample
+  | extras `hasAlgorithm` "injF2Enumerable" = do
+  -- Get all possible values for subexpressions
+  let extrasLeft = tags $ getTypeInfo left
+  let extrasRight = tags $ getTypeInfo right
+  let enumListL = head $ [x | EnumList x <- extrasLeft]
+  let enumListR = head $ [x | EnumList x <- extrasRight]
+
+  fPair <- instantiate mkVariable name -- FPair of the InjF with unique names
+  let FPair fwd inversions = fPair
+  let FDecl {inputVars=[v2, v3], outputVars=[v1]} = fwd
+  -- We get the inversion to the right side
+  let [invDecl] = filter (\(FDecl {outputVars=[w1]}) -> v3==w1) inversions   --This should only return one inversion
+  let FDecl {inputVars=[x2, x3], body=invExpr} = invDecl
+
+  -- We now compute
+  -- for each e in leftEnum:
+  --   sum += if invExpr(e, sample) in rightEnum then pLeft(e) * pRight(sample - e) else 0
+  -- For that we name e like the lhs of
+  -- We need to unfold the monad stack, because the EnumSum Works like a lambda expression and has a local scope
+  irTuple <- lift (runWriterT (do
+    -- the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
+    (pLeft, _, _) <- toIRProbability conf clauses typeEnv left (IRVar x2)
+    (pRight, _, _) <- toIRProbability conf clauses typeEnv right (IROp OpSub sample (IRVar x2))
+    tell [(x3, sample)]
+    let returnExpr = case topKThreshold conf of
+          Nothing -> IRIf (IRElementOf invExpr (IRConst (fmap failConversion (constructVList enumListR)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
+          Just thr -> IRIf (IROp OpAnd (IRElementOf invExpr (IRConst (fmap failConversion (constructVList enumListR)))) (IROp OpGreaterThan pLeft (IRConst (VFloat thr)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
+    let branchesExpr = case topKThreshold conf of
+          Nothing -> IRIf (IRElementOf invExpr (IRConst (fmap failConversion (constructVList enumListR)))) (IRConst (VFloat 1)) (IRConst (VFloat 0))
+          Just thr -> IRIf (IROp OpAnd (IRElementOf invExpr (IRConst (fmap failConversion (constructVList enumListR)))) (IROp OpGreaterThan pLeft (IRConst (VFloat thr)))) (IRConst (VFloat 1)) (IRConst (VFloat 0))
+    return (returnExpr, const0, branchesExpr)
+    )) <&> generateLetInBlock conf
+  uniquePrefix <- mkVariable ""
+  let enumSumExpr = IREnumSum x2 (fmap failConversion (constructVList enumListL)) $ IRTFst irTuple
+  let branchCountSum = IREnumSum x2 (fmap failConversion (constructVList enumListL)) $ IRTSnd (IRTSnd irTuple)
+  return (irMap (uniqueify [x2, x3] uniquePrefix) enumSumExpr, const0, irMap (uniqueify [x2, x3] uniquePrefix) branchCountSum)
 toIRProbability conf clauses typeEnv (InjF _ name params) sample | isHigherOrder name = do
   -- FPair of the InjF with unique names
   fPair <- instantiate mkVariable name
@@ -321,25 +358,36 @@ toIRProbability conf clauses typeEnv (InjF _ name [param]) sample = do
   let returnP = IROp OpMult paramExpr (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDerivExpr))
   let appTestExpr e = IRIf appTest e const0
   return (appTestExpr returnP, appTestExpr paramDim, appTestExpr paramBranches)
-toIRProbability conf clauses typeEnv (InjF TypeInfo {tags=extras} name params) sample
-  | extras `hasAlgorithm` "injF2Left" || extras `hasAlgorithm` "injF2Right" = do
-  -- Index of the deterministic and the probabilistic parameter (Left -> 0, Right -> 1)
-  let detIdx = if extras `hasAlgorithm` "injF2Left" then 0 else 1
-  let probIdx = 1 - detIdx
+toIRProbability conf clauses typeEnv e@(InjF TypeInfo {tags=extras, rType=rt} name params) sample
+  | isNothing (getProbIndex params) = do
+  -- There is no probabilistic parameter
+  -- Check whether the value of the function is equal to the sample
+  expr <- toIRGenerate typeEnv e
+  let cmp = case rt of
+        TFloat -> OpApprox
+        _ -> OpEq
+  retExpr <- indicator $ IROp cmp expr sample
+  return (retExpr, const0, const0)
+toIRProbability conf clauses typeEnv e@(InjF TypeInfo {tags=extras} name params) sample
+  | isJust (getProbIndex params) = do
   -- FPair of the InjF with unique names
   FPair fwd inversions <- instantiate mkVariable name
   let FDecl{inputVars=inVars, outputVars=[v1]} = fwd
+  -- Index of the deterministic and the probabilistic parameter (Left -> 0, Right -> 1)
+  let Just probIdx = getProbIndex params
+  let detIdxs = [0..length params - 1] \\ [probIdx]
   -- Find the inversion with all deterministic input parameters
   let [invDecl] = filter (\FDecl {outputVars=[w1]} -> (inVars !! probIdx)==w1) inversions   --This should only return one inversion
-  let FDecl {inputVars=[x2, x3], body=invExpr, applicability=appTest, deconstructing=decons, derivatives=invDerivs} = invDecl
+  let FDecl {inputVars=invVars, body=invExpr, applicability=appTest, deconstructing=decons, derivatives=invDerivs} = invDecl
+  -- All deterministic variable names
+  let detVars = filter (v1 /=) invVars
+  let detEs = map (params !!) detIdxs
+
   -- Find the relevant derivative of the inversion
   let Just invDeriv = lookup v1 invDerivs
   -- Generate the probabilistic sub expressions
-  detExpr <- toIRGenerate typeEnv (params !! detIdx)
-  -- Get the variable names of the detetministic subexpression and the result of the fwd expression
-  let (detVar, sampleVar) = if x2 == (inVars !! detIdx) then (x2, x3) else (x3, x2)
-  -- Set all known values to their variable names in the InjF
-  tell [(detVar, detExpr), (sampleVar, sample)]
+  mapM_ (\(eVar, e) -> toIRGenerate typeEnv e >>= \x -> tell [(eVar, x)]) (zip detVars detEs)
+  tell [(v1, sample)]
   -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
   let probF = if decons then toIRProbabilitySave else toIRProbability
   -- Get the probabilistic inference expression of the non-deterministic subexpression
@@ -348,43 +396,6 @@ toIRProbability conf clauses typeEnv (InjF TypeInfo {tags=extras} name params) s
   let returnP = IROp OpMult paramExpr (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDeriv))
   let appTestExpr e = IRIf appTest e const0
   return (appTestExpr returnP, appTestExpr paramDim, appTestExpr paramBranches)
-toIRProbability conf clauses typeEnv (InjF TypeInfo {tags=extras} name [left, right]) sample
-  | extras `hasAlgorithm` "injF2Enumerable" = do
-  -- Get all possible values for subexpressions
-  let extrasLeft = tags $ getTypeInfo left
-  let extrasRight = tags $ getTypeInfo right
-  let enumListL = head $ [x | EnumList x <- extrasLeft]
-  let enumListR = head $ [x | EnumList x <- extrasRight]
-
-  fPair <- instantiate mkVariable name -- FPair of the InjF with unique names
-  let FPair fwd inversions = fPair
-  let FDecl {inputVars=[v2, v3], outputVars=[v1]} = fwd
-  -- We get the inversion to the right side
-  let [invDecl] = filter (\(FDecl {outputVars=[w1]}) -> v3==w1) inversions   --This should only return one inversion
-  let FDecl {inputVars=[x2, x3], body=invExpr} = invDecl
-
-  -- We now compute
-  -- for each e in leftEnum:
-  --   sum += if invExpr(e, sample) in rightEnum then pLeft(e) * pRight(sample - e) else 0
-  -- For that we name e like the lhs of
-  -- We need to unfold the monad stack, because the EnumSum Works like a lambda expression and has a local scope
-  irTuple <- lift (runWriterT (do
-    -- the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
-    (pLeft, _, _) <- toIRProbability conf clauses typeEnv left (IRVar x2)
-    (pRight, _, _) <- toIRProbability conf clauses typeEnv right (IROp OpSub sample (IRVar x2))
-    tell [(x3, sample)]
-    let returnExpr = case topKThreshold conf of
-          Nothing -> IRIf (IRElementOf invExpr (IRConst (fmap failConversion (constructVList enumListR)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
-          Just thr -> IRIf (IROp OpAnd (IRElementOf invExpr (IRConst (fmap failConversion (constructVList enumListR)))) (IROp OpGreaterThan pLeft (IRConst (VFloat thr)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
-    let branchesExpr = case topKThreshold conf of
-          Nothing -> IRIf (IRElementOf invExpr (IRConst (fmap failConversion (constructVList enumListR)))) (IRConst (VFloat 1)) (IRConst (VFloat 0))
-          Just thr -> IRIf (IROp OpAnd (IRElementOf invExpr (IRConst (fmap failConversion (constructVList enumListR)))) (IROp OpGreaterThan pLeft (IRConst (VFloat thr)))) (IRConst (VFloat 1)) (IRConst (VFloat 0))
-    return (returnExpr, const0, branchesExpr)
-    )) <&> generateLetInBlock conf
-  uniquePrefix <- mkVariable ""
-  let enumSumExpr = IREnumSum x2 (fmap failConversion (constructVList enumListL)) $ IRTFst irTuple
-  let branchCountSum = IREnumSum x2 (fmap failConversion (constructVList enumListL)) $ IRTSnd (IRTSnd irTuple)
-  return (irMap (uniqueify [x2, x3] uniquePrefix) enumSumExpr, const0, irMap (uniqueify [x2, x3] uniquePrefix) branchCountSum)
 toIRProbability conf clauses typeEnv (Null _) sample = do
   expr <- indicator (IROp OpEq sample (IRConst $ VList EmptyList))
   return (expr, const0, const0)
@@ -482,6 +493,18 @@ createHOInverse clauses (fVar, f) = do
   let renVar = renameVar (fVar ++ "^-1") (fVar ++ "_prob")
   tell [(fVar ++ "_prob", inverseLambda)]
   return $ renVar
+
+getProbIndex :: [Expr] -> Maybe Int
+--getProbIndex es | traceShow es False = undefined
+getProbIndex es =
+  case filter (\(p, _) -> p == Prob || p == Integrate) zipped of
+    [(_, i)] -> Just i
+    [] -> Nothing
+    _ -> error "More than one probabilistic argument found"
+  where
+    pt x = pType (getTypeInfo x)
+    pTypes = map pt es
+    zipped = zip pTypes [0..]
 
 packParamsIntoLetinsProb :: [String] -> [Expr] -> IRExpr -> IRExpr -> Supply Int IRExpr
 --packParamsIntoLetinsProb [] [] expr _ = do
