@@ -84,6 +84,14 @@ generateADTClass (name, fields) =
   ["end"] ++
   -- Is function
   ["is" ++ name ++ "(x) = x isa " ++ name] ++
+  -- Equals function
+  ("Base.:(==)(other::Any, self::" ++ name ++") = begin"):
+    indentOnce
+      (("if (!(other isa " ++ name ++ ")) return false end"):
+      -- Compare every field
+      map (\f -> "if(!eq(self." ++ f ++ ", other." ++ f ++ ")) return false end") fieldNames ++ 
+      ["return true"]) ++
+  ["end"] ++
   -- Field acceessors
   concatMap (\f ->
     ("function " ++ f ++ "(x :: " ++ name ++ ")") :

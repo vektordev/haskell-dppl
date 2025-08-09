@@ -1,5 +1,5 @@
 module PredefinedFunctions (
-globalFenv,
+globalFEnv,
 FPair(..),
 FDecl(..),
 FEnv,
@@ -151,8 +151,9 @@ mapEitherInv = FDecl (Forall [TV "a", TV "b", TV "c", TV "d"] ((TVarR (TV "c") `
               (IRIf (IRIsLeft (IRVar "b")) (IRLeft (IRInvoke $ IRApply (IRVar "f^-1") (IRFromLeft (IRVar "b")))) (IRRight (IRInvoke $ IRApply (IRVar "g^-1") (IRFromRight (IRVar "b"))))) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
 
 
-globalFenv :: FEnv
-globalFenv = [("double", FPair doubleFwd [doubleInv]),
+
+globalFenv' :: FEnv
+globalFenv' = [("double", FPair doubleFwd [doubleInv]),
               ("exp", FPair expFwd [expInv]),
               ("neg", FPair negFwd [negInv]),
               ("recip", FPair recipFwd [recipInv]),
@@ -175,11 +176,14 @@ globalFenv = [("double", FPair doubleFwd [doubleInv]),
               ("mapLeft", FPair mapLeftFwd [mapLeftInv]),
               ("mapEither", FPair mapEitherFwd [mapEitherInv])]
 
+globalFEnv :: [ADTDecl] -> FEnv
+globalFEnv adts = globalFenv' ++ concatMap fPairsFromADT adts
+
 -- Creates a instance of a FPair, that has identifier names given by a monadic function. m should be a supply monad
 -- Works by having each identifier renamed using this function
-instantiate :: (Monad m) => (String -> m String) -> String -> m FPair
-instantiate gen n = do
-  let (FPair fwd inv) = case lookup n globalFenv of
+instantiate :: (Monad m) => (String -> m String) -> [ADTDecl] -> String -> m FPair
+instantiate gen adts n = do
+  let (FPair fwd inv) = case lookup n (globalFEnv adts) of
                              Just f -> f
                              Nothing -> error ("InjF " ++ n ++ " not found!")
   let FDecl {inputVars=v1, outputVars=v2} = fwd
@@ -204,9 +208,9 @@ renameDecl old new FDecl {contract=sig, inputVars=inVars, outputVars=outVars, bo
     renS s = if s == old then new else s  -- A function that replaces old string with new strings
 
 
-isHigherOrder :: String -> Bool
-isHigherOrder name =
-  case lookup name globalFenv of
+isHigherOrder :: [ADTDecl] -> String -> Bool
+isHigherOrder adts name =
+  case lookup name (globalFEnv adts) of
     Nothing -> False
     Just (FPair FDecl {contract=Forall _ c} _) -> hasArrowParameter c
   where
@@ -216,9 +220,9 @@ isHigherOrder name =
         TArrow _ a -> hasArrowParameter a
         _ -> False
 
-getFunctionParamIdx :: String -> [Int]
-getFunctionParamIdx name =
-  case lookup name globalFenv of
+getFunctionParamIdx :: [ADTDecl] -> String -> [Int]
+getFunctionParamIdx adts name =
+  case lookup name (globalFEnv adts) of
     Nothing -> []
     Just (FPair FDecl {contract=Forall _ c} _) -> findArrowParameter c
   where
@@ -228,8 +232,8 @@ getFunctionParamIdx name =
         TArrow _ a -> map (+1) (findArrowParameter a)
         _ -> []
 
-propagateValues :: String -> [[Value]] -> [Value]
-propagateValues name values = case results of
+propagateValues :: [ADTDecl] -> String -> [[Value]] -> [Value]
+propagateValues adts name values = case results of
   Left s -> []
   Right l -> map (fmap failConversionRev) l
   where
@@ -237,11 +241,11 @@ propagateValues name values = case results of
     letInBlocks = map (foldr (\(n, p) e -> IRLetIn n (IRConst (fmap failConversionFwd p)) e) fwdExpr) namedParams
     namedParams = map (zip paramNames) valueProd
     valueProd = sequence values
-    Just (FPair FDecl {inputVars = paramNames, body = fwdExpr} _) = lookup name globalFenv
+    Just (FPair FDecl {inputVars = paramNames, body = fwdExpr} _) = lookup name (globalFEnv adts)
 
-parameterCount :: String -> Int
-parameterCount name = do
-  case lookup name globalFenv of
+parameterCount :: [ADTDecl] -> String -> Int
+parameterCount adts name = do
+  case lookup name (globalFEnv adts) of
     Just (FPair FDecl {inputVars=params} _) -> length params
     _ -> error $ "Unknown InjF: " ++ name
 
@@ -251,11 +255,11 @@ failConversionFwd = error "Error during value conversion. This should not happen
 failConversionRev :: IRExpr -> Expr
 failConversionRev = error "Error during value conversion. This should not happen"
 
-fPairsFromADT :: ADTDecl -> [FPair]
+fPairsFromADT :: ADTDecl -> [(String, FPair)]
 fPairsFromADT (name, constrs) = concatMap (fPairsFromADTConstructor name) constrs
 
-fPairsFromADTConstructor :: String -> ADTConstructorDecl  -> [FPair]
-fPairsFromADTConstructor adtName constr@(constrName, fields) = FPair fwdConstr (map invConstr fieldNames):map (fPairFromADTField adtRT constr) fields
+fPairsFromADTConstructor :: String -> ADTConstructorDecl  -> [(String, FPair)]
+fPairsFromADTConstructor adtName constr@(constrName, fields) = (constrName, FPair fwdConstr (map invConstr fieldNames)):map (fPairFromADTField adtRT constr) fields
   where
     adtRT = TADT adtName
     fieldNames = map fst fields
@@ -265,18 +269,19 @@ fPairsFromADTConstructor adtName constr@(constrName, fields) = FPair fwdConstr (
     constrRT = foldr TArrow (TADT adtName) fieldRTs
     applicationExpr = foldl (\e n -> IRApply e (IRVar n)) (IRVar constrName) fieldNames'
     derivs = map (\n -> (n, IRConst $ VFloat 1)) fieldNames'
-    fwdConstr = FDecl (Forall [] constrRT) fieldNames' ["b"] applicationExpr (IRConst $ VBool True) False derivs
+    fwdConstr = FDecl (Forall [] constrRT) fieldNames' ["b"] (IRInvoke applicationExpr) (IRConst $ VBool True) False derivs
     rtOfField f = fromJust $ lookup f fields
     -- FIXME Probably chekc whether parameter is indeed of this constructor in applicability test
-    invConstr f = FDecl (Forall [] (adtRT `TArrow` rtOfField f)) ["b"] ["f_" ++ f] (IRApply (IRVar f) (IRVar "b")) (IRConst $ VBool True) True [(f, IRConst $ VFloat 1)]
-fPairFromADTField :: RType -> ADTConstructorDecl -> (String, RType) -> FPair
-fPairFromADTField adtRT constr (fieldName, fieldRT) = FPair fwd [inv]
+    invConstr f = FDecl (Forall [] (adtRT `TArrow` rtOfField f)) ["b"] ["f_" ++ f] (IRInvoke $ IRApply (IRVar f) (IRVar "b")) (IRConst $ VBool True) True [(f, IRConst $ VFloat 1)]
+
+fPairFromADTField :: RType -> ADTConstructorDecl -> (String, RType) -> (String, FPair)
+fPairFromADTField adtRT constr (fieldName, fieldRT) = (fieldName, FPair fwd [inv])
   where
     -- FIXME Probably chekc whether parameter is indeed of this constructor in applicability test
-    fwd = FDecl (Forall [] (adtRT `TArrow` fieldRT)) ["a"] ["b"] (IRApply (IRVar fieldName) (IRVar "a")) (IRConst $ VBool True) True [("a", IRConst $ VFloat 1)]
-    inv = FDecl (Forall [] (fieldRT `TArrow` adtRT)) ["b"] ["a"] (allAnyFieldsExcept constr fieldName (IRVar "b")) (IRConst $ VBool True) False [("b", IRConst $ VFloat 1)]
+    fwd = FDecl (Forall [] (adtRT `TArrow` fieldRT)) ["a"] ["b"] (IRInvoke $ IRApply (IRVar fieldName) (IRVar "a")) (IRConst $ VBool True) True [("a", IRConst $ VFloat 1)]
+    inv = FDecl (Forall [] (fieldRT `TArrow` adtRT)) ["b"] ["a"] (IRInvoke $ allAnyFieldsExcept constr fieldName (IRVar "b")) (IRConst $ VBool True) False [("b", IRConst $ VFloat 1)]
 
 allAnyFieldsExcept :: ADTConstructorDecl -> String -> IRExpr -> IRExpr
-allAnyFieldsExcept (constrName, fields) toFill fillExpr = foldl IRApply (IRVar "constrName") fieldValues
+allAnyFieldsExcept (constrName, fields) toFill fillExpr = foldl IRApply (IRVar constrName) fieldValues
   where
     fieldValues = map (\(fieldName, _) -> if fieldName == toFill then fillExpr else IRConst VAny) fields

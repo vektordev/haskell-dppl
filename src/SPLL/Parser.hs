@@ -31,7 +31,7 @@ import SPLL.Lang.Types
 import SPLL.Lang.Lang
 import SPLL.Typing.Typing
 import SPLL.Typing.RType
-import PredefinedFunctions (globalFenv, parameterCount)
+import PredefinedFunctions (globalFEnv, parameterCount)
 import SPLL.Prelude
 import Debug.Trace
 import Data.Functor ((<&>))
@@ -132,19 +132,6 @@ pExpr = dbg "expr" $ choice [
 -}
 
 -- TODO: I think this parser should accept any pExpr instead of identifiers. Might get ambiguous parses though.
-pApply :: Parser Expr
-pApply = dbg "apply" $ do
-  function <- pMaybeApply
-  args <- some pMaybeApply
-  case function of
-    (Var _ name) -> case lookup name binaryFs of
-      Just constructor -> return (construct2 constructor args)
-      Nothing -> case lookup name unaryFs of
-        Just constructor -> return (construct1 constructor args)
-        Nothing -> case lookup name injFs of
-          Just (expectedParams, constructor) -> return (constructN expectedParams constructor args)
-          Nothing -> return (applyN function args)
-    otherwise -> return (applyN function args)
 
 pTheta :: Parser Expr
 pTheta = dbg "theta" $ do
@@ -215,9 +202,6 @@ unaryFs :: [(String, Expr -> Expr)]
 unaryFs = [
   ("negate", negF)
   ]
-
-injFs :: [(String, (Int, [Expr] -> Expr))]
-injFs = [(name, (parameterCount name, injF name)) | (name, _) <- globalFenv]
 
 pValue :: Parser Value
 pValue = choice [pBool, try pFloat, pIntVal, pTupleVal, pEither, pAny, pList <&> constructVList, pThetaTree <&> VThetaTree]
@@ -441,7 +425,7 @@ tryParseProgram filename src = do
     Left err -> Left $ ParseErrorBundle ((FancyError 0 (Set.singleton (ErrorFail err))) :| []) emptyPosState
 
 emptyPosState :: PosState String
-emptyPosState = PosState "" 0 (SourcePos "" (mkPos 0)(mkPos 0)) (mkPos 0) ""
+emptyPosState = PosState "" 0 (initialPos "<string>") (mkPos 0) ""
 
 testParse :: IO ()
 testParse = do
@@ -518,8 +502,8 @@ application = dbg "application" $do
             Just constructor -> return (construct2 constructor args)
             Nothing -> case lookup name unaryFs of
                 Just constructor -> return (construct1 constructor args)
-                Nothing -> case lookup name injFs of
-                  Just (expectedParams, constructor) -> return (constructN expectedParams constructor args)
+                Nothing -> case lookup name (globalFEnv []) of
+                  Just _ -> return (constructN (parameterCount [] name) (injF name) args)
                   Nothing -> return $ foldl apply func args
         _ -> return $ foldl apply func args
 
@@ -617,7 +601,7 @@ type BuilderMap = Map.Map String ExprBuilder
 normalize :: Program -> Either String Program
 normalize prog =
   let neuralMap = buildNeuralMap (neurals prog)
-      invMap = buildInvMap globalFenv
+      invMap = buildInvMap (adts prog)
       functionMap = globalFunctions prog
       --benignVars = collectBenignVars prog
       builderMap = Map.unions [neuralMap, invMap]  -- neural builders take precedence
@@ -630,13 +614,13 @@ buildNeuralMap :: [NeuralDecl] -> BuilderMap
 buildNeuralMap decls = Map.fromList
   [(name, \[arg] -> Right $ readNN name arg) | (name, _, _) <- decls]
 
-buildInvMap :: [(String, a)] -> BuilderMap
-buildInvMap fenv = Map.fromList
+buildInvMap :: [ADTDecl] -> BuilderMap
+buildInvMap adts = Map.fromList
   [(name, \args -> case args of
-    [] -> Left $ name ++ " requires arguments"
-    --[_] -> Left $ name ++ " requires multiple arguments"
+    a | length a /= parameterCount adts name -> Left $ "Wrong number of parameters for InjF " ++ name ++ " expected " ++ show (parameterCount adts name) ++ " got " ++ show (length a)
     _ -> Right $ injF name args)
-   | (name, _) <- fenv]
+   | name <- fNames]
+  where fNames = map fst (globalFEnv adts)
 
 globalFunctions :: Program -> BuilderMap
 globalFunctions prog = Map.fromList [(name, \[] -> Right $ var name) | (name, _) <- functions prog]
@@ -672,11 +656,15 @@ normalizeExpr env@(parametricBuilders, atomicBuilders, benign) expr =
           let (base, args) = collectApplyChain expr
           in case base of
             Var _ fname | Just builder <- Map.lookup fname parametricBuilders ->
-              builder args  -- builder now takes [Expr]
+              case builder args of
+                Left _ -> Right expr' -- This prevents InjFs, which have multiple arguments from failing to build because here only one argument is applied
+                e -> e
             _ -> Right expr
         Apply ti (Var _ fname) arg
           | not (Set.member fname benign)
-          , Just builder <- Map.lookup fname parametricBuilders -> builder [arg]
+          , Just builder <- Map.lookup fname parametricBuilders -> case builder [arg] of
+            Left _ -> Right expr' -- This prevents InjFs, which have multiple arguments from failing to build because here only one argument is applied
+            e -> e
         Var ti fname
           | not (Set.member fname benign)
           , Just builder <- Map.lookup fname atomicBuilders -> builder []
@@ -687,6 +675,9 @@ collectApplyChain :: Expr -> (Expr, [Expr])
 collectApplyChain (Apply _ left arg) =
   let (base, args) = collectApplyChain left
   in (base, args ++ [arg])  -- maintain order of application
+-- Quick and dirty fix for multi parameter InjFs. The normalizatzion first creates a 1 parameter InjF and then stops with the normalization
+-- We bypass this by tricking the normalization  that the InjF is in reality an application on a variable
+collectApplyChain (InjF t name args) = (Var t name, args)
 collectApplyChain e = (e, [])
 
 -- Helper to map over all expressions in a program

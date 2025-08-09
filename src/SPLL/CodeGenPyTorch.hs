@@ -144,12 +144,20 @@ generateADTClass (name, fields) =
   ["class " ++ name ++ ":"]++
   indentOnce (
     -- Constructor
-    ("def __init__(self, " ++ intercalate ", " fieldNames ++ "):") :
+    (("def __init__(self, " ++ intercalate ", " fieldNames ++ "):") :
     case fieldNames of 
       [] -> indentOnce ["pass"]
       fieldNames -> indentOnce (
-        map (\f -> "self." ++f ++ " = " ++ f) fieldNames)
-  ) ++
+        map (\f -> "self." ++f ++ " = " ++ f) fieldNames))
+  ) ++ [""] ++
+  indentOnce (
+    "def __eq__(self, other):":
+      indentOnce (
+        ("if not isinstance(other, " ++ name ++ "): return False"):
+        map (\f -> "if not eq(self." ++ f ++ ", other." ++ f ++ "): return False") fieldNames ++
+        ["return True"]
+      )
+  ) ++ [""] ++
   -- Is function
   ["def is" ++ name ++ "(x):"] ++
   indentOnce ["return isinstance(x, " ++ name ++ ")"] ++

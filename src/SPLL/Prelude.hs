@@ -169,7 +169,7 @@ fix = "f" #->#
 
 
 compile :: CompilerConfig -> Program -> IREnv
-compile _ p | isLeft (validateProgram p) = error $ fromLeft "" (validateProgram p)
+compile _ p | isLeft (validateProgram p) = pTraceShow p $ error $ fromLeft "" (validateProgram p)
 compile conf p = fromJust $ do
   printIfVerbose conf "=== Parsed Program ==="
   pPrintIfMoreVerbose conf p

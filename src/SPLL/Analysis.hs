@@ -18,24 +18,25 @@ import PredefinedFunctions
 
 
 annotateEnumsProg :: Program -> Program
-annotateEnumsProg p@Program {functions=f, neurals=n} = p{functions = map (\(name, expr) -> (name, annotateIfNotRecursive name (exprEnv++neuralEnv) expr)) f}
+annotateEnumsProg p@Program {functions=f, neurals=n, adts=adts} = p{functions = map (\(name, expr) -> (name, annotateIfNotRecursive adts name (exprEnv++neuralEnv) expr)) f}
   --TODO this is really unclean. It does the the job of initializing the environment with correct tags, and also prevents infinite recursion, by only evaluating twice, but annotates the program twice
   where
-    exprEnv = map (second (tags . getTypeInfo . annotate [])) f
+    exprEnv = map (second (tags . getTypeInfo . annotate adts [])) f
     neuralEnv = map (\(n, _, Just t) -> (n, [t])) (filter (\(_, _, mTag) -> isJust mTag) n)
 
-annotateIfNotRecursive :: String -> [(String, [Tag])] -> Expr -> Expr
-annotateIfNotRecursive name _ e | isRecursive name e = e
-annotateIfNotRecursive _ env e = annotate env e
-annotate :: [(String, [Tag])] -> Expr -> Expr
+annotateIfNotRecursive :: [ADTDecl] -> String -> [(String, [Tag])] -> Expr -> Expr
+annotateIfNotRecursive _ name _ e | isRecursive name e = e
+annotateIfNotRecursive adts _ env e = annotate adts env e
+
+annotate :: [ADTDecl] -> [(String, [Tag])] -> Expr -> Expr
 --annotate _ e | trace ((show e)) False = undefined
-annotate env e = withNewTypeInfo
+annotate adts env e = withNewTypeInfo
   where
     withNewTypeInfo = setTypeInfo withNewSubExpr (setTags (getTypeInfo withNewSubExpr) tgs)
     newEnv = case withNewSubExpr of
       (LetIn _ n v _) -> (n, tags $ getTypeInfo v):env
       _ -> env
-    withNewSubExpr = setSubExprs e (map (annotate newEnv) (getSubExprs e))
+    withNewSubExpr = setSubExprs e (map (annotate adts newEnv) (getSubExprs e))
     tgs = if null values then [] else [EnumList values]
     values = case withNewSubExpr of
       (Constant _ a@(VInt _)) -> [a]
@@ -45,7 +46,7 @@ annotate env e = withNewTypeInfo
         _ -> error $ "Invalid Neural declaration for " ++ name ++ ".\n    found:" ++ show env
       (InjF _ name params) -> do
         let paramValues = map getValuesFromExpr params
-        propagateValues name paramValues
+        propagateValues adts name paramValues
       (IfThenElse _ _ left right) -> do
         let valuesLeft = getValuesFromExpr left
         let valuesRight = getValuesFromExpr right

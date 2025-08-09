@@ -33,7 +33,7 @@ type ReducedIREnv = [(String, IRExpr)]
 
 generateRand :: (RandomGen g) => [NeuralDecl] -> IREnv -> [IRExpr]-> IRExpr -> Rand g IRValue
 generateRand neurals env = generate f neurals adts startingEnv startingEnv
-  where 
+  where
     f = RandomFunctions {
       uniformGen = irSample IRUniform,
       normalGen= irSample IRNormal}
@@ -43,7 +43,7 @@ generateRand neurals env = generate f neurals adts startingEnv startingEnv
 generateDet :: [NeuralDecl] -> IREnv -> [IRExpr]-> IRExpr -> Either String IRValue
 --generateDet neurals env | traceShow neurals False = undefined
 generateDet neurals env = generate f neurals adts startingEnv startingEnv
-  where 
+  where
     f = RandomFunctions {
       uniformGen = Left "Uniform Gen is not det",
       normalGen = Left "Normal Gen is not det"}
@@ -143,23 +143,25 @@ generate f neurals adts globalEnv env [] (IROp OpAnd a b) = do
     --(_, VAny) -> return VAny
     _ -> error ("Type error: Or can only evaluate on two booleans: " ++ show (aVal, bVal))
 generate f neurals adts globalEnv env [] (IROp OpEq a b) = do
-  aVal <- generate f neurals adts globalEnv env [] a
-  bVal <- generate f neurals adts globalEnv env [] b
-  case (aVal, bVal) of
-    (VBool af, VBool bf) -> return $ VBool (af == bf)
-    (VFloat af, VFloat bf) -> return $ VBool (af == bf)
-    (VInt af, VInt bf) -> return $ VBool (af == bf)
-    (VList af, VList bf) -> return $ VBool (af == bf)
-    (VTuple af1 af2, VTuple bf1 bf2) -> 
-      let eqAny VAny _ = True
-          eqAny _ VAny = True
-          eqAny a b = a == b in
-            return $ VBool (eqAny af1 bf1 && eqAny af2 bf2)
-    (VEither af, VEither bf) -> return $ VBool (af == bf)
-    -- Any is not equal to anything
-    (VAny, b) -> return $ VBool False
-    (a, VAny) -> return $ VBool False
-    _ -> error ("Type error: Equals can only evaluate on two values: " ++ show (aVal, bVal))
+  aVal' <- generate f neurals adts globalEnv env [] a
+  bVal' <- generate f neurals adts globalEnv env [] b
+  let cmp aVal bVal = case (aVal, bVal) of
+        (VBool af, VBool bf) -> af == bf
+        (VFloat af, VFloat bf) -> af == bf
+        (VInt af, VInt bf) -> af == bf
+        (VList af, VList bf) -> af == bf
+        (VTuple af1 af2, VTuple bf1 bf2) ->
+          let eqAny VAny _ = True
+              eqAny _ VAny = True
+              eqAny a b = a == b in
+                (eqAny af1 bf1 && eqAny af2 bf2)
+        (VEither af, VEither bf) -> af == bf
+        (VADT n1 vs1, VADT n2 vs2) -> n1 == n2 && all (\(v1, v2) -> v1 == VAny || v2 == VAny || cmp v1 v2) (zip vs1 vs2)
+        -- Any is not equal to anything
+        (VAny, b) -> False
+        (a, VAny) -> False
+        _ -> error ("Type error: Equals can only evaluate on two values: " ++ show (aVal, bVal))
+  return $ VBool (cmp aVal' bVal')
 generate f neurals adts globalEnv env [] (IROp OpApprox a b) = do
   aVal <- generate f neurals adts globalEnv env [] a
   bVal <- generate f neurals adts globalEnv env [] b
@@ -262,7 +264,7 @@ generate f neurals adts globalEnv env args (IRTail listExpr) = do
     _ -> error "Type error: tail must be called on a non-empty list"
 generate f neurals adts globalEnv env args (IRMap fExpr listExpr) = do
   listVal <- generate f neurals adts globalEnv env args listExpr
-  case listVal of 
+  case listVal of
     VList lst -> do
       newLst <- mapM (\x -> generate f neurals adts globalEnv env args (IRApply fExpr (IRConst x))) lst
       return $ VList newLst
@@ -327,7 +329,7 @@ generate f neurals adts globalEnv env args (IRVar name) | "_mock" `isSuffixOf` n
   let (rt, tags) = fromJust (lookupNeural (iterate init name !! 5) neurals)
   let realRT (TSymbol `TArrow` r) = r
   let partPlan = makePartitionPlan (realRT rt) tags
-  case lookup symbolEnvName env of 
+  case lookup symbolEnvName env of
     Nothing -> error "No symbol found in the environment"
     Just sym -> do
       symVal <- generate f neurals adts globalEnv env args sym
@@ -363,7 +365,7 @@ generate f neurals adts globalEnv env [] (IREvalNN name sym) = do
   let realRT (TSymbol `TArrow` r) = r
   let partPlan = makePartitionPlan (realRT rt) tags
   symVal <- generate f neurals adts globalEnv env [] sym
-  return $ evaluateMockNN partPlan symVal 
+  return $ evaluateMockNN partPlan symVal
 generate f neurals adts globalEnv env args (IRIndex lstExpr idxExpr) = do
   lst <- generate f neurals adts globalEnv env args lstExpr
   idx <- generate f neurals adts globalEnv env args idxExpr

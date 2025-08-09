@@ -5,7 +5,7 @@ import SPLL.Lang.Types (Program(..), GenericValue(..))
 import SPLL.Lang.Lang (Expr(..), getSubExprs, getFunctionNames)
 import Control.Monad
 import Data.Maybe (isJust, isNothing)
-import PredefinedFunctions (globalFenv, parameterCount)
+import PredefinedFunctions (globalFEnv, parameterCount)
 
 -- This function returns nothing if the program is valid and an error else
 validateProgram :: Program -> Either String ()
@@ -19,15 +19,15 @@ validateProgram p@Program{functions=fn, neurals=nurals} = sequence_ exprValidati
     validateAllSubexpressions p topLevel expr = validateExpression p topLevel expr : concatMap (validateAllSubexpressions p topLevel) (getSubExprs expr)
 
 validateExpression :: Program -> Expr -> Expr -> Either String ()
-validateExpression _ _ (InjF _ name _) | isNothing (lookup name globalFenv) = Left ("Cannot find InjF: " ++ name)
-validateExpression _ _ (InjF _ name params) | parameterCount name /= length params = Left("Wrong number of arguments for InjF " ++ name ++ "expected: " ++ show (parameterCount name) ++ " got: " ++ show (length params))
+validateExpression Program {adts=adts} _ (InjF _ name _) | isNothing (lookup name (globalFEnv adts)) = Left ("Cannot find InjF: " ++ name)
+validateExpression Program {adts=adts} _ (InjF _ name params) | parameterCount adts name /= length params = Left("Wrong number of arguments for InjF " ++ name ++ "expected: " ++ show (parameterCount adts name) ++ " got: " ++ show (length params))
 validateExpression _ _ (LetIn _ name val _) | declarationsCount name val > 0 = Left ("Duplicate declaration of identifier (Shawdowing is not allowed): " ++ name)
 validateExpression _ _ (LetIn _ name _ body) | declarationsCount name body > 0 = Left ("Duplicate declaration of identifier (Shawdowing is not allowed): " ++ name)
-validateExpression _ _ (LetIn _ name _ _) | isJust (lookup name globalFenv) = Left ("Identifier name is already used by an InjF: " ++ name)
+validateExpression Program {adts=adts} _ (LetIn _ name _ _) | isJust (lookup name (globalFEnv adts)) = Left ("Identifier name is already used by an InjF: " ++ name)
 validateExpression p _ (LetIn _ name _ _) | name `elem` getFunctionNames p = Left ("Identifier is already a function name: " ++ name)
 validateExpression p topLevel (Var _ name) | usedBeforeDeclaration name topLevel && notElem name (getFunctionNames p) = Left ("Identifier is used without declaration: " ++ name)
 validateExpression _ _ (Lambda _ name body) | declarationsCount name body > 0 = Left ("Duplicate declaration of identifier (Shawdowing is not allowed): " ++ name)
-validateExpression _ _ (Lambda _ name body) | isJust (lookup name globalFenv) = Left ("Identifier name is already used by an InjF: " ++ name)
+validateExpression Program {adts=adts} _ (Lambda _ name body) | isJust (lookup name (globalFEnv adts)) = Left ("Identifier name is already used by an InjF: " ++ name)
 validateExpression p _ (Lambda _ name body) | name `elem` getFunctionNames p = Left ("Identifier is already a function name: " ++ name)
 validateExpression _ _ (Constant _ VAny) = Left "ANY may not be used in program declaration"
 validateExpression _ _ _ = Right ()

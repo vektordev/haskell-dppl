@@ -28,7 +28,7 @@ import SPLL.Typing.Typing
 import SPLL.Typing.RType
 --import SPLL.Typing.PType( PType(..) )
 import SPLL.InferenceRule
-import PredefinedFunctions (globalFenv, FPair(..), FDecl(..))
+import PredefinedFunctions (globalFEnv, FPair(..), FDecl(..))
 import Debug.Trace
 import SPLL.Lang.Types (FnDecl, ADTDecl)
 import SPLL.Typing.AlgebraicDataTypes
@@ -186,7 +186,7 @@ basicTEnv :: [ADTDecl] -> TEnv
 basicTEnv adts = TypeEnv $ Map.fromList $ (adtRTs ++ injFRTs)
   where
     adtRTs = map (Data.Bifunctor.second toScheme) (concatMap implicitFunctionRTypes adts)
-    injFRTs = map (\(name, FPair FDecl {contract=ty} _) -> (name, ty)) globalFenv
+    injFRTs = map (\(name, FPair FDecl {contract=ty} _) -> (name, ty)) (globalFEnv adts)
     -- plain RTypes as they exist in globalFEnv are implicitly forall'd. Make it explicit.
     toScheme :: RType -> Scheme
     toScheme rty = Forall freeVars rty
@@ -232,7 +232,7 @@ testInferProg p = do
   -- env building with (name, scheme) for infer methods
   let func_tvs = zip (map fst decls) (map (Forall []) tvs)
   -- infer the type and constraints of the declaration expressions
-  cts <- trace ("func_tvs:" ++ show func_tvs) $ mapM ((inTEnvF func_tvs . infer) . snd) decls
+  cts <- trace ("func_tvs:" ++ show func_tvs) $ mapM ((inTEnvF func_tvs . infer adts) . snd) decls
   -- building the constraints that the built type variables of the functions equal
   -- the inferred function type
   let tcs = zipWith (\t1 t2 -> Constraint t1 t2 (Just "TopLevel")) (map (rtFromScheme . snd) func_tvs) (map fst3cts cts)
@@ -260,7 +260,7 @@ inferProg p = do
   let func_tvs = zip (map fst decls) (map (Forall []) tvs)
   let typeEnv = func_tvs ++ neurals_tvs
   -- infer the type and constraints of the declaration expressions
-  cts <- mapM ((inTEnvF typeEnv . infer) . snd) decls
+  cts <- mapM ((inTEnvF typeEnv . infer adts) . snd) decls
   -- building the constraints that the built type variables of the functions equal
   -- the inferred function type
   let tcs = zipWith (\t1 t2 -> Constraint t1 t2 (Just "TopLevel")) (map (rtFromScheme . snd) func_tvs) (map fst3cts cts)
@@ -287,9 +287,9 @@ specialTreatment :: Expr -> Bool
 specialTreatment e = toStub e `elem` [StubConstant, StubLambda, StubVar, StubApply, StubInjF, StubReadNN]
 
 --TODO: Error on ambiguous InferenceRule
-infer :: Expr -> Infer (RType, [Constraint], Expr)
+infer :: [ADTDecl] ->  Expr -> Infer (RType, [Constraint], Expr)
 --infer expr | trace (show expr ++ show (specialTreatment expr) ++ show (solvesSimply expr)) False = undefined
-infer expr
+infer adts expr
     | specialTreatment expr =
       --we're dealing with StubConstant here.
       case expr of
@@ -301,24 +301,24 @@ infer expr
           -- rare case of needing an extra TV, because the var doesn't get one initially
           tv <- fresh
           -- give the lambda var a tv, with that TEnv infer the lambda expression
-          (functionTy, cs, inExprTy) <- inTEnvF [(name, Forall [] tv)] (infer inExpr)
+          (functionTy, cs, inExprTy) <- inTEnvF [(name, Forall [] tv)] (infer adts inExpr)
           -- resulting type is tv -> functionTy; propagate constraints from inner Expr.
           return (tv `TArrow` functionTy, cs, Lambda (setRType ti (tv `TArrow` functionTy)) name inExprTy)
         (Var ti name) -> do
           t <- lookupTEnv name
           return (t, [], Var (setRType ti t) name)
         e@(Apply ti func arg) -> do
-          (funcTy, c1, funcExprTy) <- infer func
-          (argTy, c2, argExprTy) <- infer arg
+          (funcTy, c1, funcExprTy) <- infer adts func
+          (argTy, c2, argExprTy) <- infer adts arg
           let argConstraint = Constraint funcTy (argTy `TArrow` (rType ti)) (Just "Apply")
           return (rType ti, [argConstraint] ++ c1 ++ c2, Apply ti funcExprTy argExprTy)
           --expr `usingScheme` (Forall [TV "a", TV "b"] (((TVarR $ TV "a") `TArrow` (TVarR $ TV "b")) `TArrow` (TVarR $ TV "a") `TArrow` (TVarR $ TV "b")))
         e@(InjF ti name params) -> do
-          let Just (FPair FDecl {contract=scheme} _) = lookup name globalFenv
-          e `usingScheme` scheme
+          let Just (FPair FDecl {contract=scheme} _) = lookup name (globalFEnv adts)
+          usingScheme adts e scheme
         e@(ReadNN ti name sym) -> do
           t <- lookupTEnv name
-          (symTy, c1, symTyExpr) <- infer sym
+          (symTy, c1, symTyExpr) <- infer adts sym
           let argConstraint = Constraint t (symTy `TArrow` (rType ti)) (Just "ReadNN")
           return (rType ti, [argConstraint] ++ c1, ReadNN ti name symTyExpr)
     | solvesSimply expr =
@@ -333,14 +333,14 @@ infer expr
             then error ("unviable Inference Rule configuration" ++ (show $ map algName plausibleAlgs))
             else
               -- use ForAll scheme from InferenceRule.
-              expr `usingScheme` scheme
+              usingScheme adts expr scheme
     | otherwise = error ("no inference implemented for " ++ show expr)
 
-usingScheme :: Expr -> Scheme -> Infer (RType, [Constraint], Expr)
-usingScheme expr scheme = do
+usingScheme :: [ADTDecl] ->  Expr -> Scheme -> Infer (RType, [Constraint], Expr)
+usingScheme adts expr scheme = do
   -- use ForAll scheme from InferenceRule.
   let subexprs = getSubExprs expr
-  tuples <- mapM infer subexprs
+  tuples <- mapM (infer adts) subexprs
   let localConstraints = concatMap snd3cts tuples
   let subExprTypes = map fst3cts tuples
   let typedSubExprs = map trd3cts tuples
