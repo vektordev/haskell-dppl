@@ -342,22 +342,6 @@ toIRProbability conf clauses typeEnv adts (InjF _ name params) sample | isHigher
   let returnP = IROp OpMult paramExpr (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDerivExpr))
   let appTestExpr e = IRIf appTest e const0
   return (renVar (appTestExpr returnP), renVar (appTestExpr paramDim), renVar (appTestExpr paramBranches))
-toIRProbability conf clauses typeEnv adts (InjF _ name [param]) sample = do
-  -- FPair of the InjF with unique names
-  fPair <- instantiate mkVariable adts name
-  -- Unary InjF has a single inversion
-  let FPair _ [inv] = fPair
-  let FDecl {inputVars=[v], body=invExpr, applicability=appTest, deconstructing=decons, derivatives=[(_, invDerivExpr)]} = inv
-  -- Set sample value to the variable name in the InjF
-  tell [(v, sample)]
-  -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
-  let probF = if decons then toIRProbabilitySave else toIRProbability
-  -- Get the probabilistic inference code for the parameter
-  (paramExpr, paramDim, paramBranches) <- probF conf clauses typeEnv adts param invExpr
-  -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
-  let returnP = IROp OpMult paramExpr (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDerivExpr))
-  let appTestExpr e = IRIf appTest e const0
-  return (appTestExpr returnP, appTestExpr paramDim, appTestExpr paramBranches)
 toIRProbability conf clauses typeEnv adts e@(InjF TypeInfo {tags=extras, rType=rt} name params) sample
   | isNothing (getProbIndex params) = do
   -- There is no probabilistic parameter
