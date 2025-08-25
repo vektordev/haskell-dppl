@@ -103,6 +103,11 @@ hornClauseToIRExpr clauses adts clause =
     -- The application expression has the value of the bound expression
     ExprHornClause [preExpr] conc (StubInfo StubApply) 1 -> do
       IRVar preExpr
+    -- The inverse Tuple expressions are fst and snd
+    ExprHornClause [preExpr] conc (StubInfo StubTCons) 1 -> do
+      IRTFst (IRVar preExpr)
+    ExprHornClause [preExpr] conc (StubInfo StubTCons) 2 -> do
+      IRTSnd (IRVar preExpr)
     -- Outside of the normal scope of inversions, therefor a negative inversion number
     -- If a value was applied to a bound variable, that bound variable is the applied value
     ExprHornClause [applied] _ AppliedInfo _ -> do
@@ -188,6 +193,8 @@ singleExprToHornClause adts e = case e of
                       ExprHornClause [getChainName e] (getChainName body) (LambdaInfo n) 1]
   Apply _ l v -> [ExprHornClause [getChainName l, getChainName v] (getChainName e) (StubInfo StubApply) 0,
                   ExprHornClause [getChainName e] (getChainName l) (StubInfo StubApply) 1]
+  TCons _ a b -> [ExprHornClause [getChainName e] (getChainName a) (StubInfo StubTCons) 1,
+                  ExprHornClause [getChainName e] (getChainName b) (StubInfo StubTCons) 2]
   InjF {} -> injFtoHornClause adts e
   -- No Horn clauses instead of error. Some expressions are not invertable and therefor do not produce Horn clauses. But we might not need them 
   _ -> []
