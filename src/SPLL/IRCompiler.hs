@@ -790,15 +790,36 @@ toIRIntegrate conf clauses typeEnv adts (Lambda t name subExpr) low high = do
       let newTypeEnv = (name, (paramRType, False)):typeEnv
       irTuple <- lift (runWriterT (toIRIntegrate conf clauses newTypeEnv adts subExpr low high)) <&> generateLetInBlock conf
       return (IRLambda name irTuple, const0, const0)
-toIRIntegrate conf clauses typeEnv adts (Apply TypeInfo{rType=rt} l v) low high = do
+toIRIntegrate conf clauses typeEnv adts (Apply TypeInfo{rType=rt} l v) low high | pType (getTypeInfo l) == Deterministic && pType (getTypeInfo v) == Deterministic = do
   vIR <- toIRGenerate adts typeEnv v
-  (lIR, _, _) <- toIRIntegrate conf clauses typeEnv adts l low high -- Dim and BC are irrelevant here. We need to extract these from the return tuple
+  lIR <- toIRGenerate adts typeEnv l -- Dim and BC are irrelevant here
+  -- The result is not a tuple if the return value is a closure
   case rt of
     TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
-    _ -> if countBranches conf then
-           return (IRTFst (IRInvoke (IRApply lIR vIR)), IRTFst (IRTSnd (IRInvoke (IRApply lIR vIR))), IRTSnd (IRTSnd (IRInvoke (IRApply lIR vIR))))
-         else
-           return (IRTFst (IRInvoke (IRApply lIR vIR)), IRTSnd (IRInvoke (IRApply lIR vIR)), const0)
+    _ -> do
+      retExpr <- indicator (IROp OpAnd (IROp OpLessThan (IRInvoke (IRApply lIR vIR)) high) (IROp OpGreaterThan (IRInvoke (IRApply lIR vIR)) low))
+      return (retExpr, const0, const0)
+toIRIntegrate conf clauses typeEnv adts (Apply TypeInfo{rType=rt} l v) low high | pType (getTypeInfo v) == Deterministic = do
+  vIR <- toIRGenerate adts typeEnv v
+  (lIR, _, _) <- toIRIntegrate conf clauses typeEnv adts l low high -- Dim and BC are irrelevant here. We need to extract these from the return tuple
+  -- The result is not a tuple if the return value is a closure
+  case rt of
+    TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
+    _ -> do
+      retVal <- mkVariable "call"
+      tell [(retVal, IRInvoke (IRApply lIR vIR))]
+      if countBranches conf then
+        return (IRTFst (IRVar retVal), IRTFst (IRTSnd (IRVar retVal)), IRTSnd (IRTSnd (IRVar retVal)))
+      else
+        return (IRTFst (IRVar retVal), IRTSnd (IRVar retVal), const0)
+
+toIRIntegrate conf clauses typeEnv adts (Apply TypeInfo{rType=rt} l v) low high | pType (getTypeInfo v) == Integrate = do
+  let lChainName = chainName (getTypeInfo l)
+  let lInv = IRLambda lChainName (toInvExpr clauses adts lChainName)
+  let appliedSampleLow = IRInvoke (IRApply lInv low)
+  let appliedSampleHigh = IRInvoke (IRApply lInv high)
+  toIRIntegrate conf clauses typeEnv adts v appliedSampleLow appliedSampleHigh
+toIRIntegrate conf clauses typeEnv adts (Apply TypeInfo{rType=rt} l v) low high = error "This instance if apply is not yet implemented"
 toIRIntegrate conf clauses typeEnv adts (Var _ n) low high = do
   -- Variable might be a function
   case lookup n typeEnv of
