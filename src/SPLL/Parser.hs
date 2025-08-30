@@ -59,7 +59,7 @@ symbol :: String -> Parser String
 symbol = L.symbol sc
 
 reserved :: [String]
-reserved = ["data", "if", "then", "else", "let", "in", "theta", "subtree", "ThetaTree", "Left", "Right"]
+reserved = ["data", "if", "then", "else", "let", "in", "theta", "subtree", "error", "ThetaTree", "Left", "Right"]
 
 keyword :: String -> Parser String
 keyword = L.symbol sc
@@ -96,16 +96,44 @@ pIfThenElse = do
 
 pLetIn :: Parser Expr
 pLetIn = do
-  _ <- symbol "let"
-  name <- pIdentifier
-  _ <- symbol "="
+  symbol "let"
+  lhs <- pExpr
+  symbol "="
   definition <- pExpr
-  _ <- symbol "in"
+  symbol "in"
   scope <- pExpr
-  return (letIn name definition scope)
+  destr <- letInDestructor 0 lhs
+  return $ destr definition scope
 
---parens :: Parser a -> Parser a
---parens = between (symbol "(") (symbol ")")
+-- Parses the identifier part of the letIn and constructs a accessors for letIns
+-- Return type is a \v, b -> Let n = v in b
+letInDestructor :: Int -> Expr -> Parser (Expr -> Expr -> Expr)
+letInDestructor n (Var _ name) = return $ letIn name
+letInDestructor n (TCons _ a b) = do
+  a' <- letInDestructor n a
+  b' <- letInDestructor n b
+  return $ \v body -> a' (tfst v) (b' (tsnd v) body)
+letInDestructor n (InjF _ "left" [x]) = do
+  x' <- letInDestructor n x
+  return $ \v -> x' (sfromLeft v)
+letInDestructor n (InjF _ "right" [x]) = do
+  x' <- letInDestructor n x
+  return $ \v -> x' (sfromRight v)
+letInDestructor n (Null _) = return $ \v b -> ifThenElse (isNull v) b (Error makeTypeInfo "RHS of letin is longer than LHS")
+letInDestructor n (Cons _ x xs) = do
+  x' <- letInDestructor n x
+  xs' <- letInDestructor (n + 1) xs
+  let varName = "p_" ++ show n
+  return $ \v body -> letIn varName v (x' (lhead (var varName)) (xs' (ltail (var varName)) body))
+letInDestructor _ _ = fail "LHS of a letIn sould be an identifier or a complex type of identifiers"
+
+pError :: Parser Expr
+pError = do
+  keyword "error"
+  char '"'
+  message <- many (noneOf "\"")
+  char '"'
+  return (Error makeTypeInfo message)
 
 pMaybeApply :: Parser Expr
 pMaybeApply = choice [parens pExpr, pVar]
@@ -229,9 +257,9 @@ pFloat :: Parser Value
 pFloat = dbg "float" $ do
   sign <- optional (symbol "-")
   f <- lexeme L.float
-  case sign of 
+  case sign of
     Nothing -> return (VFloat f)
-    Just "-" -> return (VFloat (-f)) 
+    Just "-" -> return (VFloat (-f))
 
 pIntVal :: Parser Value
 pIntVal = dbg "int" $ do
@@ -346,31 +374,31 @@ pCSV = valueParser `sepBy` (symbol ",")
 
 pDefinition :: Parser (Either FnDecl NeuralDecl)
 pDefinition = do
-  x <- choice [pNeural, pFunction]
+  x <- choice [fmap Right pNeural, fmap Left pFunction]
   doesNotContinue
   return x
 
 --TODO: Add validation via AutoNeural.
-pNeural :: Parser (Either FnDecl NeuralDecl)
+pNeural :: Parser NeuralDecl
 pNeural = dbg "neural" $ do
   _ <- keyword "neural"
   name <- pIdentifier
   _ <- symbol "::"
   ty <- SPLL.Parser.pType
   tag <- optional (symbol "of" *> listOrRange)
-  return $ Right (name, ty, tag)
+  return (name, ty, tag)
     where
       listOrRange = choice [try (pList >>= return . EnumList), pRange >>= return . EnumRange]
 
 
-pFunction :: Parser (Either FnDecl NeuralDecl)
+pFunction :: Parser FnDecl
 pFunction = dbg "function" $ do
   name <- pIdentifier
   args <- many pIdentifier
   _ <- symbol "="
   e <- pExpr
   let lambdas = foldr (#->#) e args
-  return (Left (name, lambdas))
+  return (name, lambdas)
 
 pADT :: Parser ADTDecl
 pADT = do
@@ -479,7 +507,8 @@ keywordExpr = dbg "keywordExpr" $ choice [
     pLetIn,
     pLambda,
     pTheta,
-    pSubtree
+    pSubtree,
+    pError
   ] <* sc
 
 -- | Lambda expressions

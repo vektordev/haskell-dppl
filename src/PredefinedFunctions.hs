@@ -122,6 +122,11 @@ tailFwd = FDecl (Forall [TV "a"] (ListOf (TVarR (TV "a")) `TArrow` ListOf (TVarR
 tailInv :: FDecl
 tailInv = FDecl (Forall [TV "a"] (ListOf (TVarR (TV "a")) `TArrow` ListOf (TVarR (TV "a")))) ["b"] ["a"] (IRCons (IRConst VAny) (IRVar "b")) (IRConst (VBool True)) False [("b", IRConst (VFloat 1))]
 
+isNullFwd :: FDecl
+isNullFwd = FDecl (Forall [TV "a"] (ListOf (TVarR (TV "a")) `TArrow` TBool)) ["a"] ["b"] (IROp OpEq (IRVar "a") (IRConst (VList EmptyList))) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
+-- Inverse of isNull is either an empty list if true or a list with at least one element
+isNullInv :: FDecl 
+isNullInv = FDecl (Forall [TV "a"] (TBool `TArrow` ListOf (TVarR (TV "a")))) ["b"] ["a"] (IRIf (IRVar "b") (IRConst $ VList EmptyList ) (IRConst $ VList (ListCont VAny AnyList))) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))] 
 
 -- ============================ Higher Order Functions ============================
 
@@ -174,7 +179,8 @@ globalFenv' = [("double", FPair doubleFwd [doubleInv]),
               ("apply", FPair applyFwd [applyInv]),
               ("map", FPair mapFwd [mapInv]),
               ("mapLeft", FPair mapLeftFwd [mapLeftInv]),
-              ("mapEither", FPair mapEitherFwd [mapEitherInv])]
+              ("mapEither", FPair mapEitherFwd [mapEitherInv]),
+              ("isNull", FPair isNullFwd [isNullInv])]
 
 globalFEnv :: [ADTDecl] -> FEnv
 globalFEnv adts = globalFenv' ++ concatMap fPairsFromADT adts

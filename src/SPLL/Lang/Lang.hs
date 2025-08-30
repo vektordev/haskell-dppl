@@ -5,6 +5,7 @@ module SPLL.Lang.Lang (
 , Value (..)
 , Program (..)
 , ThetaTree (..)
+, floatApproxEqThresh
 , getTypeInfo
 , setTypeInfo
 , tMap
@@ -77,6 +78,7 @@ toStub expr = case expr of
   Lambda {}      -> StubLambda
   Apply {}       -> StubApply
   (ReadNN _ _ _) -> StubReadNN
+  Error _ _        -> StubError
 
 
 
@@ -107,6 +109,10 @@ exprMap f expr = case expr of
   (Lambda t name a) -> Lambda (tInfoMap f t) name (exprMap f a)
   (Apply t a b) -> Apply (tInfoMap f t) (exprMap f a) (exprMap f b)
   (ReadNN t n a) -> ReadNN (tInfoMap f t) n (exprMap f a)
+  (Error t e) -> Error (tInfoMap f t) e
+  
+floatApproxEqThresh :: Double
+floatApproxEqThresh = 1e-10
 
 predicateFlat :: (Expr -> Bool) -> Expr -> Bool
 predicateFlat f e = f e && all (predicateFlat f) (getSubExprs e)
@@ -153,6 +159,8 @@ tMapHead f expr = case expr of
   --(LetInTuple t x a b c) -> LetInTuple (f expr) x a b c
   (Lambda _ name a) -> Lambda (f expr) name a
   (Apply _ a b) -> Apply (f expr) a b
+  (ReadNN t n a) -> ReadNN (f expr) n a
+  (Error t e) -> Error (f expr) e
 --  (ReadNN _ a) -> ReadNN (f expr) a
 
 tMapTails :: (Expr -> TypeInfo) -> Expr -> Expr
@@ -178,6 +186,8 @@ tMapTails f expr = case expr of
   --(LetInTuple t x a b c) -> LetInTuple t x (tMap f a) b (tMap f c)
   (Lambda t name a) -> Lambda t name (tMap f a)
   (Apply t a b) -> Apply t (tMap f a) (tMap f b)
+  (ReadNN t n a) -> ReadNN t n (tMap f a)
+  (Error t e) -> Error t e
 
 tMap :: (Expr -> TypeInfo) -> Expr -> Expr
 tMap f expr = case expr of
@@ -203,6 +213,7 @@ tMap f expr = case expr of
   (Lambda _ name a) -> Lambda (f expr) name (tMap f a)
   (Apply _ a b) -> Apply (f expr) (tMap f a) (tMap f b)
   (ReadNN _ n a) -> ReadNN (f expr) n (tMap f a)
+  (Error t e) -> Error (f expr) e
 
 makeMain :: Expr -> Program
 makeMain expr = Program [("main", expr)] [] []
@@ -235,6 +246,7 @@ getNullaryConstructor Normal {} = Normal
 getNullaryConstructor (Constant t val) = (`Constant` val)
 getNullaryConstructor Null {} = Null
 getNullaryConstructor (Var _ x) = (`Var` x)
+getNullaryConstructor (Error t e) = (`Error` e)
 
 tTraverse :: Applicative f => (TypeInfo -> f TypeInfo) -> Expr -> f Expr
 tTraverse f expr = fmap (\t -> setTypeInfo expr t) typeinfos
@@ -292,6 +304,7 @@ getSubExprs expr = case expr of
   (Lambda _ _ a) -> [a]
   (Apply _ a b) -> [a, b]
   (ReadNN _ _ a) -> [a]
+  (Error _ e) -> []
 
 setSubExprs :: Expr -> [Expr] -> Expr
 setSubExprs expr [] = case expr of
@@ -301,6 +314,7 @@ setSubExprs expr [] = case expr of
   Null t -> Null t
   Var t x -> Var t x
   InjF t n _ -> InjF t n []
+  Error t e -> Error t e
   _ -> error "unmatched expr in setSubExprs"
 setSubExprs expr [a] = case expr of
   ThetaI t _ x -> ThetaI t a x
@@ -327,7 +341,6 @@ setSubExprs expr [a,b,c] = case expr of
   _ -> error "unmatched expr in setSubExprs"
 setSubExprs expr subExprs = case expr of
   InjF t l _ -> InjF t l subExprs
-  InjF t n _ -> InjF t n subExprs
   _ -> error "unmatched expr in setSubExprs"
 
 getTypeInfo :: Expr -> TypeInfo
@@ -352,9 +365,10 @@ getTypeInfo expr = case expr of
   --(LetInD t _ _ _)      -> t
   --(LetInTuple t _ _ _ _)-> t
   (Lambda t _ _)        -> t
-  (Apply t _ _)    -> t
+  (Apply t _ _)         -> t
   (ReadNN t _ _)        -> t
-
+  (Error t _)           -> t
+  
 setTypeInfo :: Expr -> TypeInfo -> Expr
 setTypeInfo expr t = case expr of
   (IfThenElse _ a b c)  -> IfThenElse t a b c
@@ -379,6 +393,7 @@ setTypeInfo expr t = case expr of
   (Lambda _ a b)        -> Lambda t a b
   (Apply _ a b)         -> Apply t a b
   (ReadNN _ a b)        -> ReadNN t a b
+  (Error _ e)           -> Error t e
 
 constructVList :: [GenericValue a] -> GenericValue a
 constructVList xs = VList $ foldr ListCont EmptyList xs
@@ -509,6 +524,7 @@ printFlat expr = case expr of
   (Lambda _ name _) -> "\\" ++ name  ++ " -> "
   Apply {} -> "Apply"
   (ReadNN _ name _) -> "ReadNN " ++ name
+  (Error _ e)       -> "Error: " ++ e
 
 printFlatNoReq :: Expr -> String
 printFlatNoReq expr = case expr of
@@ -534,4 +550,5 @@ printFlatNoReq expr = case expr of
   (Lambda _ name _) -> "\\" ++ name  ++ " -> "
   Apply {} -> "Apply"
   ReadNN {} -> "ReadNN"
-
+  Error {} -> "Error"
+  

@@ -39,6 +39,9 @@ def eq(o1, o2):
 def isclose(a, b):
     return abs(a - b) <= 10e-10
 
+def throw(e):
+  raise Exception(e)
+
 class T:
   def __init__(self, t1, t2):
     self.t1 = t1

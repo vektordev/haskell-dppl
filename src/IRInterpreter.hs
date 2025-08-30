@@ -5,7 +5,7 @@ generateRand
 
 import Statistics.Distribution (ContGen, genContVar, quantile, density)
 import SPLL.IntermediateRepresentation
-import SPLL.Lang.Lang (Value(..), ThetaTree(..), Program, elementAt, constructVList, lookupNeural)
+import SPLL.Lang.Lang (Value(..), ThetaTree(..), Program, elementAt, constructVList, lookupNeural, floatApproxEqThresh)
 import StandardLibrary
 import MockNN
 import SPLL.AutoNeural
@@ -149,7 +149,13 @@ generate f neurals adts globalEnv env [] (IROp OpEq a b) = do
         (VBool af, VBool bf) -> af == bf
         (VFloat af, VFloat bf) -> af == bf
         (VInt af, VInt bf) -> af == bf
-        (VList af, VList bf) -> af == bf
+        (VList AnyList, VList _) -> True
+        (VList _, VList AnyList) -> True
+        (VList EmptyList, VList EmptyList) -> True
+        (VList (ListCont VAny as), VList (ListCont _ bs)) -> cmp (VList as) (VList bs)
+        (VList (ListCont _ as), VList (ListCont VAny bs)) -> cmp (VList as) (VList bs)
+        (VList (ListCont a as), VList (ListCont b bs)) -> cmp a b && cmp (VList as) (VList bs)
+        (VList _, VList _) -> False
         (VTuple af1 af2, VTuple bf1 bf2) ->
           let eqAny VAny _ = True
               eqAny _ VAny = True
@@ -172,7 +178,7 @@ generate f neurals adts globalEnv env [] (IROp OpApprox a b) = do
   aVal <- generate f neurals adts globalEnv env [] a
   bVal <- generate f neurals adts globalEnv env [] b
   case (aVal, bVal) of
-    (VFloat af, VFloat bf) -> return $ VBool $ abs (af - bf) <= 1e-10
+    (VFloat af, VFloat bf) -> return $ VBool $ abs (af - bf) <= floatApproxEqThresh
     _ -> error ("Type error: Approx can only evaluate on two floats: " ++ show (aVal, bVal))
 generate f neurals adts globalEnv env [] (IRUnaryOp OpNot a) = do
   aVal <- generate f neurals adts globalEnv env [] a

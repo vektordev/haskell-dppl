@@ -47,6 +47,7 @@ data Expr =
               | Not TypeInfo Expr
               -- Other
               | ReadNN TypeInfo String Expr
+              | Error TypeInfo String
               -- TODO: Needs Concat to achieve proper SPN-parity.
               deriving (Show, Eq)
 
@@ -71,8 +72,8 @@ data ExprStub = StubIfThenElse
               | StubLambda
               | StubApply
               | StubReadNN
+              | StubError
               deriving (Show, Eq)
-
 --Do not use this constructor, use makeTypeInfo instead
 data TypeInfo = TypeInfo
   { rType :: RType

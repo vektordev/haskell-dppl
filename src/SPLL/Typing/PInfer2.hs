@@ -674,6 +674,8 @@ infer env expr = case expr of
       (s, cs, t, et) <- infer env e
       return (s, cs, Prob, ReadNN (setPType ti Prob) name et)
 
+  Error ti e -> return (emptySubst, [], Deterministic, Error (setPType ti Deterministic) e)
+
   _ -> error (show expr)
 
 

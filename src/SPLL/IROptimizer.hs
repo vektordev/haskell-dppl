@@ -23,6 +23,7 @@ import Data.List (nub)
 import Control.Monad.Supply
 import Data.Foldable (toList)
 import PrettyPrint
+import SPLL.Lang.Lang (floatApproxEqThresh)
 
 
 optimizeEnv :: CompilerConfig -> IREnv -> IREnv
@@ -58,6 +59,7 @@ optimize conf = irMap (commonSubexprStage . applyConstStage . assiciativityStage
     oLvl = optimizerLevel conf
     commonSubexprStage = if False then optimizeCommonSubexpr else id -- Too buggy to use
     applyConstStage = if oLvl >= 2 then applyConstant else id
+    applyToLetInStage = if oLvl >= 2 then applyToLetIn else id
     assiciativityStage = if oLvl >= 2 then optimizeAssociativity else id
     letInStage = if oLvl >= 2 then optimizeLetIns else id
     constantDistrStage = if oLvl >= 2 then evalConstantDistr else id
@@ -96,6 +98,10 @@ distributeIf x = x
 applyConstant :: IRExpr -> IRExpr
 applyConstant (IRInvoke (IRApply (IRLambda varname inExpr) v@(IRConst _))) = replaceAll (IRVar varname) v inExpr
 applyConstant x = x
+
+applyToLetIn :: IRExpr -> IRExpr
+applyToLetIn (IRInvoke (IRApply (IRLambda varname inExpr) v)) | not (isValue v) = IRLetIn varname v inExpr
+applyToLetIn x = x
 
 optimizeAssociativity :: IRExpr -> IRExpr
 -- Associative Addition
@@ -149,7 +155,8 @@ simplify (IRHead (IRCons a _)) = a
 simplify (IRTail (IRCons _ b)) = b
 simplify (IRTFst (IRTCons a _)) = a
 simplify (IRTSnd (IRTCons _ b)) = b
-simplify (IRTCons (IRLambda n a) (IRLambda m b)) | n == m = IRLambda n (IRTCons a b)
+--simplify (IRHead (IRConst (VList (ListCont a _)))) = IRConst a
+--simplify (IRTail (IRConst (VList (ListCont _ a)))) = IRConst (VList a)
 simplify x = x
 
 countUses :: String -> IRExpr -> Int
@@ -182,6 +189,7 @@ softForceLogic OpAnd left (IRConst (VBool True)) = left
 softForceLogic OpAnd (IRConst (VBool False)) _ = IRConst (VBool False)
 softForceLogic OpAnd _ (IRConst (VBool False)) = IRConst (VBool False)
 softForceLogic OpEq (IRCons _ _) (IRConst (VList EmptyList)) = IRConst $ VBool False
+softForceLogic OpEq (IRConst (VList EmptyList)) (IRCons _ _)  = IRConst $ VBool False
 -- integer arithmetic:
 softForceLogic OpPlus (IRConst (VInt 0)) right = right
 softForceLogic OpPlus left (IRConst (VInt 0)) = left
@@ -206,11 +214,18 @@ softForceLogic OpDiv left (IRConst (VFloat 0)) = error "tried to divide by zero 
 softForceLogic OpDiv (IRConst (VFloat 0)) _ = IRConst (VFloat 0)
 softForceLogic OpSub left (IRConst (VFloat 0)) = left
 softForceLogic OpSub left right | left == right = IRConst (VFloat 0)
-softForceLogic op left right = IROp op left right
 softForceLogic op left right = IROp op left right     -- Nothing can be done
 
 forceOp :: Operand -> IRValue -> IRValue -> IRValue
-forceOp OpEq x y = VBool (x == y)
+forceOp OpEq (VList AnyList) (VList _) = VBool True
+forceOp OpEq (VList _) (VList AnyList) = VBool True
+forceOp OpEq (VList EmptyList) (VList EmptyList) = VBool True
+forceOp OpEq (VList (ListCont VAny _)) (VList (ListCont _ _)) = VBool True
+forceOp OpEq (VList (ListCont _ _)) (VList (ListCont VAny _)) = VBool True
+forceOp OpEq (VList (ListCont a as)) (VList (ListCont b bs)) = forceOp OpEq (VList as) (VList bs)
+forceOp OpEq (VList _) (VList _) = VBool False
+forceOp OpEq a b = VBool $ a == b
+forceOp OpApprox (VFloat x) (VFloat y) = VBool $ abs (x - y) <= floatApproxEqThresh
 forceOp OpMult (VInt x) (VInt y) = VInt (x*y)
 forceOp OpMult (VFloat x) (VFloat y) = VFloat (x*y)
 forceOp OpPlus (VInt x) (VInt y) = VInt (x+y)
@@ -246,7 +261,7 @@ forceUnaryOp _ _ = error "Error during forceUnaryOp optimizer"
 --TODO
 
 forceAnyCheck :: IRExpr -> IRExpr
-forceAnyCheck x | isValue x = IRConst $ VBool (unval x == VAny)
+forceAnyCheck x | isValue x = IRConst $ VBool (unval x == VAny || unval x == VList AnyList)
 forceAnyCheck (IRCons _ _) = IRConst $ VBool False  -- Lists can never be any
 forceAnyCheck (IRTCons _ _) = IRConst $ VBool False -- Tuples can never be any
 forceAnyCheck (IRLeft _) = IRConst $ VBool False -- Eithers can never be any

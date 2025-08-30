@@ -76,6 +76,8 @@ Base.:(==)(other::Any, t::T) = begin
 end
 
 
+
+
 abstract type InferenceList end
 
 struct EmptyInferenceList <: InferenceList end
@@ -120,6 +122,26 @@ end
 # Base.iterate for subsequent steps
 function Base.iterate(lst::InferenceList, state)
     state isa ConsInferenceList ? (state.value, state.next) : nothing
+end
+
+Base.:(==)(other::Any, l::InferenceList) = begin
+    if (l isa EmptyInferenceList && other isa EmptyInferenceList)
+        return true
+    end
+    if !(other isa ConsInferenceList)
+        if (other isa AnyInferenceList)
+            return true
+        else
+            return false
+        end
+    end
+    if (l isa AnyInferenceList)
+        return true
+    end
+    if !(l isa ConsInferenceList)
+        return false
+    end
+    return eq(l.value, other.value) && l.next == other.next
 end
 
 function prepend(x, xs :: InferenceList) :: InferenceList

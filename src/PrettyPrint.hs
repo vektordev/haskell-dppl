@@ -44,6 +44,7 @@ pPrintExpr (And _ a b) i = "(" ++ pPrintExpr a i ++ " && " ++ pPrintExpr b i ++ 
 pPrintExpr (Or _ a b) i = "(" ++ pPrintExpr a i ++ " || " ++ pPrintExpr b i ++ ")"
 pPrintExpr (Not _ e) i = "!(" ++ pPrintExpr e i ++ ")"
 pPrintExpr (ReadNN _ n e) i = "readNN(" ++ n ++ ", " ++ pPrintExpr e i ++ ")"
+pPrintExpr (Error _ e) i = "error(" ++ e ++ ")"
 
 pPrintIRExpr :: IRExpr -> Int -> String
 pPrintIRExpr (IRIf cond thenExpr elseExpr) n =
@@ -96,6 +97,7 @@ pPrintIRExpr (IRInvoke expr) n = pPrintIRExpr expr (n + 1) ++ "()"
 pPrintIRExpr (IREnumSum varname val e) n = "enumSum " ++ varname ++ " = " ++ show val ++ " in (\n" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IREvalNN netName e) n = "evalNN " ++ netName ++ " (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRIndex e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ ")[" ++ pPrintIRExpr e2 (n + 1) ++ "]"
+pPrintIRExpr (IRError e) n = "error(" ++ e ++")"
 
 
 pPrintValue :: Value -> String

@@ -21,6 +21,7 @@ import Data.Functor
 import SPLL.Typing.ForwardChaining
 import Data.List
 import SPLL.Typing.AlgebraicDataTypes
+import Data.Bifunctor (Bifunctor(bimap))
 
 -- SupplyT needs to be a transformer, because Supply does not implement Functor correctly
 type CompilerMonad a = WriterT [(String, IRExpr)] (SupplyT Int Identity) a
@@ -67,11 +68,14 @@ generateLetInBlock :: CompilerConfig -> (CompilationResult, [(String, IRExpr)]) 
 generateLetInBlock conf codeGen =
   case m of
     (IRLambda _ _) -> (foldr (\(var, val) expr  -> IRLetIn var val expr) m binds) --Dont make tuple out of lambdas, as the snd (and thr) element don't contain information anyway
-    _ -> if countBranches conf && not (isLambda m) then
-            (foldr (\(var, val) expr  -> IRLetIn var val expr) (IRTCons m (IRTCons dim bc)) binds)
+    _ -> if countBranches conf && not (isLambda m) then do
+            generateLetInExpr binds (IRTCons m (IRTCons dim bc))
           else
-            (foldr (\(var, val) expr  -> IRLetIn var val expr) (IRTCons m dim) binds)
+            generateLetInExpr binds (IRTCons m dim)
   where ((m, dim, bc), binds) = codeGen
+
+generateLetInExpr ::  [(Varname, IRExpr)] -> IRExpr -> IRExpr
+generateLetInExpr binds e = foldr (\(var, val) expr  -> IRLetIn var val expr) e binds
 
 -- Return type (name, rType, hasInferenceFunctions)
 getGlobalTypeEnv :: Program -> TypeEnv
@@ -135,34 +139,46 @@ toIRProbability conf clauses typeEnv adts (IfThenElse t cond left right) sample 
   (leftExpr, leftDim, leftBranches) <- toIRProbability conf clauses typeEnv adts left sample
   (rightExpr, rightDim, rightBranches) <- toIRProbability conf clauses typeEnv adts right sample
   let branches = (IROp OpPlus condTrueBranches ((IROp OpPlus leftBranches rightBranches)))
+  tell [(var_condT_p, condTrueExpr), (var_condF_p, condFalseExpr)]
   -- p(y) = if p_cond < thresh then p_else(y) * (1-p_cond(y)) else if p_cond > 1 - thresh then p_then(y) * p_cond(y) else p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
   let thr = topKThreshold conf
+
+  -- We need to restart the monad stack, because variables inside the branches may not be valid outside
+  -- E.g. if length(a) > 0 then a[0] else ...
+  -- If we were to access a[0] outside of the branch we would error
+  ((mul1Raw, leftBranches), binds1) <- lift (runWriterT (do
+    (leftExpr, leftDim, branches) <- toIRProbability conf clauses typeEnv adts left sample
+    (IRVar var_condT_p, condTrueDim) `multP` (leftExpr, leftDim) <&> (\x -> (x, branches)))) -- We need the branches outside of this scope. Append it to the tuple
+  let mul1 = bimap (generateLetInExpr binds1) (generateLetInExpr binds1) mul1Raw
+  ((mul2Raw, rightBranches), binds2) <- lift (runWriterT (do
+    (rightExpr, rightDim, branches) <- toIRProbability conf clauses typeEnv adts right sample
+    (IRVar var_condF_p, condFalseDim) `multP` (rightExpr, rightDim) <&> (\x -> (x, branches)))) -- We need the branches outside of this scope. Append it to the tuple
+  let mul2 = bimap (generateLetInExpr binds2) (generateLetInExpr binds2) mul2Raw
+  -- If probability of this branch is 0 then set the product to 0 manually. This branch could throw an error multiplied by 0
+  let zeroCheck c = IRIf (IROp OpApprox c const0) const0
+  let mul1Zeroed = bimap (zeroCheck condTrueExpr) (zeroCheck condTrueExpr) mul1
+  let mul2Zeroed = bimap (zeroCheck condFalseExpr) (zeroCheck condFalseExpr) mul2
+  (addExpr, addDim) <- mul1Zeroed `addP` mul2Zeroed
+  let branches = (IROp OpPlus condTrueBranches ((IROp OpPlus leftBranches rightBranches)))
   case thr of
     Just thresh -> do
-      mul1 <- (condTrueExpr, condTrueDim) `multP` (leftExpr, leftDim)
-      mul2 <- (condFalseExpr, condFalseDim) `multP` (rightExpr, rightDim)
-      add <- mul1 `addP` mul2
       let returnExpr = IRIf
             (IROp OpLessThan (IRVar var_condT_p) (IRConst (VFloat thresh)))
-            (fst mul2)
+            -- If probability of this branch is 0 then set the product to 0 manually. This branch could throw an error multiplied by 0
+            (IRIf (IROp OpApprox condFalseExpr const0) const0 (fst mul2))
             (IRIf (IROp OpGreaterThan (IRVar var_condT_p) (IRConst (VFloat (1-thresh))))
-              (fst mul1)
-              (fst add))
+              (IRIf (IROp OpApprox condTrueExpr const0) const0 (fst mul1))
+              addExpr)
       let returnDim = IRIf
             (IROp OpLessThan (IRVar var_condT_p) (IRConst (VFloat thresh)))
-            (snd mul2)
+            (IRIf (IROp OpApprox condFalseExpr const0) const0 (snd mul2))
             (IRIf (IROp OpGreaterThan (IRVar var_condT_p) (IRConst (VFloat (1-thresh))))
-              (snd mul1)
-              (snd add))
-      tell [(var_condT_p, condTrueExpr), (var_condF_p, condFalseExpr)]
+              (IRIf (IROp OpApprox condTrueExpr const0) const0 (snd mul1))
+              addDim)
       return (returnExpr, returnDim, branches)
     -- p(y) = p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
     Nothing -> do
-      mul1 <- (condTrueExpr, condTrueDim) `multP` (leftExpr, leftDim)
-      mul2 <- (condFalseExpr, condFalseDim) `multP` (rightExpr, rightDim)
-      returnExpr <- mul1 `addP` mul2
-      tell [(var_condT_p, condTrueExpr), (var_condF_p, condFalseExpr)]
-      return (fst returnExpr, snd returnExpr, branches)
+      return (addExpr, addDim, branches)
 toIRProbability conf clauses typeEnv adts (GreaterThan (TypeInfo {rType = t, tags = extras}) left right) sample
   | extras `hasAlgorithm` "greaterThanLeft" = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
@@ -426,6 +442,7 @@ toIRProbability conf clauses typeEnv adts (ThetaI _ a i) sample = do
   expr <- indicator (IROp OpApprox sample (IRTheta a' i))
   return (expr, const0, const0)
 toIRProbability conf clauses typeEnv adts (Subtree _ a i) sample = error "Cannot infer prob on subtree expression. Please check your syntax"
+toIRProbability conf clauses typeEnv adts (Error t e) sample = return (IRError e, const0, const0)
 toIRProbability conf clauses typeEnv adts x sample = error ("found no way to convert to IR: " ++ show x)
 
 multP :: (IRExpr, IRExpr) -> (IRExpr, IRExpr) -> CompilerMonad (IRExpr, IRExpr)
@@ -606,7 +623,9 @@ toIRGenerate adts typeEnv (Apply TypeInfo {rType=rt} l v) = do
 toIRGenerate adts typeEnv (ReadNN _ name subexpr) = do
   sub <- toIRGenerate adts typeEnv subexpr
   return $ IRInvoke (IRApply (IRVar (name ++ "_auto_gen")) sub)
+toIRGenerate adts typeEnv (Error _ e) = return $ IRError e
 toIRGenerate adts typeEnv x = error ("found no way to convert to IRGen: " ++ show x)
+
 
 packParamsIntoLetinsGen :: [ADTDecl] -> TypeEnv -> [String] -> [Expr] -> IRExpr -> CompilerMonad  IRExpr
 packParamsIntoLetinsGen adts typeEnv [] [] expr = return $ expr
@@ -848,4 +867,5 @@ toIRIntegrate conf clauses typeEnv adts (Var _ n) low high = do
     ind <- indicator (IROp OpAnd (IROp OpLessThan low (IRVar n)) (IROp OpGreaterThan high (IRVar n))) --TODO What to do if low and high are equal?
     return (ind, const0, const0)
    Nothing -> error ("Could not find name in TypeEnv: " ++ n)
+toIRIntegrate conf clauses typeEnv adts (Error t e) low high = return (IRError e, const0, const0)
 toIRIntegrate _ _ _ _ x _ _ = error ("found no way to convert to IRIntegrate: " ++ show x)

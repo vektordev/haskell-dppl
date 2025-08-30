@@ -190,6 +190,14 @@ exprNot = InferenceRule
             mostChaotic
             (Forall [] (TBool `TArrow` TBool))
 
+errorr :: InferenceRule
+errorr = InferenceRule
+            StubError
+            []
+            "error"
+            (const Deterministic)
+            (Forall [TV "a"] (TVarR $ TV "a"))
+
 allAlgorithms :: [InferenceRule]
 allAlgorithms = [
   ifThenElse,
@@ -211,5 +219,6 @@ allAlgorithms = [
   injF2Enumerable,
   cons,
   tcons,
-  exprNot
+  exprNot,
+  errorr
   ]

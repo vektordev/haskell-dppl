@@ -123,6 +123,9 @@ cons = Cons makeTypeInfo
 nul :: Expr
 nul = Null makeTypeInfo
 
+isNull :: Expr -> Expr
+isNull e = injF "isNull" [e]
+
 lhead :: Expr -> Expr
 lhead x = injF "head" [x]
 
@@ -137,6 +140,26 @@ tfst x = injF "fst" [x]
 
 tsnd :: Expr -> Expr
 tsnd x = injF "snd" [x]
+
+-- Sum types
+
+left :: Expr -> Expr
+left x = injF "left" [x]
+
+right :: Expr -> Expr
+right x = injF "right" [x]
+
+sisLeft :: Expr -> Expr
+sisLeft x = injF "isLeft" [x]
+
+sisRight :: Expr -> Expr
+sisRight x = injF "isRight" [x]
+
+sfromLeft :: Expr -> Expr
+sfromLeft x = injF "fromLeft" [x]
+
+sfromRight :: Expr -> Expr
+sfromRight x = injF "fromRight" [x]
 
 -- Boolean Algebra
 

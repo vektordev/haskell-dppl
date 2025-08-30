@@ -243,6 +243,7 @@ generateExpression (IREvalNN name arg) = name ++ "(" ++ generateExpression arg +
 generateExpression (IRIndex lst idx) = "(" ++ generateExpression lst ++ ")[" ++ generateExpression idx ++ "]"
 -- I personally hate this code. I constructs a tuple with an assignment expression in the first element and discards the first element
 generateExpression (IRLetIn name val body) = "((" ++ name ++ ":=" ++ generateExpression val ++ "), " ++ generateExpression body ++ ")[1]"
+generateExpression (IRError e) = "throw(\"" ++ e ++ "\")"
 generateExpression x = error ("Unknown expression in PyTorch codegen: " ++ show x)
 
 generateInvokeExpression :: IRExpr -> String
