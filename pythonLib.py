@@ -42,6 +42,7 @@ def isclose(a, b):
 def throw(e):
   raise Exception(e)
 
+# Tuple
 class T:
   def __init__(self, t1, t2):
     self.t1 = t1
@@ -58,6 +59,34 @@ class T:
     if index == 1:
       return self.t2
     raise ValueError("Tuple only has index 0 and 1")
+
+class Left:
+  def __init__(self, val):
+    self.val = val
+
+  def __eq__(self, other):
+    if not isinstance(other, Left):
+      return False
+    return eq(other.val, self.val)
+  
+def fromLeft(l):
+  if not isinstance(l, Left):
+    raise Exception("Item is not a Left: " + str(l))
+  return l.val
+
+class Right:
+  def __init__(self, val):
+    self.val = val
+
+  def __eq__(self, other):
+    if not isinstance(other, Right):
+      return False
+    return eq(other.val, self.val)
+  
+def fromRight(r):
+  if not isinstance(r, Right):
+    raise Exception("Item is not a Right: " + str(r))
+  return r.val
 
 class InferenceList:
   def __init__(self, value = None):

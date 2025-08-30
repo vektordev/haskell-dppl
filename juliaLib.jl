@@ -1,6 +1,6 @@
 module JuliaSPPLLib
 
-export density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, mapList, eq, isclose, T,==
+export density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, mapList, eq, isclose, T, Either, Left, Right, fromLeft, fromRight,==
 
 
 function isAny(x)
@@ -75,8 +75,43 @@ Base.:(==)(other::Any, t::T) = begin
     return eq(t.t1, other.t1) && eq(t.t2, other.t2)
 end
 
+abstract type Either end
 
+struct Left <: Either 
+    val
+end
+struct Right <: Either 
+    val
+end
+Base.:(==)(other::Any, l::Left) = begin
+     if !(other isa Left)
+        return false
+    end
+    return eq(l.val, other.val)
+end
 
+Base.:(==)(other::Any, r::Right) = begin
+     if !(other isa Right)
+        return false
+    end
+    return eq(r.val, other.val)
+end
+
+function fromLeft(l::Either)
+    if !(l isa Left)
+        throw("parameter is not a Left: " + l)
+    else
+        return l.val
+    end
+end
+
+function fromRight(r::Either)
+    if !(r isa Right)
+        throw("parameter is not a Right: " + r)
+    else
+        return r.val
+    end
+end
 
 abstract type InferenceList end
 
