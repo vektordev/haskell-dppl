@@ -46,8 +46,8 @@ getChainName = chainName . getTypeInfo
 -- The function then searches for a Lambda statement and inverses toward the bound variable
 -- Note that it deliberately skips over lambdas that are already applied
 toInvExpr :: [[HornClause]] -> [ADTDecl ] -> ChainName -> IRExpr
---toInvExpr clauses startCN | traceShow startCN False = undefined
-toInvExpr clauseSet adts startCN = irExpr
+--toInvExpr clauses adts startCN | traceShow startCN False = undefined
+toInvExpr clauseSet adts startCN = toValueExpr clauseSet [paramClause] adts toInvCN
   where
     -- Find the bound variable of a lambda that is not already applied
     -- This needs to be done if the lambda is a variable, 
@@ -56,16 +56,21 @@ toInvExpr clauseSet adts startCN = irExpr
     -- Add a clause without preconditions for parameters as a starting point
     -- Define the expression to invert as known. This is true by the definition of an inverse
     paramClause = ParameterHornClause startCN
-    augmentedClauseSet =[paramClause]:clauseSet
+
+toValueExpr :: [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> IRExpr
+--toValueExpr clauses paramClauses adts startCN | traceShow startCN False = undefined
+toValueExpr clauses paramClauses adts startCN = irExpr
+  where
+    augmentedClauseSet = map (:[]) paramClauses ++ clauses
     -- Solve the set of Horn clauses for clauses which are fulfilled
     solvedClauses = solveHCSet augmentedClauseSet
     -- Throw away superfluous clauses. Do this by sorting them by requirement
     -- and throwing away clauses after the clause that inferes the bound variable
     -- Also guarantees that the later generated letIns are in the correct order
     sortedClauses = topologicalSort solvedClauses
-    relevantSortedClauses = cutList sortedClauses (findConcludingHornClause sortedClauses toInvCN)
+    relevantSortedClauses = cutList sortedClauses (findConcludingHornClause sortedClauses startCN)
     -- Generate code
-    irExpr = toLetInBlock clauseSet adts relevantSortedClauses
+    irExpr = toLetInBlock clauses adts relevantSortedClauses
 
 -- Creates a block of code from a set of sorted horn clauses
 -- Generates the last horn clause as a return statement and wraps it in letIn statements created from the leading clauses
@@ -94,7 +99,7 @@ hornClauseToIRExpr clauses adts clause =
       let renamedF = foldr (\(old, new) decl -> renameDecl old new decl) correctInv (zip (inputVars correctInv) preVars)
       body renamedF
     -- The "value" of a lambda expression is the value of its body
-    ExprHornClause [preVar] _ (LambdaInfo _) 1 ->
+    e@(ExprHornClause [preVar] _ (LambdaInfo _) 1) ->
       IRVar preVar
     -- Forward pass of an application is setting the bound variable of an underlying lambda to the bound value
     ExprHornClause [preLmb, preBound] conc (StubInfo StubApply) 0 -> do

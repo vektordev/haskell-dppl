@@ -274,13 +274,19 @@ toIRProbability conf clauses typeEnv adts (Apply TypeInfo{rType=rt} l v) sample 
         return (IRTFst (IRVar retVal), IRTFst (IRTSnd (IRVar retVal)), IRTSnd (IRTSnd (IRVar retVal)))
       else
         return (IRTFst (IRVar retVal), IRTSnd (IRVar retVal), const0)
-
 toIRProbability conf clauses typeEnv adts (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo v) == Prob || pType (getTypeInfo v) == Integrate = do
   let lChainName = chainName (getTypeInfo l)
   let lInv = IRLambda lChainName (toInvExpr clauses adts lChainName)
   let appliedSample = IRInvoke (IRApply lInv sample)
-  toIRProbability conf clauses typeEnv adts v appliedSample
-toIRProbability conf clauses typeEnv adts (Apply TypeInfo{rType=rt} l v) sample = error "This instance if apply is not yet implemented"
+  (p, d, bc) <- toIRProbability conf clauses typeEnv adts v appliedSample
+  -- If the application is a higher order function, the return value here is a Lambda.
+  -- We find the bound variable in the program and apply its value here
+  case rType (getTypeInfo v) of
+    TArrow _ _ -> do
+      let ret = IRInvoke (applyLambdas clauses adts p)
+      if countBranches conf then return (IRTFst ret, IRTFst (IRTSnd ret), IRTFst (IRTSnd ret)) else return (IRTFst ret, IRTSnd ret, const0)
+    _ -> return (p, d, bc)
+toIRProbability conf clauses typeEnv adts (Apply TypeInfo{rType=rt} l v) sample = error "This instance of apply is not yet implemented"
 toIRProbability conf clauses typeEnv adts (Cons _ hdExpr tlExpr) sample = do
   headTuple <- lift (runWriterT (toIRProbabilitySave conf clauses typeEnv adts hdExpr (IRHead sample))) <&> generateLetInBlock conf
   tailTuple <- lift (runWriterT (toIRProbabilitySave conf clauses typeEnv adts tlExpr (IRTail sample))) <&> generateLetInBlock conf
@@ -517,6 +523,12 @@ packParamsIntoLetinsProb :: [String] -> [Expr] -> IRExpr -> IRExpr -> Supply Int
 --  return $ IRLetIn v sample e --TODO sample austauschen durch teil von sample falls multivariable
 packParamsIntoLetinsProb [v] [p] expr sample = do
   return $ IRLetIn v sample expr    --FIXME sample to auch toIRProbt werden
+
+applyLambdas :: [[HornClause]] -> [ADTDecl] -> IRExpr -> IRExpr
+applyLambdas clauses adts (IRLambda n expr) = IRApply (IRLambda n (applyLambdas clauses adts expr)) val
+  where val = toValueExpr clauses [] adts n
+applyLambdas clauses adts expr = expr
+  
 
 indicator :: IRExpr -> CompilerMonad  IRExpr
 indicator condition = return $ IRIf condition (IRConst $ VFloat 1) (IRConst $ VFloat 0)
