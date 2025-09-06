@@ -53,9 +53,11 @@ parseProbTestCases fp = do
 
 testInterpreter :: Program -> TestCase -> Property
 testInterpreter p (ProbTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = do
-  let VTuple (VFloat outProb) (VFloat outDim) = runProb defaultCompilerConfig p params sample
-  counterexample ("Probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < 0.0001) .&&.
-    counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim)
+  case runProb defaultCompilerConfig p params sample of 
+    VTuple (VFloat outProb) (VFloat outDim) -> 
+      counterexample ("Probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < 0.0001) .&&.
+        counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim)
+    x -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
 testInterpreter p (ArgmaxPTestCase name params res) = ioProperty $ do
   let paramCnt = length params
   let mockedParams seeds = map (\(par, s) -> VTuple (VInt 1) (VTuple par (VInt s))) (zip params seeds)
