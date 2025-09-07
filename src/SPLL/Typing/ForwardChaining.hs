@@ -45,7 +45,7 @@ getChainName = chainName . getTypeInfo
 -- Takes all HornClauses of a Program and a point in the AST which should be inverted.
 -- The function then searches for a Lambda statement and inverses toward the bound variable
 -- Note that it deliberately skips over lambdas that are already applied
-toInvExpr :: [[HornClause]] -> [ADTDecl ] -> ChainName -> IRExpr
+toInvExpr :: [[HornClause]] -> [ADTDecl] -> ChainName -> IRExpr
 --toInvExpr clauses adts startCN | traceShow startCN False = undefined
 toInvExpr clauseSet adts startCN = toValueExpr clauseSet paramClauses adts toInvCN
   where
@@ -188,28 +188,31 @@ getForwardClauses = concatMap (filter (\c -> inversion c == 0 || isAppliedInfo (
     isAppliedInfo _ = False
 
 getFreeVariables :: [[HornClause]] -> ChainName -> [String]
-getFreeVariables clauses cn | traceShow (getForwardClauses clauses) False = undefined
+--getFreeVariables clauses cn | traceShow (getForwardClauses clauses) False = undefined
 getFreeVariables clauses cn = inc \\ exc
   where 
     nextClauses = filter ((== cn) . conclusion) forwardClauses
     forwardClauses = getForwardClauses clauses
-    (inc, exc) = concatMap2 (getFreeVariables' forwardClauses) (concatMap premises nextClauses)
+    (inc, exc) = concatMap2 (getFreeVariables' clauses forwardClauses) (concatMap premises nextClauses)
 
 -- For any lambda l we want to get names of bound variables for that lambda
-getFreeVariables' :: [HornClause] -> ChainName -> ([String], [String])
-getFreeVariables' clauses cn = case currClauses of
+getFreeVariables' :: [[HornClause]] -> [HornClause] -> ChainName -> ([String], [String])
+getFreeVariables' allClauses clauses cn = case currClauses of
   -- If the variable is applied it cannot be free
-  c@(ExprHornClause [n] _ AppliedInfo 1):_ ->
-    let (inc, exc) = getFreeVariables' (clauses \\ [c]) cn in
-      (inc, n:exc)
+  c@(ExprHornClause [n, _] _ (StubInfo StubApply) 0):_ ->
+    let (inc, exc) = getFreeVariables' allClauses (clauses \\ [c]) cn
+        lambdaVar = findBoundVariable allClauses n in
+      (inc, lambdaVar:exc)
   c@(ExprHornClause pre _ (LambdaInfo n) _):_ -> 
-    let (inc, exc) = getFreeVariables' (clauses \\ [c]) cn in
+    let (inc, exc) = getFreeVariables' allClauses (clauses \\ [c]) cn in
       (n:inc, exc)
-  c:_ -> getFreeVariables' (clauses \\ [c]) cn
-  [] -> concatMap2 (getFreeVariables' clauses) (concatMap premises nextClauses)
+  c:_ -> getFreeVariables' allClauses (clauses \\ [c]) cn
+  [] -> concatMap2 (getFreeVariables' allClauses clauses) (concatMap premises nextClauses)
   where
-    nextClauses = filter ((== cn) . conclusion) clauses
+    nextClauses = filter (\c -> (conclusion c == cn) && not (hasAppliedInfo c)) clauses
     currClauses = filter (elem cn . premises) clauses
+    hasAppliedInfo (ExprHornClause _ _ AppliedInfo _) = True
+    hasAppliedInfo _ = False
     
 concatMap2 :: (a -> ([b], [c])) -> [a] -> ([b], [c])
 concatMap2 f xs = (concat as, concat bs)

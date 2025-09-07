@@ -168,7 +168,7 @@ generateExpression (IRCumulative dist x) = "cumulative_" ++ show dist ++ "(" ++ 
 generateExpression (IRSample IRNormal) = "randn()"
 generateExpression (IRSample IRUniform) = "rand()"
 generateExpression (IRVar name) = name
-generateExpression (IRLambda name x) = "(" ++ name  ++ " -> " ++ generateExpression x ++ ")"
+generateExpression expr@(IRLambda name x) = generateLambdaExpression expr
 -- Julia cannot really do partial application. This is a workaround
 generateExpression (IRApply f val) = "((args...) -> " ++ generateExpression f ++ "(" ++ generateExpression val ++ ", args...))"
 generateExpression expr@(IRInvoke _) = generateInvokeExpression expr
@@ -190,3 +190,12 @@ generateInvokeExpression (IRApply f@(IRApply _ _) val) = generateInvokeExpressio
 generateInvokeExpression (IRApply f val) = generateInvokeExpression f ++ generateExpression val
 -- No more parameters, compile the fucntion
 generateInvokeExpression expr = "(" ++ generateExpression expr ++ ")("
+
+generateLambdaExpression :: IRExpr -> String
+generateLambdaExpression expr = "((" ++ intercalate ", " names ++ ") -> " ++ generateExpression rest ++ ")"
+  where (names, rest) = getLambdaNames expr
+  
+getLambdaNames :: IRExpr -> ([String], IRExpr)
+getLambdaNames (IRLambda n body) = (n:names, rest)
+  where (names, rest) = getLambdaNames body
+getLambdaNames x = ([], x)

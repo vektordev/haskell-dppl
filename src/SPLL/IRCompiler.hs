@@ -279,11 +279,11 @@ toIRProbability conf clauses typeEnv adts (Apply TypeInfo{rType=rt} l v) sample 
   let lInv = IRLambda lChainName (toInvExpr clauses adts lChainName)
   let appliedSample = IRInvoke (IRApply lInv sample)
   (p, d, bc) <- toIRProbability conf clauses typeEnv adts v appliedSample
-  let freeVars = traceShowId $(getFreeVariables clauses lChainName \\ [findBoundVariable clauses lChainName]) \\ findLambdaVars p
-  let wrapInLambdas ex = traceShow p $ foldr IRLambda ex freeVars
+  let freeVars = (getFreeVariables clauses lChainName \\ [findBoundVariable clauses lChainName]) \\ findLambdaVars p
+  let wrapInLambdas ex = foldr IRLambda ex freeVars
   -- If the application is a higher order function, the return value here is a Lambda.
   -- We find the bound variable in the program and apply its value here
-  let (retP, retD, retBC) = traceShowId $ case rType (getTypeInfo v) of
+  let (retP, retD, retBC) = case rType (getTypeInfo v) of
         TArrow _ _ -> do
           let ret = IRInvoke (applyLambdas clauses adts p)
           if countBranches conf then 
@@ -293,8 +293,8 @@ toIRProbability conf clauses typeEnv adts (Apply TypeInfo{rType=rt} l v) sample 
         _ -> (p, d, bc)
   -- If the result is a function, we must wrap the return into a tuple
   case rt of
-    TArrow _ _ -> return $ traceShowId (wrapInLambdas (if countBranches conf then IRTCons retP (IRTCons retD retBC) else IRTCons retP retD), const0, const0)
-    _ -> return $ traceShowId (wrapInLambdas retP, wrapInLambdas retD, wrapInLambdas retBC)
+    TArrow _ _ -> return (wrapInLambdas (if countBranches conf then IRTCons retP (IRTCons retD retBC) else IRTCons retP retD), const0, const0)
+    _ -> return (wrapInLambdas retP, wrapInLambdas retD, wrapInLambdas retBC)
   
 toIRProbability conf clauses typeEnv adts (Apply TypeInfo{rType=rt} l v) sample = error "This instance of apply is not yet implemented"
 toIRProbability conf clauses typeEnv adts (Cons _ hdExpr tlExpr) sample = do
