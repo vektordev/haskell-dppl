@@ -2,6 +2,7 @@ module TestCaseParser (
   TestCase(..),
   isProbTestCase,
   isArgmaxPTestCase,
+  testCaseName,
   parseTestCases,
   parseProgram
 ) where
@@ -29,6 +30,10 @@ isProbTestCase _ = False
 isArgmaxPTestCase :: TestCase -> Bool
 isArgmaxPTestCase (ArgmaxPTestCase _ _ _) = True
 isArgmaxPTestCase _ = False
+
+testCaseName :: TestCase -> String
+testCaseName (ProbTestCase name _ _ _) = name
+testCaseName (ArgmaxPTestCase name _ _) = name
 
 type Parser = Parsec Void String
 sc = L.space hspace1 (L.skipLineComment "--") (L.skipBlockComment "{-" "-}")

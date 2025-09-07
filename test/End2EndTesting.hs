@@ -101,7 +101,7 @@ testProbJulia p tc = ioProperty $ do
   code <- waitForProcess handle
   case code of
     ExitSuccess -> return $ True === True
-    ExitFailure _ -> return $ counterexample "Julia test failed. See Julia error message" False
+    ExitFailure _ -> return $ counterexample ("Julia test " ++ testCaseName (head tc) ++ " failed. See Julia error message") False
 
 testProbPython :: Program -> [TestCase] -> Property
 testProbPython p tc = ioProperty $ do
@@ -110,7 +110,7 @@ testProbPython p tc = ioProperty $ do
   code <- waitForProcess handle
   case code of
     ExitSuccess -> return $ True === True
-    ExitFailure _ -> return $ counterexample "Python test failed. See Python error message" False
+    ExitFailure _ -> return $ counterexample ("Python test " ++ testCaseName (head tc) ++ " failed. See Python error message") False
 
 juliaProbTestCode :: String -> [TestCase] -> String
 juliaProbTestCode src tcs =
