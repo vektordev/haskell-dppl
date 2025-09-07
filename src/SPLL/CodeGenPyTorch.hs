@@ -235,7 +235,7 @@ generateExpression (IRCumulative dist x) = "cumulative_" ++ show dist ++ "(" ++ 
 generateExpression (IRSample IRNormal) = "randn()"
 generateExpression (IRSample IRUniform) = "rand()"
 generateExpression (IRVar name) = name
-generateExpression (IRLambda name x) = "(lambda " ++ name  ++ ": " ++ generateExpression x ++ ")"
+generateExpression expr@(IRLambda name x) = generateLambdaExpression expr
 generateExpression (IRApply f val) = "functools.partial(" ++ generateExpression f ++ ", " ++ generateExpression val ++ ")"
 generateExpression expr@(IRInvoke _) = generateInvokeExpression expr
 generateExpression (IREnumSum name enumRange expr) = "sum(map((lambda " ++ name ++ ": " ++ generateExpression expr ++ "), " ++ pyVal enumRange ++ "))"
@@ -256,3 +256,12 @@ generateInvokeExpression (IRApply f@(IRApply _ _) val) = generateInvokeExpressio
 generateInvokeExpression (IRApply f val) = generateInvokeExpression f ++ generateExpression val
 -- No more parameters, compile the fucntion
 generateInvokeExpression expr = "(" ++ generateExpression expr ++ ")("
+
+generateLambdaExpression :: IRExpr -> String
+generateLambdaExpression expr = "(lambda " ++ intercalate ", " names ++ ": " ++ generateExpression rest ++ ")"
+  where (names, rest) = getLambdaNames expr
+  
+getLambdaNames :: IRExpr -> ([String], IRExpr)
+getLambdaNames (IRLambda n body) = (n:names, rest)
+  where (names, rest) = getLambdaNames body
+getLambdaNames x = ([], x)
