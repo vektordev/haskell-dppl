@@ -53,12 +53,13 @@ toInvExpr clauseSet adts startCN = toValueExpr clauseSet paramClauses adts toInv
     -- This needs to be done if the lambda is a variable, 
     -- in which case the lamba expression would not be a subexpression of the expression to invert
     toInvCN = findBoundVariable clauseSet startCN
-    -- We expect free variables of subexpression to later be bound by a lambda. We add them as parameters, because we expect them to be bound later
-    boundVars = getFreeVariables clauseSet startCN \\ [toInvCN]
+    -- We expect lambda variables of subexpression to later be bound by a lambda. We add them as parameters, because we expect them to be bound later
+    boundVars = getUnappliedLambdas clauseSet startCN \\ [toInvCN]
     -- Add a clause without preconditions for parameters as a starting point
     -- Define the expression to invert as known. This is true by the definition of an inverse
     paramClauses = map ParameterHornClause (startCN:boundVars)
 
+-- Creates an expression, which returns the value of a point in the AST. Takes a list of AST points, which are considered to be of known value
 toValueExpr :: [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> IRExpr
 --toValueExpr clauses paramClauses adts startCN | traceShow startCN False = undefined
 toValueExpr clauses paramClauses adts startCN = irExpr
@@ -141,7 +142,7 @@ findBoundVariable clauses startName = case findBoundVariable' forwardClauses 0 s
   where
     -- Only forward clauses (inversion == 0) are relevant for this, because we dont want cycles in our graph of horn clauses
     -- Applied clauses are also relevant, because the lambda might be a variable applied elsewhere
-    forwardClauses = getForwardClauses clauses
+    forwardClauses = getForwardClauses clauses ++ getAppliedClauses clauses
 
 -- Finds the lambda a parameter ChainName is referencing
 -- This also needs to skip over applied lambdas. Because applications must happen before a lambda, 
@@ -181,38 +182,60 @@ findBoundVariable' clauses applies name =
     headIfExists (a:_) = [a]
     headIfExists [] = []
 
+-- Returns all clauses, which are considered to be forward. This includes all clauses, which are inversion=0
+-- except for clauses created by applying values, because they refference AST points backwards.
+-- These clauses can be used for syntactic traversal of a program
+-- This set of clauses is guaranteed cycle free and is analog to the AST
 getForwardClauses :: [[HornClause]] -> [HornClause]
-getForwardClauses = concatMap (filter (\c -> inversion c == 0 || isAppliedInfo (exprInfo c)))
+getForwardClauses = concatMap (filter (\c -> inversion c == 0 && not (isAppliedInfo (exprInfo c))))
   where
     isAppliedInfo AppliedInfo = True
     isAppliedInfo _ = False
 
-getFreeVariables :: [[HornClause]] -> ChainName -> [String]
---getFreeVariables clauses cn | traceShow (getForwardClauses clauses) False = undefined
-getFreeVariables clauses cn = inc \\ exc
-  where 
+-- Returns all clauses created by applying values
+-- In conjunction with the forward clauses, they can be used for evaluating traversal of a prorgam.
+-- FOr the syntactic traversal (Var x) is an atom. For evaluating traversal, there is a clause linking x to its value.
+-- Because the value is applied higher up in the program, the forwardClauses with appliedClauses are NOT cycle free
+getAppliedClauses :: [[HornClause]] -> [HornClause]
+getAppliedClauses = concatMap (filter (\c -> isAppliedInfo (exprInfo c)))
+  where
+    isAppliedInfo AppliedInfo = True
+    isAppliedInfo _ = False
+
+-- Get all names of all lambda variables in a subexpression of a specific point in the AST.
+-- Exclude all lambdas, which are already applied
+getUnappliedLambdas :: [[HornClause]] -> ChainName -> [String]
+--getUnappliedLambdas clauses cn | traceShow (getForwardClauses clauses) False = undefined
+getUnappliedLambdas clauses cn = inc \\ exc
+  where
+    -- We do not start with the firt expression directly, because it is the lambda, we want to seach the subexpressions of.
     nextClauses = filter ((== cn) . conclusion) forwardClauses
     forwardClauses = getForwardClauses clauses
-    (inc, exc) = concatMap2 (getFreeVariables' clauses forwardClauses) (concatMap premises nextClauses)
+    (inc, exc) = concatMap2 (getUnappliedLambdas' clauses forwardClauses) (concatMap premises nextClauses)
 
 -- For any lambda l we want to get names of bound variables for that lambda
-getFreeVariables' :: [[HornClause]] -> [HornClause] -> ChainName -> ([String], [String])
-getFreeVariables' allClauses clauses cn = case currClauses of
-  -- If the variable is applied it cannot be free
+-- Returns a list of candidates and a list of applied lambda names. The unapplied lambda names is the difference of those lists
+getUnappliedLambdas' :: [[HornClause]] -> [HornClause] -> ChainName -> ([String], [String])
+getUnappliedLambdas' allClauses clauses cn = case currClauses of
+  -- This is an application clause of a lambda
   c@(ExprHornClause [n, _] _ (StubInfo StubApply) 0):_ ->
-    let (inc, exc) = getFreeVariables' allClauses (clauses \\ [c]) cn
+    let (inc, exc) = getUnappliedLambdas' allClauses (clauses \\ [c]) cn
+        -- Find the bound variable and add it to the applied return list
         lambdaVar = findBoundVariable allClauses n in
       (inc, lambdaVar:exc)
+  -- This is the clause for a lambda. Add its variable name to the candiate return list
   c@(ExprHornClause pre _ (LambdaInfo n) _):_ -> 
-    let (inc, exc) = getFreeVariables' allClauses (clauses \\ [c]) cn in
+    let (inc, exc) = getUnappliedLambdas' allClauses (clauses \\ [c]) cn in
       (n:inc, exc)
-  c:_ -> getFreeVariables' allClauses (clauses \\ [c]) cn
-  [] -> concatMap2 (getFreeVariables' allClauses clauses) (concatMap premises nextClauses)
+  -- There are more possible clauses to handle
+  c:_ -> getUnappliedLambdas' allClauses (clauses \\ [c]) cn
+  -- No more clauses at this level. Search all clauses, which represent subexpressions of the current level
+  [] -> concatMap2 (getUnappliedLambdas' allClauses clauses) (concatMap premises nextClauses)
   where
-    nextClauses = filter (\c -> (conclusion c == cn) && not (hasAppliedInfo c)) clauses
+    -- Subexpressions of the current chain name
+    nextClauses = filter (\c -> (conclusion c == cn)) clauses
+    -- All clauses, on the current level of the recursive descend
     currClauses = filter (elem cn . premises) clauses
-    hasAppliedInfo (ExprHornClause _ _ AppliedInfo _) = True
-    hasAppliedInfo _ = False
     
 concatMap2 :: (a -> ([b], [c])) -> [a] -> ([b], [c])
 concatMap2 f xs = (concat as, concat bs)

@@ -252,6 +252,7 @@ toIRProbability conf clauses typeEnv adts (Lambda t name subExpr) sample = do
       let newTypeEnv = (name, (paramRType, False)):typeEnv
       irTuple <- lift (runWriterT (toIRProbability conf clauses newTypeEnv adts subExpr sample)) <&> generateLetInBlock conf
       return (IRLambda name irTuple, const0, const0)
+-- Deterministic lambda and bound expression
 toIRProbability conf clauses typeEnv adts (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo l) == Deterministic && pType (getTypeInfo v) == Deterministic = do
   vIR <- toIRGenerate adts typeEnv v
   lIR <- toIRGenerate adts typeEnv l -- Dim and BC are irrelevant here
@@ -261,6 +262,7 @@ toIRProbability conf clauses typeEnv adts (Apply TypeInfo{rType=rt} l v) sample 
     _ -> do
       retExpr <- indicator (IROp OpEq (IRInvoke (IRApply lIR vIR)) sample)
       return (retExpr, const0, const0)
+-- Deterministic bound expression
 toIRProbability conf clauses typeEnv adts (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo v) == Deterministic = do
   vIR <- toIRGenerate adts typeEnv v
   (lIR, _, _) <- toIRProbability conf clauses typeEnv adts l sample -- Dim and BC are irrelevant here. We need to extract these from the return tuple
@@ -274,14 +276,25 @@ toIRProbability conf clauses typeEnv adts (Apply TypeInfo{rType=rt} l v) sample 
         return (IRTFst (IRVar retVal), IRTFst (IRTSnd (IRVar retVal)), IRTSnd (IRTSnd (IRVar retVal)))
       else
         return (IRTFst (IRVar retVal), IRTSnd (IRVar retVal), const0)
+-- Probabilistic bound expression
 toIRProbability conf clauses typeEnv adts (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo v) == Prob || pType (getTypeInfo v) == Integrate = do
+  -- This is the probabilistic inference of a known, deterministic lambda with a probabilistic parameter
+  -- The inference looks like this: p(l(v) == sample) = p(l^-1(sample) == v)
+  -- The inverse can not be created using recursive descend, therefor we use forward chaining for the inverse only
+  -- Chain name of the callable
   let lChainName = chainName (getTypeInfo l)
+  -- Inverse of the callable as a lambda
   let lInv = IRLambda lChainName (toInvExpr clauses adts lChainName)
+  -- Apply the sample to the inverse
   let appliedSample = IRInvoke (IRApply lInv sample)
+  -- Do probabilistic inference using the applied inverse
   (p, d, bc) <- toIRProbability conf clauses typeEnv adts v appliedSample
-  let freeVars = (getFreeVariables clauses lChainName \\ [findBoundVariable clauses lChainName]) \\ findLambdaVars p
+  -- Forward chaining may have messed with the structure of the expression. We may have too many or too few lambdas.
+  -- Every lambda, which is not applied, inside of the callable should be present in the retuned IRExpr. 
+  -- Exclude the lambda, which is applied here and all lambdas, which are already present
+  let freeVars = (getUnappliedLambdas clauses lChainName \\ [findBoundVariable clauses lChainName]) \\ findLambdaVars p
   let wrapInLambdas ex = foldr IRLambda ex freeVars
-  -- If the application is a higher order function, the return value here is a Lambda.
+  -- If the parameter is a lambda, the return value here is a lambda.
   -- We find the bound variable in the program and apply its value here
   let (retP, retD, retBC) = case rType (getTypeInfo v) of
         TArrow _ _ -> do
