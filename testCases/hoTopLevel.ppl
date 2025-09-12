@@ -1,0 +1,2 @@
+f g = g 1.0
+main = f (\x -> Uniform + x)

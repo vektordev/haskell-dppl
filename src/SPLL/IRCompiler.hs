@@ -92,6 +92,9 @@ mkVariable suffix = do
   varID <- demand
   return ("l_" ++ show varID ++ "_" ++ suffix)
 
+setVariables :: [(String, IRExpr)] -> CompilerMonad ()
+setVariables = tell
+
 hasAlgorithm :: [Tag] -> String -> Bool
 hasAlgorithm tags alg = alg `elem` ([algName a | Alg a <- tags])
 --hasAlgorithm tags alg = not $ null $ filter (== alg) [a | Alg a <- tags]
@@ -139,7 +142,7 @@ toIRProbability conf clauses typeEnv adts (IfThenElse t cond left right) sample 
   (leftExpr, leftDim, leftBranches) <- toIRProbability conf clauses typeEnv adts left sample
   (rightExpr, rightDim, rightBranches) <- toIRProbability conf clauses typeEnv adts right sample
   let branches = (IROp OpPlus condTrueBranches ((IROp OpPlus leftBranches rightBranches)))
-  tell [(var_condT_p, condTrueExpr), (var_condF_p, condFalseExpr)]
+  setVariables [(var_condT_p, condTrueExpr), (var_condF_p, condFalseExpr)]
   -- p(y) = if p_cond < thresh then p_else(y) * (1-p_cond(y)) else if p_cond > 1 - thresh then p_then(y) * p_cond(y) else p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
   let thr = topKThreshold conf
 
@@ -183,38 +186,38 @@ toIRProbability conf clauses typeEnv adts (GreaterThan (TypeInfo {rType = t, tag
   | extras `hasAlgorithm` "greaterThanLeft" = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
     l <- toIRGenerate adts typeEnv left
-    tell [(var, l)]
+    setVariables [(var, l)]
     (integrate, _, integrateBranches) <- toIRIntegrate conf clauses typeEnv adts right negInf (IRVar var)
     var2 <- mkVariable "rhs_integral"
     let returnExpr = IRIf sample (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))
-    tell [(var2, integrate)]
+    setVariables [(var2, integrate)]
     return (returnExpr, const0, integrateBranches)
   | extras `hasAlgorithm` "greaterThanRight" = do --p(x | var >= const
     var <- mkVariable "fixed_bound"
     r <- toIRGenerate adts typeEnv right
-    tell [(var, r)]
+    setVariables [(var, r)]
     (integrate, _, integrateBranches) <- toIRIntegrate conf clauses typeEnv adts left negInf (IRVar var)
     var2 <- mkVariable "lhs_integral"
     let returnExpr = IRIf sample (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)) (IRVar var2)
-    tell [(var2, integrate)]
+    setVariables [(var2, integrate)]
     return (returnExpr, const0, integrateBranches)
 toIRProbability conf clauses typeEnv adts (LessThan (TypeInfo {rType = t, tags = extras}) left right) sample
   | extras `hasAlgorithm` "lessThanLeft" = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
     l <- toIRGenerate adts typeEnv left
-    tell [(var, l)]
+    setVariables [(var, l)]
     (integrate, _, integrateBranches) <- toIRIntegrate conf clauses typeEnv adts right (IRVar var) posInf
     var2 <- mkVariable "rhs_integral"
     let returnExpr = IRIf sample (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))
-    tell [(var2, integrate)]
+    setVariables [(var2, integrate)]
     return (returnExpr, const0, integrateBranches)
   | extras `hasAlgorithm` "lessThanRight" = do --p(x | var >= const
     var <- mkVariable "fixed_bound"
     r <- toIRGenerate adts typeEnv right
-    tell [(var, r)]
+    setVariables [(var, r)]
     (integrate, _, integrateBranches) <- toIRIntegrate conf clauses typeEnv adts left (IRVar var) posInf
     var2 <- mkVariable "lhs_integral"
-    tell [(var2, integrate)]
+    setVariables [(var2, integrate)]
     let returnExpr = IRIf sample (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))  (IRVar var2)
     return (returnExpr, const0, integrateBranches)
 toIRProbability conf clauses typeEnv adts (Not (TypeInfo {rType = TBool}) f) sample =
@@ -235,7 +238,7 @@ toIRProbability conf clauses typeEnv adts (ReadNN _ name symbol) sample = do
   -- Same code as for calling a top level function
   var <- mkVariable "callNN"
   sym <- toIRGenerate adts typeEnv symbol
-  tell [(var, IRInvoke (IRApply (IRApply (IRVar (name ++ "_auto_prob")) sym) sample))]
+  setVariables [(var, IRInvoke (IRApply (IRApply (IRVar (name ++ "_auto_prob")) sym) sample))]
   if countBranches conf then
     return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
   else
@@ -271,7 +274,7 @@ toIRProbability conf clauses typeEnv adts (Apply TypeInfo{rType=rt} l v) sample 
     TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
     _ -> do
       retVal <- mkVariable "call"
-      tell [(retVal, IRInvoke (IRApply lIR vIR))]
+      setVariables [(retVal, IRInvoke (IRApply lIR vIR))]
       if countBranches conf then
         return (IRTFst (IRVar retVal), IRTFst (IRTSnd (IRVar retVal)), IRTSnd (IRTSnd (IRVar retVal)))
       else
@@ -292,7 +295,8 @@ toIRProbability conf clauses typeEnv adts (Apply TypeInfo{rType=rt} l v) sample 
   -- Forward chaining may have messed with the structure of the expression. We may have too many or too few lambdas.
   -- Every lambda, which is not applied, inside of the callable should be present in the retuned IRExpr. 
   -- Exclude the lambda, which is applied here and all lambdas, which are already present
-  let freeVars = (getUnappliedLambdas clauses lChainName \\ [findBoundVariable clauses lChainName]) \\ findLambdaVars p
+  let Just lBound = findBoundVariable clauses lChainName
+  let freeVars = (getUnappliedLambdas clauses lChainName \\ [lBound]) \\ findLambdaVars p
   let wrapInLambdas ex = foldr IRLambda ex freeVars
   -- If the parameter is a lambda, the return value here is a lambda.
   -- We find the bound variable in the program and apply its value here
@@ -346,7 +350,7 @@ toIRProbability conf clauses typeEnv adts (InjF TypeInfo {tags=extras} name [lef
     -- the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
     (pLeft, _, _) <- toIRProbability conf clauses typeEnv adts left (IRVar x2)
     (pRight, _, _) <- toIRProbability conf clauses typeEnv adts right (IROp OpSub sample (IRVar x2))
-    tell [(x3, sample)]
+    setVariables [(x3, sample)]
     let returnExpr = case topKThreshold conf of
           Nothing -> IRIf (IRElementOf invExpr (IRConst (fmap failConversion (constructVList enumListR)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
           Just thr -> IRIf (IROp OpAnd (IRElementOf invExpr (IRConst (fmap failConversion (constructVList enumListR)))) (IROp OpGreaterThan pLeft (IRConst (VFloat thr)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
@@ -376,7 +380,7 @@ toIRProbability conf clauses typeEnv adts (InjF _ name params) sample | isHigher
   let fVars = map (inVars !!) (getFunctionParamIdx adts name)
   let Just invDerivExpr = lookup aVar derivs
   -- Set sample value to the variable name in the InjF
-  tell [(aVar, sample)]
+  setVariables [(aVar, sample)]
   -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
   let probF = if decons then toIRProbabilitySave else toIRProbability
   -- Create all inverses of the ho functions and save them on the variable stack
@@ -415,8 +419,8 @@ toIRProbability conf clauses typeEnv adts e@(InjF TypeInfo {tags=extras} name pa
   -- Find the relevant derivative of the inversion
   let Just invDeriv = lookup v1 invDerivs
   -- Generate the probabilistic sub expressions
-  mapM_ (\(eVar, e) -> toIRGenerate adts typeEnv e >>= \x -> tell [(eVar, x)]) (zip detVars detEs)
-  tell [(v1, sample)]
+  mapM_ (\(eVar, e) -> toIRGenerate adts typeEnv e >>= \x -> setVariables [(eVar, x)]) (zip detVars detEs)
+  setVariables [(v1, sample)]
   -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
   let probF = if decons then toIRProbabilitySave else toIRProbability
   -- Get the probabilistic inference expression of the non-deterministic subexpression
@@ -441,19 +445,19 @@ toIRProbability conf clauses typeEnv adts (Var TypeInfo {rType=rt} n) sample = d
     Just(TArrow _ _, hasInference) -> do
       var <- mkVariable "call"
       let name = if hasInference then n ++ "_prob" else n
-      tell [(var, IRApply (IRVar name) sample)]
+      setVariables [(var, IRApply (IRVar name) sample)]
       -- The return value is still a function. No need to do dim and branch counting here
       return (IRVar var, const0, const0)
     -- var is a function without a inference function
     Just(TArrow _ _, False) -> do
       var <- mkVariable "call"
-      tell [(var, IRApply (IRVar n) sample)]
+      setVariables [(var, IRApply (IRVar n) sample)]
       -- The return value is still a function. No need to do dim and branch counting here
       return (IRVar var, const0, const0)
     -- Var is a top level declaration (an therefor has a _prob function)
     Just (_, True) -> do
       var <- mkVariable "call"
-      tell [(var, IRInvoke (IRApply (IRVar (n ++ "_prob")) sample))]
+      setVariables [(var, IRInvoke (IRApply (IRVar (n ++ "_prob")) sample))]
       if countBranches conf then
           return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
         else
@@ -483,7 +487,7 @@ addP (aM, aDim) (bM, bDim) = do
   pVarB <- mkVariable "pB"
   dimVarA <- mkVariable "dimA"
   dimVarB <- mkVariable "dimB"
-  tell [(pVarA, aM), (pVarB, bM), (dimVarA, aDim), (dimVarB, bDim)]
+  setVariables [(pVarA, aM), (pVarB, bM), (dimVarA, aDim), (dimVarB, bDim)]
   return (IRIf (IROp OpApprox (IRVar pVarA) (IRConst (VFloat 0))) (IRVar pVarB)
            (IRIf (IROp OpApprox (IRVar pVarB) (IRConst (VFloat 0))) (IRVar pVarA)
            (IRIf (IROp OpLessThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar pVarA)
@@ -502,7 +506,7 @@ subP (aM, aDim) (bM, bDim) = do
   pVarB <- mkVariable "pB"
   dimVarA <- mkVariable "dimA"
   dimVarB <- mkVariable "dimB"
-  tell [(pVarA, aM), (pVarB, bM), (dimVarA, aDim), (dimVarB, bDim)]
+  setVariables [(pVarA, aM), (pVarB, bM), (dimVarA, aDim), (dimVarB, bDim)]
   return (IRIf (IROp OpApprox (IRVar pVarA) (IRConst (VFloat 0))) (IRVar pVarB)
          (IRIf (IROp OpApprox (IRVar pVarB) (IRConst (VFloat 0))) (IRVar pVarA)
          (IRIf (IROp OpLessThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar pVarA)
@@ -521,7 +525,7 @@ createHOInverse clauses adts (fVar, f) = do
   let inverseLambda = IRLambda (chainName $ getTypeInfo f) inverseF
   -- Rename all occurances of f^-1 from the definition to f_prob
   let renVar = renameVar (fVar ++ "^-1") (fVar ++ "_prob")
-  tell [(fVar ++ "_prob", inverseLambda)]
+  setVariables [(fVar ++ "_prob", inverseLambda)]
   return $ renVar
 
 getProbIndex :: [Expr] -> Maybe Int
@@ -722,7 +726,7 @@ toIRIntegrate conf clauses typeEnv adts (IfThenElse _ cond left right) low high 
   let thr = topKThreshold conf
   case thr of
     Just thresh -> do
-        tell [(var_cond_p, condExpr)]
+        setVariables [(var_cond_p, condExpr)]
         return
           (IRIf (IROp OpLessThan (IRVar var_cond_p) (IRConst (VFloat thresh)))
             (IROp OpMult (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var_cond_p) ) rightExpr)
@@ -733,7 +737,7 @@ toIRIntegrate conf clauses typeEnv adts (IfThenElse _ cond left right) low high 
                 (IROp OpMult (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var_cond_p) ) rightExpr))), const0, IROp OpPlus condBranches (IROp OpPlus leftBranches rightBranches) )
     -- p(y) = p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
     Nothing -> do
-        tell [(var_cond_p, condExpr)]
+        setVariables [(var_cond_p, condExpr)]
         return
           (IROp OpPlus
             (IROp OpMult (IRVar var_cond_p) leftExpr)
@@ -826,7 +830,7 @@ toIRIntegrate conf clauses typeEnv adts (InjF TypeInfo {tags=extras} name params
   -- Find the relevant derivative of the inversion
   let Just invDeriv = lookup v1 invDerivs
   -- Generate the probabilistic sub expressions
-  mapM_ (\(eVar, e) -> toIRGenerate adts typeEnv e >>= \x -> tell [(eVar, x)]) (zip detVars detEs)
+  mapM_ (\(eVar, e) -> toIRGenerate adts typeEnv e >>= \x -> setVariables [(eVar, x)]) (zip detVars detEs)
   let letInBlockLow = IRLetIn v1 low invExpr
   let letInBlockHigh = IRLetIn v1 high invExpr
   -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
@@ -865,7 +869,7 @@ toIRIntegrate conf clauses typeEnv adts (Apply TypeInfo{rType=rt} l v) low high 
     TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
     _ -> do
       retVal <- mkVariable "call"
-      tell [(retVal, IRInvoke (IRApply lIR vIR))]
+      setVariables [(retVal, IRInvoke (IRApply lIR vIR))]
       if countBranches conf then
         return (IRTFst (IRVar retVal), IRTFst (IRTSnd (IRVar retVal)), IRTSnd (IRTSnd (IRVar retVal)))
       else
@@ -885,18 +889,18 @@ toIRIntegrate conf clauses typeEnv adts (Var _ n) low high = do
    Just(TArrow _ _, hasInference) -> do
      var <- mkVariable "call"
      let name = if hasInference then n ++ "_integ" else n
-     tell [(var, IRApply (IRApply (IRVar name) low) high)]
+     setVariables [(var, IRApply (IRApply (IRVar name) low) high)]
      -- The return value is still a function. No need to do dim and branch counting here
      return (IRVar var, const0, const0)
    Just(TArrow _ _, False) -> do
      var <- mkVariable "call"
-     tell [(var, IRApply (IRApply (IRVar n) low) high)]
+     setVariables [(var, IRApply (IRApply (IRVar n) low) high)]
      -- The return value is still a function. No need to do dim and branch counting here
      return (IRVar var, const0, const0)
    -- Var is a top level declaration (an therefor has a _prob function)
    Just (_, True) -> do
      var <- mkVariable "call"
-     tell [(var, IRInvoke (IRApply (IRApply (IRVar (n ++ "_integ")) low) high))]
+     setVariables [(var, IRInvoke (IRApply (IRApply (IRVar (n ++ "_integ")) low) high))]
      if countBranches conf then
          return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
        else
