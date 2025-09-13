@@ -1,3 +1,5 @@
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE TemplateHaskell #-}
 
 module TestParser (
@@ -20,6 +22,10 @@ import PrettyPrint
 import Debug.Trace (trace)
 import Data.List (sortBy, intercalate)
 import Data.Ord (comparing)
+import Control.Monad.State
+import Control.Monad (MonadPlus)
+import Text.Megaparsec hiding (State)
+import Data.Void
 
 
 rTypeToString :: RType -> String
@@ -83,6 +89,11 @@ adtConstructorToString (name, rts) = name ++ " " ++ unwords (map show rts)
 programToString :: Program -> String
 programToString (Program fnDecls neuralDecls adts) =
     unlines (map fnDeclToString fnDecls ++ map neuralDeclToString neuralDecls)
+
+testParse :: StateT Int (Parsec Void String) a -> String -> Either (ParseErrorBundle String Void) a
+testParse parser src = do
+  (res, _) <- runParser (runStateT parser 0) "test" src
+  return res
 
 testExpressions :: [(String, Expr)]
 testExpressions = [
@@ -194,14 +205,14 @@ prop_operatorAssociativity = forAll genIdentifier $ \x ->
 -- Additional property to test identifier rejection at
 prop_identifierRejectsReserved :: Property
 prop_identifierRejectsReserved = forAll (elements reserved) $ \word ->
-  case parse pIdentifier "" word of
+  case testParse pIdentifier word of
     Left _ -> True
     Right _ -> False
 
 -- Property to test valid identifiers
 prop_identifierAcceptsValid :: Property
 prop_identifierAcceptsValid = forAll genValidIdentifier $ \ident ->
-  case parse pIdentifier "" ident of
+  case testParse pIdentifier ident of
     Right parsed -> parsed == ident
     Left _ -> False
 

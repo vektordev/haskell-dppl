@@ -1,12 +1,14 @@
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE ConstraintKinds #-}
+
 module SPLL.Parser (
-  testParse
+  testParse'
 , pProg
 , pExpr
 , pIdentifier
 , pValue
 , tryParseProgram
 , tryParseExpr
-, testParser
 , reserved
 ) where
 
@@ -35,6 +37,7 @@ import PredefinedFunctions (globalFEnv, parameterCount)
 import SPLL.Prelude
 import Debug.Trace
 import Data.Functor ((<&>))
+import Control.Monad.State
 
 --import Text.Megaparsec.Debug (dbg)
 
@@ -48,24 +51,25 @@ dbg x y = y
 -- At some point this deserves fixing.
 
 type Parser = Parsec Void String
+type MonadParser m = (MonadParsec Void String m, MonadPlus m, MonadFail m, MonadState Int m)
 
-
+sc :: MonadParser m => m ()
 sc = L.space hspace1 (L.skipLineComment "--") (L.skipBlockComment "{-" "-}")
 
-lexeme :: Parser a -> Parser a
+lexeme :: MonadParser m => m a -> m a
 lexeme = L.lexeme sc
 
-symbol :: String -> Parser String
+symbol :: MonadParser m => String -> m String
 symbol = L.symbol sc
 
 reserved :: [String]
 reserved = ["data", "if", "then", "else", "let", "in", "theta", "subtree", "error", "ThetaTree", "Left", "Right"]
 
-keyword :: String -> Parser String
+keyword :: MonadParser m => String -> m String
 keyword = L.symbol sc
 
 --Note: Won't parse capitalized constructors, if ever we add those.
-pIdentifier :: Parser String
+pIdentifier :: MonadParser m => m String
 pIdentifier = lexeme $ do
   x <- letterChar
   xs <- many alphaNumChar
@@ -74,17 +78,17 @@ pIdentifier = lexeme $ do
     then fail $ "reserved word: " ++ ident
     else return ident
 
-pUniform :: Parser Expr
+pUniform :: MonadParser m => m Expr
 pUniform = do
   _ <- symbol "Uniform"
   return uniform
 
-pNormal :: Parser Expr
+pNormal :: MonadParser m => m Expr
 pNormal = do
   _ <- symbol "Normal"
   return normal
 
-pIfThenElse :: Parser Expr
+pIfThenElse :: MonadParser m => m Expr
 pIfThenElse = do
   _ <- symbol "if"
   a <- pExpr
@@ -94,7 +98,7 @@ pIfThenElse = do
   c <- pExpr
   return (ifThenElse a b c)
 
-pLetIn :: Parser Expr
+pLetIn :: MonadParser m => m Expr
 pLetIn = do
   symbol "let"
   lhs <- pExpr
@@ -107,7 +111,7 @@ pLetIn = do
 
 -- Parses the identifier part of the letIn and constructs a accessors for letIns
 -- Return type is a \v, b -> Let n = v in b
-letInDestructor :: Int -> Expr -> Parser (Expr -> Expr -> Expr)
+letInDestructor :: MonadParser m => Int -> Expr -> m (Expr -> Expr -> Expr)
 letInDestructor n (Var _ name) = return $ letIn name
 letInDestructor n (TCons _ a b) = do
   a' <- letInDestructor n a
@@ -127,7 +131,7 @@ letInDestructor n (Cons _ x xs) = do
   return $ \v body -> letIn varName v (x' (lhead (var varName)) (xs' (ltail (var varName)) body))
 letInDestructor _ _ = fail "LHS of a letIn sould be an identifier or a complex type of identifiers"
 
-pError :: Parser Expr
+pError :: MonadParser m => m Expr
 pError = do
   keyword "error"
   char '"'
@@ -135,12 +139,10 @@ pError = do
   char '"'
   return (Error makeTypeInfo message)
 
-pMaybeApply :: Parser Expr
+pMaybeApply :: MonadParser m => m Expr
 pMaybeApply = choice [parens pExpr, pVar]
 
-pParensExpr = dbg "parensExpr" $ parens pExpr
-
-pExpr :: Parser Expr
+pExpr :: MonadParser m => m Expr
 pExpr = expr
 {-
 pExpr = dbg "expr" $ choice [
@@ -161,7 +163,7 @@ pExpr = dbg "expr" $ choice [
 
 -- TODO: I think this parser should accept any pExpr instead of identifiers. Might get ambiguous parses though.
 
-pTheta :: Parser Expr
+pTheta :: MonadParser m => m Expr
 pTheta = dbg "theta" $ do
   keyword "theta"
   thetaExpr <- pExpr
@@ -169,7 +171,7 @@ pTheta = dbg "theta" $ do
   ix <- pInt
   return $ theta thetaExpr ix
 
-pSubtree :: Parser Expr
+pSubtree :: MonadParser m => m Expr
 pSubtree = dbg "subtree" $ do
   keyword "subtree"
   thetaExpr <- pExpr
@@ -178,7 +180,7 @@ pSubtree = dbg "subtree" $ do
   return $ subtree thetaExpr ix
 
 -- just to make this parser quite unambiguous, we're going to demand parens around both ops.
-pBinaryOp :: Parser Expr
+pBinaryOp :: MonadParser m => m Expr
 pBinaryOp = dbg "binOp" $ do
   arg1 <- parens pExpr
   op <- pOp
@@ -187,7 +189,7 @@ pBinaryOp = dbg "binOp" $ do
     ">=" -> return $ arg1 #># arg2
     _ -> fail $ "unknown operator: " ++ op
 
-pOp :: Parser String
+pOp :: MonadParser m => m String
 pOp = lexeme $ do
     op <- some opChar
     if op `elem` reservedOps
@@ -213,7 +215,7 @@ constructN :: Int -> ([Expr] -> Expr) -> [Expr] -> Expr
 constructN n constructor args | n == length args = constructor args
 constructN _ _ _ = error "tried to apply the wrong number of arguments."
 
-pVar :: Parser Expr
+pVar :: MonadParser m => m Expr
 pVar = do
   varname <- lexeme pIdentifier
   return $ var varname
@@ -231,10 +233,10 @@ unaryFs = [
   ("negate", negF)
   ]
 
-pValue :: Parser Value
+pValue :: MonadParser m => m Value
 pValue = choice [pBool, try pFloat, pIntVal, pTupleVal, pEither, pAny, pList <&> constructVList, pThetaTree <&> VThetaTree]
 
-pTupleVal :: Parser Value
+pTupleVal :: MonadParser m => m Value
 pTupleVal = do
   (symbol "(")
   val1 <- pValue
@@ -243,17 +245,17 @@ pTupleVal = do
   (symbol ")")
   return (VTuple val1 val2)
 
-pConst :: Parser Expr
+pConst :: MonadParser m => m Expr
 pConst = do
   val <- pValue
   return (Constant makeTypeInfo val)
 
-pBool :: Parser Value
+pBool :: MonadParser m => m Value
 pBool = do
   b <- choice [keyword "True" >> return True, keyword "False" >> return False]
   return (VBool b)
 
-pFloat :: Parser Value
+pFloat :: MonadParser m => m Value
 pFloat = dbg "float" $ do
   sign <- optional (symbol "-")
   f <- lexeme L.float
@@ -261,7 +263,7 @@ pFloat = dbg "float" $ do
     Nothing -> return (VFloat f)
     Just "-" -> return (VFloat (-f))
 
-pIntVal :: Parser Value
+pIntVal :: MonadParser m => m Value
 pIntVal = dbg "int" $ do
   sign <- optional (symbol "-")
   i <- lexeme L.decimal
@@ -270,7 +272,7 @@ pIntVal = dbg "int" $ do
     Just "-" -> return (VInt (-i))
 
 
-pInt :: Parser Int
+pInt :: MonadParser m => m Int
 pInt = do
   sign <- optional (symbol "-")
   i <- lexeme L.decimal
@@ -278,7 +280,7 @@ pInt = do
     Nothing -> return i
     Just "-" -> return (-i)
 
-pEither :: Parser Value
+pEither :: MonadParser m => m Value
 pEither = do
   side <- choice[keyword "Left", keyword "Right"]
   v <- pValue
@@ -287,12 +289,12 @@ pEither = do
     "Right" -> return $ VEither (Right v)
     s -> fail $ "Unrecognized Either constructor: " ++ s
 
-pAny :: Parser Value
+pAny :: MonadParser m => m Value
 pAny = do
   keyword "ANY"
   return VAny
 
-pThetaTree :: Parser ThetaTree
+pThetaTree :: MonadParser m => m ThetaTree
 pThetaTree = do
   keyword "ThetaTree"
   symbol "["
@@ -303,7 +305,7 @@ pThetaTree = do
   symbol "]"
   return $ ThetaTree thetas subtrees
 
-pBinaryF :: Parser Expr
+pBinaryF :: MonadParser m => m Expr
 pBinaryF = do
   op <- choice (map (symbol . fst) binaryFs)
   left <- pExpr
@@ -312,7 +314,7 @@ pBinaryF = do
     Nothing -> error "unexpected parse error"
     Just opconstructor -> return (opconstructor left right)
 
-parseFromList :: [(String, b)] -> Parser b
+parseFromList :: MonadParser m => [(String, b)] -> m b
 parseFromList kvlist = do
   key <- choice (map (symbol . fst) kvlist)
   case (lookup key kvlist) of
@@ -324,12 +326,12 @@ rTypes = [("Int", TInt), ("Float", TFloat), ("Bool", TBool), ("Symbol", TSymbol)
 
 -- this function needs to handle compound types such as "Int -> Float" as well 
 -- first, we want to try parsing a compound type, and if that fails assume that a simple type is there instead.
-pType :: Parser RType
+pType :: MonadParser m => m RType
 pType = dbg "type" $ do
   t <- choice [pCompoundType, pSimpleType]
   return t
 
-pCompoundType :: Parser RType
+pCompoundType :: MonadParser m => m RType
 pCompoundType = parens $ do
   left <- pSimpleType
   combinator <- pTypeCombinator
@@ -339,18 +341,18 @@ pCompoundType = parens $ do
       pTypeCombinator = parseFromList combinators
       combinators = [("->", TArrow), ("," , Tuple)]
 
-pSimpleType :: Parser RType
+pSimpleType :: MonadParser m => m RType
 pSimpleType =
   parseFromList rTypes
 
-pList :: Parser [Value]
+pList :: MonadParser m => m [Value]
 pList = do
   (symbol "[")
   values <- pCSV
   (symbol "]")
   return values
 
-pRange :: Parser (Value, Value)
+pRange :: MonadParser m => m (Value, Value)
 pRange = do
   (symbol "[")
   from <- valueParser
@@ -359,27 +361,27 @@ pRange = do
   (symbol "]")
   return (from, to)
 
-pListExpr :: Parser Expr
+pListExpr :: MonadParser m => m Expr
 pListExpr = do
   (symbol "[")
   exprs <- expr `sepBy` (symbol ",")
   (symbol "]")
   return (foldr cons nul exprs)
 
-valueParser :: Parser Value
+valueParser :: MonadParser m => m Value
 valueParser = pValue
 
-pCSV :: Parser [Value]
+pCSV :: MonadParser m => m [Value]
 pCSV = valueParser `sepBy` (symbol ",")
 
-pDefinition :: Parser (Either FnDecl NeuralDecl)
+pDefinition :: MonadParser m => m (Either FnDecl NeuralDecl)
 pDefinition = do
   x <- choice [fmap Right pNeural, fmap Left pFunction]
   doesNotContinue
   return x
 
 --TODO: Add validation via AutoNeural.
-pNeural :: Parser NeuralDecl
+pNeural :: MonadParser m => m NeuralDecl
 pNeural = dbg "neural" $ do
   _ <- keyword "neural"
   name <- pIdentifier
@@ -391,7 +393,7 @@ pNeural = dbg "neural" $ do
       listOrRange = choice [try (pList >>= return . EnumList), pRange >>= return . EnumRange]
 
 
-pFunction :: Parser FnDecl
+pFunction :: MonadParser m => m FnDecl
 pFunction = dbg "function" $ do
   name <- pIdentifier
   args <- many pIdentifier
@@ -400,7 +402,7 @@ pFunction = dbg "function" $ do
   let lambdas = foldr (#->#) e args
   return (name, lambdas)
 
-pADT :: Parser ADTDecl
+pADT :: MonadParser m => m ADTDecl
 pADT = do
   keyword "data"
   name <- pIdentifier
@@ -409,7 +411,7 @@ pADT = do
   doesNotContinue
   return (name, constrs)
 
-pADTConstructor :: Parser ADTConstructorDecl 
+pADTConstructor :: MonadParser m => m ADTConstructorDecl 
 pADTConstructor = dbg "ADT Constr" $ do
   name <- pIdentifier
   rts <- many $ do
@@ -422,10 +424,10 @@ pADTConstructor = dbg "ADT Constr" $ do
     return (fieldName, fieldRT)
   return (name, rts)
 
-doesNotContinue :: Parser ()
+doesNotContinue :: MonadParser m => m ()
 doesNotContinue = choice [eof, void eol]
 
-pProg :: Parser Program
+pProg :: MonadParser m => m Program
 pProg = do
   sc
   adts <- dbg "trying ADTs" (many pADT)
@@ -443,11 +445,13 @@ aggregateDefinitions adts (Right nr : tail) = Program fns (nr:neurals) adtz
 aggregateDefinitions adts [] = Program [] [] adts
 
 tryParseExpr :: FilePath -> String -> Either (ParseErrorBundle String Void) Expr
-tryParseExpr filename src = runParser parseExpr filename src
+tryParseExpr filename src = do
+  (res, _) <- runParser (runStateT parseExpr 0) filename src
+  return res
 
 tryParseProgram :: FilePath -> String -> Either (ParseErrorBundle String Void) Program
 tryParseProgram filename src = do
-  prog <- runParser pProg filename src
+  (prog, _) <- runParser (runStateT pProg 0) filename src
   case normalize prog of
     Right prog -> Right prog
     Left err -> Left $ ParseErrorBundle ((FancyError 0 (Set.singleton (ErrorFail err))) :| []) emptyPosState
@@ -455,14 +459,14 @@ tryParseProgram filename src = do
 emptyPosState :: PosState String
 emptyPosState = PosState "" 0 (initialPos "<string>") (mkPos 0) ""
 
-testParse :: IO ()
-testParse = do
+testParse' :: IO ()
+testParse' = do
   let filename = "../../test.spll"
   source <- readFile filename
-  let result = runParser (pProg :: Parser Program) filename source
+  let result = runParser (runStateT pProg 0) filename source
   case result of
     Left err -> putStrLn (errorBundlePretty err)
-    Right prog -> do
+    Right (prog, _) -> do
       let flatProg = prog
       putStrLn "ASDF1"
       mapM_ putStrLn (prettyPrintProg prog)
@@ -474,12 +478,12 @@ testParse = do
       print prog
 
 
-pNull :: Parser Expr
+pNull :: MonadParser m => m Expr
 pNull = do
   _ <- symbol "[]"
   return $ nul
 
-pTuple :: Parser Expr
+pTuple :: MonadParser m => m Expr
 pTuple = parens $ do
   x <- expr
   _ <- symbol ","
@@ -488,7 +492,7 @@ pTuple = parens $ do
 
 
 -- | Parse atomic expressions (no recursion)
-atom :: Parser Expr
+atom :: MonadParser m => m Expr
 atom = choice [
     pNull,
     try (pTuple),
@@ -501,7 +505,7 @@ atom = choice [
   ] <* sc
 
 -- | Parse expressions that start with keywords
-keywordExpr :: Parser Expr
+keywordExpr :: MonadParser m => m Expr
 keywordExpr = dbg "keywordExpr" $ choice [
     pIfThenElse,
     pLetIn,
@@ -512,7 +516,7 @@ keywordExpr = dbg "keywordExpr" $ choice [
   ] <* sc
 
 -- | Lambda expressions
-pLambda :: Parser Expr
+pLambda :: MonadParser m => m Expr
 pLambda = do
     _ <- symbol "\\"
     param <- pIdentifier
@@ -522,7 +526,7 @@ pLambda = do
 
 -- | Parse function application
 -- This handles both normal application and built-in functions like multF
-application :: Parser Expr
+application :: MonadParser m => m Expr
 application = dbg "application" $do
     func <- try atom
     args <- try $ many (try atom <|> try (parens expr))
@@ -538,7 +542,7 @@ application = dbg "application" $do
 
 
 -- | Main expression parser using makeExprParser
-expr :: Parser Expr
+expr :: MonadParser m => m Expr
 expr = dbg "expr" $ makeExprParser term opTable
   where
     term = choice [
@@ -548,30 +552,30 @@ expr = dbg "expr" $ makeExprParser term opTable
       ]
 
 -- | Helper for debuggable subparsers
-withDebug :: String -> Parser a -> Parser a
+withDebug :: MonadParser m => String -> m a -> m a
 withDebug label p = dbg label p
 
 -- | Top level entry point
-parseExpr :: Parser Expr
+parseExpr :: MonadParser m => m Expr
 parseExpr = sc *> expr <* eof
 
 -- | Parse a parenthesized expression
-parens :: Parser a -> Parser a
+parens :: MonadParser m => m a -> m a
 parens = between (char '(' *> sc) (char ')' *> sc)
 
 -- | Parse an identifier (simple Haskell-style variable)
-identifier :: Parser String
+identifier :: MonadParser m => m String
 identifier = (:) <$> letterChar <*> many alphaNumChar <* sc
 
 -- | Parse an atomic expression (identifier or parenthesized expression)
-term :: Parser Expr
+term :: MonadParser m => m Expr
 term =  parens expr
     <|> pConst
     <|> var <$> identifier
 
 
 -- | Handle function application
-appTable :: Parser Expr
+appTable :: MonadParser m => m Expr
 appTable = do
   f <- term
   args <- many term
@@ -592,17 +596,17 @@ cmpOpList = [(">", (#>#)), ("<", (#<#)), (":", (#:#))]
 funLikeOps :: [([Char], Expr -> Expr)]
 funLikeOps = [("not", (#!#))]
 
-mkInfixOp :: [([Char], Expr -> Expr -> Expr)] -> [Operator Parser Expr]
+mkInfixOp :: MonadParser m => [([Char], Expr -> Expr -> Expr)] -> [Operator m Expr]
 mkInfixOp tbl = map infx tbl
   where infx (name, f) = InfixL (f <$ symbol name)
 
-mkPrefixOp :: [([Char], Expr -> Expr)] -> [Operator Parser Expr]
+mkPrefixOp :: MonadParser m => [([Char], Expr -> Expr)] -> [Operator m Expr]
 mkPrefixOp tbl = map infx tbl
   where infx (name, f) = Prefix (f <$ symbol name)
 
 
 -- | Operator table (precedence and associativity)
-opTable :: [[Operator Parser Expr]]
+opTable :: MonadParser m => [[Operator m Expr]]
 opTable =
   [ mkPrefixOp funLikeOps,
     mkInfixOp multLikeOpList,
@@ -613,14 +617,8 @@ opTable =
 
 
 -- | Top-level parser
-expressionParser :: Parser Expr
+expressionParser :: MonadParser m => m Expr
 expressionParser = sc *> expr <* eof
-
--- | Test the parser
-testParser :: String -> Either (ParseErrorBundle String Void) Expr
-testParser input = parse expressionParser "" input
-
-
 
 type ExprBuilder = [Expr] -> Either String Expr
 type BuilderMap = Map.Map String ExprBuilder

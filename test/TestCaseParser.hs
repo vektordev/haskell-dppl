@@ -1,3 +1,6 @@
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE ConstraintKinds #-}
+
 module TestCaseParser (
   TestCase(..),
   isProbTestCase,
@@ -17,6 +20,10 @@ import Text.Megaparsec hiding (State)
 import Text.Megaparsec.Char
 import Data.Void
 import Debug.Trace
+import Control.Monad.State
+import Control.Monad (MonadPlus)
+import Text.Megaparsec hiding (State)
+import Data.Void
 
 
 data TestCase = ProbTestCase String IRValue [IRValue] (IRValue, IRValue)
@@ -36,24 +43,22 @@ testCaseName (ProbTestCase name _ _ _) = name
 testCaseName (ArgmaxPTestCase name _ _) = name
 
 type Parser = Parsec Void String
+type MonadParser m = (MonadParsec Void String m, MonadPlus m, MonadFail m, MonadState Int m)
+
+sc :: MonadParser m => m ()
 sc = L.space hspace1 (L.skipLineComment "--") (L.skipBlockComment "{-" "-}")
 
-symbol :: String -> Parser String
+symbol :: MonadParser m => String -> m String
 symbol = L.symbol sc
 
 -- Either a windows or a linux newline
-pNewline :: Parser String
+pNewline :: MonadParser m => m String
 pNewline = choice [symbol "\n", symbol "\r\n"] 
 
-pIRValue :: Parser IRValue
+pIRValue :: MonadParser m => m IRValue
 pIRValue = pValue >>= return . valueToIR
 
-tryRunParser :: Parser a -> FilePath -> String -> a
-tryRunParser parser fp s = case runParser parser fp s of
-  Left err -> error (errorBundlePretty err)
-  Right val -> val
-
-pProbTestCase :: String -> Parser TestCase
+pProbTestCase :: MonadParser m => String -> m TestCase
 pProbTestCase name = do
   _ <- symbol "p("
   params <- pIRValue `sepBy` (symbol ",")
@@ -61,7 +66,7 @@ pProbTestCase name = do
   VTuple resP resD <- pIRValue
   return $ ProbTestCase name (head params) (tail params) (resP, resD)
 
-pArgmaxPTestCase :: String -> Parser TestCase
+pArgmaxPTestCase :: MonadParser m => String -> m TestCase
 pArgmaxPTestCase name = do
   symbol "argmax_p("
   params <- pIRValue `sepBy` (symbol ",")
@@ -69,13 +74,15 @@ pArgmaxPTestCase name = do
   res <- pIRValue
   return $ ArgmaxPTestCase name  params res
 
-pTestCases :: String -> Parser [TestCase]
+pTestCases :: MonadParser m => String -> m [TestCase]
 pTestCases name = choice[pProbTestCase name , pArgmaxPTestCase name] `sepBy` pNewline
 
 parseTestCases :: FilePath -> IO [TestCase]
 parseTestCases fp = do
   content <- readFile fp
-  return $ tryRunParser (pTestCases fp) fp content
+  case runParser (runStateT (pTestCases fp) 0) fp content of
+    Left err -> error (errorBundlePretty err)
+    Right (val, _) -> return $ val
 
 parseProgram :: FilePath -> IO Program
 parseProgram fp = do
