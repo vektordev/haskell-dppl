@@ -38,6 +38,7 @@ import SPLL.Prelude
 import Debug.Trace
 import Data.Functor ((<&>))
 import Control.Monad.State
+import Data.Functor.Identity
 
 --import Text.Megaparsec.Debug (dbg)
 
@@ -418,14 +419,14 @@ pADT = do
   doesNotContinue
   return (name, constrs)
 
-pADTConstructor :: MonadParser m => m ADTConstructorDecl 
+pADTConstructor :: MonadParser m => m ADTConstructorDecl
 pADTConstructor = dbg "ADT Constr" $ do
   name <- pIdentifier
   rts <- many $ do
     fieldName <- pIdentifier
     symbol "::"
     fieldType <- choice [SPLL.Parser.pType <&> Left, pIdentifier <&> Right]
-    let fieldRT = case fieldType of 
+    let fieldRT = case fieldType of
                     Left rt -> rt
                     Right adt -> TADT adt
     return (fieldName, fieldRT)
@@ -627,82 +628,91 @@ opTable =
 expressionParser :: MonadParser m => m Expr
 expressionParser = sc *> expr <* eof
 
-type ExprBuilder = [Expr] -> Either String Expr
-type BuilderMap = Map.Map String ExprBuilder
+type ExprBuilder m = [Expr] -> m (Either String Expr)
+type BuilderMap m = Map.Map String (ExprBuilder m)
 
 -- | Normalize a Program
 --  After normalization, all Vars should be properly resolved as either a ReadNN, a InjF, or a plain Var.
 normalize :: Program -> Either String Program
 normalize prog =
-  let neuralMap = buildNeuralMap (neurals prog)
+  let neuralMap = buildNeuralMap (neurals prog) :: BuilderMap (State Int)
       invMap = buildInvMap (adts prog)
       functionMap = globalFunctions prog
       --benignVars = collectBenignVars prog
       builderMap = Map.unions [neuralMap, invMap]  -- neural builders take precedence
   in if Map.disjoint invMap neuralMap && Map.disjoint invMap functionMap && Map.disjoint neuralMap functionMap
-    then mapExprInProgram (normalizeExpr (builderMap, functionMap, Set.empty)) prog
+    then do
+      --mapExprInProgram (normalizeExpr (builderMap, functionMap, Set.empty)) prog
+      evalState (mapExprInProgram (normalizeExpr (builderMap, functionMap, Set.empty)) prog) 0
     else Left $ "Found identifiers that are in multiple scopes."
 
 -- Build maps from identifiers to expression builders
-buildNeuralMap :: [NeuralDecl] -> BuilderMap
+buildNeuralMap :: MonadState Int m => [NeuralDecl] -> BuilderMap m
 buildNeuralMap decls = Map.fromList
-  [(name, \[arg] -> Right $ readNN name arg) | (name, _, _) <- decls]
+  [(name, \[arg] -> return $ Right $ readNN name arg) | (name, _, _) <- decls]
 
-buildInvMap :: [ADTDecl] -> BuilderMap
+buildInvMap :: MonadState Int m => [ADTDecl] -> BuilderMap m
 buildInvMap adts = Map.fromList
   [(name, \args -> case args of
-    a | length a /= parameterCount adts name -> Left $ "Wrong number of parameters for InjF " ++ name ++ " expected " ++ show (parameterCount adts name) ++ " got " ++ show (length a)
-    _ -> Right $ injF name args)
+    a | length a /= parameterCount adts name -> return $ Left $ "Wrong number of parameters for InjF " ++ name ++ " expected " ++ show (parameterCount adts name) ++ " got " ++ show (length a)
+    _ -> return $ Right $ injF name args)
    | name <- fNames]
   where fNames = map fst (globalFEnv adts)
 
-globalFunctions :: Program -> BuilderMap
-globalFunctions prog = Map.fromList [(name, \[] -> Right $ var name) | (name, _) <- functions prog]
+globalFunctions :: MonadState Int m =>  Program -> BuilderMap m
+globalFunctions prog = Map.fromList [(name, \[] -> return $ Right $ var name) | (name, _) <- functions prog]
 
 -- Collect all variables that should not be transformed
 collectBenignVars :: Program -> Set.Set String
 collectBenignVars prog = Set.fromList [name | (name, _) <- functions prog]
 
 -- Main expression normalization function
-normalizeExpr :: (BuilderMap, BuilderMap, Set.Set String) -> Expr -> Either String Expr
+normalizeExpr :: MonadState Int m => (BuilderMap m, BuilderMap m, Set.Set String) -> Expr -> m (Either String Expr)
 normalizeExpr env@(parametricBuilders, atomicBuilders, benign) expr =
   case expr of
     -- Handle scopes first, adding bound variables before processing sub-expressions
-    Lambda ti name body ->
-      normalizeExpr (parametricBuilders, atomicBuilders, Set.insert name benign) body
-      >>= \body' -> Right $ Lambda ti name body'
+    Lambda ti name body -> do
+      let body' = normalizeExpr (parametricBuilders, atomicBuilders, Set.insert name benign) body
+      fmap (fmap (Lambda ti name)) body'
 
     LetIn ti name def body -> do
       -- def is normalized with current scope
-      def' <- normalizeExpr env def
+      let def' = normalizeExpr env def
       -- body is normalized with name added to scope
-      body' <- normalizeExpr (parametricBuilders, atomicBuilders, Set.insert name benign) body
-      Right $ LetIn ti name def' body'
+      let body' = normalizeExpr (parametricBuilders, atomicBuilders, Set.insert name benign) body
+      let a = fmap (fmap (LetIn ti name)) def'
+      fmap (<*>) a <*> body'
 
     -- For all other expressions, normalize sub-expressions first then check for Apply pattern
     _ -> do
-      subExprs <- mapM (normalizeExpr env) (getSubExprs expr)
-      let expr' = setSubExprs expr subExprs
-      case expr' of
-        -- Start of an Apply chain
-        Apply ti (Apply _ _ _) _ ->
-          -- Need to collect all args in the chain and find base function
-          let (base, args) = collectApplyChain expr
-          in case base of
-            Var _ fname | Just builder <- Map.lookup fname parametricBuilders ->
-              case builder args of
-                Left _ -> Right expr' -- This prevents InjFs, which have multiple arguments from failing to build because here only one argument is applied
-                e -> e
-            _ -> Right expr
-        Apply ti (Var _ fname) arg
-          | not (Set.member fname benign)
-          , Just builder <- Map.lookup fname parametricBuilders -> case builder [arg] of
-            Left _ -> Right expr' -- This prevents InjFs, which have multiple arguments from failing to build because here only one argument is applied
-            e -> e
-        Var ti fname
-          | not (Set.member fname benign)
-          , Just builder <- Map.lookup fname atomicBuilders -> builder []
-        _ -> Right expr'
+      subExprs <- fmap sequence (mapM (normalizeExpr env) (getSubExprs expr))
+      let mExpr = fmap (setSubExprs expr) subExprs
+      case mExpr of
+        Left s -> return $ Left s
+        Right expr' ->
+          case expr' of
+            -- Start of an Apply chain
+            Apply ti (Apply _ _ _) _ ->
+              -- Need to collect all args in the chain and find base function
+              let (base, args) = collectApplyChain expr
+              in case base of
+                Var _ fname | Just builder <- Map.lookup fname parametricBuilders -> do
+                  build <- builder args
+                  case build of
+                    Left _ -> return $ Right expr' -- This prevents InjFs, which have multiple arguments from failing to build because here only one argument is applied
+                    e -> return e
+                _ -> return $ Right expr
+            Apply ti (Var _ fname) arg
+              | not (Set.member fname benign)
+              , Just builder <- Map.lookup fname parametricBuilders -> do
+                build <- builder [arg]
+                case build of
+                  Left _ -> return $ Right expr' -- This prevents InjFs, which have multiple arguments from failing to build because here only one argument is applied
+                  e -> return e
+            Var ti fname
+              | not (Set.member fname benign)
+              , Just builder <- Map.lookup fname atomicBuilders -> builder []
+            _ -> return $ Right expr'
 
 -- Returns (base expression, arguments in application order)
 collectApplyChain :: Expr -> (Expr, [Expr])
@@ -715,7 +725,10 @@ collectApplyChain (InjF t name args) = (Var t name, args)
 collectApplyChain e = (e, [])
 
 -- Helper to map over all expressions in a program
-mapExprInProgram :: (Expr -> Either String Expr) -> Program -> Either String Program
+mapExprInProgram :: MonadState Int m => (Expr -> m (Either String Expr)) -> Program -> m (Either String Program)
 mapExprInProgram f prog = do
-  newFuncs <- mapM (\(name, expr) -> f expr >>= \e -> Right (name, e)) (functions prog)
-  Right $ prog { functions = newFuncs }
+  newFuncs <- mapM (\(name, expr) -> f expr >>= \e -> return (name, e)) (functions prog)
+  let newFuncs' = mapM (\(s, e) -> (e <&> \ex -> (s, ex))) newFuncs
+  case newFuncs' of
+    Right fs -> return $ Right $ prog { functions = fs }
+    Left err -> return $ Left err
