@@ -39,6 +39,7 @@ import Debug.Trace
 import Data.Functor ((<&>))
 import Control.Monad.State
 import Data.Functor.Identity
+import Data.Foldable (foldl')
 
 --import Text.Megaparsec.Debug (dbg)
 
@@ -135,7 +136,7 @@ letInDestructor (Cons _ x xs) = do
   x' <- letInDestructor x
   xs' <- letInDestructor xs
   id <- demandUniqueNumber
-  let varName = "p_" ++ show id
+  let varName = "p_d" ++ show id
   return $ \v body -> letIn varName v (x' (lhead (var varName)) (xs' (ltail (var varName)) body))
 letInDestructor _ = fail "LHS of a letIn sould be an identifier or a complex type of identifiers"
 
@@ -222,6 +223,15 @@ construct2 _ _ = error "tried to apply the wrong number of arguments."
 constructN :: Int -> ([Expr] -> Expr) -> [Expr] -> Expr
 constructN n constructor args | n == length args = constructor args
 constructN _ _ _ = error "tried to apply the wrong number of arguments."
+
+-- Constructs a partially applied function, by wrapping the constructor in lambdas and using the bound variables as missing parameters
+constructNPartial :: MonadParser m => Int -> ([Expr] -> Expr) -> [Expr] -> m Expr
+constructNPartial expected constructor params = do
+  let missingParamCnt = expected - length params
+  substituteParamIDs <- replicateM missingParamCnt demandUniqueNumber
+  let substituteParamNames = map (("p_m" ++) . show) substituteParamIDs
+  let extendedArgs = params ++ map var substituteParamNames
+  return $ foldl (flip (#->#)) (constructor extendedArgs) substituteParamNames
 
 pVar :: MonadParser m => m Expr
 pVar = do
@@ -544,7 +554,13 @@ application = dbg "application" $do
             Nothing -> case lookup name unaryFs of
                 Just constructor -> return (construct1 constructor args)
                 Nothing -> case lookup name (globalFEnv []) of
-                  Just _ -> return (constructN (parameterCount [] name) (injF name) args)
+                  Just _ -> 
+                    if length args == (parameterCount [] name) then
+                      return (constructN (parameterCount [] name) (injF name) args)
+                    else if length args < (parameterCount [] name) then
+                      constructNPartial (parameterCount [] name) (injF name) args
+                    else
+                      fail $ "Function " ++ name ++ " expects " ++ show (parameterCount [] name) ++ " parameters, but got " ++ show (length args)
                   Nothing -> return $ foldl apply func args
         _ -> return $ foldl apply func args
 
@@ -637,13 +653,15 @@ normalize :: Program -> Either String Program
 normalize prog =
   let neuralMap = buildNeuralMap (neurals prog) :: BuilderMap (State Int)
       invMap = buildInvMap (adts prog)
-      functionMap = globalFunctions prog
+      globalFunctionMap = globalFunctions prog
+      injFMap = buildInjFMap prog
       --benignVars = collectBenignVars prog
-      builderMap = Map.unions [neuralMap, invMap]  -- neural builders take precedence
-  in if Map.disjoint invMap neuralMap && Map.disjoint invMap functionMap && Map.disjoint neuralMap functionMap
+      paramMap = Map.unions [neuralMap, invMap, injFMap]  -- neural builders take precedence
+      functionMap = Map.unions [globalFunctionMap, injFMap] -- InjF are in both Maps, because they can be partially applied, which means they can have zero parameters
+  in if Map.disjoint invMap neuralMap && Map.disjoint invMap globalFunctionMap && Map.disjoint neuralMap globalFunctionMap
     then do
       --mapExprInProgram (normalizeExpr (builderMap, functionMap, Set.empty)) prog
-      evalState (mapExprInProgram (normalizeExpr (builderMap, functionMap, Set.empty)) prog) 0
+      evalState (mapExprInProgram (normalizeExpr (paramMap, functionMap, Set.empty)) prog) 0
     else Left $ "Found identifiers that are in multiple scopes."
 
 -- Build maps from identifiers to expression builders
@@ -654,13 +672,27 @@ buildNeuralMap decls = Map.fromList
 buildInvMap :: MonadState Int m => [ADTDecl] -> BuilderMap m
 buildInvMap adts = Map.fromList
   [(name, \args -> case args of
-    a | length a /= parameterCount adts name -> return $ Left $ "Wrong number of parameters for InjF " ++ name ++ " expected " ++ show (parameterCount adts name) ++ " got " ++ show (length a)
+    a | length a /= parameterCount adts name -> do
+      let missingParamCnt = parameterCount adts name - length a
+      substituteParamIDs <- replicateM missingParamCnt demandUniqueNumber
+      let substituteParamNames = map (("p_m" ++) . show) substituteParamIDs
+      let extendedArgs = args ++ map var substituteParamNames
+      return $ Right $ foldl (flip (#->#)) (injF name extendedArgs) substituteParamNames
     _ -> return $ Right $ injF name args)
    | name <- fNames]
   where fNames = map fst (globalFEnv adts)
 
 globalFunctions :: MonadState Int m =>  Program -> BuilderMap m
-globalFunctions prog = Map.fromList [(name, \[] -> return $ Right $ var name) | (name, _) <- functions prog]
+globalFunctions prog = Map.fromList ([(name, \[] -> return $ Right $ var name) | (name, _) <- functions prog])
+
+buildInjFMap:: MonadState Int m => Program -> BuilderMap m
+buildInjFMap prog = Map.fromList 
+  [(name, \[] -> do
+      substituteParamIDs <- replicateM (parameterCount (adts prog) name) demandUniqueNumber
+      let substituteParamNames = map (("p_m" ++) . show) substituteParamIDs
+      let args = map var substituteParamNames
+      return $ Right $ foldl (flip (#->#)) (injF name args) substituteParamNames)
+    | (name, _) <- globalFEnv (adts prog)]
 
 -- Collect all variables that should not be transformed
 collectBenignVars :: Program -> Set.Set String
@@ -713,6 +745,9 @@ normalizeExpr env@(parametricBuilders, atomicBuilders, benign) expr =
               | not (Set.member fname benign)
               , Just builder <- Map.lookup fname atomicBuilders -> builder []
             _ -> return $ Right expr'
+
+--replaceExpr :: Expr -> Expr -> Expr
+--replaceExpr
 
 -- Returns (base expression, arguments in application order)
 collectApplyChain :: Expr -> (Expr, [Expr])
