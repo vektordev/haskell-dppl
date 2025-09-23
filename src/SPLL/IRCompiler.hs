@@ -72,7 +72,14 @@ envToIR conf p@Program{adts=adts} = optimizeEnv conf $ IREnv (-- map optimizer o
 
 
 runCompile :: CompilerMetadata -> CompilerMonad CompilationResult -> IRExpr
-runCompile meta codeGen = generateLetInBlock meta (runIdentity $ runSupplyVars $ runWriterT $ codeGen)
+runCompile meta codeGen = generateLetInBlock meta (runIdentity $ runSupplyVars $ runWriterT $ do
+  (p, d, bc) <- codeGen
+  case p of 
+    IRLambda _ _ -> return (p, d, bc)
+    _ -> tell [("l_p", p), ("l_d", d), ("l_bc", bc)] >>
+                return (IRVar "l_p", IRVar "l_d", IRVar "l_bc")
+  --
+  )
 
 generateLetInBlock :: CompilerMetadata -> (CompilationResult, [(String, IRExpr)]) -> IRExpr
 generateLetInBlock meta codeGen =

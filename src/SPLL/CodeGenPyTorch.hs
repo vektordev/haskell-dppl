@@ -114,7 +114,7 @@ generateFunctions genBoil env@(IREnv funcs adts) =
       "import functools",
       "import math",
       "from torch.nn import Module", ""] ++
-      generateADTClasses adts ++ 
+      generateADTClasses adts ++
       concatMap (generateClass (envToLUT env)) funcs ++
       ["", "# Example Initialization"] ++
       generateInitializations env
@@ -145,7 +145,7 @@ generateADTClass (name, fields) =
   indentOnce (
     -- Constructor
     (("def __init__(self, " ++ intercalate ", " fieldNames ++ "):") :
-    case fieldNames of 
+    case fieldNames of
       [] -> indentOnce ["pass"]
       fieldNames -> indentOnce (
         map (\f -> "self." ++f ++ " = " ++ f) fieldNames))
@@ -197,8 +197,7 @@ unwrapLambdas (IRLambda name rest) = (name:otherNames, plainTree)
 unwrapLambdas anyNode = ([], anyNode)
 
 generateStatementBlock :: IRExpr -> [String]
-generateStatementBlock (IRLetIn name lmd@(IRLambda _ _) body) = generateFunction False (name, (lmd, "Inner function: " ++ name)) ++ generateStatementBlock body
-generateStatementBlock (IRLetIn name val body) = (name ++ " = " ++ generateExpression val):generateStatementBlock body
+generateStatementBlock (IRLetIn name x body) = generateLetInStatement name x ++ generateStatementBlock body
 generateStatementBlock (IRIf cond left right) = let
   cCond = generateExpression cond
   cLeft = generateStatementBlock left
@@ -207,6 +206,16 @@ generateStatementBlock (IRIf cond left right) = let
   l2 = "else:"
   in [l1] ++ indentOnce cLeft ++ [l2] ++ indentOnce cRight
 generateStatementBlock expr = ["return " ++ generateExpression expr]
+
+generateLetInStatement :: String -> IRExpr -> [String]
+generateLetInStatement name lmd@(IRLambda _ _) = generateFunction False (name, (lmd, "Inner function: " ++ name))
+generateLetInStatement name (IRIf cond left right) = let
+  c = generateExpression cond in
+    ["if " ++ c ++ ":"] ++
+    indentOnce (generateLetInStatement name left) ++
+    ["else:"] ++
+    indentOnce (generateLetInStatement name right)
+generateLetInStatement name x = [name ++ " = " ++ generateExpression x]
 
 generateExpression :: IRExpr -> String
 generateExpression (IRIf cond left right) = "(" ++ generateExpression left ++ " if " ++ generateExpression cond ++ " else " ++ generateExpression right ++ ")"
@@ -260,7 +269,7 @@ generateInvokeExpression expr = "(" ++ generateExpression expr ++ ")("
 generateLambdaExpression :: IRExpr -> String
 generateLambdaExpression expr = "(lambda " ++ intercalate ", " names ++ ": " ++ generateExpression rest ++ ")"
   where (names, rest) = getLambdaNames expr
-  
+
 getLambdaNames :: IRExpr -> ([String], IRExpr)
 getLambdaNames (IRLambda n body) = (n:names, rest)
   where (names, rest) = getLambdaNames body
