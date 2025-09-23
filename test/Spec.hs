@@ -346,14 +346,22 @@ irDensity p s params = IRInterpreter.generateRand (neurals p) irEnv (sampleExpr:
         preAnnotated = annotateEnumsProg p
 
 irIntegral :: RandomGen g => Program -> IRValue -> IRValue -> [IRExpr] -> Rand g IRValue
-irIntegral p low high params = IRInterpreter.generateRand (neurals p) irEnv (lowExpr:highExpr:params) irExpr
-  where Just (irExpr, _) = integFun (lookupIREnv "main" irEnv)
-        lowExpr = IRConst low
-        highExpr = IRConst high
-        irEnv = envToIR defaultCompilerConfig annotated
-        annotated = annotateAlgsProg typedProg
-        typedProg = addTypeInfo preAnnotated
-        preAnnotated = annotateEnumsProg p
+irIntegral p low high params = do
+  highVal <- interpret highExpr
+  lowVal <- interpret lowExpr
+  case (highVal, lowVal) of
+    (VTuple (VFloat highP) (VFloat highD),
+     VTuple (VFloat lowP)  (VFloat lowD)) -> return $ VTuple (VFloat (highP - lowP)) (VFloat lowD)
+    _ -> error "irIntegral: unexpected IRValue shape"
+  where
+    interpret x = IRInterpreter.generateRand (neurals p) irEnv (x:params) irExpr
+    Just (irExpr, _) = integFun (lookupIREnv "main" irEnv)
+    lowExpr = IRConst low
+    highExpr = IRConst high
+    irEnv = envToIR defaultCompilerConfig annotated
+    annotated = annotateAlgsProg typedProg
+    typedProg = addTypeInfo preAnnotated
+    preAnnotated = annotateEnumsProg p
 
 irGen :: RandomGen g => Program -> [IRExpr] -> Rand g IRValue
 irGen p params = IRInterpreter.generateRand (neurals p) irEnv params irExpr

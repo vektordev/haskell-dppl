@@ -155,8 +155,8 @@ toIRInference :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad Com
 --toIRInference meta cumulative expr sample | trace (show expr) False = undefined
 toIRInference meta False (Normal t) sample = return (IRDensity IRNormal sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), const0)
 toIRInference meta False (Uniform t) sample = return (IRDensity IRUniform sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), const0)
-toIRInference meta True (Normal t) sample = return (IRCumulative IRNormal sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), const0)
-toIRInference meta True (Uniform t) sample = return (IRCumulative IRUniform sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), const0)
+toIRInference meta True (Normal t) sample = return (IRCumulative IRNormal sample, const0, const0)
+toIRInference meta True (Uniform t) sample = return (IRCumulative IRUniform sample, const0, const0)
 toIRInference meta False (Constant TypeInfo {rType=rt} value) sample = do
   let comp = case rt of
               TFloat -> IROp OpApprox sample (IRConst (fmap failConversion value))
