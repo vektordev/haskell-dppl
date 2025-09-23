@@ -6,6 +6,7 @@ import SPLL.Lang.Lang (Expr(..), getSubExprs, getFunctionNames)
 import Control.Monad
 import Data.Maybe (isJust, isNothing)
 import PredefinedFunctions (globalFEnv, parameterCount)
+import Data.List (intersect)
 
 -- This function returns nothing if the program is valid and an error else
 validateProgram :: Program -> Either String ()
@@ -29,6 +30,7 @@ validateExpression p topLevel (Var _ name) | usedBeforeDeclaration name topLevel
 validateExpression _ _ (Lambda _ name body) | declarationsCount name body > 0 = Left ("Duplicate declaration of identifier (Shawdowing is not allowed): " ++ name)
 validateExpression Program {adts=adts} _ (Lambda _ name body) | isJust (lookup name (globalFEnv adts)) = Left ("Identifier name is already used by an InjF: " ++ name)
 validateExpression p _ (Lambda _ name body) | name `elem` getFunctionNames p = Left ("Identifier is already a function name: " ++ name)
+validateExpression p _ (Apply _ l v) | not (null (declaredVariables l `intersect` declaredVariables v)) = Left ("Identifiers " ++ show (declaredVariables l `intersect` declaredVariables v) ++ " are possibly declared multiple times")
 validateExpression _ _ (Constant _ VAny) = Left "ANY may not be used in program declaration"
 validateExpression _ _ _ = Right ()
 
@@ -43,3 +45,8 @@ usedBeforeDeclaration name (LetIn _ decl _ _) | name == decl = False
 usedBeforeDeclaration name (Lambda _ lmd _) | name == lmd = False
 usedBeforeDeclaration name (Var _ v) | name == v = True
 usedBeforeDeclaration name expr = any (usedBeforeDeclaration name) (getSubExprs expr)
+
+declaredVariables :: Expr -> [String]
+declaredVariables (Lambda _ name body) = name:declaredVariables body
+declaredVariables (LetIn _ name value body) = name:declaredVariables body
+declaredVariables x = concatMap declaredVariables (getSubExprs x)
