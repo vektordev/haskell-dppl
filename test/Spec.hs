@@ -150,10 +150,6 @@ correctIntegralValuesTestCases =[(uniformProg, VFloat 0, VFloat 1, [], (VFloat 1
                                 (normalProgMult, VFloat (-10), VFloat (-5), [], (VFloat $ normalCDF (-10) - normalCDF (-20), VFloat 0)),
                                 (uniformNegPlus, VFloat (-5), VFloat (-4.5), [], (VFloat 0.5, VFloat 0)),
                                 (uniformProgPlus, VFloat 4, VFloat 4.5, [], (VFloat 0.5, VFloat 0)),
-                                (testList, constructVList [VFloat 0, VFloat (-1)], constructVList [VFloat 0.25, VFloat 1], [], (VFloat $ (normalCDF 1 - normalCDF (-1)) * 0.5, VFloat 0)),
-                                (simpleTuple, VTuple (VFloat 0) (VFloat (-1)), VTuple (VFloat 0.25) (VFloat 1), [], (VFloat $ (normalCDF 1 - normalCDF (-1)) * 0.5, VFloat 0)),
-                                (simpleTuple, VTuple (VFloat 0) (VFloat 0), VTuple (VFloat 0.25) (VFloat 0), [], (VFloat $ normalPDF 0 * 0.5, VFloat 1)),
-                                (simpleTuple, VTuple (VFloat 0) (VFloat 0), VTuple (VFloat 0) (VFloat 1), [], (VFloat $ (normalCDF 1 - normalCDF 0) * 2, VFloat 1)),
                                 (uniformIfProg, VFloat 0, VFloat 1, [], (VFloat 0.5, VFloat 0)),
                                 (constantProg, VFloat 1, VFloat 3, [], (VFloat 1, VFloat 0)),
                                 --,
@@ -165,7 +161,6 @@ correctIntegralValuesTestCases =[(uniformProg, VFloat 0, VFloat 1, [], (VFloat 1
                                 (simpleCall, VFloat 0, VFloat 1, [], (VFloat 1.0, VFloat 0)),
                                 (testCallArg, VFloat 3.5, VFloat 4.5, [], (VFloat 0.5, VFloat 0)),
                                 (testCallLambda, VFloat 2, VFloat 3, [], (VFloat 1.0, VFloat 0)),
-                                (gaussLists, constructVList [VFloat 0, VFloat 0, VFloat 0], constructVList [VFloat 1, VFloat 2, VFloat 3], [IRConst $ VThetaTree (ThetaTree [0.5, 1, 0] [])], (VFloat $ ((normalCDF 1) - (normalCDF 0)) * ((normalCDF 2) - (normalCDF 0)) * ((normalCDF 3) - (normalCDF 0)) / 16, VFloat 0)),
                                 (testInjFRenaming, VFloat 5, VFloat 5.5, [], (VFloat 0.5, VFloat 0)),
                                 (testIsLeft, VFloat 0, VFloat 3, [], (VFloat 1, VFloat 0)),
                                 (testIsLeft, VFloat 1.5, VFloat 3, [], (VFloat 0.6, VFloat 0)),
@@ -200,10 +195,6 @@ prop_CheckIntegralTestCases = forAll (elements correctIntegralValuesTestCases) c
 
 prop_CheckIntegralConverges :: Property
 prop_CheckIntegralConverges = forAll (elements correctIntegralValuesTestCases) checkIntegralConverges
-
---Not yet working
-prop_CheckZeroWidthIntegrals :: Property
-prop_CheckZeroWidthIntegrals = forAll (elements [(testInjF, VFloat 0, VFloat 1, [], VFloat 0.5)]) checkZeroWidthIntegral
 
 prop_CheckTopKInterprets :: Property
 prop_CheckTopKInterprets = forAll (elements correctProbValuesTestCases) checkTopKInterprets

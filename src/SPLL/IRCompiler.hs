@@ -165,6 +165,13 @@ toIRInference meta False (Constant TypeInfo {rType=rt} value) sample = do
   return (expr, const0, const0)
 toIRInference meta True (Constant TypeInfo {rType=rt} value) sample = do
   return $ (IRIf (IROp OpLessThan sample (IRConst $ valueToIR value)) (IRConst $ VFloat 0) (IRConst $ VFloat 1), const0, const0)
+toIRInference meta True (ThetaI _ a i) sample = do
+  a' <- toIRGenerate meta a
+  return (IRIf (IROp OpLessThan sample (IRTheta a' i)) (IRConst $ VFloat 0) (IRConst $ VFloat 1), const0, const0)
+toIRInference meta False (ThetaI _ a i) sample = do
+  a' <- toIRGenerate meta a
+  expr <- indicator (IROp OpApprox sample (IRTheta a' i))
+  return (expr, const0, const0)
 toIRInference meta cumulative (IfThenElse t cond left right) sample = do
   var_condT_p <- mkVariable "condT"
   var_condF_p <- mkVariable "condF"
@@ -285,7 +292,7 @@ toIRInference meta cumulative (Lambda t name subExpr) sample = do
       irTuple <- lift (runWriterT (toIRInference meta {typeEnv=newTypeEnv} cumulative subExpr sample)) <&> generateLetInBlock meta
       return (IRLambda name irTuple, const0, const0)
 -- Deterministic lambda and bound expression
-toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo l) == Deterministic && pType (getTypeInfo v) == Deterministic = do
+toIRInference meta False (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo l) == Deterministic && pType (getTypeInfo v) == Deterministic = do
   vIR <- toIRGenerate meta v
   lIR <- toIRGenerate meta l -- Dim and BC are irrelevant here
   -- The result is not a tuple if the return value is a closure
@@ -294,6 +301,14 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample | pType (get
     _ -> do
       retExpr <- indicator (IROp OpEq (IRInvoke (IRApply lIR vIR)) sample)
       return (retExpr, const0, const0)
+toIRInference meta True (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo l) == Deterministic && pType (getTypeInfo v) == Deterministic = do
+  vIR <- toIRGenerate meta v
+  lIR <- toIRGenerate meta l -- Dim and BC are irrelevant here
+  -- The result is not a tuple if the return value is a closure
+  case rt of
+    TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
+    _ -> do
+      return (IRIf (IROp OpLessThan (IRInvoke (IRApply lIR vIR)) sample) (IRConst $ VFloat 1) const0, const0, const0)
 -- Deterministic bound expression
 toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo v) == Deterministic = do
   vIR <- toIRGenerate meta v
@@ -420,11 +435,13 @@ toIRInference meta cumulative (InjF _ name params) sample | isHigherOrder (adtDe
   renVar <- foldM (\sub tup -> createHOInverse (hornClauses meta) adts tup <&> (.) sub) id (zip fVars fs)
   (paramExpr, paramDim, paramBranches) <- probF meta cumulative a invExpr
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
-  let scale x = if not cumulative then IROp OpMult x (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDerivExpr)) else x
+  let scale x = if not cumulative 
+                  then IROp OpMult x (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDerivExpr)) 
+                  else IRIf (IROp OpGreaterThan invDerivExpr (const0)) x (IROp OpSub (IRConst (VFloat 1)) x)
   let returnP = scale paramExpr
   let appTestExpr e = IRIf appTest e const0
   return (renVar (appTestExpr returnP), renVar (appTestExpr paramDim), renVar (appTestExpr paramBranches))
-toIRInference meta cumulative e@(InjF TypeInfo {tags=extras, rType=rt} name params) sample
+toIRInference meta False e@(InjF TypeInfo {tags=extras, rType=rt} name params) sample
   | isNothing (getProbIndex params) = do
   -- There is no probabilistic parameter
   -- Check whether the value of the function is equal to the sample
@@ -434,6 +451,12 @@ toIRInference meta cumulative e@(InjF TypeInfo {tags=extras, rType=rt} name para
         _ -> OpEq
   retExpr <- indicator $ IROp cmp expr sample
   return (retExpr, const0, const0)
+toIRInference meta True e@(InjF TypeInfo {tags=extras, rType=rt} name params) sample
+  | isNothing (getProbIndex params) = do
+  -- There is no probabilistic parameter
+  -- Check whether the value of the function is less than the sample
+  expr <- toIRGenerate meta e
+  return (IRIf (IROp OpLessThan expr sample) (IRConst $ VFloat 1) const0, const0, const0)
 toIRInference meta cumulative e@(InjF TypeInfo {tags=extras} name params) sample
   | isJust (getProbIndex params) = do
   -- FPair of the InjF with unique names
@@ -459,26 +482,23 @@ toIRInference meta cumulative e@(InjF TypeInfo {tags=extras} name params) sample
   -- Get the probabilistic inference expression of the non-deterministic subexpression
   (paramExpr, paramDim, paramBranches) <- probF meta cumulative (params !! probIdx) invExpr
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula if dim > 0
-  let scale x = if not cumulative then IROp OpMult x (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDeriv)) else x
+  let scale x = if not cumulative 
+                  then IROp OpMult x (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDeriv)) 
+                  else IRIf (IROp OpGreaterThan invDeriv (const0)) x (IROp OpSub (IRConst (VFloat 1)) x)
   let returnP = scale paramExpr  
   let appTestExpr e = IRIf appTest e const0
   return (appTestExpr returnP, appTestExpr paramDim, appTestExpr paramBranches)
 toIRInference meta cumulative (Null _) sample = do
   expr <- indicator (IROp OpEq sample (IRConst $ VList EmptyList))
   return (expr, const0, const0)
-toIRInference meta cumulative (Constant TypeInfo {rType=rt} value) sample = do
-  let comp = case rt of
-              TFloat -> IROp OpApprox sample (IRConst (fmap failConversion value))
-              _ -> IROp OpEq sample (IRConst (fmap failConversion value))
-  expr <- indicator comp
-  return (expr, const0, const0)
 toIRInference meta cumulative (Var TypeInfo {rType=rt} n) sample = do
   -- Variable might be a function
+  let functionSuffix = if cumulative then "_integ" else "_prob"
   case lookup n (typeEnv meta) of
     -- Var is a function
     Just(TArrow _ _, hasInference) -> do
       var <- mkVariable "call"
-      let name = if hasInference then n ++ "_prob" else n
+      let name = if hasInference then n ++ functionSuffix else n
       setVariables [(var, IRApply (IRVar name) sample)]
       -- The return value is still a function. No need to do dim and branch counting here
       return (IRVar var, const0, const0)
@@ -491,23 +511,22 @@ toIRInference meta cumulative (Var TypeInfo {rType=rt} n) sample = do
     -- Var is a top level declaration (an therefor has a _prob function)
     Just (_, True) -> do
       var <- mkVariable "call"
-      setVariables [(var, IRInvoke (IRApply (IRVar (n ++ "_prob")) sample))]
+      setVariables [(var, IRInvoke (IRApply (IRVar (n ++ functionSuffix)) sample))]
       if countBranches (compilerConfig meta) then
           return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
         else
           return (IRTFst (IRVar var), IRTSnd (IRVar var), const0)
     -- Var is a local variable
     Just (_, False) -> do
-      let comp = case rt of
+      if cumulative then
+        return (IRIf (IROp OpLessThan (IRVar n) sample) (IRConst $ VFloat 1) const0, const0, const0)
+      else do
+        let comp = case rt of
               TFloat -> IROp OpApprox sample (IRVar n)
               _ -> IROp OpEq sample (IRVar n)
-      expr <- indicator comp
-      return (expr, const0, const0)
+        expr <- indicator comp
+        return (expr, const0, const0)
     Nothing -> error ("Could not find name in TypeEnv: " ++ n)
-toIRInference meta cumulative (ThetaI _ a i) sample = do
-  a' <- toIRGenerate meta a
-  expr <- indicator (IROp OpApprox sample (IRTheta a' i))
-  return (expr, const0, const0)
 toIRInference meta cumulative (Subtree _ a i) sample = error "Cannot infer prob on subtree expression. Please check your syntax"
 toIRInference meta cumulative (Error t e) sample = return (IRError e, const0, const0)
 toIRInference meta cumulative x sample = error ("found no way to convert to IR: " ++ show x)
