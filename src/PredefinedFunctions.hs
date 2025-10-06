@@ -20,7 +20,6 @@ import Data.Maybe (fromJust)
 import SPLL.Lang.Types
 import IRInterpreter
 import Control.Monad
-import Control.Monad.Supply (MonadSupply)
 import qualified Data.Bifunctor
 import Data.Either (isLeft)
 

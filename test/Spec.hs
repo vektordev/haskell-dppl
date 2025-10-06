@@ -34,7 +34,6 @@ import Test.QuickCheck.Monadic (monadicIO, run, assert)
 import Test.QuickCheck.Property (failed, reason)
 import Debug.Trace (trace, traceShowId, traceId, traceShow)
 import SPLL.Lang.Lang (Value)
-import Control.Monad.Supply
 import Data.Foldable
 import Data.Number.Erf (erf)
 import Numeric.AD (grad', auto)
@@ -497,20 +496,6 @@ canInterpret p = do
   case result of
     Left (err :: SomeException) -> return False
     Right r -> return True
-
-
-{-prop_CDFGradIsPDF :: Property
-prop_CDFGradIsPDF = forAll (elements correctIntegralValuesTestCases)(\(p, _, high, thetas, _) -> ioProperty $ do
-    let irExpr = runSupply (toIRIntegrate main (IRConst $ VFloat (-9999999)) (IRConst high)) (+1) 1
-        Just main = lookup "main" annotated
-        irEnv = envToIR annotated
-        annotated = map (\(a,b) -> (a, annotate b)) env
-        env = progToEnv typedProg
-        typedProg = addTypeInfo p
-    grad' $ evalRandIO $ IRInterpreter.generate (autoEnv irEnv) irEnv thetas [] (autoIRExpr irExpr))
-
-autoIRExpr :: (Num a, Reifies s Tape) => IRExpr -> IRExpr (Reverse s a)
-autoIRExpr e = irMap auto e-}
 
 
 {-prop_interpretersEqualDensity :: Program () Double -> Double -> Property

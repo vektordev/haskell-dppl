@@ -2,7 +2,6 @@ module SPLL.Typing.ForwardChaining where
 import SPLL.Lang.Types hiding (HornClause)
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types (Program(Program))
-import Control.Monad.Supply
 import Data.Bifunctor
 import Data.Functor ((<&>))
 import SPLL.Lang.Lang
@@ -15,6 +14,7 @@ import Data.Foldable
 import Debug.Trace
 import GHC.Stack (HasCallStack)
 import System.Posix.Types (CNfds(CNfds))
+import Utils
 
 
 -- Information on what type of expression a HornClause originated from
@@ -315,18 +315,17 @@ annotateProg :: Program -> Program
 annotateProg p@Program {functions=fs} = p{functions=correctTopLevel}
   -- Map annotateExpr on all functions. The code is ugly because of monad shenanigans
   where
-    annotFs = runSupplyVars (mapM (\(n, f) -> annotateExpr f <&> \x -> (n, x)) fs)
+    annotFs = evalSupply (mapM (\(n, f) -> annotateExpr f <&> \x -> (n, x)) fs)
     -- Sets the ChainName of the top level expression to the name of the top level expression
     correctTopLevel = map (\(n, f) -> (n, setTypeInfo f (setChainName (getTypeInfo f) n))) annotFs
-    runSupplyVars f = runSupply f (+1) 0
 
 -- Annotate an expression and all of its subexpressions
-annotateExpr :: Expr -> Supply Int Expr
+annotateExpr :: Expr -> Supply Expr
 annotateExpr = tMapM (\ex -> do
   case ex of
     -- Variables have itself as its ChainName
     Var t n -> return $ setChainName t n
-    _ -> demand <&> ("ast" ++) . show <&> setChainName (getTypeInfo ex)
+    _ -> demandUniqueNumber <&> ("ast" ++) . show <&> setChainName (getTypeInfo ex)
   )
 
 -- Returns all recursively fulfilled clauses
@@ -362,6 +361,7 @@ cutList [] _ = []
 cutList (x:xs) stop
   | x == stop = [x]
   | otherwise = x : cutList xs stop
+
 
 -- Define a partial order that corresponds to dependancy. A is less than B if B depends on A 
 instance PartialOrd HornClause where

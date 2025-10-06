@@ -9,7 +9,6 @@ import SPLL.Lang.Types
 import SPLL.Typing.Typing
 import SPLL.Typing.RType
 import PredefinedFunctions
-import Control.Monad.Supply
 import SPLL.Typing.PType
 import SPLL.InferenceRule (algName)
 import Debug.Trace
@@ -20,7 +19,6 @@ import Data.Functor.Identity
 import Data.Functor ( (<&>) )
 import Data.Number.Erf (erf)
 import Data.List (nub)
-import Control.Monad.Supply
 import Data.Foldable (toList)
 import PrettyPrint
 import SPLL.Lang.Lang (floatApproxEqThresh)

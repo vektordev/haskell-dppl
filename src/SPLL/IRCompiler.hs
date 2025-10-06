@@ -9,7 +9,6 @@ import SPLL.Typing.Typing
 import SPLL.Typing.RType
 import SPLL.IROptimizer
 import PredefinedFunctions
-import Control.Monad.Supply
 import SPLL.Typing.PType
 import SPLL.InferenceRule (algName)
 import Debug.Trace
@@ -24,9 +23,9 @@ import SPLL.Typing.ForwardChaining
 import Data.List
 import SPLL.Typing.AlgebraicDataTypes
 import Data.Bifunctor (Bifunctor(bimap))
+import Utils
 
--- SupplyT needs to be a transformer, because Supply does not implement Functor correctly
-type CompilerMonad a = WriterT [(String, IRExpr)] (SupplyT Int Identity) a
+type CompilerMonad a = WriterT [(String, IRExpr)] Supply a
 
 type CompilationResult = (IRExpr, IRExpr, IRExpr)
 
@@ -40,9 +39,6 @@ data CompilerMetadata = CompilerMetadata {
   adtDecls :: [ADTDecl]
 }
 
--- perhaps as an explicit lambda in the top of the expression, otherwise we'll get trouble generating code.
--- TODO: How do we deal with top-level lambdas in binding here?
---  TL-Lambdas are presumably to be treated differently than non-TL, at least as far as prob is concerned.
 envToIR :: CompilerConfig -> Program -> IREnv
 envToIR conf p@Program{adts=adts} = optimizeEnv conf $ IREnv (-- map optimizer over all second elements of the tuples
   map (makeAutoNeural conf) (neurals p) ++
@@ -59,7 +55,7 @@ envToIR conf p@Program{adts=adts} = optimizeEnv conf $ IREnv (-- map optimizer o
           if pt == Deterministic || pt == Integrate || pt == Prob then
             Just (toProbDecl name (IRLambda "sample" (runCompile (meta typeEnv) (toIRInferenceSave (meta typeEnv) False binding (IRVar "sample")))))
           else Nothing,
-        genFun = toGenDecl name (fst $ runIdentity $ runSupplyVars $ runWriterT $ toIRGenerate (meta typeEnv) binding),
+        genFun = toGenDecl name (fst $ evalSupply $ runWriterT $ toIRGenerate (meta typeEnv) binding),
         groupDoc="Function group " ++ name}) (functions p)) adts
 
   where
@@ -72,7 +68,7 @@ envToIR conf p@Program{adts=adts} = optimizeEnv conf $ IREnv (-- map optimizer o
 
 
 runCompile :: CompilerMetadata -> CompilerMonad CompilationResult -> IRExpr
-runCompile meta codeGen = generateLetInBlock meta (runIdentity $ runSupplyVars $ runWriterT $ do
+runCompile meta codeGen = generateLetInBlock meta (evalSupply $ runWriterT $ do
   (p, d, bc) <- codeGen
   case p of 
     IRLambda _ _ -> return (p, d, bc)
@@ -103,12 +99,9 @@ getGlobalTypeEnv p = funcEnv ++ implicitFuncEnv ++ neuralEnv
         implicitFuncEnv = map (\(name, rt) -> (name, (rt, False))) (implicitFunctionsRTypeProg p)
         neuralEnv = map (\(name, rt, _) -> (name, (rt, False))) (neurals p)
 
-runSupplyVars :: (Monad m) => SupplyT Int m a -> m a
-runSupplyVars codeGen = runSupplyT codeGen (+1) 1
-
 mkVariable :: String -> CompilerMonad  Varname
 mkVariable suffix = do
-  varID <- demand
+  varID <- demandUniqueNumber
   return ("l_" ++ show varID ++ "_" ++ suffix)
 
 setVariables :: [(String, IRExpr)] -> CompilerMonad ()
@@ -593,7 +586,7 @@ getProbIndex es =
     pTypes = map pt es
     zipped = zip pTypes [0..]
 
-packParamsIntoLetinsProb :: [String] -> [Expr] -> IRExpr -> IRExpr -> Supply Int IRExpr
+packParamsIntoLetinsProb :: [String] -> [Expr] -> IRExpr -> IRExpr -> Supply IRExpr
 --packParamsIntoLetinsProb [] [] expr _ = do
 --  return expr
 --packParamsIntoLetinsProb [] _ _ _ = error "More parameters than variables"
