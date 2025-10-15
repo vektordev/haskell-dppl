@@ -284,7 +284,7 @@ toIRInference meta cumulative (Lambda t name subExpr) sample = do
       let newTypeEnv = (name, (paramRType, False)):typeEnv meta
       irTuple <- lift (runWriterT (toIRInference meta {typeEnv=newTypeEnv} cumulative subExpr sample)) <&> generateLetInBlock meta
       return (IRLambda name irTuple, const0, const0)
--- Deterministic lambda and bound expression
+-- Deterministic lambda and bound expression PDF
 toIRInference meta False (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo l) == Deterministic && pType (getTypeInfo v) == Deterministic = do
   vIR <- toIRGenerate meta v
   lIR <- toIRGenerate meta l -- Dim and BC are irrelevant here
@@ -294,6 +294,7 @@ toIRInference meta False (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeI
     _ -> do
       retExpr <- indicator (IROp OpEq (IRInvoke (IRApply lIR vIR)) sample)
       return (retExpr, const0, const0)
+-- Deterministic lambda and bound expression CDF
 toIRInference meta True (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo l) == Deterministic && pType (getTypeInfo v) == Deterministic = do
   vIR <- toIRGenerate meta v
   lIR <- toIRGenerate meta l -- Dim and BC are irrelevant here
@@ -599,7 +600,7 @@ packParamsIntoLetinsProb [v] [p] expr sample = do
 
 applyLambdas :: [[HornClause]] -> [ADTDecl] -> IRExpr -> IRExpr
 applyLambdas clauses adts (IRLambda n expr) = IRApply (IRLambda n (applyLambdas clauses adts expr)) val
-  where val = toValueExpr clauses [] adts n
+  where Just val = toValueExpr clauses [] adts n
 applyLambdas clauses adts expr = expr
 
 findLambdaVars :: IRExpr -> [String]

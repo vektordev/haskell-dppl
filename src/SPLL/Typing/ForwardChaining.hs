@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleInstances #-}
 module SPLL.Typing.ForwardChaining where
 import SPLL.Lang.Types hiding (HornClause)
 import SPLL.IntermediateRepresentation
@@ -6,8 +7,7 @@ import Data.Bifunctor
 import Data.Functor ((<&>))
 import SPLL.Lang.Lang
 import PredefinedFunctions
-import Data.PartialOrd (PartialOrd, minima, (<=))
-import Data.List ((\\), delete, nub)
+import Data.List ((\\), delete, nub, isPrefixOf, tails)
 import Data.Maybe
 import SPLL.Typing.Typing (setChainName)
 import Data.Foldable
@@ -15,6 +15,12 @@ import Debug.Trace
 import GHC.Stack (HasCallStack)
 import System.Posix.Types (CNfds(CNfds))
 import Utils
+import SPLL.Typing.RType
+import qualified Text.Megaparsec.Char as ANY
+import Data.IntMap.Merge.Strict (merge)
+import Utils (DAGEdge)
+import Data.Char (isDigit)
+import GHC.Base (augment)
 
 
 -- Information on what type of expression a HornClause originated from
@@ -43,12 +49,16 @@ premises ExprHornClause {premises'=p}= p
 getChainName :: Expr -> ChainName
 getChainName = chainName . getTypeInfo
 
+isAppliedInfo :: ExprInfo -> Bool
+isAppliedInfo AppliedInfo = True
+isAppliedInfo _ = False
+
 -- Takes all HornClauses of a Program and a point in the AST which should be inverted.
 -- The function then searches for a Lambda statement and inverses toward the bound variable
 -- Note that it deliberately skips over lambdas that are already applied
 toInvExpr :: [[HornClause]] -> [ADTDecl] -> ChainName -> IRExpr
 --toInvExpr clauses adts startCN | traceShow startCN False = undefined
-toInvExpr clauseSet adts startCN = toValueExpr clauseSet paramClauses adts toInvCN
+toInvExpr clauseSet adts startCN = mergeExpr valueExprs
   where
     -- Find the bound variable of a lambda that is not already applied
     -- This needs to be done if the lambda is a variable, 
@@ -61,26 +71,61 @@ toInvExpr clauseSet adts startCN = toValueExpr clauseSet paramClauses adts toInv
     -- Add a clause without preconditions for parameters as a starting point
     -- Define the expression to invert as known. This is true by the definition of an inverse
     paramClauses = map ParameterHornClause (startCN:boundVars)
+    -- If there are multiple paths towards the final parameter, we want to consider all paths for maximum information
+    -- To do this we calculate the expression multiple times, but throw out all but one horn clause concluding to toInvCN
+    terminalGroups = getTerminalGroups clauseSet toInvCN
+    intermediateSet = clauseSet \\ terminalGroups
+    -- Create the expression that calculates toInvCN
+    valueExprs = mapMaybe (\term -> toValueExpr (term:intermediateSet) paramClauses adts toInvCN) terminalGroups
+
+getTerminalGroups :: [[HornClause]] -> ChainName -> [[HornClause]]
+getTerminalGroups clauses cn = filter (any ((== cn) . conclusion)) clauses
+
+-- This takes a list of value expressions and merges then such that in tuple constructions a existing value overwrites an ANY.
+-- If two paths provide information for the same part of the tuple, we discard the second, because the should be semantically equal and therefor redundant
+-- We also assume that the different paths do not have cnflicting LetIns
+mergeExpr :: [IRExpr] -> IRExpr
+mergeExpr [] = error "Cannot merge empty list of expressions"
+mergeExpr [x] = x
+mergeExpr (x:xs) = removeReduntantLets [] $ mergeExpr2 id x (mergeExpr xs)
+
+mergeExpr2 :: (IRExpr -> IRExpr) -> IRExpr -> IRExpr -> IRExpr
+mergeExpr2 bindings (IRLetIn n v body) expr2 = mergeExpr2 (bindings . IRLetIn n v) body expr2
+mergeExpr2 bindings expr1 (IRLetIn n v body) = mergeExpr2 (bindings . IRLetIn n v) expr1 body
+mergeExpr2 bindings (IRTCons (IRConst VAny) b) (IRTCons a (IRConst VAny)) = bindings $ IRTCons a b
+mergeExpr2 bindings (IRTCons a (IRConst VAny)) (IRTCons (IRConst VAny) b)  = bindings $ IRTCons a b
+-- Assume they are semantically equal. Then just take the first
+mergeExpr2 bindings x _ = bindings x
+--mergeExpr2 bindings x y = trace ("Cannot merge expressions: " ++ show x ++ show y) (bindings x)
+
+removeReduntantLets :: [String] -> IRExpr -> IRExpr
+removeReduntantLets used (IRLetIn n v body) | n `elem` used = removeReduntantLets used body
+removeReduntantLets used (IRLetIn n v body) | n `notElem` used = IRLetIn n v (removeReduntantLets (n:used) body)
+removeReduntantLets _ e = e
 
 -- Creates an expression, which returns the value of a point in the AST. Takes a list of AST points, which are considered to be of known value
-toValueExpr :: [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> IRExpr
---toValueExpr clauses paramClauses adts startCN | traceShow startCN False = undefined
-toValueExpr clauses paramClauses adts startCN = irExpr
+toValueExpr :: [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> Maybe IRExpr
+--toValueExpr clauses paramClauses adts startCN | traceShow clauses False = undefined
+toValueExpr clauses paramClauses adts startCN =
+  case findConcludingHornClause solvedClauses startCN of
+    Just concludingClause -> do
+      -- Throw away superfluous clauses. Do this by sorting them by requirement
+      -- and throwing away clauses after the clause that inferes the bound variable
+      -- Also guarantees that the later generated letIns are in the correct order
+      let sortedClauses = topSortDAG solvedClauses
+      let relevantSortedClauses = cutList sortedClauses concludingClause
+      -- Generate code
+      Just $ toLetInBlock clauses adts relevantSortedClauses
+    Nothing -> Nothing
   where
     augmentedClauseSet = map (:[]) paramClauses ++ clauses
     -- Solve the set of Horn clauses for clauses which are fulfilled
     solvedClauses = solveHCSet augmentedClauseSet
-    -- Throw away superfluous clauses. Do this by sorting them by requirement
-    -- and throwing away clauses after the clause that inferes the bound variable
-    -- Also guarantees that the later generated letIns are in the correct order
-    sortedClauses = topologicalSort solvedClauses
-    relevantSortedClauses = cutList sortedClauses (findConcludingHornClause sortedClauses startCN)
-    -- Generate code
-    irExpr = toLetInBlock clauses adts relevantSortedClauses
 
 -- Creates a block of code from a set of sorted horn clauses
 -- Generates the last horn clause as a return statement and wraps it in letIn statements created from the leading clauses
 toLetInBlock :: [[HornClause]] -> [ADTDecl] -> [HornClause] -> IRExpr
+toLetInBlock clauses adts (ParameterHornClause _:cs) = toLetInBlock clauses adts cs
 toLetInBlock clauses adts [c] = hornClauseToIRExpr clauses adts c
 --toLetInBlock clauses adts ((ExprHornClause [preVar] _ (LambdaInfo _) 1):cs) = IRLambda preVar (toLetInBlock clauses adts cs)
 toLetInBlock clauses adts (c:cs) = IRLetIn (conclusion c) (hornClauseToIRExpr clauses adts c) (toLetInBlock clauses adts cs)
@@ -129,21 +174,28 @@ hornClauseToIRExpr clauses adts clause =
     _ -> error $ "Cannot convert clause to IRExpr: " ++ show clause
 
 -- Finds the first horn clause in a list that has a given conclusion
-findConcludingHornClause :: [HornClause] -> ChainName -> HornClause
+findConcludingHornClause :: [HornClause] -> ChainName -> Maybe HornClause
 --findConcludingHornClause hcs cn | trace ("Find " ++ cn ++ " in " ++ show hcs) False = undefined
 findConcludingHornClause hcs cn =
   case filter ((== cn) . conclusion) hcs of
-    [] -> error $ "Found no horn clause concluding to " ++ cn
-    res -> head res
+    [] -> Nothing
+    res -> Just $ head res
 
 -- Finds the bound variable of the lambda the parameter ChainName is referencing
 -- Note that this needs to skip over already applied lambdas
 findBoundVariable :: HasCallStack => [[HornClause]] -> ChainName -> Maybe ChainName
-findBoundVariable clauses = findBoundVariable' forwardClauses 0
+findBoundVariable clauses cn = findBoundVariable' forwardClauses 0 cn <&> (++ suffix)
   where
     -- Only forward clauses (inversion == 0) are relevant for this, because we dont want cycles in our graph of horn clauses
     -- Applied clauses are also relevant, because the lambda might be a variable applied elsewhere
     forwardClauses = getForwardClauses clauses ++ getAppliedClauses clauses
+    -- If chain name is tagged with a suffix, we need to tag the return with the same suffix
+    -- FIXME: If the varibale has a _ in it this does not work correctly
+    suffix = splitAfterLast "_c" cn
+    -- Look at all suffixes, then take the ones that start with the split. Take the last one in the list, because it is the shortest suffix
+    splitAfterLast split s = case filter (split `isPrefixOf`) (tails s) of
+      [] -> ""
+      xs -> last xs
 
 -- Finds the lambda a parameter ChainName is referencing
 -- This also needs to skip over applied lambdas. Because applications must happen before a lambda, 
@@ -189,9 +241,6 @@ findBoundVariable' clauses applies name =
 -- This set of clauses is guaranteed cycle free and is analog to the AST
 getForwardClauses :: [[HornClause]] -> [HornClause]
 getForwardClauses = concatMap (filter (\c -> inversion c == 0 && not (isAppliedInfo (exprInfo c))))
-  where
-    isAppliedInfo AppliedInfo = True
-    isAppliedInfo _ = False
 
 -- Returns all clauses created by applying values
 -- In conjunction with the forward clauses, they can be used for evaluating traversal of a prorgam.
@@ -199,13 +248,10 @@ getForwardClauses = concatMap (filter (\c -> inversion c == 0 && not (isAppliedI
 -- Because the value is applied higher up in the program, the forwardClauses with appliedClauses are NOT cycle free
 getAppliedClauses :: [[HornClause]] -> [HornClause]
 getAppliedClauses = concatMap (filter (\c -> isAppliedInfo (exprInfo c)))
-  where
-    isAppliedInfo AppliedInfo = True
-    isAppliedInfo _ = False
 
 -- Get all names of all lambda variables in a subexpression of a specific point in the AST.
 -- Exclude all lambdas, which are already applied
-getUnappliedLambdas :: [[HornClause]] -> ChainName -> [String]
+getUnappliedLambdas :: HasCallStack => [[HornClause]] -> ChainName -> [String]
 --getUnappliedLambdas clauses cn | traceShow (getForwardClauses clauses) False = undefined
 getUnappliedLambdas clauses cn = inc \\ exc
   where
@@ -216,14 +262,15 @@ getUnappliedLambdas clauses cn = inc \\ exc
 
 -- For any lambda l we want to get names of bound variables for that lambda
 -- Returns a list of candidates and a list of applied lambda names. The unapplied lambda names is the difference of those lists
-getUnappliedLambdas' :: [[HornClause]] -> [HornClause] -> ChainName -> ([String], [String])
+getUnappliedLambdas' :: HasCallStack => [[HornClause]] -> [HornClause] -> ChainName -> ([String], [String])
 getUnappliedLambdas' allClauses clauses cn = case currClauses of
   -- This is an application clause of a lambda
   c@(ExprHornClause [n, _] _ (StubInfo StubApply) 0):_ ->
-    let (inc, exc) = getUnappliedLambdas' allClauses (clauses \\ [c]) cn
+    let (inc, exc) = getUnappliedLambdas' allClauses (clauses \\ [c]) cn in
         -- Find the bound variable and add it to the applied return list
-        Just lambdaVar = findBoundVariable allClauses n in
-      (inc, lambdaVar:exc)
+      case findBoundVariable allClauses n of
+        Just lambdaVar -> (inc, lambdaVar:exc)
+        Nothing -> (inc, exc)
   -- This is the clause for a lambda. Add its variable name to the candiate return list
   c@(ExprHornClause pre _ (LambdaInfo n) _):_ ->
     let (inc, exc) = getUnappliedLambdas' allClauses (clauses \\ [c]) cn in
@@ -248,22 +295,24 @@ progToHornClauses Program{functions=fs, adts=adts} = augmentApplyClauseSet initi
   where
     -- We need two runs for this: first run is every expression converted into a group of Horn clauses
     initialRun = concatMap (exprToHornClauses adts . snd) fs
+    -- Second run is augmenting the clause set with fresh copies of clauses for every application
+    --freshFs = evalSupply (augmentFreshApplicationsClauseSet initialRun)
 
 -- Converts an expression with all its subexpressions into Horn clauses
 exprToHornClauses :: [ADTDecl] -> Expr -> [[HornClause]]
-exprToHornClauses adts e = singleExprToHornClause adts e:concatMap (exprToHornClauses adts) (getSubExprs e)
-
--- Converts a single expression into Horn clauses
-singleExprToHornClause :: [ADTDecl] ->  Expr -> [HornClause]
-singleExprToHornClause adts e = case e of
-  Constant _ v -> [ExprHornClause [] (getChainName e) (ConstantInfo v) 0]
+exprToHornClauses adts e = case e of
+  Constant _ v -> [[ExprHornClause [] (getChainName e) (ConstantInfo v) 0]]
   Lambda _ n body -> [ExprHornClause [getChainName body] (getChainName e) (LambdaInfo n) 0,
-                      ExprHornClause [getChainName e] (getChainName body) (LambdaInfo n) 1]
+                      ExprHornClause [getChainName e] (getChainName body) (LambdaInfo n) 1]:
+                      exprToHornClauses adts body
   Apply _ l v -> [ExprHornClause [getChainName l, getChainName v] (getChainName e) (StubInfo StubApply) 0,
-                  ExprHornClause [getChainName e] (getChainName l) (StubInfo StubApply) 1]
-  TCons _ a b -> [ExprHornClause [getChainName e] (getChainName a) (StubInfo StubTCons) 1,
-                  ExprHornClause [getChainName e] (getChainName b) (StubInfo StubTCons) 2]
-  InjF {} -> injFtoHornClause adts e
+                  ExprHornClause [getChainName e] (getChainName l) (StubInfo StubApply) 1]:
+                  exprToHornClauses adts l ++ exprToHornClauses adts v
+  -- Importantly the clauses drom the tuple are in separate groups, because they can be solved independently
+  TCons _ a b -> [ExprHornClause [getChainName e] (getChainName a) (StubInfo StubTCons) 1]:
+                 [ExprHornClause [getChainName e] (getChainName b) (StubInfo StubTCons) 2]:
+                  exprToHornClauses adts a ++ exprToHornClauses adts b
+  InjF _ _ params -> injFtoHornClause adts e: concatMap (exprToHornClauses adts) params
   -- No Horn clauses instead of error. Some expressions are not invertable and therefor do not produce Horn clauses. But we might not need them 
   _ -> []
 
@@ -292,7 +341,7 @@ constructInjFHornClause subst cn name decl inv = ExprHornClause (map lookupSubst
 -- This step requires knowledge of the program structure and can therefor only be done after the clause set is constructed
 augmentApplyClauseSet :: [[HornClause]] -> [[HornClause]]
 augmentApplyClauseSet clauses = fixpoint aug clauses
-  where 
+  where
     aug curr = nub $ filter (not . null) (map (augmentApplyClauseSet' curr) curr ++ curr)
     fixpoint f x
       | x == f x = x
@@ -305,6 +354,39 @@ augmentApplyClauseSet' clauses (c@(ExprHornClause [l, v] cn (StubInfo StubApply)
       ExprHornClause [bound] v AppliedInfo 1]
     Nothing -> []
 augmentApplyClauseSet' _ x = []
+
+-- If functions are used multiple times, we need a separate set of clauses for the whole function for every application
+-- WE do this by looking at the applications and duplicate all dependant clauses with a fresh tag
+augmentFreshApplicationsClauseSet :: [[HornClause]] -> Supply [[HornClause]]
+augmentFreshApplicationsClauseSet clauses = mapM (augmentFreshApplicationsClauseSet' sortedClauses) sortedClauses <&> concat
+  where sortedClauses = reverse $ topSortDAG clauses
+
+augmentFreshApplicationsClauseSet' :: [[HornClause]] -> [HornClause] -> Supply [[HornClause]]
+augmentFreshApplicationsClauseSet' clauses (cs@((ExprHornClause [l, v] cn (StubInfo StubApply) 0):_)) = do
+  uid <- demandUniqueNumber
+  let suffix = "_c" ++ show uid
+  let taggedGroups = map (rename l (l ++ suffix)) cs : tagGroups suffix (getDependantGroups clauses l)
+  -- Augment the newly found groups. Note that this takes all prior clauses and the newly added clauses. This contians clauses, which are deprecated, but those should not be used
+  augemntedNewGroups <- mapM (augmentFreshApplicationsClauseSet' (taggedGroups ++ clauses)) (tail taggedGroups)
+  return $ head taggedGroups : concat augemntedNewGroups
+  where rename old new c = case c of
+          ParameterHornClause {} -> c
+          ExprHornClause p c info inv -> ExprHornClause (map (\x -> if x == old then new else x) p) (if c == old then new else c) info inv
+augmentFreshApplicationsClauseSet' _ x = return [x]
+
+getDependantGroups :: [[HornClause]] -> ChainName -> [[HornClause]]
+getDependantGroups clauses cn = directDependance ++ indirectDependance
+  where
+    directDependance = filter (any (\c -> (conclusion c == cn) && not (isAppliedInfo (exprInfo c)) && (inversion c == 0))) clauses
+    directDependantCNs = concatMap (map conclusion . filter (\c -> inversion c /= 0 && not (isAppliedInfo (exprInfo c)))) directDependance
+    indirectDependance = concatMap (getDependantGroups clauses) directDependantCNs
+
+tagGroups :: String -> [[HornClause]] -> [[HornClause]]
+tagGroups tag = map (map tagClause)
+  where
+    tagClause c = case c of
+      ParameterHornClause {} -> error "Cannot tag ParameterHornClause"
+      ExprHornClause p c info inv -> ExprHornClause (map (++ tag) p) (c ++ tag) info inv
 
 -- Chain name of subexpressions
 getInputChainNames :: Expr -> [ChainName]
@@ -323,6 +405,7 @@ annotateProg p@Program {functions=fs} = p{functions=correctTopLevel}
 annotateExpr :: Expr -> Supply Expr
 annotateExpr = tMapM (\ex -> do
   case ex of
+    Var TypeInfo{rType=(TArrow _ _)} n -> demandUniqueNumber <&> ("ast" ++) . show <&> setChainName (getTypeInfo ex)
     -- Variables have itself as its ChainName
     Var t n -> return $ setChainName t n
     _ -> demandUniqueNumber <&> ("ast" ++) . show <&> setChainName (getTypeInfo ex)
@@ -348,13 +431,6 @@ findFulfilledClause hcs fulfilled = listToMaybe fulfilledClauses
     detVars = map conclusion fulfilled
     fulfilledClauses = filter (all (`elem` detVars) . premises) (concat hcs)
 
--- Sorts a list according to a partial order such that if a comes before b a <= b
-topologicalSort :: (PartialOrd a, Eq a, Show a) => [a] -> [a]
-topologicalSort [] = []
-topologicalSort clauses =
-  let maxC = minima clauses in
-    maxC ++ topologicalSort (clauses \\ maxC)
-
 -- Returns all elements that come before a given parameter in a list
 cutList :: Eq a => [a] -> a -> [a]
 cutList [] _ = []
@@ -363,10 +439,16 @@ cutList (x:xs) stop
   | otherwise = x : cutList xs stop
 
 
--- Define a partial order that corresponds to dependancy. A is less than B if B depends on A 
-instance PartialOrd HornClause where
+-- Define a DAG Edge that corresponds to dependancy. A is less than B if B depends on A 
+instance DAGEdge HornClause where
   -- A <= B iff B depends on A
-  ExprHornClause {conclusion=conc1} <= ExprHornClause {premises'=pre2} =  conc1 `elem` pre2
-  -- All ParameterHornClauses are less than all ExpressionHornClauses. All ParameterHornClauses are equal (Equal for this partial ordering, Not for Eq)
-  ExprHornClause {} <= ParameterHornClause {} = False
-  _ <= _ = True
+  ExprHornClause {conclusion=conc1} `edge` ExprHornClause {premises'=pre2} = conc1 `elem` pre2
+  _ `edge` _ = False
+
+-- Define DAG edges of HornClause groups based on the forward clause
+instance DAGEdge [HornClause] where
+  xs `edge` ys = not eitherEmpty && head possibleX `edge` head possibleY
+    where
+      possibleX = filter (\x -> inversion x == 0 && not (isAppliedInfo (exprInfo x))) xs
+      possibleY = filter (\y -> inversion y == 0 && not (isAppliedInfo (exprInfo y))) ys
+      eitherEmpty = null possibleX || null possibleY

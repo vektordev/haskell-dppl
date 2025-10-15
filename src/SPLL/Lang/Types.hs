@@ -13,7 +13,6 @@ import Data.Number.Erf (Erf)
 import Data.Bifunctor (second)
 
 import Data.Set (empty)
-import Data.PartialOrd (PartialOrd((<=)))
 import Data.Maybe
 
 
