@@ -24,6 +24,7 @@ import Data.List
 import SPLL.Typing.AlgebraicDataTypes
 import Data.Bifunctor (Bifunctor(bimap))
 import Utils
+import Control.Monad (foldM)
 
 type CompilerMonad a = WriterT [(String, IRExpr)] Supply a
 

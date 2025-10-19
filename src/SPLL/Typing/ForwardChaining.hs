@@ -184,6 +184,7 @@ findConcludingHornClause hcs cn =
 -- Finds the bound variable of the lambda the parameter ChainName is referencing
 -- Note that this needs to skip over already applied lambdas
 findBoundVariable :: HasCallStack => [[HornClause]] -> ChainName -> Maybe ChainName
+findBoundVariable clauses cn | trace ("SEARCH "++ show cn) False = undefined
 findBoundVariable clauses cn = findBoundVariable' forwardClauses 0 cn <&> (++ suffix)
   where
     -- Only forward clauses (inversion == 0) are relevant for this, because we dont want cycles in our graph of horn clauses
@@ -201,7 +202,7 @@ findBoundVariable clauses cn = findBoundVariable' forwardClauses 0 cn <&> (++ su
 -- This also needs to skip over applied lambdas. Because applications must happen before a lambda, 
 -- keep track of the number of applications seen on the way and disregard that many lambdas
 findBoundVariable' :: HasCallStack => [HornClause] -> Int -> ChainName -> Maybe ChainName
---findBoundVariable' clauses applies name | trace (show name++ "|" ++ show applies ++ "|" ++ show clauses) False = undefined
+findBoundVariable' clauses applies name | trace (show name++ "|" ++ show applies) False = undefined
 findBoundVariable' clauses applies name =
   -- The next lambda is what we are looking for
   if applies == 0 then
@@ -227,7 +228,7 @@ findBoundVariable' clauses applies name =
     -- Clauses with the name as premises are potential next clauses
     nextClauses = filter (elem name . premises) clauses
     -- Clauses with the current name as conclusion are the current clauses
-    currClauses = filter ((== name) . conclusion) clauses
+    currClauses = traceShowId $ filter ((== name) . conclusion) clauses
     -- First Just in a list, else nothing
     firstJusts ((Just x):xs) = Just x
     firstJusts (Nothing:xs) = firstJusts xs

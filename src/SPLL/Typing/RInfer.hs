@@ -33,6 +33,7 @@ import Debug.Trace
 import SPLL.Lang.Types (FnDecl, ADTDecl)
 import SPLL.Typing.AlgebraicDataTypes
 import Data.Bifunctor
+import Control.Monad (replicateM)
 
 -- changes: in infer and inferProg; also changed TypeSigs to remove RType of main expression.
 
