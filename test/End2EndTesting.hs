@@ -58,6 +58,12 @@ testInterpreter p (ProbTestCase name sample params (VFloat expectedProb, VFloat 
       counterexample ("Probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < 0.0001) .&&.
         counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim)
     x -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
+testInterpreter p (CumulTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = do
+  case runInteg defaultCompilerConfig p params sample of 
+    VTuple (VFloat outProb) (VFloat outDim) -> 
+      counterexample ("Cmulative probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < 0.0001) .&&.
+        counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim)
+    x -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
 testInterpreter p (ArgmaxPTestCase name params res) = ioProperty $ do
   let paramCnt = length params
   let mockedParams seeds = map (\(par, s) -> VTuple (VInt 1) (VTuple par (VInt s))) (zip params seeds)
@@ -94,59 +100,71 @@ progParameterCount Program{functions=f} = countLambdas main
     countLambdas (Lambda _ _ e) = 1 + countLambdas e
     countLambdas _ = 0
 
-testProbJulia :: Program -> [TestCase] -> Property
-testProbJulia p tc = ioProperty $ do
+testJulia :: Program -> [TestCase] -> Property
+testJulia p tc = ioProperty $ do
   let src = intercalate "\n" (SPLL.CodeGenJulia.generateFunctions (compile defaultCompilerConfig p))
-  (_, _, _, handle) <- createProcess (proc "julia" ["-e", juliaProbTestCode src tc])
+  (_, _, _, handle) <- createProcess (proc "julia" ["-e", juliaTestCode src tc])
   code <- waitForProcess handle
   case code of
     ExitSuccess -> return $ True === True
     ExitFailure _ -> return $ counterexample ("Julia test " ++ testCaseName (head tc) ++ " failed. See Julia error message") False
 
-testProbPython :: Program -> [TestCase] -> Property
-testProbPython p tc = ioProperty $ do
+testPython :: Program -> [TestCase] -> Property
+testPython p tc = ioProperty $ do
   let src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True (compile defaultCompilerConfig p))
-  (_, _, _, handle) <- createProcess (proc "python3" ["-c", pythonProbTestCode src tc])
+  (_, _, _, handle) <- createProcess (proc "python3" ["-c", pythonTestCode src tc])
   code <- waitForProcess handle
   case code of
     ExitSuccess -> return $ True === True
     ExitFailure _ -> return $ counterexample ("Python test " ++ testCaseName (head tc) ++ " failed. See Python error message") False
 
-juliaProbTestCode :: String -> [TestCase] -> String
-juliaProbTestCode src tcs =
+juliaTestCode :: String -> [TestCase] -> String
+juliaTestCode src tcs =
   "include(\"juliaLib.jl\")\n\
   \using .JuliaSPPLLib\n\
   \" ++ src ++ "\n" ++ 
   "main_gen(" ++ intercalate ", " (map juliaVal exampleParams) ++ ")\n" ++
-  concat (map (\(ProbTestCase name sample params (outProb, outDim)) -> "tmp = main_prob(" ++ juliaVal sample ++ ", " ++ intercalate ", " (map juliaVal params) ++ ")\n\
-  \if abs(tmp[1] - " ++ juliaVal outProb ++ ") > 0.0001\n\
-  \  error(\"Probability wrong: \" * string(tmp[1]) * \"/=\" * string(" ++ juliaVal outProb ++ ") * \"in test case " ++ name ++ "\")\n\
-  \end\n\
-  \if tmp[1] != 0 && tmp[2] != " ++ juliaVal outDim ++ "\n\
-  \  error(\"Dimensionality wrong: \" * string(tmp[2]) * \"/=\" * string(" ++ juliaVal outDim ++ ") * \"in test case " ++ name ++ "\")\n\
-  \end\n") tcs) ++ 
+  concat (map (\tc -> let (name, sample, params, outProb, outDim) = unpackTestCase tc in
+    "tmp = " ++ mainName tc ++ "(" ++ juliaVal sample ++ ", " ++ intercalate ", " (map juliaVal params) ++ ")\n\
+    \if abs(tmp[1] - " ++ juliaVal outProb ++ ") > 0.0001\n\
+    \  error(\"Probability wrong: \" * string(tmp[1]) * \"/=\" * string(" ++ juliaVal outProb ++ ") * \"in test case " ++ name ++ "\")\n\
+    \end\n\
+    \if tmp[1] != 0 && tmp[2] != " ++ juliaVal outDim ++ "\n\
+    \  error(\"Dimensionality wrong: \" * string(tmp[2]) * \"/=\" * string(" ++ juliaVal outDim ++ ") * \"in test case " ++ name ++ "\")\n\
+    \end\n") tcs) ++ 
   "exit(0)"
-  where ProbTestCase _ _ exampleParams _ = head tcs 
+  where 
+    (_, _, exampleParams, _, _) = unpackTestCase (head tcs)
+    unpackTestCase (ProbTestCase name sample params (outProb, outDim)) = (name, sample, params, outProb, outDim)
+    unpackTestCase (CumulTestCase name sample params (outProb, outDim)) = (name, sample, params, outProb, outDim)
+    mainName (ProbTestCase _ _ _ _) = "main_prob"
+    mainName (CumulTestCase _ _ _ _) = "main_integ"
 
-pythonProbTestCode :: String -> [TestCase] -> String
-pythonProbTestCode src tcs = 
+pythonTestCode :: String -> [TestCase] -> String
+pythonTestCode src tcs = 
   unpack (replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n") (pack src)) ++ "\n" ++   -- Importing pyTorch is really slow and not needed
   "main.generate(" ++ intercalate ", " (map pyVal exampleParams) ++ ")\n" ++
-  concat (map (\(ProbTestCase name sample params (outProb, outDim)) -> "tmp = main.forward(" ++ pyVal sample ++ ", " ++ intercalate ", " (map pyVal params) ++ ")\n\
-  \if abs(tmp[0] - " ++ pyVal outProb ++ ") > 0.0001:\n\
-  \  raise ValueError(\"Probability wrong: \" + str(tmp[0]) + \"!=\" + str(" ++ pyVal outProb ++ ") + \"in test case " ++ name ++ "\")\n\
-  \if tmp[0] != 0 and tmp[1] != " ++ pyVal outDim ++ ":\n\
-  \  raise ValueError(\"Dimensionality wrong: \" + str(tmp[1]) + \"/=\" + str(" ++ pyVal outDim ++ ") + \"in test case " ++ name ++ "\")\n\
-  \") tcs) ++ 
+  concat (map (\tc -> let (name, sample, params, outProb, outDim) = unpackTestCase tc in 
+    "tmp = " ++ mainName tc ++ "(" ++  pyVal sample ++ ", " ++ intercalate ", " (map pyVal params) ++ ")\n\
+    \if abs(tmp[0] - " ++ pyVal outProb ++ ") > 0.0001:\n\
+    \  raise ValueError(\"Probability wrong: \" + str(tmp[0]) + \"!=\" + str(" ++ pyVal outProb ++ ") + \"in test case " ++ name ++ "\")\n\
+    \if tmp[0] != 0 and tmp[1] != " ++ pyVal outDim ++ ":\n\
+    \  raise ValueError(\"Dimensionality wrong: \" + str(tmp[1]) + \"/=\" + str(" ++ pyVal outDim ++ ") + \"in test case " ++ name ++ "\")\n\
+    \") tcs) ++ 
   "exit(0)"
-  where ProbTestCase _ _ exampleParams _ = head tcs 
+  where 
+    (_, _, exampleParams, _, _) = unpackTestCase (head tcs)
+    unpackTestCase (ProbTestCase name sample params (outProb, outDim)) = (name, sample, params, outProb, outDim)
+    unpackTestCase (CumulTestCase name sample params (outProb, outDim)) = (name, sample, params, outProb, outDim)
+    mainName (ProbTestCase _ _ _ _) = "main.forward"
+    mainName (CumulTestCase _ _ _ _) = "main.integrate"
 
-test_end2end :: IO (Bool)
+test_end2end :: IO Bool
 test_end2end = do
   files <- getAllTestFiles
   cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
-  let probTestCases = map (\(p, tcs) -> (p, filter isProbTestCase tcs)) cases
-  let nonNeuralsProb = filter (null . neurals . fst) probTestCases
+  let queryTestCases = map (\(p, tcs) -> (p, filter (\x -> isProbTestCase x || isCumulTestCase x) tcs)) cases
+  let nonNeuralsQueries = filter (null . neurals . fst) queryTestCases
   let neuralP = map fst (filter (not . null . neurals . fst) cases)
 
   putStrLn "=== Test End2End Interpreter ==="
@@ -158,11 +176,11 @@ test_end2end = do
   interprNormalProp <- quickCheckResult (withMaxSuccess 1 interprNormalizeTest) >>= return . isSuccess
 
   putStrLn "\n=== Test End2End Julia ==="
-  let juliaTest = label "End2End Julia" $ conjoin [testProbJulia p tcs | (p, tcs) <- nonNeuralsProb]
+  let juliaTest = label "End2End Julia" $ conjoin [testJulia p tcs | (p, tcs) <- nonNeuralsQueries]
   juliaProp <- quickCheckResult (withMaxSuccess 1 juliaTest) >>= return . isSuccess
 
   putStrLn "\n=== Test End2End Python ==="
-  let pythonTest = label "End2End Python" $ conjoin [testProbPython p tcs | (p, tcs) <- nonNeuralsProb]
+  let pythonTest = label "End2End Python" $ conjoin [testPython p tcs | (p, tcs) <- nonNeuralsQueries]
   pythonProp <- quickCheckResult (withMaxSuccess 1 pythonTest) >>= return . isSuccess
 
   return $ interprProp && interprNormalProp && juliaProp && pythonProp

@@ -4,6 +4,7 @@
 module TestCaseParser (
   TestCase(..),
   isProbTestCase,
+  isCumulTestCase,
   isArgmaxPTestCase,
   testCaseName,
   parseTestCases,
@@ -27,6 +28,7 @@ import Data.Void
 
 
 data TestCase = ProbTestCase String IRValue [IRValue] (IRValue, IRValue)
+              | CumulTestCase String IRValue [IRValue] (IRValue, IRValue)
               | ArgmaxPTestCase String [IRValue] IRValue 
               deriving (Show)
 
@@ -37,6 +39,10 @@ isProbTestCase _ = False
 isArgmaxPTestCase :: TestCase -> Bool
 isArgmaxPTestCase (ArgmaxPTestCase _ _ _) = True
 isArgmaxPTestCase _ = False
+
+isCumulTestCase :: TestCase -> Bool
+isCumulTestCase (CumulTestCase _ _ _ _) = True
+isCumulTestCase _ = False
 
 testCaseName :: TestCase -> String
 testCaseName (ProbTestCase name _ _ _) = name
@@ -60,22 +66,34 @@ pIRValue = pValue >>= return . valueToIR
 
 pProbTestCase :: MonadParser m => String -> m TestCase
 pProbTestCase name = do
-  _ <- symbol "p("
-  params <- pIRValue `sepBy` (symbol ",")
-  _ <- (symbol ")=")
+  symbol "p("
+  params <- pIRValue `sepBy` symbol ","
+  symbol ")="
   VTuple resP resD <- pIRValue
-  return $ ProbTestCase name (head params) (tail params) (resP, resD)
+  case params of 
+    [] -> fail "ProbTestCase must have at least one parameter (the sample)"
+    _  -> return $ ProbTestCase name (head params) (tail params) (resP, resD)
 
 pArgmaxPTestCase :: MonadParser m => String -> m TestCase
 pArgmaxPTestCase name = do
   symbol "argmax_p("
-  params <- pIRValue `sepBy` (symbol ",")
+  params <- pIRValue `sepBy` symbol ","
   symbol ")="
   res <- pIRValue
-  return $ ArgmaxPTestCase name  params res
+  return $ ArgmaxPTestCase name params res
+
+pCumulParser :: MonadParser m => String -> m TestCase
+pCumulParser name = do
+  symbol "cdf("
+  params <- pIRValue `sepBy` symbol ","
+  symbol ")="
+  VTuple resP resD <- pIRValue
+  case params of 
+    [] -> fail "ProbTestCase must have at least one parameter (the sample)"
+    _  -> return $ CumulTestCase name (head params) (tail params) (resP, resD)
 
 pTestCases :: MonadParser m => String -> m [TestCase]
-pTestCases name = choice[pProbTestCase name , pArgmaxPTestCase name] `sepBy` pNewline
+pTestCases name = choice[pProbTestCase name, pCumulParser name, pArgmaxPTestCase name] `sepBy` pNewline
 
 parseTestCases :: FilePath -> IO [TestCase]
 parseTestCases fp = do

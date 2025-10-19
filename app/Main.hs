@@ -37,11 +37,10 @@ data CommandOpts =
   }
   | GenerateOpts
   | ProbabilityOpts{
-    pos :: IRValue
+    posP :: IRValue
   }
-  | IntegrateOpts {
-    low :: IRValue,
-    high :: IRValue
+  | CumulativeOpts {
+    posC :: IRValue
   } deriving Show
 
 data Language = Python | Julia deriving Show
@@ -101,7 +100,7 @@ parseGlobalOpts = GlobalOpts
           command "compile" (info parseCompileOpts (progDesc "Compiles the program with inference interface into target language"))
           <> command "generate" (info parseGenerateOpts (progDesc "Runs the generate pass of the program"))
           <> command "probability" (info parseProbabilityOpts (progDesc "Runs probabilistic inference on the program. Returns the probability of a given value to be the output of the program"))
-          <> command "integrate" (info parseIntegrateOpts (progDesc "Runs probabilistic inference on the program. Returns the probability of the program output to be in the given bounds"))
+          <> command "cumulative" (info parseIntegrateOpts (progDesc "Runs probabilistic inference on the program. Returns the probability of the program output to be less than the given sample"))
         )
 
 parseCompileOpts :: Parser CommandOpts
@@ -128,21 +127,16 @@ parseProbabilityOpts :: Parser CommandOpts
 parseProbabilityOpts = ProbabilityOpts
         <$> option readValue
             ( short 'x'
-            <> metavar "POSTERIOR"
-            <> help "Posterior value to calculate inference for")
+            <> metavar "SAMPLE"
+            <> help "Sample value to calculate inference for")
 
 parseIntegrateOpts :: Parser CommandOpts
-parseIntegrateOpts = IntegrateOpts
+parseIntegrateOpts = CumulativeOpts
         <$> option readValue
-            ( long "low"
-            <> short 'l'
-            <> metavar "LOW"
-            <> help "Lower bound of the integral")
-        <*> option readValue
-            ( long "high"
-            <> short 'h'
-            <> metavar "HIGH"
-            <> help "Upper bound of the integral")
+            ( short 'x'
+            <> metavar "SAMPLE"
+            <> help "Sample value to calculate inference for")
+
 
 -- Entry point for the program, parse CLI arguments and pass execution to transpile
 main :: IO ()
@@ -167,12 +161,12 @@ transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, 
       -- TODO: Nicer Output
       val <- evalRandIO (runGen conf prog [])
       print ("X=" ++ show val)
-    ProbabilityOpts{pos=x} ->
+    ProbabilityOpts{posP=x} ->
       -- TODO: Nicer Output
       print ("p(X="++ show x ++ ")=" ++ show (runProb conf prog [] x))
-    IntegrateOpts{low=l, high=h} ->
+    CumulativeOpts{posC=x} ->
       -- TODO: Nicer Output
-      print ("p("++ show l ++ "<= X <=" ++ show h ++ ")=" ++ show (runInteg conf prog [] l h))
+      print ("CDF("++ show x ++ ")=" ++ show (runInteg conf prog [] x))
 
 parseProgram :: FilePath -> IO Program
 --parseProgram path = return testLambdaParameter

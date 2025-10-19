@@ -238,12 +238,12 @@ runProb conf p args x = do
     Right v -> v
     Left err -> error err
 
-runInteg :: CompilerConfig -> Program -> [IRValue] -> IRValue -> IRValue -> IRValue
-runInteg _ p _ _ _ | isLeft (validateProgram p) = error $ fromLeft "" (validateProgram p)
-runInteg conf p args low high = do
+runInteg :: CompilerConfig -> Program -> [IRValue] -> IRValue -> IRValue
+runInteg _ p _ _ | isLeft (validateProgram p) = error $ fromLeft "" (validateProgram p)
+runInteg conf p args sample = do
   let compiled = compile conf p
   let Just (integ, _) = integFun (lookupIREnv "main" compiled)
-  let constArgs = map IRConst (low:high:args)
+  let constArgs = map IRConst (sample:args)
   let val = generateDet (neurals p) compiled constArgs integ
   case val of
     Right v -> v
