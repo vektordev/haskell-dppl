@@ -52,6 +52,16 @@ class T:
     if not isinstance(other, T):
       return False
     return eq(self.t1, other.t1) and eq(self.t2, other.t2)
+  
+  def __lt__(self, other):
+    if not isinstance(other, T):
+      raise ValueError("Cannot compare Tuple with non-Tuple")
+    return self.t1 < other.t1 and self.t2 < other.t2
+  
+  def __gt__(self, other):
+    if not isinstance(other, T):
+      raise ValueError("Cannot compare Tuple with non-Tuple")
+    return self.t1 > other.t1 and self.t2 > other.t2
 
   def __getitem__(self, index):
     if index == 0:
@@ -129,6 +139,20 @@ class InferenceList:
     if not isinstance(other, InferenceList):
       return False
     return eq(self.value, other.value) and self.next == other.next
+  
+  def __lt__(self, other):
+    if not isinstance(other, InferenceList):
+      raise ValueError("Cannot compare InferenceList with non-InferenceList (possible due to a length mismatch)")
+    if isAny(self) or isAny(other):
+      return True
+    return self.value < other.value and self.next < other.next
+  
+  def __gt__(self, other):
+    if not isinstance(other, InferenceList):
+      raise ValueError("Cannot compare InferenceList with non-InferenceList (possible due to a length mismatch)")
+    if isAny(self) or isAny(other):
+      return True
+    return self.value > other.value and self.next > other.next
 
   def prepend(self, value):
     return ConsInferenceList(value, self)

@@ -131,8 +131,7 @@ juliaTestCode src tcs =
     \end\n\
     \if tmp[1] != 0 && tmp[2] != " ++ juliaVal outDim ++ "\n\
     \  error(\"Dimensionality wrong: \" * string(tmp[2]) * \"/=\" * string(" ++ juliaVal outDim ++ ") * \"in test case " ++ name ++ "\")\n\
-    \end\n") tcs) ++ 
-  "exit(0)"
+    \end\n") tcs)
   where 
     (_, _, exampleParams, _, _) = unpackTestCase (head tcs)
     unpackTestCase (ProbTestCase name sample params (outProb, outDim)) = (name, sample, params, outProb, outDim)
@@ -150,8 +149,7 @@ pythonTestCode src tcs =
     \  raise ValueError(\"Probability wrong: \" + str(tmp[0]) + \"!=\" + str(" ++ pyVal outProb ++ ") + \"in test case " ++ name ++ "\")\n\
     \if tmp[0] != 0 and tmp[1] != " ++ pyVal outDim ++ ":\n\
     \  raise ValueError(\"Dimensionality wrong: \" + str(tmp[1]) + \"/=\" + str(" ++ pyVal outDim ++ ") + \"in test case " ++ name ++ "\")\n\
-    \") tcs) ++ 
-  "exit(0)"
+    \") tcs)
   where 
     (_, _, exampleParams, _, _) = unpackTestCase (head tcs)
     unpackTestCase (ProbTestCase name sample params (outProb, outDim)) = (name, sample, params, outProb, outDim)

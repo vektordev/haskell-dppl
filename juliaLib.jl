@@ -75,6 +75,20 @@ Base.:(==)(other::Any, t::T) = begin
     return eq(t.t1, other.t1) && eq(t.t2, other.t2)
 end
 
+Base.:(<)(other::Any, t::T) = begin
+    if !(other isa T)
+        throw(ValueError("Cannot compare Tuple with non-Tuple"))
+    end
+    return other.t1 < t.t1 && other.t2 < t.t2
+end
+
+Base.:(>)(other::Any, t::T) = begin
+    if !(other isa T)
+        throw(ValueError("Cannot compare Tuple with non-Tuple"))
+    end
+    return other.t1 > t.t1 && other.t2 > t.t2
+end
+
 abstract type Either end
 
 struct Left <: Either 
@@ -177,6 +191,26 @@ Base.:(==)(other::Any, l::InferenceList) = begin
         return false
     end
     return eq(l.value, other.value) && l.next == other.next
+end
+
+Base.:(<)(other::Any, l::InferenceList) = begin
+    if !(other isa InferenceList)
+        throw(ValueError("Cannot compare InferenceList with non-InferenceList"))
+    end
+    if !(l isa InferenceList)
+        throw(ValueError("Cannot compare InferenceList with non-InferenceList"))
+    end
+    return (head(other) < head(l)) && (tail(other) < tail(l))
+end
+
+Base.:(>)(other::Any, l::InferenceList) = begin
+    if !(other isa InferenceList)
+        throw(ValueError("Cannot compare InferenceList with non-InferenceList"))
+    end
+    if !(l isa InferenceList)
+        throw(ValueError("Cannot compare InferenceList with non-InferenceList"))
+    end
+    return (head(other) > head(l)) && (tail(other) > tail(l))
 end
 
 function prepend(x, xs :: InferenceList) :: InferenceList

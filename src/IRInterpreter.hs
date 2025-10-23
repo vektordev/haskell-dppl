@@ -94,21 +94,29 @@ generate f neurals adts globalEnv env [] (IROp OpMult a b) = do
 generate f neurals adts globalEnv env [] (IROp OpGreaterThan a b) = do
   aVal <- generate f neurals adts globalEnv env [] a
   bVal <- generate f neurals adts globalEnv env [] b
-  case (aVal, bVal) of
-    (VFloat af, VFloat bf) -> return $ VBool (af > bf)
-    (VInt af, VInt bf) -> return $ VBool (af > bf)
-    --(VAny, _) -> return $ VBool True
-    --(_, VAny) -> return $ VBool True
-    _ -> error ("Type error: greater than can only compare two numbers (of the same type): " ++ show (aVal, bVal))
+  return $ VBool $ gt aVal bVal
+  where gt a b = case (a, b) of
+          (VFloat af, VFloat bf) -> af > bf
+          (VInt af, VInt bf) -> af > bf
+          (VTuple af1 af2, VTuple bf1 bf2) -> gt af1 bf1 && gt af2 bf2
+          (VList (ListCont _ _), VList EmptyList) -> error "When comparing lists, they must be of the same length"
+          (VList EmptyList, VList (ListCont _ _)) -> error "When comparing lists, they must be of the same length"
+          (VList EmptyList, VList EmptyList) -> False
+          (VList (ListCont a as), VList (ListCont b bs)) -> gt a b && gt (VList as) (VList bs)
+          _ -> error ("Type error: greater than can only compare two numbers (of the same type): " ++ show (a, b))
 generate f neurals adts globalEnv env [] (IROp OpLessThan a b) = do
   aVal <- generate f neurals adts globalEnv env [] a
   bVal <- generate f neurals adts globalEnv env [] b
-  case (aVal, bVal) of
-    (VFloat af, VFloat bf) -> return $ VBool (af < bf)
-    (VInt af, VInt bf) -> return $ VBool (af < bf)
-    --(VAny, _) -> return $ VBool True
-    --(_, VAny) -> return $ VBool True
-    _ -> error ("Type error: greater than can only compare two numbers (of the same type): " ++ show (aVal, bVal))
+  return $ VBool $ lt aVal bVal
+  where lt a b = case (a, b) of
+          (VFloat af, VFloat bf) -> af < bf
+          (VInt af, VInt bf) -> af < bf
+          (VTuple af1 af2, VTuple bf1 bf2) -> lt af1 bf1 && lt af2 bf2
+          (VList (ListCont _ _), VList EmptyList) -> error "When comparing lists, they must be of the same length"
+          (VList EmptyList, VList (ListCont _ _)) -> error "When comparing lists, they must be of the same length"
+          (VList EmptyList, VList EmptyList) -> False
+          (VList (ListCont a as), VList (ListCont b bs)) -> lt a b && lt (VList as) (VList bs)
+          _ -> error ("Type error: less than can only compare two numbers (of the same type): " ++ show (a, b))
 generate f neurals adts globalEnv env [] (IROp OpDiv a b) = do
   aVal <- generate f neurals adts globalEnv env [] a
   bVal <- generate f neurals adts globalEnv env [] b

@@ -389,9 +389,10 @@ toIRInference meta cumulative (InjF TypeInfo {tags=extras} name [left, right]) s
   -- We need to unfold the monad stack, because the EnumSum Works like a lambda expression and has a local scope
   irTuple <- lift (runWriterT (do
     -- the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
-    (pLeft, _, _) <- toIRInference meta cumulative left (IRVar x2)
-    (pRight, _, _) <- toIRInference meta cumulative right (IROp OpSub sample (IRVar x2))
     setVariables [(x3, sample)]
+    (pLeft, _, _) <- toIRInference meta cumulative left (IRVar x2)
+    (pRight, _, _) <- toIRInference meta cumulative right invExpr
+    
     let returnExpr = case topKThreshold (compilerConfig meta) of
           Nothing -> IRIf (IRElementOf invExpr (IRConst (fmap failConversion (constructVList enumListR)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
           Just thr -> IRIf (IROp OpAnd (IRElementOf invExpr (IRConst (fmap failConversion (constructVList enumListR)))) (IROp OpGreaterThan pLeft (IRConst (VFloat thr)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
