@@ -1,0 +1,2 @@
+f x = 1.0 + x
+main = f (f Uniform)
