@@ -18,6 +18,8 @@ import Data.Foldable (asum)
 import qualified SPLL.CodeGenJulia
 import qualified SPLL.CodeGenPyTorch
 import Data.List (intercalate)
+import Text.Megaparsec (runParser)
+import Control.Monad.State (runStateT)
 
 data GlobalOpts = GlobalOpts {
   inputFile :: String,
@@ -60,14 +62,10 @@ verbosityParser :: Parser Int
 verbosityParser = length <$> many (flag' () (short 'v' <> help "Increases verbosity"))
 
 readValue :: ReadM IRValue
-readValue = eitherReader $ \s -> 
-  case asum [
-        VInt <$> readMaybe s,
-        VFloat <$> readMaybe s,
-        VBool <$> readMaybe s
-      ] of
-    Just val -> Right val
-    Nothing -> Left "Could not parse value"
+readValue = eitherReader (\s -> 
+  case runParser (runStateT pValue 0) "CLI" s of
+    Left err -> Left (errorBundlePretty err)
+    Right (val, _) -> Right (valueToIR val))
 
 parseGlobalOpts :: Parser GlobalOpts
 parseGlobalOpts = GlobalOpts
@@ -128,14 +126,14 @@ parseProbabilityOpts = ProbabilityOpts
         <$> option readValue
             ( short 'x'
             <> metavar "SAMPLE"
-            <> help "Sample value to calculate inference for")
+            <> help "Sample value to calculate inference for. Make sure to use the correct datatypes. E.g., use 3.0 for a float or 3 for an integer.")
 
 parseIntegrateOpts :: Parser CommandOpts
 parseIntegrateOpts = CumulativeOpts
         <$> option readValue
             ( short 'x'
             <> metavar "SAMPLE"
-            <> help "Sample value to calculate inference for")
+            <> help "Sample value to calculate inference for. Make sure to use the correct datatypes. E.g., use 3.0 for a float or 3 for an integer.")
 
 
 -- Entry point for the program, parse CLI arguments and pass execution to transpile
