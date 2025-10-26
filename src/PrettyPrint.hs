@@ -105,6 +105,7 @@ pPrintValue (VBool a) = show a
 pPrintValue (VFloat a) = show a
 pPrintValue (VList xs) = "[" ++ intercalate "," (map pPrintValue (toList xs)) ++ "]"
 pPrintValue (VTuple a b) = "(" ++ pPrintValue a ++ ", " ++ pPrintValue b ++ ")"
+pPrintValue (VEither a) = show a
 pPrintValue (VInt a) = show a
 pPrintValue (VSymbol a) = a
 

@@ -49,7 +49,7 @@ envToIR conf p@Program{adts=adts} = optimizeEnv conf $ IREnv (-- map optimizer o
         rt = rType $ getTypeInfo binding in
       IRFunGroup {groupName=name,
        integFun =
-        if (pt == Deterministic || pt == Integrate) && (isOnlyNumbers rt) then
+        if pt == Deterministic || pt == Integrate then
           Just (toIntegDecl name (IRLambda "sample" (runCompile (meta typeEnv) (toIRInferenceSave (meta typeEnv) True binding (IRVar "sample")))))
         else Nothing,
         probFun =

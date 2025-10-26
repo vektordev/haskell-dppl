@@ -149,6 +149,7 @@ instance Substitutable RType where
   apply s (TArrow t1 t2) = apply s t1 `TArrow` apply s t2
   apply (Subst s) t@(TVarR a) = Map.findWithDefault t a s
   apply s (GreaterType t1 t2) = apply s t1 `GreaterType` apply s t2
+  apply s NotSetYet = NotSetYet
   -- rest of RType arent used as of now
   apply _ val = error ("Missing Substitute: " ++ show val)
 
