@@ -76,10 +76,10 @@ resolvePlusCons ty1 ty2 = Deterministic
 
 -- Enumerability allows us to still infer prob in cases in which normal inference would fail
 resolveEnumPlusCons :: PType -> PType -> PType
-resolveEnumPlusCons Integrate Integrate = Prob
-resolveEnumPlusCons Integrate Prob = Prob
-resolveEnumPlusCons Prob Integrate = Prob
-resolveEnumPlusCons Prob Prob = Prob
+resolveEnumPlusCons Integrate Integrate = Integrate
+resolveEnumPlusCons Integrate Prob = Integrate
+resolveEnumPlusCons Prob Integrate = Integrate
+resolveEnumPlusCons Prob Prob = Integrate
 resolveEnumPlusCons ty1 ty2 = Deterministic
 
 resolveCompCons :: PType -> PType -> PType
@@ -673,7 +673,7 @@ infer env expr = case expr of
     
   ReadNN ti name e -> do
       (s, cs, t, et) <- infer env e
-      return (s, cs, Prob, ReadNN (setPType ti Prob) name et)
+      return (s, cs, Integrate, ReadNN (setPType ti Integrate) name et)
 
   Error ti e -> return (emptySubst, [], Deterministic, Error (setPType ti Deterministic) e)
 

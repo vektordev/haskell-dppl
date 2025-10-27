@@ -370,7 +370,7 @@ toIRInference meta cumulative (TCons _ t1Expr t2Expr) sample = do
   (t2P, t2Dim, t2Branches) <- toIRInferenceSave meta cumulative t2Expr (IRTSnd sample)
   mult <- (t1P, t1Dim) `multP` (t2P, t2Dim)
   return (fst mult, snd mult, IROp OpPlus t1Branches t2Branches)
-toIRInference meta cumulative (InjF TypeInfo {tags=extras} name [left, right]) sample
+toIRInference meta False (InjF TypeInfo {tags=extras} name [left, right]) sample
   | extras `hasAlgorithm` "injF2Enumerable" = do
   -- Get all possible values for subexpressions
   let extrasLeft = tags $ getTypeInfo left
@@ -393,8 +393,8 @@ toIRInference meta cumulative (InjF TypeInfo {tags=extras} name [left, right]) s
   irTuple <- lift (runWriterT (do
     -- the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
     setVariables [(x3, sample)]
-    (pLeft, _, _) <- toIRInference meta cumulative left (IRVar x2)
-    (pRight, _, _) <- toIRInference meta cumulative right invExpr
+    (pLeft, _, _) <- toIRInference meta False left (IRVar x2)
+    (pRight, _, _) <- toIRInference meta False right invExpr
     
     let returnExpr = case topKThreshold (compilerConfig meta) of
           Nothing -> IRIf (IRElementOf invExpr (IRConst (fmap failConversion (constructVList enumListR)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
@@ -408,6 +408,24 @@ toIRInference meta cumulative (InjF TypeInfo {tags=extras} name [left, right]) s
   let enumSumExpr = IREnumSum x2 (fmap failConversion (constructVList enumListL)) $ IRTFst irTuple
   let branchCountSum = IREnumSum x2 (fmap failConversion (constructVList enumListL)) $ IRTSnd (IRTSnd irTuple)
   return (irMap (uniqueify [x2, x3] uniquePrefix) enumSumExpr, const0, irMap (uniqueify [x2, x3] uniquePrefix) branchCountSum)
+-- For the cumulative case we cant get around two enum sums
+toIRInference meta True (InjF TypeInfo {tags=extras} name [left, right]) sample
+  | extras `hasAlgorithm` "injF2Enumerable" = do
+  -- Get all possible values for subexpressions
+  let extrasLeft = tags $ getTypeInfo left
+  let extrasRight = tags $ getTypeInfo right
+  let enumListL = head $ [x | EnumList x <- extrasLeft]
+  let enumListR = head $ [x | EnumList x <- extrasRight]
+
+  fPair <- instantiate mkVariable (adtDecls meta) name -- FPair of the InjF with unique names
+  let FPair fwd _ = fPair
+  let FDecl {inputVars=[v1, v2], body=f} = fwd
+  (irTuple, _, _) <- do
+    (pLeft, _, _) <- toIRInference meta False left (IRVar v1)
+    (pRight, _, _) <- toIRInference meta False right (IRVar v2)
+    let returnExpr = IRIf (IROp OpLessThan sample f) (IRConst (VFloat 0)) (IROp OpMult pLeft pRight)
+    return (returnExpr, const0, const0)
+  return (IREnumSum v1 (fmap failConversion (constructVList enumListL)) $ IREnumSum v2 (fmap failConversion (constructVList enumListR)) irTuple, const0, const0)
 toIRInference meta cumulative (InjF _ name params) sample | isHigherOrder (adtDecls meta) name = do
   let adts = adtDecls meta
   -- FPair of the InjF with unique names
