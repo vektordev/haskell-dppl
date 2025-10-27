@@ -147,6 +147,10 @@ toIRInferenceSave meta cumulative expr sample = do
 --in this implementation, I'll forget about the distinction between PDFs and Probabilities. Might need to fix that later.
 toIRInference :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad CompilationResult
 --toIRInference meta cumulative expr sample | trace (show expr) False = undefined
+-- CDFs on Booleans make little sense. We define that False < True. Therefor cdf(True) = 1 and cdf(False) = pdf(False)
+toIRInference meta True expr sample | rType (getTypeInfo expr) == TBool = do
+  (pFalse, _, bcFalse) <- toIRInference meta False expr (IRConst (VBool False))
+  return (IRIf sample (IRConst (VFloat 1)) pFalse, const0, bcFalse)
 toIRInference meta False (Normal t) sample = return (IRDensity IRNormal sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), const0)
 toIRInference meta False (Uniform t) sample = return (IRDensity IRUniform sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), const0)
 toIRInference meta True (Normal t) sample = return (IRCumulative IRNormal sample, const0, const0)
@@ -157,8 +161,7 @@ toIRInference meta False (Constant TypeInfo {rType=rt} value) sample = do
               _ -> IROp OpEq sample (IRConst (fmap failConversion value))
   expr <- indicator comp
   return (expr, const0, const0)
-toIRInference meta True (Constant TypeInfo {rType=rt} value) sample = do
-  return $ (IRIf (IROp OpLessThan sample (IRConst $ valueToIR value)) (IRConst $ VFloat 0) (IRConst $ VFloat 1), const0, const0)
+toIRInference meta True (Constant TypeInfo {rType=rt} value) sample = return (compareValueExpr rt value sample, const0, const0)
 toIRInference meta True (ThetaI _ a i) sample = do
   a' <- toIRGenerate meta a
   return (IRIf (IROp OpLessThan sample (IRTheta a' i)) (IRConst $ VFloat 0) (IRConst $ VFloat 1), const0, const0)
@@ -588,6 +591,13 @@ getProbIndex es =
     pt x = pType (getTypeInfo x)
     pTypes = map pt es
     zipped = zip pTypes [0..]
+
+compareValueExpr :: RType -> Value -> IRExpr -> IRExpr
+compareValueExpr TFloat v sample = IRIf (IROp OpLessThan sample (IRConst $ valueToIR v)) (IRConst $ VFloat 0) (IRConst $ VFloat 1)
+compareValueExpr TInt v sample = IRIf (IROp OpLessThan sample (IRConst $ valueToIR v)) (IRConst $ VFloat 0) (IRConst $ VFloat 1)
+compareValueExpr (TEither lr _) (VEither (Left v)) sample = IRIf (IRIsLeft sample) (compareValueExpr lr v (IRFromLeft sample)) (IRConst $ VFloat 0)
+compareValueExpr (TEither _ rr) (VEither (Right v)) sample = IRIf (IRIsRight sample) (compareValueExpr rr v (IRFromRight sample)) (IRConst $ VFloat 0)
+
 
 packParamsIntoLetinsProb :: [String] -> [Expr] -> IRExpr -> IRExpr -> Supply IRExpr
 --packParamsIntoLetinsProb [] [] expr _ = do
