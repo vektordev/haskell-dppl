@@ -161,7 +161,7 @@ toIRInference meta False (Constant TypeInfo {rType=rt} value) sample = do
               _ -> IROp OpEq sample (IRConst (fmap failConversion value))
   expr <- indicator comp
   return (expr, const0, const0)
-toIRInference meta True (Constant TypeInfo {rType=rt} value) sample = return (compareValueExpr rt value sample, const0, const0)
+toIRInference meta True (Constant TypeInfo {rType=rt} value) sample = return (compareValueExpr rt (IRConst (valueToIR value)) sample, const0, const0)
 toIRInference meta True (ThetaI _ a i) sample = do
   a' <- toIRGenerate meta a
   return (IRIf (IROp OpLessThan sample (IRTheta a' i)) (IRConst $ VFloat 0) (IRConst $ VFloat 1), const0, const0)
@@ -306,7 +306,7 @@ toIRInference meta True (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeIn
   case rt of
     TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
     _ -> do
-      return (IRIf (IROp OpLessThan (IRInvoke (IRApply lIR vIR)) sample) (IRConst $ VFloat 1) const0, const0, const0)
+      return (compareValueExpr rt (IRInvoke $ IRApply lIR vIR) sample, const0, const0)
 -- Deterministic bound expression
 toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo v) == Deterministic = do
   vIR <- toIRGenerate meta v
@@ -610,11 +610,17 @@ getProbIndex es =
     pTypes = map pt es
     zipped = zip pTypes [0..]
 
-compareValueExpr :: RType -> Value -> IRExpr -> IRExpr
-compareValueExpr TFloat v sample = IRIf (IROp OpLessThan sample (IRConst $ valueToIR v)) (IRConst $ VFloat 0) (IRConst $ VFloat 1)
-compareValueExpr TInt v sample = IRIf (IROp OpLessThan sample (IRConst $ valueToIR v)) (IRConst $ VFloat 0) (IRConst $ VFloat 1)
-compareValueExpr (TEither lr _) (VEither (Left v)) sample = IRIf (IRIsLeft sample) (compareValueExpr lr v (IRFromLeft sample)) (IRConst $ VFloat 0)
-compareValueExpr (TEither _ rr) (VEither (Right v)) sample = IRIf (IRIsRight sample) (compareValueExpr rr v (IRFromRight sample)) (IRConst $ VFloat 0)
+compareValueExpr :: RType -> IRExpr -> IRExpr -> IRExpr
+compareValueExpr TFloat v sample = IRIf (IROp OpLessThan sample v) (IRConst $ VFloat 0) (IRConst $ VFloat 1)
+compareValueExpr TInt v sample = IRIf (IROp OpLessThan sample v) (IRConst $ VFloat 0) (IRConst $ VFloat 1)
+compareValueExpr (Tuple ft st) v sample = IROp OpMult (compareValueExpr ft (IRTFst v) (IRTFst sample)) (compareValueExpr st (IRTSnd v) (IRTSnd sample))
+compareValueExpr (TEither lr rr) v sample =
+  IRIf (IRIsLeft v)
+    (IRIf (IRIsLeft sample) (compareValueExpr lr (IRFromLeft v) (IRFromLeft sample)) (IRConst $ VFloat 0))
+    (IRIf (IRIsRight sample) (compareValueExpr rr (IRFromRight v) (IRFromRight sample)) (IRConst $ VFloat 0))
+compareValueExpr (TADT _) _ _= IRConst $ VFloat 0 -- TODO implement for ADTs
+compareValueExpr rt _ _ = error $ "Comparison not implemented for type: " ++ show rt
+  
 
 
 packParamsIntoLetinsProb :: [String] -> [Expr] -> IRExpr -> IRExpr -> Supply IRExpr
