@@ -473,7 +473,7 @@ toIRInference meta True e@(InjF TypeInfo {tags=extras, rType=rt} name params) sa
   -- There is no probabilistic parameter
   -- Check whether the value of the function is less than the sample
   expr <- toIRGenerate meta e
-  return (IRIf (IROp OpLessThan expr sample) (IRConst $ VFloat 1) const0, const0, const0)
+  return (compareValueExpr rt expr sample, const0, const0)
 toIRInference meta cumulative e@(InjF TypeInfo {tags=extras} name params) sample
   | isJust (getProbIndex params) = do
   -- FPair of the InjF with unique names
@@ -536,7 +536,7 @@ toIRInference meta cumulative (Var TypeInfo {rType=rt} n) sample = do
     -- Var is a local variable
     Just (_, False) -> do
       if cumulative then
-        return (IRIf (IROp OpLessThan (IRVar n) sample) (IRConst $ VFloat 1) const0, const0, const0)
+        return (compareValueExpr rt (IRVar n) sample, const0, const0)
       else do
         let comp = case rt of
               TFloat -> IROp OpApprox sample (IRVar n)

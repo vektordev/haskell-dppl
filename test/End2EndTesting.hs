@@ -24,6 +24,7 @@ import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType
 import Test.QuickCheck hiding (verbose)
 import Debug.Trace
+import Control.Exception (try, evaluate, SomeException)
 
 getAllTestFiles :: IO [(FilePath, FilePath)]
 getAllTestFiles = do
@@ -52,18 +53,22 @@ parseProbTestCases fp = do
 -}
 
 testInterpreter :: Program -> TestCase -> Property
-testInterpreter p (ProbTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = do
-  case runProb defaultCompilerConfig p params sample of 
-    VTuple (VFloat outProb) (VFloat outDim) -> 
+testInterpreter p (ProbTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = ioProperty $ do
+  result <- try $ evaluate $ runProb defaultCompilerConfig p params sample :: IO (Either SomeException (GenericValue IRExpr))
+  return $ case result of 
+    Right (VTuple (VFloat outProb) (VFloat outDim)) -> 
       counterexample ("Probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < 0.0001) .&&.
         counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim)
-    x -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
-testInterpreter p (CumulTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = do
-  case runInteg defaultCompilerConfig p params sample of 
-    VTuple (VFloat outProb) (VFloat outDim) -> 
+    Right x -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
+    Left err -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
+testInterpreter p (CumulTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = ioProperty $ do
+  result <- try $ evaluate $ runInteg defaultCompilerConfig p params sample :: IO (Either SomeException (GenericValue IRExpr))
+  return $ case result of 
+    Right (VTuple (VFloat outProb) (VFloat outDim)) -> 
       counterexample ("Cmulative probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < 0.0001) .&&.
         counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim)
-    x -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
+    Right x -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
+    Left err -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
 testInterpreter p (ArgmaxPTestCase name params res) = ioProperty $ do
   let paramCnt = length params
   let mockedParams seeds = map (\(par, s) -> VTuple (VInt 1) (VTuple par (VInt s))) (zip params seeds)
