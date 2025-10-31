@@ -618,7 +618,8 @@ compareValueExpr (TEither lr rr) v sample =
   IRIf (IRIsLeft v)
     (IRIf (IRIsLeft sample) (compareValueExpr lr (IRFromLeft v) (IRFromLeft sample)) (IRConst $ VFloat 0))
     (IRIf (IRIsRight sample) (compareValueExpr rr (IRFromRight v) (IRFromRight sample)) (IRConst $ VFloat 0))
-compareValueExpr (TADT _) _ _= IRConst $ VFloat 0 -- TODO implement for ADTs
+compareValueExpr (TVarR _) v sample = IRIf (IROp OpLessThan sample v) (IRConst $ VFloat 0) (IRConst $ VFloat 1)
+compareValueExpr (TADT _) _ _= IRError "Not yet implemented" -- TODO implement for ADTs
 compareValueExpr rt _ _ = error $ "Comparison not implemented for type: " ++ show rt
   
 
