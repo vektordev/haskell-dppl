@@ -26,7 +26,7 @@ import Debug.Trace
 makeAutoNeural :: CompilerConfig -> NeuralDecl -> IRFunGroup  
 makeAutoNeural conf (name, (TArrow TSymbol target), tag) =
   IRFunGroup (name ++ "_auto") 
-    (IRLambda symbol $ makeGen plan name, "Wrapper for the neural network function") 
+    (Just (IRLambda symbol $ makeGen plan name, "Wrapper for the neural network function"))
     (Just (IRLambda symbol $ makeProb conf plan name, "Inference function for neural network function")) Nothing (show plan)
     where plan = makePartitionPlan target tag
 makeAutoNeural conf (name, rt, _) = error $ "Invalid neural declaration for " ++ name ++ ": Neural networks must be function TSymbol -> a"

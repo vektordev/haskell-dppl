@@ -176,7 +176,7 @@ type IRValue = GenericValue IRExpr
 data IREnv = IREnv [IRFunGroup] [ADTDecl] deriving (Show)
 
 
-data IRFunGroup = IRFunGroup {groupName::String, genFun::IRFunDecl, probFun::Maybe IRFunDecl, integFun::Maybe IRFunDecl, groupDoc::String} deriving (Show)
+data IRFunGroup = IRFunGroup {groupName::String, genFun::Maybe IRFunDecl, probFun::Maybe IRFunDecl, integFun::Maybe IRFunDecl, groupDoc::String} deriving (Show)
 
 -- Name, Documentation, Body
 type IRFunDecl = (IRExpr, String)
@@ -188,11 +188,14 @@ data CompilerConfig = CompilerConfig {
   countBranches :: Bool,
   verbose :: Int,
   optimizerLevel :: Int,
-  pruneAnyChecks :: Bool
+  pruneAnyChecks :: Bool,
+  noIntegrate :: Bool,
+  noProbability :: Bool,
+  noGenerate :: Bool
 } deriving (Show)
 
 defaultCompilerConfig :: CompilerConfig
-defaultCompilerConfig = CompilerConfig {countBranches = False, topKThreshold = Nothing, optimizerLevel = 2, verbose = 0, pruneAnyChecks = False}
+defaultCompilerConfig = CompilerConfig {countBranches = False, topKThreshold = Nothing, optimizerLevel = 2, verbose = 0, pruneAnyChecks = False, noIntegrate=False, noProbability=False, noGenerate=False}
 --3: convert algortihm-and-type-annotated Exprs into abstract representation of explicit computation:
 --    Fold enum ranges, algorithms, etc. into a representation of computation that can be directly converted into code.
 

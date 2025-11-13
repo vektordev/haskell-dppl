@@ -108,7 +108,7 @@ generateFunctions (IREnv funcs adts) =
 generateFunctionGroup :: IRFunGroup -> [String]
 generateFunctionGroup IRFunGroup {groupName=n, genFun=g, probFun=p, integFun=i, groupDoc=doc} = 
   [ "# === Function Group " ++ n ++ " ===\n# " ++ doc] ++ 
-  genF n "_gen" g ++
+  fromMaybe [] (g <&> genF n "_gen") ++
   fromMaybe [] (p <&> genF n "_prob") ++
   fromMaybe [] (i <&> genF n "_integ")
   where genF name suffix (e, d) = generateFunction (name ++ suffix) d e

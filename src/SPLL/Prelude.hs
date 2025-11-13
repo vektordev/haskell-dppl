@@ -223,7 +223,7 @@ runGen :: (RandomGen g) => CompilerConfig -> Program -> [IRValue] -> Rand g IRVa
 runGen _ p _ | isLeft (validateProgram p) = error $ fromLeft "" (validateProgram p)
 runGen conf p args = do
   let compiled = compile conf p
-  let (gen, _) = genFun (lookupIREnv "main" compiled)
+  let Just (gen, _) = genFun (lookupIREnv "main" compiled)
   let constArgs = map IRConst args
   generateRand (neurals p) compiled constArgs gen
 

@@ -41,7 +41,7 @@ data CompilerMetadata = CompilerMetadata {
 }
 
 envToIR :: CompilerConfig -> Program -> IREnv
-envToIR conf p@Program{adts=adts} = optimizeEnv conf $ IREnv (-- map optimizer over all second elements of the tuples
+envToIR conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb, noGenerate=noGen} p@Program{adts=adts} = optimizeEnv conf $ IREnv (-- map optimizer over all second elements of the tuples
   map (makeAutoNeural conf) (neurals p) ++
   map (\(name, binding) ->
     let typeEnv = getGlobalTypeEnv p
@@ -49,14 +49,18 @@ envToIR conf p@Program{adts=adts} = optimizeEnv conf $ IREnv (-- map optimizer o
         rt = rType $ getTypeInfo binding in
       IRFunGroup {groupName=name,
        integFun =
-        if pt == Deterministic || pt == Integrate then
+        if not noInteg && (pt == Deterministic || pt == Integrate) then
           Just (toIntegDecl name (IRLambda "sample" (runCompile (meta typeEnv) (toIRInferenceSave (meta typeEnv) True binding (IRVar "sample")))))
         else Nothing,
         probFun =
-          if pt == Deterministic || pt == Integrate || pt == Prob then
+          if not noProb && (pt == Deterministic || pt == Integrate || pt == Prob) then
             Just (toProbDecl name (IRLambda "sample" (runCompile (meta typeEnv) (toIRInferenceSave (meta typeEnv) False binding (IRVar "sample")))))
           else Nothing,
-        genFun = toGenDecl name (fst $ evalSupply $ runWriterT $ toIRGenerate (meta typeEnv) binding),
+        genFun = 
+          if not noGen then
+            Just (toGenDecl name (fst $ evalSupply $ runWriterT $ toIRGenerate (meta typeEnv) binding))
+          else
+            Nothing,
         groupDoc="Function group " ++ name}) (functions p)) adts
 
   where

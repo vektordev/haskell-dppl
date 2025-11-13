@@ -355,7 +355,7 @@ irIntegral p low high params = do
 
 irGen :: RandomGen g => Program -> [IRExpr] -> Rand g IRValue
 irGen p params = IRInterpreter.generateRand (neurals p) irEnv params irExpr
-  where (irExpr, _) = genFun (lookupIREnv "main" irEnv)
+  where Just (irExpr, _) = genFun (lookupIREnv "main" irEnv)
         irEnv = envToIR defaultCompilerConfig annotated
         annotated = annotateAlgsProg typedProg
         typedProg = addTypeInfo preAnnotated

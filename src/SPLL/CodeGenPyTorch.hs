@@ -175,7 +175,7 @@ generateClass lut (IRFunGroup name gen prob integ doc) = let
     Nothing -> []
   i = funcStringFromMaybe "integrate" integ
   p = funcStringFromMaybe "forward" prob
-  g = generateFunction True ("generate", replaceCallsDecl gen)
+  g =funcStringFromMaybe "generate" gen
   commentLine = "# " ++ doc
   initLine = "class " ++ onHead toUpper name ++ "(Module):"
   funcs = i ++ [""] ++ p ++ [""] ++ g

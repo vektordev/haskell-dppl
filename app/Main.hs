@@ -28,6 +28,9 @@ data GlobalOpts = GlobalOpts {
   topKCutoff :: Maybe Double,
   optimiziationLevel :: Int,
   pruneAnys :: Bool,
+  noInteg :: Bool,
+  noProb :: Bool,
+  noGen :: Bool, 
   commandOpts :: CommandOpts
 }
 
@@ -94,6 +97,18 @@ parseGlobalOpts = GlobalOpts
         <*> switch
             ( long "pruneAnyChecks"
             <> help "Prune any-checks from compiled code. WARNING: This may lead to unexpected results. You should probably leave this off")
+        <*> switch
+            ( long "noIntegrate"
+            <> short 'I'
+            <> help "The compiler does not generate a CDF function. This function may be required for the code to work")
+        <*> switch
+            ( long "noProbability"
+            <> short 'P'
+            <> help "The compiler does not generate a PDF function. This function may be required for the code to work")
+        <*> switch
+            ( long "noGenerate"
+            <> short 'G'
+            <> help "The compiler does not generate a generate function. This function may be required for the code to work")
         <*> hsubparser (
           command "compile" (info parseCompileOpts (progDesc "Compiles the program with inference interface into target language"))
           <> command "generate" (info parseGenerateOpts (progDesc "Runs the generate pass of the program"))
@@ -148,9 +163,9 @@ main = transpile =<< execParser opts
             <> header "Haskell DPPL" )
 
 transpile :: GlobalOpts -> IO ()
-transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl, pruneAnys=anyChecks}) = do
+transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl, pruneAnys=anyChecks, noInteg=nInteg, noProb=nProb, noGen=nGen}) = do
   prog <- parseProgram inFile
-  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks})
+  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen})
   case options of
     CompileOpts{language=lang, outputFile=outFile, trunc=trnc} -> do
       transpiled <- codeGenToLang lang trnc conf prog
