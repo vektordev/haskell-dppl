@@ -54,30 +54,40 @@ parseProbTestCases fp = do
 
 testInterpreter :: Program -> TestCase -> Property
 testInterpreter p (ProbTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = ioProperty $ do
-  result <- try $ evaluate $ runProb defaultCompilerConfig p params sample :: IO (Either SomeException (GenericValue IRExpr))
+  result <- try $ evaluate $ runProb defaultCompilerConfig p params sample :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of 
-    Right (VTuple (VFloat outProb) (VFloat outDim)) -> 
+    Right (Right (VTuple (VFloat outProb) (VFloat outDim))) -> 
       counterexample ("Probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < 0.0001) .&&.
         counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim)
-    Right x -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
+    Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
+    Right (Left err) -> counterexample err False
     Left err -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
 testInterpreter p (CumulTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = ioProperty $ do
-  result <- try $ evaluate $ runInteg defaultCompilerConfig p params sample :: IO (Either SomeException (GenericValue IRExpr))
+  result <- try $ evaluate $ runInteg defaultCompilerConfig p params sample :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of 
-    Right (VTuple (VFloat outProb) (VFloat outDim)) -> 
+    Right (Right (VTuple (VFloat outProb) (VFloat outDim)) )-> 
       counterexample ("Cmulative probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < 0.0001) .&&.
         counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim)
-    Right x -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
+    Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
+    Right (Left err) -> counterexample err False
     Left err -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
 testInterpreter p (ArgmaxPTestCase name params res) = ioProperty $ do
   let paramCnt = length params
   let mockedParams seeds = map (\(par, s) -> VTuple (VInt 1) (VTuple par (VInt s))) (zip params seeds)
   let mockedParamsList start = map mockedParams [[x .. x + (paramCnt-1)] | x <- [start, paramCnt..]]  -- [[((1, (p1, 0)), (1, (p2, 1)))], [(1, (p1, 2)), (1, (p2, 3))] ..]
-  let resP = runProb defaultCompilerConfig p (head (mockedParamsList 0)) res
-  let cntSamples = 100
-  samples <- evalRandIO $ mapM (runGen defaultCompilerConfig p) (take cntSamples (mockedParamsList paramCnt))
-  let samplesP = map (\(par, s) -> runProb defaultCompilerConfig p par s) (zip (take cntSamples (mockedParamsList (paramCnt * cntSamples))) samples)
-  return $ conjoin (map (\(s, p) -> counterexample ("Test Case " ++ name ++ ": Sample " ++ show s ++ " has highest probability: " ++ show p ++ " instead of sample " ++ show res ++ " with probability: " ++ show resP) (p `lessEqualsProbs` resP)) (zip samples samplesP))
+  let resP' = runProb defaultCompilerConfig p (head (mockedParamsList 0)) res
+  case resP' of
+    Left err -> return $ counterexample err False
+    Right resP -> do
+      let cntSamples = 100
+      case mapM (runGen defaultCompilerConfig p) (take cntSamples (mockedParamsList paramCnt)) of
+        Left err -> return $ counterexample err False
+        Right randVals -> do
+          samples <- evalRandIO (sequence randVals)
+          let samplesP' = sequence $ map (\(par, s) -> runProb defaultCompilerConfig p par s) (zip (take cntSamples (mockedParamsList (paramCnt * cntSamples))) samples)
+          case samplesP' of 
+            Left err -> return $ counterexample err False
+            Right samplesP -> return $ conjoin (map (\(s, p) -> counterexample ("Test Case " ++ name ++ ": Sample " ++ show s ++ " has highest probability: " ++ show p ++ " instead of sample " ++ show res ++ " with probability: " ++ show resP) (p `lessEqualsProbs` resP)) (zip samples samplesP))
 
 lessEqualsProbs :: IRValue -> IRValue -> Bool
 lessEqualsProbs (VFloat a) (VFloat b) = a <= b
@@ -86,7 +96,21 @@ lessEqualsProbs (VTuple _ (VFloat aD)) (VTuple _ (VFloat bD)) = aD > bD -- Lower
 
 -- TODO: Maybe stop sampling early if no more new samples are found
 discreteProbsNormalized :: Program -> Property
-discreteProbsNormalized p = counterexample "Probability of randomly sampled values does not sum to 1" (sumProbSamples pSamples >= sufficientlyNormal)
+discreteProbsNormalized p = do
+  let randomParams = (replicateM paramCnt (getRandomR (1, 100000))) >>= mapM (\x -> return $ VTuple (VInt 0) (VInt x)) :: RandomGen g => Rand g [IRValue]
+  let randomParamsForSamples = evalRand (replicateM sampleCnt randomParams) (mkStdGen 42)
+  case mapM (runGen defaultCompilerConfig p) randomParamsForSamples of
+        Left err -> counterexample err False
+        Right gens -> do
+          let pSamples = evalRand (sequence gens) (mkStdGen 42)
+          case mapM (\sam -> runProb defaultCompilerConfig p params sam) pSamples of
+            Left err -> counterexample err False
+            Right t -> do
+              let sumProbSamples = sum (map prob t)
+              counterexample "Probability of randomly sampled values does not sum to 1" (sumProbSamples >= sufficientlyNormal)
+  -- Create a list of random ints and then make them into a tuple
+  
+  
   where
     paramCnt = progParameterCount p
     seedList = [0 .. (paramCnt - 1)] -- List of natural numbers split into parameter count sized chunks
@@ -94,9 +118,6 @@ discreteProbsNormalized p = counterexample "Probability of randomly sampled valu
     sampleCnt = 1000
     sufficientlyNormal = 0.99
     prob (VTuple (VFloat p) _) = p
-    sumProbSamples samples = sum $ map (\sam -> prob $ runProb defaultCompilerConfig p params sam) samples
-    pSamples = nub $ evalRand ((replicateM sampleCnt randomParams) >>= mapM (runGen defaultCompilerConfig p) ) (mkStdGen 42)
-    randomParams = (replicateM paramCnt (getRandomR (1, 100000))) >>= mapM (\x -> return $ VTuple (VInt 0) (VInt x)) :: RandomGen g => Rand g [IRValue] -- Create a list of random ints and then make them into a tuple
 
 progParameterCount :: Program -> Int
 progParameterCount Program{functions=f} = countLambdas main
@@ -107,21 +128,27 @@ progParameterCount Program{functions=f} = countLambdas main
 
 testJulia :: Program -> [TestCase] -> Property
 testJulia p tc = ioProperty $ do
-  let src = intercalate "\n" (SPLL.CodeGenJulia.generateFunctions (compile defaultCompilerConfig p))
-  (_, _, _, handle) <- createProcess (proc "julia" ["-e", juliaTestCode src tc])
-  code <- waitForProcess handle
-  case code of
-    ExitSuccess -> return $ True === True
-    ExitFailure _ -> return $ counterexample ("Julia test " ++ testCaseName (head tc) ++ " failed. See Julia error message") False
+  case compile defaultCompilerConfig p of
+    Left err -> return $ counterexample err False
+    Right compiled -> do
+      let src = intercalate "\n" (SPLL.CodeGenJulia.generateFunctions compiled)
+      (_, _, _, handle) <- createProcess (proc "julia" ["-e", juliaTestCode src tc])
+      code <- waitForProcess handle
+      case code of
+        ExitSuccess -> return $ True === True
+        ExitFailure _ -> return $ counterexample ("Julia test " ++ testCaseName (head tc) ++ " failed. See Julia error message") False
 
 testPython :: Program -> [TestCase] -> Property
 testPython p tc = ioProperty $ do
-  let src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True (compile defaultCompilerConfig p))
-  (_, _, _, handle) <- createProcess (proc "python3" ["-c", pythonTestCode src tc])
-  code <- waitForProcess handle
-  case code of
-    ExitSuccess -> return $ True === True
-    ExitFailure _ -> return $ counterexample ("Python test " ++ testCaseName (head tc) ++ " failed. See Python error message") False
+  case compile defaultCompilerConfig p of
+    Left err -> return $ counterexample err False
+    Right compiled -> do
+      let src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True compiled)
+      (_, _, _, handle) <- createProcess (proc "python3" ["-c", pythonTestCode src tc])
+      code <- waitForProcess handle
+      case code of
+        ExitSuccess -> return $ True === True
+        ExitFailure _ -> return $ counterexample ("Python test " ++ testCaseName (head tc) ++ " failed. See Python error message") False
 
 juliaTestCode :: String -> [TestCase] -> String
 juliaTestCode src tcs =

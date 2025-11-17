@@ -4,12 +4,13 @@ import Options.Applicative
 import SPLL.Lang.Lang (Program)
 import SPLL.Examples
 import System.IO
+import System.Exit
 import SPLL.IntermediateRepresentation
 import Data.Char (toLower)
 import SPLL.Parser
 import System.Exit (exitFailure)
 import Text.Megaparsec.Error (errorBundlePretty)
-import SPLL.Lang.Types (Value(..), GenericValue (..))
+import SPLL.Lang.Types (Value(..), GenericValue (..), CompilerError)
 import Text.Read
 import SPLL.Prelude (runProb, runInteg, runGen, compile)
 import Control.Monad.Random (randomIO, evalRandIO)
@@ -168,18 +169,26 @@ transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, 
   let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen})
   case options of
     CompileOpts{language=lang, outputFile=outFile, trunc=trnc} -> do
-      transpiled <- codeGenToLang lang trnc conf prog
-      writeOutputFile outFile transpiled
+      case codeGenToLang lang trnc conf prog of
+        Left err -> handleError err
+        Right trans -> writeOutputFile outFile trans
     GenerateOpts -> do
       -- TODO: Nicer Output
-      val <- evalRandIO (runGen conf prog [])
-      print ("X=" ++ show val)
+      case runGen conf prog [] of
+        Left err -> handleError err
+        Right randVal -> do
+          val <- evalRandIO randVal
+          print ("X=" ++ show val)
     ProbabilityOpts{posP=x} ->
       -- TODO: Nicer Output
-      print ("p(X="++ show x ++ ")=" ++ show (runProb conf prog [] x))
+      case runProb conf prog [] x of
+        Left err -> handleError err
+        Right p -> print ("p(X="++ show x ++ ")=" ++ show p)
     CumulativeOpts{posC=x} ->
       -- TODO: Nicer Output
-      print ("CDF("++ show x ++ ")=" ++ show (runInteg conf prog [] x))
+      case runInteg conf prog [] x of 
+        Left err -> handleError err
+        Right i -> print ("CDF("++ show x ++ ")=" ++ show i)
 
 parseProgram :: FilePath -> IO Program
 --parseProgram path = return testLambdaParameter
@@ -193,12 +202,17 @@ parseProgram path = do
       exitFailure
     Right prog -> return prog
 
-codeGenToLang :: Language -> Bool -> CompilerConfig -> Program -> IO String
+codeGenToLang :: Language -> Bool -> CompilerConfig -> Program -> Either CompilerError String
 codeGenToLang lang trunc conf prog = do
-  let compiled = compile conf prog
+  compiled <- compile conf prog
   case lang of
-    Python -> return $ intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions (not trunc) compiled)
-    Julia -> return $ intercalate "\n" (SPLL.CodeGenJulia.generateFunctions compiled)
+    Python -> Right $ intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions (not trunc) compiled)
+    Julia -> Right $ intercalate "\n" (SPLL.CodeGenJulia.generateFunctions compiled)
 
 writeOutputFile :: String -> String -> IO()
 writeOutputFile = writeFile
+
+handleError :: CompilerError -> IO ()
+handleError err = do
+  putStrLn ("Error during execution: " ++ err)
+  exitWith (ExitFailure 1)

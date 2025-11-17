@@ -18,6 +18,8 @@ import Data.Maybe
 
 type ChainName = String
 
+type CompilerError = String
+
 data Expr =
               -- Flow Control
                 IfThenElse TypeInfo Expr Expr Expr

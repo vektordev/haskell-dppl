@@ -4,7 +4,6 @@
 module SPLL.Typing.PInfer2 (
   showResults
 , showResultsProg
-, inferType
 , addPTypeInfo
 , showResultsProgDebug
 , tryAddPTypeInfo
@@ -29,6 +28,7 @@ import SPLL.Typing.Typing
 import SPLL.Typing.PType
 import SPLL.Typing.RType hiding (TVar, TV, Scheme, Scheme(..))
 import Control.Monad (replicateM)
+import SPLL.Lang.Types (CompilerError)
 
 data PTypeError
   = UnificationFail PType PType
@@ -104,17 +104,11 @@ showResults expr = do
       putStrLn $ unlines $ prettyPrint ee
       putStrLn "-----"
 
-inferType :: Program -> PType
-inferType prog = do
-  case inferProgram mempty prog of
-     Left err -> error "error in infer scheme"
-     Right (_, DScheme _ b ty, _) ->  ty
-
-addPTypeInfo :: Program -> Program
+addPTypeInfo :: Program -> Either CompilerError Program
 addPTypeInfo p = do
     case inferProgram mempty p of
-       Left err -> error ("error in addPTypeInfo: " ++ show err)
-       Right (_, _, p) ->  p
+       Left err -> Left ("Error in addPTypeInfo: " ++ show err)
+       Right (_, _, p) -> Right p
 
 tryAddPTypeInfo :: Program -> Either PTypeError Program
 tryAddPTypeInfo p = do

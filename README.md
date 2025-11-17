@@ -39,10 +39,14 @@ The functions in [Prelude.hs](src/SPLL/Prelude.hs) provide an easy to use interf
 showcase :: IO ()
 showcase = do
   let twoDice = Program [("main", dice 6 #<+># dice 6)] [] []
-  gen <- evalRandIO (runGen defaultCompilerConfig twoDice [])
-  putStrLn ("Generated value: " ++ show gen)
-  let VTuple (VFloat prob) (VFloat dim) = runProb defaultCompilerConfig twoDice [] gen
-  putStrLn ("Probability of that value occuring: " ++ show prob)
+  case runGen defaultCompilerConfig twoDice [] of
+    Left err -> return $ counterexample err False
+    Right gen' -> do
+      gen <- evalRandIO gen'
+      putStrLn ("Generated value: " ++ show gen)
+      case runProb defaultCompilerConfig twoDice [] gen of 
+        Left err -> putStrLn err
+        Right (VTuple (VFloat prob) (VFloat dim)) -> putStrLn ("Probability of that value occuring: " ++ show prob)
 ```
 
 You can also decare continuous distributions using the ```uniform``` or ```normal``` functions from [Prelude.hs](src/SPLL/Prelude.hs). The resulting infered probability is then a density instead of a mass. The following example samples from a normal distribution, with a standart deviation of 2 and a mean of 1. Again the program samples one value from this distribution and outputs the probability density for that value.
@@ -51,10 +55,13 @@ You can also decare continuous distributions using the ```uniform``` or ```norma
 showcase2 :: IO ()
 showcase2 = do
   let dist = Program [("main", normal #*# constF 2 #+# constF 1)] [] []
-  gen <- evalRandIO (runGen defaultCompilerConfig dist [])
-  putStrLn ("Generated value: " ++ show gen)
-  let VTuple (VFloat prob) (VFloat dim) = runProb defaultCompilerConfig dist [] gen
-  putStrLn ("Probability density of that value occuring: " ++ show prob)
+  case runGen defaultCompilerConfig dist [] of
+    Left err -> putStrLn err
+    Right gen' -> do 
+      gen <- evalRandIO gen'
+      case runProb defaultCompilerConfig dist [] gen of
+        Left err -> putStrLn err
+        Right (VTuple (VFloat prob) (VFloat dim)) -> putStrLn ("Probability density of that value occuring: " ++ show prob)
 ```
 
 ### Examples

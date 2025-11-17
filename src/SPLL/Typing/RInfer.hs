@@ -30,7 +30,7 @@ import SPLL.Typing.RType
 import SPLL.InferenceRule
 import PredefinedFunctions (globalFEnv, FPair(..), FDecl(..))
 import Debug.Trace
-import SPLL.Lang.Types (FnDecl, ADTDecl)
+import SPLL.Lang.Types (FnDecl, ADTDecl, CompilerError)
 import SPLL.Typing.AlgebraicDataTypes
 import Data.Bifunctor
 import Control.Monad (replicateM)
@@ -197,12 +197,12 @@ basicTEnv adts = TypeEnv $ Map.fromList $ (adtRTs ++ injFRTs)
         freeVars = Set.toList $ ftv rty
 
 
-addRTypeInfo :: Program -> Program
+addRTypeInfo :: Program -> Either CompilerError Program
 addRTypeInfo p =
   case runInfer (basicTEnv (adts p)) (inferProg p) of
-    Left err -> error ("error in addRTypeInfo: " ++ show err)
+    Left err -> Left ("Error in addRTypeInfo: " ++ show err)
     Right (cs, p2) -> case runSolve cs of
-      Left err -> error (
+      Left err -> Left (
         "error in solve addRTypeInfo: " ++ show err
         ++ "\n\nprog = \n" ++ (unlines $ prettyPrintProgRTyOnly p2)
         ++ "\n\nconstraints = \n" ++ (unlines $ map showConstraint cs)
@@ -210,7 +210,7 @@ addRTypeInfo p =
         ++ "\n\nleftover constraints = \n" ++ (unlines $ map showConstraint leftoverConstraints))
           where
             (subst, leftoverConstraints) = simplify (emptySubst, cs)
-      Right subst -> apply subst p2
+      Right subst -> Right (apply subst p2)
 
 tryAddRTypeInfo :: Program -> Either RTypeError Program
 tryAddRTypeInfo p@(Program decls _ adts) = do

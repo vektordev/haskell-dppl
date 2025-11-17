@@ -1,7 +1,7 @@
 module SPLL.Prelude where
 
 import SPLL.Lang.Lang
-import SPLL.Lang.Types (makeTypeInfo, GenericValue (..))
+import SPLL.Lang.Types (makeTypeInfo, GenericValue (..), CompilerError)
 import SPLL.IntermediateRepresentation
 import SPLL.Analysis
 import SPLL.Typing.Infer (addTypeInfo)
@@ -191,9 +191,9 @@ fix = "f" #->#
     ("v" #-># apply (var "f") ("n" #-># apply (apply (var "v") (var "v")) (var "n")))
 
 
-compile :: CompilerConfig -> Program -> IREnv
-compile _ p | isLeft (validateProgram p) = pTraceShow p $ error $ fromLeft "" (validateProgram p)
-compile conf p = fromJust $ do
+compile :: CompilerConfig -> Program -> Either CompilerError IREnv
+compile conf p = do
+  validateProgram p
   printIfVerbose conf "=== Parsed Program ==="
   pPrintIfMoreVerbose conf p
   printIfVerbose conf (pPrintProg p)
@@ -206,7 +206,7 @@ compile conf p = fromJust $ do
   printIfMoreVerbose conf "\n=== Chain named Program ==="
   pPrintIfMoreVerbose conf preAnnotated
 
-  let typed = addTypeInfo forwardChained
+  typed <- addTypeInfo forwardChained
   printIfMoreVerbose conf "\n=== Typed Program ==="
   pPrintIfMoreVerbose conf typed
   let annotated = annotateAlgsProg typed
@@ -219,35 +219,29 @@ compile conf p = fromJust $ do
   printIfVerbose conf (pPrintIREnv compiled)
   return compiled
 
-runGen :: (RandomGen g) => CompilerConfig -> Program -> [IRValue] -> Rand g IRValue
-runGen _ p _ | isLeft (validateProgram p) = error $ fromLeft "" (validateProgram p)
+runGen :: (RandomGen g) => CompilerConfig -> Program -> [IRValue] -> Either CompilerError (Rand g IRValue)
+runGen _ p _ | isLeft (validateProgram p) = fmap (error "Impossible case") (validateProgram p)
 runGen conf p args = do
-  let compiled = compile conf p
+  compiled <- compile conf p
   let Just (gen, _) = genFun (lookupIREnv "main" compiled)
   let constArgs = map IRConst args
-  generateRand (neurals p) compiled constArgs gen
+  Right $ generateRand (neurals p) compiled constArgs gen
 
-runProb :: CompilerConfig -> Program -> [IRValue] -> IRValue -> IRValue
-runProb _ p _ _ | isLeft (validateProgram p) = error $ fromLeft "" (validateProgram p)
+runProb :: CompilerConfig -> Program -> [IRValue] -> IRValue -> Either CompilerError IRValue
+runProb _ p _ _ | isLeft (validateProgram p) = fmap (error "Impossible case") (validateProgram p)
 runProb conf p args x = do
-  let compiled = compile conf p
+  compiled <- compile conf p
   let Just (prob, _) = probFun (lookupIREnv "main" compiled)
   let constArgs = map IRConst (x:args)
-  let val = generateDet (neurals p) compiled constArgs prob
-  case val of
-    Right v -> v
-    Left err -> error err
+  generateDet (neurals p) compiled constArgs prob
 
-runInteg :: CompilerConfig -> Program -> [IRValue] -> IRValue -> IRValue
-runInteg _ p _ _ | isLeft (validateProgram p) = error $ fromLeft "" (validateProgram p)
+runInteg :: CompilerConfig -> Program -> [IRValue] -> IRValue -> Either CompilerError IRValue
+runInteg _ p _ _ | isLeft (validateProgram p) = fmap (error "Impossible case") (validateProgram p)
 runInteg conf p args sample = do
-  let compiled = compile conf p
+  compiled <- compile conf p
   let Just (integ, _) = integFun (lookupIREnv "main" compiled)
   let constArgs = map IRConst (sample:args)
-  let val = generateDet (neurals p) compiled constArgs integ
-  case val of
-    Right v -> v
-    Left err -> error err
+  generateDet (neurals p) compiled constArgs integ
 
 printIfVerbose :: (Monad m) => CompilerConfig -> String -> m ()
 printIfVerbose CompilerConfig {verbose=v} s | v >= 1 = trace s (return ())

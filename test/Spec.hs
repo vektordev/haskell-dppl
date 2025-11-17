@@ -216,33 +216,43 @@ prop_any = forAll (elements correctProbValuesTestCases) checkProbAny
 prop_CheckReadmeCodeListing1 :: Property
 prop_CheckReadmeCodeListing1 = ioProperty $ do
   let twoDice = Program [("main", dice 6 #<+># dice 6)] [] []
-  gen <- evalRandIO (runGen defaultCompilerConfig twoDice [])
-  let VTuple (VFloat prob) (VFloat dim) = runProb defaultCompilerConfig twoDice [] gen
-  -- Original Listing above, Tests below
-  if gen == (VInt 2) || gen == (VInt 12) then
-    return $ (VFloat prob) `reasonablyClose` (VFloat $ 1/36)
-  else if gen == (VInt 3) || gen == (VInt 11) then
-    return $ (VFloat prob) `reasonablyClose` (VFloat $ 2/36)
-  else if gen == (VInt 4) || gen == (VInt 10) then
-    return $ (VFloat prob) `reasonablyClose` (VFloat $ 3/36)
-  else if gen == (VInt 5) || gen == (VInt 9) then
-    return $ (VFloat prob) `reasonablyClose` (VFloat $ 4/36)
-  else if gen == (VInt 6) || gen == (VInt 8) then
-    return $ (VFloat prob) `reasonablyClose` (VFloat $ 5/36)
-  else if gen == (VInt 7) then
-    return $ (VFloat prob) `reasonablyClose` (VFloat $ 6/36)
-  else
-    return $ counterexample ("No valid dice roll " ++ show gen) False
+  case runGen defaultCompilerConfig twoDice [] of
+    Left err -> return $ counterexample err False
+    Right gen' -> do
+      gen <- evalRandIO gen'
+      case runProb defaultCompilerConfig twoDice [] gen of
+        Left err -> return $ counterexample err False
+        Right (VTuple (VFloat prob) (VFloat dim)) -> do
+          -- Original Listing above, Tests below
+          if gen == (VInt 2) || gen == (VInt 12) then
+            return $ (VFloat prob) `reasonablyClose` (VFloat $ 1/36)
+          else if gen == (VInt 3) || gen == (VInt 11) then
+            return $ (VFloat prob) `reasonablyClose` (VFloat $ 2/36)
+          else if gen == (VInt 4) || gen == (VInt 10) then
+            return $ (VFloat prob) `reasonablyClose` (VFloat $ 3/36)
+          else if gen == (VInt 5) || gen == (VInt 9) then
+            return $ (VFloat prob) `reasonablyClose` (VFloat $ 4/36)
+          else if gen == (VInt 6) || gen == (VInt 8) then
+            return $ (VFloat prob) `reasonablyClose` (VFloat $ 5/36)
+          else if gen == (VInt 7) then
+            return $ (VFloat prob) `reasonablyClose` (VFloat $ 6/36)
+          else
+            return $ counterexample ("No valid dice roll " ++ show gen) False
 
 -- DO NOT CHANGE THIS CODE WITHOUT ALSO CHANGING THE CODE IN THE README
 prop_CheckReadmeCodeListing2 :: Property
 prop_CheckReadmeCodeListing2 = ioProperty $ do
   let dist = Program [("main", normal #*# constF 2 #+# constF 1)] [] []
-  gen <- evalRandIO (runGen defaultCompilerConfig dist [])
-  let VTuple (VFloat prob) (VFloat dim) = runProb defaultCompilerConfig dist [] gen
-  -- Original Listing above, Tests below
-  let (VFloat genF) = gen
-  return $ (VFloat prob) `reasonablyClose` (VFloat (normalPDF ((genF - 1) / 2) / 2))
+  case runGen defaultCompilerConfig dist [] of
+    Left err -> return $ counterexample err False
+    Right gen' -> do 
+      gen <- evalRandIO gen'
+      case runProb defaultCompilerConfig dist [] gen of
+        Left err -> return $ counterexample err False
+        Right (VTuple (VFloat prob) (VFloat dim)) -> do
+          -- Original Listing above, Tests below
+          let (VFloat genF) = gen
+          return $ (VFloat prob) `reasonablyClose` (VFloat (normalPDF ((genF - 1) / 2) / 2))
 
 checkValidPrograms :: (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
 checkValidPrograms (p, _, _, _) = case validateProgram p of
@@ -314,7 +324,7 @@ irDensityTopK p thresh s params = IRInterpreter.generateRand (neurals p) irEnv (
         sampleExpr = IRConst s
         irEnv = envToIR defaultCompilerConfig {topKThreshold = Just thresh} annotated
         annotated = annotateAlgsProg typedProg
-        typedProg = addTypeInfo preAnnotated
+        Right typedProg = addTypeInfo preAnnotated
         preAnnotated = annotateEnumsProg p
 
 irDensityBC :: RandomGen g => Program -> IRValue -> [IRExpr]-> Rand g IRValue
@@ -323,7 +333,7 @@ irDensityBC p s params = IRInterpreter.generateRand (neurals p) irEnv (sampleExp
         sampleExpr = IRConst s
         irEnv = envToIR defaultCompilerConfig {countBranches = True} annotated
         annotated = annotateAlgsProg typedProg
-        typedProg = addTypeInfo preAnnotated
+        Right typedProg = addTypeInfo preAnnotated
         preAnnotated = annotateEnumsProg p
 
 irDensity :: RandomGen g => Program -> IRValue -> [IRExpr] -> Rand g IRValue
@@ -332,7 +342,7 @@ irDensity p s params = IRInterpreter.generateRand (neurals p) irEnv (sampleExpr:
         sampleExpr = IRConst s
         irEnv = envToIR defaultCompilerConfig annotated
         annotated = annotateAlgsProg typedProg
-        typedProg = addTypeInfo preAnnotated
+        Right typedProg = addTypeInfo preAnnotated
         preAnnotated = annotateEnumsProg p
 
 irIntegral :: RandomGen g => Program -> IRValue -> IRValue -> [IRExpr] -> Rand g IRValue
@@ -350,7 +360,7 @@ irIntegral p low high params = do
     highExpr = IRConst high
     irEnv = envToIR defaultCompilerConfig annotated
     annotated = annotateAlgsProg typedProg
-    typedProg = addTypeInfo preAnnotated
+    Right typedProg = addTypeInfo preAnnotated
     preAnnotated = annotateEnumsProg p
 
 irGen :: RandomGen g => Program -> [IRExpr] -> Rand g IRValue
@@ -358,7 +368,7 @@ irGen p params = IRInterpreter.generateRand (neurals p) irEnv params irExpr
   where Just (irExpr, _) = genFun (lookupIREnv "main" irEnv)
         irEnv = envToIR defaultCompilerConfig annotated
         annotated = annotateAlgsProg typedProg
-        typedProg = addTypeInfo preAnnotated
+        Right typedProg = addTypeInfo preAnnotated
         preAnnotated = annotateEnumsProg p
 
 reasonablyClose :: IRValue -> IRValue -> Property
