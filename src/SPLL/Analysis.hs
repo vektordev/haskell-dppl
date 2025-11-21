@@ -7,7 +7,7 @@ module SPLL.Analysis (
 import SPLL.Lang.Types
 import SPLL.Lang.Lang
 import SPLL.InferenceRule
-import Data.Maybe (maybeToList, fromJust, isNothing, fromMaybe, isJust)
+import Data.Maybe (maybeToList, fromJust, isNothing, fromMaybe, isJust, mapMaybe)
 import Data.List (nub)
 import Data.Bifunctor
 import SPLL.Typing.Typing (TypeInfo, TypeInfo(..), Tag(..), setTags)
@@ -111,6 +111,7 @@ isEnumerable =
     EnumList _ -> True
     EnumRange _ -> True
     _ -> False)
+
 
 likelihoodFunctionUsesTypeInfo :: ExprStub -> Bool
 likelihoodFunctionUsesTypeInfo expr = expr `elem` [StubGreaterThan, StubLessThan, StubInjF]

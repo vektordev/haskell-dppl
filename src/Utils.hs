@@ -6,6 +6,10 @@ module Utils where
 import Control.Monad.State
 import Data.Graph
 
+concatMap2 :: (a -> ([b], [c])) -> [a] -> ([b], [c])
+concatMap2 f xs = (concat as, concat bs)
+  where (as, bs) = unzip (map f xs)
+
 -- ======== SUPPLY MONAD ========
 
 type Supply = State Int

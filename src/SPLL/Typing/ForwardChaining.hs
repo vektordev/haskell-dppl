@@ -53,30 +53,56 @@ isAppliedInfo :: ExprInfo -> Bool
 isAppliedInfo AppliedInfo = True
 isAppliedInfo _ = False
 
+tagChainsTo :: Program -> Program
+tagChainsTo prog = prog {functions=map (second (tMap (tagChainsToExpr hornClauses))) (functions prog)}
+  where
+    hornClauses = progToHornClauses prog
+
+tagChainsToExpr :: [[HornClause]] -> Expr -> TypeInfo
+tagChainsToExpr clauses (Apply ti l v) = ti{tags=ChainsTo foundLambdaCN:tags ti}
+  where
+    lambdaCN = chainName (getTypeInfo l)
+    Just (_, foundLambdaCN) = findBoundVariable clauses lambdaCN
+tagChainsToExpr _ x = getTypeInfo x
+
+
+buildInversionTable :: [ADTDecl] -> Program -> [(ChainName, (String, IRExpr))]
+buildInversionTable adts prog = concatMap (buildInversionTableExpr hornClauses adts [] . snd) (functions prog)
+  where
+    hornClauses = progToHornClauses prog
+
+buildInversionTableExpr :: [[HornClause]] -> [ADTDecl] -> [String] -> Expr -> [(ChainName, (String, IRExpr))]
+buildInversionTableExpr clauses adts boundVars (Lambda TypeInfo{chainName=cn} bound body) = (cn, (bound, toInvExpr clauses adts boundVars cn bound)):buildInversionTableExpr clauses adts (bound:boundVars) body
+--buildInversionTableExpr clauses adts (Var TypeInfo{rType = TArrow _ _, chainName=cn} v) = 
+buildInversionTableExpr clauses adts boundVars x = concatMap (buildInversionTableExpr clauses adts boundVars) (getSubExprs x)
+
 -- Takes all HornClauses of a Program and a point in the AST which should be inverted.
 -- The function then searches for a Lambda statement and inverses toward the bound variable
 -- Note that it deliberately skips over lambdas that are already applied
-toInvExpr :: [[HornClause]] -> [ADTDecl] -> ChainName -> IRExpr
---toInvExpr clauses adts startCN | traceShow startCN False = undefined
-toInvExpr clauseSet adts startCN = mergeExpr valueExprs
+toInvExpr :: [[HornClause]] -> [ADTDecl] -> [String] -> ChainName -> ChainName -> IRExpr
+toInvExpr clauses adts boundVars startCN boundCN | traceShow boundCN False = undefined
+toInvExpr clauseSet adts boundVars startCN boundCN = wrappedInUnappliedLambdas
   where
     -- Find the bound variable of a lambda that is not already applied
     -- This needs to be done if the lambda is a variable, 
     -- in which case the lamba expression would not be a subexpression of the expression to invert
-    toInvCN = case findBoundVariable clauseSet startCN of
-      Just cn -> cn
-      Nothing -> error $ "Cannot find bound variable of expression: " ++ startCN
     -- We expect lambda variables of subexpression to later be bound by a lambda. We add them as parameters, because we expect them to be bound later
-    boundVars = getUnappliedLambdas clauseSet startCN \\ [toInvCN]
+    innerBoundVars = getUnappliedLambdas clauseSet startCN \\ [boundCN]
     -- Add a clause without preconditions for parameters as a starting point
     -- Define the expression to invert as known. This is true by the definition of an inverse
-    paramClauses = map ParameterHornClause (startCN:boundVars)
+    paramClauses = map ParameterHornClause (startCN:innerBoundVars) -- ++ boundVars)
     -- If there are multiple paths towards the final parameter, we want to consider all paths for maximum information
     -- To do this we calculate the expression multiple times, but throw out all but one horn clause concluding to toInvCN
-    terminalGroups = getTerminalGroups clauseSet toInvCN
+    terminalGroups = getTerminalGroups clauseSet boundCN
+
+    isLambdaGroup ((ExprHornClause _ _ (LambdaInfo _) _):_) = True
+    isLambdaGroup _ = False
+    -- We do not want to use Lambda expressions when constructing the expression, because we assume all other lambdas to be deterministic
     intermediateSet = clauseSet \\ terminalGroups
     -- Create the expression that calculates toInvCN
-    valueExprs = mapMaybe (\term -> toValueExpr (term:intermediateSet) paramClauses adts toInvCN) terminalGroups
+    valueExprs = mapMaybe (\term -> toValueExpr (term:intermediateSet) paramClauses adts boundCN) terminalGroups
+    mergedExprs = mergeExpr valueExprs
+    wrappedInUnappliedLambdas = foldr IRLambda mergedExprs innerBoundVars
 
 getTerminalGroups :: [[HornClause]] -> ChainName -> [[HornClause]]
 getTerminalGroups clauses cn = filter (any ((== cn) . conclusion)) clauses
@@ -105,7 +131,7 @@ removeReduntantLets _ e = e
 
 -- Creates an expression, which returns the value of a point in the AST. Takes a list of AST points, which are considered to be of known value
 toValueExpr :: [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> Maybe IRExpr
---toValueExpr clauses paramClauses adts startCN | traceShow clauses False = undefined
+toValueExpr clauses paramClauses adts "y" | traceShow (paramClauses:clauses) False = undefined
 toValueExpr clauses paramClauses adts startCN =
   case findConcludingHornClause solvedClauses startCN of
     Just concludingClause -> do
@@ -151,11 +177,11 @@ hornClauseToIRExpr clauses adts clause =
       let renamedF = foldr (\(old, new) decl -> renameDecl old new decl) correctInv (zip (inputVars correctInv) preVars)
       body renamedF
     -- The "value" of a lambda expression is the value of its body
-    e@(ExprHornClause [preVar] _ (LambdaInfo _) 1) ->
+    e@(ExprHornClause [preVar] _ (LambdaInfo _) _) ->
       IRVar preVar
     -- Forward pass of an application is setting the bound variable of an underlying lambda to the bound value
     ExprHornClause [preLmb, preBound] conc (StubInfo StubApply) 0 -> do
-      let Just bound = findBoundVariable clauses preLmb
+      let Just (bound, _) = findBoundVariable clauses preLmb
       IRLetIn bound (IRVar preBound) (IRVar conc)
     -- The application expression has the value of the bound expression
     ExprHornClause [preExpr] conc (StubInfo StubApply) 1 -> do
@@ -183,16 +209,14 @@ findConcludingHornClause hcs cn =
 
 -- Finds the bound variable of the lambda the parameter ChainName is referencing
 -- Note that this needs to skip over already applied lambdas
-findBoundVariable :: HasCallStack => [[HornClause]] -> ChainName -> Maybe ChainName
+findBoundVariable :: HasCallStack => [[HornClause]] -> ChainName -> Maybe (String, ChainName)
 --findBoundVariable clauses cn | trace ("SEARCH "++ show cn) False = undefined
-findBoundVariable clauses cn = findBoundVariable' forwardClauses 0 cn <&> (++ suffix)
+findBoundVariable clauses = findBoundVariable' forwardClauses 0
   where
     -- Only forward clauses (inversion == 0) are relevant for this, because we dont want cycles in our graph of horn clauses
     -- Applied clauses are also relevant, because the lambda might be a variable applied elsewhere
     forwardClauses = getForwardClauses clauses ++ getAppliedClauses clauses
-    -- If chain name is tagged with a suffix, we need to tag the return with the same suffix
-    -- FIXME: If the varibale has a _ in it this does not work correctly
-    suffix = splitAfterLast "_c" cn
+
     -- Look at all suffixes, then take the ones that start with the split. Take the last one in the list, because it is the shortest suffix
     splitAfterLast split s = case filter (split `isPrefixOf`) (tails s) of
       [] -> ""
@@ -201,14 +225,15 @@ findBoundVariable clauses cn = findBoundVariable' forwardClauses 0 cn <&> (++ su
 -- Finds the lambda a parameter ChainName is referencing
 -- This also needs to skip over applied lambdas. Because applications must happen before a lambda, 
 -- keep track of the number of applications seen on the way and disregard that many lambdas
-findBoundVariable' :: HasCallStack => [HornClause] -> Int -> ChainName -> Maybe ChainName
+-- First return is the name of the bound variable, second is the ChainName of the lambda
+findBoundVariable' :: HasCallStack => [HornClause] -> Int -> ChainName -> Maybe (String, ChainName)
 --findBoundVariable' clauses applies name | trace (show name++ "|" ++ show applies) False = undefined
 findBoundVariable' clauses applies name =
   -- The next lambda is what we are looking for
   if applies == 0 then
     case currClauses of
       -- We found what we are looking for
-      (ExprHornClause _ _ (LambdaInfo n) _):_ -> Just n
+      (ExprHornClause _ cn (LambdaInfo n) _):_ -> Just (n, cn)
       -- Increase the number of applications to disregard the next lambda
       (ExprHornClause pre _ (StubInfo StubApply) _):_ -> firstJusts $ map (findBoundVariable' (clauses \\ headIfExists currClauses) (applies + 1)) pre
       -- Continue looking, but without the current clause. First with the same name, then with all possible next names
@@ -270,7 +295,7 @@ getUnappliedLambdas' allClauses clauses cn = case currClauses of
     let (inc, exc) = getUnappliedLambdas' allClauses (clauses \\ [c]) cn in
         -- Find the bound variable and add it to the applied return list
       case findBoundVariable allClauses n of
-        Just lambdaVar -> (inc, lambdaVar:exc)
+        Just (lambdaVar, _) -> (inc, lambdaVar:exc)
         Nothing -> (inc, exc)
   -- This is the clause for a lambda. Add its variable name to the candiate return list
   c@(ExprHornClause pre _ (LambdaInfo n) _):_ ->
@@ -285,10 +310,6 @@ getUnappliedLambdas' allClauses clauses cn = case currClauses of
     nextClauses = filter (\c -> (conclusion c == cn)) clauses
     -- All clauses, on the current level of the recursive descend
     currClauses = filter (elem cn . premises) clauses
-
-concatMap2 :: (a -> ([b], [c])) -> [a] -> ([b], [c])
-concatMap2 f xs = (concat as, concat bs)
-  where (as, bs) = unzip (map f xs)
 
 -- Convert a Program to a set of groups of Horn clauses
 progToHornClauses :: Program -> [[HornClause]]
@@ -351,7 +372,7 @@ augmentApplyClauseSet clauses = fixpoint aug clauses
 augmentApplyClauseSet' :: [[HornClause]] -> [HornClause] -> [HornClause]
 augmentApplyClauseSet' clauses (c@(ExprHornClause [l, v] cn (StubInfo StubApply) 0):_) =
   case findBoundVariable clauses l of
-    Just bound -> [ExprHornClause [v] bound AppliedInfo 0,
+    Just (bound, _) -> [ExprHornClause [v] bound AppliedInfo 0,
       ExprHornClause [bound] v AppliedInfo 1]
     Nothing -> []
 augmentApplyClauseSet' _ x = []
@@ -395,12 +416,13 @@ getInputChainNames e = map getChainName (getSubExprs e)
 
 -- Annotates a Program with chain names for every expression
 annotateProg :: Program -> Program
-annotateProg p@Program {functions=fs} = p{functions=correctTopLevel}
+annotateProg p@Program {functions=fs} = chainsToTagged
   -- Map annotateExpr on all functions. The code is ugly because of monad shenanigans
   where
     annotFs = evalSupply (mapM (\(n, f) -> annotateExpr f <&> \x -> (n, x)) fs)
     -- Sets the ChainName of the top level expression to the name of the top level expression
     correctTopLevel = map (\(n, f) -> (n, setTypeInfo f (setChainName (getTypeInfo f) n))) annotFs
+    chainsToTagged = tagChainsTo p{functions=correctTopLevel}
 
 -- Annotate an expression and all of its subexpressions
 annotateExpr :: Expr -> Supply Expr

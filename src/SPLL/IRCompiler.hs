@@ -35,7 +35,7 @@ type TypeEnv = [(String, (RType, Bool))]
 
 data CompilerMetadata = CompilerMetadata {
   compilerConfig :: CompilerConfig,
-  hornClauses :: [[HornClause]],
+  invTable :: [(ChainName, (String, IRExpr))],
   typeEnv :: TypeEnv,
   adtDecls :: [ADTDecl]
 }
@@ -68,8 +68,8 @@ envToIR conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb, noGenerat
     toProbDecl name expr =
       (expr, "Calculates the probability of the sample parameter being returned from the " ++ name ++ "function")
     toIntegDecl name expr = (expr, "Calculates the probability of sample of " ++ name ++ " falling in between the parameters low and high")
-    clauses = progToHornClauses p
-    meta typeEnv = CompilerMetadata conf clauses typeEnv adts
+    invTable = buildInversionTable adts p
+    meta typeEnv = CompilerMetadata conf invTable typeEnv adts
 
 
 runCompile :: CompilerMetadata -> CompilerMonad CompilationResult -> IRExpr
@@ -326,24 +326,25 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample | pType (get
       else
         return (IRTFst (IRVar retVal), IRTSnd (IRVar retVal), const0)
 -- Probabilistic bound expression
-toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo v) == Prob || pType (getTypeInfo v) == Integrate = do
+toIRInference meta cumulative (Apply ti@TypeInfo{rType=rt} l v) sample | pType (getTypeInfo v) == Prob || pType (getTypeInfo v) == Integrate = do
   -- This is the probabilistic inference of a known, deterministic lambda with a probabilistic parameter
   -- The inference looks like this: p(l(v) == sample) = p(l^-1(sample) == v)
   -- The inverse can not be created using recursive descend, therefor we use forward chaining for the inverse only
   -- Chain name of the callable
-  let clauses = hornClauses meta
   let adts = adtDecls meta
-  let lChainName = chainName (getTypeInfo l)
+  let Just lChainName = traceShowId $ getChainsToTag ti
+  let Just (boundVar, invExpr) = lookup lChainName (traceShowId $ invTable meta)
   -- Inverse of the callable as a lambda
-  let lInv = IRLambda lChainName (toInvExpr clauses adts lChainName)
+  let lInv = traceShowId $ IRLambda lChainName invExpr
   -- Apply the sample to the inverse
   let appliedSample = IRInvoke (IRApply lInv sample)
   -- Do probabilistic inference using the applied inverse
-  (p, d, bc) <- toIRInference meta cumulative v appliedSample
+  {-(p, d, bc) <- -}
+  toIRInference meta cumulative v appliedSample
   -- Forward chaining may have messed with the structure of the expression. We may have too many or too few lambdas.
   -- Every lambda, which is not applied, inside of the callable should be present in the retuned IRExpr. 
   -- Exclude the lambda, which is applied here and all lambdas, which are already present
-  let Just lBound = findBoundVariable clauses lChainName
+  {-let Just lBound = findBoundVariable clauses lChainName
   let freeVars = (getUnappliedLambdas clauses lChainName \\ [lBound]) \\ findLambdaVars p
   let wrapInLambdas ex = foldr IRLambda ex freeVars
   -- If the parameter is a lambda, the return value here is a lambda.
@@ -356,10 +357,7 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample | pType (get
           else 
             (IRTFst ret, IRTSnd ret, const0)
         _ -> (p, d, bc)
-  -- If the result is a function, we must wrap the return into a tuple
-  case rt of
-    TArrow _ _ -> return (wrapInLambdas (if countBranches (compilerConfig meta) then IRTCons retP (IRTCons retD retBC) else IRTCons retP retD), const0, const0)
-    _ -> return (wrapInLambdas retP, wrapInLambdas retD, wrapInLambdas retBC)
+  -- If the result is a function, we must wrap the return into a tuple-}
   
 toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample = error "This instance of apply is not yet implemented"
 toIRInference meta cumulative (Cons _ hdExpr tlExpr) sample = do
@@ -453,7 +451,7 @@ toIRInference meta cumulative (InjF _ name params) sample | isHigherOrder (adtDe
   let probF = if decons then toIRInferenceSave else toIRInference
   -- Create all inverses of the ho functions and save them on the variable stack
   -- Then create a substitution that substitutes f^-1 to f_prob. All substitutions are then composed in the fold
-  renVar <- foldM (\sub tup -> createHOInverse (hornClauses meta) adts tup <&> (.) sub) id (zip fVars fs)
+  renVar <- foldM (\sub tup -> createHOInverse meta adts tup <&> (.) sub) id (zip fVars fs)
   (paramExpr, paramDim, paramBranches) <- probF meta cumulative a invExpr
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
   let scale x = if not cumulative 
@@ -593,10 +591,11 @@ subP (aM, aDim) (bM, bDim) = do
          (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar dimVarB)
          (IRVar dimVarA)))))
 
-createHOInverse :: [[HornClause]] -> [ADTDecl]-> (String, Expr) -> CompilerMonad (IRExpr -> IRExpr)
-createHOInverse clauses adts (fVar, f) = do
-  let inverseF = toInvExpr clauses adts (chainName $ getTypeInfo f)
-  let inverseLambda = IRLambda (chainName $ getTypeInfo f) inverseF
+createHOInverse :: CompilerMetadata -> [ADTDecl]-> (String, Expr) -> CompilerMonad (IRExpr -> IRExpr)
+createHOInverse meta adts (fVar, f) = do
+  let fCN = chainName (getTypeInfo f)
+  let Just (boundVar, inverseF) = lookup fCN (invTable meta)
+  let inverseLambda = IRLambda fCN inverseF
   -- Rename all occurances of f^-1 from the definition to f_prob
   let renVar = renameVar (fVar ++ "^-1") (fVar ++ "_prob")
   setVariables [(fVar ++ "_prob", inverseLambda)]
@@ -647,7 +646,11 @@ applyLambdas clauses adts expr = expr
 findLambdaVars :: IRExpr -> [String]
 findLambdaVars (IRLambda n expr) = n:findLambdaVars expr
 findLambdaVars expr = concatMap findLambdaVars (getIRSubExprs expr)
-  
+
+hasMoreArrows :: RType -> RType -> Bool
+hasMoreArrows (TArrow _ x1) (TArrow _ x2) = hasMoreArrows x1 x2
+hasMoreArrows (TArrow _ x1) _ = True
+hasMoreArrows _ _ = False
 
 indicator :: IRExpr -> CompilerMonad  IRExpr
 indicator condition = return $ IRIf condition (IRConst $ VFloat 1) (IRConst $ VFloat 0)

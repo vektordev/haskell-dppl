@@ -187,6 +187,7 @@ isVClosure _ = False
 data Tag = EnumRange (Value, Value)
            | EnumList [Value]
            | Alg InferenceRule
+           | ChainsTo ChainName
            deriving (Show, Eq)
            
 

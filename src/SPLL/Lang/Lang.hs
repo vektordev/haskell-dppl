@@ -38,6 +38,7 @@ module SPLL.Lang.Lang (
 , getFunctionNames
 , lookupNeural
 , printFlat
+, getChainsToTag
 ) where
 
 import SPLL.Lang.Types
@@ -421,6 +422,15 @@ getRType (VEither (Right a)) = TEither SPLL.Typing.RType.NotSetYet (getRType a)
 
 lookupNeural :: String -> [NeuralDecl] -> Maybe (RType, Maybe Tag)
 lookupNeural name decls = foldr (\(n, r, t) ret -> if n == name then Just (r, t) else ret) Nothing decls
+
+getChainsToTag :: TypeInfo -> Maybe ChainName
+getChainsToTag TypeInfo {tags=tgs} = case cns of
+  [cn] -> Just cn
+  _ -> Nothing
+  where
+    getChainsTo (ChainsTo cn) = Just cn
+    getChainsTo _ = Nothing
+    cns = mapMaybe getChainsTo tgs
 
 -- Returns explicit functions declared as well as implicit functions from ADTs
 getFunctionNames :: Program -> [String]
