@@ -65,13 +65,13 @@ tagChainsToExpr clauses (Apply ti l v) = ti{tags=ChainsTo foundLambdaCN:tags ti}
     Just (_, foundLambdaCN) = findBoundVariable clauses lambdaCN
 tagChainsToExpr _ x = getTypeInfo x
 
-
-buildInversionTable :: [ADTDecl] -> Program -> [(ChainName, (String, IRExpr))]
+-- Inversion table maps a chain name of the lamda declaration to: (Name of the bound variable, (Inversion of the lambda, CoV factor))
+buildInversionTable :: [ADTDecl] -> Program -> [(ChainName, (String, (IRExpr, IRExpr)))]
 buildInversionTable adts prog = concatMap (buildInversionTableExpr hornClauses adts [] . snd) (functions prog)
   where
     hornClauses = progToHornClauses prog
 
-buildInversionTableExpr :: [[HornClause]] -> [ADTDecl] -> [String] -> Expr -> [(ChainName, (String, IRExpr))]
+buildInversionTableExpr :: [[HornClause]] -> [ADTDecl] -> [String] -> Expr -> [(ChainName, (String, (IRExpr, IRExpr)))]
 buildInversionTableExpr clauses adts boundVars (Lambda TypeInfo{chainName=cn} bound body) = (cn, (bound, toInvExpr clauses adts boundVars cn bound)):buildInversionTableExpr clauses adts (bound:boundVars) body
 --buildInversionTableExpr clauses adts (Var TypeInfo{rType = TArrow _ _, chainName=cn} v) = 
 buildInversionTableExpr clauses adts boundVars x = concatMap (buildInversionTableExpr clauses adts boundVars) (getSubExprs x)
@@ -79,8 +79,8 @@ buildInversionTableExpr clauses adts boundVars x = concatMap (buildInversionTabl
 -- Takes all HornClauses of a Program and a point in the AST which should be inverted.
 -- The function then searches for a Lambda statement and inverses toward the bound variable
 -- Note that it deliberately skips over lambdas that are already applied
-toInvExpr :: [[HornClause]] -> [ADTDecl] -> [String] -> ChainName -> ChainName -> IRExpr
-toInvExpr clauses adts boundVars startCN boundCN | traceShow boundCN False = undefined
+toInvExpr :: [[HornClause]] -> [ADTDecl] -> [String] -> ChainName -> ChainName -> (IRExpr, IRExpr)
+--toInvExpr clauses adts boundVars startCN boundCN | traceShow boundCN False = undefined
 toInvExpr clauseSet adts boundVars startCN boundCN = wrappedInUnappliedLambdas
   where
     -- Find the bound variable of a lambda that is not already applied
@@ -101,8 +101,8 @@ toInvExpr clauseSet adts boundVars startCN boundCN = wrappedInUnappliedLambdas
     intermediateSet = clauseSet \\ terminalGroups
     -- Create the expression that calculates toInvCN
     valueExprs = mapMaybe (\term -> toValueExpr (term:intermediateSet) paramClauses adts boundCN) terminalGroups
-    mergedExprs = mergeExpr valueExprs
-    wrappedInUnappliedLambdas = foldr IRLambda mergedExprs innerBoundVars
+    (mergedExprs, mergedCoV) = mergeExpr valueExprs
+    wrappedInUnappliedLambdas = (foldr IRLambda mergedExprs innerBoundVars, foldr IRLambda mergedCoV innerBoundVars)
 
 getTerminalGroups :: [[HornClause]] -> ChainName -> [[HornClause]]
 getTerminalGroups clauses cn = filter (any ((== cn) . conclusion)) clauses
@@ -110,10 +110,12 @@ getTerminalGroups clauses cn = filter (any ((== cn) . conclusion)) clauses
 -- This takes a list of value expressions and merges then such that in tuple constructions a existing value overwrites an ANY.
 -- If two paths provide information for the same part of the tuple, we discard the second, because the should be semantically equal and therefor redundant
 -- We also assume that the different paths do not have cnflicting LetIns
-mergeExpr :: [IRExpr] -> IRExpr
+-- FIXME: Implement Gramian Matrix correctly, instead of multiplying all together
+mergeExpr :: [(IRExpr, IRExpr)] -> (IRExpr, IRExpr)
 mergeExpr [] = error "Cannot merge empty list of expressions"
 mergeExpr [x] = x
-mergeExpr (x:xs) = removeReduntantLets [] $ mergeExpr2 id x (mergeExpr xs)
+mergeExpr ((x, xCoV):xs) = (removeReduntantLets [] $ mergeExpr2 id x mergedX, IROp OpMult xCoV mergedCoV)
+  where (mergedX, mergedCoV) = mergeExpr xs
 
 mergeExpr2 :: (IRExpr -> IRExpr) -> IRExpr -> IRExpr -> IRExpr
 mergeExpr2 bindings (IRLetIn n v body) expr2 = mergeExpr2 (bindings . IRLetIn n v) body expr2
@@ -130,8 +132,9 @@ removeReduntantLets used (IRLetIn n v body) | n `notElem` used = IRLetIn n v (re
 removeReduntantLets _ e = e
 
 -- Creates an expression, which returns the value of a point in the AST. Takes a list of AST points, which are considered to be of known value
-toValueExpr :: [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> Maybe IRExpr
-toValueExpr clauses paramClauses adts "y" | traceShow (paramClauses:clauses) False = undefined
+-- First element is the expression, second is the CoV factor
+toValueExpr :: [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> Maybe (IRExpr, IRExpr)
+--toValueExpr clauses paramClauses adts "x" | traceShow (paramClauses:clauses) False = undefined
 toValueExpr clauses paramClauses adts startCN =
   case findConcludingHornClause solvedClauses startCN of
     Just concludingClause -> do
@@ -140,8 +143,9 @@ toValueExpr clauses paramClauses adts startCN =
       -- Also guarantees that the later generated letIns are in the correct order
       let sortedClauses = topSortDAG solvedClauses
       let relevantSortedClauses = cutList sortedClauses concludingClause
+      let deriv = derivativeOfPath adts relevantSortedClauses
       -- Generate code
-      Just $ toLetInBlock clauses adts relevantSortedClauses
+      Just $ (toLetInBlock clauses adts relevantSortedClauses, wrapInLetInBlock clauses adts relevantSortedClauses deriv)
     Nothing -> Nothing
   where
     augmentedClauseSet = map (:[]) paramClauses ++ clauses
@@ -151,11 +155,13 @@ toValueExpr clauses paramClauses adts startCN =
 -- Creates a block of code from a set of sorted horn clauses
 -- Generates the last horn clause as a return statement and wraps it in letIn statements created from the leading clauses
 toLetInBlock :: [[HornClause]] -> [ADTDecl] -> [HornClause] -> IRExpr
-toLetInBlock clauses adts (ParameterHornClause _:cs) = toLetInBlock clauses adts cs
-toLetInBlock clauses adts [c] = hornClauseToIRExpr clauses adts c
---toLetInBlock clauses adts ((ExprHornClause [preVar] _ (LambdaInfo _) 1):cs) = IRLambda preVar (toLetInBlock clauses adts cs)
-toLetInBlock clauses adts (c:cs) = IRLetIn (conclusion c) (hornClauseToIRExpr clauses adts c) (toLetInBlock clauses adts cs)
 toLetInBlock clauses adts [] = error "Cannot convert empty clause set to LetIn block"
+toLetInBlock clauses adts cs = wrapInLetInBlock clauses adts (init cs) (hornClauseToIRExpr clauses adts (last cs))
+
+wrapInLetInBlock :: [[HornClause]] -> [ADTDecl] -> [HornClause] -> IRExpr -> IRExpr
+wrapInLetInBlock clauses adts (ParameterHornClause _:cs) inner = wrapInLetInBlock clauses adts cs inner
+wrapInLetInBlock clauses adts (c:cs) inner = IRLetIn (conclusion c) (hornClauseToIRExpr clauses adts c) (wrapInLetInBlock clauses adts cs inner)
+wrapInLetInBlock clauses adts [] inner = inner
 
 
 -- Generates IRExpr from Horn clauses
@@ -352,6 +358,37 @@ injFtoHornClause adts e = case e of
       Just (FPair eFwd eInv) = lookup name (globalFEnv adts)
   _ -> error "Cannot get horn clause of non-predefined function"
 
+lambdasToHornClauses :: [Expr] -> [[HornClause]]
+lambdasToHornClauses = undefined
+
+type AssociationTable = [(ChainName, ChainName)]
+
+searchForNewlambdaHornClauses :: AssociationTable -> Expr -> AssociationTable
+-- If Apply has a lambda as its left side, then directly associate the it with the body of the lambda
+searchForNewlambdaHornClauses table (Apply aTi (Lambda lTi lVar lBody) val) =
+  case lookup (chainName aTi) table of
+    Nothing -> (chainName aTi, getChainName lBody):table
+    _ -> table
+-- If Apply has anything else on its left side, look whether that is associated with anything
+
+findExprWithCN :: [Expr] -> ChainName -> Expr
+findExprWithCN exprs cn = case mapMaybe (findExprWithCN' cn) exprs of
+  [e] -> e
+  [] -> error "Expression with given chain name not found"
+  _ -> error "Multiple expressions with the same chain name"
+
+findExprWithCN' :: ChainName -> Expr -> Maybe Expr
+findExprWithCN' cn expr | getChainName expr == cn = Just expr
+findExprWithCN' cn expr = msum $ map (findExprWithCN' cn) (getSubExprs expr)
+
+associateVariable :: AssociationTable -> [Expr] -> String -> ChainName -> Expr -> AssociationTable
+associateVariable table top var associateTo (Var TypeInfo{chainName=cn} name) | var == name = (cn, associateTo):table
+associateVariable table top var associateTo expr = do
+  let traverseSubs = foldr (\e table -> associateVariable table top var associateTo e) table (getSubExprs expr)
+  case lookup (getChainName expr) table of
+    Just chainsTo -> associateVariable traverseSubs top var associateTo (findExprWithCN top chainsTo)
+    Nothing -> traverseSubs
+
 -- Creates a Horn clause of an FDecl and substitutes the variables with a substition
 constructInjFHornClause :: [(String, ChainName)] -> ChainName -> String -> FDecl -> Int -> HornClause
 constructInjFHornClause subst cn name decl inv = ExprHornClause (map lookupSubst inV) (lookupSubst outV) (InjFInfo name) inv
@@ -377,38 +414,21 @@ augmentApplyClauseSet' clauses (c@(ExprHornClause [l, v] cn (StubInfo StubApply)
     Nothing -> []
 augmentApplyClauseSet' _ x = []
 
--- If functions are used multiple times, we need a separate set of clauses for the whole function for every application
--- WE do this by looking at the applications and duplicate all dependant clauses with a fresh tag
-augmentFreshApplicationsClauseSet :: [[HornClause]] -> Supply [[HornClause]]
-augmentFreshApplicationsClauseSet clauses = mapM (augmentFreshApplicationsClauseSet' sortedClauses) sortedClauses <&> concat
-  where sortedClauses = reverse $ topSortDAG clauses
+-- TODO: This assumes that derivativs are composable, which (I think) is not true in general
+derivativeOfPath :: [ADTDecl] -> [HornClause] -> IRExpr
+derivativeOfPath adts clauses = foldr1 (IROp OpMult) derivs
+  where derivs = map (derivativeOfHornClause adts) clauses
 
-augmentFreshApplicationsClauseSet' :: [[HornClause]] -> [HornClause] -> Supply [[HornClause]]
-augmentFreshApplicationsClauseSet' clauses (cs@((ExprHornClause [l, v] cn (StubInfo StubApply) 0):_)) = do
-  uid <- demandUniqueNumber
-  let suffix = "_c" ++ show uid
-  let taggedGroups = map (rename l (l ++ suffix)) cs : tagGroups suffix (getDependantGroups clauses l)
-  -- Augment the newly found groups. Note that this takes all prior clauses and the newly added clauses. This contians clauses, which are deprecated, but those should not be used
-  augemntedNewGroups <- mapM (augmentFreshApplicationsClauseSet' (taggedGroups ++ clauses)) (tail taggedGroups)
-  return $ head taggedGroups : concat augemntedNewGroups
-  where rename old new c = case c of
-          ParameterHornClause {} -> c
-          ExprHornClause p c info inv -> ExprHornClause (map (\x -> if x == old then new else x) p) (if c == old then new else c) info inv
-augmentFreshApplicationsClauseSet' _ x = return [x]
-
-getDependantGroups :: [[HornClause]] -> ChainName -> [[HornClause]]
-getDependantGroups clauses cn = directDependance ++ indirectDependance
-  where
-    directDependance = filter (any (\c -> (conclusion c == cn) && not (isAppliedInfo (exprInfo c)) && (inversion c == 0))) clauses
-    directDependantCNs = concatMap (map conclusion . filter (\c -> inversion c /= 0 && not (isAppliedInfo (exprInfo c)))) directDependance
-    indirectDependance = concatMap (getDependantGroups clauses) directDependantCNs
-
-tagGroups :: String -> [[HornClause]] -> [[HornClause]]
-tagGroups tag = map (map tagClause)
-  where
-    tagClause c = case c of
-      ParameterHornClause {} -> error "Cannot tag ParameterHornClause"
-      ExprHornClause p c info inv -> ExprHornClause (map (++ tag) p) (c ++ tag) info inv
+derivativeOfHornClause :: [ADTDecl] -> HornClause -> IRExpr
+derivativeOfHornClause adts (ExprHornClause pre conc (InjFInfo name) inv) | inv > 0 = do
+  let FPair injFFwdDecl injFInvDecls = fromJust $ lookup name (globalFEnv adts)
+  let correctDecl = injFInvDecls !! (inv - 1)
+  -- The premises of the of the HornClause are the input of the inverse InjF
+  let FDecl {derivatives=invDerivs} = foldr (\(old, new) decl -> renameDecl old new decl) correctDecl (zip (inputVars correctDecl) pre)
+  -- We need to find out which variable is the output of the forward InjF. For this take the fwd InjF and do the same renaming as for the inverse
+  let FDecl {outputVars=[invVar]} = foldr (\(old, new) decl -> renameDecl old new decl) injFFwdDecl (zip (inputVars correctDecl) pre)
+  fromJust $ lookup invVar invDerivs
+derivativeOfHornClause _ _ = IRConst (VFloat 1.0)
 
 -- Chain name of subexpressions
 getInputChainNames :: Expr -> [ChainName]

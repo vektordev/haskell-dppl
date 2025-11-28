@@ -35,7 +35,7 @@ type TypeEnv = [(String, (RType, Bool))]
 
 data CompilerMetadata = CompilerMetadata {
   compilerConfig :: CompilerConfig,
-  invTable :: [(ChainName, (String, IRExpr))],
+  invTable :: [(ChainName, (String, (IRExpr, IRExpr)))],
   typeEnv :: TypeEnv,
   adtDecls :: [ADTDecl]
 }
@@ -332,15 +332,19 @@ toIRInference meta cumulative (Apply ti@TypeInfo{rType=rt} l v) sample | pType (
   -- The inverse can not be created using recursive descend, therefor we use forward chaining for the inverse only
   -- Chain name of the callable
   let adts = adtDecls meta
-  let Just lChainName = traceShowId $ getChainsToTag ti
-  let Just (boundVar, invExpr) = lookup lChainName (traceShowId $ invTable meta)
+  let Just lChainName = getChainsToTag ti
+  let Just (boundVar, (invExpr, invCoV)) = lookup lChainName (invTable meta)
   -- Inverse of the callable as a lambda
-  let lInv = traceShowId $ IRLambda lChainName invExpr
+  let lInv = IRLambda lChainName invExpr
   -- Apply the sample to the inverse
   let appliedSample = IRInvoke (IRApply lInv sample)
   -- Do probabilistic inference using the applied inverse
   {-(p, d, bc) <- -}
-  toIRInference meta cumulative v appliedSample
+  (p, dim, bc) <- toIRInference meta cumulative v appliedSample
+  let scale x = if not cumulative 
+                  then IROp OpMult x (IRIf (IROp OpEq dim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invCoV)) 
+                  else IRIf (IROp OpGreaterThan invCoV const0) x (IROp OpSub (IRConst (VFloat 1)) x)
+  return (scale p, dim, bc)
   -- Forward chaining may have messed with the structure of the expression. We may have too many or too few lambdas.
   -- Every lambda, which is not applied, inside of the callable should be present in the retuned IRExpr. 
   -- Exclude the lambda, which is applied here and all lambdas, which are already present
@@ -594,7 +598,7 @@ subP (aM, aDim) (bM, bDim) = do
 createHOInverse :: CompilerMetadata -> [ADTDecl]-> (String, Expr) -> CompilerMonad (IRExpr -> IRExpr)
 createHOInverse meta adts (fVar, f) = do
   let fCN = chainName (getTypeInfo f)
-  let Just (boundVar, inverseF) = lookup fCN (invTable meta)
+  let Just (boundVar, (inverseF, inverseCoV)) = lookup fCN (invTable meta)
   let inverseLambda = IRLambda fCN inverseF
   -- Rename all occurances of f^-1 from the definition to f_prob
   let renVar = renameVar (fVar ++ "^-1") (fVar ++ "_prob")
@@ -637,11 +641,6 @@ packParamsIntoLetinsProb :: [String] -> [Expr] -> IRExpr -> IRExpr -> Supply IRE
 --  return $ IRLetIn v sample e --TODO sample austauschen durch teil von sample falls multivariable
 packParamsIntoLetinsProb [v] [p] expr sample = do
   return $ IRLetIn v sample expr    --FIXME sample to auch toIRProbt werden
-
-applyLambdas :: [[HornClause]] -> [ADTDecl] -> IRExpr -> IRExpr
-applyLambdas clauses adts (IRLambda n expr) = IRApply (IRLambda n (applyLambdas clauses adts expr)) val
-  where Just val = toValueExpr clauses [] adts n
-applyLambdas clauses adts expr = expr
 
 findLambdaVars :: IRExpr -> [String]
 findLambdaVars (IRLambda n expr) = n:findLambdaVars expr
