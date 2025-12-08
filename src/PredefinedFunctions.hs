@@ -277,7 +277,7 @@ fPairsFromADTConstructor adtName constr@(constrName, fields) = (constrName, FPai
     fwdConstr = FDecl (Forall [] constrRT) fieldNames' ["b"] (IRInvoke applicationExpr) (IRConst $ VBool True) False derivs
     rtOfField f = fromJust $ lookup f fields
     -- FIXME Probably chekc whether parameter is indeed of this constructor in applicability test
-    invConstr f = FDecl (Forall [] (adtRT `TArrow` rtOfField f)) ["b"] ["f_" ++ f] (IRInvoke $ IRApply (IRVar f) (IRVar "b")) (IRConst $ VBool True) True [(f, IRConst $ VFloat 1)]
+    invConstr f = FDecl (Forall [] (adtRT `TArrow` rtOfField f)) ["b"] ["f_" ++ f] (IRInvoke $ IRApply (IRVar f) (IRVar "b")) (IRConst $ VBool True) True [("b", IRConst $ VFloat 1)]
 
 fPairFromADTField :: RType -> ADTConstructorDecl -> (String, RType) -> (String, FPair)
 fPairFromADTField adtRT constr (fieldName, fieldRT) = (fieldName, FPair fwd [inv])

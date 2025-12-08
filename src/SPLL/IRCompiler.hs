@@ -35,7 +35,7 @@ type TypeEnv = [(String, (RType, Bool))]
 
 data CompilerMetadata = CompilerMetadata {
   compilerConfig :: CompilerConfig,
-  hornClauses :: [[HornClause]],
+  fcData :: FCData,
   typeEnv :: TypeEnv,
   adtDecls :: [ADTDecl]
 }
@@ -68,8 +68,8 @@ envToIR conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb, noGenerat
     toProbDecl name expr =
       (expr, "Calculates the probability of the sample parameter being returned from the " ++ name ++ "function")
     toIntegDecl name expr = (expr, "Calculates the probability of sample of " ++ name ++ " falling in between the parameters low and high")
-    clauses = progToHornClauses p
-    meta typeEnv = CompilerMetadata conf clauses typeEnv adts
+    fcDat = progToFCData p
+    meta typeEnv = CompilerMetadata conf fcDat typeEnv adts
 
 
 runCompile :: CompilerMetadata -> CompilerMonad CompilationResult -> IRExpr
@@ -326,24 +326,43 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample | pType (get
       else
         return (IRTFst (IRVar retVal), IRTSnd (IRVar retVal), const0)
 -- Probabilistic bound expression
-toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo v) == Prob || pType (getTypeInfo v) == Integrate = do
+toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=aChainName} l v) sample | isTArrow (rType(getTypeInfo v)) && pType (getTypeInfo v) == Prob || pType (getTypeInfo v) == Integrate = do
+  lIR <- toIRGenerate meta l
+  (vIR, _, _) <- toIRInference meta cumulative v sample
+  let applied = IRInvoke $ IRApply lIR vIR
+  if countBranches (compilerConfig meta) then
+    return (IRTFst applied, IRTFst (IRTSnd applied), IRTSnd (IRTSnd applied))
+  else
+    return (IRTFst applied, IRTSnd applied, const0)
+  where 
+    isTArrow (TArrow _ _) = True
+    isTArrow _ = False
+toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=aChainName} l v) sample | pType (getTypeInfo v) == Prob || pType (getTypeInfo v) == Integrate = do
   -- This is the probabilistic inference of a known, deterministic lambda with a probabilistic parameter
   -- The inference looks like this: p(l(v) == sample) = p(l^-1(sample) == v)
   -- The inverse can not be created using recursive descend, therefor we use forward chaining for the inverse only
   -- Chain name of the callable
-  let clauses = hornClauses meta
+  let clauses = fcData meta
   let adts = adtDecls meta
   let lChainName = chainName (getTypeInfo l)
+  -- The FC algorith uses the body of the lambda as a starting point. This is no problem, because the body of the lamdbda is always equivalent to this apply
+  let LambdaInfo _ lBodyCN = findEquivalentLambda (fcData meta) lChainName
   -- Inverse of the callable as a lambda
-  let lInv = IRLambda lChainName (toInvExpr clauses adts lChainName)
+  let (invExprP, invExprCoV) = toInvExpr clauses adts lChainName
+  let lInv = IRLambda lBodyCN invExprP
   -- Apply the sample to the inverse
   let appliedSample = IRInvoke (IRApply lInv sample)
   -- Do probabilistic inference using the applied inverse
-  (p, d, bc) <- toIRInference meta cumulative v appliedSample
+  (p, dim, bc) <- toIRInference meta cumulative v appliedSample
+
+  let scale x = if not cumulative 
+                  then IROp OpMult x (IRIf (IROp OpEq dim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invExprCoV)) 
+                  else IRIf (IROp OpGreaterThan invExprCoV const0) x (IROp OpSub (IRConst (VFloat 1)) x)
+  return (scale p, dim, bc)
   -- Forward chaining may have messed with the structure of the expression. We may have too many or too few lambdas.
   -- Every lambda, which is not applied, inside of the callable should be present in the retuned IRExpr. 
   -- Exclude the lambda, which is applied here and all lambdas, which are already present
-  let Just lBound = findBoundVariable clauses lChainName
+  {-let Just lBound = findBoundVariable clauses lChainName
   let freeVars = (getUnappliedLambdas clauses lChainName \\ [lBound]) \\ findLambdaVars p
   let wrapInLambdas ex = foldr IRLambda ex freeVars
   -- If the parameter is a lambda, the return value here is a lambda.
@@ -359,7 +378,7 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample | pType (get
   -- If the result is a function, we must wrap the return into a tuple
   case rt of
     TArrow _ _ -> return (wrapInLambdas (if countBranches (compilerConfig meta) then IRTCons retP (IRTCons retD retBC) else IRTCons retP retD), const0, const0)
-    _ -> return (wrapInLambdas retP, wrapInLambdas retD, wrapInLambdas retBC)
+    _ -> return (wrapInLambdas retP, wrapInLambdas retD, wrapInLambdas retBC)-}
   
 toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample = error "This instance of apply is not yet implemented"
 toIRInference meta cumulative (Cons _ hdExpr tlExpr) sample = do
@@ -453,7 +472,7 @@ toIRInference meta cumulative (InjF _ name params) sample | isHigherOrder (adtDe
   let probF = if decons then toIRInferenceSave else toIRInference
   -- Create all inverses of the ho functions and save them on the variable stack
   -- Then create a substitution that substitutes f^-1 to f_prob. All substitutions are then composed in the fold
-  renVar <- foldM (\sub tup -> createHOInverse (hornClauses meta) adts tup <&> (.) sub) id (zip fVars fs)
+  renVar <- foldM (\sub tup -> createHOInverse (fcData meta) adts tup <&> (.) sub) id (zip fVars fs)
   (paramExpr, paramDim, paramBranches) <- probF meta cumulative a invExpr
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
   let scale x = if not cumulative 
@@ -593,10 +612,11 @@ subP (aM, aDim) (bM, bDim) = do
          (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar dimVarB)
          (IRVar dimVarA)))))
 
-createHOInverse :: [[HornClause]] -> [ADTDecl]-> (String, Expr) -> CompilerMonad (IRExpr -> IRExpr)
-createHOInverse clauses adts (fVar, f) = do
-  let inverseF = toInvExpr clauses adts (chainName $ getTypeInfo f)
-  let inverseLambda = IRLambda (chainName $ getTypeInfo f) inverseF
+createHOInverse :: FCData -> [ADTDecl]-> (String, Expr) -> CompilerMonad (IRExpr -> IRExpr)
+createHOInverse fcData adts (fVar, f) = do
+  let (inverseF, _) = toInvExpr fcData adts (chainName $ getTypeInfo f)
+  let LambdaInfo _ lBodyChainName = findEquivalentLambda fcData (chainName $ getTypeInfo f)
+  let inverseLambda = IRLambda lBodyChainName inverseF
   -- Rename all occurances of f^-1 from the definition to f_prob
   let renVar = renameVar (fVar ++ "^-1") (fVar ++ "_prob")
   setVariables [(fVar ++ "_prob", inverseLambda)]
@@ -638,11 +658,6 @@ packParamsIntoLetinsProb :: [String] -> [Expr] -> IRExpr -> IRExpr -> Supply IRE
 --  return $ IRLetIn v sample e --TODO sample austauschen durch teil von sample falls multivariable
 packParamsIntoLetinsProb [v] [p] expr sample = do
   return $ IRLetIn v sample expr    --FIXME sample to auch toIRProbt werden
-
-applyLambdas :: [[HornClause]] -> [ADTDecl] -> IRExpr -> IRExpr
-applyLambdas clauses adts (IRLambda n expr) = IRApply (IRLambda n (applyLambdas clauses adts expr)) val
-  where Just val = toValueExpr clauses [] adts n
-applyLambdas clauses adts expr = expr
 
 findLambdaVars :: IRExpr -> [String]
 findLambdaVars (IRLambda n expr) = n:findLambdaVars expr
