@@ -326,14 +326,15 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample | pType (get
       else
         return (IRTFst (IRVar retVal), IRTSnd (IRVar retVal), const0)
 -- Probabilistic bound expression
-toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=aChainName} l v) sample | isTArrow (rType(getTypeInfo v)) && pType (getTypeInfo v) == Prob || pType (getTypeInfo v) == Integrate = do
+toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=aChainName} l v) sample | isTArrow (rType(getTypeInfo v)) && (pType (getTypeInfo v) == Prob || pType (getTypeInfo v) == Integrate) = do
   lIR <- toIRGenerate meta l
   (vIR, _, _) <- toIRInference meta cumulative v sample
-  let applied = IRInvoke $ IRApply lIR vIR
+  applied <- mkVariable "call"
+  setVariables [(applied, IRInvoke $ IRApply lIR vIR)]
   if countBranches (compilerConfig meta) then
-    return (IRTFst applied, IRTFst (IRTSnd applied), IRTSnd (IRTSnd applied))
+    return (IRTFst (IRVar applied), IRTFst (IRTSnd (IRVar applied)), IRTSnd (IRTSnd (IRVar applied)))
   else
-    return (IRTFst applied, IRTSnd applied, const0)
+    return (IRTFst (IRVar applied), IRTSnd (IRVar applied), const0)
   where 
     isTArrow (TArrow _ _) = True
     isTArrow _ = False
