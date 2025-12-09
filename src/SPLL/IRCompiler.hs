@@ -348,18 +348,29 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=aChainName} l 
   let lChainName = chainName (getTypeInfo l)
   -- The FC algorith uses the body of the lambda as a starting point. This is no problem, because the body of the lamdbda is always equivalent to this apply
   let LambdaInfo _ lBodyCN = findEquivalentLambda (fcData meta) lChainName
+  
+  -- This logic is here to wrap the expression back into lambdas if the lambda we look at returns a lambda
+  let LambdaInfo toInvCN lambdaBodyCN = findEquivalentLambda (fcData meta) lChainName
+  let (boundVar, lambdaVars) = unwrapLambdas (fcData meta) lambdaBodyCN
+  let wrapInLambdas ex = foldr IRLambda ex lambdaVars
+
   -- Inverse of the callable as a lambda
   let (invExprP, invExprCoV) = toInvExpr clauses adts lChainName
-  let lInv = IRLambda lBodyCN invExprP
+  let lInv = IRLambda boundVar invExprP
   -- Apply the sample to the inverse
   let appliedSample = IRInvoke (IRApply lInv sample)
   -- Do probabilistic inference using the applied inverse
   (p, dim, bc) <- toIRInference meta cumulative v appliedSample
 
+  
+  
+
   let scale x = if not cumulative 
                   then IROp OpMult x (IRIf (IROp OpEq dim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invExprCoV)) 
                   else IRIf (IROp OpGreaterThan invExprCoV const0) x (IROp OpSub (IRConst (VFloat 1)) x)
-  return (scale p, dim, bc)
+  case rt of
+    TArrow _ _ -> return (if countBranches (compilerConfig meta) then wrapInLambdas (IRTCons (scale p) (IRTCons dim bc)) else wrapInLambdas (IRTCons (scale p) dim), const0, const0)
+    _ -> return (wrapInLambdas $ scale p, wrapInLambdas dim, wrapInLambdas bc)
   -- Forward chaining may have messed with the structure of the expression. We may have too many or too few lambdas.
   -- Every lambda, which is not applied, inside of the callable should be present in the retuned IRExpr. 
   -- Exclude the lambda, which is applied here and all lambdas, which are already present

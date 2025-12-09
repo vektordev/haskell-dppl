@@ -69,7 +69,7 @@ isEquivalenceHornClause _ = False
 -- Note that it deliberately skips over lambdas that are already applied
 toInvExpr :: FCData -> [ADTDecl] -> ChainName -> (IRExpr, IRExpr)
 --toInvExpr clauses adts startCN | traceShow startCN False = undefined
-toInvExpr fcData adts lambdaCN = mergeExpr valueExprs
+toInvExpr fcData adts lambdaCN = (mergedM, mergedCoV)
   where
     clauseSet = hornClauses fcData
     -- Find the bound variable of a lambda that is not already applied
@@ -86,11 +86,20 @@ toInvExpr fcData adts lambdaCN = mergeExpr valueExprs
     -- If there are multiple paths towards the final parameter, we want to consider all paths for maximum information
     -- To do this we calculate the expression multiple times, but throw out all but one horn clause concluding to toInvCN-}
     LambdaInfo toInvCN lambdaBodyCN = findEquivalentLambda fcData lambdaCN
-    paramClause = ParameterHornClause lambdaBodyCN
+    (unwrappedChainName, lambdaVars) = unwrapLambdas fcData lambdaBodyCN
+    paramClause = ParameterHornClause unwrappedChainName
     terminalGroups = getTerminalGroups clauseSet toInvCN
     intermediateSet = clauseSet \\ terminalGroups
     -- Create the expression that calculates toInvCN
     valueExprs = mapMaybe (\term -> toValueExpr (term:intermediateSet) [paramClause] adts toInvCN) terminalGroups
+    (mergedM, mergedCoV) = mergeExpr valueExprs
+
+
+unwrapLambdas :: FCData -> ChainName -> (ChainName, [String])
+unwrapLambdas fcData cn = case lookup cn (chainNameInfo fcData) of
+  Just (LambdaInfo name bodyName) -> 
+    let (lCN, names) = unwrapLambdas fcData bodyName in (lCN, name:names)
+  Just _ -> (cn, [])
 
 getTerminalGroups :: [[HornClause]] -> ChainName -> [[HornClause]]
 getTerminalGroups clauses cn = filter (any ((== cn) . conclusion)) clauses
