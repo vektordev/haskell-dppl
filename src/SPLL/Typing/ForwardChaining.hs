@@ -29,6 +29,7 @@ data ExprInfo = StubInfo ExprStub   -- Generic Expression without additional Inf
               | InjFInfo String     -- InjF with the name of the InjF
               | LambdaInfo String ChainName  -- Lambda with the name of the bound variable and the ChainName of the body
               | ConstantInfo Value  -- Contant with the value
+              | VarInfo String
               | AppliedInfo         -- Does not directly correlate to an expression. Via application a value is assigned to a bound variable
               deriving (Eq, Show)
 
@@ -85,7 +86,8 @@ toInvExpr fcData adts lambdaCN = (mergedM, mergedCoV)
     
     -- If there are multiple paths towards the final parameter, we want to consider all paths for maximum information
     -- To do this we calculate the expression multiple times, but throw out all but one horn clause concluding to toInvCN-}
-    LambdaInfo toInvCN lambdaBodyCN = findEquivalentLambda fcData lambdaCN
+    LambdaInfo toInvVarName lambdaBodyCN = findEquivalentLambda fcData lambdaCN
+    toInvCN = findChainNameForVar fcData toInvVarName
     (unwrappedChainName, lambdaVars) = unwrapLambdas fcData lambdaBodyCN
     paramClause = ParameterHornClause unwrappedChainName
     terminalGroups = getTerminalGroups clauseSet toInvCN
@@ -94,6 +96,15 @@ toInvExpr fcData adts lambdaCN = (mergedM, mergedCoV)
     valueExprs = mapMaybe (\term -> toValueExpr (term:intermediateSet) [paramClause] adts toInvCN) terminalGroups
     (mergedM, mergedCoV) = mergeExpr valueExprs
 
+findChainNameForVar :: FCData -> String -> ChainName
+findChainNameForVar fcData varName = case correctVarInfos of
+  [(cn, _)] -> cn
+  [] -> error "Could not find variable " ++ varName ++ " in FC data"
+  _ -> error "Multiple occurances of  " ++ varName ++ " in FC data"
+  where
+    correctVarInfos = filter (isCorrectVarInfo varName . snd) (chainNameInfo fcData)
+    isCorrectVarInfo name (VarInfo n) | name == n = True
+    isCorrectVarInfo _ _ = False
 
 unwrapLambdas :: FCData -> ChainName -> (ChainName, [String])
 unwrapLambdas fcData cn = case lookup cn (chainNameInfo fcData) of
@@ -350,6 +361,7 @@ progToChainNameInfo Program{functions=fs} = concatMap (exprToChainNameInfo . snd
 exprToChainNameInfo :: Expr -> [(ChainName, ExprInfo)]
 exprToChainNameInfo (Lambda TypeInfo{chainName=cn} n b) = (cn, LambdaInfo n (getChainName b)):exprToChainNameInfo b
 exprToChainNameInfo (Constant TypeInfo{chainName=cn} v) = [(cn, ConstantInfo v)]
+exprToChainNameInfo (Var TypeInfo{chainName=cn} n) = [(cn, VarInfo n)]
 exprToChainNameInfo e = (getChainName e, StubInfo (toStub e)):concatMap exprToChainNameInfo (getSubExprs e)
 
 -- Convert a Program to a set of groups of Horn clauses
@@ -358,7 +370,7 @@ progToHornClauses Program{functions=fs, adts=adts} = equivClauses ++ initialRun
   where
     -- We need two runs for this: first run is every expression converted into a group of Horn clauses
     initialRun = concatMap (exprToHornClauses adts . snd) fs
-    equivClauses = lambdasToHornClauses (map snd fs)
+    equivClauses = lambdasToHornClauses fs
     -- Second run is augmenting the clause set with fresh copies of clauses for every application
     --freshFs = evalSupply (augmentFreshApplicationsClauseSet initialRun)
 
@@ -407,16 +419,19 @@ getEquivCN clauses cn = back
     equiv = filter isEquivalenceHornClause (map head clauses)
     EquivalenceHornClause _ back _ _ = head $ (filter (\(EquivalenceHornClause [pre] _ _ _) -> pre == cn)) equiv
 
-lambdasToHornClauses :: [Expr] -> [[HornClause]]
+lambdasToHornClauses :: [FnDecl] -> [[HornClause]]
 lambdasToHornClauses exprs = map (\(a, (b, et)) -> [EquivalenceHornClause [a] b et 0, EquivalenceHornClause [b] a et 1]) table
   where table = fixpointAssociationTable exprs
 
 type AssociationTable = [(ChainName, (ChainName, EquivalenceType))]
 
 -- TODO: remove the nub and fix the implementation to not produce duplicates
-fixpointAssociationTable :: [Expr] -> AssociationTable
-fixpointAssociationTable exprs = nub $ fixpoint []
+fixpointAssociationTable :: [FnDecl] -> AssociationTable
+fixpointAssociationTable fnDecls = nub $ fixpoint initialTable
   where 
+    exprs = map snd fnDecls
+    -- Map each topLevel function to their variables
+    initialTable = []
     runOnce table = foldr (flip (iterateAssociationTable exprs)) table exprs
     fixpoint t = let run = runOnce t in if run == t then t else fixpoint run
 
@@ -472,9 +487,9 @@ annotateProg p@Program {functions=fs} = p{functions=correctTopLevel}
 annotateExpr :: Expr -> Supply Expr
 annotateExpr = tMapM (\ex -> do
   case ex of
-    Var TypeInfo{rType=(TArrow _ _)} n -> demandUniqueNumber <&> ("ast" ++) . show <&> setChainName (getTypeInfo ex)
+    --Var TypeInfo{rType=(TArrow _ _)} n -> demandUniqueNumber <&> ("ast" ++) . show <&> setChainName (getTypeInfo ex)
     -- Variables have itself as its ChainName
-    Var t n -> return $ setChainName t n
+    --Var t n -> return $ setChainName t n
     _ -> demandUniqueNumber <&> ("ast" ++) . show <&> setChainName (getTypeInfo ex)
   )
 
