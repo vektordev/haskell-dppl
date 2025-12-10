@@ -198,17 +198,16 @@ hornClauseToIRExpr clauses adts clause =
     -- The application expression has the value of the bound expression
     ExprHornClause [preExpr] conc (StubInfo StubApply) 1 -> do
       IRVar preExpr
-    -- The inverse Tuple expressions are fst and snd
-    ExprHornClause [preExpr] conc (StubInfo StubTCons) 1 -> do
-      IRTFst (IRVar preExpr)
-    ExprHornClause [preExpr] conc (StubInfo StubTCons) 2 -> do
-      IRTSnd (IRVar preExpr)
     -- Outside of the normal scope of inversions, therefor a negative inversion number
     -- If a value was applied to a bound variable, that bound variable is the applied value
     ExprHornClause [applied] _ AppliedInfo _ -> do
       IRVar applied
     -- Expect parameters to be known
     -}
+    ExprHornClause [preExpr] conc (StubInfo StubTCons) 1 -> do
+      IRTFst (IRVar preExpr)
+    ExprHornClause [preExpr] conc (StubInfo StubTCons) 2 -> do
+      IRTSnd (IRVar preExpr)
     ParameterHornClause conc -> IRVar conc
     EquivalenceHornClause [p] _ _ _ -> IRVar p
     _ -> error $ "Cannot convert clause to IRExpr: " ++ show clause
@@ -372,11 +371,11 @@ exprToHornClauses adts e = case e of
                       exprToHornClauses adts body
   Apply _ l v -> [ExprHornClause [getChainName l, getChainName v] (getChainName e) (StubInfo StubApply) 0,
                   ExprHornClause [getChainName e] (getChainName l) (StubInfo StubApply) 1]:
-                  exprToHornClauses adts l ++ exprToHornClauses adts v
+                  exprToHornClauses adts l ++ exprToHornClauses adts v-}
   -- Importantly the clauses drom the tuple are in separate groups, because they can be solved independently
   TCons _ a b -> [ExprHornClause [getChainName e] (getChainName a) (StubInfo StubTCons) 1]:
                  [ExprHornClause [getChainName e] (getChainName b) (StubInfo StubTCons) 2]:
-                  exprToHornClauses adts a ++ exprToHornClauses adts b-}
+                  exprToHornClauses adts a ++ exprToHornClauses adts b
   InjF _ _ params -> injFtoHornClause adts e: concatMap (exprToHornClauses adts) params
   -- No Horn clauses instead of error. Some expressions are not invertable and therefor do not produce Horn clauses. But we might not need them 
   _ -> concatMap (exprToHornClauses adts) (getSubExprs e)
