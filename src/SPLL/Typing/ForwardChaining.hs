@@ -161,6 +161,7 @@ toValueExpr clauses paramClauses adts startCN =
     solvedClauses = solveHCSet augmentedClauseSet
 
 findEquivalentLambda :: FCData -> ChainName -> ExprInfo
+--findEquivalentLambda fcData startCN | traceShow (hornClauses fcData) False = undefined
 findEquivalentLambda fcData startCN = case lookup startCN (chainNameInfo fcData) of
   Nothing -> error $ "Could not find chainName in FCData" ++ startCN
   Just li@(LambdaInfo _ _) -> li
@@ -431,7 +432,8 @@ fixpointAssociationTable fnDecls = nub $ fixpoint initialTable
   where 
     exprs = map snd fnDecls
     -- Map each topLevel function to their variables
-    initialTable = []
+    fnNames = map fst fnDecls
+    initialTable = concatMap (\(name, e) -> concatMap (associateVariable [] exprs name (getChainName e)) exprs) fnDecls
     runOnce table = foldr (flip (iterateAssociationTable exprs)) table exprs
     fixpoint t = let run = runOnce t in if run == t then t else fixpoint run
 
@@ -476,12 +478,12 @@ getInputChainNames e = map getChainName (getSubExprs e)
 
 -- Annotates a Program with chain names for every expression
 annotateProg :: Program -> Program
-annotateProg p@Program {functions=fs} = p{functions=correctTopLevel}
+annotateProg p@Program {functions=fs} = p{functions=annotFs}
   -- Map annotateExpr on all functions. The code is ugly because of monad shenanigans
   where
     annotFs = evalSupply (mapM (\(n, f) -> annotateExpr f <&> \x -> (n, x)) fs)
     -- Sets the ChainName of the top level expression to the name of the top level expression
-    correctTopLevel = map (\(n, f) -> (n, setTypeInfo f (setChainName (getTypeInfo f) n))) annotFs
+    -- correctTopLevel = map (\(n, f) -> (n, setTypeInfo f (setChainName (getTypeInfo f) n))) annotFs
 
 -- Annotate an expression and all of its subexpressions
 annotateExpr :: Expr -> Supply Expr
