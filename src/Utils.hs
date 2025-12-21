@@ -5,7 +5,12 @@ module Utils where
 
 import Control.Monad.State
 import Data.Graph
+import Data.List (isPrefixOf)
 
+splitByString :: String -> String -> (String, String)
+splitByString split orig | split `isPrefixOf` orig = ("", orig)
+splitByString split (c:orig) = let (x, y) = splitByString split orig in (c:x, y)
+splitByString split [] = error $ "No occurance of " ++ split ++ " in string"
 
 concatMap2 :: (a -> ([b], [c])) -> [a] -> ([b], [c])
 concatMap2 f xs = (concat as, concat bs)

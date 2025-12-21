@@ -13,13 +13,11 @@ import SPLL.Typing.Typing (setChainName)
 import Data.Foldable
 import Debug.Trace
 import GHC.Stack (HasCallStack)
-import System.Posix.Types (CNfds(CNfds))
 import Utils
 import SPLL.Typing.RType
 import qualified Text.Megaparsec.Char as ANY
-import Data.IntMap.Merge.Strict (merge)
 import Data.Char (isDigit)
-import GHC.Base (augment)
+
 
 
 data FCData = FCData {hornClauses :: [[HornClause]], chainNameInfo :: [(ChainName, ExprInfo)]}
@@ -30,10 +28,11 @@ data ExprInfo = StubInfo ExprStub   -- Generic Expression without additional Inf
               | LambdaInfo String ChainName  -- Lambda with the name of the bound variable and the ChainName of the body
               | ConstantInfo Value  -- Contant with the value
               | VarInfo String
+              | ApplyInfo ChainName -- Chain name of the left parameter of the Apply
               | AppliedInfo         -- Does not directly correlate to an expression. Via application a value is assigned to a bound variable
               deriving (Eq, Show)
 
-data EquivalenceType = VariableEquivalence
+data EquivalenceType = VariableEquivalence String
                      | AppliedEquivalence
                      deriving (Eq, Show)
 
@@ -64,6 +63,14 @@ isAppliedInfo _ = False
 isEquivalenceHornClause :: HornClause -> Bool
 isEquivalenceHornClause (EquivalenceHornClause {}) = True
 isEquivalenceHornClause _ = False
+
+isExprHornClause :: HornClause -> Bool
+isExprHornClause (ExprHornClause {}) = True
+isExprHornClause _ = False
+
+isAppliedEquivalence :: EquivalenceType -> Bool
+isAppliedEquivalence AppliedEquivalence = True
+isAppliedEquivalence _ = False
 
 -- Takes all HornClauses of a Program and a point in the AST which should be inverted.
 -- The function then searches for a Lambda statement and inverses toward the bound variable
@@ -163,7 +170,7 @@ toValueExpr clauses paramClauses adts startCN =
 findEquivalentLambda :: FCData -> ChainName -> ExprInfo
 --findEquivalentLambda fcData startCN | traceShow (hornClauses fcData) False = undefined
 findEquivalentLambda fcData startCN = case lookup startCN (chainNameInfo fcData) of
-  Nothing -> error $ "Could not find chainName in FCData" ++ startCN
+  Nothing -> error $ "Could not find chainName in FCData " ++ startCN
   Just li@(LambdaInfo _ _) -> li
   Just _ -> do
     let origClauses = getAllOriginatingEquivalenceHornClauses (hornClauses fcData) startCN
@@ -354,7 +361,9 @@ getUnappliedLambdas' allClauses clauses cn = case currClauses of
     currClauses = filter (elem cn . premises) clauses -}
 
 progToFCData :: Program -> FCData
-progToFCData prog = FCData {hornClauses = progToHornClauses prog, chainNameInfo = progToChainNameInfo prog}
+progToFCData prog = FCData {hornClauses = progToHornClauses prog cnInfo, chainNameInfo = progToChainNameInfo prog}
+  where cnInfo = progToChainNameInfo prog
+  
 
 progToChainNameInfo :: Program -> [(ChainName, ExprInfo)]
 progToChainNameInfo Program{functions=fs} = concatMap (exprToChainNameInfo . snd) fs
@@ -363,15 +372,17 @@ exprToChainNameInfo :: Expr -> [(ChainName, ExprInfo)]
 exprToChainNameInfo (Lambda TypeInfo{chainName=cn} n b) = (cn, LambdaInfo n (getChainName b)):exprToChainNameInfo b
 exprToChainNameInfo (Constant TypeInfo{chainName=cn} v) = [(cn, ConstantInfo v)]
 exprToChainNameInfo (Var TypeInfo{chainName=cn} n) = [(cn, VarInfo n)]
+exprToChainNameInfo (Apply TypeInfo{chainName=cn} l v) = (cn, ApplyInfo (getChainName l)):exprToChainNameInfo l ++ exprToChainNameInfo v
 exprToChainNameInfo e = (getChainName e, StubInfo (toStub e)):concatMap exprToChainNameInfo (getSubExprs e)
 
 -- Convert a Program to a set of groups of Horn clauses
-progToHornClauses :: Program -> [[HornClause]]
-progToHornClauses Program{functions=fs, adts=adts} = equivClauses ++ initialRun
+progToHornClauses :: Program -> [(ChainName, ExprInfo)] -> [[HornClause]]
+progToHornClauses Program{functions=fs, adts=adts} cnInfo = taggedGroups
   where
     -- We need two runs for this: first run is every expression converted into a group of Horn clauses
     initialRun = concatMap (exprToHornClauses adts . snd) fs
     equivClauses = lambdasToHornClauses fs
+    taggedGroups = tagAppliedGroups (FCData (equivClauses ++ initialRun) cnInfo)
     -- Second run is augmenting the clause set with fresh copies of clauses for every application
     --freshFs = evalSupply (augmentFreshApplicationsClauseSet initialRun)
 
@@ -447,9 +458,8 @@ iterateAssociationTable exprs table (Apply aTi (Lambda lTi lVar lBody) val) | is
 iterateAssociationTable exprs table (Apply aTi b val) 
   | isNothing (lookup (chainName aTi) table)
   && isJust (lookup (getChainName b) table) = 
-  case lookup (getChainName b) table of
-    Nothing -> error "Impossible code path"
-    Just (cn, _) -> case findExprWithCN exprs cn of
+  let Just (cn, _) = lookup (getChainName b) table in
+    case findExprWithCN exprs cn of
       (Lambda _ lVar lBody) -> (chainName aTi, (getChainName lBody, AppliedEquivalence)): associateVariable table exprs lVar (getChainName val) lBody ++ table
       x -> error $ "Left side of Apply is associated with a non-lambda: " ++ show x
 iterateAssociationTable exprs table e = foldr (flip (iterateAssociationTable exprs)) table (getSubExprs e)
@@ -465,12 +475,70 @@ findExprWithCN' cn expr | getChainName expr == cn = Just expr
 findExprWithCN' cn expr = msum $ map (findExprWithCN' cn) (getSubExprs expr)
 
 associateVariable :: AssociationTable -> [Expr] -> String -> ChainName -> Expr -> AssociationTable
-associateVariable table top var associateTo (Var TypeInfo{chainName=cn} name) | var == name = (cn, (associateTo, VariableEquivalence)):table
+associateVariable table top var associateTo (Var TypeInfo{chainName=cn} name) | var == name = (cn, (associateTo, VariableEquivalence name)):table
 associateVariable table top var associateTo expr = do
   let traverseSubs = foldr (\e table -> associateVariable table top var associateTo e) table (getSubExprs expr)
   case lookup (getChainName expr) table of
     Just (chainsTo, _) -> associateVariable traverseSubs top var associateTo (findExprWithCN top chainsTo)
     Nothing -> traverseSubs
+
+tagAppliedGroups :: FCData -> [[HornClause]]
+tagAppliedGroups fcData = reconstructedVarEquivClauses
+  where
+    clauses = hornClauses fcData
+    applyClauses = filter (\c -> isEquivalenceHornClause c && isAppliedEquivalence (equivalenceType c)) (map getForwardClauseOfGroup clauses)
+    appliedVarClauses = traceShowId $ map (second fromJust) (filter (isJust . snd) (map (\c -> (c, isApplyVar fcData c)) applyClauses))
+    dependentGroups = map (\(EquivalenceHornClause [src] dst AppliedEquivalence 0, n) -> (getDependentGroups clauses dst, n)) appliedVarClauses
+    taggedGroups = evalSupply $ mapM (\(cs, n) -> demandUniqueNumber <&> \num -> (map (tagGroup num) cs, n)) dependentGroups
+    reconstructedVarEquivClauses = concatMap (\(group, varName) -> map (map (reconstructVarEquivClause varName)) group) taggedGroups
+
+reconstructVarEquivClause :: String -> HornClause -> HornClause
+reconstructVarEquivClause var clause =
+  case clause of
+    (EquivalenceHornClause [pre] conc (VariableEquivalence varName) 0) ->
+        if var == varName then
+          EquivalenceHornClause [fst $ splitByString "_t_" pre] conc (VariableEquivalence varName) 0
+        else
+          clause
+    (EquivalenceHornClause [pre] conc (VariableEquivalence varName) 1) -> 
+        if var == varName then
+          EquivalenceHornClause [pre] (fst $ splitByString "_t_" conc) (VariableEquivalence varName) 1
+        else
+          clause
+    x -> x
+  where
+    isCorrectVarInfo name (VarInfo n) | name == n = True
+    isCorrectVarInfo _ _ = False
+
+tagGroup :: Int -> [HornClause] -> [HornClause]
+tagGroup tagNum group = do
+  let tag = "_t_" ++ show tagNum
+  map (tagHornClause tag) group
+
+tagHornClause :: String -> HornClause -> HornClause
+tagHornClause tag (ExprHornClause pre conc info inv) = ExprHornClause (map (++ tag) pre) (conc ++ tag) info inv
+tagHornClause tag (EquivalenceHornClause pre conc info inv) = EquivalenceHornClause (map (++ tag) pre) (conc ++ tag) info inv
+
+-- Is the given Apply Equivalence horn clause applying a Var expression
+-- This is relevant, because we only need to tag applications of Var expressions
+isApplyVar :: FCData -> HornClause -> Maybe String 
+isApplyVar fcData (EquivalenceHornClause [src] dst AppliedEquivalence 0) = do
+  case lookup src (chainNameInfo fcData) of
+    Just (ApplyInfo lCn) -> case lookup lCn (chainNameInfo fcData) of
+      Just (VarInfo n) -> Just n
+      Just _ -> Nothing
+      Nothing -> error $ "Cannot find left side of apply in chain name info: " ++ lCn
+    _ -> error $ "Cannot find Apply in chain name info: " ++ src 
+
+getDependentGroups :: [[HornClause]] -> ChainName -> [[HornClause]]
+getDependentGroups clauses cn = filter (\cs -> conclusion (getForwardClauseOfGroup cs) == cn) clauses
+  
+
+getForwardClauseOfGroup :: [HornClause] -> HornClause
+getForwardClauseOfGroup clauses = case filter (\c -> (isExprHornClause c || isEquivalenceHornClause c) && inversion c == 0) clauses of
+  [x] -> x
+  [] -> error $ "Found no forward clause in clause group: " ++ show clauses
+  _ -> error $ "Found multiple forward clauses in clause group: " ++ show clauses
 
 -- Chain name of subexpressions
 getInputChainNames :: Expr -> [ChainName]
