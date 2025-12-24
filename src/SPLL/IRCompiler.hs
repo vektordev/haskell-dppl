@@ -347,16 +347,16 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=aChainName} l 
   let adts = adtDecls meta
   let lChainName = chainName (getTypeInfo l)
   -- The FC algorith uses the body of the lambda as a starting point. This is no problem, because the body of the lamdbda is always equivalent to this apply
-  let LambdaInfo _ lBodyCN = findEquivalentLambda (fcData meta) lChainName
+  let (LambdaInfo _ lBodyCN, _) = findEquivalentLambda (fcData meta) lChainName
   
   -- This logic is here to wrap the expression back into lambdas if the lambda we look at returns a lambda
-  let LambdaInfo toInvCN lambdaBodyCN = findEquivalentLambda (fcData meta) lChainName
+  let (LambdaInfo toInvCN lambdaBodyCN, tag) = findEquivalentLambda (fcData meta) lChainName
   let (boundVar, lambdaVars) = unwrapLambdas (fcData meta) lambdaBodyCN
   let wrapInLambdas ex = foldr IRLambda ex lambdaVars
 
   -- Inverse of the callable as a lambda
   let (invExprP, invExprCoV) = toInvExpr clauses adts lChainName
-  let lInv = IRLambda boundVar invExprP
+  let lInv = IRLambda (boundVar ++ tag) invExprP
   -- Apply the sample to the inverse
   let appliedSample = IRInvoke (IRApply lInv sample)
   -- Do probabilistic inference using the applied inverse
@@ -627,8 +627,8 @@ subP (aM, aDim) (bM, bDim) = do
 createHOInverse :: FCData -> [ADTDecl]-> (String, Expr) -> CompilerMonad (IRExpr -> IRExpr)
 createHOInverse fcData adts (fVar, f) = do
   let (inverseF, _) = toInvExpr fcData adts (chainName $ getTypeInfo f)
-  let LambdaInfo _ lBodyChainName = findEquivalentLambda fcData (chainName $ getTypeInfo f)
-  let inverseLambda = IRLambda lBodyChainName inverseF
+  let (LambdaInfo _ lBodyChainName, tag) = findEquivalentLambda fcData (chainName $ getTypeInfo f)
+  let inverseLambda = IRLambda (lBodyChainName ++ tag) inverseF
   -- Rename all occurances of f^-1 from the definition to f_prob
   let renVar = renameVar (fVar ++ "^-1") (fVar ++ "_prob")
   setVariables [(fVar ++ "_prob", inverseLambda)]
