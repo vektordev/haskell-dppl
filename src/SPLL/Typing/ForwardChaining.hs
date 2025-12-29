@@ -170,13 +170,13 @@ toValueExpr clauses paramClauses adts startCN =
     solvedClauses = solveHCSet augmentedClauseSet
 
 findEquivalentLambda :: FCData -> ChainName -> (ExprInfo, String)
---findEquivalentLambda fcData startCN | trace startCN False = undefined
+findEquivalentLambda fcData startCN | trace startCN False = undefined
 findEquivalentLambda fcData startCN = case lookup startCN (chainNameInfo fcData) of
   Nothing -> error $ "Could not find chainName in FCData " ++ startCN
   Just li@(LambdaInfo _ _) -> (li, "")
   Just _ -> do
     let origClauses = getAllOriginatingEquivalenceHornClauses (hornClauses fcData) startCN
-    let [EquivalenceHornClause [pre] _ _ _] = filter (\(EquivalenceHornClause _ conc ty inv) -> inv == 0) origClauses
+    let [EquivalenceHornClause [pre] _ _ _] = filter (\(EquivalenceHornClause _ conc ty inv) -> inv == 1) origClauses
     (fst $ findEquivalentLambda fcData (untag pre), getTag pre)
 
 getAllOriginatingEquivalenceHornClauses :: [[HornClause]] -> ChainName -> [HornClause]
@@ -379,12 +379,12 @@ exprToChainNameInfo e = (getChainName e, StubInfo (toStub e)):concatMap exprToCh
 
 -- Convert a Program to a set of groups of Horn clauses
 progToHornClauses :: Program -> [(ChainName, ExprInfo)] -> [[HornClause]]
-progToHornClauses Program{functions=fs, adts=adts} cnInfo = taggedGroups
+progToHornClauses Program{functions=fs, adts=adts} cnInfo = initialRun ++ equivClauses
   where
     -- We need two runs for this: first run is every expression converted into a group of Horn clauses
     initialRun = concatMap (exprToHornClauses adts . snd) fs
-    equivClauses = lambdasToHornClauses fs
-    taggedGroups = tagAppliedGroups (FCData (equivClauses ++ initialRun) cnInfo)
+    equivClauses = lambdasToHornClauses initialRun fs
+    --taggedGroups = tagAppliedGroups (FCData (equivClauses ++ initialRun) cnInfo)
     -- Second run is augmenting the clause set with fresh copies of clauses for every application
     --freshFs = evalSupply (augmentFreshApplicationsClauseSet initialRun)
 
@@ -435,56 +435,84 @@ getEquivCN clauses cn = case (filter (\(EquivalenceHornClause [pre] _ _ _) -> pr
   where
     equiv = filter isEquivalenceHornClause (map head clauses)
 
-lambdasToHornClauses :: [FnDecl] -> [[HornClause]]
-lambdasToHornClauses exprs = map (\(a, (b, et)) -> [EquivalenceHornClause [a] b et 1, EquivalenceHornClause [b] a et 0]) table
-  where table = fixpointAssociationTable exprs
-
-type AssociationTable = [(ChainName, (ChainName, EquivalenceType))]
-
--- TODO: remove the nub and fix the implementation to not produce duplicates
-fixpointAssociationTable :: [FnDecl] -> AssociationTable
-fixpointAssociationTable fnDecls = nub $ fixpoint initialTable
+lambdasToHornClauses :: [[HornClause]] -> [FnDecl] -> [[HornClause]]
+lambdasToHornClauses clauses fns = traceShowClauseGroupsId $ fixpoint fExprs clauses
   where
-    exprs = map snd fnDecls
-    -- Map each topLevel function to their variables
-    fnNames = map fst fnDecls
-    initialTable = concatMap (\(name, e) -> concatMap (associateVariable [] exprs name (getChainName e)) exprs) fnDecls
-    runOnce table = foldr (flip (iterateAssociationTable exprs)) table exprs
-    fixpoint t = let run = runOnce t in if run == t then t else fixpoint run
+    fExprs = map snd fns
+    fixpoint exprs cs = let extension = traceShowId $ concatMap (constructEquivalenceClauses cs fExprs) exprs in if null extension then cs else fixpoint exprs (extension ++ cs)
 
-iterateAssociationTable :: [Expr] -> AssociationTable -> Expr -> AssociationTable
--- If Apply has a lambda as its left side, then directly associate the it with the body of the lambda
-iterateAssociationTable exprs table (Apply aTi (Lambda lTi lVar lBody) val) | isNothing (lookup (chainName aTi) table) =
-  case lookup (chainName aTi) table of
-    Nothing -> (chainName aTi, (getChainName lBody, AppliedEquivalence)): associateVariable table exprs lVar (getChainName val) lBody ++ table
-    _ -> table
--- If Apply has anything else on its left side, look whether that is associated with anything
-iterateAssociationTable exprs table (Apply aTi b val)
-  | isNothing (lookup (chainName aTi) table)
-  && isJust (lookup (getChainName b) table) =
-  let Just (cn, _) = lookup (getChainName b) table in
-    case findExprWithCN exprs cn of
-      (Lambda _ lVar lBody) -> (chainName aTi, (getChainName lBody, AppliedEquivalence)): associateVariable table exprs lVar (getChainName val) lBody ++ table
-      x -> error $ "Left side of Apply is associated with a non-lambda: " ++ show x
-iterateAssociationTable exprs table e = foldr (flip (iterateAssociationTable exprs)) table (getSubExprs e)
+constructEquivalenceClauses :: [[HornClause]] -> [Expr] -> Expr -> [[HornClause]]
+{-constructEquivalenceClauses clauses exprs ex@(Apply TypeInfo{chainName=exCn} (Lambda TypeInfo{chainName=lCn} n l) v) | not (isInClauseSet clauses exCn) = do
+  let appliedGroup = createEquivHornClauseGroup AppliedEquivalence exCn (chainName (getTypeInfo l))
+  case rType (getTypeInfo v) of
+    TArrow _ _ -> do
+      let vLambdaCn = case v of
+            (Lambda TypeInfo{chainName = vlCn} _ _) -> vlCn
+            _ -> getEquivCN clauses (getChainName v)
+      let dependent = getDependentGroups clauses vLambdaCn
+      let (varClauses, applyCnt) = evalSupply $ associateFunctionVariable n vLambdaCn l
+      let taggedDependents = concatMap (\tag -> map (tagGroup tag) dependent) [0..applyCnt - 1]
+      appliedGroup:varClauses ++ taggedDependents
+    _ -> appliedGroup:associateVariable n (getChainName v) l
+--constructEquivalenceClauses clauses exprs ex@(Apply TypeInfo{chainName=exCn} l v) | trace (exCn ++ (show $ not (isInClauseSet clauses (getChainName ex))) ++ show (isInClauseSet clauses (getChainName l))) False = undefined
+constructEquivalenceClauses clauses exprs ex@(Apply TypeInfo{chainName=exCn} l v) | not (isInClauseSet clauses exCn) && isInClauseSet clauses (getChainName l) = do
+  let appliedLambdaCn = getEquivCN clauses (getChainName l)
+  let appliedLambdaTag = getTag appliedLambdaCn
+  let Lambda _ name body = findExprWithCN exprs (untag appliedLambdaCn)
+  [createEquivHornClauseGroup AppliedEquivalence exCn (getChainName body ++ appliedLambdaTag)]-}
+constructEquivalenceClauses clauses exprs ex@(Apply TypeInfo{chainName=exCn} l v) | not (isInClauseSet clauses exCn) && (isLambda l || isInClauseSet clauses (getChainName l)) = do
+    let (lCn, lTag, lVar, lBody) = case l of
+          Lambda TypeInfo{chainName=lCn'} n body -> (lCn', "", n, body)
+          _ -> 
+            let appliedLambdaCn = getEquivCN clauses (getChainName l)
+                appliedLambdaTag = getTag appliedLambdaCn
+                Lambda _ name body = findExprWithCN exprs (untag appliedLambdaCn) in
+                  (appliedLambdaCn, appliedLambdaTag, name, body)
+    let lBodyCn = getChainName lBody ++ lTag
+    let appliedGroup = createEquivHornClauseGroup AppliedEquivalence exCn lBodyCn
+    case rType (getTypeInfo v) of
+      TArrow _ _ -> do
+        let vLambdaCn = case v of
+              (Lambda TypeInfo{chainName = vlCn} _ _) -> vlCn
+              _ -> getEquivCN clauses (getChainName v)
+        let Lambda _ _ vBody = findExprWithCN exprs vLambdaCn
+        let dependent = getDependentGroups clauses (getChainName vBody)
+        let (varClauses, applyCnt) = evalSupply $ associateFunctionVariable lVar vLambdaCn lTag lBody
+        let taggedDependents = concatMap (\tag -> map (tagGroup tag) dependent) [0..applyCnt - 1]
+        appliedGroup:varClauses ++ taggedDependents
+      _ -> appliedGroup:associateVariable lVar (getChainName v) lTag lBody
+  where
+    isLambda (Lambda {}) = True
+    isLambda _ = False
+constructEquivalenceClauses clauses exprs ex = concatMap (constructEquivalenceClauses clauses exprs) (getSubExprs ex)
+
+
+isInClauseSet :: [[HornClause]] -> ChainName -> Bool
+isInClauseSet clauses cn = any (\cs -> premises (getForwardClauseOfGroup cs) == [cn] && isEquivalenceHornClause (getForwardClauseOfGroup cs)) clauses
+
+associateVariable :: String -> ChainName -> String -> Expr -> [[HornClause]]
+associateVariable varName chainTo tag (Var TypeInfo{chainName=cn} n) | n == varName = [createEquivHornClauseGroup (VariableEquivalence varName) (cn ++ tag) chainTo]
+associateVariable varName chainTo tag ex = concatMap (associateVariable varName chainTo tag) (getSubExprs ex)
+
+associateFunctionVariable :: String -> ChainName -> String -> Expr -> Supply ([[HornClause]], Int)
+associateFunctionVariable varName chainTo tag (Var TypeInfo{chainName=cn} n) | n == varName = demandUniqueNumber <&> \num -> ([createEquivHornClauseGroup (VariableEquivalence varName) (cn ++ tag) (chainTo ++ tagPrefix ++ show num)], 1)
+associateFunctionVariable varName chainTo tag ex = do
+  a <- mapM (associateFunctionVariable varName chainTo tag) (getSubExprs ex)
+  return (concatMap fst a, sum (map snd a))
+
+createEquivHornClauseGroup :: EquivalenceType -> ChainName -> ChainName -> [HornClause]
+createEquivHornClauseGroup ty cn1 cn2 = [EquivalenceHornClause [cn1] cn2 ty 0, EquivalenceHornClause [cn2] cn1 ty 1]
 
 findExprWithCN :: [Expr] -> ChainName -> Expr
 findExprWithCN exprs cn = case mapMaybe (findExprWithCN' cn) exprs of
   [e] -> e
-  [] -> error "Expression with given chain name not found"
-  _ -> error "Multiple expressions with the same chain name"
+  [] -> error $ "Expression with given chain name not found " ++ cn
+  _ -> error $ "Multiple expressions with the same chain name" ++ cn
 
 findExprWithCN' :: ChainName -> Expr -> Maybe Expr
 findExprWithCN' cn expr | getChainName expr == cn = Just expr
 findExprWithCN' cn expr = msum $ map (findExprWithCN' cn) (getSubExprs expr)
 
-associateVariable :: AssociationTable -> [Expr] -> String -> ChainName -> Expr -> AssociationTable
-associateVariable table top var associateTo (Var TypeInfo{chainName=cn} name) | var == name = (cn, (associateTo, VariableEquivalence name)):table
-associateVariable table top var associateTo expr = do
-  let traverseSubs = foldr (\e table -> associateVariable table top var associateTo e) table (getSubExprs expr)
-  case lookup (getChainName expr) table of
-    Just (chainsTo, _) -> associateVariable traverseSubs top var associateTo (findExprWithCN top chainsTo)
-    Nothing -> traverseSubs
 
 tagAppliedGroups :: FCData -> [[HornClause]]
 tagAppliedGroups fcData = withoutRemoved ++ independentGroups
@@ -542,15 +570,17 @@ reconstructAppliedEquivClauseGroup group = [EquivalenceHornClause [pre0] (untag 
     [EquivalenceHornClause [pre0] conc0 AppliedEquivalence 0] = filter ((== 0). inversion) group
     [EquivalenceHornClause [pre1] conc1 AppliedEquivalence 1] = filter ((== 1). inversion) group
 
+tagPrefix = "_t"
+
 untag :: String -> String
-untag = fst . splitByString "_t_"
+untag = fst . splitByString tagPrefix
 
 getTag :: String -> String
-getTag = snd . splitByString "_t_"
+getTag = snd . splitByString tagPrefix
 
 tagGroup :: Int -> [HornClause] -> [HornClause]
 tagGroup tagNum group = do
-  let tag = "_t_" ++ show tagNum
+  let tag = tagPrefix ++ show tagNum
   map (tagHornClause tag) group
 
 tagHornClause :: String -> HornClause -> HornClause
@@ -559,7 +589,7 @@ tagHornClause tag (EquivalenceHornClause pre conc info inv) = EquivalenceHornCla
 
 getLamdbaEquivalenceClauses :: FCData -> ChainName -> [HornClause]
 getLamdbaEquivalenceClauses fcData lCn = correctGroup
-  where 
+  where
     [correctGroup] = filter (\group -> (conclusion (getForwardClauseOfGroup group) == lCn) && isEquivalenceHornClause (getForwardClauseOfGroup group)) (hornClauses fcData)
 
 -- Is the given Apply Equivalence horn clause applying a Var expression
