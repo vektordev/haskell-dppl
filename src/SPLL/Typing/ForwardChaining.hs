@@ -97,9 +97,9 @@ toInvExpr fcData adts lambdaCN = (mergedM, mergedCoV)
     -- If there are multiple paths towards the final parameter, we want to consider all paths for maximum information
     -- To do this we calculate the expression multiple times, but throw out all but one horn clause concluding to toInvCN-}
     (LambdaInfo toInvVarName lambdaBodyCN, tag) = findEquivalentLambda fcData lambdaCN
-    toInvCN = findChainNameForVar fcData toInvVarName ++ tag
+    toInvCN = traceShowId $ findChainNameForVar fcData toInvVarName ++ tag
     (unwrappedChainName, lambdaVars) = unwrapLambdas fcData lambdaBodyCN
-    paramClause = ParameterHornClause (unwrappedChainName ++ tag)
+    paramClause = traceShowId $ ParameterHornClause (unwrappedChainName ++ tag)
     terminalGroups = getTerminalGroups clauseSet toInvCN
     intermediateSet = clauseSet \\ terminalGroups
     -- Create the expression that calculates toInvCN
@@ -379,14 +379,12 @@ exprToChainNameInfo e = (getChainName e, StubInfo (toStub e)):concatMap exprToCh
 
 -- Convert a Program to a set of groups of Horn clauses
 progToHornClauses :: Program -> [(ChainName, ExprInfo)] -> [[HornClause]]
-progToHornClauses Program{functions=fs, adts=adts} cnInfo = initialRun ++ equivClauses
+progToHornClauses Program{functions=fs, adts=adts} cnInfo = traceShowClauseGroupsId $ nub $ initialRun ++ topEquivClauses ++ equivClauses
   where
     -- We need two runs for this: first run is every expression converted into a group of Horn clauses
     initialRun = concatMap (exprToHornClauses adts . snd) fs
-    equivClauses = lambdasToHornClauses initialRun fs
-    --taggedGroups = tagAppliedGroups (FCData (equivClauses ++ initialRun) cnInfo)
-    -- Second run is augmenting the clause set with fresh copies of clauses for every application
-    --freshFs = evalSupply (augmentFreshApplicationsClauseSet initialRun)
+    topEquivClauses = constructTopLevelEquivalenceClauses initialRun fs
+    equivClauses = lambdasToHornClauses topEquivClauses fs
 
 -- Converts an expression with all its subexpressions into Horn clauses
 exprToHornClauses :: [ADTDecl] -> Expr -> [[HornClause]]
@@ -440,6 +438,19 @@ lambdasToHornClauses clauses fns = fixpoint fExprs clauses
   where
     fExprs = map snd fns
     fixpoint exprs cs = let extension = concatMap (constructEquivalenceClauses cs fExprs) exprs in if null extension then cs else fixpoint exprs (extension ++ cs)
+
+constructTopLevelEquivalenceClauses :: [[HornClause]] -> [FnDecl] -> [[HornClause]]
+constructTopLevelEquivalenceClauses clauses decls = concatMap (constructTopLevelEquivalenceClauses' clauses (map snd decls)) decls
+
+constructTopLevelEquivalenceClauses' :: [[HornClause]] -> [Expr] -> FnDecl -> [[HornClause]]
+constructTopLevelEquivalenceClauses' clauses exprs (name, expr) = case rType (getTypeInfo expr) of
+  TArrow _ _ -> concat $ evalSupply $ mapM (\otherExpr -> do
+    let Lambda _ _ body = expr
+    let dependent = getDependentGroups clauses (getChainName body)
+    (varClauses, applyCnt) <- associateFunctionVariable name (getChainName expr) "" otherExpr
+    let taggedDependents = concatMap (\tag -> map (tagGroup tag) dependent) [0..applyCnt - 1]
+    return $ varClauses ++ taggedDependents) exprs
+  _ -> concatMap (associateVariable name (getChainName expr) "") exprs
 
 constructEquivalenceClauses :: [[HornClause]] -> [Expr] -> Expr -> [[HornClause]]
 constructEquivalenceClauses clauses exprs ex@(Apply TypeInfo{chainName=exCn} l v) | not (isInClauseSet clauses exCn) && (isLambda l || isInClauseSet clauses (getChainName l)) = do
