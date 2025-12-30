@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE InstanceSigs #-}
 module SPLL.Typing.ForwardChaining where
 import SPLL.Lang.Types hiding (HornClause)
 import SPLL.IntermediateRepresentation
@@ -126,21 +127,20 @@ getTerminalGroups clauses cn = filter (any ((== cn) . conclusion)) clauses
 
 -- This takes a list of value expressions and merges then such that in tuple constructions a existing value overwrites an ANY.
 -- If two paths provide information for the same part of the tuple, we discard the second, because the should be semantically equal and therefor redundant
--- We also assume that the different paths do not have cnflicting LetIns
+-- We also assume that the different paths do not have conflicting LetIns
 -- FIXME: Implement Gramian Matrix correctly, instead of multiplying all together
 mergeExpr :: [(IRExpr, IRExpr)] -> (IRExpr, IRExpr)
 mergeExpr [] = error "Cannot merge empty list of expressions"
 mergeExpr [x] = x
-mergeExpr ((x, xCoV):xs) = (removeReduntantLets [] $ mergeExpr2 id x mergedX, IROp OpMult xCoV mergedCoV)
-  where (mergedX, mergedCoV) = mergeExpr xs
+mergeExpr (x:xs) = mergeExpr2 id x (mergeExpr xs)
 
-mergeExpr2 :: (IRExpr -> IRExpr) -> IRExpr -> IRExpr -> IRExpr
-mergeExpr2 bindings (IRLetIn n v body) expr2 = mergeExpr2 (bindings . IRLetIn n v) body expr2
-mergeExpr2 bindings expr1 (IRLetIn n v body) = mergeExpr2 (bindings . IRLetIn n v) expr1 body
-mergeExpr2 bindings (IRTCons (IRConst VAny) b) (IRTCons a (IRConst VAny)) = bindings $ IRTCons a b
-mergeExpr2 bindings (IRTCons a (IRConst VAny)) (IRTCons (IRConst VAny) b)  = bindings $ IRTCons a b
+mergeExpr2 :: (IRExpr -> IRExpr) -> (IRExpr, IRExpr) -> (IRExpr, IRExpr) -> (IRExpr, IRExpr)
+mergeExpr2 bindings (IRLetIn n v body, cov1) expr2 = mergeExpr2 (bindings . IRLetIn n v) (body, cov1) expr2
+mergeExpr2 bindings expr1 (IRLetIn n v body, cov2) = mergeExpr2 (bindings . IRLetIn n v) expr1 (body, cov2)
+mergeExpr2 bindings (IRTCons (IRConst VAny) b, cov1) (IRTCons a (IRConst VAny), cov2) = (bindings $ IRTCons a b, IROp OpMult cov1 cov2)
+mergeExpr2 bindings (IRTCons a (IRConst VAny), cov1) (IRTCons (IRConst VAny) b, cov2)  = (bindings $ IRTCons a b, IROp OpMult cov1 cov2)
 -- Assume they are semantically equal. Then just take the first
-mergeExpr2 bindings x _ = bindings x
+mergeExpr2 bindings (expr1, cov1) _ = (bindings expr1, cov1)
 --mergeExpr2 bindings x y = trace ("Cannot merge expressions: " ++ show x ++ show y) (bindings x)
 
 
@@ -170,7 +170,7 @@ toValueExpr clauses paramClauses adts startCN =
     solvedClauses = solveHCSet augmentedClauseSet
 
 findEquivalentLambda :: FCData -> ChainName -> (ExprInfo, String)
-findEquivalentLambda fcData startCN | trace startCN False = undefined
+--findEquivalentLambda fcData startCN | trace startCN False = undefined
 findEquivalentLambda fcData startCN = case lookup startCN (chainNameInfo fcData) of
   Nothing -> error $ "Could not find chainName in FCData " ++ startCN
   Just li@(LambdaInfo _ _) -> (li, "")
@@ -436,31 +436,14 @@ getEquivCN clauses cn = case (filter (\(EquivalenceHornClause [pre] _ _ _) -> pr
     equiv = filter isEquivalenceHornClause (map head clauses)
 
 lambdasToHornClauses :: [[HornClause]] -> [FnDecl] -> [[HornClause]]
-lambdasToHornClauses clauses fns = traceShowClauseGroupsId $ fixpoint fExprs clauses
+lambdasToHornClauses clauses fns = fixpoint fExprs clauses
   where
     fExprs = map snd fns
-    fixpoint exprs cs = let extension = traceShowId $ concatMap (constructEquivalenceClauses cs fExprs) exprs in if null extension then cs else fixpoint exprs (extension ++ cs)
+    fixpoint exprs cs = let extension = concatMap (constructEquivalenceClauses cs fExprs) exprs in if null extension then cs else fixpoint exprs (extension ++ cs)
 
 constructEquivalenceClauses :: [[HornClause]] -> [Expr] -> Expr -> [[HornClause]]
-{-constructEquivalenceClauses clauses exprs ex@(Apply TypeInfo{chainName=exCn} (Lambda TypeInfo{chainName=lCn} n l) v) | not (isInClauseSet clauses exCn) = do
-  let appliedGroup = createEquivHornClauseGroup AppliedEquivalence exCn (chainName (getTypeInfo l))
-  case rType (getTypeInfo v) of
-    TArrow _ _ -> do
-      let vLambdaCn = case v of
-            (Lambda TypeInfo{chainName = vlCn} _ _) -> vlCn
-            _ -> getEquivCN clauses (getChainName v)
-      let dependent = getDependentGroups clauses vLambdaCn
-      let (varClauses, applyCnt) = evalSupply $ associateFunctionVariable n vLambdaCn l
-      let taggedDependents = concatMap (\tag -> map (tagGroup tag) dependent) [0..applyCnt - 1]
-      appliedGroup:varClauses ++ taggedDependents
-    _ -> appliedGroup:associateVariable n (getChainName v) l
---constructEquivalenceClauses clauses exprs ex@(Apply TypeInfo{chainName=exCn} l v) | trace (exCn ++ (show $ not (isInClauseSet clauses (getChainName ex))) ++ show (isInClauseSet clauses (getChainName l))) False = undefined
-constructEquivalenceClauses clauses exprs ex@(Apply TypeInfo{chainName=exCn} l v) | not (isInClauseSet clauses exCn) && isInClauseSet clauses (getChainName l) = do
-  let appliedLambdaCn = getEquivCN clauses (getChainName l)
-  let appliedLambdaTag = getTag appliedLambdaCn
-  let Lambda _ name body = findExprWithCN exprs (untag appliedLambdaCn)
-  [createEquivHornClauseGroup AppliedEquivalence exCn (getChainName body ++ appliedLambdaTag)]-}
 constructEquivalenceClauses clauses exprs ex@(Apply TypeInfo{chainName=exCn} l v) | not (isInClauseSet clauses exCn) && (isLambda l || isInClauseSet clauses (getChainName l)) = do
+    -- Find the declaration of the lambda on the left side of the Apply. Trivial if the lambda is directly there, else follow equivalences
     let (lCn, lTag, lVar, lBody) = case l of
           Lambda TypeInfo{chainName=lCn'} n body -> (lCn', "", n, body)
           _ -> 
@@ -480,7 +463,12 @@ constructEquivalenceClauses clauses exprs ex@(Apply TypeInfo{chainName=exCn} l v
         let (varClauses, applyCnt) = evalSupply $ associateFunctionVariable lVar vLambdaCn lTag lBody
         let taggedDependents = concatMap (\tag -> map (tagGroup tag) dependent) [0..applyCnt - 1]
         appliedGroup:varClauses ++ taggedDependents
-      _ -> appliedGroup:associateVariable lVar (getChainName v) lTag lBody
+      _ -> 
+        let taggedGroups = if null lTag then [] else map (map (tagHornClause lTag)) (getDependentGroups clauses (getChainName lBody)) in
+        appliedGroup:taggedGroups ++ associateVariable lVar (getChainName v) lTag lBody
+          
+          
+        
   where
     isLambda (Lambda {}) = True
     isLambda _ = False
@@ -679,8 +667,8 @@ cutList (x:xs) stop
 -- Define a DAG Edge that corresponds to dependancy. A is less than B if B depends on A 
 instance DAGEdge HornClause where
   -- A <= B iff B depends on A
-  ExprHornClause {conclusion=conc1} `edge` ExprHornClause {premises'=pre2} = conc1 `elem` pre2
-  _ `edge` _ = False
+  edge :: HornClause -> HornClause -> Bool
+  c1 `edge` c2 = conclusion c1 `elem` premises c2
 
 {-}
 -- Define DAG edges of HornClause groups based on the forward clause
@@ -704,5 +692,9 @@ showClauseGroup cs = intercalate "\n" (map showClause cs)
 showClauseGroups :: [[HornClause]] -> String
 showClauseGroups groups = intercalate "\n\n" (map showClauseGroup groups)
 
+traceShowClauseGroupId :: [HornClause] -> [HornClause]
+traceShowClauseGroupId clauses = trace (showClauseGroup clauses) clauses
+
 traceShowClauseGroupsId :: [[HornClause]] -> [[HornClause]]
 traceShowClauseGroupsId clauses = trace (showClauseGroups clauses) clauses
+
