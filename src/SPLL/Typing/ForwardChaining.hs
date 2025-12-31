@@ -97,9 +97,9 @@ toInvExpr fcData adts lambdaCN = (mergedM, mergedCoV)
     -- If there are multiple paths towards the final parameter, we want to consider all paths for maximum information
     -- To do this we calculate the expression multiple times, but throw out all but one horn clause concluding to toInvCN-}
     (LambdaInfo toInvVarName lambdaBodyCN, tag) = findEquivalentLambda fcData lambdaCN
-    toInvCN = traceShowId $ findChainNameForVar fcData toInvVarName ++ tag
+    toInvCN = findChainNameForVar fcData toInvVarName ++ tag
     (unwrappedChainName, lambdaVars) = unwrapLambdas fcData lambdaBodyCN
-    paramClause = traceShowId $ ParameterHornClause (unwrappedChainName ++ tag)
+    paramClause = ParameterHornClause (unwrappedChainName ++ tag)
     terminalGroups = getTerminalGroups clauseSet toInvCN
     intermediateSet = clauseSet \\ terminalGroups
     -- Create the expression that calculates toInvCN
@@ -130,7 +130,7 @@ getTerminalGroups clauses cn = filter (any ((== cn) . conclusion)) clauses
 -- We also assume that the different paths do not have conflicting LetIns
 -- FIXME: Implement Gramian Matrix correctly, instead of multiplying all together
 mergeExpr :: [(IRExpr, IRExpr)] -> (IRExpr, IRExpr)
-mergeExpr [] = error "Cannot merge empty list of expressions"
+mergeExpr [] = error "Forward chaining failed to find a solution"
 mergeExpr [x] = x
 mergeExpr (x:xs) = mergeExpr2 id x (mergeExpr xs)
 
@@ -379,12 +379,12 @@ exprToChainNameInfo e = (getChainName e, StubInfo (toStub e)):concatMap exprToCh
 
 -- Convert a Program to a set of groups of Horn clauses
 progToHornClauses :: Program -> [(ChainName, ExprInfo)] -> [[HornClause]]
-progToHornClauses Program{functions=fs, adts=adts} cnInfo = traceShowClauseGroupsId $ nub $ initialRun ++ topEquivClauses ++ equivClauses
+progToHornClauses Program{functions=fs, adts=adts} cnInfo = nub $ initialRun ++ topEquivClauses ++ equivClauses
   where
     -- We need two runs for this: first run is every expression converted into a group of Horn clauses
     initialRun = concatMap (exprToHornClauses adts . snd) fs
     topEquivClauses = constructTopLevelEquivalenceClauses initialRun fs
-    equivClauses = lambdasToHornClauses topEquivClauses fs
+    equivClauses = lambdasToHornClauses (initialRun ++ topEquivClauses) fs
 
 -- Converts an expression with all its subexpressions into Horn clauses
 exprToHornClauses :: [ADTDecl] -> Expr -> [[HornClause]]
@@ -477,9 +477,6 @@ constructEquivalenceClauses clauses exprs ex@(Apply TypeInfo{chainName=exCn} l v
       _ -> 
         let taggedGroups = if null lTag then [] else map (map (tagHornClause lTag)) (getDependentGroups clauses (getChainName lBody)) in
         appliedGroup:taggedGroups ++ associateVariable lVar (getChainName v) lTag lBody
-          
-          
-        
   where
     isLambda (Lambda {}) = True
     isLambda _ = False
