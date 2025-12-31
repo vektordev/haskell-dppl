@@ -79,7 +79,7 @@ isAppliedEquivalence _ = False
 -- The function then searches for a Lambda statement and inverses toward the bound variable
 -- Note that it deliberately skips over lambdas that are already applied
 toInvExpr :: FCData -> [ADTDecl] -> ChainName -> (IRExpr, IRExpr)
---toInvExpr clauses adts startCN | traceShow startCN False = undefined
+--toInvExpr fcData adts startCN | trace (showClauseGroups (hornClauses fcData)) False = undefined
 toInvExpr fcData adts lambdaCN = (mergedM, mergedCoV)
   where
     clauseSet = hornClauses fcData
@@ -97,20 +97,18 @@ toInvExpr fcData adts lambdaCN = (mergedM, mergedCoV)
     -- If there are multiple paths towards the final parameter, we want to consider all paths for maximum information
     -- To do this we calculate the expression multiple times, but throw out all but one horn clause concluding to toInvCN-}
     (LambdaInfo toInvVarName lambdaBodyCN, tag) = findEquivalentLambda fcData lambdaCN
-    toInvCN = findChainNameForVar fcData toInvVarName ++ tag
+    -- If the 
+    toInvCNs = map (++tag) (findChainNamesForVar fcData toInvVarName)
     (unwrappedChainName, lambdaVars) = unwrapLambdas fcData lambdaBodyCN
     paramClause = ParameterHornClause (unwrappedChainName ++ tag)
-    terminalGroups = getTerminalGroups clauseSet toInvCN
-    intermediateSet = clauseSet \\ terminalGroups
     -- Create the expression that calculates toInvCN
-    valueExprs = mapMaybe (\term -> toValueExpr (term:intermediateSet) [paramClause] adts toInvCN) terminalGroups
+    valueExprs = mapMaybe (toValueExpr clauseSet [paramClause] adts) toInvCNs
     (mergedM, mergedCoV) = mergeExpr valueExprs
 
-findChainNameForVar :: FCData -> String -> ChainName
-findChainNameForVar fcData varName = case correctVarInfos of
-  [(cn, _)] -> cn
-  [] -> error "Could not find variable " ++ varName ++ " in FC data"
-  _ -> error "Multiple occurances of  " ++ varName ++ " in FC data"
+findChainNamesForVar :: FCData -> String -> [ChainName]
+findChainNamesForVar fcData varName = case correctVarInfos of
+  [] -> error $ "Could not find variable " ++ varName ++ " in FC data"
+  x -> map fst x
   where
     correctVarInfos = filter (isCorrectVarInfo varName . snd) (chainNameInfo fcData)
     isCorrectVarInfo name (VarInfo n) | name == n = True
@@ -121,9 +119,6 @@ unwrapLambdas fcData cn = case lookup cn (chainNameInfo fcData) of
   Just (LambdaInfo name bodyName) ->
     let (lCN, names) = unwrapLambdas fcData bodyName in (lCN, name:names)
   Just _ -> (cn, [])
-
-getTerminalGroups :: [[HornClause]] -> ChainName -> [[HornClause]]
-getTerminalGroups clauses cn = filter (any ((== cn) . conclusion)) clauses
 
 -- This takes a list of value expressions and merges then such that in tuple constructions a existing value overwrites an ANY.
 -- If two paths provide information for the same part of the tuple, we discard the second, because the should be semantically equal and therefor redundant
@@ -484,7 +479,7 @@ constructEquivalenceClauses clauses exprs ex = concatMap (constructEquivalenceCl
 
 
 isInClauseSet :: [[HornClause]] -> ChainName -> Bool
-isInClauseSet clauses cn = any (\cs -> premises (getForwardClauseOfGroup cs) == [cn] && isEquivalenceHornClause (getForwardClauseOfGroup cs)) clauses
+isInClauseSet clauses cn = any (\cs -> isEquivalenceHornClause (head cs) && premises (getForwardClauseOfGroup cs) == [cn]) clauses
 
 associateVariable :: String -> ChainName -> String -> Expr -> [[HornClause]]
 associateVariable varName chainTo tag (Var TypeInfo{chainName=cn} n) | n == varName = [createEquivHornClauseGroup (VariableEquivalence varName) (cn ++ tag) chainTo]
@@ -509,63 +504,6 @@ findExprWithCN' :: ChainName -> Expr -> Maybe Expr
 findExprWithCN' cn expr | getChainName expr == cn = Just expr
 findExprWithCN' cn expr = msum $ map (findExprWithCN' cn) (getSubExprs expr)
 
-
-tagAppliedGroups :: FCData -> [[HornClause]]
-tagAppliedGroups fcData = withoutRemoved ++ independentGroups
-  where
-    clauses = hornClauses fcData
-    applyClauses = filter (\c -> isEquivalenceHornClause (getForwardClauseOfGroup c) && isAppliedEquivalence (equivalenceType (getForwardClauseOfGroup c))) clauses
-    --nonApplyClauses = clauses \\ applyClauses
-    -- Applies that do not apply a variable on its left side. Ignore them and add them back later
-    --nonVariableApplies = map fst $ filter (isNothing . snd) (map (\c -> (c, getApplyVar fcData (getForwardClauseOfGroup c))) applyClauses)
-    appliedVarClauses = map (second fromJust) $ filter (isJust . snd) (map (\c -> (c, getApplyVar fcData (getForwardClauseOfGroup c))) applyClauses)
-    dependentGroups = map (\(apGroup, n@(var, (lCn, vCn))) -> let (EquivalenceHornClause [src] dst AppliedEquivalence 0) = getForwardClauseOfGroup apGroup in (apGroup:getLamdbaEquivalenceClauses fcData lCn:getDependentGroups clauses src, n)) appliedVarClauses
-    independentGroups = foldr ((\dependent remaining -> remaining \\ dependent)) clauses (map fst dependentGroups)
-    taggedGroups = evalSupply $ mapM (\(cs, n) -> demandUniqueNumber <&> \num -> (map (tagGroup num) cs, n)) dependentGroups
-    -- The applied equiv clauses are by construction above always the first group
-    reconstructAppliedEquivClauseGroups = map (\(c:cs, n) -> (reconstructAppliedEquivClauseGroup c:cs, n)) taggedGroups
-    reconstructedLambdaVarEquivClauses = map (\(group, (varName, (lCn, vCn))) -> (map (map (reconstructLambdaVarEquivClause lCn)) group, (varName, (lCn, vCn)))) reconstructAppliedEquivClauseGroups
-    reconstructedBoundVarEquivClauses = concatMap (\(group, (varName, (lCn, vCn))) -> map (map (reconstructBoundVarEquivClause varName vCn)) group) reconstructedLambdaVarEquivClauses
-    withoutRemoved = filter (not . null) (map catMaybes reconstructedBoundVarEquivClauses)
-
-reconstructBoundVarEquivClause :: String -> ChainName -> HornClause -> Maybe HornClause
---reconstructBoundVarEquivClause var vCn clause | trace ("Reconstructing: " ++ var ++ " in " ++ show clause) False = undefined
-reconstructBoundVarEquivClause var vCn clause@(EquivalenceHornClause [pre] conc (VariableEquivalence varName) 0) =
-        if var == varName then
-          if untag pre == vCn then
-            Just $ EquivalenceHornClause [untag pre] conc (VariableEquivalence varName) 0
-          else Nothing
-        else
-          Just clause
-reconstructBoundVarEquivClause var vCn clause@(EquivalenceHornClause [pre] conc (VariableEquivalence varName) 1) =
-        if var == varName then
-          if untag conc == vCn then
-            Just $ EquivalenceHornClause [pre] (untag conc) (VariableEquivalence varName) 1
-          else Nothing
-        else
-          Just clause
-reconstructBoundVarEquivClause var vCn x = Just x
-  where
-    isCorrectVarInfo name (VarInfo n) | name == n = True
-    isCorrectVarInfo _ _ = False
-
-reconstructLambdaVarEquivClause :: ChainName -> HornClause -> HornClause
---reconstructBoundVarEquivClause var vCn clause | trace ("Reconstructing: " ++ var ++ " in " ++ show clause) False = undefined
-reconstructLambdaVarEquivClause lCn clause@(EquivalenceHornClause [pre] conc (VariableEquivalence varName) 0) | untag conc == lCn =
-  EquivalenceHornClause [pre] (untag conc) (VariableEquivalence varName) 0
-reconstructLambdaVarEquivClause lCn clause@(EquivalenceHornClause [pre] conc (VariableEquivalence varName) 1) | untag pre == lCn =
-  EquivalenceHornClause [untag pre] conc (VariableEquivalence varName) 1
-reconstructLambdaVarEquivClause lCn x = x
-  where
-    isCorrectVarInfo name (VarInfo n) | name == n = True
-    isCorrectVarInfo _ _ = False
-
-reconstructAppliedEquivClauseGroup :: [HornClause] -> [HornClause]
-reconstructAppliedEquivClauseGroup group = [EquivalenceHornClause [pre0] (untag conc0) AppliedEquivalence 0, EquivalenceHornClause [untag pre1] conc1 AppliedEquivalence 1]
-  where
-    [EquivalenceHornClause [pre0] conc0 AppliedEquivalence 0] = filter ((== 0). inversion) group
-    [EquivalenceHornClause [pre1] conc1 AppliedEquivalence 1] = filter ((== 1). inversion) group
-
 tagPrefix = "_t"
 
 untag :: String -> String
@@ -586,7 +524,7 @@ tagHornClause tag (EquivalenceHornClause pre conc info inv) = EquivalenceHornCla
 getLamdbaEquivalenceClauses :: FCData -> ChainName -> [HornClause]
 getLamdbaEquivalenceClauses fcData lCn = correctGroup
   where
-    [correctGroup] = filter (\group -> (conclusion (getForwardClauseOfGroup group) == lCn) && isEquivalenceHornClause (getForwardClauseOfGroup group)) (hornClauses fcData)
+    [correctGroup] = filter (\group -> (isEquivalenceHornClause (head group) && conclusion (getForwardClauseOfGroup group) == lCn)) (hornClauses fcData)
 
 -- Is the given Apply Equivalence horn clause applying a Var expression
 -- This is relevant, because we only need to tag applications of Var expressions
@@ -601,7 +539,7 @@ getApplyVar fcData (EquivalenceHornClause [src] dst AppliedEquivalence 0) = do
         _ -> error $ "Could not find lambda parameter of " ++ dst
       _ -> Nothing
 
-getDependentGroups :: [[HornClause]] -> ChainName -> [[HornClause]]
+getDependentGroups :: HasCallStack => [[HornClause]] -> ChainName -> [[HornClause]]
 getDependentGroups clauses cn = directDependence cn ++ concatMap (getDependentGroups clauses) (concatMap forwardPremises (directDependence cn))
   where
     -- Variable equivalences work the other way around as other clauses
@@ -610,12 +548,15 @@ getDependentGroups clauses cn = directDependence cn ++ concatMap (getDependentGr
     -- We want to include the equivalence clauses in the dependent clauses, but don't want to follow their jumps
     forwardPremises cs = let fc = getForwardClauseOfGroup cs in if isEquivalenceHornClause fc then [] else premises fc
     --forwardPremises = premises . getForwardClauseOfGroup
-    directDependence c = filter (\cs -> forwardConclusion cs == c) clauses
+    directDependence c = filter (\cs -> hasForwardClause cs && forwardConclusion cs == c) clauses
     isVariableEquivalence (VariableEquivalence _) = True
     isVariableEquivalence _ = False
 
+hasForwardClause :: [HornClause] -> Bool
+hasForwardClause = any ((== 0) . inversion)
 
-getForwardClauseOfGroup :: [HornClause] -> HornClause
+-- Some clause groups, like TCons, may not have a forward clause. You need to make sure this is not the case when incokink this function
+getForwardClauseOfGroup :: HasCallStack => [HornClause] -> HornClause
 getForwardClauseOfGroup clauses = case filter (\c -> (isExprHornClause c || isEquivalenceHornClause c) && inversion c == 0) clauses of
   [x] -> x
   [] -> error $ "Found no forward clause in clause group: " ++ show clauses
