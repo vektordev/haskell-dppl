@@ -1,0 +1,2 @@
+f x = 1.0 + x
+main = let t = (Uniform, Uniform + 1.0) in (f (fst t), f (snd t))

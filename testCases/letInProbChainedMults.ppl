@@ -1,0 +1,1 @@
+main = let u = Uniform in let v = u * 4.0 in v * 2.0

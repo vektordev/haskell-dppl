@@ -1,0 +1,1 @@
+main = (\f -> (f 2.0) Uniform) (\x -> \y -> x * y)
