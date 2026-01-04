@@ -356,18 +356,16 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=aChainName} l 
 
   -- Inverse of the callable as a lambda
   let (invExprP, invExprCoV) = toInvExpr clauses adts lChainName
+  let appliedCoV = IRInvoke $ IRApply (IRLambda (boundVar ++ tag) invExprCoV) sample
   let lInv = IRLambda (boundVar ++ tag) invExprP
   -- Apply the sample to the inverse
   let appliedSample = IRInvoke (IRApply lInv sample)
   -- Do probabilistic inference using the applied inverse
   (p, dim, bc) <- toIRInference meta cumulative v appliedSample
 
-  
-  
-
   let scale x = if not cumulative 
-                  then IROp OpMult x (IRIf (IROp OpEq dim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invExprCoV)) 
-                  else IRIf (IROp OpGreaterThan invExprCoV const0) x (IROp OpSub (IRConst (VFloat 1)) x)
+                  then IROp OpMult x (IRIf (IROp OpEq dim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs appliedCoV)) 
+                  else IRIf (IROp OpGreaterThan appliedCoV const0) x (IROp OpSub (IRConst (VFloat 1)) x)
   case rt of
     TArrow _ _ -> return (if countBranches (compilerConfig meta) then wrapInLambdas (IRTCons (scale p) (IRTCons dim bc)) else wrapInLambdas (IRTCons (scale p) dim), const0, const0)
     _ -> return (wrapInLambdas $ scale p, wrapInLambdas dim, wrapInLambdas bc)
@@ -626,13 +624,15 @@ subP (aM, aDim) (bM, bDim) = do
 
 createHOInverse :: FCData -> [ADTDecl]-> (String, Expr) -> CompilerMonad (IRExpr -> IRExpr)
 createHOInverse fcData adts (fVar, f) = do
-  let (inverseF, _) = toInvExpr fcData adts (chainName $ getTypeInfo f)
+  let (inverseF, inverseCoV) = toInvExpr fcData adts (chainName $ getTypeInfo f)
   let (LambdaInfo _ lBodyChainName, tag) = findEquivalentLambda fcData (chainName $ getTypeInfo f)
-  let inverseLambda = IRLambda (lBodyChainName ++ tag) inverseF
+  let inverseLambdaProb = IRLambda (lBodyChainName ++ tag) inverseF
+  let inverseLambdaCoV = IRLambda (lBodyChainName ++ tag) inverseCoV
   -- Rename all occurances of f^-1 from the definition to f_prob
   let renVar = renameVar (fVar ++ "^-1") (fVar ++ "_prob")
-  setVariables [(fVar ++ "_prob", inverseLambda)]
-  return $ renVar
+  let renDeriv = renameVar (fVar ++ "^-1'") (fVar ++ "_prob_deriv")
+  setVariables [(fVar ++ "_prob", inverseLambdaProb), (fVar ++ "_prob_deriv", inverseLambdaCoV)]
+  return (renVar . renDeriv)
 
 getProbIndex :: [Expr] -> Maybe Int
 --getProbIndex es | traceShow es False = undefined

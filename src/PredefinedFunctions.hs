@@ -22,6 +22,7 @@ import IRInterpreter
 import Control.Monad
 import qualified Data.Bifunctor
 import Data.Either (isLeft)
+import StandardLibrary (invokeStandardFunction, stdListProd)
 
 -- InputVars, OutputVars, fwd, grad
 data FDecl = FDecl {contract :: Scheme, inputVars :: [String], outputVars :: [String], body :: IRExpr, applicability :: IRExpr, deconstructing :: Bool, derivatives :: [(String, IRExpr)]} deriving (Show, Eq)
@@ -133,12 +134,13 @@ isNullInv = FDecl (Forall [TV "a"] (TBool `TArrow` ListOf (TVarR (TV "a")))) ["b
 applyFwd :: FDecl
 applyFwd = FDecl (Forall [TV "a", TV "b"] ((TVarR (TV "a") `TArrow` TVarR (TV "b")) `TArrow` (TVarR (TV "a") `TArrow` TVarR (TV "b")))) ["f", "a"] ["b"] (IRInvoke $ IRApply (IRVar "f") (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
 applyInv :: FDecl
-applyInv = FDecl (Forall [TV "b", TV "a"] ((TVarR (TV "a") `TArrow` TVarR (TV "b")) `TArrow` (TVarR (TV "b") `TArrow` TVarR (TV "a")))) ["f", "b"] ["a"] (IRInvoke $ IRApply (IRVar "f^-1") (IRVar "b")) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
+applyInv = FDecl (Forall [TV "b", TV "a"] ((TVarR (TV "a") `TArrow` TVarR (TV "b")) `TArrow` (TVarR (TV "b") `TArrow` TVarR (TV "a")))) ["f", "b"] ["a"] (IRInvoke $ IRApply (IRVar "f^-1") (IRVar "b")) (IRConst (VBool True)) True [("b", IRInvoke (IRApply (IRVar "f^-1'") (IRVar "b")))]
 
 mapFwd :: FDecl
 mapFwd = FDecl (Forall [TV "a", TV "b"] ((TVarR (TV "a") `TArrow` TVarR (TV "b")) `TArrow` (ListOf (TVarR (TV "a")) `TArrow` ListOf (TVarR (TV "b"))))) ["f", "a"] ["b"] (IRMap (IRVar "f") (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
+--FIXME: The derivative here is probably wron in general, if the list represents a degenerate distribution. This should probably be something like the determinant of the jacobian
 mapInv :: FDecl
-mapInv = FDecl (Forall [TV "a", TV "b"] ((TVarR (TV "b") `TArrow` TVarR (TV "a")) `TArrow` (ListOf (TVarR (TV "b")) `TArrow` ListOf (TVarR (TV "a"))))) ["f", "b"] ["a"] (IRMap (IRVar "f^-1") (IRVar "b")) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
+mapInv = FDecl (Forall [TV "a", TV "b"] ((TVarR (TV "b") `TArrow` TVarR (TV "a")) `TArrow` (ListOf (TVarR (TV "b")) `TArrow` ListOf (TVarR (TV "a"))))) ["f", "b"] ["a"] (IRMap (IRVar "f^-1") (IRVar "b")) (IRConst (VBool True)) True [("b", invokeStandardFunction stdListProd [IRMap (IRVar "f^-1'") (IRVar "b")])]
 
 mapLeftFwd :: FDecl
 mapLeftFwd = FDecl (Forall [TV "a", TV "b", TV "c"] ((TVarR (TV "a") `TArrow` TVarR (TV "c")) `TArrow` (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TEither (TVarR (TV "c")) (TVarR (TV "b"))))) ["f", "a"] ["b"]
@@ -200,6 +202,7 @@ instantiate gen adts n = do
 rename :: String -> String -> IRExpr -> IRExpr
 rename old new (IRVar n) | n == old = IRVar new
 rename old new (IRVar n) | n == old ++ "^-1" = IRVar (new ++ "^-1")
+rename old new (IRVar n) | n == old ++ "^-1'" = IRVar (new ++ "^-1'")
 rename old new expr = expr
 
 renameAll :: String -> String -> IRExpr -> IRExpr

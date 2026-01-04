@@ -1,3 +1,4 @@
+import math
 from typing import Iterable
 from math import *
 from random import random, gauss
@@ -197,10 +198,18 @@ def mapList(f, lst):
 
 def indexOf(sample, lst):
   if isinstance(lst, EmptyInferenceList) or isinstance(lst, AnyInferenceList):
-    raise ValueError("Element Not found in list")
+    raise ValueError("Element not found in list")
   elif isinstance(lst, ConsInferenceList):
     if lst.value == sample:
       return 0
     else:
       return 1 + indexOf(sample, lst.next)
+    
+def listProd(lst):
+  if isinstance(lst, AnyInferenceList):
+    raise ValueError("Element not found in list")
+  elif isinstance(lst, EmptyInferenceList):
+    return 1
+  elif isinstance(lst, ConsInferenceList):
+    return lst.value * listProd(lst.next)
     
