@@ -221,7 +221,8 @@ findConcludingHornClause hcs cn =
     [] -> Nothing
     res -> Just $ head res
 
--- TODO: This assumes that derivativs are composable, which (I think) is not true in general
+-- We usually get away with simply multiplying here, because we only have the variable we differentiate toward once in an expression
+-- I honsetly have no idea, why this works so well. TODO: Proof It works in all cases
 derivativeOfPath :: [ADTDecl] -> [HornClause] -> IRExpr
 derivativeOfPath adts clauses = foldr1 (IROp OpMult) derivs
   where derivs = map (derivativeOfHornClause adts) clauses
@@ -236,111 +237,6 @@ derivativeOfHornClause adts (ExprHornClause pre conc (InjFInfo name) inv) | inv 
   let FDecl {outputVars=[invVar]} = foldr (\(old, new) decl -> renameDecl old new decl) injFFwdDecl (zip (inputVars correctDecl) pre)
   fromJust $ lookup invVar invDerivs
 derivativeOfHornClause _ _ = IRConst (VFloat 1.0)
-
--- Finds the bound variable of the lambda the parameter ChainName is referencing
--- Note that this needs to skip over already applied lambdas
-{-findBoundVariable :: HasCallStack => [[HornClause]] -> ChainName -> Maybe ChainName
---findBoundVariable clauses cn | trace ("SEARCH "++ show cn) False = undefined
-findBoundVariable clauses cn = findBoundVariable' forwardClauses 0 cn <&> (++ suffix)
-  where
-    -- Only forward clauses (inversion == 0) are relevant for this, because we dont want cycles in our graph of horn clauses
-    -- Applied clauses are also relevant, because the lambda might be a variable applied elsewhere
-    forwardClauses = getForwardClauses clauses ++ getAppliedClauses clauses
-    -- If chain name is tagged with a suffix, we need to tag the return with the same suffix
-    -- FIXME: If the varibale has a _ in it this does not work correctly
-    suffix = splitAfterLast "_c" cn
-    -- Look at all suffixes, then take the ones that start with the split. Take the last one in the list, because it is the shortest suffix
-    splitAfterLast split s = case filter (split `isPrefixOf`) (tails s) of
-      [] -> ""
-      xs -> last xs
-
--- Finds the lambda a parameter ChainName is referencing
--- This also needs to skip over applied lambdas. Because applications must happen before a lambda, 
--- keep track of the number of applications seen on the way and disregard that many lambdas
-findBoundVariable' :: HasCallStack => [HornClause] -> Int -> ChainName -> Maybe ChainName
---findBoundVariable' clauses applies name | trace (show name++ "|" ++ show applies) False = undefined
-findBoundVariable' clauses applies name =
-  -- The next lambda is what we are looking for
-  if applies == 0 then
-    case currClauses of
-      -- We found what we are looking for
-      (ExprHornClause _ _ (LambdaInfo n) _):_ -> Just n
-      -- Increase the number of applications to disregard the next lambda
-      (ExprHornClause pre _ (StubInfo StubApply) _):_ -> firstJusts $ map (findBoundVariable' (clauses \\ headIfExists currClauses) (applies + 1)) pre
-      -- Continue looking, but without the current clause. First with the same name, then with all possible next names
-      _ -> firstJusts $ if null currClauses then [] else findBoundVariable' (clauses \\ headIfExists currClauses) applies name:
-        map (findBoundVariable' (clauses \\ headIfExists currClauses) applies . conclusion) nextClauses
-
-  -- Disregard the next lambda, because it is already applied
-  else
-    case currClauses of
-      -- Disregard it, but decrease the number of applications
-      (ExprHornClause pre _ (LambdaInfo n) _):_ -> firstJusts $ map (findBoundVariable' (clauses \\ headIfExists currClauses) (applies - 1)) pre
-      -- Increase the number of applications to disregard the next lambda
-      (ExprHornClause pre _ (StubInfo StubApply) _):_ -> firstJusts $ map (findBoundVariable' (clauses \\ headIfExists currClauses) (applies + 1)) pre
-      _ -> firstJusts $ if null currClauses then [] else findBoundVariable' (clauses \\ headIfExists currClauses) applies name:
-        map (findBoundVariable' (clauses \\ headIfExists currClauses) applies . conclusion) nextClauses
-  where
-    -- Clauses with the name as premises are potential next clauses
-    nextClauses = filter (elem name . premises) clauses
-    -- Clauses with the current name as conclusion are the current clauses
-    currClauses = filter ((== name) . conclusion) clauses
-    -- First Just in a list, else nothing
-    firstJusts ((Just x):xs) = Just x
-    firstJusts (Nothing:xs) = firstJusts xs
-    firstJusts [] = Nothing
-    headIfExists (a:_) = [a]
-    headIfExists [] = []
--}
--- Returns all clauses, which are considered to be forward. This includes all clauses, which are inversion=0
--- except for clauses created by applying values, because they refference AST points backwards.
--- These clauses can be used for syntactic traversal of a program
--- This set of clauses is guaranteed cycle free and is analog to the AST
-{-getForwardClauses :: [[HornClause]] -> [HornClause]
-getForwardClauses = concatMap (filter (\c -> inversion c == 0 && not (isAppliedInfo (exprInfo c))))
-
--- Returns all clauses created by applying values
--- In conjunction with the forward clauses, they can be used for evaluating traversal of a prorgam.
--- For the syntactic traversal (Var x) is an atom. For evaluating traversal, there is a clause linking x to its value.
--- Because the value is applied higher up in the program, the forwardClauses with appliedClauses are NOT cycle free
-getAppliedClauses :: [[HornClause]] -> [HornClause]
-getAppliedClauses = concatMap (filter (\c -> isAppliedInfo (exprInfo c)))
-
--- Get all names of all lambda variables in a subexpression of a specific point in the AST.
--- Exclude all lambdas, which are already applied
-getUnappliedLambdas :: HasCallStack => [[HornClause]] -> ChainName -> [String]
---getUnappliedLambdas clauses cn | traceShow (getForwardClauses clauses) False = undefined
-getUnappliedLambdas clauses cn = inc \\ exc
-  where
-    -- We do not start with the firt expression directly, because it is the lambda, we want to seach the subexpressions of.
-    nextClauses = filter ((== cn) . conclusion) forwardClauses
-    forwardClauses = getForwardClauses clauses
-    (inc, exc) = concatMap2 (getUnappliedLambdas' clauses forwardClauses) (concatMap premises nextClauses)
-
--- For any lambda l we want to get names of bound variables for that lambda
--- Returns a list of candidates and a list of applied lambda names. The unapplied lambda names is the difference of those lists
-getUnappliedLambdas' :: HasCallStack => [[HornClause]] -> [HornClause] -> ChainName -> ([String], [String])
-getUnappliedLambdas' allClauses clauses cn = case currClauses of
-  -- This is an application clause of a lambda
-  c@(ExprHornClause [n, _] _ (StubInfo StubApply) 0):_ ->
-    let (inc, exc) = getUnappliedLambdas' allClauses (clauses \\ [c]) cn in
-        -- Find the bound variable and add it to the applied return list
-      case findBoundVariable allClauses n of
-        Just lambdaVar -> (inc, lambdaVar:exc)
-        Nothing -> (inc, exc)
-  -- This is the clause for a lambda. Add its variable name to the candiate return list
-  c@(ExprHornClause pre _ (LambdaInfo n) _):_ ->
-    let (inc, exc) = getUnappliedLambdas' allClauses (clauses \\ [c]) cn in
-      (n:inc, exc)
-  -- There are more possible clauses to handle
-  c:_ -> getUnappliedLambdas' allClauses (clauses \\ [c]) cn
-  -- No more clauses at this level. Search all clauses, which represent subexpressions of the current level
-  [] -> concatMap2 (getUnappliedLambdas' allClauses clauses) (concatMap premises nextClauses)
-  where
-    -- Subexpressions of the current chain name
-    nextClauses = filter (\c -> (conclusion c == cn)) clauses
-    -- All clauses, on the current level of the recursive descend
-    currClauses = filter (elem cn . premises) clauses -}
 
 progToFCData :: Program -> FCData
 progToFCData prog = FCData {hornClauses = progToHornClauses prog cnInfo, chainNameInfo = progToChainNameInfo prog}
@@ -491,6 +387,7 @@ associateVariable varName chainTo tag ex = concatMap (associateVariable varName 
 -- Gives each variable a unique tag. The number of tags created is returned
 associateFunctionVariable :: String -> ChainName -> String -> Expr -> Supply ([[HornClause]], Int)
 associateFunctionVariable varName chainTo tag (Var TypeInfo{chainName=cn} n) | n == varName = demandUniqueNumber <&> \num -> ([createEquivHornClauseGroup (VariableEquivalence varName) (cn ++ tag) (chainTo ++ tagPrefix ++ show num)], 1)
+associateFunctionVariable varName chainTo tag (Lambda _ n _) | n == varName = return ([], 0)  -- Variable is shadowed. Don't search in this branch
 associateFunctionVariable varName chainTo tag ex = do
   a <- mapM (associateFunctionVariable varName chainTo tag) (getSubExprs ex)
   return (concatMap fst a, sum (map snd a))
