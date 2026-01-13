@@ -174,7 +174,7 @@ testRecursion = Program [("main", apply (var "rec") (constF 8)),
                          ("rec", "x" #-># ifThenElse (var "x" #># constF 1) (constF 3 #*# apply (var "rec") (var "x" #*# constF 0.5)) uniform)] [] []
 
 testNN :: Program
-testNN = Program [("main", mNistAddExpr)] [("classifyMNist", TArrow TSymbol TInt, Just $ EnumList $ map VInt [0,1,2,3,4,5,6,7,8,9])] []
+testNN = Program [("main", mNistAddExpr)] [("classifyMNist", TArrow TSymbol TInt, Just (MultiDiscretes (map VInt [0..9])))] []
 
 testDimProb :: Program
 testDimProb = Program [("main", IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 0.4))) (Constant makeTypeInfo $ VFloat 0.5) (Normal makeTypeInfo))] [] []
@@ -222,7 +222,7 @@ testLambdaChoice :: Program
 testLambdaChoice = Program [("main", apply (ifThenElse (bernoulli 0.5) ("x" #-># (normal #+# var "x")) ("y" #-># (uniform #+# var "y"))) (constF 1))] [] []
 
 testAutoNeural :: Program
-testAutoNeural = Program [("main", "sym" #-># ReadNN makeTypeInfo "readMNist" (var "sym"))] [("readMNist", TArrow TSymbol TInt, Just (EnumRange ((VInt 0), (VInt 9))))] []
+testAutoNeural = Program [("main", "sym" #-># ReadNN makeTypeInfo "readMNist" (var "sym"))] [("readMNist", TArrow TSymbol TInt, Just (MultiDiscretes (map VInt [0..9])))] []
 
 
 -- ======================================= INVALID PROGRAMS ============================================

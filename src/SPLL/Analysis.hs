@@ -22,7 +22,9 @@ annotateEnumsProg p@Program {functions=f, neurals=n, adts=adts} = p{functions = 
   --TODO this is really unclean. It does the the job of initializing the environment with correct tags, and also prevents infinite recursion, by only evaluating twice, but annotates the program twice
   where
     exprEnv = map (second (tags . getTypeInfo . annotate adts [])) f
-    neuralEnv = map (\(n, _, Just t) -> (n, [t])) (filter (\(_, _, mTag) -> isJust mTag) n)
+    neuralEnv = map (\(n, _, Just (MultiDiscretes vals)) -> (n, [EnumList vals])) (filter (\(_, _, mTag) -> isJust mTag && isMultiDiscrete (fromJust mTag)) n)
+    isMultiDiscrete (MultiDiscretes _) = True
+    isMultiDiscrete _ = False
 
 annotateIfNotRecursive :: [ADTDecl] -> String -> [(String, [Tag])] -> Expr -> Expr
 annotateIfNotRecursive _ name _ e | isRecursive name e = e

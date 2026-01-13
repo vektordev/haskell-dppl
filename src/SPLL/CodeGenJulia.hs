@@ -72,7 +72,7 @@ onHead :: (a -> a) -> [a] -> [a]
 onHead f (x:xs) = f x : xs
 
 generateADTClasses :: [ADTDecl] -> [String]
-generateADTClasses decls = concatMap generateADTClass (concatMap snd decls)
+generateADTClasses decls = concatMap generateADTClass (concatMap constructors decls)
 
 generateADTClass :: ADTConstructorDecl -> [String]
 generateADTClass (name, fields) =

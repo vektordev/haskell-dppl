@@ -419,7 +419,7 @@ getRType (VTuple t1 t2) = Tuple (getRType t1) (getRType t2)
 getRType (VEither (Left a)) = TEither (getRType a) SPLL.Typing.RType.NotSetYet
 getRType (VEither (Right a)) = TEither SPLL.Typing.RType.NotSetYet (getRType a) 
 
-lookupNeural :: String -> [NeuralDecl] -> Maybe (RType, Maybe Tag)
+lookupNeural :: String -> [NeuralDecl] -> Maybe (RType, Maybe MultiValue)
 lookupNeural name decls = foldr (\(n, r, t) ret -> if n == name then Just (r, t) else ret) Nothing decls
 
 -- Returns explicit functions declared as well as implicit functions from ADTs
@@ -439,14 +439,14 @@ prettyPrintProgCustomTI :: (TypeInfo -> String) -> Program -> [String]
 prettyPrintProgCustomTI fn (Program decls neurals adts) = concatMap prettyPrintADTs adts ++  concatMap (prettyPrintDecl fn) decls ++ concatMap prettyPrintNeural neurals
 
 prettyPrintADTs :: ADTDecl  -> [String]
-prettyPrintADTs (name, constr) = ("data " ++ name ++ "::"):map (\rts -> "\n|"++ show rts) constr
+prettyPrintADTs ADTDecl{dataName=name, constructors=constr, maxDepth=d} = ("data " ++ name ++ "::"):map (\rts -> "\n|"++ show rts) constr
 
 prettyPrintNeural :: NeuralDecl -> [String]
 prettyPrintNeural (name, ty, range) = l1:l2:(l3 range):[]
   where
     l1 = ("--- Neural: " ++ name ++ "---")
     l2 = ("\t :: " ++ show ty)
-    l3 (Just (EnumList lst)) = ("\t" ++ (show $ length lst))
+    l3 (Just (MultiDiscretes lst)) = ("\t" ++ (show $ length lst))
     l3 (Nothing) = ("\t" ++ (show $ 0))
     l3 _ = "prettyprint not implemented"
 
@@ -493,7 +493,7 @@ prettyPrintNeuralNoReq (name, ty, range) = l1:l2:(l3 range):[]
   where
     l1 = ("--- Neural: " ++ name ++ "---")
     l2 = ("\t :: " ++ show ty)
-    l3 (Just (EnumList lst)) = ("\t" ++ (show $ length lst))
+    l3 (Just (MultiDiscretes lst)) = ("\t" ++ (show $ length lst))
     l3 (Nothing) = ("\t" ++ (show $ 0))
     l3 _ = "prettyprint not implemented"
 

@@ -136,7 +136,7 @@ generateInitializations :: IREnv -> [String]
 generateInitializations (IREnv funcs _) = map (\IRFunGroup {groupName=n} -> n ++ " = " ++ onHead toUpper n ++ "()") funcs
 
 generateADTClasses :: [ADTDecl] -> [String]
-generateADTClasses decls = concatMap generateADTClass (concatMap snd decls)
+generateADTClasses decls = concatMap generateADTClass (concatMap constructors decls)
 
 generateADTClass :: ADTConstructorDecl -> [String]
 generateADTClass (name, fields) =

@@ -46,7 +46,7 @@ makeForwardDecl (name, (TArrow TSymbol target), tag) = "neural Network " ++ name
 
 data PartitionPlan = TuplePlan PartitionPlan PartitionPlan -- Logit layout: first, then second.
                    | EitherPlan PartitionPlan PartitionPlan -- Logit layout: flag, then left, then right
-                   | Discretes RType Tag -- Logit layout: Enumerated values in order of "tagToValues"
+                   | Discretes RType MultiValue -- Logit layout: Enumerated values in order of "tagToValues"
                    | Continuous -- Logit layout: Mu, Sigma
                    deriving Show
 
@@ -65,8 +65,8 @@ makeProb conf plan nn_name = IRLambda "sample" $ IRLetIn vector (IREvalNN nn_nam
 -- Takes a Tag from a Discretes type and a sample, and builds code that returns the index of the sample in the tag.
 -- step 1: turn the tag into a list of values.
 -- step 2: Use IRApply "indexOf" to find the index of the value in the list
-indexOf :: Tag -> IRExpr -> IRExpr
-indexOf tag sample = invokeStandardFunction stdIndexOf [sample, IRConst (valueToIR (constructVList (tagToValues tag)))]
+indexOf :: MultiValue -> IRExpr -> IRExpr
+indexOf (MultiDiscretes vals) sample = invokeStandardFunction stdIndexOf [sample, IRConst (constructVList (map valueToIR vals))]
 
 
 makeProbRec :: PartitionPlan -> Int -> IRExpr -> (IRExpr, IRExpr, IRExpr)
@@ -86,7 +86,17 @@ makeProbRec (TuplePlan a b) ix sample = (IROp OpMult pa pb, IROp OpPlus dima dim
   where
     (pa, dima, bca) = makeProbRec a ix (IRTFst sample)
     (pb, dimb, bcb) = makeProbRec b (ix + getSize a) (IRTSnd sample)
-makeProbRec (EitherPlan a b) ix sample = undefined -- TODO: Waiting for sum types.
+makeProbRec (EitherPlan a b) ix sample = (
+  IRIf (IRIsLeft sample) 
+    (IROp OpMult pIsLeft aP) 
+    (IROp OpMult pIsRight bP),
+  -- Is choosing the bc here correct, or should they be added? 
+  IRIf (IRIsLeft sample) aDim bDim, IRIf (IRIsLeft sample) aBc bBc)
+  where
+    (aP, aDim, aBc) = makeProbRec a (ix + 1) (IRFromLeft sample)
+    (bP, bDim, bBc) = makeProbRec b (ix + 1 + getSize a) (IRFromRight sample)
+    pIsLeft = IRIndex (IRVar vector) (IRConst (VInt ix))
+    pIsRight = IROp OpSub (IRConst $ VFloat 1) pIsLeft
 
 
 makeGen :: PartitionPlan -> String ->  IRExpr
@@ -94,8 +104,11 @@ makeGen plan nn_name = IRLetIn vector (IREvalNN nn_name (IRVar "l_x_neural_in"))
 
 makeGenRec :: PartitionPlan -> Int -> IRExpr
 makeGenRec (TuplePlan a b) ix = IRTCons (makeGenRec a ix) (makeGenRec b (ix + getSize a)) 
-makeGenRec (EitherPlan a b) ix = undefined -- TODO: Waiting for sum types.
-makeGenRec (Discretes rty tag) ix = lottery (tagToValues tag) ix
+makeGenRec (EitherPlan a b) ix = IRIf 
+  (IROp OpLessThan (IRSample IRUniform) (IRIndex (IRVar vector) (IRConst (VInt ix)))) 
+    (IRLeft $ makeGenRec a (ix + 1)) 
+    (IRRight $ makeGenRec b (ix + 1 + getSize a))
+makeGenRec (Discretes rty (MultiDiscretes vals)) ix = lottery (map valueToIR vals) ix
 makeGenRec Continuous ix = IROp OpPlus
   (IROp OpMult (IRSample IRNormal) (IRIndex (IRVar vector) (IRConst (VInt $ ix + 1))))
   (IRIndex (IRVar vector) (IRConst (VInt ix)))
@@ -120,8 +133,7 @@ lottery values startIx = IRIf
 getSize :: PartitionPlan -> Int
 getSize (TuplePlan a b) = getSize a + getSize b
 getSize (EitherPlan a b) = getSize a + getSize b + 1
-getSize (Discretes _ (EnumList vals)) = length vals
-getSize (Discretes _ (EnumRange (from, to))) = getSizeRange from to
+getSize (Discretes _ (MultiDiscretes vals)) = length vals
 getSize Continuous = 2
 
 getSizeRange :: Value -> Value -> Int
@@ -142,10 +154,11 @@ isDiscrete (ListOf ty) = isDiscrete ty
 isDiscrete (Tuple ty1 ty2) = isDiscrete ty1 && isDiscrete ty2
 isDiscrete other = False
 
-makePartitionPlan :: RType -> Maybe Tag -> PartitionPlan
+makePartitionPlan :: RType -> Maybe MultiValue -> PartitionPlan
 makePartitionPlan (Tuple a b) tag = TuplePlan (makePartitionPlan a tag1) (makePartitionPlan b tag2)
     where
-      (tag1, tag2) = splitTag tag
+      tag1 = (\(MultiTuple t1 _) -> t1) <$> tag
+      tag2 = (\(MultiTuple _ t2) -> t2) <$> tag
 --TODO: Add either.
 makePartitionPlan ty (Just tag) | isDiscrete ty = Discretes ty tag -- TODO: Validate that tag is sane for this.
 makePartitionPlan ty (Nothing) | isDiscrete ty = error "no enumeration range supplied for discrete value in AutoNeural."
@@ -171,7 +184,7 @@ tupelFromValue _non_tuple = error "supplied non-tuple value to tuple-shaped NN t
 testConf = CompilerConfig {topKThreshold=Nothing, countBranches=False, verbose=2, optimizerLevel=2}
 
 test = do
-  let irdefs = IREnv [makeAutoNeural testConf ("readMNist", TArrow TSymbol TInt, Just $ EnumRange ((VInt 0), (VInt 9)))] []
+  let irdefs = IREnv [makeAutoNeural testConf ("readMNist", TArrow TSymbol TInt, Just $ MultiDiscretes (map VInt [0..9]))] []
   putStrLn (pPrintIREnv irdefs)
 
 test2 = do
@@ -182,14 +195,3 @@ test2 = do
 --test3 = do
 --  let irdefs = makeAutoNeural ("mixedTuple", TArrow TSymbol (Tuple TFloat TInt), Just $ EnumRange ((VTuple VAny (VInt 3)),(VTuple VAny (VInt 5))))
 --  putStrLn (pPrintIREnv irdefs)
-
-test4 = do
-  let irdefs = IREnv [makeAutoNeural testConf ("tuple", TArrow TSymbol (Tuple TInt TInt), Just $ EnumRange ((VTuple (VInt 7) (VInt 3)), (VTuple (VInt 9) (VInt 5))))] []
-  putStrLn (pPrintIREnv irdefs)
-
-test5 = do
-  let decl = ("tuple", TArrow TSymbol (Tuple TInt TInt), Just $ EnumList [(VTuple (VInt 7) (VInt 3)), (VTuple (VInt 9) (VInt 5))])
-  let irdefs = IREnv [makeAutoNeural testConf decl] []
-  putStrLn (pPrintIREnv irdefs)
-  let commentstring = makeForwardDecl decl
-  putStrLn commentstring

@@ -405,10 +405,65 @@ pNeural = dbg "neural" $ do
   name <- pIdentifier
   _ <- symbol "::"
   ty <- SPLL.Parser.pType
-  tag <- optional (symbol "of" *> listOrRange)
-  return (name, ty, tag)
-    where
-      listOrRange = choice [try (pList >>= return . EnumList), pRange >>= return . EnumRange]
+  multiVal <- optional (symbol "of" *> pNeuralMultiValue)
+  return (name, ty, multiVal)
+
+pNeuralMultiValue :: MonadParser m => m MultiValue
+pNeuralMultiValue = dbg "multiVal" $ do
+  choice [pMultiDiscretes, pMultiEither, pMultiTuple, pMultiADT]
+
+pMultiDiscretes :: MonadParser m => m MultiValue
+pMultiDiscretes = dbg "multiDisc" $ do
+  symbol "["
+  csv <- pCSV
+  symbol "]"
+  return $ MultiDiscretes csv
+
+pMultiEither :: MonadParser m => m MultiValue
+pMultiEither = dbg "multiEith" $ do
+  l <- pNeuralMultiValue
+  symbol "|"
+  r <- pNeuralMultiValue
+  return $ MultiEither l r
+
+pMultiTuple :: MonadParser m => m MultiValue
+pMultiTuple = dbg "multiEith" $ do
+  symbol "("
+  l <- pNeuralMultiValue
+  symbol ","
+  r <- pNeuralMultiValue
+  symbol ")"
+  return $ MultiEither l r
+
+pMultiADT :: MonadParser m => m MultiValue
+pMultiADT = dbg "multiADT" $ do
+  symbol "{"
+  constrs <- sepBy (do
+      cName <- pIdentifier
+      params <- many pNeuralMultiValue
+      return (cName, params)
+    ) (symbol "|")
+  symbol "}"
+  return $ MultiADT constrs
+
+validateNeuralType :: MonadFail m => RType -> MultiValue -> m ()
+validateNeuralType (TSymbol `TArrow` rt) val = validateNeuralType' rt val
+validateNeuralType _ _ = fail "Neural must be of type (Symbol -> ...)"
+
+validateNeuralType' :: MonadFail m => RType -> MultiValue -> m ()
+validateNeuralType' (TEither rtL rtR) (MultiEither vL vR) = validateNeuralType' rtL vL >> validateNeuralType' rtR vR
+validateNeuralType' (TEither rtL rtR) val = fail $ "Mismatch between neural type and possible values. Expected an Either type, but got: " ++ show val
+validateNeuralType' (Tuple rtL rtR) (MultiTuple vL vR) = validateNeuralType' rtL vL >> validateNeuralType' rtR vR
+validateNeuralType' (Tuple rtL rtR) val = fail $ "Mismatch between neural type and possible values. Expected an Tuple type, but got: " ++ show val
+validateNeuralType' (TADT _) (MultiADT _) = return () -- Cannot validate ADT types, because they are unknown at parse time
+validateNeuralType' (TADT _) val = fail $ "Mismatch between neural type and possible values. Expected an ADT type, but got: " ++ show val
+validateNeuralType' rt (MultiDiscretes vals) = do
+  let validateFunction = case rt of
+        TInt -> \v -> case v of VInt _ -> True; _ -> False
+        TFloat -> \v -> case v of VFloat _ -> True; _ -> False
+        TBool -> \v -> case v of VBool _ -> True; _ -> False
+  if all validateFunction vals then return () else fail $ "Not all values were of type: " ++ show rt ++ ": " ++ show vals
+validateNeuralType' rt _ = fail $ "Unknown type for neural declaration: " ++ show rt
 
 
 pFunction :: MonadParser m => m FnDecl
@@ -426,13 +481,14 @@ pADT = do
   name <- pIdentifier
   symbol "="
   constrs <- pADTConstructor `sepBy` symbol "|"
+  depth <- optional (keyword "depth" >> lexeme L.decimal)
   doesNotContinue
-  return (name, constrs)
+  return ADTDecl {dataName=name, constructors=constrs, maxDepth=depth}
 
 pADTConstructor :: MonadParser m => m ADTConstructorDecl
 pADTConstructor = dbg "ADT Constr" $ do
   name <- pIdentifier
-  rts <- many $ do
+  rts <- many $ try $ do
     fieldName <- pIdentifier
     symbol "::"
     fieldType <- choice [SPLL.Parser.pType <&> Left, pIdentifier <&> Right]

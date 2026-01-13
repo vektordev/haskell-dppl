@@ -16,7 +16,7 @@ implicitFunctionsRTypeProg :: Program -> [(String, RType)]
 implicitFunctionsRTypeProg Program {adts=adts} = concatMap implicitFunctionRTypes adts
 
 implicitFunctionRTypes :: ADTDecl -> [(String, RType)]
-implicitFunctionRTypes (name, constrs) = concatMap (implicitFunctionRTypesConstr name) constrs
+implicitFunctionRTypes ADTDecl{dataName=name, constructors=constrs} = concatMap (implicitFunctionRTypesConstr name) constrs
 
 implicitFunctionRTypesConstr :: String -> ADTConstructorDecl -> [(String, RType)]
 implicitFunctionRTypesConstr tyName (name, fields) = constructorRType tyName name (map snd fields): isRType tyName name : map (accessorRType tyName) fields
@@ -50,9 +50,9 @@ createLambdaFromRType _ idx inner = inner
 
 implicitFunctionImpl :: Show a => [ADTDecl] -> String -> [GenericValue a] -> GenericValue a
 implicitFunctionImpl decls fName [param] | fName `elem` isFNames = isImpl (drop 2 fName) param
-  where isFNames = concatMap (\(_, constrs) -> map (("is" ++) . fst) constrs) decls
+  where isFNames = concatMap (map (("is" ++) . fst) . constructors) decls
 implicitFunctionImpl decls fName param | fName `elem` constrFNames = VADT fName param
-  where constrFNames = concatMap (\(_, constrs) -> map fst constrs) decls
+  where constrFNames = concatMap (map fst . constructors) decls
 implicitFunctionImpl decls fName [param] =
   case param of
     VADT constr fields ->
@@ -71,7 +71,7 @@ isImpl _ x = error ("Parameter is not an ADT: " ++ show x)
 
 -- Returns constructor and field index
 findField :: [ADTDecl] -> String -> (String, Int)
-findField decls name = case mapM (\(_, constrs) -> mapM (mFindField 0) constrs) decls of
+findField decls name = case mapM (mapM (mFindField 0) . constructors) decls of
   Left a -> a
   Right _ -> error ("Field not found: " ++ name)
   where

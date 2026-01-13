@@ -103,9 +103,13 @@ data Program = Program {
 
 type FnDecl = (String, Expr)
 
-type NeuralDecl = (String, RType, Maybe Tag)
+type NeuralDecl = (String, RType, Maybe MultiValue)
 
-type ADTDecl = (String, [ADTConstructorDecl])
+data ADTDecl = ADTDecl {
+  dataName :: String, 
+  constructors :: [ADTConstructorDecl], 
+  maxDepth :: Maybe Int
+  } deriving (Show, Eq)
 type ADTConstructorDecl = (String, [(String, RType)])
 
 type WitnessedVars = Set.Set String
@@ -182,6 +186,13 @@ isVThetaTree (VThetaTree _) = True
 isVThetaTree _ = False
 isVClosure (VClosure _ _ _) = True
 isVClosure _ = False
+
+data MultiValue = MultiDiscretes [Value]
+                | MultiTuple MultiValue MultiValue
+                | MultiEither MultiValue MultiValue
+                | MultiADT [(String, [MultiValue])] 
+                deriving (Show, Eq)
+                
 
 
 data Tag = EnumRange (Value, Value)

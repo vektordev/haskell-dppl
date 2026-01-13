@@ -264,7 +264,7 @@ failConversionRev :: IRExpr -> Expr
 failConversionRev = error "Error during value conversion. This should not happen"
 
 fPairsFromADT :: ADTDecl -> [(String, FPair)]
-fPairsFromADT (name, constrs) = concatMap (fPairsFromADTConstructor name) constrs
+fPairsFromADT ADTDecl{dataName=name, constructors=constrs} = concatMap (fPairsFromADTConstructor name) constrs
 
 fPairsFromADTConstructor :: String -> ADTConstructorDecl  -> [(String, FPair)]
 fPairsFromADTConstructor adtName constr@(constrName, fields) = (constrName, FPair fwdConstr (map invConstr fieldNames)):map (fPairFromADTField adtRT constr) fields

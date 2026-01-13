@@ -26,6 +26,7 @@ import Control.Monad.State
 import Control.Monad (MonadPlus)
 import Text.Megaparsec hiding (State)
 import Data.Void
+import Data.Maybe (fromMaybe)
 
 
 rTypeToString :: RType -> String
@@ -35,10 +36,9 @@ rTypeToString TInt = "Int"
 rTypeToString TBool = "Bool"
 rTypeToString (TArrow rt1 rt2) = rTypeToString rt1 ++ " -> " ++ rTypeToString rt2
 
-tagToString :: Tag -> String
-tagToString (EnumRange (start, end)) = "[" ++ show start ++ ".." ++ show end ++ "]"
-tagToString (EnumList values) = "[" ++ unwords (map show values) ++ "]"
-tagToString _ = undefined
+multiValueToString :: MultiValue -> String
+multiValueToString (MultiDiscretes vals) = "[" ++ intercalate ", " (map show vals) ++ "]"
+multiValueToString _ = undefined
 
 valToString :: Value -> String
 valToString (VBool x) = show x
@@ -78,10 +78,10 @@ fnDeclToString (name, expr) = name ++ " = " ++ exprToString expr
 neuralDeclToString :: NeuralDecl -> String
 neuralDeclToString (name, rty, Nothing) = "neural " ++ name ++ " :: " ++ rTypeToString rty
 neuralDeclToString (name, rty, Just tag) =
-    "neural " ++ name ++ " :: " ++ rTypeToString rty ++ " of " ++ tagToString tag
+    "neural " ++ name ++ " :: " ++ rTypeToString rty ++ " of " ++ multiValueToString tag
 
 adtDeclToString :: ADTDecl -> String
-adtDeclToString (name, constrs) = name ++ " = " ++ intercalate " | " (map adtConstructorToString constrs)
+adtDeclToString ADTDecl{dataName=name, constructors=constrs, maxDepth=depth} = name ++ " = " ++ intercalate " | " (map adtConstructorToString constrs) ++ maybe "" ((" depth " ++) . show) depth
 
 adtConstructorToString :: ADTConstructorDecl -> String
 adtConstructorToString (name, rts) = name ++ " " ++ unwords (map show rts)

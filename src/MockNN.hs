@@ -29,11 +29,11 @@ randomMockNN part@(Discretes _ _) (VInt seed) = constructVList (map VFloat norma
 spikingMockNN :: PartitionPlan -> IRValue -> IRValue
 spikingMockNN (Discretes TInt tgs) (VTuple v@(VInt val) (VInt seed)) = do
   let idx = case tgs of
-              EnumRange (VInt low, VInt high) -> if val <= high && val >= low then val - low else error "Spinking element cannot be produced by NN"
-              EnumList eLst -> fromMaybe (error "Spinking element cannot be produced by NN") (elemIndex v (map valueToIR eLst))
+              MultiDiscretes eLst -> fromMaybe (error "Spinking element cannot be produced by NN") (elemIndex v (map valueToIR eLst))
+              t -> error $ "Mock NN currently not supports the return type: " ++ show t
   let size = case tgs of
-              EnumRange (VInt low, VInt high) -> high - low + 1
-              EnumList eLst -> length eLst
+              MultiDiscretes eLst -> length eLst
+              t -> error $ "Mock NN currently not supports the return type: " ++ show t
   let g = mkStdGen val
   -- The coice of 0.1 is completely arbitrary. The algorithm used here is not good, but sufficient for now.
   -- Problem: The maximum value of the noise does not scale with the amount of possible values.
