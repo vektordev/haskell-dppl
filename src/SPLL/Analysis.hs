@@ -45,7 +45,7 @@ annotate adts env e = withNewTypeInfo
       (ReadNN _ name _) -> case lookup name env of
         (Just [EnumList l]) -> l
         (Just [EnumRange (VInt a, VInt b)]) -> [VInt i | i <- [a..b]]
-        _ -> error $ "Invalid Neural declaration for " ++ name ++ ".\n    found:" ++ show env
+        _ -> []
       (InjF _ name params) -> do
         let paramValues = map getValuesFromExpr params
         propagateValues adts name paramValues

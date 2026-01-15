@@ -345,13 +345,18 @@ rTypes = [("Int", TInt), ("Float", TFloat), ("Bool", TBool), ("Symbol", TSymbol)
 -- this function needs to handle compound types such as "Int -> Float" as well 
 -- first, we want to try parsing a compound type, and if that fails assume that a simple type is there instead.
 pType :: MonadParser m => m RType
-pType = dbg "type" $ do
-  t <- choice [pCompoundType, pSimpleType]
-  return t
+pType = dbg "type" $ choice [pEitherType, try pCompoundType, pSimpleType]
+
+pEitherType :: MonadParser m => m RType
+pEitherType = dbg "EitherType" $ do
+  keyword "Either"
+  lType <- SPLL.Parser.pType
+  rType <- SPLL.Parser.pType
+  return $ TEither lType rType
 
 pCompoundType :: MonadParser m => m RType
-pCompoundType = parens $ do
-  left <- pSimpleType
+pCompoundType = dbg "CompoundType" $ parens $ do
+  left <- SPLL.Parser.pType
   combinator <- pTypeCombinator
   right <- SPLL.Parser.pType
   return $ combinator left right
@@ -360,8 +365,8 @@ pCompoundType = parens $ do
       combinators = [("->", TArrow), ("," , Tuple)]
 
 pSimpleType :: MonadParser m => m RType
-pSimpleType =
-  parseFromList rTypes
+pSimpleType = dbg "SimpleType" $ 
+  choice [try $ parseFromList rTypes, pIdentifier <&> TADT]
 
 pList :: MonadParser m => m [Value]
 pList = do
@@ -410,7 +415,7 @@ pNeural = dbg "neural" $ do
 
 pNeuralMultiValue :: MonadParser m => m MultiValue
 pNeuralMultiValue = dbg "multiVal" $ do
-  choice [pMultiDiscretes, pMultiEither, pMultiTuple, pMultiADT]
+  choice [try pMultiTuple, pMultiDiscretes, pMultiADT, try pMultiEither]
 
 pMultiDiscretes :: MonadParser m => m MultiValue
 pMultiDiscretes = dbg "multiDisc" $ do
@@ -420,20 +425,18 @@ pMultiDiscretes = dbg "multiDisc" $ do
   return $ MultiDiscretes csv
 
 pMultiEither :: MonadParser m => m MultiValue
-pMultiEither = dbg "multiEith" $ do
+pMultiEither = dbg "multiEith" $ parens $ do
   l <- pNeuralMultiValue
   symbol "|"
   r <- pNeuralMultiValue
   return $ MultiEither l r
 
 pMultiTuple :: MonadParser m => m MultiValue
-pMultiTuple = dbg "multiEith" $ do
-  symbol "("
+pMultiTuple = dbg "multiTuple" $ parens $ do
   l <- pNeuralMultiValue
   symbol ","
   r <- pNeuralMultiValue
-  symbol ")"
-  return $ MultiEither l r
+  return $ MultiTuple l r
 
 pMultiADT :: MonadParser m => m MultiValue
 pMultiADT = dbg "multiADT" $ do
@@ -476,14 +479,14 @@ pFunction = dbg "function" $ do
   return (name, lambdas)
 
 pADT :: MonadParser m => m ADTDecl
-pADT = do
+pADT = dbg "ADT" $ do
   keyword "data"
   name <- pIdentifier
   symbol "="
   constrs <- pADTConstructor `sepBy` symbol "|"
   depth <- optional (keyword "depth" >> lexeme L.decimal)
   doesNotContinue
-  return ADTDecl {dataName=name, constructors=constrs, maxDepth=depth}
+  return $ ADTDecl {dataName=name, constructors=constrs, maxDepth=depth}
 
 pADTConstructor :: MonadParser m => m ADTConstructorDecl
 pADTConstructor = dbg "ADT Constr" $ do

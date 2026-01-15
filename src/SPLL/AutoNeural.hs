@@ -159,12 +159,12 @@ makePartitionPlan (Tuple a b) tag = TuplePlan (makePartitionPlan a tag1) (makePa
     where
       tag1 = (\(MultiTuple t1 _) -> t1) <$> tag
       tag2 = (\(MultiTuple _ t2) -> t2) <$> tag
---TODO: Add either.
+makePartitionPlan (TEither l r) (Just (MultiEither lVal rVal)) = EitherPlan (makePartitionPlan l (Just lVal)) (makePartitionPlan r (Just rVal))
 makePartitionPlan ty (Just tag) | isDiscrete ty = Discretes ty tag -- TODO: Validate that tag is sane for this.
 makePartitionPlan ty (Nothing) | isDiscrete ty = error "no enumeration range supplied for discrete value in AutoNeural."
 makePartitionPlan TFloat Nothing = Continuous
 makePartitionPlan TFloat a = error ("enum range supplied to continuous value in AutoNeural:" ++ show a)
-makePartitionPlan x y = error ("erroneous combination of type and tag in AutoNeural." ++ show x ++ show y)
+makePartitionPlan x y = error ("erroneous combination of type and tag in AutoNeural: " ++ show x ++ show y)
 
 --split a tag over tuples into a tuple of tags.
 splitTag :: Maybe Tag -> (Maybe Tag, Maybe Tag)
