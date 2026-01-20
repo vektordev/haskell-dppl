@@ -78,16 +78,16 @@ testInterpreter p (ArgmaxPTestCase name params res) = ioProperty $ do
   let resP' = runProb defaultCompilerConfig p (head (mockedParamsList 0)) res
   case resP' of
     Left err -> return $ counterexample err False
-    Right resP -> trace "HI1!" $ do
+    Right resP -> do
       let cntSamples = 100
       case mapM (runGen defaultCompilerConfig p) (take cntSamples (mockedParamsList paramCnt)) of
         Left err -> return $ counterexample err False
-        Right randVals -> trace "HI2!" $ do
+        Right randVals -> do
           samples <- evalRandIO (sequence randVals)
           let samplesP' = mapM (\(par, s) -> runProb defaultCompilerConfig p par s) (zip (take cntSamples (mockedParamsList (paramCnt * cntSamples))) samples)
           case samplesP' of 
             Left err -> return $ counterexample err False
-            Right samplesP -> trace "HI3!" $ return $ conjoin (map (\(s, p) -> counterexample ("Test Case " ++ name ++ ": Sample " ++ show s ++ " has highest probability: " ++ show p ++ " instead of sample " ++ show res ++ " with probability: " ++ show resP) (p `lessEqualsProbs` resP || s == res)) (zip samples samplesP))
+            Right samplesP -> return $ conjoin (map (\(s, p) -> counterexample ("Test Case " ++ name ++ ": Sample " ++ show s ++ " has highest probability: " ++ show p ++ " instead of sample " ++ show res ++ " with probability: " ++ show resP) (p `lessEqualsProbs` resP || s == res)) (zip samples samplesP))
 
 lessEqualsProbs :: IRValue -> IRValue -> Bool
 lessEqualsProbs (VFloat a) (VFloat b) = a <= b

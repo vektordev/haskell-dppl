@@ -21,12 +21,12 @@ evaluateMockNN part (VTuple a (VInt seed)) | a == VInt 0 = evalRand (randomMockN
 evaluateMockNN part (VTuple a (VTuple b (VInt seed))) | a == VInt 1 = evalRand (spikingMockNN part b) (mkStdGen seed)
 
 randomMockNN :: RandomGen g => PartitionPlan -> Rand g IRValue
+--randomMockNN part | trace ("randomMockNN: " ++ show part) False = undefined
 randomMockNN part@(Discretes _ _) = do
   let planSize = getSize part
-  uniformRands <- randomList
-  let firstRands = take planSize uniformRands
-  let sumRands = sum firstRands
-  let normalized = map (/ sumRands) firstRands
+  uniformRands <- randomList planSize
+  let sumRands = sum uniformRands
+  let normalized = map (/ sumRands) uniformRands
   return $ constructVList (map VFloat normalized)
 randomMockNN part@(EitherPlan planL planR) = do
   selector <- getRandom
@@ -39,7 +39,7 @@ randomMockNN part@(EitherPlan planL planR) = do
 
 spikingMockNN :: RandomGen g => PartitionPlan -> IRValue -> Rand g IRValue
 --spikingMockNN part val | trace ("spinkingNN: " ++ show part ++ " Value: " ++ show val) False = undefined
-spikingMockNN (Discretes TInt tgs) v = do
+spikingMockNN (Discretes _ tgs) v = do
   let idx = case tgs of
               MultiDiscretes eLst -> fromMaybe (error "Spinking element cannot be produced by NN") (elemIndex v (map valueToIR eLst))
               t -> error $ "Mock NN currently not supports the return type: " ++ show t
@@ -49,15 +49,14 @@ spikingMockNN (Discretes TInt tgs) v = do
   -- The coice of 0.1 is completely arbitrary. The algorithm used here is not good, but sufficient for now.
   -- Problem: The maximum value of the noise does not scale with the amount of possible values.
   -- The more values possible, the less prominent the spike will be
-  randomNumbers <- randomList <&> map (*0.1)
-  let noise = take size randomNumbers
+  noise <- randomList size <&> map (*0.1)
   let sumNoise = sum noise
   let spike = [if i == idx then 1 else 0 | i <- [0..size - 1]]
-  return $ constructVList (map (\(n, s) -> VFloat ((n + s) / (1 + sumNoise))) (zip noise spike)) -- Noise + spike normalized
+  return $ constructVList (map (\(n, s) -> VFloat ((n + s) / (1 + sumNoise))) (zip noise spike))  -- Noise + spike normalized
 spikingMockNN (EitherPlan planL planR) (VEither v) = do
   case v of
         Left l -> do
-          selector <- getRandomR (0.8, 1.0) :: RandomGen g => Rand g Double
+          selector <- getRandomR (0.8, 1.0) :: RandomGen g => Rand g Double 
           leftMock <- spikingMockNN planL l
           let VList lMockL = leftMock
           rightMock <- randomMockNN planR
@@ -73,10 +72,11 @@ spikingMockNN (EitherPlan planL planR) (VEither v) = do
           let res = VFloat selector : toList lMockL ++ toList rMockL
           return (constructVList res)
 
-randomList :: (RandomGen g, Random a) => Rand g [a]
-randomList = do
+randomList :: (RandomGen g, Random a) => Int -> Rand g [a]
+randomList 0 = return []
+randomList size = do
   x <- getRandom
-  xs <- randomList
+  xs <- randomList (size - 1)
   return (x:xs)
 
 symbolEnvName :: String

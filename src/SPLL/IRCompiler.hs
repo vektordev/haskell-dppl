@@ -346,8 +346,6 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=aChainName} l 
   let clauses = fcData meta
   let adts = adtDecls meta
   let lChainName = chainName (getTypeInfo l)
-  -- The FC algorith uses the body of the lambda as a starting point. This is no problem, because the body of the lamdbda is always equivalent to this apply
-  let (LambdaInfo _ lBodyCN, _) = findEquivalentLambda (fcData meta) lChainName
   
   -- This logic is here to wrap the expression back into lambdas if the lambda we look at returns a lambda
   let (LambdaInfo toInvCN lambdaBodyCN, tag) = findEquivalentLambda (fcData meta) lChainName
