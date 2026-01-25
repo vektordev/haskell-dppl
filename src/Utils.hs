@@ -16,6 +16,9 @@ concatMap2 :: (a -> ([b], [c])) -> [a] -> ([b], [c])
 concatMap2 f xs = (concat as, concat bs)
   where (as, bs) = unzip (map f xs)
 
+mapTup3 :: (a -> b) -> (a, a, a) -> (b, b, b)
+mapTup3 f (a, b, c) = (f a, f b, f c)
+
 -- ======== SUPPLY MONAD ========
 
 type Supply = State Int

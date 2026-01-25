@@ -14,6 +14,8 @@ import PrettyPrint
 import StandardLibrary
 
 import Debug.Trace
+import Data.List (find)
+import Utils
 
 -- basic strucutre:
 --  get the partition plan.
@@ -47,6 +49,7 @@ makeForwardDecl (name, (TArrow TSymbol target), tag) = "neural Network " ++ name
 data PartitionPlan = TuplePlan PartitionPlan PartitionPlan -- Logit layout: first, then second.
                    | EitherPlan PartitionPlan PartitionPlan -- Logit layout: flag, then left, then right
                    | Discretes RType MultiValue -- Logit layout: Enumerated values in order of "tagToValues"
+                   | ADTPlan String [(String, [PartitionPlan])] -- Logit layout: Flag for each constructor, then each field of each constructor
                    | Continuous -- Logit layout: Mu, Sigma
                    deriving Show
 
@@ -97,6 +100,18 @@ makeProbRec (EitherPlan a b) ix sample = (
     (bP, bDim, bBc) = makeProbRec b (ix + 1 + getSize a) (IRFromRight sample)
     pIsLeft = IRIndex (IRVar vector) (IRConst (VInt ix))
     pIsRight = IROp OpSub (IRConst $ VFloat 1) pIsLeft
+makeProbRec (ADTPlan adtName plans) ix sample = undefined
+  where 
+    constrIx = scanl (+) (ix + length plans) (map totalSize plans)
+    constrGuard constr = IRIf (IRInvoke $ IRApply (IRVar ("is" ++ (fst constr))) sample)
+    constrProbs constr cPlan cIx = mapTup3 (constrGuard constr) (makeProbADTConstr cPlan constr cIx sample)
+
+makeProbADTConstr :: [PartitionPlan] -> ADTConstructorDecl -> Int -> IRExpr -> (IRExpr, IRExpr, IRExpr)
+makeProbADTConstr plans (cName, fields) ix sample = foldr1 multProbs fieldsProb
+  where
+    multProbs (p0, d0, bc0) (p1, d1, bc1) = (IROp OpMult p0 p1, IROp OpPlus d0 d1, IROp OpPlus bc0 bc1)
+    fieldIx = scanl (+) 0 (map getSize plans)
+    fieldsProb = map (\(plan, pIx, fName) -> makeProbRec plan pIx (IRInvoke (IRApply (IRVar fName) sample))) (zip3 plans fieldIx (map fst fields))
 
 
 makeGen :: PartitionPlan -> String ->  IRExpr
@@ -112,9 +127,24 @@ makeGenRec (Discretes rty (MultiDiscretes vals)) ix = lottery (map valueToIR val
 makeGenRec Continuous ix = IROp OpPlus
   (IROp OpMult (IRSample IRNormal) (IRIndex (IRVar vector) (IRConst (VInt $ ix + 1))))
   (IRIndex (IRVar vector) (IRConst (VInt ix)))
+makeGenRec (ADTPlan adtName plans) ix = undefined
+  where
+    adts = undefined :: [ADTDecl]
+    Just adt = find ((== adtName) . dataName) adts
+    cumWeightsInv = map (\i -> totalWeight (ix + i) (length plans)) [0..(length plans - 1)]
+    constrToIx = zip [0..] (scanl (+) 0 (map totalSize plans))
+
+makeGenADTConstr :: [PartitionPlan] -> String -> Int -> IRExpr
+makeGenADTConstr plans name ix = IRInvoke (foldr (IRApply) (IRVar name) gens)
+  where
+    ixForField = scanl (+) 0 (map (getSize) plans) -- Comulative sums over number of fields
+    gens = map (uncurry makeGenRec) (zip plans ixForField)
 
 totalWeight :: Int -> Int -> IRExpr
 totalWeight nValues startIx = foldl (\rest ix -> IROp OpPlus rest (vecAt ix)) (IRConst (VInt 0)) [startIx.. startIx + nValues-1]
+
+totalSize :: (String, [PartitionPlan]) -> Int
+totalSize ps = sum (map getSize (snd ps))
 
 vecAt :: Int -> IRExpr
 vecAt ix = (IRIndex (IRVar vector) (IRConst (VInt ix)))
@@ -129,6 +159,14 @@ lottery values startIx = IRIf
     where
       nValues = length values
       wtfirst = IROp OpDiv (vecAt startIx) (totalWeight nValues startIx)
+
+constructorLottery :: [(String, [PartitionPlan])] -> Int -> Int -> IRExpr
+constructorLottery [] flagIx valueIx = IRError "No element was sampled. There was an error calculating weights!"
+constructorLottery (plan:plans) flagIx valueIx = IRIf (IROp OpLessThan (IRSample IRUniform) (wtfirst))
+  (makeGenADTConstr (snd plan) (fst plan) valueIx)
+  (constructorLottery plans (flagIx + 1) (valueIx + totalSize plan))
+  where
+    wtfirst = IROp OpDiv (vecAt flagIx) (totalWeight (length plans + 1) flagIx)
 
 getSize :: PartitionPlan -> Int
 getSize (TuplePlan a b) = getSize a + getSize b
@@ -160,6 +198,14 @@ makePartitionPlan (Tuple a b) tag = TuplePlan (makePartitionPlan a tag1) (makePa
       tag1 = (\(MultiTuple t1 _) -> t1) <$> tag
       tag2 = (\(MultiTuple _ t2) -> t2) <$> tag
 makePartitionPlan (TEither l r) (Just (MultiEither lVal rVal)) = EitherPlan (makePartitionPlan l (Just lVal)) (makePartitionPlan r (Just rVal))
+makePartitionPlan (TADT name) (Just (MultiADT cVals)) = ADTPlan name (map (\(cn, fields) -> (cn, map (uncurry makePartitionPlan) fields)) fieldMultiVals)
+  where
+    adts = undefined :: [ADTDecl]
+    Just adt = find ((== name) . dataName) adts
+    constrs = constructors adt
+    fieldRTypes = map (\(c, fs) -> (c, map snd fs)) constrs
+    fieldMultiVals = map (\(mCn, mVals) -> let Just c = lookup mCn fieldRTypes in (mCn, (zip c (map Just mVals)))) cVals
+    
 makePartitionPlan ty (Just tag) | isDiscrete ty = Discretes ty tag -- TODO: Validate that tag is sane for this.
 makePartitionPlan ty (Nothing) | isDiscrete ty = error "no enumeration range supplied for discrete value in AutoNeural."
 makePartitionPlan TFloat Nothing = Continuous
