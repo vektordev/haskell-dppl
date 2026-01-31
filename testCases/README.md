@@ -52,3 +52,5 @@ argmax_p(3)=3
 The key difference to PDF/CDF testing is that we don't specify a test point. All arguments of the argmax_p assertion are directly passed to the main function. Any neural network that takes a symbol as input behaves as if it recognized the value in its symbol input.
 
 For example, an MNist addition program, that would normally take two images as symbol inputs, could be tested using: ```argmax_p(3, 7)=10``` to test that for an image showing a 3 and an image showing a 7, 10 would be the most likely outcome of the program.
+
+Neural networks that output a ADT can currently be tested by creating a list with the head being the index of the constructor and each further element representing a field. This is a workaround for the test case parser not supporting ADTs
