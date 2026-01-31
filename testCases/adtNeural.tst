@@ -1,0 +1,9 @@
+argmax_p([0, 0, 3])=0
+argmax_p([0, 1, 3])=1
+argmax_p([0, 2, 3])=2
+argmax_p([0, 0, 4])=0
+argmax_p([0, 1, 4])=1
+argmax_p([0, 2, 4])=2
+argmax_p([0, 0, 5])=0
+argmax_p([0, 1, 5])=1
+argmax_p([0, 2, 5])=2

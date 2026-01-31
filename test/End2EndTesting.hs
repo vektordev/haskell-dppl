@@ -60,7 +60,7 @@ testInterpreter p (ProbTestCase name sample params (VFloat expectedProb, VFloat 
       counterexample ("Probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < 0.0001) .&&.
         counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim)
     Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
-    Right (Left err) -> counterexample err False
+    Right (Left err) -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
     Left err -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
 testInterpreter p (CumulTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = ioProperty $ do
   result <- try $ evaluate $ runInteg defaultCompilerConfig p params sample :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
@@ -69,7 +69,7 @@ testInterpreter p (CumulTestCase name sample params (VFloat expectedProb, VFloat
       counterexample ("Cmulative probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < 0.0001) .&&.
         counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim)
     Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
-    Right (Left err) -> counterexample err False
+    Right (Left err) -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
     Left err -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
 testInterpreter p (ArgmaxPTestCase name params res) = ioProperty $ do
   let paramCnt = length params
@@ -77,7 +77,7 @@ testInterpreter p (ArgmaxPTestCase name params res) = ioProperty $ do
   let mockedParamsList start = map mockedParams [[x .. x + (paramCnt-1)] | x <- [start, paramCnt..]]  -- [[((1, (p1, 0)), (1, (p2, 1)))], [(1, (p1, 2)), (1, (p2, 3))] ..]
   let resP' = runProb defaultCompilerConfig p (head (mockedParamsList 0)) res
   case resP' of
-    Left err -> return $ counterexample err False
+    Left err -> return $ counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
     Right resP -> do
       let cntSamples = 100
       case mapM (runGen defaultCompilerConfig p) (take cntSamples (mockedParamsList paramCnt)) of

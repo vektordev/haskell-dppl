@@ -6,6 +6,7 @@ module Utils where
 import Control.Monad.State
 import Data.Graph
 import Data.List (isPrefixOf)
+import Data.Functor ((<&>))
 
 splitByString :: String -> String -> (String, String)
 splitByString split orig | split `isPrefixOf` orig = ("", orig)
@@ -18,6 +19,23 @@ concatMap2 f xs = (concat as, concat bs)
 
 mapTup3 :: (a -> b) -> (a, a, a) -> (b, b, b)
 mapTup3 f (a, b, c) = (f a, f b, f c)
+
+mapToTup :: (a -> b) -> [a] -> [(a, b)]
+mapToTup f = map (\x -> (x, f x))
+
+mapAppendTup :: [(a, b)] -> [c] -> [(a, b, c)]
+mapAppendTup = zipWith (curry (\((x, y), z) -> (x, y, z)))
+
+uncurry3 :: (a -> b -> c -> d) -> (a, b, c) -> d
+uncurry3 f (a, b, c) = f a b c
+
+concatMapM :: Monad m => (a -> m [b]) -> [a] -> m [b]
+concatMapM f l = mapM f l <&> concat
+
+replaceAt :: [a] -> Int -> a -> [a]
+replaceAt _ n _ | n < 0 = error "No negative indices allowed"
+replaceAt (_:lst) 0 x = x:lst
+replaceAt (l:lst) n x = l:replaceAt lst (n-1) x
 
 -- ======== SUPPLY MONAD ========
 

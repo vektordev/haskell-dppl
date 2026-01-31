@@ -16,6 +16,7 @@ import StandardLibrary
 import Debug.Trace
 import Data.List (find)
 import Utils
+import Data.Maybe (fromJust)
 
 -- basic strucutre:
 --  get the partition plan.
@@ -25,21 +26,21 @@ import Utils
 --  provide sampling and inference.
 
 --implicit assumption: Neural Decl accepts a "TSymbol"-typed thing.
-makeAutoNeural :: CompilerConfig -> NeuralDecl -> IRFunGroup  
-makeAutoNeural conf (name, (TArrow TSymbol target), tag) =
-  IRFunGroup (name ++ "_auto") 
-    (Just (IRLambda symbol $ makeGen plan name, "Wrapper for the neural network function"))
-    (Just (IRLambda symbol $ makeProb conf plan name, "Inference function for neural network function")) Nothing (show plan)
-    where plan = makePartitionPlan target tag
-makeAutoNeural conf (name, rt, _) = error $ "Invalid neural declaration for " ++ name ++ ": Neural networks must be function TSymbol -> a"
+makeAutoNeural :: [ADTDecl] -> CompilerConfig -> NeuralDecl -> IRFunGroup
+makeAutoNeural adts conf (name, (TArrow TSymbol target), tag) =
+  IRFunGroup (name ++ "_auto")
+    (Just (IRLambda symbol $ makeGen adts plan name, "Wrapper for the neural network function"))
+    (Just (IRLambda symbol $ makeProb adts conf plan name, "Inference function for neural network function")) Nothing (show plan)
+    where plan = makePartitionPlan adts target tag
+makeAutoNeural adts conf (name, rt, _) = error $ "Invalid neural declaration for " ++ name ++ ": Neural networks must be function TSymbol -> a"
 
 --TODO: Output this into the output file somehow.
 -- yields a forward declaration of a neural network:
 -- includes a string representation of the partition plan, including constraints about outputted logits.
-makeForwardDecl :: NeuralDecl -> String
-makeForwardDecl (name, (TArrow TSymbol target), tag) = "neural Network " ++ name ++ " :: (" ++ show target ++ ")\n  with layout: " ++ plan_string plan ++ ",\n  dimensionality=" ++ show (getSize plan) ++ ".\n"
+makeForwardDecl :: [ADTDecl] -> NeuralDecl -> String
+makeForwardDecl adts (name, (TArrow TSymbol target), tag) = "neural Network " ++ name ++ " :: (" ++ show target ++ ")\n  with layout: " ++ plan_string plan ++ ",\n  dimensionality=" ++ show (getSize plan) ++ ".\n"
   where
-    plan = makePartitionPlan target tag
+    plan = makePartitionPlan adts target tag
     plan_string (TuplePlan first second) = plan_string first ++ " x " ++ plan_string second
     plan_string (EitherPlan left right) = "[1](0..1)" ++ plan_string left ++ " + " ++ plan_string right
     plan_string p@(Discretes ty tag) = "[" ++ show (getSize p) ++ "](softmax'ed)"
@@ -59,10 +60,10 @@ vector = "l_x_neural_out"
 symbol :: String
 symbol = "l_x_neural_in"
 
-makeProb :: CompilerConfig -> PartitionPlan -> String -> IRExpr
-makeProb conf plan nn_name = IRLambda "sample" $ IRLetIn vector (IREvalNN nn_name (IRVar "l_x_neural_in")) (IRTCons m sndRet)
-  where 
-    (m, dim, bc) = (makeProbRec plan 0 (IRVar "sample"))
+makeProb :: [ADTDecl] -> CompilerConfig -> PartitionPlan -> String -> IRExpr
+makeProb adts conf plan nn_name = IRLambda "sample" $ IRLetIn vector (IREvalNN nn_name (IRVar "l_x_neural_in")) (IRTCons m sndRet)
+  where
+    (m, dim, bc) = (makeProbRec adts plan 0 (IRVar "sample"))
     sndRet = if countBranches conf then IRTCons dim bc else dim
 
 -- Takes a Tag from a Discretes type and a sample, and builds code that returns the index of the sample in the tag.
@@ -72,11 +73,11 @@ indexOf :: MultiValue -> IRExpr -> IRExpr
 indexOf (MultiDiscretes vals) sample = invokeStandardFunction stdIndexOf [sample, IRConst (constructVList (map valueToIR vals))]
 
 
-makeProbRec :: PartitionPlan -> Int -> IRExpr -> (IRExpr, IRExpr, IRExpr)
-makeProbRec (Discretes rty tag) ix sample = (p, IRConst $ VFloat 0, IRConst (VFloat 0))
+makeProbRec :: [ADTDecl] -> PartitionPlan -> Int -> IRExpr -> (IRExpr, IRExpr, IRExpr)
+makeProbRec adts (Discretes rty tag) ix sample = (noAny sample p, IRConst $ VFloat 0, IRConst (VFloat 0))
   where
     p = IRIndex (IRVar vector) (IROp OpPlus (indexOf tag sample) (IRConst (VInt ix)))
-makeProbRec Continuous ix sample = (p, IRConst $ VFloat 0, IRConst (VFloat 0))
+makeProbRec adts Continuous ix sample = (noAny sample p, IRConst $ VFloat 0, IRConst (VFloat 0))
   where
     p = IRDensity IRNormal (IROp OpSub
           (IROp OpDiv sample (IRIndex (IRVar vector) (IRConst (VInt $ ix + 1))))
@@ -85,60 +86,65 @@ makeProbRec Continuous ix sample = (p, IRConst $ VFloat 0, IRConst (VFloat 0))
 --  probabilities of the two tuple elements are multiplied.
 --  dims should be added.
 --  branch counts of both sides should be added.
-makeProbRec (TuplePlan a b) ix sample = (IROp OpMult pa pb, IROp OpPlus dima dimb, IROp OpPlus bca bcb)
+makeProbRec adts (TuplePlan a b) ix sample = (noAny sample (IROp OpMult pa pb), noAny0 sample (IROp OpPlus dima dimb), noAny0 sample (IROp OpPlus bca bcb))
   where
-    (pa, dima, bca) = makeProbRec a ix (IRTFst sample)
-    (pb, dimb, bcb) = makeProbRec b (ix + getSize a) (IRTSnd sample)
-makeProbRec (EitherPlan a b) ix sample = (
-  IRIf (IRIsLeft sample) 
-    (IROp OpMult pIsLeft aP) 
-    (IROp OpMult pIsRight bP),
+    (pa, dima, bca) = makeProbRec adts a ix (IRTFst sample)
+    (pb, dimb, bcb) = makeProbRec adts b (ix + getSize a) (IRTSnd sample)
+makeProbRec adts (EitherPlan a b) ix sample = (noAny sample 
+  (IRIf (IRIsLeft sample)
+    (IROp OpMult pIsLeft aP)
+    (IROp OpMult pIsRight bP)),
   -- Is choosing the bc here correct, or should they be added? 
-  IRIf (IRIsLeft sample) aDim bDim, IRIf (IRIsLeft sample) aBc bBc)
+  noAny0 sample (IRIf (IRIsLeft sample) aDim bDim), noAny0 sample (IRIf (IRIsLeft sample) aBc bBc))
   where
-    (aP, aDim, aBc) = makeProbRec a (ix + 1) (IRFromLeft sample)
-    (bP, bDim, bBc) = makeProbRec b (ix + 1 + getSize a) (IRFromRight sample)
+    (aP, aDim, aBc) = makeProbRec adts a (ix + 1) (IRFromLeft sample)
+    (bP, bDim, bBc) = makeProbRec adts b (ix + 1 + getSize a) (IRFromRight sample)
     pIsLeft = IRIndex (IRVar vector) (IRConst (VInt ix))
     pIsRight = IROp OpSub (IRConst $ VFloat 1) pIsLeft
-makeProbRec (ADTPlan adtName plans) ix sample = undefined
-  where 
+makeProbRec adts (ADTPlan adtName plans) ix sample = (noAny sample p, noAny0 sample dim, noAny0 sample bc)
+  where
+    Just adt = find ((== adtName) . dataName) adts
+    constrsInPlan = filter ((`elem` map fst plans) . fst) (constructors adt)
+    constrsWithPlan = mapToTup (fromJust . (`lookup` plans) . fst) constrsInPlan
+    constrsWithPlanAndIx = mapAppendTup constrsWithPlan constrIx
     constrIx = scanl (+) (ix + length plans) (map totalSize plans)
-    constrGuard constr = IRIf (IRInvoke $ IRApply (IRVar ("is" ++ (fst constr))) sample)
-    constrProbs constr cPlan cIx = mapTup3 (constrGuard constr) (makeProbADTConstr cPlan constr cIx sample)
+    constrGuard constr v = IRIf (IRInvoke $ IRApply (IRVar ("is" ++ fst constr)) sample) v (IRConst $ VFloat 0)
+    constrProb constr cPlan cIx = mapTup3 (constrGuard constr) (makeProbADTConstr adts cPlan constr cIx sample)
+    constrProbs = map (uncurry3 constrProb) constrsWithPlanAndIx
+    opPlus3 (a1, b1, c1) (a2, b2, c2) = (IROp OpPlus a1 a2, IROp OpPlus b1 b2, IROp OpPlus c1 c2)
+    (p, dim, bc) = foldr opPlus3 (IRConst $ VFloat 0, IRConst $ VFloat 0, IRConst $ VFloat 0) constrProbs
 
-makeProbADTConstr :: [PartitionPlan] -> ADTConstructorDecl -> Int -> IRExpr -> (IRExpr, IRExpr, IRExpr)
-makeProbADTConstr plans (cName, fields) ix sample = foldr1 multProbs fieldsProb
+
+makeProbADTConstr :: [ADTDecl] -> [PartitionPlan] -> ADTConstructorDecl -> Int -> IRExpr -> (IRExpr, IRExpr, IRExpr)
+makeProbADTConstr adts plans (cName, fields) ix sample = foldr1 multProbs fieldsProb
   where
     multProbs (p0, d0, bc0) (p1, d1, bc1) = (IROp OpMult p0 p1, IROp OpPlus d0 d1, IROp OpPlus bc0 bc1)
-    fieldIx = scanl (+) 0 (map getSize plans)
-    fieldsProb = map (\(plan, pIx, fName) -> makeProbRec plan pIx (IRInvoke (IRApply (IRVar fName) sample))) (zip3 plans fieldIx (map fst fields))
+    fieldIx = scanl (+) ix (map getSize plans)
+    fieldsProb = map (\(plan, pIx, fName) -> makeProbRec adts plan pIx (IRInvoke (IRApply (IRVar fName) sample))) (zip3 plans fieldIx (map fst fields))
 
 
-makeGen :: PartitionPlan -> String ->  IRExpr
-makeGen plan nn_name = IRLetIn vector (IREvalNN nn_name (IRVar "l_x_neural_in")) (makeGenRec plan 0)
+makeGen :: [ADTDecl] -> PartitionPlan -> String ->  IRExpr
+makeGen adts plan nn_name = IRLetIn vector (IREvalNN nn_name (IRVar "l_x_neural_in")) (makeGenRec adts plan 0)
 
-makeGenRec :: PartitionPlan -> Int -> IRExpr
-makeGenRec (TuplePlan a b) ix = IRTCons (makeGenRec a ix) (makeGenRec b (ix + getSize a)) 
-makeGenRec (EitherPlan a b) ix = IRIf 
-  (IROp OpLessThan (IRSample IRUniform) (IRIndex (IRVar vector) (IRConst (VInt ix)))) 
-    (IRLeft $ makeGenRec a (ix + 1)) 
-    (IRRight $ makeGenRec b (ix + 1 + getSize a))
-makeGenRec (Discretes rty (MultiDiscretes vals)) ix = lottery (map valueToIR vals) ix
-makeGenRec Continuous ix = IROp OpPlus
+makeGenRec :: [ADTDecl] -> PartitionPlan -> Int -> IRExpr
+makeGenRec adts (TuplePlan a b) ix = IRTCons (makeGenRec adts a ix) (makeGenRec adts b (ix + getSize a))
+makeGenRec adts (EitherPlan a b) ix = IRIf
+  (IROp OpLessThan (IRSample IRUniform) (IRIndex (IRVar vector) (IRConst (VInt ix))))
+    (IRLeft $ makeGenRec adts a (ix + 1))
+    (IRRight $ makeGenRec adts b (ix + 1 + getSize a))
+makeGenRec adts (Discretes rty (MultiDiscretes vals)) ix = lottery (map valueToIR vals) ix
+makeGenRec adts Continuous ix = IROp OpPlus
   (IROp OpMult (IRSample IRNormal) (IRIndex (IRVar vector) (IRConst (VInt $ ix + 1))))
   (IRIndex (IRVar vector) (IRConst (VInt ix)))
-makeGenRec (ADTPlan adtName plans) ix = undefined
+makeGenRec adts (ADTPlan adtName plans) ix = constructorLottery adts plans ix (ix + length (constructors adt))
   where
-    adts = undefined :: [ADTDecl]
     Just adt = find ((== adtName) . dataName) adts
-    cumWeightsInv = map (\i -> totalWeight (ix + i) (length plans)) [0..(length plans - 1)]
-    constrToIx = zip [0..] (scanl (+) 0 (map totalSize plans))
 
-makeGenADTConstr :: [PartitionPlan] -> String -> Int -> IRExpr
-makeGenADTConstr plans name ix = IRInvoke (foldr (IRApply) (IRVar name) gens)
+makeGenADTConstr :: [ADTDecl] -> [PartitionPlan] -> String -> Int -> IRExpr
+makeGenADTConstr adts plans name ix = IRInvoke (foldl (IRApply) (IRVar name) gens)
   where
     ixForField = scanl (+) 0 (map (getSize) plans) -- Comulative sums over number of fields
-    gens = map (uncurry makeGenRec) (zip plans ixForField)
+    gens = map (uncurry (makeGenRec adts)) (zip plans ixForField)
 
 totalWeight :: Int -> Int -> IRExpr
 totalWeight nValues startIx = foldl (\rest ix -> IROp OpPlus rest (vecAt ix)) (IRConst (VInt 0)) [startIx.. startIx + nValues-1]
@@ -160,11 +166,11 @@ lottery values startIx = IRIf
       nValues = length values
       wtfirst = IROp OpDiv (vecAt startIx) (totalWeight nValues startIx)
 
-constructorLottery :: [(String, [PartitionPlan])] -> Int -> Int -> IRExpr
-constructorLottery [] flagIx valueIx = IRError "No element was sampled. There was an error calculating weights!"
-constructorLottery (plan:plans) flagIx valueIx = IRIf (IROp OpLessThan (IRSample IRUniform) (wtfirst))
-  (makeGenADTConstr (snd plan) (fst plan) valueIx)
-  (constructorLottery plans (flagIx + 1) (valueIx + totalSize plan))
+constructorLottery :: [ADTDecl] -> [(String, [PartitionPlan])] -> Int -> Int -> IRExpr
+constructorLottery adts [] flagIx valueIx = IRError "No element was sampled. There was an error calculating weights!"
+constructorLottery adts (plan:plans) flagIx valueIx = IRIf (IROp OpLessThan (IRSample IRUniform) (wtfirst))
+  (makeGenADTConstr adts (snd plan) (fst plan) valueIx)
+  (constructorLottery adts plans (flagIx + 1) (valueIx + totalSize plan))
   where
     wtfirst = IROp OpDiv (vecAt flagIx) (totalWeight (length plans + 1) flagIx)
 
@@ -192,25 +198,24 @@ isDiscrete (ListOf ty) = isDiscrete ty
 isDiscrete (Tuple ty1 ty2) = isDiscrete ty1 && isDiscrete ty2
 isDiscrete other = False
 
-makePartitionPlan :: RType -> Maybe MultiValue -> PartitionPlan
-makePartitionPlan (Tuple a b) tag = TuplePlan (makePartitionPlan a tag1) (makePartitionPlan b tag2)
+makePartitionPlan :: [ADTDecl] -> RType -> Maybe MultiValue -> PartitionPlan
+makePartitionPlan adts (Tuple a b) tag = TuplePlan (makePartitionPlan adts a tag1) (makePartitionPlan adts b tag2)
     where
       tag1 = (\(MultiTuple t1 _) -> t1) <$> tag
       tag2 = (\(MultiTuple _ t2) -> t2) <$> tag
-makePartitionPlan (TEither l r) (Just (MultiEither lVal rVal)) = EitherPlan (makePartitionPlan l (Just lVal)) (makePartitionPlan r (Just rVal))
-makePartitionPlan (TADT name) (Just (MultiADT cVals)) = ADTPlan name (map (\(cn, fields) -> (cn, map (uncurry makePartitionPlan) fields)) fieldMultiVals)
+makePartitionPlan adts (TEither l r) (Just (MultiEither lVal rVal)) = EitherPlan (makePartitionPlan adts l (Just lVal)) (makePartitionPlan adts r (Just rVal))
+makePartitionPlan adts (TADT name) (Just (MultiADT cVals)) = ADTPlan name (map (\(cn, fields) -> (cn, map (uncurry (makePartitionPlan adts)) fields)) fieldMultiVals)
   where
-    adts = undefined :: [ADTDecl]
     Just adt = find ((== name) . dataName) adts
     constrs = constructors adt
     fieldRTypes = map (\(c, fs) -> (c, map snd fs)) constrs
     fieldMultiVals = map (\(mCn, mVals) -> let Just c = lookup mCn fieldRTypes in (mCn, (zip c (map Just mVals)))) cVals
-    
-makePartitionPlan ty (Just tag) | isDiscrete ty = Discretes ty tag -- TODO: Validate that tag is sane for this.
-makePartitionPlan ty (Nothing) | isDiscrete ty = error "no enumeration range supplied for discrete value in AutoNeural."
-makePartitionPlan TFloat Nothing = Continuous
-makePartitionPlan TFloat a = error ("enum range supplied to continuous value in AutoNeural:" ++ show a)
-makePartitionPlan x y = error ("erroneous combination of type and tag in AutoNeural: " ++ show x ++ show y)
+
+makePartitionPlan adts ty (Just tag) | isDiscrete ty = Discretes ty tag -- TODO: Validate that tag is sane for this.
+makePartitionPlan adts ty (Nothing) | isDiscrete ty = error "no enumeration range supplied for discrete value in AutoNeural."
+makePartitionPlan adts TFloat Nothing = Continuous
+makePartitionPlan adts TFloat a = error ("enum range supplied to continuous value in AutoNeural:" ++ show a)
+makePartitionPlan adts x y = error ("erroneous combination of type and tag in AutoNeural: " ++ show x ++ show y)
 
 --split a tag over tuples into a tuple of tags.
 splitTag :: Maybe Tag -> (Maybe Tag, Maybe Tag)
@@ -227,15 +232,11 @@ tupleFromValue :: Value -> (Value, Value)
 tupleFromValue (VTuple a b) = (a,b)
 tupelFromValue _non_tuple = error "supplied non-tuple value to tuple-shaped NN type."
 
-testConf = CompilerConfig {topKThreshold=Nothing, countBranches=False, verbose=2, optimizerLevel=2}
+noAny :: IRExpr -> IRExpr -> IRExpr
+noAny sample = IRIf (IRUnaryOp OpIsAny sample) (IRConst $ VFloat 1)
 
-test = do
-  let irdefs = IREnv [makeAutoNeural testConf ("readMNist", TArrow TSymbol TInt, Just $ MultiDiscretes (map VInt [0..9]))] []
-  putStrLn (pPrintIREnv irdefs)
-
-test2 = do
-  let irdefs = IREnv [makeAutoNeural testConf ("regressFloat", TArrow TSymbol TFloat, Nothing)] []
-  putStrLn (pPrintIREnv irdefs)
+noAny0 :: IRExpr -> IRExpr -> IRExpr
+noAny0 sample = IRIf (IRUnaryOp OpIsAny sample) (IRConst $ VFloat 0)
 
 --TODO: Needs MAR semantics for the VAny.
 --test3 = do

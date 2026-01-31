@@ -13,6 +13,7 @@ import Control.Monad.Random
 import Data.Functor ((<&>))
 import Debug.Trace
 import Data.Foldable (Foldable(toList))
+import Utils
 
 
 evaluateMockNN :: PartitionPlan -> IRValue -> IRValue
@@ -36,6 +37,14 @@ randomMockNN part@(EitherPlan planL planR) = do
   let VList rMockL = rightMock
   let res = VFloat selector : toList lMockL ++ toList rMockL
   return (constructVList res)
+randomMockNN part@(ADTPlan dataName constrs) = do
+  let cntConstrs = length constrs
+  selectors <- randomList cntConstrs
+  let selectorsNorm = map (/ sum selectors) selectors
+  mockedFieldLists <- concatMapM (mapM randomMockNN . snd) constrs
+  let mockedFields = concatMap (\(VList l) -> toList l) mockedFieldLists
+  let res = map VFloat selectors ++ mockedFields
+  return (constructVList res)
 
 spikingMockNN :: RandomGen g => PartitionPlan -> IRValue -> Rand g IRValue
 --spikingMockNN part val | trace ("spinkingNN: " ++ show part ++ " Value: " ++ show val) False = undefined
@@ -56,7 +65,7 @@ spikingMockNN (Discretes _ tgs) v = do
 spikingMockNN (EitherPlan planL planR) (VEither v) = do
   case v of
         Left l -> do
-          selector <- getRandomR (0.8, 1.0) :: RandomGen g => Rand g Double 
+          selector <- getRandomR (0.8, 1.0) :: RandomGen g => Rand g Double
           leftMock <- spikingMockNN planL l
           let VList lMockL = leftMock
           rightMock <- randomMockNN planR
@@ -71,6 +80,20 @@ spikingMockNN (EitherPlan planL planR) (VEither v) = do
           let VList rMockL = rightMock
           let res = VFloat selector : toList lMockL ++ toList rMockL
           return (constructVList res)
+spikingMockNN (ADTPlan dataName constrs) (VList lst) = do
+  let VInt constrSelect:fieldSpikes = toList lst
+
+  let cntConstrs = length constrs
+  selectors <- randomList cntConstrs
+  spikeProb <- getRandom <&> (* 0.8)
+  let spikingSelectors = replaceAt (map (* 0.2) selectors) constrSelect spikeProb
+  let selectorsNorm = map (/ sum spikingSelectors) spikingSelectors
+  let selectorsLst = map VFloat selectorsNorm
+
+  let constrFactory (cPlans, cIdx) = if cIdx == constrSelect then zipWithM spikingMockNN cPlans fieldSpikes else mapM randomMockNN cPlans
+  mockedFieldLists <- concatMapM constrFactory (zip (map snd constrs) [0..(cntConstrs - 1)])
+  let mockedFields = concatMap (\(VList l) -> toList l) mockedFieldLists
+  return $ constructVList (selectorsLst ++ mockedFields)
 
 randomList :: (RandomGen g, Random a) => Int -> Rand g [a]
 randomList 0 = return []

@@ -25,6 +25,7 @@ import SPLL.Typing.AlgebraicDataTypes
 import Data.Bifunctor (Bifunctor(bimap))
 import Utils
 import Control.Monad (foldM)
+import GHC.Stack (HasCallStack)
 
 type CompilerMonad a = WriterT [(String, IRExpr)] Supply a
 
@@ -42,7 +43,7 @@ data CompilerMetadata = CompilerMetadata {
 
 envToIR :: CompilerConfig -> Program -> IREnv
 envToIR conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb, noGenerate=noGen} p@Program{adts=adts} = optimizeEnv conf $ IREnv (-- map optimizer over all second elements of the tuples
-  map (makeAutoNeural conf) (neurals p) ++
+  map (makeAutoNeural adts conf) (neurals p) ++
   map (\(name, binding) ->
     let typeEnv = getGlobalTypeEnv p
         pt = pType $ getTypeInfo binding
@@ -647,6 +648,7 @@ getProbIndex es =
 compareValueExpr :: RType -> IRExpr -> IRExpr -> IRExpr
 compareValueExpr TFloat v sample = IRIf (IROp OpLessThan sample v) (IRConst $ VFloat 0) (IRConst $ VFloat 1)
 compareValueExpr TInt v sample = IRIf (IROp OpLessThan sample v) (IRConst $ VFloat 0) (IRConst $ VFloat 1)
+compareValueExpr TBool v sample = IRIf (IROp OpAnd (IRUnaryOp OpNot sample) v) (IRConst $ VFloat 0) (IRConst $ VFloat 1)
 compareValueExpr (Tuple ft st) v sample = IROp OpMult (compareValueExpr ft (IRTFst v) (IRTFst sample)) (compareValueExpr st (IRTSnd v) (IRTSnd sample))
 compareValueExpr (TEither lr rr) v sample =
   IRIf (IRIsLeft v)

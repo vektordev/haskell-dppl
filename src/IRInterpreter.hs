@@ -348,7 +348,7 @@ generate f neurals adts globalEnv env args (IRLetIn name decl body) = do
 generate f neurals adts globalEnv env args (IRVar name) | "_mock" `isSuffixOf` name && isJust (lookupNeural (iterate init name !! 5) neurals) = do
   let (rt, tags) = fromJust (lookupNeural (iterate init name !! 5) neurals)
   let realRT (TSymbol `TArrow` r) = r
-  let partPlan = makePartitionPlan (realRT rt) tags
+  let partPlan = makePartitionPlan adts (realRT rt) tags
   case lookup symbolEnvName env of
     Nothing -> error "No symbol found in the environment"
     Just sym -> do
@@ -379,11 +379,11 @@ generate f neurals adts globalEnv env [] (IREnumSum varname (VList values) expr)
     x <- generate f neurals adts globalEnv env [IRConst (VInt i)] (IRLambda varname expr)
     return $ sumValues x acc
     ) (VFloat 0) values
-  where sumValues = \(VFloat a) (VFloat b) -> VFloat $a+b
+  where sumValues = \(VFloat a) (VFloat b) -> VFloat $ a+b
 generate f neurals adts globalEnv env [] (IREvalNN name sym) = do
   let (rt, tags) = fromJust (lookupNeural name neurals)
   let realRT (TSymbol `TArrow` r) = r
-  let partPlan = makePartitionPlan (realRT rt) tags
+  let partPlan = makePartitionPlan adts (realRT rt) tags
   symVal <- generate f neurals adts globalEnv env [] sym
   return $ evaluateMockNN partPlan symVal
 generate f neurals adts globalEnv env args (IRIndex lstExpr idxExpr) = do
