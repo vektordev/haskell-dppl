@@ -1,0 +1,1 @@
+main = let a = Uniform in if a > 0.5 then 5.0 else a

@@ -1,0 +1,1 @@
+main = (if Uniform < 0.5 then \x -> x + 3.0 else \x -> x + 4.0)(10.0)
