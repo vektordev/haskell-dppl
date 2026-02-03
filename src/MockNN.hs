@@ -15,7 +15,11 @@ import Debug.Trace
 import Data.Foldable (Foldable(toList))
 import Utils
 
-
+-- Expected Syntax:
+-- Random Mock NN:
+--    (0, seed)
+-- Spinking Mock NN:
+--    (1, (spikeAt, seed))
 evaluateMockNN :: PartitionPlan -> IRValue -> IRValue
 --evaluateMockNN part val | trace ("evalMockNN: " ++ show part ++ " Value: " ++ show val) False = undefined
 evaluateMockNN part (VTuple a (VInt seed)) | a == VInt 0 = evalRand (randomMockNN part) (mkStdGen seed)

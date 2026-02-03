@@ -19,8 +19,9 @@ import Data.Foldable (asum)
 import qualified SPLL.CodeGenJulia
 import qualified SPLL.CodeGenPyTorch
 import Data.List (intercalate)
-import Text.Megaparsec (runParser)
+import Text.Megaparsec (runParser, sepBy)
 import Control.Monad.State (runStateT)
+import SPLL.Parser (pCSV)
 
 data GlobalOpts = GlobalOpts {
   inputFile :: String,
@@ -41,12 +42,16 @@ data CommandOpts =
     language :: Language,
     trunc :: Bool
   }
-  | GenerateOpts
+  | GenerateOpts {
+    paramsG :: [IRValue]
+  }
   | ProbabilityOpts{
-    posP :: IRValue
+    posP :: IRValue,
+    paramsP :: [IRValue]
   }
   | CumulativeOpts {
-    posC :: IRValue
+    posC :: IRValue,
+    paramsC :: [IRValue]
   } deriving Show
 
 data Language = Python | Julia deriving Show
@@ -70,6 +75,12 @@ readValue = eitherReader (\s ->
   case runParser (runStateT pValue 0) "CLI" s of
     Left err -> Left (errorBundlePretty err)
     Right (val, _) -> Right (valueToIR val))
+
+readValueList :: ReadM [IRValue]
+readValueList = eitherReader (\s -> 
+  case runParser (runStateT pCSV 0) "CLI" s of
+    Left err -> Left (errorBundlePretty err)
+    Right (val, _) -> Right (map valueToIR val))
 
 parseGlobalOpts :: Parser GlobalOpts
 parseGlobalOpts = GlobalOpts
@@ -135,7 +146,11 @@ parseCompileOpts = CompileOpts
             <> help "Truncates boilerplate from the generated code")
 
 parseGenerateOpts :: Parser CommandOpts
-parseGenerateOpts = pure GenerateOpts
+parseGenerateOpts = GenerateOpts
+        <$> option readValueList
+            ( short 'p'
+            <> metavar "PARAMS"
+            <> help "Parameters passed to the main functions. List of values separated by commas. Make sure to use the correct datatypes. E.g., use 3.0 for a float or 3 for an integer.")
 
 parseProbabilityOpts :: Parser CommandOpts
 parseProbabilityOpts = ProbabilityOpts
@@ -143,6 +158,10 @@ parseProbabilityOpts = ProbabilityOpts
             ( short 'x'
             <> metavar "SAMPLE"
             <> help "Sample value to calculate inference for. Make sure to use the correct datatypes. E.g., use 3.0 for a float or 3 for an integer.")
+        <*> option readValueList
+            ( short 'p'
+            <> metavar "PARAMS"
+            <> help "Parameters passed to the main functions. List of values separated by commas. Make sure to use the correct datatypes. E.g., use 3.0 for a float or 3 for an integer.")
 
 parseIntegrateOpts :: Parser CommandOpts
 parseIntegrateOpts = CumulativeOpts
@@ -150,6 +169,10 @@ parseIntegrateOpts = CumulativeOpts
             ( short 'x'
             <> metavar "SAMPLE"
             <> help "Sample value to calculate inference for. Make sure to use the correct datatypes. E.g., use 3.0 for a float or 3 for an integer.")
+        <*> option readValueList
+            ( short 'p'
+            <> metavar "PARAMS"
+            <> help "Parameters passed to the main functions. List of values separated by commas. Make sure to use the correct datatypes. E.g., use 3.0 for a float or 3 for an integer.")
 
 
 -- Entry point for the program, parse CLI arguments and pass execution to transpile
@@ -172,21 +195,21 @@ transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, 
       case codeGenToLang lang trnc conf prog of
         Left err -> handleError err
         Right trans -> writeOutputFile outFile trans
-    GenerateOpts -> do
+    GenerateOpts {paramsG=params} -> do
       -- TODO: Nicer Output
-      case runGen conf prog [] of
+      case runGen conf prog params of
         Left err -> handleError err
         Right randVal -> do
           val <- evalRandIO randVal
           print ("X=" ++ show val)
-    ProbabilityOpts{posP=x} ->
+    ProbabilityOpts{posP=x, paramsP=params} ->
       -- TODO: Nicer Output
-      case runProb conf prog [] x of
+      case runProb conf prog params x of
         Left err -> handleError err
         Right p -> print ("p(X="++ show x ++ ")=" ++ show p)
-    CumulativeOpts{posC=x} ->
+    CumulativeOpts{posC=x, paramsC=params} ->
       -- TODO: Nicer Output
-      case runInteg conf prog [] x of 
+      case runInteg conf prog params x of 
         Left err -> handleError err
         Right i -> print ("CDF("++ show x ++ ")=" ++ show i)
 

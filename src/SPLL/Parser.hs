@@ -7,6 +7,7 @@ module SPLL.Parser (
 , pExpr
 , pIdentifier
 , pValue
+, pCSV
 , tryParseProgram
 , tryParseExpr
 , reserved
