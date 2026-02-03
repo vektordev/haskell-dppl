@@ -1,0 +1,3 @@
+data MyADT = A a1 :: Int | B b1::Int
+neural adtNeural :: (Symbol -> MyADT) of {A [0, 1, 2] | B [3, 4, 5]}
+main sym = let x = adtNeural(sym) in if isA x then a1 x else b1 x
