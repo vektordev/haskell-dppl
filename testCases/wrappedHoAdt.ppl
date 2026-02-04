@@ -1,2 +1,2 @@
-data adt = C1 f1::Float f2::Float | C2 f3::Bool f4::Float
+data adt = C1 f1::Float, f2::Float | C2 f3::Bool, f4::Float
 main = map f1 [(C1 1.0 0.125), (C1 2.0 0.25), (C1 3.0 0.5)]

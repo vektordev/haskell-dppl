@@ -492,7 +492,11 @@ pADT = dbg "ADT" $ do
 pADTConstructor :: MonadParser m => m ADTConstructorDecl
 pADTConstructor = dbg "ADT Constr" $ do
   name <- pIdentifier
-  rts <- many $ try $ do
+  fields <- try pADTField `sepBy` symbol ","
+  return (name, fields)
+
+pADTField :: MonadParser m => m (String, RType)
+pADTField = do
     fieldName <- pIdentifier
     symbol "::"
     fieldType <- choice [SPLL.Parser.pType <&> Left, pIdentifier <&> Right]
@@ -500,7 +504,6 @@ pADTConstructor = dbg "ADT Constr" $ do
                     Left rt -> rt
                     Right adt -> TADT adt
     return (fieldName, fieldRT)
-  return (name, rts)
 
 doesNotContinue :: MonadParser m => m ()
 doesNotContinue = choice [eof, void eol]
