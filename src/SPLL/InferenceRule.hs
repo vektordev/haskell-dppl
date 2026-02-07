@@ -42,6 +42,17 @@ mirrorC (SubExprNIsEnumerable 0) = SubExprNIsEnumerable 1
 mirrorC (SubExprNIsEnumerable 1) = SubExprNIsEnumerable 0
 mirrorC c = error ("can not mirror Constraint: " ++ show c)
 
+equalsLeft :: InferenceRule
+equalsLeft = InferenceRule
+                    StubEquals
+                    [SubExprNIsType 0 Deterministic]
+                    "equalsLeft"
+                    (const Integrate)
+                    (Forall [TV "a"] (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TBool)))
+
+equalsRight :: InferenceRule
+equalsRight = mirror2 equalsLeft
+
 greaterThanLeft :: InferenceRule
 greaterThanLeft = InferenceRule
                     StubGreaterThan
@@ -200,6 +211,8 @@ errorr = InferenceRule
 
 allAlgorithms :: [InferenceRule]
 allAlgorithms = [
+  equalsLeft,
+  equalsRight,
   ifThenElse,
   theta,
   thetaSubTree,

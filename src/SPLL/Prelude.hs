@@ -162,6 +162,8 @@ sfromRight :: Expr -> Expr
 sfromRight x = injF "fromRight" [x]
 
 -- Boolean Algebra
+(#==#) :: Expr -> Expr -> Expr
+(#==#) = Equals makeTypeInfo
 
 (#>#) :: Expr -> Expr -> Expr
 (#>#) = GreaterThan makeTypeInfo

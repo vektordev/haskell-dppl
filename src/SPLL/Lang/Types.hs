@@ -43,6 +43,7 @@ data Expr =
               -- Boolean Operations
               | GreaterThan TypeInfo Expr Expr
               | LessThan TypeInfo Expr Expr
+              | Equals TypeInfo Expr Expr
               | And TypeInfo Expr Expr
               | Or TypeInfo Expr Expr
               | Not TypeInfo Expr
@@ -56,6 +57,7 @@ data Expr =
 data ExprStub = StubIfThenElse
               | StubGreaterThan
               | StubLessThan
+              | StubEquals
               | StubThetaI
               | StubSubtree
               | StubUniform

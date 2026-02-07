@@ -38,6 +38,7 @@ pPrintExpr (Subtree _ e n) i = "Subtree_" ++ show n ++ "(" ++ pPrintExpr e i ++ 
 pPrintExpr (Cons _ h t) i = pPrintExpr h i ++ " : " ++ pPrintExpr t i
 pPrintExpr (TCons _ h t) i = "(" ++ pPrintExpr h i ++ ", " ++ pPrintExpr t i ++ ")"
 pPrintExpr (Null _) _ = "null"
+pPrintExpr (Equals _ a b) i = "(" ++ pPrintExpr a i ++ " == " ++ pPrintExpr b i ++ ")"
 pPrintExpr (GreaterThan _ a b) i = "(" ++ pPrintExpr a i ++ " > " ++ pPrintExpr b i ++ ")"
 pPrintExpr (LessThan _ a b) i = "(" ++ pPrintExpr a i ++ " < " ++ pPrintExpr b i ++ ")"
 pPrintExpr (And _ a b) i = "(" ++ pPrintExpr a i ++ " && " ++ pPrintExpr b i ++ ")"

@@ -597,6 +597,12 @@ infer env expr = case expr of
       (s2, cs2, t2, et) <- applyOpArg env e s1 cs1 t1
       return (s2, cs2, t2, Not (setPType ti t2) et)
 
+  Equals ti e1 e2 -> do
+      (s1, cs1, t1) <- compInf
+      (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
+      (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
+      return (s3, cs3, t3, Equals (setPType ti t3) et1 et2)
+
   GreaterThan ti e1 e2 -> do
       (s1, cs1, t1) <- compInf
       (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
@@ -671,7 +677,7 @@ infer env expr = case expr of
 
   Error ti e -> return (emptySubst, [], Deterministic, Error (setPType ti Deterministic) e)
 
-  _ -> error (show expr)
+  _ -> error $ "No PType inference algorithm known for " ++ (show expr)
 
 
 normalize :: DScheme -> DScheme

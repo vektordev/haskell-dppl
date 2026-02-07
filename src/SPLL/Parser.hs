@@ -678,7 +678,7 @@ listManipulationOpList :: [([Char], Expr -> Expr -> Expr)]
 listManipulationOpList = [(":", (#:#))]
 
 cmpOpList :: [([Char], Expr -> Expr -> Expr)]
-cmpOpList = [(">", (#>#)), ("<", (#<#)), (":", (#:#))]
+cmpOpList = [(">", (#>#)), ("<", (#<#)), (":", (#:#)), ("==", (#==#))]
 
 funLikeOps :: [([Char], Expr -> Expr)]
 funLikeOps = [("not", (#!#))]

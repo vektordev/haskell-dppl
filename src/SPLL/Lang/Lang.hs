@@ -61,6 +61,7 @@ toStub expr = case expr of
   IfThenElse {}  -> StubIfThenElse
   GreaterThan {} -> StubGreaterThan
   LessThan {}    -> StubLessThan
+  Equals {}      -> StubEquals
   And {}         -> StubAnd
   Or {}          -> StubOr
   (ThetaI _ _ _) -> StubThetaI
@@ -90,6 +91,7 @@ exprMap f expr = case expr of
   (IfThenElse t a b c) -> IfThenElse (tInfoMap f t) (exprMap f b) (exprMap f b) (exprMap f c)
   (GreaterThan t a b) -> GreaterThan (tInfoMap f t) (exprMap f a) (exprMap f b)
   (LessThan t a b) -> LessThan (tInfoMap f t) (exprMap f a) (exprMap f b)
+  (Equals t a b) -> Equals (tInfoMap f t) (exprMap f a) (exprMap f b)
   (ThetaI t a x) -> ThetaI (tInfoMap f t) (exprMap f a) x
   (Subtree t a x) -> Subtree (tInfoMap f t) (exprMap f a) x
   (Uniform t) -> Uniform (tInfoMap f t)
@@ -141,6 +143,7 @@ tMapHead f expr = case expr of
   (IfThenElse _ a b c) -> IfThenElse (f expr) a b c
   (GreaterThan _ a b) -> GreaterThan (f expr) a b
   (LessThan _ a b) -> LessThan (f expr) a b
+  (Equals _ a b) -> Equals (f expr) a b
   (ThetaI _ a x) -> ThetaI (f expr) a x
   (Subtree _ a x) -> Subtree (f expr) a x
   (Uniform _) -> Uniform (f expr)
@@ -168,6 +171,7 @@ tMapTails f expr = case expr of
   (IfThenElse t a b c) -> IfThenElse t (tMap f a) (tMap f b) (tMap f c)
   (GreaterThan t a b) -> GreaterThan t (tMap f a) (tMap f b)
   (LessThan t a b) -> LessThan t (tMap f a) (tMap f b)
+  (Equals t a b) -> Equals t (tMap f a) (tMap f b)
   (ThetaI t a x) -> ThetaI t (tMap f a) x
   (Subtree t a x) -> Subtree t (tMap f a) x
   (Uniform t) -> Uniform t
@@ -194,6 +198,7 @@ tMap f expr = case expr of
   (IfThenElse _ a b c) -> IfThenElse (f expr) (tMap f a) (tMap f b) (tMap f c)
   (GreaterThan _ a b) -> GreaterThan (f expr) (tMap f a) (tMap f b)
   (LessThan _ a b) -> LessThan (f expr) (tMap f a) (tMap f b)
+  (Equals _ a b) -> Equals (f expr) (tMap f a) (tMap f b)
   (ThetaI _ a x) -> ThetaI (f expr) (tMap f a) x
   (Subtree _ a x) -> Subtree (f expr) (tMap f a) x
   (Uniform _) -> Uniform (f expr)
@@ -224,6 +229,7 @@ tMapProg f (Program decls neural adts) = Program (zip (map fst decls) (map (tMap
 getBinaryConstructor :: Expr -> (TypeInfo -> Expr -> Expr -> Expr)
 getBinaryConstructor GreaterThan {} = GreaterThan
 getBinaryConstructor LessThan {} = LessThan
+getBinaryConstructor Equals {} = Equals
 getBinaryConstructor Cons {} = Cons
 getBinaryConstructor TCons {} = TCons
 getBinaryConstructor And {} = And
@@ -285,6 +291,7 @@ getSubExprs expr = case expr of
   (IfThenElse _ a b c) -> [a,b,c]
   (GreaterThan _ a b) -> [a,b]
   (LessThan _ a b) -> [a,b]
+  (Equals _ a b) -> [a,b]
   (ThetaI _ a _) -> [a]
   (Subtree _ a _) -> [a]
   (Uniform _) -> []
@@ -327,6 +334,7 @@ setSubExprs expr [a] = case expr of
 setSubExprs expr [a,b] = case expr of
   GreaterThan t _ _ -> GreaterThan t a b
   LessThan t _ _ -> LessThan t a b
+  Equals t _ _ -> Equals t a b
   And t _ _ -> And t a b
   Or t _ _ -> Or t a b
   Cons t _ b -> Cons t a b
@@ -348,6 +356,7 @@ getTypeInfo expr = case expr of
   (IfThenElse t _ _ _)  -> t
   (GreaterThan t _ _)   -> t
   (LessThan t _ _)      -> t
+  (Equals t _ _)        -> t
   (ThetaI t _ _)        -> t
   (Subtree t _ _)       -> t
   (Uniform t)           -> t
@@ -374,6 +383,7 @@ setTypeInfo expr t = case expr of
   (IfThenElse _ a b c)  -> IfThenElse t a b c
   (GreaterThan _ a b)   -> GreaterThan t a b
   (LessThan _ a b)      -> LessThan t a b
+  (Equals _ a b)        -> Equals t a b
   (ThetaI _ a b)        -> ThetaI t a b
   (Subtree _ a b)       -> Subtree t a b
   (Uniform _)           -> Uniform t
@@ -506,6 +516,7 @@ printFlat expr = case expr of
   IfThenElse {} -> "IfThenElse"
   GreaterThan {} -> "GreaterThan"
   LessThan {} -> "LessThan"
+  Equals {} -> "Equals"
   (ThetaI _ _ i) -> "Theta_" ++ show i
   (Subtree _ _ i) -> "Subtree_" ++ show i
   Uniform {} -> "Uniform"
@@ -532,6 +543,7 @@ printFlatNoReq expr = case expr of
   IfThenElse {} -> "IfThenElse"
   GreaterThan {} -> "GreaterThan"
   LessThan {} -> "LessThan"
+  Equals {} -> "Equals"
   (ThetaI _ _ i) -> "Theta_" ++ show i
   (Subtree _ _ i) -> "Subtree_" ++ show i
   Uniform {} -> "Uniform"
