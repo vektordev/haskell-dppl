@@ -68,7 +68,7 @@ envToIR conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb, noGenerat
     toGenDecl name expr = (expr, "Generates a random sample of the " ++ name ++ " function")
     toProbDecl name expr =
       (expr, "Calculates the probability of the sample parameter being returned from the " ++ name ++ "function")
-    toIntegDecl name expr = (expr, "Calculates the probability of sample of " ++ name ++ " falling in between the parameters low and high")
+    toIntegDecl name expr = (expr, "Calculates the probability of the sample parameter being less than or equal to the " ++ name ++ " function")
     fcDat = progToFCData p
     meta typeEnv = CompilerMetadata conf fcDat typeEnv adts
 
@@ -402,6 +402,85 @@ toIRInference meta cumulative (TCons _ t1Expr t2Expr) sample = do
   (t2P, t2Dim, t2Branches) <- toIRInferenceSave meta cumulative t2Expr (IRTSnd sample)
   mult <- (t1P, t1Dim) `multP` (t2P, t2Dim)
   return (fst mult, snd mult, IROp OpPlus t1Branches t2Branches)
+toIRInference meta cumulative (InjF _ name params) sample | isHigherOrder (adtDecls meta) name = do
+  let adts = adtDecls meta
+  -- FPair of the InjF with unique names
+  fPair <- instantiate mkVariable adts name
+  -- Unary InjF has a single inversion
+  let FPair _ [inv] = fPair
+  let FDecl {inputVars=inVars, body=invExpr, applicability=appTest, deconstructing=decons, derivatives=derivs} = inv
+  --Handle the function being in different positions of the signature
+  let aPoss = [0 .. (length params - 1)] \\ getFunctionParamIdx adts name
+  let aPos = case aPoss of
+        [n] -> n
+        x -> error $ "Expected exectly one non-ho parameter, but got " ++ show (length x)
+  let a = params !! aPos
+  let aVar = inVars !! aPos
+  let fs = map (params !!) (getFunctionParamIdx adts name)
+  let fVars = map (inVars !!) (getFunctionParamIdx adts name)
+  let Just invDerivExpr = lookup aVar derivs
+  -- Set sample value to the variable name in the InjF
+  setVariables [(aVar, sample)]
+  -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
+  let probF = if decons then toIRInferenceSave else toIRInference
+  -- Create all inverses of the ho functions and save them on the variable stack
+  -- Then create a substitution that substitutes f^-1 to f_prob. All substitutions are then composed in the fold
+  renVar <- foldM (\sub tup -> createHOInverse (fcData meta) adts tup <&> (.) sub) id (zip fVars fs)
+  (paramExpr, paramDim, paramBranches) <- probF meta cumulative a invExpr
+  -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
+  let scale x = if not cumulative 
+                  then IROp OpMult x (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDerivExpr)) 
+                  else IRIf (IROp OpGreaterThan invDerivExpr (const0)) x (IROp OpSub (IRConst (VFloat 1)) x)
+  let returnP = scale paramExpr
+  let appTestExpr e = IRIf appTest e const0
+  return (renVar (appTestExpr returnP), renVar (appTestExpr paramDim), renVar (appTestExpr paramBranches))
+toIRInference meta False e@(InjF TypeInfo {tags=extras, rType=rt} name params) sample
+  | countProbParams params == 0 = do
+  -- There is no probabilistic parameter
+  -- Check whether the value of the function is equal to the sample
+  expr <- toIRGenerate meta e
+  let cmp = case rt of
+        TFloat -> OpApprox
+        _ -> OpEq
+  retExpr <- indicator $ IROp cmp expr sample
+  return (retExpr, const0, const0)
+toIRInference meta True e@(InjF TypeInfo {tags=extras, rType=rt} name params) sample
+  | countProbParams params == 0 = do
+  -- There is no probabilistic parameter
+  -- Check whether the value of the function is less than the sample
+  expr <- toIRGenerate meta e
+  return (compareValueExpr rt expr sample, const0, const0)
+toIRInference meta cumulative e@(InjF TypeInfo {tags=extras} name params) sample
+  | countProbParams params == 1 = do
+  -- FPair of the InjF with unique names
+  FPair fwd inversions <- instantiate mkVariable (adtDecls meta) name
+  let FDecl{inputVars=inVars, outputVars=[v1]} = fwd
+  -- Index of the deterministic and the probabilistic parameter (Left -> 0, Right -> 1)
+  let Just probIdx = getProbIndex params
+  let detIdxs = [0..length params - 1] \\ [probIdx]
+  -- Find the inversion with all deterministic input parameters
+  let [invDecl] = filter (\FDecl {outputVars=[w1]} -> (inVars !! probIdx)==w1) inversions   --This should only return one inversion
+  let FDecl {inputVars=invVars, body=invExpr, applicability=appTest, deconstructing=decons, derivatives=invDerivs} = invDecl
+  -- All deterministic variable names
+  let detVars = filter (v1 /=) invVars
+  let detEs = map (params !!) detIdxs
+
+  -- Find the relevant derivative of the inversion
+  let Just invDeriv = lookup v1 invDerivs
+  -- Generate the probabilistic sub expressions
+  mapM_ (\(eVar, e) -> toIRGenerate meta e >>= \x -> setVariables [(eVar, x)]) (zip detVars detEs)
+  setVariables [(v1, sample)]
+  -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
+  let probF = if decons then toIRInferenceSave else toIRInference
+  -- Get the probabilistic inference expression of the non-deterministic subexpression
+  (paramExpr, paramDim, paramBranches) <- probF meta cumulative (params !! probIdx) invExpr
+  -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula if dim > 0
+  let scale x = if not cumulative 
+                  then IROp OpMult x (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDeriv)) 
+                  else IRIf (IROp OpGreaterThan invDeriv (const0)) x (IROp OpSub (IRConst (VFloat 1)) x)
+  let returnP = scale paramExpr  
+  let appTestExpr e = IRIf appTest e const0
+  return (appTestExpr returnP, appTestExpr paramDim, appTestExpr paramBranches)
 toIRInference meta False (InjF TypeInfo {tags=extras} name [left, right]) sample
   | extras `hasAlgorithm` "injF2Enumerable" = do
   -- Get all possible values for subexpressions
@@ -458,85 +537,6 @@ toIRInference meta True (InjF TypeInfo {tags=extras} name [left, right]) sample
     let returnExpr = IRIf (IROp OpLessThan sample f) (IRConst (VFloat 0)) (IROp OpMult pLeft pRight)
     return (returnExpr, const0, const0)
   return (IREnumSum v1 (fmap failConversion (constructVList enumListL)) $ IREnumSum v2 (fmap failConversion (constructVList enumListR)) irTuple, const0, const0)
-toIRInference meta cumulative (InjF _ name params) sample | isHigherOrder (adtDecls meta) name = do
-  let adts = adtDecls meta
-  -- FPair of the InjF with unique names
-  fPair <- instantiate mkVariable adts name
-  -- Unary InjF has a single inversion
-  let FPair _ [inv] = fPair
-  let FDecl {inputVars=inVars, body=invExpr, applicability=appTest, deconstructing=decons, derivatives=derivs} = inv
-  --Handle the function being in different positions of the signature
-  let aPoss = [0 .. (length params - 1)] \\ getFunctionParamIdx adts name
-  let aPos = case aPoss of
-        [n] -> n
-        x -> error $ "Expected exectly one non-ho parameter, but got " ++ show (length x)
-  let a = params !! aPos
-  let aVar = inVars !! aPos
-  let fs = map (params !!) (getFunctionParamIdx adts name)
-  let fVars = map (inVars !!) (getFunctionParamIdx adts name)
-  let Just invDerivExpr = lookup aVar derivs
-  -- Set sample value to the variable name in the InjF
-  setVariables [(aVar, sample)]
-  -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
-  let probF = if decons then toIRInferenceSave else toIRInference
-  -- Create all inverses of the ho functions and save them on the variable stack
-  -- Then create a substitution that substitutes f^-1 to f_prob. All substitutions are then composed in the fold
-  renVar <- foldM (\sub tup -> createHOInverse (fcData meta) adts tup <&> (.) sub) id (zip fVars fs)
-  (paramExpr, paramDim, paramBranches) <- probF meta cumulative a invExpr
-  -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
-  let scale x = if not cumulative 
-                  then IROp OpMult x (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDerivExpr)) 
-                  else IRIf (IROp OpGreaterThan invDerivExpr (const0)) x (IROp OpSub (IRConst (VFloat 1)) x)
-  let returnP = scale paramExpr
-  let appTestExpr e = IRIf appTest e const0
-  return (renVar (appTestExpr returnP), renVar (appTestExpr paramDim), renVar (appTestExpr paramBranches))
-toIRInference meta False e@(InjF TypeInfo {tags=extras, rType=rt} name params) sample
-  | isNothing (getProbIndex params) = do
-  -- There is no probabilistic parameter
-  -- Check whether the value of the function is equal to the sample
-  expr <- toIRGenerate meta e
-  let cmp = case rt of
-        TFloat -> OpApprox
-        _ -> OpEq
-  retExpr <- indicator $ IROp cmp expr sample
-  return (retExpr, const0, const0)
-toIRInference meta True e@(InjF TypeInfo {tags=extras, rType=rt} name params) sample
-  | isNothing (getProbIndex params) = do
-  -- There is no probabilistic parameter
-  -- Check whether the value of the function is less than the sample
-  expr <- toIRGenerate meta e
-  return (compareValueExpr rt expr sample, const0, const0)
-toIRInference meta cumulative e@(InjF TypeInfo {tags=extras} name params) sample
-  | isJust (getProbIndex params) = do
-  -- FPair of the InjF with unique names
-  FPair fwd inversions <- instantiate mkVariable (adtDecls meta) name
-  let FDecl{inputVars=inVars, outputVars=[v1]} = fwd
-  -- Index of the deterministic and the probabilistic parameter (Left -> 0, Right -> 1)
-  let Just probIdx = getProbIndex params
-  let detIdxs = [0..length params - 1] \\ [probIdx]
-  -- Find the inversion with all deterministic input parameters
-  let [invDecl] = filter (\FDecl {outputVars=[w1]} -> (inVars !! probIdx)==w1) inversions   --This should only return one inversion
-  let FDecl {inputVars=invVars, body=invExpr, applicability=appTest, deconstructing=decons, derivatives=invDerivs} = invDecl
-  -- All deterministic variable names
-  let detVars = filter (v1 /=) invVars
-  let detEs = map (params !!) detIdxs
-
-  -- Find the relevant derivative of the inversion
-  let Just invDeriv = lookup v1 invDerivs
-  -- Generate the probabilistic sub expressions
-  mapM_ (\(eVar, e) -> toIRGenerate meta e >>= \x -> setVariables [(eVar, x)]) (zip detVars detEs)
-  setVariables [(v1, sample)]
-  -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
-  let probF = if decons then toIRInferenceSave else toIRInference
-  -- Get the probabilistic inference expression of the non-deterministic subexpression
-  (paramExpr, paramDim, paramBranches) <- probF meta cumulative (params !! probIdx) invExpr
-  -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula if dim > 0
-  let scale x = if not cumulative 
-                  then IROp OpMult x (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDeriv)) 
-                  else IRIf (IROp OpGreaterThan invDeriv (const0)) x (IROp OpSub (IRConst (VFloat 1)) x)
-  let returnP = scale paramExpr  
-  let appTestExpr e = IRIf appTest e const0
-  return (appTestExpr returnP, appTestExpr paramDim, appTestExpr paramBranches)
 toIRInference meta cumulative (Null _) sample = do
   expr <- indicator (IROp OpEq sample (IRConst $ VList EmptyList))
   return (expr, const0, const0)
@@ -633,7 +633,14 @@ createHOInverse fcData adts (fVar, f) = do
   setVariables [(fVar ++ "_prob", inverseLambdaProb), (fVar ++ "_prob_deriv", inverseLambdaCoV)]
   return (renVar . renDeriv)
 
-getProbIndex :: [Expr] -> Maybe Int
+countProbParams :: [Expr] -> Int
+countProbParams es = length probParams
+  where
+    probParams = filter (\p -> p == Prob || p == Integrate) pTypes
+    pt x = pType (getTypeInfo x)
+    pTypes = map pt es
+
+getProbIndex :: HasCallStack => [Expr] -> Maybe Int
 --getProbIndex es | traceShow es False = undefined
 getProbIndex es =
   case filter (\(p, _) -> p == Prob || p == Integrate) zipped of
