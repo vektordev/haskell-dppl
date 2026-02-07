@@ -41,7 +41,7 @@ annotate adts env e = withNewTypeInfo
     withNewSubExpr = setSubExprs e (map (annotate adts newEnv) (getSubExprs e))
     tgs = if null values then [] else [EnumList values]
     values = case withNewSubExpr of
-      (Constant _ a@(VInt _)) -> [a]
+      (Constant _ a) -> [a]
       (ReadNN _ name _) -> case lookup name env of
         (Just [EnumList l]) -> l
         (Just [EnumRange (VInt a, VInt b)]) -> [VInt i | i <- [a..b]]

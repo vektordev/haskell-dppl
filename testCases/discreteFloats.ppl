@@ -1,0 +1,2 @@
+oneOrTwo = if Uniform < 0.5 then 1.0 else 2.0
+main = oneOrTwo + oneOrTwo

@@ -23,6 +23,7 @@ import Control.Monad
 import qualified Data.Bifunctor
 import Data.Either (isLeft)
 import StandardLibrary (invokeStandardFunction, stdListProd)
+import Debug.Trace (traceShow)
 
 -- InputVars, OutputVars, fwd, grad
 data FDecl = FDecl {contract :: Scheme, inputVars :: [String], outputVars :: [String], body :: IRExpr, applicability :: IRExpr, deconstructing :: Bool, derivatives :: [(String, IRExpr)]} deriving (Show, Eq)
@@ -245,7 +246,7 @@ propagateValues adts name values = case results of
   Left s -> []
   Right l -> map (fmap failConversionRev) l
   where
-    results = mapM (generateDet [] (IREnv [] []) []) letInBlocks
+    results = mapM (generateDet [] (IREnv [] adts) []) letInBlocks
     letInBlocks = map (foldr (\(n, p) e -> IRLetIn n (IRConst (fmap failConversionFwd p)) e) fwdExpr) namedParams
     namedParams = map (zip paramNames) valueProd
     valueProd = sequence values

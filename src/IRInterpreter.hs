@@ -375,8 +375,8 @@ generate f neurals adts globalEnv env args (IRVar name) =
     Just expr -> generate f neurals adts globalEnv env args expr
     Nothing -> error ("Variable " ++ name ++ " not declared")
 generate f neurals adts globalEnv env [] (IREnumSum varname (VList values) expr) = do    --TODO Untested
-  foldrM (\(VInt i) acc -> do
-    x <- generate f neurals adts globalEnv env [IRConst (VInt i)] (IRLambda varname expr)
+  foldrM (\v acc -> do
+    x <- generate f neurals adts globalEnv env [IRConst v] (IRLambda varname expr)
     return $ sumValues x acc
     ) (VFloat 0) values
   where sumValues = \(VFloat a) (VFloat b) -> VFloat $ a+b
