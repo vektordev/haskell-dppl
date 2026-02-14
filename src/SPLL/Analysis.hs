@@ -7,7 +7,7 @@ module SPLL.Analysis (
 import SPLL.Lang.Types
 import SPLL.Lang.Lang
 import SPLL.InferenceRule
-import Data.Maybe (maybeToList, fromJust, isNothing, fromMaybe, isJust)
+import Data.Maybe (maybeToList, fromJust, isNothing, fromMaybe, isJust, listToMaybe)
 import Data.List (nub)
 import Data.Bifunctor
 import SPLL.Typing.Typing (TypeInfo, TypeInfo(..), Tag(..), setTags)
@@ -15,14 +15,16 @@ import Data.Set (fromList, toList)
 import Data.Set.Internal (merge, empty)
 import Debug.Trace (trace)
 import PredefinedFunctions
+import Utils
 
 
 annotateEnumsProg :: Program -> Program
-annotateEnumsProg p@Program {functions=f, neurals=n, adts=adts} = p{functions = map (\(name, expr) -> (name, annotateIfNotRecursive adts name (exprEnv++neuralEnv) expr)) f}
+annotateEnumsProg p@Program {functions=f, neurals=n, adts=adts} = p{functions = finalExprEnv}
   --TODO this is really unclean. It does the the job of initializing the environment with correct tags, and also prevents infinite recursion, by only evaluating twice, but annotates the program twice
   where
-    exprEnv = map (second (tags . getTypeInfo . annotate adts [])) f
-    neuralEnv = map (\(n, _, Just (MultiDiscretes vals)) -> (n, [EnumList vals])) (filter (\(_, _, mTag) -> isJust mTag && isMultiDiscrete (fromJust mTag)) n)
+    finalExprEnv = fixpoint iterateExprEnv []
+    iterateExprEnv eEnv = map (second (annotate adts (neuralEnv ++ map (second $ tags . getTypeInfo) eEnv))) f
+    neuralEnv = [(name, [DiscreteValues mv]) | (name, _, Just mv) <- n]
     isMultiDiscrete (MultiDiscretes _) = True
     isMultiDiscrete _ = False
 
@@ -34,40 +36,42 @@ annotate :: [ADTDecl] -> [(String, [Tag])] -> Expr -> Expr
 --annotate _ e | trace ((show e)) False = undefined
 annotate adts env e = withNewTypeInfo
   where
-    withNewTypeInfo = setTypeInfo withNewSubExpr (setTags (getTypeInfo withNewSubExpr) tgs)
+    oldTags = tags $ getTypeInfo e
+    newTags = case ([mv | DiscreteValues mv <- oldTags]) of
+      [] -> case valuesTag of
+        Just t -> t:oldTags
+        Nothing -> oldTags
+      _:_ -> oldTags
+    valuesTag = fmap DiscreteValues values
+    withNewTypeInfo = setTypeInfo withNewSubExpr (setTags (getTypeInfo withNewSubExpr) newTags)
     newEnv = case withNewSubExpr of
       (LetIn _ n v _) -> (n, tags $ getTypeInfo v):env
       _ -> env
     withNewSubExpr = setSubExprs e (map (annotate adts newEnv) (getSubExprs e))
-    tgs = if null values then [] else [EnumList values]
     values = case withNewSubExpr of
-      (Constant _ a) -> [a]
+      (Constant _ a) -> Just $ MultiDiscretes [a]
       (ReadNN _ name _) -> case lookup name env of
-        (Just [EnumList l]) -> l
-        (Just [EnumRange (VInt a, VInt b)]) -> [VInt i | i <- [a..b]]
-        _ -> []
+        Just tgs -> Just $ head [mv | DiscreteValues mv <- tgs]
+        _ -> Nothing
       (InjF _ name params) -> do
-        let paramValues = map getValuesFromExpr params
-        propagateValues adts name paramValues
+        paramValues <- mapM getValuesFromExpr params
+        let unpackedMultiVals = map multiValueToValueList paramValues
+        return $ valueListToMultiValue $ propagateValues adts name unpackedMultiVals
       (IfThenElse _ _ left right) -> do
-        let valuesLeft = getValuesFromExpr left
-        let valuesRight = getValuesFromExpr right
-        nub (valuesLeft ++ valuesRight)
+        valuesLeft <- getValuesFromExpr left
+        valuesRight <- getValuesFromExpr right
+        return $ unionMultiValues valuesLeft valuesRight
       (LetIn _ _ _ a) -> getValuesFromExpr a
-      (Var _ name) -> case (lookup name env) of
-        Just tags -> concatMap valuesOfTag tags
-        Nothing -> []
-      _ -> []
+      (Var _ name) -> do
+        tags <- lookup name env
+        listToMaybe [mv | DiscreteValues mv <- tags]
+      _ -> Nothing
 
 
-getValuesFromExpr :: Expr ->  [Value]
-getValuesFromExpr e = concatMap valuesOfTag (tags $ getTypeInfo e)
-
-valuesOfTag :: Tag -> [Value]
-valuesOfTag tag = case tag of
-  EnumList l -> l
-  EnumRange (VInt a, VInt b) -> [VInt i | i <- [a..b]]
-  _ -> []
+getValuesFromExpr :: Expr -> Maybe MultiValue
+getValuesFromExpr e = case [mv | DiscreteValues mv <- tags $ getTypeInfo e] of
+  [mv] -> Just mv
+  [] -> Nothing
 
 isRecursive :: String -> Expr -> Bool
 isRecursive name (Var _ n) | name == n = True
@@ -110,8 +114,7 @@ checkConstraint _ _ _ = False
 isEnumerable :: [Tag] -> Bool
 isEnumerable =
   any (\t -> case t of
-    EnumList _ -> True
-    EnumRange _ -> True
+    DiscreteValues _ -> True
     _ -> False)
 
 likelihoodFunctionUsesTypeInfo :: ExprStub -> Bool

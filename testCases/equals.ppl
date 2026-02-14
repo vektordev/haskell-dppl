@@ -1,0 +1,2 @@
+oneOfThree = if Uniform < (1.0 / 3.0) then 1 else if Uniform < (1.0 / 2.0) then 2 else 3
+main x = oneOfThree == x

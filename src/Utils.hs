@@ -37,6 +37,10 @@ replaceAt _ n _ | n < 0 = error "No negative indices allowed"
 replaceAt (_:lst) 0 x = x:lst
 replaceAt (l:lst) n x = l:replaceAt lst (n-1) x
 
+fixpoint :: Eq a => (a -> a) -> a -> a
+fixpoint f x = if fx == x then x else fixpoint f fx
+  where fx = f x
+
 -- ======== SUPPLY MONAD ========
 
 type Supply = State Int

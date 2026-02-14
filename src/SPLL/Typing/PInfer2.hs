@@ -557,8 +557,7 @@ inferProg env (Program decls nns adts) = do
 
 isEnumerable :: Expr -> Bool
 isEnumerable e = foldr (\tag b -> b || isEnum tag) False (tags (getTypeInfo e))
-  where isEnum (EnumList _) = True
-        isEnum (EnumRange _) = True
+  where isEnum (DiscreteValues _) = True
         isEnum _ = False
 
 

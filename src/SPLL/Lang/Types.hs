@@ -169,7 +169,7 @@ instance Functor GenericValue where
   fmap _ VAny = VAny
 
 
-isVInt, isVBool, isVSymbol, isVFloat, isVList, isVTuple, isVBranch, isVThetaTree, isVClosure :: GenericValue a -> Bool
+isVInt, isVBool, isVSymbol, isVFloat, isVList, isVTuple, isVEither, isVBranch, isVThetaTree, isVClosure, isVADT :: GenericValue a -> Bool
 isVInt (VInt _) = True
 isVInt _ = False
 isVBool (VBool _) = True
@@ -182,23 +182,35 @@ isVList (VList _) = True
 isVList _ = False
 isVTuple (VTuple _ _) = True
 isVTuple _ = False
+isVEither (VEither _) = True
+isVEither _ = False
 isVBranch (VBranch _ _ _) = True
 isVBranch _ = False
 isVThetaTree (VThetaTree _) = True
 isVThetaTree _ = False
 isVClosure (VClosure _ _ _) = True
 isVClosure _ = False
+isVADT (VADT _ _) = True
+isVADT _ = False
 
 data MultiValue = MultiDiscretes [Value]
                 | MultiTuple MultiValue MultiValue
                 | MultiEither MultiValue MultiValue
                 | MultiADT [(String, [MultiValue])] 
                 deriving (Show, Eq)
-                
+
+isMultiDiscretes, isMultiTuple, isMultiEither, isMultiADT :: MultiValue -> Bool
+isMultiDiscretes (MultiDiscretes _) = True
+isMultiDiscretes _ = False
+isMultiTuple (MultiTuple _ _) = True
+isMultiTuple _ = False
+isMultiEither (MultiEither _ _) = True
+isMultiEither _ = False
+isMultiADT (MultiADT _) = True
+isMultiADT _ = False
 
 
-data Tag = EnumRange (Value, Value)
-           | EnumList [Value]
+data Tag = DiscreteValues MultiValue 
            | Alg InferenceRule
            deriving (Show, Eq)
            

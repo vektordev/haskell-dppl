@@ -497,8 +497,8 @@ toIRInference meta False (InjF TypeInfo {tags=extras} name [left, right]) sample
   -- Get all possible values for subexpressions
   let extrasLeft = tags $ getTypeInfo left
   let extrasRight = tags $ getTypeInfo right
-  let enumListL = head $ [x | EnumList x <- extrasLeft]
-  let enumListR = head $ [x | EnumList x <- extrasRight]
+  let enumListL = head $ [multiValueToValueList x | DiscreteValues x <- extrasLeft]
+  let enumListR = head $ [multiValueToValueList x | DiscreteValues x <- extrasRight]
 
   fPair <- instantiate mkVariable (adtDecls meta) name -- FPair of the InjF with unique names
   let FPair fwd inversions = fPair
@@ -536,8 +536,8 @@ toIRInference meta True (InjF TypeInfo {tags=extras} name [left, right]) sample
   -- Get all possible values for subexpressions
   let extrasLeft = tags $ getTypeInfo left
   let extrasRight = tags $ getTypeInfo right
-  let enumListL = head $ [x | EnumList x <- extrasLeft]
-  let enumListR = head $ [x | EnumList x <- extrasRight]
+  let enumListL = head $ [multiValueToValueList x | DiscreteValues x <- extrasLeft]
+  let enumListR = head $ [multiValueToValueList x | DiscreteValues x <- extrasRight]
 
   fPair <- instantiate mkVariable (adtDecls meta) name -- FPair of the InjF with unique names
   let FPair fwd _ = fPair

@@ -90,7 +90,7 @@ makeProbRec adts (TuplePlan a b) ix sample = (noAny sample (IROp OpMult pa pb), 
   where
     (pa, dima, bca) = makeProbRec adts a ix (IRTFst sample)
     (pb, dimb, bcb) = makeProbRec adts b (ix + getSize a) (IRTSnd sample)
-makeProbRec adts (EitherPlan a b) ix sample = (noAny sample 
+makeProbRec adts (EitherPlan a b) ix sample = (noAny sample
   (IRIf (IRIsLeft sample)
     (IROp OpMult pIsLeft aP)
     (IROp OpMult pIsRight bP)),
@@ -178,6 +178,7 @@ getSize :: PartitionPlan -> Int
 getSize (TuplePlan a b) = getSize a + getSize b
 getSize (EitherPlan a b) = getSize a + getSize b + 1
 getSize (Discretes _ (MultiDiscretes vals)) = length vals
+getSize (ADTPlan _ plans) = sum (map (sum . map getSize . snd) plans) + length plans
 getSize Continuous = 2
 
 getSizeRange :: Value -> Value -> Int
@@ -220,13 +221,8 @@ makePartitionPlan adts x y = error ("erroneous combination of type and tag in Au
 --split a tag over tuples into a tuple of tags.
 splitTag :: Maybe Tag -> (Maybe Tag, Maybe Tag)
 splitTag Nothing = (Nothing, Nothing)
-splitTag (Just (EnumRange (v1, v2))) = (Just $ EnumRange (fst $ tupleFromValue v1, fst $ tupleFromValue v2), Just $ EnumRange (snd $ tupleFromValue v1, snd $ tupleFromValue v2))
+splitTag (Just (DiscreteValues (MultiTuple a b))) = (Just (DiscreteValues a), Just (DiscreteValues b))
 -- TODO: Error if set of values is not a cartesian product? Sounds like it'd break under independence assumptions.
-splitTag (Just (EnumList values)) = (Just $ EnumList $ map (fst . tupleFromValue) values, Just $ EnumList $ map (snd . tupleFromValue) values)
-
-tagToValues :: Tag -> [IRValue]
-tagToValues (EnumList vals) = map valueToIR vals
-tagToValues (EnumRange (v1, v2)) = expandRange (valueToIR v1) (valueToIR v2)
 
 tupleFromValue :: Value -> (Value, Value)
 tupleFromValue (VTuple a b) = (a,b)

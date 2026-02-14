@@ -34,6 +34,9 @@ module SPLL.Lang.Lang (
 , isNotTheta
 , tTraverse
 , constructVList
+, multiValueToValueList
+, valueListToMultiValue
+, unionMultiValues
 , elementAt
 , getFunctionNames
 , lookupNeural
@@ -51,10 +54,9 @@ import qualified Data.Map as Map
 import Control.Applicative (liftA2)
 import Control.Monad.Random.Lazy (Random)
 import Data.Number.Erf (Erf)
-import Data.List (intercalate)
+import Data.List (intercalate, nub)
 import Debug.Trace
-
-
+import qualified Data.Bifunctor as Bifunctor
 
 toStub :: Expr -> ExprStub
 toStub expr = case expr of
@@ -112,7 +114,7 @@ exprMap f expr = case expr of
   (Apply t a b) -> Apply (tInfoMap f t) (exprMap f a) (exprMap f b)
   (ReadNN t n a) -> ReadNN (tInfoMap f t) n (exprMap f a)
   (Error t e) -> Error (tInfoMap f t) e
-  
+
 floatApproxEqThresh :: Double
 floatApproxEqThresh = 1e-10
 
@@ -377,7 +379,7 @@ getTypeInfo expr = case expr of
   (Apply t _ _)         -> t
   (ReadNN t _ _)        -> t
   (Error t _)           -> t
-  
+
 setTypeInfo :: Expr -> TypeInfo -> Expr
 setTypeInfo expr t = case expr of
   (IfThenElse _ a b c)  -> IfThenElse t a b c
@@ -408,6 +410,48 @@ setTypeInfo expr t = case expr of
 constructVList :: [GenericValue a] -> GenericValue a
 constructVList xs = VList $ foldr ListCont EmptyList xs
 
+multiValueToValueList :: MultiValue -> [Value]
+multiValueToValueList (MultiDiscretes vals) = vals
+multiValueToValueList (MultiEither ls rs) = map (VEither . Left) lVals ++ map (VEither . Right) rVals
+  where
+    lVals = multiValueToValueList ls
+    rVals = multiValueToValueList rs
+multiValueToValueList (MultiTuple as bs) = [VTuple aVal bVal | aVal <- aVals, bVal <- bVals]
+  where
+    aVals = multiValueToValueList as
+    bVals = multiValueToValueList bs
+multiValueToValueList (MultiADT constrs) = concatMap (\(cn, fieldCombos) -> map (VADT cn) fieldCombos) constrFieldCombinations
+  where allFieldCombinations = sequence . map multiValueToValueList
+        constrFieldCombinations = map (Bifunctor.second allFieldCombinations) constrs
+
+valueListToMultiValue :: [Value] -> MultiValue
+valueListToMultiValue lst@((VEither _):_) | all isVEither lst = MultiEither lVals rVals
+  where
+    lVals = valueListToMultiValue [l | VEither (Left l) <- lst]
+    rVals = valueListToMultiValue [r | VEither (Right r) <- lst]
+valueListToMultiValue lst@((VEither _):_) = error "Not all elements in the list are Eithers"
+valueListToMultiValue lst@((VTuple _ _):_) | all isVTuple lst = MultiTuple aVals bVals
+  where
+    aVals = valueListToMultiValue [a | VTuple a _ <- lst]
+    bVals = valueListToMultiValue [b | VTuple _ b <- lst]
+valueListToMultiValue lst@((VTuple _ _):_) = error "Not all elements in the list are Tuples"
+valueListToMultiValue lst@((VADT _ _):_) | all isVADT lst = MultiADT (map (Bifunctor.second (map valueListToMultiValue)) valueListsForConstrs)
+  where
+    cns = nub [cn | VADT cn _ <- lst]
+    valueListsForConstrs = map (\cn -> (cn, [fields | VADT cn' fields <- lst, cn' == cn])) cns
+valueListToMultiValue lst@((VADT _ _):_) = error "Not all elements in the list are ADTs"
+valueListToMultiValue lst = MultiDiscretes lst
+
+unionMultiValues :: MultiValue -> MultiValue -> MultiValue
+unionMultiValues (MultiDiscretes as) (MultiDiscretes bs) = MultiDiscretes (nub (as ++ bs))
+unionMultiValues (MultiEither ls1 rs1) (MultiEither ls2 rs2) = MultiEither (unionMultiValues ls1 ls2) (unionMultiValues rs1 rs2)
+unionMultiValues (MultiTuple ls1 rs1) (MultiTuple ls2 rs2) = MultiTuple (unionMultiValues ls1 ls2) (unionMultiValues rs1 rs2)
+unionMultiValues (MultiADT constrs1) (MultiADT constrs2) = MultiADT (map (\cn -> (cn, unionConstr cn)) cNames)
+  where
+    cNames = nub $ map fst constrs1 ++ map fst constrs2
+    unionConstr cn = zipWith unionMultiValues (fromMaybe [] (lookup cn constrs1)) (fromMaybe [] (lookup cn constrs1))
+
+
 elementAt :: ValueList a -> Int -> GenericValue a
 elementAt (ListCont x _) 0 = x
 elementAt (ListCont _ xs) i = elementAt xs (i-1)
@@ -427,7 +471,7 @@ getRType (VList (ListCont a _)) = ListOf $ getRType a
 getRType (VList EmptyList) = NullList
 getRType (VTuple t1 t2) = Tuple (getRType t1) (getRType t2)
 getRType (VEither (Left a)) = TEither (getRType a) SPLL.Typing.RType.NotSetYet
-getRType (VEither (Right a)) = TEither SPLL.Typing.RType.NotSetYet (getRType a) 
+getRType (VEither (Right a)) = TEither SPLL.Typing.RType.NotSetYet (getRType a)
 
 lookupNeural :: String -> [NeuralDecl] -> Maybe (RType, Maybe MultiValue)
 lookupNeural name decls = foldr (\(n, r, t) ret -> if n == name then Just (r, t) else ret) Nothing decls
@@ -435,7 +479,7 @@ lookupNeural name decls = foldr (\(n, r, t) ret -> if n == name then Just (r, t)
 -- Returns explicit functions declared as well as implicit functions from ADTs
 getFunctionNames :: Program -> [String]
 getFunctionNames p = explicitFs ++ implicitFs
-  where 
+  where
     explicitFs = map fst (functions p)
     implicitFs = implicitFunctionNames (adts p)
 
@@ -564,4 +608,4 @@ printFlatNoReq expr = case expr of
   Apply {} -> "Apply"
   ReadNN {} -> "ReadNN"
   Error {} -> "Error"
-  
+
