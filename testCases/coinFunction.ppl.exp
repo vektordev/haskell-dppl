@@ -1,0 +1,1 @@
+main = let weightedCoin = \x -> if Uniform < x then 1 else 0 in (weightedCoin 0.25) ++ (weightedCoin 0.5)
