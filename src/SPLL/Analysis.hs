@@ -44,10 +44,13 @@ annotate adts env e = withNewTypeInfo
       _:_ -> oldTags
     valuesTag = fmap DiscreteValues values
     withNewTypeInfo = setTypeInfo withNewSubExpr (setTags (getTypeInfo withNewSubExpr) newTags)
-    newEnv = case withNewSubExpr of
-      (LetIn _ n v _) -> (n, tags $ getTypeInfo v):env
-      _ -> env
-    withNewSubExpr = setSubExprs e (map (annotate adts newEnv) (getSubExprs e))
+    withNewSubExpr = case e of
+      Apply _ l@(Lambda _ n b) v -> do
+        let annotatedV = annotate adts env v
+            newEnv = (n, tags (getTypeInfo annotatedV)):env
+            annotatedL = annotate adts env l in
+              setSubExprs e [annotatedL, annotatedV]
+      _ -> setSubExprs e (map (annotate adts env) (getSubExprs e))
     values = case withNewSubExpr of
       (Constant _ a) -> Just $ MultiDiscretes [a]
       (ReadNN _ name _) -> case lookup name env of

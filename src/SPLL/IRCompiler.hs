@@ -360,7 +360,7 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=aChainName} l 
   let lChainName = chainName (getTypeInfo l)
   
   -- This logic is here to wrap the expression back into lambdas if the lambda we look at returns a lambda
-  let (LambdaInfo toInvCN lambdaBodyCN, tag) = findEquivalentLambda (fcData meta) lChainName
+  let Just (LambdaInfo toInvCN lambdaBodyCN, tag) = findEquivalentLambda (fcData meta) lChainName
   let (boundVar, lambdaVars) = unwrapLambdas (fcData meta) lambdaBodyCN
   let wrapInLambdas ex = foldr IRLambda ex lambdaVars
 
@@ -635,7 +635,7 @@ subP (aM, aDim) (bM, bDim) = do
 createHOInverse :: FCData -> [ADTDecl]-> (String, Expr) -> CompilerMonad (IRExpr -> IRExpr)
 createHOInverse fcData adts (fVar, f) = do
   let (inverseF, inverseCoV) = toInvExpr fcData adts (chainName $ getTypeInfo f)
-  let (LambdaInfo _ lBodyChainName, tag) = findEquivalentLambda fcData (chainName $ getTypeInfo f)
+  let Just (LambdaInfo _ lBodyChainName, tag) = findEquivalentLambda fcData (chainName $ getTypeInfo f)
   let inverseLambdaProb = IRLambda (lBodyChainName ++ tag) inverseF
   let inverseLambdaCoV = IRLambda (lBodyChainName ++ tag) inverseCoV
   -- Rename all occurances of f^-1 from the definition to f_prob
