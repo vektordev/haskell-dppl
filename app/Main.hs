@@ -10,7 +10,7 @@ import Data.Char (toLower)
 import SPLL.Parser
 import System.Exit (exitFailure)
 import Text.Megaparsec.Error (errorBundlePretty)
-import SPLL.Lang.Types (Value(..), GenericValue (..), CompilerError)
+import SPLL.Lang.Types (Value(..), GenericValue (..), CompilerError, GenericList (EmptyList))
 import Text.Read
 import SPLL.Prelude (runProb, runInteg, runGen, compile)
 import Control.Monad.Random (randomIO, evalRandIO)
@@ -22,6 +22,7 @@ import Data.List (intercalate)
 import Text.Megaparsec (runParser, sepBy)
 import Control.Monad.State (runStateT)
 import SPLL.Parser (pCSV)
+import Data.Maybe (fromMaybe)
 
 data GlobalOpts = GlobalOpts {
   inputFile :: String,
@@ -81,6 +82,9 @@ readValueList = eitherReader (\s ->
   case runParser (runStateT pCSV 0) "CLI" s of
     Left err -> Left (errorBundlePretty err)
     Right (val, _) -> Right (map valueToIR val))
+
+optionalList :: Alternative f => f [a] -> f [a]
+optionalList x = fmap (fromMaybe []) (optional x)
 
 parseGlobalOpts :: Parser GlobalOpts
 parseGlobalOpts = GlobalOpts
@@ -147,10 +151,10 @@ parseCompileOpts = CompileOpts
 
 parseGenerateOpts :: Parser CommandOpts
 parseGenerateOpts = GenerateOpts
-        <$> option readValueList
+        <$> optionalList (option readValueList
             ( short 'p'
             <> metavar "PARAMS"
-            <> help "Parameters passed to the main functions. List of values separated by commas. Make sure to use the correct datatypes. E.g., use 3.0 for a float or 3 for an integer.")
+            <> help "Parameters passed to the main functions. List of values separated by commas. Make sure to use the correct datatypes. E.g., use 3.0 for a float or 3 for an integer."))
 
 parseProbabilityOpts :: Parser CommandOpts
 parseProbabilityOpts = ProbabilityOpts
@@ -158,10 +162,10 @@ parseProbabilityOpts = ProbabilityOpts
             ( short 'x'
             <> metavar "SAMPLE"
             <> help "Sample value to calculate inference for. Make sure to use the correct datatypes. E.g., use 3.0 for a float or 3 for an integer.")
-        <*> option readValueList
+        <*> optionalList (option readValueList
             ( short 'p'
             <> metavar "PARAMS"
-            <> help "Parameters passed to the main functions. List of values separated by commas. Make sure to use the correct datatypes. E.g., use 3.0 for a float or 3 for an integer.")
+            <> help "Parameters passed to the main functions. List of values separated by commas. Make sure to use the correct datatypes. E.g., use 3.0 for a float or 3 for an integer."))
 
 parseIntegrateOpts :: Parser CommandOpts
 parseIntegrateOpts = CumulativeOpts
@@ -169,10 +173,10 @@ parseIntegrateOpts = CumulativeOpts
             ( short 'x'
             <> metavar "SAMPLE"
             <> help "Sample value to calculate inference for. Make sure to use the correct datatypes. E.g., use 3.0 for a float or 3 for an integer.")
-        <*> option readValueList
+        <*> optionalList (option readValueList
             ( short 'p'
             <> metavar "PARAMS"
-            <> help "Parameters passed to the main functions. List of values separated by commas. Make sure to use the correct datatypes. E.g., use 3.0 for a float or 3 for an integer.")
+            <> help "Parameters passed to the main functions. List of values separated by commas. Make sure to use the correct datatypes. E.g., use 3.0 for a float or 3 for an integer."))
 
 
 -- Entry point for the program, parse CLI arguments and pass execution to transpile
