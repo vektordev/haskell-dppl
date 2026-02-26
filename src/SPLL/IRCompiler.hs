@@ -347,13 +347,13 @@ toIRInference meta cumulative (Apply TypeInfo {rType=rt} l v) sample
     -- the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
     (pBranch, _, _) <- toIRInference meta False v (IRVar boundVar)
 
-    let condSelector = IRIf condIR (IRConst (VFloat 1)) const0
-    let notCondSelector = IRIf (IRUnaryOp OpNot condIR) (IRConst (VFloat 1)) const0
+    let condSelector e = IRIf condIR e const0
+    let notCondSelector e = IRIf (IRUnaryOp OpNot condIR) e const0
     let cmpOp = if rType (getTypeInfo thenExpr) == TFloat then OpApprox else OpEq
     let thenSelector = if cumulative then compareValueExpr rt thenIR sample else IRIf (IROp cmpOp thenIR sample) (IRConst (VFloat 1)) const0
     let elseSelector = if cumulative then compareValueExpr rt elseIR sample else IRIf (IROp cmpOp elseIR sample) (IRConst (VFloat 1)) const0
-    let thenRes = IROp OpMult condSelector thenSelector
-    let elseRes = IROp OpMult notCondSelector elseSelector
+    let thenRes = condSelector thenSelector
+    let elseRes = notCondSelector elseSelector
     let returnExpr = IROp OpMult (IROp OpPlus thenRes elseRes) pBranch
 
     return (returnExpr, const0, const0)

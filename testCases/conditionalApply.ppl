@@ -1,2 +1,2 @@
-coin = if Uniform < 0.5 then 0.0 else 1.0
-main = let d = coin in if d > 0.5 then d + 1.0 else d + 3.0
+coin = if Uniform < 0.5 then 0 else 1
+main = let d = coin in if d == 1 then d ++ 1 else d ++ 3

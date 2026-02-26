@@ -77,6 +77,7 @@ pyVal (VEither (Left a)) = "Left(" ++ pyVal a ++ ")"
 pyVal (VEither (Right a)) = "Right(" ++ pyVal a ++ ")"
 pyVal (VThetaTree tt) = pyValTree tt
   where pyValTree (ThetaTree val trees) = "([" ++ intercalate ", " (map show val) ++ "], [" ++ intercalate ", " (map pyValTree trees) ++ "])"
+pyVal (VADT cName params) = cName ++ "(" ++ intercalate ", " (map pyVal params) ++ ")"
 pyVal (VAny) = "'ANY'"
 pyVal x = error ("unknown pyVal for " ++ show x)
 
