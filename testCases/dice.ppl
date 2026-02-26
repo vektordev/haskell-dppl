@@ -1,0 +1,2 @@
+dice x = if x == 1.0 then 1.0 else if Uniform < (1.0/x) then x else dice (x + (-1.0))
+main = dice 4.0

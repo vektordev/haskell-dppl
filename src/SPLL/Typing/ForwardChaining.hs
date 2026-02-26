@@ -29,6 +29,7 @@ data FCData = FCData {hornClauses :: [[HornClause]], chainNameInfo :: [(ChainNam
 data ExprInfo = StubInfo ExprStub   -- Generic Expression without additional Info
               | InjFInfo String     -- InjF with the name of the InjF
               | LambdaInfo String ChainName  -- Lambda with the name of the bound variable and the ChainName of the body
+              | IfInfo ChainName ChainName ChainName
               | ConstantInfo Value  -- Contant with the value
               | VarInfo String
               | ApplyInfo ChainName ChainName -- Chain name of the left parameter of the Apply
@@ -120,14 +121,11 @@ toValueExpr clauses paramClauses adts startCN =
     -- Solve the set of Horn clauses for clauses which are fulfilled
     solvedClauses = solveHCSet augmentedClauseSet
 
--- Takes a chain name of a point in the AST and finds the lambda, this point is equivalent to.
--- Also return the uniquely identifying tag if the lambda is tagged
-findEquivalentLambda :: FCData -> ChainName -> Maybe (ExprInfo, String)
---findEquivalentLambda fcData startCN | trace startCN False = undefined
-findEquivalentLambda fcData startCN = case lookup startCN (chainNameInfo fcData) of
+findEquivalentExpression :: FCData -> (ExprInfo -> Bool) -> ChainName -> Maybe (ExprInfo, String)
+findEquivalentExpression fcData testF startCN = case lookup startCN (chainNameInfo fcData) of
   Nothing -> error $ "Could not find chainName in FCData " ++ startCN
   -- Found the lambda
-  Just li@(LambdaInfo _ _) -> Just (li, "")
+  Just x | testF x -> Just (x, "")
   -- Expression must be equivalent to a lambda. Look for equilavence relations
   Just _ -> do
     -- Only outgoing equivalence relations, so we don't have cycles
@@ -137,6 +135,22 @@ findEquivalentLambda fcData startCN = case lookup startCN (chainNameInfo fcData)
         el <- findEquivalentLambda fcData (untag pre)
         return (fst el, getTag pre)
       _ -> Nothing
+
+-- Takes a chain name of a point in the AST and finds the lambda, this point is equivalent to.
+-- Also return the uniquely identifying tag if the lambda is tagged
+findEquivalentLambda :: FCData -> ChainName -> Maybe (ExprInfo, String)
+--findEquivalentLambda fcData startCN | trace startCN False = undefined
+findEquivalentLambda fcData = findEquivalentExpression fcData isLambdaInfo
+  where
+    isLambdaInfo (LambdaInfo _ _) = True
+    isLambdaInfo _ = False
+
+findEquivalentIf :: FCData -> ChainName -> Maybe (ExprInfo, String)
+--findEquivalentLambda fcData startCN | trace startCN False = undefined
+findEquivalentIf fcData = findEquivalentExpression fcData isIfInfo
+  where
+    isIfInfo (IfInfo _ _ _) = True
+    isIfInfo _ = False
 
 findChainNamesForVar :: FCData -> String -> [ChainName]
 findChainNamesForVar fcData varName = case correctVarInfos of
@@ -253,6 +267,7 @@ exprToChainNameInfo (Lambda TypeInfo{chainName=cn} n b) = (cn, LambdaInfo n (get
 exprToChainNameInfo (Constant TypeInfo{chainName=cn} v) = [(cn, ConstantInfo v)]
 exprToChainNameInfo (Var TypeInfo{chainName=cn} n) = [(cn, VarInfo n)]
 exprToChainNameInfo (Apply TypeInfo{chainName=cn} l v) = (cn, ApplyInfo (getChainName l) (getChainName v)):exprToChainNameInfo l ++ exprToChainNameInfo v
+exprToChainNameInfo (IfThenElse TypeInfo{chainName=cn} c t e) = (cn, IfInfo (getChainName c) (getChainName t) (getChainName e)): exprToChainNameInfo c ++ exprToChainNameInfo t ++ exprToChainNameInfo e
 exprToChainNameInfo e = (getChainName e, StubInfo (toStub e)):concatMap exprToChainNameInfo (getSubExprs e)
 
 -- Convert a Program to a set of groups of Horn clauses

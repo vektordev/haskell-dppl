@@ -211,7 +211,7 @@ compile conf p = do
   typed <- addTypeInfo forwardChained
   printIfMoreVerbose conf "\n=== Typed Program ==="
   pPrintIfMoreVerbose conf typed
-  let annotated = annotateAlgsProg typed
+  let annotated = (annotateAlgsProg . annotateConditionalProg) typed
   printIfMoreVerbose conf "\n=== Annotated Program (2) ==="
   pPrintIfMoreVerbose conf annotated
 

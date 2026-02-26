@@ -26,6 +26,7 @@ import Data.Bifunctor (Bifunctor(bimap))
 import Utils
 import Control.Monad (foldM)
 import GHC.Stack (HasCallStack)
+import Statistics.Distribution (Distribution(cumulative))
 
 type CompilerMonad a = WriterT [(String, IRExpr)] Supply a
 
@@ -38,7 +39,8 @@ data CompilerMetadata = CompilerMetadata {
   compilerConfig :: CompilerConfig,
   fcData :: FCData,
   typeEnv :: TypeEnv,
-  adtDecls :: [ADTDecl]
+  adtDecls :: [ADTDecl],
+  compilingProgram :: Program
 }
 
 envToIR :: CompilerConfig -> Program -> IREnv
@@ -70,7 +72,7 @@ envToIR conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb, noGenerat
       (expr, "Calculates the probability of the sample parameter being returned from the " ++ name ++ "function")
     toIntegDecl name expr = (expr, "Calculates the probability of the sample parameter being less than or equal to the " ++ name ++ " function")
     fcDat = progToFCData p
-    meta typeEnv = CompilerMetadata conf fcDat typeEnv adts
+    meta typeEnv = CompilerMetadata conf fcDat typeEnv adts p
 
 
 runCompile :: CompilerMetadata -> CompilerMonad CompilationResult -> IRExpr
@@ -323,6 +325,45 @@ toIRInference meta True (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeIn
     TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
     _ -> do
       return (compareValueExpr rt (IRInvoke $ IRApply lIR vIR) sample, const0, const0)
+toIRInference meta cumulative (Apply TypeInfo {rType=rt} l v) sample 
+  | IsConditional `elem` tags (getTypeInfo l) && any isDiscretes (tags (getTypeInfo v))
+  && pType (getTypeInfo l) == Deterministic = do  -- This is only because of a bug in pInfer, but its useful for us...
+  let lCn = chainName (getTypeInfo l)
+  let Just (LambdaInfo boundVar bodyCn , lTag) = findEquivalentLambda (fcData meta) lCn
+  let Just (IfInfo cCn tCn eCn, ifTag) = findEquivalentIf (fcData meta) bodyCn
+  let Program{functions=fs} = compilingProgram meta
+  let fExprs = map snd fs
+  let condExpr = findExprWithCN fExprs cCn
+  let thenExpr = findExprWithCN fExprs tCn
+  let elseExpr = findExprWithCN fExprs eCn
+  let discreteVVals = head [multiValueToValueList x | DiscreteValues x <- (tags (getTypeInfo v))]
+
+  let newTypeEnv = (boundVar, (rType (getTypeInfo v), False)):typeEnv meta
+  condIR <- toIRGenerate meta {typeEnv = newTypeEnv} condExpr
+  thenIR <- toIRGenerate meta {typeEnv = newTypeEnv} thenExpr
+  elseIR <- toIRGenerate meta {typeEnv = newTypeEnv} elseExpr
+
+  irTuple <- lift (runWriterT (do
+    -- the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
+    (pBranch, _, _) <- toIRInference meta False v (IRVar boundVar)
+
+    let condSelector = IRIf condIR (IRConst (VFloat 1)) const0
+    let notCondSelector = IRIf (IRUnaryOp OpNot condIR) (IRConst (VFloat 1)) const0
+    let cmpOp = if rType (getTypeInfo thenExpr) == TFloat then OpApprox else OpEq
+    let thenSelector = if cumulative then compareValueExpr rt thenIR sample else IRIf (IROp cmpOp thenIR sample) (IRConst (VFloat 1)) const0
+    let elseSelector = if cumulative then compareValueExpr rt elseIR sample else IRIf (IROp cmpOp elseIR sample) (IRConst (VFloat 1)) const0
+    let thenRes = IROp OpMult condSelector thenSelector
+    let elseRes = IROp OpMult notCondSelector elseSelector
+    let returnExpr = IROp OpMult (IROp OpPlus thenRes elseRes) pBranch
+
+    return (returnExpr, const0, const0)
+    )) <&> generateLetInBlock meta
+  let sum = IREnumSum boundVar (fmap failConversion (constructVList discreteVVals)) $ IRTFst irTuple
+  let bc = IREnumSum boundVar (fmap failConversion (constructVList discreteVVals)) $ IRTSnd $ IRTSnd irTuple
+  return (sum, const0, const0)
+  where
+    isDiscretes (DiscreteValues _) = True
+    isDiscretes _ = False
 -- Deterministic bound expression
 toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo v) == Deterministic = do
   vIR <- toIRGenerate meta v

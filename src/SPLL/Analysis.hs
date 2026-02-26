@@ -1,7 +1,8 @@
 module SPLL.Analysis (
   annotate,
   annotateEnumsProg,
-  annotateAlgsProg
+  annotateAlgsProg,
+  annotateConditionalProg
 ) where
 
 import SPLL.Lang.Types
@@ -16,6 +17,7 @@ import Data.Set.Internal (merge, empty)
 import Debug.Trace (trace)
 import PredefinedFunctions
 import Utils
+import SPLL.Typing.ForwardChaining (FCData, ExprInfo (LambdaInfo), findEquivalentLambda, findExprWithCN, progToFCData)
 
 
 annotateEnumsProg :: Program -> Program
@@ -119,6 +121,24 @@ isEnumerable =
   any (\t -> case t of
     DiscreteValues _ -> True
     _ -> False)
+
+annotateConditionalProg :: Program -> Program
+annotateConditionalProg p@Program {functions=fs} = p{functions=map (Data.Bifunctor.second (tMap (tagConditional (progToFCData p) p))) fs}
+
+tagConditional :: FCData -> Program -> Expr -> TypeInfo
+tagConditional fcData p (Lambda ti _ b) = if isConditional fcData p [] b then ti{tags=IsConditional:tags ti} else ti
+tagConditional fcData p e@(Var ti b) = if isConditional fcData p [] e then ti{tags=IsConditional:tags ti} else ti
+tagConditional fcData p x = getTypeInfo x
+
+isConditional :: FCData -> Program -> [ChainName] -> Expr -> Bool
+isConditional _ _ visited e | chainName (getTypeInfo e) `elem` visited = False
+isConditional _ _ _ (IfThenElse _ _ _ _) = True
+isConditional _ _ _ (Lambda _ _ _) = False
+isConditional _ _ _ (Apply _ _ _) = False
+isConditional fcData p visited (Var (TypeInfo{chainName=cn}) n) = case findEquivalentLambda fcData cn of
+  Just (LambdaInfo _ bodyCn, _) -> isConditional fcData p (cn:visited) (findExprWithCN (map snd (functions p)) bodyCn)
+  Nothing -> False
+isConditional fcData p visited x = any (isConditional fcData p visited) (getSubExprs x)
 
 likelihoodFunctionUsesTypeInfo :: ExprStub -> Bool
 likelihoodFunctionUsesTypeInfo expr = expr `elem` [StubEquals, StubGreaterThan, StubLessThan, StubInjF]
