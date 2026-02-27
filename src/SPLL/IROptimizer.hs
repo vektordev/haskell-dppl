@@ -64,7 +64,7 @@ optimize conf = irMap (commonSubexprStage . applyConstStage . assiciativityStage
     simplifyStage = if oLvl >= 1 then simplify else id
     indexStage = if oLvl >= 1 then indexmagic else id
     distributeConditionals = if oLvl >= 2 then distributeIf else id
-    lambdaApplicationStage = if oLvl >= 2 then optimizeLambdaApplication else id
+    lambdaApplicationStage = if False then optimizeLambdaApplication else id
     pruneAnyCkecksStage = if pruneAnyChecks conf then pruneAnyCkecksExpr else id
 
 indexmagic :: IRExpr -> IRExpr
