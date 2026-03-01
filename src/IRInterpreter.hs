@@ -25,6 +25,7 @@ import SPLL.Lang.Types
 import SPLL.Typing.RType
 import Data.Functor ((<&>))
 import SPLL.Typing.AlgebraicDataTypes
+import Data.Vector.Internal.Check (HasCallStack)
 
 data RandomFunctions m a = RandomFunctions {uniformGen:: m IRValue, normalGen:: m IRValue}
 
@@ -40,8 +41,8 @@ generateRand neurals env = generate f neurals adts startingEnv startingEnv
     startingEnv = reduceIREnv env ++ standardEnv ++ map neuralRTypeToEnv neurals ++ concatMap implicitFunctionsToEnv adts
     (IREnv _ adts) = env
 
-generateDet :: [NeuralDecl] -> IREnv -> [IRExpr]-> IRExpr -> Either String IRValue
---generateDet neurals env | traceShow neurals False = undefined
+generateDet :: (HasCallStack) => [NeuralDecl] -> IREnv -> [IRExpr]-> IRExpr -> Either String IRValue
+--generateDet neurals env params e | traceShow e False = undefined
 generateDet neurals env = generate f neurals adts startingEnv startingEnv
   where
     f = RandomFunctions {
@@ -50,7 +51,7 @@ generateDet neurals env = generate f neurals adts startingEnv startingEnv
     startingEnv = reduceIREnv env ++ standardEnv ++ map neuralRTypeToEnv neurals ++ concatMap implicitFunctionsToEnv adts
     (IREnv _ adts) = env
 
-generate :: (Monad m) => RandomFunctions m a -> [NeuralDecl] -> [ADTDecl ] -> ReducedIREnv -> ReducedIREnv -> [IRExpr]-> IRExpr -> m IRValue
+generate :: (Monad m, HasCallStack) => RandomFunctions m a -> [NeuralDecl] -> [ADTDecl ] -> ReducedIREnv -> ReducedIREnv -> [IRExpr]-> IRExpr -> m IRValue
 --generate f neurals adts globalEnv env args expr | trace ((show expr) {-++ " " ++ show env-}) False = undefined
 generate f neurals adts globalEnv env args expr | args /= [] = do
   let reverseArgs = reverse args

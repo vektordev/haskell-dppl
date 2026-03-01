@@ -107,17 +107,21 @@ makeProbRec adts (ADTPlan adtName plans) ix sample = (noAny sample p, noAny0 sam
     constrsInPlan = filter ((`elem` map fst plans) . fst) (constructors adt)
     constrsWithPlan = mapToTup (fromJust . (`lookup` plans) . fst) constrsInPlan
     constrsWithPlanAndIx = mapAppendTup constrsWithPlan constrIx
+    constrsWithPlanAndIxAndFlag = mapAppendTup3 constrsWithPlanAndIx flagProbs
     constrIx = scanl (+) (ix + length plans) (map totalSize plans)
-    constrGuard constr v = IRIf (IRInvoke $ IRApply (IRVar ("is" ++ fst constr)) sample) v (IRConst $ VFloat 0)
-    constrProb constr cPlan cIx = mapTup3 (constrGuard constr) (makeProbADTConstr adts cPlan constr cIx sample)
-    constrProbs = map (uncurry3 constrProb) constrsWithPlanAndIx
+    constrGuard constr constrFlag v = IRIf (IRInvoke $ IRApply (IRVar ("is" ++ fst constr)) sample) (IROp OpMult constrFlag v) (IRConst $ VFloat 0)
+    constrProbFields constr cPlan cIx constrFlag = mapTup3 (constrGuard constr constrFlag) (makeProbADTConstr adts cPlan constr cIx sample)
+    constrProbsFields = map (uncurry4 constrProbFields) constrsWithPlanAndIxAndFlag
     opPlus3 (a1, b1, c1) (a2, b2, c2) = (IROp OpPlus a1 a2, IROp OpPlus b1 b2, IROp OpPlus c1 c2)
-    (p, dim, bc) = foldr opPlus3 (IRConst $ VFloat 0, IRConst $ VFloat 0, IRConst $ VFloat 0) constrProbs
+    (p, dim, bc) = foldr opPlus3 (IRConst $ VFloat 0, IRConst $ VFloat 0, IRConst $ VFloat 0) constrProbsFields
+    flagIx = [ix .. ix + length plans]
+    flagProbs = map (\fIx -> IRIndex (IRVar vector) (IRConst (VInt fIx))) flagIx
 
 
 makeProbADTConstr :: [ADTDecl] -> [PartitionPlan] -> ADTConstructorDecl -> Int -> IRExpr -> (IRExpr, IRExpr, IRExpr)
-makeProbADTConstr adts plans (cName, fields) ix sample = foldr1 multProbs fieldsProb
+makeProbADTConstr adts plans (cName, fields) ix sample = foldr multProbs prob1 fieldsProb
   where
+    prob1 = (IRConst (VFloat 1), IRConst (VFloat 0), IRConst (VFloat 0))
     multProbs (p0, d0, bc0) (p1, d1, bc1) = (IROp OpMult p0 p1, IROp OpPlus d0 d1, IROp OpPlus bc0 bc1)
     fieldIx = scanl (+) ix (map getSize plans)
     fieldsProb = map (\(plan, pIx, fName) -> makeProbRec adts plan pIx (IRInvoke (IRApply (IRVar fName) sample))) (zip3 plans fieldIx (map fst fields))

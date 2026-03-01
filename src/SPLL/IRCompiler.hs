@@ -325,39 +325,30 @@ toIRInference meta True (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeIn
     TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
     _ -> do
       return (compareValueExpr rt (IRInvoke $ IRApply lIR vIR) sample, const0, const0)
-toIRInference meta cumulative (Apply TypeInfo {rType=rt} l v) sample 
+toIRInference meta cumulative e@(Apply TypeInfo {rType=rt} l v) sample 
   | IsConditional `elem` tags (getTypeInfo l) && any isDiscretes (tags (getTypeInfo v))
   && pType (getTypeInfo l) == Deterministic = do  -- This is only because of a bug in pInfer, but its useful for us...
   let lCn = chainName (getTypeInfo l)
-  let Just (LambdaInfo boundVar bodyCn , lTag) = findEquivalentLambda (fcData meta) lCn
-  let Just (IfInfo cCn tCn eCn, ifTag) = findEquivalentIf (fcData meta) bodyCn
+  let Just (_, LambdaInfo boundVar bodyCn , lTag) = findEquivalentExpression (fcData meta) lCn
   let Program{functions=fs} = compilingProgram meta
   let fExprs = map snd fs
+  let lBodyExpr = findExprWithCN fExprs bodyCn
+  {-let Just (IfInfo cCn tCn eCn, ifTag) = findEquivalentIf (fcData meta) bodyCn
+  let Program{functions=fs} = compilingProgram meta
+  
   let condExpr = findExprWithCN fExprs cCn
   let thenExpr = findExprWithCN fExprs tCn
   let elseExpr = findExprWithCN fExprs eCn
   let discreteVVals = head [multiValueToValueList x | DiscreteValues x <- (tags (getTypeInfo v))]
 
-  let newTypeEnv = (boundVar, (rType (getTypeInfo v), False)):typeEnv meta
+  
   condIR <- toIRGenerate meta {typeEnv = newTypeEnv} condExpr
   thenIR <- toIRGenerate meta {typeEnv = newTypeEnv} thenExpr
-  elseIR <- toIRGenerate meta {typeEnv = newTypeEnv} elseExpr
+  elseIR <- toIRGenerate meta {typeEnv = newTypeEnv} elseExpr-}
 
-  irTuple <- lift (runWriterT (do
-    -- the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
-    (pBranch, _, _) <- toIRInference meta False v (IRVar boundVar)
-
-    let condSelector e = IRIf condIR e const0
-    let notCondSelector e = IRIf (IRUnaryOp OpNot condIR) e const0
-    let cmpOp = if rType (getTypeInfo thenExpr) == TFloat then OpApprox else OpEq
-    let thenSelector = if cumulative then compareValueExpr rt thenIR sample else IRIf (IROp cmpOp thenIR sample) (IRConst (VFloat 1)) const0
-    let elseSelector = if cumulative then compareValueExpr rt elseIR sample else IRIf (IROp cmpOp elseIR sample) (IRConst (VFloat 1)) const0
-    let thenRes = condSelector thenSelector
-    let elseRes = notCondSelector elseSelector
-    let returnExpr = IROp OpMult (IROp OpPlus thenRes elseRes) pBranch
-
-    return (returnExpr, const0, const0)
-    )) <&> generateLetInBlock meta
+  let newTypeEnv = (boundVar, (rType (getTypeInfo v), False)):typeEnv meta
+  irTuple <- lift (runWriterT (toIREnumerate meta{typeEnv=newTypeEnv} cumulative lBodyExpr v (IRVar boundVar) sample)) <&> generateLetInBlock meta
+  let discreteVVals = head [multiValueToValueList x | DiscreteValues x <- (tags (getTypeInfo v))]
   let sum = IREnumSum boundVar (fmap failConversion (constructVList discreteVVals)) $ IRTFst irTuple
   let bc = IREnumSum boundVar (fmap failConversion (constructVList discreteVVals)) $ IRTSnd $ IRTSnd irTuple
   return (sum, const0, const0)
@@ -401,7 +392,7 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=aChainName} l 
   let lChainName = chainName (getTypeInfo l)
   
   -- This logic is here to wrap the expression back into lambdas if the lambda we look at returns a lambda
-  let Just (LambdaInfo toInvCN lambdaBodyCN, tag) = findEquivalentLambda (fcData meta) lChainName
+  let Just (_, LambdaInfo toInvCN lambdaBodyCN, tag) = findEquivalentExpression (fcData meta) lChainName
   let (boundVar, lambdaVars) = unwrapLambdas (fcData meta) lambdaBodyCN
   let wrapInLambdas ex = foldr IRLambda ex lambdaVars
 
@@ -676,7 +667,7 @@ subP (aM, aDim) (bM, bDim) = do
 createHOInverse :: FCData -> [ADTDecl]-> (String, Expr) -> CompilerMonad (IRExpr -> IRExpr)
 createHOInverse fcData adts (fVar, f) = do
   let (inverseF, inverseCoV) = toInvExpr fcData adts (chainName $ getTypeInfo f)
-  let Just (LambdaInfo _ lBodyChainName, tag) = findEquivalentLambda fcData (chainName $ getTypeInfo f)
+  let Just (_, LambdaInfo _ lBodyChainName, tag) = findEquivalentExpression fcData (chainName $ getTypeInfo f)
   let inverseLambdaProb = IRLambda (lBodyChainName ++ tag) inverseF
   let inverseLambdaCoV = IRLambda (lBodyChainName ++ tag) inverseCoV
   -- Rename all occurances of f^-1 from the definition to f_prob
@@ -856,238 +847,32 @@ packParamsIntoLetinsGen meta (v:vars) (p:params) expr = do
   pExpr <- toIRGenerate meta p
   e <- packParamsIntoLetinsGen meta vars params expr
   return $ IRLetIn v pExpr e
-{-
---Adds an additional check that the bounds are not equal
---We need this bounds check only once, because no invertible transformation can make the bounds be equal when they were not
---TODO: Some InjF could lead to CoV, which would make the bounds check at the to wrong
-toIRIntegrateSave :: CompilerMetadata -> Expr -> IRExpr -> IRExpr -> CompilerMonad CompilationResult
-toIRIntegrateSave conf clauses typeEnv adts (Lambda t name subExpr) low high = do
-  let (TArrow paramRType _) = rType t
-  case paramRType of
-    TArrow (TArrow _ _) _ -> do
-      let newTypeEnv = (name, (paramRType, True)):typeEnv
-      irTuple <- lift (runWriterT (toIRIntegrateSave conf clauses newTypeEnv adts subExpr low high)) <&> generateLetInBlock conf
-      return (IRLambda name irTuple, const0, const0)
-    _ -> do
-      let newTypeEnv = (name, (paramRType, False)):typeEnv
-      irTuple <- lift (runWriterT (toIRIntegrateSave conf clauses newTypeEnv adts subExpr low high)) <&> generateLetInBlock conf
-      return (IRLambda name irTuple, const0, const0)
-toIRIntegrateSave conf clauses typeEnv adts expr lower higher = do
-  (prob, probDim, probBC) <- toIRInference meta cumulative expr lower
-  (integ, integDim, integBC) <- toIRIntegrate meta expr lower higher
-  let eqCheck = IRIf (IROp OpEq lower higher)
-  let anyCheck = IRIf (IROp OpAnd (IRUnaryOp OpIsAny lower) (IRUnaryOp OpIsAny higher))
-  return (anyCheck (IRConst $ VFloat 1) (eqCheck prob integ), anyCheck (IRConst $ VFloat 0) (eqCheck probDim integDim), anyCheck (IRConst $ VFloat 0) (eqCheck probBC integBC))
 
+toIREnumerate :: CompilerMetadata -> Bool -> Expr -> Expr -> IRExpr -> IRExpr -> CompilerMonad CompilationResult
+toIREnumerate meta cumulative (Var TypeInfo{chainName=cn} n) distr elem sample = do
+  let Just (equivCN, _, _) = findEquivalentExpression (fcData meta) cn
+  let fs = map snd (functions (compilingProgram meta))
+  let equivExpr = findExprWithCN fs equivCN 
+  toIREnumerate meta cumulative equivExpr distr elem sample
+toIREnumerate meta cumulative (Apply TypeInfo{chainName=cn} _ _) distr elem sample = do
+  let Just (equivCN, _, _) = findEquivalentExpression (fcData meta) cn
+  let fs = map snd (functions (compilingProgram meta))
+  let equivExpr = findExprWithCN fs equivCN 
+  toIREnumerate meta cumulative equivExpr distr elem sample
+toIREnumerate meta cumulative (IfThenElse TypeInfo{rType=rt} c t e) distr elem sample = do
+  cIR <- toIRGenerate meta c
+  tIR <- toIRGenerate meta t
+  eIR <- toIRGenerate meta e
 
-toIRIntegrate :: CompilerMetadata -> Expr -> IRExpr -> IRExpr -> CompilerMonad CompilationResult
-toIRIntegrate meta expr@(Uniform _) lower higher = do
-  (density, _, _) <- toIRInference meta cumulative expr lower
-  --let expr = IRIf (IROp OpEq lower higher) density (IROp OpSub (IRCumulative IRUniform higher) (IRCumulative IRUniform lower))
-  let expr = (IROp OpSub (IRCumulative IRUniform higher) (IRCumulative IRUniform lower))
-  return (expr, IRIf (IROp OpEq lower higher) (IRConst $ VFloat 1) const0, const0)
-toIRIntegrate meta expr@(Normal _) lower higher = do
-  (density, _, _) <- toIRInference meta cumulative expr lower
-  --let expr = IRIf (IROp OpEq lower higher) density (IROp OpSub (IRCumulative IRNormal higher) (IRCumulative IRNormal lower))
-  let expr = (IROp OpSub (IRCumulative IRNormal higher) (IRCumulative IRNormal lower))
-  return (expr, IRIf (IROp OpEq lower higher) (IRConst $ VFloat 1) const0, const0)
-toIRIntegrate meta (TCons _ t1Expr t2Expr) low high = do
-  (t1P, t1Dim,  t1Branches) <- toIRIntegrateSave conf clauses typeEnv adts t1Expr (IRTFst low) (IRTFst high)
-  (t2P, t2Dim,  t2Branches) <- toIRIntegrateSave conf clauses typeEnv adts t2Expr (IRTSnd low) (IRTSnd high)
-  (productP, productDim) <- (t1P, t1Dim) `multP` (t2P, t2Dim)
-  return (productP, productDim, IROp OpPlus t1Branches t2Branches)
-toIRIntegrate meta (IfThenElse _ cond left right) low high = do
-  var_cond_p <- mkVariable "cond"
-  (condExpr, _, condBranches) <- toIRInference meta cumulative cond (IRConst (VBool True))
-  (leftExpr, _, leftBranches) <- toIRIntegrate meta left low high
-  (rightExpr, _, rightBranches) <- toIRIntegrate meta right low high
-  let thr = topKThreshold conf
-  case thr of
-    Just thresh -> do
-        setVariables [(var_cond_p, condExpr)]
-        return
-          (IRIf (IROp OpLessThan (IRVar var_cond_p) (IRConst (VFloat thresh)))
-            (IROp OpMult (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var_cond_p) ) rightExpr)
-            (IRIf (IROp OpGreaterThan (IRVar var_cond_p) (IRConst (VFloat (1-thresh))))
-              (IROp OpMult (IRVar var_cond_p) leftExpr)
-              (IROp OpPlus
-                (IROp OpMult (IRVar var_cond_p) leftExpr)
-                (IROp OpMult (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var_cond_p) ) rightExpr))), const0, IROp OpPlus condBranches (IROp OpPlus leftBranches rightBranches) )
-    -- p(y) = p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
-    Nothing -> do
-        setVariables [(var_cond_p, condExpr)]
-        return
-          (IROp OpPlus
-            (IROp OpMult (IRVar var_cond_p) leftExpr)
-            (IROp OpMult (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var_cond_p) ) rightExpr), const0, IROp OpPlus condBranches (IROp OpPlus leftBranches rightBranches) )
-toIRIntegrate meta (Cons _ hdExpr tlExpr) low high = do
-  headTuple <- lift (runWriterT (toIRIntegrateSave conf clauses typeEnv adts hdExpr (IRHead low) (IRHead high))) <&> generateLetInBlock conf
-  tailTuple <- lift (runWriterT (toIRIntegrateSave conf clauses typeEnv adts tlExpr (IRTail low) (IRTail high))) <&> generateLetInBlock conf
-  let dim = if countBranches (compilerConfig meta) then IRTFst . IRTSnd else IRTSnd
-  (multP, multDim) <- (IRTFst headTuple, dim headTuple)  `multP` (IRTFst tailTuple, dim tailTuple)
-  return (IRIf (IROp OpOr (IROp OpEq low (IRConst $ VList EmptyList)) (IROp OpEq high (IRConst $ VList EmptyList))) (IRConst $ VFloat 0) multP, multDim, IROp OpPlus (IRTSnd (IRTSnd headTuple)) (IRTSnd (IRTSnd tailTuple)))
-toIRIntegrate meta (Null _) low high = do
-  ind <- indicator (IROp OpAnd (IROp OpEq low (IRConst $ VList EmptyList)) (IROp OpEq high (IRConst $ VList EmptyList)))
-  return (ind, const0, const0)
-toIRIntegrate meta (Constant _ value) low high = do
-  ind <- indicator (IROp OpAnd (IROp OpLessThan low (IRConst (fmap failConversion value))) (IROp OpGreaterThan high (IRConst (fmap failConversion value)))) --TODO What to do if low and high are equal?
-  return (ind, const0, const0)
-toIRIntegrate meta (ThetaI _ a i) low high = do
-  a' <-  toIRGenerate meta a
-  let val = IRTheta a' i
-  ind <- indicator (IROp OpAnd (IROp OpLessThan low val) (IROp OpGreaterThan high val)) --TODO What to do if low and high are equal?
-  return (ind, const0, const0)
-toIRIntegrate meta (InjF _ name params) low high | isHigherOrder adts name = do
-  -- FPair of the InjF with unique names
-  fPair <- instantiate mkVariable adts name
-  -- Unary InjF has a single inversion
-  let FPair _ [inv] = fPair
-  let FDecl {inputVars=inVars, body=invExpr, applicability=appTest, deconstructing=decons, derivatives=derivs} = inv
-  --Handle the function being in different positions of the signature
-  let aPoss = [0 .. (length params - 1)] \\ getFunctionParamIdx adts name
-  let aPos = case aPoss of
-        [n] -> n
-        x -> error $ "Expected exectly one non-ho parameter, but got " ++ show (length x)
-  let a = params !! aPos
-  let aVar = inVars !! aPos
-  let fs = map (params !!) (getFunctionParamIdx adts name)
-  let fVars = map (inVars !!) (getFunctionParamIdx adts name)
-  let Just invDerivExpr = lookup aVar derivs
-  -- Set sample value to the variable name in the InjF
-  let letInBlockLow = IRLetIn aVar low invExpr
-  let letInBlockHigh = IRLetIn aVar high invExpr
-  -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
-  let integF = if decons then toIRIntegrateSave else toIRIntegrate
-  -- Create all inverses of the ho functions and save them on the variable stack
-  -- Then create a substitution that substitutes f^-1 to f_prob. All substitutions are then composed in the fold
-  renVar <- foldM (\sub tup -> createHOInverse clauses adts tup <&> (.) sub) id (zip fVars fs)
-  (paramExpr, paramDim, paramBranches) <- integF conf clauses typeEnv adts a letInBlockLow letInBlockHigh
-  -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
-  let returnP = IROp OpMult paramExpr (IRUnaryOp OpSign invDerivExpr)
-  let appTestExpr e = IRIf appTest e const0
-  return (renVar (appTestExpr returnP), const0, renVar (appTestExpr paramBranches))
-toIRIntegrate meta (InjF _ name [param]) low high = do
-  -- FPair of the InjF with unique names
-  fPair <- instantiate mkVariable adts name
-  -- Unary InjF has a single inversion
-  let FPair _ [inv] = fPair
-  let FDecl {inputVars=[v], body=invExpr, applicability=appTest, deconstructing=decons, derivatives=[(_, invDerivExpr)]} = inv
-  -- Set sample value to the variable name in the InjF
-  let letInBlockLow = IRLetIn v low invExpr
-  let letInBlockHigh = IRLetIn v high invExpr
-  -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
-  let integF = if decons then toIRIntegrateSave else toIRIntegrate
-  -- Get the probabilistic inference code for the parameter
-  (paramExpr, paramDim, paramBranches) <- integF conf clauses typeEnv adts param letInBlockLow letInBlockHigh
-  -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
-  let returnP = IROp OpMult paramExpr (IRUnaryOp OpSign invDerivExpr)
-  let appTestExpr e = IRIf appTest e const0
-  return (appTestExpr returnP, const0, appTestExpr paramBranches)
-toIRIntegrate meta e@(InjF TypeInfo {tags=extras, rType=rt} name params) low high
-  | isNothing (getProbIndex params) = do
-  -- There is no probabilistic parameter
-  -- Check whether the value of the function is equal to the sample
-  expr <- toIRGenerate meta e
-  retExpr <- indicator $ IROp OpAnd (IROp OpLessThan low expr) (IROp OpGreaterThan high expr)
-  return (retExpr, const0, const0)
-toIRIntegrate meta (InjF TypeInfo {tags=extras} name params) low high
-  | isJust (getProbIndex params) = do
-  -- FPair of the InjF with unique names
-  FPair fwd inversions <- instantiate mkVariable adts name
-  let FDecl{inputVars=inVars, outputVars=[v1]} = fwd
-  -- Index of the deterministic and the probabilistic parameter (Left -> 0, Right -> 1)
-  let Just probIdx = getProbIndex params
-  let detIdxs = [0..length params - 1] \\ [probIdx]
-  -- Find the inversion with all deterministic input parameters
-  let [invDecl] = filter (\FDecl {outputVars=[w1]} -> (inVars !! probIdx)==w1) inversions   --This should only return one inversion
-  let FDecl {inputVars=invVars, body=invExpr, applicability=appTest, deconstructing=decons, derivatives=invDerivs} = invDecl
-  -- All deterministic variable names
-  let detVars = filter (v1 /=) invVars
-  let detEs = map (params !!) detIdxs
-
-  -- Find the relevant derivative of the inversion
-  let Just invDeriv = lookup v1 invDerivs
-  -- Generate the probabilistic sub expressions
-  mapM_ (\(eVar, e) -> toIRGenerate meta e >>= \x -> setVariables [(eVar, x)]) (zip detVars detEs)
-  let letInBlockLow = IRLetIn v1 low invExpr
-  let letInBlockHigh = IRLetIn v1 high invExpr
-  -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
-  let integF = if decons then toIRIntegrateSave else toIRIntegrate
-  -- Get the probabilistic inference expression of the non-deterministic subexpression
-  (paramExpr, paramDim, paramBranches) <- integF conf clauses typeEnv adts (params !! probIdx) letInBlockLow letInBlockHigh
-  -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula if dim > 0
-  let returnP = IROp OpMult paramExpr (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDeriv))
-  let appTestExpr e = IRIf appTest e const0
-  return (appTestExpr returnP, appTestExpr paramDim, appTestExpr paramBranches)
-toIRIntegrate meta (Lambda t name subExpr) low high = do
-  let (TArrow paramRType _) = rType t
-  case paramRType of
-    TArrow (TArrow _ _) _ -> do
-      let newTypeEnv = (name, (paramRType, True)):typeEnv
-      irTuple <- lift (runWriterT (toIRIntegrate conf clauses newTypeEnv adts subExpr low high)) <&> generateLetInBlock conf
-      return (IRLambda name irTuple, const0, const0)
-    _ -> do
-      let newTypeEnv = (name, (paramRType, False)):typeEnv
-      irTuple <- lift (runWriterT (toIRIntegrate conf clauses newTypeEnv adts subExpr low high)) <&> generateLetInBlock conf
-      return (IRLambda name irTuple, const0, const0)
-toIRIntegrate meta (Apply TypeInfo{rType=rt} l v) low high | pType (getTypeInfo l) == Deterministic && pType (getTypeInfo v) == Deterministic = do
-  vIR <- toIRGenerate meta v
-  lIR <- toIRGenerate meta l -- Dim and BC are irrelevant here
-  -- The result is not a tuple if the return value is a closure
-  case rt of
-    TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
-    _ -> do
-      retExpr <- indicator (IROp OpAnd (IROp OpLessThan (IRInvoke (IRApply lIR vIR)) high) (IROp OpGreaterThan (IRInvoke (IRApply lIR vIR)) low))
-      return (retExpr, const0, const0)
-toIRIntegrate meta (Apply TypeInfo{rType=rt} l v) low high | pType (getTypeInfo v) == Deterministic = do
-  vIR <- toIRGenerate meta v
-  (lIR, _, _) <- toIRIntegrate meta l low high -- Dim and BC are irrelevant here. We need to extract these from the return tuple
-  -- The result is not a tuple if the return value is a closure
-  case rt of
-    TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
-    _ -> do
-      retVal <- mkVariable "call"
-      setVariables [(retVal, IRInvoke (IRApply lIR vIR))]
-      if countBranches (compilerConfig meta) then
-        return (IRTFst (IRVar retVal), IRTFst (IRTSnd (IRVar retVal)), IRTSnd (IRTSnd (IRVar retVal)))
-      else
-        return (IRTFst (IRVar retVal), IRTSnd (IRVar retVal), const0)
-
-toIRIntegrate meta (Apply TypeInfo{rType=rt} l v) low high | pType (getTypeInfo v) == Integrate = do
-  let lChainName = chainName (getTypeInfo l)
-  let lInv = IRLambda lChainName (toInvExpr clauses adts lChainName)
-  let appliedSampleLow = IRInvoke (IRApply lInv low)
-  let appliedSampleHigh = IRInvoke (IRApply lInv high)
-  toIRIntegrate meta v appliedSampleLow appliedSampleHigh
-toIRIntegrate meta (Apply TypeInfo{rType=rt} l v) low high = error "This instance if apply is not yet implemented"
-toIRIntegrate meta (Var _ n) low high = do
-  -- Variable might be a function
-  case lookup n typeEnv of
-   -- Var is a function
-   Just(TArrow _ _, hasInference) -> do
-     var <- mkVariable "call"
-     let name = if hasInference then n ++ "_integ" else n
-     setVariables [(var, IRApply (IRApply (IRVar name) low) high)]
-     -- The return value is still a function. No need to do dim and branch counting here
-     return (IRVar var, const0, const0)
-   Just(TArrow _ _, False) -> do
-     var <- mkVariable "call"
-     setVariables [(var, IRApply (IRApply (IRVar n) low) high)]
-     -- The return value is still a function. No need to do dim and branch counting here
-     return (IRVar var, const0, const0)
-   -- Var is a top level declaration (an therefor has a _prob function)
-   Just (_, True) -> do
-     var <- mkVariable "call"
-     setVariables [(var, IRInvoke (IRApply (IRApply (IRVar (n ++ "_integ")) low) high))]
-     if countBranches (compilerConfig meta) then
-         return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
-       else
-         return (IRTFst (IRVar var), IRTSnd (IRVar var), const0)
-   -- Var is a local variable
-   Just (_, False) -> do
-    ind <- indicator (IROp OpAnd (IROp OpLessThan low (IRVar n)) (IROp OpGreaterThan high (IRVar n))) --TODO What to do if low and high are equal?
-    return (ind, const0, const0)
-   Nothing -> error ("Could not find name in TypeEnv: " ++ n)
-toIRIntegrate meta (Error t e) low high = return (IRError e, const0, const0)
-toIRIntegrate _ x _ _ = error ("found no way to convert to IRIntegrate: " ++ show x)
--}
+  (pBranch, _, _) <- toIRInference meta False distr elem
+  -- Due to eager evaluation, we must make sure, that the wrong branch is not executed
+  let condSelector e = IRIf cIR e const0
+  let notCondSelector e = IRIf (IRUnaryOp OpNot cIR) e const0
+  let cmpOp = if rt == TFloat then OpApprox else OpEq
+  let thenSelector = if cumulative then compareValueExpr rt tIR sample else IRIf (IROp cmpOp tIR sample) (IRConst (VFloat 1)) const0
+  let elseSelector = if cumulative then compareValueExpr rt eIR sample else IRIf (IROp cmpOp eIR sample) (IRConst (VFloat 1)) const0
+  let thenRes = condSelector thenSelector
+  let elseRes = notCondSelector elseSelector
+  let returnExpr = IROp OpMult (IROp OpPlus thenRes elseRes) pBranch
+  return (returnExpr, const0, const0)
+--toIREnumerate meta cumulative (InjF _ name params) distr elem sample = do

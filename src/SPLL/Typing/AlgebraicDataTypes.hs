@@ -11,6 +11,7 @@ import SPLL.Typing.RType
 import System.IO.Error.Lens (errno)
 import SPLL.IntermediateRepresentation (IRExpr (..))
 import Debug.Trace
+import Data.Vector.Internal.Check (HasCallStack)
 
 implicitFunctionsRTypeProg :: Program -> [(String, RType)]
 implicitFunctionsRTypeProg Program {adts=adts} = concatMap implicitFunctionRTypes adts
@@ -48,7 +49,8 @@ createLambdaFromRType :: RType -> Int -> IRExpr -> IRExpr
 createLambdaFromRType (_ `TArrow` rt) idx inner = IRLambda ("x" ++ show idx) (createLambdaFromRType rt (idx + 1) inner)
 createLambdaFromRType _ idx inner = inner
 
-implicitFunctionImpl :: Show a => [ADTDecl] -> String -> [GenericValue a] -> GenericValue a
+implicitFunctionImpl :: (Show a, HasCallStack) => [ADTDecl] -> String -> [GenericValue a] -> GenericValue a
+--implicitFunctionImpl decls fName params | trace (show decls ++ " || " ++ fName ++ " || " ++ show params) False = undefined
 implicitFunctionImpl decls fName [param] | fName `elem` isFNames = isImpl (drop 2 fName) param
   where isFNames = concatMap (map (("is" ++) . fst) . constructors) decls
 implicitFunctionImpl decls fName param | fName `elem` constrFNames = VADT fName param

@@ -84,7 +84,7 @@ toInvExpr fcData adts lambdaCN = (mergedM, mergedCoV)
     clauseSet = hornClauses fcData
     -- Find the declaration of the lambda, which we want to invert. 
     -- If the lambda is applied multiple times, we also find the tag that uniquely identifies our application
-    Just (LambdaInfo toInvVarName lambdaBodyCN, tag) = findEquivalentLambda fcData lambdaCN
+    Just (_, LambdaInfo toInvVarName lambdaBodyCN, tag) = findEquivalentExpression fcData lambdaCN
     -- Find the occurances of the variable bound by the lambda inside of the lambda. These are the points we want to find the values of
     -- If the variable occurs multiple times, we try to find values of all occurances and merge the expressions, because they may contain complementing information
     toInvCNs = map (++tag) (findChainNamesForVar fcData toInvVarName)
@@ -121,36 +121,26 @@ toValueExpr clauses paramClauses adts startCN =
     -- Solve the set of Horn clauses for clauses which are fulfilled
     solvedClauses = solveHCSet augmentedClauseSet
 
-findEquivalentExpression :: FCData -> (ExprInfo -> Bool) -> ChainName -> Maybe (ExprInfo, String)
-findEquivalentExpression fcData testF startCN = case lookup startCN (chainNameInfo fcData) of
+-- Takes a chain name of a point in the AST and finds the lambda, this point is equivalent to.
+-- Also return the uniquely identifying tag if the lambda is tagged
+findEquivalentExpression :: FCData -> ChainName -> Maybe (ChainName, ExprInfo, String)
+findEquivalentExpression fcData startCN = case lookup startCN (chainNameInfo fcData) of
   Nothing -> error $ "Could not find chainName in FCData " ++ startCN
   -- Found the lambda
-  Just x | testF x -> Just (x, "")
+  Just x | isFinalExpr x -> Just (startCN, x, "")
   -- Expression must be equivalent to a lambda. Look for equilavence relations
   Just _ -> do
     -- Only outgoing equivalence relations, so we don't have cycles
     let origClauses = getAllOriginatingEquivalenceHornClauses (hornClauses fcData) startCN
     case filter (\(EquivalenceHornClause _ conc ty inv) -> inv == 1) origClauses of
       [EquivalenceHornClause [pre] _ _ _] -> do
-        el <- findEquivalentLambda fcData (untag pre)
-        return (fst el, getTag pre)
+        (resCN, resInfo, _) <- findEquivalentExpression fcData (untag pre)
+        return (resCN, resInfo, getTag pre)
       _ -> Nothing
-
--- Takes a chain name of a point in the AST and finds the lambda, this point is equivalent to.
--- Also return the uniquely identifying tag if the lambda is tagged
-findEquivalentLambda :: FCData -> ChainName -> Maybe (ExprInfo, String)
---findEquivalentLambda fcData startCN | trace startCN False = undefined
-findEquivalentLambda fcData = findEquivalentExpression fcData isLambdaInfo
   where
-    isLambdaInfo (LambdaInfo _ _) = True
-    isLambdaInfo _ = False
-
-findEquivalentIf :: FCData -> ChainName -> Maybe (ExprInfo, String)
---findEquivalentLambda fcData startCN | trace startCN False = undefined
-findEquivalentIf fcData = findEquivalentExpression fcData isIfInfo
-  where
-    isIfInfo (IfInfo _ _ _) = True
-    isIfInfo _ = False
+    isFinalExpr (ApplyInfo _ _) = False
+    isFinalExpr (VarInfo _) = False
+    isFinalExpr _ = True
 
 findChainNamesForVar :: FCData -> String -> [ChainName]
 findChainNamesForVar fcData varName = case correctVarInfos of

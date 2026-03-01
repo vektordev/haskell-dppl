@@ -1,0 +1,6 @@
+data Color = Red | Green | Blue
+neural readColor :: (Symbol -> (Color, (Color, (Color, Color)))) of ({Red | Green | Blue}, ({Red | Green | Blue}, ({Red | Green | Blue}, {Red | Green | Blue})))
+countRed4 l4 = (if isRed (fst l4) then 1 ++ countRed3 (snd l4) else countRed3 (snd l4)) 
+countRed3 l3 = (if isRed (fst l3) then 1 else 0) ++ countRed2 (snd l3)
+countRed2 l2 = (if isRed (fst l2) then 1 else 0) ++ (if isRed (snd l2) then 1 else 0)
+main sym = countRed4 (readColor sym)

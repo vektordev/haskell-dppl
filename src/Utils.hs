@@ -26,8 +26,14 @@ mapToTup f = map (\x -> (x, f x))
 mapAppendTup :: [(a, b)] -> [c] -> [(a, b, c)]
 mapAppendTup = zipWith (curry (\((x, y), z) -> (x, y, z)))
 
+mapAppendTup3 :: [(a, b, c)] -> [d] -> [(a, b, c, d)]
+mapAppendTup3 = zipWith (curry (\((x, y, z), a) -> (x, y, z, a)))
+
 uncurry3 :: (a -> b -> c -> d) -> (a, b, c) -> d
 uncurry3 f (a, b, c) = f a b c
+
+uncurry4 :: (a -> b -> c -> d -> e) -> (a, b, c, d) -> e
+uncurry4 f (a, b, c, d) = f a b c d
 
 concatMapM :: Monad m => (a -> m [b]) -> [a] -> m [b]
 concatMapM f l = mapM f l <&> concat

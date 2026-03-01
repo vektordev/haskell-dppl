@@ -41,6 +41,13 @@ randomMockNN part@(EitherPlan planL planR) = do
   let VList rMockL = rightMock
   let res = VFloat selector : toList lMockL ++ toList rMockL
   return (constructVList res)
+randomMockNN part@(TuplePlan planF planS) = do
+  fstMock <- randomMockNN planF
+  let VList fMockL = fstMock
+  sndMock <- randomMockNN planS
+  let VList sMockL = sndMock
+  let res = toList fMockL ++ toList sMockL
+  return (constructVList res)
 randomMockNN part@(ADTPlan dataName constrs) = do
   let cntConstrs = length constrs
   selectors <- randomList cntConstrs
@@ -66,6 +73,12 @@ spikingMockNN (Discretes _ tgs) v = do
   let sumNoise = sum noise
   let spike = [if i == idx then 1 else 0 | i <- [0..size - 1]]
   return $ constructVList (map (\(n, s) -> VFloat ((n + s) / (1 + sumNoise))) (zip noise spike))  -- Noise + spike normalized
+spikingMockNN (TuplePlan planF planS) (VTuple fVal sVal) = do
+  fMock <- spikingMockNN planF fVal
+  let VList fMockL = fMock
+  sMock <- spikingMockNN planS sVal
+  let VList sMockL = sMock
+  return $ constructVList (toList fMockL ++ toList sMockL)
 spikingMockNN (EitherPlan planL planR) (VEither v) = do
   case v of
         Left l -> do
@@ -89,8 +102,7 @@ spikingMockNN (ADTPlan dataName constrs) (VList lst) = do
 
   let cntConstrs = length constrs
   selectors <- randomList cntConstrs
-  spikeProb <- getRandom <&> (* 0.8)
-  let spikingSelectors = replaceAt (map (* 0.2) selectors) constrSelect spikeProb
+  let spikingSelectors = replaceAt (map (* 0.2) selectors) constrSelect 1.0
   let selectorsNorm = map (/ sum spikingSelectors) spikingSelectors
   let selectorsLst = map VFloat selectorsNorm
 
