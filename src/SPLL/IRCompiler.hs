@@ -347,7 +347,10 @@ toIRInference meta cumulative e@(Apply TypeInfo {rType=rt} l v) sample
   elseIR <- toIRGenerate meta {typeEnv = newTypeEnv} elseExpr-}
 
   let newTypeEnv = (boundVar, (rType (getTypeInfo v), False)):typeEnv meta
-  irTuple <- lift (runWriterT (toIREnumerate meta{typeEnv=newTypeEnv} cumulative lBodyExpr v (IRVar boundVar) sample)) <&> generateLetInBlock meta
+  irTuple <- lift (runWriterT (do
+    (pBranch, _, _) <- toIRInference meta False v (IRVar boundVar)
+    (p, d, bc) <- toIREnumerate meta{typeEnv=newTypeEnv} cumulative lBodyExpr sample
+    return (IROp OpMult p pBranch, d, bc))) <&> generateLetInBlock meta
   let discreteVVals = head [multiValueToValueList x | DiscreteValues x <- (tags (getTypeInfo v))]
   let sum = IREnumSum boundVar (fmap failConversion (constructVList discreteVVals)) $ IRTFst irTuple
   let bc = IREnumSum boundVar (fmap failConversion (constructVList discreteVVals)) $ IRTSnd $ IRTSnd irTuple
@@ -848,23 +851,22 @@ packParamsIntoLetinsGen meta (v:vars) (p:params) expr = do
   e <- packParamsIntoLetinsGen meta vars params expr
   return $ IRLetIn v pExpr e
 
-toIREnumerate :: CompilerMetadata -> Bool -> Expr -> Expr -> IRExpr -> IRExpr -> CompilerMonad CompilationResult
-toIREnumerate meta cumulative (Var TypeInfo{chainName=cn} n) distr elem sample = do
+toIREnumerate :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad CompilationResult
+toIREnumerate meta cumulative (Var TypeInfo{chainName=cn} n) sample = do
   let Just (equivCN, _, _) = findEquivalentExpression (fcData meta) cn
   let fs = map snd (functions (compilingProgram meta))
   let equivExpr = findExprWithCN fs equivCN 
-  toIREnumerate meta cumulative equivExpr distr elem sample
-toIREnumerate meta cumulative (Apply TypeInfo{chainName=cn} _ _) distr elem sample = do
+  toIREnumerate meta cumulative equivExpr sample
+toIREnumerate meta cumulative (Apply TypeInfo{chainName=cn} _ _) sample = do
   let Just (equivCN, _, _) = findEquivalentExpression (fcData meta) cn
   let fs = map snd (functions (compilingProgram meta))
   let equivExpr = findExprWithCN fs equivCN 
-  toIREnumerate meta cumulative equivExpr distr elem sample
-toIREnumerate meta cumulative (IfThenElse TypeInfo{rType=rt} c t e) distr elem sample = do
+  toIREnumerate meta cumulative equivExpr sample
+toIREnumerate meta cumulative (IfThenElse TypeInfo{rType=rt} c t e) sample = do
   cIR <- toIRGenerate meta c
   tIR <- toIRGenerate meta t
   eIR <- toIRGenerate meta e
-
-  (pBranch, _, _) <- toIRInference meta False distr elem
+  --(pBranch, _, _) <- toIRInference meta False distr elem
   -- Due to eager evaluation, we must make sure, that the wrong branch is not executed
   let condSelector e = IRIf cIR e const0
   let notCondSelector e = IRIf (IRUnaryOp OpNot cIR) e const0
@@ -873,6 +875,7 @@ toIREnumerate meta cumulative (IfThenElse TypeInfo{rType=rt} c t e) distr elem s
   let elseSelector = if cumulative then compareValueExpr rt eIR sample else IRIf (IROp cmpOp eIR sample) (IRConst (VFloat 1)) const0
   let thenRes = condSelector thenSelector
   let elseRes = notCondSelector elseSelector
-  let returnExpr = IROp OpMult (IROp OpPlus thenRes elseRes) pBranch
+  let returnExpr = IROp OpPlus thenRes elseRes
   return (returnExpr, const0, const0)
---toIREnumerate meta cumulative (InjF _ name params) distr elem sample = do
+--toIREnumerate meta cumulative (InjF _ name params) distr elem sample
+--  | not (isHigherOrder name) = do
