@@ -416,7 +416,40 @@ pNeural = dbg "neural" $ do
 
 pNeuralMultiValue :: MonadParser m => m MultiValue
 pNeuralMultiValue = dbg "multiVal" $ do
-  choice [try pMultiTuple, pMultiDiscretes, pMultiADT, try pMultiEither]
+  choice [try pMultiTypeDef, try pMultiTypeRef, try pMultiTuple, pMultiDiscretes, pMultiADT, try pMultiEither]
+
+pMultiTypeDef :: MonadParser m => m MultiValue
+pMultiTypeDef = do
+  depth <- pInt
+  name <- pIdentifier
+  symbol "."
+  inner <- pNeuralMultiValue
+  return (resolveMultiValueTypeDecl depth inner (name, inner))
+
+pMultiTypeRef :: MonadParser m => m MultiValue
+pMultiTypeRef = pIdentifier <&> MultiTypeRef
+
+resolveMultiValueTypeDecl :: Int -> MultiValue -> (String, MultiValue) -> MultiValue
+resolveMultiValueTypeDecl 0 (MultiTypeRef _) _ = error "Cannot recurse, no depth left"
+resolveMultiValueTypeDecl 1 (MultiTypeRef refName) (declName, MultiADT constrs) = MultiADT (filter (\(_, args) -> not $ any (containsMultiValueTypeRef declName) args) constrs)
+resolveMultiValueTypeDecl depthLeft (MultiTypeRef refName) decl@(declName, declVal) | declName == refName = resolveMultiValueTypeDecl (depthLeft - 1) declVal decl
+resolveMultiValueTypeDecl depthLeft (MultiDiscretes d) decl = MultiDiscretes d
+resolveMultiValueTypeDecl depthLeft (MultiTuple l r) decl =
+  MultiTuple (resolveMultiValueTypeDecl depthLeft l decl)
+             (resolveMultiValueTypeDecl depthLeft r decl)
+resolveMultiValueTypeDecl depthLeft (MultiEither l r) decl =
+  MultiEither (resolveMultiValueTypeDecl depthLeft l decl)
+              (resolveMultiValueTypeDecl depthLeft r decl)
+resolveMultiValueTypeDecl depthLeft (MultiADT cons) decl =
+  MultiADT [(cname, map (\mv -> resolveMultiValueTypeDecl depthLeft mv decl) args) |
+            (cname, args) <- cons]
+
+containsMultiValueTypeRef :: String -> MultiValue -> Bool
+containsMultiValueTypeRef _ (MultiDiscretes _) = False
+containsMultiValueTypeRef n (MultiTypeRef m) = n == m
+containsMultiValueTypeRef n (MultiEither l r) = containsMultiValueTypeRef n l || containsMultiValueTypeRef n r
+containsMultiValueTypeRef n (MultiTuple l r) = containsMultiValueTypeRef n l || containsMultiValueTypeRef n r
+containsMultiValueTypeRef n (MultiADT constrs) = any (\(_, args) -> any (containsMultiValueTypeRef n) args) constrs
 
 pMultiDiscretes :: MonadParser m => m MultiValue
 pMultiDiscretes = dbg "multiDisc" $ do
@@ -442,10 +475,11 @@ pMultiTuple = dbg "multiTuple" $ parens $ do
 pMultiADT :: MonadParser m => m MultiValue
 pMultiADT = dbg "multiADT" $ do
   symbol "{"
-  constrs <- sepBy (do
+  constrs <- sepBy (
+    (do
       cName <- pIdentifier
       params <- many pNeuralMultiValue
-      return (cName, params)
+      return (cName, params))
     ) (symbol "|")
   symbol "}"
   return $ MultiADT constrs

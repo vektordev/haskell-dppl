@@ -197,9 +197,10 @@ data MultiValue = MultiDiscretes [Value]
                 | MultiTuple MultiValue MultiValue
                 | MultiEither MultiValue MultiValue
                 | MultiADT [(String, [MultiValue])] 
+                | MultiTypeRef String
                 deriving (Show, Eq)
 
-isMultiDiscretes, isMultiTuple, isMultiEither, isMultiADT :: MultiValue -> Bool
+isMultiDiscretes, isMultiTuple, isMultiEither, isMultiADT, isMultiTypeRef :: MultiValue -> Bool
 isMultiDiscretes (MultiDiscretes _) = True
 isMultiDiscretes _ = False
 isMultiTuple (MultiTuple _ _) = True
@@ -208,6 +209,8 @@ isMultiEither (MultiEither _ _) = True
 isMultiEither _ = False
 isMultiADT (MultiADT _) = True
 isMultiADT _ = False
+isMultiTypeRef (MultiTypeRef _) = True
+isMultiTypeRef _ = False
 
 
 data Tag = DiscreteValues MultiValue 
