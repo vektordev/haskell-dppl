@@ -36,6 +36,7 @@ module SPLL.Lang.Lang (
 , constructVList
 , multiValueToValueList
 , valueListToMultiValue
+, valueInMultiValue
 , unionMultiValues
 , elementAt
 , getFunctionNames
@@ -441,6 +442,15 @@ valueListToMultiValue lst@((VADT _ _):_) | all isVADT lst = MultiADT (map (Bifun
     valueListsForConstrs = map (\cn -> (cn, [fields | VADT cn' fields <- lst, cn' == cn])) cns
 valueListToMultiValue lst@((VADT _ _):_) = error "Not all elements in the list are ADTs"
 valueListToMultiValue lst = MultiDiscretes lst
+
+valueInMultiValue :: MultiValue -> Value -> Bool
+valueInMultiValue (MultiDiscretes d) x = x `elem` d
+valueInMultiValue (MultiEither ml _) (VEither (Left l)) = valueInMultiValue ml l
+valueInMultiValue (MultiEither _ mr) (VEither (Right r)) = valueInMultiValue mr r
+valueInMultiValue (MultiTuple mf ms) (VTuple f s) = valueInMultiValue mf f && valueInMultiValue ms s
+valueInMultiValue (MultiADT mConstrs) (VADT cName vals) = fromMaybe False (do
+  constr <- lookup cName mConstrs
+  return $ all (uncurry valueInMultiValue) (zip constr vals))
 
 unionMultiValues :: MultiValue -> MultiValue -> MultiValue
 unionMultiValues (MultiDiscretes as) (MultiDiscretes bs) = MultiDiscretes (nub (as ++ bs))

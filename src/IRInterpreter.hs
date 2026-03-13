@@ -5,7 +5,7 @@ generateRand
 
 import Statistics.Distribution (ContGen, genContVar, quantile, density)
 import SPLL.IntermediateRepresentation
-import SPLL.Lang.Lang (Value(..), ThetaTree(..), Program, elementAt, constructVList, lookupNeural, floatApproxEqThresh)
+import SPLL.Lang.Lang (Value(..), ThetaTree(..), Program, elementAt, constructVList, lookupNeural, floatApproxEqThresh, multiValueToValueList, valueInMultiValue)
 import StandardLibrary
 import MockNN
 import SPLL.AutoNeural
@@ -375,12 +375,15 @@ generate f neurals adts globalEnv env args (IRVar name) =
   case lookup name env of
     Just expr -> generate f neurals adts globalEnv env args expr
     Nothing -> error ("Variable " ++ name ++ " not declared")
-generate f neurals adts globalEnv env [] (IREnumSum varname (VList values) expr) = do    --TODO Untested
+generate f neurals adts globalEnv env [] (IREnumSum varname values expr) = do    --TODO Untested
   foldrM (\v acc -> do
     x <- generate f neurals adts globalEnv env [IRConst v] (IRLambda varname expr)
     return $ sumValues x acc
-    ) (VFloat 0) values
+    ) (VFloat 0) (fmap valueToIR (multiValueToValueList values))
   where sumValues = \(VFloat a) (VFloat b) -> VFloat $ a+b
+generate f neurals adts globalEnv env [] (IRIsPossible multiVal expr) = do
+  val <- generate f neurals adts globalEnv env [] expr
+  return $ VBool (valueInMultiValue multiVal (fmap (error "Failed conversion") val))
 generate f neurals adts globalEnv env [] (IREvalNN name sym) = do
   let (rt, tags) = fromJust (lookupNeural name neurals)
   let realRT (TSymbol `TArrow` r) = r

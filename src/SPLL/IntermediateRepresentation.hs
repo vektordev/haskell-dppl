@@ -165,7 +165,8 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               | IRInvoke IRExpr -- Only relevant for CodeGen. States that the last argument has been applied to a function
               -- auxiliary construct to aid enumeration: bind each enumerated Value to the Varname and evaluate the subexpr. Sum results.
               -- maybe we can instead move this into some kind of standard library.
-              | IREnumSum Varname IRValue IRExpr
+              | IREnumSum Varname MultiValue IRExpr
+              | IRIsPossible MultiValue IRExpr
               | IREvalNN Varname IRExpr
               | IRIndex IRExpr IRExpr
               | IRError String
@@ -230,6 +231,7 @@ getIRSubExprs (IRFromLeft a) = [a]
 getIRSubExprs (IRFromRight a) = [a]
 getIRSubExprs (IRIsLeft a) = [a]
 getIRSubExprs (IRIsRight a) = [a]
+getIRSubExprs (IRIsPossible _ a) = [a]
 getIRSubExprs (IRDensity _ a) = [a]
 getIRSubExprs (IRCumulative _ a) = [a]
 getIRSubExprs (IRSample _) = []
@@ -262,6 +264,7 @@ irMap f x = case x of
   (IRFromRight expr) -> f (IRFromRight (irMap f expr))
   (IRIsLeft expr) -> f (IRIsLeft (irMap f expr))
   (IRIsRight expr) -> f (IRIsRight (irMap f expr))
+  (IRIsPossible val expr) -> f (IRIsPossible val (irMap f expr))
   (IRDensity a expr) -> f (IRDensity a (irMap f expr))
   (IRCumulative a expr) -> f (IRCumulative a (irMap f expr))
   (IRLetIn name left right) -> f (IRLetIn name (irMap f left) (irMap f right))
@@ -303,6 +306,7 @@ irPrintFlat (IRFromLeft _) = "IRFromLeft"
 irPrintFlat (IRFromRight _) = "IRFromRight"
 irPrintFlat (IRIsLeft _) = "IRIsLeft"
 irPrintFlat (IRIsRight _) = "IRIsRight"
+irPrintFlat (IRIsPossible _ _) = "IRIsPossible"
 irPrintFlat (IRDensity _ _) = "IRDensity"
 irPrintFlat (IRCumulative _ _) = "IRCumulative"
 irPrintFlat (IRSample _) = "IRSample"

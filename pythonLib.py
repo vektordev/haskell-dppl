@@ -2,6 +2,7 @@ import math
 from typing import Iterable
 from math import *
 from random import random, gauss
+import itertools
 
 def sign(x):
   return -1 if x < 0 else 0 if x == 0 else 1
@@ -212,4 +213,42 @@ def listProd(lst):
     return 1
   elif isinstance(lst, ConsInferenceList):
     return lst.value * listProd(lst.next)
+    
+def isPossible(multiVal, expr):
+  if multiVal[0] == "D":
+    return expr in multiVal[1]
+  elif multiVal[0] == "T" and isinstance(expr, tuple):
+    return isPossible(multiVal[1][0], expr[0]) and isPossible(multiVal[1][1], expr[1])
+  elif multiVal[0] == "E" and isinstance(expr, Left):
+    return isPossible(multiVal[1][0], fromLeft(expr))
+  elif multiVal[0] == "E" and isinstance(expr, Right):
+    return isPossible(multiVal[1][1], fromRight(expr))
+  elif multiVal[0] == "A":
+    foundConstr = False
+    for c in multiVal[1]:
+      cClass = c[0]
+      cMultiFields = c[1]
+      if isinstance(expr, cClass):
+        foundConstr = True
+        for mf, ef in zip(cMultiFields, expr._fields):
+          if not isPossible(mf, ef):
+            return False
+    return foundConstr
+  
+def multiValueToValueList(multiVal):
+  if multiVal[0] == "D":
+    return toList(multiVal[1])
+  elif multiVal[0] == "T":
+    cartesian = itertools.product(multiValueToValueList(multiVal[1][0]), multiValueToValueList(multiVal[1][1]))
+    tuples = map(lambda x: T(x[0], x[1]), cartesian)
+    return toList(tuples)
+  elif multiVal[0] == "E":
+    lefts = map (lambda x: Left(x), multiValueToValueList(multiVal[1][0]))
+    rights = map (lambda x: Right(x), multiValueToValueList(multiVal[1][1]))
+    return toList(lefts + rights)
+  elif multiVal[0] == "A":
+    cClass = multiVal[1][0]
+    cFields = map(multiValueToValueList, multiVal[1][1])
+    cartesian = itertools.product(*cFields)
+    return map(lambda x: cClass(*x), cartesian)
     

@@ -10,6 +10,7 @@ import Data.Char (toUpper, toLower)
 import Data.Maybe (fromJust, fromMaybe)
 import Debug.Trace (trace, traceShowId)
 import Data.Foldable
+import SPLL.Lang.Lang (constructVList, multiValueToValueList)
 
 --TODO: On the topic of memoization: Ideally we would want to optimize away redundant calls within a loop.
 -- e.g. in MNist-Addition
@@ -81,6 +82,14 @@ pyVal (VADT cName params) = cName ++ "(" ++ intercalate ", " (map pyVal params) 
 pyVal (VAny) = "'ANY'"
 pyVal x = error ("unknown pyVal for " ++ show x)
 
+pyMultiVal :: MultiValue -> String
+pyMultiVal (MultiDiscretes vals) = "(\"D\", [" ++ intercalate ", " (map (pyVal . valueToIR) vals) ++ "])"
+pyMultiVal (MultiTuple l r) = "(\"T\", (" ++ pyMultiVal l ++ ", " ++ pyMultiVal r ++ ")"
+pyMultiVal (MultiEither l r) = "(\"E\", (" ++ pyMultiVal l ++ ", " ++ pyMultiVal r ++ ")"
+pyMultiVal (MultiADT constrs) = "(\"A\", [" ++ intercalate ", " (map (\(cName, fields) -> 
+  "(" ++ cName ++ ", [" ++ intercalate ", " (map pyMultiVal fields) ++ "])"
+  ) constrs) ++ "])"
+
 unlinesTrimLeft :: [String] -> String
 unlinesTrimLeft = intercalate "\n"
 
@@ -145,11 +154,12 @@ generateADTClass (name, fields) =
   ["class " ++ name ++ ":"]++
   indentOnce (
     -- Constructor
-    (("def __init__(self, " ++ intercalate ", " fieldNames ++ "):") :
+    ("def __init__(self, " ++ intercalate ", " fieldNames ++ "):") :
     case fieldNames of
       [] -> indentOnce ["pass"]
       fieldNames -> indentOnce (
-        map (\f -> "self." ++f ++ " = " ++ f) fieldNames))
+        map (\f -> "self." ++f ++ " = " ++ f) fieldNames ++
+        ["self._fields = [" ++ intercalate ", " fieldNames ++ "]"])
   ) ++ [""] ++
   indentOnce (
     "def __eq__(self, other):":
@@ -248,7 +258,8 @@ generateExpression (IRVar name) = name
 generateExpression expr@(IRLambda name x) = generateLambdaExpression expr
 generateExpression (IRApply f val) = "functools.partial(" ++ generateExpression f ++ ", " ++ generateExpression val ++ ")"
 generateExpression expr@(IRInvoke _) = generateInvokeExpression expr
-generateExpression (IREnumSum name enumRange expr) = "sum(map((lambda " ++ name ++ ": " ++ generateExpression expr ++ "), " ++ pyVal enumRange ++ "))"
+generateExpression (IREnumSum name enumRange expr) = "sum(map((lambda " ++ name ++ ": " ++ generateExpression expr ++ "), multiValueToValueList(" ++ pyMultiVal enumRange ++ ")))"
+generateExpression (IRIsPossible multiVal expr) = "isPossible(" ++ pyMultiVal multiVal ++ ", " ++ generateExpression expr ++ ")"
 generateExpression (IREvalNN name arg) = name ++ "(" ++ generateExpression arg ++ ")"
 generateExpression (IRIndex lst idx) = "(" ++ generateExpression lst ++ ")[" ++ generateExpression idx ++ "]"
 -- I personally hate this code. I constructs a tuple with an assignment expression in the first element and discards the first element

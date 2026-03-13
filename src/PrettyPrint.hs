@@ -87,6 +87,7 @@ pPrintIRExpr (IRFromLeft e) n = "fromLeft (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRFromRight e) n = "fromRight (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRIsLeft e) n = "isLeft (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRIsRight e) n = "isRight (" ++ pPrintIRExpr e (n + 1) ++ ")"
+pPrintIRExpr (IRIsPossible val e) n = "isPossible " ++ show val ++ " (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRDensity dist e) n = "density " ++ show dist ++ " (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRCumulative dist e) n = "cumulative " ++ show dist ++ " (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRSample dist) n = "sample " ++ show dist

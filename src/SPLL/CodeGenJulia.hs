@@ -65,7 +65,14 @@ juliaVal (VThetaTree tt) = juliaValTree tt
 juliaVal (VADT cName params) = cName ++ "(" ++ intercalate ", " (map juliaVal params) ++ ")"
 juliaVal VAny = "\"ANY\""
 juliaVal x = error ("unknown juliaVal for " ++ show x)
-
+juliaMultiVal :: MultiValue -> String
+juliaMultiVal (MultiDiscretes vals) = "(\"D\", [" ++ intercalate ", " (map (juliaVal . valueToIR) vals) ++ "] )"
+juliaMultiVal (MultiTuple l r) = "(\"T\", (" ++ juliaMultiVal l ++ ", " ++ juliaMultiVal r ++ "))"
+juliaMultiVal (MultiEither l r) = "(\"E\", (" ++ juliaMultiVal l ++ ", " ++ juliaMultiVal r ++ "))"
+juliaMultiVal (MultiADT constrs) = "(\"A\", [" ++ intercalate ", " (map (\(cName, fields) ->
+  "(\"" ++ cName ++ "\", [" ++ intercalate ", " (map juliaMultiVal fields) ++ "])"
+  ) constrs) ++ "] )"
+juliaMultiVal x = error ("unknown juliaMultiVal for " ++ show x)
 unlinesTrimLeft :: [String] -> String
 unlinesTrimLeft = intercalate "\n"
 
@@ -173,7 +180,8 @@ generateExpression expr@(IRLambda name x) = generateLambdaExpression expr
 -- Julia cannot really do partial application. This is a workaround
 generateExpression (IRApply f val) = "((args...) -> " ++ generateExpression f ++ "(" ++ generateExpression val ++ ", args...))"
 generateExpression expr@(IRInvoke _) = generateInvokeExpression expr
-generateExpression (IREnumSum name enumRange expr) = "sum(map((" ++ name ++ " -> " ++ generateExpression expr ++ "), " ++ juliaVal enumRange ++ "))"
+generateExpression (IRIsPossible multiVal expr) = "isPossible(" ++ juliaMultiVal multiVal ++ ", " ++ generateExpression expr ++ ")"
+generateExpression (IREnumSum name enumRange expr) = "sum(map((" ++ name ++ " -> " ++ generateExpression expr ++ "), multiValueToValueList(" ++ juliaMultiVal enumRange ++ ")))"
 generateExpression (IREvalNN name arg) = name ++ "(" ++ generateExpression arg ++ ")"
 generateExpression (IRIndex lst idx) = "(" ++ generateExpression lst ++ ")[" ++ generateExpression idx ++ " + 1]"
 generateExpression (IRLetIn name val body) = "(let " ++ name ++ " = " ++ generateExpression val ++ "; " ++ generateExpression body ++ "end)"

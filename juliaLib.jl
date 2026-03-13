@@ -1,6 +1,6 @@
 module JuliaSPPLLib
 
-export density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, mapList, eq, isclose, indexOf, listProd, T, Either, Left, Right, fromLeft, fromRight,==
+export density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, mapList, eq, isPossible, isclose, indexOf, listProd, T, Either, Left, Right, fromLeft, fromRight, multiValueToValueList,==
 
 
 function isAny(x)
@@ -50,6 +50,38 @@ function eq(a, b)
         return true
     else
         return a == b
+    end
+end
+
+function isPossible(multiVal, expr)
+    tag = multiVal[1]
+    if tag == "D"
+        return expr in multiVal[2]
+    elseif tag == "T" && expr isa T
+        sub = multiVal[2]
+        return isPossible(sub[1], expr.t1) && isPossible(sub[2], expr.t2)
+    elseif tag == "E" && expr isa Left
+        return isPossible(multiVal[2][1], fromLeft(expr))
+    elseif tag == "E" && expr isa Right
+        return isPossible(multiVal[2][2], fromRight(expr))
+    elseif tag == "A"
+        foundConstr = false
+        for c in multiVal[2]
+            cName = c[1]
+            cMultiFields = c[2]
+            if string(typeof(expr)) == cName
+                foundConstr = true
+                fieldsyms = fieldnames(typeof(expr))
+                for (mf, fs) in zip(cMultiFields, fieldsyms)
+                    if !isPossible(mf, getfield(expr, fs))
+                        return false
+                    end
+                end
+            end
+        end
+        return foundConstr
+    else
+        error("Unknown multiVal tag: " * string(multiVal))
     end
 end
 
@@ -251,6 +283,30 @@ end
 
 function isclose(a::Float64, b::Float64)
     return abs(a - b) <= 10e-10
+end
+
+function multiValueToValueList(multiVal)
+    if multiVal[1] == "D"
+        return multiVal[2]
+    elseif multiVal[1] == "T"
+        cart = collect(Iterators.product(multiValueToValueList(multiVal[2][1]), multiValueToValueList(multiVal[2][2])))
+        return [T(x[1], x[2]) for x in cart]
+    elseif multiVal[1] == "E"
+        lefts = [Left(x) for x in multiValueToValueList(multiVal[2][1])]
+        rights = [Right(x) for x in multiValueToValueList(multiVal[2][2])]
+        return vcat(lefts, rights)
+    elseif multiVal[1] == "A"
+        result = []
+        for c in multiVal[2]
+            cName = c[1]
+            cFields = [multiValueToValueList(f) for f in c[2]]
+            cart = collect(Iterators.product(cFields...))
+            append!(result, [eval(Symbol(cName))(x...) for x in cart])
+        end
+        return result
+    else
+        error("Unknown multiVal tag: " * string(multiVal[1]))
+    end
 end
 
 end
