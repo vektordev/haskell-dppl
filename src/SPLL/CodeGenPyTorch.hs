@@ -1,3 +1,6 @@
+{-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+
 module SPLL.CodeGenPyTorch (
   generateFunctions,
   pyVal
@@ -11,6 +14,8 @@ import Data.Maybe (fromJust, fromMaybe)
 import Debug.Trace (trace, traceShowId)
 import Data.Foldable
 import SPLL.Lang.Lang (constructVList, multiValueToValueList)
+import Control.Monad.State (StateT (runStateT), MonadState (get, put), MonadTrans (lift))
+import Utils (Supply, demandUniqueNumber, evalSupply)
 
 --TODO: On the topic of memoization: Ideally we would want to optimize away redundant calls within a loop.
 -- e.g. in MNist-Addition
@@ -19,6 +24,21 @@ import SPLL.Lang.Lang (constructVList, multiValueToValueList)
 
 -- Expected format format of ThetaTrees:
 --    ThetaTree = ([Double], [ThetaTree])
+
+type GlobalStorage = StateT [(MultiValue, String)]
+type VariableSupply = Supply
+type GlobalVariableSupply a = GlobalStorage VariableSupply a
+
+addOrGetFromGlobalStorage :: MultiValue -> GlobalVariableSupply String
+addOrGetFromGlobalStorage mv = do
+  globalStorage <- get
+  case lookup mv globalStorage of
+    Nothing -> do
+      varID <- lift demandUniqueNumber
+      let varName = "_globalMulti" ++ show varID
+      put ((mv, varName):globalStorage)
+      return varName
+    Just var -> return var
 
 filet :: [a] -> [a]
 filet = init . tail
@@ -183,104 +203,203 @@ generateClass :: [(String, String)] -> IRFunGroup -> [String]
 generateClass lut (IRFunGroup name gen prob integ doc) = let
   funcStringFromMaybe name func = case func of
     Just a -> generateFunction True (name, replaceCallsDecl a)
-    Nothing -> []
-  i = funcStringFromMaybe "integrate" integ
-  p = funcStringFromMaybe "forward" prob
-  g =funcStringFromMaybe "generate" gen
+    Nothing -> return []
+  ((i, p, g), globalVars) = evalSupply $ runStateT (do
+    i' <- funcStringFromMaybe "integrate" integ
+    p' <- funcStringFromMaybe "forward" prob
+    g' <- funcStringFromMaybe "generate" gen
+    return (i', p', g')) []
   commentLine = "# " ++ doc
   initLine = "class " ++ onHead toUpper name ++ "(Module):"
+  globalVarDecls = map (\(mv, name)-> name ++ " = " ++ pyMultiVal mv) globalVars
   funcs = i ++ [""] ++ p ++ [""] ++ g
   replaceCallsDecl (e, d) = (irMap (replaceCalls lut) e, d)
-  in commentLine:initLine:indentOnce funcs
+  in commentLine:initLine:indentOnce globalVarDecls ++ indentOnce funcs
 
-generateFunction :: Bool -> (String, IRFunDecl) -> [String]
-generateFunction classFunction (name, (expr, doc)) = let
-  (args, reducedExpr) = unwrapLambdas expr
-  args' = if classFunction then "self":args else args
-  l1 = "def " ++ name ++ "(" ++ intercalate ", " args' ++ "):"
-  block = generateStatementBlock reducedExpr
-  docLine = "# " ++ doc
-  in [docLine, l1] ++ indentOnce block
+generateFunction :: Bool -> (String, IRFunDecl) -> GlobalVariableSupply [String]
+generateFunction classFunction (name, (expr, doc)) = do
+  let (args, reducedExpr) = unwrapLambdas expr
+  let args' = if classFunction then "self":args else args
+  let l1 = "def " ++ name ++ "(" ++ intercalate ", " args' ++ "):"
+  block <- generateStatementBlock reducedExpr
+  let docLine = "# " ++ doc
+  return $ [docLine, l1] ++ indentOnce block
 
 unwrapLambdas :: IRExpr -> ([String], IRExpr)
 unwrapLambdas (IRLambda name rest) = (name:otherNames, plainTree)
   where (otherNames, plainTree) = unwrapLambdas rest
 unwrapLambdas anyNode = ([], anyNode)
 
-generateStatementBlock :: IRExpr -> [String]
-generateStatementBlock (IRLetIn name x body) = generateLetInStatement name x ++ generateStatementBlock body
-generateStatementBlock (IRIf cond left right) = let
-  cCond = generateExpression cond
-  cLeft = generateStatementBlock left
-  cRight = generateStatementBlock right
-  l1 = "if " ++ cCond ++ ":"
-  l2 = "else:"
-  in [l1] ++ indentOnce cLeft ++ [l2] ++ indentOnce cRight
-generateStatementBlock expr = ["return " ++ generateExpression expr]
+generateStatementBlock :: IRExpr -> GlobalVariableSupply [String]
+generateStatementBlock (IRLetIn name x body) = do
+  s1 <- generateLetInStatement name x
+  s2 <- generateStatementBlock body
+  return (s1 ++ s2)
+generateStatementBlock (IRIf cond left right) = do
+  cCond  <- generateExpression cond
+  cLeft  <- generateStatementBlock left
+  cRight <- generateStatementBlock right
+  let l1 = "if " ++ cCond ++ ":"
+      l2 = "else:"
+  return ([l1] ++ indentOnce cLeft ++ [l2] ++ indentOnce cRight)
+generateStatementBlock expr = do
+  e <- generateExpression expr
+  return ["return " ++ e]
 
-generateLetInStatement :: String -> IRExpr -> [String]
-generateLetInStatement name lmd@(IRLambda _ _) = generateFunction False (name, (lmd, "Inner function: " ++ name))
-generateLetInStatement name (IRIf cond left right) = let
-  c = generateExpression cond in
-    ["if " ++ c ++ ":"] ++
-    indentOnce (generateLetInStatement name left) ++
-    ["else:"] ++
-    indentOnce (generateLetInStatement name right)
-generateLetInStatement name x = [name ++ " = " ++ generateExpression x]
 
-generateExpression :: IRExpr -> String
-generateExpression (IRIf cond left right) = "(" ++ generateExpression left ++ " if " ++ generateExpression cond ++ " else " ++ generateExpression right ++ ")"
-generateExpression (IROp OpApprox left right) = "isclose(" ++ generateExpression left ++ ", " ++ generateExpression right ++")"
-generateExpression (IROp op left right) = "((" ++ generateExpression left ++ ") " ++ pyOps op ++ " (" ++ generateExpression right ++"))"
-generateExpression (IRUnaryOp op expr) = pyUnaryOps op ++ "(" ++ generateExpression expr ++ ")"
-generateExpression (IRTheta x i) = "(" ++ generateExpression x ++ ")[0][" ++ show i ++ "]"
-generateExpression (IRSubtree x i) = "(" ++ generateExpression x ++ ")[1][" ++ show i ++ "]"
-generateExpression (IRConst v) = pyVal v
-generateExpression (IRCons hd tl) = "ConsInferenceList(" ++ generateExpression hd ++ ", " ++ generateExpression tl ++ ")"
-generateExpression (IRElementOf el lst) = "(" ++ generateExpression el ++ " in " ++ generateExpression lst ++ ")"
-generateExpression (IRTCons fs sn) = "T(" ++ generateExpression fs ++ ", " ++ generateExpression sn ++ ")"
-generateExpression (IRHead x) = "(" ++ generateExpression x ++ ")[0]"
-generateExpression (IRTail x) = "(" ++ generateExpression x ++ ")[1:]"
-generateExpression (IRMap f x) = "mapList(" ++ generateExpression f ++ ", " ++ generateExpression x ++ ")"
-generateExpression (IRTFst x) = "(" ++ generateExpression x ++ ")[0]"
-generateExpression (IRTSnd x) = "(" ++ generateExpression x ++ ")[1]"
-generateExpression (IRLeft x) = "Left(" ++ generateExpression x ++ ")"
-generateExpression (IRRight x) = "Right(" ++ generateExpression x ++ ")"
-generateExpression (IRFromLeft x) = "fromLeft(" ++ generateExpression x ++ ")"
-generateExpression (IRFromRight x) = "fromRight(" ++ generateExpression x ++ ")"
-generateExpression (IRIsLeft x) = "isinstance(" ++ generateExpression x ++ ", Left)"
-generateExpression (IRIsRight x) = "isinstance(" ++ generateExpression x ++ ", Right)"
-generateExpression (IRDensity dist x) = "density_" ++ show dist ++ "(" ++ generateExpression x ++ ")"
-generateExpression (IRCumulative dist x) = "cumulative_" ++ show dist ++ "(" ++ generateExpression x ++ ")"
-generateExpression (IRSample IRNormal) = "randn()"
-generateExpression (IRSample IRUniform) = "rand()"
-generateExpression (IRVar name) = name
-generateExpression expr@(IRLambda name x) = generateLambdaExpression expr
-generateExpression (IRApply f val) = "functools.partial(" ++ generateExpression f ++ ", " ++ generateExpression val ++ ")"
-generateExpression expr@(IRInvoke _) = generateInvokeExpression expr
-generateExpression (IREnumSum name enumRange expr) = "sum(map((lambda " ++ name ++ ": " ++ generateExpression expr ++ "), multiValueToValueList(" ++ pyMultiVal enumRange ++ ")))"
-generateExpression (IRIsPossible multiVal expr) = "isPossible(" ++ pyMultiVal multiVal ++ ", " ++ generateExpression expr ++ ")"
-generateExpression (IREvalNN name arg) = name ++ "(" ++ generateExpression arg ++ ")"
-generateExpression (IRIndex lst idx) = "(" ++ generateExpression lst ++ ")[" ++ generateExpression idx ++ "]"
--- I personally hate this code. I constructs a tuple with an assignment expression in the first element and discards the first element
-generateExpression (IRLetIn name val body) = "((" ++ name ++ ":=" ++ generateExpression val ++ "), " ++ generateExpression body ++ ")[1]"
-generateExpression (IRError e) = "throw(\"" ++ e ++ "\")"
-generateExpression x = error ("Unknown expression in PyTorch codegen: " ++ show x)
+generateLetInStatement :: String -> IRExpr -> GlobalVariableSupply [String]
+generateLetInStatement name lmd@(IRLambda _ _) =
+  generateFunction False (name, (lmd, "Inner function: " ++ name))
+generateLetInStatement name (IRIf cond left right) = do
+  c         <- generateExpression cond
+  leftStmts <- generateLetInStatement name left
+  rightStmts<- generateLetInStatement name right
+  return (["if " ++ c ++ ":"] ++ indentOnce leftStmts ++ ["else:"] ++ indentOnce rightStmts)
+generateLetInStatement name x = do
+  v <- generateExpression x
+  return [name ++ " = " ++ v]
 
-generateInvokeExpression :: IRExpr -> String
+generateExpression :: IRExpr -> GlobalVariableSupply String
+generateExpression (IRIf cond left right) = do
+  l <- generateExpression left
+  c <- generateExpression cond
+  r <- generateExpression right
+  return ("(" ++ l ++ " if " ++ c ++ " else " ++ r ++ ")")
+generateExpression (IROp OpApprox left right) = do
+  l <- generateExpression left
+  r <- generateExpression right
+  return ("isclose(" ++ l ++ ", " ++ r ++ ")")
+generateExpression (IROp op left right) = do
+  l <- generateExpression left
+  r <- generateExpression right
+  return ("((" ++ l ++ ") " ++ pyOps op ++ " (" ++ r ++ "))")
+generateExpression (IRUnaryOp op expr) = do
+  e <- generateExpression expr
+  return (pyUnaryOps op ++ "(" ++ e ++ ")")
+generateExpression (IRTheta x i) = do
+  sx <- generateExpression x
+  return ("(" ++ sx ++ ")[0][" ++ show i ++ "]")
+generateExpression (IRSubtree x i) = do
+  sx <- generateExpression x
+  return ("(" ++ sx ++ ")[1][" ++ show i ++ "]")
+generateExpression (IRConst v) =
+  return (pyVal v)
+generateExpression (IRCons hd tl) = do
+  h <- generateExpression hd
+  t <- generateExpression tl
+  return ("ConsInferenceList(" ++ h ++ ", " ++ t ++ ")")
+generateExpression (IRElementOf el lst) = do
+  e <- generateExpression el
+  l <- generateExpression lst
+  return ("(" ++ e ++ " in " ++ l ++ ")")
+generateExpression (IRTCons fs sn) = do
+  f <- generateExpression fs
+  s <- generateExpression sn
+  return ("T(" ++ f ++ ", " ++ s ++ ")")
+generateExpression (IRHead x) = do
+  sx <- generateExpression x
+  return ("(" ++ sx ++ ")[0]")
+generateExpression (IRTail x) = do
+  sx <- generateExpression x
+  return ("(" ++ sx ++ ")[1:]")
+generateExpression (IRMap f x) = do
+  ff <- generateExpression f
+  xx <- generateExpression x
+  return ("mapList(" ++ ff ++ ", " ++ xx ++ ")")
+generateExpression (IRTFst x) = do
+  sx <- generateExpression x
+  return ("(" ++ sx ++ ")[0]")
+generateExpression (IRTSnd x) = do
+  sx <- generateExpression x
+  return ("(" ++ sx ++ ")[1]")
+generateExpression (IRLeft x) = do
+  sx <- generateExpression x
+  return ("Left(" ++ sx ++ ")")
+generateExpression (IRRight x) = do
+  sx <- generateExpression x
+  return ("Right(" ++ sx ++ ")")
+generateExpression (IRFromLeft x) = do
+  sx <- generateExpression x
+  return ("fromLeft(" ++ sx ++ ")")
+generateExpression (IRFromRight x) = do
+  sx <- generateExpression x
+  return ("fromRight(" ++ sx ++ ")")
+generateExpression (IRIsLeft x) = do
+  sx <- generateExpression x
+  return ("isinstance(" ++ sx ++ ", Left)")
+generateExpression (IRIsRight x) = do
+  sx <- generateExpression x
+  return ("isinstance(" ++ sx ++ ", Right)")
+generateExpression (IRDensity dist x) = do
+  sx <- generateExpression x
+  return ("density_" ++ show dist ++ "(" ++ sx ++ ")")
+generateExpression (IRCumulative dist x) = do
+  sx <- generateExpression x
+  return ("cumulative_" ++ show dist ++ "(" ++ sx ++ ")")
+generateExpression (IRSample IRNormal) =
+  return "randn()"
+generateExpression (IRSample IRUniform) =
+  return "rand()"
+generateExpression (IRVar name) =
+  return name
+generateExpression expr@(IRLambda _ _) =
+  generateLambdaExpression expr
+generateExpression (IRApply f val) = do
+  gf <- generateExpression f
+  gv <- generateExpression val
+  return ("functools.partial(" ++ gf ++ ", " ++ gv ++ ")")
+generateExpression expr@(IRInvoke _) =
+  generateInvokeExpression expr
+generateExpression (IREnumSum name enumRange expr) = do
+  e <- generateExpression expr
+  varName <- addOrGetFromGlobalStorage enumRange
+  return ("sum(map((lambda " ++ name ++ ": " ++ e ++ "), multiValueToValueList(self." ++ varName ++ ")))")
+generateExpression (IRIsPossible multiVal expr) = do
+  e <- generateExpression expr
+  varName <- addOrGetFromGlobalStorage multiVal
+  return ("isPossible(self." ++ varName ++ ", " ++ e ++ ")")
+generateExpression (IREvalNN name arg) = do
+  a <- generateExpression arg
+  return (name ++ "(" ++ a ++ ")")
+generateExpression (IRIndex lst idx) = do
+  l <- generateExpression lst
+  i <- generateExpression idx
+  return ("(" ++ l ++ ")[" ++ i ++ "]")
+generateExpression (IRLetIn name val body) = do
+  v <- generateExpression val
+  b <- generateExpression body
+  return ("((" ++ name ++ ":=" ++ v ++ "), " ++ b ++ ")[1]")
+generateExpression (IRError e) =
+  return ("throw(\"" ++ e ++ "\")")
+generateExpression x =
+  error ("Unknown expression in PyTorch codegen: " ++ show x)
+
+generateInvokeExpression :: IRExpr -> GlobalVariableSupply String
 -- IRInvoke is always the outermost expression of the block compiled here. Compile the function and the parameters first, then end it all with an ")"
-generateInvokeExpression (IRInvoke expr) = generateInvokeExpression expr ++ ")"
--- Not that the parameters are in reverse order. The innermost parameter is applied first
+generateInvokeExpression (IRInvoke expr) = do
+  s <- generateInvokeExpression expr
+  return (s ++ ")")
+-- Note that the parameters are in reverse order. The innermost parameter is applied first
 -- We have more parameters
-generateInvokeExpression (IRApply f@(IRApply _ _) val) = generateInvokeExpression f ++ ", " ++ generateExpression val
+generateInvokeExpression (IRApply f@(IRApply _ _) val) = do
+  s <- generateInvokeExpression f
+  v <- generateExpression val
+  return (s ++ ", " ++ v)
 -- This is the last parameter
-generateInvokeExpression (IRApply f val) = generateInvokeExpression f ++ generateExpression val
--- No more parameters, compile the fucntion
-generateInvokeExpression expr = "(" ++ generateExpression expr ++ ")("
+generateInvokeExpression (IRApply f val) = do
+  s <- generateInvokeExpression f
+  v <- generateExpression val
+  return (s ++ v)
+-- No more parameters, compile the function
+generateInvokeExpression expr = do
+  f <- generateExpression expr
+  return ("(" ++ f ++ ")(")
 
-generateLambdaExpression :: IRExpr -> String
-generateLambdaExpression expr = "(lambda " ++ intercalate ", " names ++ ": " ++ generateExpression rest ++ ")"
-  where (names, rest) = getLambdaNames expr
+generateLambdaExpression :: IRExpr -> GlobalVariableSupply String
+generateLambdaExpression expr = do
+  let (names, rest) = getLambdaNames expr
+  body <- generateExpression rest
+  return ("(lambda " ++ intercalate ", " names ++ ": " ++ body ++ ")")
 
 getLambdaNames :: IRExpr -> ([String], IRExpr)
 getLambdaNames (IRLambda n body) = (n:names, rest)
