@@ -19,6 +19,7 @@ import PredefinedFunctions
 import Utils
 import SPLL.Typing.ForwardChaining (FCData, ExprInfo (LambdaInfo), findEquivalentExpression, findExprWithCN, progToFCData)
 
+type TagEnv = [(String, [Tag])]
 
 annotateEnumsProg :: Program -> Program
 annotateEnumsProg p@Program {functions=f, neurals=n, adts=adts} = p{functions = finalExprEnv}
@@ -30,22 +31,11 @@ annotateEnumsProg p@Program {functions=f, neurals=n, adts=adts} = p{functions = 
     isMultiDiscrete (MultiDiscretes _) = True
     isMultiDiscrete _ = False
 
-annotateIfNotRecursive :: [ADTDecl] -> String -> [(String, [Tag])] -> Expr -> Expr
-annotateIfNotRecursive _ name _ e | isRecursive name e = e
-annotateIfNotRecursive adts _ env e = annotate adts env e
-
-annotate :: [ADTDecl] -> [(String, [Tag])] -> Expr -> Expr
+annotate :: [ADTDecl] -> TagEnv -> Expr -> Expr
 --annotate _ e | trace ((show e)) False = undefined
 annotate adts env e = withNewTypeInfo
   where
     oldTags = tags $ getTypeInfo e
-    newTags = case ([mv | DiscreteValues mv <- oldTags]) of
-      [] -> case valuesTag of
-        Just t -> t:oldTags
-        Nothing -> oldTags
-      _:_ -> oldTags
-    valuesTag = fmap DiscreteValues values
-    withNewTypeInfo = setTypeInfo withNewSubExpr (setTags (getTypeInfo withNewSubExpr) newTags)
     withNewSubExpr = case e of
       Apply _ l@(Lambda _ n b) v -> do
         let annotatedV = annotate adts env v
@@ -53,7 +43,33 @@ annotate adts env e = withNewTypeInfo
             annotatedL = annotate adts env l in
               setSubExprs e [annotatedL, annotatedV]
       _ -> setSubExprs e (map (annotate adts env) (getSubExprs e))
+    valueTags = discretesTags adts env withNewSubExpr
+    newTags = valueTags ++ oldTags
+    withNewTypeInfo = setTypeInfo withNewSubExpr (setTags (getTypeInfo withNewSubExpr) newTags)
     values = case withNewSubExpr of
+      (Constant _ a) -> Just $ MultiDiscretes [a]
+      (ReadNN _ name _) -> case lookup name env of
+        Just tgs -> Just $ head [mv | DiscreteValues mv <- tgs]
+        _ -> Nothing
+      (InjF _ name params) -> do
+        paramValues <- mapM getValuesFromExpr params
+        let unpackedMultiVals = map multiValueToValueList paramValues
+        return $ valueListToMultiValue $ propagateValues adts name unpackedMultiVals
+      (IfThenElse _ _ left right) -> do
+        valuesLeft <- getValuesFromExpr left
+        valuesRight <- getValuesFromExpr right
+        return $ unionMultiValues valuesLeft valuesRight
+      (LetIn _ _ _ a) -> getValuesFromExpr a
+      (Var _ name) -> do
+        tags <- lookup name env
+        listToMaybe [mv | DiscreteValues mv <- tags]
+      _ -> Nothing
+
+discretesTags :: [ADTDecl] -> TagEnv -> Expr -> [Tag]
+discretesTags adts env e = maybeToList valuesTag
+  where
+    valuesTag = fmap DiscreteValues values
+    values = case e of
       (Constant _ a) -> Just $ MultiDiscretes [a]
       (ReadNN _ name _) -> case lookup name env of
         Just tgs -> Just $ head [mv | DiscreteValues mv <- tgs]
