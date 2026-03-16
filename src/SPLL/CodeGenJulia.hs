@@ -284,7 +284,7 @@ generateExpression (IRIsPossible multiVal expr) = do
 generateExpression (IREnumSum name enumRange expr) = do
     e <- generateExpression expr
     var <- addOrGetFromGlobalStorage enumRange
-    return $ "sum(map((" ++ name ++ " -> " ++ e ++ "), " ++ var ++"))"
+    return $ "sum(map((" ++ name ++ " -> " ++ e ++ "), multiValueToValueList(" ++ var ++")))"
 generateExpression (IREvalNN name arg) = do
     a <- generateExpression arg
     return $ name ++ "(" ++ a ++ ")"
