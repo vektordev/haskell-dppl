@@ -158,6 +158,8 @@ toIRInference :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad Com
 toIRInference meta True expr sample | rType (getTypeInfo expr) == TBool = do
   (pFalse, _, bcFalse) <- toIRInference meta False expr (IRConst (VBool False))
   return (IRIf sample (IRConst (VFloat 1)) pFalse, const0, bcFalse)
+toIRInference meta False e sample | [(mean, std)] <- [(mean,std) | IsNormal mean std <- tags (getTypeInfo e)] = return (IROp OpDiv (IRDensity IRNormal (IROp OpDiv (IROp OpSub sample (IRConst $ VFloat mean)) (IRConst $ VFloat std))) (IRConst $ VFloat std), IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), const0)
+toIRInference meta True e sample | [(mean, std)] <- [(mean,std) | IsNormal mean std <- tags (getTypeInfo e)] = return (IRCumulative IRNormal (IROp OpDiv (IROp OpSub sample (IRConst $ VFloat mean)) (IRConst $ VFloat std)),const0, const0)
 toIRInference meta False (Normal t) sample = return (IRDensity IRNormal sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), const0)
 toIRInference meta False (Uniform t) sample = return (IRDensity IRUniform sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), const0)
 toIRInference meta True (Normal t) sample = return (IRCumulative IRNormal sample, const0, const0)

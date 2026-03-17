@@ -120,6 +120,14 @@ injF2Enumerable = InferenceRule
              (const Prob)
              (Forall [TV "a"] (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TVarR (TV "a"))))
 
+injF2ResolvesToDistribution :: InferenceRule
+injF2ResolvesToDistribution = InferenceRule
+             StubInjF
+             [ResolvesToDistribution]
+             "injFResolvesToDistribution"
+             (const Integrate)
+             (Forall [TV "a"] (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TVarR (TV "a"))))
+
 ifThenElse :: InferenceRule
 ifThenElse = InferenceRule
                StubIfThenElse
@@ -230,6 +238,7 @@ allAlgorithms = [
   injF2Left, 
   injF2Right,
   injF2Enumerable,
+  injF2ResolvesToDistribution,
   cons,
   tcons,
   exprNot,
