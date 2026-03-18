@@ -23,7 +23,7 @@ import qualified Data.Map as Map
 import SPLL.Lang.Lang
 import SPLL.Typing.Typing
 import SPLL.Typing.PType
-import SPLL.Typing.RType hiding (TVar, TV, Scheme, Scheme(..))
+import SPLL.Typing.RType hiding (TVar, TV)
 import Control.Monad (replicateM)
 import SPLL.Lang.Types (CompilerError)
 
@@ -33,15 +33,7 @@ data PTypeError
   | UnboundVariable String
   deriving (Show)
 
-type Var = String
 type Infer = ExceptT PTypeError (State InferState)
-
--- Scheme: Forall [a b c] [a=b, b=c] (a->b->c)
---Forall vars con result
--- vars sind die TVars in scope in Constraint und PType. Wenn Constraint, dann resultiert in PType 
-data Scheme = Forall [TVar] [Constraint] PType
-  deriving (Show, Eq)
-type Constraint = (Var, PType)
 
 -- Scheme: Forall [a b c] [a=(b|c), a=(b + c)] (a->b->c)
 data DScheme = DScheme [TVar] [DConstraint] PType
@@ -129,7 +121,7 @@ showResultsProg :: Program -> IO ()
 showResultsProg = showResultsProgWith inferProgram
 
 newtype TEnv
-  = TypeEnv {types :: Map.Map Name [Scheme]}
+  = TypeEnv {types :: Map.Map Name PType}
   deriving (Eq, Show)
 
 instance Semigroup TEnv where
@@ -247,10 +239,6 @@ getNonRecType (tvar:tvar_rem) dConsList =
 isRecType ::  DConstraint -> Bool
 isRecType (TVar tv, dc) = let freeVars = ftv dc in Set.null freeVars || (tv `Set.member` freeVars && Set.size freeVars == 1)
 isRecType (_, _) = error "non tvar variable in fixpoint iterations"
-
-getSubstFromCons :: DConstraint -> Subst
-getSubstFromCons cons = subst
-  where (_, subst, _) = isConsResolved [cons]
 
 --collapses the constraint and checks if is resolved.
 -- A constraint is resolved if it collapses to var = basicType
@@ -378,9 +366,6 @@ closeProg env cons ty tp = (cons', DScheme alph consRes  resType', apply finalSu
         (_, _, _, su3) = if isResolved then (cons', resType, isResolved, emptySubst) else resolveStep (apply su2 cons) resType
         finalSubst = su `compose` (su2 `compose` su3)
 
-extend :: TEnv -> (Var, Scheme) -> TEnv
-extend (TypeEnv env) (x, s) = TypeEnv $ Map.insertWith (++) x [s] env
-
 -- Substitutes such that the two types are equal
 unify ::  PType -> PType -> Infer Subst
 unify a b | a == b = return emptySubst
@@ -411,18 +396,6 @@ fresh = do
     s <- get
     put s{var_count = var_count s + 1}
     return $ TVar $ TV (letters !! var_count s)
-
--- Replace variables in the scheme with fresh ones
-instantiate :: Scheme -> Infer ([Constraint], PType)
-instantiate (Forall as cs t) = do
-  as' <- mapM (const fresh) as
-  let s = Subst $ Map.fromList $ zip as as'
-  return ([],apply s t)
-
--- Forall type variables free in t and not bound in env
-generalize :: TEnv -> PType -> Scheme
-generalize env t  = Forall as [] t
-    where as = Set.toList $ ftv t `Set.difference` ftv env
 
 -- infer an argument of an operator (function) and applies it to the operator. Reduces the arity of the operator by one
 -- E.g. plusF with one expression yielding a float will result in a pType of Float -> Float
@@ -470,14 +443,6 @@ trd4 (_, _, x, _) = x
 frth4 :: (Subst, [DConstraint], PType, Expr) -> Expr
 frth4 (_, _, _, x) = x
 
-lookupEnv :: TEnv -> Var -> Infer (Subst, [DConstraint], PType)
-lookupEnv (TypeEnv env) x =
-  case Map.lookup x env of
-    Nothing -> throwError $ UnboundVariable (show x)
-    Just [s] -> do (cs, t) <- instantiate s
-                   return (emptySubst, [], t)
-    Just _ -> error "unresolved function call"
-
 plusInf :: Infer (Subst, [DConstraint], PType)
 plusInf = do
    tv1 <- fresh
@@ -514,9 +479,9 @@ inferProg env (Program decls nns adts) = do
   -- calls between these functions
   tv_rev <- freshVars (length decls) []
   let tvs = reverse tv_rev
-  -- env building with (name, scheme) for infer methods
-  let func_tvs = zip (map fst decls) (map (Forall [] []) tvs)
-  let fenv = foldl extend env func_tvs
+  -- env building with (name, ptype) for infer methods
+  let func_tvs = zip (map fst decls) tvs
+  let fenv = TypeEnv $ Map.union (Map.fromList func_tvs) (types env)
   -- infer the type and constraints of the declaration expressions
   cts <- mapM (infer fenv . snd) decls
   let Just expr = lookup "main" decls
@@ -564,7 +529,6 @@ infer env expr = case expr of
     let constraint = if all isEnumerable paramsExpr then EnumPlusConstraint else PlusConstraint
     tv <- fresh
     let s_acc = foldl compose emptySubst (map fst4 p_inf)
-    --let cts_d d = Right (LetInDConstraint(Left d))
     let pt@(p_fst:p_rst) = map trd4 p_inf
     let leftPts = map Left pt
     -- Fold all pTypes into a series of Plus Constraints (p1 + (p2 + (p3 + p4)))
@@ -582,14 +546,10 @@ infer env expr = case expr of
   And ti e1 e2        -> inferBinOp env ti e1 e2 downgradeInf And
   Or ti e1 e2         -> inferBinOp env ti e1 e2 downgradeInf Or
 
-  Var ti name -> do
-      let (TypeEnv envMap) = env
-      case Map.lookup name envMap of
+  Var ti name ->
+      case Map.lookup name (types env) of
           Nothing -> return (emptySubst, [], Deterministic, Var (setPType ti Deterministic) name)
-          Just [s] -> do
-            (_, t) <- instantiate s
-            return (emptySubst, [], t, Var (setPType ti t) name)
-          Just _ -> error "unresolved function call"
+          Just t  -> return (emptySubst, [], t, Var (setPType ti t) name)
 
   Null ti -> return (emptySubst, [], Deterministic, Null (setPType ti Deterministic))
 
@@ -692,17 +652,11 @@ instance Substitutable PType where
   apply _ Integrate = Integrate
   apply s (PArr p1 p2) = apply s p1 `PArr` apply s p2
   apply (Subst s) t@(TVar a) = Map.findWithDefault t a s
-  -- rest of PType arent used as of now
   apply _ t = t
 
   ftv (TVar a)       = Set.singleton a
   ftv (PArr p1 p2) = ftv p1 `Set.union` ftv p2
   ftv _ = Set.empty
-
-instance Substitutable Scheme where
-  apply (Subst s) (Forall as c t)   = Forall as c $ apply s' t
-                            where s' = Subst $ foldr Map.delete s as
-  ftv (Forall as _ t) = ftv t `Set.difference` Set.fromList as
 
 instance Substitutable DConstraint where
    apply s (var, chain) = (apply s var, apply s chain)
@@ -725,10 +679,6 @@ instance Substitutable (Either PType ChainConstraint) where
    ftv (Right (EnumPlusConstraint pt1 pt2)) = ftv pt1 `Set.union` ftv pt2
    ftv (Right (CompConstraint pt1 pt2)) = ftv pt1 `Set.union` ftv pt2
    ftv (Right (LetInDConstraint pt1)) = ftv pt1
-
-instance Substitutable Constraint where
-   apply s (v, t1) = (v, apply s t1)
-   ftv (_, t2) =  ftv t2
 
 instance Substitutable a => Substitutable [a] where
   apply = map . apply
