@@ -26,7 +26,6 @@ import Data.Maybe (fromJust, catMaybes)
 import Control.Monad.Random.Lazy (Random, RandomGen, Rand, evalRandIO)
 import SPLL.Typing.Infer
 import SPLL.Typing.Witnessing
-import SpecExamples
 --import ArbitrarySPLL
 import Options.Applicative
 import Control.Exception.Base (SomeException, try)
