@@ -12,9 +12,6 @@ module SPLL.Typing.PInfer2 (
 
 import Control.Monad.Except
 import Control.Monad.State
-import Control.Monad.Reader
-import Control.Monad.Identity
-import Debug.Trace
 
 import Data.List (nub, delete)
 import qualified Data.Set as Set
@@ -97,8 +94,7 @@ showResults expr = do
     Left err -> print err
     Right (cons, scheme, ee) -> do
       putStrLn $ "B:\n" ++ show cons
-      putStrLn $ "Type (No Resolution, No normalize):\n" ++ show scheme
-      putStrLn $ "Type (No Resolution):\n" ++ show (normalize scheme)
+      putStrLn $ "Type (No Resolution):\n" ++ show scheme
       putStrLn $ "Type:\n" ++ show (normalize scheme)
       putStrLn $ "Expr: "
       putStrLn $ unlines $ prettyPrint ee
@@ -115,29 +111,22 @@ tryAddPTypeInfo p = do
   (_,_,p2) <- inferProgram mempty p
   return p2
 
+showResultsProgWith :: (TEnv -> Program -> Either PTypeError ([DConstraint], DScheme, Program)) -> Program -> IO ()
+showResultsProgWith inferFn prog = case inferFn mempty prog of
+  Left err -> print err
+  Right (cons, scheme, p) -> do
+    putStrLn $ "B:\n" ++ show cons
+    putStrLn $ "Constraints (No Resolution):\n" ++ show cons
+    putStrLn $ "Type:\n" ++ show scheme
+    putStrLn "-----"
+    putStrLn "Program: "
+    putStrLn $ unlines $ prettyPrintProg p
+
 showResultsProgDebug :: Program -> IO ()
-showResultsProgDebug prog = do
-  case inferProgramDebug mempty prog of
-    Left err -> print err
-    Right (cons, scheme, p) -> do
-      putStrLn $ "B:\n" ++ show cons
-      putStrLn $ "Constraints (No Resolution):\n" ++ show cons
-      putStrLn $ "Type:\n" ++ show scheme
-      putStrLn "-----"
-      putStrLn $ "Program: "
-      putStrLn $ unlines $ prettyPrintProg p
+showResultsProgDebug = showResultsProgWith inferProgramDebug
 
 showResultsProg :: Program -> IO ()
-showResultsProg prog = do
-  case inferProgram mempty prog of
-    Left err -> print err
-    Right (cons, scheme, p) -> do
-      putStrLn $ "B:\n" ++ show cons
-      putStrLn $ "Constraints (No Resolution):\n" ++ show cons
-      putStrLn $ "Type:\n" ++ show scheme
-      putStrLn "-----"
-      putStrLn $ "Program: "
-      putStrLn $ unlines $ prettyPrintProg p
+showResultsProg = showResultsProgWith inferProgram
 
 newtype TEnv
   = TypeEnv {types :: Map.Map Name [Scheme]}
@@ -156,9 +145,6 @@ data InferState = InferState { var_count :: Int }
 -- | Initial inference state
 initInfer :: InferState
 initInfer = InferState { var_count = 0 }
-
--- | Constraint solver monad
-type Solve a = ExceptT PTypeError Identity a
 
 newtype Subst = Subst (Map.Map TVar PType)
   deriving (Eq, Show, Monoid, Semigroup)
@@ -182,6 +168,7 @@ instance DSubstitutable ChainConstraint where
   dapply s (PlusConstraint ty1 ty2) = PlusConstraint (dapply s ty1) (dapply s ty2)
   dapply s (EnumPlusConstraint ty1 ty2) = EnumPlusConstraint (dapply s ty1) (dapply s ty2)
   dapply s (CompConstraint ty1 ty2) = CompConstraint (dapply s ty1) (dapply s ty2)
+  dapply s (LetInDConstraint ty) = LetInDConstraint (dapply s ty)
 
 
 instance DSubstitutable TypeOrChain where
@@ -223,16 +210,11 @@ runInferProg :: TEnv -> Infer (Subst, [DConstraint], PType, Program) -> Either P
 runInferProg env m = case evalState (runExceptT m) initInfer of
   Left err  -> Left err
   Right (s, c, t, p) -> Right $ closeProg env c t (apply s p)
-  -- (c, DScheme [] [] t, p)
--- Right (c, (Forall [] [] t, Forall [] [] t))
---  Right $ simpleClose env c t
 
 runInfer :: TEnv -> Infer (Subst, [DConstraint], PType, Expr) -> Either PTypeError ([DConstraint], DScheme, Expr)
 runInfer env m = case evalState (runExceptT m) initInfer of
   Left err  -> Left err
   Right (_, c, t, p) -> Right $ close env c t p
--- Right (c, (Forall [] [] t, Forall [] [] t))
---  Right $ simpleClose env c t
 
 buildConstraint ::  [DConstraint] -> [DConstraint] -> Subst -> ([DConstraint], Subst)
 buildConstraint resList [] s = (resList, s)
@@ -242,7 +224,6 @@ buildConstraint resList cons s = case consElem of
   Nothing -> (resList ++ cons, s)
   where consElem = find isConsResolvable cons
 
---TODO Cleanup dconstraint remaining
 -- insert constraint chains into each other, so only the ones with direct cyclic dependencies remain
 bundleConstraints :: DConstraint -> [DConstraint] -> [DConstraint]
 bundleConstraints topD@(topTy, acc) dcons = case nonRecType of
@@ -264,7 +245,7 @@ getNonRecType (tvar:tvar_rem) dConsList =
   where dcons = extractType (TVar tvar) dConsList
 
 isRecType ::  DConstraint -> Bool
-isRecType (TVar tv, dc) = length (ftv dc) == 0 || (elem tv (ftv dc) && length (ftv dc) == 1)
+isRecType (TVar tv, dc) = let freeVars = ftv dc in Set.null freeVars || (tv `Set.member` freeVars && Set.size freeVars == 1)
 isRecType (_, _) = error "non tvar variable in fixpoint iterations"
 
 getSubstFromCons :: DConstraint -> Subst
@@ -288,7 +269,7 @@ extractType ty ((pty, dc):b) = if ty == pty then (pty, dc) else extractType ty b
 --  whenever we find a constraint, we try to force it down to two simple types, which we resolve and continue.
 --    if we can not force it, we eventually return the constraint. 
 collapseChain :: DowngradeChain -> PType -> DowngradeChain -> DowngradeChain
-collapseChain [] ty dcOut = [Left ty] ++ dcOut
+collapseChain [] ty dcOut = Left ty : dcOut
 collapseChain ((Left ty1):b) ty2 dcOut = if isBasicType ty1
                                          then collapseChain b (downgrade ty1 ty2) dcOut
                                          else collapseChain b ty2 dcOut ++ [Left ty1]
@@ -335,16 +316,12 @@ collapse (ty, dc) = (ty, collapseChain dc Deterministic [])
 
 isConsResolved :: [DConstraint] -> ([DConstraint], Subst, Bool)
 isConsResolved [(TVar a, [Left ty])] | isBasicType ty = ([], Subst $ Map.singleton a ty, True)
---isConsResolved [(ty1, [Left ty2])] | isBasicType ty1 && ty1 == ty2 = ([], emptySubst, True)
---isConsResolved [(ty1, [Left ty2])] | isBasicType ty1 && ty1 /= ty2 = error "false constraint pinfer"
 isConsResolved cons = (cons, emptySubst, False)
 
 resolveStep ::  [DConstraint] -> PType -> ([DConstraint], PType, Bool, Subst)
 resolveStep [] ty = ([], ty, True, emptySubst)
 resolveStep cons ty = (consRes, resType, isResolvedRes, substRes)
-  where --topCons = extractType ty cons
-        --consNoTop = delete topCons cons
-        (cons', subst1) = buildConstraint [] cons emptySubst
+  where (cons', subst1) = buildConstraint [] cons emptySubst
 
         topConsB =  extractType ty cons'
         consNoTopB = delete topConsB cons'
@@ -436,7 +413,6 @@ fresh = do
     return $ TVar $ TV (letters !! var_count s)
 
 -- Replace variables in the scheme with fresh ones
--- TODO: Other Constraints?
 instantiate :: Scheme -> Infer ([Constraint], PType)
 instantiate (Forall as cs t) = do
   as' <- mapM (const fresh) as
@@ -485,17 +461,14 @@ freshVars n rts = do
     put s{var_count = var_count s + 1}
     freshVars (n - 1)  (TVar (TV (letters !! var_count s)):rts)
 
-rtFromScheme :: Scheme -> PType
-rtFromScheme (Forall _ _ rt) = rt
-
-fst3 :: (Subst, [DConstraint], PType, Expr ) -> Subst
-fst3 (x, _, _, _) = x
-snd3 :: (Subst, [DConstraint], PType, Expr ) -> [DConstraint]
-snd3 (_, x, _, _) = x
-trd3 :: (Subst, [DConstraint], PType, Expr ) -> PType
-trd3 (_, _, x, _) = x
-frth3 :: (Subst, [DConstraint], PType, Expr ) ->  Expr
-frth3 (_, _, _, x) = x
+fst4 :: (Subst, [DConstraint], PType, Expr) -> Subst
+fst4 (x, _, _, _) = x
+snd4 :: (Subst, [DConstraint], PType, Expr) -> [DConstraint]
+snd4 (_, x, _, _) = x
+trd4 :: (Subst, [DConstraint], PType, Expr) -> PType
+trd4 (_, _, x, _) = x
+frth4 :: (Subst, [DConstraint], PType, Expr) -> Expr
+frth4 (_, _, _, x) = x
 
 lookupEnv :: TEnv -> Var -> Infer (Subst, [DConstraint], PType)
 lookupEnv (TypeEnv env) x =
@@ -551,15 +524,26 @@ inferProg env (Program decls nns adts) = do
   (s1, cs1, t1, pt) <- infer fenv expr
   -- building the constraints that the built type variables of the functions equal
   -- the inferred function type
-  let tcs = zipWith makeEqConstraint tvs (map trd3 cts)
+  let tcs = zipWith makeEqConstraint tvs (map trd4 cts)
   -- combine all constraints
-  return (s1, cs1 ++ concatMap snd3 cts ++ tcs , t1, Program (zip (map fst decls) (map frth3 cts)) nns adts)
+  return (s1, cs1 ++ concatMap snd4 cts ++ tcs , t1, Program (zip (map fst decls) (map frth4 cts)) nns adts)
 
 isEnumerable :: Expr -> Bool
 isEnumerable e = foldr (\tag b -> b || isEnum tag) False (tags (getTypeInfo e))
   where isEnum (DiscreteValues _) = True
         isEnum _ = False
 
+
+-- | Infer a binary operator expression using a given constraint function and constructor
+inferBinOp :: TEnv -> TypeInfo -> Expr -> Expr
+           -> Infer (Subst, [DConstraint], PType)
+           -> (TypeInfo -> Expr -> Expr -> Expr)
+           -> Infer (Subst, [DConstraint], PType, Expr)
+inferBinOp env ti e1 e2 getInf constructor = do
+  (s1, cs1, t1) <- getInf
+  (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
+  (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
+  return (s3, cs3, t3, constructor (setPType ti t3) et1 et2)
 
 infer :: TEnv -> Expr -> Infer (Subst, [DConstraint], PType, Expr)
 infer env expr = case expr of
@@ -569,62 +553,34 @@ infer env expr = case expr of
   Uniform ti  -> return (emptySubst, [], Integrate, Uniform (setPType ti Integrate))
   Normal ti  -> return (emptySubst, [], Integrate, Normal (setPType ti Integrate))
   Constant ti val  -> return (emptySubst, [], Deterministic, Constant (setPType ti Deterministic) val)
-  -- Assuming unbound variables are caught in RInfer (laziness tbh)
-  --Var ti s -> return (emptySubst, [], Deterministic, Var (setPType ti Deterministic) s)
   LetIn ti s x b -> do
     (s1, cs1, t1, xt) <- infer env x
     (s2, cs2, t2, bt) <- infer env b
     return (compose s2 s1, apply s2 cs1 ++ cs2, t2, LetIn (setPType ti t2) s xt bt)
 
   InjF ti name paramsExpr -> do
-    --(s1, cs1, t1, xt) <- infer env expr
     p_inf <- mapM (infer env) paramsExpr
     -- If all parameters are enumerable, we can use weaker constarints
     let constraint = if all isEnumerable paramsExpr then EnumPlusConstraint else PlusConstraint
     tv <- fresh
-    let s_acc = foldl compose emptySubst (map fst3 p_inf)
+    let s_acc = foldl compose emptySubst (map fst4 p_inf)
     --let cts_d d = Right (LetInDConstraint(Left d))
-    let pt@(p_fst:p_rst) = map trd3 p_inf
-    let lefts = map Left pt
+    let pt@(p_fst:p_rst) = map trd4 p_inf
+    let leftPts = map Left pt
     -- Fold all pTypes into a series of Plus Constraints (p1 + (p2 + (p3 + p4)))
-    let cs = lefts ++ foldr (\p acc -> [Right $ constraint (Left p) (Right acc)]) [Left p_fst] p_rst
-    return (s_acc, concatMap snd3 p_inf ++ [(tv,cs)] --TODO check this
-      , tv, InjF (setPType ti tv) name (map frth3 p_inf))
+    let cs = leftPts ++ foldr (\p acc -> [Right $ constraint (Left p) (Right acc)]) [Left p_fst] p_rst
+    return (s_acc, concatMap snd4 p_inf ++ [(tv,cs)], tv, InjF (setPType ti tv) name (map frth4 p_inf))
 
   Not ti e -> do
       (s1, cs1, t1) <- negInf
       (s2, cs2, t2, et) <- applyOpArg env e s1 cs1 t1
       return (s2, cs2, t2, Not (setPType ti t2) et)
 
-  Equals ti e1 e2 -> do
-      (s1, cs1, t1) <- compInf
-      (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
-      (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
-      return (s3, cs3, t3, Equals (setPType ti t3) et1 et2)
-
-  GreaterThan ti e1 e2 -> do
-      (s1, cs1, t1) <- compInf
-      (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
-      (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
-      return (s3, cs3, t3, GreaterThan (setPType ti t3) et1 et2)
-
-  LessThan ti e1 e2 -> do
-      (s1, cs1, t1) <- compInf
-      (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
-      (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
-      return (s3, cs3, t3, LessThan (setPType ti t3) et1 et2)
-  
-  And ti e1 e2 -> do
-      (s1, cs1, t1) <- downgradeInf
-      (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
-      (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
-      return (s3, cs3, t3, And (setPType ti t3) et1 et2)
-
-  Or ti e1 e2 -> do
-      (s1, cs1, t1) <- downgradeInf
-      (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
-      (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
-      return (s3, cs3, t3, Or (setPType ti t3) et1 et2)
+  Equals ti e1 e2     -> inferBinOp env ti e1 e2 compInf Equals
+  GreaterThan ti e1 e2 -> inferBinOp env ti e1 e2 compInf GreaterThan
+  LessThan ti e1 e2   -> inferBinOp env ti e1 e2 compInf LessThan
+  And ti e1 e2        -> inferBinOp env ti e1 e2 downgradeInf And
+  Or ti e1 e2         -> inferBinOp env ti e1 e2 downgradeInf Or
 
   Var ti name -> do
       let (TypeEnv envMap) = env
@@ -637,17 +593,8 @@ infer env expr = case expr of
 
   Null ti -> return (emptySubst, [], Deterministic, Null (setPType ti Deterministic))
 
-  Cons ti e1 e2 -> do
-    (s1, cs1, t1) <- downgradeInf
-    (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
-    (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
-    return (s3, cs3, t3, Cons (setPType ti t3) et1 et2)
-
-  TCons ti e1 e2 -> do
-    (s1, cs1, t1) <- downgradeInf
-    (s2, cs2, t2, et1) <- applyOpArg env e1 s1 cs1 t1
-    (s3, cs3, t3, et2) <- applyOpArg env e2 s2 cs2 t2
-    return (s3, cs3, t3, TCons (setPType ti t3) et1 et2)
+  Cons ti e1 e2  -> inferBinOp env ti e1 e2 downgradeInf Cons
+  TCons ti e1 e2 -> inferBinOp env ti e1 e2 downgradeInf TCons
 
   IfThenElse ti cond tr fl -> do
     (s1, cs1, t1) <- downgradeInf
@@ -660,15 +607,10 @@ infer env expr = case expr of
     return (s6, cs6, t6, IfThenElse (setPType ti t6) condt trt flt)
 
   Lambda ti name e -> do
-    n <- fresh
-    (s, cs, t, et) <- infer env e -- TODO Check this
+    (s, cs, t, et) <- infer env e
     return (s, cs, t, Lambda (setPType ti t) name et)
 
-  Apply ti l v -> do
-    (s1, cs1, t1) <- downgradeInf
-    (s2, cs2, t2, et1) <- applyOpArg env l s1 cs1 t1
-    (s3, cs3, t3, et2) <- applyOpArg env v s2 cs2 t2
-    return (s3, cs3, t3, Apply (setPType ti t3) et1 et2)
+  Apply ti l v -> inferBinOp env ti l v downgradeInf Apply
     
   ReadNN ti name e -> do
       (s, cs, t, et) <- infer env e
@@ -728,8 +670,6 @@ normalize (DScheme _ c body) = DScheme (map snd ord) (normcs c) (normtype body)
 -- | The empty substitution
 emptySubst :: Subst
 emptySubst = mempty
-emptyDSubst :: DSubst
-emptyDSubst = mempty
 -- | Compose substitutions
 compose :: Subst -> Subst -> Subst
 (Subst s1) `compose` (Subst s2) = Subst $ Map.map (apply (Subst s1)) s2 `Map.union` s1
