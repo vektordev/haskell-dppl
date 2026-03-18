@@ -22,3 +22,10 @@ cabal.project.local
 cabal.project.local~
 .HTF/
 .ghc.environment.*
+
+.direnv/
+haskell-dppl.cabal
+stack.yaml.lock
+vendor/
+
+__pycache__/
