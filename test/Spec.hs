@@ -319,7 +319,7 @@ checkProbAny (p, _, params, _) = ioProperty $ do
 --  checkProbTestCase p inp out .&&. acc) (True===True) correctProbValuesTestCases
 
 irDensityTopK :: RandomGen g => Program -> Double -> IRValue -> [IRExpr]-> Rand g IRValue
-irDensityTopK p thresh s params = IRInterpreter.generateRand (neurals p) irEnv (sampleExpr:params) irExpr
+irDensityTopK p thresh s params = IRInterpreter.generateRand (neurals p) irEnv (sampleExpr:IRConst (VFloat 1.0):params) irExpr
   where Just (irExpr, _) = probFun (lookupIREnv "main" irEnv)
         sampleExpr = IRConst s
         irEnv = envToIR defaultCompilerConfig {topKThreshold = Just thresh} annotated
@@ -578,6 +578,109 @@ propInfer a b = addWitnessesProg (addTypeInfo) === b
 sumsToOne :: IO Result
 sumsToOne = undefined
 -}
+-- Two-level nesting: inner true branch has global prob 0.12*0.12=0.0144 < thresh=0.1, so it is
+-- pruned by global topK but would survive local topK (local condT=0.12 > 0.1).
+prop_TopKNestedPrunesDeeper :: Property
+prop_TopKNestedPrunesDeeper = ioProperty $ do
+  let twoLevel = Program [("main",
+        ifThenElse (bernoulli 0.12)
+          (ifThenElse (bernoulli 0.12) (constF 1.0) (constF 0.0))
+          (constF 2.0))] [] []
+  topKResult <- evalRandIO $ irDensityTopK twoLevel 0.1 (VFloat 1.0) []
+  exactResult <- evalRandIO $ irDensity twoLevel (VFloat 1.0) []
+  case (topKResult, exactResult) of
+    (VTuple (VFloat topKP) _, VTuple exactP _) ->
+      return $ counterexample ("global topK P(1.0)=" ++ show topKP ++ ", expected 0") (topKP == 0.0)
+             .&&. counterexample ("exact P(1.0) should be 0.0144") (exactP `reasonablyClose` VFloat 0.0144)
+    _ -> return $ counterexample "Return type was no tuple" False
+
+-- Cross-function: accProb passes through a _prob call boundary.
+-- main = if bernoulli(0.12) then inner else 2.0
+-- inner = if bernoulli(0.12) then 1.0 else 0.0
+-- With thresh=0.1: main's true branch has accProb=0.12, inner receives it;
+-- inner's true branch has global prob 0.12*0.12=0.0144 < 0.1 → pruned, P(1.0)=0.
+prop_TopKCrossFunction :: Property
+prop_TopKCrossFunction = ioProperty $ do
+  let crossFunc = Program
+        [ ("main",  ifThenElse (bernoulli 0.12) (var "inner") (constF 2.0))
+        , ("inner", ifThenElse (bernoulli 0.12) (constF 1.0) (constF 0.0)) ]
+        [] []
+  topKResult <- evalRandIO $ irDensityTopK crossFunc 0.1 (VFloat 1.0) []
+  exactResult <- evalRandIO $ irDensity crossFunc (VFloat 1.0) []
+  case (topKResult, exactResult) of
+    (VTuple (VFloat topKP) _, VTuple exactP _) ->
+      return $ counterexample ("global topK P(1.0)=" ++ show topKP ++ ", expected 0") (topKP == 0.0)
+             .&&. counterexample ("exact P(1.0) should be 0.0144") (exactP `reasonablyClose` VFloat 0.0144)
+    _ -> return $ counterexample "Return type was no tuple" False
+
+-- Threshold=0 never prunes any branch, so results must match exact inference.
+prop_TopKZeroThreshMatchesExact :: Property
+prop_TopKZeroThreshMatchesExact = forAll (elements correctProbValuesTestCases) checkTopKZeroMatchesExact
+
+checkTopKZeroMatchesExact :: (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
+checkTopKZeroMatchesExact (p, inp, params, _) = ioProperty $ do
+  topKResult <- evalRandIO $ irDensityTopK p 0.0 inp params
+  exactResult <- evalRandIO $ irDensity p inp params
+  case (topKResult, exactResult) of
+    (VTuple topKP topKD, VTuple exactP exactD) ->
+      return $ topKP `reasonablyClose` exactP .&&. topKD `reasonablyClose` exactD
+    _ -> return $ counterexample "Return type was no tuple" False
+
+-- Pruning can only zero out branches, never inflate probability above the exact value.
+prop_TopKNeverInflates :: Property
+prop_TopKNeverInflates = forAll (elements correctProbValuesTestCases) (checkTopKNeverInflates 0.1)
+
+checkTopKNeverInflates :: Double -> (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
+checkTopKNeverInflates thresh (p, inp, params, _) = ioProperty $ do
+  topKResult <- evalRandIO $ irDensityTopK p thresh inp params
+  exactResult <- evalRandIO $ irDensity p inp params
+  case (topKResult, exactResult) of
+    (VTuple (VFloat topKP) _, VTuple (VFloat exactP) _) ->
+      return $ counterexample (show topKP ++ " > " ++ show exactP) (topKP <= exactP + 1e-9)
+    _ -> return $ counterexample "Return type was no tuple" False
+
+-- Branch counts must be ≤ no-topK branch counts (pruned branches are excluded).
+-- Uses a two-level program where the inner if has its own branch node (BC=1),
+-- making the difference observable when topK prunes it.
+prop_TopKFewerBranches :: Property
+prop_TopKFewerBranches = ioProperty $ do
+  let twoLevel = Program [("main",
+        ifThenElse (bernoulli 0.5)
+          (ifThenElse (bernoulli 0.5) uniform (constF 3.0))
+          (constF 1.0))] [] []
+  -- thresh=0.6: accTrue=0.5 < 0.6 → prune true branch (inner if) → BC drops by 1
+  topKBCResult <- evalRandIO $ irDensityTopKBC twoLevel 0.6 (VFloat 0.5) []
+  noBCResult   <- evalRandIO $ irDensityBC     twoLevel     (VFloat 0.5) []
+  case (topKBCResult, noBCResult) of
+    (VTuple _ (VTuple _ (VFloat topKBC)), VTuple _ (VTuple _ (VFloat noBC))) ->
+      return $ counterexample (show topKBC ++ " > " ++ show noBC ++ " (topK should not exceed no-topK branch count)") (topKBC <= noBC)
+    _ -> return $ counterexample "Return type was no tuple" False
+
+-- Higher threshold prunes more: BC(high_thresh) ≤ BC(low_thresh).
+prop_TopKMonotonicBranches :: Property
+prop_TopKMonotonicBranches = ioProperty $ do
+  let twoLevel = Program [("main",
+        ifThenElse (bernoulli 0.5)
+          (ifThenElse (bernoulli 0.5) uniform (constF 3.0))
+          (constF 1.0))] [] []
+  -- thresh=0.3: accTrue=0.5 ≥ 0.3, inner not pruned → BC = 2
+  -- thresh=0.6: accTrue=0.5 < 0.6, inner pruned     → BC = 1
+  bcLow  <- evalRandIO $ irDensityTopKBC twoLevel 0.3 (VFloat 0.5) []
+  bcHigh <- evalRandIO $ irDensityTopKBC twoLevel 0.6 (VFloat 0.5) []
+  case (bcLow, bcHigh) of
+    (VTuple _ (VTuple _ (VFloat lowBC)), VTuple _ (VTuple _ (VFloat highBC))) ->
+      return $ counterexample (show highBC ++ " > " ++ show lowBC ++ " (higher threshold should prune at least as much)") (highBC <= lowBC)
+    _ -> return $ counterexample "Return type was no tuple" False
+
+irDensityTopKBC :: RandomGen g => Program -> Double -> IRValue -> [IRExpr] -> Rand g IRValue
+irDensityTopKBC p thresh s params = IRInterpreter.generateRand (neurals p) irEnv (sampleExpr:IRConst (VFloat 1.0):params) irExpr
+  where Just (irExpr, _) = probFun (lookupIREnv "main" irEnv)
+        sampleExpr = IRConst s
+        irEnv = envToIR defaultCompilerConfig {topKThreshold = Just thresh, countBranches = True} annotated
+        annotated = annotateAlgsProg typedProg
+        Right typedProg = addTypeInfo preAnnotated
+        preAnnotated = annotateEnumsProg p
+
 return []
 
 

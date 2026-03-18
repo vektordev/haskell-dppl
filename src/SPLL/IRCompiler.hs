@@ -40,7 +40,8 @@ data CompilerMetadata = CompilerMetadata {
   fcData :: FCData,
   typeEnv :: TypeEnv,
   adtDecls :: [ADTDecl],
-  compilingProgram :: Program
+  compilingProgram :: Program,
+  accProb :: IRExpr
 }
 
 envToIR :: CompilerConfig -> Program -> IREnv
@@ -57,7 +58,11 @@ envToIR conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb, noGenerat
         else Nothing,
         probFun =
           if not noProb && (pt == Deterministic || pt == Integrate || pt == Prob) then
-            Just (toProbDecl name (IRLambda "sample" (runCompile (meta typeEnv) (toIRInferenceSave (meta typeEnv) False binding (IRVar "sample")))))
+            let metaBase = meta typeEnv
+                body m = runCompile m (toIRInferenceSave m False binding (IRVar "sample"))
+            in Just (toProbDecl name $ case topKThreshold conf of
+                 Just _ -> IRLambda "sample" $ IRLambda "acc_prob" $ body (metaBase { accProb = IRVar "acc_prob" })
+                 Nothing -> IRLambda "sample" $ body metaBase)
           else Nothing,
         genFun = 
           if not noGen then
@@ -72,7 +77,7 @@ envToIR conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb, noGenerat
       (expr, "Calculates the probability of the sample parameter being returned from the " ++ name ++ "function")
     toIntegDecl name expr = (expr, "Calculates the probability of the sample parameter being less than or equal to the " ++ name ++ " function")
     fcDat = progToFCData p
-    meta typeEnv = CompilerMetadata conf fcDat typeEnv adts p
+    meta typeEnv = CompilerMetadata conf fcDat typeEnv adts p (IRConst (VFloat 1.0))
 
 
 runCompile :: CompilerMetadata -> CompilerMonad CompilationResult -> IRExpr
@@ -203,11 +208,13 @@ toIRInference meta cumulative (IfThenElse t cond left right) sample = do
   -- E.g. if length(a) > 0 then a[0] else ...
   -- If we were to access a[0] outside of the branch we would error
   ((mul1Raw, leftBranches), binds1) <- lift (runWriterT (do
-    (leftExpr, leftDim, branches) <- toIRInference meta cumulative left sample
+    let metaTrue = meta { accProb = IROp OpMult (accProb meta) (IRVar var_condT_p) }
+    (leftExpr, leftDim, branches) <- toIRInference metaTrue cumulative left sample
     (IRVar var_condT_p, condTrueDim) `multP` (leftExpr, leftDim) <&> (\x -> (x, branches)))) -- We need the branches outside of this scope. Append it to the tuple
   let mul1 = bimap (generateLetInExpr binds1) (generateLetInExpr binds1) mul1Raw
   ((mul2Raw, rightBranches), binds2) <- lift (runWriterT (do
-    (rightExpr, rightDim, branches) <- toIRInference meta cumulative right sample
+    let metaFalse = meta { accProb = IROp OpMult (accProb meta) (IRVar var_condF_p) }
+    (rightExpr, rightDim, branches) <- toIRInference metaFalse cumulative right sample
     (IRVar var_condF_p, condFalseDim) `multP` (rightExpr, rightDim) <&> (\x -> (x, branches)))) -- We need the branches outside of this scope. Append it to the tuple
   let mul2 = bimap (generateLetInExpr binds2) (generateLetInExpr binds2) mul2Raw
   -- If probability of this branch is 0 then set the product to 0 manually. This branch could throw an error multiplied by 0
@@ -218,20 +225,28 @@ toIRInference meta cumulative (IfThenElse t cond left right) sample = do
   let branches = (IROp OpPlus condTrueBranches ((IROp OpPlus leftBranches rightBranches)))
   case thr of
     Just thresh -> do
+      let accTrue = IROp OpMult (accProb meta) (IRVar var_condT_p)
+      let accFalse = IROp OpMult (accProb meta) (IRVar var_condF_p)
       let returnExpr = IRIf
-            (IROp OpLessThan (IRVar var_condT_p) (IRConst (VFloat thresh)))
+            (IROp OpLessThan accTrue (IRConst (VFloat thresh)))
             -- If probability of this branch is 0 then set the product to 0 manually. This branch could throw an error multiplied by 0
             (IRIf (IROp OpApprox condFalseExpr const0) const0 (fst mul2))
-            (IRIf (IROp OpGreaterThan (IRVar var_condT_p) (IRConst (VFloat (1-thresh))))
+            (IRIf (IROp OpLessThan accFalse (IRConst (VFloat thresh)))
               (IRIf (IROp OpApprox condTrueExpr const0) const0 (fst mul1))
               addExpr)
       let returnDim = IRIf
-            (IROp OpLessThan (IRVar var_condT_p) (IRConst (VFloat thresh)))
+            (IROp OpLessThan accTrue (IRConst (VFloat thresh)))
             (IRIf (IROp OpApprox condFalseExpr const0) const0 (snd mul2))
-            (IRIf (IROp OpGreaterThan (IRVar var_condT_p) (IRConst (VFloat (1-thresh))))
+            (IRIf (IROp OpLessThan accFalse (IRConst (VFloat thresh)))
               (IRIf (IROp OpApprox condTrueExpr const0) const0 (snd mul1))
               addDim)
-      return (returnExpr, returnDim, branches)
+      let returnBranches = IRIf
+            (IROp OpLessThan accTrue (IRConst (VFloat thresh)))
+            (IROp OpPlus condTrueBranches rightBranches)
+            (IRIf (IROp OpLessThan accFalse (IRConst (VFloat thresh)))
+              (IROp OpPlus condTrueBranches leftBranches)
+              branches)
+      return (returnExpr, returnDim, returnBranches)
     -- p(y) = p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
     Nothing -> do
       return (addExpr, addDim, branches)
@@ -555,10 +570,10 @@ toIRInference meta False (InjF TypeInfo {tags=extras} name [left, right]) sample
     
     let returnExpr = case topKThreshold (compilerConfig meta) of
           Nothing -> IRIf (IRIsPossible enumListR invExpr) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
-          Just thr -> IRIf (IROp OpAnd (IRIsPossible enumListR invExpr) (IROp OpGreaterThan pLeft (IRConst (VFloat thr)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
+          Just thr -> IRIf (IROp OpAnd (IRIsPossible enumListR invExpr) (IROp OpGreaterThan (IROp OpMult (accProb meta) pLeft) (IRConst (VFloat thr)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
     let branchesExpr = case topKThreshold (compilerConfig meta) of
           Nothing -> IRIf (IRIsPossible enumListR invExpr) (IRConst (VFloat 1)) (IRConst (VFloat 0))
-          Just thr -> IRIf (IROp OpAnd (IRIsPossible enumListR invExpr) (IROp OpGreaterThan pLeft (IRConst (VFloat thr)))) (IRConst (VFloat 1)) (IRConst (VFloat 0))
+          Just thr -> IRIf (IROp OpAnd (IRIsPossible enumListR invExpr) (IROp OpGreaterThan (IROp OpMult (accProb meta) pLeft) (IRConst (VFloat thr)))) (IRConst (VFloat 1)) (IRConst (VFloat 0))
     return (returnExpr, const0, branchesExpr)
     )) <&> generateLetInBlock meta
   uniquePrefix <- mkVariable ""
@@ -594,7 +609,12 @@ toIRInference meta cumulative (Var TypeInfo {rType=rt} n) sample = do
     Just(TArrow _ _, hasInference) -> do
       var <- mkVariable "call"
       let name = if hasInference then n ++ functionSuffix else n
-      setVariables [(var, IRApply (IRVar name) sample)]
+      let callExpr = if hasInference
+            then case topKThreshold (compilerConfig meta) of
+              Just _ -> IRApply (IRApply (IRVar name) sample) (accProb meta)
+              Nothing -> IRApply (IRVar name) sample
+            else IRApply (IRVar name) sample
+      setVariables [(var, callExpr)]
       -- The return value is still a function. No need to do dim and branch counting here
       return (IRVar var, const0, const0)
     -- var is a function without a inference function
@@ -606,7 +626,10 @@ toIRInference meta cumulative (Var TypeInfo {rType=rt} n) sample = do
     -- Var is a top level declaration (an therefor has a _prob function)
     Just (_, True) -> do
       var <- mkVariable "call"
-      setVariables [(var, IRInvoke (IRApply (IRVar (n ++ functionSuffix)) sample))]
+      let callExpr = case topKThreshold (compilerConfig meta) of
+            Just _ -> IRInvoke (IRApply (IRApply (IRVar (n ++ functionSuffix)) sample) (accProb meta))
+            Nothing -> IRInvoke (IRApply (IRVar (n ++ functionSuffix)) sample)
+      setVariables [(var, callExpr)]
       if countBranches (compilerConfig meta) then
           return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
         else
