@@ -93,7 +93,7 @@ pCumulParser name = do
     _  -> return $ CumulTestCase name (head params) (tail params) (resP, resD)
 
 pTestCases :: MonadParser m => String -> m [TestCase]
-pTestCases name = choice[pProbTestCase name, pCumulParser name, pArgmaxPTestCase name] `sepBy` pNewline
+pTestCases name = choice[pProbTestCase name, pCumulParser name, pArgmaxPTestCase name] `sepEndBy` pNewline
 
 parseTestCases :: FilePath -> IO [TestCase]
 parseTestCases fp = do
