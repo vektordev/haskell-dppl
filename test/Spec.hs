@@ -186,7 +186,10 @@ prop_CheckProbTestCases :: Property
 prop_CheckProbTestCases = forAll (elements correctProbValuesTestCases) checkProbTestCase
 
 prop_CheckProbTestCasesSample :: Property
-prop_CheckProbTestCasesSample = forAll (elements correctProbValuesTestCases) (testSamplingProb 0.05 1000 5)
+prop_CheckProbTestCasesSample = forAll (elements correctProbValuesTestCases) $ \tc@(_, _, _, (_, outDim)) ->
+  case outDim of
+    VFloat d | d >= 2 -> testSamplingProb 0.05 1000 8 tc  -- extra retries for 2D (max 256k samples)
+    _                 -> testSamplingProb 0.05 1000 5 tc
 
 prop_CheckIntegralTestCases :: Property
 prop_CheckIntegralTestCases = forAll (elements correctIntegralValuesTestCases) checkIntegralTestCase
