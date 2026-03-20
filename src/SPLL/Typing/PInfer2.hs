@@ -565,6 +565,7 @@ infer :: TEnv -> Expr -> Infer (Subst, [DConstraint], PType, Expr)
 infer env expr = case expr of
 
   e | not (null ([(mean, std)|IsNormal mean std <- tags (getTypeInfo expr)])) -> return (emptySubst, [], Integrate, setTypeInfo e (getTypeInfo e){pType=Integrate})
+  e | not (null ([(mean, std)|IsLogNormal mean std <- tags (getTypeInfo expr)])) -> return (emptySubst, [], Integrate, setTypeInfo e (getTypeInfo e){pType=Integrate})
   ThetaI ti a i  -> return (emptySubst, [], Deterministic, ThetaI (setPType ti Deterministic) a i)
   Subtree ti a i  -> return (emptySubst, [], Deterministic, Subtree (setPType ti Deterministic) a i)
   Uniform ti  -> return (emptySubst, [], Integrate, Uniform (setPType ti Integrate))

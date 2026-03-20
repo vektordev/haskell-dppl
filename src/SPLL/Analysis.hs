@@ -88,10 +88,24 @@ normalTags _ (InjF _ "mult" [p0, p1])
 normalTags _ (InjF _ "mult" [p0, p1])
   | (Just (m0, s0)) <- getNormalParameters p1,
     (Just x1) <- getSingleDiscrete p0 = [IsNormal (m0 * x1) (s0 * x1)]
+normalTags _ (InjF _ "exp" [p])
+  | (Just (m, s)) <- getNormalParameters p = [IsLogNormal m s]
+normalTags _ (InjF _ "mult" [p0, p1])
+  | (Just (m0, s0)) <- getLogNormalParameters p0,
+    (Just (m1, s1)) <- getLogNormalParameters p1 = [IsLogNormal (m0 + m1) (sqrt (s0*s0 + s1*s1))]
+normalTags _ (InjF _ "mult" [p0, p1])
+  | (Just (m0, s0)) <- getLogNormalParameters p0,
+    (Just x1) <- getSingleDiscrete p1 = [IsLogNormal (m0 + log x1) s0]
+normalTags _ (InjF _ "mult" [p0, p1])
+  | (Just (m0, s0)) <- getLogNormalParameters p1,
+    (Just x1) <- getSingleDiscrete p0 = [IsLogNormal (m0 + log x1) s0]
 normalTags _ _ = []
 
 getNormalParameters :: Expr -> Maybe (Double, Double)
 getNormalParameters e = listToMaybe [(m, s) | IsNormal m s <- tags (getTypeInfo e)]
+
+getLogNormalParameters :: Expr -> Maybe (Double, Double)
+getLogNormalParameters e = listToMaybe [(m, s) | IsLogNormal m s <- tags (getTypeInfo e)]
 
 getSingleDiscrete :: Expr -> Maybe Double
 getSingleDiscrete e = listToMaybe [x | DiscreteValues (MultiDiscretes [VFloat x]) <- tags (getTypeInfo e)]
@@ -137,7 +151,9 @@ checkConstraint expr alg ResultingTypeMatch = resPType == annotatedType
     resPType = resultingPType alg (map (pType . getTypeInfo) (getSubExprs expr))
 checkConstraint expr _ (SubExprNIsEnumerable n) | length (getSubExprs expr) > n =
   isEnumerable (tags (getTypeInfo (getSubExprs expr !! n)))
-checkConstraint expr _ ResolvesToDistribution | not (null [1 | IsNormal _ _ <- tags (getTypeInfo expr)]) = True
+checkConstraint expr _ ResolvesToDistribution | not (null (
+  [1 | IsNormal _ _ <- tags (getTypeInfo expr)] ++ 
+  [1 | IsLogNormal _ _ <- tags (getTypeInfo expr)])) = True
 checkConstraint _ _ _ = False
 
 isEnumerable :: [Tag] -> Bool
