@@ -18,7 +18,7 @@ Create two files with the same name, except for the file extension. One with the
 Create a file with normal DPPL Syntax, containing a function called "main". The main may have additional parameters, which have to be specified in the TST file. This will be the function on which probabilistic inference is performed.
 
 ### Syntax of the TST file
-The TST file consists of any number of assertions for the probabilistic inference of a PPL file. There are multiple types of assertions, but all of them must be in exactly one line. Make sure that there is no empty line at the end of the file.
+The TST file consists of any number of assertions for the probabilistic inference of a PPL file. There are multiple types of assertions, but all of them must be in exactly one line.
 
 Test cases, regardless of type, take Values as inputs. Make sure that the values you pass only use Value syntax and not expression syntax. E.g., Either types can be created using the uppercase "Left" or lowercase "left" syntax in expressions. The first is Value syntax, while the latter is expression syntax and invokes the "left" constructor. In this case, only the uppercase version may be used.
 
