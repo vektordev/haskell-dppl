@@ -1,0 +1,1 @@
+main = if isLeft (left 1) then fromLeft (left Normal) else 0.0

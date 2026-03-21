@@ -1,0 +1,1 @@
+main x = if x then left Normal else right Normal

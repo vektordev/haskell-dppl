@@ -176,7 +176,8 @@ generate f neurals adts globalEnv env [] (IROp OpEq a b) = do
         (VEither (Left _), VEither (Left VAny)) -> True
         (VEither (Right VAny), VEither (Right _)) -> True
         (VEither (Right _), VEither (Right VAny)) -> True
-        (VEither a, VEither b) -> a == b
+        (VEither (Left a), VEither (Left b)) -> cmp a b
+        (VEither (Right a), VEither (Right b)) -> cmp a b
         (VADT n1 vs1, VADT n2 vs2) -> n1 == n2 && all (\(v1, v2) -> v1 == VAny || v2 == VAny || cmp v1 v2) (zip vs1 vs2)
         -- Any is not equal to anything
         (VAny, b) -> False

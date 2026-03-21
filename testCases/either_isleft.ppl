@@ -1,0 +1,1 @@
+main = isLeft (if Uniform < 0.4 then left Uniform else right 1.0)

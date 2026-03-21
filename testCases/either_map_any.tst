@@ -1,0 +1,8 @@
+p(Left 1.0, Left 1.0)=(1.0, 0.0)
+p(Right 2.0, Right 2.0)=(1.0, 0.0)
+p(Left 2.0, Left 1.0)=(0.0, 0.0)
+p(Right 1.0, Left 1.0)=(0.0, 0.0)
+p(Left ANY, Left 1.0)=(1.0, 0.0)
+p(Right ANY, Right 2.0)=(1.0, 0.0)
+p(Left ANY, Right 2.0)=(0.0, 0.0)
+p(Right ANY, Left 1.0)=(0.0, 0.0)

@@ -1,0 +1,1 @@
+main a = mapEither (\x -> x) (\y -> y) a

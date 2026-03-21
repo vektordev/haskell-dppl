@@ -1,0 +1,7 @@
+p(Left 0.0, True)=(0.3989, 1.0)
+p(Right 0.0, False)=(0.3989, 1.0)
+p(Left 0.0, False)=(0.0, 0.0)
+p(Left ANY, True)=(1.0, 0.0)
+p(Left ANY, False)=(0.0, 0.0)
+p(Right ANY, True)=(0.0, 0.0)
+p(Right ANY, False)=(1.0, 0.0)

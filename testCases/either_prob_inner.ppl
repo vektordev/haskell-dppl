@@ -1,0 +1,1 @@
+main = if Uniform < 0.5 then left (if Uniform < 0.5 then 0 else 1) else right 2

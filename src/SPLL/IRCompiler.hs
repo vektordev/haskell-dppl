@@ -133,6 +133,27 @@ negInf = IRConst (VFloat (-9999999))
 posInf :: IRExpr
 posInf = IRConst (VFloat 9999999)
 
+-- | True when `sample` is VAny or contains VAny one level inside a Left/Right wrapper.
+-- Used to detect samples like (Left ANY) that would crash arithmetic inverses.
+-- Only IRIsLeft/IRFromLeft/IRFromRight are used here; these are already VAny-safe.
+mkDeepAnyCheck :: RType -> IRExpr -> IRExpr
+mkDeepAnyCheck (TEither _ _) sample =
+  IRIf (IRUnaryOp OpIsAny sample)
+    (IRConst (VBool True))
+    (IRIf (IRIsLeft sample)
+      (IRUnaryOp OpIsAny (IRFromLeft sample))
+      (IRUnaryOp OpIsAny (IRFromRight sample)))
+mkDeepAnyCheck _ sample = IRUnaryOp OpIsAny sample
+
+-- | For a deconstructing Either InjF, returns a safe alternative invExpr that avoids
+-- arithmetic on VAny. The result mirrors the arm of `sample` but uses VAny as the inner
+-- value, so downstream OpEq comparisons handle it correctly.
+mkSafeInvExpr :: IRExpr -> IRExpr
+mkSafeInvExpr sample =
+  IRIf (IRIsLeft sample)
+    (IRLeft (IRConst VAny))
+    (IRRight (IRConst VAny))
+
 renameVar :: String -> String -> IRExpr -> IRExpr
 renameVar old new = irMap (renameVar' old new)
 
@@ -153,8 +174,12 @@ toIRInferenceSave meta cumulative (Lambda t name subExpr) sample = do
       irTuple <- lift (runWriterT (toIRInferenceSave meta {typeEnv=newTypeEnv} cumulative subExpr sample)) <&> generateLetInBlock meta
       return (IRLambda name irTuple, const0, const0)
 toIRInferenceSave meta cumulative expr sample = do
-  (probExpr, probDim, probBranches) <- toIRInference meta cumulative expr sample
-  return $ (IRIf (IRUnaryOp OpIsAny sample) (IRConst (VFloat 1)) probExpr, IRIf (IRUnaryOp OpIsAny sample) const0 probDim, IRIf (IRUnaryOp OpIsAny sample) const0 probBranches)
+  ((probExpr, probDim, probBranches), letins) <- lift $ runWriterT $ toIRInference meta cumulative expr sample
+  let wrap inner = generateLetInExpr letins inner
+  return ( IRIf (IRUnaryOp OpIsAny sample) (IRConst (VFloat 1)) (wrap probExpr)
+         , IRIf (IRUnaryOp OpIsAny sample) const0 (wrap probDim)
+         , IRIf (IRUnaryOp OpIsAny sample) const0 (wrap probBranches)
+         )
 
 --in this implementation, I'll forget about the distinction between PDFs and Probabilities. Might need to fix that later.
 toIRInference :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad CompilationResult
@@ -487,10 +512,18 @@ toIRInference meta cumulative (InjF _ name params) sample | isHigherOrder (adtDe
   -- Create all inverses of the ho functions and save them on the variable stack
   -- Then create a substitution that substitutes f^-1 to f_prob. All substitutions are then composed in the fold
   renVar <- foldM (\sub tup -> createHOInverse (fcData meta) adts tup <&> (.) sub) id (zip fVars fs)
-  (paramExpr, paramDim, paramBranches) <- probF meta cumulative a invExpr
+  -- When deconstructing an Either and sample contains a nested VAny (e.g. Left ANY),
+  -- arithmetic in invExpr would crash before isAny can fire. Replace invExpr with a
+  -- safe alternative (Left VAny / Right VAny) that lets OpEq handle the comparison.
+  let finalInvExpr = case (decons, rType (getTypeInfo a)) of
+        (True, TEither _ _) ->
+          let deepCheck = mkDeepAnyCheck (TEither undefined undefined) sample
+          in IRIf deepCheck (mkSafeInvExpr sample) invExpr
+        _ -> invExpr
+  (paramExpr, paramDim, paramBranches) <- probF meta cumulative a finalInvExpr
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
-  let scale x = if not cumulative 
-                  then IROp OpMult x (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDerivExpr)) 
+  let scale x = if not cumulative
+                  then IROp OpMult x (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDerivExpr))
                   else IRIf (IROp OpGreaterThan invDerivExpr (const0)) x (IROp OpSub (IRConst (VFloat 1)) x)
   let returnP = scale paramExpr
   let appTestExpr e = IRIf appTest e const0
@@ -539,7 +572,7 @@ toIRInference meta cumulative e@(InjF TypeInfo {tags=extras} name params) sample
   let scale x = if not cumulative 
                   then IROp OpMult x (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDeriv)) 
                   else IRIf (IROp OpGreaterThan invDeriv (const0)) x (IROp OpSub (IRConst (VFloat 1)) x)
-  let returnP = scale paramExpr  
+  let returnP = scale paramExpr
   let appTestExpr e = IRIf appTest e const0
   return (appTestExpr returnP, appTestExpr paramDim, appTestExpr paramBranches)
 toIRInference meta False (InjF TypeInfo {tags=extras} name [left, right]) sample

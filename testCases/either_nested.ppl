@@ -1,0 +1,1 @@
+main = left (right 1.0)
