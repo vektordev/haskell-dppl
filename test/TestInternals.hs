@@ -14,6 +14,7 @@ import Test.QuickCheck
 import SPLL.Typing.RInfer (tryAddRTypeInfo, RTypeError(..))
 import SPLL.Typing.RType (ClassConstraint(..), TVarR(..))
 import SPLL.Prelude
+import SPLL.Parser (tryParseProgram)
 import Test.HUnit
 
 
@@ -33,12 +34,6 @@ typechecks p = case tryAddRTypeInfo p of
   Right _ -> True
   Left _  -> False
 
--- Helper: type-check fails with a ClassConstraintViolation
-failsClassConstraint :: Program -> Bool
-failsClassConstraint p = case tryAddRTypeInfo p of
-  Left (ClassConstraintViolation _ _) -> True
-  _ -> False
-
 -- plus on two float constants should succeed
 test_plusFloat :: Test
 test_plusFloat = TestCase $
@@ -51,15 +46,24 @@ test_plusInt = TestCase $
   assertBool "plusI TInt TInt should typecheck" $
     typechecks (Program [("main", constI 1 #<+># constI 2)] [] [])
 
--- placeholder for bool rejection test (proper version in Task 7)
-test_plusBool :: Test
-test_plusBool = TestCase (return ())
+-- Bool + Bool should be rejected with a ClassConstraintViolation
+test_plusBoolReject :: Test
+test_plusBoolReject = TestCase $ do
+  let src = unlines
+        [ "coin = if Uniform < 0.5 then True else False"
+        , "main = coin + coin"
+        ]
+  case tryParseProgram "<test>" src of
+    Left err -> assertFailure ("Parse failed: " ++ show err)
+    Right prog -> case tryAddRTypeInfo prog of
+      Left (ClassConstraintViolation _ _) -> return ()
+      other -> assertFailure ("Expected ClassConstraintViolation, got: " ++ show other)
 
 classConstraintTests :: Test
 classConstraintTests = TestList
   [ test_plusFloat
   , test_plusInt
-  , test_plusBool
+  , test_plusBoolReject
   ]
 
 return []
