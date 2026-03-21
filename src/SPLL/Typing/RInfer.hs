@@ -14,7 +14,6 @@ import Control.Monad.State
 import Control.Monad.Reader
 import Control.Monad.Identity
 
-import Data.List (nub)
 import qualified Data.Set as Set
 
 import Data.Monoid
@@ -89,6 +88,8 @@ data RTypeError
   | UnificationMismatch [RType] [RType]
   | ExprInfo [String]
   | FalseParameterFail String
+  | ClassConstraintViolation ClassConstraint RType
+  | AmbiguousClassConstraint ClassConstraint
   deriving (Show, Eq)
 
 -- | Inference monad
@@ -101,11 +102,11 @@ type Infer a = (ReaderT
                   a)              -- Result
 
 -- | Inference state
-data InferState = InferState { var_count :: Int }
+data InferState = InferState { var_count :: Int, collectedClassConstraints :: [ClassConstraint] }
 
 -- | Initial inference state
 initInfer :: InferState
-initInfer = InferState { var_count = 0 }
+initInfer = InferState { var_count = 0, collectedClassConstraints = [] }
 
 data Constraint = Constraint RType RType (Maybe String)
   deriving (Eq, Show)
@@ -213,11 +214,26 @@ basicTEnv adts = TypeEnv $ Map.fromList $ (adtRTs ++ injFRTs)
         freeVars = Set.toList $ ftv rty
 
 
+-- | After solving, check that all emitted class constraints are satisfied.
+-- For each constraint, resolve the TVarR using the final substitution.
+-- A still-free TV after solving means the type is ambiguous.
+checkClassConstraints :: Subst -> [ClassConstraint] -> Either RTypeError ()
+checkClassConstraints subst cs = mapM_ check cs
+  where
+    check cc =
+      let tv = constraintTV cc
+          resolved = apply subst (TVarR tv)
+      in case resolved of
+           TVarR _ -> Left $ AmbiguousClassConstraint cc  -- still free — ambiguity
+           t       -> if satisfiesClass cc t
+                      then Right ()
+                      else Left $ ClassConstraintViolation cc t
+
 addRTypeInfo :: Program -> Either CompilerError Program
 addRTypeInfo p =
   case runInfer (basicTEnv (adts p)) (inferProg p) of
     Left err -> Left ("Error in addRTypeInfo: " ++ show err)
-    Right (cs, p2) -> case runSolve cs of
+    Right (cs, classCs, p2) -> case runSolve cs of
       Left err -> Left (
         "error in solve addRTypeInfo: " ++ show err
         ++ "\n\nprog = \n" ++ (unlines $ prettyPrintProgRTyOnly p2)
@@ -226,13 +242,16 @@ addRTypeInfo p =
         ++ "\n\nleftover constraints = \n" ++ (unlines $ map showConstraint leftoverConstraints))
           where
             (subst, leftoverConstraints) = simplify (emptySubst, cs)
-      Right subst -> Right (apply subst p2)
+      Right subst -> case checkClassConstraints subst classCs of
+        Left err -> Left ("Class constraint violation: " ++ show err)
+        Right () -> Right (apply subst p2)
 
 tryAddRTypeInfo :: Program -> Either RTypeError Program
 tryAddRTypeInfo p@(Program decls _ adts) = do
-  (cs, p) <- runInfer (basicTEnv adts) (inferProg p)
+  (cs, classCs, prog) <- runInfer (basicTEnv adts) (inferProg p)
   subst <- runSolve cs
-  return $ apply subst p
+  checkClassConstraints subst classCs
+  return $ apply subst prog
 
 --TODO Remove
 testFunction :: Program -> IO ()
@@ -380,14 +399,19 @@ rescope (Forall tvars cs rty) = do
   let substitution = Subst $ Map.fromList (zip tvars newTVars)
   let substituted = apply substitution rty
   let renamedCs = map (applyCC substitution) cs
+  -- Emit class constraints so they can be checked post-solve
+  modify (\s -> s { collectedClassConstraints = renamedCs ++ collectedClassConstraints s })
   return (Forall newvars renamedCs substituted)
     where unwrap (TVarR tv) = tv
 
 -- instantiate a Scheme: Substitute each ForAll'd TV with a fresh var.
 instantiate :: Scheme -> Infer RType
-instantiate (Forall as _ t) = do
+instantiate (Forall as cs t) = do
     as2 <- mapM (const fresh) as
     let s = Subst $ Map.fromList $ zip as as2
+    -- Emit renamed class constraints so they can be checked post-solve
+    let renamedCs = map (applyCC s) cs
+    modify (\s' -> s' { collectedClassConstraints = renamedCs ++ collectedClassConstraints s' })
     return $ apply s t
 
 -- into an existing expression, replace a subexpresison and rtype.
@@ -466,8 +490,11 @@ freshVars n rts = do
 
 
 -- | Run the inference monad
-runInfer :: TEnv -> Infer ([Constraint], Program) -> Either RTypeError ([Constraint], Program)
-runInfer env m = runExcept $ evalStateT (runReaderT m env) initInfer
+runInfer :: TEnv -> Infer ([Constraint], Program) -> Either RTypeError ([Constraint], [ClassConstraint], Program)
+runInfer env m = runExcept $ do
+  (result, finalState) <- runStateT (runReaderT m env) initInfer
+  let (cs, prog) = result
+  return (cs, collectedClassConstraints finalState, prog)
 
 
 -------------------------------------------------------------------------------
