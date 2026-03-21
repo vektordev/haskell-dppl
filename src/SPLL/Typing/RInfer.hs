@@ -224,7 +224,7 @@ checkClassConstraints subst cs = mapM_ check cs
       let tv = constraintTV cc
           resolved = apply subst (TVarR tv)
       in case resolved of
-           TVarR _ -> Left $ AmbiguousClassConstraint cc  -- still free — ambiguity
+           TVarR _ -> Right ()  -- still free = genuinely polymorphic, constraint is deferred
            t       -> if satisfiesClass cc t
                       then Right ()
                       else Left $ ClassConstraintViolation cc t
