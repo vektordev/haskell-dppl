@@ -48,7 +48,7 @@ equalsLeft = InferenceRule
                     [SubExprNIsType 0 Deterministic]
                     "equalsLeft"
                     (const Integrate)
-                    (Forall [TV "a"] (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TBool)))
+                    (Forall [TV "a"] [] (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TBool)))
 
 equalsRight :: InferenceRule
 equalsRight = mirror2 equalsLeft
@@ -59,7 +59,7 @@ greaterThanLeft = InferenceRule
                     [SubExprNIsType 0 Deterministic]
                     "greaterThanLeft"
                     (const Integrate)
-                    (Forall [] (TFloat `TArrow` (TFloat `TArrow` TBool)))
+                    (Forall [] [] (TFloat `TArrow` (TFloat `TArrow` TBool)))
 
 greaterThanRight :: InferenceRule
 greaterThanRight = mirror2 greaterThanLeft --InferenceRule StubGreaterThan [SubExprNIsType 1 Deterministic] "greaterThanRight" (const Integrate)
@@ -70,7 +70,7 @@ lessThanLeft = InferenceRule
                     [SubExprNIsType 0 Deterministic]
                     "lessThanLeft"
                     (const Integrate)
-                    (Forall [] (TFloat `TArrow` (TFloat `TArrow` TBool)))
+                    (Forall [] [] (TFloat `TArrow` (TFloat `TArrow` TBool)))
 
 lessThanRight :: InferenceRule
 lessThanRight = mirror2 lessThanLeft
@@ -81,7 +81,7 @@ greaterThanSigmoid = InferenceRule
                        [SubExprNIsType 0 Deterministic, SubExprNIsType 1 Deterministic]
                        "greaterThanSigmoid"
                        (const Integrate)
-                       (Forall [] (TFloat `TArrow` (TFloat `TArrow` TBool)))
+                       (Forall [] [] (TFloat `TArrow` (TFloat `TArrow` TBool)))
 
 andRule :: InferenceRule
 andRule = InferenceRule
@@ -89,7 +89,7 @@ andRule = InferenceRule
         [SubExprNIsType 0 Prob, SubExprNIsType 1 Prob]
         "and"
         (const Prob)
-        (Forall [] (TBool `TArrow` (TBool `TArrow` TBool)))
+        (Forall [] [] (TBool `TArrow` (TBool `TArrow` TBool)))
 
 orRule :: InferenceRule
 orRule = InferenceRule
@@ -97,7 +97,7 @@ orRule = InferenceRule
         [SubExprNIsType 0 Prob, SubExprNIsType 1 Prob]
         "or"
         (const Prob)
-        (Forall [] (TBool `TArrow` (TBool `TArrow` TBool)))
+        (Forall [] [] (TBool `TArrow` (TBool `TArrow` TBool)))
 
 --multRight = InferenceRule StubMultF [SubExprNIsType 1 Deterministic] "multRight" mostChaotic
 
@@ -107,7 +107,7 @@ injF2Left = InferenceRule
              [SubExprNIsType 0 Deterministic]
              "injF2Left"
              mostChaotic
-             (Forall [TV "a"] (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TVarR (TV "a"))))
+             (Forall [TV "a"] [] (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TVarR (TV "a"))))
             
 injF2Right :: InferenceRule
 injF2Right = mirror2 injF2Left
@@ -118,7 +118,7 @@ injF2Enumerable = InferenceRule
              [SubExprNIsEnumerable 0, SubExprNIsEnumerable 1, SubExprNIsNotType 0 Deterministic, SubExprNIsNotType 1 Deterministic]
              "injF2Enumerable"
              (const Prob)
-             (Forall [TV "a"] (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TVarR (TV "a"))))
+             (Forall [TV "a"] [] (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TVarR (TV "a"))))
 
 ifThenElse :: InferenceRule
 ifThenElse = InferenceRule
@@ -126,7 +126,7 @@ ifThenElse = InferenceRule
                [SubExprNIsAtLeast 0 Integrate]
                "ifThenElse"
                (\[_, a, b] -> mostChaotic [a,b])
-               (Forall [TV "a"] (TBool `TArrow` (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TVarR (TV "a")))))
+               (Forall [TV "a"] [] (TBool `TArrow` (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TVarR (TV "a")))))
 
 theta :: InferenceRule
 theta = InferenceRule
@@ -134,7 +134,7 @@ theta = InferenceRule
           []
           "theta"
           (const Deterministic)
-          (Forall [] (TThetaTree `TArrow` TFloat))
+          (Forall [] [] (TThetaTree `TArrow` TFloat))
 
 
 thetaSubTree :: InferenceRule
@@ -143,7 +143,7 @@ thetaSubTree = InferenceRule
           []
           "thetaSubTree"
           (const Deterministic)
-          (Forall [] (TThetaTree `TArrow` TThetaTree))
+          (Forall [] [] (TThetaTree `TArrow` TThetaTree))
 
 uniform :: InferenceRule
 uniform = InferenceRule
@@ -151,7 +151,7 @@ uniform = InferenceRule
             []
             "uniform"
             (const Integrate)
-            (Forall [] TFloat)
+            (Forall [] [] TFloat)
 
 normal :: InferenceRule
 normal = InferenceRule
@@ -159,7 +159,7 @@ normal = InferenceRule
            []
            "normal"
            (const Integrate)
-           (Forall [] TFloat)
+           (Forall [] [] TFloat)
 
 constant :: InferenceRule
 constant = InferenceRule
@@ -167,7 +167,7 @@ constant = InferenceRule
              []
              "constant"
              (const Deterministic)
-             (Forall [TV "a"] $ TVarR $ TV "a")
+             (Forall [TV "a"] [] $ TVarR $ TV "a")
 
 exprNull :: InferenceRule
 exprNull = InferenceRule
@@ -175,7 +175,7 @@ exprNull = InferenceRule
              []
              "null"
              (const Deterministic)
-             (Forall [TV "a"] (ListOf $ TVarR $ TV "a"))
+             (Forall [TV "a"] [] (ListOf $ TVarR $ TV "a"))
 
 cons :: InferenceRule
 cons = InferenceRule
@@ -183,7 +183,7 @@ cons = InferenceRule
          []
          "cons"
          (mostChaotic . (Prob:))
-         (Forall [TV "a"] ((TVarR $ TV "a") `TArrow` ((ListOf $ TVarR $ TV "a") `TArrow` (ListOf $ TVarR $ TV "a"))))
+         (Forall [TV "a"] [] ((TVarR $ TV "a") `TArrow` ((ListOf $ TVarR $ TV "a") `TArrow` (ListOf $ TVarR $ TV "a"))))
 
 tcons :: InferenceRule
 tcons = InferenceRule
@@ -191,7 +191,7 @@ tcons = InferenceRule
           []
           "tcons"
           (mostChaotic . (Prob:))
-          (Forall [TV "a", TV "b"] ((TVarR $ TV "a") `TArrow` ((TVarR $ TV "b") `TArrow` (Tuple (TVarR $ TV "a") (TVarR $ TV "b")))))
+          (Forall [TV "a", TV "b"] [] ((TVarR $ TV "a") `TArrow` ((TVarR $ TV "b") `TArrow` (Tuple (TVarR $ TV "a") (TVarR $ TV "b")))))
 
 exprNot :: InferenceRule
 exprNot = InferenceRule
@@ -199,7 +199,7 @@ exprNot = InferenceRule
             []
             "tcons"
             mostChaotic
-            (Forall [] (TBool `TArrow` TBool))
+            (Forall [] [] (TBool `TArrow` TBool))
 
 errorr :: InferenceRule
 errorr = InferenceRule
@@ -207,7 +207,7 @@ errorr = InferenceRule
             []
             "error"
             (const Deterministic)
-            (Forall [TV "a"] (TVarR $ TV "a"))
+            (Forall [TV "a"] [] (TVarR $ TV "a"))
 
 allAlgorithms :: [InferenceRule]
 allAlgorithms = [

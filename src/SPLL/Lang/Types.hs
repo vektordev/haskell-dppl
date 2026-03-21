@@ -3,16 +3,12 @@ module SPLL.Lang.Types where
 
 import SPLL.Typing.PType
 import SPLL.Typing.RType
-import qualified Data.Set as Set
-
-
 import qualified Data.Map as Map
 import Control.Applicative (liftA2)
 import Control.Monad.Random.Lazy (Random)
 import Data.Number.Erf (Erf)
 import Data.Bifunctor (second)
 
-import Data.Set (empty)
 import Data.Maybe
 
 
@@ -81,7 +77,6 @@ data ExprStub = StubIfThenElse
 data TypeInfo = TypeInfo
   { rType :: RType
   , pType :: PType
-  , witnessedVars :: WitnessedVars
   , chainName :: ChainName
   , tags :: [Tag]} deriving (Show, Eq)
 -- only use ord instance for algorithmic convenience, not for up/downgrades / lattice work.
@@ -90,7 +85,6 @@ makeTypeInfo :: TypeInfo
 makeTypeInfo = TypeInfo
     { rType = SPLL.Typing.RType.NotSetYet
     , pType = SPLL.Typing.PType.NotSetYet
-    , witnessedVars = empty
     , chainName = ""
     , tags = []}
 
@@ -113,8 +107,6 @@ data ADTDecl = ADTDecl {
   maxDepth :: Maybe Int
   } deriving (Show, Eq)
 type ADTConstructorDecl = (String, [(String, RType)])
-
-type WitnessedVars = Set.Set String
 
 data ThetaTree = ThetaTree [Double] [ThetaTree] deriving (Show, Eq)
 

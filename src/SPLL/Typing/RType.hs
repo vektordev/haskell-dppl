@@ -45,7 +45,14 @@ matches (Tuple t11 t12) (Tuple t21 t22) = t11 `matches` t21 && t12 `matches` t22
 matches (TEither t11 t12) (TEither t21 t22) = t11 `matches` t21 && t12 `matches` t22
 matches _ _ = False -- TODO: This might be too aggressive, or it might not break when RType changes.
   
-data Scheme = Forall [TVarR] RType
+data ClassConstraint = CNum TVarR
+                     | CFractional TVarR
+                     | COrd TVarR
+                     | CEq TVarR
+                     | CDiscrete TVarR
+                     deriving (Show, Eq, Ord)
+
+data Scheme = Forall [TVarR] [ClassConstraint] RType
   deriving (Show, Eq)
 
 greaterType :: RType -> RType -> Maybe RType
@@ -62,4 +69,29 @@ isOnlyNumbers (ListOf t) = isOnlyNumbers t
 isOnlyNumbers (Tuple a b) = isOnlyNumbers a && isOnlyNumbers b
 isOnlyNumbers (TEither a b) = isOnlyNumbers a && isOnlyNumbers b
 isOnlyNumbers _ = False
+
+satisfiesClass :: ClassConstraint -> RType -> Bool
+satisfiesClass (CNum _)        TFloat = True
+satisfiesClass (CNum _)        TInt   = True
+satisfiesClass (CFractional _) TFloat = True
+satisfiesClass (COrd _)        TFloat = True
+satisfiesClass (COrd _)        TInt   = True
+satisfiesClass (CEq _)         TFloat = True
+satisfiesClass (CEq _)         TInt   = True
+satisfiesClass (CEq _)         TBool  = True
+satisfiesClass (CEq _)         TSymbol = True
+satisfiesClass (CEq _)         (TADT _) = True
+satisfiesClass (CDiscrete _)   TBool  = True
+satisfiesClass (CDiscrete _)   TSymbol = True
+satisfiesClass (CDiscrete _)   (TADT _) = True
+satisfiesClass (CDiscrete _)   TInt   = True
+satisfiesClass _               _      = False
+
+-- Extract the TVarR from any ClassConstraint
+constraintTV :: ClassConstraint -> TVarR
+constraintTV (CNum tv)        = tv
+constraintTV (CFractional tv) = tv
+constraintTV (COrd tv)        = tv
+constraintTV (CEq tv)         = tv
+constraintTV (CDiscrete tv)   = tv
 

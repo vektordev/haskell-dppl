@@ -25,7 +25,6 @@ import IRInterpreter
 import Data.Maybe (fromJust, catMaybes)
 import Control.Monad.Random.Lazy (Random, RandomGen, Rand, evalRandIO)
 import SPLL.Typing.Infer
-import SPLL.Typing.Witnessing
 --import ArbitrarySPLL
 import Options.Applicative
 import Control.Exception.Base (SomeException, try)
@@ -60,7 +59,7 @@ instance Recompilable Program where
   recompile = infer . untypeP
 
 instance Recompilable Expr where
-  recompile e = case inferNoWit $ makeMain $ untypeE e of
+  recompile e = case infer $ makeMain $ untypeE e of
     Right (Program [("main", d)] _ _) -> Right d
     Left x -> Left x
     Right (Program _ _ _) -> error "unexpected error when recompiling Expr TypeInfo."

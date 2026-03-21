@@ -23,7 +23,6 @@ module SPLL.Lang.Lang (
 , prettyPrintNoReq
 , prettyRType
 , getVFloat
-, WitnessedVars
 , getSubExprs
 , setSubExprs
 , containedVars

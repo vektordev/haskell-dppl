@@ -6,7 +6,6 @@ import SPLL.Typing.RType
 import SPLL.Typing.PType
 import SPLL.Typing.RInfer
 import SPLL.Typing.PInfer2
-import SPLL.Typing.Witnessing
 import SPLL.Lang.Types (CompilerError)
 
 data CompileError = RErr RTypeError | PErr PTypeError deriving (Show)
@@ -21,12 +20,6 @@ wrapPErr (Right x) = Right x
 
 infer :: Program -> Either CompileError Program
 infer p = do
-  x <- wrapRErr $ tryAddRTypeInfo p
-  y <- wrapPErr $ tryAddPTypeInfo x
-  return $ addWitnessesProg y
-
-inferNoWit :: Program -> Either CompileError Program
-inferNoWit p = do
   x <- wrapRErr $ tryAddRTypeInfo p
   wrapPErr $ tryAddPTypeInfo x
 

@@ -9,7 +9,6 @@ module SPLL.Typing.Typing (
   makeTypeInfo,
   setRType,
   setPType,
-  setWitnessedVars,
   setChainName,
   setTags,
 )where
@@ -20,7 +19,6 @@ import SPLL.Typing.PType
 import GHC.Records
 
 import Data.Maybe
-import Data.Set (empty)
 import Control.Monad.Reader
 import Control.Monad.Except
 
@@ -33,9 +31,6 @@ setRType t rt = t {rType = rt}
 
 setPType :: TypeInfo -> PType -> TypeInfo
 setPType t pt = t {pType = pt}
-
-setWitnessedVars :: TypeInfo -> WitnessedVars -> TypeInfo
-setWitnessedVars t wit = t {witnessedVars = wit}
 
 setChainName:: TypeInfo -> ChainName -> TypeInfo
 setChainName t name = t {chainName = name}

@@ -162,9 +162,25 @@ instance Substitutable RType where
   ftv _ = Set.empty
 
 instance Substitutable Scheme where
-  apply (Subst s) (Forall as t)   = Forall as $ apply s' t
+  apply (Subst s) (Forall as cs t) = Forall as (map (applyCC s') cs) (apply s' t)
                             where s' = Subst $ foldr Map.delete s as
-  ftv (Forall as t) = ftv t `Set.difference` Set.fromList as
+  ftv (Forall as _ t) = ftv t `Set.difference` Set.fromList as
+
+-- Apply a substitution to the TVarR inside a ClassConstraint (rename only).
+-- If the substitution maps the TV to a concrete type (not another TVarR), we
+-- intentionally leave the constraint with the original TV. checkClassConstraints
+-- will apply the final Subst again at check time to resolve the concrete type.
+-- Do NOT try to "complete" the check here — that is the check pass's job.
+applyCC :: Subst -> ClassConstraint -> ClassConstraint
+applyCC (Subst s) cc = case Map.lookup (constraintTV cc) s of
+  Just (TVarR tv') -> replaceTV tv' cc
+  _                -> cc   -- TV resolved to concrete type or is absent: leave for check pass
+  where
+    replaceTV tv' (CNum _)        = CNum tv'
+    replaceTV tv' (CFractional _) = CFractional tv'
+    replaceTV tv' (COrd _)        = COrd tv'
+    replaceTV tv' (CEq _)         = CEq tv'
+    replaceTV tv' (CDiscrete _)   = CDiscrete tv'
 
 instance Substitutable Constraint where
    apply s (Constraint t1 t2 c) = Constraint (apply s t1) (apply s t2) c
@@ -191,7 +207,7 @@ basicTEnv adts = TypeEnv $ Map.fromList $ (adtRTs ++ injFRTs)
     injFRTs = map (\(name, FPair FDecl {contract=ty} _) -> (name, ty)) (globalFEnv adts)
     -- plain RTypes as they exist in globalFEnv are implicitly forall'd. Make it explicit.
     toScheme :: RType -> Scheme
-    toScheme rty = Forall freeVars rty
+    toScheme rty = Forall freeVars [] rty
       where
         freeVars :: [TVarR]
         freeVars = Set.toList $ ftv rty
@@ -232,7 +248,7 @@ testInferProg p = do
   tv_rev <- trace ("\n decl:\n" ++ show decls ++ "\n\n") freshVars (length decls) []
   let tvs = reverse tv_rev
   -- env building with (name, scheme) for infer methods
-  let func_tvs = zip (map fst decls) (map (Forall []) tvs)
+  let func_tvs = zip (map fst decls) (map (Forall [] []) tvs)
   -- infer the type and constraints of the declaration expressions
   cts <- trace ("func_tvs:" ++ show func_tvs) $ mapM ((inTEnvF func_tvs . infer adts) . snd) decls
   -- building the constraints that the built type variables of the functions equal
@@ -245,7 +261,7 @@ testInferProg p = do
 
 
 rtFromScheme :: Scheme -> RType
-rtFromScheme (Forall _ rt) = rt
+rtFromScheme (Forall _ _ rt) = rt
 
 --TODO: Simply give everything a fresh var as a unified first pass.
 inferProg :: Program -> Infer ([Constraint], Program)
@@ -257,9 +273,9 @@ inferProg p = do
   tv_rev <- freshVars (length decls) []
   let tvs = reverse tv_rev
   -- build env from neurals
-  let neurals_tvs = map (\(a, b, c) -> (a, Forall [] b)) (neurals p)
+  let neurals_tvs = map (\(a, b, c) -> (a, Forall [] [] b)) (neurals p)
   -- env building with (name, scheme) for infer methods
-  let func_tvs = zip (map fst decls) (map (Forall []) tvs)
+  let func_tvs = zip (map fst decls) (map (Forall [] []) tvs)
   let typeEnv = func_tvs ++ neurals_tvs
   -- infer the type and constraints of the declaration expressions
   cts <- mapM ((inTEnvF typeEnv . infer adts) . snd) decls
@@ -303,7 +319,7 @@ infer adts expr
           -- rare case of needing an extra TV, because the var doesn't get one initially
           tv <- fresh
           -- give the lambda var a tv, with that TEnv infer the lambda expression
-          (functionTy, cs, inExprTy) <- inTEnvF [(name, Forall [] tv)] (infer adts inExpr)
+          (functionTy, cs, inExprTy) <- inTEnvF [(name, Forall [] [] tv)] (infer adts inExpr)
           -- resulting type is tv -> functionTy; propagate constraints from inner Expr.
           return (tv `TArrow` functionTy, cs, Lambda (setRType ti (tv `TArrow` functionTy)) name inExprTy)
         (Var ti name) -> do
@@ -358,17 +374,18 @@ solvesSimply e = (not (null plausibleAlgs)) && (not ((toStub e) == StubConstant)
 --put all new TVars into a scheme
 --TODO: could probably be reduced to instantiate, depending on context.
 rescope :: Scheme -> Infer Scheme
-rescope (Forall tvars rty) = do
+rescope (Forall tvars cs rty) = do
   newTVars <- mapM (const fresh) tvars
   let newvars = map unwrap newTVars
   let substitution = Subst $ Map.fromList (zip tvars newTVars)
   let substituted = apply substitution rty
-  return (Forall newvars substituted)
+  let renamedCs = map (applyCC substitution) cs
+  return (Forall newvars renamedCs substituted)
     where unwrap (TVarR tv) = tv
 
 -- instantiate a Scheme: Substitute each ForAll'd TV with a fresh var.
 instantiate :: Scheme -> Infer RType
-instantiate (Forall as t) = do
+instantiate (Forall as _ t) = do
     as2 <- mapM (const fresh) as
     let s = Subst $ Map.fromList $ zip as as2
     return $ apply s t
@@ -382,17 +399,21 @@ reformExpr original subexprs ownTy = tMapHead (const newTy) $ setSubExprs origin
 --take a scheme like Forall [a,b,c] (a -> b -> c) and apply a list of types Int, Float to the scheme.
 -- should yield (c, [a=Int, b=Float])
 inferResultingType :: Scheme -> [RType] -> Infer (RType, [Constraint])
-inferResultingType (Forall vars rtype) [] = return (rtype, [])
-inferResultingType (Forall vars (TArrow fromTy toTy)) (fstTy:rtypes2) =
+inferResultingType (Forall vars _ rtype) [] = return (rtype, [])
+inferResultingType (Forall vars _ (TArrow fromTy toTy)) (fstTy:rtypes2) =
   do
     let constraint = Constraint fromTy fstTy (Just "inferResultingType")
-    (resultingType, moreConstraints) <- inferResultingType (Forall vars toTy) rtypes2
+    -- Class constraints (cs) are emitted by rescope before inferResultingType runs;
+    -- the recursive Scheme here is for type application only, not re-emission.
+    (resultingType, moreConstraints) <- inferResultingType (Forall vars [] toTy) rtypes2
     return (resultingType, constraint:moreConstraints)
-inferResultingType (Forall vars fTy) (fstTy:rtypes2) = do
+inferResultingType (Forall vars _ fTy) (fstTy:rtypes2) = do
   --introduce a new TV for the result.
   resultingTV <- fresh
   let constraint = Constraint fTy (fstTy `TArrow` (resultingTV)) (Just "inferResultingType")
-  (resultingType, moreConstraints) <- inferResultingType (Forall vars resultingTV) rtypes2
+  -- Class constraints (cs) are emitted by rescope before inferResultingType runs;
+  -- the recursive Scheme here is for type application only, not re-emission.
+  (resultingType, moreConstraints) <- inferResultingType (Forall vars [] resultingTV) rtypes2
   return (resultingType, constraint:moreConstraints)
 --inferResultingType a b = error ("undefined inferResulting from " ++ show a ++ " //// " ++ show b)
 
