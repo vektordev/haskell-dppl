@@ -127,6 +127,15 @@ hasAlgorithm tags alg = alg `elem` ([algName a | Alg a <- tags])
 const0 :: IRExpr
 const0 = IRConst (VFloat 0)
 
+-- | Map the polymorphic InjF name to the concrete integer variant when the
+-- resolved return type is TInt.  For all other types the name is unchanged.
+-- Safe to pattern-match only on TInt: the CNum class constraint check upstream
+-- has already rejected non-numeric types, so only TFloat and TInt reach here.
+resolveInjF :: RType -> String -> String
+resolveInjF TInt "plus" = "plusI"
+resolveInjF TInt "mult" = "multI"
+resolveInjF _    n      = n
+
 negInf :: IRExpr
 negInf = IRConst (VFloat (-9999999))
 
@@ -194,8 +203,9 @@ toIRInference meta True (Normal t) sample = return (IRCumulative IRNormal sample
 toIRInference meta True (Uniform t) sample = return (IRCumulative IRUniform sample, const0, const0)
 toIRInference meta False (Constant TypeInfo {rType=rt} value) sample = do
   let comp = case rt of
-              TFloat -> IROp OpApprox sample (IRConst (fmap failConversion value))
-              _ -> IROp OpEq sample (IRConst (fmap failConversion value))
+              TFloat   -> IROp OpApprox sample (IRConst (fmap failConversion value))
+              TVarR _  -> IROp OpApprox sample (IRConst (fmap failConversion value))
+              _        -> IROp OpEq sample (IRConst (fmap failConversion value))
   expr <- indicator comp
   return (expr, const0, const0)
 toIRInference meta True (Constant TypeInfo {rType=rt} value) sample = return (compareValueExpr rt (IRConst (valueToIR value)) sample, const0, const0)
@@ -496,10 +506,11 @@ toIRInference meta cumulative (TCons _ t1Expr t2Expr) sample = do
   (t2P, t2Dim, t2Branches) <- toIRInferenceSave meta cumulative t2Expr (IRTSnd sample)
   mult <- (t1P, t1Dim) `multP` (t2P, t2Dim)
   return (fst mult, snd mult, IROp OpPlus t1Branches t2Branches)
-toIRInference meta cumulative (InjF _ name params) sample | isHigherOrder (adtDecls meta) name = do
+toIRInference meta cumulative (InjF ti name params) sample | isHigherOrder (adtDecls meta) name = do
   let adts = adtDecls meta
+  let resolvedName = resolveInjF (rType ti) name
   -- FPair of the InjF with unique names
-  fPair <- instantiate mkVariable adts name
+  fPair <- instantiate mkVariable adts resolvedName
   -- Unary InjF has a single inversion
   let FPair _ [inv] = fPair
   let FDecl {inputVars=inVars, body=invExpr, applicability=appTest, deconstructing=decons, derivatives=derivs} = inv
@@ -542,8 +553,9 @@ toIRInference meta False e@(InjF TypeInfo {tags=extras, rType=rt} name params) s
   -- Check whether the value of the function is equal to the sample
   expr <- toIRGenerate meta e
   let cmp = case rt of
-        TFloat -> OpApprox
-        _ -> OpEq
+        TFloat   -> OpApprox
+        TVarR _  -> OpApprox
+        _        -> OpEq
   retExpr <- indicator $ IROp cmp expr sample
   return (retExpr, const0, const0)
 toIRInference meta True e@(InjF TypeInfo {tags=extras, rType=rt} name params) sample
@@ -552,10 +564,11 @@ toIRInference meta True e@(InjF TypeInfo {tags=extras, rType=rt} name params) sa
   -- Check whether the value of the function is less than the sample
   expr <- toIRGenerate meta e
   return (compareValueExpr rt expr sample, const0, const0)
-toIRInference meta cumulative e@(InjF TypeInfo {tags=extras} name params) sample
+toIRInference meta cumulative e@(InjF TypeInfo {tags=extras, rType=rt} name params) sample
   | countProbParams params == 1 = do
+  let resolvedName = resolveInjF rt name
   -- FPair of the InjF with unique names
-  FPair fwd inversions <- instantiate mkVariable (adtDecls meta) name
+  FPair fwd inversions <- instantiate mkVariable (adtDecls meta) resolvedName
   let FDecl{inputVars=inVars, outputVars=[v1]} = fwd
   -- Index of the deterministic and the probabilistic parameter (Left -> 0, Right -> 1)
   let Just probIdx = getProbIndex params
@@ -583,15 +596,16 @@ toIRInference meta cumulative e@(InjF TypeInfo {tags=extras} name params) sample
   let returnP = scale paramExpr
   let appTestExpr e = IRIf appTest e const0
   return (appTestExpr returnP, appTestExpr paramDim, appTestExpr paramBranches)
-toIRInference meta False (InjF TypeInfo {tags=extras} name [left, right]) sample
+toIRInference meta False (InjF TypeInfo {tags=extras, rType=rt} name [left, right]) sample
   | extras `hasAlgorithm` "injF2Enumerable" = do
+  let resolvedName = resolveInjF rt name
   -- Get all possible values for subexpressions
   let extrasLeft = tags $ getTypeInfo left
   let extrasRight = tags $ getTypeInfo right
   let enumListL = head [x | DiscreteValues x <- extrasLeft]
   let enumListR = head [x | DiscreteValues x <- extrasRight]
 
-  fPair <- instantiate mkVariable (adtDecls meta) name -- FPair of the InjF with unique names
+  fPair <- instantiate mkVariable (adtDecls meta) resolvedName -- FPair of the InjF with unique names
   let FPair fwd inversions = fPair
   let FDecl {inputVars=[v2, v3], outputVars=[v1]} = fwd
   -- We get the inversion to the right side
@@ -622,15 +636,16 @@ toIRInference meta False (InjF TypeInfo {tags=extras} name [left, right]) sample
   let branchCountSum = IREnumSum x2 enumListL (IRTSnd (IRTSnd irTuple))
   return (irMap (uniqueify [x2, x3] uniquePrefix) enumSumExpr, const0, irMap (uniqueify [x2, x3] uniquePrefix) branchCountSum)
 -- For the cumulative case we cant get around two enum sums
-toIRInference meta True (InjF TypeInfo {tags=extras} name [left, right]) sample
+toIRInference meta True (InjF TypeInfo {tags=extras, rType=rt} name [left, right]) sample
   | extras `hasAlgorithm` "injF2Enumerable" = do
+  let resolvedName = resolveInjF rt name
   -- Get all possible values for subexpressions
   let extrasLeft = tags $ getTypeInfo left
   let extrasRight = tags $ getTypeInfo right
   let enumListL = head [x | DiscreteValues x <- extrasLeft]
   let enumListR = head [x | DiscreteValues x <- extrasRight]
 
-  fPair <- instantiate mkVariable (adtDecls meta) name -- FPair of the InjF with unique names
+  fPair <- instantiate mkVariable (adtDecls meta) resolvedName -- FPair of the InjF with unique names
   let FPair fwd _ = fPair
   let FDecl {inputVars=[v1, v2], body=f} = fwd
   (irTuple, _, _) <- do
@@ -681,8 +696,9 @@ toIRInference meta cumulative (Var TypeInfo {rType=rt} n) sample = do
         return (compareValueExpr rt (IRVar n) sample, const0, const0)
       else do
         let comp = case rt of
-              TFloat -> IROp OpApprox sample (IRVar n)
-              _ -> IROp OpEq sample (IRVar n)
+              TFloat   -> IROp OpApprox sample (IRVar n)
+              TVarR _  -> IROp OpApprox sample (IRVar n)
+              _        -> IROp OpEq sample (IRVar n)
         expr <- indicator comp
         return (expr, const0, const0)
     Nothing -> error ("Could not find name in TypeEnv: " ++ n)
@@ -856,19 +872,16 @@ toIRGenerate meta (TCons _ t1 t2) = do
   return $ IRTCons t1' t2'
 toIRGenerate meta (Uniform _) = return $ IRSample IRUniform
 toIRGenerate meta (Normal _) = return $ IRSample IRNormal
-toIRGenerate meta (InjF _ name params) = do
+toIRGenerate meta (InjF ti name params) = do
   -- Assuming that the logic within packParamsIntoLetinsGen typeEnv is correct.
   -- You will need to process vars and params, followed by recursive calls to fwdExpr.
-  fPair <- instantiate mkVariable (adtDecls meta) name
+  let resolvedName = resolveInjF (rType ti) name
+  fPair <- instantiate mkVariable (adtDecls meta) resolvedName
   let FPair fwd _ = fPair
   let FDecl {inputVars=vars, body=fwdExpr} = fwd
   prefix <- mkVariable ""
   letInBlock <- packParamsIntoLetinsGen meta vars params fwdExpr
   return $ irMap (uniqueify vars prefix) letInBlock
-  where
-    Just fPair = lookup name (globalFEnv (adtDecls meta))
-    FPair fwd _ = fPair
-    FDecl {inputVars=vars, body=fwdExpr} = fwd
 toIRGenerate meta (Var _ name) = do
   case lookup name (typeEnv meta) of
     -- Var is a function
@@ -934,7 +947,7 @@ toIREnumerate meta cumulative (IfThenElse TypeInfo{rType=rt} c t e) sample = do
   -- Due to eager evaluation, we must make sure, that the wrong branch is not executed
   let condSelector e = IRIf cIR e const0
   let notCondSelector e = IRIf (IRUnaryOp OpNot cIR) e const0
-  let cmpOp = if rt == TFloat then OpApprox else OpEq
+  let cmpOp = case rt of { TFloat -> OpApprox; TVarR _ -> OpApprox; _ -> OpEq }
   let thenSelector = if cumulative then compareValueExpr rt tIR sample else IRIf (IROp cmpOp tIR sample) (IRConst (VFloat 1)) const0
   let elseSelector = if cumulative then compareValueExpr rt eIR sample else IRIf (IROp cmpOp eIR sample) (IRConst (VFloat 1)) const0
   let thenRes = condSelector thenSelector
