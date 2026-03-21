@@ -40,7 +40,8 @@ import Data.Reflection (Reifies)
 import Data.Bifunctor (second)
 import SPLL.Parser
 import TestParser
-import TestInternals
+import TestInternals (test_internals, classConstraintTests)
+import Test.HUnit (runTestTT)
 import End2EndTesting
 import SPLL.Prelude
 
@@ -727,6 +728,7 @@ runSpecifiedTests opts = do
   a <- if disableSpec opts then return True else runTests
   b <- if disableParser opts then return True else test_parser
   c <- if disableInternals opts then return True else test_internals
+  _ <- runTestTT classConstraintTests
   d <- if disableEnd2End opts then return True else test_end2end
   let x = a && b && c && d
   if x then
