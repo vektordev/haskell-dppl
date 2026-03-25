@@ -63,7 +63,7 @@ discretesTags adts e = maybeToList valuesTag
       (InjF _ name params) -> do
         paramValues <- mapM getValuesFromExpr params
         let unpackedMultiVals = map multiValueToValueList paramValues
-        return $ valueListToMultiValue $ propagateValues adts name unpackedMultiVals
+        return $ valueListToMultiValue $ nub $ propagateValues adts name unpackedMultiVals
       (IfThenElse _ _ left right) -> do
         valuesLeft <- getValuesFromExpr left
         valuesRight <- getValuesFromExpr right
