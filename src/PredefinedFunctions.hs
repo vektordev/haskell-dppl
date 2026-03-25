@@ -133,9 +133,9 @@ isNullInv = FDecl (Forall [TV "a"] [] (TBool `TArrow` ListOf (TVarR (TV "a")))) 
 
 -- Apply is only a test function for higher order injF
 applyFwd :: FDecl
-applyFwd = FDecl (Forall [TV "a", TV "b"] [] ((TVarR (TV "a") `TArrow` TVarR (TV "b")) `TArrow` (TVarR (TV "a") `TArrow` TVarR (TV "b")))) ["f", "a"] ["b"] (IRInvoke $ IRApply (IRVar "f") (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
+applyFwd = FDecl (Forall [TV "a", TV "b"] [] ((TVarR (TV "a") `TArrow` TVarR (TV "b")) `TArrow` (TVarR (TV "a") `TArrow` TVarR (TV "b")))) ["f", "a"] ["b"] (IRApply (IRVar "f") (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
 applyInv :: FDecl
-applyInv = FDecl (Forall [TV "b", TV "a"] [] ((TVarR (TV "a") `TArrow` TVarR (TV "b")) `TArrow` (TVarR (TV "b") `TArrow` TVarR (TV "a")))) ["f", "b"] ["a"] (IRInvoke $ IRApply (IRVar "f^-1") (IRVar "b")) (IRConst (VBool True)) True [("b", IRInvoke (IRApply (IRVar "f^-1'") (IRVar "b")))]
+applyInv = FDecl (Forall [TV "b", TV "a"] [] ((TVarR (TV "a") `TArrow` TVarR (TV "b")) `TArrow` (TVarR (TV "b") `TArrow` TVarR (TV "a")))) ["f", "b"] ["a"] (IRApply (IRVar "f^-1") (IRVar "b")) (IRConst (VBool True)) True [("b", IRApply (IRVar "f^-1'") (IRVar "b"))]
 
 mapFwd :: FDecl
 mapFwd = FDecl (Forall [TV "a", TV "b"] [] ((TVarR (TV "a") `TArrow` TVarR (TV "b")) `TArrow` (ListOf (TVarR (TV "a")) `TArrow` ListOf (TVarR (TV "b"))))) ["f", "a"] ["b"] (IRMap (IRVar "f") (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
@@ -145,17 +145,17 @@ mapInv = FDecl (Forall [TV "a", TV "b"] [] ((TVarR (TV "b") `TArrow` TVarR (TV "
 
 mapLeftFwd :: FDecl
 mapLeftFwd = FDecl (Forall [TV "a", TV "b", TV "c"] [] ((TVarR (TV "a") `TArrow` TVarR (TV "c")) `TArrow` (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TEither (TVarR (TV "c")) (TVarR (TV "b"))))) ["f", "a"] ["b"]
-              (IRIf (IRIsLeft (IRVar "a")) (IRLeft (IRInvoke $ IRApply (IRVar "f") (IRFromLeft (IRVar "a")))) (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
+              (IRIf (IRIsLeft (IRVar "a")) (IRLeft (IRApply (IRVar "f") (IRFromLeft (IRVar "a")))) (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
 mapLeftInv :: FDecl
 mapLeftInv = FDecl (Forall [TV "a", TV "b", TV "c"] [] ((TVarR (TV "c") `TArrow` TVarR (TV "a")) `TArrow` (TEither (TVarR (TV "c")) (TVarR (TV "b")) `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b"))))) ["f", "b"] ["a"]
-              (IRIf (IRIsLeft (IRVar "b")) (IRLeft (IRInvoke $ IRApply (IRVar "f^-1") (IRFromLeft (IRVar "b")))) (IRVar "b")) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
+              (IRIf (IRIsLeft (IRVar "b")) (IRLeft (IRApply (IRVar "f^-1") (IRFromLeft (IRVar "b")))) (IRVar "b")) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
 
 mapEitherFwd :: FDecl
 mapEitherFwd = FDecl (Forall [TV "a", TV "b", TV "c", TV "d"] [] ((TVarR (TV "a") `TArrow` TVarR (TV "c")) `TArrow` ((TVarR (TV "b") `TArrow` TVarR (TV "d")) `TArrow` (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TEither (TVarR (TV "c")) (TVarR (TV "d")))))) ["f", "g", "a"] ["b"]
-              (IRIf (IRIsLeft (IRVar "a")) (IRLeft (IRInvoke $ IRApply (IRVar "f") (IRFromLeft (IRVar "a")))) (IRRight (IRInvoke $ IRApply (IRVar "g") (IRFromRight (IRVar "a"))))) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
+              (IRIf (IRIsLeft (IRVar "a")) (IRLeft (IRApply (IRVar "f") (IRFromLeft (IRVar "a")))) (IRRight (IRApply (IRVar "g") (IRFromRight (IRVar "a"))))) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
 mapEitherInv :: FDecl
 mapEitherInv = FDecl (Forall [TV "a", TV "b", TV "c", TV "d"] [] ((TVarR (TV "c") `TArrow` TVarR (TV "a")) `TArrow` ((TVarR (TV "d") `TArrow` TVarR (TV "b")) `TArrow` (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TEither (TVarR (TV "c")) (TVarR (TV "d")))))) ["f", "g", "b"] ["a"]
-              (IRIf (IRIsLeft (IRVar "b")) (IRLeft (IRInvoke $ IRApply (IRVar "f^-1") (IRFromLeft (IRVar "b")))) (IRRight (IRInvoke $ IRApply (IRVar "g^-1") (IRFromRight (IRVar "b"))))) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
+              (IRIf (IRIsLeft (IRVar "b")) (IRLeft (IRApply (IRVar "f^-1") (IRFromLeft (IRVar "b")))) (IRRight (IRApply (IRVar "g^-1") (IRFromRight (IRVar "b"))))) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
 
 
 
@@ -278,17 +278,17 @@ fPairsFromADTConstructor adtName constr@(constrName, fields) = (constrName, FPai
     constrRT = foldr TArrow (TADT adtName) fieldRTs
     applicationExpr = foldl (\e n -> IRApply e (IRVar n)) (IRVar constrName) fieldNames'
     derivs = map (\n -> (n, IRConst $ VFloat 1)) fieldNames'
-    fwdConstr = FDecl (Forall [] [] constrRT) fieldNames' ["b"] (IRInvoke applicationExpr) (IRConst $ VBool True) False derivs
+    fwdConstr = FDecl (Forall [] [] constrRT) fieldNames' ["b"] applicationExpr (IRConst $ VBool True) False derivs
     rtOfField f = fromJust $ lookup f fields
     -- FIXME Probably chekc whether parameter is indeed of this constructor in applicability test
-    invConstr f = FDecl (Forall [] [] (adtRT `TArrow` rtOfField f)) ["b"] ["f_" ++ f] (IRInvoke $ IRApply (IRVar f) (IRVar "b")) (IRConst $ VBool True) True [("b", IRConst $ VFloat 1)]
+    invConstr f = FDecl (Forall [] [] (adtRT `TArrow` rtOfField f)) ["b"] ["f_" ++ f] (IRApply (IRVar f) (IRVar "b")) (IRConst $ VBool True) True [("b", IRConst $ VFloat 1)]
 
 fPairFromADTField :: RType -> ADTConstructorDecl -> (String, RType) -> (String, FPair)
 fPairFromADTField adtRT constr (fieldName, fieldRT) = (fieldName, FPair fwd [inv])
   where
     -- FIXME Probably chekc whether parameter is indeed of this constructor in applicability test
-    fwd = FDecl (Forall [] [] (adtRT `TArrow` fieldRT)) ["a"] ["b"] (IRInvoke $ IRApply (IRVar fieldName) (IRVar "a")) (IRConst $ VBool True) True [("a", IRConst $ VFloat 1)]
-    inv = FDecl (Forall [] [] (fieldRT `TArrow` adtRT)) ["b"] ["a"] (IRInvoke $ allAnyFieldsExcept constr fieldName (IRVar "b")) (IRConst $ VBool True) False [("b", IRConst $ VFloat 1)]
+    fwd = FDecl (Forall [] [] (adtRT `TArrow` fieldRT)) ["a"] ["b"] (IRApply (IRVar fieldName) (IRVar "a")) (IRConst $ VBool True) True [("a", IRConst $ VFloat 1)]
+    inv = FDecl (Forall [] [] (fieldRT `TArrow` adtRT)) ["b"] ["a"] (allAnyFieldsExcept constr fieldName (IRVar "b")) (IRConst $ VBool True) False [("b", IRConst $ VFloat 1)]
 
 allAnyFieldsExcept :: ADTConstructorDecl -> String -> IRExpr -> IRExpr
 allAnyFieldsExcept (constrName, fields) toFill fillExpr = foldl IRApply (IRVar constrName) fieldValues

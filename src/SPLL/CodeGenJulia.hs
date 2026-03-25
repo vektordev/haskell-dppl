@@ -19,18 +19,18 @@ import Utils
 -- Expected format format of ThetaTrees:
 --    ThetaTree = ([Double], [ThetaTree])
 
-type GlobalStorage = StateT [(MultiValue, String)]
+type GlobalStorage = StateT ([(MultiValue, String)], [String])
 type VariableSupply = Supply
 type GlobalVariableSupply a = GlobalStorage VariableSupply a
 
 addOrGetFromGlobalStorage :: MultiValue -> GlobalVariableSupply String
 addOrGetFromGlobalStorage mv = do
-  globalStorage <- get
+  (globalStorage, callables) <- get
   case lookup mv globalStorage of
     Nothing -> do
       varID <- lift demandUniqueNumber
       let varName = "_globalMulti" ++ show varID
-      put ((mv, varName):globalStorage)
+      put ((mv, varName):globalStorage, callables)
       return varName
     Just var -> return var
 
@@ -128,8 +128,11 @@ generateADTClass (name, fields) =
 generateFunctions :: IREnv -> [String]
 generateFunctions (IREnv funcs adts) = do
   let adtClasses = generateADTClasses adts
+  let callableNames = [ n ++ "_gen"
+                      | IRFunGroup{groupName=n, genFun=Just (e, _)} <- funcs
+                      , null (fst (unwrapLambdas e)) ]
   let funcGroupsMonadic = concatMapM generateFunctionGroup funcs
-  let (funcStrs, globalVars) = evalSupply $ runStateT funcGroupsMonadic []
+  let (funcStrs, (globalVars, _)) = evalSupply $ runStateT funcGroupsMonadic ([], callableNames)
   let varsStr = map (\(mv, name)-> name ++ " = " ++ juliaMultiVal mv) globalVars
   adtClasses ++ varsStr ++ funcStrs
 
@@ -267,16 +270,16 @@ generateExpression (IRSample IRNormal) =
     return "randn()"
 generateExpression (IRSample IRUniform) =
     return "rand()"
-generateExpression (IRVar name) =
-    return name
+generateExpression (IRVar name) = do
+    (_, callables) <- get
+    return $ if name `elem` callables then "(" ++ name ++ ")()" else name
 generateExpression expr@(IRLambda _ _) =
     generateLambdaExpression expr
-generateExpression (IRApply f val) = do
-    ff <- generateExpression f
-    v  <- generateExpression val
-    return $ "((args...) -> " ++ ff ++ "(" ++ v ++ ", args...))"
-generateExpression expr@(IRInvoke _) =
-    generateInvokeExpression expr
+generateExpression expr@(IRApply _ _) = do
+    let (fn, args) = collectApplyChain expr
+    fn' <- generateExpression fn
+    args' <- mapM generateExpression args
+    return $ "(" ++ fn' ++ ")(" ++ intercalate ", " args' ++ ")"
 generateExpression (IRIsPossible multiVal expr) = do
     e <- generateExpression expr
     var <- addOrGetFromGlobalStorage multiVal
@@ -285,9 +288,6 @@ generateExpression (IREnumSum name enumRange expr) = do
     e <- generateExpression expr
     var <- addOrGetFromGlobalStorage enumRange
     return $ "sum(map((" ++ name ++ " -> " ++ e ++ "), multiValueToValueList(" ++ var ++")))"
-generateExpression (IREvalNN name arg) = do
-    a <- generateExpression arg
-    return $ name ++ "(" ++ a ++ ")"
 generateExpression (IRIndex lst idx) = do
     l <- generateExpression lst
     i <- generateExpression idx
@@ -301,29 +301,9 @@ generateExpression (IRError e) =
 generateExpression x =
     error ("Unknown expression in Julia codegen: " ++ show x)
 
-
-generateExpression x = error ("Unknown expression in Julia codegen: " ++ show x)
-
-generateInvokeExpression :: IRExpr -> GlobalVariableSupply String
-
--- IRInvoke is always the outermost expression of the block compiled here.
-generateInvokeExpression (IRInvoke expr) = do
-    inner <- generateInvokeExpression expr
-    return $ inner ++ ")"
--- More parameters (note: parameters are in reverse order)
-generateInvokeExpression (IRApply f@(IRApply _ _) val) = do
-    f' <- generateInvokeExpression f
-    v  <- generateExpression val
-    return $ f' ++ ", " ++ v
--- Last parameter
-generateInvokeExpression (IRApply f val) = do
-    f' <- generateInvokeExpression f
-    v  <- generateExpression val
-    return $ f' ++ v
--- No more parameters: compile the function
-generateInvokeExpression expr = do
-    e <- generateExpression expr
-    return $ "(" ++ e ++ ")("
+collectApplyChain :: IRExpr -> (IRExpr, [IRExpr])
+collectApplyChain (IRApply f arg) = let (fn, args) = collectApplyChain f in (fn, args ++ [arg])
+collectApplyChain expr = (expr, [])
 
 generateLambdaExpression :: IRExpr -> GlobalVariableSupply String
 generateLambdaExpression expr = do

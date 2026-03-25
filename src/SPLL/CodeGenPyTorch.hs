@@ -25,18 +25,18 @@ import Utils (Supply, demandUniqueNumber, evalSupply)
 -- Expected format format of ThetaTrees:
 --    ThetaTree = ([Double], [ThetaTree])
 
-type GlobalStorage = StateT [(MultiValue, String)]
+type GlobalStorage = StateT ([(MultiValue, String)], [String])
 type VariableSupply = Supply
 type GlobalVariableSupply a = GlobalStorage VariableSupply a
 
 addOrGetFromGlobalStorage :: MultiValue -> GlobalVariableSupply String
 addOrGetFromGlobalStorage mv = do
-  globalStorage <- get
+  (globalStorage, callables) <- get
   case lookup mv globalStorage of
     Nothing -> do
       varID <- lift demandUniqueNumber
       let varName = "_globalMulti" ++ show varID
-      put ((mv, varName):globalStorage)
+      put ((mv, varName):globalStorage, callables)
       return varName
     Just var -> return var
 
@@ -139,17 +139,21 @@ generateFunctions genBoil env@(IREnv funcs adts) =
       Just (name, doc, expr) -> Just $ (irMap (replaceCalls lut) expr, doc)
     groups = [(name, getDef name "_gen", getDef name "_prob", getDef name "_integ")| name <- names]
     fst3 (a, b, c) = a -}
-    if genBoil then
+    let lut = envToLUT env ++ stdLib
+        callableNames = [ fromMaybe (n ++ "_gen") (lookup (n ++ "_gen") lut)
+                        | IRFunGroup{groupName=n, genFun=Just (e, _)} <- funcs
+                        , null (fst (unwrapLambdas e)) ]
+    in if genBoil then
       ["from pythonLib import *",
       "import functools",
       "import math",
       "from torch.nn import Module", ""] ++
       generateADTClasses adts ++
-      concatMap (generateClass (envToLUT env)) funcs ++
+      concatMap (generateClass lut callableNames) funcs ++
       ["", "# Example Initialization"] ++
       generateInitializations env
     else
-      concatMap (generateClass (envToLUT env)) funcs
+      concatMap (generateClass lut callableNames) funcs
 
 
 stdLib :: [(String, String)]
@@ -199,16 +203,16 @@ generateADTClass (name, fields) =
   ) fieldNames
   where fieldNames = map fst fields
 
-generateClass :: [(String, String)] -> IRFunGroup -> [String]
-generateClass lut (IRFunGroup name gen prob integ doc) = let
+generateClass :: [(String, String)] -> [String] -> IRFunGroup -> [String]
+generateClass lut callableNames (IRFunGroup name gen prob integ doc) = let
   funcStringFromMaybe name func = case func of
     Just a -> generateFunction True (name, replaceCallsDecl a)
     Nothing -> return []
-  ((i, p, g), globalVars) = evalSupply $ runStateT (do
+  ((i, p, g), (globalVars, _)) = evalSupply $ runStateT (do
     i' <- funcStringFromMaybe "integrate" integ
     p' <- funcStringFromMaybe "forward" prob
     g' <- funcStringFromMaybe "generate" gen
-    return (i', p', g')) []
+    return (i', p', g')) ([], callableNames)
   commentLine = "# " ++ doc
   initLine = "class " ++ onHead toUpper name ++ "(Module):"
   globalVarDecls = map (\(mv, name)-> name ++ " = " ++ pyMultiVal mv) globalVars
@@ -340,16 +344,16 @@ generateExpression (IRSample IRNormal) =
   return "randn()"
 generateExpression (IRSample IRUniform) =
   return "rand()"
-generateExpression (IRVar name) =
-  return name
+generateExpression (IRVar name) = do
+  (_, callables) <- get
+  return $ if name `elem` callables then "(" ++ name ++ ")()" else name
 generateExpression expr@(IRLambda _ _) =
   generateLambdaExpression expr
-generateExpression (IRApply f val) = do
-  gf <- generateExpression f
-  gv <- generateExpression val
-  return ("functools.partial(" ++ gf ++ ", " ++ gv ++ ")")
-generateExpression expr@(IRInvoke _) =
-  generateInvokeExpression expr
+generateExpression expr@(IRApply _ _) = do
+  let (fn, args) = collectApplyChain expr
+  fn' <- generateExpression fn
+  args' <- mapM generateExpression args
+  return ("(" ++ fn' ++ ")(" ++ intercalate ", " args' ++ ")")
 generateExpression (IREnumSum name enumRange expr) = do
   e <- generateExpression expr
   varName <- addOrGetFromGlobalStorage enumRange
@@ -358,9 +362,6 @@ generateExpression (IRIsPossible multiVal expr) = do
   e <- generateExpression expr
   varName <- addOrGetFromGlobalStorage multiVal
   return ("isPossible(self." ++ varName ++ ", " ++ e ++ ")")
-generateExpression (IREvalNN name arg) = do
-  a <- generateExpression arg
-  return (name ++ "(" ++ a ++ ")")
 generateExpression (IRIndex lst idx) = do
   l <- generateExpression lst
   i <- generateExpression idx
@@ -374,26 +375,9 @@ generateExpression (IRError e) =
 generateExpression x =
   error ("Unknown expression in PyTorch codegen: " ++ show x)
 
-generateInvokeExpression :: IRExpr -> GlobalVariableSupply String
--- IRInvoke is always the outermost expression of the block compiled here. Compile the function and the parameters first, then end it all with an ")"
-generateInvokeExpression (IRInvoke expr) = do
-  s <- generateInvokeExpression expr
-  return (s ++ ")")
--- Note that the parameters are in reverse order. The innermost parameter is applied first
--- We have more parameters
-generateInvokeExpression (IRApply f@(IRApply _ _) val) = do
-  s <- generateInvokeExpression f
-  v <- generateExpression val
-  return (s ++ ", " ++ v)
--- This is the last parameter
-generateInvokeExpression (IRApply f val) = do
-  s <- generateInvokeExpression f
-  v <- generateExpression val
-  return (s ++ v)
--- No more parameters, compile the function
-generateInvokeExpression expr = do
-  f <- generateExpression expr
-  return ("(" ++ f ++ ")(")
+collectApplyChain :: IRExpr -> (IRExpr, [IRExpr])
+collectApplyChain (IRApply f arg) = let (fn, args) = collectApplyChain f in (fn, args ++ [arg])
+collectApplyChain expr = (expr, [])
 
 generateLambdaExpression :: IRExpr -> GlobalVariableSupply String
 generateLambdaExpression expr = do

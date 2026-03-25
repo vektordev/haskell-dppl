@@ -162,12 +162,10 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               | IRVar Varname
               | IRLambda String IRExpr
               | IRApply IRExpr IRExpr
-              | IRInvoke IRExpr -- Only relevant for CodeGen. States that the last argument has been applied to a function
               -- auxiliary construct to aid enumeration: bind each enumerated Value to the Varname and evaluate the subexpr. Sum results.
               -- maybe we can instead move this into some kind of standard library.
               | IREnumSum Varname MultiValue IRExpr
               | IRIsPossible MultiValue IRExpr
-              | IREvalNN Varname IRExpr
               | IRIndex IRExpr IRExpr
               | IRError String
               deriving (Show, Eq)
@@ -237,11 +235,9 @@ getIRSubExprs (IRCumulative _ a) = [a]
 getIRSubExprs (IRSample _) = []
 getIRSubExprs (IRLetIn _ a b) = [a, b]
 getIRSubExprs (IRVar _) = []
-getIRSubExprs (IRInvoke a) = [a]
 getIRSubExprs (IRLambda _ a) = [a]
 getIRSubExprs (IRApply a b) = [a, b]
 getIRSubExprs (IREnumSum _ _ a) = [a]
-getIRSubExprs (IREvalNN _ a) = [a]
 getIRSubExprs (IRIndex a b) = [a, b]
 getIRSubExprs (IRError _) = []
 
@@ -270,9 +266,7 @@ irMap f x = case x of
   (IRLetIn name left right) -> f (IRLetIn name (irMap f left) (irMap f right))
   (IRLambda name scope) -> f (IRLambda name (irMap f scope))
   (IRApply a b) -> f (IRApply (irMap f a) (irMap f b))
-  (IRInvoke expr) -> f (IRInvoke (irMap f expr))
   (IREnumSum name val scope) -> f (IREnumSum name val (irMap f scope))
-  (IREvalNN name arg) -> f (IREvalNN name (irMap f arg))
   (IRIndex left right) -> f (IRIndex (irMap f left) (irMap f right))
   (IRTheta a i) -> f (IRTheta (irMap f a) i)
   (IRSubtree a i) -> f (IRSubtree (irMap f a) i)
@@ -314,9 +308,7 @@ irPrintFlat (IRLetIn _ _ _) = "IRLetIn"
 irPrintFlat (IRVar _) = "IRVar"
 irPrintFlat (IRLambda _ _) = "IRLambda"
 irPrintFlat (IRApply _ _) = "IRApply"
-irPrintFlat (IRInvoke _) = "IRInvoke"
 irPrintFlat (IREnumSum _ _ _) = "IREnumSum"
-irPrintFlat (IREvalNN name _) = "IREvalNN " ++ name
 irPrintFlat (IRIndex _ _) = "IRIndex"
 irPrintFlat (IRError _) = "IRError"
 

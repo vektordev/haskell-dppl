@@ -57,9 +57,14 @@ generate f neurals adts globalEnv env args expr | args /= [] = do
   let reverseArgs = reverse args
   let newExpr = foldr (flip IRApply) expr reverseArgs
   generate f neurals adts globalEnv env [] newExpr
-generate f neurals adts globalEnv env [] (IRInvoke expr) = generate f neurals adts globalEnv env [] expr
 generate f neurals adts globalEnv env [] (IRLambda name expr) = do
   return $ VClosure env name expr
+generate f neurals adts globalEnv env [] (IRApply (IRVar name) sym)
+  | Just (rt, tags) <- lookupNeural name neurals = do
+    let realRT (TSymbol `TArrow` r) = r
+    let partPlan = makePartitionPlan adts (realRT rt) tags
+    symVal <- generate f neurals adts globalEnv env [] sym
+    return $ evaluateMockNN partPlan symVal
 generate f neurals adts globalEnv env [] (IRApply expr val) = do
   exprVal <- generate f neurals adts globalEnv env [] expr
   valVal <- generate f neurals adts globalEnv env [] val
@@ -385,12 +390,6 @@ generate f neurals adts globalEnv env [] (IREnumSum varname values expr) = do   
 generate f neurals adts globalEnv env [] (IRIsPossible multiVal expr) = do
   val <- generate f neurals adts globalEnv env [] expr
   return $ VBool (valueInMultiValue multiVal (fmap (error "Failed conversion") val))
-generate f neurals adts globalEnv env [] (IREvalNN name sym) = do
-  let (rt, tags) = fromJust (lookupNeural name neurals)
-  let realRT (TSymbol `TArrow` r) = r
-  let partPlan = makePartitionPlan adts (realRT rt) tags
-  symVal <- generate f neurals adts globalEnv env [] sym
-  return $ evaluateMockNN partPlan symVal
 generate f neurals adts globalEnv env args (IRIndex lstExpr idxExpr) = do
   lst <- generate f neurals adts globalEnv env args lstExpr
   idx <- generate f neurals adts globalEnv env args idxExpr

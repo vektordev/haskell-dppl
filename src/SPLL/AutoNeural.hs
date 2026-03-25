@@ -61,7 +61,7 @@ symbol :: String
 symbol = "l_x_neural_in"
 
 makeProb :: [ADTDecl] -> CompilerConfig -> PartitionPlan -> String -> IRExpr
-makeProb adts conf plan nn_name = IRLambda "sample" $ IRLetIn vector (IREvalNN nn_name (IRVar "l_x_neural_in")) (IRTCons m sndRet)
+makeProb adts conf plan nn_name = IRLambda "sample" $ IRLetIn vector (IRApply (IRVar nn_name) (IRVar "l_x_neural_in")) (IRTCons m sndRet)
   where
     (m, dim, bc) = (makeProbRec adts plan 0 (IRVar "sample"))
     sndRet = if countBranches conf then IRTCons dim bc else dim
@@ -109,7 +109,7 @@ makeProbRec adts (ADTPlan adtName plans) ix sample = (noAny sample p, noAny0 sam
     constrsWithPlanAndIx = mapAppendTup constrsWithPlan constrIx
     constrsWithPlanAndIxAndFlag = mapAppendTup3 constrsWithPlanAndIx flagProbs
     constrIx = scanl (+) (ix + length plans) (map totalSize plans)
-    constrGuard constr constrFlag v = IRIf (IRInvoke $ IRApply (IRVar ("is" ++ fst constr)) sample) (IROp OpMult constrFlag v) (IRConst $ VFloat 0)
+    constrGuard constr constrFlag v = IRIf (IRApply (IRVar ("is" ++ fst constr)) sample) (IROp OpMult constrFlag v) (IRConst $ VFloat 0)
     constrProbFields constr cPlan cIx constrFlag = mapTup3 (constrGuard constr constrFlag) (makeProbADTConstr adts cPlan constr cIx sample)
     constrProbsFields = map (uncurry4 constrProbFields) constrsWithPlanAndIxAndFlag
     opPlus3 (a1, b1, c1) (a2, b2, c2) = (IROp OpPlus a1 a2, IROp OpPlus b1 b2, IROp OpPlus c1 c2)
@@ -124,11 +124,11 @@ makeProbADTConstr adts plans (cName, fields) ix sample = foldr multProbs prob1 f
     prob1 = (IRConst (VFloat 1), IRConst (VFloat 0), IRConst (VFloat 0))
     multProbs (p0, d0, bc0) (p1, d1, bc1) = (IROp OpMult p0 p1, IROp OpPlus d0 d1, IROp OpPlus bc0 bc1)
     fieldIx = scanl (+) ix (map getSize plans)
-    fieldsProb = map (\(plan, pIx, fName) -> makeProbRec adts plan pIx (IRInvoke (IRApply (IRVar fName) sample))) (zip3 plans fieldIx (map fst fields))
+    fieldsProb = map (\(plan, pIx, fName) -> makeProbRec adts plan pIx (IRApply (IRVar fName) sample)) (zip3 plans fieldIx (map fst fields))
 
 
 makeGen :: [ADTDecl] -> PartitionPlan -> String ->  IRExpr
-makeGen adts plan nn_name = IRLetIn vector (IREvalNN nn_name (IRVar "l_x_neural_in")) (makeGenRec adts plan 0)
+makeGen adts plan nn_name = IRLetIn vector (IRApply (IRVar nn_name) (IRVar "l_x_neural_in")) (makeGenRec adts plan 0)
 
 makeGenRec :: [ADTDecl] -> PartitionPlan -> Int -> IRExpr
 makeGenRec adts (TuplePlan a b) ix = IRTCons (makeGenRec adts a ix) (makeGenRec adts b (ix + getSize a))
@@ -145,7 +145,7 @@ makeGenRec adts (ADTPlan adtName plans) ix = constructorLottery adts plans ix (i
     Just adt = find ((== adtName) . dataName) adts
 
 makeGenADTConstr :: [ADTDecl] -> [PartitionPlan] -> String -> Int -> IRExpr
-makeGenADTConstr adts plans name ix = IRInvoke (foldl (IRApply) (IRVar name) gens)
+makeGenADTConstr adts plans name ix = foldl IRApply (IRVar name) gens
   where
     ixForField = scanl (+) 0 (map (getSize) plans) -- Comulative sums over number of fields
     gens = map (uncurry (makeGenRec adts)) (zip plans ixForField)

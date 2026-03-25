@@ -69,7 +69,7 @@ optimize conf = irMap (commonSubexprStage . applyConstStage . assiciativityStage
 
 indexmagic :: IRExpr -> IRExpr
 -- if calling Apply ("indexOf") elem [0..], replace with elem
-indexmagic (IRInvoke (IRApply (IRApply (IRVar "indexOf") elem) (IRConst (VList list)))) | isNaturals (toList list) = elem
+indexmagic (IRApply (IRApply (IRVar "indexOf") elem) (IRConst (VList list))) | isNaturals (toList list) = elem
   where
     isNaturals lst = and (zipWith (==) [0..] (map toNatural lst))
     toNatural (VInt x) = x
@@ -94,11 +94,11 @@ distributeIf x = x
 -- | Simplify terms that apply a constant to a lambda expression
 -- if we build a lambda expression and immediately apply a constant, replace mentions of the lambda'd variable with the constant.
 applyConstant :: IRExpr -> IRExpr
-applyConstant (IRInvoke (IRApply (IRLambda varname inExpr) v@(IRConst _))) = replaceAll (IRVar varname) v inExpr
+applyConstant (IRApply (IRLambda varname inExpr) v@(IRConst _)) = replaceAll (IRVar varname) v inExpr
 applyConstant x = x
 
 applyToLetIn :: IRExpr -> IRExpr
-applyToLetIn (IRInvoke (IRApply (IRLambda varname inExpr) v)) | not (isValue v) = IRLetIn varname v inExpr
+applyToLetIn (IRApply (IRLambda varname inExpr) v) | not (isValue v) = IRLetIn varname v inExpr
 applyToLetIn x = x
 
 optimizeAssociativity :: IRExpr -> IRExpr
@@ -313,7 +313,7 @@ extractSubexpr body (sub, name) = trace report $ IRLetIn name sub newBody
     report = "Extracted subexpression: \n" ++ pPrintIRExpr sub 2 ++ "\n ##### as " ++ name ++ ", now: \n" ++ pPrintIRExpr newBody 2
 
 optimizeLambdaApplication :: IRExpr -> IRExpr
-optimizeLambdaApplication (IRInvoke (IRApply (IRLambda n body) appl)) = replaceAll (IRVar n) appl body
+optimizeLambdaApplication (IRApply (IRLambda n body) appl) = replaceAll (IRVar n) appl body
 optimizeLambdaApplication x = x
 
 pruneAnyCkecksExpr :: IRExpr -> IRExpr

@@ -95,9 +95,7 @@ pPrintIRExpr (IRLetIn varname e1 e2) n = "let " ++ varname ++ " = (" ++ pPrintIR
 pPrintIRExpr (IRVar varname) n = varname
 pPrintIRExpr (IRLambda varname body) n = "\\" ++ varname ++ " -> (" ++ pPrintIRExpr body (n + 1) ++ ")"
 pPrintIRExpr (IRApply e1 e2) n = pPrintIRExpr e1 (n + 1) ++ "(" ++ pPrintIRExpr e2 (n + 1) ++ ")"
-pPrintIRExpr (IRInvoke expr) n = pPrintIRExpr expr (n + 1) ++ "()"
 pPrintIRExpr (IREnumSum varname val e) n = "enumSum " ++ varname ++ " = " ++ show val ++ " in (\n" ++ pPrintIRExpr e (n + 1) ++ ")"
-pPrintIRExpr (IREvalNN netName e) n = "evalNN " ++ netName ++ " (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRIndex e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ ")[" ++ pPrintIRExpr e2 (n + 1) ++ "]"
 pPrintIRExpr (IRError e) n = "error(" ++ e ++")"
 

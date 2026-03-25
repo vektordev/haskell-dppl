@@ -22,7 +22,7 @@ stdListProd = StandartFunction {functionName="listProd", parameterCount=1,
 
 invokeStandardFunction :: StandardFunction -> [IRExpr] -> IRExpr
 invokeStandardFunction f params | length params /= parameterCount f = error $ "Wrong number of arguments for " ++ functionName f
-invokeStandardFunction f params = IRInvoke $ foldl IRApply (IRVar (functionName f)) params
+invokeStandardFunction f params = foldl IRApply (IRVar (functionName f)) params
 
 standardLibrary :: [StandardFunction]
 standardLibrary = [stdIndexOf, stdListProd]

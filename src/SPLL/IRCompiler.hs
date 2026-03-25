@@ -339,7 +339,7 @@ toIRInference meta cumulative (ReadNN _ name symbol) sample = do
   -- Same code as for calling a top level function
   var <- mkVariable "callNN"
   sym <- toIRGenerate meta symbol
-  setVariables [(var, IRInvoke (IRApply (IRApply (IRVar (name ++ "_auto_prob")) sym) sample))]
+  setVariables [(var, IRApply (IRApply (IRVar (name ++ "_auto_prob")) sym) sample)]
   if countBranches (compilerConfig meta) then
     return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
   else
@@ -364,7 +364,7 @@ toIRInference meta False (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeI
   case rt of
     TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
     _ -> do
-      retExpr <- indicator (IROp OpEq (IRInvoke (IRApply lIR vIR)) sample)
+      retExpr <- indicator (IROp OpEq (IRApply lIR vIR) sample)
       return (retExpr, const0, const0)
 -- Deterministic lambda and bound expression CDF
 toIRInference meta True (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo l) == Deterministic && pType (getTypeInfo v) == Deterministic = do
@@ -374,7 +374,7 @@ toIRInference meta True (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeIn
   case rt of
     TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
     _ -> do
-      return (compareValueExpr rt (IRInvoke $ IRApply lIR vIR) sample, const0, const0)
+      return (compareValueExpr rt (IRApply lIR vIR) sample, const0, const0)
 toIRInference meta cumulative e@(Apply TypeInfo {rType=rt} l v) sample 
   | IsConditional `elem` tags (getTypeInfo l) && any isDiscretes (tags (getTypeInfo v))
   && pType (getTypeInfo l) == Deterministic = do  -- This is only because of a bug in pInfer, but its useful for us...
@@ -417,7 +417,7 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample | pType (get
     TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
     _ -> do
       retVal <- mkVariable "call"
-      setVariables [(retVal, IRInvoke (IRApply lIR vIR))]
+      setVariables [(retVal, IRApply lIR vIR)]
       if countBranches (compilerConfig meta) then
         return (IRTFst (IRVar retVal), IRTFst (IRTSnd (IRVar retVal)), IRTSnd (IRTSnd (IRVar retVal)))
       else
@@ -427,7 +427,7 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=aChainName} l 
   lIR <- toIRGenerate meta l
   (vIR, _, _) <- toIRInference meta cumulative v sample
   applied <- mkVariable "call"
-  setVariables [(applied, IRInvoke $ IRApply lIR vIR)]
+  setVariables [(applied, IRApply lIR vIR)]
   if countBranches (compilerConfig meta) then
     return (IRTFst (IRVar applied), IRTFst (IRTSnd (IRVar applied)), IRTSnd (IRTSnd (IRVar applied)))
   else
@@ -459,10 +459,10 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=aChainName} l 
   else do
     -- Inverse of the callable as a lambda
     let (invExprP, invExprCoV) = toInvExpr clauses adts lChainName
-    let appliedCoV = IRInvoke $ IRApply (IRLambda (boundVar ++ tag) invExprCoV) sample
+    let appliedCoV = IRApply (IRLambda (boundVar ++ tag) invExprCoV) sample
     let lInv = IRLambda (boundVar ++ tag) invExprP
     -- Apply the sample to the inverse
-    let appliedSample = IRInvoke (IRApply lInv sample)
+    let appliedSample = IRApply lInv sample
     -- Do probabilistic inference using the applied inverse
     (p, dim, bc) <- toIRInference meta cumulative v appliedSample
 
@@ -683,8 +683,8 @@ toIRInference meta cumulative (Var TypeInfo {rType=rt} n) sample = do
     Just (_, True) -> do
       var <- mkVariable "call"
       let callExpr = case topKThreshold (compilerConfig meta) of
-            Just _ -> IRInvoke (IRApply (IRApply (IRVar (n ++ functionSuffix)) sample) (accProb meta))
-            Nothing -> IRInvoke (IRApply (IRVar (n ++ functionSuffix)) sample)
+            Just _ -> IRApply (IRApply (IRVar (n ++ functionSuffix)) sample) (accProb meta)
+            Nothing -> IRApply (IRVar (n ++ functionSuffix)) sample
       setVariables [(var, callExpr)]
       if countBranches (compilerConfig meta) then
           return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
@@ -890,7 +890,7 @@ toIRGenerate meta (Var _ name) = do
         return $ IRVar fullName
     -- Var is a top level declaration (an therefor has a _gen function)
     Just (_, True) -> do
-      return $ IRInvoke (IRVar (name ++ "_gen"))
+      return $ IRVar (name ++ "_gen")
     -- Var is a local variable
     Just (_, False) -> do
       return $ IRVar name
@@ -911,10 +911,10 @@ toIRGenerate meta (Apply TypeInfo {rType=rt} l v) = do
   v' <- toIRGenerate meta v
   case rt of
     TArrow _ _ -> return $ IRApply l' v'
-    _ -> return $ IRInvoke $ IRApply l' v'
+    _ -> return $ IRApply l' v'
 toIRGenerate meta (ReadNN _ name subexpr) = do
   sub <- toIRGenerate meta subexpr
-  return $ IRInvoke (IRApply (IRVar (name ++ "_auto_gen")) sub)
+  return $ IRApply (IRVar (name ++ "_auto_gen")) sub
 toIRGenerate meta (Error _ e) = return $ IRError e
 toIRGenerate meta x = error ("found no way to convert to IRGen: " ++ show x)
 
