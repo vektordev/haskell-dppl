@@ -1,0 +1,1 @@
+main = (3.0 * Normal + 2.0) + (4.0 * Normal + 1.0)

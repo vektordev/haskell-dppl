@@ -19,6 +19,7 @@ import PredefinedFunctions
 import Utils
 import SPLL.Typing.ForwardChaining (FCData, ExprInfo (LambdaInfo), findEquivalentExpression, findExprWithCN, progToFCData)
 
+type TagEnv = [(String, [Tag])]
 
 annotateEnumsProg :: Program -> Program
 annotateEnumsProg p@Program {functions=f, neurals=n, adts=adts} = p{functions = finalExprEnv}
@@ -30,22 +31,17 @@ annotateEnumsProg p@Program {functions=f, neurals=n, adts=adts} = p{functions = 
     isMultiDiscrete (MultiDiscretes _) = True
     isMultiDiscrete _ = False
 
-annotateIfNotRecursive :: [ADTDecl] -> String -> [(String, [Tag])] -> Expr -> Expr
-annotateIfNotRecursive _ name _ e | isRecursive name e = e
-annotateIfNotRecursive adts _ env e = annotate adts env e
-
-annotate :: [ADTDecl] -> [(String, [Tag])] -> Expr -> Expr
+annotate :: [ADTDecl] -> TagEnv -> Expr -> Expr
 --annotate _ e | trace ((show e)) False = undefined
+annotate adts env e@(Var ti n) = case lookup n env of
+  (Just tgs) -> setTypeInfo e (ti{tags=tgs})
+  _ -> e
+annotate adts env e@(ReadNN ti n _) = case lookup n env of
+  (Just tgs) -> setTypeInfo e (ti{tags=tgs})
+  _ -> e
 annotate adts env e = withNewTypeInfo
   where
     oldTags = tags $ getTypeInfo e
-    newTags = case ([mv | DiscreteValues mv <- oldTags]) of
-      [] -> case valuesTag of
-        Just t -> t:oldTags
-        Nothing -> oldTags
-      _:_ -> oldTags
-    valuesTag = fmap DiscreteValues values
-    withNewTypeInfo = setTypeInfo withNewSubExpr (setTags (getTypeInfo withNewSubExpr) newTags)
     withNewSubExpr = case e of
       Apply _ l@(Lambda _ n b) v -> do
         let annotatedV = annotate adts env v
@@ -53,25 +49,66 @@ annotate adts env e = withNewTypeInfo
             annotatedL = annotate adts env l in
               setSubExprs e [annotatedL, annotatedV]
       _ -> setSubExprs e (map (annotate adts env) (getSubExprs e))
-    values = case withNewSubExpr of
+    valueTgs = discretesTags adts withNewSubExpr
+    normalTgs = normalTags adts withNewSubExpr
+    newTags = normalTgs ++ valueTgs ++ oldTags
+    withNewTypeInfo = setTypeInfo withNewSubExpr (setTags (getTypeInfo withNewSubExpr) newTags)
+
+discretesTags :: [ADTDecl] -> Expr -> [Tag]
+discretesTags adts e = maybeToList valuesTag
+  where
+    valuesTag = fmap DiscreteValues values
+    values = case e of
       (Constant _ a) -> Just $ MultiDiscretes [a]
-      (ReadNN _ name _) -> case lookup name env of
-        Just tgs -> Just $ head [mv | DiscreteValues mv <- tgs]
-        _ -> Nothing
       (InjF _ name params) -> do
         paramValues <- mapM getValuesFromExpr params
         let unpackedMultiVals = map multiValueToValueList paramValues
-        return $ valueListToMultiValue $ propagateValues adts name unpackedMultiVals
+        return $ valueListToMultiValue $ nub $ propagateValues adts name unpackedMultiVals
       (IfThenElse _ _ left right) -> do
         valuesLeft <- getValuesFromExpr left
         valuesRight <- getValuesFromExpr right
         return $ unionMultiValues valuesLeft valuesRight
       (LetIn _ _ _ a) -> getValuesFromExpr a
-      (Var _ name) -> do
-        tags <- lookup name env
-        listToMaybe [mv | DiscreteValues mv <- tags]
       _ -> Nothing
 
+normalTags :: [ADTDecl] -> Expr -> [Tag]
+normalTags _ (Normal _) = [IsNormal 0 1]
+normalTags _ (InjF _ "plus" [p0, p1])
+  | (Just (m0, s0)) <- getNormalParameters p0,
+    (Just (m1, s1)) <- getNormalParameters p1 = [IsNormal (m0 + m1) (sqrt (s0*s0 + s1*s1))]
+normalTags _ (InjF _ "plus" [p0, p1])
+  | (Just (m0, s0)) <- getNormalParameters p0,
+    (Just x1) <- getSingleDiscrete p1 = [IsNormal (m0 + x1) s0]
+normalTags _ (InjF _ "plus" [p0, p1])
+  | (Just (m0, s0)) <- getNormalParameters p1,
+    (Just x1) <- getSingleDiscrete p0 = [IsNormal (m0 + x1) s0]
+normalTags _ (InjF _ "mult" [p0, p1])
+  | (Just (m0, s0)) <- getNormalParameters p0,
+    (Just x1) <- getSingleDiscrete p1 = [IsNormal (m0 * x1) (s0 * x1)]
+normalTags _ (InjF _ "mult" [p0, p1])
+  | (Just (m0, s0)) <- getNormalParameters p1,
+    (Just x1) <- getSingleDiscrete p0 = [IsNormal (m0 * x1) (s0 * x1)]
+normalTags _ (InjF _ "exp" [p])
+  | (Just (m, s)) <- getNormalParameters p = [IsLogNormal m s]
+normalTags _ (InjF _ "mult" [p0, p1])
+  | (Just (m0, s0)) <- getLogNormalParameters p0,
+    (Just (m1, s1)) <- getLogNormalParameters p1 = [IsLogNormal (m0 + m1) (sqrt (s0*s0 + s1*s1))]
+normalTags _ (InjF _ "mult" [p0, p1])
+  | (Just (m0, s0)) <- getLogNormalParameters p0,
+    (Just x1) <- getSingleDiscrete p1 = [IsLogNormal (m0 + log x1) s0]
+normalTags _ (InjF _ "mult" [p0, p1])
+  | (Just (m0, s0)) <- getLogNormalParameters p1,
+    (Just x1) <- getSingleDiscrete p0 = [IsLogNormal (m0 + log x1) s0]
+normalTags _ _ = []
+
+getNormalParameters :: Expr -> Maybe (Double, Double)
+getNormalParameters e = listToMaybe [(m, s) | IsNormal m s <- tags (getTypeInfo e)]
+
+getLogNormalParameters :: Expr -> Maybe (Double, Double)
+getLogNormalParameters e = listToMaybe [(m, s) | IsLogNormal m s <- tags (getTypeInfo e)]
+
+getSingleDiscrete :: Expr -> Maybe Double
+getSingleDiscrete e = listToMaybe [x | DiscreteValues (MultiDiscretes [VFloat x]) <- tags (getTypeInfo e)]
 
 getValuesFromExpr :: Expr -> Maybe MultiValue
 getValuesFromExpr e = case [mv | DiscreteValues mv <- tags $ getTypeInfo e] of
@@ -114,6 +151,9 @@ checkConstraint expr alg ResultingTypeMatch = resPType == annotatedType
     resPType = resultingPType alg (map (pType . getTypeInfo) (getSubExprs expr))
 checkConstraint expr _ (SubExprNIsEnumerable n) | length (getSubExprs expr) > n =
   isEnumerable (tags (getTypeInfo (getSubExprs expr !! n)))
+checkConstraint expr _ ResolvesToDistribution | not (null (
+  [1 | IsNormal _ _ <- tags (getTypeInfo expr)] ++ 
+  [1 | IsLogNormal _ _ <- tags (getTypeInfo expr)])) = True
 checkConstraint _ _ _ = False
 
 isEnumerable :: [Tag] -> Bool

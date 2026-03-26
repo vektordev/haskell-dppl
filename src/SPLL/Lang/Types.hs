@@ -208,6 +208,8 @@ isMultiTypeRef _ = False
 data Tag = DiscreteValues MultiValue 
            | Alg InferenceRule
            | IsConditional
+           | IsNormal Double Double -- mean, stdDev
+           | IsLogNormal Double Double --mean, stdDev
            deriving (Show, Eq)
            
 
@@ -217,6 +219,7 @@ data RuleConstraint = SubExprNIsType Int PType
                     | SubExprNIsAtLeast Int PType
                     | SubExprNIsEnumerable Int
                     | ResultingTypeMatch
+                    | ResolvesToDistribution
                     deriving (Show, Eq)
 
 -- can we encode symmetries?

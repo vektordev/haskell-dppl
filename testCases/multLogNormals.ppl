@@ -1,0 +1,1 @@
+main = exp (Normal * 3.0 + 1.0) * exp (Normal * 4.0 + 2.0)

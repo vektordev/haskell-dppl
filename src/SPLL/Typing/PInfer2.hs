@@ -347,7 +347,7 @@ solveCyclicConstraints dcons pty s | isBasicType pty = (dcons, pty, s)
 solveCyclicConstraints dcons pty s = case nextCons of
   Nothing -> error "no rec cons in fixpoint, but final type not resolved"
   Just d -> let fixSubst = fixpointIteration d in
-    solveCyclicConstraints (apply fixSubst (delete d dcons))(apply fixSubst pty)(compose s fixSubst)
+    solveCyclicConstraints (apply fixSubst (delete d dcons)) (apply fixSubst pty) (compose s fixSubst)
   where nextCons = find isRecType dcons
 
 close :: TEnv -> [DConstraint] -> PType -> Expr -> ([DConstraint], DScheme, Expr)
@@ -513,6 +513,8 @@ inferBinOp env ti e1 e2 getInf constructor = do
 infer :: TEnv -> Expr -> Infer (Subst, [DConstraint], PType, Expr)
 infer env expr = case expr of
 
+  e | not (null ([(mean, std)|IsNormal mean std <- tags (getTypeInfo expr)])) -> return (emptySubst, [], Integrate, setTypeInfo e (getTypeInfo e){pType=Integrate})
+  e | not (null ([(mean, std)|IsLogNormal mean std <- tags (getTypeInfo expr)])) -> return (emptySubst, [], Integrate, setTypeInfo e (getTypeInfo e){pType=Integrate})
   ThetaI ti a i  -> return (emptySubst, [], Deterministic, ThetaI (setPType ti Deterministic) a i)
   Subtree ti a i  -> return (emptySubst, [], Deterministic, Subtree (setPType ti Deterministic) a i)
   Uniform ti  -> return (emptySubst, [], Integrate, Uniform (setPType ti Integrate))
@@ -571,7 +573,8 @@ infer env expr = case expr of
     return (s, cs, t, Lambda (setPType ti t) name et)
 
   Apply ti l v -> inferBinOp env ti l v downgradeInf Apply
-    
+
+
   ReadNN ti name e -> do
       (s, cs, t, et) <- infer env e
       return (s, cs, Integrate, ReadNN (setPType ti Integrate) name et)
@@ -607,10 +610,10 @@ normalize (DScheme _ c body) = DScheme (map snd ord) (normcs c) (normtype body)
     normcs [] = []
 
     normdc ((Left ty):b) =  Left (normtype ty): normdc b
-    normdc (Right(PlusConstraint ty1 ty2):b) = Right(PlusConstraint (normOr ty1) (normOr ty2)): normdc b
-    normdc (Right(EnumPlusConstraint ty1 ty2):b) = Right(EnumPlusConstraint (normOr ty1) (normOr ty2)): normdc b
-    normdc (Right(CompConstraint ty1 ty2):b) = Right(CompConstraint (normOr ty1) (normOr ty2)): normdc b
-    normdc (Right(LetInDConstraint ty):b) = Right(LetInDConstraint (normOr ty)): normdc b
+    normdc (Right(PlusConstraint ty1 ty2):b) = Right (PlusConstraint (normOr ty1) (normOr ty2)): normdc b
+    normdc (Right(EnumPlusConstraint ty1 ty2):b) = Right (EnumPlusConstraint (normOr ty1) (normOr ty2)): normdc b
+    normdc (Right(CompConstraint ty1 ty2):b) = Right (CompConstraint (normOr ty1) (normOr ty2)): normdc b
+    normdc (Right(LetInDConstraint ty):b) = Right (LetInDConstraint (normOr ty)): normdc b
     normdc [] = []
 
     normOr (Left ty) = Left $ normtype ty

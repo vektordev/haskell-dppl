@@ -54,7 +54,7 @@ import qualified Data.Map as Map
 import Control.Applicative (liftA2)
 import Control.Monad.Random.Lazy (Random)
 import Data.Number.Erf (Erf)
-import Data.List (intercalate, nub)
+import Data.List (intercalate, nub, transpose)
 import Debug.Trace
 import qualified Data.Bifunctor as Bifunctor
 
@@ -435,10 +435,13 @@ valueListToMultiValue lst@((VTuple _ _):_) | all isVTuple lst = MultiTuple aVals
     aVals = valueListToMultiValue [a | VTuple a _ <- lst]
     bVals = valueListToMultiValue [b | VTuple _ b <- lst]
 valueListToMultiValue lst@((VTuple _ _):_) = error "Not all elements in the list are Tuples"
-valueListToMultiValue lst@((VADT _ _):_) | all isVADT lst = MultiADT (map (Bifunctor.second (map valueListToMultiValue)) valueListsForConstrs)
+valueListToMultiValue lst@((VADT _ _):_) | all isVADT lst = MultiADT (map reconstructConstructor cns)
   where
     cns = nub [cn | VADT cn _ <- lst]
-    valueListsForConstrs = map (\cn -> (cn, [fields | VADT cn' fields <- lst, cn' == cn])) cns
+    reconstructConstructor cn = 
+      let field_lists = [fields | VADT cn' fields <- lst, cn' == cn]
+          transposed_fields = if null field_lists then [] else map nub (transpose field_lists)
+      in (cn, map valueListToMultiValue transposed_fields)
 valueListToMultiValue lst@((VADT _ _):_) = error "Not all elements in the list are ADTs"
 valueListToMultiValue lst = MultiDiscretes lst
 

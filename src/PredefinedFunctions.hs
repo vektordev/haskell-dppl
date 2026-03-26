@@ -162,6 +162,7 @@ mapEitherInv = FDecl (Forall [TV "a", TV "b", TV "c", TV "d"] [] ((TVarR (TV "c"
 globalFenv' :: FEnv
 globalFenv' = [("double", FPair doubleFwd [doubleInv]),
               ("exp", FPair expFwd [expInv]),
+              ("log", FPair expInv [expFwd]),
               ("neg", FPair negFwd [negInv]),
               ("recip", FPair recipFwd [recipInv]),
               ("left", FPair leftFwd [fromLeftFwd]),
