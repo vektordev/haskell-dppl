@@ -126,7 +126,7 @@ injF2ResolvesToDistribution = InferenceRule
              [ResolvesToDistribution]
              "injFResolvesToDistribution"
              (const Integrate)
-             (Forall [TV "a"] (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TVarR (TV "a"))))
+             (Forall [TV "a"] [] (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TVarR (TV "a"))))
 
 ifThenElse :: InferenceRule
 ifThenElse = InferenceRule
