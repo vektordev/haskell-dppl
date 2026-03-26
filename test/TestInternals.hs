@@ -67,4 +67,4 @@ classConstraintTests = TestList
   ]
 
 return []
-test_internals = $quickCheckAll
+test_internals = $(forAllProperties) (quickCheckWithResult stdArgs { maxSuccess = 100 })

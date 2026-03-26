@@ -89,7 +89,7 @@ reserved :: [String]
 reserved = ["data", "if", "then", "else", "let", "in", "theta", "subtree", "error", "ThetaTree", "Left", "Right"]
 
 keyword :: MonadParser m => String -> m String
-keyword = L.symbol sc
+keyword kw = lexeme $ try (string kw <* notFollowedBy (alphaNumChar <|> char '\'' <|> char '_'))
 
 --Note: Won't parse capitalized constructors, if ever we add those.
 pIdentifier :: MonadParser m => m String
@@ -113,21 +113,21 @@ pNormal = do
 
 pIfThenElse :: MonadParser m => m Expr
 pIfThenElse = do
-  _ <- symbol "if"
+  _ <- keyword "if"
   a <- pExpr
-  _ <- symbol "then"
+  _ <- keyword "then"
   b <- pExpr
-  _ <- symbol "else"
+  _ <- keyword "else"
   c <- pExpr
   return (ifThenElse a b c)
 
 pLetIn :: MonadParser m => m Expr
 pLetIn = do
-  symbol "let"
+  keyword "let"
   lhs <- pExpr
   symbol "="
   definition <- pExpr
-  symbol "in"
+  keyword "in"
   scope <- pExpr
   destr <- letInDestructor lhs
   return $ destr definition scope
@@ -732,7 +732,7 @@ mkInfixOp tbl = map infx tbl
 
 mkPrefixOp :: MonadParser m => [([Char], Expr -> Expr)] -> [Operator m Expr]
 mkPrefixOp tbl = map infx tbl
-  where infx (name, f) = Prefix (f <$ symbol name)
+  where infx (name, f) = Prefix (f <$ keyword name)
 
 
 -- | Operator table (precedence and associativity)

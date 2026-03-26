@@ -14,6 +14,7 @@ import SPLL.Lang.Lang
 import SPLL.Lang.Types
 import SPLL.Typing.RType
 import SPLL.Parser (reserved)
+import PredefinedFunctions (globalFEnv)
 
 -- Arbitrary instances for generating test data
 instance Arbitrary Value where
@@ -29,11 +30,11 @@ genIdentifier = do
   rest <- listOf (elements $ ['a'..'z'] ++ ['0'..'9'])
   return (first:rest)
   
--- Generator for valid identifiers (not in reserved list)
+-- Generator for valid identifiers (not reserved, not a builtin InjF name)
 genValidIdentifier :: Gen String
 genValidIdentifier = do
   ident <- genIdentifier
-  if ident `elem` reserved
+  if ident `elem` reserved || ident `elem` map fst (globalFEnv [])
     then genValidIdentifier  -- try again
     else return ident
 

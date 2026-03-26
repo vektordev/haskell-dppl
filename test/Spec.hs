@@ -687,7 +687,7 @@ return []
 
 
 runTests :: IO Bool
-runTests = $quickCheckAll
+runTests = $(forAllProperties) (quickCheckWithResult stdArgs { maxSuccess = 100, maxDiscardRatio = 20 })
 
 data TestOpts = TestOpts {
   disableSpec :: Bool,

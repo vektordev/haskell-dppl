@@ -225,9 +225,9 @@ prop_rejectsReservedWords = forAll (elements reserved) $ \word ->
 
 -- Function applications should associate correctly
 prop_functionApplication :: Property
-prop_functionApplication = forAll genIdentifier $ \f ->
-  forAll genIdentifier $ \g ->
-  forAll genIdentifier $ \x ->
+prop_functionApplication = forAll genValidIdentifier $ \f ->
+  forAll genValidIdentifier $ \g ->
+  forAll genValidIdentifier $ \x ->
     let input = f ++ " (" ++ g ++ " " ++ x ++ ")"
     in case tryParseExpr "test" input of
          Right (Apply _ f' (Apply _ g' x')) ->
@@ -398,4 +398,4 @@ prop_blockCommentLine =
        Left err -> counterexample (errorBundlePretty err) False
 
 return []
-test_parser = $quickCheckAll
+test_parser = $(forAllProperties) (quickCheckWithResult stdArgs { maxSuccess = 100 })
