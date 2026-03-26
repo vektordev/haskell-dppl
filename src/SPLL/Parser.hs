@@ -62,8 +62,22 @@ demandUniqueNumber = do
   put (old + 1)
   return old
 
+scTop :: MonadParser m => m ()
+scTop = L.space space1 (L.skipLineComment "--") (L.skipBlockComment "{-" "-}")
+
+scExpr :: MonadParser m => m ()
+scExpr = do
+  L.space hspace1 (L.skipLineComment "--") (L.skipBlockComment "{-" "-}")
+  _ <- optional $ try $ do
+    void eol
+    void $ many (satisfy (\c -> c == ' ' || c == '\t' || c == '\n' || c == '\r'))
+    col <- L.indentLevel
+    guard (col > mkPos 1)
+    scExpr
+  return ()
+
 sc :: MonadParser m => m ()
-sc = L.space hspace1 (L.skipLineComment "--") (L.skipBlockComment "{-" "-}")
+sc = scExpr
 
 lexeme :: MonadParser m => m a -> m a
 lexeme = L.lexeme sc
@@ -80,8 +94,8 @@ keyword = L.symbol sc
 --Note: Won't parse capitalized constructors, if ever we add those.
 pIdentifier :: MonadParser m => m String
 pIdentifier = lexeme $ do
-  x <- letterChar
-  xs <- many alphaNumChar
+  x <- letterChar <|> char '_'
+  xs <- many (alphaNumChar <|> char '\'' <|> char '_')
   let ident = (x:xs)
   if ident `elem` reserved
     then fail $ "reserved word: " ++ ident
@@ -401,7 +415,6 @@ pCSV = valueParser `sepBy` (symbol ",")
 pDefinition :: MonadParser m => m (Either FnDecl NeuralDecl)
 pDefinition = do
   x <- choice [fmap Right pNeural, fmap Left pFunction]
-  doesNotContinue
   return x
 
 --TODO: Add validation via AutoNeural.
@@ -520,7 +533,6 @@ pADT = dbg "ADT" $ do
   symbol "="
   constrs <- pADTConstructor `sepBy` symbol "|"
   depth <- optional (keyword "depth" >> lexeme L.decimal)
-  doesNotContinue
   return $ ADTDecl {dataName=name, constructors=constrs, maxDepth=depth}
 
 pADTConstructor :: MonadParser m => m ADTConstructorDecl
@@ -539,14 +551,11 @@ pADTField = do
                     Right adt -> TADT adt
     return (fieldName, fieldRT)
 
-doesNotContinue :: MonadParser m => m ()
-doesNotContinue = choice [eof, void eol]
-
 pProg :: MonadParser m => m Program
 pProg = do
-  sc
-  adts <- dbg "trying ADTs" (many pADT)
-  defs <- dbg "trying definition" (many pDefinition)
+  adts <- dbg "trying ADTs" (many (try (scTop *> pADT)))
+  defs <- dbg "trying definition" (many (try (scTop *> pDefinition)))
+  scTop
   _ <- eof
   return (aggregateDefinitions adts defs)
 
@@ -634,10 +643,10 @@ keywordExpr = dbg "keywordExpr" $ choice [
 pLambda :: MonadParser m => m Expr
 pLambda = do
     _ <- symbol "\\"
-    param <- pIdentifier
+    params <- some pIdentifier
     _ <- symbol "->"
     body <- expr
-    return $ param #-># body
+    return $ foldr (#->#) body params
 
 -- | Parse function application
 -- This handles both normal application and built-in functions like multF

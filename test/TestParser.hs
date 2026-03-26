@@ -301,5 +301,101 @@ matchExpr expr1 expr2
   -- Could hide the subexpressions here from the printout.
   | otherwise = expr1 === expr2
 
+-- Blank line between two function definitions parses, same AST as without
+prop_blankLineBetweenDefs :: Property
+prop_blankLineBetweenDefs =
+  let src1 = "coin = if Uniform < 0.5 then 1 else 0\nmain = coin"
+      src2 = "coin = if Uniform < 0.5 then 1 else 0\n\nmain = coin"
+  in case (tryParseProgram "" src1, tryParseProgram "" src2) of
+       (Right p1, Right p2) -> p1 === p2
+       (Left err, _) -> counterexample ("src1 failed: " ++ errorBundlePretty err) False
+       (_, Left err) -> counterexample ("src2 failed: " ++ errorBundlePretty err) False
+
+-- Comment-only line between definitions parses successfully
+prop_commentBetweenDefs :: Property
+prop_commentBetweenDefs =
+  let src = "-- Flip a coin\nmain = if Uniform < 0.5 then 0 else 1"
+  in case tryParseProgram "" src of
+       Right _ -> property True
+       Left err -> counterexample (errorBundlePretty err) False
+
+-- Multi-line let-in parses to the same AST as single-line
+prop_multiLineLetIn :: Property
+prop_multiLineLetIn =
+  let src1 = "main = let u = Uniform in u + 1.0"
+      src2 = "main =\n  let u = Uniform\n  in u + 1.0"
+  in case (tryParseProgram "" src1, tryParseProgram "" src2) of
+       (Right p1, Right p2) -> p1 === p2
+       (Left err, _) -> counterexample ("src1 failed: " ++ errorBundlePretty err) False
+       (_, Left err) -> counterexample ("src2 failed: " ++ errorBundlePretty err) False
+
+-- Multi-line if-then-else parses to the same AST as single-line
+prop_multiLineIfThenElse :: Property
+prop_multiLineIfThenElse =
+  let src1 = "main = if Uniform < 0.5 then 0 else 1"
+      src2 = "main = if Uniform < 0.5\n  then 0\n  else 1"
+  in case (tryParseProgram "" src1, tryParseProgram "" src2) of
+       (Right p1, Right p2) -> p1 === p2
+       (Left err, _) -> counterexample ("src1 failed: " ++ errorBundlePretty err) False
+       (_, Left err) -> counterexample ("src2 failed: " ++ errorBundlePretty err) False
+
+-- Column-1 line is NOT consumed as a continuation of the previous definition
+prop_columnOneNotContinuation :: Property
+prop_columnOneNotContinuation =
+  let src = "f = g\ng y = y + 1.0"
+  in case tryParseProgram "" src of
+       Right (Program fns _ _) -> counterexample ("expected 2 defs, got " ++ show (length fns)) (length fns === 2)
+       Left err -> counterexample (errorBundlePretty err) False
+
+-- Underscore in identifier
+prop_underscoreInIdentifier :: Property
+prop_underscoreInIdentifier =
+  let src = "go_helper x = x + 1.0\nmain = go_helper 2.0"
+  in case tryParseProgram "" src of
+       Right _ -> property True
+       Left err -> counterexample (errorBundlePretty err) False
+
+-- Apostrophe in identifier
+prop_apostropheInIdentifier :: Property
+prop_apostropheInIdentifier =
+  let src = "x' = Uniform\nmain = x'"
+  in case tryParseProgram "" src of
+       Right _ -> property True
+       Left err -> counterexample (errorBundlePretty err) False
+
+-- Multi-parameter lambda parses to the same AST as nested single-param lambdas
+prop_multiParamLambda :: Property
+prop_multiParamLambda =
+  let src1 = "(\\x -> \\y -> x + y) 1.0 2.0"
+      src2 = "(\\x y -> x + y) 1.0 2.0"
+  in case (tryParseExpr "" src1, tryParseExpr "" src2) of
+       (Right e1, Right e2) -> e1 === e2
+       (Left err, _) -> counterexample ("src1 failed: " ++ errorBundlePretty err) False
+       (_, Left err) -> counterexample ("src2 failed: " ++ errorBundlePretty err) False
+
+-- File ending with trailing blank lines parses without error
+prop_trailingBlankLines :: Property
+prop_trailingBlankLines =
+  let src = "main = Uniform\n\n"
+  in case tryParseProgram "" src of
+       Right _ -> property True
+       Left err -> counterexample (errorBundlePretty err) False
+
+-- File starting with leading blank lines parses without error
+prop_leadingBlankLines :: Property
+prop_leadingBlankLines =
+  let src = "\n\nmain = Uniform"
+  in case tryParseProgram "" src of
+       Right _ -> property True
+       Left err -> counterexample (errorBundlePretty err) False
+
+-- Block comment on its own line between definitions
+prop_blockCommentLine :: Property
+prop_blockCommentLine =
+  let src = "{- a comment -}\nmain = 1.0"
+  in case tryParseProgram "" src of
+       Right _ -> property True
+       Left err -> counterexample (errorBundlePretty err) False
+
 return []
 test_parser = $quickCheckAll
