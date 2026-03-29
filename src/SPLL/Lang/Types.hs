@@ -43,7 +43,7 @@ data Expr =
               -- Boolean Operations
               | GreaterThan TypeInfo Expr Expr
               | LessThan TypeInfo Expr Expr
-              | Equals TypeInfo Expr Expr
+              | Equals TypeInfo Expr Expr   -- deprecated in favor of injF "eq"
               | And TypeInfo Expr Expr
               | Or TypeInfo Expr Expr
               | Not TypeInfo Expr
