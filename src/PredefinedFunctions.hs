@@ -6,13 +6,14 @@ FEnv,
 instantiate,
 propagateValues,
 parameterCount,
+hasAnyExcept,
 isHigherOrder,
 getFunctionParamIdx,
 renameDecl
 ) where
 
 import SPLL.Typing.RType (RType(..), Scheme(..), TVarR(..))
-import SPLL.IntermediateRepresentation (IRExpr, IRExpr(..), Operand(..), UnaryOperand(..), irMap, IREnv (IREnv)) --FIXME
+import SPLL.IntermediateRepresentation (IRExpr, IRExpr(..), Operand(..), UnaryOperand(..), irMap, IREnv (IREnv), getIRSubExprs) --FIXME
 import SPLL.Lang.Lang
 import SPLL.Typing.Typing
 import Data.Set (fromList)
@@ -101,6 +102,12 @@ multIInv1 = FDecl (Forall [] (TInt `TArrow` (TInt `TArrow` TInt))) ["a", "c"] ["
 multIInv2 :: FDecl
 multIInv2 = FDecl (Forall [] (TInt `TArrow` (TInt `TArrow` TInt))) ["b", "c"] ["a"] (IROp OpDiv (IRVar "c") (IRVar "b")) (IRConst (VBool True)) False [("b", IRUnaryOp OpNeg (IROp OpDiv (IRVar "c") (IROp OpMult (IRVar "b") (IRVar "b")))), ("c", IROp OpDiv (IRConst (VFloat 1)) (IRVar "b"))]
 
+eqFwd :: FDecl
+eqFwd = FDecl (Forall [TV "a"] (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TBool))) ["a", "b"] ["c"] (IROp OpEq (IRVar "a") (IRVar "b")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))]
+eqInv1 :: FDecl
+eqInv1 = FDecl (Forall [TV "a"] (TVarR (TV "a") `TArrow` (TBool `TArrow` TVarR (TV "a")))) ["a", "c"] ["b"] (IRIf (IRVar "c") (IRVar "a") (IRConst (VAnyExcept [IRVar "a"]))) (IRConst (VBool True)) True [("a", IRConst (VFloat 1)), ("c", IRConst (VFloat 1))]
+eqInv2 :: FDecl
+eqInv2 = FDecl (Forall [TV "a"] (TVarR (TV "a") `TArrow` (TBool `TArrow` TVarR (TV "a")))) ["b", "c"] ["a"] (IRIf (IRVar "c") (IRVar "b") (IRConst (VAnyExcept [IRVar "b"]))) (IRConst (VBool True)) True [("b", IRConst (VFloat 1)), ("c", IRConst (VFloat 1))]
 --tConsFwd :: FDecl
 --tConsFwd = FDecl (Forall [] (TFloat `TArrow` (TFloat `TArrow` Tuple TFloat TFloat))) ["a", "b"] ["c", "d"] (IRTCons (IRVar "a") (IRVar "b")) (IRConst (VBool True)) [("a", IRTCons (IRConst (VFloat 1)) (IRVar "b")), ("b", IRTCons (IRVar "a") (IRConst (VFloat 1)))]-- Cannot declare a backward pass here
 
@@ -175,6 +182,7 @@ globalFenv' = [("double", FPair doubleFwd [doubleInv]),
               ("plusI", FPair plusIFwd [plusIInv1, plusIInv2]),
               ("mult", FPair multFwd [multInv1, multInv2]),
               ("multI", FPair multIFwd [multIInv1, multIInv2]),
+              ("eq", FPair eqFwd [eqInv1, eqInv2]),
               ("fst", FPair fstFwd [fstInv]),
               ("snd", FPair sndFwd [sndInv]),
               ("head", FPair headFwd [headInv]),
@@ -205,6 +213,7 @@ rename :: String -> String -> IRExpr -> IRExpr
 rename old new (IRVar n) | n == old = IRVar new
 rename old new (IRVar n) | n == old ++ "^-1" = IRVar (new ++ "^-1")
 rename old new (IRVar n) | n == old ++ "^-1'" = IRVar (new ++ "^-1'")
+rename old new (IRConst (VAnyExcept e)) = IRConst (VAnyExcept (map (rename old new) e))
 rename old new expr = expr
 
 renameAll :: String -> String -> IRExpr -> IRExpr
@@ -258,6 +267,17 @@ parameterCount adts name = do
   case lookup name (globalFEnv adts) of
     Just (FPair FDecl {inputVars=params} _) -> length params
     _ -> error $ "Unknown InjF: " ++ name
+
+hasAnyExcept :: [ADTDecl] -> String -> Bool
+hasAnyExcept adts name = 
+  case lookup name (globalFEnv adts) of
+    Just (FPair _ invs) -> any (hasAnyExceptExpr . body) invs
+    _ -> error $ "Unknown InjF: " ++ name
+
+
+hasAnyExceptExpr :: IRExpr -> Bool
+hasAnyExceptExpr (IRConst (VAnyExcept _)) = True 
+hasAnyExceptExpr e = any hasAnyExceptExpr (getIRSubExprs e)
 
 failConversionFwd :: Expr -> IRExpr
 failConversionFwd = error "Error during value conversion. This should not happen"
