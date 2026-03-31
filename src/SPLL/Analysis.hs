@@ -126,16 +126,19 @@ tagAlgsExpression :: Expr -> TypeInfo
 tagAlgsExpression (InjF ti _ [_]) = ti
 tagAlgsExpression expr =
   if likelihoodFunctionUsesTypeInfo (toStub expr) then
-    setTags (getTypeInfo expr) (Alg (findAlgorithm expr):tags (getTypeInfo expr))
+    case findAlgorithm expr of
+      Just alg -> setTags (getTypeInfo expr) (Alg alg:tags (getTypeInfo expr))
+      Nothing -> getTypeInfo expr
+    
   else
     getTypeInfo expr
 
-findAlgorithm :: Expr -> InferenceRule
+findAlgorithm :: Expr -> Maybe InferenceRule
 findAlgorithm expr = case validAlgs of
-  [alg] -> alg
-  [] -> error ("no valid algorithms found in expr: " ++ show expr)
+  [alg] -> Just alg
+  [] -> Nothing
   --(_:_:_) -> error "multiple valid algorithms found" -- TODO: There might be leeway here.
-  alg:_ -> alg  --If multiple choose the first one TODO: Check if correct
+  alg:_ -> Just alg  --If multiple choose the first one TODO: Check if correct
   where
     validAlgs = filter (\alg -> all (checkConstraint expr alg) (constraints alg) ) correctExpr
     correctExpr = filter (checkExprMatches expr) allAlgorithms

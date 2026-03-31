@@ -487,7 +487,7 @@ toIRInference meta cumulative (InjF _ name params) sample | isHigherOrder (adtDe
   -- Create all inverses of the ho functions and save them on the variable stack
   -- Then create a substitution that substitutes f^-1 to f_prob. All substitutions are then composed in the fold
   renVar <- foldM (\sub tup -> createHOInverse (fcData meta) adts tup <&> (.) sub) id (zip fVars fs)
-  (paramExpr, paramDim, paramBranches) <- probF meta cumulative a invExpr
+  (paramExpr, paramDim, paramBranches) <- probF meta cumulative a (renVar invExpr)
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
   let scale x = if not cumulative
                   then IROp OpMult x (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDerivExpr))
@@ -543,7 +543,7 @@ toIRInference meta cumulative e@(InjF TypeInfo {tags=extras} name params) sample
   let probF = if decons then toIRInferenceSave else toIRInference
   -- Get the probabilistic inference expression of the non-deterministic subexpression
   (nonAnyIRExpr, nonAnyDim, nonAnyBranches) <- probF meta cumulative (params !! probIdx) nonAnyExpr
-  (anyIRExpr, anyDim, anyBranches) <- probF meta cumulative (params !! probIdx) (IRConst $ VAny)
+  (anyIRExpr, anyDim, anyBranches) <- toIRInferenceSave meta cumulative (params !! probIdx) (IRConst $ VAny)
   (exceptIRExpr, exceptDim, exceptBranches) <- probF meta cumulative (params !! probIdx) exceptExpr
   let ifSample a na = if isPosAny then IRIf (IRVar v1) a na else IRIf (IRVar v1) na a
   (subExpr, subDim) <- subP (anyIRExpr, anyDim) (exceptIRExpr, exceptDim)

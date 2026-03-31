@@ -289,8 +289,11 @@ fPairsFromADT :: ADTDecl -> [(String, FPair)]
 fPairsFromADT ADTDecl{dataName=name, constructors=constrs} = concatMap (fPairsFromADTConstructor name) constrs
 
 fPairsFromADTConstructor :: String -> ADTConstructorDecl  -> [(String, FPair)]
-fPairsFromADTConstructor adtName constr@(constrName, fields) = (constrName, FPair fwdConstr (map invConstr fieldNames)):map (fPairFromADTField adtRT constr) fields
+fPairsFromADTConstructor adtName constr@(constrName, fields) = constrFPair:isFunctionFPair:fieldFPairs
   where
+    constrFPair = (constrName, FPair fwdConstr (map invConstr fieldNames))
+    isFunctionFPair = fPaisOfADTIsFunction adtName constr
+    fieldFPairs = map (fPairFromADTField adtRT constr) fields
     adtRT = TADT adtName
     fieldNames = map fst fields
     -- Rename fields so that they don' clash with the accessor functions
@@ -303,6 +306,15 @@ fPairsFromADTConstructor adtName constr@(constrName, fields) = (constrName, FPai
     rtOfField f = fromJust $ lookup f fields
     -- FIXME Probably chekc whether parameter is indeed of this constructor in applicability test
     invConstr f = FDecl (Forall [] (adtRT `TArrow` rtOfField f)) ["b"] ["f_" ++ f] (IRInvoke $ IRApply (IRVar f) (IRVar "b")) (IRConst $ VBool True) True [("b", IRConst $ VFloat 1)]
+
+fPaisOfADTIsFunction :: String -> ADTConstructorDecl -> (String, FPair)
+fPaisOfADTIsFunction adtName (constrName, rTypes) = (isFName, fPair)
+  where
+    isFName = "is" ++ constrName 
+    fPair = FPair fwdIs [invIs]
+    fwdIs = FDecl (Forall [] (TADT adtName `TArrow` TBool)) ["a"] ["b"] (IRInvoke $ IRApply (IRVar isFName) (IRVar "a")) (IRConst $ VBool True) False [("a", IRConst $ VFloat 1)]
+    constrWithAnys = IRInvoke $ foldr (\_ e -> IRApply (IRConst VAny) e) (IRVar constrName) rTypes  -- One Any for each parameter
+    invIs = FDecl (Forall [] (TBool `TArrow` TADT adtName)) ["b"] ["a"] (IRIf (IRVar "b") constrWithAnys (IRConst $ VAnyExcept [constrWithAnys])) (IRConst $ VBool True) False [("b", IRConst $ VFloat 1)]
 
 fPairFromADTField :: RType -> ADTConstructorDecl -> (String, RType) -> (String, FPair)
 fPairFromADTField adtRT constr (fieldName, fieldRT) = (fieldName, FPair fwd [inv])
