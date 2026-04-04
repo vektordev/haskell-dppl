@@ -208,7 +208,7 @@ compile conf p = do
 
   let forwardChained = annotateProg preAnnotated
   printIfMoreVerbose conf "\n=== Chain named Program ==="
-  pPrintIfMoreVerbose conf preAnnotated
+  pPrintIfMoreVerbose conf forwardChained
   printStage conf "After Forward Chaining (chain names)" forwardChained
 
   typed <- addTypeInfo forwardChained
