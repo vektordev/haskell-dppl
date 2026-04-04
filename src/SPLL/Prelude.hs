@@ -199,26 +199,33 @@ compile conf p = do
   printIfVerbose conf "=== Parsed Program ==="
   pPrintIfMoreVerbose conf p
   printIfVerbose conf (pPrintProg p)
+  printStage conf "After Parsing (no annotations)" p
 
   let preAnnotated = annotateEnumsProg p
   printIfMoreVerbose conf "\n=== Annotated Program (1) ==="
   pPrintIfMoreVerbose conf preAnnotated
+  printStage conf "After Enum Annotation" preAnnotated
 
   let forwardChained = annotateProg preAnnotated
   printIfMoreVerbose conf "\n=== Chain named Program ==="
   pPrintIfMoreVerbose conf preAnnotated
+  printStage conf "After Forward Chaining (chain names)" forwardChained
 
   typed <- addTypeInfo forwardChained
   printIfMoreVerbose conf "\n=== Typed Program ==="
   pPrintIfMoreVerbose conf typed
+  printStage conf "After Type Inference (RType + PType)" typed
+
   let annotated = (annotateAlgsProg . annotateConditionalProg) typed
   printIfMoreVerbose conf "\n=== Annotated Program (2) ==="
   pPrintIfMoreVerbose conf annotated
+  printStage conf "After Algorithm Annotation (tags include Alg)" annotated
 
   let compiled = envToIR conf annotated
   printIfVerbose conf "\n=== Compiled Program ==="
   pPrintIfMoreVerbose conf compiled
   printIfVerbose conf (pPrintIREnv compiled)
+  printStageIR conf "After IR Compilation" compiled
   return compiled
 
 runGen :: (RandomGen g) => CompilerConfig -> Program -> [IRValue] -> Either CompilerError (Rand g IRValue)
@@ -260,3 +267,23 @@ pPrintIfVerbose _ _ = return ()
 pPrintIfMoreVerbose :: (Monad m, Show a) => CompilerConfig -> a -> m ()
 pPrintIfMoreVerbose CompilerConfig {verbose=v} s | v >= 2 = pTraceShow s (return ())
 pPrintIfMoreVerbose _ _ = return ()
+
+-- Print a labeled intermediate compilation stage showing the full annotated AST tree.
+-- Each node shows: constructor name :: TypeInfo {rType, pType, chainName, tags=[..., Alg ...]}
+printStage :: (Monad m) => CompilerConfig -> String -> Program -> m ()
+printStage CompilerConfig {showIntermediates=True} label prog =
+  trace (unlines (stageHeader label ++ prettyPrintProg prog ++ [""])) (return ())
+printStage _ _ _ = return ()
+
+printStageIR :: (Monad m) => CompilerConfig -> String -> IREnv -> m ()
+printStageIR CompilerConfig {showIntermediates=True} label ir =
+  trace (unlines (stageHeader label ++ lines (pPrintIREnv ir) ++ [""])) (return ())
+printStageIR _ _ _ = return ()
+
+stageHeader :: String -> [String]
+stageHeader label =
+  [ replicate (length decorated) '='
+  , decorated
+  , replicate (length decorated) '='
+  ]
+  where decorated = "=== " ++ label ++ " ==="

@@ -190,11 +190,13 @@ data CompilerConfig = CompilerConfig {
   pruneAnyChecks :: Bool,
   noIntegrate :: Bool,
   noProbability :: Bool,
-  noGenerate :: Bool
+  noGenerate :: Bool,
+  -- When True, print every intermediate AST state during compilation (with full TypeInfo/tags)
+  showIntermediates :: Bool
 } deriving (Show)
 
 defaultCompilerConfig :: CompilerConfig
-defaultCompilerConfig = CompilerConfig {countBranches = False, topKThreshold = Nothing, optimizerLevel = 2, verbose = 0, pruneAnyChecks = False, noIntegrate=False, noProbability=False, noGenerate=False}
+defaultCompilerConfig = CompilerConfig {countBranches = False, topKThreshold = Nothing, optimizerLevel = 2, verbose = 0, pruneAnyChecks = False, noIntegrate=False, noProbability=False, noGenerate=False, showIntermediates=False}
 --3: convert algortihm-and-type-annotated Exprs into abstract representation of explicit computation:
 --    Fold enum ranges, algorithms, etc. into a representation of computation that can be directly converted into code.
 

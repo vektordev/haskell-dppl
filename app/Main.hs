@@ -33,7 +33,8 @@ data GlobalOpts = GlobalOpts {
   pruneAnys :: Bool,
   noInteg :: Bool,
   noProb :: Bool,
-  noGen :: Bool, 
+  noGen :: Bool,
+  debugIntermediates :: Bool,
   commandOpts :: CommandOpts
 }
 
@@ -125,6 +126,10 @@ parseGlobalOpts = GlobalOpts
             ( long "noGenerate"
             <> short 'G'
             <> help "The compiler does not generate a generate function. This function may be required for the code to work")
+        <*> switch
+            ( long "debugIntermediates"
+            <> short 'd'
+            <> help "Print every intermediate AST state during compilation with full annotations (rType, pType, chainName, tags including Algorithm). Useful for diagnosing which stage introduces a defect.")
         <*> hsubparser (
           command "compile" (info parseCompileOpts (progDesc "Compiles the program with inference interface into target language"))
           <> command "generate" (info parseGenerateOpts (progDesc "Runs the generate pass of the program"))
@@ -191,9 +196,9 @@ main = transpile =<< execParser opts
             <> header "Haskell DPPL" )
 
 transpile :: GlobalOpts -> IO ()
-transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl, pruneAnys=anyChecks, noInteg=nInteg, noProb=nProb, noGen=nGen}) = do
+transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl, pruneAnys=anyChecks, noInteg=nInteg, noProb=nProb, noGen=nGen, debugIntermediates=dbgInter}) = do
   prog <- parseProgram inFile
-  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen})
+  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen, showIntermediates=dbgInter})
   case options of
     CompileOpts{language=lang, outputFile=outFile, trunc=trnc} -> do
       case codeGenToLang lang trnc conf prog of
