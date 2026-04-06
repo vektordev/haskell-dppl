@@ -1,0 +1,248 @@
+-- ============================================================
+-- SPLL Syntax Showcase
+-- ============================================================
+-- Demonstrates confirmed-compiling syntax across all three
+-- inference modes (generate, probability, integrate).
+-- See docs/spll-showcase-todo.md for untested/known-broken
+-- patterns and deviations from Haskell notation.
+-- ============================================================
+
+
+-- ============================================================
+-- ALGEBRAIC DATA TYPES
+-- ============================================================
+-- Declared with `data` before all function definitions.
+-- Fields: name::Type, separated by commas.
+-- Constructors separated by |.  Zero-field constructors allowed.
+-- `depth N` at the END of the whole declaration caps unrolling.
+-- Auto-generated per constructor:
+--   isConstructorName :: T -> Bool      (guard predicate)
+--   fieldName         :: T -> FieldType (accessor)
+-- ============================================================
+
+data Shape = Circle radius::Float | Rectangle width::Float, height::Float
+
+-- Zero-field (enum-style) constructors
+data Coin = Heads | Tails
+
+-- Recursive type with depth cap
+data FList = FCons hd::Float, tl::FList | FNil depth 10
+
+
+-- ============================================================
+-- PRIMITIVE DISTRIBUTIONS
+-- ============================================================
+
+uniform01 = Uniform   -- U(0,1)
+stdNormal = Normal    -- N(0,1)
+
+
+-- ============================================================
+-- ARITHMETIC
+-- ============================================================
+-- Float: + - * /    Integer: ++    Power: **
+-- Negative literals require parens in expression position:
+--   x + (-1.0)   not   x + -1.0
+
+-- Affine transform: Normal(mu, sigma)
+locScale mu sigma = Normal * sigma + mu
+
+-- Integer addition and power
+intExample a b = (a ** 2) ++ b
+
+-- Subtraction (binary minus is fine)
+subtract1 x = x - 1.0
+
+-- Negative literal inside an expression
+shiftDown x = x + (-0.5)
+
+
+-- ============================================================
+-- COMPARISON AND LOGIC
+-- ============================================================
+-- Operators: < > == && || not
+--
+-- GOTCHA: && is at *multiplication* precedence and || at
+-- *addition* precedence -- both ABOVE comparisons (< > ==).
+--   WRONG: a < 0.5 && b < 0.8   -- parses as a < (0.5 && b) < 0.8
+--   RIGHT: (a < 0.5) && (b < 0.8)
+-- Always parenthesise comparison sub-expressions.
+--
+-- `not` is a prefix operator (not a function):
+--   not (Uniform < 0.7)         OK
+--   not Uniform < 0.7           parses as (not Uniform) < 0.7
+--
+-- >= is NOT available as an operator in .ppl files.
+-- Express a >= b as: not (a < b)
+
+-- Conjunction
+bothLow = (Uniform < 0.25) && (Uniform < 0.8)
+
+-- Disjunction
+eitherLow = (Uniform < 0.75) || (Uniform < 0.2)
+
+-- Negation and >= workaround
+notHigh      = not (Uniform < 0.7)
+atLeastHalf x = not (x < 0.5)
+
+
+-- ============================================================
+-- IF-THEN-ELSE
+-- ============================================================
+-- if <cond> then <expr> else <expr>
+-- Both branches must share the same type.
+-- ============================================================
+
+-- Bernoulli(p)
+bernoulli p = if Uniform < p then 1.0 else 0.0
+
+-- Nested; >= expressed as not (x < 1.0)
+clamp01 x =
+  if x < 0.0        then 0.0
+  else if not (x < 1.0) then 1.0
+  else x
+
+
+-- ============================================================
+-- RECURSIVE FUNCTIONS
+-- ============================================================
+
+factorial x = if x < 1.5 then 1.0 else factorial (x + (-1.0)) * x
+
+dice sides =
+  if sides == 1.0          then 1.0
+  else if Uniform < (1.0 / sides) then sides
+  else dice (sides + (-1.0))
+
+
+-- ============================================================
+-- LET-IN BINDINGS
+-- ============================================================
+-- let <pattern> = <expr> in <body>
+--
+-- Stochastic bindings must be used *exactly once* in
+-- probability/integrate modes (linearity constraint).
+-- Using a stochastic let-binding twice causes a forward-
+-- chaining failure at compile time.
+--
+-- Destructuring patterns (tuple, list-cons, Either branch)
+-- internally double-use the bound expression, so they only
+-- work safely with *deterministic* RHS values.
+-- See docs/spll-showcase-todo.md for details.
+
+-- Single-use stochastic binding (safe)
+shiftedSample = let u = Uniform in u + 1.0
+
+-- Deterministic binding reused twice (fine -- no randomness)
+reuseConst = let c = 2.0 in (Uniform * c) + c
+
+-- Tuple destructuring with deterministic RHS
+pairSum = let (a, b) = (1.0, 2.0) in (Uniform + a) + b
+
+-- List-cons destructuring with deterministic RHS
+listExample = let x : xs = [1.0, 0.5, 0.25] in x + head xs
+
+-- Either destructuring: asserts the constructor before binding
+fromLeftBound  = let left  a = left  2.5 in Uniform + a
+fromRightBound = let right b = right 1.5 in Normal  + b
+
+
+-- ============================================================
+-- LAMBDA EXPRESSIONS
+-- ============================================================
+-- \param -> body
+-- \p1 p2 -> body   (sugar for \p1 -> \p2 -> body)
+-- Immediate application: (\x -> body)(arg)
+
+shifted     = (\x -> x + 1.0)(Uniform)
+applyStored = let f = \x -> x * 2.0 in f Uniform
+multiParam  = (\x y -> x + y) Normal Uniform
+
+
+-- ============================================================
+-- INJECTED LIBRARY FUNCTIONS (InjF)
+-- ============================================================
+-- Carry forward AND inverse semantics for inference.
+-- Partial application is supported: `plus 1.0` yields
+-- a Float->Float function usable with map.
+
+expNormal  = exp Normal          -- log-normal
+negUniform = neg Uniform         -- U(-1, 0)
+recipHalf  = recip 2.0           -- deterministic: 0.5
+
+firstDraw    = head [Normal, 0.5, Uniform]
+shiftedDraws = map (plus 1.0) [Uniform, Normal]
+scaledDraws  = map (mult 2.0) [Uniform, Normal]
+
+firstOfPair  = fst (Normal, Uniform * 2.0)
+secondOfPair = snd (Normal, Uniform * 2.0)
+
+-- Either InjFs: lowercase `left`/`right` in .ppl expressions.
+-- Uppercase Left/Right is only for value literals in .tst files.
+wrappedL  = left  Normal
+wrappedR  = right Uniform
+unwrapped = fromLeft (left Normal)
+
+shiftEither e = mapEither (\x -> x + 1.0) (\y -> y + (-1.0)) e
+
+
+-- ============================================================
+-- LIST LITERALS AND CONS
+-- ============================================================
+-- [e1, e2, e3]  -- literal
+-- e : rest      -- cons
+-- GOTCHA: : is LEFT-associative in SPLL (unlike Haskell).
+--   a : b : []   parses as (a : b) : []  -- type error!
+-- Use explicit right-nesting: a : (b : [])
+
+threeDraws  = [Normal, Uniform, Normal * 2.0 + 0.5]
+consExample = Normal : (Uniform : [])
+
+gaussList = if Uniform > 0.5 then [] else Normal : gaussList
+
+
+-- ============================================================
+-- TUPLE LITERALS
+-- ============================================================
+-- (e1, e2)           -- pair
+-- (e1, (e2, e3))     -- nested triple
+
+examplePair  = (Normal, Uniform)
+nestedTriple = (Normal, (Uniform, Normal * 0.5))
+
+
+-- ============================================================
+-- ADT CONSTRUCTION AND FIELD ACCESS
+-- ============================================================
+
+aCircle = Circle 1.5
+aRect   = Rectangle 2.0 3.0
+
+shapeArea s =
+  if isCircle s
+  then radius s * radius s
+  else width s * height s
+
+shortFList = FCons 0.3 (FCons 0.7 FNil)
+listHead   = hd shortFList
+
+
+-- ============================================================
+-- THETA TREES (learned parameters)
+-- ============================================================
+-- theta <tree> @ <index>     scalar from the tree
+-- subtree <tree> @ <index>   sub-ThetaTree
+
+withTheta thetas = Uniform + (theta thetas @ 0)
+
+
+-- ============================================================
+-- MAIN
+-- Two-component Gaussian mixture; all three inference modes
+-- are tractable.
+-- ============================================================
+
+main =
+  if Uniform < 0.5
+  then locScale 0.0 2.0
+  else locScale 1.0 1.0
