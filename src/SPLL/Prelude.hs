@@ -9,6 +9,7 @@ import SPLL.Validator (validateProgram)
 import IRInterpreter (generateRand, generateDet)
 import Control.Monad.Random (Rand, RandomGen)
 import SPLL.IRCompiler
+import SPLL.IROptimizer (optimizeEnv)
 import Debug.Trace
 import Data.Either
 import SPLL.Typing.ForwardChaining (annotateProg)
@@ -221,11 +222,14 @@ compile conf p = do
   pPrintIfMoreVerbose conf annotated
   printStage conf "After Algorithm Annotation (tags include Alg)" annotated
 
-  let compiled = envToIR conf annotated
+  let unoptimized = envToIRUnoptimized conf annotated
+  printStageIR conf "After IR Compilation (pre-optimization)" unoptimized
+
+  let compiled = optimizeEnv conf unoptimized
   printIfVerbose conf "\n=== Compiled Program ==="
   pPrintIfMoreVerbose conf compiled
   printIfVerbose conf (pPrintIREnv compiled)
-  printStageIR conf "After IR Compilation" compiled
+  printStageIR conf "After Optimization" compiled
   return compiled
 
 runGen :: (RandomGen g) => CompilerConfig -> Program -> [IRValue] -> Either CompilerError (Rand g IRValue)

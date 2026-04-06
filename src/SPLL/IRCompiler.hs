@@ -1,5 +1,6 @@
 module SPLL.IRCompiler (
-  envToIR
+  envToIR,
+  envToIRUnoptimized
 )where
 
 import SPLL.IntermediateRepresentation
@@ -45,7 +46,10 @@ data CompilerMetadata = CompilerMetadata {
 }
 
 envToIR :: CompilerConfig -> Program -> IREnv
-envToIR conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb, noGenerate=noGen} p@Program{adts=adts} = optimizeEnv conf $ IREnv (-- map optimizer over all second elements of the tuples
+envToIR conf p = optimizeEnv conf (envToIRUnoptimized conf p)
+
+envToIRUnoptimized :: CompilerConfig -> Program -> IREnv
+envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb, noGenerate=noGen} p@Program{adts=adts} = IREnv (
   map (makeAutoNeural adts conf) (neurals p) ++
   map (\(name, binding) ->
     let typeEnv = getGlobalTypeEnv p
