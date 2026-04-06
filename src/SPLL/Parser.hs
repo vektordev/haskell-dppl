@@ -111,24 +111,24 @@ pNormal = do
   _ <- symbol "Normal"
   return normal
 
-pIfThenElse :: MonadParser m => m Expr
-pIfThenElse = do
+pIfThenElse :: MonadParser m => [ADTDecl] -> m Expr
+pIfThenElse adts = do
   _ <- keyword "if"
-  a <- pExpr
+  a <- pExpr adts
   _ <- keyword "then"
-  b <- pExpr
+  b <- pExpr adts
   _ <- keyword "else"
-  c <- pExpr
+  c <- pExpr adts
   return (ifThenElse a b c)
 
-pLetIn :: MonadParser m => m Expr
-pLetIn = do
+pLetIn :: MonadParser m => [ADTDecl] -> m Expr
+pLetIn adts = do
   keyword "let"
-  lhs <- pExpr
+  lhs <- pExpr adts
   symbol "="
-  definition <- pExpr
+  definition <- pExpr adts
   keyword "in"
-  scope <- pExpr
+  scope <- pExpr adts
   destr <- letInDestructor lhs
   return $ destr definition scope
 
@@ -163,10 +163,10 @@ pError = do
   char '"'
   return (Error makeTypeInfo message)
 
-pMaybeApply :: MonadParser m => m Expr
-pMaybeApply = choice [parens pExpr, pVar]
+pMaybeApply :: MonadParser m => [ADTDecl] -> m Expr
+pMaybeApply adts = choice [parens (pExpr adts), pVar]
 
-pExpr :: MonadParser m => m Expr
+pExpr :: MonadParser m => [ADTDecl] -> m Expr
 pExpr = expr
 {-
 pExpr = dbg "expr" $ choice [
@@ -187,28 +187,28 @@ pExpr = dbg "expr" $ choice [
 
 -- TODO: I think this parser should accept any pExpr instead of identifiers. Might get ambiguous parses though.
 
-pTheta :: MonadParser m => m Expr
-pTheta = dbg "theta" $ do
+pTheta :: MonadParser m => [ADTDecl] -> m Expr
+pTheta adts = dbg "theta" $ do
   keyword "theta"
-  thetaExpr <- pExpr
+  thetaExpr <- pExpr adts
   symbol "@"
   ix <- pInt
   return $ theta thetaExpr ix
 
-pSubtree :: MonadParser m => m Expr
-pSubtree = dbg "subtree" $ do
+pSubtree :: MonadParser m => [ADTDecl] -> m Expr
+pSubtree adts = dbg "subtree" $ do
   keyword "subtree"
-  thetaExpr <- pExpr
+  thetaExpr <- pExpr adts
   symbol "@"
   ix <- pInt
   return $ subtree thetaExpr ix
 
 -- just to make this parser quite unambiguous, we're going to demand parens around both ops.
-pBinaryOp :: MonadParser m => m Expr
-pBinaryOp = dbg "binOp" $ do
-  arg1 <- parens pExpr
+pBinaryOp :: MonadParser m => [ADTDecl] -> m Expr
+pBinaryOp adts = dbg "binOp" $ do
+  arg1 <- parens (pExpr adts)
   op <- pOp
-  arg2 <- parens pExpr
+  arg2 <- parens (pExpr adts)
   case op of
     ">=" -> return $ arg1 #># arg2
     _ -> fail $ "unknown operator: " ++ op
@@ -338,11 +338,11 @@ pThetaTree = do
   symbol "]"
   return $ ThetaTree thetas subtrees
 
-pBinaryF :: MonadParser m => m Expr
-pBinaryF = do
+pBinaryF :: MonadParser m => [ADTDecl] -> m Expr
+pBinaryF adts = do
   op <- choice (map (symbol . fst) binaryFs)
-  left <- pExpr
-  right <- pExpr
+  left <- pExpr adts
+  right <- pExpr adts
   case (lookup op binaryFs) of
     Nothing -> error "unexpected parse error"
     Just opconstructor -> return (opconstructor left right)
@@ -399,10 +399,10 @@ pRange = do
   (symbol "]")
   return (from, to)
 
-pListExpr :: MonadParser m => m Expr
-pListExpr = do
+pListExpr :: MonadParser m => [ADTDecl] -> m Expr
+pListExpr adts = do
   (symbol "[")
-  exprs <- expr `sepBy` (symbol ",")
+  exprs <- expr adts `sepBy` (symbol ",")
   (symbol "]")
   return (foldr cons nul exprs)
 
@@ -412,9 +412,9 @@ valueParser = pValue
 pCSV :: MonadParser m => m [Value]
 pCSV = valueParser `sepBy` (symbol ",")
 
-pDefinition :: MonadParser m => m (Either FnDecl NeuralDecl)
-pDefinition = do
-  x <- choice [fmap Right pNeural, fmap Left pFunction]
+pDefinition :: MonadParser m => [ADTDecl] -> m (Either FnDecl NeuralDecl)
+pDefinition adts = do
+  x <- choice [fmap Right pNeural, fmap Left (pFunction adts)]
   return x
 
 --TODO: Add validation via AutoNeural.
@@ -517,12 +517,12 @@ validateNeuralType' rt (MultiDiscretes vals) = do
 validateNeuralType' rt _ = fail $ "Unknown type for neural declaration: " ++ show rt
 
 
-pFunction :: MonadParser m => m FnDecl
-pFunction = dbg "function" $ do
+pFunction :: MonadParser m => [ADTDecl] -> m FnDecl
+pFunction adts = dbg "function" $ do
   name <- pIdentifier
   args <- many pIdentifier
   _ <- symbol "="
-  e <- pExpr
+  e <- pExpr adts
   let lambdas = foldr (#->#) e args
   return (name, lambdas)
 
@@ -554,7 +554,7 @@ pADTField = do
 pProg :: MonadParser m => m Program
 pProg = do
   adts <- dbg "trying ADTs" (many (try (scTop *> pADT)))
-  defs <- dbg "trying definition" (many (try (scTop *> pDefinition)))
+  defs <- dbg "trying definition" (many (try (scTop *> pDefinition adts)))
   scTop
   _ <- eof
   return (aggregateDefinitions adts defs)
@@ -607,21 +607,21 @@ pNull = do
   _ <- symbol "[]"
   return $ nul
 
-pTuple :: MonadParser m => m Expr
-pTuple = parens $ do
-  x <- expr
+pTuple :: MonadParser m => [ADTDecl] -> m Expr
+pTuple adts = parens $ do
+  x <- expr adts
   _ <- symbol ","
-  y <- expr
+  y <- expr adts
   return $ tuple x y
 
 
 -- | Parse atomic expressions (no recursion)
-atom :: MonadParser m => m Expr
-atom = choice [
+atom :: MonadParser m => [ADTDecl] -> m Expr
+atom adts = choice [
     pNull,
-    try (pTuple),
-    try (pListExpr),
-    try (parens expr),  -- Parenthesized expressions first
+    try (pTuple adts),
+    try (pListExpr adts),
+    try (parens (expr adts)),  -- Parenthesized expressions first
     pUniform,     -- Built-in distributions
     pNormal,
     pConst,       -- Constants (numbers)
@@ -629,42 +629,42 @@ atom = choice [
   ] <* sc
 
 -- | Parse expressions that start with keywords
-keywordExpr :: MonadParser m => m Expr
-keywordExpr = dbg "keywordExpr" $ choice [
-    pIfThenElse,
-    pLetIn,
-    pLambda,
-    pTheta,
-    pSubtree,
+keywordExpr :: MonadParser m => [ADTDecl] -> m Expr
+keywordExpr adts = dbg "keywordExpr" $ choice [
+    pIfThenElse adts,
+    pLetIn adts,
+    pLambda adts,
+    pTheta adts,
+    pSubtree adts,
     pError
   ] <* sc
 
 -- | Lambda expressions
-pLambda :: MonadParser m => m Expr
-pLambda = do
+pLambda :: MonadParser m => [ADTDecl] -> m Expr
+pLambda adts = do
     _ <- symbol "\\"
     params <- some pIdentifier
     _ <- symbol "->"
-    body <- expr
+    body <- expr adts
     return $ foldr (#->#) body params
 
 -- | Parse function application
 -- This handles both normal application and built-in functions like multF
-application :: MonadParser m => m Expr
-application = dbg "application" $do
-    func <- try atom
-    args <- try $ many (try atom <|> try (parens expr))
+application :: MonadParser m => [ADTDecl] -> m Expr
+application adts = dbg "application" $ do
+    func <- try (atom adts)
+    args <- try $ many (try (atom adts) <|> try (parens (expr adts)))
     case func of
         Var _ name -> case lookup name binaryFs of
             Just constructor -> return (construct2 constructor args)
             Nothing -> case lookup name unaryFs of
                 Just constructor -> return (construct1 constructor args)
-                Nothing -> case lookup name (globalFEnv []) of
+                Nothing -> case lookup name (globalFEnv adts) of
                   Just _ -> 
-                    if length args == (parameterCount [] name) then
-                      return (constructN (parameterCount [] name) (injF name) args)
-                    else if length args < (parameterCount [] name) then
-                      constructNPartial (parameterCount [] name) (injF name) args
+                    if length args == (parameterCount adts name) then
+                      return (constructN (parameterCount adts name) (injF name) args)
+                    else if length args < (parameterCount adts name) then
+                      constructNPartial (parameterCount adts name) (injF name) args
                     else
                       fail $ "Function " ++ name ++ " expects " ++ show (parameterCount [] name) ++ " parameters, but got " ++ show (length args)
                   Nothing -> return $ foldl apply func args
@@ -672,13 +672,13 @@ application = dbg "application" $do
 
 
 -- | Main expression parser using makeExprParser
-expr :: MonadParser m => m Expr
-expr = dbg "expr" $ makeExprParser term opTable
+expr :: MonadParser m => [ADTDecl] -> m Expr
+expr adts = dbg "expr" $ makeExprParser term opTable
   where
     term = choice [
-        try application,
-        try keywordExpr,
-        atom
+        try (application adts),
+        try (keywordExpr adts),
+        atom adts
       ]
 
 -- | Helper for debuggable subparsers
@@ -687,7 +687,7 @@ withDebug label p = dbg label p
 
 -- | Top level entry point
 parseExpr :: MonadParser m => m Expr
-parseExpr = sc *> expr <* eof
+parseExpr = sc *> expr [] <* eof
 
 -- | Parse a parenthesized expression
 parens :: MonadParser m => m a -> m a
@@ -697,19 +697,7 @@ parens = between (char '(' *> sc) (char ')' *> sc)
 identifier :: MonadParser m => m String
 identifier = (:) <$> letterChar <*> many alphaNumChar <* sc
 
--- | Parse an atomic expression (identifier or parenthesized expression)
-term :: MonadParser m => m Expr
-term =  parens expr
-    <|> pConst
-    <|> var <$> identifier
 
-
--- | Handle function application
-appTable :: MonadParser m => m Expr
-appTable = do
-  f <- term
-  args <- many term
-  return $ foldl apply f args
 
 multLikeOpList :: [([Char], Expr -> Expr -> Expr)]
 multLikeOpList = [("**", (#<*>#)), ("*", (#*#)), ("/", (#/#)), ("&&", (#&&#))]
@@ -748,7 +736,7 @@ opTable =
 
 -- | Top-level parser
 expressionParser :: MonadParser m => m Expr
-expressionParser = sc *> expr <* eof
+expressionParser = sc *> expr [] <* eof
 
 type ExprBuilder m = [Expr] -> m (Either String Expr)
 type BuilderMap m = Map.Map String (ExprBuilder m)

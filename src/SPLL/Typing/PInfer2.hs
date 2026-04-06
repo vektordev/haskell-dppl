@@ -531,10 +531,12 @@ infer env expr = case expr of
     let constraint = if all isEnumerable paramsExpr then EnumPlusConstraint else PlusConstraint
     tv <- fresh
     let s_acc = foldl compose emptySubst (map fst4 p_inf)
-    let pt@(p_fst:p_rst) = map trd4 p_inf
-    let leftPts = map Left pt
-    -- Fold all pTypes into a series of Plus Constraints (p1 + (p2 + (p3 + p4)))
-    let cs = leftPts ++ foldr (\p acc -> [Right $ constraint (Left p) (Right acc)]) [Left p_fst] p_rst
+    let cs = case map trd4 p_inf of
+          pt@(p_fst:p_rst) -> do
+            let leftPts = map Left pt
+            -- Fold all pTypes into a series of Plus Constraints (p1 + (p2 + (p3 + p4)))
+            leftPts ++ foldr (\p acc -> [Right $ constraint (Left p) (Right acc)]) [Left p_fst] p_rst
+          [] -> []
     return (s_acc, concatMap snd4 p_inf ++ [(tv,cs)], tv, InjF (setPType ti tv) name (map frth4 p_inf))
 
   Not ti e -> do

@@ -39,7 +39,7 @@ data Expr =
               -- Boolean Operations
               | GreaterThan TypeInfo Expr Expr
               | LessThan TypeInfo Expr Expr
-              | Equals TypeInfo Expr Expr
+              | Equals TypeInfo Expr Expr   -- deprecated in favor of injF "eq"
               | And TypeInfo Expr Expr
               | Or TypeInfo Expr Expr
               | Not TypeInfo Expr
@@ -142,7 +142,7 @@ data GenericValue a = VBool Bool
            | VClosure [(String, a)] String a 
            | VADT String [GenericValue a]
            | VAny -- Only used for marginal queries
-           -- | Value of TArrow a b could be Expr TypeInfo, with Expr being a Lambda?
+           | VAnyExcept [a] -- Only used for marginal queries
            deriving (Show, Eq)
 
 instance Functor GenericValue where
@@ -158,10 +158,11 @@ instance Functor GenericValue where
   fmap _ (VThetaTree x) = VThetaTree x
   fmap f (VClosure e n ex) = VClosure (map (Data.Bifunctor.second f) e) n (f ex)
   fmap f (VADT n adt) = VADT n (map (fmap f) adt)
+  fmap f (VAnyExcept x) = VAnyExcept (map f x)
   fmap _ VAny = VAny
 
 
-isVInt, isVBool, isVSymbol, isVFloat, isVList, isVTuple, isVEither, isVBranch, isVThetaTree, isVClosure, isVADT :: GenericValue a -> Bool
+isVInt, isVBool, isVSymbol, isVFloat, isVList, isVTuple, isVEither, isVBranch, isVThetaTree, isVClosure, isVADT, isVAnyExcept :: GenericValue a -> Bool
 isVInt (VInt _) = True
 isVInt _ = False
 isVBool (VBool _) = True
@@ -184,6 +185,8 @@ isVClosure (VClosure _ _ _) = True
 isVClosure _ = False
 isVADT (VADT _ _) = True
 isVADT _ = False
+isVAnyExcept (VAnyExcept _) = True
+isVAnyExcept _ = False
 
 data MultiValue = MultiDiscretes [Value]
                 | MultiTuple MultiValue MultiValue

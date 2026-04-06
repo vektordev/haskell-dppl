@@ -1,0 +1,2 @@
+data Coin = Heads | Tails
+main = isHeads (if Uniform < 0.3 then Heads else Tails)

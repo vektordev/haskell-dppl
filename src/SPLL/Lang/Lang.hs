@@ -339,9 +339,9 @@ setSubExprs expr [a,b] = case expr of
   Equals t _ _ -> Equals t a b
   And t _ _ -> And t a b
   Or t _ _ -> Or t a b
-  Cons t _ b -> Cons t a b
-  TCons t _ b -> TCons t a b
-  LetIn t x _ b -> LetIn t x a b
+  Cons t _ _ -> Cons t a b
+  TCons t _ _ -> TCons t a b
+  LetIn t x _ _ -> LetIn t x a b
   Apply t _ _ -> Apply t a b
   InjF t n _ -> InjF t n [a, b]
   _ -> error "unmatched expr in setSubExprs"
