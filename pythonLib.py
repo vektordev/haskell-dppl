@@ -7,16 +7,16 @@ import itertools
 def sign(x):
   return -1 if x < 0 else 0 if x == 0 else 1
 
-def density_IRUniform(x):
+def density_uniform(x):
   return 1 if 0 <= x <= 1 else 0
 
-def cumulative_IRUniform(x):
+def cumulative_uniform(x):
   return 0 if x < 0 else x if x <= 1 else 1
 
-def density_IRNormal(x):
+def density_normal(x):
   return 1 / sqrt(2 * pi) * e**(-(x**2)/2)
 
-def cumulative_IRNormal(x):
+def cumulative_normal(x):
   return (1.0 + erf(x / sqrt(2.0))) / 2.0
 
 def rand():

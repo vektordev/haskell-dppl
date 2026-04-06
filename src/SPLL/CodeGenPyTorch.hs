@@ -8,7 +8,7 @@ module SPLL.CodeGenPyTorch (
 
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types
-import Data.List (intercalate, isSuffixOf, nub, find)
+import Data.List (intercalate, isPrefixOf, isSuffixOf, nub, find)
 import Data.Char (toUpper, toLower)
 import Data.Maybe (fromJust, fromMaybe)
 import Debug.Trace (trace, traceShowId)
@@ -76,6 +76,10 @@ pyOps OpOr = "or"
 pyOps OpAnd = "and"
 pyOps OpEq = "=="
 pyOps x = error $ "Operator has no infix representation: " ++ show x
+
+pyDistName :: Distribution -> String
+pyDistName IRNormal = "normal"
+pyDistName IRUniform = "uniform"
 
 pyUnaryOps :: UnaryOperand -> String
 pyUnaryOps OpNeg = "-"
@@ -234,34 +238,202 @@ unwrapLambdas (IRLambda name rest) = (name:otherNames, plainTree)
   where (otherNames, plainTree) = unwrapLambdas rest
 unwrapLambdas anyNode = ([], anyNode)
 
+-- | True when the block is exactly one if-elif-else construct with nothing after it.
+-- After the else: body ends, no further top-level lines may appear.
+isSingleIfBlock :: [String] -> Bool
+isSingleIfBlock (l:ls) | "if " `isPrefixOf` l = afterIf ls
+isSingleIfBlock _ = False
+
+-- Scanning lines that may be elif/else or indented body after the opening if.
+afterIf :: [String] -> Bool
+afterIf [] = True
+afterIf (l:ls)
+  | "    " `isPrefixOf` l  = afterIf ls
+  | "elif " `isPrefixOf` l = afterIf ls
+  | l == "else:"           = afterElse ls
+  | otherwise              = False   -- second if, bare assignment, etc.
+
+-- Scanning lines inside an else: body; nothing may follow outside it.
+afterElse :: [String] -> Bool
+afterElse [] = True
+afterElse (l:ls)
+  | "    " `isPrefixOf` l = afterElse ls
+  | otherwise             = False   -- anything after else body = multiple blocks
+
+-- | Collapse `else: if` into `elif` only when the else-branch is a single if-block.
+mergeElif :: [String] -> [String]
+mergeElif stmts@(ifLine:rest) | "if " `isPrefixOf` ifLine && isSingleIfBlock stmts =
+  ("elif " ++ drop 3 ifLine) : rest
+mergeElif stmts = "else:" : indentOnce stmts
+
+containsIf :: IRExpr -> Bool
+containsIf (IRIf _ _ _)    = True
+containsIf (IROp _ l r)    = containsIf l || containsIf r
+containsIf (IRUnaryOp _ e) = containsIf e
+containsIf (IRApply f x)   = containsIf f || containsIf x
+containsIf (IRTCons f s)   = containsIf f || containsIf s
+containsIf (IRTFst x)      = containsIf x
+containsIf (IRTSnd x)      = containsIf x
+containsIf (IRLetIn _ v b) = containsIf v || containsIf b
+containsIf (IRHead x)      = containsIf x
+containsIf (IRTail x)      = containsIf x
+containsIf (IRLeft x)      = containsIf x
+containsIf (IRRight x)     = containsIf x
+containsIf (IRFromLeft x)  = containsIf x
+containsIf (IRFromRight x) = containsIf x
+containsIf (IRIsLeft x)    = containsIf x
+containsIf (IRIsRight x)   = containsIf x
+containsIf (IRDensity _ x) = containsIf x
+containsIf (IRCumulative _ x) = containsIf x
+containsIf (IRMap f x)     = containsIf f || containsIf x
+containsIf (IRIndex l i)   = containsIf l || containsIf i
+containsIf (IRCons h t)    = containsIf h || containsIf t
+containsIf (IRTheta x _)   = containsIf x
+containsIf (IRSubtree x _) = containsIf x
+containsIf _               = False
+
+-- | Like generateExpression, but lifts complex IRIf nodes into temp variables,
+-- returning prefix statements and the resulting expression.
+generateExpressionLifted :: IRExpr -> GlobalVariableSupply ([String], String)
+generateExpressionLifted expr@(IRIf cond left right)
+  | not (containsIf left || containsIf right) = do
+      (condStmts, c) <- generateExpressionLifted cond
+      l <- generateExpression left
+      r <- generateExpression right
+      return (condStmts, "(" ++ l ++ " if " ++ c ++ " else " ++ r ++ ")")
+  | otherwise = do
+      tmpId <- lift demandUniqueNumber
+      let tmp = "_t" ++ show tmpId
+      stmts <- generateLetInStatement tmp expr
+      return (stmts, tmp)
+generateExpressionLifted (IRLetIn name val body) = do
+  valStmts <- generateLetInStatement name val
+  (bodyStmts, bodyExpr) <- generateExpressionLifted body
+  return (valStmts ++ bodyStmts, bodyExpr)
+generateExpressionLifted (IROp OpApprox l r) = do
+  (ls, le) <- generateExpressionLifted l
+  (rs, re) <- generateExpressionLifted r
+  return (ls ++ rs, "isclose(" ++ le ++ ", " ++ re ++ ")")
+generateExpressionLifted (IROp op l r) = do
+  (ls, le) <- generateExpressionLifted l
+  (rs, re) <- generateExpressionLifted r
+  return (ls ++ rs, "(" ++ le ++ " " ++ pyOps op ++ " " ++ re ++ ")")
+generateExpressionLifted (IRUnaryOp op e) = do
+  (ss, se) <- generateExpressionLifted e
+  return (ss, pyUnaryOps op ++ "(" ++ se ++ ")")
+generateExpressionLifted (IRTFst x) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, sx ++ "[0]")
+generateExpressionLifted (IRTSnd x) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, sx ++ "[1]")
+generateExpressionLifted (IRHead x) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, sx ++ "[0]")
+generateExpressionLifted (IRTail x) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, sx ++ "[1:]")
+generateExpressionLifted (IRLeft x) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, "Left(" ++ sx ++ ")")
+generateExpressionLifted (IRRight x) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, "Right(" ++ sx ++ ")")
+generateExpressionLifted (IRFromLeft x) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, "fromLeft(" ++ sx ++ ")")
+generateExpressionLifted (IRFromRight x) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, "fromRight(" ++ sx ++ ")")
+generateExpressionLifted (IRIsLeft x) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, "isinstance(" ++ sx ++ ", Left)")
+generateExpressionLifted (IRIsRight x) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, "isinstance(" ++ sx ++ ", Right)")
+generateExpressionLifted (IRDensity dist x) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, "density_" ++ pyDistName dist ++ "(" ++ sx ++ ")")
+generateExpressionLifted (IRCumulative dist x) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, "cumulative_" ++ pyDistName dist ++ "(" ++ sx ++ ")")
+generateExpressionLifted (IRMap f x) = do
+  (fs, fe) <- generateExpressionLifted f
+  (xs, xe) <- generateExpressionLifted x
+  return (fs ++ xs, "mapList(" ++ fe ++ ", " ++ xe ++ ")")
+generateExpressionLifted (IRCons hd tl) = do
+  (hs, he) <- generateExpressionLifted hd
+  (ts, te) <- generateExpressionLifted tl
+  return (hs ++ ts, "ConsInferenceList(" ++ he ++ ", " ++ te ++ ")")
+generateExpressionLifted (IRIndex lst idx) = do
+  (ls, le) <- generateExpressionLifted lst
+  (is, ie) <- generateExpressionLifted idx
+  return (ls ++ is, "(" ++ le ++ ")[" ++ ie ++ "]")
+generateExpressionLifted (IRTheta x i) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, sx ++ "[0][" ++ show i ++ "]")
+generateExpressionLifted (IRSubtree x i) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, sx ++ "[1][" ++ show i ++ "]")
+generateExpressionLifted (IRTCons f s) = do
+  (fs, fe) <- generateExpressionLifted f
+  (ss, se) <- generateExpressionLifted s
+  return (fs ++ ss, "T(" ++ fe ++ ", " ++ se ++ ")")
+generateExpressionLifted expr@(IRApply _ _) = do
+  let (fn, args) = collectApplyChain expr
+  (fss, fn') <- generateExpressionLifted fn
+  argResults <- mapM generateExpressionLifted args
+  let argStmts = concatMap fst argResults
+      args'    = map snd argResults
+  return (fss ++ argStmts, fn' ++ "(" ++ intercalate ", " args' ++ ")")
+generateExpressionLifted expr = do
+  e <- generateExpression expr
+  return ([], e)
+
 generateStatementBlock :: IRExpr -> GlobalVariableSupply [String]
 generateStatementBlock (IRLetIn name x body) = do
   s1 <- generateLetInStatement name x
   s2 <- generateStatementBlock body
   return (s1 ++ s2)
 generateStatementBlock (IRIf cond left right) = do
-  cCond  <- generateExpression cond
+  (condStmts, cCond) <- generateExpressionLifted cond
   cLeft  <- generateStatementBlock left
   cRight <- generateStatementBlock right
   let l1 = "if " ++ cCond ++ ":"
-      l2 = "else:"
-  return ([l1] ++ indentOnce cLeft ++ [l2] ++ indentOnce cRight)
+  return $ condStmts ++ [l1] ++ indentOnce cLeft ++ mergeElif cRight
+generateStatementBlock (IRTCons (IRTCons f s) bc) = do
+  fStmts  <- generateLetInStatement "_r0" f
+  sStmts  <- generateLetInStatement "_r1" s
+  bcStmts <- generateLetInStatement "_r2" bc
+  return (fStmts ++ sStmts ++ bcStmts ++ ["return T(T(_r0, _r1), _r2)"])
+generateStatementBlock (IRTCons f s) = do
+  fStmts <- generateLetInStatement "_r0" f
+  sStmts <- generateLetInStatement "_r1" s
+  return (fStmts ++ sStmts ++ ["return T(_r0, _r1)"])
 generateStatementBlock expr = do
-  e <- generateExpression expr
-  return ["return " ++ e]
+  (stmts, e) <- generateExpressionLifted expr
+  return (stmts ++ ["return " ++ e])
 
 
 generateLetInStatement :: String -> IRExpr -> GlobalVariableSupply [String]
 generateLetInStatement name lmd@(IRLambda _ _) =
   generateFunction False (name, (lmd, "Inner function: " ++ name))
 generateLetInStatement name (IRIf cond left right) = do
-  c         <- generateExpression cond
-  leftStmts <- generateLetInStatement name left
-  rightStmts<- generateLetInStatement name right
-  return (["if " ++ c ++ ":"] ++ indentOnce leftStmts ++ ["else:"] ++ indentOnce rightStmts)
+  (condStmts, c) <- generateExpressionLifted cond
+  leftStmts  <- generateLetInStatement name left
+  rightStmts <- generateLetInStatement name right
+  return $ condStmts ++ ["if " ++ c ++ ":"] ++ indentOnce leftStmts ++ mergeElif rightStmts
+generateLetInStatement name (IRTCons f s) = do
+  fStmts <- generateLetInStatement (name ++ "_0") f
+  sStmts <- generateLetInStatement (name ++ "_1") s
+  return (fStmts ++ sStmts ++ [name ++ " = T(" ++ name ++ "_0, " ++ name ++ "_1)"])
+generateLetInStatement name (IRLetIn innerName innerVal body) = do
+  innerStmts <- generateLetInStatement innerName innerVal
+  bodyStmts  <- generateLetInStatement name body
+  return (innerStmts ++ bodyStmts)
 generateLetInStatement name x = do
-  v <- generateExpression x
-  return [name ++ " = " ++ v]
+  (stmts, expr) <- generateExpressionLifted x
+  return (stmts ++ [name ++ " = " ++ expr])
 
 generateExpression :: IRExpr -> GlobalVariableSupply String
 generateExpression (IRIf cond left right) = do
@@ -276,16 +448,16 @@ generateExpression (IROp OpApprox left right) = do
 generateExpression (IROp op left right) = do
   l <- generateExpression left
   r <- generateExpression right
-  return ("((" ++ l ++ ") " ++ pyOps op ++ " (" ++ r ++ "))")
+  return ("(" ++ l ++ " " ++ pyOps op ++ " " ++ r ++ ")")
 generateExpression (IRUnaryOp op expr) = do
   e <- generateExpression expr
   return (pyUnaryOps op ++ "(" ++ e ++ ")")
 generateExpression (IRTheta x i) = do
   sx <- generateExpression x
-  return ("(" ++ sx ++ ")[0][" ++ show i ++ "]")
+  return (sx ++ "[0][" ++ show i ++ "]")
 generateExpression (IRSubtree x i) = do
   sx <- generateExpression x
-  return ("(" ++ sx ++ ")[1][" ++ show i ++ "]")
+  return (sx ++ "[1][" ++ show i ++ "]")
 generateExpression (IRConst v) =
   return (pyVal v)
 generateExpression (IRCons hd tl) = do
@@ -302,20 +474,20 @@ generateExpression (IRTCons fs sn) = do
   return ("T(" ++ f ++ ", " ++ s ++ ")")
 generateExpression (IRHead x) = do
   sx <- generateExpression x
-  return ("(" ++ sx ++ ")[0]")
+  return (sx ++ "[0]")
 generateExpression (IRTail x) = do
   sx <- generateExpression x
-  return ("(" ++ sx ++ ")[1:]")
+  return (sx ++ "[1:]")
 generateExpression (IRMap f x) = do
   ff <- generateExpression f
   xx <- generateExpression x
   return ("mapList(" ++ ff ++ ", " ++ xx ++ ")")
 generateExpression (IRTFst x) = do
   sx <- generateExpression x
-  return ("(" ++ sx ++ ")[0]")
+  return (sx ++ "[0]")
 generateExpression (IRTSnd x) = do
   sx <- generateExpression x
-  return ("(" ++ sx ++ ")[1]")
+  return (sx ++ "[1]")
 generateExpression (IRLeft x) = do
   sx <- generateExpression x
   return ("Left(" ++ sx ++ ")")
@@ -336,10 +508,10 @@ generateExpression (IRIsRight x) = do
   return ("isinstance(" ++ sx ++ ", Right)")
 generateExpression (IRDensity dist x) = do
   sx <- generateExpression x
-  return ("density_" ++ show dist ++ "(" ++ sx ++ ")")
+  return ("density_" ++ pyDistName dist ++ "(" ++ sx ++ ")")
 generateExpression (IRCumulative dist x) = do
   sx <- generateExpression x
-  return ("cumulative_" ++ show dist ++ "(" ++ sx ++ ")")
+  return ("cumulative_" ++ pyDistName dist ++ "(" ++ sx ++ ")")
 generateExpression (IRSample IRNormal) =
   return "randn()"
 generateExpression (IRSample IRUniform) =
@@ -353,7 +525,7 @@ generateExpression expr@(IRApply _ _) = do
   let (fn, args) = collectApplyChain expr
   fn' <- generateExpression fn
   args' <- mapM generateExpression args
-  return ("(" ++ fn' ++ ")(" ++ intercalate ", " args' ++ ")")
+  return (fn' ++ "(" ++ intercalate ", " args' ++ ")")
 generateExpression (IREnumSum name enumRange expr) = do
   e <- generateExpression expr
   varName <- addOrGetFromGlobalStorage enumRange
