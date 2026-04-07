@@ -201,8 +201,8 @@ toIRInference :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad Com
 toIRInference meta True expr sample | rType (getTypeInfo expr) == TBool = do
   (pFalse, _, bcFalse) <- toIRInference meta False expr (IRConst (VBool False))
   return (IRIf sample (IRConst (VFloat 1)) pFalse, const0, bcFalse)
-toIRInference meta False e sample | [(mean, std)] <- [(mean,std) | IsNormal mean std <- tags (getTypeInfo e)] = return (IROp OpDiv (IRDensity IRNormal (IROp OpDiv (IROp OpSub sample (IRConst $ VFloat mean)) (IRConst $ VFloat std))) (IRConst $ VFloat std), IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), const0)
-toIRInference meta True e sample | [(mean, std)] <- [(mean,std) | IsNormal mean std <- tags (getTypeInfo e)] = return (IRCumulative IRNormal (IROp OpDiv (IROp OpSub sample (IRConst $ VFloat mean)) (IRConst $ VFloat std)),const0, const0)
+toIRInference meta False e sample | [(mean, std)] <- [(mean,std) | IsNormal mean std <- tags (getTypeInfo e)] = return (IROp OpDiv (IRDensity IRNormal (IROp OpDiv (IROp OpSub sample (IRConst $ VFloat mean)) (IRConst $ VFloat std))) (IRConst $ VFloat std), IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), IRConst (VFloat 1))
+toIRInference meta True e sample | [(mean, std)] <- [(mean,std) | IsNormal mean std <- tags (getTypeInfo e)] = return (IRCumulative IRNormal (IROp OpDiv (IROp OpSub sample (IRConst $ VFloat mean)) (IRConst $ VFloat std)),const0, IRConst (VFloat 1))
 toIRInference meta False e sample | [(mean, std)] <- [(mean,std) | IsLogNormal mean std <- tags (getTypeInfo e)] = do
   let correctedSample = IROp OpDiv (IROp OpSub (IRUnaryOp OpLog sample) (IRConst $ VFloat mean)) (IRConst $ VFloat std)
   let normalPDF = IRDensity IRNormal correctedSample
@@ -210,31 +210,31 @@ toIRInference meta False e sample | [(mean, std)] <- [(mean,std) | IsLogNormal m
   let p = IROp OpDiv normalPDF covFactor
   let dim = IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1)
   let negativeGuard e = IRIf (IROp OpGreaterThan sample const0) e const0
-  return (negativeGuard p, dim, const0)
+  return (negativeGuard p, dim, IRConst (VFloat 1))
 toIRInference meta True e sample | [(mean, std)] <- [(mean,std) | IsLogNormal mean std <- tags (getTypeInfo e)] = do
   let correctedSample = IROp OpDiv (IROp OpSub (IRUnaryOp OpLog sample) (IRConst $ VFloat mean)) (IRConst $ VFloat std)
   let normalCDF = IRCumulative IRNormal correctedSample
   let negativeGuard e = IRIf (IROp OpGreaterThan sample const0) e const0
-  return (negativeGuard normalCDF, const0, const0)
-toIRInference meta False (Normal t) sample = return (IRDensity IRNormal sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), const0)
-toIRInference meta False (Uniform t) sample = return (IRDensity IRUniform sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), const0)
-toIRInference meta True (Normal t) sample = return (IRCumulative IRNormal sample, const0, const0)
-toIRInference meta True (Uniform t) sample = return (IRCumulative IRUniform sample, const0, const0)
+  return (negativeGuard normalCDF, const0, IRConst (VFloat 1))
+toIRInference meta False (Normal t) sample = return (IRDensity IRNormal sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), IRConst (VFloat 1))
+toIRInference meta False (Uniform t) sample = return (IRDensity IRUniform sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), IRConst (VFloat 1))
+toIRInference meta True (Normal t) sample = return (IRCumulative IRNormal sample, const0, IRConst (VFloat 1))
+toIRInference meta True (Uniform t) sample = return (IRCumulative IRUniform sample, const0, IRConst (VFloat 1))
 toIRInference meta False (Constant TypeInfo {rType=rt} value) sample = do
   let comp = case rt of
               TFloat   -> IROp OpApprox sample (IRConst (fmap failConversion value))
               TVarR _  -> IROp OpApprox sample (IRConst (fmap failConversion value))
               _        -> IROp OpEq sample (IRConst (fmap failConversion value))
   expr <- indicator comp
-  return (expr, const0, const0)
-toIRInference meta True (Constant TypeInfo {rType=rt} value) sample = return (compareValueExpr rt (IRConst (valueToIR value)) sample, const0, const0)
+  return (expr, const0, IRConst (VFloat 1))
+toIRInference meta True (Constant TypeInfo {rType=rt} value) sample = return (compareValueExpr rt (IRConst (valueToIR value)) sample, const0, IRConst (VFloat 1))
 toIRInference meta True (ThetaI _ a i) sample = do
   a' <- toIRGenerate meta a
-  return (IRIf (IROp OpLessThan sample (IRTheta a' i)) (IRConst $ VFloat 0) (IRConst $ VFloat 1), const0, const0)
+  return (IRIf (IROp OpLessThan sample (IRTheta a' i)) (IRConst $ VFloat 0) (IRConst $ VFloat 1), const0, IRConst (VFloat 1))
 toIRInference meta False (ThetaI _ a i) sample = do
   a' <- toIRGenerate meta a
   expr <- indicator (IROp OpApprox sample (IRTheta a' i))
-  return (expr, const0, const0)
+  return (expr, const0, IRConst (VFloat 1))
 toIRInference meta False (Equals TypeInfo{rType=rt, tags=extras} a b) sample = do
   let (detParam, probParam) =
         if extras `hasAlgorithm` "equalsLeft" then
@@ -266,17 +266,19 @@ toIRInference meta cumulative (IfThenElse t cond left right) sample = do
     (leftExpr, leftDim, branches) <- toIRInference metaTrue cumulative left sample
     (IRVar var_condT_p, condTrueDim) `multP` (leftExpr, leftDim) <&> (\x -> (x, branches)))) -- We need the branches outside of this scope. Append it to the tuple
   let mul1 = bimap (generateLetInExpr binds1) (generateLetInExpr binds1) mul1Raw
+  let leftBranchesExpr = generateLetInExpr binds1 leftBranches
   ((mul2Raw, rightBranches), binds2) <- lift (runWriterT (do
     let metaFalse = meta { accProb = IROp OpMult (accProb meta) (IRVar var_condF_p) }
     (rightExpr, rightDim, branches) <- toIRInference metaFalse cumulative right sample
     (IRVar var_condF_p, condFalseDim) `multP` (rightExpr, rightDim) <&> (\x -> (x, branches)))) -- We need the branches outside of this scope. Append it to the tuple
   let mul2 = bimap (generateLetInExpr binds2) (generateLetInExpr binds2) mul2Raw
+  let rightBranchesExpr = generateLetInExpr binds2 rightBranches
   -- If probability of this branch is 0 then set the product to 0 manually. This branch could throw an error multiplied by 0
   let zeroCheck c = IRIf (IROp OpApprox c const0) const0
   let mul1Zeroed = bimap (zeroCheck condTrueExpr) (zeroCheck condTrueExpr) mul1
   let mul2Zeroed = bimap (zeroCheck condFalseExpr) (zeroCheck condFalseExpr) mul2
   (addExpr, addDim) <- mul1Zeroed `addP` mul2Zeroed
-  let branches = (IROp OpPlus condTrueBranches ((IROp OpPlus leftBranches rightBranches)))
+  let branches = IROp OpSub (IROp OpPlus condTrueBranches (IROp OpPlus leftBranchesExpr rightBranchesExpr)) (IRConst (VFloat 1))
   case thr of
     Just thresh -> do
       let accTrue = IROp OpMult (accProb meta) (IRVar var_condT_p)
@@ -296,9 +298,9 @@ toIRInference meta cumulative (IfThenElse t cond left right) sample = do
               addDim)
       let returnBranches = IRIf
             (IROp OpLessThan accTrue (IRConst (VFloat thresh)))
-            (IROp OpPlus condTrueBranches rightBranches)
+            rightBranchesExpr
             (IRIf (IROp OpLessThan accFalse (IRConst (VFloat thresh)))
-              (IROp OpPlus condTrueBranches leftBranches)
+              leftBranchesExpr
               branches)
       return (returnExpr, returnDim, returnBranches)
     -- p(y) = p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))

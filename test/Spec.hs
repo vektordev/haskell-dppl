@@ -43,6 +43,7 @@ import TestParser
 import TestInternals (test_internals, classConstraintTests)
 import Test.HUnit (runTestTT)
 import End2EndTesting
+import TestCaseParser (parseProgram)
 import SPLL.Prelude
 
 
@@ -641,34 +642,26 @@ checkTopKNeverInflates thresh (p, inp, params, _) = ioProperty $ do
       return $ counterexample (show topKP ++ " > " ++ show exactP) (topKP <= exactP + 1e-9)
     _ -> return $ counterexample "Return type was no tuple" False
 
--- Branch counts must be ≤ no-topK branch counts (pruned branches are excluded).
--- Uses a two-level program where the inner if has its own branch node (BC=1),
--- making the difference observable when topK prunes it.
+-- BC counts both if-else leaf branches and InjF enumerable branches.
+-- testDiceAdd = plusI(dice6, dice6): for P(sum=7), all 6 die combinations are valid,
+-- so without topK BC=6.  With threshold=0.2 (>1/6), accProb*(1/6)<0.2 → all 6 pruned → BC=0.
 prop_TopKFewerBranches :: Property
 prop_TopKFewerBranches = ioProperty $ do
-  let twoLevel = Program [("main",
-        ifThenElse (bernoulli 0.5)
-          (ifThenElse (bernoulli 0.5) uniform (constF 3.0))
-          (constF 1.0))] [] []
-  -- thresh=0.6: accTrue=0.5 < 0.6 → prune true branch (inner if) → BC drops by 1
-  topKBCResult <- evalRandIO $ irDensityTopKBC twoLevel 0.6 (VFloat 0.5) []
-  noBCResult   <- evalRandIO $ irDensityBC     twoLevel     (VFloat 0.5) []
+  topKBCResult <- evalRandIO $ irDensityTopKBC testDiceAdd 0.2 (VInt 7) []
+  noBCResult   <- evalRandIO $ irDensityBC     testDiceAdd     (VInt 7) []
   case (topKBCResult, noBCResult) of
     (VTuple _ (VTuple _ (VFloat topKBC)), VTuple _ (VTuple _ (VFloat noBC))) ->
-      return $ counterexample (show topKBC ++ " > " ++ show noBC ++ " (topK should not exceed no-topK branch count)") (topKBC <= noBC)
+      return $ counterexample (show topKBC ++ " >= " ++ show noBC ++ " (topK should reduce branch count when a branch is pruned)") (topKBC < noBC)
     _ -> return $ counterexample "Return type was no tuple" False
 
--- Higher threshold prunes more: BC(high_thresh) ≤ BC(low_thresh).
+-- Higher threshold prunes more InjF enum branches: BC(high_thresh) ≤ BC(low_thresh).
+-- testDiceAdd at P(sum=7): each d6 face has P=1/6.
+--   threshold=0.1 (<1/6): accProb*(1/6)>0.1 → all 6 branches kept → BC=6
+--   threshold=0.2 (>1/6): accProb*(1/6)<0.2 → all 6 branches pruned → BC=0
 prop_TopKMonotonicBranches :: Property
 prop_TopKMonotonicBranches = ioProperty $ do
-  let twoLevel = Program [("main",
-        ifThenElse (bernoulli 0.5)
-          (ifThenElse (bernoulli 0.5) uniform (constF 3.0))
-          (constF 1.0))] [] []
-  -- thresh=0.3: accTrue=0.5 ≥ 0.3, inner not pruned → BC = 2
-  -- thresh=0.6: accTrue=0.5 < 0.6, inner pruned     → BC = 1
-  bcLow  <- evalRandIO $ irDensityTopKBC twoLevel 0.3 (VFloat 0.5) []
-  bcHigh <- evalRandIO $ irDensityTopKBC twoLevel 0.6 (VFloat 0.5) []
+  bcLow  <- evalRandIO $ irDensityTopKBC testDiceAdd 0.1 (VInt 7) []
+  bcHigh <- evalRandIO $ irDensityTopKBC testDiceAdd 0.2 (VInt 7) []
   case (bcLow, bcHigh) of
     (VTuple _ (VTuple _ (VFloat lowBC)), VTuple _ (VTuple _ (VFloat highBC))) ->
       return $ counterexample (show highBC ++ " > " ++ show lowBC ++ " (higher threshold should prune at least as much)") (highBC <= lowBC)
@@ -682,6 +675,81 @@ irDensityTopKBC p thresh s params = IRInterpreter.generateRand (neurals p) irEnv
         annotated = annotateAlgsProg typedProg
         Right typedProg = addTypeInfo preAnnotated
         preAnnotated = annotateEnumsProg p
+
+-- BC for if-else: each leaf emits 1, IfThenElse uses formula cond+left+right-1.
+-- A 3-leaf if-else (if b then (if b2 then uniform else 3.0) else 1.0) should give BC=3.
+-- inner: cond(1)+uniform(1)+const3(1)-1=2; outer: cond(1)+2+const1(1)-1=3.
+prop_BCLeafCountIfElse :: Property
+prop_BCLeafCountIfElse = ioProperty $ do
+  let prog = Program [("main", ifThenElse (bernoulli 0.5) (ifThenElse (bernoulli 0.5) uniform (constF 3.0)) (constF 1.0))] [] []
+  result <- evalRandIO $ irDensityBC prog (VFloat 0.5) []
+  case result of
+    VTuple _ (VTuple _ (VFloat bc)) -> return $ counterexample ("Expected BC=3, got " ++ show bc) (bc == 3.0)
+    _ -> return $ counterexample "Return type was no tuple" False
+
+-- dice 6 is a pure if-else tree with 6 leaves. BC should equal 6 for any query.
+-- dice1=1; dice(n)=cond(1)+constI(n)(1)+dice(n-1)-1 = dice(n-1)+1; so dice(6)=6.
+prop_BCDiceIfElse :: Property
+prop_BCDiceIfElse = ioProperty $ do
+  result <- evalRandIO $ irDensityBC testDice (VInt 3) []
+  case result of
+    VTuple _ (VTuple _ (VFloat bc)) -> return $ counterexample ("Expected BC=6, got " ++ show bc) (bc == 6.0)
+    _ -> return $ counterexample "Return type was no tuple" False
+
+-- Consistency: dice6 as if-else (BC=6) and testDiceAdd as InjF (BC=6 for P(7)) agree.
+prop_BCConsistency :: Property
+prop_BCConsistency = ioProperty $ do
+  diceResult    <- evalRandIO $ irDensityBC testDice    (VInt 3) []
+  diceAddResult <- evalRandIO $ irDensityBC testDiceAdd (VInt 7) []
+  case (diceResult, diceAddResult) of
+    (VTuple _ (VTuple _ (VFloat diceBC)), VTuple _ (VTuple _ (VFloat diceAddBC))) ->
+      return $ counterexample ("dice BC=" ++ show diceBC ++ ", diceAdd BC=" ++ show diceAddBC ++ " (expected both=6)") (diceBC == diceAddBC)
+    _ -> return $ counterexample "Return type was no tuple" False
+
+-- dice 6 has equal 1/6 marginal probability per face regardless of tree structure.
+-- Global topK therefore either prunes all branches or none:
+--   threshold=0.1 (<1/6): accumulated prob of every branch is ~1/6 > 0.1 → nothing pruned, P(3)=1/6
+--   threshold=0.2 (>1/6): accumulated prob of every branch is ~1/6 < 0.2 → all pruned, P(3)=0
+-- Local topK would behave differently because the raw bernoulli probabilities vary by depth.
+prop_TopKDiceAllOrNothing :: Property
+prop_TopKDiceAllOrNothing = ioProperty $ do
+  low   <- evalRandIO $ irDensityTopK testDice 0.1 (VInt 3) []
+  high  <- evalRandIO $ irDensityTopK testDice 0.2 (VInt 3) []
+  exact <- evalRandIO $ irDensity     testDice     (VInt 3) []
+  case (low, high, exact) of
+    (VTuple lowP _, VTuple (VFloat hP) _, VTuple exactP _) ->
+      return $ lowP `reasonablyClose` exactP
+            .&&. counterexample ("threshold=0.2 should prune all branches: P=" ++ show hP) (hP == 0.0)
+    _ -> return $ counterexample "Return type was no tuple" False
+
+-- testDiceAdd = plusI(dice, dice): InjF enumerates discrete values of the left arg.
+-- Each d6 face has P=1/6; InjF branch filter is (accProb * pLeft > threshold).
+--   threshold=0.1 (<1/6): 1.0*(1/6)=0.167 > 0.1 → all enum branches kept, P(7)=6/36
+--   threshold=0.2 (>1/6): 1.0*(1/6)=0.167 < 0.2 → all enum branches pruned, P(7)=0
+prop_TopKInjFEnum :: Property
+prop_TopKInjFEnum = ioProperty $ do
+  low   <- evalRandIO $ irDensityTopK testDiceAdd 0.1 (VInt 7) []
+  high  <- evalRandIO $ irDensityTopK testDiceAdd 0.2 (VInt 7) []
+  exact <- evalRandIO $ irDensity     testDiceAdd     (VInt 7) []
+  case (low, high, exact) of
+    (VTuple lowP _, VTuple (VFloat hP) _, VTuple exactP _) ->
+      return $ lowP `reasonablyClose` exactP
+            .&&. counterexample ("threshold=0.2 should prune all InjF enum branches: P=" ++ show hP) (hP == 0.0)
+    _ -> return $ counterexample "Return type was no tuple" False
+
+-- Parses testCases/dice.ppl (d4, equal P=0.25 per face) and runs it through the full
+-- parsing + compilation pipeline with topK enabled.
+-- Note: runProb does not thread acc_prob, so we use irDensityTopK directly after parsing.
+-- threshold=0.1 (<0.25): no branch is pruned; each face should have P=0.25.
+prop_TopKEndToEnd :: Property
+prop_TopKEndToEnd = ioProperty $ do
+  prog <- parseProgram "testCases/dice.ppl"
+  results <- mapM (\v -> evalRandIO $ irDensityTopK prog 0.1 (VFloat v) []) [1.0, 2.0, 3.0, 4.0]
+  return $ conjoin
+    [ case r of
+        VTuple p _ -> p `reasonablyClose` VFloat 0.25
+        x -> counterexample ("Unexpected result shape: " ++ show x) False
+    | r <- results ]
 
 return []
 
