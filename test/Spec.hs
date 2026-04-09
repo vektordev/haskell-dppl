@@ -38,6 +38,7 @@ import Numeric.AD (grad', auto)
 import Numeric.AD.Internal.Reverse (Reverse, Tape)
 import Data.Reflection (Reifies)
 import Data.Bifunctor (second)
+import SPLL.Typing.ForwardChaining (annotateProg)
 import SPLL.Parser
 import TestParser
 import TestInternals (test_internals, classConstraintTests)
@@ -326,8 +327,9 @@ irDensityTopK p thresh s params = IRInterpreter.generateRand (neurals p) irEnv (
   where Just (irExpr, _) = probFun (lookupIREnv "main" irEnv)
         sampleExpr = IRConst s
         irEnv = envToIR defaultCompilerConfig {topKThreshold = Just thresh} annotated
-        annotated = annotateAlgsProg typedProg
-        Right typedProg = addTypeInfo preAnnotated
+        annotated = (annotateAlgsProg . annotateConditionalProg) typedProg
+        Right typedProg = addTypeInfo forwardChained
+        forwardChained = annotateProg preAnnotated
         preAnnotated = annotateEnumsProg p
 
 irDensityBC :: RandomGen g => Program -> IRValue -> [IRExpr]-> Rand g IRValue
@@ -335,8 +337,9 @@ irDensityBC p s params = IRInterpreter.generateRand (neurals p) irEnv (sampleExp
   where Just (irExpr, _) = probFun (lookupIREnv "main" irEnv)
         sampleExpr = IRConst s
         irEnv = envToIR defaultCompilerConfig {countBranches = True} annotated
-        annotated = annotateAlgsProg typedProg
-        Right typedProg = addTypeInfo preAnnotated
+        annotated = (annotateAlgsProg . annotateConditionalProg) typedProg
+        Right typedProg = addTypeInfo forwardChained
+        forwardChained = annotateProg preAnnotated
         preAnnotated = annotateEnumsProg p
 
 irDensity :: RandomGen g => Program -> IRValue -> [IRExpr] -> Rand g IRValue
@@ -344,8 +347,9 @@ irDensity p s params = IRInterpreter.generateRand (neurals p) irEnv (sampleExpr:
   where Just (irExpr, _) = probFun (lookupIREnv "main" irEnv)
         sampleExpr = IRConst s
         irEnv = envToIR defaultCompilerConfig annotated
-        annotated = annotateAlgsProg typedProg
-        Right typedProg = addTypeInfo preAnnotated
+        annotated = (annotateAlgsProg . annotateConditionalProg) typedProg
+        Right typedProg = addTypeInfo forwardChained
+        forwardChained = annotateProg preAnnotated
         preAnnotated = annotateEnumsProg p
 
 irIntegral :: RandomGen g => Program -> IRValue -> IRValue -> [IRExpr] -> Rand g IRValue
@@ -362,16 +366,18 @@ irIntegral p low high params = do
     lowExpr = IRConst low
     highExpr = IRConst high
     irEnv = envToIR defaultCompilerConfig annotated
-    annotated = annotateAlgsProg typedProg
-    Right typedProg = addTypeInfo preAnnotated
+    annotated = (annotateAlgsProg . annotateConditionalProg) typedProg
+    Right typedProg = addTypeInfo forwardChained
+    forwardChained = annotateProg preAnnotated
     preAnnotated = annotateEnumsProg p
 
 irGen :: RandomGen g => Program -> [IRExpr] -> Rand g IRValue
 irGen p params = IRInterpreter.generateRand (neurals p) irEnv params irExpr
   where Just (irExpr, _) = genFun (lookupIREnv "main" irEnv)
         irEnv = envToIR defaultCompilerConfig annotated
-        annotated = annotateAlgsProg typedProg
-        Right typedProg = addTypeInfo preAnnotated
+        annotated = (annotateAlgsProg . annotateConditionalProg) typedProg
+        Right typedProg = addTypeInfo forwardChained
+        forwardChained = annotateProg preAnnotated
         preAnnotated = annotateEnumsProg p
 
 reasonablyClose :: IRValue -> IRValue -> Property
@@ -672,8 +678,9 @@ irDensityTopKBC p thresh s params = IRInterpreter.generateRand (neurals p) irEnv
   where Just (irExpr, _) = probFun (lookupIREnv "main" irEnv)
         sampleExpr = IRConst s
         irEnv = envToIR defaultCompilerConfig {topKThreshold = Just thresh, countBranches = True} annotated
-        annotated = annotateAlgsProg typedProg
-        Right typedProg = addTypeInfo preAnnotated
+        annotated = (annotateAlgsProg . annotateConditionalProg) typedProg
+        Right typedProg = addTypeInfo forwardChained
+        forwardChained = annotateProg preAnnotated
         preAnnotated = annotateEnumsProg p
 
 -- BC for if-else: each leaf emits 1, IfThenElse uses formula cond+left+right-1.
@@ -750,6 +757,70 @@ prop_TopKEndToEnd = ioProperty $ do
         VTuple p _ -> p `reasonablyClose` VFloat 0.25
         x -> counterexample ("Unexpected result shape: " ++ show x) False
     | r <- results ]
+
+-- testConditionalLambdaBC: named deterministic selector applied to dice 2.
+-- Routes through IsConditional + toIREnumerate path in IRCompiler.
+-- dice 2 has 2 discrete values; each iteration traverses one if-else arm → BC = 2.
+-- Currently broken: toIREnumerate (IfThenElse) returns bc=0 AND the Apply case
+-- discards the computed bc, returning const0.
+prop_BCConditionalLambda :: Property
+prop_BCConditionalLambda = ioProperty $ do
+  result <- evalRandIO $ irDensityBC testConditionalLambdaBC (VFloat 1.0) []
+  case result of
+    VTuple _ (VTuple _ (VFloat bc)) ->
+      return $ counterexample ("Expected BC=2, got " ++ show bc) (bc == 2.0)
+    _ -> return $ counterexample ("Unexpected result shape: " ++ show result) False
+
+-- killAll coverage: a program that calls a sub-function via Var where the sub-function
+-- returns a continuous distribution.  With countBranches=False, stripBranchCount must
+-- rewrite IRTFst(IRTSnd(IRVar x)) → IRTSnd(IRVar x) (the killAll IRVar path) so that
+-- the dim field is extracted correctly from the stripped pair result.
+-- If killAll is broken, the dim extracted from "base"'s result would be wrong,
+-- corrupting the change-of-variables correction in the InjF "plus" inference.
+-- P(main = 5.0) = normalPDF(5.0 - 5.0) = normalPDF(0.0) ≈ 0.3989.
+prop_killAllVarExtraction :: Property
+prop_killAllVarExtraction = ioProperty $ do
+  result <- evalRandIO $ irDensity testNormalShiftedViaVar (VFloat 5.0) []
+  case result of
+    VTuple (VFloat p) _ ->
+      return $ counterexample ("Expected normalPDF(0)≈0.3989, got " ++ show p)
+        (abs (p - normalPDF 0.0) < 1e-6)
+    _ -> return $ counterexample ("Unexpected shape: " ++ show result) False
+
+-- Enabling countBranches must not alter probability values, only add a third field.
+-- Verify on testDice that P(X=3) is the same with and without branch counting.
+prop_BCDoesNotChangeProbability :: Property
+prop_BCDoesNotChangeProbability = ioProperty $ do
+  withBC    <- evalRandIO $ irDensityBC testDice (VInt 3) []
+  withoutBC <- evalRandIO $ irDensity   testDice (VInt 3) []
+  case (withBC, withoutBC) of
+    (VTuple (VFloat pBC) _, VTuple (VFloat pNone) _) ->
+      return $ counterexample
+        ("P with BC=" ++ show pBC ++ " /= P without BC=" ++ show pNone)
+        (abs (pBC - pNone) < 1e-9)
+    _ -> return $ counterexample
+      ("Unexpected result shapes: " ++ show withBC ++ ", " ++ show withoutBC) False
+
+-- stripBranchCount structural check: when countBranches=False the prob function
+-- should return a pair (prob, dim), not a triple.  We verify this by checking that
+-- the interpreter result has exactly two components (VTuple _ _) and not three
+-- (VTuple _ (VTuple _ _)).
+-- Also exercises the killAll IRVar path: testDice's main calls the dice sub-expression
+-- via Var, so killAll must rewrite IRTFst(IRTSnd(IRVar x)) → IRTSnd(IRVar x).
+prop_stripBranchCountReturnShape :: Property
+prop_stripBranchCountReturnShape = ioProperty $ do
+  withBC    <- evalRandIO $ irDensityBC testDice (VInt 3) []
+  withoutBC <- evalRandIO $ irDensity   testDice (VInt 3) []
+  let isTriple (VTuple _ (VTuple _ _)) = True
+      isTriple _                       = False
+  let isPair  (VTuple _ v) = not (isTriple (VTuple undefined v))
+      isPair  _             = False
+  return $
+    counterexample ("countBranches=True should return triple, got: " ++ show withBC)
+      (isTriple withBC)
+    .&&.
+    counterexample ("countBranches=False should return pair, got: " ++ show withoutBC)
+      (case withoutBC of { VTuple _ (VTuple _ _) -> False; VTuple _ _ -> True; _ -> False })
 
 return []
 

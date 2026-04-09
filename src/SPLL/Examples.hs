@@ -221,6 +221,27 @@ testInjFRenaming = Program [("main", apply ("a" #-># (var "a" #+# uniform)) (con
 testLambdaChoice :: Program
 testLambdaChoice = Program [("main", apply (ifThenElse (bernoulli 0.5) ("x" #-># (normal #+# var "x")) ("y" #-># (uniform #+# var "y"))) (constF 1))] [] []
 
+-- Deterministic conditional function applied to a discrete float argument.
+-- Triggers the IsConditional + toIREnumerate path in IRCompiler.
+-- The argument is a coin flip between 1.0 and 2.0 (2 discrete float values).
+-- selector maps the outcome: x>1.5 → 1.0, otherwise → 0.0.
+-- 2 discrete values, each iteration contributes bc=1 → expected BC = 2.
+testConditionalLambdaBC :: Program
+testConditionalLambdaBC = Program
+  [ ("main",     apply (var "selector") (ifThenElse (bernoulli 0.5) (constF 2.0) (constF 1.0)))
+  , ("selector", "x" #-># ifThenElse (var "x" #># constF 1.5) (constF 1.0) (constF 0.0))
+  ] [] []
+
+-- Program that calls a named sub-function via Var with a continuous distribution.
+-- With countBranches=False, stripBranchCount must correctly rewrite the dim-extraction
+-- from the sub-function's result variable (killAll IRVar path).
+-- P(main = 5.0) = normalPDF(5.0 - 5.0) = normalPDF(0.0).
+testNormalShiftedViaVar :: Program
+testNormalShiftedViaVar = Program
+  [ ("main", injF "plus" [var "base", constF 5.0])
+  , ("base", normal)
+  ] [] []
+
 testAutoNeural :: Program
 testAutoNeural = Program [("main", "sym" #-># ReadNN makeTypeInfo "readMNist" (var "sym"))] [("readMNist", TArrow TSymbol TInt, Just (MultiDiscretes (map VInt [0..9])))] []
 

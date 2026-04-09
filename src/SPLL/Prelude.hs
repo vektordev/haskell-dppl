@@ -224,8 +224,9 @@ compile conf p = do
 
   let unoptimized = envToIRUnoptimized conf annotated
   printStageIR conf "After IR Compilation (pre-optimization)" unoptimized
+  let stripped = if countBranches conf then unoptimized else stripBranchCount unoptimized
 
-  let compiled = optimizeEnv conf unoptimized
+  let compiled = optimizeEnv conf stripped
   printIfVerbose conf "\n=== Compiled Program ==="
   pPrintIfMoreVerbose conf compiled
   printIfVerbose conf (pPrintIREnv compiled)

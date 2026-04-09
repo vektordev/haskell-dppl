@@ -124,20 +124,22 @@ toValueExpr clauses paramClauses adts startCN =
 -- Takes a chain name of a point in the AST and finds the lambda, this point is equivalent to.
 -- Also return the uniquely identifying tag if the lambda is tagged
 findEquivalentExpression :: FCData -> ChainName -> Maybe (ChainName, ExprInfo, String)
-findEquivalentExpression fcData startCN = case lookup startCN (chainNameInfo fcData) of
-  Nothing -> error $ "Could not find chainName in FCData " ++ startCN
-  -- Found the lambda
-  Just x | isFinalExpr x -> Just (startCN, x, "")
-  -- Expression must be equivalent to a lambda. Look for equilavence relations
-  Just _ -> do
-    -- Only outgoing equivalence relations, so we don't have cycles
-    let origClauses = getAllOriginatingEquivalenceHornClauses (hornClauses fcData) startCN
-    case filter (\(EquivalenceHornClause _ conc ty inv) -> inv == 1) origClauses of
-      [EquivalenceHornClause [pre] _ _ _] -> do
-        (resCN, resInfo, _) <- findEquivalentExpression fcData (untag pre)
-        return (resCN, resInfo, getTag pre)
-      _ -> Nothing
+findEquivalentExpression fcData startCN = go [startCN] startCN
   where
+    go visited cn = case lookup cn (chainNameInfo fcData) of
+      Nothing -> error $ "Could not find chainName in FCData " ++ cn
+      Just x | isFinalExpr x -> Just (cn, x, "")
+      Just _ -> do
+        let origClauses = getAllOriginatingEquivalenceHornClauses (hornClauses fcData) cn
+        case filter (\(EquivalenceHornClause _ _ _ inv) -> inv == 1) origClauses of
+          [EquivalenceHornClause [pre] _ _ _] ->
+            let next = untag pre in
+            if next `elem` visited
+              then Nothing  -- cycle detected; no valid lambda found along this chain
+              else do
+                (resCN, resInfo, _) <- go (next : visited) next
+                return (resCN, resInfo, getTag pre)
+          _ -> Nothing
     isFinalExpr (ApplyInfo _ _) = False
     isFinalExpr (VarInfo _) = False
     isFinalExpr _ = True

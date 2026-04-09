@@ -1,6 +1,7 @@
 module SPLL.IRCompiler (
   envToIR,
-  envToIRUnoptimized
+  envToIRUnoptimized,
+  stripBranchCount
 )where
 
 import SPLL.IntermediateRepresentation
@@ -22,6 +23,7 @@ import SPLL.AutoNeural
 import Data.Functor
 import SPLL.Typing.ForwardChaining
 import Data.List
+import Data.Char (isDigit)
 import SPLL.Typing.AlgebraicDataTypes
 import Data.Bifunctor (Bifunctor(bimap))
 import Utils
@@ -46,7 +48,13 @@ data CompilerMetadata = CompilerMetadata {
 }
 
 envToIR :: CompilerConfig -> Program -> IREnv
-envToIR conf p = optimizeEnv conf (envToIRUnoptimized conf p)
+envToIR conf p
+  | any (null . chainName . getTypeInfo . snd) (functions p) =
+      error "envToIR: one or more top-level expressions have empty chainNames — did you call annotateProg before envToIR?"
+  | otherwise =
+      let unopt   = envToIRUnoptimized conf p
+          stripped = if countBranches conf then unopt else stripBranchCount unopt
+      in optimizeEnv conf stripped
 
 envToIRUnoptimized :: CompilerConfig -> Program -> IREnv
 envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb, noGenerate=noGen} p@Program{adts=adts} = IREnv (
@@ -98,13 +106,9 @@ generateLetInBlock :: CompilerMetadata -> (CompilationResult, [(String, IRExpr)]
 generateLetInBlock meta codeGen =
   case m of
     (IRLambda _ _) -> (foldr (\(var, val) expr  -> IRLetIn var val expr) m binds) --Dont make tuple out of lambdas, as the snd (and thr) element don't contain information anyway
-    _ -> if cb && not (isLambda m) then do
-            generateLetInExpr binds (IRTCons m (IRTCons dim bc))
-          else
-            generateLetInExpr binds (IRTCons m dim)
+    _ -> generateLetInExpr binds (IRTCons m (IRTCons dim bc))
   where
     ((m, dim, bc), binds) = codeGen
-    cb = countBranches (compilerConfig meta)
 
 generateLetInExpr ::  [(Varname, IRExpr)] -> IRExpr -> IRExpr
 generateLetInExpr binds e = foldr (\(var, val) expr  -> IRLetIn var val expr) e binds
@@ -361,10 +365,7 @@ toIRInference meta cumulative (ReadNN _ name symbol) sample = do
   var <- mkVariable "callNN"
   sym <- toIRGenerate meta symbol
   setVariables [(var, IRApply (IRApply (IRVar (name ++ "_auto_prob")) sym) sample)]
-  if countBranches (compilerConfig meta) then
-    return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
-  else
-    return (IRTFst (IRVar var), IRTSnd (IRVar var), const0)
+  return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
 toIRInference meta cumulative (Lambda t name subExpr) sample = do
   let (TArrow paramRType _) = rType t
   case paramRType of
@@ -439,20 +440,14 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample | pType (get
     _ -> do
       retVal <- mkVariable "call"
       setVariables [(retVal, IRApply lIR vIR)]
-      if countBranches (compilerConfig meta) then
-        return (IRTFst (IRVar retVal), IRTFst (IRTSnd (IRVar retVal)), IRTSnd (IRTSnd (IRVar retVal)))
-      else
-        return (IRTFst (IRVar retVal), IRTSnd (IRVar retVal), const0)
+      return (IRTFst (IRVar retVal), IRTFst (IRTSnd (IRVar retVal)), IRTSnd (IRTSnd (IRVar retVal)))
 -- Probabilistic bound expression
 toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=aChainName} l v) sample | isTArrow (rType (getTypeInfo v)) && (pType (getTypeInfo v) == Prob || pType (getTypeInfo v) == Integrate) = do
   lIR <- toIRGenerate meta l
   (vIR, _, _) <- toIRInference meta cumulative v sample
   applied <- mkVariable "call"
   setVariables [(applied, IRApply lIR vIR)]
-  if countBranches (compilerConfig meta) then
-    return (IRTFst (IRVar applied), IRTFst (IRTSnd (IRVar applied)), IRTSnd (IRTSnd (IRVar applied)))
-  else
-    return (IRTFst (IRVar applied), IRTSnd (IRVar applied), const0)
+  return (IRTFst (IRVar applied), IRTFst (IRTSnd (IRVar applied)), IRTSnd (IRTSnd (IRVar applied)))
   where
     isTArrow (TArrow _ _) = True
     isTArrow _ = False
@@ -491,7 +486,7 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=aChainName} l 
                     then IROp OpMult x (IRIf (IROp OpEq dim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs appliedCoV))
                     else IRIf (IROp OpGreaterThan appliedCoV const0) x (IROp OpSub (IRConst (VFloat 1)) x)
     case rt of
-      TArrow _ _ -> return (if countBranches (compilerConfig meta) then wrapInLambdas (IRTCons (scale p) (IRTCons dim bc)) else wrapInLambdas (IRTCons (scale p) dim), const0, const0)
+      TArrow _ _ -> return (wrapInLambdas (IRTCons (scale p) (IRTCons dim bc)), const0, const0)
       _ -> return (wrapInLambdas $ scale p, wrapInLambdas dim, wrapInLambdas bc)
   -- Forward chaining may have messed with the structure of the expression. We may have too many or too few lambdas.
   -- Every lambda, which is not applied, inside of the callable should be present in the retuned IRExpr. 
@@ -518,7 +513,7 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample = error "Thi
 toIRInference meta cumulative (Cons _ hdExpr tlExpr) sample = do
   headTuple <- lift (runWriterT (toIRInferenceSave meta cumulative hdExpr (IRHead sample))) <&> generateLetInBlock meta
   tailTuple <- lift (runWriterT (toIRInferenceSave meta cumulative tlExpr (IRTail sample))) <&> generateLetInBlock meta
-  let dim = if countBranches (compilerConfig meta) then IRTFst . IRTSnd else IRTSnd
+  let dim = IRTFst . IRTSnd
   mult <- (IRTFst headTuple, dim headTuple)  `multP` (IRTFst tailTuple, dim tailTuple)
   return (IRIf (IROp OpEq sample (IRConst $ VList EmptyList)) (IRConst $ VFloat 0) (fst mult), IRIf (IROp OpEq sample (IRConst $ VList EmptyList)) (IRConst $ VFloat 0) (snd mult), IRIf (IROp OpEq sample (IRConst $ VList EmptyList)) (IRConst $ VFloat 0) (IROp OpPlus (IRTSnd (IRTSnd headTuple)) (IRTSnd (IRTSnd tailTuple))))
   --return (IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (fst mult), IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (snd mult), IROp OpPlus headBranches tailBranches)
@@ -755,10 +750,7 @@ toIRInference meta cumulative (Var TypeInfo {rType=rt} n) sample = do
             Just _ -> IRApply (IRApply (IRVar (n ++ functionSuffix)) sample) (accProb meta)
             Nothing -> IRApply (IRVar (n ++ functionSuffix)) sample
       setVariables [(var, callExpr)]
-      if countBranches (compilerConfig meta) then
-          return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
-        else
-          return (IRTFst (IRVar var), IRTSnd (IRVar var), const0)
+      return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
     -- Var is a local variable
     Just (_, False) -> do
       if cumulative then
@@ -1025,3 +1017,43 @@ toIREnumerate meta cumulative (IfThenElse TypeInfo{rType=rt} c t e) sample = do
   return (returnExpr, const0, const0)
 --toIREnumerate meta cumulative (InjF _ name params) distr elem sample
 --  | not (isHigherOrder name) = do
+
+-- | Strip the branch-count field from all probability-mode functions in the environment.
+-- Applied after compilation and before optimisation when countBranches = False.
+-- Two-step: (1) replace every IRTSnd(IRTSnd x) with IRConst(VFloat 0) to kill bc
+-- extractions throughout the body; (2) peel through wrappers to collapse the outermost
+-- (prob, (dim, bc)) triple back to (prob, dim).
+stripBranchCount :: IREnv -> IREnv
+stripBranchCount (IREnv funcs adts) = IREnv (map stripGroup funcs) adts
+  where
+    -- Auto-neural functions manage their own pair/triple format via their own
+    -- countBranches check in makeAutoNeural; skip them here.
+    stripGroup fg
+      | "_auto" `isSuffixOf` groupName fg = fg
+      | otherwise = fg { probFun  = fmap stripFun (probFun fg)
+                       , integFun = fmap stripFun (integFun fg) }
+    stripFun (expr, doc) = (irMap killAll expr, doc)
+
+    -- Apply stripOuterTriple to every lambda body, collapsing (prob, (dim, bc)) → (prob, dim)
+    -- wherever a probability tuple is returned from a lambda.
+    killAll (IRLambda n body) = IRLambda n (stripOuterTriple body)
+    -- Fix dim and bc extractions from called-function results.
+    -- These are stored in variables generated by mkVariable (format "l_<digits>_<suffix>"),
+    -- which distinguishes them from user inputs like "sample" or auto-neural variables.
+    -- After stripping, called functions return pairs so dim is at [1], not [1][0].
+    killAll (IRTFst (IRTSnd (IRVar x))) | isGenVar x = IRTSnd (IRVar x)
+    killAll (IRTSnd (IRTSnd (IRVar x))) | isGenVar x = IRConst (VFloat 0)
+    killAll e = e
+
+    -- Variables from mkVariable have the form "l_<digits>_<suffix>".
+    isGenVar x = "l_" `isPrefixOf` x
+              && not (null rest)
+              && all isDigit (takeWhile (/= '_') rest)
+              && '_' `elem` rest
+      where rest = drop 2 x
+
+    -- Collapse (prob, (dim, _)) → (prob, dim) peeling through IRLambda/IRLetIn wrappers.
+    stripOuterTriple (IRLambda n body)         = IRLambda n (stripOuterTriple body)
+    stripOuterTriple (IRLetIn n v body)        = IRLetIn n v (stripOuterTriple body)
+    stripOuterTriple (IRTCons a (IRTCons b _)) = IRTCons a b
+    stripOuterTriple e                         = e
