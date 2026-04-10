@@ -758,11 +758,9 @@ prop_TopKEndToEnd = ioProperty $ do
         x -> counterexample ("Unexpected result shape: " ++ show x) False
     | r <- results ]
 
--- testConditionalLambdaBC: named deterministic selector applied to dice 2.
+-- testConditionalLambdaBC: named deterministic selector applied to a coin-flip argument.
 -- Routes through IsConditional + toIREnumerate path in IRCompiler.
--- dice 2 has 2 discrete values; each iteration traverses one if-else arm → BC = 2.
--- Currently broken: toIREnumerate (IfThenElse) returns bc=0 AND the Apply case
--- discards the computed bc, returning const0.
+-- Argument has 2 discrete values; each iteration traverses one if-else arm → BC = 2.
 prop_BCConditionalLambda :: Property
 prop_BCConditionalLambda = ioProperty $ do
   result <- evalRandIO $ irDensityBC testConditionalLambdaBC (VFloat 1.0) []
@@ -771,20 +769,20 @@ prop_BCConditionalLambda = ioProperty $ do
       return $ counterexample ("Expected BC=2, got " ++ show bc) (bc == 2.0)
     _ -> return $ counterexample ("Unexpected result shape: " ++ show result) False
 
--- killAll coverage: a program that calls a sub-function via Var where the sub-function
--- returns a continuous distribution.  With countBranches=False, stripBranchCount must
--- rewrite IRTFst(IRTSnd(IRVar x)) → IRTSnd(IRVar x) (the killAll IRVar path) so that
--- the dim field is extracted correctly from the stripped pair result.
--- If killAll is broken, the dim extracted from "base"'s result would be wrong,
--- corrupting the change-of-variables correction in the InjF "plus" inference.
--- P(main = 5.0) = normalPDF(5.0 - 5.0) = normalPDF(0.0) ≈ 0.3989.
+-- killAll coverage: a program that calls a sub-function via Var with a non-trivial
+-- change-of-variables correction.  testNormalScaledViaVar uses injF "mult" with factor
+-- 2.0, whose inverse derivative is 1/2.  If killAll fails to rewrite the dim extraction
+-- from the sub-function result (IRTFst(IRTSnd(IRVar x)) → IRTSnd(IRVar x)), dim would
+-- be 0 and the CoV factor would be skipped, giving normalPDF(1.0) instead of
+-- the correct normalPDF(1.0) * 0.5.
+-- P(main = 2.0) = normalPDF(1.0) * 0.5.
 prop_killAllVarExtraction :: Property
 prop_killAllVarExtraction = ioProperty $ do
-  result <- evalRandIO $ irDensity testNormalShiftedViaVar (VFloat 5.0) []
+  result <- evalRandIO $ irDensity testNormalScaledViaVar (VFloat 2.0) []
   case result of
     VTuple (VFloat p) _ ->
-      return $ counterexample ("Expected normalPDF(0)≈0.3989, got " ++ show p)
-        (abs (p - normalPDF 0.0) < 1e-6)
+      return $ counterexample ("Expected normalPDF(1)*0.5≈" ++ show (normalPDF 1.0 * 0.5) ++ ", got " ++ show p)
+        (abs (p - normalPDF 1.0 * 0.5) < 1e-6)
     _ -> return $ counterexample ("Unexpected shape: " ++ show result) False
 
 -- Enabling countBranches must not alter probability values, only add a third field.
@@ -813,8 +811,6 @@ prop_stripBranchCountReturnShape = ioProperty $ do
   withoutBC <- evalRandIO $ irDensity   testDice (VInt 3) []
   let isTriple (VTuple _ (VTuple _ _)) = True
       isTriple _                       = False
-  let isPair  (VTuple _ v) = not (isTriple (VTuple undefined v))
-      isPair  _             = False
   return $
     counterexample ("countBranches=True should return triple, got: " ++ show withBC)
       (isTriple withBC)

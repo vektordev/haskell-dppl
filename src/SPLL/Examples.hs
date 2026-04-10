@@ -242,6 +242,17 @@ testNormalShiftedViaVar = Program
   , ("base", normal)
   ] [] []
 
+-- Like testNormalShiftedViaVar but uses mult so the change-of-variables correction
+-- is 1/2 rather than 1.  If killAll fails to correctly rewrite dim extraction from
+-- the sub-function result, dim will be 0 and the CoV factor won't be applied,
+-- yielding normalPDF(x/2) instead of the correct normalPDF(x/2) * 0.5.
+-- P(main = 2.0) = normalPDF(1.0) * 0.5.
+testNormalScaledViaVar :: Program
+testNormalScaledViaVar = Program
+  [ ("main", injF "mult" [var "base", constF 2.0])
+  , ("base", normal)
+  ] [] []
+
 testAutoNeural :: Program
 testAutoNeural = Program [("main", "sym" #-># ReadNN makeTypeInfo "readMNist" (var "sym"))] [("readMNist", TArrow TSymbol TInt, Just (MultiDiscretes (map VInt [0..9])))] []
 

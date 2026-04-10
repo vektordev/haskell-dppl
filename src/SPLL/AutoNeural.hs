@@ -64,7 +64,7 @@ makeProb :: [ADTDecl] -> CompilerConfig -> PartitionPlan -> String -> IRExpr
 makeProb adts conf plan nn_name = IRLambda "sample" $ IRLetIn vector (IRApply (IRVar nn_name) (IRVar "l_x_neural_in")) (IRTCons m sndRet)
   where
     (m, dim, bc) = (makeProbRec adts plan 0 (IRVar "sample"))
-    sndRet = if countBranches conf then IRTCons dim bc else dim
+    sndRet = IRTCons dim bc
 
 -- Takes a Tag from a Discretes type and a sample, and builds code that returns the index of the sample in the tag.
 -- step 1: turn the tag into a list of values.

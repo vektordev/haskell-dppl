@@ -426,7 +426,7 @@ toIRInference meta cumulative e@(Apply TypeInfo {rType=rt} l v) sample
   let discreteVVals = head [x | DiscreteValues x <- tags (getTypeInfo v)]
   let sum = IREnumSum boundVar discreteVVals (IRTFst irTuple)
   let bc = IREnumSum boundVar discreteVVals (IRTSnd (IRTSnd irTuple))
-  return (sum, const0, const0)
+  return (sum, const0, bc)
   where
     isDiscretes (DiscreteValues _) = True
     isDiscretes _ = False
@@ -1014,7 +1014,7 @@ toIREnumerate meta cumulative (IfThenElse TypeInfo{rType=rt} c t e) sample = do
   let thenRes = condSelector thenSelector
   let elseRes = notCondSelector elseSelector
   let returnExpr = IROp OpPlus thenRes elseRes
-  return (returnExpr, const0, const0)
+  return (returnExpr, const0, IRConst (VFloat 1))
 --toIREnumerate meta cumulative (InjF _ name params) distr elem sample
 --  | not (isHigherOrder name) = do
 
@@ -1026,11 +1026,7 @@ toIREnumerate meta cumulative (IfThenElse TypeInfo{rType=rt} c t e) sample = do
 stripBranchCount :: IREnv -> IREnv
 stripBranchCount (IREnv funcs adts) = IREnv (map stripGroup funcs) adts
   where
-    -- Auto-neural functions manage their own pair/triple format via their own
-    -- countBranches check in makeAutoNeural; skip them here.
-    stripGroup fg
-      | "_auto" `isSuffixOf` groupName fg = fg
-      | otherwise = fg { probFun  = fmap stripFun (probFun fg)
+    stripGroup fg = fg { probFun  = fmap stripFun (probFun fg)
                        , integFun = fmap stripFun (integFun fg) }
     stripFun (expr, doc) = (irMap killAll expr, doc)
 
