@@ -51,8 +51,7 @@ annotate adts env e = withNewTypeInfo
               setSubExprs e [annotatedL, annotatedV]
       _ -> setSubExprs e (map (annotate adts env) (getSubExprs e))
     valueTgs = discretesTags adts withNewSubExpr
-    normalTgs = normalTags adts withNewSubExpr
-    newTags = normalTgs ++ valueTgs ++ oldTags
+    newTags = valueTgs ++ oldTags
     withNewTypeInfo = setTypeInfo withNewSubExpr (setTags (getTypeInfo withNewSubExpr) newTags)
 
 discretesTags :: [ADTDecl] -> Expr -> [Tag]
@@ -71,42 +70,6 @@ discretesTags adts e = maybeToList valuesTag
         return $ unionMultiValues valuesLeft valuesRight
       (LetIn _ _ _ a) -> getValuesFromExpr a
       _ -> Nothing
-
-normalTags :: [ADTDecl] -> Expr -> [Tag]
-normalTags _ (Normal _) = [IsNormal 0 1]
-normalTags _ (InjF _ "plus" [p0, p1])
-  | (Just (m0, s0)) <- getNormalParameters p0,
-    (Just (m1, s1)) <- getNormalParameters p1 = [IsNormal (m0 + m1) (sqrt (s0*s0 + s1*s1))]
-normalTags _ (InjF _ "plus" [p0, p1])
-  | (Just (m0, s0)) <- getNormalParameters p0,
-    (Just x1) <- getSingleDiscrete p1 = [IsNormal (m0 + x1) s0]
-normalTags _ (InjF _ "plus" [p0, p1])
-  | (Just (m0, s0)) <- getNormalParameters p1,
-    (Just x1) <- getSingleDiscrete p0 = [IsNormal (m0 + x1) s0]
-normalTags _ (InjF _ "mult" [p0, p1])
-  | (Just (m0, s0)) <- getNormalParameters p0,
-    (Just x1) <- getSingleDiscrete p1 = [IsNormal (m0 * x1) (s0 * x1)]
-normalTags _ (InjF _ "mult" [p0, p1])
-  | (Just (m0, s0)) <- getNormalParameters p1,
-    (Just x1) <- getSingleDiscrete p0 = [IsNormal (m0 * x1) (s0 * x1)]
-normalTags _ (InjF _ "exp" [p])
-  | (Just (m, s)) <- getNormalParameters p = [IsLogNormal m s]
-normalTags _ (InjF _ "mult" [p0, p1])
-  | (Just (m0, s0)) <- getLogNormalParameters p0,
-    (Just (m1, s1)) <- getLogNormalParameters p1 = [IsLogNormal (m0 + m1) (sqrt (s0*s0 + s1*s1))]
-normalTags _ (InjF _ "mult" [p0, p1])
-  | (Just (m0, s0)) <- getLogNormalParameters p0,
-    (Just x1) <- getSingleDiscrete p1 = [IsLogNormal (m0 + log x1) s0]
-normalTags _ (InjF _ "mult" [p0, p1])
-  | (Just (m0, s0)) <- getLogNormalParameters p1,
-    (Just x1) <- getSingleDiscrete p0 = [IsLogNormal (m0 + log x1) s0]
-normalTags _ _ = []
-
-getNormalParameters :: Expr -> Maybe (Double, Double)
-getNormalParameters e = listToMaybe [(m, s) | IsNormal m s <- tags (getTypeInfo e)]
-
-getLogNormalParameters :: Expr -> Maybe (Double, Double)
-getLogNormalParameters e = listToMaybe [(m, s) | IsLogNormal m s <- tags (getTypeInfo e)]
 
 getSingleDiscrete :: Expr -> Maybe Double
 getSingleDiscrete e = listToMaybe [x | DiscreteValues (MultiDiscretes [VFloat x]) <- tags (getTypeInfo e)]

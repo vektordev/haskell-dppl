@@ -212,7 +212,6 @@ irSqrt :: IRExpr -> IRExpr
 irSqrt x = IRUnaryOp OpExp (IROp OpMult (IRConst (VFloat 0.5)) (IRUnaryOp OpLog x))
 
 -- | Recursively extract (mu, sigma) as IRExprs from a PNormal-typed expression.
--- Handles structural cases; falls back to IsNormal tags for pre-computed constants.
 toIRNormalParams :: CompilerMetadata -> Expr -> CompilerMonad (IRExpr, IRExpr)
 toIRNormalParams _ (Normal _) = return (IRConst (VFloat 0), IRConst (VFloat 1))
 toIRNormalParams meta (InjF _ "plus" [e0, e1])
@@ -242,14 +241,11 @@ toIRNormalParams meta (InjF _ "mult" [e0, e1])
       return (IROp OpMult mu1 det0, IROp OpMult s1 (IRUnaryOp OpAbs det0))
 toIRNormalParams meta (InjF _ "log" [e])
   | pType (getTypeInfo e) == PLogNormal = toIRLogNormalParams meta e
--- Fall back to pre-computed IsNormal tag
-toIRNormalParams _ e
-  | [(mean, std)] <- [(m, s) | IsNormal m s <- tags (getTypeInfo e)] =
-      return (IRConst (VFloat mean), IRConst (VFloat std))
+toIRNormalParams meta (Var _ name)
+  | Just expr <- lookup name (functions (compilingProgram meta)) = toIRNormalParams meta expr
 toIRNormalParams _ e = error $ "toIRNormalParams: cannot extract Normal params from " ++ show (pType (getTypeInfo e)) ++ " | expr: " ++ show e
 
 -- | Recursively extract (mu_log, sigma) as IRExprs from a PLogNormal-typed expression.
--- Handles structural cases; falls back to IsLogNormal tags for pre-computed constants.
 toIRLogNormalParams :: CompilerMetadata -> Expr -> CompilerMonad (IRExpr, IRExpr)
 toIRLogNormalParams meta (InjF _ "exp" [e])
   | pType (getTypeInfo e) == PNormal = toIRNormalParams meta e
@@ -268,10 +264,8 @@ toIRLogNormalParams meta (InjF _ "mult" [e0, e1])
       (mu1, s1) <- toIRLogNormalParams meta e1
       det0 <- toIRGenerate meta e0
       return (IROp OpPlus mu1 (IRUnaryOp OpLog det0), s1)
--- Fall back to pre-computed IsLogNormal tag
-toIRLogNormalParams _ e
-  | [(mean, std)] <- [(m, s) | IsLogNormal m s <- tags (getTypeInfo e)] =
-      return (IRConst (VFloat mean), IRConst (VFloat std))
+toIRLogNormalParams meta (Var _ name)
+  | Just expr <- lookup name (functions (compilingProgram meta)) = toIRLogNormalParams meta expr
 toIRLogNormalParams _ e = error $ "toIRLogNormalParams: cannot extract LogNormal params from " ++ show (pType (getTypeInfo e))
 
 --in this implementation, I'll forget about the distinction between PDFs and Probabilities. Might need to fix that later.

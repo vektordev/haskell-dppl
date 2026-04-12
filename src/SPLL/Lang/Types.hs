@@ -208,11 +208,9 @@ isMultiTypeRef (MultiTypeRef _) = True
 isMultiTypeRef _ = False
 
 
-data Tag = DiscreteValues MultiValue 
+data Tag = DiscreteValues MultiValue
            | Alg InferenceRule
            | IsConditional
-           | IsNormal Double Double -- mean, stdDev
-           | IsLogNormal Double Double --mean, stdDev
            deriving (Show, Eq)
            
 

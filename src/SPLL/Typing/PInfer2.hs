@@ -595,8 +595,6 @@ inferBinOp env ti e1 e2 getInf constructor = do
 infer :: TEnv -> Expr -> Infer (Subst, [DConstraint], PType, Expr)
 infer env expr = case expr of
 
-  e | not (null ([(mean, std)|IsNormal mean std <- tags (getTypeInfo expr)])) -> return (emptySubst, [], PNormal, setTypeInfo e (getTypeInfo e){pType=PNormal})
-  e | not (null ([(mean, std)|IsLogNormal mean std <- tags (getTypeInfo expr)])) -> return (emptySubst, [], PLogNormal, setTypeInfo e (getTypeInfo e){pType=PLogNormal})
   ThetaI ti a i  -> return (emptySubst, [], Deterministic, ThetaI (setPType ti Deterministic) a i)
   Subtree ti a i  -> return (emptySubst, [], Deterministic, Subtree (setPType ti Deterministic) a i)
   Uniform ti  -> return (emptySubst, [], Integrate, Uniform (setPType ti Integrate))
@@ -679,8 +677,6 @@ infer env expr = case expr of
       return (s, cs, Integrate, ReadNN (setPType ti Integrate) name et)
 
   Error ti e -> return (emptySubst, [], Deterministic, Error (setPType ti Deterministic) e)
-
-  _ -> error $ "No PType inference algorithm known for " ++ (show expr)
 
 
 normalize :: DScheme -> DScheme
