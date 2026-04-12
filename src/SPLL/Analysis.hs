@@ -8,6 +8,7 @@ module SPLL.Analysis (
 import SPLL.Lang.Types
 import SPLL.Lang.Lang
 import SPLL.InferenceRule
+import SPLL.Typing.PType (PType(PNormal, PLogNormal))
 import Data.Maybe (maybeToList, fromJust, isNothing, fromMaybe, isJust, listToMaybe)
 import Data.List (nub)
 import Data.Bifunctor
@@ -154,9 +155,8 @@ checkConstraint expr alg ResultingTypeMatch = resPType == annotatedType
     resPType = resultingPType alg (map (pType . getTypeInfo) (getSubExprs expr))
 checkConstraint expr _ (SubExprNIsEnumerable n) | length (getSubExprs expr) > n =
   isEnumerable (tags (getTypeInfo (getSubExprs expr !! n)))
-checkConstraint expr _ ResolvesToDistribution | not (null (
-  [1 | IsNormal _ _ <- tags (getTypeInfo expr)] ++ 
-  [1 | IsLogNormal _ _ <- tags (getTypeInfo expr)])) = True
+checkConstraint expr _ ResolvesToDistribution
+  | pType (getTypeInfo expr) == PNormal || pType (getTypeInfo expr) == PLogNormal = True
 checkConstraint _ _ _ = False
 
 isEnumerable :: [Tag] -> Bool

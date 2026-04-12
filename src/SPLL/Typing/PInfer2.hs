@@ -56,11 +56,63 @@ resolveLetInDCons :: PType -> PType
 resolveLetInDCons Deterministic = Deterministic
 resolveLetInDCons _ = Bottom
 
+-- | Downgrade PNormal/PLogNormal to Integrate for contexts where Gaussian
+-- structure cannot be preserved (containers, mixtures, unknown InjFs).
+degradeNormal :: PType -> PType
+degradeNormal PNormal    = Integrate
+degradeNormal PLogNormal = Integrate
+degradeNormal p          = p
+
+-- | Post-process the result of inferBinOp for container/mixture expressions to
+-- ensure the result PType never carries Normal/LogNormal structure.
+--
+-- When the result is still a TVar, we inspect the constraint chain for that TVar
+-- (which by the time Cons/TCons/Apply return will have concrete leaves) to check
+-- whether it would resolve to PNormal or PLogNormal. Only in that case do we
+-- remove the constraint and inject TVar→Integrate into the substitution.
+-- This avoids incorrectly degrading Deterministic results (which would cascade
+-- into resolvePlusCons returning Bottom for outer expressions).
+--
+-- When the result is already a concrete type, we degrade it directly.
+degradeNormalResult :: (Subst, [DConstraint], PType, Expr)
+                    -> (Subst, [DConstraint], PType, Expr)
+degradeNormalResult (s, cs, TVar tv, e) =
+  case lookup (TVar tv) cs of
+    Just chain | wouldBeNormal chain ->
+      let cs'        = filter (\(ty, _) -> ty /= TVar tv) cs
+          forceSubst = Subst $ Map.singleton tv Integrate
+      in ( compose forceSubst s
+         , apply forceSubst cs'
+         , Integrate
+         , setTypeInfo e (getTypeInfo e){pType = Integrate}
+         )
+    _ -> (s, cs, TVar tv, setTypeInfo e (getTypeInfo e){pType = TVar tv})
+  where
+    wouldBeNormal chain = case collapseChain chain Deterministic [] of
+      [Left PNormal]    -> True
+      [Left PLogNormal] -> True
+      _                 -> False
+degradeNormalResult (s, cs, t, e) =
+  let t' = degradeNormal t
+  in (s, cs, t', setTypeInfo e (getTypeInfo e){pType = t'})
+
 resolvePlusCons :: PType -> PType -> PType
-resolvePlusCons Integrate Integrate = Bottom
-resolvePlusCons Integrate Prob = Bottom
-resolvePlusCons Prob Integrate = Bottom
-resolvePlusCons Prob Prob = Bottom
+resolvePlusCons Integrate   Integrate   = Bottom
+resolvePlusCons Integrate   Prob        = Bottom
+resolvePlusCons Prob        Integrate   = Bottom
+resolvePlusCons Prob        Prob        = Bottom
+resolvePlusCons PNormal     PNormal     = Bottom
+resolvePlusCons PNormal     Integrate   = Bottom
+resolvePlusCons Integrate   PNormal     = Bottom
+resolvePlusCons PNormal     Prob        = Bottom
+resolvePlusCons Prob        PNormal     = Bottom
+resolvePlusCons PLogNormal  PLogNormal  = Bottom
+resolvePlusCons PLogNormal  Integrate   = Bottom
+resolvePlusCons Integrate   PLogNormal  = Bottom
+resolvePlusCons PLogNormal  Prob        = Bottom
+resolvePlusCons Prob        PLogNormal  = Bottom
+resolvePlusCons PNormal     PLogNormal  = Bottom
+resolvePlusCons PLogNormal  PNormal     = Bottom
 resolvePlusCons ty1 ty2 = Deterministic
 
 -- Enumerability allows us to still infer prob in cases in which normal inference would fail
@@ -72,12 +124,24 @@ resolveEnumPlusCons Prob Prob = Integrate
 resolveEnumPlusCons ty1 ty2 = Deterministic
 
 resolveCompCons :: PType -> PType -> PType
-resolveCompCons Integrate Integrate = Bottom
-resolveCompCons Integrate Prob = Bottom
-resolveCompCons Prob Integrate = Bottom
-resolveCompCons Prob Prob = Bottom
-resolveCompCons Prob Deterministic = Bottom
-resolveCompCons Deterministic Prob = Bottom
+resolveCompCons Integrate   Integrate   = Bottom
+resolveCompCons Integrate   Prob        = Bottom
+resolveCompCons Prob        Integrate   = Bottom
+resolveCompCons Prob        Prob        = Bottom
+resolveCompCons Prob        Deterministic = Bottom
+resolveCompCons Deterministic Prob      = Bottom
+resolveCompCons PNormal     Prob        = Bottom
+resolveCompCons Prob        PNormal     = Bottom
+resolveCompCons PNormal     Integrate   = Bottom
+resolveCompCons Integrate   PNormal     = Bottom
+resolveCompCons PNormal     PNormal     = Bottom
+resolveCompCons PLogNormal  Prob        = Bottom
+resolveCompCons Prob        PLogNormal  = Bottom
+resolveCompCons PLogNormal  Integrate   = Bottom
+resolveCompCons Integrate   PLogNormal  = Bottom
+resolveCompCons PLogNormal  PLogNormal  = Bottom
+resolveCompCons PNormal     PLogNormal  = Bottom
+resolveCompCons PLogNormal  PNormal     = Bottom
 resolveCompCons ty1 ty2 = Deterministic
 
 showResults :: Expr -> IO ()
@@ -498,6 +562,24 @@ isEnumerable e = foldr (\tag b -> b || isEnum tag) False (tags (getTypeInfo e))
   where isEnum (DiscreteValues _) = True
         isEnum _ = False
 
+-- | Determine whether an InjF operation on arguments with given PTypes preserves
+-- Normal or LogNormal structure, and if so, return the resulting PType.
+tryNormalClosure :: String -> [PType] -> Maybe PType
+-- Normal arithmetic closure (linear space)
+tryNormalClosure "plus" [PNormal, PNormal]       = Just PNormal
+tryNormalClosure "plus" [PNormal, Deterministic] = Just PNormal
+tryNormalClosure "plus" [Deterministic, PNormal] = Just PNormal
+tryNormalClosure "mult" [PNormal, Deterministic] = Just PNormal
+tryNormalClosure "mult" [Deterministic, PNormal] = Just PNormal
+-- exp of Normal yields LogNormal; log of LogNormal yields Normal
+tryNormalClosure "exp"  [PNormal]               = Just PLogNormal
+tryNormalClosure "log"  [PLogNormal]            = Just PNormal
+-- LogNormal multiplicative closure (log space)
+tryNormalClosure "mult" [PLogNormal, PLogNormal]    = Just PLogNormal
+tryNormalClosure "mult" [PLogNormal, Deterministic] = Just PLogNormal
+tryNormalClosure "mult" [Deterministic, PLogNormal] = Just PLogNormal
+tryNormalClosure _      _                           = Nothing
+
 
 -- | Infer a binary operator expression using a given constraint function and constructor
 inferBinOp :: TEnv -> TypeInfo -> Expr -> Expr
@@ -513,12 +595,12 @@ inferBinOp env ti e1 e2 getInf constructor = do
 infer :: TEnv -> Expr -> Infer (Subst, [DConstraint], PType, Expr)
 infer env expr = case expr of
 
-  e | not (null ([(mean, std)|IsNormal mean std <- tags (getTypeInfo expr)])) -> return (emptySubst, [], Integrate, setTypeInfo e (getTypeInfo e){pType=Integrate})
-  e | not (null ([(mean, std)|IsLogNormal mean std <- tags (getTypeInfo expr)])) -> return (emptySubst, [], Integrate, setTypeInfo e (getTypeInfo e){pType=Integrate})
+  e | not (null ([(mean, std)|IsNormal mean std <- tags (getTypeInfo expr)])) -> return (emptySubst, [], PNormal, setTypeInfo e (getTypeInfo e){pType=PNormal})
+  e | not (null ([(mean, std)|IsLogNormal mean std <- tags (getTypeInfo expr)])) -> return (emptySubst, [], PLogNormal, setTypeInfo e (getTypeInfo e){pType=PLogNormal})
   ThetaI ti a i  -> return (emptySubst, [], Deterministic, ThetaI (setPType ti Deterministic) a i)
   Subtree ti a i  -> return (emptySubst, [], Deterministic, Subtree (setPType ti Deterministic) a i)
   Uniform ti  -> return (emptySubst, [], Integrate, Uniform (setPType ti Integrate))
-  Normal ti  -> return (emptySubst, [], Integrate, Normal (setPType ti Integrate))
+  Normal ti  -> return (emptySubst, [], PNormal, Normal (setPType ti PNormal))
   Constant ti val  -> return (emptySubst, [], Deterministic, Constant (setPType ti Deterministic) val)
   LetIn ti s x b -> do
     (s1, cs1, t1, xt) <- infer env x
@@ -527,17 +609,27 @@ infer env expr = case expr of
 
   InjF ti name paramsExpr -> do
     p_inf <- mapM (infer env) paramsExpr
-    -- If all parameters are enumerable, we can use weaker constarints
-    let constraint = if all isEnumerable paramsExpr then EnumPlusConstraint else PlusConstraint
-    tv <- fresh
+    let pts = map trd4 p_inf
     let s_acc = foldl compose emptySubst (map fst4 p_inf)
-    let cs = case map trd4 p_inf of
-          pt@(p_fst:p_rst) -> do
-            let leftPts = map Left pt
-            -- Fold all pTypes into a series of Plus Constraints (p1 + (p2 + (p3 + p4)))
-            leftPts ++ foldr (\p acc -> [Right $ constraint (Left p) (Right acc)]) [Left p_fst] p_rst
-          [] -> []
-    return (s_acc, concatMap snd4 p_inf ++ [(tv,cs)], tv, InjF (setPType ti tv) name (map frth4 p_inf))
+    let accCs = concatMap snd4 p_inf
+    let inferredExprs = map frth4 p_inf
+    case tryNormalClosure name pts of
+      Just pt ->
+        return (s_acc, accCs, pt, InjF (setPType ti pt) name inferredExprs)
+      Nothing -> do
+        -- PNormal/PLogNormal must not propagate through InjFs that aren't in
+        -- tryNormalClosure — downgrade them to Integrate so the general
+        -- constraint machinery doesn't accidentally assign a Normal type.
+        let pts' = map degradeNormal pts
+        -- If all parameters are enumerable, we can use weaker constraints
+        let constraint = if all isEnumerable paramsExpr then EnumPlusConstraint else PlusConstraint
+        tv <- fresh
+        let cs = case pts' of
+              (p_fst:p_rst) ->
+                let leftPts = map Left pts'
+                in leftPts ++ foldr (\p acc -> [Right $ constraint (Left p) (Right acc)]) [Left p_fst] p_rst
+              [] -> []
+        return (s_acc, accCs ++ [(tv,cs)], tv, InjF (setPType ti tv) name inferredExprs)
 
   Not ti e -> do
       (s1, cs1, t1) <- negInf
@@ -557,8 +649,12 @@ infer env expr = case expr of
 
   Null ti -> return (emptySubst, [], Deterministic, Null (setPType ti Deterministic))
 
-  Cons ti e1 e2  -> inferBinOp env ti e1 e2 downgradeInf Cons
-  TCons ti e1 e2 -> inferBinOp env ti e1 e2 downgradeInf TCons
+  Cons ti e1 e2 -> do
+    result <- inferBinOp env ti e1 e2 downgradeInf Cons
+    return $ degradeNormalResult result
+  TCons ti e1 e2 -> do
+    result <- inferBinOp env ti e1 e2 downgradeInf TCons
+    return $ degradeNormalResult result
 
   IfThenElse ti cond tr fl -> do
     (s1, cs1, t1) <- downgradeInf
@@ -568,7 +664,8 @@ infer env expr = case expr of
     (s4, cs4, t4) <- downgradeInf
     (s5, cs5, t5) <- applyOpTy env t3 (s4 `compose` s3) (cs3 ++ cs4) t4
     (s6, cs6, t6, flt) <- applyOpArg env fl s5 cs5 t5
-    return (s6, cs6, t6, IfThenElse (setPType ti t6) condt trt flt)
+    let (s6', cs6', t6', flt') = degradeNormalResult (s6, cs6, t6, flt)
+    return (s6', cs6', t6', IfThenElse (setPType ti t6') condt trt flt')
 
   Lambda ti name e -> do
     (s, cs, t, et) <- infer env e
@@ -594,7 +691,10 @@ normalize (DScheme _ c body) = DScheme (map snd ord) (normcs c) (normtype body)
     fv (TVar a)   = [a]
     fv (PArr a b) = fv a ++ fv b
     fv Deterministic = []
+    fv PNormal = []
+    fv PLogNormal = []
     fv Integrate = []
+    fv Prob = []
     fv Bottom = []
 
     fvcs (ty, dc) = fv ty ++ fvcd dc
@@ -623,7 +723,10 @@ normalize (DScheme _ c body) = DScheme (map snd ord) (normcs c) (normtype body)
 
     normtype (PArr a b) = PArr (normtype a) (normtype b)
     normtype Deterministic = Deterministic
+    normtype PNormal = PNormal
+    normtype PLogNormal = PLogNormal
     normtype Integrate = Integrate
+    normtype Prob = Prob
     normtype Bottom = Bottom
 
     normtype (TVar a)   =

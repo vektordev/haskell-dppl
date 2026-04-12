@@ -166,7 +166,7 @@ normal = InferenceRule
            StubNormal
            []
            "normal"
-           (const Integrate)
+           (const PNormal)
            (Forall [] [] TFloat)
 
 constant :: InferenceRule

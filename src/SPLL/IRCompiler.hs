@@ -1,7 +1,8 @@
 module SPLL.IRCompiler (
   envToIR,
   envToIRUnoptimized,
-  stripBranchCount
+  stripBranchCount,
+  toIRNormal
 )where
 
 import SPLL.IntermediateRepresentation
@@ -65,11 +66,11 @@ envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb
         rt = rType $ getTypeInfo binding in
       IRFunGroup {groupName=name,
        integFun =
-        if not noInteg && (pt == Deterministic || pt == Integrate) then
+        if not noInteg && (pt == Deterministic || pt == Integrate || pt == PNormal || pt == PLogNormal) then
           Just (toIntegDecl name (IRLambda "sample" (runCompile (meta typeEnv) (toIRInferenceSave (meta typeEnv) True binding (IRVar "sample")))))
         else Nothing,
         probFun =
-          if not noProb && (pt == Deterministic || pt == Integrate || pt == Prob) then
+          if not noProb && (pt == Deterministic || pt == Integrate || pt == Prob || pt == PNormal || pt == PLogNormal) then
             let metaBase = meta typeEnv
                 body m = runCompile m (toIRInferenceSave m False binding (IRVar "sample"))
             in Just (toProbDecl name $ case topKThreshold conf of
@@ -198,28 +199,115 @@ toIRInferenceSave meta cumulative expr sample = do
          , IRIf (IRUnaryOp OpIsAny sample) const0 (wrap probBranches)
          )
 
+
+-- | Dispatch to the appropriate param extractor based on PType.
+-- Returns (mu, sigma) for PNormal and (mu_log, sigma) for PLogNormal.
+toIRNormal :: CompilerMetadata -> Expr -> CompilerMonad (IRExpr, IRExpr)
+toIRNormal meta e
+  | pType (getTypeInfo e) == PNormal    = toIRNormalParams meta e
+  | pType (getTypeInfo e) == PLogNormal = toIRLogNormalParams meta e
+  | otherwise = error $ "toIRNormal: expression is neither PNormal nor PLogNormal: " ++ show (pType (getTypeInfo e))
+
+irSqrt :: IRExpr -> IRExpr
+irSqrt x = IRUnaryOp OpExp (IROp OpMult (IRConst (VFloat 0.5)) (IRUnaryOp OpLog x))
+
+-- | Recursively extract (mu, sigma) as IRExprs from a PNormal-typed expression.
+-- Handles structural cases; falls back to IsNormal tags for pre-computed constants.
+toIRNormalParams :: CompilerMetadata -> Expr -> CompilerMonad (IRExpr, IRExpr)
+toIRNormalParams _ (Normal _) = return (IRConst (VFloat 0), IRConst (VFloat 1))
+toIRNormalParams meta (InjF _ "plus" [e0, e1])
+  | pType (getTypeInfo e0) == PNormal, pType (getTypeInfo e1) == PNormal = do
+      (mu0, s0) <- toIRNormalParams meta e0
+      (mu1, s1) <- toIRNormalParams meta e1
+      return (IROp OpPlus mu0 mu1, irSqrt (IROp OpPlus (IROp OpMult s0 s0) (IROp OpMult s1 s1)))
+toIRNormalParams meta (InjF _ "plus" [e0, e1])
+  | pType (getTypeInfo e0) == PNormal = do
+      (mu0, s0) <- toIRNormalParams meta e0
+      det1 <- toIRGenerate meta e1
+      return (IROp OpPlus mu0 det1, s0)
+toIRNormalParams meta (InjF _ "plus" [e0, e1])
+  | pType (getTypeInfo e1) == PNormal = do
+      (mu1, s1) <- toIRNormalParams meta e1
+      det0 <- toIRGenerate meta e0
+      return (IROp OpPlus mu1 det0, s1)
+toIRNormalParams meta (InjF _ "mult" [e0, e1])
+  | pType (getTypeInfo e0) == PNormal = do
+      (mu0, s0) <- toIRNormalParams meta e0
+      det1 <- toIRGenerate meta e1
+      return (IROp OpMult mu0 det1, IROp OpMult s0 (IRUnaryOp OpAbs det1))
+toIRNormalParams meta (InjF _ "mult" [e0, e1])
+  | pType (getTypeInfo e1) == PNormal = do
+      (mu1, s1) <- toIRNormalParams meta e1
+      det0 <- toIRGenerate meta e0
+      return (IROp OpMult mu1 det0, IROp OpMult s1 (IRUnaryOp OpAbs det0))
+toIRNormalParams meta (InjF _ "log" [e])
+  | pType (getTypeInfo e) == PLogNormal = toIRLogNormalParams meta e
+-- Fall back to pre-computed IsNormal tag
+toIRNormalParams _ e
+  | [(mean, std)] <- [(m, s) | IsNormal m s <- tags (getTypeInfo e)] =
+      return (IRConst (VFloat mean), IRConst (VFloat std))
+toIRNormalParams _ e = error $ "toIRNormalParams: cannot extract Normal params from " ++ show (pType (getTypeInfo e)) ++ " | expr: " ++ show e
+
+-- | Recursively extract (mu_log, sigma) as IRExprs from a PLogNormal-typed expression.
+-- Handles structural cases; falls back to IsLogNormal tags for pre-computed constants.
+toIRLogNormalParams :: CompilerMetadata -> Expr -> CompilerMonad (IRExpr, IRExpr)
+toIRLogNormalParams meta (InjF _ "exp" [e])
+  | pType (getTypeInfo e) == PNormal = toIRNormalParams meta e
+toIRLogNormalParams meta (InjF _ "mult" [e0, e1])
+  | pType (getTypeInfo e0) == PLogNormal, pType (getTypeInfo e1) == PLogNormal = do
+      (mu0, s0) <- toIRLogNormalParams meta e0
+      (mu1, s1) <- toIRLogNormalParams meta e1
+      return (IROp OpPlus mu0 mu1, irSqrt (IROp OpPlus (IROp OpMult s0 s0) (IROp OpMult s1 s1)))
+toIRLogNormalParams meta (InjF _ "mult" [e0, e1])
+  | pType (getTypeInfo e0) == PLogNormal = do
+      (mu0, s0) <- toIRLogNormalParams meta e0
+      det1 <- toIRGenerate meta e1
+      return (IROp OpPlus mu0 (IRUnaryOp OpLog det1), s0)
+toIRLogNormalParams meta (InjF _ "mult" [e0, e1])
+  | pType (getTypeInfo e1) == PLogNormal = do
+      (mu1, s1) <- toIRLogNormalParams meta e1
+      det0 <- toIRGenerate meta e0
+      return (IROp OpPlus mu1 (IRUnaryOp OpLog det0), s1)
+-- Fall back to pre-computed IsLogNormal tag
+toIRLogNormalParams _ e
+  | [(mean, std)] <- [(m, s) | IsLogNormal m s <- tags (getTypeInfo e)] =
+      return (IRConst (VFloat mean), IRConst (VFloat std))
+toIRLogNormalParams _ e = error $ "toIRLogNormalParams: cannot extract LogNormal params from " ++ show (pType (getTypeInfo e))
+
 --in this implementation, I'll forget about the distinction between PDFs and Probabilities. Might need to fix that later.
+-- | Expressions that have their own toIRInference handlers and must not be
+-- intercepted by the PNormal/PLogNormal catch-alls below.
+hasOwnInferenceHandler :: Expr -> Bool
+hasOwnInferenceHandler (Apply _ _ _) = True
+hasOwnInferenceHandler (Cons  _ _ _) = True
+hasOwnInferenceHandler (TCons _ _ _) = True
+hasOwnInferenceHandler _             = False
+
 toIRInference :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad CompilationResult
 --toIRInference meta cumulative expr sample | trace (show expr) False = undefined
 -- CDFs on Booleans make little sense. We define that False < True. Therefor cdf(True) = 1 and cdf(False) = pdf(False)
 toIRInference meta True expr sample | rType (getTypeInfo expr) == TBool = do
   (pFalse, _, bcFalse) <- toIRInference meta False expr (IRConst (VBool False))
   return (IRIf sample (IRConst (VFloat 1)) pFalse, const0, bcFalse)
-toIRInference meta False e sample | [(mean, std)] <- [(mean,std) | IsNormal mean std <- tags (getTypeInfo e)] = return (IROp OpDiv (IRDensity IRNormal (IROp OpDiv (IROp OpSub sample (IRConst $ VFloat mean)) (IRConst $ VFloat std))) (IRConst $ VFloat std), IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), IRConst (VFloat 1))
-toIRInference meta True e sample | [(mean, std)] <- [(mean,std) | IsNormal mean std <- tags (getTypeInfo e)] = return (IRCumulative IRNormal (IROp OpDiv (IROp OpSub sample (IRConst $ VFloat mean)) (IRConst $ VFloat std)),const0, IRConst (VFloat 1))
-toIRInference meta False e sample | [(mean, std)] <- [(mean,std) | IsLogNormal mean std <- tags (getTypeInfo e)] = do
-  let correctedSample = IROp OpDiv (IROp OpSub (IRUnaryOp OpLog sample) (IRConst $ VFloat mean)) (IRConst $ VFloat std)
-  let normalPDF = IRDensity IRNormal correctedSample
-  let covFactor = IROp OpMult (IRConst $ VFloat std) sample
-  let p = IROp OpDiv normalPDF covFactor
+toIRInference meta False e sample | pType (getTypeInfo e) == PNormal, not (hasOwnInferenceHandler e) = do
+  (mu, sigma) <- toIRNormalParams meta e
+  let p = IROp OpDiv (IRDensity IRNormal (IROp OpDiv (IROp OpSub sample mu) sigma)) sigma
+  return (p, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), IRConst (VFloat 1))
+toIRInference meta True e sample | pType (getTypeInfo e) == PNormal, not (hasOwnInferenceHandler e) = do
+  (mu, sigma) <- toIRNormalParams meta e
+  return (IRCumulative IRNormal (IROp OpDiv (IROp OpSub sample mu) sigma), const0, IRConst (VFloat 1))
+toIRInference meta False e sample | pType (getTypeInfo e) == PLogNormal, not (hasOwnInferenceHandler e) = do
+  (mu, sigma) <- toIRLogNormalParams meta e
+  let correctedSample = IROp OpDiv (IROp OpSub (IRUnaryOp OpLog sample) mu) sigma
+  let p = IROp OpDiv (IRDensity IRNormal correctedSample) (IROp OpMult sigma sample)
   let dim = IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1)
-  let negativeGuard e = IRIf (IROp OpGreaterThan sample const0) e const0
+  let negativeGuard x = IRIf (IROp OpGreaterThan sample const0) x const0
   return (negativeGuard p, dim, IRConst (VFloat 1))
-toIRInference meta True e sample | [(mean, std)] <- [(mean,std) | IsLogNormal mean std <- tags (getTypeInfo e)] = do
-  let correctedSample = IROp OpDiv (IROp OpSub (IRUnaryOp OpLog sample) (IRConst $ VFloat mean)) (IRConst $ VFloat std)
-  let normalCDF = IRCumulative IRNormal correctedSample
-  let negativeGuard e = IRIf (IROp OpGreaterThan sample const0) e const0
-  return (negativeGuard normalCDF, const0, IRConst (VFloat 1))
+toIRInference meta True e sample | pType (getTypeInfo e) == PLogNormal, not (hasOwnInferenceHandler e) = do
+  (mu, sigma) <- toIRLogNormalParams meta e
+  let correctedSample = IROp OpDiv (IROp OpSub (IRUnaryOp OpLog sample) mu) sigma
+  let negativeGuard x = IRIf (IROp OpGreaterThan sample const0) x const0
+  return (negativeGuard (IRCumulative IRNormal correctedSample), const0, IRConst (VFloat 1))
 toIRInference meta False (Normal t) sample = return (IRDensity IRNormal sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), IRConst (VFloat 1))
 toIRInference meta False (Uniform t) sample = return (IRDensity IRUniform sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), IRConst (VFloat 1))
 toIRInference meta True (Normal t) sample = return (IRCumulative IRNormal sample, const0, IRConst (VFloat 1))
@@ -442,7 +530,7 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample | pType (get
       setVariables [(retVal, IRApply lIR vIR)]
       return (IRTFst (IRVar retVal), IRTFst (IRTSnd (IRVar retVal)), IRTSnd (IRTSnd (IRVar retVal)))
 -- Probabilistic bound expression
-toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=aChainName} l v) sample | isTArrow (rType (getTypeInfo v)) && (pType (getTypeInfo v) == Prob || pType (getTypeInfo v) == Integrate) = do
+toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=aChainName} l v) sample | isTArrow (rType (getTypeInfo v)) && (pType (getTypeInfo v) == Prob || pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal) = do
   lIR <- toIRGenerate meta l
   (vIR, _, _) <- toIRInference meta cumulative v sample
   applied <- mkVariable "call"
@@ -451,7 +539,7 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=aChainName} l 
   where
     isTArrow (TArrow _ _) = True
     isTArrow _ = False
-toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=aChainName} l v) sample | pType (getTypeInfo v) == Prob || pType (getTypeInfo v) == Integrate = do
+toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=aChainName} l v) sample | pType (getTypeInfo v) == Prob || pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal = do
   -- This is the probabilistic inference of a known, deterministic lambda with a probabilistic parameter
   -- The inference looks like this: p(l(v) == sample) = p(l^-1(sample) == v)
   -- The inverse can not be created using recursive descend, therefor we use forward chaining for the inverse only
@@ -823,14 +911,14 @@ createHOInverse fcData adts (fVar, f) = do
 countProbParams :: [Expr] -> Int
 countProbParams es = length probParams
   where
-    probParams = filter (\p -> p == Prob || p == Integrate) pTypes
+    probParams = filter (\p -> p == Prob || p == Integrate || p == PNormal || p == PLogNormal) pTypes
     pt x = pType (getTypeInfo x)
     pTypes = map pt es
 
 getProbIndex :: HasCallStack => [Expr] -> Maybe Int
 --getProbIndex es | traceShow es False = undefined
 getProbIndex es =
-  case filter (\(p, _) -> p == Prob || p == Integrate) zipped of
+  case filter (\(p, _) -> p == Prob || p == Integrate || p == PNormal || p == PLogNormal) zipped of
     [(_, i)] -> Just i
     [] -> Nothing
     _ -> error "More than one probabilistic argument found"
