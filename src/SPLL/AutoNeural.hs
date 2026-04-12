@@ -30,7 +30,7 @@ makeAutoNeural :: [ADTDecl] -> CompilerConfig -> NeuralDecl -> IRFunGroup
 makeAutoNeural adts conf (name, (TArrow TSymbol target), tag) =
   IRFunGroup (name ++ "_auto")
     (Just (IRLambda symbol $ makeGen adts plan name, "Wrapper for the neural network function"))
-    (Just (IRLambda symbol $ makeProb adts conf plan name, "Inference function for neural network function")) Nothing (show plan)
+    (Just (IRLambda symbol $ makeProb adts conf plan name, "Inference function for neural network function")) Nothing Nothing (show plan)
     where plan = makePartitionPlan adts target tag
 makeAutoNeural adts conf (name, rt, _) = error $ "Invalid neural declaration for " ++ name ++ ": Neural networks must be function TSymbol -> a"
 

@@ -64,7 +64,7 @@ envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb
     let typeEnv = getGlobalTypeEnv p
         pt = pType $ getTypeInfo binding
         rt = rType $ getTypeInfo binding in
-      IRFunGroup {groupName=name,
+      IRFunGroup {groupName=name, encodeFun=Nothing,
        integFun =
         if not noInteg && (pt == Deterministic || pt == Integrate || pt == PNormal || pt == PLogNormal) then
           Just (toIntegDecl name (IRLambda "sample" (runCompile (meta typeEnv) (toIRInferenceSave (meta typeEnv) True binding (IRVar "sample")))))

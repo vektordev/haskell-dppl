@@ -404,7 +404,7 @@ generate f neurals adts _ _ _ expr = error ("Expression is not yet implemented "
 -- Reduces the complex data structure of an IREnv to a simpler reduced form
 -- Does this by creating a list of Maybe IRExpressions for each triple of gen, prob, and integ functions and then removes the Nothings
 reduceIREnv :: IREnv -> ReducedIREnv
-reduceIREnv (IREnv funcs _) = concatMap (\(IRFunGroup name gen prob integ doc) -> catMaybes [gen <&> red name "_gen", prob <&> red name "_prob", integ <&> red name "_integ"]) funcs
+reduceIREnv (IREnv funcs _) = concatMap (\(IRFunGroup name gen prob integ encode doc) -> catMaybes [gen <&> red name "_gen", prob <&> red name "_prob", integ <&> red name "_integ", encode <&> red name "_encode"]) funcs
   where red name suffix (expr, _) = (name ++ suffix, expr)
 
 irSample :: (RandomGen g) => Distribution -> Rand g IRValue

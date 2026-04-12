@@ -175,7 +175,7 @@ type IRValue = GenericValue IRExpr
 data IREnv = IREnv [IRFunGroup] [ADTDecl] deriving (Show)
 
 
-data IRFunGroup = IRFunGroup {groupName::String, genFun::Maybe IRFunDecl, probFun::Maybe IRFunDecl, integFun::Maybe IRFunDecl, groupDoc::String} deriving (Show)
+data IRFunGroup = IRFunGroup {groupName::String, genFun::Maybe IRFunDecl, probFun::Maybe IRFunDecl, integFun::Maybe IRFunDecl, encodeFun::Maybe IRFunDecl, groupDoc::String} deriving (Show)
 
 -- Name, Documentation, Body
 type IRFunDecl = (IRExpr, String)

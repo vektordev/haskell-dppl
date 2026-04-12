@@ -208,19 +208,20 @@ generateADTClass (name, fields) =
   where fieldNames = map fst fields
 
 generateClass :: [(String, String)] -> [String] -> IRFunGroup -> [String]
-generateClass lut callableNames (IRFunGroup name gen prob integ doc) = let
+generateClass lut callableNames (IRFunGroup name gen prob integ encode doc) = let
   funcStringFromMaybe name func = case func of
     Just a -> generateFunction True (name, replaceCallsDecl a)
     Nothing -> return []
-  ((i, p, g), (globalVars, _)) = evalSupply $ runStateT (do
+  ((i, p, g, e), (globalVars, _)) = evalSupply $ runStateT (do
     i' <- funcStringFromMaybe "integrate" integ
     p' <- funcStringFromMaybe "forward" prob
     g' <- funcStringFromMaybe "generate" gen
-    return (i', p', g')) ([], callableNames)
+    e' <- funcStringFromMaybe "encode" encode
+    return (i', p', g', e')) ([], callableNames)
   commentLine = "# " ++ doc
   initLine = "class " ++ onHead toUpper name ++ "(Module):"
   globalVarDecls = map (\(mv, name)-> name ++ " = " ++ pyMultiVal mv) globalVars
-  funcs = i ++ [""] ++ p ++ [""] ++ g
+  funcs = i ++ [""] ++ p ++ [""] ++ g ++ [""] ++ e
   replaceCallsDecl (e, d) = (irMap (replaceCalls lut) e, d)
   in commentLine:initLine:indentOnce globalVarDecls ++ indentOnce funcs
 

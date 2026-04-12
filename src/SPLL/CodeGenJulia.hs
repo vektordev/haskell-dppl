@@ -137,12 +137,13 @@ generateFunctions (IREnv funcs adts) = do
   adtClasses ++ varsStr ++ funcStrs
 
 generateFunctionGroup :: IRFunGroup -> GlobalVariableSupply [String]
-generateFunctionGroup IRFunGroup {groupName=n, genFun=g, probFun=p, integFun=i, groupDoc=doc} = do
+generateFunctionGroup IRFunGroup {groupName=n, genFun=g, probFun=p, integFun=i, encodeFun=e, groupDoc=doc} = do
   let preemble = [ "# === Function Group " ++ n ++ " ===\n# " ++ doc]
   gen <- fromMaybe (return []) (g <&> genF n "_gen")
   prob <- fromMaybe (return []) (p <&> genF n "_prob")
   integ <- fromMaybe (return []) (i <&> genF n "_integ")
-  return $ preemble ++ gen ++ prob ++ integ
+  enc <- fromMaybe (return []) (e <&> genF n "_encode")
+  return $ preemble ++ gen ++ prob ++ integ ++ enc
   where genF name suffix (e, d) = generateFunction (name ++ suffix) d e
 
 generateFunction :: String -> String -> IRExpr -> GlobalVariableSupply [String]
