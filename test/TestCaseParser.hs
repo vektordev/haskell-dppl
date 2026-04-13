@@ -6,6 +6,8 @@ module TestCaseParser (
   isProbTestCase,
   isCumulTestCase,
   isArgmaxPTestCase,
+  isEncodingLengthTestCase,
+  isEncodingSlotTestCase,
   testCaseName,
   parseTestCases,
   parseProgram
@@ -29,7 +31,9 @@ import Data.Void
 
 data TestCase = ProbTestCase String IRValue [IRValue] (IRValue, IRValue)
               | CumulTestCase String IRValue [IRValue] (IRValue, IRValue)
-              | ArgmaxPTestCase String [IRValue] IRValue 
+              | ArgmaxPTestCase String [IRValue] IRValue
+              | EncodingLengthTestCase String IRValue Int     -- sample, expected output list length
+              | EncodingSlotTestCase String IRValue IRValue Double  -- sample, indexOf-value, expected float
               deriving (Show)
 
 isProbTestCase :: TestCase -> Bool
@@ -44,9 +48,20 @@ isCumulTestCase :: TestCase -> Bool
 isCumulTestCase (CumulTestCase _ _ _ _) = True
 isCumulTestCase _ = False
 
+isEncodingLengthTestCase :: TestCase -> Bool
+isEncodingLengthTestCase (EncodingLengthTestCase _ _ _) = True
+isEncodingLengthTestCase _ = False
+
+isEncodingSlotTestCase :: TestCase -> Bool
+isEncodingSlotTestCase (EncodingSlotTestCase _ _ _ _) = True
+isEncodingSlotTestCase _ = False
+
 testCaseName :: TestCase -> String
 testCaseName (ProbTestCase name _ _ _) = name
+testCaseName (CumulTestCase name _ _ _) = name
 testCaseName (ArgmaxPTestCase name _ _) = name
+testCaseName (EncodingLengthTestCase name _ _) = name
+testCaseName (EncodingSlotTestCase name _ _ _) = name
 
 type Parser = Parsec Void String
 type MonadParser m = (MonadParsec Void String m, MonadPlus m, MonadFail m, MonadState Int m)
@@ -92,8 +107,28 @@ pCumulParser name = do
     [] -> fail "ProbTestCase must have at least one parameter (the sample)"
     _  -> return $ CumulTestCase name (head params) (tail params) (resP, resD)
 
+pEncodingLengthTestCase :: MonadParser m => String -> m TestCase
+pEncodingLengthTestCase name = do
+  symbol "encode_len("
+  sample <- pIRValue
+  symbol ")="
+  n <- L.decimal
+  return $ EncodingLengthTestCase name sample n
+
+pEncodingSlotTestCase :: MonadParser m => String -> m TestCase
+pEncodingSlotTestCase name = do
+  symbol "encode_at("
+  sample <- pIRValue
+  symbol ","
+  symbol "indexOf("
+  idxOf <- pIRValue
+  symbol "))"
+  symbol "~="
+  expected <- L.float
+  return $ EncodingSlotTestCase name sample idxOf expected
+
 pTestCases :: MonadParser m => String -> m [TestCase]
-pTestCases name = choice[pProbTestCase name, pCumulParser name, pArgmaxPTestCase name] `sepEndBy` pNewline
+pTestCases name = choice [pProbTestCase name, pCumulParser name, pArgmaxPTestCase name, pEncodingLengthTestCase name, pEncodingSlotTestCase name] `sepEndBy` pNewline
 
 parseTestCases :: FilePath -> IO [TestCase]
 parseTestCases fp = do

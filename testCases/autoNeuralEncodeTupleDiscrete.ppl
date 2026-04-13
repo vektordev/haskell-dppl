@@ -1,0 +1,2 @@
+neural tupleNN :: (Symbol -> (Int, Bool)) of ([0, 1, 2], [True, False])
+main sym = tupleNN sym

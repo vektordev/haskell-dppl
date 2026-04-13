@@ -1,0 +1,2 @@
+neural discreteNN :: (Symbol -> Int) of [0, 1, 2]
+main sym = discreteNN sym

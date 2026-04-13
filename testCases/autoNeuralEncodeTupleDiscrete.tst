@@ -1,0 +1,10 @@
+argmax_p((0, True))=(0, True)
+argmax_p((1, False))=(1, False)
+argmax_p((2, True))=(2, True)
+encode_len((0, True))=5
+encode_len((1, False))=5
+encode_len((2, True))=5
+encode_at((0, True), indexOf(0))~=0.85
+encode_at((0, True), indexOf(1))~=0.05
+encode_at((0, True), indexOf(True))~=0.85
+encode_at((0, True), indexOf(False))~=0.05

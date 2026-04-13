@@ -16,7 +16,7 @@ import SPLL.Typing.ForwardChaining (annotateProg)
 import Text.PrettyPrint.Annotated.HughesPJClass
 import PrettyPrint (pPrintProg, pPrintIREnv)
 import Debug.Pretty.Simple
-import Data.Maybe (fromJust)
+import Data.Maybe (fromJust, isJust)
 
 -- Flow control
 ifThenElse :: Expr -> Expr -> Expr -> Expr
@@ -256,6 +256,18 @@ runInteg conf p args sample = do
   let Just (integ, _) = integFun (lookupIREnv "main" compiled)
   let constArgs = map IRConst (sample:args)
   generateDet (neurals p) compiled constArgs integ
+
+runEncode :: CompilerConfig -> Program -> IRValue -> IRValue -> Either CompilerError IRValue
+runEncode _ p _ _ | isLeft (validateProgram p) = fmap (error "Impossible case") (validateProgram p)
+runEncode conf p sym sample = do
+  compiled <- compile conf p
+  let IREnv groups _ = compiled
+  case filter (isJust . encodeFun) groups of
+    [] -> Left "No encode function found in compiled program"
+    (grp:_) ->
+      let Just (enc, _) = encodeFun grp
+          constArgs = map IRConst [sym, sample]
+      in generateDet (neurals p) compiled constArgs enc
 
 printIfVerbose :: (Monad m) => CompilerConfig -> String -> m ()
 printIfVerbose CompilerConfig {verbose=v} s | v >= 1 = trace s (return ())

@@ -2,8 +2,10 @@ module SPLL.AutoNeural(
   makeAutoNeural
 , makeForwardDecl
 , makePartitionPlan
+, makeEncodeRec
 , PartitionPlan (..)
 , getSize
+, planIndexOf
 ) where
 
 import SPLL.Lang.Types
@@ -14,7 +16,7 @@ import PrettyPrint
 import StandardLibrary
 
 import Debug.Trace
-import Data.List (find)
+import Data.List (find, elemIndex)
 import Utils
 import Data.Maybe (fromJust)
 
@@ -30,7 +32,10 @@ makeAutoNeural :: [ADTDecl] -> CompilerConfig -> NeuralDecl -> IRFunGroup
 makeAutoNeural adts conf (name, (TArrow TSymbol target), tag) =
   IRFunGroup (name ++ "_auto")
     (Just (IRLambda symbol $ makeGen adts plan name, "Wrapper for the neural network function"))
-    (Just (IRLambda symbol $ makeProb adts conf plan name, "Inference function for neural network function")) Nothing Nothing (show plan)
+    (Just (IRLambda symbol $ makeProb adts conf plan name, "Inference function for neural network function"))
+    Nothing
+    (Just (IRLambda symbol $ makeEncode adts conf plan name, "Encoding function for NN2 input"))
+    (show plan)
     where plan = makePartitionPlan adts target tag
 makeAutoNeural adts conf (name, rt, _) = error $ "Invalid neural declaration for " ++ name ++ ": Neural networks must be function TSymbol -> a"
 
@@ -231,6 +236,41 @@ splitTag (Just (DiscreteValues (MultiTuple a b))) = (Just (DiscreteValues a), Ju
 tupleFromValue :: Value -> (Value, Value)
 tupleFromValue (VTuple a b) = (a,b)
 tupelFromValue _non_tuple = error "supplied non-tuple value to tuple-shaped NN type."
+
+makeEncodeRec :: [ADTDecl] -> PartitionPlan -> Int -> IRExpr -> IRExpr
+makeEncodeRec adts (Discretes rty (MultiDiscretes vals)) ix sample =
+  foldr IRCons (IRConst (VList EmptyList)) [IRIndex (IRVar vector) (IRConst (VInt (ix + i))) | i <- [0 .. length vals - 1]]
+makeEncodeRec adts (TuplePlan a b) ix sample =
+  invokeStandardFunction stdListConcat
+    [ makeEncodeRec adts a ix (IRTFst sample)
+    , makeEncodeRec adts b (ix + getSize a) (IRTSnd sample)
+    ]
+makeEncodeRec adts Continuous ix sample =
+  IRError "Continuous encoding requires IsNormal tag — not yet implemented (see 00_bidirectional-autoNeural.md)"
+makeEncodeRec adts (EitherPlan _ _) ix sample =
+  IRError "EitherPlan encoding requires MAR semantics — not yet implemented (see mar-sum-types-observe.md)"
+makeEncodeRec adts (ADTPlan _ _) ix sample =
+  IRError "ADTPlan encoding requires MAR semantics — not yet implemented (see mar-sum-types-observe.md)"
+
+makeEncode :: [ADTDecl] -> CompilerConfig -> PartitionPlan -> String -> IRExpr
+makeEncode adts conf plan nn_name = IRLambda "sample" $
+  IRLetIn vector (IRApply (IRVar nn_name) (IRVar "l_x_neural_in")) $
+    makeEncodeRec adts plan 0 (IRVar "sample")
+
+-- Find the flat logit-vector index for a given value within a plan.
+-- For TuplePlan, searches the left sub-plan first, then the right at offset getSize a.
+planIndexOf :: PartitionPlan -> IRValue -> Int
+planIndexOf plan v = case planIndexOfMaybe plan v of
+  Just i  -> i
+  Nothing -> error $ "planIndexOf: value not found in plan"
+
+planIndexOfMaybe :: PartitionPlan -> IRValue -> Maybe Int
+planIndexOfMaybe (Discretes _ (MultiDiscretes vals)) v = elemIndex v (map valueToIR vals)
+planIndexOfMaybe (TuplePlan a b) v =
+  case planIndexOfMaybe a v of
+    Just i  -> Just i
+    Nothing -> (getSize a +) <$> planIndexOfMaybe b v
+planIndexOfMaybe _ _ = Nothing
 
 noAny :: IRExpr -> IRExpr -> IRExpr
 noAny sample = IRIf (IRUnaryOp OpIsAny sample) (IRConst $ VFloat 1)

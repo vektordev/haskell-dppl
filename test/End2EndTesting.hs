@@ -22,6 +22,8 @@ import SPLL.CodeGenPyTorch
 import TestCaseParser
 import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType
+import SPLL.AutoNeural (makePartitionPlan, planIndexOf)
+import Data.Foldable (toList)
 import Test.QuickCheck hiding (verbose)
 import Debug.Trace
 import Control.Exception (try, evaluate, SomeException)
@@ -71,6 +73,33 @@ testInterpreter p (CumulTestCase name sample params (VFloat expectedProb, VFloat
     Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
     Right (Left err) -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
     Left err -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
+testInterpreter p (EncodingLengthTestCase name sample expectedLen) = ioProperty $ do
+  let mockSym = VTuple (VInt 0) (VInt 42)
+  result <- try $ evaluate $ runEncode defaultCompilerConfig p mockSym sample :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
+  return $ case result of
+    Right (Right (VList lst)) ->
+      counterexample ("Encode length differs for test case " ++ name ++ ". Expected: " ++ show expectedLen ++ " Got: " ++ show (length lst)) (length lst == expectedLen)
+    Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a list: " ++ show x) False
+    Right (Left err) -> counterexample ("Test case " ++ name ++ " raised a compiler error: " ++ show err) False
+    Left err -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
+testInterpreter p (EncodingSlotTestCase name sample idxOf expected) = ioProperty $ do
+  let mockSym = VTuple (VInt 1) (VTuple sample (VInt 0))  -- spiking at sample, seed 0
+  let (_, TArrow _ target, nnTag) = head (neurals p)
+      plan = makePartitionPlan (adts p) target nnTag
+      slotIdx = planIndexOf plan idxOf
+  result <- try $ evaluate $ runEncode defaultCompilerConfig p mockSym sample :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
+  return $ case result of
+    Right (Right (VList lst)) ->
+      let items = toList lst
+      in if slotIdx >= length items
+         then counterexample ("Slot index " ++ show slotIdx ++ " out of bounds (list length " ++ show (length items) ++ ") in test case " ++ name) False
+         else case items !! slotIdx of
+           VFloat actual ->
+             counterexample ("Encode slot " ++ show slotIdx ++ " for " ++ name ++ ": expected " ++ show expected ++ ", got " ++ show actual ++ " (tolerance 0.15)") (abs (actual - expected) < 0.15)
+           other -> counterexample ("Slot is not VFloat: " ++ show other ++ " in " ++ name) False
+    Right (Right x) -> counterexample ("Output is not a list: " ++ show x ++ " in " ++ name) False
+    Right (Left err) -> counterexample ("Compiler error in " ++ name ++ ": " ++ show err) False
+    Left err -> counterexample ("Exception in " ++ name ++ ": " ++ show err) False
 testInterpreter p (ArgmaxPTestCase name params res) = ioProperty $ do
   let paramCnt = length params
   let mockedParams seeds = map (\(par, s) -> VTuple (VInt 1) (VTuple par (VInt s))) (zip params seeds)

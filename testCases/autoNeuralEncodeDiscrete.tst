@@ -1,0 +1,12 @@
+argmax_p(0)=0
+argmax_p(1)=1
+argmax_p(2)=2
+encode_len(0)=3
+encode_len(1)=3
+encode_len(2)=3
+encode_at(0, indexOf(0))~=0.85
+encode_at(0, indexOf(1))~=0.05
+encode_at(0, indexOf(2))~=0.05
+encode_at(1, indexOf(0))~=0.05
+encode_at(1, indexOf(1))~=0.85
+encode_at(1, indexOf(2))~=0.05
