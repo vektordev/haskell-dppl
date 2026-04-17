@@ -1,0 +1,2 @@
+neural eitherNN :: (Symbol -> Either Int Bool) of ([0, 1, 2] | [True, False])
+main sym = eitherNN sym

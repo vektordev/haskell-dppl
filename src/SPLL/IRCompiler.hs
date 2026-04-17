@@ -59,7 +59,7 @@ envToIR conf p
 
 envToIRUnoptimized :: CompilerConfig -> Program -> IREnv
 envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb, noGenerate=noGen} p@Program{adts=adts} = IREnv (
-  map (makeAutoNeural adts conf) (neurals p) ++
+  map (makeAutoNeural adts conf "main") (neurals p) ++
   map (\(name, binding) ->
     let typeEnv = getGlobalTypeEnv p
         pt = pType $ getTypeInfo binding

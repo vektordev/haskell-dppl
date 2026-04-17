@@ -1,0 +1,2 @@
+neural discreteNN :: (Symbol -> Int) of [0, 1, 2]
+main sym = if discreteNN sym == 0 then 2 else 0

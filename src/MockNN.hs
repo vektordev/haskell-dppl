@@ -48,6 +48,10 @@ randomMockNN part@(TuplePlan planF planS) = do
   let VList sMockL = sndMock
   let res = toList fMockL ++ toList sMockL
   return (constructVList res)
+randomMockNN Continuous = do
+  mu <- getRandom
+  sigmaRaw <- getRandom
+  return $ constructVList [VFloat mu, VFloat (abs sigmaRaw + 0.1)]
 randomMockNN part@(ADTPlan dataName constrs) = do
   let cntConstrs = length constrs
   selectors <- randomList cntConstrs
@@ -73,6 +77,9 @@ spikingMockNN (Discretes _ tgs) v = do
   let sumNoise = sum noise
   let spike = [if i == idx then 1 else 0 | i <- [0..size - 1]]
   return $ constructVList (map (\(n, s) -> VFloat ((n + s) / (1 + sumNoise))) (zip noise spike))  -- Noise + spike normalized
+spikingMockNN Continuous (VFloat x) = do
+  noise <- getRandom <&> (* 0.05)
+  return $ constructVList [VFloat (x + noise), VFloat (0.1 + abs noise)]
 spikingMockNN (TuplePlan planF planS) (VTuple fVal sVal) = do
   fMock <- spikingMockNN planF fVal
   let VList fMockL = fMock

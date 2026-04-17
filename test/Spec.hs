@@ -41,7 +41,7 @@ import Data.Bifunctor (second)
 import SPLL.Typing.ForwardChaining (annotateProg)
 import SPLL.Parser
 import TestParser
-import TestInternals (test_internals, classConstraintTests, test_encodeDiscreteTuple, test_encodeFromDistribution)
+import TestInternals (test_internals, classConstraintTests, test_encodeDiscreteTuple, test_encodeFromDistribution, test_encodeContinuous)
 import Test.HUnit (runTestTT)
 import End2EndTesting
 import TestCaseParser (parseProgram)
@@ -866,6 +866,7 @@ runSpecifiedTests opts = do
   _ <- runTestTT classConstraintTests
   _ <- runTestTT (test_encodeDiscreteTuple)
   _ <- runTestTT (test_encodeFromDistribution)
+  _ <- runTestTT (test_encodeContinuous)
   d <- if disableEnd2End opts then return True else test_end2end
   let x = a && b && c && d
   if x then

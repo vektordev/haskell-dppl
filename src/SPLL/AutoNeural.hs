@@ -28,16 +28,16 @@ import Data.Maybe (fromJust)
 --  provide sampling and inference.
 
 --implicit assumption: Neural Decl accepts a "TSymbol"-typed thing.
-makeAutoNeural :: [ADTDecl] -> CompilerConfig -> NeuralDecl -> IRFunGroup
-makeAutoNeural adts conf (name, (TArrow TSymbol target), tag) =
+makeAutoNeural :: [ADTDecl] -> CompilerConfig -> String -> NeuralDecl -> IRFunGroup
+makeAutoNeural adts conf spllFnName (name, (TArrow TSymbol target), tag) =
   IRFunGroup (name ++ "_auto")
     (Just (IRLambda symbol $ makeGen adts plan name, "Wrapper for the neural network function"))
     (Just (IRLambda symbol $ makeProb adts conf plan name, "Inference function for neural network function"))
     Nothing
-    (Just (IRLambda symbol $ makeEncode adts conf plan name, "Encoding function for NN2 input"))
+    (Just (IRLambda symbol $ makeEncode adts conf plan name (spllFnName ++ "_prob"), "Encoding function for NN2 input"))
     (show plan)
     where plan = makePartitionPlan adts target tag
-makeAutoNeural adts conf (name, rt, _) = error $ "Invalid neural declaration for " ++ name ++ ": Neural networks must be function TSymbol -> a"
+makeAutoNeural adts conf _ (name, rt, _) = error $ "Invalid neural declaration for " ++ name ++ ": Neural networks must be function TSymbol -> a"
 
 --TODO: Output this into the output file somehow.
 -- yields a forward declaration of a neural network:
@@ -246,16 +246,45 @@ makeEncodeRec adts (TuplePlan a b) ix sample =
     , makeEncodeRec adts b (ix + getSize a) (IRTSnd sample)
     ]
 makeEncodeRec adts Continuous ix sample =
-  IRError "Continuous encoding requires IsNormal tag — not yet implemented (see 00_bidirectional-autoNeural.md)"
-makeEncodeRec adts (EitherPlan _ _) ix sample =
-  IRError "EitherPlan encoding requires MAR semantics — not yet implemented (see mar-sum-types-observe.md)"
-makeEncodeRec adts (ADTPlan _ _) ix sample =
-  IRError "ADTPlan encoding requires MAR semantics — not yet implemented (see mar-sum-types-observe.md)"
+  -- Emit [μ, σ] directly from the logit vector slots.
+  -- For the identity pipeline (SPLL program = ReadNN), these are exactly the
+  -- parameters the upstream NN produced, so identity holds.
+  -- For non-identity PNormal transforms, use toIREncode in IRCompiler (future work).
+  foldr IRCons (IRConst (VList EmptyList))
+    [ IRIndex (IRVar vector) (IRConst (VInt ix))
+    , IRIndex (IRVar vector) (IRConst (VInt (ix + 1)))
+    ]
+makeEncodeRec adts plan@(EitherPlan a b) ix sample =
+  -- Pass-through: emit the logit vector slots for the full plan.
+  -- Layout matches the decode side: [flag | left_slots... | right_slots...]
+  -- Identity holds: for an identity SPLL program the NN's logit vector passes through unchanged.
+  -- Non-identity programs (requiring P(Left VAny) via MAR semantics) are out of scope.
+  foldr IRCons (IRConst (VList EmptyList))
+    [IRIndex (IRVar vector) (IRConst (VInt (ix + i))) | i <- [0 .. getSize plan - 1]]
+makeEncodeRec adts plan@(ADTPlan _ _) ix sample =
+  -- Pass-through: emit all flag + field logit slots for the full ADT plan.
+  -- Layout matches decode: [flag_0..flag_k | fields_constr_0... | fields_constr_1... | ...]
+  -- Same identity argument as EitherPlan; MAR-based encoding is out of scope.
+  foldr IRCons (IRConst (VList EmptyList))
+    [IRIndex (IRVar vector) (IRConst (VInt (ix + i))) | i <- [0 .. getSize plan - 1]]
 
-makeEncode :: [ADTDecl] -> CompilerConfig -> PartitionPlan -> String -> IRExpr
-makeEncode adts conf plan nn_name = IRLambda "sample" $
+-- Top-level encode dispatch: for Discretes plans, calls the compiled SPLL
+-- probability function for each enumerated value.  All other plan types fall
+-- through to the pass-through (vector read-back) in makeEncodeRec.
+makeEncodeTopLevel :: [ADTDecl] -> String -> PartitionPlan -> Int -> IRExpr -> IRExpr
+makeEncodeTopLevel adts probFnName (Discretes rty (MultiDiscretes vals)) ix _ =
+  -- For each enumerated value v, emit P(main(sym) = v) by calling the SPLL
+  -- prob function. Calling convention: probFnName takes sample first, then sym.
+  foldr IRCons (IRConst (VList EmptyList))
+    [ IRTFst (IRApply (IRApply (IRVar probFnName) (IRConst (valueToIR v))) (IRVar symbol))
+    | v <- vals ]
+makeEncodeTopLevel adts probFnName plan ix sample =
+  makeEncodeRec adts plan ix sample
+
+makeEncode :: [ADTDecl] -> CompilerConfig -> PartitionPlan -> String -> String -> IRExpr
+makeEncode adts conf plan nn_name probFnName = IRLambda "sample" $
   IRLetIn vector (IRApply (IRVar nn_name) (IRVar "l_x_neural_in")) $
-    makeEncodeRec adts plan 0 (IRVar "sample")
+    makeEncodeTopLevel adts probFnName plan 0 (IRVar "sample")
 
 -- Find the flat logit-vector index for a given value within a plan.
 -- For TuplePlan, searches the left sub-plan first, then the right at offset getSize a.

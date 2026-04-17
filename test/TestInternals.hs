@@ -4,7 +4,8 @@ module TestInternals (
   test_internals,
   classConstraintTests,
   test_encodeDiscreteTuple,
-  test_encodeFromDistribution
+  test_encodeFromDistribution,
+  test_encodeContinuous
 ) where
 
 import SPLL.Lang.Lang
@@ -149,6 +150,28 @@ test_encodeFromDistribution = TestCase $ do
       check 3 (pBool True)   -- P(b=True) = 0.7
       check 4 (pBool False)  -- P(b=False)= 0.3
     Right other -> assertFailure $ "expected VList, got: " ++ show other
+
+-- Test makeEncodeRec for Continuous: verifies that the encoder re-emits
+-- [mu, sigma] from the logit vector, ignoring the sample entirely.
+-- This is the identity-pipeline property for Gaussian outputs.
+test_encodeContinuous :: Test
+test_encodeContinuous = TestCase $ do
+  let plan = Continuous
+  let knownVec = constructVList [VFloat 2.5, VFloat 0.8]  -- mu=2.5, sigma=0.8
+  -- sample value is irrelevant: Continuous encoder reads vector slots regardless
+  let encodeExpr = IRLetIn "l_x_neural_out" (IRConst knownVec)
+                     (makeEncodeRec [] plan 0 (IRConst (VFloat 1.5)))
+  case generateDet [] (IREnv [] []) [] encodeExpr of
+    Left err -> assertFailure ("encode evaluation failed: " ++ err)
+    Right (VList result) -> do
+      let items = toList result
+      assertEqual "encoded list length" 2 (length items)
+      case items of
+        [VFloat mu, VFloat sigma] -> do
+          assertBool ("mu: expected 2.5, got " ++ show mu) (abs (mu - 2.5) < 1.0e-9)
+          assertBool ("sigma: expected 0.8, got " ++ show sigma) (abs (sigma - 0.8) < 1.0e-9)
+        _ -> assertFailure ("unexpected items: " ++ show items)
+    Right other -> assertFailure ("expected VList, got: " ++ show other)
 
 return []
 test_internals = $(forAllProperties) (quickCheckWithResult stdArgs { maxSuccess = 100 })
