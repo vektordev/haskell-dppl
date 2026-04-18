@@ -41,11 +41,13 @@ import Data.Bifunctor (second)
 import SPLL.Typing.ForwardChaining (annotateProg)
 import SPLL.Parser
 import TestParser
-import TestInternals (test_internals, classConstraintTests, test_encodeDiscreteTuple, test_encodeFromDistribution, test_encodeContinuous)
+import TestInternals (test_internals, classConstraintTests, test_encodeDiscreteTuple, test_encodeFromDistribution, test_encodeContinuous, test_encodeTupleGaussianParams)
 import Test.HUnit (runTestTT)
 import End2EndTesting
 import TestCaseParser (parseProgram)
 import SPLL.Prelude
+import qualified SPLL.CodeGenPyTorch
+import Data.List (isInfixOf)
 
 
 -- Generalizing over different compilation stages, we can fit all "this typing is what the compiler would find" cases.
@@ -818,6 +820,64 @@ prop_stripBranchCountReturnShape = ioProperty $ do
     counterexample ("countBranches=False should return pair, got: " ++ show withoutBC)
       (case withoutBC of { VTuple _ (VTuple _ _) -> False; VTuple _ _ -> True; _ -> False })
 
+-- When topKThreshold is set, IREnv should contain exactly one constant named TOP_K_CUTOFF
+-- with the value matching the config.
+prop_TopKConstantPresentInEnv :: Property
+prop_TopKConstantPresentInEnv = ioProperty $ do
+  let conf = defaultCompilerConfig { topKThreshold = Just 0.005 }
+      Right irEnv = compile conf testDice
+      IREnv _ _ consts = irEnv
+  return $ case lookup "TOP_K_CUTOFF" consts of
+    Just (VFloat v) -> counterexample ("Expected 0.005, got " ++ show v) (abs (v - 0.005) < 1e-12)
+    Just other      -> counterexample ("Expected VFloat, got " ++ show other) False
+    Nothing         -> counterexample "TOP_K_CUTOFF constant absent from IREnv" False
+
+-- When topKThreshold is Nothing, no TOP_K_CUTOFF constant should appear in IREnv.
+prop_TopKConstantAbsentWithoutFlag :: Property
+prop_TopKConstantAbsentWithoutFlag = ioProperty $ do
+  let Right irEnv = compile defaultCompilerConfig testDice
+      IREnv _ _ consts = irEnv
+  return $ counterexample "TOP_K_CUTOFF should not appear when topK is disabled"
+    (isNothing (lookup "TOP_K_CUTOFF" consts))
+  where isNothing Nothing = True; isNothing _ = False
+
+-- The generated Python should contain a plain assignment `TOP_K_CUTOFF = <value>`,
+-- not a class definition.
+prop_TopKPythonConstantIsPlainAssignment :: Property
+prop_TopKPythonConstantIsPlainAssignment = ioProperty $ do
+  let conf = defaultCompilerConfig { topKThreshold = Just 0.001 }
+      Right irEnv = compile conf testDice
+      pyLines = SPLL.CodeGenPyTorch.generateFunctions True irEnv
+  let hasAssignment = any ("TOP_K_CUTOFF = " `isInfixOf`) pyLines
+      hasClass       = any ("class TOP_K_CUTOFF" `isInfixOf`) pyLines
+  return $ counterexample ("Expected plain assignment, lines: " ++ unlines pyLines)
+    (hasAssignment && not hasClass)
+
+-- The value in the generated Python assignment must match the threshold passed in.
+prop_TopKPythonConstantValueMatchesConfig :: Property
+prop_TopKPythonConstantValueMatchesConfig = ioProperty $ do
+  let thresh = 0.0042 :: Double
+      conf = defaultCompilerConfig { topKThreshold = Just thresh }
+      Right irEnv = compile conf testDice
+      pyLines = SPLL.CodeGenPyTorch.generateFunctions True irEnv
+      assignmentLines = filter ("TOP_K_CUTOFF = " `isInfixOf`) pyLines
+  return $ case assignmentLines of
+    [line] -> counterexample ("Assignment line: " ++ line)
+                (show thresh `isInfixOf` line)
+    other  -> counterexample ("Expected exactly one assignment line, got: " ++ show other) False
+
+-- The interpreter must resolve IRVar "TOP_K_CUTOFF" via the constant in IREnv:
+-- irDensityTopK with threshold=0.001 on testDice should agree with irDensity
+-- (all branches kept since 1/6 >> 0.001).
+prop_TopKConstantResolvedByInterpreter :: Property
+prop_TopKConstantResolvedByInterpreter = ioProperty $ do
+  withTopK <- evalRandIO $ irDensityTopK testDice 0.001 (VInt 3) []
+  exact    <- evalRandIO $ irDensity     testDice       (VInt 3) []
+  case (withTopK, exact) of
+    (VTuple topKP _, VTuple exactP _) ->
+      return $ topKP `reasonablyClose` exactP
+    _ -> return $ counterexample "Return type was no tuple" False
+
 return []
 
 
@@ -867,6 +927,7 @@ runSpecifiedTests opts = do
   _ <- runTestTT (test_encodeDiscreteTuple)
   _ <- runTestTT (test_encodeFromDistribution)
   _ <- runTestTT (test_encodeContinuous)
+  _ <- runTestTT (test_encodeTupleGaussianParams)  -- forward spec: fails until TuplePlan encode uses SPLL normal params
   d <- if disableEnd2End opts then return True else test_end2end
   let x = a && b && c && d
   if x then

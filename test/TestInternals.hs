@@ -5,7 +5,8 @@ module TestInternals (
   classConstraintTests,
   test_encodeDiscreteTuple,
   test_encodeFromDistribution,
-  test_encodeContinuous
+  test_encodeContinuous,
+  test_encodeTupleGaussianParams
 ) where
 
 import SPLL.Lang.Lang
@@ -79,7 +80,7 @@ test_encodeDiscreteTuple = TestCase $ do
   -- sample is irrelevant: Discretes encoder reads vector slots regardless of sample value
   let encodeExpr = IRLetIn "l_x_neural_out" (IRConst knownVec)
                      (makeEncodeRec [] plan 0 (IRConst (VTuple (VInt 0) (VBool True))))
-  case generateDet [] (IREnv [] []) [] encodeExpr of
+  case generateDet [] (IREnv [] [] []) [] encodeExpr of
     Left err -> assertFailure ("encode evaluation failed: " ++ err)
     Right (VList result) -> do
       let items = toList result
@@ -133,7 +134,7 @@ test_encodeFromDistribution = TestCase $ do
   -- Run makeEncodeRec with this vector and an arbitrary sample
   let encodeExpr = IRLetIn "l_x_neural_out" (IRConst vec)
                      (makeEncodeRec [] plan 0 (IRConst (VTuple (VInt 0) (VBool True))))
-  case generateDet [] (IREnv [] []) [] encodeExpr of
+  case generateDet [] (IREnv [] [] []) [] encodeExpr of
     Left err -> assertFailure ("Encode evaluation failed: " ++ err)
     Right (VList result) -> do
       let items = toList result
@@ -161,7 +162,7 @@ test_encodeContinuous = TestCase $ do
   -- sample value is irrelevant: Continuous encoder reads vector slots regardless
   let encodeExpr = IRLetIn "l_x_neural_out" (IRConst knownVec)
                      (makeEncodeRec [] plan 0 (IRConst (VFloat 1.5)))
-  case generateDet [] (IREnv [] []) [] encodeExpr of
+  case generateDet [] (IREnv [] [] []) [] encodeExpr of
     Left err -> assertFailure ("encode evaluation failed: " ++ err)
     Right (VList result) -> do
       let items = toList result
@@ -171,6 +172,49 @@ test_encodeContinuous = TestCase $ do
           assertBool ("mu: expected 2.5, got " ++ show mu) (abs (mu - 2.5) < 1.0e-9)
           assertBool ("sigma: expected 0.8, got " ++ show sigma) (abs (sigma - 0.8) < 1.0e-9)
         _ -> assertFailure ("unexpected items: " ++ show items)
+    Right other -> assertFailure ("expected VList, got: " ++ show other)
+
+-- Specification test: a closed-form tuple-of-normals program with known, constant
+-- parameters.  The encoder is expected to recover those parameters directly from the
+-- compiled SPLL distribution rather than reading the raw NN logit-vector slots.
+--
+-- Expected encode output: [mu1, sigma1, mu2, sigma2] = [2.0, 1.5, -1.0, 0.5]
+-- regardless of which sample is passed in.
+--
+-- CURRENT STATUS: FAILING — makeEncodeTopLevel falls through to makeEncodeRec for
+-- TuplePlan, which reads NN logit-vector slots instead of invoking the SPLL
+-- normal-params function for each component.  This test is a forward specification:
+-- it should pass once makeEncodeTopLevel handles TuplePlan by delegating each
+-- Continuous sub-plan to the compiled main_normal (or equivalent per-component)
+-- function rather than to the raw NN output.
+test_encodeTupleGaussianParams :: Test
+test_encodeTupleGaussianParams = TestCase $ do
+  let src = unlines
+        [ "neural tupleNN :: (Symbol -> (Float, Float))"
+        , "main sym = (1.5 * Normal + 2.0, 0.5 * Normal + (-1.0))"
+        ]
+  prog <- case tryParseProgram "<test>" src of
+    Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
+    Right p  -> return p
+  let mockSym = VTuple (VInt 0) (VInt 0)  -- random mock NN, seed 0 (irrelevant for closed-form)
+  let sample  = VTuple (VFloat 2.0) (VFloat (-1.0))
+  case runEncode defaultCompilerConfig prog mockSym sample of
+    Left err -> assertFailure ("runEncode failed: " ++ err)
+    Right (VList lst) -> do
+      let items = toList lst
+      assertEqual "encode length" 4 (length items)
+      -- The encoder must recover the actual distribution parameters,
+      -- not the mock NN's random output.
+      let checkSlot i expected = case items !! i of
+            VFloat actual ->
+              assertBool ("slot " ++ show i ++ ": expected " ++ show expected
+                          ++ ", got " ++ show actual)
+                         (abs (actual - expected) < 1.0e-6)
+            other -> assertFailure ("slot " ++ show i ++ " is not VFloat: " ++ show other)
+      checkSlot 0   2.0   -- mu1
+      checkSlot 1   1.5   -- sigma1
+      checkSlot 2 (-1.0)  -- mu2
+      checkSlot 3   0.5   -- sigma2
     Right other -> assertFailure ("expected VList, got: " ++ show other)
 
 return []

@@ -261,7 +261,7 @@ runEncode :: CompilerConfig -> Program -> IRValue -> IRValue -> Either CompilerE
 runEncode _ p _ _ | isLeft (validateProgram p) = fmap (error "Impossible case") (validateProgram p)
 runEncode conf p sym sample = do
   compiled <- compile conf p
-  let IREnv groups _ = compiled
+  let IREnv groups _ _ = compiled
   case filter (isJust . encodeFun) groups of
     [] -> Left "No encode function found in compiled program"
     (grp:_) ->

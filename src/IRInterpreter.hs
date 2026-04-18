@@ -39,7 +39,7 @@ generateRand neurals env = generate f neurals adts startingEnv startingEnv
       uniformGen = irSample IRUniform,
       normalGen= irSample IRNormal}
     startingEnv = reduceIREnv env ++ standardEnv ++ map neuralRTypeToEnv neurals ++ concatMap implicitFunctionsToEnv adts
-    (IREnv _ adts) = env
+    (IREnv _ adts _) = env
 
 generateDet :: (HasCallStack) => [NeuralDecl] -> IREnv -> [IRExpr]-> IRExpr -> Either String IRValue
 --generateDet neurals env params e | traceShow e False = undefined
@@ -49,7 +49,7 @@ generateDet neurals env = generate f neurals adts startingEnv startingEnv
       uniformGen = Left "Uniform Gen is not det",
       normalGen = Left "Normal Gen is not det"}
     startingEnv = reduceIREnv env ++ standardEnv ++ map neuralRTypeToEnv neurals ++ concatMap implicitFunctionsToEnv adts
-    (IREnv _ adts) = env
+    (IREnv _ adts _) = env
 
 generate :: (Monad m, HasCallStack) => RandomFunctions m a -> [NeuralDecl] -> [ADTDecl ] -> ReducedIREnv -> ReducedIREnv -> [IRExpr]-> IRExpr -> m IRValue
 --generate f neurals adts globalEnv env args expr | trace ((show expr) {-++ " " ++ show env-}) False = undefined
@@ -404,7 +404,9 @@ generate f neurals adts _ _ _ expr = error ("Expression is not yet implemented "
 -- Reduces the complex data structure of an IREnv to a simpler reduced form
 -- Does this by creating a list of Maybe IRExpressions for each triple of gen, prob, and integ functions and then removes the Nothings
 reduceIREnv :: IREnv -> ReducedIREnv
-reduceIREnv (IREnv funcs _) = concatMap (\(IRFunGroup name gen prob integ encode doc) -> catMaybes [gen <&> red name "_gen", prob <&> red name "_prob", integ <&> red name "_integ", encode <&> red name "_encode"]) funcs
+reduceIREnv (IREnv funcs _ consts) =
+  map (\(name, val) -> (name, IRConst val)) consts ++
+  concatMap (\(IRFunGroup name gen prob integ encode normal doc) -> catMaybes [gen <&> red name "_gen", prob <&> red name "_prob", integ <&> red name "_integ", encode <&> red name "_encode", normal <&> red name "_normal"]) funcs
   where red name suffix (expr, _) = (name ++ suffix, expr)
 
 irSample :: (RandomGen g) => Distribution -> Rand g IRValue

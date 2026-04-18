@@ -1,0 +1,2 @@
+neural gaussNN :: (Symbol -> Float)
+main sym = gaussNN sym + 3.0

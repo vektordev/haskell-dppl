@@ -82,13 +82,23 @@ envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb
             Just (toGenDecl name (fst $ evalSupply $ runWriterT $ toIRGenerate (meta typeEnv) binding))
           else
             Nothing,
-        groupDoc="Function group " ++ name}) (functions p)) adts
+        normalFun =
+          if (pt == PNormal || pt == PLogNormal) && isNormalExtractable binding then
+            Just (toNormalDecl name (compileNormalExpr (meta typeEnv) binding))
+          else
+            Nothing,
+        groupDoc="Function group " ++ name}) (functions p))
+  adts
+  (case topKThreshold conf of
+    Just thresh -> [("TOP_K_CUTOFF", VFloat thresh)]
+    Nothing     -> [])
 
   where
     toGenDecl name expr = (expr, "Generates a random sample of the " ++ name ++ " function")
     toProbDecl name expr =
       (expr, "Calculates the probability of the sample parameter being returned from the " ++ name ++ "function")
     toIntegDecl name expr = (expr, "Calculates the probability of the sample parameter being less than or equal to the " ++ name ++ " function")
+    toNormalDecl name expr = (expr, "Returns (mu, sigma) normal distribution parameters for the " ++ name ++ " function")
     fcDat = progToFCData p
     meta typeEnv = CompilerMetadata conf fcDat typeEnv adts p (IRConst (VFloat 1.0))
 
@@ -113,6 +123,28 @@ generateLetInBlock meta codeGen =
 
 generateLetInExpr ::  [(Varname, IRExpr)] -> IRExpr -> IRExpr
 generateLetInExpr binds e = foldr (\(var, val) expr  -> IRLetIn var val expr) e binds
+
+-- | Compile a PNormal/PLogNormal expression to a function returning (mu, sigma) as
+-- an IRTCons pair.  Lambda wrappers are preserved so the result has the same arity
+-- as the original binding; parameter types are added to the type environment so that
+-- inner Var references resolve correctly.
+compileNormalExpr :: CompilerMetadata -> Expr -> IRExpr
+compileNormalExpr meta (Lambda t name subExpr) =
+  let newMeta = meta { typeEnv = (name, (rType (getTypeInfo subExpr), False)) : typeEnv meta }
+  in IRLambda name (compileNormalExpr newMeta subExpr)
+compileNormalExpr meta expr =
+  let ((mu, sigma), binds) = evalSupply $ runWriterT $ toIRNormal meta expr
+  in generateLetInExpr binds (IRTCons mu sigma)
+
+-- | True when the expression (with lambdas stripped) has its own toIRInference
+-- handler and cannot be processed by toIRNormalParams.  Mirrors the
+-- hasOwnInferenceHandler predicate used by toIRInference.
+isNormalExtractable :: Expr -> Bool
+isNormalExtractable (Lambda _ _ body) = isNormalExtractable body
+isNormalExtractable (Apply  _ _ _)    = False
+isNormalExtractable (Cons   _ _ _)    = False
+isNormalExtractable (TCons  _ _ _)    = False
+isNormalExtractable _                 = True
 
 -- Return type (name, rType, hasInferenceFunctions)
 getGlobalTypeEnv :: Program -> TypeEnv
@@ -243,6 +275,11 @@ toIRNormalParams meta (InjF _ "log" [e])
   | pType (getTypeInfo e) == PLogNormal = toIRLogNormalParams meta e
 toIRNormalParams meta (Var _ name)
   | Just expr <- lookup name (functions (compilingProgram meta)) = toIRNormalParams meta expr
+toIRNormalParams meta (ReadNN _ name arg) = do
+  sym <- toIRGenerate meta arg
+  var <- mkVariable "nn_out"
+  setVariables [(var, IRApply (IRVar name) sym)]
+  return (IRIndex (IRVar var) (IRConst (VInt 0)), IRIndex (IRVar var) (IRConst (VInt 1)))
 toIRNormalParams _ e = error $ "toIRNormalParams: cannot extract Normal params from " ++ show (pType (getTypeInfo e)) ++ " | expr: " ++ show e
 
 -- | Recursively extract (mu_log, sigma) as IRExprs from a PLogNormal-typed expression.
@@ -366,26 +403,26 @@ toIRInference meta cumulative (IfThenElse t cond left right) sample = do
   (addExpr, addDim) <- mul1Zeroed `addP` mul2Zeroed
   let branches = IROp OpSub (IROp OpPlus condTrueBranches (IROp OpPlus leftBranchesExpr rightBranchesExpr)) (IRConst (VFloat 1))
   case thr of
-    Just thresh -> do
+    Just _ -> do
       let accTrue = IROp OpMult (accProb meta) (IRVar var_condT_p)
       let accFalse = IROp OpMult (accProb meta) (IRVar var_condF_p)
       let returnExpr = IRIf
-            (IROp OpLessThan accTrue (IRConst (VFloat thresh)))
+            (IROp OpLessThan accTrue (IRVar "TOP_K_CUTOFF"))
             -- If probability of this branch is 0 then set the product to 0 manually. This branch could throw an error multiplied by 0
             (IRIf (IROp OpApprox condFalseExpr const0) const0 (fst mul2))
-            (IRIf (IROp OpLessThan accFalse (IRConst (VFloat thresh)))
+            (IRIf (IROp OpLessThan accFalse (IRVar "TOP_K_CUTOFF"))
               (IRIf (IROp OpApprox condTrueExpr const0) const0 (fst mul1))
               addExpr)
       let returnDim = IRIf
-            (IROp OpLessThan accTrue (IRConst (VFloat thresh)))
+            (IROp OpLessThan accTrue (IRVar "TOP_K_CUTOFF"))
             (IRIf (IROp OpApprox condFalseExpr const0) const0 (snd mul2))
-            (IRIf (IROp OpLessThan accFalse (IRConst (VFloat thresh)))
+            (IRIf (IROp OpLessThan accFalse (IRVar "TOP_K_CUTOFF"))
               (IRIf (IROp OpApprox condTrueExpr const0) const0 (snd mul1))
               addDim)
       let returnBranches = IRIf
-            (IROp OpLessThan accTrue (IRConst (VFloat thresh)))
+            (IROp OpLessThan accTrue (IRVar "TOP_K_CUTOFF"))
             rightBranchesExpr
-            (IRIf (IROp OpLessThan accFalse (IRConst (VFloat thresh)))
+            (IRIf (IROp OpLessThan accFalse (IRVar "TOP_K_CUTOFF"))
               leftBranchesExpr
               branches)
       return (returnExpr, returnDim, returnBranches)
@@ -771,10 +808,10 @@ toIRInference meta False (InjF TypeInfo {tags=extras, rType=rt} name [left, righ
 
     let returnExpr = case topKThreshold (compilerConfig meta) of
           Nothing -> IRIf (IRIsPossible enumListR invExpr) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
-          Just thr -> IRIf (IROp OpAnd (IRIsPossible enumListR invExpr) (IROp OpGreaterThan (IROp OpMult (accProb meta) pLeft) (IRConst (VFloat thr)))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
+          Just _ -> IRIf (IROp OpAnd (IRIsPossible enumListR invExpr) (IROp OpGreaterThan (IROp OpMult (accProb meta) pLeft) (IRVar "TOP_K_CUTOFF"))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
     let branchesExpr = case topKThreshold (compilerConfig meta) of
           Nothing -> IRIf (IRIsPossible enumListR invExpr) (IRConst (VFloat 1)) (IRConst (VFloat 0))
-          Just thr -> IRIf (IROp OpAnd (IRIsPossible enumListR invExpr) (IROp OpGreaterThan (IROp OpMult (accProb meta) pLeft) (IRConst (VFloat thr)))) (IRConst (VFloat 1)) (IRConst (VFloat 0))
+          Just _ -> IRIf (IROp OpAnd (IRIsPossible enumListR invExpr) (IROp OpGreaterThan (IROp OpMult (accProb meta) pLeft) (IRVar "TOP_K_CUTOFF"))) (IRConst (VFloat 1)) (IRConst (VFloat 0))
     return (returnExpr, const0, branchesExpr)
     )) <&> generateLetInBlock meta
   uniquePrefix <- mkVariable ""
@@ -1106,10 +1143,11 @@ toIREnumerate meta cumulative (IfThenElse TypeInfo{rType=rt} c t e) sample = do
 -- extractions throughout the body; (2) peel through wrappers to collapse the outermost
 -- (prob, (dim, bc)) triple back to (prob, dim).
 stripBranchCount :: IREnv -> IREnv
-stripBranchCount (IREnv funcs adts) = IREnv (map stripGroup funcs) adts
+stripBranchCount (IREnv funcs adts consts) = IREnv (map stripGroup funcs) adts consts
   where
     stripGroup fg = fg { probFun  = fmap stripFun (probFun fg)
-                       , integFun = fmap stripFun (integFun fg) }
+                       , integFun = fmap stripFun (integFun fg)
+                       , normalFun = fmap stripFun (normalFun fg) }
     stripFun (expr, doc) = (irMap killAll expr, doc)
 
     -- Apply stripOuterTriple to every lambda body, collapsing (prob, (dim, bc)) → (prob, dim)

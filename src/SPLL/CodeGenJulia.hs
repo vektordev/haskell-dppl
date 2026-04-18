@@ -126,24 +126,26 @@ generateADTClass (name, fields) =
   where fieldNames = map fst fields
 
 generateFunctions :: IREnv -> [String]
-generateFunctions (IREnv funcs adts) = do
+generateFunctions (IREnv funcs adts consts) = do
   let adtClasses = generateADTClasses adts
+  let constsStr = map (\(name, val) -> name ++ " = " ++ juliaVal val) consts
   let callableNames = [ n ++ "_gen"
                       | IRFunGroup{groupName=n, genFun=Just (e, _)} <- funcs
                       , null (fst (unwrapLambdas e)) ]
   let funcGroupsMonadic = concatMapM generateFunctionGroup funcs
   let (funcStrs, (globalVars, _)) = evalSupply $ runStateT funcGroupsMonadic ([], callableNames)
   let varsStr = map (\(mv, name)-> name ++ " = " ++ juliaMultiVal mv) globalVars
-  adtClasses ++ varsStr ++ funcStrs
+  adtClasses ++ constsStr ++ varsStr ++ funcStrs
 
 generateFunctionGroup :: IRFunGroup -> GlobalVariableSupply [String]
-generateFunctionGroup IRFunGroup {groupName=n, genFun=g, probFun=p, integFun=i, encodeFun=e, groupDoc=doc} = do
+generateFunctionGroup IRFunGroup {groupName=n, genFun=g, probFun=p, integFun=i, encodeFun=e, normalFun=nrm, groupDoc=doc} = do
   let preemble = [ "# === Function Group " ++ n ++ " ===\n# " ++ doc]
   gen <- fromMaybe (return []) (g <&> genF n "_gen")
   prob <- fromMaybe (return []) (p <&> genF n "_prob")
   integ <- fromMaybe (return []) (i <&> genF n "_integ")
   enc <- fromMaybe (return []) (e <&> genF n "_encode")
-  return $ preemble ++ gen ++ prob ++ integ ++ enc
+  norm <- fromMaybe (return []) (nrm <&> genF n "_normal")
+  return $ preemble ++ gen ++ prob ++ integ ++ enc ++ norm
   where genF name suffix (e, d) = generateFunction (name ++ suffix) d e
 
 generateFunction :: String -> String -> IRExpr -> GlobalVariableSupply [String]

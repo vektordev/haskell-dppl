@@ -12,7 +12,9 @@ pPrintProg :: Program -> String
 pPrintProg (Program decls neurals adts) = intercalate "\n\n" (map (\f -> wrapInFunctionDeclaration (snd f) (fst f) []) decls)
 
 pPrintIREnv :: IREnv -> String
-pPrintIREnv (IREnv funcs _) = intercalate "\n\n" (concatMap (\(IRFunGroup name gen prob integ encode doc) -> catMaybes [gen <&> wrapDecl name "_gen" , prob <&> wrapDecl name "_prob", integ <&> wrapDecl name "_integ", encode <&> wrapDecl name "_encode"]) funcs)
+pPrintIREnv (IREnv funcs _ consts) = intercalate "\n\n" $
+    map (\(name, val) -> name ++ " = " ++ show val) consts ++
+    concatMap (\(IRFunGroup name gen prob integ encode normal doc) -> catMaybes [gen <&> wrapDecl name "_gen" , prob <&> wrapDecl name "_prob", integ <&> wrapDecl name "_integ", encode <&> wrapDecl name "_encode", normal <&> wrapDecl name "_normal"]) funcs
     where wrapDecl name suffix (expr, doc) = wrapInFunctionDeclarationIR expr (name ++ suffix) doc []
 
 wrapInFunctionDeclaration :: Expr -> String -> [String] -> String

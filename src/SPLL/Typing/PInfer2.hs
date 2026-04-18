@@ -674,7 +674,10 @@ infer env expr = case expr of
 
   ReadNN ti name e -> do
       (s, cs, t, et) <- infer env e
-      return (s, cs, Integrate, ReadNN (setPType ti Integrate) name et)
+      -- Continuous (TFloat) NNs output (mu, sigma) logits and are treated as
+      -- PNormal so that toIRNormalParams can extract the parameters symbolically.
+      let pt = if rType ti == TFloat then PNormal else Integrate
+      return (s, cs, pt, ReadNN (setPType ti pt) name et)
 
   Error ti e -> return (emptySubst, [], Deterministic, Error (setPType ti Deterministic) e)
 

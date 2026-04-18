@@ -127,7 +127,7 @@ onLast f (x:xs) = x : onLast f xs
 generateFunctions :: Bool -> IREnv -> [String]
 --generateFunctions defs | trace (show defs) False = undefined
 --contrary to the julia backend, we want to aggregate gen and prob into one classes. Ugly implementation, but it'll do for now.
-generateFunctions genBoil env@(IREnv funcs adts) =
+generateFunctions genBoil env@(IREnv funcs adts consts) =
 {-  let
     getName str
       | "_prob" `isSuffixOf` str = iterate init str !! 5
@@ -153,10 +153,13 @@ generateFunctions genBoil env@(IREnv funcs adts) =
       "import math",
       "from torch.nn import Module", ""] ++
       generateADTClasses adts ++
+      map (\(name, val) -> name ++ " = " ++ pyVal val) consts ++
+      (if null consts then [] else [""]) ++
       concatMap (generateClass lut callableNames) funcs ++
       ["", "# Example Initialization"] ++
       generateInitializations env
     else
+      map (\(name, val) -> name ++ " = " ++ pyVal val) consts ++
       concatMap (generateClass lut callableNames) funcs
 
 
@@ -164,14 +167,14 @@ stdLib :: [(String, String)]
 stdLib = [("in", "contains")]
 
 envToLUT :: IREnv -> [(String, String)]
-envToLUT (IREnv funcs _) = concatMap (\IRFunGroup {groupName=n} -> [(n ++ "_gen", n ++ ".generate"), (n ++ "_prob", n ++ ".forward"), (n ++ "_integ", n ++ ".integrate")]) funcs
+envToLUT (IREnv funcs _ _) = concatMap (\IRFunGroup {groupName=n} -> [(n ++ "_gen", n ++ ".generate"), (n ++ "_prob", n ++ ".forward"), (n ++ "_integ", n ++ ".integrate"), (n ++ "_normal", n ++ ".normal_params")]) funcs
 
 replaceCalls :: [(String, String)] -> IRExpr -> IRExpr
 replaceCalls lut (IRVar name) = IRVar (fromMaybe name $ lookup name lut)
 replaceCalls _ other = other
 
 generateInitializations :: IREnv -> [String]
-generateInitializations (IREnv funcs _) = map (\IRFunGroup {groupName=n} -> n ++ " = " ++ onHead toUpper n ++ "()") funcs
+generateInitializations (IREnv funcs _ _) = map (\IRFunGroup {groupName=n} -> n ++ " = " ++ onHead toUpper n ++ "()") funcs
 
 generateADTClasses :: [ADTDecl] -> [String]
 generateADTClasses decls = concatMap generateADTClass (concatMap constructors decls)
@@ -208,20 +211,21 @@ generateADTClass (name, fields) =
   where fieldNames = map fst fields
 
 generateClass :: [(String, String)] -> [String] -> IRFunGroup -> [String]
-generateClass lut callableNames (IRFunGroup name gen prob integ encode doc) = let
+generateClass lut callableNames (IRFunGroup name gen prob integ encode normal doc) = let
   funcStringFromMaybe name func = case func of
     Just a -> generateFunction True (name, replaceCallsDecl a)
     Nothing -> return []
-  ((i, p, g, e), (globalVars, _)) = evalSupply $ runStateT (do
+  ((i, p, g, e, n), (globalVars, _)) = evalSupply $ runStateT (do
     i' <- funcStringFromMaybe "integrate" integ
     p' <- funcStringFromMaybe "forward" prob
     g' <- funcStringFromMaybe "generate" gen
     e' <- funcStringFromMaybe "encode" encode
-    return (i', p', g', e')) ([], callableNames)
+    n' <- funcStringFromMaybe "normal_params" normal
+    return (i', p', g', e', n')) ([], callableNames)
   commentLine = "# " ++ doc
   initLine = "class " ++ onHead toUpper name ++ "(Module):"
   globalVarDecls = map (\(mv, name)-> name ++ " = " ++ pyMultiVal mv) globalVars
-  funcs = i ++ [""] ++ p ++ [""] ++ g ++ [""] ++ e
+  funcs = i ++ [""] ++ p ++ [""] ++ g ++ [""] ++ e ++ [""] ++ n
   replaceCallsDecl (e, d) = (irMap (replaceCalls lut) e, d)
   in commentLine:initLine:indentOnce globalVarDecls ++ indentOnce funcs
 

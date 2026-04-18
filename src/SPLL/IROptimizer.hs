@@ -25,7 +25,7 @@ import SPLL.Lang.Lang (floatApproxEqThresh)
 
 
 optimizeEnv :: CompilerConfig -> IREnv -> IREnv
-optimizeEnv conf (IREnv funcs adts) = IREnv (map (\(IRFunGroup name gen prob integ encode doc) -> IRFunGroup name (gen <&> pp) (prob <&> pp) (integ <&> pp) (encode <&> pp) doc) funcs) adts
+optimizeEnv conf (IREnv funcs adts consts) = IREnv (map (\(IRFunGroup name gen prob integ encode normal doc) -> IRFunGroup name (gen <&> pp) (prob <&> pp) (integ <&> pp) (encode <&> pp) (normal <&> pp) doc) funcs) adts consts
   where pp (expr, doc) = (postProcess conf expr, doc)
 
 postProcess :: CompilerConfig -> IRExpr -> IRExpr

@@ -172,10 +172,10 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               
 type IRValue = GenericValue IRExpr
 
-data IREnv = IREnv [IRFunGroup] [ADTDecl] deriving (Show)
+data IREnv = IREnv [IRFunGroup] [ADTDecl] [(String, IRValue)] deriving (Show)
 
 
-data IRFunGroup = IRFunGroup {groupName::String, genFun::Maybe IRFunDecl, probFun::Maybe IRFunDecl, integFun::Maybe IRFunDecl, encodeFun::Maybe IRFunDecl, groupDoc::String} deriving (Show)
+data IRFunGroup = IRFunGroup {groupName::String, genFun::Maybe IRFunDecl, probFun::Maybe IRFunDecl, integFun::Maybe IRFunDecl, encodeFun::Maybe IRFunDecl, normalFun::Maybe IRFunDecl, groupDoc::String} deriving (Show)
 
 -- Name, Documentation, Body
 type IRFunDecl = (IRExpr, String)
@@ -204,7 +204,7 @@ valueToIR :: GenericValue a -> GenericValue b
 valueToIR = fmap (error "Cannot convert VClosure to IR")
 
 lookupIREnv :: String -> IREnv -> IRFunGroup
-lookupIREnv name (IREnv env _) = 
+lookupIREnv name (IREnv env _ _) =
   case filter (\IRFunGroup{groupName=a} -> a == name) env of
     [] -> error ("function " ++ show name ++ "not found in environment")
     [a] -> a

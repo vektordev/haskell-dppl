@@ -34,9 +34,12 @@ makeAutoNeural adts conf spllFnName (name, (TArrow TSymbol target), tag) =
     (Just (IRLambda symbol $ makeGen adts plan name, "Wrapper for the neural network function"))
     (Just (IRLambda symbol $ makeProb adts conf plan name, "Inference function for neural network function"))
     Nothing
-    (Just (IRLambda symbol $ makeEncode adts conf plan name (spllFnName ++ "_prob"), "Encoding function for NN2 input"))
+    (Just (IRLambda symbol $ makeEncode adts conf plan name probFnName normalFnName, "Encoding function for NN2 input"))
+    Nothing
     (show plan)
     where plan = makePartitionPlan adts target tag
+          probFnName = spllFnName ++ "_prob"
+          normalFnName = spllFnName ++ "_normal"
 makeAutoNeural adts conf _ (name, rt, _) = error $ "Invalid neural declaration for " ++ name ++ ": Neural networks must be function TSymbol -> a"
 
 --TODO: Output this into the output file somehow.
@@ -268,23 +271,37 @@ makeEncodeRec adts plan@(ADTPlan _ _) ix sample =
   foldr IRCons (IRConst (VList EmptyList))
     [IRIndex (IRVar vector) (IRConst (VInt (ix + i))) | i <- [0 .. getSize plan - 1]]
 
--- Top-level encode dispatch: for Discretes plans, calls the compiled SPLL
--- probability function for each enumerated value.  All other plan types fall
--- through to the pass-through (vector read-back) in makeEncodeRec.
-makeEncodeTopLevel :: [ADTDecl] -> String -> PartitionPlan -> Int -> IRExpr -> IRExpr
-makeEncodeTopLevel adts probFnName (Discretes rty (MultiDiscretes vals)) ix _ =
-  -- For each enumerated value v, emit P(main(sym) = v) by calling the SPLL
-  -- prob function. Calling convention: probFnName takes sample first, then sym.
+-- Top-level encode dispatch.
+--
+-- * Discretes: calls the compiled SPLL prob function for each enumerated value
+--   so the result reflects the SPLL program's output distribution, not the raw
+--   NN logits.  Calling convention: probFnName takes sample first, then sym.
+--
+-- * Continuous: calls the compiled SPLL normal-params function (normalFnName)
+--   which returns (mu, sigma) as an IRTCons pair.  This is correct for any
+--   program whose output carries PNormal/PLogNormal — including the identity
+--   pipeline (SPLL = ReadNN) after ReadNN was promoted to PNormal in PInfer2.
+--
+-- * All other plans fall through to the pass-through in makeEncodeRec.
+makeEncodeTopLevel :: [ADTDecl] -> String -> String -> PartitionPlan -> Int -> IRExpr -> IRExpr
+makeEncodeTopLevel adts probFnName normalFnName (Discretes rty (MultiDiscretes vals)) ix _ =
   foldr IRCons (IRConst (VList EmptyList))
     [ IRTFst (IRApply (IRApply (IRVar probFnName) (IRConst (valueToIR v))) (IRVar symbol))
     | v <- vals ]
-makeEncodeTopLevel adts probFnName plan ix sample =
+makeEncodeTopLevel adts probFnName normalFnName Continuous ix _ =
+  -- Call main_normal(sym) → IRTCons mu sigma, then emit [mu, sigma].
+  let normalResult = IRApply (IRVar normalFnName) (IRVar symbol)
+  in foldr IRCons (IRConst (VList EmptyList))
+       [ IRTFst normalResult
+       , IRTSnd normalResult
+       ]
+makeEncodeTopLevel adts probFnName normalFnName plan ix sample =
   makeEncodeRec adts plan ix sample
 
-makeEncode :: [ADTDecl] -> CompilerConfig -> PartitionPlan -> String -> String -> IRExpr
-makeEncode adts conf plan nn_name probFnName = IRLambda "sample" $
+makeEncode :: [ADTDecl] -> CompilerConfig -> PartitionPlan -> String -> String -> String -> IRExpr
+makeEncode adts conf plan nn_name probFnName normalFnName = IRLambda "sample" $
   IRLetIn vector (IRApply (IRVar nn_name) (IRVar "l_x_neural_in")) $
-    makeEncodeTopLevel adts probFnName plan 0 (IRVar "sample")
+    makeEncodeTopLevel adts probFnName normalFnName plan 0 (IRVar "sample")
 
 -- Find the flat logit-vector index for a given value within a plan.
 -- For TuplePlan, searches the left sub-plan first, then the right at offset getSize a.
