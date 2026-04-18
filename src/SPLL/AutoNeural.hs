@@ -27,9 +27,23 @@ import Data.Maybe (fromJust)
 --  index into vector and interpret as distribution.
 --  provide sampling and inference.
 
---implicit assumption: Neural Decl accepts a "TSymbol"-typed thing.
+-- Support bidirectional neural declarations:
+-- Decoder: (Symbol -> RType) — generates sampling, probability, and encoding functions
+-- Encoder: (RType -> Symbol) — generates an encoding function that reconstructs logits
 makeAutoNeural :: [ADTDecl] -> CompilerConfig -> String -> NeuralDecl -> IRFunGroup
-makeAutoNeural adts conf spllFnName (name, (TArrow TSymbol target), tag) =
+makeAutoNeural adts conf spllFnName (name, declType, tag) =
+  case declType of
+    TArrow TSymbol target ->
+      -- Decoder case: Symbol -> target
+      makeDecoderFunGroup adts conf spllFnName name target tag
+    TArrow source TSymbol ->
+      -- Encoder case: source -> Symbol
+      makeEncoderFunGroup adts conf name source tag
+    _ -> error $ "Invalid neural declaration for " ++ name ++ ": Neural networks must have Symbol on exactly one side of the arrow"
+
+-- Decoder: Symbol -> target. Generates sampling, probability, and encoding functions.
+makeDecoderFunGroup :: [ADTDecl] -> CompilerConfig -> String -> String -> RType -> Maybe MultiValue -> IRFunGroup
+makeDecoderFunGroup adts conf spllFnName name target tag =
   IRFunGroup (name ++ "_auto")
     (Just (IRLambda symbol $ makeGen adts plan name, "Wrapper for the neural network function"))
     (Just (IRLambda symbol $ makeProb adts conf plan name, "Inference function for neural network function"))
@@ -40,19 +54,40 @@ makeAutoNeural adts conf spllFnName (name, (TArrow TSymbol target), tag) =
     where plan = makePartitionPlan adts target tag
           probFnName = spllFnName ++ "_prob"
           normalFnName = spllFnName ++ "_normal"
-makeAutoNeural adts conf _ (name, rt, _) = error $ "Invalid neural declaration for " ++ name ++ ": Neural networks must be function TSymbol -> a"
+
+-- Encoder: source -> Symbol. Generates only an encoding function.
+makeEncoderFunGroup :: [ADTDecl] -> CompilerConfig -> String -> RType -> Maybe MultiValue -> IRFunGroup
+makeEncoderFunGroup adts conf name source tag =
+  IRFunGroup name
+    Nothing
+    Nothing
+    Nothing
+    (Just (IRLambda "sample" $ makeEncodeTopLevel adts "" "" plan 0 (IRVar "sample"), "Encoding function that reconstructs logits from source type"))
+    Nothing
+    (show plan)
+    where plan = makePartitionPlan adts source tag
 
 --TODO: Output this into the output file somehow.
 -- yields a forward declaration of a neural network:
 -- includes a string representation of the partition plan, including constraints about outputted logits.
 makeForwardDecl :: [ADTDecl] -> NeuralDecl -> String
-makeForwardDecl adts (name, (TArrow TSymbol target), tag) = "neural Network " ++ name ++ " :: (" ++ show target ++ ")\n  with layout: " ++ plan_string plan ++ ",\n  dimensionality=" ++ show (getSize plan) ++ ".\n"
+makeForwardDecl adts (name, declType, tag) =
+  case declType of
+    TArrow TSymbol target ->
+      "neural Decoder " ++ name ++ " :: (Symbol -> " ++ show target ++ ")\n  with layout: " ++ plan_string plan ++ ",\n  dimensionality=" ++ show (getSize plan) ++ ".\n"
+      where
+        plan = makePartitionPlan adts target tag
+    TArrow source TSymbol ->
+      "neural Encoder " ++ name ++ " :: (" ++ show source ++ " -> Symbol)\n  with layout: " ++ plan_string plan ++ ",\n  dimensionality=" ++ show (getSize plan) ++ ".\n"
+      where
+        plan = makePartitionPlan adts source tag
+    _ -> "neural Declaration " ++ name ++ " :: " ++ show declType ++ " (invalid: Symbol must be on exactly one side)\n"
   where
-    plan = makePartitionPlan adts target tag
     plan_string (TuplePlan first second) = plan_string first ++ " x " ++ plan_string second
     plan_string (EitherPlan left right) = "[1](0..1)" ++ plan_string left ++ " + " ++ plan_string right
     plan_string p@(Discretes ty tag) = "[" ++ show (getSize p) ++ "](softmax'ed)"
     plan_string Continuous = "[1],[1](>0)"
+    plan_string (ADTPlan _ _) = "[complex ADT layout]"
 
 
 data PartitionPlan = TuplePlan PartitionPlan PartitionPlan -- Logit layout: first, then second.
