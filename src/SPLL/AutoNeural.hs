@@ -240,15 +240,10 @@ tupleFromValue :: Value -> (Value, Value)
 tupleFromValue (VTuple a b) = (a,b)
 tupelFromValue _non_tuple = error "supplied non-tuple value to tuple-shaped NN type."
 
-makeEncodeRec :: [ADTDecl] -> PartitionPlan -> Int -> IRExpr -> IRExpr
-makeEncodeRec adts (Discretes rty (MultiDiscretes vals)) ix sample =
+makeEncodeRec :: [ADTDecl] -> String -> String -> PartitionPlan -> Int -> IRExpr -> IRExpr
+makeEncodeRec adts probFnName normalFnName (Discretes rty (MultiDiscretes vals)) ix sample =
   foldr IRCons (IRConst (VList EmptyList)) [IRIndex (IRVar vector) (IRConst (VInt (ix + i))) | i <- [0 .. length vals - 1]]
-makeEncodeRec adts (TuplePlan a b) ix sample =
-  invokeStandardFunction stdListConcat
-    [ makeEncodeRec adts a ix (IRTFst sample)
-    , makeEncodeRec adts b (ix + getSize a) (IRTSnd sample)
-    ]
-makeEncodeRec adts Continuous ix sample =
+makeEncodeRec adts probFnName normalFnName Continuous ix sample =
   -- Emit [μ, σ] directly from the logit vector slots.
   -- For the identity pipeline (SPLL program = ReadNN), these are exactly the
   -- parameters the upstream NN produced, so identity holds.
@@ -257,14 +252,23 @@ makeEncodeRec adts Continuous ix sample =
     [ IRIndex (IRVar vector) (IRConst (VInt ix))
     , IRIndex (IRVar vector) (IRConst (VInt (ix + 1)))
     ]
-makeEncodeRec adts plan@(EitherPlan a b) ix sample =
+makeEncodeRec adts probFnName normalFnName (TuplePlan a b) ix sample =
+  -- TuplePlan is dispatched through makeEncodeTopLevel in makeEncodeTopLevel itself,
+  -- so this case should not be reached. If it is, we should dispatch through
+  -- makeEncodeTopLevel to ensure sub-components get correct handling.
+  -- The sample argument is passed through unchanged since encoding ignores it.
+  invokeStandardFunction stdListConcat
+    [ makeEncodeTopLevel adts probFnName normalFnName a ix sample
+    , makeEncodeTopLevel adts probFnName normalFnName b (ix + getSize a) sample
+    ]
+makeEncodeRec adts probFnName normalFnName plan@(EitherPlan a b) ix sample =
   -- Pass-through: emit the logit vector slots for the full plan.
   -- Layout matches the decode side: [flag | left_slots... | right_slots...]
   -- Identity holds: for an identity SPLL program the NN's logit vector passes through unchanged.
   -- Non-identity programs (requiring P(Left VAny) via MAR semantics) are out of scope.
   foldr IRCons (IRConst (VList EmptyList))
     [IRIndex (IRVar vector) (IRConst (VInt (ix + i))) | i <- [0 .. getSize plan - 1]]
-makeEncodeRec adts plan@(ADTPlan _ _) ix sample =
+makeEncodeRec adts probFnName normalFnName plan@(ADTPlan _ _) ix sample =
   -- Pass-through: emit all flag + field logit slots for the full ADT plan.
   -- Layout matches decode: [flag_0..flag_k | fields_constr_0... | fields_constr_1... | ...]
   -- Same identity argument as EitherPlan; MAR-based encoding is out of scope.
@@ -282,7 +286,9 @@ makeEncodeRec adts plan@(ADTPlan _ _) ix sample =
 --   program whose output carries PNormal/PLogNormal — including the identity
 --   pipeline (SPLL = ReadNN) after ReadNN was promoted to PNormal in PInfer2.
 --
--- * All other plans fall through to the pass-through in makeEncodeRec.
+-- * TuplePlan: recursively dispatches each sub-plan through makeEncodeTopLevel
+--   so that Discretes and Continuous sub-components receive correct encoding
+--   (prob/normal functions) rather than raw logits.
 makeEncodeTopLevel :: [ADTDecl] -> String -> String -> PartitionPlan -> Int -> IRExpr -> IRExpr
 makeEncodeTopLevel adts probFnName normalFnName (Discretes rty (MultiDiscretes vals)) ix _ =
   foldr IRCons (IRConst (VList EmptyList))
@@ -295,8 +301,16 @@ makeEncodeTopLevel adts probFnName normalFnName Continuous ix _ =
        [ IRTFst normalResult
        , IRTSnd normalResult
        ]
+makeEncodeTopLevel adts probFnName normalFnName (TuplePlan a b) ix sample =
+  -- For TuplePlan, encode each sub-component independently.
+  -- The sample argument is irrelevant to correct encoding (it's only used for marginal
+  -- probability queries in sum types), so we pass it through unchanged.
+  invokeStandardFunction stdListConcat
+    [ makeEncodeTopLevel adts probFnName normalFnName a ix sample
+    , makeEncodeTopLevel adts probFnName normalFnName b (ix + getSize a) sample
+    ]
 makeEncodeTopLevel adts probFnName normalFnName plan ix sample =
-  makeEncodeRec adts plan ix sample
+  makeEncodeRec adts probFnName normalFnName plan ix sample
 
 makeEncode :: [ADTDecl] -> CompilerConfig -> PartitionPlan -> String -> String -> String -> IRExpr
 makeEncode adts conf plan nn_name probFnName normalFnName = IRLambda "sample" $
