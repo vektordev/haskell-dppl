@@ -315,38 +315,42 @@ makeEncodeRec adts probFnName normalFnName plan@(ADTPlan _ _) ix sample =
 -- * Discretes: calls the compiled SPLL prob function for each enumerated value
 --   so the result reflects the SPLL program's output distribution, not the raw
 --   NN logits.  Calling convention: probFnName takes sample first, then sym.
+--   Falls back to raw logit slots when probFnName is empty (used for tuple sub-components).
 --
 -- * Continuous: calls the compiled SPLL normal-params function (normalFnName)
 --   which returns (mu, sigma) as an IRTCons pair.  This is correct for any
 --   program whose output carries PNormal/PLogNormal — including the identity
 --   pipeline (SPLL = ReadNN) after ReadNN was promoted to PNormal in PInfer2.
 --
--- * TuplePlan: recursively dispatches each sub-plan through makeEncodeTopLevel
---   so that Discretes and Continuous sub-components receive correct encoding
---   (prob/normal functions) rather than raw logits.
+-- * TuplePlan: dispatches each sub-component with per-component normal function names.
+--   Per-component prob functions are NOT generated; discrete sub-components fall back
+--   to raw logit slots (identity assumption — correct for identity SPLL programs).
 makeEncodeTopLevel :: [ADTDecl] -> String -> String -> PartitionPlan -> Int -> IRExpr -> IRExpr
 makeEncodeTopLevel adts probFnName normalFnName (Discretes rty (MultiDiscretes vals)) ix _ =
-  foldr IRCons (IRConst (VList EmptyList))
-    [ IRTFst (IRApply (IRApply (IRVar probFnName) (IRConst (valueToIR v))) (IRVar symbol))
-    | v <- vals ]
+  if null probFnName
+  then -- No per-component prob function: fall back to raw logit slots (identity assumption).
+    foldr IRCons (IRConst (VList EmptyList))
+      [IRIndex (IRVar vector) (IRConst (VInt (ix + i))) | i <- [0 .. length vals - 1]]
+  else
+    foldr IRCons (IRConst (VList EmptyList))
+      [ IRTFst (IRApply (IRApply (IRVar probFnName) (IRConst (valueToIR v))) (IRVar symbol))
+      | v <- vals ]
 makeEncodeTopLevel adts probFnName normalFnName Continuous ix _ =
-  -- Call main_normal(sym) → IRTCons mu sigma, then emit [mu, sigma].
+  -- Call normalFnName(sym) → IRTCons mu sigma, then emit [mu, sigma].
   let normalResult = IRApply (IRVar normalFnName) (IRVar symbol)
   in foldr IRCons (IRConst (VList EmptyList))
        [ IRTFst normalResult
        , IRTSnd normalResult
        ]
 makeEncodeTopLevel adts probFnName normalFnName (TuplePlan a b) ix sample =
-  -- For TuplePlan, encode each sub-component independently using per-component function names.
-  -- The sample argument is irrelevant to correct encoding (it's only used for marginal
-  -- probability queries in sum types), so we pass it through unchanged.
+  -- For TuplePlan, encode each sub-component with per-component normal function names.
+  -- No per-component prob functions are generated, so probFnName is passed as empty
+  -- to signal the Discretes fallback to raw logit slots.
   let fstNormalFn = if null normalFnName then "" else normalFnName ++ "_fst"
-      fstProbFn = if null probFnName then "" else probFnName ++ "_fst"
       sndNormalFn = if null normalFnName then "" else normalFnName ++ "_snd"
-      sndProbFn = if null probFnName then "" else probFnName ++ "_snd"
   in invokeStandardFunction stdListConcat
-    [ makeEncodeTopLevel adts fstProbFn fstNormalFn a ix sample
-    , makeEncodeTopLevel adts sndProbFn sndNormalFn b (ix + getSize a) sample
+    [ makeEncodeTopLevel adts "" fstNormalFn a ix sample
+    , makeEncodeTopLevel adts "" sndNormalFn b (ix + getSize a) sample
     ]
 makeEncodeTopLevel adts probFnName normalFnName plan ix sample =
   makeEncodeRec adts probFnName normalFnName plan ix sample

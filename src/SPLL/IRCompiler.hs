@@ -153,29 +153,30 @@ isNormalExtractable _                 = True
 -- For a tuple (fst, snd) where both parts are PNormal/PLogNormal, generates:
 --   {name}_normal_fst :: extracting normal params from fst
 --   {name}_normal_snd :: extracting normal params from snd
--- These are created as function groups without suffix appending by using encodeFun field.
+-- Lambda wrappers are stripped to reach the TCons, then re-applied to each component.
+-- Functions are registered via the _component_ prefix mechanism in reduceIREnv.
 generateTupleComponentNormalFunctions :: CompilerMetadata -> String -> Expr -> [IRFunGroup]
-generateTupleComponentNormalFunctions meta baseName (TCons _ fstExpr sndExpr) =
-  let fstTypeInfo = getTypeInfo fstExpr
-      sndTypeInfo = getTypeInfo sndExpr
-      fstFun = generateComponentNormalFunction meta (baseName ++ "_fst") fstExpr fstTypeInfo
-      sndFun = generateComponentNormalFunction meta (baseName ++ "_snd") sndExpr sndTypeInfo
-  in catMaybes [fstFun, sndFun]
-generateTupleComponentNormalFunctions _ _ _ = []
+generateTupleComponentNormalFunctions meta baseName expr = go expr id
+  where
+    go (Lambda ti name body) wrap = go body (\e -> wrap (Lambda ti name e))
+    go (TCons _ fstExpr sndExpr) wrap =
+      catMaybes
+        [ generateComponentNormalFunction meta (baseName ++ "_normal_fst") (wrap fstExpr) (getTypeInfo fstExpr)
+        , generateComponentNormalFunction meta (baseName ++ "_normal_snd") (wrap sndExpr) (getTypeInfo sndExpr)
+        ]
+    go _ _ = []
 
 -- | Generate a single per-component normal function if the expression is extractable and PNormal/PLogNormal.
--- Uses encodeFun field to avoid suffix appending (we want the exact name, not _normal suffix).
+-- Stored in normalFun field and registered via _component_ prefix in reduceIREnv (bare name, no suffix).
 generateComponentNormalFunction :: CompilerMetadata -> String -> Expr -> TypeInfo -> Maybe IRFunGroup
 generateComponentNormalFunction meta fullName expr ti
   | (pType ti == PNormal || pType ti == PLogNormal) && isNormalExtractable expr =
-      -- Create as genFun (will be registered as {fullName}_gen) then it's a wrapper
-      -- Actually, create the function to be callable without suffix by using a special wrapper
       Just $ IRFunGroup ("_component_" ++ fullName)
         Nothing
         Nothing
         Nothing
-        (Just (compileNormalExpr meta expr, "Per-component normal extraction for tuple element: " ++ fullName))
         Nothing
+        (Just (compileNormalExpr meta expr, "Per-component normal extraction for tuple element: " ++ fullName))
         ""
   | otherwise = Nothing
 
