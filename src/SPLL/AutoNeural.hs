@@ -337,12 +337,16 @@ makeEncodeTopLevel adts probFnName normalFnName Continuous ix _ =
        , IRTSnd normalResult
        ]
 makeEncodeTopLevel adts probFnName normalFnName (TuplePlan a b) ix sample =
-  -- For TuplePlan, encode each sub-component independently.
+  -- For TuplePlan, encode each sub-component independently using per-component function names.
   -- The sample argument is irrelevant to correct encoding (it's only used for marginal
   -- probability queries in sum types), so we pass it through unchanged.
-  invokeStandardFunction stdListConcat
-    [ makeEncodeTopLevel adts probFnName normalFnName a ix sample
-    , makeEncodeTopLevel adts probFnName normalFnName b (ix + getSize a) sample
+  let fstNormalFn = if null normalFnName then "" else normalFnName ++ "_fst"
+      fstProbFn = if null probFnName then "" else probFnName ++ "_fst"
+      sndNormalFn = if null normalFnName then "" else normalFnName ++ "_snd"
+      sndProbFn = if null probFnName then "" else probFnName ++ "_snd"
+  in invokeStandardFunction stdListConcat
+    [ makeEncodeTopLevel adts fstProbFn fstNormalFn a ix sample
+    , makeEncodeTopLevel adts sndProbFn sndNormalFn b (ix + getSize a) sample
     ]
 makeEncodeTopLevel adts probFnName normalFnName plan ix sample =
   makeEncodeRec adts probFnName normalFnName plan ix sample

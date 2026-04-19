@@ -19,7 +19,7 @@ import Data.Data
 import Data.Either (fromRight)
 import Data.Bifunctor (second)
 import Data.Maybe (fromMaybe, fromJust, isJust, catMaybes)
-import Data.List (isSuffixOf)
+import Data.List (isSuffixOf, isPrefixOf)
 import Data.Foldable (toList)
 import SPLL.Lang.Types
 import SPLL.Typing.RType
@@ -406,7 +406,14 @@ generate f neurals adts _ _ _ expr = error ("Expression is not yet implemented "
 reduceIREnv :: IREnv -> ReducedIREnv
 reduceIREnv (IREnv funcs _ consts) =
   map (\(name, val) -> (name, IRConst val)) consts ++
-  concatMap (\(IRFunGroup name gen prob integ encode normal doc) -> catMaybes [gen <&> red name "_gen", prob <&> red name "_prob", integ <&> red name "_integ", encode <&> red name "_encode", normal <&> red name "_normal"]) funcs
+  concatMap (\(IRFunGroup name gen prob integ encode normal doc) ->
+    -- Special handling for per-component normal functions (created with "_component_" prefix)
+    if "_component_" `isPrefixOf` name then
+      -- Extract the actual component name and register without suffix
+      let componentName = drop 11 name  -- Remove "_component_" prefix
+      in catMaybes [normal <&> \(expr, _) -> (componentName, expr)]
+    else
+      catMaybes [gen <&> red name "_gen", prob <&> red name "_prob", integ <&> red name "_integ", encode <&> red name "_encode", normal <&> red name "_normal"]) funcs
   where red name suffix (expr, _) = (name ++ suffix, expr)
 
 irSample :: (RandomGen g) => Distribution -> Rand g IRValue

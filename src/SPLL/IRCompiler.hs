@@ -60,34 +60,37 @@ envToIR conf p
 envToIRUnoptimized :: CompilerConfig -> Program -> IREnv
 envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb, noGenerate=noGen} p@Program{adts=adts} = IREnv (
   map (makeAutoNeural adts conf "main") (neurals p) ++
-  map (\(name, binding) ->
+  concatMap (\(name, binding) ->
     let typeEnv = getGlobalTypeEnv p
         pt = pType $ getTypeInfo binding
-        rt = rType $ getTypeInfo binding in
-      IRFunGroup {groupName=name, encodeFun=Nothing,
-       integFun =
-        if not noInteg && (pt == Deterministic || pt == Integrate || pt == PNormal || pt == PLogNormal) then
-          Just (toIntegDecl name (IRLambda "sample" (runCompile (meta typeEnv) (toIRInferenceSave (meta typeEnv) True binding (IRVar "sample")))))
-        else Nothing,
-        probFun =
-          if not noProb && (pt == Deterministic || pt == Integrate || pt == Prob || pt == PNormal || pt == PLogNormal) then
-            let metaBase = meta typeEnv
-                body m = runCompile m (toIRInferenceSave m False binding (IRVar "sample"))
-            in Just (toProbDecl name $ case topKThreshold conf of
-                 Just _ -> IRLambda "sample" $ IRLambda "acc_prob" $ body (metaBase { accProb = IRVar "acc_prob" })
-                 Nothing -> IRLambda "sample" $ body metaBase)
+        rt = rType $ getTypeInfo binding
+        baseFunGroup = IRFunGroup {groupName=name, encodeFun=Nothing,
+         integFun =
+          if not noInteg && (pt == Deterministic || pt == Integrate || pt == PNormal || pt == PLogNormal) then
+            Just (toIntegDecl name (IRLambda "sample" (runCompile (meta typeEnv) (toIRInferenceSave (meta typeEnv) True binding (IRVar "sample")))))
           else Nothing,
-        genFun =
-          if not noGen then
-            Just (toGenDecl name (fst $ evalSupply $ runWriterT $ toIRGenerate (meta typeEnv) binding))
-          else
-            Nothing,
-        normalFun =
-          if (pt == PNormal || pt == PLogNormal) && isNormalExtractable binding then
-            Just (toNormalDecl name (compileNormalExpr (meta typeEnv) binding))
-          else
-            Nothing,
-        groupDoc="Function group " ++ name}) (functions p))
+          probFun =
+            if not noProb && (pt == Deterministic || pt == Integrate || pt == Prob || pt == PNormal || pt == PLogNormal) then
+              let metaBase = meta typeEnv
+                  body m = runCompile m (toIRInferenceSave m False binding (IRVar "sample"))
+              in Just (toProbDecl name $ case topKThreshold conf of
+                   Just _ -> IRLambda "sample" $ IRLambda "acc_prob" $ body (metaBase { accProb = IRVar "acc_prob" })
+                   Nothing -> IRLambda "sample" $ body metaBase)
+            else Nothing,
+          genFun =
+            if not noGen then
+              Just (toGenDecl name (fst $ evalSupply $ runWriterT $ toIRGenerate (meta typeEnv) binding))
+            else
+              Nothing,
+          normalFun =
+            if (pt == PNormal || pt == PLogNormal) && isNormalExtractable binding then
+              Just (toNormalDecl name (compileNormalExpr (meta typeEnv) binding))
+            else
+              Nothing,
+          groupDoc="Function group " ++ name}
+        -- Generate per-component normal functions for tuple outputs
+        tupleNormalFuns = generateTupleComponentNormalFunctions (meta typeEnv) name binding
+    in [baseFunGroup] ++ tupleNormalFuns) (functions p))
   adts
   (case topKThreshold conf of
     Just thresh -> [("TOP_K_CUTOFF", VFloat thresh)]
@@ -145,6 +148,36 @@ isNormalExtractable (Apply  _ _ _)    = False
 isNormalExtractable (Cons   _ _ _)    = False
 isNormalExtractable (TCons  _ _ _)    = False
 isNormalExtractable _                 = True
+
+-- | Generate per-component normal functions for tuple expressions.
+-- For a tuple (fst, snd) where both parts are PNormal/PLogNormal, generates:
+--   {name}_normal_fst :: extracting normal params from fst
+--   {name}_normal_snd :: extracting normal params from snd
+-- These are created as function groups without suffix appending by using encodeFun field.
+generateTupleComponentNormalFunctions :: CompilerMetadata -> String -> Expr -> [IRFunGroup]
+generateTupleComponentNormalFunctions meta baseName (TCons _ fstExpr sndExpr) =
+  let fstTypeInfo = getTypeInfo fstExpr
+      sndTypeInfo = getTypeInfo sndExpr
+      fstFun = generateComponentNormalFunction meta (baseName ++ "_fst") fstExpr fstTypeInfo
+      sndFun = generateComponentNormalFunction meta (baseName ++ "_snd") sndExpr sndTypeInfo
+  in catMaybes [fstFun, sndFun]
+generateTupleComponentNormalFunctions _ _ _ = []
+
+-- | Generate a single per-component normal function if the expression is extractable and PNormal/PLogNormal.
+-- Uses encodeFun field to avoid suffix appending (we want the exact name, not _normal suffix).
+generateComponentNormalFunction :: CompilerMetadata -> String -> Expr -> TypeInfo -> Maybe IRFunGroup
+generateComponentNormalFunction meta fullName expr ti
+  | (pType ti == PNormal || pType ti == PLogNormal) && isNormalExtractable expr =
+      -- Create as genFun (will be registered as {fullName}_gen) then it's a wrapper
+      -- Actually, create the function to be callable without suffix by using a special wrapper
+      Just $ IRFunGroup ("_component_" ++ fullName)
+        Nothing
+        Nothing
+        Nothing
+        (Just (compileNormalExpr meta expr, "Per-component normal extraction for tuple element: " ++ fullName))
+        Nothing
+        ""
+  | otherwise = Nothing
 
 -- Return type (name, rType, hasInferenceFunctions)
 getGlobalTypeEnv :: Program -> TypeEnv
