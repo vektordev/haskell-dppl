@@ -73,21 +73,24 @@ testInterpreter p (CumulTestCase name sample params (VFloat expectedProb, VFloat
     Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
     Right (Left err) -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
     Left err -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
-testInterpreter p (EncodingLengthTestCase name sample expectedLen) = ioProperty $ do
-  let mockSym = VTuple (VInt 0) (VInt 42)
-  result <- try $ evaluate $ runEncode defaultCompilerConfig p mockSym sample :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
+testInterpreter p (EncodingLengthTestCase name expectedLen) = ioProperty $ do
+  -- Construct one mock sym per outer parameter of main (or none for closed-form programs).
+  let paramCnt = progParameterCount p
+      mockArgs = replicate paramCnt (VTuple (VInt 0) (VInt 42))
+  result <- try $ evaluate $ runEncode defaultCompilerConfig p mockArgs :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of
     Right (Right (VList lst)) ->
       counterexample ("Encode length differs for test case " ++ name ++ ". Expected: " ++ show expectedLen ++ " Got: " ++ show (length lst)) (length lst == expectedLen)
     Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a list: " ++ show x) False
     Right (Left err) -> counterexample ("Test case " ++ name ++ " raised a compiler error: " ++ show err) False
     Left err -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
-testInterpreter p (EncodingSlotTestCase name sample idxOf expected) = ioProperty $ do
-  let mockSym = VTuple (VInt 1) (VTuple sample (VInt 0))  -- spiking at sample, seed 0
+testInterpreter p (EncodingSlotTestCase name spikeVal idxOf expected) = ioProperty $ do
+  -- Build a spiking mock sym: mode=1 spikes the mock NN at spikeVal.
+  let mockSym = VTuple (VInt 1) (VTuple spikeVal (VInt 0))
   let (_, TArrow _ target, nnTag) = head (neurals p)
       plan = makePartitionPlan (adts p) target nnTag
       slotIdx = planIndexOf plan idxOf
-  result <- try $ evaluate $ runEncode defaultCompilerConfig p mockSym sample :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
+  result <- try $ evaluate $ runEncode defaultCompilerConfig p [mockSym] :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of
     Right (Right (VList lst)) ->
       let items = toList lst

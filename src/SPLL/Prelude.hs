@@ -257,16 +257,19 @@ runInteg conf p args sample = do
   let constArgs = map IRConst (sample:args)
   generateDet (neurals p) compiled constArgs integ
 
-runEncode :: CompilerConfig -> Program -> IRValue -> IRValue -> Either CompilerError IRValue
-runEncode _ p _ _ | isLeft (validateProgram p) = fmap (error "Impossible case") (validateProgram p)
-runEncode conf p sym sample = do
+-- | Run the encode function for the first neural declaration in the program.
+-- outerArgs mirrors main's outer parameter list: pass one IRValue per outer lambda in main,
+-- or an empty list for closed-form programs with no outer parameters.
+runEncode :: CompilerConfig -> Program -> [IRValue] -> Either CompilerError IRValue
+runEncode _ p _ | isLeft (validateProgram p) = fmap (error "Impossible case") (validateProgram p)
+runEncode conf p outerArgs = do
   compiled <- compile conf p
   let IREnv groups _ _ = compiled
   case filter (isJust . encodeFun) groups of
     [] -> Left "No encode function found in compiled program"
     (grp:_) ->
       let Just (enc, _) = encodeFun grp
-          constArgs = map IRConst [sym, sample]
+          constArgs = map IRConst outerArgs
       in generateDet (neurals p) compiled constArgs enc
 
 printIfVerbose :: (Monad m) => CompilerConfig -> String -> m ()

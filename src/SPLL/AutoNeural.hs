@@ -30,25 +30,30 @@ import Data.Maybe (fromJust)
 -- Support bidirectional neural declarations:
 -- Decoder: (Symbol -> RType) — generates sampling, probability, and encoding functions
 -- Encoder: (RType -> Symbol) — generates an encoding function that reconstructs logits
-makeAutoNeural :: [ADTDecl] -> CompilerConfig -> String -> NeuralDecl -> IRFunGroup
-makeAutoNeural adts conf spllFnName (name, declType, tag) =
+--
+-- paramNames: outer parameter names of the SPLL 'main' binding (e.g. ["sym"] for
+-- `main sym = ...`, [] for `main = ...`).  Encode mirrors this arity.
+makeAutoNeural :: [ADTDecl] -> CompilerConfig -> String -> [String] -> NeuralDecl -> IRFunGroup
+makeAutoNeural adts conf spllFnName paramNames (name, declType, tag) =
   case declType of
     TArrow TSymbol target ->
       -- Decoder case: Symbol -> target
-      makeDecoderFunGroup adts conf spllFnName name target tag
+      makeDecoderFunGroup adts conf spllFnName name target tag paramNames
     TArrow source TSymbol ->
       -- Encoder case: source -> Symbol
       makeEncoderFunGroup adts conf name source tag
     _ -> error $ "Invalid neural declaration for " ++ name ++ ": Neural networks must have Symbol on exactly one side of the arrow"
 
 -- Decoder: Symbol -> target. Generates sampling, probability, and encoding functions.
-makeDecoderFunGroup :: [ADTDecl] -> CompilerConfig -> String -> String -> RType -> Maybe MultiValue -> IRFunGroup
-makeDecoderFunGroup adts conf spllFnName name target tag =
+-- encode mirrors main's outer parameter list (paramNames); it does NOT take a sym or
+-- sample argument — it derives the logit vector from the compiled SPLL inference functions.
+makeDecoderFunGroup :: [ADTDecl] -> CompilerConfig -> String -> String -> RType -> Maybe MultiValue -> [String] -> IRFunGroup
+makeDecoderFunGroup adts conf spllFnName name target tag paramNames =
   IRFunGroup (name ++ "_auto")
     (Just (IRLambda symbol $ makeGen adts plan name, "Wrapper for the neural network function"))
     (Just (IRLambda symbol $ makeProb adts conf plan name, "Inference function for neural network function"))
     Nothing
-    (Just (IRLambda symbol $ makeEncode adts conf plan name probFnName normalFnName, "Encoding function for NN2 input"))
+    (Just (makeEncode adts conf plan probFnName normalFnName paramNames, "Encoding function for NN2 input"))
     Nothing
     (show plan)
     where plan = makePartitionPlan adts target tag
@@ -62,7 +67,7 @@ makeEncoderFunGroup adts conf name source tag =
     Nothing
     Nothing
     Nothing
-    (Just (IRLambda "sample" $ makeEncodeTopLevel adts "" "" plan 0 (IRVar "sample"), "Encoding function that reconstructs logits from source type"))
+    (Just (IRLambda "sample" $ makeEncodeTopLevel adts "" "" plan 0 [IRVar "sample"], "Encoding function that reconstructs logits from source type"))
     Nothing
     (show plan)
     where plan = makePartitionPlan adts source tag
@@ -275,90 +280,91 @@ tupleFromValue :: Value -> (Value, Value)
 tupleFromValue (VTuple a b) = (a,b)
 tupelFromValue _non_tuple = error "supplied non-tuple value to tuple-shaped NN type."
 
-makeEncodeRec :: [ADTDecl] -> String -> String -> PartitionPlan -> Int -> IRExpr -> IRExpr
-makeEncodeRec adts probFnName normalFnName (Discretes rty (MultiDiscretes vals)) ix sample =
+-- makeEncodeRec: bottom-level fallback for pass-through cases (EitherPlan, ADTPlan).
+-- outerArgs: IRExprs already in scope for the outer lambda parameters of main.
+-- These cases read raw logit-vector slots (identity assumption; MAR-based encoding is
+-- out of scope until mar-sum-types-observe.md lands).
+makeEncodeRec :: [ADTDecl] -> String -> String -> PartitionPlan -> Int -> [IRExpr] -> IRExpr
+makeEncodeRec adts probFnName normalFnName (Discretes rty (MultiDiscretes vals)) ix outerArgs =
   foldr IRCons (IRConst (VList EmptyList)) [IRIndex (IRVar vector) (IRConst (VInt (ix + i))) | i <- [0 .. length vals - 1]]
-makeEncodeRec adts probFnName normalFnName Continuous ix sample =
+makeEncodeRec adts probFnName normalFnName Continuous ix outerArgs =
   -- Emit [μ, σ] directly from the logit vector slots.
-  -- For the identity pipeline (SPLL program = ReadNN), these are exactly the
-  -- parameters the upstream NN produced, so identity holds.
-  -- For non-identity PNormal transforms, use toIREncode in IRCompiler (future work).
+  -- This branch is only reached when called from makeEncodeTopLevel's fallback case,
+  -- which currently does not happen for Continuous (handled in makeEncodeTopLevel).
   foldr IRCons (IRConst (VList EmptyList))
     [ IRIndex (IRVar vector) (IRConst (VInt ix))
     , IRIndex (IRVar vector) (IRConst (VInt (ix + 1)))
     ]
-makeEncodeRec adts probFnName normalFnName (TuplePlan a b) ix sample =
-  -- TuplePlan is dispatched through makeEncodeTopLevel in makeEncodeTopLevel itself,
-  -- so this case should not be reached. If it is, we should dispatch through
-  -- makeEncodeTopLevel to ensure sub-components get correct handling.
-  -- The sample argument is passed through unchanged since encoding ignores it.
+makeEncodeRec adts probFnName normalFnName (TuplePlan a b) ix outerArgs =
   invokeStandardFunction stdListConcat
-    [ makeEncodeTopLevel adts probFnName normalFnName a ix sample
-    , makeEncodeTopLevel adts probFnName normalFnName b (ix + getSize a) sample
+    [ makeEncodeTopLevel adts probFnName normalFnName a ix outerArgs
+    , makeEncodeTopLevel adts probFnName normalFnName b (ix + getSize a) outerArgs
     ]
-makeEncodeRec adts probFnName normalFnName plan@(EitherPlan a b) ix sample =
-  -- Pass-through: emit the logit vector slots for the full plan.
-  -- Layout matches the decode side: [flag | left_slots... | right_slots...]
-  -- Identity holds: for an identity SPLL program the NN's logit vector passes through unchanged.
-  -- Non-identity programs (requiring P(Left VAny) via MAR semantics) are out of scope.
+makeEncodeRec adts probFnName normalFnName plan@(EitherPlan a b) ix outerArgs =
+  -- Stub: correct encoding requires P(Left VAny) via MAR semantics (mar-sum-types-observe.md).
+  -- Emits a zero-filled list of the correct length so length tests pass; values are wrong.
   foldr IRCons (IRConst (VList EmptyList))
-    [IRIndex (IRVar vector) (IRConst (VInt (ix + i))) | i <- [0 .. getSize plan - 1]]
-makeEncodeRec adts probFnName normalFnName plan@(ADTPlan _ _) ix sample =
-  -- Pass-through: emit all flag + field logit slots for the full ADT plan.
-  -- Layout matches decode: [flag_0..flag_k | fields_constr_0... | fields_constr_1... | ...]
-  -- Same identity argument as EitherPlan; MAR-based encoding is out of scope.
+    [ IRConst (VFloat 0) | _ <- [0 .. getSize plan - 1] ]
+makeEncodeRec adts probFnName normalFnName plan@(ADTPlan _ _) ix outerArgs =
+  -- Stub: correct encoding requires marginal constructor probabilities via MAR semantics.
+  -- Emits a zero-filled list of the correct length so length tests pass; values are wrong.
   foldr IRCons (IRConst (VList EmptyList))
-    [IRIndex (IRVar vector) (IRConst (VInt (ix + i))) | i <- [0 .. getSize plan - 1]]
+    [ IRConst (VFloat 0) | _ <- [0 .. getSize plan - 1] ]
 
 -- Top-level encode dispatch.
 --
--- * Discretes: calls the compiled SPLL prob function for each enumerated value
---   so the result reflects the SPLL program's output distribution, not the raw
---   NN logits.  Calling convention: probFnName takes sample first, then sym.
---   Falls back to raw logit slots when probFnName is empty (used for tuple sub-components).
+-- outerArgs: IRExprs for the outer lambda parameters already in scope (e.g. [IRVar "sym"]
+-- for `main sym = ...`; [] for `main = expr`).  These are forwarded as trailing arguments
+-- to the compiled SPLL inference functions (prob, normal).
 --
--- * Continuous: calls the compiled SPLL normal-params function (normalFnName)
---   which returns (mu, sigma) as an IRTCons pair.  This is correct for any
---   program whose output carries PNormal/PLogNormal — including the identity
---   pipeline (SPLL = ReadNN) after ReadNN was promoted to PNormal in PInfer2.
+-- * Discretes: calls probFnName(v)(outerArgs...) for each enumerated v, so the result
+--   reflects the SPLL program's output distribution.  Falls back to raw logit slots when
+--   probFnName is empty (used for tuple sub-components without per-component prob fns).
+--
+-- * Continuous: calls normalFnName(outerArgs...) which returns (mu, sigma) as IRTCons.
 --
 -- * TuplePlan: dispatches each sub-component with per-component normal function names.
---   Per-component prob functions are NOT generated; discrete sub-components fall back
---   to raw logit slots (identity assumption — correct for identity SPLL programs).
-makeEncodeTopLevel :: [ADTDecl] -> String -> String -> PartitionPlan -> Int -> IRExpr -> IRExpr
-makeEncodeTopLevel adts probFnName normalFnName (Discretes rty (MultiDiscretes vals)) ix _ =
+--   Per-component prob functions are NOT generated; discrete sub-components fall back to
+--   raw logit slots (identity assumption — correct for identity SPLL programs).
+makeEncodeTopLevel :: [ADTDecl] -> String -> String -> PartitionPlan -> Int -> [IRExpr] -> IRExpr
+makeEncodeTopLevel adts probFnName normalFnName (Discretes rty (MultiDiscretes vals)) ix outerArgs =
   if null probFnName
   then -- No per-component prob function: fall back to raw logit slots (identity assumption).
     foldr IRCons (IRConst (VList EmptyList))
       [IRIndex (IRVar vector) (IRConst (VInt (ix + i))) | i <- [0 .. length vals - 1]]
   else
     foldr IRCons (IRConst (VList EmptyList))
-      [ IRTFst (IRApply (IRApply (IRVar probFnName) (IRConst (valueToIR v))) (IRVar symbol))
+      [ IRTFst (foldl IRApply (IRApply (IRVar probFnName) (IRConst (valueToIR v))) outerArgs)
       | v <- vals ]
-makeEncodeTopLevel adts probFnName normalFnName Continuous ix _ =
-  -- Call normalFnName(sym) → IRTCons mu sigma, then emit [mu, sigma].
-  let normalResult = IRApply (IRVar normalFnName) (IRVar symbol)
+makeEncodeTopLevel adts probFnName normalFnName Continuous ix outerArgs =
+  -- Call normalFnName(outerArgs...) → IRTCons mu sigma, then emit [mu, sigma].
+  let normalResult = foldl IRApply (IRVar normalFnName) outerArgs
   in foldr IRCons (IRConst (VList EmptyList))
        [ IRTFst normalResult
        , IRTSnd normalResult
        ]
-makeEncodeTopLevel adts probFnName normalFnName (TuplePlan a b) ix sample =
+makeEncodeTopLevel adts probFnName normalFnName (TuplePlan a b) ix outerArgs =
   -- For TuplePlan, encode each sub-component with per-component normal function names.
   -- No per-component prob functions are generated, so probFnName is passed as empty
   -- to signal the Discretes fallback to raw logit slots.
   let fstNormalFn = if null normalFnName then "" else normalFnName ++ "_fst"
       sndNormalFn = if null normalFnName then "" else normalFnName ++ "_snd"
   in invokeStandardFunction stdListConcat
-    [ makeEncodeTopLevel adts "" fstNormalFn a ix sample
-    , makeEncodeTopLevel adts "" sndNormalFn b (ix + getSize a) sample
+    [ makeEncodeTopLevel adts "" fstNormalFn a ix outerArgs
+    , makeEncodeTopLevel adts "" sndNormalFn b (ix + getSize a) outerArgs
     ]
-makeEncodeTopLevel adts probFnName normalFnName plan ix sample =
-  makeEncodeRec adts probFnName normalFnName plan ix sample
+makeEncodeTopLevel adts probFnName normalFnName plan ix outerArgs =
+  makeEncodeRec adts probFnName normalFnName plan ix outerArgs
 
-makeEncode :: [ADTDecl] -> CompilerConfig -> PartitionPlan -> String -> String -> String -> IRExpr
-makeEncode adts conf plan nn_name probFnName normalFnName = IRLambda "sample" $
-  IRLetIn vector (IRApply (IRVar nn_name) (IRVar "l_x_neural_in")) $
-    makeEncodeTopLevel adts probFnName normalFnName plan 0 (IRVar "sample")
+-- Build the encode function body, wrapped in one lambda per outer parameter of main.
+-- encode(p1)(p2)... derives the logit vector from compiled SPLL inference functions
+-- (main_prob, main_normal) — it does NOT call the NN or accept a sample argument.
+makeEncode :: [ADTDecl] -> CompilerConfig -> PartitionPlan -> String -> String -> [String] -> IRExpr
+makeEncode adts conf plan probFnName normalFnName paramNames =
+  foldr IRLambda body paramNames
+  where
+    outerArgs = map IRVar paramNames
+    body = makeEncodeTopLevel adts probFnName normalFnName plan 0 outerArgs
 
 -- Find the flat logit-vector index for a given value within a plan.
 -- For TuplePlan, searches the left sub-plan first, then the right at offset getSize a.

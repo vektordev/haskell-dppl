@@ -1,2 +1,2 @@
 neural tupleNN :: (Symbol -> (Float, Float))
-main sym = (1.5 * Normal + 2.0, 0.5 * Normal + (-1.0))
+main = (1.5 * Normal + 2.0, 0.5 * Normal + (-1.0))

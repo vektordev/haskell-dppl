@@ -32,8 +32,8 @@ import Data.Void
 data TestCase = ProbTestCase String IRValue [IRValue] (IRValue, IRValue)
               | CumulTestCase String IRValue [IRValue] (IRValue, IRValue)
               | ArgmaxPTestCase String [IRValue] IRValue
-              | EncodingLengthTestCase String IRValue Int     -- sample, expected output list length
-              | EncodingSlotTestCase String IRValue IRValue Double  -- sample, indexOf-value, expected float
+              | EncodingLengthTestCase String Int             -- expected output list length (no outer arg: determined by program)
+              | EncodingSlotTestCase String IRValue IRValue Double  -- spikeValue, indexOf-value, expected float
               deriving (Show)
 
 isProbTestCase :: TestCase -> Bool
@@ -49,7 +49,7 @@ isCumulTestCase (CumulTestCase _ _ _ _) = True
 isCumulTestCase _ = False
 
 isEncodingLengthTestCase :: TestCase -> Bool
-isEncodingLengthTestCase (EncodingLengthTestCase _ _ _) = True
+isEncodingLengthTestCase (EncodingLengthTestCase _ _) = True
 isEncodingLengthTestCase _ = False
 
 isEncodingSlotTestCase :: TestCase -> Bool
@@ -60,7 +60,7 @@ testCaseName :: TestCase -> String
 testCaseName (ProbTestCase name _ _ _) = name
 testCaseName (CumulTestCase name _ _ _) = name
 testCaseName (ArgmaxPTestCase name _ _) = name
-testCaseName (EncodingLengthTestCase name _ _) = name
+testCaseName (EncodingLengthTestCase name _) = name
 testCaseName (EncodingSlotTestCase name _ _ _) = name
 
 type Parser = Parsec Void String
@@ -109,11 +109,9 @@ pCumulParser name = do
 
 pEncodingLengthTestCase :: MonadParser m => String -> m TestCase
 pEncodingLengthTestCase name = do
-  symbol "encode_len("
-  sample <- pIRValue
-  symbol ")="
+  symbol "encode_len="
   n <- L.decimal
-  return $ EncodingLengthTestCase name sample n
+  return $ EncodingLengthTestCase name n
 
 pEncodingSlotTestCase :: MonadParser m => String -> m TestCase
 pEncodingSlotTestCase name = do

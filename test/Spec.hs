@@ -41,7 +41,7 @@ import Data.Bifunctor (second)
 import SPLL.Typing.ForwardChaining (annotateProg)
 import SPLL.Parser
 import TestParser
-import TestInternals (test_internals, classConstraintTests, test_encodeTupleGaussianParams)
+import TestInternals (test_internals, classConstraintTests, test_encodeTupleGaussianParams, test_encodeDiscreteSumsToOne, test_encodeGaussianSigmaPositive)
 import Test.HUnit (runTestTT)
 import End2EndTesting
 import TestCaseParser (parseProgram)
@@ -924,7 +924,9 @@ runSpecifiedTests opts = do
   b <- if disableParser opts then return True else test_parser
   c <- if disableInternals opts then return True else test_internals
   _ <- runTestTT classConstraintTests
-  _ <- runTestTT (test_encodeTupleGaussianParams)  -- forward spec: fails until TuplePlan encode uses SPLL normal params
+  _ <- runTestTT test_encodeTupleGaussianParams
+  _ <- runTestTT test_encodeDiscreteSumsToOne
+  _ <- runTestTT test_encodeGaussianSigmaPositive
   d <- if disableEnd2End opts then return True else test_end2end
   let x = a && b && c && d
   if x then

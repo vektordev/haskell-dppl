@@ -3,7 +3,9 @@
 module TestInternals (
   test_internals,
   classConstraintTests,
-  test_encodeTupleGaussianParams
+  test_encodeTupleGaussianParams,
+  test_encodeDiscreteSumsToOne,
+  test_encodeGaussianSigmaPositive
 ) where
 
 import SPLL.Lang.Lang
@@ -89,14 +91,13 @@ test_encodeTupleGaussianParams :: Test
 test_encodeTupleGaussianParams = TestCase $ do
   let src = unlines
         [ "neural tupleNN :: (Symbol -> (Float, Float))"
-        , "main sym = (1.5 * Normal + 2.0, 0.5 * Normal + (-1.0))"
+        , "main = (1.5 * Normal + 2.0, 0.5 * Normal + (-1.0))"
         ]
   prog <- case tryParseProgram "<test>" src of
     Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
     Right p  -> return p
-  let mockSym = VTuple (VInt 0) (VInt 0)  -- random mock NN, seed 0 (irrelevant for closed-form)
-  let sample  = VTuple (VFloat 2.0) (VFloat (-1.0))
-  case runEncode defaultCompilerConfig prog mockSym sample of
+  -- Closed-form program: no outer params, so runEncode takes an empty arg list.
+  case runEncode defaultCompilerConfig prog [] of
     Left err -> assertFailure ("runEncode failed: " ++ err)
     Right (VList lst) -> do
       let items = toList lst
@@ -114,6 +115,55 @@ test_encodeTupleGaussianParams = TestCase $ do
       checkSlot 2 (-1.0)  -- mu2
       checkSlot 3   0.5   -- sigma2
     Right other -> assertFailure ("expected VList, got: " ++ show other)
+
+-- Property: for a discrete-output program, the encode output (probability vector) should
+-- sum to approximately 1.0 for any mock NN sym input.
+-- Tests with the discrete nonidentity program: main sym = if discreteNN sym == 0 then 2 else 0
+-- Output type Int with values [0,1,2], so encode returns [P(0), P(1), P(2)] which must sum to 1.
+test_encodeDiscreteSumsToOne :: Test
+test_encodeDiscreteSumsToOne = TestCase $ do
+  let src = unlines
+        [ "neural discreteNN :: (Symbol -> Int) of [0, 1, 2]"
+        , "main sym = if discreteNN sym == 0 then 2 else 0"
+        ]
+  prog <- case tryParseProgram "<test>" src of
+    Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
+    Right p  -> return p
+  -- Try several different mock syms; each should give a prob vector summing to 1.
+  let mockSyms = [ VTuple (VInt 0) (VInt s) | s <- [0, 1, 42, 100, 999] ]
+  mapM_ (\sym -> case runEncode defaultCompilerConfig prog [sym] of
+    Left err -> assertFailure ("runEncode failed: " ++ err)
+    Right (VList lst) -> do
+      let items = toList lst
+          total = sum [ x | VFloat x <- items ]
+      assertBool ("encode probs should sum to ~1.0, got " ++ show total)
+                 (abs (total - 1.0) < 1.0e-4)
+    Right other -> assertFailure ("expected VList, got: " ++ show other)
+    ) mockSyms
+
+-- Property: for the Gaussian identity program, encode always returns exactly 2 elements
+-- and sigma > 0, regardless of mock sym.
+test_encodeGaussianSigmaPositive :: Test
+test_encodeGaussianSigmaPositive = TestCase $ do
+  let src = unlines
+        [ "neural gaussNN :: (Symbol -> Float)"
+        , "main sym = gaussNN sym"
+        ]
+  prog <- case tryParseProgram "<test>" src of
+    Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
+    Right p  -> return p
+  let mockSyms = [ VTuple (VInt 0) (VInt s) | s <- [0, 1, 7, 42] ]
+  mapM_ (\sym -> case runEncode defaultCompilerConfig prog [sym] of
+    Left err -> assertFailure ("runEncode failed: " ++ err)
+    Right (VList lst) -> do
+      let items = toList lst
+      assertEqual "encode length for Gaussian" 2 (length items)
+      case items of
+        [_, VFloat sigma] ->
+          assertBool ("sigma should be positive, got " ++ show sigma) (sigma > 0)
+        _ -> assertFailure ("expected [mu, sigma], got: " ++ show items)
+    Right other -> assertFailure ("expected VList, got: " ++ show other)
+    ) mockSyms
 
 return []
 test_internals = $(forAllProperties) (quickCheckWithResult stdArgs { maxSuccess = 100 })

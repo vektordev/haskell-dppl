@@ -59,7 +59,7 @@ envToIR conf p
 
 envToIRUnoptimized :: CompilerConfig -> Program -> IREnv
 envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb, noGenerate=noGen} p@Program{adts=adts} = IREnv (
-  map (makeAutoNeural adts conf "main") (neurals p) ++
+  map (makeAutoNeural adts conf "main" mainParamNames) (neurals p) ++
   concatMap (\(name, binding) ->
     let typeEnv = getGlobalTypeEnv p
         pt = pType $ getTypeInfo binding
@@ -104,6 +104,9 @@ envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb
     toNormalDecl name expr = (expr, "Returns (mu, sigma) normal distribution parameters for the " ++ name ++ " function")
     fcDat = progToFCData p
     meta typeEnv = CompilerMetadata conf fcDat typeEnv adts p (IRConst (VFloat 1.0))
+    mainParamNames = maybe [] extractParamNames (lookup "main" (functions p))
+    extractParamNames (Lambda _ name body) = name : extractParamNames body
+    extractParamNames _ = []
 
 
 runCompile :: CompilerMetadata -> CompilerMonad CompilationResult -> IRExpr
@@ -171,13 +174,14 @@ generateTupleComponentNormalFunctions meta baseName expr = go expr id
 generateComponentNormalFunction :: CompilerMetadata -> String -> Expr -> TypeInfo -> Maybe IRFunGroup
 generateComponentNormalFunction meta fullName expr ti
   | (pType ti == PNormal || pType ti == PLogNormal) && isNormalExtractable expr =
-      Just $ IRFunGroup ("_component_" ++ fullName)
-        Nothing
-        Nothing
-        Nothing
-        Nothing
-        (Just (compileNormalExpr meta expr, "Per-component normal extraction for tuple element: " ++ fullName))
-        ""
+      let compiled = compileNormalExpr meta expr
+      in Just $ IRFunGroup ("_component_" ++ fullName)
+           Nothing
+           Nothing
+           Nothing
+           Nothing
+           (Just (compiled, "Per-component normal extraction for tuple element: " ++ fullName))
+           ""
   | otherwise = Nothing
 
 -- Return type (name, rType, hasInferenceFunctions)
