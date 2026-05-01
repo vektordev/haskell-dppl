@@ -7,6 +7,7 @@ data RType = TBool
            | TInt
            | TSymbol
            | TFloat
+           | TUnit
            | TThetaTree
            | ListOf RType
            | Tuple RType RType
@@ -27,6 +28,7 @@ matches TBool TBool = True
 matches TInt TInt = True
 matches TSymbol TSymbol = True
 matches TFloat TFloat = True
+matches TUnit TUnit = True
 matches TThetaTree TThetaTree = True
 matches (TADT ty1) (TADT ty2) = ty1 == ty2
 matches (TVarR x) (TVarR y) = x == y

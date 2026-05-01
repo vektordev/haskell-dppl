@@ -79,6 +79,7 @@ juliaVal (VEither (Left a)) = "Left(" ++ juliaVal a ++ ")"
 juliaVal (VEither (Right a)) = "Right(" ++ juliaVal a ++ ")"
 juliaVal (VThetaTree tt) = juliaValTree tt
   where juliaValTree (ThetaTree val trees) = "([" ++ intercalate ", " (map show val) ++ "], [" ++ intercalate ", " (map juliaValTree trees) ++ "])"
+juliaVal VUnit = "nothing"
 juliaVal (VADT cName params) = cName ++ "(" ++ intercalate ", " (map juliaVal params) ++ ")"
 juliaVal VAny = "\"ANY\""
 juliaVal x = error ("unknown juliaVal for " ++ show x)

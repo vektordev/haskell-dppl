@@ -142,6 +142,11 @@ tfst x = injF "fst" [x]
 tsnd :: Expr -> Expr
 tsnd x = injF "snd" [x]
 
+-- Unit type
+
+unit :: Expr
+unit = Constant makeTypeInfo VUnit
+
 -- Sum types
 
 left :: Expr -> Expr
@@ -149,6 +154,10 @@ left x = injF "left" [x]
 
 right :: Expr -> Expr
 right x = injF "right" [x]
+
+-- observe x pred: returns Left x if pred x, else Right ()
+observe :: Expr -> Expr -> Expr
+observe x pred = ifThenElse (apply pred x) (left x) (right unit)
 
 sisLeft :: Expr -> Expr
 sisLeft x = injF "isLeft" [x]

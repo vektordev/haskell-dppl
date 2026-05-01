@@ -267,7 +267,13 @@ unaryFs = [
   ]
 
 pValue :: MonadParser m => m Value
-pValue = choice [pBool, try pFloat, pIntVal, pTupleVal, pEither, pAny, pList <&> constructVList, pThetaTree <&> VThetaTree]
+pValue = choice [pBool, try pFloat, pIntVal, try pUnitVal, pTupleVal, pEither, pAny, pList <&> constructVList, pThetaTree <&> VThetaTree]
+
+pUnitVal :: MonadParser m => m Value
+pUnitVal = do
+  symbol "("
+  symbol ")"
+  return VUnit
 
 pTupleVal :: MonadParser m => m Value
 pTupleVal = do
@@ -355,7 +361,7 @@ parseFromList kvlist = do
     Just value -> return value
 
 rTypes :: [(String, RType)]
-rTypes = [("Int", TInt), ("Float", TFloat), ("Bool", TBool), ("Symbol", TSymbol)]
+rTypes = [("Int", TInt), ("Float", TFloat), ("Bool", TBool), ("Symbol", TSymbol), ("Unit", TUnit)]
 
 -- this function needs to handle compound types such as "Int -> Float" as well 
 -- first, we want to try parsing a compound type, and if that fails assume that a simple type is there instead.
@@ -380,8 +386,14 @@ pCompoundType = dbg "CompoundType" $ parens $ do
       combinators = [("->", TArrow), ("," , Tuple)]
 
 pSimpleType :: MonadParser m => m RType
-pSimpleType = dbg "SimpleType" $ 
-  choice [try $ parseFromList rTypes, pIdentifier <&> TADT]
+pSimpleType = dbg "SimpleType" $
+  choice [try pUnitType, try $ parseFromList rTypes, pIdentifier <&> TADT]
+
+pUnitType :: MonadParser m => m RType
+pUnitType = do
+  symbol "("
+  symbol ")"
+  return TUnit
 
 pList :: MonadParser m => m [Value]
 pList = do

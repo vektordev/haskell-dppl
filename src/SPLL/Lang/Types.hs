@@ -134,12 +134,13 @@ data GenericValue a = VBool Bool
            | VInt Int
            | VSymbol String
            | VFloat Double
+           | VUnit
            | VList (GenericList (GenericValue a))
            | VTuple (GenericValue a) (GenericValue a)
            | VEither (Either (GenericValue a) (GenericValue a))
            | VBranch (GenericValue a) (GenericValue a) String
            | VThetaTree ThetaTree
-           | VClosure [(String, a)] String a 
+           | VClosure [(String, a)] String a
            | VADT String [GenericValue a]
            | VAny -- Only used for marginal queries
            | VAnyExcept [a] -- Only used for marginal queries
@@ -150,6 +151,7 @@ instance Functor GenericValue where
   fmap _ (VBool x) = VBool x
   fmap _ (VSymbol x) = VSymbol x
   fmap _ (VFloat x) = VFloat x
+  fmap _ VUnit = VUnit
   fmap f (VList x) = VList (fmap (fmap f) x)
   fmap f (VTuple x y) = VTuple (fmap f x) (fmap f y)
   fmap f (VEither (Left x)) = VEither (Left (fmap f x))
@@ -162,7 +164,7 @@ instance Functor GenericValue where
   fmap _ VAny = VAny
 
 
-isVInt, isVBool, isVSymbol, isVFloat, isVList, isVTuple, isVEither, isVBranch, isVThetaTree, isVClosure, isVADT, isVAnyExcept :: GenericValue a -> Bool
+isVInt, isVBool, isVSymbol, isVFloat, isVUnit, isVList, isVTuple, isVEither, isVBranch, isVThetaTree, isVClosure, isVADT, isVAnyExcept :: GenericValue a -> Bool
 isVInt (VInt _) = True
 isVInt _ = False
 isVBool (VBool _) = True
@@ -171,6 +173,8 @@ isVSymbol (VSymbol _) = True
 isVSymbol _ = False
 isVFloat (VFloat _) = True
 isVFloat _ = False
+isVUnit VUnit = True
+isVUnit _ = False
 isVList (VList _) = True
 isVList _ = False
 isVTuple (VTuple _ _) = True

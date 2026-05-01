@@ -140,6 +140,7 @@ instance Substitutable RType where
   apply _ TInt = TInt
   apply _ TSymbol = TSymbol
   apply _ TFloat = TFloat
+  apply _ TUnit = TUnit
   apply _ NullList = NullList
   apply _ BottomTuple = BottomTuple
   apply _ TThetaTree = TThetaTree

@@ -100,6 +100,7 @@ pyVal (VBool f) = if f then "True" else "False"
 pyVal (VTuple a b) = "T(" ++ pyVal a ++ ", " ++ pyVal b ++ ")"
 pyVal (VEither (Left a)) = "Left(" ++ pyVal a ++ ")"
 pyVal (VEither (Right a)) = "Right(" ++ pyVal a ++ ")"
+pyVal VUnit = "None"
 pyVal (VThetaTree tt) = pyValTree tt
   where pyValTree (ThetaTree val trees) = "([" ++ intercalate ", " (map show val) ++ "], [" ++ intercalate ", " (map pyValTree trees) ++ "])"
 pyVal (VADT cName params) = cName ++ "(" ++ intercalate ", " (map pyVal params) ++ ")"

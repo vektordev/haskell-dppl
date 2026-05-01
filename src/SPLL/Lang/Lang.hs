@@ -166,7 +166,6 @@ tMapHead f expr = case expr of
   (Apply _ a b) -> Apply (f expr) a b
   (ReadNN t n a) -> ReadNN (f expr) n a
   (Error t e) -> Error (f expr) e
---  (ReadNN _ a) -> ReadNN (f expr) a
 
 tMapTails :: (Expr -> TypeInfo) -> Expr -> Expr
 tMapTails f expr = case expr of
@@ -479,6 +478,7 @@ getRType (VBool _) = TBool
 getRType (VInt _) = TInt
 getRType (VSymbol _) = TSymbol
 getRType (VFloat _) = TFloat
+getRType VUnit = TUnit
 getRType (VList (ListCont a _)) = ListOf $ getRType a
 getRType (VList EmptyList) = NullList
 getRType (VTuple t1 t2) = Tuple (getRType t1) (getRType t2)

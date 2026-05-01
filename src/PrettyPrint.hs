@@ -110,6 +110,7 @@ pPrintValue (VTuple a b) = "(" ++ pPrintValue a ++ ", " ++ pPrintValue b ++ ")"
 pPrintValue (VEither a) = show a
 pPrintValue (VInt a) = show a
 pPrintValue (VSymbol a) = a
+pPrintValue VUnit = "()"
 
 indent :: Int -> String
 indent n = replicate (2 * n) ' '

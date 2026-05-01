@@ -282,8 +282,6 @@ tupelFromValue _non_tuple = error "supplied non-tuple value to tuple-shaped NN t
 
 -- makeEncodeRec: bottom-level fallback for pass-through cases (EitherPlan, ADTPlan).
 -- outerArgs: IRExprs already in scope for the outer lambda parameters of main.
--- These cases read raw logit-vector slots (identity assumption; MAR-based encoding is
--- out of scope until mar-sum-types-observe.md lands).
 makeEncodeRec :: [ADTDecl] -> String -> String -> PartitionPlan -> Int -> [IRExpr] -> IRExpr
 makeEncodeRec adts probFnName normalFnName (Discretes rty (MultiDiscretes vals)) ix outerArgs =
   foldr IRCons (IRConst (VList EmptyList)) [IRIndex (IRVar vector) (IRConst (VInt (ix + i))) | i <- [0 .. length vals - 1]]
@@ -300,14 +298,44 @@ makeEncodeRec adts probFnName normalFnName (TuplePlan a b) ix outerArgs =
     [ makeEncodeTopLevel adts probFnName normalFnName a ix outerArgs
     , makeEncodeTopLevel adts probFnName normalFnName b (ix + getSize a) outerArgs
     ]
-makeEncodeRec adts probFnName normalFnName plan@(EitherPlan a b) ix outerArgs =
-  -- Stub: correct encoding requires P(Left VAny) via MAR semantics (mar-sum-types-observe.md).
-  -- Emits a zero-filled list of the correct length so length tests pass; values are wrong.
-  foldr IRCons (IRConst (VList EmptyList))
-    [ IRConst (VFloat 0) | _ <- [0 .. getSize plan - 1] ]
+makeEncodeRec adts probFnName normalFnName plan@(EitherPlan a b) ix outerArgs
+  | null probFnName =
+      -- No prob function available: emit zeros (length-correct stub).
+      foldr IRCons (IRConst (VList EmptyList))
+        [ IRConst (VFloat 0) | _ <- [0 .. getSize plan - 1] ]
+  | otherwise =
+      -- Compute the flag slot: P(Left VAny) from the compiled SPLL prob function.
+      -- Inner conditional probabilities: P(Left v) / P(Left VAny) for each v in the left
+      -- plan, and P(Right v) / P(Right VAny) for each v in the right plan.
+      let callProb s = foldl IRApply (IRApply (IRVar probFnName) (IRConst s)) outerArgs
+          pLeftAny  = IRTFst (callProb (VEither (Left VAny)))
+          pRightAny = IRTFst (callProb (VEither (Right VAny)))
+          flagSlot  = IRCons pLeftAny (IRConst (VList EmptyList))
+          leftEnc   = makeEncodeEitherArm probFnName outerArgs a (VEither . Left)  pLeftAny
+          rightEnc  = makeEncodeEitherArm probFnName outerArgs b (VEither . Right) pRightAny
+      in invokeStandardFunction stdListConcat
+           [ flagSlot
+           , invokeStandardFunction stdListConcat [leftEnc, rightEnc] ]
 makeEncodeRec adts probFnName normalFnName plan@(ADTPlan _ _) ix outerArgs =
   -- Stub: correct encoding requires marginal constructor probabilities via MAR semantics.
   -- Emits a zero-filled list of the correct length so length tests pass; values are wrong.
+  foldr IRCons (IRConst (VList EmptyList))
+    [ IRConst (VFloat 0) | _ <- [0 .. getSize plan - 1] ]
+
+-- | Encode the inner slots for one arm of an EitherPlan.
+-- wrap: constructs the full sample value (e.g. VEither . Left) for probFnName calls.
+-- armProb: IRExpr evaluating to P(arm VAny), used to normalise to conditional probability.
+-- For Discretes inner plans, emits P(arm v) / P(arm VAny) for each v.
+-- For complex plans, falls back to zeros (length-correct stub).
+makeEncodeEitherArm :: String -> [IRExpr] -> PartitionPlan -> (IRValue -> IRValue) -> IRExpr -> IRExpr
+makeEncodeEitherArm probFnName outerArgs (Discretes _ (MultiDiscretes vals)) wrap armProb =
+  foldr IRCons (IRConst (VList EmptyList))
+    [ IROp OpDiv
+        (IRTFst (foldl IRApply (IRApply (IRVar probFnName) (IRConst (wrap (valueToIR v)))) outerArgs))
+        armProb
+    | v <- vals ]
+makeEncodeEitherArm probFnName outerArgs plan wrap armProb =
+  -- Complex inner plan: fall back to zeros (length-correct stub).
   foldr IRCons (IRConst (VList EmptyList))
     [ IRConst (VFloat 0) | _ <- [0 .. getSize plan - 1] ]
 
@@ -387,7 +415,4 @@ noAny sample = IRIf (IRUnaryOp OpIsAny sample) (IRConst $ VFloat 1)
 noAny0 :: IRExpr -> IRExpr -> IRExpr
 noAny0 sample = IRIf (IRUnaryOp OpIsAny sample) (IRConst $ VFloat 0)
 
---TODO: Needs MAR semantics for the VAny.
---test3 = do
---  let irdefs = makeAutoNeural ("mixedTuple", TArrow TSymbol (Tuple TFloat TInt), Just $ EnumRange ((VTuple VAny (VInt 3)),(VTuple VAny (VInt 5))))
---  putStrLn (pPrintIREnv irdefs)
+-- MAR semantics for EitherPlan encoding are implemented in makeEncodeRec/makeEncodeEitherArm.
