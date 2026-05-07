@@ -24,8 +24,11 @@ cabal.project.local~
 .ghc.environment.*
 
 .direnv/
+.idea/
+*.iml
 haskell-dppl.cabal
 stack.yaml.lock
 vendor/
+out.py
 
 __pycache__/
