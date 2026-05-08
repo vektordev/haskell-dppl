@@ -51,7 +51,7 @@ makeDecoderFunGroup :: [ADTDecl] -> CompilerConfig -> String -> String -> RType 
 makeDecoderFunGroup adts conf spllFnName name target tag paramNames =
   IRFunGroup (name ++ "_auto")
     (Just (IRLambda symbol $ makeGen adts plan name, "Wrapper for the neural network function"))
-    (Just (IRLambda symbol $ makeProb adts conf plan name, "Inference function for neural network function"))
+    (Just (makeProb adts conf plan, "Inference function for neural network function"))
     Nothing
     (Just (makeEncode adts conf plan probFnName normalFnName paramNames, "Encoding function for NN2 input"))
     Nothing
@@ -108,10 +108,10 @@ vector = "l_x_neural_out"
 symbol :: String
 symbol = "l_x_neural_in"
 
-makeProb :: [ADTDecl] -> CompilerConfig -> PartitionPlan -> String -> IRExpr
-makeProb adts conf plan nn_name = IRLambda "sample" $ IRLetIn vector (IRApply (IRVar nn_name) (IRVar "l_x_neural_in")) (IRTCons m sndRet)
+makeProb :: [ADTDecl] -> CompilerConfig -> PartitionPlan -> IRExpr
+makeProb adts conf plan = IRLambda vector (IRLambda "sample" (IRTCons m sndRet))
   where
-    (m, dim, bc) = (makeProbRec adts plan 0 (IRVar "sample"))
+    (m, dim, bc) = makeProbRec adts plan 0 (IRVar "sample")
     sndRet = IRTCons dim bc
 
 -- Takes a Tag from a Discretes type and a sample, and builds code that returns the index of the sample in the tag.
