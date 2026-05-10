@@ -41,7 +41,7 @@ import Data.Bifunctor (second)
 import SPLL.Typing.ForwardChaining (annotateProg)
 import SPLL.Parser
 import TestParser
-import TestInternals (test_internals, classConstraintTests, test_encodeTupleGaussianParams, test_encodeDiscreteSumsToOne, test_encodeGaussianSigmaPositive)
+import TestInternals (test_internals, classConstraintTests, test_encodeTupleGaussianParams, test_encodeDiscreteSumsToOne, test_encodeGaussianSigmaPositive, test_nnHoistedOutOfEnumSum)
 import Test.HUnit (runTestTT)
 import End2EndTesting
 import TestCaseParser (parseProgram)
@@ -927,6 +927,7 @@ runSpecifiedTests opts = do
   _ <- runTestTT test_encodeTupleGaussianParams
   _ <- runTestTT test_encodeDiscreteSumsToOne
   _ <- runTestTT test_encodeGaussianSigmaPositive
+  _ <- runTestTT test_nnHoistedOutOfEnumSum
   d <- if disableEnd2End opts then return True else test_end2end
   let x = a && b && c && d
   if x then
