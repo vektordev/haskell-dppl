@@ -27,7 +27,8 @@ import Data.Foldable (toList)
 import Test.QuickCheck hiding (verbose)
 import Debug.Trace
 import Control.Exception (try, evaluate, SomeException)
-import System.CPUTime (getCPUTime)
+import Data.Time.Clock (getCurrentTime, diffUTCTime)
+import IRInterpreter (generateRand, generateDet)
 
 getAllTestFiles :: IO [(FilePath, FilePath)]
 getAllTestFiles = do
@@ -129,25 +130,25 @@ lessEqualsProbs (VTuple _ (VFloat aD)) (VTuple _ (VFloat bD)) = aD > bD -- Lower
 
 -- TODO: Maybe stop sampling early if no more new samples are found
 discreteProbsNormalized :: Program -> Property
-discreteProbsNormalized p = do
-  let randomParams = (replicateM paramCnt (getRandomR (1, 100000))) >>= mapM (\x -> return $ VTuple (VInt 0) (VInt x)) :: RandomGen g => Rand g [IRValue]
-  let randomParamsForSamples = evalRand (replicateM sampleCnt randomParams) (mkStdGen 42)
-  case mapM (runGen defaultCompilerConfig p) randomParamsForSamples of
+discreteProbsNormalized p = case compile defaultCompilerConfig p of
+  Left err -> counterexample ("Compilation failed: " ++ err) False
+  Right compiled ->
+    let Just (genExpr, _)  = genFun  (lookupIREnv "main" compiled)
+        Just (probExpr, _) = probFun (lookupIREnv "main" compiled)
+        randomParams :: RandomGen g => Rand g [IRValue]
+        randomParams = replicateM paramCnt (fmap (\x -> VTuple (VInt 0) (VInt x)) (getRandomR (1, 100000)))
+        randomParamsForSamples = evalRand (replicateM sampleCnt randomParams) (mkStdGen 42)
+        gens = map (\args -> generateRand (neurals p) compiled (map IRConst args) genExpr) randomParamsForSamples
+        pSamples = evalRand (sequence gens) (mkStdGen 42)
+    in case mapM (\sam -> generateDet (neurals p) compiled (map IRConst (sam:params)) probExpr) pSamples of
         Left err -> counterexample err False
-        Right gens -> do
-          let pSamples = evalRand (sequence gens) (mkStdGen 42)
-          case mapM (\sam -> runProb defaultCompilerConfig p params sam) pSamples of
-            Left err -> counterexample err False
-            Right t -> do
-              let sumProbSamples = sum (map prob t)
-              counterexample "Probability of randomly sampled values does not sum to 1" (sumProbSamples >= sufficientlyNormal)
-  -- Create a list of random ints and then make them into a tuple
-  
-  
+        Right t ->
+          let sumProbSamples = sum (map prob t)
+          in counterexample "Probability of randomly sampled values does not sum to 1" (sumProbSamples >= sufficientlyNormal)
   where
     paramCnt = progParameterCount p
-    seedList = [0 .. (paramCnt - 1)] -- List of natural numbers split into parameter count sized chunks
-    params = map (VTuple (VInt 0) . VInt) seedList  -- Made each element into a tuple with a 0 to select the random NN mock
+    seedList = [0 .. (paramCnt - 1)]
+    params = map (VTuple (VInt 0) . VInt) seedList
     sampleCnt = 1000
     sufficientlyNormal = 0.99
     prob (VTuple (VFloat p) _) = p
@@ -224,10 +225,10 @@ pythonTestCode src tcs =
 
 timedE2E :: String -> IO a -> IO a
 timedE2E label action = do
-  start <- getCPUTime
+  start <- getCurrentTime
   result <- action
-  end <- getCPUTime
-  let ms = round (fromIntegral (end - start) / 1e9 :: Double) :: Int
+  end <- getCurrentTime
+  let ms = round (realToFrac (diffUTCTime end start) * 1000 :: Double) :: Int
   putStrLn $ "[TIMING] " ++ label ++ ": " ++ show ms ++ " ms"
   return result
 

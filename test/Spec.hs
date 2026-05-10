@@ -7,7 +7,7 @@
 
 import Test.QuickCheck hiding (verbose)
 import System.Exit (exitWith, ExitCode(ExitFailure))
-import System.CPUTime (getCPUTime)
+import Data.Time.Clock (getCurrentTime, diffUTCTime)
 
 import SPLL.Examples
 --import Lib
@@ -209,7 +209,7 @@ prop_CheckProbTestCasesWithBC :: Property
 prop_CheckProbTestCasesWithBC = forAll (elements correctProbValuesTestCases) checkProbTestCasesWithBC
 
 prop_TopK :: Property
-prop_TopK = ioProperty $ do
+prop_TopK = once $ ioProperty $ do
   actualOutput0 <- evalRandIO $ irDensityTopK testTopK 0.1 (VFloat 0) []
   actualOutput1 <- evalRandIO $ irDensityTopK testTopK 0.1 (VFloat 1) []
   case (actualOutput0, actualOutput1) of
@@ -593,7 +593,7 @@ sumsToOne = undefined
 -- Two-level nesting: inner true branch has global prob 0.12*0.12=0.0144 < thresh=0.1, so it is
 -- pruned by global topK but would survive local topK (local condT=0.12 > 0.1).
 prop_TopKNestedPrunesDeeper :: Property
-prop_TopKNestedPrunesDeeper = ioProperty $ do
+prop_TopKNestedPrunesDeeper = once $ ioProperty $ do
   let twoLevel = Program [("main",
         ifThenElse (bernoulli 0.12)
           (ifThenElse (bernoulli 0.12) (constF 1.0) (constF 0.0))
@@ -612,7 +612,7 @@ prop_TopKNestedPrunesDeeper = ioProperty $ do
 -- With thresh=0.1: main's true branch has accProb=0.12, inner receives it;
 -- inner's true branch has global prob 0.12*0.12=0.0144 < 0.1 → pruned, P(1.0)=0.
 prop_TopKCrossFunction :: Property
-prop_TopKCrossFunction = ioProperty $ do
+prop_TopKCrossFunction = once $ ioProperty $ do
   let crossFunc = Program
         [ ("main",  ifThenElse (bernoulli 0.12) (var "inner") (constF 2.0))
         , ("inner", ifThenElse (bernoulli 0.12) (constF 1.0) (constF 0.0)) ]
@@ -655,7 +655,7 @@ checkTopKNeverInflates thresh (p, inp, params, _) = ioProperty $ do
 -- testDiceAdd = plusI(dice6, dice6): for P(sum=7), all 6 die combinations are valid,
 -- so without topK BC=6.  With threshold=0.2 (>1/6), accProb*(1/6)<0.2 → all 6 pruned → BC=0.
 prop_TopKFewerBranches :: Property
-prop_TopKFewerBranches = ioProperty $ do
+prop_TopKFewerBranches = once $ ioProperty $ do
   topKBCResult <- evalRandIO $ irDensityTopKBC testDiceAdd 0.2 (VInt 7) []
   noBCResult   <- evalRandIO $ irDensityBC     testDiceAdd     (VInt 7) []
   case (topKBCResult, noBCResult) of
@@ -668,7 +668,7 @@ prop_TopKFewerBranches = ioProperty $ do
 --   threshold=0.1 (<1/6): accProb*(1/6)>0.1 → all 6 branches kept → BC=6
 --   threshold=0.2 (>1/6): accProb*(1/6)<0.2 → all 6 branches pruned → BC=0
 prop_TopKMonotonicBranches :: Property
-prop_TopKMonotonicBranches = ioProperty $ do
+prop_TopKMonotonicBranches = once $ ioProperty $ do
   bcLow  <- evalRandIO $ irDensityTopKBC testDiceAdd 0.1 (VInt 7) []
   bcHigh <- evalRandIO $ irDensityTopKBC testDiceAdd 0.2 (VInt 7) []
   case (bcLow, bcHigh) of
@@ -690,7 +690,7 @@ irDensityTopKBC p thresh s params = IRInterpreter.generateRand (neurals p) irEnv
 -- A 3-leaf if-else (if b then (if b2 then uniform else 3.0) else 1.0) should give BC=3.
 -- inner: cond(1)+uniform(1)+const3(1)-1=2; outer: cond(1)+2+const1(1)-1=3.
 prop_BCLeafCountIfElse :: Property
-prop_BCLeafCountIfElse = ioProperty $ do
+prop_BCLeafCountIfElse = once $ ioProperty $ do
   let prog = Program [("main", ifThenElse (bernoulli 0.5) (ifThenElse (bernoulli 0.5) uniform (constF 3.0)) (constF 1.0))] [] []
   result <- evalRandIO $ irDensityBC prog (VFloat 0.5) []
   case result of
@@ -700,7 +700,7 @@ prop_BCLeafCountIfElse = ioProperty $ do
 -- dice 6 is a pure if-else tree with 6 leaves. BC should equal 6 for any query.
 -- dice1=1; dice(n)=cond(1)+constI(n)(1)+dice(n-1)-1 = dice(n-1)+1; so dice(6)=6.
 prop_BCDiceIfElse :: Property
-prop_BCDiceIfElse = ioProperty $ do
+prop_BCDiceIfElse = once $ ioProperty $ do
   result <- evalRandIO $ irDensityBC testDice (VInt 3) []
   case result of
     VTuple _ (VTuple _ (VFloat bc)) -> return $ counterexample ("Expected BC=6, got " ++ show bc) (bc == 6.0)
@@ -708,7 +708,7 @@ prop_BCDiceIfElse = ioProperty $ do
 
 -- Consistency: dice6 as if-else (BC=6) and testDiceAdd as InjF (BC=6 for P(7)) agree.
 prop_BCConsistency :: Property
-prop_BCConsistency = ioProperty $ do
+prop_BCConsistency = once $ ioProperty $ do
   diceResult    <- evalRandIO $ irDensityBC testDice    (VInt 3) []
   diceAddResult <- evalRandIO $ irDensityBC testDiceAdd (VInt 7) []
   case (diceResult, diceAddResult) of
@@ -722,7 +722,7 @@ prop_BCConsistency = ioProperty $ do
 --   threshold=0.2 (>1/6): accumulated prob of every branch is ~1/6 < 0.2 → all pruned, P(3)=0
 -- Local topK would behave differently because the raw bernoulli probabilities vary by depth.
 prop_TopKDiceAllOrNothing :: Property
-prop_TopKDiceAllOrNothing = ioProperty $ do
+prop_TopKDiceAllOrNothing = once $ ioProperty $ do
   low   <- evalRandIO $ irDensityTopK testDice 0.1 (VInt 3) []
   high  <- evalRandIO $ irDensityTopK testDice 0.2 (VInt 3) []
   exact <- evalRandIO $ irDensity     testDice     (VInt 3) []
@@ -737,7 +737,7 @@ prop_TopKDiceAllOrNothing = ioProperty $ do
 --   threshold=0.1 (<1/6): 1.0*(1/6)=0.167 > 0.1 → all enum branches kept, P(7)=6/36
 --   threshold=0.2 (>1/6): 1.0*(1/6)=0.167 < 0.2 → all enum branches pruned, P(7)=0
 prop_TopKInjFEnum :: Property
-prop_TopKInjFEnum = ioProperty $ do
+prop_TopKInjFEnum = once $ ioProperty $ do
   low   <- evalRandIO $ irDensityTopK testDiceAdd 0.1 (VInt 7) []
   high  <- evalRandIO $ irDensityTopK testDiceAdd 0.2 (VInt 7) []
   exact <- evalRandIO $ irDensity     testDiceAdd     (VInt 7) []
@@ -752,7 +752,7 @@ prop_TopKInjFEnum = ioProperty $ do
 -- Note: runProb does not thread acc_prob, so we use irDensityTopK directly after parsing.
 -- threshold=0.1 (<0.25): no branch is pruned; each face should have P=0.25.
 prop_TopKEndToEnd :: Property
-prop_TopKEndToEnd = ioProperty $ do
+prop_TopKEndToEnd = once $ ioProperty $ do
   prog <- parseProgram "testCases/dice.ppl"
   results <- mapM (\v -> evalRandIO $ irDensityTopK prog 0.1 (VFloat v) []) [1.0, 2.0, 3.0, 4.0]
   return $ conjoin
@@ -765,7 +765,7 @@ prop_TopKEndToEnd = ioProperty $ do
 -- Routes through IsConditional + toIREnumerate path in IRCompiler.
 -- Argument has 2 discrete values; each iteration traverses one if-else arm → BC = 2.
 prop_BCConditionalLambda :: Property
-prop_BCConditionalLambda = ioProperty $ do
+prop_BCConditionalLambda = once $ ioProperty $ do
   result <- evalRandIO $ irDensityBC testConditionalLambdaBC (VFloat 1.0) []
   case result of
     VTuple _ (VTuple _ (VFloat bc)) ->
@@ -780,7 +780,7 @@ prop_BCConditionalLambda = ioProperty $ do
 -- the correct normalPDF(1.0) * 0.5.
 -- P(main = 2.0) = normalPDF(1.0) * 0.5.
 prop_killAllVarExtraction :: Property
-prop_killAllVarExtraction = ioProperty $ do
+prop_killAllVarExtraction = once $ ioProperty $ do
   result <- evalRandIO $ irDensity testNormalScaledViaVar (VFloat 2.0) []
   case result of
     VTuple (VFloat p) _ ->
@@ -791,7 +791,7 @@ prop_killAllVarExtraction = ioProperty $ do
 -- Enabling countBranches must not alter probability values, only add a third field.
 -- Verify on testDice that P(X=3) is the same with and without branch counting.
 prop_BCDoesNotChangeProbability :: Property
-prop_BCDoesNotChangeProbability = ioProperty $ do
+prop_BCDoesNotChangeProbability = once $ ioProperty $ do
   withBC    <- evalRandIO $ irDensityBC testDice (VInt 3) []
   withoutBC <- evalRandIO $ irDensity   testDice (VInt 3) []
   case (withBC, withoutBC) of
@@ -809,7 +809,7 @@ prop_BCDoesNotChangeProbability = ioProperty $ do
 -- Also exercises the killAll IRVar path: testDice's main calls the dice sub-expression
 -- via Var, so killAll must rewrite IRTFst(IRTSnd(IRVar x)) → IRTSnd(IRVar x).
 prop_stripBranchCountReturnShape :: Property
-prop_stripBranchCountReturnShape = ioProperty $ do
+prop_stripBranchCountReturnShape = once $ ioProperty $ do
   withBC    <- evalRandIO $ irDensityBC testDice (VInt 3) []
   withoutBC <- evalRandIO $ irDensity   testDice (VInt 3) []
   let isTriple (VTuple _ (VTuple _ _)) = True
@@ -824,7 +824,7 @@ prop_stripBranchCountReturnShape = ioProperty $ do
 -- When topKThreshold is set, IREnv should contain exactly one constant named TOP_K_CUTOFF
 -- with the value matching the config.
 prop_TopKConstantPresentInEnv :: Property
-prop_TopKConstantPresentInEnv = ioProperty $ do
+prop_TopKConstantPresentInEnv = once $ ioProperty $ do
   let conf = defaultCompilerConfig { topKThreshold = Just 0.005 }
       Right irEnv = compile conf testDice
       IREnv _ _ consts = irEnv
@@ -835,7 +835,7 @@ prop_TopKConstantPresentInEnv = ioProperty $ do
 
 -- When topKThreshold is Nothing, no TOP_K_CUTOFF constant should appear in IREnv.
 prop_TopKConstantAbsentWithoutFlag :: Property
-prop_TopKConstantAbsentWithoutFlag = ioProperty $ do
+prop_TopKConstantAbsentWithoutFlag = once $ ioProperty $ do
   let Right irEnv = compile defaultCompilerConfig testDice
       IREnv _ _ consts = irEnv
   return $ counterexample "TOP_K_CUTOFF should not appear when topK is disabled"
@@ -845,7 +845,7 @@ prop_TopKConstantAbsentWithoutFlag = ioProperty $ do
 -- The generated Python should contain a plain assignment `TOP_K_CUTOFF = <value>`,
 -- not a class definition.
 prop_TopKPythonConstantIsPlainAssignment :: Property
-prop_TopKPythonConstantIsPlainAssignment = ioProperty $ do
+prop_TopKPythonConstantIsPlainAssignment = once $ ioProperty $ do
   let conf = defaultCompilerConfig { topKThreshold = Just 0.001 }
       Right irEnv = compile conf testDice
       pyLines = SPLL.CodeGenPyTorch.generateFunctions True irEnv
@@ -856,7 +856,7 @@ prop_TopKPythonConstantIsPlainAssignment = ioProperty $ do
 
 -- The value in the generated Python assignment must match the threshold passed in.
 prop_TopKPythonConstantValueMatchesConfig :: Property
-prop_TopKPythonConstantValueMatchesConfig = ioProperty $ do
+prop_TopKPythonConstantValueMatchesConfig = once $ ioProperty $ do
   let thresh = 0.0042 :: Double
       conf = defaultCompilerConfig { topKThreshold = Just thresh }
       Right irEnv = compile conf testDice
@@ -871,7 +871,7 @@ prop_TopKPythonConstantValueMatchesConfig = ioProperty $ do
 -- irDensityTopK with threshold=0.001 on testDice should agree with irDensity
 -- (all branches kept since 1/6 >> 0.001).
 prop_TopKConstantResolvedByInterpreter :: Property
-prop_TopKConstantResolvedByInterpreter = ioProperty $ do
+prop_TopKConstantResolvedByInterpreter = once $ ioProperty $ do
   withTopK <- evalRandIO $ irDensityTopK testDice 0.001 (VInt 3) []
   exact    <- evalRandIO $ irDensity     testDice       (VInt 3) []
   case (withTopK, exact) of
@@ -883,10 +883,10 @@ return []
 
 timed :: String -> IO a -> IO a
 timed label action = do
-  start <- getCPUTime
+  start <- getCurrentTime
   result <- action
-  end <- getCPUTime
-  let ms = round (fromIntegral (end - start) / 1e9 :: Double) :: Int
+  end <- getCurrentTime
+  let ms = round (realToFrac (diffUTCTime end start) * 1000 :: Double) :: Int
   putStrLn $ "[TIMING] " ++ label ++ ": " ++ show ms ++ " ms"
   return result
 
