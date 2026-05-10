@@ -7,6 +7,7 @@
 
 import Test.QuickCheck hiding (verbose)
 import System.Exit (exitWith, ExitCode(ExitFailure))
+import System.CPUTime (getCPUTime)
 
 import SPLL.Examples
 --import Lib
@@ -880,6 +881,14 @@ prop_TopKConstantResolvedByInterpreter = ioProperty $ do
 
 return []
 
+timed :: String -> IO a -> IO a
+timed label action = do
+  start <- getCPUTime
+  result <- action
+  end <- getCPUTime
+  let ms = round (fromIntegral (end - start) / 1e9 :: Double) :: Int
+  putStrLn $ "[TIMING] " ++ label ++ ": " ++ show ms ++ " ms"
+  return result
 
 runTests :: IO Bool
 runTests = $(forAllProperties) (quickCheckWithResult stdArgs { maxSuccess = 100, maxDiscardRatio = 20 })
@@ -920,15 +929,15 @@ main = runSpecifiedTests =<< execParser opts
 
 runSpecifiedTests :: TestOpts -> IO ()
 runSpecifiedTests opts = do
-  a <- if disableSpec opts then return True else runTests
-  b <- if disableParser opts then return True else test_parser
-  c <- if disableInternals opts then return True else test_internals
-  _ <- runTestTT classConstraintTests
-  _ <- runTestTT test_encodeTupleGaussianParams
-  _ <- runTestTT test_encodeDiscreteSumsToOne
-  _ <- runTestTT test_encodeGaussianSigmaPositive
-  _ <- runTestTT test_nnHoistedOutOfEnumSum
-  d <- if disableEnd2End opts then return True else test_end2end
+  a <- if disableSpec opts then return True else timed "Spec (QuickCheck props)" runTests
+  b <- if disableParser opts then return True else timed "Parser tests" test_parser
+  c <- if disableInternals opts then return True else timed "Internal tests" test_internals
+  _ <- timed "classConstraintTests" $ runTestTT classConstraintTests
+  _ <- timed "test_encodeTupleGaussianParams" $ runTestTT test_encodeTupleGaussianParams
+  _ <- timed "test_encodeDiscreteSumsToOne" $ runTestTT test_encodeDiscreteSumsToOne
+  _ <- timed "test_encodeGaussianSigmaPositive" $ runTestTT test_encodeGaussianSigmaPositive
+  _ <- timed "test_nnHoistedOutOfEnumSum" $ runTestTT test_nnHoistedOutOfEnumSum
+  d <- if disableEnd2End opts then return True else timed "End2End tests" test_end2end
   let x = a && b && c && d
   if x then
     putStrLn "Test successful!"

@@ -27,6 +27,7 @@ import Data.Foldable (toList)
 import Test.QuickCheck hiding (verbose)
 import Debug.Trace
 import Control.Exception (try, evaluate, SomeException)
+import System.CPUTime (getCPUTime)
 
 getAllTestFiles :: IO [(FilePath, FilePath)]
 getAllTestFiles = do
@@ -221,6 +222,15 @@ pythonTestCode src tcs =
     mainName (ProbTestCase _ _ _ _) = "main.forward"
     mainName (CumulTestCase _ _ _ _) = "main.integrate"
 
+timedE2E :: String -> IO a -> IO a
+timedE2E label action = do
+  start <- getCPUTime
+  result <- action
+  end <- getCPUTime
+  let ms = round (fromIntegral (end - start) / 1e9 :: Double) :: Int
+  putStrLn $ "[TIMING] " ++ label ++ ": " ++ show ms ++ " ms"
+  return result
+
 test_end2end :: IO Bool
 test_end2end = do
   files <- getAllTestFiles
@@ -231,18 +241,18 @@ test_end2end = do
 
   putStrLn "=== Test End2End Interpreter ==="
   let interprTest = label "End2End Interpreter" $ conjoin [conjoin $ map (testInterpreter p) tcs | (p, tcs) <- cases]
-  interprProp <- quickCheckResult (withMaxSuccess 1 interprTest) >>= return . isSuccess
+  interprProp <- timedE2E "End2End Interpreter" $ quickCheckResult (withMaxSuccess 1 interprTest) >>= return . isSuccess
 
   putStrLn "\n=== Test End2End Interpreter Normalization ==="
   let interprNormalizeTest = label "End2End Interpreter Normalization" $ conjoin [discreteProbsNormalized p | p <- neuralP]
-  interprNormalProp <- quickCheckResult (withMaxSuccess 1 interprNormalizeTest) >>= return . isSuccess
+  interprNormalProp <- timedE2E "End2End Interpreter Normalization" $ quickCheckResult (withMaxSuccess 1 interprNormalizeTest) >>= return . isSuccess
 
   putStrLn "\n=== Test End2End Julia ==="
   let juliaTest = label "End2End Julia" $ conjoin [testJulia p tcs | (p, tcs) <- nonNeuralsQueries]
-  juliaProp <- quickCheckResult (withMaxSuccess 1 juliaTest) >>= return . isSuccess
+  juliaProp <- timedE2E "End2End Julia" $ quickCheckResult (withMaxSuccess 1 juliaTest) >>= return . isSuccess
 
   putStrLn "\n=== Test End2End Python ==="
   let pythonTest = label "End2End Python" $ conjoin [testPython p tcs | (p, tcs) <- nonNeuralsQueries]
-  pythonProp <- quickCheckResult (withMaxSuccess 1 pythonTest) >>= return . isSuccess
+  pythonProp <- timedE2E "End2End Python" $ quickCheckResult (withMaxSuccess 1 pythonTest) >>= return . isSuccess
 
   return $ interprProp && interprNormalProp && juliaProp && pythonProp
