@@ -71,3 +71,4 @@ tests:
     dependencies:
     - haskell-dppl
     - HUnit
+    - temporary
