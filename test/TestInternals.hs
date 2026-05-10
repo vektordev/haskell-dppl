@@ -82,12 +82,10 @@ classConstraintTests = TestList
 -- Expected encode output: [mu1, sigma1, mu2, sigma2] = [2.0, 1.5, -1.0, 0.5]
 -- regardless of which sample is passed in.
 --
--- CURRENT STATUS: FAILING — makeEncodeTopLevel falls through to makeEncodeRec for
--- TuplePlan, which reads NN logit-vector slots instead of invoking the SPLL
--- normal-params function for each component.  This test is a forward specification:
--- it should pass once makeEncodeTopLevel handles TuplePlan by delegating each
--- Continuous sub-plan to the compiled main_normal (or equivalent per-component)
--- function rather than to the raw NN output.
+-- makeEncodeTopLevel handles TuplePlan by delegating each Continuous sub-plan to
+-- the per-component normal function (main_normal_fst / main_normal_snd), which
+-- returns (mu, sigma) derived from the compiled SPLL program rather than the raw
+-- NN logit vector.
 test_encodeTupleGaussianParams :: Test
 test_encodeTupleGaussianParams = TestCase $ do
   let src = unlines
