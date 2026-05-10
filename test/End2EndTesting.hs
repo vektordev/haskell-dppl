@@ -30,6 +30,7 @@ import Test.QuickCheck hiding (verbose)
 import Debug.Trace
 import Control.Exception (try, evaluate, SomeException)
 import Data.Time.Clock (getCurrentTime, diffUTCTime)
+import Data.IORef (IORef, newIORef, modifyIORef, readIORef)
 import IRInterpreter (generateRand, generateDet)
 
 getAllTestFiles :: IO [(FilePath, FilePath)]
@@ -241,17 +242,34 @@ pythonTestCode src tcs =
     mainName (ProbTestCase _ _ _ _) = "main.forward"
     mainName (CumulTestCase _ _ _ _) = "main.integrate"
 
-timedE2E :: String -> IO a -> IO a
-timedE2E label action = do
+type TimingLog = IORef [(String, Int)]
+
+newTimingLog :: IO TimingLog
+newTimingLog = newIORef []
+
+timedLog :: TimingLog -> String -> IO a -> IO a
+timedLog tlog label action = do
   start <- getCurrentTime
   result <- action
   end <- getCurrentTime
   let ms = round (realToFrac (diffUTCTime end start) * 1000 :: Double) :: Int
-  putStrLn $ "[TIMING] " ++ label ++ ": " ++ show ms ++ " ms"
+  modifyIORef tlog ((label, ms) :)
   return result
 
-test_end2end :: IO Bool
-test_end2end = do
+printTimingSummary :: TimingLog -> IO ()
+printTimingSummary tlog = do
+  entries <- fmap reverse (readIORef tlog)
+  let total = sum (map snd entries)
+  putStrLn "\n=== Timing Summary ==="
+  mapM_ (\(lbl, ms) ->
+    let pct = if total == 0 then (0 :: Int)
+              else round (fromIntegral ms * 100 / fromIntegral total :: Double)
+    in putStrLn $ "  " ++ lbl ++ ": " ++ show ms ++ " ms (" ++ show pct ++ "%)"
+    ) entries
+  putStrLn $ "  Total: " ++ show total ++ " ms"
+
+test_end2end :: TimingLog -> IO Bool
+test_end2end tlog = do
   files <- getAllTestFiles
   cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
   let queryTestCases = map (\(p, tcs) -> (p, filter (\x -> isProbTestCase x || isCumulTestCase x) tcs)) cases
@@ -260,18 +278,18 @@ test_end2end = do
 
   putStrLn "=== Test End2End Interpreter ==="
   let interprTest = label "End2End Interpreter" $ conjoin [conjoin $ map (testInterpreter p) tcs | (p, tcs) <- cases]
-  interprProp <- timedE2E "End2End Interpreter" $ quickCheckResult (withMaxSuccess 1 interprTest) >>= return . isSuccess
+  interprProp <- timedLog tlog "End2End Interpreter" $ quickCheckResult (withMaxSuccess 1 interprTest) >>= return . isSuccess
 
   putStrLn "\n=== Test End2End Interpreter Normalization ==="
   let interprNormalizeTest = label "End2End Interpreter Normalization" $ conjoin [discreteProbsNormalized p | p <- neuralP]
-  interprNormalProp <- timedE2E "End2End Interpreter Normalization" $ quickCheckResult (withMaxSuccess 1 interprNormalizeTest) >>= return . isSuccess
+  interprNormalProp <- timedLog tlog "End2End Interpreter Normalization" $ quickCheckResult (withMaxSuccess 1 interprNormalizeTest) >>= return . isSuccess
 
   putStrLn "\n=== Test End2End Julia ==="
   let juliaTest = label "End2End Julia" $ testJuliaAll nonNeuralsQueries
-  juliaProp <- timedE2E "End2End Julia" $ quickCheckResult (withMaxSuccess 1 juliaTest) >>= return . isSuccess
+  juliaProp <- timedLog tlog "End2End Julia" $ quickCheckResult (withMaxSuccess 1 juliaTest) >>= return . isSuccess
 
   putStrLn "\n=== Test End2End Python ==="
   let pythonTest = label "End2End Python" $ conjoin [testPython p tcs | (p, tcs) <- nonNeuralsQueries]
-  pythonProp <- timedE2E "End2End Python" $ quickCheckResult (withMaxSuccess 1 pythonTest) >>= return . isSuccess
+  pythonProp <- timedLog tlog "End2End Python" $ quickCheckResult (withMaxSuccess 1 pythonTest) >>= return . isSuccess
 
   return $ interprProp && interprNormalProp && juliaProp && pythonProp

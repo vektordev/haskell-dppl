@@ -7,7 +7,6 @@
 
 import Test.QuickCheck hiding (verbose)
 import System.Exit (exitWith, ExitCode(ExitFailure))
-import Data.Time.Clock (getCurrentTime, diffUTCTime)
 
 import SPLL.Examples
 --import Lib
@@ -881,15 +880,6 @@ prop_TopKConstantResolvedByInterpreter = once $ ioProperty $ do
 
 return []
 
-timed :: String -> IO a -> IO a
-timed label action = do
-  start <- getCurrentTime
-  result <- action
-  end <- getCurrentTime
-  let ms = round (realToFrac (diffUTCTime end start) * 1000 :: Double) :: Int
-  putStrLn $ "[TIMING] " ++ label ++ ": " ++ show ms ++ " ms"
-  return result
-
 runTests :: IO Bool
 runTests = $(forAllProperties) (quickCheckWithResult stdArgs { maxSuccess = 100, maxDiscardRatio = 20 })
 
@@ -897,7 +887,8 @@ data TestOpts = TestOpts {
   disableSpec :: Bool,
   disableInternals :: Bool,
   disableParser :: Bool,
-  disableEnd2End :: Bool
+  disableEnd2End :: Bool,
+  showTimings :: Bool
 }
 
 parseTestOpts :: Parser TestOpts
@@ -918,6 +909,10 @@ parseTestOpts = TestOpts
             ( long "disableEnd2End"
             <> short 'E'
             <> help "Disables the end2end tests")
+        <*> switch
+            ( long "show-timings"
+            <> short 'T'
+            <> help "Print a per-suite timing table with percentages at the end of the run")
 
 main :: IO ()
 main = runSpecifiedTests =<< execParser opts
@@ -929,15 +924,17 @@ main = runSpecifiedTests =<< execParser opts
 
 runSpecifiedTests :: TestOpts -> IO ()
 runSpecifiedTests opts = do
-  a <- if disableSpec opts then return True else timed "Spec (QuickCheck props)" runTests
-  b <- if disableParser opts then return True else timed "Parser tests" test_parser
-  c <- if disableInternals opts then return True else timed "Internal tests" test_internals
-  _ <- timed "classConstraintTests" $ runTestTT classConstraintTests
-  _ <- timed "test_encodeTupleGaussianParams" $ runTestTT test_encodeTupleGaussianParams
-  _ <- timed "test_encodeDiscreteSumsToOne" $ runTestTT test_encodeDiscreteSumsToOne
-  _ <- timed "test_encodeGaussianSigmaPositive" $ runTestTT test_encodeGaussianSigmaPositive
-  _ <- timed "test_nnHoistedOutOfEnumSum" $ runTestTT test_nnHoistedOutOfEnumSum
-  d <- if disableEnd2End opts then return True else timed "End2End tests" test_end2end
+  tlog <- newTimingLog
+  a <- if disableSpec opts then return True else timedLog tlog "Spec (QuickCheck props)" runTests
+  b <- if disableParser opts then return True else timedLog tlog "Parser tests" test_parser
+  c <- if disableInternals opts then return True else timedLog tlog "Internal tests" test_internals
+  _ <- timedLog tlog "classConstraintTests" $ runTestTT classConstraintTests
+  _ <- timedLog tlog "test_encodeTupleGaussianParams" $ runTestTT test_encodeTupleGaussianParams
+  _ <- timedLog tlog "test_encodeDiscreteSumsToOne" $ runTestTT test_encodeDiscreteSumsToOne
+  _ <- timedLog tlog "test_encodeGaussianSigmaPositive" $ runTestTT test_encodeGaussianSigmaPositive
+  _ <- timedLog tlog "test_nnHoistedOutOfEnumSum" $ runTestTT test_nnHoistedOutOfEnumSum
+  d <- if disableEnd2End opts then return True else test_end2end tlog
+  if showTimings opts then printTimingSummary tlog else return ()
   let x = a && b && c && d
   if x then
     putStrLn "Test successful!"
