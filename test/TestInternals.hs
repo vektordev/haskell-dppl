@@ -19,7 +19,7 @@ import SPLL.Typing.RInfer (tryAddRTypeInfo, RTypeError(..))
 import SPLL.Typing.RType (ClassConstraint(..), TVarR(..), RType(..))
 import SPLL.Prelude
 import SPLL.Parser (tryParseProgram)
-import SPLL.AutoNeural (PartitionPlan(..), makeEncodeRec)
+import SPLL.AutoNeural (PartitionPlan(..))
 import qualified SPLL.AutoNeural as AutoNeural (getSize)
 import SPLL.IntermediateRepresentation
 import IRInterpreter (generateDet)

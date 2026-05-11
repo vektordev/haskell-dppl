@@ -58,7 +58,7 @@ randomMockNN part@(ADTPlan dataName constrs) = do
   let selectorsNorm = map (/ sum selectors) selectors
   mockedFieldLists <- concatMapM (mapM randomMockNN . snd) constrs
   let mockedFields = concatMap (\(VList l) -> toList l) mockedFieldLists
-  let res = map VFloat selectors ++ mockedFields
+  let res = map VFloat selectorsNorm ++ mockedFields
   return (constructVList res)
 
 spikingMockNN :: RandomGen g => PartitionPlan -> IRValue -> Rand g IRValue

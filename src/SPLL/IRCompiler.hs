@@ -369,6 +369,10 @@ toIRNormalParams meta (InjF _ "mult" [e0, e1])
       (mu1, s1) <- toIRNormalParams meta e1
       det0 <- toIRGenerate meta e0
       return (IROp OpMult mu1 det0, IROp OpMult s1 (IRUnaryOp OpAbs det0))
+toIRNormalParams meta (InjF _ "neg" [e])
+  | pType (getTypeInfo e) == PNormal = do
+      (mu, s) <- toIRNormalParams meta e
+      return (IRUnaryOp OpNeg mu, s)
 toIRNormalParams meta (InjF _ "log" [e])
   | pType (getTypeInfo e) == PLogNormal = toIRLogNormalParams meta e
 toIRNormalParams meta (Var _ name)
