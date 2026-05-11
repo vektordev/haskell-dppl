@@ -295,20 +295,14 @@ pBool = do
   return (VBool b)
 
 pFloat :: MonadParser m => m Value
-pFloat = dbg "float" $ do
-  sign <- optional (symbol "-")
-  f <- lexeme L.float
-  case sign of
-    Nothing -> return (VFloat f)
-    Just "-" -> return (VFloat (-f))
+pFloat = dbg "float" $ lexeme $ do
+  f <- L.float
+  return (VFloat f)
 
 pIntVal :: MonadParser m => m Value
-pIntVal = dbg "int" $ do
-  sign <- optional (symbol "-")
-  i <- lexeme L.decimal
-  case sign of
-    Nothing -> return (VInt i)
-    Just "-" -> return (VInt (-i))
+pIntVal = dbg "int" $ lexeme $ do
+  i <- L.decimal
+  return (VInt i)
 
 
 pInt :: MonadParser m => m Int
@@ -726,6 +720,15 @@ cmpOpList = [(">", (#>#)), ("<", (#<#)), (":", (#:#)), ("==", (#==#))]
 funLikeOps :: [([Char], Expr -> Expr)]
 funLikeOps = [("not", (#!#))]
 
+-- Fold negation into literal constants so that roundtrip works for negative literals.
+smartNeg :: Expr -> Expr
+smartNeg (Constant ti (VFloat f)) = Constant ti (VFloat (-f))
+smartNeg (Constant ti (VInt i))   = Constant ti (VInt (-i))
+smartNeg e                         = negF e
+
+prefixOps :: MonadParser m => [Operator m Expr]
+prefixOps = [Prefix (smartNeg <$ try (symbol "-" <* notFollowedBy (char '>')))]
+
 mkInfixOp :: MonadParser m => [([Char], Expr -> Expr -> Expr)] -> [Operator m Expr]
 mkInfixOp tbl = map infx tbl
   where infx (name, f) = InfixL (f <$ symbol name)
@@ -738,7 +741,7 @@ mkPrefixOp tbl = map infx tbl
 -- | Operator table (precedence and associativity)
 opTable :: MonadParser m => [[Operator m Expr]]
 opTable =
-  [ mkPrefixOp funLikeOps,
+  [ mkPrefixOp funLikeOps ++ prefixOps,
     mkInfixOp multLikeOpList,
     mkInfixOp addLikeOpList,
     mkInfixOp listManipulationOpList,
