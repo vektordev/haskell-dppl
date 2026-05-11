@@ -285,25 +285,32 @@ pTupleVal = do
   return (VTuple val1 val2)
 
 pConst :: MonadParser m => m Expr
-pConst = do
-  val <- pValue
-  return (Constant makeTypeInfo val)
+pConst = Constant makeTypeInfo <$> choice
+  [ pBool, try pUnsignedFloat, pUnsignedInt
+  , try pUnitVal, pTupleVal, pEither, pAny
+  , pList <&> constructVList, pThetaTree <&> VThetaTree
+  ]
 
 pBool :: MonadParser m => m Value
 pBool = do
   b <- choice [keyword "True" >> return True, keyword "False" >> return False]
   return (VBool b)
 
+-- Signed parsers: used by pValue (standalone values, .tst files, CSV).
 pFloat :: MonadParser m => m Value
-pFloat = dbg "float" $ lexeme $ do
-  f <- L.float
-  return (VFloat f)
+pFloat = dbg "float" $ VFloat <$> lexeme (L.signed sc L.float)
 
 pIntVal :: MonadParser m => m Value
-pIntVal = dbg "int" $ lexeme $ do
-  i <- L.decimal
-  return (VInt i)
+pIntVal = dbg "int" $ VInt <$> lexeme (L.signed sc L.decimal)
 
+-- Unsigned parsers: used by pConst inside the expression atom.
+-- The expression parser handles unary minus via the operator table,
+-- so atoms must not greedily consume a leading '-'.
+pUnsignedFloat :: MonadParser m => m Value
+pUnsignedFloat = dbg "ufloat" $ VFloat <$> lexeme L.float
+
+pUnsignedInt :: MonadParser m => m Value
+pUnsignedInt = dbg "uint" $ VInt <$> lexeme L.decimal
 
 pInt :: MonadParser m => m Int
 pInt = do
