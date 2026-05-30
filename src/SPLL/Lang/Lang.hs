@@ -10,7 +10,6 @@ module SPLL.Lang.Lang (
 , setTypeInfo
 , tMap
 , tMapM
-, tMapProg
 , makeMain
 , tMapHead
 , getRType
@@ -18,10 +17,7 @@ module SPLL.Lang.Lang (
 , prettyPrintProg
 , prettyPrintProgRTyOnly
 , prettyPrint
-, prettyPrintProgNoReq
-, prettyPrintNoReq
 , prettyRType
-, getVFloat
 , getSubExprs
 , setSubExprs
 , containedVars
@@ -30,7 +26,6 @@ module SPLL.Lang.Lang (
 , predicateFlat
 , predicateProg
 , isNotTheta
-, tTraverse
 , constructVList
 , multiValueToValueList
 , valueListToMultiValue
@@ -134,33 +129,6 @@ tMapHead f expr = case expr of
   (ReadNN t n a) -> ReadNN (f expr) n a
   (Error t e) -> Error (f expr) e
 
-tMapTails :: (Expr -> TypeInfo) -> Expr -> Expr
-tMapTails f expr = case expr of
-  (IfThenElse t a b c) -> IfThenElse t (tMap f a) (tMap f b) (tMap f c)
-  (GreaterThan t a b) -> GreaterThan t (tMap f a) (tMap f b)
-  (LessThan t a b) -> LessThan t (tMap f a) (tMap f b)
-  (Equals t a b) -> Equals t (tMap f a) (tMap f b)
-  (ThetaI t a x) -> ThetaI t (tMap f a) x
-  (Subtree t a x) -> Subtree t (tMap f a) x
-  (Uniform t) -> Uniform t
-  (Normal t) -> Normal t
-  (Constant t x) -> Constant t x
-  (And t a b) -> And t (tMap f a) (tMap f b)
-  (Or t a b) -> Or t (tMap f a) (tMap f b)
-  (Not t a) -> Not t (tMap f a)
-  (Null t) -> Null t
-  (Cons t a b) -> Cons t (tMap f a) (tMap f b)
-  (TCons t a b) -> TCons t (tMap f a) (tMap f b)
-  (Var t x) -> Var t x
-  (LetIn t x a b) -> LetIn t x (tMap f a) (tMap f b)
-  (InjF t x a) -> InjF t x (map (tMap f) a)
-  --(LetInD t x a b) -> LetInD t x (tMap f a) (tMap f b)
-  --(LetInTuple t x a b c) -> LetInTuple t x (tMap f a) b (tMap f c)
-  (Lambda t name a) -> Lambda t name (tMap f a)
-  (Apply t a b) -> Apply t (tMap f a) (tMap f b)
-  (ReadNN t n a) -> ReadNN t n (tMap f a)
-  (Error t e) -> Error t e
-
 tMap :: (Expr -> TypeInfo) -> Expr -> Expr
 tMap f expr = case expr of
   (IfThenElse _ a b c) -> IfThenElse (f expr) (tMap f a) (tMap f b) (tMap f c)
@@ -191,9 +159,6 @@ tMap f expr = case expr of
 makeMain :: Expr -> Program
 makeMain expr = Program [("main", expr)] [] []
 
-tMapProg :: (Expr -> TypeInfo) -> Program -> Program
-tMapProg f (Program decls neural adts) = Program (zip (map fst decls) (map (tMap f . snd) decls)) neural adts
-
 getBinaryConstructor :: Expr -> (TypeInfo -> Expr -> Expr -> Expr)
 getBinaryConstructor GreaterThan {} = GreaterThan
 getBinaryConstructor LessThan {} = LessThan
@@ -222,10 +187,6 @@ getNullaryConstructor Null {} = Null
 getNullaryConstructor (Var _ x) = (`Var` x)
 getNullaryConstructor (Error t e) = (`Error` e)
 
-tTraverse :: Applicative f => (TypeInfo -> f TypeInfo) -> Expr -> f Expr
-tTraverse f expr = fmap (\t -> setTypeInfo expr t) typeinfos
-  where typeinfos = f $ getTypeInfo expr
-
 tMapM :: Monad m => (Expr -> m TypeInfo) -> Expr -> m Expr
 tMapM f expr@(IfThenElse _ a b c) = do
   t <- f expr
@@ -250,9 +211,6 @@ tMapM f expr
        subExpr0 <- tMapM f (getSubExprs expr !! 0)
        subExpr1 <- tMapM f (getSubExprs expr !! 1)
        return $ getBinaryConstructor expr t subExpr0 subExpr1
-
-arity :: Expr -> Int
-arity e = length $ getSubExprs e
 
 getSubExprs :: Expr -> [Expr]
 getSubExprs expr = case expr of
@@ -436,10 +394,6 @@ elementAt (ListCont _ xs) i = elementAt xs (i-1)
 elementAt EmptyList _ = error "Index out of bounds"
 elementAt AnyList _ = error "Cannot iterate AnyLists"
 
-getVFloat :: Value -> Double
-getVFloat (VFloat v) = v
-getVFloat _ = error "not vfloat where it should be"
-
 getRType :: Value -> RType
 getRType (VBool _) = TBool
 getRType (VInt _) = TInt
@@ -509,31 +463,6 @@ prettyPrintCustomTI fn expr =
       indent ls = "    " ++ ls
       fstLine = printFlat expr ++ " :: (" ++ fn (getTypeInfo expr) ++ ")"
 
-prettyPrintNoReq :: Expr -> [String]
-prettyPrintNoReq expr =
-  fstLine : indented
-    where
-      childExprs = getSubExprs expr
-      indented = map indent $ concatMap prettyPrintNoReq childExprs :: [String]
-      indent ls = "    " ++ ls
-      fstLine = printFlatNoReq expr
-
-prettyPrintProgNoReq :: Program -> [String]
-prettyPrintProgNoReq (Program fdecls ndecls adts) = concatMap prettyPrintADTs adts ++ concatMap prettyPrintDeclNoReq fdecls ++ concatMap prettyPrintNeuralNoReq ndecls
-
-prettyPrintNeuralNoReq :: NeuralDecl -> [String]
-prettyPrintNeuralNoReq (name, ty, range) = l1:l2:(l3 range):[]
-  where
-    l1 = ("--- Neural: " ++ name ++ "---")
-    l2 = ("\t :: " ++ show ty)
-    l3 (Just (MultiDiscretes lst)) = ("\t" ++ (show $ length lst))
-    l3 (Nothing) = ("\t" ++ (show $ 0))
-    l3 _ = "prettyprint not implemented"
-
-
-prettyPrintDeclNoReq :: FnDecl -> [String]
-prettyPrintDeclNoReq (name, expr) = ("--- Function: " ++ name ++ "---"):prettyPrintNoReq expr
-
 printFlat :: Expr -> String
 printFlat expr = case expr of
   IfThenElse {} -> "IfThenElse"
@@ -561,30 +490,4 @@ printFlat expr = case expr of
   (ReadNN _ name _) -> "ReadNN " ++ name
   (Error _ e)       -> "Error: " ++ e
 
-printFlatNoReq :: Expr -> String
-printFlatNoReq expr = case expr of
-  IfThenElse {} -> "IfThenElse"
-  GreaterThan {} -> "GreaterThan"
-  LessThan {} -> "LessThan"
-  Equals {} -> "Equals"
-  (ThetaI _ _ i) -> "Theta_" ++ show i
-  (Subtree _ _ i) -> "Subtree_" ++ show i
-  Uniform {} -> "Uniform"
-  Normal {} -> "Normal"
-  (Constant _ _) -> "Constant"
-  And {} -> "And"
-  Or {} -> "Or"
-  Not {} -> "Not"
-  (Null _) -> "Null"
-  Cons {} -> "Cons"
-  TCons {} -> "TCons"
-  Var _ _ -> "Var"
-  LetIn {} -> "LetIn"
-  (InjF t fname _) -> "InjF (" ++ fname ++ ")"
-  --(LetInD {}) -> "LetInD"
-  --(LetInTuple {}) -> "LetInTuple"
-  (Lambda _ name _) -> "\\" ++ name  ++ " -> "
-  Apply {} -> "Apply"
-  ReadNN {} -> "ReadNN"
-  Error {} -> "Error"
 

@@ -2,10 +2,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 module SPLL.Typing.PInfer2 (
-  showResults
-, showResultsProg
-, addPTypeInfo
-, showResultsProgDebug
+  addPTypeInfo
 , tryAddPTypeInfo
 , PTypeError (..)
 ) where
@@ -144,18 +141,6 @@ resolveCompCons PNormal     PLogNormal  = Bottom
 resolveCompCons PLogNormal  PNormal     = Bottom
 resolveCompCons ty1 ty2 = Deterministic
 
-showResults :: Expr -> IO ()
-showResults expr = do
-  case inferExpr mempty expr of
-    Left err -> print err
-    Right (cons, scheme, ee) -> do
-      putStrLn $ "B:\n" ++ show cons
-      putStrLn $ "Type (No Resolution):\n" ++ show scheme
-      putStrLn $ "Type:\n" ++ show (normalize scheme)
-      putStrLn $ "Expr: "
-      putStrLn $ unlines $ prettyPrint ee
-      putStrLn "-----"
-
 addPTypeInfo :: Program -> Either CompilerError Program
 addPTypeInfo p = do
     case inferProgram mempty p of
@@ -166,23 +151,6 @@ tryAddPTypeInfo :: Program -> Either PTypeError Program
 tryAddPTypeInfo p = do
   (_,_,p2) <- inferProgram mempty p
   return p2
-
-showResultsProgWith :: (TEnv -> Program -> Either PTypeError ([DConstraint], DScheme, Program)) -> Program -> IO ()
-showResultsProgWith inferFn prog = case inferFn mempty prog of
-  Left err -> print err
-  Right (cons, scheme, p) -> do
-    putStrLn $ "B:\n" ++ show cons
-    putStrLn $ "Constraints (No Resolution):\n" ++ show cons
-    putStrLn $ "Type:\n" ++ show scheme
-    putStrLn "-----"
-    putStrLn "Program: "
-    putStrLn $ unlines $ prettyPrintProg p
-
-showResultsProgDebug :: Program -> IO ()
-showResultsProgDebug = showResultsProgWith inferProgramDebug
-
-showResultsProg :: Program -> IO ()
-showResultsProg = showResultsProgWith inferProgram
 
 newtype TEnv
   = TypeEnv {types :: Map.Map Name PType}
@@ -251,26 +219,10 @@ substChain dsubst (Right cs)  = [Right $ dapply dsubst cs]
 inferProgram::  TEnv -> Program -> Either PTypeError ([DConstraint], DScheme, Program)
 inferProgram env = runInferProg env . inferProg env
 
-inferProgramDebug :: TEnv -> Program -> Either PTypeError ([DConstraint], DScheme, Program)
-inferProgramDebug env = runInferProgDebug env . inferProg env
-
-inferExpr :: TEnv -> Expr -> Either PTypeError ([DConstraint], DScheme, Expr)
-inferExpr env = runInfer env . infer env
-
-runInferProgDebug :: TEnv -> Infer (Subst, [DConstraint], PType, Program) -> Either PTypeError ([DConstraint], DScheme, Program)
-runInferProgDebug env m = case evalState (runExceptT m) initInfer of
-  Left err  -> Left err
-  Right (s, c, t, p) -> Right $ (c, DScheme [] [] t, p)
-
 runInferProg :: TEnv -> Infer (Subst, [DConstraint], PType, Program) -> Either PTypeError ([DConstraint], DScheme, Program)
 runInferProg env m = case evalState (runExceptT m) initInfer of
   Left err  -> Left err
   Right (s, c, t, p) -> Right $ closeProg env c t (apply s p)
-
-runInfer :: TEnv -> Infer (Subst, [DConstraint], PType, Expr) -> Either PTypeError ([DConstraint], DScheme, Expr)
-runInfer env m = case evalState (runExceptT m) initInfer of
-  Left err  -> Left err
-  Right (_, c, t, p) -> Right $ close env c t p
 
 buildConstraint ::  [DConstraint] -> [DConstraint] -> Subst -> ([DConstraint], Subst)
 buildConstraint resList [] s = (resList, s)
@@ -414,12 +366,6 @@ solveCyclicConstraints dcons pty s = case nextCons of
     solveCyclicConstraints (apply fixSubst (delete d dcons)) (apply fixSubst pty) (compose s fixSubst)
   where nextCons = find isRecType dcons
 
-close :: TEnv -> [DConstraint] -> PType -> Expr -> ([DConstraint], DScheme, Expr)
-close env cons ty tex = (cons', DScheme alph consRes  resType', tex)
-  where alph = Set.toList $ Set.difference (Set.union (ftv cons') (ftv resType)) (ftv env)
-        (cons', resType, isResolved, _) = resolveStep cons ty
-        (consRes, resType', _) = if isResolved then (cons', resType, emptySubst) else
-                   solveCyclicConstraints cons' resType emptySubst
 closeProg :: TEnv -> [DConstraint] -> PType -> Program -> ([DConstraint], DScheme, Program )
 closeProg env cons ty tp = (cons', DScheme alph consRes  resType', apply finalSubst tp)
   where alph = Set.toList $ Set.difference (Set.union (ftv cons') (ftv resType)) (ftv env)
@@ -680,58 +626,6 @@ infer env expr = case expr of
       return (s, cs, pt, ReadNN (setPType ti pt) name et)
 
   Error ti e -> return (emptySubst, [], Deterministic, Error (setPType ti Deterministic) e)
-
-
-normalize :: DScheme -> DScheme
-normalize (DScheme _ c body) = DScheme (map snd ord) (normcs c) (normtype body)
-  where
-    ord = zip (nub $ concatMap fvcs c ++ fv body ) (map TV letters)
-
-    fv (TVar a)   = [a]
-    fv (PArr a b) = fv a ++ fv b
-    fv Deterministic = []
-    fv PNormal = []
-    fv PLogNormal = []
-    fv Integrate = []
-    fv Prob = []
-    fv Bottom = []
-
-    fvcs (ty, dc) = fv ty ++ fvcd dc
-
-    fvOr (Left ty) = fv ty
-    fvOr (Right cd) = fvcd cd
-    fvcd ((Left ty):b) = fv ty ++ fvcd b
-    fvcd (Right(PlusConstraint ty1 ty2):b) = fvOr ty1 ++ fvOr ty2 ++ fvcd b
-    fvcd (Right(EnumPlusConstraint ty1 ty2):b) = fvOr ty1 ++ fvOr ty2 ++ fvcd b
-    fvcd (Right(CompConstraint ty1 ty2):b) = fvOr ty1 ++ fvOr ty2 ++ fvcd b
-    fvcd (Right(LetInDConstraint ty):b) = fvOr ty ++ fvcd b
-    fvcd [] = []
-
-    normcs ((ty, dc): b) = (normtype ty, normdc dc):normcs b
-    normcs [] = []
-
-    normdc ((Left ty):b) =  Left (normtype ty): normdc b
-    normdc (Right(PlusConstraint ty1 ty2):b) = Right (PlusConstraint (normOr ty1) (normOr ty2)): normdc b
-    normdc (Right(EnumPlusConstraint ty1 ty2):b) = Right (EnumPlusConstraint (normOr ty1) (normOr ty2)): normdc b
-    normdc (Right(CompConstraint ty1 ty2):b) = Right (CompConstraint (normOr ty1) (normOr ty2)): normdc b
-    normdc (Right(LetInDConstraint ty):b) = Right (LetInDConstraint (normOr ty)): normdc b
-    normdc [] = []
-
-    normOr (Left ty) = Left $ normtype ty
-    normOr (Right dc) = Right $ normdc dc
-
-    normtype (PArr a b) = PArr (normtype a) (normtype b)
-    normtype Deterministic = Deterministic
-    normtype PNormal = PNormal
-    normtype PLogNormal = PLogNormal
-    normtype Integrate = Integrate
-    normtype Prob = Prob
-    normtype Bottom = Bottom
-
-    normtype (TVar a)   =
-      case Prelude.lookup a ord of
-        Just x -> TVar x
-        Nothing -> error "type variable not in signature"
 
 
 -- | The empty substitution
