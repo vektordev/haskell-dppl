@@ -48,10 +48,13 @@ injF = InjF makeTypeInfo
 (#<+>#) a b = injF "plusI" [a, b]
 
 (#<->#) :: Expr -> Expr -> Expr
-(#<->#) a b = undefined
+(#<->#) a b = a #<+># negIF b
 
 negF :: Expr -> Expr
 negF x = injF "neg" [x]
+
+negIF :: Expr -> Expr
+negIF x = injF "negI" [x]
 
 recipF :: Expr -> Expr
 recipF x = injF "recip" [x]

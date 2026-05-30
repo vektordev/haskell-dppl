@@ -213,6 +213,7 @@ const0 = IRConst (VFloat 0)
 resolveInjF :: RType -> String -> String
 resolveInjF TInt "plus" = "plusI"
 resolveInjF TInt "mult" = "multI"
+resolveInjF TInt "neg"  = "negI"
 resolveInjF _    n      = n
 
 negInf :: IRExpr

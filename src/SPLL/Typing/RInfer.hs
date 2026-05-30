@@ -6,7 +6,6 @@ module SPLL.Typing.RInfer (
   RTypeError (..)
 , addRTypeInfo
 , tryAddRTypeInfo
-, testFunction
 ) where
 
 import Control.Monad.Except
@@ -20,7 +19,6 @@ import Data.Monoid
 import Data.Foldable hiding (toList)
 import qualified Data.Map as Map
 
-import Text.Pretty.Simple
 
 import SPLL.Lang.Lang
 import SPLL.Typing.Typing
@@ -28,7 +26,6 @@ import SPLL.Typing.RType
 --import SPLL.Typing.PType( PType(..) )
 import SPLL.InferenceRule
 import PredefinedFunctions (globalFEnv, FPair(..), FDecl(..))
-import Debug.Trace
 import SPLL.Lang.Types (FnDecl, ADTDecl, CompilerError)
 import SPLL.Typing.AlgebraicDataTypes
 import Data.Bifunctor
@@ -253,32 +250,6 @@ tryAddRTypeInfo p@(Program decls _ adts) = do
   subst <- runSolve cs
   checkClassConstraints subst classCs
   return $ apply subst prog
-
---TODO Remove
-testFunction :: Program -> IO ()
-testFunction p@(Program decls _ _) = do
-  let res2 = runExcept $ evalStateT (runReaderT (testInferProg p) empty) initInfer
-  pPrint res2
-
-testInferProg :: Program -> Infer ([Constraint], Program)
-testInferProg p = do
-  Program decls nns adts <- addTVarsEverywhere p
-  -- init type variable for all function decls beforehand so we can build constraints for
-  -- calls between these functions
-  tv_rev <- trace ("\n decl:\n" ++ show decls ++ "\n\n") freshVars (length decls) []
-  let tvs = reverse tv_rev
-  -- env building with (name, scheme) for infer methods
-  let func_tvs = zip (map fst decls) (map (Forall [] []) tvs)
-  -- infer the type and constraints of the declaration expressions
-  cts <- trace ("func_tvs:" ++ show func_tvs) $ mapM ((inTEnvF func_tvs . infer adts) . snd) decls
-  -- building the constraints that the built type variables of the functions equal
-  -- the inferred function type
-  let tcs = zipWith (\t1 t2 -> Constraint t1 t2 (Just "TopLevel")) (map (rtFromScheme . snd) func_tvs) (map fst3cts cts)
-  -- combine all constraints
-  return (tcs ++ concatMap snd3cts cts, Program (zip (map fst decls) (map trd3cts cts)) nns adts)
-
---unchanged up to here.
-
 
 rtFromScheme :: Scheme -> RType
 rtFromScheme (Forall _ _ rt) = rt

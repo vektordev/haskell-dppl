@@ -15,8 +15,6 @@ data RType = TBool
            | TADT String
            | NullList
            | BottomTuple
-           | RIdent String
-           | RConstraint String RType RType
            | TArrow RType RType
            | TVarR TVarR
            | GreaterType RType RType
@@ -36,8 +34,6 @@ matches (TArrow left right) (TArrow left2 right2) = left `matches` left2 && righ
 matches (ListOf x) (ListOf y) = x `matches` y
 matches NullList NullList = True
 matches BottomTuple BottomTuple = True
-matches (RIdent a) (RIdent b) = a == b
-matches (RConstraint _ _ retT) (RConstraint _ _ retT2) = retT `matches` retT2
 matches (GreaterType t1 t2) (GreaterType t3 t4) = case (greaterType t1 t2, greaterType t1 t2)
   of
     (Just a, Just b) -> a `matches` b

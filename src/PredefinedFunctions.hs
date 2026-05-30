@@ -48,6 +48,10 @@ negFwd :: FDecl
 negFwd = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["a"] ["b"] (IRUnaryOp OpNeg (IRVar "a")) (IRConst (VBool True)) False [("a", IRConst (VFloat (-1)))]
 negInv :: FDecl
 negInv = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["b"] ["a"] (IRUnaryOp OpNeg (IRVar "b")) (IRConst (VBool True)) False [("b", IRConst (VFloat (-1)))]
+negIFwd :: FDecl
+negIFwd = FDecl (Forall [] [] (TArrow TInt TInt)) ["a"] ["b"] (IRUnaryOp OpNeg (IRVar "a")) (IRConst (VBool True)) False [("a", IRConst (VFloat (-1)))]
+negIInv :: FDecl
+negIInv = FDecl (Forall [] [] (TArrow TInt TInt)) ["b"] ["a"] (IRUnaryOp OpNeg (IRVar "b")) (IRConst (VBool True)) False [("b", IRConst (VFloat (-1)))]
 
 recipFwd :: FDecl
 recipFwd = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["a"] ["b"] (IROp OpDiv (IRConst (VFloat 1)) (IRVar "a")) (IRConst (VBool True)) False [("a", IRUnaryOp OpNeg (IROp OpDiv (IRConst (VFloat 1)) (IROp OpMult (IRVar "a") (IRVar "a"))))]
@@ -171,6 +175,7 @@ globalFenv' = [("double", FPair doubleFwd [doubleInv]),
               ("exp", FPair expFwd [expInv]),
               ("log", FPair expInv [expFwd]),
               ("neg", FPair negFwd [negInv]),
+              ("negI", FPair negIFwd [negIInv]),
               ("recip", FPair recipFwd [recipInv]),
               ("left", FPair leftFwd [fromLeftFwd]),
               ("right", FPair rightFwd [fromRightFwd]),
