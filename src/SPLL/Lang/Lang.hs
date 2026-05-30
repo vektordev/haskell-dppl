@@ -15,7 +15,6 @@ module SPLL.Lang.Lang (
 , tMapHead
 , getRType
 , Name
-, exprMap
 , prettyPrintProg
 , prettyPrintProgRTyOnly
 , prettyPrint
@@ -82,38 +81,6 @@ toStub expr = case expr of
   Apply {}       -> StubApply
   (ReadNN _ _ _) -> StubReadNN
   Error _ _        -> StubError
-
-
-
-tInfoMap :: (a -> b) -> TypeInfo -> TypeInfo
-tInfoMap f t = undefined
-
-exprMap :: (a -> b) -> Expr -> Expr
-exprMap f expr = case expr of
-  (IfThenElse t a b c) -> IfThenElse (tInfoMap f t) (exprMap f b) (exprMap f b) (exprMap f c)
-  (GreaterThan t a b) -> GreaterThan (tInfoMap f t) (exprMap f a) (exprMap f b)
-  (LessThan t a b) -> LessThan (tInfoMap f t) (exprMap f a) (exprMap f b)
-  (Equals t a b) -> Equals (tInfoMap f t) (exprMap f a) (exprMap f b)
-  (ThetaI t a x) -> ThetaI (tInfoMap f t) (exprMap f a) x
-  (Subtree t a x) -> Subtree (tInfoMap f t) (exprMap f a) x
-  (Uniform t) -> Uniform (tInfoMap f t)
-  (Normal t) -> Normal (tInfoMap f t)
-  (Constant t x) -> Constant (tInfoMap f t) x
-  (And t a b) -> And (tInfoMap f t) (exprMap f a) (exprMap f b)
-  (Or t a b) -> Or (tInfoMap f t) (exprMap f a) (exprMap f b)
-  (Not t a) -> Not (tInfoMap f t) (exprMap f a)
-  (Null t) -> Null (tInfoMap f t)
-  (Cons t a b) -> Cons (tInfoMap f t) (exprMap f a) (exprMap f b)
-  (TCons t a b) -> TCons (tInfoMap f t) (exprMap f a) (exprMap f b)
-  (Var t x) -> Var (tInfoMap f t) x
-  (LetIn t x a b) -> LetIn (tInfoMap f t) x (exprMap f a) (exprMap f b)
-  (InjF t x a) -> InjF (tInfoMap f t) x (map (exprMap f) a)
-  --(LetInD t x a b) -> LetInD t x (exprMap f a) (exprMap f b)
-  --(LetInTuple t x a b c) -> LetInTuple t x (exprMap f a) (biFMap f b) (exprMap f c)
-  (Lambda t name a) -> Lambda (tInfoMap f t) name (exprMap f a)
-  (Apply t a b) -> Apply (tInfoMap f t) (exprMap f a) (exprMap f b)
-  (ReadNN t n a) -> ReadNN (tInfoMap f t) n (exprMap f a)
-  (Error t e) -> Error (tInfoMap f t) e
 
 floatApproxEqThresh :: Double
 floatApproxEqThresh = 1e-10
