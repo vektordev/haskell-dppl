@@ -2,8 +2,7 @@
 {-# LANGUAGE ConstraintKinds #-}
 
 module SPLL.Parser (
-  testParse'
-, pProg
+  pProg
 , pExpr
 , pIdentifier
 , pValue
@@ -163,27 +162,8 @@ pError = do
   char '"'
   return (Error makeTypeInfo message)
 
-pMaybeApply :: MonadParser m => [ADTDecl] -> m Expr
-pMaybeApply adts = choice [parens (pExpr adts), pVar]
-
 pExpr :: MonadParser m => [ADTDecl] -> m Expr
 pExpr = expr
-{-
-pExpr = dbg "expr" $ choice [
-  try pBinaryOp,
-  try pParensExpr,
-  try pTheta,
-  pIfThenElse,
-  pUniform,
-  pNormal,
-  pLetIn,
-  try pBinaryF,
-  try pApply,
-  try pConst,
-
-  pVar
-  ]
--}
 
 -- TODO: I think this parser should accept any pExpr instead of identifiers. Might get ambiguous parses though.
 
@@ -202,30 +182,6 @@ pSubtree adts = dbg "subtree" $ do
   symbol "@"
   ix <- pInt
   return $ subtree thetaExpr ix
-
--- just to make this parser quite unambiguous, we're going to demand parens around both ops.
-pBinaryOp :: MonadParser m => [ADTDecl] -> m Expr
-pBinaryOp adts = dbg "binOp" $ do
-  arg1 <- parens (pExpr adts)
-  op <- pOp
-  arg2 <- parens (pExpr adts)
-  case op of
-    ">=" -> return $ arg1 #># arg2
-    _ -> fail $ "unknown operator: " ++ op
-
-pOp :: MonadParser m => m String
-pOp = lexeme $ do
-    op <- some opChar
-    if op `elem` reservedOps
-        then fail $ "Reserved operator: " ++ op
-        else return op
-  where
-    opChar = oneOf ("!#$%&*+.:/<=>?@\\^|-~" :: String)
-    reservedOps = ["..","::","=","\\","|","<-","->","@","~","=>"]
-
-applyN :: Expr -> [Expr] -> Expr
-applyN function [] = function
-applyN function (arg:args) = applyN (apply function arg) args -- $ foldl (\a f -> Apply makeTypeInfo f a) (Var makeTypeInfo function) (map (Var makeTypeInfo) args)
 
 construct1 :: (Expr -> Expr) -> [Expr] -> Expr
 construct1 constructor [arg] = constructor arg
@@ -247,11 +203,6 @@ constructNPartial expected constructor params = do
   let substituteParamNames = map (("p_m" ++) . show) substituteParamIDs
   let extendedArgs = params ++ map var substituteParamNames
   return $ foldl (flip (#->#)) (constructor extendedArgs) substituteParamNames
-
-pVar :: MonadParser m => m Expr
-pVar = do
-  varname <- lexeme pIdentifier
-  return $ var varname
 
 binaryFs :: [(String, Expr -> Expr -> Expr)]
 binaryFs = [
@@ -344,15 +295,6 @@ pThetaTree = do
   symbol "]"
   return $ ThetaTree thetas subtrees
 
-pBinaryF :: MonadParser m => [ADTDecl] -> m Expr
-pBinaryF adts = do
-  op <- choice (map (symbol . fst) binaryFs)
-  left <- pExpr adts
-  right <- pExpr adts
-  case (lookup op binaryFs) of
-    Nothing -> error "unexpected parse error"
-    Just opconstructor -> return (opconstructor left right)
-
 parseFromList :: MonadParser m => [(String, b)] -> m b
 parseFromList kvlist = do
   key <- choice (map (symbol . fst) kvlist)
@@ -401,15 +343,6 @@ pList = do
   values <- pCSV
   (symbol "]")
   return values
-
-pRange :: MonadParser m => m (Value, Value)
-pRange = do
-  (symbol "[")
-  from <- valueParser
-  (symbol "..")
-  to <- valueParser
-  (symbol "]")
-  return (from, to)
 
 pListExpr :: MonadParser m => [ADTDecl] -> m Expr
 pListExpr adts = do
@@ -509,26 +442,6 @@ pMultiADT = dbg "multiADT" $ do
   symbol "}"
   return $ MultiADT constrs
 
-validateNeuralType :: MonadFail m => RType -> MultiValue -> m ()
-validateNeuralType (TSymbol `TArrow` rt) val = validateNeuralType' rt val
-validateNeuralType _ _ = fail "Neural must be of type (Symbol -> ...)"
-
-validateNeuralType' :: MonadFail m => RType -> MultiValue -> m ()
-validateNeuralType' (TEither rtL rtR) (MultiEither vL vR) = validateNeuralType' rtL vL >> validateNeuralType' rtR vR
-validateNeuralType' (TEither rtL rtR) val = fail $ "Mismatch between neural type and possible values. Expected an Either type, but got: " ++ show val
-validateNeuralType' (Tuple rtL rtR) (MultiTuple vL vR) = validateNeuralType' rtL vL >> validateNeuralType' rtR vR
-validateNeuralType' (Tuple rtL rtR) val = fail $ "Mismatch between neural type and possible values. Expected an Tuple type, but got: " ++ show val
-validateNeuralType' (TADT _) (MultiADT _) = return () -- Cannot validate ADT types, because they are unknown at parse time
-validateNeuralType' (TADT _) val = fail $ "Mismatch between neural type and possible values. Expected an ADT type, but got: " ++ show val
-validateNeuralType' rt (MultiDiscretes vals) = do
-  let validateFunction = case rt of
-        TInt -> \v -> case v of VInt _ -> True; _ -> False
-        TFloat -> \v -> case v of VFloat _ -> True; _ -> False
-        TBool -> \v -> case v of VBool _ -> True; _ -> False
-  if all validateFunction vals then return () else fail $ "Not all values were of type: " ++ show rt ++ ": " ++ show vals
-validateNeuralType' rt _ = fail $ "Unknown type for neural declaration: " ++ show rt
-
-
 pFunction :: MonadParser m => [ADTDecl] -> m FnDecl
 pFunction adts = dbg "function" $ do
   name <- pIdentifier
@@ -594,25 +507,6 @@ tryParseProgram filename src = do
 
 emptyPosState :: PosState String
 emptyPosState = PosState "" 0 (initialPos "<string>") (mkPos 0) ""
-
-testParse' :: IO ()
-testParse' = do
-  let filename = "../../test.spll"
-  source <- readFile filename
-  let result = runParser (runStateT pProg 0) filename source
-  case result of
-    Left err -> putStrLn (errorBundlePretty err)
-    Right (prog, _) -> do
-      let flatProg = prog
-      putStrLn "ASDF1"
-      mapM_ putStrLn (prettyPrintProg prog)
-      putStrLn "ASDF2"
-      putStrLn (pPrintProg prog)
-      putStrLn "ASDF3"
-      pPrint flatProg
-      putStrLn "ASDF4"
-      print prog
-
 
 pNull :: MonadParser m => m Expr
 pNull = do
@@ -693,10 +587,6 @@ expr adts = dbg "expr" $ makeExprParser term opTable
         atom adts
       ]
 
--- | Helper for debuggable subparsers
-withDebug :: MonadParser m => String -> m a -> m a
-withDebug label p = dbg label p
-
 -- | Top level entry point
 parseExpr :: MonadParser m => m Expr
 parseExpr = sc *> expr [] <* eof
@@ -704,12 +594,6 @@ parseExpr = sc *> expr [] <* eof
 -- | Parse a parenthesized expression
 parens :: MonadParser m => m a -> m a
 parens = between (char '(' *> sc) (char ')' *> sc)
-
--- | Parse an identifier (simple Haskell-style variable)
-identifier :: MonadParser m => m String
-identifier = (:) <$> letterChar <*> many alphaNumChar <* sc
-
-
 
 multLikeOpList :: [([Char], Expr -> Expr -> Expr)]
 multLikeOpList = [("**", (#<*>#)), ("*", (#*#)), ("/", (#/#)), ("&&", (#&&#))]
@@ -746,10 +630,6 @@ opTable =
   ]
 
 
--- | Top-level parser
-expressionParser :: MonadParser m => m Expr
-expressionParser = sc *> expr [] <* eof
-
 type ExprBuilder m = [Expr] -> m (Either String Expr)
 type BuilderMap m = Map.Map String (ExprBuilder m)
 
@@ -761,7 +641,6 @@ normalize prog =
       invMap = buildInvMap (adts prog)
       globalFunctionMap = globalFunctions prog
       injFMap = buildInjFMap prog
-      --benignVars = collectBenignVars prog
       paramMap = Map.unions [neuralMap, invMap, injFMap]  -- neural builders take precedence
       functionMap = Map.unions [globalFunctionMap, injFMap] -- InjF are in both Maps, because they can be partially applied, which means they can have zero parameters
   in if Map.disjoint invMap neuralMap && Map.disjoint invMap globalFunctionMap && Map.disjoint neuralMap globalFunctionMap
@@ -799,10 +678,6 @@ buildInjFMap prog = Map.fromList
       let args = map var substituteParamNames
       return $ Right $ foldl (flip (#->#)) (injF name args) substituteParamNames)
     | (name, _) <- globalFEnv (adts prog)]
-
--- Collect all variables that should not be transformed
-collectBenignVars :: Program -> Set.Set String
-collectBenignVars prog = Set.fromList [name | (name, _) <- functions prog]
 
 -- Main expression normalization function
 normalizeExpr :: MonadState Int m => (BuilderMap m, BuilderMap m, Set.Set String) -> Expr -> m (Either String Expr)
