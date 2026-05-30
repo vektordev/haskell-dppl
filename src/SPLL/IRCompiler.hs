@@ -222,6 +222,66 @@ negInf = IRConst (VFloat (-9999999))
 posInf :: IRExpr
 posInf = IRConst (VFloat 9999999)
 
+-- | True if the given variable name appears free in an IR expression.
+freeInIR :: String -> IRExpr -> Bool
+freeInIR v (IRVar v')           = v == v'
+freeInIR v (IRLetIn n val body) = freeInIR v val || (v /= n && freeInIR v body)
+freeInIR v (IRLambda n body)    = v /= n && freeInIR v body
+freeInIR v (IRApply f a)        = freeInIR v f  || freeInIR v a
+freeInIR v (IROp _ a b)         = freeInIR v a  || freeInIR v b
+freeInIR v (IRUnaryOp _ e)      = freeInIR v e
+freeInIR v (IRIf c a b)         = freeInIR v c  || freeInIR v a  || freeInIR v b
+freeInIR v (IRTCons a b)        = freeInIR v a  || freeInIR v b
+freeInIR v (IRTFst a)           = freeInIR v a
+freeInIR v (IRTSnd a)           = freeInIR v a
+freeInIR v (IRHead a)           = freeInIR v a
+freeInIR v (IRTail a)           = freeInIR v a
+freeInIR v (IRLeft a)           = freeInIR v a
+freeInIR v (IRRight a)          = freeInIR v a
+freeInIR v (IRFromLeft a)       = freeInIR v a
+freeInIR v (IRFromRight a)      = freeInIR v a
+freeInIR v (IRIsLeft a)         = freeInIR v a
+freeInIR v (IRIsRight a)        = freeInIR v a
+freeInIR v (IRCons a b)         = freeInIR v a  || freeInIR v b
+freeInIR v (IRElementOf a b)    = freeInIR v a  || freeInIR v b
+freeInIR v (IRIndex a b)        = freeInIR v a  || freeInIR v b
+freeInIR v (IRMap f x)          = freeInIR v f  || freeInIR v x
+freeInIR v (IREnumSum n _ body) = v /= n && freeInIR v body
+freeInIR v (IRDensity _ x)      = freeInIR v x
+freeInIR v (IRCumulative _ x)   = freeInIR v x
+freeInIR v (IRIsPossible _ x)   = freeInIR v x
+freeInIR v (IRTheta x _)        = freeInIR v x
+freeInIR v (IRSubtree x _)      = freeInIR v x
+freeInIR _ _                    = False
+
+-- | Flatten all leading IRLetIn bindings into a list, returning the core expression.
+flattenLetIns :: IRExpr -> ([(String, IRExpr)], IRExpr)
+flattenLetIns (IRLetIn n v body) = let (rest, core) = flattenLetIns body in ((n, v) : rest, core)
+flattenLetIns e = ([], e)
+
+-- | Rebuild an IRLetIn chain from a list of bindings around a core expression.
+buildLetIns :: [(String, IRExpr)] -> IRExpr -> IRExpr
+buildLetIns binds core = foldr (\(n, v) e -> IRLetIn n v e) core binds
+
+-- | Split the bindings of an IRLetIn chain into those that are loop-invariant
+-- (do not mention `loopVar` and do not depend on any variant binding) and the
+-- rest.  Both sublists preserve their original relative order.  Returns
+-- (invariant bindings, remaining IRExpr with variant bindings).
+hoistInvariantBindings :: String -> IRExpr -> ([(String, IRExpr)], IRExpr)
+hoistInvariantBindings loopVar expr =
+  let (allBinds, core) = flattenLetIns expr
+      (invBinds, varBinds) = partition' loopVar allBinds []
+  in (invBinds, buildLetIns varBinds core)
+  where
+    partition' _ [] _ = ([], [])
+    partition' lv ((n, v) : rest) varNames
+      | not (lv `freeInIR` v) && not (any (`freeInIR` v) varNames) =
+          let (inv, var) = partition' lv rest varNames
+          in ((n, v) : inv, var)
+      | otherwise =
+          let (inv, var) = partition' lv rest (n : varNames)
+          in (inv, (n, v) : var)
+
 -- | True when `sample` is VAny or contains VAny one level inside a Left/Right wrapper.
 -- Used to detect samples like (Left ANY) that would crash arithmetic inverses.
 -- Only IRIsLeft/IRFromLeft/IRFromRight are used here; these are already VAny-safe.
@@ -519,10 +579,11 @@ toIRInference meta cumulative (Or (TypeInfo {rType = TBool}) a b) sample = do
   (resP, resDim) <- (aP, aDim) `multP` (bP, bDim)
   return $ (IRIf sample (IROp OpSub (IRConst $ VFloat 1) resP) resP, resDim, IROp OpPlus aBC bBC)  -- p(a || b == True) == 1 - p(a == False) * p(b == False)
 toIRInference meta cumulative (ReadNN _ name symbol) sample = do
-  -- Same code as for calling a top level function
+  nnRaw <- mkVariable "nn_raw"
   var <- mkVariable "callNN"
   sym <- toIRGenerate meta symbol
-  setVariables [(var, IRApply (IRApply (IRVar (name ++ "_auto_prob")) sym) sample)]
+  setVariables [(nnRaw, IRApply (IRVar name) sym)]
+  setVariables [(var, IRApply (IRApply (IRVar (name ++ "_auto_prob")) (IRVar nnRaw)) sample)]
   return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
 toIRInference meta cumulative (Lambda t name subExpr) sample = do
   let (TArrow paramRType _) = rType t
@@ -582,8 +643,10 @@ toIRInference meta cumulative e@(Apply TypeInfo {rType=rt} l v) sample
     (p, d, bc) <- toIREnumerate meta{typeEnv=newTypeEnv} cumulative lBodyExpr sample
     return (IROp OpMult p pBranch, d, bc))) <&> generateLetInBlock meta
   let discreteVVals = head [x | DiscreteValues x <- tags (getTypeInfo v)]
-  let sum = IREnumSum boundVar discreteVVals (IRTFst irTuple)
-  let bc = IREnumSum boundVar discreteVVals (IRTSnd (IRTSnd irTuple))
+  let (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
+  setVariables outerBinds
+  let sum = IREnumSum boundVar discreteVVals (IRTFst innerTuple)
+  let bc = IREnumSum boundVar discreteVVals (IRTSnd (IRTSnd innerTuple))
   return (sum, const0, bc)
   where
     isDiscretes (DiscreteValues _) = True
@@ -854,9 +917,13 @@ toIRInference meta False (InjF TypeInfo {tags=extras, rType=rt} name [left, righ
     return (returnExpr, const0, branchesExpr)
     )) <&> generateLetInBlock meta
   uniquePrefix <- mkVariable ""
-  let enumSumExpr = IREnumSum x2 enumListL (IRTFst irTuple)
-  let branchCountSum = IREnumSum x2 enumListL (IRTSnd (IRTSnd irTuple))
-  return (irMap (uniqueify [x2, x3] uniquePrefix) enumSumExpr, const0, irMap (uniqueify [x2, x3] uniquePrefix) branchCountSum)
+  let applyUnique = irMap (uniqueify [x2, x3] uniquePrefix)
+  let (outerBinds, innerTuple) = hoistInvariantBindings x2 irTuple
+  let renameHoisted (n, v) = (if n `elem` [x2, x3] then uniquePrefix ++ n else n, applyUnique v)
+  setVariables (map renameHoisted outerBinds)
+  let enumSumExpr = IREnumSum x2 enumListL (IRTFst innerTuple)
+  let branchCountSum = IREnumSum x2 enumListL (IRTSnd (IRTSnd innerTuple))
+  return (applyUnique enumSumExpr, const0, applyUnique branchCountSum)
 -- For the cumulative case we cant get around two enum sums
 toIRInference meta True (InjF TypeInfo {tags=extras, rType=rt} name [left, right]) sample
   | extras `hasAlgorithm` "injF2Enumerable" = do

@@ -3,8 +3,10 @@
 module End2EndTesting where
 
 import System.Exit (exitWith, ExitCode(ExitFailure))
-import System.Directory (listDirectory)
+import System.Directory (listDirectory, getCurrentDirectory)
 import System.FilePath (stripExtension, isExtensionOf)
+import System.IO.Temp (withSystemTempFile)
+import System.IO (hPutStr, hClose)
 import System.Process
 import System.Exit
 import Control.Monad.Random
@@ -27,6 +29,9 @@ import Data.Foldable (toList)
 import Test.QuickCheck hiding (verbose)
 import Debug.Trace
 import Control.Exception (try, evaluate, SomeException)
+import Data.Time.Clock (getCurrentTime, diffUTCTime)
+import Data.IORef (IORef, newIORef, modifyIORef, readIORef)
+import IRInterpreter (generateRand, generateDet)
 
 getAllTestFiles :: IO [(FilePath, FilePath)]
 getAllTestFiles = do
@@ -128,25 +133,25 @@ lessEqualsProbs (VTuple _ (VFloat aD)) (VTuple _ (VFloat bD)) = aD > bD -- Lower
 
 -- TODO: Maybe stop sampling early if no more new samples are found
 discreteProbsNormalized :: Program -> Property
-discreteProbsNormalized p = do
-  let randomParams = (replicateM paramCnt (getRandomR (1, 100000))) >>= mapM (\x -> return $ VTuple (VInt 0) (VInt x)) :: RandomGen g => Rand g [IRValue]
-  let randomParamsForSamples = evalRand (replicateM sampleCnt randomParams) (mkStdGen 42)
-  case mapM (runGen defaultCompilerConfig p) randomParamsForSamples of
+discreteProbsNormalized p = case compile defaultCompilerConfig p of
+  Left err -> counterexample ("Compilation failed: " ++ err) False
+  Right compiled ->
+    let Just (genExpr, _)  = genFun  (lookupIREnv "main" compiled)
+        Just (probExpr, _) = probFun (lookupIREnv "main" compiled)
+        randomParams :: RandomGen g => Rand g [IRValue]
+        randomParams = replicateM paramCnt (fmap (\x -> VTuple (VInt 0) (VInt x)) (getRandomR (1, 100000)))
+        randomParamsForSamples = evalRand (replicateM sampleCnt randomParams) (mkStdGen 42)
+        gens = map (\args -> generateRand (neurals p) compiled (map IRConst args) genExpr) randomParamsForSamples
+        pSamples = evalRand (sequence gens) (mkStdGen 42)
+    in case mapM (\sam -> generateDet (neurals p) compiled (map IRConst (sam:params)) probExpr) pSamples of
         Left err -> counterexample err False
-        Right gens -> do
-          let pSamples = evalRand (sequence gens) (mkStdGen 42)
-          case mapM (\sam -> runProb defaultCompilerConfig p params sam) pSamples of
-            Left err -> counterexample err False
-            Right t -> do
-              let sumProbSamples = sum (map prob t)
-              counterexample "Probability of randomly sampled values does not sum to 1" (sumProbSamples >= sufficientlyNormal)
-  -- Create a list of random ints and then make them into a tuple
-  
-  
+        Right t ->
+          let sumProbSamples = sum (map prob t)
+          in counterexample "Probability of randomly sampled values does not sum to 1" (sumProbSamples >= sufficientlyNormal)
   where
     paramCnt = progParameterCount p
-    seedList = [0 .. (paramCnt - 1)] -- List of natural numbers split into parameter count sized chunks
-    params = map (VTuple (VInt 0) . VInt) seedList  -- Made each element into a tuple with a 0 to select the random NN mock
+    seedList = [0 .. (paramCnt - 1)]
+    params = map (VTuple (VInt 0) . VInt) seedList
     sampleCnt = 1000
     sufficientlyNormal = 0.99
     prob (VTuple (VFloat p) _) = p
@@ -158,17 +163,22 @@ progParameterCount Program{functions=f} = countLambdas main
     countLambdas (Lambda _ _ e) = 1 + countLambdas e
     countLambdas _ = 0
 
-testJulia :: Program -> [TestCase] -> Property
-testJulia p tc = ioProperty $ do
-  case compile defaultCompilerConfig p of
-    Left err -> return $ counterexample err False
-    Right compiled -> do
-      let src = intercalate "\n" (SPLL.CodeGenJulia.generateFunctions compiled)
-      (_, _, _, handle) <- createProcess (proc "julia" ["-e", juliaTestCode src tc])
-      code <- waitForProcess handle
-      case code of
-        ExitSuccess -> return $ True === True
-        ExitFailure _ -> return $ counterexample ("Julia test " ++ testCaseName (head tc) ++ " failed. See Julia error message") False
+testJuliaAll :: [(Program, [TestCase])] -> Property
+testJuliaAll programCases = ioProperty $ do
+  let results = [(compile defaultCompilerConfig p, tcs) | (p, tcs) <- programCases, not (null tcs)]
+  case [err | (Left err, _) <- results] of
+    (err:_) -> return $ counterexample err False
+    [] -> do
+      let srcs = [(intercalate "\n" (SPLL.CodeGenJulia.generateFunctions c), tcs) | (Right c, tcs) <- results]
+      projectDir <- getCurrentDirectory
+      code <- withSystemTempFile "julia_batch.jl" $ \tmpPath tmpHandle -> do
+        hPutStr tmpHandle (juliaBatchTestCode projectDir srcs)
+        hClose tmpHandle
+        (_, _, _, handle) <- createProcess (proc "julia" [tmpPath])
+        waitForProcess handle
+      return $ case code of
+        ExitSuccess -> True === True
+        ExitFailure _ -> counterexample "Julia batch test failed. See Julia error message above." False
 
 testPython :: Program -> [TestCase] -> Property
 testPython p tc = ioProperty $ do
@@ -182,21 +192,32 @@ testPython p tc = ioProperty $ do
         ExitSuccess -> return $ True === True
         ExitFailure _ -> return $ counterexample ("Python test " ++ testCaseName (head tc) ++ " failed. See Python error message") False
 
-juliaTestCode :: String -> [TestCase] -> String
-juliaTestCode src tcs =
-  "include(\"juliaLib.jl\")\n\
-  \using .JuliaSPPLLib\n\
-  \" ++ src ++ "\n" ++ 
-  "main_gen(" ++ intercalate ", " (map juliaVal exampleParams) ++ ")\n" ++
-  concat (map (\tc -> let (name, sample, params, outProb, outDim) = unpackTestCase tc in
-    "tmp = " ++ mainName tc ++ "(" ++ juliaVal sample ++ ", " ++ intercalate ", " (map juliaVal params) ++ ")\n\
-    \if abs(tmp[1] - " ++ juliaVal outProb ++ ") > 0.0001\n\
-    \  error(\"Probability wrong: \" * string(tmp[1]) * \"/=\" * string(" ++ juliaVal outProb ++ ") * \"in test case " ++ name ++ "\")\n\
-    \end\n\
-    \if tmp[1] != 0 && tmp[2] != " ++ juliaVal outDim ++ "\n\
-    \  error(\"Dimensionality wrong: \" * string(tmp[2]) * \"/=\" * string(" ++ juliaVal outDim ++ ") * \"in test case " ++ name ++ "\")\n\
-    \end\n") tcs)
-  where 
+juliaBatchTestCode :: FilePath -> [(String, [TestCase])] -> String
+juliaBatchTestCode projectDir allCases =
+  "include(\"" ++ projectDir ++ "/juliaLib.jl\")\n\
+  \using .JuliaSPPLLib\n" ++
+  concatMap (\(idx, (src, tcs)) ->
+    let modName = "Prog" ++ show (idx :: Int)
+    in "module " ++ modName ++ "\nusing ..JuliaSPPLLib\n" ++
+       src ++ "\nend\n" ++
+       juliaModuleTestCases modName tcs
+  ) (zip [0..] allCases)
+
+juliaModuleTestCases :: String -> [TestCase] -> String
+juliaModuleTestCases modName tcs =
+  modName ++ ".main_gen(" ++ intercalate ", " (map juliaVal exampleParams) ++ ")\n" ++
+  concat (map (\tc ->
+    let (name, sample, params, outProb, outDim) = unpackTestCase tc
+        call = modName ++ "." ++ mainName tc ++ "(" ++ juliaVal sample ++ ", " ++ intercalate ", " (map juliaVal params) ++ ")"
+    in "tmp = " ++ call ++ "\n\
+       \if abs(tmp[1] - " ++ juliaVal outProb ++ ") > 0.0001\n\
+       \  error(\"Probability wrong: \" * string(tmp[1]) * \"/=\" * string(" ++ juliaVal outProb ++ ") * \"in test case " ++ name ++ "\")\n\
+       \end\n\
+       \if tmp[1] != 0 && tmp[2] != " ++ juliaVal outDim ++ "\n\
+       \  error(\"Dimensionality wrong: \" * string(tmp[2]) * \"/=\" * string(" ++ juliaVal outDim ++ ") * \"in test case " ++ name ++ "\")\n\
+       \end\n"
+    ) tcs)
+  where
     (_, _, exampleParams, _, _) = unpackTestCase (head tcs)
     unpackTestCase (ProbTestCase name sample params (outProb, outDim)) = (name, sample, params, outProb, outDim)
     unpackTestCase (CumulTestCase name sample params (outProb, outDim)) = (name, sample, params, outProb, outDim)
@@ -221,8 +242,34 @@ pythonTestCode src tcs =
     mainName (ProbTestCase _ _ _ _) = "main.forward"
     mainName (CumulTestCase _ _ _ _) = "main.integrate"
 
-test_end2end :: IO Bool
-test_end2end = do
+type TimingLog = IORef [(String, Int)]
+
+newTimingLog :: IO TimingLog
+newTimingLog = newIORef []
+
+timedLog :: TimingLog -> String -> IO a -> IO a
+timedLog tlog label action = do
+  start <- getCurrentTime
+  result <- action
+  end <- getCurrentTime
+  let ms = round (realToFrac (diffUTCTime end start) * 1000 :: Double) :: Int
+  modifyIORef tlog ((label, ms) :)
+  return result
+
+printTimingSummary :: TimingLog -> IO ()
+printTimingSummary tlog = do
+  entries <- fmap reverse (readIORef tlog)
+  let total = sum (map snd entries)
+  putStrLn "\n=== Timing Summary ==="
+  mapM_ (\(lbl, ms) ->
+    let pct = if total == 0 then (0 :: Int)
+              else round (fromIntegral ms * 100 / fromIntegral total :: Double)
+    in putStrLn $ "  " ++ lbl ++ ": " ++ show ms ++ " ms (" ++ show pct ++ "%)"
+    ) entries
+  putStrLn $ "  Total: " ++ show total ++ " ms"
+
+test_end2end :: TimingLog -> IO Bool
+test_end2end tlog = do
   files <- getAllTestFiles
   cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
   let queryTestCases = map (\(p, tcs) -> (p, filter (\x -> isProbTestCase x || isCumulTestCase x) tcs)) cases
@@ -231,18 +278,18 @@ test_end2end = do
 
   putStrLn "=== Test End2End Interpreter ==="
   let interprTest = label "End2End Interpreter" $ conjoin [conjoin $ map (testInterpreter p) tcs | (p, tcs) <- cases]
-  interprProp <- quickCheckResult (withMaxSuccess 1 interprTest) >>= return . isSuccess
+  interprProp <- timedLog tlog "End2End Interpreter" $ quickCheckResult (withMaxSuccess 1 interprTest) >>= return . isSuccess
 
   putStrLn "\n=== Test End2End Interpreter Normalization ==="
   let interprNormalizeTest = label "End2End Interpreter Normalization" $ conjoin [discreteProbsNormalized p | p <- neuralP]
-  interprNormalProp <- quickCheckResult (withMaxSuccess 1 interprNormalizeTest) >>= return . isSuccess
+  interprNormalProp <- timedLog tlog "End2End Interpreter Normalization" $ quickCheckResult (withMaxSuccess 1 interprNormalizeTest) >>= return . isSuccess
 
   putStrLn "\n=== Test End2End Julia ==="
-  let juliaTest = label "End2End Julia" $ conjoin [testJulia p tcs | (p, tcs) <- nonNeuralsQueries]
-  juliaProp <- quickCheckResult (withMaxSuccess 1 juliaTest) >>= return . isSuccess
+  let juliaTest = label "End2End Julia" $ testJuliaAll nonNeuralsQueries
+  juliaProp <- timedLog tlog "End2End Julia" $ quickCheckResult (withMaxSuccess 1 juliaTest) >>= return . isSuccess
 
   putStrLn "\n=== Test End2End Python ==="
   let pythonTest = label "End2End Python" $ conjoin [testPython p tcs | (p, tcs) <- nonNeuralsQueries]
-  pythonProp <- quickCheckResult (withMaxSuccess 1 pythonTest) >>= return . isSuccess
+  pythonProp <- timedLog tlog "End2End Python" $ quickCheckResult (withMaxSuccess 1 pythonTest) >>= return . isSuccess
 
   return $ interprProp && interprNormalProp && juliaProp && pythonProp

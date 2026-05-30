@@ -5,7 +5,8 @@ module TestInternals (
   classConstraintTests,
   test_encodeTupleGaussianParams,
   test_encodeDiscreteSumsToOne,
-  test_encodeGaussianSigmaPositive
+  test_encodeGaussianSigmaPositive,
+  test_nnHoistedOutOfEnumSum
 ) where
 
 import SPLL.Lang.Lang
@@ -164,6 +165,31 @@ test_encodeGaussianSigmaPositive = TestCase $ do
         _ -> assertFailure ("expected [mu, sigma], got: " ++ show items)
     Right other -> assertFailure ("expected VList, got: " ++ show other)
     ) mockSyms
+
+-- | True if `name` is directly applied (IRApply (IRVar name) _) anywhere inside
+-- an IREnumSum body.  Used to check that NN forward calls are hoisted out of loops.
+nnCallInsideEnumSum :: String -> IRExpr -> Bool
+nnCallInsideEnumSum name (IREnumSum _ _ body) = containsDirectNNApply name body
+nnCallInsideEnumSum name expr = any (nnCallInsideEnumSum name) (getIRSubExprs expr)
+
+containsDirectNNApply :: String -> IRExpr -> Bool
+containsDirectNNApply name (IRApply (IRVar v) _) = v == name
+containsDirectNNApply name expr = any (containsDirectNNApply name) (getIRSubExprs expr)
+
+-- | mNistAdd: readMNist(a) ++ readMNist(b) — the NN forward pass is loop-invariant
+-- w.r.t. the IREnumSum over digit values, so it must be hoisted outside the loop.
+test_nnHoistedOutOfEnumSum :: Test
+test_nnHoistedOutOfEnumSum = TestCase $ do
+  src <- readFile "testCases/mNistAdd.ppl"
+  case tryParseProgram "mNistAdd.ppl" src of
+    Left err -> assertFailure ("Parse error: " ++ show err)
+    Right prog ->
+      case compile defaultCompilerConfig prog of
+        Left err -> assertFailure ("Compile error: " ++ show err)
+        Right irEnv -> do
+          let Just (probExpr, _) = probFun (lookupIREnv "main" irEnv)
+          assertBool "readMNist forward call should be hoisted outside IREnumSum" $
+            not (nnCallInsideEnumSum "readMNist" probExpr)
 
 return []
 test_internals = $(forAllProperties) (quickCheckWithResult stdArgs { maxSuccess = 100 })

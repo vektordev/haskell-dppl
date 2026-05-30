@@ -121,9 +121,27 @@ optimizeAssociativity x = x
 optimizeLetIns :: IRExpr -> IRExpr
 optimizeLetIns ex@(IRLetIn name val scope)
   | isSimple val = replaceAll (IRVar name) val scope
-  | countUses name scope == 1 = replaceAll (IRVar name) val scope
+  | countUses name scope == 1 && not (usedInEnumSumBodyInvariant name val scope) = replaceAll (IRVar name) val scope
   | countUses name scope == 0 = scope
 optimizeLetIns ex = ex
+
+-- | True if `var` is used inside an IREnumSum body in `scope` AND `val` does not
+-- reference any loop variable of those IREnumSums.  Such a binding is
+-- loop-invariant and should be hoisted rather than inlined into the loop body.
+usedInEnumSumBodyInvariant :: String -> IRExpr -> IRExpr -> Bool
+usedInEnumSumBodyInvariant var val scope =
+  usedInEnumSumBody var scope &&
+  all (\loopVar -> countUses loopVar val == 0) (enumSumBoundVars scope)
+
+-- | True if `var` appears free inside at least one IREnumSum body in `expr`.
+usedInEnumSumBody :: String -> IRExpr -> Bool
+usedInEnumSumBody var (IREnumSum _ _ body) = countUses var body > 0
+usedInEnumSumBody var expr = any (usedInEnumSumBody var) (getIRSubExprs expr)
+
+-- | Collect all variables bound by IREnumSum nodes in an expression.
+enumSumBoundVars :: IRExpr -> [String]
+enumSumBoundVars (IREnumSum n _ body) = n : enumSumBoundVars body
+enumSumBoundVars expr = concatMap enumSumBoundVars (getIRSubExprs expr)
 
 evalConstantDistr :: IRExpr -> IRExpr
 evalConstantDistr (IRDensity IRNormal (IRConst (VFloat x))) = IRConst (VFloat ((1 / sqrt (2 * pi)) * exp (-0.5 * x * x)))

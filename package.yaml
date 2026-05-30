@@ -34,6 +34,7 @@ dependencies:
 - repline
 - statistics
 - mwc-random
+- time
 - vector
 - QuickCheck
 - pretty-simple
@@ -70,3 +71,4 @@ tests:
     dependencies:
     - haskell-dppl
     - HUnit
+    - temporary
