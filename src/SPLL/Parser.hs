@@ -715,7 +715,7 @@ multLikeOpList :: [([Char], Expr -> Expr -> Expr)]
 multLikeOpList = [("**", (#<*>#)), ("*", (#*#)), ("/", (#/#)), ("&&", (#&&#))]
 
 addLikeOpList :: [([Char], Expr -> Expr -> Expr)]
-addLikeOpList = [("++", (#<+>#)), ("+", (#+#)), ("-", \a b -> a #+# (negF b)), ("||", (#||#))]
+addLikeOpList = [("++", (#<+>#)), ("~~", (#<->#)), ("+", (#+#)), ("-", \a b -> a #+# (negF b)), ("||", (#||#))]
 
 listManipulationOpList :: [([Char], Expr -> Expr -> Expr)]
 listManipulationOpList = [(":", (#:#))]
