@@ -1,3 +1,4 @@
+-- | Core return-type definitions for SPLL.
 module SPLL.Typing.RType where
 
 newtype TVarR = TV String
