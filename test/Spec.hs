@@ -42,7 +42,8 @@ import SPLL.Typing.ForwardChaining (annotateProg)
 import SPLL.Parser
 import TestParser
 import TestInternals (test_internals, classConstraintTests, test_encodeTupleGaussianParams, test_encodeDiscreteSumsToOne, test_encodeGaussianSigmaPositive, test_nnHoistedOutOfEnumSum)
-import Test.HUnit (runTestTT)
+import TestEncodeProperties
+import Test.HUnit (runTestTT, Counts(..))
 import End2EndTesting
 import TestCaseParser (parseProgram)
 import SPLL.Prelude
@@ -928,14 +929,28 @@ runSpecifiedTests opts = do
   a <- if disableSpec opts then return True else timedLog tlog "Spec (QuickCheck props)" runTests
   b <- if disableParser opts then return True else timedLog tlog "Parser tests" test_parser
   c <- if disableInternals opts then return True else timedLog tlog "Internal tests" test_internals
-  _ <- timedLog tlog "classConstraintTests" $ runTestTT classConstraintTests
-  _ <- timedLog tlog "test_encodeTupleGaussianParams" $ runTestTT test_encodeTupleGaussianParams
-  _ <- timedLog tlog "test_encodeDiscreteSumsToOne" $ runTestTT test_encodeDiscreteSumsToOne
-  _ <- timedLog tlog "test_encodeGaussianSigmaPositive" $ runTestTT test_encodeGaussianSigmaPositive
-  _ <- timedLog tlog "test_nnHoistedOutOfEnumSum" $ runTestTT test_nnHoistedOutOfEnumSum
+  let runHUnit label t = fmap (\c -> errors c + failures c == 0) $ timedLog tlog label (runTestTT t)
+  e <- fmap and $ sequence
+    [ runHUnit "classConstraintTests"               classConstraintTests
+    , runHUnit "test_encodeTupleGaussianParams"     test_encodeTupleGaussianParams
+    , runHUnit "test_encodeDiscreteSumsToOne"       test_encodeDiscreteSumsToOne
+    , runHUnit "test_encodeGaussianSigmaPositive"   test_encodeGaussianSigmaPositive
+    , runHUnit "test_nnHoistedOutOfEnumSum"         test_nnHoistedOutOfEnumSum
+    , runHUnit "encodeProps_gaussianScale"          encodeProps_gaussianScale
+    , runHUnit "encodeProps_gaussianNegScale"       encodeProps_gaussianNegScale
+    , runHUnit "encodeProps_gaussianSum"            encodeProps_gaussianSum
+    , runHUnit "encodeProps_gaussianSub"            encodeProps_gaussianSub
+    , runHUnit "encodeProps_eitherFlagInUnitInterval"  encodeProps_eitherFlagInUnitInterval
+    , runHUnit "encodeProps_eitherFlagSignMatchesSide" encodeProps_eitherFlagSignMatchesSide
+    , runHUnit "encodeProps_adtSingleConstrFlagIsOne"  encodeProps_adtSingleConstrFlagIsOne
+    , runHUnit "encodeInvariant_sigmaPositive"         encodeInvariant_sigmaPositive
+    , runHUnit "encodeInvariant_discreteNonNegative"   encodeInvariant_discreteNonNegative
+    , runHUnit "encodeInvariant_discreteSumsToOne"     encodeInvariant_discreteSumsToOne
+    , runHUnit "encodeInvariant_outputDimMatchesPlan"  encodeInvariant_outputDimMatchesPlan
+    ]
   d <- if disableEnd2End opts then return True else test_end2end tlog
   if showTimings opts then printTimingSummary tlog else return ()
-  let x = a && b && c && d
+  let x = a && b && c && d && e
   if x then
     putStrLn "Test successful!"
   else do

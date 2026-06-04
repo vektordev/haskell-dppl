@@ -505,6 +505,10 @@ tryNormalClosure "plus" [PNormal, Deterministic] = Just PNormal
 tryNormalClosure "plus" [Deterministic, PNormal] = Just PNormal
 tryNormalClosure "mult" [PNormal, Deterministic] = Just PNormal
 tryNormalClosure "mult" [Deterministic, PNormal] = Just PNormal
+-- Negation: preserves Gaussian structure (mu → -mu); deterministic stays deterministic.
+-- Required so that `a - b` = `a + neg(b)` propagates PNormal through the outer `plus`.
+tryNormalClosure "neg"  [PNormal]               = Just PNormal
+tryNormalClosure "neg"  [Deterministic]         = Just Deterministic
 -- exp of Normal yields LogNormal; log of LogNormal yields Normal
 tryNormalClosure "exp"  [PNormal]               = Just PLogNormal
 tryNormalClosure "log"  [PLogNormal]            = Just PNormal

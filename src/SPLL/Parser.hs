@@ -236,31 +236,32 @@ pTupleVal = do
   return (VTuple val1 val2)
 
 pConst :: MonadParser m => m Expr
-pConst = do
-  val <- pValue
-  return (Constant makeTypeInfo val)
+pConst = Constant makeTypeInfo <$> choice
+  [ pBool, try pUnsignedFloat, pUnsignedInt
+  , try pUnitVal, pTupleVal, pEither, pAny
+  , pList <&> constructVList, pThetaTree <&> VThetaTree
+  ]
 
 pBool :: MonadParser m => m Value
 pBool = do
   b <- choice [keyword "True" >> return True, keyword "False" >> return False]
   return (VBool b)
 
+-- Signed parsers: used by pValue (standalone values, .tst files, CSV).
 pFloat :: MonadParser m => m Value
-pFloat = dbg "float" $ do
-  sign <- optional (symbol "-")
-  f <- lexeme L.float
-  case sign of
-    Nothing -> return (VFloat f)
-    Just "-" -> return (VFloat (-f))
+pFloat = dbg "float" $ VFloat <$> lexeme (L.signed sc L.float)
 
 pIntVal :: MonadParser m => m Value
-pIntVal = dbg "int" $ do
-  sign <- optional (symbol "-")
-  i <- lexeme L.decimal
-  case sign of
-    Nothing -> return (VInt i)
-    Just "-" -> return (VInt (-i))
+pIntVal = dbg "int" $ VInt <$> lexeme (L.signed sc L.decimal)
 
+-- Unsigned parsers: used by pConst inside the expression atom.
+-- The expression parser handles unary minus via the operator table,
+-- so atoms must not greedily consume a leading '-'.
+pUnsignedFloat :: MonadParser m => m Value
+pUnsignedFloat = dbg "ufloat" $ VFloat <$> lexeme L.float
+
+pUnsignedInt :: MonadParser m => m Value
+pUnsignedInt = dbg "uint" $ VInt <$> lexeme L.decimal
 
 pInt :: MonadParser m => m Int
 pInt = do
@@ -610,6 +611,15 @@ cmpOpList = [(">", (#>#)), ("<", (#<#)), (":", (#:#)), ("==", (#==#))]
 funLikeOps :: [([Char], Expr -> Expr)]
 funLikeOps = [("not", (#!#))]
 
+-- Fold negation into literal constants so that roundtrip works for negative literals.
+smartNeg :: Expr -> Expr
+smartNeg (Constant ti (VFloat f)) = Constant ti (VFloat (-f))
+smartNeg (Constant ti (VInt i))   = Constant ti (VInt (-i))
+smartNeg e                         = negF e
+
+prefixOps :: MonadParser m => [Operator m Expr]
+prefixOps = [Prefix (smartNeg <$ try (symbol "-" <* notFollowedBy (char '>')))]
+
 mkInfixOp :: MonadParser m => [([Char], Expr -> Expr -> Expr)] -> [Operator m Expr]
 mkInfixOp tbl = map infx tbl
   where infx (name, f) = InfixL (f <$ symbol name)
@@ -622,7 +632,7 @@ mkPrefixOp tbl = map infx tbl
 -- | Operator table (precedence and associativity)
 opTable :: MonadParser m => [[Operator m Expr]]
 opTable =
-  [ mkPrefixOp funLikeOps,
+  [ mkPrefixOp funLikeOps ++ prefixOps,
     mkInfixOp multLikeOpList,
     mkInfixOp addLikeOpList,
     mkInfixOp listManipulationOpList,

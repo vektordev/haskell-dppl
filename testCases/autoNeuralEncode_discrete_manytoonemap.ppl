@@ -1,0 +1,2 @@
+neural discreteNN :: (Symbol -> Int) of [0, 1, 2, 3]
+main sym = if discreteNN sym == 2 then 0 else if discreteNN sym == 3 then 1 else discreteNN sym

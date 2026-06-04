@@ -370,6 +370,10 @@ toIRNormalParams meta (InjF _ (Named "mult") [e0, e1])
       (mu1, s1) <- toIRNormalParams meta e1
       det0 <- toIRGenerate meta e0
       return (IROp OpMult mu1 det0, IROp OpMult s1 (IRUnaryOp OpAbs det0))
+toIRNormalParams meta (InjF _ (Named "neg") [e])
+  | pType (getTypeInfo e) == PNormal = do
+      (mu, s) <- toIRNormalParams meta e
+      return (IRUnaryOp OpNeg mu, s)
 toIRNormalParams meta (InjF _ (Named "log") [e])
   | pType (getTypeInfo e) == PLogNormal = toIRLogNormalParams meta e
 toIRNormalParams meta (Var _ name)
@@ -893,14 +897,19 @@ toIRInference meta False (InjF TypeInfo {tags=extras, rType=rt} (Named name) [le
     -- the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
     setVariables [(x3, sample)]
     (pLeft, _, _) <- toIRInference meta False left (IRVar x2)
-    (pRight, _, _) <- toIRInference meta False right invExpr
-
-    let returnExpr = case topKThreshold (compilerConfig meta) of
-          Nothing -> IRIf (IRIsPossible enumListR invExpr) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
-          Just _ -> IRIf (IROp OpAnd (IRIsPossible enumListR invExpr) (IROp OpGreaterThan (IROp OpMult (accProb meta) pLeft) (IRVar "TOP_K_CUTOFF"))) (IROp OpMult pLeft pRight) (IRConst (VFloat 0))
-    let branchesExpr = case topKThreshold (compilerConfig meta) of
-          Nothing -> IRIf (IRIsPossible enumListR invExpr) (IRConst (VFloat 1)) (IRConst (VFloat 0))
-          Just _ -> IRIf (IROp OpAnd (IRIsPossible enumListR invExpr) (IROp OpGreaterThan (IROp OpMult (accProb meta) pLeft) (IRVar "TOP_K_CUTOFF"))) (IRConst (VFloat 1)) (IRConst (VFloat 0))
+    -- pRight is computed in a nested writer so its bindings can be guarded by the topK check,
+    -- avoiding the inner right-side inference work whenever acc_prob * pLeft is already below cutoff.
+    ((pRight, _, _), pRightBinds) <- lift $ runWriterT $ toIRInference meta False right invExpr
+    let wrapR e = generateLetInExpr pRightBinds e
+    let possible = IRIsPossible enumListR invExpr
+    let cutoffOk = case topKThreshold (compilerConfig meta) of
+          Nothing -> possible
+          Just _  -> IROp OpAnd possible
+                       (IROp OpGreaterThan
+                          (IROp OpMult (accProb meta) pLeft)
+                          (IRVar "TOP_K_CUTOFF"))
+    let returnExpr   = IRIf cutoffOk (wrapR (IROp OpMult pLeft pRight)) (IRConst (VFloat 0))
+    let branchesExpr = IRIf cutoffOk (IRConst (VFloat 1)) (IRConst (VFloat 0))
     return (returnExpr, const0, branchesExpr)
     )) <&> generateLetInBlock meta
   uniquePrefix <- mkVariable ""

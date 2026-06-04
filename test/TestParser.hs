@@ -390,5 +390,19 @@ prop_blockCommentLine =
        Right _ -> property True
        Left err -> counterexample (errorBundlePretty err) False
 
+-- "Normal - 3.0" and "Normal -3.0" should both parse as subtraction, not Apply Normal (-3.0)
+prop_normalMinusFloat :: Property
+prop_normalMinusFloat =
+  conjoin (map check ["main = Normal - 3.0", "main = Normal -3.0"])
+  where
+    check src = case tryParseProgram "" src of
+      Right (Program [("main", expr)] _ _) ->
+        counterexample ("Expected subtraction in: " ++ src ++ ", got: " ++ show expr) $
+          case expr of
+            Apply _ (Normal _) _ -> False
+            _ -> True
+      Right p -> counterexample ("Unexpected program structure: " ++ show p) False
+      Left err -> counterexample (errorBundlePretty err) False
+
 return []
 test_parser = $(forAllProperties) (quickCheckWithResult stdArgs { maxSuccess = 100 })

@@ -2,7 +2,6 @@ module SPLL.AutoNeural(
   makeAutoNeural
 , makeForwardDecl
 , makePartitionPlan
-, makeEncodeRec
 , PartitionPlan (..)
 , getSize
 , planIndexOf
@@ -280,48 +279,6 @@ tupleFromValue :: Value -> (Value, Value)
 tupleFromValue (VTuple a b) = (a,b)
 tupelFromValue _non_tuple = error "supplied non-tuple value to tuple-shaped NN type."
 
--- makeEncodeRec: bottom-level fallback for pass-through cases (EitherPlan, ADTPlan).
--- outerArgs: IRExprs already in scope for the outer lambda parameters of main.
-makeEncodeRec :: [ADTDecl] -> String -> String -> PartitionPlan -> Int -> [IRExpr] -> IRExpr
-makeEncodeRec adts probFnName normalFnName (Discretes rty (MultiDiscretes vals)) ix outerArgs =
-  foldr IRCons (IRConst (VList EmptyList)) [IRIndex (IRVar vector) (IRConst (VInt (ix + i))) | i <- [0 .. length vals - 1]]
-makeEncodeRec adts probFnName normalFnName Continuous ix outerArgs =
-  -- Emit [μ, σ] directly from the logit vector slots.
-  -- This branch is only reached when called from makeEncodeTopLevel's fallback case,
-  -- which currently does not happen for Continuous (handled in makeEncodeTopLevel).
-  foldr IRCons (IRConst (VList EmptyList))
-    [ IRIndex (IRVar vector) (IRConst (VInt ix))
-    , IRIndex (IRVar vector) (IRConst (VInt (ix + 1)))
-    ]
-makeEncodeRec adts probFnName normalFnName (TuplePlan a b) ix outerArgs =
-  invokeStandardFunction stdListConcat
-    [ makeEncodeTopLevel adts probFnName normalFnName a ix outerArgs
-    , makeEncodeTopLevel adts probFnName normalFnName b (ix + getSize a) outerArgs
-    ]
-makeEncodeRec adts probFnName normalFnName plan@(EitherPlan a b) ix outerArgs
-  | null probFnName =
-      -- No prob function available: emit zeros (length-correct stub).
-      foldr IRCons (IRConst (VList EmptyList))
-        [ IRConst (VFloat 0) | _ <- [0 .. getSize plan - 1] ]
-  | otherwise =
-      -- Compute the flag slot: P(Left VAny) from the compiled SPLL prob function.
-      -- Inner conditional probabilities: P(Left v) / P(Left VAny) for each v in the left
-      -- plan, and P(Right v) / P(Right VAny) for each v in the right plan.
-      let callProb s = foldl IRApply (IRApply (IRVar probFnName) (IRConst s)) outerArgs
-          pLeftAny  = IRTFst (callProb (VEither (Left VAny)))
-          pRightAny = IRTFst (callProb (VEither (Right VAny)))
-          flagSlot  = IRCons pLeftAny (IRConst (VList EmptyList))
-          leftEnc   = makeEncodeEitherArm probFnName outerArgs a (VEither . Left)  pLeftAny
-          rightEnc  = makeEncodeEitherArm probFnName outerArgs b (VEither . Right) pRightAny
-      in invokeStandardFunction stdListConcat
-           [ flagSlot
-           , invokeStandardFunction stdListConcat [leftEnc, rightEnc] ]
-makeEncodeRec adts probFnName normalFnName plan@(ADTPlan _ _) ix outerArgs =
-  -- Stub: correct encoding requires marginal constructor probabilities via MAR semantics.
-  -- Emits a zero-filled list of the correct length so length tests pass; values are wrong.
-  foldr IRCons (IRConst (VList EmptyList))
-    [ IRConst (VFloat 0) | _ <- [0 .. getSize plan - 1] ]
-
 -- | Encode the inner slots for one arm of an EitherPlan.
 -- wrap: constructs the full sample value (e.g. VEither . Left) for probFnName calls.
 -- armProb: IRExpr evaluating to P(arm VAny), used to normalise to conditional probability.
@@ -345,44 +302,82 @@ makeEncodeEitherArm probFnName outerArgs plan wrap armProb =
 -- for `main sym = ...`; [] for `main = expr`).  These are forwarded as trailing arguments
 -- to the compiled SPLL inference functions (prob, normal).
 --
--- * Discretes: calls probFnName(v)(outerArgs...) for each enumerated v, so the result
---   reflects the SPLL program's output distribution.  Falls back to raw logit slots when
---   probFnName is empty (used for tuple sub-components without per-component prob fns).
+-- * Discretes: calls probFnName(wrap v)(outerArgs...) for each enumerated v.  wrap
+--   constructs the full sample value for the marginal query; at the outermost level it is
+--   id, inside a TuplePlan first component it is (\v -> VTuple v VAny), etc.
+--   Falls back to raw logit slots only when probFnName is empty (encoder case).
 --
--- * Continuous: calls normalFnName(outerArgs...) which returns (mu, sigma) as IRTCons.
+-- * Continuous: calls normalFnName(outerArgs...) → (mu, sigma).
 --
--- * TuplePlan: dispatches each sub-component with per-component normal function names.
---   Per-component prob functions are NOT generated; discrete sub-components fall back to
---   raw logit slots (identity assumption — correct for identity SPLL programs).
+-- * TuplePlan / EitherPlan: recurses with composed wrap functions so sub-plan prob calls
+--   correctly query the marginal distribution of each component.
+--
+-- * ADTPlan: stub — emits zeros of the correct length.
 makeEncodeTopLevel :: [ADTDecl] -> String -> String -> PartitionPlan -> Int -> [IRExpr] -> IRExpr
-makeEncodeTopLevel adts probFnName normalFnName (Discretes rty (MultiDiscretes vals)) ix outerArgs =
+makeEncodeTopLevel = makeEncodeTopLevelW id
+
+makeEncodeTopLevelW :: (IRValue -> IRValue) -> [ADTDecl] -> String -> String -> PartitionPlan -> Int -> [IRExpr] -> IRExpr
+makeEncodeTopLevelW wrap adts probFnName normalFnName (Discretes rty (MultiDiscretes vals)) ix outerArgs =
   if null probFnName
-  then -- No per-component prob function: fall back to raw logit slots (identity assumption).
+  then -- No prob function available (encoder case): fall back to raw logit slots.
     foldr IRCons (IRConst (VList EmptyList))
       [IRIndex (IRVar vector) (IRConst (VInt (ix + i))) | i <- [0 .. length vals - 1]]
   else
     foldr IRCons (IRConst (VList EmptyList))
-      [ IRTFst (foldl IRApply (IRApply (IRVar probFnName) (IRConst (valueToIR v))) outerArgs)
+      [ IRTFst (foldl IRApply (IRApply (IRVar probFnName) (IRConst (wrap (valueToIR v)))) outerArgs)
       | v <- vals ]
-makeEncodeTopLevel adts probFnName normalFnName Continuous ix outerArgs =
+makeEncodeTopLevelW wrap adts probFnName normalFnName Continuous ix outerArgs =
   -- Call normalFnName(outerArgs...) → IRTCons mu sigma, then emit [mu, sigma].
   let normalResult = foldl IRApply (IRVar normalFnName) outerArgs
   in foldr IRCons (IRConst (VList EmptyList))
        [ IRTFst normalResult
        , IRTSnd normalResult
        ]
-makeEncodeTopLevel adts probFnName normalFnName (TuplePlan a b) ix outerArgs =
-  -- For TuplePlan, encode each sub-component with per-component normal function names.
-  -- No per-component prob functions are generated, so probFnName is passed as empty
-  -- to signal the Discretes fallback to raw logit slots.
+makeEncodeTopLevelW wrap adts probFnName normalFnName (TuplePlan a b) ix outerArgs =
+  -- Compose wrap with the tuple projection so sub-plan prob calls are marginal queries:
+  -- first component: probFn (wrap (VTuple v VAny)), second: probFn (wrap (VTuple VAny v)).
   let fstNormalFn = if null normalFnName then "" else normalFnName ++ "_fst"
       sndNormalFn = if null normalFnName then "" else normalFnName ++ "_snd"
+      fstWrap v = wrap (VTuple v VAny)
+      sndWrap v = wrap (VTuple VAny v)
   in invokeStandardFunction stdListConcat
-    [ makeEncodeTopLevel adts "" fstNormalFn a ix outerArgs
-    , makeEncodeTopLevel adts "" sndNormalFn b (ix + getSize a) outerArgs
+    [ makeEncodeTopLevelW fstWrap adts probFnName fstNormalFn a ix outerArgs
+    , makeEncodeTopLevelW sndWrap adts probFnName sndNormalFn b (ix + getSize a) outerArgs
     ]
-makeEncodeTopLevel adts probFnName normalFnName plan ix outerArgs =
-  makeEncodeRec adts probFnName normalFnName plan ix outerArgs
+makeEncodeTopLevelW wrap adts probFnName normalFnName plan@(EitherPlan a b) ix outerArgs
+  | null probFnName =
+      foldr IRCons (IRConst (VList EmptyList))
+        [ IRConst (VFloat 0) | _ <- [0 .. getSize plan - 1] ]
+  | otherwise =
+      let callProb s = foldl IRApply (IRApply (IRVar probFnName) (IRConst s)) outerArgs
+          pLeftAny  = IRTFst (callProb (wrap (VEither (Left VAny))))
+          pRightAny = IRTFst (callProb (wrap (VEither (Right VAny))))
+          flagSlot  = IRCons pLeftAny (IRConst (VList EmptyList))
+          leftWrap v  = wrap (VEither (Left v))
+          rightWrap v = wrap (VEither (Right v))
+          leftEnc   = makeEncodeEitherArm probFnName outerArgs a leftWrap pLeftAny
+          rightEnc  = makeEncodeEitherArm probFnName outerArgs b rightWrap pRightAny
+      in invokeStandardFunction stdListConcat
+           [ flagSlot
+           , invokeStandardFunction stdListConcat [leftEnc, rightEnc] ]
+makeEncodeTopLevelW wrap adts probFnName normalFnName plan@(ADTPlan adtName plans) ix outerArgs
+  | null probFnName =
+      foldr IRCons (IRConst (VList EmptyList))
+        [ IRConst (VFloat 0) | _ <- [0 .. getSize plan - 1] ]
+  | otherwise =
+      let callProb s = foldl IRApply (IRApply (IRVar probFnName) (IRConst s)) outerArgs
+          concatLists = foldr (\x acc -> invokeStandardFunction stdListConcat [x, acc]) (IRConst (VList EmptyList))
+          constrAnyVal (cName, fieldPlans) = VADT cName (replicate (length fieldPlans) VAny)
+          constrFlagProb cp = IRTFst (callProb (wrap (constrAnyVal cp)))
+          flagSlots = foldr IRCons (IRConst (VList EmptyList)) [ constrFlagProb cp | cp <- plans ]
+          encodeConstrFields (cName, fieldPlans) pConstrAny =
+            let anyArgs  = replicate (length fieldPlans) VAny
+                replaceAt j v args = take j args ++ [v] ++ drop (j+1) args
+                fieldWrap j v = wrap (VADT cName (replaceAt j v anyArgs))
+                encodeField j fp = makeEncodeEitherArm probFnName outerArgs fp (fieldWrap j) pConstrAny
+            in concatLists [ encodeField j fp | (j, fp) <- zip [0..] fieldPlans ]
+          constrFieldEncodings = [ encodeConstrFields cp (constrFlagProb cp) | cp <- plans ]
+      in concatLists (flagSlots : constrFieldEncodings)
 
 -- Build the encode function body, wrapped in one lambda per outer parameter of main.
 -- encode(p1)(p2)... derives the logit vector from compiled SPLL inference functions
@@ -407,6 +402,8 @@ planIndexOfMaybe (TuplePlan a b) v =
   case planIndexOfMaybe a v of
     Just i  -> Just i
     Nothing -> (getSize a +) <$> planIndexOfMaybe b v
+planIndexOfMaybe (EitherPlan a _) (VEither (Left v))  = (1 +)             <$> planIndexOfMaybe a v
+planIndexOfMaybe (EitherPlan a b) (VEither (Right v)) = (1 + getSize a +) <$> planIndexOfMaybe b v
 planIndexOfMaybe _ _ = Nothing
 
 noAny :: IRExpr -> IRExpr -> IRExpr
@@ -415,4 +412,4 @@ noAny sample = IRIf (IRUnaryOp OpIsAny sample) (IRConst $ VFloat 1)
 noAny0 :: IRExpr -> IRExpr -> IRExpr
 noAny0 sample = IRIf (IRUnaryOp OpIsAny sample) (IRConst $ VFloat 0)
 
--- MAR semantics for EitherPlan encoding are implemented in makeEncodeRec/makeEncodeEitherArm.
+-- MAR semantics for EitherPlan encoding are implemented in makeEncodeTopLevelW/makeEncodeEitherArm.

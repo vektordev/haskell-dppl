@@ -1,0 +1,2 @@
+neural gaussNN :: (Symbol -> Float)
+main = (Normal + 2.0) + (1.5 * Normal + (-0.5))
