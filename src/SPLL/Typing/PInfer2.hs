@@ -39,7 +39,6 @@ data DScheme = DScheme [TVar] [DConstraint] PType
 
 -- Tree of constraints. Leafes are types and constraints connect one or more nodes
 data ChainConstraint = PlusConstraint TypeOrChain TypeOrChain | EnumPlusConstraint TypeOrChain TypeOrChain | CompConstraint TypeOrChain TypeOrChain
-  | LetInDConstraint TypeOrChain
   deriving (Show, Eq)
 -- Node of the tree
 type TypeOrChain = Either PType DowngradeChain
@@ -48,10 +47,6 @@ type DowngradeChain = [Either PType ChainConstraint]
 -- A type variable with constraints on it
 -- E.g.: plusF :: a -> b -> c has constraint (c, PlusConstraint a b)
 type DConstraint = (PType, DowngradeChain)
-
-resolveLetInDCons :: PType -> PType
-resolveLetInDCons Deterministic = Deterministic
-resolveLetInDCons _ = Bottom
 
 -- | Downgrade PNormal/PLogNormal to Integrate for contexts where Gaussian
 -- structure cannot be preserved (containers, mixtures, unknown InjFs).
@@ -192,7 +187,6 @@ instance DSubstitutable ChainConstraint where
   dapply s (PlusConstraint ty1 ty2) = PlusConstraint (dapply s ty1) (dapply s ty2)
   dapply s (EnumPlusConstraint ty1 ty2) = EnumPlusConstraint (dapply s ty1) (dapply s ty2)
   dapply s (CompConstraint ty1 ty2) = CompConstraint (dapply s ty1) (dapply s ty2)
-  dapply s (LetInDConstraint ty) = LetInDConstraint (dapply s ty)
 
 
 instance DSubstitutable TypeOrChain where
@@ -298,12 +292,6 @@ collapseChain ((Right (CompConstraint ty1 ty2)):b) ty3 dcOut =
     where (b1, rty1) = getResType ty1
           (b2, rty2) = getResType ty2
           isResolved = b1 && b2
-collapseChain ((Right (LetInDConstraint (Left Deterministic))):b) ty3 dcOut = collapseChain b ty3 dcOut
-collapseChain ((Right (LetInDConstraint ty1)):b) ty3 dcOut = if isResolved
-   then collapseChain b (downgrade (resolveLetInDCons rty1) ty3) dcOut
-   else collapseChain b ty3 dcOut ++ [Right (LetInDConstraint (subCollapse ty1))]
-   where (isResolved, rty1) = getResType ty1
-
 subCollapse :: TypeOrChain -> TypeOrChain
 subCollapse (Left ty) = Left  ty
 subCollapse (Right dc) = Right $ collapseChain dc Deterministic []
@@ -546,11 +534,6 @@ infer env expr = case expr of
   Uniform ti  -> return (emptySubst, [], Integrate, Uniform (setPType ti Integrate))
   Normal ti  -> return (emptySubst, [], PNormal, Normal (setPType ti PNormal))
   Constant ti val  -> return (emptySubst, [], Deterministic, Constant (setPType ti Deterministic) val)
-  LetIn ti s x b -> do
-    (s1, cs1, t1, xt) <- infer env x
-    (s2, cs2, t2, bt) <- infer env b
-    return (compose s2 s1, apply s2 cs1 ++ cs2, t2, LetIn (setPType ti t2) s xt bt)
-
   InjF ti (Named name) paramsExpr -> do
     p_inf <- mapM (infer env) paramsExpr
     let pts = map trd4 p_inf
@@ -668,12 +651,10 @@ instance Substitutable (Either PType ChainConstraint) where
    apply s (Right (PlusConstraint pt1 pt2)) = Right (PlusConstraint (apply s pt1) (apply s pt2))
    apply s (Right (EnumPlusConstraint pt1 pt2)) = Right (EnumPlusConstraint (apply s pt1) (apply s pt2))
    apply s (Right (CompConstraint pt1 pt2)) = Right (CompConstraint (apply s pt1) (apply s pt2))
-   apply s (Right (LetInDConstraint pt1)) = Right (LetInDConstraint (apply s pt1))
    ftv (Left pt) = ftv pt
    ftv (Right (PlusConstraint pt1 pt2)) = ftv pt1 `Set.union` ftv pt2
    ftv (Right (EnumPlusConstraint pt1 pt2)) = ftv pt1 `Set.union` ftv pt2
    ftv (Right (CompConstraint pt1 pt2)) = ftv pt1 `Set.union` ftv pt2
-   ftv (Right (LetInDConstraint pt1)) = ftv pt1
 
 instance Substitutable a => Substitutable [a] where
   apply = map . apply

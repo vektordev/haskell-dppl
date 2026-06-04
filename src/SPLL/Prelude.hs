@@ -130,7 +130,6 @@ expF x = injF "exp" [x]
 -- Variables
 
 letIn :: String -> Expr -> Expr -> Expr
---letIn = LetIn makeTypeInfo
 -- We can not infer probabilities on letIns. So we rewrite them as lambdas
 letIn s val body = apply (s #-># body) val
 

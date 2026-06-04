@@ -69,7 +69,6 @@ toStub expr = case expr of
   Cons {}        -> StubCons
   TCons {}       -> StubTCons
   (Var _ _)      -> StubVar
-  LetIn {}       -> StubLetIn
   InjF {}        -> StubInjF
   Lambda {}      -> StubLambda
   Apply {}       -> StubApply
@@ -117,10 +116,7 @@ tMapHead f expr = case expr of
   (Cons _ a b) -> Cons (f expr) a b
   (TCons _ a b) -> TCons (f expr) a b
   (Var _ x) -> Var (f expr) x
-  (LetIn _ x a bi) -> LetIn (f expr) x a bi
   (InjF _ x a) -> InjF (f expr) x a
-  --(LetInD t x a b) -> LetInD (f expr) x a b
-  --(LetInTuple t x a b c) -> LetInTuple (f expr) x a b c
   (Lambda _ name a) -> Lambda (f expr) name a
   (Apply _ a b) -> Apply (f expr) a b
   (ReadNN t n a) -> ReadNN (f expr) n a
@@ -142,10 +138,7 @@ tMap f expr = case expr of
   (Cons _ a b) -> Cons (f expr) (tMap f a) (tMap f b)
   (TCons _ a b) -> TCons (f expr) (tMap f a) (tMap f b)
   (Var _ x) -> Var (f expr) x
-  (LetIn _ x a b) -> LetIn (f expr) x (tMap f a) (tMap f b)
   (InjF t x a) -> InjF (f expr) x (map (tMap f) a)
-  --(LetInD t x a b) -> LetInD (f expr) x (tMap f a) (tMap f b)
-  --(LetInTuple t x a b c) -> LetInTuple (f expr) x (tMap f a) b (tMap f c)
   (Lambda _ name a) -> Lambda (f expr) name (tMap f a)
   (Apply _ a b) -> Apply (f expr) (tMap f a) (tMap f b)
   (ReadNN _ n a) -> ReadNN (f expr) n (tMap f a)
@@ -162,8 +155,6 @@ getBinaryConstructor TCons {} = TCons
 getBinaryConstructor And {} = And
 getBinaryConstructor Or {} = Or
 getBinaryConstructor Apply {} = Apply
---getBinaryConstructor (LetIn t name a b) = \t2 -> \e1 -> \e2 -> LetIn t2 name e1 e2
-getBinaryConstructor (LetIn _ name _ _) = (`LetIn` name)
 
 getUnaryConstructor :: Expr -> (TypeInfo -> Expr -> Expr)
 getUnaryConstructor (ThetaI _ _ i) = \t a -> ThetaI t a i
@@ -220,11 +211,8 @@ getSubExprs expr = case expr of
   (Null _) -> []
   (Cons _ a b) -> [a,b]
   (TCons _ a b) -> [a,b]
-  (LetIn _ _ a b) -> [a, b]
   (Var _ _) -> []
   (InjF _ _ a) -> a
-  --(LetInD t x a b) -> [a,b]
-  --(LetInTuple t x a b c) -> [a,c]
   (Lambda _ _ a) -> [a]
   (Apply _ a b) -> [a, b]
   (ReadNN _ _ a) -> [a]
@@ -254,7 +242,6 @@ setSubExprs expr [a,b] = case expr of
   Or t _ _ -> Or t a b
   Cons t _ _ -> Cons t a b
   TCons t _ _ -> TCons t a b
-  LetIn t x _ _ -> LetIn t x a b
   Apply t _ _ -> Apply t a b
   InjF t n _ -> InjF t n [a, b]
   _ -> error "unmatched expr in setSubExprs"
@@ -282,10 +269,7 @@ getTypeInfo expr = case expr of
   (Cons t _ _)          -> t
   (TCons t _ _)         -> t
   (Var t _)             -> t
-  (LetIn t _ _ _)       -> t
   (InjF t _ _)          -> t
-  --(LetInD t _ _ _)      -> t
-  --(LetInTuple t _ _ _ _)-> t
   (Lambda t _ _)        -> t
   (Apply t _ _)         -> t
   (ReadNN t _ _)        -> t
@@ -307,10 +291,7 @@ setTypeInfo expr t = case expr of
   (Cons _ a b)          -> Cons t a b
   (TCons _ a b)         -> TCons t a b
   (Var _ a)             -> Var t a
-  (LetIn _ a b c)       -> LetIn t a b c
   (InjF _ a b)          -> InjF t a b
-  --(LetInD _ a b c)     -> (LetInD t a b c)
-  --(LetInTuple _ a b c d) -> (LetInTuple t a b c d)
   (Lambda _ a b)        -> Lambda t a b
   (Apply _ a b)         -> Apply t a b
   (ReadNN _ a b)        -> ReadNN t a b
@@ -464,9 +445,6 @@ printFlat expr = case expr of
   Cons {} -> "Cons"
   TCons {} -> "TCons"
   (Var _ a) -> "Var " ++ a
-  LetIn {} -> "LetIn"
-  --(LetInD {}) -> "LetInD"
-  --(LetInTuple {}) -> "LetInTuple"
   (InjF t (Named fname) _) -> "InjF (" ++ fname ++ ")"
   (Lambda _ name _) -> "\\" ++ name  ++ " -> "
   Apply {} -> "Apply"

@@ -31,7 +31,6 @@ wrapInFunctionDeclarationIR (IRLambda n b) fName doc params = wrapInFunctionDecl
 wrapInFunctionDeclarationIR e fName doc params = "-- " ++ doc ++ "\ndef " ++ fName ++ "(" ++ intercalate ", " params ++ "):\n" ++ indent 1 ++ pPrintIRExpr e 1 ++"\n"
 
 pPrintExpr :: Expr -> Int -> String
-pPrintExpr (LetIn _ n v b) i = "let " ++ n ++ " = " ++ pPrintExpr v (i+1) ++ " in\n" ++ indent (i+1) ++ pPrintExpr b (i+1)
 pPrintExpr (Constant _ a) _ = pPrintValue a
 pPrintExpr (Var _ a) _ = a
 pPrintExpr (Uniform _) _ = "Uniform"

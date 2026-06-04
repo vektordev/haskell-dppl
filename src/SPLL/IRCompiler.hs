@@ -1101,10 +1101,6 @@ toIRGenerate meta (IfThenElse _ cond left right) = do
   l <- toIRGenerate meta left
   r <- toIRGenerate meta right
   return $ IRIf c l r
-toIRGenerate meta (LetIn _ n v b) = do
-  v' <- toIRGenerate meta v
-  b' <- toIRGenerate meta b
-  return $ IRLetIn n v' b'
 toIRGenerate meta (GreaterThan _ left right) = do
   l <- toIRGenerate meta left
   r <- toIRGenerate meta right

@@ -488,15 +488,6 @@ testListPlus  = Program [] [] [] [] (injF "listMult"
      (Cons makeTypeInfo (PlusF makeTypeInfo normal (constF 3.0))) (Null makeTypeInfo)))
     )
 -}
-testHakaru :: Program Double
-testHakaru = Program [] [](LetInmakeTypeInfo "x" uniform
-                                      (letIn  "y" uniform
-                                         (Cons makeTypeInfo (var "x")
-                                           (Cons makeTypeInfo
-                                             (var "y")
-                                             (Cons makeTypeInfo
-                                                (PlusF makeTypeInfo (MultF makeTypeInfo (constF (-2.0)))(var "x")) (var "y"))
-                                                (Null makeTypeInfo))))))
 {-
 -- let x = normal in (if flip then x + theta else x - 0.7)
 testBranchedLetList :: Program Double
@@ -561,15 +552,6 @@ testBranchedLet = Program [] [](LetInmakeTypeInfo "x" (PlusF makeTypeInfo normal
                                       (injF "sig" [] [] (injF "plus" [constF (-0.7))]  (var "x")))))
 -}
 
-testNestedLetInDecl :: Program Double
-testNestedLetInDecl = Program [] [] [] [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (theta 0) normal)
-                         (letIn  "y" (PlusF makeTypeInfo (theta 1) (PlusF makeTypeInfo normal (var "x")))
-                                  (Cons makeTypeInfo (var "x")
-                                     (Cons makeTypeInfo (var "y")
-                                       (Cons makeTypeInfo (PlusF makeTypeInfo normal  (var "y"))
-                                        (Null makeTypeInfo))))))
--- let x = normal in let y = normal in [x, x+y]
-                                   
 testNestedLetInWit :: Program Double
 testNestedLetInWit = Program [] [] [] [] (letIn "x" (MultF makeTypeInfo (theta 0) normal)
                          (letIn  "y" (MultF makeTypeInfo normal (theta 0) )
@@ -578,39 +560,6 @@ testNestedLetInWit = Program [] [] [] [] (letIn "x" (MultF makeTypeInfo (theta 0
                                      (Null makeTypeInfo)))))
 --testInjFD :: Program Double
 --testInjFD = Program [] [] [] [] (injF "mult" [constF (-2.0))] (PlusF makeTypeInfo (theta 0) normal))
-
-testObserve :: Program Double
-testObserve = Program [] [] [] [] (LetInmakeTypeInfo "x"  normal
-                              (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (constF 2.0)) normal)
-                                (var "x")))
-
-testLetXYD :: Program Double
-testLetXYD = Program [] [] [] [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (theta 0) normal)
-                          (letIn  "y"  (theta 1)
-                                         (Cons makeTypeInfo (var "x") 
-                                           (Cons makeTypeInfo 
-                                             (PlusF makeTypeInfo normal(var "y"))
-                                             (Cons makeTypeInfo 
-                                                (MultF makeTypeInfo (PlusF makeTypeInfo normal(var "x")) (var "y"))
-                                                (Null makeTypeInfo))))))
-                                             
-testLetXY :: Program Double
-testLetXY = Program [] [] [] [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (theta 0) normal)
-                          (letIn  "y" (PlusF makeTypeInfo (theta 1) normal)
-                                         (Cons makeTypeInfo (var "x") 
-                                           (Cons makeTypeInfo 
-                                             (var "y")
-                                             (Cons makeTypeInfo 
-                                                (MultF makeTypeInfo (PlusF makeTypeInfo normal(var "x")) (var "y"))
-                                                (Null makeTypeInfo))))))
-                                             
-
-testLetTuple :: Program Double
-testLetTuple = Program [] [] [] [] (LetInmakeTypeInfo "x" (PlusF makeTypeInfo (theta 0) normal)
-                                              (Cons makeTypeInfo (var "x") 
-                                                (Cons makeTypeInfo 
-                                                  (PlusF makeTypeInfo normal(var "x")) 
-                                                  (Null makeTypeInfo))))
 
 testNormal :: Program Double
 testNormal = Program [] [] [] [] normal

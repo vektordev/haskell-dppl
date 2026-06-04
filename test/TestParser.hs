@@ -53,7 +53,6 @@ exprToString :: Expr -> String
 exprToString (IfThenElse _ cond tBranch fBranch) =
     "if " ++ bracket cond ++ " then " ++ bracket tBranch ++ " else " ++ bracket fBranch
 exprToString (InjF _ (Named name) args) = name ++ " " ++ unwords (map bracket args)
-exprToString (LetIn _ name val body) = "let " ++ name ++ " = " ++ bracket val ++ " in " ++ bracket body
 exprToString (Var _ name) = name
 exprToString (Constant _ value) = valToString value
 exprToString (Lambda _ arg body) = "\\" ++ arg ++ " -> " ++ bracket body
@@ -124,11 +123,6 @@ testExpressions = [
        (Var makeTypeInfo "condition")
        (Constant makeTypeInfo (VInt 1))
        (Constant makeTypeInfo (VInt 2))),
-
-    ("let binding",
-     LetIn makeTypeInfo "x"
-       (Constant makeTypeInfo (VInt 1))
-       (Var makeTypeInfo "x")),
 
     ("nested applications",
      Apply makeTypeInfo

@@ -22,10 +22,6 @@ validateProgram p@Program{functions=fn, neurals=nurals} = sequence_ exprValidati
 validateExpression :: Program -> Expr -> Expr -> Either String ()
 validateExpression Program {adts=adts} _ (InjF _ (Named name) _) | isNothing (lookup name (globalFEnv adts)) = Left ("Cannot find InjF: " ++ name)
 validateExpression Program {adts=adts} _ (InjF _ (Named name) params) | parameterCount adts name /= length params = Left("Wrong number of arguments for InjF " ++ name ++ "expected: " ++ show (parameterCount adts name) ++ " got: " ++ show (length params))
-validateExpression _ _ (LetIn _ name val _) | declarationsCount name val > 0 = Left ("Duplicate declaration of identifier (Shawdowing is not allowed): " ++ name)
-validateExpression _ _ (LetIn _ name _ body) | declarationsCount name body > 0 = Left ("Duplicate declaration of identifier (Shawdowing is not allowed): " ++ name)
-validateExpression Program {adts=adts} _ (LetIn _ name _ _) | isJust (lookup name (globalFEnv adts)) = Left ("Identifier name is already used by an InjF: " ++ name)
-validateExpression p _ (LetIn _ name _ _) | name `elem` getFunctionNames p = Left ("Identifier is already a function name: " ++ name)
 validateExpression p topLevel (Var _ name) | usedBeforeDeclaration name topLevel && notElem name (getFunctionNames p) = Left ("Identifier is used without declaration: " ++ name)
 validateExpression _ _ (Lambda _ name body) | declarationsCount name body > 0 = Left ("Duplicate declaration of identifier (Shawdowing is not allowed): " ++ name)
 validateExpression Program {adts=adts} _ (Lambda _ name body) | isJust (lookup name (globalFEnv adts)) = Left ("Identifier name is already used by an InjF: " ++ name)
@@ -35,18 +31,15 @@ validateExpression _ _ (Constant _ VAny) = Left "ANY may not be used in program 
 validateExpression _ _ _ = Right ()
 
 declarationsCount :: String -> Expr -> Int
-declarationsCount name (LetIn _ decl val body) | name == decl = 1 + declarationsCount name val + declarationsCount name body
 declarationsCount name (Lambda _ lmd body) | name == lmd = 1 + declarationsCount name body
 declarationsCount name expr = sum $ map (declarationsCount name) (getSubExprs expr)
 
 -- Recursive descend, stops on declaration of the identifier. Returns true if usage is detected -> Must be undeclared, because stopping on declaration
 usedBeforeDeclaration :: String -> Expr -> Bool
-usedBeforeDeclaration name (LetIn _ decl _ _) | name == decl = False
 usedBeforeDeclaration name (Lambda _ lmd _) | name == lmd = False
 usedBeforeDeclaration name (Var _ v) | name == v = True
 usedBeforeDeclaration name expr = any (usedBeforeDeclaration name) (getSubExprs expr)
 
 declaredVariables :: Expr -> [String]
 declaredVariables (Lambda _ name body) = name:declaredVariables body
-declaredVariables (LetIn _ name value body) = name:declaredVariables body
 declaredVariables x = concatMap declaredVariables (getSubExprs x)

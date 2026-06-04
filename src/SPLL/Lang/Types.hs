@@ -48,7 +48,6 @@ data Expr =
                 IfThenElse TypeInfo Expr Expr Expr
               | InjF TypeInfo InjFName [Expr]
               -- Variables
-              | LetIn TypeInfo String Expr Expr
               | Var TypeInfo String
               | Constant TypeInfo Value
               | Lambda TypeInfo String Expr    -- (Currently) must use local context
@@ -89,7 +88,6 @@ data ExprStub = StubIfThenElse
               | StubCons
               | StubTCons
               | StubVar
-              | StubLetIn
               | StubInjF
               | StubLambda
               | StubApply

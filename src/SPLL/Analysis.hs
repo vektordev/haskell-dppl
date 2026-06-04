@@ -68,7 +68,6 @@ discretesTags adts e = maybeToList valuesTag
         valuesLeft <- getValuesFromExpr left
         valuesRight <- getValuesFromExpr right
         return $ unionMultiValues valuesLeft valuesRight
-      (LetIn _ _ _ a) -> getValuesFromExpr a
       _ -> Nothing
 
 getSingleDiscrete :: Expr -> Maybe Double

@@ -688,14 +688,6 @@ normalizeExpr env@(parametricBuilders, atomicBuilders, benign) expr =
       let body' = normalizeExpr (parametricBuilders, atomicBuilders, Set.insert name benign) body
       fmap (fmap (Lambda ti name)) body'
 
-    LetIn ti name def body -> do
-      -- def is normalized with current scope
-      let def' = normalizeExpr env def
-      -- body is normalized with name added to scope
-      let body' = normalizeExpr (parametricBuilders, atomicBuilders, Set.insert name benign) body
-      let a = fmap (fmap (LetIn ti name)) def'
-      fmap (<*>) a <*> body'
-
     -- For all other expressions, normalize sub-expressions first then check for Apply pattern
     _ -> do
       subExprs <- fmap sequence (mapM (normalizeExpr env) (getSubExprs expr))
