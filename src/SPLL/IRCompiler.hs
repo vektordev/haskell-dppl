@@ -345,32 +345,32 @@ irSqrt x = IRUnaryOp OpExp (IROp OpMult (IRConst (VFloat 0.5)) (IRUnaryOp OpLog 
 -- | Recursively extract (mu, sigma) as IRExprs from a PNormal-typed expression.
 toIRNormalParams :: CompilerMetadata -> Expr -> CompilerMonad (IRExpr, IRExpr)
 toIRNormalParams _ (Normal _) = return (IRConst (VFloat 0), IRConst (VFloat 1))
-toIRNormalParams meta (InjF _ "plus" [e0, e1])
+toIRNormalParams meta (InjF _ (Named "plus") [e0, e1])
   | pType (getTypeInfo e0) == PNormal, pType (getTypeInfo e1) == PNormal = do
       (mu0, s0) <- toIRNormalParams meta e0
       (mu1, s1) <- toIRNormalParams meta e1
       return (IROp OpPlus mu0 mu1, irSqrt (IROp OpPlus (IROp OpMult s0 s0) (IROp OpMult s1 s1)))
-toIRNormalParams meta (InjF _ "plus" [e0, e1])
+toIRNormalParams meta (InjF _ (Named "plus") [e0, e1])
   | pType (getTypeInfo e0) == PNormal = do
       (mu0, s0) <- toIRNormalParams meta e0
       det1 <- toIRGenerate meta e1
       return (IROp OpPlus mu0 det1, s0)
-toIRNormalParams meta (InjF _ "plus" [e0, e1])
+toIRNormalParams meta (InjF _ (Named "plus") [e0, e1])
   | pType (getTypeInfo e1) == PNormal = do
       (mu1, s1) <- toIRNormalParams meta e1
       det0 <- toIRGenerate meta e0
       return (IROp OpPlus mu1 det0, s1)
-toIRNormalParams meta (InjF _ "mult" [e0, e1])
+toIRNormalParams meta (InjF _ (Named "mult") [e0, e1])
   | pType (getTypeInfo e0) == PNormal = do
       (mu0, s0) <- toIRNormalParams meta e0
       det1 <- toIRGenerate meta e1
       return (IROp OpMult mu0 det1, IROp OpMult s0 (IRUnaryOp OpAbs det1))
-toIRNormalParams meta (InjF _ "mult" [e0, e1])
+toIRNormalParams meta (InjF _ (Named "mult") [e0, e1])
   | pType (getTypeInfo e1) == PNormal = do
       (mu1, s1) <- toIRNormalParams meta e1
       det0 <- toIRGenerate meta e0
       return (IROp OpMult mu1 det0, IROp OpMult s1 (IRUnaryOp OpAbs det0))
-toIRNormalParams meta (InjF _ "log" [e])
+toIRNormalParams meta (InjF _ (Named "log") [e])
   | pType (getTypeInfo e) == PLogNormal = toIRLogNormalParams meta e
 toIRNormalParams meta (Var _ name)
   | Just expr <- lookup name (functions (compilingProgram meta)) = toIRNormalParams meta expr
@@ -383,19 +383,19 @@ toIRNormalParams _ e = error $ "toIRNormalParams: cannot extract Normal params f
 
 -- | Recursively extract (mu_log, sigma) as IRExprs from a PLogNormal-typed expression.
 toIRLogNormalParams :: CompilerMetadata -> Expr -> CompilerMonad (IRExpr, IRExpr)
-toIRLogNormalParams meta (InjF _ "exp" [e])
+toIRLogNormalParams meta (InjF _ (Named "exp") [e])
   | pType (getTypeInfo e) == PNormal = toIRNormalParams meta e
-toIRLogNormalParams meta (InjF _ "mult" [e0, e1])
+toIRLogNormalParams meta (InjF _ (Named "mult") [e0, e1])
   | pType (getTypeInfo e0) == PLogNormal, pType (getTypeInfo e1) == PLogNormal = do
       (mu0, s0) <- toIRLogNormalParams meta e0
       (mu1, s1) <- toIRLogNormalParams meta e1
       return (IROp OpPlus mu0 mu1, irSqrt (IROp OpPlus (IROp OpMult s0 s0) (IROp OpMult s1 s1)))
-toIRLogNormalParams meta (InjF _ "mult" [e0, e1])
+toIRLogNormalParams meta (InjF _ (Named "mult") [e0, e1])
   | pType (getTypeInfo e0) == PLogNormal = do
       (mu0, s0) <- toIRLogNormalParams meta e0
       det1 <- toIRGenerate meta e1
       return (IROp OpPlus mu0 (IRUnaryOp OpLog det1), s0)
-toIRLogNormalParams meta (InjF _ "mult" [e0, e1])
+toIRLogNormalParams meta (InjF _ (Named "mult") [e0, e1])
   | pType (getTypeInfo e1) == PLogNormal = do
       (mu1, s1) <- toIRLogNormalParams meta e1
       det0 <- toIRGenerate meta e0
@@ -743,7 +743,7 @@ toIRInference meta cumulative (TCons _ t1Expr t2Expr) sample = do
   (t2P, t2Dim, t2Branches) <- toIRInferenceSave meta cumulative t2Expr (IRTSnd sample)
   mult <- (t1P, t1Dim) `multP` (t2P, t2Dim)
   return (fst mult, snd mult, IROp OpPlus t1Branches t2Branches)
-toIRInference meta cumulative (InjF ti name params) sample | isHigherOrder (adtDecls meta) name = do
+toIRInference meta cumulative (InjF ti (Named name) params) sample | isHigherOrder (adtDecls meta) name = do
   let adts = adtDecls meta
   let resolvedName = resolveInjF (rType ti) name
   -- FPair of the InjF with unique names
@@ -785,7 +785,7 @@ toIRInference meta cumulative (InjF ti name params) sample | isHigherOrder (adtD
   let returnP = scale paramExpr
   let appTestExpr e = IRIf appTest e const0
   return (renVar (appTestExpr returnP), renVar (appTestExpr paramDim), renVar (appTestExpr paramBranches))
-toIRInference meta False e@(InjF TypeInfo {tags=extras, rType=rt} name params) sample
+toIRInference meta False e@(InjF TypeInfo {tags=extras, rType=rt} (Named name) params) sample
   | countProbParams params == 0 = do
   -- There is no probabilistic parameter
   -- Check whether the value of the function is equal to the sample
@@ -796,13 +796,13 @@ toIRInference meta False e@(InjF TypeInfo {tags=extras, rType=rt} name params) s
         _        -> OpEq
   retExpr <- indicator $ IROp cmp expr sample
   return (retExpr, const0, const0)
-toIRInference meta True e@(InjF TypeInfo {tags=extras, rType=rt} name params) sample
+toIRInference meta True e@(InjF TypeInfo {tags=extras, rType=rt} (Named name) params) sample
   | countProbParams params == 0 = do
   -- There is no probabilistic parameter
   -- Check whether the value of the function is less than the sample
   expr <- toIRGenerate meta e
   return (compareValueExpr rt expr sample, const0, const0)
-toIRInference meta cumulative e@(InjF TypeInfo {tags=extras} name params) sample
+toIRInference meta cumulative e@(InjF TypeInfo {tags=extras} (Named name) params) sample
   | hasAnyExcept (adtDecls meta) name = do
   -- FPair of the InjF with unique names
   FPair fwd inversions <- instantiate mkVariable (adtDecls meta) name
@@ -849,7 +849,7 @@ toIRInference meta cumulative e@(InjF TypeInfo {tags=extras} name params) sample
   let returnP = scale ifExpr
   let appTestExpr e = IRIf appTest e const0
   return (appTestExpr returnP, appTestExpr ifDim, appTestExpr ifBranches)
-toIRInference meta cumulative e@(InjF TypeInfo {tags=extras, rType=rt} name params) sample
+toIRInference meta cumulative e@(InjF TypeInfo {tags=extras, rType=rt} (Named name) params) sample
   | countProbParams params == 1 = do
   let resolvedName = resolveInjF rt name
   -- FPair of the InjF with unique names
@@ -881,7 +881,7 @@ toIRInference meta cumulative e@(InjF TypeInfo {tags=extras, rType=rt} name para
   let returnP = scale paramExpr
   let appTestExpr e = IRIf appTest e const0
   return (appTestExpr returnP, appTestExpr paramDim, appTestExpr paramBranches)
-toIRInference meta False (InjF TypeInfo {tags=extras, rType=rt} name [left, right]) sample
+toIRInference meta False (InjF TypeInfo {tags=extras, rType=rt} (Named name) [left, right]) sample
   | extras `hasAlgorithm` "injF2Enumerable" = do
   let resolvedName = resolveInjF rt name
   -- Get all possible values for subexpressions
@@ -925,7 +925,7 @@ toIRInference meta False (InjF TypeInfo {tags=extras, rType=rt} name [left, righ
   let branchCountSum = IREnumSum x2 enumListL (IRTSnd (IRTSnd innerTuple))
   return (applyUnique enumSumExpr, const0, applyUnique branchCountSum)
 -- For the cumulative case we cant get around two enum sums
-toIRInference meta True (InjF TypeInfo {tags=extras, rType=rt} name [left, right]) sample
+toIRInference meta True (InjF TypeInfo {tags=extras, rType=rt} (Named name) [left, right]) sample
   | extras `hasAlgorithm` "injF2Enumerable" = do
   let resolvedName = resolveInjF rt name
   -- Get all possible values for subexpressions
@@ -1159,7 +1159,7 @@ toIRGenerate meta (TCons _ t1 t2) = do
   return $ IRTCons t1' t2'
 toIRGenerate meta (Uniform _) = return $ IRSample IRUniform
 toIRGenerate meta (Normal _) = return $ IRSample IRNormal
-toIRGenerate meta (InjF ti name params) = do
+toIRGenerate meta (InjF ti (Named name) params) = do
   -- Assuming that the logic within packParamsIntoLetinsGen typeEnv is correct.
   -- You will need to process vars and params, followed by recursive calls to fwdExpr.
   let resolvedName = resolveInjF (rType ti) name

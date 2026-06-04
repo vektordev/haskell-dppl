@@ -2,7 +2,7 @@ module SPLL.Validator (
   validateProgram
 ) where
 import SPLL.Lang.Types (Program(..), GenericValue(..))
-import SPLL.Lang.Lang (Expr(..), getSubExprs, getFunctionNames)
+import SPLL.Lang.Lang (Expr(..), getSubExprs, getFunctionNames, InjFName(..))
 import Control.Monad
 import Data.Maybe (isJust, isNothing)
 import PredefinedFunctions (globalFEnv, parameterCount)
@@ -20,8 +20,8 @@ validateProgram p@Program{functions=fn, neurals=nurals} = sequence_ exprValidati
     validateAllSubexpressions p topLevel expr = validateExpression p topLevel expr : concatMap (validateAllSubexpressions p topLevel) (getSubExprs expr)
 
 validateExpression :: Program -> Expr -> Expr -> Either String ()
-validateExpression Program {adts=adts} _ (InjF _ name _) | isNothing (lookup name (globalFEnv adts)) = Left ("Cannot find InjF: " ++ name)
-validateExpression Program {adts=adts} _ (InjF _ name params) | parameterCount adts name /= length params = Left("Wrong number of arguments for InjF " ++ name ++ "expected: " ++ show (parameterCount adts name) ++ " got: " ++ show (length params))
+validateExpression Program {adts=adts} _ (InjF _ (Named name) _) | isNothing (lookup name (globalFEnv adts)) = Left ("Cannot find InjF: " ++ name)
+validateExpression Program {adts=adts} _ (InjF _ (Named name) params) | parameterCount adts name /= length params = Left("Wrong number of arguments for InjF " ++ name ++ "expected: " ++ show (parameterCount adts name) ++ " got: " ++ show (length params))
 validateExpression _ _ (LetIn _ name val _) | declarationsCount name val > 0 = Left ("Duplicate declaration of identifier (Shawdowing is not allowed): " ++ name)
 validateExpression _ _ (LetIn _ name _ body) | declarationsCount name body > 0 = Left ("Duplicate declaration of identifier (Shawdowing is not allowed): " ++ name)
 validateExpression Program {adts=adts} _ (LetIn _ name _ _) | isJust (lookup name (globalFEnv adts)) = Left ("Identifier name is already used by an InjF: " ++ name)

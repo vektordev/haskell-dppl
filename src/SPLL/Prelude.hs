@@ -1,7 +1,7 @@
 module SPLL.Prelude where
 
 import SPLL.Lang.Lang
-import SPLL.Lang.Types (makeTypeInfo, GenericValue (..), CompilerError)
+import SPLL.Lang.Types (makeTypeInfo, GenericValue (..), CompilerError, InjFName(..))
 import SPLL.IntermediateRepresentation
 import SPLL.Analysis
 import SPLL.Typing.Infer (addTypeInfo)
@@ -23,7 +23,7 @@ ifThenElse :: Expr -> Expr -> Expr -> Expr
 ifThenElse = IfThenElse makeTypeInfo
 
 injF :: String -> [Expr] -> Expr
-injF = InjF makeTypeInfo
+injF name = InjF makeTypeInfo (Named name)
 
 --Arithmetic
 

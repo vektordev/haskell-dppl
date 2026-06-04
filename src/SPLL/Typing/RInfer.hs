@@ -322,7 +322,7 @@ infer adts expr
           let argConstraint = Constraint funcTy (argTy `TArrow` (rType ti)) (Just "Apply")
           return (rType ti, [argConstraint] ++ c1 ++ c2, Apply ti funcExprTy argExprTy)
           --expr `usingScheme` (Forall [TV "a", TV "b"] (((TVarR $ TV "a") `TArrow` (TVarR $ TV "b")) `TArrow` (TVarR $ TV "a") `TArrow` (TVarR $ TV "b")))
-        e@(InjF ti name params) -> do
+        e@(InjF ti (Named name) params) -> do
           let Just (FPair FDecl {contract=scheme} _) = lookup name (globalFEnv adts)
           usingScheme adts e scheme
         e@(ReadNN ti name sym) -> do

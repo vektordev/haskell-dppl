@@ -60,7 +60,7 @@ discretesTags adts e = maybeToList valuesTag
     valuesTag = fmap DiscreteValues values
     values = case e of
       (Constant _ a) -> Just $ MultiDiscretes [a]
-      (InjF _ name params) -> do
+      (InjF _ (Named name) params) -> do
         paramValues <- mapM getValuesFromExpr params
         let unpackedMultiVals = map multiValueToValueList paramValues
         return $ valueListToMultiValue $ nub $ propagateValues adts name unpackedMultiVals

@@ -551,7 +551,7 @@ infer env expr = case expr of
     (s2, cs2, t2, bt) <- infer env b
     return (compose s2 s1, apply s2 cs1 ++ cs2, t2, LetIn (setPType ti t2) s xt bt)
 
-  InjF ti name paramsExpr -> do
+  InjF ti (Named name) paramsExpr -> do
     p_inf <- mapM (infer env) paramsExpr
     let pts = map trd4 p_inf
     let s_acc = foldl compose emptySubst (map fst4 p_inf)
@@ -559,7 +559,7 @@ infer env expr = case expr of
     let inferredExprs = map frth4 p_inf
     case tryNormalClosure name pts of
       Just pt ->
-        return (s_acc, accCs, pt, InjF (setPType ti pt) name inferredExprs)
+        return (s_acc, accCs, pt, InjF (setPType ti pt) (Named name) inferredExprs)
       Nothing -> do
         -- PNormal/PLogNormal must not propagate through InjFs that aren't in
         -- tryNormalClosure — downgrade them to Integrate so the general
@@ -573,7 +573,7 @@ infer env expr = case expr of
                 let leftPts = map Left pts'
                 in leftPts ++ foldr (\p acc -> [Right $ constraint (Left p) (Right acc)]) [Left p_fst] p_rst
               [] -> []
-        return (s_acc, accCs ++ [(tv,cs)], tv, InjF (setPType ti tv) name inferredExprs)
+        return (s_acc, accCs ++ [(tv,cs)], tv, InjF (setPType ti tv) (Named name) inferredExprs)
 
   Not ti e -> do
       (s1, cs1, t1) <- negInf

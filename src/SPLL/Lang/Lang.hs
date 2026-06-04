@@ -35,6 +35,7 @@ module SPLL.Lang.Lang (
 , getFunctionNames
 , lookupNeural
 , printFlat
+, InjFName(..)
 ) where
 
 import SPLL.Lang.Types
@@ -484,7 +485,7 @@ printFlat expr = case expr of
   LetIn {} -> "LetIn"
   --(LetInD {}) -> "LetInD"
   --(LetInTuple {}) -> "LetInTuple"
-  (InjF t fname _)        -> "InjF (" ++ fname ++ ")"
+  (InjF t (Named fname) _) -> "InjF (" ++ fname ++ ")"
   (Lambda _ name _) -> "\\" ++ name  ++ " -> "
   Apply {} -> "Apply"
   (ReadNN _ name _) -> "ReadNN " ++ name

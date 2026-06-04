@@ -143,28 +143,28 @@ mkMultF varnames size = do
   t <- arbitrary
   e1 <- genExprNames' varnames (size `div` 2)
   e2 <- genExprNames' varnames (size `div` 2)
-  return (InjF t "mult" [e1, e2])
+  return (InjF t (Named "mult") [e1, e2])
 
 mkMultI :: [String] -> Int -> Gen Expr
 mkMultI varnames size = do
   t <- arbitrary
   e1 <- genExprNames' varnames (size `div` 2)
   e2 <- genExprNames' varnames (size `div` 2)
-  return (InjF t "multI" [e1, e2])
+  return (InjF t (Named "multI") [e1, e2])
 
 mkPlusF :: [String] -> Int -> Gen Expr
 mkPlusF varnames size = do
   t <- arbitrary
   e1 <- genExprNames' varnames (size `div` 2)
   e2 <- genExprNames' varnames (size `div` 2)
-  return (InjF t "plus" [e1, e2])
+  return (InjF t (Named "plus") [e1, e2])
 
 mkPlusI :: [String] -> Int -> Gen Expr
 mkPlusI varnames size = do
   t <- arbitrary
   e1 <- genExprNames' varnames (size `div` 2)
   e2 <- genExprNames' varnames (size `div` 2)
-  return (InjF t "plusI" [e1, e2])
+  return (InjF t (Named "plusI") [e1, e2])
 
 mkConditional :: [String] -> Int -> Gen Expr
 mkConditional varnames size = do

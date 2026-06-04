@@ -289,7 +289,7 @@ exprToHornClauses adts e = case e of
 injFtoHornClause :: [ADTDecl] -> Expr -> [HornClause]
 injFtoHornClause adts e = case e of
   -- Forward Horn clause: Inverse Horn clauses with corresponding inversion number 
-  InjF t name params -> (constructInjFHornClause subst eCN name eFwd 0): zipWith (constructInjFHornClause subst eCN name) eInv [1..]
+  InjF t (Named name) params -> (constructInjFHornClause subst eCN name eFwd 0): zipWith (constructInjFHornClause subst eCN name) eInv [1..]
     where
       -- Create a substitution, that maps the variables in the declaration of the InjF
       -- to the ChainNames in the instantiation

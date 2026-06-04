@@ -139,10 +139,10 @@ letInDestructor (TCons _ a b) = do
   a' <- letInDestructor a
   b' <- letInDestructor b
   return $ \v body -> a' (tfst v) (b' (tsnd v) body)
-letInDestructor (InjF _ "left" [x]) = do
+letInDestructor (InjF _ (Named "left") [x]) = do
   x' <- letInDestructor x
   return $ \v -> x' (sfromLeft v)
-letInDestructor (InjF _ "right" [x]) = do
+letInDestructor (InjF _ (Named "right") [x]) = do
   x' <- letInDestructor x
   return $ \v -> x' (sfromRight v)
 letInDestructor (Null _) = return $ \v b -> ifThenElse (isNull v) b (Error makeTypeInfo "RHS of letin is longer than LHS")
@@ -737,7 +737,7 @@ collectApplyChain (Apply _ left arg) =
   in (base, args ++ [arg])  -- maintain order of application
 -- Quick and dirty fix for multi parameter InjFs. The normalizatzion first creates a 1 parameter InjF and then stops with the normalization
 -- We bypass this by tricking the normalization  that the InjF is in reality an application on a variable
-collectApplyChain (InjF t name args) = (Var t name, args)
+collectApplyChain (InjF t (Named name) args) = (Var t name, args)
 collectApplyChain e = (e, [])
 
 -- Helper to map over all expressions in a program

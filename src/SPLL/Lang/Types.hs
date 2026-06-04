@@ -16,10 +16,13 @@ type ChainName = String
 
 type CompilerError = String
 
+data InjFName = Named String
+              deriving (Show, Eq)
+
 data Expr =
               -- Flow Control
                 IfThenElse TypeInfo Expr Expr Expr
-              | InjF TypeInfo String [Expr]
+              | InjF TypeInfo InjFName [Expr]
               -- Variables
               | LetIn TypeInfo String Expr Expr
               | Var TypeInfo String

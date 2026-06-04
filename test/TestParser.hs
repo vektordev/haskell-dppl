@@ -52,7 +52,7 @@ bracket e = "(" ++ exprToString e ++ ")"
 exprToString :: Expr -> String
 exprToString (IfThenElse _ cond tBranch fBranch) =
     "if " ++ bracket cond ++ " then " ++ bracket tBranch ++ " else " ++ bracket fBranch
-exprToString (InjF _ name args) = name ++ " " ++ unwords (map bracket args)
+exprToString (InjF _ (Named name) args) = name ++ " " ++ unwords (map bracket args)
 exprToString (LetIn _ name val body) = "let " ++ name ++ " = " ++ bracket val ++ " in " ++ bracket body
 exprToString (Var _ name) = name
 exprToString (Constant _ value) = valToString value
