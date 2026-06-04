@@ -5,6 +5,7 @@ module SPLL.AutoNeural(
 , PartitionPlan (..)
 , getSize
 , planIndexOf
+, validateEncodeGaussian
 ) where
 
 import SPLL.Lang.Types
@@ -15,9 +16,9 @@ import PrettyPrint
 import StandardLibrary
 
 import Debug.Trace
-import Data.List (find, elemIndex)
+import Data.List (find, elemIndex, isPrefixOf)
 import Utils
-import Data.Maybe (fromJust)
+import Data.Maybe (fromJust, isJust)
 
 -- basic strucutre:
 --  get the partition plan.
@@ -411,5 +412,60 @@ noAny sample = IRIf (IRUnaryOp OpIsAny sample) (IRConst $ VFloat 1)
 
 noAny0 :: IRExpr -> IRExpr -> IRExpr
 noAny0 sample = IRIf (IRUnaryOp OpIsAny sample) (IRConst $ VFloat 0)
+
+------------------------------------------------------------------------
+-- Encode-mode Gaussian validation.
+--
+-- A `Continuous` slot in a decoder's plan is encoded by querying the SPLL program's
+-- normal-parameter function (`main_normal`, or `main_normal_fst`/`_snd` for tuple
+-- components) — see `makeEncodeTopLevelW`.  That function only exists when the
+-- corresponding output node is Gaussian (PType `PNormal`/`PLogNormal`); for a non-Gaussian
+-- continuous output (a mixture produced by `if`, a product of random variables, etc.) the
+-- IRCompiler does not generate it.  Encoding such an output would otherwise dangle on a
+-- missing function reference at runtime.  This check turns that into a clean, attributed
+-- compile error pointing at `collapse` (task encode-07).
+--
+-- The check is encode-specific: a non-Gaussian continuous program is perfectly valid for
+-- probability/generate/integrate inference, so this must not be folded into the shared
+-- `compile` path.
+validateEncodeGaussian :: [ADTDecl] -> [NeuralDecl] -> IREnv -> Either CompilerError ()
+validateEncodeGaussian adts neuralDecls env = mapM_ checkDecl decoderDecls
+  where
+    -- Only decoder declarations (Symbol -> target) build a query-based encode function.
+    decoderDecls = [ (name, target, tag) | (name, TArrow TSymbol target, tag) <- neuralDecls ]
+    available = availableNormalFns env
+    checkDecl (name, target, tag) =
+      let plan     = makePartitionPlan adts target tag
+          required = requiredNormalFns "main_normal" plan
+          missing  = filter (`notElem` available) required
+      in if null missing then Right () else Left (encodeGaussianError name)
+    encodeGaussianError name =
+      "encode: neural declaration '" ++ name ++ "' has a continuous output that is not "
+      ++ "Gaussian (PNormal/PLogNormal) — e.g. a mixture produced by `if`, or a product of "
+      ++ "random variables. A non-Gaussian continuous slot cannot be encoded; insert an "
+      ++ "explicit `collapse` at the offending node (see task encode-07)."
+
+-- | Normal-parameter function names that `encode` references for the Continuous slots of a
+-- plan.  Mirrors the name threading in `makeEncodeTopLevelW` (top-level `main_normal`,
+-- tuple components suffixed `_fst`/`_snd`).  Either/ADT arms are currently zero-stubbed and
+-- reference no normal function, so they contribute no requirement.
+requiredNormalFns :: String -> PartitionPlan -> [String]
+requiredNormalFns nf Continuous       = [nf]
+requiredNormalFns nf (TuplePlan a b)  = requiredNormalFns (nf ++ "_fst") a
+                                     ++ requiredNormalFns (nf ++ "_snd") b
+requiredNormalFns _  (Discretes _ _)  = []
+requiredNormalFns _  (EitherPlan _ _) = []
+requiredNormalFns _  (ADTPlan _ _)    = []
+
+-- | Normal-parameter function names actually present in the compiled environment.  Mirrors
+-- the registration in `reduceIREnv`: `_component_<name>` groups register under `<name>`,
+-- every other group's normal function registers under `<groupName>_normal`.
+availableNormalFns :: IREnv -> [String]
+availableNormalFns (IREnv groups _ _) =
+  [ normalName g | g <- groups, isJust (normalFun g) ]
+  where
+    normalName g
+      | "_component_" `isPrefixOf` groupName g = drop (length "_component_") (groupName g)
+      | otherwise                              = groupName g ++ "_normal"
 
 -- MAR semantics for EitherPlan encoding are implemented in makeEncodeTopLevelW/makeEncodeEitherArm.

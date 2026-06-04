@@ -942,11 +942,13 @@ runSpecifiedTests opts = do
     , runHUnit "encodeProps_gaussianSub"            encodeProps_gaussianSub
     , runHUnit "encodeProps_eitherFlagInUnitInterval"  encodeProps_eitherFlagInUnitInterval
     , runHUnit "encodeProps_eitherFlagSignMatchesSide" encodeProps_eitherFlagSignMatchesSide
+    , runHUnit "encodeProps_eitherIfMixtureFlag"       encodeProps_eitherIfMixtureFlag
     , runHUnit "encodeProps_adtSingleConstrFlagIsOne"  encodeProps_adtSingleConstrFlagIsOne
     , runHUnit "encodeInvariant_sigmaPositive"         encodeInvariant_sigmaPositive
     , runHUnit "encodeInvariant_discreteNonNegative"   encodeInvariant_discreteNonNegative
     , runHUnit "encodeInvariant_discreteSumsToOne"     encodeInvariant_discreteSumsToOne
     , runHUnit "encodeInvariant_outputDimMatchesPlan"  encodeInvariant_outputDimMatchesPlan
+    , runHUnit "encodeError_continuousMixtureRequiresCollapse" encodeError_continuousMixtureRequiresCollapse
     ]
   d <- if disableEnd2End opts then return True else test_end2end tlog
   if showTimings opts then printTimingSummary tlog else return ()

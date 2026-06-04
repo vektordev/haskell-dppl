@@ -67,6 +67,7 @@ module SPLL.Prelude
 
 import SPLL.Lang.Lang
 import SPLL.Lang.Types (makeTypeInfo, GenericValue (..), CompilerError, InjFName(..))
+import SPLL.AutoNeural (validateEncodeGaussian)
 import SPLL.IntermediateRepresentation
 import SPLL.Analysis
 import SPLL.Typing.Infer (addTypeInfo)
@@ -340,6 +341,7 @@ runEncode :: CompilerConfig -> Program -> [IRValue] -> Either CompilerError IRVa
 runEncode _ p _ | isLeft (validateProgram p) = fmap (error "Impossible case") (validateProgram p)
 runEncode conf p outerArgs = do
   compiled <- compile conf p
+  validateEncodeGaussian (adts p) (neurals p) compiled
   let IREnv groups _ _ = compiled
   case filter (isJust . encodeFun) groups of
     [] -> Left "No encode function found in compiled program"
