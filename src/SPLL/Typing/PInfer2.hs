@@ -575,12 +575,6 @@ infer env expr = case expr of
               [] -> []
         return (s_acc, accCs ++ [(tv,cs)], tv, InjF (setPType ti tv) (Named name) inferredExprs)
 
-  Not ti e -> do
-      (s1, cs1, t1) <- negInf
-      (s2, cs2, t2, et) <- applyOpArg env e s1 cs1 t1
-      return (s2, cs2, t2, Not (setPType ti t2) et)
-
-  Equals ti e1 e2     -> inferBinOp env ti e1 e2 compInf Equals
   GreaterThan ti e1 e2 -> inferBinOp env ti e1 e2 compInf GreaterThan
   LessThan ti e1 e2   -> inferBinOp env ti e1 e2 compInf LessThan
   And ti e1 e2        -> inferBinOp env ti e1 e2 downgradeInf And

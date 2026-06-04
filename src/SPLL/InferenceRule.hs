@@ -42,17 +42,6 @@ mirrorC (SubExprNIsEnumerable 0) = SubExprNIsEnumerable 1
 mirrorC (SubExprNIsEnumerable 1) = SubExprNIsEnumerable 0
 mirrorC c = error ("can not mirror Constraint: " ++ show c)
 
-equalsLeft :: InferenceRule
-equalsLeft = InferenceRule
-                    StubEquals
-                    [SubExprNIsType 0 Deterministic]
-                    "equalsLeft"
-                    (const Integrate)
-                    (Forall [TV "a"] [] (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TBool)))
-
-equalsRight :: InferenceRule
-equalsRight = mirror2 equalsLeft
-
 greaterThanLeft :: InferenceRule
 greaterThanLeft = InferenceRule
                     StubGreaterThan
@@ -201,14 +190,6 @@ tcons = InferenceRule
           (mostChaotic . (Prob:))
           (Forall [TV "a", TV "b"] [] ((TVarR $ TV "a") `TArrow` ((TVarR $ TV "b") `TArrow` (Tuple (TVarR $ TV "a") (TVarR $ TV "b")))))
 
-exprNot :: InferenceRule
-exprNot = InferenceRule
-            StubNot
-            []
-            "tcons"
-            mostChaotic
-            (Forall [] [] (TBool `TArrow` TBool))
-
 errorr :: InferenceRule
 errorr = InferenceRule
             StubError
@@ -219,8 +200,6 @@ errorr = InferenceRule
 
 allAlgorithms :: [InferenceRule]
 allAlgorithms = [
-  equalsLeft,
-  equalsRight,
   ifThenElse,
   theta,
   thetaSubTree,
@@ -241,6 +220,5 @@ allAlgorithms = [
   injF2ResolvesToDistribution,
   cons,
   tcons,
-  exprNot,
   errorr
   ]

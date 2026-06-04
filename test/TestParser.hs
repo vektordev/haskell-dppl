@@ -69,7 +69,6 @@ exprToString (GreaterThan _ e1 e2) = bracket e1 ++ " > " ++ bracket e2
 exprToString (LessThan _ e1 e2) = bracket e1 ++ " < " ++ bracket e2
 exprToString (And _ e1 e2) = bracket e1 ++ " && " ++ bracket e2
 exprToString (Or _ e1 e2) = bracket e1 ++ " || " ++ bracket e2
-exprToString (Not _ e) = "not " ++ bracket e
 exprToString (ReadNN _ name expr) = "readNN " ++ name ++ " " ++ bracket expr
 
 fnDeclToString :: FnDecl -> String

@@ -457,17 +457,6 @@ toIRInference meta False (ThetaI _ a i) sample = do
   a' <- toIRGenerate meta a
   expr <- indicator (IROp OpApprox sample (IRTheta a' i))
   return (expr, const0, IRConst (VFloat 1))
-toIRInference meta False (Equals TypeInfo{rType=rt, tags=extras} a b) sample = do
-  let (detParam, probParam) =
-        if extras `hasAlgorithm` "equalsLeft" then
-          (a, b)
-        else if extras `hasAlgorithm` "equalsRight" then
-          (b, a)
-        else
-          error "No parameter of equals is deterministic"
-  detGen <- toIRGenerate meta detParam
-  (p, d, bc) <- toIRInference meta False probParam detGen
-  return $ (IRIf sample p (IROp OpSub (IRConst $ VFloat 1) p), d, bc)
 toIRInference meta cumulative (IfThenElse t cond left right) sample = do
   var_condT_p <- mkVariable "condT"
   var_condF_p <- mkVariable "condF"
@@ -566,8 +555,6 @@ toIRInference meta False (LessThan (TypeInfo {rType = t, tags = extras}) left ri
     setVariables [(var2, integrate)]
     let returnExpr = IRIf sample (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))
     return (returnExpr, const0, integrateBranches)
-toIRInference meta cumulative (Not (TypeInfo {rType = TBool}) f) sample =
-  toIRInference meta cumulative f (IRUnaryOp OpNot sample)
 toIRInference meta cumulative (And (TypeInfo {rType = TBool}) a b) sample = do
   (aP, aDim, aBC) <- toIRInference meta cumulative a (IRConst $ VBool True)
   (bP, bDim, bBC) <- toIRInference meta cumulative b (IRConst $ VBool True)
@@ -1118,10 +1105,6 @@ toIRGenerate meta (LetIn _ n v b) = do
   v' <- toIRGenerate meta v
   b' <- toIRGenerate meta b
   return $ IRLetIn n v' b'
-toIRGenerate meta (Equals _ a b) = do
-  a' <- toIRGenerate meta a
-  b' <- toIRGenerate meta b
-  return $ IROp OpEq a' b'
 toIRGenerate meta (GreaterThan _ left right) = do
   l <- toIRGenerate meta left
   r <- toIRGenerate meta right
@@ -1130,9 +1113,6 @@ toIRGenerate meta (LessThan _ left right) = do
   l <- toIRGenerate meta left
   r <- toIRGenerate meta right
   return $ IROp OpLessThan l r
-toIRGenerate meta (Not _ f) = do
-  f' <- toIRGenerate meta f
-  return $ IRUnaryOp OpNot f'
 toIRGenerate meta (And _ a b) = do
   a' <- toIRGenerate meta a
   b' <- toIRGenerate meta b

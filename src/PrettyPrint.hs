@@ -40,12 +40,10 @@ pPrintExpr (Subtree _ e n) i = "Subtree_" ++ show n ++ "(" ++ pPrintExpr e i ++ 
 pPrintExpr (Cons _ h t) i = pPrintExpr h i ++ " : " ++ pPrintExpr t i
 pPrintExpr (TCons _ h t) i = "(" ++ pPrintExpr h i ++ ", " ++ pPrintExpr t i ++ ")"
 pPrintExpr (Null _) _ = "null"
-pPrintExpr (Equals _ a b) i = "(" ++ pPrintExpr a i ++ " == " ++ pPrintExpr b i ++ ")"
 pPrintExpr (GreaterThan _ a b) i = "(" ++ pPrintExpr a i ++ " > " ++ pPrintExpr b i ++ ")"
 pPrintExpr (LessThan _ a b) i = "(" ++ pPrintExpr a i ++ " < " ++ pPrintExpr b i ++ ")"
 pPrintExpr (And _ a b) i = "(" ++ pPrintExpr a i ++ " && " ++ pPrintExpr b i ++ ")"
 pPrintExpr (Or _ a b) i = "(" ++ pPrintExpr a i ++ " || " ++ pPrintExpr b i ++ ")"
-pPrintExpr (Not _ e) i = "!(" ++ pPrintExpr e i ++ ")"
 pPrintExpr (ReadNN _ n e) i = "readNN(" ++ n ++ ", " ++ pPrintExpr e i ++ ")"
 pPrintExpr (Error _ e) i = "error(" ++ e ++ ")"
 

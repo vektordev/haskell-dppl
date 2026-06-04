@@ -42,10 +42,8 @@ data Expr =
               -- Boolean Operations
               | GreaterThan TypeInfo Expr Expr
               | LessThan TypeInfo Expr Expr
-              | Equals TypeInfo Expr Expr   -- deprecated in favor of injF "eq"
               | And TypeInfo Expr Expr
               | Or TypeInfo Expr Expr
-              | Not TypeInfo Expr
               -- Other
               | ReadNN TypeInfo String Expr
               | Error TypeInfo String
@@ -56,13 +54,11 @@ data Expr =
 data ExprStub = StubIfThenElse
               | StubGreaterThan
               | StubLessThan
-              | StubEquals
               | StubThetaI
               | StubSubtree
               | StubUniform
               | StubNormal
               | StubConstant
-              | StubNot
               | StubAnd
               | StubOr
               | StubNull

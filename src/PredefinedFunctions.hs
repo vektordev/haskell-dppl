@@ -106,6 +106,11 @@ multIInv1 = FDecl (Forall [] [] (TInt `TArrow` (TInt `TArrow` TInt))) ["a", "c"]
 multIInv2 :: FDecl
 multIInv2 = FDecl (Forall [] [] (TInt `TArrow` (TInt `TArrow` TInt))) ["b", "c"] ["a"] (IROp OpDiv (IRVar "c") (IRVar "b")) (IRConst (VBool True)) False [("b", IRUnaryOp OpNeg (IROp OpDiv (IRVar "c") (IROp OpMult (IRVar "b") (IRVar "b")))), ("c", IROp OpDiv (IRConst (VFloat 1)) (IRVar "b"))]
 
+notFwd :: FDecl
+notFwd = FDecl (Forall [] [] (TBool `TArrow` TBool)) ["a"] ["b"] (IRUnaryOp OpNot (IRVar "a")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1))]
+notInv :: FDecl
+notInv = FDecl (Forall [] [] (TBool `TArrow` TBool)) ["b"] ["a"] (IRUnaryOp OpNot (IRVar "b")) (IRConst (VBool True)) False [("b", IRConst (VFloat 1))]
+
 eqFwd :: FDecl
 eqFwd = FDecl (Forall [TV "a"] [] (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TBool))) ["a", "b"] ["c"] (IROp OpEq (IRVar "a") (IRVar "b")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))]
 eqInv1 :: FDecl
@@ -187,6 +192,7 @@ globalFenv' = [("double", FPair doubleFwd [doubleInv]),
               ("plusI", FPair plusIFwd [plusIInv1, plusIInv2]),
               ("mult", FPair multFwd [multInv1, multInv2]),
               ("multI", FPair multIFwd [multIInv1, multIInv2]),
+              ("not", FPair notFwd [notInv]),
               ("eq", FPair eqFwd [eqInv1, eqInv2]),
               ("fst", FPair fstFwd [fstInv]),
               ("snd", FPair sndFwd [sndInv]),

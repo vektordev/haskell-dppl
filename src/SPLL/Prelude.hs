@@ -191,7 +191,7 @@ sfromRight x = injF "fromRight" [x]
 (#||#) = Or makeTypeInfo
 
 (#!#) :: Expr -> Expr
-(#!#) = Not makeTypeInfo
+(#!#) x = InjF makeTypeInfo (Named "not") [x]
 
 -- Other
 
