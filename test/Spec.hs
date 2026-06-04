@@ -52,7 +52,7 @@ import Data.List (isInfixOf)
 
 -- Generalizing over different compilation stages, we can fit all "this typing is what the compiler would find" cases.
 class Recompilable a where
-  recompile :: a -> Either CompileError a
+  recompile :: a -> Either CompilerError a
 
 untypeP :: Program -> Program
 untypeP (Program defs neuralDecl adts) = Program (map (\(a,b) -> (a, untypeE b)) defs) neuralDecl adts
@@ -61,10 +61,10 @@ untypeE :: Expr -> Expr
 untypeE = tMap (const makeTypeInfo)
 
 instance Recompilable Program where
-  recompile = infer . untypeP
+  recompile = addTypeInfo . untypeP
 
 instance Recompilable Expr where
-  recompile e = case infer $ makeMain $ untypeE e of
+  recompile e = case addTypeInfo $ makeMain $ untypeE e of
     Right (Program [("main", d)] _ _) -> Right d
     Left x -> Left x
     Right (Program _ _ _) -> error "unexpected error when recompiling Expr TypeInfo."
