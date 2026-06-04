@@ -1,7 +1,23 @@
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 
-module Utils where
+module Utils
+  ( splitByString
+  , mapTup3
+  , mapToTup
+  , mapAppendTup
+  , mapAppendTup3
+  , uncurry4
+  , concatMapM
+  , replaceAt
+  , fixpoint
+  , Supply
+  , MonadSupply
+  , demandUniqueNumber
+  , evalSupply
+  , DAGEdge(..)
+  , topSortDAG
+  ) where
 
 import Control.Monad.State
 import Data.Graph

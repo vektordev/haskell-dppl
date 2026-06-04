@@ -1,6 +1,15 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE InstanceSigs #-}
-module SPLL.Typing.ForwardChaining where
+module SPLL.Typing.ForwardChaining
+  ( FCData(..)
+  , ExprInfo(..)
+  , annotateProg
+  , progToFCData
+  , toInvExpr
+  , findEquivalentExpression
+  , findExprWithCN
+  , unwrapLambdas
+  ) where
 import SPLL.Lang.Types hiding (HornClause)
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types (Program(Program))

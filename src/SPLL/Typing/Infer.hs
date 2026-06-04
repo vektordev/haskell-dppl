@@ -1,27 +1,12 @@
-module SPLL.Typing.Infer where
+module SPLL.Typing.Infer
+  ( addTypeInfo
+  ) where
 
-import SPLL.Lang.Lang
-import SPLL.Typing.Typing
-import SPLL.Typing.RType
-import SPLL.Typing.PType
+import SPLL.Lang.Lang (Program)
 import SPLL.Typing.RInfer
 import SPLL.Typing.PInfer2
 import SPLL.Lang.Types (CompilerError)
 
-data CompileError = RErr RTypeError | PErr PTypeError deriving (Show)
-
-wrapRErr :: Either RTypeError a -> Either CompileError a
-wrapRErr (Left err) = Left (RErr err)
-wrapRErr (Right x) = Right x
-
-wrapPErr :: Either PTypeError a -> Either CompileError a
-wrapPErr (Left err) = Left (PErr err)
-wrapPErr (Right x) = Right x
-
-infer :: Program -> Either CompileError Program
-infer p = do
-  x <- wrapRErr $ tryAddRTypeInfo p
-  wrapPErr $ tryAddPTypeInfo x
 
 addTypeInfo :: Program -> Either CompilerError Program
 addTypeInfo p = addRTypeInfo p >>= addPTypeInfo 

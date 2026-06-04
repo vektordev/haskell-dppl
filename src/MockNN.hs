@@ -1,4 +1,8 @@
-module MockNN where
+module MockNN
+  ( evaluateMockNN
+  , symbolEnvName
+  , neuralRTypeToEnv
+  ) where
 
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types

@@ -1,5 +1,15 @@
 -- | Core return-type definitions for SPLL.
-module SPLL.Typing.RType where
+module SPLL.Typing.RType
+  ( TVarR(..)
+  , RType(..)
+  , ClassConstraint(..)
+  , Scheme(..)
+  , matches
+  , greaterType
+  , isOnlyNumbers
+  , satisfiesClass
+  , constraintTV
+  ) where
 
 newtype TVarR = TV String
   deriving (Show, Eq, Ord)

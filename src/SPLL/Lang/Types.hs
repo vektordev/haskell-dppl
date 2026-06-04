@@ -1,4 +1,28 @@
-module SPLL.Lang.Types where
+module SPLL.Lang.Types
+  ( ChainName
+  , CompilerError
+  , InjFName(..)
+  , Expr(..)
+  , ExprStub(..)
+  , TypeInfo(..)
+  , makeTypeInfo
+  , Name
+  , Program(..)
+  , FnDecl
+  , NeuralDecl
+  , ADTDecl(..)
+  , ADTConstructorDecl
+  , ThetaTree(..)
+  , GenericList(..)
+  , ValueList
+  , Value
+  , GenericValue(..)
+  , isVFloat, isVEither, isVTuple, isVADT
+  , MultiValue(..)
+  , Tag(..)
+  , RuleConstraint(..)
+  , InferenceRule(..)
+  ) where
 
 
 import SPLL.Typing.PType

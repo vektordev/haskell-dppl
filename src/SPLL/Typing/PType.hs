@@ -1,4 +1,13 @@
-module SPLL.Typing.PType where
+module SPLL.Typing.PType
+  ( TVar(..)
+  , PType(..)
+  , isBasicType
+  , downgrade
+  , downgrade2
+  , upgrade
+  , mostChaotic
+  , mostStructured
+  ) where
 
 import Data.Bifunctor (second)
 

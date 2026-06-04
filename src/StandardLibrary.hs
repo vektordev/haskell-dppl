@@ -1,4 +1,12 @@
-module StandardLibrary where
+module StandardLibrary
+  ( StandardFunction(..)
+  , stdIndexOf
+  , stdListProd
+  , stdListConcat
+  , invokeStandardFunction
+  , standardLibrary
+  , standardEnv
+  ) where
 import SPLL.IntermediateRepresentation (IRExpr(..), Operand (..))
 import SPLL.Lang.Types
 

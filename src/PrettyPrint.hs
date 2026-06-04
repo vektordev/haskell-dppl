@@ -1,4 +1,9 @@
-module PrettyPrint where
+module PrettyPrint
+  ( pPrintProg
+  , pPrintIREnv
+  , pPrintExpr
+  , pPrintIRExpr
+  ) where
 
 import SPLL.Lang.Lang
 import Data.List (intercalate)
