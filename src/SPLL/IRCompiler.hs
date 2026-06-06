@@ -458,8 +458,6 @@ toIRInference meta cumulative (IfThenElse _ cond left right) sample = do
   var_condF_p <- mkVariable "condF"
   (condTrueExpr, condTrueDim, condTrueBranches) <- toIRInference meta False  cond (IRConst (VBool True))
   (condFalseExpr, condFalseDim, _) <- toIRInference meta False cond (IRConst (VBool False))
-  (_, _, _) <- toIRInference meta cumulative left sample
-  (_, _, _) <- toIRInference meta cumulative right sample
   setVariables [(var_condT_p, condTrueExpr), (var_condF_p, condFalseExpr)]
   -- p(y) = if p_cond < thresh then p_else(y) * (1-p_cond(y)) else if p_cond > 1 - thresh then p_then(y) * p_cond(y) else p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
   let thr = topKThreshold (compilerConfig meta)
