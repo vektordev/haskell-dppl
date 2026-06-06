@@ -3,27 +3,22 @@ generateDet,
 generateRand
 ) where
 
-import Statistics.Distribution (ContGen, genContVar, quantile, density)
+import Statistics.Distribution (quantile)
 import SPLL.IntermediateRepresentation
-import SPLL.Lang.Lang (Value(..), ThetaTree(..), Program, elementAt, constructVList, lookupNeural, floatApproxEqThresh, multiValueToValueList, valueInMultiValue)
+import SPLL.Lang.Lang (elementAt, lookupNeural, floatApproxEqThresh, multiValueToValueList, valueInMultiValue)
 import StandardLibrary
 import MockNN
 import SPLL.AutoNeural
 
 import Control.Monad.Random
 import Statistics.Distribution.Normal (normalDistr)
-import Data.Foldable
 import Data.Number.Erf
-import Debug.Trace
-import Data.Data
-import Data.Either (fromRight)
-import Data.Bifunctor (second)
-import Data.Maybe (fromMaybe, fromJust, isJust, catMaybes)
+import Data.Maybe (fromJust, isJust, catMaybes)
 import Data.List (isSuffixOf, isPrefixOf)
-import Data.Foldable (toList)
 import SPLL.Lang.Types
 import SPLL.Typing.RType
 import Data.Functor ((<&>))
+import Data.Foldable (foldrM)
 import SPLL.Typing.AlgebraicDataTypes
 import Data.Vector.Internal.Check (HasCallStack)
 
@@ -57,7 +52,7 @@ generate f neurals adts globalEnv env args expr | args /= [] = do
   let reverseArgs = reverse args
   let newExpr = foldr (flip IRApply) expr reverseArgs
   generate f neurals adts globalEnv env [] newExpr
-generate f neurals adts globalEnv env [] (IRLambda name expr) = do
+generate _ _ _ _ env [] (IRLambda name expr) = do
   return $ VClosure env name expr
 generate f neurals adts globalEnv env [] (IRApply (IRVar name) sym)
   | Just (rt, tags) <- lookupNeural name neurals = do
@@ -186,8 +181,8 @@ generate f neurals adts globalEnv env [] (IROp OpEq a b) = do
         (VADT n1 vs1, VADT n2 vs2) -> n1 == n2 && all (\(v1, v2) -> v1 == VAny || v2 == VAny || cmp v1 v2) (zip vs1 vs2)
         (VUnit, VUnit) -> True
         -- Any is not equal to anything
-        (VAny, b) -> False
-        (a, VAny) -> False
+        (VAny, _) -> False
+        (_, VAny) -> False
         _ -> error ("Type error: Equals can only evaluate on two values: " ++ show (aVal, bVal))
   return $ VBool (cmp aVal' bVal')
 generate f neurals adts globalEnv env [] (IROp OpApprox a b) = do
@@ -252,7 +247,7 @@ generate f neurals adts globalEnv env [] (IRSubtree a i) = do
   tt <- generate f neurals adts globalEnv env [] a
   let VThetaTree (ThetaTree _ subtrees) = tt
   return $ VThetaTree (subtrees!!i)
-generate f neurals adts globalEnv env [] (IRConst val) = return val
+generate _ _ _ _ _ [] (IRConst val) = return val
 generate f neurals adts globalEnv env [] (IRCons hd tl) = do
   ls <- generate f neurals adts globalEnv env [] tl
   case ls of
@@ -322,14 +317,14 @@ generate f neurals adts globalEnv env [] (IRFromRight expr) = do
 generate f neurals adts globalEnv env [] (IRIsLeft expr) = do
   x <- generate f neurals adts globalEnv env [] expr
   case x of
-    VEither (Left r) -> return (VBool True)
-    VEither (Right r) -> return (VBool False)
+    VEither (Left _) -> return (VBool True)
+    VEither (Right _) -> return (VBool False)
     _ -> error $ "Type error: isLeft requires an either: " ++ show x
 generate f neurals adts globalEnv env [] (IRIsRight expr) = do
   x <- generate f neurals adts globalEnv env [] expr
   case x of
-    VEither (Left r) -> return (VBool False)
-    VEither (Right r) -> return (VBool True)
+    VEither (Left _) -> return (VBool False)
+    VEither (Right _) -> return (VBool True)
     _ -> error $ "Type error: isLeft requires an either: " ++ show x
 generate f neurals adts globalEnv env [] (IRDensity IRUniform expr) = do
   x <- generate f neurals adts globalEnv env [] expr
@@ -343,9 +338,9 @@ generate f neurals adts globalEnv env [] (IRCumulative IRUniform expr) = do
 generate f neurals adts globalEnv env [] (IRCumulative IRNormal expr) = do
   x <- generate f neurals adts globalEnv env [] expr
   return $ irCDF IRNormal x
-generate f neurals adts globalEnv env [] (IRSample IRUniform) =
+generate f _ _ _ _ [] (IRSample IRUniform) =
   uniformGen f
-generate f neurals adts globalEnv env [] (IRSample IRNormal) =
+generate f _ _ _ _ [] (IRSample IRNormal) =
   normalGen f
 -- Let in evaluates the declaration expression to avoid sampling the same term multiple times
 generate f neurals adts globalEnv env args (IRLetIn name decl body) = do
@@ -400,14 +395,14 @@ generate f neurals adts globalEnv env args (IRIndex lstExpr idxExpr) = do
       _ -> error "Index must be an integer"
     _ -> error "Expression must be a list"
 generate _ _ _ _ _ _ (IRError s) = error $ "Error during interpretation: " ++ s
-generate f neurals adts _ _ _ expr = error ("Expression is not yet implemented " ++ show expr)
+generate _ _ _ _ _ _ expr = error ("Expression is not yet implemented " ++ show expr)
 
 -- Reduces the complex data structure of an IREnv to a simpler reduced form
 -- Does this by creating a list of Maybe IRExpressions for each triple of gen, prob, and integ functions and then removes the Nothings
 reduceIREnv :: IREnv -> ReducedIREnv
 reduceIREnv (IREnv funcs _ consts) =
   map (\(name, val) -> (name, IRConst val)) consts ++
-  concatMap (\(IRFunGroup name gen prob integ encode normal doc) ->
+  concatMap (\(IRFunGroup name gen prob integ encode normal _) ->
     -- Special handling for per-component normal functions (created with "_component_" prefix)
     if "_component_" `isPrefixOf` name then
       -- Extract the actual component name and register without suffix
@@ -431,7 +426,7 @@ irPDF :: Distribution -> IRValue -> IRValue
 --irPDF _ VAny = VFloat 1
 irPDF IRUniform (VFloat x) = if x >= 0 && x <= 1 then VFloat 1 else VFloat 0
 irPDF IRNormal (VFloat x) = VFloat ((1 / sqrt (2 * pi)) * exp (-0.5 * x * x))
-irPDF expr x = error ("Expression must be the density of a valid distribution" ++ show x)
+irPDF _ x = error ("Expression must be the density of a valid distribution" ++ show x)
 
 irCDF :: Distribution -> IRValue -> IRValue
 irCDF IRUniform (VFloat x) = VFloat $ if x < 0 then 0 else if x > 1 then 1 else x

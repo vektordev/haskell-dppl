@@ -27,13 +27,7 @@ module SPLL.Lang.Types
 
 import SPLL.Typing.PType
 import SPLL.Typing.RType
-import qualified Data.Map as Map
-import Control.Applicative (liftA2)
-import Control.Monad.Random.Lazy (Random)
-import Data.Number.Erf (Erf)
 import Data.Bifunctor (second)
-
-import Data.Maybe
 
 
 type ChainName = String
@@ -140,12 +134,12 @@ instance Functor GenericList where
   fmap _ AnyList = AnyList
 
 instance Foldable GenericList where
-  foldMap f EmptyList = mempty
+  foldMap _ EmptyList = mempty
   foldMap f (ListCont x xs) = f x `mappend` foldMap f xs
-  foldMap f AnyList = error "Cannot fold AnyLists"
+  foldMap _ AnyList = error "Cannot fold AnyLists"
 
 instance Traversable GenericList where
-  traverse f EmptyList = pure EmptyList
+  traverse _ EmptyList = pure EmptyList
   traverse f (ListCont x xs) = ListCont <$> f x <*> traverse f xs
   traverse _ AnyList = error "AnyLists are not traversable"
 

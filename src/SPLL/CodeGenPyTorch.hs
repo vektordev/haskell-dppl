@@ -8,12 +8,9 @@ module SPLL.CodeGenPyTorch (
 
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types
-import Data.List (intercalate, isPrefixOf, isSuffixOf, nub, find)
-import Data.Char (toUpper, toLower)
-import Data.Maybe (fromJust, fromMaybe)
-import Debug.Trace (trace, traceShowId)
-import Data.Foldable
-import SPLL.Lang.Lang (constructVList, multiValueToValueList)
+import Data.List (intercalate, isPrefixOf)
+import Data.Char (toUpper)
+import Data.Maybe (fromMaybe)
 import Control.Monad.State (StateT (runStateT), MonadState (get, put), MonadTrans (lift))
 import Utils (Supply, demandUniqueNumber, evalSupply)
 
@@ -55,7 +52,7 @@ wrapMultiBlock (prefix:infixes) (block:blocks) = if length block == 1 then y els
     rest = wrapMultiBlock infixes blocks
     x = [prefix ++ head block] ++ indentOnce (filet block ++ [last block ++ head rest]) ++ tail rest
     y = [prefix ++ head block ++ head rest] ++ tail rest
-wrapMultiBlock x y = error "uneven list lengths in wrapMultiBlock"
+wrapMultiBlock _ _ = error "uneven list lengths in wrapMultiBlock"
 
 indentOnce :: [String] -> [String]
 indentOnce = map ("    " ++)
@@ -63,7 +60,7 @@ indentOnce = map ("    " ++)
 spicyHead :: [a] -> a
 spicyHead [x] = x
 spicyHead [] = error "empty list in head"
-spicyHead x = error "overfull list in head"
+spicyHead _ = error "overfull list in head"
 
 pyOps :: Operand -> String
 pyOps OpPlus = "+"

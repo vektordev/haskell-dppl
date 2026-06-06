@@ -8,14 +8,12 @@ import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types
 import SPLL.Lang.Lang
 import SPLL.AutoNeural
-import SPLL.Typing.RType
 
 import System.Random
 import Data.List (elemIndex)
 import Data.Maybe (fromMaybe)
 import Control.Monad.Random
 import Data.Functor ((<&>))
-import Debug.Trace
 import Data.Foldable (Foldable(toList))
 import Utils
 
@@ -37,7 +35,7 @@ randomMockNN part@(Discretes _ _) = do
   let sumRands = sum uniformRands
   let normalized = map (/ sumRands) uniformRands
   return $ constructVList (map VFloat normalized)
-randomMockNN part@(EitherPlan planL planR) = do
+randomMockNN (EitherPlan planL planR) = do
   selector <- getRandom
   leftMock <- randomMockNN planL
   let VList lMockL = leftMock
@@ -45,7 +43,7 @@ randomMockNN part@(EitherPlan planL planR) = do
   let VList rMockL = rightMock
   let res = VFloat selector : toList lMockL ++ toList rMockL
   return (constructVList res)
-randomMockNN part@(TuplePlan planF planS) = do
+randomMockNN (TuplePlan planF planS) = do
   fstMock <- randomMockNN planF
   let VList fMockL = fstMock
   sndMock <- randomMockNN planS
@@ -56,7 +54,7 @@ randomMockNN Continuous = do
   mu <- getRandom
   sigmaRaw <- getRandom
   return $ constructVList [VFloat mu, VFloat (abs sigmaRaw + 0.1)]
-randomMockNN part@(ADTPlan dataName constrs) = do
+randomMockNN (ADTPlan _ constrs) = do
   let cntConstrs = length constrs
   selectors <- randomList cntConstrs
   let selectorsNorm = map (/ sum selectors) selectors
@@ -108,7 +106,7 @@ spikingMockNN (EitherPlan planL planR) (VEither v) = do
           let VList rMockL = rightMock
           let res = VFloat selector : toList lMockL ++ toList rMockL
           return (constructVList res)
-spikingMockNN (ADTPlan dataName constrs) (VList lst) = do
+spikingMockNN (ADTPlan _ constrs) (VList lst) = do
   let VInt constrSelect:fieldSpikes = toList lst
 
   let cntConstrs = length constrs

@@ -8,9 +8,7 @@ module SPLL.Typing.AlgebraicDataTypes (
 ) where
 import SPLL.Lang.Types
 import SPLL.Typing.RType
-import System.IO.Error.Lens (errno)
 import SPLL.IntermediateRepresentation (IRExpr (..))
-import Debug.Trace
 import Data.Vector.Internal.Check (HasCallStack)
 
 implicitFunctionsRTypeProg :: Program -> [(String, RType)]
@@ -47,7 +45,7 @@ implicitFunctionsToEnv decl = map (\(n, rt) -> (n, createLambdaFromRType rt 0 (I
 
 createLambdaFromRType :: RType -> Int -> IRExpr -> IRExpr
 createLambdaFromRType (_ `TArrow` rt) idx inner = IRLambda ("x" ++ show idx) (createLambdaFromRType rt (idx + 1) inner)
-createLambdaFromRType _ idx inner = inner
+createLambdaFromRType _ _ inner = inner
 
 implicitFunctionImpl :: (Show a, HasCallStack) => [ADTDecl] -> String -> [GenericValue a] -> GenericValue a
 --implicitFunctionImpl decls fName params | trace (show decls ++ " || " ++ fName ++ " || " ++ show params) False = undefined

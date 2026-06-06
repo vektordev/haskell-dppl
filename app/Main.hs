@@ -2,27 +2,20 @@ module Main (main) where
 
 import Options.Applicative
 import SPLL.Lang.Lang (Program)
-import SPLL.Examples
-import System.IO
-import System.Exit
 import SPLL.IntermediateRepresentation
-import Data.Char (toLower)
 import SPLL.Parser
-import System.Exit (exitFailure)
+import Data.Char (toLower)
 import Text.Megaparsec.Error (errorBundlePretty)
-import SPLL.Lang.Types (Value(..), GenericValue (..), CompilerError, GenericList (EmptyList))
-import Text.Read
+import SPLL.Lang.Types (CompilerError)
 import SPLL.Prelude (runProb, runInteg, runGen, compile)
-import Control.Monad.Random (randomIO, evalRandIO)
-import SPLL.IntermediateRepresentation (CompilerConfig(..))
-import Data.Foldable (asum)
+import Control.Monad.Random (evalRandIO)
 import qualified SPLL.CodeGenJulia
 import qualified SPLL.CodeGenPyTorch
 import Data.List (intercalate)
-import Text.Megaparsec (runParser, sepBy)
+import Text.Megaparsec (runParser)
 import Control.Monad.State (runStateT)
-import SPLL.Parser (pCSV)
 import Data.Maybe (fromMaybe)
+import System.Exit (exitFailure, exitWith, ExitCode (ExitFailure))
 
 data GlobalOpts = GlobalOpts {
   inputFile :: String,

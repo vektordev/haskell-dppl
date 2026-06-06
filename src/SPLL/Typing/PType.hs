@@ -9,8 +9,6 @@ module SPLL.Typing.PType
   , mostStructured
   ) where
 
-import Data.Bifunctor (second)
-
 newtype TVar = TV String
   deriving (Show, Eq, Ord)
   

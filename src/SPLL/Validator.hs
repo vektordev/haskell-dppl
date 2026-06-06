@@ -3,7 +3,6 @@ module SPLL.Validator (
 ) where
 import SPLL.Lang.Types (Program(..), GenericValue(..))
 import SPLL.Lang.Lang (Expr(..), getSubExprs, getFunctionNames, InjFName(..))
-import Control.Monad
 import Data.Maybe (isJust, isNothing)
 import PredefinedFunctions (globalFEnv, parameterCount)
 import Data.List (intersect)
@@ -11,7 +10,7 @@ import Data.List (intersect)
 -- This function returns nothing if the program is valid and an error else
 validateProgram :: Program -> Either String ()
 -- We sequence the either monads so we either have a list of errors(Lefts) or discard the Rights
-validateProgram p@Program{functions=fn, neurals=nurals} = sequence_ exprValidations
+validateProgram p@Program{functions=fn, neurals=_} = sequence_ exprValidations
   where
     -- Validate all expressions potentially unsing the context of their top level declaration and their program
     exprValidations = concatMap (\(_, expr) -> validateAllSubexpressions p expr expr) fn
@@ -24,9 +23,9 @@ validateExpression Program {adts=adts} _ (InjF _ (Named name) _) | isNothing (lo
 validateExpression Program {adts=adts} _ (InjF _ (Named name) params) | parameterCount adts name /= length params = Left("Wrong number of arguments for InjF " ++ name ++ "expected: " ++ show (parameterCount adts name) ++ " got: " ++ show (length params))
 validateExpression p topLevel (Var _ name) | usedBeforeDeclaration name topLevel && notElem name (getFunctionNames p) = Left ("Identifier is used without declaration: " ++ name)
 validateExpression _ _ (Lambda _ name body) | declarationsCount name body > 0 = Left ("Duplicate declaration of identifier (Shawdowing is not allowed): " ++ name)
-validateExpression Program {adts=adts} _ (Lambda _ name body) | isJust (lookup name (globalFEnv adts)) = Left ("Identifier name is already used by an InjF: " ++ name)
-validateExpression p _ (Lambda _ name body) | name `elem` getFunctionNames p = Left ("Identifier is already a function name: " ++ name)
-validateExpression p _ (Apply _ l v) | not (null (declaredVariables l `intersect` declaredVariables v)) = Left ("Identifiers " ++ show (declaredVariables l `intersect` declaredVariables v) ++ " are possibly declared multiple times")
+validateExpression Program {adts=adts} _ (Lambda _ name _) | isJust (lookup name (globalFEnv adts)) = Left ("Identifier name is already used by an InjF: " ++ name)
+validateExpression p _ (Lambda _ name _) | name `elem` getFunctionNames p = Left ("Identifier is already a function name: " ++ name)
+validateExpression _ _ (Apply _ l v) | not (null (declaredVariables l `intersect` declaredVariables v)) = Left ("Identifiers " ++ show (declaredVariables l `intersect` declaredVariables v) ++ " are possibly declared multiple times")
 validateExpression _ _ (Constant _ VAny) = Left "ANY may not be used in program declaration"
 validateExpression _ _ _ = Right ()
 

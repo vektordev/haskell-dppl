@@ -14,12 +14,12 @@ import Data.Functor ((<&>))
 import Data.Maybe (catMaybes)
 
 pPrintProg :: Program -> String
-pPrintProg (Program decls neurals adts) = intercalate "\n\n" (map (\f -> wrapInFunctionDeclaration (snd f) (fst f) []) decls)
+pPrintProg (Program decls _ _) = intercalate "\n\n" (map (\f -> wrapInFunctionDeclaration (snd f) (fst f) []) decls)
 
 pPrintIREnv :: IREnv -> String
 pPrintIREnv (IREnv funcs _ consts) = intercalate "\n\n" $
     map (\(name, val) -> name ++ " = " ++ show val) consts ++
-    concatMap (\(IRFunGroup name gen prob integ encode normal doc) -> catMaybes [gen <&> wrapDecl name "_gen" , prob <&> wrapDecl name "_prob", integ <&> wrapDecl name "_integ", encode <&> wrapDecl name "_encode", normal <&> wrapDecl name "_normal"]) funcs
+    concatMap (\(IRFunGroup name gen prob integ encode normal _) -> catMaybes [gen <&> wrapDecl name "_gen" , prob <&> wrapDecl name "_prob", integ <&> wrapDecl name "_integ", encode <&> wrapDecl name "_encode", normal <&> wrapDecl name "_normal"]) funcs
     where wrapDecl name suffix (expr, doc) = wrapInFunctionDeclarationIR expr (name ++ suffix) doc []
 
 wrapInFunctionDeclaration :: Expr -> String -> [String] -> String
@@ -49,7 +49,7 @@ pPrintExpr (LessThan _ a b) i = "(" ++ pPrintExpr a i ++ " < " ++ pPrintExpr b i
 pPrintExpr (And _ a b) i = "(" ++ pPrintExpr a i ++ " && " ++ pPrintExpr b i ++ ")"
 pPrintExpr (Or _ a b) i = "(" ++ pPrintExpr a i ++ " || " ++ pPrintExpr b i ++ ")"
 pPrintExpr (ReadNN _ n e) i = "readNN(" ++ n ++ ", " ++ pPrintExpr e i ++ ")"
-pPrintExpr (Error _ e) i = "error(" ++ e ++ ")"
+pPrintExpr (Error _ e) _ = "error(" ++ e ++ ")"
 
 pPrintIRExpr :: IRExpr -> Int -> String
 pPrintIRExpr (IRIf cond thenExpr elseExpr) n =
@@ -76,7 +76,7 @@ pPrintIRExpr (IRUnaryOp OpSign e) n = "sign(" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRUnaryOp OpIsAny e) n = "isAny(" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRTheta e i) n = "theta (" ++ pPrintIRExpr e (n + 1) ++ ")@" ++ show i
 pPrintIRExpr (IRSubtree e i) n = "subtree (" ++ pPrintIRExpr e (n + 1) ++ ")@" ++ show i
-pPrintIRExpr (IRConst val) n = "const " ++ show val
+pPrintIRExpr (IRConst val) _ = "const " ++ show val
 pPrintIRExpr (IRCons e1 e2) n = pPrintIRExpr e1 (n + 1) ++ ":" ++ pPrintIRExpr e2 (n + 1)
 pPrintIRExpr (IRTCons e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ ", " ++ pPrintIRExpr e2 (n + 1) ++ ")"
 pPrintIRExpr (IRHead e) n = "head (" ++ pPrintIRExpr e (n + 1) ++ ")"
@@ -94,14 +94,14 @@ pPrintIRExpr (IRIsRight e) n = "isRight (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRIsPossible val e) n = "isPossible " ++ show val ++ " (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRDensity dist e) n = "density " ++ show dist ++ " (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRCumulative dist e) n = "cumulative " ++ show dist ++ " (" ++ pPrintIRExpr e (n + 1) ++ ")"
-pPrintIRExpr (IRSample dist) n = "sample " ++ show dist
+pPrintIRExpr (IRSample dist) _ = "sample " ++ show dist
 pPrintIRExpr (IRLetIn varname e1 e2) n = "let " ++ varname ++ " = (" ++ pPrintIRExpr e1 (n + 1) ++ ") in \n" ++ indent (n + 1) ++ pPrintIRExpr e2 (n + 2) ++ ""
-pPrintIRExpr (IRVar varname) n = varname
+pPrintIRExpr (IRVar varname) _ = varname
 pPrintIRExpr (IRLambda varname body) n = "\\" ++ varname ++ " -> (" ++ pPrintIRExpr body (n + 1) ++ ")"
 pPrintIRExpr (IRApply e1 e2) n = pPrintIRExpr e1 (n + 1) ++ "(" ++ pPrintIRExpr e2 (n + 1) ++ ")"
 pPrintIRExpr (IREnumSum varname val e) n = "enumSum " ++ varname ++ " = " ++ show val ++ " in (\n" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRIndex e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ ")[" ++ pPrintIRExpr e2 (n + 1) ++ "]"
-pPrintIRExpr (IRError e) n = "error(" ++ e ++")"
+pPrintIRExpr (IRError e) _ = "error(" ++ e ++")"
 
 
 pPrintValue :: Value -> String

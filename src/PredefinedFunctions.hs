@@ -15,16 +15,11 @@ renameDecl
 import SPLL.Typing.RType (RType(..), Scheme(..), TVarR(..), ClassConstraint(..))
 import SPLL.IntermediateRepresentation (IRExpr, IRExpr(..), Operand(..), UnaryOperand(..), irMap, IREnv (IREnv), getIRSubExprs) --FIXME
 import SPLL.Lang.Lang
-import SPLL.Typing.Typing
-import Data.Set (fromList)
 import Data.Maybe (fromJust)
 import SPLL.Lang.Types
 import IRInterpreter
-import Control.Monad
 import qualified Data.Bifunctor
-import Data.Either (isLeft)
 import StandardLibrary (invokeStandardFunction, stdListProd)
-import Debug.Trace (traceShow)
 
 -- InputVars, OutputVars, fwd, grad
 data FDecl = FDecl {contract :: Scheme, inputVars :: [String], outputVars :: [String], body :: IRExpr, applicability :: IRExpr, deconstructing :: Bool, derivatives :: [(String, IRExpr)]} deriving (Show, Eq)
@@ -225,7 +220,7 @@ rename old new (IRVar n) | n == old = IRVar new
 rename old new (IRVar n) | n == old ++ "^-1" = IRVar (new ++ "^-1")
 rename old new (IRVar n) | n == old ++ "^-1'" = IRVar (new ++ "^-1'")
 rename old new (IRConst (VAnyExcept e)) = IRConst (VAnyExcept (map (rename old new) e))
-rename old new expr = expr
+rename _ _ expr = expr
 
 renameAll :: String -> String -> IRExpr -> IRExpr
 renameAll old new = irMap (rename old new)
@@ -264,7 +259,7 @@ getFunctionParamIdx adts name =
 
 propagateValues :: [ADTDecl] -> String -> [[Value]] -> [Value]
 propagateValues adts name values = case results of
-  Left s -> []
+  Left _ -> []
   Right l -> map (fmap failConversionRev) l
   where
     results = mapM (generateDet [] (IREnv [] adts []) []) letInBlocks

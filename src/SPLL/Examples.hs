@@ -72,8 +72,7 @@ module SPLL.Examples
 import SPLL.Lang.Lang
 
 import SPLL.Typing.RType
-import SPLL.Typing.PType
-import SPLL.Typing.Typing (TypeInfo, makeTypeInfo)
+import SPLL.Typing.Typing ()
 import SPLL.Lang.Types
 import SPLL.Prelude
 
