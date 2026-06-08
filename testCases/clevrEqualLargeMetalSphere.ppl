@@ -1,0 +1,40 @@
+-- CLEVR query: "Are there an equal number of large things and metal spheres?"
+--   answer = ( count(size == Large) == count(shape == Sphere && material == Metal) )
+--
+-- A scene is a fixed-arity (3-object) tuple read from a neural net; each object is a
+-- tuple (Size, (Shape, Material)). Rather than build the two counts separately and
+-- compare them with ==  (equality of two *random* ints -- the Tier-3 correlated case),
+-- each object contributes +1 if large and -1 if a metal sphere, and the answer is
+-- whether the signed total is 0  --  i.e. countLarge - countMetalSphere == 0.
+--
+-- NB on shape: forward chaining can only invert the *inlined* recursive counting shape
+-- `if cond then LITERAL ++ <recursive call> else <recursive call>`, bottoming out in a
+-- literal. A flat `a ++ b ++ c` chain, or a `helper cond val rest` abstraction that
+-- passes the accumulator as an argument, both make FC fail to find a witnessing path.
+-- So the per-level structure below is deliberately inlined, mirroring adtNeuralCounting.
+
+data Size     = Small | Large
+data Shape    = Cube | Sphere | Cylinder
+data Material = Rubber | Metal
+
+neural readScene :: (Symbol -> ((Size, (Shape, Material)), ((Size, (Shape, Material)), (Size, (Shape, Material))))) of (({Small | Large}, ({Cube | Sphere | Cylinder}, {Rubber | Metal})), (({Small | Large}, ({Cube | Sphere | Cylinder}, {Rubber | Metal})), ({Small | Large}, ({Cube | Sphere | Cylinder}, {Rubber | Metal}))))
+
+isLargeObj o = isLarge (fst o)
+isMetalSphere o = isSphere (fst (snd o)) && isMetal (snd (snd o))
+
+-- innermost object (o3): emit its +1 (large) and -1 (metal sphere) contributions
+level1 o = if isLargeObj o
+             then 1 ++ (if isMetalSphere o then (-1) else 0)
+             else (if isMetalSphere o then (-1) else 0)
+
+-- middle object (o2), then recurse into level1 on the tail
+level2 l = if isLargeObj (fst l)
+             then 1 ++ (if isMetalSphere (fst l) then (-1) ++ level1 (snd l) else level1 (snd l))
+             else (if isMetalSphere (fst l) then (-1) ++ level1 (snd l) else level1 (snd l))
+
+-- first object (o1), then recurse into level2 on the tail
+level3 l = if isLargeObj (fst l)
+             then 1 ++ (if isMetalSphere (fst l) then (-1) ++ level2 (snd l) else level2 (snd l))
+             else (if isMetalSphere (fst l) then (-1) ++ level2 (snd l) else level2 (snd l))
+
+main sym = (level3 (readScene sym)) == 0
