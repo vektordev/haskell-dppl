@@ -10,8 +10,8 @@ module SPLL.InferenceRule (
 ) where
 
 import SPLL.Typing.PType hiding (TV, NotSetYet)
-import Data.List (isInfixOf, isSuffixOf)
-import SPLL.Lang.Lang (Expr(..), ExprStub(..), toStub)
+import Data.List (isSuffixOf)
+import SPLL.Lang.Lang (toStub)
 import SPLL.Typing.RType
 import SPLL.Lang.Types
 

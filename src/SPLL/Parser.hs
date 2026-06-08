@@ -17,33 +17,24 @@ import Data.Void
 import Text.Megaparsec hiding (State)
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
-import PrettyPrint
-import Text.Pretty.Simple (pPrint)
 
-import Data.Either (Either(..))
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 
 import Control.Monad.Combinators.Expr
-import Data.Void
-import Control.Monad (void)
 import Data.List.NonEmpty (NonEmpty (..))
 
 import SPLL.Lang.Types
 import SPLL.Lang.Lang
-import SPLL.Typing.Typing
 import SPLL.Typing.RType
 import PredefinedFunctions (globalFEnv, parameterCount)
 import SPLL.Prelude
-import Debug.Trace
 import Data.Functor ((<&>))
 import Control.Monad.State
-import Data.Functor.Identity
-import Data.Foldable (foldl')
 
 --import Text.Megaparsec.Debug (dbg)
 
-dbg x y = y
+dbg _ y = y
 --dbg x y = traceShow x y
 
 --TODO: This parser can by necessity not disambiguate Apply f arg from certain special-treatment builtin functions,
@@ -188,7 +179,7 @@ construct1 constructor [arg] = constructor arg
 construct1 _ _ = error "tried to apply the wrong number of arguments."
 
 construct2 :: (Expr -> Expr -> Expr) -> [Expr] -> Expr
-construct2 constructor [arg1, arg2] = constructor arg2 arg2
+construct2 constructor [arg1, arg2] = constructor arg1 arg2
 construct2 _ _ = error "tried to apply the wrong number of arguments."
 
 constructN :: Int -> ([Expr] -> Expr) -> [Expr] -> Expr
@@ -390,9 +381,9 @@ pMultiTypeRef = pIdentifier <&> MultiTypeRef
 
 resolveMultiValueTypeDecl :: Int -> MultiValue -> (String, MultiValue) -> MultiValue
 resolveMultiValueTypeDecl 0 (MultiTypeRef _) _ = error "Cannot recurse, no depth left"
-resolveMultiValueTypeDecl 1 (MultiTypeRef refName) (declName, MultiADT constrs) = MultiADT (filter (\(_, args) -> not $ any (containsMultiValueTypeRef declName) args) constrs)
+resolveMultiValueTypeDecl 1 (MultiTypeRef _) (declName, MultiADT constrs) = MultiADT (filter (\(_, args) -> not $ any (containsMultiValueTypeRef declName) args) constrs)
 resolveMultiValueTypeDecl depthLeft (MultiTypeRef refName) decl@(declName, declVal) | declName == refName = resolveMultiValueTypeDecl (depthLeft - 1) declVal decl
-resolveMultiValueTypeDecl depthLeft (MultiDiscretes d) decl = MultiDiscretes d
+resolveMultiValueTypeDecl _ (MultiDiscretes d) _ = MultiDiscretes d
 resolveMultiValueTypeDecl depthLeft (MultiTuple l r) decl =
   MultiTuple (resolveMultiValueTypeDecl depthLeft l decl)
              (resolveMultiValueTypeDecl depthLeft r decl)
@@ -707,7 +698,7 @@ normalizeExpr env@(parametricBuilders, atomicBuilders, benign) expr =
         Right expr' ->
           case expr' of
             -- Start of an Apply chain
-            Apply ti (Apply _ _ _) _ ->
+            Apply _ (Apply _ _ _) _ ->
               -- Need to collect all args in the chain and find base function
               let (base, args) = collectApplyChain expr
               in case base of
@@ -717,14 +708,14 @@ normalizeExpr env@(parametricBuilders, atomicBuilders, benign) expr =
                     Left _ -> return $ Right expr' -- This prevents InjFs, which have multiple arguments from failing to build because here only one argument is applied
                     e -> return e
                 _ -> return $ Right expr
-            Apply ti (Var _ fname) arg
+            Apply _ (Var _ fname) arg
               | not (Set.member fname benign)
               , Just builder <- Map.lookup fname parametricBuilders -> do
                 build <- builder [arg]
                 case build of
                   Left _ -> return $ Right expr' -- This prevents InjFs, which have multiple arguments from failing to build because here only one argument is applied
                   e -> return e
-            Var ti fname
+            Var _ fname
               | not (Set.member fname benign)
               , Just builder <- Map.lookup fname atomicBuilders -> builder []
             _ -> return $ Right expr'

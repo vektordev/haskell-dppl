@@ -9,13 +9,10 @@ import SPLL.Lang.Types
 import SPLL.Lang.Lang
 import SPLL.InferenceRule
 import SPLL.Typing.PType (PType(PNormal, PLogNormal))
-import Data.Maybe (maybeToList, fromJust, isNothing, fromMaybe, isJust, listToMaybe)
+import Data.Maybe (maybeToList, listToMaybe)
 import Data.List (nub)
 import Data.Bifunctor
-import SPLL.Typing.Typing (TypeInfo, TypeInfo(..), Tag(..), setTags)
-import Data.Set (fromList, toList)
-import Data.Set.Internal (merge, empty)
-import Debug.Trace (trace)
+import SPLL.Typing.Typing (setTags)
 import PredefinedFunctions
 import Utils
 import SPLL.Typing.ForwardChaining (FCData, ExprInfo (LambdaInfo), findEquivalentExpression, findExprWithCN, progToFCData)
@@ -29,24 +26,21 @@ annotateEnumsProg p@Program {functions=f, neurals=n, adts=adts} = p{functions = 
     finalExprEnv = fixpoint iterateExprEnv []
     iterateExprEnv eEnv = map (second (annotate adts (neuralEnv ++ map (second $ tags . getTypeInfo) eEnv))) f
     neuralEnv = [(name, [DiscreteValues mv]) | (name, _, Just mv) <- n]
-    isMultiDiscrete (MultiDiscretes _) = True
-    isMultiDiscrete _ = False
 
 annotate :: [ADTDecl] -> TagEnv -> Expr -> Expr
 --annotate _ e | trace ((show e)) False = undefined
-annotate adts env e@(Var ti n) = case lookup n env of
+annotate _ env e@(Var ti n) = case lookup n env of
   (Just tgs) -> setTypeInfo e (ti{tags=tgs})
   _ -> e
-annotate adts env e@(ReadNN ti n _) = case lookup n env of
+annotate _ env e@(ReadNN ti n _) = case lookup n env of
   (Just tgs) -> setTypeInfo e (ti{tags=tgs})
   _ -> e
 annotate adts env e = withNewTypeInfo
   where
     oldTags = tags $ getTypeInfo e
     withNewSubExpr = case e of
-      Apply _ l@(Lambda _ n b) v -> do
+      Apply _ l@(Lambda _ _ _) v -> do
         let annotatedV = annotate adts env v
-            newEnv = (n, tags (getTypeInfo annotatedV)):env
             annotatedL = annotate adts env l in
               setSubExprs e [annotatedL, annotatedV]
       _ -> setSubExprs e (map (annotate adts env) (getSubExprs e))
@@ -132,15 +126,15 @@ annotateConditionalProg p@Program {functions=fs} = p{functions=map (Data.Bifunct
 
 tagConditional :: FCData -> Program -> Expr -> TypeInfo
 tagConditional fcData p (Lambda ti _ b) = if isConditional fcData p [] b then ti{tags=IsConditional:tags ti} else ti
-tagConditional fcData p e@(Var ti b) = if isConditional fcData p [] e then ti{tags=IsConditional:tags ti} else ti
-tagConditional fcData p x = getTypeInfo x
+tagConditional fcData p e@(Var ti _) = if isConditional fcData p [] e then ti{tags=IsConditional:tags ti} else ti
+tagConditional _ _ x = getTypeInfo x
 
 isConditional :: FCData -> Program -> [ChainName] -> Expr -> Bool
 isConditional _ _ visited e | chainName (getTypeInfo e) `elem` visited = False
 isConditional _ _ _ (IfThenElse _ _ _ _) = True
 isConditional _ _ _ (Lambda _ _ _) = False
 isConditional _ _ _ (Apply _ _ _) = False
-isConditional fcData p visited (Var (TypeInfo{chainName=cn}) n) = case findEquivalentExpression fcData cn of
+isConditional fcData p visited (Var (TypeInfo{chainName=cn}) _) = case findEquivalentExpression fcData cn of
   Just (_, LambdaInfo _ bodyCn, _) -> isConditional fcData p (cn:visited) (findExprWithCN (map snd (functions p)) bodyCn)
   _ -> False
 isConditional fcData p visited x = any (isConditional fcData p visited) (getSubExprs x)

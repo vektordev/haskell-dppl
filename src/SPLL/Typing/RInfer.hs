@@ -15,7 +15,6 @@ import Control.Monad.Identity
 
 import qualified Data.Set as Set
 
-import Data.Monoid
 import Data.Foldable hiding (toList)
 import qualified Data.Map as Map
 
@@ -148,7 +147,7 @@ instance Substitutable RType where
   apply s (TArrow t1 t2) = apply s t1 `TArrow` apply s t2
   apply (Subst s) t@(TVarR a) = Map.findWithDefault t a s
   apply s (GreaterType t1 t2) = apply s t1 `GreaterType` apply s t2
-  apply s NotSetYet = NotSetYet
+  apply _ NotSetYet = NotSetYet
   -- rest of RType arent used as of now
   apply _ val = error ("Missing Substitute: " ++ show val)
 
@@ -245,7 +244,7 @@ addRTypeInfo p =
         Right () -> Right (apply subst p2)
 
 tryAddRTypeInfo :: Program -> Either RTypeError Program
-tryAddRTypeInfo p@(Program decls _ adts) = do
+tryAddRTypeInfo p@(Program _ _ adts) = do
   (cs, classCs, prog) <- runInfer (basicTEnv adts) (inferProg p)
   subst <- runSolve cs
   checkClassConstraints subst classCs
@@ -264,7 +263,7 @@ inferProg p = do
   tv_rev <- freshVars (length decls) []
   let tvs = reverse tv_rev
   -- build env from neurals
-  let neurals_tvs = map (\(a, b, c) -> (a, Forall [] [] b)) (neurals p)
+  let neurals_tvs = map (\(a, b, _) -> (a, Forall [] [] b)) (neurals p)
   -- env building with (name, scheme) for infer methods
   let func_tvs = zip (map fst decls) (map (Forall [] []) tvs)
   let typeEnv = func_tvs ++ neurals_tvs
@@ -316,16 +315,16 @@ infer adts expr
         (Var ti name) -> do
           t <- lookupTEnv name
           return (t, [], Var (setRType ti t) name)
-        e@(Apply ti func arg) -> do
+        (Apply ti func arg) -> do
           (funcTy, c1, funcExprTy) <- infer adts func
           (argTy, c2, argExprTy) <- infer adts arg
           let argConstraint = Constraint funcTy (argTy `TArrow` (rType ti)) (Just "Apply")
           return (rType ti, [argConstraint] ++ c1 ++ c2, Apply ti funcExprTy argExprTy)
           --expr `usingScheme` (Forall [TV "a", TV "b"] (((TVarR $ TV "a") `TArrow` (TVarR $ TV "b")) `TArrow` (TVarR $ TV "a") `TArrow` (TVarR $ TV "b")))
-        e@(InjF ti (Named name) params) -> do
+        e@(InjF _ (Named name) _) -> do
           let Just (FPair FDecl {contract=scheme} _) = lookup name (globalFEnv adts)
           usingScheme adts e scheme
-        e@(ReadNN ti name sym) -> do
+        (ReadNN ti name sym) -> do
           t <- lookupTEnv name
           (symTy, c1, symTyExpr) <- infer adts sym
           let argConstraint = Constraint t (symTy `TArrow` (rType ti)) (Just "ReadNN")
@@ -395,7 +394,7 @@ reformExpr original subexprs ownTy = tMapHead (const newTy) $ setSubExprs origin
 --take a scheme like Forall [a,b,c] (a -> b -> c) and apply a list of types Int, Float to the scheme.
 -- should yield (c, [a=Int, b=Float])
 inferResultingType :: Scheme -> [RType] -> Infer (RType, [Constraint])
-inferResultingType (Forall vars _ rtype) [] = return (rtype, [])
+inferResultingType (Forall _ _ rtype) [] = return (rtype, [])
 inferResultingType (Forall vars _ (TArrow fromTy toTy)) (fstTy:rtypes2) =
   do
     let constraint = Constraint fromTy fstTy (Just "inferResultingType")
@@ -494,7 +493,7 @@ simplify (su, []) = (su, [])
 simplify (su, ((Constraint t1 t2 c): cs0)) =
   case runIdentity $ runExceptT $ unifies t1 t2 of
     -- can't simplify the t1, t2 constraint, put it in the unusable bin.
-    Left err -> addLeftoverConstraint (simplify (su, cs0)) (Constraint t1 t2 c)
+    Left _ -> addLeftoverConstraint (simplify (su, cs0)) (Constraint t1 t2 c)
     Right newSubst -> simplify (newSubst `compose` su, apply newSubst cs0)
   where
     addLeftoverConstraint :: Unifier -> Constraint -> Unifier
@@ -511,10 +510,10 @@ solver (su, cs) =
 
 unifies :: RType -> RType -> Solve Subst
 unifies t1 t2 | t1 `matches` t2 = return emptySubst
-unifies (Tuple t1 t2) BottomTuple = return emptySubst
-unifies BottomTuple (Tuple t1 t2) = return emptySubst
-unifies (ListOf t) NullList = return emptySubst
-unifies NullList (ListOf t) = return emptySubst
+unifies (Tuple _ _) BottomTuple = return emptySubst
+unifies BottomTuple (Tuple _ _) = return emptySubst
+unifies (ListOf _) NullList = return emptySubst
+unifies NullList (ListOf _) = return emptySubst
 unifies (ListOf t1) (ListOf t2) = unifies t1 t2
 unifies t1 (GreaterType (TVarR v) t3) = if t1 `matches` t3 then v `bind` t1 else
   throwError $ UnificationFail t1 t3

@@ -7,30 +7,23 @@ module SPLL.IRCompiler (
 
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Lang
-import SPLL.Lang.Types hiding (HornClause)
-import SPLL.Typing.Typing
+import SPLL.Lang.Types
 import SPLL.Typing.RType
 import SPLL.IROptimizer
 import PredefinedFunctions
 import SPLL.Typing.PType
-import SPLL.InferenceRule (algName)
-import Debug.Trace
 import Data.Maybe
-import Control.Monad.Writer.Lazy
-import Control.Monad.Reader
-import Data.Functor.Identity
-import Data.Number.Erf (erf)
-import SPLL.AutoNeural
-import Data.Functor
-import SPLL.Typing.ForwardChaining
-import Data.List
+import Data.List (isPrefixOf, (\\))
 import Data.Char (isDigit)
+import Data.Functor ((<&>))
+import Control.Monad.Writer.Lazy
+import SPLL.AutoNeural
+import SPLL.Typing.ForwardChaining
 import SPLL.Typing.AlgebraicDataTypes
 import Data.Bifunctor (Bifunctor(bimap))
 import Utils
 import Control.Monad (foldM, when)
 import GHC.Stack (HasCallStack)
-import Statistics.Distribution (Distribution(cumulative))
 
 type CompilerMonad a = WriterT [(String, IRExpr)] Supply a
 
@@ -63,7 +56,6 @@ envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb
   concatMap (\(name, binding) ->
     let typeEnv = getGlobalTypeEnv p
         pt = pType $ getTypeInfo binding
-        rt = rType $ getTypeInfo binding
         baseFunGroup = IRFunGroup {groupName=name, encodeFun=Nothing,
          integFun =
           if not noInteg && (pt == Deterministic || pt == Integrate || pt == PNormal || pt == PLogNormal) then
@@ -120,7 +112,7 @@ runCompile meta codeGen = generateLetInBlock meta (evalSupply $ runWriterT $ do
   )
 
 generateLetInBlock :: CompilerMetadata -> (CompilationResult, [(String, IRExpr)]) -> IRExpr
-generateLetInBlock meta codeGen =
+generateLetInBlock _ codeGen =
   case m of
     (IRLambda _ _) -> (foldr (\(var, val) expr  -> IRLetIn var val expr) m binds) --Dont make tuple out of lambdas, as the snd (and thr) element don't contain information anyway
     _ -> generateLetInExpr binds (IRTCons m (IRTCons dim bc))
@@ -135,7 +127,7 @@ generateLetInExpr binds e = foldr (\(var, val) expr  -> IRLetIn var val expr) e 
 -- as the original binding; parameter types are added to the type environment so that
 -- inner Var references resolve correctly.
 compileNormalExpr :: CompilerMetadata -> Expr -> IRExpr
-compileNormalExpr meta (Lambda t name subExpr) =
+compileNormalExpr meta (Lambda _ name subExpr) =
   let newMeta = meta { typeEnv = (name, (rType (getTypeInfo subExpr), False)) : typeEnv meta }
   in IRLambda name (compileNormalExpr newMeta subExpr)
 compileNormalExpr meta expr =
@@ -442,18 +434,18 @@ toIRInference meta True e sample | pType (getTypeInfo e) == PLogNormal, not (has
   let correctedSample = IROp OpDiv (IROp OpSub (IRUnaryOp OpLog sample) mu) sigma
   let negativeGuard x = IRIf (IROp OpGreaterThan sample const0) x const0
   return (negativeGuard (IRCumulative IRNormal correctedSample), const0, IRConst (VFloat 1))
-toIRInference meta False (Normal t) sample = return (IRDensity IRNormal sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), IRConst (VFloat 1))
-toIRInference meta False (Uniform t) sample = return (IRDensity IRUniform sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), IRConst (VFloat 1))
-toIRInference meta True (Normal t) sample = return (IRCumulative IRNormal sample, const0, IRConst (VFloat 1))
-toIRInference meta True (Uniform t) sample = return (IRCumulative IRUniform sample, const0, IRConst (VFloat 1))
-toIRInference meta False (Constant TypeInfo {rType=rt} value) sample = do
+toIRInference _ False (Normal _) sample = return (IRDensity IRNormal sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), IRConst (VFloat 1))
+toIRInference _ False (Uniform _) sample = return (IRDensity IRUniform sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), IRConst (VFloat 1))
+toIRInference _ True (Normal _) sample = return (IRCumulative IRNormal sample, const0, IRConst (VFloat 1))
+toIRInference _ True (Uniform _) sample = return (IRCumulative IRUniform sample, const0, IRConst (VFloat 1))
+toIRInference _ False (Constant TypeInfo {rType=rt} value) sample = do
   let comp = case rt of
               TFloat   -> IROp OpApprox sample (IRConst (fmap failConversion value))
               TVarR _  -> IROp OpApprox sample (IRConst (fmap failConversion value))
               _        -> IROp OpEq sample (IRConst (fmap failConversion value))
   expr <- indicator comp
   return (expr, const0, IRConst (VFloat 1))
-toIRInference meta True (Constant TypeInfo {rType=rt} value) sample = return (compareValueExpr rt (IRConst (valueToIR value)) sample, const0, IRConst (VFloat 1))
+toIRInference _ True (Constant TypeInfo {rType=rt} value) sample = return (compareValueExpr rt (IRConst (valueToIR value)) sample, const0, IRConst (VFloat 1))
 toIRInference meta True (ThetaI _ a i) sample = do
   a' <- toIRGenerate meta a
   return (IRIf (IROp OpLessThan sample (IRTheta a' i)) (IRConst $ VFloat 0) (IRConst $ VFloat 1), const0, IRConst (VFloat 1))
@@ -461,14 +453,11 @@ toIRInference meta False (ThetaI _ a i) sample = do
   a' <- toIRGenerate meta a
   expr <- indicator (IROp OpApprox sample (IRTheta a' i))
   return (expr, const0, IRConst (VFloat 1))
-toIRInference meta cumulative (IfThenElse t cond left right) sample = do
+toIRInference meta cumulative (IfThenElse _ cond left right) sample = do
   var_condT_p <- mkVariable "condT"
   var_condF_p <- mkVariable "condF"
   (condTrueExpr, condTrueDim, condTrueBranches) <- toIRInference meta False  cond (IRConst (VBool True))
-  (condFalseExpr, condFalseDim, condFalseBranches) <- toIRInference meta False cond (IRConst (VBool False))
-  (leftExpr, leftDim, leftBranches) <- toIRInference meta cumulative left sample
-  (rightExpr, rightDim, rightBranches) <- toIRInference meta cumulative right sample
-  let branches = (IROp OpPlus condTrueBranches ((IROp OpPlus leftBranches rightBranches)))
+  (condFalseExpr, condFalseDim, _) <- toIRInference meta False cond (IRConst (VBool False))
   setVariables [(var_condT_p, condTrueExpr), (var_condF_p, condFalseExpr)]
   -- p(y) = if p_cond < thresh then p_else(y) * (1-p_cond(y)) else if p_cond > 1 - thresh then p_then(y) * p_cond(y) else p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
   let thr = topKThreshold (compilerConfig meta)
@@ -521,7 +510,7 @@ toIRInference meta cumulative (IfThenElse t cond left right) sample = do
     -- p(y) = p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
     Nothing -> do
       return (addExpr, addDim, branches)
-toIRInference meta False (GreaterThan (TypeInfo {rType = t, tags = extras}) left right) sample
+toIRInference meta False (GreaterThan (TypeInfo {rType = _, tags = extras}) left right) sample
   | extras `hasAlgorithm` "greaterThanLeft" = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
     l <- toIRGenerate meta left
@@ -540,7 +529,7 @@ toIRInference meta False (GreaterThan (TypeInfo {rType = t, tags = extras}) left
     let returnExpr = IRIf sample (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)) (IRVar var2)
     setVariables [(var2, integrate)]
     return (returnExpr, const0, integrateBranches)
-toIRInference meta False (LessThan (TypeInfo {rType = t, tags = extras}) left right) sample
+toIRInference meta False (LessThan (TypeInfo {rType = _, tags = extras}) left right) sample
   | extras `hasAlgorithm` "lessThanLeft" = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
     l <- toIRGenerate meta left
@@ -569,7 +558,7 @@ toIRInference meta cumulative (Or (TypeInfo {rType = TBool}) a b) sample = do
   (bP, bDim, bBC) <- toIRInference meta cumulative b (IRConst $ VBool False)
   (resP, resDim) <- (aP, aDim) `multP` (bP, bDim)
   return $ (IRIf sample (IROp OpSub (IRConst $ VFloat 1) resP) resP, resDim, IROp OpPlus aBC bBC)  -- p(a || b == True) == 1 - p(a == False) * p(b == False)
-toIRInference meta cumulative (ReadNN _ name symbol) sample = do
+toIRInference meta _ (ReadNN _ name symbol) sample = do
   nnRaw <- mkVariable "nn_raw"
   var <- mkVariable "callNN"
   sym <- toIRGenerate meta symbol
@@ -607,11 +596,11 @@ toIRInference meta True (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeIn
     TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
     _ -> do
       return (compareValueExpr rt (IRApply lIR vIR) sample, const0, const0)
-toIRInference meta cumulative e@(Apply TypeInfo {rType=rt} l v) sample
+toIRInference meta cumulative (Apply TypeInfo {rType=_} l v) sample
   | IsConditional `elem` tags (getTypeInfo l) && any isDiscretes (tags (getTypeInfo v))
   && pType (getTypeInfo l) == Deterministic = do  -- This is only because of a bug in pInfer, but its useful for us...
   let lCn = chainName (getTypeInfo l)
-  let Just (_, LambdaInfo boundVar bodyCn , lTag) = findEquivalentExpression (fcData meta) lCn
+  let Just (_, LambdaInfo boundVar bodyCn , _) = findEquivalentExpression (fcData meta) lCn
   let Program{functions=fs} = compilingProgram meta
   let fExprs = map snd fs
   let lBodyExpr = findExprWithCN fExprs bodyCn
@@ -654,7 +643,7 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample | pType (get
       setVariables [(retVal, IRApply lIR vIR)]
       return (IRTFst (IRVar retVal), IRTFst (IRTSnd (IRVar retVal)), IRTSnd (IRTSnd (IRVar retVal)))
 -- Probabilistic bound expression
-toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=aChainName} l v) sample | isTArrow (rType (getTypeInfo v)) && (pType (getTypeInfo v) == Prob || pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal) = do
+toIRInference meta cumulative (Apply TypeInfo{rType=_, chainName=_} l v) sample | isTArrow (rType (getTypeInfo v)) && (pType (getTypeInfo v) == Prob || pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal) = do
   lIR <- toIRGenerate meta l
   (vIR, _, _) <- toIRInference meta cumulative v sample
   applied <- mkVariable "call"
@@ -663,7 +652,7 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=aChainName} l 
   where
     isTArrow (TArrow _ _) = True
     isTArrow _ = False
-toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=aChainName} l v) sample | pType (getTypeInfo v) == Prob || pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal = do
+toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample | pType (getTypeInfo v) == Prob || pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal = do
   -- This is the probabilistic inference of a known, deterministic lambda with a probabilistic parameter
   -- The inference looks like this: p(l(v) == sample) = p(l^-1(sample) == v)
   -- The inverse can not be created using recursive descend, therefor we use forward chaining for the inverse only
@@ -721,7 +710,7 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=aChainName} l 
     TArrow _ _ -> return (wrapInLambdas (if countBranches (compilerConfig meta) then IRTCons retP (IRTCons retD retBC) else IRTCons retP retD), const0, const0)
     _ -> return (wrapInLambdas retP, wrapInLambdas retD, wrapInLambdas retBC)-}
 
-toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample = error "This instance of apply is not yet implemented"
+toIRInference _ _ (Apply TypeInfo{rType=_} _ _) _ = error "This instance of apply is not yet implemented"
 toIRInference meta cumulative (Cons _ hdExpr tlExpr) sample = do
   headTuple <- lift (runWriterT (toIRInferenceSave meta cumulative hdExpr (IRHead sample))) <&> generateLetInBlock meta
   tailTuple <- lift (runWriterT (toIRInferenceSave meta cumulative tlExpr (IRTail sample))) <&> generateLetInBlock meta
@@ -776,7 +765,7 @@ toIRInference meta cumulative (InjF ti (Named name) params) sample | isHigherOrd
   let returnP = scale paramExpr
   let appTestExpr e = IRIf appTest e const0
   return (renVar (appTestExpr returnP), renVar (appTestExpr paramDim), renVar (appTestExpr paramBranches))
-toIRInference meta False e@(InjF TypeInfo {tags=extras, rType=rt} (Named name) params) sample
+toIRInference meta False e@(InjF TypeInfo {tags=_, rType=rt} (Named _) params) sample
   | countProbParams params == 0 = do
   -- There is no probabilistic parameter
   -- Check whether the value of the function is equal to the sample
@@ -787,13 +776,13 @@ toIRInference meta False e@(InjF TypeInfo {tags=extras, rType=rt} (Named name) p
         _        -> OpEq
   retExpr <- indicator $ IROp cmp expr sample
   return (retExpr, const0, const0)
-toIRInference meta True e@(InjF TypeInfo {tags=extras, rType=rt} (Named name) params) sample
+toIRInference meta True e@(InjF TypeInfo {tags=_, rType=rt} (Named _) params) sample
   | countProbParams params == 0 = do
   -- There is no probabilistic parameter
   -- Check whether the value of the function is less than the sample
   expr <- toIRGenerate meta e
   return (compareValueExpr rt expr sample, const0, const0)
-toIRInference meta cumulative e@(InjF TypeInfo {tags=extras} (Named name) params) sample
+toIRInference meta cumulative (InjF TypeInfo {tags=_} (Named name) params) sample
   | hasAnyExcept (adtDecls meta) name = do
   -- FPair of the InjF with unique names
   FPair fwd inversions <- instantiate mkVariable (adtDecls meta) name
@@ -825,7 +814,7 @@ toIRInference meta cumulative e@(InjF TypeInfo {tags=extras} (Named name) params
   let probF = if decons then toIRInferenceSave else toIRInference
   -- Get the probabilistic inference expression of the non-deterministic subexpression
   (nonAnyIRExpr, nonAnyDim, nonAnyBranches) <- probF meta cumulative (params !! probIdx) nonAnyExpr
-  (anyIRExpr, anyDim, anyBranches) <- toIRInferenceSave meta cumulative (params !! probIdx) (IRConst $ VAny)
+  (anyIRExpr, anyDim, _) <- toIRInferenceSave meta cumulative (params !! probIdx) (IRConst $ VAny)
   (exceptIRExpr, exceptDim, exceptBranches) <- probF meta cumulative (params !! probIdx) exceptExpr
   let ifSample a na = if isPosAny then IRIf (IRVar v1) a na else IRIf (IRVar v1) na a
   (subExpr, subDim) <- subP (anyIRExpr, anyDim) (exceptIRExpr, exceptDim)
@@ -840,7 +829,7 @@ toIRInference meta cumulative e@(InjF TypeInfo {tags=extras} (Named name) params
   let returnP = scale ifExpr
   let appTestExpr e = IRIf appTest e const0
   return (appTestExpr returnP, appTestExpr ifDim, appTestExpr ifBranches)
-toIRInference meta cumulative e@(InjF TypeInfo {tags=extras, rType=rt} (Named name) params) sample
+toIRInference meta cumulative (InjF TypeInfo {tags=_, rType=rt} (Named name) params) sample
   | countProbParams params == 1 = do
   let resolvedName = resolveInjF rt name
   -- FPair of the InjF with unique names
@@ -883,7 +872,7 @@ toIRInference meta False (InjF TypeInfo {tags=extras, rType=rt} (Named name) [le
 
   fPair <- instantiate mkVariable (adtDecls meta) resolvedName -- FPair of the InjF with unique names
   let FPair fwd inversions = fPair
-  let FDecl {inputVars=[v2, v3], outputVars=[v1]} = fwd
+  let FDecl {inputVars=[_, v3], outputVars=[_]} = fwd
   -- We get the inversion to the right side
   let [invDecl] = filter (\(FDecl {outputVars=[w1]}) -> v3==w1) inversions   --This should only return one inversion
   let FDecl {inputVars=[x2, x3], body=invExpr} = invDecl
@@ -939,7 +928,7 @@ toIRInference meta True (InjF TypeInfo {tags=extras, rType=rt} (Named name) [lef
     let returnExpr = IRIf (IROp OpLessThan sample f) (IRConst (VFloat 0)) (IROp OpMult pLeft pRight)
     return (returnExpr, const0, const0)
   return (IREnumSum v1 enumListL $ IREnumSum v2 enumListR irTuple, const0, const0)
-toIRInference meta cumulative (Null _) sample = do
+toIRInference _ _ (Null _) sample = do
   expr <- indicator (IROp OpEq sample (IRConst $ VList EmptyList))
   return (expr, const0, const0)
 toIRInference meta cumulative (Var TypeInfo {rType=rt} n) sample = do
@@ -984,9 +973,9 @@ toIRInference meta cumulative (Var TypeInfo {rType=rt} n) sample = do
         expr <- indicator comp
         return (expr, const0, const0)
     Nothing -> error ("Could not find name in TypeEnv: " ++ n)
-toIRInference meta cumulative (Subtree _ a i) sample = error "Cannot infer prob on subtree expression. Please check your syntax"
-toIRInference meta cumulative (Error t e) sample = return (IRError e, const0, const0)
-toIRInference meta cumulative x sample = error ("found no way to convert to IR: " ++ show x)
+toIRInference _ _ (Subtree _ _ _) _ = error "Cannot infer prob on subtree expression. Please check your syntax"
+toIRInference _ _ (Error _ e) _ = return (IRError e, const0, const0)
+toIRInference _ _ x _ = error ("found no way to convert to IR: " ++ show x)
 
 multP :: (IRExpr, IRExpr) -> (IRExpr, IRExpr) -> CompilerMonad (IRExpr, IRExpr)
 multP (aM, aDim) (bM, bDim) = return (IROp OpMult aM bM, IROp OpPlus aDim bDim)
@@ -1084,7 +1073,7 @@ packParamsIntoLetinsProb :: [String] -> [Expr] -> IRExpr -> IRExpr -> Supply IRE
 --packParamsIntoLetinsProb (v:vars) (p:params) expr sample = do
 --  e <- packParamsIntoLetinsProb vars params expr sample
 --  return $ IRLetIn v sample e --TODO sample austauschen durch teil von sample falls multivariable
-packParamsIntoLetinsProb [v] [p] expr sample = do
+packParamsIntoLetinsProb [v] [_] expr sample = do
   return $ IRLetIn v sample expr    --FIXME sample to auch toIRProbt werden
 
 findLambdaVars :: IRExpr -> [String]
@@ -1132,8 +1121,8 @@ toIRGenerate meta (ThetaI _ a ix) = do
 toIRGenerate meta (Subtree _ a ix) = do
   a' <- toIRGenerate meta a
   return $ IRSubtree a' ix
-toIRGenerate meta (Constant _ x) = return (IRConst (fmap failConversion x))
-toIRGenerate meta (Null _) = return $ IRConst (VList EmptyList)
+toIRGenerate _ (Constant _ x) = return (IRConst (fmap failConversion x))
+toIRGenerate _ (Null _) = return $ IRConst (VList EmptyList)
 toIRGenerate meta (Cons _ hd tl) = do
   h <- toIRGenerate meta hd
   t <- toIRGenerate meta tl
@@ -1142,8 +1131,8 @@ toIRGenerate meta (TCons _ t1 t2) = do
   t1' <- toIRGenerate meta t1
   t2' <- toIRGenerate meta t2
   return $ IRTCons t1' t2'
-toIRGenerate meta (Uniform _) = return $ IRSample IRUniform
-toIRGenerate meta (Normal _) = return $ IRSample IRNormal
+toIRGenerate _ (Uniform _) = return $ IRSample IRUniform
+toIRGenerate _ (Normal _) = return $ IRSample IRNormal
 toIRGenerate meta (InjF ti (Named name) params) = do
   -- Assuming that the logic within packParamsIntoLetinsGen typeEnv is correct.
   -- You will need to process vars and params, followed by recursive calls to fwdExpr.
@@ -1187,21 +1176,21 @@ toIRGenerate meta (Apply TypeInfo {rType=rt} l v) = do
 toIRGenerate meta (ReadNN _ name subexpr) = do
   sub <- toIRGenerate meta subexpr
   return $ IRApply (IRVar (name ++ "_auto_gen")) sub
-toIRGenerate meta (Error _ e) = return $ IRError e
-toIRGenerate meta x = error ("found no way to convert to IRGen: " ++ show x)
+toIRGenerate _ (Error _ e) = return $ IRError e
+toIRGenerate _ x = error ("found no way to convert to IRGen: " ++ show x)
 
 
 packParamsIntoLetinsGen :: CompilerMetadata -> [String] -> [Expr] -> IRExpr -> CompilerMonad  IRExpr
-packParamsIntoLetinsGen meta [] [] expr = return $ expr
-packParamsIntoLetinsGen meta [] _ _ = error "More parameters than variables"
-packParamsIntoLetinsGen meta _ [] _ = error "More variables than parameters"
+packParamsIntoLetinsGen _ [] [] expr = return $ expr
+packParamsIntoLetinsGen _ [] _ _ = error "More parameters than variables"
+packParamsIntoLetinsGen _ _ [] _ = error "More variables than parameters"
 packParamsIntoLetinsGen meta (v:vars) (p:params) expr = do
   pExpr <- toIRGenerate meta p
   e <- packParamsIntoLetinsGen meta vars params expr
   return $ IRLetIn v pExpr e
 
 toIREnumerate :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad CompilationResult
-toIREnumerate meta cumulative (Var TypeInfo{chainName=cn} n) sample = do
+toIREnumerate meta cumulative (Var TypeInfo{chainName=cn} _) sample = do
   let Just (equivCN, _, _) = findEquivalentExpression (fcData meta) cn
   let fs = map snd (functions (compilingProgram meta))
   let equivExpr = findExprWithCN fs equivCN

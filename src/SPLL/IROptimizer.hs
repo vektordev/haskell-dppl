@@ -4,18 +4,8 @@ module SPLL.IROptimizer (
 ) where
 
 import SPLL.IntermediateRepresentation
-import SPLL.Lang.Types ( Expr )
 import SPLL.Lang.Types
-import SPLL.Typing.Typing
-import SPLL.Typing.RType
-import PredefinedFunctions
-import SPLL.Typing.PType
-import SPLL.InferenceRule (algName)
 import Debug.Trace
-import Data.Maybe
-import Control.Monad.Writer.Lazy
-import Control.Monad.Reader
-import Data.Functor.Identity
 import Data.Functor ( (<&>) )
 import Data.Number.Erf (erf)
 import Data.List (nub)
@@ -57,7 +47,6 @@ optimize conf = irMap (commonSubexprStage . applyConstStage . assiciativityStage
     oLvl = optimizerLevel conf
     commonSubexprStage = if False then optimizeCommonSubexpr else id -- Too buggy to use
     applyConstStage = if oLvl >= 2 then applyConstant else id
-    applyToLetInStage = if oLvl >= 2 then applyToLetIn else id
     assiciativityStage = if oLvl >= 2 then optimizeAssociativity else id
     letInStage = if oLvl >= 2 then optimizeLetIns else id
     constantDistrStage = if oLvl >= 2 then evalConstantDistr else id
@@ -119,7 +108,7 @@ optimizeAssociativity (IROp OpMult (IROp OpMult leftV1 leftV2) rightV )
 optimizeAssociativity x = x
 
 optimizeLetIns :: IRExpr -> IRExpr
-optimizeLetIns ex@(IRLetIn name val scope)
+optimizeLetIns (IRLetIn name val scope)
   | isSimple val = replaceAll (IRVar name) val scope
   | countUses name scope == 1 && not (usedInEnumSumBodyInvariant name val scope) = replaceAll (IRVar name) val scope
   | countUses name scope == 0 = scope
@@ -181,8 +170,8 @@ countUses var expr = sum (map (countUses var) (getIRSubExprs expr))
 
 isSimple :: IRExpr -> Bool
 --isSimple (IRTheta a) = True
-isSimple (IRVar a) = True
-isSimple (IRConst a) = True
+isSimple (IRVar _) = True
+isSimple (IRConst _) = True
 isSimple _ = False
 
 replaceAll :: IRExpr -> IRExpr -> IRExpr -> IRExpr
@@ -214,7 +203,7 @@ softForceLogic OpMult _ (IRConst (VInt 0)) = IRConst (VInt 0)
 softForceLogic OpMult (IRConst (VInt 1)) right = right
 softForceLogic OpMult left (IRConst (VInt 1)) = left
 softForceLogic OpDiv left (IRConst (VInt 1)) = left
-softForceLogic OpDiv left (IRConst (VInt 0)) = error "tried to divide by zero in softForceArithmetic"
+softForceLogic OpDiv _ (IRConst (VInt 0)) = error "tried to divide by zero in softForceArithmetic"
 softForceLogic OpDiv (IRConst (VInt 0)) _ = IRConst (VInt 0)
 softForceLogic OpSub left (IRConst (VInt 0)) = left
 softForceLogic OpSub left right | left == right = IRConst (VInt 0)
@@ -226,7 +215,7 @@ softForceLogic OpMult _ (IRConst (VFloat 0)) = IRConst (VFloat 0)
 softForceLogic OpMult (IRConst (VFloat 1)) right = right
 softForceLogic OpMult left (IRConst (VFloat 1)) = left
 softForceLogic OpDiv left (IRConst (VFloat 1)) = left
-softForceLogic OpDiv left (IRConst (VFloat 0)) = error "tried to divide by zero in softForceArithmetic"
+softForceLogic OpDiv _ (IRConst (VFloat 0)) = error "tried to divide by zero in softForceArithmetic"
 softForceLogic OpDiv (IRConst (VFloat 0)) _ = IRConst (VFloat 0)
 softForceLogic OpSub left (IRConst (VFloat 0)) = left
 softForceLogic OpSub left right | left == right = IRConst (VFloat 0)
@@ -238,7 +227,7 @@ forceOp OpEq (VList _) (VList AnyList) = VBool True
 forceOp OpEq (VList EmptyList) (VList EmptyList) = VBool True
 forceOp OpEq (VList (ListCont VAny _)) (VList (ListCont _ _)) = VBool True
 forceOp OpEq (VList (ListCont _ _)) (VList (ListCont VAny _)) = VBool True
-forceOp OpEq (VList (ListCont a as)) (VList (ListCont b bs)) = forceOp OpEq (VList as) (VList bs)
+forceOp OpEq (VList (ListCont _ as)) (VList (ListCont _ bs)) = forceOp OpEq (VList as) (VList bs)
 forceOp OpEq (VList _) (VList _) = VBool False
 forceOp OpEq a b = VBool $ a == b
 forceOp OpApprox (VFloat x) (VFloat y) = VBool $ abs (x - y) <= floatApproxEqThresh

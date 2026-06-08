@@ -66,7 +66,7 @@ module SPLL.Prelude
   ) where
 
 import SPLL.Lang.Lang
-import SPLL.Lang.Types (makeTypeInfo, GenericValue (..), CompilerError, InjFName(..))
+import SPLL.Lang.Types (makeTypeInfo, GenericValue (..), CompilerError)
 import SPLL.AutoNeural (validateEncodeGaussian)
 import SPLL.IntermediateRepresentation
 import SPLL.Analysis
@@ -79,10 +79,10 @@ import SPLL.IROptimizer (optimizeEnv)
 import Debug.Trace
 import Data.Either
 import SPLL.Typing.ForwardChaining (annotateProg)
-import Text.PrettyPrint.Annotated.HughesPJClass
+import Text.PrettyPrint.Annotated.HughesPJClass()
 import PrettyPrint (pPrintProg, pPrintIREnv)
 import Debug.Pretty.Simple
-import Data.Maybe (fromJust, isJust)
+import Data.Maybe (isJust)
 
 -- Flow control
 ifThenElse :: Expr -> Expr -> Expr -> Expr

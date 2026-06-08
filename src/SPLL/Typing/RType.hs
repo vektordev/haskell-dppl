@@ -45,11 +45,11 @@ matches (TArrow left right) (TArrow left2 right2) = left `matches` left2 && righ
 matches (ListOf x) (ListOf y) = x `matches` y
 matches NullList NullList = True
 matches BottomTuple BottomTuple = True
-matches (GreaterType t1 t2) (GreaterType t3 t4) = case (greaterType t1 t2, greaterType t1 t2)
+matches (GreaterType t1 t2) (GreaterType _ _) = case (greaterType t1 t2, greaterType t1 t2)
   of
     (Just a, Just b) -> a `matches` b
     (Nothing, Nothing) -> True
-    (x, y) -> False
+    (_, _) -> False
 matches (Tuple t11 t12) (Tuple t21 t22) = t11 `matches` t21 && t12 `matches` t22
 matches (TEither t11 t12) (TEither t21 t22) = t11 `matches` t21 && t12 `matches` t22
 matches _ _ = False -- TODO: This might be too aggressive, or it might not break when RType changes.
@@ -73,7 +73,7 @@ greaterType _ _ = Nothing
 isOnlyNumbers :: RType -> Bool
 isOnlyNumbers TFloat = True
 isOnlyNumbers TInt = True
-isOnlyNumbers (a `TArrow` b) = isOnlyNumbers b
+isOnlyNumbers (_ `TArrow` b) = isOnlyNumbers b
 isOnlyNumbers (ListOf t) = isOnlyNumbers t
 isOnlyNumbers (Tuple a b) = isOnlyNumbers a && isOnlyNumbers b
 isOnlyNumbers (TEither a b) = isOnlyNumbers a && isOnlyNumbers b

@@ -12,10 +12,8 @@ import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType
 import SPLL.Lang.Lang
-import PrettyPrint
 import StandardLibrary
 
-import Debug.Trace
 import Data.List (find, elemIndex, isPrefixOf)
 import Utils
 import Data.Maybe (fromJust, isJust)

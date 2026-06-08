@@ -20,10 +20,10 @@ module SPLL.IntermediateRepresentation (
 ) where
 
 import SPLL.Lang.Types
-import SPLL.Typing.RType
-import SPLL.Typing.PType
-import SPLL.Typing.Typing
-import Data.Data
+import SPLL.Typing.RType()
+import SPLL.Typing.PType()
+import SPLL.Typing.Typing()
+import Data.Data()
 
 {-
 {-# OPTIONS -Wall #-}

@@ -2,7 +2,7 @@ module SPLL.Lang.Lang (
   Expr (..)
 , ExprStub(..)
 , toStub
-, Value (..)
+, Value
 , Program (..)
 , ThetaTree (..)
 , floatApproxEqThresh
@@ -39,18 +39,12 @@ module SPLL.Lang.Lang (
 ) where
 
 import SPLL.Lang.Types
-import SPLL.Typing.PType
 import SPLL.Typing.RType
 import SPLL.Typing.AlgebraicDataTypes
 
 import qualified Data.Set as Set
 import Data.Maybe
-import qualified Data.Map as Map
-import Control.Applicative (liftA2)
-import Control.Monad.Random.Lazy (Random)
-import Data.Number.Erf (Erf)
-import Data.List (intercalate, nub, transpose)
-import Debug.Trace
+import Data.List (nub, transpose)
 import qualified Data.Bifunctor as Bifunctor
 
 toStub :: Expr -> ExprStub
@@ -97,7 +91,7 @@ varsOfExpr expr = case expr of
 
 isNotTheta :: Expr -> Bool
 isNotTheta expr = case expr of
-  (ThetaI _ _ name) -> False
+  (ThetaI _ _ _) -> False
   _ -> True
 
 tMapHead :: (Expr -> TypeInfo) -> Expr -> Expr
@@ -119,8 +113,8 @@ tMapHead f expr = case expr of
   (InjF _ x a) -> InjF (f expr) x a
   (Lambda _ name a) -> Lambda (f expr) name a
   (Apply _ a b) -> Apply (f expr) a b
-  (ReadNN t n a) -> ReadNN (f expr) n a
-  (Error t e) -> Error (f expr) e
+  (ReadNN _ n a) -> ReadNN (f expr) n a
+  (Error _ e) -> Error (f expr) e
 
 tMap :: (Expr -> TypeInfo) -> Expr -> Expr
 tMap f expr = case expr of
@@ -138,11 +132,11 @@ tMap f expr = case expr of
   (Cons _ a b) -> Cons (f expr) (tMap f a) (tMap f b)
   (TCons _ a b) -> TCons (f expr) (tMap f a) (tMap f b)
   (Var _ x) -> Var (f expr) x
-  (InjF t x a) -> InjF (f expr) x (map (tMap f) a)
+  (InjF _ x a) -> InjF (f expr) x (map (tMap f) a)
   (Lambda _ name a) -> Lambda (f expr) name (tMap f a)
   (Apply _ a b) -> Apply (f expr) (tMap f a) (tMap f b)
   (ReadNN _ n a) -> ReadNN (f expr) n (tMap f a)
-  (Error t e) -> Error (f expr) e
+  (Error _ e) -> Error (f expr) e
 
 makeMain :: Expr -> Program
 makeMain expr = Program [("main", expr)] [] []
@@ -166,10 +160,10 @@ getUnaryConstructor x = error ("getUnaryConstructor undefined for " ++ show x)
 getNullaryConstructor :: Expr -> (TypeInfo -> Expr)
 getNullaryConstructor Uniform {} = Uniform
 getNullaryConstructor Normal {} = Normal
-getNullaryConstructor (Constant t val) = (`Constant` val)
+getNullaryConstructor (Constant _ val) = (`Constant` val)
 getNullaryConstructor Null {} = Null
 getNullaryConstructor (Var _ x) = (`Var` x)
-getNullaryConstructor (Error t e) = (`Error` e)
+getNullaryConstructor (Error _ e) = (`Error` e)
 
 tMapM :: Monad m => (Expr -> m TypeInfo) -> Expr -> m Expr
 tMapM f expr@(IfThenElse _ a b c) = do
@@ -216,7 +210,7 @@ getSubExprs expr = case expr of
   (Lambda _ _ a) -> [a]
   (Apply _ a b) -> [a, b]
   (ReadNN _ _ a) -> [a]
-  (Error _ e) -> []
+  (Error _ _) -> []
 
 setSubExprs :: Expr -> [Expr] -> Expr
 setSubExprs expr [] = case expr of
@@ -319,20 +313,20 @@ valueListToMultiValue lst@((VEither _):_) | all isVEither lst = MultiEither lVal
   where
     lVals = valueListToMultiValue [l | VEither (Left l) <- lst]
     rVals = valueListToMultiValue [r | VEither (Right r) <- lst]
-valueListToMultiValue lst@((VEither _):_) = error "Not all elements in the list are Eithers"
+valueListToMultiValue ((VEither _):_) = error "Not all elements in the list are Eithers"
 valueListToMultiValue lst@((VTuple _ _):_) | all isVTuple lst = MultiTuple aVals bVals
   where
     aVals = valueListToMultiValue [a | VTuple a _ <- lst]
     bVals = valueListToMultiValue [b | VTuple _ b <- lst]
-valueListToMultiValue lst@((VTuple _ _):_) = error "Not all elements in the list are Tuples"
+valueListToMultiValue ((VTuple _ _):_) = error "Not all elements in the list are Tuples"
 valueListToMultiValue lst@((VADT _ _):_) | all isVADT lst = MultiADT (map reconstructConstructor cns)
   where
     cns = nub [cn | VADT cn _ <- lst]
-    reconstructConstructor cn = 
+    reconstructConstructor cn =
       let field_lists = [fields | VADT cn' fields <- lst, cn' == cn]
           transposed_fields = if null field_lists then [] else map nub (transpose field_lists)
       in (cn, map valueListToMultiValue transposed_fields)
-valueListToMultiValue lst@((VADT _ _):_) = error "Not all elements in the list are ADTs"
+valueListToMultiValue ((VADT _ _):_) = error "Not all elements in the list are ADTs"
 valueListToMultiValue lst = MultiDiscretes lst
 
 valueInMultiValue :: MultiValue -> Value -> Bool
@@ -392,7 +386,7 @@ prettyPrintProgCustomTI :: (TypeInfo -> String) -> Program -> [String]
 prettyPrintProgCustomTI fn (Program decls neurals adts) = concatMap prettyPrintADTs adts ++  concatMap (prettyPrintDecl fn) decls ++ concatMap prettyPrintNeural neurals
 
 prettyPrintADTs :: ADTDecl  -> [String]
-prettyPrintADTs ADTDecl{dataName=name, constructors=constr, maxDepth=d} = ("data " ++ name ++ "::"):map (\rts -> "\n|"++ show rts) constr
+prettyPrintADTs ADTDecl{dataName=name, constructors=constr, maxDepth=_} = ("data " ++ name ++ "::"):map (\rts -> "\n|"++ show rts) constr
 
 prettyPrintNeural :: NeuralDecl -> [String]
 prettyPrintNeural (name, ty, range) = l1:l2:(l3 range):[]
@@ -445,7 +439,7 @@ printFlat expr = case expr of
   Cons {} -> "Cons"
   TCons {} -> "TCons"
   (Var _ a) -> "Var " ++ a
-  (InjF t (Named fname) _) -> "InjF (" ++ fname ++ ")"
+  (InjF _ (Named fname) _) -> "InjF (" ++ fname ++ ")"
   (Lambda _ name _) -> "\\" ++ name  ++ " -> "
   Apply {} -> "Apply"
   (ReadNN _ name _) -> "ReadNN " ++ name

@@ -10,17 +10,17 @@ module SPLL.Typing.PInfer2 (
 import Control.Monad.Except
 import Control.Monad.State
 
-import Data.List (nub, delete)
+import Data.List (delete)
 import qualified Data.Set as Set
 
-import Data.Monoid
+import Data.Monoid()
 import Data.Either (lefts)
 import Data.Foldable hiding (toList)
 import qualified Data.Map as Map
 import SPLL.Lang.Lang
 import SPLL.Typing.Typing
 import SPLL.Typing.PType
-import SPLL.Typing.RType hiding (TVar, TV)
+import SPLL.Typing.RType hiding (TV)
 import Control.Monad (replicateM)
 import SPLL.Lang.Types (CompilerError)
 
@@ -105,7 +105,7 @@ resolvePlusCons PLogNormal  Prob        = Bottom
 resolvePlusCons Prob        PLogNormal  = Bottom
 resolvePlusCons PNormal     PLogNormal  = Bottom
 resolvePlusCons PLogNormal  PNormal     = Bottom
-resolvePlusCons ty1 ty2 = Deterministic
+resolvePlusCons _ _ = Deterministic
 
 -- Enumerability allows us to still infer prob in cases in which normal inference would fail
 resolveEnumPlusCons :: PType -> PType -> PType
@@ -113,7 +113,7 @@ resolveEnumPlusCons Integrate Integrate = Integrate
 resolveEnumPlusCons Integrate Prob = Integrate
 resolveEnumPlusCons Prob Integrate = Integrate
 resolveEnumPlusCons Prob Prob = Integrate
-resolveEnumPlusCons ty1 ty2 = Deterministic
+resolveEnumPlusCons _ _ = Deterministic
 
 resolveCompCons :: PType -> PType -> PType
 resolveCompCons Integrate   Integrate   = Bottom
@@ -134,7 +134,7 @@ resolveCompCons Integrate   PLogNormal  = Bottom
 resolveCompCons PLogNormal  PLogNormal  = Bottom
 resolveCompCons PNormal     PLogNormal  = Bottom
 resolveCompCons PLogNormal  PNormal     = Bottom
-resolveCompCons ty1 ty2 = Deterministic
+resolveCompCons _ _ = Deterministic
 
 addPTypeInfo :: Program -> Either CompilerError Program
 addPTypeInfo p = do
@@ -195,7 +195,7 @@ instance DSubstitutable TypeOrChain where
        Nothing -> Left (TVar ty)
        (Just f) -> Right f
        where res = Map.lookup ty s
-  dapply  (DSubst s) (Left ty) = Left ty
+  dapply  (DSubst _) (Left ty) = Left ty
   dapply s (Right dc) = Right $ dapply s dc
 
 dcompose :: DSubst -> DSubst -> DSubst
@@ -203,7 +203,7 @@ dcompose :: DSubst -> DSubst -> DSubst
 
 substChain :: DSubst -> Either PType ChainConstraint -> [Either PType ChainConstraint]
 substChain (DSubst s) (Left (TVar ty)) = Map.findWithDefault [Left (TVar ty)] ty s
-substChain (DSubst s) (Left ty) = [Left ty]
+substChain (DSubst _) (Left ty) = [Left ty]
 substChain dsubst (Right cs)  = [Right $ dapply dsubst cs]
 
 
@@ -228,7 +228,7 @@ buildConstraint resList cons s = case consElem of
 
 -- insert constraint chains into each other, so only the ones with direct cyclic dependencies remain
 bundleConstraints :: DConstraint -> [DConstraint] -> [DConstraint]
-bundleConstraints topD@(topTy, acc) dcons = case nonRecType of
+bundleConstraints topD@(topTy, _) dcons = case nonRecType of
   Nothing -> topD:dcons
   Just tvar -> let (tv, dc) = extractType (TVar tvar) dcons
                    dsubst = DSubst $ Map.singleton tvar dc in
@@ -239,7 +239,7 @@ bundleConstraints topD@(topTy, acc) dcons = case nonRecType of
         nonRecType = getNonRecType dftv dcons
 
 getNonRecType :: [TVar] -> [DConstraint] -> Maybe TVar
-getNonRecType [] dcons = Nothing
+getNonRecType [] _ = Nothing
 getNonRecType (tvar:tvar_rem) dConsList =
   if elem tvar (ftv dcons)
   then getNonRecType tvar_rem dConsList
@@ -254,11 +254,11 @@ isRecType (_, _) = error "non tvar variable in fixpoint iterations"
 -- A constraint is resolved if it collapses to var = basicType
 isConsResolvable :: DConstraint -> Bool
 isConsResolvable dcons =  ret
-  where (cons', _, ret) = isConsResolved [collapsedCons]
+  where (_, _, ret) = isConsResolved [collapsedCons]
         collapsedCons = collapse dcons
 
 extractType :: PType -> [DConstraint] -> DConstraint
-extractType ty [] = error "Could not find top type"
+extractType _ [] = error "Could not find top type"
 extractType ty ((pty, dc):b) = if ty == pty then (pty, dc) else extractType ty b
 
 -- we iterate through the DowngradeChain.
@@ -328,7 +328,7 @@ resolveStep cons ty = (consRes, resType, isResolvedRes, substRes)
 
 
 fixpointIteration :: DConstraint -> Subst
-fixpointIteration dcons@(TVar tv, dc) = compose (Subst $ Map.singleton tv ty) substRes
+fixpointIteration dcons@(TVar tv, _) = compose (Subst $ Map.singleton tv ty) substRes
   where (ty, substRes) = fixpointStep Deterministic dcons emptySubst
 
 fixpointStep :: PType -> DConstraint -> Subst -> (PType, Subst)
@@ -417,7 +417,7 @@ applyOpArg env expr s1 cs1 t1 = do
 
 -- if we already know the type of the first argument in a binary operator..
 applyOpTy :: TEnv -> PType -> Subst -> [DConstraint] -> PType -> Infer (Subst, [DConstraint], PType)
-applyOpTy env ty s1 cs1 t1 = do
+applyOpTy _ ty s1 cs1 t1 = do
   tv1 <- fresh
   s3       <- unify t1 (PArr ty tv1)
   return (s3 `compose` s1,
@@ -484,7 +484,7 @@ inferProg env (Program decls nns adts) = do
   cts <- mapM (infer fenv . snd) decls
   let Just expr = lookup "main" decls
   -- inferring the type of the top level expression
-  (s1, cs1, t1, pt) <- infer fenv expr
+  (s1, cs1, t1, _) <- infer fenv expr
   -- building the constraints that the built type variables of the functions equal
   -- the inferred function type
   let tcs = zipWith makeEqConstraint tvs (map trd4 cts)
@@ -600,7 +600,7 @@ infer env expr = case expr of
 
 
   ReadNN ti name e -> do
-      (s, cs, t, et) <- infer env e
+      (s, cs, _, et) <- infer env e
       -- Continuous (TFloat) NNs output (mu, sigma) logits and are treated as
       -- PNormal so that toIRNormalParams can extract the parameters symbolically.
       let pt = if rType ti == TFloat then PNormal else Integrate

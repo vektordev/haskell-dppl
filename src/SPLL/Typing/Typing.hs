@@ -16,7 +16,6 @@ module SPLL.Typing.Typing (
 import SPLL.Lang.Types
 import SPLL.Typing.RType
 import SPLL.Typing.PType
-import GHC.Records
 
 setRType :: TypeInfo -> RType -> TypeInfo
 setRType t rt = t {rType = rt}
