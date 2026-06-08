@@ -21,12 +21,11 @@ stack test --ta '-S'   # disable Spec tests
 stack test --ta '-I'   # disable Internals tests
 stack test --ta '-P'   # disable Parser tests
 stack test --ta '-E'   # disable End2End tests
-
+stack test --test-arguments "--show-timings"    # shows per-suite timing and cost center info, '-T' for short.
 ```
 
-CLI flags: `-v` verbosity, `-O LEVEL` optimization (0-2), `-k CUTOFF` top-K threshold, `-c` count branches, `-t` truncate boilerplate, `-d` debug intermediates (see below).
 
-Nix shell available via `shell.nix` (GHC 9.6.7).
+CLI flags: `-v` verbosity, `-O LEVEL` optimization (0-2), `-k CUTOFF` top-K threshold, `-c` count branches, `-t` truncate boilerplate, `-d` debug intermediates (see below).
 
 To prevent having to run `stack test` repeatedly, e.g. to grep for specific failures, always store the test output to temporary file and grep that.
 
@@ -135,34 +134,3 @@ Neural networks are declared separately as `NeuralDecl = (String, RType, Maybe M
 ## Runtime Libraries
 
 Generated Python code depends on `pythonLib.py`; generated Julia code depends on `juliaLib.jl`. These provide runtime helpers for the transpiled inference functions.
-
-## Session Notes
-
-Design notes and investigation records are in `session-notes/`. Read the relevant session note
-before starting on a feature.
-
-## API Reference Docs
-
-`api/` mirrors the source tree and contains concise per-file reference documents.
-Use them to navigate the codebase:
-
-- **"Does this file have the API I need?"** — check the relevant `api/` doc for exported types and functions.
-- **"Which files does my feature touch?"** — each doc lists cross-references to related modules.
-- **"Where do I put new code?"** — the docs describe each module's responsibility boundary.
-
-Key docs:
-- `api/src/SPLL/Lang/Types.md` — core AST, TypeInfo, Value, Program
-- `api/src/SPLL/Lang/Lang.md` — Expr traversal, tMap, prettyPrint
-- `api/src/SPLL/Typing/RType.md` / `PType.md` — type systems
-- `api/src/SPLL/Typing/RInfer.md` / `PInfer2.md` — type inference passes
-- `api/src/SPLL/IntermediateRepresentation.md` — IRExpr, IREnv, CompilerConfig
-- `api/src/SPLL/IRCompiler.md` — AST → IR compilation
-- `api/src/SPLL/InferenceRule.md` — inference algorithm rules
-- `api/src/SPLL/Analysis.md` — enum/algorithm annotation
-- `api/src/SPLL/IROptimizer.md` — IR optimization passes
-- `api/src/SPLL/CodeGenPyTorch.md` / `CodeGenJulia.md` — code generation
-- `api/src/PredefinedFunctions.md` — InjF function library
-- `api/test/End2EndTesting.md` — integration test infrastructure
-
-**Keep these docs current**: if you change a module's exports, types, or responsibilities,
-update the corresponding `api/` file. If you find an inaccuracy, correct it.

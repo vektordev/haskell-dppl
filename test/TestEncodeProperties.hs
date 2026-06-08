@@ -1,7 +1,9 @@
 -- Aspirational test suite for AutoNeural encode.
 --
 -- OUT OF SCOPE (intentional — not tested here):
---   § 3.1  collapse operator for non-Gaussian closures
+--   § 3.1  collapse operator itself (moment-matching) for non-Gaussian closures (task 07).
+--          The *error path* — rejecting a non-Gaussian continuous slot that lacks a
+--          collapse — IS covered (encodeError_continuousMixtureRequiresCollapse).
 --   § 3.4  noised void fill on constructor change
 --   § 3.5  sigma=0 / sigma=epsilon floor for hardened / observed values
 --
@@ -23,16 +25,19 @@ module TestEncodeProperties
   , encodeProps_gaussianSub
   , encodeProps_eitherFlagInUnitInterval
   , encodeProps_eitherFlagSignMatchesSide
+  , encodeProps_eitherIfMixtureFlag
   , encodeProps_adtSingleConstrFlagIsOne
   , encodeInvariant_sigmaPositive
   , encodeInvariant_discreteNonNegative
   , encodeInvariant_discreteSumsToOne
   , encodeInvariant_outputDimMatchesPlan
+  , encodeError_continuousMixtureRequiresCollapse
   ) where
 
 import Test.HUnit
 import Control.Monad (forM_)
 import Data.Foldable (toList)
+import Data.List (isInfixOf)
 
 import SPLL.Prelude (runEncode)
 import SPLL.Parser (tryParseProgram)
@@ -170,6 +175,31 @@ encodeProps_eitherFlagSignMatchesSide = TestCase $ do
              (head slotsL > 0.5)
   assertBool ("spiked Right: flag should be < 0.5, got " ++ show (head slotsR))
              (head slotsR < 0.5)
+
+-- § 2.4  Either if-mixture: `if cond then Left .. else Right ..` (non-identity).
+-- The flag slot is f = P(cond), realised automatically by the query-based encode
+-- (encode = main_prob(Left VAny), and IfThenElse prob compilation mixes the branches).
+-- condNN drives the flag; spiking it at 0 makes the condition true (flag > 0.5),
+-- spiking it at 1 makes it false (flag < 0.5).  The Either decoder NN is declared first
+-- so runEncode selects its encode function.
+eitherIfMixtureSrc :: String
+eitherIfMixtureSrc = unlines
+  [ "neural outNN  :: (Symbol -> Either Int Bool) of ([0, 1, 2] | [True, False])"
+  , "neural condNN :: (Symbol -> Int) of [0, 1]"
+  , "main sym = if condNN sym == 0 then left 1 else right True"
+  ]
+
+encodeProps_eitherIfMixtureFlag :: Test
+encodeProps_eitherIfMixtureFlag = TestCase $ do
+  prog   <- parseOrFail eitherIfMixtureSrc
+  slotsT <- encodeSlots prog [mockSpiked (VInt 0)]   -- condNN == 0 likely  → flag high
+  slotsF <- encodeSlots prog [mockSpiked (VInt 1)]   -- condNN == 1 likely  → flag low
+  assertBool ("if-mixture flag must be in [0,1], got " ++ show (head slotsT))
+             (head slotsT >= 0 && head slotsT <= 1)
+  assertBool ("cond true-spiked: flag should be > 0.5, got " ++ show (head slotsT))
+             (head slotsT > 0.5)
+  assertBool ("cond false-spiked: flag should be < 0.5, got " ++ show (head slotsF))
+             (head slotsF < 0.5)
 
 ------------------------------------------------------------------------
 -- § 1.2  ADT: constructor flags sum to 1; single-constructor flag is 1.
@@ -325,3 +355,24 @@ encodeInvariant_outputDimMatchesPlan = TestList
                   expectedLen (length slots)
   | (name, src, n) <- allPrograms
   ]
+
+------------------------------------------------------------------------
+-- § 2.4 / § 3.1  Continuous if-mixture must be rejected without `collapse`.
+--
+-- `if .. then Normal + 2.0 else Normal + 5.0` is a mixture of two Gaussians, which is not
+-- Gaussian-closed.  PInfer degrades its PType to Integrate, so no normal-parameter function
+-- is generated for the continuous slot.  Encoding it must fail cleanly (a Left
+-- CompilerError pointing at `collapse`), not dangle on a missing function reference.
+encodeError_continuousMixtureRequiresCollapse :: Test
+encodeError_continuousMixtureRequiresCollapse = TestCase $ do
+  prog <- parseOrFail $ unlines
+    [ "neural mixNN :: (Symbol -> Float)"
+    , "main = if Uniform < 0.5 then Normal + 2.0 else Normal + 5.0"
+    ]
+  case runEncode defaultCompilerConfig prog [] of
+    Left err ->
+      assertBool ("error should mention `collapse`, got: " ++ err)
+                 ("collapse" `isInfixOf` err)
+    Right v  ->
+      assertFailure ("expected a compile error for a non-Gaussian continuous output, got: "
+                     ++ show v)

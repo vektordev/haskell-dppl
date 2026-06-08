@@ -98,7 +98,7 @@ toInvExpr fcData adts lambdaCN = (mergedM, mergedCoV)
     -- Create the expression that calculates toInvCN
     valueExprs = mapMaybe (toValueExpr clauseSet [paramClause] adts) toInvCNs
     -- Merge expression, which contain complementary information
-    (mergedM, mergedCoV) = mergeExpr valueExprs
+    (mergedM, mergedCoV) = mergeExpr toInvVarName lambdaCN toInvCNs valueExprs
 
 -- Performs forward chaining to create an expression, which calculates the value of a specific point in the AST given a set of parameter points in the AST.
 -- Also returns the derivative of that expression
@@ -166,10 +166,20 @@ unwrapLambdas fcData cn = case lookup cn (chainNameInfo fcData) of
 -- If two paths provide information for the same part of the tuple, we discard the second, because the should be semantically equal and therefor redundant
 -- We also assume that the different paths do not have conflicting LetIns
 -- FIXME: Implement Gramian Matrix correctly, instead of multiplying all together
-mergeExpr :: [(IRExpr, IRExpr)] -> (IRExpr, IRExpr)
-mergeExpr [] = error "Forward chaining failed to find a solution"
-mergeExpr [x] = x
-mergeExpr (x:xs) = mergeExpr2 id x (mergeExpr xs)
+-- The first three arguments are purely diagnostic context for the failure case below:
+-- the name of the variable being witnessed, the chain name of the lambda being inverted,
+-- and the candidate occurrences (chain names) that were attempted and yielded no path.
+mergeExpr :: String -> ChainName -> [ChainName] -> [(IRExpr, IRExpr)] -> (IRExpr, IRExpr)
+mergeExpr varName lambdaCN candidateCNs [] = error $ unlines
+  [ "Forward chaining failed to find a solution: no inversion path could be constructed for variable \"" ++ varName ++ "\""
+  , "while inverting the function bound at chain name " ++ lambdaCN ++ "."
+  , "Candidate occurrences that were tried and could not be witnessed: " ++ show candidateCNs
+  , "This usually means an operand of an invertible function (e.g. the `+` in a sum) is itself a"
+  , "compound expression rather than a literal or variable, so forward chaining cannot algebraically"
+  , "isolate it. See docs/forward-chaining-recursion-constraint.md for known failure shapes and workarounds."
+  ]
+mergeExpr _ _ _ [x] = x
+mergeExpr varName lambdaCN candidateCNs (x:xs) = mergeExpr2 id x (mergeExpr varName lambdaCN candidateCNs xs)
 
 mergeExpr2 :: (IRExpr -> IRExpr) -> (IRExpr, IRExpr) -> (IRExpr, IRExpr) -> (IRExpr, IRExpr)
 mergeExpr2 bindings (IRLetIn n v body, cov1) expr2 = mergeExpr2 (bindings . IRLetIn n v) (body, cov1) expr2
