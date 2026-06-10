@@ -215,7 +215,9 @@ def listProd(lst):
     return lst.value * listProd(lst.next)
     
 def isPossible(multiVal, expr):
-  if multiVal[0] == "D":
+  if multiVal[0] == "C":
+    return True
+  elif multiVal[0] == "D":
     return expr in multiVal[1]
   elif multiVal[0] == "T" and isinstance(expr, tuple):
     return isPossible(multiVal[1][0], expr[0]) and isPossible(multiVal[1][1], expr[1])
@@ -236,7 +238,10 @@ def isPossible(multiVal, expr):
     return foundConstr
   
 def multiValueToValueList(multiVal):
-  if multiVal[0] == "D":
+  if multiVal[0] == "C":
+    # A continuous (Float) slot has no enumerable values.
+    return EmptyInferenceList()
+  elif multiVal[0] == "D":
     return toList(multiVal[1])
   elif multiVal[0] == "T":
     cartesian = itertools.product(multiValueToValueList(multiVal[1][0]), multiValueToValueList(multiVal[1][1]))

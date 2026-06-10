@@ -98,7 +98,7 @@ data PartitionPlan = TuplePlan PartitionPlan PartitionPlan -- Logit layout: firs
                    | Discretes RType MultiValue -- Logit layout: Enumerated values in order of "tagToValues"
                    | ADTPlan String [(String, [PartitionPlan])] -- Logit layout: Flag for each constructor, then each field of each constructor
                    | Continuous -- Logit layout: Mu, Sigma
-                   deriving Show
+                   deriving (Show, Eq)
 
 vector :: String
 vector = "l_x_neural_out"
@@ -249,11 +249,18 @@ isDiscrete (ListOf ty) = isDiscrete ty
 isDiscrete (Tuple ty1 ty2) = isDiscrete ty1 && isDiscrete ty2
 isDiscrete other = False
 
+-- | Build the logit-vector layout for an RType paired with an (optional) MultiValue
+-- enumeration annotation.
+--
+-- 'Nothing' and the "_" placeholder (MultiAuto) are auto-derived from the RType where
+-- possible (Bool, Float, Tuple/Either/non-recursive ADT of such types); Int and Symbol
+-- cannot be auto-derived (unbounded domain) and require an explicit enumeration.
 makePartitionPlan :: [ADTDecl] -> RType -> Maybe MultiValue -> PartitionPlan
-makePartitionPlan adts (Tuple a b) tag = TuplePlan (makePartitionPlan adts a tag1) (makePartitionPlan adts b tag2)
-    where
-      tag1 = (\(MultiTuple t1 _) -> t1) <$> tag
-      tag2 = (\(MultiTuple _ t2) -> t2) <$> tag
+makePartitionPlan adts ty Nothing = case autoDeriveMultiValue adts ty of
+  Right mv -> makePartitionPlan adts ty (Just mv)
+  Left err -> error ("AutoNeural: " ++ err ++ " (for neural output type " ++ show ty ++ ")")
+makePartitionPlan adts ty (Just MultiAuto) = makePartitionPlan adts ty Nothing
+makePartitionPlan adts (Tuple a b) (Just (MultiTuple tag1 tag2)) = TuplePlan (makePartitionPlan adts a (Just tag1)) (makePartitionPlan adts b (Just tag2))
 makePartitionPlan adts (TEither l r) (Just (MultiEither lVal rVal)) = EitherPlan (makePartitionPlan adts l (Just lVal)) (makePartitionPlan adts r (Just rVal))
 makePartitionPlan adts (TADT name) (Just (MultiADT cVals)) = ADTPlan name (map (\(cn, fields) -> (cn, map (uncurry (makePartitionPlan adts)) fields)) fieldMultiVals)
   where
@@ -261,12 +268,14 @@ makePartitionPlan adts (TADT name) (Just (MultiADT cVals)) = ADTPlan name (map (
     constrs = constructors adt
     fieldRTypes = map (\(c, fs) -> (c, map snd fs)) constrs
     fieldMultiVals = map (\(mCn, mVals) -> let Just c = lookup mCn fieldRTypes in (mCn, (zip c (map Just mVals)))) cVals
-
-makePartitionPlan adts ty (Just tag) | isDiscrete ty = Discretes ty tag -- TODO: Validate that tag is sane for this.
-makePartitionPlan adts ty (Nothing) | isDiscrete ty = error "no enumeration range supplied for discrete value in AutoNeural."
-makePartitionPlan adts TFloat Nothing = Continuous
-makePartitionPlan adts TFloat a = error ("enum range supplied to continuous value in AutoNeural:" ++ show a)
-makePartitionPlan adts x y = error ("erroneous combination of type and tag in AutoNeural: " ++ show x ++ show y)
+makePartitionPlan adts ty@(Tuple {}) (Just tag) = error ("MultiValue annotation for tuple type " ++ show ty ++ " must be a matching tuple, e.g. (..., ...), but got: " ++ show tag)
+makePartitionPlan adts ty@(TEither {}) (Just tag) = error ("MultiValue annotation for Either type " ++ show ty ++ " must be a matching Either, e.g. (... | ...), but got: " ++ show tag)
+makePartitionPlan adts ty@(TADT _) (Just tag) = error ("MultiValue annotation for ADT type " ++ show ty ++ " must be a matching ADT, e.g. {...}, but got: " ++ show tag)
+makePartitionPlan adts ty (Just tag@(MultiDiscretes _)) | isDiscrete ty = Discretes ty tag
+makePartitionPlan adts TFloat (Just MultiContinuous) = Continuous
+makePartitionPlan adts ty (Just tag) | isDiscrete ty = error ("MultiValue annotation for discrete type " ++ show ty ++ " must be an explicit enumeration (e.g. [0,1,2]), but got: " ++ show tag)
+makePartitionPlan adts TFloat (Just tag) = error ("enum range supplied to continuous (Float) value in AutoNeural: " ++ show tag ++ ". Use 'Real' or '_' for a continuous value instead.")
+makePartitionPlan adts x y = error ("erroneous combination of type and tag in AutoNeural: " ++ show x ++ " / " ++ show y)
 
 --split a tag over tuples into a tuple of tags.
 splitTag :: Maybe Tag -> (Maybe Tag, Maybe Tag)

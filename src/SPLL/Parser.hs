@@ -76,7 +76,7 @@ symbol :: MonadParser m => String -> m String
 symbol = L.symbol sc
 
 reserved :: [String]
-reserved = ["data", "if", "then", "else", "let", "in", "theta", "subtree", "error", "ThetaTree", "Left", "Right"]
+reserved = ["data", "if", "then", "else", "let", "in", "theta", "subtree", "error", "ThetaTree", "Left", "Right", "Real"]
 
 keyword :: MonadParser m => String -> m String
 keyword kw = lexeme $ try (string kw <* notFollowedBy (alphaNumChar <|> char '\'' <|> char '_'))
@@ -366,7 +366,20 @@ pNeural = dbg "neural" $ do
 
 pNeuralMultiValue :: MonadParser m => m MultiValue
 pNeuralMultiValue = dbg "multiVal" $ do
-  choice [try pMultiTypeDef, try pMultiTypeRef, try pMultiTuple, pMultiDiscretes, pMultiADT, try pMultiEither]
+  choice [try pMultiAuto, try pMultiContinuous, try pMultiTypeDef, try pMultiTypeRef, try pMultiTuple, pMultiDiscretes, pMultiADT, try pMultiEither]
+
+-- | "_": auto-derive this slot's MultiValue from its RType (full enumeration for
+-- discrete/Bool/ADT/Tuple/Either, continuous for Float; Int/Symbol cannot be derived).
+pMultiAuto :: MonadParser m => m MultiValue
+pMultiAuto = dbg "multiAuto" $ do
+  _ <- lexeme $ char '_' <* notFollowedBy (alphaNumChar <|> char '\'' <|> char '_')
+  return MultiAuto
+
+-- | "Real": a continuous (Float) leaf within a composite MultiValue annotation.
+pMultiContinuous :: MonadParser m => m MultiValue
+pMultiContinuous = dbg "multiContinuous" $ do
+  _ <- keyword "Real"
+  return MultiContinuous
 
 pMultiTypeDef :: MonadParser m => m MultiValue
 pMultiTypeDef = do
@@ -384,6 +397,8 @@ resolveMultiValueTypeDecl 0 (MultiTypeRef _) _ = error "Cannot recurse, no depth
 resolveMultiValueTypeDecl 1 (MultiTypeRef _) (declName, MultiADT constrs) = MultiADT (filter (\(_, args) -> not $ any (containsMultiValueTypeRef declName) args) constrs)
 resolveMultiValueTypeDecl depthLeft (MultiTypeRef refName) decl@(declName, declVal) | declName == refName = resolveMultiValueTypeDecl (depthLeft - 1) declVal decl
 resolveMultiValueTypeDecl _ (MultiDiscretes d) _ = MultiDiscretes d
+resolveMultiValueTypeDecl _ MultiContinuous _ = MultiContinuous
+resolveMultiValueTypeDecl _ MultiAuto _ = MultiAuto
 resolveMultiValueTypeDecl depthLeft (MultiTuple l r) decl =
   MultiTuple (resolveMultiValueTypeDecl depthLeft l decl)
              (resolveMultiValueTypeDecl depthLeft r decl)
@@ -396,6 +411,8 @@ resolveMultiValueTypeDecl depthLeft (MultiADT cons) decl =
 
 containsMultiValueTypeRef :: String -> MultiValue -> Bool
 containsMultiValueTypeRef _ (MultiDiscretes _) = False
+containsMultiValueTypeRef _ MultiContinuous = False
+containsMultiValueTypeRef _ MultiAuto = False
 containsMultiValueTypeRef n (MultiTypeRef m) = n == m
 containsMultiValueTypeRef n (MultiEither l r) = containsMultiValueTypeRef n l || containsMultiValueTypeRef n r
 containsMultiValueTypeRef n (MultiTuple l r) = containsMultiValueTypeRef n l || containsMultiValueTypeRef n r

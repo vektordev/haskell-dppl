@@ -83,6 +83,7 @@ juliaVal (VADT cName params) = cName ++ "(" ++ intercalate ", " (map juliaVal pa
 juliaVal VAny = "\"ANY\""
 juliaVal x = error ("unknown juliaVal for " ++ show x)
 juliaMultiVal :: MultiValue -> String
+juliaMultiVal MultiContinuous = "(\"C\", nothing)"
 juliaMultiVal (MultiDiscretes vals) = "(\"D\", [" ++ intercalate ", " (map (juliaVal . valueToIR) vals) ++ "] )"
 juliaMultiVal (MultiTuple l r) = "(\"T\", (" ++ juliaMultiVal l ++ ", " ++ juliaMultiVal r ++ "))"
 juliaMultiVal (MultiEither l r) = "(\"E\", (" ++ juliaMultiVal l ++ ", " ++ juliaMultiVal r ++ "))"

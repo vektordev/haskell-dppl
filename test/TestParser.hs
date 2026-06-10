@@ -404,6 +404,44 @@ prop_normalMinusFloat =
       Right p -> counterexample ("Unexpected program structure: " ++ show p) False
       Left err -> counterexample (errorBundlePretty err) False
 
+-- "Real" in a neural's "of ..." annotation parses to MultiContinuous.
+prop_neuralRealParsesAsContinuous :: Property
+prop_neuralRealParsesAsContinuous =
+  let src = "neural f :: (Symbol -> Float) of Real\nmain sym = f sym\n"
+  in case tryParseProgram "" src of
+       Right (Program _ [("f", _, tag)] _) -> tag === Just MultiContinuous
+       Right p -> counterexample ("Unexpected program structure: " ++ show p) False
+       Left err -> counterexample (errorBundlePretty err) False
+
+-- "_" placeholders in a neural's "of (...)" annotation parse to MultiAuto.
+prop_neuralUnderscoreParsesAsAuto :: Property
+prop_neuralUnderscoreParsesAsAuto =
+  let src = "neural f :: (Symbol -> (Bool, Float)) of (_, _)\nmain sym = f sym\n"
+  in case tryParseProgram "" src of
+       Right (Program _ [("f", _, tag)] _) -> tag === Just (MultiTuple MultiAuto MultiAuto)
+       Right p -> counterexample ("Unexpected program structure: " ++ show p) False
+       Left err -> counterexample (errorBundlePretty err) False
+
+-- "_" and "Real" can be mixed with explicit enumerations within the same annotation.
+prop_neuralMixedExplicitAndPlaceholders :: Property
+prop_neuralMixedExplicitAndPlaceholders =
+  let src = "neural f :: (Symbol -> (Int, Float)) of ([0, 1, 2], Real)\nmain sym = f sym\n"
+  in case tryParseProgram "" src of
+       Right (Program _ [("f", _, tag)] _) ->
+         tag === Just (MultiTuple (MultiDiscretes [VInt 0, VInt 1, VInt 2]) MultiContinuous)
+       Right p -> counterexample ("Unexpected program structure: " ++ show p) False
+       Left err -> counterexample (errorBundlePretty err) False
+
+-- An identifier starting with "_" (e.g. a recursive type reference) still parses as
+-- a MultiTypeRef, not as the "_" auto-placeholder.
+prop_underscorePrefixedIdentifierIsTypeRef :: Property
+prop_underscorePrefixedIdentifierIsTypeRef =
+  let src = "neural f :: (Symbol -> Bool) of _foo\nmain sym = f sym\n"
+  in case tryParseProgram "" src of
+       Right (Program _ [("f", _, tag)] _) -> tag === Just (MultiTypeRef "_foo")
+       Right p -> counterexample ("Unexpected program structure: " ++ show p) False
+       Left err -> counterexample (errorBundlePretty err) False
+
 return []
 
 -- Like $(forAllProperties), but stays quiet about properties that pass

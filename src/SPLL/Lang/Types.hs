@@ -210,11 +210,13 @@ isVAnyExcept _ = False
 data MultiValue = MultiDiscretes [Value]
                 | MultiTuple MultiValue MultiValue
                 | MultiEither MultiValue MultiValue
-                | MultiADT [(String, [MultiValue])] 
+                | MultiADT [(String, [MultiValue])]
                 | MultiTypeRef String
+                | MultiContinuous     -- ^ A continuous (Float) leaf, written "Real" in .ppl source.
+                | MultiAuto           -- ^ Placeholder ("_" in .ppl source): auto-derive from the RType.
                 deriving (Show, Eq)
 
-isMultiDiscretes, isMultiTuple, isMultiEither, isMultiADT, isMultiTypeRef :: MultiValue -> Bool
+isMultiDiscretes, isMultiTuple, isMultiEither, isMultiADT, isMultiTypeRef, isMultiContinuous, isMultiAuto :: MultiValue -> Bool
 isMultiDiscretes (MultiDiscretes _) = True
 isMultiDiscretes _ = False
 isMultiTuple (MultiTuple _ _) = True
@@ -225,6 +227,10 @@ isMultiADT (MultiADT _) = True
 isMultiADT _ = False
 isMultiTypeRef (MultiTypeRef _) = True
 isMultiTypeRef _ = False
+isMultiContinuous MultiContinuous = True
+isMultiContinuous _ = False
+isMultiAuto MultiAuto = True
+isMultiAuto _ = False
 
 
 data Tag = DiscreteValues MultiValue

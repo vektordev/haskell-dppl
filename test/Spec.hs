@@ -41,7 +41,7 @@ import Data.Bifunctor (second)
 import SPLL.Typing.ForwardChaining (annotateProg)
 import SPLL.Parser
 import TestParser
-import TestInternals (test_internals, classConstraintTests, test_encodeTupleGaussianParams, test_encodeDiscreteSumsToOne, test_encodeGaussianSigmaPositive, test_nnHoistedOutOfEnumSum, test_missingMainFunction)
+import TestInternals (test_internals, classConstraintTests, test_encodeTupleGaussianParams, test_encodeDiscreteSumsToOne, test_encodeGaussianSigmaPositive, test_nnHoistedOutOfEnumSum, test_missingMainFunction, autoNeuralDerivationTests)
 import TestEncodeProperties
 import Test.HUnit (Counts(..), Test, runTestText, putTextToHandle)
 import System.IO (stderr)
@@ -962,6 +962,7 @@ runSpecifiedTests opts = do
     , runHUnit "test_encodeGaussianSigmaPositive"   test_encodeGaussianSigmaPositive
     , runHUnit "test_nnHoistedOutOfEnumSum"         test_nnHoistedOutOfEnumSum
     , runHUnit "test_missingMainFunction"           test_missingMainFunction
+    , runHUnit "autoNeuralDerivationTests"          autoNeuralDerivationTests
     , runHUnit "encodeProps_gaussianScale"          encodeProps_gaussianScale
     , runHUnit "encodeProps_gaussianNegScale"       encodeProps_gaussianNegScale
     , runHUnit "encodeProps_gaussianSum"            encodeProps_gaussianSum

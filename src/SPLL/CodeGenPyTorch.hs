@@ -105,6 +105,7 @@ pyVal (VAny) = "'ANY'"
 pyVal x = error ("unknown pyVal for " ++ show x)
 
 pyMultiVal :: MultiValue -> String
+pyMultiVal MultiContinuous = "(\"C\", None)"
 pyMultiVal (MultiDiscretes vals) = "(\"D\", [" ++ intercalate ", " (map (pyVal . valueToIR) vals) ++ "])"
 pyMultiVal (MultiTuple l r) = "(\"T\", (" ++ pyMultiVal l ++ ", " ++ pyMultiVal r ++ ")"
 pyMultiVal (MultiEither l r) = "(\"E\", (" ++ pyMultiVal l ++ ", " ++ pyMultiVal r ++ ")"

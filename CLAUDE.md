@@ -123,6 +123,21 @@ Use this when a program compiles incorrectly to identify which stage introduced 
 
 Neural networks are declared separately as `NeuralDecl = (String, RType, Maybe MultiValue)` and enter the global type environment before inference. A `ReadNN name param` expression calls the named network at runtime. If the declaration carries a `MultiValue` annotation (the possible output values), Analysis propagates it through `ReadNN` nodes so that `InferenceRule` matching can select enum-aware algorithms for downstream comparisons.
 
+The `of ...` clause mirrors the output `RType` and follows this grammar (each production names its `MultiValue` constructor):
+
+```
+multival ::= _     -- MultiAuto: auto-derive from RType
+           |  Real -- Float leaf
+           |  [value1, value2]'     -- MultiDiscretes: explicit enumeration
+           |  (multival, multival)  -- MultiTuple
+           |  '(' multival '|' multival ')'              -- MultiEither
+           |  '{' ctor multival* ('|' ctor multival*)* '}' -- MultiADT
+           |  ident                                      -- MultiTypeRef: recursive self-reference
+           |  int 'x' ident '.' multival                 -- depth-limited recursion (resolves MultiTypeRef)
+```
+
+Auto-derivation (`_`, or an omitted `of ...` clause) fills these slots from the RType: `Float`→`Real`, `Bool`→`[True, False]`, `Tuple`/`Either`/non-recursive `ADT`→recurse per component/constructor. `Int`, `Symbol` (unbounded domains) and recursive `ADT`s cannot be auto-derived — give an explicit enumeration or `<depth>x.Type.{...}`, or compilation errors. E.g. `(_, [0..10], _)` for `(Color, Int, Float)` only needs the `Int` slot spelled out.
+
 ## Test Structure
 
 - `test/Spec.hs` — main entry, runs HUnit and QuickCheck tests

@@ -31,6 +31,9 @@ module SPLL.Lang.Lang (
 , valueListToMultiValue
 , valueInMultiValue
 , unionMultiValues
+, autoDeriveMultiValue
+, resolveMultiAuto
+, neuralValueType
 , elementAt
 , getFunctionNames
 , lookupNeural
@@ -44,7 +47,7 @@ import SPLL.Typing.AlgebraicDataTypes
 
 import qualified Data.Set as Set
 import Data.Maybe
-import Data.List (nub, transpose)
+import Data.List (nub, transpose, find)
 import qualified Data.Bifunctor as Bifunctor
 
 toStub :: Expr -> ExprStub
@@ -295,6 +298,9 @@ constructVList :: [GenericValue a] -> GenericValue a
 constructVList xs = VList $ foldr ListCont EmptyList xs
 
 multiValueToValueList :: MultiValue -> [Value]
+-- A continuous slot has no enumerable values: any composite containing it also has none.
+multiValueToValueList MultiContinuous = []
+multiValueToValueList MultiAuto = error "multiValueToValueList: unresolved auto-placeholder (_); this should have been resolved before discrete-value propagation"
 multiValueToValueList (MultiDiscretes vals) = vals
 multiValueToValueList (MultiEither ls rs) = map (VEither . Left) lVals ++ map (VEither . Right) rVals
   where
@@ -330,6 +336,7 @@ valueListToMultiValue ((VADT _ _):_) = error "Not all elements in the list are A
 valueListToMultiValue lst = MultiDiscretes lst
 
 valueInMultiValue :: MultiValue -> Value -> Bool
+valueInMultiValue MultiContinuous (VFloat _) = True
 valueInMultiValue (MultiDiscretes d) x = x `elem` d
 valueInMultiValue (MultiEither ml _) (VEither (Left l)) = valueInMultiValue ml l
 valueInMultiValue (MultiEither _ mr) (VEither (Right r)) = valueInMultiValue mr r
@@ -339,6 +346,7 @@ valueInMultiValue (MultiADT mConstrs) (VADT cName vals) = fromMaybe False (do
   return $ all (uncurry valueInMultiValue) (zip constr vals))
 
 unionMultiValues :: MultiValue -> MultiValue -> MultiValue
+unionMultiValues MultiContinuous MultiContinuous = MultiContinuous
 unionMultiValues (MultiDiscretes as) (MultiDiscretes bs) = MultiDiscretes (nub (as ++ bs))
 unionMultiValues (MultiEither ls1 rs1) (MultiEither ls2 rs2) = MultiEither (unionMultiValues ls1 ls2) (unionMultiValues rs1 rs2)
 unionMultiValues (MultiTuple ls1 rs1) (MultiTuple ls2 rs2) = MultiTuple (unionMultiValues ls1 ls2) (unionMultiValues rs1 rs2)
@@ -346,6 +354,48 @@ unionMultiValues (MultiADT constrs1) (MultiADT constrs2) = MultiADT (map (\cn ->
   where
     cNames = nub $ map fst constrs1 ++ map fst constrs2
     unionConstr cn = zipWith unionMultiValues (fromMaybe [] (lookup cn constrs1)) (fromMaybe [] (lookup cn constrs1))
+
+-- | Attempt to derive the full MultiValue enumeration for an RType without any explicit
+-- annotation. Succeeds for types with a finite, statically-known set of values (Bool, Float
+-- as a continuous leaf, and Tuples/Eithers/non-recursive ADTs built from such types). Fails
+-- for Int and Symbol (unbounded domains) and for recursive ADTs (would not terminate).
+autoDeriveMultiValue :: [ADTDecl] -> RType -> Either String MultiValue
+autoDeriveMultiValue _ TFloat = Right MultiContinuous
+autoDeriveMultiValue _ TBool = Right (MultiDiscretes [VBool True, VBool False])
+autoDeriveMultiValue _ TInt = Left "cannot auto-derive an enumeration for Int (unbounded) - specify the values explicitly, e.g. [0,1,2,...,10]"
+autoDeriveMultiValue _ TSymbol = Left "cannot auto-derive an enumeration for Symbol - specify the values explicitly"
+autoDeriveMultiValue adts (Tuple a b) = MultiTuple <$> autoDeriveMultiValue adts a <*> autoDeriveMultiValue adts b
+autoDeriveMultiValue adts (TEither a b) = MultiEither <$> autoDeriveMultiValue adts a <*> autoDeriveMultiValue adts b
+autoDeriveMultiValue adts (TADT name) = case find ((== name) . dataName) adts of
+  Nothing -> Left ("unknown ADT '" ++ name ++ "' referenced in neural declaration")
+  Just adt
+    | any (any ((== TADT name) . snd) . snd) (constructors adt) ->
+        Left ("cannot auto-derive recursive ADT '" ++ name ++ "' - specify a depth-limited MultiValue explicitly, e.g. <depth>x." ++ name ++ ".{...}")
+    | otherwise -> MultiADT <$> mapM deriveConstructor (constructors adt)
+  where
+    deriveConstructor (cName, fields) = (,) cName <$> mapM (autoDeriveMultiValue adts . snd) fields
+autoDeriveMultiValue _ ty = Left ("cannot auto-derive a MultiValue for type " ++ show ty ++ " - specify it explicitly")
+
+-- | Resolve "_" (MultiAuto) placeholders within a (possibly partial) MultiValue annotation,
+-- recursing alongside the corresponding RType. Leaves everything else untouched.
+resolveMultiAuto :: [ADTDecl] -> RType -> MultiValue -> MultiValue
+resolveMultiAuto adts ty MultiAuto = either error id (autoDeriveMultiValue adts ty)
+resolveMultiAuto adts (Tuple a b) (MultiTuple l r) = MultiTuple (resolveMultiAuto adts a l) (resolveMultiAuto adts b r)
+resolveMultiAuto adts (TEither a b) (MultiEither l r) = MultiEither (resolveMultiAuto adts a l) (resolveMultiAuto adts b r)
+resolveMultiAuto adts (TADT name) (MultiADT cs) = MultiADT (map resolveConstr cs)
+  where
+    fieldTypes = case find ((== name) . dataName) adts of
+      Just adt -> [(cn, map snd fs) | (cn, fs) <- constructors adt]
+      Nothing -> []
+    resolveConstr (cn, mvs) = (cn, zipWith (resolveMultiAuto adts) (fromMaybe [] (lookup cn fieldTypes)) mvs)
+resolveMultiAuto _ _ mv = mv
+
+-- | The output (decoder) or input (encoder) RType of a neural declaration's "Symbol <->
+-- target" arrow type - i.e. the type a NeuralDecl's MultiValue annotation describes.
+neuralValueType :: RType -> Maybe RType
+neuralValueType (TArrow TSymbol target) = Just target
+neuralValueType (TArrow source TSymbol) = Just source
+neuralValueType _ = Nothing
 
 
 elementAt :: ValueList a -> Int -> GenericValue a

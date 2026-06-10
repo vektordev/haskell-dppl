@@ -55,7 +55,9 @@ end
 
 function isPossible(multiVal, expr)
     tag = multiVal[1]
-    if tag == "D"
+    if tag == "C"
+        return true
+    elseif tag == "D"
         return expr in multiVal[2]
     elseif tag == "T" && expr isa T
         sub = multiVal[2]
@@ -286,7 +288,10 @@ function isclose(a::Float64, b::Float64)
 end
 
 function multiValueToValueList(multiVal)
-    if multiVal[1] == "D"
+    if multiVal[1] == "C"
+        # A continuous (Float) slot has no enumerable values.
+        return []
+    elseif multiVal[1] == "D"
         return multiVal[2]
     elseif multiVal[1] == "T"
         cart = collect(Iterators.product(multiValueToValueList(multiVal[2][1]), multiValueToValueList(multiVal[2][2])))

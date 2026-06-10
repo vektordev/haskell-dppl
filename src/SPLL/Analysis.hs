@@ -25,7 +25,10 @@ annotateEnumsProg p@Program {functions=f, neurals=n, adts=adts} = p{functions = 
   where
     finalExprEnv = fixpoint iterateExprEnv []
     iterateExprEnv eEnv = map (second (annotate adts (neuralEnv ++ map (second $ tags . getTypeInfo) eEnv))) f
-    neuralEnv = [(name, [DiscreteValues mv]) | (name, _, Just mv) <- n]
+    -- Resolve "_" (MultiAuto) placeholders against the declared output/input type before
+    -- this MultiValue is used for discrete-value propagation.
+    neuralEnv = [(name, [DiscreteValues (resolveTag declType mv)]) | (name, declType, Just mv) <- n]
+    resolveTag declType mv = maybe mv (\ty -> resolveMultiAuto adts ty mv) (neuralValueType declType)
 
 annotate :: [ADTDecl] -> TagEnv -> Expr -> Expr
 --annotate _ e | trace ((show e)) False = undefined
