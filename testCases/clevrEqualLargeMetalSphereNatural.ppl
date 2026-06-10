@@ -1,0 +1,17 @@
+-- Natural formulation of clevrEqualLargeMetalSphere: a reusable per-object
+-- contribution helper and a flat sum over the three objects. This is the shape
+-- that originally failed (docs/forward-chaining-recursion-constraint.md) and
+-- had to be hand-unrolled; it now compiles via the toIREnumerate fallback.
+
+data Size     = Small | Large
+data Shape    = Cube | Sphere | Cylinder
+data Material = Rubber | Metal
+
+neural readScene :: (Symbol -> ((Size, (Shape, Material)), ((Size, (Shape, Material)), (Size, (Shape, Material))))) of (({Small | Large}, ({Cube | Sphere | Cylinder}, {Rubber | Metal})), (({Small | Large}, ({Cube | Sphere | Cylinder}, {Rubber | Metal})), ({Small | Large}, ({Cube | Sphere | Cylinder}, {Rubber | Metal}))))
+
+isLargeObj o = isLarge (fst o)
+isMetalSphere o = isSphere (fst (snd o)) && isMetal (snd (snd o))
+
+contrib o = (if isLargeObj o then 1 else 0) ++ (if isMetalSphere o then (-1) else 0)
+total s = contrib (fst s) ++ contrib (fst (snd s)) ++ contrib (snd (snd s))
+main sym = (total (readScene sym)) == 0

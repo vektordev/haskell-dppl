@@ -1,0 +1,7 @@
+-- Regression test for docs/forward-chaining-recursion-constraint.md:
+-- flat `a ++ b ++ c` chain of conditional contributions (previously crashed in
+-- toIREnumerate, which had no case for an InjF at the root of an enumerated body).
+data Color = Red | Green | Blue
+neural readColor :: (Symbol -> (Color, (Color, Color))) of ({Red | Green | Blue}, ({Red | Green | Blue}, {Red | Green | Blue}))
+countRed s = (if isRed (fst s) then 1 else 0) ++ (if isRed (fst (snd s)) then 1 else 0) ++ (if isRed (snd (snd s)) then 1 else 0)
+main sym = countRed (readColor sym)

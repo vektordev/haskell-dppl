@@ -1,0 +1,9 @@
+-- Regression test for docs/forward-chaining-recursion-constraint.md:
+-- accumulator-passing helper abstraction over conditional contributions
+-- (previously failed in ForwardChaining.mergeExpr because isConditional
+-- stopped at Apply and the program fell into the FC-inversion rule).
+data Color = Red | Green | Blue
+neural readColor :: (Symbol -> (Color, (Color, Color))) of ({Red | Green | Blue}, ({Red | Green | Blue}, {Red | Green | Blue}))
+addTerm cond val rest = if cond then val ++ rest else rest
+count3 s = addTerm (isRed (fst s)) 1 (addTerm (isRed (fst (snd s))) 1 (if isRed (snd (snd s)) then 1 else 0))
+main sym = count3 (readColor sym)

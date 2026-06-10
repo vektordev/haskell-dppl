@@ -133,7 +133,10 @@ isConditional :: FCData -> Program -> [ChainName] -> Expr -> Bool
 isConditional _ _ visited e | chainName (getTypeInfo e) `elem` visited = False
 isConditional _ _ _ (IfThenElse _ _ _ _) = True
 isConditional _ _ _ (Lambda _ _ _) = False
-isConditional _ _ _ (Apply _ _ _) = False
+-- An application is conditional if the applied function or any argument is:
+-- the enumeration fallback in toIREnumerate evaluates the whole application
+-- forward, so conditionality anywhere below makes the result conditional.
+isConditional fcData p visited (Apply _ l v) = isConditional fcData p visited l || isConditional fcData p visited v
 isConditional fcData p visited (Var (TypeInfo{chainName=cn}) _) = case findEquivalentExpression fcData cn of
   Just (_, LambdaInfo _ bodyCn, _) -> isConditional fcData p (cn:visited) (findExprWithCN (map snd (functions p)) bodyCn)
   _ -> False

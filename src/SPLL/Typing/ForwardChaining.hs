@@ -174,9 +174,10 @@ mergeExpr varName lambdaCN candidateCNs [] = error $ unlines
   [ "Forward chaining failed to find a solution: no inversion path could be constructed for variable \"" ++ varName ++ "\""
   , "while inverting the function bound at chain name " ++ lambdaCN ++ "."
   , "Candidate occurrences that were tried and could not be witnessed: " ++ show candidateCNs
-  , "This usually means an operand of an invertible function (e.g. the `+` in a sum) is itself a"
-  , "compound expression rather than a literal or variable, so forward chaining cannot algebraically"
-  , "isolate it. See docs/forward-chaining-recursion-constraint.md for known failure shapes and workarounds."
+  , "This usually means the function is not algebraically invertible in this variable (e.g. it is"
+  , "many-to-one, like a count/sum of conditional contributions) and the program shape did not"
+  , "qualify for enumeration-based inference instead (the IsConditional + toIREnumerate path in the"
+  , "IRCompiler). See docs/forward-chaining-recursion-constraint.md for the failure analysis."
   ]
 mergeExpr _ _ _ [x] = x
 mergeExpr varName lambdaCN candidateCNs (x:xs) = mergeExpr2 id x (mergeExpr varName lambdaCN candidateCNs xs)

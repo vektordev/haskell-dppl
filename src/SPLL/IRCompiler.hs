@@ -1195,11 +1195,6 @@ toIREnumerate meta cumulative (Var TypeInfo{chainName=cn} _) sample = do
   let fs = map snd (functions (compilingProgram meta))
   let equivExpr = findExprWithCN fs equivCN
   toIREnumerate meta cumulative equivExpr sample
-toIREnumerate meta cumulative (Apply TypeInfo{chainName=cn} _ _) sample = do
-  let Just (equivCN, _, _) = findEquivalentExpression (fcData meta) cn
-  let fs = map snd (functions (compilingProgram meta))
-  let equivExpr = findExprWithCN fs equivCN
-  toIREnumerate meta cumulative equivExpr sample
 toIREnumerate meta cumulative (IfThenElse TypeInfo{rType=rt} c t e) sample = do
   cIR <- toIRGenerate meta c
   tIR <- toIRGenerate meta t
@@ -1215,8 +1210,17 @@ toIREnumerate meta cumulative (IfThenElse TypeInfo{rType=rt} c t e) sample = do
   let elseRes = notCondSelector elseSelector
   let returnExpr = IROp OpPlus thenRes elseRes
   return (returnExpr, const0, IRConst (VFloat 1))
---toIREnumerate meta cumulative (InjF _ name params) distr elem sample
---  | not (isHigherOrder name) = do
+-- Fallback: under enumeration the bound variable carries a concrete enumerated value,
+-- so the body is deterministic and can be generated forward and compared to the sample.
+-- This covers shapes whose root is not an if, e.g. an InjF sum of conditional terms.
+toIREnumerate meta cumulative e sample = do
+  eIR <- toIRGenerate meta e
+  let rt = rType (getTypeInfo e)
+  let cmpOp = case rt of { TFloat -> OpApprox; TVarR _ -> OpApprox; _ -> OpEq }
+  let res = if cumulative
+              then compareValueExpr rt eIR sample
+              else IRIf (IROp cmpOp eIR sample) (IRConst (VFloat 1)) const0
+  return (res, const0, IRConst (VFloat 1))
 
 -- | Strip the branch-count field from all probability-mode functions in the environment.
 -- Applied after compilation and before optimisation when countBranches = False.
