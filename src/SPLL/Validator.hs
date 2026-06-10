@@ -1,7 +1,7 @@
 module SPLL.Validator (
   validateProgram
 ) where
-import SPLL.Lang.Types (Program(..), GenericValue(..))
+import SPLL.Lang.Types (Program(..), GenericValue(..), FnDecl)
 import SPLL.Lang.Lang (Expr(..), getSubExprs, getFunctionNames, InjFName(..))
 import Data.Maybe (isJust, isNothing)
 import PredefinedFunctions (globalFEnv, parameterCount)
@@ -10,13 +10,20 @@ import Data.List (intersect)
 -- This function returns nothing if the program is valid and an error else
 validateProgram :: Program -> Either String ()
 -- We sequence the either monads so we either have a list of errors(Lefts) or discard the Rights
-validateProgram p@Program{functions=fn, neurals=_} = sequence_ exprValidations
+validateProgram p@Program{functions=fn, neurals=_} = sequence_ (validateMainExists fn : exprValidations)
   where
     -- Validate all expressions potentially unsing the context of their top level declaration and their program
     exprValidations = concatMap (\(_, expr) -> validateAllSubexpressions p expr expr) fn
     -- All Results from all subexpressions
     validateAllSubexpressions :: Program -> Expr -> Expr -> [Either String ()]
     validateAllSubexpressions p topLevel expr = validateExpression p topLevel expr : concatMap (validateAllSubexpressions p topLevel) (getSubExprs expr)
+
+-- A program must declare a "main" function, as it is the entry point compiled
+-- to the generate/probability/integrate functions invoked by runGen/runProb/runInteg.
+validateMainExists :: [FnDecl] -> Either String ()
+validateMainExists fn
+  | "main" `elem` map fst fn = Right ()
+  | otherwise = Left "Compiler Error: Program has no 'main' function defined."
 
 validateExpression :: Program -> Expr -> Expr -> Either String ()
 validateExpression Program {adts=adts} _ (InjF _ (Named name) _) | isNothing (lookup name (globalFEnv adts)) = Left ("Cannot find InjF: " ++ name)

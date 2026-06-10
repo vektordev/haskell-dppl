@@ -6,7 +6,8 @@ module TestInternals (
   test_encodeTupleGaussianParams,
   test_encodeDiscreteSumsToOne,
   test_encodeGaussianSigmaPositive,
-  test_nnHoistedOutOfEnumSum
+  test_nnHoistedOutOfEnumSum,
+  test_missingMainFunction
 ) where
 
 import SPLL.Lang.Lang
@@ -24,7 +25,10 @@ import qualified SPLL.AutoNeural as AutoNeural (getSize)
 import SPLL.IntermediateRepresentation
 import IRInterpreter (generateDet)
 import Data.Foldable (toList)
+import Data.List (isInfixOf)
 import Test.HUnit
+import System.Random (StdGen)
+import Control.Monad.Random (Rand)
 
 
 prop_tMapId :: Expr -> Property
@@ -188,6 +192,22 @@ test_nnHoistedOutOfEnumSum = TestCase $ do
           let Just (probExpr, _) = probFun (lookupIREnv "main" irEnv)
           assertBool "readMNist forward call should be hoisted outside IREnumSum" $
             not (nnCallInsideEnumSum "readMNist" probExpr)
+
+-- A program with no "main" function must be rejected with a descriptive
+-- CompilerError early on, instead of crashing deep in the IR lookup
+-- (lookupIREnv) or with a failed irrefutable pattern match in
+-- runGen/runProb/runInteg.
+test_missingMainFunction :: Test
+test_missingMainFunction = TestCase $ do
+  let prog = Program [("notMain", constF 1.0)] [] []
+  let assertMissingMain label result = case result of
+        Left err -> assertBool (label ++ ": error should mention 'main', got: " ++ err)
+                                ("main" `isInfixOf` err)
+        Right _ -> assertFailure (label ++ ": expected a CompilerError for a program without 'main'")
+  assertMissingMain "compile" (compile defaultCompilerConfig prog)
+  assertMissingMain "runGen" (runGen defaultCompilerConfig prog [] :: Either CompilerError (Rand StdGen IRValue))
+  assertMissingMain "runProb" (runProb defaultCompilerConfig prog [] (VFloat 1.0))
+  assertMissingMain "runInteg" (runInteg defaultCompilerConfig prog [] (VFloat 1.0))
 
 return []
 test_internals = $(forAllProperties) (quickCheckWithResult stdArgs { maxSuccess = 100 })
