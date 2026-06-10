@@ -43,7 +43,8 @@ import SPLL.Parser
 import TestParser
 import TestInternals (test_internals, classConstraintTests, test_encodeTupleGaussianParams, test_encodeDiscreteSumsToOne, test_encodeGaussianSigmaPositive, test_nnHoistedOutOfEnumSum, test_missingMainFunction)
 import TestEncodeProperties
-import Test.HUnit (runTestTT, Counts(..))
+import Test.HUnit (Counts(..), Test, runTestText, putTextToHandle)
+import System.IO (stderr)
 import End2EndTesting
 import TestCaseParser (parseProgram)
 import SPLL.Prelude
@@ -881,8 +882,26 @@ prop_TopKConstantResolvedByInterpreter = once $ ioProperty $ do
 
 return []
 
+-- Like $(forAllProperties), but stays quiet about properties that pass
+-- (no per-property "=== prop_X ===\n+++ OK, passed N tests." block) and only
+-- prints the full QuickCheck report for properties that fail.
+runPropsQuiet :: Args -> [(String, Property)] -> IO Bool
+runPropsQuiet args ps = do
+  results <- mapM runOne ps
+  putStrLn $ "  " ++ show (length (filter id results)) ++ "/" ++ show (length ps) ++ " properties passed"
+  return (and results)
+  where
+    runOne (name, p) = do
+      r <- quickCheckWithResult args { chatty = False } p
+      if isSuccess r
+        then return True
+        else do
+          putStrLn $ "=== " ++ name ++ " ==="
+          putStr (output r)
+          return False
+
 runTests :: IO Bool
-runTests = $(forAllProperties) (quickCheckWithResult stdArgs { maxSuccess = 100, maxDiscardRatio = 20 })
+runTests = runPropsQuiet stdArgs { maxSuccess = 100, maxDiscardRatio = 20 } $(allProperties)
 
 data TestOpts = TestOpts {
   disableSpec :: Bool,
@@ -923,13 +942,19 @@ main = runSpecifiedTests =<< execParser opts
             <> progDesc "Compiles or computes probabilistic programs"
             <> header "Haskell DPPL" )
 
+-- Like runTestTT, but suppresses the per-case "Cases: N Tried: M ..." progress
+-- lines (which, when not on a terminal, pile up into unreadable walls of text).
+-- Failures and errors are still reported, as is the final count line.
+runTestQuiet :: Test -> IO Counts
+runTestQuiet t = fst <$> runTestText (putTextToHandle stderr False) t
+
 runSpecifiedTests :: TestOpts -> IO ()
 runSpecifiedTests opts = do
   tlog <- newTimingLog
   a <- if disableSpec opts then return True else timedLog tlog "Spec (QuickCheck props)" runTests
   b <- if disableParser opts then return True else timedLog tlog "Parser tests" test_parser
   c <- if disableInternals opts then return True else timedLog tlog "Internal tests" test_internals
-  let runHUnit label t = fmap (\c -> errors c + failures c == 0) $ timedLog tlog label (runTestTT t)
+  let runHUnit label t = fmap (\c -> errors c + failures c == 0) $ timedLog tlog label (runTestQuiet t)
   e <- fmap and $ sequence
     [ runHUnit "classConstraintTests"               classConstraintTests
     , runHUnit "test_encodeTupleGaussianParams"     test_encodeTupleGaussianParams

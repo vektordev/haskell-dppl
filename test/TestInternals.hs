@@ -210,4 +210,24 @@ test_missingMainFunction = TestCase $ do
   assertMissingMain "runInteg" (runInteg defaultCompilerConfig prog [] (VFloat 1.0))
 
 return []
-test_internals = $(forAllProperties) (quickCheckWithResult stdArgs { maxSuccess = 100 })
+
+-- Like $(forAllProperties), but stays quiet about properties that pass
+-- (no per-property "=== prop_X ===\n+++ OK, passed N tests." block) and only
+-- prints the full QuickCheck report for properties that fail.
+runPropsQuiet :: Args -> [(String, Property)] -> IO Bool
+runPropsQuiet args ps = do
+  results <- mapM runOne ps
+  putStrLn $ "  " ++ show (length (filter id results)) ++ "/" ++ show (length ps) ++ " properties passed"
+  return (and results)
+  where
+    runOne (name, p) = do
+      r <- quickCheckWithResult args { chatty = False } p
+      if isSuccess r
+        then return True
+        else do
+          putStrLn $ "=== " ++ name ++ " ==="
+          putStr (output r)
+          return False
+
+test_internals :: IO Bool
+test_internals = runPropsQuiet stdArgs { maxSuccess = 100 } $(allProperties)

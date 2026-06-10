@@ -131,7 +131,11 @@ lessEqualsProbs (VFloat a) (VFloat b) = a <= b
 lessEqualsProbs (VTuple (VFloat aP) (VFloat aD)) (VTuple (VFloat bP) (VFloat bD)) | aD == bD = aP <= bP
 lessEqualsProbs (VTuple _ (VFloat aD)) (VTuple _ (VFloat bD)) = aD > bD -- Lower dimensionality means higher probability
 
--- TODO: Maybe stop sampling early if no more new samples are found
+-- Samples are drawn with replacement from a small discrete support, so the same
+-- value tends to come up many times in 1000 draws. generateDet's cost depends on
+-- the size of that support (it enumerates it), not on sampleCnt, so evaluating it
+-- once per *distinct* sampled value (weighted by how often it occurred) gives the
+-- exact same sum but skips the redundant repeat evaluations.
 discreteProbsNormalized :: Program -> Property
 discreteProbsNormalized p = case compile defaultCompilerConfig p of
   Left err -> counterexample ("Compilation failed: " ++ err) False
@@ -143,11 +147,25 @@ discreteProbsNormalized p = case compile defaultCompilerConfig p of
         randomParamsForSamples = evalRand (replicateM sampleCnt randomParams) (mkStdGen 42)
         gens = map (\args -> generateRand (neurals p) compiled (map IRConst args) genExpr) randomParamsForSamples
         pSamples = evalRand (sequence gens) (mkStdGen 42)
-    in case mapM (\sam -> generateDet (neurals p) compiled (map IRConst (sam:params)) probExpr) pSamples of
+        uniqueSamples = nub pSamples
+        counts = map (\u -> length (filter (== u) pSamples)) uniqueSamples
+    in case mapM (\sam -> generateDet (neurals p) compiled (map IRConst (sam:params)) probExpr) uniqueSamples of
         Left err -> counterexample err False
-        Right t ->
-          let sumProbSamples = sum (map prob t)
-          in counterexample "Probability of randomly sampled values does not sum to 1" (sumProbSamples >= sufficientlyNormal)
+        Right t
+          | all ((== VInt 0) . dim) t ->
+              -- Discrete (dim 0): with 1000 draws from a small support, every distinct
+              -- value is observed, so the probabilities of the distinct observed values
+              -- should sum to (approximately) exactly 1. Checking both bounds catches
+              -- both missing mass (e.g. wrong probabilities) and double-counted /
+              -- unnormalized probabilities (sum > 1), neither of which the old
+              -- count-weighted sum (always >> 1 for small supports) could detect.
+              let totalProb = sum (map prob t)
+              in counterexample ("Probabilities of distinct sampled values sum to " ++ show totalProb ++ ", expected ~1") (abs (totalProb - 1) < 0.01)
+          | otherwise ->
+              -- Continuous: sampled values are (almost) all distinct, and a sum of
+              -- densities has no "=1" meaning - just check the densities aren't degenerate.
+              let sumProbSamples = sum (zipWith (\c r -> fromIntegral c * prob r) counts t)
+              in counterexample "Probability of randomly sampled values does not sum to 1" (sumProbSamples >= sufficientlyNormal)
   where
     paramCnt = progParameterCount p
     seedList = [0 .. (paramCnt - 1)]
@@ -155,6 +173,7 @@ discreteProbsNormalized p = case compile defaultCompilerConfig p of
     sampleCnt = 1000
     sufficientlyNormal = 0.99
     prob (VTuple (VFloat p) _) = p
+    dim (VTuple _ d) = d
 
 progParameterCount :: Program -> Int
 progParameterCount Program{functions=f} = countLambdas main
