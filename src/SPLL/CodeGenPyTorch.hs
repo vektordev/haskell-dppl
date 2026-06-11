@@ -146,6 +146,9 @@ generateFunctions genBoil env@(IREnv funcs adts consts) =
         callableNames = [ fromMaybe (n ++ "_gen") (lookup (n ++ "_gen") lut)
                         | IRFunGroup{groupName=n, genFun=Just (e, _)} <- funcs
                         , null (fst (unwrapLambdas e)) ]
+                        -- nullary ADT constructors must be emitted as instantiations,
+                        -- otherwise the bare class never compares equal to enumerated instances
+                        ++ [ cName | decl <- adts, (cName, fields) <- constructors decl, null fields ]
     in if genBoil then
       ["from pythonLib import *",
       "import functools",

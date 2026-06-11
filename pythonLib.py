@@ -252,8 +252,10 @@ def multiValueToValueList(multiVal):
     rights = map (lambda x: Right(x), multiValueToValueList(multiVal[1][1]))
     return toList(lefts + rights)
   elif multiVal[0] == "A":
-    cClass = multiVal[1][0]
-    cFields = map(multiValueToValueList, multiVal[1][1])
-    cartesian = itertools.product(*cFields)
-    return map(lambda x: cClass(*x), cartesian)
+    vals = []
+    for (cClass, cMultiFields) in multiVal[1]:
+      cFields = map(multiValueToValueList, cMultiFields)
+      for x in itertools.product(*cFields):
+        vals.append(cClass(*x))
+    return toList(vals)
     
