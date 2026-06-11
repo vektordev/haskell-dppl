@@ -1,14 +1,11 @@
 module SPLL.Analysis (
   annotate,
   annotateEnumsProg,
-  annotateAlgsProg,
   annotateConditionalProg
 ) where
 
 import SPLL.Lang.Types
 import SPLL.Lang.Lang
-import SPLL.InferenceRule
-import SPLL.Typing.PType (PType(PNormal, PLogNormal))
 import Data.Maybe (maybeToList, listToMaybe)
 import Data.List (nub)
 import Data.Bifunctor
@@ -79,51 +76,6 @@ isRecursive :: String -> Expr -> Bool
 isRecursive name (Var _ n) | name == n = True
 isRecursive n e = any (isRecursive n) (getSubExprs e)
 
-annotateAlgsProg :: Program -> Program
-annotateAlgsProg p@Program {functions=fs} = p{functions=map (Data.Bifunctor.second (tMap tagAlgsExpression)) fs}
-
-tagAlgsExpression :: Expr -> TypeInfo
-tagAlgsExpression (InjF ti _ [_]) = ti
-tagAlgsExpression expr =
-  if likelihoodFunctionUsesTypeInfo (toStub expr) then
-    case findAlgorithm expr of
-      Just alg -> setTags (getTypeInfo expr) (Alg alg:tags (getTypeInfo expr))
-      Nothing -> getTypeInfo expr
-    
-  else
-    getTypeInfo expr
-
-findAlgorithm :: Expr -> Maybe InferenceRule
-findAlgorithm expr = case validAlgs of
-  [alg] -> Just alg
-  [] -> Nothing
-  --(_:_:_) -> error "multiple valid algorithms found" -- TODO: There might be leeway here.
-  alg:_ -> Just alg  --If multiple choose the first one TODO: Check if correct
-  where
-    validAlgs = filter (\alg -> all (checkConstraint expr alg) (constraints alg) ) correctExpr
-    correctExpr = filter (checkExprMatches expr) allAlgorithms
-
-checkConstraint :: Expr -> InferenceRule -> RuleConstraint -> Bool
-checkConstraint expr _ (SubExprNIsType n ptype) | length (getSubExprs expr) > n = ptype == p
-  where p = pType $ getTypeInfo (getSubExprs expr !! n)
-checkConstraint expr _ (SubExprNIsNotType n ptype) | length (getSubExprs expr) > n = ptype /= p
-  where p = pType $ getTypeInfo (getSubExprs expr !! n)
-checkConstraint expr alg ResultingTypeMatch = resPType == annotatedType
-  where
-    annotatedType = pType $ getTypeInfo expr
-    resPType = resultingPType alg (map (pType . getTypeInfo) (getSubExprs expr))
-checkConstraint expr _ (SubExprNIsEnumerable n) | length (getSubExprs expr) > n =
-  isEnumerable (tags (getTypeInfo (getSubExprs expr !! n)))
-checkConstraint expr _ ResolvesToDistribution
-  | pType (getTypeInfo expr) == PNormal || pType (getTypeInfo expr) == PLogNormal = True
-checkConstraint _ _ _ = False
-
-isEnumerable :: [Tag] -> Bool
-isEnumerable =
-  any (\t -> case t of
-    DiscreteValues _ -> True
-    _ -> False)
-
 annotateConditionalProg :: Program -> Program
 annotateConditionalProg p@Program {functions=fs} = p{functions=map (Data.Bifunctor.second (tMap (tagConditional (progToFCData p) p))) fs}
 
@@ -144,10 +96,3 @@ isConditional fcData p visited (Var (TypeInfo{chainName=cn}) _) = case findEquiv
   Just (_, LambdaInfo _ bodyCn, _) -> isConditional fcData p (cn:visited) (findExprWithCN (map snd (functions p)) bodyCn)
   _ -> False
 isConditional fcData p visited x = any (isConditional fcData p visited) (getSubExprs x)
-
-likelihoodFunctionUsesTypeInfo :: ExprStub -> Bool
-likelihoodFunctionUsesTypeInfo expr = expr `elem` [StubGreaterThan, StubLessThan, StubInjF]
---2A: do static analysis to determine various statically known properties we're interested in.
---2A.1: For now, that's exclusively Enum Ranges.
---2B: using those type annotations, decide on algorithms to use. We can reuse the list of all algorithms from Transpiler.
---  Here, we still have Expr Annotation a, with Annotation being a big ol' mess.

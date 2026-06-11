@@ -234,7 +234,6 @@ isMultiAuto _ = False
 
 
 data Tag = DiscreteValues MultiValue
-           | Alg InferenceRule
            | IsConditional
            deriving (Show, Eq)
            

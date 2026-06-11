@@ -298,10 +298,10 @@ compile conf p = do
   pPrintIfMoreVerbose conf typed
   printStage conf "After Type Inference (RType + PType)" typed
 
-  let annotated = (annotateAlgsProg . annotateConditionalProg) typed
+  let annotated = annotateConditionalProg typed
   printIfMoreVerbose conf "\n=== Annotated Program (2) ==="
   pPrintIfMoreVerbose conf annotated
-  printStage conf "After Algorithm Annotation (tags include Alg)" annotated
+  printStage conf "After Conditional Annotation (IsConditional tags)" annotated
 
   let unoptimized = envToIRUnoptimized conf annotated
   printStageIR conf "After IR Compilation (pre-optimization)" unoptimized
@@ -386,7 +386,7 @@ pPrintIfMoreVerbose CompilerConfig {verbose=v} s | v >= 2 = pTraceShow s (return
 pPrintIfMoreVerbose _ _ = return ()
 
 -- Print a labeled intermediate compilation stage showing the full annotated AST tree.
--- Each node shows: constructor name :: TypeInfo {rType, pType, chainName, tags=[..., Alg ...]}
+-- Each node shows: constructor name :: TypeInfo {rType, pType, chainName, tags=[...]}
 printStage :: (Monad m) => CompilerConfig -> String -> Program -> m ()
 printStage CompilerConfig {showIntermediates=True} label prog =
   trace (unlines (stageHeader label ++ prettyPrintProg prog ++ [""])) (return ())

@@ -191,9 +191,11 @@ mkVariable suffix = do
 setVariables :: [(String, IRExpr)] -> CompilerMonad ()
 setVariables = tell
 
-hasAlgorithm :: [Tag] -> String -> Bool
-hasAlgorithm tags alg = alg `elem` ([algName a | Alg a <- tags])
---hasAlgorithm tags alg = not $ null $ filter (== alg) [a | Alg a <- tags]
+-- | True if any tag on the expression marks it as enumerable (carries DiscreteValues).
+isEnumerable :: [Tag] -> Bool
+isEnumerable = any isDiscrete
+  where isDiscrete (DiscreteValues _) = True
+        isDiscrete _                  = False
 
 const0 :: IRExpr
 const0 = IRConst (VFloat 0)
@@ -510,8 +512,8 @@ toIRInference meta cumulative (IfThenElse _ cond left right) sample = do
     -- p(y) = p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
     Nothing -> do
       return (addExpr, addDim, branches)
-toIRInference meta False (GreaterThan (TypeInfo {rType = _, tags = extras}) left right) sample
-  | extras `hasAlgorithm` "greaterThanLeft" = do --p(x | const >= var)
+toIRInference meta False (GreaterThan _ left right) sample
+  | pType (getTypeInfo left) == Deterministic = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
     l <- toIRGenerate meta left
     setVariables [(var, l)]
@@ -520,7 +522,7 @@ toIRInference meta False (GreaterThan (TypeInfo {rType = _, tags = extras}) left
     let returnExpr = IRIf sample (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))
     setVariables [(var2, integrate)]
     return (returnExpr, const0, integrateBranches)
-  | extras `hasAlgorithm` "greaterThanRight" = do --p(x | var >= const)
+  | pType (getTypeInfo right) == Deterministic = do --p(x | var >= const)
     var <- mkVariable "fixed_bound"
     r <- toIRGenerate meta right
     setVariables [(var, r)]
@@ -529,8 +531,8 @@ toIRInference meta False (GreaterThan (TypeInfo {rType = _, tags = extras}) left
     let returnExpr = IRIf sample (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)) (IRVar var2)
     setVariables [(var2, integrate)]
     return (returnExpr, const0, integrateBranches)
-toIRInference meta False (LessThan (TypeInfo {rType = _, tags = extras}) left right) sample
-  | extras `hasAlgorithm` "lessThanLeft" = do --p(x | const >= var)
+toIRInference meta False (LessThan _ left right) sample
+  | pType (getTypeInfo left) == Deterministic = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
     l <- toIRGenerate meta left
     setVariables [(var, l)]
@@ -539,7 +541,7 @@ toIRInference meta False (LessThan (TypeInfo {rType = _, tags = extras}) left ri
     let returnExpr = IRIf sample (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)) (IRVar var2)
     setVariables [(var2, integrate)]
     return (returnExpr, const0, integrateBranches)
-  | extras `hasAlgorithm` "lessThanRight" = do --p(x | var >= const)
+  | pType (getTypeInfo right) == Deterministic = do --p(x | var >= const)
     var <- mkVariable "fixed_bound"
     r <- toIRGenerate meta right
     setVariables [(var, r)]
@@ -861,8 +863,9 @@ toIRInference meta cumulative (InjF TypeInfo {tags=_, rType=rt} (Named name) par
   let returnP = scale paramExpr
   let appTestExpr e = IRIf appTest e const0
   return (appTestExpr returnP, appTestExpr paramDim, appTestExpr paramBranches)
-toIRInference meta False (InjF TypeInfo {tags=extras, rType=rt} (Named name) [left, right]) sample
-  | extras `hasAlgorithm` "injF2Enumerable" = do
+toIRInference meta False (InjF TypeInfo {rType=rt} (Named name) [left, right]) sample
+  | isEnumerable (tags (getTypeInfo left)) && isEnumerable (tags (getTypeInfo right))
+    && pType (getTypeInfo left) /= Deterministic && pType (getTypeInfo right) /= Deterministic = do
   let resolvedName = resolveInjF rt name
   -- Get all possible values for subexpressions
   let extrasLeft = tags $ getTypeInfo left
@@ -910,8 +913,9 @@ toIRInference meta False (InjF TypeInfo {tags=extras, rType=rt} (Named name) [le
   let branchCountSum = IREnumSum x2 enumListL (IRTSnd (IRTSnd innerTuple))
   return (applyUnique enumSumExpr, const0, applyUnique branchCountSum)
 -- For the cumulative case we cant get around two enum sums
-toIRInference meta True (InjF TypeInfo {tags=extras, rType=rt} (Named name) [left, right]) sample
-  | extras `hasAlgorithm` "injF2Enumerable" = do
+toIRInference meta True (InjF TypeInfo {rType=rt} (Named name) [left, right]) sample
+  | isEnumerable (tags (getTypeInfo left)) && isEnumerable (tags (getTypeInfo right))
+    && pType (getTypeInfo left) /= Deterministic && pType (getTypeInfo right) /= Deterministic = do
   let resolvedName = resolveInjF rt name
   -- Get all possible values for subexpressions
   let extrasLeft = tags $ getTypeInfo left
