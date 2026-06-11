@@ -57,6 +57,10 @@ module SPLL.Prelude
   , runProb
   , runInteg
   , runEncode
+  , runGenC
+  , runProbC
+  , runIntegC
+  , runEncodeC
   , printIfVerbose
   , printIfMoreVerbose
   , pPrintIfVerbose
@@ -314,25 +318,19 @@ runGen :: (RandomGen g) => CompilerConfig -> Program -> [IRValue] -> Either Comp
 runGen _ p _ | isLeft (validateProgram p) = fmap (error "Impossible case") (validateProgram p)
 runGen conf p args = do
   compiled <- compile conf p
-  let Just (gen, _) = genFun (lookupIREnv "main" compiled)
-  let constArgs = map IRConst args
-  Right $ generateRand (neurals p) compiled constArgs gen
+  Right $ runGenC p compiled args
 
 runProb :: CompilerConfig -> Program -> [IRValue] -> IRValue -> Either CompilerError IRValue
 runProb _ p _ _ | isLeft (validateProgram p) = fmap (error "Impossible case") (validateProgram p)
 runProb conf p args x = do
   compiled <- compile conf p
-  let Just (prob, _) = probFun (lookupIREnv "main" compiled)
-  let constArgs = map IRConst (x:args)
-  generateDet (neurals p) compiled constArgs prob
+  runProbC p compiled args x
 
 runInteg :: CompilerConfig -> Program -> [IRValue] -> IRValue -> Either CompilerError IRValue
 runInteg _ p _ _ | isLeft (validateProgram p) = fmap (error "Impossible case") (validateProgram p)
 runInteg conf p args sample = do
   compiled <- compile conf p
-  let Just (integ, _) = integFun (lookupIREnv "main" compiled)
-  let constArgs = map IRConst (sample:args)
-  generateDet (neurals p) compiled constArgs integ
+  runIntegC p compiled args sample
 
 -- | Run the encode function for the first neural declaration in the program.
 -- outerArgs mirrors main's outer parameter list: pass one IRValue per outer lambda in main,
@@ -341,14 +339,35 @@ runEncode :: CompilerConfig -> Program -> [IRValue] -> Either CompilerError IRVa
 runEncode _ p _ | isLeft (validateProgram p) = fmap (error "Impossible case") (validateProgram p)
 runEncode conf p outerArgs = do
   compiled <- compile conf p
+  runEncodeC p compiled outerArgs
+
+-- Variants of the run* functions that take an already-compiled IREnv, so that
+-- callers issuing many queries against the same program pay for compilation once.
+
+runGenC :: (RandomGen g) => Program -> IREnv -> [IRValue] -> Rand g IRValue
+runGenC p compiled args =
+  let Just (gen, _) = genFun (lookupIREnv "main" compiled)
+  in generateRand (neurals p) compiled (map IRConst args) gen
+
+runProbC :: Program -> IREnv -> [IRValue] -> IRValue -> Either CompilerError IRValue
+runProbC p compiled args x =
+  let Just (prob, _) = probFun (lookupIREnv "main" compiled)
+  in generateDet (neurals p) compiled (map IRConst (x:args)) prob
+
+runIntegC :: Program -> IREnv -> [IRValue] -> IRValue -> Either CompilerError IRValue
+runIntegC p compiled args sample =
+  let Just (integ, _) = integFun (lookupIREnv "main" compiled)
+  in generateDet (neurals p) compiled (map IRConst (sample:args)) integ
+
+runEncodeC :: Program -> IREnv -> [IRValue] -> Either CompilerError IRValue
+runEncodeC p compiled outerArgs = do
   validateEncodeGaussian (adts p) (neurals p) compiled
   let IREnv groups _ _ = compiled
   case filter (isJust . encodeFun) groups of
     [] -> Left "No encode function found in compiled program"
     (grp:_) ->
       let Just (enc, _) = encodeFun grp
-          constArgs = map IRConst outerArgs
-      in generateDet (neurals p) compiled constArgs enc
+      in generateDet (neurals p) compiled (map IRConst outerArgs) enc
 
 printIfVerbose :: (Monad m) => CompilerConfig -> String -> m ()
 printIfVerbose CompilerConfig {verbose=v} s | v >= 1 = trace s (return ())

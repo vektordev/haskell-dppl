@@ -28,7 +28,9 @@ import SPLL.AutoNeural (makePartitionPlan, planIndexOf)
 import Data.Foldable (toList)
 import Test.QuickCheck hiding (verbose)
 import Debug.Trace
-import Control.Exception (try, evaluate, SomeException)
+import Control.Exception (try, evaluate, throwIO, SomeException)
+import Control.Concurrent (forkIO)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Data.Time.Clock (getCurrentTime, diffUTCTime)
 import Data.IORef (IORef, newIORef, modifyIORef, readIORef)
 import IRInterpreter (generateRand, generateDet)
@@ -59,9 +61,9 @@ parseProbTestCases fp = do
                       (a, "")    -> [a]
 -}
 
-testInterpreter :: Program -> TestCase -> Property
-testInterpreter p (ProbTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = ioProperty $ do
-  result <- try $ evaluate $ runProb defaultCompilerConfig p params sample :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
+testInterpreter :: Program -> Either CompilerError IREnv -> TestCase -> Property
+testInterpreter p compiledE (ProbTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = ioProperty $ do
+  result <- try $ evaluate $ (compiledE >>= \c -> runProbC p c params sample) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of 
     Right (Right (VTuple (VFloat outProb) (VFloat outDim))) -> 
       counterexample ("Probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < 0.0001) .&&.
@@ -69,8 +71,8 @@ testInterpreter p (ProbTestCase name sample params (VFloat expectedProb, VFloat 
     Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
     Right (Left err) -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
     Left err -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
-testInterpreter p (CumulTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = ioProperty $ do
-  result <- try $ evaluate $ runInteg defaultCompilerConfig p params sample :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
+testInterpreter p compiledE (CumulTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = ioProperty $ do
+  result <- try $ evaluate $ (compiledE >>= \c -> runIntegC p c params sample) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of 
     Right (Right (VTuple (VFloat outProb) (VFloat outDim)) )-> 
       counterexample ("Cmulative probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < 0.0001) .&&.
@@ -78,24 +80,24 @@ testInterpreter p (CumulTestCase name sample params (VFloat expectedProb, VFloat
     Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
     Right (Left err) -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
     Left err -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
-testInterpreter p (EncodingLengthTestCase name expectedLen) = ioProperty $ do
+testInterpreter p compiledE (EncodingLengthTestCase name expectedLen) = ioProperty $ do
   -- Construct one mock sym per outer parameter of main (or none for closed-form programs).
   let paramCnt = progParameterCount p
       mockArgs = replicate paramCnt (VTuple (VInt 0) (VInt 42))
-  result <- try $ evaluate $ runEncode defaultCompilerConfig p mockArgs :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
+  result <- try $ evaluate $ (compiledE >>= \c -> runEncodeC p c mockArgs) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of
     Right (Right (VList lst)) ->
       counterexample ("Encode length differs for test case " ++ name ++ ". Expected: " ++ show expectedLen ++ " Got: " ++ show (length lst)) (length lst == expectedLen)
     Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a list: " ++ show x) False
     Right (Left err) -> counterexample ("Test case " ++ name ++ " raised a compiler error: " ++ show err) False
     Left err -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
-testInterpreter p (EncodingSlotTestCase name spikeVal idxOf expected) = ioProperty $ do
+testInterpreter p compiledE (EncodingSlotTestCase name spikeVal idxOf expected) = ioProperty $ do
   -- Build a spiking mock sym: mode=1 spikes the mock NN at spikeVal.
   let mockSym = VTuple (VInt 1) (VTuple spikeVal (VInt 0))
   let (_, TArrow _ target, nnTag) = head (neurals p)
       plan = makePartitionPlan (adts p) target nnTag
       slotIdx = planIndexOf plan idxOf
-  result <- try $ evaluate $ runEncode defaultCompilerConfig p [mockSym] :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
+  result <- try $ evaluate $ (compiledE >>= \c -> runEncodeC p c [mockSym]) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of
     Right (Right (VList lst)) ->
       let items = toList lst
@@ -108,23 +110,34 @@ testInterpreter p (EncodingSlotTestCase name spikeVal idxOf expected) = ioProper
     Right (Right x) -> counterexample ("Output is not a list: " ++ show x ++ " in " ++ name) False
     Right (Left err) -> counterexample ("Compiler error in " ++ name ++ ": " ++ show err) False
     Left err -> counterexample ("Exception in " ++ name ++ ": " ++ show err) False
-testInterpreter p (ArgmaxPTestCase name params res) = ioProperty $ do
+testInterpreter p compiledE (ArgmaxPTestCase name params res) = ioProperty $ do
   let paramCnt = length params
   let mockedParams seeds = map (\(par, s) -> VTuple (VInt 1) (VTuple par (VInt s))) (zip params seeds)
   let mockedParamsList start = map mockedParams [[x .. x + (paramCnt-1)] | x <- [start, paramCnt..]]  -- [[((1, (p1, 0)), (1, (p2, 1)))], [(1, (p1, 2)), (1, (p2, 3))] ..]
-  let resP' = runProb defaultCompilerConfig p (head (mockedParamsList 0)) res
-  case resP' of
+  case compiledE of
     Left err -> return $ counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
-    Right resP -> do
-      let cntSamples = 100
-      case mapM (runGen defaultCompilerConfig p) (take cntSamples (mockedParamsList paramCnt)) of
-        Left err -> return $ counterexample err False
-        Right randVals -> do
-          samples <- evalRandIO (sequence randVals)
-          let samplesP' = mapM (\(par, s) -> runProb defaultCompilerConfig p par s) (zip (take cntSamples (mockedParamsList (paramCnt * cntSamples))) samples)
-          case samplesP' of 
+    Right compiled -> do
+      let resP' = runProbC p compiled (head (mockedParamsList 0)) res
+      case resP' of
+        Left err -> return $ counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
+        Right resP -> do
+          let cntSamples = 100
+          samples <- evalRandIO (mapM (runGenC p compiled) (take cntSamples (mockedParamsList paramCnt)))
+          -- The prob queries are independent and pure; force them in parallel.
+          probResults <- parEval (map (\(par, s) -> runProbC p compiled par s) (zip (take cntSamples (mockedParamsList (paramCnt * cntSamples))) samples))
+          case sequence probResults of
             Left err -> return $ counterexample err False
             Right samplesP -> return $ conjoin (map (\(s, p) -> counterexample ("Test Case " ++ name ++ ": Sample " ++ show s ++ " has highest probability: " ++ show p ++ " instead of sample " ++ show res ++ " with probability: " ++ show resP) (p `lessEqualsProbs` resP || s == res)) (zip samples samplesP))
+
+-- Force a list of independent pure results concurrently (one thread each).
+-- The values are unchanged - this only spreads the evaluation work across cores.
+parEval :: [a] -> IO [a]
+parEval xs = do
+  vars <- mapM (\x -> do
+    v <- newEmptyMVar
+    _ <- forkIO (try (evaluate x) >>= putMVar v)
+    return v) xs
+  mapM (\v -> takeMVar v >>= either (\e -> throwIO (e :: SomeException)) return) vars
 
 lessEqualsProbs :: IRValue -> IRValue -> Bool
 lessEqualsProbs (VFloat a) (VFloat b) = a <= b
@@ -136,10 +149,10 @@ lessEqualsProbs (VTuple _ (VFloat aD)) (VTuple _ (VFloat bD)) = aD > bD -- Lower
 -- the size of that support (it enumerates it), not on sampleCnt, so evaluating it
 -- once per *distinct* sampled value (weighted by how often it occurred) gives the
 -- exact same sum but skips the redundant repeat evaluations.
-discreteProbsNormalized :: Program -> Property
-discreteProbsNormalized p = case compile defaultCompilerConfig p of
+discreteProbsNormalized :: Program -> Either CompilerError IREnv -> Property
+discreteProbsNormalized p compiledE = case compiledE of
   Left err -> counterexample ("Compilation failed: " ++ err) False
-  Right compiled ->
+  Right compiled -> ioProperty $ do
     let Just (genExpr, _)  = genFun  (lookupIREnv "main" compiled)
         Just (probExpr, _) = probFun (lookupIREnv "main" compiled)
         randomParams :: RandomGen g => Rand g [IRValue]
@@ -149,7 +162,9 @@ discreteProbsNormalized p = case compile defaultCompilerConfig p of
         pSamples = evalRand (sequence gens) (mkStdGen 42)
         uniqueSamples = nub pSamples
         counts = map (\u -> length (filter (== u) pSamples)) uniqueSamples
-    in case mapM (\sam -> generateDet (neurals p) compiled (map IRConst (sam:params)) probExpr) uniqueSamples of
+    -- The per-sample prob queries are independent and pure; force them in parallel.
+    probResults <- parEval (map (\sam -> generateDet (neurals p) compiled (map IRConst (sam:params)) probExpr) uniqueSamples)
+    return $ case sequence probResults of
         Left err -> counterexample err False
         Right t
           | all ((== VInt 0) . dim) t ->
@@ -182,9 +197,9 @@ progParameterCount Program{functions=f} = countLambdas main
     countLambdas (Lambda _ _ e) = 1 + countLambdas e
     countLambdas _ = 0
 
-testJuliaAll :: [(Program, [TestCase])] -> Property
+testJuliaAll :: [(Either CompilerError IREnv, [TestCase])] -> Property
 testJuliaAll programCases = ioProperty $ do
-  let results = [(compile defaultCompilerConfig p, tcs) | (p, tcs) <- programCases, not (null tcs)]
+  let results = [(c, tcs) | (c, tcs) <- programCases, not (null tcs)]
   case [err | (Left err, _) <- results] of
     (err:_) -> return $ counterexample err False
     [] -> do
@@ -199,9 +214,9 @@ testJuliaAll programCases = ioProperty $ do
         ExitSuccess -> True === True
         ExitFailure _ -> counterexample "Julia batch test failed. See Julia error message above." False
 
-testPython :: Program -> [TestCase] -> Property
-testPython p tc = ioProperty $ do
-  case compile defaultCompilerConfig p of
+testPython :: Either CompilerError IREnv -> [TestCase] -> Property
+testPython compiledE tc = ioProperty $ do
+  case compiledE of
     Left err -> return $ counterexample err False
     Right compiled -> do
       let src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True compiled)
@@ -291,24 +306,26 @@ test_end2end :: TimingLog -> IO Bool
 test_end2end tlog = do
   files <- getAllTestFiles
   cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
-  let queryTestCases = map (\(p, tcs) -> (p, filter (\x -> isProbTestCase x || isCumulTestCase x) tcs)) cases
-  let nonNeuralsQueries = filter (null . neurals . fst) queryTestCases
-  let neuralP = map fst (filter (not . null . neurals . fst) cases)
+  -- Compile each program exactly once; every test group below shares the result.
+  let compiledCases = [(p, compile defaultCompilerConfig p, tcs) | (p, tcs) <- cases]
+  let queryTestCases = [(p, c, filter (\x -> isProbTestCase x || isCumulTestCase x) tcs) | (p, c, tcs) <- compiledCases]
+  let nonNeuralsQueries = filter (\(p, _, _) -> null (neurals p)) queryTestCases
+  let neuralP = [(p, c) | (p, c, _) <- compiledCases, not (null (neurals p))]
 
   putStrLn "=== Test End2End Interpreter ==="
-  let interprTest = label "End2End Interpreter" $ conjoin [conjoin $ map (testInterpreter p) tcs | (p, tcs) <- cases]
+  let interprTest = label "End2End Interpreter" $ conjoin [conjoin $ map (testInterpreter p c) tcs | (p, c, tcs) <- compiledCases]
   interprProp <- timedLog tlog "End2End Interpreter" $ quickCheckResult (withMaxSuccess 1 interprTest) >>= return . isSuccess
 
   putStrLn "\n=== Test End2End Interpreter Normalization ==="
-  let interprNormalizeTest = label "End2End Interpreter Normalization" $ conjoin [discreteProbsNormalized p | p <- neuralP]
+  let interprNormalizeTest = label "End2End Interpreter Normalization" $ conjoin [discreteProbsNormalized p c | (p, c) <- neuralP]
   interprNormalProp <- timedLog tlog "End2End Interpreter Normalization" $ quickCheckResult (withMaxSuccess 1 interprNormalizeTest) >>= return . isSuccess
 
   putStrLn "\n=== Test End2End Julia ==="
-  let juliaTest = label "End2End Julia" $ testJuliaAll nonNeuralsQueries
+  let juliaTest = label "End2End Julia" $ testJuliaAll [(c, tcs) | (_, c, tcs) <- nonNeuralsQueries]
   juliaProp <- timedLog tlog "End2End Julia" $ quickCheckResult (withMaxSuccess 1 juliaTest) >>= return . isSuccess
 
   putStrLn "\n=== Test End2End Python ==="
-  let pythonTest = label "End2End Python" $ conjoin [testPython p tcs | (p, tcs) <- nonNeuralsQueries]
+  let pythonTest = label "End2End Python" $ conjoin [testPython c tcs | (_, c, tcs) <- nonNeuralsQueries]
   pythonProp <- timedLog tlog "End2End Python" $ quickCheckResult (withMaxSuccess 1 pythonTest) >>= return . isSuccess
 
   return $ interprProp && interprNormalProp && juliaProp && pythonProp
