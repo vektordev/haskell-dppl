@@ -20,7 +20,6 @@ module SPLL.Lang.Types
   , isVFloat, isVEither, isVTuple, isVADT
   , MultiValue(..)
   , Tag(..)
-  , RuleConstraint(..)
   , InferenceRule(..)
   ) where
 
@@ -239,25 +238,17 @@ data Tag = DiscreteValues MultiValue
            
 
 
-data RuleConstraint = SubExprNIsType Int PType
-                    | SubExprNIsNotType Int PType
-                    | SubExprNIsAtLeast Int PType
-                    | SubExprNIsEnumerable Int
-                    | ResultingTypeMatch
-                    | ResolvesToDistribution
-                    deriving (Show, Eq)
-
--- can we encode symmetries?
+-- | A return-type rule: maps an expression shape (ExprStub) to the RType scheme
+-- it produces.  Used solely by RInfer for return-type inference.  (Probabilistic
+-- algorithm selection no longer lives here — it is done directly in IRCompiler from
+-- pType / enumerability annotations.)
 data InferenceRule = InferenceRule { forExpression :: ExprStub
-                                   , constraints :: [RuleConstraint]
                                    , algName :: String
-                                   --apply all subexpr PTypes to find PType
-                                   , resultingPType :: [PType] -> PType
                                    , assumedRType :: Scheme
                                    }
 
 instance Show InferenceRule where
-  show (InferenceRule _ _ name _ _) = name
+  show (InferenceRule _ name _) = name
 
 instance Eq InferenceRule where
   a1 == a2 = algName a1 == algName a2
