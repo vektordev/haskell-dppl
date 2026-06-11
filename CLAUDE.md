@@ -16,12 +16,14 @@ stack run -- -i file.spll compile -l julia                  # Compile to Julia
 stack run -- -i file.spll generate                          # Forward sampling
 stack run -- -i file.spll probability -x 0.5                # Query P(X=0.5)
 stack run -- -i file.spll integrate -l 0 -h 1               # Integrate over range
-# Disable specific test groups (no per-test name filtering available):
-stack test --ta '-S'   # disable Spec tests
-stack test --ta '-I'   # disable Internals tests
-stack test --ta '-P'   # disable Parser tests
-stack test --ta '-E'   # disable End2End tests
-stack test --test-arguments "--show-timings"    # shows per-suite timing and cost center info, '-T' for short.
+# Test selection (tasty patterns; top-level groups: Spec, Parser, Internals, Encode, End2End):
+stack test --ta '-p Spec'                # run one group
+stack test --ta '-p "!/End2End/"'        # everything except a group
+stack test --ta '-p TopK'                # any test whose name matches a substring
+stack test --ta '-p "/End2End.Interpreter/ && /dice/"'   # one .ppl test case
+stack test --ta '-l'                     # list all test names
+# Output is quiet-on-success by default; show every test (with per-test timings) via:
+TASTY_HIDE_SUCCESSES=false stack test
 ```
 
 
@@ -140,10 +142,13 @@ Auto-derivation (`_`, or an omitted `of ...` clause) fills these slots from the 
 
 ## Test Structure
 
-- `test/Spec.hs` — main entry, runs HUnit and QuickCheck tests
-- `test/TestParser.hs` — parser unit tests
-- `test/TestInternals.hs` — internal function tests
-- `test/End2EndTesting.hs` — integration tests using `.ppl` + `.tst` files from `testCases/`
+The suite runs under tasty (`tasty-quickcheck` for properties, `tasty-hunit` for unit tests). Each module exports a `TestTree`; `Spec.hs` assembles them under the groups Spec / Parser / Internals / Encode / End2End.
+
+- `test/Spec.hs` — main entry (`defaultMain`), plus the Spec QuickCheck properties
+- `test/TestParser.hs` — parser unit tests (`parserTests`)
+- `test/TestInternals.hs` — internal function tests (`internalsTests`)
+- `test/TestEncodeProperties.hs` — AutoNeural encode tests (`encodeTests`)
+- `test/End2EndTesting.hs` — integration tests using `.ppl` + `.tst` files from `testCases/` (`end2endTests`; one test per program, Julia batched into a single test)
 - `test/ArbitrarySPLL.hs` — QuickCheck Arbitrary instances for property testing
 
 ## Runtime Libraries

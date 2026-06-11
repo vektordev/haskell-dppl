@@ -1,14 +1,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 
 module TestInternals (
-  test_internals,
-  classConstraintTests,
-  test_encodeTupleGaussianParams,
-  test_encodeDiscreteSumsToOne,
-  test_encodeGaussianSigmaPositive,
-  test_nnHoistedOutOfEnumSum,
-  test_missingMainFunction,
-  autoNeuralDerivationTests
+  internalsTests
 ) where
 
 import SPLL.Lang.Lang
@@ -27,7 +20,9 @@ import SPLL.IntermediateRepresentation
 import IRInterpreter (generateDet)
 import Data.Foldable (toList)
 import Data.List (isInfixOf)
-import Test.HUnit
+import Test.Tasty (TestTree, testGroup)
+import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure)
+import Test.Tasty.QuickCheck (testProperties)
 import System.Random (StdGen)
 import Control.Monad.Random (Rand)
 
@@ -49,20 +44,20 @@ typechecks p = case tryAddRTypeInfo p of
   Left _  -> False
 
 -- plus on two float constants should succeed
-test_plusFloat :: Test
-test_plusFloat = TestCase $
+test_plusFloat :: TestTree
+test_plusFloat = testCase "plusFloat" $
   assertBool "plus TFloat TFloat should typecheck" $
     typechecks (Program [("main", constF 1.0 #+# constF 2.0)] [] [])
 
 -- plus on two int constants should succeed
-test_plusInt :: Test
-test_plusInt = TestCase $
+test_plusInt :: TestTree
+test_plusInt = testCase "plusInt" $
   assertBool "plusI TInt TInt should typecheck" $
     typechecks (Program [("main", constI 1 #<+># constI 2)] [] [])
 
 -- Bool + Bool should be rejected with a ClassConstraintViolation
-test_plusBoolReject :: Test
-test_plusBoolReject = TestCase $ do
+test_plusBoolReject :: TestTree
+test_plusBoolReject = testCase "plusBoolReject" $ do
   let src = unlines
         [ "coin = if Uniform < 0.5 then True else False"
         , "main = coin + coin"
@@ -73,8 +68,8 @@ test_plusBoolReject = TestCase $ do
       Left (ClassConstraintViolation _ _) -> return ()
       other -> assertFailure ("Expected ClassConstraintViolation, got: " ++ show other)
 
-classConstraintTests :: Test
-classConstraintTests = TestList
+classConstraintTests :: TestTree
+classConstraintTests = testGroup "classConstraints"
   [ test_plusFloat
   , test_plusInt
   , test_plusBoolReject
@@ -91,8 +86,8 @@ classConstraintTests = TestList
 -- the per-component normal function (main_normal_fst / main_normal_snd), which
 -- returns (mu, sigma) derived from the compiled SPLL program rather than the raw
 -- NN logit vector.
-test_encodeTupleGaussianParams :: Test
-test_encodeTupleGaussianParams = TestCase $ do
+test_encodeTupleGaussianParams :: TestTree
+test_encodeTupleGaussianParams = testCase "encodeTupleGaussianParams" $ do
   let src = unlines
         [ "neural tupleNN :: (Symbol -> (Float, Float))"
         , "main = (1.5 * Normal + 2.0, 0.5 * Normal + (-1.0))"
@@ -124,8 +119,8 @@ test_encodeTupleGaussianParams = TestCase $ do
 -- sum to approximately 1.0 for any mock NN sym input.
 -- Tests with the discrete nonidentity program: main sym = if discreteNN sym == 0 then 2 else 0
 -- Output type Int with values [0,1,2], so encode returns [P(0), P(1), P(2)] which must sum to 1.
-test_encodeDiscreteSumsToOne :: Test
-test_encodeDiscreteSumsToOne = TestCase $ do
+test_encodeDiscreteSumsToOne :: TestTree
+test_encodeDiscreteSumsToOne = testCase "encodeDiscreteSumsToOne" $ do
   let src = unlines
         [ "neural discreteNN :: (Symbol -> Int) of [0, 1, 2]"
         , "main sym = if discreteNN sym == 0 then 2 else 0"
@@ -147,8 +142,8 @@ test_encodeDiscreteSumsToOne = TestCase $ do
 
 -- Property: for the Gaussian identity program, encode always returns exactly 2 elements
 -- and sigma > 0, regardless of mock sym.
-test_encodeGaussianSigmaPositive :: Test
-test_encodeGaussianSigmaPositive = TestCase $ do
+test_encodeGaussianSigmaPositive :: TestTree
+test_encodeGaussianSigmaPositive = testCase "encodeGaussianSigmaPositive" $ do
   let src = unlines
         [ "neural gaussNN :: (Symbol -> Float)"
         , "main sym = gaussNN sym"
@@ -181,8 +176,8 @@ containsDirectNNApply name expr = any (containsDirectNNApply name) (getIRSubExpr
 
 -- | mNistAdd: readMNist(a) ++ readMNist(b) — the NN forward pass is loop-invariant
 -- w.r.t. the IREnumSum over digit values, so it must be hoisted outside the loop.
-test_nnHoistedOutOfEnumSum :: Test
-test_nnHoistedOutOfEnumSum = TestCase $ do
+test_nnHoistedOutOfEnumSum :: TestTree
+test_nnHoistedOutOfEnumSum = testCase "nnHoistedOutOfEnumSum" $ do
   src <- readFile "testCases/mNistAdd.ppl"
   case tryParseProgram "mNistAdd.ppl" src of
     Left err -> assertFailure ("Parse error: " ++ show err)
@@ -198,8 +193,8 @@ test_nnHoistedOutOfEnumSum = TestCase $ do
 -- CompilerError early on, instead of crashing deep in the IR lookup
 -- (lookupIREnv) or with a failed irrefutable pattern match in
 -- runGen/runProb/runInteg.
-test_missingMainFunction :: Test
-test_missingMainFunction = TestCase $ do
+test_missingMainFunction :: TestTree
+test_missingMainFunction = testCase "missingMainFunction" $ do
   let prog = Program [("notMain", constF 1.0)] [] []
   let assertMissingMain label result = case result of
         Left err -> assertBool (label ++ ": error should mention 'main', got: " ++ err)
@@ -213,23 +208,23 @@ test_missingMainFunction = TestCase $ do
 -- AutoNeural: auto-derivation of MultiValue annotations for the "Nothing" (no "of ...")
 -- and "_" (MultiAuto) cases. Float, Bool, Tuple/Either/non-recursive ADTs of these can be
 -- fully derived from the RType alone; Int and recursive ADTs cannot (unbounded/non-terminating).
-test_autoDeriveFloat :: Test
-test_autoDeriveFloat = TestCase $
+test_autoDeriveFloat :: TestTree
+test_autoDeriveFloat = testCase "autoDeriveFloat" $
   assertEqual "Float auto-derives to MultiContinuous"
     (Right MultiContinuous) (autoDeriveMultiValue [] TFloat)
 
-test_autoDeriveBool :: Test
-test_autoDeriveBool = TestCase $
+test_autoDeriveBool :: TestTree
+test_autoDeriveBool = testCase "autoDeriveBool" $
   assertEqual "Bool auto-derives to [True, False]"
     (Right (MultiDiscretes [VBool True, VBool False])) (autoDeriveMultiValue [] TBool)
 
-test_autoDeriveIntFails :: Test
-test_autoDeriveIntFails = TestCase $ case autoDeriveMultiValue [] TInt of
+test_autoDeriveIntFails :: TestTree
+test_autoDeriveIntFails = testCase "autoDeriveIntFails" $ case autoDeriveMultiValue [] TInt of
   Left err -> assertBool ("error should mention Int: " ++ err) ("Int" `isInfixOf` err)
   Right mv -> assertFailure ("expected auto-derive of Int to fail, got: " ++ show mv)
 
-test_autoDeriveTuple :: Test
-test_autoDeriveTuple = TestCase $
+test_autoDeriveTuple :: TestTree
+test_autoDeriveTuple = testCase "autoDeriveTuple" $
   assertEqual "Tuple of (Bool, Float) auto-derives componentwise"
     (Right (MultiTuple (MultiDiscretes [VBool True, VBool False]) MultiContinuous))
     (autoDeriveMultiValue [] (Tuple TBool TFloat))
@@ -237,8 +232,8 @@ test_autoDeriveTuple = TestCase $
 colorADT :: ADTDecl
 colorADT = ADTDecl "Color" [("Red", []), ("Green", []), ("Blue", [])] Nothing
 
-test_autoDeriveNonRecursiveADT :: Test
-test_autoDeriveNonRecursiveADT = TestCase $
+test_autoDeriveNonRecursiveADT :: TestTree
+test_autoDeriveNonRecursiveADT = testCase "autoDeriveNonRecursiveADT" $
   assertEqual "non-recursive enum ADT auto-derives all constructors"
     (Right (MultiADT [("Red", []), ("Green", []), ("Blue", [])]))
     (autoDeriveMultiValue [colorADT] (TADT "Color"))
@@ -249,38 +244,38 @@ treeADT = ADTDecl "Tree"
   , ("Node", [("l", TADT "Tree"), ("r", TADT "Tree")])
   ] Nothing
 
-test_autoDeriveRecursiveADTFails :: Test
-test_autoDeriveRecursiveADTFails = TestCase $ case autoDeriveMultiValue [treeADT] (TADT "Tree") of
+test_autoDeriveRecursiveADTFails :: TestTree
+test_autoDeriveRecursiveADTFails = testCase "autoDeriveRecursiveADTFails" $ case autoDeriveMultiValue [treeADT] (TADT "Tree") of
   Left err -> assertBool ("error should mention recursion: " ++ err) ("recursive" `isInfixOf` err)
   Right mv -> assertFailure ("expected auto-derive of recursive ADT to fail, got: " ++ show mv)
 
 -- AutoNeural: makePartitionPlan resolves "Nothing" and "_" (MultiAuto) via auto-derivation,
 -- and "Real" (MultiContinuous) directly to a Continuous plan.
-test_makePartitionPlanNothingFloat :: Test
-test_makePartitionPlanNothingFloat = TestCase $
+test_makePartitionPlanNothingFloat :: TestTree
+test_makePartitionPlanNothingFloat = testCase "makePartitionPlanNothingFloat" $
   assertEqual "Nothing for Float resolves to Continuous"
     Continuous (makePartitionPlan [] TFloat Nothing)
 
-test_makePartitionPlanNothingTuple :: Test
-test_makePartitionPlanNothingTuple = TestCase $
+test_makePartitionPlanNothingTuple :: TestTree
+test_makePartitionPlanNothingTuple = testCase "makePartitionPlanNothingTuple" $
   assertEqual "Nothing for (Bool, Float) resolves componentwise"
     (TuplePlan (Discretes TBool (MultiDiscretes [VBool True, VBool False])) Continuous)
     (makePartitionPlan [] (Tuple TBool TFloat) Nothing)
 
-test_makePartitionPlanWildcardMatchesNothing :: Test
-test_makePartitionPlanWildcardMatchesNothing = TestCase $
+test_makePartitionPlanWildcardMatchesNothing :: TestTree
+test_makePartitionPlanWildcardMatchesNothing = testCase "makePartitionPlanWildcardMatchesNothing" $
   assertEqual "explicit '_' placeholders resolve the same as Nothing"
     (makePartitionPlan [] (Tuple TBool TFloat) Nothing)
     (makePartitionPlan [] (Tuple TBool TFloat) (Just (MultiTuple MultiAuto MultiContinuous)))
 
-test_makePartitionPlanMixedExplicitAuto :: Test
-test_makePartitionPlanMixedExplicitAuto = TestCase $
+test_makePartitionPlanMixedExplicitAuto :: TestTree
+test_makePartitionPlanMixedExplicitAuto = testCase "makePartitionPlanMixedExplicitAuto" $
   assertEqual "an explicit Int enumeration alongside an auto-derived ('_') Float"
     (TuplePlan (Discretes TInt (MultiDiscretes [VInt 0, VInt 1, VInt 2])) Continuous)
     (makePartitionPlan [] (Tuple TInt TFloat) (Just (MultiTuple (MultiDiscretes [VInt 0, VInt 1, VInt 2]) MultiAuto)))
 
-autoNeuralDerivationTests :: Test
-autoNeuralDerivationTests = TestList
+autoNeuralDerivationTests :: TestTree
+autoNeuralDerivationTests = testGroup "autoNeuralDerivation"
   [ test_autoDeriveFloat
   , test_autoDeriveBool
   , test_autoDeriveIntFails
@@ -295,23 +290,16 @@ autoNeuralDerivationTests = TestList
 
 return []
 
--- Like $(forAllProperties), but stays quiet about properties that pass
--- (no per-property "=== prop_X ===\n+++ OK, passed N tests." block) and only
--- prints the full QuickCheck report for properties that fail.
-runPropsQuiet :: Args -> [(String, Property)] -> IO Bool
-runPropsQuiet args ps = do
-  results <- mapM runOne ps
-  putStrLn $ "  " ++ show (length (filter id results)) ++ "/" ++ show (length ps) ++ " properties passed"
-  return (and results)
-  where
-    runOne (name, p) = do
-      r <- quickCheckWithResult args { chatty = False } p
-      if isSuccess r
-        then return True
-        else do
-          putStrLn $ "=== " ++ name ++ " ==="
-          putStr (output r)
-          return False
-
-test_internals :: IO Bool
-test_internals = runPropsQuiet stdArgs { maxSuccess = 100 } $(allProperties)
+internalsTests :: TestTree
+internalsTests = testGroup "Internals"
+  [ testProperties "properties" $(allProperties)
+  , classConstraintTests
+  , testGroup "encode"
+      [ test_encodeTupleGaussianParams
+      , test_encodeDiscreteSumsToOne
+      , test_encodeGaussianSigmaPositive
+      , test_nnHoistedOutOfEnumSum
+      ]
+  , test_missingMainFunction
+  , autoNeuralDerivationTests
+  ]

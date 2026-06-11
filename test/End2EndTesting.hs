@@ -2,9 +2,8 @@
 
 module End2EndTesting where
 
-import System.Exit (exitWith, ExitCode(ExitFailure))
 import System.Directory (listDirectory, getCurrentDirectory)
-import System.FilePath (stripExtension, isExtensionOf)
+import System.FilePath (stripExtension, isExtensionOf, takeBaseName)
 import System.IO.Temp (withSystemTempFile)
 import System.IO (hPutStr, hClose)
 import System.Process
@@ -27,12 +26,12 @@ import SPLL.Typing.RType
 import SPLL.AutoNeural (makePartitionPlan, planIndexOf)
 import Data.Foldable (toList)
 import Test.QuickCheck hiding (verbose)
+import Test.Tasty (TestTree, testGroup)
+import Test.Tasty.QuickCheck (testProperty)
 import Debug.Trace
 import Control.Exception (try, evaluate, throwIO, SomeException)
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Data.Time.Clock (getCurrentTime, diffUTCTime)
-import Data.IORef (IORef, newIORef, modifyIORef, readIORef)
 import IRInterpreter (generateRand, generateDet)
 
 getAllTestFiles :: IO [(FilePath, FilePath)]
@@ -303,56 +302,24 @@ pythonTestCode src tcs =
     mainName (ProbTestCase _ _ _ _) = "main.forward"
     mainName (CumulTestCase _ _ _ _) = "main.integrate"
 
-type TimingLog = IORef [(String, Int)]
-
-newTimingLog :: IO TimingLog
-newTimingLog = newIORef []
-
-timedLog :: TimingLog -> String -> IO a -> IO a
-timedLog tlog label action = do
-  start <- getCurrentTime
-  result <- action
-  end <- getCurrentTime
-  let ms = round (realToFrac (diffUTCTime end start) * 1000 :: Double) :: Int
-  modifyIORef tlog ((label, ms) :)
-  return result
-
-printTimingSummary :: TimingLog -> IO ()
-printTimingSummary tlog = do
-  entries <- fmap reverse (readIORef tlog)
-  let total = sum (map snd entries)
-  putStrLn "\n=== Timing Summary ==="
-  mapM_ (\(lbl, ms) ->
-    let pct = if total == 0 then (0 :: Int)
-              else round (fromIntegral ms * 100 / fromIntegral total :: Double)
-    in putStrLn $ "  " ++ lbl ++ ": " ++ show ms ++ " ms (" ++ show pct ++ "%)"
-    ) entries
-  putStrLn $ "  Total: " ++ show total ++ " ms"
-
-test_end2end :: TimingLog -> IO Bool
-test_end2end tlog = do
+end2endTests :: IO TestTree
+end2endTests = do
   files <- getAllTestFiles
   cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
   -- Compile each program exactly once; every test group below shares the result.
-  let compiledCases = [(p, compile defaultCompilerConfig p, tcs) | (p, tcs) <- cases]
-  let queryTestCases = [(p, c, filter (\x -> isProbTestCase x || isCumulTestCase x) tcs) | (p, c, tcs) <- compiledCases]
-  let nonNeuralsQueries = filter (\(p, _, _) -> null (neurals p)) queryTestCases
-  let neuralP = [(p, c) | (p, c, _) <- compiledCases, not (null (neurals p))]
+  let compiledCases = [ (takeBaseName pplPath, p, compile defaultCompilerConfig p, tcs)
+                      | ((pplPath, _), (p, tcs)) <- zip files cases ]
+  let queryTestCases = [(n, p, c, filter (\x -> isProbTestCase x || isCumulTestCase x) tcs) | (n, p, c, tcs) <- compiledCases]
+  let nonNeuralsQueries = [(n, c, tcs) | (n, p, c, tcs) <- queryTestCases, null (neurals p), not (null tcs)]
+  let neuralP = [(n, p, c) | (n, p, c, _) <- compiledCases, not (null (neurals p))]
 
-  putStrLn "=== Test End2End Interpreter ==="
-  let interprTest = label "End2End Interpreter" $ conjoin [conjoin $ map (testInterpreter p c) tcs | (p, c, tcs) <- compiledCases]
-  interprProp <- timedLog tlog "End2End Interpreter" $ quickCheckResult (withMaxSuccess 1 interprTest) >>= return . isSuccess
-
-  putStrLn "\n=== Test End2End Interpreter Normalization ==="
-  let interprNormalizeTest = label "End2End Interpreter Normalization" $ conjoin [discreteProbsNormalized p c | (p, c) <- neuralP]
-  interprNormalProp <- timedLog tlog "End2End Interpreter Normalization" $ quickCheckResult (withMaxSuccess 1 interprNormalizeTest) >>= return . isSuccess
-
-  putStrLn "\n=== Test End2End Julia ==="
-  let juliaTest = label "End2End Julia" $ testJuliaAll [(c, tcs) | (_, c, tcs) <- nonNeuralsQueries]
-  juliaProp <- timedLog tlog "End2End Julia" $ quickCheckResult (withMaxSuccess 1 juliaTest) >>= return . isSuccess
-
-  putStrLn "\n=== Test End2End Python ==="
-  let pythonTest = label "End2End Python" $ conjoin [testPython c tcs | (_, c, tcs) <- nonNeuralsQueries]
-  pythonProp <- timedLog tlog "End2End Python" $ quickCheckResult (withMaxSuccess 1 pythonTest) >>= return . isSuccess
-
-  return $ interprProp && interprNormalProp && juliaProp && pythonProp
+  return $ testGroup "End2End"
+    [ testGroup "Interpreter"
+        [ testProperty n (once $ conjoin (map (testInterpreter p c) tcs)) | (n, p, c, tcs) <- compiledCases ]
+    , testGroup "Normalization"
+        [ testProperty n (once $ discreteProbsNormalized p c) | (n, p, c) <- neuralP ]
+    -- All Julia programs share one batch file (and one julia process) to amortize startup.
+    , testProperty "Julia" (once $ testJuliaAll [(c, tcs) | (_, c, tcs) <- nonNeuralsQueries])
+    , testGroup "Python"
+        [ testProperty n (once $ testPython c tcs) | (n, c, tcs) <- nonNeuralsQueries ]
+    ]

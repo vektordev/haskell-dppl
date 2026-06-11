@@ -3,7 +3,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 
 module TestParser (
-  test_parser
+  parserTests
 , programToString
 , exprToString
 , showExamples
@@ -14,6 +14,8 @@ import SPLL.Typing.Typing
 import SPLL.Lang.Types
 import SPLL.Lang.Lang
 import Test.QuickCheck
+import Test.Tasty (TestTree)
+import Test.Tasty.QuickCheck (testProperties)
 import SPLL.Examples
 import SPLL.Parser
 import ArbitrarySPLL
@@ -444,23 +446,5 @@ prop_underscorePrefixedIdentifierIsTypeRef =
 
 return []
 
--- Like $(forAllProperties), but stays quiet about properties that pass
--- (no per-property "=== prop_X ===\n+++ OK, passed N tests." block) and only
--- prints the full QuickCheck report for properties that fail.
-runPropsQuiet :: Args -> [(String, Property)] -> IO Bool
-runPropsQuiet args ps = do
-  results <- mapM runOne ps
-  putStrLn $ "  " ++ show (length (filter id results)) ++ "/" ++ show (length ps) ++ " properties passed"
-  return (and results)
-  where
-    runOne (name, p) = do
-      r <- quickCheckWithResult args { chatty = False } p
-      if isSuccess r
-        then return True
-        else do
-          putStrLn $ "=== " ++ name ++ " ==="
-          putStr (output r)
-          return False
-
-test_parser :: IO Bool
-test_parser = runPropsQuiet stdArgs { maxSuccess = 100 } $(allProperties)
+parserTests :: TestTree
+parserTests = testProperties "Parser" $(allProperties)

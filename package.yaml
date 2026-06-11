@@ -70,5 +70,7 @@ tests:
     - -with-rtsopts=-N
     dependencies:
     - haskell-dppl
-    - HUnit
+    - tasty
+    - tasty-hunit
+    - tasty-quickcheck
     - temporary

@@ -6,7 +6,10 @@
 {-# LANGUAGE FlexibleContexts #-}
 
 import Test.QuickCheck hiding (verbose)
-import System.Exit (exitWith, ExitCode(ExitFailure))
+import Test.Tasty (TestTree, testGroup, defaultMain, localOption)
+import Test.Tasty.QuickCheck (testProperties, QuickCheckMaxRatio(..))
+import System.Environment (lookupEnv, setEnv)
+import Data.Maybe (isNothing)
 
 import SPLL.Examples
 --import Lib
@@ -26,7 +29,6 @@ import Data.Maybe (fromJust, catMaybes)
 import Control.Monad.Random.Lazy (Random, RandomGen, Rand, evalRandIO)
 import SPLL.Typing.Infer
 --import ArbitrarySPLL
-import Options.Applicative
 import Control.Exception.Base (SomeException, try)
 import Test.QuickCheck.Monadic (monadicIO, run, assert)
 import Test.QuickCheck.Property (failed, reason)
@@ -40,12 +42,10 @@ import Data.Reflection (Reifies)
 import Data.Bifunctor (second)
 import SPLL.Typing.ForwardChaining (annotateProg)
 import SPLL.Parser
-import TestParser
-import TestInternals (test_internals, classConstraintTests, test_encodeTupleGaussianParams, test_encodeDiscreteSumsToOne, test_encodeGaussianSigmaPositive, test_nnHoistedOutOfEnumSum, test_missingMainFunction, autoNeuralDerivationTests)
-import TestEncodeProperties
-import Test.HUnit (Counts(..), Test, runTestText, putTextToHandle)
-import System.IO (stderr)
-import End2EndTesting
+import TestParser (parserTests)
+import TestInternals (internalsTests)
+import TestEncodeProperties (encodeTests)
+import End2EndTesting (end2endTests)
 import TestCaseParser (parseProgram)
 import SPLL.Prelude
 import qualified SPLL.CodeGenPyTorch
@@ -882,117 +882,22 @@ prop_TopKConstantResolvedByInterpreter = once $ ioProperty $ do
 
 return []
 
--- Like $(forAllProperties), but stays quiet about properties that pass
--- (no per-property "=== prop_X ===\n+++ OK, passed N tests." block) and only
--- prints the full QuickCheck report for properties that fail.
-runPropsQuiet :: Args -> [(String, Property)] -> IO Bool
-runPropsQuiet args ps = do
-  results <- mapM runOne ps
-  putStrLn $ "  " ++ show (length (filter id results)) ++ "/" ++ show (length ps) ++ " properties passed"
-  return (and results)
-  where
-    runOne (name, p) = do
-      r <- quickCheckWithResult args { chatty = False } p
-      if isSuccess r
-        then return True
-        else do
-          putStrLn $ "=== " ++ name ++ " ==="
-          putStr (output r)
-          return False
-
-runTests :: IO Bool
-runTests = runPropsQuiet stdArgs { maxSuccess = 100, maxDiscardRatio = 20 } $(allProperties)
-
-data TestOpts = TestOpts {
-  disableSpec :: Bool,
-  disableInternals :: Bool,
-  disableParser :: Bool,
-  disableEnd2End :: Bool,
-  showTimings :: Bool
-}
-
-parseTestOpts :: Parser TestOpts
-parseTestOpts = TestOpts
-        <$> switch
-            ( long "disableSpec"
-            <> short 'S'
-            <> help "Disables the tests in Spec")
-        <*> switch
-            ( long "disableInternals"
-            <> short 'I'
-            <> help "Disables the internal tests")
-        <*> switch
-            ( long "disableParser"
-            <> short 'P'
-            <> help "Disables the parser tests")
-        <*> switch
-            ( long "disableEnd2End"
-            <> short 'E'
-            <> help "Disables the end2end tests")
-        <*> switch
-            ( long "show-timings"
-            <> short 'T'
-            <> help "Print a per-suite timing table with percentages at the end of the run")
+specTests :: TestTree
+specTests = localOption (QuickCheckMaxRatio 20) $ testProperties "Spec" $(allProperties)
 
 main :: IO ()
-main = runSpecifiedTests =<< execParser opts
-         where
-           opts = info (parseTestOpts <**> helper)
-             ( fullDesc
-            <> progDesc "Compiles or computes probabilistic programs"
-            <> header "Haskell DPPL" )
-
--- Like runTestTT, but suppresses the per-case "Cases: N Tried: M ..." progress
--- lines (which, when not on a terminal, pile up into unreadable walls of text).
--- Failures and errors are still reported, as is the final count line.
-runTestQuiet :: Test -> IO Counts
-runTestQuiet t = fst <$> runTestText (putTextToHandle stderr False) t
-
-runSpecifiedTests :: TestOpts -> IO ()
-runSpecifiedTests opts = do
-  tlog <- newTimingLog
-  a <- if disableSpec opts then return True else timedLog tlog "Spec (QuickCheck props)" runTests
-  b <- if disableParser opts then return True else timedLog tlog "Parser tests" test_parser
-  c <- if disableInternals opts then return True else timedLog tlog "Internal tests" test_internals
-  let runHUnit label t = fmap (\c -> errors c + failures c == 0) $ timedLog tlog label (runTestQuiet t)
-  e <- fmap and $ sequence
-    [ runHUnit "classConstraintTests"               classConstraintTests
-    , runHUnit "test_encodeTupleGaussianParams"     test_encodeTupleGaussianParams
-    , runHUnit "test_encodeDiscreteSumsToOne"       test_encodeDiscreteSumsToOne
-    , runHUnit "test_encodeGaussianSigmaPositive"   test_encodeGaussianSigmaPositive
-    , runHUnit "test_nnHoistedOutOfEnumSum"         test_nnHoistedOutOfEnumSum
-    , runHUnit "test_missingMainFunction"           test_missingMainFunction
-    , runHUnit "autoNeuralDerivationTests"          autoNeuralDerivationTests
-    , runHUnit "encodeProps_gaussianScale"          encodeProps_gaussianScale
-    , runHUnit "encodeProps_gaussianNegScale"       encodeProps_gaussianNegScale
-    , runHUnit "encodeProps_gaussianSum"            encodeProps_gaussianSum
-    , runHUnit "encodeProps_gaussianSub"            encodeProps_gaussianSub
-    , runHUnit "encodeProps_eitherFlagInUnitInterval"  encodeProps_eitherFlagInUnitInterval
-    , runHUnit "encodeProps_eitherFlagSignMatchesSide" encodeProps_eitherFlagSignMatchesSide
-    , runHUnit "encodeProps_eitherIfMixtureFlag"       encodeProps_eitherIfMixtureFlag
-    , runHUnit "encodeProps_adtSingleConstrFlagIsOne"  encodeProps_adtSingleConstrFlagIsOne
-    , runHUnit "encodeInvariant_sigmaPositive"         encodeInvariant_sigmaPositive
-    , runHUnit "encodeInvariant_discreteNonNegative"   encodeInvariant_discreteNonNegative
-    , runHUnit "encodeInvariant_discreteSumsToOne"     encodeInvariant_discreteSumsToOne
-    , runHUnit "encodeInvariant_outputDimMatchesPlan"  encodeInvariant_outputDimMatchesPlan
-    , runHUnit "encodeError_continuousMixtureRequiresCollapse" encodeError_continuousMixtureRequiresCollapse
+main = do
+  -- Quiet-on-success by default: only failures (and the summary line) are printed.
+  -- tasty reads option defaults from TASTY_* environment variables, so setting it
+  -- here (only when unset) keeps it overridable: TASTY_HIDE_SUCCESSES=false stack test
+  -- prints the full test tree including per-test timings.
+  hideSuccesses <- lookupEnv "TASTY_HIDE_SUCCESSES"
+  if isNothing hideSuccesses then setEnv "TASTY_HIDE_SUCCESSES" "true" else return ()
+  e2e <- end2endTests
+  defaultMain $ testGroup "Tests"
+    [ specTests
+    , parserTests
+    , internalsTests
+    , encodeTests
+    , e2e
     ]
-  d <- if disableEnd2End opts then return True else test_end2end tlog
-  if showTimings opts then printTimingSummary tlog else return ()
-  let x = a && b && c && d && e
-  if x then
-    putStrLn "Test successful!"
-  else do
-    putStrLn "Test failed!"
-    exitWith (ExitFailure 1) --Exit with error code to let the tests fail
-  --mapM_ (quickCheck . not . canCompile) uncompilables
-  --checkProgs [(variableLengthS, variableLengthT),
-  --             (testLetS, testLetT),
-  --             (testLetNonLetS, testLetNonLetT),
-  --             (testLetDS, testLetDT),
-  --             (testLetTupleS, testLetTupleT),
-  --             (testLetXYS, testLetXYT)]
-  -- quickCheck $ compilesTo [("main", fst $ head expressions)] (snd $ head expressions)
-  -- quickCheck $ forAll expressionsGen (\expr -> compilesTo [("main", expr)] $ fromJust $ lookup expr expressions)
-  -- quickCheck $ forAll parametrizedGen $ discreteProbAlignment 1000
-  -- putStrLn "all tests done"
