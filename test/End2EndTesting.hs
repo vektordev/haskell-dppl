@@ -110,24 +110,56 @@ testInterpreter p compiledE (EncodingSlotTestCase name spikeVal idxOf expected) 
     Right (Right x) -> counterexample ("Output is not a list: " ++ show x ++ " in " ++ name) False
     Right (Left err) -> counterexample ("Compiler error in " ++ name ++ ": " ++ show err) False
     Left err -> counterexample ("Exception in " ++ name ++ ": " ++ show err) False
+-- argmax_p(params) = res asserts that `res` is a mode of main's output
+-- distribution given `params` (spiked mock NN inputs). Rather than drawing a
+-- fixed number of samples and checking each against p(res), we exploit
+-- normalization (checked elsewhere): once the summed probability of the
+-- distinct values seen so far ("known mass") leaves less than p(res) of
+-- probability mass unaccounted for, no unseen value can possibly exceed
+-- p(res), and the test can stop -- often immediately, since p(res) > 0.5
+-- alone proves it's the mode.
 testInterpreter p compiledE (ArgmaxPTestCase name params res) = ioProperty $ do
-  let paramCnt = length params
-  let mockedParams seeds = map (\(par, s) -> VTuple (VInt 1) (VTuple par (VInt s))) (zip params seeds)
-  let mockedParamsList start = map mockedParams [[x .. x + (paramCnt-1)] | x <- [start, paramCnt..]]  -- [[((1, (p1, 0)), (1, (p2, 1)))], [(1, (p1, 2)), (1, (p2, 3))] ..]
+  let mockedParams = [VTuple (VInt 1) (VTuple par (VInt seed)) | (par, seed) <- zip params [0..]]
   case compiledE of
     Left err -> return $ counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
-    Right compiled -> do
-      let resP' = runProbC p compiled (head (mockedParamsList 0)) res
-      case resP' of
-        Left err -> return $ counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
-        Right resP -> do
-          let cntSamples = 100
-          samples <- evalRandIO (mapM (runGenC p compiled) (take cntSamples (mockedParamsList paramCnt)))
-          -- The prob queries are independent and pure; force them in parallel.
-          probResults <- parEval (map (\(par, s) -> runProbC p compiled par s) (zip (take cntSamples (mockedParamsList (paramCnt * cntSamples))) samples))
-          case sequence probResults of
-            Left err -> return $ counterexample err False
-            Right samplesP -> return $ conjoin (map (\(s, p) -> counterexample ("Test Case " ++ name ++ ": Sample " ++ show s ++ " has highest probability: " ++ show p ++ " instead of sample " ++ show res ++ " with probability: " ++ show resP) (p `lessEqualsProbs` resP || s == res)) (zip samples samplesP))
+    Right compiled -> case runProbC p compiled mockedParams res of
+      Left err -> return $ counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
+      Right (VTuple (VFloat resP) (VFloat resDim))
+        | resDim /= 0 -> return $ counterexample ("Test case " ++ name ++ ": argmax_p does not support continuous (dim > 0) results") False
+        | otherwise -> evalRandIO (argmaxLoop p compiled name mockedParams res resP [res] resP 0)
+      Right x -> return $ counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
+
+-- Number of consecutive repeat draws (samples already in the bucket) after
+-- which we give up: if normalization held, the accumulated mass of a fully
+-- re-discovered support would already have completed the proof above, so
+-- this many repeats without that happening means the probabilities of the
+-- distinct values found so far don't sum to 1.
+argmaxPatience :: Int
+argmaxPatience = 10000
+
+argmaxLoop :: RandomGen g => Program -> IREnv -> String -> [IRValue] -> IRValue -> Double -> [IRValue] -> Double -> Int -> Rand g Property
+argmaxLoop p compiled name mockedParams res resP bucket knownMass consecutiveDuplicates
+  | 1 - knownMass < resP = return (property True)
+  | consecutiveDuplicates >= argmaxPatience = return $ counterexample
+      ("Test case " ++ name ++ ": probabilities of the " ++ show (length bucket) ++ " distinct values found sum to "
+        ++ show knownMass ++ ", which leaves more than p(" ++ show res ++ ") = " ++ show resP
+        ++ " of probability mass unaccounted for even after " ++ show argmaxPatience
+        ++ " consecutive repeat draws -- distribution appears to not be normalized to 1") False
+  | otherwise = do
+      sample <- runGenC p compiled mockedParams
+      if sample `elem` bucket
+        then argmaxLoop p compiled name mockedParams res resP bucket knownMass (consecutiveDuplicates + 1)
+        else case runProbC p compiled mockedParams sample of
+          Left err -> return $ counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
+          Right (VTuple (VFloat sampleP) (VFloat sampleDim))
+            -- A continuous value can never beat a discrete res (lower dimensionality
+            -- always wins) and isn't part of the dim-0 probability ledger.
+            | sampleDim /= 0 -> argmaxLoop p compiled name mockedParams res resP (sample:bucket) knownMass 0
+            | sampleP > resP && sample /= res -> return $ counterexample
+                ("Test Case " ++ name ++ ": Sample " ++ show sample ++ " has higher probability (" ++ show sampleP
+                  ++ ") than the presumed mode " ++ show res ++ " (" ++ show resP ++ ")") False
+            | otherwise -> argmaxLoop p compiled name mockedParams res resP (sample:bucket) (knownMass + sampleP) 0
+          Right x -> return $ counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
 
 -- Force a list of independent pure results concurrently (one thread each).
 -- The values are unchanged - this only spreads the evaluation work across cores.
@@ -138,11 +170,6 @@ parEval xs = do
     _ <- forkIO (try (evaluate x) >>= putMVar v)
     return v) xs
   mapM (\v -> takeMVar v >>= either (\e -> throwIO (e :: SomeException)) return) vars
-
-lessEqualsProbs :: IRValue -> IRValue -> Bool
-lessEqualsProbs (VFloat a) (VFloat b) = a <= b
-lessEqualsProbs (VTuple (VFloat aP) (VFloat aD)) (VTuple (VFloat bP) (VFloat bD)) | aD == bD = aP <= bP
-lessEqualsProbs (VTuple _ (VFloat aD)) (VTuple _ (VFloat bD)) = aD > bD -- Lower dimensionality means higher probability
 
 -- Samples are drawn with replacement from a small discrete support, so the same
 -- value tends to come up many times in 1000 draws. generateDet's cost depends on
