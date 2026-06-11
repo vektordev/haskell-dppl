@@ -113,11 +113,11 @@ The base cases are: continuous distributions (`Normal`, `Uniform`) emit `dim = 1
 | After Enum Annotation | `DiscreteValues` tags appear |
 | After Forward Chaining | `chainName` fields filled |
 | After Type Inference | `rType` and `pType` populated |
-| After Algorithm Annotation | `tags = [Alg <ruleName>, ...]` — the chosen inference algorithm per node |
+| After Conditional Annotation | `IsConditional` tags appear on conditioned distributions |
 | After IR Compilation (pre-optimization) | Pseudo-code IR before any optimizer passes |
 | After Optimization | Pseudo-code IR after constant folding, CSE, let-in optimization |
 
-Use this when a program compiles incorrectly to identify which stage introduced the defect. The `Alg` tag (from `Analysis.hs`) is particularly useful — it shows which `InferenceRule` was selected for each node.
+Use this when a program compiles incorrectly to identify which stage introduced the defect. `IRCompiler` selects the inference algorithm per node directly from the `pType` and `DiscreteValues` annotations visible after Type Inference (there is no separate algorithm-tag stage).
 
 ### Neural Declarations
 
