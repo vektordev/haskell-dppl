@@ -5,12 +5,12 @@ module SPLL.IROptimizer (
 
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types
-import Debug.Trace
 import Data.Functor ( (<&>) )
 import Data.Number.Erf (erf)
-import Data.List (nub)
+import Data.List (nub, maximumBy)
+import Data.Ord (comparing)
 import Data.Foldable (toList)
-import PrettyPrint
+import Control.Monad.State (State, evalState, get, put)
 import SPLL.Lang.Lang (floatApproxEqThresh)
 
 
@@ -42,10 +42,13 @@ fixedPointIteration f x = if fx == x then x else fixedPointIteration f fx
   where fx = f x
 
 optimize :: CompilerConfig -> IRExpr -> IRExpr
-optimize conf = irMap (commonSubexprStage . applyConstStage . assiciativityStage . letInStage . constantDistrStage . simplifyStage . indexStage . distributeConditionals . lambdaApplicationStage . pruneAnyCkecksStage)
+-- CSE runs as a whole-expression pass (not per-node via irMap) so it can hand out
+-- globally-unique binding names; running it per node lets the same name be reused
+-- at different nesting levels, which produces shadowing bugs.
+optimize conf = commonSubexprStage . irMap (applyConstStage . assiciativityStage . letInStage . constantDistrStage . simplifyStage . indexStage . distributeConditionals . lambdaApplicationStage . pruneAnyCkecksStage)
   where
     oLvl = optimizerLevel conf
-    commonSubexprStage = if False then optimizeCommonSubexpr else id -- Too buggy to use
+    commonSubexprStage = if oLvl >= 2 then optimizeCommonSubexpr else id
     applyConstStage = if oLvl >= 2 then applyConstant else id
     assiciativityStage = if oLvl >= 2 then optimizeAssociativity else id
     letInStage = if oLvl >= 2 then optimizeLetIns else id
@@ -53,7 +56,7 @@ optimize conf = irMap (commonSubexprStage . applyConstStage . assiciativityStage
     simplifyStage = if oLvl >= 1 then simplify else id
     indexStage = if oLvl >= 1 then indexmagic else id
     distributeConditionals = if oLvl >= 2 then distributeIf else id
-    lambdaApplicationStage = if False then optimizeLambdaApplication else id
+    lambdaApplicationStage = if oLvl >= 2 then applyToLetIn else id
     pruneAnyCkecksStage = if pruneAnyChecks conf then pruneAnyCkecksExpr else id
 
 indexmagic :: IRExpr -> IRExpr
@@ -65,17 +68,34 @@ indexmagic (IRApply (IRApply (IRVar "indexOf") elem) (IRConst (VList list))) | i
     toNatural _ = -1 -- not a natural number, should fail the above.
 indexmagic x = x
 
--- (if cond then x else y, if cond then z else w) can be simplified to if cond then (x, z) else (y, w).
--- basically, law of distribution.
+-- A tuple of conditionals sharing one condition can be hoisted into a single
+-- conditional over tuples, e.g. (if c then x else y, if c then z else w) becomes
+-- if c then (x, z) else (y, w).  Generalised to any nesting of IRTCons: whenever
+-- every leaf of the tuple tree is an IRIf with the same condition, pull that
+-- condition out and split the tree into a then-tree and an else-tree.
 distributeIf :: IRExpr -> IRExpr
-distributeIf (IRTCons (IRIf cond1 x1 x2) (IRIf cond2 y1 y2)) | cond1 == cond2 = IRIf cond1 (IRTCons x1 y1) (IRTCons x2 y2)
--- now for ((x, y), z):
-distributeIf (IRTCons (IRTCons (IRIf cond1 x1 x2) (IRIf cond2 y1 y2)) (IRIf cond3 z1 z2)) | cond1 == cond2 && cond1 == cond3 =
-  IRIf cond1 (IRTCons (IRTCons x1 y1) z1) (IRTCons (IRTCons x2 y2) z2)
--- now for (x, (y, z)):
-distributeIf (IRTCons (IRIf cond1 x1 x2) (IRTCons (IRIf cond2 y1 y2) (IRIf cond3 z1 z2))) | cond1 == cond2 && cond1 == cond3 =
-  IRIf cond1 (IRTCons x1 (IRTCons y1 z1)) (IRTCons x2 (IRTCons y2 z2))
+distributeIf e@(IRTCons _ _)
+  | allLeavesShareCond = IRIf cond (mapTupleLeaves ifThen e) (mapTupleLeaves ifElse e)
+  where
+    leaves = tupleTreeLeaves e
+    conds = [c | IRIf c _ _ <- leaves]
+    allLeavesShareCond = length conds == length leaves && all (== head conds) (tail conds)
+    cond = head conds
+    ifThen (IRIf _ t _) = t
+    ifThen x = x
+    ifElse (IRIf _ _ el) = el
+    ifElse x = x
 distributeIf x = x
+
+-- | The leaves of a tree of nested IRTCons (everything that is not itself an IRTCons).
+tupleTreeLeaves :: IRExpr -> [IRExpr]
+tupleTreeLeaves (IRTCons a b) = tupleTreeLeaves a ++ tupleTreeLeaves b
+tupleTreeLeaves x = [x]
+
+-- | Rebuild a tree of nested IRTCons, applying f to each leaf.
+mapTupleLeaves :: (IRExpr -> IRExpr) -> IRExpr -> IRExpr
+mapTupleLeaves f (IRTCons a b) = IRTCons (mapTupleLeaves f a) (mapTupleLeaves f b)
+mapTupleLeaves f x = f x
 
 --TODO: We can also optimize index magic, potentially here. i.e. a head tail tail x can be simplified.
 --TODO: Unary operators
@@ -85,10 +105,6 @@ distributeIf x = x
 applyConstant :: IRExpr -> IRExpr
 applyConstant (IRApply (IRLambda varname inExpr) v@(IRConst _)) = replaceAll (IRVar varname) v inExpr
 applyConstant x = x
-
-applyToLetIn :: IRExpr -> IRExpr
-applyToLetIn (IRApply (IRLambda varname inExpr) v) | not (isValue v) = IRLetIn varname v inExpr
-applyToLetIn x = x
 
 optimizeAssociativity :: IRExpr -> IRExpr
 -- Associative Addition
@@ -195,31 +211,31 @@ softForceLogic OpAnd (IRConst (VBool False)) _ = IRConst (VBool False)
 softForceLogic OpAnd _ (IRConst (VBool False)) = IRConst (VBool False)
 softForceLogic OpEq (IRCons _ _) (IRConst (VList EmptyList)) = IRConst $ VBool False
 softForceLogic OpEq (IRConst (VList EmptyList)) (IRCons _ _)  = IRConst $ VBool False
--- integer arithmetic:
-softForceLogic OpPlus (IRConst (VInt 0)) right = right
-softForceLogic OpPlus left (IRConst (VInt 0)) = left
-softForceLogic OpMult (IRConst (VInt 0)) _ = IRConst (VInt 0)
-softForceLogic OpMult _ (IRConst (VInt 0)) = IRConst (VInt 0)
-softForceLogic OpMult (IRConst (VInt 1)) right = right
-softForceLogic OpMult left (IRConst (VInt 1)) = left
-softForceLogic OpDiv left (IRConst (VInt 1)) = left
-softForceLogic OpDiv _ (IRConst (VInt 0)) = error "tried to divide by zero in softForceArithmetic"
-softForceLogic OpDiv (IRConst (VInt 0)) _ = IRConst (VInt 0)
-softForceLogic OpSub left (IRConst (VInt 0)) = left
-softForceLogic OpSub left right | left == right = IRConst (VInt 0)
---float arithmetic:
-softForceLogic OpPlus (IRConst (VFloat 0)) right = right
-softForceLogic OpPlus left (IRConst (VFloat 0)) = left
-softForceLogic OpMult (IRConst (VFloat 0)) _ = IRConst (VFloat 0)
-softForceLogic OpMult _ (IRConst (VFloat 0)) = IRConst (VFloat 0)
-softForceLogic OpMult (IRConst (VFloat 1)) right = right
-softForceLogic OpMult left (IRConst (VFloat 1)) = left
-softForceLogic OpDiv left (IRConst (VFloat 1)) = left
-softForceLogic OpDiv _ (IRConst (VFloat 0)) = error "tried to divide by zero in softForceArithmetic"
-softForceLogic OpDiv (IRConst (VFloat 0)) _ = IRConst (VFloat 0)
-softForceLogic OpSub left (IRConst (VFloat 0)) = left
-softForceLogic OpSub left right | left == right = IRConst (VFloat 0)
+-- numeric arithmetic, shared between Int and Float via isNumZero / isNumOne.
+-- The matched zero/one constant is reused so the result keeps the operand's type.
+softForceLogic OpPlus (IRConst z) right | isNumZero z = right
+softForceLogic OpPlus left (IRConst z) | isNumZero z = left
+softForceLogic OpMult z@(IRConst zv) _ | isNumZero zv = z
+softForceLogic OpMult _ z@(IRConst zv) | isNumZero zv = z
+softForceLogic OpMult (IRConst o) right | isNumOne o = right
+softForceLogic OpMult left (IRConst o) | isNumOne o = left
+softForceLogic OpDiv left (IRConst o) | isNumOne o = left
+softForceLogic OpDiv _ (IRConst z) | isNumZero z = error "tried to divide by zero in softForceArithmetic"
+softForceLogic OpDiv z@(IRConst zv) _ | isNumZero zv = z
+softForceLogic OpSub left (IRConst z) | isNumZero z = left
 softForceLogic op left right = IROp op left right     -- Nothing can be done
+
+-- | A numeric zero, regardless of Int/Float.
+isNumZero :: IRValue -> Bool
+isNumZero (VInt 0) = True
+isNumZero (VFloat 0) = True
+isNumZero _ = False
+
+-- | A numeric one, regardless of Int/Float.
+isNumOne :: IRValue -> Bool
+isNumOne (VInt 1) = True
+isNumOne (VFloat 1) = True
+isNumOne _ = False
 
 forceOp :: Operand -> IRValue -> IRValue -> IRValue
 forceOp OpEq (VList AnyList) (VList _) = VBool True
@@ -278,56 +294,141 @@ exprSize :: IRExpr -> Int
 exprSize expr | null (getIRSubExprs expr) = 1
 exprSize expr = sum (map exprSize (getIRSubExprs expr))
 
---slightly strict matching: Do not match if random sampling is contained.
--- otherwise, defer to (==)
-matchExprs :: IRExpr -> IRExpr -> Bool
-matchExprs a b = if samples a then False else a == b
-
+-- | True if the expression contains a random draw.  Sharing such an expression
+-- via CSE would collapse independent draws into one, so they are never extracted.
 --FIXME: a function call to a sampling function does itself also sample.
 samples :: IRExpr -> Bool
 samples (IRSample _) = True
 samples x = any samples (getIRSubExprs x)
 
-numOccurrences :: IRExpr -> IRExpr -> Int
-numOccurrences ref expr | ref `matchExprs` expr = 1
-numOccurrences ref expr = sum (map (numOccurrences ref) (getIRSubExprs expr))
-
-findExprs :: IRExpr -> [IRExpr]
-findExprs (IRLambda _ _) = []
-findExprs expr = expr : (concatMap findExprs (getIRSubExprs expr))
-
-findCommonSubexpr :: IRExpr -> IRExpr -> [IRExpr]
---findCommonSubexpr _ ref | exprSize ref < 3 = []
-findCommonSubexpr scope _ = filter (\x -> numOccurrences x scope >= 2 && exprSize x > 1) (nub (findExprs scope))
---findCommonSubexpr _ (IRLambda _ _) = []
---findCommonSubexpr fullScope ref | numOccurrences ref fullScope >= 2 = [ref]
---findCommonSubexpr fullScope ref = concatMap (findCommonSubexpr fullScope) (getIRSubExprs ref)
-
+-- Common-subexpression elimination.
+--
+-- This is a whole-expression pass (run outside @irMap@): it threads a single
+-- counter so every binding it introduces gets a globally-unique name.  Running it
+-- per node instead would let the same @cse_N@ name be chosen at two different
+-- nesting levels, which shadows and corrupts a binding of a different type.
+--
+-- At each node we extract repeated subexpressions one at a time, wrapping the
+-- node in an IRLetIn, then recurse into the children of the result.  A candidate
+-- is only hoisted when doing so is provably semantics-preserving, which requires
+-- three conditions:
+--
+--   * pure — it contains no IRSample (see 'samples'), so sharing a single value
+--     for it cannot collapse distinct random draws;
+--   * capture-safe — none of its free variables are bound anywhere inside the
+--     node, so lifting it to a let at the top of the node keeps every variable
+--     in scope;
+--   * unconditionally evaluated — it occurs at least twice in the node's
+--     "unconditional skeleton" (positions reached on every evaluation, i.e. not
+--     inside an IRIf branch, IREnumSum body, or lambda body).  Because IRLetIn is
+--     strict in both the interpreter and generated code, this guarantees the
+--     hoisted binding is forced exactly when one of its original occurrences
+--     would have been, so no extra evaluation is introduced.
 optimizeCommonSubexpr :: IRExpr -> IRExpr
-optimizeCommonSubexpr (IRLambda n b) = IRLambda n (optimizeCommonSubexpr b)
-optimizeCommonSubexpr (IRLetIn n v b) = IRLetIn n v (optimizeCommonSubexpr b)
-optimizeCommonSubexpr expr = letInBlock
+optimizeCommonSubexpr topExpr = evalState (cseWalk topExpr) 0
   where
-    commonSubs = findCommonSubexpr expr expr
-    optimNames = map (\i -> "opt_" ++ show i ++ "_common") [1..]
-    namedCommonSubs = zip commonSubs optimNames
-    letInBlock = foldl extractSubexpr expr namedCommonSubs
+    -- Names already present anywhere in the expression (e.g. from a previous
+    -- fixed-point iteration); fresh names must avoid these too.
+    reserved = freeVarsIR topExpr ++ boundVarsIR topExpr
+    fresh :: State Int String
+    fresh = do
+      i <- get
+      put (i + 1)
+      let n = "cse_" ++ show i
+      if n `elem` reserved then fresh else return n
+    cseWalk :: IRExpr -> State Int IRExpr
+    cseWalk e = do
+      e' <- extractHere e
+      kids <- mapM cseWalk (getIRSubExprs e')
+      return (setIRSubExprs e' kids)
+    extractHere :: IRExpr -> State Int IRExpr
+    extractHere e = case bestCommonSubexpr e of
+      Nothing  -> return e
+      Just sub -> do
+        name <- fresh
+        extractHere (IRLetIn name sub (replaceAll sub (IRVar name) e))
 
-extractSubexpr :: IRExpr -> (IRExpr, Varname) -> IRExpr
-extractSubexpr body (sub, name) = trace report $ IRLetIn name sub newBody
+-- | The largest hoistable common subexpression of a node, if any.
+bestCommonSubexpr :: IRExpr -> Maybe IRExpr
+bestCommonSubexpr expr = case candidates of
+  [] -> Nothing
+  cs -> Just (maximumBy (comparing exprSize) cs)
   where
-    newBody = replaceAll sub (IRVar name) body
-    report = "Extracted subexpression: \n" ++ pPrintIRExpr sub 2 ++ "\n ##### as " ++ name ++ ", now: \n" ++ pPrintIRExpr newBody 2
+    skeleton = unconditionalSubexprs expr
+    bound = boundVarsIR expr
+    candidates = nub [ s | s <- skeleton
+                         , exprSize s > 1
+                         , not (samples s)
+                         , not (any (`elem` bound) (freeVarsIR s))
+                         , length (filter (== s) skeleton) >= 2 ]
 
-optimizeLambdaApplication :: IRExpr -> IRExpr
-optimizeLambdaApplication (IRApply (IRLambda n body) appl) = replaceAll (IRVar n) appl body
-optimizeLambdaApplication x = x
+-- | Subexpressions reached on every evaluation of the node.  We descend through
+-- ordinary nodes but stop at the branches of an IRIf, the body of an IREnumSum,
+-- and the body of a lambda, since those are only conditionally, repeatedly, or
+-- never evaluated.
+unconditionalSubexprs :: IRExpr -> [IRExpr]
+unconditionalSubexprs e = e : case e of
+  IRIf cond _ _ -> unconditionalSubexprs cond
+  IRLambda _ _  -> []
+  IREnumSum{}   -> []
+  _             -> concatMap unconditionalSubexprs (getIRSubExprs e)
+
+-- | Rebuild a node from a fresh list of children (inverse of 'getIRSubExprs').
+setIRSubExprs :: IRExpr -> [IRExpr] -> IRExpr
+setIRSubExprs (IRIf{}) [a, b, c] = IRIf a b c
+setIRSubExprs (IROp op _ _) [a, b] = IROp op a b
+setIRSubExprs (IRUnaryOp op _) [a] = IRUnaryOp op a
+setIRSubExprs (IRTheta _ i) [a] = IRTheta a i
+setIRSubExprs (IRSubtree _ i) [a] = IRSubtree a i
+setIRSubExprs (IRCons{}) [a, b] = IRCons a b
+setIRSubExprs (IRTCons{}) [a, b] = IRTCons a b
+setIRSubExprs (IRHead{}) [a] = IRHead a
+setIRSubExprs (IRTail{}) [a] = IRTail a
+setIRSubExprs (IRMap{}) [a, b] = IRMap a b
+setIRSubExprs (IRElementOf{}) [a, b] = IRElementOf a b
+setIRSubExprs (IRTFst{}) [a] = IRTFst a
+setIRSubExprs (IRTSnd{}) [a] = IRTSnd a
+setIRSubExprs (IRLeft{}) [a] = IRLeft a
+setIRSubExprs (IRRight{}) [a] = IRRight a
+setIRSubExprs (IRFromLeft{}) [a] = IRFromLeft a
+setIRSubExprs (IRFromRight{}) [a] = IRFromRight a
+setIRSubExprs (IRIsLeft{}) [a] = IRIsLeft a
+setIRSubExprs (IRIsRight{}) [a] = IRIsRight a
+setIRSubExprs (IRIsPossible val _) [a] = IRIsPossible val a
+setIRSubExprs (IRDensity d _) [a] = IRDensity d a
+setIRSubExprs (IRCumulative d _) [a] = IRCumulative d a
+setIRSubExprs (IRLetIn n _ _) [a, b] = IRLetIn n a b
+setIRSubExprs (IRLambda n _) [a] = IRLambda n a
+setIRSubExprs (IRApply{}) [a, b] = IRApply a b
+setIRSubExprs (IREnumSum n val _) [a] = IREnumSum n val a
+setIRSubExprs (IRIndex{}) [a, b] = IRIndex a b
+setIRSubExprs e [] = e  -- leaves: IRConst, IRSample, IRVar, IRError
+setIRSubExprs e kids = error ("setIRSubExprs: arity mismatch for " ++ irPrintFlat e ++ " with " ++ show (length kids) ++ " children")
+
+-- | Free variables of an IR expression.
+freeVarsIR :: IRExpr -> [String]
+freeVarsIR (IRVar v) = [v]
+freeVarsIR (IRLetIn n decl body) = freeVarsIR decl ++ filter (/= n) (freeVarsIR body)
+freeVarsIR (IRLambda n body) = filter (/= n) (freeVarsIR body)
+freeVarsIR (IREnumSum n _ body) = filter (/= n) (freeVarsIR body)
+freeVarsIR e = concatMap freeVarsIR (getIRSubExprs e)
+
+-- | Every variable name bound by some binder anywhere in the expression.
+boundVarsIR :: IRExpr -> [String]
+boundVarsIR (IRLetIn n decl body) = n : (boundVarsIR decl ++ boundVarsIR body)
+boundVarsIR (IRLambda n body) = n : boundVarsIR body
+boundVarsIR (IREnumSum n _ body) = n : boundVarsIR body
+boundVarsIR e = concatMap boundVarsIR (getIRSubExprs e)
+
+-- | Replace an application of a lambda to a non-value argument by a let binding:
+-- @(\x -> body) arg@ becomes @let x = arg in body@.  This is the capture-safe
+-- form of lambda elimination; 'applyConstant' handles constant arguments by
+-- inlining them directly, and 'optimizeLetIns' cleans up the resulting binding.
+applyToLetIn :: IRExpr -> IRExpr
+applyToLetIn (IRApply (IRLambda varname inExpr) v) | not (isValue v) = IRLetIn varname v inExpr
+applyToLetIn x = x
 
 pruneAnyCkecksExpr :: IRExpr -> IRExpr
 pruneAnyCkecksExpr (IRUnaryOp OpIsAny _) = IRConst $ VBool False
 pruneAnyCkecksExpr x = x
-
-isDet :: IRExpr  -> Bool
-isDet (IRSample _) = False
-isDet e = all isDet (getIRSubExprs e)
 
