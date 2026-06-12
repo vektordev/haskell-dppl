@@ -21,6 +21,7 @@ import qualified Text.Megaparsec.Char.Lexer as L
 import SPLL.CodeGenJulia
 import SPLL.CodeGenPyTorch
 import TestCaseParser
+import TestTolerances (probTolerance, encodeSlotTolerance, normalizationTolerance)
 import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType
 import SPLL.AutoNeural (makePartitionPlan, planIndexOf)
@@ -42,30 +43,12 @@ getAllTestFiles = do
   let testCaseFiles = map ((++ ".tst") . (fromJust . stripExtension ".ppl")) pplFullPath
   return (zip pplFullPath testCaseFiles)
 
-{-
-parseProbTestCases :: FilePath -> IO [TestCase]
-parseProbTestCases fp = do
-  content <- readFile fp
-  let lines = split '\n' content
-  let valueStrs = map (split ';') lines
-  let values =  map (map (parseValue fp)) valueStrs
-  return $ map (\vals ->
-    let (outDim, notDim) = (last vals, init vals)
-        (outProb, notOut) = (last notDim, init notDim)
-        sample:params = notOut in
-          ProbTestCase sample params (outProb, outDim)
-    ) values
-  where split delim str = case break (==delim) str of
-                      (a, delim:b) -> a : split delim b
-                      (a, "")    -> [a]
--}
-
 testInterpreter :: Program -> Either CompilerError IREnv -> TestCase -> Property
 testInterpreter p compiledE (ProbTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = ioProperty $ do
   result <- try $ evaluate $ (compiledE >>= \c -> runProbC p c params sample) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of 
     Right (Right (VTuple (VFloat outProb) (VFloat outDim))) -> 
-      counterexample ("Probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < 0.0001) .&&.
+      counterexample ("Probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < probTolerance) .&&.
         counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim)
     Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
     Right (Left err) -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
@@ -74,7 +57,7 @@ testInterpreter p compiledE (CumulTestCase name sample params (VFloat expectedPr
   result <- try $ evaluate $ (compiledE >>= \c -> runIntegC p c params sample) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of 
     Right (Right (VTuple (VFloat outProb) (VFloat outDim)) )-> 
-      counterexample ("Cmulative probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < 0.0001) .&&.
+      counterexample ("Cmulative probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < probTolerance) .&&.
         counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim)
     Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
     Right (Left err) -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
@@ -104,7 +87,7 @@ testInterpreter p compiledE (EncodingSlotTestCase name spikeVal idxOf expected) 
          then counterexample ("Slot index " ++ show slotIdx ++ " out of bounds (list length " ++ show (length items) ++ ") in test case " ++ name) False
          else case items !! slotIdx of
            VFloat actual ->
-             counterexample ("Encode slot " ++ show slotIdx ++ " for " ++ name ++ ": expected " ++ show expected ++ ", got " ++ show actual ++ " (tolerance 0.15)") (abs (actual - expected) < 0.15)
+             counterexample ("Encode slot " ++ show slotIdx ++ " for " ++ name ++ ": expected " ++ show expected ++ ", got " ++ show actual ++ " (tolerance " ++ show encodeSlotTolerance ++ ")") (abs (actual - expected) < encodeSlotTolerance)
            other -> counterexample ("Slot is not VFloat: " ++ show other ++ " in " ++ name) False
     Right (Right x) -> counterexample ("Output is not a list: " ++ show x ++ " in " ++ name) False
     Right (Left err) -> counterexample ("Compiler error in " ++ name ++ ": " ++ show err) False
@@ -201,7 +184,7 @@ discreteProbsNormalized p compiledE = case compiledE of
               -- unnormalized probabilities (sum > 1), neither of which the old
               -- count-weighted sum (always >> 1 for small supports) could detect.
               let totalProb = sum (map prob t)
-              in counterexample ("Probabilities of distinct sampled values sum to " ++ show totalProb ++ ", expected ~1") (abs (totalProb - 1) < 0.01)
+              in counterexample ("Probabilities of distinct sampled values sum to " ++ show totalProb ++ ", expected ~1") (abs (totalProb - 1) < normalizationTolerance)
           | otherwise ->
               -- Continuous: sampled values are (almost) all distinct, and a sum of
               -- densities has no "=1" meaning - just check the densities aren't degenerate.
@@ -270,7 +253,7 @@ juliaModuleTestCases modName tcs =
     let (name, sample, params, outProb, outDim) = unpackTestCase tc
         call = modName ++ "." ++ mainName tc ++ "(" ++ juliaVal sample ++ ", " ++ intercalate ", " (map juliaVal params) ++ ")"
     in "tmp = " ++ call ++ "\n\
-       \if abs(tmp[1] - " ++ juliaVal outProb ++ ") > 0.0001\n\
+       \if abs(tmp[1] - " ++ juliaVal outProb ++ ") > " ++ show probTolerance ++ "\n\
        \  error(\"Probability wrong: \" * string(tmp[1]) * \"/=\" * string(" ++ juliaVal outProb ++ ") * \"in test case " ++ name ++ "\")\n\
        \end\n\
        \if tmp[1] != 0 && tmp[2] != " ++ juliaVal outDim ++ "\n\
@@ -290,7 +273,7 @@ pythonTestCode src tcs =
   "main.generate(" ++ intercalate ", " (map pyVal exampleParams) ++ ")\n" ++
   concat (map (\tc -> let (name, sample, params, outProb, outDim) = unpackTestCase tc in 
     "tmp = " ++ mainName tc ++ "(" ++  pyVal sample ++ ", " ++ intercalate ", " (map pyVal params) ++ ")\n\
-    \if abs(tmp[0] - " ++ pyVal outProb ++ ") > 0.0001:\n\
+    \if abs(tmp[0] - " ++ pyVal outProb ++ ") > " ++ show probTolerance ++ ":\n\
     \  raise ValueError(\"Probability wrong: \" + str(tmp[0]) + \"!=\" + str(" ++ pyVal outProb ++ ") + \"in test case " ++ name ++ "\")\n\
     \if tmp[0] != 0 and tmp[1] != " ++ pyVal outDim ++ ":\n\
     \  raise ValueError(\"Dimensionality wrong: \" + str(tmp[1]) + \"/=\" + str(" ++ pyVal outDim ++ ") + \"in test case " ++ name ++ "\")\n\
