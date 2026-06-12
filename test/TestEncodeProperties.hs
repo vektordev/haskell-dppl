@@ -19,22 +19,11 @@
 --   § 3.7  Cross-slot correlations silently marginalised (no test — not observable)
 
 module TestEncodeProperties
-  ( encodeProps_gaussianScale
-  , encodeProps_gaussianNegScale
-  , encodeProps_gaussianSum
-  , encodeProps_gaussianSub
-  , encodeProps_eitherFlagInUnitInterval
-  , encodeProps_eitherFlagSignMatchesSide
-  , encodeProps_eitherIfMixtureFlag
-  , encodeProps_adtSingleConstrFlagIsOne
-  , encodeInvariant_sigmaPositive
-  , encodeInvariant_discreteNonNegative
-  , encodeInvariant_discreteSumsToOne
-  , encodeInvariant_outputDimMatchesPlan
-  , encodeError_continuousMixtureRequiresCollapse
+  ( encodeTests
   ) where
 
-import Test.HUnit
+import Test.Tasty (TestTree, testGroup)
+import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure)
 import Control.Monad (forM_)
 import Data.Foldable (toList)
 import Data.List (isInfixOf)
@@ -92,8 +81,8 @@ mockSpiked v = VTuple (VInt 1) (VTuple v (VInt 0))
 -- (mu, sigma) pairs.  Tolerance is 1e-6 (no sampling, pure arithmetic).
 
 -- 3.0 * Normal  →  mu = 0.0, sigma = 3.0
-encodeProps_gaussianScale :: Test
-encodeProps_gaussianScale = TestCase $ do
+encodeProps_gaussianScale :: TestTree
+encodeProps_gaussianScale = testCase "gaussianScale" $ do
   slots <- closedEncode $ unlines
     [ "neural gaussNN :: (Symbol -> Float)"
     , "main = 3.0 * Normal"
@@ -104,8 +93,8 @@ encodeProps_gaussianScale = TestCase $ do
 
 -- (-2.0) * Normal + 1.0  →  mu = 1.0, sigma = |-2| = 2.0
 -- Key invariant: sigma = |c|, not c itself.
-encodeProps_gaussianNegScale :: Test
-encodeProps_gaussianNegScale = TestCase $ do
+encodeProps_gaussianNegScale :: TestTree
+encodeProps_gaussianNegScale = testCase "gaussianNegScale" $ do
   slots <- closedEncode $ unlines
     [ "neural gaussNN :: (Symbol -> Float)"
     , "main = (-2.0) * Normal + 1.0"
@@ -118,8 +107,8 @@ encodeProps_gaussianNegScale = TestCase $ do
 -- Each Normal is an independent sample; § 2.2 sum rule applies:
 --   mu    = 2.0 + (-0.5) = 1.5
 --   sigma = sqrt(1.0^2 + 1.5^2) = sqrt(3.25)
-encodeProps_gaussianSum :: Test
-encodeProps_gaussianSum = TestCase $ do
+encodeProps_gaussianSum :: TestTree
+encodeProps_gaussianSum = testCase "gaussianSum" $ do
   slots <- closedEncode $ unlines
     [ "neural gaussNN :: (Symbol -> Float)"
     , "main = (Normal + 2.0) + (1.5 * Normal + (-0.5))"
@@ -129,8 +118,8 @@ encodeProps_gaussianSum = TestCase $ do
   checkSlot "gaussian_sum" slots 1   (sqrt 3.25)  1e-6  -- sqrt(1^2 + 1.5^2)
 
 -- Normal - 3.0  →  mu = -3.0, sigma = 1.0
-encodeProps_gaussianSub :: Test
-encodeProps_gaussianSub = TestCase $ do
+encodeProps_gaussianSub :: TestTree
+encodeProps_gaussianSub = testCase "gaussianSub" $ do
   slots <- closedEncode $ unlines
     [ "neural gaussNN :: (Symbol -> Float)"
     , "main = Normal - 3.0"
@@ -152,8 +141,8 @@ eitherSrc = unlines
   ]
 
 -- § 1.2 EitherPlan constructor flag: must lie in [0, 1].
-encodeProps_eitherFlagInUnitInterval :: Test
-encodeProps_eitherFlagInUnitInterval = TestCase $ do
+encodeProps_eitherFlagInUnitInterval :: TestTree
+encodeProps_eitherFlagInUnitInterval = testCase "eitherFlagInUnitInterval" $ do
   prog <- parseOrFail eitherSrc
   forM_
     [ mockSpiked (VEither (Left  (VInt 0)))
@@ -166,8 +155,8 @@ encodeProps_eitherFlagInUnitInterval = TestCase $ do
                  (head slots >= 0 && head slots <= 1)
 
 -- When spiked toward Left, flag > 0.5; toward Right, flag < 0.5.
-encodeProps_eitherFlagSignMatchesSide :: Test
-encodeProps_eitherFlagSignMatchesSide = TestCase $ do
+encodeProps_eitherFlagSignMatchesSide :: TestTree
+encodeProps_eitherFlagSignMatchesSide = testCase "eitherFlagSignMatchesSide" $ do
   prog    <- parseOrFail eitherSrc
   slotsL  <- encodeSlots prog [mockSpiked (VEither (Left  (VInt 0)))]
   slotsR  <- encodeSlots prog [mockSpiked (VEither (Right (VBool True)))]
@@ -189,8 +178,8 @@ eitherIfMixtureSrc = unlines
   , "main sym = if condNN sym == 0 then left 1 else right True"
   ]
 
-encodeProps_eitherIfMixtureFlag :: Test
-encodeProps_eitherIfMixtureFlag = TestCase $ do
+encodeProps_eitherIfMixtureFlag :: TestTree
+encodeProps_eitherIfMixtureFlag = testCase "eitherIfMixtureFlag" $ do
   prog   <- parseOrFail eitherIfMixtureSrc
   slotsT <- encodeSlots prog [mockSpiked (VInt 0)]   -- condNN == 0 likely  → flag high
   slotsF <- encodeSlots prog [mockSpiked (VInt 1)]   -- condNN == 1 likely  → flag low
@@ -212,8 +201,8 @@ adtSrc = unlines
   ]
 
 -- With one constructor the flag for A must always be 1.0.
-encodeProps_adtSingleConstrFlagIsOne :: Test
-encodeProps_adtSingleConstrFlagIsOne = TestCase $ do
+encodeProps_adtSingleConstrFlagIsOne :: TestTree
+encodeProps_adtSingleConstrFlagIsOne = testCase "adtSingleConstrFlagIsOne" $ do
   prog <- parseOrFail adtSrc
   forM_ [0, 1, 42, 999 :: Int] $ \seed -> do
     slots <- encodeSlots prog [mockSeeded seed]
@@ -301,9 +290,9 @@ defaultArgs n = replicate n (mockSeeded 42)
 
 -- § 1.2  Continuous sigma slot: must be strictly positive.
 -- For a Continuous plan, encode = [mu, sigma]; sigma is slot 1.
-encodeInvariant_sigmaPositive :: Test
-encodeInvariant_sigmaPositive = TestList
-  [ TestCase $ do
+encodeInvariant_sigmaPositive :: TestTree
+encodeInvariant_sigmaPositive = testGroup "sigmaPositive"
+  [ testCase name $ do
       prog  <- parseOrFail src
       slots <- encodeSlots prog (defaultArgs n)
       assertBool ("sigma must be > 0 for " ++ name ++ ", got "
@@ -313,9 +302,9 @@ encodeInvariant_sigmaPositive = TestList
   ]
 
 -- § 1.2  Discrete softmax slots: every entry ≥ 0.
-encodeInvariant_discreteNonNegative :: Test
-encodeInvariant_discreteNonNegative = TestList
-  [ TestCase $ do
+encodeInvariant_discreteNonNegative :: TestTree
+encodeInvariant_discreteNonNegative = testGroup "discreteNonNegative"
+  [ testCase name $ do
       prog  <- parseOrFail src
       slots <- encodeSlots prog (defaultArgs n)
       forM_ (zip [0 :: Int ..] slots) $ \(i, v) ->
@@ -327,9 +316,9 @@ encodeInvariant_discreteNonNegative = TestList
 
 -- § 1.2  Discrete softmax slots: sum to approximately 1.
 -- Checked over several mock seeds to cover different NN configurations.
-encodeInvariant_discreteSumsToOne :: Test
-encodeInvariant_discreteSumsToOne = TestList
-  [ TestCase $
+encodeInvariant_discreteSumsToOne :: TestTree
+encodeInvariant_discreteSumsToOne = testGroup "discreteSumsToOne"
+  [ testCase name $
       forM_ [1, 7, 42 :: Int] $ \seed -> do
         prog  <- parseOrFail src
         slots <- encodeSlots prog (replicate n (mockSeeded seed))
@@ -343,9 +332,9 @@ encodeInvariant_discreteSumsToOne = TestList
 -- § 1.1  Output dimension == getSize plan.
 -- The plan is derived from the neural declaration's type; it is the
 -- contract that encode output must honour regardless of program content.
-encodeInvariant_outputDimMatchesPlan :: Test
-encodeInvariant_outputDimMatchesPlan = TestList
-  [ TestCase $ do
+encodeInvariant_outputDimMatchesPlan :: TestTree
+encodeInvariant_outputDimMatchesPlan = testGroup "outputDimMatchesPlan"
+  [ testCase name $ do
       prog <- parseOrFail src
       let (_, TArrow _ target, nnTag) = head (neurals prog)
           plan        = makePartitionPlan (adts prog) target nnTag
@@ -363,8 +352,8 @@ encodeInvariant_outputDimMatchesPlan = TestList
 -- Gaussian-closed.  PInfer degrades its PType to Integrate, so no normal-parameter function
 -- is generated for the continuous slot.  Encoding it must fail cleanly (a Left
 -- CompilerError pointing at `collapse`), not dangle on a missing function reference.
-encodeError_continuousMixtureRequiresCollapse :: Test
-encodeError_continuousMixtureRequiresCollapse = TestCase $ do
+encodeError_continuousMixtureRequiresCollapse :: TestTree
+encodeError_continuousMixtureRequiresCollapse = testCase "continuousMixtureRequiresCollapse" $ do
   prog <- parseOrFail $ unlines
     [ "neural mixNN :: (Symbol -> Float)"
     , "main = if Uniform < 0.5 then Normal + 2.0 else Normal + 5.0"
@@ -376,3 +365,26 @@ encodeError_continuousMixtureRequiresCollapse = TestCase $ do
     Right v  ->
       assertFailure ("expected a compile error for a non-Gaussian continuous output, got: "
                      ++ show v)
+
+------------------------------------------------------------------------
+
+encodeTests :: TestTree
+encodeTests = testGroup "Encode"
+  [ testGroup "gaussianParams"
+      [ encodeProps_gaussianScale
+      , encodeProps_gaussianNegScale
+      , encodeProps_gaussianSum
+      , encodeProps_gaussianSub
+      ]
+  , testGroup "either"
+      [ encodeProps_eitherFlagInUnitInterval
+      , encodeProps_eitherFlagSignMatchesSide
+      , encodeProps_eitherIfMixtureFlag
+      ]
+  , encodeProps_adtSingleConstrFlagIsOne
+  , encodeInvariant_sigmaPositive
+  , encodeInvariant_discreteNonNegative
+  , encodeInvariant_discreteSumsToOne
+  , encodeInvariant_outputDimMatchesPlan
+  , encodeError_continuousMixtureRequiresCollapse
+  ]

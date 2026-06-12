@@ -2,9 +2,8 @@
 
 module End2EndTesting where
 
-import System.Exit (exitWith, ExitCode(ExitFailure))
 import System.Directory (listDirectory, getCurrentDirectory)
-import System.FilePath (stripExtension, isExtensionOf)
+import System.FilePath (stripExtension, isExtensionOf, takeBaseName)
 import System.IO.Temp (withSystemTempFile)
 import System.IO (hPutStr, hClose)
 import System.Process
@@ -22,17 +21,18 @@ import qualified Text.Megaparsec.Char.Lexer as L
 import SPLL.CodeGenJulia
 import SPLL.CodeGenPyTorch
 import TestCaseParser
+import TestTolerances (probTolerance, encodeSlotTolerance, normalizationTolerance)
 import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType
 import SPLL.AutoNeural (makePartitionPlan, planIndexOf)
 import Data.Foldable (toList)
 import Test.QuickCheck hiding (verbose)
+import Test.Tasty (TestTree, testGroup)
+import Test.Tasty.QuickCheck (testProperty)
 import Debug.Trace
 import Control.Exception (try, evaluate, throwIO, SomeException)
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Data.Time.Clock (getCurrentTime, diffUTCTime)
-import Data.IORef (IORef, newIORef, modifyIORef, readIORef)
 import IRInterpreter (generateRand, generateDet)
 
 getAllTestFiles :: IO [(FilePath, FilePath)]
@@ -43,30 +43,12 @@ getAllTestFiles = do
   let testCaseFiles = map ((++ ".tst") . (fromJust . stripExtension ".ppl")) pplFullPath
   return (zip pplFullPath testCaseFiles)
 
-{-
-parseProbTestCases :: FilePath -> IO [TestCase]
-parseProbTestCases fp = do
-  content <- readFile fp
-  let lines = split '\n' content
-  let valueStrs = map (split ';') lines
-  let values =  map (map (parseValue fp)) valueStrs
-  return $ map (\vals ->
-    let (outDim, notDim) = (last vals, init vals)
-        (outProb, notOut) = (last notDim, init notDim)
-        sample:params = notOut in
-          ProbTestCase sample params (outProb, outDim)
-    ) values
-  where split delim str = case break (==delim) str of
-                      (a, delim:b) -> a : split delim b
-                      (a, "")    -> [a]
--}
-
 testInterpreter :: Program -> Either CompilerError IREnv -> TestCase -> Property
 testInterpreter p compiledE (ProbTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = ioProperty $ do
   result <- try (let r = compiledE >>= \c -> runProbC p c params sample in evaluate (length (show r)) >> return r) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of 
     Right (Right (VTuple (VFloat outProb) (VFloat outDim))) -> 
-      counterexample ("Probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < 0.0001) .&&.
+      counterexample ("Probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < probTolerance) .&&.
         counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim)
     Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
     Right (Left err) -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
@@ -75,7 +57,7 @@ testInterpreter p compiledE (CumulTestCase name sample params (VFloat expectedPr
   result <- try (let r = compiledE >>= \c -> runIntegC p c params sample in evaluate (length (show r)) >> return r) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of 
     Right (Right (VTuple (VFloat outProb) (VFloat outDim)) )-> 
-      counterexample ("Cmulative probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < 0.0001) .&&.
+      counterexample ("Cmulative probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < probTolerance) .&&.
         counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim)
     Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
     Right (Left err) -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
@@ -105,7 +87,7 @@ testInterpreter p compiledE (EncodingSlotTestCase name spikeVal idxOf expected) 
          then counterexample ("Slot index " ++ show slotIdx ++ " out of bounds (list length " ++ show (length items) ++ ") in test case " ++ name) False
          else case items !! slotIdx of
            VFloat actual ->
-             counterexample ("Encode slot " ++ show slotIdx ++ " for " ++ name ++ ": expected " ++ show expected ++ ", got " ++ show actual ++ " (tolerance 0.15)") (abs (actual - expected) < 0.15)
+             counterexample ("Encode slot " ++ show slotIdx ++ " for " ++ name ++ ": expected " ++ show expected ++ ", got " ++ show actual ++ " (tolerance " ++ show encodeSlotTolerance ++ ")") (abs (actual - expected) < encodeSlotTolerance)
            other -> counterexample ("Slot is not VFloat: " ++ show other ++ " in " ++ name) False
     Right (Right x) -> counterexample ("Output is not a list: " ++ show x ++ " in " ++ name) False
     Right (Left err) -> counterexample ("Compiler error in " ++ name ++ ": " ++ show err) False
@@ -202,7 +184,7 @@ discreteProbsNormalized p compiledE = case compiledE of
               -- unnormalized probabilities (sum > 1), neither of which the old
               -- count-weighted sum (always >> 1 for small supports) could detect.
               let totalProb = sum (map prob t)
-              in counterexample ("Probabilities of distinct sampled values sum to " ++ show totalProb ++ ", expected ~1") (abs (totalProb - 1) < 0.01)
+              in counterexample ("Probabilities of distinct sampled values sum to " ++ show totalProb ++ ", expected ~1") (abs (totalProb - 1) < normalizationTolerance)
           | otherwise ->
               -- Continuous: sampled values are (almost) all distinct, and a sum of
               -- densities has no "=1" meaning - just check the densities aren't degenerate.
@@ -271,7 +253,7 @@ juliaModuleTestCases modName tcs =
     let (name, sample, params, outProb, outDim) = unpackTestCase tc
         call = modName ++ "." ++ mainName tc ++ "(" ++ juliaVal sample ++ ", " ++ intercalate ", " (map juliaVal params) ++ ")"
     in "tmp = " ++ call ++ "\n\
-       \if abs(tmp[1] - " ++ juliaVal outProb ++ ") > 0.0001\n\
+       \if abs(tmp[1] - " ++ juliaVal outProb ++ ") > " ++ show probTolerance ++ "\n\
        \  error(\"Probability wrong: \" * string(tmp[1]) * \"/=\" * string(" ++ juliaVal outProb ++ ") * \"in test case " ++ name ++ "\")\n\
        \end\n\
        \if tmp[1] != 0 && tmp[2] != " ++ juliaVal outDim ++ "\n\
@@ -291,7 +273,7 @@ pythonTestCode src tcs =
   "main.generate(" ++ intercalate ", " (map pyVal exampleParams) ++ ")\n" ++
   concat (map (\tc -> let (name, sample, params, outProb, outDim) = unpackTestCase tc in 
     "tmp = " ++ mainName tc ++ "(" ++  pyVal sample ++ ", " ++ intercalate ", " (map pyVal params) ++ ")\n\
-    \if abs(tmp[0] - " ++ pyVal outProb ++ ") > 0.0001:\n\
+    \if abs(tmp[0] - " ++ pyVal outProb ++ ") > " ++ show probTolerance ++ ":\n\
     \  raise ValueError(\"Probability wrong: \" + str(tmp[0]) + \"!=\" + str(" ++ pyVal outProb ++ ") + \"in test case " ++ name ++ "\")\n\
     \if tmp[0] != 0 and tmp[1] != " ++ pyVal outDim ++ ":\n\
     \  raise ValueError(\"Dimensionality wrong: \" + str(tmp[1]) + \"/=\" + str(" ++ pyVal outDim ++ ") + \"in test case " ++ name ++ "\")\n\
@@ -303,64 +285,33 @@ pythonTestCode src tcs =
     mainName (ProbTestCase _ _ _ _) = "main.forward"
     mainName (CumulTestCase _ _ _ _) = "main.integrate"
 
-type TimingLog = IORef [(String, Int)]
-
-newTimingLog :: IO TimingLog
-newTimingLog = newIORef []
-
-timedLog :: TimingLog -> String -> IO a -> IO a
-timedLog tlog label action = do
-  start <- getCurrentTime
-  result <- action
-  end <- getCurrentTime
-  let ms = round (realToFrac (diffUTCTime end start) * 1000 :: Double) :: Int
-  modifyIORef tlog ((label, ms) :)
-  return result
-
-printTimingSummary :: TimingLog -> IO ()
-printTimingSummary tlog = do
-  entries <- fmap reverse (readIORef tlog)
-  let total = sum (map snd entries)
-  putStrLn "\n=== Timing Summary ==="
-  mapM_ (\(lbl, ms) ->
-    let pct = if total == 0 then (0 :: Int)
-              else round (fromIntegral ms * 100 / fromIntegral total :: Double)
-    in putStrLn $ "  " ++ lbl ++ ": " ++ show ms ++ " ms (" ++ show pct ++ "%)"
-    ) entries
-  putStrLn $ "  Total: " ++ show total ++ " ms"
-
-test_end2end :: TimingLog -> IO Bool
-test_end2end tlog = do
+end2endTests :: IO TestTree
+end2endTests = do
   files <- getAllTestFiles
   cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
   -- Compile each program exactly once; every test group below shares the result.
-  let compiledCases = [(p, compile defaultCompilerConfig p, tcs) | (p, tcs) <- cases]
+  -- Each .tst file declares which backends it runs against (default: all).
+  let compiledCases = [ (takeBaseName pplPath, p, compile defaultCompilerConfig p, bs, tcs)
+                      | ((pplPath, _), (p, (bs, tcs))) <- zip files cases ]
   -- The same programs compiled with optimization disabled, to check the optimizer
   -- is harmless: every interpreter test case must give the same answer at -O0 as
   -- at the default -O2.
-  let unoptCases = [(p, compile defaultCompilerConfig{optimizerLevel = 0} p, tcs) | (p, tcs) <- cases]
-  let queryTestCases = [(p, c, filter (\x -> isProbTestCase x || isCumulTestCase x) tcs) | (p, c, tcs) <- compiledCases]
-  let nonNeuralsQueries = filter (\(p, _, _) -> null (neurals p)) queryTestCases
-  let neuralP = [(p, c) | (p, c, _) <- compiledCases, not (null (neurals p))]
+  let unoptCases = [ (n, p, compile defaultCompilerConfig{optimizerLevel = 0} p, bs, tcs)
+                   | (n, p, _, bs, tcs) <- compiledCases ]
+  let queryTestCases = [(n, p, c, bs, filter (\x -> isProbTestCase x || isCumulTestCase x) tcs) | (n, p, c, bs, tcs) <- compiledCases]
+  let nonNeuralsQueries b = [(n, c, tcs) | (n, p, c, bs, tcs) <- queryTestCases, b `elem` bs, null (neurals p), not (null tcs)]
+  let neuralP = [(n, p, c) | (n, p, c, bs, _) <- compiledCases, Interpreter `elem` bs, not (null (neurals p))]
 
-  putStrLn "=== Test End2End Interpreter ==="
-  let interprTest = label "End2End Interpreter" $ conjoin [conjoin $ map (testInterpreter p c) tcs | (p, c, tcs) <- compiledCases]
-  interprProp <- timedLog tlog "End2End Interpreter" $ quickCheckResult (withMaxSuccess 1 interprTest) >>= return . isSuccess
-
-  putStrLn "\n=== Test End2End Interpreter (unoptimized, optimizer-harmlessness) ==="
-  let interprUnoptTest = label "End2End Interpreter Unoptimized" $ conjoin [conjoin $ map (testInterpreter p c) tcs | (p, c, tcs) <- unoptCases]
-  interprUnoptProp <- timedLog tlog "End2End Interpreter Unoptimized" $ quickCheckResult (withMaxSuccess 1 interprUnoptTest) >>= return . isSuccess
-
-  putStrLn "\n=== Test End2End Interpreter Normalization ==="
-  let interprNormalizeTest = label "End2End Interpreter Normalization" $ conjoin [discreteProbsNormalized p c | (p, c) <- neuralP]
-  interprNormalProp <- timedLog tlog "End2End Interpreter Normalization" $ quickCheckResult (withMaxSuccess 1 interprNormalizeTest) >>= return . isSuccess
-
-  putStrLn "\n=== Test End2End Julia ==="
-  let juliaTest = label "End2End Julia" $ testJuliaAll [(c, tcs) | (_, c, tcs) <- nonNeuralsQueries]
-  juliaProp <- timedLog tlog "End2End Julia" $ quickCheckResult (withMaxSuccess 1 juliaTest) >>= return . isSuccess
-
-  putStrLn "\n=== Test End2End Python ==="
-  let pythonTest = label "End2End Python" $ conjoin [testPython c tcs | (_, c, tcs) <- nonNeuralsQueries]
-  pythonProp <- timedLog tlog "End2End Python" $ quickCheckResult (withMaxSuccess 1 pythonTest) >>= return . isSuccess
-
-  return $ interprProp && interprUnoptProp && interprNormalProp && juliaProp && pythonProp
+  return $ testGroup "End2End"
+    [ testGroup "Interpreter"
+        [ testProperty n (once $ conjoin (map (testInterpreter p c) tcs)) | (n, p, c, bs, tcs) <- compiledCases, Interpreter `elem` bs ]
+    -- Re-run every interpreter case at -O0 to confirm the optimizer changes no answer.
+    , testGroup "Interpreter Unoptimized"
+        [ testProperty n (once $ conjoin (map (testInterpreter p c) tcs)) | (n, p, c, bs, tcs) <- unoptCases, Interpreter `elem` bs ]
+    , testGroup "Normalization"
+        [ testProperty n (once $ discreteProbsNormalized p c) | (n, p, c) <- neuralP ]
+    -- All Julia programs share one batch file (and one julia process) to amortize startup.
+    , testProperty "Julia" (once $ testJuliaAll [(c, tcs) | (_, c, tcs) <- nonNeuralsQueries Julia])
+    , testGroup "Python"
+        [ testProperty n (once $ testPython c tcs) | (n, c, tcs) <- nonNeuralsQueries Python ]
+    ]
