@@ -3,6 +3,8 @@
 
 module TestCaseParser (
   TestCase(..),
+  Backend(..),
+  allBackends,
   isProbTestCase,
   isCumulTestCase,
   isArgmaxPTestCase,
@@ -10,6 +12,7 @@ module TestCaseParser (
   isEncodingSlotTestCase,
   testCaseName,
   parseTestCases,
+  parseTestCasesFromString,
   parseProgram
 ) where
 
@@ -28,6 +31,15 @@ import Control.Monad (MonadPlus)
 import Text.Megaparsec hiding (State)
 import Data.Void
 
+
+-- Which execution backends a .tst file's cases run against. Declared via an
+-- optional first line `backends: interpreter, julia` (any non-empty subset);
+-- a file without the header runs against all three.
+data Backend = Interpreter | Julia | Python
+  deriving (Eq, Show, Enum, Bounded)
+
+allBackends :: [Backend]
+allBackends = [minBound .. maxBound]
 
 data TestCase = ProbTestCase String IRValue [IRValue] (IRValue, IRValue)
               | CumulTestCase String IRValue [IRValue] (IRValue, IRValue)
@@ -128,12 +140,36 @@ pEncodingSlotTestCase name = do
 pTestCases :: MonadParser m => String -> m [TestCase]
 pTestCases name = choice [pProbTestCase name, pCumulParser name, pArgmaxPTestCase name, pEncodingLengthTestCase name, pEncodingSlotTestCase name] `sepEndBy` pNewline
 
-parseTestCases :: FilePath -> IO [TestCase]
+pBackend :: MonadParser m => m Backend
+pBackend = choice
+  [ symbol "interpreter" >> return Interpreter
+  , symbol "julia" >> return Julia
+  , symbol "python" >> return Python
+  ]
+
+pBackendsHeader :: MonadParser m => m [Backend]
+pBackendsHeader = do
+  symbol "backends:"
+  bs <- pBackend `sepBy1` symbol ","
+  pNewline
+  return bs
+
+pTestFile :: MonadParser m => String -> m ([Backend], [TestCase])
+pTestFile name = do
+  bs <- option allBackends (try pBackendsHeader)
+  tcs <- pTestCases name
+  return (bs, tcs)
+
+parseTestCasesFromString :: FilePath -> String -> Either String ([Backend], [TestCase])
+parseTestCasesFromString fp content =
+  case runParser (runStateT (pTestFile fp) 0) fp content of
+    Left err -> Left (errorBundlePretty err)
+    Right (val, _) -> Right val
+
+parseTestCases :: FilePath -> IO ([Backend], [TestCase])
 parseTestCases fp = do
   content <- readFile fp
-  case runParser (runStateT (pTestCases fp) 0) fp content of
-    Left err -> error (errorBundlePretty err)
-    Right (val, _) -> return $ val
+  either error return (parseTestCasesFromString fp content)
 
 parseProgram :: FilePath -> IO Program
 parseProgram fp = do

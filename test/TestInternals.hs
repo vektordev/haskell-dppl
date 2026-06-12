@@ -22,6 +22,7 @@ import Data.Foldable (toList)
 import Data.List (isInfixOf)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure)
+import TestCaseParser (Backend(..), allBackends, parseTestCasesFromString)
 import Test.Tasty.QuickCheck (testProperties)
 import System.Random (StdGen)
 import Control.Monad.Random (Rand)
@@ -288,6 +289,25 @@ autoNeuralDerivationTests = testGroup "autoNeuralDerivation"
   , test_makePartitionPlanMixedExplicitAuto
   ]
 
+-- .tst files may carry an optional `backends:` header that routes the file's
+-- cases to a subset of the three End2End backends; no header means all three.
+test_tstBackendsHeader :: TestTree
+test_tstBackendsHeader = testCase "tstBackendsHeader" $ do
+  let parse = parseTestCasesFromString "header.tst"
+  case parse "p(0.5)=(1.0, 1.0)\n" of
+    Left err -> assertFailure err
+    Right (bs, tcs) -> do
+      assertEqual "no header defaults to all backends" allBackends bs
+      assertEqual "test case count without header" 1 (length tcs)
+  case parse "backends: interpreter\np(0.5)=(1.0, 1.0)\n" of
+    Left err -> assertFailure err
+    Right (bs, tcs) -> do
+      assertEqual "interpreter-only routing" [Interpreter] bs
+      assertEqual "test case count with header" 1 (length tcs)
+  case parse "backends: julia, python\ncdf(0.5)=(0.5, 0.0)\n" of
+    Left err -> assertFailure err
+    Right (bs, _) -> assertEqual "two-backend routing" [Julia, Python] bs
+
 return []
 
 internalsTests :: TestTree
@@ -302,4 +322,5 @@ internalsTests = testGroup "Internals"
       ]
   , test_missingMainFunction
   , autoNeuralDerivationTests
+  , test_tstBackendsHeader
   ]

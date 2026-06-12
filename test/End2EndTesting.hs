@@ -290,19 +290,20 @@ end2endTests = do
   files <- getAllTestFiles
   cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
   -- Compile each program exactly once; every test group below shares the result.
-  let compiledCases = [ (takeBaseName pplPath, p, compile defaultCompilerConfig p, tcs)
-                      | ((pplPath, _), (p, tcs)) <- zip files cases ]
-  let queryTestCases = [(n, p, c, filter (\x -> isProbTestCase x || isCumulTestCase x) tcs) | (n, p, c, tcs) <- compiledCases]
-  let nonNeuralsQueries = [(n, c, tcs) | (n, p, c, tcs) <- queryTestCases, null (neurals p), not (null tcs)]
-  let neuralP = [(n, p, c) | (n, p, c, _) <- compiledCases, not (null (neurals p))]
+  -- Each .tst file declares which backends it runs against (default: all).
+  let compiledCases = [ (takeBaseName pplPath, p, compile defaultCompilerConfig p, bs, tcs)
+                      | ((pplPath, _), (p, (bs, tcs))) <- zip files cases ]
+  let queryTestCases = [(n, p, c, bs, filter (\x -> isProbTestCase x || isCumulTestCase x) tcs) | (n, p, c, bs, tcs) <- compiledCases]
+  let nonNeuralsQueries b = [(n, c, tcs) | (n, p, c, bs, tcs) <- queryTestCases, b `elem` bs, null (neurals p), not (null tcs)]
+  let neuralP = [(n, p, c) | (n, p, c, bs, _) <- compiledCases, Interpreter `elem` bs, not (null (neurals p))]
 
   return $ testGroup "End2End"
     [ testGroup "Interpreter"
-        [ testProperty n (once $ conjoin (map (testInterpreter p c) tcs)) | (n, p, c, tcs) <- compiledCases ]
+        [ testProperty n (once $ conjoin (map (testInterpreter p c) tcs)) | (n, p, c, bs, tcs) <- compiledCases, Interpreter `elem` bs ]
     , testGroup "Normalization"
         [ testProperty n (once $ discreteProbsNormalized p c) | (n, p, c) <- neuralP ]
     -- All Julia programs share one batch file (and one julia process) to amortize startup.
-    , testProperty "Julia" (once $ testJuliaAll [(c, tcs) | (_, c, tcs) <- nonNeuralsQueries])
+    , testProperty "Julia" (once $ testJuliaAll [(c, tcs) | (_, c, tcs) <- nonNeuralsQueries Julia])
     , testGroup "Python"
-        [ testProperty n (once $ testPython c tcs) | (n, c, tcs) <- nonNeuralsQueries ]
+        [ testProperty n (once $ testPython c tcs) | (n, c, tcs) <- nonNeuralsQueries Python ]
     ]
