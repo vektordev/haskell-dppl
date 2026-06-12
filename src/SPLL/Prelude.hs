@@ -352,7 +352,15 @@ runGenC p compiled args =
 runProbC :: Program -> IREnv -> [IRValue] -> IRValue -> Either CompilerError IRValue
 runProbC p compiled args x =
   let Just (prob, _) = probFun (lookupIREnv "main" compiled)
-  in generateDet (neurals p) compiled (map IRConst (x:args)) prob
+      -- topK-compiled prob functions take an accumulated-probability parameter
+      -- right after the sample; seed it with 1.0 at the query root.
+      args' = if compiledWithTopK compiled then x : VFloat 1.0 : args else x : args
+  in generateDet (neurals p) compiled (map IRConst args') prob
+
+-- The IRCompiler emits the TOP_K_CUTOFF constant iff topKThreshold was set,
+-- so a compiled IREnv carries its own marker for the extra acc_prob parameter.
+compiledWithTopK :: IREnv -> Bool
+compiledWithTopK (IREnv _ _ consts) = isJust (lookup "TOP_K_CUTOFF" consts)
 
 runIntegC :: Program -> IREnv -> [IRValue] -> IRValue -> Either CompilerError IRValue
 runIntegC p compiled args sample =

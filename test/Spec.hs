@@ -18,16 +18,10 @@ import SPLL.Lang.Types
 import SPLL.Typing.Typing
 import SPLL.Typing.RType
 import SPLL.Typing.PType
-import SPLL.Typing.Typing
-import SPLL.Typing.RInfer
-import SPLL.Analysis
 import SPLL.IntermediateRepresentation
-import SPLL.IRCompiler
 import SPLL.Validator
-import IRInterpreter
 import Data.Maybe (fromJust, catMaybes)
 import Control.Monad.Random.Lazy (Random, RandomGen, Rand, evalRandIO)
-import SPLL.Typing.Infer
 --import ArbitrarySPLL
 import Control.Exception.Base (SomeException, try)
 import Test.QuickCheck.Monadic (monadicIO, run, assert)
@@ -40,7 +34,6 @@ import Numeric.AD (grad', auto)
 import Numeric.AD.Internal.Reverse (Reverse, Tape)
 import Data.Reflection (Reifies)
 import Data.Bifunctor (second)
-import SPLL.Typing.ForwardChaining (annotateProg)
 import SPLL.Parser
 import TestParser (parserTests)
 import TestInternals (internalsTests)
@@ -52,30 +45,11 @@ import qualified SPLL.CodeGenPyTorch
 import Data.List (isInfixOf)
 
 
--- Generalizing over different compilation stages, we can fit all "this typing is what the compiler would find" cases.
-class Recompilable a where
-  recompile :: a -> Either CompilerError a
+thetaTreeExample :: IRValue
+thetaTreeExample = VThetaTree (ThetaTree [0, 1, 2, 3] [ThetaTree [4, 5, 6, 7] [], ThetaTree [8, 9, 10, 11] [], ThetaTree [12, 13, 14, 15] []])
 
-untypeP :: Program -> Program
-untypeP (Program defs neuralDecl adts) = Program (map (\(a,b) -> (a, untypeE b)) defs) neuralDecl adts
-
-untypeE :: Expr -> Expr
-untypeE = tMap (const makeTypeInfo)
-
-instance Recompilable Program where
-  recompile = addTypeInfo . untypeP
-
-instance Recompilable Expr where
-  recompile e = case addTypeInfo $ makeMain $ untypeE e of
-    Right (Program [("main", d)] _ _) -> Right d
-    Left x -> Left x
-    Right (Program _ _ _) -> error "unexpected error when recompiling Expr TypeInfo."
-
-thetaTreeExample :: IRExpr
-thetaTreeExample = IRConst (VThetaTree (ThetaTree [0, 1, 2, 3] [ThetaTree [4, 5, 6, 7] [], ThetaTree [8, 9, 10, 11] [], ThetaTree [12, 13, 14, 15] []]))
-
-flatTree :: [Double] -> [IRExpr]
-flatTree a = [IRConst (VThetaTree (ThetaTree a []))]
+flatTree :: [Double] -> [IRValue]
+flatTree a = [VThetaTree (ThetaTree a [])]
 
 normalPDF :: Double -> Double
 normalPDF x = (1 / sqrt (2 * pi)) * exp (-0.5 * x * x)
@@ -83,7 +57,7 @@ normalPDF x = (1 / sqrt (2 * pi)) * exp (-0.5 * x * x)
 normalCDF :: Double -> Double
 normalCDF x = (1/2)*(1 + erf (x/sqrt (2)))
 
-correctProbValuesTestCases :: [(Program, IRValue, [IRExpr], (IRValue, IRValue))]
+correctProbValuesTestCases :: [(Program, IRValue, [IRValue], (IRValue, IRValue))]
 --correctProbValuesTestCases = [(testDiceAdd, VInt 2, [], (VFloat (1 / 36), VFloat 0))]
 correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat 1)),
                                (normalProg, VFloat 0.5, [], (VFloat $ normalPDF 0.5, VFloat 1)),
@@ -120,10 +94,10 @@ correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat
                                (testDiceAdd, VInt 1, [], (VFloat 0, VFloat 0)),
                                (testDimProb, VFloat 0.5, [], (VFloat 0.4, VFloat 0)),
                                (testDimProb, VFloat 0.0, [], (VFloat (0.6 * 0.39894228040143265), VFloat 1)),
-                               (gaussLists, constructVList [VFloat 0, VFloat 0, VFloat 0], [IRConst $ VThetaTree (ThetaTree [0.5, 1, 0] [])], (VFloat $ (normalPDF 0) * (normalPDF 0) * (normalPDF 0) / 16, VFloat 3)),
+                               (gaussLists, constructVList [VFloat 0, VFloat 0, VFloat 0], [VThetaTree (ThetaTree [0.5, 1, 0] [])], (VFloat $ (normalPDF 0) * (normalPDF 0) * (normalPDF 0) / 16, VFloat 3)),
                                --(testPartialInjF, VFloat 5.5, [], (VFloat 1, VFloat 1))]
                                (testInjFRenaming, VFloat 5.5, [], (VFloat 1, VFloat 1)),
-                               (gaussLists, constructVList [VFloat 0, VFloat 0, VFloat 0], [IRConst $ VThetaTree (ThetaTree [0.5, 1, 0] [])], (VFloat $ (normalPDF 0) * (normalPDF 0) * (normalPDF 0) / 16, VFloat 3)),
+                               (gaussLists, constructVList [VFloat 0, VFloat 0, VFloat 0], [VThetaTree (ThetaTree [0.5, 1, 0] [])], (VFloat $ (normalPDF 0) * (normalPDF 0) * (normalPDF 0) / 16, VFloat 3)),
                                (testLeft, VFloat 2, [], (VFloat 1.0, VFloat 0)),
                                (testLeft, VFloat 3, [], (VFloat 0, VFloat 0)),
                                (testEither, VEither (Left (VFloat 0.5)), [], (VFloat 0.5, VFloat 1)),
@@ -145,7 +119,7 @@ correctProbValuesTestCases = [ (uniformProg, VFloat 0.5, [], (VFloat 1.0, VFloat
 
                               --(testLambdaParameter, VFloat 10, [], VFloat 1.0)]
 
-correctIntegralValuesTestCases :: [(Program, IRValue, IRValue, [IRExpr], (IRValue, IRValue))]
+correctIntegralValuesTestCases :: [(Program, IRValue, IRValue, [IRValue], (IRValue, IRValue))]
 correctIntegralValuesTestCases =[(uniformProg, VFloat 0, VFloat 1, [], (VFloat 1.0, VFloat 0)),
                                 (uniformProg, VFloat (-1), VFloat 2, [], (VFloat 1.0, VFloat 0)),
                                 (normalProg, VFloat (-5), VFloat 5, [], (VFloat $ normalCDF 5 - normalCDF (-5), VFloat 0)),
@@ -211,8 +185,8 @@ prop_CheckProbTestCasesWithBC = forAll (elements correctProbValuesTestCases) che
 
 prop_TopK :: Property
 prop_TopK = once $ ioProperty $ do
-  actualOutput0 <- evalRandIO $ irDensityTopK testTopK 0.1 (VFloat 0) []
-  actualOutput1 <- evalRandIO $ irDensityTopK testTopK 0.1 (VFloat 1) []
+  let actualOutput0 = irDensity (topKConf 0.1) testTopK (VFloat 0) []
+  let actualOutput1 = irDensity (topKConf 0.1) testTopK (VFloat 1) []
   case (actualOutput0, actualOutput1) of
     (VTuple a (VFloat _), VTuple b (VFloat _)) -> return $ (b == VFloat 0.95) && (a == VFloat 0)
     _ -> return False
@@ -262,7 +236,7 @@ prop_CheckReadmeCodeListing2 = ioProperty $ do
           let (VFloat genF) = gen
           return $ (VFloat prob) `reasonablyClose` (VFloat (normalPDF ((genF - 1) / 2) / 2))
 
-checkValidPrograms :: (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
+checkValidPrograms :: (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
 checkValidPrograms (p, _, _, _) = case validateProgram p of
   Right _ -> property True
   Left err -> counterexample err False
@@ -273,52 +247,52 @@ checkInvalidPrograms p = case validateProgram p of
   Right _ -> counterexample "Program validates even though it should not" False
 
 
-checkProbTestCase :: (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
+checkProbTestCase :: (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
 checkProbTestCase (p, inp, params, (out, VFloat outDim)) = ioProperty $ do
-  actualOutput <- evalRandIO $ irDensity p inp params
+  let actualOutput = irDensity defaultCompilerConfig p inp params
   case actualOutput of
     VTuple a (VFloat d) -> return $ a `reasonablyClose` out .&&. d === outDim
     _ -> return $ counterexample "Return type was no tuple" False
 
-checkIntegralTestCase :: (Program, IRValue, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
+checkIntegralTestCase :: (Program, IRValue, IRValue, [IRValue], (IRValue, IRValue)) -> Property
 checkIntegralTestCase (p, low, high, params, (out, outDim)) = ioProperty $ do
-  actualOutput <- evalRandIO $ irIntegral p low high params
+  let actualOutput = irIntegral defaultCompilerConfig p low high params
   case actualOutput of
     VTuple a aDim -> return $ a `reasonablyClose` out .&&. aDim === outDim
     _ -> return $ counterexample "Return type was no tuple" False
 
 --TODO better bounds for Integral
-checkIntegralConverges :: (Program, IRValue, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
+checkIntegralConverges :: (Program, IRValue, IRValue, [IRValue], (IRValue, IRValue)) -> Property
 checkIntegralConverges (p, VFloat a, VFloat b, params, _) = ioProperty $ do
-  actualOutput <- evalRandIO $ irIntegral p (VFloat (-9999999)) (VFloat 9999999) params
+  let actualOutput = irIntegral defaultCompilerConfig p (VFloat (-9999999)) (VFloat 9999999) params
   case actualOutput of
     VTuple a (VFloat _) -> return $ a `reasonablyClose` VFloat 1
     _ -> return $ counterexample "Return type was no tuple" False
 checkIntegralConverges _ = False ==> False
 
-checkZeroWidthIntegral :: (Program, IRValue, IRValue, [IRExpr], IRValue) -> Property
+checkZeroWidthIntegral :: (Program, IRValue, IRValue, [IRValue], IRValue) -> Property
 checkZeroWidthIntegral (p, lower, _, params, _) = ioProperty $ do
-  integralOutput <- evalRandIO $ irIntegral p lower lower params
-  probOutput <- evalRandIO $ irDensity p lower params
+  let integralOutput = irIntegral defaultCompilerConfig p lower lower params
+  let probOutput = irDensity defaultCompilerConfig p lower params
   case (integralOutput, probOutput) of
     (VTuple a (VFloat _), VTuple b (VFloat _)) -> return $ a `reasonablyClose` b
     _ -> return $ counterexample "Return type was no tuple" False
 
-checkTopKInterprets :: (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
+checkTopKInterprets :: (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
 checkTopKInterprets (p, inp, params, _) = ioProperty $ do
-  actualOutput <- evalRandIO $ irDensityTopK p 0.05 inp params
+  let actualOutput = irDensity (topKConf 0.05) p inp params
   return $ actualOutput `reasonablyClose` actualOutput  -- No clue what the correct value should be here. Just test that is interprets to any value
 
-checkProbTestCasesWithBC :: (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
+checkProbTestCasesWithBC :: (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
 checkProbTestCasesWithBC (p, inp, params, (out, VFloat outDim)) = ioProperty $ do
-  actualOutput <- evalRandIO $ irDensityBC p inp params
+  let actualOutput = irDensity bcConf p inp params
   case actualOutput of
     VTuple a (VTuple (VFloat d) (VFloat _)) -> return $ a `reasonablyClose` out .&&. d === outDim
     _ -> return $ counterexample "Return type was no tuple" False
 
-checkProbAny :: (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
+checkProbAny :: (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
 checkProbAny (p, _, params, _) = ioProperty $ do
-  actualOutput <- evalRandIO $ irDensity p VAny params
+  let actualOutput = irDensity defaultCompilerConfig p VAny params
   case actualOutput of
     VTuple a (VFloat d) -> return $ a === VFloat 1
     _ -> return $ counterexample "Return type was no tuple" False
@@ -326,72 +300,40 @@ checkProbAny (p, _, params, _) = ioProperty $ do
 --prop_CheckProbTestCases = foldr (\(p, inp, out) acc -> do
 --  checkProbTestCase p inp out .&&. acc) (True===True) correctProbValuesTestCases
 
-irDensityTopK :: RandomGen g => Program -> Double -> IRValue -> [IRExpr]-> Rand g IRValue
-irDensityTopK p thresh s params = IRInterpreter.generateRand (neurals p) irEnv (sampleExpr:IRConst (VFloat 1.0):params) irExpr
-  where Just (irExpr, _) = probFun (lookupIREnv "main" irEnv)
-        sampleExpr = IRConst s
-        irEnv = envToIR defaultCompilerConfig {topKThreshold = Just thresh} annotated
-        annotated = (annotateAlgsProg . annotateConditionalProg) typedProg
-        Right typedProg = addTypeInfo forwardChained
-        forwardChained = annotateProg preAnnotated
-        preAnnotated = annotateEnumsProg p
+-- All test compilation goes through the public SPLL.Prelude entry points, so the
+-- tests exercise exactly the pipeline production uses. The CompilerConfig argument
+-- selects the topK / branch-counting variants.
+topKConf :: Double -> CompilerConfig
+topKConf thresh = defaultCompilerConfig {topKThreshold = Just thresh}
 
-irDensityBC :: RandomGen g => Program -> IRValue -> [IRExpr]-> Rand g IRValue
-irDensityBC p s params = IRInterpreter.generateRand (neurals p) irEnv (sampleExpr:params) irExpr
-  where Just (irExpr, _) = probFun (lookupIREnv "main" irEnv)
-        sampleExpr = IRConst s
-        irEnv = envToIR defaultCompilerConfig {countBranches = True} annotated
-        annotated = (annotateAlgsProg . annotateConditionalProg) typedProg
-        Right typedProg = addTypeInfo forwardChained
-        forwardChained = annotateProg preAnnotated
-        preAnnotated = annotateEnumsProg p
+topKBCConf :: Double -> CompilerConfig
+topKBCConf thresh = (topKConf thresh) {countBranches = True}
 
-irDensity :: RandomGen g => Program -> IRValue -> [IRExpr] -> Rand g IRValue
-irDensity p s params = IRInterpreter.generateRand (neurals p) irEnv (sampleExpr:params) irExpr
-  where Just (irExpr, _) = probFun (lookupIREnv "main" irEnv)
-        sampleExpr = IRConst s
-        irEnv = envToIR defaultCompilerConfig annotated
-        annotated = (annotateAlgsProg . annotateConditionalProg) typedProg
-        Right typedProg = addTypeInfo forwardChained
-        forwardChained = annotateProg preAnnotated
-        preAnnotated = annotateEnumsProg p
+bcConf :: CompilerConfig
+bcConf = defaultCompilerConfig {countBranches = True}
 
-irIntegral :: RandomGen g => Program -> IRValue -> IRValue -> [IRExpr] -> Rand g IRValue
-irIntegral p low high params = do
-  highVal <- interpret highExpr
-  lowVal <- interpret lowExpr
+irDensity :: CompilerConfig -> Program -> IRValue -> [IRValue] -> IRValue
+irDensity conf p s params = either error id $ runProb conf p params s
+
+irIntegral :: CompilerConfig -> Program -> IRValue -> IRValue -> [IRValue] -> IRValue
+irIntegral conf p low high params = either error id $ do
+  compiled <- compile conf p
+  highVal <- runIntegC p compiled params high
+  lowVal <- runIntegC p compiled params low
   case (highVal, lowVal) of
-    (VTuple (VFloat highP) (VFloat highD),
+    (VTuple (VFloat highP) (VFloat _),
      VTuple (VFloat lowP)  (VFloat lowD)) -> return $ VTuple (VFloat (highP - lowP)) (VFloat lowD)
-    _ -> error "irIntegral: unexpected IRValue shape"
-  where
-    interpret x = IRInterpreter.generateRand (neurals p) irEnv (x:params) irExpr
-    Just (irExpr, _) = integFun (lookupIREnv "main" irEnv)
-    lowExpr = IRConst low
-    highExpr = IRConst high
-    irEnv = envToIR defaultCompilerConfig annotated
-    annotated = (annotateAlgsProg . annotateConditionalProg) typedProg
-    Right typedProg = addTypeInfo forwardChained
-    forwardChained = annotateProg preAnnotated
-    preAnnotated = annotateEnumsProg p
-
-irGen :: RandomGen g => Program -> [IRExpr] -> Rand g IRValue
-irGen p params = IRInterpreter.generateRand (neurals p) irEnv params irExpr
-  where Just (irExpr, _) = genFun (lookupIREnv "main" irEnv)
-        irEnv = envToIR defaultCompilerConfig annotated
-        annotated = (annotateAlgsProg . annotateConditionalProg) typedProg
-        Right typedProg = addTypeInfo forwardChained
-        forwardChained = annotateProg preAnnotated
-        preAnnotated = annotateEnumsProg p
+    _ -> Left "irIntegral: unexpected IRValue shape"
 
 reasonablyClose :: IRValue -> IRValue -> Property
 reasonablyClose (VFloat a) (VFloat b) = counterexample (show a ++ "/=" ++ show b) (property $ abs (a - b) <= 1e-5)
 reasonablyClose a b = a === b
 
 --Sample PDF against expected PDF. Retiry specific number of times with double the samples each time
-testSamplingProb :: Double -> Int -> Int -> (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
+testSamplingProb :: Double -> Int -> Int -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
 testSamplingProb epsilon samples retries (p, VFloat inp, params, (VFloat out, VFloat outDim))  = ioProperty $ evalRandIO $ do
-  endlessSamples <- sequence (repeat (irGen p params >>= \(VFloat x) -> return x)) -- Generates an endless stream of samples
+  let gen = either error id (runGen defaultCompilerConfig p params)
+  endlessSamples <- sequence (repeat (gen >>= \(VFloat x) -> return x)) -- Generates an endless stream of samples
   let samplesInRange = map (\x -> abs (x - inp) <= epsilon/2) endlessSamples
   let countInside = foldr (\b acc -> if b then acc + 1 else acc) 0 (take samples samplesInRange)
   let ratioInside = fromIntegral countInside / fromIntegral samples
@@ -405,7 +347,8 @@ testSamplingProb epsilon samples retries (p, VFloat inp, params, (VFloat out, VF
     else
       return $ counterexample ("Sampled PDF is: " ++ show estimatePDF ++ ", but should be: " ++ show out) (property valid)
 testSamplingProb _ samples retries (p, VInt inp, params, (VFloat out, VFloat outDim))  = ioProperty $ evalRandIO $ do
-  endlessSamples <- sequence (repeat (irGen p params >>= \(VInt x) -> return x)) -- Generates an endless stream of samples
+  let gen = either error id (runGen defaultCompilerConfig p params)
+  endlessSamples <- sequence (repeat (gen >>= \(VInt x) -> return x)) -- Generates an endless stream of samples
   let samplesInRange = map (==inp) endlessSamples
   let countInside = foldr (\b acc -> if b then acc + 1 else acc) 0 (take samples samplesInRange)
   let ratioInside = fromIntegral countInside / fromIntegral samples
@@ -419,7 +362,8 @@ testSamplingProb _ samples retries (p, VInt inp, params, (VFloat out, VFloat out
     else
       return $ counterexample ("Sampled PDF is: " ++ show estimatePDF ++ ", but should be: " ++ show out) (property valid)
 testSamplingProb epsilon samples retries (p, VTuple (VFloat inp1) (VFloat inp2), params, (VFloat out, VFloat outDim)) = ioProperty $ evalRandIO $ do
-  endlessSamples <- sequence (repeat (irGen p params >>= \(VTuple (VFloat x1) (VFloat x2)) -> return (x1, x2))) -- Generates an endless stream of samples
+  let gen = either error id (runGen defaultCompilerConfig p params)
+  endlessSamples <- sequence (repeat (gen >>= \(VTuple (VFloat x1) (VFloat x2)) -> return (x1, x2))) -- Generates an endless stream of samples
   let samplesInRange = map (\(x1, x2) -> (abs (x1 - inp1) <= epsilon/2) && (abs (x2 - inp2) <= epsilon/2)) endlessSamples   -- Use the maximum norm
   let countInside = foldr (\b acc -> if b then acc + 1 else acc) 0 (take samples samplesInRange)
   let ratioInside = fromIntegral countInside / fromIntegral samples
@@ -434,7 +378,8 @@ testSamplingProb epsilon samples retries (p, VTuple (VFloat inp1) (VFloat inp2),
       return $ counterexample ("Sampled PDF is: " ++ show estimatePDF ++ ", but should be: " ++ show out) (property valid)
 testSamplingProb epsilon samples retries (p, VList inp, params, (VFloat out, VFloat outDim))
   | all isVFloat inp = ioProperty $ evalRandIO $ do
-  endlessSamples <- sequence (repeat (irGen p params >>= \(VList l) -> return l)) -- Generates an endless stream of samples
+  let gen = either error id (runGen defaultCompilerConfig p params)
+  endlessSamples <- sequence (repeat (gen >>= \(VList l) -> return l)) -- Generates an endless stream of samples
   let samplesInRange = map (\l -> length l == length inp && all (\(VFloat x, VFloat y) -> abs (x - y) <= epsilon/2 ) (zip l (toList inp))) (map toList endlessSamples)   -- Use the maximum norm
   let countInside = foldr (\b acc -> if b then acc + 1 else acc) 0 (take samples samplesInRange)
   let ratioInside = fromIntegral countInside / fromIntegral samples
@@ -599,8 +544,8 @@ prop_TopKNestedPrunesDeeper = once $ ioProperty $ do
         ifThenElse (bernoulli 0.12)
           (ifThenElse (bernoulli 0.12) (constF 1.0) (constF 0.0))
           (constF 2.0))] [] []
-  topKResult <- evalRandIO $ irDensityTopK twoLevel 0.1 (VFloat 1.0) []
-  exactResult <- evalRandIO $ irDensity twoLevel (VFloat 1.0) []
+  let topKResult = irDensity (topKConf 0.1) twoLevel (VFloat 1.0) []
+  let exactResult = irDensity defaultCompilerConfig twoLevel (VFloat 1.0) []
   case (topKResult, exactResult) of
     (VTuple (VFloat topKP) _, VTuple exactP _) ->
       return $ counterexample ("global topK P(1.0)=" ++ show topKP ++ ", expected 0") (topKP == 0.0)
@@ -618,8 +563,8 @@ prop_TopKCrossFunction = once $ ioProperty $ do
         [ ("main",  ifThenElse (bernoulli 0.12) (var "inner") (constF 2.0))
         , ("inner", ifThenElse (bernoulli 0.12) (constF 1.0) (constF 0.0)) ]
         [] []
-  topKResult <- evalRandIO $ irDensityTopK crossFunc 0.1 (VFloat 1.0) []
-  exactResult <- evalRandIO $ irDensity crossFunc (VFloat 1.0) []
+  let topKResult = irDensity (topKConf 0.1) crossFunc (VFloat 1.0) []
+  let exactResult = irDensity defaultCompilerConfig crossFunc (VFloat 1.0) []
   case (topKResult, exactResult) of
     (VTuple (VFloat topKP) _, VTuple exactP _) ->
       return $ counterexample ("global topK P(1.0)=" ++ show topKP ++ ", expected 0") (topKP == 0.0)
@@ -630,10 +575,10 @@ prop_TopKCrossFunction = once $ ioProperty $ do
 prop_TopKZeroThreshMatchesExact :: Property
 prop_TopKZeroThreshMatchesExact = forAll (elements correctProbValuesTestCases) checkTopKZeroMatchesExact
 
-checkTopKZeroMatchesExact :: (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
+checkTopKZeroMatchesExact :: (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
 checkTopKZeroMatchesExact (p, inp, params, _) = ioProperty $ do
-  topKResult <- evalRandIO $ irDensityTopK p 0.0 inp params
-  exactResult <- evalRandIO $ irDensity p inp params
+  let topKResult = irDensity (topKConf 0.0) p inp params
+  let exactResult = irDensity defaultCompilerConfig p inp params
   case (topKResult, exactResult) of
     (VTuple topKP topKD, VTuple exactP exactD) ->
       return $ topKP `reasonablyClose` exactP .&&. topKD `reasonablyClose` exactD
@@ -643,10 +588,10 @@ checkTopKZeroMatchesExact (p, inp, params, _) = ioProperty $ do
 prop_TopKNeverInflates :: Property
 prop_TopKNeverInflates = forAll (elements correctProbValuesTestCases) (checkTopKNeverInflates 0.1)
 
-checkTopKNeverInflates :: Double -> (Program, IRValue, [IRExpr], (IRValue, IRValue)) -> Property
+checkTopKNeverInflates :: Double -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
 checkTopKNeverInflates thresh (p, inp, params, _) = ioProperty $ do
-  topKResult <- evalRandIO $ irDensityTopK p thresh inp params
-  exactResult <- evalRandIO $ irDensity p inp params
+  let topKResult = irDensity (topKConf thresh) p inp params
+  let exactResult = irDensity defaultCompilerConfig p inp params
   case (topKResult, exactResult) of
     (VTuple (VFloat topKP) _, VTuple (VFloat exactP) _) ->
       return $ counterexample (show topKP ++ " > " ++ show exactP) (topKP <= exactP + 1e-9)
@@ -657,8 +602,8 @@ checkTopKNeverInflates thresh (p, inp, params, _) = ioProperty $ do
 -- so without topK BC=6.  With threshold=0.2 (>1/6), accProb*(1/6)<0.2 → all 6 pruned → BC=0.
 prop_TopKFewerBranches :: Property
 prop_TopKFewerBranches = once $ ioProperty $ do
-  topKBCResult <- evalRandIO $ irDensityTopKBC testDiceAdd 0.2 (VInt 7) []
-  noBCResult   <- evalRandIO $ irDensityBC     testDiceAdd     (VInt 7) []
+  let topKBCResult = irDensity (topKBCConf 0.2) testDiceAdd (VInt 7) []
+  let noBCResult   = irDensity bcConf           testDiceAdd (VInt 7) []
   case (topKBCResult, noBCResult) of
     (VTuple _ (VTuple _ (VFloat topKBC)), VTuple _ (VTuple _ (VFloat noBC))) ->
       return $ counterexample (show topKBC ++ " >= " ++ show noBC ++ " (topK should reduce branch count when a branch is pruned)") (topKBC < noBC)
@@ -670,22 +615,12 @@ prop_TopKFewerBranches = once $ ioProperty $ do
 --   threshold=0.2 (>1/6): accProb*(1/6)<0.2 → all 6 branches pruned → BC=0
 prop_TopKMonotonicBranches :: Property
 prop_TopKMonotonicBranches = once $ ioProperty $ do
-  bcLow  <- evalRandIO $ irDensityTopKBC testDiceAdd 0.1 (VInt 7) []
-  bcHigh <- evalRandIO $ irDensityTopKBC testDiceAdd 0.2 (VInt 7) []
+  let bcLow  = irDensity (topKBCConf 0.1) testDiceAdd (VInt 7) []
+  let bcHigh = irDensity (topKBCConf 0.2) testDiceAdd (VInt 7) []
   case (bcLow, bcHigh) of
     (VTuple _ (VTuple _ (VFloat lowBC)), VTuple _ (VTuple _ (VFloat highBC))) ->
       return $ counterexample (show highBC ++ " > " ++ show lowBC ++ " (higher threshold should prune at least as much)") (highBC <= lowBC)
     _ -> return $ counterexample "Return type was no tuple" False
-
-irDensityTopKBC :: RandomGen g => Program -> Double -> IRValue -> [IRExpr] -> Rand g IRValue
-irDensityTopKBC p thresh s params = IRInterpreter.generateRand (neurals p) irEnv (sampleExpr:IRConst (VFloat 1.0):params) irExpr
-  where Just (irExpr, _) = probFun (lookupIREnv "main" irEnv)
-        sampleExpr = IRConst s
-        irEnv = envToIR defaultCompilerConfig {topKThreshold = Just thresh, countBranches = True} annotated
-        annotated = (annotateAlgsProg . annotateConditionalProg) typedProg
-        Right typedProg = addTypeInfo forwardChained
-        forwardChained = annotateProg preAnnotated
-        preAnnotated = annotateEnumsProg p
 
 -- BC for if-else: each leaf emits 1, IfThenElse uses formula cond+left+right-1.
 -- A 3-leaf if-else (if b then (if b2 then uniform else 3.0) else 1.0) should give BC=3.
@@ -693,7 +628,7 @@ irDensityTopKBC p thresh s params = IRInterpreter.generateRand (neurals p) irEnv
 prop_BCLeafCountIfElse :: Property
 prop_BCLeafCountIfElse = once $ ioProperty $ do
   let prog = Program [("main", ifThenElse (bernoulli 0.5) (ifThenElse (bernoulli 0.5) uniform (constF 3.0)) (constF 1.0))] [] []
-  result <- evalRandIO $ irDensityBC prog (VFloat 0.5) []
+  let result = irDensity bcConf prog (VFloat 0.5) []
   case result of
     VTuple _ (VTuple _ (VFloat bc)) -> return $ counterexample ("Expected BC=3, got " ++ show bc) (bc == 3.0)
     _ -> return $ counterexample "Return type was no tuple" False
@@ -702,7 +637,7 @@ prop_BCLeafCountIfElse = once $ ioProperty $ do
 -- dice1=1; dice(n)=cond(1)+constI(n)(1)+dice(n-1)-1 = dice(n-1)+1; so dice(6)=6.
 prop_BCDiceIfElse :: Property
 prop_BCDiceIfElse = once $ ioProperty $ do
-  result <- evalRandIO $ irDensityBC testDice (VInt 3) []
+  let result = irDensity bcConf testDice (VInt 3) []
   case result of
     VTuple _ (VTuple _ (VFloat bc)) -> return $ counterexample ("Expected BC=6, got " ++ show bc) (bc == 6.0)
     _ -> return $ counterexample "Return type was no tuple" False
@@ -710,8 +645,8 @@ prop_BCDiceIfElse = once $ ioProperty $ do
 -- Consistency: dice6 as if-else (BC=6) and testDiceAdd as InjF (BC=6 for P(7)) agree.
 prop_BCConsistency :: Property
 prop_BCConsistency = once $ ioProperty $ do
-  diceResult    <- evalRandIO $ irDensityBC testDice    (VInt 3) []
-  diceAddResult <- evalRandIO $ irDensityBC testDiceAdd (VInt 7) []
+  let diceResult    = irDensity bcConf testDice    (VInt 3) []
+  let diceAddResult = irDensity bcConf testDiceAdd (VInt 7) []
   case (diceResult, diceAddResult) of
     (VTuple _ (VTuple _ (VFloat diceBC)), VTuple _ (VTuple _ (VFloat diceAddBC))) ->
       return $ counterexample ("dice BC=" ++ show diceBC ++ ", diceAdd BC=" ++ show diceAddBC ++ " (expected both=6)") (diceBC == diceAddBC)
@@ -724,9 +659,9 @@ prop_BCConsistency = once $ ioProperty $ do
 -- Local topK would behave differently because the raw bernoulli probabilities vary by depth.
 prop_TopKDiceAllOrNothing :: Property
 prop_TopKDiceAllOrNothing = once $ ioProperty $ do
-  low   <- evalRandIO $ irDensityTopK testDice 0.1 (VInt 3) []
-  high  <- evalRandIO $ irDensityTopK testDice 0.2 (VInt 3) []
-  exact <- evalRandIO $ irDensity     testDice     (VInt 3) []
+  let low   = irDensity (topKConf 0.1)        testDice (VInt 3) []
+  let high  = irDensity (topKConf 0.2)        testDice (VInt 3) []
+  let exact = irDensity defaultCompilerConfig testDice (VInt 3) []
   case (low, high, exact) of
     (VTuple lowP _, VTuple (VFloat hP) _, VTuple exactP _) ->
       return $ lowP `reasonablyClose` exactP
@@ -739,9 +674,9 @@ prop_TopKDiceAllOrNothing = once $ ioProperty $ do
 --   threshold=0.2 (>1/6): 1.0*(1/6)=0.167 < 0.2 → all enum branches pruned, P(7)=0
 prop_TopKInjFEnum :: Property
 prop_TopKInjFEnum = once $ ioProperty $ do
-  low   <- evalRandIO $ irDensityTopK testDiceAdd 0.1 (VInt 7) []
-  high  <- evalRandIO $ irDensityTopK testDiceAdd 0.2 (VInt 7) []
-  exact <- evalRandIO $ irDensity     testDiceAdd     (VInt 7) []
+  let low   = irDensity (topKConf 0.1)        testDiceAdd (VInt 7) []
+  let high  = irDensity (topKConf 0.2)        testDiceAdd (VInt 7) []
+  let exact = irDensity defaultCompilerConfig testDiceAdd (VInt 7) []
   case (low, high, exact) of
     (VTuple lowP _, VTuple (VFloat hP) _, VTuple exactP _) ->
       return $ lowP `reasonablyClose` exactP
@@ -749,13 +684,13 @@ prop_TopKInjFEnum = once $ ioProperty $ do
     _ -> return $ counterexample "Return type was no tuple" False
 
 -- Parses testCases/dice.ppl (d4, equal P=0.25 per face) and runs it through the full
--- parsing + compilation pipeline with topK enabled.
--- Note: runProb does not thread acc_prob, so we use irDensityTopK directly after parsing.
+-- parsing + compilation pipeline with topK enabled, via the public runProb API
+-- (which threads the initial acc_prob for topK-compiled programs).
 -- threshold=0.1 (<0.25): no branch is pruned; each face should have P=0.25.
 prop_TopKEndToEnd :: Property
 prop_TopKEndToEnd = once $ ioProperty $ do
   prog <- parseProgram "testCases/dice.ppl"
-  results <- mapM (\v -> evalRandIO $ irDensityTopK prog 0.1 (VFloat v) []) [1.0, 2.0, 3.0, 4.0]
+  let results = map (\v -> irDensity (topKConf 0.1) prog (VFloat v) []) [1.0, 2.0, 3.0, 4.0]
   return $ conjoin
     [ case r of
         VTuple p _ -> p `reasonablyClose` VFloat 0.25
@@ -767,7 +702,7 @@ prop_TopKEndToEnd = once $ ioProperty $ do
 -- Argument has 2 discrete values; each iteration traverses one if-else arm → BC = 2.
 prop_BCConditionalLambda :: Property
 prop_BCConditionalLambda = once $ ioProperty $ do
-  result <- evalRandIO $ irDensityBC testConditionalLambdaBC (VFloat 1.0) []
+  let result = irDensity bcConf testConditionalLambdaBC (VFloat 1.0) []
   case result of
     VTuple _ (VTuple _ (VFloat bc)) ->
       return $ counterexample ("Expected BC=2, got " ++ show bc) (bc == 2.0)
@@ -782,7 +717,7 @@ prop_BCConditionalLambda = once $ ioProperty $ do
 -- P(main = 2.0) = normalPDF(1.0) * 0.5.
 prop_killAllVarExtraction :: Property
 prop_killAllVarExtraction = once $ ioProperty $ do
-  result <- evalRandIO $ irDensity testNormalScaledViaVar (VFloat 2.0) []
+  let result = irDensity defaultCompilerConfig testNormalScaledViaVar (VFloat 2.0) []
   case result of
     VTuple (VFloat p) _ ->
       return $ counterexample ("Expected normalPDF(1)*0.5≈" ++ show (normalPDF 1.0 * 0.5) ++ ", got " ++ show p)
@@ -793,8 +728,8 @@ prop_killAllVarExtraction = once $ ioProperty $ do
 -- Verify on testDice that P(X=3) is the same with and without branch counting.
 prop_BCDoesNotChangeProbability :: Property
 prop_BCDoesNotChangeProbability = once $ ioProperty $ do
-  withBC    <- evalRandIO $ irDensityBC testDice (VInt 3) []
-  withoutBC <- evalRandIO $ irDensity   testDice (VInt 3) []
+  let withBC    = irDensity bcConf testDice (VInt 3) []
+  let withoutBC = irDensity defaultCompilerConfig testDice (VInt 3) []
   case (withBC, withoutBC) of
     (VTuple (VFloat pBC) _, VTuple (VFloat pNone) _) ->
       return $ counterexample
@@ -811,8 +746,8 @@ prop_BCDoesNotChangeProbability = once $ ioProperty $ do
 -- via Var, so killAll must rewrite IRTFst(IRTSnd(IRVar x)) → IRTSnd(IRVar x).
 prop_stripBranchCountReturnShape :: Property
 prop_stripBranchCountReturnShape = once $ ioProperty $ do
-  withBC    <- evalRandIO $ irDensityBC testDice (VInt 3) []
-  withoutBC <- evalRandIO $ irDensity   testDice (VInt 3) []
+  let withBC    = irDensity bcConf testDice (VInt 3) []
+  let withoutBC = irDensity defaultCompilerConfig testDice (VInt 3) []
   let isTriple (VTuple _ (VTuple _ _)) = True
       isTriple _                       = False
   return $
@@ -869,12 +804,12 @@ prop_TopKPythonConstantValueMatchesConfig = once $ ioProperty $ do
     other  -> counterexample ("Expected exactly one assignment line, got: " ++ show other) False
 
 -- The interpreter must resolve IRVar "TOP_K_CUTOFF" via the constant in IREnv:
--- irDensityTopK with threshold=0.001 on testDice should agree with irDensity
+-- a topK compile with threshold=0.001 on testDice should agree with exact inference
 -- (all branches kept since 1/6 >> 0.001).
 prop_TopKConstantResolvedByInterpreter :: Property
 prop_TopKConstantResolvedByInterpreter = once $ ioProperty $ do
-  withTopK <- evalRandIO $ irDensityTopK testDice 0.001 (VInt 3) []
-  exact    <- evalRandIO $ irDensity     testDice       (VInt 3) []
+  let withTopK = irDensity (topKConf 0.001)      testDice (VInt 3) []
+  let exact    = irDensity defaultCompilerConfig testDice (VInt 3) []
   case (withTopK, exact) of
     (VTuple topKP _, VTuple exactP _) ->
       return $ topKP `reasonablyClose` exactP
