@@ -15,7 +15,7 @@ stack run -- -i file.spll compile -o output.py -l python   # Compile to Python
 stack run -- -i file.spll compile -l julia                  # Compile to Julia
 stack run -- -i file.spll generate                          # Forward sampling
 stack run -- -i file.spll probability -x 0.5                # Query P(X=0.5)
-stack run -- -i file.spll integrate -l 0 -h 1               # Integrate over range
+stack run -- -i file.spll cumulative -x 0.5                 # CDF query P(X<=0.5)
 # Test selection (tasty patterns; top-level groups: Spec, Corpus, Parser, Internals, Encode, End2End):
 stack test --ta '-p Spec'                # run one group
 stack test --ta '-p "!/End2End/"'        # everything except a group
