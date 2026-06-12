@@ -63,7 +63,7 @@ parseProbTestCases fp = do
 
 testInterpreter :: Program -> Either CompilerError IREnv -> TestCase -> Property
 testInterpreter p compiledE (ProbTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = ioProperty $ do
-  result <- try $ evaluate $ (compiledE >>= \c -> runProbC p c params sample) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
+  result <- try (let r = compiledE >>= \c -> runProbC p c params sample in evaluate (length (show r)) >> return r) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of 
     Right (Right (VTuple (VFloat outProb) (VFloat outDim))) -> 
       counterexample ("Probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < 0.0001) .&&.
@@ -72,7 +72,7 @@ testInterpreter p compiledE (ProbTestCase name sample params (VFloat expectedPro
     Right (Left err) -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
     Left err -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
 testInterpreter p compiledE (CumulTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = ioProperty $ do
-  result <- try $ evaluate $ (compiledE >>= \c -> runIntegC p c params sample) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
+  result <- try (let r = compiledE >>= \c -> runIntegC p c params sample in evaluate (length (show r)) >> return r) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of 
     Right (Right (VTuple (VFloat outProb) (VFloat outDim)) )-> 
       counterexample ("Cmulative probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < 0.0001) .&&.
@@ -335,6 +335,10 @@ test_end2end tlog = do
   cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
   -- Compile each program exactly once; every test group below shares the result.
   let compiledCases = [(p, compile defaultCompilerConfig p, tcs) | (p, tcs) <- cases]
+  -- The same programs compiled with optimization disabled, to check the optimizer
+  -- is harmless: every interpreter test case must give the same answer at -O0 as
+  -- at the default -O2.
+  let unoptCases = [(p, compile defaultCompilerConfig{optimizerLevel = 0} p, tcs) | (p, tcs) <- cases]
   let queryTestCases = [(p, c, filter (\x -> isProbTestCase x || isCumulTestCase x) tcs) | (p, c, tcs) <- compiledCases]
   let nonNeuralsQueries = filter (\(p, _, _) -> null (neurals p)) queryTestCases
   let neuralP = [(p, c) | (p, c, _) <- compiledCases, not (null (neurals p))]
@@ -342,6 +346,10 @@ test_end2end tlog = do
   putStrLn "=== Test End2End Interpreter ==="
   let interprTest = label "End2End Interpreter" $ conjoin [conjoin $ map (testInterpreter p c) tcs | (p, c, tcs) <- compiledCases]
   interprProp <- timedLog tlog "End2End Interpreter" $ quickCheckResult (withMaxSuccess 1 interprTest) >>= return . isSuccess
+
+  putStrLn "\n=== Test End2End Interpreter (unoptimized, optimizer-harmlessness) ==="
+  let interprUnoptTest = label "End2End Interpreter Unoptimized" $ conjoin [conjoin $ map (testInterpreter p c) tcs | (p, c, tcs) <- unoptCases]
+  interprUnoptProp <- timedLog tlog "End2End Interpreter Unoptimized" $ quickCheckResult (withMaxSuccess 1 interprUnoptTest) >>= return . isSuccess
 
   putStrLn "\n=== Test End2End Interpreter Normalization ==="
   let interprNormalizeTest = label "End2End Interpreter Normalization" $ conjoin [discreteProbsNormalized p c | (p, c) <- neuralP]
@@ -355,4 +363,4 @@ test_end2end tlog = do
   let pythonTest = label "End2End Python" $ conjoin [testPython c tcs | (_, c, tcs) <- nonNeuralsQueries]
   pythonProp <- timedLog tlog "End2End Python" $ quickCheckResult (withMaxSuccess 1 pythonTest) >>= return . isSuccess
 
-  return $ interprProp && interprNormalProp && juliaProp && pythonProp
+  return $ interprProp && interprUnoptProp && interprNormalProp && juliaProp && pythonProp

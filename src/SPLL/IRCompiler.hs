@@ -926,12 +926,22 @@ toIRInference meta True (InjF TypeInfo {rType=rt} (Named name) [left, right]) sa
   fPair <- instantiate mkVariable (adtDecls meta) resolvedName -- FPair of the InjF with unique names
   let FPair fwd _ = fPair
   let FDecl {inputVars=[v1, v2], body=f} = fwd
-  (irTuple, _, _) <- do
+  -- Compute the loop body in a nested writer so its bindings can be captured rather
+  -- than leaking to the enclosing function scope: those bindings reference the enum
+  -- variables v1/v2 (the coin_prob calls) and must be scoped *inside* the matching
+  -- enumSum, not above it.
+  (returnExpr, binds) <- lift $ runWriterT $ do
     (pLeft, _, _) <- toIRInference meta False left (IRVar v1)
     (pRight, _, _) <- toIRInference meta False right (IRVar v2)
-    let returnExpr = IRIf (IROp OpLessThan sample f) (IRConst (VFloat 0)) (IROp OpMult pLeft pRight)
-    return (returnExpr, const0, const0)
-  return (IREnumSum v1 enumListL $ IREnumSum v2 enumListR irTuple, const0, const0)
+    return (IRIf (IROp OpLessThan sample f) (IRConst (VFloat 0)) (IROp OpMult pLeft pRight))
+  -- Place each binding at the outermost scope where it remains well-formed: fully
+  -- invariant bindings are hoisted to the function top level, bindings depending only
+  -- on v1 sit between the two enumSums, and bindings depending on v2 stay innermost.
+  let (v2InvBinds, v2Body) = hoistInvariantBindings v2 (buildLetIns binds returnExpr)
+  let innerSum = buildLetIns v2InvBinds (IREnumSum v2 enumListR v2Body)
+  let (outerBinds, v1Body) = hoistInvariantBindings v1 innerSum
+  setVariables outerBinds
+  return (IREnumSum v1 enumListL v1Body, const0, const0)
 toIRInference _ _ (Null _) sample = do
   expr <- indicator (IROp OpEq sample (IRConst $ VList EmptyList))
   return (expr, const0, const0)

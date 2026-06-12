@@ -197,7 +197,10 @@ makeGenADTConstr adts plans name ix = foldl IRApply (IRVar name) gens
     gens = map (uncurry (makeGenRec adts)) (zip plans ixForField)
 
 totalWeight :: Int -> Int -> IRExpr
-totalWeight nValues startIx = foldl (\rest ix -> IROp OpPlus rest (vecAt ix)) (IRConst (VInt 0)) [startIx.. startIx + nValues-1]
+-- The accumulator seed must be a float: vecAt indexes the (float) neural output
+-- vector, so summing onto a VInt 0 is a type error the interpreter rejects at -O0
+-- (the optimizer's `0 + x` identity rule happens to delete it at higher -O levels).
+totalWeight nValues startIx = foldl (\rest ix -> IROp OpPlus rest (vecAt ix)) (IRConst (VFloat 0)) [startIx.. startIx + nValues-1]
 
 totalSize :: (String, [PartitionPlan]) -> Int
 totalSize ps = sum (map getSize (snd ps))
