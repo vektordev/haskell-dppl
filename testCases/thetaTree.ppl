@@ -1,0 +1,1 @@
+main thetas = (theta thetas @ 2) + (theta (subtree thetas @ 1) @ 1)

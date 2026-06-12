@@ -1,0 +1,1 @@
+main = if Uniform > 0.5 then Uniform else Uniform + 5.0

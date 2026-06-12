@@ -1,0 +1,1 @@
+main thetas = if Uniform > (theta thetas @ 0) then [] else ((Normal * (theta thetas @ 1)) + (theta thetas @ 2)) : (main thetas)

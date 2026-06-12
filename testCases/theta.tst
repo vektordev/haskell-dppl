@@ -1,3 +1,7 @@
 p(0.0, ThetaTree [0.0][])=(1.0, 0.0)
 cdf(0.0, ThetaTree [0.0][])=(1.0, 0.0)
 cdf(-0.1, ThetaTree [0.0][])=(0.0, 0.0)
+p(1.5, ThetaTree [1.5][])=(1.0, 0.0)
+p(1.5, ThetaTree [1.0][])=(0.0, 0.0)
+cdf(1.1, ThetaTree [1.0][])=(1.0, 0.0)
+cdf(0.9, ThetaTree [1.0][])=(0.0, 0.0)
