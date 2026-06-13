@@ -122,24 +122,6 @@ constant = InferenceRule
              "constant"
              (Forall [TV "a"] [] $ TVarR $ TV "a")
 
-exprNull :: InferenceRule
-exprNull = InferenceRule
-             StubNull
-             "null"
-             (Forall [TV "a"] [] (ListOf $ TVarR $ TV "a"))
-
-cons :: InferenceRule
-cons = InferenceRule
-         StubCons
-         "cons"
-         (Forall [TV "a"] [] ((TVarR $ TV "a") `TArrow` ((ListOf $ TVarR $ TV "a") `TArrow` (ListOf $ TVarR $ TV "a"))))
-
-tcons :: InferenceRule
-tcons = InferenceRule
-          StubTCons
-          "tcons"
-          (Forall [TV "a", TV "b"] [] ((TVarR $ TV "a") `TArrow` ((TVarR $ TV "b") `TArrow` (Tuple (TVarR $ TV "a") (TVarR $ TV "b")))))
-
 errorr :: InferenceRule
 errorr = InferenceRule
             StubError
@@ -154,7 +136,6 @@ allAlgorithms = [
   uniform,
   normal,
   constant,
-  exprNull,
   greaterThanLeft,
   greaterThanRight,
   lessThanLeft,
@@ -166,7 +147,5 @@ allAlgorithms = [
   injF2Right,
   injF2Enumerable,
   injF2ResolvesToDistribution,
-  cons,
-  tcons,
   errorr
   ]

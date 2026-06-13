@@ -51,10 +51,6 @@ data Expr =
               -- Parameters
               | ThetaI TypeInfo Expr Int
               | Subtree TypeInfo Expr Int
-              -- Lists/Tuples
-              | Cons TypeInfo Expr Expr
-              | TCons TypeInfo Expr Expr
-              | Null TypeInfo
               -- Boolean Operations
               | GreaterThan TypeInfo Expr Expr
               | LessThan TypeInfo Expr Expr
@@ -77,9 +73,6 @@ data ExprStub = StubIfThenElse
               | StubConstant
               | StubAnd
               | StubOr
-              | StubNull
-              | StubCons
-              | StubTCons
               | StubVar
               | StubInjF
               | StubLambda

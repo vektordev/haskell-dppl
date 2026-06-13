@@ -47,6 +47,10 @@ valToString (VBool x) = show x
 valToString (VInt x) = show x
 valToString (VSymbol str) = str
 valToString (VFloat x) = show x
+valToString (VList lst) = "[" ++ intercalate ", " (map valToString (listElems lst)) ++ "]"
+  where listElems EmptyList      = []
+        listElems (ListCont x xs) = x : listElems xs
+        listElems AnyList         = []
 
 bracket :: Expr -> String
 bracket e = "(" ++ exprToString e ++ ")"
@@ -63,9 +67,6 @@ exprToString (Uniform _) = "Uniform"
 exprToString (Normal _) = "Normal"
 exprToString (ThetaI _ expr i) = bracket expr ++ "[" ++ show i ++ "]"
 exprToString (Subtree _ expr i) = bracket expr ++ ".subtree(" ++ show i ++ ")"
-exprToString (Cons _ e1 e2) = bracket e1 ++ " : " ++ bracket e2
-exprToString (TCons _ e1 e2) = "(" ++ bracket e1 ++ ", " ++ bracket e2 ++ ")"
-exprToString (Null _) = "[]"
 exprToString (GreaterThan _ e1 e2) = bracket e1 ++ " > " ++ bracket e2
 exprToString (LessThan _ e1 e2) = bracket e1 ++ " < " ++ bracket e2
 exprToString (And _ e1 e2) = bracket e1 ++ " && " ++ bracket e2

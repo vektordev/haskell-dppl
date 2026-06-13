@@ -22,7 +22,8 @@ import SPLL.Typing.Typing
 import SPLL.Typing.PType
 import SPLL.Typing.RType hiding (TV)
 import Control.Monad (replicateM)
-import SPLL.Lang.Types (CompilerError)
+import SPLL.Lang.Types (CompilerError, ADTDecl)
+import PredefinedFunctions (isFieldConstructor)
 
 data PTypeError
   = UnificationFail PType PType
@@ -159,11 +160,14 @@ instance Monoid TEnv where
   mappend = (<>)
 
 -- | Inference state
-data InferState = InferState { var_count :: Int }
+-- adtEnv carries the program's ADT declarations so the InjF inference branch
+-- can recognise field constructors (Cons/TCons/user-ADT constructors) and give
+-- them product/downgrade semantics instead of additive PlusConstraint semantics.
+data InferState = InferState { var_count :: Int, adtEnv :: [ADTDecl] }
 
 -- | Initial inference state
 initInfer :: InferState
-initInfer = InferState { var_count = 0 }
+initInfer = InferState { var_count = 0, adtEnv = [] }
 
 newtype Subst = Subst (Map.Map TVar PType)
   deriving (Eq, Show, Monoid, Semigroup)
@@ -473,6 +477,9 @@ makeEqConstraint t1 t2 = (t1, [Left t2])
 
 inferProg :: TEnv -> Program -> Infer (Subst, [DConstraint], PType, Program)
 inferProg env (Program decls nns adts) = do
+  -- Make the ADT declarations available to the InjF inference branch so it can
+  -- detect field constructors (Cons/TCons/user-ADT constructors).
+  modify (\s -> s { adtEnv = adts })
   -- init type variable for all function decls beforehand so we can build constraints for
   -- calls between these functions
   tv_rev <- freshVars (length decls) []
@@ -544,9 +551,20 @@ infer env expr = case expr of
     let s_acc = foldl compose emptySubst (map fst4 p_inf)
     let accCs = concatMap snd4 p_inf
     let inferredExprs = map frth4 p_inf
+    adts <- gets adtEnv
     case tryNormalClosure name pts of
       Just pt ->
         return (s_acc, accCs, pt, InjF (setPType ti pt) (Named name) inferredExprs)
+      _ | isFieldConstructor adts name -> do
+        -- Field constructors (Cons/TCons/user-ADT constructors) combine
+        -- independent fields, so the result is as inferable as the weakest
+        -- field (the meet of the field PTypes) — not the additive PlusConstraint
+        -- of correlated operands, which would collapse two probabilistic fields
+        -- to Bottom. A flat chain of Left constraints encodes this meet;
+        -- degradeNormalResult then strips any residual Normal structure, since
+        -- the container leaves are concrete by the time it runs.
+        tv <- fresh
+        return $ degradeNormalResult (s_acc, accCs ++ [(tv, map Left pts)], tv, InjF (setPType ti tv) (Named name) inferredExprs)
       Nothing -> do
         -- PNormal/PLogNormal must not propagate through InjFs that aren't in
         -- tryNormalClosure — downgrade them to Integrate so the general
@@ -571,15 +589,6 @@ infer env expr = case expr of
       case Map.lookup name (types env) of
           Nothing -> return (emptySubst, [], Deterministic, Var (setPType ti Deterministic) name)
           Just t  -> return (emptySubst, [], t, Var (setPType ti t) name)
-
-  Null ti -> return (emptySubst, [], Deterministic, Null (setPType ti Deterministic))
-
-  Cons ti e1 e2 -> do
-    result <- inferBinOp env ti e1 e2 downgradeInf Cons
-    return $ degradeNormalResult result
-  TCons ti e1 e2 -> do
-    result <- inferBinOp env ti e1 e2 downgradeInf TCons
-    return $ degradeNormalResult result
 
   IfThenElse ti cond tr fl -> do
     (s1, cs1, t1) <- downgradeInf

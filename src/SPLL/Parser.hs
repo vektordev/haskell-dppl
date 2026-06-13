@@ -126,7 +126,7 @@ pLetIn adts = do
 -- Return type is a \v, b -> Let n = v in b
 letInDestructor :: MonadParser m => Expr -> m (Expr -> Expr -> Expr)
 letInDestructor (Var _ name) = return $ letIn name
-letInDestructor (TCons _ a b) = do
+letInDestructor (InjF _ (Named "TCons") [a, b]) = do
   a' <- letInDestructor a
   b' <- letInDestructor b
   return $ \v body -> a' (tfst v) (b' (tsnd v) body)
@@ -136,8 +136,8 @@ letInDestructor (InjF _ (Named "left") [x]) = do
 letInDestructor (InjF _ (Named "right") [x]) = do
   x' <- letInDestructor x
   return $ \v -> x' (sfromRight v)
-letInDestructor (Null _) = return $ \v b -> ifThenElse (isNull v) b (Error makeTypeInfo "RHS of letin is longer than LHS")
-letInDestructor (Cons _ x xs) = do
+letInDestructor (Constant _ (VList EmptyList)) = return $ \v b -> ifThenElse (isNull v) b (Error makeTypeInfo "RHS of letin is longer than LHS")
+letInDestructor (InjF _ (Named "Cons") [x, xs]) = do
   x' <- letInDestructor x
   xs' <- letInDestructor xs
   id <- demandUniqueNumber

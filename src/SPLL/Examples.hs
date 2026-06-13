@@ -76,7 +76,7 @@ import SPLL.Lang.Types
 import SPLL.Prelude
 
 simpleList :: Program
-simpleList = Program [("main", constF 0.0 #:# Null makeTypeInfo)] [] []
+simpleList = Program [("main", constF 0.0 #:# nul)] [] []
 
 simpleAdd :: Program
 simpleAdd = Program [("main", constF 0.0 #+# constF 1.0)] [] []
@@ -115,7 +115,7 @@ testMultLeft :: Expr
 testMultLeft = constF 3.0 #*# normal
 
 testList :: Program
-testList = Program [("main", (constF 0.5 #*# uniform) #:# (normal #:# Null makeTypeInfo))] [] []
+testList = Program [("main", (constF 0.5 #*# uniform) #:# (normal #:# nul))] [] []
 
 simpleTuple :: Program
 simpleTuple = Program [("main", tuple (constF 0.5 #*# uniform) normal)] [] []

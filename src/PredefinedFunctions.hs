@@ -8,6 +8,7 @@ propagateValues,
 parameterCount,
 hasAnyExcept,
 isHigherOrder,
+isFieldConstructor,
 getFunctionParamIdx,
 renameDecl
 ) where
@@ -112,8 +113,33 @@ eqInv1 :: FDecl
 eqInv1 = FDecl (Forall [TV "a"] [] (TVarR (TV "a") `TArrow` (TBool `TArrow` TVarR (TV "a")))) ["a", "c"] ["b"] (IRIf (IRVar "c") (IRVar "a") (IRConst (VAnyExcept [IRVar "a"]))) (IRConst (VBool True)) True [("a", IRConst (VFloat 1)), ("c", IRConst (VFloat 1))]
 eqInv2 :: FDecl
 eqInv2 = FDecl (Forall [TV "a"] [] (TVarR (TV "a") `TArrow` (TBool `TArrow` TVarR (TV "a")))) ["b", "c"] ["a"] (IRIf (IRVar "c") (IRVar "b") (IRConst (VAnyExcept [IRVar "b"]))) (IRConst (VBool True)) True [("b", IRConst (VFloat 1)), ("c", IRConst (VFloat 1))]
---tConsFwd :: FDecl
---tConsFwd = FDecl (Forall [] [] (TFloat `TArrow` (TFloat `TArrow` Tuple TFloat TFloat))) ["a", "b"] ["c", "d"] (IRTCons (IRVar "a") (IRVar "b")) (IRConst (VBool True)) [("a", IRTCons (IRConst (VFloat 1)) (IRVar "b")), ("b", IRTCons (IRVar "a") (IRConst (VFloat 1)))]-- Cannot declare a backward pass here
+-- ============================ FIELD CONSTRUCTORS ============================
+-- Cons/TCons are field constructors: each field is independently recoverable
+-- from the constructed value via a deconstructing inverse (head/tail, fst/snd).
+-- This mirrors the FPair shape produced for user-ADT constructors by
+-- fPairsFromADT, so list/tuple construction folds into the generic InjF
+-- machinery instead of needing bespoke Expr constructors.
+
+-- Applicability guard shared by the Cons inverses: head/tail are undefined on
+-- the empty list, so the inversion (and hence the whole Cons inference) is only
+-- valid on a non-empty list. Mirrors the empty-list guard the old bespoke Cons
+-- inference applied by hand.
+listNonEmpty :: IRExpr
+listNonEmpty = IRUnaryOp OpNot (IROp OpEq (IRVar "b") (IRConst (VList EmptyList)))
+
+consFwd :: FDecl
+consFwd = FDecl (Forall [TV "a"] [] (TVarR (TV "a") `TArrow` (ListOf (TVarR (TV "a")) `TArrow` ListOf (TVarR (TV "a"))))) ["h", "t"] ["b"] (IRCons (IRVar "h") (IRVar "t")) (IRConst (VBool True)) False [("h", IRConst (VFloat 1)), ("t", IRConst (VFloat 1))]
+consInvHead :: FDecl
+consInvHead = FDecl (Forall [TV "a"] [] (ListOf (TVarR (TV "a")) `TArrow` TVarR (TV "a"))) ["b"] ["h"] (IRHead (IRVar "b")) listNonEmpty True [("b", IRConst (VFloat 1))]
+consInvTail :: FDecl
+consInvTail = FDecl (Forall [TV "a"] [] (ListOf (TVarR (TV "a")) `TArrow` ListOf (TVarR (TV "a")))) ["b"] ["t"] (IRTail (IRVar "b")) listNonEmpty True [("b", IRConst (VFloat 1))]
+
+tConsFwd :: FDecl
+tConsFwd = FDecl (Forall [TV "a", TV "b"] [] (TVarR (TV "a") `TArrow` (TVarR (TV "b") `TArrow` Tuple (TVarR (TV "a")) (TVarR (TV "b"))))) ["x", "y"] ["b"] (IRTCons (IRVar "x") (IRVar "y")) (IRConst (VBool True)) False [("x", IRConst (VFloat 1)), ("y", IRConst (VFloat 1))]
+tConsInvFst :: FDecl
+tConsInvFst = FDecl (Forall [TV "a", TV "b"] [] (Tuple (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "a"))) ["b"] ["x"] (IRTFst (IRVar "b")) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
+tConsInvSnd :: FDecl
+tConsInvSnd = FDecl (Forall [TV "a", TV "b"] [] (Tuple (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "b"))) ["b"] ["y"] (IRTSnd (IRVar "b")) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
 
 fstFwd :: FDecl
 fstFwd = FDecl (Forall [TV "a", TV "b"] [] (Tuple (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "a"))) ["a"] ["b"] (IRTFst (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
@@ -189,6 +215,8 @@ globalFenv' = [("double", FPair doubleFwd [doubleInv]),
               ("multI", FPair multIFwd [multIInv1, multIInv2]),
               ("not", FPair notFwd [notInv]),
               ("eq", FPair eqFwd [eqInv1, eqInv2]),
+              ("Cons", FPair consFwd [consInvHead, consInvTail]),
+              ("TCons", FPair tConsFwd [tConsInvFst, tConsInvSnd]),
               ("fst", FPair fstFwd [fstInv]),
               ("snd", FPair sndFwd [sndInv]),
               ("head", FPair headFwd [headInv]),
@@ -232,6 +260,22 @@ renameDecl old new FDecl {contract=sig, inputVars=inVars, outputVars=outVars, bo
     ren = renameAll old new-- A function that renames old to new
     renS s = if s == old then new else s  -- A function that replaces old string with new strings
 
+
+-- | True if a named InjF is a multi-field "field constructor": every input is
+-- independently recoverable from the single output via a deconstructing inverse
+-- (Cons, TCons, and user-ADT constructors with >= 2 fields). These need product
+-- inference (each field inferred against its recovered sub-sample, results
+-- multiplied) rather than the additive PlusConstraint semantics of ordinary
+-- multi-argument InjFs. Single-field constructors are excluded; they are already
+-- handled correctly by the single-probabilistic-parameter InjF path.
+isFieldConstructor :: [ADTDecl] -> String -> Bool
+isFieldConstructor adts name =
+  case lookup name (globalFEnv adts) of
+    Just (FPair FDecl{inputVars=ins, outputVars=[_]} invs) ->
+         length ins >= 2
+      && length invs == length ins
+      && all (\FDecl{inputVars=iv, deconstructing=d} -> length iv == 1 && d) invs
+    _ -> False
 
 isHigherOrder :: [ADTDecl] -> String -> Bool
 isHigherOrder adts name =

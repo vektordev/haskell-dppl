@@ -62,9 +62,6 @@ toStub expr = case expr of
   (Uniform _)    -> StubUniform
   (Normal _)     -> StubNormal
   (Constant _ _) -> StubConstant
-  (Null _)       -> StubNull
-  Cons {}        -> StubCons
-  TCons {}       -> StubTCons
   (Var _ _)      -> StubVar
   InjF {}        -> StubInjF
   Lambda {}      -> StubLambda
@@ -109,9 +106,6 @@ tMapHead f expr = case expr of
   (Constant _ x) -> Constant (f expr) x
   (And _ a b) -> And (f expr) a b
   (Or _ a b) -> Or (f expr) a b
-  (Null _) -> Null (f expr)
-  (Cons _ a b) -> Cons (f expr) a b
-  (TCons _ a b) -> TCons (f expr) a b
   (Var _ x) -> Var (f expr) x
   (InjF _ x a) -> InjF (f expr) x a
   (Lambda _ name a) -> Lambda (f expr) name a
@@ -131,9 +125,6 @@ tMap f expr = case expr of
   (Constant _ x) -> Constant (f expr) x
   (And _ a b) -> And (f expr) (tMap f a) (tMap f b)
   (Or _ a b) -> Or (f expr) (tMap f a) (tMap f b)
-  (Null _) -> Null (f expr)
-  (Cons _ a b) -> Cons (f expr) (tMap f a) (tMap f b)
-  (TCons _ a b) -> TCons (f expr) (tMap f a) (tMap f b)
   (Var _ x) -> Var (f expr) x
   (InjF _ x a) -> InjF (f expr) x (map (tMap f) a)
   (Lambda _ name a) -> Lambda (f expr) name (tMap f a)
@@ -147,8 +138,6 @@ makeMain expr = Program [("main", expr)] [] []
 getBinaryConstructor :: Expr -> (TypeInfo -> Expr -> Expr -> Expr)
 getBinaryConstructor GreaterThan {} = GreaterThan
 getBinaryConstructor LessThan {} = LessThan
-getBinaryConstructor Cons {} = Cons
-getBinaryConstructor TCons {} = TCons
 getBinaryConstructor And {} = And
 getBinaryConstructor Or {} = Or
 getBinaryConstructor Apply {} = Apply
@@ -164,7 +153,6 @@ getNullaryConstructor :: Expr -> (TypeInfo -> Expr)
 getNullaryConstructor Uniform {} = Uniform
 getNullaryConstructor Normal {} = Normal
 getNullaryConstructor (Constant _ val) = (`Constant` val)
-getNullaryConstructor Null {} = Null
 getNullaryConstructor (Var _ x) = (`Var` x)
 getNullaryConstructor (Error _ e) = (`Error` e)
 
@@ -205,9 +193,6 @@ getSubExprs expr = case expr of
   (Constant _ _) -> []
   (And _ a b) -> [a,b]
   (Or _ a b) -> [a,b]
-  (Null _) -> []
-  (Cons _ a b) -> [a,b]
-  (TCons _ a b) -> [a,b]
   (Var _ _) -> []
   (InjF _ _ a) -> a
   (Lambda _ _ a) -> [a]
@@ -220,7 +205,6 @@ setSubExprs expr [] = case expr of
   Uniform t -> Uniform t
   Normal t -> Normal t
   Constant t x -> Constant t x
-  Null t -> Null t
   Var t x -> Var t x
   InjF t n _ -> InjF t n []
   Error t e -> Error t e
@@ -237,8 +221,6 @@ setSubExprs expr [a,b] = case expr of
   LessThan t _ _ -> LessThan t a b
   And t _ _ -> And t a b
   Or t _ _ -> Or t a b
-  Cons t _ _ -> Cons t a b
-  TCons t _ _ -> TCons t a b
   Apply t _ _ -> Apply t a b
   InjF t n _ -> InjF t n [a, b]
   _ -> error "unmatched expr in setSubExprs"
@@ -262,9 +244,6 @@ getTypeInfo expr = case expr of
   (Constant t _)        -> t
   (And t _ _)           -> t
   (Or t _ _)            -> t
-  (Null t)              -> t
-  (Cons t _ _)          -> t
-  (TCons t _ _)         -> t
   (Var t _)             -> t
   (InjF t _ _)          -> t
   (Lambda t _ _)        -> t
@@ -284,9 +263,6 @@ setTypeInfo expr t = case expr of
   (Constant _ a)        -> Constant t a
   (And _ a b)           -> And t a b
   (Or _ a b)            -> Or t a b
-  (Null _)              -> Null t
-  (Cons _ a b)          -> Cons t a b
-  (TCons _ a b)         -> TCons t a b
   (Var _ a)             -> Var t a
   (InjF _ a b)          -> InjF t a b
   (Lambda _ a b)        -> Lambda t a b
@@ -485,9 +461,6 @@ printFlat expr = case expr of
   (Constant _ x) -> "Constant (" ++ show x ++ ")"
   And {} -> "And"
   Or {} -> "Or"
-  (Null _) -> "Null"
-  Cons {} -> "Cons"
-  TCons {} -> "TCons"
   (Var _ a) -> "Var " ++ a
   (InjF _ (Named fname) _) -> "InjF (" ++ fname ++ ")"
   (Lambda _ name _) -> "\\" ++ name  ++ " -> "

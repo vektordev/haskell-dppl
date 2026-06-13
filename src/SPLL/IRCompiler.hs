@@ -22,7 +22,7 @@ import SPLL.Typing.ForwardChaining
 import SPLL.Typing.AlgebraicDataTypes
 import Data.Bifunctor (Bifunctor(bimap))
 import Utils
-import Control.Monad (foldM, when)
+import Control.Monad (foldM, forM, when)
 import GHC.Stack (HasCallStack)
 
 type CompilerMonad a = WriterT [(String, IRExpr)] Supply a
@@ -138,11 +138,11 @@ compileNormalExpr meta expr =
 -- handler and cannot be processed by toIRNormalParams.  Mirrors the
 -- hasOwnInferenceHandler predicate used by toIRInference.
 isNormalExtractable :: Expr -> Bool
-isNormalExtractable (Lambda _ _ body) = isNormalExtractable body
-isNormalExtractable (Apply  _ _ _)    = False
-isNormalExtractable (Cons   _ _ _)    = False
-isNormalExtractable (TCons  _ _ _)    = False
-isNormalExtractable _                 = True
+isNormalExtractable (Lambda _ _ body)            = isNormalExtractable body
+isNormalExtractable (Apply  _ _ _)               = False
+isNormalExtractable (InjF _ (Named "Cons")  _)   = False
+isNormalExtractable (InjF _ (Named "TCons") _)   = False
+isNormalExtractable _                            = True
 
 -- | Generate per-component normal functions for tuple expressions.
 -- For a tuple (fst, snd) where both parts are PNormal/PLogNormal, generates:
@@ -154,7 +154,7 @@ generateTupleComponentNormalFunctions :: CompilerMetadata -> String -> Expr -> [
 generateTupleComponentNormalFunctions meta baseName expr = go expr id
   where
     go (Lambda ti name body) wrap = go body (\e -> wrap (Lambda ti name e))
-    go (TCons _ fstExpr sndExpr) wrap =
+    go (InjF _ (Named "TCons") [fstExpr, sndExpr]) wrap =
       catMaybes
         [ generateComponentNormalFunction meta (baseName ++ "_normal_fst") (wrap fstExpr) (getTypeInfo fstExpr)
         , generateComponentNormalFunction meta (baseName ++ "_normal_snd") (wrap sndExpr) (getTypeInfo sndExpr)
@@ -405,11 +405,14 @@ toIRLogNormalParams _ e = error $ "toIRLogNormalParams: cannot extract LogNormal
 --in this implementation, I'll forget about the distinction between PDFs and Probabilities. Might need to fix that later.
 -- | Expressions that have their own toIRInference handlers and must not be
 -- intercepted by the PNormal/PLogNormal catch-alls below.
-hasOwnInferenceHandler :: Expr -> Bool
-hasOwnInferenceHandler (Apply _ _ _) = True
-hasOwnInferenceHandler (Cons  _ _ _) = True
-hasOwnInferenceHandler (TCons _ _ _) = True
-hasOwnInferenceHandler _             = False
+hasOwnInferenceHandler :: [ADTDecl] -> Expr -> Bool
+hasOwnInferenceHandler _    (Apply _ _ _)            = True
+-- Field constructors (Cons/TCons/user-ADT constructors) carry the PType of their
+-- fields, which can be PNormal even though the container itself cannot be
+-- inferred by toIRNormal. They have their own construction handler, so the
+-- PNormal/PLogNormal catch-alls must not intercept them.
+hasOwnInferenceHandler adts (InjF _ (Named name) _) = isFieldConstructor adts name
+hasOwnInferenceHandler _    _                        = False
 
 toIRInference :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad CompilationResult
 --toIRInference meta cumulative expr sample | trace (show expr) False = undefined
@@ -417,21 +420,21 @@ toIRInference :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad Com
 toIRInference meta True expr sample | rType (getTypeInfo expr) == TBool = do
   (pFalse, _, bcFalse) <- toIRInference meta False expr (IRConst (VBool False))
   return (IRIf sample (IRConst (VFloat 1)) pFalse, const0, bcFalse)
-toIRInference meta False e sample | pType (getTypeInfo e) == PNormal, not (hasOwnInferenceHandler e) = do
+toIRInference meta False e sample | pType (getTypeInfo e) == PNormal, not (hasOwnInferenceHandler (adtDecls meta) e) = do
   (mu, sigma) <- toIRNormalParams meta e
   let p = IROp OpDiv (IRDensity IRNormal (IROp OpDiv (IROp OpSub sample mu) sigma)) sigma
   return (p, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), IRConst (VFloat 1))
-toIRInference meta True e sample | pType (getTypeInfo e) == PNormal, not (hasOwnInferenceHandler e) = do
+toIRInference meta True e sample | pType (getTypeInfo e) == PNormal, not (hasOwnInferenceHandler (adtDecls meta) e) = do
   (mu, sigma) <- toIRNormalParams meta e
   return (IRCumulative IRNormal (IROp OpDiv (IROp OpSub sample mu) sigma), const0, IRConst (VFloat 1))
-toIRInference meta False e sample | pType (getTypeInfo e) == PLogNormal, not (hasOwnInferenceHandler e) = do
+toIRInference meta False e sample | pType (getTypeInfo e) == PLogNormal, not (hasOwnInferenceHandler (adtDecls meta) e) = do
   (mu, sigma) <- toIRLogNormalParams meta e
   let correctedSample = IROp OpDiv (IROp OpSub (IRUnaryOp OpLog sample) mu) sigma
   let p = IROp OpDiv (IRDensity IRNormal correctedSample) (IROp OpMult sigma sample)
   let dim = IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1)
   let negativeGuard x = IRIf (IROp OpGreaterThan sample const0) x const0
   return (negativeGuard p, dim, IRConst (VFloat 1))
-toIRInference meta True e sample | pType (getTypeInfo e) == PLogNormal, not (hasOwnInferenceHandler e) = do
+toIRInference meta True e sample | pType (getTypeInfo e) == PLogNormal, not (hasOwnInferenceHandler (adtDecls meta) e) = do
   (mu, sigma) <- toIRLogNormalParams meta e
   let correctedSample = IROp OpDiv (IROp OpSub (IRUnaryOp OpLog sample) mu) sigma
   let negativeGuard x = IRIf (IROp OpGreaterThan sample const0) x const0
@@ -713,18 +716,38 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample
     _ -> return (wrapInLambdas retP, wrapInLambdas retD, wrapInLambdas retBC)-}
 
 toIRInference _ _ (Apply TypeInfo{rType=_} _ _) _ = error "This instance of apply is not yet implemented"
-toIRInference meta cumulative (Cons _ hdExpr tlExpr) sample = do
-  headTuple <- lift (runWriterT (toIRInferenceSave meta cumulative hdExpr (IRHead sample))) <&> generateLetInBlock meta
-  tailTuple <- lift (runWriterT (toIRInferenceSave meta cumulative tlExpr (IRTail sample))) <&> generateLetInBlock meta
-  let dim = IRTFst . IRTSnd
-  mult <- (IRTFst headTuple, dim headTuple)  `multP` (IRTFst tailTuple, dim tailTuple)
-  return (IRIf (IROp OpEq sample (IRConst $ VList EmptyList)) (IRConst $ VFloat 0) (fst mult), IRIf (IROp OpEq sample (IRConst $ VList EmptyList)) (IRConst $ VFloat 0) (snd mult), IRIf (IROp OpEq sample (IRConst $ VList EmptyList)) (IRConst $ VFloat 0) (IROp OpPlus (IRTSnd (IRTSnd headTuple)) (IRTSnd (IRTSnd tailTuple))))
-  --return (IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (fst mult), IRIf (IROp OpEq sample (IRConst $ VList [])) (IRConst $ VFloat 0) (snd mult), IROp OpPlus headBranches tailBranches)
-toIRInference meta cumulative (TCons _ t1Expr t2Expr) sample = do
-  (t1P, t1Dim, t1Branches) <- toIRInferenceSave meta cumulative t1Expr (IRTFst sample)
-  (t2P, t2Dim, t2Branches) <- toIRInferenceSave meta cumulative t2Expr (IRTSnd sample)
-  mult <- (t1P, t1Dim) `multP` (t2P, t2Dim)
-  return (fst mult, snd mult, IROp OpPlus t1Branches t2Branches)
+-- Generic inference for multi-field constructor InjFs (Cons, TCons, user-ADT
+-- constructors). Each field is independently recoverable from the constructed
+-- sample via a deconstructing inverse, so we infer each field against its
+-- recovered sub-sample and combine: probabilities multiply, dimensions add,
+-- branch counts add. The components are independent, hence product (not the
+-- additive PlusConstraint) semantics. Fires for >= 1 probabilistic parameter;
+-- the all-deterministic case is handled by the generate-and-compare branch below.
+toIRInference meta cumulative (InjF TypeInfo{rType=rt} (Named name) params) sample
+  | isFieldConstructor (adtDecls meta) name && countProbParams params >= 1 = do
+  let resolvedName = resolveInjF rt name
+  FPair fwd inversions <- instantiate mkVariable (adtDecls meta) resolvedName
+  let FDecl {inputVars=inVars, outputVars=[outV]} = fwd
+  -- Inline the sample directly into each inverse body (instead of binding it to
+  -- outV) so the optimizer can fold deconstructions like head(prepend(s, ANY))
+  -- back to s. A let-binding referenced by every field plus the guard would
+  -- survive optimization and force materialising the reconstructed container.
+  let inlineSample = irMap (\e -> case e of IRVar n | n == outV -> sample; _ -> e)
+  fieldResults <- forM (zip inVars params) $ \(inV, p) -> do
+    let [inv] = filter (\FDecl {outputVars=[w]} -> w == inV) inversions
+    let FDecl {body=invBody, applicability=appT, deconstructing=decons} = inv
+    -- Deconstructing inverses need the Any-safe inference variant.
+    let probF = if decons then toIRInferenceSave else toIRInference
+    (fp, fd, fbc) <- probF meta cumulative p (inlineSample invBody)
+    return (fp, fd, fbc, inlineSample appT)
+  let ((p0, d0, bc0, _) : rest) = fieldResults
+  (combP, combDim) <- foldM (\acc (fp, fd, _, _) -> acc `multP` (fp, fd)) (p0, d0) rest
+  let combBC = foldl (\acc (_, _, fbc, _) -> IROp OpPlus acc fbc) bc0 rest
+  -- Guard the result by the conjunction of all field applicability tests (e.g.
+  -- the non-empty-list test carried by the Cons inverses).
+  let guardCond = foldr1 (IROp OpAnd) (map (\(_, _, _, a) -> a) fieldResults)
+  let guarded e = IRIf guardCond e const0
+  return (guarded combP, guarded combDim, guarded combBC)
 toIRInference meta cumulative (InjF ti (Named name) params) sample | isHigherOrder (adtDecls meta) name = do
   let adts = adtDecls meta
   let resolvedName = resolveInjF (rType ti) name
@@ -942,9 +965,6 @@ toIRInference meta True (InjF TypeInfo {rType=rt} (Named name) [left, right]) sa
   let (outerBinds, v1Body) = hoistInvariantBindings v1 innerSum
   setVariables outerBinds
   return (IREnumSum v1 enumListL v1Body, const0, const0)
-toIRInference _ _ (Null _) sample = do
-  expr <- indicator (IROp OpEq sample (IRConst $ VList EmptyList))
-  return (expr, const0, const0)
 toIRInference meta cumulative (Var TypeInfo {rType=rt} n) sample = do
   -- Variable might be a function
   let functionSuffix = if cumulative then "_integ" else "_prob"
@@ -1074,6 +1094,11 @@ compareValueExpr (TEither lr rr) v sample =
     (IRIf (IRIsLeft sample) (compareValueExpr lr (IRFromLeft v) (IRFromLeft sample)) (IRConst $ VFloat 0))
     (IRIf (IRIsRight sample) (compareValueExpr rr (IRFromRight v) (IRFromRight sample)) (IRConst $ VFloat 0))
 compareValueExpr (TVarR _) v sample = IRIf (IROp OpLessThan sample v) (IRConst $ VFloat 0) (IRConst $ VFloat 1)
+-- A deterministic list contributes an equality indicator: it is 1 exactly when
+-- the sample matches (in particular the empty-list base of a Cons chain yields
+-- 1, the multiplicative identity, so a list CDF reduces to the product of its
+-- element CDFs).
+compareValueExpr (ListOf _) v sample = IRIf (IROp OpEq sample v) (IRConst $ VFloat 1) (IRConst $ VFloat 0)
 compareValueExpr (TADT _) _ _= IRError "Not yet implemented" -- TODO implement for ADTs
 compareValueExpr rt _ _ = error $ "Comparison not implemented for type: " ++ show rt
 
@@ -1136,15 +1161,6 @@ toIRGenerate meta (Subtree _ a ix) = do
   a' <- toIRGenerate meta a
   return $ IRSubtree a' ix
 toIRGenerate _ (Constant _ x) = return (IRConst (fmap failConversion x))
-toIRGenerate _ (Null _) = return $ IRConst (VList EmptyList)
-toIRGenerate meta (Cons _ hd tl) = do
-  h <- toIRGenerate meta hd
-  t <- toIRGenerate meta tl
-  return $ IRCons h t
-toIRGenerate meta (TCons _ t1 t2) = do
-  t1' <- toIRGenerate meta t1
-  t2' <- toIRGenerate meta t2
-  return $ IRTCons t1' t2'
 toIRGenerate _ (Uniform _) = return $ IRSample IRUniform
 toIRGenerate _ (Normal _) = return $ IRSample IRNormal
 toIRGenerate meta (InjF ti (Named name) params) = do

@@ -188,13 +188,13 @@ subtree = Subtree makeTypeInfo
 -- Product Types
 
 cons :: Expr -> Expr -> Expr
-cons = Cons makeTypeInfo
+cons h t = injF "Cons" [h, t]
 
 (#:#) :: Expr -> Expr -> Expr
 (#:#) = cons
 
 nul :: Expr
-nul = Null makeTypeInfo
+nul = Constant makeTypeInfo (constructVList [])
 
 isNull :: Expr -> Expr
 isNull e = injF "isNull" [e]
@@ -206,7 +206,7 @@ ltail :: Expr -> Expr
 ltail x = injF "tail" [x]
 
 tuple :: Expr -> Expr -> Expr
-tuple = TCons makeTypeInfo
+tuple a b = injF "TCons" [a, b]
 
 tfst :: Expr -> Expr
 tfst x = injF "fst" [x]

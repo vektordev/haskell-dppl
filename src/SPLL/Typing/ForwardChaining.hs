@@ -224,12 +224,6 @@ hornClauseToIRExpr _ adts clause =
       let correctInv = invInjF !! (inv - 1)
       let renamedF = foldr (\(old, new) decl -> renameDecl old new decl) correctInv (zip (inputVars correctInv) preVars)
       body renamedF
-    ExprHornClause [preExpr1, preExpr2] _ (StubInfo StubTCons) 0 -> do
-      IRTCons (IRVar preExpr1) (IRVar preExpr2)
-    ExprHornClause [preExpr] _ (StubInfo StubTCons) 1 -> do
-      IRTFst (IRVar preExpr)
-    ExprHornClause [preExpr] _ (StubInfo StubTCons) 2 -> do
-      IRTSnd (IRVar preExpr)
     ParameterHornClause conc -> IRVar conc
     EquivalenceHornClause [p] _ _ _ -> IRVar p
     _ -> error $ "Cannot convert clause to IRExpr: " ++ show clause
@@ -288,12 +282,13 @@ progToHornClauses Program{functions=fs, adts=adts} _ = nub $ initialRun ++ topEq
 exprToHornClauses :: [ADTDecl] -> Expr -> [[HornClause]]
 exprToHornClauses adts e = case e of
   Constant _ v -> [[ExprHornClause [] (getChainName e) (ConstantInfo v) 0]]
-  -- Importantly the clauses drom the tuple are in separate groups, because they can be solved independently
-  -- We don't have a forward clause here, because it could create cycles
-  -- TODO: Check if how forward clauses could be integrated
-  TCons _ a b -> [ExprHornClause [getChainName e] (getChainName a) (StubInfo StubTCons) 1]:
-                 [ExprHornClause [getChainName e] (getChainName b) (StubInfo StubTCons) 2]:
-                  exprToHornClauses adts a ++ exprToHornClauses adts b
+  -- Field constructors (Cons/TCons/user-ADT constructors) emit only their
+  -- inverse clauses, each in its own group because the fields can be solved
+  -- independently. The forward clause is omitted deliberately: constructing the
+  -- container from its fields could create cycles in the chaining graph.
+  InjF _ (Named name) params
+    | isFieldConstructor adts name ->
+        map (: []) (tail (injFtoHornClause adts e)) ++ concatMap (exprToHornClauses adts) params
   InjF _ _ params -> injFtoHornClause adts e: concatMap (exprToHornClauses adts) params
   -- Some expressions are not invertable and therefor do not produce Horn clauses
   _ -> concatMap (exprToHornClauses adts) (getSubExprs e)
