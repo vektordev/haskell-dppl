@@ -6,7 +6,6 @@ module SPLL.Typing.RType
   , Scheme(..)
   , matches
   , greaterType
-  , isOnlyNumbers
   , satisfiesClass
   , constraintTV
   ) where
@@ -45,7 +44,7 @@ matches (TArrow left right) (TArrow left2 right2) = left `matches` left2 && righ
 matches (ListOf x) (ListOf y) = x `matches` y
 matches NullList NullList = True
 matches BottomTuple BottomTuple = True
-matches (GreaterType t1 t2) (GreaterType _ _) = case (greaterType t1 t2, greaterType t1 t2)
+matches (GreaterType t1 t2) (GreaterType t3 t4) = case (greaterType t1 t2, greaterType t3 t4)
   of
     (Just a, Just b) -> a `matches` b
     (Nothing, Nothing) -> True
@@ -69,15 +68,6 @@ greaterType (ListOf t1) NullList = Just $ ListOf t1
 greaterType NullList (ListOf t1)  = Just $ ListOf t1
 greaterType t1 t2 | t1 `matches` t2 =  Just t1
 greaterType _ _ = Nothing
-
-isOnlyNumbers :: RType -> Bool
-isOnlyNumbers TFloat = True
-isOnlyNumbers TInt = True
-isOnlyNumbers (_ `TArrow` b) = isOnlyNumbers b
-isOnlyNumbers (ListOf t) = isOnlyNumbers t
-isOnlyNumbers (Tuple a b) = isOnlyNumbers a && isOnlyNumbers b
-isOnlyNumbers (TEither a b) = isOnlyNumbers a && isOnlyNumbers b
-isOnlyNumbers _ = False
 
 satisfiesClass :: ClassConstraint -> RType -> Bool
 satisfiesClass (CNum _)        TFloat = True
