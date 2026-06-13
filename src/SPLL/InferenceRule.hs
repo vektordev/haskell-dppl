@@ -52,18 +52,6 @@ greaterThanSigmoid = InferenceRule
                        "greaterThanSigmoid"
                        (Forall [] [] (TFloat `TArrow` (TFloat `TArrow` TBool)))
 
-andRule :: InferenceRule
-andRule = InferenceRule
-        StubAnd
-        "and"
-        (Forall [] [] (TBool `TArrow` (TBool `TArrow` TBool)))
-
-orRule :: InferenceRule
-orRule = InferenceRule
-        StubOr
-        "or"
-        (Forall [] [] (TBool `TArrow` (TBool `TArrow` TBool)))
-
 injF2Left :: InferenceRule
 injF2Left = InferenceRule
              StubInjF
@@ -121,8 +109,6 @@ allAlgorithms = [
   lessThanLeft,
   lessThanRight,
   greaterThanSigmoid,
-  andRule,
-  orRule,
   injF2Left,
   injF2Right,
   injF2Enumerable,

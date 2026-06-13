@@ -54,6 +54,11 @@ discretesTags adts e = maybeToList valuesTag
     valuesTag = fmap DiscreteValues values
     values = case e of
       (Constant _ a) -> Just $ MultiDiscretes [a]
+      -- Comparisons are Bool-valued, hence finitely enumerable. Tagging them lets
+      -- and/or (and any boolean InjF above them) take the discrete-enumeration path.
+      -- (rType is not yet populated at enum-annotation time, so this is done by shape.)
+      (GreaterThan _ _ _) -> Just $ MultiDiscretes [VBool True, VBool False]
+      (LessThan _ _ _) -> Just $ MultiDiscretes [VBool True, VBool False]
       (InjF _ (Named name) params) -> do
         paramValues <- mapM getValuesFromExpr params
         let unpackedMultiVals = map multiValueToValueList paramValues

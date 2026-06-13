@@ -210,6 +210,15 @@ resolveInjF TInt "mult" = "multI"
 resolveInjF TInt "neg"  = "negI"
 resolveInjF _    n      = n
 
+-- | True if the named InjF is forward-only (no inverse declarations), e.g. and/or.
+-- Such ops cannot be inverted to recover an operand from the result, so their
+-- discrete inference enumerates both operand grids and filters by the forward value
+-- rather than inverting one side.
+isForwardOnly :: [ADTDecl] -> String -> Bool
+isForwardOnly adts name = case lookup name (globalFEnv adts) of
+  Just (FPair _ []) -> True
+  _                 -> False
+
 negInf :: IRExpr
 negInf = IRConst (VFloat (-9999999))
 
@@ -557,16 +566,6 @@ toIRInference meta False (LessThan _ left right) sample
     setVariables [(var2, integrate)]
     let returnExpr = IRIf sample (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))
     return (returnExpr, const0, integrateBranches)
-toIRInference meta cumulative (And (TypeInfo {rType = TBool}) a b) sample = do
-  (aP, aDim, aBC) <- toIRInference meta cumulative a (IRConst $ VBool True)
-  (bP, bDim, bBC) <- toIRInference meta cumulative b (IRConst $ VBool True)
-  (resP, resDim) <- (aP, aDim) `multP` (bP, bDim)
-  return $ (IRIf sample resP (IROp OpSub (IRConst $ VFloat 1) resP), resDim, IROp OpPlus aBC bBC)
-toIRInference meta cumulative (Or (TypeInfo {rType = TBool}) a b) sample = do
-  (aP, aDim, aBC) <- toIRInference meta cumulative a (IRConst $ VBool False)
-  (bP, bDim, bBC) <- toIRInference meta cumulative b (IRConst $ VBool False)
-  (resP, resDim) <- (aP, aDim) `multP` (bP, bDim)
-  return $ (IRIf sample (IROp OpSub (IRConst $ VFloat 1) resP) resP, resDim, IROp OpPlus aBC bBC)  -- p(a || b == True) == 1 - p(a == False) * p(b == False)
 toIRInference meta _ (ReadNN _ name symbol) sample = do
   nnRaw <- mkVariable "nn_raw"
   var <- mkVariable "callNN"
@@ -890,6 +889,28 @@ toIRInference meta cumulative (InjF TypeInfo {tags=_, rType=rt} (Named name) par
   let returnP = scale paramExpr
   let appTestExpr e = IRIf appTest e const0
   return (appTestExpr returnP, appTestExpr paramDim, appTestExpr paramBranches)
+-- Enumerate-both discrete path for forward-only binary InjFs (and/or). No point
+-- inverse exists, so loop the |L|x|R| grid and keep cells where forward(l,r) == sample,
+-- accumulating pLeft(l) * pRight(r). Mirrors the cumulative double-enum path below.
+toIRInference meta False (InjF TypeInfo {rType=rt} (Named name) [left, right]) sample
+  | isForwardOnly (adtDecls meta) (resolveInjF rt name)
+    && isEnumerable (tags (getTypeInfo left)) && isEnumerable (tags (getTypeInfo right))
+    && pType (getTypeInfo left) /= Deterministic && pType (getTypeInfo right) /= Deterministic = do
+  let resolvedName = resolveInjF rt name
+  let enumListL = head [x | DiscreteValues x <- tags (getTypeInfo left)]
+  let enumListR = head [x | DiscreteValues x <- tags (getTypeInfo right)]
+  fPair <- instantiate mkVariable (adtDecls meta) resolvedName
+  let FPair fwd _ = fPair
+  let FDecl {inputVars=[v1, v2], body=f} = fwd
+  (returnExpr, binds) <- lift $ runWriterT $ do
+    (pLeft, _, _) <- toIRInference meta False left (IRVar v1)
+    (pRight, _, _) <- toIRInference meta False right (IRVar v2)
+    return (IRIf (IROp OpEq f sample) (IROp OpMult pLeft pRight) (IRConst (VFloat 0)))
+  let (v2InvBinds, v2Body) = hoistInvariantBindings v2 (buildLetIns binds returnExpr)
+  let innerSum = buildLetIns v2InvBinds (IREnumSum v2 enumListR v2Body)
+  let (outerBinds, v1Body) = hoistInvariantBindings v1 innerSum
+  setVariables outerBinds
+  return (IREnumSum v1 enumListL v1Body, const0, const0)
 toIRInference meta False (InjF TypeInfo {rType=rt} (Named name) [left, right]) sample
   | isEnumerable (tags (getTypeInfo left)) && isEnumerable (tags (getTypeInfo right))
     && pType (getTypeInfo left) /= Deterministic && pType (getTypeInfo right) /= Deterministic = do
@@ -1149,14 +1170,6 @@ toIRGenerate meta (LessThan _ left right) = do
   l <- toIRGenerate meta left
   r <- toIRGenerate meta right
   return $ IROp OpLessThan l r
-toIRGenerate meta (And _ a b) = do
-  a' <- toIRGenerate meta a
-  b' <- toIRGenerate meta b
-  return $ IROp OpAnd a' b'
-toIRGenerate meta (Or _ a b) = do
-  a' <- toIRGenerate meta a
-  b' <- toIRGenerate meta b
-  return $ IROp OpOr a' b'
 toIRGenerate meta (ThetaI _ a ix) = do
   a' <- toIRGenerate meta a
   return $ IRTheta a' ix

@@ -67,8 +67,6 @@ exprToString (ThetaI _ expr i) = bracket expr ++ "[" ++ show i ++ "]"
 exprToString (Subtree _ expr i) = bracket expr ++ ".subtree(" ++ show i ++ ")"
 exprToString (GreaterThan _ e1 e2) = bracket e1 ++ " > " ++ bracket e2
 exprToString (LessThan _ e1 e2) = bracket e1 ++ " < " ++ bracket e2
-exprToString (And _ e1 e2) = bracket e1 ++ " && " ++ bracket e2
-exprToString (Or _ e1 e2) = bracket e1 ++ " || " ++ bracket e2
 exprToString (ReadNN _ name expr) = "readNN " ++ name ++ " " ++ bracket expr
 
 fnDeclToString :: FnDecl -> String

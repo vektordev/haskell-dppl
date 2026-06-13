@@ -55,8 +55,6 @@ toStub expr = case expr of
   IfThenElse {}  -> StubIfThenElse
   GreaterThan {} -> StubGreaterThan
   LessThan {}    -> StubLessThan
-  And {}         -> StubAnd
-  Or {}          -> StubOr
   (ThetaI _ _ _) -> StubThetaI
   (Subtree _ _ _)-> StubSubtree
   (Constant _ _) -> StubConstant
@@ -99,8 +97,6 @@ tMapHead f expr = case expr of
   (ThetaI _ a x) -> ThetaI (f expr) a x
   (Subtree _ a x) -> Subtree (f expr) a x
   (Constant _ x) -> Constant (f expr) x
-  (And _ a b) -> And (f expr) a b
-  (Or _ a b) -> Or (f expr) a b
   (Var _ x) -> Var (f expr) x
   (InjF _ x a) -> InjF (f expr) x a
   (Lambda _ name a) -> Lambda (f expr) name a
@@ -115,8 +111,6 @@ tMap f expr = case expr of
   (ThetaI _ a x) -> ThetaI (f expr) (tMap f a) x
   (Subtree _ a x) -> Subtree (f expr) (tMap f a) x
   (Constant _ x) -> Constant (f expr) x
-  (And _ a b) -> And (f expr) (tMap f a) (tMap f b)
-  (Or _ a b) -> Or (f expr) (tMap f a) (tMap f b)
   (Var _ x) -> Var (f expr) x
   (InjF _ x a) -> InjF (f expr) x (map (tMap f) a)
   (Lambda _ name a) -> Lambda (f expr) name (tMap f a)
@@ -129,8 +123,6 @@ makeMain expr = Program [("main", expr)] [] []
 getBinaryConstructor :: Expr -> (TypeInfo -> Expr -> Expr -> Expr)
 getBinaryConstructor GreaterThan {} = GreaterThan
 getBinaryConstructor LessThan {} = LessThan
-getBinaryConstructor And {} = And
-getBinaryConstructor Or {} = Or
 getBinaryConstructor Apply {} = Apply
 
 getUnaryConstructor :: Expr -> (TypeInfo -> Expr -> Expr)
@@ -177,8 +169,6 @@ getSubExprs expr = case expr of
   (ThetaI _ a _) -> [a]
   (Subtree _ a _) -> [a]
   (Constant _ _) -> []
-  (And _ a b) -> [a,b]
-  (Or _ a b) -> [a,b]
   (Var _ _) -> []
   (InjF _ _ a) -> a
   (Lambda _ _ a) -> [a]
@@ -201,8 +191,6 @@ setSubExprs expr [a] = case expr of
 setSubExprs expr [a,b] = case expr of
   GreaterThan t _ _ -> GreaterThan t a b
   LessThan t _ _ -> LessThan t a b
-  And t _ _ -> And t a b
-  Or t _ _ -> Or t a b
   Apply t _ _ -> Apply t a b
   InjF t n _ -> InjF t n [a, b]
   _ -> error "unmatched expr in setSubExprs"
@@ -222,8 +210,6 @@ getTypeInfo expr = case expr of
   (ThetaI t _ _)        -> t
   (Subtree t _ _)       -> t
   (Constant t _)        -> t
-  (And t _ _)           -> t
-  (Or t _ _)            -> t
   (Var t _)             -> t
   (InjF t _ _)          -> t
   (Lambda t _ _)        -> t
@@ -238,8 +224,6 @@ setTypeInfo expr t = case expr of
   (ThetaI _ a b)        -> ThetaI t a b
   (Subtree _ a b)       -> Subtree t a b
   (Constant _ a)        -> Constant t a
-  (And _ a b)           -> And t a b
-  (Or _ a b)            -> Or t a b
   (Var _ a)             -> Var t a
   (InjF _ a b)          -> InjF t a b
   (Lambda _ a b)        -> Lambda t a b
@@ -433,8 +417,6 @@ printFlat expr = case expr of
   (ThetaI _ _ i) -> "Theta_" ++ show i
   (Subtree _ _ i) -> "Subtree_" ++ show i
   (Constant _ x) -> "Constant (" ++ show x ++ ")"
-  And {} -> "And"
-  Or {} -> "Or"
   (Var _ a) -> "Var " ++ a
   (InjF _ (Named fname) _) -> "InjF (" ++ fname ++ ")"
   (Lambda _ name _) -> "\\" ++ name  ++ " -> "

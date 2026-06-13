@@ -107,6 +107,15 @@ notFwd = FDecl (Forall [] [] (TBool `TArrow` TBool)) ["a"] ["b"] (IRUnaryOp OpNo
 notInv :: FDecl
 notInv = FDecl (Forall [] [] (TBool `TArrow` TBool)) ["b"] ["a"] (IRUnaryOp OpNot (IRVar "b")) (IRConst (VBool True)) False [("b", IRConst (VFloat 1))]
 
+-- Boolean conjunction/disjunction: forward-only (no point inverse — given a&&b=False
+-- and a=False, b is free). They carry an empty inverse list, which routes them to the
+-- enumerate-both discrete inference path in IRCompiler rather than the invert-one path.
+-- Derivatives are placeholders (booleans are not differentiated).
+andFwd :: FDecl
+andFwd = FDecl (Forall [] [] (TBool `TArrow` (TBool `TArrow` TBool))) ["a", "b"] ["c"] (IROp OpAnd (IRVar "a") (IRVar "b")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))]
+orFwd :: FDecl
+orFwd = FDecl (Forall [] [] (TBool `TArrow` (TBool `TArrow` TBool))) ["a", "b"] ["c"] (IROp OpOr (IRVar "a") (IRVar "b")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))]
+
 eqFwd :: FDecl
 eqFwd = FDecl (Forall [TV "a"] [] (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TBool))) ["a", "b"] ["c"] (IROp OpEq (IRVar "a") (IRVar "b")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))]
 eqInv1 :: FDecl
@@ -214,6 +223,8 @@ globalFenv' = [("double", FPair doubleFwd [doubleInv]),
               ("mult", FPair multFwd [multInv1, multInv2]),
               ("multI", FPair multIFwd [multIInv1, multIInv2]),
               ("not", FPair notFwd [notInv]),
+              ("and", FPair andFwd []),
+              ("or", FPair orFwd []),
               ("eq", FPair eqFwd [eqInv1, eqInv2]),
               ("Cons", FPair consFwd [consInvHead, consInvTail]),
               ("TCons", FPair tConsFwd [tConsInvFst, tConsInvSnd]),

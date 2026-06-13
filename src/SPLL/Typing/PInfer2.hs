@@ -588,8 +588,6 @@ infer env expr = case expr of
 
   GreaterThan ti e1 e2 -> inferBinOp env ti e1 e2 compInf GreaterThan
   LessThan ti e1 e2   -> inferBinOp env ti e1 e2 compInf LessThan
-  And ti e1 e2        -> inferBinOp env ti e1 e2 downgradeInf And
-  Or ti e1 e2         -> inferBinOp env ti e1 e2 downgradeInf Or
 
   Var ti name ->
       case Map.lookup name (types env) of

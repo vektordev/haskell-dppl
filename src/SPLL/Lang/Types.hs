@@ -65,8 +65,6 @@ data ExprStub = StubIfThenElse
               | StubThetaI
               | StubSubtree
               | StubConstant
-              | StubAnd
-              | StubOr
               | StubVar
               | StubInjF
               | StubLambda

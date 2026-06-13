@@ -256,10 +256,10 @@ sfromRight x = injF "fromRight" [x]
 (#<#) = LessThan makeTypeInfo
 
 (#&&#) :: Expr -> Expr -> Expr
-(#&&#) = And makeTypeInfo
+(#&&#) a b = injF "and" [a, b]
 
 (#||#) :: Expr -> Expr -> Expr
-(#||#) = Or makeTypeInfo
+(#||#) a b = injF "or" [a, b]
 
 (#!#) :: Expr -> Expr
 (#!#) x = InjF makeTypeInfo (Named "not") [x]
