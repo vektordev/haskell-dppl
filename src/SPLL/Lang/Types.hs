@@ -17,7 +17,7 @@ module SPLL.Lang.Types
   , ValueList
   , Value
   , GenericValue(..)
-  , isVFloat, isVEither, isVTuple, isVADT
+  , isVEither, isVTuple, isVADT
   , MultiValue(..)
   , Tag(..)
   , InferenceRule(..)
@@ -152,7 +152,6 @@ data GenericValue a = VBool Bool
            | VList (GenericList (GenericValue a))
            | VTuple (GenericValue a) (GenericValue a)
            | VEither (Either (GenericValue a) (GenericValue a))
-           | VBranch (GenericValue a) (GenericValue a) String
            | VThetaTree ThetaTree
            | VClosure [(String, a)] String a
            | VADT String [GenericValue a]
@@ -170,7 +169,6 @@ instance Functor GenericValue where
   fmap f (VTuple x y) = VTuple (fmap f x) (fmap f y)
   fmap f (VEither (Left x)) = VEither (Left (fmap f x))
   fmap f (VEither (Right x)) = VEither (Right (fmap f x))
-  fmap f (VBranch x y s) = VBranch (fmap f x) (fmap f y) s
   fmap _ (VThetaTree x) = VThetaTree x
   fmap f (VClosure e n ex) = VClosure (map (Data.Bifunctor.second f) e) n (f ex)
   fmap f (VADT n adt) = VADT n (map (fmap f) adt)
@@ -178,33 +176,13 @@ instance Functor GenericValue where
   fmap _ VAny = VAny
 
 
-isVInt, isVBool, isVSymbol, isVFloat, isVUnit, isVList, isVTuple, isVEither, isVBranch, isVThetaTree, isVClosure, isVADT, isVAnyExcept :: GenericValue a -> Bool
-isVInt (VInt _) = True
-isVInt _ = False
-isVBool (VBool _) = True
-isVBool _ = False
-isVSymbol (VSymbol _) = True
-isVSymbol _ = False
-isVFloat (VFloat _) = True
-isVFloat _ = False
-isVUnit VUnit = True
-isVUnit _ = False
-isVList (VList _) = True
-isVList _ = False
+isVTuple, isVEither, isVADT :: GenericValue a -> Bool
 isVTuple (VTuple _ _) = True
 isVTuple _ = False
 isVEither (VEither _) = True
 isVEither _ = False
-isVBranch (VBranch _ _ _) = True
-isVBranch _ = False
-isVThetaTree (VThetaTree _) = True
-isVThetaTree _ = False
-isVClosure (VClosure _ _ _) = True
-isVClosure _ = False
 isVADT (VADT _ _) = True
 isVADT _ = False
-isVAnyExcept (VAnyExcept _) = True
-isVAnyExcept _ = False
 
 data MultiValue = MultiDiscretes [Value]
                 | MultiTuple MultiValue MultiValue
@@ -214,22 +192,6 @@ data MultiValue = MultiDiscretes [Value]
                 | MultiContinuous     -- ^ A continuous (Float) leaf, written "Real" in .ppl source.
                 | MultiAuto           -- ^ Placeholder ("_" in .ppl source): auto-derive from the RType.
                 deriving (Show, Eq)
-
-isMultiDiscretes, isMultiTuple, isMultiEither, isMultiADT, isMultiTypeRef, isMultiContinuous, isMultiAuto :: MultiValue -> Bool
-isMultiDiscretes (MultiDiscretes _) = True
-isMultiDiscretes _ = False
-isMultiTuple (MultiTuple _ _) = True
-isMultiTuple _ = False
-isMultiEither (MultiEither _ _) = True
-isMultiEither _ = False
-isMultiADT (MultiADT _) = True
-isMultiADT _ = False
-isMultiTypeRef (MultiTypeRef _) = True
-isMultiTypeRef _ = False
-isMultiContinuous MultiContinuous = True
-isMultiContinuous _ = False
-isMultiAuto MultiAuto = True
-isMultiAuto _ = False
 
 
 data Tag = DiscreteValues MultiValue
