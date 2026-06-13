@@ -48,7 +48,6 @@ createLambdaFromRType (_ `TArrow` rt) idx inner = IRLambda ("x" ++ show idx) (cr
 createLambdaFromRType _ _ inner = inner
 
 implicitFunctionImpl :: (Show a, HasCallStack) => [ADTDecl] -> String -> [GenericValue a] -> GenericValue a
---implicitFunctionImpl decls fName params | trace (show decls ++ " || " ++ fName ++ " || " ++ show params) False = undefined
 implicitFunctionImpl decls fName [param] | fName `elem` isFNames = isImpl (drop 2 fName) param
   where isFNames = concatMap (map (("is" ++) . fst) . constructors) decls
 implicitFunctionImpl decls fName param | fName `elem` constrFNames = VADT fName param

@@ -80,7 +80,6 @@ data RTypeError
   = UnificationFail RType RType
   | InfiniteType TVarR RType
   | UnboundVariable String
-  | Ambigious [Constraint]
   | UnificationMismatch [RType] [RType]
   | ExprInfo [String]
   | FalseParameterFail String

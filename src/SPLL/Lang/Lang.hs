@@ -353,7 +353,7 @@ unionMultiValues (MultiTuple ls1 rs1) (MultiTuple ls2 rs2) = MultiTuple (unionMu
 unionMultiValues (MultiADT constrs1) (MultiADT constrs2) = MultiADT (map (\cn -> (cn, unionConstr cn)) cNames)
   where
     cNames = nub $ map fst constrs1 ++ map fst constrs2
-    unionConstr cn = zipWith unionMultiValues (fromMaybe [] (lookup cn constrs1)) (fromMaybe [] (lookup cn constrs1))
+    unionConstr cn = zipWith unionMultiValues (fromMaybe [] (lookup cn constrs1)) (fromMaybe [] (lookup cn constrs2))
 
 -- | Attempt to derive the full MultiValue enumeration for an RType without any explicit
 -- annotation. Succeeds for types with a finite, statically-known set of values (Bool, Float

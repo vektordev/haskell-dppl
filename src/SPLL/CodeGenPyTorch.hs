@@ -95,24 +95,8 @@ onHead :: (a -> a) -> [a] -> [a]
 onHead f (x:xs) = f x : xs
 
 generateFunctions :: Bool -> IREnv -> [String]
---generateFunctions defs | trace (show defs) False = undefined
 --contrary to the julia backend, we want to aggregate gen and prob into one classes. Ugly implementation, but it'll do for now.
 generateFunctions genBoil env@(IREnv funcs adts consts) =
-{-  let
-    getName str
-      | "_prob" `isSuffixOf` str = iterate init str !! 5
-      | "_integ" `isSuffixOf` str = iterate init str !! 6
-      | otherwise = iterate init str !! 4
-    names = nub $ map (getName . fst3) defs
-    lut = [(name ++ "_gen", onHead toLower name ++ ".generate") | name <- names]
-       ++ [(name ++ "_prob", onHead toLower name ++ ".forward") | name <- names]
-       ++ [(name ++ "_integ", onHead toLower name ++ ".integrate") | name <- names] ++ stdLib
-    findDef name suffix = find (\def -> fst3 def == (name ++ suffix)) defs
-    getDef name suffix = case findDef name suffix of
-      Nothing -> Nothing
-      Just (name, doc, expr) -> Just $ (irMap (replaceCalls lut) expr, doc)
-    groups = [(name, getDef name "_gen", getDef name "_prob", getDef name "_integ")| name <- names]
-    fst3 (a, b, c) = a -}
     let lut = envToLUT env ++ stdLib
         callableNames = [ fromMaybe (n ++ "_gen") (lookup (n ++ "_gen") lut)
                         | IRFunGroup{groupName=n, genFun=Just (e, _)} <- funcs

@@ -234,17 +234,6 @@ getSize (Discretes _ (MultiDiscretes vals)) = length vals
 getSize (ADTPlan _ plans) = sum (map (sum . map getSize . snd) plans) + length plans
 getSize Continuous = 2
 
-getSizeRange :: Value -> Value -> Int
--- + 1's because we're inclusive on both ends.
-getSizeRange (VInt from) (VInt to) = (abs (from - to)) + 1
-getSizeRange (VBool x) (VBool y) = (if x == y then 0 else 1) + 1
-
-expandRange :: IRValue -> IRValue -> [IRValue]
-expandRange (VInt singular) (VInt singular2) | singular == singular2 = [VInt singular]
-expandRange (VInt from) (VInt to) = VInt from : (expandRange (VInt (from+1)) (VInt to))
-expandRange (VBool x) (VBool y) = if x == y then [VBool x] else [VBool x, VBool y]
---TODO: Test invariant: expanded range length equal to getSizeRange
-
 isDiscrete :: RType -> Bool
 isDiscrete TBool = True
 isDiscrete TInt = True

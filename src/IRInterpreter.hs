@@ -208,7 +208,7 @@ generate f neurals adts globalEnv env [] (IRUnaryOp OpLog a) = do
   case aVal of
     VFloat af -> return $ VFloat $ log af
     --VAny -> return VAny
-    _ -> error "Type error: Exp can only evaluate on a floating point numbers"
+    _ -> error "Type error: Log can only evaluate on a floating point numbers"
 generate f neurals adts globalEnv env [] (IRUnaryOp OpNeg a) = do
   aVal <- generate f neurals adts globalEnv env [] a
   case aVal of

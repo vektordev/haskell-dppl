@@ -10,10 +10,10 @@ module StandardLibrary
 import SPLL.IntermediateRepresentation (IRExpr(..), Operand (..))
 import SPLL.Lang.Types
 
-data StandardFunction = StandartFunction {functionName :: String, parameterCount :: Int, functionBody :: IRExpr}
+data StandardFunction = StandardFunction {functionName :: String, parameterCount :: Int, functionBody :: IRExpr}
 
 stdIndexOf :: StandardFunction
-stdIndexOf = StandartFunction {functionName = "indexOf", parameterCount = 2,
+stdIndexOf = StandardFunction {functionName = "indexOf", parameterCount = 2,
   functionBody=IRLambda "sample" (IRLambda "lst" 
     (IRIf (IROp OpEq (IRVar "lst") (IRConst $ VList EmptyList)) -- If lst is empty
       (IRError "Element not found in list") -- Then error
@@ -22,14 +22,14 @@ stdIndexOf = StandartFunction {functionName = "indexOf", parameterCount = 2,
         (IROp OpPlus (IRConst $ VInt 1) (invokeStandardFunction stdIndexOf [IRVar "sample", IRTail (IRVar "lst")])))))} -- else return 1 + indexOf(sample, tail(lst))
 
 stdListProd :: StandardFunction
-stdListProd = StandartFunction {functionName="listProd", parameterCount=1,
+stdListProd = StandardFunction {functionName="listProd", parameterCount=1,
   functionBody=IRLambda "lst"
     (IRIf (IROp OpEq (IRVar "lst") (IRConst $ VList EmptyList)) -- If lst is empty
       (IRConst $ VFloat 1) -- Then 1
       (IROp OpMult (IRHead (IRVar "lst")) (invokeStandardFunction stdListProd [IRTail (IRVar "lst")])))}
 
 stdListConcat :: StandardFunction
-stdListConcat = StandartFunction {functionName = "listConcat", parameterCount = 2,
+stdListConcat = StandardFunction {functionName = "listConcat", parameterCount = 2,
   functionBody = IRLambda "lst1" (IRLambda "lst2"
     (IRIf (IROp OpEq (IRVar "lst1") (IRConst $ VList EmptyList))
       (IRVar "lst2")
