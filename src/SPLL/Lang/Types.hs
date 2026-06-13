@@ -45,9 +45,6 @@ data Expr =
               | Constant TypeInfo Value
               | Lambda TypeInfo String Expr    -- (Currently) must use local context
               | Apply TypeInfo Expr Expr
-              -- Distributions
-              | Uniform TypeInfo
-              | Normal TypeInfo
               -- Parameters
               | ThetaI TypeInfo Expr Int
               | Subtree TypeInfo Expr Int
@@ -67,8 +64,6 @@ data ExprStub = StubIfThenElse
               | StubLessThan
               | StubThetaI
               | StubSubtree
-              | StubUniform
-              | StubNormal
               | StubConstant
               | StubAnd
               | StubOr

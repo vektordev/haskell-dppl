@@ -118,11 +118,13 @@ exprGens = [
 
 mkNormal :: [String] -> Int -> Gen Expr
 mkNormal varnames size = do
-  Normal <$> arbitrary
+  ti <- arbitrary
+  return $ Var ti "Normal"
 
 mkUniform :: [String] -> Int -> Gen Expr
 mkUniform varnames size = do
-  Uniform <$> arbitrary
+  ti <- arbitrary
+  return $ Var ti "Uniform"
   
 mkThetaI :: [String] -> Int -> Gen Expr
 mkThetaI varnames size = do

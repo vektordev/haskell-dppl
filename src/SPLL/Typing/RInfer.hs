@@ -198,10 +198,12 @@ showConstraint (Constraint a b (Just c)) = prettyRType a ++ " :==: " ++ prettyRT
 
 --build the basic type environment: Take all invertible functions; ignore their inverses
 basicTEnv :: [ADTDecl] -> TEnv
-basicTEnv adts = TypeEnv $ Map.fromList $ (adtRTs ++ injFRTs)
+basicTEnv adts = TypeEnv $ Map.fromList $ (adtRTs ++ injFRTs ++ distRTs)
   where
     adtRTs = map (Data.Bifunctor.second toScheme) (concatMap implicitFunctionRTypes adts)
     injFRTs = map (\(name, FPair FDecl {contract=ty} _) -> (name, ty)) (globalFEnv adts)
+    -- Distribution primitives are reserved-name Vars bound in the prelude; both draw a Float.
+    distRTs = map (Data.Bifunctor.second toScheme) [("Uniform", TFloat), ("Normal", TFloat)]
     -- plain RTypes as they exist in globalFEnv are implicitly forall'd. Make it explicit.
     toScheme :: RType -> Scheme
     toScheme rty = Forall freeVars [] rty

@@ -161,11 +161,13 @@ apply = Apply makeTypeInfo
 
 -- Distributions
 
+-- Distributions are prelude primitives: nullary named leaves bound to a primitive
+-- generator, represented as reserved-name Vars rather than dedicated constructors.
 uniform :: Expr
-uniform = Uniform makeTypeInfo
+uniform = Var makeTypeInfo "Uniform"
 
 normal :: Expr
-normal = Normal makeTypeInfo
+normal = Var makeTypeInfo "Normal"
 
 bernoulli :: Double -> Expr
 bernoulli p = uniform #<# constF p

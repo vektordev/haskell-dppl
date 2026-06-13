@@ -33,8 +33,6 @@ wrapInFunctionDeclarationIR e fName doc params = "-- " ++ doc ++ "\ndef " ++ fNa
 pPrintExpr :: Expr -> Int -> String
 pPrintExpr (Constant _ a) _ = pPrintValue a
 pPrintExpr (Var _ a) _ = a
-pPrintExpr (Uniform _) _ = "Uniform"
-pPrintExpr (Normal _) _ = "Normal"
 pPrintExpr (IfThenElse _ c t e) i = "if " ++ pPrintExpr c i ++ " then\n" ++ indent (i+1) ++ pPrintExpr t (i+1) ++"\n" ++ indent i ++ "else\n" ++ indent (i+1) ++ pPrintExpr e (i+1)
 pPrintExpr (InjF _ (Named f) args) i = f ++ "(" ++ intercalate ", " (map (`pPrintExpr` i) args) ++ ")"
 pPrintExpr (Lambda _ n e) i = "\\" ++ n ++ " -> " ++ pPrintExpr e (i+1)

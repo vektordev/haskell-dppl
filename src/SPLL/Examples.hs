@@ -188,7 +188,7 @@ testNN :: Program
 testNN = Program [("main", mNistAddExpr)] [("classifyMNist", TArrow TSymbol TInt, Just (MultiDiscretes (map VInt [0..9])))] []
 
 testDimProb :: Program
-testDimProb = Program [("main", IfThenElse makeTypeInfo (LessThan makeTypeInfo (Uniform makeTypeInfo) (Constant makeTypeInfo (VFloat 0.4))) (Constant makeTypeInfo $ VFloat 0.5) (Normal makeTypeInfo))] [] []
+testDimProb = Program [("main", IfThenElse makeTypeInfo (LessThan makeTypeInfo uniform (Constant makeTypeInfo (VFloat 0.4))) (Constant makeTypeInfo $ VFloat 0.5) normal)] [] []
 
 
 mNistAddExpr :: Expr

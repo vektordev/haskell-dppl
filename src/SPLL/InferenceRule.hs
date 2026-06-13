@@ -104,18 +104,6 @@ thetaSubTree = InferenceRule
           "thetaSubTree"
           (Forall [] [] (TThetaTree `TArrow` TThetaTree))
 
-uniform :: InferenceRule
-uniform = InferenceRule
-            StubUniform
-            "uniform"
-            (Forall [] [] TFloat)
-
-normal :: InferenceRule
-normal = InferenceRule
-           StubNormal
-           "normal"
-           (Forall [] [] TFloat)
-
 constant :: InferenceRule
 constant = InferenceRule
              StubConstant
@@ -127,8 +115,6 @@ allAlgorithms = [
   ifThenElse,
   theta,
   thetaSubTree,
-  uniform,
-  normal,
   constant,
   greaterThanLeft,
   greaterThanRight,

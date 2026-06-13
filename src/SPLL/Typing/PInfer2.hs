@@ -486,7 +486,9 @@ inferProg env (Program decls nns adts) = do
   let tvs = reverse tv_rev
   -- env building with (name, ptype) for infer methods
   let func_tvs = zip (map fst decls) tvs
-  let fenv = TypeEnv $ Map.union (Map.fromList func_tvs) (types env)
+  -- Distribution primitives are prelude-bound Vars (reserved names), seeded here so
+  -- `Var "Uniform"`/`Var "Normal"` resolve to their probabilistic types.
+  let fenv = TypeEnv $ Map.unions [Map.fromList func_tvs, types env, Map.fromList distributionPrimitives]
   -- infer the type and constraints of the declaration expressions
   cts <- mapM (infer fenv . snd) decls
   let Just expr = lookup "main" decls
@@ -497,6 +499,12 @@ inferProg env (Program decls nns adts) = do
   let tcs = zipWith makeEqConstraint tvs (map trd4 cts)
   -- combine all constraints
   return (s1, cs1 ++ concatMap snd4 cts ++ tcs , t1, Program (zip (map fst decls) (map frth4 cts)) nns adts)
+
+-- | Probabilistic types of the prelude-primitive distributions, keyed by their
+-- reserved Var names. Uniform has a known CDF (Integrate); Normal admits the
+-- closed-form Gaussian shortcut (PNormal).
+distributionPrimitives :: [(Name, PType)]
+distributionPrimitives = [("Uniform", Integrate), ("Normal", PNormal)]
 
 isEnumerable :: Expr -> Bool
 isEnumerable e = foldr (\tag b -> b || isEnum tag) False (tags (getTypeInfo e))
@@ -542,8 +550,6 @@ infer env expr = case expr of
 
   ThetaI ti a i  -> return (emptySubst, [], Deterministic, ThetaI (setPType ti Deterministic) a i)
   Subtree ti a i  -> return (emptySubst, [], Deterministic, Subtree (setPType ti Deterministic) a i)
-  Uniform ti  -> return (emptySubst, [], Integrate, Uniform (setPType ti Integrate))
-  Normal ti  -> return (emptySubst, [], PNormal, Normal (setPType ti PNormal))
   Constant ti val  -> return (emptySubst, [], Deterministic, Constant (setPType ti Deterministic) val)
   InjF ti (Named name) paramsExpr -> do
     p_inf <- mapM (infer env) paramsExpr

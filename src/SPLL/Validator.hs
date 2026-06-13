@@ -7,6 +7,10 @@ import Data.Maybe (isJust, isNothing)
 import PredefinedFunctions (globalFEnv, parameterCount)
 import Data.List (intersect)
 
+-- Reserved Var names bound to prelude-primitive distributions; not user declarations.
+distributionPrimitiveNames :: [String]
+distributionPrimitiveNames = ["Uniform", "Normal"]
+
 -- This function returns nothing if the program is valid and an error else
 validateProgram :: Program -> Either String ()
 -- We sequence the either monads so we either have a list of errors(Lefts) or discard the Rights
@@ -28,6 +32,7 @@ validateMainExists fn
 validateExpression :: Program -> Expr -> Expr -> Either String ()
 validateExpression Program {adts=adts} _ (InjF _ (Named name) _) | isNothing (lookup name (globalFEnv adts)) = Left ("Cannot find InjF: " ++ name)
 validateExpression Program {adts=adts} _ (InjF _ (Named name) params) | parameterCount adts name /= length params = Left("Wrong number of arguments for InjF " ++ name ++ "expected: " ++ show (parameterCount adts name) ++ " got: " ++ show (length params))
+validateExpression _ _ (Var _ name) | name `elem` distributionPrimitiveNames = Right ()
 validateExpression p topLevel (Var _ name) | usedBeforeDeclaration name topLevel && notElem name (getFunctionNames p) = Left ("Identifier is used without declaration: " ++ name)
 validateExpression _ _ (Lambda _ name body) | declarationsCount name body > 0 = Left ("Duplicate declaration of identifier (Shawdowing is not allowed): " ++ name)
 validateExpression Program {adts=adts} _ (Lambda _ name _) | isJust (lookup name (globalFEnv adts)) = Left ("Identifier name is already used by an InjF: " ++ name)

@@ -63,8 +63,6 @@ exprToString (Var _ name) = name
 exprToString (Constant _ value) = valToString value
 exprToString (Lambda _ arg body) = "\\" ++ arg ++ " -> " ++ bracket body
 exprToString (Apply _ f arg) = bracket f ++ " " ++ bracket arg
-exprToString (Uniform _) = "Uniform"
-exprToString (Normal _) = "Normal"
 exprToString (ThetaI _ expr i) = bracket expr ++ "[" ++ show i ++ "]"
 exprToString (Subtree _ expr i) = bracket expr ++ ".subtree(" ++ show i ++ ")"
 exprToString (GreaterThan _ e1 e2) = bracket e1 ++ " > " ++ bracket e2
@@ -212,9 +210,12 @@ prop_identifierAcceptsValid = forAll genValidIdentifier $ \ident ->
     Right parsed -> parsed == ident
     Left _ -> False
 
--- Reserved words should not parse as identifiers
+-- Reserved words should not parse as identifiers. The distribution keywords
+-- ("Uniform"/"Normal") are reserved so users can't rebind them, but they DO parse
+-- as standalone expressions (the prelude-primitive distributions), so they're
+-- excluded here.
 prop_rejectsReservedWords :: Property
-prop_rejectsReservedWords = forAll (elements reserved) $ \word ->
+prop_rejectsReservedWords = forAll (elements (filter (`notElem` ["Uniform", "Normal"]) reserved)) $ \word ->
   case tryParseExpr "test" word of
     Left _ -> True
     Right _ -> False
@@ -402,7 +403,7 @@ prop_normalMinusFloat =
       Right (Program [("main", expr)] _ _) ->
         counterexample ("Expected subtraction in: " ++ src ++ ", got: " ++ show expr) $
           case expr of
-            Apply _ (Normal _) _ -> False
+            Apply _ (Var _ "Normal") _ -> False
             _ -> True
       Right p -> counterexample ("Unexpected program structure: " ++ show p) False
       Left err -> counterexample (errorBundlePretty err) False

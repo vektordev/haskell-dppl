@@ -59,8 +59,6 @@ toStub expr = case expr of
   Or {}          -> StubOr
   (ThetaI _ _ _) -> StubThetaI
   (Subtree _ _ _)-> StubSubtree
-  (Uniform _)    -> StubUniform
-  (Normal _)     -> StubNormal
   (Constant _ _) -> StubConstant
   (Var _ _)      -> StubVar
   InjF {}        -> StubInjF
@@ -100,8 +98,6 @@ tMapHead f expr = case expr of
   (LessThan _ a b) -> LessThan (f expr) a b
   (ThetaI _ a x) -> ThetaI (f expr) a x
   (Subtree _ a x) -> Subtree (f expr) a x
-  (Uniform _) -> Uniform (f expr)
-  (Normal _) -> Normal (f expr)
   (Constant _ x) -> Constant (f expr) x
   (And _ a b) -> And (f expr) a b
   (Or _ a b) -> Or (f expr) a b
@@ -118,8 +114,6 @@ tMap f expr = case expr of
   (LessThan _ a b) -> LessThan (f expr) (tMap f a) (tMap f b)
   (ThetaI _ a x) -> ThetaI (f expr) (tMap f a) x
   (Subtree _ a x) -> Subtree (f expr) (tMap f a) x
-  (Uniform _) -> Uniform (f expr)
-  (Normal _) -> Normal (f expr)
   (Constant _ x) -> Constant (f expr) x
   (And _ a b) -> And (f expr) (tMap f a) (tMap f b)
   (Or _ a b) -> Or (f expr) (tMap f a) (tMap f b)
@@ -147,8 +141,6 @@ getUnaryConstructor (ReadNN _ x _) = (`ReadNN` x)
 getUnaryConstructor x = error ("getUnaryConstructor undefined for " ++ show x)
 
 getNullaryConstructor :: Expr -> (TypeInfo -> Expr)
-getNullaryConstructor Uniform {} = Uniform
-getNullaryConstructor Normal {} = Normal
 getNullaryConstructor (Constant _ val) = (`Constant` val)
 getNullaryConstructor (Var _ x) = (`Var` x)
 
@@ -184,8 +176,6 @@ getSubExprs expr = case expr of
   (LessThan _ a b) -> [a,b]
   (ThetaI _ a _) -> [a]
   (Subtree _ a _) -> [a]
-  (Uniform _) -> []
-  (Normal _) -> []
   (Constant _ _) -> []
   (And _ a b) -> [a,b]
   (Or _ a b) -> [a,b]
@@ -197,8 +187,6 @@ getSubExprs expr = case expr of
 
 setSubExprs :: Expr -> [Expr] -> Expr
 setSubExprs expr [] = case expr of
-  Uniform t -> Uniform t
-  Normal t -> Normal t
   Constant t x -> Constant t x
   Var t x -> Var t x
   InjF t n _ -> InjF t n []
@@ -233,8 +221,6 @@ getTypeInfo expr = case expr of
   (LessThan t _ _)      -> t
   (ThetaI t _ _)        -> t
   (Subtree t _ _)       -> t
-  (Uniform t)           -> t
-  (Normal t)            -> t
   (Constant t _)        -> t
   (And t _ _)           -> t
   (Or t _ _)            -> t
@@ -251,8 +237,6 @@ setTypeInfo expr t = case expr of
   (LessThan _ a b)      -> LessThan t a b
   (ThetaI _ a b)        -> ThetaI t a b
   (Subtree _ a b)       -> Subtree t a b
-  (Uniform _)           -> Uniform t
-  (Normal _)            -> Normal t
   (Constant _ a)        -> Constant t a
   (And _ a b)           -> And t a b
   (Or _ a b)            -> Or t a b
@@ -448,8 +432,6 @@ printFlat expr = case expr of
   LessThan {} -> "LessThan"
   (ThetaI _ _ i) -> "Theta_" ++ show i
   (Subtree _ _ i) -> "Subtree_" ++ show i
-  Uniform {} -> "Uniform"
-  Normal {} -> "Normal"
   (Constant _ x) -> "Constant (" ++ show x ++ ")"
   And {} -> "And"
   Or {} -> "Or"

@@ -338,7 +338,7 @@ irSqrt x = IRUnaryOp OpExp (IROp OpMult (IRConst (VFloat 0.5)) (IRUnaryOp OpLog 
 
 -- | Recursively extract (mu, sigma) as IRExprs from a PNormal-typed expression.
 toIRNormalParams :: CompilerMetadata -> Expr -> CompilerMonad (IRExpr, IRExpr)
-toIRNormalParams _ (Normal _) = return (IRConst (VFloat 0), IRConst (VFloat 1))
+toIRNormalParams _ (Var _ "Normal") = return (IRConst (VFloat 0), IRConst (VFloat 1))
 toIRNormalParams meta (InjF _ (Named "plus") [e0, e1])
   | pType (getTypeInfo e0) == PNormal, pType (getTypeInfo e1) == PNormal = do
       (mu0, s0) <- toIRNormalParams meta e0
@@ -439,10 +439,13 @@ toIRInference meta True e sample | pType (getTypeInfo e) == PLogNormal, not (has
   let correctedSample = IROp OpDiv (IROp OpSub (IRUnaryOp OpLog sample) mu) sigma
   let negativeGuard x = IRIf (IROp OpGreaterThan sample const0) x const0
   return (negativeGuard (IRCumulative IRNormal correctedSample), const0, IRConst (VFloat 1))
-toIRInference _ False (Normal _) sample = return (IRDensity IRNormal sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), IRConst (VFloat 1))
-toIRInference _ False (Uniform _) sample = return (IRDensity IRUniform sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), IRConst (VFloat 1))
-toIRInference _ True (Normal _) sample = return (IRCumulative IRNormal sample, const0, IRConst (VFloat 1))
-toIRInference _ True (Uniform _) sample = return (IRCumulative IRUniform sample, const0, IRConst (VFloat 1))
+-- Distribution primitives (reserved-name Vars). Normal usually reaches the PNormal
+-- catch-all above; these equations are the direct density/CDF leaves for Uniform and
+-- the defensive Normal fallback.
+toIRInference _ False (Var _ "Normal") sample = return (IRDensity IRNormal sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), IRConst (VFloat 1))
+toIRInference _ False (Var _ "Uniform") sample = return (IRDensity IRUniform sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), IRConst (VFloat 1))
+toIRInference _ True (Var _ "Normal") sample = return (IRCumulative IRNormal sample, const0, IRConst (VFloat 1))
+toIRInference _ True (Var _ "Uniform") sample = return (IRCumulative IRUniform sample, const0, IRConst (VFloat 1))
 toIRInference _ _ (Constant _ (VError e)) _ = return (IRError e, const0, const0)
 toIRInference _ False (Constant TypeInfo {rType=rt} value) sample = do
   let comp = case rt of
@@ -1162,8 +1165,9 @@ toIRGenerate meta (Subtree _ a ix) = do
   return $ IRSubtree a' ix
 toIRGenerate _ (Constant _ (VError e)) = return $ IRError e
 toIRGenerate _ (Constant _ x) = return (IRConst (fmap failConversion x))
-toIRGenerate _ (Uniform _) = return $ IRSample IRUniform
-toIRGenerate _ (Normal _) = return $ IRSample IRNormal
+-- Distribution primitives (reserved-name Vars): each occurrence is a fresh draw.
+toIRGenerate _ (Var _ "Uniform") = return $ IRSample IRUniform
+toIRGenerate _ (Var _ "Normal") = return $ IRSample IRNormal
 toIRGenerate meta (InjF ti (Named name) params) = do
   -- Assuming that the logic within packParamsIntoLetinsGen typeEnv is correct.
   -- You will need to process vars and params, followed by recursive calls to fwdExpr.

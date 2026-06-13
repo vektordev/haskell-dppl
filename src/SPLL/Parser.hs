@@ -76,7 +76,7 @@ symbol :: MonadParser m => String -> m String
 symbol = L.symbol sc
 
 reserved :: [String]
-reserved = ["data", "if", "then", "else", "let", "in", "theta", "subtree", "error", "ThetaTree", "Left", "Right", "Real"]
+reserved = ["data", "if", "then", "else", "let", "in", "theta", "subtree", "error", "ThetaTree", "Left", "Right", "Real", "Uniform", "Normal"]
 
 keyword :: MonadParser m => String -> m String
 keyword kw = lexeme $ try (string kw <* notFollowedBy (alphaNumChar <|> char '\'' <|> char '_'))
