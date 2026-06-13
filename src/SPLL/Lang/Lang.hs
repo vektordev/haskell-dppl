@@ -67,7 +67,6 @@ toStub expr = case expr of
   Lambda {}      -> StubLambda
   Apply {}       -> StubApply
   (ReadNN _ _ _) -> StubReadNN
-  Error _ _        -> StubError
 
 floatApproxEqThresh :: Double
 floatApproxEqThresh = 1e-10
@@ -111,7 +110,6 @@ tMapHead f expr = case expr of
   (Lambda _ name a) -> Lambda (f expr) name a
   (Apply _ a b) -> Apply (f expr) a b
   (ReadNN _ n a) -> ReadNN (f expr) n a
-  (Error _ e) -> Error (f expr) e
 
 tMap :: (Expr -> TypeInfo) -> Expr -> Expr
 tMap f expr = case expr of
@@ -130,7 +128,6 @@ tMap f expr = case expr of
   (Lambda _ name a) -> Lambda (f expr) name (tMap f a)
   (Apply _ a b) -> Apply (f expr) (tMap f a) (tMap f b)
   (ReadNN _ n a) -> ReadNN (f expr) n (tMap f a)
-  (Error _ e) -> Error (f expr) e
 
 makeMain :: Expr -> Program
 makeMain expr = Program [("main", expr)] [] []
@@ -154,7 +151,6 @@ getNullaryConstructor Uniform {} = Uniform
 getNullaryConstructor Normal {} = Normal
 getNullaryConstructor (Constant _ val) = (`Constant` val)
 getNullaryConstructor (Var _ x) = (`Var` x)
-getNullaryConstructor (Error _ e) = (`Error` e)
 
 tMapM :: Monad m => (Expr -> m TypeInfo) -> Expr -> m Expr
 tMapM f expr@(IfThenElse _ a b c) = do
@@ -198,7 +194,6 @@ getSubExprs expr = case expr of
   (Lambda _ _ a) -> [a]
   (Apply _ a b) -> [a, b]
   (ReadNN _ _ a) -> [a]
-  (Error _ _) -> []
 
 setSubExprs :: Expr -> [Expr] -> Expr
 setSubExprs expr [] = case expr of
@@ -207,7 +202,6 @@ setSubExprs expr [] = case expr of
   Constant t x -> Constant t x
   Var t x -> Var t x
   InjF t n _ -> InjF t n []
-  Error t e -> Error t e
   _ -> error "unmatched expr in setSubExprs"
 setSubExprs expr [a] = case expr of
   ThetaI t _ x -> ThetaI t a x
@@ -249,7 +243,6 @@ getTypeInfo expr = case expr of
   (Lambda t _ _)        -> t
   (Apply t _ _)         -> t
   (ReadNN t _ _)        -> t
-  (Error t _)           -> t
 
 setTypeInfo :: Expr -> TypeInfo -> Expr
 setTypeInfo expr t = case expr of
@@ -268,7 +261,6 @@ setTypeInfo expr t = case expr of
   (Lambda _ a b)        -> Lambda t a b
   (Apply _ a b)         -> Apply t a b
   (ReadNN _ a b)        -> ReadNN t a b
-  (Error _ e)           -> Error t e
 
 constructVList :: [GenericValue a] -> GenericValue a
 constructVList xs = VList $ foldr ListCont EmptyList xs
@@ -466,6 +458,5 @@ printFlat expr = case expr of
   (Lambda _ name _) -> "\\" ++ name  ++ " -> "
   Apply {} -> "Apply"
   (ReadNN _ name _) -> "ReadNN " ++ name
-  (Error _ e)       -> "Error: " ++ e
 
 

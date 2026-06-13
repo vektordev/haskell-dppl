@@ -136,7 +136,7 @@ letInDestructor (InjF _ (Named "left") [x]) = do
 letInDestructor (InjF _ (Named "right") [x]) = do
   x' <- letInDestructor x
   return $ \v -> x' (sfromRight v)
-letInDestructor (Constant _ (VList EmptyList)) = return $ \v b -> ifThenElse (isNull v) b (Error makeTypeInfo "RHS of letin is longer than LHS")
+letInDestructor (Constant _ (VList EmptyList)) = return $ \v b -> ifThenElse (isNull v) b (Constant makeTypeInfo (VError "RHS of letin is longer than LHS"))
 letInDestructor (InjF _ (Named "Cons") [x, xs]) = do
   x' <- letInDestructor x
   xs' <- letInDestructor xs
@@ -151,7 +151,7 @@ pError = do
   char '"'
   message <- many (noneOf "\"")
   char '"'
-  return (Error makeTypeInfo message)
+  return (Constant makeTypeInfo (VError message))
 
 pExpr :: MonadParser m => [ADTDecl] -> m Expr
 pExpr = expr

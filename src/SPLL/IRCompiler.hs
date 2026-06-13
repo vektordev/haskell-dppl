@@ -443,6 +443,7 @@ toIRInference _ False (Normal _) sample = return (IRDensity IRNormal sample, IRI
 toIRInference _ False (Uniform _) sample = return (IRDensity IRUniform sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), IRConst (VFloat 1))
 toIRInference _ True (Normal _) sample = return (IRCumulative IRNormal sample, const0, IRConst (VFloat 1))
 toIRInference _ True (Uniform _) sample = return (IRCumulative IRUniform sample, const0, IRConst (VFloat 1))
+toIRInference _ _ (Constant _ (VError e)) _ = return (IRError e, const0, const0)
 toIRInference _ False (Constant TypeInfo {rType=rt} value) sample = do
   let comp = case rt of
               TFloat   -> IROp OpApprox sample (IRConst (fmap failConversion value))
@@ -1008,7 +1009,6 @@ toIRInference meta cumulative (Var TypeInfo {rType=rt} n) sample = do
         return (expr, const0, const0)
     Nothing -> error ("Could not find name in TypeEnv: " ++ n)
 toIRInference _ _ (Subtree _ _ _) _ = error "Cannot infer prob on subtree expression. Please check your syntax"
-toIRInference _ _ (Error _ e) _ = return (IRError e, const0, const0)
 toIRInference _ _ x _ = error ("found no way to convert to IR: " ++ show x)
 
 multP :: (IRExpr, IRExpr) -> (IRExpr, IRExpr) -> CompilerMonad (IRExpr, IRExpr)
@@ -1160,6 +1160,7 @@ toIRGenerate meta (ThetaI _ a ix) = do
 toIRGenerate meta (Subtree _ a ix) = do
   a' <- toIRGenerate meta a
   return $ IRSubtree a' ix
+toIRGenerate _ (Constant _ (VError e)) = return $ IRError e
 toIRGenerate _ (Constant _ x) = return (IRConst (fmap failConversion x))
 toIRGenerate _ (Uniform _) = return $ IRSample IRUniform
 toIRGenerate _ (Normal _) = return $ IRSample IRNormal
@@ -1206,7 +1207,6 @@ toIRGenerate meta (Apply TypeInfo {rType=rt} l v) = do
 toIRGenerate meta (ReadNN _ name subexpr) = do
   sub <- toIRGenerate meta subexpr
   return $ IRApply (IRVar (name ++ "_auto_gen")) sub
-toIRGenerate _ (Error _ e) = return $ IRError e
 toIRGenerate _ x = error ("found no way to convert to IRGen: " ++ show x)
 
 

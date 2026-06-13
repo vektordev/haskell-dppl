@@ -615,8 +615,6 @@ infer env expr = case expr of
       let pt = if rType ti == TFloat then PNormal else Integrate
       return (s, cs, pt, ReadNN (setPType ti pt) name et)
 
-  Error ti e -> return (emptySubst, [], Deterministic, Error (setPType ti Deterministic) e)
-
 
 -- | The empty substitution
 emptySubst :: Subst

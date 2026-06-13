@@ -25,7 +25,7 @@ import SPLL.Typing.RType
 --import SPLL.Typing.PType( PType(..) )
 import SPLL.InferenceRule
 import PredefinedFunctions (globalFEnv, FPair(..), FDecl(..))
-import SPLL.Lang.Types (FnDecl, ADTDecl, CompilerError)
+import SPLL.Lang.Types (FnDecl, ADTDecl, CompilerError, GenericValue(..))
 import SPLL.Typing.AlgebraicDataTypes
 import Data.Bifunctor
 import Control.Monad (replicateM)
@@ -300,6 +300,11 @@ infer adts expr
     | specialTreatment expr =
       --we're dealing with StubConstant here.
       case expr of
+        (Constant ty (VError msg)) -> do
+          -- An error can occur in place of any type, so its type is unconstrained.
+          tVal <- fresh
+          let constraint = Constraint (rType ty) tVal (Just "Constant")
+          return (rType ty, [constraint], Constant ty (VError msg))
         (Constant ty val) -> do
           let tVal = getRType val
           let constraint = Constraint (rType ty) tVal (Just "Constant")

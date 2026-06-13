@@ -73,6 +73,7 @@ juliaVal (VThetaTree tt) = juliaValTree tt
 juliaVal VUnit = "nothing"
 juliaVal (VADT cName params) = cName ++ "(" ++ intercalate ", " (map juliaVal params) ++ ")"
 juliaVal VAny = "\"ANY\""
+juliaVal (VError e) = "throw(\"" ++ e ++ "\")"
 juliaVal x = error ("unknown juliaVal for " ++ show x)
 juliaMultiVal :: MultiValue -> String
 juliaMultiVal MultiContinuous = "(\"C\", nothing)"

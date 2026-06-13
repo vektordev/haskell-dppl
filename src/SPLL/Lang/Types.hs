@@ -58,7 +58,6 @@ data Expr =
               | Or TypeInfo Expr Expr
               -- Other
               | ReadNN TypeInfo String Expr
-              | Error TypeInfo String
               -- TODO: Needs Concat to achieve proper SPN-parity.
               deriving (Show, Eq)
 
@@ -78,7 +77,6 @@ data ExprStub = StubIfThenElse
               | StubLambda
               | StubApply
               | StubReadNN
-              | StubError
               deriving (Show, Eq)
 --Do not use this constructor, use makeTypeInfo instead
 data TypeInfo = TypeInfo
@@ -150,6 +148,7 @@ data GenericValue a = VBool Bool
            | VADT String [GenericValue a]
            | VAny -- Only used for marginal queries
            | VAnyExcept [a] -- Only used for marginal queries
+           | VError String
            deriving (Show, Eq)
 
 instance Functor GenericValue where
@@ -167,6 +166,7 @@ instance Functor GenericValue where
   fmap f (VADT n adt) = VADT n (map (fmap f) adt)
   fmap f (VAnyExcept x) = VAnyExcept (map f x)
   fmap _ VAny = VAny
+  fmap _ (VError s) = VError s
 
 
 isVTuple, isVEither, isVADT :: GenericValue a -> Bool

@@ -46,7 +46,6 @@ pPrintExpr (LessThan _ a b) i = "(" ++ pPrintExpr a i ++ " < " ++ pPrintExpr b i
 pPrintExpr (And _ a b) i = "(" ++ pPrintExpr a i ++ " && " ++ pPrintExpr b i ++ ")"
 pPrintExpr (Or _ a b) i = "(" ++ pPrintExpr a i ++ " || " ++ pPrintExpr b i ++ ")"
 pPrintExpr (ReadNN _ n e) i = "readNN(" ++ n ++ ", " ++ pPrintExpr e i ++ ")"
-pPrintExpr (Error _ e) _ = "error(" ++ e ++ ")"
 
 pPrintIRExpr :: IRExpr -> Int -> String
 pPrintIRExpr (IRIf cond thenExpr elseExpr) n =
@@ -110,6 +109,7 @@ pPrintValue (VEither a) = show a
 pPrintValue (VInt a) = show a
 pPrintValue (VSymbol a) = a
 pPrintValue VUnit = "()"
+pPrintValue (VError e) = "error(" ++ e ++ ")"
 
 indent :: Int -> String
 indent n = replicate (2 * n) ' '

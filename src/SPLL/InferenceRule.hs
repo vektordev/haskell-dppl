@@ -122,12 +122,6 @@ constant = InferenceRule
              "constant"
              (Forall [TV "a"] [] $ TVarR $ TV "a")
 
-errorr :: InferenceRule
-errorr = InferenceRule
-            StubError
-            "error"
-            (Forall [TV "a"] [] (TVarR $ TV "a"))
-
 allAlgorithms :: [InferenceRule]
 allAlgorithms = [
   ifThenElse,
@@ -146,6 +140,5 @@ allAlgorithms = [
   injF2Left,
   injF2Right,
   injF2Enumerable,
-  injF2ResolvesToDistribution,
-  errorr
+  injF2ResolvesToDistribution
   ]
