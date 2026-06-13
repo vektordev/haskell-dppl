@@ -21,6 +21,7 @@ import Data.Foldable
 import SPLL.Parser
 import TestParser (parserTests)
 import TestInternals (internalsTests)
+import TestRejection (rejectionTests)
 import TestEncodeProperties (encodeTests)
 import End2EndTesting (end2endTests, getAllTestFiles)
 import TestCaseParser (parseProgram, parseTestCases, TestCase(..), Backend(..))
@@ -547,6 +548,7 @@ main = do
     , corpusTests corpusPool
     , parserTests
     , internalsTests
+    , rejectionTests
     , encodeTests
     , e2e
     ]
