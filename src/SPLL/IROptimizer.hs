@@ -125,7 +125,11 @@ optimizeAssociativity x = x
 
 optimizeLetIns :: IRExpr -> IRExpr
 optimizeLetIns (IRLetIn name val scope)
-  | isSimple val = replaceAll (IRVar name) val scope
+  -- Only IRConst is safe to duplicate unconditionally. A bare IRVar can name a
+  -- nullary generator (e.g. coin_gen) whose evaluation samples randomness, so
+  -- inlining it into multiple uses re-draws the sample (see ir-effectful-var-purity).
+  -- Multi-use non-const bindings stay as a let; single use is still inlined below.
+  | isValue val = replaceAll (IRVar name) val scope
   | countUses name scope == 1 && not (usedInEnumSumBodyInvariant name val scope) = replaceAll (IRVar name) val scope
   | countUses name scope == 0 = scope
 optimizeLetIns ex = ex
@@ -183,12 +187,6 @@ simplify x = x
 countUses :: String -> IRExpr -> Int
 countUses var (IRVar a) | a == var = 1
 countUses var expr = sum (map (countUses var) (getIRSubExprs expr))
-
-isSimple :: IRExpr -> Bool
---isSimple (IRTheta a) = True
-isSimple (IRVar _) = True
-isSimple (IRConst _) = True
-isSimple _ = False
 
 replaceAll :: IRExpr -> IRExpr -> IRExpr -> IRExpr
 replaceAll find replaceWith = irMap (replace find replaceWith)

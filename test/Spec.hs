@@ -57,12 +57,14 @@ invalidTestCases = [invalidDuplicateDecl1, invalidDuplicateDecl2, invalidDuplica
 prop_CheckInvalidPrograms :: Property
 prop_CheckInvalidPrograms = forAll (elements invalidTestCases) checkInvalidPrograms
 
--- Corpus-driven metamorphic properties. Each invariant holds for the whole
--- selected slice (interpreter-routed, non-neural prob/cdf cases):
+-- Corpus-driven metamorphic properties. Each property enumerates its whole
+-- selected slice deterministically (interpreter-routed, non-neural prob/cdf
+-- cases; see forAllNamedIn), so any failing case is surfaced on every run rather
+-- than only when a random draw happens to select it. Each invariant:
 --  * ValidPrograms: every program the End2End interpreter runs must pass validateProgram.
 --  * SamplingMatchesPDF: the empirical frequency of a sampleable value estimates the
---    density the .tst file asserts; non-sampleable shapes (bools, eithers, ANY) are
---    discarded by the sampleable guard, zero-probability cases pass trivially.
+--    density the .tst file asserts; non-sampleable shapes (bools, eithers, ANY) and
+--    dim >= 2 cases are filtered out of the pool, zero-probability cases pass trivially.
 --  * TopK*: pruning may only zero out branches, never invent mass -- threshold 0 must
 --    reproduce exact inference and any threshold may only lower the probability.
 --  * ProbWithBranchCounting: branch counting adds a third result component without
@@ -79,15 +81,16 @@ corpusTests probPool = localOption (QuickCheckMaxRatio 20) $ testGroup "Corpus"
   -- dim 0 means the expectation refers to an atom, not a density: match drawn
   -- samples against it with a near-exact window (wide enough for float noise like
   -- 0.1+0.2, narrow enough to separate deliberately-close .tst atoms) instead of
-  -- the density-estimation window. dim >= 2 cases are discarded: the hit
-  -- probability of a window estimate scales with density * eps^dim, so reliable
-  -- multivariate estimates need prohibitively many samples; those cases are
-  -- value-checked exactly by End2End.Interpreter instead.
-  , testProperty "SamplingMatchesPDF" (forAllNamed (\tc@(_, _, _, (_, outDim)) ->
-      case outDim of
-        VFloat 0 -> testSamplingProb 1e-9 1000 5 tc
-        VFloat 1 -> testSamplingProb 0.05 1000 5 tc
-        _        -> False ==> False))
+  -- the density-estimation window. dim >= 2 cases (and non-sampleable shapes:
+  -- bools, eithers, ANY) are filtered out of the enumerated pool rather than
+  -- discarded at test time -- conjoin treats a discard as "gave up", not as a
+  -- pass. The hit probability of a window estimate scales with density * eps^dim,
+  -- so reliable multivariate estimates need prohibitively many samples; those
+  -- cases are value-checked exactly by End2End.Interpreter instead.
+  , testProperty "SamplingMatchesPDF" $ once $ conjoin
+      [ counterexample ("corpus case: " ++ n) (testSamplingProb (samplingEps outDim) 1000 5 tc)
+      | (n, tc@(_, inp, _, (_, outDim))) <- probPool
+      , sampleable inp, outDim == VFloat 0 || outDim == VFloat 1 ]
   , testProperty "TopKInterprets" (forAllNamed checkTopKInterprets)
   -- testCases/dice (recursive float dice) diverges under branch-counting
   -- compilation: the BC-compiled prob function never terminates although plain
@@ -101,8 +104,11 @@ corpusTests probPool = localOption (QuickCheckMaxRatio 20) $ testGroup "Corpus"
   , testProperty "TopKNeverInflates" (forAllNamed (checkTopKNeverInflates 0.1))
   ]
   where
-    forAllNamedIn pool f = forAll (elements pool) (\(n, tc) -> counterexample ("corpus case: " ++ n) (f tc))
+    -- Enumerate the whole (filtered) pool deterministically so any failing corpus
+    -- case surfaces on every run, rather than only when a random draw selects it.
+    forAllNamedIn pool f = once $ conjoin [counterexample ("corpus case: " ++ n) (f tc) | (n, tc) <- pool]
     forAllNamed = forAllNamedIn probPool
+    samplingEps outDim = if outDim == VFloat 0 then 1e-9 else 0.05
 
 prop_TopK :: Property
 prop_TopK = once $ ioProperty $ do
