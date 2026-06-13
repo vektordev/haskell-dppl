@@ -33,14 +33,6 @@ addOrGetFromGlobalStorage mv = do
       return varName
     Just var -> return var
 
-filet :: [a] -> [a]
-filet = init . tail
-
-wrap :: String -> [String] -> String -> [String]
-wrap hd [singleline] tl = [hd ++ singleline ++ tl]
-wrap hd block tl = (hd ++ head block) : indentOnce (filet block ++ [last block ++ tl])
-wrap _ [] _ = undefined
-
 indentOnce :: [String] -> [String]
 indentOnce = map ("  " ++)
 
@@ -91,11 +83,6 @@ juliaMultiVal (MultiADT constrs) = "(\"A\", [" ++ intercalate ", " (map (\(cName
   "(\"" ++ cName ++ "\", [" ++ intercalate ", " (map juliaMultiVal fields) ++ "])"
   ) constrs) ++ "] )"
 juliaMultiVal x = error ("unknown juliaMultiVal for " ++ show x)
-unlinesTrimLeft :: [String] -> String
-unlinesTrimLeft = intercalate "\n"
-
-onHead :: (a -> a) -> [a] -> [a]
-onHead f (x:xs) = f x : xs
 
 generateADTClasses :: [ADTDecl] -> [String]
 generateADTClasses decls = concatMap generateADTClass (concatMap constructors decls)

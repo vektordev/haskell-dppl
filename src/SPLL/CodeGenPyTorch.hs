@@ -37,30 +37,8 @@ addOrGetFromGlobalStorage mv = do
       return varName
     Just var -> return var
 
-filet :: [a] -> [a]
-filet = init . tail
-
-wrap :: String -> [String] -> String -> [String]
-wrap hd [singleline] tl = [hd ++ singleline ++ tl]
-wrap hd (block) tl = [hd ++ head block] ++ indentOnce (filet block ++ [last block ++ tl])
-wrap _ [] _ = undefined
-
-wrapMultiBlock :: [String] -> [[String]] -> [String]
-wrapMultiBlock [prefix, suffix] [block] = wrap prefix block suffix
-wrapMultiBlock (prefix:infixes) (block:blocks) = if length block == 1 then y else x
-  where
-    rest = wrapMultiBlock infixes blocks
-    x = [prefix ++ head block] ++ indentOnce (filet block ++ [last block ++ head rest]) ++ tail rest
-    y = [prefix ++ head block ++ head rest] ++ tail rest
-wrapMultiBlock _ _ = error "uneven list lengths in wrapMultiBlock"
-
 indentOnce :: [String] -> [String]
 indentOnce = map ("    " ++)
-
-spicyHead :: [a] -> a
-spicyHead [x] = x
-spicyHead [] = error "empty list in head"
-spicyHead _ = error "overfull list in head"
 
 pyOps :: Operand -> String
 pyOps OpPlus = "+"
@@ -113,15 +91,8 @@ pyMultiVal (MultiADT constrs) = "(\"A\", [" ++ intercalate ", " (map (\(cName, f
   "(" ++ cName ++ ", [" ++ intercalate ", " (map pyMultiVal fields) ++ "])"
   ) constrs) ++ "])"
 
-unlinesTrimLeft :: [String] -> String
-unlinesTrimLeft = intercalate "\n"
-
 onHead :: (a -> a) -> [a] -> [a]
 onHead f (x:xs) = f x : xs
-
-onLast :: (a -> a) -> [a] -> [a]
-onLast f [x] = [f x]
-onLast f (x:xs) = x : onLast f xs
 
 generateFunctions :: Bool -> IREnv -> [String]
 --generateFunctions defs | trace (show defs) False = undefined
