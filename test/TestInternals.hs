@@ -97,7 +97,7 @@ test_encodeTupleGaussianParams = testCase "encodeTupleGaussianParams" $ do
     Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
     Right p  -> return p
   -- Closed-form program: no outer params, so runEncode takes an empty arg list.
-  case runEncode defaultCompilerConfig prog [] of
+  case runEncode defaultCompilerConfig prog "tupleNN_auto" [] of
     Left err -> assertFailure ("runEncode failed: " ++ err)
     Right (VList lst) -> do
       let items = toList lst
@@ -131,7 +131,7 @@ test_encodeDiscreteSumsToOne = testCase "encodeDiscreteSumsToOne" $ do
     Right p  -> return p
   -- Try several different mock syms; each should give a prob vector summing to 1.
   let mockSyms = [ VTuple (VInt 0) (VInt s) | s <- [0, 1, 42, 100, 999] ]
-  mapM_ (\sym -> case runEncode defaultCompilerConfig prog [sym] of
+  mapM_ (\sym -> case runEncode defaultCompilerConfig prog "discreteNN_auto" [sym] of
     Left err -> assertFailure ("runEncode failed: " ++ err)
     Right (VList lst) -> do
       let items = toList lst
@@ -153,7 +153,7 @@ test_encodeGaussianSigmaPositive = testCase "encodeGaussianSigmaPositive" $ do
     Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
     Right p  -> return p
   let mockSyms = [ VTuple (VInt 0) (VInt s) | s <- [0, 1, 7, 42] ]
-  mapM_ (\sym -> case runEncode defaultCompilerConfig prog [sym] of
+  mapM_ (\sym -> case runEncode defaultCompilerConfig prog "gaussNN_auto" [sym] of
     Left err -> assertFailure ("runEncode failed: " ++ err)
     Right (VList lst) -> do
       let items = toList lst
@@ -164,6 +164,31 @@ test_encodeGaussianSigmaPositive = testCase "encodeGaussianSigmaPositive" $ do
         _ -> assertFailure ("expected [mu, sigma], got: " ++ show items)
     Right other -> assertFailure ("expected VList, got: " ++ show other)
     ) mockSyms
+
+-- A program with two decoder declarations gives two encode groups, decA_auto and
+-- decB_auto, each scoped to its own target type. runEncode addresses them by name,
+-- so both are independently reachable — not just whichever was declared first.
+-- decA enumerates [0,1,2] (3 slots); decB enumerates [0,1] (2 slots); the differing
+-- lengths confirm each target selects its own encode rather than a shared one.
+test_encodeTwoDecodersByName :: TestTree
+test_encodeTwoDecodersByName = testCase "encodeTwoDecodersByName" $ do
+  let src = unlines
+        [ "neural decA :: (Symbol -> Int) of [0, 1, 2]"
+        , "neural decB :: (Symbol -> Int) of [0, 1]"
+        , "main sym = if decB sym == 0 then decA sym else 0"
+        ]
+  prog <- case tryParseProgram "<test>" src of
+    Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
+    Right p  -> return p
+  let sym = VTuple (VInt 0) (VInt 42)
+      encodeLen target = case runEncode defaultCompilerConfig prog target [sym] of
+        Left err          -> assertFailure ("runEncode " ++ target ++ " failed: " ++ err) >> return (-1)
+        Right (VList lst) -> return (length (toList lst))
+        Right other       -> assertFailure ("expected VList, got: " ++ show other) >> return (-1)
+  lenA <- encodeLen "decA_auto"
+  lenB <- encodeLen "decB_auto"
+  assertEqual "decA_auto encode length" 3 lenA
+  assertEqual "decB_auto encode length" 2 lenB
 
 -- | True if `name` is directly applied (IRApply (IRVar name) _) anywhere inside
 -- an IREnumSum body.  Used to check that NN forward calls are hoisted out of loops.
@@ -318,6 +343,7 @@ internalsTests = testGroup "Internals"
       [ test_encodeTupleGaussianParams
       , test_encodeDiscreteSumsToOne
       , test_encodeGaussianSigmaPositive
+      , test_encodeTwoDecodersByName
       , test_nnHoistedOutOfEnumSum
       ]
   , test_missingMainFunction

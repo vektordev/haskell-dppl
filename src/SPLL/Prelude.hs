@@ -87,6 +87,7 @@ import Text.PrettyPrint.Annotated.HughesPJClass()
 import PrettyPrint (pPrintProg, pPrintIREnv)
 import Debug.Pretty.Simple
 import Data.Maybe (isJust)
+import Data.List (find)
 
 -- Flow control
 ifThenElse :: Expr -> Expr -> Expr -> Expr
@@ -334,14 +335,15 @@ runInteg conf p args sample = do
   compiled <- compile conf p
   runIntegC p compiled args sample
 
--- | Run the encode function for the first neural declaration in the program.
+-- | Run the encode function of the named function group (e.g. "decA_auto" for a
+-- decoder declaration `decA :: Symbol -> ...`).
 -- outerArgs mirrors main's outer parameter list: pass one IRValue per outer lambda in main,
 -- or an empty list for closed-form programs with no outer parameters.
-runEncode :: CompilerConfig -> Program -> [IRValue] -> Either CompilerError IRValue
-runEncode _ p _ | isLeft (validateProgram p) = fmap (error "Impossible case") (validateProgram p)
-runEncode conf p outerArgs = do
+runEncode :: CompilerConfig -> Program -> String -> [IRValue] -> Either CompilerError IRValue
+runEncode _ p _ _ | isLeft (validateProgram p) = fmap (error "Impossible case") (validateProgram p)
+runEncode conf p target outerArgs = do
   compiled <- compile conf p
-  runEncodeC p compiled outerArgs
+  runEncodeC p compiled target outerArgs
 
 -- Variants of the run* functions that take an already-compiled IREnv, so that
 -- callers issuing many queries against the same program pay for compilation once.
@@ -369,15 +371,19 @@ runIntegC p compiled args sample =
   let Just (integ, _) = integFun (lookupIREnv "main" compiled)
   in generateDet (neurals p) compiled (map IRConst (sample:args)) integ
 
-runEncodeC :: Program -> IREnv -> [IRValue] -> Either CompilerError IRValue
-runEncodeC p compiled outerArgs = do
+-- | Run the encode function of the function group named `target`. Each decoder
+-- declaration `name :: Symbol -> X` contributes a group `<name>_auto` whose encode
+-- is independently scoped to that declaration's own target type, so the target name
+-- selects which decoder's encode to run (rather than relying on declaration order).
+runEncodeC :: Program -> IREnv -> String -> [IRValue] -> Either CompilerError IRValue
+runEncodeC p compiled target outerArgs = do
   validateEncodeGaussian (adts p) (neurals p) compiled
   let IREnv groups _ _ = compiled
-  case filter (isJust . encodeFun) groups of
-    [] -> Left "No encode function found in compiled program"
-    (grp:_) ->
-      let Just (enc, _) = encodeFun grp
-      in generateDet (neurals p) compiled (map IRConst outerArgs) enc
+  case find ((== target) . groupName) groups of
+    Nothing  -> Left ("No function group named " ++ show target ++ " in compiled program")
+    Just grp -> case encodeFun grp of
+      Nothing       -> Left ("Function group " ++ show target ++ " has no encode function")
+      Just (enc, _) -> generateDet (neurals p) compiled (map IRConst outerArgs) enc
 
 printIfVerbose :: (Monad m) => CompilerConfig -> String -> m ()
 printIfVerbose CompilerConfig {verbose=v} s | v >= 1 = trace s (return ())

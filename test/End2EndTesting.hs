@@ -66,7 +66,8 @@ testInterpreter p compiledE (EncodingLengthTestCase name expectedLen) = ioProper
   -- Construct one mock sym per outer parameter of main (or none for closed-form programs).
   let paramCnt = progParameterCount p
       mockArgs = replicate paramCnt (VTuple (VInt 0) (VInt 42))
-  result <- try $ evaluate $ (compiledE >>= \c -> runEncodeC p c mockArgs) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
+      (declName, _, _) = head (neurals p)
+  result <- try $ evaluate $ (compiledE >>= \c -> runEncodeC p c (declName ++ "_auto") mockArgs) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of
     Right (Right (VList lst)) ->
       counterexample ("Encode length differs for test case " ++ name ++ ". Expected: " ++ show expectedLen ++ " Got: " ++ show (length lst)) (length lst == expectedLen)
@@ -76,10 +77,10 @@ testInterpreter p compiledE (EncodingLengthTestCase name expectedLen) = ioProper
 testInterpreter p compiledE (EncodingSlotTestCase name spikeVal idxOf expected) = ioProperty $ do
   -- Build a spiking mock sym: mode=1 spikes the mock NN at spikeVal.
   let mockSym = VTuple (VInt 1) (VTuple spikeVal (VInt 0))
-  let (_, TArrow _ target, nnTag) = head (neurals p)
+  let (declName, TArrow _ target, nnTag) = head (neurals p)
       plan = makePartitionPlan (adts p) target nnTag
       slotIdx = planIndexOf plan idxOf
-  result <- try $ evaluate $ (compiledE >>= \c -> runEncodeC p c [mockSym]) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
+  result <- try $ evaluate $ (compiledE >>= \c -> runEncodeC p c (declName ++ "_auto") [mockSym]) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of
     Right (Right (VList lst)) ->
       let items = toList lst
