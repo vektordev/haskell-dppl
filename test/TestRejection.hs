@@ -15,10 +15,11 @@ module TestRejection (rejectionTests) where
 -- that changes which rule fires is pinpointed to the offending program.
 
 import SPLL.Lang.Lang
-import SPLL.Lang.Types (Program(..), makeTypeInfo, GenericValue(..))
+import SPLL.Lang.Types (Program(..), makeTypeInfo, GenericValue(..), MultiValue(..))
+import SPLL.Typing.RType (RType(..))
 import SPLL.Examples
 import SPLL.Validator (validateProgram)
-import SPLL.Prelude (compile, uniform, constB, (#+#))
+import SPLL.Prelude (compile, uniform, constB, constF, (#+#))
 import SPLL.IntermediateRepresentation (defaultCompilerConfig)
 import SPLL.Typing.Infer (addTypeInfo)
 
@@ -47,6 +48,15 @@ noMainProg = Program [("notMain", uniform)] [] [] []
 anyInProgramProg :: Program
 anyInProgramProg = Program [("main", Constant makeTypeInfo VAny)] [] [] []
 
+-- Two PartitionPlan annotations for the same RType (Int) that disagree must be
+-- rejected as a conflicting registration -- not reachable via the invalid* family,
+-- so it is constructed locally here (see SPLL.Validator.validateEncodeDecls).
+encodeCollisionProg :: Program
+encodeCollisionProg = Program [("main", constF 1.0)] [] []
+  [ (TInt, MultiDiscretes [VInt 0, VInt 1])
+  , (TInt, MultiDiscretes [VInt 0, VInt 1, VInt 2])
+  ]
+
 -- Each entry: (case name, program, distinctive substring of the expected error).
 -- The substring identifies *which* validation rule should fire, so we catch both
 -- "should have been rejected but wasn't" and "rejected for the wrong reason".
@@ -64,6 +74,7 @@ validatorCases =
   , ("reservedName2",    invalidReservedName2,   "already used by an InjF")
   , ("noMain",           noMainProg,             "no 'main' function")
   , ("anyInProgram",     anyInProgramProg,       "ANY may not be used")
+  , ("encodeCollision",  encodeCollisionProg,    "conflicting PartitionPlan annotations")
   ]
 
 validatorTests :: TestTree

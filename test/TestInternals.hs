@@ -191,6 +191,26 @@ test_encodeTwoDecodersByName = testCase "encodeTwoDecodersByName" $ do
   assertEqual "decA_auto encode length" 3 lenA
   assertEqual "decB_auto encode length" 3 lenB
 
+-- A standalone "neural encode :: Int of [...]" declaration registers a PartitionPlan
+-- annotation for Int without declaring any callable network. A decoder targeting Int
+-- with no "of" clause of its own picks up that registry entry, so its encode group
+-- still produces the registered number of slots.
+test_encodeUsesStandaloneRegistration :: TestTree
+test_encodeUsesStandaloneRegistration = testCase "encodeUsesStandaloneRegistration" $ do
+  let src = unlines
+        [ "neural encode :: Int of [0, 1, 2]"
+        , "neural decA :: (Symbol -> Int)"
+        , "main sym = decA sym"
+        ]
+  prog <- case tryParseProgram "<test>" src of
+    Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
+    Right p  -> return p
+  let sym = VTuple (VInt 0) (VInt 42)
+  case runEncode defaultCompilerConfig prog "decA_auto" [sym] of
+    Left err          -> assertFailure ("runEncode decA_auto failed: " ++ err)
+    Right (VList lst) -> assertEqual "decA_auto encode length" 3 (length (toList lst))
+    Right other       -> assertFailure ("expected VList, got: " ++ show other)
+
 -- | True if `name` is directly applied (IRApply (IRVar name) _) anywhere inside
 -- an IREnumSum body.  Used to check that NN forward calls are hoisted out of loops.
 nnCallInsideEnumSum :: String -> IRExpr -> Bool
@@ -345,6 +365,7 @@ internalsTests = testGroup "Internals"
       , test_encodeDiscreteSumsToOne
       , test_encodeGaussianSigmaPositive
       , test_encodeTwoDecodersByName
+      , test_encodeUsesStandaloneRegistration
       , test_nnHoistedOutOfEnumSum
       ]
   , test_missingMainFunction

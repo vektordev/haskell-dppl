@@ -444,6 +444,28 @@ prop_underscorePrefixedIdentifierIsTypeRef =
        Right p -> counterexample ("Unexpected program structure: " ++ show p) False
        Left err -> counterexample (errorBundlePretty err) False
 
+-- "neural encode :: T of M" registers a standalone PartitionPlan annotation for T in
+-- Program.encodeDecls (see SPLL.Lang.Types.encodeDecls), without declaring a callable
+-- neural network -- "encode" is a reserved name and contributes nothing to 'neurals'.
+prop_neuralEncodeRegistersPartitionPlan :: Property
+prop_neuralEncodeRegistersPartitionPlan =
+  let src = "neural encode :: Int of [0, 1, 2]\nmain = 0\n"
+  in case tryParseProgram "" src of
+       Right (Program _ neuralDecls _ enc) ->
+         counterexample ("Unexpected neurals: " ++ show neuralDecls) (null neuralDecls)
+         .&&. (enc === [(TInt, MultiDiscretes [VInt 0, VInt 1, VInt 2])])
+       Left err -> counterexample (errorBundlePretty err) False
+
+-- Every NeuralDecl's "of" clause is sugar that also registers its target type's
+-- MultiValue into Program.encodeDecls -- this is what lets a later decoder for the
+-- same RType, declared without its own "of" clause, pick up the same PartitionPlan.
+prop_neuralOfClauseRegistersSugar :: Property
+prop_neuralOfClauseRegistersSugar =
+  let src = "neural decA :: (Symbol -> Int) of [0, 1, 2]\nmain sym = decA sym\n"
+  in case tryParseProgram "" src of
+       Right (Program _ _ _ enc) -> enc === [(TInt, MultiDiscretes [VInt 0, VInt 1, VInt 2])]
+       Left err -> counterexample (errorBundlePretty err) False
+
 return []
 
 parserTests :: TestTree
