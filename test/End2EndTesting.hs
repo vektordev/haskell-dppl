@@ -168,12 +168,12 @@ discreteProbsNormalized p compiledE = case compiledE of
         randomParams :: RandomGen g => Rand g [IRValue]
         randomParams = replicateM paramCnt (fmap (\x -> VTuple (VInt 0) (VInt x)) (getRandomR (1, 100000)))
         randomParamsForSamples = evalRand (replicateM sampleCnt randomParams) (mkStdGen 42)
-        gens = map (\args -> generateRand (neurals p) compiled (map IRConst args) genExpr) randomParamsForSamples
+        gens = map (\args -> generateRand (neurals p) (encodeDecls p) compiled (map IRConst args) genExpr) randomParamsForSamples
         pSamples = evalRand (sequence gens) (mkStdGen 42)
         uniqueSamples = nub pSamples
         counts = map (\u -> length (filter (== u) pSamples)) uniqueSamples
     -- The per-sample prob queries are independent and pure; force them in parallel.
-    probResults <- parEval (map (\sam -> generateDet (neurals p) compiled (map IRConst (sam:params)) probExpr) uniqueSamples)
+    probResults <- parEval (map (\sam -> generateDet (neurals p) (encodeDecls p) compiled (map IRConst (sam:params)) probExpr) uniqueSamples)
     return $ case sequence probResults of
         Left err -> counterexample err False
         Right t

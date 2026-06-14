@@ -1,11 +1,13 @@
 module SPLL.Validator (
   validateProgram
 ) where
-import SPLL.Lang.Types (Program(..), GenericValue(..), FnDecl)
+import SPLL.Lang.Types (Program(..), GenericValue(..), FnDecl, MultiValue)
 import SPLL.Lang.Lang (Expr(..), getSubExprs, getFunctionNames, InjFName(..))
+import SPLL.Typing.RType (RType)
 import Data.Maybe (isJust, isNothing)
 import PredefinedFunctions (globalFEnv, parameterCount)
-import Data.List (intersect)
+import Data.List (intersect, groupBy, sortOn, nub)
+import Data.Function (on)
 
 -- Reserved Var names bound to prelude-primitive distributions; not user declarations.
 distributionPrimitiveNames :: [String]
@@ -14,13 +16,27 @@ distributionPrimitiveNames = ["Uniform", "Normal"]
 -- This function returns nothing if the program is valid and an error else
 validateProgram :: Program -> Either String ()
 -- We sequence the either monads so we either have a list of errors(Lefts) or discard the Rights
-validateProgram p@Program{functions=fn, neurals=_} = sequence_ (validateMainExists fn : exprValidations)
+validateProgram p@Program{functions=fn, neurals=_, encodeDecls=enc} = sequence_ (validateMainExists fn : validateEncodeDecls enc : exprValidations)
   where
     -- Validate all expressions potentially unsing the context of their top level declaration and their program
     exprValidations = concatMap (\(_, expr) -> validateAllSubexpressions p expr expr) fn
     -- All Results from all subexpressions
     validateAllSubexpressions :: Program -> Expr -> Expr -> [Either String ()]
     validateAllSubexpressions p topLevel expr = validateExpression p topLevel expr : concatMap (validateAllSubexpressions p topLevel) (getSubExprs expr)
+
+-- | The PartitionPlan annotation registry (explicit "neural encode :: T of M"
+-- declarations, plus sugar from every NeuralDecl's "of" clause) may register a given
+-- RType at most once: two differing MultiValue annotations for the same type is a
+-- loud, hard error. Identical re-registrations (e.g. a decoder's own "of" clause
+-- agreeing with an explicit "neural encode" entry for the same type) are not a conflict.
+validateEncodeDecls :: [(RType, MultiValue)] -> Either String ()
+validateEncodeDecls decls = mapM_ checkGroup grouped
+  where
+    grouped = groupBy ((==) `on` fst) (sortOn fst decls)
+    checkGroup g = case nub (map snd g) of
+      (_:_:_) -> Left ("Compiler Error: conflicting PartitionPlan annotations for type "
+                        ++ show (fst (head g)) ++ ": " ++ show (map snd g))
+      _ -> Right ()
 
 -- A program must declare a "main" function, as it is the entry point compiled
 -- to the generate/probability/integrate functions invoked by runGen/runProb/runInteg.

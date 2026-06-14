@@ -351,7 +351,7 @@ runEncode conf p target outerArgs = do
 runGenC :: (RandomGen g) => Program -> IREnv -> [IRValue] -> Rand g IRValue
 runGenC p compiled args =
   let Just (gen, _) = genFun (lookupIREnv "main" compiled)
-  in generateRand (neurals p) compiled (map IRConst args) gen
+  in generateRand (neurals p) (encodeDecls p) compiled (map IRConst args) gen
 
 runProbC :: Program -> IREnv -> [IRValue] -> IRValue -> Either CompilerError IRValue
 runProbC p compiled args x =
@@ -359,7 +359,7 @@ runProbC p compiled args x =
       -- topK-compiled prob functions take an accumulated-probability parameter
       -- right after the sample; seed it with 1.0 at the query root.
       args' = if compiledWithTopK compiled then x : VFloat 1.0 : args else x : args
-  in generateDet (neurals p) compiled (map IRConst args') prob
+  in generateDet (neurals p) (encodeDecls p) compiled (map IRConst args') prob
 
 -- The IRCompiler emits the TOP_K_CUTOFF constant iff topKThreshold was set,
 -- so a compiled IREnv carries its own marker for the extra acc_prob parameter.
@@ -369,7 +369,7 @@ compiledWithTopK (IREnv _ _ consts) = isJust (lookup "TOP_K_CUTOFF" consts)
 runIntegC :: Program -> IREnv -> [IRValue] -> IRValue -> Either CompilerError IRValue
 runIntegC p compiled args sample =
   let Just (integ, _) = integFun (lookupIREnv "main" compiled)
-  in generateDet (neurals p) compiled (map IRConst (sample:args)) integ
+  in generateDet (neurals p) (encodeDecls p) compiled (map IRConst (sample:args)) integ
 
 -- | Run the encode function of the function group named `target`. Each decoder
 -- declaration `name :: Symbol -> X` contributes a group `<name>_auto` whose encode
@@ -377,13 +377,13 @@ runIntegC p compiled args sample =
 -- selects which decoder's encode to run (rather than relying on declaration order).
 runEncodeC :: Program -> IREnv -> String -> [IRValue] -> Either CompilerError IRValue
 runEncodeC p compiled target outerArgs = do
-  validateEncodeGaussian (adts p) (neurals p) compiled
+  validateEncodeGaussian (adts p) (encodeDecls p) (neurals p) compiled
   let IREnv groups _ _ = compiled
   case find ((== target) . groupName) groups of
     Nothing  -> Left ("No function group named " ++ show target ++ " in compiled program")
     Just grp -> case encodeFun grp of
       Nothing       -> Left ("Function group " ++ show target ++ " has no encode function")
-      Just (enc, _) -> generateDet (neurals p) compiled (map IRConst outerArgs) enc
+      Just (enc, _) -> generateDet (neurals p) (encodeDecls p) compiled (map IRConst outerArgs) enc
 
 printIfVerbose :: (Monad m) => CompilerConfig -> String -> m ()
 printIfVerbose CompilerConfig {verbose=v} s | v >= 1 = trace s (return ())

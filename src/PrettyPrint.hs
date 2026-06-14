@@ -14,7 +14,7 @@ import Data.Functor ((<&>))
 import Data.Maybe (catMaybes)
 
 pPrintProg :: Program -> String
-pPrintProg (Program decls _ _) = intercalate "\n\n" (map (\f -> wrapInFunctionDeclaration (snd f) (fst f) []) decls)
+pPrintProg (Program decls _ _ _) = intercalate "\n\n" (map (\f -> wrapInFunctionDeclaration (snd f) (fst f) []) decls)
 
 pPrintIREnv :: IREnv -> String
 pPrintIREnv (IREnv funcs _ consts) = intercalate "\n\n" $

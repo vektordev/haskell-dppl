@@ -48,13 +48,13 @@ typechecks p = case tryAddRTypeInfo p of
 test_plusFloat :: TestTree
 test_plusFloat = testCase "plusFloat" $
   assertBool "plus TFloat TFloat should typecheck" $
-    typechecks (Program [("main", constF 1.0 #+# constF 2.0)] [] [])
+    typechecks (Program [("main", constF 1.0 #+# constF 2.0)] [] [] [])
 
 -- plus on two int constants should succeed
 test_plusInt :: TestTree
 test_plusInt = testCase "plusInt" $
   assertBool "plusI TInt TInt should typecheck" $
-    typechecks (Program [("main", constI 1 #<+># constI 2)] [] [])
+    typechecks (Program [("main", constI 1 #<+># constI 2)] [] [] [])
 
 -- Bool + Bool should be rejected with a ClassConstraintViolation
 test_plusBoolReject :: TestTree
@@ -166,15 +166,16 @@ test_encodeGaussianSigmaPositive = testCase "encodeGaussianSigmaPositive" $ do
     ) mockSyms
 
 -- A program with two decoder declarations gives two encode groups, decA_auto and
--- decB_auto, each scoped to its own target type. runEncode addresses them by name,
--- so both are independently reachable — not just whichever was declared first.
--- decA enumerates [0,1,2] (3 slots); decB enumerates [0,1] (2 slots); the differing
--- lengths confirm each target selects its own encode rather than a shared one.
+-- decB_auto, both scoped to the same target type (Int). decA's "of [0,1,2]" registers
+-- a PartitionPlan annotation for Int (via the of-clause sugar registry, see
+-- SPLL.Lang.Types.encodeDecls); decB has no "of" clause of its own, so it picks up
+-- that same registry entry. runEncode addresses each group independently by name,
+-- and both produce 3-slot encodes since they share one PartitionPlan for Int.
 test_encodeTwoDecodersByName :: TestTree
 test_encodeTwoDecodersByName = testCase "encodeTwoDecodersByName" $ do
   let src = unlines
         [ "neural decA :: (Symbol -> Int) of [0, 1, 2]"
-        , "neural decB :: (Symbol -> Int) of [0, 1]"
+        , "neural decB :: (Symbol -> Int)"
         , "main sym = if decB sym == 0 then decA sym else 0"
         ]
   prog <- case tryParseProgram "<test>" src of
@@ -188,7 +189,7 @@ test_encodeTwoDecodersByName = testCase "encodeTwoDecodersByName" $ do
   lenA <- encodeLen "decA_auto"
   lenB <- encodeLen "decB_auto"
   assertEqual "decA_auto encode length" 3 lenA
-  assertEqual "decB_auto encode length" 2 lenB
+  assertEqual "decB_auto encode length" 3 lenB
 
 -- | True if `name` is directly applied (IRApply (IRVar name) _) anywhere inside
 -- an IREnumSum body.  Used to check that NN forward calls are hoisted out of loops.
@@ -221,7 +222,7 @@ test_nnHoistedOutOfEnumSum = testCase "nnHoistedOutOfEnumSum" $ do
 -- runGen/runProb/runInteg.
 test_missingMainFunction :: TestTree
 test_missingMainFunction = testCase "missingMainFunction" $ do
-  let prog = Program [("notMain", constF 1.0)] [] []
+  let prog = Program [("notMain", constF 1.0)] [] [] []
   let assertMissingMain label result = case result of
         Left err -> assertBool (label ++ ": error should mention 'main', got: " ++ err)
                                 ("main" `isInfixOf` err)
@@ -256,7 +257,7 @@ test_autoDeriveTuple = testCase "autoDeriveTuple" $
     (autoDeriveMultiValue [] (Tuple TBool TFloat))
 
 colorADT :: ADTDecl
-colorADT = ADTDecl "Color" [("Red", []), ("Green", []), ("Blue", [])] Nothing
+colorADT = ADTDecl "Color" [("Red", []), ("Green", []), ("Blue", [])]
 
 test_autoDeriveNonRecursiveADT :: TestTree
 test_autoDeriveNonRecursiveADT = testCase "autoDeriveNonRecursiveADT" $
@@ -268,7 +269,7 @@ treeADT :: ADTDecl
 treeADT = ADTDecl "Tree"
   [ ("Leaf", [("val", TInt)])
   , ("Node", [("l", TADT "Tree"), ("r", TADT "Tree")])
-  ] Nothing
+  ]
 
 test_autoDeriveRecursiveADTFails :: TestTree
 test_autoDeriveRecursiveADTFails = testCase "autoDeriveRecursiveADTFails" $ case autoDeriveMultiValue [treeADT] (TADT "Tree") of

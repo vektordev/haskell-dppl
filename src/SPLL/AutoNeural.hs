@@ -2,6 +2,7 @@ module SPLL.AutoNeural(
   makeAutoNeural
 , makeForwardDecl
 , makePartitionPlan
+, resolvePartitionAnnotation
 , PartitionPlan (..)
 , getSize
 , planIndexOf
@@ -17,6 +18,7 @@ import StandardLibrary
 import Data.List (find, elemIndex, isPrefixOf)
 import Utils
 import Data.Maybe (fromJust, isJust)
+import Control.Applicative ((<|>))
 
 -- basic strucutre:
 --  get the partition plan.
@@ -31,16 +33,28 @@ import Data.Maybe (fromJust, isJust)
 --
 -- paramNames: outer parameter names of the SPLL 'main' binding (e.g. ["sym"] for
 -- `main sym = ...`, [] for `main = ...`).  Encode mirrors this arity.
-makeAutoNeural :: [ADTDecl] -> CompilerConfig -> String -> [String] -> NeuralDecl -> IRFunGroup
-makeAutoNeural adts conf spllFnName paramNames (name, declType, tag) =
+--
+-- registry: the standalone PartitionPlan annotation registry (Program.encodeDecls).
+-- An entry for this declaration's target/source type takes precedence over the
+-- declaration's own "of" clause -- see 'resolvePartitionAnnotation'.
+makeAutoNeural :: [ADTDecl] -> CompilerConfig -> String -> [String] -> [(RType, MultiValue)] -> NeuralDecl -> IRFunGroup
+makeAutoNeural adts conf spllFnName paramNames registry (name, declType, tag) =
   case declType of
     TArrow TSymbol target ->
       -- Decoder case: Symbol -> target
-      makeDecoderFunGroup adts conf spllFnName name target tag paramNames
+      makeDecoderFunGroup adts conf spllFnName name target (resolvePartitionAnnotation registry target tag) paramNames
     TArrow source TSymbol ->
       -- Encoder case: source -> Symbol
-      makeEncoderFunGroup adts conf name source tag
+      makeEncoderFunGroup adts conf name source (resolvePartitionAnnotation registry source tag)
     _ -> error $ "Invalid neural declaration for " ++ name ++ ": Neural networks must have Symbol on exactly one side of the arrow"
+
+-- | Resolve the MultiValue annotation for a PartitionPlan target/source type: an
+-- explicit registry entry (SPLL.Lang.Types.encodeDecls, populated from "neural encode ::
+-- T of M" declarations and from every NeuralDecl's own "of" clause as sugar) wins over
+-- the tag passed in directly. 'makePartitionPlan' falls back to 'autoDeriveMultiValue'
+-- when this resolves to 'Nothing'.
+resolvePartitionAnnotation :: [(RType, MultiValue)] -> RType -> Maybe MultiValue -> Maybe MultiValue
+resolvePartitionAnnotation registry ty tag = lookup ty registry <|> tag
 
 -- Decoder: Symbol -> target. Generates sampling, probability, and encoding functions.
 -- encode mirrors main's outer parameter list (paramNames); it does NOT take a sym or
@@ -73,17 +87,17 @@ makeEncoderFunGroup adts conf name source tag =
 --TODO: Output this into the output file somehow.
 -- yields a forward declaration of a neural network:
 -- includes a string representation of the partition plan, including constraints about outputted logits.
-makeForwardDecl :: [ADTDecl] -> NeuralDecl -> String
-makeForwardDecl adts (name, declType, tag) =
+makeForwardDecl :: [ADTDecl] -> [(RType, MultiValue)] -> NeuralDecl -> String
+makeForwardDecl adts registry (name, declType, tag) =
   case declType of
     TArrow TSymbol target ->
       "neural Decoder " ++ name ++ " :: (Symbol -> " ++ show target ++ ")\n  with layout: " ++ plan_string plan ++ ",\n  dimensionality=" ++ show (getSize plan) ++ ".\n"
       where
-        plan = makePartitionPlan adts target tag
+        plan = makePartitionPlan adts target (resolvePartitionAnnotation registry target tag)
     TArrow source TSymbol ->
       "neural Encoder " ++ name ++ " :: (" ++ show source ++ " -> Symbol)\n  with layout: " ++ plan_string plan ++ ",\n  dimensionality=" ++ show (getSize plan) ++ ".\n"
       where
-        plan = makePartitionPlan adts source tag
+        plan = makePartitionPlan adts source (resolvePartitionAnnotation registry source tag)
     _ -> "neural Declaration " ++ name ++ " :: " ++ show declType ++ " (invalid: Symbol must be on exactly one side)\n"
   where
     plan_string (TuplePlan first second) = plan_string first ++ " x " ++ plan_string second
@@ -427,14 +441,14 @@ noAny0 sample = IRIf (IRUnaryOp OpIsAny sample) (IRConst $ VFloat 0)
 -- The check is encode-specific: a non-Gaussian continuous program is perfectly valid for
 -- probability/generate/integrate inference, so this must not be folded into the shared
 -- `compile` path.
-validateEncodeGaussian :: [ADTDecl] -> [NeuralDecl] -> IREnv -> Either CompilerError ()
-validateEncodeGaussian adts neuralDecls env = mapM_ checkDecl decoderDecls
+validateEncodeGaussian :: [ADTDecl] -> [(RType, MultiValue)] -> [NeuralDecl] -> IREnv -> Either CompilerError ()
+validateEncodeGaussian adts registry neuralDecls env = mapM_ checkDecl decoderDecls
   where
     -- Only decoder declarations (Symbol -> target) build a query-based encode function.
     decoderDecls = [ (name, target, tag) | (name, TArrow TSymbol target, tag) <- neuralDecls ]
     available = availableNormalFns env
     checkDecl (name, target, tag) =
-      let plan     = makePartitionPlan adts target tag
+      let plan     = makePartitionPlan adts target (resolvePartitionAnnotation registry target tag)
           required = requiredNormalFns "main_normal" plan
           missing  = filter (`notElem` available) required
       in if null missing then Right () else Left (encodeGaussianError name)

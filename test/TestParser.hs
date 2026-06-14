@@ -78,13 +78,13 @@ neuralDeclToString (name, rty, Just tag) =
     "neural " ++ name ++ " :: " ++ rTypeToString rty ++ " of " ++ multiValueToString tag
 
 adtDeclToString :: ADTDecl -> String
-adtDeclToString ADTDecl{dataName=name, constructors=constrs, maxDepth=depth} = name ++ " = " ++ intercalate " | " (map adtConstructorToString constrs) ++ maybe "" ((" depth " ++) . show) depth
+adtDeclToString ADTDecl{dataName=name, constructors=constrs} = name ++ " = " ++ intercalate " | " (map adtConstructorToString constrs)
 
 adtConstructorToString :: ADTConstructorDecl -> String
 adtConstructorToString (name, rts) = name ++ " " ++ unwords (map show rts)
 
 programToString :: Program -> String
-programToString (Program fnDecls neuralDecls adts) =
+programToString (Program fnDecls neuralDecls _adts _enc) =
     unlines (map fnDeclToString fnDecls ++ map neuralDeclToString neuralDecls)
 
 testParse :: StateT Int (Parsec Void String) a -> String -> Either (ParseErrorBundle String Void) a
@@ -339,7 +339,7 @@ prop_columnOneNotContinuation :: Property
 prop_columnOneNotContinuation =
   let src = "f = g\ng y = y + 1.0"
   in case tryParseProgram "" src of
-       Right (Program fns _ _) -> counterexample ("expected 2 defs, got " ++ show (length fns)) (length fns === 2)
+       Right (Program fns _ _ _) -> counterexample ("expected 2 defs, got " ++ show (length fns)) (length fns === 2)
        Left err -> counterexample (errorBundlePretty err) False
 
 -- Underscore in identifier
@@ -398,7 +398,7 @@ prop_normalMinusFloat =
   conjoin (map check ["main = Normal - 3.0", "main = Normal -3.0"])
   where
     check src = case tryParseProgram "" src of
-      Right (Program [("main", expr)] _ _) ->
+      Right (Program [("main", expr)] _ _ _) ->
         counterexample ("Expected subtraction in: " ++ src ++ ", got: " ++ show expr) $
           case expr of
             Apply _ (Var _ "Normal") _ -> False
@@ -411,7 +411,7 @@ prop_neuralRealParsesAsContinuous :: Property
 prop_neuralRealParsesAsContinuous =
   let src = "neural f :: (Symbol -> Float) of Real\nmain sym = f sym\n"
   in case tryParseProgram "" src of
-       Right (Program _ [("f", _, tag)] _) -> tag === Just MultiContinuous
+       Right (Program _ [("f", _, tag)] _ _) -> tag === Just MultiContinuous
        Right p -> counterexample ("Unexpected program structure: " ++ show p) False
        Left err -> counterexample (errorBundlePretty err) False
 
@@ -420,7 +420,7 @@ prop_neuralUnderscoreParsesAsAuto :: Property
 prop_neuralUnderscoreParsesAsAuto =
   let src = "neural f :: (Symbol -> (Bool, Float)) of (_, _)\nmain sym = f sym\n"
   in case tryParseProgram "" src of
-       Right (Program _ [("f", _, tag)] _) -> tag === Just (MultiTuple MultiAuto MultiAuto)
+       Right (Program _ [("f", _, tag)] _ _) -> tag === Just (MultiTuple MultiAuto MultiAuto)
        Right p -> counterexample ("Unexpected program structure: " ++ show p) False
        Left err -> counterexample (errorBundlePretty err) False
 
@@ -429,7 +429,7 @@ prop_neuralMixedExplicitAndPlaceholders :: Property
 prop_neuralMixedExplicitAndPlaceholders =
   let src = "neural f :: (Symbol -> (Int, Float)) of ([0, 1, 2], Real)\nmain sym = f sym\n"
   in case tryParseProgram "" src of
-       Right (Program _ [("f", _, tag)] _) ->
+       Right (Program _ [("f", _, tag)] _ _) ->
          tag === Just (MultiTuple (MultiDiscretes [VInt 0, VInt 1, VInt 2]) MultiContinuous)
        Right p -> counterexample ("Unexpected program structure: " ++ show p) False
        Left err -> counterexample (errorBundlePretty err) False
@@ -440,7 +440,7 @@ prop_underscorePrefixedIdentifierIsTypeRef :: Property
 prop_underscorePrefixedIdentifierIsTypeRef =
   let src = "neural f :: (Symbol -> Bool) of _foo\nmain sym = f sym\n"
   in case tryParseProgram "" src of
-       Right (Program _ [("f", _, tag)] _) -> tag === Just (MultiTypeRef "_foo")
+       Right (Program _ [("f", _, tag)] _ _) -> tag === Just (MultiTypeRef "_foo")
        Right p -> counterexample ("Unexpected program structure: " ++ show p) False
        Left err -> counterexample (errorBundlePretty err) False
 

@@ -119,7 +119,7 @@ class Substitutable a where
   ftv   :: a -> Set.Set TVarR
 
 instance Substitutable Program where
-  apply s (Program decls nns adts) = Program (zip (map fst decls) (map (apply s . snd) decls)) nns adts
+  apply s (Program decls nns adts enc) = Program (zip (map fst decls) (map (apply s . snd) decls)) nns adts enc
   ftv _ = Set.empty
 
 instance Substitutable Expr where
@@ -245,7 +245,7 @@ addRTypeInfo p =
         Right () -> Right (apply subst p2)
 
 tryAddRTypeInfo :: Program -> Either RTypeError Program
-tryAddRTypeInfo p@(Program _ _ adts) = do
+tryAddRTypeInfo p@(Program _ _ adts _) = do
   (cs, classCs, prog) <- runInfer (basicTEnv adts) (inferProg p)
   subst <- runSolve cs
   checkClassConstraints subst classCs
@@ -257,7 +257,7 @@ rtFromScheme (Forall _ _ rt) = rt
 --TODO: Simply give everything a fresh var as a unified first pass.
 inferProg :: Program -> Infer ([Constraint], Program)
 inferProg p = do
-  Program decls nns adts <- addTVarsEverywhere p
+  Program decls nns adts enc <- addTVarsEverywhere p
 
   -- init type variable for all function decls beforehand so we can build constraints for
   -- calls between these functions
@@ -274,12 +274,12 @@ inferProg p = do
   -- the inferred function type
   let tcs = zipWith (\t1 t2 -> Constraint t1 t2 (Just "TopLevel")) (map (rtFromScheme . snd) func_tvs) (map fst3cts cts)
   -- combine all constraints
-  return (tcs ++ concatMap snd3cts cts, Program (zip (map fst decls) (map trd3cts cts)) nns adts)
+  return (tcs ++ concatMap snd3cts cts, Program (zip (map fst decls) (map trd3cts cts)) nns adts enc)
 
 addTVarsEverywhere :: Program -> Infer Program
-addTVarsEverywhere (Program decls nns adts) = do
+addTVarsEverywhere (Program decls nns adts enc) = do
     newdecls <- mapM addTVarsToDecl decls
-    return (Program newdecls nns adts)
+    return (Program newdecls nns adts enc)
   where
     addTVarsToDecl :: FnDecl -> Infer FnDecl
     addTVarsToDecl (name, expr) = do

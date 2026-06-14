@@ -92,7 +92,11 @@ type Name = String
 data Program = Program {
                     functions :: [FnDecl],
                     neurals :: [NeuralDecl],
-                    adts :: [ADTDecl]
+                    adts :: [ADTDecl],
+                    -- | Standalone PartitionPlan annotations, keyed by RType: either
+                    -- explicit @neural encode :: T of M@ declarations, or sugar registered
+                    -- from a NeuralDecl's @of@ clause for its target/source type.
+                    encodeDecls :: [(RType, MultiValue)]
                     } deriving (Show, Eq)
 
 type FnDecl = (String, Expr)
@@ -100,9 +104,8 @@ type FnDecl = (String, Expr)
 type NeuralDecl = (String, RType, Maybe MultiValue)
 
 data ADTDecl = ADTDecl {
-  dataName :: String, 
-  constructors :: [ADTConstructorDecl], 
-  maxDepth :: Maybe Int
+  dataName :: String,
+  constructors :: [ADTConstructorDecl]
   } deriving (Show, Eq)
 type ADTConstructorDecl = (String, [(String, RType)])
 

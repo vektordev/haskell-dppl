@@ -31,6 +31,7 @@ import PredefinedFunctions (globalFEnv, parameterCount)
 import SPLL.Prelude
 import Data.Functor ((<&>))
 import Control.Monad.State
+import Data.Maybe (fromMaybe)
 
 --import Text.Megaparsec.Debug (dbg)
 
@@ -466,8 +467,7 @@ pADT = dbg "ADT" $ do
   name <- pIdentifier
   symbol "="
   constrs <- pADTConstructor `sepBy` symbol "|"
-  depth <- optional (keyword "depth" >> lexeme L.decimal)
-  return $ ADTDecl {dataName=name, constructors=constrs, maxDepth=depth}
+  return $ ADTDecl {dataName=name, constructors=constrs}
 
 pADTConstructor :: MonadParser m => m ADTConstructorDecl
 pADTConstructor = dbg "ADT Constr" $ do
@@ -493,14 +493,24 @@ pProg = do
   _ <- eof
   return (aggregateDefinitions adts defs)
 
+-- | "neural encode :: T of M" registers a standalone PartitionPlan annotation for the
+-- RType T (the registry; see SPLL.Lang.Types.encodeDecls), rather than declaring a
+-- callable neural network -- 'encode' is therefore a reserved network name. Every other
+-- NeuralDecl's "of" clause is sugar that also registers into this registry, keyed by
+-- the declaration's target/source type (see 'neuralValueType').
 aggregateDefinitions :: [ADTDecl] -> [Either FnDecl NeuralDecl] -> Program
-aggregateDefinitions adts (Left fn : tail) = Program (fn:fns) neurals adtz
+aggregateDefinitions adts (Left fn : tail) = Program (fn:fns) neurals adtz enc
   where
-    Program fns neurals adtz = aggregateDefinitions adts tail
-aggregateDefinitions adts (Right nr : tail) = Program fns (nr:neurals) adtz
+    Program fns neurals adtz enc = aggregateDefinitions adts tail
+aggregateDefinitions adts (Right nr@(name, ty, mtag) : tail)
+  | name == "encode" = Program fns neurals adtz ((ty, fromMaybe MultiAuto mtag) : enc)
+  | otherwise = Program fns (nr:neurals) adtz (sugar ++ enc)
   where
-    Program fns neurals adtz = aggregateDefinitions adts tail
-aggregateDefinitions adts [] = Program [] [] adts
+    Program fns neurals adtz enc = aggregateDefinitions adts tail
+    sugar = case (mtag, neuralValueType ty) of
+      (Just mv, Just target) -> [(target, mv)]
+      _ -> []
+aggregateDefinitions adts [] = Program [] [] adts []
 
 tryParseExpr :: FilePath -> String -> Either (ParseErrorBundle String Void) Expr
 tryParseExpr filename src = do

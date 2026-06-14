@@ -476,7 +476,7 @@ makeEqConstraint :: PType -> PType -> DConstraint
 makeEqConstraint t1 t2 = (t1, [Left t2])
 
 inferProg :: TEnv -> Program -> Infer (Subst, [DConstraint], PType, Program)
-inferProg env (Program decls nns adts) = do
+inferProg env (Program decls nns adts enc) = do
   -- Make the ADT declarations available to the InjF inference branch so it can
   -- detect field constructors (Cons/TCons/user-ADT constructors).
   modify (\s -> s { adtEnv = adts })
@@ -498,7 +498,7 @@ inferProg env (Program decls nns adts) = do
   -- the inferred function type
   let tcs = zipWith makeEqConstraint tvs (map trd4 cts)
   -- combine all constraints
-  return (s1, cs1 ++ concatMap snd4 cts ++ tcs , t1, Program (zip (map fst decls) (map frth4 cts)) nns adts)
+  return (s1, cs1 ++ concatMap snd4 cts ++ tcs , t1, Program (zip (map fst decls) (map frth4 cts)) nns adts enc)
 
 -- | Probabilistic types of the prelude-primitive distributions, keyed by their
 -- reserved Var names. Uniform has a known CDF (Integrate); Normal admits the
@@ -632,7 +632,7 @@ class Substitutable a where
   ftv   :: a -> Set.Set TVar
 
 instance Substitutable Program where
-  apply s (Program decls nns adts) = Program (zip (map fst decls) (map (apply s . snd) decls)) nns adts
+  apply s (Program decls nns adts enc) = Program (zip (map fst decls) (map (apply s . snd) decls)) nns adts enc
   ftv _ = Set.empty
 instance Substitutable Expr where
   apply s = tMap (apply s . getTypeInfo)

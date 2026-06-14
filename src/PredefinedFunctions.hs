@@ -317,7 +317,7 @@ propagateValues adts name values = case results of
   Left _ -> []
   Right l -> map (fmap failConversionRev) l
   where
-    results = mapM (generateDet [] (IREnv [] adts []) []) letInBlocks
+    results = mapM (generateDet [] [] (IREnv [] adts []) []) letInBlocks
     letInBlocks = map (foldr (\(n, p) e -> IRLetIn n (IRConst (fmap failConversionFwd p)) e) fwdExpr) namedParams
     namedParams = map (zip paramNames) valueProd
     valueProd = sequence values

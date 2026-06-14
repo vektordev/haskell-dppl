@@ -74,7 +74,7 @@ containedVars :: (Expr -> Set.Set String) -> Expr -> Set.Set String
 containedVars f e = Set.union (f e) (foldl Set.union Set.empty (map (containedVars f) (getSubExprs e)))
 
 predicateProg :: (Expr -> Bool) -> Program -> Bool
-predicateProg f (Program decls _ _) = and (map (predicateExpr f . snd) decls)
+predicateProg f (Program decls _ _ _) = and (map (predicateExpr f . snd) decls)
 
 predicateExpr :: (Expr -> Bool) -> Expr -> Bool
 predicateExpr f e = f e && and (map (predicateExpr f) (getSubExprs e))
@@ -118,7 +118,7 @@ tMap f expr = case expr of
   (ReadNN _ n a) -> ReadNN (f expr) n (tMap f a)
 
 makeMain :: Expr -> Program
-makeMain expr = Program [("main", expr)] [] []
+makeMain expr = Program [("main", expr)] [] [] []
 
 getBinaryConstructor :: Expr -> (TypeInfo -> Expr -> Expr -> Expr)
 getBinaryConstructor GreaterThan {} = GreaterThan
@@ -369,10 +369,10 @@ prettyPrintProgRTyOnly :: Program -> [String]
 prettyPrintProgRTyOnly = prettyPrintProgCustomTI prettyRTypeOnly
 
 prettyPrintProgCustomTI :: (TypeInfo -> String) -> Program -> [String]
-prettyPrintProgCustomTI fn (Program decls neurals adts) = concatMap prettyPrintADTs adts ++  concatMap (prettyPrintDecl fn) decls ++ concatMap prettyPrintNeural neurals
+prettyPrintProgCustomTI fn (Program decls neurals adts _) = concatMap prettyPrintADTs adts ++  concatMap (prettyPrintDecl fn) decls ++ concatMap prettyPrintNeural neurals
 
 prettyPrintADTs :: ADTDecl  -> [String]
-prettyPrintADTs ADTDecl{dataName=name, constructors=constr, maxDepth=_} = ("data " ++ name ++ "::"):map (\rts -> "\n|"++ show rts) constr
+prettyPrintADTs ADTDecl{dataName=name, constructors=constr} = ("data " ++ name ++ "::"):map (\rts -> "\n|"++ show rts) constr
 
 prettyPrintNeural :: NeuralDecl -> [String]
 prettyPrintNeural (name, ty, range) = l1:l2:(l3 range):[]

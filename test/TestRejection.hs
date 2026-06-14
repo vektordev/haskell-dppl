@@ -41,11 +41,11 @@ rejectionTests = testGroup "Rejection"
 -- A program with no 'main' entry point: not reachable via the invalid* family
 -- (those all declare main), so it is constructed locally here.
 noMainProg :: Program
-noMainProg = Program [("notMain", uniform)] [] []
+noMainProg = Program [("notMain", uniform)] [] [] []
 
 -- ANY is a marginal-query sentinel and must never appear in a source program.
 anyInProgramProg :: Program
-anyInProgramProg = Program [("main", Constant makeTypeInfo VAny)] [] []
+anyInProgramProg = Program [("main", Constant makeTypeInfo VAny)] [] [] []
 
 -- Each entry: (case name, program, distinctive substring of the expected error).
 -- The substring identifies *which* validation rule should fire, so we catch both
@@ -94,7 +94,7 @@ compileRejectsTests = testGroup "CompileRejects"
 -- plus on two Bools: structurally fine (plus is a known 2-ary InjF) so the
 -- validator accepts it, but RType inference rejects the class-constraint.
 boolPlusBoolProg :: Program
-boolPlusBoolProg = Program [("main", constB True #+# constB False)] [] []
+boolPlusBoolProg = Program [("main", constB True #+# constB False)] [] [] []
 
 typeInferenceCases :: [(String, Program)]
 typeInferenceCases =
