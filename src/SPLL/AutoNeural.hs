@@ -1,6 +1,7 @@
 module SPLL.AutoNeural(
   makeAutoNeural
 , makeForwardDecl
+, planLayoutString
 , makePartitionPlan
 , resolvePartitionAnnotation
 , PartitionPlan (..)
@@ -39,11 +40,12 @@ import Control.Applicative ((<|>))
 -- An entry for this declaration's target type takes precedence over the declaration's own
 -- "of" clause -- see 'resolvePartitionAnnotation'.
 makeAutoNeural :: [ADTDecl] -> CompilerConfig -> [(RType, MultiValue)] -> NeuralDecl -> IRFunGroup
-makeAutoNeural adts conf registry (name, declType, tag) =
+makeAutoNeural adts conf registry decl@(name, declType, tag) =
   case declType of
     TArrow TSymbol target ->
-      -- Decoder case: Symbol -> target
-      makeDecoderFunGroup adts conf name target (resolvePartitionAnnotation registry target tag)
+      -- Decoder case: Symbol -> target. The forward-decl string (NN1's required output
+      -- layout) rides along as the group's doc so codegen emits it beside the readers.
+      makeDecoderFunGroup adts conf name target (resolvePartitionAnnotation registry target tag) (makeForwardDecl adts registry decl)
     _ -> error $ "Invalid neural declaration for " ++ name ++ ": Neural networks must have Symbol on the left of the arrow (Symbol -> target)"
 
 -- | Resolve the MultiValue annotation for a PartitionPlan target/source type: an
@@ -56,38 +58,42 @@ resolvePartitionAnnotation registry ty tag = lookup ty registry <|> tag
 
 -- Decoder: Symbol -> target. Generates sampling and probability reader functions for NN1.
 -- It hosts no encode function (the encode lives on the value-producing SPLL function).
-makeDecoderFunGroup :: [ADTDecl] -> CompilerConfig -> String -> RType -> Maybe MultiValue -> IRFunGroup
-makeDecoderFunGroup adts conf name target tag =
+-- fwdDecl is the human-readable forward declaration (NN1's required output layout); it is
+-- stored as the group's doc so codegen emits it as a header comment beside the readers.
+makeDecoderFunGroup :: [ADTDecl] -> CompilerConfig -> String -> RType -> Maybe MultiValue -> String -> IRFunGroup
+makeDecoderFunGroup adts conf name target tag fwdDecl =
   IRFunGroup (name ++ "_auto")
     (Just (IRLambda symbol $ makeGen adts plan name, "Wrapper for the neural network function"))
     (Just (makeProb adts conf plan, "Inference function for neural network function"))
     Nothing
     Nothing
     Nothing
-    (show plan)
+    fwdDecl
     where plan = makePartitionPlan adts target tag
 
---TODO: Output this into the output file somehow.
--- yields a forward declaration of a neural network:
--- includes a string representation of the partition plan, including constraints about outputted logits.
+-- | Forward declaration of a neural network (NN1): a human-readable description of the
+-- decoder's required logit-vector output layout.  Emitted by codegen via the decoder group's
+-- doc (see 'makeDecoderFunGroup').  The (source -> Symbol) Encoder direction has been removed,
+-- so only the decoder shape is rendered.
 makeForwardDecl :: [ADTDecl] -> [(RType, MultiValue)] -> NeuralDecl -> String
 makeForwardDecl adts registry (name, declType, tag) =
   case declType of
     TArrow TSymbol target ->
-      "neural Decoder " ++ name ++ " :: (Symbol -> " ++ show target ++ ")\n  with layout: " ++ plan_string plan ++ ",\n  dimensionality=" ++ show (getSize plan) ++ ".\n"
-      where
-        plan = makePartitionPlan adts target (resolvePartitionAnnotation registry target tag)
-    TArrow source TSymbol ->
-      "neural Encoder " ++ name ++ " :: (" ++ show source ++ " -> Symbol)\n  with layout: " ++ plan_string plan ++ ",\n  dimensionality=" ++ show (getSize plan) ++ ".\n"
-      where
-        plan = makePartitionPlan adts source (resolvePartitionAnnotation registry source tag)
-    _ -> "neural Declaration " ++ name ++ " :: " ++ show declType ++ " (invalid: Symbol must be on exactly one side)\n"
+      "neural Decoder " ++ name ++ " :: (Symbol -> " ++ show target ++ "); NN1 required output "
+        ++ planLayoutString (makePartitionPlan adts target (resolvePartitionAnnotation registry target tag))
+    _ -> "neural Declaration " ++ name ++ " :: " ++ show declType ++ " (invalid: a neural network must be Symbol -> target)"
+
+-- | A human-readable description of a PartitionPlan's flat logit-vector layout and its total
+-- dimensionality.  Documents both the decoder forward-declaration (NN1's required output, via
+-- 'makeForwardDecl') and each endpoint's encode function (NN2's input, via the encode doc).
+planLayoutString :: PartitionPlan -> String
+planLayoutString plan = "layout: " ++ planStr plan ++ ", dimensionality=" ++ show (getSize plan)
   where
-    plan_string (TuplePlan first second) = plan_string first ++ " x " ++ plan_string second
-    plan_string (EitherPlan left right) = "[1](0..1)" ++ plan_string left ++ " + " ++ plan_string right
-    plan_string p@(Discretes ty tag) = "[" ++ show (getSize p) ++ "](softmax'ed)"
-    plan_string Continuous = "[1],[1](>0)"
-    plan_string (ADTPlan _ _) = "[complex ADT layout]"
+    planStr (TuplePlan first second) = planStr first ++ " x " ++ planStr second
+    planStr (EitherPlan left right)  = "[1](0..1) " ++ planStr left ++ " + " ++ planStr right
+    planStr p@(Discretes _ _)        = "[" ++ show (getSize p) ++ "](softmax'ed)"
+    planStr Continuous               = "[1],[1](>0)"
+    planStr (ADTPlan _ _)            = "[complex ADT layout]"
 
 
 data PartitionPlan = TuplePlan PartitionPlan PartitionPlan -- Logit layout: first, then second.
@@ -496,7 +502,7 @@ makeTopLevelEncodeFun adts conf registry fnName rty paramNames probAvailable nor
     available    = availableNormalFns (IREnv normalGroups [] [])
     normalsOk    = all (`elem` available) (requiredNormalFns normalFnName plan)
     probOk       = not (planUsesProb plan) || probAvailable
-    doc          = "Encoding function for " ++ fnName ++ "'s own output type"
+    doc          = "Encoding function for " ++ fnName ++ "'s own output type; " ++ planLayoutString plan
 
 -- | Whether an encode plan references the program's prob function: true for any discrete /
 -- Either / ADT slot, false for a pure-Continuous plan (which queries only the normal
