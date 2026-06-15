@@ -56,7 +56,19 @@ envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb
   concatMap (\(name, binding) ->
     let typeEnv = getGlobalTypeEnv p
         pt = pType $ getTypeInfo binding
-        baseFunGroup = IRFunGroup {groupName=name, encodeFun=Nothing,
+        -- `main`'s own group gets an encodeFun when its output type is logit-representable,
+        -- with no neural declaration required (task encode-main-auto-derived). Lazily
+        -- references baseFunGroup/tupleNormalFuns to read whether main's prob/normal
+        -- functions were generated; other groups keep encodeFun = Nothing.
+        encodeF
+          | name == "main" =
+              makeTopLevelEncodeFun adts conf (encodeDecls p)
+                (rType (getTypeInfo (stripLambdas binding)))
+                mainParamNames
+                (isJust (probFun baseFunGroup))
+                (baseFunGroup : tupleNormalFuns)
+          | otherwise = Nothing
+        baseFunGroup = IRFunGroup {groupName=name, encodeFun=encodeF,
          integFun =
           if not noInteg && (pt == Deterministic || pt == Integrate || pt == PNormal || pt == PLogNormal) then
             Just (toIntegDecl name (IRLambda "sample" (runCompile (meta typeEnv) (toIRInferenceSave (meta typeEnv) True binding (IRVar "sample")))))
@@ -99,6 +111,8 @@ envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb
     mainParamNames = maybe [] extractParamNames (lookup "main" (functions p))
     extractParamNames (Lambda _ name body) = name : extractParamNames body
     extractParamNames _ = []
+    stripLambdas (Lambda _ _ body) = stripLambdas body
+    stripLambdas e = e
 
 
 runCompile :: CompilerMetadata -> CompilerMonad CompilationResult -> IRExpr

@@ -7,6 +7,7 @@ module SPLL.AutoNeural(
 , getSize
 , planIndexOf
 , validateEncodeGaussian
+, makeTopLevelEncodeFun
 ) where
 
 import SPLL.Lang.Types
@@ -482,3 +483,56 @@ availableNormalFns (IREnv groups _ _) =
       | otherwise                              = groupName g ++ "_normal"
 
 -- MAR semantics for EitherPlan encoding are implemented in makeEncodeTopLevelW/makeEncodeEitherArm.
+
+------------------------------------------------------------------------
+-- main's own encode function (auto-derive slice of PartitionPlan decoupling).
+--
+-- `makeEncode`'s logic only needs a PartitionPlan for some RType plus the program's
+-- `main_prob`/`main_normal` functions; it does not need a `neural :: Symbol -> target`
+-- declaration -- that's merely the current trigger.  This builds an encode function for a
+-- top-level binding (`main`) directly from its own output RType, with no neural declaration
+-- involved, whenever that type is representable as a logit vector.  See task
+-- encode-main-auto-derived / design encode-partitionplan-decoupling.
+--
+-- This is purely additive: it returns Nothing (never an error) when
+--   * the type is neither in the encodeDecls registry nor auto-derivable -- i.e. it
+--     involves Int, Symbol, or a recursive ADT (these need an explicit annotation that the
+--     auto-derive-only slice does not supply), or
+--   * a Continuous slot would reference a `main_normal` function that wasn't generated
+--     because the output isn't Gaussian -- the same requiredNormalFns/availableNormalFns
+--     check `validateEncodeGaussian` applies to decoder declarations, or
+--   * a discrete/Either/ADT slot would reference an absent `main_prob` function.
+makeTopLevelEncodeFun :: [ADTDecl] -> CompilerConfig -> [(RType, MultiValue)]
+                      -> RType        -- ^ the binding's (return) RType
+                      -> [String]     -- ^ outer parameter names of main
+                      -> Bool         -- ^ whether main's prob function was generated
+                      -> [IRFunGroup] -- ^ groups carrying main's normal functions (base + tuple components)
+                      -> Maybe IRFunDecl
+makeTopLevelEncodeFun adts conf registry rty paramNames probAvailable normalGroups
+  | not buildable       = Nothing
+  | normalsOk && probOk = Just (makeEncode adts conf plan probFnName normalFnName paramNames, doc)
+  | otherwise           = Nothing
+  where
+    probFnName   = "main_prob"
+    normalFnName = "main_normal"
+    tag          = resolvePartitionAnnotation registry rty Nothing
+    buildable    = case tag of
+                     Just _  -> True   -- explicit registry entry
+                     Nothing -> case autoDeriveMultiValue adts rty of
+                                  Right _ -> True
+                                  Left _  -> False
+    plan         = makePartitionPlan adts rty tag
+    available    = availableNormalFns (IREnv normalGroups [] [])
+    normalsOk    = all (`elem` available) (requiredNormalFns normalFnName plan)
+    probOk       = not (planUsesProb plan) || probAvailable
+    doc          = "Encoding function for main's own output type"
+
+-- | Whether an encode plan references the program's prob function: true for any discrete /
+-- Either / ADT slot, false for a pure-Continuous plan (which queries only the normal
+-- function).
+planUsesProb :: PartitionPlan -> Bool
+planUsesProb Continuous       = False
+planUsesProb (TuplePlan a b)  = planUsesProb a || planUsesProb b
+planUsesProb (Discretes _ _)  = True
+planUsesProb (EitherPlan _ _) = True
+planUsesProb (ADTPlan _ _)    = True

@@ -211,6 +211,90 @@ test_encodeUsesStandaloneRegistration = testCase "encodeUsesStandaloneRegistrati
     Right (VList lst) -> assertEqual "decA_auto encode length" 3 (length (toList lst))
     Right other       -> assertFailure ("expected VList, got: " ++ show other)
 
+-- A program with no neural declarations at all, whose main has an auto-derivable output
+-- type (Bool), still gets an encodeFun on its own "main" group (task
+-- encode-main-auto-derived). The encode is a probability vector over [True, False],
+-- queried from main_prob, so it must sum to ~1.0.
+test_encodeMainAutoDerivedBool :: TestTree
+test_encodeMainAutoDerivedBool = testCase "encodeMainAutoDerivedBool" $ do
+  let src = unlines
+        [ "main = if Uniform < 0.3 then True else False"
+        ]
+  prog <- case tryParseProgram "<test>" src of
+    Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
+    Right p  -> return p
+  case runEncode defaultCompilerConfig prog "main" [] of
+    Left err -> assertFailure ("runEncode main failed: " ++ err)
+    Right (VList lst) -> do
+      let items = toList lst
+          total = sum [ x | VFloat x <- items ]
+      assertEqual "encode length over [True, False]" 2 (length items)
+      assertBool ("encode probs should sum to ~1.0, got " ++ show total)
+                 (abs (total - 1.0) < 1.0e-4)
+    Right other -> assertFailure ("expected VList, got: " ++ show other)
+
+-- Registry-first: main's Int output is not auto-derivable, but the decoder's "of [0,1,2]"
+-- registers a PartitionPlan for Int into encodeDecls (the of-clause sugar). So main's own
+-- group DOES get an encodeFun, sliced by that registry entry (length 3) — the registry ∪
+-- auto-derive rule from the parent design (encode-partitionplan-decoupling). The decoder's
+-- own <decl>_auto group is independently addressable and unaffected.
+test_encodeMainIntViaRegistry :: TestTree
+test_encodeMainIntViaRegistry = testCase "encodeMainIntViaRegistry" $ do
+  let src = unlines
+        [ "neural decA :: (Symbol -> Int) of [0, 1, 2]"
+        , "main sym = decA sym"
+        ]
+  prog <- case tryParseProgram "<test>" src of
+    Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
+    Right p  -> return p
+  let sym = VTuple (VInt 0) (VInt 42)
+      encodeLen target = case runEncode defaultCompilerConfig prog target [sym] of
+        Left err          -> assertFailure ("runEncode " ++ target ++ " failed: " ++ err) >> return (-1)
+        Right (VList lst) -> return (length (toList lst))
+        Right other       -> assertFailure ("expected VList, got: " ++ show other) >> return (-1)
+  lenMain <- encodeLen "main"
+  lenDecA <- encodeLen "decA_auto"
+  assertEqual "main encode length (registry Int)" 3 lenMain
+  assertEqual "decA_auto encode length" 3 lenDecA
+
+-- A program with no neural declarations whose main has a type that is neither
+-- auto-derivable nor in the registry (a list) gets NO encodeFun — the addition is purely
+-- additive and degrades to a clean "no encode function" error rather than crashing.
+test_encodeMainNotRepresentable :: TestTree
+test_encodeMainNotRepresentable = testCase "encodeMainNotRepresentable" $ do
+  let src = unlines
+        [ "main = (Normal : (Normal : []))"
+        ]
+  prog <- case tryParseProgram "<test>" src of
+    Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
+    Right p  -> return p
+  case runEncode defaultCompilerConfig prog "main" [] of
+    Left err -> assertBool ("error should mention main has no encode function, got: " ++ err)
+                           ("main" `isInfixOf` err)
+    Right v  -> assertFailure ("expected main to have no encodeFun, got: " ++ show v)
+
+-- When main's output type is auto-derivable (Bool) AND a decoder declaration shares that
+-- type, both groups carry an independently-correct encodeFun, each retrievable by name:
+-- "main" (main's own output) and "decB_auto" (the decoder's). Both are 2-slot Bool plans.
+test_encodeMainAndDecoderShareType :: TestTree
+test_encodeMainAndDecoderShareType = testCase "encodeMainAndDecoderShareType" $ do
+  let src = unlines
+        [ "neural decB :: (Symbol -> Bool)"
+        , "main sym = if decB sym then True else False"
+        ]
+  prog <- case tryParseProgram "<test>" src of
+    Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
+    Right p  -> return p
+  let sym = VTuple (VInt 0) (VInt 42)
+      encodeLen target = case runEncode defaultCompilerConfig prog target [sym] of
+        Left err          -> assertFailure ("runEncode " ++ target ++ " failed: " ++ err) >> return (-1)
+        Right (VList lst) -> return (length (toList lst))
+        Right other       -> assertFailure ("expected VList, got: " ++ show other) >> return (-1)
+  lenMain <- encodeLen "main"
+  lenDecB <- encodeLen "decB_auto"
+  assertEqual "main encode length over [True, False]" 2 lenMain
+  assertEqual "decB_auto encode length over [True, False]" 2 lenDecB
+
 -- | True if `name` is directly applied (IRApply (IRVar name) _) anywhere inside
 -- an IREnumSum body.  Used to check that NN forward calls are hoisted out of loops.
 nnCallInsideEnumSum :: String -> IRExpr -> Bool
@@ -366,6 +450,10 @@ internalsTests = testGroup "Internals"
       , test_encodeGaussianSigmaPositive
       , test_encodeTwoDecodersByName
       , test_encodeUsesStandaloneRegistration
+      , test_encodeMainAutoDerivedBool
+      , test_encodeMainIntViaRegistry
+      , test_encodeMainNotRepresentable
+      , test_encodeMainAndDecoderShareType
       , test_nnHoistedOutOfEnumSum
       ]
   , test_missingMainFunction
