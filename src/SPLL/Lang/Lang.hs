@@ -326,11 +326,12 @@ resolveMultiAuto adts (TADT name) (MultiADT cs) = MultiADT (map resolveConstr cs
     resolveConstr (cn, mvs) = (cn, zipWith (resolveMultiAuto adts) (fromMaybe [] (lookup cn fieldTypes)) mvs)
 resolveMultiAuto _ _ mv = mv
 
--- | The output (decoder) or input (encoder) RType of a neural declaration's "Symbol <->
--- target" arrow type - i.e. the type a NeuralDecl's MultiValue annotation describes.
+-- | The output (target) RType of a Decoder neural declaration's "Symbol -> target" arrow
+-- type - i.e. the type a NeuralDecl's MultiValue annotation describes.  The (source ->
+-- Symbol) Encoder direction has been removed (rejected at validation), so only the decoder
+-- shape resolves to a value type.
 neuralValueType :: RType -> Maybe RType
 neuralValueType (TArrow TSymbol target) = Just target
-neuralValueType (TArrow source TSymbol) = Just source
 neuralValueType _ = Nothing
 
 

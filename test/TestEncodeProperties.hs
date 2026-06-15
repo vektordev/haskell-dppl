@@ -45,18 +45,15 @@ parseOrFail src =
     Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
     Right p  -> return p
 
--- Encode group for the program's first decoder declaration. Each test program
--- here has a single decoder of interest declared first, so its `<name>_auto`
--- group is the encode target.
-firstDecoderAuto :: Program -> String
-firstDecoderAuto prog = case neurals prog of
-  ((name, _, _) : _) -> name ++ "_auto"
-  []                 -> error "firstDecoderAuto: program has no neural declaration"
+-- The encode bridge lives on the value-producing function, not on a neural declaration.
+-- Each test program here encodes its `main` output, so "main" is the target.
+mainTarget :: String
+mainTarget = "main"
 
 -- Run encode and return the flat list of slot values, asserting success.
 encodeSlots :: Program -> [IRValue] -> IO [Double]
 encodeSlots prog args =
-  case runEncode defaultCompilerConfig prog (firstDecoderAuto prog) args of
+  case runEncode defaultCompilerConfig prog mainTarget args of
     Left err        -> assertFailure ("runEncode failed: " ++ err ++ "\n" ++ show prog) >> return []
     Right (VList l) -> return [x | VFloat x <- toList l]
     Right other     -> assertFailure ("encode returned non-list: " ++ show other) >> return []
@@ -177,8 +174,8 @@ encodeProps_eitherFlagSignMatchesSide = testCase "eitherFlagSignMatchesSide" $ d
 -- The flag slot is f = P(cond), realised automatically by the query-based encode
 -- (encode = main_prob(Left VAny), and IfThenElse prob compilation mixes the branches).
 -- condNN drives the flag; spiking it at 0 makes the condition true (flag > 0.5),
--- spiking it at 1 makes it false (flag < 0.5).  The Either decoder NN is declared first,
--- so firstDecoderAuto targets its `outNN_auto` encode group.
+-- spiking it at 1 makes it false (flag < 0.5).  The encode is queried on `main`, whose
+-- Either Int Bool output type resolves to the EitherPlan via the registry.
 eitherIfMixtureSrc :: String
 eitherIfMixtureSrc = unlines
   [ "neural outNN  :: (Symbol -> Either Int Bool) of ([0, 1, 2] | [True, False])"
@@ -366,7 +363,7 @@ encodeError_continuousMixtureRequiresCollapse = testCase "continuousMixtureRequi
     [ "neural mixNN :: (Symbol -> Float)"
     , "main = if Uniform < 0.5 then Normal + 2.0 else Normal + 5.0"
     ]
-  case runEncode defaultCompilerConfig prog (firstDecoderAuto prog) [] of
+  case runEncode defaultCompilerConfig prog mainTarget [] of
     Left err ->
       assertBool ("error should mention `collapse`, got: " ++ err)
                  ("collapse" `isInfixOf` err)

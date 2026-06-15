@@ -1,9 +1,9 @@
 module SPLL.Validator (
   validateProgram
 ) where
-import SPLL.Lang.Types (Program(..), GenericValue(..), FnDecl, MultiValue)
+import SPLL.Lang.Types (Program(..), GenericValue(..), FnDecl, NeuralDecl, MultiValue)
 import SPLL.Lang.Lang (Expr(..), getSubExprs, getFunctionNames, InjFName(..))
-import SPLL.Typing.RType (RType)
+import SPLL.Typing.RType (RType(..))
 import Data.Maybe (isJust, isNothing)
 import PredefinedFunctions (globalFEnv, parameterCount)
 import Data.List (intersect, groupBy, sortOn, nub)
@@ -16,7 +16,7 @@ distributionPrimitiveNames = ["Uniform", "Normal"]
 -- This function returns nothing if the program is valid and an error else
 validateProgram :: Program -> Either String ()
 -- We sequence the either monads so we either have a list of errors(Lefts) or discard the Rights
-validateProgram p@Program{functions=fn, neurals=_, encodeDecls=enc} = sequence_ (validateMainExists fn : validateEncodeDecls enc : exprValidations)
+validateProgram p@Program{functions=fn, neurals=nrls, encodeDecls=enc} = sequence_ (validateMainExists fn : validateEncodeDecls enc : map validateNeuralShape nrls ++ exprValidations)
   where
     -- Validate all expressions potentially unsing the context of their top level declaration and their program
     exprValidations = concatMap (\(_, expr) -> validateAllSubexpressions p expr expr) fn
@@ -37,6 +37,20 @@ validateEncodeDecls decls = mapM_ checkGroup grouped
       (_:_:_) -> Left ("Compiler Error: conflicting PartitionPlan annotations for type "
                         ++ show (fst (head g)) ++ ": " ++ show (map snd g))
       _ -> Right ()
+
+-- | A neural declaration forward-declares a Decoder (Symbol -> target): NN1, whose logits
+-- SPLL reads.  The (source -> Symbol) "Encoder" direction has been removed: it named an
+-- external network (NN2) with no SPLL call site, and the encode bridge it tried to host now
+-- lives on the value-producing SPLL function instead.  Reject it with a pointer at the
+-- registry syntax that covers the only job it still had (registering a type's logit layout).
+validateNeuralShape :: NeuralDecl -> Either String ()
+validateNeuralShape (_, TArrow TSymbol _, _) = Right ()
+validateNeuralShape (name, TArrow _ TSymbol, _) =
+  Left ("Compiler Error: neural declaration '" ++ name ++ "' has the form (source -> Symbol), "
+        ++ "the Encoder direction, which is no longer supported. To register a logit layout "
+        ++ "for a type, write `neural encode :: <type> of <multivalue>`; the encode for a "
+        ++ "value is generated on the SPLL function that produces it.")
+validateNeuralShape _ = Right ()
 
 -- A program must declare a "main" function, as it is the entry point compiled
 -- to the generate/probability/integrate functions invoked by runGen/runProb/runInteg.

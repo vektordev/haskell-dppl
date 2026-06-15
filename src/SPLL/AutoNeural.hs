@@ -28,26 +28,23 @@ import Control.Applicative ((<|>))
 --  index into vector and interpret as distribution.
 --  provide sampling and inference.
 
--- Support bidirectional neural declarations:
--- Decoder: (Symbol -> RType) — generates sampling, probability, and encoding functions
--- Encoder: (RType -> Symbol) — generates an encoding function that reconstructs logits
---
--- paramNames: outer parameter names of the SPLL 'main' binding (e.g. ["sym"] for
--- `main sym = ...`, [] for `main = ...`).  Encode mirrors this arity.
+-- Neural declarations forward-declare a Decoder (Symbol -> RType): NN1, which SPLL reads.
+-- Each builds an `<name>_auto` IRFunGroup with sampling and probability/density readers.
+-- It hosts NO encode function: the encode bridge ("turn an SPLL output value into logits")
+-- belongs to whichever SPLL *function* produces that value, keyed to that function's own
+-- prob/normal (see 'makeTopLevelEncodeFun' / task encode-per-function-endpoints).  The
+-- (source -> Symbol) "Encoder" direction has been removed; it is rejected at validation.
 --
 -- registry: the standalone PartitionPlan annotation registry (Program.encodeDecls).
--- An entry for this declaration's target/source type takes precedence over the
--- declaration's own "of" clause -- see 'resolvePartitionAnnotation'.
-makeAutoNeural :: [ADTDecl] -> CompilerConfig -> String -> [String] -> [(RType, MultiValue)] -> NeuralDecl -> IRFunGroup
-makeAutoNeural adts conf spllFnName paramNames registry (name, declType, tag) =
+-- An entry for this declaration's target type takes precedence over the declaration's own
+-- "of" clause -- see 'resolvePartitionAnnotation'.
+makeAutoNeural :: [ADTDecl] -> CompilerConfig -> [(RType, MultiValue)] -> NeuralDecl -> IRFunGroup
+makeAutoNeural adts conf registry (name, declType, tag) =
   case declType of
     TArrow TSymbol target ->
       -- Decoder case: Symbol -> target
-      makeDecoderFunGroup adts conf spllFnName name target (resolvePartitionAnnotation registry target tag) paramNames
-    TArrow source TSymbol ->
-      -- Encoder case: source -> Symbol
-      makeEncoderFunGroup adts conf name source (resolvePartitionAnnotation registry source tag)
-    _ -> error $ "Invalid neural declaration for " ++ name ++ ": Neural networks must have Symbol on exactly one side of the arrow"
+      makeDecoderFunGroup adts conf name target (resolvePartitionAnnotation registry target tag)
+    _ -> error $ "Invalid neural declaration for " ++ name ++ ": Neural networks must have Symbol on the left of the arrow (Symbol -> target)"
 
 -- | Resolve the MultiValue annotation for a PartitionPlan target/source type: an
 -- explicit registry entry (SPLL.Lang.Types.encodeDecls, populated from "neural encode ::
@@ -57,33 +54,18 @@ makeAutoNeural adts conf spllFnName paramNames registry (name, declType, tag) =
 resolvePartitionAnnotation :: [(RType, MultiValue)] -> RType -> Maybe MultiValue -> Maybe MultiValue
 resolvePartitionAnnotation registry ty tag = lookup ty registry <|> tag
 
--- Decoder: Symbol -> target. Generates sampling, probability, and encoding functions.
--- encode mirrors main's outer parameter list (paramNames); it does NOT take a sym or
--- sample argument — it derives the logit vector from the compiled SPLL inference functions.
-makeDecoderFunGroup :: [ADTDecl] -> CompilerConfig -> String -> String -> RType -> Maybe MultiValue -> [String] -> IRFunGroup
-makeDecoderFunGroup adts conf spllFnName name target tag paramNames =
+-- Decoder: Symbol -> target. Generates sampling and probability reader functions for NN1.
+-- It hosts no encode function (the encode lives on the value-producing SPLL function).
+makeDecoderFunGroup :: [ADTDecl] -> CompilerConfig -> String -> RType -> Maybe MultiValue -> IRFunGroup
+makeDecoderFunGroup adts conf name target tag =
   IRFunGroup (name ++ "_auto")
     (Just (IRLambda symbol $ makeGen adts plan name, "Wrapper for the neural network function"))
     (Just (makeProb adts conf plan, "Inference function for neural network function"))
     Nothing
-    (Just (makeEncode adts conf plan probFnName normalFnName paramNames, "Encoding function for NN2 input"))
+    Nothing
     Nothing
     (show plan)
     where plan = makePartitionPlan adts target tag
-          probFnName = spllFnName ++ "_prob"
-          normalFnName = spllFnName ++ "_normal"
-
--- Encoder: source -> Symbol. Generates only an encoding function.
-makeEncoderFunGroup :: [ADTDecl] -> CompilerConfig -> String -> RType -> Maybe MultiValue -> IRFunGroup
-makeEncoderFunGroup adts conf name source tag =
-  IRFunGroup name
-    Nothing
-    Nothing
-    Nothing
-    (Just (IRLambda "sample" $ makeEncodeTopLevel adts "" "" plan 0 [IRVar "sample"], "Encoding function that reconstructs logits from source type"))
-    Nothing
-    (show plan)
-    where plan = makePartitionPlan adts source tag
 
 --TODO: Output this into the output file somehow.
 -- yields a forward declaration of a neural network:
@@ -333,14 +315,9 @@ makeEncodeTopLevel = makeEncodeTopLevelW id
 
 makeEncodeTopLevelW :: (IRValue -> IRValue) -> [ADTDecl] -> String -> String -> PartitionPlan -> Int -> [IRExpr] -> IRExpr
 makeEncodeTopLevelW wrap adts probFnName normalFnName (Discretes rty (MultiDiscretes vals)) ix outerArgs =
-  if null probFnName
-  then -- No prob function available (encoder case): fall back to raw logit slots.
-    foldr IRCons (IRConst (VList EmptyList))
-      [IRIndex (IRVar vector) (IRConst (VInt (ix + i))) | i <- [0 .. length vals - 1]]
-  else
-    foldr IRCons (IRConst (VList EmptyList))
-      [ IRTFst (foldl IRApply (IRApply (IRVar probFnName) (IRConst (wrap (valueToIR v)))) outerArgs)
-      | v <- vals ]
+  foldr IRCons (IRConst (VList EmptyList))
+    [ IRTFst (foldl IRApply (IRApply (IRVar probFnName) (IRConst (wrap (valueToIR v)))) outerArgs)
+    | v <- vals ]
 makeEncodeTopLevelW wrap adts probFnName normalFnName Continuous ix outerArgs =
   -- Call normalFnName(outerArgs...) → IRTCons mu sigma, then emit [mu, sigma].
   let normalResult = foldl IRApply (IRVar normalFnName) outerArgs
@@ -351,19 +328,15 @@ makeEncodeTopLevelW wrap adts probFnName normalFnName Continuous ix outerArgs =
 makeEncodeTopLevelW wrap adts probFnName normalFnName (TuplePlan a b) ix outerArgs =
   -- Compose wrap with the tuple projection so sub-plan prob calls are marginal queries:
   -- first component: probFn (wrap (VTuple v VAny)), second: probFn (wrap (VTuple VAny v)).
-  let fstNormalFn = if null normalFnName then "" else normalFnName ++ "_fst"
-      sndNormalFn = if null normalFnName then "" else normalFnName ++ "_snd"
+  let fstNormalFn = normalFnName ++ "_fst"
+      sndNormalFn = normalFnName ++ "_snd"
       fstWrap v = wrap (VTuple v VAny)
       sndWrap v = wrap (VTuple VAny v)
   in invokeStandardFunction stdListConcat
     [ makeEncodeTopLevelW fstWrap adts probFnName fstNormalFn a ix outerArgs
     , makeEncodeTopLevelW sndWrap adts probFnName sndNormalFn b (ix + getSize a) outerArgs
     ]
-makeEncodeTopLevelW wrap adts probFnName normalFnName plan@(EitherPlan a b) ix outerArgs
-  | null probFnName =
-      foldr IRCons (IRConst (VList EmptyList))
-        [ IRConst (VFloat 0) | _ <- [0 .. getSize plan - 1] ]
-  | otherwise =
+makeEncodeTopLevelW wrap adts probFnName normalFnName plan@(EitherPlan a b) ix outerArgs =
       let callProb s = foldl IRApply (IRApply (IRVar probFnName) (IRConst s)) outerArgs
           pLeftAny  = IRTFst (callProb (wrap (VEither (Left VAny))))
           pRightAny = IRTFst (callProb (wrap (VEither (Right VAny))))
@@ -375,11 +348,7 @@ makeEncodeTopLevelW wrap adts probFnName normalFnName plan@(EitherPlan a b) ix o
       in invokeStandardFunction stdListConcat
            [ flagSlot
            , invokeStandardFunction stdListConcat [leftEnc, rightEnc] ]
-makeEncodeTopLevelW wrap adts probFnName normalFnName plan@(ADTPlan adtName plans) ix outerArgs
-  | null probFnName =
-      foldr IRCons (IRConst (VList EmptyList))
-        [ IRConst (VFloat 0) | _ <- [0 .. getSize plan - 1] ]
-  | otherwise =
+makeEncodeTopLevelW wrap adts probFnName normalFnName plan@(ADTPlan adtName plans) ix outerArgs =
       let callProb s = foldl IRApply (IRApply (IRVar probFnName) (IRConst s)) outerArgs
           concatLists = foldr (\x acc -> invokeStandardFunction stdListConcat [x, acc]) (IRConst (VList EmptyList))
           constrAnyVal (cName, fieldPlans) = VADT cName (replicate (length fieldPlans) VAny)
@@ -485,14 +454,15 @@ availableNormalFns (IREnv groups _ _) =
 -- MAR semantics for EitherPlan encoding are implemented in makeEncodeTopLevelW/makeEncodeEitherArm.
 
 ------------------------------------------------------------------------
--- main's own encode function (auto-derive slice of PartitionPlan decoupling).
+-- A top-level function's own encode function (auto-derive slice of PartitionPlan decoupling).
 --
--- `makeEncode`'s logic only needs a PartitionPlan for some RType plus the program's
--- `main_prob`/`main_normal` functions; it does not need a `neural :: Symbol -> target`
--- declaration -- that's merely the current trigger.  This builds an encode function for a
--- top-level binding (`main`) directly from its own output RType, with no neural declaration
--- involved, whenever that type is representable as a logit vector.  See task
--- encode-main-auto-derived / design encode-partitionplan-decoupling.
+-- `makeEncode`'s logic only needs a PartitionPlan for some RType plus that function's
+-- `<fn>_prob`/`<fn>_normal` functions; it does not need a `neural :: Symbol -> target`
+-- declaration -- that's merely a historical trigger.  This builds an encode function for any
+-- logit-representable top-level binding directly from its own output RType, querying that
+-- function's own prob/normal functions, with no neural declaration involved.  `main` is just
+-- the `fn == "main"` case.  See tasks encode-main-auto-derived / encode-per-function-endpoints
+-- and design encode-partitionplan-decoupling.
 --
 -- This is purely additive: it returns Nothing (never an error) when
 --   * the type is neither in the encodeDecls registry nor auto-derivable -- i.e. it
@@ -503,18 +473,19 @@ availableNormalFns (IREnv groups _ _) =
 --     check `validateEncodeGaussian` applies to decoder declarations, or
 --   * a discrete/Either/ADT slot would reference an absent `main_prob` function.
 makeTopLevelEncodeFun :: [ADTDecl] -> CompilerConfig -> [(RType, MultiValue)]
+                      -> String       -- ^ host function name (e.g. "main", "isRed")
                       -> RType        -- ^ the binding's (return) RType
-                      -> [String]     -- ^ outer parameter names of main
-                      -> Bool         -- ^ whether main's prob function was generated
-                      -> [IRFunGroup] -- ^ groups carrying main's normal functions (base + tuple components)
+                      -> [String]     -- ^ outer parameter names of the host function
+                      -> Bool         -- ^ whether the host's prob function was generated
+                      -> [IRFunGroup] -- ^ groups carrying the host's normal functions (base + tuple components)
                       -> Maybe IRFunDecl
-makeTopLevelEncodeFun adts conf registry rty paramNames probAvailable normalGroups
+makeTopLevelEncodeFun adts conf registry fnName rty paramNames probAvailable normalGroups
   | not buildable       = Nothing
   | normalsOk && probOk = Just (makeEncode adts conf plan probFnName normalFnName paramNames, doc)
   | otherwise           = Nothing
   where
-    probFnName   = "main_prob"
-    normalFnName = "main_normal"
+    probFnName   = fnName ++ "_prob"
+    normalFnName = fnName ++ "_normal"
     tag          = resolvePartitionAnnotation registry rty Nothing
     buildable    = case tag of
                      Just _  -> True   -- explicit registry entry
@@ -525,7 +496,7 @@ makeTopLevelEncodeFun adts conf registry rty paramNames probAvailable normalGrou
     available    = availableNormalFns (IREnv normalGroups [] [])
     normalsOk    = all (`elem` available) (requiredNormalFns normalFnName plan)
     probOk       = not (planUsesProb plan) || probAvailable
-    doc          = "Encoding function for main's own output type"
+    doc          = "Encoding function for " ++ fnName ++ "'s own output type"
 
 -- | Whether an encode plan references the program's prob function: true for any discrete /
 -- Either / ADT slot, false for a pure-Continuous plan (which queries only the normal

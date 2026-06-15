@@ -57,6 +57,12 @@ encodeCollisionProg = Program [("main", constF 1.0)] [] []
   , (TInt, MultiDiscretes [VInt 0, VInt 1, VInt 2])
   ]
 
+-- The (source -> Symbol) "Encoder" neural declaration direction has been removed: it named
+-- an external network (NN2) with no SPLL call site. Such a declaration must be rejected at
+-- validation, pointing the user at the registry syntax ("neural encode :: T of M").
+encoderDeclProg :: Program
+encoderDeclProg = Program [("main", constB True)] [("ren", TArrow TBool TSymbol, Nothing)] [] []
+
 -- Each entry: (case name, program, distinctive substring of the expected error).
 -- The substring identifies *which* validation rule should fire, so we catch both
 -- "should have been rejected but wasn't" and "rejected for the wrong reason".
@@ -75,6 +81,7 @@ validatorCases =
   , ("noMain",           noMainProg,             "no 'main' function")
   , ("anyInProgram",     anyInProgramProg,       "ANY may not be used")
   , ("encodeCollision",  encodeCollisionProg,    "conflicting PartitionPlan annotations")
+  , ("encoderDecl",      encoderDeclProg,        "neural encode")
   ]
 
 validatorTests :: TestTree

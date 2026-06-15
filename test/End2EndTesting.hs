@@ -24,7 +24,10 @@ import TestCaseParser
 import TestTolerances (probTolerance, encodeSlotTolerance, normalizationTolerance)
 import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType
-import SPLL.AutoNeural (makePartitionPlan, planIndexOf)
+import SPLL.AutoNeural (makePartitionPlan, planIndexOf, resolvePartitionAnnotation, PartitionPlan)
+import SPLL.Typing.Infer (addTypeInfo)
+import SPLL.Typing.ForwardChaining (annotateProg)
+import SPLL.Analysis (annotateEnumsProg)
 import Data.Foldable (toList)
 import Test.QuickCheck hiding (verbose)
 import Test.Tasty (TestTree, testGroup)
@@ -62,25 +65,20 @@ testInterpreter p compiledE (CumulTestCase name sample params (VFloat expectedPr
     Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
     Right (Left err) -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
     Left err -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
-testInterpreter p compiledE (EncodingLengthTestCase name expectedLen) = ioProperty $ do
-  -- Construct one mock sym per outer parameter of main (or none for closed-form programs).
-  let paramCnt = progParameterCount p
-      mockArgs = replicate paramCnt (VTuple (VInt 0) (VInt 42))
-      (declName, _, _) = head (neurals p)
-  result <- try $ evaluate $ (compiledE >>= \c -> runEncodeC p c (declName ++ "_auto") mockArgs) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
+testInterpreter p compiledE (EncodingLengthTestCase name target explicitArgs expectedLen) = ioProperty $ do
+  let args = encodeArgsFor p explicitArgs
+  result <- try $ evaluate $ (compiledE >>= \c -> runEncodeC p c target args) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of
     Right (Right (VList lst)) ->
-      counterexample ("Encode length differs for test case " ++ name ++ ". Expected: " ++ show expectedLen ++ " Got: " ++ show (length lst)) (length lst == expectedLen)
+      counterexample ("Encode length differs for test case " ++ name ++ " (target " ++ target ++ "). Expected: " ++ show expectedLen ++ " Got: " ++ show (length lst)) (length lst == expectedLen)
     Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a list: " ++ show x) False
     Right (Left err) -> counterexample ("Test case " ++ name ++ " raised a compiler error: " ++ show err) False
     Left err -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
-testInterpreter p compiledE (EncodingSlotTestCase name spikeVal idxOf expected) = ioProperty $ do
-  -- Build a spiking mock sym: mode=1 spikes the mock NN at spikeVal.
-  let mockSym = VTuple (VInt 1) (VTuple spikeVal (VInt 0))
-  let (declName, TArrow _ target, nnTag) = head (neurals p)
-      plan = makePartitionPlan (adts p) target nnTag
+testInterpreter p compiledE (EncodingSlotTestCase name target explicitArgs idxOf expected) = ioProperty $ do
+  let args = encodeArgsFor p explicitArgs
+      plan = endpointPlan p target
       slotIdx = planIndexOf plan idxOf
-  result <- try $ evaluate $ (compiledE >>= \c -> runEncodeC p c (declName ++ "_auto") [mockSym]) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
+  result <- try $ evaluate $ (compiledE >>= \c -> runEncodeC p c target args) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of
     Right (Right (VList lst)) ->
       let items = toList lst
@@ -206,6 +204,40 @@ progParameterCount Program{functions=f} = countLambdas main
     Just main = lookup "main" f
     countLambdas (Lambda _ _ e) = 1 + countLambdas e
     countLambdas _ = 0
+
+-- | Build the argument list for an encode query from the directive's explicit args.
+--
+--   * No-NN programs (per-function encode over real values): args are passed verbatim
+--     (e.g. `encode_at[isRed](0.3, indexOf(True))` calls isRed's encode with s = 0.3).
+--   * Decoder programs: each explicit arg is the value to spike the mock NN at, wrapped in
+--     the mock-sym envelope `(mode=1, (spikeVal, seed=0))` so the mock network peaks there.
+--   * Decoder programs with no explicit args (legacy `encode_len=N`): one neutral mock sym
+--     per outer parameter of main.
+encodeArgsFor :: Program -> [IRValue] -> [IRValue]
+encodeArgsFor p explicitArgs
+  | not (null explicitArgs) = if null (neurals p) then explicitArgs else map spike explicitArgs
+  | null (neurals p)        = []
+  | otherwise               = replicate (progParameterCount p) (VTuple (VInt 0) (VInt 42))
+  where spike v = VTuple (VInt 1) (VTuple v (VInt 0))
+
+-- | The logit layout for an endpoint function's own output type, resolved exactly as the
+-- compiler resolves it when emitting that function's encodeFun (registry entry, else
+-- auto-derive). Used to map an `indexOf(value)` directive to a flat slot index.
+endpointPlan :: Program -> String -> PartitionPlan
+endpointPlan p target = makePartitionPlan (adts p) rt (resolvePartitionAnnotation (encodeDecls p) rt Nothing)
+  where rt = endpointReturnRType p target
+
+endpointReturnRType :: Program -> String -> RType
+endpointReturnRType p target =
+  case lookup target (functions typed) of
+    Just binding -> rType (getTypeInfo (stripLambdasE binding))
+    Nothing      -> error ("endpointReturnRType: no function named " ++ target ++ " in program")
+  where
+    typed = case addTypeInfo (annotateProg (annotateEnumsProg p)) of
+      Right tp  -> tp
+      Left err  -> error ("endpointReturnRType: type inference failed: " ++ show err)
+    stripLambdasE (Lambda _ _ b) = stripLambdasE b
+    stripLambdasE e = e
 
 testJuliaAll :: [(Either CompilerError IREnv, [TestCase])] -> Property
 testJuliaAll programCases = ioProperty $ do

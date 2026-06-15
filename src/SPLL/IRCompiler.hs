@@ -52,22 +52,24 @@ envToIR conf p
 
 envToIRUnoptimized :: CompilerConfig -> Program -> IREnv
 envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb, noGenerate=noGen} p@Program{adts=adts} = IREnv (
-  map (makeAutoNeural adts conf "main" mainParamNames (encodeDecls p)) (neurals p) ++
+  map (makeAutoNeural adts conf (encodeDecls p)) (neurals p) ++
   concatMap (\(name, binding) ->
     let typeEnv = getGlobalTypeEnv p
+        bindingParamNames = extractParamNames binding
         pt = pType $ getTypeInfo binding
-        -- `main`'s own group gets an encodeFun when its output type is logit-representable,
-        -- with no neural declaration required (task encode-main-auto-derived). Lazily
-        -- references baseFunGroup/tupleNormalFuns to read whether main's prob/normal
-        -- functions were generated; other groups keep encodeFun = Nothing.
-        encodeF
-          | name == "main" =
+        -- Every logit-representable top-level function gets its own encodeFun, keyed to its
+        -- own <name>_prob / <name>_normal functions, with no neural declaration required
+        -- (task encode-per-function-endpoints; `main` is just the name == "main" case).
+        -- Lazily references baseFunGroup/tupleNormalFuns to read whether this function's
+        -- prob/normal functions were generated; non-representable functions keep
+        -- encodeFun = Nothing (purely additive, no new error surface).
+        encodeF =
               makeTopLevelEncodeFun adts conf (encodeDecls p)
+                name
                 (rType (getTypeInfo (stripLambdas binding)))
-                mainParamNames
+                bindingParamNames
                 (isJust (probFun baseFunGroup))
                 (baseFunGroup : tupleNormalFuns)
-          | otherwise = Nothing
         baseFunGroup = IRFunGroup {groupName=name, encodeFun=encodeF,
          integFun =
           if not noInteg && (pt == Deterministic || pt == Integrate || pt == PNormal || pt == PLogNormal) then
@@ -108,7 +110,6 @@ envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb
     toNormalDecl name expr = (expr, "Returns (mu, sigma) normal distribution parameters for the " ++ name ++ " function")
     fcDat = progToFCData p
     meta typeEnv = CompilerMetadata conf fcDat typeEnv adts p (IRConst (VFloat 1.0))
-    mainParamNames = maybe [] extractParamNames (lookup "main" (functions p))
     extractParamNames (Lambda _ name body) = name : extractParamNames body
     extractParamNames _ = []
     stripLambdas (Lambda _ _ body) = stripLambdas body

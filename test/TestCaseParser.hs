@@ -44,8 +44,8 @@ allBackends = [minBound .. maxBound]
 data TestCase = ProbTestCase String IRValue [IRValue] (IRValue, IRValue)
               | CumulTestCase String IRValue [IRValue] (IRValue, IRValue)
               | ArgmaxPTestCase String [IRValue] IRValue
-              | EncodingLengthTestCase String Int             -- expected output list length (no outer arg: determined by program)
-              | EncodingSlotTestCase String IRValue IRValue Double  -- spikeValue, indexOf-value, expected float
+              | EncodingLengthTestCase String String [IRValue] Int             -- target fn, explicit args, expected output list length
+              | EncodingSlotTestCase String String [IRValue] IRValue Double  -- target fn, explicit args, indexOf-value, expected float
               deriving (Show)
 
 isProbTestCase :: TestCase -> Bool
@@ -61,19 +61,19 @@ isCumulTestCase (CumulTestCase _ _ _ _) = True
 isCumulTestCase _ = False
 
 isEncodingLengthTestCase :: TestCase -> Bool
-isEncodingLengthTestCase (EncodingLengthTestCase _ _) = True
+isEncodingLengthTestCase (EncodingLengthTestCase {}) = True
 isEncodingLengthTestCase _ = False
 
 isEncodingSlotTestCase :: TestCase -> Bool
-isEncodingSlotTestCase (EncodingSlotTestCase _ _ _ _) = True
+isEncodingSlotTestCase (EncodingSlotTestCase {}) = True
 isEncodingSlotTestCase _ = False
 
 testCaseName :: TestCase -> String
 testCaseName (ProbTestCase name _ _ _) = name
 testCaseName (CumulTestCase name _ _ _) = name
 testCaseName (ArgmaxPTestCase name _ _) = name
-testCaseName (EncodingLengthTestCase name _) = name
-testCaseName (EncodingSlotTestCase name _ _ _) = name
+testCaseName (EncodingLengthTestCase name _ _ _) = name
+testCaseName (EncodingSlotTestCase name _ _ _ _) = name
 
 type Parser = Parsec Void String
 type MonadParser m = (MonadParsec Void String m, MonadPlus m, MonadFail m, MonadState Int m)
@@ -119,23 +119,43 @@ pCumulParser name = do
     [] -> fail "ProbTestCase must have at least one parameter (the sample)"
     _  -> return $ CumulTestCase name (head params) (tail params) (resP, resD)
 
+-- Optional endpoint addressing: `[fn]` selects which top-level function's encode to query.
+-- Defaults to "main" (the f == main case of the one per-function-encode rule).
+pEncodeTarget :: MonadParser m => m String
+pEncodeTarget = option "main" (between (symbol "[") (symbol "]") pTargetName)
+  where pTargetName = L.lexeme sc (some (alphaNumChar <|> char '_'))
+
+-- Optional explicit argument list passed verbatim to the endpoint's encode (e.g. `(0.3)`
+-- for `isRed s` with s = 0.3). Empty when omitted; the harness then falls back to mock-NN
+-- argument fabrication for decoder programs.
+pEncodeArgs :: MonadParser m => m [IRValue]
+pEncodeArgs = option [] (between (symbol "(") (symbol ")") (pIRValue `sepBy` symbol ","))
+
 pEncodingLengthTestCase :: MonadParser m => String -> m TestCase
 pEncodingLengthTestCase name = do
-  symbol "encode_len="
+  symbol "encode_len"
+  target <- pEncodeTarget
+  args <- pEncodeArgs
+  symbol "="
   n <- L.decimal
-  return $ EncodingLengthTestCase name n
+  return $ EncodingLengthTestCase name target args n
 
+-- encode_at[fn](arg1, ..., indexOf(v)) ~= e
+-- The values before the trailing `indexOf(...)` are the endpoint's explicit arguments
+-- (possibly none); `indexOf(v)` selects the logit slot for value v within the endpoint's plan.
 pEncodingSlotTestCase :: MonadParser m => String -> m TestCase
 pEncodingSlotTestCase name = do
-  symbol "encode_at("
-  sample <- pIRValue
-  symbol ","
+  symbol "encode_at"
+  target <- pEncodeTarget
+  symbol "("
+  args <- many (try (pIRValue <* symbol ","))
   symbol "indexOf("
   idxOf <- pIRValue
-  symbol "))"
+  symbol ")"
+  symbol ")"
   symbol "~="
   expected <- L.float
-  return $ EncodingSlotTestCase name sample idxOf expected
+  return $ EncodingSlotTestCase name target args idxOf expected
 
 pTestCases :: MonadParser m => String -> m [TestCase]
 pTestCases name = choice [pProbTestCase name, pCumulParser name, pArgmaxPTestCase name, pEncodingLengthTestCase name, pEncodingSlotTestCase name] `sepEndBy` pNewline

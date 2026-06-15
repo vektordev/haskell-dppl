@@ -1,0 +1,3 @@
+isRed s = if Uniform < s then True else False
+isBig s = if Uniform < 0.2 then True else False
+main s = (isRed s, isBig s)
