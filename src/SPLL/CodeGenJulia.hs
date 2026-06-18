@@ -128,7 +128,7 @@ generateFunctions (IREnv funcs adts consts) = do
 
 generateFunctionGroup :: IRFunGroup -> GlobalVariableSupply [String]
 generateFunctionGroup IRFunGroup {groupName=n, genFun=g, probFun=p, integFun=i, encodeFun=e, normalFun=nrm, groupDoc=doc} = do
-  let preemble = [ "# === Function Group " ++ n ++ " ===\n# " ++ doc]
+  let preemble = ("# === Function Group " ++ n ++ " ===") : map ("# " ++) (lines doc)
   gen <- fromMaybe (return []) (g <&> genF n "_gen")
   prob <- fromMaybe (return []) (p <&> genF n "_prob")
   integ <- fromMaybe (return []) (i <&> genF n "_integ")
@@ -140,11 +140,11 @@ generateFunctionGroup IRFunGroup {groupName=n, genFun=g, probFun=p, integFun=i, 
 generateFunction :: String -> String -> IRExpr -> GlobalVariableSupply [String]
 generateFunction name doc expr = do
     let (args, reducedExpr) = unwrapLambdas expr
-    let docLine = "# " ++ doc
+    let docLines = map ("# " ++) (lines doc)
     let l1 = "function " ++ name ++ "(" ++ intercalate ", " args ++ ")"
     block <- generateStatementBlock reducedExpr
     let lEnd = "end"
-    return $ [docLine, l1] ++ indentOnce block ++ [lEnd]
+    return $ docLines ++ [l1] ++ indentOnce block ++ [lEnd]
 
 unwrapLambdas :: IRExpr -> ([String], IRExpr)
 unwrapLambdas (IRLambda name rest) = (name:otherNames, plainTree)

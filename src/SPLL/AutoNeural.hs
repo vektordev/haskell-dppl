@@ -17,7 +17,7 @@ import SPLL.Typing.RType
 import SPLL.Lang.Lang
 import StandardLibrary
 
-import Data.List (find, elemIndex, isPrefixOf)
+import Data.List (find, elemIndex, isPrefixOf, intercalate)
 import Utils
 import Data.Maybe (fromJust, isJust)
 import Control.Applicative ((<|>))
@@ -83,17 +83,82 @@ makeForwardDecl adts registry (name, declType, tag) =
         ++ planLayoutString (makePartitionPlan adts target (resolvePartitionAnnotation registry target tag))
     _ -> "neural Declaration " ++ name ++ " :: " ++ show declType ++ " (invalid: a neural network must be Symbol -> target)"
 
--- | A human-readable description of a PartitionPlan's flat logit-vector layout and its total
--- dimensionality.  Documents both the decoder forward-declaration (NN1's required output, via
--- 'makeForwardDecl') and each endpoint's encode function (NN2's input, via the encode doc).
+-- | A human-readable, multi-line *table* describing a PartitionPlan's flat logit-vector
+-- layout.  One row per leaf slot, with columns: index-range / constraint / semantic note.
+-- The note carries the structural path (fst/snd, Either L/R, ctor/field) down to the leaf's
+-- meaning, so every row names both its real logit slot(s) and what they encode.  Documents
+-- both the decoder forward-declaration (NN1's required output, via 'makeForwardDecl') and
+-- each endpoint's encode function (NN2's input, via the encode doc).  Multi-line output is
+-- safe: codegen comments every line of a doc (see CodeGenPyTorch/CodeGenJulia).
 planLayoutString :: PartitionPlan -> String
-planLayoutString plan = "layout: " ++ planStr plan ++ ", dimensionality=" ++ show (getSize plan)
+planLayoutString plan =
+  intercalate "\n" (heading : tableLine headerRow : tableLine sepRow : map tableLine rows)
   where
-    planStr (TuplePlan first second) = planStr first ++ " x " ++ planStr second
-    planStr (EitherPlan left right)  = "[1](0..1) " ++ planStr left ++ " + " ++ planStr right
-    planStr p@(Discretes _ _)        = "[" ++ show (getSize p) ++ "](softmax'ed)"
-    planStr Continuous               = "[1],[1](>0)"
-    planStr (ADTPlan _ _)            = "[complex ADT layout]"
+    heading       = "PartitionPlan layout (" ++ show (getSize plan) ++ " logits)"
+    (rows, _)     = planRows 0 "" plan
+    headerRow     = ("idx", "constraint", "meaning")
+    fst3 (a,_,_)  = a
+    snd3 (_,b,_)  = b
+    w1            = maximum (map (length . fst3) (headerRow : rows))
+    w2            = maximum (map (length . snd3) (headerRow : rows))
+    sepRow        = (replicate w1 '-', replicate w2 '-', replicate (length "meaning") '-')
+    pad w s       = s ++ replicate (max 0 (w - length s)) ' '
+    tableLine (a, b, c) = pad w1 a ++ "  " ++ pad w2 b ++ "  " ++ c
+
+    -- Append a child segment to a semantic path, "" being the root.
+    sub p seg = if null p then seg else p ++ " / " ++ seg
+
+    -- 'planRows ix path p' lays 'p' out starting at flat logit index 'ix', tagging each row
+    -- with the breadcrumb 'path'. Indices match makeProbRec/makeGenRec exactly. Returns the
+    -- rows and the next free index (ix + getSize p).
+    planRows :: Int -> String -> PartitionPlan -> ([(String, String, String)], Int)
+    planRows ix path (TuplePlan a b) =
+      let (ra, ix1) = planRows ix  (sub path "fst") a
+          (rb, ix2) = planRows ix1 (sub path "snd") b
+      in (ra ++ rb, ix2)
+    planRows ix path (EitherPlan l r) =
+      let flagRow   = (show ix, "0..1", sub path "Either flag = P(left)")
+          (rl, ix1) = planRows (ix + 1) (sub path "L") l
+          (rr, ix2) = planRows ix1      (sub path "R") r
+      in (flagRow : rl ++ rr, ix2)
+    planRows ix path p@(Discretes rty tag) =
+      let n    = getSize p
+          desc = case tag of
+                   MultiDiscretes vals -> "enum " ++ show rty ++ " " ++ showVals vals
+                   _                   -> "enum " ++ show rty
+      in ([(rangeStr ix n, "softmax", sub path desc)], ix + n)
+    planRows ix path Continuous =
+      ([ (show ix,       "free", sub path "Gaussian mu")
+       , (show (ix + 1), "> 0",  sub path "Gaussian sigma") ], ix + 2)
+    planRows ix path (ADTPlan name constrs) =
+      let nFlags  = length constrs
+          flagRow = (rangeStr ix nFlags, "softmax",
+                     sub path (name ++ " ctor flags: " ++ intercalate "|" (map fst constrs)))
+          renderConstr (acc, cix) (cName, fields) =
+            let (frs, cix') = renderFields cix (sub path cName) fields
+            in (acc ++ frs, cix')
+          (constrRows, ixEnd) = foldl renderConstr ([], ix + nFlags) constrs
+      in (flagRow : constrRows, ixEnd)
+
+    -- a constructor's fields are laid out sequentially, each its own breadcrumb segment.
+    renderFields ix _    [] = ([], ix)
+    renderFields ix path fields =
+      foldl (\(acc, cix) (j, f) ->
+               let (rs, cix') = planRows cix (sub path ("f" ++ show j)) f
+               in (acc ++ rs, cix'))
+            ([], ix) (zip [0 :: Int ..] fields)
+
+    showVals vals =
+      let strs = map showLeafVal vals
+      in if length strs <= 6
+           then "{" ++ intercalate "," strs ++ "}"
+           else "{" ++ intercalate "," (take 5 strs) ++ ",... +" ++ show (length strs - 5) ++ "}"
+    showLeafVal (VBool b)  = show b
+    showLeafVal (VInt i)   = show i
+    showLeafVal (VFloat f) = show f
+    showLeafVal v          = show v
+
+    rangeStr ix n = if n <= 1 then show ix else show ix ++ ".." ++ show (ix + n - 1)
 
 
 data PartitionPlan = TuplePlan PartitionPlan PartitionPlan -- Logit layout: first, then second.

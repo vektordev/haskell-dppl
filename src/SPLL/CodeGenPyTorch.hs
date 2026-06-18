@@ -180,12 +180,12 @@ generateClass lut callableNames (IRFunGroup name gen prob integ encode normal do
     e' <- funcStringFromMaybe "encode" encode
     n' <- funcStringFromMaybe "normal_params" normal
     return (i', p', g', e', n')) ([], callableNames)
-  commentLine = "# " ++ doc
+  commentLines = map ("# " ++) (lines doc)
   initLine = "class " ++ onHead toUpper name ++ "(Module):"
   globalVarDecls = map (\(mv, name)-> name ++ " = " ++ pyMultiVal mv) globalVars
   funcs = i ++ [""] ++ p ++ [""] ++ g ++ [""] ++ e ++ [""] ++ n
   replaceCallsDecl (e, d) = (irMap (replaceCalls lut) e, d)
-  in commentLine:initLine:indentOnce globalVarDecls ++ indentOnce funcs
+  in commentLines ++ initLine:indentOnce globalVarDecls ++ indentOnce funcs
 
 generateFunction :: Bool -> (String, IRFunDecl) -> GlobalVariableSupply [String]
 generateFunction classFunction (name, (expr, doc)) = do
@@ -193,8 +193,8 @@ generateFunction classFunction (name, (expr, doc)) = do
   let args' = if classFunction then "self":args else args
   let l1 = "def " ++ name ++ "(" ++ intercalate ", " args' ++ "):"
   block <- generateStatementBlock reducedExpr
-  let docLine = "# " ++ doc
-  return $ [docLine, l1] ++ indentOnce block
+  let docLines = map ("# " ++) (lines doc)
+  return $ docLines ++ [l1] ++ indentOnce block
 
 unwrapLambdas :: IRExpr -> ([String], IRExpr)
 unwrapLambdas (IRLambda name rest) = (name:otherNames, plainTree)
