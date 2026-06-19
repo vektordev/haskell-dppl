@@ -212,6 +212,21 @@ isEnumerable = any isDiscrete
   where isDiscrete (DiscreteValues _) = True
         isDiscrete _                  = False
 
+-- | True when `Apply l v` should be compiled by enumerating the argument's discrete
+-- support (marginalising over a random draw). This requires:
+--   * the applied function is conditional (its body is enumerable-compilable, not
+--     something forward chaining must algebraically invert), and
+--   * the argument is a *probabilistic* discrete draw -- it carries DiscreteValues and
+--     is not Deterministic. The Deterministic exclusion is essential: a constant or
+--     deterministic input (e.g. `dice 4.0`, where `4.0` carries a DiscreteValues tag)
+--     is a fixed value with nothing to marginalise over, and must take the ordinary
+--     application path instead of being enumerated.
+isEnumerableApplication :: Expr -> Expr -> Bool
+isEnumerableApplication l v =
+     IsConditional `elem` tags (getTypeInfo l)
+  && isEnumerable (tags (getTypeInfo v))
+  && pType (getTypeInfo v) /= Deterministic
+
 const0 :: IRExpr
 const0 = IRConst (VFloat 0)
 
@@ -619,41 +634,14 @@ toIRInference meta True (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeIn
     TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
     _ -> do
       return (compareValueExpr rt (IRApply lIR vIR) sample, const0, const0)
+-- Enumerable conditional lambda applied to a probabilistic discrete argument:
+-- enumerate the argument's discrete support and weight each value by its probability,
+-- compiling the body via toIREnumerate. The body need not be deterministic given the
+-- bound variable -- toIREnumerate recurses into further enumerable applications
+-- (nested enumerable `let`s), so this rule no longer requires `pType l == Deterministic`.
 toIRInference meta cumulative (Apply TypeInfo {rType=_} l v) sample
-  | IsConditional `elem` tags (getTypeInfo l) && any isDiscretes (tags (getTypeInfo v))
-  && pType (getTypeInfo l) == Deterministic = do  -- This is only because of a bug in pInfer, but its useful for us...
-  let lCn = chainName (getTypeInfo l)
-  let Just (_, LambdaInfo boundVar bodyCn , _) = findEquivalentExpression (fcData meta) lCn
-  let Program{functions=fs} = compilingProgram meta
-  let fExprs = map snd fs
-  let lBodyExpr = findExprWithCN fExprs bodyCn
-  {-let Just (IfInfo cCn tCn eCn, ifTag) = findEquivalentIf (fcData meta) bodyCn
-  let Program{functions=fs} = compilingProgram meta
-  
-  let condExpr = findExprWithCN fExprs cCn
-  let thenExpr = findExprWithCN fExprs tCn
-  let elseExpr = findExprWithCN fExprs eCn
-  let discreteVVals = head [multiValueToValueList x | DiscreteValues x <- (tags (getTypeInfo v))]
-
-  
-  condIR <- toIRGenerate meta {typeEnv = newTypeEnv} condExpr
-  thenIR <- toIRGenerate meta {typeEnv = newTypeEnv} thenExpr
-  elseIR <- toIRGenerate meta {typeEnv = newTypeEnv} elseExpr-}
-
-  let newTypeEnv = (boundVar, (rType (getTypeInfo v), False)):typeEnv meta
-  irTuple <- lift (runWriterT (do
-    (pBranch, _, _) <- toIRInference meta False v (IRVar boundVar)
-    (p, d, bc) <- toIREnumerate meta{typeEnv=newTypeEnv} cumulative lBodyExpr sample
-    return (IROp OpMult p pBranch, d, bc))) <&> generateLetInBlock meta
-  let discreteVVals = head [x | DiscreteValues x <- tags (getTypeInfo v)]
-  let (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
-  setVariables outerBinds
-  let sum = IREnumSum boundVar discreteVVals (IRTFst innerTuple)
-  let bc = IREnumSum boundVar discreteVVals (IRTSnd (IRTSnd innerTuple))
-  return (sum, const0, bc)
-  where
-    isDiscretes (DiscreteValues _) = True
-    isDiscretes _ = False
+  | isEnumerableApplication l v =
+  enumerateAppliedLambda meta cumulative l v sample
 -- Deterministic bound expression
 toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo v) == Deterministic = do
   vIR <- toIRGenerate meta v
@@ -1251,7 +1239,36 @@ packParamsIntoLetinsGen meta (v:vars) (p:params) expr = do
   e <- packParamsIntoLetinsGen meta vars params expr
   return $ IRLetIn v pExpr e
 
+-- | Enumerate the application of a conditional/enumerable lambda to a discrete
+-- argument. Computes sum over the argument's discrete support of
+-- P(arg = value) * P_enum(body | bound = value). Shared by the top-level inference
+-- rule and by toIREnumerate, so that nested enumerable `let`s
+-- (`let c = .. in let d = .. in ..`) enumerate at every level instead of generating
+-- the inner draws forward.
+enumerateAppliedLambda :: CompilerMetadata -> Bool -> Expr -> Expr -> IRExpr -> CompilerMonad CompilationResult
+enumerateAppliedLambda meta cumulative l v sample = do
+  let lCn = chainName (getTypeInfo l)
+  let Just (_, LambdaInfo boundVar bodyCn, _) = findEquivalentExpression (fcData meta) lCn
+  let fExprs = map snd (functions (compilingProgram meta))
+  let lBodyExpr = findExprWithCN fExprs bodyCn
+  let newTypeEnv = (boundVar, (rType (getTypeInfo v), False)):typeEnv meta
+  irTuple <- lift (runWriterT (do
+    (pBranch, _, _) <- toIRInference meta False v (IRVar boundVar)
+    (p, d, bc) <- toIREnumerate meta{typeEnv=newTypeEnv} cumulative lBodyExpr sample
+    return (IROp OpMult p pBranch, d, bc))) <&> generateLetInBlock meta
+  let discreteVVals = head [x | DiscreteValues x <- tags (getTypeInfo v)]
+  let (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
+  setVariables outerBinds
+  let summed = IREnumSum boundVar discreteVVals (IRTFst innerTuple)
+  let bc = IREnumSum boundVar discreteVVals (IRTSnd (IRTSnd innerTuple))
+  return (summed, const0, bc)
+
 toIREnumerate :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad CompilationResult
+-- Nested enumerable application (e.g. an inner `let` binding a fresh discrete draw):
+-- recurse with enumeration + weighting rather than generating the draw forward.
+toIREnumerate meta cumulative (Apply _ l v) sample
+  | isEnumerableApplication l v =
+  enumerateAppliedLambda meta cumulative l v sample
 toIREnumerate meta cumulative (Var TypeInfo{chainName=cn} _) sample = do
   let Just (equivCN, _, _) = findEquivalentExpression (fcData meta) cn
   let fs = map snd (functions (compilingProgram meta))

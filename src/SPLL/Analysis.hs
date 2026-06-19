@@ -96,8 +96,22 @@ isConditional _ _ _ (Lambda _ _ _) = False
 -- An application is conditional if the applied function or any argument is:
 -- the enumeration fallback in toIREnumerate evaluates the whole application
 -- forward, so conditionality anywhere below makes the result conditional.
+-- A directly-applied lambda (as produced by `let` desugaring) is looked through
+-- into its body -- the body *is* evaluated by the application, unlike a bare
+-- (un-applied) lambda which is a closure value. This lets nested enumerable
+-- `let`s (let c = .. in let d = .. in ..) propagate conditionality outward.
+isConditional fcData p visited (Apply _ (Lambda _ _ b) v) = isConditional fcData p visited b || isConditional fcData p visited v
 isConditional fcData p visited (Apply _ l v) = isConditional fcData p visited l || isConditional fcData p visited v
 isConditional fcData p visited (Var (TypeInfo{chainName=cn}) _) = case findEquivalentExpression fcData cn of
-  Just (_, LambdaInfo _ bodyCn, _) -> isConditional fcData p (cn:visited) (findExprWithCN (map snd (functions p)) bodyCn)
+  -- A named function reference resolves to its (possibly curried) lambda body. Strip
+  -- the leading lambdas of a multi-argument function so the conditional inside a helper
+  -- like `contrib u x = if u then x else 0` is reached, rather than stopping at the
+  -- intermediate `\x -> ...` lambda.
+  Just (_, LambdaInfo _ bodyCn, _) -> isConditional fcData p (cn:visited) (stripLambdas (findExprWithCN (map snd (functions p)) bodyCn))
   _ -> False
 isConditional fcData p visited x = any (isConditional fcData p visited) (getSubExprs x)
+
+-- Strip leading lambdas from a (curried) function body.
+stripLambdas :: Expr -> Expr
+stripLambdas (Lambda _ _ b) = stripLambdas b
+stripLambdas e = e
