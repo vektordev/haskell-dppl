@@ -12,7 +12,7 @@ import Data.Bifunctor
 import SPLL.Typing.Typing (setTags)
 import PredefinedFunctions
 import Utils
-import SPLL.Typing.ForwardChaining (FCData, ExprInfo (LambdaInfo), findEquivalentExpression, findExprWithCN, progToFCData)
+import SPLL.Typing.ForwardChaining (FCData, ExprInfo (LambdaInfo), findEquivalentExpression, findExprWithCN)
 
 type TagEnv = [(String, [Tag])]
 
@@ -81,8 +81,10 @@ isRecursive :: String -> Expr -> Bool
 isRecursive name (Var _ n) | name == n = True
 isRecursive n e = any (isRecursive n) (getSubExprs e)
 
-annotateConditionalProg :: Program -> Program
-annotateConditionalProg p@Program {functions=fs} = p{functions=map (Data.Bifunctor.second (tMap (tagConditional (progToFCData p) p))) fs}
+-- The FCData certificate is built once in 'Prelude.compile' and threaded in,
+-- rather than rebuilt here (modality-split-forwardchaining).
+annotateConditionalProg :: FCData -> Program -> Program
+annotateConditionalProg fcData p@Program {functions=fs} = p{functions=map (Data.Bifunctor.second (tMap (tagConditional fcData p))) fs}
 
 tagConditional :: FCData -> Program -> Expr -> TypeInfo
 tagConditional fcData p (Lambda ti _ b) = if isConditional fcData p [] b then ti{tags=IsConditional:tags ti} else ti

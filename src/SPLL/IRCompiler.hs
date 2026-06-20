@@ -41,17 +41,19 @@ data CompilerMetadata = CompilerMetadata {
   accProb :: IRExpr
 }
 
-envToIR :: CompilerConfig -> Program -> IREnv
-envToIR conf p
+envToIR :: CompilerConfig -> FCData -> Program -> IREnv
+envToIR conf fcDat p
   | any (null . chainName . getTypeInfo . snd) (functions p) =
       error "envToIR: one or more top-level expressions have empty chainNames — did you call annotateProg before envToIR?"
   | otherwise =
-      let unopt   = envToIRUnoptimized conf p
+      let unopt   = envToIRUnoptimized conf fcDat p
           stripped = if countBranches conf then unopt else stripBranchCount unopt
       in optimizeEnv conf stripped
 
-envToIRUnoptimized :: CompilerConfig -> Program -> IREnv
-envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb, noGenerate=noGen} p@Program{adts=adts} = IREnv (
+-- The FCData certificate is built once in 'Prelude.compile' and threaded in,
+-- rather than rebuilt here (modality-split-forwardchaining).
+envToIRUnoptimized :: CompilerConfig -> FCData -> Program -> IREnv
+envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb, noGenerate=noGen} fcDat p@Program{adts=adts} = IREnv (
   map (makeAutoNeural adts conf (encodeDecls p)) (neurals p) ++
   concatMap (\(name, binding) ->
     let typeEnv = getGlobalTypeEnv p
@@ -108,7 +110,6 @@ envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb
       (expr, "Calculates the probability of the sample parameter being returned from the " ++ name ++ "function")
     toIntegDecl name expr = (expr, "Calculates the probability of the sample parameter being less than or equal to the " ++ name ++ " function")
     toNormalDecl name expr = (expr, "Returns (mu, sigma) normal distribution parameters for the " ++ name ++ " function")
-    fcDat = progToFCData p
     meta typeEnv = CompilerMetadata conf fcDat typeEnv adts p (IRConst (VFloat 1.0))
     extractParamNames (Lambda _ name body) = name : extractParamNames body
     extractParamNames _ = []

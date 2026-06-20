@@ -82,7 +82,7 @@ import SPLL.IRCompiler
 import SPLL.IROptimizer (optimizeEnv)
 import Debug.Trace
 import Data.Either
-import SPLL.Typing.ForwardChaining (annotateProg)
+import SPLL.Typing.ForwardChaining (annotateProg, progToFCData)
 import SPLL.Typing.Determinism (knownAnchors)
 import qualified Data.Set as Set
 import Text.PrettyPrint.Annotated.HughesPJClass()
@@ -311,12 +311,20 @@ compile conf p = do
   pPrintIfMoreVerbose conf typed
   printStage conf "After Type Inference (RType + PType)" typed
 
-  let annotated = annotateConditionalProg typed
+  -- Stage 2 of the modality pipeline (modality-split-forwardchaining): build the
+  -- ForwardChaining certificate ONCE, seeded with the determinism field's known
+  -- anchors, and thread the same FCData to both consumers (conditional annotation
+  -- and IR codegen). Formerly progToFCData was built twice (in Analysis and in
+  -- IRCompiler). Built here after RInfer because the certificate reads rType
+  -- (function arrows) but no pType, which keeps it independent of modality.
+  let fcData = progToFCData anchors typed
+
+  let annotated = annotateConditionalProg fcData typed
   printIfMoreVerbose conf "\n=== Annotated Program (2) ==="
   pPrintIfMoreVerbose conf annotated
   printStage conf "After Conditional Annotation (IsConditional tags)" annotated
 
-  let unoptimized = envToIRUnoptimized conf annotated
+  let unoptimized = envToIRUnoptimized conf fcData annotated
   printStageIR conf "After IR Compilation (pre-optimization)" unoptimized
   let stripped = if countBranches conf then unoptimized else stripBranchCount unoptimized
 

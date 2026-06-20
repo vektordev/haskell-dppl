@@ -24,7 +24,8 @@ resolver: lts-22.9
 nix:
   enable: false
 
-system-ghc: true
+system-ghc: false
+install-ghc: false
 compiler-check: newer-minor
 
 # User packages to be built.

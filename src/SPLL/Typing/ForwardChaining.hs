@@ -16,6 +16,7 @@ import Data.Functor ((<&>))
 import SPLL.Lang.Lang
 import PredefinedFunctions
 import Data.List (delete, nub, intercalate)
+import Data.Set (Set)
 import Data.Maybe
 import SPLL.Typing.Typing (setChainName)
 import Data.Foldable
@@ -253,9 +254,21 @@ derivativeOfHornClause adts (ExprHornClause pre _ (InjFInfo name) inv) | inv > 0
   fromJust $ lookup invVar invDerivs
 derivativeOfHornClause _ _ = IRConst (VFloat 1.0)
 
-progToFCData :: Program -> FCData
-progToFCData prog = FCData {hornClauses = progToHornClauses prog cnInfo, chainNameInfo = progToChainNameInfo prog}
-  where cnInfo = progToChainNameInfo prog
+-- | Build the forward-chaining certificate for a whole program. The 'Set'
+-- argument is the determinism field's known-anchor set (chain names whose value
+-- is known without observing the sample); it seeds extra self-sufficient anchors
+-- beyond the structural @Constant@-only approximation (modality-determinism-pass,
+-- consumed here per modality-split-forwardchaining).
+progToFCData :: Set ChainName -> Program -> FCData
+progToFCData _anchors prog =
+  FCData { hornClauses = progToHornClauses prog cnInfo
+         , chainNameInfo = progToChainNameInfo prog }
+  where
+    cnInfo = progToChainNameInfo prog
+    -- NOTE: @_anchors@ (the determinism field's known-anchor set) will seed extra
+    -- self-sufficient forward-chaining starting points beyond the structural
+    -- @Constant@-only approximation. Injection is paired with codegen
+    -- materialisation in IRCompiler and lands as the anchor-wiring step.
 
 
 progToChainNameInfo :: Program -> [(ChainName, ExprInfo)]
