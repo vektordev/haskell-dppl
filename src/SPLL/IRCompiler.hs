@@ -249,6 +249,16 @@ isForwardOnly adts name = case lookup name (globalFEnv adts) of
   Just (FPair _ []) -> True
   _                 -> False
 
+-- | Extend the type environment for a Lambda parameter: determine whether the
+-- parameter itself takes a function argument (hasInference = True, so that
+-- downstream Var lookups append _gen/_prob/_integ suffixes when the parameter is
+-- applied) or is a plain value (False).
+extendMetaForLambda :: CompilerMetadata -> TypeInfo -> String -> CompilerMetadata
+extendMetaForLambda meta t name =
+  let (TArrow paramRType _) = rType t
+      hasInference = case paramRType of { TArrow (TArrow _ _) _ -> True; _ -> False }
+  in meta { typeEnv = (name, (paramRType, hasInference)) : typeEnv meta }
+
 negInf :: IRExpr
 negInf = IRConst (VFloat (-9999999))
 
@@ -345,16 +355,9 @@ renameVar' _ _ x = x
 
 toIRInferenceSave :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad CompilationResult
 toIRInferenceSave meta cumulative (Lambda t name subExpr) sample = do
-  let (TArrow paramRType _) = rType t
-  case paramRType of
-    TArrow (TArrow _ _) _ -> do
-      let newTypeEnv = (name, (paramRType, True)):typeEnv meta
-      irTuple <- lift (runWriterT (toIRInferenceSave meta {typeEnv=newTypeEnv} cumulative subExpr sample)) <&> generateLetInBlock meta
-      return (IRLambda name irTuple, const0, const0)
-    _ -> do
-      let newTypeEnv = (name, (paramRType, False)):typeEnv meta
-      irTuple <- lift (runWriterT (toIRInferenceSave meta {typeEnv=newTypeEnv} cumulative subExpr sample)) <&> generateLetInBlock meta
-      return (IRLambda name irTuple, const0, const0)
+  let newMeta = extendMetaForLambda meta t name
+  irTuple <- lift (runWriterT (toIRInferenceSave newMeta cumulative subExpr sample)) <&> generateLetInBlock meta
+  return (IRLambda name irTuple, const0, const0)
 toIRInferenceSave meta cumulative expr sample = do
   ((probExpr, probDim, probBranches), letins) <- lift $ runWriterT $ toIRInference meta cumulative expr sample
   let wrap inner = generateLetInExpr letins inner
@@ -604,17 +607,9 @@ toIRInference meta _ (ReadNN _ name symbol) sample = do
   setVariables [(var, IRApply (IRApply (IRVar (name ++ "_auto_prob")) (IRVar nnRaw)) sample)]
   return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
 toIRInference meta cumulative (Lambda t name subExpr) sample = do
-  let (TArrow paramRType _) = rType t
-  case paramRType of
-    TArrow (TArrow _ _) _ -> do
-      -- Lambda parameter is a function
-      let newTypeEnv = (name, (paramRType, True)):typeEnv meta
-      irTuple <- lift (runWriterT (toIRInference meta {typeEnv=newTypeEnv} cumulative subExpr sample)) <&> generateLetInBlock meta
-      return (IRLambda name irTuple, const0, const0)
-    _ -> do
-      let newTypeEnv = (name, (paramRType, False)):typeEnv meta
-      irTuple <- lift (runWriterT (toIRInference meta {typeEnv=newTypeEnv} cumulative subExpr sample)) <&> generateLetInBlock meta
-      return (IRLambda name irTuple, const0, const0)
+  let newMeta = extendMetaForLambda meta t name
+  irTuple <- lift (runWriterT (toIRInference newMeta cumulative subExpr sample)) <&> generateLetInBlock meta
+  return (IRLambda name irTuple, const0, const0)
 -- Deterministic lambda and bound expression PDF
 toIRInference meta False (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo l) == Deterministic && pType (getTypeInfo v) == Deterministic = do
   vIR <- toIRGenerate meta v
@@ -1009,12 +1004,6 @@ toIRInference meta cumulative (Var TypeInfo {rType=rt} n) sample = do
       setVariables [(var, callExpr)]
       -- The return value is still a function. No need to do dim and branch counting here
       return (IRVar var, const0, const0)
-    -- var is a function without a inference function
-    Just(TArrow _ _, False) -> do
-      var <- mkVariable "call"
-      setVariables [(var, IRApply (IRVar n) sample)]
-      -- The return value is still a function. No need to do dim and branch counting here
-      return (IRVar var, const0, const0)
     -- Var is a top level declaration (an therefor has a _prob function)
     Just (_, True) -> do
       var <- mkVariable "call"
@@ -1207,23 +1196,12 @@ toIRGenerate meta (Var _ name) = do
     Just (_, False) -> do
       return $ IRVar name
     Nothing -> error ("Could not find name in TypeEnv: " ++ name)
-toIRGenerate meta (Lambda t name subExpr) = do
-  let (TArrow paramRType _) = rType t
-  case paramRType of
-    TArrow (TArrow _ _) _ -> do
-      let newTypeEnv = (name, (paramRType, True)):typeEnv meta
-      irTuple <- toIRGenerate meta{typeEnv=newTypeEnv} subExpr
-      return $ IRLambda name irTuple
-    _ -> do
-      let newTypeEnv = (name, (paramRType, False)):typeEnv meta
-      irTuple <- toIRGenerate meta{typeEnv=newTypeEnv} subExpr
-      return $ IRLambda name irTuple
-toIRGenerate meta (Apply TypeInfo {rType=rt} l v) = do
+toIRGenerate meta (Lambda t name subExpr) =
+  IRLambda name <$> toIRGenerate (extendMetaForLambda meta t name) subExpr
+toIRGenerate meta (Apply _ l v) = do
   l' <- toIRGenerate meta l
   v' <- toIRGenerate meta v
-  case rt of
-    TArrow _ _ -> return $ IRApply l' v'
-    _ -> return $ IRApply l' v'
+  return $ IRApply l' v'
 toIRGenerate meta (ReadNN _ name subexpr) = do
   sub <- toIRGenerate meta subexpr
   return $ IRApply (IRVar (name ++ "_auto_gen")) sub
