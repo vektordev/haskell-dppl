@@ -200,7 +200,13 @@ unwrapLambdas fcData cn = case lookup cn (chainNameInfo fcData) of
 -- This takes a list of value expressions and merges then such that in tuple constructions a existing value overwrites an ANY.
 -- If two paths provide information for the same part of the tuple, we discard the second, because the should be semantically equal and therefor redundant
 -- We also assume that the different paths do not have conflicting LetIns
--- FIXME: Implement Gramian Matrix correctly, instead of multiplying all together
+-- The covariance factors are multiplied only in the two disjoint-tuple-slot
+-- merges below (each path fills one component, the other ANY). Disjoint
+-- components are independent coordinates, so the Jacobian is block-diagonal and
+-- its determinant IS that product — the correct Gramian for this shape. Any other
+-- merge takes the first path's covariance (semantically-equal values, one
+-- Jacobian), never a product. Proven sound by investigation
+-- forward-chaining-math-correctness.
 -- The first three arguments are purely diagnostic context for the failure case below:
 -- the name of the variable being witnessed, the chain name of the lambda being inverted,
 -- and the candidate occurrences (chain names) that were attempted and yielded no path.
@@ -270,8 +276,12 @@ findConcludingHornClause hcs cn =
     [] -> Nothing
     res -> Just $ head res
 
--- We usually get away with simply multiplying here, because we only have the variable we differentiate toward once in an expression
--- I honsetly have no idea, why this works so well. TODO: Proof It works in all cases
+-- An FC inversion path is a linear chain of single-input invertible steps, and
+-- the witnessed variable flows through it exactly once (a step with two
+-- un-witnessed random inputs has no inversion clause and never enters a path).
+-- So this product of per-step inverse derivatives IS the chain rule
+-- d/dx g(h(x)) = g'(h(x))·h'(x), i.e. the full path Jacobian — proven sound under
+-- that structural constraint by investigation forward-chaining-math-correctness.
 derivativeOfPath :: [ADTDecl] -> [HornClause] -> IRExpr
 derivativeOfPath adts clauses = foldr1 (IROp OpMult) derivs
   where derivs = map (derivativeOfHornClause adts) clauses
@@ -348,7 +358,10 @@ exprToHornClauses adts e = case e of
   -- Field constructors (Cons/TCons/user-ADT constructors) emit only their
   -- inverse clauses, each in its own group because the fields can be solved
   -- independently. The forward clause is omitted deliberately: constructing the
-  -- container from its fields could create cycles in the chaining graph.
+  -- container from its fields could create cycles in the chaining graph. This is
+  -- safe (not merely defensive): container construction inference is handled
+  -- out-of-band by IRCompiler's field-constructor path, so no program needs the
+  -- forward clause (investigation forward-chaining-math-correctness, Q3).
   InjF _ (Named name) params
     | isFieldConstructor adts name ->
         map (: []) (tail (injFtoHornClause adts e)) ++ concatMap (exprToHornClauses adts) params
