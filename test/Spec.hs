@@ -25,6 +25,7 @@ import TestRejection (rejectionTests)
 import TestModality (modalityTests)
 import TestEncodeProperties (encodeTests)
 import End2EndTesting (end2endTests, getAllTestFiles)
+import ModalityDiff (modalityDiffTests)
 import TestCaseParser (parseProgram, parseTestCases, TestCase(..), Backend(..))
 import TestTolerances (probTolerance, reasonablyCloseTolerance, samplingTolerance)
 import SPLL.Prelude
@@ -543,6 +544,7 @@ main = do
   hideSuccesses <- lookupEnv "TASTY_HIDE_SUCCESSES"
   if isNothing hideSuccesses then setEnv "TASTY_HIDE_SUCCESSES" "true" else return ()
   e2e <- end2endTests
+  modDiff <- modalityDiffTests
   corpusPool <- loadCorpusCases
   defaultMain $ testGroup "Tests"
     [ specTests
@@ -551,6 +553,7 @@ main = do
     , internalsTests
     , rejectionTests
     , modalityTests
+    , modDiff
     , encodeTests
     , e2e
     ]
