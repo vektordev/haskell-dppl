@@ -51,8 +51,6 @@ data Expr =
               -- Boolean Operations
               | GreaterThan TypeInfo Expr Expr
               | LessThan TypeInfo Expr Expr
-              | And TypeInfo Expr Expr
-              | Or TypeInfo Expr Expr
               -- Other
               | ReadNN TypeInfo String Expr
               -- TODO: Needs Concat to achieve proper SPN-parity.

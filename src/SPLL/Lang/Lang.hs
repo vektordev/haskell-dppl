@@ -130,7 +130,6 @@ getUnaryConstructor (ThetaI _ _ i) = \t a -> ThetaI t a i
 getUnaryConstructor (Subtree _ _ i) = \t a -> Subtree t a i
 getUnaryConstructor (Lambda _ x _) = (`Lambda` x)
 getUnaryConstructor (ReadNN _ x _) = (`ReadNN` x)
-getUnaryConstructor x = error ("getUnaryConstructor undefined for " ++ show x)
 
 getNullaryConstructor :: Expr -> (TypeInfo -> Expr)
 getNullaryConstructor (Constant _ val) = (`Constant` val)
