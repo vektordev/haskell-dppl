@@ -22,6 +22,7 @@ import SPLL.Parser
 import TestParser (parserTests)
 import TestInternals (internalsTests)
 import TestRejection (rejectionTests)
+import TestModality (modalityTests)
 import TestEncodeProperties (encodeTests)
 import End2EndTesting (end2endTests, getAllTestFiles)
 import TestCaseParser (parseProgram, parseTestCases, TestCase(..), Backend(..))
@@ -549,6 +550,7 @@ main = do
     , parserTests
     , internalsTests
     , rejectionTests
+    , modalityTests
     , encodeTests
     , e2e
     ]
