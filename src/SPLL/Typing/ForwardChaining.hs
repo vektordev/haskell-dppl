@@ -15,12 +15,12 @@ import SPLL.IntermediateRepresentation
 import Data.Functor ((<&>))
 import SPLL.Lang.Lang
 import PredefinedFunctions
-import Data.List (delete, nub, intercalate)
+import Data.List (nub, intercalate)
 import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Maybe
 import SPLL.Typing.Typing (setChainName)
 import Data.Foldable
-import Debug.Trace
 import Utils
 import SPLL.Typing.RType
 
@@ -81,7 +81,6 @@ isAppliedEquivalence _ = False
 
 -- Takes the chainName of a function (May be a lambda, a variable, an Apply ...) and returns the inverse function of that lambda together with the derivative of the inverse
 toInvExpr :: FCData -> [ADTDecl] -> ChainName -> (IRExpr, IRExpr)
---toInvExpr fcData adts startCN | trace (showClauseGroups (hornClauses fcData)) False = undefined
 toInvExpr fcData adts lambdaCN = (mergedM, mergedCoV)
   where
     clauseSet = hornClauses fcData
@@ -104,7 +103,6 @@ toInvExpr fcData adts lambdaCN = (mergedM, mergedCoV)
 -- Performs forward chaining to create an expression, which calculates the value of a specific point in the AST given a set of parameter points in the AST.
 -- Also returns the derivative of that expression
 toValueExpr :: [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> Maybe (IRExpr, IRExpr)
---toValueExpr clauses paramClauses adts startCN | trace (startCN ++ " || " ++ show clauses) False = undefined
 toValueExpr clauses paramClauses adts startCN =
   case findConcludingHornClause solvedClauses startCN of
     Just concludingClause -> do
@@ -231,7 +229,6 @@ hornClauseToIRExpr _ adts clause =
 
 -- Finds the first horn clause in a list that has a given conclusion
 findConcludingHornClause :: [HornClause] -> ChainName -> Maybe HornClause
---findConcludingHornClause hcs cn | trace ("Find " ++ cn ++ " in " ++ show hcs) False = undefined
 findConcludingHornClause hcs cn =
   case filter ((== cn) . conclusion) hcs of
     [] -> Nothing
@@ -492,25 +489,25 @@ annotateProg p@Program {functions=fs} = p{functions=annotFs}
 annotateExpr :: Expr -> Supply Expr
 annotateExpr = tMapM (\ex -> demandUniqueNumber <&> ("ast" ++) . show <&> setChainName (getTypeInfo ex))
 
--- Returns all recursively fulfilled clauses
+-- Returns all recursively fulfilled clauses, in reverse discovery order (most
+-- recently fulfilled first), matching the legacy accumulation order downstream
+-- code (findConcludingHornClause / topSortDAG) relies on.
+--
+-- Each clause group contributes at most one fulfilled clause (the first whose
+-- premises are all already known). We track used groups by index and known
+-- conclusions in 'Set's, so membership tests are logarithmic rather than the
+-- linear list 'delete'/'elem' scans this used to do (cleanup-forward-chaining).
 solveHCSet :: [[HornClause]] -> [HornClause]
-solveHCSet hcs = solveHCSet' hcs []
-
--- Takes a set of all clauses and already fulfilled clauses and returns a set of fulfilled Horn clauses
-solveHCSet' :: [[HornClause]] -> [HornClause] -> [HornClause]
-solveHCSet' hcs fulfilled = case findFulfilledClause hcs fulfilled of
-  Just nextClause ->
-    -- Remove used clause group from set of available clauses
-    let updatedHCs = delete (fromJust (find (elem nextClause) hcs)) hcs in
-      solveHCSet' updatedHCs (nextClause:fulfilled)
-  Nothing -> fulfilled
-
--- Finds a fulfilled clause given a set of already fulfilled clauses
-findFulfilledClause :: [[HornClause]] -> [HornClause] -> Maybe HornClause
-findFulfilledClause hcs fulfilled = listToMaybe fulfilledClauses
+solveHCSet hcs = go Set.empty Set.empty []
   where
-    detVars = map conclusion fulfilled
-    fulfilledClauses = filter (all (`elem` detVars) . premises) (concat hcs)
+    groups = zip [0 :: Int ..] hcs
+    go usedGroups detVars fulfilled =
+      case [ (i, c) | (i, g) <- groups
+                    , not (i `Set.member` usedGroups)
+                    , c <- g
+                    , all (`Set.member` detVars) (premises c) ] of
+        [] -> fulfilled
+        ((i, c):_) -> go (Set.insert i usedGroups) (Set.insert (conclusion c) detVars) (c : fulfilled)
 
 -- Returns all elements that come before a given parameter in a list
 cutList :: Eq a => [a] -> a -> [a]
@@ -538,10 +535,4 @@ showClauseGroup cs = intercalate "\n" (map showClause cs)
 
 showClauseGroups :: [[HornClause]] -> String
 showClauseGroups groups = intercalate "\n\n" (map showClauseGroup groups)
-
-traceShowClauseGroupId :: [HornClause] -> [HornClause]
-traceShowClauseGroupId clauses = trace (showClauseGroup clauses) clauses
-
-traceShowClauseGroupsId :: [[HornClause]] -> [[HornClause]]
-traceShowClauseGroupsId clauses = trace (showClauseGroups clauses) clauses
 
