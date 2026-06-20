@@ -14,6 +14,10 @@ import SPLL.Typing.RInfer (tryAddRTypeInfo, RTypeError(..))
 import SPLL.Typing.RType (ClassConstraint(..), TVarR(..), RType(..))
 import SPLL.Prelude
 import SPLL.Parser (tryParseProgram)
+import SPLL.Analysis (annotateEnumsProg)
+import SPLL.Typing.Infer (addTypeInfo)
+import SPLL.Typing.ForwardChaining (FCData, annotateProg, progToFCData, isInvertibleLambda)
+import qualified Data.Set as Set
 import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan)
 import qualified SPLL.AutoNeural as AutoNeural (getSize)
 import SPLL.IntermediateRepresentation
@@ -492,10 +496,58 @@ test_tstBackendsHeader = testCase "tstBackendsHeader" $ do
 
 return []
 
+-- ---------------------------------------------------------------------------
+-- ForwardChaining invertibility certificate (modality-split-forwardchaining)
+-- ---------------------------------------------------------------------------
+
+-- | Parse + the pre-inference annotation stages + type inference that the FC
+-- certificate depends on (progToFCData reads rType, so types must be present).
+prepTypedFC :: String -> (Program, FCData)
+prepTypedFC src =
+  let p0    = annotateProg (annotateEnumsProg (parse src))
+      typed = either (\e -> error ("type inference failed: " ++ show e)) id (addTypeInfo p0)
+  in (typed, progToFCData Set.empty typed)
+  where
+    parse s = either (\e -> error ("parse failed: " ++ show e)) id (tryParseProgram "test" s)
+
+universeE :: Expr -> [Expr]
+universeE e = e : concatMap universeE (getSubExprs e)
+
+allNodes :: Program -> [Expr]
+allNodes prog = concatMap (universeE . snd) (functions prog)
+
+-- The chain name of the function on the left of the first Apply — exactly the
+-- handle 'IRCompiler' passes to the certificate / 'toInvExpr'.
+applyLeftCN :: Program -> ChainName
+applyLeftCN prog = head [ chainName (getTypeInfo l) | Apply _ l _ <- allNodes prog ]
+
+constNodeCN :: Program -> ChainName
+constNodeCN prog = head [ chainName (getTypeInfo c) | c@(Constant _ _) <- allNodes prog ]
+
+forwardChainingCertTests :: TestTree
+forwardChainingCertTests = testGroup "ForwardChaining certificate"
+  [ testCase "invertible probabilistic-bound lambda is witnessed" $
+      let (prog, fc) = prepTypedFC "main=(\\x -> x + 5.0)(Uniform)"
+      in assertBool "\\x -> x + 5.0 should invert in x"
+           (isInvertibleLambda fc (adts prog) (applyLeftCN prog))
+  , testCase "many-to-one comparison body is not witnessed" $
+      -- `x > 0.5` is many-to-one onto {T,F}; no inversion path exists, so the
+      -- certificate must report False (this is the program that otherwise
+      -- crashes codegen in toInvExpr's mergeExpr).
+      let (prog, fc) = prepTypedFC "main=(\\x -> x > 0.5)(Uniform)"
+      in assertBool "\\x -> x > 0.5 must not invert in x"
+           (not (isInvertibleLambda fc (adts prog) (applyLeftCN prog)))
+  , testCase "a non-lambda chain name is not invertible" $
+      let (prog, fc) = prepTypedFC "main=(\\x -> x + 5.0)(Uniform)"
+      in assertBool "a Constant node is not an invertible lambda"
+           (not (isInvertibleLambda fc (adts prog) (constNodeCN prog)))
+  ]
+
 internalsTests :: TestTree
 internalsTests = testGroup "Internals"
   [ testProperties "properties" $(allProperties)
   , classConstraintTests
+  , forwardChainingCertTests
   , testGroup "encode"
       [ test_encodeTupleGaussianParams
       , test_encodeDiscreteSumsToOne

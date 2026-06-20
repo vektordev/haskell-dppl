@@ -6,6 +6,7 @@ module SPLL.Typing.ForwardChaining
   , annotateProg
   , progToFCData
   , toInvExpr
+  , isInvertibleLambda
   , findEquivalentExpression
   , findExprWithCN
   , unwrapLambdas
@@ -79,25 +80,52 @@ isAppliedEquivalence :: EquivalenceType -> Bool
 isAppliedEquivalence AppliedEquivalence = True
 isAppliedEquivalence _ = False
 
+-- The forward-chaining setup shared by the invertibility certificate
+-- ('isInvertibleLambda') and the inverse codegen ('toInvExpr'), so the two can
+-- never disagree about which lambdas invert. For the lambda resolved from a
+-- chain name it returns: the bound variable's name, the chain names of every
+-- occurrence of that variable inside the body (the points we try to solve for),
+-- and the ParameterHornClause declaring the observed body known. 'Nothing' when
+-- the chain name does not resolve to a lambda.
+inversionSetup :: FCData -> ChainName -> Maybe (String, [ChainName], HornClause)
+inversionSetup fcData lambdaCN = do
+  (_, info, tag) <- findEquivalentExpression fcData lambdaCN
+  case info of
+    -- If the lambda is applied multiple times, @tag@ uniquely identifies our
+    -- application; it suffixes both the occurrences and the observed body.
+    LambdaInfo toInvVarName lambdaBodyCN ->
+      let toInvCNs = map (++ tag) (findChainNamesForVar fcData toInvVarName)
+          -- If the function being inverted is itself a function, strip the
+          -- additional lambdas; those are re-added by the caller around the
+          -- whole inference function (the inverse is only a part of it).
+          (unwrappedChainName, _) = unwrapLambdas fcData lambdaBodyCN
+          paramClause = ParameterHornClause (unwrappedChainName ++ tag)
+      in Just (toInvVarName, toInvCNs, paramClause)
+    _ -> Nothing
+
+-- | Invertibility certificate (modality stage 2): is the variable bound by the
+-- lambda at this chain name algebraically recoverable from the known anchors and
+-- the observed body? This is the pure verdict the modality engine consults in
+-- place of weaker ad-hoc heuristics; the IR realisation that shares the very
+-- same 'FCData' is 'toInvExpr'. (Finiteness/preimage of the recovered value is
+-- the orthogonal DiscreteValues axis — Fin in the design — not a FC concern.)
+isInvertibleLambda :: FCData -> [ADTDecl] -> ChainName -> Bool
+isInvertibleLambda fcData adts lambdaCN = case inversionSetup fcData lambdaCN of
+  Just (_, toInvCNs, paramClause) ->
+    any (isJust . toValueExpr (hornClauses fcData) [paramClause] adts) toInvCNs
+  Nothing -> False
+
 -- Takes the chainName of a function (May be a lambda, a variable, an Apply ...) and returns the inverse function of that lambda together with the derivative of the inverse
 toInvExpr :: FCData -> [ADTDecl] -> ChainName -> (IRExpr, IRExpr)
 toInvExpr fcData adts lambdaCN = (mergedM, mergedCoV)
   where
     clauseSet = hornClauses fcData
-    -- Find the declaration of the lambda, which we want to invert. 
-    -- If the lambda is applied multiple times, we also find the tag that uniquely identifies our application
-    Just (_, LambdaInfo toInvVarName lambdaBodyCN, tag) = findEquivalentExpression fcData lambdaCN
-    -- Find the occurances of the variable bound by the lambda inside of the lambda. These are the points we want to find the values of
-    -- If the variable occurs multiple times, we try to find values of all occurances and merge the expressions, because they may contain complementing information
-    toInvCNs = map (++tag) (findChainNamesForVar fcData toInvVarName)
-    -- If the function we want to invert is itself a function, we strip the additional lambdas. They need to be added back later, which is not done by this function
-    -- It cannot be done in here, because the the lambdas need to be wrapped around the inference function, of which the inverse is only a part of
-    (unwrappedChainName, _) = unwrapLambdas fcData lambdaBodyCN
-    -- Declare the top level expression of the lambda body as known
-    paramClause = ParameterHornClause (unwrappedChainName ++ tag)
-    -- Create the expression that calculates toInvCN
+    (toInvVarName, toInvCNs, paramClause) = case inversionSetup fcData lambdaCN of
+      Just x  -> x
+      Nothing -> error $ "toInvExpr: chain name does not resolve to an invertible lambda: " ++ lambdaCN
+    -- Create the expression that calculates each occurrence; merge those that
+    -- carry complementary information.
     valueExprs = mapMaybe (toValueExpr clauseSet [paramClause] adts) toInvCNs
-    -- Merge expression, which contain complementary information
     (mergedM, mergedCoV) = mergeExpr toInvVarName lambdaCN toInvCNs valueExprs
 
 -- Performs forward chaining to create an expression, which calculates the value of a specific point in the AST given a set of parameter points in the AST.
