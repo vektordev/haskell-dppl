@@ -10,6 +10,7 @@ module SPLL.Typing.ForwardChaining
   , findEquivalentExpression
   , findExprWithCN
   , unwrapLambdas
+  , untag
   ) where
 import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
@@ -27,7 +28,14 @@ import SPLL.Typing.RType
 
 
 
-data FCData = FCData {hornClauses :: [[HornClause]], chainNameInfo :: [(ChainName, ExprInfo)]}
+data FCData = FCData
+  { hornClauses :: [[HornClause]]
+  , chainNameInfo :: [(ChainName, ExprInfo)]
+  -- | The determinism field's known-anchor set seeded into 'hornClauses'. Kept
+  -- around so codegen (IRCompiler) can materialise the value of any non-constant
+  -- anchor a forward-chaining inverse path lands on.
+  , fcAnchors :: Set ChainName
+  }
 
 -- Information on what type of expression a HornClause originated from
 data ExprInfo = StubInfo ExprStub   -- Generic Expression without additional Info
@@ -285,15 +293,32 @@ derivativeOfHornClause _ _ = IRConst (VFloat 1.0)
 -- beyond the structural @Constant@-only approximation (modality-determinism-pass,
 -- consumed here per modality-split-forwardchaining).
 progToFCData :: Set ChainName -> Program -> FCData
-progToFCData _anchors prog =
-  FCData { hornClauses = progToHornClauses prog cnInfo
-         , chainNameInfo = progToChainNameInfo prog }
+progToFCData anchors prog =
+  FCData { hornClauses = anchorClauses ++ baseClauses
+         , chainNameInfo = cnInfo
+         , fcAnchors = anchorInstances }
   where
     cnInfo = progToChainNameInfo prog
-    -- NOTE: @_anchors@ (the determinism field's known-anchor set) will seed extra
-    -- self-sufficient forward-chaining starting points beyond the structural
-    -- @Constant@-only approximation. Injection is paired with codegen
-    -- materialisation in IRCompiler and lands as the anchor-wiring step.
+    baseClauses = progToHornClauses prog cnInfo
+    -- Each known anchor is a self-sufficient (empty-premise) starting point for
+    -- forward chaining, mirroring how @Constant@ already self-derives. This
+    -- replaces FC's structural @Constant@-only under-approximation with the real
+    -- determinism field, so ThetaI/Subtree/derived-deterministic operands become
+    -- invertible-through.
+    --
+    -- Anchors are computed on the untagged program, but FC tags chain names per
+    -- function invocation (e.g. @ast5_t0@) when it duplicates a helper-function
+    -- body. So we anchor every chain name in the clause graph whose /untagged/
+    -- form is a known anchor — otherwise a @theta@ inside an inverted helper
+    -- (the @inner z = z + theta_0@ shape) would never match. The corresponding
+    -- values are materialised in codegen (IRCompiler) for non-constant anchors.
+    anchorInstances = Set.fromList
+      [ cn | cn <- allClauseChainNames baseClauses, Set.member (untag cn) anchors ]
+    anchorClauses = [ [ParameterHornClause cn] | cn <- Set.toList anchorInstances ]
+
+-- Every chain name appearing as a premise or conclusion anywhere in a clause set.
+allClauseChainNames :: [[HornClause]] -> [ChainName]
+allClauseChainNames = nub . concatMap (concatMap (\c -> conclusion c : premises c))
 
 
 progToChainNameInfo :: Program -> [(ChainName, ExprInfo)]

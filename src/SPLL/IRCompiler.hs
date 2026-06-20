@@ -23,6 +23,7 @@ import SPLL.Typing.AlgebraicDataTypes
 import Data.Bifunctor (Bifunctor(bimap))
 import Utils
 import Control.Monad (foldM, forM, when)
+import qualified Data.Set as Set
 import GHC.Stack (HasCallStack)
 
 type CompilerMonad a = WriterT [(String, IRExpr)] Supply a
@@ -682,7 +683,9 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample
     toIRInference meta cumulative bodyExpr sample
   else do
     -- Inverse of the callable as a lambda
-    let (invExprP, invExprCoV) = toInvExpr clauses adts lChainName
+    let (invExprP0, invExprCoV0) = toInvExpr clauses adts lChainName
+    invExprP   <- materializeAnchors meta invExprP0
+    invExprCoV <- materializeAnchors meta invExprCoV0
     let appliedCoV = IRApply (IRLambda (boundVar ++ tag) invExprCoV) sample
     let lInv = IRLambda (boundVar ++ tag) invExprP
     -- Apply the sample to the inverse
@@ -774,7 +777,7 @@ toIRInference meta cumulative (InjF ti (Named name) params) sample | isHigherOrd
   let probF = if decons then toIRInferenceSave else toIRInference
   -- Create all inverses of the ho functions and save them on the variable stack
   -- Then create a substitution that substitutes f^-1 to f_prob. All substitutions are then composed in the fold
-  renVar <- foldM (\sub tup -> createHOInverse (fcData meta) adts tup <&> (.) sub) id (zip fVars fs)
+  renVar <- foldM (\sub tup -> createHOInverse meta tup <&> (.) sub) id (zip fVars fs)
   -- When deconstructing an Either and sample contains a nested VAny (e.g. Left ANY),
   -- arithmetic in invExpr would crash before isAny can fire. Replace invExpr with a
   -- safe alternative (Left VAny / Right VAny) that lets OpEq handle the comparison.
@@ -1069,10 +1072,31 @@ subP (aM, aDim) (bM, bDim) = do
          (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar dimVarB)
          (IRVar dimVarA)))))
 
-createHOInverse :: FCData -> [ADTDecl]-> (String, Expr) -> CompilerMonad (IRExpr -> IRExpr)
-createHOInverse fcData adts (fVar, f) = do
-  let (inverseF, inverseCoV) = toInvExpr fcData adts (chainName $ getTypeInfo f)
-  let Just (_, LambdaInfo _ lBodyChainName, tag) = findEquivalentExpression fcData (chainName $ getTypeInfo f)
+-- Bind the forward-chaining anchors a generated inverse lands on. An anchor
+-- chain name that appears free in the inverse (e.g. a ThetaI/Subtree operand FC
+-- inverted through) is not bound by the wrapping sample lambda, so we materialise
+-- its value from the anchor node's generate-mode IR and let-bind it. Plain
+-- constants need no binding (they render as IRConst); only non-constant anchors
+-- show up free here (modality-split-forwardchaining, anchor wiring).
+materializeAnchors :: CompilerMetadata -> IRExpr -> CompilerMonad IRExpr
+materializeAnchors meta expr = foldM bindAnchor expr usedAnchors
+  where
+    usedAnchors = filter (`freeInIR` expr) (Set.toList (fcAnchors (fcData meta)))
+    fns = map snd (functions (compilingProgram meta))
+    -- The free var is a (possibly invocation-tagged) anchor chain name; the
+    -- source node to generate its value from is the untagged original.
+    bindAnchor body cn = do
+      anchorIR <- toIRGenerate meta (findExprWithCN fns (untag cn))
+      return (IRLetIn cn anchorIR body)
+
+createHOInverse :: CompilerMetadata -> (String, Expr) -> CompilerMonad (IRExpr -> IRExpr)
+createHOInverse meta (fVar, f) = do
+  let fcData' = fcData meta
+  let adts = adtDecls meta
+  let (inverseF0, inverseCoV0) = toInvExpr fcData' adts (chainName $ getTypeInfo f)
+  inverseF   <- materializeAnchors meta inverseF0
+  inverseCoV <- materializeAnchors meta inverseCoV0
+  let Just (_, LambdaInfo _ lBodyChainName, tag) = findEquivalentExpression fcData' (chainName $ getTypeInfo f)
   let inverseLambdaProb = IRLambda (lBodyChainName ++ tag) inverseF
   let inverseLambdaCoV = IRLambda (lBodyChainName ++ tag) inverseCoV
   -- Rename all occurances of f^-1 from the definition to f_prob
