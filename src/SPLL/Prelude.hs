@@ -83,6 +83,8 @@ import SPLL.IROptimizer (optimizeEnv)
 import Debug.Trace
 import Data.Either
 import SPLL.Typing.ForwardChaining (annotateProg)
+import SPLL.Typing.Determinism (knownAnchors)
+import qualified Data.Set as Set
 import Text.PrettyPrint.Annotated.HughesPJClass()
 import PrettyPrint (pPrintProg, pPrintIREnv)
 import Debug.Pretty.Simple
@@ -295,6 +297,14 @@ compile conf p = do
   printIfMoreVerbose conf "\n=== Chain named Program ==="
   pPrintIfMoreVerbose conf forwardChained
   printStage conf "After Forward Chaining (chain names)" forwardChained
+
+  -- Stage 1 of the modality pipeline (modality-typesystem-port §4): the forward
+  -- determinism dataflow whose known-anchor set ForwardChaining will consume in
+  -- place of its Constant-only approximation (the wiring is milestone 3). It
+  -- slots here, after chain naming and before type inference, per the §4 order.
+  let anchors = knownAnchors forwardChained
+  printIfMoreVerbose conf ("\n=== Determinism (known anchors) ===\n"
+                            ++ unwords (Set.toList anchors))
 
   typed <- addTypeInfo forwardChained
   printIfMoreVerbose conf "\n=== Typed Program ==="

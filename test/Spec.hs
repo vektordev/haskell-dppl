@@ -23,6 +23,7 @@ import TestParser (parserTests)
 import TestInternals (internalsTests)
 import TestRejection (rejectionTests)
 import TestModality (modalityTests)
+import TestDeterminism (determinismTests)
 import TestEncodeProperties (encodeTests)
 import End2EndTesting (end2endTests, getAllTestFiles)
 import ModalityDiff (modalityDiffTests)
@@ -545,6 +546,7 @@ main = do
   if isNothing hideSuccesses then setEnv "TASTY_HIDE_SUCCESSES" "true" else return ()
   e2e <- end2endTests
   modDiff <- modalityDiffTests
+  detTests <- determinismTests
   corpusPool <- loadCorpusCases
   defaultMain $ testGroup "Tests"
     [ specTests
@@ -553,6 +555,7 @@ main = do
     , internalsTests
     , rejectionTests
     , modalityTests
+    , detTests
     , modDiff
     , encodeTests
     , e2e
