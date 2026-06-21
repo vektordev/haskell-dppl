@@ -65,16 +65,34 @@ data IMod
   | IRec GroundMod IMod
 
 -- | The value-level ground summary of any 'IMod' (mirrors 'outerGround').
+--
+-- A scalar distribution family ('Family') is meaningful only on a bare scalar
+-- value, so the structured cases ('IProd'/'ISum'/'IRec') drop it: a tuple, sum,
+-- or list of Normals is not itself a Normal (mirrors @PInfer2.degradeNormal@ for
+-- containers). The per-field family survives /inside/ the structure, so the
+-- @fst@/@snd@ accessors still recover a field's Gaussian.
 outerI :: IMod -> GroundMod
 outerI (IG g)      = g
 outerI (IArr rho _)= rho
-outerI (IProd a b) = meetGround (outerI a) (outerI b)
-outerI (ISum t a b)= meetGround t (meetGround (outerI a) (outerI b))
-outerI (IRec s e)  = meetGround s (outerI e)
+outerI (IProd a b) = (meetGround (outerI a) (outerI b))            { gFam = FamNone }
+outerI (ISum t a b)= (meetGround t (meetGround (outerI a) (outerI b))) { gFam = FamNone }
+outerI (IRec s e)  = (meetGround s (outerI e))                    { gFam = FamNone }
 
 -- | Project an 'IMod' onto the flat 'PType' (the per-node annotation).
 projectI :: IMod -> PType
 projectI = projectGround . outerI
+
+-- | Project a /node/ onto the flat 'PType' @IRCompiler@ reads. A function-typed
+-- modality ('IArr') is annotated with its /result (body)/ pType — apply the
+-- transfer to a representative argument and recurse to the final result — not the
+-- lossy outer-closure 'Deterministic'. This matches @PInfer2@ (which annotates a
+-- function node with its body's pType) and is what @IRCompiler@ selects
+-- prob/integrate codegen from: a @Var@ referencing a top-level
+-- @distr x = 2*Uniform+x@ must read 'Integrate'. Non-function nodes project
+-- losslessly through 'projectI'.
+projectNode :: RType -> IMod -> PType
+projectNode (TArrow a b) (IArr _ phi) = projectNode b (phi (repIMod a))
+projectNode _            m            = projectI m
 
 -- | Marginalise an outer law into a conditional result over the structure
 -- (mirrors 'applyOuter'; the design doc's @rho ▷@).
@@ -182,6 +200,18 @@ tagFinMod :: TypeInfo -> IMod -> IMod
 tagFinMod ti (IG g) = IG (tagFin ti g)
 tagFinMod _  m      = m
 
+-- | A scalar distribution family ('FamNormal'/'FamLogNormal') only attaches to a
+-- bare 'TFloat' value. A field constructor that builds a container/sum (e.g.
+-- @left :: a -> Either a b@, @cons@) yields a value that is not itself Gaussian,
+-- so drop the family there (mirrors @PInfer2.degradeNormal@ for containers). The
+-- single-field 'IG' case — @left (Normal …)@, which the @injFMod@ floor passes
+-- through unchanged — is the one this catches that 'outerI' alone cannot, since
+-- no 'IProd'/'ISum' wrapper marks it as a container.
+gateScalarFamily :: RType -> IMod -> IMod
+gateScalarFamily TFloat m      = m
+gateScalarFamily _      (IG g) = IG g { gFam = FamNone }
+gateScalarFamily _      m      = m
+
 gExact, gIntegrate, gNormal, gLogNormal :: GroundMod
 gExact     = topGround                                 -- Deterministic
 gIntegrate = groundMod DensInt Infinite FamNone        -- Integrate
@@ -227,7 +257,7 @@ inferE adts env expr = case expr of
                 | name == "Normal"  -> IG gNormal
                 | name == "Uniform" -> IG gIntegrate
                 | otherwise         -> IG gExact   -- unbound ⇒ Deterministic (PInfer2 default)
-    in done m (Var (setPType ti (projectI m)) name) []
+    in done m (Var (setPType ti (projectNode (rType ti) m)) name) []
 
   ReadNN ti name s ->
     let (_, s', sa) = inferE adts env s
@@ -242,7 +272,7 @@ inferE adts env expr = case expr of
         mods = [ m  | (m,_,_) <- rs ]
         es'  = [ e  | (_,e,_) <- rs ]
         acc  = concat [ a | (_,_,a) <- rs ]
-        m    = tagFinMod ti (injFMod adts fname mods)
+        m    = gateScalarFamily (rType ti) (tagFinMod ti (injFMod adts fname mods))
     in done m (InjF (setPType ti (projectI m)) name es') acc
 
   IfThenElse ti c t f ->
@@ -255,8 +285,13 @@ inferE adts env expr = case expr of
   Lambda ti x body ->
     let argTy = case rType ti of TArrow a _ -> a; _ -> TFloat
         arr   = IArr gExact (\m -> let (im,_,_) = inferE adts (Map.insert x m env) body in im)
-        (_, body', ba) = inferE adts (Map.insert x (repIMod argTy) env) body
-    in done arr (Lambda (setPType ti (projectI arr)) x body') ba
+        (bodyRepMod, body', ba) = inferE adts (Map.insert x (repIMod argTy) env) body
+    -- The internal modality is the closure 'arr' (so application β-reduces), but
+    -- the flat annotation @IRCompiler@ reads is the /body's/ pType, not the outer
+    -- closure 'Deterministic' — IRCompiler selects prob/integrate codegen from the
+    -- function node's pType (e.g. a top-level @distr x = 2*Uniform+x@ must read
+    -- 'Integrate', not the lossy outer 'Deterministic'). Matches @PInfer2@.
+    in done arr (Lambda (setPType ti (projectI bodyRepMod)) x body') ba
 
   Apply ti f arg ->
     let (argMod, arg', aa) = inferE adts env arg
@@ -265,13 +300,16 @@ inferE adts env expr = case expr of
          -- argument's actual modality (β-reduction with the precise value).
          Lambda lti x body ->
            let (bodyMod, body', ba) = inferE adts (Map.insert x argMod env) body
-               f' = Lambda (setPType lti Deterministic) x body'
-           in done bodyMod (Apply (setPType ti (projectI bodyMod)) f' arg')
+               -- The applied lambda node carries the body's pType (its result),
+               -- matching @PInfer2@ and what @IRCompiler@ reads, not the outer
+               -- closure 'Deterministic'.
+               f' = Lambda (setPType lti (projectI bodyMod)) x body'
+           in done bodyMod (Apply (setPType ti (projectNode (rType ti) bodyMod)) f' arg')
                    (laccLambda lti ++ ba ++ aa)
          _ ->
            let (fMod, f', fa) = inferE adts env f
                m = applyI fMod argMod
-           in done m (Apply (setPType ti (projectI m)) f' arg') (fa ++ aa)
+           in done m (Apply (setPType ti (projectNode (rType ti) m)) f' arg') (fa ++ aa)
 
   where
     done m e acc = (m, e, (cnOf e, outerI m) : acc)

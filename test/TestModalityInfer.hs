@@ -113,13 +113,20 @@ modalityInferTests = testGroup "ModalityInfer"
           -- {S,I} (integral but no density) projects to Bottom, matching
           -- PInfer2's resolvePlusCons.
           assertEqual "" Bottom (mainPType "main = Uniform + Normal")
-      , testCase "a syntactic function value is Deterministic (outer modality)" $
-          assertEqual "" Deterministic (mainPType "main x = x + Uniform")
+      , testCase "a function node carries its body pType (IRCompiler contract)" $
+          -- Milestone 5: a function-typed node projects to its /body/ pType, not
+          -- the lossy outer-closure 'Deterministic'. @IRCompiler@ selects
+          -- prob/integrate codegen off this annotation (a top-level function's
+          -- root node is its binding), so @main x = x + Uniform@ must read
+          -- 'Integrate'. The internal modality is still the closure (application
+          -- β-reduces); only the flat annotation changed. See
+          -- @modality-cutover-delete-pinfer2@.
+          assertEqual "" Integrate (mainPType "main x = x + Uniform")
       ]
   , testGroup "finiteness (decision C) keeps enumerable combinations tractable"
       [ testCase "sum of two enumerable neural Ints is Integrate, not Bottom" $
-          -- main is a 2-arg function, so its root node is the (Deterministic)
-          -- closure; the ++ body sits two lambdas deep.
+          -- main is a 2-arg function; the ++ body sits two lambdas deep, so we
+          -- read it at path [0,0] rather than the (now body-typed) root node.
           assertEqual "" Integrate $
             pTypeAt "main" [0,0]
               "neural readMNist :: (Symbol -> Int) of [0,1,2,3,4,5,6,7,8,9]\n\
