@@ -325,6 +325,7 @@ applyMod _ _ = error "applyMod: applied a non-function modality"
 -- extended over the type structure. When @rho@ is a Dirac the marginalization
 -- is free and nothing changes.
 applyOuter :: GroundMod -> Mod -> Mod
+applyOuter rho m | gCap rho == Exact = m   -- Dirac function choice: free, family-preserving
 applyOuter rho (MGround g)  = MGround (marginalize rho g)
 applyOuter rho (MProd a b)  = MProd (applyOuter rho a) (applyOuter rho b)
 applyOuter rho (MArr r phi) = MArr (marginalize rho r) phi   -- transfer survives

@@ -23,6 +23,7 @@ import TestParser (parserTests)
 import TestInternals (internalsTests)
 import TestRejection (rejectionTests)
 import TestModality (modalityTests)
+import TestModalityInfer (modalityInferTests)
 import TestDeterminism (determinismTests)
 import TestEncodeProperties (encodeTests)
 import End2EndTesting (end2endTests, getAllTestFiles)
@@ -555,6 +556,7 @@ main = do
     , internalsTests
     , rejectionTests
     , modalityTests
+    , modalityInferTests
     , detTests
     , modDiff
     , encodeTests
