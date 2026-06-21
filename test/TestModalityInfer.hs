@@ -132,4 +132,89 @@ modalityInferTests = testGroup "ModalityInfer"
               "neural readMNist :: (Symbol -> Int) of [0,1,2,3,4,5,6,7,8,9]\n\
               \main a b = readMNist(a) ++ readMNist(b)"
       ]
+
+  -- Milestone 6 (task @modality-mrec-msum-validation@): the structured-modality
+  -- cases — the sum eliminator ('ISum') and the recursive-ADT summary ('IRec') —
+  -- have no @PInfer2@ baseline, so the diff harness could not cover them. These
+  -- groups pin hand-verified modalities on them. Every expectation here is the
+  -- *sound* answer; where the engine is also *imprecise* (a continuous law floored
+  -- to 'Integrate' instead of a recovered 'PNormal') the case carries a comment
+  -- saying so and points at the resolution. Verified against the engine, not
+  -- guessed.
+  , testGroup "MSum validation: the sum eliminator (case/if over Either)"
+      [ testCase "let-bound Either destructure idiom is Integrate" $
+          -- The forward-chaining-either-let regression program. The tag is a
+          -- random Bernoulli (Uniform < 0.5), so the eliminator marginalises a
+          -- continuous mixture of @Normal@ and @0.0@ → 'Integrate'. This milestone
+          -- only confirms the MSum eliminator's modality; the bug's own fix
+          -- compiles the idiom in @IRCompiler@ and is not owned here.
+          assertEqual "" Integrate $
+            mainPType "main = let e = if Uniform < 0.5 then left Normal else right 0.0 \
+                      \in if isLeft e then fromLeft e else fromRight e"
+      , testCase "both branches continuous: Integrate" $
+          assertEqual "" Integrate $
+            mainPType "main = if Uniform < 0.5 then left Normal else right Uniform"
+      , testCase "Either container drops the scalar family: fromLeft of a Normal is Integrate" $
+          -- @left (Normal+1.0)@ builds an 'Either', not a bare 'TFloat', so
+          -- 'gateScalarFamily' drops 'FamNormal' (mirrors @PInfer2.degradeNormal@
+          -- for containers). The eliminator therefore yields 'Integrate', never
+          -- 'PNormal' — the value's outer law is not a scalar Gaussian.
+          assertEqual "" Integrate $
+            mainPType "main = fromLeft (left (Normal + 1.0))"
+      , testCase "deterministic-tag Either selection still drops family (Integrate)" $
+          -- Contrast with the scalar det-tag selection two groups up
+          -- (@if 0.1 < 0.5 then Normal else Normal + 1.0@ → 'PNormal'): there the
+          -- branches are bare Gaussians and the family survives the meet. Here the
+          -- same deterministic tag selects between two *Either* values, and the
+          -- container gate has already stripped each branch's family, so the meet
+          -- is family-free → 'Integrate'. Pins the scalar-vs-container boundary.
+          assertEqual "" Integrate $
+            mainPType "main = if 0.1 < 0.5 then left Normal else right Normal"
+      ]
+  , testGroup "MRec validation: the recursive-ADT summary"
+      [ testCase "deterministic recursive-ADT access stays Deterministic" $
+          -- A 'Cont'/'Empty' list of constants, destructured by @hd . tl@. The
+          -- 'IRec' structural summary carries the deterministic content through
+          -- without over-degrading — the honest 'Deterministic'.
+          assertEqual "" Deterministic $
+            mainPType "data Lst = Cont hd::Float, tl::Lst | Empty\n\
+                      \main = hd (tl (Cont 0.3 (Cont 0.2 Empty)))"
+      , testCase "recursive list of Normals is Integrate (family drops through MRec)" $
+          -- @gaussList@: a coin-terminated recursive list each of whose elements is
+          -- a 'Normal'. Sound but imprecise: the greatest-fixpoint summary meets
+          -- the @[]@ base case ('Deterministic', FamNone) with the @Normal : rest@
+          -- case, and the meet drops the family to 'FamNone' → 'Integrate' rather
+          -- than a per-element 'PNormal'. This is the deferred MRec family-precision
+          -- wrinkle (design §9 / §10): the principled fix is the totality axis
+          -- [[modality-totality-axis]], because an unbounded-depth recursion is a
+          -- depth-mixture, not a single Gaussian. (The design's @addNoise n@ example
+          -- is not even well-typed here — integer @n - 1@ fails RInfer — so this is
+          -- the realisable stand-in for the MRec family case.)
+          assertEqual "" Integrate $
+            mainPType "main = if Uniform > 0.5 then [] else Normal : main"
+      , testCase "single-element recursive ADT carrying a Normal is Integrate" $
+          -- Even with no actual recursion taken, the recursive *type* forces the
+          -- 'IRec' summary, whose fixpoint meets in the @Empty@ base case and drops
+          -- the family. Same wrinkle as @gaussList@, isolated to one element.
+          assertEqual "" Integrate $
+            mainPType "data Lst = Cont hd::Float, tl::Lst | Empty\n\
+                      \main = hd (Cont (Normal + 1.0) Empty)"
+      ]
+  , testGroup "MProd boundary: tuple accessors recover family, user-ADT accessors do not"
+      [ testCase "tuple fst recovers the per-component Gaussian (PNormal)" $
+          -- The 'IProd' built by a tuple literal keeps each component's family, and
+          -- @fst@/@snd@ have dedicated 'projFst'/'projSnd' projections, so the
+          -- component's 'PNormal' survives.
+          assertEqual "" PNormal $
+            mainPType "main = fst (Normal + 1.0, Uniform)"
+      , testCase "user-ADT field accessor does NOT recover the field family (Integrate)" $
+          -- A user-ADT accessor (@x@ on @data P = P x::Float, y::Float@) is a plain
+          -- 'InjF' with no 'projFst'/'projSnd' special-case, so it marginalises the
+          -- whole 'IProd' (family already dropped by 'outerI') → 'Integrate'. Pins
+          -- the boundary: only the built-in tuple accessors recover a field family
+          -- today; user-ADT accessors are the imprecise (but sound) case.
+          assertEqual "" Integrate $
+            mainPType "data P = P x::Float, y::Float\n\
+                      \main = x (P (Normal + 1.0) Uniform)"
+      ]
   ]
