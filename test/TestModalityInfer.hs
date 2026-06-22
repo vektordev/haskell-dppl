@@ -219,7 +219,8 @@ modalityInferTests = testGroup "ModalityInfer"
       ]
 
   -- Characterization of the cross-latent invertible-recovery gap. Pins CURRENT
-  -- behaviour as a KNOWN LIMITATION, not an endorsement.
+  -- behaviour as a KNOWN LIMITATION, not an endorsement. These assertions are
+  -- EXPECTED TO FLIP to 'Integrate' when [[modality-witnessed-inference]] lands.
   --
   -- Task @modality-fc-capability-regression-test@; investigation
   -- @fc-recovers-capability-marginalize-floors@ (resolved). The witness shares one
@@ -232,23 +233,45 @@ modalityInferTests = testGroup "ModalityInfer"
   -- lifting the type alone would not suffice — the IRCompiler has never had the
   -- shared-latent once-counting capability, so a type-only lift would emit a
   -- silently-wrong joint density. The fix is the scoped witnessed-inference feature.
-  --
-  -- The two negative guards below are the discriminator: they MUST stay 'Bottom'
-  -- under any future fix (genuine convolutions needing quadrature, which the
-  -- language disclaims). They make the witness's 'Bottom' here a documented gap
-  -- rather than the same verdict as a true convolution.
-  , testGroup "cross-latent invertible recovery (KNOWN LIMITATION: FC witnessing not wired)"
-      [ testCase "witness: shared-latent tuple is Bottom today (desired: Integrate under FC)" $
+  , testGroup "cross-latent invertible recovery (KNOWN LIMITATION: flips when FC witnessing is wired)"
+      [ testCase "witness (additive): shared-latent tuple is Bottom today (desired: Integrate)" $
           assertEqual "" Bottom $
             mainPType "main = let x = Uniform in let y = x + Uniform in (x, y)"
-      , testCase "negative guard: y-only is a genuine convolution, must stay Bottom" $
-          -- Drop the @x@ component: @x@ is no longer observed, so @u2@ cannot be
-          -- recovered (one equation, two unknowns) — a real convolution. FC's
-          -- @isInvertibleLambda@ for the @x@-binding is False here (vs True in the
-          -- witness): this is the load-bearing discriminator a future fix consults.
+      , testCase "witness (multiplicative): shared-latent tuple is Bottom today (desired: Integrate)" $
+          -- Same recoverable shape with @mult@: @x@ observed via @fst@, then
+          -- @u2 = y / x@ recovered via @snd@ (Jacobian 1/|x|). Documented here, NOT
+          -- among the permanent guards below, because it is a desired-recovery case
+          -- — the gap is not specific to @plus@.
+          assertEqual "" Bottom $
+            mainPType "main = let x = Uniform in let y = x * Uniform in (x, y)"
+      ]
+
+  -- Permanent soundness guards. Unlike the characterization group above, these MUST
+  -- stay 'Bottom' FOREVER — including after [[modality-witnessed-inference]] lands.
+  -- They are genuine convolutions / multi-residual-latent combinations that need
+  -- the in-house quadrature the language disclaims (design decision B): no single
+  -- sibling is observed that would witness the residual randomness away. They mark
+  -- the boundary the witnessed-inference fix must NOT cross. (@Uniform + Normal@ as
+  -- a bare sum is already pinned in the "ground rules vs PInfer2 parity" group.)
+  , testGroup "continuous convolutions stay Bottom (permanent soundness guards)"
+      [ testCase "y-only: x unobserved, so x + Uniform is a real convolution" $
+          -- The discriminator vs the additive witness: FC's @isInvertibleLambda@ for
+          -- the @x@-binding is False here (x is not observed) but True in the witness.
           assertEqual "" Bottom $
             mainPType "main = let x = Uniform in let y = x + Uniform in y"
-      , testCase "negative guard: sum of two unobserved continuous laws stays Bottom" $
-          assertEqual "" Bottom (mainPType "main = Uniform + Normal")
+      , testCase "let-bound sum of two continuous laws" $
+          assertEqual "" Bottom (mainPType "main = let z = Uniform + Normal in z")
+      , testCase "product of two unobserved continuous laws" $
+          assertEqual "" Bottom (mainPType "main = Uniform * Uniform")
+      , testCase "a convolution component floors the whole tuple" $
+          assertEqual "" Bottom (mainPType "main = (Uniform + Normal, Uniform)")
+      , testCase "two residual latents in one observed slot cannot both be witnessed" $
+          -- Adjacent to the recoverable witness but MUST stay Bottom: observing the
+          -- second slot gives one equation for two fresh draws (u2, u3). The
+          -- @marginalize@ floor self-enforces this even once @x@ is witnessed — the
+          -- key guard that the witnessed-inference fix promotes ONLY single-residual
+          -- recoveries, never a genuine multi-latent convolution.
+          assertEqual "" Bottom $
+            mainPType "main = let x = Uniform in (x, x + Uniform + Uniform)"
       ]
   ]
