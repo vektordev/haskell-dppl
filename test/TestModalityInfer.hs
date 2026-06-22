@@ -217,4 +217,38 @@ modalityInferTests = testGroup "ModalityInfer"
             mainPType "data P = P x::Float, y::Float\n\
                       \main = x (P (Normal + 1.0) Uniform)"
       ]
+
+  -- Characterization of the cross-latent invertible-recovery gap. Pins CURRENT
+  -- behaviour as a KNOWN LIMITATION, not an endorsement.
+  --
+  -- Task @modality-fc-capability-regression-test@; investigation
+  -- @fc-recovers-capability-marginalize-floors@ (resolved). The witness shares one
+  -- latent @x@ across two observed tuple slots: @x@ is recovered from @fst@, then
+  -- @u2 = y - x@ from @snd@, so the joint @p(x)·p(y-x)@ is fully recoverable by
+  -- forward chaining — DESIRED capability is 'Integrate' (full density). The engine
+  -- does NOT wire FC's witnessing verdict, so the @marginalize@ floor types
+  -- @x + Uniform@ as {S,I} → 'Bottom' and the tuple meets to 'Bottom' (sample
+  -- only). The deeper finding (see design @modality-witnessed-inference@): even
+  -- lifting the type alone would not suffice — the IRCompiler has never had the
+  -- shared-latent once-counting capability, so a type-only lift would emit a
+  -- silently-wrong joint density. The fix is the scoped witnessed-inference feature.
+  --
+  -- The two negative guards below are the discriminator: they MUST stay 'Bottom'
+  -- under any future fix (genuine convolutions needing quadrature, which the
+  -- language disclaims). They make the witness's 'Bottom' here a documented gap
+  -- rather than the same verdict as a true convolution.
+  , testGroup "cross-latent invertible recovery (KNOWN LIMITATION: FC witnessing not wired)"
+      [ testCase "witness: shared-latent tuple is Bottom today (desired: Integrate under FC)" $
+          assertEqual "" Bottom $
+            mainPType "main = let x = Uniform in let y = x + Uniform in (x, y)"
+      , testCase "negative guard: y-only is a genuine convolution, must stay Bottom" $
+          -- Drop the @x@ component: @x@ is no longer observed, so @u2@ cannot be
+          -- recovered (one equation, two unknowns) — a real convolution. FC's
+          -- @isInvertibleLambda@ for the @x@-binding is False here (vs True in the
+          -- witness): this is the load-bearing discriminator a future fix consults.
+          assertEqual "" Bottom $
+            mainPType "main = let x = Uniform in let y = x + Uniform in y"
+      , testCase "negative guard: sum of two unobserved continuous laws stays Bottom" $
+          assertEqual "" Bottom (mainPType "main = Uniform + Normal")
+      ]
   ]
