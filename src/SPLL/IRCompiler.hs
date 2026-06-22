@@ -259,6 +259,12 @@ extendMetaForLambda meta t name =
       hasInference = case paramRType of { TArrow (TArrow _ _) _ -> True; _ -> False }
   in meta { typeEnv = (name, (paramRType, hasInference)) : typeEnv meta }
 
+-- | True if the expression is a literal lambda (as opposed to a function reached
+-- through the higher-order equivalence machinery, e.g. a Var or an Apply result).
+isLambdaExpr :: Expr -> Bool
+isLambdaExpr (Lambda {}) = True
+isLambdaExpr _ = False
+
 negInf :: IRExpr
 negInf = IRConst (VFloat (-9999999))
 
@@ -694,7 +700,36 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample
                     else IRIf (IROp OpGreaterThan appliedCoV const0) x (IROp OpSub (IRConst (VFloat 1)) x)
     case rt of
       TArrow _ _ -> return (wrapInLambdas (IRTCons (scale p) (IRTCons dim bc)), const0, const0)
-      _ -> return (wrapInLambdas $ scale p, wrapInLambdas dim, wrapInLambdas bc)
+      _ | cumulative || not (isLambdaExpr l) || not (null tag) ->
+            -- Keep the original single-witness behaviour when: (a) integrate mode, where
+            -- tuple/multi-latent CDFs are ill-defined; (b) the callable is not a literal
+            -- lambda, i.e. it is a function reached through the higher-order equivalence
+            -- machinery (applied top-level fn / returned closure), whose body references
+            -- tagged variables this folding would mis-bind; or (c) the lambda is applied
+            -- under a tag (HO duplication). Body-factor folding is only sound for a plain
+            -- value let-binding `Apply (Lambda x body) v`.
+            return (wrapInLambdas $ scale p, wrapInLambdas dim, wrapInLambdas bc)
+      _ -> do
+        -- The inversion above only recovers and infers the variable bound by THIS
+        -- lambda. Any additional independent latents bound deeper in the body (e.g. a
+        -- second `let` whose value is repacked alongside this one in a tuple) are not
+        -- captured by the bound-value inference. Infer the body too and fold it in as an
+        -- independent factor: probabilities multiply, dimensions add, branch counts add.
+        -- For a body that is deterministic given the recovered variable, the exact
+        -- inverse makes the body factor an always-true (dim-0) indicator, so the product
+        -- collapses to the original result; only genuinely new latents add density/dim.
+        let Program{functions=fs} = compilingProgram meta
+        let bodyExpr = findExprWithCN (map snd fs) lambdaBodyCN
+        -- The body references the bound variable, so it must be in scope in the type
+        -- environment (mirrors how the Lambda arm descends into a lambda body).
+        let bodyMeta = extendMetaForLambda meta (getTypeInfo l) toInvCN
+        (pBody, dimBody, bcBody) <- toIRInference bodyMeta cumulative bodyExpr sample
+        -- Bind the recovered value of the bound variable in scope so free occurrences in
+        -- the body factor resolve (and redundant comparisons collapse to true).
+        let bindRec e = IRLetIn (toInvCN ++ tag) appliedSample e
+        (combP, combDim) <- multP (scale p, dim) (bindRec pBody, bindRec dimBody)
+        let combBC = IROp OpPlus bc (bindRec bcBody)
+        return (wrapInLambdas combP, wrapInLambdas combDim, wrapInLambdas combBC)
   -- Forward chaining may have messed with the structure of the expression. We may have too many or too few lambdas.
   -- Every lambda, which is not applied, inside of the callable should be present in the retuned IRExpr. 
   -- Exclude the lambda, which is applied here and all lambdas, which are already present
