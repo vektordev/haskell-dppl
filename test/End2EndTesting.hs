@@ -160,35 +160,41 @@ parEval xs = do
 discreteProbsNormalized :: Program -> Either CompilerError IREnv -> Property
 discreteProbsNormalized p compiledE = case compiledE of
   Left err -> counterexample ("Compilation failed: " ++ err) False
-  Right compiled -> ioProperty $ do
-    let Just (genExpr, _)  = genFun  (lookupIREnv "main" compiled)
-        Just (probExpr, _) = probFun (lookupIREnv "main" compiled)
-        randomParams :: RandomGen g => Rand g [IRValue]
-        randomParams = replicateM paramCnt (fmap (\x -> VTuple (VInt 0) (VInt x)) (getRandomR (1, 100000)))
-        randomParamsForSamples = evalRand (replicateM sampleCnt randomParams) (mkStdGen 42)
-        gens = map (\args -> generateRand (neurals p) (encodeDecls p) compiled (map IRConst args) genExpr) randomParamsForSamples
-        pSamples = evalRand (sequence gens) (mkStdGen 42)
-        uniqueSamples = nub pSamples
-        counts = map (\u -> length (filter (== u) pSamples)) uniqueSamples
-    -- The per-sample prob queries are independent and pure; force them in parallel.
-    probResults <- parEval (map (\sam -> generateDet (neurals p) (encodeDecls p) compiled (map IRConst (sam:params)) probExpr) uniqueSamples)
-    return $ case sequence probResults of
-        Left err -> counterexample err False
-        Right t
-          | all ((== VInt 0) . dim) t ->
-              -- Discrete (dim 0): with 1000 draws from a small support, every distinct
-              -- value is observed, so the probabilities of the distinct observed values
-              -- should sum to (approximately) exactly 1. Checking both bounds catches
-              -- both missing mass (e.g. wrong probabilities) and double-counted /
-              -- unnormalized probabilities (sum > 1), neither of which the old
-              -- count-weighted sum (always >> 1 for small supports) could detect.
-              let totalProb = sum (map prob t)
-              in counterexample ("Probabilities of distinct sampled values sum to " ++ show totalProb ++ ", expected ~1") (abs (totalProb - 1) < normalizationTolerance)
-          | otherwise ->
-              -- Continuous: sampled values are (almost) all distinct, and a sum of
-              -- densities has no "=1" meaning - just check the densities aren't degenerate.
-              let sumProbSamples = sum (zipWith (\c r -> fromIntegral c * prob r) counts t)
-              in counterexample "Probability of randomly sampled values does not sum to 1" (sumProbSamples >= sufficientlyNormal)
+  Right compiled -> case (genFun (lookupIREnv "main" compiled), probFun (lookupIREnv "main" compiled)) of
+    -- A program with no probability function cannot have its normalization
+    -- checked -- and for an inference compiler, a program we can only sample
+    -- from is not a passing test, it is a missing feature. Fail loudly rather
+    -- than crash on a partial match (the irrefutable Just-pattern this replaces)
+    -- or silently pass. E.g. clevr3_predicate_spatial compares two continuous
+    -- neural outputs, which currently yields Bottom and emits no main_prob.
+    (Just (genExpr, _), Just (probExpr, _)) -> ioProperty $ do
+      let randomParams :: RandomGen g => Rand g [IRValue]
+          randomParams = replicateM paramCnt (fmap (\x -> VTuple (VInt 0) (VInt x)) (getRandomR (1, 100000)))
+          randomParamsForSamples = evalRand (replicateM sampleCnt randomParams) (mkStdGen 42)
+          gens = map (\args -> generateRand (neurals p) (encodeDecls p) compiled (map IRConst args) genExpr) randomParamsForSamples
+          pSamples = evalRand (sequence gens) (mkStdGen 42)
+          uniqueSamples = nub pSamples
+          counts = map (\u -> length (filter (== u) pSamples)) uniqueSamples
+      -- The per-sample prob queries are independent and pure; force them in parallel.
+      probResults <- parEval (map (\sam -> generateDet (neurals p) (encodeDecls p) compiled (map IRConst (sam:params)) probExpr) uniqueSamples)
+      return $ case sequence probResults of
+          Left err -> counterexample err False
+          Right t
+            | all ((== VInt 0) . dim) t ->
+                -- Discrete (dim 0): with 1000 draws from a small support, every distinct
+                -- value is observed, so the probabilities of the distinct observed values
+                -- should sum to (approximately) exactly 1. Checking both bounds catches
+                -- both missing mass (e.g. wrong probabilities) and double-counted /
+                -- unnormalized probabilities (sum > 1), neither of which the old
+                -- count-weighted sum (always >> 1 for small supports) could detect.
+                let totalProb = sum (map prob t)
+                in counterexample ("Probabilities of distinct sampled values sum to " ++ show totalProb ++ ", expected ~1") (abs (totalProb - 1) < normalizationTolerance)
+            | otherwise ->
+                -- Continuous: sampled values are (almost) all distinct, and a sum of
+                -- densities has no "=1" meaning - just check the densities aren't degenerate.
+                let sumProbSamples = sum (zipWith (\c r -> fromIntegral c * prob r) counts t)
+                in counterexample "Probability of randomly sampled values does not sum to 1" (sumProbSamples >= sufficientlyNormal)
+    _ -> counterexample "main has no probability function (inference unavailable); only generate compiled" False
   where
     paramCnt = progParameterCount p
     seedList = [0 .. (paramCnt - 1)]

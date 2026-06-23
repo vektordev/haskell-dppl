@@ -427,6 +427,18 @@ toIRNormalParams meta (ReadNN _ name arg) = do
   return (IRIndex (IRVar var) (IRConst (VInt 0)), IRIndex (IRVar var) (IRConst (VInt 1)))
 toIRNormalParams _ e = error $ "toIRNormalParams: cannot extract Normal params from " ++ show (pType (getTypeInfo e)) ++ " | expr: " ++ show e
 
+-- | Standard-normal CDF at 0 of the difference of two PNormal expressions.
+-- left - right ~ Normal(muL - muR, sqrt(sL^2 + sR^2)); returns Phi((0 - mu) / sigma),
+-- which is p(left < right). Used to give P-mode a closed form for Gaussian-vs-Gaussian
+-- comparisons, where neither side is a deterministic bound.
+normalDiffCdfAtZero :: CompilerMetadata -> Expr -> Expr -> CompilerMonad IRExpr
+normalDiffCdfAtZero meta left right = do
+  (muL, sL) <- toIRNormalParams meta left
+  (muR, sR) <- toIRNormalParams meta right
+  let mu = IROp OpSub muL muR
+      sigma = irSqrt (IROp OpPlus (IROp OpMult sL sL) (IROp OpMult sR sR))
+  return (IRCumulative IRNormal (IROp OpDiv (IROp OpSub (IRConst (VFloat 0)) mu) sigma))
+
 -- | Recursively extract (mu_log, sigma) as IRExprs from a PLogNormal-typed expression.
 toIRLogNormalParams :: CompilerMetadata -> Expr -> CompilerMonad (IRExpr, IRExpr)
 toIRLogNormalParams meta (InjF _ (Named "exp") [e])
@@ -567,6 +579,22 @@ toIRInference meta cumulative (IfThenElse _ cond left right) sample = do
     -- p(y) = p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
     Nothing -> do
       return (addExpr, addDim, branches)
+-- Both sides Gaussian: left - right ~ Normal(muL - muR, sqrt(sL^2 + sR^2)), so the
+-- comparison is that difference's CDF evaluated at 0. Neither side is Deterministic,
+-- so the bound-based equations below do not apply. resolveCompCons types this Bool
+-- as Integrate (a closed-form discrete probability), matching the dim-0 result here.
+toIRInference meta False (GreaterThan _ left right) sample
+  | pType (getTypeInfo left) == PNormal && pType (getTypeInfo right) == PNormal = do
+    cdfAt0 <- normalDiffCdfAtZero meta left right
+    -- p(left > right) = p(diff > 0) = 1 - cdf(0)
+    let returnExpr = IRIf sample (IROp OpSub (IRConst $ VFloat 1.0) cdfAt0) cdfAt0
+    return (returnExpr, const0, IRConst (VFloat 1))
+toIRInference meta False (LessThan _ left right) sample
+  | pType (getTypeInfo left) == PNormal && pType (getTypeInfo right) == PNormal = do
+    cdfAt0 <- normalDiffCdfAtZero meta left right
+    -- p(left < right) = p(diff < 0) = cdf(0)
+    let returnExpr = IRIf sample cdfAt0 (IROp OpSub (IRConst $ VFloat 1.0) cdfAt0)
+    return (returnExpr, const0, IRConst (VFloat 1))
 toIRInference meta False (GreaterThan _ left right) sample
   | pType (getTypeInfo left) == Deterministic = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"

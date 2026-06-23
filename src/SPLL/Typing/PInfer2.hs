@@ -127,7 +127,18 @@ resolveCompCons PNormal     Prob        = Bottom
 resolveCompCons Prob        PNormal     = Bottom
 resolveCompCons PNormal     Integrate   = Bottom
 resolveCompCons Integrate   PNormal     = Bottom
-resolveCompCons PNormal     PNormal     = Bottom
+-- Two Gaussians: left - right is Normal, so the comparison reduces to a Gaussian
+-- CDF evaluated at 0 (see the both-PNormal LessThan/GreaterThan IR-gen). The
+-- result is a Bool with a closed-form probability, i.e. Integrate -- never PNormal
+-- (a Bool can never be Gaussian; leaving it PNormal makes the function compiler try
+-- to extract (mu, sigma) from the comparison and crash in toIRNormalParams).
+resolveCompCons PNormal     PNormal     = Integrate
+-- Gaussian (or log-Gaussian) vs a constant bound: the existing Deterministic-side
+-- LessThan/GreaterThan path integrates the distribution's CDF up to that bound.
+resolveCompCons PNormal     Deterministic = Integrate
+resolveCompCons Deterministic PNormal     = Integrate
+resolveCompCons PLogNormal  Deterministic = Integrate
+resolveCompCons Deterministic PLogNormal  = Integrate
 resolveCompCons PLogNormal  Prob        = Bottom
 resolveCompCons Prob        PLogNormal  = Bottom
 resolveCompCons PLogNormal  Integrate   = Bottom
