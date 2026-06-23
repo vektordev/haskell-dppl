@@ -496,8 +496,7 @@ validateEncodeGaussian adts registry neuralDecls env = mapM_ checkDecl decoderDe
     encodeGaussianError name =
       "encode: neural declaration '" ++ name ++ "' has a continuous output that is not "
       ++ "Gaussian (PNormal/PLogNormal) — e.g. a mixture produced by `if`, or a product of "
-      ++ "random variables. A non-Gaussian continuous slot cannot be encoded; insert an "
-      ++ "explicit `collapse` at the offending node (see task encode-07)."
+      ++ "random variables. A non-Gaussian continuous slot cannot be encoded."
 
 -- | Normal-parameter function names that `encode` references for the Continuous slots of a
 -- plan.  Mirrors the name threading in `makeEncodeTopLevelW` (top-level `main_normal`,
