@@ -91,19 +91,12 @@ degradeNormalResult (s, cs, t, e) =
 
 resolvePlusCons :: PType -> PType -> PType
 resolvePlusCons Integrate   Integrate   = Bottom
-resolvePlusCons Integrate   Prob        = Bottom
-resolvePlusCons Prob        Integrate   = Bottom
-resolvePlusCons Prob        Prob        = Bottom
 resolvePlusCons PNormal     PNormal     = Bottom
 resolvePlusCons PNormal     Integrate   = Bottom
 resolvePlusCons Integrate   PNormal     = Bottom
-resolvePlusCons PNormal     Prob        = Bottom
-resolvePlusCons Prob        PNormal     = Bottom
 resolvePlusCons PLogNormal  PLogNormal  = Bottom
 resolvePlusCons PLogNormal  Integrate   = Bottom
 resolvePlusCons Integrate   PLogNormal  = Bottom
-resolvePlusCons PLogNormal  Prob        = Bottom
-resolvePlusCons Prob        PLogNormal  = Bottom
 resolvePlusCons PNormal     PLogNormal  = Bottom
 resolvePlusCons PLogNormal  PNormal     = Bottom
 resolvePlusCons _ _ = Deterministic
@@ -111,20 +104,10 @@ resolvePlusCons _ _ = Deterministic
 -- Enumerability allows us to still infer prob in cases in which normal inference would fail
 resolveEnumPlusCons :: PType -> PType -> PType
 resolveEnumPlusCons Integrate Integrate = Integrate
-resolveEnumPlusCons Integrate Prob = Integrate
-resolveEnumPlusCons Prob Integrate = Integrate
-resolveEnumPlusCons Prob Prob = Integrate
 resolveEnumPlusCons _ _ = Deterministic
 
 resolveCompCons :: PType -> PType -> PType
 resolveCompCons Integrate   Integrate   = Bottom
-resolveCompCons Integrate   Prob        = Bottom
-resolveCompCons Prob        Integrate   = Bottom
-resolveCompCons Prob        Prob        = Bottom
-resolveCompCons Prob        Deterministic = Bottom
-resolveCompCons Deterministic Prob      = Bottom
-resolveCompCons PNormal     Prob        = Bottom
-resolveCompCons Prob        PNormal     = Bottom
 resolveCompCons PNormal     Integrate   = Bottom
 resolveCompCons Integrate   PNormal     = Bottom
 -- Two Gaussians: left - right is Normal, so the comparison reduces to a Gaussian
@@ -139,8 +122,6 @@ resolveCompCons PNormal     Deterministic = Integrate
 resolveCompCons Deterministic PNormal     = Integrate
 resolveCompCons PLogNormal  Deterministic = Integrate
 resolveCompCons Deterministic PLogNormal  = Integrate
-resolveCompCons PLogNormal  Prob        = Bottom
-resolveCompCons Prob        PLogNormal  = Bottom
 resolveCompCons PLogNormal  Integrate   = Bottom
 resolveCompCons Integrate   PLogNormal  = Bottom
 resolveCompCons PLogNormal  PLogNormal  = Bottom
