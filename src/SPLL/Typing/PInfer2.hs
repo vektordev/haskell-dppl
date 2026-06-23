@@ -523,6 +523,12 @@ tryNormalClosure "log"  [PLogNormal]            = Just PNormal
 tryNormalClosure "mult" [PLogNormal, PLogNormal]    = Just PLogNormal
 tryNormalClosure "mult" [PLogNormal, Deterministic] = Just PLogNormal
 tryNormalClosure "mult" [Deterministic, PLogNormal] = Just PLogNormal
+-- LogNormal analytic transforms (each follows from f(exp x) = exp(g x), so the
+-- log-space variable stays Gaussian): sqrt → exp(x/2), sq → exp(2x), recip → exp(-x).
+-- The corresponding (mu_log, sigma) rescalings live in toIRLogNormalParams.
+tryNormalClosure "sqrt"  [PLogNormal]               = Just PLogNormal
+tryNormalClosure "sq"    [PLogNormal]               = Just PLogNormal
+tryNormalClosure "recip" [PLogNormal]               = Just PLogNormal
 tryNormalClosure _      _                           = Nothing
 
 

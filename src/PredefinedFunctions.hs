@@ -54,6 +54,20 @@ recipFwd = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["a"] ["b"] (IROp OpDiv (
 recipInv :: FDecl
 recipInv = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["b"] ["a"] (IROp OpDiv (IRConst (VFloat 1)) (IRVar "b")) (IRConst (VBool True)) False [("b", IRUnaryOp OpNeg (IROp OpDiv (IRConst (VFloat 1)) (IROp OpMult (IRVar "b") (IRVar "b"))))]
 
+-- sqrt via exp(0.5*log x) (no dedicated OpSqrt); defined on the positive reals.
+-- Forward derivative d/da sqrt(a) = 0.5 / sqrt(a). Inverse is squaring.
+sqrtFwd :: FDecl
+sqrtFwd = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["a"] ["b"] (IRUnaryOp OpExp (IROp OpMult (IRConst (VFloat 0.5)) (IRUnaryOp OpLog (IRVar "a")))) (IROp OpGreaterThan (IRVar "a") (IRConst (VFloat 0))) False [("a", IROp OpDiv (IRConst (VFloat 0.5)) (IRUnaryOp OpExp (IROp OpMult (IRConst (VFloat 0.5)) (IRUnaryOp OpLog (IRVar "a")))))]
+sqrtInv :: FDecl
+sqrtInv = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["b"] ["a"] (IROp OpMult (IRVar "b") (IRVar "b")) (IRConst (VBool True)) False [("b", IROp OpMult (IRConst (VFloat 2)) (IRVar "b"))]
+
+-- sq (squaring); inverse is sqrt, so it is only invertible on the positive reals.
+-- Forward derivative d/da a^2 = 2a.
+sqFwd :: FDecl
+sqFwd = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["a"] ["b"] (IROp OpMult (IRVar "a") (IRVar "a")) (IRConst (VBool True)) False [("a", IROp OpMult (IRConst (VFloat 2)) (IRVar "a"))]
+sqInv :: FDecl
+sqInv = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["b"] ["a"] (IRUnaryOp OpExp (IROp OpMult (IRConst (VFloat 0.5)) (IRUnaryOp OpLog (IRVar "b")))) (IROp OpGreaterThan (IRVar "b") (IRConst (VFloat 0))) False [("b", IROp OpDiv (IRConst (VFloat 0.5)) (IRUnaryOp OpExp (IROp OpMult (IRConst (VFloat 0.5)) (IRUnaryOp OpLog (IRVar "b")))))]
+
 leftFwd :: FDecl
 leftFwd = FDecl (Forall [TV "a", TV "b"] [] (TVarR (TV "a") `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b")))) ["a"] ["b"] (IRLeft (IRVar "a")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1))]
 fromLeftFwd :: FDecl
@@ -212,6 +226,8 @@ globalFenv' = [("double", FPair doubleFwd [doubleInv]),
               ("neg", FPair negFwd [negInv]),
               ("negI", FPair negIFwd [negIInv]),
               ("recip", FPair recipFwd [recipInv]),
+              ("sqrt", FPair sqrtFwd [sqrtInv]),
+              ("sq", FPair sqFwd [sqInv]),
               ("left", FPair leftFwd [fromLeftFwd]),
               ("right", FPair rightFwd [fromRightFwd]),
               ("fromLeft", FPair fromLeftFwd [leftFwd]),

@@ -1,0 +1,1 @@
+main = sq (exp Normal)

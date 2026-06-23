@@ -1,0 +1,1 @@
+main = recip (exp (Normal * 1.0 + 1.0))

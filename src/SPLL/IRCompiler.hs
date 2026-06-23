@@ -458,6 +458,21 @@ toIRLogNormalParams meta (InjF _ (Named "mult") [e0, e1])
       (mu1, s1) <- toIRLogNormalParams meta e1
       det0 <- toIRGenerate meta e0
       return (IROp OpPlus mu1 (IRUnaryOp OpLog det0), s1)
+-- sqrt(exp x) = exp(x/2): the log-space variable is halved, so (mu_log, sigma) -> (mu_log/2, sigma/2).
+toIRLogNormalParams meta (InjF _ (Named "sqrt") [e])
+  | pType (getTypeInfo e) == PLogNormal = do
+      (mu, s) <- toIRLogNormalParams meta e
+      return (IROp OpMult (IRConst (VFloat 0.5)) mu, IROp OpMult (IRConst (VFloat 0.5)) s)
+-- sq(exp x) = (exp x)^2 = exp(2x): the log-space variable is doubled, so (mu_log, sigma) -> (2 mu_log, 2 sigma).
+toIRLogNormalParams meta (InjF _ (Named "sq") [e])
+  | pType (getTypeInfo e) == PLogNormal = do
+      (mu, s) <- toIRLogNormalParams meta e
+      return (IROp OpMult (IRConst (VFloat 2)) mu, IROp OpMult (IRConst (VFloat 2)) s)
+-- recip(exp x) = 1/exp x = exp(-x): the log-space variable is negated, so (mu_log, sigma) -> (-mu_log, sigma).
+toIRLogNormalParams meta (InjF _ (Named "recip") [e])
+  | pType (getTypeInfo e) == PLogNormal = do
+      (mu, s) <- toIRLogNormalParams meta e
+      return (IRUnaryOp OpNeg mu, s)
 toIRLogNormalParams meta (Var _ name)
   | Just expr <- lookup name (functions (compilingProgram meta)) = toIRLogNormalParams meta expr
 toIRLogNormalParams _ e = error $ "toIRLogNormalParams: cannot extract LogNormal params from " ++ show (pType (getTypeInfo e))
