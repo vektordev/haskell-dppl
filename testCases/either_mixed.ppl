@@ -1,0 +1,2 @@
+neural nn :: (Symbol -> Either Bool Float) of ([True, False] | Real)
+main sym = nn sym
