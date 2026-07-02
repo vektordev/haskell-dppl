@@ -7,6 +7,7 @@ module SPLL.Typing.ForwardChaining
   , progToFCData
   , toInvExpr
   , isInvertibleLambda
+  , isWitnessedLambda
   , findEquivalentExpression
   , findExprWithCN
   , unwrapLambdas
@@ -113,14 +114,47 @@ inversionSetup fcData lambdaCN = do
 
 -- | Invertibility certificate (modality stage 2): is the variable bound by the
 -- lambda at this chain name algebraically recoverable from the known anchors and
--- the observed body? This is the pure verdict the modality engine consults in
--- place of weaker ad-hoc heuristics; the IR realisation that shares the very
--- same 'FCData' is 'toInvExpr'. (Finiteness/preimage of the recovered value is
--- the orthogonal DiscreteValues axis — Fin in the design — not a FC concern.)
+-- the observed body? The IR realisation that shares the very same 'FCData' is
+-- 'toInvExpr', so the certificate and the codegen can never disagree.
+-- (Finiteness/preimage of the recovered value is the orthogonal DiscreteValues
+-- axis — Fin in the design — not a FC concern.)
+--
+-- NOTE: the modality engine does not consult this verdict today — the shipped
+-- engine's marginalize+Fin lattice reproduces it on the current corpus, so the
+-- only consumers are the tests (investigation
+-- fc-recovers-capability-marginalize-floors scoped that finding to the corpus).
+-- The engine-facing variant that the witnessed-inference feature wires in is
+-- 'isWitnessedLambda' (design modality-witnessed-inference, milestone 2).
 isInvertibleLambda :: FCData -> [ADTDecl] -> ChainName -> Bool
 isInvertibleLambda fcData adts lambdaCN = case inversionSetup fcData lambdaCN of
   Just (_, toInvCNs, paramClause) ->
     any (isJust . toValueExpr (hornClauses fcData) [paramClause] adts) toInvCNs
+  Nothing -> False
+
+-- | Witnessed-binding query (design modality-witnessed-inference, milestone 1):
+-- is the variable bound by the lambda at @lambdaCN@ algebraically recoverable
+-- when @obsCN@ — not the lambda's own body — is the observed value?
+--
+-- This differs from 'isInvertibleLambda' only in the seed of the chaining: the
+-- certificate observes the binding's own body, which for a let nested under a
+-- non-invertible context over-claims (the body is not actually observed there).
+-- Seeding at the declaration's observed result instead makes the verdict honest
+-- for the let-chains-feeding-output shape: the observation reaches the let body
+-- through Apply/variable equivalences exactly when the surrounding context
+-- preserves it. Pass the declaration root's chain name as @obsCN@; wrapping
+-- lambdas (a function declaration's parameters) are stripped, mirroring
+-- 'inversionSetup', because the observation is the applied function's result.
+--
+-- The verdict is per-binding: a True here says only that THIS bound variable is
+-- recoverable from the observation. Whether the residual fresh latents of the
+-- body are also single-witnessable is the modality engine's marginalize floor's
+-- concern (milestone 2), not this query's.
+isWitnessedLambda :: FCData -> [ADTDecl] -> ChainName -> ChainName -> Bool
+isWitnessedLambda fcData adts obsCN lambdaCN = case inversionSetup fcData lambdaCN of
+  Just (_, toInvCNs, _) ->
+    let (unwrappedObsCN, _) = unwrapLambdas fcData obsCN
+        obsClause = ParameterHornClause unwrappedObsCN
+    in any (isJust . toValueExpr (hornClauses fcData) [obsClause] adts) toInvCNs
   Nothing -> False
 
 -- Takes the chainName of a function (May be a lambda, a variable, an Apply ...) and returns the inverse function of that lambda together with the derivative of the inverse

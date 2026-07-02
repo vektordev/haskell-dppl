@@ -16,7 +16,7 @@ import SPLL.Prelude
 import SPLL.Parser (tryParseProgram)
 import SPLL.Analysis (annotateEnumsProg)
 import SPLL.Typing.Infer (addTypeInfo)
-import SPLL.Typing.ForwardChaining (FCData, annotateProg, progToFCData, isInvertibleLambda)
+import SPLL.Typing.ForwardChaining (FCData, annotateProg, progToFCData, isInvertibleLambda, isWitnessedLambda)
 import qualified Data.Set as Set
 import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan)
 import qualified SPLL.AutoNeural as AutoNeural (getSize)
@@ -543,11 +543,87 @@ forwardChainingCertTests = testGroup "ForwardChaining certificate"
            (not (isInvertibleLambda fc (adts prog) (constNodeCN prog)))
   ]
 
+-- The lambda that binds @v@ — a let binding's handle (the parser rewrites
+-- @let v = e in b@ to @Apply (Lambda v b) e@).
+letLambdaCN :: String -> Program -> ChainName
+letLambdaCN v prog =
+  head [ chainName (getTypeInfo l) | l@(Lambda _ n _) <- allNodes prog, n == v ]
+
+declRootCN :: String -> Program -> ChainName
+declRootCN fname prog = case lookup fname (functions prog) of
+  Just e  -> chainName (getTypeInfo e)
+  Nothing -> error ("no function " ++ fname)
+
+-- | Witnessed-binding query (design modality-witnessed-inference, milestone 1).
+-- Same FC machinery as the certificate above, but the chaining is seeded at the
+-- DECLARATION'S observed result rather than the binding's own body. Pins the
+-- design's discriminating programs; the modality engine consumes this verdict in
+-- milestone 2. The residual-latent boundary (two fresh draws in one observed
+-- slot) is deliberately NOT this query's concern — the marginalize floor
+-- self-enforces it, so those cases assert only on the bound variable itself.
+witnessedBindingTests :: TestTree
+witnessedBindingTests = testGroup "ForwardChaining witnessed-binding query"
+  [ testCase "additive witness: x is recovered from the observed tuple" $
+      let (prog, fc) = prepTypedFC
+            "main = let x = Uniform in let y = x + Uniform in (x, y)"
+      in assertBool "x should be witnessed via fst"
+           (isWitnessedLambda fc (adts prog) (declRootCN "main" prog) (letLambdaCN "x" prog))
+  , testCase "multiplicative witness: x is recovered from the observed tuple" $
+      let (prog, fc) = prepTypedFC
+            "main = let x = Uniform in let y = x * Uniform in (x, y)"
+      in assertBool "x should be witnessed via fst"
+           (isWitnessedLambda fc (adts prog) (declRootCN "main" prog) (letLambdaCN "x" prog))
+  , testCase "y-only: x is NOT witnessed (genuine convolution)" $
+      -- The load-bearing discriminator (investigation
+      -- fc-recovers-capability-marginalize-floors): observing only y = x + u2
+      -- gives one equation for two fresh draws, so x must not be witnessed.
+      let (prog, fc) = prepTypedFC
+            "main = let x = Uniform in let y = x + Uniform in y"
+      in assertBool "x must not be witnessed from y alone"
+           (not (isWitnessedLambda fc (adts prog) (declRootCN "main" prog) (letLambdaCN "x" prog)))
+  , testCase "y-only: the y-binding itself IS witnessed (why x is the discriminator)" $
+      -- y equals the observation, so the y-binding is trivially recoverable in
+      -- both programs — consulting it cannot separate the witness from the
+      -- convolution. Pins why milestone 2 must key on the x-binding's verdict.
+      let (prog, fc) = prepTypedFC
+            "main = let x = Uniform in let y = x + Uniform in y"
+      in assertBool "y is the observed value itself"
+           (isWitnessedLambda fc (adts prog) (declRootCN "main" prog) (letLambdaCN "y" prog))
+  , testCase "two residual latents: x itself is still witnessed (floor guards the rest)" $
+      -- x is observed directly via fst, so THIS query answers True; keeping the
+      -- program at Bottom is the marginalize floor's job (u2 + u3 in one slot),
+      -- pinned in TestModalityInfer's permanent guards.
+      let (prog, fc) = prepTypedFC
+            "main = let x = Uniform in (x, x + Uniform + Uniform)"
+      in assertBool "x is observed directly"
+           (isWitnessedLambda fc (adts prog) (declRootCN "main" prog) (letLambdaCN "x" prog))
+  , testCase "let-chain: the observation reaches x through chained equivalences" $
+      -- Confirms the per-let verdict suffices for the let-chains-feeding-output
+      -- shape (milestone 1's open question): the observed tuple chains through
+      -- z and y back to x.
+      let (prog, fc) = prepTypedFC
+            "main = let x = Uniform in let y = x + Uniform in let z = 2.0 * y in (x, z)"
+      in assertBool "x should be witnessed through the chain"
+           (isWitnessedLambda fc (adts prog) (declRootCN "main" prog) (letLambdaCN "x" prog))
+  , testCase "let under a many-to-one context: witnessed says False where the certificate says True" $
+      -- The seeding difference that makes this query honest: the let's body
+      -- (x + 1.0) would recover x if it were observed, but the enclosing (> 0.5)
+      -- is many-to-one, so the declaration's observation witnesses nothing.
+      let (prog, fc) = prepTypedFC
+            "main = (let x = Uniform in x + 1.0) > 0.5"
+          lamCN = letLambdaCN "x" prog
+      in do assertBool "own-body certificate claims invertibility"
+              (isInvertibleLambda fc (adts prog) lamCN)
+            assertBool "observation-seeded query must not"
+              (not (isWitnessedLambda fc (adts prog) (declRootCN "main" prog) lamCN))
+  ]
+
 internalsTests :: TestTree
 internalsTests = testGroup "Internals"
   [ testProperties "properties" $(allProperties)
   , classConstraintTests
   , forwardChainingCertTests
+  , witnessedBindingTests
   , testGroup "encode"
       [ test_encodeTupleGaussianParams
       , test_encodeDiscreteSumsToOne
