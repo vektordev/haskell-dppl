@@ -79,7 +79,7 @@ envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb
             Just (toIntegDecl name (IRLambda "sample" (runCompile (meta typeEnv) (toIRInferenceSave (meta typeEnv) True binding (IRVar "sample")))))
           else Nothing,
           probFun =
-            if not noProb && (pt == Deterministic || pt == Integrate || pt == Prob || pt == PNormal || pt == PLogNormal) then
+            if not noProb && (pt == Deterministic || pt == Integrate || pt == PNormal || pt == PLogNormal) then
               let metaBase = meta typeEnv
                   body m = runCompile m (toIRInferenceSave m False binding (IRVar "sample"))
               in Just (toProbDecl name $ case topKThreshold conf of
@@ -651,7 +651,7 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample | pType (get
       setVariables [(retVal, IRApply lIR vIR)]
       return (IRTFst (IRVar retVal), IRTFst (IRTSnd (IRVar retVal)), IRTSnd (IRTSnd (IRVar retVal)))
 -- Probabilistic bound expression
-toIRInference meta cumulative (Apply TypeInfo{rType=_, chainName=_} l v) sample | isTArrow (rType (getTypeInfo v)) && (pType (getTypeInfo v) == Prob || pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal) = do
+toIRInference meta cumulative (Apply TypeInfo{rType=_, chainName=_} l v) sample | isTArrow (rType (getTypeInfo v)) && (pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal) = do
   lIR <- toIRGenerate meta l
   (vIR, _, _) <- toIRInference meta cumulative v sample
   applied <- mkVariable "call"
@@ -660,7 +660,7 @@ toIRInference meta cumulative (Apply TypeInfo{rType=_, chainName=_} l v) sample 
   where
     isTArrow (TArrow _ _) = True
     isTArrow _ = False
-toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample | pType (getTypeInfo v) == Prob || pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal = do
+toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample | pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal = do
   -- This is the probabilistic inference of a known, deterministic lambda with a probabilistic parameter
   -- The inference looks like this: p(l(v) == sample) = p(l^-1(sample) == v)
   -- The inverse can not be created using recursive descend, therefor we use forward chaining for the inverse only
@@ -1108,14 +1108,14 @@ createHOInverse meta (fVar, f) = do
 countProbParams :: [Expr] -> Int
 countProbParams es = length probParams
   where
-    probParams = filter (\p -> p == Prob || p == Integrate || p == PNormal || p == PLogNormal) pTypes
+    probParams = filter (\p -> p == Integrate || p == PNormal || p == PLogNormal) pTypes
     pt x = pType (getTypeInfo x)
     pTypes = map pt es
 
 getProbIndex :: HasCallStack => [Expr] -> Maybe Int
 --getProbIndex es | traceShow es False = undefined
 getProbIndex es =
-  case filter (\(p, _) -> p == Prob || p == Integrate || p == PNormal || p == PLogNormal) zipped of
+  case filter (\(p, _) -> p == Integrate || p == PNormal || p == PLogNormal) zipped of
     [(_, i)] -> Just i
     [] -> Nothing
     _ -> error "More than one probabilistic argument found"

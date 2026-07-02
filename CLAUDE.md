@@ -37,7 +37,7 @@ To prevent having to run `stack test` repeatedly, e.g. to grep for specific fail
 SPLL source (.spll/.ppl)
   → Parser.hs (megaparsec)
   → AST (Lang/Lang.hs, Lang/Types.hs)
-  → Type inference (Typing/RInfer.hs for return types, Typing/PInfer2.hs for probabilistic types)
+  → Type inference (Typing/RInfer.hs for return types, Typing/ModalityInfer.hs for probabilistic types)
   → IRCompiler.hs → IR (IntermediateRepresentation.hs)
      Three compilation branches: generate, probability, integrate
   → IROptimizer.hs (constant folding, CSE, let-in optimization, lambda→letIn refactoring)
@@ -50,7 +50,7 @@ Every SPLL program is compiled into three function variants:
 2. **Probability** — computes probability density/mass at a given point
 3. **Integrate** — integrates probability over a range
 
-The availability of each depends on that inference being tractable, as determined by PInfer2.
+The availability of each depends on that inference being tractable, as determined by ModalityInfer.
 
 Runtime execution: `IRInterpreter.hs` (`generateRand` for random sampling, `generateDet` for deterministic).
 
@@ -58,7 +58,7 @@ Runtime execution: `IRInterpreter.hs` (`generateRand` for random sampling, `gene
 
 - **Expr** (`src/SPLL/Lang/Types.hs`): Main AST — includes `IfThenElse`, `LetIn`, `Lambda`, `Apply`, `Uniform`, `Normal`, `ReadNN`, `InjF` (injected functions like plus/mult), `Cons`, `TCons`, etc.
 - **IRExpr** (`src/SPLL/IntermediateRepresentation.hs`): IR after compilation — `IRIf`, `IROp`, `IRLetIn`, `IRLambda`, `IRDensity`, `IRSample`, etc.
-- **TypeInfo**: Bundle of RType (return type: `TFloat`, `TBool`, `TInt`, `ListOf`, `Tuple`, etc.), PType (probabilistic: `Deterministic`, `PNormal`, `PLogNormal`, `Integrate`, `Prob`, `Bottom`), and CType (constraints).
+- **TypeInfo**: Bundle of RType (return type: `TFloat`, `TBool`, `TInt`, `ListOf`, `Tuple`, etc.), PType (probabilistic: `Deterministic`, `PNormal`, `PLogNormal`, `Integrate`, `Bottom`), and CType (constraints).
 - **Value**: Runtime values — `VFloat`, `VInt`, `VBool`, `VList`, `VTuple`, `VEither`, `VClosure`, `VThetaTree`, `VSymbol`, `VBranch`, `VADT`, `VAny` (VAny is used only for marginal queries).
 - **MultiValue**: Structured set of possible values for neural network output annotation — `MultiDiscretes [Value]`, `MultiTuple MultiValue MultiValue`, `MultiEither MultiValue MultiValue`, `MultiADT [(String, [MultiValue])]`, `MultiTypeRef String`.
 - **CompilerConfig**: Controls verbosity, optimization level, top-K threshold, branch counting, plus flags `pruneAnyChecks`, `noIntegrate`, `noProbability`, `noGenerate`.
@@ -70,7 +70,7 @@ Every AST node carries a `TypeInfo` record that accumulates annotations from suc
 ```haskell
 data TypeInfo = TypeInfo {
   rType            :: RType,           -- value structure (filled by RInfer, standard type annotations.)
-  pType            :: PType,           -- probabilistic semantics (filled by PInfer2)
+  pType            :: PType,           -- probabilistic semantics (filled by ModalityInfer)
   chainName        :: ChainName,
   tags             :: [Tag]            -- enum ranges + chosen algorithm (filled by Analysis)
 }
@@ -79,9 +79,9 @@ data TypeInfo = TypeInfo {
 `PType` classifies how uncertainty flows through a node, forming a partial order:
 
 ```
-Deterministic  >  PNormal, PLogNormal  >  Integrate  >  Prob  >  Bottom
+Deterministic  >  PNormal, PLogNormal  >  Integrate  >  Bottom
 ```
-`PNormal` and `PLogNormal` are incomparable siblings (different distribution families); their meet is `Integrate`. Deterministic values are not affected by randomness and need no inference. `PNormal`/`PLogNormal` allow closed-form Gaussian inference shortcuts. Integrate values have a known CDF. Prob values have a known PDF. Bottom values can only be sampled from, not inferred. Each PType implies that the semantics of lower types are available.
+`PNormal` and `PLogNormal` are incomparable siblings (different distribution families); their meet is `Integrate`. Deterministic values are not affected by randomness and need no inference. `PNormal`/`PLogNormal` allow closed-form Gaussian inference shortcuts. Integrate values have a known CDF (evaluable via trusted special functions, e.g. `erf` — not necessarily closed-form). Bottom values can only be sampled from, not inferred. Each PType implies that the semantics of lower types are available. (There is deliberately no dens-only rung between `Integrate` and `Bottom`: a density whose CDF would need in-house quadrature is excluded by the language; the internal capability engine in `SPLL.Typing.Modality` still distinguishes that state and projects it to `Bottom`.)
 
 ## Additional Features
 
