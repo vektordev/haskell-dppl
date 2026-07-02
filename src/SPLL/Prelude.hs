@@ -82,7 +82,7 @@ import SPLL.IRCompiler
 import SPLL.IROptimizer (optimizeEnv)
 import Debug.Trace
 import Data.Either
-import SPLL.Typing.ForwardChaining (annotateProg, progToFCData)
+import SPLL.Typing.ForwardChaining (annotateProg)
 import SPLL.Typing.Determinism (knownAnchors)
 import qualified Data.Set as Set
 import Text.PrettyPrint.Annotated.HughesPJClass()
@@ -306,18 +306,17 @@ compile conf p = do
   printIfMoreVerbose conf ("\n=== Determinism (known anchors) ===\n"
                             ++ unwords (Set.toList anchors))
 
-  typed <- addTypeInfo forwardChained
+  -- Stage 2 of the modality pipeline (modality-split-forwardchaining): the
+  -- ForwardChaining certificate is built ONCE, inside addTypeInfo — between
+  -- RInfer (it reads rType for function arrows) and the modality pass, which
+  -- consults its witnessed-binding verdict for the let rule
+  -- (modality-witnessed-inference, milestone 2). The same FCData is returned
+  -- here and threaded to both remaining consumers (conditional annotation and
+  -- IR codegen).
+  (typed, fcData) <- addTypeInfo forwardChained
   printIfMoreVerbose conf "\n=== Typed Program ==="
   pPrintIfMoreVerbose conf typed
   printStage conf "After Type Inference (RType + PType)" typed
-
-  -- Stage 2 of the modality pipeline (modality-split-forwardchaining): build the
-  -- ForwardChaining certificate ONCE, seeded with the determinism field's known
-  -- anchors, and thread the same FCData to both consumers (conditional annotation
-  -- and IR codegen). Formerly progToFCData was built twice (in Analysis and in
-  -- IRCompiler). Built here after RInfer because the certificate reads rType
-  -- (function arrows) but no pType, which keeps it independent of modality.
-  let fcData = progToFCData anchors typed
 
   let annotated = annotateConditionalProg fcData typed
   printIfMoreVerbose conf "\n=== Annotated Program (2) ==="

@@ -103,13 +103,18 @@ inversionSetup fcData lambdaCN = do
     -- If the lambda is applied multiple times, @tag@ uniquely identifies our
     -- application; it suffixes both the occurrences and the observed body.
     LambdaInfo toInvVarName lambdaBodyCN ->
-      let toInvCNs = map (++ tag) (findChainNamesForVar fcData toInvVarName)
-          -- If the function being inverted is itself a function, strip the
-          -- additional lambdas; those are re-added by the caller around the
-          -- whole inference function (the inverse is only a part of it).
-          (unwrappedChainName, _) = unwrapLambdas fcData lambdaBodyCN
-          paramClause = ParameterHornClause (unwrappedChainName ++ tag)
-      in Just (toInvVarName, toInvCNs, paramClause)
+      case findChainNamesForVar fcData toInvVarName of
+        -- A dead binding (no occurrence of the bound variable) has nothing to
+        -- invert through: not an invertible/witnessable lambda.
+        []   -> Nothing
+        occs ->
+          let toInvCNs = map (++ tag) occs
+              -- If the function being inverted is itself a function, strip the
+              -- additional lambdas; those are re-added by the caller around the
+              -- whole inference function (the inverse is only a part of it).
+              (unwrappedChainName, _) = unwrapLambdas fcData lambdaBodyCN
+              paramClause = ParameterHornClause (unwrappedChainName ++ tag)
+          in Just (toInvVarName, toInvCNs, paramClause)
     _ -> Nothing
 
 -- | Invertibility certificate (modality stage 2): is the variable bound by the
@@ -215,10 +220,10 @@ findEquivalentExpression fcData startCN = go [startCN] startCN
     isFinalExpr (VarInfo _) = False
     isFinalExpr _ = True
 
+-- Empty for a variable with no occurrences (a dead binding) — the caller
+-- decides; 'inversionSetup' answers Nothing there.
 findChainNamesForVar :: FCData -> String -> [ChainName]
-findChainNamesForVar fcData varName = case correctVarInfos of
-  [] -> error $ "Could not find variable " ++ varName ++ " in FC data"
-  x -> map fst x
+findChainNamesForVar fcData varName = map fst correctVarInfos
   where
     correctVarInfos = filter (isCorrectVarInfo varName . snd) (chainNameInfo fcData)
     isCorrectVarInfo name (VarInfo n) | name == n = True

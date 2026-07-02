@@ -47,6 +47,7 @@ import SPLL.Typing.Typing (setPType)
 import SPLL.Typing.PType (PType(..))
 import SPLL.Typing.RType (RType(..))
 import SPLL.Typing.Modality
+import SPLL.Typing.ForwardChaining (FCData, isWitnessedLambda)
 import PredefinedFunctions (isFieldConstructor)
 
 -- ---------------------------------------------------------------------------
@@ -63,6 +64,25 @@ data IMod
   | IArr GroundMod (IMod -> IMod)
   | ISum GroundMod IMod IMod
   | IRec GroundMod IMod
+  | IWit IMod
+    -- ^ Witnessed value (design @modality-witnessed-inference@, milestone 2): a
+    -- value that is a /deterministic function of the observation/ — an
+    -- FC-witnessed let binding, or a deterministic image of one. The payload is
+    -- its /standalone/ law (family and all): projection reads the standalone law
+    -- unchanged (witnessing never lifts a value's own modality), while
+    -- combinations ('injFMod's floor) treat the operand as Exact — recovering it
+    -- from the observation is free, so it does not pay a marginalization. The
+    -- once-counting ledger is positional: a witnessed value's density is counted
+    -- exactly once, at its own standalone slot, never as a combination cost.
+
+-- | Wrap as witnessed (idempotent).
+iwit :: IMod -> IMod
+iwit m@(IWit _) = m
+iwit m          = IWit m
+
+isWitI :: IMod -> Bool
+isWitI (IWit _) = True
+isWitI _        = False
 
 -- | The value-level ground summary of any 'IMod' (mirrors 'outerGround').
 --
@@ -77,6 +97,7 @@ outerI (IArr rho _)= rho
 outerI (IProd a b) = (meetGround (outerI a) (outerI b))            { gFam = FamNone }
 outerI (ISum t a b)= (meetGround t (meetGround (outerI a) (outerI b))) { gFam = FamNone }
 outerI (IRec s e)  = (meetGround s (outerI e))                    { gFam = FamNone }
+outerI (IWit m)    = outerI m   -- witnessing never lifts the standalone law
 
 -- | Project an 'IMod' onto the flat 'PType' (the per-node annotation).
 projectI :: IMod -> PType
@@ -91,6 +112,7 @@ projectI = projectGround . outerI
 -- @distr x = 2*Uniform+x@ must read 'Integrate'. Non-function nodes project
 -- losslessly through 'projectI'.
 projectNode :: RType -> IMod -> PType
+projectNode t            (IWit m)     = projectNode t m
 projectNode (TArrow a b) (IArr _ phi) = projectNode b (phi (repIMod a))
 projectNode _            m            = projectI m
 
@@ -110,12 +132,16 @@ applyOuterI rho (IProd a b) = IProd (applyOuterI rho a) (applyOuterI rho b)
 applyOuterI rho (IArr r p)  = IArr (marginalize rho r) p
 applyOuterI rho (ISum t a b)= ISum (marginalize rho t) (applyOuterI rho a) (applyOuterI rho b)
 applyOuterI rho (IRec s e)  = IRec (marginalize rho s) (applyOuterI rho e)
+-- Marginalising a genuinely random outer law into a witnessed value mixes it:
+-- the result is no longer a deterministic function of the observation.
+applyOuterI rho (IWit m)    = applyOuterI rho m
 
 -- | The application rule @Mod(f e) = rho ▷ phi(e)@. For a syntactic function the
 -- transfer is the body closure (β-reduction). A non-function head is applied
 -- opaquely through its outer ground (a safe, never-failing fallback for the
 -- ill-typed / unknown-head case).
 applyI :: IMod -> IMod -> IMod
+applyI (IWit f)       arg = applyI f arg   -- a witnessed function is still that function
 applyI (IArr rho phi) arg = applyOuterI rho (phi arg)
 applyI other          arg = applyOuterI (outerI other) arg
 
@@ -126,6 +152,9 @@ applyI other          arg = applyOuterI (outerI other) arg
 -- optimism" unsoundness — design §9 — which would type a continuous mixture as
 -- 'Deterministic'.) The shape-mismatch fallback meets the outer grounds.
 meetI :: IMod -> IMod -> IMod
+meetI (IWit a)     (IWit b)      = iwit (meetI a b)   -- both alternatives witnessed
+meetI (IWit a)     b             = meetI a b
+meetI a            (IWit b)      = meetI a b
 meetI (IG a)       (IG b)        = IG (meetGround a b)
 meetI (IProd a1 a2)(IProd b1 b2) = IProd (meetI a1 b1) (meetI a2 b2)
 meetI (IArr r1 p1) (IArr r2 p2)  = IArr (meetGround r1 r2) (\m -> meetI (p1 m) (p2 m))
@@ -161,6 +190,8 @@ repIMod _             = IG topGround
 -- | Subtyping over 'IMod' (transfers compared pointwise over the finite ground
 -- input lattice). The convergence test for the fixpoint.
 subI :: IMod -> IMod -> Bool
+subI (IWit a)     b             = subI a b   -- the flag is bookkeeping, capability-equal
+subI a            (IWit b)      = subI a b
 subI (IG a)       (IG b)        = leqGround a b
 subI (IProd a1 a2)(IProd b1 b2) = subI a1 b1 && subI a2 b2
 subI (IArr r1 p1) (IArr r2 p2)  =
@@ -180,6 +211,7 @@ toMod (IProd a b) = MProd (toMod a) (toMod b)
 toMod (IArr rho p)= MArr rho (mkTransfer (\g -> toMod (p (IG g))))
 toMod (ISum t a b)= MSum t (toMod a) (toMod b)
 toMod (IRec s e)  = MRec s (toMod e)
+toMod (IWit m)    = toMod m   -- the serialisable form carries only the standalone law
 
 -- ---------------------------------------------------------------------------
 -- Ground leaves
@@ -197,8 +229,9 @@ tagFin ti g
   | otherwise                       = g
 
 tagFinMod :: TypeInfo -> IMod -> IMod
-tagFinMod ti (IG g) = IG (tagFin ti g)
-tagFinMod _  m      = m
+tagFinMod ti (IG g)   = IG (tagFin ti g)
+tagFinMod ti (IWit m) = IWit (tagFinMod ti m)
+tagFinMod _  m        = m
 
 -- | A scalar distribution family ('FamNormal'/'FamLogNormal') only attaches to a
 -- bare 'TFloat' value. A field constructor that builds a container/sum (e.g.
@@ -208,9 +241,10 @@ tagFinMod _  m      = m
 -- through unchanged — is the one this catches that 'outerI' alone cannot, since
 -- no 'IProd'/'ISum' wrapper marks it as a container.
 gateScalarFamily :: RType -> IMod -> IMod
-gateScalarFamily TFloat m      = m
-gateScalarFamily _      (IG g) = IG g { gFam = FamNone }
-gateScalarFamily _      m      = m
+gateScalarFamily TFloat m        = m
+gateScalarFamily t      (IWit m) = IWit (gateScalarFamily t m)
+gateScalarFamily _      (IG g)   = IG g { gFam = FamNone }
+gateScalarFamily _      m        = m
 
 gExact, gIntegrate, gNormal, gLogNormal :: GroundMod
 gExact     = topGround                                 -- Deterministic
@@ -236,13 +270,23 @@ type Env = Map String IMod
 -- (design §6). Keyed by chain name (every node has one after @annotateProg@).
 type GAcc = [(ChainName, GroundMod)]
 
+-- | The per-declaration inference context: the ADT declarations, the
+-- forward-chaining certificate, and the chain name of the declaration root —
+-- the /observed/ node the witnessed-binding query is seeded at (design
+-- @modality-witnessed-inference@, milestone 2).
+data ICtx = ICtx
+  { icADTs :: [ADTDecl]
+  , icFC   :: FCData
+  , icObs  :: ChainName
+  }
+
 cnOf :: Expr -> ChainName
 cnOf = chainName . getTypeInfo
 
 -- | Infer the modality of an expression, returning the modality, the
 -- pType-annotated expression, and the per-node outer-ground accumulation.
-inferE :: [ADTDecl] -> Env -> Expr -> (IMod, Expr, GAcc)
-inferE adts env expr = case expr of
+inferE :: ICtx -> Env -> Expr -> (IMod, Expr, GAcc)
+inferE ctx env expr = case expr of
 
   -- The theta-tree source of ThetaI/Subtree is left untouched (PInfer2 does not
   -- annotate it either); only this node's own modality is recorded.
@@ -260,7 +304,7 @@ inferE adts env expr = case expr of
     in done m (Var (setPType ti (projectNode (rType ti) m)) name) []
 
   ReadNN ti name s ->
-    let (_, s', sa) = inferE adts env s
+    let (_, s', sa) = inferE ctx env s
         g = tagFin ti (if rType ti == TFloat then gNormal else gIntegrate)
     in done (IG g) (ReadNN (setPType ti (projectGround g)) name s') sa
 
@@ -268,24 +312,24 @@ inferE adts env expr = case expr of
   LessThan    ti a b -> compareNode ti LessThan a b
 
   InjF ti name@(Named fname) args ->
-    let rs   = map (inferE adts env) args
+    let rs   = map (inferE ctx env) args
         mods = [ m  | (m,_,_) <- rs ]
         es'  = [ e  | (_,e,_) <- rs ]
         acc  = concat [ a | (_,_,a) <- rs ]
-        m    = gateScalarFamily (rType ti) (tagFinMod ti (injFMod adts fname mods))
+        m    = gateScalarFamily (rType ti) (tagFinMod ti (injFMod (icADTs ctx) fname mods))
     in done m (InjF (setPType ti (projectI m)) name es') acc
 
   IfThenElse ti c t f ->
-    let (mc, c', ca) = inferE adts env c
-        (mt, t', ta) = inferE adts env t
-        (mf, f', fa) = inferE adts env f
+    let (mc, c', ca) = inferE ctx env c
+        (mt, t', ta) = inferE ctx env t
+        (mf, f', fa) = inferE ctx env f
         m = applyOuterI (outerI mc) (meetI mt mf)
     in done m (IfThenElse (setPType ti (projectI m)) c' t' f') (ca ++ ta ++ fa)
 
   Lambda ti x body ->
     let argTy = case rType ti of TArrow a _ -> a; _ -> TFloat
-        arr   = IArr gExact (\m -> let (im,_,_) = inferE adts (Map.insert x m env) body in im)
-        (bodyRepMod, body', ba) = inferE adts (Map.insert x (repIMod argTy) env) body
+        arr   = IArr gExact (\m -> let (im,_,_) = inferE ctx (Map.insert x m env) body in im)
+        (bodyRepMod, body', ba) = inferE ctx (Map.insert x (repIMod argTy) env) body
     -- The internal modality is the closure 'arr' (so application β-reduces), but
     -- the flat annotation @IRCompiler@ reads is the /body's/ pType, not the outer
     -- closure 'Deterministic' — IRCompiler selects prob/integrate codegen from the
@@ -294,12 +338,22 @@ inferE adts env expr = case expr of
     in done arr (Lambda (setPType ti (projectI bodyRepMod)) x body') ba
 
   Apply ti f arg ->
-    let (argMod, arg', aa) = inferE adts env arg
+    let (argMod, arg', aa) = inferE ctx env arg
     in case f of
          -- A directly-applied lambda is a @let@: bind the parameter to the
          -- argument's actual modality (β-reduction with the precise value).
+         -- Milestone 2 of @modality-witnessed-inference@: when the binding is
+         -- random AND forward chaining certifies the bound variable recoverable
+         -- from the declaration's observed result, bind it /witnessed/ — the
+         -- body then sees it as Exact-for-marginalization (free, family
+         -- preserved) while its standalone law (and density, counted once at its
+         -- own slot) is untouched. The capability gate (@gCap /= Exact@) skips
+         -- the FC query for deterministic and function-valued bindings.
          Lambda lti x body ->
-           let (bodyMod, body', ba) = inferE adts (Map.insert x argMod env) body
+           let witnessed = gCap (outerI argMod) /= Exact
+                        && isWitnessedLambda (icFC ctx) (icADTs ctx) (icObs ctx) (chainName lti)
+               boundMod = if witnessed then iwit argMod else argMod
+               (bodyMod, body', ba) = inferE ctx (Map.insert x boundMod env) body
                -- The applied lambda node carries the body's pType (its result),
                -- matching @PInfer2@ and what @IRCompiler@ reads, not the outer
                -- closure 'Deterministic'.
@@ -307,7 +361,7 @@ inferE adts env expr = case expr of
            in done bodyMod (Apply (setPType ti (projectNode (rType ti) bodyMod)) f' arg')
                    (laccLambda lti ++ ba ++ aa)
          _ ->
-           let (fMod, f', fa) = inferE adts env f
+           let (fMod, f', fa) = inferE ctx env f
                m = applyI fMod argMod
            in done m (Apply (setPType ti (projectNode (rType ti) m)) f' arg') (fa ++ aa)
 
@@ -317,8 +371,8 @@ inferE adts env expr = case expr of
     laccLambda lti = [(chainName lti, gExact)]
 
     compareNode ti ctor a b =
-      let (ma, a', aacc) = inferE adts env a
-          (mb, b', bacc) = inferE adts env b
+      let (ma, a', aacc) = inferE ctx env a
+          (mb, b', bacc) = inferE ctx env b
           g = tagFin ti (compareGround (outerI ma) (outerI mb))
       in done (IG g) (ctor (setPType ti (projectGround g)) a' b') (aacc ++ bacc)
 
@@ -345,21 +399,61 @@ compareGround a b
 --   4. everything else marginalises its operands (the generic combination
 --      floor); a unary invertible map is the singleton case and passes its
 --      operand through, family intact.
+--
+-- Witnessed operands (milestone 2 of @modality-witnessed-inference@) change the
+-- floor's per-operand treatment — see 'floorCombine'. A closure/floor result is
+-- itself witnessed exactly when it is a deterministic function of a /single/
+-- witnessed operand (everything else Dirac): the once-counting ledger stays
+-- positional (that one latent's density is the result's standalone law, counted
+-- once). Two or more distinct witnessed operands are deliberately NOT re-marked
+-- (their combination would need latent identity to dedup the ledger), and any
+-- fresh latent in the combination un-marks the result — that is what keeps the
+-- two-residual guard at 'Bottom'.
 injFMod :: [ADTDecl] -> String -> [IMod] -> IMod
 injFMod adts name mods =
   case tryNormalClosure name (map projectI mods) of
-    Just pt -> IG (fromClosurePType pt)
+    Just pt -> witWrap (IG (fromClosurePType pt))
     Nothing
       | isFieldConstructor adts name, (m0:rest) <- mods -> foldl IProd m0 rest
       | name == "fst", [m] <- mods -> projFst m
       | name == "snd", [m] <- mods -> projSnd m
-      | otherwise -> case map outerI mods of
-          []     -> IG gExact
-          (g:gs) -> IG (foldl marginalize g gs)
-  where projFst (IProd a _) = a
+      | otherwise -> floorCombine
+  where projFst (IWit m)    = iwit (projFst m)   -- a witnessed pair's field is witnessed
+        projFst (IProd a _) = a
         projFst m           = m
+        projSnd (IWit m)    = iwit (projSnd m)
         projSnd (IProd _ b) = b
         projSnd m           = m
+
+        entries = [ (isWitI m, outerI m) | m <- mods ]
+        -- witnessed random operands / fresh (unwitnessed) random operands
+        wits    = [ g | (True,  g) <- entries, gCap g /= Exact ]
+        fresh   = [ g | (False, g) <- entries, gCap g /= Exact ]
+        singleWitnessed = length wits == 1 && null fresh
+        witWrap m | singleWitnessed = iwit m
+                  | otherwise       = m
+
+        -- The generic combination floor, witnessed-aware:
+        --   * no witnessed operand: the plain marginalize fold (unchanged);
+        --   * one witnessed operand, rest Dirac: a deterministic image of the
+        --     witnessed latent — the standalone law passes through the plain
+        --     fold (Diracs are free) and the result stays witnessed;
+        --   * witnessed + fresh: recovering the witnessed side from the
+        --     observation is free, so it enters the fold as Exact; only the
+        --     fresh residual pays. One fresh latent survives with its density
+        --     (the u2-recovery case); two fresh latents still floor to {S,I}.
+        --   * ≥2 witnessed, no fresh: conservative plain fold, not witnessed
+        --     (no latent identity to dedup the density ledger).
+        floorCombine
+          | null wits       = plainFold (map snd entries)
+          | singleWitnessed = iwit (plainFold (map snd entries))
+          | not (null fresh) =
+              plainFold [ if w && gCap g /= Exact then topGround else g
+                        | (w, g) <- entries ]
+          | otherwise       = plainFold (map snd entries)
+
+        plainFold []     = IG gExact
+        plainFold (g:gs) = IG (foldl marginalize g gs)
 
 -- ---------------------------------------------------------------------------
 -- tryNormalClosure (ported verbatim from PInfer2 — the family precision layer)
@@ -395,37 +489,41 @@ tryNormalClosure _      _                           = Nothing
 -- value in one step regardless of the seed. (Pure non-terminating recursion would
 -- sit at the top — the totality axis, design §10, is the principled handle and is
 -- deferred.)
-summaries :: [ADTDecl] -> [FnDecl] -> Env
-summaries adts decls = go initial (50 :: Int)
+summaries :: [ADTDecl] -> FCData -> [FnDecl] -> Env
+summaries adts fcData decls = go initial (50 :: Int)
   where
     initial = Map.fromList [ (n, topI (rType (getTypeInfo b))) | (n, b) <- decls ]
-    step env = Map.fromList [ (n, fst3 (inferE adts env b)) | (n, b) <- decls ]
+    step env = Map.fromList [ (n, fst3 (inferE (declCtx b) env b)) | (n, b) <- decls ]
     go env 0 = env
     go env k = let env' = step env
                in if converged env env' then env' else go env' (k - 1)
     converged a b = and [ eqI (a Map.! n) (b Map.! n) | (n, _) <- decls ]
     fst3 (x,_,_) = x
+    declCtx b = ICtx adts fcData (cnOf b)
 
 -- ---------------------------------------------------------------------------
 -- Public entry points
 -- ---------------------------------------------------------------------------
 
 -- | Annotate every node with its projected flat 'PType' (the replacement for
--- @PInfer2.addPTypeInfo@). Assumes RType inference has already run.
-addModalityPTypeInfo :: Program -> Either CompilerError Program
-addModalityPTypeInfo prog = Right (fst (inferProgram prog))
+-- @PInfer2.addPTypeInfo@). Assumes RType inference has already run, and takes
+-- the forward-chaining certificate (built between RInfer and this pass —
+-- @progToFCData@ reads rType but no pType) whose witnessed-binding verdict the
+-- let rule consults ('SPLL.Typing.Infer.addTypeInfo' does the sequencing).
+addModalityPTypeInfo :: FCData -> Program -> Either CompilerError Program
+addModalityPTypeInfo fcData prog = Right (fst (inferProgram fcData prog))
 
 -- | The annotated program plus the per-node outer-ground list (for the diff
 -- harness's partial-set invariant check).
-inferProgram :: Program -> (Program, [(ChainName, GroundMod)])
-inferProgram (Program decls nns adtDecls enc) =
+inferProgram :: FCData -> Program -> (Program, [(ChainName, GroundMod)])
+inferProgram fcData (Program decls nns adtDecls enc) =
   (Program decls' nns adtDecls enc, concat accs)
   where
-    env = summaries adtDecls decls
-    results = [ (n, inferE adtDecls env b) | (n, b) <- decls ]
+    env = summaries adtDecls fcData decls
+    results = [ (n, inferE (ICtx adtDecls fcData (cnOf b)) env b) | (n, b) <- decls ]
     decls'  = [ (n, e) | (n, (_, e, _)) <- results ]
     accs    = [ a | (_, (_, _, a)) <- results ]
 
 -- | The per-node outer 'GroundMod', keyed by chain name (diff harness §6).
-perNodeOuterGrounds :: Program -> [(ChainName, GroundMod)]
-perNodeOuterGrounds = snd . inferProgram
+perNodeOuterGrounds :: FCData -> Program -> [(ChainName, GroundMod)]
+perNodeOuterGrounds fcData = snd . inferProgram fcData

@@ -505,7 +505,10 @@ return []
 prepTypedFC :: String -> (Program, FCData)
 prepTypedFC src =
   let p0    = annotateProg (annotateEnumsProg (parse src))
-      typed = either (\e -> error ("type inference failed: " ++ show e)) id (addTypeInfo p0)
+      -- addTypeInfo returns its own (knownAnchors-seeded) certificate since
+      -- witnessed-inference milestone 2; these tests keep building the
+      -- anchor-free one so the certificate queries are pinned in isolation.
+      typed = either (\e -> error ("type inference failed: " ++ show e)) fst (addTypeInfo p0)
   in (typed, progToFCData Set.empty typed)
   where
     parse s = either (\e -> error ("parse failed: " ++ show e)) id (tryParseProgram "test" s)

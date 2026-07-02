@@ -20,19 +20,21 @@ import SPLL.Typing.PType (PType(..))
 import SPLL.Parser (tryParseProgram)
 import SPLL.Analysis (annotateEnumsProg)
 import SPLL.Typing.ForwardChaining (annotateProg)
-import SPLL.Typing.RInfer (addRTypeInfo)
-import SPLL.Typing.ModalityInfer (addModalityPTypeInfo)
+import SPLL.Typing.Infer (addTypeInfo)
 
 -- | Run the modality pipeline on a source string and return the typed program.
+-- Goes through 'addTypeInfo' (RInfer → FC certificate → ModalityInfer) so the
+-- engine sees the same witnessed-binding verdicts as the production pipeline
+-- (witnessed-inference milestone 2).
 typeProg :: String -> Program
 typeProg src =
   case tryParseProgram "<test>" src of
     Left e  -> error ("parse error: " ++ show e)
     Right p ->
       let pre = annotateProg (annotateEnumsProg p)
-      in case addRTypeInfo pre >>= addModalityPTypeInfo of
+      in case addTypeInfo pre of
            Left e2 -> error ("typing error: " ++ show e2)
-           Right p2 -> p2
+           Right (p2, _) -> p2
 
 -- | The 'PType' on the root node of the named top-level function.
 rootPTypeOf :: String -> String -> PType
@@ -218,32 +220,46 @@ modalityInferTests = testGroup "ModalityInfer"
                       \main = x (P (Normal + 1.0) Uniform)"
       ]
 
-  -- Characterization of the cross-latent invertible-recovery gap. Pins CURRENT
-  -- behaviour as a KNOWN LIMITATION, not an endorsement. These assertions are
-  -- EXPECTED TO FLIP to 'Integrate' when [[modality-witnessed-inference]] lands.
+  -- Witnessed inference, milestone 2 (design @modality-witnessed-inference@):
+  -- the engine consults FC's observation-seeded witnessed-binding verdict
+  -- ('isWitnessedLambda') for every random let binding. A witnessed binding is
+  -- Exact FOR MARGINALIZATION in the body (recovering it from the observation is
+  -- free) while its standalone law — family, density, counted once at its own
+  -- slot — is untouched. These cases were the milestone-1 characterization group
+  -- (pinned 'Bottom' as a known limitation); they flipped to the recovered
+  -- capability when the type-level rule landed.
   --
-  -- Task @modality-fc-capability-regression-test@; investigation
-  -- @fc-recovers-capability-marginalize-floors@ (resolved). The witness shares one
-  -- latent @x@ across two observed tuple slots: @x@ is recovered from @fst@, then
-  -- @u2 = y - x@ from @snd@, so the joint @p(x)·p(y-x)@ is fully recoverable by
-  -- forward chaining — DESIRED capability is 'Integrate' (full density). The engine
-  -- does NOT wire FC's witnessing verdict, so the @marginalize@ floor types
-  -- @x + Uniform@ as {S,I} → 'Bottom' and the tuple meets to 'Bottom' (sample
-  -- only). The deeper finding (see design @modality-witnessed-inference@): even
-  -- lifting the type alone would not suffice — the IRCompiler has never had the
-  -- shared-latent once-counting capability, so a type-only lift would emit a
-  -- silently-wrong joint density. The fix is the scoped witnessed-inference feature.
-  , testGroup "cross-latent invertible recovery (KNOWN LIMITATION: flips when FC witnessing is wired)"
-      [ testCase "witness (additive): shared-latent tuple is Bottom today (desired: Integrate)" $
-          assertEqual "" Bottom $
+  -- CAVEAT until milestone 3: the IRCompiler's let handler cannot yet emit the
+  -- conditional-probability fold @p_D(x*)·|J|·p(body|x=x*)@, so COMPILING these
+  -- shapes in probability mode produces wrong densities — the lifted type is
+  -- ahead of codegen on this branch. Milestone 4 adds the end-to-end
+  -- @testCases/@ pinning once the fold exists.
+  , testGroup "witnessed inference (M2): FC-witnessed bindings lift the marginalize floor"
+      [ testCase "witness (additive): shared-latent tuple recovers Integrate" $
+          -- x recovered from fst, then u2 = y - x from snd (Jacobian 1): the
+          -- joint p(x)·p(y-x) is a full density, dim 2.
+          assertEqual "" Integrate $
             mainPType "main = let x = Uniform in let y = x + Uniform in (x, y)"
-      , testCase "witness (multiplicative): shared-latent tuple is Bottom today (desired: Integrate)" $
-          -- Same recoverable shape with @mult@: @x@ observed via @fst@, then
-          -- @u2 = y / x@ recovered via @snd@ (Jacobian 1/|x|). Documented here, NOT
-          -- among the permanent guards below, because it is a desired-recovery case
-          -- — the gap is not specific to @plus@.
-          assertEqual "" Bottom $
+      , testCase "witness (multiplicative): shared-latent tuple recovers Integrate" $
+          -- Same shape with @mult@: u2 = y / x (Jacobian 1/|x|) — the recovery
+          -- is not specific to @plus@.
+          assertEqual "" Integrate $
             mainPType "main = let x = Uniform in let y = x * Uniform in (x, y)"
+      , testCase "direct witness without the intermediate let" $
+          -- The same recovery with the combination inline in the observed slot.
+          assertEqual "" Integrate $
+            mainPType "main = let x = Uniform in (x, x + Uniform)"
+      , testCase "family preservation: let x = Normal in x stays PNormal" $
+          -- The once-counting rule binds x witnessed WITHOUT erasing its
+          -- standalone law — the naive Exact binding would regress this to
+          -- Deterministic (or, via meet with the rhs, to Integrate).
+          assertEqual "" PNormal $
+            mainPType "main = let x = Normal in x"
+      , testCase "family survives a witnessed affine combination" $
+          -- x + 1.0 is a deterministic image of the witnessed x: still
+          -- witnessed downstream, and tryNormalClosure keeps the family.
+          assertEqual "" PNormal $
+            mainPType "main = let x = Normal in x + 1.0"
       ]
 
   -- Permanent soundness guards. Unlike the characterization group above, these MUST
