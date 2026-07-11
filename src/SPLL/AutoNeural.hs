@@ -254,14 +254,16 @@ makeGenRec adts (Discretes rty (MultiDiscretes vals)) ix = lottery (map valueToI
 makeGenRec adts Continuous ix = IROp OpPlus
   (IROp OpMult (IRSample IRNormal) (IRIndex (IRVar vector) (IRConst (VInt $ ix + 1))))
   (IRIndex (IRVar vector) (IRConst (VInt ix)))
-makeGenRec adts (ADTPlan adtName plans) ix = constructorLottery adts plans ix (ix + length (constructors adt))
-  where
-    Just adt = find ((== adtName) . dataName) adts
+-- Flags occupy one slot per constructor *present in the plan* (length plans), then the
+-- fields follow -- matching getSize and makeProbRec.  A depth-limited recursive ADT prunes
+-- constructors at its deepest level, so `length plans` can be smaller than the full
+-- `constructors adt`; the value region must start right after the flags that actually exist.
+makeGenRec adts (ADTPlan _ plans) ix = constructorLottery adts plans ix (ix + length plans)
 
 makeGenADTConstr :: [ADTDecl] -> [PartitionPlan] -> String -> Int -> IRExpr
 makeGenADTConstr adts plans name ix = foldl IRApply (IRVar name) gens
   where
-    ixForField = scanl (+) 0 (map (getSize) plans) -- Comulative sums over number of fields
+    ixForField = scanl (+) ix (map (getSize) plans) -- Cumulative field offsets from this constructor's base index
     gens = map (uncurry (makeGenRec adts)) (zip plans ixForField)
 
 totalWeight :: Int -> Int -> IRExpr
@@ -496,8 +498,7 @@ validateEncodeGaussian adts registry neuralDecls env = mapM_ checkDecl decoderDe
     encodeGaussianError name =
       "encode: neural declaration '" ++ name ++ "' has a continuous output that is not "
       ++ "Gaussian (PNormal/PLogNormal) — e.g. a mixture produced by `if`, or a product of "
-      ++ "random variables. A non-Gaussian continuous slot cannot be encoded; insert an "
-      ++ "explicit `collapse` at the offending node (see task encode-07)."
+      ++ "random variables. A non-Gaussian continuous slot cannot be encoded."
 
 -- | Normal-parameter function names that `encode` references for the Continuous slots of a
 -- plan.  Mirrors the name threading in `makeEncodeTopLevelW` (top-level `main_normal`,
