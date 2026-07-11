@@ -413,7 +413,7 @@ test_autoDeriveTuple = testCase "autoDeriveTuple" $
     (autoDeriveMultiValue [] (Tuple TBool TFloat))
 
 colorADT :: ADTDecl
-colorADT = ADTDecl "Color" [("Red", []), ("Green", []), ("Blue", [])]
+colorADT = ADTDecl "Color" [("Red", []), ("Green", []), ("Blue", [])] Nothing
 
 test_autoDeriveNonRecursiveADT :: TestTree
 test_autoDeriveNonRecursiveADT = testCase "autoDeriveNonRecursiveADT" $
@@ -421,16 +421,34 @@ test_autoDeriveNonRecursiveADT = testCase "autoDeriveNonRecursiveADT" $
     (Right (MultiADT [("Red", []), ("Green", []), ("Blue", [])]))
     (autoDeriveMultiValue [colorADT] (TADT "Color"))
 
+-- Recursive, no `depth`: auto-derivation has no finite enumeration to produce.
 treeADT :: ADTDecl
 treeADT = ADTDecl "Tree"
   [ ("Leaf", [("val", TInt)])
   , ("Node", [("l", TADT "Tree"), ("r", TADT "Tree")])
-  ]
+  ] Nothing
 
 test_autoDeriveRecursiveADTFails :: TestTree
 test_autoDeriveRecursiveADTFails = testCase "autoDeriveRecursiveADTFails" $ case autoDeriveMultiValue [treeADT] (TADT "Tree") of
   Left err -> assertBool ("error should mention recursion: " ++ err) ("recursive" `isInfixOf` err)
   Right mv -> assertFailure ("expected auto-derive of recursive ADT to fail, got: " ++ show mv)
+
+-- Recursive WITH a declared depth: auto-derivation unrolls to that depth. At
+-- depth 1 the self-referential FCons tail may only be FNil (the recursive
+-- constructor is dropped at the leaf).
+flistADT :: ADTDecl
+flistADT = ADTDecl
+  { dataName = "FList"
+  , constructors = [ ("FCons", [("hd", TFloat), ("tl", TADT "FList")]), ("FNil", []) ]
+  , adtDepth = Just 1 }
+
+test_autoDeriveRecursiveADTWithDepth :: TestTree
+test_autoDeriveRecursiveADTWithDepth = testCase "autoDeriveRecursiveADTWithDepth" $
+  assertEqual "recursive ADT with `depth 1` unrolls one level (tail must be FNil)"
+    (Right (MultiADT
+      [ ("FCons", [MultiContinuous, MultiADT [("FNil", [])]])
+      , ("FNil", []) ]))
+    (autoDeriveMultiValue [flistADT] (TADT "FList"))
 
 -- AutoNeural: makePartitionPlan resolves "Nothing" and "_" (MultiAuto) via auto-derivation,
 -- and "Real" (MultiContinuous) directly to a Continuous plan.
@@ -465,6 +483,7 @@ autoNeuralDerivationTests = testGroup "autoNeuralDerivation"
   , test_autoDeriveTuple
   , test_autoDeriveNonRecursiveADT
   , test_autoDeriveRecursiveADTFails
+  , test_autoDeriveRecursiveADTWithDepth
   , test_makePartitionPlanNothingFloat
   , test_makePartitionPlanNothingTuple
   , test_makePartitionPlanWildcardMatchesNothing

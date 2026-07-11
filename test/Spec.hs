@@ -23,6 +23,7 @@ import TestParser (parserTests)
 import TestInternals (internalsTests)
 import TestRejection (rejectionTests)
 import TestEncodeProperties (encodeTests)
+import TestShowcase (showcaseTests)
 import End2EndTesting (end2endTests, getAllTestFiles)
 import TestCaseParser (parseProgram, parseTestCases, TestCase(..), Backend(..))
 import TestTolerances (probTolerance, reasonablyCloseTolerance, samplingTolerance)
@@ -542,6 +543,7 @@ main = do
   hideSuccesses <- lookupEnv "TASTY_HIDE_SUCCESSES"
   if isNothing hideSuccesses then setEnv "TASTY_HIDE_SUCCESSES" "true" else return ()
   e2e <- end2endTests
+  showcase <- showcaseTests
   corpusPool <- loadCorpusCases
   defaultMain $ testGroup "Tests"
     [ specTests
@@ -550,5 +552,6 @@ main = do
     , internalsTests
     , rejectionTests
     , encodeTests
+    , showcase
     , e2e
     ]

@@ -16,7 +16,7 @@ stack run -- -i file.spll compile -l julia                  # Compile to Julia
 stack run -- -i file.spll generate                          # Forward sampling
 stack run -- -i file.spll probability -x 0.5                # Query P(X=0.5)
 stack run -- -i file.spll cumulative -x 0.5                 # CDF query P(X<=0.5)
-# Test selection (tasty patterns; top-level groups: Spec, Corpus, Parser, Internals, Rejection, Encode, End2End):
+# Test selection (tasty patterns; top-level groups: Spec, Corpus, Parser, Internals, Rejection, Encode, Showcase, End2End):
 stack test --ta '-p Spec'                # run one group
 stack test --ta '-p "!/End2End/"'        # everything except a group
 stack test --ta '-p TopK'                # any test whose name matches a substring
@@ -135,20 +135,23 @@ multival ::= _     -- MultiAuto: auto-derive from RType
            |  '(' multival '|' multival ')'              -- MultiEither
            |  '{' ctor multival* ('|' ctor multival*)* '}' -- MultiADT
            |  ident                                      -- MultiTypeRef: recursive self-reference
-           |  int 'x' ident '.' multival                 -- depth-limited recursion (resolves MultiTypeRef)
+           |  int ident '.' multival                     -- depth-limited recursion: unroll <int> levels, binding the self-reference name <ident> — e.g. `3x.{A [0,1,2] | B x}` (the `x` is the binder, not a keyword)
 ```
 
-Auto-derivation (`_`, or an omitted `of ...` clause) fills these slots from the RType: `Float`→`Real`, `Bool`→`[True, False]`, `Tuple`/`Either`/non-recursive `ADT`→recurse per component/constructor. `Int`, `Symbol` (unbounded domains) and recursive `ADT`s cannot be auto-derived — give an explicit enumeration or `<depth>x.Type.{...}`, or compilation errors. E.g. `(_, [0..10], _)` for `(Color, Int, Float)` only needs the `Int` slot spelled out.
+Auto-derivation (`_`, or an omitted `of ...` clause) fills these slots from the RType: `Float`→`Real`, `Bool`→`[True, False]`, `Tuple`/`Either`/non-recursive `ADT`→recurse per component/constructor. `Int`, `Symbol` (unbounded domains) cannot be auto-derived — give an explicit enumeration. A **recursive `ADT`** auto-derives only if its `data` declaration carries a default depth (`data T = … depth N`), which bounds the unrolling; otherwise give a depth-bounded `<depth><binder>.{...}` (e.g. `3x.{...}`) as a per-declaration override, or compilation errors. E.g. `(_, [0..10], _)` for `(Color, Int, Float)` only needs the `Int` slot spelled out.
+
+Only *direct* self-recursion is auto-detected; nested (`ListOf (TADT name)`) or mutual recursion still needs an explicit `of`.
 
 ## Test Structure
 
-The suite runs under tasty (`tasty-quickcheck` for properties, `tasty-hunit` for unit tests). Each module exports a `TestTree`; `Spec.hs` assembles them under the groups Spec / Corpus / Parser / Internals / Rejection / Encode / End2End.
+The suite runs under tasty (`tasty-quickcheck` for properties, `tasty-hunit` for unit tests). Each module exports a `TestTree`; `Spec.hs` assembles them under the groups Spec / Corpus / Parser / Internals / Rejection / Encode / Showcase / End2End.
 
 - `test/Spec.hs` — main entry (`defaultMain`), the static Spec QuickCheck properties, and the Corpus group: metamorphic properties (sampling-vs-PDF, topK, branch counting, P(ANY)=1, validation) whose generator pool is built from the interpreter-routed, non-neural prob cases of `testCases/` — there is no separate inline table of expected values
 - `test/TestParser.hs` — parser unit tests (`parserTests`)
 - `test/TestInternals.hs` — internal function tests (`internalsTests`)
 - `test/TestRejection.hs` — unhappy-path tests (`rejectionTests`): per-program HUnit cases asserting that invalid programs (the `invalid*` family from `Examples.hs`, plus missing-`main`/`ANY`) are rejected by the validator with the expected reason, that `compile` propagates the rejection, and that ill-typed programs are rejected by type inference
 - `test/TestEncodeProperties.hs` — AutoNeural encode tests (`encodeTests`)
+- `test/TestShowcase.hs` — documentation drift guard (`showcaseTests`): parses the whole `examples/showcase.ppl`, forward-samples + prob/cdf-checks its `main` against `examples/showcase.tst`, and parses+compiles every ` ```spll ` fenced block in `README.md` (with a count assertion so an untagged block can't slip through). Keeps documented syntax from rotting out of sync with the parser/compiler
 - `test/End2EndTesting.hs` — integration tests using `.ppl` + `.tst` files from `testCases/` (`end2endTests`; one test per program, Julia batched into a single test)
 - `test/TestCaseParser.hs` — `.tst` parser and `TestCase`/`Backend` types
 - `test/ArbitrarySPLL.hs` — QuickCheck Arbitrary instances for property testing

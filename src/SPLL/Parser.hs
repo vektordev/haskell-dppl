@@ -393,32 +393,6 @@ pMultiTypeDef = do
 pMultiTypeRef :: MonadParser m => m MultiValue
 pMultiTypeRef = pIdentifier <&> MultiTypeRef
 
-resolveMultiValueTypeDecl :: Int -> MultiValue -> (String, MultiValue) -> MultiValue
-resolveMultiValueTypeDecl 0 (MultiTypeRef _) _ = error "Cannot recurse, no depth left"
-resolveMultiValueTypeDecl 1 (MultiTypeRef _) (declName, MultiADT constrs) = MultiADT (filter (\(_, args) -> not $ any (containsMultiValueTypeRef declName) args) constrs)
-resolveMultiValueTypeDecl depthLeft (MultiTypeRef refName) decl@(declName, declVal) | declName == refName = resolveMultiValueTypeDecl (depthLeft - 1) declVal decl
-resolveMultiValueTypeDecl _ (MultiDiscretes d) _ = MultiDiscretes d
-resolveMultiValueTypeDecl _ MultiContinuous _ = MultiContinuous
-resolveMultiValueTypeDecl _ MultiAuto _ = MultiAuto
-resolveMultiValueTypeDecl depthLeft (MultiTuple l r) decl =
-  MultiTuple (resolveMultiValueTypeDecl depthLeft l decl)
-             (resolveMultiValueTypeDecl depthLeft r decl)
-resolveMultiValueTypeDecl depthLeft (MultiEither l r) decl =
-  MultiEither (resolveMultiValueTypeDecl depthLeft l decl)
-              (resolveMultiValueTypeDecl depthLeft r decl)
-resolveMultiValueTypeDecl depthLeft (MultiADT cons) decl =
-  MultiADT [(cname, map (\mv -> resolveMultiValueTypeDecl depthLeft mv decl) args) |
-            (cname, args) <- cons]
-
-containsMultiValueTypeRef :: String -> MultiValue -> Bool
-containsMultiValueTypeRef _ (MultiDiscretes _) = False
-containsMultiValueTypeRef _ MultiContinuous = False
-containsMultiValueTypeRef _ MultiAuto = False
-containsMultiValueTypeRef n (MultiTypeRef m) = n == m
-containsMultiValueTypeRef n (MultiEither l r) = containsMultiValueTypeRef n l || containsMultiValueTypeRef n r
-containsMultiValueTypeRef n (MultiTuple l r) = containsMultiValueTypeRef n l || containsMultiValueTypeRef n r
-containsMultiValueTypeRef n (MultiADT constrs) = any (\(_, args) -> any (containsMultiValueTypeRef n) args) constrs
-
 pMultiDiscretes :: MonadParser m => m MultiValue
 pMultiDiscretes = dbg "multiDisc" $ do
   symbol "["
@@ -467,7 +441,10 @@ pADT = dbg "ADT" $ do
   name <- pIdentifier
   symbol "="
   constrs <- pADTConstructor `sepBy` symbol "|"
-  return $ ADTDecl {dataName=name, constructors=constrs}
+  -- Optional trailing `depth N`: the default unroll depth used when a neural net
+  -- auto-derives an enumeration of this (recursive) type. See ADTDecl.adtDepth.
+  depth <- optional (keyword "depth" *> pInt)
+  return $ ADTDecl {dataName=name, constructors=constrs, adtDepth=depth}
 
 pADTConstructor :: MonadParser m => m ADTConstructorDecl
 pADTConstructor = dbg "ADT Constr" $ do
