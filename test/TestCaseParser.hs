@@ -13,8 +13,13 @@ module TestCaseParser (
   testCaseName,
   parseTestCases,
   parseTestCasesFromString,
+  FreezeCase(..),
+  FreezeMode(..),
+  parseFreezeCasesFromString,
   parseProgram
 ) where
+
+import Data.List (isPrefixOf)
 
 import SPLL.Parser (tryParseProgram, pValue)
 import SPLL.IntermediateRepresentation
@@ -190,6 +195,50 @@ parseTestCases :: FilePath -> IO ([Backend], [TestCase])
 parseTestCases fp = do
   content <- readFile fp
   either error return (parseTestCasesFromString fp content)
+
+-- ---------------------------------------------------------------------------
+-- Showcase behavioural-freeze lines (examples/showcase.freeze)
+-- ---------------------------------------------------------------------------
+-- Each line pins the inference result of ONE named top-level definition, driven
+-- directly by name rather than through `main`. See test/TestShowcase.hs.
+
+data FreezeMode = FreezeProb | FreezeCdf
+  deriving (Eq, Show)
+
+-- FreezeCase <def> <args> <mode> <sample> <expected probability>
+data FreezeCase = FreezeCase String [IRValue] FreezeMode IRValue Double
+  deriving (Show)
+
+-- An identifier followed by an OPTIONAL parenthesised argument list. The args
+-- must be distinguished from the mode's own `(` -- they only bind when the `(`
+-- immediately follows the name (no separating space, unlike `... p(`).
+pFreezeArgs :: MonadParser m => m [IRValue]
+pFreezeArgs = option [] (between (char '(') (symbol ")") (pIRValue `sepBy` symbol ","))
+
+pFreezeCase :: MonadParser m => m FreezeCase
+pFreezeCase = do
+  sc
+  name <- some (alphaNumChar <|> char '_')
+  args <- pFreezeArgs
+  sc
+  mode <- choice [symbol "p(" >> return FreezeProb, symbol "cdf(" >> return FreezeCdf]
+  sample <- pIRValue
+  symbol ")"
+  symbol "="
+  expected <- L.signed sc (L.lexeme sc L.float)
+  return $ FreezeCase name args mode sample expected
+
+-- | Parse a whole showcase.freeze file. Blank lines and `--` comment lines are
+-- dropped, then each remaining line is parsed independently so that a single
+-- malformed line names itself in the error rather than derailing the file.
+parseFreezeCasesFromString :: FilePath -> String -> Either String [FreezeCase]
+parseFreezeCasesFromString fp = traverse parseLine . relevantLines
+  where
+    relevantLines = filter (not . irrelevant) . map (dropWhile (== ' ')) . lines
+    irrelevant l = null l || "--" `isPrefixOf` l
+    parseLine l = case runParser (runStateT (pFreezeCase <* eof) 0) fp l of
+      Left err  -> Left (errorBundlePretty err)
+      Right (v, _) -> Right v
 
 parseProgram :: FilePath -> IO Program
 parseProgram fp = do

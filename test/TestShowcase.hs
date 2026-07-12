@@ -9,11 +9,16 @@
 --   * showcase `main` runs in all three inference modes: it forward-samples
 --     (generate) and its probability/cumulative values match
 --     examples/showcase.tst;
---   * every @```spll@ block in the README parses and compiles.
+--   * every DEFINITION listed in examples/showcase.freeze is driven directly
+--     by name and its probability/cumulative result is pinned -- this freezes
+--     the behaviour of the individual documented helpers, not just `main`;
+--   * every @```spll@ block in the README parses and compiles; a @```text@
+--     block placed immediately after one supplies expected p()/cdf() output
+--     (in showcase.tst syntax) which is then verified against that snippet.
 --
--- Note: only `main`'s path is forced, not every helper definition. The helpers
--- are parse-only syntax demonstrations (see the file header) and some are
--- intentionally generate-only, so whole-program compilation is not required.
+-- Definitions absent from showcase.freeze are guaranteed only to PARSE (some
+-- are intentionally generate-only or parse-only syntax demonstrations); the
+-- freeze file is the opt-in list of definitions whose behaviour is frozen.
 module TestShowcase (showcaseTests) where
 
 import Test.Tasty (TestTree, testGroup)
@@ -29,9 +34,10 @@ import Text.Megaparsec (ParseErrorBundle, errorBundlePretty)
 
 import SPLL.Lang.Types
 import SPLL.Parser (tryParseProgram)
-import SPLL.Prelude (compile, runGenC, runProbC, runIntegC)
+import SPLL.Prelude (compile, runGenC, runProbC, runIntegC, runProbNamedC, runIntegNamedC)
 import SPLL.IntermediateRepresentation (defaultCompilerConfig, IREnv, IRValue)
-import TestCaseParser (TestCase(..), parseTestCasesFromString)
+import TestCaseParser (TestCase(..), parseTestCasesFromString,
+                       FreezeCase(..), FreezeMode(..), parseFreezeCasesFromString)
 import TestTolerances (probTolerance)
 
 showcasePath :: FilePath
@@ -39,6 +45,9 @@ showcasePath = "examples/showcase.ppl"
 
 showcaseTstPath :: FilePath
 showcaseTstPath = "examples/showcase.tst"
+
+showcaseFreezePath :: FilePath
+showcaseFreezePath = "examples/showcase.freeze"
 
 readmePath :: FilePath
 readmePath = "README.md"
@@ -53,10 +62,12 @@ showcaseTests :: IO TestTree
 showcaseTests = do
   scSrc     <- readFile showcasePath
   tstSrc    <- readFile showcaseTstPath
+  freezeSrc <- readFile showcaseFreezePath
   readmeSrc <- readFile readmePath
-  let scProg  = tryParseProgram showcasePath scSrc
-      tstCases = either (const []) snd (parseTestCasesFromString showcaseTstPath tstSrc)
-      readmeBlocks = spllBlocks readmeSrc
+  let scProg       = tryParseProgram showcasePath scSrc
+      tstCases     = either (const []) snd (parseTestCasesFromString showcaseTstPath tstSrc)
+      freezeParsed = parseFreezeCasesFromString showcaseFreezePath freezeSrc
+      readmeBlocks = spllBlocksWithExpected readmeSrc
   return $ testGroup "Showcase"
     [ testCase (showcasePath ++ " parses") $
         assertParses showcasePath scSrc
@@ -64,16 +75,63 @@ showcaseTests = do
         either (assertFailure . prettyParse) assertGenerates scProg
     , testCase (showcasePath ++ " main matches showcase.tst (probability + cumulative)") $
         either (assertFailure . prettyParse) (assertTstMatches tstCases) scProg
-    , testGroup "README ```spll examples" $
-        [ testCase ("README ```spll block " ++ show i ++ " parses & compiles") $ do
-            assertParses (readmePath ++ " block " ++ show i) block
-            either (assertFailure . prettyParse) assertCompiles (tryParseProgram readmePath block)
-        | (i, block) <- zip [1 :: Int ..] readmeBlocks
-        ] ++
-        [ testCase "README has the expected number of ```spll blocks" $
-            length readmeBlocks @?= expectedReadmeBlocks
-        ]
+    , freezeTests scProg freezeParsed
+    , readmeTests readmeBlocks
     ]
+
+-- | Per-definition behavioural freeze: drive each definition named in
+-- showcase.freeze by name and pin its inference result.
+freezeTests :: Either (ParseErrorBundle String Void) Program -> Either String [FreezeCase] -> TestTree
+freezeTests scProg freezeParsed = testGroup "showcase.freeze anchors" $
+  case (scProg, freezeParsed) of
+    (Left e, _) -> [ testCase "showcase parses" $ assertFailure (prettyParse e) ]
+    (_, Left e) -> [ testCase (showcaseFreezePath ++ " parses") $ assertFailure e ]
+    (Right p, Right cases) -> case compile defaultCompilerConfig p of
+      Left err  -> [ testCase "showcase compiles" $ assertFailure (show err) ]
+      Right env ->
+        testCase (showcaseFreezePath ++ " is non-empty")
+                 (assertBool "no freeze anchors parsed" (not (null cases)))
+        : [ testCase (freezeLabel c) $ assertFreeze env p c | c <- cases ]
+
+freezeLabel :: FreezeCase -> String
+freezeLabel (FreezeCase name args mode sample _) =
+  name ++ argStr ++ " " ++ modeStr mode ++ "(" ++ show sample ++ ")"
+  where argStr = if null args then "" else show args
+        modeStr FreezeProb = "p"
+        modeStr FreezeCdf  = "cdf"
+
+assertFreeze :: IREnv -> Program -> FreezeCase -> IO ()
+assertFreeze env p c@(FreezeCase name args mode sample expected) =
+  checkQuery (modeName mode) (freezeLabel c) result expected
+  where
+    result = case mode of
+      FreezeProb -> runProbNamedC p env name args sample
+      FreezeCdf  -> runIntegNamedC p env name args sample
+    modeName FreezeProb = "probability"
+    modeName FreezeCdf  = "cumulative"
+
+-- | README examples: every @```spll@ block parses and compiles, and if an
+-- expected-output @```text@ block follows it, its p()/cdf() lines are verified.
+readmeTests :: [(String, Maybe String)] -> TestTree
+readmeTests blocks = testGroup "README ```spll examples" $
+  [ testCase (label ++ suffix mexp) $ do
+      assertParses label block
+      case tryParseProgram readmePath block of
+        Left e     -> assertFailure (prettyParse e)
+        Right prog -> do
+          assertCompiles prog
+          case mexp of
+            Nothing       -> return ()
+            Just expected -> case parseTestCasesFromString label expected of
+              Left perr        -> assertFailure ("expected-output block failed to parse:\n" ++ perr)
+              Right (_, cases) -> assertTstMatches cases prog
+  | (i, (block, mexp)) <- zip [1 :: Int ..] blocks
+  , let label = readmePath ++ " ```spll block " ++ show i
+  ] ++
+  [ testCase "README has the expected number of ```spll blocks" $
+      length blocks @?= expectedReadmeBlocks ]
+  where suffix Nothing  = " parses & compiles"
+        suffix (Just _) = " parses, compiles & matches expected output"
 
 prettyParse :: ParseErrorBundle String Void -> String
 prettyParse = errorBundlePretty
@@ -136,15 +194,25 @@ checkQuery mode name result expProb = do
     extractProb (VTuple (VFloat prob) _) = Just prob
     extractProb _                        = Nothing
 
--- | Extract the contents of every @```spll@ fenced code block from markdown.
-spllBlocks :: String -> [String]
-spllBlocks = go . lines
+-- | Extract every @```spll@ fenced block from markdown, each paired with the
+-- expected-output @```text@ block that immediately follows it (only blank lines
+-- may separate them), if any.
+spllBlocksWithExpected :: String -> [(String, Maybe String)]
+spllBlocksWithExpected = go . lines
   where
     go [] = []
     go (l:ls)
-      | isFenceOpen l = let (body, rest) = break isFenceClose ls
-                        in unlines body : go (drop 1 rest)
-      | otherwise     = go ls
-    isFenceOpen l  = maybe False (== "spll") (stripPrefix "```" (trim l))
-    isFenceClose l = trim l == "```"
+      | isFenceOpen "spll" l =
+          let (body, rest)     = break isFenceClose ls
+              afterSpll        = drop 1 rest
+              (mexp, rest')    = grabExpected afterSpll
+          in (unlines body, mexp) : go rest'
+      | otherwise = go ls
+    grabExpected ls = case dropWhile (null . trim) ls of
+      (l:rest) | isFenceOpen "text" l ->
+          let (body, rest') = break isFenceClose rest
+          in (Just (unlines body), drop 1 rest')
+      _ -> (Nothing, ls)
+    isFenceOpen tag l = maybe False (== tag) (stripPrefix "```" (trim l))
+    isFenceClose l    = trim l == "```"
     trim = dropWhile (== ' ')

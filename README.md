@@ -101,10 +101,20 @@ The next example creates a unbound list by rolling a 0.5 probability and prepeni
 main=if Uniform > 0.5 then [] else Normal:main
 ```
 
+```text
+p([])=(0.5, 0.0)
+```
+
+Half the time the coin comes up empty, so the probability that this program outputs the empty list is exactly `0.5`, as the expected-output block above records.
+
 This example shows off some basic features using algebraic data types:
 
 ```spll
 main=(if Uniform>0.5 then left Uniform else right Normal, Uniform)
+```
+
+```text
+p((Left 0.3, 0.5))=(0.5, 2.0)
 ```
 
 
