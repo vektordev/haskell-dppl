@@ -229,11 +229,15 @@ modalityInferTests = testGroup "ModalityInfer"
   -- (pinned 'Bottom' as a known limitation); they flipped to the recovered
   -- capability when the type-level rule landed.
   --
-  -- CAVEAT until milestone 3: the IRCompiler's let handler cannot yet emit the
-  -- conditional-probability fold @p_D(x*)·|J|·p(body|x=x*)@, so COMPILING these
-  -- shapes in probability mode produces wrong densities — the lifted type is
-  -- ahead of codegen on this branch. Milestone 4 adds the end-to-end
-  -- @testCases/@ pinning once the fold exists.
+  -- Milestone 3 (the conditional-probability fold @p_D(x*)·|J|·p(body|x=x*)@)
+  -- landed via the ExpressiveNeurals merge: the IRCompiler's body-factor
+  -- folding in the Apply arm is exactly that fold, and the body is re-typed
+  -- deterministic-given-the-recovered-variable for dispatch (retypeDetGiven).
+  -- Milestone 4's end-to-end pinning lives in @testCases/@:
+  -- letWitnessedSharedLatent(Mult), letTwoUniformIndirect. The same-latent
+  -- shape @(x, x+x)@ compiles (to p_x·indicator, dim 1, at parity with
+  -- ExpressiveNeurals) but is NOT corpus-pinned: its degenerate support makes
+  -- the joint-density convention ambiguous — warn-correlated-slots territory.
   , testGroup "witnessed inference (M2): FC-witnessed bindings lift the marginalize floor"
       [ testCase "witness (additive): shared-latent tuple recovers Integrate" $
           -- x recovered from fst, then u2 = y - x from snd (Jacobian 1): the

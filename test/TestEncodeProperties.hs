@@ -26,13 +26,13 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure)
 import Control.Monad (forM_)
 import Data.Foldable (toList)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, nub, sort)
 
 import SPLL.Prelude (runEncode)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Lang.Types
 import SPLL.Lang.Lang (Program(..))
-import SPLL.AutoNeural (makePartitionPlan, getSize, PartitionPlan(..))
+import SPLL.AutoNeural (makeAutoNeural, makePartitionPlan, getSize, PartitionPlan(..))
 import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType (RType(..))
 
@@ -351,12 +351,13 @@ encodeInvariant_outputDimMatchesPlan = testGroup "outputDimMatchesPlan"
   ]
 
 ------------------------------------------------------------------------
--- § 2.4 / § 3.1  Continuous if-mixture must be rejected without `collapse`.
+-- § 2.4 / § 3.1  A non-Gaussian continuous output must be rejected by encode.
 --
 -- `if .. then Normal + 2.0 else Normal + 5.0` is a mixture of two Gaussians, which is not
 -- Gaussian-closed.  PInfer degrades its PType to Integrate, so no normal-parameter function
 -- is generated for the continuous slot.  Encoding it must fail cleanly (a Left
--- CompilerError pointing at `collapse`), not dangle on a missing function reference.
+-- CompilerError naming the non-Gaussian continuous output), not dangle on a missing
+-- function reference.
 encodeError_continuousMixtureRequiresCollapse :: TestTree
 encodeError_continuousMixtureRequiresCollapse = testCase "continuousMixtureRequiresCollapse" $ do
   prog <- parseOrFail $ unlines
@@ -365,11 +366,103 @@ encodeError_continuousMixtureRequiresCollapse = testCase "continuousMixtureRequi
     ]
   case runEncode defaultCompilerConfig prog mainTarget [] of
     Left err ->
-      assertBool ("error should mention `collapse`, got: " ++ err)
-                 ("collapse" `isInfixOf` err)
+      assertBool ("error should report a non-Gaussian continuous output, got: " ++ err)
+                 ("not Gaussian" `isInfixOf` err)
     Right v  ->
       assertFailure ("expected a compile error for a non-Gaussian continuous output, got: "
                      ++ show v)
+
+------------------------------------------------------------------------
+-- Decoder logit-index liveness.
+--
+-- AutoNeural lays a decoder's output into a flat logit vector of `getSize plan` slots.
+-- The generated `generate` (sampler) and `forward` (probability) readers must index only
+-- live slots [0 .. size-1]; furthermore the sampler must reference *every* slot exactly
+-- once across the whole layout.  A missing slot (sampled field never reads its logits) or
+-- an aliased slot (a field overlapping the constructor flags) means it is sampling from
+-- the wrong logits.  This is the regression guard for the `makeGenADTConstr` field-offset
+-- bug: an ADT constructor's fields were laid out from index 0 rather than from the
+-- constructor's own base index, so for `data Object = Null | Object shape, color` the
+-- generated sampler read the Shape field off the constructor-flag slots and never touched
+-- the last Color slot.
+
+vectorOut :: String
+vectorOut = "l_x_neural_out"
+
+-- Every node of an IR expression (the AutoNeural readers contain no binders that shadow the
+-- vector, so a flat universe walk is sufficient).
+irUniverse :: IRExpr -> [IRExpr]
+irUniverse e = e : concatMap irUniverse (getIRSubExprs e)
+
+-- The literal logit indices an expression reads from the neural output vector.  `generate`
+-- uses constant indices throughout; `forward` adds a constant base offset to a dynamic
+-- indexOf(...) for discrete leaves, so we also take the constant operand of a `+`.
+vectorIndices :: IRExpr -> [Int]
+vectorIndices root =
+  [ i | IRIndex (IRVar v) idx <- irUniverse root, v == vectorOut, i <- idxConsts idx ]
+  where
+    idxConsts (IRConst (VInt i)) = [i]
+    idxConsts (IROp OpPlus a b)  = constOperand a ++ constOperand b
+    idxConsts _                  = []
+    constOperand (IRConst (VInt i)) = [i]
+    constOperand _                  = []
+
+decoderGroup :: Program -> IRFunGroup
+decoderGroup prog =
+  makeAutoNeural (adts prog) defaultCompilerConfig [] (head (neurals prog))
+
+decoderPlan :: Program -> PartitionPlan
+decoderPlan prog =
+  let (_, TArrow _ target, tag) = head (neurals prog)
+  in makePartitionPlan (adts prog) target tag
+
+-- Decoder programs exercising ADT-with-field layouts, plus reuse of the cross-program list.
+decoderPrograms :: [ProgramSpec]
+decoderPrograms =
+  [ ( "adt_twofield"
+    , unlines [ "data MyADT = A i1 :: Int, i2 :: Int"
+              , "neural adtNN :: (Symbol -> MyADT) of {A [0, 1, 2] [3, 4, 5]}"
+              , "main sym = adtNN sym" ]
+    , 1 )
+  , ( "clevr_reduced"  -- reduced from the CLEVR scene decoder; field-carrying + nested ADTs
+    , unlines [ "data Object = Null | Object shape :: Shape, color :: Color"
+              , "data Shape = Cube | Sphere"
+              , "data Color = Red | Blue"
+              , "neural extractCLEVR :: (Symbol -> Object)"
+              , "main sym = extractCLEVR sym" ]
+    , 1 )
+  ] ++ allPrograms
+
+-- generate must reference every logit slot exactly once across [0 .. size-1].
+encodeInvariant_generateCoversAllSlots :: TestTree
+encodeInvariant_generateCoversAllSlots = testGroup "generateCoversAllSlots"
+  [ testCase name $ do
+      prog <- parseOrFail src
+      let size = getSize (decoderPlan prog)
+      case genFun (decoderGroup prog) of
+        Nothing        -> assertFailure (name ++ ": decoder has no generate function")
+        Just (gen, _)  ->
+          assertEqual (name ++ ": generate must reference every logit slot in [0.."
+                       ++ show (size - 1) ++ "] exactly once")
+                      [0 .. size - 1] (sort (nub (vectorIndices gen)))
+  | (name, src, _) <- decoderPrograms
+  ]
+
+-- Every logit index read by the probability reader must be in bounds [0 .. size-1].
+encodeInvariant_probIndicesInBounds :: TestTree
+encodeInvariant_probIndicesInBounds = testGroup "probIndicesInBounds"
+  [ testCase name $ do
+      prog <- parseOrFail src
+      let size = getSize (decoderPlan prog)
+      case probFun (decoderGroup prog) of
+        Nothing         -> return ()
+        Just (probE, _) ->
+          forM_ (vectorIndices probE) $ \i ->
+            assertBool (name ++ ": prob reads out-of-range logit index " ++ show i
+                        ++ " (size " ++ show size ++ ")")
+                       (i >= 0 && i < size)
+  | (name, src, _) <- decoderPrograms
+  ]
 
 ------------------------------------------------------------------------
 
@@ -392,4 +485,6 @@ encodeTests = testGroup "Encode"
   , encodeInvariant_discreteSumsToOne
   , encodeInvariant_outputDimMatchesPlan
   , encodeError_continuousMixtureRequiresCollapse
+  , encodeInvariant_generateCoversAllSlots
+  , encodeInvariant_probIndicesInBounds
   ]

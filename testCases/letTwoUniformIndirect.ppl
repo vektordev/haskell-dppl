@@ -1,0 +1,1 @@
+main = let x = Uniform in let y = Uniform in let z = x * 2.0 in (x + 3.0, y+z)

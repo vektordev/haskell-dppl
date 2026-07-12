@@ -1,10 +1,12 @@
 -- ============================================================
 -- SPLL Syntax Showcase
 -- ============================================================
--- Demonstrates confirmed-compiling syntax across all three
--- inference modes (generate, probability, integrate).
--- See docs/spll-showcase-todo.md for untested/known-broken
--- patterns and deviations from Haskell notation.
+-- Demonstrates confirmed-parsing syntax; `main` (a Gaussian
+-- mixture) additionally compiles and runs in all three
+-- inference modes (generate, probability, cumulative).
+-- The whole file is parsed and `main` compiled by the test
+-- suite (test/TestShowcase.hs) so it cannot drift out of sync
+-- with the language.
 -- ============================================================
 
 
@@ -14,7 +16,12 @@
 -- Declared with `data` before all function definitions.
 -- Fields: name::Type, separated by commas.
 -- Constructors separated by |.  Zero-field constructors allowed.
--- `depth N` at the END of the whole declaration caps unrolling.
+-- A recursive type may carry a trailing `depth N`: the default
+-- unroll depth used when a neural net auto-derives (`of _`) an
+-- enumeration of this type (see README).  It has no effect on
+-- ordinary values, which are bounded by the program that builds
+-- them.  An explicit `of <N> <binder>.{...}` on the neural
+-- declaration overrides it per-site.
 -- Auto-generated per constructor:
 --   isConstructorName :: T -> Bool      (guard predicate)
 --   fieldName         :: T -> FieldType (accessor)
@@ -25,7 +32,9 @@ data Shape = Circle radius::Float | Rectangle width::Float, height::Float
 -- Zero-field (enum-style) constructors
 data Coin = Heads | Tails
 
--- Recursive type with depth cap
+-- Recursive type. `depth 10` is the default unroll depth for
+-- auto-derived neural enumerations of FList; it does not bound
+-- the finite value built below.
 data FList = FCons hd::Float, tl::FList | FNil depth 10
 
 
@@ -44,7 +53,11 @@ stdNormal = Normal    -- N(0,1)
 -- Negative literals require parens in expression position:
 --   x + (-1.0)   not   x + -1.0
 
--- Affine transform: Normal(mu, sigma)
+-- Affine transform: Normal(mu, sigma).
+-- NOTE: a curried helper whose body is stochastic works in
+-- `generate`, but probability/cumulative/compile of a CALL to
+-- it is not supported -- inline the transform instead (see
+-- `main`).  This definition is therefore parse-only.
 locScale mu sigma = Normal * sigma + mu
 
 -- Integer addition and power
@@ -128,7 +141,7 @@ dice sides =
 -- Destructuring patterns (tuple, list-cons, Either branch)
 -- internally double-use the bound expression, so they only
 -- work safely with *deterministic* RHS values.
--- See docs/spll-showcase-todo.md for details.
+-- (A stochastic RHS there triggers a forward-chaining error.)
 
 -- Single-use stochastic binding (safe)
 shiftedSample = let u = Uniform in u + 1.0
@@ -239,10 +252,13 @@ withTheta thetas = Uniform + (theta thetas @ 0)
 -- ============================================================
 -- MAIN
 -- Two-component Gaussian mixture; all three inference modes
--- are tractable.
+-- (generate, probability, cumulative) are tractable.
+-- The affine transforms are written inline rather than via
+-- `locScale`, because a call to a curried stochastic helper is
+-- not compilable in probability/cumulative mode (see locScale).
 -- ============================================================
 
 main =
   if Uniform < 0.5
-  then locScale 0.0 2.0
-  else locScale 1.0 1.0
+  then Normal * 2.0
+  else Normal * 1.0 + 1.0

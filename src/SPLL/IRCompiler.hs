@@ -39,7 +39,11 @@ data CompilerMetadata = CompilerMetadata {
   typeEnv :: TypeEnv,
   adtDecls :: [ADTDecl],
   compilingProgram :: Program,
-  accProb :: IRExpr
+  accProb :: IRExpr,
+  -- | Variables already recovered by an enclosing body-factor fold. Body
+  -- expressions are re-fetched from the (original) program at every fold
+  -- level, so the deterministic re-typing must be replayed with the full set.
+  recoveredVars :: [String]
 }
 
 envToIR :: CompilerConfig -> FCData -> Program -> IREnv
@@ -111,7 +115,7 @@ envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb
       (expr, "Calculates the probability of the sample parameter being returned from the " ++ name ++ "function")
     toIntegDecl name expr = (expr, "Calculates the probability of the sample parameter being less than or equal to the " ++ name ++ " function")
     toNormalDecl name expr = (expr, "Returns (mu, sigma) normal distribution parameters for the " ++ name ++ " function")
-    meta typeEnv = CompilerMetadata conf fcDat typeEnv adts p (IRConst (VFloat 1.0))
+    meta typeEnv = CompilerMetadata conf fcDat typeEnv adts p (IRConst (VFloat 1.0)) []
     extractParamNames (Lambda _ name body) = name : extractParamNames body
     extractParamNames _ = []
     stripLambdas (Lambda _ _ body) = stripLambdas body
@@ -260,6 +264,35 @@ extendMetaForLambda meta t name =
   let (TArrow paramRType _) = rType t
       hasInference = case paramRType of { TArrow (TArrow _ _) _ -> True; _ -> False }
   in meta { typeEnv = (name, (paramRType, hasInference)) : typeEnv meta }
+
+-- | True if the expression is a literal lambda (as opposed to a function reached
+-- through the higher-order equivalence machinery, e.g. a Var or an Apply result).
+isLambdaExpr :: Expr -> Bool
+isLambdaExpr (Lambda {}) = True
+isLambdaExpr _ = False
+
+-- | Re-type a body factor for dispatch, given that the named variables have
+-- been recovered by enclosing folds (design @modality-witnessed-inference@,
+-- codegen level: the body sub-inference must see a recovered variable as
+-- Deterministic so e.g. an inner @plus[y, z]@ with both operands recovered
+-- routes to generate-and-compare instead of an inversion arm that needs a
+-- random operand). Occurrences of the recovered variables become
+-- 'Deterministic'; pure 'InjF' nodes whose operands are all deterministic
+-- follow. Shadowing lambdas stop the substitution for their own name. Other
+-- node kinds keep their annotations — their arms dispatch on operand types.
+retypeDetGiven :: [String] -> Expr -> Expr
+retypeDetGiven [] e = e
+retypeDetGiven names e = go names e
+  where
+    go ns (Var ti n) | n `elem` ns = Var (ti {pType = Deterministic}) n
+    go ns (Lambda ti n body) = Lambda ti n (go (filter (/= n) ns) body)
+    go ns ex =
+      let ex' = setSubExprs ex (map (go ns) (getSubExprs ex))
+      in case ex' of
+           InjF ti f params
+             | all ((== Deterministic) . pType . getTypeInfo) params ->
+                 InjF (ti {pType = Deterministic}) f params
+           _ -> ex'
 
 negInf :: IRExpr
 negInf = IRConst (VFloat (-9999999))
@@ -414,6 +447,18 @@ toIRNormalParams meta (InjF _ (Named "neg") [e])
       return (IRUnaryOp OpNeg mu, s)
 toIRNormalParams meta (InjF _ (Named "log") [e])
   | pType (getTypeInfo e) == PLogNormal = toIRLogNormalParams meta e
+-- Tuple-field projection: the marginal of a literal tuple's field is that
+-- field's own law, so extraction descends into the projected component. The
+-- modality engine's IProd projection types e.g. @fst (Normal, Uniform * 2)@ as
+-- PNormal, a shape PInfer2 never produced.
+toIRNormalParams meta (InjF _ (Named "fst") [InjF _ (Named "TCons") [a, _]])
+  | pType (getTypeInfo a) == PNormal = toIRNormalParams meta a
+toIRNormalParams meta (InjF _ (Named "snd") [InjF _ (Named "TCons") [_, b]])
+  | pType (getTypeInfo b) == PNormal = toIRNormalParams meta b
+toIRNormalParams meta (InjF ti f@(Named n) [Var _ name])
+  | n `elem` ["fst", "snd"]
+  , Just expr <- lookup name (functions (compilingProgram meta)) =
+      toIRNormalParams meta (InjF ti f [expr])
 toIRNormalParams meta (Var _ name)
   | Just expr <- lookup name (functions (compilingProgram meta)) = toIRNormalParams meta expr
 toIRNormalParams meta (ReadNN _ name arg) = do
@@ -442,6 +487,15 @@ toIRLogNormalParams meta (InjF _ (Named "mult") [e0, e1])
       (mu1, s1) <- toIRLogNormalParams meta e1
       det0 <- toIRGenerate meta e0
       return (IROp OpPlus mu1 (IRUnaryOp OpLog det0), s1)
+-- Tuple-field projection, mirroring toIRNormalParams.
+toIRLogNormalParams meta (InjF _ (Named "fst") [InjF _ (Named "TCons") [a, _]])
+  | pType (getTypeInfo a) == PLogNormal = toIRLogNormalParams meta a
+toIRLogNormalParams meta (InjF _ (Named "snd") [InjF _ (Named "TCons") [_, b]])
+  | pType (getTypeInfo b) == PLogNormal = toIRLogNormalParams meta b
+toIRLogNormalParams meta (InjF ti f@(Named n) [Var _ name])
+  | n `elem` ["fst", "snd"]
+  , Just expr <- lookup name (functions (compilingProgram meta)) =
+      toIRLogNormalParams meta (InjF ti f [expr])
 toIRLogNormalParams meta (Var _ name)
   | Just expr <- lookup name (functions (compilingProgram meta)) = toIRLogNormalParams meta expr
 toIRLogNormalParams _ e = error $ "toIRLogNormalParams: cannot extract LogNormal params from " ++ show (pType (getTypeInfo e))
@@ -670,13 +724,14 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample
   let lChainName = chainName (getTypeInfo l)
 
   -- This logic is here to wrap the expression back into lambdas if the lambda we look at returns a lambda
-  let Just (_, LambdaInfo toInvCN lambdaBodyCN, tag) = findEquivalentExpression (fcData meta) lChainName
+  let Just (lResolvedCN, LambdaInfo toInvCN lambdaBodyCN, tag) = findEquivalentExpression (fcData meta) lChainName
   let (boundVar, lambdaVars) = unwrapLambdas (fcData meta) lambdaBodyCN
   let wrapInLambdas ex = foldr IRLambda ex lambdaVars
 
   -- Dead binding: if the bound variable never appears in the body, the body is independent
   -- of the argument. In that case p(result = sample) = p(body = sample).
-  let deadBinding = null [() | (_, VarInfo n) <- chainNameInfo (fcData meta), n == toInvCN]
+  -- Scoped to THIS lambda's body: a same-named variable bound elsewhere must not count.
+  let deadBinding = null (fromMaybe [] (lookup lResolvedCN (lambdaVarOccurrences (fcData meta))))
   if deadBinding then do
     let Program{functions=fs} = compilingProgram meta
     let bodyExpr = findExprWithCN (map snd fs) lambdaBodyCN
@@ -698,7 +753,51 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample
                     else IRIf (IROp OpGreaterThan appliedCoV const0) x (IROp OpSub (IRConst (VFloat 1)) x)
     case rt of
       TArrow _ _ -> return (wrapInLambdas (IRTCons (scale p) (IRTCons dim bc)), const0, const0)
-      _ -> return (wrapInLambdas $ scale p, wrapInLambdas dim, wrapInLambdas bc)
+      _ | cumulative || not (isLambdaExpr l) || not (null tag) ->
+            -- Keep the original single-witness behaviour when: (a) integrate mode, where
+            -- tuple/multi-latent CDFs are ill-defined; (b) the callable is not a literal
+            -- lambda, i.e. it is a function reached through the higher-order equivalence
+            -- machinery (applied top-level fn / returned closure), whose body references
+            -- tagged variables this folding would mis-bind; or (c) the lambda is applied
+            -- under a tag (HO duplication). Body-factor folding is only sound for a plain
+            -- value let-binding `Apply (Lambda x body) v`.
+            return (wrapInLambdas $ scale p, wrapInLambdas dim, wrapInLambdas bc)
+      _ -> do
+        -- The inversion above only recovers and infers the variable bound by THIS
+        -- lambda. Any additional independent latents bound deeper in the body (e.g. a
+        -- second `let` whose value is repacked alongside this one in a tuple) are not
+        -- captured by the bound-value inference. Infer the body too and fold it in as an
+        -- independent factor: probabilities multiply, dimensions add, branch counts add.
+        -- For a body that is deterministic given the recovered variable, the exact
+        -- inverse makes the body factor an always-true (dim-0) indicator, so the product
+        -- collapses to the original result; only genuinely new latents add density/dim.
+        let Program{functions=fs} = compilingProgram meta
+        -- The recovered variable (and any recovered by enclosing folds) is
+        -- Deterministic for the body's dispatch; re-typing happens after the
+        -- fetch because the fetch always returns original annotations.
+        let recovered = toInvCN : recoveredVars meta
+        let bodyExpr = retypeDetGiven recovered (findExprWithCN (map snd fs) lambdaBodyCN)
+        -- The body references the bound variable, so it must be in scope in the type
+        -- environment (mirrors how the Lambda arm descends into a lambda body).
+        let bodyMeta = (extendMetaForLambda meta (getTypeInfo l) toInvCN) { recoveredVars = recovered }
+        -- Compile the body factor in its own let-in block: any bindings the recursion
+        -- floats (e.g. the shared `l_*_call` triple of an inner Apply) must stay under
+        -- the recovered-variable binding below -- evaluation is strict, so a floated
+        -- binding that mentions the bound variable would otherwise be evaluated before
+        -- the recovered value is in scope.
+        bodyBlock <- lift (runWriterT (toIRInference bodyMeta cumulative bodyExpr sample)) <&> generateLetInBlock bodyMeta
+        -- Bind the recovered value of the bound variable in scope so free occurrences in
+        -- the body factor resolve (and redundant comparisons collapse to true). Kept
+        -- inline (not hoisted through setVariables): stripBranchCount's genVar heuristic
+        -- would shift projections from a hoisted binding as if it were a called-function
+        -- pair, while the local triple value stays unshifted. CSE recovers the sharing.
+        let bodyTriple = IRLetIn (toInvCN ++ tag) appliedSample bodyBlock
+        let pBody   = IRTFst bodyTriple
+            dimBody = IRTFst (IRTSnd bodyTriple)
+            bcBody  = IRTSnd (IRTSnd bodyTriple)
+        (combP, combDim) <- multP (scale p, dim) (pBody, dimBody)
+        let combBC = IROp OpPlus bc bcBody
+        return (wrapInLambdas combP, wrapInLambdas combDim, wrapInLambdas combBC)
   -- Forward chaining may have messed with the structure of the expression. We may have too many or too few lambdas.
   -- Every lambda, which is not applied, inside of the callable should be present in the retuned IRExpr. 
   -- Exclude the lambda, which is applied here and all lambdas, which are already present

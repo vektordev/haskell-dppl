@@ -26,10 +26,10 @@ You can also run the program directly from the command line using the built-in i
 ```
 stack run -- -i yourCode.spll generate
 stack run -- -i yourCode.spll probability -x 0.5
-stack run -- -i yourCode.spll integrate -l 0 -h 1
+stack run -- -i yourCode.spll cumulative -x 0.5
 ```
 
-to run the program in the forward direction, the prior distribution at x=0.5 and integrate the prior distribution from 0 to 1.
+to run the program in the forward direction, the probability (density) at x=0.5, and the cumulative distribution (P(X ≤ 0.5)) of the prior at x=0.5.
 
 ### Using the haskell interface
 
@@ -72,23 +72,49 @@ The following sections show simple examples that can be compiled and run using S
 
 This example constructs a MNist neural network, evaluates it with two different symbols and adds the results
 
-```
+```spll
 neural readMNist :: (Symbol -> Int) of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 main a b = readMNist(a) ++ readMNist(b)
+```
+
+The `of ...` clause enumerates the possible outputs of a neural network. When a network outputs an *unbounded recursive* ADT, the enumeration has to be bounded to a finite depth. Give the `data` type a default unroll depth with a trailing `depth N`, and auto-derivation (`of _`) uses it:
+
+```spll
+data FList = FCons hd::Float, tl::FList | FNil depth 2
+neural genList :: (Symbol -> FList) of _
+main sym = let xs = genList sym in if isFNil xs then 0.0 else hd xs
+```
+
+An explicit `of <N> <binder>.{...}` overrides the default per declaration (and is required when a field's domain can't be auto-derived, e.g. an `Int`), where `<binder>` is the self-reference name used inside the braces:
+
+```spll
+data Test = A a1::Int | B b1::Test
+neural classify :: (Symbol -> Test) of 3x.{A [0, 1, 2] | B x}
+main sym = if isA (classify sym) then 0 else 1
 ```
 
 #### Recursive lists
 
 The next example creates a unbound list by rolling a 0.5 probability and prepening a normally distributed value to the list if it suceeded.
 
-```
+```spll
 main=if Uniform > 0.5 then [] else Normal:main
 ```
 
+```text
+p([])=(0.5, 0.0)
+```
+
+Half the time the coin comes up empty, so the probability that this program outputs the empty list is exactly `0.5`, as the expected-output block above records.
+
 This example shows off some basic features using algebraic data types:
 
-```
+```spll
 main=(if Uniform>0.5 then left Uniform else right Normal, Uniform)
+```
+
+```text
+p((Left 0.3, 0.5))=(0.5, 2.0)
 ```
 
 

@@ -103,7 +103,11 @@ type NeuralDecl = (String, RType, Maybe MultiValue)
 
 data ADTDecl = ADTDecl {
   dataName :: String,
-  constructors :: [ADTConstructorDecl]
+  constructors :: [ADTConstructorDecl],
+  -- | Default recursion-unroll depth.
+  -- See 'autoDeriveMultiValue'.
+  -- 'Nothing' for non-recursive types or when no default was given.
+  adtDepth :: Maybe Int
   } deriving (Show, Eq)
 type ADTConstructorDecl = (String, [(String, RType)])
 

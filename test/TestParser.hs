@@ -78,7 +78,9 @@ neuralDeclToString (name, rty, Just tag) =
     "neural " ++ name ++ " :: " ++ rTypeToString rty ++ " of " ++ multiValueToString tag
 
 adtDeclToString :: ADTDecl -> String
-adtDeclToString ADTDecl{dataName=name, constructors=constrs} = name ++ " = " ++ intercalate " | " (map adtConstructorToString constrs)
+adtDeclToString ADTDecl{dataName=name, constructors=constrs, adtDepth=d} =
+  name ++ " = " ++ intercalate " | " (map adtConstructorToString constrs)
+    ++ maybe "" (\n -> " depth " ++ show n) d
 
 adtConstructorToString :: ADTConstructorDecl -> String
 adtConstructorToString (name, rts) = name ++ " " ++ unwords (map show rts)

@@ -36,6 +36,13 @@ data FCData = FCData
   -- around so codegen (IRCompiler) can materialise the value of any non-constant
   -- anchor a forward-chaining inverse path lands on.
   , fcAnchors :: Set ChainName
+  -- | For every Lambda node (keyed by its chain name): the occurrences of ITS
+  -- bound variable inside its own body, shadowing-aware. Occurrence lookup must
+  -- be scoped like this: a global by-name search would pick up same-named
+  -- variables bound by unrelated lambdas elsewhere in the program, and anchor
+  -- seeding can make those foreign occurrences solvable, yielding an inverse
+  -- built from another function's material.
+  , lambdaVarOccurrences :: [(ChainName, [ChainName])]
   }
 
 -- Information on what type of expression a HornClause originated from
@@ -98,12 +105,12 @@ isAppliedEquivalence _ = False
 -- the chain name does not resolve to a lambda.
 inversionSetup :: FCData -> ChainName -> Maybe (String, [ChainName], HornClause)
 inversionSetup fcData lambdaCN = do
-  (_, info, tag) <- findEquivalentExpression fcData lambdaCN
+  (resolvedCN, info, tag) <- findEquivalentExpression fcData lambdaCN
   case info of
     -- If the lambda is applied multiple times, @tag@ uniquely identifies our
     -- application; it suffixes both the occurrences and the observed body.
     LambdaInfo toInvVarName lambdaBodyCN ->
-      case findChainNamesForVar fcData toInvVarName of
+      case fromMaybe [] (lookup resolvedCN (lambdaVarOccurrences fcData)) of
         -- A dead binding (no occurrence of the bound variable) has nothing to
         -- invert through: not an invertible/witnessable lambda.
         []   -> Nothing
@@ -220,14 +227,19 @@ findEquivalentExpression fcData startCN = go [startCN] startCN
     isFinalExpr (VarInfo _) = False
     isFinalExpr _ = True
 
--- Empty for a variable with no occurrences (a dead binding) — the caller
--- decides; 'inversionSetup' answers Nothing there.
-findChainNamesForVar :: FCData -> String -> [ChainName]
-findChainNamesForVar fcData varName = map fst correctVarInfos
+-- Build the 'lambdaVarOccurrences' map for a whole program: every Lambda node
+-- paired with the (shadowing-aware) occurrences of its bound variable in its
+-- own body. Empty for a dead binding — the caller decides; 'inversionSetup'
+-- answers Nothing there.
+progToLambdaVarOccurrences :: Program -> [(ChainName, [ChainName])]
+progToLambdaVarOccurrences Program{functions=fs} = concatMap (go . snd) fs
   where
-    correctVarInfos = filter (isCorrectVarInfo varName . snd) (chainNameInfo fcData)
-    isCorrectVarInfo name (VarInfo n) | name == n = True
-    isCorrectVarInfo _ _ = False
+    go e@(Lambda TypeInfo{chainName=cn} n body) =
+      (cn, varOccurrences n body) : concatMap go (getSubExprs e)
+    go e = concatMap go (getSubExprs e)
+    varOccurrences n (Var TypeInfo{chainName=cn} m) | m == n = [cn]
+    varOccurrences n (Lambda _ m _) | m == n = []  -- shadowed; don't descend
+    varOccurrences n e = concatMap (varOccurrences n) (getSubExprs e)
 
 -- Strip the expression of all wrapping lambdas. Return the chain name of the resulting expression and all names of the bound variables stripped away
 unwrapLambdas :: FCData -> ChainName -> (ChainName, [String])
@@ -345,7 +357,8 @@ progToFCData :: Set ChainName -> Program -> FCData
 progToFCData anchors prog =
   FCData { hornClauses = anchorClauses ++ baseClauses
          , chainNameInfo = cnInfo
-         , fcAnchors = anchorInstances }
+         , fcAnchors = anchorInstances
+         , lambdaVarOccurrences = progToLambdaVarOccurrences prog }
   where
     cnInfo = progToChainNameInfo prog
     baseClauses = progToHornClauses prog cnInfo

@@ -405,10 +405,12 @@ compareGround a b
 -- itself witnessed exactly when it is a deterministic function of a /single/
 -- witnessed operand (everything else Dirac): the once-counting ledger stays
 -- positional (that one latent's density is the result's standalone law, counted
--- once). Two or more distinct witnessed operands are deliberately NOT re-marked
--- (their combination would need latent identity to dedup the ledger), and any
--- fresh latent in the combination un-marks the result — that is what keeps the
--- two-residual guard at 'Bottom'.
+-- once). A combination of two or more witnessed operands keeps a random
+-- capability but is NOT re-marked witnessed (the value is an image of several
+-- latents, not one; the codegen let-fold pays each latent at its own binding,
+-- which also covers the same-latent shape without a ledger identity). Any
+-- fresh latent beyond one in the combination floors the result — that is what
+-- keeps the two-residual guard at 'Bottom'.
 injFMod :: [ADTDecl] -> String -> [IMod] -> IMod
 injFMod adts name mods =
   case tryNormalClosure name (map projectI mods) of
@@ -442,15 +444,26 @@ injFMod adts name mods =
         --     observation is free, so it enters the fold as Exact; only the
         --     fresh residual pays. One fresh latent survives with its density
         --     (the u2-recovery case); two fresh latents still floor to {S,I}.
-        --   * ≥2 witnessed, no fresh: conservative plain fold, not witnessed
-        --     (no latent identity to dedup the density ledger).
+        --   * ≥2 witnessed, no fresh: every random operand is individually
+        --     recoverable from the observation, so this node's inference is
+        --     free once those recoveries are in scope — the codegen let-fold
+        --     (body-factor folding in IRCompiler's Apply arm) pays each
+        --     latent's density once at its own binding and checks this node
+        --     as an indicator, which also covers the same-latent shape
+        --     (e.g. x+x) without a ledger identity. The node keeps an honest
+        --     random capability: the meet of the witnessed grounds, family
+        --     dropped (a genuine combination). Not re-marked witnessed: the
+        --     value is an image of several latents, not one.
         floorCombine
           | null wits       = plainFold (map snd entries)
           | singleWitnessed = iwit (plainFold (map snd entries))
           | not (null fresh) =
               plainFold [ if w && gCap g /= Exact then topGround else g
                         | (w, g) <- entries ]
-          | otherwise       = plainFold (map snd entries)
+          | otherwise       =
+              IG (groundMod (foldr1 meetCap (map gCap wits))
+                            (foldr joinFin Finite (map gFin wits))
+                            FamNone)
 
         plainFold []     = IG gExact
         plainFold (g:gs) = IG (foldl marginalize g gs)
