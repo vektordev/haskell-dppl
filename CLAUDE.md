@@ -83,6 +83,8 @@ Deterministic  >  PNormal, PLogNormal  >  Integrate  >  Bottom
 ```
 `PNormal` and `PLogNormal` are incomparable siblings (different distribution families); their meet is `Integrate`. Deterministic values are not affected by randomness and need no inference. `PNormal`/`PLogNormal` allow closed-form Gaussian inference shortcuts. Integrate values have a known CDF (evaluable via trusted special functions, e.g. `erf` — not necessarily closed-form). Bottom values can only be sampled from, not inferred. Each PType implies that the semantics of lower types are available. (There is deliberately no dens-only rung between `Integrate` and `Bottom`: a density whose CDF would need in-house quadrature is excluded by the language; the internal capability engine in `SPLL.Typing.Modality` still distinguishes that state and projects it to `Bottom`.)
 
+A probabilistic `let x = v in body` whose observation cannot be point-inverted onto `x` (every path crosses a comparison or `if`) is compiled via **set-valued witnesses** (`setWitnessApply` in IRCompiler): the observation is inverted into guarded constraint-set worlds over `x` — intervals from comparisons (measured as CDF differences), case splits from conditionals, intersections across multiple occurrences — e.g. `let x = Normal in if x < 0.0 then 0.0 - x else x` yields the |Normal| density `2φ(y)`. Bodies drawing fresh randomness alongside such constraints are refused with a diagnostic.
+
 ## Additional Features
 
 ### topK Branch Pruning
