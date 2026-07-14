@@ -764,9 +764,15 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample
     let Program{functions=fs} = compilingProgram meta
     let bodyExpr = findExprWithCN (map snd fs) lambdaBodyCN
     toIRInference meta cumulative bodyExpr sample
-  else do
-    -- Inverse of the callable as a lambda
-    let (invExprP0, invExprCoV0) = toInvExpr clauses adts lChainName
+  else case toInvExprMaybe clauses adts lChainName of
+   -- No occurrence of the bound variable is point-invertible from the
+   -- observation. Fall back to set-valued witnesses: invert the observation
+   -- structurally into guarded constraint sets on the bound variable (intervals
+   -- from comparisons, case splits from ifs, intersections across occurrences)
+   -- and measure them against the bound distribution (design
+   -- set-valued-witnesses).
+   Nothing -> setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag v sample
+   Just (invExprP0, invExprCoV0) -> do
     invExprP   <- pruneDeadLetIns <$> materializeAnchors meta invExprP0
     invExprCoV <- pruneDeadLetIns <$> materializeAnchors meta invExprCoV0
     let appliedCoV = IRApply (IRLambda (boundVar ++ tag) invExprCoV) sample
@@ -1488,3 +1494,299 @@ stripBranchCount (IREnv funcs adts consts) = IREnv (map stripGroup funcs) adts c
     stripOuterTriple (IRLetIn n v body)        = IRLetIn n v (stripOuterTriple body)
     stripOuterTriple (IRTCons a (IRTCons b _)) = IRTCons a b
     stripOuterTriple e                         = e
+
+-- ===== Set-valued witnesses (design set-valued-witnesses) =====
+--
+-- When the bound variable of a probabilistic let cannot be point-recovered from
+-- the observation ('toInvExprMaybe' = Nothing), the observation may still carve
+-- out a measurable SET of its values: a comparison observed True confines it to
+-- an interval, an if-then-else case-splits on its condition, and multiple
+-- occurrences intersect their constraints. A "world" is a guarded constraint
+-- set; p(sample) = sum over worlds of (product of guards) * mu_v(set), where a
+-- point set is measured by v's density (with change-of-variables factor) and an
+-- interval by a CDF difference (mass needs no change-of-variables correction).
+
+data WBound = WNegInf | WPosInf | WFinite IRExpr
+
+-- | A constraint set over the bound variable's (scalar) domain.
+data WSet = WPoint IRExpr IRExpr     -- witness value, |d inverse / d observation|
+          | WInterval WBound WBound
+          | WFull
+          | WEmpty
+
+-- | Guards are Bool-valued IR over the sample and deterministic scope; a world
+-- contributes only when all guards hold.
+data WWorld = WWorld { wGuards :: [IRExpr], wSet :: WSet }
+
+constTrueIR :: IRExpr
+constTrueIR = IRConst (VBool True)
+
+const1 :: IRExpr
+const1 = IRConst (VFloat 1)
+
+addGuard :: IRExpr -> WWorld -> WWorld
+addGuard g (WWorld gs s) = WWorld (g:gs) s
+
+intersectW :: WWorld -> WWorld -> WWorld
+intersectW (WWorld g1 s1) (WWorld g2 s2) =
+  let (g3, s3) = intersectSet s1 s2 in WWorld (g1 ++ g2 ++ g3) s3
+
+-- Two constraints on the SAME draw. Point-point takes the first: both compute
+-- the same value from the same observation (the mergeExpr convention).
+intersectSet :: WSet -> WSet -> ([IRExpr], WSet)
+intersectSet WFull s = ([], s)
+intersectSet s WFull = ([], s)
+intersectSet WEmpty _ = ([], WEmpty)
+intersectSet _ WEmpty = ([], WEmpty)
+intersectSet (WPoint p c) (WPoint _ _) = ([], WPoint p c)
+intersectSet (WPoint p c) (WInterval lo hi) = (boundGuards p lo hi, WPoint p c)
+intersectSet (WInterval lo hi) (WPoint p c) = (boundGuards p lo hi, WPoint p c)
+intersectSet (WInterval lo1 hi1) (WInterval lo2 hi2) =
+  ([], WInterval (maxWBound lo1 lo2) (minWBound hi1 hi2))
+
+-- Membership guards of a point against interval bounds. Strictness is
+-- irrelevant for the continuous measures this engine emits (a boundary point
+-- has measure zero); the non-strict form gives boundary queries like p(0) for
+-- |Normal| the density instead of an arbitrary 0.
+boundGuards :: IRExpr -> WBound -> WBound -> [IRExpr]
+boundGuards p lo hi =
+     [IRUnaryOp OpNot (IROp OpLessThan p e) | WFinite e <- [lo]]
+  ++ [IRUnaryOp OpNot (IROp OpGreaterThan p e) | WFinite e <- [hi]]
+  ++ [IRConst (VBool False) | WPosInf <- [lo]]
+  ++ [IRConst (VBool False) | WNegInf <- [hi]]
+
+maxWBound :: WBound -> WBound -> WBound
+maxWBound WNegInf b = b
+maxWBound b WNegInf = b
+maxWBound WPosInf _ = WPosInf
+maxWBound _ WPosInf = WPosInf
+maxWBound (WFinite a) (WFinite b) = WFinite (IRIf (IROp OpGreaterThan a b) a b)
+
+minWBound :: WBound -> WBound -> WBound
+minWBound WPosInf b = b
+minWBound b WPosInf = b
+minWBound WNegInf _ = WNegInf
+minWBound _ WNegInf = WNegInf
+minWBound (WFinite a) (WFinite b) = WFinite (IRIf (IROp OpLessThan a b) a b)
+
+-- | Bool-valued IR: is @val@ (a deterministic value) inside the target set?
+memberGuard :: RType -> IRExpr -> WSet -> IRExpr
+memberGuard rt val (WPoint p _) = case rt of
+  TFloat  -> IROp OpApprox val p
+  TVarR _ -> IROp OpApprox val p
+  _       -> IROp OpEq val p
+memberGuard _ val (WInterval lo hi) = case boundGuards val lo hi of
+  [] -> constTrueIR
+  gs -> foldr1 (IROp OpAnd) gs
+memberGuard _ _ WFull  = constTrueIR
+memberGuard _ _ WEmpty = IRConst (VBool False)
+
+subtreeCNs :: Expr -> [ChainName]
+subtreeCNs e = chainName (getTypeInfo e) : concatMap subtreeCNs (getSubExprs e)
+
+subtreeHasOcc :: [ChainName] -> Expr -> Bool
+subtreeHasOcc occs e = let cns = subtreeCNs e in any (`elem` cns) occs
+
+-- | Entry point of the fallback, called from the probabilistic Apply arm after
+-- 'toInvExprMaybe' failed. Builds the constraint worlds for the observation and
+-- measures them against the bound distribution @v@.
+setWitnessApply :: CompilerMetadata -> Bool -> RType -> Expr -> ChainName -> ChainName -> String -> Expr -> IRExpr -> CompilerMonad CompilationResult
+setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag v sample = do
+  let userVar = case l of Lambda _ n _ -> n; _ -> "<bound variable>"
+  let refuse why = error $ unlines
+        [ "set-valued witness construction failed for the binding of '" ++ userVar ++ "' (lambda at " ++ lResolvedCN ++ "):"
+        , why
+        , "No occurrence of the bound variable is point-invertible either (forward"
+        , "chaining found no inversion path). See design set-valued-witnesses." ]
+  if tag /= ""
+    then refuse "the lambda is applied through higher-order machinery (tagged invocation), which the set-witness fallback does not support."
+    else return ()
+  case rt of
+    TArrow _ _ -> refuse "the body returns a function."
+    _ -> return ()
+  let Program{functions=fs} = compilingProgram meta
+  let bodyExpr = findExprWithCN (map snd fs) lambdaBodyCN
+  let occs = fromMaybe [] (lookup lResolvedCN (lambdaVarOccurrences (fcData meta)))
+  let target = if cumulative
+        then WInterval WNegInf (WFinite sample)
+        else WPoint sample const1
+  worldsM <- invertToWorlds meta occs bodyExpr target
+  case worldsM of
+    -- A cumulative query the engine cannot invert (e.g. the multivariate CDF of
+    -- a correlated tuple) is refused at runtime: the probability variant of the
+    -- same program may be perfectly fine, and a compile-time error here would
+    -- take it down too (all variants are compiled up front).
+    Nothing | cumulative -> return
+      ( IRError ("cannot compute this cumulative: the observation on binding '" ++ userVar
+          ++ "' has no set-valued inverse in cumulative mode (design set-valued-witnesses)")
+      , const0, const1)
+    Nothing -> refuse ("the observation cannot be propagated onto the bound variable: the body"
+      ++ " contains a node that is neither point-invertible, a comparison against a"
+      ++ " deterministic bound, an if-then-else case split, a tuple of such parts, nor"
+      ++ " deterministic given scope (e.g. it draws fresh randomness).")
+    Just worlds -> do
+      measured <- mapM (measureWorld meta v) worlds
+      (pSum, dimSum, bcSum) <- case measured of
+        -- no worlds can only mean an impossible observation
+        []     -> return (const0, const0, const1)
+        (m:ms) -> foldM (\(ap, ad, ab) (bp, bd, bb) -> do
+                           (cp, cd) <- addP (ap, ad) (bp, bd)
+                           return (cp, cd, IROp OpPlus ab bb)) m ms
+      -- Full-ANY marginal short-circuit: guards and transported bounds are not
+      -- ANY-aware, but the marginal of the whole observation is simply 1.
+      if cumulative
+        then return (pSum, dimSum, bcSum)
+        else return ( IRIf (IRUnaryOp OpIsAny sample) const1 pSum
+                    , IRIf (IRUnaryOp OpIsAny sample) const0 dimSum
+                    , IRIf (IRUnaryOp OpIsAny sample) const1 bcSum )
+
+-- | Measure one world against the bound distribution. The measure is compiled
+-- in its own writer scope and kept under the world's guards, so bindings whose
+-- evaluation is only valid when the guards hold are not hoisted past them.
+measureWorld :: CompilerMetadata -> Expr -> WWorld -> CompilerMonad CompilationResult
+measureWorld meta v (WWorld guards set) = do
+  ((p, dim, bc), binds) <- lift (runWriterT (measureSet meta v set))
+  let wrap = generateLetInExpr binds
+  let guarded zero e = foldr (\g acc -> IRIf g acc zero) (wrap e) guards
+  return (guarded const0 p, guarded const0 dim, guarded const0 bc)
+
+measureSet :: CompilerMetadata -> Expr -> WSet -> CompilerMonad CompilationResult
+measureSet meta v (WPoint p cov) = do
+  (pv, dv, bv) <- toIRInference meta False v p
+  -- change-of-variables correction only for continuous results, mirroring the
+  -- point-witness path
+  let scaled = IROp OpMult pv (IRIf (IROp OpEq dv const0) const1 (IRUnaryOp OpAbs cov))
+  return (scaled, dv, bv)
+measureSet meta v (WInterval lo hi) = do
+  (cdfHi, bcHi) <- cdfAtBound meta v hi
+  (cdfLo, bcLo) <- cdfAtBound meta v lo
+  let diff = IROp OpSub cdfHi cdfLo
+  -- an empty runtime intersection shows up as a non-positive difference
+  let clamped = IRIf (IROp OpGreaterThan diff const0) diff const0
+  let bc = case (hi, lo) of
+        (WFinite _, _) -> bcHi
+        (_, WFinite _) -> bcLo
+        _              -> const1
+  return (clamped, const0, bc)
+measureSet _ _ WFull  = return (const1, const0, const1)
+measureSet _ _ WEmpty = return (const0, const0, const1)
+
+cdfAtBound :: CompilerMetadata -> Expr -> WBound -> CompilerMonad (IRExpr, IRExpr)
+cdfAtBound _ _ WNegInf = return (const0, const1)
+cdfAtBound _ _ WPosInf = return (const1, const1)
+cdfAtBound meta v (WFinite e) = do
+  (p, _, bc) <- toIRInference meta True v e
+  return (p, bc)
+
+-- | Invert the observation @body ∈ target@ into constraint worlds on the bound
+-- variable (occurrences @occs@). Nothing when some node on the way is not
+-- supported — the caller refuses with a diagnostic.
+invertToWorlds :: CompilerMetadata -> [ChainName] -> Expr -> WSet -> CompilerMonad (Maybe [WWorld])
+invertToWorlds meta occs body target
+  -- x-free subtree: deterministic given scope reduces to a membership test of
+  -- its value against the target; anything else draws fresh randomness, and
+  -- folding that in alongside set constraints is not supported (the
+  -- point-witness path's body-factor folding handles the point case).
+  | not (subtreeHasOcc occs body) =
+      if pType (getTypeInfo body) == Deterministic
+        then do
+          bIR <- toIRGenerate meta body
+          return (Just [WWorld [memberGuard (rType (getTypeInfo body)) bIR target] WFull])
+        else return Nothing
+invertToWorlds meta occs body target = do
+  direct <- transportDirect meta occs body target
+  case direct of
+    Just ws -> return (Just ws)
+    Nothing -> case body of
+      IfThenElse _ c t e
+        | not (subtreeHasOcc occs c) && pType (getTypeInfo c) == Deterministic -> do
+            g <- toIRGenerate meta c
+            wsT <- invertToWorlds meta occs t target
+            wsE <- invertToWorlds meta occs e target
+            case (wsT, wsE) of
+              (Just ts, Just es) -> return (Just (map (addGuard g) ts ++ map (addGuard (IRUnaryOp OpNot g)) es))
+              _ -> return Nothing
+        | subtreeHasOcc occs c -> do
+            -- the condition constrains the same draw: case split and intersect
+            cT <- invertToWorlds meta occs c (WPoint constTrueIR const1)
+            cF <- invertToWorlds meta occs c (WPoint (IRConst (VBool False)) const1)
+            wsT <- invertToWorlds meta occs t target
+            wsE <- invertToWorlds meta occs e target
+            case (cT, cF, wsT, wsE) of
+              (Just cts, Just cfs, Just ts, Just es) ->
+                return (Just ([intersectW cw tw | cw <- cts, tw <- ts]
+                           ++ [intersectW cw ew | cw <- cfs, ew <- es]))
+              _ -> return Nothing
+        | otherwise -> return Nothing
+      LessThan _ lop rop -> comparisonWorlds meta occs False lop rop target
+      GreaterThan _ lop rop -> comparisonWorlds meta occs True lop rop target
+      InjF _ (Named "TCons") [pa, pb] -> case target of
+        WPoint s _ -> do
+          wsA <- invertToWorlds meta occs pa (WPoint (IRTFst s) const1)
+          wsB <- invertToWorlds meta occs pb (WPoint (IRTSnd s) const1)
+          case (wsA, wsB) of
+            (Just as, Just bs) -> return (Just [intersectW a b | a <- as, b <- bs])
+            _ -> return Nothing
+        -- a multivariate CDF over correlated components is not defined here
+        _ -> return Nothing
+      _ -> return Nothing
+
+-- | Point/interval transport of a whole subtree onto its single occurrence of
+-- the bound variable, via forward chaining seeded at the subtree root. Only
+-- fires for exactly one occurrence: with several, a point inversion through
+-- one of them would silently drop the others' constraints — the structural
+-- cases above split those instead.
+transportDirect :: CompilerMetadata -> [ChainName] -> Expr -> WSet -> CompilerMonad (Maybe [WWorld])
+transportDirect meta occs body target = case filter (`elem` subtreeCNs body) occs of
+  [occ] -> case target of
+    WPoint s c0 -> case toSeededInvExpr (fcData meta) (adtDecls meta) bodyCN occ of
+      Nothing -> return Nothing
+      Just (g0, cov0) -> do
+        g   <- pruneDeadLetIns <$> materializeAnchors meta g0
+        cov <- pruneDeadLetIns <$> materializeAnchors meta cov0
+        let applyTo e arg = IRApply (IRLambda bodyCN e) arg
+        return (Just [WWorld [] (WPoint (applyTo g s) (IROp OpMult c0 (applyTo cov s)))])
+    WInterval lo hi -> case toSeededMonotoneInvExpr (fcData meta) (adtDecls meta) bodyCN occ of
+      Nothing -> return Nothing
+      Just (g0, dir) -> do
+        g <- pruneDeadLetIns <$> materializeAnchors meta g0
+        let tr (WFinite e) = WFinite (IRApply (IRLambda bodyCN g) e)
+            tr b = b
+        -- a decreasing inverse swaps the endpoints, infinities included
+        let flipInf WNegInf = WPosInf
+            flipInf WPosInf = WNegInf
+            flipInf b = b
+        let (lo', hi') = case dir of
+              MonInc -> (tr lo, tr hi)
+              MonDec -> (flipInf (tr hi), flipInf (tr lo))
+        return (Just [WWorld [] (WInterval lo' hi')])
+    _ -> return Nothing
+  _ -> return Nothing
+  where bodyCN = chainName (getTypeInfo body)
+
+-- | Worlds of a comparison node: the side carrying the bound variable is
+-- confined to a half-line whose direction depends on the observed boolean;
+-- the other side must be deterministic.
+comparisonWorlds :: CompilerMetadata -> [ChainName] -> Bool -> Expr -> Expr -> WSet -> CompilerMonad (Maybe [WWorld])
+comparisonWorlds meta occs isGT lop rop target
+  | subtreeHasOcc occs lop && not (subtreeHasOcc occs rop) && pType (getTypeInfo rop) == Deterministic = do
+      b <- toIRGenerate meta rop
+      splitOn lop b False
+  | subtreeHasOcc occs rop && not (subtreeHasOcc occs lop) && pType (getTypeInfo lop) == Deterministic = do
+      b <- toIRGenerate meta lop
+      splitOn rop b True
+  | otherwise = return Nothing
+  where
+    -- With the bound-variable side on the LEFT of `<`, True means side < bound;
+    -- each of `>` and the side being on the right flips the direction.
+    splitOn side b flipped = do
+      let lower = WInterval WNegInf (WFinite b)
+          upper = WInterval (WFinite b) WPosInf
+      let (setT, setF) = if isGT /= flipped then (upper, lower) else (lower, upper)
+      wsT <- invertToWorlds meta occs side setT
+      wsF <- invertToWorlds meta occs side setF
+      case (wsT, wsF) of
+        (Just ts, Just fs) -> return (Just (
+             map (addGuard (memberGuard TBool constTrueIR target)) ts
+          ++ map (addGuard (memberGuard TBool (IRConst (VBool False)) target)) fs))
+        _ -> return Nothing

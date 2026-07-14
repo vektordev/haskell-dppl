@@ -6,6 +6,10 @@ module SPLL.Typing.ForwardChaining
   , annotateProg
   , progToFCData
   , toInvExpr
+  , toInvExprMaybe
+  , toSeededInvExpr
+  , toSeededMonotoneInvExpr
+  , Monotonicity(..)
   , isInvertibleLambda
   , isWitnessedLambda
   , findEquivalentExpression
@@ -182,10 +186,42 @@ toInvExpr fcData adts lambdaCN = (mergedM, mergedCoV)
     valueExprs = mapMaybe (toValueExpr clauseSet [paramClause] adts) toInvCNs
     (mergedM, mergedCoV) = mergeExpr toInvVarName lambdaCN toInvCNs valueExprs
 
+-- | 'toInvExpr' with a recoverable outcome: Nothing when no occurrence of the
+-- bound variable yields an inversion path (where 'toInvExpr' dies in
+-- 'mergeExpr'). The set-valued witness fallback in IRCompiler dispatches on
+-- this instead of the hard error.
+toInvExprMaybe :: FCData -> [ADTDecl] -> ChainName -> Maybe (IRExpr, IRExpr)
+toInvExprMaybe fcData adts lambdaCN = do
+  (toInvVarName, toInvCNs, paramClause) <- inversionSetup fcData lambdaCN
+  case mapMaybe (toValueExpr (hornClauses fcData) [paramClause] adts) toInvCNs of
+    []  -> Nothing
+    ves -> Just (mergeExpr toInvVarName lambdaCN toInvCNs ves)
+
+-- | Point-inversion of the chain from an arbitrary observed node (@seedCN@)
+-- down to one occurrence of a witnessed variable (@occCN@). The returned
+-- expressions have @seedCN@ as their free variable. This is the machinery of
+-- 'isWitnessedLambda' exposed for codegen: the set-valued witness fallback
+-- inverts if-branches and comparison operands from their own roots rather than
+-- from the lambda body.
+toSeededInvExpr :: FCData -> [ADTDecl] -> ChainName -> ChainName -> Maybe (IRExpr, IRExpr)
+toSeededInvExpr fcData adts seedCN occCN =
+  toValueExpr (hornClauses fcData) [ParameterHornClause seedCN] adts occCN
+
 -- Performs forward chaining to create an expression, which calculates the value of a specific point in the AST given a set of parameter points in the AST.
 -- Also returns the derivative of that expression
 toValueExpr :: [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> Maybe (IRExpr, IRExpr)
-toValueExpr clauses paramClauses adts startCN =
+toValueExpr clauses paramClauses adts startCN = do
+  relevantSortedClauses <- toValuePath clauses paramClauses startCN
+  -- Calculate the symbolic derivative
+  let deriv = derivativeOfPath adts relevantSortedClauses
+  -- Generate code
+  Just (toLetInBlock clauses adts relevantSortedClauses, wrapInLetInBlock clauses adts relevantSortedClauses deriv)
+
+-- The clause-path core of 'toValueExpr': the topologically sorted, fulfilled
+-- clauses up to (and including) the one concluding @startCN@, or Nothing when
+-- forward chaining never derives it.
+toValuePath :: [[HornClause]] -> [HornClause] -> ChainName -> Maybe [HornClause]
+toValuePath clauses paramClauses startCN =
   case findConcludingHornClause solvedClauses startCN of
     Just concludingClause -> do
       -- Throw away superfluous clauses. Do this by sorting them by requirement
@@ -193,16 +229,93 @@ toValueExpr clauses paramClauses adts startCN =
       -- Also guarantees that the later generated letIns are in the correct order
       -- This may still contain some superflous clauses, but they can easily be detected by an optimizer
       let sortedClauses = topSortDAG solvedClauses
-      let relevantSortedClauses = cutList sortedClauses concludingClause
-      -- Calculate the symbolic derivative
-      let deriv = derivativeOfPath adts relevantSortedClauses
-      -- Generate code
-      Just (toLetInBlock clauses adts relevantSortedClauses, wrapInLetInBlock clauses adts relevantSortedClauses deriv)
+      Just (cutList sortedClauses concludingClause)
     Nothing -> Nothing
   where
     augmentedClauseSet = map (:[]) paramClauses ++ clauses
     -- Solve the set of Horn clauses for clauses which are fulfilled
     solvedClauses = solveHCSet augmentedClauseSet
+
+-- | Whether the inverse chain seed→occurrence is monotone increasing or
+-- decreasing, statically.
+data Monotonicity = MonInc | MonDec deriving (Eq, Show)
+
+-- | Like 'toSeededInvExpr', but for transporting an *interval* constraint
+-- instead of a point: returns the inverse g (free variable @seedCN@) together
+-- with a static monotonicity certificate. g monotone means g maps intervals to
+-- intervals, with the endpoints swapped iff 'MonDec' — so
+-- @seed ∈ [lo,hi] ⟺ occ ∈ [g lo, g hi]@ (resp. @[g hi, g lo]@). No Jacobian is
+-- returned: interval mass needs no change-of-variables correction. Nothing when
+-- there is no path or when a step on the value-carrying spine has no statically
+-- known direction (e.g. multiplication by a non-literal operand) or is not a
+-- scalar monotone float function at all.
+toSeededMonotoneInvExpr :: FCData -> [ADTDecl] -> ChainName -> ChainName -> Maybe (IRExpr, Monotonicity)
+toSeededMonotoneInvExpr fcData adts seedCN occCN = do
+  let clauses = hornClauses fcData
+  path <- toValuePath clauses [ParameterHornClause seedCN] occCN
+  spine <- chainSpine fcData path seedCN occCN
+  dirs <- mapM (stepMonotonicity fcData) spine
+  let dir = if odd (length (filter (== MonDec) dirs)) then MonDec else MonInc
+  return (toLetInBlock clauses adts path, dir)
+
+-- The value-carrying spine of an inversion path: walking from the occurrence
+-- back towards the seed, at each step the clause concluding the current node
+-- and then its "parent" premise — the one holding the observed value flowing
+-- down. Side computations (deriving the other operands) are not on the spine
+-- and cannot affect monotonicity. Nothing when a spine step's parent cannot be
+-- identified.
+chainSpine :: FCData -> [HornClause] -> ChainName -> ChainName -> Maybe [HornClause]
+chainSpine fcData path seedCN = go
+  where
+    go cn
+      | cn == seedCN = Just []
+      | otherwise = case findConcludingHornClause path cn of
+          Nothing -> Just []  -- reached a self-sufficient start (parameter/anchor)
+          Just (ParameterHornClause _) -> Just []
+          Just c  -> do
+            parent <- spineParent fcData c
+            rest <- go parent
+            return (c : rest)
+
+-- The premise of a clause that carries the observed value. For an equivalence
+-- it is the single premise; for an InjF inverse it is the conclusion of the
+-- clause group's forward sibling (the node the inverted function computed) —
+-- premise ORDER is not a reliable indicator, the forward output sits at
+-- different positions in different inverse FDecls.
+spineParent :: FCData -> HornClause -> Maybe ChainName
+spineParent _ (EquivalenceHornClause [p] _ _ _) = Just p
+spineParent _ (ExprHornClause [p] _ _ _) = Just p
+spineParent fcData c@(ExprHornClause pres _ (InjFInfo _) inv) | inv > 0 = do
+  grp <- find (c `elem`) (hornClauses fcData)
+  fwd <- find (\cl -> isExprHornClause cl && inversion cl == 0) grp
+  let parent = conclusion fwd
+  if parent `elem` pres then Just parent else Nothing
+spineParent _ _ = Nothing
+
+-- Static monotonicity of one spine step, in its value-carrying argument.
+-- Conservative: any InjF without an entry here fails the whole transport.
+stepMonotonicity :: FCData -> HornClause -> Maybe Monotonicity
+stepMonotonicity _ (EquivalenceHornClause {}) = Just MonInc
+stepMonotonicity fcData c@(ExprHornClause pres _ (InjFInfo name) inv) | inv > 0 =
+  case name of
+    "plus"   -> Just MonInc   -- subtract the other operand
+    "double" -> Just MonInc
+    "exp"    -> Just MonInc   -- inverse is log
+    "log"    -> Just MonInc   -- inverse is exp
+    "neg"    -> Just MonDec
+    "mult"   -> do
+      -- divide by the other operand: direction is the sign of that operand,
+      -- known statically only when it is a literal constant.
+      parent <- spineParent fcData c
+      case filter (/= parent) pres of
+        [other] -> case lookup (untag other) (chainNameInfo fcData) of
+          Just (ConstantInfo (VFloat f))
+            | f > 0 -> Just MonInc
+            | f < 0 -> Just MonDec
+          _ -> Nothing
+        _ -> Nothing
+    _ -> Nothing
+stepMonotonicity _ _ = Nothing
 
 -- Takes a chain name of a point in the AST and finds the lambda, this point is equivalent to.
 -- Also return the uniquely identifying tag if the lambda is tagged
