@@ -294,6 +294,34 @@ retypeDetGiven names e = go names e
                  InjF (ti {pType = Deterministic}) f params
            _ -> ex'
 
+-- | True if the expression contains a source of randomness: a reference to a
+-- non-deterministic variable (the builtin distributions @Uniform@/@Normal@ are
+-- 'Var' nodes, as are references to probabilistic top-level functions) or a
+-- neural-network read. Run this on a body already passed through
+-- 'retypeDetGiven', so recovered variables are 'Deterministic' and don't count.
+containsRandomSource :: Expr -> Bool
+containsRandomSource e = isSource e || any containsRandomSource (getSubExprs e)
+  where
+    isSource (Var ti _)  = pType ti /= Deterministic
+    isSource (ReadNN {}) = True
+    isSource _           = False
+
+-- | Drop dead let-bindings from a forward-chaining inverse expression.
+-- 'toValueExpr' deliberately over-emits: its letin chain can bind clause
+-- values unrelated to the recovered variable ("superfluous clauses ... easily
+-- detected by an optimizer"). Relying on the optimizer for that is not just a
+-- performance matter: 'IRLetIn' is strict, so under a marginal (ANY) query an
+-- unrelated binding can run arithmetic on VAny and crash an unoptimized run
+-- even though the live inverse path never touches the ANY slot. Prune to the
+-- live chain at emission time.
+pruneDeadLetIns :: IRExpr -> IRExpr
+pruneDeadLetIns e =
+  let e' = irMap prune e
+  in if e' == e then e' else pruneDeadLetIns e'
+  where
+    prune (IRLetIn n _ b) | not (freeInIR n b) = b
+    prune x = x
+
 negInf :: IRExpr
 negInf = IRConst (VFloat (-9999999))
 
@@ -739,8 +767,8 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample
   else do
     -- Inverse of the callable as a lambda
     let (invExprP0, invExprCoV0) = toInvExpr clauses adts lChainName
-    invExprP   <- materializeAnchors meta invExprP0
-    invExprCoV <- materializeAnchors meta invExprCoV0
+    invExprP   <- pruneDeadLetIns <$> materializeAnchors meta invExprP0
+    invExprCoV <- pruneDeadLetIns <$> materializeAnchors meta invExprCoV0
     let appliedCoV = IRApply (IRLambda (boundVar ++ tag) invExprCoV) sample
     let lInv = IRLambda (boundVar ++ tag) invExprP
     -- Apply the sample to the inverse
@@ -797,7 +825,28 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample
             bcBody  = IRTSnd (IRTSnd bodyTriple)
         (combP, combDim) <- multP (scale p, dim) (pBody, dimBody)
         let combBC = IROp OpPlus bc bcBody
-        return (wrapInLambdas combP, wrapInLambdas combDim, wrapInLambdas combBC)
+        -- ANY in the witnessing slot (design modality-witnessed-inference, §ANY):
+        -- appliedSample is VAny at runtime iff the slot FC recovers this binding
+        -- from was queried marginally. If the binding is a "sink" — a single
+        -- occurrence and no further randomness in the body — its density
+        -- integrates to 1 and the body factor alone is the correct marginal
+        -- (the ANY-valued occurrence lands in the very slot that is ANY, where
+        -- the deconstruction Save-guard absorbs it). Otherwise the marginal is a
+        -- genuine convolution (or the ANY value would flow into inverse
+        -- arithmetic / observed-slot comparisons), so refuse at runtime rather
+        -- than crash or return a silently wrong density.
+        let occurrences = fromMaybe [] (lookup lResolvedCN (lambdaVarOccurrences (fcData meta)))
+        let bindingIsSink = length occurrences == 1 && not (containsRandomSource bodyExpr)
+        let userVar = case l of Lambda _ n _ -> n; _ -> boundVar
+        let refuse = IRError ("cannot compute marginal: binding '" ++ userVar
+              ++ "' is unobserved (ANY in its witnessing slot), but its value feeds"
+              ++ " observed slots or further randomness; integrating it out is beyond"
+              ++ " this engine (design modality-witnessed-inference)")
+        let anyW = IRUnaryOp OpIsAny appliedSample
+        let guardAny ok whenAnySink = IRIf anyW (if bindingIsSink then whenAnySink else refuse) ok
+        return ( wrapInLambdas (guardAny combP pBody)
+               , wrapInLambdas (guardAny combDim dimBody)
+               , wrapInLambdas (guardAny combBC bcBody) )
   -- Forward chaining may have messed with the structure of the expression. We may have too many or too few lambdas.
   -- Every lambda, which is not applied, inside of the callable should be present in the retuned IRExpr. 
   -- Exclude the lambda, which is applied here and all lambdas, which are already present

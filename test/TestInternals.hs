@@ -24,6 +24,7 @@ import SPLL.IntermediateRepresentation
 import IRInterpreter (generateDet)
 import Data.Foldable (toList)
 import Data.List (isInfixOf)
+import Control.Exception (try, evaluate, ErrorCall(..))
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure)
 import TestCaseParser (Backend(..), allBackends, parseTestCasesFromString)
@@ -640,12 +641,54 @@ witnessedBindingTests = testGroup "ForwardChaining witnessed-binding query"
               (not (isWitnessedLambda fc (adts prog) (declRootCN "main" prog) lamCN))
   ]
 
+-- | Runtime ANY-refusal guard (design modality-witnessed-inference, §ANY —
+-- the milestone-3 remainder). ANY in the slot that witnesses a let binding
+-- means the binding is unobserved. When it is a sink (single occurrence, no
+-- downstream randomness) the marginal is free — pinned in the letWitnessed*
+-- .tst cases. Otherwise the marginal is a convolution the engine cannot
+-- compute, and the compiled probability code must refuse with a diagnostic —
+-- never crash on VAny arithmetic, never return a silent 1.0.
+anyRefusalTests :: TestTree
+anyRefusalTests = testGroup "witnessed-inference ANY refusal"
+  [ testCase "ANY in the witnessing slot of the additive witness refuses, naming x" $
+      expectMarginalRefusal
+        "main = let x = Uniform in let y = x + Uniform in (x, y)"
+        (VTuple VAny (VFloat 1.0)) "x"
+  , testCase "ANY in the witnessing slot of the multiplicative witness refuses, naming x" $
+      expectMarginalRefusal
+        "main = let x = Uniform in let y = x * Uniform in (x, y)"
+        (VTuple VAny (VFloat 0.25)) "x"
+  , testCase "mid-chain ANY with an observed dependent slot refuses, naming y" $
+      -- z = y + u3 is observed, so recovering u3 needs y's value: a genuine
+      -- convolution. The guard must fire at the y-binding, not crash at the
+      -- z-binding's inverse arithmetic.
+      expectMarginalRefusal
+        "main = let x = Uniform in let y = x + Uniform in let z = y + Uniform in (x, (y, z))"
+        (VTuple (VFloat 0.5) (VTuple VAny (VFloat 1.5))) "y"
+  ]
+
+expectMarginalRefusal :: String -> IRValue -> String -> IO ()
+expectMarginalRefusal src sample var = do
+  let prog = either (\e -> error ("parse failed: " ++ show e)) id (tryParseProgram "test" src)
+  r <- try (case runProb defaultCompilerConfig prog [] sample of
+              Left cerr -> return (Left cerr)
+              Right v   -> evaluate (length (show v)) >> return (Right v))
+  case r of
+    Left (ErrorCall msg) -> do
+      assertBool ("expected the marginal-refusal diagnostic, got: " ++ msg)
+        ("cannot compute marginal" `isInfixOf` msg)
+      assertBool ("diagnostic should name the binding '" ++ var ++ "', got: " ++ msg)
+        (("'" ++ var ++ "'") `isInfixOf` msg)
+    Right (Left cerr) -> assertFailure ("expected runtime refusal, got compile error: " ++ show cerr)
+    Right (Right v) -> assertFailure ("expected runtime refusal, got value: " ++ show v)
+
 internalsTests :: TestTree
 internalsTests = testGroup "Internals"
   [ testProperties "properties" $(allProperties)
   , classConstraintTests
   , forwardChainingCertTests
   , witnessedBindingTests
+  , anyRefusalTests
   , testGroup "encode"
       [ test_encodeTupleGaussianParams
       , test_encodeDiscreteSumsToOne

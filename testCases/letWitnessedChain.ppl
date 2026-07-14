@@ -1,0 +1,1 @@
+main = let x = Uniform in let y = x + Uniform in let z = y + Uniform in (x, (y, z))
