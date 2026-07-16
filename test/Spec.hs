@@ -25,7 +25,7 @@ import TestRejection (rejectionTests)
 import TestModality (modalityTests)
 import TestModalityInfer (modalityInferTests)
 import TestDeterminism (determinismTests)
-import TestEncodeProperties (encodeTests)
+import TestEncodeProperties (encodeTests, encodeRoundtripTests)
 import TestShowcase (showcaseTests)
 import End2EndTesting (end2endTests, getAllTestFiles)
 import TestCaseParser (parseProgram, parseTestCases, TestCase(..), Backend(..))
@@ -549,6 +549,7 @@ main = do
   detTests <- determinismTests
   showcase <- showcaseTests
   corpusPool <- loadCorpusCases
+  encodeRoundtrip <- encodeRoundtripTests
   defaultMain $ testGroup "Tests"
     [ specTests
     , corpusTests corpusPool
@@ -559,6 +560,7 @@ main = do
     , modalityInferTests
     , detTests
     , encodeTests
+    , encodeRoundtrip
     , showcase
     , e2e
     ]

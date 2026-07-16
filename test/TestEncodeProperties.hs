@@ -20,21 +20,30 @@
 
 module TestEncodeProperties
   ( encodeTests
+  , encodeRoundtripTests
   ) where
 
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure)
-import Control.Monad (forM_)
+import Control.Monad (forM_, replicateM)
+import Control.Monad.Random (evalRand)
+import System.Random (mkStdGen)
+import System.FilePath (takeBaseName)
 import Data.Foldable (toList)
 import Data.List (isInfixOf, nub, sort)
 
-import SPLL.Prelude (runEncode)
+import SPLL.Prelude (runEncode, compile, runEncodeC, runProbNamedC, runGenNamedC)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Lang.Types
 import SPLL.Lang.Lang (Program(..))
-import SPLL.AutoNeural (makeAutoNeural, makePartitionPlan, getSize, PartitionPlan(..))
+import SPLL.AutoNeural (makeAutoNeural, makePartitionPlan, makeProb, getSize, PartitionPlan(..))
 import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType (RType(..))
+import IRInterpreter (generateDet)
+import MockNN (evaluateMockNN)
+import TestCaseParser (parseTestCases, parseProgram, TestCase(..), Backend(..))
+import TestTolerances (probTolerance)
+import End2EndTesting (getAllTestFiles, encodeArgsFor, endpointPlan)
 
 ------------------------------------------------------------------------
 -- Internal helpers
@@ -488,3 +497,121 @@ encodeTests = testGroup "Encode"
   , encodeInvariant_generateCoversAllSlots
   , encodeInvariant_probIndicesInBounds
   ]
+
+------------------------------------------------------------------------
+-- Corpus roundtrip invariants: encode and the decoder readers must be two
+-- views of the same logit-vector semantics. Two complementary directions:
+--
+--  * LogitIdentity (logits -> distribution -> logits): for every corpus
+--    program whose main is a pure decoder passthrough (`main sym = nn sym`),
+--    feeding the mock NN a literal logit vector and encoding main's output
+--    distribution must reproduce that vector exactly. This pins the slot
+--    *layout*: encode's discrete slots re-derive their values through the
+--    prob reader's index arithmetic, continuous slots through the
+--    normal-params extraction, so any drift between makeGen/makeProb/encode
+--    offsets surfaces as a slot mismatch. (It cannot catch formula bugs:
+--    both sides of the identity go through the same reader.)
+--
+--  * DensityAgreement (distribution -> logits -> distribution): for every
+--    encode invocation the corpus declares (`encode_len`/`encode_at` cases,
+--    giving a known-good endpoint + argument list), the endpoint's encoded
+--    logit vector, decoded through the plan's standalone prob reader, must
+--    assign the same (prob, dim) as the endpoint's own compiled prob
+--    function at forward-sampled points. On transformed outputs (e.g. the
+--    affine-Gaussian family) the two sides take independent compiler paths
+--    (toIRNormalParams vs makeProbRec), so this direction catches *formula*
+--    bugs -- e.g. a mis-(de)normalized mu/sigma in the Gaussian reader.
+--    Valid only where the output distribution is plan-representable
+--    (independent tuple slots -- true of the current encode corpus; a
+--    dependent-slot program would need excluding here, since encode
+--    deliberately marginalises cross-slot correlations, design § 3.7).
+
+-- Corpus pool: every interpreter-routed testCases/*.ppl with its test cases.
+loadRoundtripPool :: IO [(String, Program, [TestCase])]
+loadRoundtripPool = do
+  files <- getAllTestFiles
+  pool <- mapM (\(ppl, tst) -> do
+    prog <- parseProgram ppl
+    (backends, tcs) <- parseTestCases tst
+    return (takeBaseName ppl, prog, backends, tcs)) files
+  return [(n, p, tcs) | (n, p, backends, tcs) <- pool, Interpreter `elem` backends]
+
+-- `main sym = nn sym` (after normalization: a ReadNN directly on the lambda
+-- parameter). Only for these does main's output distribution equal the
+-- decoder's own, making encode the vector-level identity.
+isDecoderPassthrough :: Program -> Bool
+isDecoderPassthrough p = case lookup "main" (functions p) of
+  Just (Lambda _ s (ReadNN _ _ (Var _ s'))) -> s == s'
+  _                                         -> False
+
+compileOrFail :: Program -> IO IREnv
+compileOrFail p = either (\e -> assertFailure ("compile failed: " ++ show e) >> return undefined)
+                         return (compile defaultCompilerConfig p)
+
+encodeRoundtripTests :: IO TestTree
+encodeRoundtripTests = do
+  pool <- loadRoundtripPool
+  return $ testGroup "EncodeRoundtrip"
+    [ testGroup "LogitIdentity"
+        [ logitIdentityCase n p | (n, p, _) <- pool, isDecoderPassthrough p ]
+    , testGroup "DensityAgreement"
+        [ densityAgreementCase n p target args
+        | (n, p, tcs) <- pool
+        , (target, args) <- nub [ (t, a) | tc <- tcs, Just (t, a) <- [encodeInvocation tc] ]
+        ]
+    ]
+  where
+    encodeInvocation (EncodingLengthTestCase _ t a _)  = Just (t, a)
+    encodeInvocation (EncodingSlotTestCase _ t a _ _)  = Just (t, a)
+    encodeInvocation _                                 = Nothing
+
+-- logits -> distribution -> logits: encode(main)((2, v)) == v for valid
+-- logit vectors v. randomMockNN (mock mode 0) is the generator of valid
+-- vectors (normalized softmax groups, sigma > 0, flags in [0,1]).
+logitIdentityCase :: String -> Program -> TestTree
+logitIdentityCase name p = testCase (name ++ ".logitIdentity") $ do
+  compiled <- compileOrFail p
+  let plan = endpointPlan p "main"
+  forM_ [0 .. 4 :: Int] $ \seed -> do
+    let vec@(VList slots) = evaluateMockNN plan (VTuple (VInt 0) (VInt seed))
+    case runEncodeC p compiled "main" [VTuple (VInt 2) vec] of
+      Left err -> assertFailure (name ++ ": encode failed: " ++ show err)
+      Right (VList out) -> do
+        assertEqual (name ++ ": roundtripped vector length") (length (toList slots)) (length (toList out))
+        forM_ (zip3 [0 :: Int ..] (toList slots) (toList out)) $ \(i, VFloat vIn, VFloat vOut) ->
+          assertBool (name ++ ": logit slot " ++ show i ++ " fed " ++ show vIn
+                      ++ " but encode returned " ++ show vOut)
+                     (abs (vIn - vOut) < 1e-6)
+      Right other -> assertFailure (name ++ ": encode returned non-list: " ++ show other)
+
+-- distribution -> logits -> distribution: the endpoint's encoded vector,
+-- read back through the plan's standalone prob reader, agrees with the
+-- endpoint's own prob function on forward-sampled points (prob and dim).
+densityAgreementCase :: String -> Program -> String -> [IRValue] -> TestTree
+densityAgreementCase name p target explicitArgs = testCase caseName $ do
+  compiled <- compileOrFail p
+  let args = encodeArgsFor p explicitArgs
+      plan = endpointPlan p target
+      planReader = makeProb (adts p) defaultCompilerConfig plan
+      decode vec x = generateDet (neurals p) (encodeDecls p) compiled [IRConst vec, IRConst x] planReader
+  case runEncodeC p compiled target args of
+    Left err  -> assertFailure (name ++ ": encode failed: " ++ show err)
+    Right vec -> do
+      let samples = evalRand (replicateM 20 (runGenNamedC p compiled target args)) (mkStdGen 42)
+      forM_ (nub samples) $ \x -> do
+        (pOwn, dOwn) <- case runProbNamedC p compiled target args x of
+          Right (VTuple (VFloat pr) (VFloat d)) -> return (pr, d)
+          other -> assertFailure (name ++ ": prob(" ++ show x ++ ") returned " ++ show other) >> return (0, 0)
+        (pDec, dDec) <- case decode vec x of
+          Right (VTuple (VFloat pr) (VTuple (VFloat d) _)) -> return (pr, d)
+          other -> assertFailure (name ++ ": plan reader at " ++ show x ++ " returned " ++ show other) >> return (0, 0)
+        assertBool (caseName ++ ": prob differs at sample " ++ show x
+                    ++ ": own " ++ show pOwn ++ " vs decoded " ++ show pDec)
+                   (abs (pOwn - pDec) < probTolerance)
+        assertEqual (caseName ++ ": dim differs at sample " ++ show x) dOwn dDec
+  where
+    -- distinct .tst invocations of the same endpoint differ only in args;
+    -- fold them into the test name so every case is uniquely addressable
+    caseName = name ++ "." ++ target
+             ++ (if null explicitArgs then "" else show explicitArgs)
+             ++ ".densityAgreement"
