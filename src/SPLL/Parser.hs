@@ -703,15 +703,16 @@ normalizeExpr env@(parametricBuilders, atomicBuilders, benign) expr =
           case expr' of
             -- Start of an Apply chain
             Apply _ (Apply _ _ _) _ ->
-              -- Need to collect all args in the chain and find base function
-              let (base, args) = collectApplyChain expr
+              -- Need to collect all args in the chain and find base function.
+              -- Collect from expr' (not expr) so the args keep their normalization.
+              let (base, args) = collectApplyChain expr'
               in case base of
                 Var _ fname | Just builder <- Map.lookup fname parametricBuilders -> do
                   build <- builder args
                   case build of
                     Left _ -> return $ Right expr' -- This prevents InjFs, which have multiple arguments from failing to build because here only one argument is applied
                     e -> return e
-                _ -> return $ Right expr
+                _ -> return $ Right expr'
             Apply _ (Var _ fname) arg
               | not (Set.member fname benign)
               , Just builder <- Map.lookup fname parametricBuilders -> do
