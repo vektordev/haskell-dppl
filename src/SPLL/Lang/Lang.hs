@@ -28,6 +28,7 @@ module SPLL.Lang.Lang (
 , isNotTheta
 , constructVList
 , multiValueToValueList
+, multiValueContainsContinuous
 , valueListToMultiValue
 , valueInMultiValue
 , unionMultiValues
@@ -250,6 +251,21 @@ multiValueToValueList (MultiTuple as bs) = [VTuple aVal bVal | aVal <- aVals, bV
 multiValueToValueList (MultiADT constrs) = concatMap (\(cn, fieldCombos) -> map (VADT cn) fieldCombos) constrFieldCombinations
   where allFieldCombinations = sequence . map multiValueToValueList
         constrFieldCombinations = map (Bifunctor.second allFieldCombinations) constrs
+
+-- | True if the MultiValue has a continuous (Real) leaf anywhere. Such a value set
+-- has no finite enumeration: 'multiValueToValueList' would yield only its discrete
+-- residue, so enum-based inference must never be offered for it (the enum-annotation
+-- pass declines to tag it, and 'isEnumerable' in the IRCompiler refuses it).
+-- 'MultiTypeRef' is resolved away before MultiValues reach tags, so it is structural
+-- here; 'MultiAuto' must likewise be resolved before asking.
+multiValueContainsContinuous :: MultiValue -> Bool
+multiValueContainsContinuous MultiContinuous = True
+multiValueContainsContinuous (MultiDiscretes _) = False
+multiValueContainsContinuous (MultiTuple a b) = multiValueContainsContinuous a || multiValueContainsContinuous b
+multiValueContainsContinuous (MultiEither a b) = multiValueContainsContinuous a || multiValueContainsContinuous b
+multiValueContainsContinuous (MultiADT constrs) = any (any multiValueContainsContinuous . snd) constrs
+multiValueContainsContinuous (MultiTypeRef _) = False
+multiValueContainsContinuous MultiAuto = False
 
 valueListToMultiValue :: [Value] -> MultiValue
 valueListToMultiValue lst@((VEither _):_) | all isVEither lst = MultiEither lVals rVals

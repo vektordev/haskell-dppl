@@ -24,7 +24,13 @@ annotateEnumsProg p@Program {functions=f, neurals=n, adts=adts} = p{functions = 
     iterateExprEnv eEnv = map (second (annotate adts (neuralEnv ++ map (second $ tags . getTypeInfo) eEnv))) f
     -- Resolve "_" (MultiAuto) placeholders against the declared output/input type before
     -- this MultiValue is used for discrete-value propagation.
-    neuralEnv = [(name, [DiscreteValues (resolveTag declType mv)]) | (name, declType, Just mv) <- n]
+    -- A MultiValue with a continuous (Real) leaf has no finite enumeration; tagging it
+    -- would make the enumeration machinery sum over only its discrete residue, silently
+    -- dropping the continuous probability mass. Decline to tag instead, the same as a
+    -- neural with no `of` annotation at all.
+    neuralEnv = [(name, [DiscreteValues mv]) | (name, declType, Just rawMv) <- n,
+                 let mv = resolveTag declType rawMv,
+                 not (multiValueContainsContinuous mv)]
     resolveTag declType mv = maybe mv (\ty -> resolveMultiAuto adts ty mv) (neuralValueType declType)
 
 annotate :: [ADTDecl] -> TagEnv -> Expr -> Expr
@@ -49,9 +55,10 @@ annotate adts env e = withNewTypeInfo
     withNewTypeInfo = setTypeInfo withNewSubExpr (setTags (getTypeInfo withNewSubExpr) newTags)
 
 discretesTags :: [ADTDecl] -> Expr -> [Tag]
-discretesTags adts e = maybeToList valuesTag
+-- The continuous-leaf filter mirrors neuralEnv above: never emit a DiscreteValues
+-- tag whose enumeration would be a discrete residue of a partly-continuous set.
+discretesTags adts e = [DiscreteValues mv | mv <- maybeToList values, not (multiValueContainsContinuous mv)]
   where
-    valuesTag = fmap DiscreteValues values
     values = case e of
       (Constant _ a) -> Just $ MultiDiscretes [a]
       -- Comparisons are Bool-valued, hence finitely enumerable. Tagging them lets

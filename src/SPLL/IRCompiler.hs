@@ -213,10 +213,14 @@ setVariables :: [(String, IRExpr)] -> CompilerMonad ()
 setVariables = tell
 
 -- | True if any tag on the expression marks it as enumerable (carries DiscreteValues).
+-- A MultiValue with a continuous (Real) leaf is refused: it has no finite enumeration,
+-- and walking its discrete residue would silently drop the continuous probability mass.
+-- (The enum-annotation pass already declines to produce such tags; this guards any
+-- other producer.)
 isEnumerable :: [Tag] -> Bool
 isEnumerable = any isDiscrete
-  where isDiscrete (DiscreteValues _) = True
-        isDiscrete _                  = False
+  where isDiscrete (DiscreteValues mv) = not (multiValueContainsContinuous mv)
+        isDiscrete _                   = False
 
 -- | True when `Apply l v` should be compiled by enumerating the argument's discrete
 -- support (marginalising over a random draw). This requires:

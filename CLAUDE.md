@@ -125,7 +125,7 @@ Use this when a program compiles incorrectly to identify which stage introduced 
 
 ### Neural Declarations
 
-Neural networks are declared separately as `NeuralDecl = (String, RType, Maybe MultiValue)` and enter the global type environment before inference. A `ReadNN name param` expression calls the named network at runtime. If the declaration carries a `MultiValue` annotation (the possible output values), Analysis propagates it through `ReadNN` nodes so that `InferenceRule` matching can select enum-aware algorithms for downstream comparisons.
+Neural networks are declared separately as `NeuralDecl = (String, RType, Maybe MultiValue)` and enter the global type environment before inference. A `ReadNN name param` expression calls the named network at runtime. If the declaration carries a `MultiValue` annotation (the possible output values), Analysis propagates it through `ReadNN` nodes so that `InferenceRule` matching can select enum-aware algorithms for downstream comparisons. A `MultiValue` containing a continuous leaf (`Real`, incl. via `_` on a `Float` slot) is never tagged for enumeration — enumerating only its discrete residue would silently drop the continuous mass — so such declarations behave like unannotated ones for enum purposes (`multiValueContainsContinuous`, guarded in both `annotateEnumsProg` and `isEnumerable`).
 
 The `of ...` clause mirrors the output `RType` and follows this grammar (each production names its `MultiValue` constructor):
 

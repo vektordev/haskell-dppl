@@ -682,6 +682,41 @@ expectMarginalRefusal src sample var = do
     Right (Left cerr) -> assertFailure ("expected runtime refusal, got compile error: " ++ show cerr)
     Right (Right v) -> assertFailure ("expected runtime refusal, got value: " ++ show v)
 
+-- | Enum annotation must not offer enumeration for a MultiValue containing a
+-- continuous (Real) leaf: enumerating it would walk only the discrete residue
+-- (e.g. just the Left values of ([0,1] | Real)) and silently drop the
+-- continuous probability mass. annotateEnumsProg declines to tag such neurals,
+-- the same treatment as a neural with no `of` annotation at all.
+enumTagsOf :: String -> [MultiValue]
+enumTagsOf src =
+  let prog = either (\e -> error ("parse failed: " ++ show e)) id (tryParseProgram "test" src)
+  in [mv | e <- allNodes (annotateEnumsProg prog), DiscreteValues mv <- tags (getTypeInfo e)]
+
+enumContinuousRefusalTests :: TestTree
+enumContinuousRefusalTests = testGroup "enum annotation refuses continuous leaves"
+  [ testCase "mixed Either ([0,1] | Real) gets no DiscreteValues tag" $
+      assertEqual "expected no tags" []
+        (enumTagsOf "neural f :: (Symbol -> Either Int Float) of ([0, 1] | Real)\nmain sym = f sym\n")
+  , testCase "pure Real gets no DiscreteValues tag" $
+      assertEqual "expected no tags" []
+        (enumTagsOf "neural f :: (Symbol -> Float) of Real\nmain sym = f sym\n")
+  , testCase "tuple with an auto-derived Float slot gets no DiscreteValues tag" $
+      -- '_' resolves to MultiContinuous for a Float slot, so the whole tuple
+      -- annotation must be declined, not enumerated as a residue.
+      assertEqual "expected no tags" []
+        (enumTagsOf "neural f :: (Symbol -> (Int, Float)) of ([0, 1], _)\nmain sym = f sym\n")
+  , testCase "pure discrete enumeration is still tagged" $
+      assertBool "expected DiscreteValues tags" (not (null
+        (enumTagsOf "neural f :: (Symbol -> Int) of [0, 1, 2]\nmain sym = f sym\n")))
+  , testCase "multiValueContainsContinuous finds nested leaves" $ do
+      assertBool "tuple/Either nesting" (multiValueContainsContinuous
+        (MultiTuple (MultiDiscretes [VInt 0]) (MultiEither (MultiDiscretes [VBool True]) MultiContinuous)))
+      assertBool "ADT field" (multiValueContainsContinuous
+        (MultiADT [("A", [MultiDiscretes [VInt 0]]), ("B", [MultiContinuous])]))
+      assertBool "pure discrete composite is clean" (not (multiValueContainsContinuous
+        (MultiTuple (MultiDiscretes [VInt 0]) (MultiADT [("A", [])]))))
+  ]
+
 internalsTests :: TestTree
 internalsTests = testGroup "Internals"
   [ testProperties "properties" $(allProperties)
@@ -705,5 +740,6 @@ internalsTests = testGroup "Internals"
       ]
   , test_missingMainFunction
   , autoNeuralDerivationTests
+  , enumContinuousRefusalTests
   , test_tstBackendsHeader
   ]
