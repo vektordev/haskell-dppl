@@ -1,0 +1,8 @@
+-- Plan-guided lazy enumeration (M1): a 12-slot neural scene whose joint
+-- support (3^12 = 531441 values) is far too large to materialize into an
+-- IREnumSum -- the plan-backed lazy path compiles it in O(slots).
+-- existsRed-style inline if-chain; with per-slot P(Red) = 0.5,
+-- p(0) = 0.5^12 = 0.000244140625.
+data Color = Red | Green | Blue
+neural readColor :: (Symbol -> (Color, (Color, (Color, (Color, (Color, (Color, (Color, (Color, (Color, (Color, (Color, Color))))))))))))
+main sym = let s = readColor sym in if isRed (fst s) then 1 else (if isRed (fst (snd s)) then 1 else (if isRed (fst (snd (snd s))) then 1 else (if isRed (fst (snd (snd (snd s)))) then 1 else (if isRed (fst (snd (snd (snd (snd s))))) then 1 else (if isRed (fst (snd (snd (snd (snd (snd s)))))) then 1 else (if isRed (fst (snd (snd (snd (snd (snd (snd s))))))) then 1 else (if isRed (fst (snd (snd (snd (snd (snd (snd (snd s)))))))) then 1 else (if isRed (fst (snd (snd (snd (snd (snd (snd (snd (snd s))))))))) then 1 else (if isRed (fst (snd (snd (snd (snd (snd (snd (snd (snd (snd s)))))))))) then 1 else (if isRed (fst (snd (snd (snd (snd (snd (snd (snd (snd (snd (snd s))))))))))) then 1 else (if isRed (snd (snd (snd (snd (snd (snd (snd (snd (snd (snd (snd s))))))))))) then 1 else 0)))))))))))

@@ -1,0 +1,5 @@
+-- Plan-guided lazy enumeration (M1): Bool logit leaves exercised as a bare
+-- if-condition, under `&&`, and compared `==` against a deterministic value.
+-- No `of` clause, so this cannot materialize -- lazy plan path only.
+neural readFlags :: (Symbol -> (Bool, Bool))
+main sym = let s = readFlags sym in if (fst s) && ((snd s) == False) then 0 else (if fst s then 1 else 2)

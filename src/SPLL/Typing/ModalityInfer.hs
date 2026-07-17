@@ -39,9 +39,11 @@ module SPLL.Typing.ModalityInfer
 
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
+import Data.List (find)
 
 import SPLL.Lang.Types
-  ( Expr(..), Program(..), TypeInfo(..), InjFName(..), ChainName, ADTDecl, CompilerError, FnDecl )
+  ( Expr(..), Program(..), TypeInfo(..), InjFName(..), ChainName, ADTDecl, CompilerError, FnDecl
+  , dataName, constructors )
 import SPLL.Lang.Lang (getTypeInfo)
 import SPLL.Typing.Typing (setPType)
 import SPLL.Typing.PType (PType(..))
@@ -223,15 +225,41 @@ toMod (IWit m)    = toMod m   -- the serialisable form carries only the standalo
 -- categorical net, integer @plusI@/equality, …) where it turns the
 -- marginalization floor from @{S,I}@ (no closed density) into @{S,D,I}@ (a finite
 -- mixture has a density).
-tagFin :: TypeInfo -> GroundMod -> GroundMod
-tagFin ti g
+--
+-- A node whose /type/ is structurally finite (Bool, enum-like ADTs, and
+-- tuples/Eithers of such) has finite support even without a @DiscreteValues@
+-- tag — the tag only exists when an @of@ enumeration was declared, but
+-- finiteness is a property of the type itself. This is what admits the
+-- plan-guided lazy-enumeration shapes (design plan-guided-lazy-enumeration):
+-- an un-@of@'d neural ADT output is a finite mixture whose density exists,
+-- even though nobody intends to materialize its support.
+tagFin :: [ADTDecl] -> TypeInfo -> GroundMod -> GroundMod
+tagFin adts ti g
   | finFromTags (tags ti) == Finite = g { gFin = Finite }
+  | finiteRType adts (rType ti)     = g { gFin = Finite }
   | otherwise                       = g
 
-tagFinMod :: TypeInfo -> IMod -> IMod
-tagFinMod ti (IG g)   = IG (tagFin ti g)
-tagFinMod ti (IWit m) = IWit (tagFinMod ti m)
-tagFinMod _  m        = m
+tagFinMod :: [ADTDecl] -> TypeInfo -> IMod -> IMod
+tagFinMod adts ti (IG g)   = IG (tagFin adts ti g)
+tagFinMod adts ti (IWit m) = IWit (tagFinMod adts ti m)
+tagFinMod _    _  m        = m
+
+-- | Structural finiteness of a type: does it have finitely many inhabitants?
+-- Recursive ADTs are conservatively infinite (their depth-unrolled neural
+-- plans are finite, but the type itself is not; milestone 2 revisits this
+-- alongside recursive predicates).
+finiteRType :: [ADTDecl] -> RType -> Bool
+finiteRType adts = go []
+  where
+    go _ TBool            = True
+    go seen (Tuple a b)   = go seen a && go seen b
+    go seen (TEither a b) = go seen a && go seen b
+    go seen (TADT name)
+      | name `elem` seen = False
+      | otherwise = case find ((== name) . dataName) adts of
+          Just decl -> all (all (go (name : seen) . snd) . snd) (constructors decl)
+          Nothing   -> False
+    go _ _ = False
 
 -- | A scalar distribution family ('FamNormal'/'FamLogNormal') only attaches to a
 -- bare 'TFloat' value. A field constructor that builds a container/sum (e.g.
@@ -305,7 +333,7 @@ inferE ctx env expr = case expr of
 
   ReadNN ti name s ->
     let (_, s', sa) = inferE ctx env s
-        g = tagFin ti (if rType ti == TFloat then gNormal else gIntegrate)
+        g = tagFin (icADTs ctx) ti (if rType ti == TFloat then gNormal else gIntegrate)
     in done (IG g) (ReadNN (setPType ti (projectGround g)) name s') sa
 
   GreaterThan ti a b -> compareNode ti GreaterThan a b
@@ -316,7 +344,7 @@ inferE ctx env expr = case expr of
         mods = [ m  | (m,_,_) <- rs ]
         es'  = [ e  | (_,e,_) <- rs ]
         acc  = concat [ a | (_,_,a) <- rs ]
-        m    = gateScalarFamily (rType ti) (tagFinMod ti (injFMod (icADTs ctx) fname mods))
+        m    = gateScalarFamily (rType ti) (tagFinMod (icADTs ctx) ti (injFMod (icADTs ctx) fname mods))
     in done m (InjF (setPType ti (projectI m)) name es') acc
 
   IfThenElse ti c t f ->
@@ -373,7 +401,7 @@ inferE ctx env expr = case expr of
     compareNode ti ctor a b =
       let (ma, a', aacc) = inferE ctx env a
           (mb, b', bacc) = inferE ctx env b
-          g = tagFin ti (compareGround (outerI ma) (outerI mb))
+          g = tagFin (icADTs ctx) ti (compareGround (outerI ma) (outerI mb))
       in done (IG g) (ctor (setPType ti (projectGround g)) a' b') (aacc ++ bacc)
 
 -- | Comparison (@>@/@<@): the Boolean result is a Bernoulli (finite support).

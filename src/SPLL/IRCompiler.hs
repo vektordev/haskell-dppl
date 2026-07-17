@@ -13,7 +13,8 @@ import SPLL.IROptimizer
 import PredefinedFunctions
 import SPLL.Typing.PType
 import Data.Maybe
-import Data.List (isPrefixOf, (\\))
+import Data.Either (isRight)
+import Data.List (isPrefixOf, (\\), find, elemIndex)
 import Data.Char (isDigit)
 import Data.Functor ((<&>))
 import Control.Monad.Writer.Lazy
@@ -768,115 +769,129 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample
     let Program{functions=fs} = compilingProgram meta
     let bodyExpr = findExprWithCN (map snd fs) lambdaBodyCN
     toIRInference meta cumulative bodyExpr sample
-  else case toInvExprMaybe clauses adts lChainName of
-   -- No occurrence of the bound variable is point-invertible from the
-   -- observation. Fall back to set-valued witnesses: invert the observation
-   -- structurally into guarded constraint sets on the bound variable (intervals
-   -- from comparisons, case splits from ifs, intersections across occurrences)
-   -- and measure them against the bound distribution (design
-   -- set-valued-witnesses).
-   Nothing -> setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag v sample
-   Just (invExprP0, invExprCoV0) -> do
-    invExprP   <- pruneDeadLetIns <$> materializeAnchors meta invExprP0
-    invExprCoV <- pruneDeadLetIns <$> materializeAnchors meta invExprCoV0
-    let appliedCoV = IRApply (IRLambda (boundVar ++ tag) invExprCoV) sample
-    let lInv = IRLambda (boundVar ++ tag) invExprP
-    -- Apply the sample to the inverse
-    let appliedSample = IRApply lInv sample
-    -- Do probabilistic inference using the applied inverse
-    (p, dim, bc) <- toIRInference meta cumulative v appliedSample
-
-    let scale x = if not cumulative
-                    then IROp OpMult x (IRIf (IROp OpEq dim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs appliedCoV))
-                    else IRIf (IROp OpGreaterThan appliedCoV const0) x (IROp OpSub (IRConst (VFloat 1)) x)
+  else do
+   -- Plan-guided lazy enumeration (design plan-guided-lazy-enumeration): when
+   -- the bound value is a neural network's structured output, its distribution
+   -- factorizes per PartitionPlan slot and the observation can be inverted
+   -- onto individual plan leaves without ever materializing the support. This
+   -- is tried BEFORE point inversion: for the body shapes the plan traversal
+   -- supports (accessor chains, is<Ctor>/==/comparison predicates, if splits),
+   -- forward chaining's "inverse" routes through the VAnyExcept machinery and
+   -- crashes at runtime on ADT accessors — an M0-style silent-failure path —
+   -- so interception strictly improves them; bodies the traversal declines
+   -- keep their current path untouched.
+   planRes <- planWitnessApply meta cumulative rt lResolvedCN lambdaBodyCN tag v sample
+   case planRes of
+    Right result -> return result
+    Left planDiag -> case toInvExprMaybe clauses adts lChainName of
+     -- No occurrence of the bound variable is point-invertible from the
+     -- observation either. Fall back to set-valued witnesses: invert the
+     -- observation structurally into guarded constraint sets on the bound
+     -- variable (intervals from comparisons, case splits from ifs,
+     -- intersections across occurrences) and measure them against the bound
+     -- distribution (design set-valued-witnesses).
+     Nothing -> setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag planDiag v sample
+     Just (invExprP0, invExprCoV0) -> do
+      invExprP   <- pruneDeadLetIns <$> materializeAnchors meta invExprP0
+      invExprCoV <- pruneDeadLetIns <$> materializeAnchors meta invExprCoV0
+      let appliedCoV = IRApply (IRLambda (boundVar ++ tag) invExprCoV) sample
+      let lInv = IRLambda (boundVar ++ tag) invExprP
+      -- Apply the sample to the inverse
+      let appliedSample = IRApply lInv sample
+      -- Do probabilistic inference using the applied inverse
+      (p, dim, bc) <- toIRInference meta cumulative v appliedSample
+  
+      let scale x = if not cumulative
+                      then IROp OpMult x (IRIf (IROp OpEq dim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs appliedCoV))
+                      else IRIf (IROp OpGreaterThan appliedCoV const0) x (IROp OpSub (IRConst (VFloat 1)) x)
+      case rt of
+        TArrow _ _ -> return (wrapInLambdas (IRTCons (scale p) (IRTCons dim bc)), const0, const0)
+        _ | cumulative || not (isLambdaExpr l) || not (null tag) ->
+              -- Keep the original single-witness behaviour when: (a) integrate mode, where
+              -- tuple/multi-latent CDFs are ill-defined; (b) the callable is not a literal
+              -- lambda, i.e. it is a function reached through the higher-order equivalence
+              -- machinery (applied top-level fn / returned closure), whose body references
+              -- tagged variables this folding would mis-bind; or (c) the lambda is applied
+              -- under a tag (HO duplication). Body-factor folding is only sound for a plain
+              -- value let-binding `Apply (Lambda x body) v`.
+              return (wrapInLambdas $ scale p, wrapInLambdas dim, wrapInLambdas bc)
+        _ -> do
+          -- The inversion above only recovers and infers the variable bound by THIS
+          -- lambda. Any additional independent latents bound deeper in the body (e.g. a
+          -- second `let` whose value is repacked alongside this one in a tuple) are not
+          -- captured by the bound-value inference. Infer the body too and fold it in as an
+          -- independent factor: probabilities multiply, dimensions add, branch counts add.
+          -- For a body that is deterministic given the recovered variable, the exact
+          -- inverse makes the body factor an always-true (dim-0) indicator, so the product
+          -- collapses to the original result; only genuinely new latents add density/dim.
+          let Program{functions=fs} = compilingProgram meta
+          -- The recovered variable (and any recovered by enclosing folds) is
+          -- Deterministic for the body's dispatch; re-typing happens after the
+          -- fetch because the fetch always returns original annotations.
+          let recovered = toInvCN : recoveredVars meta
+          let bodyExpr = retypeDetGiven recovered (findExprWithCN (map snd fs) lambdaBodyCN)
+          -- The body references the bound variable, so it must be in scope in the type
+          -- environment (mirrors how the Lambda arm descends into a lambda body).
+          let bodyMeta = (extendMetaForLambda meta (getTypeInfo l) toInvCN) { recoveredVars = recovered }
+          -- Compile the body factor in its own let-in block: any bindings the recursion
+          -- floats (e.g. the shared `l_*_call` triple of an inner Apply) must stay under
+          -- the recovered-variable binding below -- evaluation is strict, so a floated
+          -- binding that mentions the bound variable would otherwise be evaluated before
+          -- the recovered value is in scope.
+          bodyBlock <- lift (runWriterT (toIRInference bodyMeta cumulative bodyExpr sample)) <&> generateLetInBlock bodyMeta
+          -- Bind the recovered value of the bound variable in scope so free occurrences in
+          -- the body factor resolve (and redundant comparisons collapse to true). Kept
+          -- inline (not hoisted through setVariables): stripBranchCount's genVar heuristic
+          -- would shift projections from a hoisted binding as if it were a called-function
+          -- pair, while the local triple value stays unshifted. CSE recovers the sharing.
+          let bodyTriple = IRLetIn (toInvCN ++ tag) appliedSample bodyBlock
+          let pBody   = IRTFst bodyTriple
+              dimBody = IRTFst (IRTSnd bodyTriple)
+              bcBody  = IRTSnd (IRTSnd bodyTriple)
+          (combP, combDim) <- multP (scale p, dim) (pBody, dimBody)
+          let combBC = IROp OpPlus bc bcBody
+          -- ANY in the witnessing slot (design modality-witnessed-inference, §ANY):
+          -- appliedSample is VAny at runtime iff the slot FC recovers this binding
+          -- from was queried marginally. If the binding is a "sink" — a single
+          -- occurrence and no further randomness in the body — its density
+          -- integrates to 1 and the body factor alone is the correct marginal
+          -- (the ANY-valued occurrence lands in the very slot that is ANY, where
+          -- the deconstruction Save-guard absorbs it). Otherwise the marginal is a
+          -- genuine convolution (or the ANY value would flow into inverse
+          -- arithmetic / observed-slot comparisons), so refuse at runtime rather
+          -- than crash or return a silently wrong density.
+          let occurrences = fromMaybe [] (lookup lResolvedCN (lambdaVarOccurrences (fcData meta)))
+          let bindingIsSink = length occurrences == 1 && not (containsRandomSource bodyExpr)
+          let userVar = case l of Lambda _ n _ -> n; _ -> boundVar
+          let refuse = IRError ("cannot compute marginal: binding '" ++ userVar
+                ++ "' is unobserved (ANY in its witnessing slot), but its value feeds"
+                ++ " observed slots or further randomness; integrating it out is beyond"
+                ++ " this engine (design modality-witnessed-inference)")
+          let anyW = IRUnaryOp OpIsAny appliedSample
+          let guardAny ok whenAnySink = IRIf anyW (if bindingIsSink then whenAnySink else refuse) ok
+          return ( wrapInLambdas (guardAny combP pBody)
+                 , wrapInLambdas (guardAny combDim dimBody)
+                 , wrapInLambdas (guardAny combBC bcBody) )
+    -- Forward chaining may have messed with the structure of the expression. We may have too many or too few lambdas.
+    -- Every lambda, which is not applied, inside of the callable should be present in the retuned IRExpr. 
+    -- Exclude the lambda, which is applied here and all lambdas, which are already present
+    {-let Just lBound = findBoundVariable clauses lChainName
+    let freeVars = (getUnappliedLambdas clauses lChainName \\ [lBound]) \\ findLambdaVars p
+    let wrapInLambdas ex = foldr IRLambda ex freeVars
+    -- If the parameter is a lambda, the return value here is a lambda.
+    -- We find the bound variable in the program and apply its value here
+    let (retP, retD, retBC) = case rType (getTypeInfo v) of
+          TArrow _ _ -> do
+            let ret = IRInvoke (applyLambdas clauses adts p)
+            if countBranches (compilerConfig meta) then 
+              (IRTFst ret, IRTFst (IRTSnd ret), IRTFst (IRTSnd ret)) 
+            else 
+              (IRTFst ret, IRTSnd ret, const0)
+          _ -> (p, d, bc)
+    -- If the result is a function, we must wrap the return into a tuple
     case rt of
-      TArrow _ _ -> return (wrapInLambdas (IRTCons (scale p) (IRTCons dim bc)), const0, const0)
-      _ | cumulative || not (isLambdaExpr l) || not (null tag) ->
-            -- Keep the original single-witness behaviour when: (a) integrate mode, where
-            -- tuple/multi-latent CDFs are ill-defined; (b) the callable is not a literal
-            -- lambda, i.e. it is a function reached through the higher-order equivalence
-            -- machinery (applied top-level fn / returned closure), whose body references
-            -- tagged variables this folding would mis-bind; or (c) the lambda is applied
-            -- under a tag (HO duplication). Body-factor folding is only sound for a plain
-            -- value let-binding `Apply (Lambda x body) v`.
-            return (wrapInLambdas $ scale p, wrapInLambdas dim, wrapInLambdas bc)
-      _ -> do
-        -- The inversion above only recovers and infers the variable bound by THIS
-        -- lambda. Any additional independent latents bound deeper in the body (e.g. a
-        -- second `let` whose value is repacked alongside this one in a tuple) are not
-        -- captured by the bound-value inference. Infer the body too and fold it in as an
-        -- independent factor: probabilities multiply, dimensions add, branch counts add.
-        -- For a body that is deterministic given the recovered variable, the exact
-        -- inverse makes the body factor an always-true (dim-0) indicator, so the product
-        -- collapses to the original result; only genuinely new latents add density/dim.
-        let Program{functions=fs} = compilingProgram meta
-        -- The recovered variable (and any recovered by enclosing folds) is
-        -- Deterministic for the body's dispatch; re-typing happens after the
-        -- fetch because the fetch always returns original annotations.
-        let recovered = toInvCN : recoveredVars meta
-        let bodyExpr = retypeDetGiven recovered (findExprWithCN (map snd fs) lambdaBodyCN)
-        -- The body references the bound variable, so it must be in scope in the type
-        -- environment (mirrors how the Lambda arm descends into a lambda body).
-        let bodyMeta = (extendMetaForLambda meta (getTypeInfo l) toInvCN) { recoveredVars = recovered }
-        -- Compile the body factor in its own let-in block: any bindings the recursion
-        -- floats (e.g. the shared `l_*_call` triple of an inner Apply) must stay under
-        -- the recovered-variable binding below -- evaluation is strict, so a floated
-        -- binding that mentions the bound variable would otherwise be evaluated before
-        -- the recovered value is in scope.
-        bodyBlock <- lift (runWriterT (toIRInference bodyMeta cumulative bodyExpr sample)) <&> generateLetInBlock bodyMeta
-        -- Bind the recovered value of the bound variable in scope so free occurrences in
-        -- the body factor resolve (and redundant comparisons collapse to true). Kept
-        -- inline (not hoisted through setVariables): stripBranchCount's genVar heuristic
-        -- would shift projections from a hoisted binding as if it were a called-function
-        -- pair, while the local triple value stays unshifted. CSE recovers the sharing.
-        let bodyTriple = IRLetIn (toInvCN ++ tag) appliedSample bodyBlock
-        let pBody   = IRTFst bodyTriple
-            dimBody = IRTFst (IRTSnd bodyTriple)
-            bcBody  = IRTSnd (IRTSnd bodyTriple)
-        (combP, combDim) <- multP (scale p, dim) (pBody, dimBody)
-        let combBC = IROp OpPlus bc bcBody
-        -- ANY in the witnessing slot (design modality-witnessed-inference, §ANY):
-        -- appliedSample is VAny at runtime iff the slot FC recovers this binding
-        -- from was queried marginally. If the binding is a "sink" — a single
-        -- occurrence and no further randomness in the body — its density
-        -- integrates to 1 and the body factor alone is the correct marginal
-        -- (the ANY-valued occurrence lands in the very slot that is ANY, where
-        -- the deconstruction Save-guard absorbs it). Otherwise the marginal is a
-        -- genuine convolution (or the ANY value would flow into inverse
-        -- arithmetic / observed-slot comparisons), so refuse at runtime rather
-        -- than crash or return a silently wrong density.
-        let occurrences = fromMaybe [] (lookup lResolvedCN (lambdaVarOccurrences (fcData meta)))
-        let bindingIsSink = length occurrences == 1 && not (containsRandomSource bodyExpr)
-        let userVar = case l of Lambda _ n _ -> n; _ -> boundVar
-        let refuse = IRError ("cannot compute marginal: binding '" ++ userVar
-              ++ "' is unobserved (ANY in its witnessing slot), but its value feeds"
-              ++ " observed slots or further randomness; integrating it out is beyond"
-              ++ " this engine (design modality-witnessed-inference)")
-        let anyW = IRUnaryOp OpIsAny appliedSample
-        let guardAny ok whenAnySink = IRIf anyW (if bindingIsSink then whenAnySink else refuse) ok
-        return ( wrapInLambdas (guardAny combP pBody)
-               , wrapInLambdas (guardAny combDim dimBody)
-               , wrapInLambdas (guardAny combBC bcBody) )
-  -- Forward chaining may have messed with the structure of the expression. We may have too many or too few lambdas.
-  -- Every lambda, which is not applied, inside of the callable should be present in the retuned IRExpr. 
-  -- Exclude the lambda, which is applied here and all lambdas, which are already present
-  {-let Just lBound = findBoundVariable clauses lChainName
-  let freeVars = (getUnappliedLambdas clauses lChainName \\ [lBound]) \\ findLambdaVars p
-  let wrapInLambdas ex = foldr IRLambda ex freeVars
-  -- If the parameter is a lambda, the return value here is a lambda.
-  -- We find the bound variable in the program and apply its value here
-  let (retP, retD, retBC) = case rType (getTypeInfo v) of
-        TArrow _ _ -> do
-          let ret = IRInvoke (applyLambdas clauses adts p)
-          if countBranches (compilerConfig meta) then 
-            (IRTFst ret, IRTFst (IRTSnd ret), IRTFst (IRTSnd ret)) 
-          else 
-            (IRTFst ret, IRTSnd ret, const0)
-        _ -> (p, d, bc)
-  -- If the result is a function, we must wrap the return into a tuple
-  case rt of
-    TArrow _ _ -> return (wrapInLambdas (if countBranches (compilerConfig meta) then IRTCons retP (IRTCons retD retBC) else IRTCons retP retD), const0, const0)
-    _ -> return (wrapInLambdas retP, wrapInLambdas retD, wrapInLambdas retBC)-}
+      TArrow _ _ -> return (wrapInLambdas (if countBranches (compilerConfig meta) then IRTCons retP (IRTCons retD retBC) else IRTCons retP retD), const0, const0)
+      _ -> return (wrapInLambdas retP, wrapInLambdas retD, wrapInLambdas retBC)-}
 
 toIRInference _ _ (Apply TypeInfo{rType=_} _ _) _ = error "This instance of apply is not yet implemented"
 -- Generic inference for multi-field constructor InjFs (Cons, TCons, user-ADT
@@ -1594,14 +1609,18 @@ subtreeHasOcc occs e = let cns = subtreeCNs e in any (`elem` cns) occs
 -- | Entry point of the fallback, called from the probabilistic Apply arm after
 -- 'toInvExprMaybe' failed. Builds the constraint worlds for the observation and
 -- measures them against the bound distribution @v@.
-setWitnessApply :: CompilerMetadata -> Bool -> RType -> Expr -> ChainName -> ChainName -> String -> Expr -> IRExpr -> CompilerMonad CompilationResult
-setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag v sample = do
+setWitnessApply :: CompilerMetadata -> Bool -> RType -> Expr -> ChainName -> ChainName -> String -> Maybe String -> Expr -> IRExpr -> CompilerMonad CompilationResult
+setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag planDiag v sample = do
   let userVar = case l of Lambda _ n _ -> n; _ -> "<bound variable>"
-  let refuse why = error $ unlines
+  let refuse why = error $ unlines $
         [ "set-valued witness construction failed for the binding of '" ++ userVar ++ "' (lambda at " ++ lResolvedCN ++ "):"
         , why
         , "No occurrence of the bound variable is point-invertible either (forward"
         , "chaining found no inversion path). See design set-valued-witnesses." ]
+        ++ maybe [] (\d ->
+             [ "Plan-guided lazy enumeration was applicable but could not compile the body:"
+             , d
+             , "(design plan-guided-lazy-enumeration)" ]) planDiag
   if tag /= ""
     then refuse "the lambda is applied through higher-order machinery (tagged invocation), which the set-witness fallback does not support."
     else return ()
@@ -1794,3 +1813,353 @@ comparisonWorlds meta occs isGT lop rop target
              map (addGuard (memberGuard TBool constTrueIR target)) ts
           ++ map (addGuard (memberGuard TBool (IRConst (VBool False)) target)) fs))
         _ -> return Nothing
+
+-- ===== Plan-guided lazy enumeration (design plan-guided-lazy-enumeration, M1) =====
+--
+-- When the bound variable of a probabilistic let is the structured output of a
+-- neural network (an argument that is a ReadNN whose declaration yields a
+-- PartitionPlan), the NN's distribution over that value is fully factorized
+-- per plan slot -- softmax regions for enums and constructor flags, (mu,
+-- sigma) pairs for continuous leaves -- and the plan is depth-unrolled, hence
+-- finite. So instead of materializing the argument's (possibly astronomically
+-- large) discrete support into an IREnumSum, the observation is inverted into
+-- worlds whose constraints live on individual plan LEAVES: each world maps
+-- constrained leaf regions to their still-allowed logit slots (with optional
+-- per-slot runtime guards) and is measured as the product of the constrained
+-- regions' masses, read directly from the raw logit vector. Leaves untouched
+-- by a world contribute their full marginal of 1 (the same principle as the
+-- witnessed-inference ANY guard), which is also what makes plans with
+-- continuous leaves safe here as long as the body never constrains them.
+--
+-- Milestone 1 scope: constraints on discrete leaves only, no user-function
+-- recursion -- bodies are inline predicate expressions built from field
+-- accessors (fst/snd/ADT fields), is<Ctor> tests, ==/</> against
+-- deterministic values, boolean connectives, and if splits. Anything the
+-- traversal cannot handle makes this dispatch decline (Left), and the caller
+-- falls through to the set-witness fallback, whose refusal diagnostic then
+-- names the unsupported node.
+
+-- | A reference into the neural argument's PartitionPlan: the sub-plan
+-- denoting an expression's value plus that sub-plan's flat logit offset.
+data PlanRef = PlanRef PartitionPlan Int
+
+-- | Constraint on one discrete leaf REGION of the plan (a Discretes region or
+-- an ADT constructor-flag region), identified by the flat offset of its first
+-- logit (regions are always constrained as a whole, so the base offset is a
+-- unique key). Allowed slots are (relative index, guard) pairs; a slot
+-- contributes its logit's mass only when its Bool-valued guard holds. An
+-- empty slot list is an unsatisfiable constraint (the world measures 0).
+data PLeafCon = PLeafCon { plcBase :: Int, plcSlots :: [(Int, IRExpr)] }
+
+-- | A guarded conjunction of per-leaf constraints; the plan-leaf analogue of
+-- 'WWorld'. Contributes (product of constrained leaf masses) when all guards
+-- hold, else 0.
+data PlanWorld = PlanWorld { pwGuards :: [IRExpr], pwCons :: [PLeafCon] }
+
+-- | The observation target: the plan-leaf analogue of the point/interval
+-- split in 'WSet'. PTUpTo is the cumulative target (body <= sample).
+data PTarget = PTPoint IRExpr | PTUpTo IRExpr
+
+planAddGuard :: IRExpr -> PlanWorld -> PlanWorld
+planAddGuard g (PlanWorld gs cs) = PlanWorld (g:gs) cs
+
+andGuard :: IRExpr -> IRExpr -> IRExpr
+andGuard a b | a == constTrueIR = b
+             | b == constTrueIR = a
+             | otherwise        = IROp OpAnd a b
+
+-- | Intersect two constraints on the same region: keep slots allowed by both,
+-- conjoining their guards.
+intersectLeafCon :: PLeafCon -> PLeafCon -> PLeafCon
+intersectLeafCon (PLeafCon b s1) (PLeafCon _ s2) =
+  PLeafCon b [ (i, andGuard g1 g2) | (i, g1) <- s1, Just g2 <- [lookup i s2] ]
+
+insertLeafCon :: PLeafCon -> [PLeafCon] -> [PLeafCon]
+insertLeafCon c [] = [c]
+insertLeafCon c (c':cs) | plcBase c == plcBase c' = intersectLeafCon c' c : cs
+                        | otherwise               = c' : insertLeafCon c cs
+
+intersectPlanW :: PlanWorld -> PlanWorld -> PlanWorld
+intersectPlanW (PlanWorld g1 c1) (PlanWorld g2 c2) =
+  PlanWorld (g1 ++ g2) (foldl (flip insertLeafCon) c1 c2)
+
+-- | Bool-valued IR: is the deterministic value @val@ inside the target?
+-- Mirrors the memberGuard / compareValueExpr conventions (approximate
+-- equality for floats; False < True for Bool cumulatives).
+planDetGuard :: RType -> IRExpr -> PTarget -> IRExpr
+planDetGuard rt val (PTPoint s) = case rt of
+  TFloat  -> IROp OpApprox val s
+  TVarR _ -> IROp OpApprox val s
+  _       -> IROp OpEq val s
+planDetGuard rt val (PTUpTo s) = case rt of
+  TBool -> IROp OpOr (IRUnaryOp OpNot val) s
+  _     -> IRUnaryOp OpNot (IROp OpGreaterThan val s)
+
+-- | Combine the canonical (outcome-True, outcome-False) worlds of a
+-- Bool-valued node against the actual target, mirroring 'comparisonWorlds'.
+planBoolWorlds :: PTarget -> [PlanWorld] -> [PlanWorld] -> [PlanWorld]
+planBoolWorlds tgt ts fs =
+     map (planAddGuard (planDetGuard TBool constTrueIR tgt)) ts
+  ++ map (planAddGuard (planDetGuard TBool (IRConst (VBool False)) tgt)) fs
+
+-- | Short node description for the fall-through diagnostic.
+planNodeName :: Expr -> String
+planNodeName (InjF _ (Named n) _) = "InjF " ++ n
+planNodeName (Var _ n)            = "Var " ++ n
+planNodeName (Apply _ _ _)        = "Apply (user-function application; milestone 2)"
+planNodeName e                    = head (words (show e))
+
+-- | Field bases of an ADTPlan region at offset @off@: for each constructor
+-- (in plan order), the flat offset where its field block starts. Mirrors the
+-- constrIx arithmetic of AutoNeural.makeProbRec exactly.
+adtCtorBases :: Int -> [(String, [PartitionPlan])] -> [Int]
+adtCtorBases off ctorPlans = scanl (+) (off + length ctorPlans) (map (sum . map getSize . snd) ctorPlans)
+
+-- | Look up an ADT field accessor name across the declared ADTs: yields the
+-- owning constructor's name and the field's index within it.
+lookupADTAccessor :: [ADTDecl] -> String -> Maybe (String, Int)
+lookupADTAccessor adts name = listToMaybe
+  [ (cName, fj)
+  | adt <- adts, (cName, fields) <- constructors adt
+  , Just fj <- [elemIndex name (map fst fields)] ]
+
+-- | Symbolically evaluate an accessor chain over an occurrence of the bound
+-- variable into a plan slice. Nothing: the expression is not such a chain
+-- (the caller tries other rules). Just (Left why): it is, but the plan shape
+-- does not support it. Descending an ADT field accessor additionally emits
+-- the implied constructor-flag constraint (accessing a field of C is only
+-- meaningful on the C branch of the distribution; the accessor's mass is the
+-- flag's).
+planEvalRef :: CompilerMetadata -> [ChainName] -> PartitionPlan -> Expr -> Maybe (Either String (PlanRef, [PLeafCon]))
+planEvalRef meta occs rootPlan = go
+  where
+    go e | chainName (getTypeInfo e) `elem` occs = Just (Right (PlanRef rootPlan 0, []))
+    go (InjF _ (Named "fst") [e]) = descend e $ \(PlanRef sub off) cons -> case sub of
+      TuplePlan a _ -> Right (PlanRef a off, cons)
+      _ -> Left "fst applied to a non-tuple plan slice"
+    go (InjF _ (Named "snd") [e]) = descend e $ \(PlanRef sub off) cons -> case sub of
+      TuplePlan a b -> Right (PlanRef b (off + getSize a), cons)
+      _ -> Left "snd applied to a non-tuple plan slice"
+    go (InjF _ (Named nm) [e])
+      | Just (cName, fj) <- lookupADTAccessor (adtDecls meta) nm =
+          descend e $ \(PlanRef sub off) cons -> case sub of
+            ADTPlan _ ctorPlans
+              | Just ci <- elemIndex cName (map fst ctorPlans) ->
+                  let fieldPlans = snd (ctorPlans !! ci)
+                      fBase = (adtCtorBases off ctorPlans !! ci) + sum (map getSize (take fj fieldPlans))
+                      flagCon = PLeafCon off [(ci, constTrueIR)]
+                  in Right (PlanRef (fieldPlans !! fj) fBase, insertLeafCon flagCon cons)
+              | otherwise -> Left ("accessor " ++ nm ++ ": constructor " ++ cName ++ " is not present in the plan (depth-pruned)")
+            _ -> Left ("accessor " ++ nm ++ " applied to a non-ADT plan slice")
+    go _ = Nothing
+    descend e k = fmap (>>= uncurry k) (go e)
+
+-- | Worlds constraining a plan slice to lie in the target. Only shapes whose
+-- inversion is supported in milestone 1: Discretes leaves (point and upto),
+-- component-wise tuple decomposition against a point, and nullary-constructor
+-- ADT regions against a point (guarded per constructor by is<Ctor> on the
+-- observed value).
+planRefWorlds :: PlanRef -> [PLeafCon] -> PTarget -> Either String [PlanWorld]
+planRefWorlds (PlanRef (Discretes rty (MultiDiscretes vals)) off) cons tgt =
+  Right [PlanWorld [] (insertLeafCon
+          (PLeafCon off [ (i, planDetGuard rty (IRConst (valueToIR v)) tgt) | (i, v) <- zip [0..] vals ])
+          cons)]
+planRefWorlds (PlanRef (TuplePlan a b) off) cons (PTPoint s) = do
+  wa <- planRefWorlds (PlanRef a off) cons (PTPoint (IRTFst s))
+  wb <- planRefWorlds (PlanRef b (off + getSize a)) [] (PTPoint (IRTSnd s))
+  return [ intersectPlanW x y | x <- wa, y <- wb ]
+planRefWorlds (PlanRef (ADTPlan _ ctorPlans) off) cons (PTPoint s)
+  | all (null . snd) ctorPlans =
+      Right [PlanWorld [] (insertLeafCon
+              (PLeafCon off [ (i, IRApply (IRVar ("is" ++ cn)) s) | (i, (cn, _)) <- zip [0..] ctorPlans ])
+              cons)]
+planRefWorlds (PlanRef sub _) _ _ =
+  Left ("this plan slice cannot be matched against the observation directly (unsupported in milestone 1): " ++ head (words (show sub)))
+
+-- | Invert the observation @body ∈ target@ into plan-leaf constraint worlds.
+-- The plan-backed analogue of 'invertToWorlds'. Left carries a diagnostic
+-- naming the unsupported node; the caller falls through to set-witnesses.
+planInvert :: CompilerMetadata -> [ChainName] -> PartitionPlan -> Expr -> PTarget -> CompilerMonad (Either String [PlanWorld])
+planInvert meta occs rootPlan body target
+  -- x-free subtree: deterministic given scope reduces to a membership guard
+  -- of its value against the target; anything else draws fresh randomness.
+  | not (subtreeHasOcc occs body) =
+      if pType (getTypeInfo body) == Deterministic
+        then do
+          bIR <- toIRGenerate meta body
+          return (Right [PlanWorld [planDetGuard (rType (getTypeInfo body)) bIR target] []])
+        else return (Left ("a subtree independent of the bound variable draws fresh randomness: " ++ planNodeName body))
+planInvert meta occs rootPlan body target
+  | Just refE <- planEvalRef meta occs rootPlan body =
+      return (refE >>= \(ref, cons) -> planRefWorlds ref cons target)
+planInvert meta occs rootPlan body target = case body of
+  IfThenElse _ c t e
+    | not (subtreeHasOcc occs c) && pType (getTypeInfo c) == Deterministic -> do
+        g <- toIRGenerate meta c
+        wsT <- planInvert meta occs rootPlan t target
+        wsE <- planInvert meta occs rootPlan e target
+        return ((\ts es -> map (planAddGuard g) ts ++ map (planAddGuard (IRUnaryOp OpNot g)) es) <$> wsT <*> wsE)
+    | subtreeHasOcc occs c -> do
+        cb  <- planInvertBool meta occs rootPlan c
+        wsT <- planInvert meta occs rootPlan t target
+        wsE <- planInvert meta occs rootPlan e target
+        return $ do
+          (cts, cfs) <- cb
+          ts <- wsT
+          es <- wsE
+          return ([ intersectPlanW cw tw | cw <- cts, tw <- ts ]
+               ++ [ intersectPlanW cw ew | cw <- cfs, ew <- es ])
+    | otherwise -> return (Left "an if condition independent of the bound variable draws fresh randomness")
+  InjF _ (Named "not") [a] -> do
+    ab <- planInvertBool meta occs rootPlan a
+    return ((\(t, f) -> planBoolWorlds target f t) <$> ab)
+  InjF _ (Named "and") [a, b] -> do
+    ab <- planInvertBool meta occs rootPlan a
+    bb <- planInvertBool meta occs rootPlan b
+    return $ do
+      (at, af) <- ab
+      (bt, bf) <- bb
+      let tw = [ intersectPlanW x y | x <- at, y <- bt ]
+      let fw = af ++ [ intersectPlanW x y | x <- at, y <- bf ]
+      return (planBoolWorlds target tw fw)
+  InjF _ (Named "or") [a, b] -> do
+    ab <- planInvertBool meta occs rootPlan a
+    bb <- planInvertBool meta occs rootPlan b
+    return $ do
+      (at, af) <- ab
+      (bt, bf) <- bb
+      let tw = at ++ [ intersectPlanW x y | x <- af, y <- bt ]
+      let fw = [ intersectPlanW x y | x <- af, y <- bf ]
+      return (planBoolWorlds target tw fw)
+  InjF _ (Named nm) [a]
+    | Just ctor <- ctorTestName nm -> case planEvalRef meta occs rootPlan a of
+        Just (Right (PlanRef (ADTPlan _ ctorPlans) off, cons)) -> do
+          let n = length ctorPlans
+          let ci = elemIndex ctor (map fst ctorPlans)
+          -- a constructor pruned from the plan (depth limit) simply has mass 0
+          let inSet  = maybe [] (\i -> [(i, constTrueIR)]) ci
+          let outSet = [ (i, constTrueIR) | i <- [0 .. n-1], Just i /= ci ]
+          let tw = [PlanWorld [] (insertLeafCon (PLeafCon off inSet)  cons)]
+          let fw = [PlanWorld [] (insertLeafCon (PLeafCon off outSet) cons)]
+          return (Right (planBoolWorlds target tw fw))
+        Just (Left why) -> return (Left why)
+        _ -> return (Left (nm ++ " applied to something that is not a plan slice"))
+  InjF _ (Named "eq") [a, b]
+    | isPlanSide a, isDetSide b -> planLeafEq a b
+    | isPlanSide b, isDetSide a -> planLeafEq b a
+  LessThan    _ a b -> planCmp False a b
+  GreaterThan _ a b -> planCmp True  a b
+  _ -> return (Left ("unsupported node in plan traversal: " ++ planNodeName body))
+  where
+    isPlanSide x = isJust (planEvalRef meta occs rootPlan x)
+    isDetSide  x = not (subtreeHasOcc occs x) && pType (getTypeInfo x) == Deterministic
+    ctorTestName nm
+      | "is" `isPrefixOf` nm
+      , drop 2 nm `elem` concatMap (map fst . constructors) (adtDecls meta) = Just (drop 2 nm)
+      | otherwise = Nothing
+    planLeafEq pe de = case planEvalRef meta occs rootPlan pe of
+        Just (Right (PlanRef (Discretes rty (MultiDiscretes vals)) off, cons)) -> do
+          d  <- toIRGenerate meta de
+          dv <- mkVariable "eq_rhs"
+          setVariables [(dv, d)]
+          let eqG v = planDetGuard rty (IRConst (valueToIR v)) (PTPoint (IRVar dv))
+          let tw = [PlanWorld [] (insertLeafCon (PLeafCon off [ (i, eqG v)                    | (i, v) <- zip [0..] vals ]) cons)]
+          let fw = [PlanWorld [] (insertLeafCon (PLeafCon off [ (i, IRUnaryOp OpNot (eqG v)) | (i, v) <- zip [0..] vals ]) cons)]
+          return (Right (planBoolWorlds target tw fw))
+        Just (Right (PlanRef (ADTPlan _ ctorPlans) off, cons)) | all (null . snd) ctorPlans -> do
+          d  <- toIRGenerate meta de
+          dv <- mkVariable "eq_rhs"
+          setVariables [(dv, d)]
+          let isG cn = IRApply (IRVar ("is" ++ cn)) (IRVar dv)
+          let tw = [PlanWorld [] (insertLeafCon (PLeafCon off [ (i, isG cn)                    | (i, (cn, _)) <- zip [0..] ctorPlans ]) cons)]
+          let fw = [PlanWorld [] (insertLeafCon (PLeafCon off [ (i, IRUnaryOp OpNot (isG cn)) | (i, (cn, _)) <- zip [0..] ctorPlans ]) cons)]
+          return (Right (planBoolWorlds target tw fw))
+        Just (Left why) -> return (Left why)
+        _ -> return (Left "== between a plan slice and a deterministic value: only enum leaves and nullary-constructor ADT slices are supported (milestone 1)")
+    -- Comparison of an enum leaf against a deterministic bound: each leaf
+    -- value is statically known, so the outcome split is a per-slot guard.
+    planCmp isGT a b
+      | isPlanSide a, isDetSide b = leafCmp a b isGT False
+      | isPlanSide b, isDetSide a = leafCmp b a isGT True
+      | otherwise = return (Left "comparison: one side must be an enum plan leaf and the other deterministic (milestone 1)")
+    leafCmp pe de isGT flipped = case planEvalRef meta occs rootPlan pe of
+      Just (Right (PlanRef (Discretes _ (MultiDiscretes vals)) off, cons)) -> do
+        d  <- toIRGenerate meta de
+        dv <- mkVariable "cmp_rhs"
+        setVariables [(dv, d)]
+        let op = if isGT /= flipped then OpGreaterThan else OpLessThan
+        let cmpG v = IROp op (IRConst (valueToIR v)) (IRVar dv)
+        let tw = [PlanWorld [] (insertLeafCon (PLeafCon off [ (i, cmpG v)                    | (i, v) <- zip [0..] vals ]) cons)]
+        let fw = [PlanWorld [] (insertLeafCon (PLeafCon off [ (i, IRUnaryOp OpNot (cmpG v)) | (i, v) <- zip [0..] vals ]) cons)]
+        return (Right (planBoolWorlds target tw fw))
+      Just (Left why) -> return (Left why)
+      _ -> return (Left "comparison against a non-enum plan slice (milestone 1 supports enum leaves only)")
+
+-- | Canonical (outcome-True, outcome-False) worlds of a Bool-valued node.
+planInvertBool :: CompilerMetadata -> [ChainName] -> PartitionPlan -> Expr -> CompilerMonad (Either String ([PlanWorld], [PlanWorld]))
+planInvertBool meta occs rootPlan e = do
+  t <- planInvert meta occs rootPlan e (PTPoint constTrueIR)
+  f <- planInvert meta occs rootPlan e (PTPoint (IRConst (VBool False)))
+  return ((,) <$> t <*> f)
+
+-- | Measure the worlds against the raw logit vector bound at @nnRaw@:
+-- p = sum over worlds of (guards -> product of constrained leaf masses),
+-- where a leaf's mass is the sum of its allowed slots' logits (each under its
+-- own guard). All constraints are discrete, so dim = 0; each world whose
+-- guards hold counts as one branch.
+measurePlanWorlds :: String -> [PlanWorld] -> CompilationResult
+measurePlanWorlds nnRaw worlds = (sumUp (map fst measured), const0, sumUp (map snd measured))
+  where
+    measured = map one worlds
+    sumUp [] = const0
+    sumUp xs = foldr1 (IROp OpPlus) xs
+    one (PlanWorld guards cons) =
+      let guarded e = foldr (\g acc -> IRIf g acc const0) e guards
+      in (guarded (prodMass cons), guarded const1)
+    prodMass []   = const1
+    prodMass cons = foldr1 (IROp OpMult) (map leafMass cons)
+    leafMass (PLeafCon _ [])       = const0
+    leafMass (PLeafCon base slots) = foldr1 (IROp OpPlus) (map (slotRead base) slots)
+    slotRead base (i, g)
+      | g == constTrueIR = vecRead (base + i)
+      | otherwise        = IRIf g (vecRead (base + i)) const0
+    vecRead k = IRIndex (IRVar nnRaw) (IRConst (VInt k))
+
+-- | Entry point of the plan-guided dispatch, tried from the probabilistic
+-- Apply arm after point inversion failed and before the set-witness fallback.
+-- Right: the compiled result. Left Nothing: not applicable (the argument is
+-- not a plan-backed ReadNN, or the application shape is out of scope). Left
+-- (Just why): applicable, but the body traversal hit an unsupported node --
+-- the diagnostic is appended to the set-witness refusal.
+planWitnessApply :: CompilerMetadata -> Bool -> RType -> ChainName -> ChainName -> String -> Expr -> IRExpr -> CompilerMonad (Either (Maybe String) CompilationResult)
+planWitnessApply meta cumulative rt lResolvedCN lambdaBodyCN tag v sample
+  | tag == ""
+  , not (isArrow rt)
+  , ReadNN _ nnName symArg <- v
+  , Just (_, TArrow TSymbol targetTy, declTag) <- find (\(n, _, _) -> n == nnName) (neurals (compilingProgram meta))
+  , let resolved = resolvePartitionAnnotation (encodeDecls (compilingProgram meta)) targetTy declTag
+  , isJust resolved || isRight (autoDeriveMultiValue (adtDecls meta) targetTy)
+  = do
+      let plan = makePartitionPlan (adtDecls meta) targetTy resolved
+      let Program{functions=fs} = compilingProgram meta
+      let bodyExpr = findExprWithCN (map snd fs) lambdaBodyCN
+      let occs = fromMaybe [] (lookup lResolvedCN (lambdaVarOccurrences (fcData meta)))
+      let target = if cumulative then PTUpTo sample else PTPoint sample
+      worldsE <- planInvert meta occs plan bodyExpr target
+      case worldsE of
+        Left why -> return (Left (Just why))
+        Right worlds -> do
+          nnRaw <- mkVariable "nn_raw"
+          sym <- toIRGenerate meta symArg
+          setVariables [(nnRaw, IRApply (IRVar nnName) sym)]
+          let (p, dim, bc) = measurePlanWorlds nnRaw worlds
+          -- Full-ANY marginal short-circuit, mirroring setWitnessApply.
+          if cumulative
+            then return (Right (p, dim, bc))
+            else return (Right ( IRIf (IRUnaryOp OpIsAny sample) const1 p
+                               , IRIf (IRUnaryOp OpIsAny sample) const0 dim
+                               , IRIf (IRUnaryOp OpIsAny sample) const1 bc ))
+  | otherwise = return (Left Nothing)
+  where
+    isArrow (TArrow _ _) = True
+    isArrow _            = False

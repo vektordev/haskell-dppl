@@ -1,0 +1,7 @@
+-- Plan-guided lazy enumeration (M1): field accessors on a neural ADT with
+-- fields (accessor descent slices the constructor's field sub-plan and
+-- implies the constructor-flag constraint). No `of` clause -- lazy path only.
+data Color = Red | Green | Blue
+data Obj = Mk c :: Color, f :: Bool
+neural readObj :: (Symbol -> Obj)
+main sym = let o = readObj sym in if isRed (c o) then (if f o then 0 else 1) else 2

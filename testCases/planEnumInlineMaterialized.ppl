@@ -1,0 +1,8 @@
+-- Materialized-path twin of planEnumInline.ppl: the `of` clause produces
+-- DiscreteValues tags, so this compiles via enumerateAppliedLambda (IREnumSum
+-- over the 9-value joint support). Expected values are identical to
+-- planEnumInline.tst -- together the two files form the M1 differential test
+-- between the materializing and the plan-backed lazy path.
+data Color = Red | Green | Blue
+neural readColor :: (Symbol -> (Color, Color)) of ({Red | Green | Blue}, {Red | Green | Blue})
+main sym = let s = readColor sym in if isRed (fst s) then (if isRed (snd s) then 2 else 1) else (if isRed (snd s) then 1 else 0)
