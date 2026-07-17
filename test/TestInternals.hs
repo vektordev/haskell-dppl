@@ -27,7 +27,7 @@ import Data.List (isInfixOf)
 import Control.Exception (try, evaluate, ErrorCall(..))
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure)
-import TestCaseParser (Backend(..), allBackends, parseTestCasesFromString)
+import TestCaseParser (Backend(..), TestCase(..), allBackends, parseTestCasesFromString)
 import Test.Tasty.QuickCheck (testProperties)
 import System.Random (StdGen)
 import Control.Monad.Random (Rand)
@@ -717,6 +717,49 @@ enumContinuousRefusalTests = testGroup "enum annotation refuses continuous leave
         (MultiTuple (MultiDiscretes [VInt 0]) (MultiADT [("A", [])]))))
   ]
 
+-- | Plan-guided lazy enumeration milestone 2 (design
+-- plan-guided-lazy-enumeration): the recursive-specialization corpus program
+-- under the topK and branch-counting compiler variants, checked against the
+-- values pinned in its .tst. TopK wraps Expr-level IfThenElse inference arms,
+-- which the plan engine bypasses (worlds carry their own guards and are
+-- exact), so probabilities must be unchanged; branch counting counts one
+-- branch per live world, so the count must be strictly positive and the
+-- shifted result triple must still carry the same probability.
+test_planEnumRecTopKAndBC :: TestTree
+test_planEnumRecTopKAndBC = testCase "planEnumRecTopKAndBC" $ do
+  src <- readFile "testCases/planEnumRecChain.ppl"
+  prog <- case tryParseProgram "planEnumRecChain.ppl" src of
+    Left err -> assertFailure ("Parse error: " ++ show err)
+    Right p  -> return p
+  tstSrc <- readFile "testCases/planEnumRecChain.tst"
+  (_, tcs) <- case parseTestCasesFromString "planEnumRecChain.tst" tstSrc of
+    Left err -> assertFailure ("tst parse error: " ++ err)
+    Right r  -> return r
+  let probCases = [ (s, ps, out) | ProbTestCase _ s ps (VFloat out, _) <- tcs ]
+  assertBool "planEnumRecChain.tst should contain prob cases" (not (null probCases))
+  -- compile once per config, evaluate every pinned case against each
+  let compiledWith conf = either (error . show) id (compile conf prog)
+  let cDef  = compiledWith defaultCompilerConfig
+  let cTopK = compiledWith defaultCompilerConfig{topKThreshold = Just 0.05}
+  let cBC   = compiledWith defaultCompilerConfig{countBranches = True}
+  let cBoth = compiledWith defaultCompilerConfig{topKThreshold = Just 0.05, countBranches = True}
+  let evalWith c ps s = either (error . show) id (runProbC prog c ps s)
+  mapM_ (\(s, ps, expected) -> do
+          let VTuple (VFloat pDef) (VFloat dimDef) = evalWith cDef ps s
+          let VTuple (VFloat pTopK) _              = evalWith cTopK ps s
+          let VTuple (VFloat pBC) (VTuple (VFloat dimBC) (VFloat bc)) = evalWith cBC ps s
+          let VTuple (VFloat pBoth) (VTuple _ (VFloat bcBoth))        = evalWith cBoth ps s
+          assertBool ("default prob " ++ show pDef ++ " differs from .tst " ++ show expected)
+            (abs (pDef - expected) < 1e-4)
+          assertEqual "all-discrete plan worlds have dim 0" 0 dimDef
+          assertEqual "topK must not change plan-world probabilities" pDef pTopK
+          assertEqual "branch counting must not change the probability" pDef pBC
+          assertEqual "bc variant dim" 0 dimBC
+          assertBool ("branch count should be strictly positive, got " ++ show bc) (bc >= 1)
+          assertEqual "topK+bc must not change the probability" pDef pBoth
+          assertBool "topK+bc branch count should be strictly positive" (bcBoth >= 1))
+        probCases
+
 internalsTests :: TestTree
 internalsTests = testGroup "Internals"
   [ testProperties "properties" $(allProperties)
@@ -741,5 +784,6 @@ internalsTests = testGroup "Internals"
   , test_missingMainFunction
   , autoNeuralDerivationTests
   , enumContinuousRefusalTests
+  , test_planEnumRecTopKAndBC
   , test_tstBackendsHeader
   ]

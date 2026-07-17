@@ -1,0 +1,14 @@
+-- M2 lazy path, depth-3 simple recursive scan over a two-constructor Object
+-- (exercises accessor descent through a nested ADT with an implied
+-- constructor-flag constraint: `color (obj s)` presupposes Obj, and Null
+-- objects fall through to the recursion). Expected values hand-computed:
+-- P(exists red) = .7*(.8*.5 + (.8*.5+.2)*(.6*(.07+.93*(.5*.6*.25)))) = 0.315217.
+data Color = Red | Green | Blue
+data Object = Null | Obj color::Color
+data Scene = Empty | SCons obj::Object, rest::Scene depth 3
+
+neural readScene :: (Symbol -> Scene)
+
+existsRed s = if isEmpty s then False else (if isObj (obj s) then (if isRed (color (obj s)) then True else existsRed (rest s)) else existsRed (rest s))
+
+main sym = let scene = readScene sym in if existsRed scene then 1 else 0

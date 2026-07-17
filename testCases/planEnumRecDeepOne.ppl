@@ -1,0 +1,19 @@
+-- M2 lazy path at depth 10, threaded-bool scan (exactly one green among up
+-- to 10 objects): quadratically many worlds via memoized specialization.
+-- Interpreter-only: the compiled probability function is large enough that
+-- the extra backend compiles are not worth the redundant coverage (the
+-- backend surface -- logit-slice reads -- is already pinned by the
+-- planEnumInline* and depth-3 planEnumRec* cases). Expected values from the
+-- independent DP oracle.
+data Color = Red | Green | Blue
+data Size = Small | Large
+data Object = Obj color::Color, size::Size
+data Scene = Empty | SCons obj::Object, rest::Scene depth 10
+
+neural readScene :: (Symbol -> Scene)
+
+goOne s found = if isEmpty s then found else (if isGreen (color (obj s)) then (if found then False else goOne (rest s) True) else goOne (rest s) found)
+
+exactlyOneGreen s = goOne s False
+
+main sym = let scene = readScene sym in if exactlyOneGreen scene then 1 else 0

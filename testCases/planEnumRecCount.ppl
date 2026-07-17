@@ -1,0 +1,15 @@
+-- M2 lazy path, depth-3 counting fold compared against a deterministic
+-- bound: `numRed scene > 1.5` cannot be inverted leaf-wise, so the fold's
+-- value support is enumerated as (value, world) pairs (planEnumValues) and
+-- each guarded against the bound. Worlds are exponential in depth at M2
+-- (value-grouped DP is milestone 4). Expected value hand-computed
+-- (P(>=2 reds), reds r=[.4,.07,.15], lengths s=[.7,.6,.5]): 0.024801.
+data Color = Red | Green | Blue
+data Object = Null | Obj color::Color
+data Scene = Empty | SCons obj::Object, rest::Scene depth 3
+
+neural readScene :: (Symbol -> Scene)
+
+numRed s = if isEmpty s then 0.0 else (if isObj (obj s) then (if isRed (color (obj s)) then 1.0 else 0.0) else 0.0) + numRed (rest s)
+
+main sym = let scene = readScene sym in if numRed scene > 1.5 then 1 else 0

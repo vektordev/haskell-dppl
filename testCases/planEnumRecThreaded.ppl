@@ -1,0 +1,16 @@
+-- M2 lazy path, depth-3 threaded-bool scan: the deterministic `found` flag
+-- is a call-site constant per specialization, so specializations are keyed
+-- (function, plan offset, det args) and the two flag states share memo
+-- entries per level. Expected value hand-computed (exactly one green object
+-- among up to 3, greens g=[.24,.42,.30], lengths s=[.7,.6,.5]): 0.2586192.
+data Color = Red | Green | Blue
+data Object = Null | Obj color::Color
+data Scene = Empty | SCons obj::Object, rest::Scene depth 3
+
+neural readScene :: (Symbol -> Scene)
+
+goOne s found = if isEmpty s then found else (if isObj (obj s) then (if isGreen (color (obj s)) then (if found then False else goOne (rest s) True) else goOne (rest s) found) else goOne (rest s) found)
+
+exactlyOneGreen s = goOne s False
+
+main sym = let scene = readScene sym in if exactlyOneGreen scene then 1 else 0

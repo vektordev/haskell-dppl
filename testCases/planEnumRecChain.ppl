@@ -1,0 +1,26 @@
+-- Plan-guided lazy enumeration (design plan-guided-lazy-enumeration, M2):
+-- the fully-discrete driving-program shape -- recursive user predicates
+-- folding over a neural net's recursive ADT output, WITHOUT an `of` clause.
+-- No DiscreteValues tag exists, so the materializing enumeration path cannot
+-- fire; the if-chain compiles via recursive user-function specialization on
+-- the plan (simple scan, threaded-bool scan, and a counting fold compared
+-- against a bound). planEnumRecChainMaterialized.ppl is the same program
+-- with `of _` (IREnumSum over the 259-scene support) and identical expected
+-- values -- a differential oracle between the two paths. Expected values
+-- independently computed by a DP over the factorized per-level distribution.
+data Color = Red | Green | Blue
+data Size = Small | Large
+data Object = Obj color::Color, size::Size
+data Scene = Empty | SCons obj::Object, rest::Scene depth 3
+
+neural readScene :: (Symbol -> Scene)
+
+existsRed s = if isEmpty s then False else (if isRed (color (obj s)) then True else existsRed (rest s))
+
+goOne s found = if isEmpty s then found else (if isGreen (color (obj s)) then (if found then False else goOne (rest s) True) else goOne (rest s) found)
+
+exactlyOneGreen s = goOne s False
+
+numLarge s = if isEmpty s then 0.0 else (if isLarge (size (obj s)) then 1.0 else 0.0) + numLarge (rest s)
+
+main sym = let scene = readScene sym in if existsRed scene then 0 else (if exactlyOneGreen scene then 1 else (if numLarge scene > 1.5 then 2 else 3))

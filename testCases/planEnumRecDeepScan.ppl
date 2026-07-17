@@ -1,0 +1,15 @@
+-- M2 lazy path at depth 10: the discrete support has ~6^10 scenes and could
+-- never be materialized; the recursive scan compiles in O(depth) worlds via
+-- plan specialization (one world per possible red-position, ~1s compile).
+-- Expected values from an independent DP oracle over the factorized
+-- per-level distribution (design plan-guided-lazy-enumeration, M2 notes).
+data Color = Red | Green | Blue
+data Size = Small | Large
+data Object = Obj color::Color, size::Size
+data Scene = Empty | SCons obj::Object, rest::Scene depth 10
+
+neural readScene :: (Symbol -> Scene)
+
+existsRed s = if isEmpty s then False else (if isRed (color (obj s)) then True else existsRed (rest s))
+
+main sym = let scene = readScene sym in if existsRed scene then 1 else 0

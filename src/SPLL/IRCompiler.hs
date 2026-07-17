@@ -24,6 +24,8 @@ import SPLL.Typing.AlgebraicDataTypes
 import Data.Bifunctor (Bifunctor(bimap))
 import Utils
 import Control.Monad (foldM, forM, when)
+import Control.Monad.State.Strict (StateT, evalStateT, get, put, modify)
+import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import GHC.Stack (HasCallStack)
 
@@ -1831,13 +1833,21 @@ comparisonWorlds meta occs isGT lop rop target
 -- witnessed-inference ANY guard), which is also what makes plans with
 -- continuous leaves safe here as long as the body never constrains them.
 --
--- Milestone 1 scope: constraints on discrete leaves only, no user-function
--- recursion -- bodies are inline predicate expressions built from field
--- accessors (fst/snd/ADT fields), is<Ctor> tests, ==/</> against
--- deterministic values, boolean connectives, and if splits. Anything the
--- traversal cannot handle makes this dispatch decline (Left), and the caller
--- falls through to the set-witness fallback, whose refusal diagnostic then
--- names the unsupported node.
+-- Milestone 1 scope: constraints on discrete leaves only -- bodies are inline
+-- predicate expressions built from field accessors (fst/snd/ADT fields),
+-- is<Ctor> tests, ==/</> against deterministic values, boolean connectives,
+-- and if splits. Milestone 2 adds user-function application: a call whose
+-- arguments are plan slices (accessor chains) or deterministic values is
+-- specialized -- its body is traversed under a fresh parameter frame --
+-- with specializations memoized by (body, plan offsets, det args) and a
+-- strict-plan-descent stack guard for termination; recursion bottoms out
+-- where the depth-unrolled plan prunes the recursive constructors (their
+-- branch worlds become unsatisfiable and the branch is never traversed).
+-- Value-valued plan-dependent expressions (counting folds compared against
+-- deterministic bounds) enumerate as (value, world) pairs via
+-- 'planEnumValues'. Anything the traversal cannot handle makes this dispatch
+-- decline (Left), and the caller falls through to the set-witness fallback,
+-- whose refusal diagnostic then names the unsupported node.
 
 -- | A reference into the neural argument's PartitionPlan: the sub-plan
 -- denoting an expression's value plus that sub-plan's flat logit offset.
@@ -1859,6 +1869,76 @@ data PlanWorld = PlanWorld { pwGuards :: [IRExpr], pwCons :: [PLeafCon] }
 -- | The observation target: the plan-leaf analogue of the point/interval
 -- split in 'WSet'. PTUpTo is the cumulative target (body <= sample).
 data PTarget = PTPoint IRExpr | PTUpTo IRExpr
+
+-- | Traversal-scope binding of one lambda parameter (milestone 2): the
+-- parameter denotes either a slice of the neural argument's plan or a
+-- deterministic call-site value. Parameters are identified by the occurrence
+-- chain names of their binding lambda (shadowing-aware, via
+-- 'lambdaVarOccurrences').
+data PlanBinding = PBPlan PlanRef
+                 | PBDet String IRExpr  -- ^ parameter name, call-site value
+
+-- | The traversal environment: one entry per parameter in scope. Since callee
+-- bodies can only reference their own parameters and top-level names, each
+-- specialization replaces the environment with the callee's own frame rather
+-- than nesting.
+type PlanEnv = [([ChainName], PlanBinding)]
+
+-- | Occurrence chain names bound to plan slices: the "random occurrences" of
+-- the traversal. Deterministic parameter occurrences deliberately do not
+-- count -- a subtree mentioning only those is deterministic given scope.
+planEnvOccs :: PlanEnv -> [ChainName]
+planEnvOccs env = concat [cns | (cns, PBPlan _) <- env]
+
+planEnvLookup :: PlanEnv -> ChainName -> Maybe PlanBinding
+planEnvLookup env cn = listToMaybe [b | (cns, b) <- env, cn `elem` cns]
+
+-- | Static truth value of a guard built over constants (the canonical
+-- polarity targets of 'planInvertBool' produce exactly such guards).
+staticBool :: IRExpr -> Maybe Bool
+staticBool (IRConst (VBool b)) = Just b
+staticBool (IROp OpEq (IRConst a) (IRConst b)) = Just (a == b)
+staticBool (IRUnaryOp OpNot e) = not <$> staticBool e
+staticBool (IROp OpAnd a b) = (&&) <$> staticBool a <*> staticBool b
+staticBool (IROp OpOr  a b) = (||) <$> staticBool a <*> staticBool b
+staticBool _ = Nothing
+
+-- | A world is statically unsatisfiable when some constrained leaf region has
+-- no allowed slots left, or a guard is statically false. Used to prune
+-- zero-mass worlds and, crucially, to gate traversal of if-branches
+-- unreachable under the plan's depth unrolling: at the plan's deepest level
+-- the recursive constructors are pruned, the branch worlds guarded by them
+-- die, and the branch body -- containing the recursive call -- is never
+-- traversed. This is the recursion base of the milestone-2 specialization.
+pwUnsat :: PlanWorld -> Bool
+pwUnsat (PlanWorld gs cons) = any (null . plcSlots) cons
+                           || any ((== Just False) . staticBool) gs
+
+-- | Memo key of a user-function specialization: callee body chain name +
+-- plan-argument offsets + deterministic arguments. Det args are keyed
+-- syntactically on their generated IR (no normalization/constant folding is
+-- attempted, so semantically equal but syntactically distinct arguments miss
+-- the cache -- costs sharing, never correctness).
+type PlanSpecKey = (ChainName, [Int], [String])
+
+-- | Compile-time state of the milestone-2 specialization machinery: memoized
+-- specializations (shared world lists; sound because worlds only reference
+-- absolute plan offsets, top-level names, and once-bound argument variables),
+-- and the active-specialization stack for the termination guard.
+data PlanState = PlanState
+  { psBoolMemo :: Map.Map PlanSpecKey ([PlanWorld], [PlanWorld])
+  , psEnumMemo :: Map.Map PlanSpecKey [(IRExpr, PlanWorld)]
+    -- | (callee body CN, sum of plan-argument offsets) per active
+    -- specialization: re-entering a body already on the stack without
+    -- strictly descending the plan cannot terminate and is declined.
+  , psStack    :: [(ChainName, Int)]
+  }
+
+emptyPlanState :: PlanState
+emptyPlanState = PlanState Map.empty Map.empty []
+
+-- (CompilerMonad spelled out: it is an unsaturated synonym application otherwise)
+type PlanM a = StateT PlanState (WriterT [(String, IRExpr)] Supply) a
 
 planAddGuard :: IRExpr -> PlanWorld -> PlanWorld
 planAddGuard g (PlanWorld gs cs) = PlanWorld (g:gs) cs
@@ -1883,6 +1963,14 @@ intersectPlanW :: PlanWorld -> PlanWorld -> PlanWorld
 intersectPlanW (PlanWorld g1 c1) (PlanWorld g2 c2) =
   PlanWorld (g1 ++ g2) (foldl (flip insertLeafCon) c1 c2)
 
+-- | Cross-intersect two world sets, dropping statically unsatisfiable
+-- results. This is what keeps the world count of an if-chain over several
+-- recursive predicates in check: cross-terms pinning contradictory scene
+-- shapes (e.g. different lengths, via the same constructor-flag region) die
+-- here instead of surviving as zero-mass worlds in the generated IR.
+liveIntersects :: [PlanWorld] -> [PlanWorld] -> [PlanWorld]
+liveIntersects ws1 ws2 = filter (not . pwUnsat) [ intersectPlanW a b | a <- ws1, b <- ws2 ]
+
 -- | Bool-valued IR: is the deterministic value @val@ inside the target?
 -- Mirrors the memberGuard / compareValueExpr conventions (approximate
 -- equality for floats; False < True for Bool cumulatives).
@@ -1897,16 +1985,25 @@ planDetGuard rt val (PTUpTo s) = case rt of
 
 -- | Combine the canonical (outcome-True, outcome-False) worlds of a
 -- Bool-valued node against the actual target, mirroring 'comparisonWorlds'.
+-- Statically decidable membership guards (the canonical polarity targets of
+-- 'planInvertBool') are folded away here rather than left for the optimizer:
+-- the milestone-2 dead-branch gating inspects worlds at compile time, so a
+-- world excluded by its polarity must not survive with a False guard.
 planBoolWorlds :: PTarget -> [PlanWorld] -> [PlanWorld] -> [PlanWorld]
 planBoolWorlds tgt ts fs =
-     map (planAddGuard (planDetGuard TBool constTrueIR tgt)) ts
-  ++ map (planAddGuard (planDetGuard TBool (IRConst (VBool False)) tgt)) fs
+     attach (planDetGuard TBool constTrueIR tgt) ts
+  ++ attach (planDetGuard TBool (IRConst (VBool False)) tgt) fs
+  where
+    attach g ws = case staticBool g of
+      Just True  -> ws
+      Just False -> []
+      Nothing    -> map (planAddGuard g) ws
 
 -- | Short node description for the fall-through diagnostic.
 planNodeName :: Expr -> String
 planNodeName (InjF _ (Named n) _) = "InjF " ++ n
 planNodeName (Var _ n)            = "Var " ++ n
-planNodeName (Apply _ _ _)        = "Apply (user-function application; milestone 2)"
+planNodeName (Apply _ _ _)        = "Apply"
 planNodeName e                    = head (words (show e))
 
 -- | Field bases of an ADTPlan region at offset @off@: for each constructor
@@ -1923,17 +2020,34 @@ lookupADTAccessor adts name = listToMaybe
   | adt <- adts, (cName, fields) <- constructors adt
   , Just fj <- [elemIndex name (map fst fields)] ]
 
--- | Symbolically evaluate an accessor chain over an occurrence of the bound
--- variable into a plan slice. Nothing: the expression is not such a chain
--- (the caller tries other rules). Just (Left why): it is, but the plan shape
--- does not support it. Descending an ADT field accessor additionally emits
--- the implied constructor-flag constraint (accessing a field of C is only
--- meaningful on the C branch of the distribution; the accessor's mass is the
--- flag's).
-planEvalRef :: CompilerMetadata -> [ChainName] -> PartitionPlan -> Expr -> Maybe (Either String (PlanRef, [PLeafCon]))
-planEvalRef meta occs rootPlan = go
+-- | Generate-mode IR for a subtree that is deterministic given scope.
+-- Inside a specialized callee body, occurrences of det-bound parameters
+-- compile to @IRVar <param>@, which is unbound in the generated program --
+-- rewrite them to their call-site values. (A blind name rewrite is safe:
+-- callee bodies reference only their own parameters and top-level names, and
+-- the substituted values are either constants or fresh compiler-generated
+-- variables, which can collide with neither.)
+planGenDet :: CompilerMetadata -> PlanEnv -> Expr -> PlanM IRExpr
+planGenDet meta env e = do
+  ir <- lift (toIRGenerate meta e)
+  let substs = [(n, v) | (_, PBDet n v) <- env]
+  if null substs
+    then return ir
+    else return (irMap (\x -> case x of IRVar n | Just v <- lookup n substs -> v; _ -> x) ir)
+
+-- | Symbolically evaluate an accessor chain over an occurrence of a
+-- plan-bound variable into a plan slice. Nothing: the expression is not such
+-- a chain (the caller tries other rules). Just (Left why): it is, but the
+-- plan shape does not support it. Descending an ADT field accessor
+-- additionally emits the implied constructor-flag constraint (accessing a
+-- field of C is only meaningful on the C branch of the distribution; the
+-- accessor's mass is the flag's).
+planEvalRef :: CompilerMetadata -> PlanEnv -> Expr -> Maybe (Either String (PlanRef, [PLeafCon]))
+planEvalRef meta env = go
   where
-    go e | chainName (getTypeInfo e) `elem` occs = Just (Right (PlanRef rootPlan 0, []))
+    go e | Just b <- planEnvLookup env (chainName (getTypeInfo e)) = case b of
+      PBPlan ref -> Just (Right (ref, []))
+      PBDet _ _  -> Nothing
     go (InjF _ (Named "fst") [e]) = descend e $ \(PlanRef sub off) cons -> case sub of
       TuplePlan a _ -> Right (PlanRef a off, cons)
       _ -> Left "fst applied to a non-tuple plan slice"
@@ -1979,60 +2093,68 @@ planRefWorlds (PlanRef sub _) _ _ =
 -- | Invert the observation @body ∈ target@ into plan-leaf constraint worlds.
 -- The plan-backed analogue of 'invertToWorlds'. Left carries a diagnostic
 -- naming the unsupported node; the caller falls through to set-witnesses.
-planInvert :: CompilerMetadata -> [ChainName] -> PartitionPlan -> Expr -> PTarget -> CompilerMonad (Either String [PlanWorld])
-planInvert meta occs rootPlan body target
-  -- x-free subtree: deterministic given scope reduces to a membership guard
-  -- of its value against the target; anything else draws fresh randomness.
-  | not (subtreeHasOcc occs body) =
+planInvert :: CompilerMetadata -> PlanEnv -> Expr -> PTarget -> PlanM (Either String [PlanWorld])
+planInvert meta env body target
+  -- Plan-free subtree: deterministic given scope reduces to a membership
+  -- guard of its value against the target; anything else draws fresh
+  -- randomness. (Det-bound parameter occurrences are deterministic here.)
+  | not (subtreeHasOcc (planEnvOccs env) body) =
       if pType (getTypeInfo body) == Deterministic
         then do
-          bIR <- toIRGenerate meta body
+          bIR <- planGenDet meta env body
           return (Right [PlanWorld [planDetGuard (rType (getTypeInfo body)) bIR target] []])
-        else return (Left ("a subtree independent of the bound variable draws fresh randomness: " ++ planNodeName body))
-planInvert meta occs rootPlan body target
-  | Just refE <- planEvalRef meta occs rootPlan body =
+        else return (Left ("a subtree independent of the plan-bound variables draws fresh randomness: " ++ planNodeName body))
+planInvert meta env body target
+  | Just refE <- planEvalRef meta env body =
       return (refE >>= \(ref, cons) -> planRefWorlds ref cons target)
-planInvert meta occs rootPlan body target = case body of
+planInvert meta env body target = case body of
   IfThenElse _ c t e
     | not (subtreeHasOcc occs c) && pType (getTypeInfo c) == Deterministic -> do
-        g <- toIRGenerate meta c
-        wsT <- planInvert meta occs rootPlan t target
-        wsE <- planInvert meta occs rootPlan e target
+        g <- planGenDet meta env c
+        wsT <- planInvert meta env t target
+        wsE <- planInvert meta env e target
         return ((\ts es -> map (planAddGuard g) ts ++ map (planAddGuard (IRUnaryOp OpNot g)) es) <$> wsT <*> wsE)
     | subtreeHasOcc occs c -> do
-        cb  <- planInvertBool meta occs rootPlan c
-        wsT <- planInvert meta occs rootPlan t target
-        wsE <- planInvert meta occs rootPlan e target
-        return $ do
-          (cts, cfs) <- cb
-          ts <- wsT
-          es <- wsE
-          return ([ intersectPlanW cw tw | cw <- cts, tw <- ts ]
-               ++ [ intersectPlanW cw ew | cw <- cfs, ew <- es ])
-    | otherwise -> return (Left "an if condition independent of the bound variable draws fresh randomness")
+        cb <- planInvertBool meta env c
+        case cb of
+          Left why -> return (Left why)
+          Right (cts0, cfs0) -> do
+            -- Statically dead condition worlds gate their branch's traversal
+            -- entirely; at the plan's depth boundary (where the recursive
+            -- constructors are pruned) this is what terminates recursive
+            -- predicate specialization.
+            let cts = filter (not . pwUnsat) cts0
+            let cfs = filter (not . pwUnsat) cfs0
+            wsT <- if null cts then return (Right []) else planInvert meta env t target
+            wsE <- if null cfs then return (Right []) else planInvert meta env e target
+            return $ do
+              ts <- wsT
+              es <- wsE
+              return (liveIntersects cts ts ++ liveIntersects cfs es)
+    | otherwise -> return (Left "an if condition independent of the plan-bound variables draws fresh randomness")
   InjF _ (Named "not") [a] -> do
-    ab <- planInvertBool meta occs rootPlan a
+    ab <- planInvertBool meta env a
     return ((\(t, f) -> planBoolWorlds target f t) <$> ab)
   InjF _ (Named "and") [a, b] -> do
-    ab <- planInvertBool meta occs rootPlan a
-    bb <- planInvertBool meta occs rootPlan b
+    ab <- planInvertBool meta env a
+    bb <- planInvertBool meta env b
     return $ do
       (at, af) <- ab
       (bt, bf) <- bb
-      let tw = [ intersectPlanW x y | x <- at, y <- bt ]
-      let fw = af ++ [ intersectPlanW x y | x <- at, y <- bf ]
+      let tw = liveIntersects at bt
+      let fw = af ++ liveIntersects at bf
       return (planBoolWorlds target tw fw)
   InjF _ (Named "or") [a, b] -> do
-    ab <- planInvertBool meta occs rootPlan a
-    bb <- planInvertBool meta occs rootPlan b
+    ab <- planInvertBool meta env a
+    bb <- planInvertBool meta env b
     return $ do
       (at, af) <- ab
       (bt, bf) <- bb
-      let tw = at ++ [ intersectPlanW x y | x <- af, y <- bt ]
-      let fw = [ intersectPlanW x y | x <- af, y <- bf ]
+      let tw = at ++ liveIntersects af bt
+      let fw = liveIntersects af bf
       return (planBoolWorlds target tw fw)
   InjF _ (Named nm) [a]
-    | Just ctor <- ctorTestName nm -> case planEvalRef meta occs rootPlan a of
+    | Just ctor <- ctorTestName nm -> case planEvalRef meta env a of
         Just (Right (PlanRef (ADTPlan _ ctorPlans) off, cons)) -> do
           let n = length ctorPlans
           let ci = elemIndex ctor (map fst ctorPlans)
@@ -2045,62 +2167,299 @@ planInvert meta occs rootPlan body target = case body of
         Just (Left why) -> return (Left why)
         _ -> return (Left (nm ++ " applied to something that is not a plan slice"))
   InjF _ (Named "eq") [a, b]
-    | isPlanSide a, isDetSide b -> planLeafEq a b
-    | isPlanSide b, isDetSide a -> planLeafEq b a
+    | planDep a, isDetSide b -> planLeafEq a b
+    | planDep b, isDetSide a -> planLeafEq b a
   LessThan    _ a b -> planCmp False a b
   GreaterThan _ a b -> planCmp True  a b
+  Apply {} -> planApplyTarget meta env body target
   _ -> return (Left ("unsupported node in plan traversal: " ++ planNodeName body))
   where
-    isPlanSide x = isJust (planEvalRef meta occs rootPlan x)
+    occs = planEnvOccs env
+    planDep = subtreeHasOcc occs
     isDetSide  x = not (subtreeHasOcc occs x) && pType (getTypeInfo x) == Deterministic
     ctorTestName nm
       | "is" `isPrefixOf` nm
       , drop 2 nm `elem` concatMap (map fst . constructors) (adtDecls meta) = Just (drop 2 nm)
       | otherwise = Nothing
-    planLeafEq pe de = case planEvalRef meta occs rootPlan pe of
+    bindDetSide suffix de = do
+      d  <- planGenDet meta env de
+      dv <- lift (mkVariable suffix)
+      lift (setVariables [(dv, d)])
+      return dv
+    planLeafEq pe de = case planEvalRef meta env pe of
         Just (Right (PlanRef (Discretes rty (MultiDiscretes vals)) off, cons)) -> do
-          d  <- toIRGenerate meta de
-          dv <- mkVariable "eq_rhs"
-          setVariables [(dv, d)]
+          dv <- bindDetSide "eq_rhs" de
           let eqG v = planDetGuard rty (IRConst (valueToIR v)) (PTPoint (IRVar dv))
           let tw = [PlanWorld [] (insertLeafCon (PLeafCon off [ (i, eqG v)                    | (i, v) <- zip [0..] vals ]) cons)]
           let fw = [PlanWorld [] (insertLeafCon (PLeafCon off [ (i, IRUnaryOp OpNot (eqG v)) | (i, v) <- zip [0..] vals ]) cons)]
           return (Right (planBoolWorlds target tw fw))
         Just (Right (PlanRef (ADTPlan _ ctorPlans) off, cons)) | all (null . snd) ctorPlans -> do
-          d  <- toIRGenerate meta de
-          dv <- mkVariable "eq_rhs"
-          setVariables [(dv, d)]
+          dv <- bindDetSide "eq_rhs" de
           let isG cn = IRApply (IRVar ("is" ++ cn)) (IRVar dv)
           let tw = [PlanWorld [] (insertLeafCon (PLeafCon off [ (i, isG cn)                    | (i, (cn, _)) <- zip [0..] ctorPlans ]) cons)]
           let fw = [PlanWorld [] (insertLeafCon (PLeafCon off [ (i, IRUnaryOp OpNot (isG cn)) | (i, (cn, _)) <- zip [0..] ctorPlans ]) cons)]
           return (Right (planBoolWorlds target tw fw))
         Just (Left why) -> return (Left why)
-        _ -> return (Left "== between a plan slice and a deterministic value: only enum leaves and nullary-constructor ADT slices are supported (milestone 1)")
+        -- Not an enum-leaf slice: enumerate the plan-dependent side's values
+        -- (milestone 2) and guard each against the deterministic side.
+        _ -> do
+          vsE <- planEnumValues meta env pe
+          case vsE of
+            Left why -> return (Left why)
+            Right pairs -> do
+              dv <- bindDetSide "eq_rhs" de
+              let rt = rType (getTypeInfo pe)
+              let eqG v = planDetGuard rt v (PTPoint (IRVar dv))
+              let tw = [ planAddGuard (eqG v) w                    | (v, w) <- pairs ]
+              let fw = [ planAddGuard (IRUnaryOp OpNot (eqG v)) w | (v, w) <- pairs ]
+              return (Right (planBoolWorlds target tw fw))
     -- Comparison of an enum leaf against a deterministic bound: each leaf
     -- value is statically known, so the outcome split is a per-slot guard.
     planCmp isGT a b
-      | isPlanSide a, isDetSide b = leafCmp a b isGT False
-      | isPlanSide b, isDetSide a = leafCmp b a isGT True
-      | otherwise = return (Left "comparison: one side must be an enum plan leaf and the other deterministic (milestone 1)")
-    leafCmp pe de isGT flipped = case planEvalRef meta occs rootPlan pe of
+      | planDep a, isDetSide b = leafCmp a b isGT False
+      | planDep b, isDetSide a = leafCmp b a isGT True
+      | otherwise = return (Left "comparison: one side must be plan-dependent and the other deterministic")
+    leafCmp pe de isGT flipped = case planEvalRef meta env pe of
       Just (Right (PlanRef (Discretes _ (MultiDiscretes vals)) off, cons)) -> do
-        d  <- toIRGenerate meta de
-        dv <- mkVariable "cmp_rhs"
-        setVariables [(dv, d)]
+        dv <- bindDetSide "cmp_rhs" de
         let op = if isGT /= flipped then OpGreaterThan else OpLessThan
         let cmpG v = IROp op (IRConst (valueToIR v)) (IRVar dv)
         let tw = [PlanWorld [] (insertLeafCon (PLeafCon off [ (i, cmpG v)                    | (i, v) <- zip [0..] vals ]) cons)]
         let fw = [PlanWorld [] (insertLeafCon (PLeafCon off [ (i, IRUnaryOp OpNot (cmpG v)) | (i, v) <- zip [0..] vals ]) cons)]
         return (Right (planBoolWorlds target tw fw))
       Just (Left why) -> return (Left why)
-      _ -> return (Left "comparison against a non-enum plan slice (milestone 1 supports enum leaves only)")
+      -- Not an enum-leaf slice: enumerate the plan-dependent side's values
+      -- (milestone 2 -- the counting-fold-vs-bound shape) and guard each.
+      _ -> do
+        vsE <- planEnumValues meta env pe
+        case vsE of
+          Left why -> return (Left why)
+          Right pairs -> do
+            dv <- bindDetSide "cmp_rhs" de
+            let op = if isGT /= flipped then OpGreaterThan else OpLessThan
+            let cmpG v = IROp op v (IRVar dv)
+            let tw = [ planAddGuard (cmpG v) w                    | (v, w) <- pairs ]
+            let fw = [ planAddGuard (IRUnaryOp OpNot (cmpG v)) w | (v, w) <- pairs ]
+            return (Right (planBoolWorlds target tw fw))
 
 -- | Canonical (outcome-True, outcome-False) worlds of a Bool-valued node.
-planInvertBool :: CompilerMetadata -> [ChainName] -> PartitionPlan -> Expr -> CompilerMonad (Either String ([PlanWorld], [PlanWorld]))
-planInvertBool meta occs rootPlan e = do
-  t <- planInvert meta occs rootPlan e (PTPoint constTrueIR)
-  f <- planInvert meta occs rootPlan e (PTPoint (IRConst (VBool False)))
+planInvertBool :: CompilerMetadata -> PlanEnv -> Expr -> PlanM (Either String ([PlanWorld], [PlanWorld]))
+planInvertBool meta env e = do
+  t <- planInvert meta env e (PTPoint constTrueIR)
+  f <- planInvert meta env e (PTPoint (IRConst (VBool False)))
   return ((,) <$> t <*> f)
+
+-- | Enumerate the possible values of a plan-dependent expression as
+-- (value, world) pairs -- the milestone-2 mechanism behind counting folds.
+-- The worlds partition the plan-consistent outcomes (every fork below is a
+-- partition), so a consumer may guard each value independently and sum.
+-- Values are IR expressions, usually constants; arithmetic combines them
+-- unfolded (constant folding is left to the optimizer).
+planEnumValues :: CompilerMetadata -> PlanEnv -> Expr -> PlanM (Either String [(IRExpr, PlanWorld)])
+planEnumValues meta env body
+  | not (subtreeHasOcc occs body) =
+      if pType (getTypeInfo body) == Deterministic
+        then do
+          ir <- planGenDet meta env body
+          return (Right [(ir, PlanWorld [] [])])
+        else return (Left ("a subtree independent of the plan-bound variables draws fresh randomness: " ++ planNodeName body))
+  | Just refE <- planEvalRef meta env body = return $ case refE of
+      Left why -> Left why
+      Right (PlanRef (Discretes _ (MultiDiscretes vals)) off, cons) ->
+        Right [ (IRConst (valueToIR v), PlanWorld [] (insertLeafCon (PLeafCon off [(i, constTrueIR)]) cons))
+              | (i, v) <- zip [0..] vals ]
+      Right _ -> Left "value enumeration is only supported for enum plan leaves"
+  | otherwise = case body of
+      IfThenElse _ c t e
+        | not (subtreeHasOcc occs c) && pType (getTypeInfo c) == Deterministic -> do
+            g <- planGenDet meta env c
+            vsT <- planEnumValues meta env t
+            vsE <- planEnumValues meta env e
+            return ((\ts es -> [ (v, planAddGuard g w)                    | (v, w) <- ts ]
+                            ++ [ (v, planAddGuard (IRUnaryOp OpNot g) w) | (v, w) <- es ]) <$> vsT <*> vsE)
+        | subtreeHasOcc occs c -> do
+            cb <- planInvertBool meta env c
+            case cb of
+              Left why -> return (Left why)
+              Right (cts0, cfs0) -> do
+                -- same dead-branch gating as in planInvert
+                let cts = filter (not . pwUnsat) cts0
+                let cfs = filter (not . pwUnsat) cfs0
+                vsT <- if null cts then return (Right []) else planEnumValues meta env t
+                vsE <- if null cfs then return (Right []) else planEnumValues meta env e
+                return $ do
+                  ts <- vsT
+                  es <- vsE
+                  return (livePairs [ (v, intersectPlanW cw w) | cw <- cts, (v, w) <- ts ]
+                       ++ livePairs [ (v, intersectPlanW cw w) | cw <- cfs, (v, w) <- es ])
+        | otherwise -> return (Left "an if condition independent of the plan-bound variables draws fresh randomness")
+      InjF _ (Named nm) [a, b] | Just op <- arithOp nm -> do
+        vsA <- planEnumValues meta env a
+        vsB <- planEnumValues meta env b
+        return ((\as bs -> livePairs [ (IROp op va vb, intersectPlanW wa wb) | (va, wa) <- as, (vb, wb) <- bs ]) <$> vsA <*> vsB)
+      Apply {} -> do
+        specE <- planResolveApply meta env body
+        case specE of
+          Left why -> return (Left why)
+          Right spec
+            | rType (getTypeInfo body) == TBool -> do
+                r <- planSpecializeBool spec
+                return ((\(tw, fw) -> [ (constTrueIR, addSpecCons spec w)          | w <- tw ]
+                                   ++ [ (IRConst (VBool False), addSpecCons spec w) | w <- fw ]) <$> r)
+            | otherwise -> do
+                r <- planSpecializeEnum spec
+                return ((\pairs -> [ (v, addSpecCons spec w) | (v, w) <- pairs ]) <$> r)
+      _ -> return (Left ("unsupported node in plan value enumeration: " ++ planNodeName body))
+  where
+    occs = planEnvOccs env
+    arithOp n = lookup n [("plus", OpPlus), ("mult", OpMult)]
+    livePairs = filter (not . pwUnsat . snd)
+
+-- | A resolved user-function application, ready to specialize: the callee's
+-- parameter frame, its body, the memo key, the plan-descent measure, the
+-- call-site accessor constraints of its arguments, and the metadata extended
+-- with the callee's parameters (so det subtrees inside the body compile).
+data PlanSpec = PlanSpec
+  { spEnv   :: PlanEnv
+  , spBody  :: Expr
+  , spKey   :: PlanSpecKey
+  , spDepth :: Int
+  , spCons  :: [PLeafCon]
+  , spMeta  :: CompilerMetadata
+  }
+
+-- | Fold the call-site accessor constraints (e.g. the SCons flag implied by
+-- @f (rest s)@) into a world produced by the callee.
+addSpecCons :: PlanSpec -> PlanWorld -> PlanWorld
+addSpecCons spec (PlanWorld gs cons) = PlanWorld gs (foldr insertLeafCon cons (spCons spec))
+
+-- | Resolve a user-function application into a specialization: the callee
+-- must be a directly-applied (saturated) top-level function, and each
+-- argument either an accessor chain into the plan (bound 'PBPlan') or
+-- deterministic given scope (generated at the call site, bound 'PBDet').
+planResolveApply :: CompilerMetadata -> PlanEnv -> Expr -> PlanM (Either String PlanSpec)
+planResolveApply meta env body = case collectApply body [] of
+  Nothing -> return (Left ("unsupported callee in plan traversal (only directly-applied top-level functions can be specialized): " ++ planNodeName body))
+  Just (fname, args) -> case lookup fname (functions (compilingProgram meta)) of
+    Nothing -> return (Left ("call to '" ++ fname ++ "': not a top-level function (higher-order callees are not specializable)"))
+    Just decl -> do
+      let (params, calleeBody) = unwrapCalleeLambdas decl
+      if length params /= length args
+        then return (Left ("call to '" ++ fname ++ "': partial application is not specializable (expected "
+                           ++ show (length params) ++ " arguments, got " ++ show (length args) ++ ")"))
+        else do
+          classesE <- mapM classifyArg args
+          case sequence classesE of
+            Left why -> return (Left why)
+            Right classes -> do
+              frame <- lift (mapM bindParam (zip params classes))
+              let planOffs = [ off | ArgPlan (PlanRef _ off) _ <- classes ]
+              let detKeys  = [ show ir | ArgDet ir <- classes ]
+              let key = (chainName (getTypeInfo calleeBody), planOffs, detKeys)
+              let callCons = concat [ cons | ArgPlan _ cons <- classes ]
+              let meta' = foldl (\m (pname, pti, _) -> extendMetaForLambda m pti pname) meta params
+              return (Right (PlanSpec frame calleeBody key (sum planOffs) callCons meta'))
+  where
+    collectApply (Apply _ f a) acc = collectApply f (a : acc)
+    collectApply v@(Var _ n) acc
+      -- a callee bound in the traversal env is a higher-order parameter, not
+      -- a top-level function of the same name
+      | isJust (planEnvLookup env (chainName (getTypeInfo v))) = Nothing
+      | otherwise = Just (n, acc)
+    collectApply _ _ = Nothing
+    unwrapCalleeLambdas (Lambda ti n sub) =
+      let (ps, b) = unwrapCalleeLambdas sub in ((n, ti, chainName ti) : ps, b)
+    unwrapCalleeLambdas e = ([], e)
+    classifyArg argE
+      | Just refE <- planEvalRef meta env argE = return (fmap (uncurry ArgPlan) refE)
+      | not (subtreeHasOcc (planEnvOccs env) argE) && pType (getTypeInfo argE) == Deterministic =
+          Right . ArgDet <$> planGenDet meta env argE
+      | otherwise = return (Left ("call argument is neither a plan slice (accessor chain) nor deterministic given scope: " ++ planNodeName argE))
+    -- Bind a non-trivial det argument to a fresh variable once; constants and
+    -- variables pass through (also keeps memo keys small and collision-free).
+    bindParam ((pname, _, pcn), cls) = case cls of
+      ArgPlan ref _ -> return (occsOf pcn, PBPlan ref)
+      ArgDet ir -> do
+        v <- case ir of
+          IRConst _ -> return ir
+          IRVar _   -> return ir
+          _ -> do
+            nm <- mkVariable "spec_arg"
+            setVariables [(nm, ir)]
+            return (IRVar nm)
+        return (occsOf pcn, PBDet pname v)
+    occsOf cn = fromMaybe [] (lookup cn (lambdaVarOccurrences (fcData meta)))
+
+data ArgClass = ArgPlan PlanRef [PLeafCon] | ArgDet IRExpr
+
+-- | Push a specialization onto the stack for the duration of the action,
+-- declining first if it would re-enter an active body without strictly
+-- descending the plan. Plan offsets are bounded by the plan size, so strictly
+-- increasing re-entry terminates; anything else (self-recursion at the same
+-- slice, mutual recursion cycles, det-arg-only "recursion") is declined.
+planEnterSpec :: PlanSpec -> PlanM (Either String a) -> PlanM (Either String a)
+planEnterSpec spec act = do
+  st <- get
+  let (bodyCN, _, _) = spKey spec
+  if any (\(cn, d) -> cn == bodyCN && d >= spDepth spec) (psStack st)
+    then return (Left ("recursive specialization of the function at " ++ bodyCN
+                       ++ " does not strictly descend the plan (non-terminating recursion shape)"))
+    else do
+      put st { psStack = (bodyCN, spDepth spec) : psStack st }
+      r <- act
+      modify (\s -> s { psStack = drop 1 (psStack s) })
+      return r
+
+-- | Specialize a Bool-valued callee at its arguments: canonical
+-- (outcome-True, outcome-False) worlds of its body under the argument frame,
+-- memoized. NOTE: the returned worlds do not include the call-site accessor
+-- constraints -- the caller applies 'addSpecCons'.
+planSpecializeBool :: PlanSpec -> PlanM (Either String ([PlanWorld], [PlanWorld]))
+planSpecializeBool spec = do
+  st <- get
+  case Map.lookup (spKey spec) (psBoolMemo st) of
+    Just r  -> return (Right r)
+    Nothing -> planEnterSpec spec $ do
+      r <- planInvertBool (spMeta spec) (spEnv spec) (spBody spec)
+      case r of
+        Left why -> return (Left why)
+        Right tf -> do
+          modify (\s -> s { psBoolMemo = Map.insert (spKey spec) tf (psBoolMemo s) })
+          return (Right tf)
+
+-- | Specialize a value-valued callee at its arguments: (value, world) pairs
+-- of its body under the argument frame, memoized. Same call-site-constraint
+-- note as 'planSpecializeBool'.
+planSpecializeEnum :: PlanSpec -> PlanM (Either String [(IRExpr, PlanWorld)])
+planSpecializeEnum spec = do
+  st <- get
+  case Map.lookup (spKey spec) (psEnumMemo st) of
+    Just r  -> return (Right r)
+    Nothing -> planEnterSpec spec $ do
+      r <- planEnumValues (spMeta spec) (spEnv spec) (spBody spec)
+      case r of
+        Left why -> return (Left why)
+        Right pairs -> do
+          modify (\s -> s { psEnumMemo = Map.insert (spKey spec) pairs (psEnumMemo s) })
+          return (Right pairs)
+
+-- | Observation target applied to a user-function application (milestone 2):
+-- specialize the callee at its arguments and match its outcome against the
+-- target. Bool results go through the canonical two-polarity specialization
+-- (so both polarities share one memo entry); anything else through value
+-- enumeration.
+planApplyTarget :: CompilerMetadata -> PlanEnv -> Expr -> PTarget -> PlanM (Either String [PlanWorld])
+planApplyTarget meta env body target = do
+  specE <- planResolveApply meta env body
+  case specE of
+    Left why -> return (Left why)
+    Right spec -> case rType (getTypeInfo body) of
+      TBool -> do
+        r <- planSpecializeBool spec
+        return ((\(tw, fw) -> map (addSpecCons spec) (planBoolWorlds target tw fw)) <$> r)
+      rt -> do
+        r <- planSpecializeEnum spec
+        return ((\pairs -> [ addSpecCons spec (planAddGuard (planDetGuard rt v target) w) | (v, w) <- pairs ]) <$> r)
 
 -- | Measure the worlds against the raw logit vector bound at @nnRaw@:
 -- p = sum over worlds of (guards -> product of constrained leaf masses),
@@ -2144,11 +2503,14 @@ planWitnessApply meta cumulative rt lResolvedCN lambdaBodyCN tag v sample
       let Program{functions=fs} = compilingProgram meta
       let bodyExpr = findExprWithCN (map snd fs) lambdaBodyCN
       let occs = fromMaybe [] (lookup lResolvedCN (lambdaVarOccurrences (fcData meta)))
+      let env = [(occs, PBPlan (PlanRef plan 0))]
       let target = if cumulative then PTUpTo sample else PTPoint sample
-      worldsE <- planInvert meta occs plan bodyExpr target
+      worldsE <- evalStateT (planInvert meta env bodyExpr target) emptyPlanState
       case worldsE of
         Left why -> return (Left (Just why))
-        Right worlds -> do
+        Right worlds0 -> do
+          -- statically unsatisfiable worlds measure 0; drop them
+          let worlds = filter (not . pwUnsat) worlds0
           nnRaw <- mkVariable "nn_raw"
           sym <- toIRGenerate meta symArg
           setVariables [(nnRaw, IRApply (IRVar nnName) sym)]
