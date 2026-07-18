@@ -8,6 +8,7 @@ module SPLL.CodeGenPyTorch (
 
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types
+import SPLL.Typing.RType (RType(..))
 import Data.List (intercalate, isPrefixOf)
 import Data.Char (toUpper)
 import Data.Maybe (fromMaybe)
@@ -506,9 +507,47 @@ generateExpression (IRLetIn name val body) = do
   b <- generateExpression body
   return ("((" ++ name ++ ":=" ++ v ++ "), " ++ b ++ ")[1]")
 generateExpression (IRError e) =
-  return ("throw(\"" ++ e ++ "\")")
+  return ("throw(\"" ++ escapeStr e ++ "\")")
+generateExpression (IRConformsTo t x) = do
+  sx <- generateExpression x
+  return (pyConforms t sx)
 generateExpression x =
   error ("Unknown expression in PyTorch codegen: " ++ show x)
+
+-- | Escape a Haskell string for embedding in a double-quoted target-language
+-- string literal (e.g. an IRError message that may contain quotes from a show'd type).
+escapeStr :: String -> String
+escapeStr = concatMap esc
+  where esc '"'  = "\\\""
+        esc '\\' = "\\\\"
+        esc '\n' = "\\n"
+        esc c    = [c]
+
+-- | A runtime type-tag check for the query-type guard (see IRConformsTo). Full-depth
+-- structural check mirroring the interpreter's 'valueConformsTo': recurses into tuple
+-- components, either arms, and every list element; precise for float/bool/int and
+-- permissive ("True") only for types with no cheap runtime tag (so it never falsely
+-- rejects). The marginal-query wildcard (isAny) is accepted at every level, matching
+-- VAny, and short-circuits before any component accessor is evaluated. The Int arg is
+-- a nesting depth used to name list-comprehension binders uniquely.
+pyConforms :: RType -> String -> String
+pyConforms = pyConformsAt 0
+
+pyConformsAt :: Int -> RType -> String -> String
+pyConformsAt d t e = "(isAny(" ++ e ++ ") or " ++ pyConformsShape d t e ++ ")"
+
+pyConformsShape :: Int -> RType -> String -> String
+pyConformsShape _ TFloat  e = "isinstance(" ++ e ++ ", float)"
+pyConformsShape _ TBool   e = "isinstance(" ++ e ++ ", bool)"
+pyConformsShape _ TInt    e = "(isinstance(" ++ e ++ ", int) and not isinstance(" ++ e ++ ", bool))"
+pyConformsShape d (Tuple a b) e =
+  "(isinstance(" ++ e ++ ", T) and " ++ pyConformsAt d a (e ++ ".t1") ++ " and " ++ pyConformsAt d b (e ++ ".t2") ++ ")"
+pyConformsShape d (ListOf t) e =
+  let v = "_ce" ++ show d
+  in "(isinstance(" ++ e ++ ", InferenceList) and all(" ++ pyConformsAt (d + 1) t v ++ " for " ++ v ++ " in " ++ e ++ "))"
+pyConformsShape d (TEither a b) e =
+  "((isinstance(" ++ e ++ ", Left) and " ++ pyConformsAt d a (e ++ ".val") ++ ") or (isinstance(" ++ e ++ ", Right) and " ++ pyConformsAt d b (e ++ ".val") ++ "))"
+pyConformsShape _ _ _ = "True"
 
 collectApplyChain :: IRExpr -> (IRExpr, [IRExpr])
 collectApplyChain (IRApply f arg) = let (fn, args) = collectApplyChain f in (fn, args ++ [arg])
