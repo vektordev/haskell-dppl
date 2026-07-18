@@ -133,10 +133,10 @@ letInDestructor (InjF _ (Named "TCons") [a, b]) = do
   return $ \v body -> a' (tfst v) (b' (tsnd v) body)
 letInDestructor (InjF _ (Named "left") [x]) = do
   x' <- letInDestructor x
-  return $ \v -> x' (sfromLeft v)
+  return $ \v -> x' (sfromLeftPartial v)
 letInDestructor (InjF _ (Named "right") [x]) = do
   x' <- letInDestructor x
-  return $ \v -> x' (sfromRight v)
+  return $ \v -> x' (sfromRightPartial v)
 letInDestructor (Constant _ (VList EmptyList)) = return $ \v b -> ifThenElse (isNull v) b (Constant makeTypeInfo (VError "RHS of letin is longer than LHS"))
 letInDestructor (InjF _ (Named "Cons") [x, xs]) = do
   x' <- letInDestructor x

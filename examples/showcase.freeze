@@ -34,7 +34,7 @@ negUniform    p(-0.5) = 1.0
 expNormal     p(1.0)  = 0.3989422804014327
 firstOfPair   p(0.0)  = 0.3989422804014327
 secondOfPair  p(1.0)  = 0.5
-unwrapped     p(0.0)  = 0.3989422804014327
+unwrapped     p(Right 0.0)  = 0.3989422804014327
 
 -- Comparison / logic (Bool-valued, discrete mass)
 bothLow       p(True) = 0.2

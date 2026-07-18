@@ -44,6 +44,8 @@ module SPLL.Prelude
   , sisRight
   , sfromLeft
   , sfromRight
+  , sfromLeftPartial
+  , sfromRightPartial
   , (#==#)
   , (#>#)
   , (#<#)
@@ -250,6 +252,16 @@ sfromLeft x = injF "fromLeft" [x]
 
 sfromRight :: Expr -> Expr
 sfromRight x = injF "fromRight" [x]
+
+-- Partial (crash-on-mismatch) extractors, used only by the `let left a = ...`/
+-- `let right b = ...` letIn-destructuring sugar (Parser.letInDestructor), which
+-- is always guarded by construction (the pattern dictates which side is taken)
+-- and is a distinct feature from the total, Maybe-returning `fromLeft`/`fromRight`.
+sfromLeftPartial :: Expr -> Expr
+sfromLeftPartial x = injF "fromLeftPartial" [x]
+
+sfromRightPartial :: Expr -> Expr
+sfromRightPartial x = injF "fromRightPartial" [x]
 
 -- Boolean Algebra
 (#==#) :: Expr -> Expr -> Expr

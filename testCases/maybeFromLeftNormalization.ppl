@@ -1,0 +1,1 @@
+main = fromLeft (if Uniform < 0.5 then left Normal else right (Normal + 10.0))

@@ -70,13 +70,45 @@ sqInv = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["b"] ["a"] (IRUnaryOp OpExp
 
 leftFwd :: FDecl
 leftFwd = FDecl (Forall [TV "a", TV "b"] [] (TVarR (TV "a") `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b")))) ["a"] ["b"] (IRLeft (IRVar "a")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1))]
+-- Partial extractor, kept only to serve as `left`'s inverse (guarded by
+-- applicability = isLeft, as before). Not exposed under the "fromLeft" name
+-- any more -- see fromLeftMaybeFwd/fromLeftMaybeInv below for that.
 fromLeftFwd :: FDecl
 fromLeftFwd = FDecl (Forall [TV "a", TV "b"] [] (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "a"))) ["b"] ["a"] (IRFromLeft (IRVar "b")) (IRIsLeft (IRVar "b")) True [("b", IRConst (VFloat 1))]
 
 rightFwd :: FDecl
 rightFwd = FDecl (Forall [TV "a", TV "b"] [] (TVarR (TV "b") `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b")))) ["a"] ["b"] (IRRight (IRVar "a")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1))]
+-- Partial extractor, kept only to serve as `right`'s inverse. See fromRightFwd's
+-- comment above.
 fromRightFwd :: FDecl
 fromRightFwd = FDecl (Forall [TV "a", TV "b"] [] (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "b"))) ["b"] ["a"] (IRFromRight (IRVar "b")) (IRIsRight (IRVar "b")) True [("b", IRConst (VFloat 1))]
+
+-- Total, Maybe-returning fromLeft/fromRight (the surfaced "fromLeft"/"fromRight"
+-- InjF names). Maybe a is represented as Either () a (Haskell convention:
+-- Nothing = Left (), Just x = Right x -- see maybe-partial-functions task doc).
+-- fromLeft (Left x) = Just x = Right x; fromLeft (Right _) = Nothing = Left ().
+-- Always applicable (total), so no zero-guard is needed at the call site.
+fromLeftMaybeFwd :: FDecl
+fromLeftMaybeFwd = FDecl (Forall [TV "a", TV "b"] [] (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TEither TUnit (TVarR (TV "a"))))
+  ["b"] ["m"]
+  (IRIf (IRIsLeft (IRVar "b")) (IRRight (IRFromLeft (IRVar "b"))) (IRLeft (IRConst VUnit)))
+  (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
+fromLeftMaybeInv :: FDecl
+fromLeftMaybeInv = FDecl (Forall [TV "a", TV "b"] [] (TEither TUnit (TVarR (TV "a")) `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b"))))
+  ["m"] ["b"]
+  (IRIf (IRIsRight (IRVar "m")) (IRLeft (IRFromRight (IRVar "m"))) (IRRight (IRConst VAny)))
+  (IRConst (VBool True)) True [("m", IRConst (VFloat 1))]
+
+fromRightMaybeFwd :: FDecl
+fromRightMaybeFwd = FDecl (Forall [TV "a", TV "b"] [] (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TEither TUnit (TVarR (TV "b"))))
+  ["b"] ["m"]
+  (IRIf (IRIsRight (IRVar "b")) (IRRight (IRFromRight (IRVar "b"))) (IRLeft (IRConst VUnit)))
+  (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
+fromRightMaybeInv :: FDecl
+fromRightMaybeInv = FDecl (Forall [TV "a", TV "b"] [] (TEither TUnit (TVarR (TV "b")) `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b"))))
+  ["m"] ["b"]
+  (IRIf (IRIsRight (IRVar "m")) (IRRight (IRFromRight (IRVar "m"))) (IRLeft (IRConst VAny)))
+  (IRConst (VBool True)) True [("m", IRConst (VFloat 1))]
 
 isLeftFwd :: FDecl
 isLeftFwd = FDecl (Forall [TV "a", TV "b"] [] (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TBool)) ["a"] ["b"] (IRIsLeft (IRVar "a")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1))]
@@ -230,8 +262,12 @@ globalFenv' = [("double", FPair doubleFwd [doubleInv]),
               ("sq", FPair sqFwd [sqInv]),
               ("left", FPair leftFwd [fromLeftFwd]),
               ("right", FPair rightFwd [fromRightFwd]),
-              ("fromLeft", FPair fromLeftFwd [leftFwd]),
-              ("fromRight", FPair fromRightFwd [rightFwd]),
+              ("fromLeft", FPair fromLeftMaybeFwd [fromLeftMaybeInv]),
+              ("fromRight", FPair fromRightMaybeFwd [fromRightMaybeInv]),
+              -- Partial extractors backing the `let left a = ...`/`let right b = ...`
+              -- letIn-destructuring sugar only -- see sfromLeftPartial/sfromRightPartial.
+              ("fromLeftPartial", FPair fromLeftFwd [leftFwd]),
+              ("fromRightPartial", FPair fromRightFwd [rightFwd]),
               ("isLeft", FPair isLeftFwd [isLeftInv]),
               ("isRight", FPair isRightFwd [isRightInv]),
               ("plus", FPair plusFwd [plusInv1, plusInv2]),
