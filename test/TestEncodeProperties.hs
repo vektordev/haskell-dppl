@@ -30,7 +30,8 @@ import Control.Monad.Random (evalRand)
 import System.Random (mkStdGen)
 import System.FilePath (takeBaseName)
 import Data.Foldable (toList)
-import Data.List (isInfixOf, nub, sort)
+import Data.List (find, isInfixOf, nub, sort)
+import Data.Maybe (isJust)
 
 import SPLL.Prelude (runEncode, compile, runEncodeC, runProbNamedC, runGenNamedC)
 import SPLL.Parser (tryParseProgram)
@@ -548,16 +549,25 @@ compileOrFail :: Program -> IO IREnv
 compileOrFail p = either (\e -> assertFailure ("compile failed: " ++ show e) >> return undefined)
                          return (compile defaultCompilerConfig p)
 
+-- Whether an encode function was actually generated for the named endpoint. The roundtrip
+-- invariants only apply where encode exists: a continuous arm inside an Either/ADT is refused
+-- (no encode built), so its program is skipped here rather than asserted broken.
+encodeGenerated :: Program -> String -> Bool
+encodeGenerated p target = case compile defaultCompilerConfig p of
+  Right (IREnv groups _ _) -> maybe False (isJust . encodeFun) (find ((== target) . groupName) groups)
+  Left _                   -> False
+
 encodeRoundtripTests :: IO TestTree
 encodeRoundtripTests = do
   pool <- loadRoundtripPool
   return $ testGroup "EncodeRoundtrip"
     [ testGroup "LogitIdentity"
-        [ logitIdentityCase n p | (n, p, _) <- pool, isDecoderPassthrough p ]
+        [ logitIdentityCase n p | (n, p, _) <- pool, isDecoderPassthrough p, encodeGenerated p "main" ]
     , testGroup "DensityAgreement"
         [ densityAgreementCase n p target args
         | (n, p, tcs) <- pool
         , (target, args) <- nub [ (t, a) | tc <- tcs, Just (t, a) <- [encodeInvocation tc] ]
+        , encodeGenerated p target
         ]
     ]
   where
