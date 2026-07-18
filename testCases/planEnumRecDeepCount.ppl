@@ -1,0 +1,17 @@
+-- M4 value-grouped DP path, depth-12 counting fold. At M2 this fold was
+-- 2^depth worlds (4096 at depth 12) and blew up the IR; the milestone-4
+-- value grouping collapses same-count worlds into one measured mass each, so
+-- the compile stays O(depth^2) worlds. Interpreter-only: the compiled prob
+-- function is a large let-block of shared count masses, and the backend
+-- surface (logit-slice reads) is already pinned by the depth-3 planEnumRec*
+-- and planEnumInline* cases. Expected values from an independent DP oracle
+-- over the factorized per-level distribution (P(#red >= 2) at depth 12).
+data Color = Red | Green | Blue
+data Object = Null | Obj color::Color
+data Scene = Empty | SCons obj::Object, rest::Scene depth 12
+
+neural readScene :: (Symbol -> Scene)
+
+numRed s = if isEmpty s then 0.0 else (if isObj (obj s) then (if isRed (color (obj s)) then 1.0 else 0.0) else 0.0) + numRed (rest s)
+
+main sym = let scene = readScene sym in if numRed scene > 1.5 then 1 else 0

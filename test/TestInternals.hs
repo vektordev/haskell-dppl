@@ -916,6 +916,36 @@ test_planEnumThreadedTopKAndBC = planEnumTopKAndBCTest "planEnumThreadedTopKAndB
 test_planEnumRecTopKAndBC :: TestTree
 test_planEnumRecTopKAndBC = planEnumTopKAndBCTest "planEnumRecTopKAndBC" "planEnumRecChain"
 
+-- | Milestone-4 value-grouped DP acceptance: a counting fold compared against
+-- a deterministic bound compiles to polynomially-sized IR. At milestone 2 the
+-- fold enumerated 2^depth (value, world) pairs, so the IR grew exponentially;
+-- the value DP collapses same-count worlds into one measured mass per count,
+-- keeping the IR O(depth^2). We measure IR size as the length of the shown IR
+-- (the same node-count proxy the orthant-refusal test uses) at depth 10 and
+-- depth 30: a 2^depth blow-up would put depth 30 astronomically above depth 10
+-- (ratio ~2^20), whereas the DP keeps the ratio a small polynomial factor. The
+-- test completing at all also proves depth 30 does not hang or OOM.
+test_planEnumM4Polynomial :: TestTree
+test_planEnumM4Polynomial = testCase "planEnumM4Polynomial" $ do
+  let prog d = unlines
+        [ "data Color = Red | Green | Blue"
+        , "data Object = Null | Obj color::Color"
+        , "data Scene = Empty | SCons obj::Object, rest::Scene depth " ++ show d
+        , "neural readScene :: (Symbol -> Scene)"
+        , "numRed s = if isEmpty s then 0.0 else (if isObj (obj s) then (if isRed (color (obj s)) then 1.0 else 0.0) else 0.0) + numRed (rest s)"
+        , "main sym = let scene = readScene sym in if numRed scene > 1.5 then 1 else 0"
+        ]
+  let sizeAt d = case tryParseProgram "m4" (prog d) of
+        Left e  -> assertFailure ("parse error at depth " ++ show d ++ ": " ++ show e)
+        Right p -> case compile defaultCompilerConfig p of
+          Left e   -> assertFailure ("compile error at depth " ++ show d ++ ": " ++ show e)
+          Right ir -> return (length (show ir))
+  s10 <- sizeAt 10
+  s30 <- sizeAt 30
+  assertBool ("depth-30 counting-fold IR is not polynomially bounded (2^depth would give a ~10^6 ratio): s10="
+              ++ show s10 ++ " s30=" ++ show s30 ++ " ratio=" ++ show (fromIntegral s30 / fromIntegral s10 :: Double))
+    (s30 < 30 * s10)
+
 -- | Milestone-3 refusal rule, kept precise: a world that couples a continuous
 -- plan leaf pairwise and also bounds it, or couples it twice, is a correlated
 -- orthant probability -- quadrature the language excludes by design. The plan
@@ -969,6 +999,7 @@ internalsTests = testGroup "Internals"
   , autoNeuralDerivationTests
   , enumContinuousRefusalTests
   , test_planEnumThreadedTopKAndBC
+  , test_planEnumM4Polynomial
   , planOverCouplingRefusalTests
   , test_tstBackendsHeader
   ]

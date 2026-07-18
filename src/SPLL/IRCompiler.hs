@@ -13,7 +13,7 @@ import SPLL.IROptimizer
 import PredefinedFunctions
 import SPLL.Typing.PType
 import Data.Maybe
-import Data.Either (isRight)
+import Data.Either (isRight, partitionEithers)
 import Data.List (isPrefixOf, (\\), find, elemIndex, nub)
 import Data.Char (isDigit)
 import Data.Functor ((<&>))
@@ -24,7 +24,7 @@ import SPLL.Typing.AlgebraicDataTypes
 import Data.Bifunctor (Bifunctor(bimap))
 import Utils
 import Control.Monad (foldM, forM, when)
-import Control.Monad.State.Strict (StateT, evalStateT, get, put, modify)
+import Control.Monad.State.Strict (StateT, evalStateT, get, gets, put, modify)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import GHC.Stack (HasCallStack)
@@ -2101,11 +2101,17 @@ plcBase (PLeafPt b _ _ _) = b
 -- at most once, and a coupled leaf may carry no other constraint -- anything
 -- beyond that is an orthant probability, which the language excludes
 -- (checked in 'pwOverCoupled'; design plan-guided-lazy-enumeration M3).
-data PlanWorld = PlanWorld { pwGuards :: [IRExpr], pwCons :: [PLeafCon], pwPairs :: [(Int, Int)] }
+-- 'pwFactor' (milestone 4) is a pre-measured multiplicative mass contribution
+-- carried by the world -- const1 for every ordinary world, and the summed
+-- mass of a collapsed value group for the DP path-counting worlds (see
+-- 'planGroupValues'): a group of same-value worlds is merged into one world
+-- with empty constraints and this factor, so counting folds stay O(depth)
+-- instead of 2^depth.
+data PlanWorld = PlanWorld { pwGuards :: [IRExpr], pwCons :: [PLeafCon], pwPairs :: [(Int, Int)], pwFactor :: IRExpr }
 
 -- | An unguarded world from leaf constraints alone.
 pw1 :: [PLeafCon] -> PlanWorld
-pw1 cs = PlanWorld [] cs []
+pw1 cs = PlanWorld [] cs [] const1
 
 -- | The observation target: the plan-leaf analogue of the point/interval
 -- split in 'WSet'. PTUpTo is the cumulative target (body <= sample).
@@ -2152,7 +2158,7 @@ staticBool _ = Nothing
 -- die, and the branch body -- containing the recursive call -- is never
 -- traversed. This is the recursion base of the milestone-2 specialization.
 pwUnsat :: PlanWorld -> Bool
-pwUnsat (PlanWorld gs cons pairs) = any conUnsat cons
+pwUnsat (PlanWorld gs cons pairs _) = any conUnsat cons
                                  || any ((== Just False) . staticBool) gs
                                  || any (\(a, b) -> (b, a) `elem` pairs || a == b) pairs
   where
@@ -2168,7 +2174,7 @@ pwUnsat (PlanWorld gs cons pairs) = any conUnsat cons
 -- excludes by design (see "Hard residual" in the design doc). Returns a
 -- diagnostic for the first offending world.
 pwOverCoupled :: PlanWorld -> Maybe String
-pwOverCoupled (PlanWorld _ cons pairs)
+pwOverCoupled (PlanWorld _ cons pairs _)
   | (base:_) <- overCoupled = Just
       ("a world couples the continuous leaf at logit offset " ++ show base
        ++ " to other random leaves more than once (or couples it and also"
@@ -2202,21 +2208,39 @@ data PlanState = PlanState
     -- specialization: re-entering a body already on the stack without
     -- strictly descending the plan cannot terminate and is declined.
   , psStack    :: [(ChainName, Int)]
+    -- | The variable the raw logit vector is bound to (milestone 4): the value
+    -- grouping measures collapsed worlds against it in-flight, so it must be
+    -- bound before the traversal rather than only at measurement time.
+  , psNnRaw    :: String
+    -- | Whether the milestone-4 value grouping ('planGroupValues') may collapse
+    -- same-value worlds into a single measured mass. Sound only when the
+    -- counting fold is the SOLE reader of the neural scene: merging bakes the
+    -- fold's leaf constraints (including the shared structural SCons/Obj flags)
+    -- into one mass, so any sibling predicate re-constraining those same leaves
+    -- would double-count them. Enabled iff the plan-bound variable occurs once
+    -- in the observation (see 'planWitnessApply').
+  , psMerge    :: Bool
   }
 
-emptyPlanState :: PlanState
-emptyPlanState = PlanState Map.empty Map.empty []
+emptyPlanState :: String -> Bool -> PlanState
+emptyPlanState nnRaw merge = PlanState Map.empty Map.empty [] nnRaw merge
 
 -- (CompilerMonad spelled out: it is an unsaturated synonym application otherwise)
 type PlanM a = StateT PlanState (WriterT [(String, IRExpr)] Supply) a
 
 planAddGuard :: IRExpr -> PlanWorld -> PlanWorld
-planAddGuard g (PlanWorld gs cs ps) = PlanWorld (g:gs) cs ps
+planAddGuard g w = w { pwGuards = g : pwGuards w }
 
 andGuard :: IRExpr -> IRExpr -> IRExpr
 andGuard a b | a == constTrueIR = b
              | b == constTrueIR = a
              | otherwise        = IROp OpAnd a b
+
+-- | Multiply two world mass factors, dropping identity const1 factors.
+mulFactor :: IRExpr -> IRExpr -> IRExpr
+mulFactor a b | a == const1 = b
+              | b == const1 = a
+              | otherwise   = IROp OpMult a b
 
 -- | Intersect two constraints on the same region. Discrete regions keep the
 -- slots allowed by both, conjoining their guards. Continuous leaves follow
@@ -2247,8 +2271,8 @@ insertLeafCon c (c':cs) | plcBase c == plcBase c' = intersectLeafCon c' c : cs
                         | otherwise               = c' : insertLeafCon c cs
 
 intersectPlanW :: PlanWorld -> PlanWorld -> PlanWorld
-intersectPlanW (PlanWorld g1 c1 p1) (PlanWorld g2 c2 p2) =
-  PlanWorld (g1 ++ g2) (foldl (flip insertLeafCon) c1 c2) (nub (p1 ++ p2))
+intersectPlanW (PlanWorld g1 c1 p1 f1) (PlanWorld g2 c2 p2 f2) =
+  PlanWorld (g1 ++ g2) (foldl (flip insertLeafCon) c1 c2) (nub (p1 ++ p2)) (mulFactor f1 f2)
 
 -- | Cross-intersect two world sets, dropping statically unsatisfiable
 -- results. This is what keeps the world count of an if-chain over several
@@ -2448,7 +2472,7 @@ planInvert meta env body target
       if pType (getTypeInfo body) == Deterministic
         then do
           bIR <- planGenDet meta env body
-          return (Right [PlanWorld [planDetGuard (rType (getTypeInfo body)) bIR target] [] []])
+          return (Right [PlanWorld [planDetGuard (rType (getTypeInfo body)) bIR target] [] [] const1])
         else return (Left ("a subtree independent of the plan-bound variables draws fresh randomness: " ++ planNodeName body))
 planInvert meta env body target
   | Just refE <- planEvalRef meta env body =
@@ -2665,14 +2689,102 @@ planInvertBool meta env e = do
   f <- planInvert meta env e (PTPoint (IRConst (VBool False)))
   return ((,) <$> t <*> f)
 
+-- | Fold an IR value expression built from numeric literals and plus/mult
+-- into a constant Value, when possible. Counting-fold values are always
+-- statically foldable (literal increments combined by plus); anything else is
+-- left ungrouped by the value DP ('planGroupValues').
+foldValueConst :: IRExpr -> Maybe IRValue
+foldValueConst (IRConst v) = Just v
+foldValueConst (IROp op a b) = do
+  va <- foldValueConst a
+  vb <- foldValueConst b
+  case op of
+    OpPlus -> num (+) va vb
+    OpMult -> num (*) va vb
+    _      -> Nothing
+  where
+    num f (VFloat x) (VFloat y) = Just (VFloat (f x y))
+    num f (VInt  x)  (VInt  y)  = Just (VInt (round (f (fromIntegral x :: Double) (fromIntegral y))))
+    num _ _ _                   = Nothing
+foldValueConst _ = Nothing
+
+-- | Milestone-4 value-grouped DP: collapse (value, world) pairs that share a
+-- statically-known value into one world carrying the summed mass, bound to a
+-- fresh IR variable so the mass is shared rather than re-inlined at every
+-- recursion level. This is what turns counting folds from 2^depth enumerated
+-- worlds into O(depth) value groups per level -- the
+-- [[materialized-marginals-semiring]] idea in its first concrete consumer.
+-- Soundness rests on three things: the (value, world) pairs are a partition, so
+-- summing a same-value subset is exactly P(value = v); constraints shared
+-- identically by every world of a group stay LIVE ('commonDiscreteCons') so an
+-- outer re-constraint still dedups; and merging fires at all only when the fold
+-- is the scene's sole reader ('psMerge'), so no sibling predicate re-constrains
+-- a baked leaf. Only all-dim-0, uncoupled worlds with a foldable value are
+-- merged; multi-world groups collapse (a singleton keeps its constraints, so no
+-- premature commitment), and anything non-foldable or carrying a point/pair
+-- constraint passes through untouched.
+planGroupValues :: [(IRExpr, PlanWorld)] -> PlanM [(IRExpr, PlanWorld)]
+planGroupValues pairs = do
+  merge <- gets psMerge
+  nnRaw <- gets psNnRaw
+  if not merge
+    -- unsafe to collapse (the fold shares leaves with a sibling predicate);
+    -- keep the milestone-2 world-per-path enumeration unchanged
+    then return pairs
+    else do
+      merged <- mapM (mergeGroup nnRaw) grouped
+      return (merged ++ keep)
+  where
+    (mergeable, keep) = partitionEithers (map classify pairs)
+    classify (ve, w)
+      | Just v <- foldValueConst ve, canMerge w = Left (show v, (v, [w]))
+      | otherwise                               = Right (ve, w)
+    canMerge w = null (pwPairs w) && not (any isPt (pwCons w))
+    isPt PLeafPt{} = True
+    isPt _         = False
+    -- group same-value worlds, keeping ascending value-key order for
+    -- reproducible IR
+    grouped = Map.elems (Map.fromListWith comb mergeable)
+    comb (v, ws1) (_, ws2) = (v, ws1 ++ ws2)
+    mergeGroup _ (v, [w]) = return (IRConst v, w)
+    -- Merge same-value worlds. Constraints shared identically by every world
+    -- in the group (a discrete leaf region with the same slots+guards -- in
+    -- practice the recursion's accessor/constructor flags) are kept LIVE on the
+    -- collapsed world, so an outer context re-constraining that leaf still
+    -- dedups via 'intersectLeafCon' instead of double-counting it. Only the
+    -- residual (the internal randomness that varies across the group, disjoint
+    -- from anything constrained outside) is baked into the summed mass factor.
+    mergeGroup nnRaw (v, ws) = do
+      let common = commonDiscreteCons ws
+          residual w = w { pwCons = filter (\c -> not (any (conEq c) common)) (pwCons w) }
+      let mass = foldr1 (IROp OpPlus) (map (planWorldMass nnRaw . residual) ws)
+      mv <- lift (mkVariable "cnt_mass")
+      lift (setVariables [(mv, mass)])
+      return (IRConst v, PlanWorld [] common [] (IRVar mv))
+    -- discrete leaf constraints present (identically) in every world's cons
+    commonDiscreteCons (w:ws') =
+      [ c | c@(PLeafCon _ _) <- pwCons w, all (\w' -> any (conEq c) (pwCons w')) ws' ]
+    commonDiscreteCons [] = []
+    conEq (PLeafCon b1 s1) (PLeafCon b2 s2) = b1 == b2 && s1 == s2
+    conEq _ _ = False
+
 -- | Enumerate the possible values of a plan-dependent expression as
 -- (value, world) pairs -- the milestone-2 mechanism behind counting folds.
 -- The worlds partition the plan-consistent outcomes (every fork below is a
 -- partition), so a consumer may guard each value independently and sum.
 -- Values are IR expressions, usually constants; arithmetic combines them
--- unfolded (constant folding is left to the optimizer).
+-- unfolded (constant folding is left to the optimizer). The result is passed
+-- through the milestone-4 value DP ('planGroupValues') so same-value worlds
+-- collapse at every level -- without it counting folds are 2^depth.
 planEnumValues :: CompilerMetadata -> PlanEnv -> Expr -> PlanM (Either String [(IRExpr, PlanWorld)])
-planEnumValues meta env body
+planEnumValues meta env body = do
+  r <- planEnumValuesRaw meta env body
+  case r of
+    Left why    -> return (Left why)
+    Right pairs -> Right <$> planGroupValues pairs
+
+planEnumValuesRaw :: CompilerMetadata -> PlanEnv -> Expr -> PlanM (Either String [(IRExpr, PlanWorld)])
+planEnumValuesRaw meta env body
   | not (subtreeHasOcc occs body) =
       if pType (getTypeInfo body) == Deterministic
         then do
@@ -2747,7 +2859,7 @@ data PlanSpec = PlanSpec
 -- | Fold the call-site accessor constraints (e.g. the SCons flag implied by
 -- @f (rest s)@) into a world produced by the callee.
 addSpecCons :: PlanSpec -> PlanWorld -> PlanWorld
-addSpecCons spec (PlanWorld gs cons ps) = PlanWorld gs (foldr insertLeafCon cons (spCons spec)) ps
+addSpecCons spec w = w { pwCons = foldr insertLeafCon (pwCons w) (spCons spec) }
 
 -- | Resolve a user-function application into a specialization: the callee
 -- must be a directly-applied (saturated) top-level function, and each
@@ -2890,23 +3002,41 @@ planApplyTarget meta env body target = do
 -- world whose guards hold counts as one branch.
 measurePlanWorlds :: String -> [PlanWorld] -> CompilerMonad CompilationResult
 measurePlanWorlds nnRaw worlds
-  | all ((== 0) . wDim) worlds =
-      return (sumUp (map (fst . one) worlds), const0, sumUp (map (snd . one) worlds))
-  | otherwise = case map (\w -> let (p, bc) = one w in ((p, dimC (wDim w)), bc)) worlds of
+  | all ((== 0) . planWorldDim) worlds =
+      return (sumUp (map mass worlds), const0, sumUp (map branch worlds))
+  | otherwise = case map (\w -> ((mass w, dimC (planWorldDim w)), branch w)) worlds of
       []     -> return (const0, const0, const0)
       (m:ms) -> do
         (pS, dS) <- foldM addP (fst m) (map fst ms)
         return (pS, dS, sumUp (map snd (m:ms)))
   where
     dimC d = IRConst (VFloat (fromIntegral d))
-    wDim w = length [ () | PLeafPt {} <- pwCons w ]
     sumUp [] = const0
     sumUp xs = foldr1 (IROp OpPlus) xs
-    one (PlanWorld guards cons pairs) =
-      let guarded e = foldr (\g acc -> IRIf g acc const0) e guards
-      in (guarded (prodMass cons pairs), guarded const1)
-    prodMass [] []     = const1
-    prodMass cons pairs = foldr1 (IROp OpMult) (map leafMass cons ++ map pairMass pairs)
+    mass = planWorldMass nnRaw
+    branch w = foldr (\g acc -> IRIf g acc const0) const1 (pwGuards w)
+
+-- | Dimensionality of a world's mass: one per point constraint (a univariate
+-- density); discrete slots, CDF intervals, pairwise couplings and the carried
+-- mass factor are all dim 0.
+planWorldDim :: PlanWorld -> Int
+planWorldDim w = length [ () | PLeafPt {} <- pwCons w ]
+
+-- | The mass a world contributes: (guards -> the carried factor times the
+-- product of constrained leaf masses), read from the raw logit vector bound at
+-- @nnRaw@. A discrete leaf's mass is the sum of its allowed slots' logits (each
+-- under its own guard), an interval-constrained continuous leaf's is a Gaussian
+-- CDF difference over its (mu, sigma) slice, a pairwise coupling's is the
+-- closed-form difference Gaussian, and a point-constrained continuous leaf's is
+-- its density times |change-of-variables| (the only dim-1 measure). Shared
+-- between 'measurePlanWorlds' and the milestone-4 value grouping so a collapsed
+-- group's factor measures exactly as the worlds it replaced.
+planWorldMass :: String -> PlanWorld -> IRExpr
+planWorldMass nnRaw (PlanWorld guards cons pairs factor) =
+    foldr (\g acc -> IRIf g acc const0) (mulFactor factor (prodMass cons pairs)) guards
+  where
+    prodMass []  []  = const1
+    prodMass cs prs = foldr1 (IROp OpMult) (map leafMass cs ++ map pairMass prs)
     leafMass (PLeafCon _ [])       = const0
     leafMass (PLeafCon base slots) = foldr1 (IROp OpPlus) (map (slotRead base) slots)
     leafMass (PLeafIvl base lo hi) =
@@ -2958,7 +3088,17 @@ planWitnessApply meta cumulative rt lResolvedCN lambdaBodyCN tag v sample
       let occs = fromMaybe [] (lookup lResolvedCN (lambdaVarOccurrences (fcData meta)))
       let env = [(occs, PBPlan (PlanRef plan 0))]
       let target = if cumulative then PTUpTo sample else PTPoint sample
-      worldsE <- evalStateT (planInvert meta env bodyExpr target) emptyPlanState
+      -- Bind the raw logit vector up front: the milestone-4 value grouping
+      -- measures collapsed worlds during the traversal, so it needs the name.
+      nnRaw <- mkVariable "nn_raw"
+      sym <- toIRGenerate meta symArg
+      setVariables [(nnRaw, IRApply (IRVar nnName) sym)]
+      -- The milestone-4 value grouping may collapse same-count worlds only when
+      -- the fold is the scene's sole reader: with a single occurrence its leaves
+      -- are private, so baking them into a summed mass cannot clash with a
+      -- sibling predicate re-constraining the shared structural flags.
+      let mayMerge = length occs <= 1
+      worldsE <- evalStateT (planInvert meta env bodyExpr target) (emptyPlanState nnRaw mayMerge)
       case worldsE of
         Left why -> return (Left (Just why))
         Right worlds0 -> do
@@ -2967,9 +3107,6 @@ planWitnessApply meta cumulative rt lResolvedCN lambdaBodyCN tag v sample
           case mapMaybe pwOverCoupled worlds of
            (why:_) -> return (Left (Just why))
            [] -> do
-            nnRaw <- mkVariable "nn_raw"
-            sym <- toIRGenerate meta symArg
-            setVariables [(nnRaw, IRApply (IRVar nnName) sym)]
             (p, dim, bc) <- measurePlanWorlds nnRaw worlds
             -- Full-ANY marginal short-circuit, mirroring setWitnessApply.
             if cumulative
