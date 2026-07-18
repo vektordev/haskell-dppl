@@ -7,11 +7,13 @@ import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types
 import Data.Functor ( (<&>) )
 import Data.Number.Erf (erf)
-import Data.List (maximumBy)
+import Data.Bits (xor)
+import Data.List (maximumBy, foldl', findIndex, partition)
 import Data.Ord (comparing)
 import Data.Foldable (toList)
-import Control.Monad.State (State, evalState, get, put)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
+import Control.Monad.State (State, evalState, get, put)
 import SPLL.Lang.Lang (floatApproxEqThresh)
 
 
@@ -289,17 +291,6 @@ forceAnyCheck (IRRight _) = IRConst $ VBool False -- Eithers can never be any
 forceAnyCheck x = IRUnaryOp OpIsAny x
 -- Maybe more, I am not quite sure
 
-exprSize :: IRExpr -> Int
-exprSize expr | null (getIRSubExprs expr) = 1
-exprSize expr = sum (map exprSize (getIRSubExprs expr))
-
--- | True if the expression contains a random draw.  Sharing such an expression
--- via CSE would collapse independent draws into one, so they are never extracted.
---FIXME: a function call to a sampling function does itself also sample.
-samples :: IRExpr -> Bool
-samples (IRSample _) = True
-samples x = any samples (getIRSubExprs x)
-
 -- Common-subexpression elimination.
 --
 -- This is a whole-expression pass (run outside @irMap@): it threads a single
@@ -307,13 +298,11 @@ samples x = any samples (getIRSubExprs x)
 -- per node instead would let the same @cse_N@ name be chosen at two different
 -- nesting levels, which shadows and corrupts a binding of a different type.
 --
--- At each node we extract repeated subexpressions one at a time, wrapping the
--- node in an IRLetIn, then recurse into the children of the result.  A candidate
--- is only hoisted when doing so is provably semantics-preserving, which requires
--- three conditions:
+-- A candidate is only hoisted when doing so is provably semantics-preserving,
+-- which requires three conditions:
 --
---   * pure — it contains no IRSample (see 'samples'), so sharing a single value
---     for it cannot collapse distinct random draws;
+--   * pure — it contains no IRSample (see 'annSamples'), so sharing a single
+--     value for it cannot collapse distinct random draws;
 --   * capture-safe — none of its free variables are bound anywhere inside the
 --     node, so lifting it to a let at the top of the node keeps every variable
 --     in scope;
@@ -323,93 +312,230 @@ samples x = any samples (getIRSubExprs x)
 --     strict in both the interpreter and generated code, this guarantees the
 --     hoisted binding is forced exactly when one of its original occurrences
 --     would have been, so no extra evaluation is introduced.
+--
+-- Cost model: a skeleton is scanned only at "scan roots" (the top expression
+-- and each conditional entry point: if-branches, lambda and enum-sum bodies),
+-- not at every node.  An interior node's skeleton is a sublist of its scan
+-- root's, so it cannot contain a repeat the root scan did not already see —
+-- except a candidate the root refused only for capture reasons, whose binder
+-- the descent can move below; only such still-repeated candidates warrant a
+-- same-region re-scan, and only along child subtrees whose skeleton still
+-- repeats one of them ('descendBlocked').  Repeats are counted by structural
+-- hash ('annotateIR', verified with exact equality inside each bucket),
+-- replacing the pairwise subexpression comparisons that, together with the
+-- historical per-node re-scans, made this pass roughly cubic in the length of
+-- world-sum spines (see task iroptimizer-superlinear-scaling).
 optimizeCommonSubexpr :: IRExpr -> IRExpr
-optimizeCommonSubexpr topExpr = evalState (cseWalk topExpr) 0
+optimizeCommonSubexpr topExpr = evalState (scan (annotateIR topExpr)) 0
   where
     -- Names already present anywhere in the expression (e.g. from a previous
     -- fixed-point iteration); fresh names must avoid these too.
-    reserved = freeVarsIR topExpr ++ boundVarsIR topExpr
+    reserved = allNamesIR topExpr
     fresh :: State Int String
     fresh = do
       i <- get
       put (i + 1)
       let n = "cse_" ++ show i
-      if n `elem` reserved then fresh else return n
-    -- | Fully resolve a node's own unconditional region (via 'extractHere'),
-    -- then descend -- WITHOUT re-scanning the parts of that same region again
-    -- (see 'descendRegion').
-    cseWalk :: IRExpr -> State Int IRExpr
-    cseWalk e = extractHere e >>= descendRegion
-    -- | Descend through a node whose enclosing unconditional region has
-    -- already been fully scanned by an ancestor's 'extractHere' call. Since
-    -- 'unconditionalSubexprs' descends transparently through every
-    -- constructor except IRIf's branches, IRLambda's body and IREnumSum's
-    -- body, any subexpression reachable through those transparent
-    -- constructors was already a member of the ancestor's skeleton -- so any
-    -- duplicate within it was already found and hoisted from there.
-    -- Re-running 'extractHere' on every one of those transparent descendants
-    -- (the original per-node 'cseWalk' recursion) is therefore pure
-    -- redundant work: for a long transparent chain of length k (e.g. the
-    -- k-way IROp sum built by 'measurePlanWorlds' for a plan-enumeration
-    -- program) it turned a single O(k) region scan into an O(k^2) one, since
-    -- every position along the chain re-scanned the entire remaining
-    -- suffix. 'descendRegion' instead only calls 'extractHere' again once it
-    -- reaches an actual region boundary, matching 'unconditionalSubexprs'
-    -- exactly so no candidate is missed and none is scanned twice.
-    descendRegion :: IRExpr -> State Int IRExpr
-    descendRegion e = case e of
-      IRIf c t f -> do
-        c' <- descendRegion c
-        t' <- cseWalk t
-        f' <- cseWalk f
-        return (IRIf c' t' f')
-      IRLambda n body -> IRLambda n <$> cseWalk body
-      IREnumSum n val body -> IREnumSum n val <$> cseWalk body
-      _ -> do
-        kids <- mapM descendRegion (getIRSubExprs e)
+      if n `Set.member` reserved then fresh else return n
+    -- Extract every hoistable repeat of this node's skeleton, then continue
+    -- at the scan roots below it.  The annotation is built once for the whole
+    -- expression and reused down the walk; only an actual extraction, which
+    -- rewrites the node, forces a re-annotation of that subtree.
+    scan :: AnnIR -> State Int IRExpr
+    scan a = do
+      (a', blockedKeys) <- extractHere a
+      if Set.null blockedKeys
+        then descendToScanRoots a'
+        else descendBlocked blockedKeys a'
+    descendToScanRoots :: AnnIR -> State Int IRExpr
+    descendToScanRoots a = case annExpr a of
+      IRIf{}          | [c, t, el] <- annKids a -> IRIf <$> descendToScanRoots c <*> scan t <*> scan el
+      IRLambda n _    | [b] <- annKids a -> IRLambda n <$> scan b
+      IREnumSum n v _ | [b] <- annKids a -> IREnumSum n v <$> scan b
+      e -> do
+        kids <- mapM descendToScanRoots (annKids a)
         return (setIRSubExprs e kids)
-    extractHere :: IRExpr -> State Int IRExpr
-    extractHere e = case bestCommonSubexpr e of
-      Nothing  -> return e
-      Just sub -> do
+    -- Like descendToScanRoots, but through a region whose scan left capture-
+    -- blocked repeats: a same-region child is re-scanned only if some blocked
+    -- candidate still occurs >=2 times in the child's own skeleton (only there
+    -- can the descent free it for extraction below its binder); all other
+    -- children cannot host a same-region extraction and take the cheap walk.
+    descendBlocked :: Set.Set (Int, Int) -> AnnIR -> State Int IRExpr
+    descendBlocked keys a = case annExpr a of
+      IRIf{}          | [c, t, el] <- annKids a -> IRIf <$> route c <*> scan t <*> scan el
+      IRLambda n _    | [b] <- annKids a -> IRLambda n <$> scan b
+      IREnumSum n v _ | [b] <- annKids a -> IREnumSum n v <$> scan b
+      e -> do
+        kids <- mapM route (annKids a)
+        return (setIRSubExprs e kids)
+      where
+        -- once no key repeats in a child's skeleton, none can repeat deeper in
+        -- the same region (skeletons only shrink), so the walk needs no
+        -- further key counting
+        route c | keysRepeatedIn keys c = scan c
+                | otherwise = descendToScanRoots c
+    extractHere :: AnnIR -> State Int (AnnIR, Set.Set (Int, Int))
+    extractHere a = case bestCommonSubexpr a of
+      (Nothing, blockedKeys) -> return (a, blockedKeys)
+      (Just sub, _) -> do
         name <- fresh
-        extractHere (IRLetIn name sub (replaceAll sub (IRVar name) e))
+        -- swap the occurrences inside the existing annotation instead of
+        -- re-annotating the whole subtree: re-annotation per extraction made
+        -- extraction chains quadratic in region size
+        let body = annReplace sub (annotateIR (IRVar name)) a
+        extractHere (mkAnnIR (IRLetIn name (annExpr sub) (annExpr body)) [sub, body])
 
--- | The largest hoistable common subexpression of a node, if any.
---
--- Candidate detection is grouped by 'show' key in a Map rather than the
--- naive O(m^2) "nub + count via filter (==s) skeleton" (m = skeleton size):
--- on the large IR trees plan-guided enumeration and set-witness compilation
--- can produce, the pairwise-equality version dominated total compile time
--- (each '==' on a subtree is itself O(subtree size), so the nub/filter scan
--- was effectively O(m^2 * avg subtree size)). Grouping by a 'show'-derived
--- key is O(m log m * avg subtree size) -- one string-render and Map
--- insertion per skeleton element instead of a full pairwise scan.
-bestCommonSubexpr :: IRExpr -> Maybe IRExpr
-bestCommonSubexpr expr
-  | Map.null repeated = Nothing
-  | otherwise = Just (maximumBy (comparing exprSize) (Map.elems repeated))
+-- | True if any of the given (hash, size) keys occurs at least twice in the
+-- node's unconditional skeleton.
+keysRepeatedIn :: Set.Set (Int, Int) -> AnnIR -> Bool
+keysRepeatedIn keys ann = any (>= (2 :: Int)) (Map.elems counts)
   where
-    skeleton = unconditionalSubexprs expr
-    bound = boundVarsIR expr
-    eligible = [ s | s <- skeleton
-                    , exprSize s > 1
-                    , not (samples s)
-                    , not (any (`elem` bound) (freeVarsIR s)) ]
-    counts = Map.fromListWith (+) [ (show s, 1 :: Int) | s <- eligible ]
-    firstOccurrence = Map.fromListWith (\_ old -> old) [ (show s, s) | s <- eligible ]
-    repeated = Map.intersectionWith const firstOccurrence (Map.filter (>= 2) counts)
+    counts = Map.fromListWith (+)
+      [ (k, 1) | a <- unconditionalAnns ann
+               , let k = (annHash a, annSize a)
+               , k `Set.member` keys ]
+
+-- | Subtree annotated with memoized structural facts, so repeats can be
+-- counted by hash instead of pairwise tree comparison.
+data AnnIR = AnnIR
+  { annExpr    :: IRExpr
+  , annKids    :: [AnnIR]
+  , annHash    :: !Int
+  , annSize    :: !Int      -- leaf count
+  , annSamples :: !Bool     -- contains a random draw (an IRSample)
+    --FIXME: a function call to a sampling function does itself also sample.
+  , annBound   :: Set.Set String  -- names bound by binders anywhere in the subtree
+  }
+
+annotateIR :: IRExpr -> AnnIR
+annotateIR e = mkAnnIR e (map annotateIR (getIRSubExprs e))
+
+-- | Annotate a node whose children are already annotated.
+mkAnnIR :: IRExpr -> [AnnIR] -> AnnIR
+mkAnnIR e kids = AnnIR e kids h sz smp bnd
+  where
+    h = foldl' hashMix (headHash e) (map annHash kids)
+    sz = if null kids then 1 else sum (map annSize kids)
+    smp = case e of
+      IRSample _ -> True
+      _          -> any annSamples kids
+    kidsBound = Set.unions (map annBound kids)
+    bnd = case e of
+      IRLetIn n _ _   -> Set.insert n kidsBound
+      IRLambda n _    -> Set.insert n kidsBound
+      IREnumSum n _ _ -> Set.insert n kidsBound
+      _               -> kidsBound
+
+-- | Replace every subtree structurally equal to `sub` by `rep`, rebuilding
+-- annotations only along changed paths and sharing untouched subtrees.
+-- Occurrences cannot nest (a strict subtree is smaller than its host), so a
+-- match is not descended into — same result as the historical whole-tree
+-- replaceAll with a fresh re-annotation, without its quadratic cost.
+annReplace :: AnnIR -> AnnIR -> AnnIR -> AnnIR
+annReplace sub rep a0 = maybe a0 id (go a0)
+  where
+    go a
+      | annSize a < annSize sub = Nothing
+      | annHash a == annHash sub && annSize a == annSize sub
+        && annExpr a == annExpr sub = Just rep
+      | otherwise =
+          let changes = map go (annKids a)
+          in if all (== Nothing) (map (fmap (const ())) changes)
+               then Nothing
+               else let kids' = zipWith (\old new -> maybe old id new) (annKids a) changes
+                    in Just (mkAnnIR (setIRSubExprs (annExpr a) (map annExpr kids')) kids')
+
+hashMix :: Int -> Int -> Int
+hashMix a b = (a * 16777619) `xor` b
+
+hashStr :: String -> Int
+hashStr = foldl' (\a c -> hashMix a (fromEnum c)) 5381
+
+-- | Hash of a node's constructor and non-child payload.
+headHash :: IRExpr -> Int
+headHash e = case e of
+  IRIf{}            -> 1
+  IROp op _ _       -> hashMix 2 (hashStr (show op))
+  IRUnaryOp op _    -> hashMix 3 (hashStr (show op))
+  IRTheta _ i       -> hashMix 4 i
+  IRSubtree _ i     -> hashMix 5 i
+  IRConst v         -> hashMix 6 (hashStr (show v))
+  IRCons{}          -> 7
+  IRElementOf{}     -> 8
+  IRTCons{}         -> 9
+  IRHead{}          -> 10
+  IRTail{}          -> 11
+  IRMap{}           -> 12
+  IRTFst{}          -> 13
+  IRTSnd{}          -> 14
+  IRLeft{}          -> 15
+  IRRight{}         -> 16
+  IRFromLeft{}      -> 17
+  IRFromRight{}     -> 18
+  IRIsLeft{}        -> 19
+  IRIsRight{}       -> 20
+  IRDensity d _     -> hashMix 21 (hashStr (show d))
+  IRCumulative d _  -> hashMix 22 (hashStr (show d))
+  IRSample d        -> hashMix 23 (hashStr (show d))
+  IRLetIn n _ _     -> hashMix 24 (hashStr n)
+  IRVar n           -> hashMix 25 (hashStr n)
+  IRLambda n _      -> hashMix 26 (hashStr n)
+  IRApply{}         -> 27
+  IREnumSum n v _   -> hashMix (hashMix 28 (hashStr n)) (hashStr (show v))
+  IRIsPossible v _  -> hashMix 29 (hashStr (show v))
+  IRIndex{}         -> 30
+  IRError s         -> hashMix 31 (hashStr s)
+
+-- | The largest hoistable common subexpression of a node (candidates are in
+-- first-occurrence order and ties break like the historical
+-- @maximumBy . nub@, i.e. towards the last equal maximum), plus the
+-- (hash, size) keys of repeated pure candidates that were refused only for
+-- capture reasons (and may become extractable further down).
+bestCommonSubexpr :: AnnIR -> (Maybe AnnIR, Set.Set (Int, Int))
+bestCommonSubexpr ann =
+  ( if null candidates then Nothing else Just (maximumBy (comparing annSize) candidates)
+  , Set.fromList [ (annHash a, annSize a) | a <- blocked ] )
+  where
+    skeleton = unconditionalAnns ann
+    bound = annBound ann
+    repeated = [ a | (a, n) <- tallyAnns skeleton
+                   , n >= 2
+                   , annSize a > 1
+                   , not (annSamples a) ]
+    (candidates, blocked) = partition captureSafe repeated
+    captureSafe a = not (any (`Set.member` bound) (freeVarsIR (annExpr a)))
 
 -- | Subexpressions reached on every evaluation of the node.  We descend through
 -- ordinary nodes but stop at the branches of an IRIf, the body of an IREnumSum,
 -- and the body of a lambda, since those are only conditionally, repeatedly, or
 -- never evaluated.
-unconditionalSubexprs :: IRExpr -> [IRExpr]
-unconditionalSubexprs e = e : case e of
-  IRIf cond _ _ -> unconditionalSubexprs cond
-  IRLambda _ _  -> []
-  IREnumSum{}   -> []
-  _             -> concatMap unconditionalSubexprs (getIRSubExprs e)
+unconditionalAnns :: AnnIR -> [AnnIR]
+unconditionalAnns a0 = go a0 []
+  where
+    go a acc = a : case annExpr a of
+      IRIf{}      -> case annKids a of { (c:_) -> go c acc; [] -> acc }
+      IRLambda{}  -> acc
+      IREnumSum{} -> acc
+      _           -> foldr go acc (annKids a)
+
+-- | Exact occurrence counts of the distinct subexpressions in the list, in
+-- order of first occurrence.  Entries are bucketed by (hash, size) and
+-- resolved by exact equality within a bucket, so a hash collision can cost
+-- time but never miscount.  (A miscount of 1 as >=2 would extract a
+-- single-use binding that optimizeLetIns inlines right back, making the
+-- optimizer fixpoint oscillate.)
+tallyAnns :: [AnnIR] -> [(AnnIR, Int)]
+tallyAnns anns = [ (a, countAt key idx) | (key, idx, a) <- reverse order ]
+  where
+    (finalCounts, order) = foldl' step (Map.empty, []) anns
+    countAt key idx = snd (Map.findWithDefault [] key finalCounts !! idx)
+    step (m, ord) a =
+      let key = (annHash a, annSize a)
+          bucket = Map.findWithDefault [] key m
+      in case findIndex ((== annExpr a) . fst) bucket of
+           Just i  -> (Map.insert key (bumpAt i bucket) m, ord)
+           Nothing -> (Map.insert key (bucket ++ [(annExpr a, 1)]) m, (key, length bucket, a) : ord)
+    bumpAt i xs = [ if j == i then (x, n + 1) else (x, n) | (j, (x, n)) <- zip [0 ..] xs ]
 
 -- | Rebuild a node from a fresh list of children (inverse of 'getIRSubExprs').
 setIRSubExprs :: IRExpr -> [IRExpr] -> IRExpr
@@ -452,12 +578,19 @@ freeVarsIR (IRLambda n body) = filter (/= n) (freeVarsIR body)
 freeVarsIR (IREnumSum n _ body) = filter (/= n) (freeVarsIR body)
 freeVarsIR e = concatMap freeVarsIR (getIRSubExprs e)
 
--- | Every variable name bound by some binder anywhere in the expression.
-boundVarsIR :: IRExpr -> [String]
-boundVarsIR (IRLetIn n decl body) = n : (boundVarsIR decl ++ boundVarsIR body)
-boundVarsIR (IRLambda n body) = n : boundVarsIR body
-boundVarsIR (IREnumSum n _ body) = n : boundVarsIR body
-boundVarsIR e = concatMap boundVarsIR (getIRSubExprs e)
+-- | Every variable name occurring anywhere in the expression, as a variable
+-- occurrence or as a binder — i.e. the union of free and bound variables,
+-- computed scope-blind in one pass (the per-binder filtering of 'freeVarsIR'
+-- makes free-then-bound quadratic on deep let chains).
+allNamesIR :: IRExpr -> Set.Set String
+allNamesIR = go Set.empty
+  where
+    go acc e = case e of
+      IRVar n         -> Set.insert n acc
+      IRLetIn n _ _   -> foldl' go (Set.insert n acc) (getIRSubExprs e)
+      IRLambda n _    -> foldl' go (Set.insert n acc) (getIRSubExprs e)
+      IREnumSum n _ _ -> foldl' go (Set.insert n acc) (getIRSubExprs e)
+      _               -> foldl' go acc (getIRSubExprs e)
 
 -- | Replace an application of a lambda to a non-value argument by a let binding:
 -- @(\x -> body) arg@ becomes @let x = arg in body@.  This is the capture-safe
