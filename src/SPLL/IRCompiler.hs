@@ -1253,14 +1253,20 @@ addP (aM, aDim) (bM, bDim) = do
   dimVarA <- mkVariable "dimA"
   dimVarB <- mkVariable "dimB"
   setVariables [(pVarA, aM), (pVarB, bM), (dimVarA, aDim), (dimVarB, bDim)]
-  return (IRIf (IROp OpApprox (IRVar pVarA) (IRConst (VFloat 0))) (IRVar pVarB)
-           (IRIf (IROp OpApprox (IRVar pVarB) (IRConst (VFloat 0))) (IRVar pVarA)
+  -- Exact equality here, not OpApprox: this branch exists to detect a genuine
+  -- indicator-zero (e.g. the wrong Either arm), which is always produced exactly
+  -- by upstream indicator/comparison logic. A 1e-10 approx threshold instead
+  -- wrongly discards legitimately tiny-but-nonzero continuous tail densities
+  -- (see observe-partials-umbrella N4). Not total: a deep enough tail still
+  -- underflows to a true float zero and hits this same ambiguity.
+  return (IRIf (IROp OpEq (IRVar pVarA) (IRConst (VFloat 0))) (IRVar pVarB)
+           (IRIf (IROp OpEq (IRVar pVarB) (IRConst (VFloat 0))) (IRVar pVarA)
            (IRIf (IROp OpLessThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar pVarA)
            (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar pVarB)
            (IROp OpPlus (IRVar pVarA) (IRVar pVarB))))),
            -- Dim
-           IRIf (IROp OpApprox (IRVar pVarA) (IRConst (VFloat 0))) (IRVar dimVarB)
-           (IRIf (IROp OpApprox (IRVar pVarB) (IRConst (VFloat 0))) (IRVar dimVarA)
+           IRIf (IROp OpEq (IRVar pVarA) (IRConst (VFloat 0))) (IRVar dimVarB)
+           (IRIf (IROp OpEq (IRVar pVarB) (IRConst (VFloat 0))) (IRVar dimVarA)
            (IRIf (IROp OpLessThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar dimVarA)
            (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar dimVarB)
            (IRVar dimVarA)))))

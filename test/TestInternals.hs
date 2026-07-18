@@ -393,6 +393,25 @@ test_missingMainFunction = testCase "missingMainFunction" $ do
   assertMissingMain "runProb" (runProb defaultCompilerConfig prog [] (VFloat 1.0))
   assertMissingMain "runInteg" (runInteg defaultCompilerConfig prog [] (VFloat 1.0))
 
+-- Regression for observe-partials-umbrella N4: addP's mixture combinator used to
+-- decide "which branch contributed zero" via an epsilon-approximate float compare
+-- (floatApproxEqThresh = 1e-10). A far-tail continuous density is legitimately
+-- smaller than that threshold without being the impossible-event zero the check
+-- was meant to catch, so it got mistaken for the *other* (structurally zero, wrong
+-- constructor arm) branch and silently discarded. The probTolerance-based End2End
+-- harness can't see this: a tail density this small is already within tolerance of
+-- 0, so a magnitude check would pass either way. What distinguishes fixed from
+-- broken is that the broken path collapses to an *exact* 0.0/dim 0, so assert
+-- non-zero-ness and dimensionality directly instead.
+test_farTailEitherDensityNotZeroed :: TestTree
+test_farTailEitherDensityNotZeroed = testCase "farTailEitherDensityNotZeroed" $ do
+  let prog = Program [("main", ifThenElse (normal #>#  constF 0.0) (left normal) (right unit))] [] [] []
+  case runProb defaultCompilerConfig prog [] (VEither (Left (VFloat 7.0))) of
+    Right (VTuple (VFloat p) (VFloat d)) -> do
+      assertBool ("expected a nonzero far-tail density, got exactly " ++ show p) (p > 0)
+      assertEqual "far-tail density must keep dim=1 (continuous)" 1.0 d
+    other -> assertFailure ("expected a probability tuple, got: " ++ show other)
+
 -- AutoNeural: auto-derivation of MultiValue annotations for the "Nothing" (no "of ...")
 -- and "_" (MultiAuto) cases. Float, Bool, Tuple/Either/non-recursive ADTs of these can be
 -- fully derived from the RType alone; Int and recursive ADTs cannot (unbounded/non-terminating).
@@ -739,6 +758,7 @@ internalsTests = testGroup "Internals"
       , test_nnHoistedOutOfEnumSum
       ]
   , test_missingMainFunction
+  , test_farTailEitherDensityNotZeroed
   , autoNeuralDerivationTests
   , enumContinuousRefusalTests
   , test_tstBackendsHeader
