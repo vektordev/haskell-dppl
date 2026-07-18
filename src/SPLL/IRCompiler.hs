@@ -1578,10 +1578,39 @@ stripBranchCount (IREnv funcs adts consts) = IREnv (map stripGroup funcs) adts c
 data WBound = WNegInf | WPosInf | WFinite IRExpr
 
 -- | A constraint set over the bound variable's (scalar) domain.
-data WSet = WPoint IRExpr IRExpr     -- witness value, |d inverse / d observation|
+data WSet = WPoint IRExpr IRExpr IRExpr -- witness value, |d inverse / d observation|,
+                                        -- informative: a runtime Bool, True iff this
+                                        -- particular evaluation of the value is fully
+                                        -- concrete rather than reconstructed by a lossy
+                                        -- inverse (e.g. isLeft's, which recovers only
+                                        -- the tag and fills the payload with a
+                                        -- placeholder VAny) -- see 'irRuntimeContainsAny'
           | WInterval WBound WBound
           | WFull
           | WEmpty
+
+-- | Mirrors an inverse-witness expression's structure to build a runtime Bool
+-- expression that evaluates to True iff the value that expression produces
+-- (under the SAME runtime branching) contains a placeholder VAny introduced by
+-- a lossy inverse reconstruction -- e.g. isLeft's inverse (always: @if tag then
+-- Left VAny else Right VAny@), or the Nothing arm of fromLeft's total inverse
+-- (@if isRight m then Left (fromRight m) else Right VAny@, only ANY-tainted on
+-- one branch). A single static "is this any-tainted" flag can't capture the
+-- latter -- it depends on which branch a given call actually takes -- so this
+-- produces a same-shaped runtime expression instead of a compile-time Bool.
+-- Recognises the specific shapes this module's inverse FDecls build
+-- (IRConst/IRIf/IRLeft/IRRight/IRLetIn); anything else falls back to a
+-- shallow runtime OpIsAny check on the whole subexpression (safe: OpIsAny only
+-- misses ANY nested below the top level, under-approximating "any-tainted",
+-- which only affects which side 'intersectSet' prefers -- the OpEq guard it
+-- also emits independently catches a genuine structural mismatch either way).
+irRuntimeContainsAny :: IRExpr -> IRExpr
+irRuntimeContainsAny (IRConst v) = if valueContainsAny v then constTrueIR else IRConst (VBool False)
+irRuntimeContainsAny (IRIf c t e) = IRIf c (irRuntimeContainsAny t) (irRuntimeContainsAny e)
+irRuntimeContainsAny (IRLeft a) = irRuntimeContainsAny a
+irRuntimeContainsAny (IRRight a) = irRuntimeContainsAny a
+irRuntimeContainsAny (IRLetIn n v b) = IRLetIn n v (irRuntimeContainsAny b)
+irRuntimeContainsAny e = IRUnaryOp OpIsAny e
 
 -- | Guards are Bool-valued IR over the sample and deterministic scope; a world
 -- contributes only when all guards hold.
@@ -1600,16 +1629,28 @@ intersectW :: WWorld -> WWorld -> WWorld
 intersectW (WWorld g1 s1) (WWorld g2 s2) =
   let (g3, s3) = intersectSet s1 s2 in WWorld (g1 ++ g2 ++ g3) s3
 
--- Two constraints on the SAME draw. Point-point takes the first: both compute
--- the same value from the same observation (the mergeExpr convention).
+-- Two constraints on the SAME draw. Point-point must agree: 'OpEq' is already
+-- deep VAny-wildcard-aware for every structured value this compiler produces
+-- (see IRInterpreter's cmp for OpEq -- Left/Right tag mismatches compare
+-- False, a VAny payload on either side compares True), so it doubles as a safe
+-- runtime compatibility guard regardless of which side, if any, is a lossy
+-- reconstruction (e.g. isLeft's inverse, which knows the tag but fills the
+-- payload with VAny). The *value* kept still needs to prefer whichever side is
+-- actually informative, since OpEq's wildcard tolerance doesn't tell us which
+-- one -- and using a VAny-payloaded value downstream (e.g. as the point
+-- 'measureSet' evaluates a density at) silently computes the wrong,
+-- less-specific answer instead of crashing (see observe-partials-umbrella, the
+-- let-bound-either-destructure bug).
 intersectSet :: WSet -> WSet -> ([IRExpr], WSet)
 intersectSet WFull s = ([], s)
 intersectSet s WFull = ([], s)
 intersectSet WEmpty _ = ([], WEmpty)
 intersectSet _ WEmpty = ([], WEmpty)
-intersectSet (WPoint p c) (WPoint _ _) = ([], WPoint p c)
-intersectSet (WPoint p c) (WInterval lo hi) = (boundGuards p lo hi, WPoint p c)
-intersectSet (WInterval lo hi) (WPoint p c) = (boundGuards p lo hi, WPoint p c)
+intersectSet (WPoint p1 c1 inf1) (WPoint p2 c2 inf2) =
+  ( [IROp OpEq p1 p2]
+  , WPoint (IRIf inf1 p1 p2) (IRIf inf1 c1 c2) (IROp OpOr inf1 inf2) )
+intersectSet (WPoint p c inf) (WInterval lo hi) = (boundGuards p lo hi, WPoint p c inf)
+intersectSet (WInterval lo hi) (WPoint p c inf) = (boundGuards p lo hi, WPoint p c inf)
 intersectSet (WInterval lo1 hi1) (WInterval lo2 hi2) =
   ([], WInterval (maxWBound lo1 lo2) (minWBound hi1 hi2))
 
@@ -1640,7 +1681,7 @@ minWBound (WFinite a) (WFinite b) = WFinite (IRIf (IROp OpLessThan a b) a b)
 
 -- | Bool-valued IR: is @val@ (a deterministic value) inside the target set?
 memberGuard :: RType -> IRExpr -> WSet -> IRExpr
-memberGuard rt val (WPoint p _) = case rt of
+memberGuard rt val (WPoint p _ _) = case rt of
   TFloat  -> IROp OpApprox val p
   TVarR _ -> IROp OpApprox val p
   _       -> IROp OpEq val p
@@ -1678,7 +1719,7 @@ setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag v sample = do
   let occs = fromMaybe [] (lookup lResolvedCN (lambdaVarOccurrences (fcData meta)))
   let target = if cumulative
         then WInterval WNegInf (WFinite sample)
-        else WPoint sample const1
+        else WPoint sample const1 constTrueIR
   worldsM <- invertToWorlds meta occs bodyExpr target
   case worldsM of
     -- A cumulative query the engine cannot invert (e.g. the multivariate CDF of
@@ -1720,7 +1761,7 @@ measureWorld meta v (WWorld guards set) = do
   return (guarded const0 p, guarded const0 dim, guarded const0 bc)
 
 measureSet :: CompilerMetadata -> Expr -> WSet -> CompilerMonad CompilationResult
-measureSet meta v (WPoint p cov) = do
+measureSet meta v (WPoint p cov _) = do
   (pv, dv, bv) <- toIRInference meta False v p
   -- change-of-variables correction only for continuous results, mirroring the
   -- point-witness path
@@ -1777,8 +1818,8 @@ invertToWorlds meta occs body target = do
               _ -> return Nothing
         | subtreeHasOcc occs c -> do
             -- the condition constrains the same draw: case split and intersect
-            cT <- invertToWorlds meta occs c (WPoint constTrueIR const1)
-            cF <- invertToWorlds meta occs c (WPoint (IRConst (VBool False)) const1)
+            cT <- invertToWorlds meta occs c (WPoint constTrueIR const1 constTrueIR)
+            cF <- invertToWorlds meta occs c (WPoint (IRConst (VBool False)) const1 constTrueIR)
             wsT <- invertToWorlds meta occs t target
             wsE <- invertToWorlds meta occs e target
             case (cT, cF, wsT, wsE) of
@@ -1790,9 +1831,9 @@ invertToWorlds meta occs body target = do
       LessThan _ lop rop -> comparisonWorlds meta occs False lop rop target
       GreaterThan _ lop rop -> comparisonWorlds meta occs True lop rop target
       InjF _ (Named "TCons") [pa, pb] -> case target of
-        WPoint s _ -> do
-          wsA <- invertToWorlds meta occs pa (WPoint (IRTFst s) const1)
-          wsB <- invertToWorlds meta occs pb (WPoint (IRTSnd s) const1)
+        WPoint s _ inf -> do
+          wsA <- invertToWorlds meta occs pa (WPoint (IRTFst s) const1 inf)
+          wsB <- invertToWorlds meta occs pb (WPoint (IRTSnd s) const1 inf)
           case (wsA, wsB) of
             (Just as, Just bs) -> return (Just [intersectW a b | a <- as, b <- bs])
             _ -> return Nothing
@@ -1808,7 +1849,7 @@ invertToWorlds meta occs body target = do
 transportDirect :: CompilerMetadata -> [ChainName] -> Expr -> WSet -> CompilerMonad (Maybe [WWorld])
 transportDirect meta occs body target = case filter (`elem` subtreeCNs body) occs of
   [occ] -> case target of
-    WPoint s c0 -> case toSeededInvExpr (fcData meta) (adtDecls meta) bodyCN occ of
+    WPoint s c0 _ -> case toSeededInvExpr (fcData meta) (adtDecls meta) bodyCN occ of
       Nothing -> return Nothing
       Just (g0, cov0, guard0) -> do
         g     <- pruneDeadLetIns <$> materializeAnchors meta g0
@@ -1820,7 +1861,13 @@ transportDirect meta occs body target = case filter (`elem` subtreeCNs body) occ
         -- extra world guard so measureWorld zeroes this world instead of
         -- evaluating the (crashing on the wrong arm) point value -- see
         -- observe-partials-umbrella N1b.
-        return (Just [WWorld [applyTo guard s] (WPoint (applyTo g s) (IROp OpMult c0 (applyTo cov s)))])
+        -- A lossy inverse (e.g. isLeft's, recovering only the tag, or
+        -- fromLeft's total inverse on its Nothing arm) yields a value that may
+        -- contain a placeholder VAny; mark the witness as such (per the actual
+        -- runtime branch taken) so 'intersectSet' prefers a more informative
+        -- co-occurrence over it instead of picking whichever came first.
+        let informative = applyTo (IRUnaryOp OpNot (irRuntimeContainsAny g)) s
+        return (Just [WWorld [applyTo guard s] (WPoint (applyTo g s) (IROp OpMult c0 (applyTo cov s)) informative)])
     WInterval lo hi -> case toSeededMonotoneInvExpr (fcData meta) (adtDecls meta) bodyCN occ of
       Nothing -> return Nothing
       Just (g0, dir) -> do

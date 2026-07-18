@@ -1,0 +1,2 @@
+main = let e = if Uniform < 0.5 then left Normal else right 0.0
+       in if isLeft e then fromLeft e else fromRight e

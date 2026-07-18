@@ -412,6 +412,42 @@ test_farTailEitherDensityNotZeroed = testCase "farTailEitherDensityNotZeroed" $ 
       assertEqual "far-tail density must keep dim=1 (continuous)" 1.0 d
     other -> assertFailure ("expected a probability tuple, got: " ++ show other)
 
+-- Regression for observe-partials-umbrella: 'intersectSet's WPoint/WPoint case
+-- (IRCompiler.hs) used to unconditionally keep the first witness and silently
+-- discard the second whenever a let-bound stochastic Either is destructured
+-- via the named-binding idiom `let e = ... in if isLeft e then fromLeft e
+-- else fromRight e` -- three occurrences of `e` force the set-witness
+-- fallback, which case-splits on `isLeft e` and then intersects that
+-- condition's own witness (isLeft's inverse: tag-only, `Left VAny`) with the
+-- branch's sample-derived witness (fromLeft's inverse, the actual value). The
+-- condition's placeholder witness always won, so the compiled program ignored
+-- the query sample entirely and returned the constant marginal
+-- P(isLeft)+P(isRight)=1 for every query -- and, separately, a structurally
+-- impossible sample (`Left ()`/Nothing, which fromLeft/fromRight's own guard
+-- makes unreachable here) also wrongly returned 1 instead of 0, since neither
+-- placeholder witness carries enough information to detect the Left-vs-Right
+-- tag conflict on its own. Fixed by tracking, per witness, a runtime
+-- "informative" guard (mirrors the witness expression's own branching -- a
+-- single static flag can't work, since e.g. fromLeft/fromRight's *total*
+-- inverse is only ANY-tainted on the arm that reconstructs a Nothing) and
+-- using 'OpEq' -- already deep VAny-wildcard-aware in the interpreter -- as
+-- the cross-check guard.
+test_letBoundEitherDestructureUsesSample :: TestTree
+test_letBoundEitherDestructureUsesSample = testCase "letBoundEitherDestructureUsesSample" $ do
+  let boundE = ifThenElse (uniform #<# constF 0.5) (left normal) (right (constF 0.0))
+  let body = ifThenElse (sisLeft (var "e")) (sfromLeft (var "e")) (sfromRight (var "e"))
+  let prog = Program [("main", letIn "e" boundE body)] [] [] []
+  let phi x = (1 / sqrt (2 * pi)) * exp (-0.5 * x * x)
+  case runProb defaultCompilerConfig prog [] (VEither (Right (VFloat 0.3))) of
+    Right (VTuple (VFloat p) (VFloat d)) -> do
+      assertBool ("expected 0.5*phi(0.3) =~ 0.1907, got " ++ show p) (abs (p - 0.5 * phi 0.3) < 0.0001)
+      assertEqual "continuous arm keeps dim=1" 1.0 d
+    other -> assertFailure ("expected a probability tuple, got: " ++ show other)
+  case runProb defaultCompilerConfig prog [] (VEither (Left VUnit)) of
+    Right (VTuple (VFloat p) _) ->
+      assertEqual "Nothing is structurally impossible here (fromLeft/fromRight always succeed under their own isLeft/isRight guard)" 0.0 p
+    other -> assertFailure ("expected a probability tuple, got: " ++ show other)
+
 -- AutoNeural: auto-derivation of MultiValue annotations for the "Nothing" (no "of ...")
 -- and "_" (MultiAuto) cases. Float, Bool, Tuple/Either/non-recursive ADTs of these can be
 -- fully derived from the RType alone; Int and recursive ADTs cannot (unbounded/non-terminating).
@@ -759,6 +795,7 @@ internalsTests = testGroup "Internals"
       ]
   , test_missingMainFunction
   , test_farTailEitherDensityNotZeroed
+  , test_letBoundEitherDestructureUsesSample
   , autoNeuralDerivationTests
   , enumContinuousRefusalTests
   , test_tstBackendsHeader
