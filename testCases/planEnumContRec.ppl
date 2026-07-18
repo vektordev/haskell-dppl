@@ -1,0 +1,16 @@
+-- M3 acceptance shape 2: recursive scan whose predicate compares a
+-- continuous plan leaf (an object's position) against a deterministic bound,
+-- through user-function specialization (M2) -- per-level interval worlds
+-- measured as Gaussian CDF differences. Per level [Empty, SCons, Null, Obj,
+-- mu, sigma]; q_k = 1 - Phi((0.5 - mu_k)/sigma_k):
+-- q1 = 0.308538 (N(0,1)), q2 = 0.598706 (N(1,2)), q3 = 0.001350 (N(-1,0.5)).
+-- P3 = 0.5*0.6*q3; P2 = 0.6*(0.7*q2 + (0.7*(1-q2)+0.3)*P3);
+-- P1 = 0.7*(0.8*q1 + (0.8*(1-q1)+0.2)*P2) = 0.305428.
+data Object = Null | Obj position::Float
+data Scene = Empty | SCons obj::Object, rest::Scene depth 3
+
+neural readScene :: (Symbol -> Scene)
+
+existsRight s = if isEmpty s then False else (if isObj (obj s) then (if position (obj s) > 0.5 then True else existsRight (rest s)) else existsRight (rest s))
+
+main sym = let scene = readScene sym in if existsRight scene then 1 else 0

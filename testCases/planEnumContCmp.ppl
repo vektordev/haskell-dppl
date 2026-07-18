@@ -1,0 +1,7 @@
+-- M3: inline comparison of a continuous plan leaf against a deterministic
+-- bound. Plan (Bool, Float) = [p_True, p_False, mu, sigma]; with mu=0,
+-- sigma=1 the leaf's P(> 0.5) = 1 - Phi(0.5) = 0.308538. Expected:
+-- p(2) = 0.7 * 0.308538, p(1) = 0.7 * Phi(0.5), p(0) = 0.3.
+neural readObj :: (Symbol -> (Bool, Float))
+
+main sym = let o = readObj sym in if fst o then (if snd o > 0.5 then 2 else 1) else 0

@@ -1,0 +1,7 @@
+-- M3: comparison through an increasing affine transform of a continuous plan
+-- leaf -- the bound is transported through the inverse chain (peel):
+-- snd o * 2 + 1 > 0.5  <=>  leaf > -0.25; with N(0,1),
+-- p(1) = 1 - Phi(-0.25) = 0.598706. The Bool leaf stays a free marginal.
+neural readObj :: (Symbol -> (Bool, Float))
+
+main sym = let o = readObj sym in if (snd o) * 2.0 + 1.0 > 0.5 then 1 else 0

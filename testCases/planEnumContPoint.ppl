@@ -1,0 +1,10 @@
+-- M3: direct observation of a continuous plan leaf -- a point constraint
+-- measured as the leaf's density, the engine's only dim-1 case, mixed with a
+-- dim-0 deterministic branch (the mixture takes the smaller dimension via
+-- addP). Plan (Bool, Float) = [0.7, 0.3, 0, 1]:
+-- p(0.3)  = 0.7 * phi(0.3) = 0.266971 at dim 1 (else-branch guard 5~=0.3 fails);
+-- p(5.0)  = 0.3 at dim 0 (the dim-0 else branch wins over the dim-1 density);
+-- cdf(x)  = 0.7 * Phi(x) + 0.3 * [5 <= x].
+neural readObj :: (Symbol -> (Bool, Float))
+
+main sym = let o = readObj sym in if fst o then snd o else 5.0

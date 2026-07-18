@@ -14,7 +14,7 @@ import PredefinedFunctions
 import SPLL.Typing.PType
 import Data.Maybe
 import Data.Either (isRight)
-import Data.List (isPrefixOf, (\\), find, elemIndex)
+import Data.List (isPrefixOf, (\\), find, elemIndex, nub)
 import Data.Char (isDigit)
 import Data.Functor ((<&>))
 import Control.Monad.Writer.Lazy
@@ -2072,18 +2072,40 @@ comparisonWorlds meta occs isGT lop rop target
 -- denoting an expression's value plus that sub-plan's flat logit offset.
 data PlanRef = PlanRef PartitionPlan Int
 
--- | Constraint on one discrete leaf REGION of the plan (a Discretes region or
--- an ADT constructor-flag region), identified by the flat offset of its first
--- logit (regions are always constrained as a whole, so the base offset is a
--- unique key). Allowed slots are (relative index, guard) pairs; a slot
--- contributes its logit's mass only when its Bool-valued guard holds. An
--- empty slot list is an unsatisfiable constraint (the world measures 0).
-data PLeafCon = PLeafCon { plcBase :: Int, plcSlots :: [(Int, IRExpr)] }
+-- | Constraint on one leaf REGION of the plan, identified by the flat offset
+-- of its first logit (regions are always constrained as a whole, so the base
+-- offset is a unique key). 'PLeafCon' constrains a discrete region (a
+-- Discretes region or an ADT constructor-flag region): allowed slots are
+-- (relative index, guard) pairs; a slot contributes its logit's mass only
+-- when its Bool-valued guard holds, and an empty slot list is an
+-- unsatisfiable constraint (the world measures 0). Milestone 3 adds
+-- constraints on Continuous leaves (mu = vec[base], sigma = vec[base+1]):
+-- 'PLeafIvl' confines the leaf to an interval, measured as a Gaussian CDF
+-- difference (mass, dim 0); 'PLeafPt' pins it to a point, measured as the
+-- leaf's density times the |change-of-variables| factor (dim 1), under
+-- membership guards accumulated from intersected intervals.
+data PLeafCon = PLeafCon Int [(Int, IRExpr)]
+              | PLeafIvl Int WBound WBound
+              | PLeafPt  Int IRExpr IRExpr [IRExpr]
+
+plcBase :: PLeafCon -> Int
+plcBase (PLeafCon b _)    = b
+plcBase (PLeafIvl b _ _)  = b
+plcBase (PLeafPt b _ _ _) = b
 
 -- | A guarded conjunction of per-leaf constraints; the plan-leaf analogue of
 -- 'WWorld'. Contributes (product of constrained leaf masses) when all guards
--- hold, else 0.
-data PlanWorld = PlanWorld { pwGuards :: [IRExpr], pwCons :: [PLeafCon] }
+-- hold, else 0. 'pwPairs' (milestone 3) are pairwise couplings between two
+-- continuous leaves: (a, b) constrains leaf@a > leaf@b, measured in closed
+-- form via the difference Gaussian. A world may couple each continuous leaf
+-- at most once, and a coupled leaf may carry no other constraint -- anything
+-- beyond that is an orthant probability, which the language excludes
+-- (checked in 'pwOverCoupled'; design plan-guided-lazy-enumeration M3).
+data PlanWorld = PlanWorld { pwGuards :: [IRExpr], pwCons :: [PLeafCon], pwPairs :: [(Int, Int)] }
+
+-- | An unguarded world from leaf constraints alone.
+pw1 :: [PLeafCon] -> PlanWorld
+pw1 cs = PlanWorld [] cs []
 
 -- | The observation target: the plan-leaf analogue of the point/interval
 -- split in 'WSet'. PTUpTo is the cumulative target (body <= sample).
@@ -2130,8 +2152,37 @@ staticBool _ = Nothing
 -- die, and the branch body -- containing the recursive call -- is never
 -- traversed. This is the recursion base of the milestone-2 specialization.
 pwUnsat :: PlanWorld -> Bool
-pwUnsat (PlanWorld gs cons) = any (null . plcSlots) cons
-                           || any ((== Just False) . staticBool) gs
+pwUnsat (PlanWorld gs cons pairs) = any conUnsat cons
+                                 || any ((== Just False) . staticBool) gs
+                                 || any (\(a, b) -> (b, a) `elem` pairs || a == b) pairs
+  where
+    conUnsat (PLeafCon _ slots)  = null slots
+    conUnsat (PLeafIvl _ (WFinite (IRConst (VFloat lo))) (WFinite (IRConst (VFloat hi)))) = lo >= hi
+    conUnsat (PLeafPt _ _ _ gs') = any ((== Just False) . staticBool) gs'
+    conUnsat _ = False
+
+-- | Milestone-3 refusal rule, kept precise: a world may couple each
+-- continuous leaf to at most one other leaf, and a coupled leaf may carry no
+-- interval or point constraint of its own. Anything beyond that is a
+-- correlated-Gaussian orthant probability, i.e. quadrature the language
+-- excludes by design (see "Hard residual" in the design doc). Returns a
+-- diagnostic for the first offending world.
+pwOverCoupled :: PlanWorld -> Maybe String
+pwOverCoupled (PlanWorld _ cons pairs)
+  | (base:_) <- overCoupled = Just
+      ("a world couples the continuous leaf at logit offset " ++ show base
+       ++ " to other random leaves more than once (or couples it and also"
+       ++ " bounds it); measuring this exactly is an orthant probability,"
+       ++ " which is out of scope by design (plan-guided-lazy-enumeration,"
+       ++ " milestone 3 refusal rule)")
+  | otherwise = Nothing
+  where
+    coupled = concat [[a, b] | (a, b) <- pairs]
+    contCon = [plcBase c | c <- cons, isCont c]
+    isCont PLeafCon{} = False
+    isCont _          = True
+    overCoupled = [ b | b <- coupled
+                      , length (filter (== b) coupled) > 1 || b `elem` contCon ]
 
 -- | Memo key of a user-function specialization: callee body chain name +
 -- plan-argument offsets + deterministic arguments. Det args are keyed
@@ -2160,18 +2211,35 @@ emptyPlanState = PlanState Map.empty Map.empty []
 type PlanM a = StateT PlanState (WriterT [(String, IRExpr)] Supply) a
 
 planAddGuard :: IRExpr -> PlanWorld -> PlanWorld
-planAddGuard g (PlanWorld gs cs) = PlanWorld (g:gs) cs
+planAddGuard g (PlanWorld gs cs ps) = PlanWorld (g:gs) cs ps
 
 andGuard :: IRExpr -> IRExpr -> IRExpr
 andGuard a b | a == constTrueIR = b
              | b == constTrueIR = a
              | otherwise        = IROp OpAnd a b
 
--- | Intersect two constraints on the same region: keep slots allowed by both,
--- conjoining their guards.
+-- | Intersect two constraints on the same region. Discrete regions keep the
+-- slots allowed by both, conjoining their guards. Continuous leaves follow
+-- the scalar 'intersectSet' conventions: interval-interval tightens the
+-- bounds, a point absorbs an interval as membership guards, and point-point
+-- keeps the first (both compute the same value from the same observation --
+-- the mergeExpr convention). A region cannot be discrete in one constraint
+-- and continuous in another (the plan fixes each region's kind).
 intersectLeafCon :: PLeafCon -> PLeafCon -> PLeafCon
 intersectLeafCon (PLeafCon b s1) (PLeafCon _ s2) =
   PLeafCon b [ (i, andGuard g1 g2) | (i, g1) <- s1, Just g2 <- [lookup i s2] ]
+intersectLeafCon (PLeafIvl b lo1 hi1) (PLeafIvl _ lo2 hi2) =
+  PLeafIvl b (maxWBound lo1 lo2) (minWBound hi1 hi2)
+intersectLeafCon (PLeafPt b v cov gs) (PLeafIvl _ lo hi) =
+  PLeafPt b v cov (gs ++ boundGuards v lo hi)
+intersectLeafCon (PLeafIvl _ lo hi) (PLeafPt b v cov gs) =
+  PLeafPt b v cov (gs ++ boundGuards v lo hi)
+intersectLeafCon p@(PLeafPt {}) (PLeafPt {}) = p
+intersectLeafCon c c' = error ("plan leaf region at offset " ++ show (plcBase c)
+  ++ " is constrained as both discrete and continuous (plan invariant violation): "
+  ++ show (isDisc c) ++ " vs " ++ show (isDisc c'))
+  where isDisc PLeafCon{} = True
+        isDisc _          = False
 
 insertLeafCon :: PLeafCon -> [PLeafCon] -> [PLeafCon]
 insertLeafCon c [] = [c]
@@ -2179,8 +2247,8 @@ insertLeafCon c (c':cs) | plcBase c == plcBase c' = intersectLeafCon c' c : cs
                         | otherwise               = c' : insertLeafCon c cs
 
 intersectPlanW :: PlanWorld -> PlanWorld -> PlanWorld
-intersectPlanW (PlanWorld g1 c1) (PlanWorld g2 c2) =
-  PlanWorld (g1 ++ g2) (foldl (flip insertLeafCon) c1 c2)
+intersectPlanW (PlanWorld g1 c1 p1) (PlanWorld g2 c2 p2) =
+  PlanWorld (g1 ++ g2) (foldl (flip insertLeafCon) c1 c2) (nub (p1 ++ p2))
 
 -- | Cross-intersect two world sets, dropping statically unsatisfiable
 -- results. This is what keeps the world count of an if-chain over several
@@ -2294,7 +2362,7 @@ planEvalRef meta env = go
 -- observed value).
 planRefWorlds :: PlanRef -> [PLeafCon] -> PTarget -> Either String [PlanWorld]
 planRefWorlds (PlanRef (Discretes rty (MultiDiscretes vals)) off) cons tgt =
-  Right [PlanWorld [] (insertLeafCon
+  Right [pw1 (insertLeafCon
           (PLeafCon off [ (i, planDetGuard rty (IRConst (valueToIR v)) tgt) | (i, v) <- zip [0..] vals ])
           cons)]
 planRefWorlds (PlanRef (TuplePlan a b) off) cons (PTPoint s) = do
@@ -2303,11 +2371,70 @@ planRefWorlds (PlanRef (TuplePlan a b) off) cons (PTPoint s) = do
   return [ intersectPlanW x y | x <- wa, y <- wb ]
 planRefWorlds (PlanRef (ADTPlan _ ctorPlans) off) cons (PTPoint s)
   | all (null . snd) ctorPlans =
-      Right [PlanWorld [] (insertLeafCon
+      Right [pw1 (insertLeafCon
               (PLeafCon off [ (i, IRApply (IRVar ("is" ++ cn)) s) | (i, (cn, _)) <- zip [0..] ctorPlans ])
               cons)]
+planRefWorlds (PlanRef Continuous off) cons (PTPoint s) =
+  Right [pw1 (insertLeafCon (PLeafPt off s const1 []) cons)]
+planRefWorlds (PlanRef Continuous off) cons (PTUpTo s) =
+  Right [pw1 (insertLeafCon (PLeafIvl off WNegInf (WFinite s)) cons)]
 planRefWorlds (PlanRef sub _) _ _ =
   Left ("this plan slice cannot be matched against the observation directly (unsupported in milestone 1): " ++ head (words (show sub)))
+
+-- | Peel invertible monotone float transforms off a plan-dependent operand
+-- down to a Continuous plan slice (milestone 3). Supports the same static
+-- envelope as ForwardChaining.stepMonotonicity: plus/neg/double/exp/log
+-- unconditionally, mult only by a literal constant (any other deterministic
+-- operand has no statically known direction). Yields the slice, its accessor
+-- constraints, a pure transformer from an observed bound to (leaf-space
+-- bound, |d leaf-space bound / d observed bound| change-of-variables factor),
+-- and the chain's net monotonicity. Nothing: not such a chain over a
+-- continuous slice -- the caller tries its other rules (in particular, this
+-- deliberately declines chains bottoming out at discrete slices, which the
+-- value-enumeration path already covers).
+planPeelSlice :: CompilerMetadata -> PlanEnv -> Expr -> PlanM (Maybe (Either String (PlanRef, [PLeafCon], IRExpr -> (IRExpr, IRExpr), Monotonicity)))
+planPeelSlice meta env = go
+  where
+    go e | Just refE <- planEvalRef meta env e = return $ case refE of
+      Right (ref@(PlanRef Continuous _), cons) ->
+        Just (Right (ref, cons, \b -> (b, const1), MonInc))
+      _ -> Nothing
+    go (InjF _ (Named "neg") [a])    = chain a (IRUnaryOp OpNeg) (const const1) MonDec
+    go (InjF _ (Named "double") [a]) = chain a (\b -> IROp OpDiv b (IRConst (VFloat 2))) (const (IRConst (VFloat 0.5))) MonInc
+    go (InjF _ (Named "exp") [a])    = chain a (IRUnaryOp OpLog) (\b -> IROp OpDiv const1 b) MonInc
+    go (InjF _ (Named "log") [a])    = chain a (IRUnaryOp OpExp) (IRUnaryOp OpExp) MonInc
+    go (InjF _ (Named "plus") [a, b])
+      | pdep a, pfree b = plusStep a b
+      | pdep b, pfree a = plusStep b a
+    go (InjF _ (Named "mult") [a, b])
+      | pdep a, pfree b = multStep a b
+      | pdep b, pfree a = multStep b a
+    go _ = return Nothing
+    pdep = subtreeHasOcc (planEnvOccs env)
+    pfree x = not (pdep x) && pType (getTypeInfo x) == Deterministic
+    plusStep pe de = do
+      d <- planGenDet meta env de
+      chain pe (\b -> IROp OpSub b d) (const const1) MonInc
+    multStep pe de = do
+      d <- planGenDet meta env de
+      case d of
+        IRConst (VFloat f) | f /= 0 ->
+          chain pe (\b -> IROp OpDiv b d) (const (IRConst (VFloat (1 / abs f))))
+                   (if f > 0 then MonInc else MonDec)
+        _ -> return (Just (Left "multiplication of a continuous plan leaf by a non-literal deterministic operand has no statically known monotonicity direction"))
+    -- Compose one peeled step (observed -> operand space) with the rest of
+    -- the chain (operand space -> leaf space).
+    chain pe stepF covF stepDir = do
+      innerM <- go pe
+      return $ fmap (fmap (\(ref, cons, invT, dir) ->
+        ( ref, cons
+        , \b -> let (bi, covI) = invT (stepF b) in (bi, mulCov (covF b) covI)
+        , if stepDir == MonDec then flipDir dir else dir ))) innerM
+    flipDir MonInc = MonDec
+    flipDir MonDec = MonInc
+    mulCov x y | x == const1 = y
+               | y == const1 = x
+               | otherwise   = IROp OpMult x y
 
 -- | Invert the observation @body ∈ target@ into plan-leaf constraint worlds.
 -- The plan-backed analogue of 'invertToWorlds'. Left carries a diagnostic
@@ -2321,7 +2448,7 @@ planInvert meta env body target
       if pType (getTypeInfo body) == Deterministic
         then do
           bIR <- planGenDet meta env body
-          return (Right [PlanWorld [planDetGuard (rType (getTypeInfo body)) bIR target] []])
+          return (Right [PlanWorld [planDetGuard (rType (getTypeInfo body)) bIR target] [] []])
         else return (Left ("a subtree independent of the plan-bound variables draws fresh randomness: " ++ planNodeName body))
 planInvert meta env body target
   | Just refE <- planEvalRef meta env body =
@@ -2380,8 +2507,8 @@ planInvert meta env body target = case body of
           -- a constructor pruned from the plan (depth limit) simply has mass 0
           let inSet  = maybe [] (\i -> [(i, constTrueIR)]) ci
           let outSet = [ (i, constTrueIR) | i <- [0 .. n-1], Just i /= ci ]
-          let tw = [PlanWorld [] (insertLeafCon (PLeafCon off inSet)  cons)]
-          let fw = [PlanWorld [] (insertLeafCon (PLeafCon off outSet) cons)]
+          let tw = [pw1 (insertLeafCon (PLeafCon off inSet)  cons)]
+          let fw = [pw1 (insertLeafCon (PLeafCon off outSet) cons)]
           return (Right (planBoolWorlds target tw fw))
         Just (Left why) -> return (Left why)
         _ -> return (Left (nm ++ " applied to something that is not a plan slice"))
@@ -2409,57 +2536,127 @@ planInvert meta env body target = case body of
         Just (Right (PlanRef (Discretes rty (MultiDiscretes vals)) off, cons)) -> do
           dv <- bindDetSide "eq_rhs" de
           let eqG v = planDetGuard rty (IRConst (valueToIR v)) (PTPoint (IRVar dv))
-          let tw = [PlanWorld [] (insertLeafCon (PLeafCon off [ (i, eqG v)                    | (i, v) <- zip [0..] vals ]) cons)]
-          let fw = [PlanWorld [] (insertLeafCon (PLeafCon off [ (i, IRUnaryOp OpNot (eqG v)) | (i, v) <- zip [0..] vals ]) cons)]
+          let tw = [pw1 (insertLeafCon (PLeafCon off [ (i, eqG v)                    | (i, v) <- zip [0..] vals ]) cons)]
+          let fw = [pw1 (insertLeafCon (PLeafCon off [ (i, IRUnaryOp OpNot (eqG v)) | (i, v) <- zip [0..] vals ]) cons)]
           return (Right (planBoolWorlds target tw fw))
         Just (Right (PlanRef (ADTPlan _ ctorPlans) off, cons)) | all (null . snd) ctorPlans -> do
           dv <- bindDetSide "eq_rhs" de
           let isG cn = IRApply (IRVar ("is" ++ cn)) (IRVar dv)
-          let tw = [PlanWorld [] (insertLeafCon (PLeafCon off [ (i, isG cn)                    | (i, (cn, _)) <- zip [0..] ctorPlans ]) cons)]
-          let fw = [PlanWorld [] (insertLeafCon (PLeafCon off [ (i, IRUnaryOp OpNot (isG cn)) | (i, (cn, _)) <- zip [0..] ctorPlans ]) cons)]
+          let tw = [pw1 (insertLeafCon (PLeafCon off [ (i, isG cn)                    | (i, (cn, _)) <- zip [0..] ctorPlans ]) cons)]
+          let fw = [pw1 (insertLeafCon (PLeafCon off [ (i, IRUnaryOp OpNot (isG cn)) | (i, (cn, _)) <- zip [0..] ctorPlans ]) cons)]
           return (Right (planBoolWorlds target tw fw))
+        -- Continuous leaf pinned to a deterministic value (milestone 3): the
+        -- True outcome is a point constraint (dim-1 density); the False
+        -- outcome leaves the leaf free -- the complement of a point is a
+        -- full-measure set (the point is a null set).
+        Just (Right (PlanRef Continuous off, cons)) -> do
+          dv <- bindDetSide "eq_rhs" de
+          contEqWorlds off cons (IRVar dv) const1
         Just (Left why) -> return (Left why)
-        -- Not an enum-leaf slice: enumerate the plan-dependent side's values
-        -- (milestone 2) and guard each against the deterministic side.
         _ -> do
-          vsE <- planEnumValues meta env pe
-          case vsE of
-            Left why -> return (Left why)
-            Right pairs -> do
+          peelM <- planPeelSlice meta env pe
+          case peelM of
+            -- A monotone transform chain over a continuous leaf (milestone
+            -- 3): pin the leaf at the inverse-transformed value, with the
+            -- change-of-variables factor of the inverse chain.
+            Just (Right (PlanRef _ off, cons, invT, _)) -> do
               dv <- bindDetSide "eq_rhs" de
-              let rt = rType (getTypeInfo pe)
-              let eqG v = planDetGuard rt v (PTPoint (IRVar dv))
-              let tw = [ planAddGuard (eqG v) w                    | (v, w) <- pairs ]
-              let fw = [ planAddGuard (IRUnaryOp OpNot (eqG v)) w | (v, w) <- pairs ]
-              return (Right (planBoolWorlds target tw fw))
+              let (bnd, cov) = invT (IRVar dv)
+              bv <- lift (mkVariable "eq_bnd")
+              lift (setVariables [(bv, bnd)])
+              contEqWorlds off cons (IRVar bv) cov
+            Just (Left why) -> return (Left why)
+            -- Not a continuous shape: enumerate the plan-dependent side's
+            -- values (milestone 2) and guard each against the deterministic
+            -- side.
+            Nothing -> do
+              vsE <- planEnumValues meta env pe
+              case vsE of
+                Left why -> return (Left why)
+                Right pairs -> do
+                  dv <- bindDetSide "eq_rhs" de
+                  let rt = rType (getTypeInfo pe)
+                  let eqG v = planDetGuard rt v (PTPoint (IRVar dv))
+                  let tw = [ planAddGuard (eqG v) w                    | (v, w) <- pairs ]
+                  let fw = [ planAddGuard (IRUnaryOp OpNot (eqG v)) w | (v, w) <- pairs ]
+                  return (Right (planBoolWorlds target tw fw))
+    contEqWorlds off cons v cov = do
+      let tw = [pw1 (insertLeafCon (PLeafPt off v cov []) cons)]
+      let fw = [pw1 cons]
+      return (Right (planBoolWorlds target tw fw))
     -- Comparison of an enum leaf against a deterministic bound: each leaf
     -- value is statically known, so the outcome split is a per-slot guard.
     planCmp isGT a b
       | planDep a, isDetSide b = leafCmp a b isGT False
       | planDep b, isDetSide a = leafCmp b a isGT True
-      | otherwise = return (Left "comparison: one side must be plan-dependent and the other deterministic")
+      | planDep a, planDep b   = coupleCmp a b isGT
+      | otherwise = return (Left "comparison: some side is neither plan-dependent nor deterministic (it draws fresh randomness)")
     leafCmp pe de isGT flipped = case planEvalRef meta env pe of
       Just (Right (PlanRef (Discretes _ (MultiDiscretes vals)) off, cons)) -> do
         dv <- bindDetSide "cmp_rhs" de
         let op = if isGT /= flipped then OpGreaterThan else OpLessThan
         let cmpG v = IROp op (IRConst (valueToIR v)) (IRVar dv)
-        let tw = [PlanWorld [] (insertLeafCon (PLeafCon off [ (i, cmpG v)                    | (i, v) <- zip [0..] vals ]) cons)]
-        let fw = [PlanWorld [] (insertLeafCon (PLeafCon off [ (i, IRUnaryOp OpNot (cmpG v)) | (i, v) <- zip [0..] vals ]) cons)]
+        let tw = [pw1 (insertLeafCon (PLeafCon off [ (i, cmpG v)                    | (i, v) <- zip [0..] vals ]) cons)]
+        let fw = [pw1 (insertLeafCon (PLeafCon off [ (i, IRUnaryOp OpNot (cmpG v)) | (i, v) <- zip [0..] vals ]) cons)]
         return (Right (planBoolWorlds target tw fw))
+      -- Continuous leaf against a deterministic bound (milestone 3): the
+      -- outcomes are complementary half-lines on the leaf, measured as
+      -- Gaussian CDF differences. Interval mass is dim 0, like set-witnesses.
+      Just (Right (PlanRef Continuous off, cons)) -> do
+        dv <- bindDetSide "cmp_rhs" de
+        contCmpWorlds off cons (IRVar dv) (isGT /= flipped)
       Just (Left why) -> return (Left why)
-      -- Not an enum-leaf slice: enumerate the plan-dependent side's values
-      -- (milestone 2 -- the counting-fold-vs-bound shape) and guard each.
       _ -> do
-        vsE <- planEnumValues meta env pe
-        case vsE of
-          Left why -> return (Left why)
-          Right pairs -> do
+        peelM <- planPeelSlice meta env pe
+        case peelM of
+          -- A monotone transform chain over a continuous leaf (milestone 3):
+          -- transport the bound through the inverse chain; a net-decreasing
+          -- chain flips which half-line the True outcome selects.
+          Just (Right (PlanRef _ off, cons, invT, dir)) -> do
             dv <- bindDetSide "cmp_rhs" de
-            let op = if isGT /= flipped then OpGreaterThan else OpLessThan
-            let cmpG v = IROp op v (IRVar dv)
-            let tw = [ planAddGuard (cmpG v) w                    | (v, w) <- pairs ]
-            let fw = [ planAddGuard (IRUnaryOp OpNot (cmpG v)) w | (v, w) <- pairs ]
+            let (bnd, _) = invT (IRVar dv)
+            bv <- lift (mkVariable "cmp_bnd")
+            lift (setVariables [(bv, bnd)])
+            contCmpWorlds off cons (IRVar bv) ((isGT /= flipped) == (dir == MonInc))
+          Just (Left why) -> return (Left why)
+          -- Not a continuous shape: enumerate the plan-dependent side's
+          -- values (milestone 2 -- the counting-fold-vs-bound shape).
+          Nothing -> do
+            vsE <- planEnumValues meta env pe
+            case vsE of
+              Left why -> return (Left why)
+              Right pairs -> do
+                dv <- bindDetSide "cmp_rhs" de
+                let op = if isGT /= flipped then OpGreaterThan else OpLessThan
+                let cmpG v = IROp op v (IRVar dv)
+                let tw = [ planAddGuard (cmpG v) w                    | (v, w) <- pairs ]
+                let fw = [ planAddGuard (IRUnaryOp OpNot (cmpG v)) w | (v, w) <- pairs ]
+                return (Right (planBoolWorlds target tw fw))
+    -- Worlds of (continuous leaf@off > bound) when gtLeaf, else (leaf < bound).
+    contCmpWorlds off cons bnd gtLeaf = do
+      let upper = pw1 (insertLeafCon (PLeafIvl off (WFinite bnd) WPosInf) cons)
+      let lower = pw1 (insertLeafCon (PLeafIvl off WNegInf (WFinite bnd)) cons)
+      let (tw, fw) = if gtLeaf then ([upper], [lower]) else ([lower], [upper])
+      return (Right (planBoolWorlds target tw fw))
+    -- Comparison of two plan-dependent sides (milestone 3): a single
+    -- pairwise coupling of two continuous leaves, measured in closed form
+    -- via the difference Gaussian. Transform chains on a coupled side are
+    -- out of scope (only bare slices couple); 'pwOverCoupled' refuses any
+    -- world that constrains a coupled leaf twice.
+    coupleCmp ae be isGT = case (planEvalRef meta env ae, planEvalRef meta env be) of
+      (Just (Right (PlanRef Continuous offA, consA)), Just (Right (PlanRef Continuous offB, consB))) -> do
+        let cons = foldr insertLeafCon consB consA
+        if offA == offB
+          -- the same leaf compared against itself: statically False
+          then return (Right (planBoolWorlds target [] [pw1 cons]))
+          else do
+            let mkW pr = (pw1 cons) { pwPairs = [pr] }
+            let tw = [mkW (if isGT then (offA, offB) else (offB, offA))]
+            let fw = [mkW (if isGT then (offB, offA) else (offA, offB))]
             return (Right (planBoolWorlds target tw fw))
+      (Just (Left why), _) -> return (Left why)
+      (_, Just (Left why)) -> return (Left why)
+      _ -> return (Left "a comparison with both sides plan-dependent is only supported between two continuous plan leaves (single pairwise coupling)")
 
 -- | Canonical (outcome-True, outcome-False) worlds of a Bool-valued node.
 planInvertBool :: CompilerMetadata -> PlanEnv -> Expr -> PlanM (Either String ([PlanWorld], [PlanWorld]))
@@ -2480,12 +2677,12 @@ planEnumValues meta env body
       if pType (getTypeInfo body) == Deterministic
         then do
           ir <- planGenDet meta env body
-          return (Right [(ir, PlanWorld [] [])])
+          return (Right [(ir, pw1 [])])
         else return (Left ("a subtree independent of the plan-bound variables draws fresh randomness: " ++ planNodeName body))
   | Just refE <- planEvalRef meta env body = return $ case refE of
       Left why -> Left why
       Right (PlanRef (Discretes _ (MultiDiscretes vals)) off, cons) ->
-        Right [ (IRConst (valueToIR v), PlanWorld [] (insertLeafCon (PLeafCon off [(i, constTrueIR)]) cons))
+        Right [ (IRConst (valueToIR v), pw1 (insertLeafCon (PLeafCon off [(i, constTrueIR)]) cons))
               | (i, v) <- zip [0..] vals ]
       Right _ -> Left "value enumeration is only supported for enum plan leaves"
   | otherwise = case body of
@@ -2550,7 +2747,7 @@ data PlanSpec = PlanSpec
 -- | Fold the call-site accessor constraints (e.g. the SCons flag implied by
 -- @f (rest s)@) into a world produced by the callee.
 addSpecCons :: PlanSpec -> PlanWorld -> PlanWorld
-addSpecCons spec (PlanWorld gs cons) = PlanWorld gs (foldr insertLeafCon cons (spCons spec))
+addSpecCons spec (PlanWorld gs cons ps) = PlanWorld gs (foldr insertLeafCon cons (spCons spec)) ps
 
 -- | Resolve a user-function application into a specialization: the callee
 -- must be a directly-applied (saturated) top-level function, and each
@@ -2682,22 +2879,59 @@ planApplyTarget meta env body target = do
 
 -- | Measure the worlds against the raw logit vector bound at @nnRaw@:
 -- p = sum over worlds of (guards -> product of constrained leaf masses),
--- where a leaf's mass is the sum of its allowed slots' logits (each under its
--- own guard). All constraints are discrete, so dim = 0; each world whose
--- guards hold counts as one branch.
-measurePlanWorlds :: String -> [PlanWorld] -> CompilationResult
-measurePlanWorlds nnRaw worlds = (sumUp (map fst measured), const0, sumUp (map snd measured))
+-- where a discrete leaf's mass is the sum of its allowed slots' logits (each
+-- under its own guard), an interval-constrained continuous leaf's is a
+-- Gaussian CDF difference over its (mu, sigma) slice, a pairwise coupling's
+-- is the closed-form difference Gaussian, and a point-constrained continuous
+-- leaf's is its density times |change-of-variables| -- the only dim-1
+-- measure. When every world is dim 0 (in particular for any milestone-1/2
+-- world set) the worlds sum directly; with point constraints present the
+-- worlds combine via 'addP' (mixture addition, smaller dimension wins). Each
+-- world whose guards hold counts as one branch.
+measurePlanWorlds :: String -> [PlanWorld] -> CompilerMonad CompilationResult
+measurePlanWorlds nnRaw worlds
+  | all ((== 0) . wDim) worlds =
+      return (sumUp (map (fst . one) worlds), const0, sumUp (map (snd . one) worlds))
+  | otherwise = case map (\w -> let (p, bc) = one w in ((p, dimC (wDim w)), bc)) worlds of
+      []     -> return (const0, const0, const0)
+      (m:ms) -> do
+        (pS, dS) <- foldM addP (fst m) (map fst ms)
+        return (pS, dS, sumUp (map snd (m:ms)))
   where
-    measured = map one worlds
+    dimC d = IRConst (VFloat (fromIntegral d))
+    wDim w = length [ () | PLeafPt {} <- pwCons w ]
     sumUp [] = const0
     sumUp xs = foldr1 (IROp OpPlus) xs
-    one (PlanWorld guards cons) =
+    one (PlanWorld guards cons pairs) =
       let guarded e = foldr (\g acc -> IRIf g acc const0) e guards
-      in (guarded (prodMass cons), guarded const1)
-    prodMass []   = const1
-    prodMass cons = foldr1 (IROp OpMult) (map leafMass cons)
+      in (guarded (prodMass cons pairs), guarded const1)
+    prodMass [] []     = const1
+    prodMass cons pairs = foldr1 (IROp OpMult) (map leafMass cons ++ map pairMass pairs)
     leafMass (PLeafCon _ [])       = const0
     leafMass (PLeafCon base slots) = foldr1 (IROp OpPlus) (map (slotRead base) slots)
+    leafMass (PLeafIvl base lo hi) =
+      let diff = IROp OpSub (cdfAt base hi) (cdfAt base lo)
+      in case (lo, hi) of
+           -- one-sided intervals cannot go negative; only a runtime-empty
+           -- two-sided intersection needs the clamp (mirrors measureSet)
+           (WFinite _, WFinite _) -> IRIf (IROp OpGreaterThan diff const0) diff const0
+           _                      -> diff
+    leafMass (PLeafPt base v cov gs) =
+      let dens = IROp OpDiv (IRDensity IRNormal (zScore base v)) (vecRead (base + 1))
+          scaled = if cov == const1 then dens else IROp OpMult dens (IRUnaryOp OpAbs cov)
+      in foldr (\g acc -> IRIf g acc const0) scaled gs
+    -- P(leaf@a > leaf@b) for independent Gaussians: Phi((mu_a - mu_b) / sqrt(s_a^2 + s_b^2))
+    pairMass (a, b) =
+      let num = IROp OpSub (vecRead a) (vecRead b)
+          sq x = IROp OpMult x x
+          var = IROp OpPlus (sq (vecRead (a + 1))) (sq (vecRead (b + 1)))
+          -- sqrt spelled as exp(log/2): the IR has no sqrt primitive
+          sd = IRUnaryOp OpExp (IROp OpMult (IRConst (VFloat 0.5)) (IRUnaryOp OpLog var))
+      in IRCumulative IRNormal (IROp OpDiv num sd)
+    cdfAt _ WNegInf = const0
+    cdfAt _ WPosInf = const1
+    cdfAt base (WFinite e) = IRCumulative IRNormal (zScore base e)
+    zScore base e = IROp OpDiv (IROp OpSub e (vecRead base)) (vecRead (base + 1))
     slotRead base (i, g)
       | g == constTrueIR = vecRead (base + i)
       | otherwise        = IRIf g (vecRead (base + i)) const0
@@ -2730,16 +2964,19 @@ planWitnessApply meta cumulative rt lResolvedCN lambdaBodyCN tag v sample
         Right worlds0 -> do
           -- statically unsatisfiable worlds measure 0; drop them
           let worlds = filter (not . pwUnsat) worlds0
-          nnRaw <- mkVariable "nn_raw"
-          sym <- toIRGenerate meta symArg
-          setVariables [(nnRaw, IRApply (IRVar nnName) sym)]
-          let (p, dim, bc) = measurePlanWorlds nnRaw worlds
-          -- Full-ANY marginal short-circuit, mirroring setWitnessApply.
-          if cumulative
-            then return (Right (p, dim, bc))
-            else return (Right ( IRIf (IRUnaryOp OpIsAny sample) const1 p
-                               , IRIf (IRUnaryOp OpIsAny sample) const0 dim
-                               , IRIf (IRUnaryOp OpIsAny sample) const1 bc ))
+          case mapMaybe pwOverCoupled worlds of
+           (why:_) -> return (Left (Just why))
+           [] -> do
+            nnRaw <- mkVariable "nn_raw"
+            sym <- toIRGenerate meta symArg
+            setVariables [(nnRaw, IRApply (IRVar nnName) sym)]
+            (p, dim, bc) <- measurePlanWorlds nnRaw worlds
+            -- Full-ANY marginal short-circuit, mirroring setWitnessApply.
+            if cumulative
+              then return (Right (p, dim, bc))
+              else return (Right ( IRIf (IRUnaryOp OpIsAny sample) const1 p
+                                 , IRIf (IRUnaryOp OpIsAny sample) const0 dim
+                                 , IRIf (IRUnaryOp OpIsAny sample) const1 bc ))
   | otherwise = return (Left Nothing)
   where
     isArrow (TArrow _ _) = True

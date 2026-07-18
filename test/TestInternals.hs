@@ -916,6 +916,31 @@ test_planEnumThreadedTopKAndBC = planEnumTopKAndBCTest "planEnumThreadedTopKAndB
 test_planEnumRecTopKAndBC :: TestTree
 test_planEnumRecTopKAndBC = planEnumTopKAndBCTest "planEnumRecTopKAndBC" "planEnumRecChain"
 
+-- | Milestone-3 refusal rule, kept precise: a world that couples a continuous
+-- plan leaf pairwise and also bounds it, or couples it twice, is a correlated
+-- orthant probability -- quadrature the language excludes by design. The plan
+-- engine must decline at compile time with the orthant diagnostic (surfaced
+-- through the set-witness refusal) rather than emit wrong code.
+planOverCouplingRefusalTests :: TestTree
+planOverCouplingRefusalTests = testGroup "plan-guided M3 over-coupling refusal"
+  [ testCase "coupled leaf additionally bounded refuses with the orthant diagnostic" $
+      expectOrthantRefusal
+        "neural readPair :: (Symbol -> (Float, Float))\nmain sym = let p = readPair sym in if fst p > snd p then (if fst p > 0.5 then 2 else 1) else 0\n"
+  , testCase "leaf coupled twice refuses with the orthant diagnostic" $
+      expectOrthantRefusal
+        "neural readTri :: (Symbol -> (Float, (Float, Float)))\nmain sym = let p = readTri sym in if fst p > fst (snd p) then (if fst p > snd (snd p) then 2 else 1) else 0\n"
+  ]
+
+expectOrthantRefusal :: String -> IO ()
+expectOrthantRefusal src = do
+  let prog = either (\e -> error ("parse failed: " ++ show e)) id (tryParseProgram "test" src)
+  r <- try (evaluate (either (error . show) (length . show) (compile defaultCompilerConfig prog)))
+  case r of
+    Left (ErrorCall msg) -> assertBool
+      ("expected the orthant-probability diagnostic, got: " ++ msg)
+      ("orthant" `isInfixOf` msg)
+    Right _ -> assertFailure "expected a compile-time refusal, but compilation succeeded"
+
 internalsTests :: TestTree
 internalsTests = testGroup "Internals"
   [ testProperties "properties" $(allProperties)
@@ -944,6 +969,7 @@ internalsTests = testGroup "Internals"
   , autoNeuralDerivationTests
   , enumContinuousRefusalTests
   , test_planEnumThreadedTopKAndBC
+  , planOverCouplingRefusalTests
   , test_tstBackendsHeader
   ]
 

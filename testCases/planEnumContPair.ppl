@@ -1,0 +1,7 @@
+-- M3: single pairwise coupling of two continuous plan leaves, measured in
+-- closed form via the difference Gaussian. Plan (Float, Float) =
+-- [mu_a, sigma_a, mu_b, sigma_b]; P(A > B) = Phi((mu_a - mu_b) /
+-- sqrt(sigma_a^2 + sigma_b^2)) = Phi(-1/sqrt(5)) = 0.327360.
+neural readPair :: (Symbol -> (Float, Float))
+
+main sym = let p = readPair sym in if fst p > snd p then 1 else 0

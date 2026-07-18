@@ -1,0 +1,15 @@
+-- M3 acceptance shape 1 (design plan-guided-lazy-enumeration): the recursive
+-- scan of planEnumRecScan with continuous Position fields present but never
+-- constrained by the predicate -- the positions integrate out as free
+-- marginals, so the expected values equal planEnumRecScan's (same discrete
+-- parameters; the (mu, sigma) slots are ignored by the compiled prob).
+data Color = Red | Green | Blue
+data Position = Pos x::Float, y::Float
+data Object = Null | Obj color::Color, position::Position
+data Scene = Empty | SCons obj::Object, rest::Scene depth 3
+
+neural readScene :: (Symbol -> Scene)
+
+existsRed s = if isEmpty s then False else (if isObj (obj s) then (if isRed (color (obj s)) then True else existsRed (rest s)) else existsRed (rest s))
+
+main sym = let scene = readScene sym in if existsRed scene then 1 else 0

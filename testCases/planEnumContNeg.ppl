@@ -1,0 +1,7 @@
+-- M3: comparison through a net-DECREASING transform chain (0.5 - leaf
+-- desugars to plus(0.5, neg leaf)) -- the transported bound flips which
+-- half-line the True outcome selects: 0.5 - snd o > 0.2  <=>  leaf < 0.3;
+-- with N(0,1), p(1) = Phi(0.3) = 0.617911.
+neural readObj :: (Symbol -> (Bool, Float))
+
+main sym = let o = readObj sym in if 0.5 - (snd o) > 0.2 then 1 else 0
