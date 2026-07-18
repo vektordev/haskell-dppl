@@ -60,6 +60,9 @@ module SPLL.Prelude
   , runGenC
   , runProbC
   , runIntegC
+  , runGenNamedC
+  , runProbNamedC
+  , runIntegNamedC
   , runEncodeC
   , printIfVerbose
   , printIfMoreVerbose
@@ -83,6 +86,8 @@ import SPLL.IROptimizer (optimizeEnv)
 import Debug.Trace
 import Data.Either
 import SPLL.Typing.ForwardChaining (annotateProg)
+import SPLL.Typing.Determinism (knownAnchors)
+import qualified Data.Set as Set
 import Text.PrettyPrint.Annotated.HughesPJClass()
 import PrettyPrint (pPrintProg, pPrintIREnv)
 import Debug.Pretty.Simple
@@ -296,17 +301,32 @@ compile conf p = do
   pPrintIfMoreVerbose conf forwardChained
   printStage conf "After Forward Chaining (chain names)" forwardChained
 
-  typed <- addTypeInfo forwardChained
+  -- Stage 1 of the modality pipeline (modality-typesystem-port §4): the forward
+  -- determinism dataflow whose known-anchor set ForwardChaining will consume in
+  -- place of its Constant-only approximation (the wiring is milestone 3). It
+  -- slots here, after chain naming and before type inference, per the §4 order.
+  let anchors = knownAnchors forwardChained
+  printIfMoreVerbose conf ("\n=== Determinism (known anchors) ===\n"
+                            ++ unwords (Set.toList anchors))
+
+  -- Stage 2 of the modality pipeline (modality-split-forwardchaining): the
+  -- ForwardChaining certificate is built ONCE, inside addTypeInfo — between
+  -- RInfer (it reads rType for function arrows) and the modality pass, which
+  -- consults its witnessed-binding verdict for the let rule
+  -- (modality-witnessed-inference, milestone 2). The same FCData is returned
+  -- here and threaded to both remaining consumers (conditional annotation and
+  -- IR codegen).
+  (typed, fcData) <- addTypeInfo forwardChained
   printIfMoreVerbose conf "\n=== Typed Program ==="
   pPrintIfMoreVerbose conf typed
   printStage conf "After Type Inference (RType + PType)" typed
 
-  let annotated = annotateConditionalProg typed
+  let annotated = annotateConditionalProg fcData typed
   printIfMoreVerbose conf "\n=== Annotated Program (2) ==="
   pPrintIfMoreVerbose conf annotated
   printStage conf "After Conditional Annotation (IsConditional tags)" annotated
 
-  let unoptimized = envToIRUnoptimized conf annotated
+  let unoptimized = envToIRUnoptimized conf fcData annotated
   printStageIR conf "After IR Compilation (pre-optimization)" unoptimized
   let stripped = if countBranches conf then unoptimized else stripBranchCount unoptimized
 
@@ -349,13 +369,24 @@ runEncode conf p target outerArgs = do
 -- callers issuing many queries against the same program pay for compilation once.
 
 runGenC :: (RandomGen g) => Program -> IREnv -> [IRValue] -> Rand g IRValue
-runGenC p compiled args =
-  let Just (gen, _) = genFun (lookupIREnv "main" compiled)
-  in generateRand (neurals p) (encodeDecls p) compiled (map IRConst args) gen
+runGenC p compiled = runGenNamedC p compiled "main"
 
 runProbC :: Program -> IREnv -> [IRValue] -> IRValue -> Either CompilerError IRValue
-runProbC p compiled args x =
-  let Just (prob, _) = probFun (lookupIREnv "main" compiled)
+runProbC p compiled = runProbNamedC p compiled "main"
+
+-- | Like 'runGenC'/'runProbC'/'runIntegC', but selects the compiled function
+-- group by name instead of always using @main@. Every top-level definition is
+-- compiled into its own 'IRFunGroup' keyed by its name, so these drive any
+-- definition directly -- used by the showcase drift guard to freeze the
+-- behaviour of individual documented definitions, not just @main@.
+runGenNamedC :: (RandomGen g) => Program -> IREnv -> String -> [IRValue] -> Rand g IRValue
+runGenNamedC p compiled name args =
+  let Just (gen, _) = genFun (lookupIREnv name compiled)
+  in generateRand (neurals p) (encodeDecls p) compiled (map IRConst args) gen
+
+runProbNamedC :: Program -> IREnv -> String -> [IRValue] -> IRValue -> Either CompilerError IRValue
+runProbNamedC p compiled name args x =
+  let Just (prob, _) = probFun (lookupIREnv name compiled)
       -- topK-compiled prob functions take an accumulated-probability parameter
       -- right after the sample; seed it with 1.0 at the query root.
       args' = if compiledWithTopK compiled then x : VFloat 1.0 : args else x : args
@@ -367,8 +398,11 @@ compiledWithTopK :: IREnv -> Bool
 compiledWithTopK (IREnv _ _ consts) = isJust (lookup "TOP_K_CUTOFF" consts)
 
 runIntegC :: Program -> IREnv -> [IRValue] -> IRValue -> Either CompilerError IRValue
-runIntegC p compiled args sample =
-  let Just (integ, _) = integFun (lookupIREnv "main" compiled)
+runIntegC p compiled = runIntegNamedC p compiled "main"
+
+runIntegNamedC :: Program -> IREnv -> String -> [IRValue] -> IRValue -> Either CompilerError IRValue
+runIntegNamedC p compiled name args sample =
+  let Just (integ, _) = integFun (lookupIREnv name compiled)
   in generateDet (neurals p) (encodeDecls p) compiled (map IRConst (sample:args)) integ
 
 -- | Run the encode function of the function group named `target`. Each decoder

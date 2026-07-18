@@ -240,8 +240,8 @@ endpointReturnRType p target =
     Nothing      -> error ("endpointReturnRType: no function named " ++ target ++ " in program")
   where
     typed = case addTypeInfo (annotateProg (annotateEnumsProg p)) of
-      Right tp  -> tp
-      Left err  -> error ("endpointReturnRType: type inference failed: " ++ show err)
+      Right (tp, _) -> tp
+      Left err      -> error ("endpointReturnRType: type inference failed: " ++ show err)
     stripLambdasE (Lambda _ _ b) = stripLambdasE b
     stripLambdasE e = e
 

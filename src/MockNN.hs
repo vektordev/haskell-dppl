@@ -22,10 +22,17 @@ import Utils
 --    (0, seed)
 -- Spinking Mock NN:
 --    (1, (spikeAt, seed))
+-- Literal Mock NN (the given vector is returned verbatim, no noise):
+--    (2, [logit0, logit1, ...])
 evaluateMockNN :: PartitionPlan -> IRValue -> IRValue
 --evaluateMockNN part val | trace ("evalMockNN: " ++ show part ++ " Value: " ++ show val) False = undefined
 evaluateMockNN part (VTuple a (VInt seed)) | a == VInt 0 = evalRand (randomMockNN part) (mkStdGen seed)
 evaluateMockNN part (VTuple a (VTuple b (VInt seed))) | a == VInt 1 = evalRand (spikingMockNN part b) (mkStdGen seed)
+evaluateMockNN part (VTuple a lst@(VList vals)) | a == VInt 2 =
+  if length (toList vals) == getSize part
+    then lst
+    else error $ "Literal mock NN vector has length " ++ show (length (toList vals))
+              ++ ", but the partition plan needs " ++ show (getSize part)
 
 randomMockNN :: RandomGen g => PartitionPlan -> Rand g IRValue
 --randomMockNN part | trace ("randomMockNN: " ++ show part) False = undefined

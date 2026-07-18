@@ -62,11 +62,6 @@ downgrade PNormal    PLogNormal = Integrate
 downgrade PLogNormal PNormal    = Integrate
 downgrade ty1 ty2 = maybe Bottom (\ord -> if ord == LT then ty1 else ty2) order
   where order = partialOrd ty1 ty2
-{-downgrade Bottom _ = Bottom
-downgrade _ Bottom = Bottom
-downgrade Integrate _ = Integrate
-downgrade _ Integrate = Integrate
-downgrade Deterministic Deterministic = Deterministic-}
 
 downgrade2 :: PType -> PType -> PType
 downgrade2 leftP rightP = if upgrade leftP rightP == Deterministic
@@ -79,11 +74,6 @@ upgrade PNormal    PLogNormal = Deterministic
 upgrade PLogNormal PNormal    = Deterministic
 upgrade ty1 ty2 = maybe Bottom (\ord -> if ord == GT then ty1 else ty2) order
   where order = partialOrd ty1 ty2
-{-upgrade _ Deterministic = Deterministic
-upgrade Deterministic _ = Deterministic
-upgrade Chaos _ = Chaos
-upgrade _ Chaos = Chaos
-upgrade Integrate Integrate = Integrate-}
 
 mostChaotic :: [PType] -> PType
 mostChaotic = foldl1 downgrade

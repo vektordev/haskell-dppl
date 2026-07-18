@@ -24,7 +24,11 @@ resolver: lts-22.9
 nix:
   enable: false
 
-system-ghc: true
+# system-ghc / install-ghc deliberately left unset here: NixOS needs
+# system-ghc: true (a stack-downloaded GHC won't run without /nix/store's
+# dynamic linker), while a machine with no usable system GHC needs the
+# opposite. Set your preference per-machine in ~/.stack/config.yaml instead
+# of here, since a project-level setting would override it for everyone.
 compiler-check: newer-minor
 
 # User packages to be built.

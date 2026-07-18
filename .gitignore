@@ -32,3 +32,4 @@ vendor/
 out.py
 
 __pycache__/
+.claude/

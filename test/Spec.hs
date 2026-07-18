@@ -22,7 +22,11 @@ import SPLL.Parser
 import TestParser (parserTests)
 import TestInternals (internalsTests)
 import TestRejection (rejectionTests)
-import TestEncodeProperties (encodeTests)
+import TestModality (modalityTests)
+import TestModalityInfer (modalityInferTests)
+import TestDeterminism (determinismTests)
+import TestEncodeProperties (encodeTests, encodeRoundtripTests)
+import TestShowcase (showcaseTests)
 import End2EndTesting (end2endTests, getAllTestFiles)
 import TestCaseParser (parseProgram, parseTestCases, TestCase(..), Backend(..))
 import TestTolerances (probTolerance, reasonablyCloseTolerance, samplingTolerance)
@@ -542,13 +546,21 @@ main = do
   hideSuccesses <- lookupEnv "TASTY_HIDE_SUCCESSES"
   if isNothing hideSuccesses then setEnv "TASTY_HIDE_SUCCESSES" "true" else return ()
   e2e <- end2endTests
+  detTests <- determinismTests
+  showcase <- showcaseTests
   corpusPool <- loadCorpusCases
+  encodeRoundtrip <- encodeRoundtripTests
   defaultMain $ testGroup "Tests"
     [ specTests
     , corpusTests corpusPool
     , parserTests
     , internalsTests
     , rejectionTests
+    , modalityTests
+    , modalityInferTests
+    , detTests
     , encodeTests
+    , encodeRoundtrip
+    , showcase
     , e2e
     ]

@@ -14,12 +14,17 @@ import SPLL.Typing.RInfer (tryAddRTypeInfo, RTypeError(..))
 import SPLL.Typing.RType (ClassConstraint(..), TVarR(..), RType(..))
 import SPLL.Prelude
 import SPLL.Parser (tryParseProgram)
+import SPLL.Analysis (annotateEnumsProg)
+import SPLL.Typing.Infer (addTypeInfo)
+import SPLL.Typing.ForwardChaining (FCData, annotateProg, progToFCData, isInvertibleLambda, isWitnessedLambda)
+import qualified Data.Set as Set
 import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan)
 import qualified SPLL.AutoNeural as AutoNeural (getSize)
 import SPLL.IntermediateRepresentation
 import IRInterpreter (generateDet)
 import Data.Foldable (toList)
 import Data.List (isInfixOf)
+import Control.Exception (try, evaluate, ErrorCall(..))
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure)
 import TestCaseParser (Backend(..), allBackends, parseTestCasesFromString)
@@ -413,7 +418,7 @@ test_autoDeriveTuple = testCase "autoDeriveTuple" $
     (autoDeriveMultiValue [] (Tuple TBool TFloat))
 
 colorADT :: ADTDecl
-colorADT = ADTDecl "Color" [("Red", []), ("Green", []), ("Blue", [])]
+colorADT = ADTDecl "Color" [("Red", []), ("Green", []), ("Blue", [])] Nothing
 
 test_autoDeriveNonRecursiveADT :: TestTree
 test_autoDeriveNonRecursiveADT = testCase "autoDeriveNonRecursiveADT" $
@@ -421,16 +426,34 @@ test_autoDeriveNonRecursiveADT = testCase "autoDeriveNonRecursiveADT" $
     (Right (MultiADT [("Red", []), ("Green", []), ("Blue", [])]))
     (autoDeriveMultiValue [colorADT] (TADT "Color"))
 
+-- Recursive, no `depth`: auto-derivation has no finite enumeration to produce.
 treeADT :: ADTDecl
 treeADT = ADTDecl "Tree"
   [ ("Leaf", [("val", TInt)])
   , ("Node", [("l", TADT "Tree"), ("r", TADT "Tree")])
-  ]
+  ] Nothing
 
 test_autoDeriveRecursiveADTFails :: TestTree
 test_autoDeriveRecursiveADTFails = testCase "autoDeriveRecursiveADTFails" $ case autoDeriveMultiValue [treeADT] (TADT "Tree") of
   Left err -> assertBool ("error should mention recursion: " ++ err) ("recursive" `isInfixOf` err)
   Right mv -> assertFailure ("expected auto-derive of recursive ADT to fail, got: " ++ show mv)
+
+-- Recursive WITH a declared depth: auto-derivation unrolls to that depth. At
+-- depth 1 the self-referential FCons tail may only be FNil (the recursive
+-- constructor is dropped at the leaf).
+flistADT :: ADTDecl
+flistADT = ADTDecl
+  { dataName = "FList"
+  , constructors = [ ("FCons", [("hd", TFloat), ("tl", TADT "FList")]), ("FNil", []) ]
+  , adtDepth = Just 1 }
+
+test_autoDeriveRecursiveADTWithDepth :: TestTree
+test_autoDeriveRecursiveADTWithDepth = testCase "autoDeriveRecursiveADTWithDepth" $
+  assertEqual "recursive ADT with `depth 1` unrolls one level (tail must be FNil)"
+    (Right (MultiADT
+      [ ("FCons", [MultiContinuous, MultiADT [("FNil", [])]])
+      , ("FNil", []) ]))
+    (autoDeriveMultiValue [flistADT] (TADT "FList"))
 
 -- AutoNeural: makePartitionPlan resolves "Nothing" and "_" (MultiAuto) via auto-derivation,
 -- and "Real" (MultiContinuous) directly to a Continuous plan.
@@ -465,6 +488,7 @@ autoNeuralDerivationTests = testGroup "autoNeuralDerivation"
   , test_autoDeriveTuple
   , test_autoDeriveNonRecursiveADT
   , test_autoDeriveRecursiveADTFails
+  , test_autoDeriveRecursiveADTWithDepth
   , test_makePartitionPlanNothingFloat
   , test_makePartitionPlanNothingTuple
   , test_makePartitionPlanWildcardMatchesNothing
@@ -492,10 +516,214 @@ test_tstBackendsHeader = testCase "tstBackendsHeader" $ do
 
 return []
 
+-- ---------------------------------------------------------------------------
+-- ForwardChaining invertibility certificate (modality-split-forwardchaining)
+-- ---------------------------------------------------------------------------
+
+-- | Parse + the pre-inference annotation stages + type inference that the FC
+-- certificate depends on (progToFCData reads rType, so types must be present).
+prepTypedFC :: String -> (Program, FCData)
+prepTypedFC src =
+  let p0    = annotateProg (annotateEnumsProg (parse src))
+      -- addTypeInfo returns its own (knownAnchors-seeded) certificate since
+      -- witnessed-inference milestone 2; these tests keep building the
+      -- anchor-free one so the certificate queries are pinned in isolation.
+      typed = either (\e -> error ("type inference failed: " ++ show e)) fst (addTypeInfo p0)
+  in (typed, progToFCData Set.empty typed)
+  where
+    parse s = either (\e -> error ("parse failed: " ++ show e)) id (tryParseProgram "test" s)
+
+universeE :: Expr -> [Expr]
+universeE e = e : concatMap universeE (getSubExprs e)
+
+allNodes :: Program -> [Expr]
+allNodes prog = concatMap (universeE . snd) (functions prog)
+
+-- The chain name of the function on the left of the first Apply — exactly the
+-- handle 'IRCompiler' passes to the certificate / 'toInvExpr'.
+applyLeftCN :: Program -> ChainName
+applyLeftCN prog = head [ chainName (getTypeInfo l) | Apply _ l _ <- allNodes prog ]
+
+constNodeCN :: Program -> ChainName
+constNodeCN prog = head [ chainName (getTypeInfo c) | c@(Constant _ _) <- allNodes prog ]
+
+forwardChainingCertTests :: TestTree
+forwardChainingCertTests = testGroup "ForwardChaining certificate"
+  [ testCase "invertible probabilistic-bound lambda is witnessed" $
+      let (prog, fc) = prepTypedFC "main=(\\x -> x + 5.0)(Uniform)"
+      in assertBool "\\x -> x + 5.0 should invert in x"
+           (isInvertibleLambda fc (adts prog) (applyLeftCN prog))
+  , testCase "many-to-one comparison body is not witnessed" $
+      -- `x > 0.5` is many-to-one onto {T,F}; no inversion path exists, so the
+      -- certificate must report False (this is the program that otherwise
+      -- crashes codegen in toInvExpr's mergeExpr).
+      let (prog, fc) = prepTypedFC "main=(\\x -> x > 0.5)(Uniform)"
+      in assertBool "\\x -> x > 0.5 must not invert in x"
+           (not (isInvertibleLambda fc (adts prog) (applyLeftCN prog)))
+  , testCase "a non-lambda chain name is not invertible" $
+      let (prog, fc) = prepTypedFC "main=(\\x -> x + 5.0)(Uniform)"
+      in assertBool "a Constant node is not an invertible lambda"
+           (not (isInvertibleLambda fc (adts prog) (constNodeCN prog)))
+  ]
+
+-- The lambda that binds @v@ — a let binding's handle (the parser rewrites
+-- @let v = e in b@ to @Apply (Lambda v b) e@).
+letLambdaCN :: String -> Program -> ChainName
+letLambdaCN v prog =
+  head [ chainName (getTypeInfo l) | l@(Lambda _ n _) <- allNodes prog, n == v ]
+
+declRootCN :: String -> Program -> ChainName
+declRootCN fname prog = case lookup fname (functions prog) of
+  Just e  -> chainName (getTypeInfo e)
+  Nothing -> error ("no function " ++ fname)
+
+-- | Witnessed-binding query (design modality-witnessed-inference, milestone 1).
+-- Same FC machinery as the certificate above, but the chaining is seeded at the
+-- DECLARATION'S observed result rather than the binding's own body. Pins the
+-- design's discriminating programs; the modality engine consumes this verdict in
+-- milestone 2. The residual-latent boundary (two fresh draws in one observed
+-- slot) is deliberately NOT this query's concern — the marginalize floor
+-- self-enforces it, so those cases assert only on the bound variable itself.
+witnessedBindingTests :: TestTree
+witnessedBindingTests = testGroup "ForwardChaining witnessed-binding query"
+  [ testCase "additive witness: x is recovered from the observed tuple" $
+      let (prog, fc) = prepTypedFC
+            "main = let x = Uniform in let y = x + Uniform in (x, y)"
+      in assertBool "x should be witnessed via fst"
+           (isWitnessedLambda fc (adts prog) (declRootCN "main" prog) (letLambdaCN "x" prog))
+  , testCase "multiplicative witness: x is recovered from the observed tuple" $
+      let (prog, fc) = prepTypedFC
+            "main = let x = Uniform in let y = x * Uniform in (x, y)"
+      in assertBool "x should be witnessed via fst"
+           (isWitnessedLambda fc (adts prog) (declRootCN "main" prog) (letLambdaCN "x" prog))
+  , testCase "y-only: x is NOT witnessed (genuine convolution)" $
+      -- The load-bearing discriminator (investigation
+      -- fc-recovers-capability-marginalize-floors): observing only y = x + u2
+      -- gives one equation for two fresh draws, so x must not be witnessed.
+      let (prog, fc) = prepTypedFC
+            "main = let x = Uniform in let y = x + Uniform in y"
+      in assertBool "x must not be witnessed from y alone"
+           (not (isWitnessedLambda fc (adts prog) (declRootCN "main" prog) (letLambdaCN "x" prog)))
+  , testCase "y-only: the y-binding itself IS witnessed (why x is the discriminator)" $
+      -- y equals the observation, so the y-binding is trivially recoverable in
+      -- both programs — consulting it cannot separate the witness from the
+      -- convolution. Pins why milestone 2 must key on the x-binding's verdict.
+      let (prog, fc) = prepTypedFC
+            "main = let x = Uniform in let y = x + Uniform in y"
+      in assertBool "y is the observed value itself"
+           (isWitnessedLambda fc (adts prog) (declRootCN "main" prog) (letLambdaCN "y" prog))
+  , testCase "two residual latents: x itself is still witnessed (floor guards the rest)" $
+      -- x is observed directly via fst, so THIS query answers True; keeping the
+      -- program at Bottom is the marginalize floor's job (u2 + u3 in one slot),
+      -- pinned in TestModalityInfer's permanent guards.
+      let (prog, fc) = prepTypedFC
+            "main = let x = Uniform in (x, x + Uniform + Uniform)"
+      in assertBool "x is observed directly"
+           (isWitnessedLambda fc (adts prog) (declRootCN "main" prog) (letLambdaCN "x" prog))
+  , testCase "let-chain: the observation reaches x through chained equivalences" $
+      -- Confirms the per-let verdict suffices for the let-chains-feeding-output
+      -- shape (milestone 1's open question): the observed tuple chains through
+      -- z and y back to x.
+      let (prog, fc) = prepTypedFC
+            "main = let x = Uniform in let y = x + Uniform in let z = 2.0 * y in (x, z)"
+      in assertBool "x should be witnessed through the chain"
+           (isWitnessedLambda fc (adts prog) (declRootCN "main" prog) (letLambdaCN "x" prog))
+  , testCase "let under a many-to-one context: witnessed says False where the certificate says True" $
+      -- The seeding difference that makes this query honest: the let's body
+      -- (x + 1.0) would recover x if it were observed, but the enclosing (> 0.5)
+      -- is many-to-one, so the declaration's observation witnesses nothing.
+      let (prog, fc) = prepTypedFC
+            "main = (let x = Uniform in x + 1.0) > 0.5"
+          lamCN = letLambdaCN "x" prog
+      in do assertBool "own-body certificate claims invertibility"
+              (isInvertibleLambda fc (adts prog) lamCN)
+            assertBool "observation-seeded query must not"
+              (not (isWitnessedLambda fc (adts prog) (declRootCN "main" prog) lamCN))
+  ]
+
+-- | Runtime ANY-refusal guard (design modality-witnessed-inference, §ANY —
+-- the milestone-3 remainder). ANY in the slot that witnesses a let binding
+-- means the binding is unobserved. When it is a sink (single occurrence, no
+-- downstream randomness) the marginal is free — pinned in the letWitnessed*
+-- .tst cases. Otherwise the marginal is a convolution the engine cannot
+-- compute, and the compiled probability code must refuse with a diagnostic —
+-- never crash on VAny arithmetic, never return a silent 1.0.
+anyRefusalTests :: TestTree
+anyRefusalTests = testGroup "witnessed-inference ANY refusal"
+  [ testCase "ANY in the witnessing slot of the additive witness refuses, naming x" $
+      expectMarginalRefusal
+        "main = let x = Uniform in let y = x + Uniform in (x, y)"
+        (VTuple VAny (VFloat 1.0)) "x"
+  , testCase "ANY in the witnessing slot of the multiplicative witness refuses, naming x" $
+      expectMarginalRefusal
+        "main = let x = Uniform in let y = x * Uniform in (x, y)"
+        (VTuple VAny (VFloat 0.25)) "x"
+  , testCase "mid-chain ANY with an observed dependent slot refuses, naming y" $
+      -- z = y + u3 is observed, so recovering u3 needs y's value: a genuine
+      -- convolution. The guard must fire at the y-binding, not crash at the
+      -- z-binding's inverse arithmetic.
+      expectMarginalRefusal
+        "main = let x = Uniform in let y = x + Uniform in let z = y + Uniform in (x, (y, z))"
+        (VTuple (VFloat 0.5) (VTuple VAny (VFloat 1.5))) "y"
+  ]
+
+expectMarginalRefusal :: String -> IRValue -> String -> IO ()
+expectMarginalRefusal src sample var = do
+  let prog = either (\e -> error ("parse failed: " ++ show e)) id (tryParseProgram "test" src)
+  r <- try (case runProb defaultCompilerConfig prog [] sample of
+              Left cerr -> return (Left cerr)
+              Right v   -> evaluate (length (show v)) >> return (Right v))
+  case r of
+    Left (ErrorCall msg) -> do
+      assertBool ("expected the marginal-refusal diagnostic, got: " ++ msg)
+        ("cannot compute marginal" `isInfixOf` msg)
+      assertBool ("diagnostic should name the binding '" ++ var ++ "', got: " ++ msg)
+        (("'" ++ var ++ "'") `isInfixOf` msg)
+    Right (Left cerr) -> assertFailure ("expected runtime refusal, got compile error: " ++ show cerr)
+    Right (Right v) -> assertFailure ("expected runtime refusal, got value: " ++ show v)
+
+-- | Enum annotation must not offer enumeration for a MultiValue containing a
+-- continuous (Real) leaf: enumerating it would walk only the discrete residue
+-- (e.g. just the Left values of ([0,1] | Real)) and silently drop the
+-- continuous probability mass. annotateEnumsProg declines to tag such neurals,
+-- the same treatment as a neural with no `of` annotation at all.
+enumTagsOf :: String -> [MultiValue]
+enumTagsOf src =
+  let prog = either (\e -> error ("parse failed: " ++ show e)) id (tryParseProgram "test" src)
+  in [mv | e <- allNodes (annotateEnumsProg prog), DiscreteValues mv <- tags (getTypeInfo e)]
+
+enumContinuousRefusalTests :: TestTree
+enumContinuousRefusalTests = testGroup "enum annotation refuses continuous leaves"
+  [ testCase "mixed Either ([0,1] | Real) gets no DiscreteValues tag" $
+      assertEqual "expected no tags" []
+        (enumTagsOf "neural f :: (Symbol -> Either Int Float) of ([0, 1] | Real)\nmain sym = f sym\n")
+  , testCase "pure Real gets no DiscreteValues tag" $
+      assertEqual "expected no tags" []
+        (enumTagsOf "neural f :: (Symbol -> Float) of Real\nmain sym = f sym\n")
+  , testCase "tuple with an auto-derived Float slot gets no DiscreteValues tag" $
+      -- '_' resolves to MultiContinuous for a Float slot, so the whole tuple
+      -- annotation must be declined, not enumerated as a residue.
+      assertEqual "expected no tags" []
+        (enumTagsOf "neural f :: (Symbol -> (Int, Float)) of ([0, 1], _)\nmain sym = f sym\n")
+  , testCase "pure discrete enumeration is still tagged" $
+      assertBool "expected DiscreteValues tags" (not (null
+        (enumTagsOf "neural f :: (Symbol -> Int) of [0, 1, 2]\nmain sym = f sym\n")))
+  , testCase "multiValueContainsContinuous finds nested leaves" $ do
+      assertBool "tuple/Either nesting" (multiValueContainsContinuous
+        (MultiTuple (MultiDiscretes [VInt 0]) (MultiEither (MultiDiscretes [VBool True]) MultiContinuous)))
+      assertBool "ADT field" (multiValueContainsContinuous
+        (MultiADT [("A", [MultiDiscretes [VInt 0]]), ("B", [MultiContinuous])]))
+      assertBool "pure discrete composite is clean" (not (multiValueContainsContinuous
+        (MultiTuple (MultiDiscretes [VInt 0]) (MultiADT [("A", [])]))))
+  ]
+
 internalsTests :: TestTree
 internalsTests = testGroup "Internals"
   [ testProperties "properties" $(allProperties)
   , classConstraintTests
+  , forwardChainingCertTests
+  , witnessedBindingTests
+  , anyRefusalTests
   , testGroup "encode"
       [ test_encodeTupleGaussianParams
       , test_encodeDiscreteSumsToOne
@@ -512,5 +740,6 @@ internalsTests = testGroup "Internals"
       ]
   , test_missingMainFunction
   , autoNeuralDerivationTests
+  , enumContinuousRefusalTests
   , test_tstBackendsHeader
   ]

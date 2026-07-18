@@ -5,6 +5,7 @@ module SPLL.AutoNeural(
 , makePartitionPlan
 , resolvePartitionAnnotation
 , PartitionPlan (..)
+, makeProb
 , getSize
 , planIndexOf
 , validateEncodeGaussian
@@ -191,11 +192,14 @@ makeProbRec :: [ADTDecl] -> PartitionPlan -> Int -> IRExpr -> (IRExpr, IRExpr, I
 makeProbRec adts (Discretes rty tag) ix sample = (noAny sample p, IRConst $ VFloat 0, IRConst (VFloat 0))
   where
     p = IRIndex (IRVar vector) (IROp OpPlus (indexOf tag sample) (IRConst (VInt ix)))
-makeProbRec adts Continuous ix sample = (noAny sample p, IRConst $ VFloat 0, IRConst (VFloat 0))
+makeProbRec adts Continuous ix sample = (noAny sample p, noAny0 sample (IRConst $ VFloat 1), IRConst (VFloat 0))
   where
-    p = IRDensity IRNormal (IROp OpSub
-          (IROp OpDiv sample (IRIndex (IRVar vector) (IRConst (VInt $ ix + 1))))
-          (IRIndex (IRVar vector) (IRConst (VInt ix))))
+    -- density of μ + σ·z at x: φ((x − μ)/σ)/σ, with μ = vec[ix], σ = vec[ix+1]
+    sigma = IRIndex (IRVar vector) (IRConst (VInt $ ix + 1))
+    mu = IRIndex (IRVar vector) (IRConst (VInt ix))
+    p = IROp OpDiv
+          (IRDensity IRNormal (IROp OpDiv (IROp OpSub sample mu) sigma))
+          sigma
 --Not entirely sure how to combine elements in the next case. For now:
 --  probabilities of the two tuple elements are multiplied.
 --  dims should be added.

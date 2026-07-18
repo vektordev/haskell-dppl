@@ -1,0 +1,54 @@
+-- ============================================================
+-- Behavioural freeze for examples/showcase.ppl
+-- ============================================================
+-- Each line pins the inference result of ONE named top-level
+-- definition, driven directly by name (see test/TestShowcase.hs).
+-- Unlike a single-`main` router, the lines are independent: adding
+-- a definition here adds one anchor without disturbing the others.
+--
+-- Format:
+--   <def>[(<arg>, ...)]  p(<sample>)   = <expected>   -- probability mode
+--   <def>[(<arg>, ...)]  cdf(<sample>) = <expected>   -- cumulative mode
+--
+-- The expected value is the probability component (the dim/mass
+-- component is not frozen). Values are compared with probTolerance.
+-- Only definitions that compile in the queried mode may appear here;
+-- parse-only demos (e.g. locScale) are intentionally absent.
+-- ============================================================
+
+-- Primitive distributions
+stdNormal    p(0.0) = 0.3989422804014327
+uniform01    p(0.5) = 1.0
+
+-- Let-in bindings (single-use stochastic / deterministic reuse / destructuring)
+shiftedSample p(1.5) = 1.0
+reuseConst    p(3.0) = 0.5
+pairSum       p(3.5) = 1.0
+
+-- Lambda expressions
+shifted       p(1.5) = 1.0
+applyStored   p(1.0) = 0.5
+
+-- Injected library functions
+negUniform    p(-0.5) = 1.0
+expNormal     p(1.0)  = 0.3989422804014327
+firstOfPair   p(0.0)  = 0.3989422804014327
+secondOfPair  p(1.0)  = 0.5
+unwrapped     p(0.0)  = 0.3989422804014327
+
+-- Comparison / logic (Bool-valued, discrete mass)
+bothLow       p(True) = 0.2
+eitherLow     p(True) = 0.8000000000000002
+notHigh       p(True) = 0.30000000000000004
+
+-- Argument-taking definitions (args in parentheses after the name)
+bernoulli(0.7)   p(1.0)  = 0.7
+subtract1(3.0)   p(2.0)  = 1.0
+shiftDown(1.0)   p(0.5)  = 1.0
+atLeastHalf(0.7) p(True) = 1.0
+clamp01(0.5)     p(0.5)  = 1.0
+
+-- Cumulative mode (cdf) anchors
+stdNormal     cdf(0.0) = 0.5
+uniform01     cdf(0.5) = 0.5
+shiftedSample cdf(1.5) = 0.5

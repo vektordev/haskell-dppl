@@ -28,11 +28,14 @@ module SPLL.Lang.Lang (
 , isNotTheta
 , constructVList
 , multiValueToValueList
+, multiValueContainsContinuous
 , valueListToMultiValue
 , valueInMultiValue
 , unionMultiValues
 , autoDeriveMultiValue
 , resolveMultiAuto
+, resolveMultiValueTypeDecl
+, containsMultiValueTypeRef
 , neuralValueType
 , elementAt
 , getFunctionNames
@@ -249,6 +252,21 @@ multiValueToValueList (MultiADT constrs) = concatMap (\(cn, fieldCombos) -> map 
   where allFieldCombinations = sequence . map multiValueToValueList
         constrFieldCombinations = map (Bifunctor.second allFieldCombinations) constrs
 
+-- | True if the MultiValue has a continuous (Real) leaf anywhere. Such a value set
+-- has no finite enumeration: 'multiValueToValueList' would yield only its discrete
+-- residue, so enum-based inference must never be offered for it (the enum-annotation
+-- pass declines to tag it, and 'isEnumerable' in the IRCompiler refuses it).
+-- 'MultiTypeRef' is resolved away before MultiValues reach tags, so it is structural
+-- here; 'MultiAuto' must likewise be resolved before asking.
+multiValueContainsContinuous :: MultiValue -> Bool
+multiValueContainsContinuous MultiContinuous = True
+multiValueContainsContinuous (MultiDiscretes _) = False
+multiValueContainsContinuous (MultiTuple a b) = multiValueContainsContinuous a || multiValueContainsContinuous b
+multiValueContainsContinuous (MultiEither a b) = multiValueContainsContinuous a || multiValueContainsContinuous b
+multiValueContainsContinuous (MultiADT constrs) = any (any multiValueContainsContinuous . snd) constrs
+multiValueContainsContinuous (MultiTypeRef _) = False
+multiValueContainsContinuous MultiAuto = False
+
 valueListToMultiValue :: [Value] -> MultiValue
 valueListToMultiValue lst@((VEither _):_) | all isVEither lst = MultiEither lVals rVals
   where
@@ -304,11 +322,25 @@ autoDeriveMultiValue adts (TEither a b) = MultiEither <$> autoDeriveMultiValue a
 autoDeriveMultiValue adts (TADT name) = case find ((== name) . dataName) adts of
   Nothing -> Left ("unknown ADT '" ++ name ++ "' referenced in neural declaration")
   Just adt
-    | any (any ((== TADT name) . snd) . snd) (constructors adt) ->
-        Left ("cannot auto-derive recursive ADT '" ++ name ++ "' - specify a depth-limited MultiValue explicitly, e.g. <depth>x." ++ name ++ ".{...}")
+    | isRecursive adt -> case adtDepth adt of
+        -- A recursive type auto-derives to its declared default depth: build the
+        -- constructor set with a MultiTypeRef at each self-referential field, then
+        -- unroll it with the shared resolver (same one the explicit `of Nx.{...}`
+        -- form uses). Without a depth there is no finite enumeration to derive.
+        Just d  -> do
+          body <- MultiADT <$> mapM deriveConstructorRec (constructors adt)
+          return (resolveMultiValueTypeDecl d body (name, body))
+        Nothing -> Left ("cannot auto-derive recursive ADT '" ++ name ++ "' without a recursion depth - add `depth N` to its `data` declaration, or give a depth-limited MultiValue explicitly, e.g. 3x." ++ name ++ ".{...}")
     | otherwise -> MultiADT <$> mapM deriveConstructor (constructors adt)
   where
+    isRecursive adt = any (any ((== TADT name) . snd) . snd) (constructors adt)
     deriveConstructor (cName, fields) = (,) cName <$> mapM (autoDeriveMultiValue adts . snd) fields
+    -- A directly self-referential field becomes a MultiTypeRef for the unroller;
+    -- every other field auto-derives as usual. (Only direct recursion is detected;
+    -- nested `ListOf (TADT name)` or mutual recursion still needs an explicit `of`.)
+    deriveConstructorRec (cName, fields) = (,) cName <$> mapM deriveField fields
+    deriveField (_, TADT n) | n == name = Right (MultiTypeRef name)
+    deriveField (_, ft)                 = autoDeriveMultiValue adts ft
 autoDeriveMultiValue _ ty = Left ("cannot auto-derive a MultiValue for type " ++ show ty ++ " - specify it explicitly")
 
 -- | Resolve "_" (MultiAuto) placeholders within a (possibly partial) MultiValue annotation,
@@ -324,6 +356,38 @@ resolveMultiAuto adts (TADT name) (MultiADT cs) = MultiADT (map resolveConstr cs
       Nothing -> []
     resolveConstr (cn, mvs) = (cn, zipWith (resolveMultiAuto adts) (fromMaybe [] (lookup cn fieldTypes)) mvs)
 resolveMultiAuto _ _ mv = mv
+
+-- | Unroll a recursive MultiValue to a finite depth. The @(String, MultiValue)@
+-- pair is the recursion binder: every 'MultiTypeRef' whose name matches is
+-- replaced by the binder's body and the depth decremented. At depth 1 the
+-- constructors that would recurse again are dropped; at 0 there is nothing left
+-- to unroll. Used by both the explicit @of Nx.{...}@ clause (Parser) and the
+-- auto-derivation of a depth-annotated @data@ type ('autoDeriveMultiValue').
+resolveMultiValueTypeDecl :: Int -> MultiValue -> (String, MultiValue) -> MultiValue
+resolveMultiValueTypeDecl 0 (MultiTypeRef _) _ = error "Cannot recurse, no depth left"
+resolveMultiValueTypeDecl 1 (MultiTypeRef _) (declName, MultiADT constrs) = MultiADT (filter (\(_, args) -> not $ any (containsMultiValueTypeRef declName) args) constrs)
+resolveMultiValueTypeDecl depthLeft (MultiTypeRef refName) decl@(declName, declVal) | declName == refName = resolveMultiValueTypeDecl (depthLeft - 1) declVal decl
+resolveMultiValueTypeDecl _ (MultiDiscretes d) _ = MultiDiscretes d
+resolveMultiValueTypeDecl _ MultiContinuous _ = MultiContinuous
+resolveMultiValueTypeDecl _ MultiAuto _ = MultiAuto
+resolveMultiValueTypeDecl depthLeft (MultiTuple l r) decl =
+  MultiTuple (resolveMultiValueTypeDecl depthLeft l decl)
+             (resolveMultiValueTypeDecl depthLeft r decl)
+resolveMultiValueTypeDecl depthLeft (MultiEither l r) decl =
+  MultiEither (resolveMultiValueTypeDecl depthLeft l decl)
+              (resolveMultiValueTypeDecl depthLeft r decl)
+resolveMultiValueTypeDecl depthLeft (MultiADT cons) decl =
+  MultiADT [(cname, map (\mv -> resolveMultiValueTypeDecl depthLeft mv decl) args) |
+            (cname, args) <- cons]
+
+containsMultiValueTypeRef :: String -> MultiValue -> Bool
+containsMultiValueTypeRef _ (MultiDiscretes _) = False
+containsMultiValueTypeRef _ MultiContinuous = False
+containsMultiValueTypeRef _ MultiAuto = False
+containsMultiValueTypeRef n (MultiTypeRef m) = n == m
+containsMultiValueTypeRef n (MultiEither l r) = containsMultiValueTypeRef n l || containsMultiValueTypeRef n r
+containsMultiValueTypeRef n (MultiTuple l r) = containsMultiValueTypeRef n l || containsMultiValueTypeRef n r
+containsMultiValueTypeRef n (MultiADT constrs) = any (\(_, args) -> any (containsMultiValueTypeRef n) args) constrs
 
 -- | The output (target) RType of a Decoder neural declaration's "Symbol -> target" arrow
 -- type - i.e. the type a NeuralDecl's MultiValue annotation describes.  The (source ->
@@ -372,7 +436,7 @@ prettyPrintProgCustomTI :: (TypeInfo -> String) -> Program -> [String]
 prettyPrintProgCustomTI fn (Program decls neurals adts _) = concatMap prettyPrintADTs adts ++  concatMap (prettyPrintDecl fn) decls ++ concatMap prettyPrintNeural neurals
 
 prettyPrintADTs :: ADTDecl  -> [String]
-prettyPrintADTs ADTDecl{dataName=name, constructors=constr} = ("data " ++ name ++ "::"):map (\rts -> "\n|"++ show rts) constr
+prettyPrintADTs ADTDecl{dataName=name, constructors=constr, adtDepth=d} = ("data " ++ name ++ "::" ++ maybe "" (\n -> " depth " ++ show n) d):map (\rts -> "\n|"++ show rts) constr
 
 prettyPrintNeural :: NeuralDecl -> [String]
 prettyPrintNeural (name, ty, range) = l1:l2:(l3 range):[]

@@ -6,26 +6,48 @@ module SPLL.Typing.ForwardChaining
   , annotateProg
   , progToFCData
   , toInvExpr
+  , toInvExprMaybe
+  , toSeededInvExpr
+  , toSeededMonotoneInvExpr
+  , Monotonicity(..)
+  , isInvertibleLambda
+  , isWitnessedLambda
   , findEquivalentExpression
   , findExprWithCN
   , unwrapLambdas
+  , untag
   ) where
 import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
 import Data.Functor ((<&>))
 import SPLL.Lang.Lang
 import PredefinedFunctions
-import Data.List (delete, nub, intercalate)
+import Data.List (nub, intercalate)
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Maybe
 import SPLL.Typing.Typing (setChainName)
 import Data.Foldable
-import Debug.Trace
 import Utils
 import SPLL.Typing.RType
 
 
 
-data FCData = FCData {hornClauses :: [[HornClause]], chainNameInfo :: [(ChainName, ExprInfo)]}
+data FCData = FCData
+  { hornClauses :: [[HornClause]]
+  , chainNameInfo :: [(ChainName, ExprInfo)]
+  -- | The determinism field's known-anchor set seeded into 'hornClauses'. Kept
+  -- around so codegen (IRCompiler) can materialise the value of any non-constant
+  -- anchor a forward-chaining inverse path lands on.
+  , fcAnchors :: Set ChainName
+  -- | For every Lambda node (keyed by its chain name): the occurrences of ITS
+  -- bound variable inside its own body, shadowing-aware. Occurrence lookup must
+  -- be scoped like this: a global by-name search would pick up same-named
+  -- variables bound by unrelated lambdas elsewhere in the program, and anchor
+  -- seeding can make those foreign occurrences solvable, yielding an inverse
+  -- built from another function's material.
+  , lambdaVarOccurrences :: [(ChainName, [ChainName])]
+  }
 
 -- Information on what type of expression a HornClause originated from
 data ExprInfo = StubInfo ExprStub   -- Generic Expression without additional Info
@@ -78,33 +100,128 @@ isAppliedEquivalence :: EquivalenceType -> Bool
 isAppliedEquivalence AppliedEquivalence = True
 isAppliedEquivalence _ = False
 
+-- The forward-chaining setup shared by the invertibility certificate
+-- ('isInvertibleLambda') and the inverse codegen ('toInvExpr'), so the two can
+-- never disagree about which lambdas invert. For the lambda resolved from a
+-- chain name it returns: the bound variable's name, the chain names of every
+-- occurrence of that variable inside the body (the points we try to solve for),
+-- and the ParameterHornClause declaring the observed body known. 'Nothing' when
+-- the chain name does not resolve to a lambda.
+inversionSetup :: FCData -> ChainName -> Maybe (String, [ChainName], HornClause)
+inversionSetup fcData lambdaCN = do
+  (resolvedCN, info, tag) <- findEquivalentExpression fcData lambdaCN
+  case info of
+    -- If the lambda is applied multiple times, @tag@ uniquely identifies our
+    -- application; it suffixes both the occurrences and the observed body.
+    LambdaInfo toInvVarName lambdaBodyCN ->
+      case fromMaybe [] (lookup resolvedCN (lambdaVarOccurrences fcData)) of
+        -- A dead binding (no occurrence of the bound variable) has nothing to
+        -- invert through: not an invertible/witnessable lambda.
+        []   -> Nothing
+        occs ->
+          let toInvCNs = map (++ tag) occs
+              -- If the function being inverted is itself a function, strip the
+              -- additional lambdas; those are re-added by the caller around the
+              -- whole inference function (the inverse is only a part of it).
+              (unwrappedChainName, _) = unwrapLambdas fcData lambdaBodyCN
+              paramClause = ParameterHornClause (unwrappedChainName ++ tag)
+          in Just (toInvVarName, toInvCNs, paramClause)
+    _ -> Nothing
+
+-- | Invertibility certificate (modality stage 2): is the variable bound by the
+-- lambda at this chain name algebraically recoverable from the known anchors and
+-- the observed body? The IR realisation that shares the very same 'FCData' is
+-- 'toInvExpr', so the certificate and the codegen can never disagree.
+-- (Finiteness/preimage of the recovered value is the orthogonal DiscreteValues
+-- axis — Fin in the design — not a FC concern.)
+--
+-- NOTE: the modality engine does not consult this verdict today — the shipped
+-- engine's marginalize+Fin lattice reproduces it on the current corpus, so the
+-- only consumers are the tests (investigation
+-- fc-recovers-capability-marginalize-floors scoped that finding to the corpus).
+-- The engine-facing variant that the witnessed-inference feature wires in is
+-- 'isWitnessedLambda' (design modality-witnessed-inference, milestone 2).
+isInvertibleLambda :: FCData -> [ADTDecl] -> ChainName -> Bool
+isInvertibleLambda fcData adts lambdaCN = case inversionSetup fcData lambdaCN of
+  Just (_, toInvCNs, paramClause) ->
+    any (isJust . toValueExpr (hornClauses fcData) [paramClause] adts) toInvCNs
+  Nothing -> False
+
+-- | Witnessed-binding query (design modality-witnessed-inference, milestone 1):
+-- is the variable bound by the lambda at @lambdaCN@ algebraically recoverable
+-- when @obsCN@ — not the lambda's own body — is the observed value?
+--
+-- This differs from 'isInvertibleLambda' only in the seed of the chaining: the
+-- certificate observes the binding's own body, which for a let nested under a
+-- non-invertible context over-claims (the body is not actually observed there).
+-- Seeding at the declaration's observed result instead makes the verdict honest
+-- for the let-chains-feeding-output shape: the observation reaches the let body
+-- through Apply/variable equivalences exactly when the surrounding context
+-- preserves it. Pass the declaration root's chain name as @obsCN@; wrapping
+-- lambdas (a function declaration's parameters) are stripped, mirroring
+-- 'inversionSetup', because the observation is the applied function's result.
+--
+-- The verdict is per-binding: a True here says only that THIS bound variable is
+-- recoverable from the observation. Whether the residual fresh latents of the
+-- body are also single-witnessable is the modality engine's marginalize floor's
+-- concern (milestone 2), not this query's.
+isWitnessedLambda :: FCData -> [ADTDecl] -> ChainName -> ChainName -> Bool
+isWitnessedLambda fcData adts obsCN lambdaCN = case inversionSetup fcData lambdaCN of
+  Just (_, toInvCNs, _) ->
+    let (unwrappedObsCN, _) = unwrapLambdas fcData obsCN
+        obsClause = ParameterHornClause unwrappedObsCN
+    in any (isJust . toValueExpr (hornClauses fcData) [obsClause] adts) toInvCNs
+  Nothing -> False
+
 -- Takes the chainName of a function (May be a lambda, a variable, an Apply ...) and returns the inverse function of that lambda together with the derivative of the inverse
 toInvExpr :: FCData -> [ADTDecl] -> ChainName -> (IRExpr, IRExpr)
---toInvExpr fcData adts startCN | trace (showClauseGroups (hornClauses fcData)) False = undefined
 toInvExpr fcData adts lambdaCN = (mergedM, mergedCoV)
   where
     clauseSet = hornClauses fcData
-    -- Find the declaration of the lambda, which we want to invert. 
-    -- If the lambda is applied multiple times, we also find the tag that uniquely identifies our application
-    Just (_, LambdaInfo toInvVarName lambdaBodyCN, tag) = findEquivalentExpression fcData lambdaCN
-    -- Find the occurances of the variable bound by the lambda inside of the lambda. These are the points we want to find the values of
-    -- If the variable occurs multiple times, we try to find values of all occurances and merge the expressions, because they may contain complementing information
-    toInvCNs = map (++tag) (findChainNamesForVar fcData toInvVarName)
-    -- If the function we want to invert is itself a function, we strip the additional lambdas. They need to be added back later, which is not done by this function
-    -- It cannot be done in here, because the the lambdas need to be wrapped around the inference function, of which the inverse is only a part of
-    (unwrappedChainName, _) = unwrapLambdas fcData lambdaBodyCN
-    -- Declare the top level expression of the lambda body as known
-    paramClause = ParameterHornClause (unwrappedChainName ++ tag)
-    -- Create the expression that calculates toInvCN
+    (toInvVarName, toInvCNs, paramClause) = case inversionSetup fcData lambdaCN of
+      Just x  -> x
+      Nothing -> error $ "toInvExpr: chain name does not resolve to an invertible lambda: " ++ lambdaCN
+    -- Create the expression that calculates each occurrence; merge those that
+    -- carry complementary information.
     valueExprs = mapMaybe (toValueExpr clauseSet [paramClause] adts) toInvCNs
-    -- Merge expression, which contain complementary information
     (mergedM, mergedCoV) = mergeExpr toInvVarName lambdaCN toInvCNs valueExprs
+
+-- | 'toInvExpr' with a recoverable outcome: Nothing when no occurrence of the
+-- bound variable yields an inversion path (where 'toInvExpr' dies in
+-- 'mergeExpr'). The set-valued witness fallback in IRCompiler dispatches on
+-- this instead of the hard error.
+toInvExprMaybe :: FCData -> [ADTDecl] -> ChainName -> Maybe (IRExpr, IRExpr)
+toInvExprMaybe fcData adts lambdaCN = do
+  (toInvVarName, toInvCNs, paramClause) <- inversionSetup fcData lambdaCN
+  case mapMaybe (toValueExpr (hornClauses fcData) [paramClause] adts) toInvCNs of
+    []  -> Nothing
+    ves -> Just (mergeExpr toInvVarName lambdaCN toInvCNs ves)
+
+-- | Point-inversion of the chain from an arbitrary observed node (@seedCN@)
+-- down to one occurrence of a witnessed variable (@occCN@). The returned
+-- expressions have @seedCN@ as their free variable. This is the machinery of
+-- 'isWitnessedLambda' exposed for codegen: the set-valued witness fallback
+-- inverts if-branches and comparison operands from their own roots rather than
+-- from the lambda body.
+toSeededInvExpr :: FCData -> [ADTDecl] -> ChainName -> ChainName -> Maybe (IRExpr, IRExpr)
+toSeededInvExpr fcData adts seedCN occCN =
+  toValueExpr (hornClauses fcData) [ParameterHornClause seedCN] adts occCN
 
 -- Performs forward chaining to create an expression, which calculates the value of a specific point in the AST given a set of parameter points in the AST.
 -- Also returns the derivative of that expression
 toValueExpr :: [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> Maybe (IRExpr, IRExpr)
---toValueExpr clauses paramClauses adts startCN | trace (startCN ++ " || " ++ show clauses) False = undefined
-toValueExpr clauses paramClauses adts startCN =
+toValueExpr clauses paramClauses adts startCN = do
+  relevantSortedClauses <- toValuePath clauses paramClauses startCN
+  -- Calculate the symbolic derivative
+  let deriv = derivativeOfPath adts relevantSortedClauses
+  -- Generate code
+  Just (toLetInBlock clauses adts relevantSortedClauses, wrapInLetInBlock clauses adts relevantSortedClauses deriv)
+
+-- The clause-path core of 'toValueExpr': the topologically sorted, fulfilled
+-- clauses up to (and including) the one concluding @startCN@, or Nothing when
+-- forward chaining never derives it.
+toValuePath :: [[HornClause]] -> [HornClause] -> ChainName -> Maybe [HornClause]
+toValuePath clauses paramClauses startCN =
   case findConcludingHornClause solvedClauses startCN of
     Just concludingClause -> do
       -- Throw away superfluous clauses. Do this by sorting them by requirement
@@ -112,16 +229,93 @@ toValueExpr clauses paramClauses adts startCN =
       -- Also guarantees that the later generated letIns are in the correct order
       -- This may still contain some superflous clauses, but they can easily be detected by an optimizer
       let sortedClauses = topSortDAG solvedClauses
-      let relevantSortedClauses = cutList sortedClauses concludingClause
-      -- Calculate the symbolic derivative
-      let deriv = derivativeOfPath adts relevantSortedClauses
-      -- Generate code
-      Just (toLetInBlock clauses adts relevantSortedClauses, wrapInLetInBlock clauses adts relevantSortedClauses deriv)
+      Just (cutList sortedClauses concludingClause)
     Nothing -> Nothing
   where
     augmentedClauseSet = map (:[]) paramClauses ++ clauses
     -- Solve the set of Horn clauses for clauses which are fulfilled
     solvedClauses = solveHCSet augmentedClauseSet
+
+-- | Whether the inverse chain seed→occurrence is monotone increasing or
+-- decreasing, statically.
+data Monotonicity = MonInc | MonDec deriving (Eq, Show)
+
+-- | Like 'toSeededInvExpr', but for transporting an *interval* constraint
+-- instead of a point: returns the inverse g (free variable @seedCN@) together
+-- with a static monotonicity certificate. g monotone means g maps intervals to
+-- intervals, with the endpoints swapped iff 'MonDec' — so
+-- @seed ∈ [lo,hi] ⟺ occ ∈ [g lo, g hi]@ (resp. @[g hi, g lo]@). No Jacobian is
+-- returned: interval mass needs no change-of-variables correction. Nothing when
+-- there is no path or when a step on the value-carrying spine has no statically
+-- known direction (e.g. multiplication by a non-literal operand) or is not a
+-- scalar monotone float function at all.
+toSeededMonotoneInvExpr :: FCData -> [ADTDecl] -> ChainName -> ChainName -> Maybe (IRExpr, Monotonicity)
+toSeededMonotoneInvExpr fcData adts seedCN occCN = do
+  let clauses = hornClauses fcData
+  path <- toValuePath clauses [ParameterHornClause seedCN] occCN
+  spine <- chainSpine fcData path seedCN occCN
+  dirs <- mapM (stepMonotonicity fcData) spine
+  let dir = if odd (length (filter (== MonDec) dirs)) then MonDec else MonInc
+  return (toLetInBlock clauses adts path, dir)
+
+-- The value-carrying spine of an inversion path: walking from the occurrence
+-- back towards the seed, at each step the clause concluding the current node
+-- and then its "parent" premise — the one holding the observed value flowing
+-- down. Side computations (deriving the other operands) are not on the spine
+-- and cannot affect monotonicity. Nothing when a spine step's parent cannot be
+-- identified.
+chainSpine :: FCData -> [HornClause] -> ChainName -> ChainName -> Maybe [HornClause]
+chainSpine fcData path seedCN = go
+  where
+    go cn
+      | cn == seedCN = Just []
+      | otherwise = case findConcludingHornClause path cn of
+          Nothing -> Just []  -- reached a self-sufficient start (parameter/anchor)
+          Just (ParameterHornClause _) -> Just []
+          Just c  -> do
+            parent <- spineParent fcData c
+            rest <- go parent
+            return (c : rest)
+
+-- The premise of a clause that carries the observed value. For an equivalence
+-- it is the single premise; for an InjF inverse it is the conclusion of the
+-- clause group's forward sibling (the node the inverted function computed) —
+-- premise ORDER is not a reliable indicator, the forward output sits at
+-- different positions in different inverse FDecls.
+spineParent :: FCData -> HornClause -> Maybe ChainName
+spineParent _ (EquivalenceHornClause [p] _ _ _) = Just p
+spineParent _ (ExprHornClause [p] _ _ _) = Just p
+spineParent fcData c@(ExprHornClause pres _ (InjFInfo _) inv) | inv > 0 = do
+  grp <- find (c `elem`) (hornClauses fcData)
+  fwd <- find (\cl -> isExprHornClause cl && inversion cl == 0) grp
+  let parent = conclusion fwd
+  if parent `elem` pres then Just parent else Nothing
+spineParent _ _ = Nothing
+
+-- Static monotonicity of one spine step, in its value-carrying argument.
+-- Conservative: any InjF without an entry here fails the whole transport.
+stepMonotonicity :: FCData -> HornClause -> Maybe Monotonicity
+stepMonotonicity _ (EquivalenceHornClause {}) = Just MonInc
+stepMonotonicity fcData c@(ExprHornClause pres _ (InjFInfo name) inv) | inv > 0 =
+  case name of
+    "plus"   -> Just MonInc   -- subtract the other operand
+    "double" -> Just MonInc
+    "exp"    -> Just MonInc   -- inverse is log
+    "log"    -> Just MonInc   -- inverse is exp
+    "neg"    -> Just MonDec
+    "mult"   -> do
+      -- divide by the other operand: direction is the sign of that operand,
+      -- known statically only when it is a literal constant.
+      parent <- spineParent fcData c
+      case filter (/= parent) pres of
+        [other] -> case lookup (untag other) (chainNameInfo fcData) of
+          Just (ConstantInfo (VFloat f))
+            | f > 0 -> Just MonInc
+            | f < 0 -> Just MonDec
+          _ -> Nothing
+        _ -> Nothing
+    _ -> Nothing
+stepMonotonicity _ _ = Nothing
 
 -- Takes a chain name of a point in the AST and finds the lambda, this point is equivalent to.
 -- Also return the uniquely identifying tag if the lambda is tagged
@@ -146,14 +340,19 @@ findEquivalentExpression fcData startCN = go [startCN] startCN
     isFinalExpr (VarInfo _) = False
     isFinalExpr _ = True
 
-findChainNamesForVar :: FCData -> String -> [ChainName]
-findChainNamesForVar fcData varName = case correctVarInfos of
-  [] -> error $ "Could not find variable " ++ varName ++ " in FC data"
-  x -> map fst x
+-- Build the 'lambdaVarOccurrences' map for a whole program: every Lambda node
+-- paired with the (shadowing-aware) occurrences of its bound variable in its
+-- own body. Empty for a dead binding — the caller decides; 'inversionSetup'
+-- answers Nothing there.
+progToLambdaVarOccurrences :: Program -> [(ChainName, [ChainName])]
+progToLambdaVarOccurrences Program{functions=fs} = concatMap (go . snd) fs
   where
-    correctVarInfos = filter (isCorrectVarInfo varName . snd) (chainNameInfo fcData)
-    isCorrectVarInfo name (VarInfo n) | name == n = True
-    isCorrectVarInfo _ _ = False
+    go e@(Lambda TypeInfo{chainName=cn} n body) =
+      (cn, varOccurrences n body) : concatMap go (getSubExprs e)
+    go e = concatMap go (getSubExprs e)
+    varOccurrences n (Var TypeInfo{chainName=cn} m) | m == n = [cn]
+    varOccurrences n (Lambda _ m _) | m == n = []  -- shadowed; don't descend
+    varOccurrences n e = concatMap (varOccurrences n) (getSubExprs e)
 
 -- Strip the expression of all wrapping lambdas. Return the chain name of the resulting expression and all names of the bound variables stripped away
 unwrapLambdas :: FCData -> ChainName -> (ChainName, [String])
@@ -165,7 +364,13 @@ unwrapLambdas fcData cn = case lookup cn (chainNameInfo fcData) of
 -- This takes a list of value expressions and merges then such that in tuple constructions a existing value overwrites an ANY.
 -- If two paths provide information for the same part of the tuple, we discard the second, because the should be semantically equal and therefor redundant
 -- We also assume that the different paths do not have conflicting LetIns
--- FIXME: Implement Gramian Matrix correctly, instead of multiplying all together
+-- The covariance factors are multiplied only in the two disjoint-tuple-slot
+-- merges below (each path fills one component, the other ANY). Disjoint
+-- components are independent coordinates, so the Jacobian is block-diagonal and
+-- its determinant IS that product — the correct Gramian for this shape. Any other
+-- merge takes the first path's covariance (semantically-equal values, one
+-- Jacobian), never a product. Proven sound by investigation
+-- forward-chaining-math-correctness.
 -- The first three arguments are purely diagnostic context for the failure case below:
 -- the name of the variable being witnessed, the chain name of the lambda being inverted,
 -- and the candidate occurrences (chain names) that were attempted and yielded no path.
@@ -230,14 +435,17 @@ hornClauseToIRExpr _ adts clause =
 
 -- Finds the first horn clause in a list that has a given conclusion
 findConcludingHornClause :: [HornClause] -> ChainName -> Maybe HornClause
---findConcludingHornClause hcs cn | trace ("Find " ++ cn ++ " in " ++ show hcs) False = undefined
 findConcludingHornClause hcs cn =
   case filter ((== cn) . conclusion) hcs of
     [] -> Nothing
     res -> Just $ head res
 
--- We usually get away with simply multiplying here, because we only have the variable we differentiate toward once in an expression
--- I honsetly have no idea, why this works so well. TODO: Proof It works in all cases
+-- An FC inversion path is a linear chain of single-input invertible steps, and
+-- the witnessed variable flows through it exactly once (a step with two
+-- un-witnessed random inputs has no inversion clause and never enters a path).
+-- So this product of per-step inverse derivatives IS the chain rule
+-- d/dx g(h(x)) = g'(h(x))·h'(x), i.e. the full path Jacobian — proven sound under
+-- that structural constraint by investigation forward-chaining-math-correctness.
 derivativeOfPath :: [ADTDecl] -> [HornClause] -> IRExpr
 derivativeOfPath adts clauses = foldr1 (IROp OpMult) derivs
   where derivs = map (derivativeOfHornClause adts) clauses
@@ -253,9 +461,39 @@ derivativeOfHornClause adts (ExprHornClause pre _ (InjFInfo name) inv) | inv > 0
   fromJust $ lookup invVar invDerivs
 derivativeOfHornClause _ _ = IRConst (VFloat 1.0)
 
-progToFCData :: Program -> FCData
-progToFCData prog = FCData {hornClauses = progToHornClauses prog cnInfo, chainNameInfo = progToChainNameInfo prog}
-  where cnInfo = progToChainNameInfo prog
+-- | Build the forward-chaining certificate for a whole program. The 'Set'
+-- argument is the determinism field's known-anchor set (chain names whose value
+-- is known without observing the sample); it seeds extra self-sufficient anchors
+-- beyond the structural @Constant@-only approximation (modality-determinism-pass,
+-- consumed here per modality-split-forwardchaining).
+progToFCData :: Set ChainName -> Program -> FCData
+progToFCData anchors prog =
+  FCData { hornClauses = anchorClauses ++ baseClauses
+         , chainNameInfo = cnInfo
+         , fcAnchors = anchorInstances
+         , lambdaVarOccurrences = progToLambdaVarOccurrences prog }
+  where
+    cnInfo = progToChainNameInfo prog
+    baseClauses = progToHornClauses prog cnInfo
+    -- Each known anchor is a self-sufficient (empty-premise) starting point for
+    -- forward chaining, mirroring how @Constant@ already self-derives. This
+    -- replaces FC's structural @Constant@-only under-approximation with the real
+    -- determinism field, so ThetaI/Subtree/derived-deterministic operands become
+    -- invertible-through.
+    --
+    -- Anchors are computed on the untagged program, but FC tags chain names per
+    -- function invocation (e.g. @ast5_t0@) when it duplicates a helper-function
+    -- body. So we anchor every chain name in the clause graph whose /untagged/
+    -- form is a known anchor — otherwise a @theta@ inside an inverted helper
+    -- (the @inner z = z + theta_0@ shape) would never match. The corresponding
+    -- values are materialised in codegen (IRCompiler) for non-constant anchors.
+    anchorInstances = Set.fromList
+      [ cn | cn <- allClauseChainNames baseClauses, Set.member (untag cn) anchors ]
+    anchorClauses = [ [ParameterHornClause cn] | cn <- Set.toList anchorInstances ]
+
+-- Every chain name appearing as a premise or conclusion anywhere in a clause set.
+allClauseChainNames :: [[HornClause]] -> [ChainName]
+allClauseChainNames = nub . concatMap (concatMap (\c -> conclusion c : premises c))
 
 
 progToChainNameInfo :: Program -> [(ChainName, ExprInfo)]
@@ -285,7 +523,10 @@ exprToHornClauses adts e = case e of
   -- Field constructors (Cons/TCons/user-ADT constructors) emit only their
   -- inverse clauses, each in its own group because the fields can be solved
   -- independently. The forward clause is omitted deliberately: constructing the
-  -- container from its fields could create cycles in the chaining graph.
+  -- container from its fields could create cycles in the chaining graph. This is
+  -- safe (not merely defensive): container construction inference is handled
+  -- out-of-band by IRCompiler's field-constructor path, so no program needs the
+  -- forward clause (investigation forward-chaining-math-correctness, Q3).
   InjF _ (Named name) params
     | isFieldConstructor adts name ->
         map (: []) (tail (injFtoHornClause adts e)) ++ concatMap (exprToHornClauses adts) params
@@ -479,25 +720,25 @@ annotateProg p@Program {functions=fs} = p{functions=annotFs}
 annotateExpr :: Expr -> Supply Expr
 annotateExpr = tMapM (\ex -> demandUniqueNumber <&> ("ast" ++) . show <&> setChainName (getTypeInfo ex))
 
--- Returns all recursively fulfilled clauses
+-- Returns all recursively fulfilled clauses, in reverse discovery order (most
+-- recently fulfilled first), matching the legacy accumulation order downstream
+-- code (findConcludingHornClause / topSortDAG) relies on.
+--
+-- Each clause group contributes at most one fulfilled clause (the first whose
+-- premises are all already known). We track used groups by index and known
+-- conclusions in 'Set's, so membership tests are logarithmic rather than the
+-- linear list 'delete'/'elem' scans this used to do (cleanup-forward-chaining).
 solveHCSet :: [[HornClause]] -> [HornClause]
-solveHCSet hcs = solveHCSet' hcs []
-
--- Takes a set of all clauses and already fulfilled clauses and returns a set of fulfilled Horn clauses
-solveHCSet' :: [[HornClause]] -> [HornClause] -> [HornClause]
-solveHCSet' hcs fulfilled = case findFulfilledClause hcs fulfilled of
-  Just nextClause ->
-    -- Remove used clause group from set of available clauses
-    let updatedHCs = delete (fromJust (find (elem nextClause) hcs)) hcs in
-      solveHCSet' updatedHCs (nextClause:fulfilled)
-  Nothing -> fulfilled
-
--- Finds a fulfilled clause given a set of already fulfilled clauses
-findFulfilledClause :: [[HornClause]] -> [HornClause] -> Maybe HornClause
-findFulfilledClause hcs fulfilled = listToMaybe fulfilledClauses
+solveHCSet hcs = go Set.empty Set.empty []
   where
-    detVars = map conclusion fulfilled
-    fulfilledClauses = filter (all (`elem` detVars) . premises) (concat hcs)
+    groups = zip [0 :: Int ..] hcs
+    go usedGroups detVars fulfilled =
+      case [ (i, c) | (i, g) <- groups
+                    , not (i `Set.member` usedGroups)
+                    , c <- g
+                    , all (`Set.member` detVars) (premises c) ] of
+        [] -> fulfilled
+        ((i, c):_) -> go (Set.insert i usedGroups) (Set.insert (conclusion c) detVars) (c : fulfilled)
 
 -- Returns all elements that come before a given parameter in a list
 cutList :: Eq a => [a] -> a -> [a]
@@ -525,10 +766,4 @@ showClauseGroup cs = intercalate "\n" (map showClause cs)
 
 showClauseGroups :: [[HornClause]] -> String
 showClauseGroups groups = intercalate "\n\n" (map showClauseGroup groups)
-
-traceShowClauseGroupId :: [HornClause] -> [HornClause]
-traceShowClauseGroupId clauses = trace (showClauseGroup clauses) clauses
-
-traceShowClauseGroupsId :: [[HornClause]] -> [[HornClause]]
-traceShowClauseGroupsId clauses = trace (showClauseGroups clauses) clauses
 
