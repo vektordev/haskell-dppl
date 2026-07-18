@@ -1660,44 +1660,45 @@ intersectW :: WWorld -> WWorld -> WWorld
 intersectW (WWorld g1 s1) (WWorld g2 s2) =
   let (g3, s3) = intersectSet s1 s2 in WWorld (g1 ++ g2 ++ g3) s3
 
--- Two constraints on the SAME draw. Point-point must agree: 'mergeWitnessValue'
--- recurses through IRTCons so complementary partial witnesses (e.g. one
--- recovering only a tuple's first field via fst's inverse, the other only its
--- second via snd's) combine field-by-field into a single fully concrete value
--- instead of one silently overriding the other (mirroring the equivalent merge
--- already used on the ordinary, non-set-witness point-inversion path --
--- ForwardChaining.hs's 'mergeExpr2' IRTCons/VAny cases); at each leaf, 'OpEq'
--- -- already deep, VAny-wildcard-aware in the interpreter (Left/Right tag
--- mismatches compare False, a VAny payload on either side compares True) --
--- doubles as a safe runtime compatibility guard regardless of which side, if
--- any, is a lossy reconstruction (e.g. isLeft's inverse, which knows the tag
--- but fills the payload with VAny). See observe-partials-umbrella N6.
+-- Two constraints on the SAME draw. Point-point must agree: the compatibility
+-- guard is a single 'OpEq' on the whole, undecomposed values -- deliberately
+-- NOT computed field-by-field. 'OpEq' is already deep, VAny-wildcard-aware in
+-- the interpreter, but only where VAny is *nested inside* a container
+-- comparison (IRInterpreter.hs's cmp: 'VTuple'/'VEither' cases treat a nested
+-- VAny as a wildcard); a *bare* top-level VAny compares False against
+-- anything (the `(VAny, _) -> False` / `(_, VAny) -> False` fallback). Calling
+-- OpEq on a decomposed leaf (e.g. comparing a recovered field directly against
+-- a bare `IRConst VAny` placeholder) would hit that fallback and wrongly
+-- reject an otherwise-valid world -- so the guard stays a single check at this
+-- level, and only the VALUE selection ('mergeWitnessValue') recurses.
 intersectSet :: WSet -> WSet -> ([IRExpr], WSet)
 intersectSet WFull s = ([], s)
 intersectSet s WFull = ([], s)
 intersectSet WEmpty _ = ([], WEmpty)
 intersectSet _ WEmpty = ([], WEmpty)
 intersectSet (WPoint p1 c1) (WPoint p2 c2) =
-  let (guards, p) = mergeWitnessValue p1 p2
-  in (guards, WPoint p (IROp OpMult c1 c2))
+  ([IROp OpEq p1 p2], WPoint (mergeWitnessValue p1 p2) (IROp OpMult c1 c2))
 intersectSet (WPoint p c) (WInterval lo hi) = (boundGuards p lo hi, WPoint p c)
 intersectSet (WInterval lo hi) (WPoint p c) = (boundGuards p lo hi, WPoint p c)
 intersectSet (WInterval lo1 hi1) (WInterval lo2 hi2) =
   ([], WInterval (maxWBound lo1 lo2) (minWBound hi1 hi2))
 
--- | Merges two witnesses for the same variable. Recurses through IRTCons
--- (see 'intersectSet'); at a leaf, prefers whichever side is not
--- ANY-tainted (checked fresh via 'irRuntimeContainsAny', not a value carried
--- from construction time, since informativeness can differ per field of a
--- composite witness) and guards with 'OpEq'.
-mergeWitnessValue :: IRExpr -> IRExpr -> ([IRExpr], IRExpr)
+-- | Picks, field-by-field, whichever side of two witnesses for the same
+-- variable is not ANY-tainted (checked fresh via 'irRuntimeContainsAny' at
+-- each position, since informativeness can differ per field of a composite
+-- witness -- e.g. one side recovers only a tuple's first field via fst's
+-- inverse, the other only its second via snd's). Recurses through IRTCons so
+-- such complementary partial witnesses combine into a single fully concrete
+-- value instead of one silently overriding the other -- mirrors the
+-- equivalent merge already used on the ordinary, non-set-witness
+-- point-inversion path, ForwardChaining.hs's 'mergeExpr2' IRTCons/VAny cases.
+-- Compatibility is 'intersectSet's job (a single guard on the whole value,
+-- not per field -- see there for why); this function never rejects, only
+-- chooses.
+mergeWitnessValue :: IRExpr -> IRExpr -> IRExpr
 mergeWitnessValue (IRTCons a1 b1) (IRTCons a2 b2) =
-  let (gA, a) = mergeWitnessValue a1 a2
-      (gB, b) = mergeWitnessValue b1 b2
-  in (gA ++ gB, IRTCons a b)
-mergeWitnessValue p1 p2 =
-  let informative1 = IRUnaryOp OpNot (irRuntimeContainsAny p1)
-  in ([IROp OpEq p1 p2], IRIf informative1 p1 p2)
+  IRTCons (mergeWitnessValue a1 a2) (mergeWitnessValue b1 b2)
+mergeWitnessValue p1 p2 = IRIf (irRuntimeContainsAny p1) p2 p1
 
 -- Membership guards of a point against interval bounds. Strictness is
 -- irrelevant for the continuous measures this engine emits (a boundary point

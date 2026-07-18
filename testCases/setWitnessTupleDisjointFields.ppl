@@ -1,0 +1,2 @@
+main = let e = (Normal, Uniform)
+       in if 1.0 > 0.0 then (fst e, snd e) else (0.0, 0.0)
