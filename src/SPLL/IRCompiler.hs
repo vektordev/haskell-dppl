@@ -819,21 +819,32 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample
    -- and measure them against the bound distribution (design
    -- set-valued-witnesses).
    Nothing -> setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag v sample
-   Just (invExprP0, invExprCoV0) -> do
-    invExprP   <- pruneDeadLetIns <$> materializeAnchors meta invExprP0
-    invExprCoV <- pruneDeadLetIns <$> materializeAnchors meta invExprCoV0
+   Just (invExprP0, invExprCoV0, invExprGuard0) -> do
+    invExprP    <- pruneDeadLetIns <$> materializeAnchors meta invExprP0
+    invExprCoV  <- pruneDeadLetIns <$> materializeAnchors meta invExprCoV0
+    invExprGuard <- pruneDeadLetIns <$> materializeAnchors meta invExprGuard0
     let appliedCoV = IRApply (IRLambda (boundVar ++ tag) invExprCoV) sample
     let lInv = IRLambda (boundVar ++ tag) invExprP
     -- Apply the sample to the inverse
     let appliedSample = IRApply lInv sample
+    -- The inversion chain may pass through a deconstructing InjF whose inverse
+    -- (e.g. fromLeft/fromRight) is only applicable on one arm (isLeft/isRight):
+    -- 'guard' is False exactly when `sample` falls outside that domain, in which
+    -- case the whole result below must be forced to zero WITHOUT evaluating it
+    -- (it crashes on out-of-domain input -- observe-partials-umbrella N1b). Each
+    -- `IRIf guard ... 0` below relies on the interpreter's short-circuit
+    -- evaluation of the untaken branch, same as the existing appTestExpr/zeroCheck
+    -- idiom elsewhere in this module.
+    let guard = IRApply (IRLambda (boundVar ++ tag) invExprGuard) sample
     -- Do probabilistic inference using the applied inverse
     (p, dim, bc) <- toIRInference meta cumulative v appliedSample
 
     let scale x = if not cumulative
                     then IROp OpMult x (IRIf (IROp OpEq dim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs appliedCoV))
                     else IRIf (IROp OpGreaterThan appliedCoV const0) x (IROp OpSub (IRConst (VFloat 1)) x)
+    let guarded e zero = IRIf guard e zero
     case rt of
-      TArrow _ _ -> return (wrapInLambdas (IRTCons (scale p) (IRTCons dim bc)), const0, const0)
+      TArrow _ _ -> return (guarded (wrapInLambdas (IRTCons (scale p) (IRTCons dim bc))) (wrapInLambdas (IRTCons const0 (IRTCons const0 const0))), const0, const0)
       _ | cumulative || not (isLambdaExpr l) || not (null tag) ->
             -- Keep the original single-witness behaviour when: (a) integrate mode, where
             -- tuple/multi-latent CDFs are ill-defined; (b) the callable is not a literal
@@ -842,7 +853,7 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample
             -- tagged variables this folding would mis-bind; or (c) the lambda is applied
             -- under a tag (HO duplication). Body-factor folding is only sound for a plain
             -- value let-binding `Apply (Lambda x body) v`.
-            return (wrapInLambdas $ scale p, wrapInLambdas dim, wrapInLambdas bc)
+            return (wrapInLambdas $ guarded (scale p) const0, wrapInLambdas $ guarded dim const0, wrapInLambdas $ guarded bc const0)
       _ -> do
         -- The inversion above only recovers and infers the variable bound by THIS
         -- lambda. Any additional independent latents bound deeper in the body (e.g. a
@@ -897,9 +908,9 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample
               ++ " this engine (design modality-witnessed-inference)")
         let anyW = IRUnaryOp OpIsAny appliedSample
         let guardAny ok whenAnySink = IRIf anyW (if bindingIsSink then whenAnySink else refuse) ok
-        return ( wrapInLambdas (guardAny combP pBody)
-               , wrapInLambdas (guardAny combDim dimBody)
-               , wrapInLambdas (guardAny combBC bcBody) )
+        return ( wrapInLambdas (guarded (guardAny combP pBody) const0)
+               , wrapInLambdas (guarded (guardAny combDim dimBody) const0)
+               , wrapInLambdas (guarded (guardAny combBC bcBody) const0) )
   -- Forward chaining may have messed with the structure of the expression. We may have too many or too few lambdas.
   -- Every lambda, which is not applied, inside of the callable should be present in the retuned IRExpr. 
   -- Exclude the lambda, which is applied here and all lambdas, which are already present
@@ -1294,7 +1305,12 @@ createHOInverse :: CompilerMetadata -> (String, Expr) -> CompilerMonad (IRExpr -
 createHOInverse meta (fVar, f) = do
   let fcData' = fcData meta
   let adts = adtDecls meta
-  let (inverseF0, inverseCoV0) = toInvExpr fcData' adts (chainName $ getTypeInfo f)
+  -- NB: the applicability guard (3rd component, see observe-partials-umbrella
+  -- N1b) is not threaded through the higher-order inverse path yet -- a
+  -- deconstructing InjF crossed while inverting a user-defined function passed
+  -- through createHOInverse can still crash. Not hit by any current test case;
+  -- tracked as follow-up alongside the other HO-inverse gaps.
+  let (inverseF0, inverseCoV0, _inverseGuard0) = toInvExpr fcData' adts (chainName $ getTypeInfo f)
   inverseF   <- materializeAnchors meta inverseF0
   inverseCoV <- materializeAnchors meta inverseCoV0
   let Just (_, LambdaInfo _ lBodyChainName, tag) = findEquivalentExpression fcData' (chainName $ getTypeInfo f)
@@ -1788,11 +1804,17 @@ transportDirect meta occs body target = case filter (`elem` subtreeCNs body) occ
   [occ] -> case target of
     WPoint s c0 -> case toSeededInvExpr (fcData meta) (adtDecls meta) bodyCN occ of
       Nothing -> return Nothing
-      Just (g0, cov0) -> do
-        g   <- pruneDeadLetIns <$> materializeAnchors meta g0
-        cov <- pruneDeadLetIns <$> materializeAnchors meta cov0
+      Just (g0, cov0, guard0) -> do
+        g     <- pruneDeadLetIns <$> materializeAnchors meta g0
+        cov   <- pruneDeadLetIns <$> materializeAnchors meta cov0
+        guard <- pruneDeadLetIns <$> materializeAnchors meta guard0
         let applyTo e arg = IRApply (IRLambda bodyCN e) arg
-        return (Just [WWorld [] (WPoint (applyTo g s) (IROp OpMult c0 (applyTo cov s)))])
+        -- The inversion may pass through a deconstructing InjF (e.g.
+        -- fromLeft/fromRight) only applicable on one arm; fold that as an
+        -- extra world guard so measureWorld zeroes this world instead of
+        -- evaluating the (crashing on the wrong arm) point value -- see
+        -- observe-partials-umbrella N1b.
+        return (Just [WWorld [applyTo guard s] (WPoint (applyTo g s) (IROp OpMult c0 (applyTo cov s)))])
     WInterval lo hi -> case toSeededMonotoneInvExpr (fcData meta) (adtDecls meta) bodyCN occ of
       Nothing -> return Nothing
       Just (g0, dir) -> do

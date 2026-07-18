@@ -174,8 +174,10 @@ isWitnessedLambda fcData adts obsCN lambdaCN = case inversionSetup fcData lambda
   Nothing -> False
 
 -- Takes the chainName of a function (May be a lambda, a variable, an Apply ...) and returns the inverse function of that lambda together with the derivative of the inverse
-toInvExpr :: FCData -> [ADTDecl] -> ChainName -> (IRExpr, IRExpr)
-toInvExpr fcData adts lambdaCN = (mergedM, mergedCoV)
+-- | Returns (value, derivative, guard) -- see 'toValueExpr' for the guard's
+-- meaning; callers must gate evaluation of value/derivative on it.
+toInvExpr :: FCData -> [ADTDecl] -> ChainName -> (IRExpr, IRExpr, IRExpr)
+toInvExpr fcData adts lambdaCN = (mergedM, mergedCoV, mergedGuard)
   where
     clauseSet = hornClauses fcData
     (toInvVarName, toInvCNs, paramClause) = case inversionSetup fcData lambdaCN of
@@ -184,13 +186,13 @@ toInvExpr fcData adts lambdaCN = (mergedM, mergedCoV)
     -- Create the expression that calculates each occurrence; merge those that
     -- carry complementary information.
     valueExprs = mapMaybe (toValueExpr clauseSet [paramClause] adts) toInvCNs
-    (mergedM, mergedCoV) = mergeExpr toInvVarName lambdaCN toInvCNs valueExprs
+    (mergedM, mergedCoV, mergedGuard) = mergeExpr toInvVarName lambdaCN toInvCNs valueExprs
 
 -- | 'toInvExpr' with a recoverable outcome: Nothing when no occurrence of the
 -- bound variable yields an inversion path (where 'toInvExpr' dies in
 -- 'mergeExpr'). The set-valued witness fallback in IRCompiler dispatches on
 -- this instead of the hard error.
-toInvExprMaybe :: FCData -> [ADTDecl] -> ChainName -> Maybe (IRExpr, IRExpr)
+toInvExprMaybe :: FCData -> [ADTDecl] -> ChainName -> Maybe (IRExpr, IRExpr, IRExpr)
 toInvExprMaybe fcData adts lambdaCN = do
   (toInvVarName, toInvCNs, paramClause) <- inversionSetup fcData lambdaCN
   case mapMaybe (toValueExpr (hornClauses fcData) [paramClause] adts) toInvCNs of
@@ -203,19 +205,54 @@ toInvExprMaybe fcData adts lambdaCN = do
 -- 'isWitnessedLambda' exposed for codegen: the set-valued witness fallback
 -- inverts if-branches and comparison operands from their own roots rather than
 -- from the lambda body.
-toSeededInvExpr :: FCData -> [ADTDecl] -> ChainName -> ChainName -> Maybe (IRExpr, IRExpr)
+toSeededInvExpr :: FCData -> [ADTDecl] -> ChainName -> ChainName -> Maybe (IRExpr, IRExpr, IRExpr)
 toSeededInvExpr fcData adts seedCN occCN =
   toValueExpr (hornClauses fcData) [ParameterHornClause seedCN] adts occCN
 
 -- Performs forward chaining to create an expression, which calculates the value of a specific point in the AST given a set of parameter points in the AST.
--- Also returns the derivative of that expression
-toValueExpr :: [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> Maybe (IRExpr, IRExpr)
+-- Also returns the derivative of that expression, and a guard: a Bool IRExpr that
+-- is False exactly when some step of the chain is a deconstructing inverse (e.g.
+-- fromLeft/fromRight's applicability = isLeft/isRight) applied outside its domain
+-- -- see 'guardChain'. Callers must skip evaluating the returned value/deriv
+-- entirely when the guard is False (wrap with IRIf guard ... , not just zero the
+-- result afterward): the value expression itself crashes on out-of-domain input
+-- (observe-partials-umbrella N1b).
+toValueExpr :: [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> Maybe (IRExpr, IRExpr, IRExpr)
 toValueExpr clauses paramClauses adts startCN = do
   relevantSortedClauses <- toValuePath clauses paramClauses startCN
   -- Calculate the symbolic derivative
   let deriv = derivativeOfPath adts relevantSortedClauses
   -- Generate code
-  Just (toLetInBlock clauses adts relevantSortedClauses, wrapInLetInBlock clauses adts relevantSortedClauses deriv)
+  Just (toLetInBlock clauses adts relevantSortedClauses, wrapInLetInBlock clauses adts relevantSortedClauses deriv, guardChain clauses adts relevantSortedClauses)
+
+-- | A Bool IRExpr, safe to evaluate unconditionally, that is True iff every step
+-- of the chain is within its inverse FDecl's applicability domain -- i.e. the
+-- chain's value expression ('toLetInBlock') would not crash. Mirrors
+-- 'wrapInLetInBlock's LetIn nesting so that a later step's applicability test
+-- (which may reference an earlier step's bound value) is only evaluated once the
+-- earlier step is known to be in-domain; a failing step short-circuits to False
+-- without ever forcing the unsafe binding that follows it.
+guardChain :: [[HornClause]] -> [ADTDecl] -> [HornClause] -> IRExpr
+guardChain _ _ [] = IRConst (VBool True)
+guardChain clauses adts (ParameterHornClause _:cs) = guardChain clauses adts cs
+guardChain clauses adts (c:cs) =
+  case clauseApplicability adts c of
+    IRConst (VBool True) -> IRLetIn (conclusion c) (hornClauseToIRExpr clauses adts c) (guardChain clauses adts cs)
+    appTest -> IRIf appTest
+                 (IRLetIn (conclusion c) (hornClauseToIRExpr clauses adts c) (guardChain clauses adts cs))
+                 (IRConst (VBool False))
+
+-- | The applicability test of the inverse FDecl a Horn clause invokes (renamed
+-- to the clause's own premise variables), or an unconditional True for clauses
+-- that carry no domain restriction (constants, equivalences, forward InjF
+-- applications, parameters).
+clauseApplicability :: [ADTDecl] -> HornClause -> IRExpr
+clauseApplicability adts (ExprHornClause preVars _ (InjFInfo name) inv) | inv > 0 =
+  let Just (FPair _ invInjF) = lookup name (globalFEnv adts)
+      correctInv = invInjF !! (inv - 1)
+      renamedF = foldr (\(old, new) decl -> renameDecl old new decl) correctInv (zip (inputVars correctInv) preVars)
+  in applicability renamedF
+clauseApplicability _ _ = IRConst (VBool True)
 
 -- The clause-path core of 'toValueExpr': the topologically sorted, fulfilled
 -- clauses up to (and including) the one concluding @startCN@, or Nothing when
@@ -374,7 +411,7 @@ unwrapLambdas fcData cn = case lookup cn (chainNameInfo fcData) of
 -- The first three arguments are purely diagnostic context for the failure case below:
 -- the name of the variable being witnessed, the chain name of the lambda being inverted,
 -- and the candidate occurrences (chain names) that were attempted and yielded no path.
-mergeExpr :: String -> ChainName -> [ChainName] -> [(IRExpr, IRExpr)] -> (IRExpr, IRExpr)
+mergeExpr :: String -> ChainName -> [ChainName] -> [(IRExpr, IRExpr, IRExpr)] -> (IRExpr, IRExpr, IRExpr)
 mergeExpr varName lambdaCN candidateCNs [] = error $ unlines
   [ "Forward chaining failed to find a solution: no inversion path could be constructed for variable \"" ++ varName ++ "\""
   , "while inverting the function bound at chain name " ++ lambdaCN ++ "."
@@ -387,14 +424,14 @@ mergeExpr varName lambdaCN candidateCNs [] = error $ unlines
 mergeExpr _ _ _ [x] = x
 mergeExpr varName lambdaCN candidateCNs (x:xs) = mergeExpr2 id x (mergeExpr varName lambdaCN candidateCNs xs)
 
-mergeExpr2 :: (IRExpr -> IRExpr) -> (IRExpr, IRExpr) -> (IRExpr, IRExpr) -> (IRExpr, IRExpr)
-mergeExpr2 bindings (IRLetIn n v body, cov1) expr2 = mergeExpr2 (bindings . IRLetIn n v) (body, cov1) expr2
-mergeExpr2 bindings expr1 (IRLetIn n v body, cov2) = mergeExpr2 (bindings . IRLetIn n v) expr1 (body, cov2)
-mergeExpr2 bindings (IRTCons (IRConst VAny) b, cov1) (IRTCons a (IRConst VAny), cov2) = (bindings $ IRTCons a b, IROp OpMult cov1 cov2)
-mergeExpr2 bindings (IRTCons a (IRConst VAny), cov1) (IRTCons (IRConst VAny) b, cov2)  = (bindings $ IRTCons a b, IROp OpMult cov1 cov2)
+mergeExpr2 :: (IRExpr -> IRExpr) -> (IRExpr, IRExpr, IRExpr) -> (IRExpr, IRExpr, IRExpr) -> (IRExpr, IRExpr, IRExpr)
+mergeExpr2 bindings (IRLetIn n v body, cov1, g1) expr2 = mergeExpr2 (bindings . IRLetIn n v) (body, cov1, g1) expr2
+mergeExpr2 bindings expr1 (IRLetIn n v body, cov2, g2) = mergeExpr2 (bindings . IRLetIn n v) expr1 (body, cov2, g2)
+mergeExpr2 bindings (IRTCons (IRConst VAny) b, cov1, g1) (IRTCons a (IRConst VAny), cov2, g2) = (bindings $ IRTCons a b, IROp OpMult cov1 cov2, IROp OpAnd g1 g2)
+mergeExpr2 bindings (IRTCons a (IRConst VAny), cov1, g1) (IRTCons (IRConst VAny) b, cov2, g2)  = (bindings $ IRTCons a b, IROp OpMult cov1 cov2, IROp OpAnd g1 g2)
 -- Expressions are not compatible. Assume they are semantically equal. Then just take the first
 -- TODO: Maybe one of the two is compatible with a third expression, then we would want to take this one
-mergeExpr2 bindings (expr1, cov1) _ = (bindings expr1, cov1)
+mergeExpr2 bindings (expr1, cov1, g1) _ = (bindings expr1, cov1, g1)
 
 getAllOriginatingEquivalenceHornClauses :: [[HornClause]] -> ChainName -> [HornClause]
 getAllOriginatingEquivalenceHornClauses clauses cn = concatMap (filter (\hc -> isEquivalenceHornClause hc && conclusion hc == cn)) clauses
