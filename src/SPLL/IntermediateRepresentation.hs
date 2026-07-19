@@ -20,7 +20,7 @@ module SPLL.IntermediateRepresentation (
 ) where
 
 import SPLL.Lang.Types
-import SPLL.Typing.RType()
+import SPLL.Typing.RType (RType(..))
 import SPLL.Typing.PType()
 import SPLL.Typing.Typing()
 import Data.Data()
@@ -168,6 +168,12 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               | IRIsPossible MultiValue IRExpr
               | IRIndex IRExpr IRExpr
               | IRError String
+              -- Runtime type-tag check: True iff the value of the sub-expression
+              -- structurally conforms to the given RType. Emitted only as the
+              -- query-type guard at a prob/integ function root (see IRCompiler),
+              -- so a wrong-typed query value fails with a clear diagnostic instead
+              -- of a silent bogus number or a deep "not a boolean" panic.
+              | IRConformsTo RType IRExpr
               deriving (Show, Eq)
               
 type IRValue = GenericValue IRExpr
@@ -192,11 +198,16 @@ data CompilerConfig = CompilerConfig {
   noProbability :: Bool,
   noGenerate :: Bool,
   -- When True, print every intermediate AST state during compilation (with full TypeInfo/tags)
-  showIntermediates :: Bool
+  showIntermediates :: Bool,
+  -- When True (default), the prob/integ function root is wrapped in a guard that
+  -- checks the query value structurally conforms to the program's return type,
+  -- failing with a clear diagnostic on a mismatch. Independent of optimizerLevel.
+  -- Disable (CLI --noTypeCheck) to shave the entry check off hot compiled code.
+  checkQueryType :: Bool
 } deriving (Show)
 
 defaultCompilerConfig :: CompilerConfig
-defaultCompilerConfig = CompilerConfig {countBranches = False, topKThreshold = Nothing, optimizerLevel = 2, verbose = 0, pruneAnyChecks = False, noIntegrate=False, noProbability=False, noGenerate=False, showIntermediates=False}
+defaultCompilerConfig = CompilerConfig {countBranches = False, topKThreshold = Nothing, optimizerLevel = 2, verbose = 0, pruneAnyChecks = False, noIntegrate=False, noProbability=False, noGenerate=False, showIntermediates=False, checkQueryType=True}
 --3: convert algortihm-and-type-annotated Exprs into abstract representation of explicit computation:
 --    Fold enum ranges, algorithms, etc. into a representation of computation that can be directly converted into code.
 
@@ -242,6 +253,7 @@ getIRSubExprs (IRApply a b) = [a, b]
 getIRSubExprs (IREnumSum _ _ a) = [a]
 getIRSubExprs (IRIndex a b) = [a, b]
 getIRSubExprs (IRError _) = []
+getIRSubExprs (IRConformsTo _ a) = [a]
 
 irMap :: (IRExpr -> IRExpr) -> IRExpr -> IRExpr
 irMap f x = case x of
@@ -276,6 +288,7 @@ irMap f x = case x of
   (IRSample _) -> f x
   (IRVar _) -> f x
   (IRError _) -> f x
+  (IRConformsTo t a) -> f (IRConformsTo t (irMap f a))
 
 isLambda :: IRExpr -> Bool
 isLambda IRLambda {} = True
@@ -313,4 +326,5 @@ irPrintFlat (IRApply _ _) = "IRApply"
 irPrintFlat (IREnumSum _ _ _) = "IREnumSum"
 irPrintFlat (IRIndex _ _) = "IRIndex"
 irPrintFlat (IRError _) = "IRError"
+irPrintFlat (IRConformsTo _ _) = "IRConformsTo"
 

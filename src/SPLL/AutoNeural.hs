@@ -357,7 +357,11 @@ tupelFromValue _non_tuple = error "supplied non-tuple value to tuple-shaped NN t
 -- wrap: constructs the full sample value (e.g. VEither . Left) for probFnName calls.
 -- armProb: IRExpr evaluating to P(arm VAny), used to normalise to conditional probability.
 -- For Discretes inner plans, emits P(arm v) / P(arm VAny) for each v.
--- For complex plans, falls back to zeros (length-correct stub).
+-- For complex plans, falls back to zeros (length-correct stub).  A *continuous* arm never
+-- reaches this stub: `requiredNormalFns` surfaces it as a missing arm-conditional normal
+-- function, so `makeTopLevelEncodeFun` refuses to build the encode at all.  Fully-discrete
+-- nested arms (a Tuple/Either/ADT of discretes) still hit the zero stub and are the remaining
+-- known gap here — no corpus program exercises them yet.
 makeEncodeEitherArm :: String -> [IRExpr] -> PartitionPlan -> (IRValue -> IRValue) -> IRExpr -> IRExpr
 makeEncodeEitherArm probFnName outerArgs (Discretes _ (MultiDiscretes vals)) wrap armProb =
   foldr IRCons (IRConst (VList EmptyList))
@@ -500,21 +504,33 @@ validateEncodeGaussian adts registry neuralDecls env = mapM_ checkDecl decoderDe
           missing  = filter (`notElem` available) required
       in if null missing then Right () else Left (encodeGaussianError name)
     encodeGaussianError name =
-      "encode: neural declaration '" ++ name ++ "' has a continuous output that is not "
-      ++ "Gaussian (PNormal/PLogNormal) — e.g. a mixture produced by `if`, or a product of "
-      ++ "random variables. A non-Gaussian continuous slot cannot be encoded."
+      "encode: neural declaration '" ++ name ++ "' has a continuous output slot that cannot "
+      ++ "be encoded. Either it is not Gaussian (a mixture produced by `if`, a product of "
+      ++ "random variables), or it is a continuous arm inside an Either/ADT — the latter is "
+      ++ "not yet supported (its arm-conditional (mu, sigma) is not generated), so it is "
+      ++ "refused rather than silently zero-stubbed."
 
 -- | Normal-parameter function names that `encode` references for the Continuous slots of a
 -- plan.  Mirrors the name threading in `makeEncodeTopLevelW` (top-level `main_normal`,
--- tuple components suffixed `_fst`/`_snd`).  Either/ADT arms are currently zero-stubbed and
--- reference no normal function, so they contribute no requirement.
+-- tuple components suffixed `_fst`/`_snd`).
+--
+-- Either/ADT arms recurse too: a continuous leaf inside an arm names an arm-conditional
+-- normal function (`_left`/`_right`, `_<ctor>_<field>`) that the IRCompiler does not yet
+-- generate — `makeEncodeEitherArm` only handles Discretes arms, zero-stubbing the rest.  By
+-- surfacing that leaf as a required-but-absent normal function, `makeTopLevelEncodeFun`'s
+-- `normalsOk` check refuses to build such an encode (and `validateEncodeGaussian` refuses to
+-- run it) rather than silently emitting a zero for the arm's `(mu, sigma)`.  A fully-discrete
+-- arm contributes no requirement, so mixed Either/ADT with only discrete arms stay buildable.
 requiredNormalFns :: String -> PartitionPlan -> [String]
-requiredNormalFns nf Continuous       = [nf]
-requiredNormalFns nf (TuplePlan a b)  = requiredNormalFns (nf ++ "_fst") a
-                                     ++ requiredNormalFns (nf ++ "_snd") b
-requiredNormalFns _  (Discretes _ _)  = []
-requiredNormalFns _  (EitherPlan _ _) = []
-requiredNormalFns _  (ADTPlan _ _)    = []
+requiredNormalFns nf Continuous        = [nf]
+requiredNormalFns nf (TuplePlan a b)   = requiredNormalFns (nf ++ "_fst") a
+                                      ++ requiredNormalFns (nf ++ "_snd") b
+requiredNormalFns nf (EitherPlan a b)  = requiredNormalFns (nf ++ "_left") a
+                                      ++ requiredNormalFns (nf ++ "_right") b
+requiredNormalFns nf (ADTPlan _ ctors) =
+  concat [ requiredNormalFns (nf ++ "_" ++ cName ++ "_" ++ show j) fp
+         | (cName, fps) <- ctors, (j, fp) <- zip [0 :: Int ..] fps ]
+requiredNormalFns _  (Discretes _ _)   = []
 
 -- | Normal-parameter function names actually present in the compiled environment.  Mirrors
 -- the registration in `reduceIREnv`: `_component_<name>` groups register under `<name>`,

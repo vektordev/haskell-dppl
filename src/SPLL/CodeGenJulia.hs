@@ -7,6 +7,7 @@ import SPLL.IntermediateRepresentation
 import SPLL.Lang.Lang
 import Data.List (intercalate)
 import SPLL.Lang.Types
+import SPLL.Typing.RType (RType(..))
 import Data.Maybe (fromMaybe)
 import Data.Functor ((<&>))
 import Control.Monad.State (StateT (runStateT), MonadState (get, put), MonadTrans (lift))
@@ -164,7 +165,7 @@ generateStatementBlock (IRLetIn name val body) = do
     return ((name ++ " = " ++ v) : rest)
 
 generateStatementBlock (IRError e) =
-    return ["throw(\"" ++ e ++ "\")"]
+    return ["throw(\"" ++ escapeStr e ++ "\")"]
 
 generateStatementBlock (IRIf cond left right) = do
     cCond  <- generateExpression cond
@@ -289,9 +290,47 @@ generateExpression (IRLetIn name val body) = do
     b <- generateExpression body
     return $ "(let " ++ name ++ " = " ++ v ++ "; " ++ b ++ " end)"
 generateExpression (IRError e) =
-    return $ "throw(\"" ++ e ++ "\")"
+    return $ "throw(\"" ++ escapeStr e ++ "\")"
+generateExpression (IRConformsTo t x) = do
+    sx <- generateExpression x
+    return (jlConforms t sx)
 generateExpression x =
     error ("Unknown expression in Julia codegen: " ++ show x)
+
+-- | Escape a Haskell string for embedding in a double-quoted Julia string literal
+-- (e.g. an IRError message that may contain quotes from a show'd type).
+escapeStr :: String -> String
+escapeStr = concatMap esc
+  where esc '"'  = "\\\""
+        esc '\\' = "\\\\"
+        esc '\n' = "\\n"
+        esc c    = [c]
+
+-- | Runtime type-tag check for the query-type guard (see IRConformsTo). Full-depth
+-- structural check mirroring the interpreter's 'valueConformsTo': recurses into tuple
+-- components, either arms, and every list element; precise for float/bool/int and
+-- permissive ("true") only for types with no cheap runtime tag. Note Bool <: Integer
+-- in Julia, so TInt explicitly excludes Bool. The marginal-query wildcard (isAny) is
+-- accepted at every level, matching VAny, and short-circuits before any component
+-- accessor. The Int arg is a nesting depth used to name list-lambda binders uniquely.
+jlConforms :: RType -> String -> String
+jlConforms = jlConformsAt 0
+
+jlConformsAt :: Int -> RType -> String -> String
+jlConformsAt d t e = "(isAny(" ++ e ++ ") || " ++ jlConformsShape d t e ++ ")"
+
+jlConformsShape :: Int -> RType -> String -> String
+jlConformsShape _ TFloat  e = "(" ++ e ++ " isa AbstractFloat)"
+jlConformsShape _ TBool   e = "(" ++ e ++ " isa Bool)"
+jlConformsShape _ TInt    e = "((" ++ e ++ " isa Integer) && !(" ++ e ++ " isa Bool))"
+jlConformsShape d (Tuple a b) e =
+  "((" ++ e ++ " isa T) && " ++ jlConformsAt d a (e ++ ".t1") ++ " && " ++ jlConformsAt d b (e ++ ".t2") ++ ")"
+jlConformsShape d (ListOf t) e =
+  let v = "_ce" ++ show d
+  in "((" ++ e ++ " isa InferenceList) && all(" ++ v ++ " -> " ++ jlConformsAt (d + 1) t v ++ ", " ++ e ++ "))"
+jlConformsShape d (TEither a b) e =
+  "(((" ++ e ++ " isa Left) && " ++ jlConformsAt d a (e ++ ".val") ++ ") || ((" ++ e ++ " isa Right) && " ++ jlConformsAt d b (e ++ ".val") ++ "))"
+jlConformsShape _ _ _ = "true"
 
 collectApplyChain :: IRExpr -> (IRExpr, [IRExpr])
 collectApplyChain (IRApply f arg) = let (fn, args) = collectApplyChain f in (fn, args ++ [arg])

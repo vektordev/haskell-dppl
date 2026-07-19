@@ -393,6 +393,99 @@ test_missingMainFunction = testCase "missingMainFunction" $ do
   assertMissingMain "runProb" (runProb defaultCompilerConfig prog [] (VFloat 1.0))
   assertMissingMain "runInteg" (runInteg defaultCompilerConfig prog [] (VFloat 1.0))
 
+-- Regression for observe-partials-umbrella N4: addP's mixture combinator used to
+-- decide "which branch contributed zero" via an epsilon-approximate float compare
+-- (floatApproxEqThresh = 1e-10). A far-tail continuous density is legitimately
+-- smaller than that threshold without being the impossible-event zero the check
+-- was meant to catch, so it got mistaken for the *other* (structurally zero, wrong
+-- constructor arm) branch and silently discarded. The probTolerance-based End2End
+-- harness can't see this: a tail density this small is already within tolerance of
+-- 0, so a magnitude check would pass either way. What distinguishes fixed from
+-- broken is that the broken path collapses to an *exact* 0.0/dim 0, so assert
+-- non-zero-ness and dimensionality directly instead.
+test_farTailEitherDensityNotZeroed :: TestTree
+test_farTailEitherDensityNotZeroed = testCase "farTailEitherDensityNotZeroed" $ do
+  let prog = Program [("main", ifThenElse (normal #>#  constF 0.0) (left normal) (right unit))] [] [] []
+  case runProb defaultCompilerConfig prog [] (VEither (Left (VFloat 7.0))) of
+    Right (VTuple (VFloat p) (VFloat d)) -> do
+      assertBool ("expected a nonzero far-tail density, got exactly " ++ show p) (p > 0)
+      assertEqual "far-tail density must keep dim=1 (continuous)" 1.0 d
+    other -> assertFailure ("expected a probability tuple, got: " ++ show other)
+
+-- Regression for observe-partials-umbrella: 'intersectSet's WPoint/WPoint case
+-- (IRCompiler.hs) used to unconditionally keep the first witness and silently
+-- discard the second whenever a let-bound stochastic Either is destructured
+-- via the named-binding idiom `let e = ... in if isLeft e then fromLeft e
+-- else fromRight e` -- three occurrences of `e` force the set-witness
+-- fallback, which case-splits on `isLeft e` and then intersects that
+-- condition's own witness (isLeft's inverse: tag-only, `Left VAny`) with the
+-- branch's sample-derived witness (fromLeft's inverse, the actual value). The
+-- condition's placeholder witness always won, so the compiled program ignored
+-- the query sample entirely and returned the constant marginal
+-- P(isLeft)+P(isRight)=1 for every query -- and, separately, a structurally
+-- impossible sample (`Left ()`/Nothing, which fromLeft/fromRight's own guard
+-- makes unreachable here) also wrongly returned 1 instead of 0, since neither
+-- placeholder witness carries enough information to detect the Left-vs-Right
+-- tag conflict on its own. Fixed by tracking, per witness, a runtime
+-- "informative" guard (mirrors the witness expression's own branching -- a
+-- single static flag can't work, since e.g. fromLeft/fromRight's *total*
+-- inverse is only ANY-tainted on the arm that reconstructs a Nothing) and
+-- using 'OpEq' -- already deep VAny-wildcard-aware in the interpreter -- as
+-- the cross-check guard.
+test_letBoundEitherDestructureUsesSample :: TestTree
+test_letBoundEitherDestructureUsesSample = testCase "letBoundEitherDestructureUsesSample" $ do
+  let boundE = ifThenElse (uniform #<# constF 0.5) (left normal) (right (constF 0.0))
+  let body = ifThenElse (sisLeft (var "e")) (sfromLeft (var "e")) (sfromRight (var "e"))
+  let prog = Program [("main", letIn "e" boundE body)] [] [] []
+  let phi x = (1 / sqrt (2 * pi)) * exp (-0.5 * x * x)
+  case runProb defaultCompilerConfig prog [] (VEither (Right (VFloat 0.3))) of
+    Right (VTuple (VFloat p) (VFloat d)) -> do
+      assertBool ("expected 0.5*phi(0.3) =~ 0.1907, got " ++ show p) (abs (p - 0.5 * phi 0.3) < 0.0001)
+      assertEqual "continuous arm keeps dim=1" 1.0 d
+    other -> assertFailure ("expected a probability tuple, got: " ++ show other)
+  case runProb defaultCompilerConfig prog [] (VEither (Left VUnit)) of
+    Right (VTuple (VFloat p) _) ->
+      assertEqual "Nothing is structurally impossible here (fromLeft/fromRight always succeed under their own isLeft/isRight guard)" 0.0 p
+    other -> assertFailure ("expected a probability tuple, got: " ++ show other)
+
+-- Regression for observe-partials-umbrella N6, second half: 'intersectSet's
+-- WPoint/WPoint case, once fixed to prefer whichever witness is informative
+-- (above), still silently dropped information when TWO witnesses each hold
+-- *complementary* partial knowledge of a composite (tuple) variable -- e.g.
+-- one occurrence recovered only the first field via fst's inverse
+-- (`TCons(b, VAny)`), another only the second via snd's (`TCons(VAny, b)`).
+-- Neither side is "the informative one"; both need to be merged field-by-field.
+-- The set-witness fallback's TCons-body case (`let e = (Normal, Uniform) in
+-- (fst e, snd e)`, wrapped in a deterministic if to force the fallback instead
+-- of the ordinary point-inversion path, which already merges this correctly
+-- via ForwardChaining.hs's mergeExpr2) intersects exactly such a pair. Before
+-- the fix, the second field silently fell back to a *marginal* (P(ANY)=1)
+-- instead of the concrete point density -- invisible in the probability
+-- magnitude (a marginal always integrates to exactly 1, masking the loss) but
+-- visible in the dimensionality (1.0 instead of the correct 2.0, one
+-- continuous dimension short). Fixed by 'mergeWitnessValue' recursing through
+-- IRTCons to pick whichever side of each field is not ANY-tainted, checked
+-- fresh per field via 'irRuntimeContainsAny' (a first attempt that checked
+-- with 'OpEq' per decomposed field, mirroring the sibling Either fix, broke
+-- this: OpEq's VAny-wildcard tolerance only applies to a VAny *nested inside*
+-- a container comparison -- IRInterpreter.hs's cmp -- not a bare top-level
+-- VAny, which a field-level comparison always is after decomposition; the
+-- compatibility guard has to stay a single 'OpEq' on the whole undecomposed
+-- value, where OpEq's own recursion already handles nested VAny correctly).
+test_setWitnessMergesComplementaryTupleFields :: TestTree
+test_setWitnessMergesComplementaryTupleFields = testCase "setWitnessMergesComplementaryTupleFields" $ do
+  let boundE = tuple normal uniform
+  let body = ifThenElse (constF 1.0 #># constF 0.0)
+               (tuple (tfst (var "e")) (tsnd (var "e")))
+               (tuple (constF 0.0) (constF 0.0))
+  let prog = Program [("main", letIn "e" boundE body)] [] [] []
+  let phi x = (1 / sqrt (2 * pi)) * exp (-0.5 * x * x)
+  case runProb defaultCompilerConfig prog [] (VTuple (VFloat 0.3) (VFloat 0.7)) of
+    Right (VTuple (VFloat p) (VFloat d)) -> do
+      assertBool ("expected phi(0.3)*1 =~ 0.3814, got " ++ show p) (abs (p - phi 0.3) < 0.0001)
+      assertEqual "both fields recovered => dim=2 (two independent continuous slots)" 2.0 d
+    other -> assertFailure ("expected a probability tuple, got: " ++ show other)
+
 -- AutoNeural: auto-derivation of MultiValue annotations for the "Nothing" (no "of ...")
 -- and "_" (MultiAuto) cases. Float, Bool, Tuple/Either/non-recursive ADTs of these can be
 -- fully derived from the RType alone; Int and recursive ADTs cannot (unbounded/non-terminating).
@@ -782,6 +875,9 @@ internalsTests = testGroup "Internals"
       , test_nnHoistedOutOfEnumSum
       ]
   , test_missingMainFunction
+  , test_farTailEitherDensityNotZeroed
+  , test_letBoundEitherDestructureUsesSample
+  , test_setWitnessMergesComplementaryTupleFields
   , autoNeuralDerivationTests
   , enumContinuousRefusalTests
   , test_planEnumRecTopKAndBC

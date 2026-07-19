@@ -80,18 +80,42 @@ envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb
                 bindingParamNames
                 (isJust (probFun baseFunGroup))
                 (baseFunGroup : tupleNormalFuns)
+        -- The type the query value must structurally match: the function's result
+        -- type with any outer parameter lambdas stripped. Backs the query-type guard.
+        returnRType = rType (getTypeInfo (stripLambdas binding))
+        -- Wrap a value-returning inference body so a wrong-typed query value fails
+        -- with a clear diagnostic (see IRConformsTo) instead of a silent bogus
+        -- number or a deep "not a boolean" panic. `sample` is already bound by the
+        -- enclosing IRLambda. Gated on checkQueryType (default on, independent of -O).
+        -- Pushed under any outer parameter lambdas (via guardUnderLambdas) so those
+        -- stay at the function head where codegen collects them into the signature.
+        guardQuery kind = guardUnderLambdas
+          where
+            guardUnderLambdas (IRLambda n b) = IRLambda n (guardUnderLambdas b)
+            guardUnderLambdas bodyExpr
+              | checkQueryType conf =
+                  IRIf (IRConformsTo returnRType (IRVar "sample"))
+                       bodyExpr
+                       (IRError (kind ++ "(" ++ name ++ "): query value does not conform to return type " ++ show returnRType))
+              | otherwise = bodyExpr
+        -- Appended to the guarded function's doc (emitted as a comment by codegen)
+        -- so the generated code points at the flag that produced the check.
+        guardNote = if checkQueryType conf
+                    then "\nQuery-type guard active: rejects a query value not matching return type " ++ show returnRType ++ " (disable with --noTypeCheck)."
+                    else ""
+        appendDoc note (e, d) = (e, d ++ note)
         baseFunGroup = IRFunGroup {groupName=name, encodeFun=encodeF,
          integFun =
           if not noInteg && (pt == Deterministic || pt == Integrate || pt == PNormal || pt == PLogNormal) then
-            Just (toIntegDecl name (IRLambda "sample" (runCompile (meta typeEnv) (toIRInferenceSave (meta typeEnv) True binding (IRVar "sample")))))
+            Just (appendDoc guardNote (toIntegDecl name (IRLambda "sample" (guardQuery "cdf" (runCompile (meta typeEnv) (toIRInferenceSave (meta typeEnv) True binding (IRVar "sample")))))))
           else Nothing,
           probFun =
             if not noProb && (pt == Deterministic || pt == Integrate || pt == PNormal || pt == PLogNormal) then
               let metaBase = meta typeEnv
                   body m = runCompile m (toIRInferenceSave m False binding (IRVar "sample"))
-              in Just (toProbDecl name $ case topKThreshold conf of
-                   Just _ -> IRLambda "sample" $ IRLambda "acc_prob" $ body (metaBase { accProb = IRVar "acc_prob" })
-                   Nothing -> IRLambda "sample" $ body metaBase)
+              in Just (appendDoc guardNote $ toProbDecl name $ case topKThreshold conf of
+                   Just _ -> IRLambda "sample" $ IRLambda "acc_prob" $ guardQuery "p" $ body (metaBase { accProb = IRVar "acc_prob" })
+                   Nothing -> IRLambda "sample" $ guardQuery "p" $ body metaBase)
             else Nothing,
           genFun =
             if not noGen then
@@ -503,6 +527,18 @@ toIRNormalParams meta (ReadNN _ name arg) = do
   return (IRIndex (IRVar var) (IRConst (VInt 0)), IRIndex (IRVar var) (IRConst (VInt 1)))
 toIRNormalParams _ e = error $ "toIRNormalParams: cannot extract Normal params from " ++ show (pType (getTypeInfo e)) ++ " | expr: " ++ show e
 
+-- | Standard-normal CDF at 0 of the difference of two PNormal expressions.
+-- left - right ~ Normal(muL - muR, sqrt(sL^2 + sR^2)); returns Phi((0 - mu) / sigma),
+-- which is p(left < right). Used to give P-mode a closed form for Gaussian-vs-Gaussian
+-- comparisons, where neither side is a deterministic bound.
+normalDiffCdfAtZero :: CompilerMetadata -> Expr -> Expr -> CompilerMonad IRExpr
+normalDiffCdfAtZero meta left right = do
+  (muL, sL) <- toIRNormalParams meta left
+  (muR, sR) <- toIRNormalParams meta right
+  let mu = IROp OpSub muL muR
+      sigma = irSqrt (IROp OpPlus (IROp OpMult sL sL) (IROp OpMult sR sR))
+  return (IRCumulative IRNormal (IROp OpDiv (IROp OpSub (IRConst (VFloat 0)) mu) sigma))
+
 -- | Recursively extract (mu_log, sigma) as IRExprs from a PLogNormal-typed expression.
 toIRLogNormalParams :: CompilerMetadata -> Expr -> CompilerMonad (IRExpr, IRExpr)
 toIRLogNormalParams meta (InjF _ (Named "exp") [e])
@@ -522,6 +558,21 @@ toIRLogNormalParams meta (InjF _ (Named "mult") [e0, e1])
       (mu1, s1) <- toIRLogNormalParams meta e1
       det0 <- toIRGenerate meta e0
       return (IROp OpPlus mu1 (IRUnaryOp OpLog det0), s1)
+-- sqrt(exp x) = exp(x/2): the log-space variable is halved, so (mu_log, sigma) -> (mu_log/2, sigma/2).
+toIRLogNormalParams meta (InjF _ (Named "sqrt") [e])
+  | pType (getTypeInfo e) == PLogNormal = do
+      (mu, s) <- toIRLogNormalParams meta e
+      return (IROp OpMult (IRConst (VFloat 0.5)) mu, IROp OpMult (IRConst (VFloat 0.5)) s)
+-- sq(exp x) = (exp x)^2 = exp(2x): the log-space variable is doubled, so (mu_log, sigma) -> (2 mu_log, 2 sigma).
+toIRLogNormalParams meta (InjF _ (Named "sq") [e])
+  | pType (getTypeInfo e) == PLogNormal = do
+      (mu, s) <- toIRLogNormalParams meta e
+      return (IROp OpMult (IRConst (VFloat 2)) mu, IROp OpMult (IRConst (VFloat 2)) s)
+-- recip(exp x) = 1/exp x = exp(-x): the log-space variable is negated, so (mu_log, sigma) -> (-mu_log, sigma).
+toIRLogNormalParams meta (InjF _ (Named "recip") [e])
+  | pType (getTypeInfo e) == PLogNormal = do
+      (mu, s) <- toIRLogNormalParams meta e
+      return (IRUnaryOp OpNeg mu, s)
 -- Tuple-field projection, mirroring toIRNormalParams.
 toIRLogNormalParams meta (InjF _ (Named "fst") [InjF _ (Named "TCons") [a, _]])
   | pType (getTypeInfo a) == PLogNormal = toIRLogNormalParams meta a
@@ -652,6 +703,22 @@ toIRInference meta cumulative (IfThenElse _ cond left right) sample = do
     -- p(y) = p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
     Nothing -> do
       return (addExpr, addDim, branches)
+-- Both sides Gaussian: left - right ~ Normal(muL - muR, sqrt(sL^2 + sR^2)), so the
+-- comparison is that difference's CDF evaluated at 0. Neither side is Deterministic,
+-- so the bound-based equations below do not apply. resolveCompCons types this Bool
+-- as Integrate (a closed-form discrete probability), matching the dim-0 result here.
+toIRInference meta False (GreaterThan _ left right) sample
+  | pType (getTypeInfo left) == PNormal && pType (getTypeInfo right) == PNormal = do
+    cdfAt0 <- normalDiffCdfAtZero meta left right
+    -- p(left > right) = p(diff > 0) = 1 - cdf(0)
+    let returnExpr = IRIf sample (IROp OpSub (IRConst $ VFloat 1.0) cdfAt0) cdfAt0
+    return (returnExpr, const0, IRConst (VFloat 1))
+toIRInference meta False (LessThan _ left right) sample
+  | pType (getTypeInfo left) == PNormal && pType (getTypeInfo right) == PNormal = do
+    cdfAt0 <- normalDiffCdfAtZero meta left right
+    -- p(left < right) = p(diff < 0) = cdf(0)
+    let returnExpr = IRIf sample cdfAt0 (IROp OpSub (IRConst $ VFloat 1.0) cdfAt0)
+    return (returnExpr, const0, IRConst (VFloat 1))
 toIRInference meta False (GreaterThan _ left right) sample
   | pType (getTypeInfo left) == Deterministic = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
@@ -793,21 +860,32 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample
      -- intersections across occurrences) and measure them against the bound
      -- distribution (design set-valued-witnesses).
      Nothing -> setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag planDiag v sample
-     Just (invExprP0, invExprCoV0) -> do
-      invExprP   <- pruneDeadLetIns <$> materializeAnchors meta invExprP0
-      invExprCoV <- pruneDeadLetIns <$> materializeAnchors meta invExprCoV0
+     Just (invExprP0, invExprCoV0, invExprGuard0) -> do
+      invExprP     <- pruneDeadLetIns <$> materializeAnchors meta invExprP0
+      invExprCoV   <- pruneDeadLetIns <$> materializeAnchors meta invExprCoV0
+      invExprGuard <- pruneDeadLetIns <$> materializeAnchors meta invExprGuard0
       let appliedCoV = IRApply (IRLambda (boundVar ++ tag) invExprCoV) sample
       let lInv = IRLambda (boundVar ++ tag) invExprP
       -- Apply the sample to the inverse
       let appliedSample = IRApply lInv sample
+      -- The inversion chain may pass through a deconstructing InjF whose inverse
+      -- (e.g. fromLeft/fromRight) is only applicable on one arm (isLeft/isRight):
+      -- 'guard' is False exactly when `sample` falls outside that domain, in which
+      -- case the whole result below must be forced to zero WITHOUT evaluating it
+      -- (it crashes on out-of-domain input -- observe-partials-umbrella N1b). Each
+      -- `IRIf guard ... 0` below relies on the interpreter's short-circuit
+      -- evaluation of the untaken branch, same as the existing appTestExpr/zeroCheck
+      -- idiom elsewhere in this module.
+      let guard = IRApply (IRLambda (boundVar ++ tag) invExprGuard) sample
       -- Do probabilistic inference using the applied inverse
       (p, dim, bc) <- toIRInference meta cumulative v appliedSample
-  
+
       let scale x = if not cumulative
                       then IROp OpMult x (IRIf (IROp OpEq dim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs appliedCoV))
                       else IRIf (IROp OpGreaterThan appliedCoV const0) x (IROp OpSub (IRConst (VFloat 1)) x)
+      let guarded e zero = IRIf guard e zero
       case rt of
-        TArrow _ _ -> return (wrapInLambdas (IRTCons (scale p) (IRTCons dim bc)), const0, const0)
+        TArrow _ _ -> return (guarded (wrapInLambdas (IRTCons (scale p) (IRTCons dim bc))) (wrapInLambdas (IRTCons const0 (IRTCons const0 const0))), const0, const0)
         _ | cumulative || not (isLambdaExpr l) || not (null tag) ->
               -- Keep the original single-witness behaviour when: (a) integrate mode, where
               -- tuple/multi-latent CDFs are ill-defined; (b) the callable is not a literal
@@ -816,7 +894,7 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample
               -- tagged variables this folding would mis-bind; or (c) the lambda is applied
               -- under a tag (HO duplication). Body-factor folding is only sound for a plain
               -- value let-binding `Apply (Lambda x body) v`.
-              return (wrapInLambdas $ scale p, wrapInLambdas dim, wrapInLambdas bc)
+              return (wrapInLambdas $ guarded (scale p) const0, wrapInLambdas $ guarded dim const0, wrapInLambdas $ guarded bc const0)
         _ -> do
           -- The inversion above only recovers and infers the variable bound by THIS
           -- lambda. Any additional independent latents bound deeper in the body (e.g. a
@@ -871,11 +949,11 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample
                 ++ " this engine (design modality-witnessed-inference)")
           let anyW = IRUnaryOp OpIsAny appliedSample
           let guardAny ok whenAnySink = IRIf anyW (if bindingIsSink then whenAnySink else refuse) ok
-          return ( wrapInLambdas (guardAny combP pBody)
-                 , wrapInLambdas (guardAny combDim dimBody)
-                 , wrapInLambdas (guardAny combBC bcBody) )
+          return ( wrapInLambdas (guarded (guardAny combP pBody) const0)
+                 , wrapInLambdas (guarded (guardAny combDim dimBody) const0)
+                 , wrapInLambdas (guarded (guardAny combBC bcBody) const0) )
     -- Forward chaining may have messed with the structure of the expression. We may have too many or too few lambdas.
-    -- Every lambda, which is not applied, inside of the callable should be present in the retuned IRExpr. 
+    -- Every lambda, which is not applied, inside of the callable should be present in the retuned IRExpr.
     -- Exclude the lambda, which is applied here and all lambdas, which are already present
     {-let Just lBound = findBoundVariable clauses lChainName
     let freeVars = (getUnappliedLambdas clauses lChainName \\ [lBound]) \\ findLambdaVars p
@@ -885,9 +963,9 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample
     let (retP, retD, retBC) = case rType (getTypeInfo v) of
           TArrow _ _ -> do
             let ret = IRInvoke (applyLambdas clauses adts p)
-            if countBranches (compilerConfig meta) then 
-              (IRTFst ret, IRTFst (IRTSnd ret), IRTFst (IRTSnd ret)) 
-            else 
+            if countBranches (compilerConfig meta) then
+              (IRTFst ret, IRTFst (IRTSnd ret), IRTFst (IRTSnd ret))
+            else
               (IRTFst ret, IRTSnd ret, const0)
           _ -> (p, d, bc)
     -- If the result is a function, we must wrap the return into a tuple
@@ -1216,14 +1294,20 @@ addP (aM, aDim) (bM, bDim) = do
   dimVarA <- mkVariable "dimA"
   dimVarB <- mkVariable "dimB"
   setVariables [(pVarA, aM), (pVarB, bM), (dimVarA, aDim), (dimVarB, bDim)]
-  return (IRIf (IROp OpApprox (IRVar pVarA) (IRConst (VFloat 0))) (IRVar pVarB)
-           (IRIf (IROp OpApprox (IRVar pVarB) (IRConst (VFloat 0))) (IRVar pVarA)
+  -- Exact equality here, not OpApprox: this branch exists to detect a genuine
+  -- indicator-zero (e.g. the wrong Either arm), which is always produced exactly
+  -- by upstream indicator/comparison logic. A 1e-10 approx threshold instead
+  -- wrongly discards legitimately tiny-but-nonzero continuous tail densities
+  -- (see observe-partials-umbrella N4). Not total: a deep enough tail still
+  -- underflows to a true float zero and hits this same ambiguity.
+  return (IRIf (IROp OpEq (IRVar pVarA) (IRConst (VFloat 0))) (IRVar pVarB)
+           (IRIf (IROp OpEq (IRVar pVarB) (IRConst (VFloat 0))) (IRVar pVarA)
            (IRIf (IROp OpLessThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar pVarA)
            (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar pVarB)
            (IROp OpPlus (IRVar pVarA) (IRVar pVarB))))),
            -- Dim
-           IRIf (IROp OpApprox (IRVar pVarA) (IRConst (VFloat 0))) (IRVar dimVarB)
-           (IRIf (IROp OpApprox (IRVar pVarB) (IRConst (VFloat 0))) (IRVar dimVarA)
+           IRIf (IROp OpEq (IRVar pVarA) (IRConst (VFloat 0))) (IRVar dimVarB)
+           (IRIf (IROp OpEq (IRVar pVarB) (IRConst (VFloat 0))) (IRVar dimVarA)
            (IRIf (IROp OpLessThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar dimVarA)
            (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar dimVarB)
            (IRVar dimVarA)))))
@@ -1268,7 +1352,12 @@ createHOInverse :: CompilerMetadata -> (String, Expr) -> CompilerMonad (IRExpr -
 createHOInverse meta (fVar, f) = do
   let fcData' = fcData meta
   let adts = adtDecls meta
-  let (inverseF0, inverseCoV0) = toInvExpr fcData' adts (chainName $ getTypeInfo f)
+  -- NB: the applicability guard (3rd component, see observe-partials-umbrella
+  -- N1b) is not threaded through the higher-order inverse path yet -- a
+  -- deconstructing InjF crossed while inverting a user-defined function passed
+  -- through createHOInverse can still crash. Not hit by any current test case;
+  -- tracked as follow-up alongside the other HO-inverse gaps.
+  let (inverseF0, inverseCoV0, _inverseGuard0) = toInvExpr fcData' adts (chainName $ getTypeInfo f)
   inverseF   <- materializeAnchors meta inverseF0
   inverseCoV <- materializeAnchors meta inverseCoV0
   let Just (_, LambdaInfo _ lBodyChainName, tag) = findEquivalentExpression fcData' (chainName $ getTypeInfo f)
@@ -1510,9 +1599,12 @@ stripBranchCount (IREnv funcs adts consts) = IREnv (map stripGroup funcs) adts c
               && '_' `elem` rest
       where rest = drop 2 x
 
-    -- Collapse (prob, (dim, _)) → (prob, dim) peeling through IRLambda/IRLetIn wrappers.
+    -- Collapse (prob, (dim, _)) → (prob, dim) peeling through IRLambda/IRLetIn wrappers,
+    -- and through the query-type guard's IRIf (whose then-branch carries the real triple;
+    -- the else-branch is an IRError, left untouched by the catch-all).
     stripOuterTriple (IRLambda n body)         = IRLambda n (stripOuterTriple body)
     stripOuterTriple (IRLetIn n v body)        = IRLetIn n v (stripOuterTriple body)
+    stripOuterTriple (IRIf c t e)              = IRIf c (stripOuterTriple t) (stripOuterTriple e)
     stripOuterTriple (IRTCons a (IRTCons b _)) = IRTCons a b
     stripOuterTriple e                         = e
 
@@ -1535,6 +1627,39 @@ data WSet = WPoint IRExpr IRExpr     -- witness value, |d inverse / d observatio
           | WFull
           | WEmpty
 
+-- | Mirrors an inverse-witness expression's structure to build a runtime Bool
+-- expression that evaluates to True iff the value that expression produces
+-- (under the SAME runtime branching) contains a placeholder VAny introduced by
+-- a lossy inverse reconstruction -- e.g. isLeft's inverse (always: @if tag then
+-- Left VAny else Right VAny@), the Nothing arm of fromLeft's total inverse
+-- (@if isRight m then Left (fromRight m) else Right VAny@, only ANY-tainted on
+-- one branch), or a tuple projection's inverse (fst's: @TCons(b, VAny)@, tainted
+-- only in the second slot). A single static "is this any-tainted" flag can't
+-- capture either of the latter two -- one depends on which branch is taken,
+-- the other differs per field of a composite value -- so this produces a
+-- same-shaped runtime expression instead of a compile-time Bool, queried fresh
+-- per (sub)value by 'mergeWitnessValue' rather than computed once for a whole
+-- witness. Recognises the specific shapes this module's inverse FDecls build
+-- (IRConst/IRIf/IRLeft/IRRight/IRLetIn); anything else falls back to a
+-- shallow runtime OpIsAny check on the whole subexpression (safe: OpIsAny only
+-- misses ANY nested below the top level, under-approximating "any-tainted",
+-- which only affects which side 'mergeWitnessValue' prefers -- its OpEq guard
+-- independently catches a genuine structural mismatch either way).
+irRuntimeContainsAny :: IRExpr -> IRExpr
+irRuntimeContainsAny (IRConst v) = if valueContainsAny v then constTrueIR else IRConst (VBool False)
+irRuntimeContainsAny (IRIf c t e) = IRIf c (irRuntimeContainsAny t) (irRuntimeContainsAny e)
+irRuntimeContainsAny (IRLeft a) = irRuntimeContainsAny a
+irRuntimeContainsAny (IRRight a) = irRuntimeContainsAny a
+irRuntimeContainsAny (IRLetIn n v b) = IRLetIn n v (irRuntimeContainsAny b)
+irRuntimeContainsAny e = IRUnaryOp OpIsAny e
+
+-- | Substitutes every occurrence of the IR variable @n@ with @val@. Not
+-- capture-avoiding -- fine here, where it is only ever used to eliminate the
+-- single free variable of a small inverse-witness template built from a
+-- globally-unique "astN" chain name, never shadowed by a nested binder.
+substIRVar :: String -> IRExpr -> IRExpr -> IRExpr
+substIRVar n val = irMap (\e -> case e of { IRVar n' | n' == n -> val; _ -> e })
+
 -- | Guards are Bool-valued IR over the sample and deterministic scope; a world
 -- contributes only when all guards hold.
 data WWorld = WWorld { wGuards :: [IRExpr], wSet :: WSet }
@@ -1552,18 +1677,45 @@ intersectW :: WWorld -> WWorld -> WWorld
 intersectW (WWorld g1 s1) (WWorld g2 s2) =
   let (g3, s3) = intersectSet s1 s2 in WWorld (g1 ++ g2 ++ g3) s3
 
--- Two constraints on the SAME draw. Point-point takes the first: both compute
--- the same value from the same observation (the mergeExpr convention).
+-- Two constraints on the SAME draw. Point-point must agree: the compatibility
+-- guard is a single 'OpEq' on the whole, undecomposed values -- deliberately
+-- NOT computed field-by-field. 'OpEq' is already deep, VAny-wildcard-aware in
+-- the interpreter, but only where VAny is *nested inside* a container
+-- comparison (IRInterpreter.hs's cmp: 'VTuple'/'VEither' cases treat a nested
+-- VAny as a wildcard); a *bare* top-level VAny compares False against
+-- anything (the `(VAny, _) -> False` / `(_, VAny) -> False` fallback). Calling
+-- OpEq on a decomposed leaf (e.g. comparing a recovered field directly against
+-- a bare `IRConst VAny` placeholder) would hit that fallback and wrongly
+-- reject an otherwise-valid world -- so the guard stays a single check at this
+-- level, and only the VALUE selection ('mergeWitnessValue') recurses.
 intersectSet :: WSet -> WSet -> ([IRExpr], WSet)
 intersectSet WFull s = ([], s)
 intersectSet s WFull = ([], s)
 intersectSet WEmpty _ = ([], WEmpty)
 intersectSet _ WEmpty = ([], WEmpty)
-intersectSet (WPoint p c) (WPoint _ _) = ([], WPoint p c)
+intersectSet (WPoint p1 c1) (WPoint p2 c2) =
+  ([IROp OpEq p1 p2], WPoint (mergeWitnessValue p1 p2) (IROp OpMult c1 c2))
 intersectSet (WPoint p c) (WInterval lo hi) = (boundGuards p lo hi, WPoint p c)
 intersectSet (WInterval lo hi) (WPoint p c) = (boundGuards p lo hi, WPoint p c)
 intersectSet (WInterval lo1 hi1) (WInterval lo2 hi2) =
   ([], WInterval (maxWBound lo1 lo2) (minWBound hi1 hi2))
+
+-- | Picks, field-by-field, whichever side of two witnesses for the same
+-- variable is not ANY-tainted (checked fresh via 'irRuntimeContainsAny' at
+-- each position, since informativeness can differ per field of a composite
+-- witness -- e.g. one side recovers only a tuple's first field via fst's
+-- inverse, the other only its second via snd's). Recurses through IRTCons so
+-- such complementary partial witnesses combine into a single fully concrete
+-- value instead of one silently overriding the other -- mirrors the
+-- equivalent merge already used on the ordinary, non-set-witness
+-- point-inversion path, ForwardChaining.hs's 'mergeExpr2' IRTCons/VAny cases.
+-- Compatibility is 'intersectSet's job (a single guard on the whole value,
+-- not per field -- see there for why); this function never rejects, only
+-- chooses.
+mergeWitnessValue :: IRExpr -> IRExpr -> IRExpr
+mergeWitnessValue (IRTCons a1 b1) (IRTCons a2 b2) =
+  IRTCons (mergeWitnessValue a1 a2) (mergeWitnessValue b1 b2)
+mergeWitnessValue p1 p2 = IRIf (irRuntimeContainsAny p1) p2 p1
 
 -- Membership guards of a point against interval bounds. Strictness is
 -- irrelevant for the continuous measures this engine emits (a boundary point
@@ -1766,11 +1918,25 @@ transportDirect meta occs body target = case filter (`elem` subtreeCNs body) occ
   [occ] -> case target of
     WPoint s c0 -> case toSeededInvExpr (fcData meta) (adtDecls meta) bodyCN occ of
       Nothing -> return Nothing
-      Just (g0, cov0) -> do
-        g   <- pruneDeadLetIns <$> materializeAnchors meta g0
-        cov <- pruneDeadLetIns <$> materializeAnchors meta cov0
+      Just (g0, cov0, guard0) -> do
+        g     <- pruneDeadLetIns <$> materializeAnchors meta g0
+        cov   <- pruneDeadLetIns <$> materializeAnchors meta cov0
+        guard <- pruneDeadLetIns <$> materializeAnchors meta guard0
         let applyTo e arg = IRApply (IRLambda bodyCN e) arg
-        return (Just [WWorld [] (WPoint (applyTo g s) (IROp OpMult c0 (applyTo cov s)))])
+        -- The inversion may pass through a deconstructing InjF (e.g.
+        -- fromLeft/fromRight) only applicable on one arm; fold that as an
+        -- extra world guard so measureWorld zeroes this world instead of
+        -- evaluating the (crashing on the wrong arm) point value -- see
+        -- observe-partials-umbrella N1b.
+        -- Substitute eagerly (rather than leaving an IRApply/IRLambda shell
+        -- for the interpreter to beta-reduce at runtime) so the witness value
+        -- is a genuinely literal expression -- e.g. IRTCons (IRTFst sample)
+        -- (IRConst VAny) rather than that same tree hidden behind an
+        -- application -- for 'mergeWitnessValue' (see 'intersectSet') to
+        -- pattern-match on directly when this witness is later intersected
+        -- with another occurrence's.
+        let value = substIRVar bodyCN s g
+        return (Just [WWorld [applyTo guard s] (WPoint value (IROp OpMult c0 (applyTo cov s)))])
     WInterval lo hi -> case toSeededMonotoneInvExpr (fcData meta) (adtDecls meta) bodyCN occ of
       Nothing -> return Nothing
       Just (g0, dir) -> do

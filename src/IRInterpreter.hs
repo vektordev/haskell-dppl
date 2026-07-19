@@ -326,6 +326,9 @@ generate f neurals registry adts globalEnv env [] (IRIsRight expr) = do
     VEither (Left _) -> return (VBool False)
     VEither (Right _) -> return (VBool True)
     _ -> error $ "Type error: isLeft requires an either: " ++ show x
+generate f neurals registry adts globalEnv env [] (IRConformsTo t expr) = do
+  x <- generate f neurals registry adts globalEnv env [] expr
+  return $ VBool (valueConformsTo t x)
 generate f neurals registry adts globalEnv env [] (IRDensity IRUniform expr) = do
   x <- generate f neurals registry adts globalEnv env [] expr
   return $ irPDF IRUniform x
@@ -431,5 +434,41 @@ irPDF _ x = error ("Expression must be the density of a valid distribution" ++ s
 irCDF :: Distribution -> IRValue -> IRValue
 irCDF IRUniform (VFloat x) = VFloat $ if x < 0 then 0 else if x > 1 then 1 else x
 irCDF IRNormal (VFloat x) = VFloat $ (1/2)*(1 + erf(x/sqrt(2)))
+
+-- | Structural runtime-tag check backing 'IRConformsTo': does the value match the
+-- shape of the given return type? Used to reject wrong-typed query values (e.g.
+-- p(0.5) against a Bool-returning program) at the function boundary. Deliberately
+-- permissive for types that carry no meaningful runtime tag (type variables,
+-- functions, unset) and for marginal-query wildcards (VAny/VAnyExcept), so the
+-- guard only ever fires on an unambiguous mismatch.
+valueConformsTo :: RType -> GenericValue a -> Bool
+valueConformsTo _ VAny             = True
+valueConformsTo _ (VAnyExcept _)   = True
+valueConformsTo _ (VError _)       = True
+valueConformsTo TBool      (VBool _)   = True
+valueConformsTo TInt       (VInt _)    = True
+valueConformsTo TSymbol    (VSymbol _) = True
+valueConformsTo TFloat     (VFloat _)  = True
+valueConformsTo TUnit      VUnit       = True
+valueConformsTo TThetaTree (VThetaTree _) = True
+valueConformsTo (ListOf t)   (VList xs)        = all (valueConformsTo t) (listToValues xs)
+valueConformsTo (Tuple a b)  (VTuple x y)      = valueConformsTo a x && valueConformsTo b y
+valueConformsTo (TEither a _) (VEither (Left x))  = valueConformsTo a x
+valueConformsTo (TEither _ b) (VEither (Right y)) = valueConformsTo b y
+valueConformsTo (TADT _)     (VADT _ _)        = True
+-- Types with no checkable runtime tag: never reject.
+valueConformsTo (TVarR _)       _ = True
+valueConformsTo (TArrow _ _)    _ = True
+valueConformsTo (GreaterType _ _) _ = True
+valueConformsTo BottomTuple     _ = True
+valueConformsTo NullList        _ = True
+valueConformsTo NotSetYet       _ = True
+-- Any remaining concrete-type / value pairing is a genuine mismatch.
+valueConformsTo _ _ = False
+
+listToValues :: GenericList a -> [a]
+listToValues EmptyList        = []
+listToValues AnyList          = []
+listToValues (ListCont x rest) = x : listToValues rest
 
 

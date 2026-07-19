@@ -194,6 +194,8 @@ secondOfPair = snd (Normal, Uniform * 2.0)
 -- Uppercase Left/Right is only for value literals in .tst files.
 wrappedL  = left  Normal
 wrappedR  = right Uniform
+-- fromLeft/fromRight are total: they return Maybe a (= Either () a), Nothing
+-- (Left ()) on a structural mismatch instead of crashing.
 unwrapped = fromLeft (left Normal)
 
 shiftEither e = mapEither (\x -> x + 1.0) (\y -> y + (-1.0)) e

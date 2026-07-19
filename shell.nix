@@ -12,7 +12,8 @@ pkgs.mkShell {
     ncurses
     pkg-config
     cacert
-    python3
+    # python3 + pyyaml so the NeST_internal_docs q.py frontmatter tool runs from this shell
+    (python3.withPackages (ps: [ ps.pyyaml ]))
     julia
   ];
 

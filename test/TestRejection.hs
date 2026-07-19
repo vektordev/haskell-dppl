@@ -19,10 +19,11 @@ import SPLL.Lang.Types (Program(..), makeTypeInfo, GenericValue(..), MultiValue(
 import SPLL.Typing.RType (RType(..))
 import SPLL.Examples
 import SPLL.Validator (validateProgram)
-import SPLL.Prelude (compile, uniform, constB, constF, (#+#))
-import SPLL.IntermediateRepresentation (defaultCompilerConfig)
+import SPLL.Prelude (compile, runProb, runInteg, uniform, constB, constF, (#+#), (#<#))
+import SPLL.IntermediateRepresentation (defaultCompilerConfig, checkQueryType)
 import SPLL.Typing.Infer (addTypeInfo)
 
+import Control.Exception (try, evaluate, SomeException)
 import Data.List (isInfixOf)
 import Data.Either (isLeft)
 import Test.Tasty (TestTree, testGroup)
@@ -32,6 +33,7 @@ rejectionTests :: TestTree
 rejectionTests = testGroup "Rejection"
   [ validatorTests
   , compileRejectsTests
+  , queryTypeGuardTests
   , typeInferenceTests
   ]
 
@@ -125,3 +127,50 @@ typeInferenceTests = testGroup "TypeInference"
       Left _  -> return ()
       Right _ -> assertFailure "Ill-typed program was accepted by type inference"
   | (name, prog) <- typeInferenceCases ]
+
+-- ----------------------------------------------------------------------------
+-- Query-type guard: a query value whose type does not match the program's return
+-- type (e.g. p(0.5) against a Bool-returning program) must fail with a clear
+-- diagnostic rather than a silent bogus number (guard folded away by the
+-- optimizer) or a deep "not a boolean" panic. The guard is emitted into the IR
+-- (IRConformsTo) and evaluated by the interpreter, so the failure surfaces as a
+-- thrown error we catch here. --noTypeCheck (checkQueryType=False) removes it.
+-- ----------------------------------------------------------------------------
+
+-- main = Uniform < 0.5 : a Bool-returning program. Symmetric threshold so that,
+-- without the guard, the optimizer would fold the sample check away and return a
+-- plausible-but-meaningless 0.5 -- the silent case the guard is meant to catch.
+boolProg :: Program
+boolProg = Program [("main", uniform #<# constF 0.5)] [] [] []
+
+-- Fully forces the query result, propagating any error thrown by the guard.
+forced :: (Show e, Show a) => Either e a -> IO (Either SomeException Int)
+forced = try . evaluate . length . show
+
+queryTypeGuardTests :: TestTree
+queryTypeGuardTests = testGroup "QueryTypeGuard"
+  [ testCase "p() rejects a float query against a Bool program" $ do
+      res <- forced (runProb defaultCompilerConfig boolProg [] (VFloat 0.5))
+      case res of
+        Left e  -> assertBool ("expected conformance diagnostic, got: " ++ show e)
+                              ("does not conform to return type TBool" `isInfixOf` show e)
+        Right _ -> assertFailure "float query against a Bool program was silently accepted"
+  , testCase "cdf() rejects a float query against a Bool program" $ do
+      res <- forced (runInteg defaultCompilerConfig boolProg [] (VFloat 0.5))
+      case res of
+        Left e  -> assertBool ("expected conformance diagnostic, got: " ++ show e)
+                              ("does not conform to return type TBool" `isInfixOf` show e)
+        Right _ -> assertFailure "float cdf query against a Bool program was silently accepted"
+  , testCase "p() accepts a well-typed Bool query" $ do
+      res <- forced (runProb defaultCompilerConfig boolProg [] (VBool True))
+      case res of
+        Left e  -> assertFailure ("well-typed Bool query was rejected: " ++ show e)
+        Right _ -> return ()
+  , testCase "--noTypeCheck disables the guard" $ do
+      let conf = defaultCompilerConfig { checkQueryType = False }
+      res <- forced (runProb conf boolProg [] (VFloat 0.5))
+      case res of
+        Left e  -> assertBool ("guard should be off, but a conformance error was raised: " ++ show e)
+                              (not ("does not conform" `isInfixOf` show e))
+        Right _ -> return ()
+  ]

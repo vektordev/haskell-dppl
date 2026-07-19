@@ -25,6 +25,10 @@ data PType = Deterministic
 -- Lattice (partial order):
 --   Deterministic > PNormal, PLogNormal > Integrate > Bottom
 --   PNormal and PLogNormal are incomparable (different distribution families)
+-- Note: "Integrate" means the CDF is evaluable via a trusted, O(1) special-function
+-- (e.g. erf for the Gaussian) -- not necessarily closed-form. The old density-only
+-- rung (density known, CDF only via in-house quadrature) was provably uninhabited
+-- under the no-Class-B-quadrature policy and has been removed.
 
 infixr `PArr`
 

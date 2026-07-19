@@ -18,6 +18,7 @@ module SPLL.Lang.Types
   , Value
   , GenericValue(..)
   , isVEither, isVTuple, isVADT
+  , valueContainsAny
   , MultiValue(..)
   , Tag(..)
   , InferenceRule(..)
@@ -174,6 +175,25 @@ isVEither (VEither _) = True
 isVEither _ = False
 isVADT (VADT _ _) = True
 isVADT _ = False
+
+-- | Whether a value has a placeholder 'VAny'/'VAnyExcept' anywhere in its
+-- structure (e.g. 'VEither (Left VAny)') -- distinct from the value itself
+-- being 'VAny'. Used to tell a witness that only partially determines a value
+-- (recovered from a lossy inverse, e.g. isLeft's, which knows the tag but not
+-- the payload) apart from a fully concrete one.
+valueContainsAny :: GenericValue a -> Bool
+valueContainsAny VAny = True
+valueContainsAny (VAnyExcept _) = True
+valueContainsAny (VEither (Left v)) = valueContainsAny v
+valueContainsAny (VEither (Right v)) = valueContainsAny v
+valueContainsAny (VTuple a b) = valueContainsAny a || valueContainsAny b
+valueContainsAny (VADT _ vs) = any valueContainsAny vs
+valueContainsAny (VList l) = listContainsAny l
+  where
+    listContainsAny EmptyList = False
+    listContainsAny AnyList = True
+    listContainsAny (ListCont x xs) = valueContainsAny x || listContainsAny xs
+valueContainsAny _ = False
 
 data MultiValue = MultiDiscretes [Value]
                 | MultiTuple MultiValue MultiValue

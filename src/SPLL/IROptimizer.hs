@@ -400,6 +400,7 @@ setIRSubExprs (IRLambda n _) [a] = IRLambda n a
 setIRSubExprs (IRApply{}) [a, b] = IRApply a b
 setIRSubExprs (IREnumSum n val _) [a] = IREnumSum n val a
 setIRSubExprs (IRIndex{}) [a, b] = IRIndex a b
+setIRSubExprs (IRConformsTo t _) [a] = IRConformsTo t a
 setIRSubExprs e [] = e  -- leaves: IRConst, IRSample, IRVar, IRError
 setIRSubExprs e kids = error ("setIRSubExprs: arity mismatch for " ++ irPrintFlat e ++ " with " ++ show (length kids) ++ " children")
 
