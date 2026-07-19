@@ -9,7 +9,7 @@ import Test.Tasty (TestTree, testGroup, defaultMain, localOption)
 import Test.Tasty.QuickCheck (testProperty, testProperties, QuickCheckMaxRatio(..))
 import System.Environment (lookupEnv, setEnv)
 import System.FilePath (takeBaseName)
-import Data.Maybe (isNothing)
+import Data.Maybe (isNothing, fromMaybe)
 
 import SPLL.Examples
 import SPLL.Lang.Lang
@@ -32,7 +32,9 @@ import TestCaseParser (parseProgram, parseTestCases, TestCase(..), Backend(..))
 import TestTolerances (probTolerance, reasonablyCloseTolerance, samplingTolerance)
 import SPLL.Prelude
 import qualified SPLL.CodeGenPyTorch
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, nubBy)
+import Data.Function (on)
+import qualified Data.Map.Strict as Map
 
 
 normalPDF :: Double -> Double
@@ -82,7 +84,7 @@ prop_CheckInvalidPrograms = forAll (elements invalidTestCases) checkInvalidProgr
 -- cdf(x)=(1.0, 0.0) line per program.
 corpusTests :: [CorpusProbCase] -> TestTree
 corpusTests probPool = localOption (QuickCheckMaxRatio 20) $ testGroup "Corpus"
-  [ testProperty "ValidPrograms" (forAllNamed checkValidPrograms)
+  [ testProperty "ValidPrograms" (forAllNamed (\_ tc -> checkValidPrograms tc))
   -- dim 0 means the expectation refers to an atom, not a density: match drawn
   -- samples against it with a near-exact window (wide enough for float noise like
   -- 0.1+0.2, narrow enough to separate deliberately-close .tst atoms) instead of
@@ -93,25 +95,34 @@ corpusTests probPool = localOption (QuickCheckMaxRatio 20) $ testGroup "Corpus"
   -- so reliable multivariate estimates need prohibitively many samples; those
   -- cases are value-checked exactly by End2End.Interpreter instead.
   , testProperty "SamplingMatchesPDF" $ once $ conjoin
-      [ counterexample ("corpus case: " ++ n) (testSamplingProb (samplingEps outDim) 1000 5 tc)
+      [ counterexample ("corpus case: " ++ n) (testSamplingProb defaultEnvs n (samplingEps outDim) 1000 5 tc)
       | (n, tc@(_, inp, _, (_, outDim))) <- probPool
       , sampleable inp, outDim == VFloat 0 || outDim == VFloat 1 ]
-  , testProperty "TopKInterprets" (forAllNamed checkTopKInterprets)
+  , testProperty "TopKInterprets" (forAllNamed (checkTopKInterprets topK005Envs))
   -- testCases/dice (recursive float dice) diverges under branch-counting
   -- compilation: the BC-compiled prob function never terminates although plain
   -- and topK compilation interpret it in milliseconds. Genuine BC bug on
   -- recursive parameterized functions (NeST_internal_docs task
   -- bc-recursive-prob-divergence); excluded from the pool until it is fixed.
   , testProperty "ProbWithBranchCounting"
-      (forAllNamedIn (filter ((/= "dice") . fst) probPool) checkProbTestCasesWithBC)
-  , testProperty "MarginalAnyIsOne" (forAllNamed checkProbAny)
-  , testProperty "TopKZeroThreshMatchesExact" (forAllNamed checkTopKZeroMatchesExact)
-  , testProperty "TopKNeverInflates" (forAllNamed (checkTopKNeverInflates 0.1))
+      (forAllNamedIn (filter ((/= "dice") . fst) probPool) (checkProbTestCasesWithBC bcEnvs))
+  , testProperty "MarginalAnyIsOne" (forAllNamed (checkProbAny defaultEnvs))
+  , testProperty "TopKZeroThreshMatchesExact" (forAllNamed (checkTopKZeroMatchesExact topK0Envs defaultEnvs))
+  , testProperty "TopKNeverInflates" (forAllNamed (checkTopKNeverInflates topK01Envs defaultEnvs))
   ]
   where
+    -- Compile each corpus program once per config, shared by every invariant and
+    -- every .tst line drawn from that program (compile depends only on the pair,
+    -- never on the queried sample/params).
+    progs = uniqueCorpusPrograms probPool
+    defaultEnvs = compileCorpusPrograms defaultCompilerConfig progs
+    topK005Envs = compileCorpusPrograms (topKConf 0.05) progs
+    topK0Envs   = compileCorpusPrograms (topKConf 0.0) progs
+    topK01Envs  = compileCorpusPrograms (topKConf 0.1) progs
+    bcEnvs      = compileCorpusPrograms bcConf progs
     -- Enumerate the whole (filtered) pool deterministically so any failing corpus
     -- case surfaces on every run, rather than only when a random draw selects it.
-    forAllNamedIn pool f = once $ conjoin [counterexample ("corpus case: " ++ n) (f tc) | (n, tc) <- pool]
+    forAllNamedIn pool f = once $ conjoin [counterexample ("corpus case: " ++ n) (f n tc) | (n, tc) <- pool]
     forAllNamed = forAllNamedIn probPool
     samplingEps outDim = if outDim == VFloat 0 then 1e-9 else 0.05
 
@@ -176,26 +187,26 @@ checkInvalidPrograms p = case validateProgram p of
   Right _ -> counterexample "Program validates even though it should not" False
 
 
-checkTopKInterprets :: (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
-checkTopKInterprets (p, inp, params, _) = ioProperty $ do
-  let actualOutput = irDensity (topKConf 0.05) p inp params
+checkTopKInterprets :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
+checkTopKInterprets envs n (p, inp, params, _) = ioProperty $ do
+  let actualOutput = irDensityC envs n p params inp
   return $ actualOutput `reasonablyClose` actualOutput  -- No clue what the correct value should be here. Just test that is interprets to any value
 
 -- Expected values in .tst files are rounded to ~4 digits, so compare with the
 -- corpus-wide probTolerance (as the End2End checks do), and skip the dim check
 -- for zero probability (a zero result carries no meaningful dimension).
-checkProbTestCasesWithBC :: (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
-checkProbTestCasesWithBC (p, inp, params, (VFloat out, VFloat outDim)) = ioProperty $ do
-  let actualOutput = irDensity bcConf p inp params
+checkProbTestCasesWithBC :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
+checkProbTestCasesWithBC envs n (p, inp, params, (VFloat out, VFloat outDim)) = ioProperty $ do
+  let actualOutput = irDensityC envs n p params inp
   case actualOutput of
     VTuple (VFloat a) (VTuple (VFloat d) (VFloat _)) -> return $
       counterexample (show a ++ "/=" ++ show out) (property $ abs (a - out) < probTolerance)
       .&&. (a === 0 .||. d === outDim)
     _ -> return $ counterexample "Return type was no tuple" False
 
-checkProbAny :: (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
-checkProbAny (p, _, params, _) = ioProperty $ do
-  let actualOutput = irDensity defaultCompilerConfig p VAny params
+checkProbAny :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
+checkProbAny envs n (p, _, params, _) = ioProperty $ do
+  let actualOutput = irDensityC envs n p params VAny
   case actualOutput of
     VTuple a (VFloat d) -> return $ a `reasonablyClose` VFloat 1
     _ -> return $ counterexample "Return type was no tuple" False
@@ -214,6 +225,25 @@ bcConf = defaultCompilerConfig {countBranches = True}
 
 irDensity :: CompilerConfig -> Program -> IRValue -> [IRValue] -> IRValue
 irDensity conf p s params = either error id $ runProb conf p params s
+
+-- Corpus programs are compiled once per (name, config) and shared across every
+-- test-case line drawn from that program: with N .tst lines per program and 5
+-- corpus invariants each needing their own config, compiling per-line-per-invariant
+-- (as irDensity does) redoes the same compile ~5N times over. compile only depends
+-- on (config, program), never on the queried sample/params, so this is pure waste.
+type CompiledPrograms = Map.Map String (Either CompilerError IREnv)
+
+uniqueCorpusPrograms :: [CorpusProbCase] -> [(String, Program)]
+uniqueCorpusPrograms pool = nubBy ((==) `on` fst) [(n, p) | (n, (p, _, _, _)) <- pool]
+
+compileCorpusPrograms :: CompilerConfig -> [(String, Program)] -> CompiledPrograms
+compileCorpusPrograms conf progs = Map.fromList [(n, compile conf p) | (n, p) <- progs]
+
+lookupCompiled :: CompiledPrograms -> String -> Either CompilerError IREnv
+lookupCompiled envs n = fromMaybe (error ("no compiled entry for corpus program " ++ n)) (Map.lookup n envs)
+
+irDensityC :: CompiledPrograms -> String -> Program -> [IRValue] -> IRValue -> IRValue
+irDensityC envs n p params s = either error id (lookupCompiled envs n >>= \c -> runProbC p c params s)
 
 reasonablyClose :: IRValue -> IRValue -> Property
 reasonablyClose (VFloat a) (VFloat b) = counterexample (show a ++ "/=" ++ show b) (property $ abs (a - b) <= reasonablyCloseTolerance)
@@ -239,10 +269,11 @@ sampleable (VList l) = all sampleable l
 sampleable _ = False
 
 --Sample PDF against expected PDF. Retry specific number of times with double the samples each time
-testSamplingProb :: Double -> Int -> Int -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
-testSamplingProb epsilon samples retries tc@(p, inp, params, (VFloat out, VFloat outDim))
+testSamplingProb :: CompiledPrograms -> String -> Double -> Int -> Int -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
+testSamplingProb envs n epsilon samples retries tc@(p, inp, params, (VFloat out, VFloat outDim))
   | sampleable inp = ioProperty $ evalRandIO $ do
-    let gen = either error id (runGen defaultCompilerConfig p params)
+    let compiledEnv = either error id (lookupCompiled envs n)
+    let gen = runGenC p compiledEnv params
     drawn <- replicateM samples gen
     let countInside = length (filter (sampleMatches epsilon inp) drawn)
     let ratioInside = fromIntegral countInside / fromIntegral samples
@@ -254,10 +285,10 @@ testSamplingProb epsilon samples retries tc@(p, inp, params, (VFloat out, VFloat
       return $ property True
     else
       if retries > 0 then
-        return $ testSamplingProb epsilon (samples * 2) (retries - 1) tc
+        return $ testSamplingProb envs n epsilon (samples * 2) (retries - 1) tc
       else
         return $ counterexample ("Sampled PDF is: " ++ show estimatePDF ++ ", but should be: " ++ show out) (property valid)
-testSamplingProb _ _ _ _ = False ==> False
+testSamplingProb _ _ _ _ _ _ = False ==> False
 
 -- Two-level nesting: inner true branch has global prob 0.12*0.12=0.0144 < thresh=0.1, so it is
 -- pruned by global topK but would survive local topK (local condT=0.12 > 0.1).
@@ -295,20 +326,20 @@ prop_TopKCrossFunction = once $ ioProperty $ do
     _ -> return $ counterexample "Return type was no tuple" False
 
 -- Threshold=0 never prunes any branch, so results must match exact inference.
-checkTopKZeroMatchesExact :: (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
-checkTopKZeroMatchesExact (p, inp, params, _) = ioProperty $ do
-  let topKResult = irDensity (topKConf 0.0) p inp params
-  let exactResult = irDensity defaultCompilerConfig p inp params
+checkTopKZeroMatchesExact :: CompiledPrograms -> CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
+checkTopKZeroMatchesExact topKEnvs defEnvs n (p, inp, params, _) = ioProperty $ do
+  let topKResult = irDensityC topKEnvs n p params inp
+  let exactResult = irDensityC defEnvs n p params inp
   case (topKResult, exactResult) of
     (VTuple topKP topKD, VTuple exactP exactD) ->
       return $ topKP `reasonablyClose` exactP .&&. topKD `reasonablyClose` exactD
     _ -> return $ counterexample "Return type was no tuple" False
 
 -- Pruning can only zero out branches, never inflate probability above the exact value.
-checkTopKNeverInflates :: Double -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
-checkTopKNeverInflates thresh (p, inp, params, _) = ioProperty $ do
-  let topKResult = irDensity (topKConf thresh) p inp params
-  let exactResult = irDensity defaultCompilerConfig p inp params
+checkTopKNeverInflates :: CompiledPrograms -> CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
+checkTopKNeverInflates topKEnvs defEnvs n (p, inp, params, _) = ioProperty $ do
+  let topKResult = irDensityC topKEnvs n p params inp
+  let exactResult = irDensityC defEnvs n p params inp
   case (topKResult, exactResult) of
     (VTuple (VFloat topKP) _, VTuple (VFloat exactP) _) ->
       return $ counterexample (show topKP ++ " > " ++ show exactP) (topKP <= exactP + 1e-9)
