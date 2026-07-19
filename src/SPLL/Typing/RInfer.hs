@@ -15,7 +15,7 @@ import Control.Monad.Identity
 
 import qualified Data.Set as Set
 
-import Data.Foldable hiding (toList)
+import Data.Foldable (foldl')
 import qualified Data.Map as Map
 
 
@@ -32,49 +32,8 @@ import Control.Monad (replicateM)
 
 -- changes: in infer and inferProg; also changed TypeSigs to remove RType of main expression.
 
--- unchanged:
-data TEnv = TypeEnv { types :: Map.Map Name Scheme }
-  deriving (Eq, Show)
-
-empty :: TEnv
-empty = TypeEnv Map.empty
-
-extend :: TEnv -> (Name, Scheme) -> TEnv
-extend env (x, s) = env { types = Map.insert x s (types env) }
-
-remove :: TEnv -> Name -> TEnv
-remove (TypeEnv env) var = TypeEnv (Map.delete var env)
-
-extends :: TEnv -> [(Name, Scheme)] -> TEnv
-extends env xs = env { types = Map.union (Map.fromList xs) (types env) }
-
-lookupE :: Name -> TEnv -> Maybe Scheme
-lookupE key (TypeEnv tys) = Map.lookup key tys
-
-merge :: TEnv -> TEnv -> TEnv
-merge (TypeEnv a) (TypeEnv b) = TypeEnv (Map.union a b)
-
-mergeTEnvs :: [TEnv] -> TEnv
-mergeTEnvs = foldl' merge empty
-
-singleton :: Name -> Scheme -> TEnv
-singleton x y = TypeEnv (Map.singleton x y)
-
-keys :: TEnv -> [Name]
-keys (TypeEnv env) = Map.keys env
-
-fromList :: [(Name, Scheme)] -> TEnv
-fromList xs = TypeEnv (Map.fromList xs)
-
-toList :: TEnv -> [(Name, Scheme)]
-toList (TypeEnv env) = Map.toList env
-
-instance Semigroup TEnv where
-  (<>) = merge
-
-instance Monoid TEnv where
-  mempty = empty
-  mappend = (<>)
+-- The typing environment is a plain Data.Map from variable name to its Scheme.
+type TEnv = Map.Map Name Scheme
 
 data RTypeError
   = UnificationFail RType RType
@@ -187,10 +146,6 @@ instance Substitutable a => Substitutable [a] where
   apply = map . apply
   ftv   = foldr (Set.union . ftv) Set.empty
 
-instance Substitutable TEnv where
-  apply s (TypeEnv env) = TypeEnv $ Map.map (apply s) env
-  ftv (TypeEnv env) = ftv $ Map.elems env
-
 showConstraint :: Constraint -> String
 showConstraint (Constraint a b Nothing) = prettyRType a ++ " :==: " ++ prettyRType b
 showConstraint (Constraint a b (Just c)) = prettyRType a ++ " :==: " ++ prettyRType b ++ " (from " ++ c ++ ")"
@@ -198,7 +153,7 @@ showConstraint (Constraint a b (Just c)) = prettyRType a ++ " :==: " ++ prettyRT
 
 --build the basic type environment: Take all invertible functions; ignore their inverses
 basicTEnv :: [ADTDecl] -> TEnv
-basicTEnv adts = TypeEnv $ Map.fromList $ (adtRTs ++ injFRTs ++ distRTs)
+basicTEnv adts = Map.fromList $ (adtRTs ++ injFRTs ++ distRTs)
   where
     adtRTs = map (Data.Bifunctor.second toScheme) (concatMap implicitFunctionRTypes adts)
     injFRTs = map (\(name, FPair FDecl {contract=ty} _) -> (name, ty)) (globalFEnv adts)
@@ -421,18 +376,12 @@ inferResultingType (Forall vars _ fTy) (fstTy:rtypes2) = do
 
 -- | Extend type TEnvironment
 inTEnvF :: [(Name, Scheme)] -> Infer a -> Infer a
-inTEnvF [] m = m
-inTEnvF ((x, sc): []) m = do
-  let scope e = remove e x `extend` (x, sc)
-  local scope m
-inTEnvF ((x, sc): r) m = do
-  let scope e = remove e x `extend` (x, sc)
-  inTEnvF r (local scope m)
+inTEnvF bindings m = local (\env -> foldl' (\e (x, sc) -> Map.insert x sc e) env bindings) m
 
 -- | Lookup type in the TEnvironment
 lookupTEnv :: Name -> Infer RType
 lookupTEnv x = do
-  (TypeEnv env) <- ask
+  env <- ask
   case Map.lookup x env of
       Nothing   ->  throwError $ UnboundVariable x
       Just s    ->  do t <- instantiate s
