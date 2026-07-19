@@ -509,21 +509,27 @@ pNull = do
   _ <- symbol "[]"
   return $ nul
 
+-- | Parses "(expr)" and "(expr, expr)" sharing a single parse of the first
+-- component. A prior version tried a standalone pTuple (parse expr, require
+-- comma) before falling back to a standalone parenthesized-expr parser (parse
+-- expr again); on a failed tuple guess that re-parsed the whole first
+-- component from scratch. Since every nested paren re-triggers the same
+-- doubling, a chain of N nested parenthesized subexpressions (e.g. a
+-- right-nested if/accessor chain) cost O(2^N) instead of O(N) -- 12 levels of
+-- nesting alone measured at 160+ seconds to parse (testCases/planEnumInlineWide).
 pTuple :: MonadParser m => [ADTDecl] -> m Expr
 pTuple adts = parens $ do
   x <- expr adts
-  _ <- symbol ","
-  y <- expr adts
-  return $ tuple x y
+  rest <- optional (symbol "," *> expr adts)
+  return $ maybe x (tuple x) rest
 
 
 -- | Parse atomic expressions (no recursion)
 atom :: MonadParser m => [ADTDecl] -> m Expr
 atom adts = choice [
     pNull,
-    try (pTuple adts),
     try (pListExpr adts),
-    try (parens (expr adts)),  -- Parenthesized expressions first
+    try (pTuple adts),  -- "(expr)" and "(expr, expr)" -- see pTuple
     pUniform,     -- Built-in distributions
     pNormal,
     pConst,       -- Constants (numbers)
@@ -555,7 +561,10 @@ pLambda adts = do
 application :: MonadParser m => [ADTDecl] -> m Expr
 application adts = dbg "application" $ do
     func <- try (atom adts)
-    args <- try $ many (try (atom adts) <|> try (parens (expr adts)))
+    -- atom already covers "(expr)"/"(expr, expr)" via pTuple; a separate
+    -- parens(expr) fallback here would re-parse the same paren contents a
+    -- second time on every atom-alternative failure (see pTuple's comment).
+    args <- try $ many (try (atom adts))
     case func of
         Var _ name -> case lookup name binaryFs of
             Just constructor -> return (construct2 constructor args)
