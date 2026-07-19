@@ -49,6 +49,34 @@ typechecks p = case tryAddRTypeInfo p of
   Right _ -> True
   Left _  -> False
 
+-- GreaterType (SPLL.Typing.RType) is a transient unification device used only
+-- inside RInfer's constraint solver (unifies/greaterType) to defer choosing
+-- between two candidate types; it must never survive into an RType annotation
+-- once inference has finished (task cleanup-rinfer).
+containsGreaterType :: RType -> Bool
+containsGreaterType (GreaterType _ _) = True
+containsGreaterType (ListOf t)        = containsGreaterType t
+containsGreaterType (Tuple t1 t2)     = containsGreaterType t1 || containsGreaterType t2
+containsGreaterType (TEither t1 t2)   = containsGreaterType t1 || containsGreaterType t2
+containsGreaterType (TArrow t1 t2)    = containsGreaterType t1 || containsGreaterType t2
+containsGreaterType _                 = False
+
+exprSubtree :: Expr -> [Expr]
+exprSubtree e = e : concatMap exprSubtree (getSubExprs e)
+
+-- Property: for any (untyped) generated program, if RType inference succeeds,
+-- no GreaterType ever appears in any of the resulting RType annotations.
+-- Ill-typed programs (Left) are out of scope for this invariant -- there is no
+-- annotated tree to inspect.
+prop_noGreaterTypeAfterRInfer :: Program -> Property
+prop_noGreaterTypeAfterRInfer prog = case tryAddRTypeInfo prog of
+  Left _ -> property True
+  Right typed ->
+    let allRTypes = [ rType (getTypeInfo e)
+                     | (_, body) <- functions typed
+                     , e <- exprSubtree body ]
+    in property (not (any containsGreaterType allRTypes))
+
 -- plus on two float constants should succeed
 test_plusFloat :: TestTree
 test_plusFloat = testCase "plusFloat" $
