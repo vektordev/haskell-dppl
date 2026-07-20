@@ -1112,6 +1112,59 @@ toIRInference meta cumulative (InjF TypeInfo {tags=_} (Named name) params) sampl
   let returnP = scale ifExpr
   let appTestExpr e = IRIf appTest e const0
   return (appTestExpr returnP, appTestExpr ifDim, appTestExpr ifBranches)
+-- Single-operand enumeration for forward-only binary InjFs (and/or) when exactly
+-- one operand is deterministic and the other is a single tractable random Bool
+-- (Integrate/PNormal/PLogNormal). Forward-only ops (see 'isForwardOnly') declare
+-- no inversions, so the generic single-inversion clause below has nothing to
+-- invert and crashes with "Non-exhaustive patterns in [invDecl]" on exactly this
+-- shape (found by TestFuzz's typed generator, e.g. @(Uniform < 0.4) and True@).
+-- Mirrors the two-operand enumerate-both case further down: the deterministic
+-- side doesn't depend on the enum variable, so it's evaluated once outside the
+-- loop; the random side's own (already-tractable) enum is then looped, keeping
+-- cells where forward(l,r) == sample.
+toIRInference meta False (InjF TypeInfo {rType=rt} (Named name) [left, right]) sample
+  | isForwardOnly (adtDecls meta) (resolveInjF rt name)
+    && (pType (getTypeInfo left) == Deterministic || pType (getTypeInfo right) == Deterministic)
+    && countProbParams [left, right] == 1
+    && isEnumerable (tags (getTypeInfo (if pType (getTypeInfo left) == Deterministic then right else left))) = do
+  let resolvedName = resolveInjF rt name
+  let leftDet = pType (getTypeInfo left) == Deterministic
+  let (detExprSrc, randExprSrc) = if leftDet then (left, right) else (right, left)
+  let enumList = head [x | DiscreteValues x <- tags (getTypeInfo randExprSrc)]
+  fPair <- instantiate mkVariable (adtDecls meta) resolvedName
+  let FPair fwd _ = fPair
+  let FDecl {inputVars=[v1, v2], body=f} = fwd
+  let (detVar, randVar) = if leftDet then (v1, v2) else (v2, v1)
+  detIR <- toIRGenerate meta detExprSrc
+  setVariables [(detVar, detIR)]
+  (returnExpr, binds) <- lift $ runWriterT $ do
+    (pRand, _, _) <- toIRInference meta False randExprSrc (IRVar randVar)
+    return (IRIf (IROp OpEq f sample) pRand (IRConst (VFloat 0)))
+  let (outerBinds, body') = hoistInvariantBindings randVar (buildLetIns binds returnExpr)
+  setVariables outerBinds
+  return (IREnumSum randVar enumList body', const0, const0)
+-- Cumulative (cdf) counterpart of the single-operand enumeration case above.
+toIRInference meta True (InjF TypeInfo {rType=rt} (Named name) [left, right]) sample
+  | isForwardOnly (adtDecls meta) (resolveInjF rt name)
+    && (pType (getTypeInfo left) == Deterministic || pType (getTypeInfo right) == Deterministic)
+    && countProbParams [left, right] == 1
+    && isEnumerable (tags (getTypeInfo (if pType (getTypeInfo left) == Deterministic then right else left))) = do
+  let resolvedName = resolveInjF rt name
+  let leftDet = pType (getTypeInfo left) == Deterministic
+  let (detExprSrc, randExprSrc) = if leftDet then (left, right) else (right, left)
+  let enumList = head [x | DiscreteValues x <- tags (getTypeInfo randExprSrc)]
+  fPair <- instantiate mkVariable (adtDecls meta) resolvedName
+  let FPair fwd _ = fPair
+  let FDecl {inputVars=[v1, v2], body=f} = fwd
+  let (detVar, randVar) = if leftDet then (v1, v2) else (v2, v1)
+  detIR <- toIRGenerate meta detExprSrc
+  setVariables [(detVar, detIR)]
+  (returnExpr, binds) <- lift $ runWriterT $ do
+    (pRand, _, _) <- toIRInference meta False randExprSrc (IRVar randVar)
+    return (IRIf (IROp OpLessThan sample f) (IRConst (VFloat 0)) pRand)
+  let (outerBinds, body') = hoistInvariantBindings randVar (buildLetIns binds returnExpr)
+  setVariables outerBinds
+  return (IREnumSum randVar enumList body', const0, const0)
 toIRInference meta cumulative (InjF TypeInfo {tags=_, rType=rt} (Named name) params) sample
   | countProbParams params == 1 = do
   let resolvedName = resolveInjF rt name

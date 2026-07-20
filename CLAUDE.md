@@ -122,14 +122,17 @@ The base cases are: continuous distributions (`Normal`, `Uniform`) emit `dim = 1
 | Stage | What becomes visible |
 |---|---|
 | After Parsing | All fields `NotSetYet`, tags empty |
+| After RType Inference | `rType` populated; `pType` still `NotSetYet` |
 | After Enum Annotation | `DiscreteValues` tags appear |
 | After Forward Chaining | `chainName` fields filled |
-| After Type Inference | `rType` and `pType` populated |
+| After Modality Inference | `pType` populated |
 | After Conditional Annotation | `IsConditional` tags appear on conditioned distributions |
 | After IR Compilation (pre-optimization) | Pseudo-code IR before any optimizer passes |
 | After Optimization | Pseudo-code IR after constant folding, CSE, let-in optimization |
 
-Use this when a program compiles incorrectly to identify which stage introduced the defect. `IRCompiler` selects the inference algorithm per node directly from the `pType` and `DiscreteValues` annotations visible after Type Inference (there is no separate algorithm-tag stage).
+Use this when a program compiles incorrectly to identify which stage introduced the defect. `IRCompiler` selects the inference algorithm per node directly from the `pType` and `DiscreteValues` annotations visible after Modality Inference (there is no separate algorithm-tag stage).
+
+RType inference (`SPLL.Typing.RInfer.addRTypeInfo`) runs first, directly on the freshly parsed program — it needs no chain names or enum tags, only `PredefinedFunctions`' declared contracts, so it can reject ill-typed InjF applications (e.g. `fromRightPartial` on a non-`Either` value) with a clean `RTypeError` before enum annotation ever forward-evaluates them. `SPLL.Typing.Infer.addModalityInfo` then builds the `ForwardChaining` certificate and runs the modality (`pType`) pass on the already-RType'd, chain-named program; `addTypeInfo` remains as a thin composition of `addRTypeInfo` + `addModalityInfo` for callers (mainly tests) that still want the whole pipeline collapsed into one call on a chain-named program.
 
 ### Neural Declarations
 

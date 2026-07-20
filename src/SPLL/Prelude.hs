@@ -79,7 +79,8 @@ import SPLL.Lang.Types (makeTypeInfo, GenericValue (..), CompilerError)
 import SPLL.AutoNeural (validateEncodeGaussian)
 import SPLL.IntermediateRepresentation
 import SPLL.Analysis
-import SPLL.Typing.Infer (addTypeInfo)
+import SPLL.Typing.Infer (addModalityInfo)
+import SPLL.Typing.RInfer (addRTypeInfo)
 import SPLL.Validator (validateProgram)
 import IRInterpreter (generateRand, generateDet)
 import Control.Monad.Random (Rand, RandomGen)
@@ -303,7 +304,21 @@ compile conf p = do
   printIfVerbose conf (pPrintProg p)
   printStage conf "After Parsing (no annotations)" p
 
-  let preAnnotated = annotateEnumsProg p
+  -- RType inference now runs first, directly on the freshly parsed program --
+  -- it needs no chain names or enum tags (SPLL.Typing.RInfer reads only the
+  -- Expr shape and PredefinedFunctions' contracts). Running it here, rather
+  -- than after enum annotation/forward chaining as before, means: (1) ill-typed
+  -- programs (e.g. fromRightPartial applied to a non-Either value) are rejected
+  -- before discretesTags forward-evaluates any InjF application and can hit a
+  -- partial-function crash on genuinely ill-typed input; (2) every later pass
+  -- -- enum annotation, forward chaining, the modality pass -- sees real RType
+  -- instead of NotSetYet, in case any of them can make use of it.
+  rtyped <- addRTypeInfo p
+  printIfMoreVerbose conf "\n=== RType-inferred Program ==="
+  pPrintIfMoreVerbose conf rtyped
+  printStage conf "After RType Inference" rtyped
+
+  let preAnnotated = annotateEnumsProg rtyped
   printIfMoreVerbose conf "\n=== Annotated Program (1) ==="
   pPrintIfMoreVerbose conf preAnnotated
   printStage conf "After Enum Annotation" preAnnotated
@@ -316,22 +331,22 @@ compile conf p = do
   -- Stage 1 of the modality pipeline (modality-typesystem-port §4): the forward
   -- determinism dataflow whose known-anchor set ForwardChaining will consume in
   -- place of its Constant-only approximation (the wiring is milestone 3). It
-  -- slots here, after chain naming and before type inference, per the §4 order.
+  -- slots here, after chain naming and before the modality pass, per the §4 order.
   let anchors = knownAnchors forwardChained
   printIfMoreVerbose conf ("\n=== Determinism (known anchors) ===\n"
                             ++ unwords (Set.toList anchors))
 
   -- Stage 2 of the modality pipeline (modality-split-forwardchaining): the
-  -- ForwardChaining certificate is built ONCE, inside addTypeInfo — between
-  -- RInfer (it reads rType for function arrows) and the modality pass, which
+  -- ForwardChaining certificate is built ONCE, inside addModalityInfo -- from
+  -- the already-RType'd, chain-named program, feeding the modality pass, which
   -- consults its witnessed-binding verdict for the let rule
   -- (modality-witnessed-inference, milestone 2). The same FCData is returned
   -- here and threaded to both remaining consumers (conditional annotation and
   -- IR codegen).
-  (typed, fcData) <- addTypeInfo forwardChained
+  (typed, fcData) <- addModalityInfo forwardChained
   printIfMoreVerbose conf "\n=== Typed Program ==="
   pPrintIfMoreVerbose conf typed
-  printStage conf "After Type Inference (RType + PType)" typed
+  printStage conf "After Modality Inference (PType)" typed
 
   let annotated = annotateConditionalProg fcData typed
   printIfMoreVerbose conf "\n=== Annotated Program (2) ==="

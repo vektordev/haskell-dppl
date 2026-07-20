@@ -50,7 +50,9 @@ validateNeuralShape (name, TArrow _ TSymbol, _) =
         ++ "the Encoder direction, which is no longer supported. To register a logit layout "
         ++ "for a type, write `neural encode :: <type> of <multivalue>`; the encode for a "
         ++ "value is generated on the SPLL function that produces it.")
-validateNeuralShape _ = Right ()
+validateNeuralShape (name, ty, _) =
+  Left ("Compiler Error: neural declaration '" ++ name ++ "' has type " ++ show ty
+        ++ ", but neural declarations must have the form (Symbol -> target).")
 
 -- A program must declare a "main" function, as it is the entry point compiled
 -- to the generate/probability/integrate functions invoked by runGen/runProb/runInteg.

@@ -65,6 +65,14 @@ encodeCollisionProg = Program [("main", constF 1.0)] [] []
 encoderDeclProg :: Program
 encoderDeclProg = Program [("main", constB True)] [("ren", TArrow TBool TSymbol, Nothing)] [] []
 
+-- A neural declaration whose type is not an arrow at all (nor the Encoder-direction
+-- arrow above): must be rejected at validation for the same reason -- neural
+-- declarations must have the form (Symbol -> target). Previously this fell through
+-- validateNeuralShape's catch-all (Right ()) and crashed later, deep in AutoNeural's
+-- makeAutoNeural, instead of being rejected here.
+malformedNeuralDeclProg :: Program
+malformedNeuralDeclProg = Program [("main", constB True)] [("ren", TBool, Nothing)] [] []
+
 -- Each entry: (case name, program, distinctive substring of the expected error).
 -- The substring identifies *which* validation rule should fire, so we catch both
 -- "should have been rejected but wasn't" and "rejected for the wrong reason".
@@ -84,6 +92,7 @@ validatorCases =
   , ("anyInProgram",     anyInProgramProg,       "ANY may not be used")
   , ("encodeCollision",  encodeCollisionProg,    "conflicting PartitionPlan annotations")
   , ("encoderDecl",      encoderDeclProg,        "neural encode")
+  , ("malformedNeuralDecl", malformedNeuralDeclProg, "must have the form (Symbol -> target)")
   ]
 
 validatorTests :: TestTree

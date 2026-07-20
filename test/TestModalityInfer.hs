@@ -115,6 +115,18 @@ modalityInferTests = testGroup "ModalityInfer"
           -- {S,I} (integral but no density) projects to Bottom, matching
           -- PInfer2's resolvePlusCons.
           assertEqual "" Bottom (mainPType "main = Uniform + Normal")
+      , testCase "comparison against a Bottom operand is Bottom, not Integrate" $
+          -- Regression (found by TestFuzz's typed generator, 2026-07-20):
+          -- 'compareGround's "both integral-ready" branch used to accept the
+          -- right operand's degenerate {S,I} ground (the same IntegralOnly
+          -- state the previous case shows projects to Bottom) via a
+          -- reflexive 'leqCap IntegralOnly IntegralOnly' check that is
+          -- trivially true, wrongly promoting the comparison to 'Integrate'
+          -- (a claimed-but-nonexistent closed-form CDF) instead of 'Bottom'.
+          -- IRCompiler then crashed with "found no way to convert to IR" on
+          -- this exact shape trying to honor the bogus 'Integrate' claim.
+          assertEqual "" Bottom
+            (mainPType "main = 2.0 * Normal > Uniform + Normal")
       , testCase "a function node carries its body pType (IRCompiler contract)" $
           -- Milestone 5: a function-typed node projects to its /body/ pType, not
           -- the lossy outer-closure 'Deterministic'. @IRCompiler@ selects

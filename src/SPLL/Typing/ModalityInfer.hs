@@ -413,7 +413,17 @@ compareGround a b
   | okInt a && okInt b                 = groundMod DensInt      Finite FamNone
   | canSample a && canSample b         = groundMod SampleOnly   Finite FamNone
   | otherwise                          = groundMod Opaque       Finite FamNone
-  where okInt g     = leqCap IntegralOnly (gCap g) || gCap g == Exact
+  -- 'DensInt'/'Exact' are the only ground states with a real, usable CDF here.
+  -- 'IntegralOnly' (bare {S,I}) is a degenerate byproduct of 'marginalize'
+  -- combining two infinite-support operands (no finite side to keep the
+  -- density) -- it is NOT a genuine "integral without density" capability;
+  -- 'projectGround' itself maps it to 'Bottom' for exactly this reason
+  -- ("held unreachable, would overpromise"). A naive @leqCap IntegralOnly
+  -- (gCap g)@ check is trivially true whenever @gCap g == IntegralOnly@
+  -- (reflexivity of the subset order), so it wrongly accepted this degenerate
+  -- state as CDF-ready and produced a spurious 'Integrate' comparison result
+  -- for e.g. @Normal*c > Uniform+Normal@ instead of 'Bottom'.
+  where okInt g     = gCap g == DensInt || gCap g == Exact
         canSample g = leqCap SampleOnly (gCap g)
 
 -- | Modality of an 'InjF' application. Resolution order:
