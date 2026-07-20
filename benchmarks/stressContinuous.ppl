@@ -1,0 +1,45 @@
+-- Stress-test (compiler performance only, not a pinned-value test): deep
+-- recursion, set-valued witnesses, and Gaussian mixtures combined into one
+-- program, kept entirely in the continuous/Float domain so it avoids the
+-- plan-guided engine and instead exercises forward chaining / set-witness
+-- compilation and the IR optimizer on a larger-than-usual expression tree.
+
+factorial x = if x < 1.5 then 1.0 else factorial (x + (-1.0)) * x
+
+dice sides =
+  if sides == 1.0          then 1.0
+  else if Uniform < (1.0 / sides) then sides
+  else dice (sides + (-1.0))
+
+-- set-witness continuous inference: comparisons on both sides of a
+-- stochastic let-binding, forcing interval-witness compilation
+absNormal = let x = Normal in if x < 0.0 then 0.0 - x else x
+
+absNormal2 = let y = Normal * 2.0 in if y < 0.0 then 0.0 - y else y
+
+mixture3 p1 p2 mu1 mu2 mu3 =
+  if Uniform < p1
+    then Normal + mu1
+    else if Uniform < p2
+      then Normal + mu2
+      else Normal + mu3
+
+bucket x =
+  if x < 0.1 then 0.0
+  else if x < 0.2 then 1.0
+  else if x < 0.3 then 2.0
+  else if x < 0.4 then 3.0
+  else if x < 0.5 then 4.0
+  else if x < 0.6 then 5.0
+  else if x < 0.7 then 6.0
+  else if x < 0.8 then 7.0
+  else if x < 0.9 then 8.0
+  else 9.0
+
+main sym =
+  let a = absNormal in
+  let b = absNormal2 in
+  let m = mixture3 0.2 0.5 (0.0 - 3.0) 0.0 3.0 in
+  let d = dice 8.0 in
+  let bk = bucket Uniform in
+  a + b + m + d + bk

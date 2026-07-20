@@ -1,0 +1,36 @@
+-- Stress-test (compiler performance only, not a pinned-value test): a wider
+-- and deeper plan-guided recursive enumeration workload than any single
+-- existing testCases/planEnumRec* program -- more predicates over a deeper
+-- recursive neural ADT, combined into one multi-way branch, to see how the
+-- plan traversal / specialization memoization scales.
+
+data Color = Red | Green | Blue
+data Size = Small | Large
+data Object = Obj color::Color, size::Size
+data Scene = Empty | SCons obj::Object, rest::Scene depth 4
+
+neural readScene :: (Symbol -> Scene)
+
+existsRed s = if isEmpty s then False else (if isRed (color (obj s)) then True else existsRed (rest s))
+
+existsBlue s = if isEmpty s then False else (if isBlue (color (obj s)) then True else existsBlue (rest s))
+
+goOneGreen s found = if isEmpty s then found else (if isGreen (color (obj s)) then (if found then False else goOneGreen (rest s) True) else goOneGreen (rest s) found)
+
+exactlyOneGreen s = goOneGreen s False
+
+numLarge s = if isEmpty s then 0.0 else (if isLarge (size (obj s)) then 1.0 else 0.0) + numLarge (rest s)
+
+numRed s = if isEmpty s then 0.0 else (if isRed (color (obj s)) then 1.0 else 0.0) + numRed (rest s)
+
+allSmall s = if isEmpty s then True else (if isSmall (size (obj s)) then allSmall (rest s) else False)
+
+main sym =
+  let scene = readScene sym in
+  if existsRed scene then 0
+  else if existsBlue scene then 1
+  else if exactlyOneGreen scene then 2
+  else if allSmall scene then 3
+  else if numLarge scene > 3.5 then 4
+  else if numRed scene > 1.5 then 5
+  else 6
