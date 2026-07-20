@@ -179,19 +179,38 @@ pBackendsHeader = do
   pNewline
   return bs
 
-pTestFile :: MonadParser m => String -> m ([Backend], [TestCase])
-pTestFile name = do
-  bs <- option allBackends (try pBackendsHeader)
-  tcs <- pTestCases name
-  return (bs, tcs)
+-- An optional standalone `slow` header line, order-independent with the
+-- backends header. Marks the file's cases as expensive enough to belong in
+-- the opt-in Slow test group (see End2EndTesting.slowEnd2EndTests) rather
+-- than the default `stack test` run.
+pSlowHeader :: MonadParser m => m ()
+pSlowHeader = do
+  symbol "slow"
+  pNewline
+  return ()
 
-parseTestCasesFromString :: FilePath -> String -> Either String ([Backend], [TestCase])
+-- Both headers are optional and may appear in either order (or not at all).
+pHeaders :: MonadParser m => m ([Backend], Bool)
+pHeaders = go allBackends False
+  where
+    go bs slow =
+      (try pBackendsHeader >>= \bs' -> go bs' slow) <|>
+      (try pSlowHeader >> go bs True) <|>
+      return (bs, slow)
+
+pTestFile :: MonadParser m => String -> m ([Backend], Bool, [TestCase])
+pTestFile name = do
+  (bs, slow) <- pHeaders
+  tcs <- pTestCases name
+  return (bs, slow, tcs)
+
+parseTestCasesFromString :: FilePath -> String -> Either String ([Backend], Bool, [TestCase])
 parseTestCasesFromString fp content =
   case runParser (runStateT (pTestFile fp) 0) fp content of
     Left err -> Left (errorBundlePretty err)
     Right (val, _) -> Right val
 
-parseTestCases :: FilePath -> IO ([Backend], [TestCase])
+parseTestCases :: FilePath -> IO ([Backend], Bool, [TestCase])
 parseTestCases fp = do
   content <- readFile fp
   either error return (parseTestCasesFromString fp content)

@@ -1,7 +1,8 @@
 {-# LANGUAGE TemplateHaskell #-}
 
 module TestInternals (
-  internalsTests
+  internalsTests,
+  slowInternalsTests
 ) where
 
 import SPLL.Lang.Lang
@@ -618,22 +619,40 @@ autoNeuralDerivationTests = testGroup "autoNeuralDerivation"
 
 -- .tst files may carry an optional `backends:` header that routes the file's
 -- cases to a subset of the three End2End backends; no header means all three.
+-- They may also carry an optional `slow` header (in either order relative to
+-- `backends:`) that moves the file into the opt-in Slow test group.
 test_tstBackendsHeader :: TestTree
 test_tstBackendsHeader = testCase "tstBackendsHeader" $ do
   let parse = parseTestCasesFromString "header.tst"
   case parse "p(0.5)=(1.0, 1.0)\n" of
     Left err -> assertFailure err
-    Right (bs, tcs) -> do
+    Right (bs, slow, tcs) -> do
       assertEqual "no header defaults to all backends" allBackends bs
+      assertEqual "no header defaults to not slow" False slow
       assertEqual "test case count without header" 1 (length tcs)
   case parse "backends: interpreter\np(0.5)=(1.0, 1.0)\n" of
     Left err -> assertFailure err
-    Right (bs, tcs) -> do
+    Right (bs, _, tcs) -> do
       assertEqual "interpreter-only routing" [Interpreter] bs
       assertEqual "test case count with header" 1 (length tcs)
   case parse "backends: julia, python\ncdf(0.5)=(0.5, 0.0)\n" of
     Left err -> assertFailure err
-    Right (bs, _) -> assertEqual "two-backend routing" [Julia, Python] bs
+    Right (bs, _, _) -> assertEqual "two-backend routing" [Julia, Python] bs
+  case parse "slow\np(0.5)=(1.0, 1.0)\n" of
+    Left err -> assertFailure err
+    Right (bs, slow, _) -> do
+      assertEqual "slow header alone still defaults to all backends" allBackends bs
+      assertEqual "slow header is recognized" True slow
+  case parse "backends: interpreter\nslow\np(0.5)=(1.0, 1.0)\n" of
+    Left err -> assertFailure err
+    Right (bs, slow, _) -> do
+      assertEqual "backends-then-slow routing" [Interpreter] bs
+      assertEqual "backends-then-slow is recognized" True slow
+  case parse "slow\nbackends: interpreter\np(0.5)=(1.0, 1.0)\n" of
+    Left err -> assertFailure err
+    Right (bs, slow, _) -> do
+      assertEqual "slow-then-backends routing" [Interpreter] bs
+      assertEqual "slow-then-backends is recognized" True slow
 
 return []
 
@@ -839,25 +858,31 @@ enumContinuousRefusalTests = testGroup "enum annotation refuses continuous leave
   ]
 
 -- | Plan-guided lazy enumeration milestone 2 (design
--- plan-guided-lazy-enumeration): the recursive-specialization corpus program
+-- plan-guided-lazy-enumeration): a recursive-specialization corpus program
 -- under the topK and branch-counting compiler variants, checked against the
 -- values pinned in its .tst. TopK wraps Expr-level IfThenElse inference arms,
 -- which the plan engine bypasses (worlds carry their own guards and are
 -- exact), so probabilities must be unchanged; branch counting counts one
 -- branch per live world, so the count must be strictly positive and the
--- shifted result triple must still carry the same probability.
-test_planEnumRecTopKAndBC :: TestTree
-test_planEnumRecTopKAndBC = testCase "planEnumRecTopKAndBC" $ do
-  src <- readFile "testCases/planEnumRecChain.ppl"
-  prog <- case tryParseProgram "planEnumRecChain.ppl" src of
+-- shifted result triple must still carry the same probability. Parametrized
+-- over the program so the cheap depth-3 shape can be pinned in the fast
+-- Internals group (planEnumThreadedTopKAndBC) while the pricier
+-- multi-predicate differential twin (planEnumRecChain, 4 extra full
+-- compiles) stays in slowInternalsTests.
+planEnumTopKAndBCTest :: String -> String -> TestTree
+planEnumTopKAndBCTest testName baseName = testCase testName $ do
+  let pplPath = "testCases/" ++ baseName ++ ".ppl"
+      tstPath = "testCases/" ++ baseName ++ ".tst"
+  src <- readFile pplPath
+  prog <- case tryParseProgram pplPath src of
     Left err -> assertFailure ("Parse error: " ++ show err)
     Right p  -> return p
-  tstSrc <- readFile "testCases/planEnumRecChain.tst"
-  (_, tcs) <- case parseTestCasesFromString "planEnumRecChain.tst" tstSrc of
+  tstSrc <- readFile tstPath
+  (_, _, tcs) <- case parseTestCasesFromString tstPath tstSrc of
     Left err -> assertFailure ("tst parse error: " ++ err)
     Right r  -> return r
   let probCases = [ (s, ps, out) | ProbTestCase _ s ps (VFloat out, _) <- tcs ]
-  assertBool "planEnumRecChain.tst should contain prob cases" (not (null probCases))
+  assertBool (baseName ++ ".tst should contain prob cases") (not (null probCases))
   -- compile once per config, evaluate every pinned case against each
   let compiledWith conf = either (error . show) id (compile conf prog)
   let cDef  = compiledWith defaultCompilerConfig
@@ -880,6 +905,16 @@ test_planEnumRecTopKAndBC = testCase "planEnumRecTopKAndBC" $ do
           assertEqual "topK+bc must not change the probability" pDef pBoth
           assertBool "topK+bc branch count should be strictly positive" (bcBoth >= 1))
         probCases
+
+-- | Fast-group case: pins topK/branch-counting interaction on the cheapest
+-- recursive-specialization shape (depth-3, single threaded-bool predicate),
+-- so this behaviour class stays covered even though the pricier
+-- multi-predicate chain moved to slowInternalsTests.
+test_planEnumThreadedTopKAndBC :: TestTree
+test_planEnumThreadedTopKAndBC = planEnumTopKAndBCTest "planEnumThreadedTopKAndBC" "planEnumRecThreaded"
+
+test_planEnumRecTopKAndBC :: TestTree
+test_planEnumRecTopKAndBC = planEnumTopKAndBCTest "planEnumRecTopKAndBC" "planEnumRecChain"
 
 internalsTests :: TestTree
 internalsTests = testGroup "Internals"
@@ -908,6 +943,15 @@ internalsTests = testGroup "Internals"
   , test_setWitnessMergesComplementaryTupleFields
   , autoNeuralDerivationTests
   , enumContinuousRefusalTests
-  , test_planEnumRecTopKAndBC
+  , test_planEnumThreadedTopKAndBC
   , test_tstBackendsHeader
+  ]
+
+-- | Tests heavy enough (multiple full compiles of a depth-3/depth-10 plan
+-- enumeration program) to noticeably slow day-to-day `stack test`, and
+-- unlikely to catch regressions outside plan-guided-lazy-enumeration work.
+-- Opt in with NEST_SLOW_TESTS=1 (see Spec.hs's Slow group).
+slowInternalsTests :: TestTree
+slowInternalsTests = testGroup "Internals (slow)"
+  [ test_planEnumRecTopKAndBC
   ]

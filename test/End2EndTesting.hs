@@ -324,33 +324,62 @@ pythonTestCode src tcs =
     mainName (ProbTestCase _ _ _ _) = "main.forward"
     mainName (CumulTestCase _ _ _ _) = "main.integrate"
 
+-- | Programs whose .tst file carries a `slow` header (see TestCaseParser) are
+-- expensive enough (deep recursive plan enumeration, run through both the
+-- optimized and unoptimized interpreter passes) to noticeably slow day-to-day
+-- `stack test`, and unlikely to catch regressions outside the code they pin.
+-- Excluded from end2endTests; covered instead by slowEnd2EndTests, which
+-- Spec.hs includes only when NEST_SLOW_TESTS is set (see Spec.hs's Slow
+-- group).
 end2endTests :: IO TestTree
 end2endTests = do
+  compiled <- loadEnd2EndCases (\slow -> not slow)
+  return $ buildEnd2EndTree "End2End" True compiled
+
+-- | The slow-only twin of end2endTests: same Interpreter/Unoptimized checks,
+-- restricted to `slow`-headered programs. Julia/Python/Normalization are
+-- skipped since these programs are Interpreter-only by design (see their
+-- .tst headers).
+slowEnd2EndTests :: IO TestTree
+slowEnd2EndTests = do
+  compiled <- loadEnd2EndCases id
+  return $ buildEnd2EndTree "End2End (slow)" False compiled
+
+-- | Parses and compiles (default -O2, and -O0 to check the optimizer is
+-- harmless) every testCases/*.ppl+.tst pair whose `slow` header (see
+-- TestCaseParser) satisfies `keep`.
+loadEnd2EndCases :: (Bool -> Bool)
+                  -> IO [(String, Program, Either CompilerError IREnv, [Backend], [TestCase])]
+loadEnd2EndCases keep = do
   files <- getAllTestFiles
   cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
-  -- Compile each program exactly once; every test group below shares the result.
-  -- Each .tst file declares which backends it runs against (default: all).
-  let compiledCases = [ (takeBaseName pplPath, p, compile defaultCompilerConfig p, bs, tcs)
-                      | ((pplPath, _), (p, (bs, tcs))) <- zip files cases ]
-  -- The same programs compiled with optimization disabled, to check the optimizer
-  -- is harmless: every interpreter test case must give the same answer at -O0 as
-  -- at the default -O2.
-  let unoptCases = [ (n, p, compile defaultCompilerConfig{optimizerLevel = 0} p, bs, tcs)
-                   | (n, p, _, bs, tcs) <- compiledCases ]
-  let queryTestCases = [(n, p, c, bs, filter (\x -> isProbTestCase x || isCumulTestCase x) tcs) | (n, p, c, bs, tcs) <- compiledCases]
-  let nonNeuralsQueries b = [(n, c, tcs) | (n, p, c, bs, tcs) <- queryTestCases, b `elem` bs, null (neurals p), not (null tcs)]
-  let neuralP = [(n, p, c) | (n, p, c, bs, _) <- compiledCases, Interpreter `elem` bs, not (null (neurals p))]
+  return [ (takeBaseName pplPath, p, compile defaultCompilerConfig p, bs, tcs)
+         | ((pplPath, _), (p, (bs, slow, tcs))) <- zip files cases, keep slow ]
 
-  return $ testGroup "End2End"
+-- | Builds the standard End2End test groups from already-loaded/compiled
+-- cases. includeBackends controls whether the Normalization/Julia/Python
+-- groups are built (skipped for the slow subset, whose programs are
+-- Interpreter-only by design).
+buildEnd2EndTree :: String -> Bool
+                  -> [(String, Program, Either CompilerError IREnv, [Backend], [TestCase])]
+                  -> TestTree
+buildEnd2EndTree groupName includeBackends compiledCases = testGroup groupName $
     [ testGroup "Interpreter"
         [ testProperty n (once $ conjoin (map (testInterpreter p c) tcs)) | (n, p, c, bs, tcs) <- compiledCases, Interpreter `elem` bs ]
     -- Re-run every interpreter case at -O0 to confirm the optimizer changes no answer.
     , testGroup "Interpreter Unoptimized"
-        [ testProperty n (once $ conjoin (map (testInterpreter p c) tcs)) | (n, p, c, bs, tcs) <- unoptCases, Interpreter `elem` bs ]
-    , testGroup "Normalization"
-        [ testProperty n (once $ discreteProbsNormalized p c) | (n, p, c) <- neuralP ]
-    -- All Julia programs share one batch file (and one julia process) to amortize startup.
-    , testProperty "Julia" (once $ testJuliaAll [(c, tcs) | (_, c, tcs) <- nonNeuralsQueries Julia])
-    , testGroup "Python"
-        [ testProperty n (once $ testPython c tcs) | (n, c, tcs) <- nonNeuralsQueries Python ]
-    ]
+        [ testProperty n (once $ conjoin (map (testInterpreter p c) tcs)) | (n, p, _, bs, tcs) <- compiledCases, Interpreter `elem` bs
+        , let c = compile defaultCompilerConfig{optimizerLevel = 0} p ]
+    ] ++
+    ( if not includeBackends then [] else
+      let queryTestCases = [(n, p, c, bs, filter (\x -> isProbTestCase x || isCumulTestCase x) tcs) | (n, p, c, bs, tcs) <- compiledCases]
+          nonNeuralsQueries b = [(n, c, tcs) | (n, p, c, bs, tcs) <- queryTestCases, b `elem` bs, null (neurals p), not (null tcs)]
+          neuralP = [(n, p, c) | (n, p, c, bs, _) <- compiledCases, Interpreter `elem` bs, not (null (neurals p))]
+      in [ testGroup "Normalization"
+             [ testProperty n (once $ discreteProbsNormalized p c) | (n, p, c) <- neuralP ]
+         -- All Julia programs share one batch file (and one julia process) to amortize startup.
+         , testProperty "Julia" (once $ testJuliaAll [(c, tcs) | (_, c, tcs) <- nonNeuralsQueries Julia])
+         , testGroup "Python"
+             [ testProperty n (once $ testPython c tcs) | (n, c, tcs) <- nonNeuralsQueries Python ]
+         ]
+    )

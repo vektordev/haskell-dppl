@@ -166,7 +166,15 @@ The suite runs under tasty (`tasty-quickcheck` for properties, `tasty-hunit` for
 - `test/TestCaseParser.hs` — `.tst` parser and `TestCase`/`Backend` types
 - `test/ArbitrarySPLL.hs` — QuickCheck Arbitrary instances for property testing
 
-A `.tst` file may start with an optional routing header `backends: interpreter, julia, python` (any non-empty subset); without it the file runs against all three backends. Expected values are compared with `probTolerance` (1e-4). Integral convergence is encoded per program as an upper-tail `cdf(x)=(1.0, 0.0)` line rather than checked at a global probe point — no single finite bound suits both heavy-tailed lognormal products and log-domain programs whose inverse overflows.
+A `.tst` file may start with two optional header lines, in either order: a routing header `backends: interpreter, julia, python` (any non-empty subset; without it the file runs against all three backends), and a standalone `slow` line. Expected values are compared with `probTolerance` (1e-4). Integral convergence is encoded per program as an upper-tail `cdf(x)=(1.0, 0.0)` line rather than checked at a global probe point — no single finite bound suits both heavy-tailed lognormal products and log-domain programs whose inverse overflows.
+
+### Slow tests
+
+A handful of tests are expensive enough (multiple full compiles of a large/deep program) to noticeably slow day-to-day `stack test`, while being unlikely to catch regressions outside the specific feature they pin. These are skipped by default and only run with `NEST_SLOW_TESTS=1 stack test` (or `NEST_SLOW_TESTS=1 stack test --ta '-p Slow'` to run just that group) — CI or an occasional manual pass should still exercise them regularly. Two mechanisms feed the top-level `Slow` group built in `Spec.hs`:
+- A `.tst` file's `slow` header (see above) routes its program out of `end2endTests`'s Interpreter/Interpreter-Unoptimized groups and into `End2EndTesting.slowEnd2EndTests` instead (e.g. `testCases/planEnumRecDeepOne.tst`, a depth-10 plan enumeration stress case).
+- A few individual `TestInternals.hs` cases that redundantly recompile a corpus program under several `CompilerConfig`s (e.g. `test_planEnumRecTopKAndBC`, which compiles `planEnumRecChain.ppl` four more times to check topK/branch-counting interaction) live in `TestInternals.slowInternalsTests` instead of `internalsTests`.
+
+Coverage should not otherwise decrease when adding to this group — reach for it only when a test is both measurably heavy and narrowly scoped to a feature that isn't touched by everyday changes elsewhere.
 
 The interpreter substitutes a mock for every declared neural network (`MockNN.hs`); the Symbol argument selects the mode: `(0, seed)` random logits, `(1, (spikeAt, seed))` a noisy spike at a value (what `argmax_p` queries auto-wrap), `(2, [logit0, ...])` a verbatim logit vector — the only mode with deterministic output, used to pin exact densities in `.tst` files (e.g. `autoNeuralProbGaussian.tst` passes `(2, [mu, sigma])` to check the decoder's Gaussian reader).
 

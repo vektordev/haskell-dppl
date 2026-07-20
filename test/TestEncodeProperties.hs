@@ -533,9 +533,9 @@ loadRoundtripPool = do
   files <- getAllTestFiles
   pool <- mapM (\(ppl, tst) -> do
     prog <- parseProgram ppl
-    (backends, tcs) <- parseTestCases tst
-    return (takeBaseName ppl, prog, backends, tcs)) files
-  return [(n, p, tcs) | (n, p, backends, tcs) <- pool, Interpreter `elem` backends]
+    (backends, slow, tcs) <- parseTestCases tst
+    return (takeBaseName ppl, prog, backends, slow, tcs)) files
+  return [(n, p, tcs) | (n, p, backends, slow, tcs) <- pool, Interpreter `elem` backends, not slow]
 
 -- `main sym = nn sym` (after normalization: a ReadNN directly on the lambda
 -- parameter). Only for these does main's output distribution equal the

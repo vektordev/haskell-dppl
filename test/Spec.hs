@@ -20,14 +20,14 @@ import Control.Monad.Random.Lazy (evalRandIO, replicateM)
 import Data.Foldable
 import SPLL.Parser
 import TestParser (parserTests)
-import TestInternals (internalsTests)
+import TestInternals (internalsTests, slowInternalsTests)
 import TestRejection (rejectionTests)
 import TestModality (modalityTests)
 import TestModalityInfer (modalityInferTests)
 import TestDeterminism (determinismTests)
 import TestEncodeProperties (encodeTests, encodeRoundtripTests)
 import TestShowcase (showcaseTests)
-import End2EndTesting (end2endTests, getAllTestFiles)
+import End2EndTesting (end2endTests, slowEnd2EndTests, getAllTestFiles)
 import TestCaseParser (parseProgram, parseTestCases, TestCase(..), Backend(..))
 import TestTolerances (probTolerance, reasonablyCloseTolerance, samplingTolerance)
 import SPLL.Prelude
@@ -53,7 +53,7 @@ loadCorpusCases = do
   files <- getAllTestFiles
   pairs <- mapM (\(ppl, tst) -> do
     prog <- parseProgram ppl
-    (backends, tcs) <- parseTestCases tst
+    (backends, _slow, tcs) <- parseTestCases tst
     return (takeBaseName ppl, prog, backends, tcs)) files
   let usable = [(n, p, tcs) | (n, p, backends, tcs) <- pairs, Interpreter `elem` backends, null (neurals p)]
   return [(n, (p, sample, params, expected)) | (n, p, tcs) <- usable, ProbTestCase _ sample params expected <- tcs]
@@ -581,6 +581,14 @@ main = do
   showcase <- showcaseTests
   corpusPool <- loadCorpusCases
   encodeRoundtrip <- encodeRoundtripTests
+  -- A handful of tests (deep plan enumeration, mainly) are expensive enough
+  -- to noticeably slow day-to-day `stack test` while rarely catching
+  -- regressions outside the code they pin. They're skipped unless
+  -- NEST_SLOW_TESTS is set, e.g. `NEST_SLOW_TESTS=1 stack test --ta '-p Slow'`.
+  runSlow <- lookupEnv "NEST_SLOW_TESTS"
+  slow <- if isNothing runSlow then return (testGroup "Slow" []) else do
+    slowE2e <- slowEnd2EndTests
+    return $ testGroup "Slow" [slowInternalsTests, slowE2e]
   defaultMain $ testGroup "Tests"
     [ specTests
     , corpusTests corpusPool
@@ -594,4 +602,5 @@ main = do
     , encodeRoundtrip
     , showcase
     , e2e
+    , slow
     ]
