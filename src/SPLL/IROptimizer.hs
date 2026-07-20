@@ -7,10 +7,11 @@ import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types
 import Data.Functor ( (<&>) )
 import Data.Number.Erf (erf)
-import Data.List (nub, maximumBy)
+import Data.List (maximumBy)
 import Data.Ord (comparing)
 import Data.Foldable (toList)
 import Control.Monad.State (State, evalState, get, put)
+import qualified Data.Map.Strict as Map
 import SPLL.Lang.Lang (floatApproxEqThresh)
 
 
@@ -334,11 +335,39 @@ optimizeCommonSubexpr topExpr = evalState (cseWalk topExpr) 0
       put (i + 1)
       let n = "cse_" ++ show i
       if n `elem` reserved then fresh else return n
+    -- | Fully resolve a node's own unconditional region (via 'extractHere'),
+    -- then descend -- WITHOUT re-scanning the parts of that same region again
+    -- (see 'descendRegion').
     cseWalk :: IRExpr -> State Int IRExpr
-    cseWalk e = do
-      e' <- extractHere e
-      kids <- mapM cseWalk (getIRSubExprs e')
-      return (setIRSubExprs e' kids)
+    cseWalk e = extractHere e >>= descendRegion
+    -- | Descend through a node whose enclosing unconditional region has
+    -- already been fully scanned by an ancestor's 'extractHere' call. Since
+    -- 'unconditionalSubexprs' descends transparently through every
+    -- constructor except IRIf's branches, IRLambda's body and IREnumSum's
+    -- body, any subexpression reachable through those transparent
+    -- constructors was already a member of the ancestor's skeleton -- so any
+    -- duplicate within it was already found and hoisted from there.
+    -- Re-running 'extractHere' on every one of those transparent descendants
+    -- (the original per-node 'cseWalk' recursion) is therefore pure
+    -- redundant work: for a long transparent chain of length k (e.g. the
+    -- k-way IROp sum built by 'measurePlanWorlds' for a plan-enumeration
+    -- program) it turned a single O(k) region scan into an O(k^2) one, since
+    -- every position along the chain re-scanned the entire remaining
+    -- suffix. 'descendRegion' instead only calls 'extractHere' again once it
+    -- reaches an actual region boundary, matching 'unconditionalSubexprs'
+    -- exactly so no candidate is missed and none is scanned twice.
+    descendRegion :: IRExpr -> State Int IRExpr
+    descendRegion e = case e of
+      IRIf c t f -> do
+        c' <- descendRegion c
+        t' <- cseWalk t
+        f' <- cseWalk f
+        return (IRIf c' t' f')
+      IRLambda n body -> IRLambda n <$> cseWalk body
+      IREnumSum n val body -> IREnumSum n val <$> cseWalk body
+      _ -> do
+        kids <- mapM descendRegion (getIRSubExprs e)
+        return (setIRSubExprs e kids)
     extractHere :: IRExpr -> State Int IRExpr
     extractHere e = case bestCommonSubexpr e of
       Nothing  -> return e
@@ -347,18 +376,29 @@ optimizeCommonSubexpr topExpr = evalState (cseWalk topExpr) 0
         extractHere (IRLetIn name sub (replaceAll sub (IRVar name) e))
 
 -- | The largest hoistable common subexpression of a node, if any.
+--
+-- Candidate detection is grouped by 'show' key in a Map rather than the
+-- naive O(m^2) "nub + count via filter (==s) skeleton" (m = skeleton size):
+-- on the large IR trees plan-guided enumeration and set-witness compilation
+-- can produce, the pairwise-equality version dominated total compile time
+-- (each '==' on a subtree is itself O(subtree size), so the nub/filter scan
+-- was effectively O(m^2 * avg subtree size)). Grouping by a 'show'-derived
+-- key is O(m log m * avg subtree size) -- one string-render and Map
+-- insertion per skeleton element instead of a full pairwise scan.
 bestCommonSubexpr :: IRExpr -> Maybe IRExpr
-bestCommonSubexpr expr = case candidates of
-  [] -> Nothing
-  cs -> Just (maximumBy (comparing exprSize) cs)
+bestCommonSubexpr expr
+  | Map.null repeated = Nothing
+  | otherwise = Just (maximumBy (comparing exprSize) (Map.elems repeated))
   where
     skeleton = unconditionalSubexprs expr
     bound = boundVarsIR expr
-    candidates = nub [ s | s <- skeleton
-                         , exprSize s > 1
-                         , not (samples s)
-                         , not (any (`elem` bound) (freeVarsIR s))
-                         , length (filter (== s) skeleton) >= 2 ]
+    eligible = [ s | s <- skeleton
+                    , exprSize s > 1
+                    , not (samples s)
+                    , not (any (`elem` bound) (freeVarsIR s)) ]
+    counts = Map.fromListWith (+) [ (show s, 1 :: Int) | s <- eligible ]
+    firstOccurrence = Map.fromListWith (\_ old -> old) [ (show s, s) | s <- eligible ]
+    repeated = Map.intersectionWith const firstOccurrence (Map.filter (>= 2) counts)
 
 -- | Subexpressions reached on every evaluation of the node.  We descend through
 -- ordinary nodes but stop at the branches of an IRIf, the body of an IREnumSum,
