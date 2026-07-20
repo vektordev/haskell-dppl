@@ -28,6 +28,7 @@ import TestDeterminism (determinismTests)
 import TestEncodeProperties (encodeTests, encodeRoundtripTests)
 import TestShowcase (showcaseTests)
 import End2EndTesting (end2endTests, slowEnd2EndTests, getAllTestFiles)
+import TestFuzz (fuzzTests, superSlowFuzzTests)
 import TestCaseParser (parseProgram, parseTestCases, TestCase(..), Backend(..))
 import TestTolerances (probTolerance, reasonablyCloseTolerance, samplingTolerance)
 import SPLL.Prelude
@@ -588,7 +589,13 @@ main = do
   runSlow <- lookupEnv "NEST_SLOW_TESTS"
   slow <- if isNothing runSlow then return (testGroup "Slow" []) else do
     slowE2e <- slowEnd2EndTests
-    return $ testGroup "Slow" [slowInternalsTests, slowE2e]
+    return $ testGroup "Slow" [slowInternalsTests, slowE2e, fuzzTests]
+  -- 'prop_Fuzz_SamplingMatchesPDF' (the sampling-vs-PDF cross-check between
+  -- `generate` and `probability`) draws up to tens of thousands of forward
+  -- samples per case, dwarfing every other Slow test's runtime, so it gets
+  -- its own further opt-in tier: `NEST_SUPERSLOW_TESTS=1 stack test --ta '-p SuperSlow'`.
+  runSuperSlow <- lookupEnv "NEST_SUPERSLOW_TESTS"
+  let superSlow = if isNothing runSuperSlow then testGroup "SuperSlow" [] else testGroup "SuperSlow" [superSlowFuzzTests]
   defaultMain $ testGroup "Tests"
     [ specTests
     , corpusTests corpusPool
@@ -603,4 +610,5 @@ main = do
     , showcase
     , e2e
     , slow
+    , superSlow
     ]

@@ -63,8 +63,12 @@ exprToString (Var _ name) = name
 exprToString (Constant _ value) = valToString value
 exprToString (Lambda _ arg body) = "\\" ++ arg ++ " -> " ++ bracket body
 exprToString (Apply _ f arg) = bracket f ++ " " ++ bracket arg
-exprToString (ThetaI _ expr i) = bracket expr ++ "[" ++ show i ++ "]"
-exprToString (Subtree _ expr i) = bracket expr ++ ".subtree(" ++ show i ++ ")"
+-- Matches pTheta/pSubtree's real concrete syntax ("theta EXPR @ IX" /
+-- "subtree EXPR @ IX"), not the postfix "[i]"/".subtree(i)" this previously
+-- invented -- ThetaI/Subtree were never exercised by the generator until it
+-- gained full constructor coverage, so this mismatch went undetected.
+exprToString (ThetaI _ expr i) = "theta " ++ bracket expr ++ " @ " ++ show i
+exprToString (Subtree _ expr i) = "subtree " ++ bracket expr ++ " @ " ++ show i
 exprToString (GreaterThan _ e1 e2) = bracket e1 ++ " > " ++ bracket e2
 exprToString (LessThan _ e1 e2) = bracket e1 ++ " < " ++ bracket e2
 exprToString (ReadNN _ name expr) = "readNN " ++ name ++ " " ++ bracket expr
