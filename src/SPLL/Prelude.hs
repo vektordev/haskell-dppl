@@ -87,6 +87,7 @@ import IRInterpreter (generateRand, generateDet)
 import Control.Monad.Random (Rand, RandomGen)
 import SPLL.IRCompiler
 import SPLL.IROptimizer (optimizeEnv)
+import SPLL.IRSelectPass (selectPassEnv)
 import Debug.Trace
 import Data.Either
 import SPLL.Typing.ForwardChaining (annotateProg)
@@ -361,7 +362,14 @@ compile conf p = do
   printStageIR conf "After IR Compilation (pre-optimization)" unoptimized
   let stripped = if countBranches conf then unoptimized else stripBranchCount unoptimized
 
-  let compiled = optimizeEnv conf stripped
+  -- Batched mode (design pytorch-tensorizer): retag elementwise-eligible ifs to
+  -- selects before the optimizer, which would otherwise fold the conditionals
+  -- away and obscure the transformation. Runs only under --batched; in M1 it is
+  -- a scalar no-op, so the default pipeline is byte-identical.
+  let selected = if batched conf then selectPassEnv stripped else stripped
+  printStageIR conf "After Select Pass" selected
+
+  let compiled = optimizeEnv conf selected
   printIfVerbose conf "\n=== Compiled Program ==="
   pPrintIfMoreVerbose conf compiled
   printIfVerbose conf (pPrintIREnv compiled)

@@ -46,6 +46,54 @@ getAllTestFiles = do
   let testCaseFiles = map ((++ ".tst") . (fromJust . stripExtension ".ppl")) pplFullPath
   return (zip pplFullPath testCaseFiles)
 
+-- | M1 differential test (design pytorch-tensorizer): the IR select pass is a
+-- behavioural no-op under scalar lowering, since the interpreter and scalar
+-- backends evaluate a SelectIf exactly like a LazyIf. So for every corpus
+-- prob/cumulative query point, compiling with @batched = True@ (which runs the
+-- select pass) must return the same result as the default pipeline. Reuses the
+-- same corpus loader as 'end2endTests', restricted to the non-slow,
+-- interpreter-routed cases.
+selectPassDifferentialTests :: IO TestTree
+selectPassDifferentialTests = do
+  files <- getAllTestFiles
+  cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
+  let entries = [ (takeBaseName pplPath, p, tcs)
+                | ((pplPath, _), (p, (bs, slow, tcs))) <- zip files cases
+                , not slow, Interpreter `elem` bs ]
+  return $ testGroup "SelectPassNoOp"
+    [ testProperty n (once $ conjoin (map (selectNoOp p) tcs)) | (n, p, tcs) <- entries ]
+
+-- | Assert one corpus query point is unchanged by the select pass. Non-query
+-- cases (encode/argmax) are skipped: the pass only touches prob/integ bodies.
+selectNoOp :: Program -> TestCase -> Property
+selectNoOp p (ProbTestCase  name sample params _) = selectNoOpCmp p name (\c -> runProbC  p c params sample)
+selectNoOp p (CumulTestCase name sample params _) = selectNoOpCmp p name (\c -> runIntegC p c params sample)
+selectNoOp _ _ = property True
+
+selectNoOpCmp :: Program -> String -> (IREnv -> Either CompilerError IRValue) -> Property
+selectNoOpCmp p name run = ioProperty $ do
+  scalar  <- forceResult (compile defaultCompilerConfig p >>= run)
+  batched <- forceResult (compile defaultCompilerConfig{batched = True} p >>= run)
+  return $ counterexample
+    ("select pass is not a no-op for " ++ name ++ ": scalar=" ++ show scalar ++ ", batched=" ++ show batched)
+    (resultsAgree scalar batched)
+
+resultsAgree :: Either String IRValue -> Either String IRValue -> Bool
+resultsAgree (Right (VProbDim p1 d1)) (Right (VProbDim p2 d2)) = abs (p1 - p2) < probTolerance && d1 == d2
+resultsAgree (Right a)                (Right b)                = show a == show b
+resultsAgree (Left _)                 (Left _)                 = True
+resultsAgree _                        _                        = False
+
+-- | Fully force a compile+run result, turning any exception (or compile error)
+-- into a 'Left' so a crash on only one side is a visible disagreement rather
+-- than a hang or a mismatched-type comparison.
+forceResult :: Either CompilerError IRValue -> IO (Either String IRValue)
+forceResult res = do
+  r <- try (evaluate (case res of
+              Left err -> error ("compileError: " ++ err)
+              Right v  -> length (show v) `seq` v)) :: IO (Either SomeException IRValue)
+  return $ either (Left . show) Right r
+
 testInterpreter :: Program -> Either CompilerError IREnv -> TestCase -> Property
 testInterpreter p compiledE (ProbTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = ioProperty $ do
   result <- try (let r = compiledE >>= \c -> runProbC p c params sample in evaluate (length (show r)) >> return r) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))

@@ -20,6 +20,9 @@ module SPLL.IntermediateRepresentation (
 , irPrintFlat
 , valueToIR
 , isLambda
+, IfMode(..)
+, pattern IRIf
+, pattern IRSelect
 , pattern VProbDim
 , pattern VProbDimBC
 , resultImpossible
@@ -172,7 +175,21 @@ data UnaryOperand = OpNeg
 
 data Distribution = IRNormal | IRUniform deriving (Show, Eq)
 
-data IRExpr = IRIf IRExpr IRExpr IRExpr
+-- | Strictness of an 'IRIfMode' node (design pytorch-tensorizer, M1).
+--
+-- A 'LazyIf' is the ordinary conditional: exactly one arm is evaluated. A
+-- 'SelectIf' is a /select/: both arms are computed and combined by a mask.
+-- Every if leaves 'IRCompiler' as 'LazyIf'; the batched-mode select pass
+-- (see 'SPLL.IRSelectPass') retags the data-dependent, elementwise-eligible
+-- ones to 'SelectIf'. Scalar backends lower both identically (a lazy ternary),
+-- so retagging is a behavioural no-op today; a future batched backend lowers
+-- 'SelectIf' to @torch.where@. The flag lives on the if rather than in a
+-- separate node so the ~130 existing if sites -- which neither know nor care
+-- about select semantics -- keep matching/constructing through the 'IRIf'
+-- pattern synonym unchanged.
+data IfMode = LazyIf | SelectIf deriving (Show, Eq)
+
+data IRExpr = IRIfMode IfMode IRExpr IRExpr IRExpr
               | IROp Operand IRExpr IRExpr
               | IRUnaryOp UnaryOperand IRExpr
               | IRTheta IRExpr Int
@@ -212,7 +229,25 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               -- of a silent bogus number or a deep "not a boolean" panic.
               | IRConformsTo RType IRExpr
               deriving (Show, Eq)
-              
+
+-- | A conditional of unspecified strictness. As a /pattern/ it matches an if
+-- of either mode (callers that don't distinguish select from lazy see a plain
+-- three-field if); as a /constructor/ it builds a 'LazyIf'. This is what keeps
+-- the existing if sites source-compatible after the 'IfMode' field was added.
+pattern IRIf :: IRExpr -> IRExpr -> IRExpr -> IRExpr
+pattern IRIf c t e <- IRIfMode _ c t e where
+        IRIf c t e = IRIfMode LazyIf c t e
+
+-- | A select: both arms are evaluated and combined by a mask on @cond@.
+pattern IRSelect :: IRExpr -> IRExpr -> IRExpr -> IRExpr
+pattern IRSelect c t e = IRIfMode SelectIf c t e
+
+{-# COMPLETE IRIf, IROp, IRUnaryOp, IRTheta, IRSubtree, IRConst, IRCons
+  , IRElementOf, IRTCons, IRHead, IRTail, IRMap, IRTFst, IRTSnd, IRLeft
+  , IRRight, IRFromLeft, IRFromRight, IRIsLeft, IRIsRight, IRDensity
+  , IRCumulative, IRSample, IRLetIn, IRVar, IRLambda, IRApply, IREnumSum
+  , IRIsPossible, IRIndex, IRError, IRConformsTo #-}
+
 type IRValue = GenericValue IRExpr
 
 data IREnv = IREnv [IRFunGroup] [ADTDecl] [(String, IRValue)] deriving (Show)
@@ -240,11 +275,16 @@ data CompilerConfig = CompilerConfig {
   -- checks the query value structurally conforms to the program's return type,
   -- failing with a clear diagnostic on a mismatch. Independent of optimizerLevel.
   -- Disable (CLI --noTypeCheck) to shave the entry check off hot compiled code.
-  checkQueryType :: Bool
+  checkQueryType :: Bool,
+  -- When True (CLI --batched), opt into batched inference mode (design
+  -- pytorch-tensorizer). M1 wires only the backend-agnostic select pass, which
+  -- retags data-dependent elementwise ifs to SelectIf; scalar lowering is
+  -- unchanged, so today this is a behavioural no-op over the tensor fragment.
+  batched :: Bool
 } deriving (Show)
 
 defaultCompilerConfig :: CompilerConfig
-defaultCompilerConfig = CompilerConfig {countBranches = False, topKThreshold = Nothing, optimizerLevel = 2, verbose = 0, pruneAnyChecks = False, noIntegrate=False, noProbability=False, noGenerate=False, showIntermediates=False, checkQueryType=True}
+defaultCompilerConfig = CompilerConfig {countBranches = False, topKThreshold = Nothing, optimizerLevel = 2, verbose = 0, pruneAnyChecks = False, noIntegrate=False, noProbability=False, noGenerate=False, showIntermediates=False, checkQueryType=True, batched=False}
 --3: convert algortihm-and-type-annotated Exprs into abstract representation of explicit computation:
 --    Fold enum ranges, algorithms, etc. into a representation of computation that can be directly converted into code.
 
@@ -303,7 +343,9 @@ irMap f x = f (irDescend (irMap f) x)
 -- re-listing the whole 35-constructor AST.
 irDescend :: (IRExpr -> IRExpr) -> IRExpr -> IRExpr
 irDescend f x = case x of
-  (IRIf cond left right) -> IRIf (f cond) (f left) (f right)
+  -- Match the real constructor so a SelectIf tag survives the rebuild; the
+  -- bare 'IRIf' synonym would reconstruct it as LazyIf and drop the flag.
+  (IRIfMode m cond left right) -> IRIfMode m (f cond) (f left) (f right)
   (IROp op left right) -> IROp op (f left) (f right)
   (IRUnaryOp op expr) -> IRUnaryOp op (f expr)
   (IRCons left right) -> IRCons (f left) (f right)
@@ -341,7 +383,8 @@ isLambda IRLambda {} = True
 isLambda _ = False
 
 irPrintFlat :: IRExpr -> String
-irPrintFlat (IRIf _ _ _) = "IRIf"
+irPrintFlat (IRIfMode LazyIf _ _ _) = "IRIf"
+irPrintFlat (IRIfMode SelectIf _ _ _) = "IRSelect"
 irPrintFlat (IROp _ _ _) = "IROp"
 irPrintFlat (IRUnaryOp _ _) = "IRUnaryOp"
 irPrintFlat (IRTheta _ _) = "IRTheta"

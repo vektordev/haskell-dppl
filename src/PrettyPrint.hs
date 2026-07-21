@@ -44,11 +44,12 @@ pPrintExpr (LessThan _ a b) i = "(" ++ pPrintExpr a i ++ " < " ++ pPrintExpr b i
 pPrintExpr (ReadNN _ n e) i = "readNN(" ++ n ++ ", " ++ pPrintExpr e i ++ ")"
 
 pPrintIRExpr :: IRExpr -> Int -> String
-pPrintIRExpr (IRIf cond thenExpr elseExpr) n =
-    "\n" ++ indent n ++ "if " ++ pPrintIRExpr cond (n + 1) ++ " then\n" ++
+pPrintIRExpr (IRIfMode mode cond thenExpr elseExpr) n =
+    "\n" ++ indent n ++ kw ++ " " ++ pPrintIRExpr cond (n + 1) ++ " then\n" ++
     indent (n + 1) ++ pPrintIRExpr thenExpr (n + 1) ++ "\n" ++
     indent n ++ "else\n" ++
      indent (n + 1) ++ pPrintIRExpr elseExpr (n + 1)
+  where kw = case mode of { LazyIf -> "if"; SelectIf -> "select" }
 pPrintIRExpr (IROp OpPlus e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ " + " ++ pPrintIRExpr e2 (n + 1) ++ ")"
 pPrintIRExpr (IROp OpSub e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ " - " ++ pPrintIRExpr e2 (n + 1) ++ ")"
 pPrintIRExpr (IROp OpMult e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ " * " ++ pPrintIRExpr e2 (n + 1) ++ ")"
@@ -94,6 +95,7 @@ pPrintIRExpr (IRApply e1 e2) n = pPrintIRExpr e1 (n + 1) ++ "(" ++ pPrintIRExpr 
 pPrintIRExpr (IREnumSum varname val e) n = "enumSum " ++ varname ++ " = " ++ show val ++ " in (\n" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRIndex e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ ")[" ++ pPrintIRExpr e2 (n + 1) ++ "]"
 pPrintIRExpr (IRError e) _ = "error(" ++ e ++")"
+pPrintIRExpr (IRConformsTo t e) n = "conformsTo " ++ show t ++ " (" ++ pPrintIRExpr e (n + 1) ++ ")"
 
 
 pPrintValue :: Value -> String
