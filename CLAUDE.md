@@ -221,7 +221,9 @@ l_20_pB   = l_18_armF[0]
 l_22_dimB = l_18_armF[1][0]
 ```
 
-312 of `stressContinuous`'s 3747 -O2 lines are tuple construction and 792 are the component assignments feeding it. A tuple that is only ever projected never needs to be materialised, so the fix belongs in the optimizer: split a let-bound tuple through the guard's `IRIf` into per-component bindings (`v_i = if g then a_i else b_i`), duplicating only the cheap condition. Note this is *not* the same as forwarding projections by hoisting the block's bindings out of the binding — that cannot fire, because the guard is exactly what must not be hoisted past.
+That round trip is real but small: of the 1674 extra -O2 lines, 372 are tuple construction and 264 are projections. Removing it (`generateLetInStatement` already emits the components as `name_0`/`name_1` before packing them, so the Python backend could read those directly and drop the pack) recovers roughly 10%, not the 2x.
+
+The rest is structural to sharing, and worth understanding before anyone tries to optimise it away. Four fields now travel through one guarded tuple, so every branch path of the block materialises all four — where previously each field was its own binding and the optimizer folded most dims and flags to constants and deleted them. Keeping unread fields unprojected (see `shareResult`) already claws back the cases where a field ignores the block; at the sites that dominate this benchmark it does not apply, because the fields genuinely overlap (12/9/7/0 of 12 bindings). Two candidate optimizer passes were measured and rejected: hoisting the block's bindings out of the binding cannot fire at all (the guard must not be hoisted past), and splitting per field costs more than it saves (28 binding-copies against 12). The -O2 size is the price of the compile-time fix, not a missing optimization.
 
 ### Fuzz tests
 
