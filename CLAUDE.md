@@ -95,23 +95,33 @@ When the bound value is a **neural network's structured output** (`let s = nn sy
 
 ### Dimension Counting
 
-Every probability-mode compilation result is a `PResult { rProb, rDim, rBranches }` (see below) whose `rDim` is an `IRExpr` tracking the **dimensionality of the probability value**:
+Every probability-mode compilation result is a `PResult { rProb, rDim, rBranches, rImposs }` (see below) whose `rDim` is an `IRExpr` tracking the **dimensionality of the probability value**:
 
 - `dim = 0` — discrete probability mass (indicator / PMF)
 - `dim = 1` — univariate continuous density
 - `dim = n` — multivariate density
 
-Dimensionality determines whether the **change-of-variables correction** is applied when passing a value through an invertible function (`InjF`): if `dim > 0` the result is multiplied by `|derivative of inverse|`; if `dim = 0` no correction is needed. When combining two sub-expressions, dimensions **add** under multiplication (independent continuous variables), and the **smaller dimension wins** under mixture addition (whichever branch produced the non-zero probability).
+Dimensionality determines whether the **change-of-variables correction** is applied when passing a value through an invertible function (`InjF`): if `dim > 0` the result is multiplied by `|derivative of inverse|`; if `dim = 0` no correction is needed. When combining two sub-expressions, dimensions **add** under multiplication (independent continuous variables), and under mixture addition the **smaller dimension wins** among the alternatives that are *possible* (see the impossibility flag below).
 
 The base cases are: continuous distributions (`Normal`, `Uniform`) emit `dim = 1`; discrete and deterministic expressions emit `dim = 0`.
 
 ### PResult combinators
 
-`dim` and the branch count are not hand-written per case. `toIRInference` / `toIRInferenceSave` / `toIREnumerate`, and the set-witness and plan-enum measurement functions, all return an opaque `PResult` built from a small combinator vocabulary (design presult-combinators, `IRCompiler.hs`): leaves are `density`/`mass`/`detP`, independent conjunction is `prodP` (a `Monoid` with unit `detP const1`), branches mix with `mixP`/`mixSubP`, enumeration sums with `enumSumP`, the change-of-variables correction is `scaleCoV` (which reads the result's own dim, so call sites never name it), and guards map over all three fields with `mapResult`/`zipResult` (single fields via `onProb`/`onDim`/`onBranches`). `mixP` takes the branch count as an explicit argument because no call site wants the operands' plain sum: `IfThenElse` shares one condition between its arms (`cond + left + right - 1`), the `AnyExcept` InjF selects one arm's count, and world sums add over all worlds. `packResult`/`unpackResult` are the only places that know the `IRTCons p (IRTCons d bc)` encoding.
+`dim` and the branch count are not hand-written per case. `toIRInference` / `toIRInferenceSave` / `toIREnumerate`, and the set-witness and plan-enum measurement functions, all return an opaque `PResult` built from a small combinator vocabulary (design presult-combinators, `IRCompiler.hs`): leaves are `density`/`mass`/`detP`, independent conjunction is `prodP` (a `Monoid` with unit `detP const1`), branches mix with `mixP`/`mixSubP`, enumeration sums with `enumSumP`, the change-of-variables correction is `scaleCoV` (which reads the result's own dim, so call sites never name it), and guards map over all three fields with `mapResult`/`zipResult` (single fields via `onProb`/`onDim`/`onBranches`). `mixP` takes the branch count as an explicit argument because no call site wants the operands' plain sum: `IfThenElse` shares one condition between its arms (`cond + left + right - 1`), the `AnyExcept` InjF selects one arm's count, and world sums add over all worlds. `packResult`/`unpackResult` are the only places that know the `IRTCons p (IRTCons d (IRTCons bc imposs))` encoding.
+
+### Impossibility flag
+
+The fourth field, `rImposs :: IRExpr`, is a Bool answering **"is this result a structurally impossible event?"** — the wrong `Either` arm, an indicator that did not match, a failed applicability guard, an arm whose condition cannot hold, a sample off a `Uniform`'s support. It exists because `mixP`/`mixSubP` need exactly that fact to decide which alternative wins, and used to *infer* it by comparing the computed probability to zero — which is wrong in both directions: a deep-tail density underflows to a true `0.0` while remaining possible (task addp-zero-check-non-total; `test_underflowedTailKeepsDimension`), and an approximate zero test additionally discarded merely-tiny densities (observe-partials-umbrella N4). `mixWith` now branches on the flag alone; no probability is compared against a float constant there.
+
+Rules: leaves are possible (`density`/`mass`/`detP`); `indicatorP cond` sets `not cond`; `guardP` sets it where the guard fails; `prodP` ORs; `mixWith` consumes it (a mixture is impossible only if every alternative is). `impossibleWhen`/`guardP` spell the flag as an `IRIf`, never `IROp OpOr`/`OpAnd` — both operands of an IR boolean op are evaluated, and the conditions being guarded against are frequently what makes evaluating the other side safe or terminating (a zero-probability arm may contain the recursive call the zero-check exists to skip; a failed applicability guard means a deconstructing inverse would crash).
+
+Two places derive the flag from the value instead of from structure, and only for a **discrete mass**, where an exact zero genuinely does mean "nothing contributed": `opaqueMass` (enumeration sums and plan-world sums — there is no boolean `IREnumSum` to fold over the support) and `AutoNeural.makeProb`'s decoder reader (assembled from logit reads, with no guard to take the fact from). A dim-1 density never derives its flag this way; that is the whole point.
+
+The flag is **not stripped** from the emitted result (design inference-result-side-channels; deferred deliberately — stripping it would have to either drop it from called functions, losing the information exactly where the mixture is cross-function, or give callees and query targets different layouts). So the compiled prob/integ result shape is `(prob, (dim, imposs))`, or `(prob, (dim, (bc, imposs)))` with `countBranches`. Consumers match it through the `VProbDim`/`VProbDimBC` pattern synonyms and `resultImpossible` in `SPLL.IntermediateRepresentation` rather than on the tuple shape; those are the layout's only definition outside the compiler. Cost: ~50% compile time on the set-witness-heavy benchmark, negligible on plan enumeration (see Benchmarks).
 
 ### Branch Counting
 
-`countBranches :: Bool` in `CompilerConfig` controls whether the compilation result's third field, `branchCount`, survives into the emitted code: compilation always produces the full triple (nested `IRTCons`), and `stripBranchCount` collapses it back to `(prob, dim)` as a post-pass when the flag is off. The branch count records how many distinct enumerated branches were actually traversed during evaluation — leaves emit 0 or 1; branches sum their children's counts. When `countBranches` is enabled, all tuple-unpacking in the IRCompiler shifts position (`IRTFst`/`IRTSnd` chains extend by one level) to accommodate the extra element. `topKThreshold` and `countBranches` interact: a pruned branch contributes 0 to the branch count.
+`countBranches :: Bool` in `CompilerConfig` controls whether the compilation result's third field, `branchCount`, survives into the emitted code: compilation always produces all four fields (nested `IRTCons`), and `stripBranchCount` removes just the branch-count slot as a post-pass when the flag is off, leaving `(prob, (dim, imposs))`. The branch count records how many distinct enumerated branches were actually traversed during evaluation — leaves emit 0 or 1; branches sum their children's counts. When `countBranches` is enabled, all tuple-unpacking in the IRCompiler shifts position (`IRTFst`/`IRTSnd` chains extend by one level) to accommodate the extra element. `topKThreshold` and `countBranches` interact: a pruned branch contributes 0 to the branch count.
 
 ### Query-Type Guard
 
@@ -184,6 +194,18 @@ A handful of tests are expensive enough (multiple full compiles of a large/deep 
 - A few individual `TestInternals.hs` cases that redundantly recompile a corpus program under several `CompilerConfig`s (e.g. `test_planEnumRecTopKAndBC`, which compiles `planEnumRecChain.ppl` four more times to check topK/branch-counting interaction) live in `TestInternals.slowInternalsTests` instead of `internalsTests`.
 
 Coverage should not otherwise decrease when adding to this group — reach for it only when a test is both measurably heavy and narrowly scoped to a feature that isn't touched by everyday changes elsewhere.
+
+### Benchmarks
+
+`benchmarks/` holds compiler-performance stress programs (`stressPlanEnum.ppl`, `stressContinuous.ppl`, added with the IROptimizer CSE fix `ebd46ab`). They pin no values and are not part of the test suite — they are run through the CLI and timed:
+
+```bash
+stack run -- -i benchmarks/stressContinuous.ppl compile -l python -o /tmp/b.py   # time this
+```
+
+Always run once to warm up before timing: the first invocation after a source change includes stack's rebuild-and-register, which dwarfs the compile itself (seconds vs. milliseconds) and has been mistaken for a regression. There is no tasty benchmark ingredient; for the test suite itself, `TASTY_HIDE_SUCCESSES=false` gives per-test timings and `--ta '-t 60'` (seconds) bounds each test, which is the quickest way to find a hang.
+
+Reference timings on the two benchmarks, warm (2026-07-21): `stressPlanEnum` ~1.1 s, `stressContinuous` ~3.3 s. `stressContinuous` grew ~50% (2.2 s → 3.3 s) when the impossibility flag added a fourth field to every inference result; the cost is diffuse (more IR everywhere, not one hot spot) and would come back if the flag is ever stripped from the emitted result.
 
 ### Fuzz tests
 
