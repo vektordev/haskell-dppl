@@ -22,6 +22,7 @@ import qualified Data.Set as Set
 import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan)
 import qualified SPLL.AutoNeural as AutoNeural (getSize)
 import SPLL.IntermediateRepresentation
+import SPLL.IROptimizer (postProcess)
 import IRInterpreter (generateDet)
 import Data.Foldable (toList)
 import Data.List (isInfixOf)
@@ -1058,6 +1059,59 @@ expectOrthantRefusal src = do
       ("orthant" `isInfixOf` msg)
     Right _ -> assertFailure "expected a compile-time refusal, but compilation succeeded"
 
+-- | Count occurrences of @IRVar name@ in an expression.
+countIRVar :: String -> IRExpr -> Int
+countIRVar name (IRVar n) | n == name = 1
+countIRVar name e = sum (map (countIRVar name) (getIRSubExprs e))
+
+-- The optimizer must treat a nullary generator reference (IRVar "..._gen",
+-- effectful) differently from a pure local reference. These white-box tests pin
+-- the single `isPure` mechanism (task ir-effectful-var-purity) at both duplicating
+-- sites: optimizeLetIns (inlining) and CSE (sharing).
+optimizerPurityTests :: TestTree
+optimizerPurityTests = testGroup "optimizer purity (ir-effectful-var-purity)"
+  -- isPure classifies a generator reference and a sample as effectful, a plain
+  -- local as pure.
+  [ testCase "isPure classifies effectful vs pure references" $ do
+      assertBool "coin_gen is effectful" (not (isPure (IRVar "coin_gen")))
+      assertBool "nn_auto_gen is effectful" (not (isPure (IRVar "nn_auto_gen")))
+      assertBool "IRSample is effectful" (not (isPure (IRSample IRNormal)))
+      assertBool "plain local is pure" (isPure (IRVar "d"))
+      assertBool "op over locals is pure" (isPure (IROp OpPlus (IRVar "d") (IRConst (VFloat 1))))
+      assertBool "op containing a generator ref is effectful"
+        (not (isPure (IROp OpPlus (IRVar "coin_gen") (IRConst (VFloat 1)))))
+  -- A let binding a generator reference must NOT be inlined into its two uses:
+  -- that would re-draw the sample. The let survives and coin_gen still occurs once.
+  , testCase "optimizeLetIns keeps a multi-use generator binding shared" $ do
+      let expr = IRLetIn "d" (IRVar "coin_gen")
+                   (IROp OpPlus (IRVar "d") (IRVar "d"))
+          opt  = postProcess defaultCompilerConfig expr
+      assertEqual "coin_gen sampled exactly once" 1 (countIRVar "coin_gen" opt)
+  -- A pure bare-variable binding, by contrast, is copy-propagated into both uses
+  -- (the binding disappears) -- the behaviour the old IRConst-only rule blocked.
+  , testCase "optimizeLetIns copy-propagates a pure variable binding" $ do
+      let expr = IRLetIn "d" (IRVar "x")
+                   (IROp OpPlus (IRVar "d") (IRVar "x"))
+          opt  = postProcess defaultCompilerConfig expr
+      assertEqual "d fully inlined" 0 (countIRVar "d" opt)
+      assertEqual "x appears at both uses" 2 (countIRVar "x" opt)
+  -- CSE must NOT collapse two occurrences of an expression built from a generator
+  -- reference into one shared binding: that would fuse two independent draws.
+  , testCase "CSE does not share a repeated generator-referencing subexpression" $ do
+      let sub  = IROp OpMult (IRVar "coin_gen") (IRConst (VFloat 2))
+          expr = IROp OpPlus sub sub
+          opt  = postProcess defaultCompilerConfig expr
+      assertEqual "both draws survive" 2 (countIRVar "coin_gen" opt)
+  -- ...whereas a repeated pure subexpression is shared as usual (one binding, one
+  -- occurrence of each pure leaf), confirming the refusal above is specific to
+  -- effectfulness, not a blanket disabling of CSE.
+  , testCase "CSE still shares a repeated pure subexpression" $ do
+      let sub  = IROp OpMult (IRVar "x") (IRConst (VFloat 2))
+          expr = IROp OpPlus sub sub
+          opt  = postProcess defaultCompilerConfig expr
+      assertEqual "x read once through the shared binding" 1 (countIRVar "x" opt)
+  ]
+
 internalsTests :: TestTree
 internalsTests = testGroup "Internals"
   [ testProperties "properties" $(allProperties)
@@ -1093,6 +1147,7 @@ internalsTests = testGroup "Internals"
   , test_planEnumM4Polynomial
   , planOverCouplingRefusalTests
   , test_tstBackendsHeader
+  , optimizerPurityTests
   ]
 
 -- | Tests heavy enough (multiple full compiles of a depth-3/depth-10 plan
