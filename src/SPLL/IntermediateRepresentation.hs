@@ -14,6 +14,7 @@ module SPLL.IntermediateRepresentation (
 , CompilerConfig(..)
 , defaultCompilerConfig
 , irMap
+, irDescend
 , getIRSubExprs
 , lookupIREnv
 , irPrintFlat
@@ -292,39 +293,48 @@ getIRSubExprs (IRError _) = []
 getIRSubExprs (IRConformsTo _ a) = [a]
 
 irMap :: (IRExpr -> IRExpr) -> IRExpr -> IRExpr
-irMap f x = case x of
-  (IRIf cond left right) -> f (IRIf (irMap f cond) (irMap f left) (irMap f right))
-  (IROp op left right) -> f (IROp op (irMap f left) (irMap f right))
-  (IRUnaryOp op expr) -> f (IRUnaryOp op (irMap f expr))
-  (IRCons left right) -> f (IRCons (irMap f left) (irMap f right))
-  (IRTCons left right) -> f (IRTCons (irMap f left) (irMap f right))
-  (IRHead expr) -> f (IRHead (irMap f expr))
-  (IRTail expr) -> f (IRTail (irMap f expr))
-  (IRMap fe expr) -> f (IRMap (irMap f fe) (irMap f expr))
-  (IRElementOf ele lst) -> f (IRElementOf (irMap f ele) (irMap f lst))
-  (IRTFst expr) -> f (IRTFst (irMap f expr))
-  (IRTSnd expr) -> f (IRTSnd (irMap f expr))
-  (IRLeft expr) -> f (IRLeft (irMap f expr))
-  (IRRight expr) -> f (IRRight (irMap f expr))
-  (IRFromLeft expr) -> f (IRFromLeft (irMap f expr))
-  (IRFromRight expr) -> f (IRFromRight (irMap f expr))
-  (IRIsLeft expr) -> f (IRIsLeft (irMap f expr))
-  (IRIsRight expr) -> f (IRIsRight (irMap f expr))
-  (IRIsPossible val expr) -> f (IRIsPossible val (irMap f expr))
-  (IRDensity a expr) -> f (IRDensity a (irMap f expr))
-  (IRCumulative a expr) -> f (IRCumulative a (irMap f expr))
-  (IRLetIn name left right) -> f (IRLetIn name (irMap f left) (irMap f right))
-  (IRLambda name scope) -> f (IRLambda name (irMap f scope))
-  (IRApply a b) -> f (IRApply (irMap f a) (irMap f b))
-  (IREnumSum name val scope) -> f (IREnumSum name val (irMap f scope))
-  (IRIndex left right) -> f (IRIndex (irMap f left) (irMap f right))
-  (IRTheta a i) -> f (IRTheta (irMap f a) i)
-  (IRSubtree a i) -> f (IRSubtree (irMap f a) i)
-  (IRConst _) -> f x
-  (IRSample _) -> f x
-  (IRVar _) -> f x
-  (IRError _) -> f x
-  (IRConformsTo t a) -> f (IRConformsTo t (irMap f a))
+irMap f x = f (irDescend (irMap f) x)
+
+-- | Apply @f@ to the immediate children of a node, rebuilding it. One level
+-- only -- unlike 'irMap' it does not recurse, so the caller controls the
+-- traversal. This is what a scope-aware rewrite needs: it can handle the
+-- binding forms itself (threading an environment through 'IRLetIn'/'IRLambda'/
+-- 'IREnumSum' scopes) and delegate every other constructor here, instead of
+-- re-listing the whole 35-constructor AST.
+irDescend :: (IRExpr -> IRExpr) -> IRExpr -> IRExpr
+irDescend f x = case x of
+  (IRIf cond left right) -> IRIf (f cond) (f left) (f right)
+  (IROp op left right) -> IROp op (f left) (f right)
+  (IRUnaryOp op expr) -> IRUnaryOp op (f expr)
+  (IRCons left right) -> IRCons (f left) (f right)
+  (IRTCons left right) -> IRTCons (f left) (f right)
+  (IRHead expr) -> IRHead (f expr)
+  (IRTail expr) -> IRTail (f expr)
+  (IRMap fe expr) -> IRMap (f fe) (f expr)
+  (IRElementOf ele lst) -> IRElementOf (f ele) (f lst)
+  (IRTFst expr) -> IRTFst (f expr)
+  (IRTSnd expr) -> IRTSnd (f expr)
+  (IRLeft expr) -> IRLeft (f expr)
+  (IRRight expr) -> IRRight (f expr)
+  (IRFromLeft expr) -> IRFromLeft (f expr)
+  (IRFromRight expr) -> IRFromRight (f expr)
+  (IRIsLeft expr) -> IRIsLeft (f expr)
+  (IRIsRight expr) -> IRIsRight (f expr)
+  (IRIsPossible val expr) -> IRIsPossible val (f expr)
+  (IRDensity a expr) -> IRDensity a (f expr)
+  (IRCumulative a expr) -> IRCumulative a (f expr)
+  (IRLetIn name left right) -> IRLetIn name (f left) (f right)
+  (IRLambda name scope) -> IRLambda name (f scope)
+  (IRApply a b) -> IRApply (f a) (f b)
+  (IREnumSum name val scope) -> IREnumSum name val (f scope)
+  (IRIndex left right) -> IRIndex (f left) (f right)
+  (IRTheta a i) -> IRTheta (f a) i
+  (IRSubtree a i) -> IRSubtree (f a) i
+  (IRConst _) -> x
+  (IRSample _) -> x
+  (IRVar _) -> x
+  (IRError _) -> x
+  (IRConformsTo t a) -> IRConformsTo t (f a)
 
 isLambda :: IRExpr -> Bool
 isLambda IRLambda {} = True
