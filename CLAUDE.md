@@ -211,7 +211,17 @@ Reference timings on the two benchmarks, warm (2026-07-21): `stressPlanEnum` ~1.
 
 Two things about that fix are load-bearing and easy to undo by accident. The zero-probability check must be the *bound value's* guard, not a wrapper around each projection: a shared binding is eager, and an arm whose condition cannot hold may contain the very recursive call the check exists to skip (guarding the projections instead makes `dice` non-terminating). And sharing is skipped when fewer than two fields read the block, with unread fields kept as themselves rather than projected: dims and flags are usually static constants, and routing a constant through an opaque tuple hides it from constant folding — sharing every field unconditionally shrank -O0 400x while growing the -O2 *output* 2.7x.
 
-What remains is a code-size gap, not a compile-time one: emitted -O2 code is ~1.9x larger than before the flag (105 KB → 200 KB on `stressContinuous`), because one shared binding keeps every binding alive for all its readers where a per-field copy let the optimizer prune each field's block independently. Recovering that means splitting the block per field without duplicating what several fields share — the optimizer cannot do it after the fact (a projection can only be pushed through the arm's guard by duplicating the block, so the rule never fires).
+What remains is a code-size gap, not a compile-time one: emitted -O2 code is ~1.9x larger than before the flag (105 KB → 200 KB on `stressContinuous`). The cause is **not** lost per-field dead-binding elimination — that was the intuitive explanation and it is measurably wrong, since the fields overlap heavily (at a typical 12-binding site the probability needs all 12, the dim 9, the flag 7, the branch count 0, so per-field slices would total 28 copies where sharing has 12).
+
+The actual cost is a construct-then-immediately-destructure round trip. The emitted code builds the shared tuple out of scalar components that already exist as their own variables and then reads it straight back apart:
+
+```python
+l_18_armF = T(l_18_armF_0, l_18_armF_1)
+l_20_pB   = l_18_armF[0]
+l_22_dimB = l_18_armF[1][0]
+```
+
+312 of `stressContinuous`'s 3747 -O2 lines are tuple construction and 792 are the component assignments feeding it. A tuple that is only ever projected never needs to be materialised, so the fix belongs in the optimizer: split a let-bound tuple through the guard's `IRIf` into per-component bindings (`v_i = if g then a_i else b_i`), duplicating only the cheap condition. Note this is *not* the same as forwarding projections by hoisting the block's bindings out of the binding — that cannot fire, because the guard is exactly what must not be hoisted past.
 
 ### Fuzz tests
 
