@@ -95,7 +95,7 @@ When the bound value is a **neural network's structured output** (`let s = nn sy
 
 ### Dimension Counting
 
-Every probability-mode compilation result is a pair `(prob, dim)` where `dim` is an `IRExpr` tracking the **dimensionality of the probability value**:
+Every probability-mode compilation result is a `PResult { rProb, rDim, rBranches }` (see below) whose `rDim` is an `IRExpr` tracking the **dimensionality of the probability value**:
 
 - `dim = 0` — discrete probability mass (indicator / PMF)
 - `dim = 1` — univariate continuous density
@@ -105,9 +105,13 @@ Dimensionality determines whether the **change-of-variables correction** is appl
 
 The base cases are: continuous distributions (`Normal`, `Uniform`) emit `dim = 1`; discrete and deterministic expressions emit `dim = 0`.
 
+### PResult combinators
+
+`dim` and the branch count are not hand-written per case. `toIRInference` / `toIRInferenceSave` / `toIREnumerate`, and the set-witness and plan-enum measurement functions, all return an opaque `PResult` built from a small combinator vocabulary (design presult-combinators, `IRCompiler.hs`): leaves are `density`/`mass`/`detP`, independent conjunction is `prodP` (a `Monoid` with unit `detP const1`), branches mix with `mixP`/`mixSubP`, enumeration sums with `enumSumP`, the change-of-variables correction is `scaleCoV` (which reads the result's own dim, so call sites never name it), and guards map over all three fields with `mapResult`/`zipResult` (single fields via `onProb`/`onDim`/`onBranches`). `mixP` takes the branch count as an explicit argument because no call site wants the operands' plain sum: `IfThenElse` shares one condition between its arms (`cond + left + right - 1`), the `AnyExcept` InjF selects one arm's count, and world sums add over all worlds. `packResult`/`unpackResult` are the only places that know the `IRTCons p (IRTCons d bc)` encoding.
+
 ### Branch Counting
 
-`countBranches :: Bool` in `CompilerConfig` extends the compilation result from a pair to a triple `(prob, dim, branchCount)` via nested `IRTCons`. The branch count records how many distinct enumerated branches were actually traversed during evaluation — leaves emit 0 or 1; branches sum their children's counts. When `countBranches` is enabled, all tuple-unpacking in the IRCompiler shifts position (`IRTFst`/`IRTSnd` chains extend by one level) to accommodate the extra element. `topKThreshold` and `countBranches` interact: a pruned branch contributes 0 to the branch count.
+`countBranches :: Bool` in `CompilerConfig` controls whether the compilation result's third field, `branchCount`, survives into the emitted code: compilation always produces the full triple (nested `IRTCons`), and `stripBranchCount` collapses it back to `(prob, dim)` as a post-pass when the flag is off. The branch count records how many distinct enumerated branches were actually traversed during evaluation — leaves emit 0 or 1; branches sum their children's counts. When `countBranches` is enabled, all tuple-unpacking in the IRCompiler shifts position (`IRTFst`/`IRTSnd` chains extend by one level) to accommodate the extra element. `topKThreshold` and `countBranches` interact: a pruned branch contributes 0 to the branch count.
 
 ### Query-Type Guard
 
