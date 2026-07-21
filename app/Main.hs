@@ -29,6 +29,7 @@ data GlobalOpts = GlobalOpts {
   noGen :: Bool,
   debugIntermediates :: Bool,
   noTypeCheck :: Bool,
+  batchedMode :: Bool,
   commandOpts :: CommandOpts
 }
 
@@ -127,6 +128,9 @@ parseGlobalOpts = GlobalOpts
         <*> switch
             ( long "noTypeCheck"
             <> help "Omit the query-type guard that rejects a query value whose type does not match the program's return type (e.g. p(0.5) against a Bool program). The guard is on by default at every optimization level; disable it to shave the entry check off hot compiled code.")
+        <*> switch
+            ( long "batched"
+            <> help "Opt into batched inference mode (design pytorch-tensorizer). Currently wires only the backend-agnostic IR select pass, which retags data-dependent elementwise ifs as selects before optimization; scalar output is unchanged (a behavioural no-op), so this is chiefly useful with -d to audit the transformation.")
         <*> hsubparser (
           command "compile" (info parseCompileOpts (progDesc "Compiles the program with inference interface into target language"))
           <> command "generate" (info parseGenerateOpts (progDesc "Runs the generate pass of the program"))
@@ -193,9 +197,9 @@ main = transpile =<< execParser opts
             <> header "Haskell DPPL" )
 
 transpile :: GlobalOpts -> IO ()
-transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl, pruneAnys=anyChecks, noInteg=nInteg, noProb=nProb, noGen=nGen, debugIntermediates=dbgInter, noTypeCheck=nTypeChk}) = do
+transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl, pruneAnys=anyChecks, noInteg=nInteg, noProb=nProb, noGen=nGen, debugIntermediates=dbgInter, noTypeCheck=nTypeChk, batchedMode=batchedFlag}) = do
   prog <- parseProgram inFile
-  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen, showIntermediates=dbgInter, checkQueryType=not nTypeChk})
+  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen, showIntermediates=dbgInter, checkQueryType=not nTypeChk, batched=batchedFlag})
   case options of
     CompileOpts{language=lang, outputFile=outFile, trunc=trnc} -> do
       case codeGenToLang lang trnc conf prog of

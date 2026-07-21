@@ -10,6 +10,7 @@ import SPLL.Lang.Lang
 import SPLL.Lang.Types
 import SPLL.Typing.RType
 import SPLL.IROptimizer
+import SPLL.IRSelectPass (selectPassEnv)
 import PredefinedFunctions
 import SPLL.Typing.PType
 import Data.Maybe
@@ -62,9 +63,12 @@ envToIR conf fcDat p
   | any (null . chainName . getTypeInfo . snd) (functions p) =
       error "envToIR: one or more top-level expressions have empty chainNames — did you call annotateProg before envToIR?"
   | otherwise =
-      let unopt   = envToIRUnoptimized conf fcDat p
+      let unopt    = envToIRUnoptimized conf fcDat p
           stripped = if countBranches conf then unopt else stripBranchCount unopt
-      in optimizeEnv conf stripped
+          -- Batched mode: retag elementwise ifs to selects before optimizing
+          -- (design pytorch-tensorizer). Mirrors 'Prelude.compile'.
+          selected = if batched conf then selectPassEnv stripped else stripped
+      in optimizeEnv conf selected
 
 -- The FCData certificate is built once in 'Prelude.compile' and threaded in,
 -- rather than rebuilt here (modality-split-forwardchaining).
