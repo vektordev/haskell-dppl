@@ -610,7 +610,7 @@ densityAgreementCase name p target explicitArgs = testCase caseName $ do
       let samples = evalRand (replicateM 20 (runGenNamedC p compiled target args)) (mkStdGen 42)
       forM_ (nub samples) $ \x -> do
         (pOwn, dOwn) <- case runProbNamedC p compiled target args x of
-          Right (VTuple (VFloat pr) (VFloat d)) -> return (pr, d)
+          Right (VProbDim pr d) -> return (pr, d)
           other -> assertFailure (name ++ ": prob(" ++ show x ++ ") returned " ++ show other) >> return (0, 0)
         (pDec, dDec) <- case decode vec x of
           Right (VTuple (VFloat pr) (VTuple (VFloat d) _)) -> return (pr, d)

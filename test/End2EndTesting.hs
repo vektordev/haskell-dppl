@@ -50,7 +50,7 @@ testInterpreter :: Program -> Either CompilerError IREnv -> TestCase -> Property
 testInterpreter p compiledE (ProbTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = ioProperty $ do
   result <- try (let r = compiledE >>= \c -> runProbC p c params sample in evaluate (length (show r)) >> return r) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of 
-    Right (Right (VTuple (VFloat outProb) (VFloat outDim))) -> 
+    Right (Right (VProbDim outProb outDim)) -> 
       counterexample ("Probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < probTolerance) .&&.
         counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim)
     Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
@@ -59,7 +59,7 @@ testInterpreter p compiledE (ProbTestCase name sample params (VFloat expectedPro
 testInterpreter p compiledE (CumulTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = ioProperty $ do
   result <- try (let r = compiledE >>= \c -> runIntegC p c params sample in evaluate (length (show r)) >> return r) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of 
-    Right (Right (VTuple (VFloat outProb) (VFloat outDim)) )-> 
+    Right (Right (VProbDim outProb outDim)) -> 
       counterexample ("Cmulative probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < probTolerance) .&&.
         counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim)
     Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
@@ -105,7 +105,7 @@ testInterpreter p compiledE (ArgmaxPTestCase name params res) = ioProperty $ do
     Left err -> return $ counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
     Right compiled -> case runProbC p compiled mockedParams res of
       Left err -> return $ counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
-      Right (VTuple (VFloat resP) (VFloat resDim))
+      Right (VProbDim resP resDim)
         | resDim /= 0 -> return $ counterexample ("Test case " ++ name ++ ": argmax_p does not support continuous (dim > 0) results") False
         | otherwise -> evalRandIO (argmaxLoop p compiled name mockedParams res resP [res] resP 0)
       Right x -> return $ counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
@@ -132,7 +132,7 @@ argmaxLoop p compiled name mockedParams res resP bucket knownMass consecutiveDup
         then argmaxLoop p compiled name mockedParams res resP bucket knownMass (consecutiveDuplicates + 1)
         else case runProbC p compiled mockedParams sample of
           Left err -> return $ counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
-          Right (VTuple (VFloat sampleP) (VFloat sampleDim))
+          Right (VProbDim sampleP sampleDim)
             -- A continuous value can never beat a discrete res (lower dimensionality
             -- always wins) and isn't part of the dim-0 probability ledger.
             | sampleDim /= 0 -> argmaxLoop p compiled name mockedParams res resP (sample:bucket) knownMass 0
@@ -201,8 +201,12 @@ discreteProbsNormalized p compiledE = case compiledE of
     params = map (VTuple (VInt 0) . VInt) seedList
     sampleCnt = 1000
     sufficientlyNormal = 0.99
-    prob (VTuple (VFloat p) _) = p
-    dim (VTuple _ d) = d
+    prob :: IRValue -> Double
+    prob (VProbDim p _) = p
+    prob v = error ("not a probability result: " ++ show v)
+    dim :: IRValue -> IRValue
+    dim (VProbDim _ d) = VFloat d
+    dim v = error ("not a probability result: " ++ show v)
 
 progParameterCount :: Program -> Int
 progParameterCount Program{functions=f} = countLambdas main
@@ -285,6 +289,9 @@ juliaBatchTestCode projectDir allCases =
        juliaModuleTestCases modName tcs
   ) (zip [0..] allCases)
 
+-- The compiled result is (prob, (dim, impossible)) -- the trailing field is the
+-- internal impossibility flag (design inference-result-side-channels), which is
+-- not stripped from the emitted code, hence the nested dim access below.
 juliaModuleTestCases :: String -> [TestCase] -> String
 juliaModuleTestCases modName tcs =
   modName ++ ".main_gen(" ++ intercalate ", " (map juliaVal exampleParams) ++ ")\n" ++
@@ -295,8 +302,8 @@ juliaModuleTestCases modName tcs =
        \if abs(tmp[1] - " ++ juliaVal outProb ++ ") > " ++ show probTolerance ++ "\n\
        \  error(\"Probability wrong: \" * string(tmp[1]) * \"/=\" * string(" ++ juliaVal outProb ++ ") * \"in test case " ++ name ++ "\")\n\
        \end\n\
-       \if tmp[1] != 0 && tmp[2] != " ++ juliaVal outDim ++ "\n\
-       \  error(\"Dimensionality wrong: \" * string(tmp[2]) * \"/=\" * string(" ++ juliaVal outDim ++ ") * \"in test case " ++ name ++ "\")\n\
+       \if tmp[1] != 0 && tmp[2][1] != " ++ juliaVal outDim ++ "\n\
+       \  error(\"Dimensionality wrong: \" * string(tmp[2][1]) * \"/=\" * string(" ++ juliaVal outDim ++ ") * \"in test case " ++ name ++ "\")\n\
        \end\n"
     ) tcs)
   where
@@ -314,8 +321,8 @@ pythonTestCode src tcs =
     "tmp = " ++ mainName tc ++ "(" ++  pyVal sample ++ ", " ++ intercalate ", " (map pyVal params) ++ ")\n\
     \if abs(tmp[0] - " ++ pyVal outProb ++ ") > " ++ show probTolerance ++ ":\n\
     \  raise ValueError(\"Probability wrong: \" + str(tmp[0]) + \"!=\" + str(" ++ pyVal outProb ++ ") + \"in test case " ++ name ++ "\")\n\
-    \if tmp[0] != 0 and tmp[1] != " ++ pyVal outDim ++ ":\n\
-    \  raise ValueError(\"Dimensionality wrong: \" + str(tmp[1]) + \"/=\" + str(" ++ pyVal outDim ++ ") + \"in test case " ++ name ++ "\")\n\
+    \if tmp[0] != 0 and tmp[1][0] != " ++ pyVal outDim ++ ":\n\
+    \  raise ValueError(\"Dimensionality wrong: \" + str(tmp[1][0]) + \"/=\" + str(" ++ pyVal outDim ++ ") + \"in test case " ++ name ++ "\")\n\
     \") tcs)
   where 
     (_, _, exampleParams, _, _) = unpackTestCase (head tcs)

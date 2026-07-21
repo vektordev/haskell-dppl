@@ -275,6 +275,9 @@ forceUnaryOp OpNeg (VInt x) = VInt (-x)
 forceUnaryOp OpSign (VFloat x) = VFloat (signum x)
 forceUnaryOp OpSign (VInt x) = VInt (signum x)
 forceUnaryOp OpNot (VBool x) = VBool (not x)
+-- Same policy as forceOp: an operation on ANY is an unreachable path being
+-- folded, not a real negation.
+forceUnaryOp OpNot VAny = VAny
 forceUnaryOp OpExp (VFloat x) = VFloat (exp x)
 forceUnaryOp OpLog (VFloat x) = VFloat (log x)
 forceUnaryOp _ _ = error "Error during forceUnaryOp optimizer"

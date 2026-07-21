@@ -436,7 +436,7 @@ test_farTailEitherDensityNotZeroed :: TestTree
 test_farTailEitherDensityNotZeroed = testCase "farTailEitherDensityNotZeroed" $ do
   let prog = Program [("main", ifThenElse (normal #>#  constF 0.0) (left normal) (right unit))] [] [] []
   case runProb defaultCompilerConfig prog [] (VEither (Left (VFloat 7.0))) of
-    Right (VTuple (VFloat p) (VFloat d)) -> do
+    Right (VProbDim p d) -> do
       assertBool ("expected a nonzero far-tail density, got exactly " ++ show p) (p > 0)
       assertEqual "far-tail density must keep dim=1 (continuous)" 1.0 d
     other -> assertFailure ("expected a probability tuple, got: " ++ show other)
@@ -468,12 +468,12 @@ test_letBoundEitherDestructureUsesSample = testCase "letBoundEitherDestructureUs
   let prog = Program [("main", letIn "e" boundE body)] [] [] []
   let phi x = (1 / sqrt (2 * pi)) * exp (-0.5 * x * x)
   case runProb defaultCompilerConfig prog [] (VEither (Right (VFloat 0.3))) of
-    Right (VTuple (VFloat p) (VFloat d)) -> do
+    Right (VProbDim p d) -> do
       assertBool ("expected 0.5*phi(0.3) =~ 0.1907, got " ++ show p) (abs (p - 0.5 * phi 0.3) < 0.0001)
       assertEqual "continuous arm keeps dim=1" 1.0 d
     other -> assertFailure ("expected a probability tuple, got: " ++ show other)
   case runProb defaultCompilerConfig prog [] (VEither (Left VUnit)) of
-    Right (VTuple (VFloat p) _) ->
+    Right (VProbDim p _) ->
       assertEqual "Nothing is structurally impossible here (fromLeft/fromRight always succeed under their own isLeft/isRight guard)" 0.0 p
     other -> assertFailure ("expected a probability tuple, got: " ++ show other)
 
@@ -510,7 +510,7 @@ test_setWitnessMergesComplementaryTupleFields = testCase "setWitnessMergesComple
   let prog = Program [("main", letIn "e" boundE body)] [] [] []
   let phi x = (1 / sqrt (2 * pi)) * exp (-0.5 * x * x)
   case runProb defaultCompilerConfig prog [] (VTuple (VFloat 0.3) (VFloat 0.7)) of
-    Right (VTuple (VFloat p) (VFloat d)) -> do
+    Right (VProbDim p d) -> do
       assertBool ("expected phi(0.3)*1 =~ 0.3814, got " ++ show p) (abs (p - phi 0.3) < 0.0001)
       assertEqual "both fields recovered => dim=2 (two independent continuous slots)" 2.0 d
     other -> assertFailure ("expected a probability tuple, got: " ++ show other)
@@ -891,10 +891,10 @@ planEnumTopKAndBCTest testName baseName = testCase testName $ do
   let cBoth = compiledWith defaultCompilerConfig{topKThreshold = Just 0.05, countBranches = True}
   let evalWith c ps s = either (error . show) id (runProbC prog c ps s)
   mapM_ (\(s, ps, expected) -> do
-          let VTuple (VFloat pDef) (VFloat dimDef) = evalWith cDef ps s
-          let VTuple (VFloat pTopK) _              = evalWith cTopK ps s
-          let VTuple (VFloat pBC) (VTuple (VFloat dimBC) (VFloat bc)) = evalWith cBC ps s
-          let VTuple (VFloat pBoth) (VTuple _ (VFloat bcBoth))        = evalWith cBoth ps s
+          let VProbDim pDef dimDef      = evalWith cDef ps s
+          let VProbDim pTopK _          = evalWith cTopK ps s
+          let VProbDimBC pBC dimBC bc   = evalWith cBC ps s
+          let VProbDimBC pBoth _ bcBoth = evalWith cBoth ps s
           assertBool ("default prob " ++ show pDef ++ " differs from .tst " ++ show expected)
             (abs (pDef - expected) < 1e-4)
           assertEqual "all-discrete plan worlds have dim 0" 0 dimDef

@@ -125,7 +125,7 @@ irInteg :: Program -> IREnv -> IRValue -> Maybe Double
 irInteg p compiled x
   | not (hasIntegFun compiled) = Nothing
   | otherwise = case runIntegC p compiled [] x of
-      Right (VTuple (VFloat c) _) -> Just c
+      Right (VProbDim c _) -> Just c
       _ -> Nothing
 
 -- | A properly-discarded QuickCheck test case (via the standard '==>'
@@ -146,8 +146,7 @@ discardVacuous = False ==> True
 -- Pulls (prob, dim) out of the standard IRValue result shape, tolerating the
 -- countBranches variant's extra third tuple component.
 probDim :: IRValue -> Maybe (Double, Double)
-probDim (VTuple (VFloat pr) (VFloat d)) = Just (pr, d)
-probDim (VTuple (VFloat pr) (VTuple (VFloat d) (VFloat _))) = Just (pr, d)
+probDim (VProbDim pr d) = Just (pr, d)
 probDim _ = Nothing
 
 -- | The compiler is not (yet) known to terminate on arbitrary/ill-typed

@@ -177,6 +177,8 @@ A `.tst` file may start with two optional header lines, in either order: a routi
 
 ### Slow tests
 
+**The `Slow` group is currently known-broken** — it is not green, and failures there are pre-existing rather than caused by whatever change you are making. Do not treat a red `NEST_SLOW_TESTS=1` run as a regression signal without first confirming the same failure on an untouched checkout. The default (non-slow) suite is the gate.
+
 A handful of tests are expensive enough (multiple full compiles of a large/deep program) to noticeably slow day-to-day `stack test`, while being unlikely to catch regressions outside the specific feature they pin. These are skipped by default and only run with `NEST_SLOW_TESTS=1 stack test` (or `NEST_SLOW_TESTS=1 stack test --ta '-p Slow'` to run just that group) — CI or an occasional manual pass should still exercise them regularly. Two mechanisms feed the top-level `Slow` group built in `Spec.hs`:
 - A `.tst` file's `slow` header (see above) routes its program out of `end2endTests`'s Interpreter/Interpreter-Unoptimized groups and into `End2EndTesting.slowEnd2EndTests` instead (e.g. `testCases/planEnumRecDeepOne.tst`, a depth-10 plan enumeration stress case).
 - A few individual `TestInternals.hs` cases that redundantly recompile a corpus program under several `CompilerConfig`s (e.g. `test_planEnumRecTopKAndBC`, which compiles `planEnumRecChain.ppl` four more times to check topK/branch-counting interaction) live in `TestInternals.slowInternalsTests` instead of `internalsTests`.

@@ -132,7 +132,7 @@ prop_TopK = once $ ioProperty $ do
   let actualOutput0 = irDensity (topKConf 0.1) testTopK (VFloat 0) []
   let actualOutput1 = irDensity (topKConf 0.1) testTopK (VFloat 1) []
   case (actualOutput0, actualOutput1) of
-    (VTuple a (VFloat _), VTuple b (VFloat _)) -> return $ (b == VFloat 0.95) && (a == VFloat 0)
+    (VProbDim a _, VProbDim b _) -> return $ (b == 0.95) && (a == 0)
     _ -> return False
 
 -- DO NOT CHANGE THIS CODE WITHOUT ALSO CHANGING THE CODE IN THE README
@@ -145,7 +145,7 @@ prop_CheckReadmeCodeListing1 = ioProperty $ do
       gen <- evalRandIO gen'
       case runProb defaultCompilerConfig twoDice [] gen of
         Left err -> return $ counterexample err False
-        Right (VTuple (VFloat prob) (VFloat dim)) -> do
+        Right (VProbDim prob dim) -> do
           -- Original Listing above, Tests below
           if gen == (VInt 2) || gen == (VInt 12) then
             return $ (VFloat prob) `reasonablyClose` (VFloat $ 1/36)
@@ -172,7 +172,7 @@ prop_CheckReadmeCodeListing2 = ioProperty $ do
       gen <- evalRandIO gen'
       case runProb defaultCompilerConfig dist [] gen of
         Left err -> return $ counterexample err False
-        Right (VTuple (VFloat prob) (VFloat dim)) -> do
+        Right (VProbDim prob dim) -> do
           -- Original Listing above, Tests below
           let (VFloat genF) = gen
           return $ (VFloat prob) `reasonablyClose` (VFloat (normalPDF ((genF - 1) / 2) / 2))
@@ -200,7 +200,7 @@ checkProbTestCasesWithBC :: CompiledPrograms -> String -> (Program, IRValue, [IR
 checkProbTestCasesWithBC envs n (p, inp, params, (VFloat out, VFloat outDim)) = ioProperty $ do
   let actualOutput = irDensityC envs n p params inp
   case actualOutput of
-    VTuple (VFloat a) (VTuple (VFloat d) (VFloat _)) -> return $
+    VProbDimBC a d _ -> return $
       counterexample (show a ++ "/=" ++ show out) (property $ abs (a - out) < probTolerance)
       .&&. (a === 0 .||. d === outDim)
     _ -> return $ counterexample "Return type was no tuple" False
@@ -209,7 +209,7 @@ checkProbAny :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRV
 checkProbAny envs n (p, _, params, _) = ioProperty $ do
   let actualOutput = irDensityC envs n p params VAny
   case actualOutput of
-    VTuple a (VFloat d) -> return $ a `reasonablyClose` VFloat 1
+    VProbDim a _ -> return $ VFloat a `reasonablyClose` VFloat 1
     _ -> return $ counterexample "Return type was no tuple" False
 
 -- All test compilation goes through the public SPLL.Prelude entry points, so the
@@ -302,9 +302,9 @@ prop_TopKNestedPrunesDeeper = once $ ioProperty $ do
   let topKResult = irDensity (topKConf 0.1) twoLevel (VFloat 1.0) []
   let exactResult = irDensity defaultCompilerConfig twoLevel (VFloat 1.0) []
   case (topKResult, exactResult) of
-    (VTuple (VFloat topKP) _, VTuple exactP _) ->
+    (VProbDim topKP _, VProbDim exactP _) ->
       return $ counterexample ("global topK P(1.0)=" ++ show topKP ++ ", expected 0") (topKP == 0.0)
-             .&&. counterexample ("exact P(1.0) should be 0.0144") (exactP `reasonablyClose` VFloat 0.0144)
+             .&&. counterexample ("exact P(1.0) should be 0.0144") (VFloat exactP `reasonablyClose` VFloat 0.0144)
     _ -> return $ counterexample "Return type was no tuple" False
 
 -- Cross-function: accProb passes through a _prob call boundary.
@@ -321,9 +321,9 @@ prop_TopKCrossFunction = once $ ioProperty $ do
   let topKResult = irDensity (topKConf 0.1) crossFunc (VFloat 1.0) []
   let exactResult = irDensity defaultCompilerConfig crossFunc (VFloat 1.0) []
   case (topKResult, exactResult) of
-    (VTuple (VFloat topKP) _, VTuple exactP _) ->
+    (VProbDim topKP _, VProbDim exactP _) ->
       return $ counterexample ("global topK P(1.0)=" ++ show topKP ++ ", expected 0") (topKP == 0.0)
-             .&&. counterexample ("exact P(1.0) should be 0.0144") (exactP `reasonablyClose` VFloat 0.0144)
+             .&&. counterexample ("exact P(1.0) should be 0.0144") (VFloat exactP `reasonablyClose` VFloat 0.0144)
     _ -> return $ counterexample "Return type was no tuple" False
 
 -- Threshold=0 never prunes any branch, so results must match exact inference.
@@ -332,8 +332,9 @@ checkTopKZeroMatchesExact topKEnvs defEnvs n (p, inp, params, _) = ioProperty $ 
   let topKResult = irDensityC topKEnvs n p params inp
   let exactResult = irDensityC defEnvs n p params inp
   case (topKResult, exactResult) of
-    (VTuple topKP topKD, VTuple exactP exactD) ->
-      return $ topKP `reasonablyClose` exactP .&&. topKD `reasonablyClose` exactD
+    (VProbDim topKP topKD, VProbDim exactP exactD) ->
+      return $ VFloat topKP `reasonablyClose` VFloat exactP
+          .&&. VFloat topKD `reasonablyClose` VFloat exactD
     _ -> return $ counterexample "Return type was no tuple" False
 
 -- Pruning can only zero out branches, never inflate probability above the exact value.
@@ -342,7 +343,7 @@ checkTopKNeverInflates topKEnvs defEnvs n (p, inp, params, _) = ioProperty $ do
   let topKResult = irDensityC topKEnvs n p params inp
   let exactResult = irDensityC defEnvs n p params inp
   case (topKResult, exactResult) of
-    (VTuple (VFloat topKP) _, VTuple (VFloat exactP) _) ->
+    (VProbDim topKP _, VProbDim exactP _) ->
       return $ counterexample (show topKP ++ " > " ++ show exactP) (topKP <= exactP + 1e-9)
     _ -> return $ counterexample "Return type was no tuple" False
 
@@ -354,7 +355,7 @@ prop_TopKFewerBranches = once $ ioProperty $ do
   let topKBCResult = irDensity (topKBCConf 0.2) testDiceAdd (VInt 7) []
   let noBCResult   = irDensity bcConf           testDiceAdd (VInt 7) []
   case (topKBCResult, noBCResult) of
-    (VTuple _ (VTuple _ (VFloat topKBC)), VTuple _ (VTuple _ (VFloat noBC))) ->
+    (VProbDimBC _ _ topKBC, VProbDimBC _ _ noBC) ->
       return $ counterexample (show topKBC ++ " >= " ++ show noBC ++ " (topK should reduce branch count when a branch is pruned)") (topKBC < noBC)
     _ -> return $ counterexample "Return type was no tuple" False
 
@@ -367,7 +368,7 @@ prop_TopKMonotonicBranches = once $ ioProperty $ do
   let bcLow  = irDensity (topKBCConf 0.1) testDiceAdd (VInt 7) []
   let bcHigh = irDensity (topKBCConf 0.2) testDiceAdd (VInt 7) []
   case (bcLow, bcHigh) of
-    (VTuple _ (VTuple _ (VFloat lowBC)), VTuple _ (VTuple _ (VFloat highBC))) ->
+    (VProbDimBC _ _ lowBC, VProbDimBC _ _ highBC) ->
       return $ counterexample (show highBC ++ " > " ++ show lowBC ++ " (higher threshold should prune at least as much)") (highBC <= lowBC)
     _ -> return $ counterexample "Return type was no tuple" False
 
@@ -379,7 +380,7 @@ prop_BCLeafCountIfElse = once $ ioProperty $ do
   let prog = Program [("main", ifThenElse (bernoulli 0.5) (ifThenElse (bernoulli 0.5) uniform (constF 3.0)) (constF 1.0))] [] [] []
   let result = irDensity bcConf prog (VFloat 0.5) []
   case result of
-    VTuple _ (VTuple _ (VFloat bc)) -> return $ counterexample ("Expected BC=3, got " ++ show bc) (bc == 3.0)
+    VProbDimBC _ _ bc -> return $ counterexample ("Expected BC=3, got " ++ show bc) (bc == 3.0)
     _ -> return $ counterexample "Return type was no tuple" False
 
 -- dice 6 is a pure if-else tree with 6 leaves. BC should equal 6 for any query.
@@ -388,7 +389,7 @@ prop_BCDiceIfElse :: Property
 prop_BCDiceIfElse = once $ ioProperty $ do
   let result = irDensity bcConf testDice (VInt 3) []
   case result of
-    VTuple _ (VTuple _ (VFloat bc)) -> return $ counterexample ("Expected BC=6, got " ++ show bc) (bc == 6.0)
+    VProbDimBC _ _ bc -> return $ counterexample ("Expected BC=6, got " ++ show bc) (bc == 6.0)
     _ -> return $ counterexample "Return type was no tuple" False
 
 -- Consistency: dice6 as if-else (BC=6) and testDiceAdd as InjF (BC=6 for P(7)) agree.
@@ -397,7 +398,7 @@ prop_BCConsistency = once $ ioProperty $ do
   let diceResult    = irDensity bcConf testDice    (VInt 3) []
   let diceAddResult = irDensity bcConf testDiceAdd (VInt 7) []
   case (diceResult, diceAddResult) of
-    (VTuple _ (VTuple _ (VFloat diceBC)), VTuple _ (VTuple _ (VFloat diceAddBC))) ->
+    (VProbDimBC _ _ diceBC, VProbDimBC _ _ diceAddBC) ->
       return $ counterexample ("dice BC=" ++ show diceBC ++ ", diceAdd BC=" ++ show diceAddBC ++ " (expected both=6)") (diceBC == diceAddBC)
     _ -> return $ counterexample "Return type was no tuple" False
 
@@ -412,8 +413,8 @@ prop_TopKDiceAllOrNothing = once $ ioProperty $ do
   let high  = irDensity (topKConf 0.2)        testDice (VInt 3) []
   let exact = irDensity defaultCompilerConfig testDice (VInt 3) []
   case (low, high, exact) of
-    (VTuple lowP _, VTuple (VFloat hP) _, VTuple exactP _) ->
-      return $ lowP `reasonablyClose` exactP
+    (VProbDim lowP _, VProbDim hP _, VProbDim exactP _) ->
+      return $ VFloat lowP `reasonablyClose` VFloat exactP
             .&&. counterexample ("threshold=0.2 should prune all branches: P=" ++ show hP) (hP == 0.0)
     _ -> return $ counterexample "Return type was no tuple" False
 
@@ -427,8 +428,8 @@ prop_TopKInjFEnum = once $ ioProperty $ do
   let high  = irDensity (topKConf 0.2)        testDiceAdd (VInt 7) []
   let exact = irDensity defaultCompilerConfig testDiceAdd (VInt 7) []
   case (low, high, exact) of
-    (VTuple lowP _, VTuple (VFloat hP) _, VTuple exactP _) ->
-      return $ lowP `reasonablyClose` exactP
+    (VProbDim lowP _, VProbDim hP _, VProbDim exactP _) ->
+      return $ VFloat lowP `reasonablyClose` VFloat exactP
             .&&. counterexample ("threshold=0.2 should prune all InjF enum branches: P=" ++ show hP) (hP == 0.0)
     _ -> return $ counterexample "Return type was no tuple" False
 
@@ -442,7 +443,7 @@ prop_TopKEndToEnd = once $ ioProperty $ do
   let results = map (\v -> irDensity (topKConf 0.1) prog (VFloat v) []) [1.0, 2.0, 3.0, 4.0]
   return $ conjoin
     [ case r of
-        VTuple p _ -> p `reasonablyClose` VFloat 0.25
+        VProbDim p _ -> VFloat p `reasonablyClose` VFloat 0.25
         x -> counterexample ("Unexpected result shape: " ++ show x) False
     | r <- results ]
 
@@ -453,7 +454,7 @@ prop_BCConditionalLambda :: Property
 prop_BCConditionalLambda = once $ ioProperty $ do
   let result = irDensity bcConf testConditionalLambdaBC (VFloat 1.0) []
   case result of
-    VTuple _ (VTuple _ (VFloat bc)) ->
+    VProbDimBC _ _ bc ->
       return $ counterexample ("Expected BC=2, got " ++ show bc) (bc == 2.0)
     _ -> return $ counterexample ("Unexpected result shape: " ++ show result) False
 
@@ -468,7 +469,7 @@ prop_killAllVarExtraction :: Property
 prop_killAllVarExtraction = once $ ioProperty $ do
   let result = irDensity defaultCompilerConfig testNormalScaledViaVar (VFloat 2.0) []
   case result of
-    VTuple (VFloat p) _ ->
+    VProbDim p _ ->
       return $ counterexample ("Expected normalPDF(1)*0.5≈" ++ show (normalPDF 1.0 * 0.5) ++ ", got " ++ show p)
         (abs (p - normalPDF 1.0 * 0.5) < 1e-6)
     _ -> return $ counterexample ("Unexpected shape: " ++ show result) False
@@ -480,31 +481,35 @@ prop_BCDoesNotChangeProbability = once $ ioProperty $ do
   let withBC    = irDensity bcConf testDice (VInt 3) []
   let withoutBC = irDensity defaultCompilerConfig testDice (VInt 3) []
   case (withBC, withoutBC) of
-    (VTuple (VFloat pBC) _, VTuple (VFloat pNone) _) ->
+    (VProbDim pBC _, VProbDim pNone _) ->
       return $ counterexample
         ("P with BC=" ++ show pBC ++ " /= P without BC=" ++ show pNone)
         (abs (pBC - pNone) < 1e-9)
     _ -> return $ counterexample
       ("Unexpected result shapes: " ++ show withBC ++ ", " ++ show withoutBC) False
 
--- stripBranchCount structural check: when countBranches=False the prob function
--- should return a pair (prob, dim), not a triple.  We verify this by checking that
--- the interpreter result has exactly two components (VTuple _ _) and not three
--- (VTuple _ (VTuple _ _)).
+-- stripBranchCount structural check: countBranches=False must drop the branch
+-- count from the result and nothing else.  The result always carries the
+-- impossibility flag as its last field (design inference-result-side-channels),
+-- so the layouts are (prob, (dim, (bc, imposs))) and (prob, (dim, imposs)) --
+-- what this pins is that exactly the bc slot disappears.
 -- Also exercises the killAll IRVar path: testDice's main calls the dice sub-expression
--- via Var, so killAll must rewrite IRTFst(IRTSnd(IRVar x)) → IRTSnd(IRVar x).
+-- via Var, so killAll must rewrite the bc/flag extractions from the called
+-- function's result to the shortened layout.
 prop_stripBranchCountReturnShape :: Property
 prop_stripBranchCountReturnShape = once $ ioProperty $ do
   let withBC    = irDensity bcConf testDice (VInt 3) []
   let withoutBC = irDensity defaultCompilerConfig testDice (VInt 3) []
-  let isTriple (VTuple _ (VTuple _ _)) = True
-      isTriple _                       = False
+  let hasBC (VTuple _ (VTuple _ (VTuple _ (VBool _)))) = True
+      hasBC _                                          = False
+      noBC  (VTuple _ (VTuple _ (VBool _)))            = True
+      noBC  _                                          = False
   return $
-    counterexample ("countBranches=True should return triple, got: " ++ show withBC)
-      (isTriple withBC)
+    counterexample ("countBranches=True should return (p, (d, (bc, imposs))), got: " ++ show withBC)
+      (hasBC withBC)
     .&&.
-    counterexample ("countBranches=False should return pair, got: " ++ show withoutBC)
-      (case withoutBC of { VTuple _ (VTuple _ _) -> False; VTuple _ _ -> True; _ -> False })
+    counterexample ("countBranches=False should return (p, (d, imposs)), got: " ++ show withoutBC)
+      (noBC withoutBC)
 
 -- When topKThreshold is set, IREnv should contain exactly one constant named TOP_K_CUTOFF
 -- with the value matching the config.
@@ -560,8 +565,8 @@ prop_TopKConstantResolvedByInterpreter = once $ ioProperty $ do
   let withTopK = irDensity (topKConf 0.001)      testDice (VInt 3) []
   let exact    = irDensity defaultCompilerConfig testDice (VInt 3) []
   case (withTopK, exact) of
-    (VTuple topKP _, VTuple exactP _) ->
-      return $ topKP `reasonablyClose` exactP
+    (VProbDim topKP _, VProbDim exactP _) ->
+      return $ VFloat topKP `reasonablyClose` VFloat exactP
     _ -> return $ counterexample "Return type was no tuple" False
 
 return []

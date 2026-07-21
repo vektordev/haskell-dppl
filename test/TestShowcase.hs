@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 -- | Drift guard for the documentation examples.
 --
 -- The syntax showcase (@examples/showcase.ppl@) and the fenced @```spll@
@@ -35,7 +36,7 @@ import Text.Megaparsec (ParseErrorBundle, errorBundlePretty)
 import SPLL.Lang.Types
 import SPLL.Parser (tryParseProgram)
 import SPLL.Prelude (compile, runGenC, runProbC, runIntegC, runProbNamedC, runIntegNamedC)
-import SPLL.IntermediateRepresentation (defaultCompilerConfig, IREnv, IRValue)
+import SPLL.IntermediateRepresentation (defaultCompilerConfig, IREnv, IRValue, pattern VProbDim)
 import TestCaseParser (TestCase(..), parseTestCasesFromString,
                        FreezeCase(..), FreezeMode(..), parseFreezeCasesFromString)
 import TestTolerances (probTolerance)
@@ -191,7 +192,7 @@ checkQuery mode name result expProb = do
       (mode ++ " case " ++ name ++ ": expected " ++ show expProb ++ " got " ++ show got)
       (abs (got - expProb) < probTolerance)
   where
-    extractProb (VTuple (VFloat prob) _) = Just prob
+    extractProb (VProbDim prob _) = Just prob
     extractProb _                        = Nothing
 
 -- | Extract every @```spll@ fenced block from markdown, each paired with the

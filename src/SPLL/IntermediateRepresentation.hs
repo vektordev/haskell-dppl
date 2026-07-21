@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 module SPLL.IntermediateRepresentation (
   IRExpr(..)
 , IREnv(..)
@@ -17,6 +19,9 @@ module SPLL.IntermediateRepresentation (
 , irPrintFlat
 , valueToIR
 , isLambda
+, pattern VProbDim
+, pattern VProbDimBC
+, resultImpossible
 ) where
 
 import SPLL.Lang.Types
@@ -24,6 +29,37 @@ import SPLL.Typing.RType (RType(..))
 import SPLL.Typing.PType()
 import SPLL.Typing.Typing()
 import Data.Data()
+
+-- | The probability-mode result layout, as produced by 'SPLL.IRCompiler.packResult':
+--
+-- >  (prob, (dim, (branchCount, impossible)))    -- countBranches on
+-- >  (prob, (dim, impossible))                   -- countBranches off
+--
+-- The impossibility flag is an internal side-channel (design
+-- inference-result-side-channels): it tells a mixture which alternatives are
+-- structurally inapplicable, instead of that being re-derived by comparing a
+-- probability to zero. It is not stripped from the emitted result yet, so
+-- consumers match through these patterns rather than on the tuple shape, which
+-- is the layout's only definition outside the compiler.
+pattern VProbDim :: Double -> Double -> IRValue
+pattern VProbDim p d <- (probDimOf -> Just (p, d))
+
+pattern VProbDimBC :: Double -> Double -> Double -> IRValue
+pattern VProbDimBC p d bc <- (probDimBCOf -> Just (p, d, bc))
+
+probDimOf :: IRValue -> Maybe (Double, Double)
+probDimOf (VTuple (VFloat p) (VTuple (VFloat d) _)) = Just (p, d)
+probDimOf _                                         = Nothing
+
+probDimBCOf :: IRValue -> Maybe (Double, Double, Double)
+probDimBCOf (VTuple (VFloat p) (VTuple (VFloat d) (VTuple (VFloat bc) _))) = Just (p, d, bc)
+probDimBCOf _                                                             = Nothing
+
+-- | The impossibility flag of a result, when the layout carries one.
+resultImpossible :: IRValue -> Maybe Bool
+resultImpossible (VTuple _ (VTuple _ (VBool imp)))            = Just imp
+resultImpossible (VTuple _ (VTuple _ (VTuple _ (VBool imp)))) = Just imp
+resultImpossible _                                            = Nothing
 
 {-
 {-# OPTIONS -Wall #-}

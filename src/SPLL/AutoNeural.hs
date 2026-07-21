@@ -175,11 +175,26 @@ vector = "l_x_neural_out"
 symbol :: String
 symbol = "l_x_neural_in"
 
+-- The decoder's reader assembles its result tuple by hand rather than through
+-- IRCompiler's PResult algebra, so the impossibility flag (design
+-- inference-result-side-channels) has to be supplied here too -- callers unpack
+-- all four fields. There is no guard or indicator to take the fact from: the
+-- value is a product of logit reads. What can be said soundly is that a
+-- vanishing *mass* means no slot was selected, i.e. an impossible sample, while
+-- a vanishing density is just a small density -- so the flag is derived from
+-- the value only on the dim-0 side. Both dim and the probability are let-bound
+-- (dim is a constant for every non-mixed plan and folds away).
 makeProb :: [ADTDecl] -> CompilerConfig -> PartitionPlan -> IRExpr
-makeProb adts conf plan = IRLambda vector (IRLambda "sample" (IRTCons m sndRet))
+makeProb adts conf plan = IRLambda vector (IRLambda "sample"
+  (IRLetIn probVar m (IRLetIn dimVar dim
+    (IRTCons (IRVar probVar) (IRTCons (IRVar dimVar) (IRTCons bc imposs))))))
   where
     (m, dim, bc) = makeProbRec adts plan 0 (IRVar "sample")
-    sndRet = IRTCons dim bc
+    probVar = "l_dec_p"
+    dimVar  = "l_dec_dim"
+    imposs  = IRIf (IROp OpEq (IRVar dimVar) (IRConst (VFloat 0)))
+                   (IROp OpEq (IRVar probVar) (IRConst (VFloat 0)))
+                   (IRConst (VBool False))
 
 -- Takes a Tag from a Discretes type and a sample, and builds code that returns the index of the sample in the tag.
 -- step 1: turn the tag into a list of values.
