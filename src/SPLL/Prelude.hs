@@ -12,6 +12,7 @@ module SPLL.Prelude
   , negIF
   , recipF
   , expF
+  , sqrtF
   , letIn
   , var
   , constF
@@ -140,6 +141,9 @@ recipF x = injF "recip" [x]
 
 expF :: Expr -> Expr
 expF x = injF "exp" [x]
+
+sqrtF :: Expr -> Expr
+sqrtF x = injF "sqrt" [x]
 
 -- Variables
 

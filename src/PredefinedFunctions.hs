@@ -52,14 +52,20 @@ negIInv = FDecl (Forall [] [] (TArrow TInt TInt)) ["b"] ["a"] (IRUnaryOp OpNeg (
 recipFwd :: FDecl
 recipFwd = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["a"] ["b"] (IROp OpDiv (IRConst (VFloat 1)) (IRVar "a")) (IRConst (VBool True)) False [("a", IRUnaryOp OpNeg (IROp OpDiv (IRConst (VFloat 1)) (IROp OpMult (IRVar "a") (IRVar "a"))))]
 recipInv :: FDecl
-recipInv = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["b"] ["a"] (IROp OpDiv (IRConst (VFloat 1)) (IRVar "b")) (IRConst (VBool True)) False [("b", IRUnaryOp OpNeg (IROp OpDiv (IRConst (VFloat 1)) (IROp OpMult (IRVar "b") (IRVar "b"))))]
+-- 1/a is never 0, so a zero observation is impossible rather than a division
+-- by zero producing NaN/Inf in the reported density.
+recipInv = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["b"] ["a"] (IROp OpDiv (IRConst (VFloat 1)) (IRVar "b")) (IRUnaryOp OpNot (IROp OpEq (IRVar "b") (IRConst $ VFloat 0))) False [("b", IRUnaryOp OpNeg (IROp OpDiv (IRConst (VFloat 1)) (IROp OpMult (IRVar "b") (IRVar "b"))))]
 
 -- sqrt via exp(0.5*log x) (no dedicated OpSqrt); defined on the positive reals.
 -- Forward derivative d/da sqrt(a) = 0.5 / sqrt(a). Inverse is squaring.
 sqrtFwd :: FDecl
 sqrtFwd = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["a"] ["b"] (IRUnaryOp OpExp (IROp OpMult (IRConst (VFloat 0.5)) (IRUnaryOp OpLog (IRVar "a")))) (IROp OpGreaterThan (IRVar "a") (IRConst (VFloat 0))) False [("a", IROp OpDiv (IRConst (VFloat 0.5)) (IRUnaryOp OpExp (IROp OpMult (IRConst (VFloat 0.5)) (IRUnaryOp OpLog (IRVar "a")))))]
+-- Applicable only on the image of sqrt, [0, inf): squaring happily maps a
+-- negative observation back into the argument's support (p(sqrt(X) = -0.5)
+-- would otherwise report X's density at 0.25), so the observation itself has
+-- to be tested. Spelled as not(b < 0) for want of an OpGeq, and inclusive of 0.
 sqrtInv :: FDecl
-sqrtInv = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["b"] ["a"] (IROp OpMult (IRVar "b") (IRVar "b")) (IRConst (VBool True)) False [("b", IROp OpMult (IRConst (VFloat 2)) (IRVar "b"))]
+sqrtInv = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["b"] ["a"] (IROp OpMult (IRVar "b") (IRVar "b")) (IRUnaryOp OpNot (IROp OpLessThan (IRVar "b") (IRConst $ VFloat 0))) False [("b", IROp OpMult (IRConst (VFloat 2)) (IRVar "b"))]
 
 -- sq (squaring); inverse is sqrt, so it is only invertible on the positive reals.
 -- Forward derivative d/da a^2 = 2a.

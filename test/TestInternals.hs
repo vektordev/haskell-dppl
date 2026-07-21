@@ -489,6 +489,45 @@ test_uniformOffSupportIsImpossible = testCase "uniformOffSupportIsImpossible" $ 
     Right res -> assertEqual "0.5 is in support" (Just False) (resultImpossible res)
     other -> assertFailure ("expected a probability tuple, got: " ++ show other)
 
+-- An InjF whose image is smaller than its type is a second way a *density*
+-- result can be a structural zero, alongside a leaf's own support: observing a
+-- value the function cannot produce. Where the inverse declares an
+-- applicability test (exp, sq: b > 0) the flag comes from that test for free,
+-- and where the argument has bounded support the observation is often caught
+-- transitively -- pushed back through the inverse, it lands off the leaf's
+-- support. Neither covers `sqrt` and `recip` at an observation whose preimage
+-- lands back INSIDE the argument's support, which is why their inverses now
+-- carry image tests of their own. p(sqrt(X) = -0.5) used to report X's density
+-- at 0.25 (squaring maps the negative observation right back into [0,1]), and
+-- p(recip(X) = 0) used to report NaN.
+test_injFImageIsImpossible :: TestTree
+test_injFImageIsImpossible = testGroup "InjF image constraints"
+  [ testCase "sqrt: a negative observation is impossible, not X's density at its square" $ do
+      let prog = Program [("main", sqrtF uniform)] [] [] []
+      assertImpossible prog (VFloat (-0.5))
+      assertPossible   prog (VFloat 0.9) 1.8
+  , testCase "recip: a zero observation is impossible, not NaN" $ do
+      let prog = Program [("main", recipF uniform)] [] [] []
+      assertImpossible prog (VFloat 0.0)
+      assertPossible   prog (VFloat 2.0) 0.25
+  , testCase "exp: an observation off (0, inf) is impossible (via the declared applicability test)" $ do
+      let prog = Program [("main", expF normal)] [] [] []
+      assertImpossible prog (VFloat (-1.0))
+      assertPossible   prog (VFloat 2.0) 0.1568740192789811
+  ]
+  where
+    assertImpossible prog x = case runProb defaultCompilerConfig prog [] x of
+      Right res@(VProbDim p _) -> do
+        assertEqual ("probability at " ++ show x) 0.0 p
+        assertEqual ("impossibility flag at " ++ show x) (Just True) (resultImpossible res)
+      other -> assertFailure ("expected a probability tuple, got: " ++ show other)
+    assertPossible prog x expected = case runProb defaultCompilerConfig prog [] x of
+      Right res@(VProbDim p _) -> do
+        assertBool ("expected " ++ show expected ++ " at " ++ show x ++ ", got " ++ show p)
+                   (abs (p - expected) < 1e-9)
+        assertEqual ("impossibility flag at " ++ show x) (Just False) (resultImpossible res)
+      other -> assertFailure ("expected a probability tuple, got: " ++ show other)
+
 -- Regression for observe-partials-umbrella: 'intersectSet's WPoint/WPoint case
 -- (IRCompiler.hs) used to unconditionally keep the first witness and silently
 -- discard the second whenever a let-bound stochastic Either is destructured
@@ -1045,6 +1084,7 @@ internalsTests = testGroup "Internals"
   , test_underflowedTailKeepsDimension
   , test_structurallyImpossibleSampleIsFlagged
   , test_uniformOffSupportIsImpossible
+  , test_injFImageIsImpossible
   , test_letBoundEitherDestructureUsesSample
   , test_setWitnessMergesComplementaryTupleFields
   , autoNeuralDerivationTests
