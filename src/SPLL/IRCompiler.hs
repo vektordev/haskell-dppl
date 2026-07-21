@@ -684,22 +684,21 @@ toIRInference meta cumulative (IfThenElse _ cond left right) sample = do
   (mul1Raw, binds1) <- lift (runWriterT (do
     let metaTrue = meta { accProb = IROp OpMult (accProb meta) (IRVar var_condT_p) }
     weighByCond var_condT_p condTrue <$> toIRInference metaTrue cumulative left sample))
-  let mul1 = mapResult (generateLetInExpr binds1) mul1Raw
   (mul2Raw, binds2) <- lift (runWriterT (do
     let metaFalse = meta { accProb = IROp OpMult (accProb meta) (IRVar var_condF_p) }
     weighByCond var_condF_p condFalse <$> toIRInference metaFalse cumulative right sample))
-  let mul2 = mapResult (generateLetInExpr binds2) mul2Raw
-  let leftBranchesExpr  = rBranches mul1
-  let rightBranchesExpr = rBranches mul2
   -- If probability of this branch is 0 then set the product to 0 manually. This branch could throw an error multiplied by 0
   -- A condition that cannot hold makes its arm an impossible event, which is
   -- exactly what the mixture below needs to know to drop it -- so record it
   -- rather than leaving the zeroed product to be recognised numerically.
-  let zeroCheck c = IRIf (IROp OpApprox c const0) const0
-  let zeroCheckR c r = impossibleWhen (IROp OpApprox c const0)
-                         (onProb (zeroCheck c) (onDim (zeroCheck c) r))
-  let mul1Zeroed = zeroCheckR condTrueExpr mul1
-  let mul2Zeroed = zeroCheckR condFalseExpr mul2
+  -- The check is the arm block's guard (see 'shareResult'), so an arm whose
+  -- condition cannot hold is never evaluated -- it may hold the recursive call
+  -- the check exists to skip.
+  let liveArm c = notIR (IROp OpApprox c const0)
+  mul1Zeroed <- shareResult "armT" [liveArm condTrueExpr] binds1 mul1Raw
+  mul2Zeroed <- shareResult "armF" [liveArm condFalseExpr] binds2 mul2Raw
+  let leftBranchesExpr  = rBranches mul1Zeroed
+  let rightBranchesExpr = rBranches mul2Zeroed
   -- Shared condition: its branches are counted once for both arms, hence the -1.
   let branches = IROp OpSub (IROp OpPlus (rBranches condTrue) (IROp OpPlus leftBranchesExpr rightBranchesExpr)) const1
   addRes <- mixP branches mul1Zeroed mul2Zeroed
@@ -1541,6 +1540,71 @@ opaqueMass p bc = do
   s <- mkVariable "enum_mass"
   setVariables [(s, p)]
   return (PResult (IRVar s) const0 bc (IROp OpEq (IRVar s) const0))
+
+-- | Bind a sub-result's let-in block ONCE, under @guards@, and hand back
+-- projections off that single binding.
+--
+-- The alternative -- 'mapResult' (@generateLetInExpr binds@) -- re-wraps the
+-- whole block around each of the four fields, so every binding the sub-result
+-- floated is duplicated four times at every nesting level. That is exponential
+-- in nesting depth (measured base ~3.18 per level, ~2.16 before the
+-- impossibility flag existed): a 45-line program produced 200 MB of
+-- pre-optimisation IR. CSE folds it all back together afterwards, so the cost
+-- is entirely in what the optimizer has to traverse.
+--
+-- The guards must be part of the bound value rather than applied to the
+-- projections, because the block becomes eager once it is bound: a guard whose
+-- job is to keep a zero-probability arm from being evaluated at all (that arm
+-- may hold the recursive call the guard exists to skip) only does that job from
+-- inside. A failing guard yields 'impossibleP' -- zero on every numeric field,
+-- flagged impossible -- which is what the guarded field-wise form produced too.
+--
+-- Only the fields that actually read the block are projected out of it. Dims,
+-- branch counts and flags are usually statically known constants, and routing a
+-- constant through an opaque tuple hides it from constant folding: doing that to
+-- every field made the -O2 OUTPUT 2.7x larger even as the -O0 input shrank 400x,
+-- with 'mixWith's dim comparisons left as runtime tests that used to fold away.
+shareResult :: String -> [IRExpr] -> [(Varname, IRExpr)] -> PResult -> CompilerMonad PResult
+shareResult tag guards binds r
+  -- Sharing only pays when two or more fields would each carry a copy of the
+  -- block; below two there is no duplication to remove, and the tuple is not
+  -- free: packing and projecting costs assignments per arm, the failed-guard
+  -- fallback is another constant tuple per guard, and routing a statically-known
+  -- dim or flag through it hides that constant from folding. Sharing every
+  -- result unconditionally shrank -O0 400x but grew the -O2 OUTPUT 2.7x.
+  | length readers <= 1 = return (PResult
+      (guarded const0      (wrapIfRead (rProb r)))
+      (guarded const0      (wrapIfRead (rDim r)))
+      -- The branch count is deliberately not guarded: an arm that cannot occur
+      -- still reports the branches it would have traversed, as before.
+      (                     wrapIfRead (rBranches r))
+      (guarded constTrueIR (wrapIfRead (rImposs r))))
+  | otherwise = do
+      v <- mkVariable tag
+      let block = generateLetInExpr binds (packResult r)
+      setVariables [(v, foldr (\g acc -> IRIf g acc (packResult impossibleP)) block guards)]
+      let proj prj e = if reads' e then prj (IRVar v) else guarded const0 e
+      return (PResult
+        (IRTFst (IRVar v))
+        (proj (IRTFst . IRTSnd) (rDim r))
+        (if reads' (rBranches r) then IRTFst (IRTSnd (IRTSnd (IRVar v))) else rBranches r)
+        (if reads' (rImposs r)   then IRTSnd (IRTSnd (IRTSnd (IRVar v)))
+                                 else guarded constTrueIR (rImposs r)))
+  where
+    reads' = mentionsAny (map fst binds)
+    readers = filter reads' [rProb r, rDim r, rBranches r, rImposs r]
+    wrapIfRead e = if reads' e then generateLetInExpr binds e else e
+    -- Guards nest as IRIf, never OpOr/OpAnd -- see 'guardP'.
+    guarded orElse e = foldr (\g acc -> IRIf g acc orElse) e guards
+
+-- | Does this expression read any of the given variables?
+mentionsAny :: [Varname] -> IRExpr -> Bool
+mentionsAny [] _ = False
+mentionsAny names e = go e
+  where
+    nameSet = Set.fromList names
+    go (IRVar n) = n `Set.member` nameSet
+    go x = any go (getIRSubExprs x)
 
 -- | The IR encoding of a result. 'packResult' and 'unpackResult' are the only
 -- places that know it.
