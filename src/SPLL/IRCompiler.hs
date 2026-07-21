@@ -21,7 +21,6 @@ import Control.Monad.Writer.Lazy
 import SPLL.AutoNeural
 import SPLL.Typing.ForwardChaining
 import SPLL.Typing.AlgebraicDataTypes
-import Data.Bifunctor (Bifunctor(bimap))
 import Utils
 import Control.Monad (foldM, forM, when)
 import Control.Monad.State.Strict (StateT, evalStateT, get, gets, put, modify)
@@ -31,7 +30,16 @@ import GHC.Stack (HasCallStack)
 
 type CompilerMonad a = WriterT [(String, IRExpr)] Supply a
 
-type CompilationResult = (IRExpr, IRExpr, IRExpr)
+-- | The result of compiling one expression in probability or integrate mode:
+-- the probability payload plus the two bookkeeping fields that travel with it.
+-- Built and combined through the combinator vocabulary below (design
+-- presult-combinators) rather than by hand, so that a case body can name the
+-- probability and its structural role and leave dim/branch-count implicit.
+data PResult = PResult
+  { rProb     :: IRExpr   -- ^ density / probability mass value
+  , rDim      :: IRExpr   -- ^ dimensionality: 0 = discrete mass, n = n-variate density
+  , rBranches :: IRExpr   -- ^ how many enumerated branches were traversed
+  }
 
 -- (name, ((RType of (Var name)), (Has _gen _prop _integ (if applicable) functions)))
 type TypeEnv = [(String, (RType, Bool))]
@@ -149,23 +157,23 @@ envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb
     stripLambdas e = e
 
 
-runCompile :: CompilerMetadata -> CompilerMonad CompilationResult -> IRExpr
+runCompile :: CompilerMetadata -> CompilerMonad PResult -> IRExpr
 runCompile meta codeGen = generateLetInBlock meta (evalSupply $ runWriterT $ do
-  (p, d, bc) <- codeGen
-  case p of
-    IRLambda _ _ -> return (p, d, bc)
-    _ -> tell [("l_p", p), ("l_d", d), ("l_bc", bc)] >>
-                return (IRVar "l_p", IRVar "l_d", IRVar "l_bc")
+  res <- codeGen
+  case rProb res of
+    IRLambda _ _ -> return res
+    _ -> tell [("l_p", rProb res), ("l_d", rDim res), ("l_bc", rBranches res)] >>
+                return (PResult (IRVar "l_p") (IRVar "l_d") (IRVar "l_bc"))
   --
   )
 
-generateLetInBlock :: CompilerMetadata -> (CompilationResult, [(String, IRExpr)]) -> IRExpr
+generateLetInBlock :: CompilerMetadata -> (PResult, [(String, IRExpr)]) -> IRExpr
 generateLetInBlock _ codeGen =
-  case m of
-    (IRLambda _ _) -> (foldr (\(var, val) expr  -> IRLetIn var val expr) m binds) --Dont make tuple out of lambdas, as the snd (and thr) element don't contain information anyway
-    _ -> generateLetInExpr binds (IRTCons m (IRTCons dim bc))
+  case rProb res of
+    (IRLambda _ _) -> (foldr (\(var, val) expr  -> IRLetIn var val expr) (rProb res) binds) --Dont make tuple out of lambdas, as the snd (and thr) element don't contain information anyway
+    _ -> generateLetInExpr binds (packResult res)
   where
-    ((m, dim, bc), binds) = codeGen
+    (res, binds) = codeGen
 
 generateLetInExpr ::  [(Varname, IRExpr)] -> IRExpr -> IRExpr
 generateLetInExpr binds e = foldr (\(var, val) expr  -> IRLetIn var val expr) e binds
@@ -447,18 +455,14 @@ renameVar' :: String -> String -> IRExpr -> IRExpr
 renameVar' old new (IRVar n) | n == old = IRVar new
 renameVar' _ _ x = x
 
-toIRInferenceSave :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad CompilationResult
+toIRInferenceSave :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PResult
 toIRInferenceSave meta cumulative (Lambda t name subExpr) sample = do
   let newMeta = extendMetaForLambda meta t name
   irTuple <- lift (runWriterT (toIRInferenceSave newMeta cumulative subExpr sample)) <&> generateLetInBlock meta
-  return (IRLambda name irTuple, const0, const0)
+  return (detP (IRLambda name irTuple))
 toIRInferenceSave meta cumulative expr sample = do
-  ((probExpr, probDim, probBranches), letins) <- lift $ runWriterT $ toIRInference meta cumulative expr sample
-  let wrap inner = generateLetInExpr letins inner
-  return ( IRIf (IRUnaryOp OpIsAny sample) (IRConst (VFloat 1)) (wrap probExpr)
-         , IRIf (IRUnaryOp OpIsAny sample) const0 (wrap probDim)
-         , IRIf (IRUnaryOp OpIsAny sample) const0 (wrap probBranches)
-         )
+  (res, letins) <- lift $ runWriterT $ toIRInference meta cumulative expr sample
+  return (anySafe sample (generateLetInExpr letins) res)
 
 
 -- | Dispatch to the appropriate param extractor based on PType.
@@ -598,111 +602,111 @@ hasOwnInferenceHandler _    (Apply _ _ _)            = True
 hasOwnInferenceHandler adts (InjF _ (Named name) _) = isFieldConstructor adts name
 hasOwnInferenceHandler _    _                        = False
 
-toIRInference :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad CompilationResult
+toIRInference :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PResult
 --toIRInference meta cumulative expr sample | trace (show expr) False = undefined
 -- CDFs on Booleans make little sense. We define that False < True. Therefor cdf(True) = 1 and cdf(False) = pdf(False)
 toIRInference meta True expr sample | rType (getTypeInfo expr) == TBool = do
-  (pFalse, _, bcFalse) <- toIRInference meta False expr (IRConst (VBool False))
-  return (IRIf sample (IRConst (VFloat 1)) pFalse, const0, bcFalse)
+  false <- toIRInference meta False expr (IRConst (VBool False))
+  return (PResult (IRIf sample const1 (rProb false)) const0 (rBranches false))
 toIRInference meta False e sample | pType (getTypeInfo e) == PNormal, not (hasOwnInferenceHandler (adtDecls meta) e) = do
   (mu, sigma) <- toIRNormalParams meta e
   let p = IROp OpDiv (IRDensity IRNormal (IROp OpDiv (IROp OpSub sample mu) sigma)) sigma
-  return (p, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), IRConst (VFloat 1))
+  return (density p sample)
 toIRInference meta True e sample | pType (getTypeInfo e) == PNormal, not (hasOwnInferenceHandler (adtDecls meta) e) = do
   (mu, sigma) <- toIRNormalParams meta e
-  return (IRCumulative IRNormal (IROp OpDiv (IROp OpSub sample mu) sigma), const0, IRConst (VFloat 1))
+  return (mass (IRCumulative IRNormal (IROp OpDiv (IROp OpSub sample mu) sigma)))
 toIRInference meta False e sample | pType (getTypeInfo e) == PLogNormal, not (hasOwnInferenceHandler (adtDecls meta) e) = do
   (mu, sigma) <- toIRLogNormalParams meta e
   let correctedSample = IROp OpDiv (IROp OpSub (IRUnaryOp OpLog sample) mu) sigma
   let p = IROp OpDiv (IRDensity IRNormal correctedSample) (IROp OpMult sigma sample)
-  let dim = IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1)
   let negativeGuard x = IRIf (IROp OpGreaterThan sample const0) x const0
-  return (negativeGuard p, dim, IRConst (VFloat 1))
+  return (onProb negativeGuard (density p sample))
 toIRInference meta True e sample | pType (getTypeInfo e) == PLogNormal, not (hasOwnInferenceHandler (adtDecls meta) e) = do
   (mu, sigma) <- toIRLogNormalParams meta e
   let correctedSample = IROp OpDiv (IROp OpSub (IRUnaryOp OpLog sample) mu) sigma
   let negativeGuard x = IRIf (IROp OpGreaterThan sample const0) x const0
-  return (negativeGuard (IRCumulative IRNormal correctedSample), const0, IRConst (VFloat 1))
+  return (mass (negativeGuard (IRCumulative IRNormal correctedSample)))
 -- Distribution primitives (reserved-name Vars). Normal usually reaches the PNormal
 -- catch-all above; these equations are the direct density/CDF leaves for Uniform and
 -- the defensive Normal fallback.
-toIRInference _ False (Var _ "Normal") sample = return (IRDensity IRNormal sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), IRConst (VFloat 1))
-toIRInference _ False (Var _ "Uniform") sample = return (IRDensity IRUniform sample, IRIf (IRUnaryOp OpIsAny sample) const0 (IRConst $ VFloat 1), IRConst (VFloat 1))
-toIRInference _ True (Var _ "Normal") sample = return (IRCumulative IRNormal sample, const0, IRConst (VFloat 1))
-toIRInference _ True (Var _ "Uniform") sample = return (IRCumulative IRUniform sample, const0, IRConst (VFloat 1))
-toIRInference _ _ (Constant _ (VError e)) _ = return (IRError e, const0, const0)
+toIRInference _ False (Var _ "Normal") sample = return (density (IRDensity IRNormal sample) sample)
+toIRInference _ False (Var _ "Uniform") sample = return (density (IRDensity IRUniform sample) sample)
+toIRInference _ True (Var _ "Normal") sample = return (mass (IRCumulative IRNormal sample))
+toIRInference _ True (Var _ "Uniform") sample = return (mass (IRCumulative IRUniform sample))
+toIRInference _ _ (Constant _ (VError e)) _ = return (detP (IRError e))
 toIRInference _ False (Constant TypeInfo {rType=rt} value) sample = do
   let comp = case rt of
               TFloat   -> IROp OpApprox sample (IRConst (fmap failConversion value))
               TVarR _  -> IROp OpApprox sample (IRConst (fmap failConversion value))
               _        -> IROp OpEq sample (IRConst (fmap failConversion value))
   expr <- indicator comp
-  return (expr, const0, IRConst (VFloat 1))
-toIRInference _ True (Constant TypeInfo {rType=rt} value) sample = return (compareValueExpr rt (IRConst (valueToIR value)) sample, const0, IRConst (VFloat 1))
+  return (mass expr)
+toIRInference _ True (Constant TypeInfo {rType=rt} value) sample = return (mass (compareValueExpr rt (IRConst (valueToIR value)) sample))
 toIRInference meta True (ThetaI _ a i) sample = do
   a' <- toIRGenerate meta a
-  return (IRIf (IROp OpLessThan sample (IRTheta a' i)) (IRConst $ VFloat 0) (IRConst $ VFloat 1), const0, IRConst (VFloat 1))
+  return (mass (IRIf (IROp OpLessThan sample (IRTheta a' i)) const0 const1))
 toIRInference meta False (ThetaI _ a i) sample = do
   a' <- toIRGenerate meta a
   expr <- indicator (IROp OpApprox sample (IRTheta a' i))
-  return (expr, const0, IRConst (VFloat 1))
+  return (mass expr)
 toIRInference meta cumulative (IfThenElse _ cond left right) sample = do
   var_condT_p <- mkVariable "condT"
   var_condF_p <- mkVariable "condF"
-  (condTrueExpr, condTrueDim, condTrueBranches) <- toIRInference meta False  cond (IRConst (VBool True))
-  (condFalseExpr, condFalseDim, _) <- toIRInference meta False cond (IRConst (VBool False))
+  condTrue  <- toIRInference meta False cond (IRConst (VBool True))
+  condFalse <- toIRInference meta False cond (IRConst (VBool False))
+  let condTrueExpr  = rProb condTrue
+  let condFalseExpr = rProb condFalse
   setVariables [(var_condT_p, condTrueExpr), (var_condF_p, condFalseExpr)]
   -- p(y) = if p_cond < thresh then p_else(y) * (1-p_cond(y)) else if p_cond > 1 - thresh then p_then(y) * p_cond(y) else p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
   let thr = topKThreshold (compilerConfig meta)
 
+  -- The arm is weighted by the condition's probability -- an independent factor,
+  -- so 'prodP'. The branch count is the exception to the product rule: both arms
+  -- share ONE condition, so its count is added once, below, and each arm carries
+  -- only its own count through the product.
+  let weighByCond v condRes armRes =
+        onBranches (const (rBranches armRes))
+          (prodP (PResult (IRVar v) (rDim condRes) const0) armRes)
+
   -- We need to restart the monad stack, because variables inside the branches may not be valid outside
   -- E.g. if length(a) > 0 then a[0] else ...
   -- If we were to access a[0] outside of the branch we would error
-  ((mul1Raw, leftBranches), binds1) <- lift (runWriterT (do
+  (mul1Raw, binds1) <- lift (runWriterT (do
     let metaTrue = meta { accProb = IROp OpMult (accProb meta) (IRVar var_condT_p) }
-    (leftExpr, leftDim, branches) <- toIRInference metaTrue cumulative left sample
-    (IRVar var_condT_p, condTrueDim) `multP` (leftExpr, leftDim) <&> (\x -> (x, branches)))) -- We need the branches outside of this scope. Append it to the tuple
-  let mul1 = bimap (generateLetInExpr binds1) (generateLetInExpr binds1) mul1Raw
-  let leftBranchesExpr = generateLetInExpr binds1 leftBranches
-  ((mul2Raw, rightBranches), binds2) <- lift (runWriterT (do
+    weighByCond var_condT_p condTrue <$> toIRInference metaTrue cumulative left sample))
+  let mul1 = mapResult (generateLetInExpr binds1) mul1Raw
+  (mul2Raw, binds2) <- lift (runWriterT (do
     let metaFalse = meta { accProb = IROp OpMult (accProb meta) (IRVar var_condF_p) }
-    (rightExpr, rightDim, branches) <- toIRInference metaFalse cumulative right sample
-    (IRVar var_condF_p, condFalseDim) `multP` (rightExpr, rightDim) <&> (\x -> (x, branches)))) -- We need the branches outside of this scope. Append it to the tuple
-  let mul2 = bimap (generateLetInExpr binds2) (generateLetInExpr binds2) mul2Raw
-  let rightBranchesExpr = generateLetInExpr binds2 rightBranches
+    weighByCond var_condF_p condFalse <$> toIRInference metaFalse cumulative right sample))
+  let mul2 = mapResult (generateLetInExpr binds2) mul2Raw
+  let leftBranchesExpr  = rBranches mul1
+  let rightBranchesExpr = rBranches mul2
   -- If probability of this branch is 0 then set the product to 0 manually. This branch could throw an error multiplied by 0
   let zeroCheck c = IRIf (IROp OpApprox c const0) const0
-  let mul1Zeroed = bimap (zeroCheck condTrueExpr) (zeroCheck condTrueExpr) mul1
-  let mul2Zeroed = bimap (zeroCheck condFalseExpr) (zeroCheck condFalseExpr) mul2
-  (addExpr, addDim) <- mul1Zeroed `addP` mul2Zeroed
-  let branches = IROp OpSub (IROp OpPlus condTrueBranches (IROp OpPlus leftBranchesExpr rightBranchesExpr)) (IRConst (VFloat 1))
+  let zeroCheckR c r = onProb (zeroCheck c) (onDim (zeroCheck c) r)
+  let mul1Zeroed = zeroCheckR condTrueExpr mul1
+  let mul2Zeroed = zeroCheckR condFalseExpr mul2
+  -- Shared condition: its branches are counted once for both arms, hence the -1.
+  let branches = IROp OpSub (IROp OpPlus (rBranches condTrue) (IROp OpPlus leftBranchesExpr rightBranchesExpr)) const1
+  addRes <- mixP branches mul1Zeroed mul2Zeroed
   case thr of
     Just _ -> do
       let accTrue = IROp OpMult (accProb meta) (IRVar var_condT_p)
       let accFalse = IROp OpMult (accProb meta) (IRVar var_condF_p)
-      let returnExpr = IRIf
+      -- Below cutoff on one side, only the other arm is evaluated. Applied
+      -- field-wise, so all three stay consistent about which arms were traversed.
+      let pruned elseOnly thenOnly both = IRIf
             (IROp OpLessThan accTrue (IRVar "TOP_K_CUTOFF"))
-            -- If probability of this branch is 0 then set the product to 0 manually. This branch could throw an error multiplied by 0
-            (IRIf (IROp OpApprox condFalseExpr const0) const0 (fst mul2))
+            elseOnly
             (IRIf (IROp OpLessThan accFalse (IRVar "TOP_K_CUTOFF"))
-              (IRIf (IROp OpApprox condTrueExpr const0) const0 (fst mul1))
-              addExpr)
-      let returnDim = IRIf
-            (IROp OpLessThan accTrue (IRVar "TOP_K_CUTOFF"))
-            (IRIf (IROp OpApprox condFalseExpr const0) const0 (snd mul2))
-            (IRIf (IROp OpLessThan accFalse (IRVar "TOP_K_CUTOFF"))
-              (IRIf (IROp OpApprox condTrueExpr const0) const0 (snd mul1))
-              addDim)
-      let returnBranches = IRIf
-            (IROp OpLessThan accTrue (IRVar "TOP_K_CUTOFF"))
-            rightBranchesExpr
-            (IRIf (IROp OpLessThan accFalse (IRVar "TOP_K_CUTOFF"))
-              leftBranchesExpr
-              branches)
-      return (returnExpr, returnDim, returnBranches)
+              thenOnly
+              both)
+      return (PResult
+        (pruned (rProb mul2Zeroed) (rProb mul1Zeroed) (rProb addRes))
+        (pruned (rDim mul2Zeroed)  (rDim mul1Zeroed)  (rDim addRes))
+        (pruned rightBranchesExpr  leftBranchesExpr   branches))
     -- p(y) = p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
-    Nothing -> do
-      return (addExpr, addDim, branches)
+    Nothing -> return addRes
 -- Both sides Gaussian: left - right ~ Normal(muL - muR, sqrt(sL^2 + sR^2)), so the
 -- comparison is that difference's CDF evaluated at 0. Neither side is Deterministic,
 -- so the bound-based equations below do not apply. resolveCompCons types this Bool
@@ -711,82 +715,81 @@ toIRInference meta False (GreaterThan _ left right) sample
   | pType (getTypeInfo left) == PNormal && pType (getTypeInfo right) == PNormal = do
     cdfAt0 <- normalDiffCdfAtZero meta left right
     -- p(left > right) = p(diff > 0) = 1 - cdf(0)
-    let returnExpr = IRIf sample (IROp OpSub (IRConst $ VFloat 1.0) cdfAt0) cdfAt0
-    return (returnExpr, const0, IRConst (VFloat 1))
+    return (mass (IRIf sample (IROp OpSub (IRConst $ VFloat 1.0) cdfAt0) cdfAt0))
 toIRInference meta False (LessThan _ left right) sample
   | pType (getTypeInfo left) == PNormal && pType (getTypeInfo right) == PNormal = do
     cdfAt0 <- normalDiffCdfAtZero meta left right
     -- p(left < right) = p(diff < 0) = cdf(0)
-    let returnExpr = IRIf sample cdfAt0 (IROp OpSub (IRConst $ VFloat 1.0) cdfAt0)
-    return (returnExpr, const0, IRConst (VFloat 1))
+    return (mass (IRIf sample cdfAt0 (IROp OpSub (IRConst $ VFloat 1.0) cdfAt0)))
 toIRInference meta False (GreaterThan _ left right) sample
   | pType (getTypeInfo left) == Deterministic = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
     l <- toIRGenerate meta left
     setVariables [(var, l)]
-    (integrate, _, integrateBranches) <- toIRInference meta True right (IRVar var)
+    integ <- toIRInference meta True right (IRVar var)
     var2 <- mkVariable "rhs_integral"
     let returnExpr = IRIf sample (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))
-    setVariables [(var2, integrate)]
-    return (returnExpr, const0, integrateBranches)
+    setVariables [(var2, rProb integ)]
+    return (PResult returnExpr const0 (rBranches integ))
   | pType (getTypeInfo right) == Deterministic = do --p(x | var >= const)
     var <- mkVariable "fixed_bound"
     r <- toIRGenerate meta right
     setVariables [(var, r)]
-    (integrate, _, integrateBranches) <- toIRInference meta True left (IRVar var)
+    integ <- toIRInference meta True left (IRVar var)
     var2 <- mkVariable "lhs_integral"
     let returnExpr = IRIf sample (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)) (IRVar var2)
-    setVariables [(var2, integrate)]
-    return (returnExpr, const0, integrateBranches)
+    setVariables [(var2, rProb integ)]
+    return (PResult returnExpr const0 (rBranches integ))
 toIRInference meta False (LessThan _ left right) sample
   | pType (getTypeInfo left) == Deterministic = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
     l <- toIRGenerate meta left
     setVariables [(var, l)]
-    (integrate, _, integrateBranches) <- toIRInference meta True right (IRVar var)
+    integ <- toIRInference meta True right (IRVar var)
     var2 <- mkVariable "rhs_integral"
     let returnExpr = IRIf sample (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)) (IRVar var2)
-    setVariables [(var2, integrate)]
-    return (returnExpr, const0, integrateBranches)
+    setVariables [(var2, rProb integ)]
+    return (PResult returnExpr const0 (rBranches integ))
   | pType (getTypeInfo right) == Deterministic = do --p(x | var >= const)
     var <- mkVariable "fixed_bound"
     r <- toIRGenerate meta right
     setVariables [(var, r)]
-    (integrate, _, integrateBranches) <- toIRInference meta True left (IRVar var)
+    integ <- toIRInference meta True left (IRVar var)
     var2 <- mkVariable "lhs_integral"
-    setVariables [(var2, integrate)]
+    setVariables [(var2, rProb integ)]
     let returnExpr = IRIf sample (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))
-    return (returnExpr, const0, integrateBranches)
+    return (PResult returnExpr const0 (rBranches integ))
 toIRInference meta _ (ReadNN _ name symbol) sample = do
   nnRaw <- mkVariable "nn_raw"
   var <- mkVariable "callNN"
   sym <- toIRGenerate meta symbol
   setVariables [(nnRaw, IRApply (IRVar name) sym)]
   setVariables [(var, IRApply (IRApply (IRVar (name ++ "_auto_prob")) (IRVar nnRaw)) sample)]
-  return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
+  -- Not a leaf: the network's own _auto_prob function already packed a triple.
+  return (unpackResult (IRVar var))
 toIRInference meta cumulative (Lambda t name subExpr) sample = do
   let newMeta = extendMetaForLambda meta t name
   irTuple <- lift (runWriterT (toIRInference newMeta cumulative subExpr sample)) <&> generateLetInBlock meta
-  return (IRLambda name irTuple, const0, const0)
+  return (detP (IRLambda name irTuple))
 -- Deterministic lambda and bound expression PDF
 toIRInference meta False (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo l) == Deterministic && pType (getTypeInfo v) == Deterministic = do
   vIR <- toIRGenerate meta v
   lIR <- toIRGenerate meta l -- Dim and BC are irrelevant here
   -- The result is not a tuple if the return value is a closure
   case rt of
-    TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
+    TArrow _ _ -> return (detP (IRApply lIR vIR))
     _ -> do
       retExpr <- indicator (IROp OpEq (IRApply lIR vIR) sample)
-      return (retExpr, const0, const0)
+      return (detP retExpr)
 -- Deterministic lambda and bound expression CDF
 toIRInference meta True (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo l) == Deterministic && pType (getTypeInfo v) == Deterministic = do
   vIR <- toIRGenerate meta v
   lIR <- toIRGenerate meta l -- Dim and BC are irrelevant here
   -- The result is not a tuple if the return value is a closure
   case rt of
-    TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
+    TArrow _ _ -> return (detP (IRApply lIR vIR))
     _ -> do
-      return (compareValueExpr rt (IRApply lIR vIR) sample, const0, const0)
+      return (detP (compareValueExpr rt (IRApply lIR vIR) sample))
 -- Enumerable conditional lambda applied to a probabilistic discrete argument:
 -- enumerate the argument's discrete support and weight each value by its probability,
 -- compiling the body via toIREnumerate. The body need not be deterministic given the
@@ -798,21 +801,21 @@ toIRInference meta cumulative (Apply TypeInfo {rType=_} l v) sample
 -- Deterministic bound expression
 toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo v) == Deterministic = do
   vIR <- toIRGenerate meta v
-  (lIR, _, _) <- toIRInference meta cumulative l sample -- Dim and BC are irrelevant here. We need to extract these from the return tuple
+  lIR <- rProb <$> toIRInference meta cumulative l sample -- Dim and BC are irrelevant here. We need to extract these from the return tuple
   -- The result is not a tuple if the return value is a closure
   case rt of
-    TArrow _ _ -> return (IRApply lIR vIR, const0, const0)
+    TArrow _ _ -> return (detP (IRApply lIR vIR))
     _ -> do
       retVal <- mkVariable "call"
       setVariables [(retVal, IRApply lIR vIR)]
-      return (IRTFst (IRVar retVal), IRTFst (IRTSnd (IRVar retVal)), IRTSnd (IRTSnd (IRVar retVal)))
+      return (unpackResult (IRVar retVal))
 -- Probabilistic bound expression
 toIRInference meta cumulative (Apply TypeInfo{rType=_, chainName=_} l v) sample | isTArrow (rType (getTypeInfo v)) && (pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal) = do
   lIR <- toIRGenerate meta l
-  (vIR, _, _) <- toIRInference meta cumulative v sample
+  vIR <- rProb <$> toIRInference meta cumulative v sample
   applied <- mkVariable "call"
   setVariables [(applied, IRApply lIR vIR)]
-  return (IRTFst (IRVar applied), IRTFst (IRTSnd (IRVar applied)), IRTSnd (IRTSnd (IRVar applied)))
+  return (unpackResult (IRVar applied))
   where
     isTArrow (TArrow _ _) = True
     isTArrow _ = False
@@ -878,14 +881,15 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample
       -- idiom elsewhere in this module.
       let guard = IRApply (IRLambda (boundVar ++ tag) invExprGuard) sample
       -- Do probabilistic inference using the applied inverse
-      (p, dim, bc) <- toIRInference meta cumulative v appliedSample
-
-      let scale x = if not cumulative
-                      then IROp OpMult x (IRIf (IROp OpEq dim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs appliedCoV))
-                      else IRIf (IROp OpGreaterThan appliedCoV const0) x (IROp OpSub (IRConst (VFloat 1)) x)
+      res <- toIRInference meta cumulative v appliedSample
+      -- Change of variables for the inverse the observation was pushed through.
+      let scaled = scaleCoV cumulative appliedCoV res
       let guarded e zero = IRIf guard e zero
+      -- Guarded-to-zero: outside the inverse's domain the whole result is zero,
+      -- and must not be evaluated (short-circuit, see 'guard' above).
+      let guardedZero = mapResult (\e -> guarded e const0)
       case rt of
-        TArrow _ _ -> return (guarded (wrapInLambdas (IRTCons (scale p) (IRTCons dim bc))) (wrapInLambdas (IRTCons const0 (IRTCons const0 const0))), const0, const0)
+        TArrow _ _ -> return (detP (guarded (wrapInLambdas (packResult scaled)) (wrapInLambdas (packResult (detP const0)))))
         _ | cumulative || not (isLambdaExpr l) || not (null tag) ->
               -- Keep the original single-witness behaviour when: (a) integrate mode, where
               -- tuple/multi-latent CDFs are ill-defined; (b) the callable is not a literal
@@ -894,7 +898,7 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample
               -- tagged variables this folding would mis-bind; or (c) the lambda is applied
               -- under a tag (HO duplication). Body-factor folding is only sound for a plain
               -- value let-binding `Apply (Lambda x body) v`.
-              return (wrapInLambdas $ guarded (scale p) const0, wrapInLambdas $ guarded dim const0, wrapInLambdas $ guarded bc const0)
+              return (mapResult wrapInLambdas (guardedZero scaled))
         _ -> do
           -- The inversion above only recovers and infers the variable bound by THIS
           -- lambda. Any additional independent latents bound deeper in the body (e.g. a
@@ -925,11 +929,9 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample
           -- would shift projections from a hoisted binding as if it were a called-function
           -- pair, while the local triple value stays unshifted. CSE recovers the sharing.
           let bodyTriple = IRLetIn (toInvCN ++ tag) appliedSample bodyBlock
-          let pBody   = IRTFst bodyTriple
-              dimBody = IRTFst (IRTSnd bodyTriple)
-              bcBody  = IRTSnd (IRTSnd bodyTriple)
-          (combP, combDim) <- multP (scale p, dim) (pBody, dimBody)
-          let combBC = IROp OpPlus bc bcBody
+          let bodyRes = unpackResult bodyTriple
+          -- Independent factors: probabilities multiply, dims add, branch counts add.
+          let combined = prodP scaled bodyRes
           -- ANY in the witnessing slot (design modality-witnessed-inference, §ANY):
           -- appliedSample is VAny at runtime iff the slot FC recovers this binding
           -- from was queried marginally. If the binding is a "sink" — a single
@@ -949,9 +951,7 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample
                 ++ " this engine (design modality-witnessed-inference)")
           let anyW = IRUnaryOp OpIsAny appliedSample
           let guardAny ok whenAnySink = IRIf anyW (if bindingIsSink then whenAnySink else refuse) ok
-          return ( wrapInLambdas (guarded (guardAny combP pBody) const0)
-                 , wrapInLambdas (guarded (guardAny combDim dimBody) const0)
-                 , wrapInLambdas (guarded (guardAny combBC bcBody) const0) )
+          return (mapResult wrapInLambdas (guardedZero (zipResult guardAny combined bodyRes)))
     -- Forward chaining may have messed with the structure of the expression. We may have too many or too few lambdas.
     -- Every lambda, which is not applied, inside of the callable should be present in the retuned IRExpr.
     -- Exclude the lambda, which is applied here and all lambdas, which are already present
@@ -996,16 +996,14 @@ toIRInference meta cumulative (InjF TypeInfo{rType=rt} (Named name) params) samp
     let FDecl {body=invBody, applicability=appT, deconstructing=decons} = inv
     -- Deconstructing inverses need the Any-safe inference variant.
     let probF = if decons then toIRInferenceSave else toIRInference
-    (fp, fd, fbc) <- probF meta cumulative p (inlineSample invBody)
-    return (fp, fd, fbc, inlineSample appT)
-  let ((p0, d0, bc0, _) : rest) = fieldResults
-  (combP, combDim) <- foldM (\acc (fp, fd, _, _) -> acc `multP` (fp, fd)) (p0, d0) rest
-  let combBC = foldl (\acc (_, _, fbc, _) -> IROp OpPlus acc fbc) bc0 rest
+    fieldRes <- probF meta cumulative p (inlineSample invBody)
+    return (fieldRes, inlineSample appT)
+  -- The fields are independent, so the whole construction is their product.
+  let combined = foldl1 prodP (map fst fieldResults)
   -- Guard the result by the conjunction of all field applicability tests (e.g.
   -- the non-empty-list test carried by the Cons inverses).
-  let guardCond = foldr1 (IROp OpAnd) (map (\(_, _, _, a) -> a) fieldResults)
-  let guarded e = IRIf guardCond e const0
-  return (guarded combP, guarded combDim, guarded combBC)
+  let guardCond = foldr1 (IROp OpAnd) (map snd fieldResults)
+  return (mapResult (\e -> IRIf guardCond e const0) combined)
 toIRInference meta cumulative (InjF ti (Named name) params) sample | isHigherOrder (adtDecls meta) name = do
   let adts = adtDecls meta
   let resolvedName = resolveInjF (rType ti) name
@@ -1040,14 +1038,10 @@ toIRInference meta cumulative (InjF ti (Named name) params) sample | isHigherOrd
           let deepCheck = mkDeepAnyCheck (TEither undefined undefined) sample
           in IRIf deepCheck (mkSafeInvExpr sample) renamedInvExpr
         _ -> renamedInvExpr
-  (paramExpr, paramDim, paramBranches) <- probF meta cumulative a finalInvExpr
+  paramRes <- probF meta cumulative a finalInvExpr
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
-  let scale x = if not cumulative
-                  then IROp OpMult x (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDerivExpr))
-                  else IRIf (IROp OpGreaterThan invDerivExpr (const0)) x (IROp OpSub (IRConst (VFloat 1)) x)
-  let returnP = scale paramExpr
-  let appTestExpr e = IRIf appTest e const0
-  return (renVar (appTestExpr returnP), renVar (appTestExpr paramDim), renVar (appTestExpr paramBranches))
+  return (mapResult (renVar . (\e -> IRIf appTest e const0))
+         (scaleCoV cumulative invDerivExpr paramRes))
 toIRInference meta False e@(InjF TypeInfo {tags=_, rType=rt} (Named _) params) sample
   | countProbParams params == 0 = do
   -- There is no probabilistic parameter
@@ -1058,13 +1052,13 @@ toIRInference meta False e@(InjF TypeInfo {tags=_, rType=rt} (Named _) params) s
         TVarR _  -> OpApprox
         _        -> OpEq
   retExpr <- indicator $ IROp cmp expr sample
-  return (retExpr, const0, const0)
+  return (detP retExpr)
 toIRInference meta True e@(InjF TypeInfo {tags=_, rType=rt} (Named _) params) sample
   | countProbParams params == 0 = do
   -- There is no probabilistic parameter
   -- Check whether the value of the function is less than the sample
   expr <- toIRGenerate meta e
-  return (compareValueExpr rt expr sample, const0, const0)
+  return (detP (compareValueExpr rt expr sample))
 toIRInference meta cumulative (InjF TypeInfo {tags=_} (Named name) params) sample
   | hasAnyExcept (adtDecls meta) name = do
   -- FPair of the InjF with unique names
@@ -1096,22 +1090,16 @@ toIRInference meta cumulative (InjF TypeInfo {tags=_} (Named name) params) sampl
   -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
   let probF = if decons then toIRInferenceSave else toIRInference
   -- Get the probabilistic inference expression of the non-deterministic subexpression
-  (nonAnyIRExpr, nonAnyDim, nonAnyBranches) <- probF meta cumulative (params !! probIdx) nonAnyExpr
-  (anyIRExpr, anyDim, _) <- toIRInferenceSave meta cumulative (params !! probIdx) (IRConst $ VAny)
-  (exceptIRExpr, exceptDim, exceptBranches) <- probF meta cumulative (params !! probIdx) exceptExpr
+  nonAnyRes <- probF meta cumulative (params !! probIdx) nonAnyExpr
+  anyRes    <- toIRInferenceSave meta cumulative (params !! probIdx) (IRConst $ VAny)
+  exceptRes <- probF meta cumulative (params !! probIdx) exceptExpr
   let ifSample a na = if isPosAny then IRIf (IRVar v1) a na else IRIf (IRVar v1) na a
-  (subExpr, subDim) <- subP (anyIRExpr, anyDim) (exceptIRExpr, exceptDim)
-  let ifExpr = ifSample subExpr nonAnyIRExpr
-  let ifDim = ifSample subDim nonAnyDim
-  let ifBranches = ifSample exceptBranches nonAnyBranches
-
+  -- The ANY arm is the marginal minus the excepted value's mass; its branch count
+  -- is the excepted value's, not a sum (this is a select between the two arms).
+  subRes <- mixSubP (rBranches exceptRes) anyRes exceptRes
+  let ifRes = zipResult ifSample subRes nonAnyRes
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula if dim > 0
-  let scale x = if not cumulative
-                  then IROp OpMult x (IRIf (IROp OpEq ifDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDeriv))
-                  else IRIf (IROp OpGreaterThan invDeriv const0) x (IROp OpSub (IRConst (VFloat 1)) x)
-  let returnP = scale ifExpr
-  let appTestExpr e = IRIf appTest e const0
-  return (appTestExpr returnP, appTestExpr ifDim, appTestExpr ifBranches)
+  return (mapResult (\e -> IRIf appTest e const0) (scaleCoV cumulative invDeriv ifRes))
 -- Single-operand enumeration for forward-only binary InjFs (and/or) when exactly
 -- one operand is deterministic and the other is a single tractable random Bool
 -- (Integrate/PNormal/PLogNormal). Forward-only ops (see 'isForwardOnly') declare
@@ -1138,11 +1126,11 @@ toIRInference meta False (InjF TypeInfo {rType=rt} (Named name) [left, right]) s
   detIR <- toIRGenerate meta detExprSrc
   setVariables [(detVar, detIR)]
   (returnExpr, binds) <- lift $ runWriterT $ do
-    (pRand, _, _) <- toIRInference meta False randExprSrc (IRVar randVar)
+    pRand <- rProb <$> toIRInference meta False randExprSrc (IRVar randVar)
     return (IRIf (IROp OpEq f sample) pRand (IRConst (VFloat 0)))
   let (outerBinds, body') = hoistInvariantBindings randVar (buildLetIns binds returnExpr)
   setVariables outerBinds
-  return (IREnumSum randVar enumList body', const0, const0)
+  return (PResult (IREnumSum randVar enumList body') const0 const0)
 -- Cumulative (cdf) counterpart of the single-operand enumeration case above.
 toIRInference meta True (InjF TypeInfo {rType=rt} (Named name) [left, right]) sample
   | isForwardOnly (adtDecls meta) (resolveInjF rt name)
@@ -1160,11 +1148,11 @@ toIRInference meta True (InjF TypeInfo {rType=rt} (Named name) [left, right]) sa
   detIR <- toIRGenerate meta detExprSrc
   setVariables [(detVar, detIR)]
   (returnExpr, binds) <- lift $ runWriterT $ do
-    (pRand, _, _) <- toIRInference meta False randExprSrc (IRVar randVar)
+    pRand <- rProb <$> toIRInference meta False randExprSrc (IRVar randVar)
     return (IRIf (IROp OpLessThan sample f) (IRConst (VFloat 0)) pRand)
   let (outerBinds, body') = hoistInvariantBindings randVar (buildLetIns binds returnExpr)
   setVariables outerBinds
-  return (IREnumSum randVar enumList body', const0, const0)
+  return (PResult (IREnumSum randVar enumList body') const0 const0)
 toIRInference meta cumulative (InjF TypeInfo {tags=_, rType=rt} (Named name) params) sample
   | countProbParams params == 1 = do
   let resolvedName = resolveInjF rt name
@@ -1189,14 +1177,9 @@ toIRInference meta cumulative (InjF TypeInfo {tags=_, rType=rt} (Named name) par
   -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
   let probF = if decons then toIRInferenceSave else toIRInference
   -- Get the probabilistic inference expression of the non-deterministic subexpression
-  (paramExpr, paramDim, paramBranches) <- probF meta cumulative (params !! probIdx) invExpr
+  paramRes <- probF meta cumulative (params !! probIdx) invExpr
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula if dim > 0
-  let scale x = if not cumulative
-                  then IROp OpMult x (IRIf (IROp OpEq paramDim const0) (IRConst (VFloat 1)) (IRUnaryOp OpAbs invDeriv))
-                  else IRIf (IROp OpGreaterThan invDeriv (const0)) x (IROp OpSub (IRConst (VFloat 1)) x)
-  let returnP = scale paramExpr
-  let appTestExpr e = IRIf appTest e const0
-  return (appTestExpr returnP, appTestExpr paramDim, appTestExpr paramBranches)
+  return (mapResult (\e -> IRIf appTest e const0) (scaleCoV cumulative invDeriv paramRes))
 -- Enumerate-both discrete path for forward-only binary InjFs (and/or). No point
 -- inverse exists, so loop the |L|x|R| grid and keep cells where forward(l,r) == sample,
 -- accumulating pLeft(l) * pRight(r). Mirrors the cumulative double-enum path below.
@@ -1211,14 +1194,14 @@ toIRInference meta False (InjF TypeInfo {rType=rt} (Named name) [left, right]) s
   let FPair fwd _ = fPair
   let FDecl {inputVars=[v1, v2], body=f} = fwd
   (returnExpr, binds) <- lift $ runWriterT $ do
-    (pLeft, _, _) <- toIRInference meta False left (IRVar v1)
-    (pRight, _, _) <- toIRInference meta False right (IRVar v2)
+    pLeft <- rProb <$> toIRInference meta False left (IRVar v1)
+    pRight <- rProb <$> toIRInference meta False right (IRVar v2)
     return (IRIf (IROp OpEq f sample) (IROp OpMult pLeft pRight) (IRConst (VFloat 0)))
   let (v2InvBinds, v2Body) = hoistInvariantBindings v2 (buildLetIns binds returnExpr)
   let innerSum = buildLetIns v2InvBinds (IREnumSum v2 enumListR v2Body)
   let (outerBinds, v1Body) = hoistInvariantBindings v1 innerSum
   setVariables outerBinds
-  return (IREnumSum v1 enumListL v1Body, const0, const0)
+  return (PResult (IREnumSum v1 enumListL v1Body) const0 const0)
 toIRInference meta False (InjF TypeInfo {rType=rt} (Named name) [left, right]) sample
   | isEnumerable (tags (getTypeInfo left)) && isEnumerable (tags (getTypeInfo right))
     && pType (getTypeInfo left) /= Deterministic && pType (getTypeInfo right) /= Deterministic = do
@@ -1244,10 +1227,11 @@ toIRInference meta False (InjF TypeInfo {rType=rt} (Named name) [left, right]) s
   irTuple <- lift (runWriterT (do
     -- the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
     setVariables [(x3, sample)]
-    (pLeft, _, _) <- toIRInference meta False left (IRVar x2)
+    pLeft <- rProb <$> toIRInference meta False left (IRVar x2)
     -- pRight is computed in a nested writer so its bindings can be guarded by the topK check,
     -- avoiding the inner right-side inference work whenever acc_prob * pLeft is already below cutoff.
-    ((pRight, _, _), pRightBinds) <- lift $ runWriterT $ toIRInference meta False right invExpr
+    (pRightRes, pRightBinds) <- lift $ runWriterT $ toIRInference meta False right invExpr
+    let pRight = rProb pRightRes
     let wrapR e = generateLetInExpr pRightBinds e
     let possible = IRIsPossible enumListR invExpr
     let cutoffOk = case topKThreshold (compilerConfig meta) of
@@ -1258,16 +1242,14 @@ toIRInference meta False (InjF TypeInfo {rType=rt} (Named name) [left, right]) s
                           (IRVar "TOP_K_CUTOFF"))
     let returnExpr   = IRIf cutoffOk (wrapR (IROp OpMult pLeft pRight)) (IRConst (VFloat 0))
     let branchesExpr = IRIf cutoffOk (IRConst (VFloat 1)) (IRConst (VFloat 0))
-    return (returnExpr, const0, branchesExpr)
+    return (PResult returnExpr const0 branchesExpr)
     )) <&> generateLetInBlock meta
   uniquePrefix <- mkVariable ""
   let applyUnique = irMap (uniqueify [x2, x3] uniquePrefix)
   let (outerBinds, innerTuple) = hoistInvariantBindings x2 irTuple
   let renameHoisted (n, v) = (if n `elem` [x2, x3] then uniquePrefix ++ n else n, applyUnique v)
   setVariables (map renameHoisted outerBinds)
-  let enumSumExpr = IREnumSum x2 enumListL (IRTFst innerTuple)
-  let branchCountSum = IREnumSum x2 enumListL (IRTSnd (IRTSnd innerTuple))
-  return (applyUnique enumSumExpr, const0, applyUnique branchCountSum)
+  return (mapResult applyUnique (enumSumP x2 enumListL (unpackResult innerTuple)))
 -- For the cumulative case we cant get around two enum sums
 toIRInference meta True (InjF TypeInfo {rType=rt} (Named name) [left, right]) sample
   | isEnumerable (tags (getTypeInfo left)) && isEnumerable (tags (getTypeInfo right))
@@ -1287,8 +1269,8 @@ toIRInference meta True (InjF TypeInfo {rType=rt} (Named name) [left, right]) sa
   -- variables v1/v2 (the coin_prob calls) and must be scoped *inside* the matching
   -- enumSum, not above it.
   (returnExpr, binds) <- lift $ runWriterT $ do
-    (pLeft, _, _) <- toIRInference meta False left (IRVar v1)
-    (pRight, _, _) <- toIRInference meta False right (IRVar v2)
+    pLeft <- rProb <$> toIRInference meta False left (IRVar v1)
+    pRight <- rProb <$> toIRInference meta False right (IRVar v2)
     return (IRIf (IROp OpLessThan sample f) (IRConst (VFloat 0)) (IROp OpMult pLeft pRight))
   -- Place each binding at the outermost scope where it remains well-formed: fully
   -- invariant bindings are hoisted to the function top level, bindings depending only
@@ -1297,7 +1279,7 @@ toIRInference meta True (InjF TypeInfo {rType=rt} (Named name) [left, right]) sa
   let innerSum = buildLetIns v2InvBinds (IREnumSum v2 enumListR v2Body)
   let (outerBinds, v1Body) = hoistInvariantBindings v1 innerSum
   setVariables outerBinds
-  return (IREnumSum v1 enumListL v1Body, const0, const0)
+  return (PResult (IREnumSum v1 enumListL v1Body) const0 const0)
 toIRInference meta cumulative (Var TypeInfo {rType=rt} n) sample = do
   -- Variable might be a function
   let functionSuffix = if cumulative then "_integ" else "_prob"
@@ -1313,7 +1295,7 @@ toIRInference meta cumulative (Var TypeInfo {rType=rt} n) sample = do
             else IRApply (IRVar name) sample
       setVariables [(var, callExpr)]
       -- The return value is still a function. No need to do dim and branch counting here
-      return (IRVar var, const0, const0)
+      return (detP (IRVar var))
     -- Var is a top level declaration (an therefor has a _prob function)
     Just (_, True) -> do
       var <- mkVariable "call"
@@ -1321,68 +1303,171 @@ toIRInference meta cumulative (Var TypeInfo {rType=rt} n) sample = do
             Just _ -> IRApply (IRApply (IRVar (n ++ functionSuffix)) sample) (accProb meta)
             Nothing -> IRApply (IRVar (n ++ functionSuffix)) sample
       setVariables [(var, callExpr)]
-      return (IRTFst (IRVar var), IRTFst (IRTSnd (IRVar var)), IRTSnd (IRTSnd (IRVar var)))
+      return (unpackResult (IRVar var))
     -- Var is a local variable
     Just (_, False) -> do
       if cumulative then
-        return (compareValueExpr rt (IRVar n) sample, const0, const0)
+        return (detP (compareValueExpr rt (IRVar n) sample))
       else do
         let comp = case rt of
               TFloat   -> IROp OpApprox sample (IRVar n)
               TVarR _  -> IROp OpApprox sample (IRVar n)
               _        -> IROp OpEq sample (IRVar n)
         expr <- indicator comp
-        return (expr, const0, const0)
+        return (detP expr)
     Nothing -> error ("Could not find name in TypeEnv: " ++ n)
 toIRInference _ _ (Subtree _ _ _) _ = error "Cannot infer prob on subtree expression. Please check your syntax"
 toIRInference _ _ x _ = error ("found no way to convert to IR: " ++ show x)
 
-multP :: (IRExpr, IRExpr) -> (IRExpr, IRExpr) -> CompilerMonad (IRExpr, IRExpr)
-multP (aM, aDim) (bM, bDim) = return (IROp OpMult aM bM, IROp OpPlus aDim bDim)
+-- ===== PResult combinators (design presult-combinators) =====
+--
+-- Every 'toIRInference' case plays one of a handful of structural roles, and the
+-- role alone determines how dim and branch count combine:
+--
+--   product (independent conjunction)  p1*p2   d1+d2    b1+b2
+--   mixture (branch / disjunction)     mixP    min-dim  caller-supplied
+--   enumSum                            sum p   0        sum b
+--   change-of-variables scaling        f p     unchanged
+--   guard / select                     f p     f d, f b (same f)
+--   leaf                               given   0 or any-guarded 1
+--
+-- The combinators below are the whole algebra; cases name one instead of
+-- re-deriving all three fields inline.
 
-addP :: (IRExpr, IRExpr) -> (IRExpr, IRExpr) -> CompilerMonad (IRExpr, IRExpr)
-addP (aM, aDim) (bM, bDim) = do
+-- | Dimension of a continuous leaf: 1, except under a marginal (ANY) query,
+-- where the leaf contributes mass 1 and hence no dimension.
+anyGuardedDim :: IRExpr -> IRExpr
+anyGuardedDim sample = IRIf (IRUnaryOp OpIsAny sample) const0 const1
+
+-- | A continuous density leaf observed at @sample@: dim 1 (ANY-guarded), one branch.
+density :: IRExpr -> IRExpr -> PResult
+density p sample = PResult p (anyGuardedDim sample) const1
+
+-- | A discrete probability mass / CDF value: dim 0, one branch.
+mass :: IRExpr -> PResult
+mass p = PResult p const0 const1
+
+-- | A deterministic result (indicator, local variable, closure): dim 0, no branch.
+detP :: IRExpr -> PResult
+detP p = PResult p const0 const0
+
+-- | Independent conjunction: probabilities multiply, dims add, branch counts add.
+prodP :: PResult -> PResult -> PResult
+prodP (PResult aP aDim aBC) (PResult bP bDim bBC) =
+  PResult (IROp OpMult aP bP) (IROp OpPlus aDim bDim) (IROp OpPlus aBC bBC)
+
+-- | Product is the monoid: 'detP const1' is the unit (probability 1 contributes
+-- no dimension and no branch). Lets variadic factors fold with 'mconcat'.
+instance Semigroup PResult where
+  (<>) = prodP
+
+instance Monoid PResult where
+  mempty = detP const1
+
+-- | Prob-only transform; dim and branch count untouched.
+onProb :: (IRExpr -> IRExpr) -> PResult -> PResult
+onProb f r = r { rProb = f (rProb r) }
+
+onDim :: (IRExpr -> IRExpr) -> PResult -> PResult
+onDim f r = r { rDim = f (rDim r) }
+
+onBranches :: (IRExpr -> IRExpr) -> PResult -> PResult
+onBranches f r = r { rBranches = f (rBranches r) }
+
+-- | Apply the same guard/selector to all three fields, e.g. the InjF
+-- applicability test @\\e -> IRIf appTest e const0@.
+mapResult :: (IRExpr -> IRExpr) -> PResult -> PResult
+mapResult f (PResult p d bc) = PResult (f p) (f d) (f bc)
+
+-- | Combine two results field-wise with the same operator. For the cases that
+-- select between two whole results at runtime.
+zipResult :: (IRExpr -> IRExpr -> IRExpr) -> PResult -> PResult -> PResult
+zipResult f (PResult aP aDim aBC) (PResult bP bDim bBC) =
+  PResult (f aP bP) (f aDim bDim) (f aBC bBC)
+
+-- | The change-of-variables correction shared by every inverse-based case: in
+-- probability mode multiply by |d(inverse)/d(observation)| unless the result is
+-- discrete (dim 0); in cumulative mode a decreasing transform flips the CDF.
+-- Reads the result's own dim, so call sites never name it.
+scaleCoV :: Bool -> IRExpr -> PResult -> PResult
+scaleCoV cumulative deriv r = onProb scale r
+  where
+    scale x = if not cumulative
+                then IROp OpMult x (IRIf (IROp OpEq (rDim r) const0) const1 (IRUnaryOp OpAbs deriv))
+                else IRIf (IROp OpGreaterThan deriv const0) x (IROp OpSub const1 x)
+
+-- | The ANY-safe wrapper of 'toIRInferenceSave': a marginal query over this
+-- expression contributes mass 1, dim 0, no branches, without evaluating the body.
+anySafe :: IRExpr -> (IRExpr -> IRExpr) -> PResult -> PResult
+anySafe sample wrap (PResult p d bc) = PResult
+  (IRIf isAnySample const1 (wrap p))
+  (IRIf isAnySample const0 (wrap d))
+  (IRIf isAnySample const0 (wrap bc))
+  where isAnySample = IRUnaryOp OpIsAny sample
+
+-- | Sum a result over an enumerated variable's support: probabilities and branch
+-- counts sum, the result is a discrete mass (dim 0).
+enumSumP :: Varname -> MultiValue -> PResult -> PResult
+enumSumP v vals r = PResult (IREnumSum v vals (rProb r)) const0 (IREnumSum v vals (rBranches r))
+
+-- | The IR encoding of a result triple. 'packResult' and 'unpackResult' are the
+-- only places that know it.
+packResult :: PResult -> IRExpr
+packResult (PResult p d bc) = IRTCons p (IRTCons d bc)
+
+unpackResult :: IRExpr -> PResult
+unpackResult e = PResult (IRTFst e) (IRTFst (IRTSnd e)) (IRTSnd (IRTSnd e))
+
+-- | Mixture of two alternatives (branch / disjunction): whichever side is
+-- non-zero wins, ties add, and the smaller dimension wins (a discrete mass and
+-- a density never sum). The branch count is supplied by the caller: no call
+-- site wants a plain sum of the two operands' counts -- an 'IfThenElse' shares
+-- one condition between its arms, an AnyExcept selects one arm, and a world set
+-- sums over all of its worlds.
+mixP :: IRExpr -> PResult -> PResult -> CompilerMonad PResult
+mixP = mixWith OpEq OpPlus
+
+-- | 'mixP' for the AnyExcept case, where the excepted value's mass is
+-- subtracted from the marginal rather than added.
+mixSubP :: IRExpr -> PResult -> PResult -> CompilerMonad PResult
+mixSubP = mixWith OpApprox OpSub
+
+-- | Shared body of 'mixP'/'mixSubP'. Both operands are let-bound first, since
+-- each is read several times by the case analysis below.
+--
+-- The zero test is really asking "is this branch IMPOSSIBLE?", not "is this
+-- number small?" -- an impossible world must be dropped from the mixture, an
+-- extremely unlikely one must not. Lacking a way to say so, the two combinators
+-- disagree on how to spell it: 'mixP' uses exact equality, because a genuine
+-- indicator-zero (e.g. the wrong Either arm) is always produced exactly by
+-- upstream indicator/comparison logic, and a 1e-10 approx threshold would
+-- instead discard legitimately tiny-but-nonzero continuous tail densities (see
+-- observe-partials-umbrella N4); 'mixSubP' still uses OpApprox. Neither is
+-- total: a deep enough tail underflows to a true float zero and becomes
+-- indistinguishable from impossible. Once results carry an explicit
+-- impossibility slot, both should test that flag instead and this parameter
+-- should collapse.
+mixWith :: Operand -> Operand -> IRExpr -> PResult -> PResult -> CompilerMonad PResult
+mixWith zeroTest combine bc a b = do
   pVarA <- mkVariable "pA"
   pVarB <- mkVariable "pB"
   dimVarA <- mkVariable "dimA"
   dimVarB <- mkVariable "dimB"
-  setVariables [(pVarA, aM), (pVarB, bM), (dimVarA, aDim), (dimVarB, bDim)]
-  -- Exact equality here, not OpApprox: this branch exists to detect a genuine
-  -- indicator-zero (e.g. the wrong Either arm), which is always produced exactly
-  -- by upstream indicator/comparison logic. A 1e-10 approx threshold instead
-  -- wrongly discards legitimately tiny-but-nonzero continuous tail densities
-  -- (see observe-partials-umbrella N4). Not total: a deep enough tail still
-  -- underflows to a true float zero and hits this same ambiguity.
-  return (IRIf (IROp OpEq (IRVar pVarA) (IRConst (VFloat 0))) (IRVar pVarB)
-           (IRIf (IROp OpEq (IRVar pVarB) (IRConst (VFloat 0))) (IRVar pVarA)
-           (IRIf (IROp OpLessThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar pVarA)
-           (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar pVarB)
-           (IROp OpPlus (IRVar pVarA) (IRVar pVarB))))),
-           -- Dim
-           IRIf (IROp OpEq (IRVar pVarA) (IRConst (VFloat 0))) (IRVar dimVarB)
-           (IRIf (IROp OpEq (IRVar pVarB) (IRConst (VFloat 0))) (IRVar dimVarA)
-           (IRIf (IROp OpLessThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar dimVarA)
-           (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar dimVarB)
-           (IRVar dimVarA)))))
-
-subP :: (IRExpr, IRExpr) -> (IRExpr, IRExpr) -> CompilerMonad (IRExpr, IRExpr)
-subP (aM, aDim) (bM, bDim) = do
-  pVarA <- mkVariable "pA"
-  pVarB <- mkVariable "pB"
-  dimVarA <- mkVariable "dimA"
-  dimVarB <- mkVariable "dimB"
-  setVariables [(pVarA, aM), (pVarB, bM), (dimVarA, aDim), (dimVarB, bDim)]
-  return (IRIf (IROp OpApprox (IRVar pVarA) (IRConst (VFloat 0))) (IRVar pVarB)
-         (IRIf (IROp OpApprox (IRVar pVarB) (IRConst (VFloat 0))) (IRVar pVarA)
-         (IRIf (IROp OpLessThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar pVarA)
-         (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar pVarB)
-         (IROp OpSub (IRVar pVarA) (IRVar pVarB))))),
-         -- Dim
-         IRIf (IROp OpApprox (IRVar pVarA) (IRConst (VFloat 0))) (IRVar dimVarB)
-         (IRIf (IROp OpApprox (IRVar pVarB) (IRConst (VFloat 0))) (IRVar dimVarA)
-         (IRIf (IROp OpLessThan (IRVar dimVarA) (IRVar dimVarB)) (IRVar dimVarA)
-         (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) (IRVar dimVarB)
-         (IRVar dimVarA)))))
+  setVariables [(pVarA, rProb a), (pVarB, rProb b), (dimVarA, rDim a), (dimVarB, rDim b)]
+  -- Both fields make the same case distinction: a zero side is ignored, then the
+  -- lower-dimensional side wins, and only equal dimensions actually combine.
+  let cases whenAZero whenBZero whenALower whenBLower whenEqual =
+        IRIf (IROp zeroTest (IRVar pVarA) (IRConst (VFloat 0))) whenAZero
+        (IRIf (IROp zeroTest (IRVar pVarB) (IRConst (VFloat 0))) whenBZero
+        (IRIf (IROp OpLessThan (IRVar dimVarA) (IRVar dimVarB)) whenALower
+        (IRIf (IROp OpLessThan (IRVar dimVarB) (IRVar dimVarA)) whenBLower
+        whenEqual)))
+  return (PResult
+    (cases (IRVar pVarB) (IRVar pVarA) (IRVar pVarA) (IRVar pVarB)
+           (IROp combine (IRVar pVarA) (IRVar pVarB)))
+    (cases (IRVar dimVarB) (IRVar dimVarA) (IRVar dimVarA) (IRVar dimVarB)
+           (IRVar dimVarA))
+    bc)
 
 -- Bind the forward-chaining anchors a generated inverse lands on. An anchor
 -- chain name that appears free in the inverse (e.g. a ThetaI/Subtree operand FC
@@ -1565,7 +1650,7 @@ packParamsIntoLetinsGen meta (v:vars) (p:params) expr = do
 -- rule and by toIREnumerate, so that nested enumerable `let`s
 -- (`let c = .. in let d = .. in ..`) enumerate at every level instead of generating
 -- the inner draws forward.
-enumerateAppliedLambda :: CompilerMetadata -> Bool -> Expr -> Expr -> IRExpr -> CompilerMonad CompilationResult
+enumerateAppliedLambda :: CompilerMetadata -> Bool -> Expr -> Expr -> IRExpr -> CompilerMonad PResult
 enumerateAppliedLambda meta cumulative l v sample = do
   let lCn = chainName (getTypeInfo l)
   let Just (_, LambdaInfo boundVar bodyCn, _) = findEquivalentExpression (fcData meta) lCn
@@ -1573,17 +1658,15 @@ enumerateAppliedLambda meta cumulative l v sample = do
   let lBodyExpr = findExprWithCN fExprs bodyCn
   let newTypeEnv = (boundVar, (rType (getTypeInfo v), False)):typeEnv meta
   irTuple <- lift (runWriterT (do
-    (pBranch, _, _) <- toIRInference meta False v (IRVar boundVar)
-    (p, d, bc) <- toIREnumerate meta{typeEnv=newTypeEnv} cumulative lBodyExpr sample
-    return (IROp OpMult p pBranch, d, bc))) <&> generateLetInBlock meta
+    pBranch <- rProb <$> toIRInference meta False v (IRVar boundVar)
+    bodyRes <- toIREnumerate meta{typeEnv=newTypeEnv} cumulative lBodyExpr sample
+    return (onProb (\p -> IROp OpMult p pBranch) bodyRes))) <&> generateLetInBlock meta
   let discreteVVals = head [x | DiscreteValues x <- tags (getTypeInfo v)]
   let (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
   setVariables outerBinds
-  let summed = IREnumSum boundVar discreteVVals (IRTFst innerTuple)
-  let bc = IREnumSum boundVar discreteVVals (IRTSnd (IRTSnd innerTuple))
-  return (summed, const0, bc)
+  return (enumSumP boundVar discreteVVals (unpackResult innerTuple))
 
-toIREnumerate :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad CompilationResult
+toIREnumerate :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PResult
 -- Nested enumerable application (e.g. an inner `let` binding a fresh discrete draw):
 -- recurse with enumeration + weighting rather than generating the draw forward.
 toIREnumerate meta cumulative (Apply _ l v) sample
@@ -1608,7 +1691,7 @@ toIREnumerate meta cumulative (IfThenElse TypeInfo{rType=rt} c t e) sample = do
   let thenRes = condSelector thenSelector
   let elseRes = notCondSelector elseSelector
   let returnExpr = IROp OpPlus thenRes elseRes
-  return (returnExpr, const0, IRConst (VFloat 1))
+  return (mass returnExpr)
 -- Fallback: under enumeration the bound variable carries a concrete enumerated value,
 -- so the body is deterministic and can be generated forward and compared to the sample.
 -- This covers shapes whose root is not an if, e.g. an InjF sum of conditional terms.
@@ -1619,7 +1702,7 @@ toIREnumerate meta cumulative e sample = do
   let res = if cumulative
               then compareValueExpr rt eIR sample
               else IRIf (IROp cmpOp eIR sample) (IRConst (VFloat 1)) const0
-  return (res, const0, IRConst (VFloat 1))
+  return (mass res)
 
 -- | Strip the branch-count field from all probability-mode functions in the environment.
 -- Applied after compilation and before optimisation when countBranches = False.
@@ -1816,7 +1899,7 @@ subtreeHasOcc occs e = let cns = subtreeCNs e in any (`elem` cns) occs
 -- | Entry point of the fallback, called from the probabilistic Apply arm after
 -- 'toInvExprMaybe' failed. Builds the constraint worlds for the observation and
 -- measures them against the bound distribution @v@.
-setWitnessApply :: CompilerMetadata -> Bool -> RType -> Expr -> ChainName -> ChainName -> String -> Maybe String -> Expr -> IRExpr -> CompilerMonad CompilationResult
+setWitnessApply :: CompilerMetadata -> Bool -> RType -> Expr -> ChainName -> ChainName -> String -> Maybe String -> Expr -> IRExpr -> CompilerMonad PResult
 setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag planDiag v sample = do
   let userVar = case l of Lambda _ n _ -> n; _ -> "<bound variable>"
   let refuse why = error $ unlines $
@@ -1847,46 +1930,42 @@ setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag planDiag v sam
     -- same program may be perfectly fine, and a compile-time error here would
     -- take it down too (all variants are compiled up front).
     Nothing | cumulative -> return
-      ( IRError ("cannot compute this cumulative: the observation on binding '" ++ userVar
-          ++ "' has no set-valued inverse in cumulative mode (design set-valued-witnesses)")
-      , const0, const1)
+      (mass (IRError ("cannot compute this cumulative: the observation on binding '" ++ userVar
+          ++ "' has no set-valued inverse in cumulative mode (design set-valued-witnesses)")))
     Nothing -> refuse ("the observation cannot be propagated onto the bound variable: the body"
       ++ " contains a node that is neither point-invertible, a comparison against a"
       ++ " deterministic bound, an if-then-else case split, a tuple of such parts, nor"
       ++ " deterministic given scope (e.g. it draws fresh randomness).")
     Just worlds -> do
       measured <- mapM (measureWorld meta v) worlds
-      (pSum, dimSum, bcSum) <- case measured of
+      -- The worlds partition the observation, so they mix; here (unlike the
+      -- IfThenElse mixture) each world really was traversed, so counts sum.
+      summed <- case measured of
         -- no worlds can only mean an impossible observation
-        []     -> return (const0, const0, const1)
-        (m:ms) -> foldM (\(ap, ad, ab) (bp, bd, bb) -> do
-                           (cp, cd) <- addP (ap, ad) (bp, bd)
-                           return (cp, cd, IROp OpPlus ab bb)) m ms
+        []     -> return (mass const0)
+        (m:ms) -> foldM (\a b -> mixP (IROp OpPlus (rBranches a) (rBranches b)) a b) m ms
       -- Full-ANY marginal short-circuit: guards and transported bounds are not
       -- ANY-aware, but the marginal of the whole observation is simply 1.
       if cumulative
-        then return (pSum, dimSum, bcSum)
-        else return ( IRIf (IRUnaryOp OpIsAny sample) const1 pSum
-                    , IRIf (IRUnaryOp OpIsAny sample) const0 dimSum
-                    , IRIf (IRUnaryOp OpIsAny sample) const1 bcSum )
+        then return summed
+        else return (zipResult (\anyVal e -> IRIf (IRUnaryOp OpIsAny sample) anyVal e)
+                       (mass const1) summed)
 
 -- | Measure one world against the bound distribution. The measure is compiled
 -- in its own writer scope and kept under the world's guards, so bindings whose
 -- evaluation is only valid when the guards hold are not hoisted past them.
-measureWorld :: CompilerMetadata -> Expr -> WWorld -> CompilerMonad CompilationResult
+measureWorld :: CompilerMetadata -> Expr -> WWorld -> CompilerMonad PResult
 measureWorld meta v (WWorld guards set) = do
-  ((p, dim, bc), binds) <- lift (runWriterT (measureSet meta v set))
+  (res, binds) <- lift (runWriterT (measureSet meta v set))
   let wrap = generateLetInExpr binds
-  let guarded zero e = foldr (\g acc -> IRIf g acc zero) (wrap e) guards
-  return (guarded const0 p, guarded const0 dim, guarded const0 bc)
+  let guarded e = foldr (\g acc -> IRIf g acc const0) (wrap e) guards
+  return (mapResult guarded res)
 
-measureSet :: CompilerMetadata -> Expr -> WSet -> CompilerMonad CompilationResult
+measureSet :: CompilerMetadata -> Expr -> WSet -> CompilerMonad PResult
 measureSet meta v (WPoint p cov) = do
-  (pv, dv, bv) <- toIRInference meta False v p
   -- change-of-variables correction only for continuous results, mirroring the
   -- point-witness path
-  let scaled = IROp OpMult pv (IRIf (IROp OpEq dv const0) const1 (IRUnaryOp OpAbs cov))
-  return (scaled, dv, bv)
+  scaleCoV False cov <$> toIRInference meta False v p
 measureSet meta v (WInterval lo hi) = do
   (cdfHi, bcHi) <- cdfAtBound meta v hi
   (cdfLo, bcLo) <- cdfAtBound meta v lo
@@ -1897,16 +1976,16 @@ measureSet meta v (WInterval lo hi) = do
         (WFinite _, _) -> bcHi
         (_, WFinite _) -> bcLo
         _              -> const1
-  return (clamped, const0, bc)
-measureSet _ _ WFull  = return (const1, const0, const1)
-measureSet _ _ WEmpty = return (const0, const0, const1)
+  return (PResult clamped const0 bc)
+measureSet _ _ WFull  = return (mass const1)
+measureSet _ _ WEmpty = return (mass const0)
 
 cdfAtBound :: CompilerMetadata -> Expr -> WBound -> CompilerMonad (IRExpr, IRExpr)
 cdfAtBound _ _ WNegInf = return (const0, const1)
 cdfAtBound _ _ WPosInf = return (const1, const1)
 cdfAtBound meta v (WFinite e) = do
-  (p, _, bc) <- toIRInference meta True v e
-  return (p, bc)
+  res <- toIRInference meta True v e
+  return (rProb res, rBranches res)
 
 -- | Invert the observation @body ∈ target@ into constraint worlds on the bound
 -- variable (occurrences @occs@). Nothing when some node on the way is not
@@ -2998,22 +3077,23 @@ planApplyTarget meta env body target = do
 -- leaf's is its density times |change-of-variables| -- the only dim-1
 -- measure. When every world is dim 0 (in particular for any milestone-1/2
 -- world set) the worlds sum directly; with point constraints present the
--- worlds combine via 'addP' (mixture addition, smaller dimension wins). Each
+-- worlds combine via 'mixP' (mixture addition, smaller dimension wins). Each
 -- world whose guards hold counts as one branch.
-measurePlanWorlds :: String -> [PlanWorld] -> CompilerMonad CompilationResult
+measurePlanWorlds :: String -> [PlanWorld] -> CompilerMonad PResult
 measurePlanWorlds nnRaw worlds
   | all ((== 0) . planWorldDim) worlds =
-      return (sumUp (map mass worlds), const0, sumUp (map branch worlds))
-  | otherwise = case map (\w -> ((mass w, dimC (planWorldDim w)), branch w)) worlds of
-      []     -> return (const0, const0, const0)
-      (m:ms) -> do
-        (pS, dS) <- foldM addP (fst m) (map fst ms)
-        return (pS, dS, sumUp (map snd (m:ms)))
+      return (PResult (sumUp (map worldMass worlds)) const0 branchSum)
+  | otherwise = case [ PResult (worldMass w) (dimC (planWorldDim w)) branchSum | w <- worlds ] of
+      []     -> return (detP const0)
+      -- Every world whose guards hold was traversed, so the branch count is the
+      -- sum over all of them regardless of which one carries the mixture's mass.
+      (m:ms) -> foldM (mixP branchSum) m ms
   where
     dimC d = IRConst (VFloat (fromIntegral d))
     sumUp [] = const0
     sumUp xs = foldr1 (IROp OpPlus) xs
-    mass = planWorldMass nnRaw
+    worldMass = planWorldMass nnRaw
+    branchSum = sumUp (map branch worlds)
     branch w = foldr (\g acc -> IRIf g acc const0) const1 (pwGuards w)
 
 -- | Dimensionality of a world's mass: one per point constraint (a univariate
@@ -3073,7 +3153,7 @@ planWorldMass nnRaw (PlanWorld guards cons pairs factor) =
 -- not a plan-backed ReadNN, or the application shape is out of scope). Left
 -- (Just why): applicable, but the body traversal hit an unsupported node --
 -- the diagnostic is appended to the set-witness refusal.
-planWitnessApply :: CompilerMetadata -> Bool -> RType -> ChainName -> ChainName -> String -> Expr -> IRExpr -> CompilerMonad (Either (Maybe String) CompilationResult)
+planWitnessApply :: CompilerMetadata -> Bool -> RType -> ChainName -> ChainName -> String -> Expr -> IRExpr -> CompilerMonad (Either (Maybe String) PResult)
 planWitnessApply meta cumulative rt lResolvedCN lambdaBodyCN tag v sample
   | tag == ""
   , not (isArrow rt)
@@ -3107,13 +3187,12 @@ planWitnessApply meta cumulative rt lResolvedCN lambdaBodyCN tag v sample
           case mapMaybe pwOverCoupled worlds of
            (why:_) -> return (Left (Just why))
            [] -> do
-            (p, dim, bc) <- measurePlanWorlds nnRaw worlds
+            measured <- measurePlanWorlds nnRaw worlds
             -- Full-ANY marginal short-circuit, mirroring setWitnessApply.
             if cumulative
-              then return (Right (p, dim, bc))
-              else return (Right ( IRIf (IRUnaryOp OpIsAny sample) const1 p
-                                 , IRIf (IRUnaryOp OpIsAny sample) const0 dim
-                                 , IRIf (IRUnaryOp OpIsAny sample) const1 bc ))
+              then return (Right measured)
+              else return (Right (zipResult (\anyVal e -> IRIf (IRUnaryOp OpIsAny sample) anyVal e)
+                                    (mass const1) measured))
   | otherwise = return (Left Nothing)
   where
     isArrow (TArrow _ _) = True
