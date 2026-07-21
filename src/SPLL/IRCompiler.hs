@@ -1617,8 +1617,15 @@ mixWith combine bc a b = do
 bindFlags :: IRExpr -> IRExpr -> CompilerMonad (IRExpr, IRExpr)
 bindFlags fa fb = (,) <$> bindFlag "impA" fa <*> bindFlag "impB" fb
   where
+    -- Constants and plain reads are cheap and pure; binding them would only add
+    -- a let for every mixture, and world folds mix once per world.
+    atomic (IRConst _)  = True
+    atomic (IRVar _)    = True
+    atomic (IRTFst e)   = atomic e
+    atomic (IRTSnd e)   = atomic e
+    atomic _            = False
     bindFlag name f
-      | f == constFalseIR || f == constTrueIR = return f
+      | atomic f  = return f
       | otherwise = do
           v <- mkVariable name
           setVariables [(v, f)]
@@ -2122,7 +2129,11 @@ measureSet meta v (WPoint p cov) = do
 measureSet meta v (WInterval lo hi) = do
   (cdfHi, bcHi) <- cdfAtBound meta v hi
   (cdfLo, bcLo) <- cdfAtBound meta v lo
-  let diff = IROp OpSub cdfHi cdfLo
+  -- Let-bound because both the measure and its impossibility flag read it, and
+  -- a CDF difference is two full inference compiles.
+  diffVar <- mkVariable "ivl_mass"
+  setVariables [(diffVar, IROp OpSub cdfHi cdfLo)]
+  let diff = IRVar diffVar
   -- an empty runtime intersection shows up as a non-positive difference
   let clamped = IRIf (IROp OpGreaterThan diff const0) diff const0
   let bc = case (hi, lo) of

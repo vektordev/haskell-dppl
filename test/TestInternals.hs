@@ -441,6 +441,54 @@ test_farTailEitherDensityNotZeroed = testCase "farTailEitherDensityNotZeroed" $ 
       assertEqual "far-tail density must keep dim=1 (continuous)" 1.0 d
     other -> assertFailure ("expected a probability tuple, got: " ++ show other)
 
+-- The same program past the float underflow floor -- the residual half of the
+-- bug above (task addp-zero-check-non-total). At x=39 the true density is around
+-- 1e-331, which is not representable: the density itself IS exactly 0.0, so no
+-- amount of care with the zero test can tell it apart from an impossible branch
+-- BY VALUE. What still distinguishes them is provenance, and that is what the
+-- impossibility flag carries: the Left arm's density underflowed (possible,
+-- dim 1), the Right arm's indicator did not match (impossible), so the mixture
+-- must report the Left arm's dimension. Before the flag, this returned dim 0.
+test_underflowedTailKeepsDimension :: TestTree
+test_underflowedTailKeepsDimension = testCase "underflowedTailKeepsDimension" $ do
+  let prog = Program [("main", ifThenElse (normal #>#  constF 0.0) (left normal) (right unit))] [] [] []
+  case runProb defaultCompilerConfig prog [] (VEither (Left (VFloat 39.0))) of
+    Right res@(VProbDim p d) -> do
+      assertEqual "the density underflows to a true float zero at this depth" 0.0 p
+      assertEqual "but the branch is possible, so the mixture keeps dim=1" 1.0 d
+      assertEqual "and the result is not flagged impossible" (Just False) (resultImpossible res)
+    other -> assertFailure ("expected a probability tuple, got: " ++ show other)
+
+-- The flag's own meaning, in the case where value-based detection is right but
+-- says nothing about why: a sample in the wrong Either arm is not a zero-valued
+-- density, it is an event the program cannot produce.
+test_structurallyImpossibleSampleIsFlagged :: TestTree
+test_structurallyImpossibleSampleIsFlagged = testCase "structurallyImpossibleSampleIsFlagged" $ do
+  let prog = Program [("main", left uniform)] [] [] []
+  case runProb defaultCompilerConfig prog [] (VEither (Right (VFloat 0.5))) of
+    Right res -> do
+      assertEqual "wrong Either arm is impossible" (Just True) (resultImpossible res)
+    other -> assertFailure ("expected a probability tuple, got: " ++ show other)
+  -- ... whereas a sample the program CAN produce is never flagged, however
+  -- little density it carries.
+  case runProb defaultCompilerConfig prog [] (VEither (Left (VFloat 0.5))) of
+    Right res -> assertEqual "a live arm is possible" (Just False) (resultImpossible res)
+    other -> assertFailure ("expected a probability tuple, got: " ++ show other)
+
+-- Uniform is the case where a *density* leaf really is a structural zero: off
+-- its support the event cannot occur, and the mixture must be able to tell that
+-- apart from the deep-tail case above (where the value is equally zero but the
+-- event is possible).
+test_uniformOffSupportIsImpossible :: TestTree
+test_uniformOffSupportIsImpossible = testCase "uniformOffSupportIsImpossible" $ do
+  let prog = Program [("main", uniform)] [] [] []
+  case runProb defaultCompilerConfig prog [] (VFloat 2.0) of
+    Right res -> assertEqual "2.0 is outside [0,1]" (Just True) (resultImpossible res)
+    other -> assertFailure ("expected a probability tuple, got: " ++ show other)
+  case runProb defaultCompilerConfig prog [] (VFloat 0.5) of
+    Right res -> assertEqual "0.5 is in support" (Just False) (resultImpossible res)
+    other -> assertFailure ("expected a probability tuple, got: " ++ show other)
+
 -- Regression for observe-partials-umbrella: 'intersectSet's WPoint/WPoint case
 -- (IRCompiler.hs) used to unconditionally keep the first witness and silently
 -- discard the second whenever a let-bound stochastic Either is destructured
@@ -994,6 +1042,9 @@ internalsTests = testGroup "Internals"
       ]
   , test_missingMainFunction
   , test_farTailEitherDensityNotZeroed
+  , test_underflowedTailKeepsDimension
+  , test_structurallyImpossibleSampleIsFlagged
+  , test_uniformOffSupportIsImpossible
   , test_letBoundEitherDestructureUsesSample
   , test_setWitnessMergesComplementaryTupleFields
   , autoNeuralDerivationTests

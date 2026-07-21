@@ -58,7 +58,7 @@ import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
 import SPLL.Prelude
 import SPLL.Validator (validateProgram)
-import ArbitrarySPLL (genRawFuzzProgram, genTypedProgram)
+import ArbitrarySPLL (genRawFuzzProgram, genTypedProgram, genTypedExpr, Ty(..))
 
 -- | `show`ing a value forces every field, catching lazily-hidden crashes
 -- (partial functions/undefined) that a bare WHNF `seq` would miss.
@@ -171,11 +171,17 @@ fuzzSize :: Int
 fuzzSize = 12
 
 withinBudget :: IO Property -> IO Property
-withinBudget act = do
-  result <- timeout perCaseBudgetMicros act
+withinBudget = withinBudgetScaled 1
+
+-- | 'withinBudget' for properties that do more than one compile per draw, so
+-- that a slow-but-terminating draw is not reported as a hang.
+withinBudgetScaled :: Int -> IO Property -> IO Property
+withinBudgetScaled factor act = do
+  let budget = factor * perCaseBudgetMicros
+  result <- timeout budget act
   return $ case result of
     Just prop -> prop
-    Nothing -> counterexample ("did not terminate within " ++ show perCaseBudgetMicros ++ "us") False
+    Nothing -> counterexample ("did not terminate within " ++ show budget ++ "us") False
 
 -- ---------------------------------------------------------------------------
 -- Crash-freedom: the compiler must never throw a Haskell exception, only
@@ -303,6 +309,86 @@ prop_Fuzz_BranchCountingDoesNotChangeProbability = withMaxSuccess 40 $ forAll (r
           _ -> counterexample "unexpected result shapes" False
         _ -> discardVacuous
     _ -> return discardVacuous
+
+-- | The mixture combination rules, checked on pairs of independently generated
+-- programs of the SAME type (design inference-result-side-channels; the rules
+-- themselves live in 'mixWith').
+--
+-- For arms A and B and a condition of probability q, the compiled mixture
+-- @if bernoulli q then A else B@ must, at any query point x, report exactly:
+--
+-- >  A impossible at x   ->  ((1-q)*pB, dB)
+-- >  B impossible at x   ->  (q*pA,     dA)
+-- >  dA < dB             ->  (q*pA,     dA)      -- the lower dimension wins
+-- >  dB < dA             ->  ((1-q)*pB, dB)
+-- >  otherwise           ->  (q*pA + (1-q)*pB, dA)
+--
+-- This is the property the old value-based zero test could not state: it had
+-- to *guess* "impossible" from a zero probability, which is neither necessary
+-- (a structural zero can be any value once guards multiply through) nor
+-- sufficient (an underflowed tail density is zero and possible). Reading each
+-- arm's own flag makes the rule checkable, and q is kept away from 0 and 1 so
+-- that neither arm is impossible merely because its condition cannot hold.
+prop_Fuzz_MixtureFollowsCombinationRules :: Property
+prop_Fuzz_MixtureFollowsCombinationRules =
+  -- Three compiles per draw (both arms and the mixture, which is larger than
+  -- either), and the mixture of two if-heavy arms is exactly the shape that
+  -- compiles slowly -- hence the generous budget and the reduced draw count.
+  -- Occasional draws still exceed it and are reported as failures per this
+  -- module's convention; observed failures here have been budget overruns, not
+  -- rule violations, so read the counterexample before believing the latter.
+  withMaxSuccess 25 $ forAll genMixturePair $ \(exprA, exprB, q) -> ioProperty $ withinBudgetScaled 10 $ do
+    let progA = Program [("main", exprA)] [] [] []
+        progB = Program [("main", exprB)] [] [] []
+        progM = Program [("main", ifThenElse (bernoulli q) exprA exprB)] [] [] []
+    envs <- mapM (compileSafe defaultCompilerConfig) [progA, progB, progM]
+    case envs of
+      [Just envA, Just envB, Just envM]
+        | all hasProbFun [envA, envB, envM] -> do
+            x <- drawSample progM envM
+            return $ case (runProbC progA envA [] x, runProbC progB envB [] x, runProbC progM envM [] x) of
+              (Right resA, Right resB, Right resM)
+                | Just (pA, dA) <- probDim resA
+                , Just (pB, dB) <- probDim resB
+                , Just (pM, dM) <- probDim resM
+                , Just impA <- resultImpossible resA
+                , Just impB <- resultImpossible resB ->
+                    let (expectedP, expectedD)
+                          | impA      = ((1 - q) * pB, dB)
+                          | impB      = (q * pA,       dA)
+                          | dA < dB   = (q * pA,       dA)
+                          | dB < dA   = ((1 - q) * pB, dB)
+                          | otherwise = (q * pA + (1 - q) * pB, dA)
+                    in counterexample
+                         ("arms: A=(" ++ show pA ++ ", dim " ++ show dA ++ ", imposs " ++ show impA
+                          ++ ") B=(" ++ show pB ++ ", dim " ++ show dB ++ ", imposs " ++ show impB
+                          ++ ") q=" ++ show q ++ " at x=" ++ show x
+                          ++ "; mixture=(" ++ show pM ++ ", dim " ++ show dM
+                          ++ ") expected (" ++ show expectedP ++ ", dim " ++ show expectedD ++ ")")
+                         (closeEnough pM expectedP && dM == expectedD)
+              _ -> discardVacuous
+      _ -> return discardVacuous
+  where
+    -- Relative tolerance: arm probabilities span many orders of magnitude
+    -- (that being the whole point), so an absolute epsilon is meaningless.
+    closeEnough got want = abs (got - want) <= 1e-9 * max 1 (abs want)
+
+-- | Two independently generated programs of the same type, plus a mixing
+-- probability bounded away from 0 and 1.
+genMixturePair :: Gen (Expr, Expr, Double)
+genMixturePair = do
+  ty <- elements [TyFloat, TyInt, TyBool]
+  a  <- resize mixtureArmSize (sized (genTypedExpr ty))
+  b  <- resize mixtureArmSize (sized (genTypedExpr ty))
+  q  <- choose (0.1, 0.9)
+  return (a, b, q)
+
+-- | Arms are drawn smaller than 'fuzzSize': the mixture program is larger than
+-- both arms combined and gets compiled alongside them, and what this property
+-- exercises (how two results combine) does not get more thorough with deeper
+-- arms -- it just makes every draw a slow compile.
+mixtureArmSize :: Int
+mixtureArmSize = 6
 
 return []
 
