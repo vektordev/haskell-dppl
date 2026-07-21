@@ -16,6 +16,8 @@ module SPLL.IntermediateRepresentation (
 , irMap
 , irDescend
 , getIRSubExprs
+, isPure
+, isEffectfulVar
 , lookupIREnv
 , irPrintFlat
 , valueToIR
@@ -30,6 +32,7 @@ import SPLL.Typing.RType (RType(..))
 import SPLL.Typing.PType()
 import SPLL.Typing.Typing()
 import Data.Data()
+import Data.List (isSuffixOf)
 
 -- | The probability-mode result layout, as produced by 'SPLL.IRCompiler.packResult':
 --
@@ -291,6 +294,42 @@ getIRSubExprs (IREnumSum _ _ a) = [a]
 getIRSubExprs (IRIndex a b) = [a, b]
 getIRSubExprs (IRError _) = []
 getIRSubExprs (IRConformsTo _ a) = [a]
+
+-- | True if an @IRVar name@ reference is *effectful* -- i.e. a reference to a
+-- top-level generator function, whose evaluation draws randomness. The IR uses
+-- @IRVar@ for two semantically different things: a pure value reference (a
+-- lambda parameter, let binding, or enumSum loop variable, free to duplicate)
+-- and a nullary generator call such as @coin_gen@. \"Referencing\" the latter
+-- actually /runs the sampler/: the interpreter re-evaluates the bound expression
+-- on every lookup and code generation renders it as a call, so duplicating the
+-- reference duplicates the random draw (task ir-effectful-var-purity).
+--
+-- Generator references are recognised by the @_gen@ name suffix that
+-- 'SPLL.IRCompiler' appends to every inference-carrying top-level declaration
+-- (this also covers neural @_auto_gen@). A @_gen@ reference that names a
+-- /function/ rather than a nullary sampler is itself a pure closure value, but
+-- treating it conservatively as effectful only ever forgoes an optimization --
+-- it never changes semantics -- so this predicate does not try to tell them
+-- apart.
+isEffectfulVar :: String -> Bool
+isEffectfulVar name = "_gen" `isSuffixOf` name
+
+-- | True if evaluating the expression has no observable side effect, so it is
+-- safe both to duplicate (inline into several uses) and to collapse repeated
+-- occurrences into one shared binding. The two effects are drawing a random
+-- sample ('IRSample') and referencing a generator function ('isEffectfulVar').
+--
+-- This is the single mechanism every duplicating or sharing optimizer rewrite
+-- consults, replacing the ad-hoc per-pass assumptions this class of bug used to
+-- rely on: @optimizeLetIns@' \"never duplicate a non-'IRConst' binding\" and
+-- CSE's \"a subexpression is pure iff it contains no 'IRSample'\" -- the latter
+-- silently misclassified an expression built from a generator reference as
+-- pure and could collapse two independent draws into one (task
+-- ir-effectful-var-purity).
+isPure :: IRExpr -> Bool
+isPure (IRSample _) = False
+isPure (IRVar name) = not (isEffectfulVar name)
+isPure e            = all isPure (getIRSubExprs e)
 
 irMap :: (IRExpr -> IRExpr) -> IRExpr -> IRExpr
 irMap f x = f (irDescend (irMap f) x)

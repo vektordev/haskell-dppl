@@ -1,5 +1,6 @@
 module SPLL.IROptimizer (
   optimizeEnv
+, postProcess
 , failConversion
 ) where
 
@@ -128,14 +129,28 @@ optimizeAssociativity x = x
 
 optimizeLetIns :: IRExpr -> IRExpr
 optimizeLetIns (IRLetIn name val scope)
-  -- Only IRConst is safe to duplicate unconditionally. A bare IRVar can name a
-  -- nullary generator (e.g. coin_gen) whose evaluation samples randomness, so
-  -- inlining it into multiple uses re-draws the sample (see ir-effectful-var-purity).
-  -- Multi-use non-const bindings stay as a let; single use is still inlined below.
-  | isValue val = replaceAll (IRVar name) val scope
+  -- A binding may be inlined into *every* use (i.e. duplicated) only when doing so
+  -- is both cheap and effect-free. `duplicableBinding` is the gate: IRConst
+  -- (small, pure) and pure copy-propagations of a bare IRVar qualify. Effectfulness
+  -- is decided by the shared `isPure` mechanism rather than the old
+  -- "IRConst only" rule -- a bare IRVar can name a nullary generator (e.g.
+  -- coin_gen) whose evaluation samples randomness, so inlining it into multiple
+  -- uses would re-draw the sample (task ir-effectful-var-purity). Multi-use
+  -- non-duplicable bindings stay as a let; single use is still inlined below.
+  | duplicableBinding val = replaceAll (IRVar name) val scope
   | countUses name scope == 1 && not (usedInEnumSumBodyInvariant name val scope) = replaceAll (IRVar name) val scope
   | countUses name scope == 0 = scope
 optimizeLetIns ex = ex
+
+-- | A binding whose value may be duplicated across all uses without changing
+-- semantics or blowing up code size: a literal constant, or a pure bare
+-- variable reference (copy propagation). The purity check is what keeps an
+-- effectful generator reference (@coin_gen@) from being duplicated
+-- (ir-effectful-var-purity).
+duplicableBinding :: IRExpr -> Bool
+duplicableBinding val = isValue val || (isBareVar val && isPure val)
+  where isBareVar (IRVar _) = True
+        isBareVar _         = False
 
 -- | True if `var` is used inside an IREnumSum body in `scope` AND `val` does not
 -- reference any loop variable of those IREnumSums.  Such a binding is
@@ -304,8 +319,9 @@ forceAnyCheck x = IRUnaryOp OpIsAny x
 -- A candidate is only hoisted when doing so is provably semantics-preserving,
 -- which requires three conditions:
 --
---   * pure — it contains no IRSample (see 'annSamples'), so sharing a single
---     value for it cannot collapse distinct random draws;
+--   * pure — evaluating it has no side effect ('isPure', tracked as 'annImpure'):
+--     no IRSample draw and no generator reference, so sharing a single value for
+--     it cannot collapse distinct random draws;
 --   * capture-safe — none of its free variables are bound anywhere inside the
 --     node, so lifting it to a let at the top of the node keeps every variable
 --     in scope;
@@ -405,8 +421,9 @@ data AnnIR = AnnIR
   , annKids    :: [AnnIR]
   , annHash    :: !Int
   , annSize    :: !Int      -- leaf count
-  , annSamples :: !Bool     -- contains a random draw (an IRSample)
-    --FIXME: a function call to a sampling function does itself also sample.
+  , annImpure  :: !Bool     -- evaluation has a side effect: an IRSample draw or
+                            -- a generator reference (see 'isPure'). Sharing an
+                            -- impure repeat would collapse independent draws.
   , annBound   :: Set.Set String  -- names bound by binders anywhere in the subtree
   }
 
@@ -420,8 +437,9 @@ mkAnnIR e kids = AnnIR e kids h sz smp bnd
     h = foldl' hashMix (headHash e) (map annHash kids)
     sz = if null kids then 1 else sum (map annSize kids)
     smp = case e of
-      IRSample _ -> True
-      _          -> any annSamples kids
+      IRSample _              -> True
+      IRVar n | isEffectfulVar n -> True
+      _                       -> any annImpure kids
     kidsBound = Set.unions (map annBound kids)
     bnd = case e of
       IRLetIn n _ _   -> Set.insert n kidsBound
@@ -505,7 +523,7 @@ bestCommonSubexpr ann =
     repeated = [ a | (a, n) <- tallyAnns skeleton
                    , n >= 2
                    , annSize a > 1
-                   , not (annSamples a) ]
+                   , not (annImpure a) ]
     (candidates, blocked) = partition captureSafe repeated
     captureSafe a = not (any (`Set.member` bound) (freeVarsIR (annExpr a)))
 
