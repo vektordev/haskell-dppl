@@ -485,6 +485,7 @@ headHash e = case e of
   IRIsPossible v _  -> hashMix 29 (hashStr (show v))
   IRIndex{}         -> 30
   IRError s         -> hashMix 31 (hashStr s)
+  IRConformsTo t _  -> hashMix 32 (hashStr (show t))
 
 -- | The largest hoistable common subexpression of a node (candidates are in
 -- first-occurrence order and ties break like the historical
