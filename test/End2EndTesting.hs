@@ -14,7 +14,7 @@ import Data.Function (on)
 import Control.Monad.Random
 import System.Random (mkStdGen)
 import Data.Maybe
-import Data.List (intercalate, nub, isInfixOf)
+import Data.List (intercalate, nub, isInfixOf, transpose)
 import Data.Text (replace, pack, unpack)
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
@@ -404,16 +404,22 @@ batchedPythonTests :: IO TestTree
 batchedPythonTests = do
   files <- getAllTestFiles
   cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
+  -- Non-neural programs are routed to Python by their .tst header; neural
+  -- programs are Interpreter-only there (their networks are undefined in the
+  -- emitted code), but batched mode supplies a torch mock (identity, for the
+  -- mode-2 verbatim-logit symbols the .tst files pass), so we admit them here
+  -- regardless of the Python routing header (design pytorch-tensorizer M2b).
   let entries = [ (takeBaseName pplPath, p, tcs)
                 | ((pplPath, _), (p, (bs, slow, tcs))) <- zip files cases
-                , not slow, Python `elem` bs, null (neurals p) ]
-      eligible = [ (n, src, groups)
+                , not slow, Python `elem` bs || not (null (neurals p)) ]
+      eligible = [ (n, src, groups, netNames)
                  | (n, p, tcs) <- entries
                  , let qtcs = filter (\t -> isProbTestCase t || isCumulTestCase t) tcs
                  , not (null qtcs)
+                 , let netNames = [nm | (nm, _, _) <- neurals p]
                  , Right env <- [compile defaultCompilerConfig{batched = True} p]
                  , Right srcLines <- [generateFunctionsBatched True env]
-                 , Just groups <- [batchGroups qtcs]
+                 , Just groups <- [batchGroups (not (null netNames)) qtcs]
                  , let src = intercalate "\n" srcLines ]
   mpy <- findTorchPython
   return $ testGroup "BatchedPython" $ case mpy of
@@ -439,35 +445,71 @@ refusalProp = ioProperty $ do
                     ("tensor fragment" `isInfixOf` msg && "list" `isInfixOf` msg)
 
 -- | A batchable group: all query points sharing the same query kind (prob vs
--- cumulative) and the same parameter list, so they form one batched call.
+-- cumulative), rendered into one batched call. 'bgParamExprs' is the Python
+-- expression for each positional argument after the sample: a broadcast scalar
+-- for a shared non-neural parameter, or a @[B, n]@ tensor for a batched neural
+-- symbol (whose per-point value differs across the batch — that variation is
+-- the whole point of neural batching).
 data BatchGroup = BatchGroup
-  { bgIsCumul :: Bool
-  , bgParams  :: [IRValue]
-  , bgSamples :: [IRValue]
-  , bgExpProb :: [Double]
-  , bgExpDim  :: [Double]
+  { bgIsCumul    :: Bool
+  , bgParamExprs :: [String]
+  , bgSamples    :: [IRValue]
+  , bgExpProb    :: [Double]
+  , bgExpDim     :: [Double]
   }
 
 -- | Split a program's prob/cumulative test cases into batchable groups, or
 -- 'Nothing' if any sample is not structure-of-arrays batchable (a non
--- float/int/bool/tuple leaf).
-batchGroups :: [TestCase] -> Maybe [BatchGroup]
-batchGroups tcs = mapM build grouped
+-- float/int/bool/tuple leaf). For a neural program ('isNeural'), all points of
+-- a query kind form one group and each per-point symbol argument is batched
+-- into a @[B, n]@ tensor; for a non-neural program, points are grouped by
+-- identical parameter list and the shared parameters broadcast as scalars.
+batchGroups :: Bool -> [TestCase] -> Maybe [BatchGroup]
+batchGroups isNeural tcs = mapM build grouped
   where
     keyed = [ q | t <- tcs, Just q <- [asQuery t] ]
-    grouped = groupBy ((==) `on` (\(c, ps, _, _, _) -> (c, show ps)))
-                      keyed
-    build g@((c, ps, _, _, _):_) =
+    grouped
+      | isNeural  = groupBy ((==) `on` (\(c, _, _, _, _) -> c)) keyed
+      | otherwise = groupBy ((==) `on` (\(c, ps, _, _, _) -> (c, show ps))) keyed
+    build g@((c, _, _, _, _):_) =
       let samples = [s | (_, _, s, _, _) <- g]
-      in case batchLiteral samples of
-           Nothing -> Nothing
-           Just _  -> Just BatchGroup { bgIsCumul = c, bgParams = ps, bgSamples = samples
-                                      , bgExpProb = [ep | (_, _, _, ep, _) <- g]
-                                      , bgExpDim  = [ed | (_, _, _, _, ed) <- g] }
+          paramRows = [ps | (_, ps, _, _, _) <- g]
+      in do _ <- batchLiteral samples
+            paramExprs <- if isNeural
+              then batchSymParamCols paramRows
+              else Just (map pyVal (head paramRows))
+            Just BatchGroup { bgIsCumul = c, bgParamExprs = paramExprs, bgSamples = samples
+                            , bgExpProb = [ep | (_, _, _, ep, _) <- g]
+                            , bgExpDim  = [ed | (_, _, _, _, ed) <- g] }
     build [] = Nothing
     asQuery (ProbTestCase _ s ps (VFloat ep, VFloat ed))  = Just (False, ps, s, ep, ed)
     asQuery (CumulTestCase _ s ps (VFloat ep, VFloat ed)) = Just (True,  ps, s, ep, ed)
     asQuery _ = Nothing
+
+-- | Batch the positional symbol arguments of a neural program across points.
+-- Each row is one point's argument list; every argument is a mode-2 verbatim
+-- symbol envelope @(2, [logit0, ...])@ (what the neural .tst files pass). We
+-- transpose to columns (one per argument position) and stack each column's
+-- logit vectors into a @[B, n]@ tensor literal — fed to the identity mock the
+-- driver installs for every declared network. 'Nothing' if the rows are ragged
+-- or any argument is not a mode-2 envelope.
+batchSymParamCols :: [[IRValue]] -> Maybe [String]
+batchSymParamCols rows
+  | null rows                          = Just []
+  | any ((/= length (head rows)) . length) rows = Nothing
+  | otherwise = mapM batchSymColumn (transpose rows)
+
+batchSymColumn :: [IRValue] -> Maybe String
+batchSymColumn vs = do
+  logitRows <- mapM logitsOf vs
+  return ("torch.tensor([" ++ intercalate ", " (map renderRow logitRows) ++ "])")
+  where
+    logitsOf (VTuple (VInt 2) (VList ls)) = Just (toList ls)
+    logitsOf _                            = Nothing
+    renderRow ls = "[" ++ intercalate ", " (map num ls) ++ "]"
+    num (VFloat f) = show f
+    num (VInt i)   = show (fromIntegral i :: Double)
+    num _          = "0.0"
 
 -- | Build a structure-of-arrays batch tensor literal from a homogeneous list of
 -- sample values: numeric leaves stack into a float tensor, bools into a bool
@@ -520,14 +562,22 @@ findTorchPython = do
 
 -- | Run every eligible program's batched code in one shared torch process and
 -- assert every batched query point matches its expected value.
-runBatchedPython :: FilePath -> [(String, String, [BatchGroup])] -> Property
+runBatchedPython :: FilePath -> [(String, String, [BatchGroup], [String])] -> Property
 runBatchedPython _ [] = counterexample "BatchedPython: no eligible corpus programs found" False
 runBatchedPython py eligible = ioProperty $ do
   hPutStrLn stderr ("BatchedPython: " ++ show (length eligible) ++ " eligible corpus programs, "
-                    ++ show (sum [sum (map (length . bgSamples) gs) | (_, _, gs) <- eligible])
+                    ++ show (sum [sum (map (length . bgSamples) gs) | (_, _, gs, _) <- eligible])
                     ++ " query points, via " ++ py)
-  let script = batchedDriver eligible
-  (code, out, err) <- readProcessWithExitCode py ["-c", script] ""
+  -- Run the script from a temp file rather than `python -c`: deep neural logit
+  -- vectors make the embedded literals exceed the OS argument-length limit. A
+  -- temp file puts its own directory (not cwd) on sys.path, so prepend the
+  -- project root explicitly so `pythonLibBatched` resolves.
+  cwd <- getCurrentDirectory
+  let script = "import sys\nsys.path.insert(0, " ++ show cwd ++ ")\n" ++ batchedDriver eligible
+  (code, out, err) <- withSystemTempFile "batched_diff.py" $ \tmpPath tmpHandle -> do
+    hPutStr tmpHandle script
+    hClose tmpHandle
+    readProcessWithExitCode py [tmpPath] ""
   return $ case code of
     ExitSuccess -> counterexample (out ++ err) True
     ExitFailure _ -> counterexample ("Batched PyTorch differential failed:\n" ++ out ++ err) False
@@ -536,7 +586,7 @@ runBatchedPython py eligible = ioProperty $ do
 -- (torch imported once), run every batched group, and exit non-zero listing any
 -- element whose prob (or dim, where prob is non-zero) disagrees with the corpus
 -- expectation beyond 'probTolerance'.
-batchedDriver :: [(String, String, [BatchGroup])] -> String
+batchedDriver :: [(String, String, [BatchGroup], [String])] -> String
 batchedDriver eligible = unlines $
   [ "import torch, sys, traceback"
   , "from pythonLibBatched import T"  -- for structure-of-arrays tuple sample batches
@@ -563,20 +613,24 @@ batchedDriver eligible = unlines $
   , "print('BatchedPython OK: " ++ show (length eligible) ++ " programs')"
   ]
   where
-    programBlock (name, src, groups) =
+    programBlock (name, src, groups, netNames) =
       [ "try:"
       , "    _ns = {}"
       , "    exec(" ++ show src ++ ", _ns)"
-      , "    _main = _ns['main']"
+      -- Install an identity mock for every declared network: the .tst symbols
+      -- are mode-2 verbatim-logit envelopes, batched into a [B, n] logit
+      -- tensor, so net(sym) = sym returns those logits directly.
       ] ++
+      [ "    _ns[" ++ show nm ++ "] = (lambda s: s)" | nm <- netNames ] ++
+      [ "    _main = _ns['main']" ] ++
       concatMap (groupCall name) groups ++
       [ "except Exception as _e:"
       , "    failures.append(" ++ show name ++ " + ': exception ' + repr(_e) + '\\n' + traceback.format_exc())"
       ]
-    groupCall name (BatchGroup isCumul params samples expP expD) =
+    groupCall name (BatchGroup isCumul paramExprs samples expP expD) =
       let method = if isCumul then "integrate" else "forward"
           xs = case batchLiteral samples of Just s -> s; Nothing -> "None"
-          paramStr = concatMap (\pv -> ", " ++ pyVal pv) params
+          paramStr = concatMap (", " ++) paramExprs
           call = "_main." ++ method ++ "(" ++ xs ++ paramStr ++ ")"
       in [ "    _cmp(" ++ show name ++ ", " ++ show method ++ ", " ++ call
            ++ ", " ++ pyFloatList expP ++ ", " ++ pyFloatList expD ++ ")" ]

@@ -29,20 +29,23 @@ module SPLL.CodeGenPyTorchBatched
 
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types (CompilerError, GenericValue(..))
-import SPLL.CodeGenPyTorch (pyVal)
+import SPLL.CodeGenPyTorch (pyVal, envToLUT, replaceCalls)
 import Data.Char (toUpper)
-import Data.List (intercalate)
+import Data.List (intercalate, isSuffixOf)
+import Control.Monad (foldM)
 
 -- | Entry point mirroring 'SPLL.CodeGenPyTorch.generateFunctions', but for the
 -- batched backend and fallible: it runs the fragment guard over every emitted
 -- prob/integ body and returns a refusal diagnostic ('Left') if any is outside
 -- the tensor fragment. The 'Bool' is the same generate-boilerplate flag.
 generateFunctionsBatched :: Bool -> IREnv -> Either CompilerError [String]
-generateFunctionsBatched genBoil (IREnv funcs adts consts)
+generateFunctionsBatched genBoil env@(IREnv funcs adts consts)
   | not (null adts) =
       Left "batched mode: ADT declarations are not in the tensor fragment (no tensor representation for constructor-tagged values)."
   | otherwise = do
-      classes <- mapM generateClass funcs
+      let lut = envToLUT env
+      () <- checkCallGraph funcs
+      classes <- mapM (generateClass lut) funcs
       let body = map (\(n, v) -> n ++ " = " ++ pyVal v) consts
              ++ (if null consts then [] else [""])
              ++ concat classes
@@ -58,20 +61,29 @@ generateFunctionsBatched genBoil (IREnv funcs adts consts)
 -- | Emit one function group's class. Only the prob ('forward') and integ
 -- ('integrate') methods are emitted: batched sampling is milestone M4, so a
 -- group's generate function is skipped here.
-generateClass :: IRFunGroup -> Either CompilerError [String]
-generateClass (IRFunGroup name _ prob integ _ _ doc) = do
-  p <- maybe (Right []) (generateMethod "forward" name) prob
-  i <- maybe (Right []) (generateMethod "integrate" name) integ
+generateClass :: [(String, String)] -> IRFunGroup -> Either CompilerError [String]
+generateClass lut (IRFunGroup name _ prob integ _ _ doc) = do
+  p <- maybe (Right []) (generateMethod lut "forward" name) prob
+  i <- maybe (Right []) (generateMethod lut "integrate" name) integ
   let commentLines = map ("# " ++) (lines doc)
       initLine = "class " ++ onHead toUpper name ++ "(Module):"
-  return $ commentLines ++ [initLine] ++ indentOnce (i ++ [""] ++ p)
+      -- A group with neither a forward nor an integrate method (e.g. a tuple
+      -- 'component' group carrying only a normal/gen function, which batched
+      -- mode does not emit) would otherwise produce a syntactically empty class
+      -- body. It is never called (checkCallGraph admits only forward/integrate
+      -- callees), so a `pass` body keeps the instantiation valid.
+      methodBody = if null i && null p then ["pass"] else i ++ [""] ++ p
+  return $ commentLines ++ [initLine] ++ indentOnce methodBody
 
--- | Emit one method: peel the query-type guard and any @isAny@ marginal
--- branches (batched v1 excludes @VAny@), check the residue lies in the tensor
--- fragment, then render it as a let-spine ending in a @return@.
-generateMethod :: String -> String -> IRFunDecl -> Either CompilerError [String]
-generateMethod methodName groupName (expr, doc) = do
-  let (args, body) = unwrapLambdas (prepBatchedBody expr)
+-- | Emit one method: rewrite cross-function call names to Python @class.method@
+-- form (the same @_prob@ → @.forward@ LUT the scalar backend uses), peel the
+-- query-type guard and any @isAny@ marginal branches (batched v1 excludes
+-- @VAny@), check the residue lies in the tensor fragment, then render it as a
+-- let-spine ending in a @return@.
+generateMethod :: [(String, String)] -> String -> String -> IRFunDecl -> Either CompilerError [String]
+generateMethod lut methodName groupName (expr0, doc) = do
+  let expr = irMap (replaceCalls lut) expr0
+      (args, body) = unwrapLambdas (prepBatchedBody expr)
   () <- batchedGuard groupName methodName body
   let l1 = "def " ++ methodName ++ "(self" ++ concatMap (", " ++) args ++ "):"
       docLines = map ("# " ++) (lines doc)
@@ -170,6 +182,59 @@ projTuple True  e              = IRTFst e
 projTuple False e              = IRTSnd e
 
 -- ---------------------------------------------------------------------------
+-- Call-graph guard: recursion and non-emitted-method calls
+-- ---------------------------------------------------------------------------
+
+-- | Batched mode admits cross-function calls (the neural decoder pattern:
+-- @main_prob@ → @decoder_prob@ → a network invocation), but only to functions
+-- it actually emits — the @forward@ (@_prob@) and @integrate@ (@_integ@)
+-- methods — and only when the call graph is acyclic. Two constructs it must
+-- keep refusing (both were caught for free by the old blanket @IRApply@
+-- refusal): a call reaching a @generate@/@normal@ method (not emitted in
+-- batched mode; e.g. scalar @factorial@/@flip@), and recursion (unbounded,
+-- data-dependent depth is outside the tensor fragment and both-arm-eager
+-- evaluation would not terminate; e.g. scalar @dice@).
+checkCallGraph :: [IRFunGroup] -> Either CompilerError ()
+checkCallGraph funcs = () <$ foldM (walk []) [] roots
+  where
+    methods  = concatMap groupMethods funcs
+    universe = map fst methods
+    roots    = [n | (n, _) <- methods, isEmittedMethod n]
+    callees name = maybe [] (filter (`elem` universe) . allVarNames) (lookup name methods)
+    -- DFS with a grey path (cycle detection) and a black memo (already proven
+    -- clean, so a shared sub-DAG is not re-walked).
+    walk grey black name
+      | name `elem` grey =
+          Left $ "batched mode: " ++ head grey ++ " reaches " ++ name
+              ++ " recursively; data-dependent recursion is outside the tensor "
+              ++ "fragment (design pytorch-tensorizer)."
+      | name `elem` black = Right black
+      | not (isEmittedMethod name) =
+          Left $ "batched mode: a prob/integ path calls " ++ name
+              ++ ", which batched mode does not emit (only forward/integrate are "
+              ++ "emitted -- generate and normal_params are scalar-only)."
+      | otherwise = do
+          black' <- foldM (walk (name : grey)) black (callees name)
+          Right (name : black')
+
+groupMethods :: IRFunGroup -> [(String, IRExpr)]
+groupMethods (IRFunGroup n gen prob integ enc normal _) =
+     [(n ++ "_gen",    b) | Just (b, _) <- [gen]]
+  ++ [(n ++ "_prob",   b) | Just (b, _) <- [prob]]
+  ++ [(n ++ "_integ",  b) | Just (b, _) <- [integ]]
+  ++ [(n ++ "_encode", b) | Just (b, _) <- [enc]]
+  ++ [(n ++ "_normal", b) | Just (b, _) <- [normal]]
+
+-- | The only methods 'generateClass' emits in batched mode.
+isEmittedMethod :: String -> Bool
+isEmittedMethod n = ("_prob" `isSuffixOf` n) || ("_integ" `isSuffixOf` n)
+
+-- | Every 'IRVar' name occurring anywhere in an expression (call-graph edges
+-- are these names filtered to the function universe).
+allVarNames :: IRExpr -> [String]
+allVarNames e = [n | IRVar n <- [e]] ++ concatMap allVarNames (getIRSubExprs e)
+
+-- ---------------------------------------------------------------------------
 -- Fragment guard
 -- ---------------------------------------------------------------------------
 
@@ -197,6 +262,8 @@ emittable e = case e of
   IRSelect{}     -> True
   IROp{}         -> True
   IRUnaryOp op _ -> op /= OpIsAny   -- isAny must have been pruned
+  IRConst VAny       -> False       -- marginal sentinel: no tensor representation
+  IRConst (VAnyExcept _) -> False
   IRConst{}      -> True
   IRVar{}        -> True
   IRLetIn{}      -> True
@@ -207,6 +274,8 @@ emittable e = case e of
   IRSubtree{}    -> True
   IRDensity{}    -> True
   IRCumulative{} -> True
+  IRApply{}      -> True   -- network call / cross-function decoder call (M2b)
+  IRIndex{}      -> True   -- logit-vector slice or per-element gather (M2b)
   _              -> False
 
 -- | A human-readable name for an unsupported node, for the refusal diagnostic.
@@ -231,6 +300,8 @@ reason e = case e of
   IRSample{}      -> "random sample (IRSample); batched generate is milestone M4"
   IRError{}       -> "refusal/error arm (IRError); poison-masking is milestone M3"
   IRConformsTo{}  -> "type-conformance check (IRConformsTo)"
+  IRConst VAny        -> "marginal ANY sentinel (IRConst VAny); marginal queries are outside the tensor fragment"
+  IRConst (VAnyExcept _) -> "marginal ANY-except sentinel (IRConst VAnyExcept); marginal queries are outside the tensor fragment"
   IRUnaryOp OpIsAny _ -> "marginal (ANY) check (IRUnaryOp OpIsAny)"
   _               -> irPrintFlat e
 
@@ -287,6 +358,19 @@ batchedExpr (IRTheta e i)    = "(" ++ batchedExpr e ++ ")[0][" ++ show i ++ "]"
 batchedExpr (IRSubtree e i)  = "(" ++ batchedExpr e ++ ")[1][" ++ show i ++ "]"
 batchedExpr (IRDensity d e)    = "density_" ++ batchedDist d ++ "(" ++ batchedExpr e ++ ")"
 batchedExpr (IRCumulative d e) = "cumulative_" ++ batchedDist d ++ "(" ++ batchedExpr e ++ ")"
+-- A call chain: the raw network invocation @net(sym)@ (returning a @[B, n]@
+-- logit tensor) or a cross-function decoder call @decoder.forward(logits, sample)@
+-- (the function name already rewritten to @class.method@ form by the LUT).
+batchedExpr e@(IRApply _ _) =
+  let (fn, args) = collectApplyChain e
+  in batchedExpr fn ++ "(" ++ intercalate ", " (map batchedExpr args) ++ ")"
+-- Indexing a @[B, n]@ logit tensor. A constant logit slot is the last-axis
+-- select @out[..., i]@ (dim 0 stays the batch); a per-element index (a @[B]@
+-- @sample@ tensor) is a batched gather @nn_gather(out, idx)@.
+batchedExpr (IRIndex l (IRConst (VInt i))) =
+  "(" ++ batchedExpr l ++ ")[..., " ++ show i ++ "]"
+batchedExpr (IRIndex l idx) =
+  "nn_gather(" ++ batchedExpr l ++ ", " ++ batchedExpr idx ++ ")"
 batchedExpr (IRLetIn name val body) =
   "((" ++ name ++ " := " ++ batchedExpr val ++ "), " ++ batchedExpr body ++ ")[1]"
 batchedExpr e = error ("batched PyTorch codegen: unexpected node " ++ irPrintFlat e)
@@ -312,3 +396,9 @@ batchedOp op            = error ("batched PyTorch codegen: no infix form for " +
 batchedDist :: Distribution -> String
 batchedDist IRNormal  = "normal"
 batchedDist IRUniform = "uniform"
+
+-- | Flatten a left-nested application spine into the callee and its arguments,
+-- in source order (mirrors the scalar backend's 'collectApplyChain').
+collectApplyChain :: IRExpr -> (IRExpr, [IRExpr])
+collectApplyChain (IRApply f arg) = let (fn, args) = collectApplyChain f in (fn, args ++ [arg])
+collectApplyChain e = (e, [])

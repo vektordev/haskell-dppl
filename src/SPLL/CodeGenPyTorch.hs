@@ -3,7 +3,9 @@
 
 module SPLL.CodeGenPyTorch (
   generateFunctions,
-  pyVal
+  pyVal,
+  envToLUT,
+  replaceCalls
 ) where
 
 import SPLL.IntermediateRepresentation

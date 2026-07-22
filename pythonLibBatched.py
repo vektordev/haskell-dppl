@@ -57,6 +57,19 @@ def asmask(x):
 def _dtype(x):
   return x.dtype if torch.is_tensor(x) else torch.get_default_dtype()
 
+# --- neural: gather a per-element logit slot ---------------------------------
+# A neural decoder reads `logits[sample]`: for each batch element, the logit
+# slot selected by that element's (integer) sample. `out` is the [B, n] logit
+# tensor, `idx` a [B] integer tensor; the result is the [B] tensor of selected
+# logits. (A constant slot is emitted inline as out[..., i]; this handles the
+# data-dependent index.)
+
+def nn_gather(out, idx):
+  idx_t = idx.long() if torch.is_tensor(idx) else torch.tensor(int(idx))
+  if idx_t.dim() == 0:
+    return out[..., idx_t]
+  return out[torch.arange(out.shape[0]), idx_t]
+
 # --- tuple (structure-of-arrays leaf carrier) --------------------------------
 # Identical to pythonLib.T; a fixed tuple whose leaves are [B] tensors.
 
