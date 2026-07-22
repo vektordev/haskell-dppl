@@ -29,6 +29,7 @@ module SPLL.CodeGenPyTorchBatched
 
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types (CompilerError, GenericValue(..))
+import SPLL.Lang.Lang (multiValueToValueList)
 import SPLL.CodeGenPyTorch (pyVal, envToLUT, replaceCalls)
 import Data.Char (toUpper)
 import Data.List (intercalate, isSuffixOf)
@@ -276,6 +277,7 @@ emittable e = case e of
   IRCumulative{} -> True
   IRApply{}      -> True   -- network call / cross-function decoder call (M2b)
   IRIndex{}      -> True   -- logit-vector slice or per-element gather (M2b)
+  IREnumSum{}    -> True   -- enumeration sum, unrolled over the enum axis (M2b)
   _              -> False
 
 -- | A human-readable name for an unsupported node, for the refusal diagnostic.
@@ -295,7 +297,6 @@ reason e = case e of
   IRIsRight{}     -> "Either predicate (IRIsRight)"
   IRApply{}       -> "function application (IRApply); a call did not inline"
   IRLambda{}      -> "inner lambda (IRLambda)"
-  IREnumSum{}     -> "enumeration sum (IREnumSum); neural/enumerable programs are a later milestone"
   IRIsPossible{}  -> "membership check (IRIsPossible)"
   IRSample{}      -> "random sample (IRSample); batched generate is milestone M4"
   IRError{}       -> "refusal/error arm (IRError); poison-masking is milestone M3"
@@ -371,6 +372,16 @@ batchedExpr (IRIndex l (IRConst (VInt i))) =
   "(" ++ batchedExpr l ++ ")[..., " ++ show i ++ "]"
 batchedExpr (IRIndex l idx) =
   "nn_gather(" ++ batchedExpr l ++ ", " ++ batchedExpr idx ++ ")"
+-- An enumeration sum: sum the body over its enumerable values. The enum axis is
+-- known at compile time (a resolved 'MultiValue'), so we unroll it inline —
+-- binding @name@ to each value and summing the resulting @[B]@ tensors — rather
+-- than going through the scalar backend's runtime @multiValueToValueList@
+-- storage (the batched backend keeps no global-storage state). This is the
+-- @[E, B]@ enum-axis stack of the design's "Central insight": each arm is
+-- evaluated against the whole batch, then reduced over the enum axis.
+batchedExpr (IREnumSum name multiVal expr) =
+  "sum(map((lambda " ++ name ++ ": " ++ batchedExpr expr ++ "), ["
+    ++ intercalate ", " (map (pyVal . valueToIR) (multiValueToValueList multiVal)) ++ "]))"
 batchedExpr (IRLetIn name val body) =
   "((" ++ name ++ " := " ++ batchedExpr val ++ "), " ++ batchedExpr body ++ ")[1]"
 batchedExpr e = error ("batched PyTorch codegen: unexpected node " ++ irPrintFlat e)
