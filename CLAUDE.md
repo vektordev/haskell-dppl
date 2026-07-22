@@ -239,6 +239,15 @@ Every `try`/`catch` in this module that runs inside a `withinBudget`/`withinSupe
 
 The interpreter substitutes a mock for every declared neural network (`MockNN.hs`); the Symbol argument selects the mode: `(0, seed)` random logits, `(1, (spikeAt, seed))` a noisy spike at a value (what `argmax_p` queries auto-wrap), `(2, [logit0, ...])` a verbatim logit vector — the only mode with deterministic output, used to pin exact densities in `.tst` files (e.g. `autoNeuralProbGaussian.tst` passes `(2, [mu, sigma])` to check the decoder's Gaussian reader).
 
+### Batched Mode (PyTorch tensorizer)
+
+`batched :: Bool` in `CompilerConfig` (CLI `--batched`, design pytorch-tensorizer) opts into **batched inference**: instead of scalar Python evaluated one query point at a time, emit branch-free elementwise PyTorch that runs a whole `[B]`-shaped batch through at once (`torch.where` instead of data-dependent `if`, `torch.*` instead of `math.*`; broadcasting does the rest). Two pieces:
+
+- **The IR select pass** (`SPLL.IRSelectPass`, M1) retags every data-dependent, elementwise-eligible `IRIf` in prob/integ bodies as a first-class `IRSelect` (both arms evaluated, combined by a mask). It runs before the optimizer, gated on `batched`. Scalar consumers lower `IRSelect` back to `IRIf` at entry (`desugarSelectEnv`; the interpreter delegates its case), so with a scalar backend it is a **behavioural no-op** — pinned by the `SelectPassNoOp` corpus differential test. A distinct node (not a flag on `IRIf`) keeps if-only optimizer rewrites from silently relabelling a select.
+- **The batched backend** (`SPLL.CodeGenPyTorchBatched.generateFunctionsBatched`, M2a) emits `torch.where` for selects and tensor formulas for everything else, over the **tensor fragment** only: float/int/bool leaves in fixed-shape tuples (structure-of-arrays: tuple structure stays a Python `T` object whose leaves are `[B]` tensors, so `dim`, the impossibility flag, and the branch count are per-element tensors too). It refuses programs outside the fragment (lists, `Either`, `IREnumSum`, `IRIsPossible`, `IRApply`, `IRError`, `VAny` marginals, and **neural `ReadNN`** — M2b) with a diagnostic naming the offending construct. `VAny`/query-type-guard handling is stripped at the batched entry (`prepBatchedBody`), not represented. Runtime lib: `pythonLibBatched.py` (torch density/CDF twins, elementwise `T.__eq__`, `asmask`).
+
+Batched output is tested by the `BatchedPython` group (`End2EndTesting.batchedPythonTests`): every eligible corpus program's batched code is run over a batch of its query points in a **real torch interpreter** and compared per-element to the point's expected `.tst` value. It needs a torch-enabled Python — found via `NEST_TORCH_PYTHON` → a venv path → `python3` — and **skips with a visible note** if none imports torch, so a torch-less CI stays green. topK/marginal queries and batched `generate` are later milestones.
+
 ## Runtime Libraries
 
-Generated Python code depends on `pythonLib.py`; generated Julia code depends on `juliaLib.jl`. These provide runtime helpers for the transpiled inference functions.
+Generated Python code depends on `pythonLib.py` (scalar) or `pythonLibBatched.py` (batched mode, see above); generated Julia code depends on `juliaLib.jl`. These provide runtime helpers for the transpiled inference functions.
