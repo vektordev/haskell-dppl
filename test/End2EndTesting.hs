@@ -432,15 +432,15 @@ batchedPythonTests = do
       , testProperty "refusal-diagnostic" (once (ioProperty (return refusalProp))) ]
 
 -- | The batched backend must refuse a program outside the tensor fragment with
--- a diagnostic naming the offending construct. `coin` (whose main, `coin ++
--- coin`, builds a list) is a stable negative.
+-- a diagnostic naming the offending construct. `list` (whose main,
+-- `[Normal, Uniform*2.0]`, is genuinely list-valued) is a stable negative.
 refusalProp :: Property
 refusalProp = ioProperty $ do
-  p <- parseProgram "testCases/coin.ppl"
+  p <- parseProgram "testCases/list.ppl"
   return $ case compile defaultCompilerConfig{batched = True} p of
-    Left err -> counterexample ("coin failed to compile at all: " ++ err) False
+    Left err -> counterexample ("list failed to compile at all: " ++ err) False
     Right env -> case generateFunctionsBatched True env of
-      Right _  -> counterexample "batched mode accepted list-valued coin; expected a fragment refusal" False
+      Right _  -> counterexample "batched mode accepted list-valued program; expected a fragment refusal" False
       Left msg -> counterexample ("refusal diagnostic did not mention the tensor fragment: " ++ msg)
                     ("tensor fragment" `isInfixOf` msg && "list" `isInfixOf` msg)
 

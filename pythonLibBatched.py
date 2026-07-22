@@ -70,6 +70,18 @@ def nn_gather(out, idx):
     return out[..., idx_t]
   return out[torch.arange(out.shape[0]), idx_t]
 
+# --- enumeration membership -------------------------------------------------
+# `x in {vals}` as an elementwise [B] bool mask (e.g. "is the residual c - a a
+# valid digit?" in MNIST addition). x is evaluated once by the caller and passed
+# in; vals is the compile-time-unrolled enumeration.
+
+def is_member(x, vals):
+  xt = astensor(x)
+  mask = torch.zeros_like(xt, dtype=torch.bool)
+  for v in vals:
+    mask = mask | (xt == v)
+  return mask
+
 # --- tuple (structure-of-arrays leaf carrier) --------------------------------
 # Identical to pythonLib.T; a fixed tuple whose leaves are [B] tensors.
 

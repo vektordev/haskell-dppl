@@ -28,7 +28,7 @@ module SPLL.CodeGenPyTorchBatched
   ) where
 
 import SPLL.IntermediateRepresentation
-import SPLL.Lang.Types (CompilerError, GenericValue(..))
+import SPLL.Lang.Types (CompilerError, GenericValue(..), MultiValue(..))
 import SPLL.Lang.Lang (multiValueToValueList)
 import SPLL.CodeGenPyTorch (pyVal, envToLUT, replaceCalls)
 import Data.Char (toUpper)
@@ -278,7 +278,20 @@ emittable e = case e of
   IRApply{}      -> True   -- network call / cross-function decoder call (M2b)
   IRIndex{}      -> True   -- logit-vector slice or per-element gather (M2b)
   IREnumSum{}    -> True   -- enumeration sum, unrolled over the enum axis (M2b)
+  IRIsPossible mv _ -> scalarDiscreteMulti mv  -- membership over a scalar enum (M2b)
   _              -> False
+
+-- | A 'MultiValue' whose membership test is a flat scalar enumeration — the only
+-- 'IRIsPossible' shape the batched backend renders (an elementwise @x in {..}@
+-- mask). Composite membership (tuple/either/ADT structure) is outside the
+-- tensor fragment.
+scalarDiscreteMulti :: MultiValue -> Bool
+scalarDiscreteMulti (MultiDiscretes vs) = not (null vs) && all isScalarV vs
+  where isScalarV (VInt _)   = True
+        isScalarV (VBool _)  = True
+        isScalarV (VFloat _) = True
+        isScalarV _          = False
+scalarDiscreteMulti _ = False
 
 -- | A human-readable name for an unsupported node, for the refusal diagnostic.
 reason :: IRExpr -> String
@@ -382,6 +395,12 @@ batchedExpr (IRIndex l idx) =
 batchedExpr (IREnumSum name multiVal expr) =
   "sum(map((lambda " ++ name ++ ": " ++ batchedExpr expr ++ "), ["
     ++ intercalate ", " (map (pyVal . valueToIR) (multiValueToValueList multiVal)) ++ "]))"
+-- A membership test @x in {v0, ..}@ over a scalar enumeration (e.g. \"is the
+-- residual @c - a@ a valid digit?\" in MNIST addition). Rendered as an
+-- elementwise @[B]@ bool mask via 'is_member', which evaluates @x@ once.
+batchedExpr (IRIsPossible multiVal expr) =
+  "is_member(" ++ batchedExpr expr ++ ", ["
+    ++ intercalate ", " (map (pyVal . valueToIR) (multiValueToValueList multiVal)) ++ "])"
 batchedExpr (IRLetIn name val body) =
   "((" ++ name ++ " := " ++ batchedExpr val ++ "), " ++ batchedExpr body ++ ")[1]"
 batchedExpr e = error ("batched PyTorch codegen: unexpected node " ++ irPrintFlat e)
