@@ -279,6 +279,7 @@ emittable e = case e of
   IRIndex{}      -> True   -- logit-vector slice or per-element gather (M2b)
   IREnumSum{}    -> True   -- enumeration sum, unrolled over the enum axis (M2b)
   IRIsPossible mv _ -> scalarDiscreteMulti mv  -- membership over a scalar enum (M2b)
+  IRError{}      -> True   -- refusal arm, emitted as a selected-away NaN poison (M3)
   _              -> False
 
 -- | A 'MultiValue' whose membership test is a flat scalar enumeration — the only
@@ -312,7 +313,6 @@ reason e = case e of
   IRLambda{}      -> "inner lambda (IRLambda)"
   IRIsPossible{}  -> "membership check (IRIsPossible)"
   IRSample{}      -> "random sample (IRSample); batched generate is milestone M4"
-  IRError{}       -> "refusal/error arm (IRError); poison-masking is milestone M3"
   IRConformsTo{}  -> "type-conformance check (IRConformsTo)"
   IRConst VAny        -> "marginal ANY sentinel (IRConst VAny); marginal queries are outside the tensor fragment"
   IRConst (VAnyExcept _) -> "marginal ANY-except sentinel (IRConst VAnyExcept); marginal queries are outside the tensor fragment"
@@ -356,11 +356,16 @@ batchedExpr (IRVar name)  = name
 batchedExpr (IROp OpApprox l r) = "isclose(" ++ batchedExpr l ++ ", " ++ batchedExpr r ++ ")"
 batchedExpr (IROp OpAnd l r)    = "(" ++ batchedExpr l ++ " & " ++ batchedExpr r ++ ")"
 batchedExpr (IROp OpOr l r)     = "(" ++ batchedExpr l ++ " | " ++ batchedExpr r ++ ")"
+-- OpDiv is gradient-unsafe (division by zero in a masked-away arm yields NaN
+-- gradients); route it through the double-where 'safe_div' (design M3).
+batchedExpr (IROp OpDiv l r)    = "safe_div(" ++ batchedExpr l ++ ", " ++ batchedExpr r ++ ")"
 batchedExpr (IROp op l r)       = "(" ++ batchedExpr l ++ " " ++ batchedOp op ++ " " ++ batchedExpr r ++ ")"
 batchedExpr (IRUnaryOp OpNot e) = "torch.logical_not(asmask(" ++ batchedExpr e ++ "))"
 batchedExpr (IRUnaryOp OpNeg e) = "(-(" ++ batchedExpr e ++ "))"
 batchedExpr (IRUnaryOp OpExp e) = "torch.exp(" ++ batchedExpr e ++ ")"
-batchedExpr (IRUnaryOp OpLog e) = "torch.log(" ++ batchedExpr e ++ ")"
+-- OpLog is gradient-unsafe (log of a non-positive value in a masked-away arm
+-- yields NaN gradients); route it through the double-where 'safe_log' (M3).
+batchedExpr (IRUnaryOp OpLog e) = "safe_log(" ++ batchedExpr e ++ ")"
 batchedExpr (IRUnaryOp OpAbs e) = "torch.abs(" ++ batchedExpr e ++ ")"
 batchedExpr (IRUnaryOp OpSign e) = "sign(" ++ batchedExpr e ++ ")"
 batchedExpr (IRSelect c t f) = torchWhere c t f
@@ -403,6 +408,10 @@ batchedExpr (IRIsPossible multiVal expr) =
     ++ intercalate ", " (map (pyVal . valueToIR) (multiValueToValueList multiVal)) ++ "])"
 batchedExpr (IRLetIn name val body) =
   "((" ++ name ++ " := " ++ batchedExpr val ++ "), " ++ batchedExpr body ++ ")[1]"
+-- A refusal/error arm has no batched value; emit a NaN poison constant that the
+-- enclosing torch.where selects away (design M3). A poison that survives into
+-- the output shows up as NaN, caught by the value differential.
+batchedExpr (IRError _) = "poison()"
 batchedExpr e = error ("batched PyTorch codegen: unexpected node " ++ irPrintFlat e)
 
 -- | @torch.where@: the condition is coerced to a bool tensor ('asmask') so a

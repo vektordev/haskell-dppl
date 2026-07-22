@@ -429,7 +429,8 @@ batchedPythonTests = do
           return True ]
     Just py ->
       [ testProperty "batched-vs-expected" (once (runBatchedPython py eligible))
-      , testProperty "refusal-diagnostic" (once (ioProperty (return refusalProp))) ]
+      , testProperty "refusal-diagnostic" (once (ioProperty (return refusalProp)))
+      , testProperty "gradients-nan-free" (once (runBatchedGradients py eligible)) ]
 
 -- | The batched backend must refuse a program outside the tensor fragment with
 -- a diagnostic naming the offending construct. `list` (whose main,
@@ -635,6 +636,94 @@ batchedDriver eligible = unlines $
       in [ "    _cmp(" ++ show name ++ ", " ++ show method ++ ", " ++ call
            ++ ", " ++ pyFloatList expP ++ ", " ++ pyFloatList expD ++ ")" ]
     pyFloatList xs = "[" ++ intercalate ", " (map show xs) ++ "]"
+
+-- ===========================================================================
+-- M3: gradient hygiene (design pytorch-tensorizer)
+-- ===========================================================================
+
+-- | Acceptance test for M3's double-'where' masking: for every eligible program
+-- whose batched code contains a gradient-unsafe op wrapped by 'safe_log'/
+-- 'safe_div', feed a batch that straddles its guard boundary (the corpus points
+-- already include off-support samples like @p(-1.0)@) with @requires_grad@ on the
+-- sample, run backward, and assert the sample gradient is NaN-free. Without the
+-- masking, autograd flows @0 * inf = NaN@ through the untaken (log-of-negative /
+-- divide-by-zero) arm; the differential's value check alone would not catch it,
+-- since the forward values are already correct.
+--
+-- Restricted to non-neural programs with a plain-float sample batch (a
+-- differentiable leaf); the log-domain programs (@logNormal@ and friends) are the
+-- ones that actually exhibit the bug.
+runBatchedGradients :: FilePath -> [(String, String, [BatchGroup], [String])] -> Property
+runBatchedGradients py eligible
+  | null probes = ioProperty $ do
+      hPutStrLn stderr "BatchedPython gradients: no safe_log/safe_div programs found (skipped)."
+      return True
+  | otherwise = ioProperty $ do
+      hPutStrLn stderr ("BatchedPython gradients: " ++ show (length probes)
+                        ++ " unsafe-op programs, via " ++ py)
+      cwd <- getCurrentDirectory
+      let script = "import sys\nsys.path.insert(0, " ++ show cwd ++ ")\n" ++ gradientDriver probes
+      (code, out, err) <- withSystemTempFile "batched_grad.py" $ \tmpPath tmpHandle -> do
+        hPutStr tmpHandle script
+        hClose tmpHandle
+        readProcessWithExitCode py [tmpPath] ""
+      return $ case code of
+        ExitSuccess   -> counterexample (out ++ err) True
+        ExitFailure _ -> counterexample ("Batched PyTorch gradient check failed:\n" ++ out ++ err) False
+  where
+    probes = [ (name, src, xs, bgParamExprs g)
+             | (name, src, groups, netNames) <- eligible
+             , null netNames
+             , "safe_log(" `isInfixOf` src || "safe_div(" `isInfixOf` src
+             , g <- take 1 [gr | gr <- groups, not (bgIsCumul gr)]
+             , Just xs <- [floatBatchLit (bgSamples g)] ]
+
+-- | A batch tensor literal for a homogeneous list of /float/ samples, or
+-- 'Nothing' if any sample is not a plain float (so it is a differentiable leaf,
+-- not a bool/int/tuple).
+floatBatchLit :: [IRValue] -> Maybe String
+floatBatchLit vs
+  | not (null vs), all isFloatV vs =
+      Just ("torch.tensor([" ++ intercalate ", " [show f | VFloat f <- vs] ++ "])")
+  | otherwise = Nothing
+  where isFloatV (VFloat _) = True
+        isFloatV _          = False
+
+-- | The single Python script for the gradient check: run each program's
+-- @main.forward@ on a @requires_grad@ float batch, backward through the prob
+-- field, and record any NaN gradient.
+gradientDriver :: [(String, String, String, [String])] -> String
+gradientDriver probes = unlines $
+  [ "import torch, sys, traceback"
+  , "from pythonLibBatched import T"
+  , "failures = []"
+  ] ++ concatMap block probes ++
+  [ "if failures:"
+  , "    print('BATCHED GRADIENT FAILURES (' + str(len(failures)) + '):')"
+  , "    for f in failures: print('  ' + f)"
+  , "    sys.exit(1)"
+  , "print('BatchedPython gradients OK: " ++ show (length probes) ++ " programs')"
+  ]
+  where
+    block (name, src, xs, params) =
+      [ "try:"
+      , "    _ns = {}"
+      , "    exec(" ++ show src ++ ", _ns)"
+      , "    _main = _ns['main']"
+      , "    _x = (" ++ xs ++ ").requires_grad_(True)"
+      , "    _r = _main.forward(_x" ++ concatMap (", " ++) params ++ ")"
+      , "    _p = _r[0]"
+      -- A fully out-of-support batch would make _p constant (no grad path); the
+      -- corpus points always include an in-support sample, so guard defensively.
+      , "    if getattr(_p, 'requires_grad', False):"
+      , "        _p.sum().backward()"
+      , "        if _x.grad is None:"
+      , "            failures.append(" ++ show name ++ " + ': sample grad is None')"
+      , "        elif torch.isnan(_x.grad).any() or torch.isinf(_x.grad).any():"
+      , "            failures.append(" ++ show name ++ " + ': sample grad has NaN/Inf: ' + str(_x.grad.tolist()))"
+      , "except Exception as _e:"
+      , "    failures.append(" ++ show name ++ " + ': exception ' + repr(_e) + '\\n' + traceback.format_exc())"
+      ]
 
 -- | Programs whose .tst file carries a `slow` header (see TestCaseParser) are
 -- expensive enough (deep recursive plan enumeration, run through both the

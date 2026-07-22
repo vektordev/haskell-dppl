@@ -33,6 +33,41 @@ def cumulative_normal(x):
 def sign(x):
   return torch.sign(astensor(x))
 
+# --- gradient-safe unsafe ops (double-where masking) -------------------------
+# In batched mode both arms of a torch.where run over the whole batch, so an
+# unsafe op (log of a non-positive value, division by zero) in an *untaken* arm
+# produces a correct-but-discarded value yet a NaN *gradient*: autograd flows
+# through the untaken branch, and 0 (the where mask) * inf (the op's derivative
+# at the singularity) = NaN, which poisons the whole backward pass. The standard
+# fix is the "double where": mask the op's input to a harmless dummy inside its
+# safe domain, so its local derivative stays finite; the enclosing where then
+# discards the harmless value. The compiler emits these for every OpLog/OpDiv
+# (design pytorch-tensorizer, M3). On the taken (in-domain) elements the result
+# is identical to the plain op, so forward values are unchanged.
+
+def safe_log(x):
+  xt = astensor(x)
+  safe = xt > 0
+  return torch.where(safe, torch.log(torch.where(safe, xt, torch.ones_like(xt))),
+                     torch.full_like(xt, float('-inf')))
+
+def safe_div(a, b):
+  bt = astensor(b)
+  safe = bt != 0
+  return torch.where(safe, astensor(a) / torch.where(safe, bt, torch.ones_like(bt)),
+                     torch.full_like(bt, float('nan')))
+
+# --- poison: an IRError arm as a selected-away sentinel ----------------------
+# A refusal/error arm (IRError) has no batched value; it is emitted as a NaN
+# poison constant that the enclosing torch.where selects away on every element
+# that does not hit the error. NaN is a constant (no grad), so it never causes a
+# NaN gradient the way an unsafe op does; and a poison that *does* survive
+# selection into the output shows up as NaN there, caught by the value
+# differential (design pytorch-tensorizer, M3).
+
+def poison():
+  return torch.tensor(float('nan'))
+
 # --- elementwise predicates --------------------------------------------------
 
 def isclose(a, b):
