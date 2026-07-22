@@ -11,7 +11,6 @@ module SPLL.AutoNeural(
 , validateEncodeGaussian
 , makeTopLevelEncodeFun
 , neuralDecoderSuffix
-, isNeuralDecoderGroup
 ) where
 
 import SPLL.Lang.Types
@@ -20,7 +19,7 @@ import SPLL.Typing.RType
 import SPLL.Lang.Lang
 import StandardLibrary
 
-import Data.List (find, elemIndex, isPrefixOf, isSuffixOf, intercalate)
+import Data.List (find, elemIndex, isPrefixOf, intercalate)
 import Utils
 import Data.Maybe (fromJust, isJust)
 import Control.Applicative ((<|>))
@@ -62,17 +61,9 @@ resolvePartitionAnnotation registry ty tag = lookup ty registry <|> tag
 -- | The naming convention 'makeDecoderFunGroup' uses to mark a decoder's own
 -- 'IRFunGroup' (as opposed to the value-producing SPLL function that reads
 -- it): its group name is the network's declared name with this suffix
--- appended. Exported so a consumer that needs to recognise "is this group a
--- neural decoder" (e.g. batched mode's generate admission, which does not yet
--- support tensorising a decoder's own sampling logic) has one place to ask,
--- instead of re-deriving the convention from a bare string literal.
+-- appended.
 neuralDecoderSuffix :: String
 neuralDecoderSuffix = "_auto"
-
--- | Does this 'IRFunGroup' name belong to a neural decoder (built by
--- 'makeDecoderFunGroup'), as opposed to a regular SPLL function?
-isNeuralDecoderGroup :: String -> Bool
-isNeuralDecoderGroup = (neuralDecoderSuffix `isSuffixOf`)
 
 -- Decoder: Symbol -> target. Generates sampling and probability reader functions for NN1.
 -- It hosts no encode function (the encode lives on the value-producing SPLL function).

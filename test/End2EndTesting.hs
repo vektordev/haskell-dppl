@@ -14,7 +14,7 @@ import Data.Function (on)
 import Control.Monad.Random
 import System.Random (mkStdGen)
 import Data.Maybe
-import Data.List (intercalate, nub, isInfixOf, transpose)
+import Data.List (intercalate, nub, isInfixOf, transpose, zip4)
 import Data.Text (replace, pack, unpack)
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
@@ -736,41 +736,51 @@ gradientDriver probes = unlines $
 -- M4: batched generate (design pytorch-tensorizer)
 -- ===========================================================================
 
--- | Acceptance test for M4 (batched generate). Scope is non-neural, matching
--- M2a -- neural decoder sampling is refused with a diagnostic at compile time
--- (see 'SPLL.CodeGenPyTorchBatched.renderGen') and left to a follow-on
--- milestone.
+-- | Acceptance test for M4 (batched generate), extended to neural (task
+-- neural-generate-parity) to cover decoder-own sampling (categorical/Gaussian)
+-- and cross-decoder composition (e.g. MNIST addition).
 --
 -- There is no per-draw ground truth for a stochastic 'generate' (unlike
 -- forward/integrate, which have an exact expected value at each query point),
 -- so the differential instead mirrors Spec.hs's existing @testSamplingProb@
--- idiom: draw a large batch via @main.generate(_batchN)@ in a real torch
--- interpreter, then estimate an empirical density in an epsilon-window around
--- each of the program's *existing* prob query points (the same
--- @.tst@-declared ground truth the value differential already checks) and
--- compare to the declared density within 'samplingTolerance'. This reuses
--- ground truth already in the corpus (no second sampling distribution to
--- generate or compare against) and is one vectorized torch pass per program
--- rather than one Python call per sample.
+-- idiom: draw a large batch, then estimate an empirical density in an
+-- epsilon-window around each of the program's *existing* prob query points
+-- (the same @.tst@-declared ground truth the value differential already
+-- checks) and compare to the declared density within 'samplingTolerance'.
+-- This reuses ground truth already in the corpus (no second sampling
+-- distribution to generate or compare against) and is one vectorized torch
+-- pass per point rather than one Python call per sample.
+--
+-- Non-neural programs draw one shared @main.generate(_batchN)@ batch and
+-- check it against every point (the distribution does not depend on the
+-- point). Neural programs' distribution *does* depend on the point (each
+-- point supplies its own decoder input symbol, per the corpus's mode-2
+-- verbatim-logit convention), so each point gets its own
+-- @main.generate(sym, _batchN)@ call: the point's row is sliced out of the
+-- group's already-batched symbol tensor ('bgParamExprs', the same per-point
+-- @[B, n]@ column 'batchSymParamCols' builds for forward/integrate) and
+-- broadcast to a fresh @[N, n]@ batch via 'expand'.
 --
 -- Restricted to query points whose sample is a bare float/int/bool (not a
 -- tuple): a tuple-valued window density would need per-leaf volume handling
 -- the corpus's existing (sample, dim) pairs don't disentangle. A program
--- whose generate needs more than the batch-size parameter (e.g. a ThetaTree
--- test override, as in @gaussListTheta@/@lambdaThetaInverse@) is skipped
--- dynamically in the driver (arity-checked via 'inspect.signature'), since
--- Haskell-side arity bookkeeping would only duplicate what the emitted
--- signature already says.
+-- whose generate needs a different argument count than expected (e.g. a
+-- ThetaTree test override, as in @gaussListTheta@/@lambdaThetaInverse@) is
+-- skipped dynamically in the driver (arity-checked via
+-- @inspect.signature@), since Haskell-side arity bookkeeping would only
+-- duplicate what the emitted signature already says.
 runBatchedGenerate :: FilePath -> [(String, String, [BatchGroup], [String])] -> Property
 runBatchedGenerate _ [] = counterexample "BatchedPython generate: no eligible corpus programs found" False
 runBatchedGenerate py eligible
-  | null probes = ioProperty $ do
-      hPutStrLn stderr "BatchedPython generate: no eligible non-neural programs with a compiled generate found (skipped)."
+  | null nonNeuralProbes && null neuralProbes = ioProperty $ do
+      hPutStrLn stderr "BatchedPython generate: no eligible programs with a compiled generate found (skipped)."
       return True
   | otherwise = ioProperty $ do
-      hPutStrLn stderr ("BatchedPython generate: " ++ show (length probes) ++ " programs, via " ++ py)
+      hPutStrLn stderr ("BatchedPython generate: " ++ show (length nonNeuralProbes) ++ " non-neural + "
+                        ++ show (length neuralProbes) ++ " neural programs, via " ++ py)
       cwd <- getCurrentDirectory
-      let script = "import sys\nsys.path.insert(0, " ++ show cwd ++ ")\n" ++ generateDriver probes
+      let script = "import sys\nsys.path.insert(0, " ++ show cwd ++ ")\n"
+                 ++ generateDriver nonNeuralProbes neuralProbes
       (code, out, err) <- withSystemTempFile "batched_generate.py" $ \tmpPath tmpHandle -> do
         hPutStr tmpHandle script
         hClose tmpHandle
@@ -779,13 +789,20 @@ runBatchedGenerate py eligible
         ExitSuccess   -> counterexample (out ++ err) True
         ExitFailure _ -> counterexample ("Batched PyTorch generate differential failed:\n" ++ out ++ err) False
   where
-    probes = [ (name, src, points)
+    nonNeuralProbes = [ (name, src, points)
              | (name, src, groups, netNames) <- eligible
              , null netNames
-             , not ("NotImplementedError" `isInfixOf` src)
              , let points = [ (pyVal s, ep, ed)
                             | g <- groups, not (bgIsCumul g)
                             , (s, ep, ed) <- zip3 (bgSamples g) (bgExpProb g) (bgExpDim g)
+                            , isScalarSample s ]
+             , not (null points) ]
+    neuralProbes = [ (name, src, netNames, bgParamExprs g, points)
+             | (name, src, groups, netNames) <- eligible
+             , not (null netNames)
+             , (g:_) <- [[gr | gr <- groups, not (bgIsCumul gr)]]
+             , let points = [ (pyVal s, ep, ed, i)
+                            | (i, s, ep, ed) <- zip4 [0 :: Int ..] (bgSamples g) (bgExpProb g) (bgExpDim g)
                             , isScalarSample s ]
              , not (null points) ]
 
@@ -794,13 +811,16 @@ runBatchedGenerate py eligible
 isScalarSample :: IRValue -> Bool
 isScalarSample v = isNum v || isBoolV v
 
--- | The single Python script for the generate check: for each program, draw
--- one large batch and test it against every query point's epsilon-window
--- density estimate (mirrors Spec.hs's @testSamplingProb@, single-shot rather
--- than retried -- the batch size is fixed large enough, and the seed is
--- pinned, to keep this non-flaky).
-generateDriver :: [(String, String, [(String, Double, Double)])] -> String
-generateDriver probes = unlines $
+-- | The single Python script for the generate check: for each non-neural
+-- program, draw one shared large batch and test it against every query
+-- point's epsilon-window density estimate; for each neural program, draw a
+-- fresh per-point batch (the point's own decoder symbol, repeated) and test
+-- that point alone. Single-shot rather than retried -- the batch size is
+-- fixed large enough, and the seed is pinned, to keep this non-flaky.
+generateDriver :: [(String, String, [(String, Double, Double)])]
+               -> [(String, String, [String], [String], [(String, Double, Double, Int)])]
+               -> String
+generateDriver nonNeuralProbes neuralProbes = unlines $
   [ "import torch, sys, traceback, inspect"
   , "from pythonLibBatched import T"
   , "torch.manual_seed(1234)"
@@ -809,14 +829,14 @@ generateDriver probes = unlines $
   , "failures = []"
   , "checked = 0"
   , "skipped = 0"
-  ] ++ concatMap block probes ++
+  ] ++ concatMap block nonNeuralProbes ++ concatMap neuralBlock neuralProbes ++
   [ "if checked == 0:"
   , "    failures.append('no program actually had its generate density checked (all skipped)')"
   , "if failures:"
   , "    print('BATCHED GENERATE FAILURES (' + str(len(failures)) + '):')"
   , "    for f in failures: print('  ' + f)"
   , "    sys.exit(1)"
-  , "print('BatchedPython generate OK: ' + str(checked) + ' programs checked, ' + str(skipped) + ' skipped (non-nullary generate)')"
+  , "print('BatchedPython generate OK: ' + str(checked) + ' checks, ' + str(skipped) + ' skipped (arity mismatch))')"
   ]
   where
     block (name, src, points) =
@@ -833,11 +853,46 @@ generateDriver probes = unlines $
       , "        _btd = _bt.double()"
       , "        checked += 1"
       ] ++
-      concatMap (pointCheck name) points ++
+      concatMap (pointCheck name "_btd") points ++
       [ "except Exception as _e:"
       , "    failures.append(" ++ show name ++ " + ': exception ' + repr(_e) + '\\n' + traceback.format_exc())"
       ]
-    pointCheck name (xExpr, expProb, expDim) =
+    -- Each point supplies its own decoder symbol (a row of the group's [B, n]
+    -- symbol tensor, per argument position), so it needs its own generate call
+    -- and its own arity check (the signature is the same for every point of a
+    -- program, but checking it once per point keeps this block symmetric with
+    -- 'block' and costs nothing at this scale).
+    neuralBlock (name, src, netNames, paramExprs, points) =
+      [ "try:"
+      , "    _ns = {}"
+      , "    exec(" ++ show src ++ ", _ns)"
+      ] ++
+      [ "    _ns[" ++ show nm ++ "] = (lambda s: s)" | nm <- netNames ] ++
+      [ "    _main = _ns['main']"
+      , "    _sig = inspect.signature(_main.generate)"
+      , "    if len(_sig.parameters) != " ++ show (length paramExprs + 1) ++ ":"
+      , "        skipped += 1"
+      , "    else:"
+      ] ++
+      concatMap (neuralPointCheck name paramExprs) points ++
+      [ "except Exception as _e:"
+      , "    failures.append(" ++ show name ++ " + ': exception ' + repr(_e) + '\\n' + traceback.format_exc())"
+      ]
+    neuralPointCheck name paramExprs (xExpr, expProb, expDim, rowIx) =
+      let argVar j = "_sym" ++ show rowIx ++ "_" ++ show j
+          argSetup = [ "        " ++ argVar j ++ " = (" ++ e ++ ")[" ++ show rowIx ++ ":" ++ show (rowIx + 1) ++ "].expand(N, -1)"
+                     | (j, e) <- zip [0 :: Int ..] paramExprs ]
+          callArgs = intercalate ", " (map argVar [0 .. length paramExprs - 1] ++ ["N"])
+          batchVar = "_batch" ++ show rowIx
+          batchVarD = batchVar ++ "d"
+      in argSetup ++
+         [ "        " ++ batchVar ++ " = _main.generate(" ++ callArgs ++ ")"
+         , "        " ++ batchVarD ++ " = (" ++ batchVar ++ " if torch.is_tensor(" ++ batchVar
+             ++ ") else torch.as_tensor(float(" ++ batchVar ++ "))).double()"
+         , "        checked += 1"
+         ] ++
+         pointCheck name batchVarD (xExpr, expProb, expDim)
+    pointCheck name batchVarD (xExpr, expProb, expDim) =
       -- A tighter window (Spec.hs's testSamplingProb uses 1e-9, comparing
       -- interpreter Doubles) is unusable here: torch.rand/randn default to
       -- float32, so a discrete atom threaded through a torch.where alongside a
@@ -849,7 +904,7 @@ generateDriver probes = unlines $
       -- covering float32 rounding.
       let eps = if expDim == 0 then 1e-4 else 0.05 :: Double
       in [ "        _x = float(" ++ xExpr ++ ")"
-         , "        _inside = (torch.abs(_btd - _x) <= " ++ show (eps / 2.0) ++ ").double().mean().item()"
+         , "        _inside = (torch.abs(" ++ batchVarD ++ " - _x) <= " ++ show (eps / 2.0) ++ ").double().mean().item()"
          , "        _est = _inside / (" ++ show eps ++ " ** " ++ show expDim ++ ")"
          , "        if abs(_est - " ++ show expProb ++ ") > TOL:"
          , "            failures.append(" ++ show name ++ " + ': generate density at ' + str(_x) + ' estimated ' + str(_est) + ' != ' + str(" ++ show expProb ++ "))"

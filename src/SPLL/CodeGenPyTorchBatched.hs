@@ -31,7 +31,6 @@ import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types (CompilerError, GenericValue(..), MultiValue(..))
 import SPLL.Lang.Lang (multiValueToValueList)
 import SPLL.CodeGenPyTorch (pyVal, envToLUT, replaceCalls)
-import SPLL.AutoNeural (isNeuralDecoderGroup)
 import Data.Char (toUpper)
 import Data.List (intercalate, isSuffixOf)
 import Data.Maybe (fromMaybe)
@@ -39,15 +38,23 @@ import Control.Monad (foldM)
 
 -- | Entry point mirroring 'SPLL.CodeGenPyTorch.generateFunctions', but for the
 -- batched backend and fallible: it runs the fragment guard over every emitted
--- prob/integ body and returns a refusal diagnostic ('Left') if any is outside
--- the tensor fragment. The 'Bool' is the same generate-boilerplate flag.
+-- prob/integ/generate body and returns a refusal diagnostic ('Left') if any is
+-- outside the tensor fragment. The 'Bool' is the same generate-boilerplate
+-- flag.
 --
--- Generate (milestone M4) is best-effort /per class/ rather than folded into
--- this fallible pipeline: a group whose generate body is outside the (batched)
--- fragment -- recursive, or reaching a neural decoder's sampling logic, which
--- is its own follow-on milestone -- gets a runtime-raising stub instead of
--- aborting the whole compile. Only forward/integrate ineligibility is still a
--- hard 'Left', matching M1-M3.
+-- Generate ineligibility (recursive, or a still-unsupported shape) is a hard
+-- 'Left' here, exactly like forward/integrate (task neural-generate-parity).
+-- M4 originally made a single class's generate ineligibility degrade to a
+-- runtime-raising stub rather than aborting the whole compile, because every
+-- neural decoder group unconditionally had a 'genFun' and batched generate did
+-- not yet support any of them -- a hard failure would have broken batched
+-- compilation of every neural corpus program the moment generate was
+-- attempted at all. Now that neural decoder generate (categorical/Gaussian
+-- sampling) is supported for the non-ADT/non-Either shapes, that blanket
+-- exclusion is gone and the remaining ineligible shapes (recursion; Either/ADT
+-- decoder output, which already fails to batch-compile via forward/integrate
+-- for the same structural reason) are rare enough that a hard refusal is the
+-- more honest contract, matching forward/integrate.
 generateFunctionsBatched :: Bool -> IREnv -> Either CompilerError [String]
 generateFunctionsBatched genBoil env@(IREnv funcs adts consts)
   | not (null adts) =
@@ -76,15 +83,17 @@ generateFunctionsBatched genBoil env@(IREnv funcs adts consts)
              , "from torch.nn import Module", "" ] ++ body
         else body
 
--- | Emit one function group's class: the prob ('forward') and integ
--- ('integrate') methods (unchanged, still a hard fragment refusal), plus a
--- best-effort generate method (M4, see 'renderGen').
+-- | Emit one function group's class: the prob ('forward'), integ
+-- ('integrate'), and generate methods -- all three a hard fragment refusal
+-- (task neural-generate-parity: generate's ineligibility used to degrade to a
+-- runtime-raising stub per class, M4; it is now a compile-time refusal like
+-- forward/integrate, see 'renderGen').
 generateClass :: [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> IRFunGroup -> Either CompilerError [String]
 generateClass lut genArities genMethods (IRFunGroup name gen prob integ _ _ doc) = do
   p <- maybe (Right []) (generateMethod lut "forward" name) prob
   i <- maybe (Right []) (generateMethod lut "integrate" name) integ
-  let g = maybe [] (renderGen lut genArities genMethods name) gen
-      commentLines = map ("# " ++) (lines doc)
+  g <- maybe (Right []) (renderGen lut genArities genMethods name) gen
+  let commentLines = map ("# " ++) (lines doc)
       initLine = "class " ++ onHead toUpper name ++ "(Module):"
       -- A group with none of forward/integrate/generate (e.g. a tuple
       -- 'component' group carrying only a normal function, which batched mode
@@ -122,17 +131,33 @@ onHead f (x:xs) = f x : xs
 onHead _ []     = []
 
 -- ---------------------------------------------------------------------------
--- Generate (milestone M4): rand()/randn() take a batch shape, and a random
--- `if` becomes a select over per-element draws -- both arms of a select are
--- drawn independently for the whole batch and combined by the same mask
--- machinery prob/integ already use, which is exactly as correct here: each
--- element ends up with one arm's *fresh, independent* draw, so the result is
--- the same mixture distribution as the scalar generate, just with (harmless)
--- extra randomness drawn for the untaken arm.
+-- Generate (milestone M4, extended by task neural-generate-parity):
+-- rand()/randn() take a batch shape, and a random `if` becomes a select over
+-- per-element draws -- both arms of a select are drawn independently for the
+-- whole batch and combined by the same mask machinery prob/integ already use,
+-- which is exactly as correct here: each element ends up with one arm's
+-- *fresh, independent* draw, so the result is the same mixture distribution
+-- as the scalar generate, just with (harmless) extra randomness drawn for the
+-- untaken arm.
 --
--- Unlike forward/integrate, an ineligible generate body does not abort the
--- whole compile -- see 'generateFunctionsBatched' -- it degrades to a
--- runtime-raising stub for that one class, named by 'renderGen'.
+-- A neural decoder's own generate body ('SPLL.AutoNeural.makeGenRec') draws
+-- from the decoder's output distribution: a sequential weighted lottery for a
+-- discrete/categorical leaf (nested 'IRIf'/'IRSample' 'IRUniform' comparisons
+-- against running normalised weight -- mathematically a categorical draw, the
+-- same shape 'lottery' already builds for the *scalar* backend, not a fresh
+-- policy invented here) and a Gaussian reparameterisation
+-- (@mu + sample*sigma@, 'IRSample' 'IRNormal') for a continuous leaf, composed
+-- over 'IRTCons' for tuples. None of that needed new IR nodes or new
+-- 'pythonLibBatched.py' primitives: every node 'makeGenRec' emits was already
+-- in the tensor fragment ('emittable' below), so removing the blanket
+-- @isNeuralDecoderGroup@ exclusion this milestone had is sufficient. What
+-- remains excluded -- 'EitherPlan' (@IRLeft@/@IRRight@ construction has no
+-- tensor representation) and 'ADTPlan' (ADTs are refused for the whole batched
+-- compile already, see 'generateFunctionsBatched') -- is refused by the same
+-- 'batchedGuard' forward/integrate already goes through, which is no loss:
+-- a decoder with an Either/ADT-shaped output already fails to batch-compile at
+-- all, since its *probability* reader ('SPLL.AutoNeural.makeProb') hits the
+-- same excluded constructs.
 -- ---------------------------------------------------------------------------
 
 -- | The batch-size parameter threaded through every generate method and every
@@ -143,65 +168,33 @@ onHead _ []     = []
 batchNVar :: String
 batchNVar = "_batchN"
 
--- | Render one group's generate method: a real batched @def generate@ when its
--- body is eligible, or a stub that raises 'NotImplementedError' naming the
--- reason when it is not. Never fails -- ineligibility here only removes one
--- class's generate capability, it does not touch forward/integrate.
+-- | Render one group's generate method as a real batched @def generate@, or
+-- refuse the whole compile ('Left') if it is not eligible.
 --
--- Three shapes are excluded, each with its own diagnostic:
+-- Two shapes are excluded, each with its own diagnostic:
 --
---   1. Neural decoder groups (@groupName@ ends in @_auto@, the 'SPLL.AutoNeural'
---      convention): their generate body samples from the decoder's own output
---      distribution (categorical / Gaussian reparameterisation), which is
---      genuinely new machinery, out of scope for this milestone (design
---      pytorch-tensorizer M4; a follow-on is filed for neural generate
---      parity). Checked structurally by name, not by trying and failing the
---      fragment guard: 'IRApply' is broadly emittable (M2b needs it for
---      network/decoder calls), so the guard alone would not reliably catch
---      this shape.
---   2. Recursive generate (a cycle in the generate-only call graph,
+--   1. Recursive generate (a cycle in the generate-only call graph,
 --      'hasGenCycle'): both-arm-eager select semantics would recurse forever
 --      at *runtime* (unlike prob/integ, this is not merely a compile-time
 --      concern -- Python would stack-overflow actually calling it).
---   3. Any other construct outside the tensor fragment ('batchedGuard', same
---      as forward/integrate): lists, ADTs, Either dispatch, etc.
---
--- A stubbed callee is still a valid call target for a *caller* whose own
--- generate is otherwise eligible (e.g. @main@ calling a neural decoder's
--- generate): the caller's code is still emitted, and simply raises at runtime
--- when execution actually reaches the unsupported call -- the diagnostic
--- surfaces exactly where the missing capability is needed, without requiring
--- whole-program reachability analysis here.
-renderGen :: [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> String -> IRFunDecl -> [String]
+--   2. Any other construct outside the tensor fragment ('batchedGuard', same
+--      as forward/integrate): lists, ADTs, Either dispatch (including a
+--      neural decoder's own 'EitherPlan'/'ADTPlan' output shape -- see the
+--      header comment above), etc.
+renderGen :: [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> String -> IRFunDecl -> Either CompilerError [String]
 renderGen lut genArities genRaw groupName (expr0, doc)
-  | isNeuralDecoderGroup groupName =
-      stubGen doc $ "batched mode: " ++ groupName ++ "'s generate samples from a neural "
-        ++ "decoder's own output distribution, which batched generate does not support yet "
-        ++ "(design pytorch-tensorizer, milestone M4; neural generate parity is a follow-on)."
   | hasGenCycle genRaw (groupName ++ "_gen") =
-      stubGen doc $ "batched mode: " ++ groupName ++ "'s generate function recurses (directly "
+      Left $ "batched mode: " ++ groupName ++ "'s generate function recurses (directly "
         ++ "or through a call chain); data-dependent recursion is outside the tensor fragment "
         ++ "(design pytorch-tensorizer) and both-arm-eager select semantics would not terminate."
   | otherwise =
       let expr = irMap (attachBatchCall genArities . replaceCalls lut) expr0
           (args, body) = unwrapLambdas (prepBatchedBody expr)
-      in case batchedGuard groupName "generate" body of
-           Left err -> stubGen doc err
-           Right () ->
-             let l1 = "def generate(self" ++ concatMap (", " ++) (args ++ [batchNVar]) ++ "):"
-                 docLines = map ("# " ++) (lines doc)
-             in docLines ++ [l1] ++ indentOnce (batchedBlock body)
-
--- | A generate method that always raises, for a group whose generate is
--- outside batched mode's (current) capability. Accepts any call signature
--- (@*args, **kwargs@) so a caller threading the batch-size parameter through a
--- stubbed callee doesn't itself fail with a mismatched-arity 'TypeError'
--- before reaching the intended diagnostic.
-stubGen :: String -> String -> [String]
-stubGen doc msg =
-  map ("# " ++) (lines doc)
-  ++ ["def generate(self, *args, **kwargs):"]
-  ++ indentOnce ["raise NotImplementedError(" ++ show msg ++ ")"]
+      in do
+           () <- batchedGuard groupName "generate" body
+           let l1 = "def generate(self" ++ concatMap (", " ++) (args ++ [batchNVar]) ++ "):"
+               docLines = map ("# " ++) (lines doc)
+           Right (docLines ++ [l1] ++ indentOnce (batchedBlock body))
 
 -- | Is there a cycle reachable from @root@ in the call graph restricted to
 -- generate methods (@_gen@-suffixed names only, mirroring 'checkCallGraph's
