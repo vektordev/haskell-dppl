@@ -43,18 +43,26 @@ import Control.Monad (foldM)
 -- flag.
 --
 -- Generate ineligibility (recursive, or a still-unsupported shape) is a hard
--- 'Left' here, exactly like forward/integrate (task neural-generate-parity).
--- M4 originally made a single class's generate ineligibility degrade to a
--- runtime-raising stub rather than aborting the whole compile, because every
--- neural decoder group unconditionally had a 'genFun' and batched generate did
--- not yet support any of them -- a hard failure would have broken batched
--- compilation of every neural corpus program the moment generate was
--- attempted at all. Now that neural decoder generate (categorical/Gaussian
--- sampling) is supported for the non-ADT/non-Either shapes, that blanket
--- exclusion is gone and the remaining ineligible shapes (recursion; Either/ADT
--- decoder output, which already fails to batch-compile via forward/integrate
--- for the same structural reason) are rare enough that a hard refusal is the
--- more honest contract, matching forward/integrate.
+-- 'Left' here, exactly like forward/integrate (task neural-generate-parity,
+-- an explicit choice over keeping M4's per-class stub now that neural decoder
+-- generate is usually eligible). M4 originally made a single class's generate
+-- ineligibility degrade to a runtime-raising stub rather than aborting the
+-- whole compile, because every neural decoder group unconditionally had a
+-- 'genFun' and batched generate did not yet support any of them -- a hard
+-- failure would have broken batched compilation of every neural corpus
+-- program the moment generate was attempted at all.
+--
+-- This has one known, accepted cost in the current corpus: @twiceApplication@
+-- (@main = (\f -> f (f Uniform)) (\x -> x * 2.0)@, a nullary higher-order
+-- application) has forward/integrate bodies the optimizer beta-reduces down
+-- to plain arithmetic, but a *generate* body that still contains a literal,
+-- un-reduced 'IRLambda'/'IRApply' -- unrelated to neural decoders, and not
+-- something this task's fragment additions cover. Under M4's stub it still
+-- contributed forward/integrate coverage to the batched differential; under
+-- this hard rule the whole program is refused, dropping it out of batched
+-- mode entirely (measured: 92→91 eligible corpus programs, 461→457 points).
+-- Accepted per Viktor (2026-07-22) as the honest cost of a hard, uniform
+-- contract, rather than special-casing the stub back in for this one shape.
 generateFunctionsBatched :: Bool -> IREnv -> Either CompilerError [String]
 generateFunctionsBatched genBoil env@(IREnv funcs adts consts)
   | not (null adts) =
