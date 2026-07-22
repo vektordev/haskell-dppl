@@ -11,6 +11,7 @@ import SPLL.Prelude (runProb, runInteg, runGen, compile)
 import Control.Monad.Random (evalRandIO)
 import qualified SPLL.CodeGenJulia
 import qualified SPLL.CodeGenPyTorch
+import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
 import Data.List (intercalate)
 import Text.Megaparsec (runParser)
 import Control.Monad.State (runStateT)
@@ -239,7 +240,9 @@ codeGenToLang :: Language -> Bool -> CompilerConfig -> Program -> Either Compile
 codeGenToLang lang trunc conf prog = do
   compiled <- compile conf prog
   case lang of
-    Python -> Right $ intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions (not trunc) compiled)
+    Python
+      | batched conf -> intercalate "\n" <$> generateFunctionsBatched (not trunc) compiled
+      | otherwise    -> Right $ intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions (not trunc) compiled)
     Julia -> Right $ intercalate "\n" (SPLL.CodeGenJulia.generateFunctions compiled)
 
 writeOutputFile :: String -> String -> IO()
