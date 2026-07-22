@@ -132,17 +132,42 @@ foldConst = irMap f
     f (IRIf     (IRConst (VBool False)) _ e) = e
     f e = e
 
--- | Push a select whose arms are tuple constructions into per-component selects,
--- so @torch.where@ only ever selects scalar tensors:
+-- | Push a /tuple-valued/ select into per-component selects, so @torch.where@
+-- only ever selects scalar tensors:
 -- @select c (T a b) (T x y)  ->  T (select c a x) (select c b y)@.
+--
+-- An arm is tuple-valued when, after peeling its @let@-spine, it is an
+-- 'IRTCons' (the whole-result guard @select c (let … in T p (T d i)) (T 0 …)@
+-- is exactly this shape). Projection is pushed through the let-spine
+-- ('projTuple'), so each component select carries the bindings it needs; the
+-- optimizer's own field-splitting already duplicates such spines, so this only
+-- mirrors that.
 distributeSelects :: IRExpr -> IRExpr
 distributeSelects = irMap d
   where
-    d (IRSelect c (IRTCons a b) (IRTCons x y)) =
-      IRTCons (distributeSelects (IRSelect c a x)) (distributeSelects (IRSelect c b y))
-    d (IRIf c (IRTCons a b) (IRTCons x y)) =
-      IRTCons (distributeSelects (IRIf c a x)) (distributeSelects (IRIf c b y))
+    d (IRSelect c t f) | tupleValued t || tupleValued f =
+      IRTCons (distributeSelects (IRSelect c (projTuple True t)  (projTuple True f)))
+              (distributeSelects (IRSelect c (projTuple False t) (projTuple False f)))
+    d (IRIf c t f) | tupleValued t || tupleValued f =
+      IRTCons (distributeSelects (IRIf c (projTuple True t)  (projTuple True f)))
+              (distributeSelects (IRIf c (projTuple False t) (projTuple False f)))
     d e = e
+
+-- | Does this expression evaluate to a tuple (an 'IRTCons' under its let-spine)?
+tupleValued :: IRExpr -> Bool
+tupleValued (IRLetIn _ _ b) = tupleValued b
+tupleValued (IRTCons _ _)   = True
+tupleValued _               = False
+
+-- | Project the first (@fst=True@) or second component out of a tuple-valued
+-- expression, pushing the projection through the let-spine so bindings stay in
+-- scope. Falls back to 'IRTFst'/'IRTSnd' for a non-literal tuple.
+projTuple :: Bool -> IRExpr -> IRExpr
+projTuple fstp (IRLetIn n v b) = IRLetIn n v (projTuple fstp b)
+projTuple True  (IRTCons a _)  = a
+projTuple False (IRTCons _ b)  = b
+projTuple True  e              = IRTFst e
+projTuple False e              = IRTSnd e
 
 -- ---------------------------------------------------------------------------
 -- Fragment guard
@@ -247,7 +272,7 @@ batchedExpr (IROp OpApprox l r) = "isclose(" ++ batchedExpr l ++ ", " ++ batched
 batchedExpr (IROp OpAnd l r)    = "(" ++ batchedExpr l ++ " & " ++ batchedExpr r ++ ")"
 batchedExpr (IROp OpOr l r)     = "(" ++ batchedExpr l ++ " | " ++ batchedExpr r ++ ")"
 batchedExpr (IROp op l r)       = "(" ++ batchedExpr l ++ " " ++ batchedOp op ++ " " ++ batchedExpr r ++ ")"
-batchedExpr (IRUnaryOp OpNot e) = "torch.logical_not(" ++ batchedExpr e ++ ")"
+batchedExpr (IRUnaryOp OpNot e) = "torch.logical_not(asmask(" ++ batchedExpr e ++ "))"
 batchedExpr (IRUnaryOp OpNeg e) = "(-(" ++ batchedExpr e ++ "))"
 batchedExpr (IRUnaryOp OpExp e) = "torch.exp(" ++ batchedExpr e ++ ")"
 batchedExpr (IRUnaryOp OpLog e) = "torch.log(" ++ batchedExpr e ++ ")"

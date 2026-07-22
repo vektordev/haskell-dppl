@@ -65,6 +65,14 @@ class T:
     self.t1 = t1
     self.t2 = t2
 
+  def __eq__(self, other):
+    # Structure-of-arrays tuple equality is elementwise: two batches of tuples
+    # are equal per element iff every leaf is. Returns a [B] bool tensor (the
+    # leaves recurse through this method for nested tuples).
+    if not isinstance(other, T):
+      return NotImplemented
+    return (self.t1 == other.t1) & (self.t2 == other.t2)
+
   def __getitem__(self, index):
     if index == 0:
       return self.t1

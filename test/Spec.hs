@@ -27,7 +27,7 @@ import TestModalityInfer (modalityInferTests)
 import TestDeterminism (determinismTests)
 import TestEncodeProperties (encodeTests, encodeRoundtripTests)
 import TestShowcase (showcaseTests)
-import End2EndTesting (end2endTests, slowEnd2EndTests, getAllTestFiles, selectPassDifferentialTests)
+import End2EndTesting (end2endTests, slowEnd2EndTests, getAllTestFiles, selectPassDifferentialTests, batchedPythonTests)
 import TestFuzz (fuzzTests, superSlowFuzzTests)
 import TestCaseParser (parseProgram, parseTestCases, TestCase(..), Backend(..))
 import TestTolerances (probTolerance, reasonablyCloseTolerance, samplingTolerance)
@@ -584,6 +584,7 @@ main = do
   if isNothing hideSuccesses then setEnv "TASTY_HIDE_SUCCESSES" "true" else return ()
   e2e <- end2endTests
   selectDiff <- selectPassDifferentialTests
+  batchedPy <- batchedPythonTests
   detTests <- determinismTests
   showcase <- showcaseTests
   corpusPool <- loadCorpusCases
@@ -616,6 +617,7 @@ main = do
     , showcase
     , e2e
     , selectDiff
+    , batchedPy
     , slow
     , superSlow
     ]

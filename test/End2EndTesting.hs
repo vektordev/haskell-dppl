@@ -2,16 +2,19 @@
 
 module End2EndTesting where
 
-import System.Directory (listDirectory, getCurrentDirectory)
+import System.Directory (listDirectory, getCurrentDirectory, doesFileExist)
 import System.FilePath (stripExtension, isExtensionOf, takeBaseName)
 import System.IO.Temp (withSystemTempFile)
-import System.IO (hPutStr, hClose)
+import System.IO (hPutStr, hClose, hPutStrLn, stderr)
+import System.Environment (lookupEnv)
 import System.Process
 import System.Exit
+import Data.List (groupBy)
+import Data.Function (on)
 import Control.Monad.Random
 import System.Random (mkStdGen)
 import Data.Maybe
-import Data.List (intercalate, nub)
+import Data.List (intercalate, nub, isInfixOf)
 import Data.Text (replace, pack, unpack)
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
@@ -20,6 +23,7 @@ import SPLL.Parser (tryParseProgram, pValue)
 import qualified Text.Megaparsec.Char.Lexer as L
 import SPLL.CodeGenJulia
 import SPLL.CodeGenPyTorch
+import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
 import TestCaseParser
 import TestTolerances (probTolerance, encodeSlotTolerance, normalizationTolerance)
 import SPLL.IntermediateRepresentation
@@ -378,6 +382,205 @@ pythonTestCode src tcs =
     unpackTestCase (CumulTestCase name sample params (outProb, outDim)) = (name, sample, params, outProb, outDim)
     mainName (ProbTestCase _ _ _ _) = "main.forward"
     mainName (CumulTestCase _ _ _ _) = "main.integrate"
+
+-- ===========================================================================
+-- Batched PyTorch differential test (design pytorch-tensorizer, M2)
+-- ===========================================================================
+
+-- | For every corpus program eligible for batched mode (its prob/integ body
+-- lies in the tensor fragment, so 'generateFunctionsBatched' returns 'Right'),
+-- run the emitted batched code over a /batch/ of the program's query points at
+-- once and check each element matches the point's expected @.tst@ value -- the
+-- same ground truth the scalar Python test checks per point. This exercises the
+-- real torch code path: @torch.where@ selects, tensor densities, structure-of-
+-- arrays tuple leaves, and per-element @dim@ tensors.
+--
+-- The batched backend emits @torch@ ops, so a torch-enabled Python interpreter
+-- is required. It is looked up via @NEST_TORCH_PYTHON@, then a conventional
+-- venv path, then @python3@; if none imports torch the whole group is skipped
+-- with a visible note (so a torch-less CI stays green). Torch import is slow, so
+-- every eligible program runs in one shared interpreter process.
+batchedPythonTests :: IO TestTree
+batchedPythonTests = do
+  files <- getAllTestFiles
+  cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
+  let entries = [ (takeBaseName pplPath, p, tcs)
+                | ((pplPath, _), (p, (bs, slow, tcs))) <- zip files cases
+                , not slow, Python `elem` bs, null (neurals p) ]
+      eligible = [ (n, src, groups)
+                 | (n, p, tcs) <- entries
+                 , let qtcs = filter (\t -> isProbTestCase t || isCumulTestCase t) tcs
+                 , not (null qtcs)
+                 , Right env <- [compile defaultCompilerConfig{batched = True} p]
+                 , Right srcLines <- [generateFunctionsBatched True env]
+                 , Just groups <- [batchGroups qtcs]
+                 , let src = intercalate "\n" srcLines ]
+  mpy <- findTorchPython
+  return $ testGroup "BatchedPython" $ case mpy of
+    Nothing ->
+      [ testProperty "skipped-no-torch" $ once $ ioProperty $ do
+          hPutStrLn stderr "BatchedPython: skipped -- no torch-enabled python found (set NEST_TORCH_PYTHON)."
+          return True ]
+    Just py ->
+      [ testProperty "batched-vs-expected" (once (runBatchedPython py eligible))
+      , testProperty "refusal-diagnostic" (once (ioProperty (return refusalProp))) ]
+
+-- | The batched backend must refuse a program outside the tensor fragment with
+-- a diagnostic naming the offending construct. `coin` (whose main, `coin ++
+-- coin`, builds a list) is a stable negative.
+refusalProp :: Property
+refusalProp = ioProperty $ do
+  p <- parseProgram "testCases/coin.ppl"
+  return $ case compile defaultCompilerConfig{batched = True} p of
+    Left err -> counterexample ("coin failed to compile at all: " ++ err) False
+    Right env -> case generateFunctionsBatched True env of
+      Right _  -> counterexample "batched mode accepted list-valued coin; expected a fragment refusal" False
+      Left msg -> counterexample ("refusal diagnostic did not mention the tensor fragment: " ++ msg)
+                    ("tensor fragment" `isInfixOf` msg && "list" `isInfixOf` msg)
+
+-- | A batchable group: all query points sharing the same query kind (prob vs
+-- cumulative) and the same parameter list, so they form one batched call.
+data BatchGroup = BatchGroup
+  { bgIsCumul :: Bool
+  , bgParams  :: [IRValue]
+  , bgSamples :: [IRValue]
+  , bgExpProb :: [Double]
+  , bgExpDim  :: [Double]
+  }
+
+-- | Split a program's prob/cumulative test cases into batchable groups, or
+-- 'Nothing' if any sample is not structure-of-arrays batchable (a non
+-- float/int/bool/tuple leaf).
+batchGroups :: [TestCase] -> Maybe [BatchGroup]
+batchGroups tcs = mapM build grouped
+  where
+    keyed = [ q | t <- tcs, Just q <- [asQuery t] ]
+    grouped = groupBy ((==) `on` (\(c, ps, _, _, _) -> (c, show ps)))
+                      keyed
+    build g@((c, ps, _, _, _):_) =
+      let samples = [s | (_, _, s, _, _) <- g]
+      in case batchLiteral samples of
+           Nothing -> Nothing
+           Just _  -> Just BatchGroup { bgIsCumul = c, bgParams = ps, bgSamples = samples
+                                      , bgExpProb = [ep | (_, _, _, ep, _) <- g]
+                                      , bgExpDim  = [ed | (_, _, _, _, ed) <- g] }
+    build [] = Nothing
+    asQuery (ProbTestCase _ s ps (VFloat ep, VFloat ed))  = Just (False, ps, s, ep, ed)
+    asQuery (CumulTestCase _ s ps (VFloat ep, VFloat ed)) = Just (True,  ps, s, ep, ed)
+    asQuery _ = Nothing
+
+-- | Build a structure-of-arrays batch tensor literal from a homogeneous list of
+-- sample values: numeric leaves stack into a float tensor, bools into a bool
+-- tensor, and tuples recurse per component (so the batch dimension lives at the
+-- leaves). 'Nothing' if a leaf is neither.
+batchLiteral :: [IRValue] -> Maybe String
+batchLiteral vs
+  | all isTup vs, not (null vs) =
+      do l <- batchLiteral [a | VTuple a _ <- vs]
+         r <- batchLiteral [b | VTuple _ b <- vs]
+         return ("T(" ++ l ++ ", " ++ r ++ ")")
+  | all isBoolV vs =
+      Just ("torch.tensor([" ++ intercalate ", " (map (\v -> case v of VBool b -> if b then "True" else "False"; _ -> "False") vs) ++ "], dtype=torch.bool)")
+  | all isNum vs =
+      Just ("torch.tensor([" ++ intercalate ", " (map numLit vs) ++ "])")
+  | otherwise = Nothing
+  where
+    isTup (VTuple _ _) = True
+    isTup _ = False
+    isBoolV (VBool _) = True
+    isBoolV _ = False
+    isNum (VFloat _) = True
+    isNum (VInt _) = True
+    isNum _ = False
+    numLit (VFloat f) = show f
+    numLit (VInt i)   = show (fromIntegral i :: Double)
+    numLit _          = "0.0"
+
+-- | Locate a Python interpreter that can import torch: @NEST_TORCH_PYTHON@, then
+-- a conventional venv path under @HOME@, then @python3@. Returns the first whose
+-- @import torch@ succeeds.
+findTorchPython :: IO (Maybe FilePath)
+findTorchPython = do
+  envPy <- lookupEnv "NEST_TORCH_PYTHON"
+  home  <- lookupEnv "HOME"
+  let candidates = maybe [] (:[]) envPy
+                ++ maybe [] (\h -> [h ++ "/.cache/nest/torchvenv/bin/python"]) home
+                ++ ["python3"]
+  firstWithTorch candidates
+  where
+    firstWithTorch [] = return Nothing
+    firstWithTorch (c:cs) = do
+      ok <- hasTorch c
+      if ok then return (Just c) else firstWithTorch cs
+    hasTorch c = do
+      res <- try (readProcessWithExitCode c ["-c", "import torch"] "") :: IO (Either SomeException (ExitCode, String, String))
+      return $ case res of
+        Right (ExitSuccess, _, _) -> True
+        _ -> False
+
+-- | Run every eligible program's batched code in one shared torch process and
+-- assert every batched query point matches its expected value.
+runBatchedPython :: FilePath -> [(String, String, [BatchGroup])] -> Property
+runBatchedPython _ [] = counterexample "BatchedPython: no eligible corpus programs found" False
+runBatchedPython py eligible = ioProperty $ do
+  hPutStrLn stderr ("BatchedPython: " ++ show (length eligible) ++ " eligible corpus programs, "
+                    ++ show (sum [sum (map (length . bgSamples) gs) | (_, _, gs) <- eligible])
+                    ++ " query points, via " ++ py)
+  let script = batchedDriver eligible
+  (code, out, err) <- readProcessWithExitCode py ["-c", script] ""
+  return $ case code of
+    ExitSuccess -> counterexample (out ++ err) True
+    ExitFailure _ -> counterexample ("Batched PyTorch differential failed:\n" ++ out ++ err) False
+
+-- | The single Python script: define each eligible program in its own namespace
+-- (torch imported once), run every batched group, and exit non-zero listing any
+-- element whose prob (or dim, where prob is non-zero) disagrees with the corpus
+-- expectation beyond 'probTolerance'.
+batchedDriver :: [(String, String, [BatchGroup])] -> String
+batchedDriver eligible = unlines $
+  [ "import torch, sys, traceback"
+  , "from pythonLibBatched import T"  -- for structure-of-arrays tuple sample batches
+  , "TOL = " ++ show probTolerance
+  , "failures = []"
+  , "def _leaf(x, i):"
+  , "    return float(x[i]) if (torch.is_tensor(x) and x.dim() > 0) else float(x)"
+  , "def _cmp(name, method, r, exp_p, exp_d):"
+  , "    p = r[0]; d = r[1][0]"
+  , "    for i in range(len(exp_p)):"
+  , "        pv = _leaf(p, i)"
+  , "        if abs(pv - exp_p[i]) > TOL:"
+  , "            failures.append(name + '.' + method + ' pt ' + str(i) + ': prob ' + str(pv) + ' != ' + str(exp_p[i]))"
+  , "        if pv != 0.0:"
+  , "            dv = _leaf(d, i)"
+  , "            if abs(dv - exp_d[i]) > TOL:"
+  , "                failures.append(name + '.' + method + ' pt ' + str(i) + ': dim ' + str(dv) + ' != ' + str(exp_d[i]))"
+  ] ++
+  concatMap programBlock eligible ++
+  [ "if failures:"
+  , "    print('BATCHED DIFFERENTIAL FAILURES (' + str(len(failures)) + '):')"
+  , "    for f in failures: print('  ' + f)"
+  , "    sys.exit(1)"
+  , "print('BatchedPython OK: " ++ show (length eligible) ++ " programs')"
+  ]
+  where
+    programBlock (name, src, groups) =
+      [ "try:"
+      , "    _ns = {}"
+      , "    exec(" ++ show src ++ ", _ns)"
+      , "    _main = _ns['main']"
+      ] ++
+      concatMap (groupCall name) groups ++
+      [ "except Exception as _e:"
+      , "    failures.append(" ++ show name ++ " + ': exception ' + repr(_e) + '\\n' + traceback.format_exc())"
+      ]
+    groupCall name (BatchGroup isCumul params samples expP expD) =
+      let method = if isCumul then "integrate" else "forward"
+          xs = case batchLiteral samples of Just s -> s; Nothing -> "None"
+          paramStr = concatMap (\pv -> ", " ++ pyVal pv) params
+          call = "_main." ++ method ++ "(" ++ xs ++ paramStr ++ ")"
+      in [ "    _cmp(" ++ show name ++ ", " ++ show method ++ ", " ++ call
+           ++ ", " ++ pyFloatList expP ++ ", " ++ pyFloatList expD ++ ")" ]
+    pyFloatList xs = "[" ++ intercalate ", " (map show xs) ++ "]"
 
 -- | Programs whose .tst file carries a `slow` header (see TestCaseParser) are
 -- expensive enough (deep recursive plan enumeration, run through both the
