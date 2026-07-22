@@ -131,7 +131,7 @@ parseGlobalOpts = GlobalOpts
             <> help "Omit the query-type guard that rejects a query value whose type does not match the program's return type (e.g. p(0.5) against a Bool program). The guard is on by default at every optimization level; disable it to shave the entry check off hot compiled code.")
         <*> switch
             ( long "batched"
-            <> help "Opt into batched inference mode (design pytorch-tensorizer). Currently wires only the backend-agnostic IR select pass, which retags data-dependent elementwise ifs as selects before optimization; scalar output is unchanged (a behavioural no-op), so this is chiefly useful with -d to audit the transformation.")
+            <> help "Opt into batched inference mode (design pytorch-tensorizer): with 'compile -l python', emits torch code that runs a whole [B]-shaped batch of query points through forward/integrate/generate at once (torch.where instead of data-dependent if), for the tensor fragment (float/int/bool leaves in fixed-shape tuples; no lists/ADTs/Either dispatch/recursion/marginal queries -- refused at compile time with a diagnostic naming the offending construct). Neural (ReadNN) programs are supported for forward/integrate; batched generate is neural-scoped to a follow-on milestone and raises at runtime for a decoder's own sampling. Only wires the IR select pass for other output languages (a behavioural no-op).")
         <*> hsubparser (
           command "compile" (info parseCompileOpts (progDesc "Compiles the program with inference interface into target language"))
           <> command "generate" (info parseGenerateOpts (progDesc "Runs the generate pass of the program"))

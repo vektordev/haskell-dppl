@@ -33,6 +33,21 @@ def cumulative_normal(x):
 def sign(x):
   return torch.sign(astensor(x))
 
+# --- sampling (batched generate, milestone M4) -------------------------------
+# The scalar twins (pythonLib's rand()/randn()) draw one Python float each; here
+# every call draws a whole batch at once, shape [n]. A random `if` in generate
+# mode becomes the same select machinery as prob/integ (torch.where): both arms
+# draw independently for the whole batch, so an element gets one arm's fresh
+# draw exactly as the scalar generate's taken branch would -- the untaken arm's
+# draw is simply discarded, not reused, so this is a correct (if slightly
+# wasteful) elementwise mixture.
+
+def rand(n):
+  return torch.rand(n)
+
+def randn(n):
+  return torch.randn(n)
+
 # --- gradient-safe unsafe ops (double-where masking) -------------------------
 # In batched mode both arms of a torch.where run over the whole batch, so an
 # unsafe op (log of a non-positive value, division by zero) in an *untaken* arm

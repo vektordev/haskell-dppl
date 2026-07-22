@@ -25,7 +25,7 @@ import SPLL.CodeGenJulia
 import SPLL.CodeGenPyTorch
 import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
 import TestCaseParser
-import TestTolerances (probTolerance, encodeSlotTolerance, normalizationTolerance)
+import TestTolerances (probTolerance, encodeSlotTolerance, normalizationTolerance, samplingTolerance)
 import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType
 import SPLL.AutoNeural (makePartitionPlan, planIndexOf, resolvePartitionAnnotation, PartitionPlan)
@@ -430,7 +430,8 @@ batchedPythonTests = do
     Just py ->
       [ testProperty "batched-vs-expected" (once (runBatchedPython py eligible))
       , testProperty "refusal-diagnostic" (once (ioProperty (return refusalProp)))
-      , testProperty "gradients-nan-free" (once (runBatchedGradients py eligible)) ]
+      , testProperty "gradients-nan-free" (once (runBatchedGradients py eligible))
+      , testProperty "generate-density-matches-expected" (once (runBatchedGenerate py eligible)) ]
 
 -- | The batched backend must refuse a program outside the tensor fragment with
 -- a diagnostic naming the offending construct. `list` (whose main,
@@ -512,6 +513,19 @@ batchSymColumn vs = do
     num (VInt i)   = show (fromIntegral i :: Double)
     num _          = "0.0"
 
+isTup :: IRValue -> Bool
+isTup (VTuple _ _) = True
+isTup _ = False
+
+isBoolV :: IRValue -> Bool
+isBoolV (VBool _) = True
+isBoolV _ = False
+
+isNum :: IRValue -> Bool
+isNum (VFloat _) = True
+isNum (VInt _) = True
+isNum _ = False
+
 -- | Build a structure-of-arrays batch tensor literal from a homogeneous list of
 -- sample values: numeric leaves stack into a float tensor, bools into a bool
 -- tensor, and tuples recurse per component (so the batch dimension lives at the
@@ -528,13 +542,6 @@ batchLiteral vs
       Just ("torch.tensor([" ++ intercalate ", " (map numLit vs) ++ "])")
   | otherwise = Nothing
   where
-    isTup (VTuple _ _) = True
-    isTup _ = False
-    isBoolV (VBool _) = True
-    isBoolV _ = False
-    isNum (VFloat _) = True
-    isNum (VInt _) = True
-    isNum _ = False
     numLit (VFloat f) = show f
     numLit (VInt i)   = show (fromIntegral i :: Double)
     numLit _          = "0.0"
@@ -724,6 +731,129 @@ gradientDriver probes = unlines $
       , "except Exception as _e:"
       , "    failures.append(" ++ show name ++ " + ': exception ' + repr(_e) + '\\n' + traceback.format_exc())"
       ]
+
+-- ===========================================================================
+-- M4: batched generate (design pytorch-tensorizer)
+-- ===========================================================================
+
+-- | Acceptance test for M4 (batched generate). Scope is non-neural, matching
+-- M2a -- neural decoder sampling is refused with a diagnostic at compile time
+-- (see 'SPLL.CodeGenPyTorchBatched.renderGen') and left to a follow-on
+-- milestone.
+--
+-- There is no per-draw ground truth for a stochastic 'generate' (unlike
+-- forward/integrate, which have an exact expected value at each query point),
+-- so the differential instead mirrors Spec.hs's existing @testSamplingProb@
+-- idiom: draw a large batch via @main.generate(_batchN)@ in a real torch
+-- interpreter, then estimate an empirical density in an epsilon-window around
+-- each of the program's *existing* prob query points (the same
+-- @.tst@-declared ground truth the value differential already checks) and
+-- compare to the declared density within 'samplingTolerance'. This reuses
+-- ground truth already in the corpus (no second sampling distribution to
+-- generate or compare against) and is one vectorized torch pass per program
+-- rather than one Python call per sample.
+--
+-- Restricted to query points whose sample is a bare float/int/bool (not a
+-- tuple): a tuple-valued window density would need per-leaf volume handling
+-- the corpus's existing (sample, dim) pairs don't disentangle. A program
+-- whose generate needs more than the batch-size parameter (e.g. a ThetaTree
+-- test override, as in @gaussListTheta@/@lambdaThetaInverse@) is skipped
+-- dynamically in the driver (arity-checked via 'inspect.signature'), since
+-- Haskell-side arity bookkeeping would only duplicate what the emitted
+-- signature already says.
+runBatchedGenerate :: FilePath -> [(String, String, [BatchGroup], [String])] -> Property
+runBatchedGenerate _ [] = counterexample "BatchedPython generate: no eligible corpus programs found" False
+runBatchedGenerate py eligible
+  | null probes = ioProperty $ do
+      hPutStrLn stderr "BatchedPython generate: no eligible non-neural programs with a compiled generate found (skipped)."
+      return True
+  | otherwise = ioProperty $ do
+      hPutStrLn stderr ("BatchedPython generate: " ++ show (length probes) ++ " programs, via " ++ py)
+      cwd <- getCurrentDirectory
+      let script = "import sys\nsys.path.insert(0, " ++ show cwd ++ ")\n" ++ generateDriver probes
+      (code, out, err) <- withSystemTempFile "batched_generate.py" $ \tmpPath tmpHandle -> do
+        hPutStr tmpHandle script
+        hClose tmpHandle
+        readProcessWithExitCode py [tmpPath] ""
+      return $ case code of
+        ExitSuccess   -> counterexample (out ++ err) True
+        ExitFailure _ -> counterexample ("Batched PyTorch generate differential failed:\n" ++ out ++ err) False
+  where
+    probes = [ (name, src, points)
+             | (name, src, groups, netNames) <- eligible
+             , null netNames
+             , not ("NotImplementedError" `isInfixOf` src)
+             , let points = [ (pyVal s, ep, ed)
+                            | g <- groups, not (bgIsCumul g)
+                            , (s, ep, ed) <- zip3 (bgSamples g) (bgExpProb g) (bgExpDim g)
+                            , isScalarSample s ]
+             , not (null points) ]
+
+-- | Is this sample a bare scalar leaf (not a tuple)? 'isNum'/'isBoolV' already
+-- cover exactly float/int/bool between them (see 'batchLiteral').
+isScalarSample :: IRValue -> Bool
+isScalarSample v = isNum v || isBoolV v
+
+-- | The single Python script for the generate check: for each program, draw
+-- one large batch and test it against every query point's epsilon-window
+-- density estimate (mirrors Spec.hs's @testSamplingProb@, single-shot rather
+-- than retried -- the batch size is fixed large enough, and the seed is
+-- pinned, to keep this non-flaky).
+generateDriver :: [(String, String, [(String, Double, Double)])] -> String
+generateDriver probes = unlines $
+  [ "import torch, sys, traceback, inspect"
+  , "from pythonLibBatched import T"
+  , "torch.manual_seed(1234)"
+  , "N = 50000"
+  , "TOL = " ++ show samplingTolerance
+  , "failures = []"
+  , "checked = 0"
+  , "skipped = 0"
+  ] ++ concatMap block probes ++
+  [ "if checked == 0:"
+  , "    failures.append('no program actually had its generate density checked (all skipped)')"
+  , "if failures:"
+  , "    print('BATCHED GENERATE FAILURES (' + str(len(failures)) + '):')"
+  , "    for f in failures: print('  ' + f)"
+  , "    sys.exit(1)"
+  , "print('BatchedPython generate OK: ' + str(checked) + ' programs checked, ' + str(skipped) + ' skipped (non-nullary generate)')"
+  ]
+  where
+    block (name, src, points) =
+      [ "try:"
+      , "    _ns = {}"
+      , "    exec(" ++ show src ++ ", _ns)"
+      , "    _main = _ns['main']"
+      , "    _sig = inspect.signature(_main.generate)"
+      , "    if len(_sig.parameters) != 1:"
+      , "        skipped += 1"
+      , "    else:"
+      , "        _batch = _main.generate(N)"
+      , "        _bt = _batch if torch.is_tensor(_batch) else torch.as_tensor(float(_batch))"
+      , "        _btd = _bt.double()"
+      , "        checked += 1"
+      ] ++
+      concatMap (pointCheck name) points ++
+      [ "except Exception as _e:"
+      , "    failures.append(" ++ show name ++ " + ': exception ' + repr(_e) + '\\n' + traceback.format_exc())"
+      ]
+    pointCheck name (xExpr, expProb, expDim) =
+      -- A tighter window (Spec.hs's testSamplingProb uses 1e-9, comparing
+      -- interpreter Doubles) is unusable here: torch.rand/randn default to
+      -- float32, so a discrete atom threaded through a torch.where alongside a
+      -- float32 draw is itself rounded to float32 precision (~1e-7 relative),
+      -- which an exact-match window at 1e-9 would simply miss. 1e-4 is still
+      -- tight enough to exclude a neighbouring continuous arm's contribution
+      -- (whose density over a 1e-4-wide window is on the order of 1e-4 * its
+      -- density, negligible next to samplingTolerance) while comfortably
+      -- covering float32 rounding.
+      let eps = if expDim == 0 then 1e-4 else 0.05 :: Double
+      in [ "        _x = float(" ++ xExpr ++ ")"
+         , "        _inside = (torch.abs(_btd - _x) <= " ++ show (eps / 2.0) ++ ").double().mean().item()"
+         , "        _est = _inside / (" ++ show eps ++ " ** " ++ show expDim ++ ")"
+         , "        if abs(_est - " ++ show expProb ++ ") > TOL:"
+         , "            failures.append(" ++ show name ++ " + ': generate density at ' + str(_x) + ' estimated ' + str(_est) + ' != ' + str(" ++ show expProb ++ "))"
+         ]
 
 -- | Programs whose .tst file carries a `slow` header (see TestCaseParser) are
 -- expensive enough (deep recursive plan enumeration, run through both the

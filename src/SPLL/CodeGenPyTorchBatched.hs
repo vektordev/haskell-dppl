@@ -31,22 +31,39 @@ import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types (CompilerError, GenericValue(..), MultiValue(..))
 import SPLL.Lang.Lang (multiValueToValueList)
 import SPLL.CodeGenPyTorch (pyVal, envToLUT, replaceCalls)
+import SPLL.AutoNeural (isNeuralDecoderGroup)
 import Data.Char (toUpper)
 import Data.List (intercalate, isSuffixOf)
+import Data.Maybe (fromMaybe)
 import Control.Monad (foldM)
 
 -- | Entry point mirroring 'SPLL.CodeGenPyTorch.generateFunctions', but for the
 -- batched backend and fallible: it runs the fragment guard over every emitted
 -- prob/integ body and returns a refusal diagnostic ('Left') if any is outside
 -- the tensor fragment. The 'Bool' is the same generate-boilerplate flag.
+--
+-- Generate (milestone M4) is best-effort /per class/ rather than folded into
+-- this fallible pipeline: a group whose generate body is outside the (batched)
+-- fragment -- recursive, or reaching a neural decoder's sampling logic, which
+-- is its own follow-on milestone -- gets a runtime-raising stub instead of
+-- aborting the whole compile. Only forward/integrate ineligibility is still a
+-- hard 'Left', matching M1-M3.
 generateFunctionsBatched :: Bool -> IREnv -> Either CompilerError [String]
 generateFunctionsBatched genBoil env@(IREnv funcs adts consts)
   | not (null adts) =
       Left "batched mode: ADT declarations are not in the tensor fragment (no tensor representation for constructor-tagged values)."
   | otherwise = do
       let lut = envToLUT env
+          -- Every group's generate method, raw (pre-rename) name and body: the
+          -- self-contained recursion check ('hasGenCycle') walks these
+          -- directly, mirroring 'checkCallGraph's raw-name convention.
+          genRaw = [ (n ++ "_gen", e) | IRFunGroup{groupName=n, genFun=Just (e, _)} <- funcs ]
+          -- Every group's generate arity, keyed by its *post-LUT* name, used to
+          -- thread the batch-size parameter through cross-function generate
+          -- calls ('attachBatchCalls'), which runs after the same renaming.
+          genArities = [ (fromMaybe raw (lookup raw lut), length (fst (unwrapLambdas e))) | (raw, e) <- genRaw ]
       () <- checkCallGraph funcs
-      classes <- mapM (generateClass lut) funcs
+      classes <- mapM (generateClass lut genArities genRaw) funcs
       let body = map (\(n, v) -> n ++ " = " ++ pyVal v) consts
              ++ (if null consts then [] else [""])
              ++ concat classes
@@ -59,21 +76,23 @@ generateFunctionsBatched genBoil env@(IREnv funcs adts consts)
              , "from torch.nn import Module", "" ] ++ body
         else body
 
--- | Emit one function group's class. Only the prob ('forward') and integ
--- ('integrate') methods are emitted: batched sampling is milestone M4, so a
--- group's generate function is skipped here.
-generateClass :: [(String, String)] -> IRFunGroup -> Either CompilerError [String]
-generateClass lut (IRFunGroup name _ prob integ _ _ doc) = do
+-- | Emit one function group's class: the prob ('forward') and integ
+-- ('integrate') methods (unchanged, still a hard fragment refusal), plus a
+-- best-effort generate method (M4, see 'renderGen').
+generateClass :: [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> IRFunGroup -> Either CompilerError [String]
+generateClass lut genArities genMethods (IRFunGroup name gen prob integ _ _ doc) = do
   p <- maybe (Right []) (generateMethod lut "forward" name) prob
   i <- maybe (Right []) (generateMethod lut "integrate" name) integ
-  let commentLines = map ("# " ++) (lines doc)
+  let g = maybe [] (renderGen lut genArities genMethods name) gen
+      commentLines = map ("# " ++) (lines doc)
       initLine = "class " ++ onHead toUpper name ++ "(Module):"
-      -- A group with neither a forward nor an integrate method (e.g. a tuple
-      -- 'component' group carrying only a normal/gen function, which batched
-      -- mode does not emit) would otherwise produce a syntactically empty class
+      -- A group with none of forward/integrate/generate (e.g. a tuple
+      -- 'component' group carrying only a normal function, which batched mode
+      -- does not emit) would otherwise produce a syntactically empty class
       -- body. It is never called (checkCallGraph admits only forward/integrate
       -- callees), so a `pass` body keeps the instantiation valid.
-      methodBody = if null i && null p then ["pass"] else i ++ [""] ++ p
+      sections = filter (not . null) [i, p, g]
+      methodBody = if null sections then ["pass"] else intercalate [""] sections
   return $ commentLines ++ [initLine] ++ indentOnce methodBody
 
 -- | Emit one method: rewrite cross-function call names to Python @class.method@
@@ -101,6 +120,137 @@ indentOnce = map ("    " ++)
 onHead :: (a -> a) -> [a] -> [a]
 onHead f (x:xs) = f x : xs
 onHead _ []     = []
+
+-- ---------------------------------------------------------------------------
+-- Generate (milestone M4): rand()/randn() take a batch shape, and a random
+-- `if` becomes a select over per-element draws -- both arms of a select are
+-- drawn independently for the whole batch and combined by the same mask
+-- machinery prob/integ already use, which is exactly as correct here: each
+-- element ends up with one arm's *fresh, independent* draw, so the result is
+-- the same mixture distribution as the scalar generate, just with (harmless)
+-- extra randomness drawn for the untaken arm.
+--
+-- Unlike forward/integrate, an ineligible generate body does not abort the
+-- whole compile -- see 'generateFunctionsBatched' -- it degrades to a
+-- runtime-raising stub for that one class, named by 'renderGen'.
+-- ---------------------------------------------------------------------------
+
+-- | The batch-size parameter threaded through every generate method and every
+-- cross-function generate call. Reserved-looking (matches the compiler's own
+-- "_r0"/"_t0"/"cse_0" internal-name convention) so it can never collide with a
+-- user-chosen SPLL parameter name (e.g. a helper function genuinely
+-- parameterised as @dist n = ...@).
+batchNVar :: String
+batchNVar = "_batchN"
+
+-- | Render one group's generate method: a real batched @def generate@ when its
+-- body is eligible, or a stub that raises 'NotImplementedError' naming the
+-- reason when it is not. Never fails -- ineligibility here only removes one
+-- class's generate capability, it does not touch forward/integrate.
+--
+-- Three shapes are excluded, each with its own diagnostic:
+--
+--   1. Neural decoder groups (@groupName@ ends in @_auto@, the 'SPLL.AutoNeural'
+--      convention): their generate body samples from the decoder's own output
+--      distribution (categorical / Gaussian reparameterisation), which is
+--      genuinely new machinery, out of scope for this milestone (design
+--      pytorch-tensorizer M4; a follow-on is filed for neural generate
+--      parity). Checked structurally by name, not by trying and failing the
+--      fragment guard: 'IRApply' is broadly emittable (M2b needs it for
+--      network/decoder calls), so the guard alone would not reliably catch
+--      this shape.
+--   2. Recursive generate (a cycle in the generate-only call graph,
+--      'hasGenCycle'): both-arm-eager select semantics would recurse forever
+--      at *runtime* (unlike prob/integ, this is not merely a compile-time
+--      concern -- Python would stack-overflow actually calling it).
+--   3. Any other construct outside the tensor fragment ('batchedGuard', same
+--      as forward/integrate): lists, ADTs, Either dispatch, etc.
+--
+-- A stubbed callee is still a valid call target for a *caller* whose own
+-- generate is otherwise eligible (e.g. @main@ calling a neural decoder's
+-- generate): the caller's code is still emitted, and simply raises at runtime
+-- when execution actually reaches the unsupported call -- the diagnostic
+-- surfaces exactly where the missing capability is needed, without requiring
+-- whole-program reachability analysis here.
+renderGen :: [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> String -> IRFunDecl -> [String]
+renderGen lut genArities genRaw groupName (expr0, doc)
+  | isNeuralDecoderGroup groupName =
+      stubGen doc $ "batched mode: " ++ groupName ++ "'s generate samples from a neural "
+        ++ "decoder's own output distribution, which batched generate does not support yet "
+        ++ "(design pytorch-tensorizer, milestone M4; neural generate parity is a follow-on)."
+  | hasGenCycle genRaw (groupName ++ "_gen") =
+      stubGen doc $ "batched mode: " ++ groupName ++ "'s generate function recurses (directly "
+        ++ "or through a call chain); data-dependent recursion is outside the tensor fragment "
+        ++ "(design pytorch-tensorizer) and both-arm-eager select semantics would not terminate."
+  | otherwise =
+      let expr = irMap (attachBatchCall genArities . replaceCalls lut) expr0
+          (args, body) = unwrapLambdas (prepBatchedBody expr)
+      in case batchedGuard groupName "generate" body of
+           Left err -> stubGen doc err
+           Right () ->
+             let l1 = "def generate(self" ++ concatMap (", " ++) (args ++ [batchNVar]) ++ "):"
+                 docLines = map ("# " ++) (lines doc)
+             in docLines ++ [l1] ++ indentOnce (batchedBlock body)
+
+-- | A generate method that always raises, for a group whose generate is
+-- outside batched mode's (current) capability. Accepts any call signature
+-- (@*args, **kwargs@) so a caller threading the batch-size parameter through a
+-- stubbed callee doesn't itself fail with a mismatched-arity 'TypeError'
+-- before reaching the intended diagnostic.
+stubGen :: String -> String -> [String]
+stubGen doc msg =
+  map ("# " ++) (lines doc)
+  ++ ["def generate(self, *args, **kwargs):"]
+  ++ indentOnce ["raise NotImplementedError(" ++ show msg ++ ")"]
+
+-- | Is there a cycle reachable from @root@ in the call graph restricted to
+-- generate methods (@_gen@-suffixed names only, mirroring 'checkCallGraph's
+-- restriction to its own method universe)? Same grey/black DFS shape as
+-- 'checkCallGraph's 'walk' (a black memo of nodes already proven acyclic, so a
+-- diamond-shaped call graph -- shared helpers called from several branches --
+-- is not re-explored once per incoming path), specialised to a single root and
+-- a plain 'Bool' rather than threading an 'Either' diagnostic.
+hasGenCycle :: [(String, IRExpr)] -> String -> Bool
+hasGenCycle genMethods root = fst (walk [] [] root)
+  where
+    callees = graphCallees genMethods
+    walk grey black n
+      | n `elem` grey  = (True, black)
+      | n `elem` black = (False, black)
+      | otherwise      = let (cyclic, black') = walkAny (n : grey) black (callees n)
+                          in (cyclic, n : black')
+    walkAny _    black []     = (False, black)
+    walkAny grey black (c:cs) =
+      let (cyclic, black') = walk grey black c
+      in if cyclic then (True, black') else walkAny grey black' cs
+
+-- | Call-graph edges for a DFS restricted to a given method universe: every
+-- 'IRVar' name referenced by @n@'s body that is itself a member of the
+-- universe. Shared by 'checkCallGraph' (prob/integ) and 'hasGenCycle'
+-- (generate) -- the two graphs differ only in which methods populate
+-- @methods@, not in how an edge is read off a body.
+graphCallees :: [(String, IRExpr)] -> String -> [String]
+graphCallees methods name =
+  maybe [] (filter (`elem` map fst methods) . allVarNames) (lookup name methods)
+
+-- | Thread the batch-size parameter through one cross-function generate call:
+-- a bare nullary reference (@IRVar name@, the compiler's convention for
+-- calling a zero-argument function) becomes @name(_batchN)@, and a *complete*
+-- application (all of the callee's declared arguments already supplied, per
+-- @arities@) gets one more argument appended, e.g. @dist(0.3)@ becomes
+-- @dist(0.3, _batchN)@. Both shapes reduce to the same check via
+-- 'collectApplyChain' (a bare 'IRVar' collects zero args), matched by exact
+-- arity. Applied bottom-up (fused into the same 'irMap' pass as
+-- 'replaceCalls', so cross-function names are already renamed at each node),
+-- so an inner complete call is rewritten before an outer node (which might
+-- itself be a different complete call) is examined.
+attachBatchCall :: [(String, Int)] -> IRExpr -> IRExpr
+attachBatchCall arities e
+  | (IRVar name, callArgs) <- collectApplyChain e
+  , Just ar <- lookup name arities
+  , length callArgs == ar
+  = IRApply e (IRVar batchNVar)
+attachBatchCall _ e = e
 
 -- ---------------------------------------------------------------------------
 -- Body preparation: strip the constructs batched v1 does not represent.
@@ -188,20 +338,25 @@ projTuple False e              = IRTSnd e
 
 -- | Batched mode admits cross-function calls (the neural decoder pattern:
 -- @main_prob@ → @decoder_prob@ → a network invocation), but only to functions
--- it actually emits — the @forward@ (@_prob@) and @integrate@ (@_integ@)
--- methods — and only when the call graph is acyclic. Two constructs it must
--- keep refusing (both were caught for free by the old blanket @IRApply@
--- refusal): a call reaching a @generate@/@normal@ method (not emitted in
--- batched mode; e.g. scalar @factorial@/@flip@), and recursion (unbounded,
--- data-dependent depth is outside the tensor fragment and both-arm-eager
--- evaluation would not terminate; e.g. scalar @dice@).
+-- it actually emits from a prob/integ path -- the @forward@ (@_prob@) and
+-- @integrate@ (@_integ@) methods -- and only when the call graph is acyclic.
+-- Two constructs it must keep refusing (both were caught for free by the old
+-- blanket @IRApply@ refusal): a prob/integ call reaching a @generate@/@normal@
+-- method (a different compiled artifact entirely -- e.g. scalar
+-- @factorial@/@flip@'s prob path), and recursion (unbounded, data-dependent
+-- depth is outside the tensor fragment and both-arm-eager evaluation would not
+-- terminate; e.g. scalar @dice@).
+--
+-- This check is unchanged by generate's own admission (M4, 'renderGen'):
+-- generate is now sometimes emitted, but it is checked and rendered
+-- independently (per class, best-effort) rather than through this hard,
+-- whole-program graph -- see 'hasGenCycle' for its own, separate cycle check.
 checkCallGraph :: [IRFunGroup] -> Either CompilerError ()
 checkCallGraph funcs = () <$ foldM (walk []) [] roots
   where
     methods  = concatMap groupMethods funcs
-    universe = map fst methods
     roots    = [n | (n, _) <- methods, isEmittedMethod n]
-    callees name = maybe [] (filter (`elem` universe) . allVarNames) (lookup name methods)
+    callees  = graphCallees methods
     -- DFS with a grey path (cycle detection) and a black memo (already proven
     -- clean, so a shared sub-DAG is not re-walked).
     walk grey black name
@@ -212,8 +367,9 @@ checkCallGraph funcs = () <$ foldM (walk []) [] roots
       | name `elem` black = Right black
       | not (isEmittedMethod name) =
           Left $ "batched mode: a prob/integ path calls " ++ name
-              ++ ", which batched mode does not emit (only forward/integrate are "
-              ++ "emitted -- generate and normal_params are scalar-only)."
+              ++ ", which is not a forward/integrate method (a prob/integ path may only "
+              ++ "call other forward/integrate methods; generate and normal_params are "
+              ++ "compiled separately -- see design pytorch-tensorizer)."
       | otherwise = do
           black' <- foldM (walk (name : grey)) black (callees name)
           Right (name : black')
@@ -226,7 +382,8 @@ groupMethods (IRFunGroup n gen prob integ enc normal _) =
   ++ [(n ++ "_encode", b) | Just (b, _) <- [enc]]
   ++ [(n ++ "_normal", b) | Just (b, _) <- [normal]]
 
--- | The only methods 'generateClass' emits in batched mode.
+-- | The only call targets a prob/integ path may reach ('checkCallGraph').
+-- Generate has its own, separate admission rule ('renderGen'/'hasGenCycle').
 isEmittedMethod :: String -> Bool
 isEmittedMethod n = ("_prob" `isSuffixOf` n) || ("_integ" `isSuffixOf` n)
 
@@ -280,6 +437,8 @@ emittable e = case e of
   IREnumSum{}    -> True   -- enumeration sum, unrolled over the enum axis (M2b)
   IRIsPossible mv _ -> scalarDiscreteMulti mv  -- membership over a scalar enum (M2b)
   IRError{}      -> True   -- refusal arm, emitted as a selected-away NaN poison (M3)
+  IRSample{}     -> True   -- a fresh random draw, batched via rand(n)/randn(n) (M4);
+                           -- only ever produced by a generate body, never prob/integ
   _              -> False
 
 -- | A 'MultiValue' whose membership test is a flat scalar enumeration — the only
@@ -312,7 +471,6 @@ reason e = case e of
   IRApply{}       -> "function application (IRApply); a call did not inline"
   IRLambda{}      -> "inner lambda (IRLambda)"
   IRIsPossible{}  -> "membership check (IRIsPossible)"
-  IRSample{}      -> "random sample (IRSample); batched generate is milestone M4"
   IRConformsTo{}  -> "type-conformance check (IRConformsTo)"
   IRConst VAny        -> "marginal ANY sentinel (IRConst VAny); marginal queries are outside the tensor fragment"
   IRConst (VAnyExcept _) -> "marginal ANY-except sentinel (IRConst VAnyExcept); marginal queries are outside the tensor fragment"
@@ -370,6 +528,12 @@ batchedExpr (IRUnaryOp OpAbs e) = "torch.abs(" ++ batchedExpr e ++ ")"
 batchedExpr (IRUnaryOp OpSign e) = "sign(" ++ batchedExpr e ++ ")"
 batchedExpr (IRSelect c t f) = torchWhere c t f
 batchedExpr (IRIf c t f)     = torchWhere c t f
+-- A fresh random draw (M4): the whole batch's worth at once, shape [_batchN].
+-- Both arms of an enclosing select draw independently (see the M4 header
+-- comment above 'batchNVar'), so this is correct even under eager both-arm
+-- evaluation.
+batchedExpr (IRSample IRNormal)  = "randn(" ++ batchNVar ++ ")"
+batchedExpr (IRSample IRUniform) = "rand(" ++ batchNVar ++ ")"
 batchedExpr (IRTCons a b)    = "T(" ++ batchedExpr a ++ ", " ++ batchedExpr b ++ ")"
 batchedExpr (IRTFst e)       = "(" ++ batchedExpr e ++ ")[0]"
 batchedExpr (IRTSnd e)       = "(" ++ batchedExpr e ++ ")[1]"
