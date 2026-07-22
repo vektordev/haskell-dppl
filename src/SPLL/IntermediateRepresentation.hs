@@ -20,9 +20,6 @@ module SPLL.IntermediateRepresentation (
 , irPrintFlat
 , valueToIR
 , isLambda
-, IfMode(..)
-, pattern IRIf
-, pattern IRSelect
 , pattern VProbDim
 , pattern VProbDimBC
 , resultImpossible
@@ -175,21 +172,19 @@ data UnaryOperand = OpNeg
 
 data Distribution = IRNormal | IRUniform deriving (Show, Eq)
 
--- | Strictness of an 'IRIfMode' node (design pytorch-tensorizer, M1).
---
--- A 'LazyIf' is the ordinary conditional: exactly one arm is evaluated. A
--- 'SelectIf' is a /select/: both arms are computed and combined by a mask.
--- Every if leaves 'IRCompiler' as 'LazyIf'; the batched-mode select pass
--- (see 'SPLL.IRSelectPass') retags the data-dependent, elementwise-eligible
--- ones to 'SelectIf'. Scalar backends lower both identically (a lazy ternary),
--- so retagging is a behavioural no-op today; a future batched backend lowers
--- 'SelectIf' to @torch.where@. The flag lives on the if rather than in a
--- separate node so the ~130 existing if sites -- which neither know nor care
--- about select semantics -- keep matching/constructing through the 'IRIf'
--- pattern synonym unchanged.
-data IfMode = LazyIf | SelectIf deriving (Show, Eq)
-
-data IRExpr = IRIfMode IfMode IRExpr IRExpr IRExpr
+data IRExpr = IRIf IRExpr IRExpr IRExpr
+              -- | A /select/ (design pytorch-tensorizer, M1): semantically an
+              -- if whose /both/ arms are evaluated and combined by a mask on the
+              -- condition. Every conditional leaves 'IRCompiler' as an 'IRIf';
+              -- the batched-mode select pass ('SPLL.IRSelectPass') rewrites the
+              -- data-dependent, elementwise-eligible ones to 'IRSelect'. Scalar
+              -- consumers lower it identically to 'IRIf' (a lazy ternary) -- the
+              -- interpreter delegates and each codegen desugars it away at entry
+              -- -- so today it is a behavioural no-op; a future batched backend
+              -- lowers it to @torch.where@ instead. A distinct node (rather than
+              -- a flag on 'IRIf') keeps if-specific optimizer rewrites from
+              -- silently relabelling or mis-transforming a select.
+              | IRSelect IRExpr IRExpr IRExpr
               | IROp Operand IRExpr IRExpr
               | IRUnaryOp UnaryOperand IRExpr
               | IRTheta IRExpr Int
@@ -229,24 +224,6 @@ data IRExpr = IRIfMode IfMode IRExpr IRExpr IRExpr
               -- of a silent bogus number or a deep "not a boolean" panic.
               | IRConformsTo RType IRExpr
               deriving (Show, Eq)
-
--- | A conditional of unspecified strictness. As a /pattern/ it matches an if
--- of either mode (callers that don't distinguish select from lazy see a plain
--- three-field if); as a /constructor/ it builds a 'LazyIf'. This is what keeps
--- the existing if sites source-compatible after the 'IfMode' field was added.
-pattern IRIf :: IRExpr -> IRExpr -> IRExpr -> IRExpr
-pattern IRIf c t e <- IRIfMode _ c t e where
-        IRIf c t e = IRIfMode LazyIf c t e
-
--- | A select: both arms are evaluated and combined by a mask on @cond@.
-pattern IRSelect :: IRExpr -> IRExpr -> IRExpr -> IRExpr
-pattern IRSelect c t e = IRIfMode SelectIf c t e
-
-{-# COMPLETE IRIf, IROp, IRUnaryOp, IRTheta, IRSubtree, IRConst, IRCons
-  , IRElementOf, IRTCons, IRHead, IRTail, IRMap, IRTFst, IRTSnd, IRLeft
-  , IRRight, IRFromLeft, IRFromRight, IRIsLeft, IRIsRight, IRDensity
-  , IRCumulative, IRSample, IRLetIn, IRVar, IRLambda, IRApply, IREnumSum
-  , IRIsPossible, IRIndex, IRError, IRConformsTo #-}
 
 type IRValue = GenericValue IRExpr
 
@@ -300,6 +277,7 @@ lookupIREnv name (IREnv env _ _) =
 
 getIRSubExprs :: IRExpr -> [IRExpr]
 getIRSubExprs (IRIf a b c) = [a, b, c]
+getIRSubExprs (IRSelect a b c) = [a, b, c]
 getIRSubExprs (IROp _ a b) = [a, b]
 getIRSubExprs (IRUnaryOp _ a) = [a]
 getIRSubExprs (IRTheta a _) = [a]
@@ -343,9 +321,8 @@ irMap f x = f (irDescend (irMap f) x)
 -- re-listing the whole 35-constructor AST.
 irDescend :: (IRExpr -> IRExpr) -> IRExpr -> IRExpr
 irDescend f x = case x of
-  -- Match the real constructor so a SelectIf tag survives the rebuild; the
-  -- bare 'IRIf' synonym would reconstruct it as LazyIf and drop the flag.
-  (IRIfMode m cond left right) -> IRIfMode m (f cond) (f left) (f right)
+  (IRIf cond left right) -> IRIf (f cond) (f left) (f right)
+  (IRSelect cond left right) -> IRSelect (f cond) (f left) (f right)
   (IROp op left right) -> IROp op (f left) (f right)
   (IRUnaryOp op expr) -> IRUnaryOp op (f expr)
   (IRCons left right) -> IRCons (f left) (f right)
@@ -383,8 +360,8 @@ isLambda IRLambda {} = True
 isLambda _ = False
 
 irPrintFlat :: IRExpr -> String
-irPrintFlat (IRIfMode LazyIf _ _ _) = "IRIf"
-irPrintFlat (IRIfMode SelectIf _ _ _) = "IRSelect"
+irPrintFlat (IRIf _ _ _) = "IRIf"
+irPrintFlat (IRSelect _ _ _) = "IRSelect"
 irPrintFlat (IROp _ _ _) = "IROp"
 irPrintFlat (IRUnaryOp _ _) = "IRUnaryOp"
 irPrintFlat (IRTheta _ _) = "IRTheta"

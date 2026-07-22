@@ -7,6 +7,7 @@ module SPLL.CodeGenPyTorch (
 ) where
 
 import SPLL.IntermediateRepresentation
+import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..))
 import Data.List (intercalate, intersperse, isPrefixOf)
@@ -98,8 +99,12 @@ onHead f (x:xs) = f x : xs
 
 generateFunctions :: Bool -> IREnv -> [String]
 --contrary to the julia backend, we want to aggregate gen and prob into one classes. Ugly implementation, but it'll do for now.
-generateFunctions genBoil env@(IREnv funcs adts consts) =
-    let lut = envToLUT env ++ stdLib
+generateFunctions genBoil env0 =
+    -- Scalar backend: lower any IRSelect (from batched mode's select pass) back
+    -- to IRIf up front, so the rest of codegen never sees it (pytorch-tensorizer
+    -- M1, strategy B).
+    let env@(IREnv funcs adts consts) = desugarSelectEnv env0
+        lut = envToLUT env ++ stdLib
         callableNames = [ fromMaybe (n ++ "_gen") (lookup (n ++ "_gen") lut)
                         | IRFunGroup{groupName=n, genFun=Just (e, _)} <- funcs
                         , null (fst (unwrapLambdas e)) ]

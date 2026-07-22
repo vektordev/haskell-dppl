@@ -1,4 +1,3 @@
-{-# LANGUAGE PatternSynonyms #-}
 module PredefinedFunctions (
 globalFEnv,
 FPair(..),
@@ -15,7 +14,7 @@ renameDecl
 ) where
 
 import SPLL.Typing.RType (RType(..), Scheme(..), TVarR(..), ClassConstraint(..))
-import SPLL.IntermediateRepresentation (IRExpr, IRExpr(..), pattern IRIf, Operand(..), UnaryOperand(..), irMap, IREnv (IREnv), getIRSubExprs) --FIXME
+import SPLL.IntermediateRepresentation (IRExpr, IRExpr(..), Operand(..), UnaryOperand(..), irMap, IREnv (IREnv), getIRSubExprs) --FIXME
 import SPLL.Lang.Lang
 import Data.Maybe (fromJust)
 import SPLL.Lang.Types
