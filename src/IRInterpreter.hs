@@ -74,6 +74,10 @@ generate f neurals registry adts globalEnv env args (IRIf cond thenCase elseCase
     VBool True -> generate f neurals registry adts globalEnv env args thenCase
     VBool False -> generate f neurals registry adts globalEnv env args elseCase
     _ -> error $ "Type error: Condition is not a boolean: " ++ show condVal
+-- A select lowers to the lazy if under scalar interpretation (design
+-- pytorch-tensorizer, M1): only a batched backend distinguishes the two.
+generate f neurals registry adts globalEnv env args (IRSelect cond thenCase elseCase) =
+  generate f neurals registry adts globalEnv env args (IRIf cond thenCase elseCase)
 generate f neurals registry adts globalEnv env [] (IROp OpPlus a b) = do
   aVal <- generate f neurals registry adts globalEnv env [] a
   bVal <- generate f neurals registry adts globalEnv env [] b

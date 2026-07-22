@@ -1,4 +1,3 @@
-{-# LANGUAGE PatternSynonyms #-}
 module StandardLibrary
   ( StandardFunction(..)
   , stdIndexOf
@@ -8,7 +7,7 @@ module StandardLibrary
   , standardLibrary
   , standardEnv
   ) where
-import SPLL.IntermediateRepresentation (IRExpr(..), pattern IRIf, Operand (..))
+import SPLL.IntermediateRepresentation (IRExpr(..), Operand (..))
 import SPLL.Lang.Types
 
 data StandardFunction = StandardFunction {functionName :: String, parameterCount :: Int, functionBody :: IRExpr}

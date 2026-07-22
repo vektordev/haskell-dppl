@@ -190,6 +190,18 @@ simplify x@(IRIf cond left right) =
       then left
       else right
     else x
+-- The same two foldings are sound for a select (pytorch-tensorizer M1): equal
+-- arms collapse to that value, and a constant mask picks one arm -- both hold
+-- whether one arm is taken (scalar) or both are computed and masked (batched),
+-- so unlike distributeIf these are safe to fire on IRSelect. They keep batched
+-- code from bloating when the select pass converts constant-conditioned ifs.
+simplify (IRSelect _ left right) | left == right = left
+simplify x@(IRSelect cond left right) =
+  if isValue cond
+    then if unval cond == VBool True
+      then left
+      else right
+    else x
 simplify x@(IRCons left right) =
   if isValue left && isValue right
     then let (VList tl) = unval right in IRConst (VList (ListCont (unval left) tl))
@@ -369,6 +381,7 @@ optimizeCommonSubexpr topExpr = evalState (scan (annotateIR topExpr)) 0
     descendToScanRoots :: AnnIR -> State Int IRExpr
     descendToScanRoots a = case annExpr a of
       IRIf{}          | [c, t, el] <- annKids a -> IRIf <$> descendToScanRoots c <*> scan t <*> scan el
+      IRSelect{}      | [c, t, el] <- annKids a -> IRSelect <$> descendToScanRoots c <*> scan t <*> scan el
       IRLambda n _    | [b] <- annKids a -> IRLambda n <$> scan b
       IREnumSum n v _ | [b] <- annKids a -> IREnumSum n v <$> scan b
       e -> do
@@ -382,6 +395,7 @@ optimizeCommonSubexpr topExpr = evalState (scan (annotateIR topExpr)) 0
     descendBlocked :: Set.Set (Int, Int) -> AnnIR -> State Int IRExpr
     descendBlocked keys a = case annExpr a of
       IRIf{}          | [c, t, el] <- annKids a -> IRIf <$> route c <*> scan t <*> scan el
+      IRSelect{}      | [c, t, el] <- annKids a -> IRSelect <$> route c <*> scan t <*> scan el
       IRLambda n _    | [b] <- annKids a -> IRLambda n <$> scan b
       IREnumSum n v _ | [b] <- annKids a -> IREnumSum n v <$> scan b
       e -> do
@@ -476,6 +490,7 @@ hashStr = foldl' (\a c -> hashMix a (fromEnum c)) 5381
 headHash :: IRExpr -> Int
 headHash e = case e of
   IRIf{}            -> 1
+  IRSelect{}        -> 33
   IROp op _ _       -> hashMix 2 (hashStr (show op))
   IRUnaryOp op _    -> hashMix 3 (hashStr (show op))
   IRTheta _ i       -> hashMix 4 i
@@ -536,6 +551,10 @@ unconditionalAnns a0 = go a0 []
   where
     go a acc = a : case annExpr a of
       IRIf{}      -> case annKids a of { (c:_) -> go c acc; [] -> acc }
+      -- A select's arms are conditional under scalar lowering exactly like an
+      -- if's (pytorch-tensorizer M1): only the condition is unconditional, so a
+      -- guarded subexpression must not be counted as hoistable above the guard.
+      IRSelect{}  -> case annKids a of { (c:_) -> go c acc; [] -> acc }
       IRLambda{}  -> acc
       IREnumSum{} -> acc
       _           -> foldr go acc (annKids a)
@@ -562,6 +581,7 @@ tallyAnns anns = [ (a, countAt key idx) | (key, idx, a) <- reverse order ]
 -- | Rebuild a node from a fresh list of children (inverse of 'getIRSubExprs').
 setIRSubExprs :: IRExpr -> [IRExpr] -> IRExpr
 setIRSubExprs (IRIf{}) [a, b, c] = IRIf a b c
+setIRSubExprs (IRSelect{}) [a, b, c] = IRSelect a b c
 setIRSubExprs (IROp op _ _) [a, b] = IROp op a b
 setIRSubExprs (IRUnaryOp op _) [a] = IRUnaryOp op a
 setIRSubExprs (IRTheta _ i) [a] = IRTheta a i

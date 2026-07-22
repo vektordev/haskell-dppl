@@ -10,6 +10,7 @@ module SPLL.AutoNeural(
 , planIndexOf
 , validateEncodeGaussian
 , makeTopLevelEncodeFun
+, neuralDecoderSuffix
 ) where
 
 import SPLL.Lang.Types
@@ -57,13 +58,20 @@ makeAutoNeural adts conf registry decl@(name, declType, tag) =
 resolvePartitionAnnotation :: [(RType, MultiValue)] -> RType -> Maybe MultiValue -> Maybe MultiValue
 resolvePartitionAnnotation registry ty tag = lookup ty registry <|> tag
 
+-- | The naming convention 'makeDecoderFunGroup' uses to mark a decoder's own
+-- 'IRFunGroup' (as opposed to the value-producing SPLL function that reads
+-- it): its group name is the network's declared name with this suffix
+-- appended.
+neuralDecoderSuffix :: String
+neuralDecoderSuffix = "_auto"
+
 -- Decoder: Symbol -> target. Generates sampling and probability reader functions for NN1.
 -- It hosts no encode function (the encode lives on the value-producing SPLL function).
 -- fwdDecl is the human-readable forward declaration (NN1's required output layout); it is
 -- stored as the group's doc so codegen emits it as a header comment beside the readers.
 makeDecoderFunGroup :: [ADTDecl] -> CompilerConfig -> String -> RType -> Maybe MultiValue -> String -> IRFunGroup
 makeDecoderFunGroup adts conf name target tag fwdDecl =
-  IRFunGroup (name ++ "_auto")
+  IRFunGroup (name ++ neuralDecoderSuffix)
     (Just (IRLambda symbol $ makeGen adts plan name, "Wrapper for the neural network function"))
     (Just (makeProb adts conf plan, "Inference function for neural network function"))
     Nothing

@@ -4,6 +4,7 @@ module SPLL.CodeGenJulia (
 ) where
 
 import SPLL.IntermediateRepresentation
+import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.Lang.Lang
 import Data.List (intercalate)
 import SPLL.Lang.Types
@@ -116,7 +117,10 @@ generateADTClass (name, fields) =
   where fieldNames = map fst fields
 
 generateFunctions :: IREnv -> [String]
-generateFunctions (IREnv funcs adts consts) = do
+generateFunctions env0 = do
+  -- Scalar backend: lower any IRSelect back to IRIf up front (pytorch-tensorizer
+  -- M1, strategy B), so the rest of codegen never encounters it.
+  let IREnv funcs adts consts = desugarSelectEnv env0
   let adtClasses = generateADTClasses adts
   let constsStr = map (\(name, val) -> name ++ " = " ++ juliaVal val) consts
   let callableNames = [ n ++ "_gen"

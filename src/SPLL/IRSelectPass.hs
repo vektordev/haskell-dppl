@@ -8,16 +8,19 @@
 -- codegen. Any future backend (Julia broadcast, JAX) reuses it, and @-d@
 -- intermediates make the rewrite auditable.
 --
--- This is M1: the pass alone. It retags eligible 'LazyIf' nodes to 'SelectIf'
+-- This is M1: the pass alone. It rewrites eligible 'IRIf' nodes to 'IRSelect'
 -- but changes nothing about how they are emitted — the scalar backends lower
--- both modes to the same lazy ternary — so running it is a behavioural no-op,
--- pinned by a corpus differential test. The eligibility predicate here is the
--- seed of the M2 fragment guard; growing it (poison masking, the batched
--- runtime) is later milestones.
+-- 'IRSelect' identically to 'IRIf' (the interpreter delegates, each codegen
+-- desugars it at entry) — so running it is a behavioural no-op, pinned by a
+-- corpus differential test. The eligibility predicate here is the seed of the
+-- M2 fragment guard; growing it (poison masking, the batched runtime) is later
+-- milestones.
 module SPLL.IRSelectPass
   ( selectPassEnv
   , selectPassExpr
   , isTensorFragment
+  , desugarSelectEnv
+  , desugarSelectExpr
   ) where
 
 import SPLL.IntermediateRepresentation
@@ -36,19 +39,20 @@ selectPassGroup g = g
   }
   where onBody (body, doc) = (selectPassExpr body, doc)
 
--- | Retag every elementwise-eligible conditional in an expression to
--- 'SelectIf'. Bottom-up ('irMap'), so a node's arms are already processed when
--- it is examined; retagging an inner if does not change its eligibility (a
--- select-if is elementwise exactly when the lazy-if it came from was), so the
--- traversal order is immaterial to the result.
+-- | Rewrite every elementwise-eligible 'IRIf' in an expression to 'IRSelect'.
+-- Bottom-up ('irMap'), so a node's arms are already processed when it is
+-- examined; converting an inner if does not change its eligibility (an
+-- 'IRSelect' is elementwise exactly when the 'IRIf' it came from was, and
+-- 'isTensorFragment' treats the two alike), so the traversal order is
+-- immaterial to the result.
 selectPassExpr :: IRExpr -> IRExpr
-selectPassExpr = irMap retag
+selectPassExpr = irMap convert
   where
-    retag e@(IRIf cond thn els)
+    convert e@(IRIf cond thn els)
       | isTensorFragment cond && isTensorFragment thn && isTensorFragment els
       = IRSelect cond thn els
       | otherwise = e
-    retag e = e
+    convert e = e
 
 -- | Is this subexpression in the /tensor fragment/ — free of the constructs a
 -- per-element @where@ cannot stand in for? Value-dependent control flow ('IRIf'
@@ -85,3 +89,27 @@ isTensorFragment expr = ok expr && all isTensorFragment (getIRSubExprs expr)
       IRError _         -> False
       IRConformsTo _ _  -> False
       _                 -> True
+
+-- | Lower every 'IRSelect' back to an 'IRIf' throughout an environment. This is
+-- how scalar codegens consume select-tagged IR (design pytorch-tensorizer, M1,
+-- strategy B): they call this once at entry so the rest of the backend never
+-- sees an 'IRSelect' and needs no per-site handling. A batched backend, by
+-- contrast, would lower 'IRSelect' to @torch.where@ and would /not/ desugar.
+desugarSelectEnv :: IREnv -> IREnv
+desugarSelectEnv (IREnv groups adts globals) =
+  IREnv (map onGroup groups) adts globals
+  where
+    onGroup g = g
+      { genFun   = fmap onBody (genFun g)
+      , probFun  = fmap onBody (probFun g)
+      , integFun = fmap onBody (integFun g)
+      , encodeFun = fmap onBody (encodeFun g)
+      , normalFun = fmap onBody (normalFun g)
+      }
+    onBody (body, doc) = (desugarSelectExpr body, doc)
+
+desugarSelectExpr :: IRExpr -> IRExpr
+desugarSelectExpr = irMap lower
+  where
+    lower (IRSelect cond thn els) = IRIf cond thn els
+    lower e                       = e
