@@ -76,6 +76,23 @@ data TypeInfo = TypeInfo {
 }
 ```
 
+The annotation is held in a record wrapper around a parametric base functor, rather than
+as a first field on each constructor:
+
+```haskell
+data Expr = Expr { ann :: TypeInfo, node :: ExprF Expr }
+data ExprF a = IfThenElse a a a | InjF InjFName [a] | Var String | Constant Value | ...
+               deriving (Show, Eq, Functor, Foldable, Traversable)
+```
+
+So a node is written and matched as `Expr ti (IfThenElse c t f)`. The derived
+`Functor`/`Foldable`/`Traversable` are what let `SPLL.Lang.Lang`'s traversals
+(`tMap`, `tMapM`, `tMapHead`, `getSubExprs`, `setSubExprs`, `getTypeInfo`, `setTypeInfo`)
+be generic one-liners instead of per-constructor case blocks. `Constant` deliberately
+holds a concrete `Value`, not a `GenericValue a`: a `Value` can embed `Expr`s inside a
+`VClosure`, but those are not AST sub-expressions and must stay out of derived traversals.
+`SPLL.Prelude`'s smart constructors build nodes through `mkExpr :: ExprF Expr -> Expr`.
+
 `PType` classifies how uncertainty flows through a node, forming a partial order:
 
 ```
