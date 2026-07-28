@@ -85,8 +85,8 @@ instance Arbitrary Expr where
 
 genExpr :: Int -> Gen Expr
 genExpr 0 = oneof [
-  Constant makeTypeInfo <$> arbitrary,
-  Var makeTypeInfo <$> genLeafName
+  (\v -> Expr makeTypeInfo (Constant v)) <$> arbitrary,
+  (\n -> Expr makeTypeInfo (Var n)) <$> genLeafName
   ]
 -- ReadNN is deliberately not generated here: TestParser's exprToString/parser
 -- round-trip harness has no concrete syntax for an arbitrary-expression
@@ -96,14 +96,14 @@ genExpr 0 = oneof [
 -- and has no round-trip requirement.
 genExpr n = oneof [
   genExpr 0,
-  Apply makeTypeInfo <$> genExpr (n `div` 2) <*> genExpr (n `div` 2),
-  IfThenElse makeTypeInfo <$> genExpr (n `div` 3) <*> genExpr (n `div` 3) <*> genExpr (n `div` 3),
-  Lambda makeTypeInfo <$> genValidIdentifier <*> genExpr (n-1),
+  (\a b -> Expr makeTypeInfo (Apply a b)) <$> genExpr (n `div` 2) <*> genExpr (n `div` 2),
+  (\a b c -> Expr makeTypeInfo (IfThenElse a b c)) <$> genExpr (n `div` 3) <*> genExpr (n `div` 3) <*> genExpr (n `div` 3),
+  (\x body -> Expr makeTypeInfo (Lambda x body)) <$> genValidIdentifier <*> genExpr (n-1),
   genInjFApp (n `div` 2),
-  ThetaI makeTypeInfo <$> genExpr (n `div` 2) <*> arbitrary,
-  Subtree makeTypeInfo <$> genExpr (n `div` 2) <*> arbitrary,
-  GreaterThan makeTypeInfo <$> genExpr (n `div` 2) <*> genExpr (n `div` 2),
-  LessThan makeTypeInfo <$> genExpr (n `div` 2) <*> genExpr (n `div` 2)
+  (\e i -> Expr makeTypeInfo (ThetaI e i)) <$> genExpr (n `div` 2) <*> arbitrary,
+  (\e i -> Expr makeTypeInfo (Subtree e i)) <$> genExpr (n `div` 2) <*> arbitrary,
+  (\a b -> Expr makeTypeInfo (GreaterThan a b)) <$> genExpr (n `div` 2) <*> genExpr (n `div` 2),
+  (\a b -> Expr makeTypeInfo (LessThan a b)) <$> genExpr (n `div` 2) <*> genExpr (n `div` 2)
   ]
 
 -- | Full Expr-constructor coverage (all 11 constructors, including ReadNN),
@@ -111,12 +111,12 @@ genExpr n = oneof [
 -- through the parser's pretty-printer.
 genRawFuzzExpr :: Int -> Gen Expr
 genRawFuzzExpr 0 = oneof [
-  Constant makeTypeInfo <$> genValueWide 3,
-  Var makeTypeInfo <$> genLeafName
+  (\v -> Expr makeTypeInfo (Constant v)) <$> genValueWide 3,
+  (\n -> Expr makeTypeInfo (Var n)) <$> genLeafName
   ]
 genRawFuzzExpr n = oneof [
   genExpr n,
-  ReadNN makeTypeInfo <$> genValidIdentifier <*> genRawFuzzExpr (n-1)
+  (\name body -> Expr makeTypeInfo (ReadNN name body)) <$> genValidIdentifier <*> genRawFuzzExpr (n-1)
   ]
 
 -- Leaf variable references: a mix of fresh identifiers (mostly unbound --
@@ -142,7 +142,7 @@ genInjFApp :: Int -> Gen Expr
 genInjFApp n = do
   name <- genInjFName
   args <- vectorOf (parameterCount [] name) (genExpr n)
-  return (InjF makeTypeInfo (Named name) args)
+  return (Expr makeTypeInfo (InjF (Named name) args))
 
 -- Additional Arbitrary instances
 instance Arbitrary Program where
@@ -159,7 +159,7 @@ genFunctionDecl = do
   numArgs <- choose (0, 3)  -- reasonable limit for test cases
   args <- vectorOf numArgs genValidIdentifier
   body <- arbitrary
-  let expr = foldr (Lambda makeTypeInfo) body args
+  let expr = foldr (\x acc -> Expr makeTypeInfo (Lambda x acc)) body args
   return (name, expr)
 
 -- | Full-space raw program generator: like the 'Arbitrary Program' instance,
@@ -175,7 +175,7 @@ genRawFuzzProgram = do
   -- validator check and actually exercise the deeper compilation stages.
   mainBody <- sized genRawFuzzExpr
   mainArgs <- choose (0, 3) >>= flip vectorOf genValidIdentifier
-  let mainDecl = ("main", foldr (Lambda makeTypeInfo) mainBody mainArgs)
+  let mainDecl = ("main", foldr (\x acc -> Expr makeTypeInfo (Lambda x acc)) mainBody mainArgs)
   extraFuncs <- vectorOf numExtraFuncs genRawFuzzFunctionDecl
   neurals <- vectorOf numNeurals genNeuralDecl
   return $ Program (mainDecl : extraFuncs) neurals [] []
@@ -186,7 +186,7 @@ genRawFuzzFunctionDecl = do
   numArgs <- choose (0, 3)
   args <- vectorOf numArgs genValidIdentifier
   body <- sized genRawFuzzExpr
-  let expr = foldr (Lambda makeTypeInfo) body args
+  let expr = foldr (\x acc -> Expr makeTypeInfo (Lambda x acc)) body args
   return (name, expr)
 
 genNeuralDecl :: Gen NeuralDecl
@@ -235,54 +235,54 @@ exprGens = [
 mkNormal :: [String] -> Int -> Gen Expr
 mkNormal varnames size = do
   ti <- arbitrary
-  return $ Var ti "Normal"
+  return $ Expr ti (Var "Normal")
 
 mkUniform :: [String] -> Int -> Gen Expr
 mkUniform varnames size = do
   ti <- arbitrary
-  return $ Var ti "Uniform"
+  return $ Expr ti (Var "Uniform")
 
 mkThetaI :: [String] -> Int -> Gen Expr
 mkThetaI varnames size = do
   t0 <- arbitrary
   t1 <- arbitrary
   ix <- arbitrary
-  return $ ThetaI t0 (Var t1 "thetas") ix
+  return $ Expr t0 (ThetaI (Expr t1 (Var "thetas")) ix)
 
 mkGreaterThan :: [String] -> Int -> Gen Expr
 mkGreaterThan varnames size = do
   t <- arbitrary
   e1 <- genExprNames' varnames (size `div` 2)
   e2 <- genExprNames' varnames (size `div` 2)
-  return (GreaterThan t e1 e2)
+  return (Expr t (GreaterThan e1 e2))
 
 mkMultF :: [String] -> Int -> Gen Expr
 mkMultF varnames size = do
   t <- arbitrary
   e1 <- genExprNames' varnames (size `div` 2)
   e2 <- genExprNames' varnames (size `div` 2)
-  return (InjF t (Named "mult") [e1, e2])
+  return (Expr t (InjF (Named "mult") [e1, e2]))
 
 mkMultI :: [String] -> Int -> Gen Expr
 mkMultI varnames size = do
   t <- arbitrary
   e1 <- genExprNames' varnames (size `div` 2)
   e2 <- genExprNames' varnames (size `div` 2)
-  return (InjF t (Named "multI") [e1, e2])
+  return (Expr t (InjF (Named "multI") [e1, e2]))
 
 mkPlusF :: [String] -> Int -> Gen Expr
 mkPlusF varnames size = do
   t <- arbitrary
   e1 <- genExprNames' varnames (size `div` 2)
   e2 <- genExprNames' varnames (size `div` 2)
-  return (InjF t (Named "plus") [e1, e2])
+  return (Expr t (InjF (Named "plus") [e1, e2]))
 
 mkPlusI :: [String] -> Int -> Gen Expr
 mkPlusI varnames size = do
   t <- arbitrary
   e1 <- genExprNames' varnames (size `div` 2)
   e2 <- genExprNames' varnames (size `div` 2)
-  return (InjF t (Named "plusI") [e1, e2])
+  return (Expr t (InjF (Named "plusI") [e1, e2]))
 
 mkConditional :: [String] -> Int -> Gen Expr
 mkConditional varnames size = do
@@ -290,7 +290,7 @@ mkConditional varnames size = do
   e1 <- genExprNames' varnames (size `div` 3)
   e2 <- genExprNames' varnames (size `div` 3)
   e3 <- genExprNames' varnames (size `div` 3)
-  return (IfThenElse t e1 e2 e3)
+  return (Expr t (IfThenElse e1 e2 e3))
 
 genProgNames ::  [String] -> Gen Program
 genProgNames names = do

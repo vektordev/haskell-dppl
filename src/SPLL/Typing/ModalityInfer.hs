@@ -42,7 +42,7 @@ import Data.Map.Strict (Map)
 import Data.List (find)
 
 import SPLL.Lang.Types
-  ( Expr(..), Program(..), TypeInfo(..), InjFName(..), ChainName, ADTDecl, CompilerError, FnDecl
+  ( Expr(..), ExprF(..), Program(..), TypeInfo(..), InjFName(..), ChainName, ADTDecl, CompilerError, FnDecl
   , dataName, constructors )
 import SPLL.Lang.Lang (getTypeInfo)
 import SPLL.Typing.Typing (setPType)
@@ -318,43 +318,43 @@ inferE ctx env expr = case expr of
 
   -- The theta-tree source of ThetaI/Subtree is left untouched (PInfer2 does not
   -- annotate it either); only this node's own modality is recorded.
-  ThetaI ti s i  -> done (IG gExact) (ThetaI (setPType ti Deterministic) s i) []
-  Subtree ti s i -> done (IG gExact) (Subtree (setPType ti Deterministic) s i) []
-  Constant ti v  -> done (IG gExact) (Constant (setPType ti Deterministic) v) []
+  Expr ti (ThetaI s i)  -> done (IG gExact) (Expr (setPType ti Deterministic) (ThetaI s i)) []
+  Expr ti (Subtree s i) -> done (IG gExact) (Expr (setPType ti Deterministic) (Subtree s i)) []
+  Expr ti (Constant v)  -> done (IG gExact) (Expr (setPType ti Deterministic) (Constant v)) []
 
-  Var ti name ->
+  Expr ti (Var name) ->
     let m = case Map.lookup name env of
               Just im            -> im
               Nothing
                 | name == "Normal"  -> IG gNormal
                 | name == "Uniform" -> IG gIntegrate
                 | otherwise         -> IG gExact   -- unbound ⇒ Deterministic (PInfer2 default)
-    in done m (Var (setPType ti (projectNode (rType ti) m)) name) []
+    in done m (Expr (setPType ti (projectNode (rType ti) m)) (Var name)) []
 
-  ReadNN ti name s ->
+  Expr ti (ReadNN name s) ->
     let (_, s', sa) = inferE ctx env s
         g = tagFin (icADTs ctx) ti (if rType ti == TFloat then gNormal else gIntegrate)
-    in done (IG g) (ReadNN (setPType ti (projectGround g)) name s') sa
+    in done (IG g) (Expr (setPType ti (projectGround g)) (ReadNN name s')) sa
 
-  GreaterThan ti a b -> compareNode ti GreaterThan a b
-  LessThan    ti a b -> compareNode ti LessThan a b
+  Expr ti (GreaterThan a b) -> compareNode ti GreaterThan a b
+  Expr ti (LessThan    a b) -> compareNode ti LessThan a b
 
-  InjF ti name@(Named fname) args ->
+  Expr ti (InjF name@(Named fname) args) ->
     let rs   = map (inferE ctx env) args
         mods = [ m  | (m,_,_) <- rs ]
         es'  = [ e  | (_,e,_) <- rs ]
         acc  = concat [ a | (_,_,a) <- rs ]
         m    = gateScalarFamily (rType ti) (tagFinMod (icADTs ctx) ti (injFMod (icADTs ctx) fname mods))
-    in done m (InjF (setPType ti (projectI m)) name es') acc
+    in done m (Expr (setPType ti (projectI m)) (InjF name es')) acc
 
-  IfThenElse ti c t f ->
+  Expr ti (IfThenElse c t f) ->
     let (mc, c', ca) = inferE ctx env c
         (mt, t', ta) = inferE ctx env t
         (mf, f', fa) = inferE ctx env f
         m = applyOuterI (outerI mc) (meetI mt mf)
-    in done m (IfThenElse (setPType ti (projectI m)) c' t' f') (ca ++ ta ++ fa)
+    in done m (Expr (setPType ti (projectI m)) (IfThenElse c' t' f')) (ca ++ ta ++ fa)
 
-  Lambda ti x body ->
+  Expr ti (Lambda x body) ->
     let argTy = case rType ti of TArrow a _ -> a; _ -> TFloat
         arr   = IArr gExact (\m -> let (im,_,_) = inferE ctx (Map.insert x m env) body in im)
         (bodyRepMod, body', ba) = inferE ctx (Map.insert x (repIMod argTy) env) body
@@ -363,9 +363,9 @@ inferE ctx env expr = case expr of
     -- closure 'Deterministic' — IRCompiler selects prob/integrate codegen from the
     -- function node's pType (e.g. a top-level @distr x = 2*Uniform+x@ must read
     -- 'Integrate', not the lossy outer 'Deterministic'). Matches @PInfer2@.
-    in done arr (Lambda (setPType ti (projectI bodyRepMod)) x body') ba
+    in done arr (Expr (setPType ti (projectI bodyRepMod)) (Lambda x body')) ba
 
-  Apply ti f arg ->
+  Expr ti (Apply f arg) ->
     let (argMod, arg', aa) = inferE ctx env arg
     in case f of
          -- A directly-applied lambda is a @let@: bind the parameter to the
@@ -377,7 +377,7 @@ inferE ctx env expr = case expr of
          -- preserved) while its standalone law (and density, counted once at its
          -- own slot) is untouched. The capability gate (@gCap /= Exact@) skips
          -- the FC query for deterministic and function-valued bindings.
-         Lambda lti x body ->
+         Expr lti (Lambda x body) ->
            let witnessed = gCap (outerI argMod) /= Exact
                         && isWitnessedLambda (icFC ctx) (icADTs ctx) (icObs ctx) (chainName lti)
                boundMod = if witnessed then iwit argMod else argMod
@@ -385,13 +385,13 @@ inferE ctx env expr = case expr of
                -- The applied lambda node carries the body's pType (its result),
                -- matching @PInfer2@ and what @IRCompiler@ reads, not the outer
                -- closure 'Deterministic'.
-               f' = Lambda (setPType lti (projectI bodyMod)) x body'
-           in done bodyMod (Apply (setPType ti (projectNode (rType ti) bodyMod)) f' arg')
+               f' = Expr (setPType lti (projectI bodyMod)) (Lambda x body')
+           in done bodyMod (Expr (setPType ti (projectNode (rType ti) bodyMod)) (Apply f' arg'))
                    (laccLambda lti ++ ba ++ aa)
          _ ->
            let (fMod, f', fa) = inferE ctx env f
                m = applyI fMod argMod
-           in done m (Apply (setPType ti (projectNode (rType ti) m)) f' arg') (fa ++ aa)
+           in done m (Expr (setPType ti (projectNode (rType ti) m)) (Apply f' arg')) (fa ++ aa)
 
   where
     done m e acc = (m, e, (cnOf e, outerI m) : acc)
@@ -402,7 +402,7 @@ inferE ctx env expr = case expr of
       let (ma, a', aacc) = inferE ctx env a
           (mb, b', bacc) = inferE ctx env b
           g = tagFin (icADTs ctx) ti (compareGround (outerI ma) (outerI mb))
-      in done (IG g) (ctor (setPType ti (projectGround g)) a' b') (aacc ++ bacc)
+      in done (IG g) (Expr (setPType ti (projectGround g)) (ctor a' b')) (aacc ++ bacc)
 
 -- | Comparison (@>@/@<@): the Boolean result is a Bernoulli (finite support).
 -- Both deterministic ⇒ a known Boolean; both integral-ready ⇒ exact tail

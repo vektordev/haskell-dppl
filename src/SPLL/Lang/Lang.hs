@@ -1,5 +1,6 @@
 module SPLL.Lang.Lang (
   Expr (..)
+, ExprF (..)
 , ExprStub(..)
 , toStub
 , Value
@@ -51,21 +52,22 @@ import SPLL.Typing.AlgebraicDataTypes
 import qualified Data.Set as Set
 import Data.Maybe
 import Data.List (nub, transpose, find)
+import Data.Traversable (mapAccumL)
 import qualified Data.Bifunctor as Bifunctor
 
 toStub :: Expr -> ExprStub
-toStub expr = case expr of
+toStub expr = case node expr of
   IfThenElse {}  -> StubIfThenElse
   GreaterThan {} -> StubGreaterThan
   LessThan {}    -> StubLessThan
-  (ThetaI _ _ _) -> StubThetaI
-  (Subtree _ _ _)-> StubSubtree
-  (Constant _ _) -> StubConstant
-  (Var _ _)      -> StubVar
+  ThetaI {}      -> StubThetaI
+  Subtree {}     -> StubSubtree
+  Constant {}    -> StubConstant
+  Var {}         -> StubVar
   InjF {}        -> StubInjF
   Lambda {}      -> StubLambda
   Apply {}       -> StubApply
-  (ReadNN _ _ _) -> StubReadNN
+  ReadNN {}      -> StubReadNN
 
 floatApproxEqThresh :: Double
 floatApproxEqThresh = 1e-10
@@ -83,154 +85,54 @@ predicateExpr :: (Expr -> Bool) -> Expr -> Bool
 predicateExpr f e = f e && and (map (predicateExpr f) (getSubExprs e))
 
 varsOfExpr :: Expr -> Set.Set String
-varsOfExpr expr = case expr of
-  (Var _ name) -> Set.singleton name
+varsOfExpr expr = case node expr of
+  Var name -> Set.singleton name
   _ -> Set.empty
 
 isNotTheta :: Expr -> Bool
-isNotTheta expr = case expr of
-  (ThetaI _ _ _) -> False
+isNotTheta expr = case node expr of
+  ThetaI {} -> False
   _ -> True
 
+-- | Replace the annotation on the root node only.
 tMapHead :: (Expr -> TypeInfo) -> Expr -> Expr
-tMapHead f expr = case expr of
-  (IfThenElse _ a b c) -> IfThenElse (f expr) a b c
-  (GreaterThan _ a b) -> GreaterThan (f expr) a b
-  (LessThan _ a b) -> LessThan (f expr) a b
-  (ThetaI _ a x) -> ThetaI (f expr) a x
-  (Subtree _ a x) -> Subtree (f expr) a x
-  (Constant _ x) -> Constant (f expr) x
-  (Var _ x) -> Var (f expr) x
-  (InjF _ x a) -> InjF (f expr) x a
-  (Lambda _ name a) -> Lambda (f expr) name a
-  (Apply _ a b) -> Apply (f expr) a b
-  (ReadNN _ n a) -> ReadNN (f expr) n a
+tMapHead f expr = expr { ann = f expr }
 
+-- | Bottom-up rewrite of every node's annotation. The callback sees the
+-- *original* node (children not yet rewritten).
 tMap :: (Expr -> TypeInfo) -> Expr -> Expr
-tMap f expr = case expr of
-  (IfThenElse _ a b c) -> IfThenElse (f expr) (tMap f a) (tMap f b) (tMap f c)
-  (GreaterThan _ a b) -> GreaterThan (f expr) (tMap f a) (tMap f b)
-  (LessThan _ a b) -> LessThan (f expr) (tMap f a) (tMap f b)
-  (ThetaI _ a x) -> ThetaI (f expr) (tMap f a) x
-  (Subtree _ a x) -> Subtree (f expr) (tMap f a) x
-  (Constant _ x) -> Constant (f expr) x
-  (Var _ x) -> Var (f expr) x
-  (InjF _ x a) -> InjF (f expr) x (map (tMap f) a)
-  (Lambda _ name a) -> Lambda (f expr) name (tMap f a)
-  (Apply _ a b) -> Apply (f expr) (tMap f a) (tMap f b)
-  (ReadNN _ n a) -> ReadNN (f expr) n (tMap f a)
+tMap f expr = Expr (f expr) (fmap (tMap f) (node expr))
 
 makeMain :: Expr -> Program
 makeMain expr = Program [("main", expr)] [] [] []
 
-getBinaryConstructor :: Expr -> (TypeInfo -> Expr -> Expr -> Expr)
-getBinaryConstructor GreaterThan {} = GreaterThan
-getBinaryConstructor LessThan {} = LessThan
-getBinaryConstructor Apply {} = Apply
-
-getUnaryConstructor :: Expr -> (TypeInfo -> Expr -> Expr)
-getUnaryConstructor (ThetaI _ _ i) = \t a -> ThetaI t a i
-getUnaryConstructor (Subtree _ _ i) = \t a -> Subtree t a i
-getUnaryConstructor (Lambda _ x _) = (`Lambda` x)
-getUnaryConstructor (ReadNN _ x _) = (`ReadNN` x)
-
-getNullaryConstructor :: Expr -> (TypeInfo -> Expr)
-getNullaryConstructor (Constant _ val) = (`Constant` val)
-getNullaryConstructor (Var _ x) = (`Var` x)
-
+-- | Monadic 'tMap'. The annotation effect runs before the children's.
 tMapM :: Monad m => (Expr -> m TypeInfo) -> Expr -> m Expr
-tMapM f expr@(IfThenElse _ a b c) = do
+tMapM f expr = do
   t <- f expr
-  fa <- tMapM f a
-  fb <- tMapM f b
-  fc <- tMapM f c
-  return $ IfThenElse t fa fb fc
-tMapM f expr@(InjF _ name p) = do
-  fp <- mapM (tMapM f) p
-  t <- f expr
-  return $ InjF t name fp
-tMapM f expr
-  | length (getSubExprs expr) == 0 = do
-      t <- f expr
-      return $ getNullaryConstructor expr t
-  | length (getSubExprs expr) == 1 = do
-       t <- f expr
-       subExpr <- tMapM f (getSubExprs expr !! 0)
-       return $ getUnaryConstructor expr t subExpr
-  | length (getSubExprs expr) == 2 =do
-       t <- f expr
-       subExpr0 <- tMapM f (getSubExprs expr !! 0)
-       subExpr1 <- tMapM f (getSubExprs expr !! 1)
-       return $ getBinaryConstructor expr t subExpr0 subExpr1
+  n <- traverse (tMapM f) (node expr)
+  return (Expr t n)
 
 getSubExprs :: Expr -> [Expr]
-getSubExprs expr = case expr of
-  (IfThenElse _ a b c) -> [a,b,c]
-  (GreaterThan _ a b) -> [a,b]
-  (LessThan _ a b) -> [a,b]
-  (ThetaI _ a _) -> [a]
-  (Subtree _ a _) -> [a]
-  (Constant _ _) -> []
-  (Var _ _) -> []
-  (InjF _ _ a) -> a
-  (Lambda _ _ a) -> [a]
-  (Apply _ a b) -> [a, b]
-  (ReadNN _ _ a) -> [a]
+getSubExprs = foldr (:) [] . node
 
+-- | Replace the sub-expressions of a node, positionally. The replacement list
+-- must have the same length as 'getSubExprs' of the same node (except for
+-- 'InjF', whose arity is variable).
 setSubExprs :: Expr -> [Expr] -> Expr
-setSubExprs expr [] = case expr of
-  Constant t x -> Constant t x
-  Var t x -> Var t x
-  InjF t n _ -> InjF t n []
-  _ -> error "unmatched expr in setSubExprs"
-setSubExprs expr [a] = case expr of
-  ThetaI t _ x -> ThetaI t a x
-  Subtree t _ x -> Subtree t a x
-  Lambda t l _ -> Lambda t l a
-  ReadNN t n _ -> ReadNN t n a
-  InjF t n _ -> InjF t n [a]
-  _ -> error "unmatched expr in setSubExprs"
-setSubExprs expr [a,b] = case expr of
-  GreaterThan t _ _ -> GreaterThan t a b
-  LessThan t _ _ -> LessThan t a b
-  Apply t _ _ -> Apply t a b
-  InjF t n _ -> InjF t n [a, b]
-  _ -> error "unmatched expr in setSubExprs"
-setSubExprs expr [a,b,c] = case expr of
-  IfThenElse t _ _ _ -> IfThenElse t a b c
-  InjF t n _ -> InjF t n [a, b, c]
-  _ -> error "unmatched expr in setSubExprs"
-setSubExprs expr subExprs = case expr of
-  InjF t l _ -> InjF t l subExprs
-  _ -> error "unmatched expr in setSubExprs"
+setSubExprs (Expr t (InjF n _)) subExprs = Expr t (InjF n subExprs)
+setSubExprs expr subExprs
+  | length subExprs /= length (getSubExprs expr) = error "unmatched expr in setSubExprs"
+  | otherwise = Expr (ann expr) (snd (mapAccumL replace subExprs (node expr)))
+  where
+    replace (x:rest) _ = (rest, x)
+    replace []       _ = error "unmatched expr in setSubExprs"
 
 getTypeInfo :: Expr -> TypeInfo
-getTypeInfo expr = case expr of
-  (IfThenElse t _ _ _)  -> t
-  (GreaterThan t _ _)   -> t
-  (LessThan t _ _)      -> t
-  (ThetaI t _ _)        -> t
-  (Subtree t _ _)       -> t
-  (Constant t _)        -> t
-  (Var t _)             -> t
-  (InjF t _ _)          -> t
-  (Lambda t _ _)        -> t
-  (Apply t _ _)         -> t
-  (ReadNN t _ _)        -> t
+getTypeInfo = ann
 
 setTypeInfo :: Expr -> TypeInfo -> Expr
-setTypeInfo expr t = case expr of
-  (IfThenElse _ a b c)  -> IfThenElse t a b c
-  (GreaterThan _ a b)   -> GreaterThan t a b
-  (LessThan _ a b)      -> LessThan t a b
-  (ThetaI _ a b)        -> ThetaI t a b
-  (Subtree _ a b)       -> Subtree t a b
-  (Constant _ a)        -> Constant t a
-  (Var _ a)             -> Var t a
-  (InjF _ a b)          -> InjF t a b
-  (Lambda _ a b)        -> Lambda t a b
-  (Apply _ a b)         -> Apply t a b
-  (ReadNN _ a b)        -> ReadNN t a b
+setTypeInfo expr t = expr { ann = t }
 
 constructVList :: [GenericValue a] -> GenericValue a
 constructVList xs = VList $ foldr ListCont EmptyList xs
@@ -474,17 +376,17 @@ prettyPrintCustomTI fn expr =
       fstLine = printFlat expr ++ " :: (" ++ fn (getTypeInfo expr) ++ ")"
 
 printFlat :: Expr -> String
-printFlat expr = case expr of
+printFlat expr = case node expr of
   IfThenElse {} -> "IfThenElse"
   GreaterThan {} -> "GreaterThan"
   LessThan {} -> "LessThan"
-  (ThetaI _ _ i) -> "Theta_" ++ show i
-  (Subtree _ _ i) -> "Subtree_" ++ show i
-  (Constant _ x) -> "Constant (" ++ show x ++ ")"
-  (Var _ a) -> "Var " ++ a
-  (InjF _ (Named fname) _) -> "InjF (" ++ fname ++ ")"
-  (Lambda _ name _) -> "\\" ++ name  ++ " -> "
+  ThetaI _ i -> "Theta_" ++ show i
+  Subtree _ i -> "Subtree_" ++ show i
+  Constant x -> "Constant (" ++ show x ++ ")"
+  Var a -> "Var " ++ a
+  InjF (Named fname) _ -> "InjF (" ++ fname ++ ")"
+  Lambda name _ -> "\\" ++ name  ++ " -> "
   Apply {} -> "Apply"
-  (ReadNN _ name _) -> "ReadNN " ++ name
+  ReadNN name _ -> "ReadNN " ++ name
 
 

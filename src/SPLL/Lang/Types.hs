@@ -1,8 +1,13 @@
+{-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE DeriveFoldable #-}
+{-# LANGUAGE DeriveTraversable #-}
+
 module SPLL.Lang.Types
   ( ChainName
   , CompilerError
   , InjFName(..)
   , Expr(..)
+  , ExprF(..)
   , ExprStub(..)
   , TypeInfo(..)
   , makeTypeInfo
@@ -37,25 +42,40 @@ type CompilerError = String
 data InjFName = Named String
               deriving (Show, Eq)
 
-data Expr =
+-- | The AST node shapes, parameterised over the type of sub-expressions.
+--
+-- Splitting the shape out from the annotation is what makes the traversals in
+-- "SPLL.Lang.Lang" generic: 'Functor' \/ 'Foldable' \/ 'Traversable' are derived
+-- here, so @getSubExprs@, @tMap@, @tMapM@ and friends need no per-constructor
+-- boilerplate.
+--
+-- Note that @Constant@ holds a concrete 'Value' rather than a @GenericValue a@.
+-- A 'Value' can embed 'Expr's (inside a 'VClosure'), but those are *not*
+-- sub-expressions of the AST: making the field parametric would drag closure
+-- bodies into every derived traversal.
+data ExprF a =
               -- Flow Control
-                IfThenElse TypeInfo Expr Expr Expr
-              | InjF TypeInfo InjFName [Expr]
+                IfThenElse a a a
+              | InjF InjFName [a]
               -- Variables
-              | Var TypeInfo String
-              | Constant TypeInfo Value
-              | Lambda TypeInfo String Expr    -- (Currently) must use local context
-              | Apply TypeInfo Expr Expr
+              | Var String
+              | Constant Value
+              | Lambda String a    -- (Currently) must use local context
+              | Apply a a
               -- Parameters
-              | ThetaI TypeInfo Expr Int
-              | Subtree TypeInfo Expr Int
+              | ThetaI a Int
+              | Subtree a Int
               -- Boolean Operations
-              | GreaterThan TypeInfo Expr Expr
-              | LessThan TypeInfo Expr Expr
+              | GreaterThan a a
+              | LessThan a a
               -- Other
-              | ReadNN TypeInfo String Expr
+              | ReadNN String a
               -- TODO: Needs Concat to achieve proper SPN-parity.
-              deriving (Show, Eq)
+              deriving (Show, Eq, Functor, Foldable, Traversable)
+
+-- | An AST node: a 'TypeInfo' annotation paired with the node shape.
+data Expr = Expr { ann :: TypeInfo, node :: ExprF Expr }
+            deriving (Show, Eq)
 
 
 data ExprStub = StubIfThenElse

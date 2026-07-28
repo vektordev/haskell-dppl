@@ -76,7 +76,7 @@ module SPLL.Prelude
   ) where
 
 import SPLL.Lang.Lang
-import SPLL.Lang.Types (makeTypeInfo, GenericValue (..), CompilerError)
+import SPLL.Lang.Types (makeTypeInfo, GenericValue (..), CompilerError, Expr(..), ExprF(..))
 import SPLL.AutoNeural (validateEncodeGaussian)
 import SPLL.IntermediateRepresentation
 import SPLL.Analysis
@@ -99,12 +99,17 @@ import Debug.Pretty.Simple
 import Data.Maybe (isJust)
 import Data.List (find)
 
+-- | Build an AST node with a blank annotation. All the smart constructors
+-- below are annotation-free by construction; the inference passes fill them in.
+mkExpr :: ExprF Expr -> Expr
+mkExpr = Expr makeTypeInfo
+
 -- Flow control
 ifThenElse :: Expr -> Expr -> Expr -> Expr
-ifThenElse = IfThenElse makeTypeInfo
+ifThenElse c t e = mkExpr (IfThenElse c t e)
 
 injF :: String -> [Expr] -> Expr
-injF name = InjF makeTypeInfo (Named name)
+injF name args = mkExpr (InjF (Named name) args)
 
 --Arithmetic
 
@@ -153,35 +158,35 @@ letIn :: String -> Expr -> Expr -> Expr
 letIn s val body = apply (s #-># body) val
 
 var :: String -> Expr
-var = Var makeTypeInfo
+var n = mkExpr (Var n)
 
 constF :: Double -> Expr
-constF = Constant makeTypeInfo . VFloat
+constF x = mkExpr (Constant (VFloat x))
 
 constI :: Int -> Expr
-constI = Constant makeTypeInfo . VInt
+constI x = mkExpr (Constant (VInt x))
 
 constB :: Bool -> Expr
-constB = Constant makeTypeInfo . VBool
+constB x = mkExpr (Constant (VBool x))
 
 constL :: [Value] -> Expr
-constL lst = Constant makeTypeInfo (constructVList lst)
+constL lst = mkExpr (Constant (constructVList lst))
 
 (#->#) :: String -> Expr -> Expr
-(#->#) = Lambda makeTypeInfo
+(#->#) n b = mkExpr (Lambda n b)
 
 apply :: Expr -> Expr -> Expr
-apply = Apply makeTypeInfo
+apply f x = mkExpr (Apply f x)
 
 -- Distributions
 
 -- Distributions are prelude primitives: nullary named leaves bound to a primitive
 -- generator, represented as reserved-name Vars rather than dedicated constructors.
 uniform :: Expr
-uniform = Var makeTypeInfo "Uniform"
+uniform = mkExpr (Var "Uniform")
 
 normal :: Expr
-normal = Var makeTypeInfo "Normal"
+normal = mkExpr (Var "Normal")
 
 bernoulli :: Double -> Expr
 bernoulli p = uniform #<# constF p
@@ -196,10 +201,10 @@ dice sides = ifThenElse (bernoulli (1/fromIntegral sides)) (constI sides)  (dice
 -- Parameters
 
 theta :: Expr -> Int -> Expr
-theta = ThetaI makeTypeInfo
+theta e i = mkExpr (ThetaI e i)
 
 subtree :: Expr -> Int -> Expr
-subtree = Subtree makeTypeInfo
+subtree e i = mkExpr (Subtree e i)
 
 -- Product Types
 
@@ -210,7 +215,7 @@ cons h t = injF "Cons" [h, t]
 (#:#) = cons
 
 nul :: Expr
-nul = Constant makeTypeInfo (constructVList [])
+nul = mkExpr (Constant (constructVList []))
 
 isNull :: Expr -> Expr
 isNull e = injF "isNull" [e]
@@ -233,7 +238,7 @@ tsnd x = injF "snd" [x]
 -- Unit type
 
 unit :: Expr
-unit = Constant makeTypeInfo VUnit
+unit = mkExpr (Constant VUnit)
 
 -- Sum types
 
@@ -274,10 +279,10 @@ sfromRightPartial x = injF "fromRightPartial" [x]
 (#==#) a b = injF "eq" [a, b]
 
 (#>#) :: Expr -> Expr -> Expr
-(#>#) = GreaterThan makeTypeInfo
+(#>#) a b = mkExpr (GreaterThan a b)
 
 (#<#) :: Expr -> Expr -> Expr
-(#<#) = LessThan makeTypeInfo
+(#<#) a b = mkExpr (LessThan a b)
 
 (#&&#) :: Expr -> Expr -> Expr
 (#&&#) a b = injF "and" [a, b]
@@ -286,12 +291,12 @@ sfromRightPartial x = injF "fromRightPartial" [x]
 (#||#) a b = injF "or" [a, b]
 
 (#!#) :: Expr -> Expr
-(#!#) x = InjF makeTypeInfo (Named "not") [x]
+(#!#) x = mkExpr (InjF (Named "not") [x])
 
 -- Other
 
 readNN :: String -> Expr -> Expr 
-readNN = ReadNN makeTypeInfo
+readNN n e = mkExpr (ReadNN n e)
 
 -- This is a Z-Combinator
 -- TODO: Our typesystem is not ready for that yet 

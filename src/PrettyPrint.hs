@@ -23,7 +23,7 @@ pPrintIREnv (IREnv funcs _ consts) = intercalate "\n\n" $
     where wrapDecl name suffix (expr, doc) = wrapInFunctionDeclarationIR expr (name ++ suffix) doc []
 
 wrapInFunctionDeclaration :: Expr -> String -> [String] -> String
-wrapInFunctionDeclaration (Lambda _ n b) fName params = wrapInFunctionDeclaration b fName (n:params)
+wrapInFunctionDeclaration (Expr _ (Lambda n b)) fName params = wrapInFunctionDeclaration b fName (n:params)
 wrapInFunctionDeclaration e fName params = "def " ++ fName ++ "(" ++ intercalate ", " (reverse params) ++ "):\n" ++ indent 1 ++ pPrintExpr e 1 ++"\n"
 
 wrapInFunctionDeclarationIR :: IRExpr -> String -> String -> [String] -> String
@@ -31,17 +31,17 @@ wrapInFunctionDeclarationIR (IRLambda n b) fName doc params = wrapInFunctionDecl
 wrapInFunctionDeclarationIR e fName doc params = "-- " ++ doc ++ "\ndef " ++ fName ++ "(" ++ intercalate ", " params ++ "):\n" ++ indent 1 ++ pPrintIRExpr e 1 ++"\n"
 
 pPrintExpr :: Expr -> Int -> String
-pPrintExpr (Constant _ a) _ = pPrintValue a
-pPrintExpr (Var _ a) _ = a
-pPrintExpr (IfThenElse _ c t e) i = "if " ++ pPrintExpr c i ++ " then\n" ++ indent (i+1) ++ pPrintExpr t (i+1) ++"\n" ++ indent i ++ "else\n" ++ indent (i+1) ++ pPrintExpr e (i+1)
-pPrintExpr (InjF _ (Named f) args) i = f ++ "(" ++ intercalate ", " (map (`pPrintExpr` i) args) ++ ")"
-pPrintExpr (Lambda _ n e) i = "\\" ++ n ++ " -> " ++ pPrintExpr e (i+1)
-pPrintExpr (Apply _ f v) i = pPrintExpr f i ++ "(" ++ pPrintExpr v i ++ ")"
-pPrintExpr (ThetaI _ e n) i = "Theta_" ++ show n ++ "(" ++ pPrintExpr e i ++ ")"
-pPrintExpr (Subtree _ e n) i = "Subtree_" ++ show n ++ "(" ++ pPrintExpr e i ++ ")"
-pPrintExpr (GreaterThan _ a b) i = "(" ++ pPrintExpr a i ++ " > " ++ pPrintExpr b i ++ ")"
-pPrintExpr (LessThan _ a b) i = "(" ++ pPrintExpr a i ++ " < " ++ pPrintExpr b i ++ ")"
-pPrintExpr (ReadNN _ n e) i = "readNN(" ++ n ++ ", " ++ pPrintExpr e i ++ ")"
+pPrintExpr (Expr _ (Constant a)) _ = pPrintValue a
+pPrintExpr (Expr _ (Var a)) _ = a
+pPrintExpr (Expr _ (IfThenElse c t e)) i = "if " ++ pPrintExpr c i ++ " then\n" ++ indent (i+1) ++ pPrintExpr t (i+1) ++"\n" ++ indent i ++ "else\n" ++ indent (i+1) ++ pPrintExpr e (i+1)
+pPrintExpr (Expr _ (InjF (Named f) args)) i = f ++ "(" ++ intercalate ", " (map (`pPrintExpr` i) args) ++ ")"
+pPrintExpr (Expr _ (Lambda n e)) i = "\\" ++ n ++ " -> " ++ pPrintExpr e (i+1)
+pPrintExpr (Expr _ (Apply f v)) i = pPrintExpr f i ++ "(" ++ pPrintExpr v i ++ ")"
+pPrintExpr (Expr _ (ThetaI e n)) i = "Theta_" ++ show n ++ "(" ++ pPrintExpr e i ++ ")"
+pPrintExpr (Expr _ (Subtree e n)) i = "Subtree_" ++ show n ++ "(" ++ pPrintExpr e i ++ ")"
+pPrintExpr (Expr _ (GreaterThan a b)) i = "(" ++ pPrintExpr a i ++ " > " ++ pPrintExpr b i ++ ")"
+pPrintExpr (Expr _ (LessThan a b)) i = "(" ++ pPrintExpr a i ++ " < " ++ pPrintExpr b i ++ ")"
+pPrintExpr (Expr _ (ReadNN n e)) i = "readNN(" ++ n ++ ", " ++ pPrintExpr e i ++ ")"
 
 pPrintIRExpr :: IRExpr -> Int -> String
 pPrintIRExpr (IRIf cond thenExpr elseExpr) n =

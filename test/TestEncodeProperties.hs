@@ -542,8 +542,8 @@ loadRoundtripPool = do
 -- decoder's own, making encode the vector-level identity.
 isDecoderPassthrough :: Program -> Bool
 isDecoderPassthrough p = case lookup "main" (functions p) of
-  Just (Lambda _ s (ReadNN _ _ (Var _ s'))) -> s == s'
-  _                                         -> False
+  Just (Expr _ (Lambda s (Expr _ (ReadNN _ (Expr _ (Var s')))))) -> s == s'
+  _                                                              -> False
 
 compileOrFail :: Program -> IO IREnv
 compileOrFail p = either (\e -> assertFailure ("compile failed: " ++ show e) >> return undefined)

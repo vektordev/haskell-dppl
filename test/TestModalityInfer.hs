@@ -14,7 +14,7 @@ module TestModalityInfer (modalityInferTests) where
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertEqual, assertBool)
 
-import SPLL.Lang.Types (Program(..), Expr, TypeInfo(..))
+import SPLL.Lang.Types (Program(..), Expr(..), ExprF(..), TypeInfo(..))
 import SPLL.Lang.Lang (getTypeInfo, getSubExprs)
 import SPLL.Typing.PType (PType(..))
 import SPLL.Parser (tryParseProgram)

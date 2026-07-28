@@ -126,19 +126,19 @@ pLetIn adts = do
 -- Parses the identifier part of the letIn and constructs a accessors for letIns
 -- Return type is a \v, b -> Let n = v in b
 letInDestructor :: MonadParser m => Expr -> m (Expr -> Expr -> Expr)
-letInDestructor (Var _ name) = return $ letIn name
-letInDestructor (InjF _ (Named "TCons") [a, b]) = do
+letInDestructor (Expr _ (Var name)) = return $ letIn name
+letInDestructor (Expr _ (InjF (Named "TCons") [a, b])) = do
   a' <- letInDestructor a
   b' <- letInDestructor b
   return $ \v body -> a' (tfst v) (b' (tsnd v) body)
-letInDestructor (InjF _ (Named "left") [x]) = do
+letInDestructor (Expr _ (InjF (Named "left") [x])) = do
   x' <- letInDestructor x
   return $ \v -> x' (sfromLeftPartial v)
-letInDestructor (InjF _ (Named "right") [x]) = do
+letInDestructor (Expr _ (InjF (Named "right") [x])) = do
   x' <- letInDestructor x
   return $ \v -> x' (sfromRightPartial v)
-letInDestructor (Constant _ (VList EmptyList)) = return $ \v b -> ifThenElse (isNull v) b (Constant makeTypeInfo (VError "RHS of letin is longer than LHS"))
-letInDestructor (InjF _ (Named "Cons") [x, xs]) = do
+letInDestructor (Expr _ (Constant (VList EmptyList))) = return $ \v b -> ifThenElse (isNull v) b (Expr makeTypeInfo (Constant (VError "RHS of letin is longer than LHS")))
+letInDestructor (Expr _ (InjF (Named "Cons") [x, xs])) = do
   x' <- letInDestructor x
   xs' <- letInDestructor xs
   id <- demandUniqueNumber
@@ -152,7 +152,7 @@ pError = do
   char '"'
   message <- many (noneOf "\"")
   char '"'
-  return (Constant makeTypeInfo (VError message))
+  return (Expr makeTypeInfo (Constant (VError message)))
 
 pExpr :: MonadParser m => [ADTDecl] -> m Expr
 pExpr = expr
@@ -228,7 +228,7 @@ pTupleVal = do
   return (VTuple val1 val2)
 
 pConst :: MonadParser m => m Expr
-pConst = Constant makeTypeInfo <$> choice
+pConst = (\v -> Expr makeTypeInfo (Constant v)) <$> choice
   [ pBool, try pUnsignedFloat, pUnsignedInt
   , try pUnitVal, pTupleVal, pEither, pAny
   , pList <&> constructVList, pThetaTree <&> VThetaTree
@@ -566,7 +566,7 @@ application adts = dbg "application" $ do
     -- second time on every atom-alternative failure (see pTuple's comment).
     args <- try $ many (try (atom adts))
     case func of
-        Var _ name -> case lookup name binaryFs of
+        Expr _ (Var name) -> case lookup name binaryFs of
             Just constructor -> return (construct2 constructor args)
             Nothing -> case lookup name unaryFs of
                 Just constructor -> return (construct1 constructor args)
@@ -617,8 +617,8 @@ funLikeOps = [("not", (#!#))]
 
 -- Fold negation into literal constants so that roundtrip works for negative literals.
 smartNeg :: Expr -> Expr
-smartNeg (Constant ti (VFloat f)) = Constant ti (VFloat (-f))
-smartNeg (Constant ti (VInt i))   = Constant ti (VInt (-i))
+smartNeg (Expr ti (Constant (VFloat f))) = Expr ti (Constant (VFloat (-f)))
+smartNeg (Expr ti (Constant (VInt i)))   = Expr ti (Constant (VInt (-i)))
 smartNeg e                         = negF e
 
 prefixOps :: MonadParser m => [Operator m Expr]
@@ -698,9 +698,9 @@ normalizeExpr :: MonadState Int m => (BuilderMap m, BuilderMap m, Set.Set String
 normalizeExpr env@(parametricBuilders, atomicBuilders, benign) expr =
   case expr of
     -- Handle scopes first, adding bound variables before processing sub-expressions
-    Lambda ti name body -> do
+    Expr ti (Lambda name body) -> do
       let body' = normalizeExpr (parametricBuilders, atomicBuilders, Set.insert name benign) body
-      fmap (fmap (Lambda ti name)) body'
+      fmap (fmap (\b -> Expr ti (Lambda name b))) body'
 
     -- For all other expressions, normalize sub-expressions first then check for Apply pattern
     _ -> do
@@ -711,25 +711,25 @@ normalizeExpr env@(parametricBuilders, atomicBuilders, benign) expr =
         Right expr' ->
           case expr' of
             -- Start of an Apply chain
-            Apply _ (Apply _ _ _) _ ->
+            Expr _ (Apply (Expr _ (Apply _ _)) _) ->
               -- Need to collect all args in the chain and find base function.
               -- Collect from expr' (not expr) so the args keep their normalization.
               let (base, args) = collectApplyChain expr'
               in case base of
-                Var _ fname | Just builder <- Map.lookup fname parametricBuilders -> do
+                Expr _ (Var fname) | Just builder <- Map.lookup fname parametricBuilders -> do
                   build <- builder args
                   case build of
                     Left _ -> return $ Right expr' -- This prevents InjFs, which have multiple arguments from failing to build because here only one argument is applied
                     e -> return e
                 _ -> return $ Right expr'
-            Apply _ (Var _ fname) arg
+            Expr _ (Apply (Expr _ (Var fname)) arg)
               | not (Set.member fname benign)
               , Just builder <- Map.lookup fname parametricBuilders -> do
                 build <- builder [arg]
                 case build of
                   Left _ -> return $ Right expr' -- This prevents InjFs, which have multiple arguments from failing to build because here only one argument is applied
                   e -> return e
-            Var _ fname
+            Expr _ (Var fname)
               | not (Set.member fname benign)
               , Just builder <- Map.lookup fname atomicBuilders -> builder []
             _ -> return $ Right expr'
@@ -739,12 +739,12 @@ normalizeExpr env@(parametricBuilders, atomicBuilders, benign) expr =
 
 -- Returns (base expression, arguments in application order)
 collectApplyChain :: Expr -> (Expr, [Expr])
-collectApplyChain (Apply _ left arg) =
+collectApplyChain (Expr _ (Apply left arg)) =
   let (base, args) = collectApplyChain left
   in (base, args ++ [arg])  -- maintain order of application
 -- Quick and dirty fix for multi parameter InjFs. The normalizatzion first creates a 1 parameter InjF and then stops with the normalization
 -- We bypass this by tricking the normalization  that the InjF is in reality an application on a variable
-collectApplyChain (InjF t (Named name) args) = (Var t name, args)
+collectApplyChain (Expr t (InjF (Named name) args)) = (Expr t (Var name), args)
 collectApplyChain e = (e, [])
 
 -- Helper to map over all expressions in a program
