@@ -336,8 +336,15 @@ inferE ctx env expr = case expr of
         g = tagFin (icADTs ctx) ti (if rType ti == TFloat then gNormal else gIntegrate)
     in done (IG g) (Expr (setPType ti (projectGround g)) (ReadNN name s')) sa
 
-  Expr ti (GreaterThan a b) -> compareNode ti GreaterThan a b
-  Expr ti (LessThan    a b) -> compareNode ti LessThan a b
+  -- gt/lt are forward-only InjFs (PredefinedFunctions), but their modality is
+  -- not the generic marginalize-combination floor 'injFMod' gives every other
+  -- InjF: a comparison's Boolean result is a Bernoulli (finite support) whose
+  -- capability depends on whether its operands are exactly comparable
+  -- (Exact/DensInt) or only samplable, not on marginalizing two continuous
+  -- operands together. This mirrors the old bespoke GreaterThan/LessThan
+  -- dispatch (task gt-lt-range-propagation).
+  Expr ti (InjF (Named fname) [a, b])
+    | fname `elem` ["gt", "lt"] -> compareNode ti fname a b
 
   Expr ti (InjF name@(Named fname) args) ->
     let rs   = map (inferE ctx env) args
@@ -398,11 +405,11 @@ inferE ctx env expr = case expr of
     -- a directly-applied lambda node still records its own (det) outer ground
     laccLambda lti = [(chainName lti, gExact)]
 
-    compareNode ti ctor a b =
+    compareNode ti fname a b =
       let (ma, a', aacc) = inferE ctx env a
           (mb, b', bacc) = inferE ctx env b
           g = tagFin (icADTs ctx) ti (compareGround (outerI ma) (outerI mb))
-      in done (IG g) (Expr (setPType ti (projectGround g)) (ctor a' b')) (aacc ++ bacc)
+      in done (IG g) (Expr (setPType ti (projectGround g)) (InjF (Named fname) [a', b'])) (aacc ++ bacc)
 
 -- | Comparison (@>@/@<@): the Boolean result is a Bernoulli (finite support).
 -- Both deterministic ⇒ a known Boolean; both integral-ready ⇒ exact tail

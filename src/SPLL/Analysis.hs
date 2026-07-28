@@ -61,11 +61,12 @@ discretesTags adts e = [DiscreteValues mv | mv <- maybeToList values, not (multi
   where
     values = case e of
       (Expr _ (Constant a)) -> Just $ MultiDiscretes [a]
-      -- Comparisons are Bool-valued, hence finitely enumerable. Tagging them lets
-      -- and/or (and any boolean InjF above them) take the discrete-enumeration path.
-      -- (rType is not yet populated at enum-annotation time, so this is done by shape.)
-      (Expr _ (GreaterThan _ _)) -> Just $ MultiDiscretes [VBool True, VBool False]
-      (Expr _ (LessThan _ _)) -> Just $ MultiDiscretes [VBool True, VBool False]
+      -- Comparisons (gt/lt) are Bool-valued, hence finitely enumerable regardless
+      -- of whether their operands are, unlike the generic InjF case below (which
+      -- requires every operand to already carry a DiscreteValues tag). Tagging
+      -- them lets and/or (and any boolean InjF above them) take the
+      -- discrete-enumeration path. Must come before the generic InjF case.
+      (Expr _ (InjF (Named name) [_, _])) | name `elem` ["gt", "lt"] -> Just $ MultiDiscretes [VBool True, VBool False]
       (Expr _ (InjF (Named name) params)) -> do
         paramValues <- mapM getValuesFromExpr params
         let unpackedMultiVals = map multiValueToValueList paramValues

@@ -168,6 +168,18 @@ andFwd = FDecl (Forall [] [] (TBool `TArrow` (TBool `TArrow` TBool))) ["a", "b"]
 orFwd :: FDecl
 orFwd = FDecl (Forall [] [] (TBool `TArrow` (TBool `TArrow` TBool))) ["a", "b"] ["c"] (IROp OpOr (IRVar "a") (IRVar "b")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))]
 
+-- Comparisons: also forward-only -- given a>b=False there is no point inverse
+-- recovering a single operand (a<=b is a half-line, not a point). Continuous
+-- comparisons are handled by IRCompiler's own bespoke deterministic-bound /
+-- both-PNormal cases (which key off resolved InjF name "gt"/"lt" directly,
+-- same as the old bespoke GreaterThan/LessThan constructors did); the empty
+-- inverse list here only routes the both-enumerable-discrete case to the
+-- generic enumerate-both path (task gt-lt-range-propagation).
+gtFwd :: FDecl
+gtFwd = FDecl (Forall [] [] (TFloat `TArrow` (TFloat `TArrow` TBool))) ["a", "b"] ["c"] (IROp OpGreaterThan (IRVar "a") (IRVar "b")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))]
+ltFwd :: FDecl
+ltFwd = FDecl (Forall [] [] (TFloat `TArrow` (TFloat `TArrow` TBool))) ["a", "b"] ["c"] (IROp OpLessThan (IRVar "a") (IRVar "b")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))]
+
 eqFwd :: FDecl
 eqFwd = FDecl (Forall [TV "a"] [] (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TBool))) ["a", "b"] ["c"] (IROp OpEq (IRVar "a") (IRVar "b")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))]
 eqInv1 :: FDecl
@@ -283,6 +295,8 @@ globalFenv' = [("double", FPair doubleFwd [doubleInv]),
               ("not", FPair notFwd [notInv]),
               ("and", FPair andFwd []),
               ("or", FPair orFwd []),
+              ("gt", FPair gtFwd []),
+              ("lt", FPair ltFwd []),
               ("eq", FPair eqFwd [eqInv1, eqInv2]),
               ("Cons", FPair consFwd [consInvHead, consInvTail]),
               ("TCons", FPair tConsFwd [tConsInvFst, tConsInvSnd]),

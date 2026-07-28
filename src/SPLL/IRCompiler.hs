@@ -729,17 +729,17 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
 -- comparison is that difference's CDF evaluated at 0. Neither side is Deterministic,
 -- so the bound-based equations below do not apply. resolveCompCons types this Bool
 -- as Integrate (a closed-form discrete probability), matching the dim-0 result here.
-toIRInference meta False (Expr _ (GreaterThan left right)) sample
+toIRInference meta False (Expr _ (InjF (Named "gt") [left, right])) sample
   | pType (getTypeInfo left) == PNormal && pType (getTypeInfo right) == PNormal = do
     cdfAt0 <- normalDiffCdfAtZero meta left right
     -- p(left > right) = p(diff > 0) = 1 - cdf(0)
     return (mass (IRIf sample (IROp OpSub (IRConst $ VFloat 1.0) cdfAt0) cdfAt0))
-toIRInference meta False (Expr _ (LessThan left right)) sample
+toIRInference meta False (Expr _ (InjF (Named "lt") [left, right])) sample
   | pType (getTypeInfo left) == PNormal && pType (getTypeInfo right) == PNormal = do
     cdfAt0 <- normalDiffCdfAtZero meta left right
     -- p(left < right) = p(diff < 0) = cdf(0)
     return (mass (IRIf sample cdfAt0 (IROp OpSub (IRConst $ VFloat 1.0) cdfAt0)))
-toIRInference meta False (Expr _ (GreaterThan left right)) sample
+toIRInference meta False (Expr _ (InjF (Named "gt") [left, right])) sample
   | pType (getTypeInfo left) == Deterministic = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
     l <- toIRGenerate meta left
@@ -760,7 +760,7 @@ toIRInference meta False (Expr _ (GreaterThan left right)) sample
     setVariables [(var2, rProb integ)]
     -- A comparison's mass, not a structural choice: possible either way.
     return (PResult returnExpr const0 (rBranches integ) constFalseIR)
-toIRInference meta False (Expr _ (LessThan left right)) sample
+toIRInference meta False (Expr _ (InjF (Named "lt") [left, right])) sample
   | pType (getTypeInfo left) == Deterministic = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
     l <- toIRGenerate meta left
@@ -1807,14 +1807,6 @@ toIRGenerate meta (Expr _ (IfThenElse cond left right)) = do
   l <- toIRGenerate meta left
   r <- toIRGenerate meta right
   return $ IRIf c l r
-toIRGenerate meta (Expr _ (GreaterThan left right)) = do
-  l <- toIRGenerate meta left
-  r <- toIRGenerate meta right
-  return $ IROp OpGreaterThan l r
-toIRGenerate meta (Expr _ (LessThan left right)) = do
-  l <- toIRGenerate meta left
-  r <- toIRGenerate meta right
-  return $ IROp OpLessThan l r
 toIRGenerate meta (Expr _ (ThetaI a ix)) = do
   a' <- toIRGenerate meta a
   return $ IRTheta a' ix
@@ -2287,8 +2279,8 @@ invertToWorlds meta occs body target = do
                            ++ [intersectW cw ew | cw <- cfs, ew <- es]))
               _ -> return Nothing
         | otherwise -> return Nothing
-      Expr _ (LessThan lop rop) -> comparisonWorlds meta occs False lop rop target
-      Expr _ (GreaterThan lop rop) -> comparisonWorlds meta occs True lop rop target
+      Expr _ (InjF (Named "lt") [lop, rop]) -> comparisonWorlds meta occs False lop rop target
+      Expr _ (InjF (Named "gt") [lop, rop]) -> comparisonWorlds meta occs True lop rop target
       Expr _ (InjF (Named "TCons") [pa, pb]) -> case target of
         WPoint s _ -> do
           wsA <- invertToWorlds meta occs pa (WPoint (IRTFst s) const1)
@@ -2878,8 +2870,8 @@ planInvert meta env body target = case body of
   Expr _ (InjF (Named "eq") [a, b])
     | planDep a, isDetSide b -> planLeafEq a b
     | planDep b, isDetSide a -> planLeafEq b a
-  Expr _ (LessThan    a b) -> planCmp False a b
-  Expr _ (GreaterThan a b) -> planCmp True  a b
+  Expr _ (InjF (Named "lt") [a, b]) -> planCmp False a b
+  Expr _ (InjF (Named "gt") [a, b]) -> planCmp True  a b
   Expr _ (Apply {}) -> planApplyTarget meta env body target
   _ -> return (Left ("unsupported node in plan traversal: " ++ planNodeName body))
   where

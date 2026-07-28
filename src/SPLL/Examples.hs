@@ -104,7 +104,7 @@ uniformNegPlus :: Program
 uniformNegPlus = Program [("main", negF (uniform #+#constF 4))] [] [] []
 
 uniformIfProg :: Program
-uniformIfProg = Program [("main", ifThenElse (Expr makeTypeInfo (GreaterThan uniform (constF 0.5)))
+uniformIfProg = Program [("main", ifThenElse (uniform #># constF 0.5)
                              uniform
                              (uniform #+# constF 5))] [] [] []
 
@@ -188,7 +188,7 @@ testNN :: Program
 testNN = Program [("main", mNistAddExpr)] [("classifyMNist", TArrow TSymbol TInt, Just (MultiDiscretes (map VInt [0..9])))] [] []
 
 testDimProb :: Program
-testDimProb = Program [("main", Expr makeTypeInfo (IfThenElse (Expr makeTypeInfo (LessThan uniform (Expr makeTypeInfo (Constant (VFloat 0.4))))) (Expr makeTypeInfo (Constant (VFloat 0.5))) normal))] [] [] []
+testDimProb = Program [("main", Expr makeTypeInfo (IfThenElse (uniform #<# Expr makeTypeInfo (Constant (VFloat 0.4))) (Expr makeTypeInfo (Constant (VFloat 0.5))) normal))] [] [] []
 
 
 mNistAddExpr :: Expr

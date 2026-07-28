@@ -39,8 +39,6 @@ pPrintExpr (Expr _ (Lambda n e)) i = "\\" ++ n ++ " -> " ++ pPrintExpr e (i+1)
 pPrintExpr (Expr _ (Apply f v)) i = pPrintExpr f i ++ "(" ++ pPrintExpr v i ++ ")"
 pPrintExpr (Expr _ (ThetaI e n)) i = "Theta_" ++ show n ++ "(" ++ pPrintExpr e i ++ ")"
 pPrintExpr (Expr _ (Subtree e n)) i = "Subtree_" ++ show n ++ "(" ++ pPrintExpr e i ++ ")"
-pPrintExpr (Expr _ (GreaterThan a b)) i = "(" ++ pPrintExpr a i ++ " > " ++ pPrintExpr b i ++ ")"
-pPrintExpr (Expr _ (LessThan a b)) i = "(" ++ pPrintExpr a i ++ " < " ++ pPrintExpr b i ++ ")"
 pPrintExpr (Expr _ (ReadNN n e)) i = "readNN(" ++ n ++ ", " ++ pPrintExpr e i ++ ")"
 
 pPrintIRExpr :: IRExpr -> Int -> String

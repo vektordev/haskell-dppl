@@ -69,8 +69,6 @@ exprToString (Expr _ (Apply f arg)) = bracket f ++ " " ++ bracket arg
 -- gained full constructor coverage, so this mismatch went undetected.
 exprToString (Expr _ (ThetaI expr i)) = "theta " ++ bracket expr ++ " @ " ++ show i
 exprToString (Expr _ (Subtree expr i)) = "subtree " ++ bracket expr ++ " @ " ++ show i
-exprToString (Expr _ (GreaterThan e1 e2)) = bracket e1 ++ " > " ++ bracket e2
-exprToString (Expr _ (LessThan e1 e2)) = bracket e1 ++ " < " ++ bracket e2
 exprToString (Expr _ (ReadNN name expr)) = "readNN " ++ name ++ " " ++ bracket expr
 
 fnDeclToString :: FnDecl -> String
@@ -148,9 +146,10 @@ testExpressions = [
     ("mixed operators and applications",
      Expr makeTypeInfo (Apply
        (Expr makeTypeInfo (Var "f"))
-       (Expr makeTypeInfo (GreaterThan
-         (Expr makeTypeInfo (Var "x"))
-         (Expr makeTypeInfo (Constant (VInt 42)))))))
+       (Expr makeTypeInfo (InjF (Named "gt")
+         [ Expr makeTypeInfo (Var "x")
+         , Expr makeTypeInfo (Constant (VInt 42))
+         ]))))
     ]
 
 examples :: [Program]

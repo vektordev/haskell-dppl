@@ -28,30 +28,6 @@ mirrorN name
   | "Right" `isSuffixOf` name = take (length name - 5) name ++ "Left"
   | otherwise = name ++ "'"
 
-greaterThanLeft :: InferenceRule
-greaterThanLeft = InferenceRule
-                    StubGreaterThan
-                    "greaterThanLeft"
-                    (Forall [] [] (TFloat `TArrow` (TFloat `TArrow` TBool)))
-
-greaterThanRight :: InferenceRule
-greaterThanRight = mirror2 greaterThanLeft
-
-lessThanLeft :: InferenceRule
-lessThanLeft = InferenceRule
-                    StubLessThan
-                    "lessThanLeft"
-                    (Forall [] [] (TFloat `TArrow` (TFloat `TArrow` TBool)))
-
-lessThanRight :: InferenceRule
-lessThanRight = mirror2 lessThanLeft
-
-greaterThanSigmoid :: InferenceRule
-greaterThanSigmoid = InferenceRule
-                       StubGreaterThan
-                       "greaterThanSigmoid"
-                       (Forall [] [] (TFloat `TArrow` (TFloat `TArrow` TBool)))
-
 injF2Left :: InferenceRule
 injF2Left = InferenceRule
              StubInjF
@@ -104,11 +80,6 @@ allAlgorithms = [
   theta,
   thetaSubTree,
   constant,
-  greaterThanLeft,
-  greaterThanRight,
-  lessThanLeft,
-  lessThanRight,
-  greaterThanSigmoid,
   injF2Left,
   injF2Right,
   injF2Enumerable,

@@ -58,8 +58,6 @@ import qualified Data.Bifunctor as Bifunctor
 toStub :: Expr -> ExprStub
 toStub expr = case node expr of
   IfThenElse {}  -> StubIfThenElse
-  GreaterThan {} -> StubGreaterThan
-  LessThan {}    -> StubLessThan
   ThetaI {}      -> StubThetaI
   Subtree {}     -> StubSubtree
   Constant {}    -> StubConstant
@@ -378,8 +376,6 @@ prettyPrintCustomTI fn expr =
 printFlat :: Expr -> String
 printFlat expr = case node expr of
   IfThenElse {} -> "IfThenElse"
-  GreaterThan {} -> "GreaterThan"
-  LessThan {} -> "LessThan"
   ThetaI _ i -> "Theta_" ++ show i
   Subtree _ i -> "Subtree_" ++ show i
   Constant x -> "Constant (" ++ show x ++ ")"

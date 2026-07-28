@@ -279,10 +279,10 @@ sfromRightPartial x = injF "fromRightPartial" [x]
 (#==#) a b = injF "eq" [a, b]
 
 (#>#) :: Expr -> Expr -> Expr
-(#>#) a b = mkExpr (GreaterThan a b)
+(#>#) a b = injF "gt" [a, b]
 
 (#<#) :: Expr -> Expr -> Expr
-(#<#) a b = mkExpr (LessThan a b)
+(#<#) a b = injF "lt" [a, b]
 
 (#&&#) :: Expr -> Expr -> Expr
 (#&&#) a b = injF "and" [a, b]

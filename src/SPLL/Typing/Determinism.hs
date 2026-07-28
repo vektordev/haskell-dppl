@@ -142,8 +142,6 @@ detExpr phi env e = case node e of
   ReadNN _ s  -> here False (snd (detExpr phi env s))
 
   -- Pure combinators: deterministic iff every operand is.
-  GreaterThan a b -> binAnd a b
-  LessThan a b    -> binAnd a b
   InjF _ args     -> let rs = map (detExpr phi env) args
                        in here (and (map fst rs)) (Map.unionsWith (&&) (map snd rs))
   IfThenElse c t f ->
@@ -161,10 +159,6 @@ detExpr phi env e = case node e of
     cn = chainName (getTypeInfo e)
     -- record this node's determinism, merged (meet) with the descendants' map
     here b m = (b, Map.insertWith (&&) cn b m)
-    binAnd a b =
-      let (da, ma) = detExpr phi env a
-          (db, mb) = detExpr phi env b
-      in here (da && db) (Map.unionWith (&&) ma mb)
 
 -- | Application. Two cases are resolved precisely:
 --

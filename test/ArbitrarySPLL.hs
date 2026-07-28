@@ -101,9 +101,7 @@ genExpr n = oneof [
   (\x body -> Expr makeTypeInfo (Lambda x body)) <$> genValidIdentifier <*> genExpr (n-1),
   genInjFApp (n `div` 2),
   (\e i -> Expr makeTypeInfo (ThetaI e i)) <$> genExpr (n `div` 2) <*> arbitrary,
-  (\e i -> Expr makeTypeInfo (Subtree e i)) <$> genExpr (n `div` 2) <*> arbitrary,
-  (\a b -> Expr makeTypeInfo (GreaterThan a b)) <$> genExpr (n `div` 2) <*> genExpr (n `div` 2),
-  (\a b -> Expr makeTypeInfo (LessThan a b)) <$> genExpr (n `div` 2) <*> genExpr (n `div` 2)
+  (\e i -> Expr makeTypeInfo (Subtree e i)) <$> genExpr (n `div` 2) <*> arbitrary
   ]
 
 -- | Full Expr-constructor coverage (all 11 constructors, including ReadNN),
@@ -248,13 +246,6 @@ mkThetaI varnames size = do
   t1 <- arbitrary
   ix <- arbitrary
   return $ Expr t0 (ThetaI (Expr t1 (Var "thetas")) ix)
-
-mkGreaterThan :: [String] -> Int -> Gen Expr
-mkGreaterThan varnames size = do
-  t <- arbitrary
-  e1 <- genExprNames' varnames (size `div` 2)
-  e2 <- genExprNames' varnames (size `div` 2)
-  return (Expr t (GreaterThan e1 e2))
 
 mkMultF :: [String] -> Int -> Gen Expr
 mkMultF varnames size = do

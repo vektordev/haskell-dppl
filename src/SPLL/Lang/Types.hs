@@ -65,9 +65,6 @@ data ExprF a =
               -- Parameters
               | ThetaI a Int
               | Subtree a Int
-              -- Boolean Operations
-              | GreaterThan a a
-              | LessThan a a
               -- Other
               | ReadNN String a
               -- TODO: Needs Concat to achieve proper SPN-parity.
@@ -79,8 +76,6 @@ data Expr = Expr { ann :: TypeInfo, node :: ExprF Expr }
 
 
 data ExprStub = StubIfThenElse
-              | StubGreaterThan
-              | StubLessThan
               | StubThetaI
               | StubSubtree
               | StubConstant
