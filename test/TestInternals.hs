@@ -770,10 +770,10 @@ allNodes prog = concatMap (universeE . snd) (functions prog)
 -- The chain name of the function on the left of the first Apply — exactly the
 -- handle 'IRCompiler' passes to the certificate / 'toInvExpr'.
 applyLeftCN :: Program -> ChainName
-applyLeftCN prog = head [ chainName (getTypeInfo l) | Apply _ l _ <- allNodes prog ]
+applyLeftCN prog = head [ chainName (getTypeInfo l) | Expr _ (Apply l _) <- allNodes prog ]
 
 constNodeCN :: Program -> ChainName
-constNodeCN prog = head [ chainName (getTypeInfo c) | c@(Constant _ _) <- allNodes prog ]
+constNodeCN prog = head [ chainName (getTypeInfo c) | c@(Expr _ (Constant _)) <- allNodes prog ]
 
 forwardChainingCertTests :: TestTree
 forwardChainingCertTests = testGroup "ForwardChaining certificate"
@@ -798,7 +798,7 @@ forwardChainingCertTests = testGroup "ForwardChaining certificate"
 -- @let v = e in b@ to @Apply (Lambda v b) e@).
 letLambdaCN :: String -> Program -> ChainName
 letLambdaCN v prog =
-  head [ chainName (getTypeInfo l) | l@(Lambda _ n _) <- allNodes prog, n == v ]
+  head [ chainName (getTypeInfo l) | l@(Expr _ (Lambda n _)) <- allNodes prog, n == v ]
 
 declRootCN :: String -> Program -> ChainName
 declRootCN fname prog = case lookup fname (functions prog) of

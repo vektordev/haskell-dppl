@@ -35,17 +35,17 @@ annotateEnumsProg p@Program {functions=f, neurals=n, adts=adts} = p{functions = 
 
 annotate :: [ADTDecl] -> TagEnv -> Expr -> Expr
 --annotate _ e | trace ((show e)) False = undefined
-annotate _ env e@(Var ti n) = case lookup n env of
+annotate _ env e@(Expr ti (Var n)) = case lookup n env of
   (Just tgs) -> setTypeInfo e (ti{tags=tgs})
   _ -> e
-annotate _ env e@(ReadNN ti n _) = case lookup n env of
+annotate _ env e@(Expr ti (ReadNN n _)) = case lookup n env of
   (Just tgs) -> setTypeInfo e (ti{tags=tgs})
   _ -> e
 annotate adts env e = withNewTypeInfo
   where
     oldTags = tags $ getTypeInfo e
     withNewSubExpr = case e of
-      Apply _ l@(Lambda _ _ _) v -> do
+      Expr _ (Apply l@(Expr _ (Lambda _ _)) v) -> do
         let annotatedV = annotate adts env v
             annotatedL = annotate adts env l in
               setSubExprs e [annotatedL, annotatedV]
@@ -60,17 +60,17 @@ discretesTags :: [ADTDecl] -> Expr -> [Tag]
 discretesTags adts e = [DiscreteValues mv | mv <- maybeToList values, not (multiValueContainsContinuous mv)]
   where
     values = case e of
-      (Constant _ a) -> Just $ MultiDiscretes [a]
+      (Expr _ (Constant a)) -> Just $ MultiDiscretes [a]
       -- Comparisons are Bool-valued, hence finitely enumerable. Tagging them lets
       -- and/or (and any boolean InjF above them) take the discrete-enumeration path.
       -- (rType is not yet populated at enum-annotation time, so this is done by shape.)
-      (GreaterThan _ _ _) -> Just $ MultiDiscretes [VBool True, VBool False]
-      (LessThan _ _ _) -> Just $ MultiDiscretes [VBool True, VBool False]
-      (InjF _ (Named name) params) -> do
+      (Expr _ (GreaterThan _ _)) -> Just $ MultiDiscretes [VBool True, VBool False]
+      (Expr _ (LessThan _ _)) -> Just $ MultiDiscretes [VBool True, VBool False]
+      (Expr _ (InjF (Named name) params)) -> do
         paramValues <- mapM getValuesFromExpr params
         let unpackedMultiVals = map multiValueToValueList paramValues
         return $ valueListToMultiValue $ nub $ propagateValues adts name unpackedMultiVals
-      (IfThenElse _ _ left right) -> do
+      (Expr _ (IfThenElse _ left right)) -> do
         valuesLeft <- getValuesFromExpr left
         valuesRight <- getValuesFromExpr right
         return $ unionMultiValues valuesLeft valuesRight
@@ -85,7 +85,7 @@ getValuesFromExpr e = case [mv | DiscreteValues mv <- tags $ getTypeInfo e] of
   [] -> Nothing
 
 isRecursive :: String -> Expr -> Bool
-isRecursive name (Var _ n) | name == n = True
+isRecursive name (Expr _ (Var n)) | name == n = True
 isRecursive n e = any (isRecursive n) (getSubExprs e)
 
 -- The FCData certificate is built once in 'Prelude.compile' and threaded in,
@@ -94,14 +94,14 @@ annotateConditionalProg :: FCData -> Program -> Program
 annotateConditionalProg fcData p@Program {functions=fs} = p{functions=map (Data.Bifunctor.second (tMap (tagConditional fcData p))) fs}
 
 tagConditional :: FCData -> Program -> Expr -> TypeInfo
-tagConditional fcData p (Lambda ti _ b) = if isConditional fcData p [] b then ti{tags=IsConditional:tags ti} else ti
-tagConditional fcData p e@(Var ti _) = if isConditional fcData p [] e then ti{tags=IsConditional:tags ti} else ti
+tagConditional fcData p (Expr ti (Lambda _ b)) = if isConditional fcData p [] b then ti{tags=IsConditional:tags ti} else ti
+tagConditional fcData p e@(Expr ti (Var _)) = if isConditional fcData p [] e then ti{tags=IsConditional:tags ti} else ti
 tagConditional _ _ x = getTypeInfo x
 
 isConditional :: FCData -> Program -> [ChainName] -> Expr -> Bool
 isConditional _ _ visited e | chainName (getTypeInfo e) `elem` visited = False
-isConditional _ _ _ (IfThenElse _ _ _ _) = True
-isConditional _ _ _ (Lambda _ _ _) = False
+isConditional _ _ _ (Expr _ (IfThenElse _ _ _)) = True
+isConditional _ _ _ (Expr _ (Lambda _ _)) = False
 -- An application is conditional if the applied function or any argument is:
 -- the enumeration fallback in toIREnumerate evaluates the whole application
 -- forward, so conditionality anywhere below makes the result conditional.
@@ -109,9 +109,9 @@ isConditional _ _ _ (Lambda _ _ _) = False
 -- into its body -- the body *is* evaluated by the application, unlike a bare
 -- (un-applied) lambda which is a closure value. This lets nested enumerable
 -- `let`s (let c = .. in let d = .. in ..) propagate conditionality outward.
-isConditional fcData p visited (Apply _ (Lambda _ _ b) v) = isConditional fcData p visited b || isConditional fcData p visited v
-isConditional fcData p visited (Apply _ l v) = isConditional fcData p visited l || isConditional fcData p visited v
-isConditional fcData p visited (Var (TypeInfo{chainName=cn}) _) = case findEquivalentExpression fcData cn of
+isConditional fcData p visited (Expr _ (Apply (Expr _ (Lambda _ b)) v)) = isConditional fcData p visited b || isConditional fcData p visited v
+isConditional fcData p visited (Expr _ (Apply l v)) = isConditional fcData p visited l || isConditional fcData p visited v
+isConditional fcData p visited (Expr (TypeInfo{chainName=cn}) (Var _)) = case findEquivalentExpression fcData cn of
   -- A named function reference resolves to its (possibly curried) lambda body. Strip
   -- the leading lambdas of a multi-argument function so the conditional inside a helper
   -- like `contrib u x = if u then x else 0` is reached, rather than stopping at the
@@ -122,5 +122,5 @@ isConditional fcData p visited x = any (isConditional fcData p visited) (getSubE
 
 -- Strip leading lambdas from a (curried) function body.
 stripLambdas :: Expr -> Expr
-stripLambdas (Lambda _ _ b) = stripLambdas b
+stripLambdas (Expr _ (Lambda _ b)) = stripLambdas b
 stripLambdas e = e

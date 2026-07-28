@@ -104,7 +104,7 @@ uniformNegPlus :: Program
 uniformNegPlus = Program [("main", negF (uniform #+#constF 4))] [] [] []
 
 uniformIfProg :: Program
-uniformIfProg = Program [("main", ifThenElse (GreaterThan makeTypeInfo uniform (constF 0.5))
+uniformIfProg = Program [("main", ifThenElse (Expr makeTypeInfo (GreaterThan uniform (constF 0.5)))
                              uniform
                              (uniform #+# constF 5))] [] [] []
 
@@ -157,7 +157,7 @@ testTheta :: Program
 testTheta = Program [("main", "thetas" #-># theta (var "thetas") 0)] [] [] []
 
 testThetaTree :: Program
-testThetaTree = Program [("main", "thetas" #-># (theta (var "thetas") 2 #+# theta (Subtree makeTypeInfo (var "thetas") 1) 1))] [] [] []
+testThetaTree = Program [("main", "thetas" #-># (theta (var "thetas") 2 #+# theta (Expr makeTypeInfo (Subtree (var "thetas") 1)) 1))] [] [] []
 
 testAnd :: Program
 testAnd = Program [("main", (normal #<# constF 0) #&&# (uniform #># constF 0.5))] [] [] []
@@ -188,11 +188,11 @@ testNN :: Program
 testNN = Program [("main", mNistAddExpr)] [("classifyMNist", TArrow TSymbol TInt, Just (MultiDiscretes (map VInt [0..9])))] [] []
 
 testDimProb :: Program
-testDimProb = Program [("main", IfThenElse makeTypeInfo (LessThan makeTypeInfo uniform (Constant makeTypeInfo (VFloat 0.4))) (Constant makeTypeInfo $ VFloat 0.5) normal)] [] [] []
+testDimProb = Program [("main", Expr makeTypeInfo (IfThenElse (Expr makeTypeInfo (LessThan uniform (Expr makeTypeInfo (Constant (VFloat 0.4))))) (Expr makeTypeInfo (Constant (VFloat 0.5))) normal))] [] [] []
 
 
 mNistAddExpr :: Expr
-mNistAddExpr = "im1" #-># ("im2" #-># (ReadNN makeTypeInfo "classifyMNist" (var "im1") #+# ReadNN makeTypeInfo "classifyMNist" (var "im2")))
+mNistAddExpr = "im1" #-># ("im2" #-># (Expr makeTypeInfo (ReadNN "classifyMNist" (var "im1")) #+# Expr makeTypeInfo (ReadNN "classifyMNist" (var "im2"))))
 
 gaussLists :: Program
 gaussLists = Program [("main", "thetas" #->#
@@ -265,7 +265,7 @@ testNormalScaledViaVar = Program
   ] [] [] []
 
 testAutoNeural :: Program
-testAutoNeural = Program [("main", "sym" #-># ReadNN makeTypeInfo "readMNist" (var "sym"))] [("readMNist", TArrow TSymbol TInt, Just (MultiDiscretes (map VInt [0..9])))] [] []
+testAutoNeural = Program [("main", "sym" #-># Expr makeTypeInfo (ReadNN "readMNist" (var "sym")))] [("readMNist", TArrow TSymbol TInt, Just (MultiDiscretes (map VInt [0..9])))] [] []
 
 
 -- ======================================= INVALID PROGRAMS ============================================

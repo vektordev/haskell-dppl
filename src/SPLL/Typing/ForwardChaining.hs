@@ -384,11 +384,11 @@ findEquivalentExpression fcData startCN = go [startCN] startCN
 progToLambdaVarOccurrences :: Program -> [(ChainName, [ChainName])]
 progToLambdaVarOccurrences Program{functions=fs} = concatMap (go . snd) fs
   where
-    go e@(Lambda TypeInfo{chainName=cn} n body) =
+    go e@(Expr TypeInfo{chainName=cn} (Lambda n body)) =
       (cn, varOccurrences n body) : concatMap go (getSubExprs e)
     go e = concatMap go (getSubExprs e)
-    varOccurrences n (Var TypeInfo{chainName=cn} m) | m == n = [cn]
-    varOccurrences n (Lambda _ m _) | m == n = []  -- shadowed; don't descend
+    varOccurrences n (Expr TypeInfo{chainName=cn} (Var m)) | m == n = [cn]
+    varOccurrences n (Expr _ (Lambda m _)) | m == n = []  -- shadowed; don't descend
     varOccurrences n e = concatMap (varOccurrences n) (getSubExprs e)
 
 -- Strip the expression of all wrapping lambdas. Return the chain name of the resulting expression and all names of the bound variables stripped away
@@ -537,11 +537,11 @@ progToChainNameInfo :: Program -> [(ChainName, ExprInfo)]
 progToChainNameInfo Program{functions=fs} = concatMap (exprToChainNameInfo . snd) fs
 
 exprToChainNameInfo :: Expr -> [(ChainName, ExprInfo)]
-exprToChainNameInfo (Lambda TypeInfo{chainName=cn} n b) = (cn, LambdaInfo n (getChainName b)):exprToChainNameInfo b
-exprToChainNameInfo (Constant TypeInfo{chainName=cn} v) = [(cn, ConstantInfo v)]
-exprToChainNameInfo (Var TypeInfo{chainName=cn} n) = [(cn, VarInfo n)]
-exprToChainNameInfo (Apply TypeInfo{chainName=cn} l v) = (cn, ApplyInfo (getChainName l) (getChainName v)):exprToChainNameInfo l ++ exprToChainNameInfo v
-exprToChainNameInfo (IfThenElse TypeInfo{chainName=cn} c t e) = (cn, IfInfo (getChainName c) (getChainName t) (getChainName e)): exprToChainNameInfo c ++ exprToChainNameInfo t ++ exprToChainNameInfo e
+exprToChainNameInfo (Expr TypeInfo{chainName=cn} (Lambda n b)) = (cn, LambdaInfo n (getChainName b)):exprToChainNameInfo b
+exprToChainNameInfo (Expr TypeInfo{chainName=cn} (Constant v)) = [(cn, ConstantInfo v)]
+exprToChainNameInfo (Expr TypeInfo{chainName=cn} (Var n)) = [(cn, VarInfo n)]
+exprToChainNameInfo (Expr TypeInfo{chainName=cn} (Apply l v)) = (cn, ApplyInfo (getChainName l) (getChainName v)):exprToChainNameInfo l ++ exprToChainNameInfo v
+exprToChainNameInfo (Expr TypeInfo{chainName=cn} (IfThenElse c t e)) = (cn, IfInfo (getChainName c) (getChainName t) (getChainName e)): exprToChainNameInfo c ++ exprToChainNameInfo t ++ exprToChainNameInfo e
 exprToChainNameInfo e = (getChainName e, StubInfo (toStub e)):concatMap exprToChainNameInfo (getSubExprs e)
 
 -- Convert a Program to a set of groups of Horn clauses
@@ -556,7 +556,7 @@ progToHornClauses Program{functions=fs, adts=adts} _ = nub $ initialRun ++ topEq
 -- Converts an expression with all its subexpressions into Horn clauses
 exprToHornClauses :: [ADTDecl] -> Expr -> [[HornClause]]
 exprToHornClauses adts e = case e of
-  Constant _ v -> [[ExprHornClause [] (getChainName e) (ConstantInfo v) 0]]
+  Expr _ (Constant v) -> [[ExprHornClause [] (getChainName e) (ConstantInfo v) 0]]
   -- Field constructors (Cons/TCons/user-ADT constructors) emit only their
   -- inverse clauses, each in its own group because the fields can be solved
   -- independently. The forward clause is omitted deliberately: constructing the
@@ -564,10 +564,10 @@ exprToHornClauses adts e = case e of
   -- safe (not merely defensive): container construction inference is handled
   -- out-of-band by IRCompiler's field-constructor path, so no program needs the
   -- forward clause (investigation forward-chaining-math-correctness, Q3).
-  InjF _ (Named name) params
+  Expr _ (InjF (Named name) params)
     | isFieldConstructor adts name ->
         map (: []) (tail (injFtoHornClause adts e)) ++ concatMap (exprToHornClauses adts) params
-  InjF _ _ params -> injFtoHornClause adts e: concatMap (exprToHornClauses adts) params
+  Expr _ (InjF _ params) -> injFtoHornClause adts e: concatMap (exprToHornClauses adts) params
   -- Some expressions are not invertable and therefor do not produce Horn clauses
   _ -> concatMap (exprToHornClauses adts) (getSubExprs e)
 
@@ -575,7 +575,7 @@ exprToHornClauses adts e = case e of
 injFtoHornClause :: [ADTDecl] -> Expr -> [HornClause]
 injFtoHornClause adts e = case e of
   -- Forward Horn clause: Inverse Horn clauses with corresponding inversion number
-  InjF _ (Named name) _ -> (constructInjFHornClause subst eCN name eFwd 0): zipWith (constructInjFHornClause subst eCN name) eInv [1..]
+  Expr _ (InjF (Named name) _) -> (constructInjFHornClause subst eCN name eFwd 0): zipWith (constructInjFHornClause subst eCN name) eInv [1..]
     where
       -- Create a substitution, that maps the variables in the declaration of the InjF
       -- to the ChainNames in the instantiation
@@ -619,7 +619,7 @@ constructTopLevelEquivalenceClauses clauses decls = concatMap (constructTopLevel
 constructTopLevelEquivalenceClauses' :: [[HornClause]] -> [Expr] -> FnDecl -> [[HornClause]]
 constructTopLevelEquivalenceClauses' clauses exprs (name, expr) = case rType (getTypeInfo expr) of
   TArrow _ _ -> concat $ evalSupply $ mapM (\otherExpr -> do
-    let Lambda _ _ body = expr
+    let Expr _ (Lambda _ body) = expr
     let dependent = getDependentGroups clauses (getChainName body)
     (varClauses, applyCnt) <- associateFunctionVariable name (getChainName expr) "" otherExpr
     let taggedDependents = concatMap (\tag -> map (tagGroup tag) dependent) [0..applyCnt - 1]
@@ -628,14 +628,14 @@ constructTopLevelEquivalenceClauses' clauses exprs (name, expr) = case rType (ge
 
 -- Construct horn clauses for equivalences induced by Applies. See lambdasToHornClauses for more info
 constructEquivalenceClauses :: [[HornClause]] -> [Expr] -> Expr -> [[HornClause]]
-constructEquivalenceClauses clauses exprs (Apply TypeInfo{chainName=exCn} l v) | not (isInClauseSet clauses exCn) && (isLambda l || isInClauseSet clauses (getChainName l)) = do
+constructEquivalenceClauses clauses exprs (Expr TypeInfo{chainName=exCn} (Apply l v)) | not (isInClauseSet clauses exCn) && (isLambda l || isInClauseSet clauses (getChainName l)) = do
     -- Find the declaration of the lambda on the left side of the Apply. Trivial if the lambda is directly there, else follow equivalences
     let (_, lTag, lVar, lBody) = case l of
-          Lambda TypeInfo{chainName=lCn'} n body -> (lCn', "", n, body)
+          Expr TypeInfo{chainName=lCn'} (Lambda n body) -> (lCn', "", n, body)
           _ ->
             let appliedLambdaCn = getEquivCN clauses (getChainName l)
                 appliedLambdaTag = getTag appliedLambdaCn
-                Lambda _ name body = findExprWithCN exprs (untag appliedLambdaCn) in
+                Expr _ (Lambda name body) = findExprWithCN exprs (untag appliedLambdaCn) in
                   (appliedLambdaCn, appliedLambdaTag, name, body)
     let lBodyCn = getChainName lBody ++ lTag
     -- The Apply is equivalent to the body of the lambda it is applying
@@ -649,9 +649,9 @@ constructEquivalenceClauses clauses exprs (Apply TypeInfo{chainName=exCn} l v) |
       TArrow _ _ -> do
         -- Fing the lambda bound
         let vLambdaCn = case v of
-              (Lambda TypeInfo{chainName = vlCn} _ _) -> vlCn
+              (Expr TypeInfo{chainName = vlCn} (Lambda _ _)) -> vlCn
               _ -> getEquivCN clauses (getChainName v)
-        let Lambda _ _ vBody = findExprWithCN exprs vLambdaCn
+        let Expr _ (Lambda _ vBody) = findExprWithCN exprs vLambdaCn
         -- Get all horn clauses, which corresspond to expressions in the sub-AST of the lambda
         let dependent = getDependentGroups clauses (getChainName vBody)
         -- Supply each invokation with a unique tag and create the corresponding clauses
@@ -665,7 +665,7 @@ constructEquivalenceClauses clauses exprs (Apply TypeInfo{chainName=exCn} l v) |
         let taggedGroups = if null lTag then [] else map (map (tagHornClause lTag)) (getDependentGroups clauses (getChainName lBody)) in
         appliedGroup:taggedGroups ++ associateVariable lVar (getChainName v) lTag lBody
   where
-    isLambda (Lambda {}) = True
+    isLambda (Expr _ Lambda{}) = True
     isLambda _ = False
 constructEquivalenceClauses clauses exprs ex = concatMap (constructEquivalenceClauses clauses exprs) (getSubExprs ex)
 
@@ -675,14 +675,14 @@ isInClauseSet clauses cn = any (\cs -> isEquivalenceHornClause (head cs) && prem
 
 -- Creates Horn clauses implying an equivalence between a given chainName and all occurances of a given variable in an expression
 associateVariable :: String -> ChainName -> String -> Expr -> [[HornClause]]
-associateVariable varName chainTo tag (Var TypeInfo{chainName=cn} n) | n == varName = [createEquivHornClauseGroup (VariableEquivalence varName) (cn ++ tag) chainTo]
+associateVariable varName chainTo tag (Expr TypeInfo{chainName=cn} (Var n)) | n == varName = [createEquivHornClauseGroup (VariableEquivalence varName) (cn ++ tag) chainTo]
 associateVariable varName chainTo tag ex = concatMap (associateVariable varName chainTo tag) (getSubExprs ex)
 
 -- Creates Horn clauses implying an equivalence between a given chainName and all occurances of a given variable in an expression
 -- Gives each variable a unique tag. The number of tags created is returned
 associateFunctionVariable :: String -> ChainName -> String -> Expr -> Supply ([[HornClause]], Int)
-associateFunctionVariable varName chainTo tag (Var TypeInfo{chainName=cn} n) | n == varName = demandUniqueNumber <&> \num -> ([createEquivHornClauseGroup (VariableEquivalence varName) (cn ++ tag) (chainTo ++ tagPrefix ++ show num)], 1)
-associateFunctionVariable varName _ _ (Lambda _ n _) | n == varName = return ([], 0)  -- Variable is shadowed. Don't search in this branch
+associateFunctionVariable varName chainTo tag (Expr TypeInfo{chainName=cn} (Var n)) | n == varName = demandUniqueNumber <&> \num -> ([createEquivHornClauseGroup (VariableEquivalence varName) (cn ++ tag) (chainTo ++ tagPrefix ++ show num)], 1)
+associateFunctionVariable varName _ _ (Expr _ (Lambda n _)) | n == varName = return ([], 0)  -- Variable is shadowed. Don't search in this branch
 associateFunctionVariable varName chainTo tag ex = do
   a <- mapM (associateFunctionVariable varName chainTo tag) (getSubExprs ex)
   return (concatMap fst a, sum (map snd a))

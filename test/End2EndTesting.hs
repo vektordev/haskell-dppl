@@ -264,7 +264,7 @@ progParameterCount :: Program -> Int
 progParameterCount Program{functions=f} = countLambdas main
   where
     Just main = lookup "main" f
-    countLambdas (Lambda _ _ e) = 1 + countLambdas e
+    countLambdas (Expr _ (Lambda _ e)) = 1 + countLambdas e
     countLambdas _ = 0
 
 -- | Build the argument list for an encode query from the directive's explicit args.
@@ -298,7 +298,7 @@ endpointReturnRType p target =
     typed = case addTypeInfo (annotateProg (annotateEnumsProg p)) of
       Right (tp, _) -> tp
       Left err      -> error ("endpointReturnRType: type inference failed: " ++ show err)
-    stripLambdasE (Lambda _ _ b) = stripLambdasE b
+    stripLambdasE (Expr _ (Lambda _ b)) = stripLambdasE b
     stripLambdasE e = e
 
 testJuliaAll :: [(Either CompilerError IREnv, [TestCase])] -> Property

@@ -25,7 +25,7 @@ import SPLL.Typing.RType
 --import SPLL.Typing.PType( PType(..) )
 import SPLL.InferenceRule
 import PredefinedFunctions (globalFEnv, FPair(..), FDecl(..))
-import SPLL.Lang.Types (FnDecl, ADTDecl, CompilerError, GenericValue(..))
+import SPLL.Lang.Types (FnDecl, ADTDecl, CompilerError, GenericValue(..), Expr(..), ExprF(..))
 import SPLL.Typing.AlgebraicDataTypes
 import Data.Bifunctor
 import Control.Monad (replicateM)
@@ -257,39 +257,39 @@ infer adts expr
     | specialTreatment expr =
       --we're dealing with StubConstant here.
       case expr of
-        (Constant ty (VError msg)) -> do
+        (Expr ty (Constant (VError msg))) -> do
           -- An error can occur in place of any type, so its type is unconstrained.
           tVal <- fresh
           let constraint = Constraint (rType ty) tVal (Just "Constant")
-          return (rType ty, [constraint], Constant ty (VError msg))
-        (Constant ty val) -> do
+          return (rType ty, [constraint], Expr ty (Constant (VError msg)))
+        (Expr ty (Constant val)) -> do
           let tVal = getRType val
           let constraint = Constraint (rType ty) tVal (Just "Constant")
           return (rType ty, [constraint], expr)
-        (Lambda ti name inExpr) -> do
+        (Expr ti (Lambda name inExpr)) -> do
           -- rare case of needing an extra TV, because the var doesn't get one initially
           tv <- fresh
           -- give the lambda var a tv, with that TEnv infer the lambda expression
           (functionTy, cs, inExprTy) <- inTEnvF [(name, Forall [] [] tv)] (infer adts inExpr)
           -- resulting type is tv -> functionTy; propagate constraints from inner Expr.
-          return (tv `TArrow` functionTy, cs, Lambda (setRType ti (tv `TArrow` functionTy)) name inExprTy)
-        (Var ti name) -> do
+          return (tv `TArrow` functionTy, cs, Expr (setRType ti (tv `TArrow` functionTy)) (Lambda name inExprTy))
+        (Expr ti (Var name)) -> do
           t <- lookupTEnv name
-          return (t, [], Var (setRType ti t) name)
-        (Apply ti func arg) -> do
+          return (t, [], Expr (setRType ti t) (Var name))
+        (Expr ti (Apply func arg)) -> do
           (funcTy, c1, funcExprTy) <- infer adts func
           (argTy, c2, argExprTy) <- infer adts arg
           let argConstraint = Constraint funcTy (argTy `TArrow` (rType ti)) (Just "Apply")
-          return (rType ti, [argConstraint] ++ c1 ++ c2, Apply ti funcExprTy argExprTy)
+          return (rType ti, [argConstraint] ++ c1 ++ c2, Expr ti (Apply funcExprTy argExprTy))
           --expr `usingScheme` (Forall [TV "a", TV "b"] (((TVarR $ TV "a") `TArrow` (TVarR $ TV "b")) `TArrow` (TVarR $ TV "a") `TArrow` (TVarR $ TV "b")))
-        e@(InjF _ (Named name) _) -> do
+        e@(Expr _ (InjF (Named name) _)) -> do
           let Just (FPair FDecl {contract=scheme} _) = lookup name (globalFEnv adts)
           usingScheme adts e scheme
-        (ReadNN ti name sym) -> do
+        (Expr ti (ReadNN name sym)) -> do
           t <- lookupTEnv name
           (symTy, c1, symTyExpr) <- infer adts sym
           let argConstraint = Constraint t (symTy `TArrow` (rType ti)) (Just "ReadNN")
-          return (rType ti, [argConstraint] ++ c1, ReadNN ti name symTyExpr)
+          return (rType ti, [argConstraint] ++ c1, Expr ti (ReadNN name symTyExpr))
     | solvesSimply expr =
         let
           plausibleAlgs = filter (checkExprMatches expr) allAlgorithms

@@ -56,22 +56,22 @@ bracket :: Expr -> String
 bracket e = "(" ++ exprToString e ++ ")"
 
 exprToString :: Expr -> String
-exprToString (IfThenElse _ cond tBranch fBranch) =
+exprToString (Expr _ (IfThenElse cond tBranch fBranch)) =
     "if " ++ bracket cond ++ " then " ++ bracket tBranch ++ " else " ++ bracket fBranch
-exprToString (InjF _ (Named name) args) = name ++ " " ++ unwords (map bracket args)
-exprToString (Var _ name) = name
-exprToString (Constant _ value) = valToString value
-exprToString (Lambda _ arg body) = "\\" ++ arg ++ " -> " ++ bracket body
-exprToString (Apply _ f arg) = bracket f ++ " " ++ bracket arg
+exprToString (Expr _ (InjF (Named name) args)) = name ++ " " ++ unwords (map bracket args)
+exprToString (Expr _ (Var name)) = name
+exprToString (Expr _ (Constant value)) = valToString value
+exprToString (Expr _ (Lambda arg body)) = "\\" ++ arg ++ " -> " ++ bracket body
+exprToString (Expr _ (Apply f arg)) = bracket f ++ " " ++ bracket arg
 -- Matches pTheta/pSubtree's real concrete syntax ("theta EXPR @ IX" /
 -- "subtree EXPR @ IX"), not the postfix "[i]"/".subtree(i)" this previously
 -- invented -- ThetaI/Subtree were never exercised by the generator until it
 -- gained full constructor coverage, so this mismatch went undetected.
-exprToString (ThetaI _ expr i) = "theta " ++ bracket expr ++ " @ " ++ show i
-exprToString (Subtree _ expr i) = "subtree " ++ bracket expr ++ " @ " ++ show i
-exprToString (GreaterThan _ e1 e2) = bracket e1 ++ " > " ++ bracket e2
-exprToString (LessThan _ e1 e2) = bracket e1 ++ " < " ++ bracket e2
-exprToString (ReadNN _ name expr) = "readNN " ++ name ++ " " ++ bracket expr
+exprToString (Expr _ (ThetaI expr i)) = "theta " ++ bracket expr ++ " @ " ++ show i
+exprToString (Expr _ (Subtree expr i)) = "subtree " ++ bracket expr ++ " @ " ++ show i
+exprToString (Expr _ (GreaterThan e1 e2)) = bracket e1 ++ " > " ++ bracket e2
+exprToString (Expr _ (LessThan e1 e2)) = bracket e1 ++ " < " ++ bracket e2
+exprToString (Expr _ (ReadNN name expr)) = "readNN " ++ name ++ " " ++ bracket expr
 
 fnDeclToString :: FnDecl -> String
 fnDeclToString (name, expr) = name ++ " = " ++ exprToString expr
@@ -101,56 +101,56 @@ testParse parser src = do
 testExpressions :: [(String, Expr)]
 testExpressions = [
     ("simple lambda",
-     Lambda makeTypeInfo "x" (Var makeTypeInfo "x")),
+     Expr makeTypeInfo (Lambda "x" (Expr makeTypeInfo (Var "x")))),
 
     ("lambda with application",
-     Lambda makeTypeInfo "x"
-       (Apply makeTypeInfo (Var makeTypeInfo "f") (Var makeTypeInfo "x"))),
+     Expr makeTypeInfo (Lambda "x"
+       (Expr makeTypeInfo (Apply (Expr makeTypeInfo (Var "f")) (Expr makeTypeInfo (Var "x")))))),
 
     ("lambda with parens",
-     Lambda makeTypeInfo "x"
-       (Apply makeTypeInfo (Var makeTypeInfo "f") (Var makeTypeInfo "x"))),
+     Expr makeTypeInfo (Lambda "x"
+       (Expr makeTypeInfo (Apply (Expr makeTypeInfo (Var "f")) (Expr makeTypeInfo (Var "x")))))),
 
     ("nested lambda",
-     Lambda makeTypeInfo "x"
-       (Lambda makeTypeInfo "y" (Var makeTypeInfo "x"))),
+     Expr makeTypeInfo (Lambda "x"
+       (Expr makeTypeInfo (Lambda "y" (Expr makeTypeInfo (Var "x")))))),
 
     ("lambda with nested application",
-     Lambda makeTypeInfo "o"
-       (Apply makeTypeInfo
-         (Apply makeTypeInfo (Var makeTypeInfo "h2")
-           (Constant makeTypeInfo (VInt 1)))
-         (Constant makeTypeInfo (VInt 1)))),
+     Expr makeTypeInfo (Lambda "o"
+       (Expr makeTypeInfo (Apply
+         (Expr makeTypeInfo (Apply (Expr makeTypeInfo (Var "h2"))
+           (Expr makeTypeInfo (Constant (VInt 1)))))
+         (Expr makeTypeInfo (Constant (VInt 1))))))),
 
     -- Adding some additional useful test cases
     ("if-then-else",
-     IfThenElse makeTypeInfo
-       (Var makeTypeInfo "condition")
-       (Constant makeTypeInfo (VInt 1))
-       (Constant makeTypeInfo (VInt 2))),
+     Expr makeTypeInfo (IfThenElse
+       (Expr makeTypeInfo (Var "condition"))
+       (Expr makeTypeInfo (Constant (VInt 1)))
+       (Expr makeTypeInfo (Constant (VInt 2))))),
 
     ("nested applications",
-     Apply makeTypeInfo
-       (Apply makeTypeInfo
-         (Var makeTypeInfo "f")
-         (Var makeTypeInfo "x"))
-       (Var makeTypeInfo "y")),
+     Expr makeTypeInfo (Apply
+       (Expr makeTypeInfo (Apply
+         (Expr makeTypeInfo (Var "f"))
+         (Expr makeTypeInfo (Var "x"))))
+       (Expr makeTypeInfo (Var "y")))),
 
     ("function with multiple args",
-     Apply makeTypeInfo
-       (Apply makeTypeInfo
-         (Apply makeTypeInfo
-           (Var makeTypeInfo "f")
-           (Constant makeTypeInfo (VInt 1)))
-         (Constant makeTypeInfo (VFloat 2.0)))
-       (Var makeTypeInfo "x")),
+     Expr makeTypeInfo (Apply
+       (Expr makeTypeInfo (Apply
+         (Expr makeTypeInfo (Apply
+           (Expr makeTypeInfo (Var "f"))
+           (Expr makeTypeInfo (Constant (VInt 1)))))
+         (Expr makeTypeInfo (Constant (VFloat 2.0)))))
+       (Expr makeTypeInfo (Var "x")))),
 
     ("mixed operators and applications",
-     Apply makeTypeInfo
-       (Var makeTypeInfo "f")
-       (GreaterThan makeTypeInfo
-         (Var makeTypeInfo "x")
-         (Constant makeTypeInfo (VInt 42))))
+     Expr makeTypeInfo (Apply
+       (Expr makeTypeInfo (Var "f"))
+       (Expr makeTypeInfo (GreaterThan
+         (Expr makeTypeInfo (Var "x"))
+         (Expr makeTypeInfo (Constant (VInt 42)))))))
     ]
 
 examples :: [Program]
@@ -231,9 +231,9 @@ prop_functionApplication = forAll genValidIdentifier $ \f ->
   forAll genValidIdentifier $ \x ->
     let input = f ++ " (" ++ g ++ " " ++ x ++ ")"
     in case tryParseExpr "test" input of
-         Right (Apply _ f' (Apply _ g' x')) ->
+         Right (Expr _ (Apply f' (Expr _ (Apply g' x')))) ->
            case (f', g', x') of
-             (Var _ f'', Var _ g'', Var _ x'') ->
+             (Expr _ (Var f''), Expr _ (Var g''), Expr _ (Var x'')) ->
                f == f'' && g == g'' && x == x''
              _ -> False
          _ -> False
@@ -407,7 +407,7 @@ prop_normalMinusFloat =
       Right (Program [("main", expr)] _ _ _) ->
         counterexample ("Expected subtraction in: " ++ src ++ ", got: " ++ show expr) $
           case expr of
-            Apply _ (Var _ "Normal") _ -> False
+            Expr _ (Apply (Expr _ (Var "Normal")) _) -> False
             _ -> True
       Right p -> counterexample ("Unexpected program structure: " ++ show p) False
       Left err -> counterexample (errorBundlePretty err) False

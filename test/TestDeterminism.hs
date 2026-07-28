@@ -18,7 +18,7 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, (@?=))
 
 import SPLL.Lang.Types
-import SPLL.Lang.Lang (getTypeInfo, getSubExprs)
+import SPLL.Lang.Lang (getTypeInfo, getSubExprs, Expr(..), ExprF(..))
 import SPLL.Analysis (annotateEnumsProg)
 import SPLL.Typing.ForwardChaining (annotateProg)
 import SPLL.Typing.Determinism
@@ -52,17 +52,17 @@ detsWhere p prog dm =
 -- Node predicates ------------------------------------------------------------
 
 isThetaNode, isConstNode, isNormalVar, isReadNN, isPlus :: Expr -> Bool
-isThetaNode (ThetaI{})  = True
-isThetaNode (Subtree{}) = True
+isThetaNode (Expr _ ThetaI{})  = True
+isThetaNode (Expr _ Subtree{}) = True
 isThetaNode _           = False
-isConstNode (Constant{}) = True
+isConstNode (Expr _ Constant{}) = True
 isConstNode _            = False
-isNormalVar (Var _ "Normal")  = True
-isNormalVar (Var _ "Uniform") = True
+isNormalVar (Expr _ (Var "Normal"))  = True
+isNormalVar (Expr _ (Var "Uniform")) = True
 isNormalVar _                 = False
-isReadNN (ReadNN{}) = True
+isReadNN (Expr _ ReadNN{}) = True
 isReadNN _          = False
-isPlus (InjF _ (Named "plus") _) = True
+isPlus (Expr _ (InjF (Named "plus") _)) = True
 isPlus _                         = False
 
 -- | Determinism of the result of a named top-level function — i.e. of the body
@@ -73,7 +73,7 @@ rootDet fname prog dm =
   case lookup fname (functions prog) of
     Nothing -> error ("no such function: " ++ fname)
     Just body -> isKnownAnchor dm (chainName (getTypeInfo (peel body)))
-  where peel (Lambda _ _ b) = peel b
+  where peel (Expr _ (Lambda _ b)) = peel b
         peel e              = e
 
 -- ---------------------------------------------------------------------------

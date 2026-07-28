@@ -40,7 +40,7 @@ import Data.Map.Strict (Map)
 import qualified Data.Set as Set
 import Data.Set (Set)
 
-import SPLL.Lang.Types (Expr(..), Program(..), TypeInfo(..), ChainName)
+import SPLL.Lang.Types (Expr(..), ExprF(..), Program(..), TypeInfo(..), ChainName)
 import SPLL.Lang.Lang (getTypeInfo, getSubExprs)
 
 -- | Per-node determinism, keyed by the chain name assigned by
@@ -112,7 +112,7 @@ summaryOf phi expr =
 
 -- | Strip leading lambdas, returning their bound names and the body beneath.
 peelParams :: Expr -> ([String], Expr)
-peelParams (Lambda _ x b) = let (ps, body) = peelParams b in (x : ps, body)
+peelParams (Expr _ (Lambda x b)) = let (ps, body) = peelParams b in (x : ps, body)
 peelParams e              = ([], e)
 
 -- ---------------------------------------------------------------------------
@@ -123,40 +123,40 @@ peelParams e              = ([], e)
 -- and all its descendants. Sub-maps are merged with '(&&)' so a node visited in
 -- several contexts (e.g. a multiply-applied function body) takes the meet.
 detExpr :: FnSummary -> VarEnv -> Expr -> (Bool, DetMap)
-detExpr phi env e = case e of
+detExpr phi env e = case node e of
   -- Self-sufficient known anchors: constants and parameter access. Their child
   -- (the theta-tree source of ThetaI/Subtree) is itself deterministic.
   Constant{}    -> here True Map.empty
-  ThetaI _ s _  -> here True (snd (detExpr phi env s))
-  Subtree _ s _ -> here True (snd (detExpr phi env s))
+  ThetaI s _  -> here True (snd (detExpr phi env s))
+  Subtree s _ -> here True (snd (detExpr phi env s))
 
   -- Variables: bound ⇒ their context determinism; a distribution primitive ⇒
   -- random; otherwise (top-level function reference / free name) ⇒ known,
   -- matching PInfer2's default of Deterministic for an unbound Var.
-  Var _ name
+  Var name
     | name `Map.member` env          -> here (env Map.! name) Map.empty
     | name `Set.member` randomPrimitives -> here False Map.empty
     | otherwise                      -> here True Map.empty
 
   -- Neural reads draw from a (categorical / Gaussian) law: never deterministic.
-  ReadNN _ _ s  -> here False (snd (detExpr phi env s))
+  ReadNN _ s  -> here False (snd (detExpr phi env s))
 
   -- Pure combinators: deterministic iff every operand is.
-  GreaterThan _ a b -> binAnd a b
-  LessThan _ a b    -> binAnd a b
-  InjF _ _ args     -> let rs = map (detExpr phi env) args
+  GreaterThan a b -> binAnd a b
+  LessThan a b    -> binAnd a b
+  InjF _ args     -> let rs = map (detExpr phi env) args
                        in here (and (map fst rs)) (Map.unionsWith (&&) (map snd rs))
-  IfThenElse _ c t f ->
+  IfThenElse c t f ->
     let rs = map (detExpr phi env) [c, t, f]
     in here (and (map fst rs)) (Map.unionsWith (&&) (map snd rs))
 
   -- A bare lambda (one not immediately applied — handled in Apply) is a function
   -- value, not a ground anchor: mark it False and walk its body with the
   -- parameter unknown.
-  Lambda _ x body ->
+  Lambda x body ->
     here False (snd (detExpr phi (Map.insert x False env) body))
 
-  Apply _ f arg -> detApply phi env e f arg
+  Apply f arg -> detApply phi env e f arg
   where
     cn = chainName (getTypeInfo e)
     -- record this node's determinism, merged (meet) with the descendants' map
@@ -177,25 +177,25 @@ detExpr phi env e = case e of
 -- a lambda, …) is conservatively non-deterministic. In every case both
 -- sub-expressions are still walked so all descendants are annotated.
 detApply :: FnSummary -> VarEnv -> Expr -> Expr -> Expr -> (Bool, DetMap)
-detApply phi env node f arg =
+detApply phi env whole f arg =
   let (da, ma)  = detExpr phi env arg
       (_,  mf)  = detExpr phi env f
       base      = Map.unionWith (&&) ma mf
       record b m = (b, Map.insertWith (&&) cn b m)
-  in case f of
-       Lambda _ x body ->
+  in case node f of
+       Lambda x body ->
          let (db, mb) = detExpr phi (Map.insert x da env) body
          in record db (Map.unionWith (&&) base mb)
-       _ -> case appSpine node of
+       _ -> case appSpine whole of
               Just (g, args) | g `Map.member` phi ->
                 let argsDet = and [ fst (detExpr phi env a) | a <- args ]
                 in record (phi Map.! g && argsDet) base
               _ -> record False base
-  where cn = chainName (getTypeInfo node)
+  where cn = chainName (getTypeInfo whole)
 
 -- | Collect an application spine @f a1 a2 …@ down to a 'Var' head, returning the
 -- head name and the arguments left-to-right. 'Nothing' if the head is not a Var.
 appSpine :: Expr -> Maybe (String, [Expr])
-appSpine (Var _ n)     = Just (n, [])
-appSpine (Apply _ g a) = do (n, as) <- appSpine g; Just (n, as ++ [a])
+appSpine (Expr _ (Var n))     = Just (n, [])
+appSpine (Expr _ (Apply g a)) = do (n, as) <- appSpine g; Just (n, as ++ [a])
 appSpine _             = Nothing

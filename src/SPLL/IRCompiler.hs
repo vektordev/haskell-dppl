@@ -155,9 +155,9 @@ envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb
     toIntegDecl name expr = (expr, "Calculates the probability of the sample parameter being less than or equal to the " ++ name ++ " function")
     toNormalDecl name expr = (expr, "Returns (mu, sigma) normal distribution parameters for the " ++ name ++ " function")
     meta typeEnv = CompilerMetadata conf fcDat typeEnv adts p (IRConst (VFloat 1.0)) []
-    extractParamNames (Lambda _ name body) = name : extractParamNames body
+    extractParamNames (Expr _ (Lambda name body)) = name : extractParamNames body
     extractParamNames _ = []
-    stripLambdas (Lambda _ _ body) = stripLambdas body
+    stripLambdas (Expr _ (Lambda _ body)) = stripLambdas body
     stripLambdas e = e
 
 
@@ -188,7 +188,7 @@ generateLetInExpr binds e = foldr (\(var, val) expr  -> IRLetIn var val expr) e 
 -- as the original binding; parameter types are added to the type environment so that
 -- inner Var references resolve correctly.
 compileNormalExpr :: CompilerMetadata -> Expr -> IRExpr
-compileNormalExpr meta (Lambda _ name subExpr) =
+compileNormalExpr meta (Expr _ (Lambda name subExpr)) =
   let newMeta = meta { typeEnv = (name, (rType (getTypeInfo subExpr), False)) : typeEnv meta }
   in IRLambda name (compileNormalExpr newMeta subExpr)
 compileNormalExpr meta expr =
@@ -199,10 +199,10 @@ compileNormalExpr meta expr =
 -- handler and cannot be processed by toIRNormalParams.  Mirrors the
 -- hasOwnInferenceHandler predicate used by toIRInference.
 isNormalExtractable :: Expr -> Bool
-isNormalExtractable (Lambda _ _ body)            = isNormalExtractable body
-isNormalExtractable (Apply  _ _ _)               = False
-isNormalExtractable (InjF _ (Named "Cons")  _)   = False
-isNormalExtractable (InjF _ (Named "TCons") _)   = False
+isNormalExtractable (Expr _ (Lambda _ body))            = isNormalExtractable body
+isNormalExtractable (Expr _ (Apply  _ _))               = False
+isNormalExtractable (Expr _ (InjF (Named "Cons")  _))   = False
+isNormalExtractable (Expr _ (InjF (Named "TCons") _))   = False
 isNormalExtractable _                            = True
 
 -- | Generate per-component normal functions for tuple expressions.
@@ -214,8 +214,8 @@ isNormalExtractable _                            = True
 generateTupleComponentNormalFunctions :: CompilerMetadata -> String -> Expr -> [IRFunGroup]
 generateTupleComponentNormalFunctions meta baseName expr = go expr id
   where
-    go (Lambda ti name body) wrap = go body (\e -> wrap (Lambda ti name e))
-    go (InjF _ (Named "TCons") [fstExpr, sndExpr]) wrap =
+    go (Expr ti (Lambda name body)) wrap = go body (\e -> wrap (Expr ti (Lambda name e)))
+    go (Expr _ (InjF (Named "TCons") [fstExpr, sndExpr])) wrap =
       catMaybes
         [ generateComponentNormalFunction meta (baseName ++ "_normal_fst") (wrap fstExpr) (getTypeInfo fstExpr)
         , generateComponentNormalFunction meta (baseName ++ "_normal_snd") (wrap sndExpr) (getTypeInfo sndExpr)
@@ -312,7 +312,7 @@ extendMetaForLambda meta t name =
 -- | True if the expression is a literal lambda (as opposed to a function reached
 -- through the higher-order equivalence machinery, e.g. a Var or an Apply result).
 isLambdaExpr :: Expr -> Bool
-isLambdaExpr (Lambda {}) = True
+isLambdaExpr (Expr _ (Lambda {})) = True
 isLambdaExpr _ = False
 
 -- | Re-type a body factor for dispatch, given that the named variables have
@@ -328,14 +328,14 @@ retypeDetGiven :: [String] -> Expr -> Expr
 retypeDetGiven [] e = e
 retypeDetGiven names e = go names e
   where
-    go ns (Var ti n) | n `elem` ns = Var (ti {pType = Deterministic}) n
-    go ns (Lambda ti n body) = Lambda ti n (go (filter (/= n) ns) body)
+    go ns (Expr ti (Var n)) | n `elem` ns = Expr (ti {pType = Deterministic}) (Var n)
+    go ns (Expr ti (Lambda n body)) = Expr ti (Lambda n (go (filter (/= n) ns) body))
     go ns ex =
       let ex' = setSubExprs ex (map (go ns) (getSubExprs ex))
       in case ex' of
-           InjF ti f params
+           Expr ti (InjF f params)
              | all ((== Deterministic) . pType . getTypeInfo) params ->
-                 InjF (ti {pType = Deterministic}) f params
+                 Expr (ti {pType = Deterministic}) (InjF f params)
            _ -> ex'
 
 -- | True if the expression contains a source of randomness: a reference to a
@@ -346,8 +346,8 @@ retypeDetGiven names e = go names e
 containsRandomSource :: Expr -> Bool
 containsRandomSource e = isSource e || any containsRandomSource (getSubExprs e)
   where
-    isSource (Var ti _)  = pType ti /= Deterministic
-    isSource (ReadNN {}) = True
+    isSource (Expr ti (Var _))  = pType ti /= Deterministic
+    isSource (Expr _ (ReadNN {})) = True
     isSource _           = False
 
 -- | Drop dead let-bindings from a forward-chaining inverse expression.
@@ -461,7 +461,7 @@ renameVar' old new (IRVar n) | n == old = IRVar new
 renameVar' _ _ x = x
 
 toIRInferenceSave :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PResult
-toIRInferenceSave meta cumulative (Lambda t name subExpr) sample = do
+toIRInferenceSave meta cumulative (Expr t (Lambda name subExpr)) sample = do
   let newMeta = extendMetaForLambda meta t name
   irTuple <- lift (runWriterT (toIRInferenceSave newMeta cumulative subExpr sample)) <&> generateLetInBlock meta
   return (detP (IRLambda name irTuple))
@@ -483,53 +483,53 @@ irSqrt x = IRUnaryOp OpExp (IROp OpMult (IRConst (VFloat 0.5)) (IRUnaryOp OpLog 
 
 -- | Recursively extract (mu, sigma) as IRExprs from a PNormal-typed expression.
 toIRNormalParams :: CompilerMetadata -> Expr -> CompilerMonad (IRExpr, IRExpr)
-toIRNormalParams _ (Var _ "Normal") = return (IRConst (VFloat 0), IRConst (VFloat 1))
-toIRNormalParams meta (InjF _ (Named "plus") [e0, e1])
+toIRNormalParams _ (Expr _ (Var "Normal")) = return (IRConst (VFloat 0), IRConst (VFloat 1))
+toIRNormalParams meta (Expr _ (InjF (Named "plus") [e0, e1]))
   | pType (getTypeInfo e0) == PNormal, pType (getTypeInfo e1) == PNormal = do
       (mu0, s0) <- toIRNormalParams meta e0
       (mu1, s1) <- toIRNormalParams meta e1
       return (IROp OpPlus mu0 mu1, irSqrt (IROp OpPlus (IROp OpMult s0 s0) (IROp OpMult s1 s1)))
-toIRNormalParams meta (InjF _ (Named "plus") [e0, e1])
+toIRNormalParams meta (Expr _ (InjF (Named "plus") [e0, e1]))
   | pType (getTypeInfo e0) == PNormal = do
       (mu0, s0) <- toIRNormalParams meta e0
       det1 <- toIRGenerate meta e1
       return (IROp OpPlus mu0 det1, s0)
-toIRNormalParams meta (InjF _ (Named "plus") [e0, e1])
+toIRNormalParams meta (Expr _ (InjF (Named "plus") [e0, e1]))
   | pType (getTypeInfo e1) == PNormal = do
       (mu1, s1) <- toIRNormalParams meta e1
       det0 <- toIRGenerate meta e0
       return (IROp OpPlus mu1 det0, s1)
-toIRNormalParams meta (InjF _ (Named "mult") [e0, e1])
+toIRNormalParams meta (Expr _ (InjF (Named "mult") [e0, e1]))
   | pType (getTypeInfo e0) == PNormal = do
       (mu0, s0) <- toIRNormalParams meta e0
       det1 <- toIRGenerate meta e1
       return (IROp OpMult mu0 det1, IROp OpMult s0 (IRUnaryOp OpAbs det1))
-toIRNormalParams meta (InjF _ (Named "mult") [e0, e1])
+toIRNormalParams meta (Expr _ (InjF (Named "mult") [e0, e1]))
   | pType (getTypeInfo e1) == PNormal = do
       (mu1, s1) <- toIRNormalParams meta e1
       det0 <- toIRGenerate meta e0
       return (IROp OpMult mu1 det0, IROp OpMult s1 (IRUnaryOp OpAbs det0))
-toIRNormalParams meta (InjF _ (Named "neg") [e])
+toIRNormalParams meta (Expr _ (InjF (Named "neg") [e]))
   | pType (getTypeInfo e) == PNormal = do
       (mu, s) <- toIRNormalParams meta e
       return (IRUnaryOp OpNeg mu, s)
-toIRNormalParams meta (InjF _ (Named "log") [e])
+toIRNormalParams meta (Expr _ (InjF (Named "log") [e]))
   | pType (getTypeInfo e) == PLogNormal = toIRLogNormalParams meta e
 -- Tuple-field projection: the marginal of a literal tuple's field is that
 -- field's own law, so extraction descends into the projected component. The
 -- modality engine's IProd projection types e.g. @fst (Normal, Uniform * 2)@ as
 -- PNormal, a shape PInfer2 never produced.
-toIRNormalParams meta (InjF _ (Named "fst") [InjF _ (Named "TCons") [a, _]])
+toIRNormalParams meta (Expr _ (InjF (Named "fst") [Expr _ (InjF (Named "TCons") [a, _])]))
   | pType (getTypeInfo a) == PNormal = toIRNormalParams meta a
-toIRNormalParams meta (InjF _ (Named "snd") [InjF _ (Named "TCons") [_, b]])
+toIRNormalParams meta (Expr _ (InjF (Named "snd") [Expr _ (InjF (Named "TCons") [_, b])]))
   | pType (getTypeInfo b) == PNormal = toIRNormalParams meta b
-toIRNormalParams meta (InjF ti f@(Named n) [Var _ name])
+toIRNormalParams meta (Expr ti (InjF f@(Named n) [Expr _ (Var name)]))
   | n `elem` ["fst", "snd"]
   , Just expr <- lookup name (functions (compilingProgram meta)) =
-      toIRNormalParams meta (InjF ti f [expr])
-toIRNormalParams meta (Var _ name)
+      toIRNormalParams meta (Expr ti (InjF f [expr]))
+toIRNormalParams meta (Expr _ (Var name))
   | Just expr <- lookup name (functions (compilingProgram meta)) = toIRNormalParams meta expr
-toIRNormalParams meta (ReadNN _ name arg) = do
+toIRNormalParams meta (Expr _ (ReadNN name arg)) = do
   sym <- toIRGenerate meta arg
   var <- mkVariable "nn_out"
   setVariables [(var, IRApply (IRVar name) sym)]
@@ -550,48 +550,48 @@ normalDiffCdfAtZero meta left right = do
 
 -- | Recursively extract (mu_log, sigma) as IRExprs from a PLogNormal-typed expression.
 toIRLogNormalParams :: CompilerMetadata -> Expr -> CompilerMonad (IRExpr, IRExpr)
-toIRLogNormalParams meta (InjF _ (Named "exp") [e])
+toIRLogNormalParams meta (Expr _ (InjF (Named "exp") [e]))
   | pType (getTypeInfo e) == PNormal = toIRNormalParams meta e
-toIRLogNormalParams meta (InjF _ (Named "mult") [e0, e1])
+toIRLogNormalParams meta (Expr _ (InjF (Named "mult") [e0, e1]))
   | pType (getTypeInfo e0) == PLogNormal, pType (getTypeInfo e1) == PLogNormal = do
       (mu0, s0) <- toIRLogNormalParams meta e0
       (mu1, s1) <- toIRLogNormalParams meta e1
       return (IROp OpPlus mu0 mu1, irSqrt (IROp OpPlus (IROp OpMult s0 s0) (IROp OpMult s1 s1)))
-toIRLogNormalParams meta (InjF _ (Named "mult") [e0, e1])
+toIRLogNormalParams meta (Expr _ (InjF (Named "mult") [e0, e1]))
   | pType (getTypeInfo e0) == PLogNormal = do
       (mu0, s0) <- toIRLogNormalParams meta e0
       det1 <- toIRGenerate meta e1
       return (IROp OpPlus mu0 (IRUnaryOp OpLog det1), s0)
-toIRLogNormalParams meta (InjF _ (Named "mult") [e0, e1])
+toIRLogNormalParams meta (Expr _ (InjF (Named "mult") [e0, e1]))
   | pType (getTypeInfo e1) == PLogNormal = do
       (mu1, s1) <- toIRLogNormalParams meta e1
       det0 <- toIRGenerate meta e0
       return (IROp OpPlus mu1 (IRUnaryOp OpLog det0), s1)
 -- sqrt(exp x) = exp(x/2): the log-space variable is halved, so (mu_log, sigma) -> (mu_log/2, sigma/2).
-toIRLogNormalParams meta (InjF _ (Named "sqrt") [e])
+toIRLogNormalParams meta (Expr _ (InjF (Named "sqrt") [e]))
   | pType (getTypeInfo e) == PLogNormal = do
       (mu, s) <- toIRLogNormalParams meta e
       return (IROp OpMult (IRConst (VFloat 0.5)) mu, IROp OpMult (IRConst (VFloat 0.5)) s)
 -- sq(exp x) = (exp x)^2 = exp(2x): the log-space variable is doubled, so (mu_log, sigma) -> (2 mu_log, 2 sigma).
-toIRLogNormalParams meta (InjF _ (Named "sq") [e])
+toIRLogNormalParams meta (Expr _ (InjF (Named "sq") [e]))
   | pType (getTypeInfo e) == PLogNormal = do
       (mu, s) <- toIRLogNormalParams meta e
       return (IROp OpMult (IRConst (VFloat 2)) mu, IROp OpMult (IRConst (VFloat 2)) s)
 -- recip(exp x) = 1/exp x = exp(-x): the log-space variable is negated, so (mu_log, sigma) -> (-mu_log, sigma).
-toIRLogNormalParams meta (InjF _ (Named "recip") [e])
+toIRLogNormalParams meta (Expr _ (InjF (Named "recip") [e]))
   | pType (getTypeInfo e) == PLogNormal = do
       (mu, s) <- toIRLogNormalParams meta e
       return (IRUnaryOp OpNeg mu, s)
 -- Tuple-field projection, mirroring toIRNormalParams.
-toIRLogNormalParams meta (InjF _ (Named "fst") [InjF _ (Named "TCons") [a, _]])
+toIRLogNormalParams meta (Expr _ (InjF (Named "fst") [Expr _ (InjF (Named "TCons") [a, _])]))
   | pType (getTypeInfo a) == PLogNormal = toIRLogNormalParams meta a
-toIRLogNormalParams meta (InjF _ (Named "snd") [InjF _ (Named "TCons") [_, b]])
+toIRLogNormalParams meta (Expr _ (InjF (Named "snd") [Expr _ (InjF (Named "TCons") [_, b])]))
   | pType (getTypeInfo b) == PLogNormal = toIRLogNormalParams meta b
-toIRLogNormalParams meta (InjF ti f@(Named n) [Var _ name])
+toIRLogNormalParams meta (Expr ti (InjF f@(Named n) [Expr _ (Var name)]))
   | n `elem` ["fst", "snd"]
   , Just expr <- lookup name (functions (compilingProgram meta)) =
-      toIRLogNormalParams meta (InjF ti f [expr])
-toIRLogNormalParams meta (Var _ name)
+      toIRLogNormalParams meta (Expr ti (InjF f [expr]))
+toIRLogNormalParams meta (Expr _ (Var name))
   | Just expr <- lookup name (functions (compilingProgram meta)) = toIRLogNormalParams meta expr
 toIRLogNormalParams _ e = error $ "toIRLogNormalParams: cannot extract LogNormal params from " ++ show (pType (getTypeInfo e))
 
@@ -599,12 +599,12 @@ toIRLogNormalParams _ e = error $ "toIRLogNormalParams: cannot extract LogNormal
 -- | Expressions that have their own toIRInference handlers and must not be
 -- intercepted by the PNormal/PLogNormal catch-alls below.
 hasOwnInferenceHandler :: [ADTDecl] -> Expr -> Bool
-hasOwnInferenceHandler _    (Apply _ _ _)            = True
+hasOwnInferenceHandler _    (Expr _ (Apply _ _))            = True
 -- Field constructors (Cons/TCons/user-ADT constructors) carry the PType of their
 -- fields, which can be PNormal even though the container itself cannot be
 -- inferred by toIRNormal. They have their own construction handler, so the
 -- PNormal/PLogNormal catch-alls must not intercept them.
-hasOwnInferenceHandler adts (InjF _ (Named name) _) = isFieldConstructor adts name
+hasOwnInferenceHandler adts (Expr _ (InjF (Named name) _)) = isFieldConstructor adts name
 hasOwnInferenceHandler _    _                        = False
 
 toIRInference :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PResult
@@ -641,29 +641,29 @@ toIRInference meta True e sample | pType (getTypeInfo e) == PLogNormal, not (has
 -- Distribution primitives (reserved-name Vars). Normal usually reaches the PNormal
 -- catch-all above; these equations are the direct density/CDF leaves for Uniform and
 -- the defensive Normal fallback.
-toIRInference _ False (Var _ "Normal") sample = return (density (IRDensity IRNormal sample) sample)
+toIRInference _ False (Expr _ (Var "Normal")) sample = return (density (IRDensity IRNormal sample) sample)
 -- Unlike Normal, Uniform has bounded support: off it the density is not a tiny
 -- tail value but an impossible event, and saying so structurally is what keeps
 -- 'mixWith' from having to read it back off the zero.
-toIRInference _ False (Var _ "Uniform") sample =
+toIRInference _ False (Expr _ (Var "Uniform")) sample =
   return (impossibleWhen (outsideUnitInterval sample) (density (IRDensity IRUniform sample) sample))
-toIRInference _ True (Var _ "Normal") sample = return (mass (IRCumulative IRNormal sample))
-toIRInference _ True (Var _ "Uniform") sample = return (mass (IRCumulative IRUniform sample))
-toIRInference _ _ (Constant _ (VError e)) _ = return (detP (IRError e))
-toIRInference _ False (Constant TypeInfo {rType=rt} value) sample = do
+toIRInference _ True (Expr _ (Var "Normal")) sample = return (mass (IRCumulative IRNormal sample))
+toIRInference _ True (Expr _ (Var "Uniform")) sample = return (mass (IRCumulative IRUniform sample))
+toIRInference _ _ (Expr _ (Constant (VError e))) _ = return (detP (IRError e))
+toIRInference _ False (Expr TypeInfo {rType=rt} (Constant value)) sample = do
   let comp = case rt of
               TFloat   -> IROp OpApprox sample (IRConst (fmap failConversion value))
               TVarR _  -> IROp OpApprox sample (IRConst (fmap failConversion value))
               _        -> IROp OpEq sample (IRConst (fmap failConversion value))
   return (indicatorP comp)
-toIRInference _ True (Constant TypeInfo {rType=rt} value) sample = return (mass (compareValueExpr rt (IRConst (valueToIR value)) sample))
-toIRInference meta True (ThetaI _ a i) sample = do
+toIRInference _ True (Expr TypeInfo {rType=rt} (Constant value)) sample = return (mass (compareValueExpr rt (IRConst (valueToIR value)) sample))
+toIRInference meta True (Expr _ (ThetaI a i)) sample = do
   a' <- toIRGenerate meta a
   return (mass (IRIf (IROp OpLessThan sample (IRTheta a' i)) const0 const1))
-toIRInference meta False (ThetaI _ a i) sample = do
+toIRInference meta False (Expr _ (ThetaI a i)) sample = do
   a' <- toIRGenerate meta a
   return (indicatorP (IROp OpApprox sample (IRTheta a' i)))
-toIRInference meta cumulative (IfThenElse _ cond left right) sample = do
+toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
   var_condT_p <- mkVariable "condT"
   var_condF_p <- mkVariable "condF"
   condTrue  <- toIRInference meta False cond (IRConst (VBool True))
@@ -729,17 +729,17 @@ toIRInference meta cumulative (IfThenElse _ cond left right) sample = do
 -- comparison is that difference's CDF evaluated at 0. Neither side is Deterministic,
 -- so the bound-based equations below do not apply. resolveCompCons types this Bool
 -- as Integrate (a closed-form discrete probability), matching the dim-0 result here.
-toIRInference meta False (GreaterThan _ left right) sample
+toIRInference meta False (Expr _ (GreaterThan left right)) sample
   | pType (getTypeInfo left) == PNormal && pType (getTypeInfo right) == PNormal = do
     cdfAt0 <- normalDiffCdfAtZero meta left right
     -- p(left > right) = p(diff > 0) = 1 - cdf(0)
     return (mass (IRIf sample (IROp OpSub (IRConst $ VFloat 1.0) cdfAt0) cdfAt0))
-toIRInference meta False (LessThan _ left right) sample
+toIRInference meta False (Expr _ (LessThan left right)) sample
   | pType (getTypeInfo left) == PNormal && pType (getTypeInfo right) == PNormal = do
     cdfAt0 <- normalDiffCdfAtZero meta left right
     -- p(left < right) = p(diff < 0) = cdf(0)
     return (mass (IRIf sample cdfAt0 (IROp OpSub (IRConst $ VFloat 1.0) cdfAt0)))
-toIRInference meta False (GreaterThan _ left right) sample
+toIRInference meta False (Expr _ (GreaterThan left right)) sample
   | pType (getTypeInfo left) == Deterministic = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
     l <- toIRGenerate meta left
@@ -760,7 +760,7 @@ toIRInference meta False (GreaterThan _ left right) sample
     setVariables [(var2, rProb integ)]
     -- A comparison's mass, not a structural choice: possible either way.
     return (PResult returnExpr const0 (rBranches integ) constFalseIR)
-toIRInference meta False (LessThan _ left right) sample
+toIRInference meta False (Expr _ (LessThan left right)) sample
   | pType (getTypeInfo left) == Deterministic = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
     l <- toIRGenerate meta left
@@ -781,7 +781,7 @@ toIRInference meta False (LessThan _ left right) sample
     let returnExpr = IRIf sample (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))
     -- A comparison's mass, not a structural choice: possible either way.
     return (PResult returnExpr const0 (rBranches integ) constFalseIR)
-toIRInference meta _ (ReadNN _ name symbol) sample = do
+toIRInference meta _ (Expr _ (ReadNN name symbol)) sample = do
   nnRaw <- mkVariable "nn_raw"
   var <- mkVariable "callNN"
   sym <- toIRGenerate meta symbol
@@ -789,12 +789,12 @@ toIRInference meta _ (ReadNN _ name symbol) sample = do
   setVariables [(var, IRApply (IRApply (IRVar (name ++ "_auto_prob")) (IRVar nnRaw)) sample)]
   -- Not a leaf: the network's own _auto_prob function already packed a triple.
   return (unpackResult (IRVar var))
-toIRInference meta cumulative (Lambda t name subExpr) sample = do
+toIRInference meta cumulative (Expr t (Lambda name subExpr)) sample = do
   let newMeta = extendMetaForLambda meta t name
   irTuple <- lift (runWriterT (toIRInference newMeta cumulative subExpr sample)) <&> generateLetInBlock meta
   return (detP (IRLambda name irTuple))
 -- Deterministic lambda and bound expression PDF
-toIRInference meta False (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo l) == Deterministic && pType (getTypeInfo v) == Deterministic = do
+toIRInference meta False (Expr TypeInfo{rType=rt} (Apply l v)) sample | pType (getTypeInfo l) == Deterministic && pType (getTypeInfo v) == Deterministic = do
   vIR <- toIRGenerate meta v
   lIR <- toIRGenerate meta l -- Dim and BC are irrelevant here
   -- The result is not a tuple if the return value is a closure
@@ -804,7 +804,7 @@ toIRInference meta False (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeI
       let comp = IROp OpEq (IRApply lIR vIR) sample
       return (impossibleWhen (notIR comp) (detP (IRIf comp const1 const0)))
 -- Deterministic lambda and bound expression CDF
-toIRInference meta True (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo l) == Deterministic && pType (getTypeInfo v) == Deterministic = do
+toIRInference meta True (Expr TypeInfo{rType=rt} (Apply l v)) sample | pType (getTypeInfo l) == Deterministic && pType (getTypeInfo v) == Deterministic = do
   vIR <- toIRGenerate meta v
   lIR <- toIRGenerate meta l -- Dim and BC are irrelevant here
   -- The result is not a tuple if the return value is a closure
@@ -817,11 +817,11 @@ toIRInference meta True (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeIn
 -- compiling the body via toIREnumerate. The body need not be deterministic given the
 -- bound variable -- toIREnumerate recurses into further enumerable applications
 -- (nested enumerable `let`s), so this rule no longer requires `pType l == Deterministic`.
-toIRInference meta cumulative (Apply TypeInfo {rType=_} l v) sample
+toIRInference meta cumulative (Expr TypeInfo {rType=_} (Apply l v)) sample
   | isEnumerableApplication l v =
   enumerateAppliedLambda meta cumulative l v sample
 -- Deterministic bound expression
-toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample | pType (getTypeInfo v) == Deterministic = do
+toIRInference meta cumulative (Expr TypeInfo{rType=rt} (Apply l v)) sample | pType (getTypeInfo v) == Deterministic = do
   vIR <- toIRGenerate meta v
   lIR <- rProb <$> toIRInference meta cumulative l sample -- Dim and BC are irrelevant here. We need to extract these from the return tuple
   -- The result is not a tuple if the return value is a closure
@@ -832,7 +832,7 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt} l v) sample | pType (get
       setVariables [(retVal, IRApply lIR vIR)]
       return (unpackResult (IRVar retVal))
 -- Probabilistic bound expression
-toIRInference meta cumulative (Apply TypeInfo{rType=_, chainName=_} l v) sample | isTArrow (rType (getTypeInfo v)) && (pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal) = do
+toIRInference meta cumulative (Expr TypeInfo{rType=_, chainName=_} (Apply l v)) sample | isTArrow (rType (getTypeInfo v)) && (pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal) = do
   lIR <- toIRGenerate meta l
   vIR <- rProb <$> toIRInference meta cumulative v sample
   applied <- mkVariable "call"
@@ -841,7 +841,7 @@ toIRInference meta cumulative (Apply TypeInfo{rType=_, chainName=_} l v) sample 
   where
     isTArrow (TArrow _ _) = True
     isTArrow _ = False
-toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample | pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal = do
+toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v)) sample | pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal = do
   -- This is the probabilistic inference of a known, deterministic lambda with a probabilistic parameter
   -- The inference looks like this: p(l(v) == sample) = p(l^-1(sample) == v)
   -- The inverse can not be created using recursive descend, therefor we use forward chaining for the inverse only
@@ -966,7 +966,7 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample
           -- than crash or return a silently wrong density.
           let occurrences = fromMaybe [] (lookup lResolvedCN (lambdaVarOccurrences (fcData meta)))
           let bindingIsSink = length occurrences == 1 && not (containsRandomSource bodyExpr)
-          let userVar = case l of Lambda _ n _ -> n; _ -> boundVar
+          let userVar = case l of Expr _ (Lambda n _) -> n; _ -> boundVar
           let refuse = IRError ("cannot compute marginal: binding '" ++ userVar
                 ++ "' is unobserved (ANY in its witnessing slot), but its value feeds"
                 ++ " observed slots or further randomness; integrating it out is beyond"
@@ -995,7 +995,7 @@ toIRInference meta cumulative (Apply TypeInfo{rType=rt, chainName=_} l v) sample
       TArrow _ _ -> return (wrapInLambdas (if countBranches (compilerConfig meta) then IRTCons retP (IRTCons retD retBC) else IRTCons retP retD), const0, const0)
       _ -> return (wrapInLambdas retP, wrapInLambdas retD, wrapInLambdas retBC)-}
 
-toIRInference _ _ (Apply TypeInfo{rType=_} _ _) _ = error "This instance of apply is not yet implemented"
+toIRInference _ _ (Expr TypeInfo{rType=_} (Apply _ _)) _ = error "This instance of apply is not yet implemented"
 -- Generic inference for multi-field constructor InjFs (Cons, TCons, user-ADT
 -- constructors). Each field is independently recoverable from the constructed
 -- sample via a deconstructing inverse, so we infer each field against its
@@ -1003,7 +1003,7 @@ toIRInference _ _ (Apply TypeInfo{rType=_} _ _) _ = error "This instance of appl
 -- branch counts add. The components are independent, hence product (not the
 -- additive PlusConstraint) semantics. Fires for >= 1 probabilistic parameter;
 -- the all-deterministic case is handled by the generate-and-compare branch below.
-toIRInference meta cumulative (InjF TypeInfo{rType=rt} (Named name) params) sample
+toIRInference meta cumulative (Expr TypeInfo{rType=rt} (InjF (Named name) params)) sample
   | isFieldConstructor (adtDecls meta) name && countProbParams params >= 1 = do
   let resolvedName = resolveInjF rt name
   FPair fwd inversions <- instantiate mkVariable (adtDecls meta) resolvedName
@@ -1026,7 +1026,7 @@ toIRInference meta cumulative (InjF TypeInfo{rType=rt} (Named name) params) samp
   -- the non-empty-list test carried by the Cons inverses).
   let guardCond = foldr1 (IROp OpAnd) (map snd fieldResults)
   return (guardP [guardCond] combined)
-toIRInference meta cumulative (InjF ti (Named name) params) sample | isHigherOrder (adtDecls meta) name = do
+toIRInference meta cumulative (Expr ti (InjF (Named name) params)) sample | isHigherOrder (adtDecls meta) name = do
   let adts = adtDecls meta
   let resolvedName = resolveInjF (rType ti) name
   -- FPair of the InjF with unique names
@@ -1063,7 +1063,7 @@ toIRInference meta cumulative (InjF ti (Named name) params) sample | isHigherOrd
   paramRes <- probF meta cumulative a finalInvExpr
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
   return (mapResult renVar (guardP [appTest] (scaleCoV cumulative invDerivExpr paramRes)))
-toIRInference meta False e@(InjF TypeInfo {tags=_, rType=rt} (Named _) params) sample
+toIRInference meta False e@(Expr TypeInfo {tags=_, rType=rt} (InjF (Named _) params)) sample
   | countProbParams params == 0 = do
   -- There is no probabilistic parameter
   -- Check whether the value of the function is equal to the sample
@@ -1074,13 +1074,13 @@ toIRInference meta False e@(InjF TypeInfo {tags=_, rType=rt} (Named _) params) s
         _        -> OpEq
   let comp = IROp cmp expr sample
   return (impossibleWhen (notIR comp) (detP (IRIf comp const1 const0)))
-toIRInference meta True e@(InjF TypeInfo {tags=_, rType=rt} (Named _) params) sample
+toIRInference meta True e@(Expr TypeInfo {tags=_, rType=rt} (InjF (Named _) params)) sample
   | countProbParams params == 0 = do
   -- There is no probabilistic parameter
   -- Check whether the value of the function is less than the sample
   expr <- toIRGenerate meta e
   return (detP (compareValueExpr rt expr sample))
-toIRInference meta cumulative (InjF TypeInfo {tags=_} (Named name) params) sample
+toIRInference meta cumulative (Expr TypeInfo {tags=_} (InjF (Named name) params)) sample
   | hasAnyExcept (adtDecls meta) name = do
   -- FPair of the InjF with unique names
   FPair fwd inversions <- instantiate mkVariable (adtDecls meta) name
@@ -1131,7 +1131,7 @@ toIRInference meta cumulative (InjF TypeInfo {tags=_} (Named name) params) sampl
 -- side doesn't depend on the enum variable, so it's evaluated once outside the
 -- loop; the random side's own (already-tractable) enum is then looped, keeping
 -- cells where forward(l,r) == sample.
-toIRInference meta False (InjF TypeInfo {rType=rt} (Named name) [left, right]) sample
+toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, right])) sample
   | isForwardOnly (adtDecls meta) (resolveInjF rt name)
     && (pType (getTypeInfo left) == Deterministic || pType (getTypeInfo right) == Deterministic)
     && countProbParams [left, right] == 1
@@ -1153,7 +1153,7 @@ toIRInference meta False (InjF TypeInfo {rType=rt} (Named name) [left, right]) s
   setVariables outerBinds
   opaqueMass (IREnumSum randVar enumList body') const0
 -- Cumulative (cdf) counterpart of the single-operand enumeration case above.
-toIRInference meta True (InjF TypeInfo {rType=rt} (Named name) [left, right]) sample
+toIRInference meta True (Expr TypeInfo {rType=rt} (InjF (Named name) [left, right])) sample
   | isForwardOnly (adtDecls meta) (resolveInjF rt name)
     && (pType (getTypeInfo left) == Deterministic || pType (getTypeInfo right) == Deterministic)
     && countProbParams [left, right] == 1
@@ -1174,7 +1174,7 @@ toIRInference meta True (InjF TypeInfo {rType=rt} (Named name) [left, right]) sa
   let (outerBinds, body') = hoistInvariantBindings randVar (buildLetIns binds returnExpr)
   setVariables outerBinds
   opaqueMass (IREnumSum randVar enumList body') const0
-toIRInference meta cumulative (InjF TypeInfo {tags=_, rType=rt} (Named name) params) sample
+toIRInference meta cumulative (Expr TypeInfo {tags=_, rType=rt} (InjF (Named name) params)) sample
   | countProbParams params == 1 = do
   let resolvedName = resolveInjF rt name
   -- FPair of the InjF with unique names
@@ -1204,7 +1204,7 @@ toIRInference meta cumulative (InjF TypeInfo {tags=_, rType=rt} (Named name) par
 -- Enumerate-both discrete path for forward-only binary InjFs (and/or). No point
 -- inverse exists, so loop the |L|x|R| grid and keep cells where forward(l,r) == sample,
 -- accumulating pLeft(l) * pRight(r). Mirrors the cumulative double-enum path below.
-toIRInference meta False (InjF TypeInfo {rType=rt} (Named name) [left, right]) sample
+toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, right])) sample
   | isForwardOnly (adtDecls meta) (resolveInjF rt name)
     && isEnumerable (tags (getTypeInfo left)) && isEnumerable (tags (getTypeInfo right))
     && pType (getTypeInfo left) /= Deterministic && pType (getTypeInfo right) /= Deterministic = do
@@ -1223,7 +1223,7 @@ toIRInference meta False (InjF TypeInfo {rType=rt} (Named name) [left, right]) s
   let (outerBinds, v1Body) = hoistInvariantBindings v1 innerSum
   setVariables outerBinds
   opaqueMass (IREnumSum v1 enumListL v1Body) const0
-toIRInference meta False (InjF TypeInfo {rType=rt} (Named name) [left, right]) sample
+toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, right])) sample
   | isEnumerable (tags (getTypeInfo left)) && isEnumerable (tags (getTypeInfo right))
     && pType (getTypeInfo left) /= Deterministic && pType (getTypeInfo right) /= Deterministic = do
   let resolvedName = resolveInjF rt name
@@ -1272,7 +1272,7 @@ toIRInference meta False (InjF TypeInfo {rType=rt} (Named name) [left, right]) s
   setVariables (map renameHoisted outerBinds)
   enumSumP applyUnique x2 enumListL (unpackResult innerTuple)
 -- For the cumulative case we cant get around two enum sums
-toIRInference meta True (InjF TypeInfo {rType=rt} (Named name) [left, right]) sample
+toIRInference meta True (Expr TypeInfo {rType=rt} (InjF (Named name) [left, right])) sample
   | isEnumerable (tags (getTypeInfo left)) && isEnumerable (tags (getTypeInfo right))
     && pType (getTypeInfo left) /= Deterministic && pType (getTypeInfo right) /= Deterministic = do
   let resolvedName = resolveInjF rt name
@@ -1301,7 +1301,7 @@ toIRInference meta True (InjF TypeInfo {rType=rt} (Named name) [left, right]) sa
   let (outerBinds, v1Body) = hoistInvariantBindings v1 innerSum
   setVariables outerBinds
   opaqueMass (IREnumSum v1 enumListL v1Body) const0
-toIRInference meta cumulative (Var TypeInfo {rType=rt} n) sample = do
+toIRInference meta cumulative (Expr TypeInfo {rType=rt} (Var n)) sample = do
   -- Variable might be a function
   let functionSuffix = if cumulative then "_integ" else "_prob"
   case lookup n (typeEnv meta) of
@@ -1336,7 +1336,7 @@ toIRInference meta cumulative (Var TypeInfo {rType=rt} n) sample = do
               _        -> IROp OpEq sample (IRVar n)
         return (impossibleWhen (notIR comp) (detP (IRIf comp const1 const0)))
     Nothing -> error ("Could not find name in TypeEnv: " ++ n)
-toIRInference _ _ (Subtree _ _ _) _ = error "Cannot infer prob on subtree expression. Please check your syntax"
+toIRInference _ _ (Expr _ (Subtree _ _)) _ = error "Cannot infer prob on subtree expression. Please check your syntax"
 toIRInference _ _ x _ = error ("found no way to convert to IR: " ++ show x)
 
 -- ===== PResult combinators (design presult-combinators) =====
@@ -1802,31 +1802,31 @@ uniqueify _ _ e = e
 --folding detGen and Gen into one, as the distinction is one to make sure things that are det are indeed det.
 -- That's what the type system is for though.
 toIRGenerate :: CompilerMetadata -> Expr -> CompilerMonad  IRExpr
-toIRGenerate meta (IfThenElse _ cond left right) = do
+toIRGenerate meta (Expr _ (IfThenElse cond left right)) = do
   c <- toIRGenerate meta cond
   l <- toIRGenerate meta left
   r <- toIRGenerate meta right
   return $ IRIf c l r
-toIRGenerate meta (GreaterThan _ left right) = do
+toIRGenerate meta (Expr _ (GreaterThan left right)) = do
   l <- toIRGenerate meta left
   r <- toIRGenerate meta right
   return $ IROp OpGreaterThan l r
-toIRGenerate meta (LessThan _ left right) = do
+toIRGenerate meta (Expr _ (LessThan left right)) = do
   l <- toIRGenerate meta left
   r <- toIRGenerate meta right
   return $ IROp OpLessThan l r
-toIRGenerate meta (ThetaI _ a ix) = do
+toIRGenerate meta (Expr _ (ThetaI a ix)) = do
   a' <- toIRGenerate meta a
   return $ IRTheta a' ix
-toIRGenerate meta (Subtree _ a ix) = do
+toIRGenerate meta (Expr _ (Subtree a ix)) = do
   a' <- toIRGenerate meta a
   return $ IRSubtree a' ix
-toIRGenerate _ (Constant _ (VError e)) = return $ IRError e
-toIRGenerate _ (Constant _ x) = return (IRConst (fmap failConversion x))
+toIRGenerate _ (Expr _ (Constant (VError e))) = return $ IRError e
+toIRGenerate _ (Expr _ (Constant x)) = return (IRConst (fmap failConversion x))
 -- Distribution primitives (reserved-name Vars): each occurrence is a fresh draw.
-toIRGenerate _ (Var _ "Uniform") = return $ IRSample IRUniform
-toIRGenerate _ (Var _ "Normal") = return $ IRSample IRNormal
-toIRGenerate meta (InjF ti (Named name) params) = do
+toIRGenerate _ (Expr _ (Var "Uniform")) = return $ IRSample IRUniform
+toIRGenerate _ (Expr _ (Var "Normal")) = return $ IRSample IRNormal
+toIRGenerate meta (Expr ti (InjF (Named name) params)) = do
   -- Assuming that the logic within packParamsIntoLetinsGen typeEnv is correct.
   -- You will need to process vars and params, followed by recursive calls to fwdExpr.
   let resolvedName = resolveInjF (rType ti) name
@@ -1836,7 +1836,7 @@ toIRGenerate meta (InjF ti (Named name) params) = do
   prefix <- mkVariable ""
   letInBlock <- packParamsIntoLetinsGen meta vars params fwdExpr
   return $ irMap (uniqueify vars prefix) letInBlock
-toIRGenerate meta (Var _ name) = do
+toIRGenerate meta (Expr _ (Var name)) = do
   case lookup name (typeEnv meta) of
     -- Var is a function
     Just (TArrow _ _, hasInference) ->
@@ -1849,13 +1849,13 @@ toIRGenerate meta (Var _ name) = do
     Just (_, False) -> do
       return $ IRVar name
     Nothing -> error ("Could not find name in TypeEnv: " ++ name)
-toIRGenerate meta (Lambda t name subExpr) =
+toIRGenerate meta (Expr t (Lambda name subExpr)) =
   IRLambda name <$> toIRGenerate (extendMetaForLambda meta t name) subExpr
-toIRGenerate meta (Apply _ l v) = do
+toIRGenerate meta (Expr _ (Apply l v)) = do
   l' <- toIRGenerate meta l
   v' <- toIRGenerate meta v
   return $ IRApply l' v'
-toIRGenerate meta (ReadNN _ name subexpr) = do
+toIRGenerate meta (Expr _ (ReadNN name subexpr)) = do
   sub <- toIRGenerate meta subexpr
   return $ IRApply (IRVar (name ++ "_auto_gen")) sub
 toIRGenerate _ x = error ("found no way to convert to IRGen: " ++ show x)
@@ -1895,15 +1895,15 @@ enumerateAppliedLambda meta cumulative l v sample = do
 toIREnumerate :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PResult
 -- Nested enumerable application (e.g. an inner `let` binding a fresh discrete draw):
 -- recurse with enumeration + weighting rather than generating the draw forward.
-toIREnumerate meta cumulative (Apply _ l v) sample
+toIREnumerate meta cumulative (Expr _ (Apply l v)) sample
   | isEnumerableApplication l v =
   enumerateAppliedLambda meta cumulative l v sample
-toIREnumerate meta cumulative (Var TypeInfo{chainName=cn} _) sample = do
+toIREnumerate meta cumulative (Expr TypeInfo{chainName=cn} (Var _)) sample = do
   let Just (equivCN, _, _) = findEquivalentExpression (fcData meta) cn
   let fs = map snd (functions (compilingProgram meta))
   let equivExpr = findExprWithCN fs equivCN
   toIREnumerate meta cumulative equivExpr sample
-toIREnumerate meta cumulative (IfThenElse TypeInfo{rType=rt} c t e) sample = do
+toIREnumerate meta cumulative (Expr TypeInfo{rType=rt} (IfThenElse c t e)) sample = do
   cIR <- toIRGenerate meta c
   tIR <- toIRGenerate meta t
   eIR <- toIRGenerate meta e
@@ -2155,7 +2155,7 @@ subtreeHasOcc occs e = let cns = subtreeCNs e in any (`elem` cns) occs
 -- measures them against the bound distribution @v@.
 setWitnessApply :: CompilerMetadata -> Bool -> RType -> Expr -> ChainName -> ChainName -> String -> Maybe String -> Expr -> IRExpr -> CompilerMonad PResult
 setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag planDiag v sample = do
-  let userVar = case l of Lambda _ n _ -> n; _ -> "<bound variable>"
+  let userVar = case l of Expr _ (Lambda n _) -> n; _ -> "<bound variable>"
   let refuse why = error $ unlines $
         [ "set-valued witness construction failed for the binding of '" ++ userVar ++ "' (lambda at " ++ lResolvedCN ++ "):"
         , why
@@ -2267,7 +2267,7 @@ invertToWorlds meta occs body target = do
   case direct of
     Just ws -> return (Just ws)
     Nothing -> case body of
-      IfThenElse _ c t e
+      Expr _ (IfThenElse c t e)
         | not (subtreeHasOcc occs c) && pType (getTypeInfo c) == Deterministic -> do
             g <- toIRGenerate meta c
             wsT <- invertToWorlds meta occs t target
@@ -2287,9 +2287,9 @@ invertToWorlds meta occs body target = do
                            ++ [intersectW cw ew | cw <- cfs, ew <- es]))
               _ -> return Nothing
         | otherwise -> return Nothing
-      LessThan _ lop rop -> comparisonWorlds meta occs False lop rop target
-      GreaterThan _ lop rop -> comparisonWorlds meta occs True lop rop target
-      InjF _ (Named "TCons") [pa, pb] -> case target of
+      Expr _ (LessThan lop rop) -> comparisonWorlds meta occs False lop rop target
+      Expr _ (GreaterThan lop rop) -> comparisonWorlds meta occs True lop rop target
+      Expr _ (InjF (Named "TCons") [pa, pb]) -> case target of
         WPoint s _ -> do
           wsA <- invertToWorlds meta occs pa (WPoint (IRTFst s) const1)
           wsB <- invertToWorlds meta occs pb (WPoint (IRTSnd s) const1)
@@ -2651,9 +2651,9 @@ planBoolWorlds tgt ts fs =
 
 -- | Short node description for the fall-through diagnostic.
 planNodeName :: Expr -> String
-planNodeName (InjF _ (Named n) _) = "InjF " ++ n
-planNodeName (Var _ n)            = "Var " ++ n
-planNodeName (Apply _ _ _)        = "Apply"
+planNodeName (Expr _ (InjF (Named n) _)) = "InjF " ++ n
+planNodeName (Expr _ (Var n))            = "Var " ++ n
+planNodeName (Expr _ (Apply _ _))        = "Apply"
 planNodeName e                    = head (words (show e))
 
 -- | Field bases of an ADTPlan region at offset @off@: for each constructor
@@ -2698,13 +2698,13 @@ planEvalRef meta env = go
     go e | Just b <- planEnvLookup env (chainName (getTypeInfo e)) = case b of
       PBPlan ref -> Just (Right (ref, []))
       PBDet _ _  -> Nothing
-    go (InjF _ (Named "fst") [e]) = descend e $ \(PlanRef sub off) cons -> case sub of
+    go (Expr _ (InjF (Named "fst") [e])) = descend e $ \(PlanRef sub off) cons -> case sub of
       TuplePlan a _ -> Right (PlanRef a off, cons)
       _ -> Left "fst applied to a non-tuple plan slice"
-    go (InjF _ (Named "snd") [e]) = descend e $ \(PlanRef sub off) cons -> case sub of
+    go (Expr _ (InjF (Named "snd") [e])) = descend e $ \(PlanRef sub off) cons -> case sub of
       TuplePlan a b -> Right (PlanRef b (off + getSize a), cons)
       _ -> Left "snd applied to a non-tuple plan slice"
-    go (InjF _ (Named nm) [e])
+    go (Expr _ (InjF (Named nm) [e]))
       | Just (cName, fj) <- lookupADTAccessor (adtDecls meta) nm =
           descend e $ \(PlanRef sub off) cons -> case sub of
             ADTPlan _ ctorPlans
@@ -2762,14 +2762,14 @@ planPeelSlice meta env = go
       Right (ref@(PlanRef Continuous _), cons) ->
         Just (Right (ref, cons, \b -> (b, const1), MonInc))
       _ -> Nothing
-    go (InjF _ (Named "neg") [a])    = chain a (IRUnaryOp OpNeg) (const const1) MonDec
-    go (InjF _ (Named "double") [a]) = chain a (\b -> IROp OpDiv b (IRConst (VFloat 2))) (const (IRConst (VFloat 0.5))) MonInc
-    go (InjF _ (Named "exp") [a])    = chain a (IRUnaryOp OpLog) (\b -> IROp OpDiv const1 b) MonInc
-    go (InjF _ (Named "log") [a])    = chain a (IRUnaryOp OpExp) (IRUnaryOp OpExp) MonInc
-    go (InjF _ (Named "plus") [a, b])
+    go (Expr _ (InjF (Named "neg") [a]))    = chain a (IRUnaryOp OpNeg) (const const1) MonDec
+    go (Expr _ (InjF (Named "double") [a])) = chain a (\b -> IROp OpDiv b (IRConst (VFloat 2))) (const (IRConst (VFloat 0.5))) MonInc
+    go (Expr _ (InjF (Named "exp") [a]))    = chain a (IRUnaryOp OpLog) (\b -> IROp OpDiv const1 b) MonInc
+    go (Expr _ (InjF (Named "log") [a]))    = chain a (IRUnaryOp OpExp) (IRUnaryOp OpExp) MonInc
+    go (Expr _ (InjF (Named "plus") [a, b]))
       | pdep a, pfree b = plusStep a b
       | pdep b, pfree a = plusStep b a
-    go (InjF _ (Named "mult") [a, b])
+    go (Expr _ (InjF (Named "mult") [a, b]))
       | pdep a, pfree b = multStep a b
       | pdep b, pfree a = multStep b a
     go _ = return Nothing
@@ -2817,7 +2817,7 @@ planInvert meta env body target
   | Just refE <- planEvalRef meta env body =
       return (refE >>= \(ref, cons) -> planRefWorlds ref cons target)
 planInvert meta env body target = case body of
-  IfThenElse _ c t e
+  Expr _ (IfThenElse c t e)
     | not (subtreeHasOcc occs c) && pType (getTypeInfo c) == Deterministic -> do
         g <- planGenDet meta env c
         wsT <- planInvert meta env t target
@@ -2841,10 +2841,10 @@ planInvert meta env body target = case body of
               es <- wsE
               return (liveIntersects cts ts ++ liveIntersects cfs es)
     | otherwise -> return (Left "an if condition independent of the plan-bound variables draws fresh randomness")
-  InjF _ (Named "not") [a] -> do
+  Expr _ (InjF (Named "not") [a]) -> do
     ab <- planInvertBool meta env a
     return ((\(t, f) -> planBoolWorlds target f t) <$> ab)
-  InjF _ (Named "and") [a, b] -> do
+  Expr _ (InjF (Named "and") [a, b]) -> do
     ab <- planInvertBool meta env a
     bb <- planInvertBool meta env b
     return $ do
@@ -2853,7 +2853,7 @@ planInvert meta env body target = case body of
       let tw = liveIntersects at bt
       let fw = af ++ liveIntersects at bf
       return (planBoolWorlds target tw fw)
-  InjF _ (Named "or") [a, b] -> do
+  Expr _ (InjF (Named "or") [a, b]) -> do
     ab <- planInvertBool meta env a
     bb <- planInvertBool meta env b
     return $ do
@@ -2862,7 +2862,7 @@ planInvert meta env body target = case body of
       let tw = at ++ liveIntersects af bt
       let fw = liveIntersects af bf
       return (planBoolWorlds target tw fw)
-  InjF _ (Named nm) [a]
+  Expr _ (InjF (Named nm) [a])
     | Just ctor <- ctorTestName nm -> case planEvalRef meta env a of
         Just (Right (PlanRef (ADTPlan _ ctorPlans) off, cons)) -> do
           let n = length ctorPlans
@@ -2875,12 +2875,12 @@ planInvert meta env body target = case body of
           return (Right (planBoolWorlds target tw fw))
         Just (Left why) -> return (Left why)
         _ -> return (Left (nm ++ " applied to something that is not a plan slice"))
-  InjF _ (Named "eq") [a, b]
+  Expr _ (InjF (Named "eq") [a, b])
     | planDep a, isDetSide b -> planLeafEq a b
     | planDep b, isDetSide a -> planLeafEq b a
-  LessThan    _ a b -> planCmp False a b
-  GreaterThan _ a b -> planCmp True  a b
-  Apply {} -> planApplyTarget meta env body target
+  Expr _ (LessThan    a b) -> planCmp False a b
+  Expr _ (GreaterThan a b) -> planCmp True  a b
+  Expr _ (Apply {}) -> planApplyTarget meta env body target
   _ -> return (Left ("unsupported node in plan traversal: " ++ planNodeName body))
   where
     occs = planEnvOccs env
@@ -3137,7 +3137,7 @@ planEnumValuesRaw meta env body
               | (i, v) <- zip [0..] vals ]
       Right _ -> Left "value enumeration is only supported for enum plan leaves"
   | otherwise = case body of
-      IfThenElse _ c t e
+      Expr _ (IfThenElse c t e)
         | not (subtreeHasOcc occs c) && pType (getTypeInfo c) == Deterministic -> do
             g <- planGenDet meta env c
             vsT <- planEnumValues meta env t
@@ -3160,11 +3160,11 @@ planEnumValuesRaw meta env body
                   return (livePairs [ (v, intersectPlanW cw w) | cw <- cts, (v, w) <- ts ]
                        ++ livePairs [ (v, intersectPlanW cw w) | cw <- cfs, (v, w) <- es ])
         | otherwise -> return (Left "an if condition independent of the plan-bound variables draws fresh randomness")
-      InjF _ (Named nm) [a, b] | Just op <- arithOp nm -> do
+      Expr _ (InjF (Named nm) [a, b]) | Just op <- arithOp nm -> do
         vsA <- planEnumValues meta env a
         vsB <- planEnumValues meta env b
         return ((\as bs -> livePairs [ (IROp op va vb, intersectPlanW wa wb) | (va, wa) <- as, (vb, wb) <- bs ]) <$> vsA <*> vsB)
-      Apply {} -> do
+      Expr _ (Apply {}) -> do
         specE <- planResolveApply meta env body
         case specE of
           Left why -> return (Left why)
@@ -3227,14 +3227,14 @@ planResolveApply meta env body = case collectApply body [] of
               let meta' = foldl (\m (pname, pti, _) -> extendMetaForLambda m pti pname) meta params
               return (Right (PlanSpec frame calleeBody key (sum planOffs) callCons meta'))
   where
-    collectApply (Apply _ f a) acc = collectApply f (a : acc)
-    collectApply v@(Var _ n) acc
+    collectApply (Expr _ (Apply f a)) acc = collectApply f (a : acc)
+    collectApply v@(Expr _ (Var n)) acc
       -- a callee bound in the traversal env is a higher-order parameter, not
       -- a top-level function of the same name
       | isJust (planEnvLookup env (chainName (getTypeInfo v))) = Nothing
       | otherwise = Just (n, acc)
     collectApply _ _ = Nothing
-    unwrapCalleeLambdas (Lambda ti n sub) =
+    unwrapCalleeLambdas (Expr ti (Lambda n sub)) =
       let (ps, b) = unwrapCalleeLambdas sub in ((n, ti, chainName ti) : ps, b)
     unwrapCalleeLambdas e = ([], e)
     classifyArg argE
@@ -3425,7 +3425,7 @@ planWitnessApply :: CompilerMetadata -> Bool -> RType -> ChainName -> ChainName 
 planWitnessApply meta cumulative rt lResolvedCN lambdaBodyCN tag v sample
   | tag == ""
   , not (isArrow rt)
-  , ReadNN _ nnName symArg <- v
+  , Expr _ (ReadNN nnName symArg) <- v
   , Just (_, TArrow TSymbol targetTy, declTag) <- find (\(n, _, _) -> n == nnName) (neurals (compilingProgram meta))
   , let resolved = resolvePartitionAnnotation (encodeDecls (compilingProgram meta)) targetTy declTag
   , isJust resolved || isRight (autoDeriveMultiValue (adtDecls meta) targetTy)

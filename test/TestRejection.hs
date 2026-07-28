@@ -15,7 +15,7 @@ module TestRejection (rejectionTests) where
 -- that changes which rule fires is pinpointed to the offending program.
 
 import SPLL.Lang.Lang
-import SPLL.Lang.Types (Program(..), makeTypeInfo, GenericValue(..), MultiValue(..))
+import SPLL.Lang.Types (Program(..), makeTypeInfo, GenericValue(..), MultiValue(..), Expr(..), ExprF(..))
 import SPLL.Typing.RType (RType(..))
 import SPLL.Examples
 import SPLL.Validator (validateProgram)
@@ -48,7 +48,7 @@ noMainProg = Program [("notMain", uniform)] [] [] []
 
 -- ANY is a marginal-query sentinel and must never appear in a source program.
 anyInProgramProg :: Program
-anyInProgramProg = Program [("main", Constant makeTypeInfo VAny)] [] [] []
+anyInProgramProg = Program [("main", Expr makeTypeInfo (Constant VAny))] [] [] []
 
 -- Two PartitionPlan annotations for the same RType (Int) that disagree must be
 -- rejected as a conflicting registration -- not reachable via the invalid* family,
