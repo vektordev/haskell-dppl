@@ -1,0 +1,13 @@
+-- Both operands of `>` are enumerable (DiscreteValues-tagged via the
+-- if-then-else-with-constant-branches propagation in Analysis.hs) and
+-- non-Deterministic (each depends on its own fresh Uniform draw). Neither
+-- side is Deterministic, so IRCompiler's bespoke deterministic-bound gt/lt
+-- cases don't fire; this exercises the generic both-enumerable-discrete
+-- InjF path (built for and/or) that gt/lt now also reach as ordinary
+-- forward-only InjFs (task gt-lt-range-propagation) -- previously an
+-- unconditional pattern-match failure for the bespoke GreaterThan/LessThan
+-- constructors. (A helper function wrapping the if-then-else does not
+-- work here: Analysis.hs's enum-tagging pass has no Apply case, so the
+-- tag only lands on the if-then-else node itself, not on a call site
+-- that returns it -- hence both coins are inlined directly.)
+main = (if Uniform < 0.5 then 1.0 else 0.0) > (if Uniform < 0.7 then 1.0 else 0.0)

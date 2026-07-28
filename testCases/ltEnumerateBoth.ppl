@@ -1,0 +1,4 @@
+-- lt twin of gtEnumerateBoth.ppl -- see that file's comment for why the
+-- if-then-else operands are inlined rather than routed through a helper
+-- function.
+main = (if Uniform < 0.5 then 1.0 else 0.0) < (if Uniform < 0.7 then 1.0 else 0.0)
