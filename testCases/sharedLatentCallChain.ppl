@@ -1,0 +1,3 @@
+inner u x = if u then x else 0
+contrib u x = inner u x
+main = let u = Uniform < 0.3 in (contrib u 1) ++ (contrib u 1)

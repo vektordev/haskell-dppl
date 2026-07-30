@@ -1,0 +1,2 @@
+contrib pr = if fst pr then snd pr else 0
+main = let u = Uniform < 0.3 in (contrib (u, 1)) ++ (contrib (u, 1))
