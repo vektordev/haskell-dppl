@@ -502,6 +502,11 @@ batchedValOrDie v = fromMaybe
 -- 'batchedVal') because neither @is_member@ nor the enum unrolling is known to
 -- behave correctly on a structure-of-arrays @T@; widening that needs a test, not
 -- an assumption.
+--
+-- The composite-'MultiValue' direction is not reachable from a real program
+-- (an Either/ADT-shaped decoder trips 'IRIsLeft' or the ADT-declaration bail
+-- first), so its positive control is the synthetic-IR row in
+-- @TestInternals.batchedRefusalUnitTests@ rather than a corpus program.
 scalarDiscreteMulti :: MultiValue -> Bool
 scalarDiscreteMulti (MultiDiscretes vs) = not (null vs) && all isScalarV vs
   where isScalarV (VInt _)   = True

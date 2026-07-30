@@ -27,7 +27,7 @@ import TestModalityInfer (modalityInferTests)
 import TestDeterminism (determinismTests)
 import TestEncodeProperties (encodeTests, encodeRoundtripTests)
 import TestShowcase (showcaseTests)
-import End2EndTesting (end2endTests, slowEnd2EndTests, getAllTestFiles, selectPassDifferentialTests, batchedPythonTests)
+import End2EndTesting (end2endTests, slowEnd2EndTests, getAllTestFiles, selectPassDifferentialTests, batchedPythonTests, batchedRefusalTests)
 import TestFuzz (fuzzTests, superSlowFuzzTests)
 import TestCaseParser (parseProgram, parseTestCases, TestCase(..), Backend(..))
 import TestTolerances (probTolerance, reasonablyCloseTolerance, samplingTolerance)
@@ -618,6 +618,7 @@ main = do
     , e2e
     , selectDiff
     , batchedPy
+    , batchedRefusalTests
     , slow
     , superSlow
     ]
