@@ -566,14 +566,21 @@ batchedRefusalTests = testGroup "BatchedRefusal"
 -- global flag and must precede the @compile@ subcommand).
 batchedRefusalTable :: [(String, String)]
 batchedRefusalTable =
-  -- lists
-  [ ("list",                      "list head (IRHead)")
+  -- lists. Note `list` is pinned on the list *constant*, not on IRHead: since
+  -- 'batchedVal' gates IRConst, the empty-list constant in `main = [Normal,
+  -- Uniform*2.0]` is now the first offender the walk finds, and the diagnostic
+  -- reports only the first. IRHead itself keeps a positive control as a
+  -- synthetic row in "TestInternals" (the let-spine case), where no constant
+  -- competes with it.
+  [ ("list",                      "constant with no batched representation (VList")
   , ("headTail",                  "list construction (IRCons)")
   , ("listLiteralDeconstruction", "list tail (IRTail)")
   , ("map",                       "list map (IRMap)")
   -- Either: constructors, destructors, predicates
   , ("either_const",              "Either constructor (IRLeft)")
-  , ("either_isleft",             "Either constructor (IRRight)")
+    -- like `list` above: an Either *constant* now out-races IRRight as the
+    -- first offender here, so IRRight's node-level control is synthetic too
+  , ("either_isleft",             "constant with no batched representation (VEither")
   , ("nestedDeconstruction",      "Either destructor (IRFromLeft)")
   , ("eitherDeconstruction",      "Either destructor (IRFromRight)")
   , ("either",                    "Either predicate (IRIsLeft)")

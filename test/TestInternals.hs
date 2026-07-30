@@ -1184,6 +1184,15 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
   , testCase "an inner lambda is refused" $
       assertRefusal "inner lambda (IRLambda)"
         (IROp OpPlus (IRVar "x") (IRApply (IRLambda "y" (IRVar "y")) (IRVar "x")))
+  , testCase "the IRRight Either constructor is refused" $
+      -- No corpus program pins this one any more: with IRConst gated on
+      -- 'batchedVal', an Either-valued *constant* is the first offender found in
+      -- either_isleft, and the diagnostic reports only the first. Built here
+      -- with no constant to out-race it.
+      assertRefusal "Either constructor (IRRight)"
+        (IRRight (IRVar "x"))
+  , testCase "the IRHead list destructor is refused on its own" $
+      assertRefusal "list head (IRHead)" (IRHead (IRVar "xs"))
   , testCase "an offender nested deep in a let-spine is still found" $
       -- 'batchedGuard' walks the whole tree, not just the root.
       assertRefusal "list head (IRHead)"
