@@ -113,9 +113,20 @@ def _dtype(x):
 # tensor, `idx` a [B] integer tensor; the result is the [B] tensor of selected
 # logits. (A constant slot is emitted inline as out[..., i]; this handles the
 # data-dependent index.)
+#
+# The index is clamped into range, for the same reason `safe_log`/`safe_div`
+# mask their inputs: under select semantics both arms of a `torch.where` are
+# evaluated, so an element whose index is out of range (the residual `c - a` in
+# MNIST addition, for digit pairs that do not sum to `c`) still reaches this
+# gather even though `is_member` will mask its value away. Without the clamp,
+# such an element either indexes out of bounds and raises -- taking down a whole
+# batch because of a value nothing reads -- or, for a negative index, silently
+# wraps around and reads the wrong logit. The clamped read is discarded by the
+# enclosing `where`, exactly like a masked `safe_log`.
 
 def nn_gather(out, idx):
   idx_t = idx.long() if torch.is_tensor(idx) else torch.tensor(int(idx))
+  idx_t = idx_t.clamp(0, out.shape[-1] - 1)
   if idx_t.dim() == 0:
     return out[..., idx_t]
   return out[torch.arange(out.shape[0]), idx_t]
