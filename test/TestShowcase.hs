@@ -175,9 +175,9 @@ assertTstMatches cases p = case compile defaultCompilerConfig p of
   Right env -> forM_ cases (checkCase p env)
 
 checkCase :: Program -> IREnv -> TestCase -> IO ()
-checkCase p env (ProbTestCase name sample params (VFloat expProb, _)) =
+checkCase p env (ProbTestCase name sample params (VFloat expProb, _) _) =
   checkQuery "probability" name (runProbC p env params sample) expProb
-checkCase p env (CumulTestCase name sample params (VFloat expProb, _)) =
+checkCase p env (CumulTestCase name sample params (VFloat expProb, _) _) =
   checkQuery "cumulative" name (runIntegC p env params sample) expProb
 checkCase _ _ _ = return ()  -- showcase.tst only carries prob/cdf cases
 

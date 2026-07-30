@@ -30,10 +30,10 @@ module SPLL.CodeGenPyTorchBatched
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types (CompilerError, GenericValue(..), MultiValue(..))
 import SPLL.Lang.Lang (multiValueToValueList)
-import SPLL.CodeGenPyTorch (pyVal, envToLUT, replaceCalls)
+import SPLL.CodeGenPyTorch (envToLUT, replaceCalls)
 import Data.Char (toUpper)
 import Data.List (intercalate, isSuffixOf)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Control.Monad (foldM)
 
 -- | Entry point mirroring 'SPLL.CodeGenPyTorch.generateFunctions', but for the
@@ -79,7 +79,8 @@ generateFunctionsBatched genBoil env@(IREnv funcs adts consts)
           genArities = [ (fromMaybe raw (lookup raw lut), length (fst (unwrapLambdas e))) | (raw, e) <- genRaw ]
       () <- checkCallGraph funcs
       classes <- mapM (generateClass lut genArities genRaw) funcs
-      let body = map (\(n, v) -> n ++ " = " ++ pyVal v) consts
+      constLines <- mapM renderConst consts
+      let body = constLines
              ++ (if null consts then [] else [""])
              ++ concat classes
              ++ ["", "# Example Initialization"]
@@ -90,6 +91,16 @@ generateFunctionsBatched genBoil env@(IREnv funcs adts consts)
              , "import math"
              , "from torch.nn import Module", "" ] ++ body
         else body
+
+-- | Render a top-level constant binding, refusing one whose shape has no
+-- batched representation ('batchedVal').
+renderConst :: (String, IRValue) -> Either CompilerError String
+renderConst (n, v) = case batchedVal v of
+  Just s  -> Right (n ++ " = " ++ s)
+  Nothing -> Left ("batched mode: top-level constant " ++ n
+                   ++ " has a shape with no batched representation: " ++ show v
+                   ++ ". The tensor fragment admits only float/int/bool leaves "
+                   ++ "in fixed-shape tuples.")
 
 -- | Emit one function group's class: the prob ('forward'), integ
 -- ('integrate'), and generate methods -- all three a hard fragment refusal
@@ -421,9 +432,7 @@ emittable e = case e of
   IRSelect{}     -> True
   IROp{}         -> True
   IRUnaryOp op _ -> op /= OpIsAny   -- isAny must have been pruned
-  IRConst VAny       -> False       -- marginal sentinel: no tensor representation
-  IRConst (VAnyExcept _) -> False
-  IRConst{}      -> True
+  IRConst v      -> isJust (batchedVal v)   -- scalar/tuple leaves only; see 'batchedVal'
   IRVar{}        -> True
   IRLetIn{}      -> True
   IRTCons{}      -> True
@@ -435,17 +444,69 @@ emittable e = case e of
   IRCumulative{} -> True
   IRApply{}      -> True   -- network call / cross-function decoder call (M2b)
   IRIndex{}      -> True   -- logit-vector slice or per-element gather (M2b)
-  IREnumSum{}    -> True   -- enumeration sum, unrolled over the enum axis (M2b)
+  IREnumSum _ mv _  -> scalarDiscreteMulti mv  -- enum sum, unrolled over the enum axis (M2b)
   IRIsPossible mv _ -> scalarDiscreteMulti mv  -- membership over a scalar enum (M2b)
   IRError{}      -> True   -- refusal arm, emitted as a selected-away NaN poison (M3)
   IRSample{}     -> True   -- a fresh random draw, batched via rand(n)/randn(n) (M4);
                            -- only ever produced by a generate body, never prob/integ
   _              -> False
 
--- | A 'MultiValue' whose membership test is a flat scalar enumeration — the only
--- 'IRIsPossible' shape the batched backend renders (an elementwise @x in {..}@
--- mask). Composite membership (tuple/either/ADT structure) is outside the
--- tensor fragment.
+-- | Render a constant as batched Python, or 'Nothing' if its shape has no
+-- batched representation.
+--
+-- This deliberately does /not/ reuse the scalar backend's
+-- 'SPLL.CodeGenPyTorch.pyVal', and that is the whole point: @pyVal@ is total
+-- over @IRValue@ against the *scalar* @pythonLib.py@, so it happily names
+-- runtime constructors that do not exist in @pythonLibBatched.py@ —
+-- @ConsInferenceList@/@EmptyInferenceList@ for lists, @Left@/@Right@ for
+-- 'VEither', ADT constructors, @'ANY'@, @throw@, @None@. Emitting any of those
+-- produces batched Python that dies with a @NameError@ at run time instead of
+-- being refused at compile time. Borrowing @pyVal@ here was a live defect, not
+-- a hypothetical one: six corpus programs (the @planEnumCont*@ family,
+-- @planEnumInlineBool@, @autoNeuralEncodeTupleDiscrete@) passed 'batchedGuard'
+-- and emitted @indexOf(..., ConsInferenceList(True, ...))@ — the enum-index
+-- lookup 'SPLL.AutoNeural.indexOf' builds over a 'VList' constant, which the
+-- old blanket @IRConst{} -> True@ admitted. The list survives to codegen
+-- whenever 'SPLL.IROptimizer.indexmagic' cannot fold it away (it only fires for
+-- a @[0..n]@ naturals list, so a @[True, False]@ enumeration keeps the call).
+--
+-- Keeping this partial, and gating 'IRConst' on it in 'emittable', makes the
+-- whole class of defect a compile-time refusal by construction rather than one
+-- predicate per call site. The module does not import @pyVal@ at all, so the
+-- compiler enforces that.
+batchedVal :: IRValue -> Maybe String
+batchedVal (VFloat f) = Just (show f)
+batchedVal (VInt i)   = Just (show i)
+batchedVal (VBool b)  = Just (if b then "True" else "False")
+batchedVal (VTuple a b) = do
+  a' <- batchedVal a
+  b' <- batchedVal b
+  return ("T(" ++ a' ++ ", " ++ b' ++ ")")
+batchedVal _ = Nothing
+
+-- | 'batchedVal' for the emitters, which run only on a body 'batchedGuard' has
+-- already accepted. A 'Nothing' here means the guard and the emitter have
+-- drifted apart, so it fails the same way the emitter's own catch-all node case
+-- does rather than emitting a name the batched runtime lib does not define.
+batchedValOrDie :: IRValue -> String
+batchedValOrDie v = fromMaybe
+  (error ("batched PyTorch codegen: constant with no batched representation: " ++ show v))
+  (batchedVal v)
+
+-- | A 'MultiValue' that is a flat enumeration of scalar values — the only shape
+-- the two 'MultiValue'-carrying nodes may have. Their emitters ('IRIsPossible' →
+-- an elementwise @x in {..}@ mask, 'IREnumSum' → an inline unrolling over the
+-- enum axis) render each enumerated value individually, so a composite
+-- 'MultiValue' would need a composite constant — refused by 'batchedVal' for the
+-- reasons given there. Tuple leaves are excluded here (rather than deferred to
+-- 'batchedVal') because neither @is_member@ nor the enum unrolling is known to
+-- behave correctly on a structure-of-arrays @T@; widening that needs a test, not
+-- an assumption.
+--
+-- The composite-'MultiValue' direction is not reachable from a real program
+-- (an Either/ADT-shaped decoder trips 'IRIsLeft' or the ADT-declaration bail
+-- first), so its positive control is the synthetic-IR row in
+-- @TestInternals.batchedRefusalUnitTests@ rather than a corpus program.
 scalarDiscreteMulti :: MultiValue -> Bool
 scalarDiscreteMulti (MultiDiscretes vs) = not (null vs) && all isScalarV vs
   where isScalarV (VInt _)   = True
@@ -471,10 +532,15 @@ reason e = case e of
   IRIsRight{}     -> "Either predicate (IRIsRight)"
   IRApply{}       -> "function application (IRApply); a call did not inline"
   IRLambda{}      -> "inner lambda (IRLambda)"
-  IRIsPossible{}  -> "membership check (IRIsPossible)"
+  IRIsPossible{}  -> "membership check (IRIsPossible) over a non-scalar enumeration"
+  IREnumSum{}     -> "enumeration sum (IREnumSum) over a non-scalar enumeration"
   IRConformsTo{}  -> "type-conformance check (IRConformsTo)"
   IRConst VAny        -> "marginal ANY sentinel (IRConst VAny); marginal queries are outside the tensor fragment"
   IRConst (VAnyExcept _) -> "marginal ANY-except sentinel (IRConst VAnyExcept); marginal queries are outside the tensor fragment"
+  IRConst v       -> "constant with no batched representation (" ++ show v
+                     ++ "); the batched runtime lib defines no counterpart for it "
+                     ++ "(see batchedVal), so only float/int/bool leaves in "
+                     ++ "fixed-shape tuples are admitted"
   IRUnaryOp OpIsAny _ -> "marginal (ANY) check (IRUnaryOp OpIsAny)"
   _               -> irPrintFlat e
 
@@ -510,7 +576,7 @@ batchedAssign name e = [name ++ " = " ++ batchedExpr e]
 -- | Emit an expression as branch-free, elementwise Python. Every conditional is
 -- a @torch.where@; math functions and boolean operators are their tensor twins.
 batchedExpr :: IRExpr -> String
-batchedExpr (IRConst v)   = pyVal v
+batchedExpr (IRConst v)   = batchedValOrDie v
 batchedExpr (IRVar name)  = name
 batchedExpr (IROp OpApprox l r) = "isclose(" ++ batchedExpr l ++ ", " ++ batchedExpr r ++ ")"
 batchedExpr (IROp OpAnd l r)    = "(" ++ batchedExpr l ++ " & " ++ batchedExpr r ++ ")"
@@ -564,13 +630,13 @@ batchedExpr (IRIndex l idx) =
 -- evaluated against the whole batch, then reduced over the enum axis.
 batchedExpr (IREnumSum name multiVal expr) =
   "sum(map((lambda " ++ name ++ ": " ++ batchedExpr expr ++ "), ["
-    ++ intercalate ", " (map (pyVal . valueToIR) (multiValueToValueList multiVal)) ++ "]))"
+    ++ intercalate ", " (map (batchedValOrDie . valueToIR) (multiValueToValueList multiVal)) ++ "]))"
 -- A membership test @x in {v0, ..}@ over a scalar enumeration (e.g. \"is the
 -- residual @c - a@ a valid digit?\" in MNIST addition). Rendered as an
 -- elementwise @[B]@ bool mask via 'is_member', which evaluates @x@ once.
 batchedExpr (IRIsPossible multiVal expr) =
   "is_member(" ++ batchedExpr expr ++ ", ["
-    ++ intercalate ", " (map (pyVal . valueToIR) (multiValueToValueList multiVal)) ++ "])"
+    ++ intercalate ", " (map (batchedValOrDie . valueToIR) (multiValueToValueList multiVal)) ++ "])"
 batchedExpr (IRLetIn name val body) =
   "((" ++ name ++ " := " ++ batchedExpr val ++ "), " ++ batchedExpr body ++ ")[1]"
 -- A refusal/error arm has no batched value; emit a NaN poison constant that the

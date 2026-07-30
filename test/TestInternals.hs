@@ -23,13 +23,14 @@ import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan)
 import qualified SPLL.AutoNeural as AutoNeural (getSize)
 import SPLL.IntermediateRepresentation
 import SPLL.IROptimizer (postProcess)
+import SPLL.CodeGenPyTorchBatched (batchedGuard, generateFunctionsBatched)
 import IRInterpreter (generateDet)
 import Data.Foldable (toList)
 import Data.List (isInfixOf)
 import Control.Exception (try, evaluate, ErrorCall(..))
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure)
-import TestCaseParser (Backend(..), TestCase(..), allBackends, parseTestCasesFromString)
+import TestCaseParser (Backend(..), TestCase(..), defaultBackends, parseTestCasesFromString)
 import Test.Tasty.QuickCheck (testProperties)
 import System.Random (StdGen)
 import Control.Monad.Random (Rand)
@@ -706,7 +707,8 @@ autoNeuralDerivationTests = testGroup "autoNeuralDerivation"
   ]
 
 -- .tst files may carry an optional `backends:` header that routes the file's
--- cases to a subset of the three End2End backends; no header means all three.
+-- cases to a subset of the End2End backends; no header means the three scalar
+-- backends (`defaultBackends`) -- notably NOT the opt-in `batched` token.
 -- They may also carry an optional `slow` header (in either order relative to
 -- `backends:`) that moves the file into the opt-in Slow test group.
 test_tstBackendsHeader :: TestTree
@@ -715,7 +717,7 @@ test_tstBackendsHeader = testCase "tstBackendsHeader" $ do
   case parse "p(0.5)=(1.0, 1.0)\n" of
     Left err -> assertFailure err
     Right (bs, slow, tcs) -> do
-      assertEqual "no header defaults to all backends" allBackends bs
+      assertEqual "no header defaults to the scalar backends" defaultBackends bs
       assertEqual "no header defaults to not slow" False slow
       assertEqual "test case count without header" 1 (length tcs)
   case parse "backends: interpreter\np(0.5)=(1.0, 1.0)\n" of
@@ -729,8 +731,11 @@ test_tstBackendsHeader = testCase "tstBackendsHeader" $ do
   case parse "slow\np(0.5)=(1.0, 1.0)\n" of
     Left err -> assertFailure err
     Right (bs, slow, _) -> do
-      assertEqual "slow header alone still defaults to all backends" allBackends bs
+      assertEqual "slow header alone still defaults to the scalar backends" defaultBackends bs
       assertEqual "slow header is recognized" True slow
+  case parse "backends: python, batched\np(0.5)=(1.0, 1.0)\n" of
+    Left err -> assertFailure err
+    Right (bs, _, _) -> assertEqual "batched is an explicit opt-in token" [Python, Batched] bs
   case parse "backends: interpreter\nslow\np(0.5)=(1.0, 1.0)\n" of
     Left err -> assertFailure err
     Right (bs, slow, _) -> do
@@ -969,7 +974,7 @@ planEnumTopKAndBCTest testName baseName = testCase testName $ do
   (_, _, tcs) <- case parseTestCasesFromString tstPath tstSrc of
     Left err -> assertFailure ("tst parse error: " ++ err)
     Right r  -> return r
-  let probCases = [ (s, ps, out) | ProbTestCase _ s ps (VFloat out, _) <- tcs ]
+  let probCases = [ (s, ps, out) | ProbTestCase _ s ps (VFloat out, _) _ <- tcs ]
   assertBool (baseName ++ ".tst should contain prob cases") (not (null probCases))
   -- compile once per config, evaluate every pinned case against each
   let compiledWith conf = either (error . show) id (compile conf prog)
@@ -1112,6 +1117,121 @@ optimizerPurityTests = testGroup "optimizer purity (ir-effectful-var-purity)"
       assertEqual "x read once through the shared binding" 1 (countIRVar "x" opt)
   ]
 
+-- ---------------------------------------------------------------------------
+-- Batched-mode refusals with no corpus trigger (design pytorch-tensorizer)
+-- ---------------------------------------------------------------------------
+
+-- | The corpus-driven rows in "End2EndTesting" ('End2EndTesting.batchedRefusalTests')
+-- cover every batched fragment refusal a real @.ppl@ can reach. A handful cannot
+-- be reached from any program, because another guard always fires first — most
+-- notably the non-scalar 'MultiValue' gate on 'IREnumSum'/'IRIsPossible': every
+-- Either/ADT-shaped decoder emits an 'IRIsLeft', or trips the ADT-declaration
+-- bail, long before a composite enumeration could reach the emitter. That
+-- ordering makes the gate correct today but leaves it with no positive control,
+-- so a refactor could silently delete it — and deleting it emits Python naming
+-- runtime constructors (@Left@, @ConsInferenceList@, ADT constructors) that
+-- exist only in the *scalar* @pythonLib.py@, dying with a @NameError@ instead of
+-- being refused. These rows call the guards directly on hand-built 'IRExpr'
+-- values, and include the accepting direction so a gate that refused everything
+-- would not pass.
+batchedRefusalUnitTests :: TestTree
+batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
+  -- Composite MultiValues: both MultiValue-carrying nodes must refuse each.
+  [ testCase (nodeName ++ " over " ++ mvName ++ " is refused") $
+      assertRefusal needle (mkNode mv)
+  | (nodeName, needle, mkNode) <-
+      [ ("IREnumSum",    "enumeration sum (IREnumSum)",
+         \mv -> IREnumSum "v" mv (IRVar "v"))
+      , ("IRIsPossible", "membership check (IRIsPossible)",
+         \mv -> IRIsPossible mv (IRVar "sample")) ]
+  , (mvName, mv) <-
+      [ ("MultiTuple",     MultiTuple (MultiDiscretes [VInt 0, VInt 1]) (MultiDiscretes [VBool True]))
+      , ("MultiEither",    MultiEither (MultiDiscretes [VInt 0]) (MultiDiscretes [VInt 1]))
+      , ("MultiADT",       MultiADT [("A", [MultiDiscretes [VInt 0]]), ("B", [])])
+      , ("MultiDiscretes with a tuple value",
+                           MultiDiscretes [VTuple (VInt 0) (VInt 1), VTuple (VInt 1) (VInt 0)])
+      , ("MultiDiscretes with an Either value",
+                           MultiDiscretes [VEither (Left (VInt 0)), VEither (Right (VInt 1))])
+      , ("MultiContinuous", MultiContinuous)
+      , ("empty MultiDiscretes", MultiDiscretes []) ]
+  ] ++
+  -- The accepting direction: a flat scalar enumeration is in the fragment.
+  [ testCase (nodeName ++ " over a flat scalar MultiDiscretes is accepted") $
+      assertAccepted (mkNode (MultiDiscretes [VInt 0, VInt 7]))
+        >> assertAccepted (mkNode (MultiDiscretes [VBool True, VBool False]))
+        >> assertAccepted (mkNode (MultiDiscretes [VFloat 0.5]))
+  | (nodeName, mkNode) <-
+      [ ("IREnumSum",    \mv -> IREnumSum "v" mv (IRVar "v"))
+      , ("IRIsPossible", \mv -> IRIsPossible mv (IRVar "sample")) ]
+  ] ++
+  -- Further 'reason' rows with no corpus trigger.
+  [ testCase "IRElementOf is refused" $
+      assertRefusal "list membership (IRElementOf)"
+        (IRElementOf (IRVar "sample") (IRVar "xs"))
+  , testCase "the VAnyExcept marginal sentinel is refused" $
+      assertRefusal "marginal ANY-except sentinel (IRConst VAnyExcept)"
+        (IROp OpEq (IRVar "sample") (IRConst (VAnyExcept [IRConst (VInt 0)])))
+  , testCase "a residual IRConformsTo (not at the root) is refused" $
+      -- prepBatchedBody strips only a *root* query-type guard; one nested
+      -- anywhere else would reach the emitter, which has no case for it.
+      assertRefusal "type-conformance check (IRConformsTo)"
+        (IROp OpAnd (IRVar "b") (IRConformsTo TFloat (IRVar "sample")))
+  , testCase "a residual isAny check is refused" $
+      -- pruneAny rewrites these away, so reaching the guard with one means the
+      -- pruning pass was bypassed or regressed.
+      assertRefusal "marginal (ANY) check (IRUnaryOp OpIsAny)"
+        (IRUnaryOp OpIsAny (IRVar "sample"))
+  , testCase "an inner lambda is refused" $
+      assertRefusal "inner lambda (IRLambda)"
+        (IROp OpPlus (IRVar "x") (IRApply (IRLambda "y" (IRVar "y")) (IRVar "x")))
+  , testCase "the IRRight Either constructor is refused" $
+      -- No corpus program pins this one any more: with IRConst gated on
+      -- 'batchedVal', an Either-valued *constant* is the first offender found in
+      -- either_isleft, and the diagnostic reports only the first. Built here
+      -- with no constant to out-race it.
+      assertRefusal "Either constructor (IRRight)"
+        (IRRight (IRVar "x"))
+  , testCase "the IRHead list destructor is refused on its own" $
+      assertRefusal "list head (IRHead)" (IRHead (IRVar "xs"))
+  , testCase "an offender nested deep in a let-spine is still found" $
+      -- 'batchedGuard' walks the whole tree, not just the root.
+      assertRefusal "list head (IRHead)"
+        (IRLetIn "a" (IRConst (VFloat 1.0))
+          (IRLetIn "b" (IROp OpPlus (IRVar "a") (IRHead (IRVar "xs"))) (IRVar "b")))
+  -- Generate-only recursion ('hasGenCycle'): unreachable from the corpus,
+  -- because a recursive program's *prob* path trips 'checkCallGraph' first
+  -- (e.g. dice). Driven through 'generateFunctionsBatched' on a group that has
+  -- only a generate method, so there is no prob/integ root to check at all.
+  , testCase "a self-recursive generate body is refused" $
+      case generateFunctionsBatched False (recGenEnv (IRVar "rec_gen")) of
+        Right _  -> assertFailure "batched mode accepted a self-recursive generate body"
+        Left msg -> assertBool ("wrong diagnostic for recursive generate: " ++ msg)
+                      ("generate function recurses" `isInfixOf` msg)
+  , testCase "a non-recursive generate body of the same shape is accepted" $
+      case generateFunctionsBatched False (recGenEnv (IRSample IRNormal)) of
+        Right _  -> return ()
+        Left msg -> assertFailure ("batched mode refused a plain generate body: " ++ msg)
+  ]
+  where
+    -- A one-group environment whose only method is generate, with the given
+    -- body (either self-referential or not).
+    recGenEnv body = IREnv
+      [IRFunGroup { groupName = "rec", genFun = Just (body, "")
+                  , probFun = Nothing, integFun = Nothing
+                  , encodeFun = Nothing, normalFun = Nothing, groupDoc = "" }]
+      [] []
+    -- 'batchedGuard' is called on the raw term, *not* through 'prepBatchedBody':
+    -- these rows check the guard itself, and prepping would rewrite away the very
+    -- nodes some of them are about (pruneAny turns an OpIsAny check into a plain
+    -- constant, which is legitimately in the fragment).
+    assertRefusal needle e = case batchedGuard "g" "forward" e of
+      Right () -> assertFailure ("batchedGuard accepted a node it must refuse; expected: " ++ needle)
+      Left msg -> assertBool ("batched refusal does not mention " ++ show needle
+                              ++ "; actual diagnostic: " ++ msg) (needle `isInfixOf` msg)
+    assertAccepted e = case batchedGuard "g" "forward" e of
+      Right () -> return ()
+      Left msg -> assertFailure ("batchedGuard refused a node inside the fragment: " ++ msg)
+
 internalsTests :: TestTree
 internalsTests = testGroup "Internals"
   [ testProperties "properties" $(allProperties)
@@ -1148,6 +1268,7 @@ internalsTests = testGroup "Internals"
   , planOverCouplingRefusalTests
   , test_tstBackendsHeader
   , optimizerPurityTests
+  , batchedRefusalUnitTests
   ]
 
 -- | Tests heavy enough (multiple full compiles of a depth-3/depth-10 plan

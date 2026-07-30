@@ -27,7 +27,7 @@ import TestModalityInfer (modalityInferTests)
 import TestDeterminism (determinismTests)
 import TestEncodeProperties (encodeTests, encodeRoundtripTests)
 import TestShowcase (showcaseTests)
-import End2EndTesting (end2endTests, slowEnd2EndTests, getAllTestFiles, selectPassDifferentialTests, batchedPythonTests)
+import End2EndTesting (end2endTests, slowEnd2EndTests, getAllTestFiles, selectPassDifferentialTests, batchedPythonTests, batchedRefusalTests)
 import TestFuzz (fuzzTests, superSlowFuzzTests)
 import TestCaseParser (parseProgram, parseTestCases, TestCase(..), Backend(..))
 import TestTolerances (probTolerance, reasonablyCloseTolerance, samplingTolerance)
@@ -57,7 +57,7 @@ loadCorpusCases = do
     (backends, _slow, tcs) <- parseTestCases tst
     return (takeBaseName ppl, prog, backends, tcs)) files
   let usable = [(n, p, tcs) | (n, p, backends, tcs) <- pairs, Interpreter `elem` backends, null (neurals p)]
-  return [(n, (p, sample, params, expected)) | (n, p, tcs) <- usable, ProbTestCase _ sample params expected <- tcs]
+  return [(n, (p, sample, params, expected)) | (n, p, tcs) <- usable, ProbTestCase _ sample params expected _ <- tcs]
 
 invalidTestCases :: [Program]
 invalidTestCases = [invalidDuplicateDecl1, invalidDuplicateDecl2, invalidDuplicateDecl3, invalidDuplicateDecl4, invalidDuplicateDecl5, invalidMissingDecl, invalidMissingInjF, invalidReservedName, invalidReservedName2, invalidWrongArgCount]
@@ -618,6 +618,7 @@ main = do
     , e2e
     , selectDiff
     , batchedPy
+    , batchedRefusalTests
     , slow
     , superSlow
     ]

@@ -1,3 +1,4 @@
+backends: interpreter, julia, python, batched
 p(True, 1)=(0.333333, 0.0)
 p(True, 2)=(0.333333, 0.0)
 p(True, 3)=(0.333333, 0.0)

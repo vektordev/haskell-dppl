@@ -71,8 +71,8 @@ selectPassDifferentialTests = do
 -- | Assert one corpus query point is unchanged by the select pass. Non-query
 -- cases (encode/argmax) are skipped: the pass only touches prob/integ bodies.
 selectNoOp :: Program -> TestCase -> Property
-selectNoOp p (ProbTestCase  name sample params _) = selectNoOpCmp p name (\c -> runProbC  p c params sample)
-selectNoOp p (CumulTestCase name sample params _) = selectNoOpCmp p name (\c -> runIntegC p c params sample)
+selectNoOp p (ProbTestCase  name sample params _ _) = selectNoOpCmp p name (\c -> runProbC  p c params sample)
+selectNoOp p (CumulTestCase name sample params _ _) = selectNoOpCmp p name (\c -> runIntegC p c params sample)
 selectNoOp _ _ = property True
 
 selectNoOpCmp :: Program -> String -> (IREnv -> Either CompilerError IRValue) -> Property
@@ -99,22 +99,38 @@ forceResult res = do
               Right v  -> length (show v) `seq` v)) :: IO (Either SomeException IRValue)
   return $ either (Left . show) Right r
 
+-- | Check a query point's expected impossibility flag, if the .tst line declared
+-- one (the optional third expectation component). The flag is read through
+-- 'resultImpossible' rather than by matching the result tuple's shape here --
+-- that accessor is the emitted layout's only definition outside the compiler
+-- (see CLAUDE.md, design inference-result-side-channels).
+checkImposs :: String -> Maybe Bool -> IRValue -> Property
+checkImposs _ Nothing _ = property True
+checkImposs name (Just expected) v = case resultImpossible v of
+  Nothing -> counterexample
+    ("Test case " ++ name ++ " expects an impossibility flag but its result carries none: " ++ show v) False
+  Just actual -> counterexample
+    ("Impossibility flag differs for test case " ++ name ++ ". Expected: " ++ show expected ++ " Got: " ++ show actual)
+    (actual == expected)
+
 testInterpreter :: Program -> Either CompilerError IREnv -> TestCase -> Property
-testInterpreter p compiledE (ProbTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = ioProperty $ do
+testInterpreter p compiledE (ProbTestCase name sample params (VFloat expectedProb, VFloat expectedDim) expImposs) = ioProperty $ do
   result <- try (let r = compiledE >>= \c -> runProbC p c params sample in evaluate (length (show r)) >> return r) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
-  return $ case result of 
-    Right (Right (VProbDim outProb outDim)) -> 
+  return $ case result of
+    Right (Right res@(VProbDim outProb outDim)) ->
       counterexample ("Probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < probTolerance) .&&.
-        counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim)
+        counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim) .&&.
+        checkImposs name expImposs res
     Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
     Right (Left err) -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
     Left err -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
-testInterpreter p compiledE (CumulTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = ioProperty $ do
+testInterpreter p compiledE (CumulTestCase name sample params (VFloat expectedProb, VFloat expectedDim) expImposs) = ioProperty $ do
   result <- try (let r = compiledE >>= \c -> runIntegC p c params sample in evaluate (length (show r)) >> return r) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
-  return $ case result of 
-    Right (Right (VProbDim outProb outDim)) -> 
+  return $ case result of
+    Right (Right res@(VProbDim outProb outDim)) ->
       counterexample ("Cmulative probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < probTolerance) .&&.
-        counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim)
+        counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim) .&&.
+        checkImposs name expImposs res
     Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
     Right (Left err) -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
     Left err -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
@@ -349,7 +365,7 @@ juliaModuleTestCases :: String -> [TestCase] -> String
 juliaModuleTestCases modName tcs =
   modName ++ ".main_gen(" ++ intercalate ", " (map juliaVal exampleParams) ++ ")\n" ++
   concat (map (\tc ->
-    let (name, sample, params, outProb, outDim) = unpackTestCase tc
+    let (name, sample, params, outProb, outDim, expImposs) = unpackTestCase tc
         call = modName ++ "." ++ mainName tc ++ "(" ++ juliaVal sample ++ ", " ++ intercalate ", " (map juliaVal params) ++ ")"
     in "tmp = " ++ call ++ "\n\
        \if abs(tmp[1] - " ++ juliaVal outProb ++ ") > " ++ show probTolerance ++ "\n\
@@ -357,32 +373,51 @@ juliaModuleTestCases modName tcs =
        \end\n\
        \if tmp[1] != 0 && tmp[2][1] != " ++ juliaVal outDim ++ "\n\
        \  error(\"Dimensionality wrong: \" * string(tmp[2][1]) * \"/=\" * string(" ++ juliaVal outDim ++ ") * \"in test case " ++ name ++ "\")\n\
-       \end\n"
+       \end\n" ++ juliaImpossCheck name expImposs
     ) tcs)
   where
-    (_, _, exampleParams, _, _) = unpackTestCase (head tcs)
-    unpackTestCase (ProbTestCase name sample params (outProb, outDim)) = (name, sample, params, outProb, outDim)
-    unpackTestCase (CumulTestCase name sample params (outProb, outDim)) = (name, sample, params, outProb, outDim)
-    mainName (ProbTestCase _ _ _ _) = "main_prob"
-    mainName (CumulTestCase _ _ _ _) = "main_integ"
+    (_, _, exampleParams, _, _, _) = unpackTestCase (head tcs)
+    unpackTestCase (ProbTestCase name sample params (outProb, outDim) imp) = (name, sample, params, outProb, outDim, imp)
+    unpackTestCase (CumulTestCase name sample params (outProb, outDim) imp) = (name, sample, params, outProb, outDim, imp)
+    mainName (ProbTestCase _ _ _ _ _) = "main_prob"
+    mainName (CumulTestCase _ _ _ _ _) = "main_integ"
+
+-- The emitted result is (prob, (dim, impossible)), so the impossibility flag --
+-- checked only when the .tst line declared an expectation for it -- sits at
+-- tmp[2][2].
+juliaImpossCheck :: String -> Maybe Bool -> String
+juliaImpossCheck _ Nothing = ""
+juliaImpossCheck name (Just expected) =
+  "if tmp[2][2] != " ++ juliaVal (VBool expected) ++ "\n\
+  \  error(\"Impossibility flag wrong: \" * string(tmp[2][2]) * \"/=\" * string(" ++ juliaVal (VBool expected) ++ ") * \"in test case " ++ name ++ "\")\n\
+  \end\n"
 
 pythonTestCode :: String -> [TestCase] -> String
 pythonTestCode src tcs = 
   unpack (replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n") (pack src)) ++ "\n" ++   -- Importing pyTorch is really slow and not needed
   "main.generate(" ++ intercalate ", " (map pyVal exampleParams) ++ ")\n" ++
-  concat (map (\tc -> let (name, sample, params, outProb, outDim) = unpackTestCase tc in 
+  concat (map (\tc -> let (name, sample, params, outProb, outDim, expImposs) = unpackTestCase tc in
     "tmp = " ++ mainName tc ++ "(" ++  pyVal sample ++ ", " ++ intercalate ", " (map pyVal params) ++ ")\n\
     \if abs(tmp[0] - " ++ pyVal outProb ++ ") > " ++ show probTolerance ++ ":\n\
     \  raise ValueError(\"Probability wrong: \" + str(tmp[0]) + \"!=\" + str(" ++ pyVal outProb ++ ") + \"in test case " ++ name ++ "\")\n\
     \if tmp[0] != 0 and tmp[1][0] != " ++ pyVal outDim ++ ":\n\
     \  raise ValueError(\"Dimensionality wrong: \" + str(tmp[1][0]) + \"/=\" + str(" ++ pyVal outDim ++ ") + \"in test case " ++ name ++ "\")\n\
-    \") tcs)
-  where 
-    (_, _, exampleParams, _, _) = unpackTestCase (head tcs)
-    unpackTestCase (ProbTestCase name sample params (outProb, outDim)) = (name, sample, params, outProb, outDim)
-    unpackTestCase (CumulTestCase name sample params (outProb, outDim)) = (name, sample, params, outProb, outDim)
-    mainName (ProbTestCase _ _ _ _) = "main.forward"
-    mainName (CumulTestCase _ _ _ _) = "main.integrate"
+    \" ++ pyImpossCheck name expImposs) tcs)
+  where
+    (_, _, exampleParams, _, _, _) = unpackTestCase (head tcs)
+    unpackTestCase (ProbTestCase name sample params (outProb, outDim) imp) = (name, sample, params, outProb, outDim, imp)
+    unpackTestCase (CumulTestCase name sample params (outProb, outDim) imp) = (name, sample, params, outProb, outDim, imp)
+    mainName (ProbTestCase _ _ _ _ _) = "main.forward"
+    mainName (CumulTestCase _ _ _ _ _) = "main.integrate"
+
+-- The emitted result is (prob, (dim, impossible)), so the impossibility flag --
+-- checked only when the .tst line declared an expectation for it -- sits at
+-- tmp[1][1].
+pyImpossCheck :: String -> Maybe Bool -> String
+pyImpossCheck _ Nothing = ""
+pyImpossCheck name (Just expected) =
+  "if bool(tmp[1][1]) != " ++ pyVal (VBool expected) ++ ":\n\
+  \  raise ValueError(\"Impossibility flag wrong: \" + str(tmp[1][1]) + \"!=\" + str(" ++ pyVal (VBool expected) ++ ") + \"in test case " ++ name ++ "\")\n"
 
 -- ===========================================================================
 -- Batched PyTorch differential test (design pytorch-tensorizer, M2)
@@ -398,56 +433,206 @@ pythonTestCode src tcs =
 --
 -- The batched backend emits @torch@ ops, so a torch-enabled Python interpreter
 -- is required. It is looked up via @NEST_TORCH_PYTHON@, then a conventional
--- venv path, then @python3@; if none imports torch the whole group is skipped
--- with a visible note (so a torch-less CI stays green). Torch import is slow, so
--- every eligible program runs in one shared interpreter process.
+-- venv path, then @python3@; if none imports torch the value differential is
+-- skipped with a visible note (so a torch-less CI stays green). Torch import is
+-- slow, so every eligible program runs in one shared interpreter process.
+--
+-- Which programs participate is a first-class @.tst@ routing declaration: the
+-- @batched@ token in the @backends:@ header (see TestCaseParser). For every
+-- program that lists it, eligibility is /asserted/ (`declared-batched-eligible`)
+-- rather than filtered — a change that makes a program fall out of the tensor
+-- fragment names it and quotes the refusal diagnostic instead of silently
+-- shrinking the group. That assertion is pure Haskell (compile +
+-- 'generateFunctionsBatched' + 'batchGroups') and therefore runs whether or not
+-- torch is available.
+--
+-- The reverse direction (a program that is eligible but does not declare it)
+-- is only a stderr note, not a failure: eligibility /loss/ is the regression
+-- worth breaking the build over, while eligibility /gain/ happens whenever
+-- someone adds an ordinary scalar program.
+--
+-- The same declared set feeds the M5 topK differential ('topKEntries' /
+-- 'runBatchedTopK'), which recompiles each program at a cutoff and checks batched
+-- topK is a per-element decision.
+--
+-- (Before this became a declaration, the selection condition was
+-- @Python \`elem\` bs || not (null (neurals p))@: neural programs are
+-- Interpreter-routed, since their networks are undefined in the emitted scalar
+-- code, but batched mode supplies a torch mock, so they were admitted
+-- regardless of the Python routing header (design pytorch-tensorizer M2b). That
+-- special case is gone — a neural program simply lists @batched@ itself.)
 batchedPythonTests :: IO TestTree
 batchedPythonTests = do
   files <- getAllTestFiles
   cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
-  -- Non-neural programs are routed to Python by their .tst header; neural
-  -- programs are Interpreter-only there (their networks are undefined in the
-  -- emitted code), but batched mode supplies a torch mock (identity, for the
-  -- mode-2 verbatim-logit symbols the .tst files pass), so we admit them here
-  -- regardless of the Python routing header (design pytorch-tensorizer M2b).
-  let entries = [ (takeBaseName pplPath, p, tcs)
+  -- `slow`-headered programs stay out of batched coverage by construction, the
+  -- same way they stay out of the Interpreter groups.
+  let entries = [ (takeBaseName pplPath, p, bs, tcs)
                 | ((pplPath, _), (p, (bs, slow, tcs))) <- zip files cases
-                , not slow, Python `elem` bs || not (null (neurals p)) ]
-      eligible = [ (n, src, groups, netNames)
-                 | (n, p, tcs) <- entries
-                 , let qtcs = filter (\t -> isProbTestCase t || isCumulTestCase t) tcs
-                 , not (null qtcs)
-                 , let netNames = [nm | (nm, _, _) <- neurals p]
-                 , Right env <- [compile defaultCompilerConfig{batched = True} p]
-                 , Right srcLines <- [generateFunctionsBatched True env]
-                 , Just groups <- [batchGroups (not (null netNames)) qtcs]
-                 , let src = intercalate "\n" srcLines ]
-      topkEligible = topKEntries entries
+                , not slow ]
+      -- The topK differential (M5) recompiles the `batched`-declaring programs
+      -- at a cutoff, so it draws from the same declaration, not from a second
+      -- eligibility condition of its own.
+      batchedDeclared = [ (n, p, tcs) | (n, p, bs, tcs) <- entries, Batched `elem` bs ]
+  declared <- mapM (\(n, p, _, tcs) -> (,) n <$> batchedEligibility p tcs)
+                   [ e | e@(_, _, bs, _) <- entries, Batched `elem` bs ]
+  undeclared <- mapM (\(n, p, _, tcs) -> (,) n <$> batchedEligibility p tcs)
+                     [ e | e@(_, _, bs, _) <- entries, Batched `notElem` bs ]
+  let eligible = [ (n, src, gs, nets) | (n, Right (src, gs, nets)) <- declared ]
+      refused  = [ (n, msg) | (n, Left msg) <- declared ]
+      gained   = [ n | (n, Right _) <- undeclared ]
+      topkEligible = topKEntries batchedDeclared
   mpy <- findTorchPython
-  return $ testGroup "BatchedPython" $ case mpy of
-    Nothing ->
-      [ testProperty "skipped-no-torch" $ once $ ioProperty $ do
-          hPutStrLn stderr "BatchedPython: skipped -- no torch-enabled python found (set NEST_TORCH_PYTHON)."
-          return True ]
-    Just py ->
-      [ testProperty "batched-vs-expected" (once (runBatchedPython py eligible))
-      , testProperty "refusal-diagnostic" (once (ioProperty (return refusalProp)))
-      , testProperty "gradients-nan-free" (once (runBatchedGradients py eligible))
-      , testProperty "generate-density-matches-expected" (once (runBatchedGenerate py eligible))
-      , testProperty "topk-is-per-element" (once (runBatchedTopK py topkEligible)) ]
+  return $ testGroup "BatchedPython" $
+    [ testProperty "declared-batched-eligible" (once (declaredEligibleProp (length declared) refused))
+    , testProperty "eligibility-gain-note" (once (gainNoteProp gained))
+    ] ++ case mpy of
+      Nothing ->
+        [ testProperty "skipped-no-torch" $ once $ ioProperty $ do
+            hPutStrLn stderr "BatchedPython: value differential skipped -- no torch-enabled python found (set NEST_TORCH_PYTHON)."
+            return True ]
+      Just py ->
+        [ testProperty "batched-vs-expected" (once (runBatchedPython py eligible))
+        , testProperty "gradients-nan-free" (once (runBatchedGradients py eligible))
+        , testProperty "generate-density-matches-expected" (once (runBatchedGenerate py eligible))
+        , testProperty "topk-is-per-element" (once (runBatchedTopK py topkEligible)) ]
 
--- | The batched backend must refuse a program outside the tensor fragment with
--- a diagnostic naming the offending construct. `list` (whose main,
--- `[Normal, Uniform*2.0]`, is genuinely list-valued) is a stable negative.
-refusalProp :: Property
-refusalProp = ioProperty $ do
-  p <- parseProgram "testCases/list.ppl"
+-- | Everything the batched differential needs from one corpus program, or a
+-- diagnostic saying why batched mode cannot take it: the three eligibility
+-- conditions (a batched 'compile', a 'generateFunctionsBatched' emission, and
+-- batchable query samples) plus the precondition that the @.tst@ file has
+-- prob/cumulative points at all. Runs in IO so that a compiler @error@ (rather
+-- than a @Left@) becomes a named diagnostic instead of derailing the group.
+batchedEligibility :: Program -> [TestCase] -> IO (Either String (String, [BatchGroup], [String]))
+batchedEligibility p tcs = do
+  r <- try (evaluate (force (go p tcs))) :: IO (Either SomeException (Either String (String, [BatchGroup], [String])))
+  return $ either (\e -> Left ("crashed while compiling for batched mode: " ++ show e)) id r
+  where
+    force res = case res of
+      Left msg              -> length msg `seq` res
+      Right (src, gs, nets) -> length src `seq` length gs `seq` length nets `seq` res
+    go prog cs = do
+      let qtcs = filter (\t -> isProbTestCase t || isCumulTestCase t) cs
+          netNames = [nm | (nm, _, _) <- neurals prog]
+      if null qtcs
+        then Left "the .tst file declares no p()/cdf() query points to batch"
+        else Right ()
+      env <- compile defaultCompilerConfig{batched = True} prog
+      srcLines <- generateFunctionsBatched True env
+      groups <- maybe (Left "query samples are not structure-of-arrays batchable") Right
+                      (batchGroups (not (null netNames)) qtcs)
+      return (intercalate "\n" srcLines, groups, netNames)
+
+-- | The point of the @batched@ routing token: a program that declares it must
+-- still be batched-eligible. Each refusal names the program and quotes the
+-- diagnostic.
+declaredEligibleProp :: Int -> [(String, String)] -> Property
+declaredEligibleProp 0 _ = counterexample
+  "no .tst file declares `batched` in its backends header; batched mode has no coverage" False
+declaredEligibleProp _ refused = counterexample
+  ("programs declaring `batched` in their .tst backends header are no longer batched-eligible:\n"
+   ++ unlines [ "  " ++ n ++ ": " ++ msg | (n, msg) <- refused ])
+  (null refused)
+
+-- | A visible note (never a failure) for programs batched mode /could/ take but
+-- whose @.tst@ file does not say so.
+gainNoteProp :: [String] -> Property
+gainNoteProp gained = ioProperty $ do
+  if null gained
+    then return ()
+    else hPutStrLn stderr ("BatchedPython: " ++ show (length gained) ++ " program(s) are batched-eligible but do not\n\
+      \  declare `batched` in their .tst backends header (add the token to gain coverage):\n"
+      ++ unlines [ "    " ++ n | n <- gained ])
+  return True
+
+-- ===========================================================================
+-- Batched-mode refusal coverage (design pytorch-tensorizer)
+-- ===========================================================================
+
+-- | Table-driven coverage of the batched fragment refusals a /real corpus
+-- program/ reaches: one row per refused construct, asserting the program
+-- compiles fine (so the refusal is genuinely the batched backend's, not an
+-- unrelated earlier failure) and only then that 'generateFunctionsBatched'
+-- returns 'Left' with a diagnostic naming that construct.
+--
+-- This group deliberately lives outside 'batchedPythonTests': refusals are pure
+-- Haskell and must be checked on a torch-less machine too, whereas the value
+-- differential skips itself there (the single predecessor of this table,
+-- @refusalProp@, sat inside the torch-gated branch and so never ran without
+-- torch). Refusals with no corpus trigger — list membership, the @VAnyExcept@
+-- sentinel, a residual @IRConformsTo@/@OpIsAny@, a composite-'MultiValue'
+-- @IREnumSum@/@IRIsPossible@, and generate-only recursion — are covered by the
+-- synthetic-IR rows in "TestInternals" (@batchedRefusalUnitTests@), because on
+-- any real program another guard always fires first.
+batchedRefusalTests :: TestTree
+batchedRefusalTests = testGroup "BatchedRefusal"
+  [ testProperty (prog ++ " -- " ++ needle) (once (refusalRow prog needle))
+  | (prog, needle) <- batchedRefusalTable ]
+
+-- | @(corpus program base name, diagnostic substring pinning the construct)@.
+-- The substring names the offending IR node rather than quoting prose, so a
+-- reworded diagnostic does not break a row, but a *different* refusal firing
+-- first does. Every row was read off the actual diagnostic
+-- (@stack run -- -i FILE --batched compile -l python@ — note @--batched@ is a
+-- global flag and must precede the @compile@ subcommand).
+batchedRefusalTable :: [(String, String)]
+batchedRefusalTable =
+  -- lists. Note `list` is pinned on the list *constant*, not on IRHead: since
+  -- 'batchedVal' gates IRConst, the empty-list constant in `main = [Normal,
+  -- Uniform*2.0]` is now the first offender the walk finds, and the diagnostic
+  -- reports only the first. IRHead itself keeps a positive control as a
+  -- synthetic row in "TestInternals" (the let-spine case), where no constant
+  -- competes with it.
+  [ ("list",                      "constant with no batched representation (VList")
+  , ("headTail",                  "list construction (IRCons)")
+  , ("listLiteralDeconstruction", "list tail (IRTail)")
+  , ("map",                       "list map (IRMap)")
+  -- Either: constructors, destructors, predicates
+  , ("either_const",              "Either constructor (IRLeft)")
+    -- like `list` above: an Either *constant* now out-races IRRight as the
+    -- first offender here, so IRRight's node-level control is synthetic too
+  , ("either_isleft",             "constant with no batched representation (VEither")
+  , ("nestedDeconstruction",      "Either destructor (IRFromLeft)")
+  , ("eitherDeconstruction",      "Either destructor (IRFromRight)")
+  , ("either",                    "Either predicate (IRIsLeft)")
+  , ("either_fromLeft",           "Either predicate (IRIsRight)")
+  -- a neural decoder's own Either-shaped output: the refused method is a
+  -- decoder group's forward, not main's
+  , ("eitherNeural",              "eitherNeural_auto's forward")
+  -- ADT declarations: the bail at the top of 'generateFunctionsBatched'
+  , ("adt",                       "ADT declarations are not in the tensor fragment")
+  , ("adtNeuralCounting",         "ADT declarations are not in the tensor fragment")
+  -- prob/integ recursion: a cycle found by 'checkCallGraph'
+  , ("dice",                      "dice_prob reaches dice_prob recursively")
+  , ("gaussList",                 "main_prob reaches main_prob recursively")
+  -- a prob/integ path reaching a method batched mode does not emit
+  , ("factorial",                 "calls factorial_gen, which is not a forward/integrate method")
+  , ("flip",                      "calls flip_gen, which is not a forward/integrate method")
+  -- the marginal ANY sentinel
+  , ("sndCall",                   "marginal ANY sentinel (IRConst VAny)")
+  -- an inner lambda that did not reduce, once in each of the three method
+  -- bodies (twiceApplication's forward/integrate *do* reduce; only its
+  -- generate body keeps the literal lambda -- the accepted cost of generate's
+  -- hard refusal rule, see 'generateFunctionsBatched')
+  , ("either_arith_inv",          "main's forward uses a construct outside the tensor fragment: inner lambda (IRLambda)")
+  , ("injApply",                  "main's integrate uses a construct outside the tensor fragment: inner lambda (IRLambda)")
+  , ("twiceApplication",          "main's generate uses a construct outside the tensor fragment: inner lambda (IRLambda)")
+  ]
+
+-- | One table row: the program must compile, and only then be refused by the
+-- batched backend with a diagnostic containing @needle@.
+refusalRow :: String -> String -> Property
+refusalRow prog needle = ioProperty $ do
+  p <- parseProgram ("testCases/" ++ prog ++ ".ppl")
   return $ case compile defaultCompilerConfig{batched = True} p of
-    Left err -> counterexample ("list failed to compile at all: " ++ err) False
+    Left err -> counterexample (prog ++ " failed to compile at all, so this row proves "
+                                ++ "nothing about the batched refusal: " ++ err) False
     Right env -> case generateFunctionsBatched True env of
-      Right _  -> counterexample "batched mode accepted list-valued program; expected a fragment refusal" False
-      Left msg -> counterexample ("refusal diagnostic did not mention the tensor fragment: " ++ msg)
-                    ("tensor fragment" `isInfixOf` msg && "list" `isInfixOf` msg)
+      Right _  -> counterexample ("batched mode accepted " ++ prog
+                                  ++ "; expected a refusal mentioning: " ++ needle) False
+      Left msg -> counterexample ("batched refusal for " ++ prog ++ " does not mention "
+                                  ++ show needle ++ "; actual diagnostic: " ++ msg)
+                    (needle `isInfixOf` msg)
 
 -- | A batchable group: all query points sharing the same query kind (prob vs
 -- cumulative), rendered into one batched call. 'bgParamExprs' is the Python
@@ -492,8 +677,8 @@ batchGroups isNeural tcs = mapM build grouped
                             , bgExpProb = [ep | (_, _, _, ep, _) <- g]
                             , bgExpDim  = [ed | (_, _, _, _, ed) <- g] }
     build [] = Nothing
-    asQuery (ProbTestCase _ s ps (VFloat ep, VFloat ed))  = Just (False, ps, s, ep, ed)
-    asQuery (CumulTestCase _ s ps (VFloat ep, VFloat ed)) = Just (True,  ps, s, ep, ed)
+    asQuery (ProbTestCase _ s ps (VFloat ep, VFloat ed) _)  = Just (False, ps, s, ep, ed)
+    asQuery (CumulTestCase _ s ps (VFloat ep, VFloat ed) _) = Just (True,  ps, s, ep, ed)
     asQuery _ = Nothing
 
 -- | Batch the positional symbol arguments of a neural program across points.
@@ -681,7 +866,11 @@ topKDiffThresholds = [0.3, 0.6]
 -- would be wrong wherever pruning bites.
 --
 -- Restricted to prob queries: the integrate path takes no @acc_prob@ parameter
--- and topK does not apply to it.
+-- and topK does not apply to it. Input is the @batched@-declaring corpus
+-- entries, the same declaration 'batchedPythonTests' filters on — a program
+-- whose fragment eligibility is asserted there is silently dropped here if it
+-- fails to compile at a cutoff, which is why the non-vacuity assertion below
+-- exists.
 -- Returns the driver entries plus the number of programs on which the threshold
 -- actually bites (some point's pruned value differs from its topK-off value) —
 -- the property asserts that is non-zero, so the differential can never quietly
