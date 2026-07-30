@@ -397,41 +397,108 @@ pythonTestCode src tcs =
 --
 -- The batched backend emits @torch@ ops, so a torch-enabled Python interpreter
 -- is required. It is looked up via @NEST_TORCH_PYTHON@, then a conventional
--- venv path, then @python3@; if none imports torch the whole group is skipped
--- with a visible note (so a torch-less CI stays green). Torch import is slow, so
--- every eligible program runs in one shared interpreter process.
+-- venv path, then @python3@; if none imports torch the value differential is
+-- skipped with a visible note (so a torch-less CI stays green). Torch import is
+-- slow, so every eligible program runs in one shared interpreter process.
+--
+-- Which programs participate is a first-class @.tst@ routing declaration: the
+-- @batched@ token in the @backends:@ header (see TestCaseParser). For every
+-- program that lists it, eligibility is /asserted/ (`declared-batched-eligible`)
+-- rather than filtered — a change that makes a program fall out of the tensor
+-- fragment names it and quotes the refusal diagnostic instead of silently
+-- shrinking the group. That assertion is pure Haskell (compile +
+-- 'generateFunctionsBatched' + 'batchGroups') and therefore runs whether or not
+-- torch is available.
+--
+-- The reverse direction (a program that is eligible but does not declare it)
+-- is only a stderr note, not a failure: eligibility /loss/ is the regression
+-- worth breaking the build over, while eligibility /gain/ happens whenever
+-- someone adds an ordinary scalar program.
+--
+-- (Before this became a declaration, the selection condition was
+-- @Python \`elem\` bs || not (null (neurals p))@: neural programs are
+-- Interpreter-routed, since their networks are undefined in the emitted scalar
+-- code, but batched mode supplies a torch mock, so they were admitted
+-- regardless of the Python routing header (design pytorch-tensorizer M2b). That
+-- special case is gone — a neural program simply lists @batched@ itself.)
 batchedPythonTests :: IO TestTree
 batchedPythonTests = do
   files <- getAllTestFiles
   cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
-  -- Non-neural programs are routed to Python by their .tst header; neural
-  -- programs are Interpreter-only there (their networks are undefined in the
-  -- emitted code), but batched mode supplies a torch mock (identity, for the
-  -- mode-2 verbatim-logit symbols the .tst files pass), so we admit them here
-  -- regardless of the Python routing header (design pytorch-tensorizer M2b).
-  let entries = [ (takeBaseName pplPath, p, tcs)
+  -- `slow`-headered programs stay out of batched coverage by construction, the
+  -- same way they stay out of the Interpreter groups.
+  let entries = [ (takeBaseName pplPath, p, bs, tcs)
                 | ((pplPath, _), (p, (bs, slow, tcs))) <- zip files cases
-                , not slow, Python `elem` bs || not (null (neurals p)) ]
-      eligible = [ (n, src, groups, netNames)
-                 | (n, p, tcs) <- entries
-                 , let qtcs = filter (\t -> isProbTestCase t || isCumulTestCase t) tcs
-                 , not (null qtcs)
-                 , let netNames = [nm | (nm, _, _) <- neurals p]
-                 , Right env <- [compile defaultCompilerConfig{batched = True} p]
-                 , Right srcLines <- [generateFunctionsBatched True env]
-                 , Just groups <- [batchGroups (not (null netNames)) qtcs]
-                 , let src = intercalate "\n" srcLines ]
+                , not slow ]
+  declared <- mapM (\(n, p, _, tcs) -> (,) n <$> batchedEligibility p tcs)
+                   [ e | e@(_, _, bs, _) <- entries, Batched `elem` bs ]
+  undeclared <- mapM (\(n, p, _, tcs) -> (,) n <$> batchedEligibility p tcs)
+                     [ e | e@(_, _, bs, _) <- entries, Batched `notElem` bs ]
+  let eligible = [ (n, src, gs, nets) | (n, Right (src, gs, nets)) <- declared ]
+      refused  = [ (n, msg) | (n, Left msg) <- declared ]
+      gained   = [ n | (n, Right _) <- undeclared ]
   mpy <- findTorchPython
-  return $ testGroup "BatchedPython" $ case mpy of
-    Nothing ->
-      [ testProperty "skipped-no-torch" $ once $ ioProperty $ do
-          hPutStrLn stderr "BatchedPython: skipped -- no torch-enabled python found (set NEST_TORCH_PYTHON)."
-          return True ]
-    Just py ->
-      [ testProperty "batched-vs-expected" (once (runBatchedPython py eligible))
-      , testProperty "refusal-diagnostic" (once (ioProperty (return refusalProp)))
-      , testProperty "gradients-nan-free" (once (runBatchedGradients py eligible))
-      , testProperty "generate-density-matches-expected" (once (runBatchedGenerate py eligible)) ]
+  return $ testGroup "BatchedPython" $
+    [ testProperty "declared-batched-eligible" (once (declaredEligibleProp (length declared) refused))
+    , testProperty "eligibility-gain-note" (once (gainNoteProp gained))
+    , testProperty "refusal-diagnostic" (once (ioProperty (return refusalProp)))
+    ] ++ case mpy of
+      Nothing ->
+        [ testProperty "skipped-no-torch" $ once $ ioProperty $ do
+            hPutStrLn stderr "BatchedPython: value differential skipped -- no torch-enabled python found (set NEST_TORCH_PYTHON)."
+            return True ]
+      Just py ->
+        [ testProperty "batched-vs-expected" (once (runBatchedPython py eligible))
+        , testProperty "gradients-nan-free" (once (runBatchedGradients py eligible))
+        , testProperty "generate-density-matches-expected" (once (runBatchedGenerate py eligible)) ]
+
+-- | Everything the batched differential needs from one corpus program, or a
+-- diagnostic saying why batched mode cannot take it: the three eligibility
+-- conditions (a batched 'compile', a 'generateFunctionsBatched' emission, and
+-- batchable query samples) plus the precondition that the @.tst@ file has
+-- prob/cumulative points at all. Runs in IO so that a compiler @error@ (rather
+-- than a @Left@) becomes a named diagnostic instead of derailing the group.
+batchedEligibility :: Program -> [TestCase] -> IO (Either String (String, [BatchGroup], [String]))
+batchedEligibility p tcs = do
+  r <- try (evaluate (force (go p tcs))) :: IO (Either SomeException (Either String (String, [BatchGroup], [String])))
+  return $ either (\e -> Left ("crashed while compiling for batched mode: " ++ show e)) id r
+  where
+    force res = case res of
+      Left msg              -> length msg `seq` res
+      Right (src, gs, nets) -> length src `seq` length gs `seq` length nets `seq` res
+    go prog cs = do
+      let qtcs = filter (\t -> isProbTestCase t || isCumulTestCase t) cs
+          netNames = [nm | (nm, _, _) <- neurals prog]
+      if null qtcs
+        then Left "the .tst file declares no p()/cdf() query points to batch"
+        else Right ()
+      env <- compile defaultCompilerConfig{batched = True} prog
+      srcLines <- generateFunctionsBatched True env
+      groups <- maybe (Left "query samples are not structure-of-arrays batchable") Right
+                      (batchGroups (not (null netNames)) qtcs)
+      return (intercalate "\n" srcLines, groups, netNames)
+
+-- | The point of the @batched@ routing token: a program that declares it must
+-- still be batched-eligible. Each refusal names the program and quotes the
+-- diagnostic.
+declaredEligibleProp :: Int -> [(String, String)] -> Property
+declaredEligibleProp 0 _ = counterexample
+  "no .tst file declares `batched` in its backends header; batched mode has no coverage" False
+declaredEligibleProp _ refused = counterexample
+  ("programs declaring `batched` in their .tst backends header are no longer batched-eligible:\n"
+   ++ unlines [ "  " ++ n ++ ": " ++ msg | (n, msg) <- refused ])
+  (null refused)
+
+-- | A visible note (never a failure) for programs batched mode /could/ take but
+-- whose @.tst@ file does not say so.
+gainNoteProp :: [String] -> Property
+gainNoteProp gained = ioProperty $ do
+  if null gained
+    then return ()
+    else hPutStrLn stderr ("BatchedPython: " ++ show (length gained) ++ " program(s) are batched-eligible but do not\n\
+      \  declare `batched` in their .tst backends header (add the token to gain coverage):\n"
+      ++ unlines [ "    " ++ n | n <- gained ])
+  return True
 
 -- | The batched backend must refuse a program outside the tensor fragment with
 -- a diagnostic naming the offending construct. `list` (whose main,

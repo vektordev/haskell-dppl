@@ -5,6 +5,7 @@ module TestCaseParser (
   TestCase(..),
   Backend(..),
   allBackends,
+  defaultBackends,
   isProbTestCase,
   isCumulTestCase,
   isArgmaxPTestCase,
@@ -39,12 +40,26 @@ import Data.Void
 
 -- Which execution backends a .tst file's cases run against. Declared via an
 -- optional first line `backends: interpreter, julia` (any non-empty subset);
--- a file without the header runs against all three.
-data Backend = Interpreter | Julia | Python
+-- a file without the header runs against the three scalar backends
+-- ('defaultBackends').
+--
+-- `batched` is deliberately NOT part of that default: it is an opt-in
+-- declaration that the program is expected to be batched-mode eligible (see
+-- End2EndTesting.batchedPythonTests), asserted rather than filtered, so
+-- silently losing eligibility fails the suite. Listing it does not remove the
+-- file from any scalar backend -- spell those out alongside it.
+data Backend = Interpreter | Julia | Python | Batched
   deriving (Eq, Show, Enum, Bounded)
 
+-- Every Backend constructor. Note this now includes 'Batched', so it is NOT the
+-- right default for a header-less file -- use 'defaultBackends' for that.
 allBackends :: [Backend]
 allBackends = [minBound .. maxBound]
+
+-- What a .tst file without a `backends:` header routes to: the three scalar
+-- backends, but not batched mode.
+defaultBackends :: [Backend]
+defaultBackends = [Interpreter, Julia, Python]
 
 data TestCase = ProbTestCase String IRValue [IRValue] (IRValue, IRValue)
               | CumulTestCase String IRValue [IRValue] (IRValue, IRValue)
@@ -170,6 +185,7 @@ pBackend = choice
   [ symbol "interpreter" >> return Interpreter
   , symbol "julia" >> return Julia
   , symbol "python" >> return Python
+  , symbol "batched" >> return Batched
   ]
 
 pBackendsHeader :: MonadParser m => m [Backend]
@@ -190,8 +206,10 @@ pSlowHeader = do
   return ()
 
 -- Both headers are optional and may appear in either order (or not at all).
+-- A missing `backends:` header means 'defaultBackends' (the three scalar
+-- backends), never 'allBackends': `batched` must be opted into explicitly.
 pHeaders :: MonadParser m => m ([Backend], Bool)
-pHeaders = go allBackends False
+pHeaders = go defaultBackends False
   where
     go bs slow =
       (try pBackendsHeader >>= \bs' -> go bs' slow) <|>

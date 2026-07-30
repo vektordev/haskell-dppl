@@ -1,3 +1,4 @@
+backends: interpreter, julia, python, batched
 p(-1.0)=(0.0,1.0)
 p(0.5)=(0.25,1.0)
 p(3.5)=(0.25,1.0)

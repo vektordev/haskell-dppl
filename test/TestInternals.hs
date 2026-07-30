@@ -29,7 +29,7 @@ import Data.List (isInfixOf)
 import Control.Exception (try, evaluate, ErrorCall(..))
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure)
-import TestCaseParser (Backend(..), TestCase(..), allBackends, parseTestCasesFromString)
+import TestCaseParser (Backend(..), TestCase(..), defaultBackends, parseTestCasesFromString)
 import Test.Tasty.QuickCheck (testProperties)
 import System.Random (StdGen)
 import Control.Monad.Random (Rand)
@@ -706,7 +706,8 @@ autoNeuralDerivationTests = testGroup "autoNeuralDerivation"
   ]
 
 -- .tst files may carry an optional `backends:` header that routes the file's
--- cases to a subset of the three End2End backends; no header means all three.
+-- cases to a subset of the End2End backends; no header means the three scalar
+-- backends (`defaultBackends`) -- notably NOT the opt-in `batched` token.
 -- They may also carry an optional `slow` header (in either order relative to
 -- `backends:`) that moves the file into the opt-in Slow test group.
 test_tstBackendsHeader :: TestTree
@@ -715,7 +716,7 @@ test_tstBackendsHeader = testCase "tstBackendsHeader" $ do
   case parse "p(0.5)=(1.0, 1.0)\n" of
     Left err -> assertFailure err
     Right (bs, slow, tcs) -> do
-      assertEqual "no header defaults to all backends" allBackends bs
+      assertEqual "no header defaults to the scalar backends" defaultBackends bs
       assertEqual "no header defaults to not slow" False slow
       assertEqual "test case count without header" 1 (length tcs)
   case parse "backends: interpreter\np(0.5)=(1.0, 1.0)\n" of
@@ -729,8 +730,11 @@ test_tstBackendsHeader = testCase "tstBackendsHeader" $ do
   case parse "slow\np(0.5)=(1.0, 1.0)\n" of
     Left err -> assertFailure err
     Right (bs, slow, _) -> do
-      assertEqual "slow header alone still defaults to all backends" allBackends bs
+      assertEqual "slow header alone still defaults to the scalar backends" defaultBackends bs
       assertEqual "slow header is recognized" True slow
+  case parse "backends: python, batched\np(0.5)=(1.0, 1.0)\n" of
+    Left err -> assertFailure err
+    Right (bs, _, _) -> assertEqual "batched is an explicit opt-in token" [Python, Batched] bs
   case parse "backends: interpreter\nslow\np(0.5)=(1.0, 1.0)\n" of
     Left err -> assertFailure err
     Right (bs, slow, _) -> do
