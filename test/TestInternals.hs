@@ -1184,13 +1184,19 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
   , testCase "an inner lambda is refused" $
       assertRefusal "inner lambda (IRLambda)"
         (IROp OpPlus (IRVar "x") (IRApply (IRLambda "y" (IRVar "y")) (IRVar "x")))
-  , testCase "the IRRight Either constructor is refused" $
-      -- No corpus program pins this one any more: with IRConst gated on
-      -- 'batchedVal', an Either-valued *constant* is the first offender found in
-      -- either_isleft, and the diagnostic reports only the first. Built here
-      -- with no constant to out-race it.
-      assertRefusal "Either constructor (IRRight)"
-        (IRRight (IRVar "x"))
+  , testCase "Either dispatch is accepted (the tag is part of the signature)" $
+      -- Heterogeneous M2: within a bucket the constructor tag is uniform, so
+      -- `isinstance(x, Left)` is a Python bool and the arm accessor the emitted
+      -- code takes is always the legal one.
+      mapM_ assertAccepted
+        [ IRLeft (IRVar "x"), IRRight (IRVar "x")
+        , IRFromLeft (IRVar "e"), IRFromRight (IRVar "e")
+        , IRIsLeft (IRVar "e"), IRIsRight (IRVar "e")
+        , IRConst (VEither (Left (VFloat 1.0))) ]
+  , testCase "a value-dependent select between Either arms is refused" $
+      assertRefusal "arms have different structure"
+        (IRSelect (IROp OpGreaterThan (IRVar "x") (IRConst (VFloat 0.0)))
+                  (IRLeft (IRVar "x")) (IRRight (IRVar "x")))
   , testCase "an offender nested deep in a let-spine is still found" $
       -- 'batchedGuard' walks the whole tree, not just the root.
       assertRefusal "list membership (IRElementOf)"
@@ -1260,11 +1266,11 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
     -- these rows check the guard itself, and prepping would rewrite away the very
     -- nodes some of them are about (pruneAny turns an OpIsAny check into a plain
     -- constant, which is legitimately in the fragment).
-    assertRefusal needle e = case batchedGuard "g" "forward" e of
+    assertRefusal needle e = case batchedGuard [] "g" "forward" e of
       Right () -> assertFailure ("batchedGuard accepted a node it must refuse; expected: " ++ needle)
       Left msg -> assertBool ("batched refusal does not mention " ++ show needle
                               ++ "; actual diagnostic: " ++ msg) (needle `isInfixOf` msg)
-    assertAccepted e = case batchedGuard "g" "forward" e of
+    assertAccepted e = case batchedGuard [] "g" "forward" e of
       Right () -> return ()
       Left msg -> assertFailure ("batchedGuard refused a node inside the fragment: " ++ msg)
 

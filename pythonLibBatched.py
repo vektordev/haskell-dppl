@@ -246,6 +246,42 @@ def toList(xs):
     back = ConsInferenceList(x, back)
   return back
 
+# --- Either arms (heterogeneous batching, M2) --------------------------------
+# The constructor tag is *structure*, so it is part of the bucket signature and
+# uniform within a kernel call: `isinstance(x, Left)` is a plain Python bool
+# there, and the arm accessor the emitted code takes is always the legal one.
+# The payload is whatever the leaves are -- [B] tensors.
+
+class Left:
+  def __init__(self, val):
+    self.val = val
+
+  def __eq__(self, other):
+    # Tag mismatch is structural (Python bool); matching tags compare payloads
+    # elementwise, like T.__eq__ and InferenceList.__eq__.
+    if not isinstance(other, Left):
+      return False
+    return self.val == other.val
+
+class Right:
+  def __init__(self, val):
+    self.val = val
+
+  def __eq__(self, other):
+    if not isinstance(other, Right):
+      return False
+    return self.val == other.val
+
+def fromLeft(l):
+  if not isinstance(l, Left):
+    raise Exception("Item is not a Left: " + str(l))
+  return l.val
+
+def fromRight(r):
+  if not isinstance(r, Right):
+    raise Exception("Item is not a Right: " + str(r))
+  return r.val
+
 # --- shape-signature bucketing (Component 1) ---------------------------------
 # `bucketed(fn, samples, *args)` is the host wrapper the design calls for:
 #
@@ -265,6 +301,22 @@ def signature(v):
     return ('L',) + tuple(signature(x) for x in v)
   if isinstance(v, T):
     return ('T', signature(v.t1), signature(v.t2))
+  if isinstance(v, Left):
+    return ('L?', signature(v.val))
+  if isinstance(v, Right):
+    return ('R?', signature(v.val))
+  # An ADT value: the constructor tag *and* the field shapes. The tag must be
+  # part of the key -- two constructors of the same arity are different
+  # structures, and merging them into one bucket would run the wrong arm.
+  # An ADT value (every emitted constructor class sets _fields, empty for a
+  # nullary one): the constructor tag *and* the field shapes. The tag must be
+  # part of the key -- two constructors of the same arity are different
+  # structures, and merging them into one bucket would run the wrong arm.
+  # Unexercised by the corpus today: the .tst value parser has no ADT literal,
+  # so no corpus program can have an ADT-valued *sample*. It is here so that
+  # such a sample would bucket correctly rather than silently merge.
+  if hasattr(v, '_fields'):
+    return ('A', type(v).__name__) + tuple(signature(f) for f in v._fields)
   return 'x'
 
 def bucket_count(samples):
@@ -278,6 +330,13 @@ def _pack(vs):
     return toList([_pack([s[i] for s in vs]) for i in range(len(head))])
   if isinstance(head, T):
     return T(_pack([s.t1 for s in vs]), _pack([s.t2 for s in vs]))
+  if hasattr(head, '_fields'):
+    return type(head)(*[_pack([s._fields[i] for s in vs])
+                        for i in range(len(head._fields))])
+  if isinstance(head, Left):
+    return Left(_pack([s.val for s in vs]))
+  if isinstance(head, Right):
+    return Right(_pack([s.val for s in vs]))
   if torch.is_tensor(head) and head.dim() > 0:
     return torch.stack([astensor(v) for v in vs])
   if isinstance(head, bool):
@@ -301,6 +360,11 @@ def _scatter(parts, idxs, total):
              _scatter([p.t2 for p in parts], idxs, total))
   if isinstance(head, InferenceList):
     return toList([_scatter([p[i] for p in parts], idxs, total) for i in range(len(head))])
+  if isinstance(head, (Left, Right)):
+    return type(head)(_scatter([p.val for p in parts], idxs, total))
+  if hasattr(head, '_fields'):
+    return type(head)(*[_scatter([p._fields[i] for p in parts], idxs, total)
+                        for i in range(len(head._fields))])
   out = None
   for p, idx in zip(parts, idxs):
     t = astensor(p)

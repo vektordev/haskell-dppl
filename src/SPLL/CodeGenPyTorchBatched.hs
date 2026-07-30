@@ -17,13 +17,14 @@
 -- assignments ending in a @return@.
 --
 -- Only the /tensor fragment/ is supported (design "Scope"): float/int/bool
--- leaves in fixed-shape tuples, no ADTs / Either dispatch / @VAny@ marginals. A
+-- leaves in fixed-shape tuples, no @VAny@ marginals. A
 -- program outside it is refused at compile time with a diagnostic naming the
 -- offending construct ('batchedGuard'), in the style of the set-valued-witness
 -- refusals.
 --
--- Lists and structure-directed recursion /are/ in the fragment, via design
--- heterogeneous-batch-inference (M1): the host bucketing wrapper
+-- Lists, @Either@ arms, ADT constructors and structure-directed recursion /are/
+-- in the fragment, via design heterogeneous-batch-inference (M1 lists, M2
+-- constructor tags): the host bucketing wrapper
 -- (@pythonLibBatched.bucketed@) partitions a batch by structural signature
 -- before calling the kernel, so within one call the shape is uniform. That
 -- turns every shape-directed test into a plain Python bool, which this backend
@@ -41,7 +42,7 @@ module SPLL.CodeGenPyTorchBatched
   ) where
 
 import SPLL.IntermediateRepresentation
-import SPLL.Lang.Types (CompilerError, GenericValue(..), GenericList(..), MultiValue(..))
+import SPLL.Lang.Types (CompilerError, GenericValue(..), GenericList(..), MultiValue(..), ADTDecl(..))
 import SPLL.Lang.Lang (multiValueToValueList)
 import SPLL.CodeGenPyTorch (envToLUT, replaceCalls)
 import Data.Char (toUpper)
@@ -78,10 +79,7 @@ import Control.Monad.State (State, evalState, get, put)
 -- Accepted per Viktor (2026-07-22) as the honest cost of a hard, uniform
 -- contract, rather than special-casing the stub back in for this one shape.
 generateFunctionsBatched :: Bool -> IREnv -> Either CompilerError [String]
-generateFunctionsBatched genBoil env@(IREnv funcs adts consts)
-  | not (null adts) =
-      Left "batched mode: ADT declarations are not in the tensor fragment (no tensor representation for constructor-tagged values)."
-  | otherwise = do
+generateFunctionsBatched genBoil env@(IREnv funcs adts consts) = do
       let lut = envToLUT env
           -- Every group's generate method, raw (pre-rename) name and body: the
           -- self-contained recursion check ('hasGenCycle') walks these
@@ -92,9 +90,12 @@ generateFunctionsBatched genBoil env@(IREnv funcs adts consts)
           -- calls ('attachBatchCalls'), which runs after the same renaming.
           genArities = [ (fromMaybe raw (lookup raw lut), length (fst (unwrapLambdas e))) | (raw, e) <- genRaw ]
       () <- checkCallGraph funcs
-      classes <- mapM (generateClass lut genArities genRaw) funcs
+      -- Every ADT constructor name, so the dichotomy guard can recognise a
+      -- constructor-tagged value as *structure* (M2).
+      let ctorNames = [ cn | d <- adts, (cn, _) <- constructors d ]
+      classes <- mapM (generateClass ctorNames lut genArities genRaw) funcs
       constLines <- mapM renderConst consts
-      let body = constLines
+      let body = generateADTClassesBatched adts ++ constLines
              ++ (if null consts then [] else [""])
              ++ concat classes
              ++ ["", "# Example Initialization"]
@@ -105,6 +106,36 @@ generateFunctionsBatched genBoil env@(IREnv funcs adts consts)
              , "import math"
              , "from torch.nn import Module", "" ] ++ body
         else body
+
+-- | The batched twin of 'SPLL.CodeGenPyTorch.generateADTClasses': one Python
+-- class per constructor, plus its @is\<Ctor\>@ predicate and field accessors.
+-- The constructor tag is structure (part of the bucket signature, uniform
+-- within a kernel call), so the predicate answers a plain Python bool; the
+-- fields are @[B]@ tensors, so @__eq__@ is elementwise like @T.__eq__@ -- except
+-- on a tag mismatch, which is structural and answers a Python @False@.
+generateADTClassesBatched :: [ADTDecl] -> [String]
+generateADTClassesBatched decls = concatMap one (concatMap constructors decls)
+  where
+    one (name, fieldDecls) =
+      let fields = map fst fieldDecls in
+      ["class " ++ name ++ ":"]
+      ++ indentOnce (("def __init__(self" ++ concatMap (", " ++) fields ++ "):")
+           : indentOnce (map (\f -> "self." ++ f ++ " = " ++ f) fields
+                         -- Always set _fields, even when empty: the bucketing
+                         -- wrapper uses its presence to recognise a
+                         -- constructor-tagged value, and a nullary constructor
+                         -- is pure tag with nothing to pack.
+                         ++ ["self._fields = [" ++ intercalate ", " fields ++ "]"]))
+      ++ [""]
+      ++ indentOnce ("def __eq__(self, other):"
+           : indentOnce (("if not isinstance(other, " ++ name ++ "): return False")
+               : [if null fields then "return True"
+                  else "return " ++ intercalate " & "
+                         [ "(self." ++ f ++ " == other." ++ f ++ ")" | f <- fields ]]))
+      ++ [""]
+      ++ ["def is" ++ name ++ "(x):"] ++ indentOnce ["return isinstance(x, " ++ name ++ ")"]
+      ++ concatMap (\f -> ("def " ++ f ++ "(x):") : indentOnce ["return x." ++ f]) fields
+      ++ [""]
 
 -- | Render a top-level constant binding, refusing one whose shape has no
 -- batched representation ('batchedVal').
@@ -121,11 +152,11 @@ renderConst (n, v) = case batchedVal v of
 -- (task neural-generate-parity: generate's ineligibility used to degrade to a
 -- runtime-raising stub per class, M4; it is now a compile-time refusal like
 -- forward/integrate, see 'renderGen').
-generateClass :: [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> IRFunGroup -> Either CompilerError [String]
-generateClass lut genArities genMethods (IRFunGroup name gen prob integ _ _ doc) = do
-  p <- maybe (Right []) (generateMethod lut "forward" name) prob
-  i <- maybe (Right []) (generateMethod lut "integrate" name) integ
-  g <- maybe (Right []) (renderGen lut genArities genMethods name) gen
+generateClass :: [String] -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> IRFunGroup -> Either CompilerError [String]
+generateClass ctors lut genArities genMethods (IRFunGroup name gen prob integ _ _ doc) = do
+  p <- maybe (Right []) (generateMethod ctors lut "forward" name) prob
+  i <- maybe (Right []) (generateMethod ctors lut "integrate" name) integ
+  g <- maybe (Right []) (renderGen ctors lut genArities genMethods name) gen
   let commentLines = map ("# " ++) (lines doc)
       initLine = "class " ++ onHead toUpper name ++ "(Module):"
       -- A group with none of forward/integrate/generate (e.g. a tuple
@@ -142,11 +173,11 @@ generateClass lut genArities genMethods (IRFunGroup name gen prob integ _ _ doc)
 -- query-type guard and any @isAny@ marginal branches (batched v1 excludes
 -- @VAny@), check the residue lies in the tensor fragment, then render it as a
 -- let-spine ending in a @return@.
-generateMethod :: [(String, String)] -> String -> String -> IRFunDecl -> Either CompilerError [String]
-generateMethod lut methodName groupName (expr0, doc) = do
+generateMethod :: [String] -> [(String, String)] -> String -> String -> IRFunDecl -> Either CompilerError [String]
+generateMethod ctors lut methodName groupName (expr0, doc) = do
   let expr = irMap (replaceCalls lut) expr0
       (args, body) = unwrapLambdas (prepBatchedBody expr)
-  () <- batchedGuard groupName methodName body
+  () <- batchedGuard ctors groupName methodName body
   let l1 = "def " ++ methodName ++ "(self" ++ concatMap (", " ++) args ++ "):"
       docLines = map ("# " ++) (lines doc)
   return $ docLines ++ [l1] ++ indentOnce (batchedBlock [] body)
@@ -214,8 +245,8 @@ batchNVar = "_batchN"
 --      as forward/integrate): lists, ADTs, Either dispatch (including a
 --      neural decoder's own 'EitherPlan'/'ADTPlan' output shape -- see the
 --      header comment above), etc.
-renderGen :: [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> String -> IRFunDecl -> Either CompilerError [String]
-renderGen lut genArities genRaw groupName (expr0, doc)
+renderGen :: [String] -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> String -> IRFunDecl -> Either CompilerError [String]
+renderGen ctors lut genArities genRaw groupName (expr0, doc)
   | hasGenCycle genRaw (groupName ++ "_gen") =
       if producesList (lookup (groupName ++ "_gen") genRaw)
         then Right (heterogeneousGenStub groupName)
@@ -225,16 +256,23 @@ renderGen lut genArities genRaw groupName (expr0, doc)
   | otherwise =
       let expr = irMap (attachBatchCall genArities . replaceCalls lut) expr0
           (args, body) = unwrapLambdas (prepBatchedBody expr)
-      in do
-           () <- batchedGuard groupName "generate" body
-           let l1 = "def generate(self" ++ concatMap (", " ++) (args ++ [batchNVar]) ++ "):"
-               docLines = map ("# " ++) (lines doc)
-           Right (docLines ++ [l1] ++ indentOnce (batchedBlock [] body))
+      in case batchedGuard ctors groupName "generate" body of
+           -- Drawing a *structurally heterogeneous* sample -- a value-dependent
+           -- branch between two shapes -- is the same Component 4 situation as
+           -- the recursive list case above: the shapes are the output, so there
+           -- is nothing to bucket on. Stub it rather than refusing the whole
+           -- program, whose inference over such samples buckets fine.
+           Left why | structureBranch ctors body -> Right (heterogeneousGenStub groupName)
+                    | otherwise                 -> Left why
+           Right () ->
+             let l1 = "def generate(self" ++ concatMap (", " ++) (args ++ [batchNVar]) ++ "):"
+                 docLines = map ("# " ++) (lines doc)
+             in Right (docLines ++ [l1] ++ indentOnce (batchedBlock [] body))
 
--- | A recursive generate that builds a /list/ is the one recursion whose depth
--- is genuinely per element: each drawn sample decides on its own how many
--- elements it has, so there is no bucket to run it in — the batch's shapes are
--- the *output*, not an input to partition on. That is design
+-- | A generate that draws a /structurally heterogeneous/ sample -- a recursion
+-- that builds a list, or a value-dependent branch between two shapes -- is the
+-- one case where the batch's shapes are the *output* rather than an input to
+-- partition on, so there is no bucket to run it in. That is design
 -- heterogeneous-batch-inference's Component 4 (per-element dynamic iteration),
 -- explicitly deferred there pending a driving program.
 --
@@ -248,14 +286,26 @@ renderGen lut genArities genRaw groupName (expr0, doc)
 heterogeneousGenStub :: String -> [String]
 heterogeneousGenStub groupName =
   [ "# Batched generate for " ++ groupName ++ " is not available: it draws a"
-  , "# structurally heterogeneous (list-shaped) sample, whose per-element"
-  , "# recursion depth is design heterogeneous-batch-inference Component 4."
+  , "# structurally heterogeneous sample (its shape is decided per element), which"
+  , "# is design heterogeneous-batch-inference Component 4. Inference *over* such"
+  , "# samples batches fine -- the bucketing wrapper partitions by shape -- but"
+  , "# drawing them cannot, because the shapes are the output."
   , "def generate(self, *args, **kwargs):"
   , "    raise NotImplementedError(\"batched generate: " ++ groupName
-      ++ " produces a structurally heterogeneous (list-shaped) sample; \""
-  , "                              \"batched generate over heterogeneous output is "
-      ++ "design heterogeneous-batch-inference Component 4 (per-element dynamic iteration).\")"
+      ++ " draws a structurally heterogeneous sample \""
+  , "                              \"(list length / constructor tag decided per element); that is design "
+      ++ "heterogeneous-batch-inference Component 4 (per-element dynamic iteration).\")"
   ]
+
+-- | Does this body contain a /value-dependent/ branch whose arms have different
+-- structure -- the shape the dichotomy guard refuses? In a generate body that
+-- means the drawn sample's structure is itself random.
+structureBranch :: [String] -> IRExpr -> Bool
+structureBranch ctors e = here e || any (structureBranch ctors) (getIRSubExprs e)
+  where here (IRSelect _ t f) = listValued ctors t || listValued ctors f
+        here (IRIf c t f)     = not (structural [] c)
+                             && (listValued ctors t || listValued ctors f)
+        here _                = False
 
 -- | Does this generate body construct a list?
 producesList :: Maybe IRExpr -> Bool
@@ -435,6 +485,10 @@ structural :: SEnv -> IRExpr -> Bool
 structural env e = case e of
   IRConst _         -> True
   IRVar n           -> n `elem` env
+  -- An Either tag test is pure structure: which arm a value is in is part of
+  -- its signature, so it is uniform across a bucket (M2).
+  IRIsLeft _        -> True
+  IRIsRight _       -> True
   IROp OpEq a b     -> isEmptyListConst a || isEmptyListConst b
   IROp OpAnd a b    -> structural env a && structural env b
   IROp OpOr  a b    -> structural env a && structural env b
@@ -452,21 +506,30 @@ isEmptyListConst :: IRExpr -> Bool
 isEmptyListConst (IRConst (VList EmptyList)) = True
 isEmptyListConst _                           = False
 
--- | Does this expression evaluate to a /list/? Used by the dichotomy guard: a
+-- | Does this expression evaluate to a /structure/ (a list or an @Either@ arm)?
+-- Used by the dichotomy guard: a
 -- per-element branch (a select, or a residual value-dependent 'IRIf') may not
 -- choose between two structures, because @torch.where@ has nothing to select
 -- with -- that is precisely the "structure-dependent branching" the bucketing
 -- wrapper exists to eliminate, and a program that still contains one after
 -- bucketing is outside the fragment.
-listValued :: IRExpr -> Bool
-listValued e = case e of
-  IRCons{}          -> True
-  IRTail{}          -> True
-  IRConst (VList _) -> True
-  IRLetIn _ _ b     -> listValued b
-  IRIf _ t f        -> listValued t || listValued f
-  IRSelect _ t f    -> listValued t || listValued f
-  _                 -> False
+listValued :: [String] -> IRExpr -> Bool
+listValued ctors e = case e of
+  IRCons{}            -> True
+  IRTail{}            -> True
+  IRConst (VList _)   -> True
+  IRLeft{}            -> True
+  IRRight{}           -> True
+  IRConst (VEither _) -> True
+  IRLetIn _ _ b       -> listValued ctors b
+  IRIf _ t f          -> listValued ctors t || listValued ctors f
+  IRSelect _ t f      -> listValued ctors t || listValued ctors f
+  IRConst (VADT _ _)  -> True
+  -- An ADT constructor: a bare nullary one (`Heads`) is a reference to the
+  -- emitted class, an applied one is a call to it. Either way it builds a
+  -- constructor-tagged value, which is structure.
+  _ | (IRVar n, _) <- collectApplyChain e -> n `elem` ctors
+  _                   -> False
 
 -- | Lift every structural 'IRIf' out of expression position into a @let@-bound
 -- temporary at the nearest enclosing statement position, so the emitter can
@@ -647,8 +710,8 @@ allVarNames e = [n | IRVar n <- [e]] ++ concatMap allVarNames (getIRSubExprs e)
 -- with a diagnostic naming the first offender. Runs on the already-prepared
 -- body (guard/isAny stripped), so the only nodes it should see are the ones
 -- 'batchedExpr' knows how to emit.
-batchedGuard :: String -> String -> IRExpr -> Either CompilerError ()
-batchedGuard groupName methodName body =
+batchedGuard :: [String] -> String -> String -> IRExpr -> Either CompilerError ()
+batchedGuard ctors groupName methodName body =
   case offenders [] body of
     []      -> Right ()
     (why:_) -> Left $
@@ -669,9 +732,9 @@ batchedGuard groupName methodName body =
     -- is value-dependent has no tensor form at all (torch.where cannot select
     -- between lists of different length), so it is refused here rather than
     -- emitted as something that dies at run time.
-    structureSelect _   (IRSelect _ t f) = listValued t || listValued f
+    structureSelect _   (IRSelect _ t f) = listValued ctors t || listValued ctors f
     structureSelect env (IRIf c t f)     = not (structural env c)
-                                        && (listValued t || listValued f)
+                                        && (listValued ctors t || listValued ctors f)
     structureSelect _   _                = False
     structureSelectReason =
       "a value-dependent branch (select) whose arms have different structure; "
@@ -709,6 +772,15 @@ emittable e = case e of
   IRHead{}       -> True
   IRTail{}       -> True
   IRCons{}       -> True
+  -- Either dispatch (M2): the tag is part of the shape signature, so within a
+  -- bucket `isinstance(x, Left)` is a bucket-uniform Python bool and the arm
+  -- accessor is always the legal one.
+  IRIsLeft{}     -> True
+  IRIsRight{}    -> True
+  IRFromLeft{}   -> True
+  IRFromRight{}  -> True
+  IRLeft{}       -> True
+  IRRight{}      -> True
   _              -> False
 
 -- | Render a constant as batched Python, or 'Nothing' if its shape has no
@@ -745,6 +817,10 @@ batchedVal (VBool b)  = Just (if b then "True" else "False")
 -- the enumeration `SPLL.AutoNeural.indexOf` builds over, see task
 -- batched-bool-enum-index) that the batched runtime has no reader for.
 batchedVal (VList EmptyList) = Just "EmptyInferenceList()"
+-- An Either constant is a tag plus a payload: the tag is structure (uniform
+-- across the bucket), the payload is whatever it is (M2).
+batchedVal (VEither (Left v))  = ("Left("  ++) . (++ ")") <$> batchedVal v
+batchedVal (VEither (Right v)) = ("Right(" ++) . (++ ")") <$> batchedVal v
 batchedVal (VTuple a b) = do
   a' <- batchedVal a
   b' <- batchedVal b
@@ -783,20 +859,12 @@ scalarDiscreteMulti (MultiDiscretes vs) = not (null vs) && all isScalarV vs
 scalarDiscreteMulti _ = False
 
 -- | A human-readable name for an unsupported node, for the refusal diagnostic.
+-- Only nodes 'emittable' rejects can reach here, so there is no row for the
+-- list/Either constructs heterogeneous M1/M2 admitted.
 reason :: IRExpr -> String
 reason e = case e of
-  IRCons{}        -> "list construction (IRCons)"
-  IRHead{}        -> "list head (IRHead)"
-  IRTail{}        -> "list tail (IRTail)"
   IRMap{}         -> "list map (IRMap)"
-  IRIndex{}       -> "list index (IRIndex)"
   IRElementOf{}   -> "list membership (IRElementOf)"
-  IRLeft{}        -> "Either constructor (IRLeft)"
-  IRRight{}       -> "Either constructor (IRRight)"
-  IRFromLeft{}    -> "Either destructor (IRFromLeft)"
-  IRFromRight{}   -> "Either destructor (IRFromRight)"
-  IRIsLeft{}      -> "Either predicate (IRIsLeft)"
-  IRIsRight{}     -> "Either predicate (IRIsRight)"
   IRApply{}       -> "function application (IRApply); a call did not inline"
   IRLambda{}      -> "inner lambda (IRLambda)"
   IRIsPossible{}  -> "membership check (IRIsPossible) over a non-scalar enumeration"
@@ -943,6 +1011,14 @@ batchedExpr env (IRHead e)   = "(" ++ batchedExpr env e ++ ")[0]"
 batchedExpr env (IRTail e)   = "(" ++ batchedExpr env e ++ ")[1:]"
 batchedExpr env (IRCons a b) =
   "ConsInferenceList(" ++ batchedExpr env a ++ ", " ++ batchedExpr env b ++ ")"
+-- Either: the same forms the scalar backend emits. The tag test is structural,
+-- so it only ever ends up in a Python `if`, never in a torch.where mask.
+batchedExpr env (IRLeft e)      = "Left(" ++ batchedExpr env e ++ ")"
+batchedExpr env (IRRight e)     = "Right(" ++ batchedExpr env e ++ ")"
+batchedExpr env (IRFromLeft e)  = "fromLeft(" ++ batchedExpr env e ++ ")"
+batchedExpr env (IRFromRight e) = "fromRight(" ++ batchedExpr env e ++ ")"
+batchedExpr env (IRIsLeft e)    = "isinstance(" ++ batchedExpr env e ++ ", Left)"
+batchedExpr env (IRIsRight e)   = "isinstance(" ++ batchedExpr env e ++ ", Right)"
 -- A refusal/error arm has no batched value; emit a NaN poison constant that the
 -- enclosing torch.where selects away (design M3). A poison that survives into
 -- the output shows up as NaN, caught by the value differential.

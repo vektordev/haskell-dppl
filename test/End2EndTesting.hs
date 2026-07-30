@@ -586,21 +586,27 @@ batchedRefusalTable =
   -- batched-bool-enum-index) and IRMap.
   [ ("listLiteralDeconstruction", "constant with no batched representation (VList")
   , ("map",                       "list map (IRMap)")
-  -- Either: constructors, destructors, predicates
-  , ("either_const",              "Either constructor (IRLeft)")
-    -- like `list` above: an Either *constant* now out-races IRRight as the
-    -- first offender here, so IRRight's node-level control is synthetic too
-  , ("either_isleft",             "constant with no batched representation (VEither")
-  , ("nestedDeconstruction",      "Either destructor (IRFromLeft)")
-  , ("eitherDeconstruction",      "Either destructor (IRFromRight)")
-  , ("either",                    "Either predicate (IRIsLeft)")
-  , ("either_fromLeft",           "Either predicate (IRIsRight)")
+  -- Either. Since heterogeneous M2 the tag is *structure*: it is part of the
+  -- bucket signature, so the constructors, destructors and predicates are all
+  -- in the fragment (`either`, `either_const`, `eitherDeconstruction`,
+  -- `nestedDeconstruction`, `either_both_cont` are eligible programs now). What
+  -- is refused is the dichotomy's other half -- `either_isleft` chooses which
+  -- *arm* to build from a coin flip (`if Uniform < 0.4 then left .. else
+  -- right ..`), so the sample's structure is per element and there is no bucket
+  -- to run it in.
+  , ("either_isleft",             "arms have different structure")
   -- a neural decoder's own Either-shaped output: the refused method is a
   -- decoder group's forward, not main's
   , ("eitherNeural",              "eitherNeural_auto's forward")
   -- ADT declarations: the bail at the top of 'generateFunctionsBatched'
-  , ("adt",                       "ADT declarations are not in the tensor fragment")
-  , ("adtNeuralCounting",         "ADT declarations are not in the tensor fragment")
+  -- ADTs. The declarations themselves are emittable since heterogeneous M2
+  -- (constructor tag = structure = part of the bucket signature), so `adtCoin`,
+  -- `recursiveAdt`, `planEnumInline`/`Wide` are eligible programs now. These two
+  -- are refused for an unrelated, pre-existing reason: their prob path evaluates
+  -- a deterministic argument by *generating* it, and generate is a separate
+  -- artifact batched mode does not call into.
+  , ("adt",                       "calls func_gen, which is not a forward/integrate method")
+  , ("adtNeuralCounting",         "calls countRed3_gen, which is not a forward/integrate method")
   -- prob/integ recursion. Structure-directed recursion is admitted since M1
   -- (its depth is uniform within a shape bucket, so it runs unchanged over [B]
   -- leaves -- `gaussList` is an eligible program now, checked in
@@ -663,7 +669,13 @@ data BatchGroup = BatchGroup
 batchGroups :: Bool -> [TestCase] -> Maybe [BatchGroup]
 batchGroups isNeural tcs = mapM build grouped
   where
-    keyed = [ q | t <- tcs, Just q <- [asQuery t] ]
+    -- Marginal (ANY) query points are dropped rather than disqualifying the
+    -- whole program: batched v1 has no VAny representation at all (the compiler
+    -- prunes isAny to False, and design heterogeneous-batch-inference Component
+    -- 3 is the designated successor for batched marginals), so such a point is
+    -- simply not a batched query. Before this, one ANY point kept every *other*
+    -- point of that program out of the differential too.
+    keyed = [ q | t <- tcs, Just q@(_, _, sm, _, _) <- [asQuery t], not (containsAnyV sm) ]
     grouped
       | isNeural  = groupBy ((==) `on` (\(c, _, _, _, _) -> c)) keyed
       | otherwise = groupBy ((==) `on` (\(c, ps, _, _, _) -> (c, show ps))) keyed
@@ -741,29 +753,35 @@ data SampleBatch
 batchSamples :: [IRValue] -> Maybe SampleBatch
 batchSamples vs
   | any containsAnyV vs  = Nothing
-  | any containsListV vs =
+  | any containsStructureV vs =
       Just (Bucketed ("[" ++ intercalate ", " (map pyVal vs) ++ "]")
                      (length (nub (map shapeSig vs))))
   | otherwise            = SoA <$> batchLiteral vs
 
-containsListV :: IRValue -> Bool
-containsListV (VList _)    = True
-containsListV (VTuple a b) = containsListV a || containsListV b
-containsListV _            = False
+-- | Does this sample carry structure a batch can differ in — a list length or
+-- an Either tag? Such a group goes through the bucketing wrapper.
+containsStructureV :: IRValue -> Bool
+containsStructureV (VList _)    = True
+containsStructureV (VEither _)  = True
+containsStructureV (VTuple a b) = containsStructureV a || containsStructureV b
+containsStructureV _            = False
 
 containsAnyV :: IRValue -> Bool
 containsAnyV VAny           = True
 containsAnyV (VAnyExcept _) = True
 containsAnyV (VList l)      = any containsAnyV (toList l)
+containsAnyV (VEither e)    = either containsAnyV containsAnyV e
 containsAnyV (VTuple a b)   = containsAnyV a || containsAnyV b
 containsAnyV _              = False
 
 -- | The Haskell twin of @pythonLibBatched.signature@: the sample's structural
 -- skeleton with every scalar leaf erased. Used only to predict the bucket count.
 shapeSig :: IRValue -> String
-shapeSig (VList l)    = "L(" ++ intercalate "," (map shapeSig (toList l)) ++ ")"
-shapeSig (VTuple a b) = "T(" ++ shapeSig a ++ "," ++ shapeSig b ++ ")"
-shapeSig _            = "x"
+shapeSig (VList l)            = "L(" ++ intercalate "," (map shapeSig (toList l)) ++ ")"
+shapeSig (VTuple a b)         = "T(" ++ shapeSig a ++ "," ++ shapeSig b ++ ")"
+shapeSig (VEither (Left v))   = "L?(" ++ shapeSig v ++ ")"
+shapeSig (VEither (Right v))  = "R?(" ++ shapeSig v ++ ")"
+shapeSig _                    = "x"
 
 -- | Build a structure-of-arrays batch tensor literal from a homogeneous list of
 -- sample values: numeric leaves stack into a float tensor, bools into a bool
@@ -838,7 +856,7 @@ batchedDriver accArg eligible = unlines $
   [ "import torch, sys, traceback"
   -- T for structure-of-arrays tuple sample batches; the list constructors and
   -- the bucketing wrapper for heterogeneous (list-shaped) samples.
-  , "from pythonLibBatched import T, ConsInferenceList, EmptyInferenceList, bucketed, bucket_count"
+  , "from pythonLibBatched import T, ConsInferenceList, EmptyInferenceList, Left, Right, bucketed, bucket_count"
   , "TOL = " ++ show probTolerance
   , "failures = []"
   , "def _bucket_count(name, samples, expected):"
@@ -1205,7 +1223,12 @@ generateDriver nonNeuralProbes neuralProbes = unlines $
       , "        checked += 1"
       ] ++
       concatMap (pointCheck name "_btd") points ++
-      [ "except Exception as _e:"
+      -- A generate that is a declared stub (a structurally heterogeneous draw,
+      -- design heterogeneous-batch-inference Component 4) is a skip, not a
+      -- failure -- the same treatment as the arity mismatch above.
+      [ "except NotImplementedError:"
+      , "    skipped += 1"
+      , "except Exception as _e:"
       , "    failures.append(" ++ show name ++ " + ': exception ' + repr(_e) + '\\n' + traceback.format_exc())"
       ]
     -- Each point supplies its own decoder symbol (a row of the group's [B, n]
@@ -1226,7 +1249,12 @@ generateDriver nonNeuralProbes neuralProbes = unlines $
       , "    else:"
       ] ++
       concatMap (neuralPointCheck name paramExprs) points ++
-      [ "except Exception as _e:"
+      -- A generate that is a declared stub (a structurally heterogeneous draw,
+      -- design heterogeneous-batch-inference Component 4) is a skip, not a
+      -- failure -- the same treatment as the arity mismatch above.
+      [ "except NotImplementedError:"
+      , "    skipped += 1"
+      , "except Exception as _e:"
       , "    failures.append(" ++ show name ++ " + ': exception ' + repr(_e) + '\\n' + traceback.format_exc())"
       ]
     neuralPointCheck name paramExprs (xExpr, expProb, expDim, rowIx) =
