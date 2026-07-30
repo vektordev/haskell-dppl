@@ -11,6 +11,7 @@ import System.Process
 import System.Exit
 import Data.List (groupBy)
 import Data.Function (on)
+import Control.Monad (zipWithM)
 import Control.Monad.Random
 import System.Random (mkStdGen)
 import Data.Maybe
@@ -421,6 +422,7 @@ batchedPythonTests = do
                  , Right srcLines <- [generateFunctionsBatched True env]
                  , Just groups <- [batchGroups (not (null netNames)) qtcs]
                  , let src = intercalate "\n" srcLines ]
+      topkEligible = topKEntries entries
   mpy <- findTorchPython
   return $ testGroup "BatchedPython" $ case mpy of
     Nothing ->
@@ -431,7 +433,8 @@ batchedPythonTests = do
       [ testProperty "batched-vs-expected" (once (runBatchedPython py eligible))
       , testProperty "refusal-diagnostic" (once (ioProperty (return refusalProp)))
       , testProperty "gradients-nan-free" (once (runBatchedGradients py eligible))
-      , testProperty "generate-density-matches-expected" (once (runBatchedGenerate py eligible)) ]
+      , testProperty "generate-density-matches-expected" (once (runBatchedGenerate py eligible))
+      , testProperty "topk-is-per-element" (once (runBatchedTopK py topkEligible)) ]
 
 -- | The batched backend must refuse a program outside the tensor fragment with
 -- a diagnostic naming the offending construct. `list` (whose main,
@@ -455,6 +458,10 @@ refusalProp = ioProperty $ do
 data BatchGroup = BatchGroup
   { bgIsCumul    :: Bool
   , bgParamExprs :: [String]
+  -- | The raw positional arguments of each point, in sample order — what the
+  -- Python-side 'bgParamExprs' were built from. Kept so the topK differential
+  -- can re-run the same points through the interpreter for ground truth.
+  , bgParamRows  :: [[IRValue]]
   , bgSamples    :: [IRValue]
   , bgExpProb    :: [Double]
   , bgExpDim     :: [Double]
@@ -480,7 +487,8 @@ batchGroups isNeural tcs = mapM build grouped
             paramExprs <- if isNeural
               then batchSymParamCols paramRows
               else Just (map pyVal (head paramRows))
-            Just BatchGroup { bgIsCumul = c, bgParamExprs = paramExprs, bgSamples = samples
+            Just BatchGroup { bgIsCumul = c, bgParamExprs = paramExprs
+                            , bgParamRows = paramRows, bgSamples = samples
                             , bgExpProb = [ep | (_, _, _, ep, _) <- g]
                             , bgExpDim  = [ed | (_, _, _, _, ed) <- g] }
     build [] = Nothing
@@ -581,7 +589,7 @@ runBatchedPython py eligible = ioProperty $ do
   -- temp file puts its own directory (not cwd) on sys.path, so prepend the
   -- project root explicitly so `pythonLibBatched` resolves.
   cwd <- getCurrentDirectory
-  let script = "import sys\nsys.path.insert(0, " ++ show cwd ++ ")\n" ++ batchedDriver eligible
+  let script = "import sys\nsys.path.insert(0, " ++ show cwd ++ ")\n" ++ batchedDriver False eligible
   (code, out, err) <- withSystemTempFile "batched_diff.py" $ \tmpPath tmpHandle -> do
     hPutStr tmpHandle script
     hClose tmpHandle
@@ -594,8 +602,8 @@ runBatchedPython py eligible = ioProperty $ do
 -- (torch imported once), run every batched group, and exit non-zero listing any
 -- element whose prob (or dim, where prob is non-zero) disagrees with the corpus
 -- expectation beyond 'probTolerance'.
-batchedDriver :: [(String, String, [BatchGroup], [String])] -> String
-batchedDriver eligible = unlines $
+batchedDriver :: Bool -> [(String, String, [BatchGroup], [String])] -> String
+batchedDriver accArg eligible = unlines $
   [ "import torch, sys, traceback"
   , "from pythonLibBatched import T"  -- for structure-of-arrays tuple sample batches
   , "TOL = " ++ show probTolerance
@@ -635,14 +643,106 @@ batchedDriver eligible = unlines $
       [ "except Exception as _e:"
       , "    failures.append(" ++ show name ++ " + ': exception ' + repr(_e) + '\\n' + traceback.format_exc())"
       ]
-    groupCall name (BatchGroup isCumul paramExprs samples expP expD) =
+    groupCall name (BatchGroup isCumul paramExprs _ samples expP expD) =
       let method = if isCumul then "integrate" else "forward"
           xs = case batchLiteral samples of Just s -> s; Nothing -> "None"
+          -- A topK-compiled prob function takes an accumulated-probability
+          -- parameter right after the sample (see 'compiledWithTopK'); seed it
+          -- with 1.0 at the query root, exactly as the interpreter driver does.
+          accStr = if accArg && not isCumul then ", 1.0" else ""
           paramStr = concatMap (", " ++) paramExprs
-          call = "_main." ++ method ++ "(" ++ xs ++ paramStr ++ ")"
+          call = "_main." ++ method ++ "(" ++ xs ++ accStr ++ paramStr ++ ")"
       in [ "    _cmp(" ++ show name ++ ", " ++ show method ++ ", " ++ call
            ++ ", " ++ pyFloatList expP ++ ", " ++ pyFloatList expD ++ ")" ]
     pyFloatList xs = "[" ++ intercalate ", " (map show xs) ++ "]"
+
+-- ===========================================================================
+-- M5: topK under batched mode (design pytorch-tensorizer)
+-- ===========================================================================
+
+-- | The threshold the topK differential compiles with. Chosen so that pruning
+-- actually bites on part of the corpus (the property asserts that below), while
+-- leaving enough programs unpruned that the "identical to scalar" direction is
+-- exercised too.
+topKDiffThresholds :: [Double]
+topKDiffThresholds = [0.3, 0.6]
+
+-- | Batched topK is /per element/: the pruning predicate
+-- (@acc_prob * p_cond < TOP_K_CUTOFF@) is a @[B]@ mask feeding a @torch.where@,
+-- so every batch element takes the same decision it would take alone in scalar
+-- mode. This test pins that, and would fail loudly if anyone ever switched to a
+-- per-batch rule (prune only when the whole batch agrees / on the batch max):
+-- the fixtures below deliberately contain batches whose elements disagree about
+-- which branches survive the cutoff, and under a per-batch rule the disagreeing
+-- elements would take the other decision.
+--
+-- Ground truth is the /interpreter/ run of the same program compiled with the
+-- same threshold in scalar mode — not the @.tst@ values, which are topK-off and
+-- would be wrong wherever pruning bites.
+--
+-- Restricted to prob queries: the integrate path takes no @acc_prob@ parameter
+-- and topK does not apply to it.
+-- Returns the driver entries plus the number of programs on which the threshold
+-- actually bites (some point's pruned value differs from its topK-off value) —
+-- the property asserts that is non-zero, so the differential can never quietly
+-- degenerate into "topK changed nothing anywhere".
+topKEntries :: [(String, Program, [TestCase])] -> ([(String, String, [BatchGroup], [String])], [String])
+topKEntries entries = (map fst built, nub [n | ((n, _, _, _), True) <- built])
+  where
+    built =
+      [ ((n ++ "@k=" ++ show thresh, src, groups', netNames), bites)
+      | thresh <- topKDiffThresholds
+      , let confK = defaultCompilerConfig{topKThreshold = Just thresh}
+      , (n, p, tcs) <- entries
+      , let qtcs = filter isProbTestCase tcs
+      , not (null qtcs)
+      , let netNames = [nm | (nm, _, _) <- neurals p]
+      , Right envK    <- [compile confK{batched = True}  p]
+      , Right envKint <- [compile confK{batched = False} p]
+      , Right env0    <- [compile defaultCompilerConfig p]
+      , Right srcLines <- [generateFunctionsBatched True envK]
+      , Just groups  <- [batchGroups (not (null netNames)) qtcs]
+      , Just groups' <- [mapM (retarget p envKint) groups]
+      , Just groups0 <- [mapM (retarget p env0) groups]
+      , let src = intercalate "\n" srcLines
+      , let bites = topKBites groups' groups0 ]
+    -- Replace the .tst expectations by what the scalar/interpreter pipeline
+    -- computes at the same threshold. A point the interpreter cannot evaluate
+    -- drops the whole program rather than being silently skipped.
+    retarget p env g = do
+      pts <- zipWithM (interpPoint p env) (bgParamRows g) (bgSamples g)
+      return g{bgExpProb = map fst pts, bgExpDim = map snd pts}
+    interpPoint p env params sample = case runProbC p env params sample of
+      Right (VProbDim pr d) -> Just (pr, d)
+      _                     -> Nothing
+
+-- | Whether a program's topK-pruned values actually differ from its topK-off
+-- values — i.e. whether the threshold bites at all on this program.
+topKBites :: [BatchGroup] -> [BatchGroup] -> Bool
+topKBites withK withoutK =
+  or [ abs (a - b) > probTolerance
+     | (gk, g0) <- zip withK withoutK, (a, b) <- zip (bgExpProb gk) (bgExpProb g0) ]
+
+runBatchedTopK :: FilePath -> ([(String, String, [BatchGroup], [String])], [String]) -> Property
+runBatchedTopK py (topkEligible, biting)
+  | null topkEligible = counterexample "BatchedPython topK: no eligible programs" False
+  | null biting = counterexample
+      ("BatchedPython topK: thresholds " ++ show topKDiffThresholds
+       ++ " prune nothing anywhere in the corpus -- the differential is vacuous") False
+  | otherwise = ioProperty $ do
+      hPutStrLn stderr ("BatchedPython topK: " ++ show (length topkEligible)
+                        ++ " program/threshold pairs over " ++ show topKDiffThresholds
+                        ++ " (pruning bites on " ++ intercalate ", " biting ++ "), via " ++ py)
+      cwd <- getCurrentDirectory
+      let script = "import sys\nsys.path.insert(0, " ++ show cwd ++ ")\n"
+                   ++ batchedDriver True topkEligible
+      (code, out, err) <- withSystemTempFile "batched_topk.py" $ \tmpPath tmpHandle -> do
+        hPutStr tmpHandle script
+        hClose tmpHandle
+        readProcessWithExitCode py [tmpPath] ""
+      return $ case code of
+        ExitSuccess   -> counterexample (out ++ err) True
+        ExitFailure _ -> counterexample ("Batched PyTorch topK differential failed:\n" ++ out ++ err) False
 
 -- ===========================================================================
 -- M3: gradient hygiene (design pytorch-tensorizer)
