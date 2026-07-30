@@ -17,24 +17,38 @@
 -- assignments ending in a @return@.
 --
 -- Only the /tensor fragment/ is supported (design "Scope"): float/int/bool
--- leaves in fixed-shape tuples, no lists / ADTs / Either dispatch / recursion /
--- @VAny@ marginals. A program outside it is refused at compile time with a
--- diagnostic naming the offending construct ('batchedGuard'), in the style of
--- the set-valued-witness refusals.
+-- leaves in fixed-shape tuples, no ADTs / Either dispatch / @VAny@ marginals. A
+-- program outside it is refused at compile time with a diagnostic naming the
+-- offending construct ('batchedGuard'), in the style of the set-valued-witness
+-- refusals.
+--
+-- Lists and structure-directed recursion /are/ in the fragment, via design
+-- heterogeneous-batch-inference (M1): the host bucketing wrapper
+-- (@pythonLibBatched.bucketed@) partitions a batch by structural signature
+-- before calling the kernel, so within one call the shape is uniform. That
+-- turns every shape-directed test into a plain Python bool, which this backend
+-- keeps as a real @if@ statement ('structural', 'hoistStructural') over
+-- structure-of-arrays data, and makes list recursion terminate at a
+-- bucket-uniform depth. What stays refused is the other half of the dichotomy:
+-- a *value*-dependent branch that chooses between structures, and
+-- value-dependent recursion ('recOffenders').
 module SPLL.CodeGenPyTorchBatched
   ( generateFunctionsBatched
   , batchedGuard
   , prepBatchedBody
+  , structural
+  , hoistStructural
   ) where
 
 import SPLL.IntermediateRepresentation
-import SPLL.Lang.Types (CompilerError, GenericValue(..), MultiValue(..))
+import SPLL.Lang.Types (CompilerError, GenericValue(..), GenericList(..), MultiValue(..))
 import SPLL.Lang.Lang (multiValueToValueList)
 import SPLL.CodeGenPyTorch (envToLUT, replaceCalls)
 import Data.Char (toUpper)
-import Data.List (intercalate, isSuffixOf)
+import Data.List (intercalate, isSuffixOf, nub)
 import Data.Maybe (fromMaybe, isJust)
 import Control.Monad (foldM)
+import Control.Monad.State (State, evalState, get, put)
 
 -- | Entry point mirroring 'SPLL.CodeGenPyTorch.generateFunctions', but for the
 -- batched backend and fallible: it runs the fragment guard over every emitted
@@ -135,7 +149,7 @@ generateMethod lut methodName groupName (expr0, doc) = do
   () <- batchedGuard groupName methodName body
   let l1 = "def " ++ methodName ++ "(self" ++ concatMap (", " ++) args ++ "):"
       docLines = map ("# " ++) (lines doc)
-  return $ docLines ++ [l1] ++ indentOnce (batchedBlock body)
+  return $ docLines ++ [l1] ++ indentOnce (batchedBlock [] body)
 
 unwrapLambdas :: IRExpr -> ([String], IRExpr)
 unwrapLambdas (IRLambda name rest) = (name : otherNames, plainTree)
@@ -203,9 +217,11 @@ batchNVar = "_batchN"
 renderGen :: [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> String -> IRFunDecl -> Either CompilerError [String]
 renderGen lut genArities genRaw groupName (expr0, doc)
   | hasGenCycle genRaw (groupName ++ "_gen") =
-      Left $ "batched mode: " ++ groupName ++ "'s generate function recurses (directly "
-        ++ "or through a call chain); data-dependent recursion is outside the tensor fragment "
-        ++ "(design pytorch-tensorizer) and both-arm-eager select semantics would not terminate."
+      if producesList (lookup (groupName ++ "_gen") genRaw)
+        then Right (heterogeneousGenStub groupName)
+        else Left $ "batched mode: " ++ groupName ++ "'s generate function recurses (directly "
+          ++ "or through a call chain); data-dependent recursion is outside the tensor fragment "
+          ++ "(design pytorch-tensorizer) and both-arm-eager select semantics would not terminate."
   | otherwise =
       let expr = irMap (attachBatchCall genArities . replaceCalls lut) expr0
           (args, body) = unwrapLambdas (prepBatchedBody expr)
@@ -213,7 +229,42 @@ renderGen lut genArities genRaw groupName (expr0, doc)
            () <- batchedGuard groupName "generate" body
            let l1 = "def generate(self" ++ concatMap (", " ++) (args ++ [batchNVar]) ++ "):"
                docLines = map ("# " ++) (lines doc)
-           Right (docLines ++ [l1] ++ indentOnce (batchedBlock body))
+           Right (docLines ++ [l1] ++ indentOnce (batchedBlock [] body))
+
+-- | A recursive generate that builds a /list/ is the one recursion whose depth
+-- is genuinely per element: each drawn sample decides on its own how many
+-- elements it has, so there is no bucket to run it in — the batch's shapes are
+-- the *output*, not an input to partition on. That is design
+-- heterogeneous-batch-inference's Component 4 (per-element dynamic iteration),
+-- explicitly deferred there pending a driving program.
+--
+-- This is the single, narrow exception to the hard-refusal rule task
+-- neural-generate-parity established (see 'generateFunctionsBatched'): without
+-- it, admitting list-valued *inference* (M1) would buy nothing, because every
+-- list-valued corpus program also has a generate function, and a whole-program
+-- refusal on it would keep the program out of batched mode entirely. It is
+-- scoped by construction to a recursion that constructs a list, so
+-- @twiceApplication@ (the accepted cost of the hard rule) is unaffected.
+heterogeneousGenStub :: String -> [String]
+heterogeneousGenStub groupName =
+  [ "# Batched generate for " ++ groupName ++ " is not available: it draws a"
+  , "# structurally heterogeneous (list-shaped) sample, whose per-element"
+  , "# recursion depth is design heterogeneous-batch-inference Component 4."
+  , "def generate(self, *args, **kwargs):"
+  , "    raise NotImplementedError(\"batched generate: " ++ groupName
+      ++ " produces a structurally heterogeneous (list-shaped) sample; \""
+  , "                              \"batched generate over heterogeneous output is "
+      ++ "design heterogeneous-batch-inference Component 4 (per-element dynamic iteration).\")"
+  ]
+
+-- | Does this generate body construct a list?
+producesList :: Maybe IRExpr -> Bool
+producesList Nothing  = False
+producesList (Just e) = go e
+  where go x = case x of
+          IRCons{}          -> True
+          IRConst (VList _) -> True
+          _                 -> any go (getIRSubExprs x)
 
 -- | Is there a cycle reachable from @root@ in the call graph restricted to
 -- generate methods (@_gen@-suffixed names only, mirroring 'checkCallGraph's
@@ -278,9 +329,12 @@ attachBatchCall _ e = e
 --      fold the now-constant selects away;
 --   3. push selects through tuple construction so every 'IRSelect' arm is a
 --      scalar tensor (a @torch.where@ cannot select whole Python @T@ objects).
+--   4. hoist structural (shape-directed) 'IRIf's out of expression positions,
+--      so each becomes a real Python @if@ statement (design
+--      heterogeneous-batch-inference, Component 1).
 prepBatchedBody :: IRExpr -> IRExpr
 prepBatchedBody (IRLambda n b) = IRLambda n (prepBatchedBody b)
-prepBatchedBody e = distributeSelects (foldConst (pruneAny (stripRootGuard e)))
+prepBatchedBody e = hoistStructural (distributeSelects (foldConst (pruneAny (stripRootGuard e))))
 
 -- | Strip a root query-type guard @if (sample conforms) then body else error@,
 -- taking the conforming arm. Leaves a guard-less body untouched.
@@ -345,6 +399,135 @@ projTuple True  e              = IRTFst e
 projTuple False e              = IRTSnd e
 
 -- ---------------------------------------------------------------------------
+-- Structural (shape-directed) control flow -- design
+-- heterogeneous-batch-inference, Component 1.
+--
+-- The tensorizer's dichotomy: *value*-dependent branching is per element and
+-- becomes a @torch.where@ (the select pass has already retagged those);
+-- *structure*-dependent branching -- "is this list empty?", "which constructor
+-- is this?" -- has no tensor representation at all. It does not need one:
+-- the host bucketing wrapper ('bucketed' in pythonLibBatched.py) partitions the
+-- batch by structural signature before calling the kernel, so within one call
+-- every sample has the same shape, every structural test has the same answer
+-- for the whole bucket, and it can stay ordinary Python control flow over
+-- structure-of-arrays data.
+--
+-- So the batched backend needs to *recognise* structural conditions, keep them
+-- as real @if@ statements, and refuse the shapes where the dichotomy does not
+-- hold (a value-dependent branch that chooses between different structures).
+-- ---------------------------------------------------------------------------
+
+-- | Names bound to a structurally-determined (batch-independent, Python-bool)
+-- value.
+type SEnv = [String]
+
+-- | Is this expression's value fixed by the sample's /shape/ alone, hence a
+-- plain Python value that is constant across a bucket?
+--
+-- The only primitive shape probe the compiler emits is a comparison against the
+-- empty-list constant (@sample == []@, @tail (tail sample) == []@) -- which the
+-- batched 'InferenceList.__eq__' answers with a Python bool precisely when the
+-- lengths differ or both are empty. Boolean combinations of those, constants,
+-- and previously-bound structural names are structural too. Everything else --
+-- notably any comparison against a *non-empty* list, which compares leaves
+-- elementwise -- is treated as per-element.
+structural :: SEnv -> IRExpr -> Bool
+structural env e = case e of
+  IRConst _         -> True
+  IRVar n           -> n `elem` env
+  IROp OpEq a b     -> isEmptyListConst a || isEmptyListConst b
+  IROp OpAnd a b    -> structural env a && structural env b
+  IROp OpOr  a b    -> structural env a && structural env b
+  IRUnaryOp OpNot a -> structural env a
+  IRLetIn n v b     -> structural (bindS env n v) b
+  _                 -> False
+
+-- | Extend the structural environment with a @let@ binding (shadowing a
+-- previously-structural name that is rebound to a per-element value).
+bindS :: SEnv -> String -> IRExpr -> SEnv
+bindS env n v | structural env v = nub (n : env)
+              | otherwise        = filter (/= n) env
+
+isEmptyListConst :: IRExpr -> Bool
+isEmptyListConst (IRConst (VList EmptyList)) = True
+isEmptyListConst _                           = False
+
+-- | Does this expression evaluate to a /list/? Used by the dichotomy guard: a
+-- per-element branch (a select, or a residual value-dependent 'IRIf') may not
+-- choose between two structures, because @torch.where@ has nothing to select
+-- with -- that is precisely the "structure-dependent branching" the bucketing
+-- wrapper exists to eliminate, and a program that still contains one after
+-- bucketing is outside the fragment.
+listValued :: IRExpr -> Bool
+listValued e = case e of
+  IRCons{}          -> True
+  IRTail{}          -> True
+  IRConst (VList _) -> True
+  IRLetIn _ _ b     -> listValued b
+  IRIf _ t f        -> listValued t || listValued f
+  IRSelect _ t f    -> listValued t || listValued f
+  _                 -> False
+
+-- | Lift every structural 'IRIf' out of expression position into a @let@-bound
+-- temporary at the nearest enclosing statement position, so the emitter can
+-- render it as a Python @if@ statement block. Arms of a structural @if@ are
+-- themselves statement positions, so nothing is ever hoisted /out/ of an arm --
+-- which matters: the arm's guard is often what makes evaluating it legal at all
+-- (@head sample@ under @if sample != []@).
+--
+-- Expressions containing no structural @if@ are returned untouched, so this is a
+-- no-op for every program in the original (non-heterogeneous) tensor fragment.
+hoistStructural :: IRExpr -> IRExpr
+hoistStructural top = evalState (stmt [] top) 0
+  where
+    -- Statement position: the binding forms keep their shape, everything else
+    -- collects hoisted bindings and wraps them around itself.
+    stmt :: SEnv -> IRExpr -> State Int IRExpr
+    stmt env (IRLambda n b)   = IRLambda n <$> stmt env b
+    stmt env (IRLetIn n v b)  = IRLetIn n <$> stmt env v <*> stmt (bindS env n v) b
+    stmt env (IRTCons a b)    = IRTCons <$> stmt env a <*> stmt env b
+    stmt env (IRIf c t f)
+      | structural env c      = IRIf c <$> stmt env t <*> stmt env f
+    stmt env e = do
+      (e', binds) <- expr env e
+      return (foldr (\(n, v) acc -> IRLetIn n v acc) e' binds)
+
+    -- Expression position: replace each structural if by a fresh name.
+    expr :: SEnv -> IRExpr -> State Int (IRExpr, [(String, IRExpr)])
+    expr env e
+      | not (hasStructuralIf env e) = return (e, [])
+      | hoistable = do
+          e' <- stmt env e
+          i  <- get
+          put (i + 1)
+          let n = "_hs" ++ show i
+          return (IRVar n, [(n, e')])
+      | otherwise = do
+          results <- mapM (expr env) (getIRSubExprs e)
+          return (rebuild e (map fst results), concatMap snd results)
+      where
+        -- A structural if is lifted whole; so is a let-binding spine containing
+        -- one, because lifting out of it would move the hoisted binding out of
+        -- the scope of the let's own name.
+        hoistable = case e of
+          IRIf c _ _ -> structural env c
+          IRLetIn{}  -> True
+          _          -> False
+
+    -- Put rewritten children back, in the order 'getIRSubExprs' produced them.
+    rebuild e subs = evalState (irDescendM (const pop) e) subs
+      where pop = do { xs <- get; case xs of { (y:ys) -> put ys >> return y; [] -> return (IRConst (VBool False)) } }
+
+-- | Does a structural 'IRIf' occur anywhere in this expression (with @let@
+-- scopes threaded, so a name bound to a shape probe counts)?
+hasStructuralIf :: SEnv -> IRExpr -> Bool
+hasStructuralIf env e = case e of
+  IRIf c t f | structural env c -> True
+             | otherwise        -> any (hasStructuralIf env) [c, t, f]
+  IRLetIn n v b -> hasStructuralIf env v || hasStructuralIf (bindS env n v) b
+  _             -> any (hasStructuralIf env) (getIRSubExprs e)
+
+-- ---------------------------------------------------------------------------
 -- Call-graph guard: recursion and non-emitted-method calls
 -- ---------------------------------------------------------------------------
 
@@ -364,18 +547,32 @@ projTuple False e              = IRTSnd e
 -- independently (per class, best-effort) rather than through this hard,
 -- whole-program graph -- see 'hasGenCycle' for its own, separate cycle check.
 checkCallGraph :: [IRFunGroup] -> Either CompilerError ()
-checkCallGraph funcs = () <$ foldM (walk []) [] roots
+checkCallGraph funcs = do
+    () <$ foldM (walk []) [] roots
+    mapM_ checkRecursion [(n, prepBatchedBody b) | (n, b) <- methods, isEmittedMethod n]
   where
     methods  = concatMap groupMethods funcs
     roots    = [n | (n, _) <- methods, isEmittedMethod n]
     callees  = graphCallees methods
+    -- Every method that can reach itself: the calls this body makes to any of
+    -- them are the ones that need a structural guard.
+    cyclic   = [n | (n, _) <- methods, isEmittedMethod n, n `elem` reachable n]
+    reachable = go [] . callees
+      where go seen []     = seen
+            go seen (n:ns)
+              | n `elem` seen = go seen ns
+              | otherwise     = go (n : seen) (callees n ++ ns)
+    checkRecursion (n, body) = case recOffenders cyclic [] False body of
+      []      -> Right ()
+      (why:_) -> Left $ "batched mode: " ++ n ++ " " ++ why
+                     ++ ". Structure-directed recursion is admitted (design "
+                     ++ "heterogeneous-batch-inference, Component 1: within a "
+                     ++ "shape bucket its depth is uniform, so it runs unchanged "
+                     ++ "over [B] leaves), but value-dependent recursion is not."
     -- DFS with a grey path (cycle detection) and a black memo (already proven
     -- clean, so a shared sub-DAG is not re-walked).
     walk grey black name
-      | name `elem` grey =
-          Left $ "batched mode: " ++ head grey ++ " reaches " ++ name
-              ++ " recursively; data-dependent recursion is outside the tensor "
-              ++ "fragment (design pytorch-tensorizer)."
+      | name `elem` grey  = Right black   -- a cycle: admissibility is 'checkRecursion's call
       | name `elem` black = Right black
       | not (isEmittedMethod name) =
           Left $ "batched mode: a prob/integ path calls " ++ name
@@ -385,6 +582,44 @@ checkCallGraph funcs = () <$ foldM (walk []) [] roots
       | otherwise = do
           black' <- foldM (walk (name : grey)) black (callees name)
           Right (name : black')
+
+-- | Why a recursive call site is /not/ admissible, if it is not. Recursion is
+-- in the fragment exactly when it is structure-directed, which needs two things
+-- at every call to a cycle member:
+--
+--   1. it is reached only through a structural (shape-directed) @if@ — so the
+--      call is skipped, at Python level, for the bucket that bottoms out.
+--      Under eager select semantics a call sitting under a @torch.where@ is
+--      /always/ evaluated, so a value-guarded recursion would not terminate;
+--   2. it descends: some argument is the tail of a list, so the shrinking
+--      structure is what bounds the depth. Together these are the termination
+--      argument — the same one the sample's own finite length gives the scalar
+--      backend.
+--
+-- @guarded@ tracks (1) down the traversal; @env@ tracks which names hold
+-- structural values ('structural').
+recOffenders :: [String] -> SEnv -> Bool -> IRExpr -> [String]
+recOffenders cyc env guarded e = case e of
+  IRLetIn n v b -> recOffenders cyc env guarded v
+                ++ recOffenders cyc (bindS env n v) guarded b
+  IRIf c t f | structural env c ->
+       recOffenders cyc env guarded c
+    ++ recOffenders cyc env True t
+    ++ recOffenders cyc env True f
+  _ | (IRVar n, args) <- collectApplyChain e, n `elem` cyc ->
+       [ "calls " ++ n ++ " recursively from a position that is not guarded by a "
+         ++ "structural (shape-directed) test, so both-arm-eager select semantics "
+         ++ "would not terminate" | not guarded ]
+    ++ [ "calls " ++ n ++ " recursively without descending into the tail of a list "
+         ++ "argument, so the recursion is not bounded by the sample's structure"
+       | not (any hasTailDescent args) ]
+    ++ concatMap (recOffenders cyc env guarded) args
+  _ -> concatMap (recOffenders cyc env guarded) (getIRSubExprs e)
+
+-- | Does this argument expression take the tail of a list anywhere?
+hasTailDescent :: IRExpr -> Bool
+hasTailDescent IRTail{} = True
+hasTailDescent e        = any hasTailDescent (getIRSubExprs e)
 
 groupMethods :: IRFunGroup -> [(String, IRExpr)]
 groupMethods (IRFunGroup n gen prob integ enc normal _) =
@@ -414,7 +649,7 @@ allVarNames e = [n | IRVar n <- [e]] ++ concatMap allVarNames (getIRSubExprs e)
 -- 'batchedExpr' knows how to emit.
 batchedGuard :: String -> String -> IRExpr -> Either CompilerError ()
 batchedGuard groupName methodName body =
-  case offenders body of
+  case offenders [] body of
     []      -> Right ()
     (why:_) -> Left $
       "batched mode: " ++ groupName ++ "'s " ++ methodName
@@ -423,7 +658,25 @@ batchedGuard groupName methodName body =
       ++ "float/int/bool leaves in fixed-shape tuples -- no lists, ADTs, "
       ++ "Either dispatch, recursion, or marginal (ANY) queries."
   where
-    offenders e = [reason e | not (emittable e)] ++ concatMap offenders (getIRSubExprs e)
+    offenders env e = [reason e | not (emittable e)]
+                   ++ [ structureSelectReason | structureSelect env e ]
+                   ++ case e of
+                        IRLetIn n v b -> offenders env v ++ offenders (bindS env n v) b
+                        _             -> concatMap (offenders env) (getIRSubExprs e)
+    -- The dichotomy guard (design heterogeneous-batch-inference): a per-element
+    -- branch may not choose between two *structures*. Bucketing removes the
+    -- structural branches whose condition is shape-directed; one whose condition
+    -- is value-dependent has no tensor form at all (torch.where cannot select
+    -- between lists of different length), so it is refused here rather than
+    -- emitted as something that dies at run time.
+    structureSelect _   (IRSelect _ t f) = listValued t || listValued f
+    structureSelect env (IRIf c t f)     = not (structural env c)
+                                        && (listValued t || listValued f)
+    structureSelect _   _                = False
+    structureSelectReason =
+      "a value-dependent branch (select) whose arms have different structure; "
+      ++ "torch.where cannot select between structures -- only shape-directed "
+      ++ "branching is bucketable (design heterogeneous-batch-inference)"
 
 -- | Is this node one the batched expression emitter handles?
 emittable :: IRExpr -> Bool
@@ -449,6 +702,13 @@ emittable e = case e of
   IRError{}      -> True   -- refusal arm, emitted as a selected-away NaN poison (M3)
   IRSample{}     -> True   -- a fresh random draw, batched via rand(n)/randn(n) (M4);
                            -- only ever produced by a generate body, never prob/integ
+  -- Structure-of-arrays list access (design heterogeneous-batch-inference, M1):
+  -- within a shape bucket a list is a fixed-length Python spine whose leaves are
+  -- [B] tensors, so head/tail/cons are the same Python operations the scalar
+  -- backend emits -- they are shape operations, uniform across the bucket.
+  IRHead{}       -> True
+  IRTail{}       -> True
+  IRCons{}       -> True
   _              -> False
 
 -- | Render a constant as batched Python, or 'Nothing' if its shape has no
@@ -478,6 +738,13 @@ batchedVal :: IRValue -> Maybe String
 batchedVal (VFloat f) = Just (show f)
 batchedVal (VInt i)   = Just (show i)
 batchedVal (VBool b)  = Just (if b then "True" else "False")
+-- The empty-list constant is the one list constant with a batched form: it is
+-- pure structure, and both the shape probe (@sample == []@) and a fixed-length
+-- list's spine terminator need it (design heterogeneous-batch-inference, M1). A
+-- *non-empty* list constant stays refused — it carries per-element data (e.g.
+-- the enumeration `SPLL.AutoNeural.indexOf` builds over, see task
+-- batched-bool-enum-index) that the batched runtime has no reader for.
+batchedVal (VList EmptyList) = Just "EmptyInferenceList()"
 batchedVal (VTuple a b) = do
   a' <- batchedVal a
   b' <- batchedVal b
@@ -554,73 +821,102 @@ reason e = case e of
 -- result tuple's components are lifted to assignments (like the scalar backend's
 -- 'SPLL.CodeGenPyTorch.generateStatementBlock') so a deep world-sum spine stays
 -- a sequence of statements rather than one pathologically long expression.
-batchedBlock :: IRExpr -> [String]
-batchedBlock (IRLetIn name val body) =
-  batchedAssign name val ++ batchedBlock body
-batchedBlock (IRTCons f s) =
-  batchedAssign "_r0" f ++ batchedAssign "_r1" s ++ ["return T(_r0, _r1)"]
-batchedBlock e = ["return " ++ batchedExpr e]
+batchedBlock :: SEnv -> IRExpr -> [String]
+batchedBlock env (IRLetIn name val body) =
+  batchedAssign env name val ++ batchedBlock (bindS env name val) body
+-- A structural (shape-directed) if is real Python control flow: within a shape
+-- bucket its condition is a plain Python bool, so only one arm runs -- which is
+-- what makes structure-directed recursion terminate and what keeps an arm that
+-- is illegal for this shape (e.g. `head sample` on an empty list) unevaluated.
+batchedBlock env (IRIf c t f) | structural env c =
+  ["if " ++ structuralCond env c ++ ":"] ++ indentOnce (batchedBlock env t)
+  ++ ["else:"] ++ indentOnce (batchedBlock env f)
+batchedBlock env (IRTCons f s) =
+  batchedAssign env "_r0" f ++ batchedAssign env "_r1" s ++ ["return T(_r0, _r1)"]
+batchedBlock env e = ["return " ++ batchedExpr env e]
 
 -- | Emit a let binding as one or more assignment statements, splitting a
 -- let-spine and a tuple construction into separate statements so sharing and
 -- statement form are preserved down the tree.
-batchedAssign :: String -> IRExpr -> [String]
-batchedAssign name (IRLetIn innerName innerVal body) =
-  batchedAssign innerName innerVal ++ batchedAssign name body
-batchedAssign name (IRTCons f s) =
-  batchedAssign (name ++ "_0") f
-  ++ batchedAssign (name ++ "_1") s
+batchedAssign :: SEnv -> String -> IRExpr -> [String]
+batchedAssign env name (IRLetIn innerName innerVal body) =
+  batchedAssign env innerName innerVal
+  ++ batchedAssign (bindS env innerName innerVal) name body
+batchedAssign env name (IRIf c t f) | structural env c =
+  ["if " ++ structuralCond env c ++ ":"] ++ indentOnce (batchedAssign env name t)
+  ++ ["else:"] ++ indentOnce (batchedAssign env name f)
+batchedAssign env name (IRTCons f s) =
+  batchedAssign env (name ++ "_0") f
+  ++ batchedAssign env (name ++ "_1") s
   ++ [name ++ " = T(" ++ name ++ "_0, " ++ name ++ "_1)"]
-batchedAssign name e = [name ++ " = " ++ batchedExpr e]
+batchedAssign env name e = [name ++ " = " ++ batchedExpr env e]
+
+-- | Emit a /structural/ condition ('structural') as a plain Python bool
+-- expression, rather than the tensor form 'batchedExpr' would give it. The
+-- value is a Python bool by construction (a bucket-uniform shape fact), and a
+-- Python @if@ should see it as one: @not(x) and not(y)@, not
+-- @torch.logical_not(asmask(x)) & ...@, which would only work by 0-d tensor
+-- truthiness. It also keeps the failure mode honest — if this ever runs on
+-- something that is secretly per-element, torch raises "Boolean value of Tensor
+-- with more than one element is ambiguous" instead of silently picking a branch
+-- for the whole bucket.
+structuralCond :: SEnv -> IRExpr -> String
+structuralCond env e = case e of
+  IRUnaryOp OpNot a -> "not(" ++ structuralCond env a ++ ")"
+  IROp OpAnd a b    -> "(" ++ structuralCond env a ++ " and " ++ structuralCond env b ++ ")"
+  IROp OpOr  a b    -> "(" ++ structuralCond env a ++ " or "  ++ structuralCond env b ++ ")"
+  _                 -> batchedExpr env e
 
 -- | Emit an expression as branch-free, elementwise Python. Every conditional is
 -- a @torch.where@; math functions and boolean operators are their tensor twins.
-batchedExpr :: IRExpr -> String
-batchedExpr (IRConst v)   = batchedValOrDie v
-batchedExpr (IRVar name)  = name
-batchedExpr (IROp OpApprox l r) = "isclose(" ++ batchedExpr l ++ ", " ++ batchedExpr r ++ ")"
-batchedExpr (IROp OpAnd l r)    = "(" ++ batchedExpr l ++ " & " ++ batchedExpr r ++ ")"
-batchedExpr (IROp OpOr l r)     = "(" ++ batchedExpr l ++ " | " ++ batchedExpr r ++ ")"
+batchedExpr :: SEnv -> IRExpr -> String
+batchedExpr env (IRConst v)   = batchedValOrDie v
+batchedExpr env (IRVar name)  = name
+batchedExpr env (IROp OpApprox l r) = "isclose(" ++ batchedExpr env l ++ ", " ++ batchedExpr env r ++ ")"
+batchedExpr env (IROp OpAnd l r)    = "(" ++ batchedExpr env l ++ " & " ++ batchedExpr env r ++ ")"
+batchedExpr env (IROp OpOr l r)     = "(" ++ batchedExpr env l ++ " | " ++ batchedExpr env r ++ ")"
 -- OpDiv is gradient-unsafe (division by zero in a masked-away arm yields NaN
 -- gradients); route it through the double-where 'safe_div' (design M3).
-batchedExpr (IROp OpDiv l r)    = "safe_div(" ++ batchedExpr l ++ ", " ++ batchedExpr r ++ ")"
-batchedExpr (IROp op l r)       = "(" ++ batchedExpr l ++ " " ++ batchedOp op ++ " " ++ batchedExpr r ++ ")"
-batchedExpr (IRUnaryOp OpNot e) = "torch.logical_not(asmask(" ++ batchedExpr e ++ "))"
-batchedExpr (IRUnaryOp OpNeg e) = "(-(" ++ batchedExpr e ++ "))"
-batchedExpr (IRUnaryOp OpExp e) = "torch.exp(" ++ batchedExpr e ++ ")"
+batchedExpr env (IROp OpDiv l r)    = "safe_div(" ++ batchedExpr env l ++ ", " ++ batchedExpr env r ++ ")"
+batchedExpr env (IROp op l r)       = "(" ++ batchedExpr env l ++ " " ++ batchedOp op ++ " " ++ batchedExpr env r ++ ")"
+batchedExpr env (IRUnaryOp OpNot e) = "torch.logical_not(asmask(" ++ batchedExpr env e ++ "))"
+batchedExpr env (IRUnaryOp OpNeg e) = "(-(" ++ batchedExpr env e ++ "))"
+batchedExpr env (IRUnaryOp OpExp e) = "torch.exp(astensor(" ++ batchedExpr env e ++ "))"
 -- OpLog is gradient-unsafe (log of a non-positive value in a masked-away arm
 -- yields NaN gradients); route it through the double-where 'safe_log' (M3).
-batchedExpr (IRUnaryOp OpLog e) = "safe_log(" ++ batchedExpr e ++ ")"
-batchedExpr (IRUnaryOp OpAbs e) = "torch.abs(" ++ batchedExpr e ++ ")"
-batchedExpr (IRUnaryOp OpSign e) = "sign(" ++ batchedExpr e ++ ")"
-batchedExpr (IRSelect c t f) = torchWhere c t f
-batchedExpr (IRIf c t f)     = torchWhere c t f
+batchedExpr env (IRUnaryOp OpLog e) = "safe_log(" ++ batchedExpr env e ++ ")"
+-- astensor: these are total on tensors but reject a plain Python float, which a
+-- fully constant-folded subexpression (e.g. a literal theta scale) can still be.
+batchedExpr env (IRUnaryOp OpAbs e) = "torch.abs(astensor(" ++ batchedExpr env e ++ "))"
+batchedExpr env (IRUnaryOp OpSign e) = "sign(" ++ batchedExpr env e ++ ")"
+batchedExpr env (IRSelect c t f) = torchWhere env c t f
+batchedExpr env (IRIf c t f)     = torchWhere env c t f
 -- A fresh random draw (M4): the whole batch's worth at once, shape [_batchN].
 -- Both arms of an enclosing select draw independently (see the M4 header
 -- comment above 'batchNVar'), so this is correct even under eager both-arm
 -- evaluation.
-batchedExpr (IRSample IRNormal)  = "randn(" ++ batchNVar ++ ")"
-batchedExpr (IRSample IRUniform) = "rand(" ++ batchNVar ++ ")"
-batchedExpr (IRTCons a b)    = "T(" ++ batchedExpr a ++ ", " ++ batchedExpr b ++ ")"
-batchedExpr (IRTFst e)       = "(" ++ batchedExpr e ++ ")[0]"
-batchedExpr (IRTSnd e)       = "(" ++ batchedExpr e ++ ")[1]"
-batchedExpr (IRTheta e i)    = "(" ++ batchedExpr e ++ ")[0][" ++ show i ++ "]"
-batchedExpr (IRSubtree e i)  = "(" ++ batchedExpr e ++ ")[1][" ++ show i ++ "]"
-batchedExpr (IRDensity d e)    = "density_" ++ batchedDist d ++ "(" ++ batchedExpr e ++ ")"
-batchedExpr (IRCumulative d e) = "cumulative_" ++ batchedDist d ++ "(" ++ batchedExpr e ++ ")"
+batchedExpr env (IRSample IRNormal)  = "randn(" ++ batchNVar ++ ")"
+batchedExpr env (IRSample IRUniform) = "rand(" ++ batchNVar ++ ")"
+batchedExpr env (IRTCons a b)    = "T(" ++ batchedExpr env a ++ ", " ++ batchedExpr env b ++ ")"
+batchedExpr env (IRTFst e)       = "(" ++ batchedExpr env e ++ ")[0]"
+batchedExpr env (IRTSnd e)       = "(" ++ batchedExpr env e ++ ")[1]"
+batchedExpr env (IRTheta e i)    = "(" ++ batchedExpr env e ++ ")[0][" ++ show i ++ "]"
+batchedExpr env (IRSubtree e i)  = "(" ++ batchedExpr env e ++ ")[1][" ++ show i ++ "]"
+batchedExpr env (IRDensity d e)    = "density_" ++ batchedDist d ++ "(" ++ batchedExpr env e ++ ")"
+batchedExpr env (IRCumulative d e) = "cumulative_" ++ batchedDist d ++ "(" ++ batchedExpr env e ++ ")"
 -- A call chain: the raw network invocation @net(sym)@ (returning a @[B, n]@
 -- logit tensor) or a cross-function decoder call @decoder.forward(logits, sample)@
 -- (the function name already rewritten to @class.method@ form by the LUT).
-batchedExpr e@(IRApply _ _) =
+batchedExpr env e@(IRApply _ _) =
   let (fn, args) = collectApplyChain e
-  in batchedExpr fn ++ "(" ++ intercalate ", " (map batchedExpr args) ++ ")"
+  in batchedExpr env fn ++ "(" ++ intercalate ", " (map (batchedExpr env) args) ++ ")"
 -- Indexing a @[B, n]@ logit tensor. A constant logit slot is the last-axis
 -- select @out[..., i]@ (dim 0 stays the batch); a per-element index (a @[B]@
 -- @sample@ tensor) is a batched gather @nn_gather(out, idx)@.
-batchedExpr (IRIndex l (IRConst (VInt i))) =
-  "(" ++ batchedExpr l ++ ")[..., " ++ show i ++ "]"
-batchedExpr (IRIndex l idx) =
-  "nn_gather(" ++ batchedExpr l ++ ", " ++ batchedExpr idx ++ ")"
+batchedExpr env (IRIndex l (IRConst (VInt i))) =
+  "(" ++ batchedExpr env l ++ ")[..., " ++ show i ++ "]"
+batchedExpr env (IRIndex l idx) =
+  "nn_gather(" ++ batchedExpr env l ++ ", " ++ batchedExpr env idx ++ ")"
 -- An enumeration sum: sum the body over its enumerable values. The enum axis is
 -- known at compile time (a resolved 'MultiValue'), so we unroll it inline —
 -- binding @name@ to each value and summing the resulting @[B]@ tensors — rather
@@ -628,30 +924,38 @@ batchedExpr (IRIndex l idx) =
 -- storage (the batched backend keeps no global-storage state). This is the
 -- @[E, B]@ enum-axis stack of the design's "Central insight": each arm is
 -- evaluated against the whole batch, then reduced over the enum axis.
-batchedExpr (IREnumSum name multiVal expr) =
-  "sum(map((lambda " ++ name ++ ": " ++ batchedExpr expr ++ "), ["
+batchedExpr env (IREnumSum name multiVal expr) =
+  "sum(map((lambda " ++ name ++ ": " ++ batchedExpr env expr ++ "), ["
     ++ intercalate ", " (map (batchedValOrDie . valueToIR) (multiValueToValueList multiVal)) ++ "]))"
 -- A membership test @x in {v0, ..}@ over a scalar enumeration (e.g. \"is the
 -- residual @c - a@ a valid digit?\" in MNIST addition). Rendered as an
 -- elementwise @[B]@ bool mask via 'is_member', which evaluates @x@ once.
-batchedExpr (IRIsPossible multiVal expr) =
-  "is_member(" ++ batchedExpr expr ++ ", ["
+batchedExpr env (IRIsPossible multiVal expr) =
+  "is_member(" ++ batchedExpr env expr ++ ", ["
     ++ intercalate ", " (map (batchedValOrDie . valueToIR) (multiValueToValueList multiVal)) ++ "])"
-batchedExpr (IRLetIn name val body) =
-  "((" ++ name ++ " := " ++ batchedExpr val ++ "), " ++ batchedExpr body ++ ")[1]"
+batchedExpr env (IRLetIn name val body) =
+  "((" ++ name ++ " := " ++ batchedExpr env val ++ "), "
+  ++ batchedExpr (bindS env name val) body ++ ")[1]"
+-- Structure-of-arrays list access (design heterogeneous-batch-inference, M1):
+-- the spine is a Python object, uniform across the bucket; the leaves are [B]
+-- tensors. These are exactly the scalar backend's forms.
+batchedExpr env (IRHead e)   = "(" ++ batchedExpr env e ++ ")[0]"
+batchedExpr env (IRTail e)   = "(" ++ batchedExpr env e ++ ")[1:]"
+batchedExpr env (IRCons a b) =
+  "ConsInferenceList(" ++ batchedExpr env a ++ ", " ++ batchedExpr env b ++ ")"
 -- A refusal/error arm has no batched value; emit a NaN poison constant that the
 -- enclosing torch.where selects away (design M3). A poison that survives into
 -- the output shows up as NaN, caught by the value differential.
-batchedExpr (IRError _) = "poison()"
-batchedExpr e = error ("batched PyTorch codegen: unexpected node " ++ irPrintFlat e)
+batchedExpr env (IRError _) = "poison()"
+batchedExpr _ e = error ("batched PyTorch codegen: unexpected node " ++ irPrintFlat e)
 
 -- | @torch.where@: the condition is coerced to a bool tensor ('asmask') so a
 -- batch-independent (Python-bool) mask -- e.g. a comparison of two folded
 -- constants -- still broadcasts against the tensor arms.
-torchWhere :: IRExpr -> IRExpr -> IRExpr -> String
-torchWhere c t f =
-  "torch.where(asmask(" ++ batchedExpr c ++ "), "
-  ++ batchedExpr t ++ ", " ++ batchedExpr f ++ ")"
+torchWhere :: SEnv -> IRExpr -> IRExpr -> IRExpr -> String
+torchWhere env c t f =
+  "torch.where(asmask(" ++ batchedExpr env c ++ "), "
+  ++ batchedExpr env t ++ ", " ++ batchedExpr env f ++ ")"
 
 batchedOp :: Operand -> String
 batchedOp OpPlus        = "+"

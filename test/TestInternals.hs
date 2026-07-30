@@ -1191,13 +1191,39 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       -- with no constant to out-race it.
       assertRefusal "Either constructor (IRRight)"
         (IRRight (IRVar "x"))
-  , testCase "the IRHead list destructor is refused on its own" $
-      assertRefusal "list head (IRHead)" (IRHead (IRVar "xs"))
   , testCase "an offender nested deep in a let-spine is still found" $
       -- 'batchedGuard' walks the whole tree, not just the root.
-      assertRefusal "list head (IRHead)"
+      assertRefusal "list membership (IRElementOf)"
         (IRLetIn "a" (IRConst (VFloat 1.0))
-          (IRLetIn "b" (IROp OpPlus (IRVar "a") (IRHead (IRVar "xs"))) (IRVar "b")))
+          (IRLetIn "b" (IROp OpPlus (IRVar "a") (IRElementOf (IRVar "a") (IRVar "xs"))) (IRVar "b")))
+  -- Heterogeneous batching, M1: the list *spine* operations are in the fragment
+  -- (within a shape bucket they are uniform Python structure over [B] leaves),
+  -- but the branch that would have to *choose* between two structures is not --
+  -- torch.where has nothing to select with. Bucketing removes the shape-directed
+  -- ones; a value-dependent one is a genuine refusal.
+  , testCase "SoA list access (head/tail/cons, empty-list constant) is accepted" $
+      mapM_ assertAccepted
+        [ IRHead (IRVar "xs")
+        , IRTail (IRVar "xs")
+        , IRCons (IRVar "x") (IRConst (VList EmptyList))
+        , IROp OpEq (IRVar "xs") (IRConst (VList EmptyList)) ]
+  , testCase "a non-empty list constant is still refused" $
+      -- It carries per-element data, not structure: the batched runtime has no
+      -- reader for it (task batched-bool-enum-index).
+      assertRefusal "constant with no batched representation (VList"
+        (IROp OpEq (IRVar "xs") (IRConst (VList (ListCont (VBool True) EmptyList))))
+  , testCase "a value-dependent select between two structures is refused" $
+      assertRefusal "arms have different structure"
+        (IRSelect (IROp OpGreaterThan (IRVar "x") (IRConst (VFloat 0.0)))
+                  (IRCons (IRVar "x") (IRConst (VList EmptyList)))
+                  (IRConst (VList EmptyList)))
+  , testCase "a shape-directed if between two structures is accepted" $
+      -- The same shape, but branching on an emptiness probe: uniform within a
+      -- bucket, so it stays ordinary Python control flow.
+      assertAccepted
+        (IRIf (IROp OpEq (IRVar "xs") (IRConst (VList EmptyList)))
+              (IRConst (VList EmptyList))
+              (IRCons (IRVar "x") (IRConst (VList EmptyList))))
   -- Generate-only recursion ('hasGenCycle'): unreachable from the corpus,
   -- because a recursive program's *prob* path trips 'checkCallGraph' first
   -- (e.g. dice). Driven through 'generateFunctionsBatched' on a group that has
@@ -1211,6 +1237,16 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       case generateFunctionsBatched False (recGenEnv (IRSample IRNormal)) of
         Right _  -> return ()
         Left msg -> assertFailure ("batched mode refused a plain generate body: " ++ msg)
+  , testCase "a list-building recursive generate degrades to a stub, not a refusal" $
+      -- The one narrow exception to the hard whole-program refusal rule: a
+      -- generate whose recursion *builds a list* has per-element depth (design
+      -- heterogeneous-batch-inference Component 4), but refusing the whole
+      -- program for it would take the program's bucketable prob/integ down too.
+      case generateFunctionsBatched False (recGenEnv (IRCons (IRSample IRNormal) (IRVar "rec_gen"))) of
+        Left msg -> assertFailure ("batched mode refused a list-valued recursive generate "
+                                   ++ "instead of stubbing it: " ++ msg)
+        Right ls -> assertBool ("stub does not raise NotImplementedError: " ++ unlines ls)
+                      (any ("NotImplementedError" `isInfixOf`) ls)
   ]
   where
     -- A one-group environment whose only method is generate, with the given

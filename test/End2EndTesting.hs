@@ -577,15 +577,14 @@ batchedRefusalTests = testGroup "BatchedRefusal"
 -- global flag and must precede the @compile@ subcommand).
 batchedRefusalTable :: [(String, String)]
 batchedRefusalTable =
-  -- lists. Note `list` is pinned on the list *constant*, not on IRHead: since
-  -- 'batchedVal' gates IRConst, the empty-list constant in `main = [Normal,
-  -- Uniform*2.0]` is now the first offender the walk finds, and the diagnostic
-  -- reports only the first. IRHead itself keeps a positive control as a
-  -- synthetic row in "TestInternals" (the let-spine case), where no constant
-  -- competes with it.
-  [ ("list",                      "constant with no batched representation (VList")
-  , ("headTail",                  "list construction (IRCons)")
-  , ("listLiteralDeconstruction", "list tail (IRTail)")
+  -- lists. With M1 (design heterogeneous-batch-inference) the list *spine*
+  -- operations are in the fragment -- within a shape bucket they are uniform
+  -- Python structure over [B] leaves -- so what is refused here is what
+  -- bucketing does not rescue: a list *constant* carrying per-element data
+  -- (`listLiteralDeconstruction`'s `[1.0, 2.0]`, the same shape as the
+  -- enumeration `SPLL.AutoNeural.indexOf` builds, see task
+  -- batched-bool-enum-index) and IRMap.
+  [ ("listLiteralDeconstruction", "constant with no batched representation (VList")
   , ("map",                       "list map (IRMap)")
   -- Either: constructors, destructors, predicates
   , ("either_const",              "Either constructor (IRLeft)")
@@ -602,9 +601,12 @@ batchedRefusalTable =
   -- ADT declarations: the bail at the top of 'generateFunctionsBatched'
   , ("adt",                       "ADT declarations are not in the tensor fragment")
   , ("adtNeuralCounting",         "ADT declarations are not in the tensor fragment")
-  -- prob/integ recursion: a cycle found by 'checkCallGraph'
-  , ("dice",                      "dice_prob reaches dice_prob recursively")
-  , ("gaussList",                 "main_prob reaches main_prob recursively")
+  -- prob/integ recursion. Structure-directed recursion is admitted since M1
+  -- (its depth is uniform within a shape bucket, so it runs unchanged over [B]
+  -- leaves -- `gaussList` is an eligible program now, checked in
+  -- 'batchedPythonTests'); what stays refused is *value*-dependent recursion,
+  -- where eager both-arm select semantics would not terminate.
+  , ("dice",                      "calls dice_prob recursively from a position that is not guarded")
   -- a prob/integ path reaching a method batched mode does not emit
   , ("factorial",                 "calls factorial_gen, which is not a forward/integrate method")
   , ("flip",                      "calls flip_gen, which is not a forward/integrate method")
@@ -668,7 +670,7 @@ batchGroups isNeural tcs = mapM build grouped
     build g@((c, _, _, _, _):_) =
       let samples = [s | (_, _, s, _, _) <- g]
           paramRows = [ps | (_, ps, _, _, _) <- g]
-      in do _ <- batchLiteral samples
+      in do _ <- batchSamples samples
             paramExprs <- if isNeural
               then batchSymParamCols paramRows
               else Just (map pyVal (head paramRows))
@@ -718,6 +720,50 @@ isNum :: IRValue -> Bool
 isNum (VFloat _) = True
 isNum (VInt _) = True
 isNum _ = False
+
+-- | How a group's query points are handed to the batched kernel.
+data SampleBatch
+  -- | One structure-of-arrays tensor: the whole batch has one fixed shape, so
+  -- the kernel takes it directly (the original tensor fragment).
+  = SoA String
+  -- | A plain Python list of per-point samples, to be routed through the host
+  -- bucketing wrapper (design heterogeneous-batch-inference, Component 1): the
+  -- points differ in structure (list lengths), so @bucketed@ partitions them by
+  -- structural signature, SoA-packs each bucket, runs the kernel once per
+  -- bucket and scatters the results back into input order. The 'Int' is the
+  -- number of distinct signatures the wrapper must find -- the M1 acceptance
+  -- criterion ("bucket count = distinct shapes"), asserted in the driver.
+  | Bucketed String Int
+
+-- | The Python form of a group's samples, or 'Nothing' if they are not
+-- batchable at all (a marginal @ANY@ sample, or a leaf that is neither
+-- numeric, bool, nor a structure of those).
+batchSamples :: [IRValue] -> Maybe SampleBatch
+batchSamples vs
+  | any containsAnyV vs  = Nothing
+  | any containsListV vs =
+      Just (Bucketed ("[" ++ intercalate ", " (map pyVal vs) ++ "]")
+                     (length (nub (map shapeSig vs))))
+  | otherwise            = SoA <$> batchLiteral vs
+
+containsListV :: IRValue -> Bool
+containsListV (VList _)    = True
+containsListV (VTuple a b) = containsListV a || containsListV b
+containsListV _            = False
+
+containsAnyV :: IRValue -> Bool
+containsAnyV VAny           = True
+containsAnyV (VAnyExcept _) = True
+containsAnyV (VList l)      = any containsAnyV (toList l)
+containsAnyV (VTuple a b)   = containsAnyV a || containsAnyV b
+containsAnyV _              = False
+
+-- | The Haskell twin of @pythonLibBatched.signature@: the sample's structural
+-- skeleton with every scalar leaf erased. Used only to predict the bucket count.
+shapeSig :: IRValue -> String
+shapeSig (VList l)    = "L(" ++ intercalate "," (map shapeSig (toList l)) ++ ")"
+shapeSig (VTuple a b) = "T(" ++ shapeSig a ++ "," ++ shapeSig b ++ ")"
+shapeSig _            = "x"
 
 -- | Build a structure-of-arrays batch tensor literal from a homogeneous list of
 -- sample values: numeric leaves stack into a float tensor, bools into a bool
@@ -790,9 +836,15 @@ runBatchedPython py eligible = ioProperty $ do
 batchedDriver :: Bool -> [(String, String, [BatchGroup], [String])] -> String
 batchedDriver accArg eligible = unlines $
   [ "import torch, sys, traceback"
-  , "from pythonLibBatched import T"  -- for structure-of-arrays tuple sample batches
+  -- T for structure-of-arrays tuple sample batches; the list constructors and
+  -- the bucketing wrapper for heterogeneous (list-shaped) samples.
+  , "from pythonLibBatched import T, ConsInferenceList, EmptyInferenceList, bucketed, bucket_count"
   , "TOL = " ++ show probTolerance
   , "failures = []"
+  , "def _bucket_count(name, samples, expected):"
+  , "    got = bucket_count(samples)"
+  , "    if got != expected:"
+  , "        failures.append(name + ': bucketing produced ' + str(got) + ' buckets, expected ' + str(expected))"
   , "def _leaf(x, i):"
   , "    return float(x[i]) if (torch.is_tensor(x) and x.dim() > 0) else float(x)"
   , "def _cmp(name, method, r, exp_p, exp_d):"
@@ -830,15 +882,25 @@ batchedDriver accArg eligible = unlines $
       ]
     groupCall name (BatchGroup isCumul paramExprs _ samples expP expD) =
       let method = if isCumul then "integrate" else "forward"
-          xs = case batchLiteral samples of Just s -> s; Nothing -> "None"
           -- A topK-compiled prob function takes an accumulated-probability
           -- parameter right after the sample (see 'compiledWithTopK'); seed it
           -- with 1.0 at the query root, exactly as the interpreter driver does.
           accStr = if accArg && not isCumul then ", 1.0" else ""
           paramStr = concatMap (", " ++) paramExprs
-          call = "_main." ++ method ++ "(" ++ xs ++ accStr ++ paramStr ++ ")"
-      in [ "    _cmp(" ++ show name ++ ", " ++ show method ++ ", " ++ call
-           ++ ", " ++ pyFloatList expP ++ ", " ++ pyFloatList expD ++ ")" ]
+          (bucketCheck, call) = case batchSamples samples of
+            Just (SoA xs) ->
+              ([], "_main." ++ method ++ "(" ++ xs ++ accStr ++ paramStr ++ ")")
+            -- Heterogeneous samples go through the host bucketing wrapper, and
+            -- the bucket count is asserted: the M1 acceptance criterion is that
+            -- the wrapper makes exactly one kernel call per distinct shape, not
+            -- merely that the numbers come out right.
+            Just (Bucketed xs n) ->
+              ( [ "    _bucket_count(" ++ show name ++ ", " ++ xs ++ ", " ++ show n ++ ")" ]
+              , "bucketed(_main." ++ method ++ ", " ++ xs ++ accStr ++ paramStr ++ ")" )
+            Nothing -> ([], "None")
+      in bucketCheck
+         ++ [ "    _cmp(" ++ show name ++ ", " ++ show method ++ ", " ++ call
+              ++ ", " ++ pyFloatList expP ++ ", " ++ pyFloatList expD ++ ")" ]
     pyFloatList xs = "[" ++ intercalate ", " (map show xs) ++ "]"
 
 -- ===========================================================================

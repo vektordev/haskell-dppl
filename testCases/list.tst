@@ -1,3 +1,4 @@
+backends: interpreter, julia, python, batched
 p([0.0, 1.0])=(0.199471, 2.0)
 cdf([1.0, 2.0])=(0.841345, 0.0)
 cdf([1.0, 1.0])=(0.4206725, 0.0)

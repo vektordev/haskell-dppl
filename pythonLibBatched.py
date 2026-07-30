@@ -165,3 +165,167 @@ class T:
     if index == 1:
       return self.t2
     raise ValueError("Tuple only has index 0 and 1")
+
+# --- structure-of-arrays lists (heterogeneous batching, M1) ------------------
+# Design heterogeneous-batch-inference, Component 1. A batched list sample is a
+# fixed-length linked list -- the same shape as pythonLib's InferenceList --
+# whose *leaves* are [B] tensors. That representation is only well-defined when
+# every sample in the batch has the same structure, which is exactly what the
+# bucketing wrapper below guarantees: the batch is partitioned by structural
+# signature first, so within one kernel call the list length (and any nested
+# tuple/list shape) is a compile-time-uniform Python fact, and the emitted
+# structural `if`s stay ordinary Python control flow over SoA data.
+
+class InferenceList:
+  def __init__(self, value=None):
+    return NotImplemented
+
+  def __len__(self):
+    cnt = 0
+    curr = self
+    while curr is not None and isinstance(curr, ConsInferenceList):
+      cnt += 1
+      curr = curr.next
+    return cnt
+
+  def __iter__(self):
+    curr = self
+    while curr is not None and isinstance(curr, ConsInferenceList):
+      yield curr.value
+      curr = curr.next
+
+  def __getitem__(self, index):
+    if isinstance(index, slice):
+      # Tail lists only, as in pythonLib: sample[1:] is the tail.
+      if index.start > 0 and (index.stop == -1 or index.stop is None) and (index.step == 1 or index.step is None):
+        current = self
+        for _ in range(index.start - 1):
+          current = current.next
+        return current.next
+      raise IndexError("Slices may only be used for tail lists")
+    if index < 0:
+      index += len(self)
+    if index < 0 or index >= len(self):
+      raise IndexError("InferenceList index out of range")
+    current = self
+    for _ in range(index):
+      current = current.next
+    return current.value
+
+  def __eq__(self, other):
+    # Length disagreement is a *structural* fact, uniform across the bucket, so
+    # it answers with a plain Python bool (which `asmask` broadcasts). Equal
+    # lengths compare elementwise through the leaves, like T.__eq__, giving a
+    # [B] bool tensor. `sample == EmptyInferenceList()` -- the emptiness probe
+    # the compiler emits -- therefore always lands in the Python-bool case.
+    if not isinstance(other, InferenceList):
+      return NotImplemented
+    if len(self) != len(other):
+      return False
+    acc = True
+    for a, b in zip(self, other):
+      acc = (a == b) if acc is True else (acc & (a == b))
+    return acc
+
+  def prepend(self, value):
+    return ConsInferenceList(value, self)
+
+class EmptyInferenceList(InferenceList):
+  def __init__(self):
+    self.next = None
+    self.value = None
+
+class ConsInferenceList(InferenceList):
+  def __init__(self, value, tail):
+    self.value = value
+    self.next = tail
+
+def toList(xs):
+  back = EmptyInferenceList()
+  for x in reversed(list(xs)):
+    back = ConsInferenceList(x, back)
+  return back
+
+# --- shape-signature bucketing (Component 1) ---------------------------------
+# `bucketed(fn, samples, *args)` is the host wrapper the design calls for:
+#
+#   group batch by signature -> per bucket: SoA-pack leaves, run batched kernel
+#   -> scatter results back to input order
+#
+# It costs O(#distinct shapes) kernel invocations instead of O(B), degrades
+# gracefully (a fully heterogeneous batch is today's per-sample behaviour, a
+# homogeneous one is a single call), and needs no cooperation from the emitted
+# code: inside a bucket, structure is uniform, so the kernel's structural `if`s
+# and structure-directed recursion run unchanged over [B_bucket] leaves.
+
+def signature(v):
+  # The full structural skeleton (the design's approved granularity): list
+  # lengths and nested tuple shape, with every scalar leaf erased to 'x'.
+  if isinstance(v, InferenceList):
+    return ('L',) + tuple(signature(x) for x in v)
+  if isinstance(v, T):
+    return ('T', signature(v.t1), signature(v.t2))
+  return 'x'
+
+def bucket_count(samples):
+  return len(set(signature(s) for s in samples))
+
+def _pack(vs):
+  # Structure-of-arrays pack: a homogeneous list of samples becomes one sample
+  # whose leaves are stacked [B] tensors.
+  head = vs[0]
+  if isinstance(head, InferenceList):
+    return toList([_pack([s[i] for s in vs]) for i in range(len(head))])
+  if isinstance(head, T):
+    return T(_pack([s.t1 for s in vs]), _pack([s.t2 for s in vs]))
+  if torch.is_tensor(head) and head.dim() > 0:
+    return torch.stack([astensor(v) for v in vs])
+  if isinstance(head, bool):
+    return torch.tensor([bool(v) for v in vs])
+  if isinstance(head, int):
+    return torch.tensor([int(v) for v in vs])
+  return torch.tensor([float(v) for v in vs])
+
+def _slice_arg(a, idx, total):
+  # A per-point extra argument (e.g. a [B, n] neural symbol batch) is sliced to
+  # the bucket; a shared/broadcast argument is passed through untouched.
+  if torch.is_tensor(a) and a.dim() > 0 and a.shape[0] == total:
+    return a[torch.tensor(idx)]
+  return a
+
+def _scatter(parts, idxs, total):
+  # Reassemble per-bucket results into one [B] result in input order.
+  head = parts[0]
+  if isinstance(head, T):
+    return T(_scatter([p.t1 for p in parts], idxs, total),
+             _scatter([p.t2 for p in parts], idxs, total))
+  if isinstance(head, InferenceList):
+    return toList([_scatter([p[i] for p in parts], idxs, total) for i in range(len(head))])
+  out = None
+  for p, idx in zip(parts, idxs):
+    t = astensor(p)
+    if t.dim() == 0:
+      t = t.expand(len(idx))
+    if out is None:
+      out = torch.empty(total, dtype=t.dtype)
+    out[torch.tensor(idx)] = t.to(out.dtype)
+  return out
+
+def bucketed(fn, samples, *args):
+  samples = list(samples)
+  total = len(samples)
+  order = []
+  for i, s in enumerate(samples):
+    sig = signature(s)
+    for grp in order:
+      if grp[0] == sig:
+        grp[1].append(i)
+        break
+    else:
+      order.append((sig, [i]))
+  parts, idxs = [], []
+  for _sig, idx in order:
+    packed = _pack([samples[i] for i in idx])
+    parts.append(fn(packed, *[_slice_arg(a, idx, total) for a in args]))
+    idxs.append(idx)
+  return _scatter(parts, idxs, total)

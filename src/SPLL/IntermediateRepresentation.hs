@@ -15,6 +15,7 @@ module SPLL.IntermediateRepresentation (
 , defaultCompilerConfig
 , irMap
 , irDescend
+, irDescendM
 , getIRSubExprs
 , isPure
 , isEffectfulVar
@@ -450,6 +451,50 @@ irDescend f x = case x of
   (IRVar _) -> x
   (IRError _) -> x
   (IRConformsTo t a) -> IRConformsTo t (f a)
+
+-- | Monadic 'irDescend': rebuild a node from effectfully-rewritten children,
+-- one level only. Children are visited left-to-right, so an effect that
+-- threads state (a fresh-name counter, a collected list of hoisted bindings)
+-- sees them in source order. Like 'irDescend' it does /not/ recurse — the
+-- caller drives the traversal and can handle binding forms itself.
+irDescendM :: Monad m => (IRExpr -> m IRExpr) -> IRExpr -> m IRExpr
+irDescendM f x = case x of
+  (IRIf cond left right) -> IRIf <$> f cond <*> f left <*> f right
+  (IRSelect cond left right) -> IRSelect <$> f cond <*> f left <*> f right
+  (IROp op left right) -> IROp op <$> f left <*> f right
+  (IRUnaryOp op expr) -> IRUnaryOp op <$> f expr
+  (IRCons left right) -> IRCons <$> f left <*> f right
+  (IRTCons left right) -> IRTCons <$> f left <*> f right
+  (IRHead expr) -> IRHead <$> f expr
+  (IRTail expr) -> IRTail <$> f expr
+  (IRMap fe expr) -> IRMap <$> f fe <*> f expr
+  (IRElementOf ele lst) -> IRElementOf <$> f ele <*> f lst
+  (IRTFst expr) -> IRTFst <$> f expr
+  (IRTSnd expr) -> IRTSnd <$> f expr
+  (IRLeft expr) -> IRLeft <$> f expr
+  (IRRight expr) -> IRRight <$> f expr
+  (IRFromLeft expr) -> IRFromLeft <$> f expr
+  (IRFromRight expr) -> IRFromRight <$> f expr
+  (IRIsLeft expr) -> IRIsLeft <$> f expr
+  (IRIsRight expr) -> IRIsRight <$> f expr
+  (IRIsPossible val expr) -> IRIsPossible val <$> f expr
+  (IRDensity a expr) -> IRDensity a <$> f expr
+  (IRCumulative a expr) -> IRCumulative a <$> f expr
+  (IRLogDensity a expr) -> IRLogDensity a <$> f expr
+  (IRLogCumulative a expr) -> IRLogCumulative a <$> f expr
+  (IRLetIn name left right) -> IRLetIn name <$> f left <*> f right
+  (IRLambda name scope) -> IRLambda name <$> f scope
+  (IRApply a b) -> IRApply <$> f a <*> f b
+  (IREnumSum name val scope) -> IREnumSum name val <$> f scope
+  (IRLogEnumSum name val scope) -> IRLogEnumSum name val <$> f scope
+  (IRIndex left right) -> IRIndex <$> f left <*> f right
+  (IRTheta a i) -> flip IRTheta i <$> f a
+  (IRSubtree a i) -> flip IRSubtree i <$> f a
+  (IRConst _) -> pure x
+  (IRSample _) -> pure x
+  (IRVar _) -> pure x
+  (IRError _) -> pure x
+  (IRConformsTo t a) -> IRConformsTo t <$> f a
 
 isLambda :: IRExpr -> Bool
 isLambda IRLambda {} = True
