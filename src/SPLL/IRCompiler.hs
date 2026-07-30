@@ -787,10 +787,23 @@ toIRInference meta False (Expr _ (ThetaI a i)) sample = do
 toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
   var_condT_p <- mkVariable "condT"
   var_condF_p <- mkVariable "condF"
-  condTrue  <- toIRInference meta False cond (IRConst (VBool True))
-  condFalse <- toIRInference meta False cond (IRConst (VBool False))
+  -- 'cond' is TBool, so its mass is an exhaustive two-way partition:
+  -- p(cond=False) = 1 - p(cond=True). Deriving the complement this way
+  -- (the same identity already used for gt/lt against a deterministic bound
+  -- and for two-Normal comparisons, both below) avoids a second full
+  -- recursive compile of 'cond' -- which, when 'cond' is itself a nested
+  -- Bool IfThenElse, doubles the work at every nesting level and turned
+  -- compiling a depth-d chain of nested boolean conditions into an O(2^d)
+  -- blowup (fuzz-qc-compiler-bugs item 3: seconds at depth 4, unusable
+  -- past depth ~6). rDim is carried over unchanged (any TBool result is
+  -- structurally dim 0, same as condTrue's). rImposs is derived from the
+  -- value, the same discrete-mass exception 'opaqueMass' already relies on
+  -- ("only a discrete mass may derive the flag from its value" -- an exact
+  -- zero here genuinely means the complementary event cannot occur).
+  condTrue <- toIRInference meta False cond (IRConst (VBool True))
   let condTrueExpr  = rProb condTrue
-  let condFalseExpr = rProb condFalse
+  let condFalseExpr = IROp OpSub const1 condTrueExpr
+  let condFalse = PResult condFalseExpr (rDim condTrue) const0 (IROp OpEq condFalseExpr const0)
   setVariables [(var_condT_p, condTrueExpr), (var_condF_p, condFalseExpr)]
   -- p(y) = if p_cond < thresh then p_else(y) * (1-p_cond(y)) else if p_cond > 1 - thresh then p_then(y) * p_cond(y) else p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
   let thr = topKThreshold (compilerConfig meta)
@@ -829,21 +842,32 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
   addRes <- mixP branches mul1Zeroed mul2Zeroed
   case thr of
     Just _ -> do
-      let accTrue = IROp OpMult (accProb meta) (IRVar var_condT_p)
-      let accFalse = IROp OpMult (accProb meta) (IRVar var_condF_p)
-      -- Below cutoff on one side, only the other arm is evaluated. Applied
-      -- field-wise, so all three stay consistent about which arms were traversed.
-      let pruned elseOnly thenOnly both = IRIf
-            (IROp OpLessThan accTrue (IRVar "TOP_K_CUTOFF"))
-            elseOnly
-            (IRIf (IROp OpLessThan accFalse (IRVar "TOP_K_CUTOFF"))
-              thenOnly
-              both)
-      return (PResult
-        (pruned (rProb mul2Zeroed)   (rProb mul1Zeroed)   (rProb addRes))
-        (pruned (rDim mul2Zeroed)    (rDim mul1Zeroed)    (rDim addRes))
-        (pruned rightBranchesExpr    leftBranchesExpr     branches)
-        (pruned (rImposs mul2Zeroed) (rImposs mul1Zeroed) (rImposs addRes)))
+      -- Pick among the three whole packed results ONCE, bound to a single
+      -- variable, rather than wrapping each of the four PResult fields in
+      -- its own copy of the accTrue/accFalse IRIf (the previous shape):
+      -- that field-wise wrapping is exactly the duplication pattern
+      -- 'shareResult' exists to avoid (see its docs) -- here it wasn't
+      -- routed through shareResult at all, so it re-embedded mul1Zeroed's/
+      -- mul2Zeroed's/addRes's own fields FOUR times per level. Since this
+      -- whole 'IfThenElse' case can itself be 'cond' of an enclosing
+      -- topK-guarded IfThenElse, that 4x-per-level duplication compounds
+      -- with nesting depth into an exponential blowup independent of (and
+      -- compounding on top of) the condTrue/condFalse fix above
+      -- (fuzz-qc-compiler-bugs item 3: nested topK-guarded conditions timed
+      -- out well before the plain default-config case did).
+      accTrueV <- mkVariable "accTrue"
+      accFalseV <- mkVariable "accFalse"
+      setVariables [(accTrueV, IROp OpMult (accProb meta) (IRVar var_condT_p))]
+      setVariables [(accFalseV, IROp OpMult (accProb meta) (IRVar var_condF_p))]
+      prunedV <- mkVariable "pruned"
+      let prunedExpr = IRIf
+            (IROp OpLessThan (IRVar accTrueV) (IRVar "TOP_K_CUTOFF"))
+            (packResult mul2Zeroed)
+            (IRIf (IROp OpLessThan (IRVar accFalseV) (IRVar "TOP_K_CUTOFF"))
+              (packResult mul1Zeroed)
+              (packResult addRes))
+      setVariables [(prunedV, prunedExpr)]
+      return (unpackResult (IRVar prunedV))
     -- p(y) = p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
     Nothing -> return addRes
 -- Both sides Gaussian: left - right ~ Normal(muL - muR, sqrt(sL^2 + sR^2)), so the
@@ -1387,7 +1411,7 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
   let (outerBinds, innerTuple) = hoistInvariantBindings x2 irTuple
   let renameHoisted (n, v) = (if n `elem` [x2, x3] then uniquePrefix ++ n else n, applyUnique v)
   setVariables (map renameHoisted outerBinds)
-  enumSumP applyUnique x2 enumListL (unpackResult innerTuple)
+  enumSumP meta applyUnique x2 enumListL (unpackResult innerTuple)
 -- For the cumulative case we cant get around two enum sums
 toIRInference meta True (Expr TypeInfo {rType=rt} (InjF (Named name) [left, right])) sample
   | isEnumerable (tags (getTypeInfo left)) && isEnumerable (tags (getTypeInfo right))
@@ -1638,9 +1662,33 @@ anySafe sample wrap (PResult p d bc imp) = PResult
 -- | Sum a result over an enumerated variable's support: probabilities and branch
 -- counts sum, the result is a discrete mass (dim 0). @wrap@ post-processes the
 -- assembled sums (variable uniqueification at the double-enumeration site).
-enumSumP :: (IRExpr -> IRExpr) -> Varname -> MultiValue -> PResult -> CompilerMonad PResult
-enumSumP wrap v vals r =
-  opaqueMass (wrap (IREnumSum v vals (rProb r))) (wrap (IREnumSum v vals (rBranches r)))
+--
+-- Builds TWO separate 'IREnumSum' loops -- one summing 'rProb', one summing
+-- 'rBranches' -- because 'IREnumSum' only accumulates a single scalar, so the
+-- two sums cannot share one loop body. When @r@'s own per-iteration
+-- computation is expensive (e.g. it is itself built from a recursively
+-- enumerable sub-expression), that duplicates the whole computation, and
+-- compounds into an exponential blowup when this fires at every level of a
+-- recursively-nested enumerable structure (fuzz-qc-compiler-bugs item 3,
+-- residual mechanism beyond the topK-specific one fixed alongside this: a
+-- plusI/negI chain over nested dice-style IfThenElse-of-Uniform-threshold
+-- splits with both operands enumerable hits this at every level even without
+-- topK). 'rBranches' is a pure side channel with no feedback into
+-- 'rProb'/'rDim'/'rImposs' anywhere in the compiler, and is discarded
+-- wholesale by 'stripBranchCount' as a post-pass whenever @countBranches@ is
+-- off -- so when it is off, computing an accurate branches sum here is
+-- guaranteed-wasted work: skip the second loop and fall back to a cheap
+-- placeholder instead of paying (and compounding) the duplication for a
+-- value nobody reads. When @countBranches@ is on, the exact sum is still
+-- computed as before -- this does not change behaviour, only which
+-- configurations pay for it.
+enumSumP :: CompilerMetadata -> (IRExpr -> IRExpr) -> Varname -> MultiValue -> PResult -> CompilerMonad PResult
+enumSumP meta wrap v vals r =
+  opaqueMass (wrap (IREnumSum v vals (rProb r))) branchesSum
+  where
+    branchesSum
+      | countBranches (compilerConfig meta) = wrap (IREnumSum v vals (rBranches r))
+      | otherwise = const0
 
 -- | A discrete mass assembled by summing contributions (an enumerated support,
 -- a set of plan worlds), with its branch count.
@@ -2049,7 +2097,7 @@ enumerateAppliedLambda meta cumulative l v sample = do
   let discreteVVals = head [x | DiscreteValues x <- tags (getTypeInfo v)]
   let (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
   setVariables outerBinds
-  enumSumP id boundVar discreteVVals (unpackResult innerTuple)
+  enumSumP meta id boundVar discreteVVals (unpackResult innerTuple)
 
 toIREnumerate :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PResult
 -- Nested enumerable application (e.g. an inner `let` binding a fresh discrete draw):
