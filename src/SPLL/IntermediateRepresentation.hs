@@ -162,6 +162,13 @@ data Operand = OpPlus
              | OpAnd
              | OpEq
              | OpApprox
+             -- Fiber-enumerator probe (task fiber-enumerator-probe-max): `max`
+             -- is a forward-only binary numeric op, added purely to exercise
+             -- the existing isForwardOnly enumerate-both InjF path on a second
+             -- operator. Interpreter-only for now -- no Python/Julia/batched
+             -- codegen case exists, since the probe's corpus test declares
+             -- `backends: interpreter` only.
+             | OpMax
              deriving (Show, Eq)
 
 data UnaryOperand = OpNeg

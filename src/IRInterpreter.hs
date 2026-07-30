@@ -139,6 +139,13 @@ generate f neurals registry adts globalEnv env [] (IROp OpSub a b) = do
     --(VAny, _) -> return VAny
     --(_, VAny) -> return VAny
     _ -> error ("Type error: Minus can only subtract two numbers (of the same type): " ++ show (aVal, bVal))
+generate f neurals registry adts globalEnv env [] (IROp OpMax a b) = do
+  aVal <- generate f neurals registry adts globalEnv env [] a
+  bVal <- generate f neurals registry adts globalEnv env [] b
+  case (aVal, bVal) of
+    (VFloat af, VFloat bf) -> return $ VFloat (max af bf)
+    (VInt af, VInt bf) -> return $ VInt (max af bf)
+    _ -> error ("Type error: Max can only compare two numbers (of the same type): " ++ show (aVal, bVal))
 generate f neurals registry adts globalEnv env [] (IROp OpOr a b) = do
   aVal <- generate f neurals registry adts globalEnv env [] a
   bVal <- generate f neurals registry adts globalEnv env [] b

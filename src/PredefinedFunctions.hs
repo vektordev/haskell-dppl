@@ -180,6 +180,20 @@ gtFwd = FDecl (Forall [] [] (TFloat `TArrow` (TFloat `TArrow` TBool))) ["a", "b"
 ltFwd :: FDecl
 ltFwd = FDecl (Forall [] [] (TFloat `TArrow` (TFloat `TArrow` TBool))) ["a", "b"] ["c"] (IROp OpLessThan (IRVar "a") (IRVar "b")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))]
 
+-- max: also forward-only, like gt/lt -- given max(a,b)=c there is no single
+-- functional inverse recovering one operand from the other. If a is known
+-- and a<c then b=c is forced, but if a==c then b can be *any* value <= c: the
+-- fiber is set-valued, not a point, exactly the shape task
+-- fiber-enumerator-probe-max exists to test. Declaring an empty inverse list
+-- (like and/or/gt/lt) routes both-enumerable-discrete and
+-- one-side-deterministic cases through IRCompiler's existing isForwardOnly
+-- enumerate-both/enumerate-single machinery with NO new IRCompiler code --
+-- see the task writeup for what that does and does not prove. Derivatives
+-- are placeholders (unused: max never reaches a continuous change-of-variables
+-- case, since no inversion is ever looked up for a forward-only InjF).
+maxFwd :: FDecl
+maxFwd = FDecl (Forall [] [] (TFloat `TArrow` (TFloat `TArrow` TFloat))) ["a", "b"] ["c"] (IROp OpMax (IRVar "a") (IRVar "b")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))]
+
 eqFwd :: FDecl
 eqFwd = FDecl (Forall [TV "a"] [] (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TBool))) ["a", "b"] ["c"] (IROp OpEq (IRVar "a") (IRVar "b")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))]
 eqInv1 :: FDecl
@@ -297,6 +311,7 @@ globalFenv' = [("double", FPair doubleFwd [doubleInv]),
               ("or", FPair orFwd []),
               ("gt", FPair gtFwd []),
               ("lt", FPair ltFwd []),
+              ("max", FPair maxFwd []),
               ("eq", FPair eqFwd [eqInv1, eqInv2]),
               ("Cons", FPair consFwd [consInvHead, consInvTail]),
               ("TCons", FPair tConsFwd [tConsInvFst, tConsInvSnd]),
