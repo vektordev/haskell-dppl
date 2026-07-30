@@ -46,15 +46,19 @@ data Backend = Interpreter | Julia | Python
 allBackends :: [Backend]
 allBackends = [minBound .. maxBound]
 
-data TestCase = ProbTestCase String IRValue [IRValue] (IRValue, IRValue)
-              | CumulTestCase String IRValue [IRValue] (IRValue, IRValue)
+-- The last field of Prob/CumulTestCase is the OPTIONAL expected impossibility
+-- flag (the fourth field of the compiled inference result, see CLAUDE.md's
+-- "Impossibility flag"): @Just b@ when the .tst line spelled a third component,
+-- @Nothing@ when it declared only (prob, dim) and the flag is not to be checked.
+data TestCase = ProbTestCase String IRValue [IRValue] (IRValue, IRValue) (Maybe Bool)
+              | CumulTestCase String IRValue [IRValue] (IRValue, IRValue) (Maybe Bool)
               | ArgmaxPTestCase String [IRValue] IRValue
               | EncodingLengthTestCase String String [IRValue] Int             -- target fn, explicit args, expected output list length
               | EncodingSlotTestCase String String [IRValue] IRValue Double  -- target fn, explicit args, indexOf-value, expected float
               deriving (Show)
 
 isProbTestCase :: TestCase -> Bool
-isProbTestCase (ProbTestCase _ _ _ _) = True
+isProbTestCase (ProbTestCase _ _ _ _ _) = True
 isProbTestCase _ = False
 
 isArgmaxPTestCase :: TestCase -> Bool
@@ -62,7 +66,7 @@ isArgmaxPTestCase (ArgmaxPTestCase _ _ _) = True
 isArgmaxPTestCase _ = False
 
 isCumulTestCase :: TestCase -> Bool
-isCumulTestCase (CumulTestCase _ _ _ _) = True
+isCumulTestCase (CumulTestCase _ _ _ _ _) = True
 isCumulTestCase _ = False
 
 isEncodingLengthTestCase :: TestCase -> Bool
@@ -74,8 +78,8 @@ isEncodingSlotTestCase (EncodingSlotTestCase {}) = True
 isEncodingSlotTestCase _ = False
 
 testCaseName :: TestCase -> String
-testCaseName (ProbTestCase name _ _ _) = name
-testCaseName (CumulTestCase name _ _ _) = name
+testCaseName (ProbTestCase name _ _ _ _) = name
+testCaseName (CumulTestCase name _ _ _ _) = name
 testCaseName (ArgmaxPTestCase name _ _) = name
 testCaseName (EncodingLengthTestCase name _ _ _) = name
 testCaseName (EncodingSlotTestCase name _ _ _ _) = name
@@ -96,15 +100,38 @@ pNewline = choice [symbol "\n", symbol "\r\n"]
 pIRValue :: MonadParser m => m IRValue
 pIRValue = pValue >>= return . valueToIR
 
+-- | The expected inference result of a prob/cumulative line: @(prob, dim)@, or
+-- @(prob, dim, imposs)@ where the optional third component is the expected
+-- impossibility flag, spelled with the same @True@/@False@ literals 'pValue'
+-- uses for booleans everywhere else. Omitting it (the shape every pre-existing
+-- corpus line has) means "check prob and dim only, do not check the flag".
+--
+-- Spelled out here rather than delegating to 'pValue' because SPLL's own tuple
+-- syntax is strictly binary: a three-component expectation is a .tst-level
+-- expectation triple, not an SPLL value.
+pExpectedResult :: MonadParser m => m (IRValue, IRValue, Maybe Bool)
+pExpectedResult = do
+  symbol "("
+  resP <- pIRValue
+  symbol ","
+  resD <- pIRValue
+  mImp <- optional (symbol "," >> pIRValue)
+  symbol ")"
+  case mImp of
+    Nothing        -> return (resP, resD, Nothing)
+    Just (VBool b) -> return (resP, resD, Just b)
+    Just other     -> fail ("the third component of an expected result is the impossibility flag "
+                            ++ "and must be True or False, got: " ++ show other)
+
 pProbTestCase :: MonadParser m => String -> m TestCase
 pProbTestCase name = do
   symbol "p("
   params <- pIRValue `sepBy` symbol ","
   symbol ")="
-  VTuple resP resD <- pIRValue
-  case params of 
+  (resP, resD, mImp) <- pExpectedResult
+  case params of
     [] -> fail "ProbTestCase must have at least one parameter (the sample)"
-    _  -> return $ ProbTestCase name (head params) (tail params) (resP, resD)
+    _  -> return $ ProbTestCase name (head params) (tail params) (resP, resD) mImp
 
 pArgmaxPTestCase :: MonadParser m => String -> m TestCase
 pArgmaxPTestCase name = do
@@ -119,10 +146,10 @@ pCumulParser name = do
   symbol "cdf("
   params <- pIRValue `sepBy` symbol ","
   symbol ")="
-  VTuple resP resD <- pIRValue
-  case params of 
+  (resP, resD, mImp) <- pExpectedResult
+  case params of
     [] -> fail "ProbTestCase must have at least one parameter (the sample)"
-    _  -> return $ CumulTestCase name (head params) (tail params) (resP, resD)
+    _  -> return $ CumulTestCase name (head params) (tail params) (resP, resD) mImp
 
 -- Optional endpoint addressing: `[fn]` selects which top-level function's encode to query.
 -- Defaults to "main" (the f == main case of the one per-function-encode rule).

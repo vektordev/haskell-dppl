@@ -70,8 +70,8 @@ selectPassDifferentialTests = do
 -- | Assert one corpus query point is unchanged by the select pass. Non-query
 -- cases (encode/argmax) are skipped: the pass only touches prob/integ bodies.
 selectNoOp :: Program -> TestCase -> Property
-selectNoOp p (ProbTestCase  name sample params _) = selectNoOpCmp p name (\c -> runProbC  p c params sample)
-selectNoOp p (CumulTestCase name sample params _) = selectNoOpCmp p name (\c -> runIntegC p c params sample)
+selectNoOp p (ProbTestCase  name sample params _ _) = selectNoOpCmp p name (\c -> runProbC  p c params sample)
+selectNoOp p (CumulTestCase name sample params _ _) = selectNoOpCmp p name (\c -> runIntegC p c params sample)
 selectNoOp _ _ = property True
 
 selectNoOpCmp :: Program -> String -> (IREnv -> Either CompilerError IRValue) -> Property
@@ -98,22 +98,38 @@ forceResult res = do
               Right v  -> length (show v) `seq` v)) :: IO (Either SomeException IRValue)
   return $ either (Left . show) Right r
 
+-- | Check a query point's expected impossibility flag, if the .tst line declared
+-- one (the optional third expectation component). The flag is read through
+-- 'resultImpossible' rather than by matching the result tuple's shape here --
+-- that accessor is the emitted layout's only definition outside the compiler
+-- (see CLAUDE.md, design inference-result-side-channels).
+checkImposs :: String -> Maybe Bool -> IRValue -> Property
+checkImposs _ Nothing _ = property True
+checkImposs name (Just expected) v = case resultImpossible v of
+  Nothing -> counterexample
+    ("Test case " ++ name ++ " expects an impossibility flag but its result carries none: " ++ show v) False
+  Just actual -> counterexample
+    ("Impossibility flag differs for test case " ++ name ++ ". Expected: " ++ show expected ++ " Got: " ++ show actual)
+    (actual == expected)
+
 testInterpreter :: Program -> Either CompilerError IREnv -> TestCase -> Property
-testInterpreter p compiledE (ProbTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = ioProperty $ do
+testInterpreter p compiledE (ProbTestCase name sample params (VFloat expectedProb, VFloat expectedDim) expImposs) = ioProperty $ do
   result <- try (let r = compiledE >>= \c -> runProbC p c params sample in evaluate (length (show r)) >> return r) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
-  return $ case result of 
-    Right (Right (VProbDim outProb outDim)) -> 
+  return $ case result of
+    Right (Right res@(VProbDim outProb outDim)) ->
       counterexample ("Probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < probTolerance) .&&.
-        counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim)
+        counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim) .&&.
+        checkImposs name expImposs res
     Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
     Right (Left err) -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
     Left err -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
-testInterpreter p compiledE (CumulTestCase name sample params (VFloat expectedProb, VFloat expectedDim)) = ioProperty $ do
+testInterpreter p compiledE (CumulTestCase name sample params (VFloat expectedProb, VFloat expectedDim) expImposs) = ioProperty $ do
   result <- try (let r = compiledE >>= \c -> runIntegC p c params sample in evaluate (length (show r)) >> return r) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
-  return $ case result of 
-    Right (Right (VProbDim outProb outDim)) -> 
+  return $ case result of
+    Right (Right res@(VProbDim outProb outDim)) ->
       counterexample ("Cmulative probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < probTolerance) .&&.
-        counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim)
+        counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim) .&&.
+        checkImposs name expImposs res
     Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
     Right (Left err) -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
     Left err -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
@@ -348,7 +364,7 @@ juliaModuleTestCases :: String -> [TestCase] -> String
 juliaModuleTestCases modName tcs =
   modName ++ ".main_gen(" ++ intercalate ", " (map juliaVal exampleParams) ++ ")\n" ++
   concat (map (\tc ->
-    let (name, sample, params, outProb, outDim) = unpackTestCase tc
+    let (name, sample, params, outProb, outDim, expImposs) = unpackTestCase tc
         call = modName ++ "." ++ mainName tc ++ "(" ++ juliaVal sample ++ ", " ++ intercalate ", " (map juliaVal params) ++ ")"
     in "tmp = " ++ call ++ "\n\
        \if abs(tmp[1] - " ++ juliaVal outProb ++ ") > " ++ show probTolerance ++ "\n\
@@ -356,32 +372,51 @@ juliaModuleTestCases modName tcs =
        \end\n\
        \if tmp[1] != 0 && tmp[2][1] != " ++ juliaVal outDim ++ "\n\
        \  error(\"Dimensionality wrong: \" * string(tmp[2][1]) * \"/=\" * string(" ++ juliaVal outDim ++ ") * \"in test case " ++ name ++ "\")\n\
-       \end\n"
+       \end\n" ++ juliaImpossCheck name expImposs
     ) tcs)
   where
-    (_, _, exampleParams, _, _) = unpackTestCase (head tcs)
-    unpackTestCase (ProbTestCase name sample params (outProb, outDim)) = (name, sample, params, outProb, outDim)
-    unpackTestCase (CumulTestCase name sample params (outProb, outDim)) = (name, sample, params, outProb, outDim)
-    mainName (ProbTestCase _ _ _ _) = "main_prob"
-    mainName (CumulTestCase _ _ _ _) = "main_integ"
+    (_, _, exampleParams, _, _, _) = unpackTestCase (head tcs)
+    unpackTestCase (ProbTestCase name sample params (outProb, outDim) imp) = (name, sample, params, outProb, outDim, imp)
+    unpackTestCase (CumulTestCase name sample params (outProb, outDim) imp) = (name, sample, params, outProb, outDim, imp)
+    mainName (ProbTestCase _ _ _ _ _) = "main_prob"
+    mainName (CumulTestCase _ _ _ _ _) = "main_integ"
+
+-- The emitted result is (prob, (dim, impossible)), so the impossibility flag --
+-- checked only when the .tst line declared an expectation for it -- sits at
+-- tmp[2][2].
+juliaImpossCheck :: String -> Maybe Bool -> String
+juliaImpossCheck _ Nothing = ""
+juliaImpossCheck name (Just expected) =
+  "if tmp[2][2] != " ++ juliaVal (VBool expected) ++ "\n\
+  \  error(\"Impossibility flag wrong: \" * string(tmp[2][2]) * \"/=\" * string(" ++ juliaVal (VBool expected) ++ ") * \"in test case " ++ name ++ "\")\n\
+  \end\n"
 
 pythonTestCode :: String -> [TestCase] -> String
 pythonTestCode src tcs = 
   unpack (replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n") (pack src)) ++ "\n" ++   -- Importing pyTorch is really slow and not needed
   "main.generate(" ++ intercalate ", " (map pyVal exampleParams) ++ ")\n" ++
-  concat (map (\tc -> let (name, sample, params, outProb, outDim) = unpackTestCase tc in 
+  concat (map (\tc -> let (name, sample, params, outProb, outDim, expImposs) = unpackTestCase tc in
     "tmp = " ++ mainName tc ++ "(" ++  pyVal sample ++ ", " ++ intercalate ", " (map pyVal params) ++ ")\n\
     \if abs(tmp[0] - " ++ pyVal outProb ++ ") > " ++ show probTolerance ++ ":\n\
     \  raise ValueError(\"Probability wrong: \" + str(tmp[0]) + \"!=\" + str(" ++ pyVal outProb ++ ") + \"in test case " ++ name ++ "\")\n\
     \if tmp[0] != 0 and tmp[1][0] != " ++ pyVal outDim ++ ":\n\
     \  raise ValueError(\"Dimensionality wrong: \" + str(tmp[1][0]) + \"/=\" + str(" ++ pyVal outDim ++ ") + \"in test case " ++ name ++ "\")\n\
-    \") tcs)
-  where 
-    (_, _, exampleParams, _, _) = unpackTestCase (head tcs)
-    unpackTestCase (ProbTestCase name sample params (outProb, outDim)) = (name, sample, params, outProb, outDim)
-    unpackTestCase (CumulTestCase name sample params (outProb, outDim)) = (name, sample, params, outProb, outDim)
-    mainName (ProbTestCase _ _ _ _) = "main.forward"
-    mainName (CumulTestCase _ _ _ _) = "main.integrate"
+    \" ++ pyImpossCheck name expImposs) tcs)
+  where
+    (_, _, exampleParams, _, _, _) = unpackTestCase (head tcs)
+    unpackTestCase (ProbTestCase name sample params (outProb, outDim) imp) = (name, sample, params, outProb, outDim, imp)
+    unpackTestCase (CumulTestCase name sample params (outProb, outDim) imp) = (name, sample, params, outProb, outDim, imp)
+    mainName (ProbTestCase _ _ _ _ _) = "main.forward"
+    mainName (CumulTestCase _ _ _ _ _) = "main.integrate"
+
+-- The emitted result is (prob, (dim, impossible)), so the impossibility flag --
+-- checked only when the .tst line declared an expectation for it -- sits at
+-- tmp[1][1].
+pyImpossCheck :: String -> Maybe Bool -> String
+pyImpossCheck _ Nothing = ""
+pyImpossCheck name (Just expected) =
+  "if bool(tmp[1][1]) != " ++ pyVal (VBool expected) ++ ":\n\
+  \  raise ValueError(\"Impossibility flag wrong: \" + str(tmp[1][1]) + \"!=\" + str(" ++ pyVal (VBool expected) ++ ") + \"in test case " ++ name ++ "\")\n"
 
 -- ===========================================================================
 -- Batched PyTorch differential test (design pytorch-tensorizer, M2)
@@ -484,8 +519,8 @@ batchGroups isNeural tcs = mapM build grouped
                             , bgExpProb = [ep | (_, _, _, ep, _) <- g]
                             , bgExpDim  = [ed | (_, _, _, _, ed) <- g] }
     build [] = Nothing
-    asQuery (ProbTestCase _ s ps (VFloat ep, VFloat ed))  = Just (False, ps, s, ep, ed)
-    asQuery (CumulTestCase _ s ps (VFloat ep, VFloat ed)) = Just (True,  ps, s, ep, ed)
+    asQuery (ProbTestCase _ s ps (VFloat ep, VFloat ed) _)  = Just (False, ps, s, ep, ed)
+    asQuery (CumulTestCase _ s ps (VFloat ep, VFloat ed) _) = Just (True,  ps, s, ep, ed)
     asQuery _ = Nothing
 
 -- | Batch the positional symbol arguments of a neural program across points.
