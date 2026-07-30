@@ -263,6 +263,12 @@ generateExpression (IRDensity dist x) = do
 generateExpression (IRCumulative dist x) = do
     e <- generateExpression x
     return $ "cumulative_" ++ show dist ++ "(" ++ e ++ ")"
+generateExpression (IRLogDensity dist x) = do
+    e <- generateExpression x
+    return $ "log_density_" ++ show dist ++ "(" ++ e ++ ")"
+generateExpression (IRLogCumulative dist x) = do
+    e <- generateExpression x
+    return $ "log_cumulative_" ++ show dist ++ "(" ++ e ++ ")"
 generateExpression (IRSample IRNormal) =
     return "randn()"
 generateExpression (IRSample IRUniform) =
@@ -285,6 +291,10 @@ generateExpression (IREnumSum name enumRange expr) = do
     e <- generateExpression expr
     var <- addOrGetFromGlobalStorage enumRange
     return $ "sum(map((" ++ name ++ " -> " ++ e ++ "), multiValueToValueList(" ++ var ++")))"
+generateExpression (IRLogEnumSum name enumRange expr) = do
+    e <- generateExpression expr
+    var <- addOrGetFromGlobalStorage enumRange
+    return $ "logsumexp(map((" ++ name ++ " -> " ++ e ++ "), multiValueToValueList(" ++ var ++")))"
 generateExpression (IRIndex lst idx) = do
     l <- generateExpression lst
     i <- generateExpression idx

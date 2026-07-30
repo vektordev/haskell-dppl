@@ -256,6 +256,8 @@ containsIf (IRIsLeft x)    = containsIf x
 containsIf (IRIsRight x)   = containsIf x
 containsIf (IRDensity _ x) = containsIf x
 containsIf (IRCumulative _ x) = containsIf x
+containsIf (IRLogDensity _ x) = containsIf x
+containsIf (IRLogCumulative _ x) = containsIf x
 containsIf (IRMap f x)     = containsIf f || containsIf x
 containsIf (IRIndex l i)   = containsIf l || containsIf i
 containsIf (IRCons h t)    = containsIf h || containsIf t
@@ -334,6 +336,12 @@ generateExpressionLifted (IRDensity dist x) = do
 generateExpressionLifted (IRCumulative dist x) = do
   (ss, sx) <- generateExpressionLifted x
   return (ss, str ("cumulative_" ++ pyDistName dist) . str "(" . sx . str ")")
+generateExpressionLifted (IRLogDensity dist x) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, str ("log_density_" ++ pyDistName dist) . str "(" . sx . str ")")
+generateExpressionLifted (IRLogCumulative dist x) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, str ("log_cumulative_" ++ pyDistName dist) . str "(" . sx . str ")")
 generateExpressionLifted (IRMap f x) = do
   (fs, fe) <- generateExpressionLifted f
   (xs, xe) <- generateExpressionLifted x
@@ -497,6 +505,12 @@ generateExpression (IRDensity dist x) = do
 generateExpression (IRCumulative dist x) = do
   sx <- generateExpression x
   return ("cumulative_" ++ pyDistName dist ++ "(" ++ sx ++ ")")
+generateExpression (IRLogDensity dist x) = do
+  sx <- generateExpression x
+  return ("log_density_" ++ pyDistName dist ++ "(" ++ sx ++ ")")
+generateExpression (IRLogCumulative dist x) = do
+  sx <- generateExpression x
+  return ("log_cumulative_" ++ pyDistName dist ++ "(" ++ sx ++ ")")
 generateExpression (IRSample IRNormal) =
   return "randn()"
 generateExpression (IRSample IRUniform) =
@@ -515,6 +529,10 @@ generateExpression (IREnumSum name enumRange expr) = do
   e <- generateExpression expr
   varName <- addOrGetFromGlobalStorage enumRange
   return ("sum(map((lambda " ++ name ++ ": " ++ e ++ "), multiValueToValueList(self." ++ varName ++ ")))")
+generateExpression (IRLogEnumSum name enumRange expr) = do
+  e <- generateExpression expr
+  varName <- addOrGetFromGlobalStorage enumRange
+  return ("logsumexp(map((lambda " ++ name ++ ": " ++ e ++ "), multiValueToValueList(self." ++ varName ++ ")))")
 generateExpression (IRIsPossible multiVal expr) = do
   e <- generateExpression expr
   varName <- addOrGetFromGlobalStorage multiVal

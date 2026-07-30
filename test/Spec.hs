@@ -110,6 +110,18 @@ corpusTests probPool = localOption (QuickCheckMaxRatio 20) $ testGroup "Corpus"
   , testProperty "MarginalAnyIsOne" (forAllNamed (checkProbAny defaultEnvs))
   , testProperty "TopKZeroThreshMatchesExact" (forAllNamed (checkTopKZeroMatchesExact topK0Envs defaultEnvs))
   , testProperty "TopKNeverInflates" (forAllNamed (checkTopKNeverInflates topK01Envs defaultEnvs))
+  -- task log-space-probability-computation: compiling with logSpace=True makes
+  -- p()/cdf() return a log-probability instead of a linear one, so exp(actual)
+  -- must reproduce the same corpus expectation as the linear compile. Excludes
+  -- the programs whose inference routes through a subsystem the task
+  -- deliberately left linear-only (set-valued witnesses / plan-guided lazy
+  -- enumeration -- see the Semiring doc comment in IRCompiler.hs): those
+  -- subsystems ignore the logSpace flag and keep returning a linear value, so
+  -- exp(already-linear) would not match by construction. This is itself the
+  -- task's invasiveness evidence, not a bug -- see the task doc/design update.
+  , testProperty "LogSpaceMatchesLinear"
+      (forAllNamedIn (filter ((`notElem` logSpaceUncoveredPrograms) . fst) probPool)
+        (checkLogSpaceMatchesLinear logEnvs))
   ]
   where
     -- Compile each corpus program once per config, shared by every invariant and
@@ -121,6 +133,7 @@ corpusTests probPool = localOption (QuickCheckMaxRatio 20) $ testGroup "Corpus"
     topK0Envs   = compileCorpusPrograms (topKConf 0.0) progs
     topK01Envs  = compileCorpusPrograms (topKConf 0.1) progs
     bcEnvs      = compileCorpusPrograms bcConf progs
+    logEnvs     = compileCorpusPrograms (defaultCompilerConfig {logSpace = True}) progs
     -- Enumerate the whole (filtered) pool deterministically so any failing corpus
     -- case surfaces on every run, rather than only when a random draw selects it.
     forAllNamedIn pool f = once $ conjoin [counterexample ("corpus case: " ++ n) (f n tc) | (n, tc) <- pool]
@@ -203,6 +216,40 @@ checkProbTestCasesWithBC envs n (p, inp, params, (VFloat out, VFloat outDim)) = 
     VProbDimBC a d _ -> return $
       counterexample (show a ++ "/=" ++ show out) (property $ abs (a - out) < probTolerance)
       .&&. (a === 0 .||. d === outDim)
+    _ -> return $ counterexample "Return type was no tuple" False
+
+-- | Corpus programs whose inference reaches a subsystem the log-space task
+-- deliberately left linear-only (set-valued witnesses, i.e. 'invertToWorlds'/
+-- 'measureWorld'/'measureSet'/'cdfAtBound' -- programs whose observation
+-- cannot be point-inverted onto the bound variable): those always compute a
+-- linear value regardless of the 'logSpace' config flag (see the Semiring doc
+-- comment and the 'linearSemiring'-pinned call sites in IRCompiler.hs), so
+-- 'checkLogSpaceMatchesLinear' fails on them by construction --
+-- exp(already-linear-not-log) is not the corpus expectation. This list was
+-- determined empirically (not guessed) by running the property against the
+-- WHOLE interpreter-routed non-neural corpus pool with a throwaway diagnostic
+-- harness and recording every mismatch; it IS the invasiveness evidence the
+-- task's acceptance criteria ask for, and every mismatch was a value
+-- disagreement, never a crash. No plan-guided-lazy-enumeration
+-- ("planEnum*"/shared-latent) corpus program appears here -- every one of
+-- those already routes through the log-aware core combinators and passes.
+logSpaceUncoveredPrograms :: [String]
+logSpaceUncoveredPrograms =
+  [ "letProbIntervalPair", "letProbIf", "letProbCmp", "letProbAbsNormal"
+  , "setWitnessTupleDisjointFields", "letBoundEitherDestructure"
+  , "eitherIfDeconstructObserve"
+  ]
+
+checkLogSpaceMatchesLinear :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
+checkLogSpaceMatchesLinear envs n (p, inp, params, (VFloat out, VFloat outDim)) = ioProperty $ do
+  let actualOutput = irDensityC envs n p params inp
+  case actualOutput of
+    VProbDim logP d ->
+      let linP = exp logP in
+      return $
+        counterexample (show linP ++ " (= exp(" ++ show logP ++ ")) /= " ++ show out)
+          (property $ abs (linP - out) < probTolerance)
+        .&&. (linP === 0 .||. d === outDim)
     _ -> return $ counterexample "Return type was no tuple" False
 
 checkProbAny :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property

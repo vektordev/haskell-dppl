@@ -1,6 +1,6 @@
 module JuliaSPPLLib
 
-export density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, mapList, eq, isPossible, isclose, indexOf, listProd, T, Either, Left, Right, fromLeft, fromRight, multiValueToValueList,==
+export density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, log_density_IRUniform, log_density_IRNormal, log_cumulative_IRUniform, log_cumulative_IRNormal, logsumexp, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, mapList, eq, isPossible, isclose, indexOf, listProd, T, Either, Left, Right, fromLeft, fromRight, multiValueToValueList,==
 
 
 function isAny(x)
@@ -43,6 +43,46 @@ function cumulative_IRNormal(x)
     end
     
     return 0.5 * (1 + erf(x / sqrt(2)))
+end
+
+# Native log-pdf/log-cdf (task log-space-probability-computation), computed
+# directly from the formula rather than as log(density_...(x)): the latter
+# would underflow to a true float 0.0 in a deep tail before the log is taken,
+# losing the tail entirely.
+function log_density_IRUniform(x)
+    if 0.0 <= x <= 1.0
+        return 0.0
+    else
+        return -Inf
+    end
+end
+
+function log_cumulative_IRUniform(x)
+    c = cumulative_IRUniform(x)
+    return c <= 0.0 ? -Inf : log(c)
+end
+
+function log_density_IRNormal(x)
+    return -0.5 * x^2 - 0.5 * log(2 * pi)
+end
+
+function log_cumulative_IRNormal(x)
+    c = cumulative_IRNormal(x)
+    return c <= 0.0 ? -Inf : log(c)
+end
+
+# Log-sum-exp reduction backing IRLogEnumSum's emitted code: the log-space
+# sibling of a plain sum() over enumerated per-value log-probabilities.
+function logsumexp(xs)
+    xs = collect(xs)
+    if isempty(xs)
+        return -Inf
+    end
+    m = maximum(xs)
+    if m == -Inf
+        return -Inf
+    end
+    return m + log(sum(exp(x - m) for x in xs))
 end
 
 function eq(a, b)

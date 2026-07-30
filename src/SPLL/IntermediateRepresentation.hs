@@ -216,6 +216,18 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               | IRIsRight IRExpr
               | IRDensity Distribution IRExpr
               | IRCumulative Distribution IRExpr
+              -- | Native log-density / log-cumulative leaves for the two
+              -- builtin distributions (task log-space-probability-computation).
+              -- Distinct from @log (IRDensity ...)@: the latter computes the
+              -- linear pdf (which underflows in a deep tail, e.g. exp(-z^2/2)
+              -- for large z) and only then takes the log, so precision is
+              -- already lost by the time the log is taken. These nodes let
+              -- each backend emit the log-pdf/log-cdf formula directly (e.g.
+              -- Normal log-pdf = -0.5*z^2 - 0.5*log(2*pi)), so a compile-time
+              -- log-space mode never round-trips through a linear value that
+              -- could have underflowed to zero first.
+              | IRLogDensity Distribution IRExpr
+              | IRLogCumulative Distribution IRExpr
               | IRSample Distribution
               | IRLetIn Varname IRExpr IRExpr
               | IRVar Varname
@@ -224,6 +236,14 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               -- auxiliary construct to aid enumeration: bind each enumerated Value to the Varname and evaluate the subexpr. Sum results.
               -- maybe we can instead move this into some kind of standard library.
               | IREnumSum Varname MultiValue IRExpr
+              -- | Log-space sibling of 'IREnumSum': sums a discrete mass over
+              -- an enumerated support by log-sum-exp instead of a plain add,
+              -- so a "long enumeration" (the second motivating case in the
+              -- task, alongside deep products) never forms the linear sum of
+              -- many small probabilities. Bound variable and body semantics
+              -- otherwise mirror 'IREnumSum' exactly (same optimizer/CSE
+              -- treatment, same scoping).
+              | IRLogEnumSum Varname MultiValue IRExpr
               | IRIsPossible MultiValue IRExpr
               | IRIndex IRExpr IRExpr
               | IRError String
@@ -267,11 +287,35 @@ data CompilerConfig = CompilerConfig {
   -- pytorch-tensorizer). M1 wires only the backend-agnostic select pass, which
   -- retags data-dependent elementwise ifs to SelectIf; scalar lowering is
   -- unchanged, so today this is a behavioural no-op over the tensor fragment.
-  batched :: Bool
+  batched :: Bool,
+  -- When True (CLI --logSpace), compute probabilities in log space rather
+  -- than linear space (task log-space-probability-computation, design
+  -- materialized-marginals-semiring Decision beta): 'IRCompiler's PResult
+  -- combinators (density/mass/prodP/mixP/enumSumP/guardP/scaleCoV/
+  -- compareValueExpr) build and combine log-probabilities instead of linear
+  -- ones (times becomes IROp OpPlus, mixture-sum becomes log-sum-exp, the
+  -- multiplicative unit 1.0 becomes the additive unit 0.0, the zero
+  -- probability becomes negative infinity), and the two builtin continuous
+  -- distributions emit native log-pdf/log-cdf IR leaves ('IRLogDensity'/
+  -- 'IRLogCumulative') rather than logging an already-computed linear value,
+  -- so a deep tail never underflows to a hard float zero before its log is
+  -- taken. Motivation: deep conjunctions and long enumerations of small
+  -- probabilities underflow in linear space long before they are numerically
+  -- meaningless. Scope (see the task's written invasiveness verdict): the
+  -- core PResult combinators, the Uniform/Normal leaves, discrete
+  -- value-equality masses ('compareValueExpr'), and enumerable-InjF sums
+  -- ('enumSumP') are log-aware; 'ReadNN'/'AutoNeural' neural decoder logit
+  -- reads, the set-witness/plan-enum continuous measurement machinery, and
+  -- batched mode are NOT -- they remain linear-only, so a program reaching
+  -- those paths under 'logSpace' will not get the numerical-stability
+  -- benefit there (and, for set-witness/plan-enum specifically, may combine
+  -- a linear leaf with a log-space combinator and produce a wrong answer;
+  -- no compile-time refusal guards this yet). Independent of 'batched'.
+  logSpace :: Bool
 } deriving (Show)
 
 defaultCompilerConfig :: CompilerConfig
-defaultCompilerConfig = CompilerConfig {countBranches = False, topKThreshold = Nothing, optimizerLevel = 2, verbose = 0, pruneAnyChecks = False, noIntegrate=False, noProbability=False, noGenerate=False, showIntermediates=False, checkQueryType=True, batched=False}
+defaultCompilerConfig = CompilerConfig {countBranches = False, topKThreshold = Nothing, optimizerLevel = 2, verbose = 0, pruneAnyChecks = False, noIntegrate=False, noProbability=False, noGenerate=False, showIntermediates=False, checkQueryType=True, batched=False, logSpace=False}
 --3: convert algortihm-and-type-annotated Exprs into abstract representation of explicit computation:
 --    Fold enum ranges, algorithms, etc. into a representation of computation that can be directly converted into code.
 
@@ -310,12 +354,15 @@ getIRSubExprs (IRIsRight a) = [a]
 getIRSubExprs (IRIsPossible _ a) = [a]
 getIRSubExprs (IRDensity _ a) = [a]
 getIRSubExprs (IRCumulative _ a) = [a]
+getIRSubExprs (IRLogDensity _ a) = [a]
+getIRSubExprs (IRLogCumulative _ a) = [a]
 getIRSubExprs (IRSample _) = []
 getIRSubExprs (IRLetIn _ a b) = [a, b]
 getIRSubExprs (IRVar _) = []
 getIRSubExprs (IRLambda _ a) = [a]
 getIRSubExprs (IRApply a b) = [a, b]
 getIRSubExprs (IREnumSum _ _ a) = [a]
+getIRSubExprs (IRLogEnumSum _ _ a) = [a]
 getIRSubExprs (IRIndex a b) = [a, b]
 getIRSubExprs (IRError _) = []
 getIRSubExprs (IRConformsTo _ a) = [a]
@@ -388,10 +435,13 @@ irDescend f x = case x of
   (IRIsPossible val expr) -> IRIsPossible val (f expr)
   (IRDensity a expr) -> IRDensity a (f expr)
   (IRCumulative a expr) -> IRCumulative a (f expr)
+  (IRLogDensity a expr) -> IRLogDensity a (f expr)
+  (IRLogCumulative a expr) -> IRLogCumulative a (f expr)
   (IRLetIn name left right) -> IRLetIn name (f left) (f right)
   (IRLambda name scope) -> IRLambda name (f scope)
   (IRApply a b) -> IRApply (f a) (f b)
   (IREnumSum name val scope) -> IREnumSum name val (f scope)
+  (IRLogEnumSum name val scope) -> IRLogEnumSum name val (f scope)
   (IRIndex left right) -> IRIndex (f left) (f right)
   (IRTheta a i) -> IRTheta (f a) i
   (IRSubtree a i) -> IRSubtree (f a) i
@@ -430,6 +480,9 @@ irPrintFlat (IRIsRight _) = "IRIsRight"
 irPrintFlat (IRIsPossible _ _) = "IRIsPossible"
 irPrintFlat (IRDensity _ _) = "IRDensity"
 irPrintFlat (IRCumulative _ _) = "IRCumulative"
+irPrintFlat (IRLogDensity _ _) = "IRLogDensity"
+irPrintFlat (IRLogCumulative _ _) = "IRLogCumulative"
+irPrintFlat (IRLogEnumSum _ _ _) = "IRLogEnumSum"
 irPrintFlat (IRSample _) = "IRSample"
 irPrintFlat (IRLetIn _ _ _) = "IRLetIn"
 irPrintFlat (IRVar _) = "IRVar"

@@ -397,8 +397,11 @@ freeInIR v (IRElementOf a b)    = freeInIR v a  || freeInIR v b
 freeInIR v (IRIndex a b)        = freeInIR v a  || freeInIR v b
 freeInIR v (IRMap f x)          = freeInIR v f  || freeInIR v x
 freeInIR v (IREnumSum n _ body) = v /= n && freeInIR v body
+freeInIR v (IRLogEnumSum n _ body) = v /= n && freeInIR v body
 freeInIR v (IRDensity _ x)      = freeInIR v x
 freeInIR v (IRCumulative _ x)   = freeInIR v x
+freeInIR v (IRLogDensity _ x)   = freeInIR v x
+freeInIR v (IRLogCumulative _ x) = freeInIR v x
 freeInIR v (IRIsPossible _ x)   = freeInIR v x
 freeInIR v (IRTheta x _)        = freeInIR v x
 freeInIR v (IRSubtree x _)      = freeInIR v x
@@ -467,7 +470,7 @@ toIRInferenceSave meta cumulative (Expr t (Lambda name subExpr)) sample = do
   return (detP (IRLambda name irTuple))
 toIRInferenceSave meta cumulative expr sample = do
   (res, letins) <- lift $ runWriterT $ toIRInference meta cumulative expr sample
-  return (anySafe sample (generateLetInExpr letins) res)
+  return (anySafe (semiringOf meta) sample (generateLetInExpr letins) res)
 
 
 -- | Dispatch to the appropriate param extractor based on PType.
@@ -546,7 +549,7 @@ normalDiffCdfAtZero meta left right = do
   (muR, sR) <- toIRNormalParams meta right
   let mu = IROp OpSub muL muR
       sigma = irSqrt (IROp OpPlus (IROp OpMult sL sL) (IROp OpMult sR sR))
-  return (IRCumulative IRNormal (IROp OpDiv (IROp OpSub (IRConst (VFloat 0)) mu) sigma))
+  return (distCumulative (semiringOf meta) IRNormal (IROp OpDiv (IROp OpSub (IRConst (VFloat 0)) mu) sigma))
 
 -- | Recursively extract (mu_log, sigma) as IRExprs from a PLogNormal-typed expression.
 toIRLogNormalParams :: CompilerMetadata -> Expr -> CompilerMonad (IRExpr, IRExpr)
@@ -613,56 +616,58 @@ toIRInference :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PRe
 toIRInference meta True expr sample | rType (getTypeInfo expr) == TBool = do
   false <- toIRInference meta False expr (IRConst (VBool False))
   -- cdf(True) = 1 is always attainable; cdf(False) inherits the False case.
-  return (PResult (IRIf sample const1 (rProb false)) const0 (rBranches false)
+  return (PResult (IRIf sample (srOne (semiringOf meta)) (rProb false)) const0 (rBranches false)
                   (IRIf sample constFalseIR (rImposs false)))
 toIRInference meta False e sample | pType (getTypeInfo e) == PNormal, not (hasOwnInferenceHandler (adtDecls meta) e) = do
   (mu, sigma) <- toIRNormalParams meta e
-  let p = IROp OpDiv (IRDensity IRNormal (IROp OpDiv (IROp OpSub sample mu) sigma)) sigma
+  let p = scaledNormalDensity (semiringOf meta) (IROp OpDiv (IROp OpSub sample mu) sigma) [sigma]
   return (density p sample)
 toIRInference meta True e sample | pType (getTypeInfo e) == PNormal, not (hasOwnInferenceHandler (adtDecls meta) e) = do
   (mu, sigma) <- toIRNormalParams meta e
-  return (mass (IRCumulative IRNormal (IROp OpDiv (IROp OpSub sample mu) sigma)))
+  return (mass (distCumulative (semiringOf meta) IRNormal (IROp OpDiv (IROp OpSub sample mu) sigma)))
 toIRInference meta False e sample | pType (getTypeInfo e) == PLogNormal, not (hasOwnInferenceHandler (adtDecls meta) e) = do
   (mu, sigma) <- toIRLogNormalParams meta e
+  let sr = semiringOf meta
   let correctedSample = IROp OpDiv (IROp OpSub (IRUnaryOp OpLog sample) mu) sigma
-  let p = IROp OpDiv (IRDensity IRNormal correctedSample) (IROp OpMult sigma sample)
+  let p = scaledNormalDensity sr correctedSample [sigma, sample]
   let positive = IROp OpGreaterThan sample const0
-  let negativeGuard x = IRIf positive x const0
+  let negativeGuard x = IRIf positive x (srZero sr)
   -- A non-positive sample is outside the lognormal's support: impossible, not
   -- merely unlikely. Support boundaries are the one way a *density* leaf can be
   -- a structural zero, and they are known statically here.
   return (impossibleWhen (notIR positive) (onProb negativeGuard (density p sample)))
 toIRInference meta True e sample | pType (getTypeInfo e) == PLogNormal, not (hasOwnInferenceHandler (adtDecls meta) e) = do
   (mu, sigma) <- toIRLogNormalParams meta e
+  let sr = semiringOf meta
   let correctedSample = IROp OpDiv (IROp OpSub (IRUnaryOp OpLog sample) mu) sigma
   let positive = IROp OpGreaterThan sample const0
-  let negativeGuard x = IRIf positive x const0
-  return (impossibleWhen (notIR positive) (mass (negativeGuard (IRCumulative IRNormal correctedSample))))
+  let negativeGuard x = IRIf positive x (srZero sr)
+  return (impossibleWhen (notIR positive) (mass (negativeGuard (distCumulative sr IRNormal correctedSample))))
 -- Distribution primitives (reserved-name Vars). Normal usually reaches the PNormal
 -- catch-all above; these equations are the direct density/CDF leaves for Uniform and
 -- the defensive Normal fallback.
-toIRInference _ False (Expr _ (Var "Normal")) sample = return (density (IRDensity IRNormal sample) sample)
+toIRInference meta False (Expr _ (Var "Normal")) sample = return (density (distDensity (semiringOf meta) IRNormal sample) sample)
 -- Unlike Normal, Uniform has bounded support: off it the density is not a tiny
 -- tail value but an impossible event, and saying so structurally is what keeps
 -- 'mixWith' from having to read it back off the zero.
-toIRInference _ False (Expr _ (Var "Uniform")) sample =
-  return (impossibleWhen (outsideUnitInterval sample) (density (IRDensity IRUniform sample) sample))
-toIRInference _ True (Expr _ (Var "Normal")) sample = return (mass (IRCumulative IRNormal sample))
-toIRInference _ True (Expr _ (Var "Uniform")) sample = return (mass (IRCumulative IRUniform sample))
+toIRInference meta False (Expr _ (Var "Uniform")) sample =
+  return (impossibleWhen (outsideUnitInterval sample) (density (distDensity (semiringOf meta) IRUniform sample) sample))
+toIRInference meta True (Expr _ (Var "Normal")) sample = return (mass (distCumulative (semiringOf meta) IRNormal sample))
+toIRInference meta True (Expr _ (Var "Uniform")) sample = return (mass (distCumulative (semiringOf meta) IRUniform sample))
 toIRInference _ _ (Expr _ (Constant (VError e))) _ = return (detP (IRError e))
-toIRInference _ False (Expr TypeInfo {rType=rt} (Constant value)) sample = do
+toIRInference meta False (Expr TypeInfo {rType=rt} (Constant value)) sample = do
   let comp = case rt of
               TFloat   -> IROp OpApprox sample (IRConst (fmap failConversion value))
               TVarR _  -> IROp OpApprox sample (IRConst (fmap failConversion value))
               _        -> IROp OpEq sample (IRConst (fmap failConversion value))
-  return (indicatorP comp)
-toIRInference _ True (Expr TypeInfo {rType=rt} (Constant value)) sample = return (mass (compareValueExpr rt (IRConst (valueToIR value)) sample))
+  return (indicatorP (semiringOf meta) comp)
+toIRInference meta True (Expr TypeInfo {rType=rt} (Constant value)) sample = return (mass (compareValueExpr (semiringOf meta) rt (IRConst (valueToIR value)) sample))
 toIRInference meta True (Expr _ (ThetaI a i)) sample = do
   a' <- toIRGenerate meta a
-  return (mass (IRIf (IROp OpLessThan sample (IRTheta a' i)) const0 const1))
+  return (mass (IRIf (IROp OpLessThan sample (IRTheta a' i)) (srZero (semiringOf meta)) (srOne (semiringOf meta))))
 toIRInference meta False (Expr _ (ThetaI a i)) sample = do
   a' <- toIRGenerate meta a
-  return (indicatorP (IROp OpApprox sample (IRTheta a' i)))
+  return (indicatorP (semiringOf meta) (IROp OpApprox sample (IRTheta a' i)))
 toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
   var_condT_p <- mkVariable "condT"
   var_condF_p <- mkVariable "condF"
@@ -678,9 +683,10 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
   -- so 'prodP'. The branch count is the exception to the product rule: both arms
   -- share ONE condition, so its count is added once, below, and each arm carries
   -- only its own count through the product.
+  let sr = semiringOf meta
   let weighByCond v condRes armRes =
         onBranches (const (rBranches armRes))
-          (prodP (PResult (IRVar v) (rDim condRes) const0 (rImposs condRes)) armRes)
+          (prodP sr (PResult (IRVar v) (rDim condRes) const0 (rImposs condRes)) armRes)
 
   -- We need to restart the monad stack, because variables inside the branches may not be valid outside
   -- E.g. if length(a) > 0 then a[0] else ...
@@ -698,14 +704,24 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
   -- The check is the arm block's guard (see 'shareResult'), so an arm whose
   -- condition cannot hold is never evaluated -- it may hold the recursive call
   -- the check exists to skip.
-  let liveArm c = notIR (IROp OpApprox c const0)
-  mul1Zeroed <- shareResult "armT" [liveArm condTrueExpr] binds1 mul1Raw
-  mul2Zeroed <- shareResult "armF" [liveArm condFalseExpr] binds2 mul2Raw
+  -- Whether the condition's own probability is (approximately) the semiring
+  -- zero: linear 0.0, or log-space negative infinity. Comparing against the
+  -- literal 0.0 here would falsely treat every log-space arm as live (a log
+  -- probability is essentially never exactly 0.0). Log-space uses exact
+  -- equality against -infinity rather than OpApprox's subtraction-based test:
+  -- (-inf) - (-inf) is NaN, which would make an approx-equality test against
+  -- two structurally-impossible operands wrongly report "not equal" (i.e.
+  -- "live"), the wrong direction for a check whose job is to skip evaluating
+  -- an arm that may hold a nonterminating recursive call.
+  let liveArm c = if srLogSpace sr then notIR (IROp OpEq c (srZero sr))
+                                   else notIR (IROp OpApprox c (srZero sr))
+  mul1Zeroed <- shareResult sr "armT" [liveArm condTrueExpr] binds1 mul1Raw
+  mul2Zeroed <- shareResult sr "armF" [liveArm condFalseExpr] binds2 mul2Raw
   let leftBranchesExpr  = rBranches mul1Zeroed
   let rightBranchesExpr = rBranches mul2Zeroed
   -- Shared condition: its branches are counted once for both arms, hence the -1.
   let branches = IROp OpSub (IROp OpPlus (rBranches condTrue) (IROp OpPlus leftBranchesExpr rightBranchesExpr)) const1
-  addRes <- mixP branches mul1Zeroed mul2Zeroed
+  addRes <- mixP sr branches mul1Zeroed mul2Zeroed
   case thr of
     Just _ -> do
       let accTrue = IROp OpMult (accProb meta) (IRVar var_condT_p)
@@ -733,12 +749,12 @@ toIRInference meta False (Expr _ (InjF (Named "gt") [left, right])) sample
   | pType (getTypeInfo left) == PNormal && pType (getTypeInfo right) == PNormal = do
     cdfAt0 <- normalDiffCdfAtZero meta left right
     -- p(left > right) = p(diff > 0) = 1 - cdf(0)
-    return (mass (IRIf sample (IROp OpSub (IRConst $ VFloat 1.0) cdfAt0) cdfAt0))
+    return (mass (IRIf sample (srComplement (semiringOf meta) cdfAt0) cdfAt0))
 toIRInference meta False (Expr _ (InjF (Named "lt") [left, right])) sample
   | pType (getTypeInfo left) == PNormal && pType (getTypeInfo right) == PNormal = do
     cdfAt0 <- normalDiffCdfAtZero meta left right
     -- p(left < right) = p(diff < 0) = cdf(0)
-    return (mass (IRIf sample cdfAt0 (IROp OpSub (IRConst $ VFloat 1.0) cdfAt0)))
+    return (mass (IRIf sample cdfAt0 (srComplement (semiringOf meta) cdfAt0)))
 toIRInference meta False (Expr _ (InjF (Named "gt") [left, right])) sample
   | pType (getTypeInfo left) == Deterministic = do --p(x | const >= var)
     var <- mkVariable "fixed_bound"
@@ -746,7 +762,7 @@ toIRInference meta False (Expr _ (InjF (Named "gt") [left, right])) sample
     setVariables [(var, l)]
     integ <- toIRInference meta True right (IRVar var)
     var2 <- mkVariable "rhs_integral"
-    let returnExpr = IRIf sample (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))
+    let returnExpr = IRIf sample (IRVar var2) (srComplement (semiringOf meta) (IRVar var2))
     setVariables [(var2, rProb integ)]
     -- A comparison's mass, not a structural choice: possible either way.
     return (PResult returnExpr const0 (rBranches integ) constFalseIR)
@@ -756,7 +772,7 @@ toIRInference meta False (Expr _ (InjF (Named "gt") [left, right])) sample
     setVariables [(var, r)]
     integ <- toIRInference meta True left (IRVar var)
     var2 <- mkVariable "lhs_integral"
-    let returnExpr = IRIf sample (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)) (IRVar var2)
+    let returnExpr = IRIf sample (srComplement (semiringOf meta) (IRVar var2)) (IRVar var2)
     setVariables [(var2, rProb integ)]
     -- A comparison's mass, not a structural choice: possible either way.
     return (PResult returnExpr const0 (rBranches integ) constFalseIR)
@@ -767,7 +783,7 @@ toIRInference meta False (Expr _ (InjF (Named "lt") [left, right])) sample
     setVariables [(var, l)]
     integ <- toIRInference meta True right (IRVar var)
     var2 <- mkVariable "rhs_integral"
-    let returnExpr = IRIf sample (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2)) (IRVar var2)
+    let returnExpr = IRIf sample (srComplement (semiringOf meta) (IRVar var2)) (IRVar var2)
     setVariables [(var2, rProb integ)]
     -- A comparison's mass, not a structural choice: possible either way.
     return (PResult returnExpr const0 (rBranches integ) constFalseIR)
@@ -778,7 +794,7 @@ toIRInference meta False (Expr _ (InjF (Named "lt") [left, right])) sample
     integ <- toIRInference meta True left (IRVar var)
     var2 <- mkVariable "lhs_integral"
     setVariables [(var2, rProb integ)]
-    let returnExpr = IRIf sample (IRVar var2) (IROp OpSub (IRConst $ VFloat 1.0) (IRVar var2))
+    let returnExpr = IRIf sample (IRVar var2) (srComplement (semiringOf meta) (IRVar var2))
     -- A comparison's mass, not a structural choice: possible either way.
     return (PResult returnExpr const0 (rBranches integ) constFalseIR)
 toIRInference meta _ (Expr _ (ReadNN name symbol)) sample = do
@@ -802,7 +818,7 @@ toIRInference meta False (Expr TypeInfo{rType=rt} (Apply l v)) sample | pType (g
     TArrow _ _ -> return (detP (IRApply lIR vIR))
     _ -> do
       let comp = IROp OpEq (IRApply lIR vIR) sample
-      return (impossibleWhen (notIR comp) (detP (IRIf comp const1 const0)))
+      return (impossibleWhen (notIR comp) (detP (maskSR (semiringOf meta) comp)))
 -- Deterministic lambda and bound expression CDF
 toIRInference meta True (Expr TypeInfo{rType=rt} (Apply l v)) sample | pType (getTypeInfo l) == Deterministic && pType (getTypeInfo v) == Deterministic = do
   vIR <- toIRGenerate meta v
@@ -811,7 +827,7 @@ toIRInference meta True (Expr TypeInfo{rType=rt} (Apply l v)) sample | pType (ge
   case rt of
     TArrow _ _ -> return (detP (IRApply lIR vIR))
     _ -> do
-      return (detP (compareValueExpr rt (IRApply lIR vIR) sample))
+      return (detP (compareValueExpr (semiringOf meta) rt (IRApply lIR vIR) sample))
 -- Enumerable conditional lambda applied to a probabilistic discrete argument:
 -- enumerate the argument's discrete support and weight each value by its probability,
 -- compiling the body via toIREnumerate. The body need not be deterministic given the
@@ -904,14 +920,15 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
       let guard = IRApply (IRLambda (boundVar ++ tag) invExprGuard) sample
       -- Do probabilistic inference using the applied inverse
       res <- toIRInference meta cumulative v appliedSample
+      let sr = semiringOf meta
       -- Change of variables for the inverse the observation was pushed through.
-      let scaled = scaleCoV cumulative appliedCoV res
+      let scaled = scaleCoV sr cumulative appliedCoV res
       let guarded e zero = IRIf guard e zero
       -- Guarded-to-zero: outside the inverse's domain the whole result is zero,
       -- and must not be evaluated (short-circuit, see 'guard' above).
-      let guardedZero = guardP [guard]
+      let guardedZero = guardP sr [guard]
       case rt of
-        TArrow _ _ -> return (detP (guarded (wrapInLambdas (packResult scaled)) (wrapInLambdas (packResult (detP const0)))))
+        TArrow _ _ -> return (detP (guarded (wrapInLambdas (packResult scaled)) (wrapInLambdas (packResult (detP (srZero sr))))))
         _ | cumulative || not (isLambdaExpr l) || not (null tag) ->
               -- Keep the original single-witness behaviour when: (a) integrate mode, where
               -- tuple/multi-latent CDFs are ill-defined; (b) the callable is not a literal
@@ -953,7 +970,7 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
           let bodyTriple = IRLetIn (toInvCN ++ tag) appliedSample bodyBlock
           let bodyRes = unpackResult bodyTriple
           -- Independent factors: probabilities multiply, dims add, branch counts add.
-          let combined = prodP scaled bodyRes
+          let combined = prodP sr scaled bodyRes
           -- ANY in the witnessing slot (design modality-witnessed-inference, §ANY):
           -- appliedSample is VAny at runtime iff the slot FC recovers this binding
           -- from was queried marginally. If the binding is a "sink" — a single
@@ -1021,11 +1038,11 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt} (InjF (Named name) params
     fieldRes <- probF meta cumulative p (inlineSample invBody)
     return (fieldRes, inlineSample appT)
   -- The fields are independent, so the whole construction is their product.
-  let combined = foldl1 prodP (map fst fieldResults)
+  let combined = foldl1 (prodP (semiringOf meta)) (map fst fieldResults)
   -- Guard the result by the conjunction of all field applicability tests (e.g.
   -- the non-empty-list test carried by the Cons inverses).
   let guardCond = foldr1 (IROp OpAnd) (map snd fieldResults)
-  return (guardP [guardCond] combined)
+  return (guardP (semiringOf meta) [guardCond] combined)
 toIRInference meta cumulative (Expr ti (InjF (Named name) params)) sample | isHigherOrder (adtDecls meta) name = do
   let adts = adtDecls meta
   let resolvedName = resolveInjF (rType ti) name
@@ -1062,7 +1079,7 @@ toIRInference meta cumulative (Expr ti (InjF (Named name) params)) sample | isHi
         _ -> renamedInvExpr
   paramRes <- probF meta cumulative a finalInvExpr
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
-  return (mapResult renVar (guardP [appTest] (scaleCoV cumulative invDerivExpr paramRes)))
+  return (mapResult renVar (guardP (semiringOf meta) [appTest] (scaleCoV (semiringOf meta) cumulative invDerivExpr paramRes)))
 toIRInference meta False e@(Expr TypeInfo {tags=_, rType=rt} (InjF (Named _) params)) sample
   | countProbParams params == 0 = do
   -- There is no probabilistic parameter
@@ -1073,13 +1090,13 @@ toIRInference meta False e@(Expr TypeInfo {tags=_, rType=rt} (InjF (Named _) par
         TVarR _  -> OpApprox
         _        -> OpEq
   let comp = IROp cmp expr sample
-  return (impossibleWhen (notIR comp) (detP (IRIf comp const1 const0)))
+  return (impossibleWhen (notIR comp) (detP (maskSR (semiringOf meta) comp)))
 toIRInference meta True e@(Expr TypeInfo {tags=_, rType=rt} (InjF (Named _) params)) sample
   | countProbParams params == 0 = do
   -- There is no probabilistic parameter
   -- Check whether the value of the function is less than the sample
   expr <- toIRGenerate meta e
-  return (detP (compareValueExpr rt expr sample))
+  return (detP (compareValueExpr (semiringOf meta) rt expr sample))
 toIRInference meta cumulative (Expr TypeInfo {tags=_} (InjF (Named name) params)) sample
   | hasAnyExcept (adtDecls meta) name = do
   -- FPair of the InjF with unique names
@@ -1117,10 +1134,10 @@ toIRInference meta cumulative (Expr TypeInfo {tags=_} (InjF (Named name) params)
   let ifSample a na = if isPosAny then IRIf (IRVar v1) a na else IRIf (IRVar v1) na a
   -- The ANY arm is the marginal minus the excepted value's mass; its branch count
   -- is the excepted value's, not a sum (this is a select between the two arms).
-  subRes <- mixSubP (rBranches exceptRes) anyRes exceptRes
+  subRes <- mixSubP (semiringOf meta) (rBranches exceptRes) anyRes exceptRes
   let ifRes = zipResult ifSample subRes nonAnyRes
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula if dim > 0
-  return (guardP [appTest] (scaleCoV cumulative invDeriv ifRes))
+  return (guardP (semiringOf meta) [appTest] (scaleCoV (semiringOf meta) cumulative invDeriv ifRes))
 -- Single-operand enumeration for forward-only binary InjFs (and/or) when exactly
 -- one operand is deterministic and the other is a single tractable random Bool
 -- (Integrate/PNormal/PLogNormal). Forward-only ops (see 'isForwardOnly') declare
@@ -1146,12 +1163,13 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
   let (detVar, randVar) = if leftDet then (v1, v2) else (v2, v1)
   detIR <- toIRGenerate meta detExprSrc
   setVariables [(detVar, detIR)]
+  let sr = semiringOf meta
   (returnExpr, binds) <- lift $ runWriterT $ do
     pRand <- rProb <$> toIRInference meta False randExprSrc (IRVar randVar)
-    return (IRIf (IROp OpEq f sample) pRand (IRConst (VFloat 0)))
+    return (IRIf (IROp OpEq f sample) pRand (srZero sr))
   let (outerBinds, body') = hoistInvariantBindings randVar (buildLetIns binds returnExpr)
   setVariables outerBinds
-  opaqueMass (IREnumSum randVar enumList body') const0
+  opaqueMass sr (enumSumNode sr randVar enumList body') const0
 -- Cumulative (cdf) counterpart of the single-operand enumeration case above.
 toIRInference meta True (Expr TypeInfo {rType=rt} (InjF (Named name) [left, right])) sample
   | isForwardOnly (adtDecls meta) (resolveInjF rt name)
@@ -1168,12 +1186,13 @@ toIRInference meta True (Expr TypeInfo {rType=rt} (InjF (Named name) [left, righ
   let (detVar, randVar) = if leftDet then (v1, v2) else (v2, v1)
   detIR <- toIRGenerate meta detExprSrc
   setVariables [(detVar, detIR)]
+  let sr = semiringOf meta
   (returnExpr, binds) <- lift $ runWriterT $ do
     pRand <- rProb <$> toIRInference meta False randExprSrc (IRVar randVar)
-    return (IRIf (IROp OpLessThan sample f) (IRConst (VFloat 0)) pRand)
+    return (IRIf (IROp OpLessThan sample f) (srZero sr) pRand)
   let (outerBinds, body') = hoistInvariantBindings randVar (buildLetIns binds returnExpr)
   setVariables outerBinds
-  opaqueMass (IREnumSum randVar enumList body') const0
+  opaqueMass sr (enumSumNode sr randVar enumList body') const0
 toIRInference meta cumulative (Expr TypeInfo {tags=_, rType=rt} (InjF (Named name) params)) sample
   | countProbParams params == 1 = do
   let resolvedName = resolveInjF rt name
@@ -1200,7 +1219,7 @@ toIRInference meta cumulative (Expr TypeInfo {tags=_, rType=rt} (InjF (Named nam
   -- Get the probabilistic inference expression of the non-deterministic subexpression
   paramRes <- probF meta cumulative (params !! probIdx) invExpr
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula if dim > 0
-  return (guardP [appTest] (scaleCoV cumulative invDeriv paramRes))
+  return (guardP (semiringOf meta) [appTest] (scaleCoV (semiringOf meta) cumulative invDeriv paramRes))
 -- Enumerate-both discrete path for forward-only binary InjFs (and/or). No point
 -- inverse exists, so loop the |L|x|R| grid and keep cells where forward(l,r) == sample,
 -- accumulating pLeft(l) * pRight(r). Mirrors the cumulative double-enum path below.
@@ -1214,15 +1233,16 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
   fPair <- instantiate mkVariable (adtDecls meta) resolvedName
   let FPair fwd _ = fPair
   let FDecl {inputVars=[v1, v2], body=f} = fwd
+  let sr = semiringOf meta
   (returnExpr, binds) <- lift $ runWriterT $ do
     pLeft <- rProb <$> toIRInference meta False left (IRVar v1)
     pRight <- rProb <$> toIRInference meta False right (IRVar v2)
-    return (IRIf (IROp OpEq f sample) (IROp OpMult pLeft pRight) (IRConst (VFloat 0)))
+    return (IRIf (IROp OpEq f sample) (srTimes sr pLeft pRight) (srZero sr))
   let (v2InvBinds, v2Body) = hoistInvariantBindings v2 (buildLetIns binds returnExpr)
-  let innerSum = buildLetIns v2InvBinds (IREnumSum v2 enumListR v2Body)
+  let innerSum = buildLetIns v2InvBinds (enumSumNode sr v2 enumListR v2Body)
   let (outerBinds, v1Body) = hoistInvariantBindings v1 innerSum
   setVariables outerBinds
-  opaqueMass (IREnumSum v1 enumListL v1Body) const0
+  opaqueMass sr (enumSumNode sr v1 enumListL v1Body) const0
 toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, right])) sample
   | isEnumerable (tags (getTypeInfo left)) && isEnumerable (tags (getTypeInfo right))
     && pType (getTypeInfo left) /= Deterministic && pType (getTypeInfo right) /= Deterministic = do
@@ -1245,6 +1265,7 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
   --   sum += if invExpr(e, sample) in rightEnum then pLeft(e) * pRight(sample - e) else 0
   -- For that we name e like the lhs of
   -- We need to unfold the monad stack, because the EnumSum Works like a lambda expression and has a local scope
+  let sr = semiringOf meta
   irTuple <- lift (runWriterT (do
     -- the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
     setVariables [(x3, sample)]
@@ -1255,13 +1276,18 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
     let pRight = rProb pRightRes
     let wrapR e = generateLetInExpr pRightBinds e
     let possible = IRIsPossible enumListR invExpr
+    -- NOTE (log-space scope): the topK accumulator ('accProb') and cutoff
+    -- comparison are always linear-probability arithmetic, unconverted by
+    -- 'logSpace' -- topK combined with log-space is not a supported/tested
+    -- combination (task log-space-probability-computation's written
+    -- invasiveness verdict flags this as an explicit scope boundary).
     let cutoffOk = case topKThreshold (compilerConfig meta) of
           Nothing -> possible
           Just _  -> IROp OpAnd possible
                        (IROp OpGreaterThan
                           (IROp OpMult (accProb meta) pLeft)
                           (IRVar "TOP_K_CUTOFF"))
-    let returnExpr   = IRIf cutoffOk (wrapR (IROp OpMult pLeft pRight)) (IRConst (VFloat 0))
+    let returnExpr   = IRIf cutoffOk (wrapR (srTimes sr pLeft pRight)) (srZero sr)
     let branchesExpr = IRIf cutoffOk (IRConst (VFloat 1)) (IRConst (VFloat 0))
     return (PResult returnExpr const0 branchesExpr (notIR cutoffOk))
     )) <&> generateLetInBlock meta
@@ -1270,7 +1296,7 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
   let (outerBinds, innerTuple) = hoistInvariantBindings x2 irTuple
   let renameHoisted (n, v) = (if n `elem` [x2, x3] then uniquePrefix ++ n else n, applyUnique v)
   setVariables (map renameHoisted outerBinds)
-  enumSumP applyUnique x2 enumListL (unpackResult innerTuple)
+  enumSumP sr applyUnique x2 enumListL (unpackResult innerTuple)
 -- For the cumulative case we cant get around two enum sums
 toIRInference meta True (Expr TypeInfo {rType=rt} (InjF (Named name) [left, right])) sample
   | isEnumerable (tags (getTypeInfo left)) && isEnumerable (tags (getTypeInfo right))
@@ -1285,6 +1311,7 @@ toIRInference meta True (Expr TypeInfo {rType=rt} (InjF (Named name) [left, righ
   fPair <- instantiate mkVariable (adtDecls meta) resolvedName -- FPair of the InjF with unique names
   let FPair fwd _ = fPair
   let FDecl {inputVars=[v1, v2], body=f} = fwd
+  let sr = semiringOf meta
   -- Compute the loop body in a nested writer so its bindings can be captured rather
   -- than leaking to the enclosing function scope: those bindings reference the enum
   -- variables v1/v2 (the coin_prob calls) and must be scoped *inside* the matching
@@ -1292,15 +1319,15 @@ toIRInference meta True (Expr TypeInfo {rType=rt} (InjF (Named name) [left, righ
   (returnExpr, binds) <- lift $ runWriterT $ do
     pLeft <- rProb <$> toIRInference meta False left (IRVar v1)
     pRight <- rProb <$> toIRInference meta False right (IRVar v2)
-    return (IRIf (IROp OpLessThan sample f) (IRConst (VFloat 0)) (IROp OpMult pLeft pRight))
+    return (IRIf (IROp OpLessThan sample f) (srZero sr) (srTimes sr pLeft pRight))
   -- Place each binding at the outermost scope where it remains well-formed: fully
   -- invariant bindings are hoisted to the function top level, bindings depending only
   -- on v1 sit between the two enumSums, and bindings depending on v2 stay innermost.
   let (v2InvBinds, v2Body) = hoistInvariantBindings v2 (buildLetIns binds returnExpr)
-  let innerSum = buildLetIns v2InvBinds (IREnumSum v2 enumListR v2Body)
+  let innerSum = buildLetIns v2InvBinds (enumSumNode sr v2 enumListR v2Body)
   let (outerBinds, v1Body) = hoistInvariantBindings v1 innerSum
   setVariables outerBinds
-  opaqueMass (IREnumSum v1 enumListL v1Body) const0
+  opaqueMass sr (enumSumNode sr v1 enumListL v1Body) const0
 toIRInference meta cumulative (Expr TypeInfo {rType=rt} (Var n)) sample = do
   -- Variable might be a function
   let functionSuffix = if cumulative then "_integ" else "_prob"
@@ -1328,13 +1355,13 @@ toIRInference meta cumulative (Expr TypeInfo {rType=rt} (Var n)) sample = do
     -- Var is a local variable
     Just (_, False) -> do
       if cumulative then
-        return (detP (compareValueExpr rt (IRVar n) sample))
+        return (detP (compareValueExpr (semiringOf meta) rt (IRVar n) sample))
       else do
         let comp = case rt of
               TFloat   -> IROp OpApprox sample (IRVar n)
               TVarR _  -> IROp OpApprox sample (IRVar n)
               _        -> IROp OpEq sample (IRVar n)
-        return (impossibleWhen (notIR comp) (detP (IRIf comp const1 const0)))
+        return (impossibleWhen (notIR comp) (detP (maskSR (semiringOf meta) comp)))
     Nothing -> error ("Could not find name in TypeEnv: " ++ n)
 toIRInference _ _ (Expr _ (Subtree _ _)) _ = error "Cannot infer prob on subtree expression. Please check your syntax"
 toIRInference _ _ x _ = error ("found no way to convert to IR: " ++ show x)
@@ -1391,6 +1418,100 @@ outsideUnitInterval sample =
 anyGuardedDim :: IRExpr -> IRExpr
 anyGuardedDim sample = IRIf (IRUnaryOp OpIsAny sample) const0 const1
 
+-- | The two probability semirings 'PResult' can be combined under (design
+-- materialized-marginals-semiring Decision beta; task
+-- log-space-probability-computation). Linear: (x) = *, (+) = plain add, one =
+-- 1.0, zero = 0.0. Log: (x) = +, (+) = log-sum-exp, one = 0.0 (= log 1), zero
+-- = negative infinity (= log 0). Only the identity elements and the two
+-- combining operators differ between the two; every mode-aware PResult
+-- combinator below reads them off a 'Semiring' (picked once per compiled
+-- function from 'CompilerConfig' via 'semiringOf') instead of hard-coding the
+-- linear ones, so the log-space toggle is a swap of this one value rather than
+-- a second code path threaded through every case in this module.
+--
+-- NOT semiring-aware (see the task's written invasiveness verdict): the
+-- ReadNN/AutoNeural neural decoder's own logit-read construction, and the
+-- set-witness/plan-enum continuous measurement machinery further down this
+-- file (both build PRRresult leaves from their own bespoke IRExpr formulas,
+-- not through this vocabulary). Those remain linear-only under 'logSpace'.
+data Semiring = Semiring
+  { srLogSpace :: Bool                        -- ^ picks the IR *node* (e.g. IRDensity vs IRLogDensity), where the operator alone isn't enough
+  , srZero     :: IRExpr                      -- ^ probability zero / structurally impossible
+  , srOne      :: IRExpr                      -- ^ multiplicative identity
+  , srTimes    :: IRExpr -> IRExpr -> IRExpr  -- ^ independent conjunction (prodP, change-of-variables scaling)
+  , srPlus     :: IRExpr -> IRExpr -> IRExpr  -- ^ mixture / alternative sum (mixP)
+  , srMinus    :: IRExpr -> IRExpr -> IRExpr  -- ^ AnyExcept: marginal minus one branch (mixSubP)
+  , srComplement :: IRExpr -> IRExpr          -- ^ CDF flip under a decreasing transform: 1 - x linear, log(1 - exp x) log
+  }
+
+semiringOf :: CompilerMetadata -> Semiring
+semiringOf meta = mkSemiring (logSpace (compilerConfig meta))
+
+mkSemiring :: Bool -> Semiring
+mkSemiring False = linearSemiring
+mkSemiring True  = logSemiring
+
+linearSemiring :: Semiring
+linearSemiring = Semiring False const0 const1 (IROp OpMult) (IROp OpPlus) (IROp OpSub)
+                          (IROp OpSub const1)
+
+logSemiring :: Semiring
+logSemiring = Semiring True negInfIR const0 (IROp OpPlus) logSumExpIR logSubExpIR
+                       (\x -> IRUnaryOp OpLog (IROp OpSub const1 (IRUnaryOp OpExp x)))
+
+negInfIR :: IRExpr
+negInfIR = IRConst (VFloat (-1/0))
+
+-- | log(exp a + exp b): the log-space mixture sum, stable at the -infinity
+-- (impossible) boundary and without ever forming the linear sum that would
+-- underflow. a/b are expected to already be cheap (let-bound) references,
+-- since each is read twice; 'mixWith' arranges that.
+logSumExpIR :: IRExpr -> IRExpr -> IRExpr
+logSumExpIR a b =
+  IRIf (IROp OpEq a negInfIR) b
+  (IRIf (IROp OpEq b negInfIR) a
+  (IRIf (IROp OpGreaterThan a b)
+    (IROp OpPlus a (IRUnaryOp OpLog (IROp OpPlus const1 (IRUnaryOp OpExp (IROp OpSub b a)))))
+    (IROp OpPlus b (IRUnaryOp OpLog (IROp OpPlus const1 (IRUnaryOp OpExp (IROp OpSub a b)))))))
+
+-- | log(exp a - exp b), for the AnyExcept marginal-minus-one-branch case
+-- (log-space sibling of 'mixSubP'/'OpSub'). Assumes b <= a, which holds
+-- whenever b is genuinely one alternative folded into the marginal a.
+logSubExpIR :: IRExpr -> IRExpr -> IRExpr
+logSubExpIR a b =
+  IRIf (IROp OpEq a negInfIR) negInfIR
+  (IRIf (IROp OpEq b negInfIR) a
+  (IROp OpPlus a (IRUnaryOp OpLog (IROp OpSub const1 (IRUnaryOp OpExp (IROp OpSub b a))))))
+
+-- | An indicator-shaped semiring value: the semiring one where @cond@ holds,
+-- the semiring zero otherwise. Generalizes the very common
+-- @IRIf cond const1 const0@ linear 1/0 mask to either semiring.
+maskSR :: Semiring -> IRExpr -> IRExpr
+maskSR sr cond = IRIf cond (srOne sr) (srZero sr)
+
+-- | The native log-pdf/log-cdf leaf for a builtin distribution when @sr@ is
+-- log-space, or the ordinary linear leaf otherwise. Distinct from
+-- @log (IRDensity ...)@: the latter computes the linear pdf first (which
+-- underflows in a deep tail, e.g. exp(-z^2/2) for large z) and only then
+-- takes the log, so precision is already lost by the time the log is taken.
+-- These emit the log formula directly in each backend instead.
+distDensity :: Semiring -> Distribution -> IRExpr -> IRExpr
+distDensity sr d s = if srLogSpace sr then IRLogDensity d s else IRDensity d s
+
+distCumulative :: Semiring -> Distribution -> IRExpr -> IRExpr
+distCumulative sr d s = if srLogSpace sr then IRLogCumulative d s else IRCumulative d s
+
+-- | The base normal density scaled by change-of-variables factors (division
+-- by one or more positive scale terms -- sigma for PNormal, sigma*sample for
+-- PLogNormal). The log form subtracts log(scaleFactor) from the native log-pdf
+-- leaf instead of dividing the linear density, so a deep tail's precision
+-- survives the whole formula rather than being lost to an earlier exp/log
+-- round trip through the linear leaf.
+scaledNormalDensity :: Semiring -> IRExpr -> [IRExpr] -> IRExpr
+scaledNormalDensity sr z scaleFactors
+  | srLogSpace sr = foldl (\acc s -> IROp OpSub acc (IRUnaryOp OpLog s)) (IRLogDensity IRNormal z) scaleFactors
+  | otherwise     = foldl (\acc s -> IROp OpDiv acc s) (IRDensity IRNormal z) scaleFactors
+
 -- | A continuous density leaf observed at @sample@: dim 1 (ANY-guarded), one branch.
 -- Never impossible: a density may be arbitrarily small (and may underflow to a
 -- true float zero in a deep tail) without the event being impossible -- that
@@ -1409,16 +1530,17 @@ detP :: IRExpr -> PResult
 detP p = PResult p const0 const0 constFalseIR
 
 -- | A structurally impossible event: the wrong Either arm, an empty world set,
--- a failed guard. Probability zero, and flagged as such so that a mixture drops
--- it without having to recognise the zero numerically.
-impossibleP :: PResult
-impossibleP = PResult const0 const0 const0 constTrueIR
+-- a failed guard. Probability zero (semiring zero, so linear 0.0 or log
+-- -infinity), and flagged as such so that a mixture drops it without having
+-- to recognise the zero numerically.
+impossibleP :: Semiring -> PResult
+impossibleP sr = PResult (srZero sr) const0 const0 constTrueIR
 
--- | An indicator leaf: mass 1 where @cond@ holds, and a flagged impossibility
--- where it does not. The flag is the structural fact the indicator was built
--- from, not a re-reading of the mass it produced.
-indicatorP :: IRExpr -> PResult
-indicatorP cond = impossibleWhen (notIR cond) (mass (IRIf cond const1 const0))
+-- | An indicator leaf: mass 1 (semiring one) where @cond@ holds, and a flagged
+-- impossibility where it does not. The flag is the structural fact the
+-- indicator was built from, not a re-reading of the mass it produced.
+indicatorP :: Semiring -> IRExpr -> PResult
+indicatorP sr cond = impossibleWhen (notIR cond) (mass (maskSR sr cond))
 
 -- | Mark a result impossible exactly when @cond@ holds (accumulating onto any
 -- impossibility it already carries).
@@ -1435,17 +1557,14 @@ impossibleWhen cond r
 
 -- | Independent conjunction: probabilities multiply, dims add, branch counts
 -- add, and the conjunction is impossible if either factor is.
-prodP :: PResult -> PResult -> PResult
-prodP (PResult aP aDim aBC aImp) (PResult bP bDim bBC bImp) =
-  PResult (IROp OpMult aP bP) (IROp OpPlus aDim bDim) (IROp OpPlus aBC bBC) (orIR aImp bImp)
-
--- | Product is the monoid: 'detP const1' is the unit (probability 1 contributes
--- no dimension and no branch). Lets variadic factors fold with 'mconcat'.
-instance Semigroup PResult where
-  (<>) = prodP
-
-instance Monoid PResult where
-  mempty = detP const1
+prodP :: Semiring -> PResult -> PResult -> PResult
+prodP sr (PResult aP aDim aBC aImp) (PResult bP bDim bBC bImp) =
+  PResult (srTimes sr aP bP) (IROp OpPlus aDim bDim) (IROp OpPlus aBC bBC) (orIR aImp bImp)
+-- No Semigroup/Monoid instance: the semiring's unit (linear 'detP const1',
+-- log 'detP const0') is a runtime choice, not a fixed value, so 'mempty'
+-- cannot express it and 'prodP' is called explicitly with a 'Semiring'
+-- instead (nothing in this module used '<>'/'mconcat' for PResult, so this
+-- is not a behaviour change).
 
 -- | Prob-only transform; dim and branch count untouched.
 onProb :: (IRExpr -> IRExpr) -> PResult -> PResult
@@ -1483,9 +1602,9 @@ mapFlag f imp | imp == constFalseIR || imp == constTrueIR = imp
 -- result AND the later guards may crash when an earlier guard fails (a
 -- deconstructing inverse applied to the wrong arm -- observe-partials-umbrella
 -- N1b); only the branch form leaves them unevaluated.
-guardP :: [IRExpr] -> PResult -> PResult
-guardP conds r = PResult
-  (nest const0 (rProb r))
+guardP :: Semiring -> [IRExpr] -> PResult -> PResult
+guardP sr conds r = PResult
+  (nest (srZero sr) (rProb r))
   (nest const0 (rDim r))
   (nest const0 (rBranches r))
   (nest constTrueIR (rImposs r))
@@ -1502,18 +1621,22 @@ zipResult f (PResult aP aDim aBC aImp) (PResult bP bDim bBC bImp) =
 -- probability mode multiply by |d(inverse)/d(observation)| unless the result is
 -- discrete (dim 0); in cumulative mode a decreasing transform flips the CDF.
 -- Reads the result's own dim, so call sites never name it.
-scaleCoV :: Bool -> IRExpr -> PResult -> PResult
-scaleCoV cumulative deriv r = onProb scale r
+scaleCoV :: Semiring -> Bool -> IRExpr -> PResult -> PResult
+scaleCoV sr cumulative deriv r = onProb scale r
   where
+    -- |deriv| is always a plain linearly-computed Jacobian factor (never
+    -- itself a log-space value), so it needs its own log before 'srTimes'
+    -- (log mode: OpPlus) can combine it with the log-space probability x.
+    scaleFactor s = if srLogSpace sr then IRUnaryOp OpLog s else s
     scale x = if not cumulative
-                then IROp OpMult x (IRIf (IROp OpEq (rDim r) const0) const1 (IRUnaryOp OpAbs deriv))
-                else IRIf (IROp OpGreaterThan deriv const0) x (IROp OpSub const1 x)
+                then srTimes sr x (IRIf (IROp OpEq (rDim r) const0) (srOne sr) (scaleFactor (IRUnaryOp OpAbs deriv)))
+                else IRIf (IROp OpGreaterThan deriv const0) x (srComplement sr x)
 
 -- | The ANY-safe wrapper of 'toIRInferenceSave': a marginal query over this
 -- expression contributes mass 1, dim 0, no branches, without evaluating the body.
-anySafe :: IRExpr -> (IRExpr -> IRExpr) -> PResult -> PResult
-anySafe sample wrap (PResult p d bc imp) = PResult
-  (IRIf isAnySample const1 (wrap p))
+anySafe :: Semiring -> IRExpr -> (IRExpr -> IRExpr) -> PResult -> PResult
+anySafe sr sample wrap (PResult p d bc imp) = PResult
+  (IRIf isAnySample (srOne sr) (wrap p))
   (IRIf isAnySample const0 (wrap d))
   (IRIf isAnySample const0 (wrap bc))
   -- A marginal query over this expression is mass 1: possible, whatever the
@@ -1524,9 +1647,17 @@ anySafe sample wrap (PResult p d bc imp) = PResult
 -- | Sum a result over an enumerated variable's support: probabilities and branch
 -- counts sum, the result is a discrete mass (dim 0). @wrap@ post-processes the
 -- assembled sums (variable uniqueification at the double-enumeration site).
-enumSumP :: (IRExpr -> IRExpr) -> Varname -> MultiValue -> PResult -> CompilerMonad PResult
-enumSumP wrap v vals r =
-  opaqueMass (wrap (IREnumSum v vals (rProb r))) (wrap (IREnumSum v vals (rBranches r)))
+enumSumP :: Semiring -> (IRExpr -> IRExpr) -> Varname -> MultiValue -> PResult -> CompilerMonad PResult
+enumSumP sr wrap v vals r =
+  opaqueMass sr (wrap (enumSumNode sr v vals (rProb r))) (wrap (IREnumSum v vals (rBranches r)))
+
+-- | The IR node an enumerated sum of probabilities is built from: 'IRLogEnumSum'
+-- (log-sum-exp reduction) in log space, plain 'IREnumSum' (linear sum)
+-- otherwise. Shared by 'enumSumP' and the hand-rolled double-enumeration
+-- cases in 'toIRInference' that build an 'IREnumSum' directly rather than
+-- through 'enumSumP'.
+enumSumNode :: Semiring -> Varname -> MultiValue -> IRExpr -> IRExpr
+enumSumNode sr = if srLogSpace sr then IRLogEnumSum else IREnumSum
 
 -- | A discrete mass assembled by summing contributions (an enumerated support,
 -- a set of plan worlds), with its branch count.
@@ -1539,11 +1670,11 @@ enumSumP wrap v vals r =
 -- really is impossible. A density, which may underflow while remaining
 -- possible, never derives its flag this way. The sum is let-bound so the test
 -- reads the value instead of duplicating the whole enumeration.
-opaqueMass :: IRExpr -> IRExpr -> CompilerMonad PResult
-opaqueMass p bc = do
+opaqueMass :: Semiring -> IRExpr -> IRExpr -> CompilerMonad PResult
+opaqueMass sr p bc = do
   s <- mkVariable "enum_mass"
   setVariables [(s, p)]
-  return (PResult (IRVar s) const0 bc (IROp OpEq (IRVar s) const0))
+  return (PResult (IRVar s) const0 bc (IROp OpEq (IRVar s) (srZero sr)))
 
 -- | Bind a sub-result's let-in block ONCE, under @guards@, and hand back
 -- projections off that single binding.
@@ -1568,8 +1699,8 @@ opaqueMass p bc = do
 -- constant through an opaque tuple hides it from constant folding: doing that to
 -- every field made the -O2 OUTPUT 2.7x larger even as the -O0 input shrank 400x,
 -- with 'mixWith's dim comparisons left as runtime tests that used to fold away.
-shareResult :: String -> [IRExpr] -> [(Varname, IRExpr)] -> PResult -> CompilerMonad PResult
-shareResult tag guards binds r
+shareResult :: Semiring -> String -> [IRExpr] -> [(Varname, IRExpr)] -> PResult -> CompilerMonad PResult
+shareResult sr tag guards binds r
   -- Sharing only pays when two or more fields would each carry a copy of the
   -- block; below two there is no duplication to remove, and the tuple is not
   -- free: packing and projecting costs assignments per arm, the failed-guard
@@ -1577,7 +1708,7 @@ shareResult tag guards binds r
   -- dim or flag through it hides that constant from folding. Sharing every
   -- result unconditionally shrank -O0 400x but grew the -O2 OUTPUT 2.7x.
   | length readers <= 1 = return (PResult
-      (guarded const0      (wrapIfRead (rProb r)))
+      (guarded (srZero sr)  (wrapIfRead (rProb r)))
       (guarded const0      (wrapIfRead (rDim r)))
       -- The branch count is deliberately not guarded: an arm that cannot occur
       -- still reports the branches it would have traversed, as before.
@@ -1586,7 +1717,7 @@ shareResult tag guards binds r
   | otherwise = do
       v <- mkVariable tag
       let block = generateLetInExpr binds (packResult r)
-      setVariables [(v, foldr (\g acc -> IRIf g acc (packResult impossibleP)) block guards)]
+      setVariables [(v, foldr (\g acc -> IRIf g acc (packResult (impossibleP sr))) block guards)]
       let proj prj e = if reads' e then prj (IRVar v) else guarded const0 e
       return (PResult
         (IRTFst (IRVar v))
@@ -1625,13 +1756,13 @@ unpackResult e = PResult (IRTFst e) (IRTFst (IRTSnd e))
 -- site wants a plain sum of the two operands' counts -- an 'IfThenElse' shares
 -- one condition between its arms, an AnyExcept selects one arm, and a world set
 -- sums over all of its worlds.
-mixP :: IRExpr -> PResult -> PResult -> CompilerMonad PResult
-mixP = mixWith OpPlus
+mixP :: Semiring -> IRExpr -> PResult -> PResult -> CompilerMonad PResult
+mixP sr = mixWith (srPlus sr)
 
 -- | 'mixP' for the AnyExcept case, where the excepted value's mass is
 -- subtracted from the marginal rather than added.
-mixSubP :: IRExpr -> PResult -> PResult -> CompilerMonad PResult
-mixSubP = mixWith OpSub
+mixSubP :: Semiring -> IRExpr -> PResult -> PResult -> CompilerMonad PResult
+mixSubP sr = mixWith (srMinus sr)
 
 -- | Shared body of 'mixP'/'mixSubP'. Both operands are let-bound first, since
 -- each is read several times by the case analysis below.
@@ -1648,7 +1779,7 @@ mixSubP = mixWith OpSub
 -- addp-zero-check-non-total). The flag carries the fact from the guard or
 -- indicator that established it, so neither float scale nor float precision
 -- enters the decision.
-mixWith :: Operand -> IRExpr -> PResult -> PResult -> CompilerMonad PResult
+mixWith :: (IRExpr -> IRExpr -> IRExpr) -> IRExpr -> PResult -> PResult -> CompilerMonad PResult
 mixWith combine bc a b = do
   pVarA <- mkVariable "pA"
   pVarB <- mkVariable "pB"
@@ -1670,7 +1801,7 @@ mixWith combine bc a b = do
         whenEqual)))
   return (PResult
     (cases (IRVar pVarB) (IRVar pVarA) (IRVar pVarA) (IRVar pVarB)
-           (IROp combine (IRVar pVarA) (IRVar pVarB)))
+           (combine (IRVar pVarA) (IRVar pVarB)))
     (cases (IRVar dimVarB) (IRVar dimVarA) (IRVar dimVarA) (IRVar dimVarB)
            (IRVar dimVarA))
     bc
@@ -1755,24 +1886,29 @@ getProbIndex es =
     pTypes = map pt es
     zipped = zip pTypes [0..]
 
-compareValueExpr :: RType -> IRExpr -> IRExpr -> IRExpr
-compareValueExpr TFloat v sample = IRIf (IROp OpLessThan sample v) (IRConst $ VFloat 0) (IRConst $ VFloat 1)
-compareValueExpr TInt v sample = IRIf (IROp OpLessThan sample v) (IRConst $ VFloat 0) (IRConst $ VFloat 1)
-compareValueExpr TBool v sample = IRIf (IROp OpAnd (IRUnaryOp OpNot sample) v) (IRConst $ VFloat 0) (IRConst $ VFloat 1)
-compareValueExpr TUnit _ _ = IRConst (VFloat 1)
-compareValueExpr (Tuple ft st) v sample = IROp OpMult (compareValueExpr ft (IRTFst v) (IRTFst sample)) (compareValueExpr st (IRTSnd v) (IRTSnd sample))
-compareValueExpr (TEither lr rr) v sample =
+-- | Discrete value-equality / step-CDF masses (used both for a deterministic
+-- Constant's cumulative "0 below, 1 at-or-above" step function and for
+-- equality indicators), built as semiring one/zero rather than the literal
+-- linear 1.0/0.0 so it stays correct under 'logSpace' (task
+-- log-space-probability-computation).
+compareValueExpr :: Semiring -> RType -> IRExpr -> IRExpr -> IRExpr
+compareValueExpr sr TFloat v sample = IRIf (IROp OpLessThan sample v) (srZero sr) (srOne sr)
+compareValueExpr sr TInt v sample = IRIf (IROp OpLessThan sample v) (srZero sr) (srOne sr)
+compareValueExpr sr TBool v sample = IRIf (IROp OpAnd (IRUnaryOp OpNot sample) v) (srZero sr) (srOne sr)
+compareValueExpr sr TUnit _ _ = srOne sr
+compareValueExpr sr (Tuple ft st) v sample = srTimes sr (compareValueExpr sr ft (IRTFst v) (IRTFst sample)) (compareValueExpr sr st (IRTSnd v) (IRTSnd sample))
+compareValueExpr sr (TEither lr rr) v sample =
   IRIf (IRIsLeft v)
-    (IRIf (IRIsLeft sample) (compareValueExpr lr (IRFromLeft v) (IRFromLeft sample)) (IRConst $ VFloat 0))
-    (IRIf (IRIsRight sample) (compareValueExpr rr (IRFromRight v) (IRFromRight sample)) (IRConst $ VFloat 0))
-compareValueExpr (TVarR _) v sample = IRIf (IROp OpLessThan sample v) (IRConst $ VFloat 0) (IRConst $ VFloat 1)
--- A deterministic list contributes an equality indicator: it is 1 exactly when
--- the sample matches (in particular the empty-list base of a Cons chain yields
--- 1, the multiplicative identity, so a list CDF reduces to the product of its
--- element CDFs).
-compareValueExpr (ListOf _) v sample = IRIf (IROp OpEq sample v) (IRConst $ VFloat 1) (IRConst $ VFloat 0)
-compareValueExpr (TADT _) _ _= IRError "Not yet implemented" -- TODO implement for ADTs
-compareValueExpr rt _ _ = error $ "Comparison not implemented for type: " ++ show rt
+    (IRIf (IRIsLeft sample) (compareValueExpr sr lr (IRFromLeft v) (IRFromLeft sample)) (srZero sr))
+    (IRIf (IRIsRight sample) (compareValueExpr sr rr (IRFromRight v) (IRFromRight sample)) (srZero sr))
+compareValueExpr sr (TVarR _) v sample = IRIf (IROp OpLessThan sample v) (srZero sr) (srOne sr)
+-- A deterministic list contributes an equality indicator: it is the semiring
+-- one exactly when the sample matches (in particular the empty-list base of a
+-- Cons chain yields the semiring one, the multiplicative identity, so a list
+-- CDF reduces to the product of its element CDFs).
+compareValueExpr sr (ListOf _) v sample = maskSR sr (IROp OpEq sample v)
+compareValueExpr _ (TADT _) _ _= IRError "Not yet implemented" -- TODO implement for ADTs
+compareValueExpr _ rt _ _ = error $ "Comparison not implemented for type: " ++ show rt
 
 
 
@@ -1797,6 +1933,7 @@ uniqueify :: [Varname] -> String -> IRExpr -> IRExpr
 uniqueify vars prefix (IRVar name) | name `elem` vars = IRVar (prefix ++ name)
 uniqueify vars prefix (IRLetIn name boundExpr bodyExpr) | name `elem` vars = IRLetIn (prefix ++ name) (uniqueify vars prefix boundExpr) (uniqueify vars prefix bodyExpr)
 uniqueify vars prefix (IREnumSum name lst bodyExpr) | name `elem` vars = IREnumSum (prefix ++ name) lst (uniqueify vars prefix bodyExpr)
+uniqueify vars prefix (IRLogEnumSum name lst bodyExpr) | name `elem` vars = IRLogEnumSum (prefix ++ name) lst (uniqueify vars prefix bodyExpr)
 uniqueify _ _ e = e
 
 --folding detGen and Gen into one, as the distinction is one to make sure things that are det are indeed det.
@@ -1875,14 +2012,15 @@ enumerateAppliedLambda meta cumulative l v sample = do
   let fExprs = map snd (functions (compilingProgram meta))
   let lBodyExpr = findExprWithCN fExprs bodyCn
   let newTypeEnv = (boundVar, (rType (getTypeInfo v), False)):typeEnv meta
+  let sr = semiringOf meta
   irTuple <- lift (runWriterT (do
     pBranch <- rProb <$> toIRInference meta False v (IRVar boundVar)
     bodyRes <- toIREnumerate meta{typeEnv=newTypeEnv} cumulative lBodyExpr sample
-    return (onProb (\p -> IROp OpMult p pBranch) bodyRes))) <&> generateLetInBlock meta
+    return (onProb (\p -> srTimes sr p pBranch) bodyRes))) <&> generateLetInBlock meta
   let discreteVVals = head [x | DiscreteValues x <- tags (getTypeInfo v)]
   let (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
   setVariables outerBinds
-  enumSumP id boundVar discreteVVals (unpackResult innerTuple)
+  enumSumP sr id boundVar discreteVVals (unpackResult innerTuple)
 
 toIREnumerate :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PResult
 -- Nested enumerable application (e.g. an inner `let` binding a fresh discrete draw):
@@ -1896,19 +2034,24 @@ toIREnumerate meta cumulative (Expr TypeInfo{chainName=cn} (Var _)) sample = do
   let equivExpr = findExprWithCN fs equivCN
   toIREnumerate meta cumulative equivExpr sample
 toIREnumerate meta cumulative (Expr TypeInfo{rType=rt} (IfThenElse c t e)) sample = do
+  let sr = semiringOf meta
   cIR <- toIRGenerate meta c
   tIR <- toIRGenerate meta t
   eIR <- toIRGenerate meta e
   --(pBranch, _, _) <- toIRInference meta False distr elem
   -- Due to eager evaluation, we must make sure, that the wrong branch is not executed
-  let condSelector e = IRIf cIR e const0
-  let notCondSelector e = IRIf (IRUnaryOp OpNot cIR) e const0
+  let condSelector e = IRIf cIR e (srZero sr)
+  let notCondSelector e = IRIf (IRUnaryOp OpNot cIR) e (srZero sr)
   let cmpOp = case rt of { TFloat -> OpApprox; TVarR _ -> OpApprox; _ -> OpEq }
-  let thenSelector = if cumulative then compareValueExpr rt tIR sample else IRIf (IROp cmpOp tIR sample) (IRConst (VFloat 1)) const0
-  let elseSelector = if cumulative then compareValueExpr rt eIR sample else IRIf (IROp cmpOp eIR sample) (IRConst (VFloat 1)) const0
+  let thenSelector = if cumulative then compareValueExpr sr rt tIR sample else maskSR sr (IROp cmpOp tIR sample)
+  let elseSelector = if cumulative then compareValueExpr sr rt eIR sample else maskSR sr (IROp cmpOp eIR sample)
   let thenRes = condSelector thenSelector
   let elseRes = notCondSelector elseSelector
-  let returnExpr = IROp OpPlus thenRes elseRes
+  -- The two selectors are mutually exclusive (exactly one is ever "live", the
+  -- other is the semiring zero), so this is a mixture-sum, not a plain add:
+  -- in log space 'srZero' is negative infinity, and OpPlus-ing that against a
+  -- finite log-probability would wrongly zero the whole result out.
+  let returnExpr = srPlus sr thenRes elseRes
   return (mass returnExpr)
 -- Fallback: under enumeration the bound variable carries a concrete enumerated value,
 -- so the body is deterministic and can be generated forward and compared to the sample.
@@ -1918,8 +2061,8 @@ toIREnumerate meta cumulative e sample = do
   let rt = rType (getTypeInfo e)
   let cmpOp = case rt of { TFloat -> OpApprox; TVarR _ -> OpApprox; _ -> OpEq }
   if cumulative
-    then return (mass (compareValueExpr rt eIR sample))
-    else return (indicatorP (IROp cmpOp eIR sample))
+    then return (mass (compareValueExpr (semiringOf meta) rt eIR sample))
+    else return (indicatorP (semiringOf meta) (IROp cmpOp eIR sample))
 
 -- | Strip the branch-count field from all probability-mode functions in the environment.
 -- Applied after compilation and before optimisation when countBranches = False.
@@ -1965,6 +2108,8 @@ stripBranchCount (IREnv funcs adts consts) = IREnv (map stripGroup funcs) adts c
         IRLambda n (stripOuterTriple (strip (rebind n False callResults) body))
       IREnumSum n val body ->
         IREnumSum n val (strip (rebind n False callResults) body)
+      IRLogEnumSum n val body ->
+        IRLogEnumSum n val (strip (rebind n False callResults) body)
       _ -> irDescend (strip callResults) e
 
     rebind n True  = Set.insert n
@@ -2186,10 +2331,15 @@ setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag planDiag v sam
       measured <- mapM (measureWorld meta v) worlds
       -- The worlds partition the observation, so they mix; here (unlike the
       -- IfThenElse mixture) each world really was traversed, so counts sum.
+      -- Set-witness continuous measurement (this function and its
+      -- helpers below: measureWorld/measureSet/cdfAtBound) is explicitly
+      -- OUT of log-space scope (task log-space-probability-computation's
+      -- written invasiveness verdict): it stays pinned to 'linearSemiring'
+      -- regardless of the 'logSpace' config flag.
       summed <- case measured of
         -- no worlds can only mean an impossible observation
-        []     -> return impossibleP
-        (m:ms) -> foldM (\a b -> mixP (IROp OpPlus (rBranches a) (rBranches b)) a b) m ms
+        []     -> return (impossibleP linearSemiring)
+        (m:ms) -> foldM (\a b -> mixP linearSemiring (IROp OpPlus (rBranches a) (rBranches b)) a b) m ms
       -- Full-ANY marginal short-circuit: guards and transported bounds are not
       -- ANY-aware, but the marginal of the whole observation is simply 1.
       if cumulative
@@ -2205,13 +2355,13 @@ measureWorld meta v (WWorld guards set) = do
   (res, binds) <- lift (runWriterT (measureSet meta v set))
   let wrap = generateLetInExpr binds
   -- A world whose guards fail is not part of the observation at all.
-  return (guardP guards (mapResult wrap res))
+  return (guardP linearSemiring guards (mapResult wrap res))
 
 measureSet :: CompilerMetadata -> Expr -> WSet -> CompilerMonad PResult
 measureSet meta v (WPoint p cov) = do
   -- change-of-variables correction only for continuous results, mirroring the
   -- point-witness path
-  scaleCoV False cov <$> toIRInference meta False v p
+  scaleCoV linearSemiring False cov <$> toIRInference meta False v p
 measureSet meta v (WInterval lo hi) = do
   (cdfHi, bcHi) <- cdfAtBound meta v hi
   (cdfLo, bcLo) <- cdfAtBound meta v lo
@@ -2230,7 +2380,7 @@ measureSet meta v (WInterval lo hi) = do
   return (impossibleWhen (notIR (IROp OpGreaterThan diff const0))
             (PResult clamped const0 bc constFalseIR))
 measureSet _ _ WFull  = return (mass const1)
-measureSet _ _ WEmpty = return impossibleP
+measureSet _ _ WEmpty = return (impossibleP linearSemiring)
 
 cdfAtBound :: CompilerMetadata -> Expr -> WBound -> CompilerMonad (IRExpr, IRExpr)
 cdfAtBound _ _ WNegInf = return (const0, const1)
@@ -3331,9 +3481,13 @@ planApplyTarget meta env body target = do
 -- world set) the worlds sum directly; with point constraints present the
 -- worlds combine via 'mixP' (mixture addition, smaller dimension wins). Each
 -- world whose guards hold counts as one branch.
+-- Plan-guided lazy enumeration measurement (this function): explicitly OUT of
+-- log-space scope (task log-space-probability-computation's written
+-- invasiveness verdict), like the set-witness continuous machinery above --
+-- stays pinned to 'linearSemiring' regardless of the 'logSpace' config flag.
 measurePlanWorlds :: String -> [PlanWorld] -> CompilerMonad PResult
 measurePlanWorlds nnRaw worlds
-  | all ((== 0) . planWorldDim) worlds = opaqueMass (sumUp (map worldMass worlds)) branchSum
+  | all ((== 0) . planWorldDim) worlds = opaqueMass linearSemiring (sumUp (map worldMass worlds)) branchSum
   | otherwise = do
       -- A dim-0 world's mass vanishing means its slots were not selected, i.e.
       -- the world is impossible; a dim-1 (point-constrained continuous) world's
@@ -3341,13 +3495,13 @@ measurePlanWorlds nnRaw worlds
       -- derives the flag from its value.
       ws <- forM worlds $ \w ->
               if planWorldDim w == 0
-                then onBranches (const branchSum) <$> opaqueMass (worldMass w) branchSum
+                then onBranches (const branchSum) <$> opaqueMass linearSemiring (worldMass w) branchSum
                 else return (PResult (worldMass w) (dimC (planWorldDim w)) branchSum constFalseIR)
       case ws of
-        []     -> return impossibleP
+        []     -> return (impossibleP linearSemiring)
         -- Every world whose guards hold was traversed, so the branch count is the
         -- sum over all of them regardless of which one carries the mixture's mass.
-        (m:ms) -> foldM (mixP branchSum) m ms
+        (m:ms) -> foldM (mixP linearSemiring branchSum) m ms
   where
     dimC d = IRConst (VFloat (fromIntegral d))
     sumUp [] = const0
