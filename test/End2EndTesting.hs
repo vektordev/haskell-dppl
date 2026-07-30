@@ -429,22 +429,90 @@ batchedPythonTests = do
           return True ]
     Just py ->
       [ testProperty "batched-vs-expected" (once (runBatchedPython py eligible))
-      , testProperty "refusal-diagnostic" (once (ioProperty (return refusalProp)))
       , testProperty "gradients-nan-free" (once (runBatchedGradients py eligible))
       , testProperty "generate-density-matches-expected" (once (runBatchedGenerate py eligible)) ]
 
--- | The batched backend must refuse a program outside the tensor fragment with
--- a diagnostic naming the offending construct. `list` (whose main,
--- `[Normal, Uniform*2.0]`, is genuinely list-valued) is a stable negative.
-refusalProp :: Property
-refusalProp = ioProperty $ do
-  p <- parseProgram "testCases/list.ppl"
+-- ===========================================================================
+-- Batched-mode refusal coverage (design pytorch-tensorizer)
+-- ===========================================================================
+
+-- | Table-driven coverage of the batched fragment refusals a /real corpus
+-- program/ reaches: one row per refused construct, asserting the program
+-- compiles fine (so the refusal is genuinely the batched backend's, not an
+-- unrelated earlier failure) and only then that 'generateFunctionsBatched'
+-- returns 'Left' with a diagnostic naming that construct.
+--
+-- This group deliberately lives outside 'batchedPythonTests': refusals are pure
+-- Haskell and must be checked on a torch-less machine too, whereas the value
+-- differential skips itself there (the single predecessor of this table,
+-- @refusalProp@, sat inside the torch-gated branch and so never ran without
+-- torch). Refusals with no corpus trigger — list membership, the @VAnyExcept@
+-- sentinel, a residual @IRConformsTo@/@OpIsAny@, a composite-'MultiValue'
+-- @IREnumSum@/@IRIsPossible@, and generate-only recursion — are covered by the
+-- synthetic-IR rows in "TestInternals" (@batchedRefusalUnitTests@), because on
+-- any real program another guard always fires first.
+batchedRefusalTests :: TestTree
+batchedRefusalTests = testGroup "BatchedRefusal"
+  [ testProperty (prog ++ " -- " ++ needle) (once (refusalRow prog needle))
+  | (prog, needle) <- batchedRefusalTable ]
+
+-- | @(corpus program base name, diagnostic substring pinning the construct)@.
+-- The substring names the offending IR node rather than quoting prose, so a
+-- reworded diagnostic does not break a row, but a *different* refusal firing
+-- first does. Every row was read off the actual diagnostic
+-- (@stack run -- -i FILE --batched compile -l python@ — note @--batched@ is a
+-- global flag and must precede the @compile@ subcommand).
+batchedRefusalTable :: [(String, String)]
+batchedRefusalTable =
+  -- lists
+  [ ("list",                      "list head (IRHead)")
+  , ("headTail",                  "list construction (IRCons)")
+  , ("listLiteralDeconstruction", "list tail (IRTail)")
+  , ("map",                       "list map (IRMap)")
+  -- Either: constructors, destructors, predicates
+  , ("either_const",              "Either constructor (IRLeft)")
+  , ("either_isleft",             "Either constructor (IRRight)")
+  , ("nestedDeconstruction",      "Either destructor (IRFromLeft)")
+  , ("eitherDeconstruction",      "Either destructor (IRFromRight)")
+  , ("either",                    "Either predicate (IRIsLeft)")
+  , ("either_fromLeft",           "Either predicate (IRIsRight)")
+  -- a neural decoder's own Either-shaped output: the refused method is a
+  -- decoder group's forward, not main's
+  , ("eitherNeural",              "eitherNeural_auto's forward")
+  -- ADT declarations: the bail at the top of 'generateFunctionsBatched'
+  , ("adt",                       "ADT declarations are not in the tensor fragment")
+  , ("adtNeuralCounting",         "ADT declarations are not in the tensor fragment")
+  -- prob/integ recursion: a cycle found by 'checkCallGraph'
+  , ("dice",                      "dice_prob reaches dice_prob recursively")
+  , ("gaussList",                 "main_prob reaches main_prob recursively")
+  -- a prob/integ path reaching a method batched mode does not emit
+  , ("factorial",                 "calls factorial_gen, which is not a forward/integrate method")
+  , ("flip",                      "calls flip_gen, which is not a forward/integrate method")
+  -- the marginal ANY sentinel
+  , ("sndCall",                   "marginal ANY sentinel (IRConst VAny)")
+  -- an inner lambda that did not reduce, once in each of the three method
+  -- bodies (twiceApplication's forward/integrate *do* reduce; only its
+  -- generate body keeps the literal lambda -- the accepted cost of generate's
+  -- hard refusal rule, see 'generateFunctionsBatched')
+  , ("either_arith_inv",          "main's forward uses a construct outside the tensor fragment: inner lambda (IRLambda)")
+  , ("injApply",                  "main's integrate uses a construct outside the tensor fragment: inner lambda (IRLambda)")
+  , ("twiceApplication",          "main's generate uses a construct outside the tensor fragment: inner lambda (IRLambda)")
+  ]
+
+-- | One table row: the program must compile, and only then be refused by the
+-- batched backend with a diagnostic containing @needle@.
+refusalRow :: String -> String -> Property
+refusalRow prog needle = ioProperty $ do
+  p <- parseProgram ("testCases/" ++ prog ++ ".ppl")
   return $ case compile defaultCompilerConfig{batched = True} p of
-    Left err -> counterexample ("list failed to compile at all: " ++ err) False
+    Left err -> counterexample (prog ++ " failed to compile at all, so this row proves "
+                                ++ "nothing about the batched refusal: " ++ err) False
     Right env -> case generateFunctionsBatched True env of
-      Right _  -> counterexample "batched mode accepted list-valued program; expected a fragment refusal" False
-      Left msg -> counterexample ("refusal diagnostic did not mention the tensor fragment: " ++ msg)
-                    ("tensor fragment" `isInfixOf` msg && "list" `isInfixOf` msg)
+      Right _  -> counterexample ("batched mode accepted " ++ prog
+                                  ++ "; expected a refusal mentioning: " ++ needle) False
+      Left msg -> counterexample ("batched refusal for " ++ prog ++ " does not mention "
+                                  ++ show needle ++ "; actual diagnostic: " ++ msg)
+                    (needle `isInfixOf` msg)
 
 -- | A batchable group: all query points sharing the same query kind (prob vs
 -- cumulative), rendered into one batched call. 'bgParamExprs' is the Python

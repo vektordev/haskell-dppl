@@ -435,17 +435,28 @@ emittable e = case e of
   IRCumulative{} -> True
   IRApply{}      -> True   -- network call / cross-function decoder call (M2b)
   IRIndex{}      -> True   -- logit-vector slice or per-element gather (M2b)
-  IREnumSum{}    -> True   -- enumeration sum, unrolled over the enum axis (M2b)
+  IREnumSum _ mv _  -> scalarDiscreteMulti mv  -- enum sum over a scalar enum (M2b)
   IRIsPossible mv _ -> scalarDiscreteMulti mv  -- membership over a scalar enum (M2b)
   IRError{}      -> True   -- refusal arm, emitted as a selected-away NaN poison (M3)
   IRSample{}     -> True   -- a fresh random draw, batched via rand(n)/randn(n) (M4);
                            -- only ever produced by a generate body, never prob/integ
   _              -> False
 
--- | A 'MultiValue' whose membership test is a flat scalar enumeration — the only
--- 'IRIsPossible' shape the batched backend renders (an elementwise @x in {..}@
--- mask). Composite membership (tuple/either/ADT structure) is outside the
--- tensor fragment.
+-- | A 'MultiValue' that is a flat enumeration of scalar values — the only shape
+-- the two 'MultiValue'-carrying nodes may have, for the same reason in both
+-- cases: their emitters ('IRIsPossible' → an elementwise @x in {..}@ mask,
+-- 'IREnumSum' → an inline unrolling over the enum axis) render each enumerated
+-- value through the scalar backend's 'pyVal', which happily names runtime
+-- constructors that exist only in the *scalar* @pythonLib.py@ (@Left@,
+-- @ConsInferenceList@, ADT constructors). A composite 'MultiValue' would
+-- therefore emit Python that dies with a @NameError@ against
+-- @pythonLibBatched.py@ rather than being refused here.
+--
+-- Reachable only via 'IREnumSum' today, and not even from a real program: every
+-- Either/ADT-shaped decoder emits an 'IRIsLeft' (or trips the ADT-declaration
+-- bail in 'generateFunctionsBatched') first. That makes this a belt to the
+-- ordering's braces, so it has no corpus test — its positive control is the
+-- synthetic-IR row in @TestInternals.batchedRefusalUnitTests@.
 scalarDiscreteMulti :: MultiValue -> Bool
 scalarDiscreteMulti (MultiDiscretes vs) = not (null vs) && all isScalarV vs
   where isScalarV (VInt _)   = True
@@ -471,7 +482,8 @@ reason e = case e of
   IRIsRight{}     -> "Either predicate (IRIsRight)"
   IRApply{}       -> "function application (IRApply); a call did not inline"
   IRLambda{}      -> "inner lambda (IRLambda)"
-  IRIsPossible{}  -> "membership check (IRIsPossible)"
+  IRIsPossible{}  -> "membership check (IRIsPossible) over a non-scalar enumeration"
+  IREnumSum{}     -> "enumeration sum (IREnumSum) over a non-scalar enumeration"
   IRConformsTo{}  -> "type-conformance check (IRConformsTo)"
   IRConst VAny        -> "marginal ANY sentinel (IRConst VAny); marginal queries are outside the tensor fragment"
   IRConst (VAnyExcept _) -> "marginal ANY-except sentinel (IRConst VAnyExcept); marginal queries are outside the tensor fragment"
