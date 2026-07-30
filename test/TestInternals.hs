@@ -24,6 +24,8 @@ import qualified SPLL.AutoNeural as AutoNeural (getSize)
 import SPLL.IntermediateRepresentation
 import SPLL.IROptimizer (postProcess)
 import SPLL.CodeGenPyTorchBatched (batchedGuard, generateFunctionsBatched)
+import SPLL.IRCompiler (injFLatentVerdicts)
+import SPLL.Typing.PType (PType(..))
 import IRInterpreter (generateDet)
 import Data.Foldable (toList)
 import Data.List (isInfixOf)
@@ -1232,6 +1234,61 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       Right () -> return ()
       Left msg -> assertFailure ("batchedGuard refused a node inside the fragment: " ++ msg)
 
+-- ---------------------------------------------------------------------------
+-- Decomposability gate: shared enumerated latent (design decomposability-gate-shared-latent)
+-- ---------------------------------------------------------------------------
+
+-- | Same pipeline as 'prepTypedFC' (parse, enum tags, RType, modality/pType),
+-- minus the FC certificate this gate has no use for.
+prepTypedProgSrc :: String -> Program
+prepTypedProgSrc = fst . prepTypedFC
+
+prepTypedProgFile :: FilePath -> IO Program
+prepTypedProgFile path = prepTypedProgSrc <$> readFile path
+
+-- | The outermost candidate binary-enumerable-InjF verdict found in 'main'
+-- (first entry of 'injFLatentVerdicts', which walks pre-order). Every
+-- fixture below has exactly one node of interest.
+mainOuterVerdict :: Program -> Bool
+mainOuterVerdict prog = case lookup "main" (functions prog) of
+  Nothing -> error "no main function"
+  Just mainExpr -> case injFLatentVerdicts mainExpr of
+    ((_, verdict) : _) -> verdict
+    []                 -> error "no candidate binary InjF node found in main"
+
+decomposabilityGateTests :: TestTree
+decomposabilityGateTests = testGroup "Decomposability gate: shared enumerated latent"
+  [ testCase "canary: letThreadEnumerable's shared u is flagged" $ do
+      prog <- prepTypedProgFile "testCases/letThreadEnumerable.ppl"
+      assertBool "u used on both sides of ++ must be flagged as shared" (mainOuterVerdict prog)
+  , testCase "sharedLatentCallChain: latent crosses a two-level call boundary" $ do
+      prog <- prepTypedProgFile "testCases/sharedLatentCallChain.ppl"
+      assertBool "shared through the inner/contrib call chain" (mainOuterVerdict prog)
+  , testCase "sharedLatentTupleSlot: latent reaches both uses via a tuple slot" $ do
+      prog <- prepTypedProgFile "testCases/sharedLatentTupleSlot.ppl"
+      assertBool "shared through the (u, 1) tuple argument" (mainOuterVerdict prog)
+  , testCase "sharedLatentThreeUses: transitively closed across 3 occurrences" $ do
+      prog <- prepTypedProgFile "testCases/sharedLatentThreeUses.ppl"
+      assertBool "a pairwise-only check would miss 3-way sharing; must be transitively closed"
+        (mainOuterVerdict prog)
+  , testCase "sharedLatentNestedLet: dependency threads through a derived let binding" $ do
+      prog <- prepTypedProgFile "testCases/sharedLatentNestedLet.ppl"
+      assertBool "v = contrib u 1 must still carry u's identity forward" (mainOuterVerdict prog)
+  , testCase "sharedLatentOneSideOnly: gate permits genuinely independent operands" $ do
+      prog <- prepTypedProgFile "testCases/sharedLatentOneSideOnly.ppl"
+      assertBool "u and v are distinct lets; must NOT be flagged as shared"
+        (not (mainOuterVerdict prog))
+  , testCase "sharedLatentPlusFresh: identical-looking draws bound to distinct lets are independent" $ do
+      prog <- prepTypedProgFile "testCases/sharedLatentPlusFresh.ppl"
+      assertBool "u and v draw from the same distribution shape but are distinct latents"
+        (not (mainOuterVerdict prog))
+  , testCase "two independent raw draws with no let are never flagged" $ do
+      let prog = prepTypedProgSrc
+            "main = (if Uniform < 0.3 then 1 else 0) ++ (if Uniform < 0.3 then 1 else 0)"
+      assertBool "two textually-identical but distinct raw draws are independent"
+        (not (mainOuterVerdict prog))
+  ]
+
 internalsTests :: TestTree
 internalsTests = testGroup "Internals"
   [ testProperties "properties" $(allProperties)
@@ -1269,6 +1326,7 @@ internalsTests = testGroup "Internals"
   , test_tstBackendsHeader
   , optimizerPurityTests
   , batchedRefusalUnitTests
+  , decomposabilityGateTests
   ]
 
 -- | Tests heavy enough (multiple full compiles of a depth-3/depth-10 plan

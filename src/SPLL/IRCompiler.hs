@@ -2,7 +2,11 @@ module SPLL.IRCompiler (
   envToIR,
   envToIRUnoptimized,
   stripBranchCount,
-  toIRNormal
+  toIRNormal,
+  sharesEnumeratedLatent,
+  latentDependencies,
+  injFLatentVerdicts,
+  isCandidateBinaryEnumInjF
 )where
 
 import SPLL.IntermediateRepresentation
@@ -276,6 +280,126 @@ isEnumerableApplication l v =
      IsConditional `elem` tags (getTypeInfo l)
   && isEnumerable (tags (getTypeInfo v))
   && pType (getTypeInfo v) /= Deterministic
+
+-- ===== Decomposability gate (design decomposability-gate-shared-latent) =====
+--
+-- A static analysis answering, for a binary enumerable InjF node, whether its
+-- two operands may share an *enumerated latent* -- a 'let'-bound enumerable,
+-- non-deterministic value that both operands' subtrees read, directly or
+-- through tuple/ADT components or a user-function's parameters. If they do,
+-- the operands are NOT independent and must not be tabulated (weighted and
+-- summed) separately; the correct answer requires enumerating the shared
+-- latent jointly. This is the correctness precondition for a future
+-- per-operand marginal tabulation (design materialize-discrete-marginals);
+-- it is pure analysis with no consumer yet, so it does not gate any of this
+-- module's existing compilation decisions and changes no emitted code. See
+-- TestInternals for direct unit coverage of the predicate.
+--
+-- Mechanism: track, per in-scope local variable, the set of latent chain
+-- names ('LatentScope') its value structurally depends on -- 'Nothing' means
+-- unknown/unanalysable rather than "no dependency", so it propagates through
+-- later reads of that variable instead of silently looking independent. A
+-- scope is NOT optional: an operand's free variables only resolve relative
+-- to the 'let's that lexically enclose it, so the gate must be queried with
+-- the scope in effect at that point in the program (see 'injFLatentVerdicts'
+-- for a whole-program walk that builds it correctly; querying with an empty
+-- scope on an operand pulled from deep inside nested 'let's silently answers
+-- "independent" for everything, which is the false negative this analysis
+-- exists to avoid).
+--
+-- A 'let x = v in body' (@Apply (Lambda x body) v@, 'bindLatent') looks up
+-- whatever 'v' itself depends on and, if 'v' is itself a fresh enumerable
+-- non-deterministic draw, mints a new latent identity keyed by 'v's own
+-- chain name -- so two textually identical-looking draws bound by two
+-- distinct 'let's are never conflated (chain names are unique per AST
+-- occurrence). A saturated call to a top-level function needs no body
+-- inlining to catch latents crossing the call boundary: since SPLL has no
+-- closures over a caller's 'let's, a callee can only see its own parameters,
+-- so the latent set of `f a1 .. an` is exactly the union of the arguments'
+-- latent sets, and the generic 'Apply'-chain case below already computes
+-- that by unrolling currying. Anything this can't see through -- a
+-- first-class 'Lambda' value reached anywhere other than directly as a
+-- 'let' RHS -- reports unknown ('Nothing'), which 'sharesEnumeratedLatent'
+-- treats conservatively as "may share": an unnecessary refusal costs
+-- performance, a missed one costs correctness silently.
+type LatentScope = Map.Map String (Maybe (Set.Set ChainName))
+
+latentDependencies :: LatentScope -> Expr -> Maybe (Set.Set ChainName)
+latentDependencies scope (Expr _ (Var x))       = Map.findWithDefault (Just Set.empty) x scope
+latentDependencies _     (Expr _ (Constant _))  = Just Set.empty
+latentDependencies _     (Expr _ (Lambda _ _))  = Nothing
+latentDependencies scope (Expr _ (ThetaI e _))  = latentDependencies scope e
+latentDependencies scope (Expr _ (Subtree e _)) = latentDependencies scope e
+latentDependencies scope (Expr _ (ReadNN _ e))  = latentDependencies scope e
+latentDependencies scope (Expr _ (IfThenElse c t e)) =
+  mconcat <$> mapM (latentDependencies scope) [c, t, e]
+latentDependencies scope (Expr _ (InjF _ params)) =
+  mconcat <$> mapM (latentDependencies scope) params
+latentDependencies scope (Expr _ (Apply (Expr _ (Lambda x body)) v)) =
+  latentDependencies (bindLatent scope x v) body
+latentDependencies scope (Expr _ (Apply l v)) =
+  mconcat <$> mapM (latentDependencies scope) [l, v]
+
+-- | Extend a 'LatentScope' with a 'let x = v in ...' binding: 'x' depends on
+-- whatever 'v' depends on, plus (if 'v' is itself a fresh enumerable
+-- non-deterministic draw) a new latent identity of its own. Shared between
+-- 'latentDependencies' (which needs it to descend into a 'let's body) and
+-- 'injFLatentVerdicts' (which needs it to build the scope for OTHER nodes
+-- reached later in the same walk) so the two never disagree on what a 'let'
+-- binds.
+bindLatent :: LatentScope -> String -> Expr -> LatentScope
+bindLatent scope x v = Map.insert x xLatent scope
+  where
+    vTi = getTypeInfo v
+    freshLatent
+      | isEnumerable (tags vTi) && pType vTi /= Deterministic = Set.singleton (chainName vTi)
+      | otherwise = Set.empty
+    xLatent = (<> freshLatent) <$> latentDependencies scope v
+
+-- | The gate itself: under the given scope, may these two operands of a
+-- binary node (typically a binary enumerable InjF) share an enumerated
+-- latent? Conservative on the unknown case -- see 'latentDependencies'.
+sharesEnumeratedLatent :: LatentScope -> Expr -> Expr -> Bool
+sharesEnumeratedLatent scope l r =
+  case (latentDependencies scope l, latentDependencies scope r) of
+    (Just ls, Just rs) -> not (Set.disjoint ls rs)
+    _                  -> True
+
+-- | True for the exact shape the per-operand tabulation paths above
+-- (isEnumerable/isEnumerable && non-Deterministic/non-Deterministic guards
+-- on 'left'/'right', e.g. the enumerate-both and invert-one-side InjF
+-- clauses) require of a binary InjF's two operands. Today's Analysis pass
+-- only tags DiscreteValues on a handful of shapes (ReadNN, InjF-of-enum,
+-- discrete-conditioned IfThenElse, Constant, ADT accessors -- see
+-- Analysis.md), NOT on the result of an ordinary user-function call; so a
+-- node like `(contrib u 1) ++ (contrib u 1)`, whose operands are finite Ints
+-- in the shape's own logic but untagged, does not currently satisfy this
+-- narrower predicate even though 'sharesEnumeratedLatent' answers it fine.
+-- That tag-propagation gap is a separate, pre-existing concern; this
+-- predicate is kept here (and exported) purely to name what would gate a
+-- real consumer wired into the paths above, not to filter 'injFLatentVerdicts'.
+isCandidateBinaryEnumInjF :: Expr -> Expr -> Bool
+isCandidateBinaryEnumInjF l r =
+     isEnumerable (tags (getTypeInfo l)) && pType (getTypeInfo l) /= Deterministic
+  && isEnumerable (tags (getTypeInfo r)) && pType (getTypeInfo r) /= Deterministic
+
+-- | Every binary InjF node inside 'e', paired with the gate's verdict for
+-- its own two operands, evaluated under the 'let'-scope actually in effect
+-- at that node -- built by this same top-down walk via 'bindLatent', so
+-- each node's free variables resolve against exactly the 'let's lexically
+-- enclosing it. Deliberately not filtered to 'isCandidateBinaryEnumInjF'
+-- (see its doc): the latent-sharing question is well-defined for any binary
+-- InjF regardless of today's tag coverage, and a real consumer can intersect
+-- with that narrower predicate itself. Exposed purely for direct testing
+-- (see TestInternals); not wired into any compilation decision.
+injFLatentVerdicts :: Expr -> [(ChainName, Bool)]
+injFLatentVerdicts = go Map.empty
+  where
+    go scope e = case node e of
+      InjF _ [l, r] ->
+        (chainName (getTypeInfo e), sharesEnumeratedLatent scope l r) : go scope l ++ go scope r
+      Apply (Expr _ (Lambda x body)) v -> go (bindLatent scope x v) body ++ go scope v
+      _ -> concatMap (go scope) (getSubExprs e)
 
 const0 :: IRExpr
 const0 = IRConst (VFloat 0)
