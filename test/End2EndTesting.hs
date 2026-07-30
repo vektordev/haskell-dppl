@@ -588,7 +588,11 @@ batchedRefusalTable =
   , ("listLiteralDeconstruction", "list tail (IRTail)")
   , ("map",                       "list map (IRMap)")
   -- Either: constructors, destructors, predicates
-  , ("either_const",              "Either constructor (IRLeft)")
+  -- fp-exact-tuple-compare (haskell-dppl IRCompiler.hs 'equalityGuard') made
+  -- the deterministic Either-compare arm structurally check IRIsLeft before
+  -- ever reaching the IRLeft constructor underneath, so that predicate is now
+  -- the first offender the batched walk finds here.
+  , ("either_const",              "Either predicate (IRIsLeft)")
     -- like `list` above: an Either *constant* now out-races IRRight as the
     -- first offender here, so IRRight's node-level control is synthetic too
   , ("either_isleft",             "constant with no batched representation (VEither")

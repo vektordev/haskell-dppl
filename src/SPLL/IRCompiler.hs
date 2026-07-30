@@ -651,10 +651,7 @@ toIRInference _ True (Expr _ (Var "Normal")) sample = return (mass (IRCumulative
 toIRInference _ True (Expr _ (Var "Uniform")) sample = return (mass (IRCumulative IRUniform sample))
 toIRInference _ _ (Expr _ (Constant (VError e))) _ = return (detP (IRError e))
 toIRInference _ False (Expr TypeInfo {rType=rt} (Constant value)) sample = do
-  let comp = case rt of
-              TFloat   -> IROp OpApprox sample (IRConst (fmap failConversion value))
-              TVarR _  -> IROp OpApprox sample (IRConst (fmap failConversion value))
-              _        -> IROp OpEq sample (IRConst (fmap failConversion value))
+  let comp = equalityGuard rt (IRConst (fmap failConversion value)) sample
   return (indicatorP comp)
 toIRInference _ True (Expr TypeInfo {rType=rt} (Constant value)) sample = return (mass (compareValueExpr rt (IRConst (valueToIR value)) sample))
 toIRInference meta True (Expr _ (ThetaI a i)) sample = do
@@ -1068,11 +1065,7 @@ toIRInference meta False e@(Expr TypeInfo {tags=_, rType=rt} (InjF (Named _) par
   -- There is no probabilistic parameter
   -- Check whether the value of the function is equal to the sample
   expr <- toIRGenerate meta e
-  let cmp = case rt of
-        TFloat   -> OpApprox
-        TVarR _  -> OpApprox
-        _        -> OpEq
-  let comp = IROp cmp expr sample
+  let comp = equalityGuard rt expr sample
   return (impossibleWhen (notIR comp) (detP (IRIf comp const1 const0)))
 toIRInference meta True e@(Expr TypeInfo {tags=_, rType=rt} (InjF (Named _) params)) sample
   | countProbParams params == 0 = do
@@ -1330,10 +1323,7 @@ toIRInference meta cumulative (Expr TypeInfo {rType=rt} (Var n)) sample = do
       if cumulative then
         return (detP (compareValueExpr rt (IRVar n) sample))
       else do
-        let comp = case rt of
-              TFloat   -> IROp OpApprox sample (IRVar n)
-              TVarR _  -> IROp OpApprox sample (IRVar n)
-              _        -> IROp OpEq sample (IRVar n)
+        let comp = equalityGuard rt (IRVar n) sample
         return (impossibleWhen (notIR comp) (detP (IRIf comp const1 const0)))
     Nothing -> error ("Could not find name in TypeEnv: " ++ n)
 toIRInference _ _ (Expr _ (Subtree _ _)) _ = error "Cannot infer prob on subtree expression. Please check your syntax"
@@ -1774,7 +1764,60 @@ compareValueExpr (ListOf _) v sample = IRIf (IROp OpEq sample v) (IRConst $ VFlo
 compareValueExpr (TADT _) _ _= IRError "Not yet implemented" -- TODO implement for ADTs
 compareValueExpr rt _ _ = error $ "Comparison not implemented for type: " ++ show rt
 
+-- | Bool-valued IR: is deterministic value @v@ equal to @sample@? This is the
+-- equality analogue of 'compareValueExpr' (which builds a '<='-style CDF
+-- indicator): a continuous leaf (TFloat/TVarR) recovered via inverse
+-- arithmetic is one ulp away from the query point far more often than it is
+-- bit-identical, so it is compared with 'OpApprox' (floatApproxEqThresh,
+-- 1e-10 -- well inside the .tst harness's 1e-4 probTolerance) rather than
+-- bit-exact 'OpEq'. Discrete/exact types (Bool, Int, ListOf, TADT, Symbol)
+-- keep bit-exact 'OpEq': their values are never fp-recovered, so exactness is
+-- both correct and cheaper. Tuple/Either recurse structurally so a compound
+-- value's float leaves get the approximate treatment too, mirroring
+-- compareValueExpr's own recursion shape.
+--
+-- Every recursion step of 'equalityGuard' additionally wraps an Any-wildcard
+-- guard around itself first: the plain 'OpEq'/'OpApprox' this replaces relied
+-- on a single flat comparison whose runtime semantics (IRInterpreter's
+-- 'cmp', pythonLib's 'T'/'Left'/'Right' '__eq__') already treat a VAny
+-- operand at *any* depth as an automatic match (a partial marginal query
+-- like @p((0.5, ANY))@ or @p(Left ANY)@). Once the comparison is decomposed
+-- into per-field IR (IRTFst/IRFromLeft), that recursive Any-awareness must
+-- be rebuilt explicitly at each step, or a nested ANY reaches a leaf
+-- comparison op that errors (OpApprox on a non-float) or silently returns
+-- False (OpEq's own base case treats VAny as never equal to anything --
+-- correct as a *fallback*, wrong as the first thing tried). The guard is
+-- spelled as nested 'IRIf', never 'IROp OpOr'/'OpAnd': both operands of an
+-- IR boolean op are evaluated, and the real comparison beneath the guard is
+-- exactly the op that would crash on a genuine VAny operand.
+--
+-- 'equalityGuardStatic' is the same structural recursion without that guard,
+-- for the set-witness ('memberGuard') and plan-guided-lazy-enumeration
+-- ('planDetGuard') callers: both build purely compile-time constraint IR
+-- over concrete plan/witness values that are never themselves a runtime
+-- VAny, and the Any-check nodes confuse those engines' own static analysis
+-- of the guard IR (occurrence counting for accessor pruning) -- adding it
+-- there produced spurious "constructor ... not present in the plan"
+-- refusals on the plan-enum corpus without fixing anything the guard is for.
+equalityGuard :: RType -> IRExpr -> IRExpr -> IRExpr
+equalityGuard rt v sample =
+  IRIf (IRUnaryOp OpIsAny v) constTrueIR
+    (IRIf (IRUnaryOp OpIsAny sample) constTrueIR (equalityGuardBody equalityGuard rt v sample))
 
+equalityGuardStatic :: RType -> IRExpr -> IRExpr -> IRExpr
+equalityGuardStatic = equalityGuardBody equalityGuardStatic
+
+equalityGuardBody :: (RType -> IRExpr -> IRExpr -> IRExpr) -> RType -> IRExpr -> IRExpr -> IRExpr
+equalityGuardBody _    TFloat    v sample = IROp OpApprox sample v
+equalityGuardBody _    (TVarR _) v sample = IROp OpApprox sample v
+equalityGuardBody _    TUnit _ _ = constTrueIR
+equalityGuardBody self (Tuple ft st) v sample =
+  IROp OpAnd (self ft (IRTFst v) (IRTFst sample)) (self st (IRTSnd v) (IRTSnd sample))
+equalityGuardBody self (TEither lr rr) v sample =
+  IRIf (IRIsLeft v)
+    (IRIf (IRIsLeft sample) (self lr (IRFromLeft v) (IRFromLeft sample)) (IRConst $ VBool False))
+    (IRIf (IRIsLeft sample) (IRConst $ VBool False) (self rr (IRFromRight v) (IRFromRight sample)))
+equalityGuardBody _    _ v sample = IROp OpEq sample v
 
 packParamsIntoLetinsProb :: [String] -> [Expr] -> IRExpr -> IRExpr -> Supply IRExpr
 --packParamsIntoLetinsProb [] [] expr _ = do
@@ -2126,10 +2169,7 @@ minWBound (WFinite a) (WFinite b) = WFinite (IRIf (IROp OpLessThan a b) a b)
 
 -- | Bool-valued IR: is @val@ (a deterministic value) inside the target set?
 memberGuard :: RType -> IRExpr -> WSet -> IRExpr
-memberGuard rt val (WPoint p _) = case rt of
-  TFloat  -> IROp OpApprox val p
-  TVarR _ -> IROp OpApprox val p
-  _       -> IROp OpEq val p
+memberGuard rt val (WPoint p _) = equalityGuardStatic rt p val
 memberGuard _ val (WInterval lo hi) = case boundGuards val lo hi of
   [] -> constTrueIR
   gs -> foldr1 (IROp OpAnd) gs
@@ -2617,10 +2657,7 @@ liveIntersects ws1 ws2 = filter (not . pwUnsat) [ intersectPlanW a b | a <- ws1,
 -- Mirrors the memberGuard / compareValueExpr conventions (approximate
 -- equality for floats; False < True for Bool cumulatives).
 planDetGuard :: RType -> IRExpr -> PTarget -> IRExpr
-planDetGuard rt val (PTPoint s) = case rt of
-  TFloat  -> IROp OpApprox val s
-  TVarR _ -> IROp OpApprox val s
-  _       -> IROp OpEq val s
+planDetGuard rt val (PTPoint s) = equalityGuardStatic rt s val
 planDetGuard rt val (PTUpTo s) = case rt of
   TBool -> IROp OpOr (IRUnaryOp OpNot val) s
   _     -> IRUnaryOp OpNot (IROp OpGreaterThan val s)
