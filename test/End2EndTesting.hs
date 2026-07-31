@@ -15,7 +15,7 @@ import Control.Monad (zipWithM)
 import Control.Monad.Random
 import System.Random (mkStdGen)
 import Data.Maybe
-import Data.List (intercalate, nub, isInfixOf, transpose, zip4)
+import Data.List (intercalate, nub, isInfixOf, isPrefixOf, transpose, zip4)
 import Data.Text (replace, pack, unpack)
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
@@ -474,6 +474,7 @@ batchedPythonTests = do
       -- at a cutoff, so it draws from the same declaration, not from a second
       -- eligibility condition of its own.
       batchedDeclared = [ (n, p, tcs) | (n, p, bs, tcs) <- entries, Batched `elem` bs ]
+      denseNames = [ n | (n, _, bs, _) <- entries, Dense `elem` bs ]
   declared <- mapM (\(n, p, _, tcs) -> (,) n <$> batchedEligibility p tcs)
                    [ e | e@(_, _, bs, _) <- entries, Batched `elem` bs ]
   undeclared <- mapM (\(n, p, _, tcs) -> (,) n <$> batchedEligibility p tcs)
@@ -482,10 +483,30 @@ batchedPythonTests = do
       refused  = [ (n, msg) | (n, Left msg) <- declared ]
       gained   = [ n | (n, Right _) <- undeclared ]
       topkEligible = topKEntries batchedDeclared
+      -- M3: a program declaring `dense` must actually get dense entry points.
+      -- Read off the emitted source, which is where the capability is visible;
+      -- a `dense` declaration on a program that is not even batched-eligible is
+      -- already caught above.
+      denseDeclared = [ e | e@(n, _, _, _) <- eligible, n `elem` denseNames ]
+      denseRefused = [ n | n <- denseNames
+                         , n `notElem` [ m | (m, src, _, _) <- eligible, not (null (denseEntryPoints src)) ] ]
+      denseGained = [ n | (n, src, _, _) <- eligible
+                        , n `notElem` denseNames, not (null (denseEntryPoints src)) ]
+      -- M3 x M5: the same topK-recompiled entries the per-element topK
+      -- differential uses, narrowed to the dense-declaring programs. Their
+      -- expectations are already retargeted to the *interpreter's* value at
+      -- that threshold, so running them through the dense path checks dense
+      -- mode inherits topK rather than merely agreeing with itself.
+      denseTopK = [ e | e@(n, src, _, _) <- fst topkEligible
+                      , takeWhile (/= '@') n `elem` denseNames
+                      , not (null (denseEntryPoints src)) ]
   mpy <- findTorchPython
   return $ testGroup "BatchedPython" $
     [ testProperty "declared-batched-eligible" (once (declaredEligibleProp (length declared) refused))
     , testProperty "eligibility-gain-note" (once (gainNoteProp gained))
+    , testProperty "declared-dense-eligible" (once (declaredDenseProp (length denseNames) denseRefused))
+    , testProperty "dense-eligibility-gain-note" (once (denseGainNoteProp denseGained))
+    , testProperty "dense-domain-boundary" (once (denseBoundaryProp eligible))
     ] ++ case mpy of
       Nothing ->
         [ testProperty "skipped-no-torch" $ once $ ioProperty $ do
@@ -495,6 +516,8 @@ batchedPythonTests = do
         [ testProperty "batched-vs-expected" (once (runBatchedPython py eligible))
         , testProperty "gradients-nan-free" (once (runBatchedGradients py eligible))
         , testProperty "generate-density-matches-expected" (once (runBatchedGenerate py eligible))
+        , testProperty "dense-matches-expected" (once (runBatchedDense False py denseDeclared))
+        , testProperty "dense-inherits-topk" (once (runBatchedDense True py denseTopK))
         , testProperty "topk-is-per-element" (once (runBatchedTopK py topkEligible)) ]
 
 -- | Everything the batched differential needs from one corpus program, or a
@@ -919,6 +942,183 @@ batchedDriver accArg eligible = unlines $
       in bucketCheck
          ++ [ "    _cmp(" ++ show name ++ ", " ++ show method ++ ", " ++ call
               ++ ", " ++ pyFloatList expP ++ ", " ++ pyFloatList expD ++ ")" ]
+    pyFloatList xs = "[" ++ intercalate ", " (map show xs) ++ "]"
+
+-- ===========================================================================
+-- M3: dense enumeration mode (design heterogeneous-batch-inference)
+-- ===========================================================================
+
+-- | The inference methods the emitted @Main@ class exposes a dense entry point
+-- for. Read off the emitted source rather than recomputed from the IR: the
+-- capability under test is precisely "the generated class has these methods",
+-- and re-deriving the eligibility rule here would let the test agree with a
+-- broken compiler.
+--
+-- Scoped to the @Main@ class block, because a helper group can perfectly well
+-- have a finite domain while @main@ does not (@coin@'s own @Coin@ class does;
+-- @Main@ there does too, but @gaussList@ is the shape where they differ).
+denseEntryPoints :: String -> [String]
+denseEntryPoints src =
+  [ m | m <- ["forward", "integrate"], ("def " ++ m ++ "_dense(") `isInfixOf` block ]
+  where
+    block = unlines $ takeWhile indented $ drop 1
+          $ dropWhile (/= "class Main(Module):") (lines src)
+    indented l = null l || " " `isPrefixOf` l
+
+-- | The point of the @dense@ routing token: a program that declares it must
+-- actually receive dense entry points.
+declaredDenseProp :: Int -> [String] -> Property
+declaredDenseProp 0 _ = counterexample
+  "no .tst file declares `dense` in its backends header; dense enumeration has no coverage" False
+declaredDenseProp _ refused = counterexample
+  ("programs declaring `dense` in their .tst backends header no longer get dense entry points\n\
+   \  (a finite query domain, and a prob/integ signature of just the sample):\n"
+   ++ unlines [ "  " ++ n | n <- refused ])
+  (null refused)
+
+-- | A visible note (never a failure) for batched programs that /could/ enumerate
+-- densely but whose @.tst@ file does not say so. Same asymmetry as
+-- 'gainNoteProp': losing the capability is the regression, gaining it is not.
+denseGainNoteProp :: [String] -> Property
+denseGainNoteProp gained = ioProperty $ do
+  if null gained
+    then return ()
+    else hPutStrLn stderr ("BatchedPython: " ++ show (length gained) ++ " batched program(s) have a finite\n\
+      \  query domain but do not declare `dense` in their .tst backends header:\n"
+      ++ unlines [ "    " ++ n | n <- gained ])
+  return True
+
+-- | Both sides of the dense decision boundary, named explicitly, so that a
+-- change which quietly widened or narrowed it fails here rather than only
+-- shifting a count. The gain/loss notes above measure the boundary's *position*;
+-- these rows pin the *reasons* it sits there.
+--
+-- Torch-free: it reads the emitted source, like the eligibility assertions.
+denseBoundaryProp :: [(String, String, [BatchGroup], [String])] -> Property
+denseBoundaryProp eligible = counterexample (unlines wrong) (null wrong)
+  where
+    rows =
+      -- A continuous query domain has no enumeration: dense must decline.
+      [ ("normal", False, "a continuous query domain")
+      , ("uniform", False, "a continuous query domain")
+      -- Finite domain, but the prob function also takes a per-point neural
+      -- symbol, so the dense result would be [B, V] and amortise over nothing.
+      , ("autoNeuralProbMnistAdd", False, "a per-point neural symbol argument")
+      -- The positive controls, one scalar and one composite, so a gate that
+      -- refused everything could not pass this property.
+      , ("coin", True, "a finite Int domain from the DiscreteValues tag")
+      , ("letProbIntervalPair", True, "a finite (Bool, Bool) domain from the return type")
+      ]
+    wrong =
+      [ "  " ++ n ++ ": expected " ++ (if want then "" else "no ") ++ "dense entry points ("
+        ++ why ++ "), got " ++ show (denseEntryPoints src)
+      | (n, want, why) <- rows
+      , (m, src, _, _) <- eligible
+      , m == n
+      , not (null (denseEntryPoints src)) /= want ]
+
+-- | Run every @dense@-declaring program's dense entry points in one torch
+-- process. For each query group this checks three things:
+--
+--   * the dense vector really is the domain -- its length is @len(DOMAIN)@, so
+--     the @[V]@ axis is pinned rather than merely being "some batch";
+--   * @<method>_at(points, dense=True)@ matches the corpus expectation, i.e. the
+--     gather into the dense vector agrees with per-point ground truth;
+--   * @<method>_at(points, dense=False)@ does too, so the runtime dispatch is
+--     value-neutral and forcing either axis is safe.
+--
+-- The dense=True direction is forced rather than left to the size heuristic:
+-- most corpus programs have more domain values than query points, so the
+-- automatic choice would take the direct path and never exercise M3 at all.
+--
+-- The @accArg@ flag runs the same check against topK-recompiled entries, whose
+-- prob function takes the accumulated probability after the sample. Dense mode
+-- needs no topK machinery of its own for that to work: under M5's per-element
+-- rule the cutoff comparison is already an elementwise mask over whatever batch
+-- is passed, and the domain is just another batch -- so pruning is per *domain
+-- value* and the vector is identical to querying those values one at a time.
+-- That is the whole answer to the design's open question about topK in dense
+-- mode, and this property is what pins it.
+runBatchedDense :: Bool -> FilePath -> [(String, String, [BatchGroup], [String])] -> Property
+runBatchedDense accArg _ [] = counterexample
+  ("BatchedPython dense: no dense-declaring corpus programs found"
+   ++ (if accArg then " at a topK threshold" else "")) False
+runBatchedDense accArg py entries = ioProperty $ do
+  hPutStrLn stderr ("BatchedPython dense" ++ (if accArg then " topK" else "") ++ ": "
+                    ++ show (length entries) ++ " program(s), "
+                    ++ show (sum [ length (denseEntryPoints src) | (_, src, _, _) <- entries ])
+                    ++ " dense entry point(s), via " ++ py)
+  cwd <- getCurrentDirectory
+  let script = "import sys\nsys.path.insert(0, " ++ show cwd ++ ")\n" ++ denseDriver accArg entries
+  (code, out, err) <- withSystemTempFile "batched_dense.py" $ \tmpPath tmpHandle -> do
+    hPutStr tmpHandle script
+    hClose tmpHandle
+    readProcessWithExitCode py [tmpPath] ""
+  return $ case code of
+    ExitSuccess -> counterexample (out ++ err) True
+    ExitFailure _ -> counterexample ("Batched PyTorch dense differential failed:\n" ++ out ++ err) False
+
+denseDriver :: Bool -> [(String, String, [BatchGroup], [String])] -> String
+denseDriver accArg entries = unlines $
+  [ "import torch, sys, traceback"
+  , "from pythonLibBatched import T, ConsInferenceList, EmptyInferenceList, Left, Right"
+  , "TOL = " ++ show probTolerance
+  , "failures = []"
+  , "def _leaf(x, i):"
+  , "    return float(x[i]) if (torch.is_tensor(x) and x.dim() > 0) else float(x)"
+  , "def _cmp(name, method, r, exp_p, exp_d):"
+  , "    p = r[0]; d = r[1][0]"
+  , "    for i in range(len(exp_p)):"
+  , "        pv = _leaf(p, i)"
+  , "        if abs(pv - exp_p[i]) > TOL:"
+  , "            failures.append(name + '.' + method + ' pt ' + str(i) + ': prob ' + str(pv) + ' != ' + str(exp_p[i]))"
+  , "        if pv != 0.0:"
+  , "            dv = _leaf(d, i)"
+  , "            if abs(dv - exp_d[i]) > TOL:"
+  , "                failures.append(name + '.' + method + ' pt ' + str(i) + ': dim ' + str(dv) + ' != ' + str(exp_d[i]))"
+  -- A topK-compiled prob function takes the accumulated probability right after
+  -- the sample; seed it with 1.0 at the query root, as every other driver does.
+  -- It is a scalar, so it broadcasts over the domain batch as well as over the
+  -- query batch -- which is exactly why dense mode needs no topK plumbing.
+  , "ACC = " ++ (if accArg then "(1.0,)" else "()")
+  , "def _dense(name, method, main, samples, exp_p, exp_d):"
+  , "    dom = type(main).DOMAIN"
+  , "    vec = getattr(main, method + '_dense')(*ACC)"
+  , "    n = vec[0].shape[0] if (torch.is_tensor(vec[0]) and vec[0].dim() > 0) else 1"
+  , "    if n != len(dom):"
+  , "        failures.append(name + '.' + method + '_dense: vector length ' + str(n) + ' != domain size ' + str(len(dom)))"
+  , "    at = getattr(main, method + '_at')"
+  , "    _cmp(name, method + '_at[dense]', at(samples, *ACC, dense=True), exp_p, exp_d)"
+  , "    _cmp(name, method + '_at[direct]', at(samples, *ACC, dense=False), exp_p, exp_d)"
+  ] ++
+  concatMap programBlock entries ++
+  [ "if failures:"
+  , "    print('DENSE DIFFERENTIAL FAILURES (' + str(len(failures)) + '):')"
+  , "    for f in failures: print('  ' + f)"
+  , "    sys.exit(1)"
+  , "print('BatchedPython dense OK: " ++ show (length entries) ++ " programs')"
+  ]
+  where
+    programBlock (name, src, groups, netNames) =
+      [ "try:"
+      , "    _ns = {}"
+      , "    exec(" ++ show src ++ ", _ns)"
+      ] ++
+      [ "    _ns[" ++ show nm ++ "] = (lambda s: s)" | nm <- netNames ] ++
+      [ "    _main = _ns['main']" ] ++
+      concatMap (groupCall name src) groups ++
+      [ "except Exception as _e:"
+      , "    failures.append(" ++ show name ++ " + ': exception ' + repr(_e) + '\\n' + traceback.format_exc())"
+      ]
+    -- A group is checked only for the method that actually has a dense entry
+    -- point: `integrate` can be absent (or itself outside the fragment) while
+    -- `forward` is dense, and vice versa.
+    groupCall name src g =
+      let method = if bgIsCumul g then "integrate" else "forward"
+          samples = "[" ++ intercalate ", " (map pyVal (bgSamples g)) ++ "]"
+      in [ "    _dense(" ++ show name ++ ", " ++ show method ++ ", _main, " ++ samples
+           ++ ", " ++ pyFloatList (bgExpProb g) ++ ", " ++ pyFloatList (bgExpDim g) ++ ")"
+         | method `elem` denseEntryPoints src ]
     pyFloatList xs = "[" ++ intercalate ", " (map show xs) ++ "]"
 
 -- ===========================================================================

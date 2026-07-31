@@ -948,6 +948,29 @@ enumContinuousRefusalTests = testGroup "enum annotation refuses continuous leave
         (MultiADT [("A", [MultiDiscretes [VInt 0]]), ("B", [MultiContinuous])]))
       assertBool "pure discrete composite is clean" (not (multiValueContainsContinuous
         (MultiTuple (MultiDiscretes [VInt 0]) (MultiADT [("A", [])]))))
+  -- 'multiValueIsFinite' backs the dense-enumeration domain (design
+  -- heterogeneous-batch-inference M3). It is deliberately *stricter* than
+  -- @not . multiValueContainsContinuous@, and each row below is a case where
+  -- the two answers differ -- which is the whole reason it exists rather than
+  -- reusing the older predicate.
+  , testCase "multiValueIsFinite is stricter than the continuity check" $ do
+      assertBool "wholly discrete composite is finite" (multiValueIsFinite
+        (MultiTuple (MultiDiscretes [VInt 0, VInt 1]) (MultiDiscretes [VBool True])))
+      assertBool "nullary ADT constructor contributes one value" (multiValueIsFinite
+        (MultiADT [("A", []), ("B", [MultiDiscretes [VInt 0]])]))
+      -- An Either with one continuous arm: enumerating only the discrete arm
+      -- would be a strict subset of the domain, so it is not a domain at all.
+      assertBool "Either with a continuous arm is not finite" (not (multiValueIsFinite
+        (MultiEither (MultiDiscretes [VInt 0]) MultiContinuous)))
+      -- These two are *not* continuous, yet still have no usable enumeration:
+      -- multiValueToValueList would error on the first and has no case for the
+      -- second, so a caller wanting the values must be told no.
+      assertBool "unresolved auto placeholder is not finite"
+        (not (multiValueContainsContinuous MultiAuto) && not (multiValueIsFinite MultiAuto))
+      assertBool "unresolved type reference is not finite"
+        (not (multiValueContainsContinuous (MultiTypeRef "T"))
+         && not (multiValueIsFinite (MultiTypeRef "T")))
+      assertBool "empty enumeration is not finite" (not (multiValueIsFinite (MultiDiscretes [])))
   ]
 
 -- | Plan-guided lazy enumeration milestone 2 (design

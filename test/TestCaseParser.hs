@@ -48,11 +48,15 @@ import Data.Void
 -- End2EndTesting.batchedPythonTests), asserted rather than filtered, so
 -- silently losing eligibility fails the suite. Listing it does not remove the
 -- file from any scalar backend -- spell those out alongside it.
-data Backend = Interpreter | Julia | Python | Batched
+-- `dense` is the same kind of declaration one level in: that the program's
+-- *query domain* is finite, so batched mode emits dense-enumeration entry points
+-- for it (design heterogeneous-batch-inference, M3). It presupposes `batched`
+-- and does not imply it -- list both.
+data Backend = Interpreter | Julia | Python | Batched | Dense
   deriving (Eq, Show, Enum, Bounded)
 
--- Every Backend constructor. Note this now includes 'Batched', so it is NOT the
--- right default for a header-less file -- use 'defaultBackends' for that.
+-- Every Backend constructor. Note this now includes 'Batched' and 'Dense', so it
+-- is NOT the right default for a header-less file -- use 'defaultBackends'.
 allBackends :: [Backend]
 allBackends = [minBound .. maxBound]
 
@@ -213,6 +217,7 @@ pBackend = choice
   , symbol "julia" >> return Julia
   , symbol "python" >> return Python
   , symbol "batched" >> return Batched
+  , symbol "dense" >> return Dense
   ]
 
 pBackendsHeader :: MonadParser m => m [Backend]

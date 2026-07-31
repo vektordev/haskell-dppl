@@ -1,4 +1,4 @@
-backends: interpreter, julia, python, batched
+backends: interpreter, julia, python, batched, dense
 p(1.0)=(1.0, 0.0)
 p(0.0)=(0.0, 0.0)
 cdf(0.9)=(0.0, 0.0)
