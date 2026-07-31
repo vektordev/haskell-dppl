@@ -110,7 +110,14 @@ symbol = L.symbol sc
 
 -- Either a windows or a linux newline
 pNewline :: MonadParser m => m String
-pNewline = choice [symbol "\n", symbol "\r\n"] 
+pNewline = choice [symbol "\n", symbol "\r\n"]
+
+-- Full-file whitespace: blank lines and whole-line `--`/`{- -}` comments.
+-- Only consumed at the very start of the file (before any headers) and at the
+-- very end (after the last test case, before 'eof') -- comments interleaved
+-- between test-case lines are not supported.
+scn :: MonadParser m => m ()
+scn = L.space space1 (L.skipLineComment "--") (L.skipBlockComment "{-" "-}")
 
 pIRValue :: MonadParser m => m IRValue
 pIRValue = pValue >>= return . valueToIR
@@ -245,8 +252,11 @@ pHeaders = go defaultBackends False
 
 pTestFile :: MonadParser m => String -> m ([Backend], Bool, [TestCase])
 pTestFile name = do
+  scn
   (bs, slow) <- pHeaders
   tcs <- pTestCases name
+  scn
+  eof
   return (bs, slow, tcs)
 
 parseTestCasesFromString :: FilePath -> String -> Either String ([Backend], Bool, [TestCase])
