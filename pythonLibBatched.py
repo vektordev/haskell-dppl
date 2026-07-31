@@ -455,17 +455,64 @@ def gather_dense(dense, idx):
     return t.expand(len(idx))
   return t[idx]
 
+# The measured crossover, on a scalar domain with an already-packed [B] sample
+# tensor (so index lookup is pure torch): dense+gather is 0.9x the direct kernel
+# at B=16, 1.0x at B=256, 1.4x at B=4096 and 4.8x at B=65536 on `coin`. It is
+# kernel-dependent -- a more expensive body moves it down -- so this is a
+# conservative default, not a claim about every program.
+#
+# Note the marshalled path (a Python *list* of sample values) never reaches the
+# crossover on small kernels: `denskey` per sample is O(B) Python and outweighs
+# the O(V) torch saving. That path therefore stays direct unless forced, and the
+# real amortisation idiom is a caller who holds the vector:
+#
+#     vec = main.forward_dense()          # once per parameter update
+#     p1  = gather_dense(vec, idx1)       # 23-62x the direct kernel
+#
+DENSE_MIN_BATCH = 1024
+
+def _scalar_domain_index(domain, samp):
+  # Index lookup for a scalar domain against an already-packed [B] tensor: one
+  # O(B*V) torch comparison, no per-sample Python. Returns (idx, all_present);
+  # a sample matching no domain slot must not be answered from the vector.
+  dom = torch.tensor([float(v) for v in domain], dtype=torch.get_default_dtype())
+  eq = (samp.to(dom.dtype).unsqueeze(-1) == dom.unsqueeze(0))
+  return eq.to(torch.int64).argmax(-1), bool(eq.any(-1).all())
+
 def dense_query(dense_fn, kernel, domain, samples, args=(), dense=None):
   # The body of the emitted `<method>_at`. `dense=None` picks the cheaper axis
-  # (dense iff the batch is larger than the domain); True/False force it, which
-  # is what a benchmark or a differential test wants.
+  # from the measured rule above; True/False force it, which is what a benchmark
+  # or a differential test wants.
+  #
+  # Fast path first: an already-packed [B] tensor over a scalar domain needs no
+  # Python per sample at all, which is the only shape where the automatic choice
+  # can currently come out dense.
+  if torch.is_tensor(samples) and samples.dim() > 0 and all(
+       not isinstance(v, (T, InferenceList, Left, Right)) and not hasattr(v, '_fields')
+       for v in domain):
+    per_point = [a for a in args if torch.is_tensor(a) and a.dim() > 0 and a.shape[0] == samples.shape[0]]
+    idx, all_present = _scalar_domain_index(domain, samples)
+    use = ((not per_point) and all_present and samples.shape[0] >= DENSE_MIN_BATCH) \
+          if dense is None else dense
+    if not use:
+      return kernel(samples, *args)
+    if per_point:
+      raise ValueError("dense_query(dense=True): a per-point argument cannot be evaluated over the domain")
+    if not all_present:
+      # Off-domain elements have no slot to gather; fall back wholesale rather
+      # than silently answering them with slot 0.
+      return kernel(samples, *args)
+    return gather_dense(dense_fn(*args), idx)
   samples = list(samples)
   args = list(args)
   # An argument that varies per query point (a [B, n] neural symbol batch) has no
   # meaning over a domain of a different length, so it rules the dense axis out.
   # A shared one (a scalar topK accProb, a ThetaTree) broadcasts and is fine.
   per_point = [a for a in args if torch.is_tensor(a) and a.dim() > 0 and a.shape[0] == len(samples)]
-  use = ((not per_point) and len(samples) > len(domain)) if dense is None else dense
+  # A marshalled list of sample values: measured never to reach the crossover on
+  # the corpus's kernels (see DENSE_MIN_BATCH), so the automatic choice is the
+  # direct path. dense=True still forces it, which is what the differential does.
+  use = False if dense is None else dense
   if use and per_point:
     raise ValueError("dense_query(dense=True): a per-point argument cannot be evaluated over the domain")
   if not use:

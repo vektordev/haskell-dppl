@@ -1081,7 +1081,7 @@ denseDriver accArg entries = unlines $
   -- It is a scalar, so it broadcasts over the domain batch as well as over the
   -- query batch -- which is exactly why dense mode needs no topK plumbing.
   , "ACC = " ++ (if accArg then "(1.0,)" else "()")
-  , "def _dense(name, method, main, samples, exp_p, exp_d):"
+  , "def _dense(name, method, main, samples, exp_p, exp_d, packed=None):"
   , "    dom = type(main).DOMAIN"
   , "    vec = getattr(main, method + '_dense')(*ACC)"
   , "    n = vec[0].shape[0] if (torch.is_tensor(vec[0]) and vec[0].dim() > 0) else 1"
@@ -1090,6 +1090,14 @@ denseDriver accArg entries = unlines $
   , "    at = getattr(main, method + '_at')"
   , "    _cmp(name, method + '_at[dense]', at(samples, *ACC, dense=True), exp_p, exp_d)"
   , "    _cmp(name, method + '_at[direct]', at(samples, *ACC, dense=False), exp_p, exp_d)"
+  -- The scalar fast path: an already-packed [B] tensor skips the per-sample
+  -- Python marshalling and looks the domain up with one torch comparison. It is
+  -- a separate branch of dense_query, so it needs its own row -- and it is the
+  -- only branch whose automatic choice can come out dense, which is why the
+  -- unforced call is checked here and not above.
+  , "    if packed is not None:"
+  , "        _cmp(name, method + '_at[packed,dense]', at(packed, *ACC, dense=True), exp_p, exp_d)"
+  , "        _cmp(name, method + '_at[packed,auto]', at(packed, *ACC), exp_p, exp_d)"
   ] ++
   concatMap programBlock entries ++
   [ "if failures:"
@@ -1116,8 +1124,14 @@ denseDriver accArg entries = unlines $
     groupCall name src g =
       let method = if bgIsCumul g then "integrate" else "forward"
           samples = "[" ++ intercalate ", " (map pyVal (bgSamples g)) ++ "]"
+          -- Only a scalar (non-tuple, non-structural) batch has a packed form
+          -- the fast path accepts; anything else exercises the marshalled path
+          -- alone, which is correct -- dense_query routes it there too.
+          packed = case batchLiteral (bgSamples g) of
+            Just lit | not ("T(" `isPrefixOf` lit) -> ", " ++ lit
+            _ -> ""
       in [ "    _dense(" ++ show name ++ ", " ++ show method ++ ", _main, " ++ samples
-           ++ ", " ++ pyFloatList (bgExpProb g) ++ ", " ++ pyFloatList (bgExpDim g) ++ ")"
+           ++ ", " ++ pyFloatList (bgExpProb g) ++ ", " ++ pyFloatList (bgExpDim g) ++ packed ++ ")"
          | method `elem` denseEntryPoints src ]
     pyFloatList xs = "[" ++ intercalate ", " (map show xs) ++ "]"
 
