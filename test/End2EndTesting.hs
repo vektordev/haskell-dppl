@@ -618,9 +618,16 @@ batchedRefusalTable =
   -- right ..`), so the sample's structure is per element and there is no bucket
   -- to run it in.
   , ("either_isleft",             "arms have different structure")
-  -- a neural decoder's own Either-shaped output: the refused method is a
-  -- decoder group's forward, not main's
-  , ("eitherNeural",              "eitherNeural_auto's forward")
+  -- `eitherNeural`'s decoder (Either Int Bool) used to be refused here too --
+  -- not for the Either shape itself (M2 handles that), but because its Bool
+  -- arm's enum-index lookup built an `indexOf(x, [True, False])` call that
+  -- 'SPLL.IROptimizer.indexmagic' could not fold (only `[0..n]` naturals lists
+  -- folded), so the `VList` constant survived to codegen with no batched
+  -- representation. Fixed by task batched-bool-enum-index (indexmagic now
+  -- folds any constant scalar enumeration, not just naturals); `eitherNeural`
+  -- itself has no `p()`/`cdf()` query points in its `.tst` (argmax_p only), so
+  -- it does not appear in the eligible/gained lists either -- it simply drops
+  -- out of this refusal table.
   -- ADT declarations: the bail at the top of 'generateFunctionsBatched'
   -- ADTs. The declarations themselves are emittable since heterogeneous M2
   -- (constructor tag = structure = part of the bucket signature), so `adtCoin`,

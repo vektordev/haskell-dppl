@@ -65,12 +65,44 @@ optimize conf = commonSubexprStage . irMap (applyConstStage . assiciativityStage
 
 indexmagic :: IRExpr -> IRExpr
 -- if calling Apply ("indexOf") elem [0..], replace with elem
-indexmagic (IRApply (IRApply (IRVar "indexOf") elem) (IRConst (VList list))) | isNaturals (toList list) = elem
+indexmagic (IRApply (IRApply (IRVar "indexOf") elem) (IRConst (VList list)))
+  | isNaturals valList = elem
+  | Just vals <- constEnumList valList = indexOfChain elem vals
   where
+    valList = toList list
     isNaturals lst = and (zipWith (==) [0..] (map toNatural lst))
     toNatural (VInt x) = x
     toNatural _ = -1 -- not a natural number, should fail the above.
 indexmagic x = x
+
+-- | A non-naturals enumeration constant (e.g. [False, True] or [3, 7, 11]) that
+-- indexmagic's fast path above doesn't fold: every element is a scalar constant
+-- (Bool/Int) so equality against it is cheap and unambiguous. Used to fold
+-- `indexOf elem [..]` into a chain of equality comparisons below, which keeps the
+-- enum-index lookup an elementwise IRIf chain (select-pass/batching eligible)
+-- rather than surviving to codegen as a call to the linked-list-walking stdlib
+-- `indexOf`, whose `VList` argument has no batched representation
+-- (task batched-bool-enum-index).
+constEnumList :: [IRValue] -> Maybe [IRValue]
+constEnumList lst@(_:_) | all isScalarConst lst = Just lst
+  where
+    isScalarConst (VBool _) = True
+    isScalarConst (VInt _) = True
+    isScalarConst _ = False
+constEnumList _ = Nothing
+
+-- | indexOf elem [v0, v1, .., vn] ~> if elem == v0 then 0 else if elem == v1 then 1
+-- else .. else n. The last element needs no comparison: indexOf's own contract
+-- (StandardLibrary.stdIndexOf) is a total function only when elem is a member of
+-- the list, so falling through to the final index is sound whenever this fold's
+-- caller relied on that same guarantee (as SPLL.AutoNeural.indexOf's callers do).
+indexOfChain :: IRExpr -> [IRValue] -> IRExpr
+indexOfChain _ [] = IRError "indexOf: empty enumeration"
+indexOfChain elemExpr vals = go (zip [0 ..] vals)
+  where
+    go [(i, _)] = IRConst (VInt i)
+    go ((i, v) : rest) = IRIf (IROp OpEq elemExpr (IRConst v)) (IRConst (VInt i)) (go rest)
+    go [] = IRError "indexOf: empty enumeration"
 
 -- A tuple of conditionals sharing one condition can be hoisted into a single
 -- conditional over tuples, e.g. (if c then x else y, if c then z else w) becomes
