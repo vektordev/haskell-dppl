@@ -19,7 +19,7 @@ import SPLL.Lang.Lang (floatApproxEqThresh)
 
 
 optimizeEnv :: CompilerConfig -> IREnv -> IREnv
-optimizeEnv conf (IREnv funcs adts consts) = IREnv (map (\(IRFunGroup name gen prob integ encode normal doc) -> IRFunGroup name (gen <&> pp) (prob <&> pp) (integ <&> pp) (encode <&> pp) (normal <&> pp) doc) funcs) adts consts
+optimizeEnv conf (IREnv funcs adts consts) = IREnv (map (\fg -> fg { genFun = genFun fg <&> pp, probFun = probFun fg <&> pp, integFun = integFun fg <&> pp, encodeFun = encodeFun fg <&> pp, normalFun = normalFun fg <&> pp }) funcs) adts consts
   where pp (expr, doc) = (postProcess conf expr, doc)
 
 postProcess :: CompilerConfig -> IRExpr -> IRExpr
@@ -160,14 +160,17 @@ usedInEnumSumBodyInvariant var val scope =
   usedInEnumSumBody var scope &&
   all (\loopVar -> countUses loopVar val == 0) (enumSumBoundVars scope)
 
--- | True if `var` appears free inside at least one IREnumSum body in `expr`.
+-- | True if `var` appears free inside at least one IREnumSum/IRLogEnumSum
+-- body in `expr`.
 usedInEnumSumBody :: String -> IRExpr -> Bool
 usedInEnumSumBody var (IREnumSum _ _ body) = countUses var body > 0
+usedInEnumSumBody var (IRLogEnumSum _ _ body) = countUses var body > 0
 usedInEnumSumBody var expr = any (usedInEnumSumBody var) (getIRSubExprs expr)
 
--- | Collect all variables bound by IREnumSum nodes in an expression.
+-- | Collect all variables bound by IREnumSum/IRLogEnumSum nodes in an expression.
 enumSumBoundVars :: IRExpr -> [String]
 enumSumBoundVars (IREnumSum n _ body) = n : enumSumBoundVars body
+enumSumBoundVars (IRLogEnumSum n _ body) = n : enumSumBoundVars body
 enumSumBoundVars expr = concatMap enumSumBoundVars (getIRSubExprs expr)
 
 evalConstantDistr :: IRExpr -> IRExpr
@@ -175,6 +178,10 @@ evalConstantDistr (IRDensity IRNormal (IRConst (VFloat x))) = IRConst (VFloat ((
 evalConstantDistr (IRCumulative IRNormal (IRConst (VFloat x))) = IRConst (VFloat ((1/2) * (1 + erf (x/sqrt (2)))))
 evalConstantDistr (IRDensity IRUniform (IRConst (VFloat x))) = IRConst (VFloat (if x >= 0 && x <= 1 then 1 else 0))
 evalConstantDistr (IRCumulative IRUniform (IRConst (VFloat x))) = IRConst (VFloat (if x < 0 then 0 else if x > 1 then 1 else x))
+evalConstantDistr (IRLogDensity IRNormal (IRConst (VFloat x))) = IRConst (VFloat ((-0.5) * x * x - 0.5 * log (2 * pi)))
+evalConstantDistr (IRLogCumulative IRNormal (IRConst (VFloat x))) = IRConst (VFloat (log ((1/2) * (1 + erf (x/sqrt (2))))))
+evalConstantDistr (IRLogDensity IRUniform (IRConst (VFloat x))) = IRConst (VFloat (if x >= 0 && x <= 1 then 0 else (-1)/0))
+evalConstantDistr (IRLogCumulative IRUniform (IRConst (VFloat x))) = IRConst (VFloat (log (if x < 0 then 0 else if x > 1 then 1 else x)))
 evalConstantDistr x = x
 
 simplify :: IRExpr -> IRExpr
@@ -384,6 +391,7 @@ optimizeCommonSubexpr topExpr = evalState (scan (annotateIR topExpr)) 0
       IRSelect{}      | [c, t, el] <- annKids a -> IRSelect <$> descendToScanRoots c <*> scan t <*> scan el
       IRLambda n _    | [b] <- annKids a -> IRLambda n <$> scan b
       IREnumSum n v _ | [b] <- annKids a -> IREnumSum n v <$> scan b
+      IRLogEnumSum n v _ | [b] <- annKids a -> IRLogEnumSum n v <$> scan b
       e -> do
         kids <- mapM descendToScanRoots (annKids a)
         return (setIRSubExprs e kids)
@@ -398,6 +406,7 @@ optimizeCommonSubexpr topExpr = evalState (scan (annotateIR topExpr)) 0
       IRSelect{}      | [c, t, el] <- annKids a -> IRSelect <$> route c <*> scan t <*> scan el
       IRLambda n _    | [b] <- annKids a -> IRLambda n <$> scan b
       IREnumSum n v _ | [b] <- annKids a -> IREnumSum n v <$> scan b
+      IRLogEnumSum n v _ | [b] <- annKids a -> IRLogEnumSum n v <$> scan b
       e -> do
         kids <- mapM route (annKids a)
         return (setIRSubExprs e kids)
@@ -459,6 +468,7 @@ mkAnnIR e kids = AnnIR e kids h sz smp bnd
       IRLetIn n _ _   -> Set.insert n kidsBound
       IRLambda n _    -> Set.insert n kidsBound
       IREnumSum n _ _ -> Set.insert n kidsBound
+      IRLogEnumSum n _ _ -> Set.insert n kidsBound
       _               -> kidsBound
 
 -- | Replace every subtree structurally equal to `sub` by `rep`, rebuilding
@@ -522,6 +532,9 @@ headHash e = case e of
   IRIndex{}         -> 30
   IRError s         -> hashMix 31 (hashStr s)
   IRConformsTo t _  -> hashMix 32 (hashStr (show t))
+  IRLogDensity d _    -> hashMix 34 (hashStr (show d))
+  IRLogCumulative d _ -> hashMix 35 (hashStr (show d))
+  IRLogEnumSum n v _  -> hashMix (hashMix 36 (hashStr n)) (hashStr (show v))
 
 -- | The largest hoistable common subexpression of a node (candidates are in
 -- first-occurrence order and ties break like the historical
@@ -557,6 +570,7 @@ unconditionalAnns a0 = go a0 []
       IRSelect{}  -> case annKids a of { (c:_) -> go c acc; [] -> acc }
       IRLambda{}  -> acc
       IREnumSum{} -> acc
+      IRLogEnumSum{} -> acc
       _           -> foldr go acc (annKids a)
 
 -- | Exact occurrence counts of the distinct subexpressions in the list, in
@@ -603,10 +617,13 @@ setIRSubExprs (IRIsRight{}) [a] = IRIsRight a
 setIRSubExprs (IRIsPossible val _) [a] = IRIsPossible val a
 setIRSubExprs (IRDensity d _) [a] = IRDensity d a
 setIRSubExprs (IRCumulative d _) [a] = IRCumulative d a
+setIRSubExprs (IRLogDensity d _) [a] = IRLogDensity d a
+setIRSubExprs (IRLogCumulative d _) [a] = IRLogCumulative d a
 setIRSubExprs (IRLetIn n _ _) [a, b] = IRLetIn n a b
 setIRSubExprs (IRLambda n _) [a] = IRLambda n a
 setIRSubExprs (IRApply{}) [a, b] = IRApply a b
 setIRSubExprs (IREnumSum n val _) [a] = IREnumSum n val a
+setIRSubExprs (IRLogEnumSum n val _) [a] = IRLogEnumSum n val a
 setIRSubExprs (IRIndex{}) [a, b] = IRIndex a b
 setIRSubExprs (IRConformsTo t _) [a] = IRConformsTo t a
 setIRSubExprs e [] = e  -- leaves: IRConst, IRSample, IRVar, IRError
@@ -618,6 +635,7 @@ freeVarsIR (IRVar v) = [v]
 freeVarsIR (IRLetIn n decl body) = freeVarsIR decl ++ filter (/= n) (freeVarsIR body)
 freeVarsIR (IRLambda n body) = filter (/= n) (freeVarsIR body)
 freeVarsIR (IREnumSum n _ body) = filter (/= n) (freeVarsIR body)
+freeVarsIR (IRLogEnumSum n _ body) = filter (/= n) (freeVarsIR body)
 freeVarsIR e = concatMap freeVarsIR (getIRSubExprs e)
 
 -- | Every variable name occurring anywhere in the expression, as a variable
@@ -632,6 +650,7 @@ allNamesIR = go Set.empty
       IRLetIn n _ _   -> foldl' go (Set.insert n acc) (getIRSubExprs e)
       IRLambda n _    -> foldl' go (Set.insert n acc) (getIRSubExprs e)
       IREnumSum n _ _ -> foldl' go (Set.insert n acc) (getIRSubExprs e)
+      IRLogEnumSum n _ _ -> foldl' go (Set.insert n acc) (getIRSubExprs e)
       _               -> foldl' go acc (getIRSubExprs e)
 
 -- | Replace an application of a lambda to a non-value argument by a let binding:

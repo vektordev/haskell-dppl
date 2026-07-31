@@ -19,6 +19,35 @@ def density_normal(x):
 def cumulative_normal(x):
   return (1.0 + erf(x / sqrt(2.0))) / 2.0
 
+# Native log-pdf/log-cdf (task log-space-probability-computation), computed
+# directly from the formula rather than as log(density_...(x)): the latter
+# would underflow to a true float 0.0 in a deep tail before the log is taken,
+# losing the tail entirely.
+def log_density_uniform(x):
+  return 0.0 if 0 <= x <= 1 else -math.inf
+
+def log_cumulative_uniform(x):
+  c = cumulative_uniform(x)
+  return -math.inf if c <= 0 else math.log(c)
+
+def log_density_normal(x):
+  return -(x**2) / 2 - 0.5 * math.log(2 * pi)
+
+def log_cumulative_normal(x):
+  c = cumulative_normal(x)
+  return -math.inf if c <= 0 else math.log(c)
+
+# Log-sum-exp reduction backing IRLogEnumSum's emitted code: the log-space
+# sibling of a plain sum() over enumerated per-value log-probabilities.
+def logsumexp(xs):
+  xs = list(xs)
+  if not xs:
+    return -math.inf
+  m = max(xs)
+  if m == -math.inf:
+    return -math.inf
+  return m + math.log(sum(math.exp(x - m) for x in xs))
+
 def rand():
   return random()
 

@@ -30,6 +30,7 @@ module SPLL.Lang.Lang (
 , constructVList
 , multiValueToValueList
 , multiValueContainsContinuous
+, multiValueIsFinite
 , valueListToMultiValue
 , valueInMultiValue
 , unionMultiValues
@@ -166,6 +167,29 @@ multiValueContainsContinuous (MultiEither a b) = multiValueContainsContinuous a 
 multiValueContainsContinuous (MultiADT constrs) = any (any multiValueContainsContinuous . snd) constrs
 multiValueContainsContinuous (MultiTypeRef _) = False
 multiValueContainsContinuous MultiAuto = False
+
+-- | True if the MultiValue enumerates a non-empty, statically finite set of values,
+-- so that 'multiValueToValueList' is total on it and returns every value of the
+-- domain. Stricter than @not . 'multiValueContainsContinuous'@ in two ways that
+-- matter to a caller who wants the enumeration itself rather than a yes/no on
+-- enum-based inference: an unresolved 'MultiAuto'/'MultiTypeRef' is refused (the
+-- former makes 'multiValueToValueList' @error@, the latter has no case at all),
+-- and a composite is finite only if /every/ slot is -- an @Either@ with one
+-- continuous arm enumerates its discrete arm alone, which is a strict subset of
+-- the domain and would silently under-enumerate.
+--
+-- Backs the batched dense-enumeration mode (design heterogeneous-batch-inference
+-- M3), which needs the whole domain or nothing.
+multiValueIsFinite :: MultiValue -> Bool
+multiValueIsFinite MultiContinuous = False
+multiValueIsFinite MultiAuto = False
+multiValueIsFinite (MultiTypeRef _) = False
+multiValueIsFinite (MultiDiscretes vals) = not (null vals)
+multiValueIsFinite (MultiTuple a b) = multiValueIsFinite a && multiValueIsFinite b
+multiValueIsFinite (MultiEither a b) = multiValueIsFinite a && multiValueIsFinite b
+-- A nullary constructor has no fields, so @all _ []@ is vacuously true and the
+-- constructor contributes exactly one value -- which is what we want.
+multiValueIsFinite (MultiADT constrs) = not (null constrs) && all (all multiValueIsFinite . snd) constrs
 
 valueListToMultiValue :: [Value] -> MultiValue
 valueListToMultiValue lst@((VEither _):_) | all isVEither lst = MultiEither lVals rVals

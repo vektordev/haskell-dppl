@@ -950,6 +950,29 @@ enumContinuousRefusalTests = testGroup "enum annotation refuses continuous leave
         (MultiADT [("A", [MultiDiscretes [VInt 0]]), ("B", [MultiContinuous])]))
       assertBool "pure discrete composite is clean" (not (multiValueContainsContinuous
         (MultiTuple (MultiDiscretes [VInt 0]) (MultiADT [("A", [])]))))
+  -- 'multiValueIsFinite' backs the dense-enumeration domain (design
+  -- heterogeneous-batch-inference M3). It is deliberately *stricter* than
+  -- @not . multiValueContainsContinuous@, and each row below is a case where
+  -- the two answers differ -- which is the whole reason it exists rather than
+  -- reusing the older predicate.
+  , testCase "multiValueIsFinite is stricter than the continuity check" $ do
+      assertBool "wholly discrete composite is finite" (multiValueIsFinite
+        (MultiTuple (MultiDiscretes [VInt 0, VInt 1]) (MultiDiscretes [VBool True])))
+      assertBool "nullary ADT constructor contributes one value" (multiValueIsFinite
+        (MultiADT [("A", []), ("B", [MultiDiscretes [VInt 0]])]))
+      -- An Either with one continuous arm: enumerating only the discrete arm
+      -- would be a strict subset of the domain, so it is not a domain at all.
+      assertBool "Either with a continuous arm is not finite" (not (multiValueIsFinite
+        (MultiEither (MultiDiscretes [VInt 0]) MultiContinuous)))
+      -- These two are *not* continuous, yet still have no usable enumeration:
+      -- multiValueToValueList would error on the first and has no case for the
+      -- second, so a caller wanting the values must be told no.
+      assertBool "unresolved auto placeholder is not finite"
+        (not (multiValueContainsContinuous MultiAuto) && not (multiValueIsFinite MultiAuto))
+      assertBool "unresolved type reference is not finite"
+        (not (multiValueContainsContinuous (MultiTypeRef "T"))
+         && not (multiValueIsFinite (MultiTypeRef "T")))
+      assertBool "empty enumeration is not finite" (not (multiValueIsFinite (MultiDiscretes [])))
   ]
 
 -- | Plan-guided lazy enumeration milestone 2 (design
@@ -1186,20 +1209,52 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
   , testCase "an inner lambda is refused" $
       assertRefusal "inner lambda (IRLambda)"
         (IROp OpPlus (IRVar "x") (IRApply (IRLambda "y" (IRVar "y")) (IRVar "x")))
-  , testCase "the IRRight Either constructor is refused" $
-      -- No corpus program pins this one any more: with IRConst gated on
-      -- 'batchedVal', an Either-valued *constant* is the first offender found in
-      -- either_isleft, and the diagnostic reports only the first. Built here
-      -- with no constant to out-race it.
-      assertRefusal "Either constructor (IRRight)"
-        (IRRight (IRVar "x"))
-  , testCase "the IRHead list destructor is refused on its own" $
-      assertRefusal "list head (IRHead)" (IRHead (IRVar "xs"))
+  , testCase "Either dispatch is accepted (the tag is part of the signature)" $
+      -- Heterogeneous M2: within a bucket the constructor tag is uniform, so
+      -- `isinstance(x, Left)` is a Python bool and the arm accessor the emitted
+      -- code takes is always the legal one.
+      mapM_ assertAccepted
+        [ IRLeft (IRVar "x"), IRRight (IRVar "x")
+        , IRFromLeft (IRVar "e"), IRFromRight (IRVar "e")
+        , IRIsLeft (IRVar "e"), IRIsRight (IRVar "e")
+        , IRConst (VEither (Left (VFloat 1.0))) ]
+  , testCase "a value-dependent select between Either arms is refused" $
+      assertRefusal "arms have different structure"
+        (IRSelect (IROp OpGreaterThan (IRVar "x") (IRConst (VFloat 0.0)))
+                  (IRLeft (IRVar "x")) (IRRight (IRVar "x")))
   , testCase "an offender nested deep in a let-spine is still found" $
       -- 'batchedGuard' walks the whole tree, not just the root.
-      assertRefusal "list head (IRHead)"
+      assertRefusal "list membership (IRElementOf)"
         (IRLetIn "a" (IRConst (VFloat 1.0))
-          (IRLetIn "b" (IROp OpPlus (IRVar "a") (IRHead (IRVar "xs"))) (IRVar "b")))
+          (IRLetIn "b" (IROp OpPlus (IRVar "a") (IRElementOf (IRVar "a") (IRVar "xs"))) (IRVar "b")))
+  -- Heterogeneous batching, M1: the list *spine* operations are in the fragment
+  -- (within a shape bucket they are uniform Python structure over [B] leaves),
+  -- but the branch that would have to *choose* between two structures is not --
+  -- torch.where has nothing to select with. Bucketing removes the shape-directed
+  -- ones; a value-dependent one is a genuine refusal.
+  , testCase "SoA list access (head/tail/cons, empty-list constant) is accepted" $
+      mapM_ assertAccepted
+        [ IRHead (IRVar "xs")
+        , IRTail (IRVar "xs")
+        , IRCons (IRVar "x") (IRConst (VList EmptyList))
+        , IROp OpEq (IRVar "xs") (IRConst (VList EmptyList)) ]
+  , testCase "a non-empty list constant is still refused" $
+      -- It carries per-element data, not structure: the batched runtime has no
+      -- reader for it (task batched-bool-enum-index).
+      assertRefusal "constant with no batched representation (VList"
+        (IROp OpEq (IRVar "xs") (IRConst (VList (ListCont (VBool True) EmptyList))))
+  , testCase "a value-dependent select between two structures is refused" $
+      assertRefusal "arms have different structure"
+        (IRSelect (IROp OpGreaterThan (IRVar "x") (IRConst (VFloat 0.0)))
+                  (IRCons (IRVar "x") (IRConst (VList EmptyList)))
+                  (IRConst (VList EmptyList)))
+  , testCase "a shape-directed if between two structures is accepted" $
+      -- The same shape, but branching on an emptiness probe: uniform within a
+      -- bucket, so it stays ordinary Python control flow.
+      assertAccepted
+        (IRIf (IROp OpEq (IRVar "xs") (IRConst (VList EmptyList)))
+              (IRConst (VList EmptyList))
+              (IRCons (IRVar "x") (IRConst (VList EmptyList))))
   -- Generate-only recursion ('hasGenCycle'): unreachable from the corpus,
   -- because a recursive program's *prob* path trips 'checkCallGraph' first
   -- (e.g. dice). Driven through 'generateFunctionsBatched' on a group that has
@@ -1213,6 +1268,16 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       case generateFunctionsBatched False (recGenEnv (IRSample IRNormal)) of
         Right _  -> return ()
         Left msg -> assertFailure ("batched mode refused a plain generate body: " ++ msg)
+  , testCase "a list-building recursive generate degrades to a stub, not a refusal" $
+      -- The one narrow exception to the hard whole-program refusal rule: a
+      -- generate whose recursion *builds a list* has per-element depth (design
+      -- heterogeneous-batch-inference Component 4), but refusing the whole
+      -- program for it would take the program's bucketable prob/integ down too.
+      case generateFunctionsBatched False (recGenEnv (IRCons (IRSample IRNormal) (IRVar "rec_gen"))) of
+        Left msg -> assertFailure ("batched mode refused a list-valued recursive generate "
+                                   ++ "instead of stubbing it: " ++ msg)
+        Right ls -> assertBool ("stub does not raise NotImplementedError: " ++ unlines ls)
+                      (any ("NotImplementedError" `isInfixOf`) ls)
   ]
   where
     -- A one-group environment whose only method is generate, with the given
@@ -1220,17 +1285,18 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
     recGenEnv body = IREnv
       [IRFunGroup { groupName = "rec", genFun = Just (body, "")
                   , probFun = Nothing, integFun = Nothing
-                  , encodeFun = Nothing, normalFun = Nothing, groupDoc = "" }]
+                  , encodeFun = Nothing, normalFun = Nothing, groupDoc = ""
+                  , sampleDomain = Nothing }]
       [] []
     -- 'batchedGuard' is called on the raw term, *not* through 'prepBatchedBody':
     -- these rows check the guard itself, and prepping would rewrite away the very
     -- nodes some of them are about (pruneAny turns an OpIsAny check into a plain
     -- constant, which is legitimately in the fragment).
-    assertRefusal needle e = case batchedGuard "g" "forward" e of
+    assertRefusal needle e = case batchedGuard [] "g" "forward" e of
       Right () -> assertFailure ("batchedGuard accepted a node it must refuse; expected: " ++ needle)
       Left msg -> assertBool ("batched refusal does not mention " ++ show needle
                               ++ "; actual diagnostic: " ++ msg) (needle `isInfixOf` msg)
-    assertAccepted e = case batchedGuard "g" "forward" e of
+    assertAccepted e = case batchedGuard [] "g" "forward" e of
       Right () -> return ()
       Left msg -> assertFailure ("batchedGuard refused a node inside the fragment: " ++ msg)
 

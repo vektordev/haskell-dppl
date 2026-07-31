@@ -31,6 +31,7 @@ data GlobalOpts = GlobalOpts {
   debugIntermediates :: Bool,
   noTypeCheck :: Bool,
   batchedMode :: Bool,
+  logSpaceMode :: Bool,
   commandOpts :: CommandOpts
 }
 
@@ -132,6 +133,9 @@ parseGlobalOpts = GlobalOpts
         <*> switch
             ( long "batched"
             <> help "Opt into batched inference mode (design pytorch-tensorizer): with 'compile -l python', emits torch code that runs a whole [B]-shaped batch of query points through forward/integrate/generate at once (torch.where instead of data-dependent if), for the tensor fragment (float/int/bool leaves in fixed-shape tuples; no lists/ADTs/Either dispatch/recursion/marginal queries -- refused at compile time with a diagnostic naming the offending construct). Neural (ReadNN) programs are supported for forward/integrate/generate, including a decoder's own categorical/Gaussian sampling and cross-decoder composition (e.g. MNIST addition); an Either- or ADT-shaped neural output is refused at compile time like any other Either/ADT program. Only wires the IR select pass for other output languages (a behavioural no-op).")
+        <*> switch
+            ( long "logSpace"
+            <> help "Compute probabilities in log space rather than linear space (task log-space-probability-computation). Motivation: deep conjunctions and long enumerations of small probabilities underflow in linear space long before they are numerically meaningless. Native log-pdf/log-cdf leaves are used for Normal/Uniform, and the compiled p()/cdf() functions return log-probabilities. Scope: the core PResult combinators, Uniform/Normal, discrete value-equality masses, and enumerable-InjF sums are log-aware; ReadNN/AutoNeural neural decoder logit reads, the set-witness/plan-enum continuous measurement machinery, and batched mode remain linear-only under this flag.")
         <*> hsubparser (
           command "compile" (info parseCompileOpts (progDesc "Compiles the program with inference interface into target language"))
           <> command "generate" (info parseGenerateOpts (progDesc "Runs the generate pass of the program"))
@@ -198,9 +202,9 @@ main = transpile =<< execParser opts
             <> header "Haskell DPPL" )
 
 transpile :: GlobalOpts -> IO ()
-transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl, pruneAnys=anyChecks, noInteg=nInteg, noProb=nProb, noGen=nGen, debugIntermediates=dbgInter, noTypeCheck=nTypeChk, batchedMode=batchedFlag}) = do
+transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl, pruneAnys=anyChecks, noInteg=nInteg, noProb=nProb, noGen=nGen, debugIntermediates=dbgInter, noTypeCheck=nTypeChk, batchedMode=batchedFlag, logSpaceMode=logSpaceFlag}) = do
   prog <- parseProgram inFile
-  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen, showIntermediates=dbgInter, checkQueryType=not nTypeChk, batched=batchedFlag})
+  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen, showIntermediates=dbgInter, checkQueryType=not nTypeChk, batched=batchedFlag, logSpace=logSpaceFlag})
   case options of
     CompileOpts{language=lang, outputFile=outFile, trunc=trnc} -> do
       case codeGenToLang lang trnc conf prog of

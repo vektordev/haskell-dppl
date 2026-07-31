@@ -1,0 +1,6 @@
+-- Sibling probe to maxEnumerateBoth.ppl: here one operand (0.5) is
+-- Deterministic and the other is a single enumerable random Bool-shaped
+-- float. Exercises IRCompiler's isForwardOnly single-operand enumeration
+-- case (the one-side-deterministic sibling of the both-enumerable path),
+-- again with no max-specific IRCompiler code.
+main = max (if Uniform < 0.5 then 1.0 else 0.0) 0.5

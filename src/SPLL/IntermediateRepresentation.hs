@@ -15,6 +15,7 @@ module SPLL.IntermediateRepresentation (
 , defaultCompilerConfig
 , irMap
 , irDescend
+, irDescendM
 , getIRSubExprs
 , isPure
 , isEffectfulVar
@@ -162,6 +163,13 @@ data Operand = OpPlus
              | OpAnd
              | OpEq
              | OpApprox
+             -- Fiber-enumerator probe (task fiber-enumerator-probe-max): `max`
+             -- is a forward-only binary numeric op, added purely to exercise
+             -- the existing isForwardOnly enumerate-both InjF path on a second
+             -- operator. Interpreter-only for now -- no Python/Julia/batched
+             -- codegen case exists, since the probe's corpus test declares
+             -- `backends: interpreter` only.
+             | OpMax
              deriving (Show, Eq)
 
 data UnaryOperand = OpNeg
@@ -209,6 +217,18 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               | IRIsRight IRExpr
               | IRDensity Distribution IRExpr
               | IRCumulative Distribution IRExpr
+              -- | Native log-density / log-cumulative leaves for the two
+              -- builtin distributions (task log-space-probability-computation).
+              -- Distinct from @log (IRDensity ...)@: the latter computes the
+              -- linear pdf (which underflows in a deep tail, e.g. exp(-z^2/2)
+              -- for large z) and only then takes the log, so precision is
+              -- already lost by the time the log is taken. These nodes let
+              -- each backend emit the log-pdf/log-cdf formula directly (e.g.
+              -- Normal log-pdf = -0.5*z^2 - 0.5*log(2*pi)), so a compile-time
+              -- log-space mode never round-trips through a linear value that
+              -- could have underflowed to zero first.
+              | IRLogDensity Distribution IRExpr
+              | IRLogCumulative Distribution IRExpr
               | IRSample Distribution
               | IRLetIn Varname IRExpr IRExpr
               | IRVar Varname
@@ -217,6 +237,14 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               -- auxiliary construct to aid enumeration: bind each enumerated Value to the Varname and evaluate the subexpr. Sum results.
               -- maybe we can instead move this into some kind of standard library.
               | IREnumSum Varname MultiValue IRExpr
+              -- | Log-space sibling of 'IREnumSum': sums a discrete mass over
+              -- an enumerated support by log-sum-exp instead of a plain add,
+              -- so a "long enumeration" (the second motivating case in the
+              -- task, alongside deep products) never forms the linear sum of
+              -- many small probabilities. Bound variable and body semantics
+              -- otherwise mirror 'IREnumSum' exactly (same optimizer/CSE
+              -- treatment, same scoping).
+              | IRLogEnumSum Varname MultiValue IRExpr
               | IRIsPossible MultiValue IRExpr
               | IRIndex IRExpr IRExpr
               | IRError String
@@ -233,7 +261,18 @@ type IRValue = GenericValue IRExpr
 data IREnv = IREnv [IRFunGroup] [ADTDecl] [(String, IRValue)] deriving (Show)
 
 
-data IRFunGroup = IRFunGroup {groupName::String, genFun::Maybe IRFunDecl, probFun::Maybe IRFunDecl, integFun::Maybe IRFunDecl, encodeFun::Maybe IRFunDecl, normalFun::Maybe IRFunDecl, groupDoc::String} deriving (Show)
+data IRFunGroup = IRFunGroup {groupName::String, genFun::Maybe IRFunDecl, probFun::Maybe IRFunDecl, integFun::Maybe IRFunDecl, encodeFun::Maybe IRFunDecl, normalFun::Maybe IRFunDecl, groupDoc::String,
+  -- | The finite enumeration of values a query against this group's prob/integ
+  -- function can take, when the sample domain is statically finite -- the
+  -- function's own return type, /not/ the domain of anything it enumerates
+  -- internally (that is 'IREnumSum', a separate axis). 'Nothing' whenever the
+  -- domain is continuous, unbounded (Int/Symbol), or not statically derivable.
+  --
+  -- Consumed only by the batched backend's dense-enumeration mode (design
+  -- heterogeneous-batch-inference M3), which evaluates the ordinary batched
+  -- kernel once with this domain /as the batch/ to get the whole probability
+  -- vector. Purely additive: every other backend ignores it.
+  sampleDomain::Maybe MultiValue} deriving (Show)
 
 -- Name, Documentation, Body
 type IRFunDecl = (IRExpr, String)
@@ -260,11 +299,35 @@ data CompilerConfig = CompilerConfig {
   -- pytorch-tensorizer). M1 wires only the backend-agnostic select pass, which
   -- retags data-dependent elementwise ifs to SelectIf; scalar lowering is
   -- unchanged, so today this is a behavioural no-op over the tensor fragment.
-  batched :: Bool
+  batched :: Bool,
+  -- When True (CLI --logSpace), compute probabilities in log space rather
+  -- than linear space (task log-space-probability-computation, design
+  -- materialized-marginals-semiring Decision beta): 'IRCompiler's PResult
+  -- combinators (density/mass/prodP/mixP/enumSumP/guardP/scaleCoV/
+  -- compareValueExpr) build and combine log-probabilities instead of linear
+  -- ones (times becomes IROp OpPlus, mixture-sum becomes log-sum-exp, the
+  -- multiplicative unit 1.0 becomes the additive unit 0.0, the zero
+  -- probability becomes negative infinity), and the two builtin continuous
+  -- distributions emit native log-pdf/log-cdf IR leaves ('IRLogDensity'/
+  -- 'IRLogCumulative') rather than logging an already-computed linear value,
+  -- so a deep tail never underflows to a hard float zero before its log is
+  -- taken. Motivation: deep conjunctions and long enumerations of small
+  -- probabilities underflow in linear space long before they are numerically
+  -- meaningless. Scope (see the task's written invasiveness verdict): the
+  -- core PResult combinators, the Uniform/Normal leaves, discrete
+  -- value-equality masses ('compareValueExpr'), and enumerable-InjF sums
+  -- ('enumSumP') are log-aware; 'ReadNN'/'AutoNeural' neural decoder logit
+  -- reads, the set-witness/plan-enum continuous measurement machinery, and
+  -- batched mode are NOT -- they remain linear-only, so a program reaching
+  -- those paths under 'logSpace' will not get the numerical-stability
+  -- benefit there (and, for set-witness/plan-enum specifically, may combine
+  -- a linear leaf with a log-space combinator and produce a wrong answer;
+  -- no compile-time refusal guards this yet). Independent of 'batched'.
+  logSpace :: Bool
 } deriving (Show)
 
 defaultCompilerConfig :: CompilerConfig
-defaultCompilerConfig = CompilerConfig {countBranches = False, topKThreshold = Nothing, optimizerLevel = 2, verbose = 0, pruneAnyChecks = False, noIntegrate=False, noProbability=False, noGenerate=False, showIntermediates=False, checkQueryType=True, batched=False}
+defaultCompilerConfig = CompilerConfig {countBranches = False, topKThreshold = Nothing, optimizerLevel = 2, verbose = 0, pruneAnyChecks = False, noIntegrate=False, noProbability=False, noGenerate=False, showIntermediates=False, checkQueryType=True, batched=False, logSpace=False}
 --3: convert algortihm-and-type-annotated Exprs into abstract representation of explicit computation:
 --    Fold enum ranges, algorithms, etc. into a representation of computation that can be directly converted into code.
 
@@ -303,12 +366,15 @@ getIRSubExprs (IRIsRight a) = [a]
 getIRSubExprs (IRIsPossible _ a) = [a]
 getIRSubExprs (IRDensity _ a) = [a]
 getIRSubExprs (IRCumulative _ a) = [a]
+getIRSubExprs (IRLogDensity _ a) = [a]
+getIRSubExprs (IRLogCumulative _ a) = [a]
 getIRSubExprs (IRSample _) = []
 getIRSubExprs (IRLetIn _ a b) = [a, b]
 getIRSubExprs (IRVar _) = []
 getIRSubExprs (IRLambda _ a) = [a]
 getIRSubExprs (IRApply a b) = [a, b]
 getIRSubExprs (IREnumSum _ _ a) = [a]
+getIRSubExprs (IRLogEnumSum _ _ a) = [a]
 getIRSubExprs (IRIndex a b) = [a, b]
 getIRSubExprs (IRError _) = []
 getIRSubExprs (IRConformsTo _ a) = [a]
@@ -381,10 +447,13 @@ irDescend f x = case x of
   (IRIsPossible val expr) -> IRIsPossible val (f expr)
   (IRDensity a expr) -> IRDensity a (f expr)
   (IRCumulative a expr) -> IRCumulative a (f expr)
+  (IRLogDensity a expr) -> IRLogDensity a (f expr)
+  (IRLogCumulative a expr) -> IRLogCumulative a (f expr)
   (IRLetIn name left right) -> IRLetIn name (f left) (f right)
   (IRLambda name scope) -> IRLambda name (f scope)
   (IRApply a b) -> IRApply (f a) (f b)
   (IREnumSum name val scope) -> IREnumSum name val (f scope)
+  (IRLogEnumSum name val scope) -> IRLogEnumSum name val (f scope)
   (IRIndex left right) -> IRIndex (f left) (f right)
   (IRTheta a i) -> IRTheta (f a) i
   (IRSubtree a i) -> IRSubtree (f a) i
@@ -393,6 +462,50 @@ irDescend f x = case x of
   (IRVar _) -> x
   (IRError _) -> x
   (IRConformsTo t a) -> IRConformsTo t (f a)
+
+-- | Monadic 'irDescend': rebuild a node from effectfully-rewritten children,
+-- one level only. Children are visited left-to-right, so an effect that
+-- threads state (a fresh-name counter, a collected list of hoisted bindings)
+-- sees them in source order. Like 'irDescend' it does /not/ recurse — the
+-- caller drives the traversal and can handle binding forms itself.
+irDescendM :: Monad m => (IRExpr -> m IRExpr) -> IRExpr -> m IRExpr
+irDescendM f x = case x of
+  (IRIf cond left right) -> IRIf <$> f cond <*> f left <*> f right
+  (IRSelect cond left right) -> IRSelect <$> f cond <*> f left <*> f right
+  (IROp op left right) -> IROp op <$> f left <*> f right
+  (IRUnaryOp op expr) -> IRUnaryOp op <$> f expr
+  (IRCons left right) -> IRCons <$> f left <*> f right
+  (IRTCons left right) -> IRTCons <$> f left <*> f right
+  (IRHead expr) -> IRHead <$> f expr
+  (IRTail expr) -> IRTail <$> f expr
+  (IRMap fe expr) -> IRMap <$> f fe <*> f expr
+  (IRElementOf ele lst) -> IRElementOf <$> f ele <*> f lst
+  (IRTFst expr) -> IRTFst <$> f expr
+  (IRTSnd expr) -> IRTSnd <$> f expr
+  (IRLeft expr) -> IRLeft <$> f expr
+  (IRRight expr) -> IRRight <$> f expr
+  (IRFromLeft expr) -> IRFromLeft <$> f expr
+  (IRFromRight expr) -> IRFromRight <$> f expr
+  (IRIsLeft expr) -> IRIsLeft <$> f expr
+  (IRIsRight expr) -> IRIsRight <$> f expr
+  (IRIsPossible val expr) -> IRIsPossible val <$> f expr
+  (IRDensity a expr) -> IRDensity a <$> f expr
+  (IRCumulative a expr) -> IRCumulative a <$> f expr
+  (IRLogDensity a expr) -> IRLogDensity a <$> f expr
+  (IRLogCumulative a expr) -> IRLogCumulative a <$> f expr
+  (IRLetIn name left right) -> IRLetIn name <$> f left <*> f right
+  (IRLambda name scope) -> IRLambda name <$> f scope
+  (IRApply a b) -> IRApply <$> f a <*> f b
+  (IREnumSum name val scope) -> IREnumSum name val <$> f scope
+  (IRLogEnumSum name val scope) -> IRLogEnumSum name val <$> f scope
+  (IRIndex left right) -> IRIndex <$> f left <*> f right
+  (IRTheta a i) -> flip IRTheta i <$> f a
+  (IRSubtree a i) -> flip IRSubtree i <$> f a
+  (IRConst _) -> pure x
+  (IRSample _) -> pure x
+  (IRVar _) -> pure x
+  (IRError _) -> pure x
+  (IRConformsTo t a) -> IRConformsTo t <$> f a
 
 isLambda :: IRExpr -> Bool
 isLambda IRLambda {} = True
@@ -423,6 +536,9 @@ irPrintFlat (IRIsRight _) = "IRIsRight"
 irPrintFlat (IRIsPossible _ _) = "IRIsPossible"
 irPrintFlat (IRDensity _ _) = "IRDensity"
 irPrintFlat (IRCumulative _ _) = "IRCumulative"
+irPrintFlat (IRLogDensity _ _) = "IRLogDensity"
+irPrintFlat (IRLogCumulative _ _) = "IRLogCumulative"
+irPrintFlat (IRLogEnumSum _ _ _) = "IRLogEnumSum"
 irPrintFlat (IRSample _) = "IRSample"
 irPrintFlat (IRLetIn _ _ _) = "IRLetIn"
 irPrintFlat (IRVar _) = "IRVar"

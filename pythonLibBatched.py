@@ -165,3 +165,372 @@ class T:
     if index == 1:
       return self.t2
     raise ValueError("Tuple only has index 0 and 1")
+
+# --- structure-of-arrays lists (heterogeneous batching, M1) ------------------
+# Design heterogeneous-batch-inference, Component 1. A batched list sample is a
+# fixed-length linked list -- the same shape as pythonLib's InferenceList --
+# whose *leaves* are [B] tensors. That representation is only well-defined when
+# every sample in the batch has the same structure, which is exactly what the
+# bucketing wrapper below guarantees: the batch is partitioned by structural
+# signature first, so within one kernel call the list length (and any nested
+# tuple/list shape) is a compile-time-uniform Python fact, and the emitted
+# structural `if`s stay ordinary Python control flow over SoA data.
+
+class InferenceList:
+  def __init__(self, value=None):
+    return NotImplemented
+
+  def __len__(self):
+    cnt = 0
+    curr = self
+    while curr is not None and isinstance(curr, ConsInferenceList):
+      cnt += 1
+      curr = curr.next
+    return cnt
+
+  def __iter__(self):
+    curr = self
+    while curr is not None and isinstance(curr, ConsInferenceList):
+      yield curr.value
+      curr = curr.next
+
+  def __getitem__(self, index):
+    if isinstance(index, slice):
+      # Tail lists only, as in pythonLib: sample[1:] is the tail.
+      if index.start > 0 and (index.stop == -1 or index.stop is None) and (index.step == 1 or index.step is None):
+        current = self
+        for _ in range(index.start - 1):
+          current = current.next
+        return current.next
+      raise IndexError("Slices may only be used for tail lists")
+    if index < 0:
+      index += len(self)
+    if index < 0 or index >= len(self):
+      raise IndexError("InferenceList index out of range")
+    current = self
+    for _ in range(index):
+      current = current.next
+    return current.value
+
+  def __eq__(self, other):
+    # Length disagreement is a *structural* fact, uniform across the bucket, so
+    # it answers with a plain Python bool (which `asmask` broadcasts). Equal
+    # lengths compare elementwise through the leaves, like T.__eq__, giving a
+    # [B] bool tensor. `sample == EmptyInferenceList()` -- the emptiness probe
+    # the compiler emits -- therefore always lands in the Python-bool case.
+    if not isinstance(other, InferenceList):
+      return NotImplemented
+    if len(self) != len(other):
+      return False
+    acc = True
+    for a, b in zip(self, other):
+      acc = (a == b) if acc is True else (acc & (a == b))
+    return acc
+
+  def prepend(self, value):
+    return ConsInferenceList(value, self)
+
+class EmptyInferenceList(InferenceList):
+  def __init__(self):
+    self.next = None
+    self.value = None
+
+class ConsInferenceList(InferenceList):
+  def __init__(self, value, tail):
+    self.value = value
+    self.next = tail
+
+def toList(xs):
+  back = EmptyInferenceList()
+  for x in reversed(list(xs)):
+    back = ConsInferenceList(x, back)
+  return back
+
+# --- Either arms (heterogeneous batching, M2) --------------------------------
+# The constructor tag is *structure*, so it is part of the bucket signature and
+# uniform within a kernel call: `isinstance(x, Left)` is a plain Python bool
+# there, and the arm accessor the emitted code takes is always the legal one.
+# The payload is whatever the leaves are -- [B] tensors.
+
+class Left:
+  def __init__(self, val):
+    self.val = val
+
+  def __eq__(self, other):
+    # Tag mismatch is structural (Python bool); matching tags compare payloads
+    # elementwise, like T.__eq__ and InferenceList.__eq__.
+    if not isinstance(other, Left):
+      return False
+    return self.val == other.val
+
+class Right:
+  def __init__(self, val):
+    self.val = val
+
+  def __eq__(self, other):
+    if not isinstance(other, Right):
+      return False
+    return self.val == other.val
+
+def fromLeft(l):
+  if not isinstance(l, Left):
+    raise Exception("Item is not a Left: " + str(l))
+  return l.val
+
+def fromRight(r):
+  if not isinstance(r, Right):
+    raise Exception("Item is not a Right: " + str(r))
+  return r.val
+
+# --- shape-signature bucketing (Component 1) ---------------------------------
+# `bucketed(fn, samples, *args)` is the host wrapper the design calls for:
+#
+#   group batch by signature -> per bucket: SoA-pack leaves, run batched kernel
+#   -> scatter results back to input order
+#
+# It costs O(#distinct shapes) kernel invocations instead of O(B), degrades
+# gracefully (a fully heterogeneous batch is today's per-sample behaviour, a
+# homogeneous one is a single call), and needs no cooperation from the emitted
+# code: inside a bucket, structure is uniform, so the kernel's structural `if`s
+# and structure-directed recursion run unchanged over [B_bucket] leaves.
+
+def signature(v):
+  # The full structural skeleton (the design's approved granularity): list
+  # lengths and nested tuple shape, with every scalar leaf erased to 'x'.
+  if isinstance(v, InferenceList):
+    return ('L',) + tuple(signature(x) for x in v)
+  if isinstance(v, T):
+    return ('T', signature(v.t1), signature(v.t2))
+  if isinstance(v, Left):
+    return ('L?', signature(v.val))
+  if isinstance(v, Right):
+    return ('R?', signature(v.val))
+  # An ADT value: the constructor tag *and* the field shapes. The tag must be
+  # part of the key -- two constructors of the same arity are different
+  # structures, and merging them into one bucket would run the wrong arm.
+  # An ADT value (every emitted constructor class sets _fields, empty for a
+  # nullary one): the constructor tag *and* the field shapes. The tag must be
+  # part of the key -- two constructors of the same arity are different
+  # structures, and merging them into one bucket would run the wrong arm.
+  # Unexercised by the corpus today: the .tst value parser has no ADT literal,
+  # so no corpus program can have an ADT-valued *sample*. It is here so that
+  # such a sample would bucket correctly rather than silently merge.
+  if hasattr(v, '_fields'):
+    return ('A', type(v).__name__) + tuple(signature(f) for f in v._fields)
+  return 'x'
+
+def bucket_count(samples):
+  return len(set(signature(s) for s in samples))
+
+def _pack(vs):
+  # Structure-of-arrays pack: a homogeneous list of samples becomes one sample
+  # whose leaves are stacked [B] tensors.
+  head = vs[0]
+  if isinstance(head, InferenceList):
+    return toList([_pack([s[i] for s in vs]) for i in range(len(head))])
+  if isinstance(head, T):
+    return T(_pack([s.t1 for s in vs]), _pack([s.t2 for s in vs]))
+  if hasattr(head, '_fields'):
+    return type(head)(*[_pack([s._fields[i] for s in vs])
+                        for i in range(len(head._fields))])
+  if isinstance(head, Left):
+    return Left(_pack([s.val for s in vs]))
+  if isinstance(head, Right):
+    return Right(_pack([s.val for s in vs]))
+  if torch.is_tensor(head) and head.dim() > 0:
+    return torch.stack([astensor(v) for v in vs])
+  if isinstance(head, bool):
+    return torch.tensor([bool(v) for v in vs])
+  if isinstance(head, int):
+    return torch.tensor([int(v) for v in vs])
+  return torch.tensor([float(v) for v in vs])
+
+def _slice_arg(a, idx, total):
+  # A per-point extra argument (e.g. a [B, n] neural symbol batch) is sliced to
+  # the bucket; a shared/broadcast argument is passed through untouched.
+  if torch.is_tensor(a) and a.dim() > 0 and a.shape[0] == total:
+    return a[torch.tensor(idx)]
+  return a
+
+def _scatter(parts, idxs, total):
+  # Reassemble per-bucket results into one [B] result in input order.
+  head = parts[0]
+  if isinstance(head, T):
+    return T(_scatter([p.t1 for p in parts], idxs, total),
+             _scatter([p.t2 for p in parts], idxs, total))
+  if isinstance(head, InferenceList):
+    return toList([_scatter([p[i] for p in parts], idxs, total) for i in range(len(head))])
+  if isinstance(head, (Left, Right)):
+    return type(head)(_scatter([p.val for p in parts], idxs, total))
+  if hasattr(head, '_fields'):
+    return type(head)(*[_scatter([p._fields[i] for p in parts], idxs, total)
+                        for i in range(len(head._fields))])
+  out = None
+  for p, idx in zip(parts, idxs):
+    t = astensor(p)
+    if t.dim() == 0:
+      t = t.expand(len(idx))
+    if out is None:
+      out = torch.empty(total, dtype=t.dtype)
+    out[torch.tensor(idx)] = t.to(out.dtype)
+  return out
+
+def bucketed(fn, samples, *args):
+  samples = list(samples)
+  total = len(samples)
+  order = []
+  for i, s in enumerate(samples):
+    sig = signature(s)
+    for grp in order:
+      if grp[0] == sig:
+        grp[1].append(i)
+        break
+    else:
+      order.append((sig, [i]))
+  parts, idxs = [], []
+  for _sig, idx in order:
+    packed = _pack([samples[i] for i in idx])
+    parts.append(fn(packed, *[_slice_arg(a, idx, total) for a in args]))
+    idxs.append(idx)
+  return _scatter(parts, idxs, total)
+
+# --- dense enumeration mode (Component 2, M3) --------------------------------
+# When the *query* domain is finite -- the program returns one of V statically
+# known values -- batching query points is the wrong axis: evaluate the kernel
+# once with the whole domain as the batch, giving the [V] probability vector,
+# and answer any query by gathering into it. The [V] axis here is the ordinary
+# *batch* axis, so nothing inside the kernel changes and enumeration the program
+# does internally (IREnumSum) is untouched: dense mode sits above it, not
+# instead of it.
+#
+# Cost: O(V) kernel work independent of B, so it wins when B > V (or when the
+# caller reuses the vector across batches) and loses otherwise, structurally the
+# same crossover batching itself has. That is why the emitted `forward` is
+# unchanged and `forward_at` dispatches on the two sizes rather than the
+# compiler committing to one path.
+#
+# Deliberately *not* cached: the vector depends on thetas and network weights,
+# and nothing in the emitted class observes those changing, so an implicit cache
+# would silently serve stale values -- and a stale autograd graph -- after every
+# parameter update, which is precisely the training loop this exists for. A
+# caller that wants amortisation holds the tensor itself.
+
+def denskey(v):
+  # A hashable structural rendering of a sample value, used to look a query up
+  # in the domain. Mirrors `signature` but keeps the leaves, since here it is
+  # the value and not just the shape that selects the slot.
+  if isinstance(v, InferenceList):
+    return ('L',) + tuple(denskey(x) for x in v)
+  if isinstance(v, T):
+    return ('T', denskey(v.t1), denskey(v.t2))
+  if isinstance(v, Left):
+    return ('L?', denskey(v.val))
+  if isinstance(v, Right):
+    return ('R?', denskey(v.val))
+  if hasattr(v, '_fields'):
+    return ('A', type(v).__name__) + tuple(denskey(f) for f in v._fields)
+  if torch.is_tensor(v):
+    return denskey(v.item())
+  if isinstance(v, bool):
+    return ('b', v)
+  return ('n', float(v))
+
+def dense_positions(domain):
+  return {denskey(v): i for i, v in enumerate(domain)}
+
+def gather_dense(dense, idx):
+  # Index every leaf of a nested result structure -- (prob, (dim, imposs)) and
+  # friends -- with the same [B] index tensor, turning the [V] vector into the
+  # [B] answer. A 0-d leaf (a folded constant dim/flag) broadcasts instead.
+  if isinstance(dense, T):
+    return T(gather_dense(dense.t1, idx), gather_dense(dense.t2, idx))
+  if isinstance(dense, InferenceList):
+    return toList([gather_dense(x, idx) for x in dense])
+  if isinstance(dense, (Left, Right)):
+    return type(dense)(gather_dense(dense.val, idx))
+  if hasattr(dense, '_fields'):
+    return type(dense)(*[gather_dense(f, idx) for f in dense._fields])
+  t = astensor(dense)
+  if t.dim() == 0:
+    return t.expand(len(idx))
+  return t[idx]
+
+# The measured crossover, on a scalar domain with an already-packed [B] sample
+# tensor (so index lookup is pure torch): dense+gather is 0.9x the direct kernel
+# at B=16, 1.0x at B=256, 1.4x at B=4096 and 4.8x at B=65536 on `coin`. It is
+# kernel-dependent -- a more expensive body moves it down -- so this is a
+# conservative default, not a claim about every program.
+#
+# Note the marshalled path (a Python *list* of sample values) never reaches the
+# crossover on small kernels: `denskey` per sample is O(B) Python and outweighs
+# the O(V) torch saving. That path therefore stays direct unless forced, and the
+# real amortisation idiom is a caller who holds the vector:
+#
+#     vec = main.forward_dense()          # once per parameter update
+#     p1  = gather_dense(vec, idx1)       # 23-62x the direct kernel
+#
+DENSE_MIN_BATCH = 1024
+
+def _scalar_domain_index(domain, samp):
+  # Index lookup for a scalar domain against an already-packed [B] tensor: one
+  # O(B*V) torch comparison, no per-sample Python. Returns (idx, all_present);
+  # a sample matching no domain slot must not be answered from the vector.
+  dom = torch.tensor([float(v) for v in domain], dtype=torch.get_default_dtype())
+  eq = (samp.to(dom.dtype).unsqueeze(-1) == dom.unsqueeze(0))
+  return eq.to(torch.int64).argmax(-1), bool(eq.any(-1).all())
+
+def dense_query(dense_fn, kernel, domain, samples, args=(), dense=None):
+  # The body of the emitted `<method>_at`. `dense=None` picks the cheaper axis
+  # from the measured rule above; True/False force it, which is what a benchmark
+  # or a differential test wants.
+  #
+  # Fast path first: an already-packed [B] tensor over a scalar domain needs no
+  # Python per sample at all, which is the only shape where the automatic choice
+  # can currently come out dense.
+  if torch.is_tensor(samples) and samples.dim() > 0 and all(
+       not isinstance(v, (T, InferenceList, Left, Right)) and not hasattr(v, '_fields')
+       for v in domain):
+    per_point = [a for a in args if torch.is_tensor(a) and a.dim() > 0 and a.shape[0] == samples.shape[0]]
+    idx, all_present = _scalar_domain_index(domain, samples)
+    use = ((not per_point) and all_present and samples.shape[0] >= DENSE_MIN_BATCH) \
+          if dense is None else dense
+    if not use:
+      return kernel(samples, *args)
+    if per_point:
+      raise ValueError("dense_query(dense=True): a per-point argument cannot be evaluated over the domain")
+    if not all_present:
+      # Off-domain elements have no slot to gather; fall back wholesale rather
+      # than silently answering them with slot 0.
+      return kernel(samples, *args)
+    return gather_dense(dense_fn(*args), idx)
+  samples = list(samples)
+  args = list(args)
+  # An argument that varies per query point (a [B, n] neural symbol batch) has no
+  # meaning over a domain of a different length, so it rules the dense axis out.
+  # A shared one (a scalar topK accProb, a ThetaTree) broadcasts and is fine.
+  per_point = [a for a in args if torch.is_tensor(a) and a.dim() > 0 and a.shape[0] == len(samples)]
+  # A marshalled list of sample values: measured never to reach the crossover on
+  # the corpus's kernels (see DENSE_MIN_BATCH), so the automatic choice is the
+  # direct path. dense=True still forces it, which is what the differential does.
+  use = False if dense is None else dense
+  if use and per_point:
+    raise ValueError("dense_query(dense=True): a per-point argument cannot be evaluated over the domain")
+  if not use:
+    return bucketed(kernel, samples, *args)
+  pos = dense_positions(domain)
+  keys = [denskey(s) for s in samples]
+  hit = [i for i, k in enumerate(keys) if k in pos]
+  miss = [i for i, k in enumerate(keys) if k not in pos]
+  parts, idxs = [], []
+  if hit:
+    parts.append(gather_dense(dense_fn(*args), torch.tensor([pos[keys[i]] for i in hit])))
+    idxs.append(hit)
+  if miss:
+    # A query *outside* the declared domain is still a legal query with a
+    # well-defined answer (0 off the support -- e.g. discreteFloats' p(5.0)).
+    # The dense vector cannot supply it, so those points fall back to the
+    # ordinary kernel: a domain miss degrades to correctness, never to a wrong
+    # value, which is also what makes the float-equality keying above safe.
+    parts.append(bucketed(kernel, [samples[i] for i in miss], *args))
+    idxs.append(miss)
+  return _scatter(parts, idxs, len(samples))

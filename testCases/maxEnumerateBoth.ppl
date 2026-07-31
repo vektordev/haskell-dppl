@@ -1,0 +1,9 @@
+-- Probe for task fiber-enumerator-probe-max: `max` is declared in
+-- PredefinedFunctions as a forward-only InjF (empty inverse list, like
+-- and/or/gt/lt) because max(a,b)=c has no functional point inverse -- if
+-- a==c, b can be ANY value <= c, a genuinely set-valued fiber. Both operands
+-- here are enumerable (DiscreteValues-tagged) and non-Deterministic, so this
+-- exercises IRCompiler's existing isForwardOnly enumerate-both path (built
+-- for and/or, later reused by gt/lt) with NO max-specific code added to
+-- IRCompiler.hs -- see gtEnumerateBoth.ppl for the identical shape on `>`.
+main = max (if Uniform < 0.5 then 1.0 else 0.0) (if Uniform < 0.7 then 1.0 else 0.0)

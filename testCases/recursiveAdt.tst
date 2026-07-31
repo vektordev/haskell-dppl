@@ -1,3 +1,4 @@
+backends: interpreter, julia, python, batched, dense
 p(0.2)=(1.0, 0.0)
 p(0.3)=(0.0, 0.0)
 p(0.2)=(1.0, 0.0)

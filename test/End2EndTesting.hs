@@ -15,7 +15,7 @@ import Control.Monad (zipWithM)
 import Control.Monad.Random
 import System.Random (mkStdGen)
 import Data.Maybe
-import Data.List (intercalate, nub, isInfixOf, transpose, zip4)
+import Data.List (intercalate, nub, isInfixOf, isPrefixOf, transpose, zip4)
 import Data.Text (replace, pack, unpack)
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
@@ -474,6 +474,7 @@ batchedPythonTests = do
       -- at a cutoff, so it draws from the same declaration, not from a second
       -- eligibility condition of its own.
       batchedDeclared = [ (n, p, tcs) | (n, p, bs, tcs) <- entries, Batched `elem` bs ]
+      denseNames = [ n | (n, _, bs, _) <- entries, Dense `elem` bs ]
   declared <- mapM (\(n, p, _, tcs) -> (,) n <$> batchedEligibility p tcs)
                    [ e | e@(_, _, bs, _) <- entries, Batched `elem` bs ]
   undeclared <- mapM (\(n, p, _, tcs) -> (,) n <$> batchedEligibility p tcs)
@@ -482,10 +483,30 @@ batchedPythonTests = do
       refused  = [ (n, msg) | (n, Left msg) <- declared ]
       gained   = [ n | (n, Right _) <- undeclared ]
       topkEligible = topKEntries batchedDeclared
+      -- M3: a program declaring `dense` must actually get dense entry points.
+      -- Read off the emitted source, which is where the capability is visible;
+      -- a `dense` declaration on a program that is not even batched-eligible is
+      -- already caught above.
+      denseDeclared = [ e | e@(n, _, _, _) <- eligible, n `elem` denseNames ]
+      denseRefused = [ n | n <- denseNames
+                         , n `notElem` [ m | (m, src, _, _) <- eligible, not (null (denseEntryPoints src)) ] ]
+      denseGained = [ n | (n, src, _, _) <- eligible
+                        , n `notElem` denseNames, not (null (denseEntryPoints src)) ]
+      -- M3 x M5: the same topK-recompiled entries the per-element topK
+      -- differential uses, narrowed to the dense-declaring programs. Their
+      -- expectations are already retargeted to the *interpreter's* value at
+      -- that threshold, so running them through the dense path checks dense
+      -- mode inherits topK rather than merely agreeing with itself.
+      denseTopK = [ e | e@(n, src, _, _) <- fst topkEligible
+                      , takeWhile (/= '@') n `elem` denseNames
+                      , not (null (denseEntryPoints src)) ]
   mpy <- findTorchPython
   return $ testGroup "BatchedPython" $
     [ testProperty "declared-batched-eligible" (once (declaredEligibleProp (length declared) refused))
     , testProperty "eligibility-gain-note" (once (gainNoteProp gained))
+    , testProperty "declared-dense-eligible" (once (declaredDenseProp (length denseNames) denseRefused))
+    , testProperty "dense-eligibility-gain-note" (once (denseGainNoteProp denseGained))
+    , testProperty "dense-domain-boundary" (once (denseBoundaryProp eligible))
     ] ++ case mpy of
       Nothing ->
         [ testProperty "skipped-no-torch" $ once $ ioProperty $ do
@@ -495,6 +516,8 @@ batchedPythonTests = do
         [ testProperty "batched-vs-expected" (once (runBatchedPython py eligible))
         , testProperty "gradients-nan-free" (once (runBatchedGradients py eligible))
         , testProperty "generate-density-matches-expected" (once (runBatchedGenerate py eligible))
+        , testProperty "dense-matches-expected" (once (runBatchedDense False py denseDeclared))
+        , testProperty "dense-inherits-topk" (once (runBatchedDense True py denseTopK))
         , testProperty "topk-is-per-element" (once (runBatchedTopK py topkEligible)) ]
 
 -- | Everything the batched differential needs from one corpus program, or a
@@ -577,38 +600,42 @@ batchedRefusalTests = testGroup "BatchedRefusal"
 -- global flag and must precede the @compile@ subcommand).
 batchedRefusalTable :: [(String, String)]
 batchedRefusalTable =
-  -- lists. Note `list` is pinned on the list *constant*, not on IRHead: since
-  -- 'batchedVal' gates IRConst, the empty-list constant in `main = [Normal,
-  -- Uniform*2.0]` is now the first offender the walk finds, and the diagnostic
-  -- reports only the first. IRHead itself keeps a positive control as a
-  -- synthetic row in "TestInternals" (the let-spine case), where no constant
-  -- competes with it.
-  [ ("list",                      "constant with no batched representation (VList")
-  , ("headTail",                  "list construction (IRCons)")
-  , ("listLiteralDeconstruction", "list tail (IRTail)")
+  -- lists. With M1 (design heterogeneous-batch-inference) the list *spine*
+  -- operations are in the fragment -- within a shape bucket they are uniform
+  -- Python structure over [B] leaves -- so what is refused here is what
+  -- bucketing does not rescue: a list *constant* carrying per-element data
+  -- (`listLiteralDeconstruction`'s `[1.0, 2.0]`, the same shape as the
+  -- enumeration `SPLL.AutoNeural.indexOf` builds, see task
+  -- batched-bool-enum-index) and IRMap.
+  [ ("listLiteralDeconstruction", "constant with no batched representation (VList")
   , ("map",                       "list map (IRMap)")
-  -- Either: constructors, destructors, predicates
-  -- fp-exact-tuple-compare (haskell-dppl IRCompiler.hs 'equalityGuard') made
-  -- the deterministic Either-compare arm structurally check IRIsLeft before
-  -- ever reaching the IRLeft constructor underneath, so that predicate is now
-  -- the first offender the batched walk finds here.
-  , ("either_const",              "Either predicate (IRIsLeft)")
-    -- like `list` above: an Either *constant* now out-races IRRight as the
-    -- first offender here, so IRRight's node-level control is synthetic too
-  , ("either_isleft",             "constant with no batched representation (VEither")
-  , ("nestedDeconstruction",      "Either destructor (IRFromLeft)")
-  , ("eitherDeconstruction",      "Either destructor (IRFromRight)")
-  , ("either",                    "Either predicate (IRIsLeft)")
-  , ("either_fromLeft",           "Either predicate (IRIsRight)")
+  -- Either. Since heterogeneous M2 the tag is *structure*: it is part of the
+  -- bucket signature, so the constructors, destructors and predicates are all
+  -- in the fragment (`either`, `either_const`, `eitherDeconstruction`,
+  -- `nestedDeconstruction`, `either_both_cont` are eligible programs now). What
+  -- is refused is the dichotomy's other half -- `either_isleft` chooses which
+  -- *arm* to build from a coin flip (`if Uniform < 0.4 then left .. else
+  -- right ..`), so the sample's structure is per element and there is no bucket
+  -- to run it in.
+  , ("either_isleft",             "arms have different structure")
   -- a neural decoder's own Either-shaped output: the refused method is a
   -- decoder group's forward, not main's
   , ("eitherNeural",              "eitherNeural_auto's forward")
   -- ADT declarations: the bail at the top of 'generateFunctionsBatched'
-  , ("adt",                       "ADT declarations are not in the tensor fragment")
-  , ("adtNeuralCounting",         "ADT declarations are not in the tensor fragment")
-  -- prob/integ recursion: a cycle found by 'checkCallGraph'
-  , ("dice",                      "dice_prob reaches dice_prob recursively")
-  , ("gaussList",                 "main_prob reaches main_prob recursively")
+  -- ADTs. The declarations themselves are emittable since heterogeneous M2
+  -- (constructor tag = structure = part of the bucket signature), so `adtCoin`,
+  -- `recursiveAdt`, `planEnumInline`/`Wide` are eligible programs now. These two
+  -- are refused for an unrelated, pre-existing reason: their prob path evaluates
+  -- a deterministic argument by *generating* it, and generate is a separate
+  -- artifact batched mode does not call into.
+  , ("adt",                       "calls func_gen, which is not a forward/integrate method")
+  , ("adtNeuralCounting",         "calls countRed3_gen, which is not a forward/integrate method")
+  -- prob/integ recursion. Structure-directed recursion is admitted since M1
+  -- (its depth is uniform within a shape bucket, so it runs unchanged over [B]
+  -- leaves -- `gaussList` is an eligible program now, checked in
+  -- 'batchedPythonTests'); what stays refused is *value*-dependent recursion,
+  -- where eager both-arm select semantics would not terminate.
+  , ("dice",                      "calls dice_prob recursively from a position that is not guarded")
   -- a prob/integ path reaching a method batched mode does not emit
   , ("factorial",                 "calls factorial_gen, which is not a forward/integrate method")
   , ("flip",                      "calls flip_gen, which is not a forward/integrate method")
@@ -665,14 +692,20 @@ data BatchGroup = BatchGroup
 batchGroups :: Bool -> [TestCase] -> Maybe [BatchGroup]
 batchGroups isNeural tcs = mapM build grouped
   where
-    keyed = [ q | t <- tcs, Just q <- [asQuery t] ]
+    -- Marginal (ANY) query points are dropped rather than disqualifying the
+    -- whole program: batched v1 has no VAny representation at all (the compiler
+    -- prunes isAny to False, and design heterogeneous-batch-inference Component
+    -- 3 is the designated successor for batched marginals), so such a point is
+    -- simply not a batched query. Before this, one ANY point kept every *other*
+    -- point of that program out of the differential too.
+    keyed = [ q | t <- tcs, Just q@(_, _, sm, _, _) <- [asQuery t], not (containsAnyV sm) ]
     grouped
       | isNeural  = groupBy ((==) `on` (\(c, _, _, _, _) -> c)) keyed
       | otherwise = groupBy ((==) `on` (\(c, ps, _, _, _) -> (c, show ps))) keyed
     build g@((c, _, _, _, _):_) =
       let samples = [s | (_, _, s, _, _) <- g]
           paramRows = [ps | (_, ps, _, _, _) <- g]
-      in do _ <- batchLiteral samples
+      in do _ <- batchSamples samples
             paramExprs <- if isNeural
               then batchSymParamCols paramRows
               else Just (map pyVal (head paramRows))
@@ -722,6 +755,56 @@ isNum :: IRValue -> Bool
 isNum (VFloat _) = True
 isNum (VInt _) = True
 isNum _ = False
+
+-- | How a group's query points are handed to the batched kernel.
+data SampleBatch
+  -- | One structure-of-arrays tensor: the whole batch has one fixed shape, so
+  -- the kernel takes it directly (the original tensor fragment).
+  = SoA String
+  -- | A plain Python list of per-point samples, to be routed through the host
+  -- bucketing wrapper (design heterogeneous-batch-inference, Component 1): the
+  -- points differ in structure (list lengths), so @bucketed@ partitions them by
+  -- structural signature, SoA-packs each bucket, runs the kernel once per
+  -- bucket and scatters the results back into input order. The 'Int' is the
+  -- number of distinct signatures the wrapper must find -- the M1 acceptance
+  -- criterion ("bucket count = distinct shapes"), asserted in the driver.
+  | Bucketed String Int
+
+-- | The Python form of a group's samples, or 'Nothing' if they are not
+-- batchable at all (a marginal @ANY@ sample, or a leaf that is neither
+-- numeric, bool, nor a structure of those).
+batchSamples :: [IRValue] -> Maybe SampleBatch
+batchSamples vs
+  | any containsAnyV vs  = Nothing
+  | any containsStructureV vs =
+      Just (Bucketed ("[" ++ intercalate ", " (map pyVal vs) ++ "]")
+                     (length (nub (map shapeSig vs))))
+  | otherwise            = SoA <$> batchLiteral vs
+
+-- | Does this sample carry structure a batch can differ in — a list length or
+-- an Either tag? Such a group goes through the bucketing wrapper.
+containsStructureV :: IRValue -> Bool
+containsStructureV (VList _)    = True
+containsStructureV (VEither _)  = True
+containsStructureV (VTuple a b) = containsStructureV a || containsStructureV b
+containsStructureV _            = False
+
+containsAnyV :: IRValue -> Bool
+containsAnyV VAny           = True
+containsAnyV (VAnyExcept _) = True
+containsAnyV (VList l)      = any containsAnyV (toList l)
+containsAnyV (VEither e)    = either containsAnyV containsAnyV e
+containsAnyV (VTuple a b)   = containsAnyV a || containsAnyV b
+containsAnyV _              = False
+
+-- | The Haskell twin of @pythonLibBatched.signature@: the sample's structural
+-- skeleton with every scalar leaf erased. Used only to predict the bucket count.
+shapeSig :: IRValue -> String
+shapeSig (VList l)            = "L(" ++ intercalate "," (map shapeSig (toList l)) ++ ")"
+shapeSig (VTuple a b)         = "T(" ++ shapeSig a ++ "," ++ shapeSig b ++ ")"
+shapeSig (VEither (Left v))   = "L?(" ++ shapeSig v ++ ")"
+shapeSig (VEither (Right v))  = "R?(" ++ shapeSig v ++ ")"
+shapeSig _                    = "x"
 
 -- | Build a structure-of-arrays batch tensor literal from a homogeneous list of
 -- sample values: numeric leaves stack into a float tensor, bools into a bool
@@ -794,9 +877,15 @@ runBatchedPython py eligible = ioProperty $ do
 batchedDriver :: Bool -> [(String, String, [BatchGroup], [String])] -> String
 batchedDriver accArg eligible = unlines $
   [ "import torch, sys, traceback"
-  , "from pythonLibBatched import T"  -- for structure-of-arrays tuple sample batches
+  -- T for structure-of-arrays tuple sample batches; the list constructors and
+  -- the bucketing wrapper for heterogeneous (list-shaped) samples.
+  , "from pythonLibBatched import T, ConsInferenceList, EmptyInferenceList, Left, Right, bucketed, bucket_count"
   , "TOL = " ++ show probTolerance
   , "failures = []"
+  , "def _bucket_count(name, samples, expected):"
+  , "    got = bucket_count(samples)"
+  , "    if got != expected:"
+  , "        failures.append(name + ': bucketing produced ' + str(got) + ' buckets, expected ' + str(expected))"
   , "def _leaf(x, i):"
   , "    return float(x[i]) if (torch.is_tensor(x) and x.dim() > 0) else float(x)"
   , "def _cmp(name, method, r, exp_p, exp_d):"
@@ -834,15 +923,216 @@ batchedDriver accArg eligible = unlines $
       ]
     groupCall name (BatchGroup isCumul paramExprs _ samples expP expD) =
       let method = if isCumul then "integrate" else "forward"
-          xs = case batchLiteral samples of Just s -> s; Nothing -> "None"
           -- A topK-compiled prob function takes an accumulated-probability
           -- parameter right after the sample (see 'compiledWithTopK'); seed it
           -- with 1.0 at the query root, exactly as the interpreter driver does.
           accStr = if accArg && not isCumul then ", 1.0" else ""
           paramStr = concatMap (", " ++) paramExprs
-          call = "_main." ++ method ++ "(" ++ xs ++ accStr ++ paramStr ++ ")"
-      in [ "    _cmp(" ++ show name ++ ", " ++ show method ++ ", " ++ call
-           ++ ", " ++ pyFloatList expP ++ ", " ++ pyFloatList expD ++ ")" ]
+          (bucketCheck, call) = case batchSamples samples of
+            Just (SoA xs) ->
+              ([], "_main." ++ method ++ "(" ++ xs ++ accStr ++ paramStr ++ ")")
+            -- Heterogeneous samples go through the host bucketing wrapper, and
+            -- the bucket count is asserted: the M1 acceptance criterion is that
+            -- the wrapper makes exactly one kernel call per distinct shape, not
+            -- merely that the numbers come out right.
+            Just (Bucketed xs n) ->
+              ( [ "    _bucket_count(" ++ show name ++ ", " ++ xs ++ ", " ++ show n ++ ")" ]
+              , "bucketed(_main." ++ method ++ ", " ++ xs ++ accStr ++ paramStr ++ ")" )
+            Nothing -> ([], "None")
+      in bucketCheck
+         ++ [ "    _cmp(" ++ show name ++ ", " ++ show method ++ ", " ++ call
+              ++ ", " ++ pyFloatList expP ++ ", " ++ pyFloatList expD ++ ")" ]
+    pyFloatList xs = "[" ++ intercalate ", " (map show xs) ++ "]"
+
+-- ===========================================================================
+-- M3: dense enumeration mode (design heterogeneous-batch-inference)
+-- ===========================================================================
+
+-- | The inference methods the emitted @Main@ class exposes a dense entry point
+-- for. Read off the emitted source rather than recomputed from the IR: the
+-- capability under test is precisely "the generated class has these methods",
+-- and re-deriving the eligibility rule here would let the test agree with a
+-- broken compiler.
+--
+-- Scoped to the @Main@ class block, because a helper group can perfectly well
+-- have a finite domain while @main@ does not (@coin@'s own @Coin@ class does;
+-- @Main@ there does too, but @gaussList@ is the shape where they differ).
+denseEntryPoints :: String -> [String]
+denseEntryPoints src =
+  [ m | m <- ["forward", "integrate"], ("def " ++ m ++ "_dense(") `isInfixOf` block ]
+  where
+    block = unlines $ takeWhile indented $ drop 1
+          $ dropWhile (/= "class Main(Module):") (lines src)
+    indented l = null l || " " `isPrefixOf` l
+
+-- | The point of the @dense@ routing token: a program that declares it must
+-- actually receive dense entry points.
+declaredDenseProp :: Int -> [String] -> Property
+declaredDenseProp 0 _ = counterexample
+  "no .tst file declares `dense` in its backends header; dense enumeration has no coverage" False
+declaredDenseProp _ refused = counterexample
+  ("programs declaring `dense` in their .tst backends header no longer get dense entry points\n\
+   \  (a finite query domain, and a prob/integ signature of just the sample):\n"
+   ++ unlines [ "  " ++ n | n <- refused ])
+  (null refused)
+
+-- | A visible note (never a failure) for batched programs that /could/ enumerate
+-- densely but whose @.tst@ file does not say so. Same asymmetry as
+-- 'gainNoteProp': losing the capability is the regression, gaining it is not.
+denseGainNoteProp :: [String] -> Property
+denseGainNoteProp gained = ioProperty $ do
+  if null gained
+    then return ()
+    else hPutStrLn stderr ("BatchedPython: " ++ show (length gained) ++ " batched program(s) have a finite\n\
+      \  query domain but do not declare `dense` in their .tst backends header:\n"
+      ++ unlines [ "    " ++ n | n <- gained ])
+  return True
+
+-- | Both sides of the dense decision boundary, named explicitly, so that a
+-- change which quietly widened or narrowed it fails here rather than only
+-- shifting a count. The gain/loss notes above measure the boundary's *position*;
+-- these rows pin the *reasons* it sits there.
+--
+-- Torch-free: it reads the emitted source, like the eligibility assertions.
+denseBoundaryProp :: [(String, String, [BatchGroup], [String])] -> Property
+denseBoundaryProp eligible = counterexample (unlines wrong) (null wrong)
+  where
+    rows =
+      -- A continuous query domain has no enumeration: dense must decline.
+      [ ("normal", False, "a continuous query domain")
+      , ("uniform", False, "a continuous query domain")
+      -- Finite domain, but the prob function also takes a per-point neural
+      -- symbol, so the dense result would be [B, V] and amortise over nothing.
+      , ("autoNeuralProbMnistAdd", False, "a per-point neural symbol argument")
+      -- The positive controls, one scalar and one composite, so a gate that
+      -- refused everything could not pass this property.
+      , ("coin", True, "a finite Int domain from the DiscreteValues tag")
+      , ("letProbIntervalPair", True, "a finite (Bool, Bool) domain from the return type")
+      ]
+    wrong =
+      [ "  " ++ n ++ ": expected " ++ (if want then "" else "no ") ++ "dense entry points ("
+        ++ why ++ "), got " ++ show (denseEntryPoints src)
+      | (n, want, why) <- rows
+      , (m, src, _, _) <- eligible
+      , m == n
+      , not (null (denseEntryPoints src)) /= want ]
+
+-- | Run every @dense@-declaring program's dense entry points in one torch
+-- process. For each query group this checks three things:
+--
+--   * the dense vector really is the domain -- its length is @len(DOMAIN)@, so
+--     the @[V]@ axis is pinned rather than merely being "some batch";
+--   * @<method>_at(points, dense=True)@ matches the corpus expectation, i.e. the
+--     gather into the dense vector agrees with per-point ground truth;
+--   * @<method>_at(points, dense=False)@ does too, so the runtime dispatch is
+--     value-neutral and forcing either axis is safe.
+--
+-- The dense=True direction is forced rather than left to the size heuristic:
+-- most corpus programs have more domain values than query points, so the
+-- automatic choice would take the direct path and never exercise M3 at all.
+--
+-- The @accArg@ flag runs the same check against topK-recompiled entries, whose
+-- prob function takes the accumulated probability after the sample. Dense mode
+-- needs no topK machinery of its own for that to work: under M5's per-element
+-- rule the cutoff comparison is already an elementwise mask over whatever batch
+-- is passed, and the domain is just another batch -- so pruning is per *domain
+-- value* and the vector is identical to querying those values one at a time.
+-- That is the whole answer to the design's open question about topK in dense
+-- mode, and this property is what pins it.
+runBatchedDense :: Bool -> FilePath -> [(String, String, [BatchGroup], [String])] -> Property
+runBatchedDense accArg _ [] = counterexample
+  ("BatchedPython dense: no dense-declaring corpus programs found"
+   ++ (if accArg then " at a topK threshold" else "")) False
+runBatchedDense accArg py entries = ioProperty $ do
+  hPutStrLn stderr ("BatchedPython dense" ++ (if accArg then " topK" else "") ++ ": "
+                    ++ show (length entries) ++ " program(s), "
+                    ++ show (sum [ length (denseEntryPoints src) | (_, src, _, _) <- entries ])
+                    ++ " dense entry point(s), via " ++ py)
+  cwd <- getCurrentDirectory
+  let script = "import sys\nsys.path.insert(0, " ++ show cwd ++ ")\n" ++ denseDriver accArg entries
+  (code, out, err) <- withSystemTempFile "batched_dense.py" $ \tmpPath tmpHandle -> do
+    hPutStr tmpHandle script
+    hClose tmpHandle
+    readProcessWithExitCode py [tmpPath] ""
+  return $ case code of
+    ExitSuccess -> counterexample (out ++ err) True
+    ExitFailure _ -> counterexample ("Batched PyTorch dense differential failed:\n" ++ out ++ err) False
+
+denseDriver :: Bool -> [(String, String, [BatchGroup], [String])] -> String
+denseDriver accArg entries = unlines $
+  [ "import torch, sys, traceback"
+  , "from pythonLibBatched import T, ConsInferenceList, EmptyInferenceList, Left, Right"
+  , "TOL = " ++ show probTolerance
+  , "failures = []"
+  , "def _leaf(x, i):"
+  , "    return float(x[i]) if (torch.is_tensor(x) and x.dim() > 0) else float(x)"
+  , "def _cmp(name, method, r, exp_p, exp_d):"
+  , "    p = r[0]; d = r[1][0]"
+  , "    for i in range(len(exp_p)):"
+  , "        pv = _leaf(p, i)"
+  , "        if abs(pv - exp_p[i]) > TOL:"
+  , "            failures.append(name + '.' + method + ' pt ' + str(i) + ': prob ' + str(pv) + ' != ' + str(exp_p[i]))"
+  , "        if pv != 0.0:"
+  , "            dv = _leaf(d, i)"
+  , "            if abs(dv - exp_d[i]) > TOL:"
+  , "                failures.append(name + '.' + method + ' pt ' + str(i) + ': dim ' + str(dv) + ' != ' + str(exp_d[i]))"
+  -- A topK-compiled prob function takes the accumulated probability right after
+  -- the sample; seed it with 1.0 at the query root, as every other driver does.
+  -- It is a scalar, so it broadcasts over the domain batch as well as over the
+  -- query batch -- which is exactly why dense mode needs no topK plumbing.
+  , "ACC = " ++ (if accArg then "(1.0,)" else "()")
+  , "def _dense(name, method, main, samples, exp_p, exp_d, packed=None):"
+  , "    dom = type(main).DOMAIN"
+  , "    vec = getattr(main, method + '_dense')(*ACC)"
+  , "    n = vec[0].shape[0] if (torch.is_tensor(vec[0]) and vec[0].dim() > 0) else 1"
+  , "    if n != len(dom):"
+  , "        failures.append(name + '.' + method + '_dense: vector length ' + str(n) + ' != domain size ' + str(len(dom)))"
+  , "    at = getattr(main, method + '_at')"
+  , "    _cmp(name, method + '_at[dense]', at(samples, *ACC, dense=True), exp_p, exp_d)"
+  , "    _cmp(name, method + '_at[direct]', at(samples, *ACC, dense=False), exp_p, exp_d)"
+  -- The scalar fast path: an already-packed [B] tensor skips the per-sample
+  -- Python marshalling and looks the domain up with one torch comparison. It is
+  -- a separate branch of dense_query, so it needs its own row -- and it is the
+  -- only branch whose automatic choice can come out dense, which is why the
+  -- unforced call is checked here and not above.
+  , "    if packed is not None:"
+  , "        _cmp(name, method + '_at[packed,dense]', at(packed, *ACC, dense=True), exp_p, exp_d)"
+  , "        _cmp(name, method + '_at[packed,auto]', at(packed, *ACC), exp_p, exp_d)"
+  ] ++
+  concatMap programBlock entries ++
+  [ "if failures:"
+  , "    print('DENSE DIFFERENTIAL FAILURES (' + str(len(failures)) + '):')"
+  , "    for f in failures: print('  ' + f)"
+  , "    sys.exit(1)"
+  , "print('BatchedPython dense OK: " ++ show (length entries) ++ " programs')"
+  ]
+  where
+    programBlock (name, src, groups, netNames) =
+      [ "try:"
+      , "    _ns = {}"
+      , "    exec(" ++ show src ++ ", _ns)"
+      ] ++
+      [ "    _ns[" ++ show nm ++ "] = (lambda s: s)" | nm <- netNames ] ++
+      [ "    _main = _ns['main']" ] ++
+      concatMap (groupCall name src) groups ++
+      [ "except Exception as _e:"
+      , "    failures.append(" ++ show name ++ " + ': exception ' + repr(_e) + '\\n' + traceback.format_exc())"
+      ]
+    -- A group is checked only for the method that actually has a dense entry
+    -- point: `integrate` can be absent (or itself outside the fragment) while
+    -- `forward` is dense, and vice versa.
+    groupCall name src g =
+      let method = if bgIsCumul g then "integrate" else "forward"
+          samples = "[" ++ intercalate ", " (map pyVal (bgSamples g)) ++ "]"
+          -- Only a scalar (non-tuple, non-structural) batch has a packed form
+          -- the fast path accepts; anything else exercises the marshalled path
+          -- alone, which is correct -- dense_query routes it there too.
+          packed = case batchLiteral (bgSamples g) of
+            Just lit | not ("T(" `isPrefixOf` lit) -> ", " ++ lit
+            _ -> ""
+      in [ "    _dense(" ++ show name ++ ", " ++ show method ++ ", _main, " ++ samples
+           ++ ", " ++ pyFloatList (bgExpProb g) ++ ", " ++ pyFloatList (bgExpDim g) ++ packed ++ ")"
+         | method `elem` denseEntryPoints src ]
     pyFloatList xs = "[" ++ intercalate ", " (map show xs) ++ "]"
 
 -- ===========================================================================
@@ -1147,7 +1437,12 @@ generateDriver nonNeuralProbes neuralProbes = unlines $
       , "        checked += 1"
       ] ++
       concatMap (pointCheck name "_btd") points ++
-      [ "except Exception as _e:"
+      -- A generate that is a declared stub (a structurally heterogeneous draw,
+      -- design heterogeneous-batch-inference Component 4) is a skip, not a
+      -- failure -- the same treatment as the arity mismatch above.
+      [ "except NotImplementedError:"
+      , "    skipped += 1"
+      , "except Exception as _e:"
       , "    failures.append(" ++ show name ++ " + ': exception ' + repr(_e) + '\\n' + traceback.format_exc())"
       ]
     -- Each point supplies its own decoder symbol (a row of the group's [B, n]
@@ -1168,7 +1463,12 @@ generateDriver nonNeuralProbes neuralProbes = unlines $
       , "    else:"
       ] ++
       concatMap (neuralPointCheck name paramExprs) points ++
-      [ "except Exception as _e:"
+      -- A generate that is a declared stub (a structurally heterogeneous draw,
+      -- design heterogeneous-batch-inference Component 4) is a skip, not a
+      -- failure -- the same treatment as the arity mismatch above.
+      [ "except NotImplementedError:"
+      , "    skipped += 1"
+      , "except Exception as _e:"
       , "    failures.append(" ++ show name ++ " + ': exception ' + repr(_e) + '\\n' + traceback.format_exc())"
       ]
     neuralPointCheck name paramExprs (xExpr, expProb, expDim, rowIx) =

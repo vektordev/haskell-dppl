@@ -139,6 +139,13 @@ generate f neurals registry adts globalEnv env [] (IROp OpSub a b) = do
     --(VAny, _) -> return VAny
     --(_, VAny) -> return VAny
     _ -> error ("Type error: Minus can only subtract two numbers (of the same type): " ++ show (aVal, bVal))
+generate f neurals registry adts globalEnv env [] (IROp OpMax a b) = do
+  aVal <- generate f neurals registry adts globalEnv env [] a
+  bVal <- generate f neurals registry adts globalEnv env [] b
+  case (aVal, bVal) of
+    (VFloat af, VFloat bf) -> return $ VFloat (max af bf)
+    (VInt af, VInt bf) -> return $ VInt (max af bf)
+    _ -> error ("Type error: Max can only compare two numbers (of the same type): " ++ show (aVal, bVal))
 generate f neurals registry adts globalEnv env [] (IROp OpOr a b) = do
   aVal <- generate f neurals registry adts globalEnv env [] a
   bVal <- generate f neurals registry adts globalEnv env [] b
@@ -345,6 +352,12 @@ generate f neurals registry adts globalEnv env [] (IRCumulative IRUniform expr) 
 generate f neurals registry adts globalEnv env [] (IRCumulative IRNormal expr) = do
   x <- generate f neurals registry adts globalEnv env [] expr
   return $ irCDF IRNormal x
+generate f neurals registry adts globalEnv env [] (IRLogDensity dist expr) = do
+  x <- generate f neurals registry adts globalEnv env [] expr
+  return $ irLogPDF dist x
+generate f neurals registry adts globalEnv env [] (IRLogCumulative dist expr) = do
+  x <- generate f neurals registry adts globalEnv env [] expr
+  return $ irLogCDF dist x
 generate f _ _ _ _ _ [] (IRSample IRUniform) =
   uniformGen f
 generate f _ _ _ _ _ [] (IRSample IRNormal) =
@@ -390,6 +403,20 @@ generate f neurals registry adts globalEnv env [] (IREnumSum varname values expr
     return $ sumValues x acc
     ) (VFloat 0) (fmap valueToIR (multiValueToValueList values))
   where sumValues = \(VFloat a) (VFloat b) -> VFloat $ a+b
+-- | Log-space sibling of IREnumSum (task log-space-probability-computation):
+-- reduces the enumerated per-value log-probabilities by log-sum-exp instead
+-- of a plain sum, starting from the semiring zero (-infinity, the log-sum-exp
+-- identity) instead of 0.0.
+generate f neurals registry adts globalEnv env [] (IRLogEnumSum varname values expr) = do
+  foldrM (\v acc -> do
+    x <- generate f neurals registry adts globalEnv env [IRConst v] (IRLambda varname expr)
+    return $ logSumExpValues x acc
+    ) (VFloat ((-1)/0)) (fmap valueToIR (multiValueToValueList values))
+  where
+    logSumExpValues (VFloat a) (VFloat b)
+      | isInfinite a && a < 0 = VFloat b
+      | isInfinite b && b < 0 = VFloat a
+      | otherwise = let m = max a b in VFloat (m + log (exp (a - m) + exp (b - m)))
 generate f neurals registry adts globalEnv env [] (IRIsPossible multiVal expr) = do
   val <- generate f neurals registry adts globalEnv env [] expr
   return $ VBool (valueInMultiValue multiVal (fmap (error "Failed conversion") val))
@@ -409,7 +436,7 @@ generate _ _ _ _ _ _ _ expr = error ("Expression is not yet implemented " ++ sho
 reduceIREnv :: IREnv -> ReducedIREnv
 reduceIREnv (IREnv funcs _ consts) =
   map (\(name, val) -> (name, IRConst val)) consts ++
-  concatMap (\(IRFunGroup name gen prob integ encode normal _) ->
+  concatMap (\(IRFunGroup name gen prob integ encode normal _ _) ->
     -- Special handling for per-component normal functions (created with "_component_" prefix)
     if "_component_" `isPrefixOf` name then
       -- Extract the actual component name and register without suffix
@@ -438,6 +465,20 @@ irPDF _ x = error ("Expression must be the density of a valid distribution" ++ s
 irCDF :: Distribution -> IRValue -> IRValue
 irCDF IRUniform (VFloat x) = VFloat $ if x < 0 then 0 else if x > 1 then 1 else x
 irCDF IRNormal (VFloat x) = VFloat $ (1/2)*(1 + erf(x/sqrt(2)))
+
+-- | Native log-pdf/log-cdf (task log-space-probability-computation): computed
+-- directly from the formula rather than as @log (irPDF ...)@, so a deep tail
+-- never underflows to a hard float zero (whose log would be -Infinity, losing
+-- the tail entirely) before the log is taken.
+irLogPDF :: Distribution -> IRValue -> IRValue
+irLogPDF IRUniform (VFloat x) = if x >= 0 && x <= 1 then VFloat 0 else VFloat ((-1)/0)
+irLogPDF IRNormal (VFloat x) = VFloat ((-0.5) * x * x - 0.5 * log (2 * pi))
+irLogPDF _ x = error ("Expression must be the log-density of a valid distribution" ++ show x)
+
+irLogCDF :: Distribution -> IRValue -> IRValue
+irLogCDF IRUniform (VFloat x) = VFloat $ log (if x < 0 then 0 else if x > 1 then 1 else x)
+irLogCDF IRNormal (VFloat x) = VFloat $ log ((1/2) * (1 + erf (x/sqrt(2))))
+irLogCDF _ x = error ("Expression must be the log-cumulative of a valid distribution" ++ show x)
 
 -- | Structural runtime-tag check backing 'IRConformsTo': does the value match the
 -- shape of the given return type? Used to reject wrong-typed query values (e.g.
