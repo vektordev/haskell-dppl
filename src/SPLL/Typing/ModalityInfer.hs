@@ -15,8 +15,11 @@
 --     is obtained by partial evaluation of the body — so application is resolved
 --     by β-reduction at the call site, which is what preserves the distribution
 --     family ('Family') through application (design §6 motivating program 2);
---   * recursion among top-level declarations is a least fixpoint computed by
---     Kleene iteration over the whole decl graph (covers mutual recursion).
+--   * recursion among top-level declarations is a greatest fixpoint,
+--     seeded at the top of the lattice and iterated downward via Kleene
+--     iteration over the whole decl graph (covers mutual recursion; see
+--     the note above 'topI' for why a least fixpoint would collapse
+--     multi-clause recursion to 'Bottom').
 --
 -- == Internal representation
 --
