@@ -202,7 +202,7 @@ The suite runs under tasty (`tasty-quickcheck` for properties, `tasty-hunit` for
 
 A `.tst` file may start with two optional header lines, in either order: a routing header `backends: interpreter, julia, python` (any non-empty subset; without it the file runs against all three scalar backends), and a standalone `slow` line. The `.tst` grammar has no comment syntax: a line the expectation parser cannot match silently ends the file (`pTestFile` has no `eof`), so a `--` line would quietly drop every expectation after it.
 
-The header accepts a fourth, **opt-in** token, `batched`, which is *not* part of the no-header default (`defaultBackends` in `TestCaseParser`, deliberately distinct from `allBackends = [minBound .. maxBound]` — adding the constructor to the latter would have silently enrolled every corpus file). It declares that the program is expected to be **batched-mode eligible**, and the `BatchedPython` group *asserts* that (`declared-batched-eligible`: a batched `compile`, a `generateFunctionsBatched` emission, and batchable query samples) instead of filtering silently, naming the program and quoting the refusal diagnostic on failure. Those assertions are pure Haskell and run even where no torch-enabled Python exists, so a torch-less CI still guards batched eligibility. The reverse direction — a program that *is* eligible but does not declare it — is a stderr note only (`eligibility-gain-note`), since eligibility loss is the regression worth failing on while eligibility gain happens whenever an ordinary scalar program is added. Listing `batched` never removes a file from a scalar backend: spell the scalar ones out alongside it. `slow`-headered files stay out of batched coverage by construction.
+The header accepts a fourth, **opt-in** token, `batched`, which is *not* part of the no-header default (`defaultBackends` in `TestCaseParser`, deliberately distinct from `allBackends = [minBound .. maxBound]` — adding the constructor to the latter would have silently enrolled every corpus file). It declares that the program is expected to be **batched-mode eligible**, and the `BatchedPython` group *asserts* that (`declared-batched-eligible`: a batched `compile`, a `generateFunctionsBatched` emission, and batchable query samples) instead of filtering silently, naming the program and quoting the refusal diagnostic on failure. Those assertions are pure Haskell and run even where no torch-enabled Python exists, so a torch-less CI still guards batched eligibility. The reverse direction — a program that *is* eligible but does not declare it — is a stderr note only (`eligibility-gain-note`), since eligibility loss is the regression worth failing on while eligibility gain happens whenever an ordinary scalar program is added. Listing `batched` never removes a file from a scalar backend: spell the scalar ones out alongside it. `slow`-headered files stay out of batched coverage by construction. A fifth token, `dense`, declares the narrower property that the program's *query domain* is finite so batched mode emits dense-enumeration entry points for it (design heterogeneous-batch-inference M3); it presupposes `batched` and does not imply it, and is asserted/gain-noted the same way. Beware CRLF `.tst` files when adding a token by script: appending after the `\r` puts it outside the header line, and `pTestFile` then silently truncates the file to zero expectations rather than failing.
 
 Expected values are compared with `probTolerance` (1e-4). Integral convergence is encoded per program as an upper-tail `cdf(x)=(1.0, 0.0)` line rather than checked at a global probe point — no single finite bound suits both heavy-tailed lognormal products and log-domain programs whose inverse overflows.
 
@@ -324,6 +324,75 @@ is the corpus witness for the *refusal* (which arm exists is decided per
 element). One test-side change: a marginal (ANY) query point is now dropped from
 its group rather than disqualifying its whole program, since batched v1 has no
 `VAny` at all.
+
+**M3 — dense enumeration mode.** When a group's *query* domain is statically
+finite, evaluating the kernel once with the whole domain as the batch gives the
+`[V]` probability vector, and any query is a gather into it. The `[V]` axis is
+the ordinary **batch** axis: nothing inside the kernel changes, and the
+enumeration a program does *internally* (`IREnumSum`) is a separate axis dense
+mode sits above rather than replaces — a call from `main` to an enumerable `A`
+is untouched, and `A`'s finite domain does not make `main` faster (hoisting
+`A`'s vector into `main` is `materialized-marginals-semiring`/
+`batched-enumsum-materialization` territory, deliberately not started here).
+It is **strictly additive**: `forward`/`integrate`/`generate` come out
+byte-identical, and an eligible class merely gains a `DOMAIN` constant plus
+`<method>_dense()` / `<method>_at(samples, *args, dense=None)`. An unrenderable
+domain or an unfitting signature yields *no* dense methods rather than a
+refusal — dense must never cost a program its ordinary batched eligibility.
+
+The domain lives on `IRFunGroup.sampleDomain`, filled in `IRCompiler` from
+Analysis's `DiscreteValues` tag where present (the only source that knows a
+*numeric* finite domain — `coin`'s `[0,1,2]`, `discreteFloats`'
+`[2.0,3.0,4.0]`) else `autoDeriveMultiValue` on the return type (Bool, enum
+ADTs, tuples/Eithers thereof), in both cases gated on `multiValueIsFinite`.
+That predicate is deliberately **stricter** than
+`not . multiValueContainsContinuous`: an unresolved `MultiAuto`/`MultiTypeRef`
+is refused (`multiValueToValueList` is not total on them), and a composite is
+finite only if *every* slot is — an `Either` with one continuous arm would
+otherwise enumerate a strict subset of its own domain. Eligibility additionally
+requires the emitted signature to be exactly `sample`, optionally followed by
+topK's `acc_prob`; a further per-point argument (a neural symbol) is excluded,
+its dense result being `[B, V]`, which amortises over nothing.
+
+**topK needs no plumbing here**: under M5's per-element rule the cutoff is
+already an elementwise mask over whatever batch is passed, and the domain is
+just another batch — so pruning is per *domain value* and the vector is
+identical to querying those values one at a time.
+
+Runtime side (`pythonLibBatched`): `denskey`/`dense_positions`/`gather_dense`,
+and `dense_query`, which picks the axis. Measured on `coin` (V=3) against the
+direct kernel, the design's own "amortizes perfectly over any batch size"
+premise turned out **wrong** and the numbers reshaped the API: a *reused*
+vector is 28–53x (the real win — `forward_dense()` returns a plain tensor, so
+the documented idiom is the caller holding it across batches); a per-call dense
+query crosses over around **B≈1000**, not at `B > V`; and the *marshalled* path
+(a Python list of sample values) never wins on these kernels at all, since
+`denskey` costs O(B) Python before any torch runs. So `dense_query` has a
+scalar fast path — an already-packed `[B]` tensor over a scalar domain, indexed
+by one `O(B·V)` torch comparison — and that is the only branch whose
+*automatic* choice can come out dense (above `DENSE_MIN_BATCH = 1024`); the
+marshalled branch stays direct unless `dense=True` is forced. Nothing is
+cached, deliberately: the vector depends on thetas and weights that nothing in
+the emitted class observes changing, so an implicit cache would serve stale
+values *and a stale autograd graph* after every parameter update — and a
+forgotten explicit invalidation would be a wrong gradient, not just a wrong
+number. An off-domain query point (`discreteFloats`' `p(5.0)`) falls back to
+the ordinary kernel, so a key miss costs a kernel call rather than an answer —
+which is also what makes float-equality keying safe.
+
+Participation is a new `dense` token in the `.tst` `backends:` header, which
+presupposes `batched` and does not imply it (spell out both). 35 corpus
+programs, 70 dense entry points (`integrate` gets them too — a CDF over a
+finite domain is equally enumerable). Eligibility is **asserted**
+(`declared-dense-eligible`) with a gain note the other way, exactly like
+`batched`; `dense-domain-boundary` pins both sides by name (`normal`/`uniform`
+for a continuous domain, `autoNeuralProbMnistAdd` for a per-point symbol, and
+`coin`/`letProbIntervalPair` as positive controls, so a gate that refused
+everything could not pass). The torch differential `dense-matches-expected`
+checks, per query group, that the vector's length *is* the domain size and that
+both forced axes — and the packed-tensor fast path, forced and automatic —
+match the `.tst` expectation; `dense-inherits-topk` re-runs all 35 at
+thresholds 0.3/0.6 against the **interpreter's** value at the same threshold.
 
 **M4** adds **batched generate** (`rand(n)`/`randn(n)` draw a whole `[n]`-shaped batch; a random `if` in generate mode renders exactly like a prob/integ select — `torch.where`, both arms drawing independently for the whole batch, so each element gets one arm's fresh draw and the result is the same mixture distribution as scalar generate, just with harmless extra randomness for the untaken arm). The batch-size parameter is a reserved-looking internal name (`_batchN`, matching the `_r0`/`cse_0` convention) rather than something public-facing like `n`, specifically to avoid colliding with a genuinely `n`-parameterised SPLL function. Originally scoped to the non-neural tensor fragment only (matching M2a), with a neural decoder group's own generate (categorical/Gaussian decoder sampling) out of scope and stubbed; **neural generate parity landed as a same-day follow-on** (task neural-generate-parity, haskell-dppl `e9dc4ab`): `AutoNeural.makeGenRec`'s decoder body — a sequential weighted-lottery categorical draw (`IRIf`/`IRSample IRUniform`/`IROp OpDiv` cascading over running normalised weight — mathematically a genuine categorical sample, not argmax, matching scalar `makeGenRec`'s own semantics) for a discrete leaf, Gaussian reparameterisation (`mu + sample*sigma`) for a continuous leaf, `IRTCons` composition for tuples — turned out to already lie entirely in the tensor fragment once M2b (`IRApply`/`IRIndex`) and M4 (`IRSample`) had landed, so removing the blanket neural-decoder exclusion was sufficient; no new IR nodes or `pythonLibBatched.py` primitives were needed. This reaches `mNistAdd`-style composed generate too (`readMNist_auto.generate(a, N) + readMNist_auto.generate(b, N)`). An `EitherPlan`/`ADTPlan`-shaped decoder output stays refused (`IRLeft`/`IRRight` have no tensor representation) — not a new gap, since such a decoder's *forward* function already fails to batch-compile for the same structural reason (`makeProbRec`'s `IRIsLeft`/`IRFromLeft`/`IRFromRight`). Generate ineligibility (recursion via `hasGenCycle`, or a residual non-fragment construct via the same `batchedGuard` forward/integrate uses) is now a **hard compile-time refusal**, exactly like forward/integrate — the `generateFunctionsBatched` pipeline is a single `Either` covering all three methods. (The original M4 design made generate ineligibility a **per-class, best-effort** stub — `raise NotImplementedError(...)`, accepting `*args, **kwargs` so a caller threading the batch-size parameter through a stubbed callee wouldn't itself fail on arity first — specifically because every neural decoder group unconditionally had a generate function that was, at the time, never eligible; a hard failure then would have broken batched compilation of every neural corpus program. That blanket exclusion is gone now that decoder generate is supported for the shapes that matter. Switching to a hard refusal has **one measured cost**, not zero: `twiceApplication` (`main = (\f -> f (f Uniform)) (\x -> x * 2.0)`, a nullary higher-order application) has a forward/integrate body the optimizer beta-reduces to plain arithmetic, but a *generate* body that still contains a literal, un-reduced `IRLambda`/`IRApply` unrelated to neural decoders; under the old stub it still contributed forward/integrate coverage, under the hard rule the whole program is refused. Accepted per Viktor (2026-07-22) rather than special-casing the stub back in for this one shape — see the `BatchedPython` count above.) Tested by a third `BatchedPython` property, `generate-density-matches-expected`: for every eligible non-neural program, a large fixed-seed batch from `main.generate(_batchN)` is checked against the program's *existing* prob query points via an epsilon-window empirical-density estimate (mirroring `Spec.hs`'s `testSamplingProb` idiom) compared to the `.tst`-declared density within `samplingTolerance`; for every eligible neural program, each query point instead gets its *own* `main.generate(sym, _batchN)` call (that point's own decoder symbol, sliced from the group's already-batched `[B, n]` symbol tensor and broadcast to a fresh `N`-sized batch), checked the same way — reusing corpus ground truth rather than needing a second sampling distribution to compare against (**94 non-neural + 6 neural = 100 of the 110 differential programs** checked; a list-valued program falls out naturally, its samples not being scalar — the rest need more than the batch-size parameter, e.g. a `ThetaTree` test override).
 
