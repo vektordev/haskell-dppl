@@ -96,7 +96,7 @@ import qualified Data.Set as Set
 import Text.PrettyPrint.Annotated.HughesPJClass()
 import PrettyPrint (pPrintProg, pPrintIREnv)
 import Debug.Pretty.Simple
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, fromMaybe)
 import Data.List (find)
 
 -- | Build an AST node with a blank annotation. All the smart constructors
@@ -432,14 +432,24 @@ runProbNamedC :: Program -> IREnv -> String -> [IRValue] -> IRValue -> Either Co
 runProbNamedC p compiled name args x =
   let Just (prob, _) = probFun (lookupIREnv name compiled)
       -- topK-compiled prob functions take an accumulated-probability parameter
-      -- right after the sample; seed it with 1.0 at the query root.
-      args' = if compiledWithTopK compiled then x : VFloat 1.0 : args else x : args
+      -- right after the sample; seed it with the semiring's multiplicative
+      -- identity at the query root -- linear 1.0, or log-space 0.0. Hardcoding
+      -- 1.0 here silently discarded all probability mass under logSpace, since
+      -- the compiled cutoff comparisons expect a log-space accumulator
+      -- (task topk-logspace-unsound).
+      args' = if compiledWithTopK compiled then x : accProbInit compiled : args else x : args
   in generateDet (neurals p) (encodeDecls p) compiled (map IRConst args') prob
 
 -- The IRCompiler emits the TOP_K_CUTOFF constant iff topKThreshold was set,
 -- so a compiled IREnv carries its own marker for the extra acc_prob parameter.
 compiledWithTopK :: IREnv -> Bool
 compiledWithTopK (IREnv _ _ consts) = isJust (lookup "TOP_K_CUTOFF" consts)
+
+-- The IRCompiler emits ACC_PROB_INIT alongside TOP_K_CUTOFF, in the same
+-- space (linear 1.0 / log-space 0.0), so the caller never has to know
+-- separately whether the compilation was log-space.
+accProbInit :: IREnv -> IRValue
+accProbInit (IREnv _ _ consts) = fromMaybe (VFloat 1.0) (lookup "ACC_PROB_INIT" consts)
 
 runIntegC :: Program -> IREnv -> [IRValue] -> IRValue -> Either CompilerError IRValue
 runIntegC p compiled = runIntegNamedC p compiled "main"

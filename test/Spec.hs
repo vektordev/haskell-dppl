@@ -122,6 +122,18 @@ corpusTests probPool = localOption (QuickCheckMaxRatio 20) $ testGroup "Corpus"
   , testProperty "LogSpaceMatchesLinear"
       (forAllNamedIn (filter ((`notElem` logSpaceUncoveredPrograms) . fst) probPool)
         (checkLogSpaceMatchesLinear logEnvs))
+  -- task topk-logspace-unsound: logSpace combined with topK used to discard all
+  -- probability mass (accProb/TOP_K_CUTOFF arithmetic was hardcoded linear, so
+  -- every branch compared a log-probability against a linear threshold and was
+  -- pruned unconditionally). Checked the same way LogSpaceMatchesLinear is --
+  -- against the corresponding LINEAR topK compile at the same threshold, not
+  -- against the (topK-off) .tst expectations, since topK is a real pruning
+  -- optimisation whose own linear-mode result is the correct oracle here.
+  -- Reuses logSpaceUncoveredPrograms: the set-witness/plan-enum subsystems it
+  -- excludes stay linear-only regardless of topK.
+  , testProperty "TopKLogSpaceMatchesLinear"
+      (forAllNamedIn (filter ((`notElem` logSpaceUncoveredPrograms) . fst) probPool)
+        (checkTopKLogSpaceMatchesLinear topK005LogEnvs topK005Envs))
   ]
   where
     -- Compile each corpus program once per config, shared by every invariant and
@@ -134,6 +146,7 @@ corpusTests probPool = localOption (QuickCheckMaxRatio 20) $ testGroup "Corpus"
     topK01Envs  = compileCorpusPrograms (topKConf 0.1) progs
     bcEnvs      = compileCorpusPrograms bcConf progs
     logEnvs     = compileCorpusPrograms (defaultCompilerConfig {logSpace = True}) progs
+    topK005LogEnvs = compileCorpusPrograms (topKConf 0.05) {logSpace = True} progs
     -- Enumerate the whole (filtered) pool deterministically so any failing corpus
     -- case surfaces on every run, rather than only when a random draw selects it.
     forAllNamedIn pool f = once $ conjoin [counterexample ("corpus case: " ++ n) (f n tc) | (n, tc) <- pool]
@@ -250,6 +263,24 @@ checkLogSpaceMatchesLinear envs n (p, inp, params, (VFloat out, VFloat outDim)) 
         counterexample (show linP ++ " (= exp(" ++ show logP ++ ")) /= " ++ show out)
           (property $ abs (linP - out) < probTolerance)
         .&&. (linP === 0 .||. d === outDim)
+    _ -> return $ counterexample "Return type was no tuple" False
+
+-- task topk-logspace-unsound: exp(logSpace+topK result) must reproduce the
+-- LINEAR topK result at the same threshold -- the topK-off .tst values are
+-- the wrong oracle here, since topK genuinely prunes (see
+-- checkTopKZeroMatchesExact/checkTopKNeverInflates for the analogous
+-- linear-only shape).
+checkTopKLogSpaceMatchesLinear :: CompiledPrograms -> CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
+checkTopKLogSpaceMatchesLinear logEnvs linEnvs n (p, inp, params, _) = ioProperty $ do
+  let logResult = irDensityC logEnvs n p params inp
+  let linResult = irDensityC linEnvs n p params inp
+  case (logResult, linResult) of
+    (VProbDim logP logD, VProbDim linP linD) ->
+      let expLogP = exp logP in
+      return $
+        counterexample (show expLogP ++ " (= exp(" ++ show logP ++ ")) /= " ++ show linP)
+          (property $ abs (expLogP - linP) < probTolerance)
+        .&&. (expLogP === 0 .||. logD === linD)
     _ -> return $ counterexample "Return type was no tuple" False
 
 checkProbAny :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property

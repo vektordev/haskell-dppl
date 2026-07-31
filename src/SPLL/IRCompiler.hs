@@ -163,8 +163,17 @@ envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb
         tupleNormalFuns = generateTupleComponentNormalFunctions (meta typeEnv) name binding
     in [baseFunGroup] ++ tupleNormalFuns) (functions p))
   adts
+  -- The cutoff must live in the same space as the accumulated probability it's
+  -- compared against: under logSpace that's log(thresh), not the raw linear
+  -- threshold. The comparison operators themselves (OpLessThan/OpGreaterThan)
+  -- stay unchanged either way -- log is a monotone increasing transform, so
+  -- ordering against the cutoff is preserved without touching the comparisons.
+  -- ACC_PROB_INIT mirrors TOP_K_CUTOFF's marker-const idiom: the value a
+  -- caller must seed the extra acc_prob parameter with at the query root
+  -- (linear 1.0, or log-space 0.0). It's read back by 'SPLL.Prelude.runProbNamedC'.
   (case topKThreshold conf of
-    Just thresh -> [("TOP_K_CUTOFF", VFloat thresh)]
+    Just thresh -> [("TOP_K_CUTOFF", VFloat (if logSpace conf then log thresh else thresh)),
+                     ("ACC_PROB_INIT", VFloat (if logSpace conf then 0.0 else 1.0))]
     Nothing     -> [])
 
   where
@@ -173,7 +182,12 @@ envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb
       (expr, "Calculates the probability of the sample parameter being returned from the " ++ name ++ "function")
     toIntegDecl name expr = (expr, "Calculates the probability of the sample parameter being less than or equal to the " ++ name ++ " function")
     toNormalDecl name expr = (expr, "Returns (mu, sigma) normal distribution parameters for the " ++ name ++ " function")
-    meta typeEnv = CompilerMetadata conf fcDat typeEnv adts p (IRConst (VFloat 1.0)) []
+    -- accProb starts at the semiring's multiplicative identity: linear 1.0, or
+    -- log-space 0.0 (log 1). Hardcoding VFloat 1.0 here silently discarded all
+    -- probability mass under logSpace, since every branch's accumulated weight
+    -- was then a linear 1.0 multiplied against log (negative) per-branch terms
+    -- (task topk-logspace-unsound).
+    meta typeEnv = CompilerMetadata conf fcDat typeEnv adts p (srOne (mkSemiring (logSpace conf))) []
     extractParamNames (Expr _ (Lambda name body)) = name : extractParamNames body
     extractParamNames _ = []
     stripLambdas (Expr _ (Lambda _ body)) = stripLambdas body
@@ -849,10 +863,10 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
   -- E.g. if length(a) > 0 then a[0] else ...
   -- If we were to access a[0] outside of the branch we would error
   (mul1Raw, binds1) <- lift (runWriterT (do
-    let metaTrue = meta { accProb = IROp OpMult (accProb meta) (IRVar var_condT_p) }
+    let metaTrue = meta { accProb = srTimes sr (accProb meta) (IRVar var_condT_p) }
     weighByCond var_condT_p condTrue <$> toIRInference metaTrue cumulative left sample))
   (mul2Raw, binds2) <- lift (runWriterT (do
-    let metaFalse = meta { accProb = IROp OpMult (accProb meta) (IRVar var_condF_p) }
+    let metaFalse = meta { accProb = srTimes sr (accProb meta) (IRVar var_condF_p) }
     weighByCond var_condF_p condFalse <$> toIRInference metaFalse cumulative right sample))
   -- If probability of this branch is 0 then set the product to 0 manually. This branch could throw an error multiplied by 0
   -- A condition that cannot hold makes its arm an impossible event, which is
@@ -896,8 +910,8 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
       -- out well before the plain default-config case did).
       accTrueV <- mkVariable "accTrue"
       accFalseV <- mkVariable "accFalse"
-      setVariables [(accTrueV, IROp OpMult (accProb meta) (IRVar var_condT_p))]
-      setVariables [(accFalseV, IROp OpMult (accProb meta) (IRVar var_condF_p))]
+      setVariables [(accTrueV, srTimes sr (accProb meta) (IRVar var_condT_p))]
+      setVariables [(accFalseV, srTimes sr (accProb meta) (IRVar var_condF_p))]
       prunedV <- mkVariable "pruned"
       let prunedExpr = IRIf
             (IROp OpLessThan (IRVar accTrueV) (IRVar "TOP_K_CUTOFF"))
@@ -1440,16 +1454,16 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
     let pRight = rProb pRightRes
     let wrapR e = generateLetInExpr pRightBinds e
     let possible = IRIsPossible enumListR invExpr
-    -- NOTE (log-space scope): the topK accumulator ('accProb') and cutoff
-    -- comparison are always linear-probability arithmetic, unconverted by
-    -- 'logSpace' -- topK combined with log-space is not a supported/tested
-    -- combination (task log-space-probability-computation's written
-    -- invasiveness verdict flags this as an explicit scope boundary).
+    -- accProb * pLeft is a semiring product (srTimes): under logSpace both
+    -- operands are log-probabilities, so a hardcoded OpMult here silently
+    -- pruned every branch (task topk-logspace-unsound). The comparison against
+    -- TOP_K_CUTOFF stays OpGreaterThan either way -- log is monotone, and
+    -- TOP_K_CUTOFF is seeded in the matching space at its definition site.
     let cutoffOk = case topKThreshold (compilerConfig meta) of
           Nothing -> possible
           Just _  -> IROp OpAnd possible
                        (IROp OpGreaterThan
-                          (IROp OpMult (accProb meta) pLeft)
+                          (srTimes sr (accProb meta) pLeft)
                           (IRVar "TOP_K_CUTOFF"))
     let returnExpr   = IRIf cutoffOk (wrapR (srTimes sr pLeft pRight)) (srZero sr)
     let branchesExpr = IRIf cutoffOk (IRConst (VFloat 1)) (IRConst (VFloat 0))
