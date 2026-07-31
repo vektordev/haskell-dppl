@@ -436,7 +436,7 @@ generate _ _ _ _ _ _ _ expr = error ("Expression is not yet implemented " ++ sho
 reduceIREnv :: IREnv -> ReducedIREnv
 reduceIREnv (IREnv funcs _ consts) =
   map (\(name, val) -> (name, IRConst val)) consts ++
-  concatMap (\(IRFunGroup name gen prob integ encode normal _) ->
+  concatMap (\(IRFunGroup name gen prob integ encode normal _ _) ->
     -- Special handling for per-component normal functions (created with "_component_" prefix)
     if "_component_" `isPrefixOf` name then
       -- Extract the actual component name and register without suffix

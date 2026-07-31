@@ -1260,7 +1260,8 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
     recGenEnv body = IREnv
       [IRFunGroup { groupName = "rec", genFun = Just (body, "")
                   , probFun = Nothing, integFun = Nothing
-                  , encodeFun = Nothing, normalFun = Nothing, groupDoc = "" }]
+                  , encodeFun = Nothing, normalFun = Nothing, groupDoc = ""
+                  , sampleDomain = Nothing }]
       [] []
     -- 'batchedGuard' is called on the raw term, *not* through 'prepBatchedBody':
     -- these rows check the guard itself, and prepping would rewrite away the very

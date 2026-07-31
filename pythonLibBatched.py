@@ -393,3 +393,97 @@ def bucketed(fn, samples, *args):
     parts.append(fn(packed, *[_slice_arg(a, idx, total) for a in args]))
     idxs.append(idx)
   return _scatter(parts, idxs, total)
+
+# --- dense enumeration mode (Component 2, M3) --------------------------------
+# When the *query* domain is finite -- the program returns one of V statically
+# known values -- batching query points is the wrong axis: evaluate the kernel
+# once with the whole domain as the batch, giving the [V] probability vector,
+# and answer any query by gathering into it. The [V] axis here is the ordinary
+# *batch* axis, so nothing inside the kernel changes and enumeration the program
+# does internally (IREnumSum) is untouched: dense mode sits above it, not
+# instead of it.
+#
+# Cost: O(V) kernel work independent of B, so it wins when B > V (or when the
+# caller reuses the vector across batches) and loses otherwise, structurally the
+# same crossover batching itself has. That is why the emitted `forward` is
+# unchanged and `forward_at` dispatches on the two sizes rather than the
+# compiler committing to one path.
+#
+# Deliberately *not* cached: the vector depends on thetas and network weights,
+# and nothing in the emitted class observes those changing, so an implicit cache
+# would silently serve stale values -- and a stale autograd graph -- after every
+# parameter update, which is precisely the training loop this exists for. A
+# caller that wants amortisation holds the tensor itself.
+
+def denskey(v):
+  # A hashable structural rendering of a sample value, used to look a query up
+  # in the domain. Mirrors `signature` but keeps the leaves, since here it is
+  # the value and not just the shape that selects the slot.
+  if isinstance(v, InferenceList):
+    return ('L',) + tuple(denskey(x) for x in v)
+  if isinstance(v, T):
+    return ('T', denskey(v.t1), denskey(v.t2))
+  if isinstance(v, Left):
+    return ('L?', denskey(v.val))
+  if isinstance(v, Right):
+    return ('R?', denskey(v.val))
+  if hasattr(v, '_fields'):
+    return ('A', type(v).__name__) + tuple(denskey(f) for f in v._fields)
+  if torch.is_tensor(v):
+    return denskey(v.item())
+  if isinstance(v, bool):
+    return ('b', v)
+  return ('n', float(v))
+
+def dense_positions(domain):
+  return {denskey(v): i for i, v in enumerate(domain)}
+
+def gather_dense(dense, idx):
+  # Index every leaf of a nested result structure -- (prob, (dim, imposs)) and
+  # friends -- with the same [B] index tensor, turning the [V] vector into the
+  # [B] answer. A 0-d leaf (a folded constant dim/flag) broadcasts instead.
+  if isinstance(dense, T):
+    return T(gather_dense(dense.t1, idx), gather_dense(dense.t2, idx))
+  if isinstance(dense, InferenceList):
+    return toList([gather_dense(x, idx) for x in dense])
+  if isinstance(dense, (Left, Right)):
+    return type(dense)(gather_dense(dense.val, idx))
+  if hasattr(dense, '_fields'):
+    return type(dense)(*[gather_dense(f, idx) for f in dense._fields])
+  t = astensor(dense)
+  if t.dim() == 0:
+    return t.expand(len(idx))
+  return t[idx]
+
+def dense_query(dense_fn, kernel, domain, samples, args=(), dense=None):
+  # The body of the emitted `<method>_at`. `dense=None` picks the cheaper axis
+  # (dense iff the batch is larger than the domain); True/False force it, which
+  # is what a benchmark or a differential test wants.
+  samples = list(samples)
+  args = list(args)
+  # An argument that varies per query point (a [B, n] neural symbol batch) has no
+  # meaning over a domain of a different length, so it rules the dense axis out.
+  # A shared one (a scalar topK accProb, a ThetaTree) broadcasts and is fine.
+  per_point = [a for a in args if torch.is_tensor(a) and a.dim() > 0 and a.shape[0] == len(samples)]
+  use = ((not per_point) and len(samples) > len(domain)) if dense is None else dense
+  if use and per_point:
+    raise ValueError("dense_query(dense=True): a per-point argument cannot be evaluated over the domain")
+  if not use:
+    return bucketed(kernel, samples, *args)
+  pos = dense_positions(domain)
+  keys = [denskey(s) for s in samples]
+  hit = [i for i, k in enumerate(keys) if k in pos]
+  miss = [i for i, k in enumerate(keys) if k not in pos]
+  parts, idxs = [], []
+  if hit:
+    parts.append(gather_dense(dense_fn(*args), torch.tensor([pos[keys[i]] for i in hit])))
+    idxs.append(hit)
+  if miss:
+    # A query *outside* the declared domain is still a legal query with a
+    # well-defined answer (0 off the support -- e.g. discreteFloats' p(5.0)).
+    # The dense vector cannot supply it, so those points fall back to the
+    # ordinary kernel: a domain miss degrades to correctness, never to a wrong
+    # value, which is also what makes the float-equality keying above safe.
+    parts.append(bucketed(kernel, [samples[i] for i in miss], *args))
+    idxs.append(miss)
+  return _scatter(parts, idxs, len(samples))

@@ -21,7 +21,7 @@ import StandardLibrary
 
 import Data.List (find, elemIndex, isPrefixOf, intercalate)
 import Utils
-import Data.Maybe (fromJust, isJust)
+import Data.Maybe (fromJust, isJust, listToMaybe, maybeToList)
 import Control.Applicative ((<|>))
 
 -- basic strucutre:
@@ -78,6 +78,11 @@ makeDecoderFunGroup adts conf name target tag fwdDecl =
     Nothing
     Nothing
     fwdDecl
+    -- The decoder's own query domain is its target type's (M3). Every decoder
+    -- group's prob also takes the symbol, so the batched backend's arity rule
+    -- keeps dense mode off them for now; recording it here is the truthful
+    -- answer rather than a placeholder.
+    (listToMaybe $ filter multiValueIsFinite (maybeToList tag ++ [mv | Right mv <- [autoDeriveMultiValue adts target]]))
     where plan = makePartitionPlan adts target tag
 
 -- | Forward declaration of a neural network (NN1): a human-readable description of the

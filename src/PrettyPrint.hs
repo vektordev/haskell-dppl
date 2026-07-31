@@ -19,7 +19,7 @@ pPrintProg (Program decls _ _ _) = intercalate "\n\n" (map (\f -> wrapInFunction
 pPrintIREnv :: IREnv -> String
 pPrintIREnv (IREnv funcs _ consts) = intercalate "\n\n" $
     map (\(name, val) -> name ++ " = " ++ show val) consts ++
-    concatMap (\(IRFunGroup name gen prob integ encode normal _) -> catMaybes [gen <&> wrapDecl name "_gen" , prob <&> wrapDecl name "_prob", integ <&> wrapDecl name "_integ", encode <&> wrapDecl name "_encode", normal <&> wrapDecl name "_normal"]) funcs
+    concatMap (\(IRFunGroup name gen prob integ encode normal _ _) -> catMaybes [gen <&> wrapDecl name "_gen" , prob <&> wrapDecl name "_prob", integ <&> wrapDecl name "_integ", encode <&> wrapDecl name "_encode", normal <&> wrapDecl name "_normal"]) funcs
     where wrapDecl name suffix (expr, doc) = wrapInFunctionDeclarationIR expr (name ++ suffix) doc []
 
 wrapInFunctionDeclaration :: Expr -> String -> [String] -> String

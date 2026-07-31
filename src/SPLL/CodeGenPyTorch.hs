@@ -177,7 +177,7 @@ generateADTClass (name, fields) =
   where fieldNames = map fst fields
 
 generateClass :: [(String, String)] -> [String] -> IRFunGroup -> [String]
-generateClass lut callableNames (IRFunGroup name gen prob integ encode normal doc) = let
+generateClass lut callableNames (IRFunGroup name gen prob integ encode normal doc _) = let
   funcStringFromMaybe name func = case func of
     Just a -> generateFunction True (name, replaceCallsDecl a)
     Nothing -> return []

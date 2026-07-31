@@ -42,7 +42,7 @@ module SPLL.CodeGenPyTorchBatched
   ) where
 
 import SPLL.IntermediateRepresentation
-import SPLL.Lang.Types (CompilerError, GenericValue(..), GenericList(..), MultiValue(..), ADTDecl(..))
+import SPLL.Lang.Types (CompilerError, GenericValue(..), GenericList(..), MultiValue(..), ADTDecl(..), Value)
 import SPLL.Lang.Lang (multiValueToValueList)
 import SPLL.CodeGenPyTorch (envToLUT, replaceCalls)
 import Data.Char (toUpper)
@@ -153,20 +153,106 @@ renderConst (n, v) = case batchedVal v of
 -- runtime-raising stub per class, M4; it is now a compile-time refusal like
 -- forward/integrate, see 'renderGen').
 generateClass :: [String] -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> IRFunGroup -> Either CompilerError [String]
-generateClass ctors lut genArities genMethods (IRFunGroup name gen prob integ _ _ doc) = do
+generateClass ctors lut genArities genMethods (IRFunGroup name gen prob integ _ _ doc dom) = do
   p <- maybe (Right []) (generateMethod ctors lut "forward" name) prob
   i <- maybe (Right []) (generateMethod ctors lut "integrate" name) integ
   g <- maybe (Right []) (renderGen ctors lut genArities genMethods name) gen
   let commentLines = map ("# " ++) (lines doc)
       initLine = "class " ++ onHead toUpper name ++ "(Module):"
+      -- Dense enumeration (M3): rendered domain, and the two extra methods per
+      -- inference method whose signature it fits. Purely additive -- `forward`,
+      -- `integrate` and `generate` above are byte-identical either way.
+      domLines = denseDomainLines dom
+      pDense = if null domLines then [] else denseMethods lut "forward" prob
+      iDense = if null domLines then [] else denseMethods lut "integrate" integ
+      -- Emit the domain constant only if something reads it: a finite domain on
+      -- a group whose methods all take extra per-point arguments is real, but
+      -- has no dense entry point to justify the constant.
+      domSection = if null pDense && null iDense then [] else domLines
       -- A group with none of forward/integrate/generate (e.g. a tuple
       -- 'component' group carrying only a normal function, which batched mode
       -- does not emit) would otherwise produce a syntactically empty class
       -- body. It is never called (checkCallGraph admits only forward/integrate
       -- callees), so a `pass` body keeps the instantiation valid.
-      sections = filter (not . null) [i, p, g]
+      sections = filter (not . null) [domSection, i, iDense, p, pDense, g]
       methodBody = if null sections then ["pass"] else intercalate [""] sections
   return $ commentLines ++ [initLine] ++ indentOnce methodBody
+
+-- ---------------------------------------------------------------------------
+-- Dense enumeration mode (design heterogeneous-batch-inference, Component 2 /
+-- M3). When the *query* domain is finite, evaluating the kernel once with the
+-- whole domain as the batch gives the @[V]@ probability vector, and any query is
+-- a gather into it (@pythonLibBatched.dense_query@). The @[V]@ axis is the
+-- ordinary batch axis: nothing inside the kernel changes, and the enumeration a
+-- program does *internally* ('IREnumSum') is a separate axis dense mode sits
+-- above rather than replaces.
+--
+-- Everything here is additive. A domain that cannot be rendered, or a method
+-- whose signature does not fit, yields no dense methods -- never a refusal,
+-- since that would cost the program its ordinary batched eligibility for the
+-- sake of an optional extra entry point.
+
+-- | The class-level @DOMAIN@ constant, or @[]@ when there is no renderable
+-- finite domain.
+denseDomainLines :: Maybe MultiValue -> [String]
+-- Deduplicated: a DiscreteValues tag may enumerate the same value by several
+-- routes (tupleDiscreteDistrib's tag lists each tuple 3x), and a repeated slot
+-- would cost kernel work for a column nothing distinct reads -- and inflate V,
+-- which is what dense_query's dispatch compares the batch against.
+denseDomainLines dom = case nub <$> (dom >>= (mapM domainVal . multiValueToValueList)) of
+  Just vals@(_:_) ->
+    [ "# Dense enumeration domain (design heterogeneous-batch-inference, M3): the"
+    , "# " ++ show (length vals) ++ " value(s) a query against this function can take."
+    , "DOMAIN = [" ++ intercalate ", " vals ++ "]" ]
+  _ -> []
+
+-- | Render one domain value as the per-point Python literal @bucketed@ consumes
+-- (it packs the leaves into @[B]@ tensors itself). Deliberately separate from
+-- 'batchedVal', which answers a different question -- what may appear as a
+-- constant *inside* a kernel body -- and must not silently gain cases here.
+domainVal :: Value -> Maybe String
+domainVal (VFloat f) = Just (show f)
+domainVal (VInt i)   = Just (show i)
+domainVal (VBool b)  = Just (if b then "True" else "False")
+domainVal (VTuple a b) = (\x y -> "T(" ++ x ++ ", " ++ y ++ ")") <$> domainVal a <*> domainVal b
+domainVal (VEither (Left v))  = (\x -> "Left("  ++ x ++ ")") <$> domainVal v
+domainVal (VEither (Right v)) = (\x -> "Right(" ++ x ++ ")") <$> domainVal v
+domainVal (VADT cn fs) = (\xs -> cn ++ "(" ++ intercalate ", " xs ++ ")") <$> mapM domainVal fs
+domainVal _ = Nothing
+
+-- | @\<method\>_dense@ / @\<method\>_at@ for one inference method, when its
+-- signature admits the domain as a batch: the parameters must be exactly the
+-- query value, optionally followed by topK's accumulated probability (which is
+-- shared across the batch and broadcasts). A method taking a further per-point
+-- argument -- a neural symbol -- is excluded: its dense result would be
+-- @[B, V]@, which amortises over nothing.
+denseMethods :: [(String, String)] -> String -> Maybe IRFunDecl -> [String]
+denseMethods _ _ Nothing = []
+denseMethods lut methodName (Just fd)
+  | denseArgs (methodArgs lut fd) =
+      [ "def " ++ methodName ++ "_dense(self, *args):"
+      ] ++ indentOnce
+      [ "# The whole [V] vector: the kernel above, evaluated once with the domain"
+      , "# as the batch. Deliberately not cached -- it depends on thetas/weights"
+      , "# that nothing here observes changing (see pythonLibBatched)."
+      , "return bucketed(self." ++ methodName ++ ", type(self).DOMAIN, *args)" ]
+      ++ [ "", "def " ++ methodName ++ "_at(self, samples, *args, dense=None):" ]
+      ++ indentOnce
+      [ "# Query points answered by gathering into the dense vector when that is"
+      , "# the cheaper axis (batch larger than the domain), else by the ordinary"
+      , "# kernel. dense=True/False forces the choice."
+      , "return dense_query(self." ++ methodName ++ "_dense, self." ++ methodName
+        ++ ", type(self).DOMAIN, samples, args, dense)" ]
+  | otherwise = []
+  where
+    denseArgs ["sample"] = True
+    denseArgs ["sample", "acc_prob"] = True
+    denseArgs _ = False
+
+-- | The parameter names 'generateMethod' will emit for a method, without
+-- rendering it (or committing to its fragment check succeeding).
+methodArgs :: [(String, String)] -> IRFunDecl -> [String]
+methodArgs lut (expr0, _) = fst (unwrapLambdas (prepBatchedBody (irMap (replaceCalls lut) expr0)))
 
 -- | Emit one method: rewrite cross-function call names to Python @class.method@
 -- form (the same @_prob@ → @.forward@ LUT the scalar backend uses), peel the
@@ -685,7 +771,7 @@ hasTailDescent IRTail{} = True
 hasTailDescent e        = any hasTailDescent (getIRSubExprs e)
 
 groupMethods :: IRFunGroup -> [(String, IRExpr)]
-groupMethods (IRFunGroup n gen prob integ enc normal _) =
+groupMethods (IRFunGroup n gen prob integ enc normal _ _) =
      [(n ++ "_gen",    b) | Just (b, _) <- [gen]]
   ++ [(n ++ "_prob",   b) | Just (b, _) <- [prob]]
   ++ [(n ++ "_integ",  b) | Just (b, _) <- [integ]]

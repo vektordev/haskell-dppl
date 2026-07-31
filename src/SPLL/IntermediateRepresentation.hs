@@ -261,7 +261,18 @@ type IRValue = GenericValue IRExpr
 data IREnv = IREnv [IRFunGroup] [ADTDecl] [(String, IRValue)] deriving (Show)
 
 
-data IRFunGroup = IRFunGroup {groupName::String, genFun::Maybe IRFunDecl, probFun::Maybe IRFunDecl, integFun::Maybe IRFunDecl, encodeFun::Maybe IRFunDecl, normalFun::Maybe IRFunDecl, groupDoc::String} deriving (Show)
+data IRFunGroup = IRFunGroup {groupName::String, genFun::Maybe IRFunDecl, probFun::Maybe IRFunDecl, integFun::Maybe IRFunDecl, encodeFun::Maybe IRFunDecl, normalFun::Maybe IRFunDecl, groupDoc::String,
+  -- | The finite enumeration of values a query against this group's prob/integ
+  -- function can take, when the sample domain is statically finite -- the
+  -- function's own return type, /not/ the domain of anything it enumerates
+  -- internally (that is 'IREnumSum', a separate axis). 'Nothing' whenever the
+  -- domain is continuous, unbounded (Int/Symbol), or not statically derivable.
+  --
+  -- Consumed only by the batched backend's dense-enumeration mode (design
+  -- heterogeneous-batch-inference M3), which evaluates the ordinary batched
+  -- kernel once with this domain /as the batch/ to get the whole probability
+  -- vector. Purely additive: every other backend ignores it.
+  sampleDomain::Maybe MultiValue} deriving (Show)
 
 -- Name, Documentation, Body
 type IRFunDecl = (IRExpr, String)

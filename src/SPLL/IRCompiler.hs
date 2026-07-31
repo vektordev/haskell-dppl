@@ -116,7 +116,22 @@ envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb
                     then "\nQuery-type guard active: rejects a query value not matching return type " ++ show returnRType ++ " (disable with --noTypeCheck)."
                     else ""
         appendDoc note (e, d) = (e, d ++ note)
-        baseFunGroup = IRFunGroup {groupName=name, encodeFun=encodeF,
+        -- Design heterogeneous-batch-inference M3: the finite enumeration of
+        -- query values, when this function has one. Analysis's DiscreteValues
+        -- tag is preferred, being the only source that knows a *numeric* finite
+        -- domain (`coin`'s [0,1,2], `discreteFloats`' [2.0,3.0,4.0]); the return
+        -- type is the fallback for the structurally finite types Analysis has no
+        -- reason to tag (Bool, enum ADTs, tuples/Eithers thereof). A domain that
+        -- is not wholly finite ('multiValueIsFinite') is no domain at all -- see
+        -- there for why a partial enumeration would be worse than none.
+        --
+        -- This is the domain of the function's own *result*, i.e. of a query
+        -- against it; the domains it enumerates internally are 'IREnumSum's,
+        -- a separate axis this deliberately does not touch.
+        sampleDom = listToMaybe $ filter multiValueIsFinite $
+          [mv | DiscreteValues mv <- tags (getTypeInfo (stripLambdas binding))]
+          ++ [mv | Right mv <- [autoDeriveMultiValue adts returnRType]]
+        baseFunGroup = IRFunGroup {groupName=name, encodeFun=encodeF, sampleDomain=sampleDom,
          integFun =
           if not noInteg && (pt == Deterministic || pt == Integrate || pt == PNormal || pt == PLogNormal) then
             Just (appendDoc guardNote (toIntegDecl name (IRLambda "sample" (guardQuery "cdf" (runCompile (meta typeEnv) (toIRInferenceSave (meta typeEnv) True binding (IRVar "sample")))))))
@@ -235,6 +250,8 @@ generateComponentNormalFunction meta fullName expr ti
            Nothing
            (Just (compiled, "Per-component normal extraction for tuple element: " ++ fullName))
            ""
+           -- No prob function, so no query domain to enumerate (M3).
+           Nothing
   | otherwise = Nothing
 
 -- Return type (name, rType, hasInferenceFunctions)
