@@ -1,0 +1,17 @@
+-- Two-reader twin of planEnumRecJointState.ppl: the same computation spelled
+-- as two independent predicates over one scene. `scene` occurs twice in the
+-- observation, so `psMerge` is off and this compiles via the milestone-2
+-- world-per-path enumeration. Expected values are identical to the fused
+-- twin's -- together they pin that joint-state fusion preserves semantics.
+data Color = Red | Green | Blue
+data Size = Small | Large
+data Object = Nil | Obj color::Color, size::Size
+data Scene = Empty | SCons obj::Object, rest::Scene depth 3
+
+neural readScene :: (Symbol -> Scene)
+
+existsRed s = if isEmpty s then False else (if isNil (obj s) then existsRed (rest s) else (if isRed (color (obj s)) then True else existsRed (rest s)))
+
+goL s b = if isEmpty s then b else (if isNil (obj s) then goL (rest s) b else (if isLarge (size (obj s)) then (if b then False else goL (rest s) True) else goL (rest s) b))
+
+main sym = let scene = readScene sym in if existsRed scene then 1 else (if goL scene False then 2 else 0)

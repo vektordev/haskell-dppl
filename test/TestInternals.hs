@@ -1064,6 +1064,92 @@ test_planEnumM4Polynomial = testCase "planEnumM4Polynomial" $ do
               ++ show s10 ++ " s30=" ++ show s30 ++ " ratio=" ++ show (fromIntegral s30 / fromIntegral s10 :: Double))
     (s30 < 30 * s10)
 
+-- | The same value-grouped DP acceptance, on the BOOL path ('planGroupBool').
+-- A recursive Bool predicate reaches its recursive call through one disjoint
+-- world per @Object@ constructor (here: @obj@ is @Null@, or it is @Obj@ with a
+-- non-Red colour), so before grouping the polarity world sets multiplied by
+-- the constructor count at every level -- measured at 2.0x per level for a
+-- 2-constructor Object and 3.0x for a 3-constructor one. Grouping collapses
+-- each polarity into one summed mass per level, restoring the distributive
+-- law. Same size proxy and same depth pair as 'test_planEnumM4Polynomial'.
+--
+-- Note this predicate is deliberately the Bool twin of the M4 counting fold
+-- above: same data declarations, same per-level branch structure, but the
+-- result is a Bool rather than a counted value, so it routes through
+-- 'planInvertBool'/'planSpecializeBool' instead of 'planEnumValues'.
+--
+-- The depth pair is 8/12 rather than M4's 10/30 ON PURPOSE. Measured on this
+-- program, the ungrouped Bool path costs 57 s and 36 MB of emitted code at
+-- depth 12 and exceeds a 6 GB cap at depth 16 -- so at M4's depth 30 a
+-- regression would OOM-kill the whole test process (it did, when this test
+-- was first written that way) and take every other test's result with it.
+-- At 8/12 a regression instead fails red in about a minute. The margin is
+-- still wide: measured emitted-code ratio is 1.44x grouped against 23x
+-- ungrouped, so the 6x threshold has ~4x headroom on both sides.
+test_planEnumBoolCtorPolynomial :: TestTree
+test_planEnumBoolCtorPolynomial = testCase "planEnumBoolCtorPolynomial" $ do
+  let prog d = unlines
+        [ "data Color = Red | Green | Blue"
+        , "data Object = Null | Obj color::Color"
+        , "data Scene = Empty | SCons obj::Object, rest::Scene depth " ++ show d
+        , "neural readScene :: (Symbol -> Scene)"
+        , "existsRed s = if isEmpty s then False else (if isObj (obj s) then (if isRed (color (obj s)) then True else existsRed (rest s)) else existsRed (rest s))"
+        , "main sym = let scene = readScene sym in if existsRed scene then 1 else 0"
+        ]
+  let sizeAt d = case tryParseProgram "boolctor" (prog d) of
+        Left e  -> assertFailure ("parse error at depth " ++ show d ++ ": " ++ show e)
+        Right p -> case compile defaultCompilerConfig p of
+          Left e   -> assertFailure ("compile error at depth " ++ show d ++ ": " ++ show e)
+          Right ir -> return (length (show ir))
+  s8  <- sizeAt 8
+  s12 <- sizeAt 12
+  assertBool ("depth-12 recursive Bool-predicate IR is not polynomially bounded (ungrouped c^depth measures ~23x here, grouped ~1.4x): s8="
+              ++ show s8 ++ " s12=" ++ show s12 ++ " ratio=" ++ show (fromIntegral s12 / fromIntegral s8 :: Double))
+    (s12 < 6 * s8)
+
+-- | Fused joint-state DP acceptance. Two predicates over one scene are
+-- exponential (two readers turn 'psMerge' off); folding them into ONE
+-- traversal that threads a joint automaton state through deterministic
+-- arguments restores the single reader, and the grouping DP then collapses
+-- each level to one world per reachable state.
+--
+-- This is the shape 'foldConstIn' was extended for: the @==@ InjF emits its
+-- operands as let-bindings (@let a = 0 in let b = 1 in a == b@), so with a
+-- constant-only fold the state test was undecidable, every (value, world) pair
+-- was unmergeable, and this program OOM-ed by depth 8. Measured before/after
+-- at depth 6: 10.6 MB -> 226 KB.
+test_planEnumFusedJointStatePolynomial :: TestTree
+test_planEnumFusedJointStatePolynomial = testCase "planEnumFusedJointStatePolynomial" $ do
+  let prog d = unlines
+        [ "data Color = Red | Green | Blue"
+        , "data Size = Small | Large"
+        , "data Object = Nil | Obj color::Color, size::Size"
+        , "data Scene = Empty | SCons obj::Object, rest::Scene depth " ++ show d
+        , "neural readScene :: (Symbol -> Scene)"
+        , "go s red lg = if isEmpty s"
+        , "  then (if red then 1 else (if lg == 1 then 2 else 0))"
+        , "  else (if isNil (obj s)"
+        , "    then go (rest s) red lg"
+        , "    else (if isRed (color (obj s))"
+        , "      then (if isLarge (size (obj s))"
+        , "              then (if lg == 0 then go (rest s) True 1 else go (rest s) True 2)"
+        , "              else go (rest s) True lg)"
+        , "      else (if isLarge (size (obj s))"
+        , "              then (if lg == 0 then go (rest s) red 1 else go (rest s) red 2)"
+        , "              else go (rest s) red lg)))"
+        , "main sym = let scene = readScene sym in go scene False 0"
+        ]
+  let sizeAt d = case tryParseProgram "joint" (prog d) of
+        Left e  -> assertFailure ("parse error at depth " ++ show d ++ ": " ++ show e)
+        Right p -> case compile defaultCompilerConfig p of
+          Left e   -> assertFailure ("compile error at depth " ++ show d ++ ": " ++ show e)
+          Right ir -> return (length (show ir))
+  s4 <- sizeAt 4
+  s8 <- sizeAt 8
+  assertBool ("depth-8 fused joint-state IR is not polynomially bounded (unmergeable pairs OOM-ed here before foldConstIn): s4="
+              ++ show s4 ++ " s8=" ++ show s8 ++ " ratio=" ++ show (fromIntegral s8 / fromIntegral s4 :: Double))
+    (s8 < 6 * s4)
+
 -- | Milestone-3 refusal rule, kept precise: a world that couples a continuous
 -- plan leaf pairwise and also bounds it, or couples it twice, is a correlated
 -- orthant probability -- quadrature the language excludes by design. The plan
@@ -1388,6 +1474,8 @@ internalsTests = testGroup "Internals"
   , enumContinuousRefusalTests
   , test_planEnumThreadedTopKAndBC
   , test_planEnumM4Polynomial
+  , test_planEnumBoolCtorPolynomial
+  , test_planEnumFusedJointStatePolynomial
   , planOverCouplingRefusalTests
   , test_tstBackendsHeader
   , optimizerPurityTests

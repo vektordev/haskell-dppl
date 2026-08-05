@@ -1,0 +1,23 @@
+-- Regression pin for the milestone-4 value grouping applied to the Bool path
+-- ('planGroupBool'). `Object` has TWO constructors, so the per-level test
+-- reaches the recursive call through two disjoint worlds (obj is Nil, or obj
+-- is Obj with a non-Red colour). Without Bool-path grouping the world set
+-- doubles per level (c^depth for a c-constructor Object); with it the
+-- polarity worlds collapse to one summed mass per level and the cost is
+-- linear in depth. planEnumRecNilCtorMaterialized.ppl is the same program
+-- with `of _`, compiling via IREnumSum over the full scene support -- the two
+-- files form the differential oracle for the grouped Bool path.
+data Color = Red | Green | Blue
+data Size = Small | Large
+data Object = Nil | Obj color::Color, size::Size
+data Scene = Empty | SCons obj::Object, rest::Scene depth 3
+
+neural readScene :: (Symbol -> Scene)
+
+existsRed s = if isEmpty s
+    then False
+    else (if isNil (obj s)
+            then existsRed (rest s)
+            else (if isRed (color (obj s)) then True else existsRed (rest s)))
+
+main sym = let scene = readScene sym in if existsRed scene then 0 else 1

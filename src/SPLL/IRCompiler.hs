@@ -2908,24 +2908,76 @@ planInvertBool meta env e = do
   f <- planInvert meta env e (PTPoint (IRConst (VBool False)))
   return ((,) <$> t <*> f)
 
--- | Fold an IR value expression built from numeric literals and plus/mult
--- into a constant Value, when possible. Counting-fold values are always
--- statically foldable (literal increments combined by plus); anything else is
--- left ungrouped by the value DP ('planGroupValues').
+-- | The milestone-4 value-grouped DP ('planGroupValues') applied to the Bool
+-- path. A predicate's (True-worlds, False-worlds) pair is already a partition
+-- by value -- the same precondition the counting-fold DP relies on -- so each
+-- polarity's worlds may be collapsed into one world carrying their summed
+-- mass. Without this a per-level DISJUNCTION multiplies the shared recursive
+-- continuation instead of summing beside it: a predicate whose per-level test
+-- reaches its recursive call through @c@ disjoint worlds (an @Object@ ADT with
+-- @c@ constructors, or a @&&@ over two plan leaves) enumerates @c^depth@
+-- worlds. Grouping restores the distributive law -- @P(f k) = [sum of the
+-- level's local worlds] * P(f (k+1))@ -- making it polynomial.
+--
+-- Soundness is exactly 'planGroupValues'' (partition, 'commonDiscreteCons'
+-- kept live, gated on 'psMerge'); this only supplies Bool-valued pairs to it.
+planGroupBool :: ([PlanWorld], [PlanWorld]) -> PlanM ([PlanWorld], [PlanWorld])
+planGroupBool (ts, fs) = do
+  grouped <- planGroupValues ([(constTrueIR, w) | w <- ts] ++ [(constFalseIR, w) | w <- fs])
+  return ( [w | (v, w) <- grouped, v == constTrueIR]
+         , [w | (v, w) <- grouped, v /= constTrueIR] )
+
+-- | Fold an IR value expression into a constant Value, when possible.
+-- Counting-fold values are always statically foldable (literal increments
+-- combined by plus); anything else is left ungrouped by the value DP
+-- ('planGroupValues').
+--
+-- This carries a substitution environment because of how deterministic
+-- sub-expressions are GENERATED, not because the language needs one. A fold
+-- that threads an automaton STATE through deterministic arguments decides its
+-- result with an if-chain over those arguments (@if red then 1 else if met ==
+-- 1 then 2 else 0@), and the @==@ InjF emits its operands as let-bindings
+-- rather than inline: @let a = 0 in let b = 1 in a == b@. Folding only
+-- 'IRConst'/'OpPlus'/'OpMult' therefore returned Nothing for the whole value,
+-- 'planGroupValues' classified the pair unmergeable, and the DP never fired at
+-- any recursion level -- measured as a CONSTANT number of merges (12) from
+-- depth 4 to depth 6 while the pair count grew 22 -> 342, of which 341 were
+-- kept ungrouped. Specialization memoization was never the problem there
+-- (measured 19 distinct keys at depth 4, 31 at depth 6 -- linear, ~6 per level,
+-- exactly the joint states); the pair list was.
 foldValueConst :: IRExpr -> Maybe IRValue
-foldValueConst (IRConst v) = Just v
-foldValueConst (IROp op a b) = do
-  va <- foldValueConst a
-  vb <- foldValueConst b
+foldValueConst = foldConstIn []
+
+-- | 'foldValueConst' under an environment of let-bound constants.
+foldConstIn :: [(String, IRValue)] -> IRExpr -> Maybe IRValue
+foldConstIn _   (IRConst v) = Just v
+foldConstIn env (IRVar n)   = lookup n env
+foldConstIn env (IRLetIn n v b) = do
+  vv <- foldConstIn env v
+  foldConstIn ((n, vv) : env) b
+foldConstIn env (IRIf c t e) = do
+  b <- staticBoolIn env c
+  foldConstIn env (if b then t else e)
+foldConstIn env (IROp op a b) = do
+  va <- foldConstIn env a
+  vb <- foldConstIn env b
   case op of
     OpPlus -> num (+) va vb
     OpMult -> num (*) va vb
+    OpEq   -> Just (VBool (va == vb))
     _      -> Nothing
   where
     num f (VFloat x) (VFloat y) = Just (VFloat (f x y))
     num f (VInt  x)  (VInt  y)  = Just (VInt (round (f (fromIntegral x :: Double) (fromIntegral y))))
     num _ _ _                   = Nothing
-foldValueConst _ = Nothing
+foldConstIn _ _ = Nothing
+
+-- | 'staticBool' under the same environment, so a condition spelled as a
+-- let-bound comparison decides just as an inline one does.
+staticBoolIn :: [(String, IRValue)] -> IRExpr -> Maybe Bool
+staticBoolIn env e = case foldConstIn env e of
+  Just (VBool b) -> Just b
+  _              -> staticBool e
 
 -- | Milestone-4 value-grouped DP: collapse (value, world) pairs that share a
 -- statically-known value into one world carrying the summed mass, bound to a
@@ -3170,7 +3222,12 @@ planSpecializeBool spec = do
       r <- planInvertBool (spMeta spec) (spEnv spec) (spBody spec)
       case r of
         Left why -> return (Left why)
-        Right tf -> do
+        Right tf0 -> do
+          -- Collapse each polarity's worlds (milestone-4 DP on the Bool path):
+          -- this is what keeps a per-level disjunction -- an extra Object
+          -- constructor, a two-leaf test -- from multiplying the recursive
+          -- continuation. See 'planGroupBool'.
+          tf <- planGroupBool tf0
           modify (\s -> s { psBoolMemo = Map.insert (spKey spec) tf (psBoolMemo s) })
           return (Right tf)
 

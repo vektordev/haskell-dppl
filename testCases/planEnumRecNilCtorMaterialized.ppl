@@ -1,0 +1,21 @@
+-- Materializing twin of planEnumRecNilCtor.ppl: the `of _` clause produces
+-- DiscreteValues tags, so this compiles via enumerateAppliedLambda (IREnumSum
+-- over the full depth-3 scene support) instead of the plan-backed lazy path.
+-- Expected values are identical to planEnumRecNilCtor.tst, and both match an
+-- independently computed DP over the factorized per-level distribution --
+-- together the two files are the differential oracle for the grouped Bool
+-- path ('planGroupBool'), on an Object with two constructors.
+data Color = Red | Green | Blue
+data Size = Small | Large
+data Object = Nil | Obj color::Color, size::Size
+data Scene = Empty | SCons obj::Object, rest::Scene depth 3
+
+neural readScene :: (Symbol -> Scene) of _
+
+existsRed s = if isEmpty s
+    then False
+    else (if isNil (obj s)
+            then existsRed (rest s)
+            else (if isRed (color (obj s)) then True else existsRed (rest s)))
+
+main sym = let scene = readScene sym in if existsRed scene then 0 else 1

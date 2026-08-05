@@ -1,0 +1,37 @@
+-- Fused joint-state DP (task: multi-predicate plan enumeration). Both CLEVR
+-- predicates -- "does a Red object exist" and "is there exactly one Large
+-- object" -- are folded into ONE traversal threading a joint automaton state
+-- (red :: Bool, lg :: 0|1|2) through deterministic arguments. That makes the
+-- scene a SINGLE reader, so `psMerge` permits the milestone-4 value grouping,
+-- and each recursion level collapses to one world per reachable state.
+--
+-- planEnumRecJointStateSeparate.ppl is the same computation spelled as two
+-- independent predicates over the same scene (two readers, `psMerge` off, the
+-- world-per-path M2 path). The two files pin that fusing is exactly
+-- semantics-preserving; the expected values are an independent brute-force
+-- enumeration of all depth-3 scenes (see docs/plan-enum-scaling/).
+--
+-- This shape only became viable once `foldConstIn` learned to fold through
+-- let-bound constants: the `==` InjF emits `let a = 0 in let b = 1 in a == b`,
+-- which the old constant-only fold could not decide, so every (value, world)
+-- pair was classified unmergeable and the DP never fired.
+data Color = Red | Green | Blue
+data Size = Small | Large
+data Object = Nil | Obj color::Color, size::Size
+data Scene = Empty | SCons obj::Object, rest::Scene depth 3
+
+neural readScene :: (Symbol -> Scene)
+
+go s red lg = if isEmpty s
+  then (if red then 1 else (if lg == 1 then 2 else 0))
+  else (if isNil (obj s)
+    then go (rest s) red lg
+    else (if isRed (color (obj s))
+      then (if isLarge (size (obj s))
+              then (if lg == 0 then go (rest s) True 1 else go (rest s) True 2)
+              else go (rest s) True lg)
+      else (if isLarge (size (obj s))
+              then (if lg == 0 then go (rest s) red 1 else go (rest s) red 2)
+              else go (rest s) red lg)))
+
+main sym = let scene = readScene sym in go scene False 0
