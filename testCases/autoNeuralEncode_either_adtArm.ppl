@@ -1,0 +1,8 @@
+-- The Either-arm half of the same gap (this is the case `makeEncodeEitherArm`
+-- was named for): a composite arm -- here an enum ADT on the left -- used to
+-- encode as zeros while occupying its slots.  Decoder passthrough, so
+-- LogitIdentity pins every slot.
+-- Layout: [P(Left), P(Red|Left), P(Green|Left), P(True|Right), P(False|Right)].
+data Color = Red | Green
+neural readEither :: (Symbol -> Either Color Bool) of _
+main sym = readEither sym
