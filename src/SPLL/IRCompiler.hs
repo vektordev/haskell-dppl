@@ -26,7 +26,7 @@ import SPLL.AutoNeural
 import SPLL.Typing.ForwardChaining
 import SPLL.Typing.AlgebraicDataTypes
 import Utils
-import Control.Monad (foldM, forM, when)
+import Control.Monad (foldM, forM, when, zipWithM)
 import Control.Monad.State.Strict (StateT, evalStateT, get, gets, put, modify)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -3045,6 +3045,62 @@ lookupADTAccessor adts name = listToMaybe
   | adt <- adts, (cName, fields) <- constructors adt
   , Just fj <- [elemIndex name (map fst fields)] ]
 
+-- | The fields (accessor name and type) of a declared ADT constructor, in field
+-- order -- i.e. "is @name@ a constructor, and what does applying it take?".
+-- Nullary constructors yield @Just []@.
+lookupADTConstructor :: [ADTDecl] -> String -> Maybe [(String, RType)]
+lookupADTConstructor adts name = listToMaybe
+  [ fields | adt <- adts, (cName, fields) <- constructors adt, cName == name ]
+
+-- | Runtime test that @y@ carries constructor @nm@.
+planIsCtor :: String -> IRExpr -> IRExpr
+planIsCtor nm y = IRApply (IRVar ("is" ++ nm)) y
+
+-- | Read field @f@ (of type @fty@) off an observation that only carries
+-- constructor @nm@ on the branch the enclosing world guards.
+--
+-- The world guard cannot protect this read on its own: leaf constraints float
+-- their deterministic sides out into let-bindings ('bindDetSide'), and
+-- 'generateLetInBlock' emits those *outside* the guarded mass expression, where
+-- they are evaluated unconditionally. An unguarded @tl y@ would then run against
+-- an @Empty@ and crash the whole query rather than contributing zero. So the read
+-- carries its own constructor test.
+--
+-- The else-branch is a canonical value of the field's type, NOT 'VAny': these
+-- reads nest (@hd (tl y)@), so the fallback is itself fed to the next level's
+-- @is<Ctor>@, and the convention everywhere else in the compiler is that
+-- @is<Ctor>@ is only ever reached after an 'isAny' test (see the decoder's own
+-- reader) -- 'isImpl' errors on a wildcard rather than answering it. A
+-- well-formed dummy answers False cleanly and the chain stays total. Which
+-- dummy is irrelevant: the enclosing guard discards the whole world.
+planSafeField :: [ADTDecl] -> String -> String -> RType -> IRExpr -> Either String IRExpr
+planSafeField adts nm f fty y = do
+  dummy <- maybe (Left ("no canonical value for field type " ++ show fty ++ " of constructor " ++ nm)) Right
+                 (planCanonicalValue adts [] fty)
+  return (IRIf (planIsCtor nm y) (IRApply (IRVar f) y) (IRConst dummy))
+
+-- | Some well-formed value of an RType, used only as a discarded placeholder
+-- (see 'planSafeField'). For an ADT it prefers a nullary constructor, which is
+-- what makes this terminate on recursive types; @seen@ breaks any remaining
+-- cycle by refusing rather than looping.
+planCanonicalValue :: [ADTDecl] -> [String] -> RType -> Maybe IRValue
+planCanonicalValue adts seen ty = case ty of
+  TFloat      -> Just (VFloat 0)
+  TInt        -> Just (VInt 0)
+  TBool       -> Just (VBool False)
+  TUnit       -> Just VUnit
+  TSymbol     -> Just (VSymbol "")
+  ListOf _    -> Just (VList EmptyList)
+  Tuple a b   -> VTuple <$> rec a <*> rec b
+  TEither l _ -> (VEither . Left) <$> rec l
+  TADT n | n `notElem` seen -> do
+    decl <- find ((== n) . dataName) adts
+    let ctors = constructors decl
+    (cn, fields) <- listToMaybe ([c | c@(_, []) <- ctors] ++ ctors)
+    VADT cn <$> mapM (planCanonicalValue adts (n : seen) . snd) fields
+  _ -> Nothing
+  where rec = planCanonicalValue adts seen
+
 -- | Generate-mode IR for a subtree that is deterministic given scope.
 -- Inside a specialized callee body, occurrences of det-bound parameters
 -- compile to @IRVar <param>@, which is unbound in the generated program --
@@ -3093,31 +3149,55 @@ planEvalRef meta env = go
     go _ = Nothing
     descend e k = fmap (>>= uncurry k) (go e)
 
--- | Worlds constraining a plan slice to lie in the target. Only shapes whose
--- inversion is supported in milestone 1: Discretes leaves (point and upto),
--- component-wise tuple decomposition against a point, and nullary-constructor
--- ADT regions against a point (guarded per constructor by is<Ctor> on the
--- observed value).
-planRefWorlds :: PlanRef -> [PLeafCon] -> PTarget -> Either String [PlanWorld]
-planRefWorlds (PlanRef (Discretes rty (MultiDiscretes vals)) off) cons tgt =
+-- | Worlds constraining a plan slice to lie in the target: Discretes leaves
+-- (point and upto), component-wise tuple decomposition against a point, ADT
+-- regions against a point, and Continuous leaves.
+--
+-- A nullary-constructor ADT region stays a single world, its flag slots each
+-- guarded by is<Ctor> on the observed value. With *fields* that no longer
+-- suffices -- each constructor carries different field constraints -- so the
+-- region splits into one world per constructor, which is a partition (the
+-- observation has exactly one constructor, and the guards are mutually
+-- exclusive) and so sums correctly. Note the cost: c constructors per level of
+-- a recursive ADT is c^depth worlds, the scaling rule recorded for plan leaves
+-- in general. Marginalising the untaken constructors' field regions into one
+-- world instead would remove the exponent; it is not attempted here.
+planRefWorlds :: [ADTDecl] -> PlanRef -> [PLeafCon] -> PTarget -> Either String [PlanWorld]
+planRefWorlds _ (PlanRef (Discretes rty (MultiDiscretes vals)) off) cons tgt =
   Right [pw1 (insertLeafCon
           (PLeafCon off [ (i, planDetGuard rty (IRConst (valueToIR v)) tgt) | (i, v) <- zip [0..] vals ])
           cons)]
-planRefWorlds (PlanRef (TuplePlan a b) off) cons (PTPoint s) = do
-  wa <- planRefWorlds (PlanRef a off) cons (PTPoint (IRTFst s))
-  wb <- planRefWorlds (PlanRef b (off + getSize a)) [] (PTPoint (IRTSnd s))
+planRefWorlds adts (PlanRef (TuplePlan a b) off) cons (PTPoint s) = do
+  wa <- planRefWorlds adts (PlanRef a off) cons (PTPoint (IRTFst s))
+  wb <- planRefWorlds adts (PlanRef b (off + getSize a)) [] (PTPoint (IRTSnd s))
   return [ intersectPlanW x y | x <- wa, y <- wb ]
-planRefWorlds (PlanRef (ADTPlan _ ctorPlans) off) cons (PTPoint s)
+planRefWorlds _ (PlanRef (ADTPlan _ ctorPlans) off) cons (PTPoint s)
   | all (null . snd) ctorPlans =
       Right [pw1 (insertLeafCon
-              (PLeafCon off [ (i, IRApply (IRVar ("is" ++ cn)) s) | (i, (cn, _)) <- zip [0..] ctorPlans ])
+              (PLeafCon off [ (i, planIsCtor cn s) | (i, (cn, _)) <- zip [0..] ctorPlans ])
               cons)]
-planRefWorlds (PlanRef Continuous off) cons (PTPoint s) =
+planRefWorlds adts (PlanRef (ADTPlan adtName ctorPlans) off) cons (PTPoint s) =
+  concat <$> mapM ctorWorlds (zip3 [0 ..] ctorPlans (adtCtorBases off ctorPlans))
+  where
+    ctorWorlds (ci, (cn, fps), cbase) = do
+      fields <- maybe (Left (missing cn)) Right (lookupADTConstructor adts cn)
+      -- The flag slot carries the guard, so a world for the wrong constructor
+      -- measures zero; the field reads below are individually safe anyway
+      -- ('planSafeField'), since floated bindings escape the guard.
+      let flagWorld = pw1 (insertLeafCon (PLeafCon off [(ci, planIsCtor cn s)]) cons)
+      fieldWorlds <- mapM (fieldW cn cbase fps) (zip3 [0 ..] fps fields)
+      return (foldl (\acc ws -> [ intersectPlanW x y | x <- acc, y <- ws ]) [flagWorld] fieldWorlds)
+    fieldW cn cbase fps (j, fp, (fname, fty)) = do
+      sub <- planSafeField adts cn fname fty s
+      planRefWorlds adts (PlanRef fp (cbase + sum (map getSize (take j fps)))) [] (PTPoint sub)
+    missing cn = "constructor " ++ cn ++ " of ADT " ++ adtName ++ " is in the partition plan "
+                 ++ "but not among the declared constructors"
+planRefWorlds _ (PlanRef Continuous off) cons (PTPoint s) =
   Right [pw1 (insertLeafCon (PLeafPt off s const1 []) cons)]
-planRefWorlds (PlanRef Continuous off) cons (PTUpTo s) =
+planRefWorlds _ (PlanRef Continuous off) cons (PTUpTo s) =
   Right [pw1 (insertLeafCon (PLeafIvl off WNegInf (WFinite s)) cons)]
-planRefWorlds (PlanRef sub _) _ _ =
-  Left ("this plan slice cannot be matched against the observation directly (unsupported in milestone 1): " ++ head (words (show sub)))
+planRefWorlds _ (PlanRef sub _) _ _ =
+  Left ("this plan slice cannot be matched against the observation directly: " ++ head (words (show sub)))
 
 -- | Peel invertible monotone float transforms off a plan-dependent operand
 -- down to a Continuous plan slice (milestone 3). Supports the same static
@@ -3190,7 +3270,7 @@ planInvert meta env body target
         else return (Left ("a subtree independent of the plan-bound variables draws fresh randomness: " ++ planNodeName body))
 planInvert meta env body target
   | Just refE <- planEvalRef meta env body =
-      return (refE >>= \(ref, cons) -> planRefWorlds ref cons target)
+      return (refE >>= \(ref, cons) -> planRefWorlds (adtDecls meta) ref cons target)
 planInvert meta env body target = case body of
   Expr _ (IfThenElse c t e)
     | not (subtreeHasOcc occs c) && pType (getTypeInfo c) == Deterministic -> do
@@ -3256,6 +3336,26 @@ planInvert meta env body target = case body of
   Expr _ (InjF (Named "lt") [a, b]) -> planCmp False a b
   Expr _ (InjF (Named "gt") [a, b]) -> planCmp True  a b
   Expr _ (Apply {}) -> planApplyTarget meta env body target
+  -- Structural inversion of a *constructed* ADT value. The observation must
+  -- carry this constructor, and each field's observation is pushed onto the
+  -- corresponding argument, the field worlds intersecting. This is what keeps a
+  -- structure-returning body linear in the term: the alternative -- enumerating
+  -- the constructed type -- is its whole (depth-unrolled) support.
+  -- A wholly deterministic construction never reaches here; it is compared as a
+  -- value by the plan-free case at the top of 'planInvert'.
+  Expr _ (InjF (Named nm) args)
+    | Just fields <- lookupADTConstructor (adtDecls meta) nm
+    , length fields == length args -> case target of
+        -- A cumulative target orders values; a constructed ADT has no such order
+        -- to push through its fields.
+        PTUpTo _ -> return (Left ("cumulative target on the constructed ADT value " ++ nm))
+        PTPoint y -> case mapM (\(f, fty) -> planSafeField (adtDecls meta) nm f fty y) fields of
+          Left why -> return (Left why)
+          Right subTargets -> do
+            fieldsE <- zipWithM (\a s -> planInvert meta env a (PTPoint s)) args subTargets
+            return $ do
+              wss <- sequence fieldsE
+              return (map (planAddGuard (planIsCtor nm y)) (foldl liveIntersects [pw1 []] wss))
   _ -> return (Left ("unsupported node in plan traversal: " ++ planNodeName body))
   where
     occs = planEnvOccs env
@@ -3685,6 +3785,27 @@ planSpecializeEnum spec = do
           modify (\s -> s { psEnumMemo = Map.insert (spKey spec) pairs (psEnumMemo s) })
           return (Right pairs)
 
+-- | Specialize a structure-returning callee directly against the observation:
+-- invert its body with the target pushed in, rather than enumerating its result
+-- values. Deliberately NOT memoized -- unlike the Bool and enum specializations,
+-- the result depends on the target, and a structural recursion descends into a
+-- fresh accessor chain (@tl (tl y)@) at every level, so a memo keyed on it could
+-- never hit. Termination therefore rests entirely on 'planEnterSpec''s
+-- strict-plan-descent guard, exactly as it does for the memoized paths.
+planSpecializeTarget :: PlanSpec -> PTarget -> PlanM (Either String [PlanWorld])
+planSpecializeTarget spec target = planEnterSpec spec $ do
+  r <- planInvert (spMeta spec) (spEnv spec) (spBody spec) target
+  case r of
+    Left why -> return (Left why)
+    -- The worlds are the disjoint ways this call's observation can be met, i.e.
+    -- a partition all carrying the same outcome ("matched"). That is exactly
+    -- 'planGroupValues'' precondition, with a constant standing in for the
+    -- value, so the milestone-4 DP applies unchanged: the level's shared
+    -- constructor flags stay live via commonDiscreteCons and only the deeper
+    -- levels' residual mass is baked. Without this a c-constructor ADT costs
+    -- c^depth worlds -- the same collapse 'planGroupBool' does for predicates.
+    Right ws -> Right . map snd <$> planGroupValues [ (constTrueIR, w) | w <- ws ]
+
 -- | Observation target applied to a user-function application (milestone 2):
 -- specialize the callee at its arguments and match its outcome against the
 -- target. Bool results go through the canonical two-polarity specialization
@@ -3701,7 +3822,24 @@ planApplyTarget meta env body target = do
         return ((\(tw, fw) -> map (addSpecCons spec) (planBoolWorlds target tw fw)) <$> r)
       rt -> do
         r <- planSpecializeEnum spec
-        return ((\pairs -> [ addSpecCons spec (planAddGuard (planDetGuard rt v target) w) | (v, w) <- pairs ]) <$> r)
+        case r of
+          Right pairs ->
+            return (Right [ addSpecCons spec (planAddGuard (planDetGuard rt v target) w) | (v, w) <- pairs ])
+          -- Value enumeration declines a callee that *builds* a value rather than
+          -- choosing among a few (a structure-returning recursion is the case in
+          -- point: its result set is the whole depth-unrolled support). Such a
+          -- body can still be inverted structurally, pushing the observation onto
+          -- the constructor's fields. Tried second, so no program that enumerates
+          -- today changes path. When both decline, both reasons are reported: for
+          -- a structure-returning body the enum diagnostic alone names the
+          -- constructor it could not enumerate, which reads like the whole story
+          -- but is only the path that was never going to work.
+          Left whyEnum
+            | TADT _ <- rt -> do
+                s <- planSpecializeTarget spec target
+                return (either (\whyStruct -> Left (whyEnum ++ "; and structurally: " ++ whyStruct))
+                               (Right . map (addSpecCons spec)) s)
+            | otherwise -> return (Left whyEnum)
 
 -- | Measure the worlds against the raw logit vector bound at @nnRaw@:
 -- p = sum over worlds of (guards -> product of constrained leaf masses),

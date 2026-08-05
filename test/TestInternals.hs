@@ -36,6 +36,7 @@ import TestCaseParser (Backend(..), TestCase(..), defaultBackends, parseTestCase
 import Test.Tasty.QuickCheck (testProperties)
 import System.Random (StdGen)
 import Control.Monad.Random (Rand)
+import Control.Monad (forM_)
 
 
 prop_tMapId :: Expr -> Property
@@ -1024,6 +1025,183 @@ planEnumTopKAndBCTest testName baseName = testCase testName $ do
           assertBool "topK+bc branch count should be strictly positive" (bcBoth >= 1))
         probCases
 
+-- | Structural inversion of a *constructed* ADT observation (a body that builds
+-- a value rather than choosing among a few), pinned against the materializing
+-- enumeration path on the same program -- the `*Materialized` differential twin
+-- idiom, written here rather than as a corpus pair because the query values are
+-- ADT values, which `.tst` (via `pValue`) cannot spell.
+--
+-- `filterGreen` is the shape that motivated this: it returns a Scene it builds
+-- from the observed one, so value enumeration declines it (its result set is the
+-- whole depth-unrolled support) and the observation has to be pushed onto the
+-- constructor's fields instead.
+planEnumStructuralADTTests :: TestTree
+planEnumStructuralADTTests = testGroup "planEnumStructuralADT"
+  [ testCase "lazy structural inversion matches materialized enumeration" $ do
+      lazyProg <- parseOrFailSrc (progSrc "")
+      matProg  <- parseOrFailSrc (progSrc " of _")
+      let cfg = defaultCompilerConfig
+      let cLazy = either (error . show) id (compile cfg lazyProg)
+      let cMat  = either (error . show) id (compile cfg matProg)
+      forM_ queries $ \(label, q) -> do
+        let VProbDim pLazy dLazy = either (error . show) id (runProbC lazyProg cLazy [sym] q)
+        let VProbDim pMat  dMat  = either (error . show) id (runProbC matProg  cMat  [sym] q)
+        assertBool (label ++ ": lazy " ++ show pLazy ++ " vs materialized " ++ show pMat)
+          (abs (pLazy - pMat) < 1e-9)
+        assertEqual (label ++ ": dim") dMat dLazy
+  , testCase "every filtered-scene observation together carries all the mass" $ do
+      -- The queries below are every Scene the filter can *output* at depth 2, so
+      -- their probabilities must sum to 1. This is the check the differential
+      -- cannot make on its own: two paths agreeing on a wrong normalisation
+      -- would still agree.
+      prog <- parseOrFailSrc (progSrc "")
+      let c = either (error . show) id (compile defaultCompilerConfig prog)
+      let ps = [ p | (_, q) <- queries, let VProbDim p _ = either (error . show) id (runProbC prog c [sym] q) ]
+      assertBool ("outputs sum to " ++ show (sum ps) ++ ", expected 1") (abs (sum ps - 1) < 1e-9)
+  ]
+  where
+    -- The `of` clause is the only difference: with it the program routes to
+    -- materializing enumeration over the whole Scene support, without it to
+    -- plan-guided lazy structural inversion.
+    progSrc ofClause = unlines
+      [ "data Color = Red | Green"
+      , "data Object = Nil | Obj color::Color"
+      , "data Scene = List hd::Object, tl::Scene | Empty depth 2"
+      , "neural readScene :: (Symbol -> Scene)" ++ ofClause
+      , "main symbol = let scene = readScene symbol in filterGreen scene"
+      -- Recurses to the end of the spine, replacing every non-green object with
+      -- Nil. Deliberately total (the `isEmpty old` case comes first): the
+      -- materializing oracle evaluates the filter at *every* scene in the
+      -- support, so a filter that reads `tl old` before testing emptiness --
+      -- as the program this feature came from does -- crashes there rather than
+      -- yielding a comparison. See planEnumStructuralPartialTests for that case.
+      , "filterGreen old = if isEmpty old"
+      , "    then Empty"
+      , "    else if isNil (hd old)"
+      , "        then List Nil (filterGreen (tl old))"
+      , "        else if isGreen (color (hd old))"
+      , "            then List (hd old) (filterGreen (tl old))"
+      , "            else List Nil (filterGreen (tl old))"
+      ]
+    -- Verbatim mock logits (mode 2), so both paths read one fixed distribution.
+    sym = VTuple (VInt 2) (constructVList (map VFloat logits))
+    -- 13 slots, exactly the plan the compiler prints as the decoder's required
+    -- output layout; every softmax group sums to 1.
+    logits = [ 0.6, 0.4          -- 0..1   Scene ctor flags: List|Empty
+             , 0.3, 0.7          -- 2..3   List/f0 Object ctor flags: Nil|Obj
+             , 0.25, 0.75        -- 4..5   List/f0/Obj/f0 Color: Red|Green
+             , 0.55, 0.45        -- 6..7   List/f1 Scene ctor flags: List|Empty
+             , 0.2, 0.8          -- 8..9   List/f1/List/f0 Object: Nil|Obj
+             , 0.35, 0.65        -- 10..11 List/f1/List/f0/Obj/f0 Color: Red|Green
+             , 1.0 ]             -- 12     List/f1/List/f1 Scene: Empty (depth-pruned)
+    nil    = VADT "Nil" []
+    obj c  = VADT "Obj" [VADT c []]
+    empty  = VADT "Empty" []
+    scene1 h = VADT "List" [h, empty]
+    scene2 h t = VADT "List" [h, VADT "List" [t, empty]]
+    queries =
+      [ ("Empty",              empty)
+      , ("[Nil]",              scene1 nil)
+      , ("[Obj Green]",        scene1 (obj "Green"))
+      , ("[Nil, Nil]",         scene2 nil nil)
+      , ("[Nil, Obj Green]",   scene2 nil (obj "Green"))
+      , ("[Obj Green, Nil]",   scene2 (obj "Green") nil)
+      , ("[Obj Green, Obj Green]", scene2 (obj "Green") (obj "Green"))
+      ]
+
+-- | The shape this feature came from: a filter that reads @tl old@ before
+-- testing emptiness, so it is undefined on an empty scene. It has no
+-- materialized twin to check against (materialization evaluates the filter at
+-- every scene in the support, including the empty one, and dies there), so what
+-- is pinned instead is that the mass it does assign is exactly the probability
+-- of the inputs on which it *is* defined -- i.e. the partiality costs the empty
+-- input's mass and nothing else.
+planEnumStructuralPartialTests :: TestTree
+planEnumStructuralPartialTests = testGroup "planEnumStructuralPartial"
+  [ testCase "partial filter's outputs carry exactly the defined inputs' mass" $ do
+      prog <- parseOrFailSrc src
+      let c = either (error . show) id (compile defaultCompilerConfig prog)
+      let ps = [ p | q <- queries, let VProbDim p _ = either (error . show) id (runProbC prog c [sym] q) ]
+      -- pSceneIsList is logit slot 0: every defined input has a List at the root.
+      assertBool ("outputs sum to " ++ show (sum ps) ++ ", expected " ++ show pSceneIsList)
+        (abs (sum ps - pSceneIsList) < 1e-9)
+      assertBool "every listed output should be reachable" (all (> 0) ps)
+  ]
+  where
+    pSceneIsList = 0.6
+    src = unlines
+      [ "data Color = Red | Green"
+      , "data Object = Nil | Obj color::Color"
+      , "data Scene = List hd::Object, tl::Scene | Empty depth 2"
+      , "neural readScene :: (Symbol -> Scene)"
+      , "main symbol = let scene = readScene symbol in filterGreen scene"
+      , "filterGreen old = if isEmpty (tl old)"
+      , "    then if isNil (hd old)"
+      , "        then List Nil Empty"
+      , "        else if isGreen (color (hd old))"
+      , "            then List (hd old) Empty"
+      , "            else List Nil Empty"
+      , "    else if isNil (hd old)"
+      , "        then List Nil (filterGreen (tl old))"
+      , "        else if isGreen (color (hd old))"
+      , "            then List (hd old) (filterGreen (tl old))"
+      , "            else List Nil (filterGreen (tl old))"
+      ]
+    sym = VTuple (VInt 2) (constructVList (map VFloat
+            [ 0.6, 0.4, 0.3, 0.7, 0.25, 0.75, 0.55, 0.45, 0.2, 0.8, 0.35, 0.65, 1.0 ]))
+    nil   = VADT "Nil" []
+    green = VADT "Obj" [VADT "Green" []]
+    empty = VADT "Empty" []
+    -- Every scene the partial filter can output: a one-element result for a
+    -- one-element input, a two-element one for a two-element input.
+    queries = [ VADT "List" [h, empty] | h <- [nil, green] ]
+           ++ [ VADT "List" [h, VADT "List" [t, empty]] | h <- [nil, green], t <- [nil, green] ]
+
+-- | Structural inversion routes its match-worlds through the milestone-4 value
+-- grouping ('planSpecializeTarget'). Without that, a structure-returning
+-- recursion costs one world per constructor per level: measured on this program
+-- the emitted IR grew ~6.5x per level (75 KB at depth 2 to 52 MB at depth 6),
+-- against ~2.5x with grouping (66 KB to 1.7 MB) -- a 31x saving at depth 6 that
+-- grows with depth.
+--
+-- This pins the base, not polynomiality: unlike the counting folds
+-- 'test_planEnumM4Polynomial' covers, structural inversion is still exponential
+-- here, because the caller crosses each level's grouped worlds with its own
+-- branches. Depths kept low deliberately -- depth 6 alone takes ~25 s.
+test_planEnumStructuralGrouped :: TestTree
+test_planEnumStructuralGrouped = testCase "planEnumStructuralGrouped" $ do
+  let prog d = unlines
+        [ "data Color = Red | Green"
+        , "data Object = Nil | Obj color::Color"
+        , "data Scene = List hd::Object, tl::Scene | Empty depth " ++ show d
+        , "neural readScene :: (Symbol -> Scene)"
+        , "main symbol = let scene = readScene symbol in filterGreen scene"
+        , "filterGreen old = if isEmpty old"
+        , "    then Empty"
+        , "    else if isNil (hd old)"
+        , "        then List Nil (filterGreen (tl old))"
+        , "        else if isGreen (color (hd old))"
+        , "            then List (hd old) (filterGreen (tl old))"
+        , "            else List Nil (filterGreen (tl old))"
+        ]
+  let sizeAt d = do
+        p <- parseOrFailSrc (prog d)
+        case compile defaultCompilerConfig p of
+          Left e   -> assertFailure ("compile error at depth " ++ show d ++ ": " ++ show e)
+          Right ir -> return (length (show ir))
+  s3 <- sizeAt 3
+  s5 <- sizeAt 5
+  -- Ungrouped this ratio was ~17x (6.5 per level over two levels); grouped it is
+  -- ~5x. A regression that switched grouping off would blow straight through 10.
+  assertBool ("structural-inversion IR is growing at the ungrouped rate: s3=" ++ show s3
+              ++ " s5=" ++ show s5 ++ " ratio=" ++ show (fromIntegral s5 / fromIntegral s3 :: Double))
+    (s5 < 10 * s3)
+
+parseOrFailSrc :: String -> IO Program
+parseOrFailSrc src = case tryParseProgram "<inline>" src of
+  Left err -> assertFailure ("Parse error: " ++ show err)
+  Right p  -> return p
+
 -- | Fast-group case: pins topK/branch-counting interaction on the cheapest
 -- recursive-specialization shape (depth-3, single threaded-bool predicate),
 -- so this behaviour class stays covered even though the pricier
@@ -1393,6 +1571,9 @@ internalsTests = testGroup "Internals"
   , optimizerPurityTests
   , batchedRefusalUnitTests
   , decomposabilityGateTests
+  , planEnumStructuralADTTests
+  , planEnumStructuralPartialTests
+  , test_planEnumStructuralGrouped
   ]
 
 -- | Tests heavy enough (multiple full compiles of a depth-3/depth-10 plan
