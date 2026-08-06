@@ -381,96 +381,101 @@ tupleFromValue :: Value -> (Value, Value)
 tupleFromValue (VTuple a b) = (a,b)
 tupelFromValue _non_tuple = error "supplied non-tuple value to tuple-shaped NN type."
 
--- | Encode the inner slots for one arm of an EitherPlan.
--- wrap: constructs the full sample value (e.g. VEither . Left) for probFnName calls.
--- armProb: IRExpr evaluating to P(arm VAny), used to normalise to conditional probability.
--- For Discretes inner plans, emits P(arm v) / P(arm VAny) for each v.
--- For complex plans, falls back to zeros (length-correct stub).  A *continuous* arm never
--- reaches this stub: `requiredNormalFns` surfaces it as a missing arm-conditional normal
--- function, so `makeTopLevelEncodeFun` refuses to build the encode at all.  Fully-discrete
--- nested arms (a Tuple/Either/ADT of discretes) still hit the zero stub and are the remaining
--- known gap here — no corpus program exercises them yet.
-makeEncodeEitherArm :: String -> [IRExpr] -> PartitionPlan -> (IRValue -> IRValue) -> IRExpr -> IRExpr
-makeEncodeEitherArm probFnName outerArgs (Discretes _ (MultiDiscretes vals)) wrap armProb =
-  foldr IRCons (IRConst (VList EmptyList))
-    [ IROp OpDiv
-        (IRTFst (foldl IRApply (IRApply (IRVar probFnName) (IRConst (wrap (valueToIR v)))) outerArgs))
-        armProb
-    | v <- vals ]
-makeEncodeEitherArm probFnName outerArgs plan wrap armProb =
-  -- Complex inner plan: fall back to zeros (length-correct stub).
-  foldr IRCons (IRConst (VList EmptyList))
-    [ IRConst (VFloat 0) | _ <- [0 .. getSize plan - 1] ]
-
--- Top-level encode dispatch.
+-- Encode dispatch: lay one plan (sub-)tree out into its slice of the flat logit vector.
+--
+-- Every slot is a *marginal query* against the host function's own prob function.  Two
+-- parameters carry the context that makes such a query correct at an arbitrary depth:
+--
+-- * @wrap@ rebuilds the full sample value from a value at this position, filling every
+--   other position with 'VAny' -- identity at the root, @\v -> VTuple v VAny@ inside a
+--   tuple's first component, @\v -> VADT "Obj" [v, VAny]@ inside an ADT field, and so on.
+--   Composing it on the way down is what keeps a nested slot a marginal rather than a
+--   point query.
+--
+-- * @norm@ is the conditioning normaliser.  It is 'Nothing' at the root, where slots are
+--   absolute probabilities.  Inside an Either/ADT arm it is @Just p@ with @p = P(arm)@,
+--   and every slot below divides by it -- so a constructor's flag slot holds P(ctor) while
+--   its field slots hold P(field value | ctor).  That categorical-times-conditional
+--   factorisation is exactly what 'makeProbRec' reads back, which is why the two must
+--   agree on it.
+--
+-- Slot counts per case match 'getSize' exactly (an EitherPlan contributes ONE flag slot,
+-- P(Left), since P(Right) is its complement; an ADTPlan contributes one per constructor).
 --
 -- outerArgs: IRExprs for the outer lambda parameters already in scope (e.g. [IRVar "sym"]
 -- for `main sym = ...`; [] for `main = expr`).  These are forwarded as trailing arguments
 -- to the compiled SPLL inference functions (prob, normal).
 --
--- * Discretes: calls probFnName(wrap v)(outerArgs...) for each enumerated v.  wrap
---   constructs the full sample value for the marginal query; at the outermost level it is
---   id, inside a TuplePlan first component it is (\v -> VTuple v VAny), etc.
---   Falls back to raw logit slots only when probFnName is empty (encoder case).
---
--- * Continuous: calls normalFnName(outerArgs...) → (mu, sigma).
---
--- * TuplePlan / EitherPlan: recurses with composed wrap functions so sub-plan prob calls
---   correctly query the marginal distribution of each component.
---
--- * ADTPlan: stub — emits zeros of the correct length.
-makeEncodeTopLevel :: [ADTDecl] -> String -> String -> PartitionPlan -> Int -> [IRExpr] -> IRExpr
-makeEncodeTopLevel = makeEncodeTopLevelW id
+-- This one walker serves both the root and the arms.  It used to be two -- a full
+-- top-level dispatch plus a `makeEncodeEitherArm` that handled only Discretes arms and
+-- zero-stubbed every composite one, so an ADT field of any non-Discretes plan (a nested
+-- enum ADT, a tuple, an Either) encoded as zeros while still occupying its slots.  Keeping
+-- them separate is what let the arm walker fall behind; hence the single function.
+makeEncodePlan :: (IRValue -> IRValue)  -- ^ wrap: rebuild the full sample value for a marginal query
+               -> String                -- ^ prob function name
+               -> String                -- ^ normal function name for this position
+               -> Maybe IRExpr          -- ^ arm normaliser: P(enclosing arm), or Nothing at the root
+               -> PartitionPlan
+               -> [IRExpr]              -- ^ outer parameters in scope
+               -> IRExpr
+makeEncodePlan wrap probFnName normalFnName norm plan outerArgs = case plan of
+  Discretes _ (MultiDiscretes vals) ->
+    irList [ slot (marginal (wrap (valueToIR v))) | v <- vals ]
 
-makeEncodeTopLevelW :: (IRValue -> IRValue) -> [ADTDecl] -> String -> String -> PartitionPlan -> Int -> [IRExpr] -> IRExpr
-makeEncodeTopLevelW wrap adts probFnName normalFnName (Discretes rty (MultiDiscretes vals)) ix outerArgs =
-  foldr IRCons (IRConst (VList EmptyList))
-    [ IRTFst (foldl IRApply (IRApply (IRVar probFnName) (IRConst (wrap (valueToIR v)))) outerArgs)
-    | v <- vals ]
-makeEncodeTopLevelW wrap adts probFnName normalFnName Continuous ix outerArgs =
-  -- Call normalFnName(outerArgs...) → IRTCons mu sigma, then emit [mu, sigma].
-  let normalResult = foldl IRApply (IRVar normalFnName) outerArgs
-  in foldr IRCons (IRConst (VList EmptyList))
-       [ IRTFst normalResult
-       , IRTSnd normalResult
-       ]
-makeEncodeTopLevelW wrap adts probFnName normalFnName (TuplePlan a b) ix outerArgs =
-  -- Compose wrap with the tuple projection so sub-plan prob calls are marginal queries:
-  -- first component: probFn (wrap (VTuple v VAny)), second: probFn (wrap (VTuple VAny v)).
-  let fstNormalFn = normalFnName ++ "_fst"
-      sndNormalFn = normalFnName ++ "_snd"
-      fstWrap v = wrap (VTuple v VAny)
-      sndWrap v = wrap (VTuple VAny v)
-  in invokeStandardFunction stdListConcat
-    [ makeEncodeTopLevelW fstWrap adts probFnName fstNormalFn a ix outerArgs
-    , makeEncodeTopLevelW sndWrap adts probFnName sndNormalFn b (ix + getSize a) outerArgs
+  Continuous ->
+    -- Call normalFnName(outerArgs...) → IRTCons mu sigma, then emit [mu, sigma].
+    -- 'norm' is necessarily Nothing here: a continuous leaf inside an arm would need an
+    -- arm-conditional (mu, sigma) that the IRCompiler does not generate, and
+    -- 'requiredNormalFns' names it so 'makeTopLevelEncodeFun'/'validateEncodeGaussian'
+    -- refuse the whole encode before reaching this point.
+    let normalResult = foldl IRApply (IRVar normalFnName) outerArgs
+    in irList [IRTFst normalResult, IRTSnd normalResult]
+
+  TuplePlan a b -> concatLists
+    [ rec (\v -> wrap (VTuple v VAny)) (normalFnName ++ "_fst") norm a
+    , rec (\v -> wrap (VTuple VAny v)) (normalFnName ++ "_snd") norm b
     ]
-makeEncodeTopLevelW wrap adts probFnName normalFnName plan@(EitherPlan a b) ix outerArgs =
-      let callProb s = foldl IRApply (IRApply (IRVar probFnName) (IRConst s)) outerArgs
-          pLeftAny  = IRTFst (callProb (wrap (VEither (Left VAny))))
-          pRightAny = IRTFst (callProb (wrap (VEither (Right VAny))))
-          flagSlot  = IRCons pLeftAny (IRConst (VList EmptyList))
-          leftWrap v  = wrap (VEither (Left v))
-          rightWrap v = wrap (VEither (Right v))
-          leftEnc   = makeEncodeEitherArm probFnName outerArgs a leftWrap pLeftAny
-          rightEnc  = makeEncodeEitherArm probFnName outerArgs b rightWrap pRightAny
-      in invokeStandardFunction stdListConcat
-           [ flagSlot
-           , invokeStandardFunction stdListConcat [leftEnc, rightEnc] ]
-makeEncodeTopLevelW wrap adts probFnName normalFnName plan@(ADTPlan adtName plans) ix outerArgs =
-      let callProb s = foldl IRApply (IRApply (IRVar probFnName) (IRConst s)) outerArgs
-          concatLists = foldr (\x acc -> invokeStandardFunction stdListConcat [x, acc]) (IRConst (VList EmptyList))
-          constrAnyVal (cName, fieldPlans) = VADT cName (replicate (length fieldPlans) VAny)
-          constrFlagProb cp = IRTFst (callProb (wrap (constrAnyVal cp)))
-          flagSlots = foldr IRCons (IRConst (VList EmptyList)) [ constrFlagProb cp | cp <- plans ]
-          encodeConstrFields (cName, fieldPlans) pConstrAny =
-            let anyArgs  = replicate (length fieldPlans) VAny
-                replaceAt j v args = take j args ++ [v] ++ drop (j+1) args
-                fieldWrap j v = wrap (VADT cName (replaceAt j v anyArgs))
-                encodeField j fp = makeEncodeEitherArm probFnName outerArgs fp (fieldWrap j) pConstrAny
-            in concatLists [ encodeField j fp | (j, fp) <- zip [0..] fieldPlans ]
-          constrFieldEncodings = [ encodeConstrFields cp (constrFlagProb cp) | cp <- plans ]
-      in concatLists (flagSlots : constrFieldEncodings)
+
+  -- One flag slot, P(Left); each arm's own slots are conditional on that arm, so they
+  -- normalise by the arm probability rather than by the enclosing 'norm'.
+  EitherPlan a b ->
+    let pLeftAny  = marginal (wrap (VEither (Left  VAny)))
+        pRightAny = marginal (wrap (VEither (Right VAny)))
+    in concatLists
+         [ irList [slot pLeftAny]
+         , rec (wrap . VEither . Left)  (normalFnName ++ "_left")  (Just pLeftAny)  a
+         , rec (wrap . VEither . Right) (normalFnName ++ "_right") (Just pRightAny) b
+         ]
+
+  -- One flag slot per constructor, then each constructor's field block.  Field slots are
+  -- conditional on their constructor (see EitherPlan above).  The normal-function names
+  -- mirror 'requiredNormalFns' so its refusal check and this emission cannot disagree.
+  ADTPlan _ ctors ->
+    let ctorAnyVal (cName, fps) = wrap (VADT cName (replicate (length fps) VAny))
+        pCtorAny = marginal . ctorAnyVal
+        replaceAt j v args = take j args ++ [v] ++ drop (j + 1) args
+        fieldWrap cName n j v = wrap (VADT cName (replaceAt j v (replicate n VAny)))
+        ctorFields cp@(cName, fps) = concatLists
+          [ rec (fieldWrap cName (length fps) j)
+                (normalFnName ++ "_" ++ cName ++ "_" ++ show j)
+                (Just (pCtorAny cp)) fp
+          | (j, fp) <- zip [0 :: Int ..] fps ]
+    in concatLists (irList [ slot (pCtorAny cp) | cp <- ctors ] : map ctorFields ctors)
+  where
+    rec w nf n p = makeEncodePlan w probFnName nf n p outerArgs
+    irList       = foldr IRCons emptyList
+    emptyList    = IRConst (VList EmptyList)
+    marginal s   = IRTFst (foldl IRApply (IRApply (IRVar probFnName) (IRConst s)) outerArgs)
+    slot p       = maybe p (IROp OpDiv p) norm
+
+    -- Statically-empty segments are dropped before folding rather than concatenated
+    -- with: a fieldless constructor contributes one, and every nesting level would
+    -- otherwise add an identity `listConcat(x, [])` to the emitted vector expression.
+    concatLists xs = case filter (not . isEmptyList) xs of
+      []  -> emptyList
+      ys  -> foldr1 (\x acc -> invokeStandardFunction stdListConcat [x, acc]) ys
+    isEmptyList (IRConst (VList EmptyList)) = True
+    isEmptyList _                           = False
 
 -- Build the encode function body, wrapped in one lambda per outer parameter of main.
 -- encode(p1)(p2)... derives the logit vector from compiled SPLL inference functions
@@ -480,7 +485,7 @@ makeEncode adts conf plan probFnName normalFnName paramNames =
   foldr IRLambda body paramNames
   where
     outerArgs = map IRVar paramNames
-    body = makeEncodeTopLevel adts probFnName normalFnName plan 0 outerArgs
+    body = makeEncodePlan id probFnName normalFnName Nothing plan outerArgs
 
 -- Find the flat logit-vector index for a given value within a plan.
 -- For TuplePlan, searches the left sub-plan first, then the right at offset getSize a.
@@ -510,7 +515,7 @@ noAny0 sample = IRIf (IRUnaryOp OpIsAny sample) (IRConst $ VFloat 0)
 --
 -- A `Continuous` slot in a decoder's plan is encoded by querying the SPLL program's
 -- normal-parameter function (`main_normal`, or `main_normal_fst`/`_snd` for tuple
--- components) — see `makeEncodeTopLevelW`.  That function only exists when the
+-- components) — see `makeEncodePlan`.  That function only exists when the
 -- corresponding output node is Gaussian (PType `PNormal`/`PLogNormal`); for a non-Gaussian
 -- continuous output (a mixture produced by `if`, a product of random variables, etc.) the
 -- IRCompiler does not generate it.  Encoding such an output would otherwise dangle on a
@@ -539,16 +544,21 @@ validateEncodeGaussian adts registry neuralDecls env = mapM_ checkDecl decoderDe
       ++ "refused rather than silently zero-stubbed."
 
 -- | Normal-parameter function names that `encode` references for the Continuous slots of a
--- plan.  Mirrors the name threading in `makeEncodeTopLevelW` (top-level `main_normal`,
+-- plan.  Mirrors the name threading in `makeEncodePlan` (top-level `main_normal`,
 -- tuple components suffixed `_fst`/`_snd`).
 --
 -- Either/ADT arms recurse too: a continuous leaf inside an arm names an arm-conditional
 -- normal function (`_left`/`_right`, `_<ctor>_<field>`) that the IRCompiler does not yet
--- generate — `makeEncodeEitherArm` only handles Discretes arms, zero-stubbing the rest.  By
--- surfacing that leaf as a required-but-absent normal function, `makeTopLevelEncodeFun`'s
--- `normalsOk` check refuses to build such an encode (and `validateEncodeGaussian` refuses to
--- run it) rather than silently emitting a zero for the arm's `(mu, sigma)`.  A fully-discrete
--- arm contributes no requirement, so mixed Either/ADT with only discrete arms stay buildable.
+-- generate.  By surfacing that leaf as a required-but-absent normal function,
+-- `makeTopLevelEncodeFun`'s `normalsOk` check refuses to build such an encode (and
+-- `validateEncodeGaussian` refuses to run it) rather than silently emitting a zero for the
+-- arm's `(mu, sigma)`.  A fully-discrete arm contributes no requirement, so a discrete
+-- Either/ADT of any nesting depth stays buildable — `makeEncodePlan` encodes those arms
+-- for real, and this list is exactly the continuous residue it cannot.
+--
+-- The names generated here must match `makeEncodePlan`'s `normalFnName` threading case for
+-- case; they are a single scheme spelled in two places, one deciding refusal and one
+-- deciding emission.
 requiredNormalFns :: String -> PartitionPlan -> [String]
 requiredNormalFns nf Continuous        = [nf]
 requiredNormalFns nf (TuplePlan a b)   = requiredNormalFns (nf ++ "_fst") a
@@ -571,7 +581,7 @@ availableNormalFns (IREnv groups _ _) =
       | "_component_" `isPrefixOf` groupName g = drop (length "_component_") (groupName g)
       | otherwise                              = groupName g ++ "_normal"
 
--- MAR semantics for EitherPlan encoding are implemented in makeEncodeTopLevelW/makeEncodeEitherArm.
+-- MAR semantics for EitherPlan encoding are implemented in makeEncodePlan.
 
 ------------------------------------------------------------------------
 -- A top-level function's own encode function (auto-derive slice of PartitionPlan decoupling).

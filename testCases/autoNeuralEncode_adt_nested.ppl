@@ -1,0 +1,10 @@
+-- Encode of an ADT whose constructor field is itself a composite plan (a nested
+-- enum ADT), the shape the arm encoder used to zero-stub: the two Object ctor
+-- flags were real while Color's three slots encoded as 0.0.  Being a decoder
+-- passthrough (`main sym = nn sym`) it is picked up by EncodeRoundtrip's
+-- LogitIdentity, which pins every slot against the mock's own logit vector.
+-- Layout: [P(Nil), P(Obj), P(Red|Obj), P(Green|Obj), P(Blue|Obj)].
+data Color = Red | Green | Blue
+data Object = Nil | Obj color::Color
+neural readObj :: (Symbol -> Object) of _
+main sym = readObj sym
