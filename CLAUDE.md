@@ -106,6 +106,37 @@ When the bound value is a **neural network's structured output** (`let s = nn sy
 
 ## Additional Features
 
+### `observe` (Maybe-valued conditioning)
+
+`observe base pred` (design mar-sum-types-observe) is the surface primitive for conditioning:
+type `a -> (a -> Bool) -> Maybe a`, where `Maybe a` is `Either () a` under the Haskell
+convention `Just x = right x`, `Nothing = left ()` (observe-partials-umbrella N3). It is
+**parser sugar only** — there is no `Observe` `Expr` constructor and no inference rule of its
+own. `pObserve` desugars it through `SPLL.Prelude.observe`/`observeBound` into
+`let v = base in if pred v then right v else left ()`, and the existing let/if/Either
+machinery supplies the specified semantics: `p(Just v) = p(base = v) · p(pred v)`,
+`p(Nothing)` the remaining mass, and the structural-`ANY` marginalisation over the sum type
+gives `p(Just ANY)` — the two sum to 1, so the `Maybe`-valued result is *already* a proper
+distribution and `observe` renormalises nothing itself. Conditioning is the ratio of two
+ordinary queries, `p(Just v) / p(Just ANY)` (`test_observeRenormalizesViaJustAny`).
+
+Two details are load-bearing. The base is **let-bound** rather than spliced in twice: it
+occurs both under the predicate and as the payload, and a probabilistic base substituted
+twice would be two independent draws. And a predicate written as a **literal lambda is
+beta-reduced at parse time**, so the condition mentions the binder directly — inference has
+to invert the condition back onto the binding, and an occurrence left under an unreduced
+`Apply`/`Lambda` defeats both point inversion and the set-valued witness fallback (the
+continuous `observe Normal (\v -> v > 0.0)` refuses to compile otherwise, while the
+equivalent hand-written idiom compiles). A non-lambda predicate (a named function) keeps the
+application and gets a generated binder name.
+
+Corpus: `observeKeyword`, `observeKeywordNamedPred`, `observeKeywordTruncated` (the keyword
+twins of the hand-idiom cases `observeDiscreteId`, `observeDiscretePoE`,
+`eitherIfDeconstructObserve`). Known gap, inherited rather than introduced: `p(Just ANY)` on
+a *continuous* observation hard-errors in the set-witness comparison inversion (`ANY` inside
+a constructor slot of the comparison target) — the discrete denominator works, the continuous
+one is the umbrella's open "known adjacent gap".
+
 ### topK Branch Pruning
 
 `topKThreshold :: Maybe Double` in `CompilerConfig` enables probability-based branch pruning during inference compilation. When set, the IRCompiler wraps each `IfThenElse` in probability mode with guards: if `p_cond < threshold` only the else branch is evaluated; if `p_cond > 1 - threshold` only the then branch; otherwise both. The threshold uses the global probability, accumulated through all branches during inference. The same threshold is applied to enumerable `InjF` branches, filtering out enum values whose left-parameter probability falls below the threshold. Pruned branches contribute zero to the result — this is a performance optimisation, not an approximation to the logic.

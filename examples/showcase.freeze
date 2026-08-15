@@ -36,6 +36,13 @@ firstOfPair   p(0.0)  = 0.3989422804014327
 secondOfPair  p(1.0)  = 0.5
 unwrapped     p(Right 0.0)  = 0.3989422804014327
 
+-- observe: Maybe-valued conditioning (kept mass + rejected mass = 1)
+observedCoin  p(Right 1)   = 0.3
+observedCoin  p(Right ANY) = 0.3
+observedCoin  p(Left ())   = 0.7
+truncNormal   p(Right 1.0) = 0.24197072451914337
+truncNormal   p(Left ())   = 0.5
+
 -- Comparison / logic (Bool-valued, discrete mass)
 bothLow       p(True) = 0.2
 eitherLow     p(True) = 0.8000000000000002
