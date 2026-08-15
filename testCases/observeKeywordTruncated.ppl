@@ -1,0 +1,1 @@
+main = observe Normal (\v -> v > 0.0)

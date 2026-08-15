@@ -41,6 +41,7 @@ module SPLL.Prelude
   , left
   , right
   , observe
+  , observeBound
   , sisLeft
   , sisRight
   , sfromLeft
@@ -248,9 +249,28 @@ left x = injF "left" [x]
 right :: Expr -> Expr
 right x = injF "right" [x]
 
--- observe x pred: returns Left x if pred x, else Right ()
-observe :: Expr -> Expr -> Expr
-observe x pred = ifThenElse (apply pred x) (left x) (right unit)
+-- | @observe binder base pred@ -- the desugaring of the surface @observe@
+-- primitive (design mar-sum-types-observe): @observe base pred@ has type
+-- @a -> (a -> Bool) -> Maybe a@ and yields @Just base@ where the predicate
+-- holds, @Nothing@ where it does not. @Maybe a@ is @Either () a@ with the
+-- Haskell-side convention @Just x = right x@, @Nothing = left ()@
+-- (observe-partials-umbrella N3).
+--
+-- The binder is not cosmetic: @base@ occurs twice in the result (once under the
+-- predicate, once as the payload), and a probabilistic @base@ spliced in twice
+-- would be two independent draws rather than one observed value. Callers supply
+-- a fresh name (the parser uses 'demandUniqueNumber').
+observe :: String -> Expr -> Expr -> Expr
+observe binder base pred = observeBound binder base (apply pred (var binder))
+
+-- | 'observe' with the predicate already applied to the binder -- i.e. the
+-- beta-reduced form @let binder = base in if cond then right binder else
+-- left ()@, where @cond@ mentions @binder@ directly. Inference can invert such
+-- a condition onto the binding, which it cannot do through an unreduced
+-- @Apply (Lambda ...)@; see 'SPLL.Parser.pObserve'.
+observeBound :: String -> Expr -> Expr -> Expr
+observeBound binder base cond =
+  letIn binder base (ifThenElse cond (right (var binder)) (left unit))
 
 sisLeft :: Expr -> Expr
 sisLeft x = injF "isLeft" [x]

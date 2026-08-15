@@ -471,6 +471,30 @@ prop_neuralOfClauseRegistersSugar =
        Right (Program _ _ _ enc) -> enc === [(TInt, MultiDiscretes [VInt 0, VInt 1, VInt 2])]
        Left err -> counterexample (errorBundlePretty err) False
 
+-- "observe base (\v -> pred)" is surface sugar: it desugars to the hand-written
+-- Maybe idiom, with the lambda beta-reduced so that the condition mentions the
+-- binder directly (an occurrence left under an Apply/Lambda is not invertible,
+-- see SPLL.Parser.pObserve). Just x = right x, Nothing = left ().
+prop_observeLambdaDesugarsToLetIdiom :: Property
+prop_observeLambdaDesugarsToLetIdiom =
+  let src1 = "main = observe Normal (\\v -> v > 0.0)"
+      src2 = "main = let v = Normal in if v > 0.0 then right v else left ()"
+  in case (tryParseProgram "" src1, tryParseProgram "" src2) of
+       (Right p1, Right p2) -> p1 === p2
+       (Left err, _) -> counterexample ("src1 failed: " ++ errorBundlePretty err) False
+       (_, Left err) -> counterexample ("src2 failed: " ++ errorBundlePretty err) False
+
+-- A predicate that is not a literal lambda (a named function, say) keeps the
+-- application, and the binder gets a generated name instead.
+prop_observeNamedPredicateDesugarsToApply :: Property
+prop_observeNamedPredicateDesugarsToApply =
+  let src1 = "isPos v = v > 0.0\nmain = observe Normal isPos"
+      src2 = "isPos v = v > 0.0\nmain = let p_ob0 = Normal in if isPos p_ob0 then right p_ob0 else left ()"
+  in case (tryParseProgram "" src1, tryParseProgram "" src2) of
+       (Right p1, Right p2) -> p1 === p2
+       (Left err, _) -> counterexample ("src1 failed: " ++ errorBundlePretty err) False
+       (_, Left err) -> counterexample ("src2 failed: " ++ errorBundlePretty err) False
+
 return []
 
 parserTests :: TestTree
