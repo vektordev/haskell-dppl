@@ -1,0 +1,3 @@
+-- Showcase Level 2 (design sum-type-showcase): both arms continuous, so the
+-- constructor marginals are exactly the branch weights of the mixture.
+main = if Uniform < 0.5 then left Normal else right Normal

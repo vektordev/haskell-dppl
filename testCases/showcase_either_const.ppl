@@ -1,0 +1,4 @@
+-- Showcase Level 0 (design sum-type-showcase): Either construction and exact query.
+-- The whole mass sits on one constructor, so the other arm is a structurally
+-- impossible event rather than a merely-tiny probability.
+main = left 1

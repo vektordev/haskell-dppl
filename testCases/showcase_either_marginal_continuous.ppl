@@ -1,0 +1,5 @@
+-- Showcase Level 2 (design sum-type-showcase): structural MAR with a
+-- *continuous* inner type. `p(Left ANY)` integrates the Normal over the reals
+-- (= 1) and keeps only the branch weight, so it is a dim-0 mass even though a
+-- point query on the same arm is a dim-1 density.
+main = if Uniform < 0.3 then left Normal else right 0.0

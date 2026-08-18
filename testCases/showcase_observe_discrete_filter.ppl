@@ -1,0 +1,5 @@
+-- Showcase Level 3 (design sum-type-showcase): userspace `observe` filtering a
+-- neural discrete distribution down to a single class. The kept mass is the
+-- network's probability for that class; everything else becomes `Nothing`.
+neural digitNN :: (Symbol -> Int) of [0, 1, 2]
+main img = let v = digitNN img in if v == 1 then right v else left ()
