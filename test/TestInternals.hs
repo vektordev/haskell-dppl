@@ -1355,6 +1355,138 @@ decomposabilityGateTests = testGroup "Decomposability gate: shared enumerated la
         (not (mainOuterVerdict prog))
   ]
 
+-- design sum-type-showcase: the Level 0-4 showcase corpus pins frozen numbers
+-- in its .tst files. Those numbers are only the *right* numbers if the
+-- identities the series is meant to demonstrate actually hold, so the
+-- identities themselves are checked here rather than left implicit in a
+-- decimal expansion.
+sumTypeShowcaseTests :: TestTree
+sumTypeShowcaseTests = testGroup "sumTypeShowcase"
+  [ test_showcasePoeIsProductOfExperts
+  , test_showcasePoeThreeSensors
+  , test_showcasePoePosteriorRenormalizes
+  , test_showcaseConstructorMarginalsSumToOne
+  ]
+
+-- | Parse a corpus program, failing the test (rather than the whole run) on a
+-- parse error.
+loadCorpusProgram :: String -> IO Program
+loadCorpusProgram baseName = do
+  let path = "testCases/" ++ baseName ++ ".ppl"
+  src <- readFile path
+  case tryParseProgram path src of
+    Left err -> assertFailure ("Parse error in " ++ path ++ ": " ++ show err)
+    Right p  -> return p
+
+-- | The probability of one query point of a compiled corpus program.
+showcaseProb :: Program -> [IRValue] -> IRValue -> IO Double
+showcaseProb prog params sample = case runProb defaultCompilerConfig prog params sample of
+  Right (VProbDim p _) -> return p
+  other -> assertFailure ("expected a probability tuple, got: " ++ show other)
+
+-- | A mock-network symbol in random-logit mode (see MockNN): the logits depend
+-- only on the partition plan and this seed, never on the network's name, so a
+-- single one-network reference program stands in for every expert declared
+-- with the same @of@ clause.
+mockSymbol :: Int -> IRValue
+mockSymbol seed = VTuple (VInt 0) (VInt seed)
+
+-- | One expert's class distribution: a bare @main s = expertNN s@ over the
+-- same three-class enumeration the showcase PoE programs declare.
+expertClassProb :: IO (Int -> Int -> IO Double)
+expertClassProb = do
+  let src = unlines
+        [ "neural expertNN :: (Symbol -> Int) of [0, 1, 2]"
+        , "main s = expertNN s" ]
+  prog <- case tryParseProgram "expert-reference" src of
+    Left err -> assertFailure ("Parse error in the expert reference program: " ++ show err)
+    Right p  -> return p
+  return (\seed k -> showcaseProb prog [mockSymbol seed] (VInt k))
+
+-- | Level 4: fusing two sensors by observing their agreement is a *product* of
+-- experts, not a mixture -- p(Just k) = P_cam(k) * P_depth(k). The evidence
+-- Z = p(Just ANY) is that product summed over the support, and the rejected
+-- mass p(Nothing) is its complement.
+test_showcasePoeIsProductOfExperts :: TestTree
+test_showcasePoeIsProductOfExperts = testCase "showcasePoeIsProductOfExperts" $ do
+  prog <- loadCorpusProgram "showcase_poe_discrete"
+  expert <- expertClassProb
+  let params = [mockSymbol 42, mockSymbol 43]
+  joints <- mapM (\k -> showcaseProb prog params (VEither (Right (VInt k)))) [0, 1, 2]
+  expected <- mapM (\k -> (*) <$> expert 42 k <*> expert 43 k) [0, 1, 2]
+  mapM_ (\(k, got, want) ->
+          assertBool ("p(Just " ++ show k ++ ") = " ++ show got
+                      ++ " is not P_cam(k)*P_depth(k) = " ++ show want)
+            (abs (got - want) < 1e-9))
+        (zip3 [0 :: Int, 1, 2] joints expected)
+  z <- showcaseProb prog params (VEither (Right VAny))
+  assertBool ("p(Just ANY) = " ++ show z ++ " is not the sum of the fused masses "
+              ++ show (sum joints)) (abs (z - sum joints) < 1e-9)
+  nothing <- showcaseProb prog params (VEither (Left VUnit))
+  assertBool ("p(Nothing) = " ++ show nothing ++ " and p(Just ANY) = " ++ show z
+              ++ " do not sum to one") (abs (nothing + z - 1) < 1e-9)
+
+-- | Level 4, chained: a compound agreement predicate is the userspace spelling
+-- of @observeFurther@, and fuses a third expert into the same product.
+test_showcasePoeThreeSensors :: TestTree
+test_showcasePoeThreeSensors = testCase "showcasePoeThreeSensors" $ do
+  prog <- loadCorpusProgram "showcase_poe_three_sensors"
+  expert <- expertClassProb
+  let params = [mockSymbol 42, mockSymbol 43, mockSymbol 44]
+  joints <- mapM (\k -> showcaseProb prog params (VEither (Right (VInt k)))) [0, 1, 2]
+  expected <- mapM (\k -> (\a b c -> a * b * c) <$> expert 42 k <*> expert 43 k <*> expert 44 k)
+                   [0, 1, 2]
+  mapM_ (\(k, got, want) ->
+          assertBool ("p(Just " ++ show k ++ ") = " ++ show got
+                      ++ " is not the triple product " ++ show want)
+            (abs (got - want) < 1e-9))
+        (zip3 [0 :: Int, 1, 2] joints expected)
+
+-- | Level 4 with a prior: the fused masses are unnormalized (they are a
+-- prior times two likelihoods), and dividing by the evidence p(Just ANY)
+-- turns them into a posterior over the support.
+test_showcasePoePosteriorRenormalizes :: TestTree
+test_showcasePoePosteriorRenormalizes = testCase "showcasePoePosteriorRenormalizes" $ do
+  prog <- loadCorpusProgram "showcase_poe_with_prior"
+  let params = [mockSymbol 42, mockSymbol 43]
+  joints <- mapM (\k -> showcaseProb prog params (VEither (Right (VInt k)))) [0, 1, 2]
+  z <- showcaseProb prog params (VEither (Right VAny))
+  assertBool ("the evidence " ++ show z ++ " is not a proper subprobability")
+    (z > 0 && z < 1)
+  let posterior = map (/ z) joints
+  assertBool ("the renormalized posterior " ++ show posterior ++ " does not sum to one")
+    (abs (sum posterior - 1) < 1e-9)
+  nothing <- showcaseProb prog params (VEither (Left VUnit))
+  assertBool ("p(Nothing) = " ++ show nothing ++ " and the evidence " ++ show z
+              ++ " do not sum to one") (abs (nothing + z - 1) < 1e-9)
+
+-- | Levels 0-3: whatever a sum-typed program does, its two constructor
+-- marginals partition the whole mass. This holds for a constant, for a
+-- branch, for a neural Either, for continuous inner types (where the point
+-- query is a dim-1 density but the marginal is a dim-0 mass), and for the
+-- userspace @observe@ idiom -- where it is exactly
+-- @p(Nothing) + p(Just ANY) = 1@.
+test_showcaseConstructorMarginalsSumToOne :: TestTree
+test_showcaseConstructorMarginalsSumToOne = testCase "showcaseConstructorMarginalsSumToOne" $
+  mapM_ check
+    [ ("showcase_either_const", [])
+    , ("showcase_either_branch", [])
+    , ("showcase_either_neural", [mockSymbol 42])
+    , ("showcase_either_fromLeft", [mockSymbol 42])
+    , ("showcase_either_marginal_discrete", [mockSymbol 42])
+    , ("showcase_either_marginal_continuous", [])
+    , ("showcase_either_marginal_injf", [])
+    , ("showcase_observe_trivial", [])
+    , ("showcase_observe_discrete_filter", [mockSymbol 42])
+    ]
+  where
+    check (name, params) = do
+      prog <- loadCorpusProgram name
+      l <- showcaseProb prog params (VEither (Left VAny))
+      r <- showcaseProb prog params (VEither (Right VAny))
+      assertBool (name ++ ": p(Left ANY) = " ++ show l ++ " and p(Right ANY) = " ++ show r
+                  ++ " do not sum to one") (abs (l + r - 1) < 1e-9)
+
 internalsTests :: TestTree
 internalsTests = testGroup "Internals"
   [ testProperties "properties" $(allProperties)
@@ -1393,6 +1525,7 @@ internalsTests = testGroup "Internals"
   , optimizerPurityTests
   , batchedRefusalUnitTests
   , decomposabilityGateTests
+  , sumTypeShowcaseTests
   ]
 
 -- | Tests heavy enough (multiple full compiles of a depth-3/depth-10 plan
