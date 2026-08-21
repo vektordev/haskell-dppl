@@ -90,8 +90,10 @@ deterministic).
   `MultiADT [(String, [MultiValue])]`, `MultiTypeRef String`,
   `MultiContinuous` (a `Real` leaf), `MultiAuto` (the `_` placeholder).
 - **CompilerConfig**: Controls verbosity, optimization level, top-K
-  threshold, branch counting, plus flags `pruneAnyChecks`, `noIntegrate`,
-  `noProbability`, `noGenerate`, `batched`, `logSpace`.
+  threshold, branch counting, the marginal-materialization cardinality budget
+  (`materializationCardinality`, default 10000 — see Marginal Materialization
+  below), plus flags `pruneAnyChecks`, `noIntegrate`, `noProbability`,
+  `noGenerate`, `batched`, `logSpace`.
 
 ## Internal Details
 
@@ -185,6 +187,24 @@ Pruning is **lossy** — a dropped branch's mass is simply gone. Hence the
 one-sided invariants: topK never *inflates* a probability
 (`Corpus.TopKNeverInflates`), and only threshold 0 is exact
 (`Corpus.TopKZeroThreshMatchesExact`).
+
+### Marginal Materialization
+
+`materializationCardinality :: Int` (default 10000) is the cardinality
+budget for **marginal materialization**: the largest finite
+`DiscreteValues` domain whose marginal the compiler will tabulate up
+front. `Analysis.materializationDomain` is the guard — a total predicate
+over a node's tags returning the domain to tabulate or `Nothing`
+("fall back to today's point-query path"); anything unannotated,
+non-finite, or over budget answers `Nothing`, since over-refusing costs
+performance while under-refusing costs correctness silently. The same
+budget bounds the operand *grid* a convolution unrolls, because a
+materialized table is let-bound scalar cells rather than a runtime array
+(`IRExpr` has no dense array; `IRIndex` is an O(n) cons-cell walk) —
+"the domain is small" and "the unrolling is affordable" are one question,
+not two, and a change to either has to be made on both. The budget is
+per-node, deliberately not cumulative across nesting levels. Set it to 0
+to disable materialization entirely.
 
 ### Dimension Counting
 

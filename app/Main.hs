@@ -208,7 +208,7 @@ main = transpile =<< execParser opts
 transpile :: GlobalOpts -> IO ()
 transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl, pruneAnys=anyChecks, noInteg=nInteg, noProb=nProb, noGen=nGen, debugIntermediates=dbgInter, noTypeCheck=nTypeChk, batchedMode=batchedFlag, logSpaceMode=logSpaceFlag, optStatsMode=optStatsFlag}) = do
   prog <- parseProgram inFile
-  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen, showIntermediates=dbgInter, checkQueryType=not nTypeChk, batched=batchedFlag, logSpace=logSpaceFlag, optStats=optStatsFlag})
+  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen, showIntermediates=dbgInter, checkQueryType=not nTypeChk, batched=batchedFlag, logSpace=logSpaceFlag, optStats=optStatsFlag, materializationCardinality=defaultMaterializationCardinality})
   case options of
     CompileOpts{language=lang, outputFile=outFile, trunc=trnc} -> do
       case codeGenToLang lang trnc conf prog of

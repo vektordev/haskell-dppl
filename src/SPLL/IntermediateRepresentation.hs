@@ -13,6 +13,7 @@ module SPLL.IntermediateRepresentation (
 , IRValue
 , CompilerConfig(..)
 , defaultCompilerConfig
+, defaultMaterializationCardinality
 , irMap
 , irDescend
 , irDescendM
@@ -331,11 +332,36 @@ data CompilerConfig = CompilerConfig {
   -- function, and -- at @verbose >= 1@ -- which rewrite rule fired how many
   -- times in each of those iterations. Diagnostic only; it does not change what
   -- is compiled. Off by default so an ordinary compile stays quiet.
-  optStats :: Bool
+  optStats :: Bool,
+  -- | Cardinality budget for marginal materialization (task
+  -- materialization-cardinality-guard, design materialized-marginals-semiring
+  -- Tier 0): the largest finite 'DiscreteValues' domain whose marginal the
+  -- compiler is allowed to tabulate up front, and -- the SAME question, not a
+  -- second one -- the largest operand grid it is allowed to unroll into
+  -- let-bound cells, since a materialized table IS an unrolling of let-bound
+  -- scalar cells rather than a runtime array (see 'SPLL.Analysis's
+  -- 'materializationDomain' and IRCompiler's 'materializeOperandTable'). A
+  -- domain above this falls back to today's point-query re-descent; set to 0
+  -- to disable materialization entirely. Per-node, deliberately NOT a
+  -- cumulative budget across nesting levels: budgeting the join is a
+  -- non-compositional mechanism that is harder to reason about and to debug,
+  -- and each level's unrolling is independently affordable or not. 10000 is a
+  -- magic number chosen to sit far above every realistic enumerable domain
+  -- (a 10-term MNIST-digit sum tops out at 91 cells and a 910-pair grid) and
+  -- far below anything whose unrolling would be a compile-time disaster
+  -- (set/bag-valued 2^k intermediates); it is a config field rather than a
+  -- literal so the plumbing already exists if it ever needs to be
+  -- user-servicable.
+  materializationCardinality :: Int
 } deriving (Show)
 
+-- | The default cardinality budget for marginal materialization. See
+-- 'materializationCardinality' for what the number means and why it is 10000.
+defaultMaterializationCardinality :: Int
+defaultMaterializationCardinality = 10000
+
 defaultCompilerConfig :: CompilerConfig
-defaultCompilerConfig = CompilerConfig {countBranches = False, topKThreshold = Nothing, optimizerLevel = 2, verbose = 0, pruneAnyChecks = False, noIntegrate=False, noProbability=False, noGenerate=False, showIntermediates=False, checkQueryType=True, batched=False, logSpace=False, optStats=False}
+defaultCompilerConfig = CompilerConfig {countBranches = False, topKThreshold = Nothing, optimizerLevel = 2, verbose = 0, pruneAnyChecks = False, noIntegrate=False, noProbability=False, noGenerate=False, showIntermediates=False, checkQueryType=True, batched=False, logSpace=False, optStats=False, materializationCardinality=defaultMaterializationCardinality}
 --3: convert algortihm-and-type-annotated Exprs into abstract representation of explicit computation:
 --    Fold enum ranges, algorithms, etc. into a representation of computation that can be directly converted into code.
 

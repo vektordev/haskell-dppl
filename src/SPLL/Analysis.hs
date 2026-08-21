@@ -1,7 +1,9 @@
 module SPLL.Analysis (
   annotate,
   annotateEnumsProg,
-  annotateConditionalProg
+  annotateConditionalProg,
+  materializationDomain,
+  withinMaterializationBudget
 ) where
 
 import SPLL.Lang.Types
@@ -125,3 +127,47 @@ isConditional fcData p visited x = any (isConditional fcData p visited) (getSubE
 stripLambdas :: Expr -> Expr
 stripLambdas (Expr _ (Lambda _ b)) = stripLambdas b
 stripLambdas e = e
+
+-- ===== Cardinality guard for marginal materialization =====
+-- (task materialization-cardinality-guard, design materialized-marginals-semiring)
+
+-- | The finite domain a node's marginal may be materialized over, or 'Nothing'
+-- if it may not be -- the decidable guard that lets Tier 0 marginal
+-- materialization (IRCompiler's 'materializeOperandTable') proceed WITHOUT the
+-- "coarsest sufficient statistic for the downstream query" analysis the parent
+-- design firewalls out: set- and bag-valued intermediates have 2^k domains, and
+-- this refuses them rather than analysing them.
+--
+-- @bound@ is 'materializationCardinality' from the 'CompilerConfig'. The
+-- predicate is cheap by construction: the domains are already computed --
+-- 'annotateEnumsProg' above tags every enumerable node with a 'DiscreteValues'
+-- range via 'propagateValues' -- so this reads a number already sitting in the
+-- node's tags. No new analysis, no new pass.
+--
+-- It is TOTAL: every node gets an answer, and anything unannotated, non-finite
+-- (a continuous leaf, an unresolved @_@ / type reference), or over budget
+-- answers "do not materialize". Being over-conservative costs performance;
+-- being wrong costs correctness silently, so every unknown resolves to
+-- 'Nothing'.
+--
+-- LOAD-BEARING COINCIDENCE, do not let it drift: this is the SAME predicate as
+-- the let-unrolling affordability condition. Tier 0 materializes a table as
+-- let-bound scalar cells rather than as a runtime array (IRExpr has no dense
+-- array type; 'IRIndex' is an O(n) cons-cell walk), so "the domain is small
+-- enough to tabulate" and "the unrolling is affordable" are one question, not
+-- two. A change to either side has to be made on both.
+materializationDomain :: Int -> [Tag] -> Maybe [Value]
+materializationDomain bound tgs = case [mv | DiscreteValues mv <- tgs] of
+  (mv:_) | multiValueIsFinite mv
+         , let vals = multiValueToValueList mv
+         , withinMaterializationBudget bound (length vals) -> Just vals
+  _ -> Nothing
+
+-- | Is a cell count within the materialization budget? Split out from
+-- 'materializationDomain' because the same budget also bounds the operand GRID
+-- a convolution unrolls (@|D_left| * |D_right|@ compile-time pairs), which is
+-- not any node's own tag but is the same "how much unrolling is affordable"
+-- question -- see the note above. A non-positive @bound@ disables
+-- materialization entirely, which is the off-switch differential tests use.
+withinMaterializationBudget :: Int -> Int -> Bool
+withinMaterializationBudget bound n = n > 0 && n <= bound

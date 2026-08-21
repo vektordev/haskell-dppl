@@ -15,7 +15,7 @@ import SPLL.Typing.RInfer (tryAddRTypeInfo, RTypeError(..))
 import SPLL.Typing.RType (ClassConstraint(..), TVarR(..), RType(..))
 import SPLL.Prelude
 import SPLL.Parser (tryParseProgram)
-import SPLL.Analysis (annotateEnumsProg)
+import SPLL.Analysis (annotateEnumsProg, materializationDomain, withinMaterializationBudget)
 import SPLL.Typing.Infer (addTypeInfo)
 import SPLL.Typing.ForwardChaining (FCData, annotateProg, progToFCData, isInvertibleLambda, isWitnessedLambda)
 import qualified Data.Set as Set
@@ -28,7 +28,7 @@ import SPLL.IRCompiler (injFLatentVerdicts)
 import SPLL.Typing.PType (PType(..))
 import IRInterpreter (generateDet)
 import Data.Foldable (toList)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, intercalate)
 import Control.Exception (try, evaluate, ErrorCall(..))
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure)
@@ -1622,6 +1622,85 @@ mainOuterVerdict prog = case lookup "main" (functions prog) of
     ((_, verdict) : _) -> verdict
     []                 -> error "no candidate binary InjF node found in main"
 
+-- ---------------------------------------------------------------------------
+-- Cardinality guard for marginal materialization
+-- (task materialization-cardinality-guard)
+-- ---------------------------------------------------------------------------
+
+-- | The tags of the outermost binary InjF node in 'main', and of its two
+-- operands -- the exact three domains the materializer asks the guard about.
+mainInjFTags :: Program -> ([Tag], [Tag], [Tag])
+mainInjFTags prog = case lookup "main" (functions prog) of
+  Nothing -> error "no main function"
+  Just mainExpr -> case [ (getTypeInfo e, getTypeInfo l, getTypeInfo r)
+                        | e@(Expr _ (InjF _ [l, r])) <- collect mainExpr ] of
+    ((ti, lti, rti) : _) -> (tags ti, tags lti, tags rti)
+    []                   -> error "no binary InjF node found in main"
+  where collect e = e : concatMap collect (getSubExprs e)
+
+-- | The tags of 'main''s body itself (after stripping the parameter lambdas).
+mainBodyTags :: Program -> [Tag]
+mainBodyTags prog = case lookup "main" (functions prog) of
+  Nothing -> error "no main function"
+  Just mainExpr -> tags (getTypeInfo (strip mainExpr))
+  where strip (Expr _ (Lambda _ b)) = strip b
+        strip e = e
+
+materializationGuardTests :: TestTree
+materializationGuardTests = testGroup "Cardinality guard for marginal materialization"
+  [ testCase "permits mNistAdd: sum domain, both operand domains, and the operand grid" $ do
+      prog <- prepTypedProgFile "testCases/mNistAdd.ppl"
+      let (nodeTags, leftTags, rightTags) = mainInjFTags prog
+          bound = defaultMaterializationCardinality
+      case (materializationDomain bound nodeTags,
+            materializationDomain bound leftTags,
+            materializationDomain bound rightTags) of
+        (Just nodeVals, Just leftVals, Just rightVals) -> do
+          assertEqual "readMNist(a) ++ readMNist(b) enumerates 0..18" 19 (length nodeVals)
+          assertEqual "left digit domain" 10 (length leftVals)
+          assertEqual "right digit domain" 10 (length rightVals)
+          assertBool "the 10x10 operand grid must be affordable to unroll"
+            (withinMaterializationBudget bound (length leftVals * length rightVals))
+        other -> assertFailure ("guard refused mNistAdd's domains: " ++ show other)
+  , testCase "refuses a deliberately large domain at the default bound" $ do
+      -- A real program, annotated by the real enum pass: the declared neural
+      -- domain alone is over budget, so its marginal must not be tabulated.
+      let big = [0 .. defaultMaterializationCardinality + 1] :: [Int]
+          src = "neural readBig :: (Symbol -> Int) of ["
+                  ++ intercalate ", " (map show big) ++ "]\nmain a = readBig(a)"
+          prog = prepTypedProgSrc src
+      assertEqual "domain of 10002 values is over the 10000 budget"
+        Nothing (materializationDomain defaultMaterializationCardinality (mainBodyTags prog))
+  , testCase "the boundary is pinned, not incidental" $ do
+      let atBound  = [DiscreteValues (MultiDiscretes (map (VInt . fromIntegral) [1 .. 10 :: Int]))]
+      assertBool "|domain| == bound materializes"
+        (materializationDomain 10 atBound /= Nothing)
+      assertEqual "|domain| == bound + 1 does not"
+        Nothing (materializationDomain 9 atBound)
+  , testCase "total: unannotated, continuous and unresolved domains all refuse" $ do
+      let bound = defaultMaterializationCardinality
+      assertEqual "no DiscreteValues tag at all"
+        Nothing (materializationDomain bound [])
+      assertEqual "a tag carrying no domain (IsConditional only)"
+        Nothing (materializationDomain bound [IsConditional])
+      assertEqual "a continuous leaf has no finite enumeration"
+        Nothing (materializationDomain bound [DiscreteValues MultiContinuous])
+      assertEqual "a partly-continuous tuple enumerates only a discrete residue"
+        Nothing (materializationDomain bound
+                  [DiscreteValues (MultiTuple (MultiDiscretes [VInt 0]) MultiContinuous)])
+      assertEqual "an unresolved auto-placeholder is not a domain"
+        Nothing (materializationDomain bound [DiscreteValues MultiAuto])
+      assertEqual "an unresolved recursive type reference is not a domain"
+        Nothing (materializationDomain bound [DiscreteValues (MultiTypeRef "T")])
+      assertEqual "an empty enumeration is not a domain"
+        Nothing (materializationDomain bound [DiscreteValues (MultiDiscretes [])])
+  , testCase "a non-positive budget is the off-switch" $ do
+      prog <- prepTypedProgFile "testCases/mNistAdd.ppl"
+      let (nodeTags, _, _) = mainInjFTags prog
+      assertEqual "cardinality 0 refuses everything"
+        Nothing (materializationDomain 0 nodeTags)
+  ]
+
 decomposabilityGateTests :: TestTree
 decomposabilityGateTests = testGroup "Decomposability gate: shared enumerated latent"
   [ testCase "canary: letThreadEnumerable's shared u is flagged" $ do
@@ -1828,6 +1907,7 @@ internalsTests = testGroup "Internals"
   , optimizerPurityTests
   , batchedRefusalUnitTests
   , decomposabilityGateTests
+  , materializationGuardTests
   , planEnumStructuralADTTests
   , planEnumStructuralPartialTests
   , test_planEnumStructuralGrouped
