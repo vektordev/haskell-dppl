@@ -208,7 +208,9 @@ class ConsInferenceList(InferenceList):
 
 def toList(lst):
   back = EmptyInferenceList()
-  for x in reversed(lst):
+  # Materialise first: callers pass lazy iterables (map/itertools.product
+  # results from multiValueToValueList), which are not reversible.
+  for x in reversed(list(lst)):
     back = back.prepend(x)
   return back
 
@@ -266,7 +268,27 @@ def isPossible(multiVal, expr):
             return False
     return foundConstr
   
+# The enumerated support of a MultiValue is a program constant: the emitted
+# code passes the same module-level `_globalMultiN` description at every
+# enum-sum site, and re-derives the whole cartesian product on each call. For a
+# multi-object neural scene that product is the dominant allocation in the
+# query (12^5 = 248832 tuples, ~0.2s, rebuilt several times per query), so it is
+# memoised on the description. The key is the description's repr -- small,
+# hashable and structural, unlike the description itself, which nests lists.
+# Sound because the returned InferenceList is immutable: prepend/mapList/toList
+# all build fresh cells rather than mutating.
+_multiValueCache = {}
+
 def multiValueToValueList(multiVal):
+  key = repr(multiVal)
+  cached = _multiValueCache.get(key)
+  if cached is not None:
+    return cached
+  result = _multiValueToValueList(multiVal)
+  _multiValueCache[key] = result
+  return result
+
+def _multiValueToValueList(multiVal):
   if multiVal[0] == "C":
     # A continuous (Float) slot has no enumerable values.
     return EmptyInferenceList()
@@ -277,8 +299,8 @@ def multiValueToValueList(multiVal):
     tuples = map(lambda x: T(x[0], x[1]), cartesian)
     return toList(tuples)
   elif multiVal[0] == "E":
-    lefts = map (lambda x: Left(x), multiValueToValueList(multiVal[1][0]))
-    rights = map (lambda x: Right(x), multiValueToValueList(multiVal[1][1]))
+    lefts = [Left(x) for x in multiValueToValueList(multiVal[1][0])]
+    rights = [Right(x) for x in multiValueToValueList(multiVal[1][1])]
     return toList(lefts + rights)
   elif multiVal[0] == "A":
     vals = []

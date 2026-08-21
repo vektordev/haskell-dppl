@@ -610,7 +610,7 @@ toIRInferenceSave meta cumulative (Expr t (Lambda name subExpr)) sample = do
   return (detP (IRLambda name irTuple))
 toIRInferenceSave meta cumulative expr sample = do
   (res, letins) <- lift $ runWriterT $ toIRInference meta cumulative expr sample
-  return (anySafe (semiringOf meta) sample (generateLetInExpr letins) res)
+  return (anySafe (semiringOf meta) sample (wrapBlockIfRead letins) res)
 
 
 -- | Dispatch to the appropriate param extractor based on PType.

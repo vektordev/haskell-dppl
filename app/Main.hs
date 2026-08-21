@@ -32,6 +32,7 @@ data GlobalOpts = GlobalOpts {
   noTypeCheck :: Bool,
   batchedMode :: Bool,
   logSpaceMode :: Bool,
+  optStatsMode :: Bool,
   commandOpts :: CommandOpts
 }
 
@@ -104,7 +105,7 @@ parseGlobalOpts = GlobalOpts
         <*> option auto
             ( long "optimizationLevel"
             <> short 'O'
-            <> help "Level of optimization. 0: None, 1: Basic, 2: Advanced"
+            <> help "Level of optimization. 0: None, 1: Basic, 2: Advanced, 3: Aggressive (trades compile time for smaller/faster output)"
             <> showDefault
             <> value 2
             <> metavar "OPTIMIZATION" )
@@ -136,6 +137,9 @@ parseGlobalOpts = GlobalOpts
         <*> switch
             ( long "logSpace"
             <> help "Compute probabilities in log space rather than linear space (task log-space-probability-computation). Motivation: deep conjunctions and long enumerations of small probabilities underflow in linear space long before they are numerically meaningless. Native log-pdf/log-cdf leaves are used for Normal/Uniform, and the compiled p()/cdf() functions return log-probabilities. Scope: the core PResult combinators, Uniform/Normal, discrete value-equality masses, and enumerable-InjF sums are log-aware; ReadNN/AutoNeural neural decoder logit reads, the set-witness/plan-enum continuous measurement machinery, and batched mode remain linear-only under this flag.")
+        <*> switch
+            ( long "optStats"
+            <> help "Report optimizer telemetry on stderr: how many fixed-point iterations the IR optimizer needed for each emitted function, plus a per-rule firing tally. Add -v for the per-iteration breakdown (which rule fired how often in which iteration). Diagnostic only -- it does not change what is compiled.")
         <*> hsubparser (
           command "compile" (info parseCompileOpts (progDesc "Compiles the program with inference interface into target language"))
           <> command "generate" (info parseGenerateOpts (progDesc "Runs the generate pass of the program"))
@@ -202,9 +206,9 @@ main = transpile =<< execParser opts
             <> header "Haskell DPPL" )
 
 transpile :: GlobalOpts -> IO ()
-transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl, pruneAnys=anyChecks, noInteg=nInteg, noProb=nProb, noGen=nGen, debugIntermediates=dbgInter, noTypeCheck=nTypeChk, batchedMode=batchedFlag, logSpaceMode=logSpaceFlag}) = do
+transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl, pruneAnys=anyChecks, noInteg=nInteg, noProb=nProb, noGen=nGen, debugIntermediates=dbgInter, noTypeCheck=nTypeChk, batchedMode=batchedFlag, logSpaceMode=logSpaceFlag, optStatsMode=optStatsFlag}) = do
   prog <- parseProgram inFile
-  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen, showIntermediates=dbgInter, checkQueryType=not nTypeChk, batched=batchedFlag, logSpace=logSpaceFlag})
+  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen, showIntermediates=dbgInter, checkQueryType=not nTypeChk, batched=batchedFlag, logSpace=logSpaceFlag, optStats=optStatsFlag})
   case options of
     CompileOpts{language=lang, outputFile=outFile, trunc=trnc} -> do
       case codeGenToLang lang trnc conf prog of

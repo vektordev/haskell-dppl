@@ -19,6 +19,7 @@ module SPLL.IntermediateRepresentation (
 , getIRSubExprs
 , isPure
 , isEffectfulVar
+, isPureGiven
 , lookupIREnv
 , irPrintFlat
 , valueToIR
@@ -34,6 +35,7 @@ import SPLL.Typing.PType()
 import SPLL.Typing.Typing()
 import Data.Data()
 import Data.List (isSuffixOf)
+import qualified Data.Set as Set
 
 -- | The probability-mode result layout, as produced by 'SPLL.IRCompiler.packResult':
 --
@@ -323,11 +325,17 @@ data CompilerConfig = CompilerConfig {
   -- benefit there (and, for set-witness/plan-enum specifically, may combine
   -- a linear leaf with a log-space combinator and produce a wrong answer;
   -- no compile-time refusal guards this yet). Independent of 'batched'.
-  logSpace :: Bool
+  logSpace :: Bool,
+  -- When True (CLI --optStats), report optimizer telemetry on stderr: how many
+  -- fixed-point iterations 'SPLL.IROptimizer.postProcess' needed per emitted
+  -- function, and -- at @verbose >= 1@ -- which rewrite rule fired how many
+  -- times in each of those iterations. Diagnostic only; it does not change what
+  -- is compiled. Off by default so an ordinary compile stays quiet.
+  optStats :: Bool
 } deriving (Show)
 
 defaultCompilerConfig :: CompilerConfig
-defaultCompilerConfig = CompilerConfig {countBranches = False, topKThreshold = Nothing, optimizerLevel = 2, verbose = 0, pruneAnyChecks = False, noIntegrate=False, noProbability=False, noGenerate=False, showIntermediates=False, checkQueryType=True, batched=False, logSpace=False}
+defaultCompilerConfig = CompilerConfig {countBranches = False, topKThreshold = Nothing, optimizerLevel = 2, verbose = 0, pruneAnyChecks = False, noIntegrate=False, noProbability=False, noGenerate=False, showIntermediates=False, checkQueryType=True, batched=False, logSpace=False, optStats=False}
 --3: convert algortihm-and-type-annotated Exprs into abstract representation of explicit computation:
 --    Fold enum ranges, algorithms, etc. into a representation of computation that can be directly converted into code.
 
@@ -411,9 +419,22 @@ isEffectfulVar name = "_gen" `isSuffixOf` name
 -- pure and could collapse two independent draws into one (task
 -- ir-effectful-var-purity).
 isPure :: IRExpr -> Bool
-isPure (IRSample _) = False
-isPure (IRVar name) = not (isEffectfulVar name)
-isPure e            = all isPure (getIRSubExprs e)
+isPure = isPureGiven Set.empty
+
+-- | 'isPure' relative to a set of generator names already /proven/ deterministic
+-- by whole-program analysis (see 'SPLL.IROptimizer.deterministicGens').
+--
+-- 'isEffectfulVar' is a name test, so it calls every @_gen@ reference effectful.
+-- That is safe but blunt: a generate function that draws no randomness -- an
+-- accessor, a comparison, an arithmetic helper -- is a pure call, and refusing
+-- to share it blocks CSE on every expression that mentions one. In an
+-- enumerated inference body, which is written almost entirely in terms of such
+-- calls, that means the enumeration itself is never recognised as a repeat and
+-- gets evaluated once per occurrence.
+isPureGiven :: Set.Set Varname -> IRExpr -> Bool
+isPureGiven _   (IRSample _) = False
+isPureGiven det (IRVar name) = not (isEffectfulVar name) || Set.member name det
+isPureGiven det e            = all (isPureGiven det) (getIRSubExprs e)
 
 irMap :: (IRExpr -> IRExpr) -> IRExpr -> IRExpr
 irMap f x = f (irDescend (irMap f) x)

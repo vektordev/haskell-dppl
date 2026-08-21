@@ -50,7 +50,7 @@ module SPLL.Semiring (
   packResult, unpackResult, mixP, mixSubP, mixWith,
   -- * Compiler monad plumbing (generic; not Semiring-specific, but shared by
   -- combinators that bind fresh variables)
-  CompilerMonad, mkVariable, setVariables, generateLetInExpr
+  CompilerMonad, mkVariable, setVariables, generateLetInExpr, wrapBlockIfRead
 ) where
 
 import SPLL.IntermediateRepresentation
@@ -294,6 +294,16 @@ impossibleP sr = PResult (P (srZero sr)) const0 const0 constTrueIR
 -- | An indicator leaf: mass 1 (semiring one) where @cond@ holds, and a flagged
 -- impossibility where it does not. The flag is the structural fact the
 -- indicator was built from, not a re-reading of the mass it produced.
+--
+-- @cond@ is deliberately NOT let-bound here, even though both fields read it
+-- and it can be the largest expression around (an 'equalityGuard' embeds the
+-- whole value being compared). Sharing it at emission time was measured and is
+-- a pessimization: at -O2 the binding displaces a CSE that was already finding
+-- the repeat and hoisting it more cheaply (+12% emitted code on
+-- benchmarks/stressContinuous and stressPlanEnum), and at -O3 the tuple-arm
+-- merge in 'SPLL.IROptimizer.distributeIf' reaches the same shared form without
+-- it, and smaller. Pre-optimization IR does shrink ~30%, but that buys no
+-- measurable compile time. See the semiring-presult-internals notes.
 indicatorP :: Semiring -> IRExpr -> PResult
 indicatorP sr cond = impossibleWhen (notIR cond) (mass (maskSR sr cond))
 
@@ -512,6 +522,18 @@ shareResult sr tag guards binds r
     wrapIfRead e = if reads' e then generateLetInExpr binds e else e
     -- Guards nest as IRIf, never OpOr/OpAnd -- see 'guardP'.
     guarded orElse e = foldr (\g acc -> IRIf g acc orElse) e guards
+
+-- | Wrap a let-in block around an expression only if the expression actually
+-- reads something the block binds. A 'PResult' field that does not -- a
+-- statically-known dim of 0, a branch count of 0, a constant flag -- otherwise
+-- drags a full copy of the block behind a value it never looks at, which for a
+-- body containing an enumerated sum means a duplicate of the single most
+-- expensive node in the program per field per nesting level. 'shareResult'
+-- already applies this rule to its own fields; 'anySafe' takes it as its @wrap@.
+wrapBlockIfRead :: [(Varname, IRExpr)] -> IRExpr -> IRExpr
+wrapBlockIfRead binds e
+  | mentionsAny (map fst binds) e = generateLetInExpr binds e
+  | otherwise                     = e
 
 -- | Does this expression read any of the given variables?
 mentionsAny :: [Varname] -> IRExpr -> Bool

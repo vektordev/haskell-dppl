@@ -327,7 +327,25 @@ function isclose(a::Float64, b::Float64)
     return abs(a - b) <= 10e-10
 end
 
+# The enumerated support of a MultiValue is a program constant: the emitted code
+# passes the same `_globalMultiN` description at every enum-sum site and
+# re-derives the whole cartesian product on each call. Memoised on the
+# description's string form -- small and structural, unlike the description
+# itself. Sound because the returned list is never mutated by callers.
+const _multiValueCache = Dict{String,Any}()
+
 function multiValueToValueList(multiVal)
+    key = string(multiVal)
+    cached = get(_multiValueCache, key, nothing)
+    if cached !== nothing
+        return cached
+    end
+    result = _multiValueToValueList(multiVal)
+    _multiValueCache[key] = result
+    return result
+end
+
+function _multiValueToValueList(multiVal)
     if multiVal[1] == "C"
         # A continuous (Float) slot has no enumerable values.
         return []

@@ -52,16 +52,16 @@ pPrintIRExpr (IRSelect cond thenExpr elseExpr) n =
     indent (n + 1) ++ pPrintIRExpr thenExpr (n + 1) ++ "\n" ++
     indent n ++ "else\n" ++
      indent (n + 1) ++ pPrintIRExpr elseExpr (n + 1)
-pPrintIRExpr (IROp OpPlus e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ " + " ++ pPrintIRExpr e2 (n + 1) ++ ")"
-pPrintIRExpr (IROp OpSub e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ " - " ++ pPrintIRExpr e2 (n + 1) ++ ")"
-pPrintIRExpr (IROp OpMult e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ " * " ++ pPrintIRExpr e2 (n + 1) ++ ")"
-pPrintIRExpr (IROp OpDiv e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ " / " ++ pPrintIRExpr e2 (n + 1) ++ ")"
-pPrintIRExpr (IROp OpGreaterThan e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ " > " ++ pPrintIRExpr e2 (n + 1) ++ ")"
-pPrintIRExpr (IROp OpLessThan e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ " < " ++ pPrintIRExpr e2 (n + 1) ++ ")"
-pPrintIRExpr (IROp OpEq e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ " == " ++ pPrintIRExpr e2 (n + 1) ++ ")"
+pPrintIRExpr (IROp OpPlus e1 e2) n = binOpIR "+" e1 e2 n
+pPrintIRExpr (IROp OpSub e1 e2) n = binOpIR "-" e1 e2 n
+pPrintIRExpr (IROp OpMult e1 e2) n = binOpIR "*" e1 e2 n
+pPrintIRExpr (IROp OpDiv e1 e2) n = binOpIR "/" e1 e2 n
+pPrintIRExpr (IROp OpGreaterThan e1 e2) n = binOpIR ">" e1 e2 n
+pPrintIRExpr (IROp OpLessThan e1 e2) n = binOpIR "<" e1 e2 n
+pPrintIRExpr (IROp OpEq e1 e2) n = binOpIR "==" e1 e2 n
 pPrintIRExpr (IROp OpApprox e1 e2) n = "isclose(" ++ pPrintIRExpr e1 (n + 1) ++ ", " ++ pPrintIRExpr e2 (n + 1) ++ ")"
-pPrintIRExpr (IROp OpOr e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ " || " ++ pPrintIRExpr e2 (n + 1) ++ ")"
-pPrintIRExpr (IROp OpAnd e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ " && " ++ pPrintIRExpr e2 (n + 1) ++ ")"
+pPrintIRExpr (IROp OpOr e1 e2) n = binOpIR "||" e1 e2 n
+pPrintIRExpr (IROp OpAnd e1 e2) n = binOpIR "&&" e1 e2 n
 pPrintIRExpr (IRUnaryOp OpNeg e) n = "-(" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRUnaryOp OpAbs e) n = "abs(" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRUnaryOp OpNot e) n = "!(" ++ pPrintIRExpr e (n + 1) ++ ")"
@@ -73,7 +73,7 @@ pPrintIRExpr (IRTheta e i) n = "theta (" ++ pPrintIRExpr e (n + 1) ++ ")@" ++ sh
 pPrintIRExpr (IRSubtree e i) n = "subtree (" ++ pPrintIRExpr e (n + 1) ++ ")@" ++ show i
 pPrintIRExpr (IRConst val) _ = "const " ++ show val
 pPrintIRExpr (IRCons e1 e2) n = pPrintIRExpr e1 (n + 1) ++ ":" ++ pPrintIRExpr e2 (n + 1)
-pPrintIRExpr (IRTCons e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ ", " ++ pPrintIRExpr e2 (n + 1) ++ ")"
+pPrintIRExpr (IRTCons e1 e2) n = binOpIR "," e1 e2 n
 pPrintIRExpr (IRHead e) n = "head (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRTail e) n = "tail (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRMap f e) n = "map (" ++ pPrintIRExpr f (n + 1) ++ ", " ++ pPrintIRExpr e (n + 1) ++ ")"
@@ -99,6 +99,33 @@ pPrintIRExpr (IRIndex e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ ")[" ++ pPrin
 pPrintIRExpr (IRError e) _ = "error(" ++ e ++")"
 pPrintIRExpr (IRConformsTo t e) n = "conformsTo " ++ show t ++ " (" ++ pPrintIRExpr e (n + 1) ++ ")"
 
+
+-- | A binary form whose operands may each render over several lines.
+--
+-- 'IRIf' and 'IRLetIn' both start a new line, so the flat
+-- @"(" ++ l ++ " op " ++ r ++ ")"@ layout puts the operator at the end of the
+-- last line of the left operand -- which reads as if it belonged to that
+-- operand's else-arm. A mask times a density printed as
+--
+-- >  (
+-- >    if c then
+-- >      1.0
+-- >    else
+-- >      0.0 * p)
+--
+-- looks like the multiplication is inside the else, when it is in fact applied
+-- to the whole conditional. Breaking before the operator and closing the paren
+-- at the parent indentation puts the grouping back where the reader can see it.
+binOpIR :: String -> IRExpr -> IRExpr -> Int -> String
+binOpIR op e1 e2 n
+  | any multiline [l, r] =
+      "(" ++ l ++ "\n" ++ indent n ++ op ++ " " ++ r ++ "\n" ++ indent n ++ ")"
+  | op == ","  = "(" ++ l ++ ", " ++ r ++ ")"
+  | otherwise  = "(" ++ l ++ " " ++ op ++ " " ++ r ++ ")"
+  where
+    l = pPrintIRExpr e1 (n + 1)
+    r = pPrintIRExpr e2 (n + 1)
+    multiline = elem '\n'
 
 pPrintValue :: Value -> String
 pPrintValue (VBool a) = show a

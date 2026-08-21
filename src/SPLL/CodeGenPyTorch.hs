@@ -90,8 +90,8 @@ pyVal x = error ("unknown pyVal for " ++ show x)
 pyMultiVal :: MultiValue -> String
 pyMultiVal MultiContinuous = "(\"C\", None)"
 pyMultiVal (MultiDiscretes vals) = "(\"D\", [" ++ intercalate ", " (map (pyVal . valueToIR) vals) ++ "])"
-pyMultiVal (MultiTuple l r) = "(\"T\", (" ++ pyMultiVal l ++ ", " ++ pyMultiVal r ++ ")"
-pyMultiVal (MultiEither l r) = "(\"E\", (" ++ pyMultiVal l ++ ", " ++ pyMultiVal r ++ ")"
+pyMultiVal (MultiTuple l r) = "(\"T\", (" ++ pyMultiVal l ++ ", " ++ pyMultiVal r ++ "))"
+pyMultiVal (MultiEither l r) = "(\"E\", (" ++ pyMultiVal l ++ ", " ++ pyMultiVal r ++ "))"
 pyMultiVal (MultiADT constrs) = "(\"A\", [" ++ intercalate ", " (map (\(cName, fields) -> 
   "(" ++ cName ++ ", [" ++ intercalate ", " (map pyMultiVal fields) ++ "])"
   ) constrs) ++ "])"
