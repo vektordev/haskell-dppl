@@ -19,12 +19,13 @@ import SPLL.Analysis (annotateEnumsProg, materializationDomain, withinMaterializ
 import SPLL.Typing.Infer (addTypeInfo)
 import SPLL.Typing.ForwardChaining (FCData, annotateProg, progToFCData, isInvertibleLambda, isWitnessedLambda)
 import qualified Data.Set as Set
+import qualified Data.Map.Strict as Map
 import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan)
 import qualified SPLL.AutoNeural as AutoNeural (getSize)
 import SPLL.IntermediateRepresentation
 import SPLL.IROptimizer (postProcess)
 import SPLL.CodeGenPyTorchBatched (batchedGuard, generateFunctionsBatched)
-import SPLL.IRCompiler (injFLatentVerdicts)
+import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts)
 import SPLL.Typing.PType (PType(..))
 import IRInterpreter (generateDet)
 import Data.Foldable (toList)
@@ -1701,6 +1702,153 @@ materializationGuardTests = testGroup "Cardinality guard for marginal materializ
         Nothing (materializationDomain 0 nodeTags)
   ]
 
+-- ---------------------------------------------------------------------------
+-- Tier 0 marginal materialization (task materialize-discrete-marginals)
+-- ---------------------------------------------------------------------------
+
+-- | Materialization off, via the cardinality guard's own off-switch.
+noMaterializationConfig :: CompilerConfig
+noMaterializationConfig = defaultCompilerConfig { materializationCardinality = 0 }
+
+-- | A literal mock-NN parameter: the digit distribution, padded to the ten
+-- logits @readMNist@'s partition plan expects (see MockNN's @(2, [..])@ form).
+mockDigits :: [Double] -> IRValue
+mockDigits ps = VTuple (VInt 2) (constructVList (map VFloat (take 10 (ps ++ repeat 0.0))))
+
+-- | p(main = sample) of a corpus program under a given config, as a Double.
+probUnder :: CompilerConfig -> Program -> [IRValue] -> IRValue -> IO Double
+probUnder conf prog params sample = case runProb conf prog params sample of
+  Right (VProbDim pr _) -> return pr
+  other -> assertFailure ("expected a probability tuple, got: " ++ show other)
+
+-- | cdf(main <= sample) of a corpus program under a given config.
+cumulUnder :: CompilerConfig -> Program -> [IRValue] -> IRValue -> IO Double
+cumulUnder conf prog params sample = case runInteg conf prog params sample of
+  Right (VProbDim pr _) -> return pr
+  other -> assertFailure ("expected a probability tuple, got: " ++ show other)
+
+-- | Does the compiled program contain materialized marginal cells?
+compilesWithCells :: CompilerConfig -> Program -> IO Bool
+compilesWithCells conf prog = case compile conf prog of
+  Left err -> assertFailure ("compilation failed: " ++ show err)
+  Right ir -> return ("mat_cell" `isInfixOf` show ir)
+
+digits3, digits4 :: [IRValue]
+digits3 = [mockDigits [0.7, 0.3], mockDigits [0.6, 0.4], mockDigits [0.5, 0.5]]
+digits4 = digits3 ++ [mockDigits [0.5, 0.5]]
+
+materializationTests :: TestTree
+materializationTests = testGroup "Tier 0 marginal materialization"
+  [ testCase "fires on a three-term chain, and the guard's off-switch stops it" $ do
+      prog <- loadCorpusProgram "mNistAdd3"
+      onCells  <- compilesWithCells defaultCompilerConfig prog
+      offCells <- compilesWithCells noMaterializationConfig prog
+      assertBool "a 3-term chain's left operand must be tabulated" onCells
+      assertBool "cardinality 0 must fall back to point-query re-descent" (not offCells)
+  , testCase "does NOT fire on a two-term chain: neither operand is nested" $ do
+      -- Tabulating the queried node itself would be a pessimization (its point
+      -- query costs |D_left|, its table |D_left| * |D_node|), so a flat program's
+      -- emitted IR must be untouched -- byte for byte, not just numerically.
+      prog <- loadCorpusProgram "mNistAdd"
+      cells <- compilesWithCells defaultCompilerConfig prog
+      assertBool "a flat two-term add must not be materialized" (not cells)
+      case (compile defaultCompilerConfig prog, compile noMaterializationConfig prog) of
+        (Right onIR, Right offIR) ->
+          assertEqual "two-term add: emitted IR identical with and without materialization"
+            (show offIR) (show onIR)
+        _ -> assertFailure "compilation failed"
+  , testCase "materialized == re-descended, value for value (probability)" $ do
+      -- The tables are built by evaluating the InjF forward over the operand
+      -- grid, accumulating in the same order the enumeration loop does, so this
+      -- is exact equality rather than a tolerance comparison.
+      prog3 <- loadCorpusProgram "mNistAdd3"
+      prog4 <- loadCorpusProgram "mNistAdd4"
+      forM_ [(prog3, digits3, [0 .. 5]), (prog4, digits4, [0 .. 6])] $ \(prog, params, qs) ->
+        forM_ qs $ \q -> do
+          matP <- probUnder defaultCompilerConfig    prog params (VInt q)
+          refP <- probUnder noMaterializationConfig  prog params (VInt q)
+          assertEqual ("p(" ++ show q ++ ") must not move") refP matP
+  , testCase "materialized == re-descended, value for value (cumulative)" $ do
+      prog3 <- loadCorpusProgram "mNistAdd3"
+      forM_ [0 .. 4] $ \q -> do
+        matC <- cumulUnder defaultCompilerConfig   prog3 digits3 (VInt q)
+        refC <- cumulUnder noMaterializationConfig prog3 digits3 (VInt q)
+        assertEqual ("cdf(" ++ show q ++ ") must not move") refC matC
+  , testCase "topK: materialization prunes exactly what the in-loop cutoff prunes" $ do
+      -- The required relationship, stated as a property: table-local pruning
+      -- drops no more mass than accProb pruning would. It holds by identity --
+      -- accProb is only modified at an IfThenElse, so every level of an enum
+      -- chain shares one accProb, and the per-term guard is the same test on
+      -- the same value. A threshold that visibly bites (0.15 against digit
+      -- masses of 0.7/0.3/0.5) is the interesting case, not a vacuous one.
+      prog <- loadCorpusProgram "mNistAdd3"
+      forM_ [0.0, 0.15, 0.3] $ \thresh -> do
+        let onConf  = defaultCompilerConfig   { topKThreshold = Just thresh }
+            offConf = noMaterializationConfig { topKThreshold = Just thresh }
+        forM_ [0 .. 4] $ \q -> do
+          matP <- probUnder onConf  prog digits3 (VInt q)
+          refP <- probUnder offConf prog digits3 (VInt q)
+          assertEqual ("topK " ++ show thresh ++ ", p(" ++ show q ++ ")") refP matP
+  , testCase "log space: materialized == re-descended" $ do
+      prog <- loadCorpusProgram "mNistAdd3"
+      forM_ [0 .. 4] $ \q -> do
+        matP <- probUnder (defaultCompilerConfig   { logSpace = True }) prog digits3 (VInt q)
+        refP <- probUnder (noMaterializationConfig { logSpace = True }) prog digits3 (VInt q)
+        assertEqual ("logSpace p(" ++ show q ++ ")") refP matP
+  , testCase "branch counting is unaffected by materialization" $ do
+      -- The enumeration paths already discard a sub-result's branch count (they
+      -- read the probability only), so a tabulated operand must not change the
+      -- node's own count either.
+      prog <- loadCorpusProgram "mNistAdd3"
+      forM_ [0 .. 4] $ \q -> do
+        let bcConf' c = c { SPLL.IntermediateRepresentation.countBranches = True }
+        matR <- return (runProb (bcConf' defaultCompilerConfig)   prog digits3 (VInt q))
+        refR <- return (runProb (bcConf' noMaterializationConfig) prog digits3 (VInt q))
+        case (matR, refR) of
+          (Right (VProbDimBC mp _ mbc), Right (VProbDimBC rp _ rbc)) -> do
+            assertEqual ("p(" ++ show q ++ ") under -c") rp mp
+            assertEqual ("branch count at " ++ show q) rbc mbc
+          other -> assertFailure ("expected branch-counted tuples, got: " ++ show other)
+  ]
+
+-- | The consumer-grade decomposability walk. Unlike 'injFLatentVerdicts' it
+-- binds bare lambda parameters -- see 'materializationVerdicts'.
+materializationVerdictTests :: TestTree
+materializationVerdictTests = testGroup "Decomposability gate: materialization consumer"
+  [ testCase "a nested chain whose operands share a latent is flagged" $ do
+      -- The gate's whole job, at the shape a materializer would break: the
+      -- OUTER ++ combines two independent things (the inner chain, and w),
+      -- while the INNER one's operands are both u and must not be tabulated
+      -- separately. The program's other binary InjFs are the two `<` nodes.
+      prog <- prepTypedProgFile "testCases/sharedLatentNestedChain.ppl"
+      let verdicts = Map.elems (materializationVerdicts prog)
+      assertEqual "four binary InjF nodes: 2 comparisons, the outer ++, the inner ++"
+        4 (length verdicts)
+      assertEqual "exactly one of them -- the inner ++ -- may share a latent"
+        1 (length (filter id verdicts))
+  , testCase "mNistAdd3/4: every node independent, so every level may be tabulated" $ do
+      forM_ ["mNistAdd3", "mNistAdd4"] $ \name -> do
+        prog <- prepTypedProgFile ("testCases/" ++ name ++ ".ppl")
+        assertBool (name ++ ": digit reads through deterministic symbols are independent")
+          (not (or (Map.elems (materializationVerdicts prog))))
+  , testCase "a latent threaded through a function parameter is never a candidate" $ do
+      -- Inside a callee a parameter is typed Deterministic (it is fixed by the
+      -- enumeration the caller compiles to), and Analysis propagates no
+      -- DiscreteValues tag through it -- so `x ++ x` in a callee fails
+      -- 'isCandidateBinaryEnumInjF' on both counts and never reaches the
+      -- materializer. Asserted at the consumer level rather than on the
+      -- verdict, because the verdict is not what keeps this node out.
+      -- Raw parse, not 'prepTypedProgSrc': 'compile' runs the annotation
+      -- pipeline itself, and annotating an already-annotated program doubles
+      -- its tags.
+      let prog = either (error . show) id
+            (tryParseProgram "test"
+              ("twice x = x ++ x\n"
+               ++ "main = let u = Uniform < 0.3 in twice (if u then 1 else 0)"))
+      cells <- compilesWithCells defaultCompilerConfig prog
+      assertBool "a parameter-fed chain must not be tabulated" (not cells)
+  ]
+
 decomposabilityGateTests :: TestTree
 decomposabilityGateTests = testGroup "Decomposability gate: shared enumerated latent"
   [ testCase "canary: letThreadEnumerable's shared u is flagged" $ do
@@ -1908,6 +2056,8 @@ internalsTests = testGroup "Internals"
   , batchedRefusalUnitTests
   , decomposabilityGateTests
   , materializationGuardTests
+  , materializationTests
+  , materializationVerdictTests
   , planEnumStructuralADTTests
   , planEnumStructuralPartialTests
   , test_planEnumStructuralGrouped

@@ -927,19 +927,33 @@ bestCommonSubexpr ann =
 -- ordinary nodes but stop at the branches of an IRIf, the body of an IREnumSum,
 -- and the body of a lambda, since those are only conditionally, repeatedly, or
 -- never evaluated.
+--
+-- One node shape is descended into but never LISTED: the function half of an
+-- application that is itself an application, i.e. a partially applied call.
+-- The IR is curried (@IRApply (IRApply f a) b@) while the scalar backends are
+-- not -- they flatten a whole application spine into one @f(a, b)@ call site --
+-- so hoisting the inner spine into its own binding emits @cse_0 = f(a)@, a call
+-- with the wrong arity, which is a runtime TypeError rather than a slower
+-- program. (A partially applied LAMBDA is legitimate and common; this only
+-- refuses to let CSE manufacture one where the source had a saturated call.)
 unconditionalAnns :: AnnIR -> [AnnIR]
-unconditionalAnns a0 = go a0 []
+unconditionalAnns a0 = go True a0 []
   where
-    go a acc = a : case annExpr a of
-      IRIf{}      -> case annKids a of { (c:_) -> go c acc; [] -> acc }
+    go listed a acc = (if listed then (a :) else id) $ case annExpr a of
+      IRIf{}      -> case annKids a of { (c:_) -> go True c acc; [] -> acc }
       -- A select's arms are conditional under scalar lowering exactly like an
       -- if's (pytorch-tensorizer M1): only the condition is unconditional, so a
       -- guarded subexpression must not be counted as hoistable above the guard.
-      IRSelect{}  -> case annKids a of { (c:_) -> go c acc; [] -> acc }
+      IRSelect{}  -> case annKids a of { (c:_) -> go True c acc; [] -> acc }
       IRLambda{}  -> acc
       IREnumSum{} -> acc
       IRLogEnumSum{} -> acc
-      _           -> foldr go acc (annKids a)
+      IRApply{}   -> case annKids a of
+        [fn, arg] -> go (not (isApplication (annExpr fn))) fn (go True arg acc)
+        kids      -> foldr (go True) acc kids
+      _           -> foldr (go True) acc (annKids a)
+    isApplication IRApply{} = True
+    isApplication _         = False
 
 -- | Exact occurrence counts of the distinct subexpressions in the list, in
 -- order of first occurrence.  Entries are bucketed by (hash, size) and

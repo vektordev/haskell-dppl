@@ -1,0 +1,1 @@
+main = let u = Uniform < 0.3 in let w = Uniform < 0.5 in ((if u then 1 else 0) ++ (if u then 1 else 0)) ++ (if w then 1 else 0)

@@ -6,6 +6,7 @@ module SPLL.IRCompiler (
   sharesEnumeratedLatent,
   latentDependencies,
   injFLatentVerdicts,
+  materializationVerdicts,
   isCandidateBinaryEnumInjF
 )where
 
@@ -16,6 +17,7 @@ import SPLL.Typing.RType
 import SPLL.IROptimizer
 import SPLL.IRSelectPass (selectPassEnv)
 import PredefinedFunctions
+import SPLL.Analysis (materializationDomain, withinMaterializationBudget)
 import SPLL.Typing.PType
 import Data.Maybe
 import Data.Either (isRight, partitionEithers)
@@ -28,6 +30,7 @@ import SPLL.Typing.AlgebraicDataTypes
 import SPLL.Semiring
 import Utils
 import Control.Monad (foldM, forM, when, zipWithM)
+import Data.Foldable (foldrM)
 import Control.Monad.State.Strict (StateT, evalStateT, get, gets, put, modify)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -56,7 +59,14 @@ data CompilerMetadata = CompilerMetadata {
   -- | Variables already recovered by an enclosing body-factor fold. Body
   -- expressions are re-fetched from the (original) program at every fold
   -- level, so the deterministic re-typing must be replayed with the full set.
-  recoveredVars :: [String]
+  recoveredVars :: [String],
+  -- | The decomposability verdict per binary InjF node of the whole program,
+  -- keyed by chain name (unique program-wide): True = the node's two operands
+  -- may share an enumerated latent, so its marginal must NOT be tabulated by
+  -- convolving them separately. Precomputed once per compile because the
+  -- verdict depends on the 'let'-scope lexically enclosing the node, which a
+  -- 'toIRInference' case looking at a node in isolation cannot reconstruct.
+  latentVerdicts :: Map.Map ChainName Bool
 }
 
 semiringOf :: CompilerMetadata -> Semiring
@@ -187,7 +197,9 @@ envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb
     -- probability mass under logSpace, since every branch's accumulated weight
     -- was then a linear 1.0 multiplied against log (negative) per-branch terms
     -- (task topk-logspace-unsound).
-    meta typeEnv = CompilerMetadata conf fcDat typeEnv adts p (srOne (mkSemiring (logSpace conf))) []
+    meta typeEnv = CompilerMetadata conf fcDat typeEnv adts p (srOne (mkSemiring (logSpace conf))) [] verdicts
+    -- One walk of the whole program, shared by every 'meta' built below.
+    verdicts = materializationVerdicts p
     extractParamNames (Expr _ (Lambda name body)) = name : extractParamNames body
     extractParamNames _ = []
     stripLambdas (Expr _ (Lambda _ body)) = stripLambdas body
@@ -395,8 +407,9 @@ sharesEnumeratedLatent scope l r =
 -- in the shape's own logic but untagged, does not currently satisfy this
 -- narrower predicate even though 'sharesEnumeratedLatent' answers it fine.
 -- That tag-propagation gap is a separate, pre-existing concern; this
--- predicate is kept here (and exported) purely to name what would gate a
--- real consumer wired into the paths above, not to filter 'injFLatentVerdicts'.
+-- predicate names what a consumer wired into the paths above must ALSO
+-- require; it deliberately does not filter 'injFLatentVerdicts' itself.
+-- Tier 0 marginal materialization is that consumer ('isNestedEnumInjF').
 isCandidateBinaryEnumInjF :: Expr -> Expr -> Bool
 isCandidateBinaryEnumInjF l r =
      isEnumerable (tags (getTypeInfo l)) && pType (getTypeInfo l) /= Deterministic
@@ -412,13 +425,282 @@ isCandidateBinaryEnumInjF l r =
 -- with that narrower predicate itself. Exposed purely for direct testing
 -- (see TestInternals); not wired into any compilation decision.
 injFLatentVerdicts :: Expr -> [(ChainName, Bool)]
-injFLatentVerdicts = go Map.empty
+injFLatentVerdicts = latentVerdictWalk False
+
+-- | 'injFLatentVerdicts' for the whole program, with bare (non-'let') lambda
+-- parameters bound rather than left to default to "depends on no latent" --
+-- and keyed by chain name, which is unique program-wide, so one map answers
+-- for every function.
+--
+-- The parameter handling is the difference between an analysis and a
+-- CONSUMER-GRADE analysis, and it is the unsound direction if skipped:
+-- 'injFLatentVerdicts' walks each function body from an empty scope, so a
+-- parameter read is an unbound 'Var' and 'latentDependencies' answers
+-- @Just empty@ for it -- making @f x = x ++ x@ (and every latent that reaches
+-- a callee through an argument) read as INDEPENDENT. That is harmless for the
+-- pure analysis, whose fixtures all query 'main' where the 'let's are in
+-- scope, but it is the unsound direction for a materializer, which sees the
+-- callee's node too. 'bindLambdaParam' closes it -- defence in depth rather
+-- than a live hole, since such a node is not a materialization candidate for
+-- an independent reason spelled out there.
+materializationVerdicts :: Program -> Map.Map ChainName Bool
+materializationVerdicts p =
+  Map.fromList (concatMap (latentVerdictWalk True . snd) (functions p))
+
+-- | Shared implementation of the two walks above. @bindParams@ selects
+-- whether a bare 'Lambda' binds its parameter ('bindLambdaParam') or is
+-- descended into with the parameter left unbound (the historical behaviour
+-- 'injFLatentVerdicts' pins).
+latentVerdictWalk :: Bool -> Expr -> [(ChainName, Bool)]
+latentVerdictWalk bindParams = go Map.empty
   where
     go scope e = case node e of
       InjF _ [l, r] ->
         (chainName (getTypeInfo e), sharesEnumeratedLatent scope l r) : go scope l ++ go scope r
       Apply (Expr _ (Lambda x body)) v -> go (bindLatent scope x v) body ++ go scope v
+      Lambda x body | bindParams -> go (bindLambdaParam scope (chainName (getTypeInfo e)) x) body
       _ -> concatMap (go scope) (getSubExprs e)
+
+-- | Bind a bare lambda parameter, whose value comes from a call site this walk
+-- cannot see, to a latent identity of its OWN -- keyed by the binding lambda's
+-- chain name, so it can never collide with a real draw's identity or with
+-- another parameter's. Two operands that both read the same parameter therefore
+-- report "may share" (@twice x = x ++ x@), while operands reading different
+-- parameters stay independent -- which is what lets
+-- @main a b = readMNist(a) ++ readMNist(b)@ be tabulated at all.
+--
+-- Two parameters of the same function CAN receive correlated arguments
+-- (@pair (f u) (g u)@), and this does not see that: answering it needs a
+-- whole-program call-site aliasing analysis Tier 0 deliberately does not build.
+-- What makes the gap unreachable rather than merely unlikely is the compiler's
+-- own convention for callee bodies: a parameter is typed 'Deterministic' there
+-- (it is fixed by the enumeration the CALLER compiles a probabilistic argument
+-- into), and 'Analysis' propagates no 'DiscreteValues' tag through one -- so any
+-- operand whose randomness comes from a parameter fails
+-- 'isCandidateBinaryEnumInjF' on both counts and never reaches the materializer.
+-- Testing the parameter's own pType here instead would be the direct statement
+-- of that argument, and is deliberately NOT done: forcing a parameter
+-- occurrence's pType is exponential in the number of parameters (~7x per added
+-- one, 9s at seven), a pre-existing property of the modality annotations that
+-- no other consumer happens to hit.
+bindLambdaParam :: LatentScope -> ChainName -> String -> LatentScope
+bindLambdaParam scope lambdaCn x =
+  Map.insert x (Just (Set.singleton ("param:" ++ lambdaCn ++ ":" ++ x))) scope
+
+-- ===== Tier 0: materialized discrete marginals =====
+-- (task materialize-discrete-marginals, design materialized-marginals-semiring)
+--
+-- THE COST BEING RETIRED. The enumerable-InjF inference paths below compile a
+-- point query on `l (+) r` into a loop over l's finite domain whose body
+-- re-descends into `l` for every value. That descent is EAGER (pLeft is
+-- computed before the topK cutoff, which only gates the right-hand descent),
+-- so a nested chain costs T(n) = |D(n-1)| * T(n-1) -- super-exponential, and
+-- invisible to every optimizer pass we have: the recomputation is a runtime
+-- loop re-entry, not duplicated IR, and CSE deliberately stops at IREnumSum
+-- bodies. Measured (task measure-marginal-recomputation) at 10.7x redundant
+-- neural-cell evaluations for a 3-term MNIST-digit sum and 4021x for a 6-term
+-- one, tracking wall clock almost exactly.
+--
+-- WHAT REPLACES IT. When an OPERAND is itself such a chain, its marginal is
+-- tabulated once over its finite domain -- one let-bound scalar cell per value,
+-- each cell an unrolled convolution over the operand grid -- and the loop body
+-- reads a cell instead of re-descending. The chain then costs
+-- sum(k) |D(k)|*|D(leaf)| instead of the product.
+--
+-- THREE DESIGN POINTS, each load-bearing:
+--
+--  1. Cells are LET-BOUND SCALARS, not a table in the IR. 'IRExpr' has no dense
+--     array type and 'IRIndex' is an O(n) cons-cell walk in the interpreter, so
+--     a runtime table would turn the O(n*range) DP into O(n*range^2) on the path
+--     the whole corpus runs on. The domains are compile-time known and small, so
+--     unrolling is both possible and the cheaper choice -- which is why the
+--     cardinality guard ('materializationDomain') and the unrolling
+--     affordability condition are literally the same predicate.
+--
+--  2. Only an operand that is ITSELF a nested enumerable InjF is tabulated;
+--     the queried node keeps today's path. Tabulating the queried node would be
+--     a pessimization for an invertible op: its point query costs O(|D_left|)
+--     (enumerate left, invert to right) while its table costs |D_left|*|D_node|,
+--     and only one cell is ever read. (For a forward-only op -- and/or/max, no
+--     inverse -- the point query already walks the whole |L|x|R| grid, so a
+--     table there would be cost-neutral rather than harmful; still no gain at
+--     the top, and as an operand it is tabulated by the same rule below.)
+--     Consequence worth knowing: a two-term program's emitted IR is unchanged.
+--
+--  3. The tables are built by evaluating the InjF's FORWARD function at compile
+--     time over the operand grid ('propagateValues' -- the same evaluator
+--     Analysis already uses to derive the DiscreteValues domains), never by
+--     inverting. So forward-only ops need no special case, and the terms of each
+--     cell land in the same order today's loop accumulates them in, which is why
+--     materialization is numerically IDENTICAL to the path it replaces rather
+--     than merely equal within tolerance.
+--
+-- TOPK. The cutoff is `accProb * pLeft > TOP_K_CUTOFF`, where accProb is the
+-- globally accumulated path probability. A context-free table could not see it
+-- -- except that accProb is only ever modified at an 'IfThenElse', so every
+-- level of an enum chain shares the one accProb IRExpr, and the cells are bound
+-- in the scope where it is live. The per-term guard emitted below is therefore
+-- the same test on the same value, dropping exactly the terms today's in-loop
+-- cutoff drops: table-local pruning drops no more mass than accProb pruning
+-- would, by identity rather than by argument.
+--
+-- rIMPOSS. Deliberately not tracked per cell. The paths that consume these
+-- tables already discard the sub-result's dim, branch count and impossibility
+-- flag (they read `unP . rProb` only) and derive the node's own flag from the
+-- summed mass via 'opaqueMass' -- sound there because it is a discrete mass, as
+-- that function's own comment argues. A cell is one term of exactly such a sum,
+-- so per-cell flags would have no consumer; giving them one is a change to what
+-- the enumeration paths report, not to materialization.
+
+-- | A materialized marginal: for each value of a node's finite domain, an
+-- 'IRExpr' reading the let-bound cell holding p(node = value).
+type MarginalTable = [(Value, IRExpr)]
+
+-- | Tabulate an operand's marginal for one of the enumerable-InjF paths, or
+-- decline (in which case the caller re-descends as before). Declines unless the
+-- operand is itself a nested enumerable InjF -- see design point 2 above.
+materializeOperandTable :: CompilerMetadata -> Expr -> CompilerMonad (Maybe MarginalTable)
+materializeOperandTable meta e
+  | isNestedEnumInjF e = materializeMarginal meta e
+  | otherwise          = return Nothing
+
+-- | The shape whose marginal is worth tabulating: a binary InjF both of whose
+-- operands are enumerable and non-'Deterministic' -- i.e. exactly what the
+-- enumerable-InjF inference paths below fire on, and therefore exactly what
+-- costs a full re-descent per queried value today.
+isNestedEnumInjF :: Expr -> Bool
+isNestedEnumInjF e = case node e of
+  InjF (Named _) [l, r] -> isCandidateBinaryEnumInjF l r
+  _                     -> False
+
+-- | Build the marginal table for @e@, recursively: a convolution of its
+-- operands' tables when @e@ is a permitted nested node, a per-value point query
+-- when it is a leaf. 'Nothing' means "do not materialize", and propagates: a
+-- nested node that fails the gate does NOT fall back to per-value point queries
+-- of itself, since that would emit |domain| copies of a whole sub-inference and
+-- compound multiplicatively with depth.
+materializeMarginal :: CompilerMetadata -> Expr -> CompilerMonad (Maybe MarginalTable)
+materializeMarginal meta e = case domainOf e of
+  Nothing  -> return Nothing
+  Just dom
+    | isNestedEnumInjF e -> materializeConvolution meta e dom
+    | isEnumerable (tags ti) && pType ti /= Deterministic -> Just <$> pointQueryTable meta e dom
+    | otherwise -> return Nothing
+  where
+    ti = getTypeInfo e
+    domainOf = materializationDomain (materializationCardinality (compilerConfig meta))
+                 . tags . getTypeInfo
+
+-- | The table of a nested node, as the convolution of its two operands' tables:
+-- cell v = sum over the operand pairs whose forward value is v, of the product
+-- of their cells. Declines if the decomposability gate says the operands may
+-- share an enumerated latent (tabulating them separately would then be silently
+-- wrong -- 'testCases/letThreadEnumerable' is the canary), if the operand grid
+-- is too large to unroll, if either operand declines, or if any grid pair fails
+-- to evaluate forward at compile time or lands outside the node's own domain.
+materializeConvolution :: CompilerMetadata -> Expr -> [Value] -> CompilerMonad (Maybe MarginalTable)
+materializeConvolution meta e dom = case node e of
+  InjF (Named name) [l, r]
+    | mayShareLatent -> return Nothing
+    | otherwise -> do
+        mTblL <- materializeMarginal meta l
+        mTblR <- materializeMarginal meta r
+        case (mTblL, mTblR) of
+          (Just tblL, Just tblR)
+            | withinMaterializationBudget bound (length tblL * length tblR)
+            , Just grid <- forwardGrid (resolveInjF (rType (getTypeInfo e)) name) tblL tblR
+              -> Just <$> convolveTables meta dom grid
+          _ -> return Nothing
+  _ -> return Nothing
+  where
+    bound = materializationCardinality (compilerConfig meta)
+    -- Missing verdict (a node the whole-program walk did not reach) is
+    -- conservative "may share", like every other unknown in this analysis.
+    mayShareLatent =
+      Map.findWithDefault True (chainName (getTypeInfo e)) (latentVerdicts meta)
+    -- Evaluate the InjF's forward function on every operand-value pair at
+    -- compile time. Nothing if any pair fails to evaluate or produces a value
+    -- outside the node's own tagged domain -- either would silently drop mass.
+    forwardGrid fName tblL tblR = mapM pairCell [(lv, lc, rv, rc) | (lv, lc) <- tblL, (rv, rc) <- tblR]
+      where
+        pairCell (lv, lc, rv, rc) = case propagateValues (adtDecls meta) fName [[lv], [rv]] of
+          [v] | v `elem` dom -> Just (v, lc, rc)
+          _                  -> Nothing
+
+-- | Emit one let-bound cell per domain value out of the compile-time grid.
+convolveTables :: CompilerMetadata -> [Value] -> [(Value, IRExpr, IRExpr)] -> CompilerMonad MarginalTable
+convolveTables meta dom grid = do
+  cells <- mapM cellFor dom
+  return (zip dom cells)
+  where
+    sr = semiringOf meta
+    cellFor v = do
+      cellExpr <- sumTerms [term lc rc | (v', lc, rc) <- grid, v' == v]
+      cellName <- mkVariable "mat_cell"
+      setVariables [(cellName, cellExpr)]
+      return (IRVar cellName)
+    -- The topK guard, in the same shape and on the same accProb the in-loop
+    -- cutoff uses (see the TOPK note above). No membership test is needed: the
+    -- grid only holds pairs that are in both operands' domains by construction,
+    -- where today's loop has to test the inverted value at runtime.
+    term lc rc = case topKThreshold (compilerConfig meta) of
+      Nothing -> srTimes sr lc rc
+      Just _  -> IRIf (IROp OpGreaterThan (srTimes sr (accProb meta) lc) (IRVar "TOP_K_CUTOFF"))
+                      (srTimes sr lc rc)
+                      (srZero sr)
+    -- Right fold from the semiring zero, over the terms in the left operand's
+    -- domain order: exactly how the 'IREnumSum' this replaces is reduced in
+    -- the interpreter, so the tabulated cell is bit-identical to the value the
+    -- re-descending loop produced rather than merely equal within tolerance.
+    -- (Dropping the pairs that contribute nothing does not perturb that: the
+    -- terms they would contribute are the semiring zero, and both @x + 0.0@
+    -- and @logSumExp x (-inf)@ are exactly @x@.) The emitted backends fold
+    -- their own way -- Python's IREnumSum is a left-folding @sum()@ -- so the
+    -- bit-identity claim is per-backend, not universal; the corpus tolerance
+    -- covers the rest.
+    --
+    -- In log space the running accumulator is let-bound: 'logSumExpIR' reads
+    -- both its operands three times, so an unbound accumulator would grow the
+    -- cell 3^n in the number of terms.
+    sumTerms :: [IRExpr] -> CompilerMonad IRExpr
+    sumTerms = foldrM step (srZero sr)
+    step t acc
+      | srLogSpace sr = do
+          accName <- mkVariable "mat_acc"
+          setVariables [(accName, acc)]
+          return (srPlus sr t (IRVar accName))
+      | otherwise = return (srPlus sr t acc)
+
+-- | The base case: one let-bound cell per domain value, each the ordinary
+-- point-query inference of @e@ at that (compile-time constant) value. This is
+-- the same IR today's loop body builds against the loop variable, with the
+-- constant substituted -- which is what makes the tabulated value bit-identical
+-- to the re-descended one.
+pointQueryTable :: CompilerMetadata -> Expr -> [Value] -> CompilerMonad MarginalTable
+pointQueryTable meta e dom = do
+  cells <- forM dom $ \v -> do
+    res <- toIRInference meta False e (IRConst (valueToIR v))
+    cellName <- mkVariable "mat_leaf"
+    setVariables [(cellName, unP (rProb res))]
+    return (IRVar cellName)
+  return (zip dom cells)
+
+-- | Read a materialized marginal at a runtime key: an unrolled if-chain over
+-- the tabulated domain. The final @else@ is the semiring zero, which is what a
+-- key outside the domain must contribute (and is unreachable when the key is an
+-- enumeration variable ranging over exactly this domain). @key@ is read once per
+-- arm, so callers pass a variable, not an expression.
+lookupMarginal :: Semiring -> MarginalTable -> IRExpr -> IRExpr
+lookupMarginal sr tbl key =
+  foldr (\(v, cell) rest -> IRIf (IROp OpEq key (IRConst (valueToIR v))) cell rest) (srZero sr) tbl
+
+-- | @p(operand = key)@ for one of the enumerable-InjF loop bodies: a
+-- materialized-table read when the operand was tabulated, today's re-descent
+-- otherwise. Only the probability is taken either way -- see the rIMPOSS note
+-- above for why that is not a loss.
+operandProb :: CompilerMetadata -> Maybe MarginalTable -> Expr -> IRExpr -> CompilerMonad IRExpr
+operandProb meta (Just tbl) _ key = return (lookupMarginal (semiringOf meta) tbl key)
+operandProb meta Nothing    e key = (unP . rProb) <$> toIRInference meta False e key
 
 -- | Map the polymorphic InjF name to the concrete integer variant when the
 -- resolved return type is TInt.  For all other types the name is unchanged.
@@ -1327,8 +1609,9 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
   detIR <- toIRGenerate meta detExprSrc
   setVariables [(detVar, detIR)]
   let sr = semiringOf meta
+  mTblRand <- materializeOperandTable meta randExprSrc
   (returnExpr, binds) <- lift $ runWriterT $ do
-    pRand <- (unP . rProb) <$> toIRInference meta False randExprSrc (IRVar randVar)
+    pRand <- operandProb meta mTblRand randExprSrc (IRVar randVar)
     return (IRIf (IROp OpEq f sample) pRand (srZero sr))
   let (outerBinds, body') = hoistInvariantBindings randVar (buildLetIns binds returnExpr)
   setVariables outerBinds
@@ -1350,8 +1633,9 @@ toIRInference meta True (Expr TypeInfo {rType=rt} (InjF (Named name) [left, righ
   detIR <- toIRGenerate meta detExprSrc
   setVariables [(detVar, detIR)]
   let sr = semiringOf meta
+  mTblRand <- materializeOperandTable meta randExprSrc
   (returnExpr, binds) <- lift $ runWriterT $ do
-    pRand <- (unP . rProb) <$> toIRInference meta False randExprSrc (IRVar randVar)
+    pRand <- operandProb meta mTblRand randExprSrc (IRVar randVar)
     return (IRIf (IROp OpLessThan sample f) (srZero sr) pRand)
   let (outerBinds, body') = hoistInvariantBindings randVar (buildLetIns binds returnExpr)
   setVariables outerBinds
@@ -1397,9 +1681,11 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
   let FPair fwd _ = fPair
   let FDecl {inputVars=[v1, v2], body=f} = fwd
   let sr = semiringOf meta
+  mTblL <- materializeOperandTable meta left
+  mTblR <- materializeOperandTable meta right
   (returnExpr, binds) <- lift $ runWriterT $ do
-    pLeft <- (unP . rProb) <$> toIRInference meta False left (IRVar v1)
-    pRight <- (unP . rProb) <$> toIRInference meta False right (IRVar v2)
+    pLeft <- operandProb meta mTblL left (IRVar v1)
+    pRight <- operandProb meta mTblR right (IRVar v2)
     return (IRIf (IROp OpEq f sample) (srTimes sr pLeft pRight) (srZero sr))
   let (v2InvBinds, v2Body) = hoistInvariantBindings v2 (buildLetIns binds returnExpr)
   let innerSum = buildLetIns v2InvBinds (enumSumNode sr v2 enumListR v2Body)
@@ -1429,13 +1715,26 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
   -- For that we name e like the lhs of
   -- We need to unfold the monad stack, because the EnumSum Works like a lambda expression and has a local scope
   let sr = semiringOf meta
+  -- Materialized operand marginals, when the operand is itself a nested
+  -- enumerable chain: built here, in the enclosing scope, so their cells are
+  -- computed once instead of once per iteration of the enumeration below.
+  mTblL <- materializeOperandTable meta left
+  mTblR <- materializeOperandTable meta right
   irTuple <- lift (runWriterT (do
     -- the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
     setVariables [(x3, sample)]
-    pLeft <- (unP . rProb) <$> toIRInference meta False left (IRVar x2)
+    pLeft <- operandProb meta mTblL left (IRVar x2)
     -- pRight is computed in a nested writer so its bindings can be guarded by the topK check,
     -- avoiding the inner right-side inference work whenever acc_prob * pLeft is already below cutoff.
-    (pRightRes, pRightBinds) <- lift $ runWriterT $ toIRInference meta False right invExpr
+    -- The right-hand key is the INVERTED value, an expression rather than an
+    -- enumeration variable, so a table read has to bind it first: the lookup
+    -- reads its key once per arm.
+    (pRightRes, pRightBinds) <- lift $ runWriterT $ case mTblR of
+          Just tbl -> do
+            keyName <- mkVariable "mat_key"
+            setVariables [(keyName, invExpr)]
+            return (mass (lookupMarginal sr tbl (IRVar keyName)))
+          Nothing -> toIRInference meta False right invExpr
     let pRight = unP (rProb pRightRes)
     let wrapR e = generateLetInExpr pRightBinds e
     let possible = IRIsPossible enumListR invExpr
@@ -1479,9 +1778,11 @@ toIRInference meta True (Expr TypeInfo {rType=rt} (InjF (Named name) [left, righ
   -- than leaking to the enclosing function scope: those bindings reference the enum
   -- variables v1/v2 (the coin_prob calls) and must be scoped *inside* the matching
   -- enumSum, not above it.
+  mTblL <- materializeOperandTable meta left
+  mTblR <- materializeOperandTable meta right
   (returnExpr, binds) <- lift $ runWriterT $ do
-    pLeft <- (unP . rProb) <$> toIRInference meta False left (IRVar v1)
-    pRight <- (unP . rProb) <$> toIRInference meta False right (IRVar v2)
+    pLeft <- operandProb meta mTblL left (IRVar v1)
+    pRight <- operandProb meta mTblR right (IRVar v2)
     return (IRIf (IROp OpLessThan sample f) (srZero sr) (srTimes sr pLeft pRight))
   -- Place each binding at the outermost scope where it remains well-formed: fully
   -- invariant bindings are hoisted to the function top level, bindings depending only
