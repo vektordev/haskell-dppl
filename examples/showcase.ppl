@@ -202,6 +202,25 @@ shiftEither e = mapEither (\x -> x + 1.0) (\y -> y + (-1.0)) e
 
 
 -- ============================================================
+-- OBSERVE (CONDITIONING)
+-- ============================================================
+-- `observe base pred` conditions on a predicate without needing
+-- a reject-and-retry semantics: it has type a -> (a -> Bool) ->
+-- Maybe a, returning `right base` where the predicate holds and
+-- `left ()` (Nothing) where it does not.  Both arguments are
+-- atoms, so a computed base or a lambda predicate needs parens.
+-- It is surface sugar -- `observe e (\v -> p)` is exactly
+-- `let v = e in if p then right v else left ()`.
+-- The Maybe-valued result is already a proper distribution:
+--   p(Right v)   -- mass/density of a kept value
+--   p(Left ())   -- the rejected mass; the two sum to 1
+--   p(Right ANY) -- all kept mass; divide by it to renormalise,
+--                -- i.e. p(v | kept) = p(Right v) / p(Right ANY)
+observedCoin = observe (if Uniform < 0.3 then 1 else 0) (\v -> v == 1)
+truncNormal  = observe Normal (\v -> v > 0.0)
+
+
+-- ============================================================
 -- LIST LITERALS AND CONS
 -- ============================================================
 -- [e1, e2, e3]  -- literal

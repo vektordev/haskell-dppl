@@ -464,6 +464,42 @@ test_underflowedTailKeepsDimension = testCase "underflowedTailKeepsDimension" $ 
       assertEqual "and the result is not flagged impossible" (Just False) (resultImpossible res)
     other -> assertFailure ("expected a probability tuple, got: " ++ show other)
 
+-- Design mar-sum-types-observe §3: renormalising an observation needs no
+-- compiler feature of its own, because 'observe' keeps the result in Maybe --
+-- the conditional distribution p(v | Just) is the ratio of two ordinary
+-- probability queries, p(Just v) / p(Just ANY), and the denominator is what the
+-- structural-ANY marginalisation over the sum type provides. Pinned as a
+-- direct HUnit assertion rather than a .tst case because a ratio of two query
+-- results is not expressible in the .tst expectation language.
+test_observeRenormalizesViaJustAny :: TestTree
+test_observeRenormalizesViaJustAny = testCase "observeRenormalizesViaJustAny" $ do
+  -- Unconditionally: 1 with p=0.3, else 2 or 3 with p=0.35 each. Observing
+  -- "v /= 1" rejects the 1, so the renormalised posterior is 2 and 3 at 1/2 each.
+  let src = "main = observe (if Uniform < 0.3 then 1 else (if Uniform < 0.5 then 2 else 3)) (\\v -> not (v == 1))"
+  prog <- case tryParseProgram "<test>" src of
+    Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
+    Right p  -> return p
+  let probOf v = case runProb defaultCompilerConfig prog [] v of
+        Right (VProbDim p _) -> return p
+        other -> assertFailure ("expected a probability tuple, got: " ++ show other) >> return 0
+      approx name expected actual =
+        assertBool (name ++ ": expected " ++ show expected ++ ", got " ++ show actual)
+                   (abs (actual - expected) < 1.0e-9)
+  pJust2   <- probOf (VEither (Right (VInt 2)))
+  pJust3   <- probOf (VEither (Right (VInt 3)))
+  pJustAny <- probOf (VEither (Right VAny))
+  pNothing <- probOf (VEither (Left VUnit))
+  approx "p(Just 2)" 0.35 pJust2
+  approx "p(Just 3)" 0.35 pJust3
+  -- The denominator is the marginal over the whole Just branch, i.e. exactly
+  -- the mass the observation keeps.
+  approx "p(Just ANY)" 0.7 pJustAny
+  -- ... and the Maybe-valued result is a proper distribution to begin with:
+  -- nothing is renormalised away by 'observe' itself (umbrella N2b).
+  approx "p(Just ANY) + p(Nothing)" 1.0 (pJustAny + pNothing)
+  approx "p(2 | Just)" 0.5 (pJust2 / pJustAny)
+  approx "p(3 | Just)" 0.5 (pJust3 / pJustAny)
+
 -- The flag's own meaning, in the case where value-based detection is right but
 -- says nothing about why: a sample in the wrong Either arm is not a zero-valued
 -- density, it is an event the program cannot produce.
@@ -1644,6 +1680,7 @@ internalsTests = testGroup "Internals"
   , test_farTailEitherDensityNotZeroed
   , test_underflowedTailKeepsDimension
   , test_structurallyImpossibleSampleIsFlagged
+  , test_observeRenormalizesViaJustAny
   , test_uniformOffSupportIsImpossible
   , test_injFImageIsImpossible
   , test_letBoundEitherDestructureUsesSample

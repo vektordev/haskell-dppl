@@ -77,7 +77,7 @@ symbol :: MonadParser m => String -> m String
 symbol = L.symbol sc
 
 reserved :: [String]
-reserved = ["data", "if", "then", "else", "let", "in", "theta", "subtree", "error", "ThetaTree", "Left", "Right", "Real", "Uniform", "Normal"]
+reserved = ["data", "if", "then", "else", "let", "in", "theta", "subtree", "error", "observe", "ThetaTree", "Left", "Right", "Real", "Uniform", "Normal"]
 
 keyword :: MonadParser m => String -> m String
 keyword kw = lexeme $ try (string kw <* notFollowedBy (alphaNumChar <|> char '\'' <|> char '_'))
@@ -145,6 +145,38 @@ letInDestructor (Expr _ (InjF (Named "Cons") [x, xs])) = do
   let varName = "p_d" ++ show id
   return $ \v body -> letIn varName v (x' (lhead (var varName)) (xs' (ltail (var varName)) body))
 letInDestructor _ = fail "LHS of a letIn sould be an identifier or a complex type of identifiers"
+
+-- | @observe base pred@ -- conditioning as a total, Maybe-returning expression
+-- (design mar-sum-types-observe §2/§5). Both arguments are atoms, as for any
+-- other application, so a computed base or a lambda predicate is parenthesised:
+-- @observe (camNN sym) (\\v -> v == 0)@. Desugars via 'SPLL.Prelude.observe'
+-- into @let o = base in if pred o then right o else left ()@ over a fresh
+-- binder -- there is no @Observe@ 'Expr' constructor and no inference rule of
+-- its own; the existing let/if/Either machinery already gives the specified
+-- semantics (@p(Just v) = p(base = v) * p(pred v)@, @p(Nothing)@ the rest of
+-- the mass), and marginalising the binder out with @p(Just ANY)@ is the
+-- renormalisation denominator.
+pObserve :: MonadParser m => [ADTDecl] -> m Expr
+pObserve adts = do
+  keyword "observe"
+  base <- atom adts
+  predicate <- atom adts
+  case predicate of
+    -- A literal lambda is beta-reduced here rather than left as an 'Apply': the
+    -- binder becomes the lambda's own parameter and the body becomes the
+    -- condition verbatim. This is not cosmetic. Inference has to invert the
+    -- condition back onto the binding, and it can only do that for occurrences
+    -- it can see through -- an occurrence under an unreduced 'Apply' of a
+    -- 'Lambda' defeats both point inversion and the set-valued witness
+    -- fallback, so 'observe Normal (\v -> v > 0.0)' would refuse to compile
+    -- while the equivalent hand-written let/if idiom compiles fine. Capture is
+    -- not a concern: 'letIn' is an 'Apply' of a 'Lambda', so a free occurrence
+    -- of the same name inside @base@ is evaluated outside the new binding and
+    -- still refers to the outer one.
+    Expr _ (Lambda param body) -> return $ observeBound param base body
+    _ -> do
+      binderId <- demandUniqueNumber
+      return $ observe ("p_ob" ++ show binderId) base predicate
 
 pError :: MonadParser m => m Expr
 pError = do
@@ -544,6 +576,7 @@ keywordExpr adts = dbg "keywordExpr" $ choice [
     pLambda adts,
     pTheta adts,
     pSubtree adts,
+    pObserve adts,
     pError
   ] <* sc
 
