@@ -556,6 +556,13 @@ bindLambdaParam scope lambdaCn x =
 -- 'IRExpr' reading the let-bound cell holding p(node = value).
 type MarginalTable = [(Value, IRExpr)]
 
+-- | An orderable key for a domain value, so grid pairs can be grouped by the
+-- output they produce in one pass. 'Value' has no 'Ord' instance and giving it
+-- one would be a much wider change; a domain is a finite set of literal
+-- constants, on which 'show' is injective, which is all this needs.
+valueKey :: Value -> String
+valueKey = show
+
 -- | Tabulate an operand's marginal for one of the enumerable-InjF paths, or
 -- decline (in which case the caller re-descends as before). Declines unless the
 -- operand is itself a nested enumerable InjF -- see design point 2 above.
@@ -584,7 +591,7 @@ materializeMarginal meta e = case domainOf e of
   Nothing  -> return Nothing
   Just dom
     | isNestedEnumInjF e -> materializeConvolution meta e dom
-    | isEnumerable (tags ti) && pType ti /= Deterministic -> Just <$> pointQueryTable meta e dom
+    | isEnumerable (tags ti) && pType ti /= Deterministic -> pointQueryTable meta e dom
     | otherwise -> return Nothing
   where
     ti = getTypeInfo e
@@ -608,8 +615,8 @@ materializeConvolution meta e dom = case node e of
         case (mTblL, mTblR) of
           (Just tblL, Just tblR)
             | withinMaterializationBudget bound (length tblL * length tblR)
-            , Just grid <- forwardGrid (resolveInjF (rType (getTypeInfo e)) name) tblL tblR
-              -> Just <$> convolveTables meta dom grid
+            , Just buckets <- forwardGrid (resolveInjF (rType (getTypeInfo e)) name) tblL tblR
+              -> Just <$> convolveTables meta dom buckets
           _ -> return Nothing
   _ -> return Nothing
   where
@@ -618,24 +625,38 @@ materializeConvolution meta e dom = case node e of
     -- conservative "may share", like every other unknown in this analysis.
     mayShareLatent =
       Map.findWithDefault True (chainName (getTypeInfo e)) (latentVerdicts meta)
+    domKeys = Set.fromList (map valueKey dom)
     -- Evaluate the InjF's forward function on every operand-value pair at
-    -- compile time. Nothing if any pair fails to evaluate or produces a value
-    -- outside the node's own tagged domain -- either would silently drop mass.
-    forwardGrid fName tblL tblR = mapM pairCell [(lv, lc, rv, rc) | (lv, lc) <- tblL, (rv, rc) <- tblR]
+    -- compile time, and bucket the pairs by the output value they produce.
+    -- Nothing if any pair fails to evaluate or produces a value outside the
+    -- node's own tagged domain -- either would silently drop mass.
+    --
+    -- Bucketing here, rather than letting each cell filter the whole grid, is
+    -- what keeps a level's cost linear in the grid: the per-cell filter is
+    -- |domain| * |grid| value comparisons, which on a wide domain (the
+    -- cardinality guard permits several thousand cells) dominates everything
+    -- else the compiler does -- measured at 8.3s for a single generated
+    -- program before this, 0.3s after.
+    forwardGrid fName tblL tblR =
+      bucket <$> mapM pairCell [(lv, lc, rv, rc) | (lv, lc) <- tblL, (rv, rc) <- tblR]
       where
         pairCell (lv, lc, rv, rc) = case propagateValues (adtDecls meta) fName [[lv], [rv]] of
-          [v] | v `elem` dom -> Just (v, lc, rc)
-          _                  -> Nothing
+          [v] | valueKey v `Set.member` domKeys -> Just (valueKey v, (lc, rc))
+          _                                     -> Nothing
+        -- fromListWith prepends, so each bucket comes out in reverse grid
+        -- order; the reverse restores it, and the order is load-bearing (see
+        -- 'convolveTables' on why the fold order has to match the loop's).
+        bucket = Map.map reverse . Map.fromListWith (++) . map (fmap (: []))
 
 -- | Emit one let-bound cell per domain value out of the compile-time grid.
-convolveTables :: CompilerMetadata -> [Value] -> [(Value, IRExpr, IRExpr)] -> CompilerMonad MarginalTable
-convolveTables meta dom grid = do
+convolveTables :: CompilerMetadata -> [Value] -> Map.Map String [(IRExpr, IRExpr)] -> CompilerMonad MarginalTable
+convolveTables meta dom buckets = do
   cells <- mapM cellFor dom
   return (zip dom cells)
   where
     sr = semiringOf meta
     cellFor v = do
-      cellExpr <- sumTerms [term lc rc | (v', lc, rc) <- grid, v' == v]
+      cellExpr <- sumTerms [term lc rc | (lc, rc) <- Map.findWithDefault [] (valueKey v) buckets]
       cellName <- mkVariable "mat_cell"
       setVariables [(cellName, cellExpr)]
       return (IRVar cellName)
@@ -676,14 +697,67 @@ convolveTables meta dom grid = do
 -- the same IR today's loop body builds against the loop variable, with the
 -- constant substituted -- which is what makes the tabulated value bit-identical
 -- to the re-descended one.
-pointQueryTable :: CompilerMetadata -> Expr -> [Value] -> CompilerMonad MarginalTable
-pointQueryTable meta e dom = do
-  cells <- forM dom $ \v -> do
-    res <- toIRInference meta False e (IRConst (valueToIR v))
-    cellName <- mkVariable "mat_leaf"
-    setVariables [(cellName, unP (rProb res))]
-    return (IRVar cellName)
-  return (zip dom cells)
+--
+-- Unlike a convolution cell, which is a handful of references to cells below
+-- it, a leaf cell holds a whole compiled sub-inference -- so this is the one
+-- place where materialization multiplies real IR rather than rearranging it,
+-- and it is where an unaffordable unrolling actually shows up. A `ReadNN`
+-- digit read is a few nodes and ten of them cost nothing; an arbitrary
+-- enumerable expression (a deep if-tree over comparisons, say) can be
+-- thousands, and copying that per domain value blows the IR up by more than an
+-- order of magnitude -- measured 14x, and a 0.17s compile turning into 16s,
+-- before this guard.
+--
+-- So the first value is compiled in its own writer scope as a PROBE, and the
+-- whole table is declined -- with the probe's bindings discarded, never
+-- reaching the enclosing scope -- unless the unrolling it implies is
+-- affordable. The probe is kept and reused for its own cell rather than
+-- recompiled, so the measurement costs one sub-compile, not two.
+--
+-- Affordable is two conditions, because the total and the per-copy size are
+-- different failure modes: the total must fit the cardinality budget (the same
+-- "how much unrolling is affordable" question the guard asks of domains and
+-- grids), and the individual copy must be small enough to be worth copying at
+-- all ('maxTabulatedLeafNodes').
+pointQueryTable :: CompilerMetadata -> Expr -> [Value] -> CompilerMonad (Maybe MarginalTable)
+pointQueryTable _ _ [] = return Nothing
+pointQueryTable meta e dom@(v0 : vs) = do
+  (probeRes, probeBinds) <- lift $ runWriterT $ inferAt v0
+  let probeSize = irNodeCount (unP (rProb probeRes)) + sum (map (irNodeCount . snd) probeBinds)
+      bound = materializationCardinality (compilerConfig meta)
+      affordable = probeSize <= maxTabulatedLeafNodes
+                && withinMaterializationBudget bound (length dom * probeSize)
+  if not affordable
+    then return Nothing
+    else do
+      setVariables probeBinds
+      cell0 <- bindCell (unP (rProb probeRes))
+      cells <- forM vs (\v -> inferAt v >>= bindCell . unP . rProb)
+      return (Just (zip dom (cell0 : cells)))
+  where
+    inferAt v = toIRInference meta False e (IRConst (valueToIR v))
+    bindCell p = do
+      cellName <- mkVariable "mat_leaf"
+      setVariables [(cellName, p)]
+      return (IRVar cellName)
+
+-- | Node count of an IR expression, for the unrolling-size budget above.
+irNodeCount :: IRExpr -> Int
+irNodeCount e = 1 + sum (map irNodeCount (getIRSubExprs e))
+
+-- | How large a leaf's compiled inference may be and still be worth copying
+-- once per domain value. Not a second cardinality budget -- a statement about
+-- what a "leaf" is: past this size the node is a sub-program that happens to
+-- have a finite domain, and tabulating it multiplies IR instead of
+-- rearranging it, for a chain whose depth was never what made it slow.
+--
+-- Calibrated, not guessed. A `ReadNN` digit read -- the shape the whole design
+-- targets -- compiles to 10 nodes. Sweeping 250 generated programs, every leaf
+-- that made materialization a compile-time pessimization was 181 nodes or
+-- more (up to 5099, at which point a 0.17s compile became 16s). Nothing
+-- observed lands between; this sits in the gap.
+maxTabulatedLeafNodes :: Int
+maxTabulatedLeafNodes = 100
 
 -- | Read a materialized marginal at a runtime key: an unrolled if-chain over
 -- the tabulated domain. The final @else@ is the semiring zero, which is what a
