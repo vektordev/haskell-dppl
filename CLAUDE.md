@@ -16,12 +16,12 @@ probabilistic inference (sampling, exact probability, integration).
 ```bash
 stack build                    # Build
 stack test                     # Run all tests
-stack run -- -i file.spll compile -o output.py -l python   # Compile to Python
-stack run -- -i file.spll compile -l julia                  # Compile to Julia
-stack run -- -i file.spll generate                          # Forward sampling
-stack run -- -i file.spll probability -x 0.5                # Query P(X=0.5)
-stack run -- -i file.spll cumulative -x 0.5                 # CDF query P(X<=0.5)
-# Test selection (tasty patterns; top-level groups: Spec, Corpus, Parser, Internals, Rejection, Encode, Showcase, End2End):
+stack run -- -i file.ppl compile -o output.py -l python   # Compile to Python (-o is required)
+stack run -- -i file.ppl compile -o output.jl -l julia    # Compile to Julia
+stack run -- -i file.ppl generate                         # Forward sampling
+stack run -- -i file.ppl probability -x 0.5               # Query P(X=0.5)
+stack run -- -i file.ppl cumulative -x 0.5                # CDF query P(X<=0.5)
+# Test selection (tasty patterns; `--ta '-l'` lists every group and test name):
 stack test --ta '-p Spec'                # run one group
 stack test --ta '-p "!/End2End/"'        # everything except a group
 stack test --ta '-p TopK'                # any test whose name matches a substring
@@ -31,9 +31,11 @@ stack test --ta '-l'                     # list all test names
 TASTY_HIDE_SUCCESSES=false stack test
 ```
 
-CLI flags: `-v` verbosity, `-O LEVEL` optimization (0-2), `-k CUTOFF` top-K
-threshold, `-c` count branches, `-t` truncate boilerplate, `-d` debug
-intermediates (see below).
+Global flags (before the subcommand): `-v` verbosity, `-O LEVEL`
+optimization (0-2), `-k CUTOFF` top-K threshold, `-c` count branches, `-d`
+debug intermediates (see below), and the long-form `--pruneAnyChecks`,
+`--noIntegrate`/`--noProbability`/`--noGenerate`, `--noTypeCheck`,
+`--batched`, `--logSpace`. Per-subcommand flags: `--help`.
 
 To prevent having to run `stack test` repeatedly, e.g. to grep for specific
 failures, always store the test output to a temporary file and grep that.
@@ -42,14 +44,18 @@ failures, always store the test output to a temporary file and grep that.
 
 ```
 SPLL source (.spll/.ppl)
-  → Parser.hs (megaparsec)
-  → AST (Lang/Lang.hs, Lang/Types.hs)
-  → Type inference (Typing/RInfer.hs for return types, Typing/ModalityInfer.hs for probabilistic types)
+  → Parser.hs (megaparsec) → AST (Lang/Lang.hs, Lang/Types.hs)
+  → Validator.hs → Typing/RInfer.hs (return types)
+  → Analysis.hs (DiscreteValues tags) → Typing/ForwardChaining.hs (chain names)
+  → Typing/ModalityInfer.hs (PTypes) → Analysis.hs (IsConditional tags)
   → IRCompiler.hs → IR (IntermediateRepresentation.hs)
      Three compilation branches: generate, probability, integrate
-  → IROptimizer.hs (constant folding, CSE, let-in optimization, lambda→letIn refactoring)
-  → CodeGenPyTorch.hs or CodeGenJulia.hs
+  → IRSelectPass.hs (batched only) → IROptimizer.hs (const folding, CSE, let-in)
+  → CodeGenPyTorch.hs, CodeGenPyTorchBatched.hs, or CodeGenJulia.hs
 ```
+
+`SPLL.Prelude`'s `compile` is the authority on stage order; `-d` dumps the
+program after each one.
 
 Every SPLL program compiles into three function variants — **generate**
 (forward sampling), **probability** (density/mass at a point), and
@@ -60,22 +66,29 @@ deterministic).
 
 ## Key Types
 
-- **Expr** (`src/SPLL/Lang/Types.hs`): Main AST — includes `IfThenElse`,
-  `LetIn`, `Lambda`, `Apply`, `Uniform`, `Normal`, `ReadNN`, `InjF` (injected
-  functions like plus/mult), `Cons`, `TCons`, etc.
+- **Expr** (`src/SPLL/Lang/Types.hs`): Main AST. `ExprF` is a small closed
+  set — `IfThenElse`, `InjF` (injected functions like plus/mult), `Var`,
+  `Constant`, `Lambda`, `Apply`, `ThetaI`, `Subtree`, `ReadNN`. Everything
+  else is sugar assembled from those by `SPLL.Prelude`: `letIn x v b` is
+  `Apply (Lambda x b) v`, `Uniform`/`Normal` are `Var`s, `cons`/`tCons` are
+  `InjF`s.
 - **IRExpr** (`src/SPLL/IntermediateRepresentation.hs`): IR after
   compilation — `IRIf`, `IROp`, `IRLetIn`, `IRLambda`, `IRDensity`,
   `IRSample`, etc.
-- **TypeInfo**: Bundle of RType (return type: `TFloat`, `TBool`, `TInt`,
-  `ListOf`, `Tuple`, etc.), PType (probabilistic: `Deterministic`, `PNormal`,
-  `PLogNormal`, `Integrate`, `Bottom`), and CType (constraints).
-- **Value**: Runtime values — `VFloat`, `VInt`, `VBool`, `VList`, `VTuple`,
-  `VEither`, `VClosure`, `VThetaTree`, `VSymbol`, `VBranch`, `VADT`, `VAny`
-  (VAny is used only for marginal queries).
+- **TypeInfo**: `rType` (return type: `TFloat`, `TBool`, `TInt`, `TSymbol`,
+  `ListOf`, `Tuple`, `TEither`, `TADT`, `TArrow`, etc.), `pType`
+  (probabilistic: `Deterministic`, `PNormal`, `PLogNormal`, `Integrate`,
+  `Bottom`, and `NotSetYet` before inference runs), `chainName`, and `tags`
+  (`DiscreteValues`, `IsConditional`). `PType`'s `PArr`/`TVar` are dead code.
+- **Value** (`= GenericValue Expr`): Runtime values — `VFloat`, `VInt`,
+  `VBool`, `VSymbol`, `VUnit`, `VList`, `VTuple`, `VEither`, `VADT`,
+  `VClosure`, `VThetaTree`, `VError`, plus `VAny`/`VAnyExcept` (used only for
+  marginal queries).
 - **MultiValue**: Structured set of possible values for neural network
   output annotation — `MultiDiscretes [Value]`,
   `MultiTuple MultiValue MultiValue`, `MultiEither MultiValue MultiValue`,
-  `MultiADT [(String, [MultiValue])]`, `MultiTypeRef String`.
+  `MultiADT [(String, [MultiValue])]`, `MultiTypeRef String`,
+  `MultiContinuous` (a `Real` leaf), `MultiAuto` (the `_` placeholder).
 - **CompilerConfig**: Controls verbosity, optimization level, top-K
   threshold, branch counting, plus flags `pruneAnyChecks`, `noIntegrate`,
   `noProbability`, `noGenerate`, `batched`, `logSpace`.
@@ -112,19 +125,32 @@ Deterministic  >  PNormal, PLogNormal  >  Integrate  >  Bottom
 families) whose meet is `Integrate`. Deterministic values need no
 inference; `PNormal`/`PLogNormal` allow closed-form Gaussian shortcuts;
 `Integrate` values have a known CDF (via trusted special functions like
-`erf`); `Bottom` values can only be sampled from. Each PType implies the
-semantics of lower types are available.
+`erf`); `Bottom` values offer nothing better than sampling. Each PType
+implies the semantics of lower types are available.
+
+### Modality: the layer `PType` projects from
+
+`PType` is not the probabilistic type system but a flat, lossy projection of
+one: `Typing/Modality.hs` carries a capability lattice (subsets of
+`{CanSample, CanDensity, CanIntegrate, CanExact}`) crossed with orthogonal
+support-finiteness and distribution-family axes, and `Typing/ModalityInfer.hs`
+infers it bottom-up before `projectGround` flattens it onto the five `PType`
+rungs. Read those two modules before changing what an expression is allowed to
+do — notably, `PNormal` and `Integrate` are the same capability rung differing
+only by family, and `Bottom` is a collapse of four distinct levels.
 
 ### Inference for non-invertible observations
 
 Two IRCompiler engines handle `let`-bindings whose observation can't be
-point-inverted onto the bound variable: **set-valued witnesses**
-(`setWitnessApply`, for observations that cross a comparison or `if`) and
-**plan-guided lazy enumeration** (`planWitnessApply`, for observations over
-a neural network's structured output). Both are tried before
+point-inverted onto the bound variable: **plan-guided lazy enumeration**
+(`planWitnessApply`, for observations over a neural network's structured
+output) and **set-valued witnesses** (`setWitnessApply`, for observations
+that cross a comparison or `if`). Plan enumeration is tried *before*
 forward-chaining point inversion, whose inverses would otherwise crash on
-these shapes. Full mechanism, examples, and the `testCases/planEnum*`
-pointers: `docs/witness-inversion-engines.md`.
+those shapes; set-valued witnesses are the fallback *after* it, taken when
+no occurrence of the bound variable is point-invertible at all. Full
+mechanism, examples, and the `testCases/planEnum*` pointers:
+`docs/witness-inversion-engines.md`.
 
 ### `observe` (Maybe-valued conditioning)
 
@@ -148,12 +174,17 @@ constructor slot).
 ### topK Branch Pruning
 
 `topKThreshold :: Maybe Double` in `CompilerConfig` enables
-probability-based branch pruning: the IRCompiler wraps each `IfThenElse`
-in probability mode with guards — if `p_cond < threshold` only the else
-branch is evaluated, if `p_cond > 1 - threshold` only the then branch,
-otherwise both. The same threshold filters enumerable `InjF` branches by
-left-parameter probability. Pruned branches contribute zero — this is a
-performance optimisation, not an approximation.
+probability-based branch pruning. The compiler threads an `accProb` (the
+probability of reaching the current point) through inference; each
+`IfThenElse` arm in probability mode is guarded on its *accumulated* path
+probability (`accProb * p_cond`) against `TOP_K_CUTOFF`, and an arm below
+the cutoff is dropped. The same threshold filters enumerable `InjF`
+branches by `accProb * p_left`.
+
+Pruning is **lossy** — a dropped branch's mass is simply gone. Hence the
+one-sided invariants: topK never *inflates* a probability
+(`Corpus.TopKNeverInflates`), and only threshold 0 is exact
+(`Corpus.TopKZeroThreshMatchesExact`).
 
 ### Dimension Counting
 
@@ -177,8 +208,8 @@ constructed by routing through it — or one of two escape hatches,
 `unsafeLinearP` and `sealP`, for subsystems that assemble bespoke
 `IRExpr` formulas (grepping `unsafeLinearP` finds them). Every
 probability is computed through a `Semiring` record that's either linear
-or log-space (`logSpace` in `CompilerConfig`, CLI `--logSpace`), picked
-once per function. **Never hand-write a linear identity on a
+or log-space (`logSpace` in `CompilerConfig`, CLI `--logSpace`), fixed for
+the whole compile. **Never hand-write a linear identity on a
 probability** — use `srComplement`/`srZero`, not raw arithmetic, since
 under log space those are silently different numbers. Full vocabulary,
 the rest of the log-space gotchas, and the `shareResult` zero-guard
@@ -195,10 +226,13 @@ while still possible, and an approximate zero test can discard merely-tiny
 densities. `mixWith` branches on the flag alone.
 
 Leaves are possible; `indicatorP`/`guardP` set it on failure; `prodP` ORs;
-`mixWith` consumes it (impossible only if every alternative is). It's
-spelled as an `IRIf`, never `OpOr`/`OpAnd`, since both operands of an IR
-boolean op are evaluated and the guarded-against condition is often what
-makes evaluating the other side safe. The compiled result shape is
+`mixWith` consumes it (impossible only if every alternative is).
+`impossibleWhen`, which folds a *fresh* condition onto an existing flag,
+spells that as an `IRIf` rather than an `OpOr`: both operands of an IR
+boolean op are evaluated, and the guarded-against condition is often what
+makes evaluating the other side safe or terminating. Combining two
+already-computed flags (`prodP`, `mixWith`) uses plain `orIR`/`andIR`. The
+compiled result shape is
 `(prob, (dim, imposs))`, or with `countBranches`, `(prob, (dim, (bc,
 imposs)))`; consumers match it through the `VProbDim`/`VProbDimBC` pattern
 synonyms and `resultImpossible`, never the raw tuple shape.
@@ -216,10 +250,10 @@ traversed (leaves emit 0 or 1, branches sum their children); a pruned
 `checkQueryType :: Bool` (default `True`, CLI opt-out `--noTypeCheck`)
 wraps every prob/integ function root in a guard checking the query value
 structurally conforms to the program's return type (`IRConformsTo`,
-consumed by all three backends) — without it, a wrong-typed query either
-silently returns a bogus number or hits a deep panic. The marginal
-wildcard (`VAny`) is accepted at every level so marginal queries aren't
-penalized.
+consumed by the three scalar backends; batched mode strips the root guard
+instead) — without it, a wrong-typed query either silently returns a bogus
+number or hits a deep panic. The marginal wildcard (`VAny`) is accepted at
+every level so marginal queries aren't penalized.
 
 ### Debug: Intermediate Stage Dump (`-d`)
 
@@ -236,6 +270,7 @@ fully-annotated AST after each pipeline stage to stderr via
 | After Modality Inference | `pType` populated |
 | After Conditional Annotation | `IsConditional` tags appear on conditioned distributions |
 | After IR Compilation (pre-optimization) | Pseudo-code IR before any optimizer passes |
+| After Select Pass | `IRIf` → `IRSelect` retagging (a no-op unless `--batched`) |
 | After Optimization | Pseudo-code IR after constant folding, CSE, let-in optimization |
 
 Use this to identify which stage introduced a defect when a program
@@ -248,10 +283,11 @@ Modality Inference.
 Neural networks are declared separately as
 `NeuralDecl = (String, RType, Maybe MultiValue)` and enter the global type
 environment before inference; `ReadNN name param` calls the named network
-at runtime. A `MultiValue` annotation on the declaration lets
-`InferenceRule` matching select enum-aware algorithms for downstream
-comparisons — except a continuous leaf (`Real`, incl. `_` on a `Float`
-slot) is never tagged for enumeration, since enumerating only the discrete
+at runtime. A `MultiValue` annotation on the declaration becomes a
+`DiscreteValues` tag (`Analysis.hs`), which is what lets `IRCompiler` pick
+enum-aware algorithms for downstream comparisons — except that an
+annotation containing a continuous leaf anywhere (`Real`, incl. `_` on a
+`Float` slot) is declined entirely, since enumerating only the discrete
 residue would silently drop continuous mass.
 
 The `of ...` clause mirrors the output `RType`:
@@ -259,7 +295,7 @@ The `of ...` clause mirrors the output `RType`:
 ```
 multival ::= _     -- MultiAuto: auto-derive from RType
            |  Real -- Float leaf
-           |  [value1, value2]'     -- MultiDiscretes: explicit enumeration
+           |  [value1, value2]      -- MultiDiscretes: explicit enumeration
            |  (multival, multival)  -- MultiTuple
            |  '(' multival '|' multival ')'              -- MultiEither
            |  '{' ctor multival* ('|' ctor multival*)* '}' -- MultiADT
@@ -278,27 +314,31 @@ is auto-detected.
 ## Test Structure
 
 The suite runs under tasty (`tasty-quickcheck` for properties, `tasty-hunit`
-for unit tests). Each module exports a `TestTree`; `Spec.hs` assembles them
-under the groups Spec / Corpus / Parser / Internals / Rejection / Encode /
-Showcase / End2End.
+for unit tests). Each module exports a `TestTree` which `Spec.hs` assembles
+into the top-level groups (`--ta '-l'` prints the current list):
 
-- `test/Spec.hs` — main entry, static Spec properties, and the Corpus
-  group of metamorphic properties (sampling-vs-PDF, topK, branch counting,
-  P(ANY)=1, validation) generated from `testCases/`
+- `test/Spec.hs` — main entry, the static `Spec` properties, and the
+  `Corpus` group of metamorphic properties generated from `testCases/`
+  (validation, sampling-vs-PDF, topK, branch counting, P(ANY)=1, log-space
+  vs linear)
 - `test/TestParser.hs` / `TestInternals.hs` — parser and internal-function
   unit tests
-- `test/TestRejection.hs` — unhappy-path tests: invalid or ill-typed
-  programs are rejected with the expected reason
-- `test/TestEncodeProperties.hs` — AutoNeural encode tests, plus
-  corpus-driven roundtrip checks that encode/decode preserves slot layout
-  and slot semantics
-- `test/TestShowcase.hs` — documentation drift guard: checks
-  `examples/showcase.ppl`/`.tst`, freezes named definitions, and compiles
-  every ` ```spll ` block in `README.md` as a doctest
-- `test/End2EndTesting.hs` — integration tests from `testCases/`
-  `.ppl`/`.tst` pairs
-- `test/TestCaseParser.hs` / `ArbitrarySPLL.hs` — the `.tst` parser and
-  QuickCheck `Arbitrary` instances
+- `test/TestRejection.hs` — unhappy-path: invalid or ill-typed programs must
+  be rejected with the expected reason
+- `test/TestModality.hs` / `TestModalityInfer.hs` — the capability lattice
+  and its projection; hand-verified modalities the engine must pin
+- `test/TestDeterminism.hs` — the forward determinism dataflow and its
+  call-graph fixpoint
+- `test/TestEncodeProperties.hs` — AutoNeural encode, plus corpus-driven
+  encode/decode roundtrip checks on slot layout and semantics
+- `test/TestShowcase.hs` — documentation drift guard: `examples/showcase.*`
+  (incl. the `.freeze` definitions) and every ` ```spll ` block in
+  `README.md` as a doctest
+- `test/End2EndTesting.hs` — `.ppl`/`.tst` integration against interpreter,
+  Julia and Python, plus the batched groups (see Batched Mode below)
+- `test/TestFuzz.hs` — `Fuzz`, inside the opt-in `Slow`/`SuperSlow` groups
+- `test/TestCaseParser.hs` / `ArbitrarySPLL.hs` / `TestTolerances.hs` — the
+  `.tst` parser, QuickCheck generators, shared numeric tolerances
 
 A `.tst` file may start with two optional header lines, in either order: a
 routing header `backends: interpreter, julia, python` (any non-empty
@@ -329,8 +369,9 @@ default (non-slow) suite is the gate.
 
 Tests expensive enough to noticeably slow `stack test` but unlikely to
 catch regressions elsewhere are skipped by default, run via
-`NEST_SLOW_TESTS=1 stack test`: a `.tst` file's `slow` header, or a
-`TestInternals.hs` case placed in `slowInternalsTests`.
+`NEST_SLOW_TESTS=1 stack test`: a `.tst` file's `slow` header, a
+`TestInternals.hs` case placed in `slowInternalsTests`, and the whole
+`Fuzz` group.
 
 ### Benchmarks
 
@@ -357,8 +398,9 @@ program (needs a torch-enabled Python, same lookup as `BatchedPython`).
 generated SPLL programs (`test/ArbitrarySPLL.hs`) against the same
 metamorphic invariants the hand-written corpus checks — P(ANY)=1, topK
 never inflates probability, branch counting doesn't change the
-probability value, probability is never negative — rather than known
-expected values. Details, the raw-vs-typed generator split, and the
+probability value, probability is never negative, mixtures follow the
+dimension-combination rules — rather than known expected values, plus
+crash-freedom on both generators. Details, the raw-vs-typed split, and the
 `SuperSlow` sampling-vs-PDF tier: `docs/fuzz-testing.md`.
 
 ### Batched Mode (PyTorch tensorizer)

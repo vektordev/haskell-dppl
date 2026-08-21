@@ -6,9 +6,11 @@ hand-written corpus checks in `Spec.hs`'s Corpus group, rather than known
 expected values. `genRawFuzzProgram`/`genRawFuzzExpr` cover the full AST
 space and are only useful for crash-freedom (almost every draw is
 ill-typed); `genTypedProgram`/`genTypedExpr` build well-typed scalar
-programs and drive the real invariants (P(ANY)=1, topK never inflates
-probability, branch counting doesn't change the probability value,
-probability is never negative). Each property caps structural size and
+programs and drive the real invariants (programs validate, P(ANY)=1,
+probability is never negative, topK at threshold 0 reproduces exact
+inference and at a real threshold never inflates it, branch counting
+doesn't change the probability value, and mixtures follow the
+dimension-combination rules). Each property caps structural size and
 wraps each case in a wall-clock timeout. Since most draws end up with no
 probability function to check, every such branch returns `discardVacuous`
 rather than `property True`, so QuickCheck's own discard-ratio accounting

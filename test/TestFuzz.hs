@@ -5,8 +5,8 @@
 --
 -- Two generators feed these properties (see ArbitrarySPLL.hs):
 --
---   * 'genRawFuzzProgram' -- the full Expr/Program AST space (all 11
---     constructors, wide Constant leaves, arbitrary identifiers). Almost
+--   * 'genRawFuzzProgram' -- the full Expr/Program AST space (every 'ExprF'
+--     constructor, wide Constant leaves, arbitrary identifiers). Almost
 --     every draw is ill-typed or otherwise invalid.
 --
 --   * 'genTypedProgram' -- a narrower, well-typed-by-construction generator

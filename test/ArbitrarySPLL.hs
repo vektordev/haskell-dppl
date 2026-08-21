@@ -104,7 +104,7 @@ genExpr n = oneof [
   (\e i -> Expr makeTypeInfo (Subtree e i)) <$> genExpr (n `div` 2) <*> arbitrary
   ]
 
--- | Full Expr-constructor coverage (all 11 constructors, including ReadNN),
+-- | Full Expr-constructor coverage (every 'ExprF' constructor, incl. ReadNN),
 -- for use by generators that only need to feed the compiler, not round-trip
 -- through the parser's pretty-printer.
 genRawFuzzExpr :: Int -> Gen Expr

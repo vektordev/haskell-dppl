@@ -26,8 +26,9 @@ Grepping `unsafeLinearP` is the "which subsystems ignore `logSpace`" audit.
 `logSpace :: Bool` in `CompilerConfig` (CLI `--logSpace`) computes
 probabilities as **logs** so deep tails and long products don't underflow.
 The `PResult` combinators read their operators off a single `Semiring`
-record, picked once per function by `semiringOf` (log-sum-exp instead of
-`+`, `-inf` instead of `0`). `topK` pruning's accumulator and cutoff are
+record that `semiringOf` derives from the `CompilerConfig` (log-sum-exp
+instead of `+`, `-inf` instead of `0`); since the config is fixed for a
+compile, so is the semiring. `topK` pruning's accumulator and cutoff are
 semiring-aware too. Two consequences worth internalising before touching
 `toIRInference`:
 
