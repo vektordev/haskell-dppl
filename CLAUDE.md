@@ -190,21 +190,75 @@ one-sided invariants: topK never *inflates* a probability
 
 ### Marginal Materialization
 
-`materializationCardinality :: Int` (default 10000) is the cardinality
-budget for **marginal materialization**: the largest finite
-`DiscreteValues` domain whose marginal the compiler will tabulate up
-front. `Analysis.materializationDomain` is the guard — a total predicate
-over a node's tags returning the domain to tabulate or `Nothing`
-("fall back to today's point-query path"); anything unannotated,
-non-finite, or over budget answers `Nothing`, since over-refusing costs
-performance while under-refusing costs correctness silently. The same
-budget bounds the operand *grid* a convolution unrolls, because a
-materialized table is let-bound scalar cells rather than a runtime array
-(`IRExpr` has no dense array; `IRIndex` is an O(n) cons-cell walk) —
-"the domain is small" and "the unrolling is affordable" are one question,
-not two, and a change to either has to be made on both. The budget is
-per-node, deliberately not cumulative across nesting levels. Set it to 0
-to disable materialization entirely.
+A point query on a nested enumerable `InjF` chain (`readMNist(a) ++
+readMNist(b) ++ …`) re-descends into its left operand once per enumerated
+value, and that descent is *eager* — so an n-term chain costs
+`T(n) = |D(n-1)|·T(n-1)`, super-exponential. No optimizer pass recovers
+it: the recomputation is a runtime loop re-entry, not duplicated IR.
+
+**Tier 0 materialization** replaces it with a streaming convolution. When
+an *operand* is itself such a chain, its marginal is tabulated once over
+its finite domain — one let-bound scalar cell per value, each cell an
+unrolled convolution over the operand grid — and the loop body reads a
+cell instead of re-descending. Measured on n-term digit addition (emitted
+Python): 14x faster at n=4, 87x at n=5, 626x at n=6, ~3900x at n=7
+(52.8s → 0.014s), with neural-cell evaluations going from ×10 per added
+term to exactly quadratic.
+
+Three things make it cheap, and each is load-bearing:
+
+- Cells are **let-bound scalars, not an IR table**. `IRExpr` has no dense
+  array and `IRIndex` is an O(n) cons-cell walk, so a runtime table would
+  turn the `O(n·range)` DP into `O(n·range²)` on the path the whole
+  corpus runs on.
+- Only an operand that is **itself** a nested enumerable `InjF` is
+  tabulated; the queried node keeps the ordinary path. Tabulating the
+  queried node would be a pessimization for an invertible op (its point
+  query costs `O(|D_left|)`, its table `|D_left|·|D_node|`, and one cell
+  is read). A two-term program's emitted IR is therefore unchanged.
+- Tables are built by evaluating the InjF's **forward** function at
+  compile time over the operand grid (`propagateValues`, the same
+  evaluator Analysis uses for the domains), never by inverting — so
+  forward-only ops (`and`/`or`/`max`) need no special case, and cell terms
+  accumulate in the same order the enumeration loop does, making the
+  result bit-identical to the path it replaces rather than merely close.
+
+`topK` is preserved exactly: `accProb` is only modified at an
+`IfThenElse`, so every level of a chain shares one `accProb` and the
+per-term guard is the same test on the same value, dropping exactly the
+terms the in-loop cutoff drops. `rImposs` is deliberately not tracked per
+cell — the enumeration paths already discard a sub-result's dim, branch
+count and flag, deriving the node's own flag from the summed mass via
+`opaqueMass`.
+
+Two preconditions gate it, and both refuse rather than analyse:
+
+- **Decomposability** (`materializationVerdicts`): tabulating two
+  operands separately is wrong if they share an enumerated latent
+  (`testCases/letThreadEnumerable` is the canary,
+  `testCases/sharedLatentNestedChain` the nested one). Unlike
+  `injFLatentVerdicts`, this walk binds lambda parameters, each to a
+  latent identity of its own.
+- **Cardinality** (`materializationCardinality :: Int`, default 10000, in
+  `CompilerConfig`): `Analysis.materializationDomain` is a total
+  predicate over a node's tags returning the domain to tabulate or
+  `Nothing`; anything unannotated, non-finite, or over budget answers
+  `Nothing`, since over-refusing costs performance while under-refusing
+  costs correctness silently. The same budget bounds the operand *grid* a
+  convolution unrolls — "the domain is small" and "the unrolling is
+  affordable" are one question, not two, and a change to either has to be
+  made on both. Per-node, deliberately not cumulative across nesting
+  levels. Set it to 0 to disable materialization entirely (the
+  differential tests' off-switch).
+
+A leaf cell holds a whole compiled sub-inference rather than a few
+references, so it is the one place materialization multiplies IR instead
+of rearranging it. `pointQueryTable` compiles the first value as a probe,
+measures it, and declines the table unless the copy is small
+(`maxTabulatedLeafNodes`) and the total fits the budget — a `ReadNN`
+digit read is 10 IR nodes, while an arbitrary enumerable if-tree can be
+thousands, where copying per value cost 14x the IR and turned a 0.17s
+compile into 16s.
 
 ### Dimension Counting
 
