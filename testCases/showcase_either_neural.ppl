@@ -1,0 +1,4 @@
+-- Showcase Level 0 (design sum-type-showcase): a neural network returning an
+-- Either, queried at exact classes on both sides of the sum.
+neural eitherNN :: (Symbol -> Either Int Bool) of ([0, 1, 2] | [True, False])
+main sym = eitherNN sym

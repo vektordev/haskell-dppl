@@ -1,0 +1,5 @@
+-- Showcase Level 2 (design sum-type-showcase): structural MAR over a neural
+-- Either with discrete inner types. `p(Left ANY)` sums the network's mass over
+-- the whole Left support, and the two constructor marginals sum to one.
+neural eitherNN :: (Symbol -> Either Int Bool) of ([0, 1, 2] | [True, False])
+main sym = eitherNN sym

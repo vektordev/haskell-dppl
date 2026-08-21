@@ -1,0 +1,11 @@
+-- Showcase Level 3 (design sum-type-showcase): userspace `observe` with a
+-- continuous base and an inequality predicate -- a truncated Normal. The kept
+-- arm is a dim-1 density restricted to the positive half-line; the rejected arm
+-- is the dim-0 mass of the complement, measured through the CDF by the
+-- set-valued witness machinery (design set-valued-witnesses).
+--
+-- `p(Right ANY)` (= P(Just ANY) = 0.5) is NOT queried here: structural MAR
+-- inside a constructor slot of a *continuous* comparison target is the known
+-- open gap of observe-partials-umbrella. It crashes rather than answering, so
+-- it graduates into this .tst when that gap closes.
+main = let v = Normal in if v > 0.0 then right v else left ()

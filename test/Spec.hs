@@ -250,7 +250,7 @@ logSpaceUncoveredPrograms :: [String]
 logSpaceUncoveredPrograms =
   [ "letProbIntervalPair", "letProbIf", "letProbCmp", "letProbAbsNormal"
   , "setWitnessTupleDisjointFields", "letBoundEitherDestructure"
-  , "eitherIfDeconstructObserve", "observeKeywordTruncated"
+  , "eitherIfDeconstructObserve", "observeKeywordTruncated", "showcase_observe_inequality"
   ]
 
 checkLogSpaceMatchesLinear :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property

@@ -1,0 +1,3 @@
+-- Showcase Level 0 (design sum-type-showcase): an IfThenElse whose arms carry
+-- different Either constructors. Exact queries route through the branch mixture.
+main = if Uniform < 0.3 then left 1 else right 0

@@ -1,0 +1,6 @@
+-- Showcase Level 1 (design sum-type-showcase): projecting out of a neural
+-- Either. `fromLeft` is total (task maybe-partial-functions): it returns
+-- `Just x = right x` on a Left and `Nothing = left ()` on a Right, so the
+-- Right branch of the network shows up as the whole mass of `Left ()`.
+neural eitherNN :: (Symbol -> Either Int Bool) of ([0, 1, 2] | [True, False])
+main sym = fromLeft (eitherNN sym)

@@ -1,0 +1,12 @@
+-- Showcase Level 4 (design sum-type-showcase): the same fusion chained over a
+-- third sensor. A compound agreement predicate is the userspace spelling of
+-- `observeFurther`, and the kept mass is the triple product
+-- P_cam(k) * P_depth(k) * P_audio(k).
+neural camNN   :: (Symbol -> Int) of [0, 1, 2]
+neural depthNN :: (Symbol -> Int) of [0, 1, 2]
+neural audioNN :: (Symbol -> Int) of [0, 1, 2]
+main img depth au =
+  let v = camNN img in
+  let w = depthNN depth in
+  let u = audioNN au in
+  if (v == w) && (v == u) then right v else left ()

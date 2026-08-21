@@ -1,0 +1,15 @@
+-- Showcase Level 4 (design sum-type-showcase): discrete product of experts.
+-- Two sensors are fused by *observing their agreement* rather than mixing them:
+-- conditioning on `v == w` weights each class by the product of the two
+-- networks' class probabilities, so `p(Just k) = P_cam(k) * P_depth(k)` and
+-- `p(Just ANY) = Z = sum_k P_cam(k) * P_depth(k)` is the fusion evidence.
+--
+-- Both experts must be let-bound: the enumeration that produces the product
+-- fires on nested let-bound enumerables, and an inline `camNN img == depthNN d`
+-- instead compiles the right-hand side through the *generator*.
+neural camNN   :: (Symbol -> Int) of [0, 1, 2]
+neural depthNN :: (Symbol -> Int) of [0, 1, 2]
+main img depth =
+  let v = camNN img in
+  let w = depthNN depth in
+  if v == w then right v else left ()

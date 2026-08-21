@@ -1,0 +1,3 @@
+-- Showcase Level 1 (design sum-type-showcase): `isLeft` over a branch whose
+-- arms carry different constructors. P(isLeft) is the branch probability.
+main = isLeft (if Uniform < 0.3 then left 1 else right 0)
