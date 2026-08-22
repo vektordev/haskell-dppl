@@ -42,12 +42,14 @@ module SPLL.Typing.ModalityInfer
 
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
+import qualified Data.Set as Set
+import Data.Graph (SCC(..), stronglyConnComp)
 import Data.List (find)
 
 import SPLL.Lang.Types
   ( Expr(..), ExprF(..), Program(..), TypeInfo(..), InjFName(..), ChainName, ADTDecl, CompilerError, FnDecl
   , dataName, constructors )
-import SPLL.Lang.Lang (getTypeInfo)
+import SPLL.Lang.Lang (getTypeInfo, containedVars, varsOfExpr)
 import SPLL.Typing.Typing (setPType)
 import SPLL.Typing.PType (PType(..))
 import SPLL.Typing.RType (RType(..))
@@ -542,23 +544,58 @@ tryNormalClosure _      _                           = Nothing
 -- The vector fixpoint over top-level declarations
 -- ---------------------------------------------------------------------------
 
--- | The /greatest/-fixpoint summaries of every top-level declaration, computed
--- by Kleene iteration seeded at 'topI'. The body operator is monotone-decreasing
--- (every rule only loses capability), so from the top seed the sequence descends
--- in the finite-height lattice and converges. Recursive and mutually-recursive
--- calls read the current approximation; non-recursive declarations reach their
--- value in one step regardless of the seed. (Pure non-terminating recursion would
--- sit at the top — the totality axis, design §10, is the principled handle and is
--- deferred.)
+-- | The /greatest/-fixpoint summaries of every top-level declaration.
+--
+-- The body operator is monotone-decreasing (every rule only loses capability),
+-- so a recursive declaration's modality is a greatest fixpoint: seed at 'topI'
+-- and let Kleene iteration descend to the stable value in the finite-height
+-- lattice.
+--
+-- The iteration is staged over the /call graph's/ strongly-connected components
+-- in dependency order (callees first) rather than run globally over every
+-- declaration at once. Chaotic-iteration staging reaches the same greatest
+-- fixpoint — a component's operator only reads components below it, which are
+-- already at their fixpoint — but it means a declaration that is not part of a
+-- cycle is inferred exactly /once/, with no convergence test at all.
+--
+-- That distinction is a performance cliff, not a micro-optimisation: the
+-- convergence test 'eqI'/'subI' compares two 'IArr' transfers /pointwise over
+-- the ground input lattice/, and for a curried n-ary function it recurses
+-- down the whole arrow spine doing so — @|reprInputs|^n@ re-inferences of the
+-- body. On @main s1 .. sn = readMNist(s1) ++ .. ++ readMNist(sn)@ the global
+-- iteration therefore spent ~6x more time per added parameter (task
+-- @modality-param-ptype-exponential@: 58s at n=8) for a program with no
+-- recursion at all. Only a genuine cycle now pays a convergence test, and it
+-- pays it over its own members only.
+--
+-- The call graph over-approximates: a body's referenced 'Var' names are taken
+-- flat, so a lambda parameter that shadows a declaration name counts as a call.
+-- Over-approximating merges components, which only costs iterations; it never
+-- changes the fixpoint. (Pure non-terminating recursion would sit at the top —
+-- the totality axis, design §10, is the principled handle and is deferred.)
 summaries :: [ADTDecl] -> FCData -> [FnDecl] -> Env
-summaries adts fcData decls = go initial (50 :: Int)
+summaries adts fcData decls = foldl solve Map.empty components
   where
-    initial = Map.fromList [ (n, topI (rType (getTypeInfo b))) | (n, b) <- decls ]
-    step env = Map.fromList [ (n, fst3 (inferE (declCtx b) env b)) | (n, b) <- decls ]
-    go env 0 = env
-    go env k = let env' = step env
-               in if converged env env' then env' else go env' (k - 1)
-    converged a b = and [ eqI (a Map.! n) (b Map.! n) | (n, _) <- decls ]
+    declNames  = Set.fromList (map fst decls)
+    components = stronglyConnComp
+                   [ ((n, b), n, callees b) | (n, b) <- decls ]
+    callees b  = Set.toList (Set.intersection declNames (containedVars varsOfExpr b))
+
+    -- A declaration outside every cycle: one inference against the already
+    -- solved components it depends on, no seed and no convergence test.
+    solve env (AcyclicSCC (n, b)) = Map.insert n (inferDecl env b) env
+    -- A cycle (including a self-recursive declaration): Kleene iteration over
+    -- the component's members only, seeded at the top.
+    solve env (CyclicSCC grp) = go (foldr seed env grp) (50 :: Int)
+      where
+        seed (n, b) e = Map.insert n (topI (rType (getTypeInfo b))) e
+        step e = foldr (\(n, b) e' -> Map.insert n (inferDecl e b) e') e grp
+        go e 0 = e
+        go e k = let e' = step e
+                 in if converged e e' then e' else go e' (k - 1)
+        converged a b = and [ eqI (a Map.! n) (b Map.! n) | (n, _) <- grp ]
+
+    inferDecl env b = fst3 (inferE (declCtx b) env b)
     fst3 (x,_,_) = x
     declCtx b = ICtx adts fcData (cnOf b)
 

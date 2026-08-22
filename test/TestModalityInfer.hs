@@ -12,7 +12,11 @@
 module TestModalityInfer (modalityInferTests) where
 
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (testCase, assertEqual, assertBool)
+import Test.Tasty.HUnit (testCase, assertEqual, assertBool, assertFailure)
+
+import Control.Exception (evaluate)
+import Data.List (intercalate)
+import System.Timeout (timeout)
 
 import SPLL.Lang.Types (Program(..), Expr(..), ExprF(..), TypeInfo(..))
 import SPLL.Lang.Lang (getTypeInfo, getSubExprs)
@@ -306,4 +310,49 @@ modalityInferTests = testGroup "ModalityInfer"
           assertEqual "" Bottom $
             mainPType "main = let x = Uniform in (x, x + Uniform + Uniform)"
       ]
+
+  -- Task @modality-param-ptype-exponential@: the annotation on a lambda-bound
+  -- parameter occurrence is the ONLY pType that consults the top-level summary
+  -- environment, so it is the first thing to demand the declaration fixpoint.
+  -- While that fixpoint was iterated globally, its convergence test compared
+  -- two 'IArr' transfers pointwise over the ground input lattice, recursing
+  -- through the whole curried arrow spine -- |reprInputs|^n re-inferences of
+  -- the body for an n-ary function, ~6x per added parameter (58s at n=8 for a
+  -- program with no recursion at all). Staging the fixpoint over the call
+  -- graph's SCCs means a non-recursive declaration is inferred once with no
+  -- convergence test. Nothing in the compiler forces these annotations today,
+  -- so only a direct test catches a re-regression.
+  , testGroup "parameter pType is not exponential in the parameter count"
+      [ testCase "10-parameter neural chain: every parameter pType forced" $ do
+          let n     = 10
+              prog  = typeProg (curriedNeuralChain n)
+              pts   = [ pType (getTypeInfo e)
+                      | e@(Expr _ (Var v)) <- allNodes prog, take 1 v == "s" ]
+          -- Ten seconds is ~3 orders of magnitude above the fixed cost and two
+          -- below the pre-fix n=10 blow-up, so it discriminates without being
+          -- flaky on a loaded machine.
+          r <- timeout (10 * 1000000) (evaluate (length (show pts)))
+          case r of
+            Nothing -> assertFailure
+              ("forcing the " ++ show n ++ " parameter pTypes did not finish in 10s \
+               \-- the declaration fixpoint is tabulating the curried transfer again")
+            Just _  -> do
+              assertEqual "one occurrence per parameter" n (length pts)
+              -- A parameter is Deterministic inside the body it is bound in:
+              -- the value is fixed by whatever the caller enumerates it into.
+              assertEqual "" (replicate n Deterministic) pts
+      ]
   ]
+
+-- | @main s1 .. sn = readMNist(s1) ++ .. ++ readMNist(sn)@ -- the n-ary curried
+-- declaration whose parameter annotations the test above forces.
+curriedNeuralChain :: Int -> String
+curriedNeuralChain n =
+  "neural readMNist :: (Symbol -> Int) of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]\n\
+  \main " ++ unwords ps ++ " = "
+  ++ intercalate " ++ " [ "readMNist(" ++ p ++ ")" | p <- ps ] ++ "\n"
+  where ps = [ "s" ++ show i | i <- [1 .. n] ]
+
+allNodes :: Program -> [Expr]
+allNodes prog = concatMap (universeE . snd) (functions prog)
+  where universeE e = e : concatMap universeE (getSubExprs e)
