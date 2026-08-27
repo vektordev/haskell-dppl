@@ -1,0 +1,2 @@
+data Shape = Dot v::Float | Pair p::Float, q::Float
+main = if Uniform < 0.3 then Dot Uniform else Pair Uniform Uniform

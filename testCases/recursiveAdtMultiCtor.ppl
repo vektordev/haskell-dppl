@@ -1,0 +1,3 @@
+data DTree = Leaf | Node l::DTree, r::DTree
+genT = if Uniform < 0.6 then Leaf else Node genT genT
+main = genT

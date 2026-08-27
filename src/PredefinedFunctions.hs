@@ -452,8 +452,13 @@ fPairsFromADTConstructor adtName constr@(constrName, fields) = constrFPair:isFun
     derivs = map (\n -> (n, IRConst $ VFloat 1)) fieldNames'
     fwdConstr = FDecl (Forall [] [] constrRT) fieldNames' ["b"] applicationExpr (IRConst $ VBool True) False derivs
     rtOfField f = fromJust $ lookup f fields
-    -- FIXME Probably chekc whether parameter is indeed of this constructor in applicability test
-    invConstr f = FDecl (Forall [] [] (adtRT `TArrow` rtOfField f)) ["b"] ["f_" ++ f] (IRApply (IRVar f) (IRVar "b")) (IRConst $ VBool True) True [("b", IRConst $ VFloat 1)]
+    -- The inverse deconstructs the sample with a field accessor, which is only
+    -- defined when the sample actually carries this constructor. Without the
+    -- guard, inference for a multi-constructor ADT evaluates every
+    -- constructor's contribution unconditionally and the accessor throws on a
+    -- sample built by a sibling constructor. Any-tolerant, since a marginal
+    -- wildcard stands for a value of every constructor.
+    invConstr f = FDecl (Forall [] [] (adtRT `TArrow` rtOfField f)) ["b"] ["f_" ++ f] (IRApply (IRVar f) (IRVar "b")) (isConstrGuard constrName (IRVar "b")) True [("b", IRConst $ VFloat 1)]
 
 fPaisOfADTIsFunction :: String -> ADTConstructorDecl -> (String, FPair)
 fPaisOfADTIsFunction adtName (constrName, rTypes) = (isFName, fPair)
@@ -465,11 +470,20 @@ fPaisOfADTIsFunction adtName (constrName, rTypes) = (isFName, fPair)
     invIs = FDecl (Forall [] [] (TBool `TArrow` TADT adtName)) ["b"] ["a"] (IRIf (IRVar "b") constrWithAnys (IRConst $ VAnyExcept [constrWithAnys])) (IRConst $ VBool True) False [("b", IRConst $ VFloat 1)]
 
 fPairFromADTField :: RType -> ADTConstructorDecl -> (String, RType) -> (String, FPair)
-fPairFromADTField adtRT constr (fieldName, fieldRT) = (fieldName, FPair fwd [inv])
+fPairFromADTField adtRT constr@(ownerName, _) (fieldName, fieldRT) = (fieldName, FPair fwd [inv])
   where
-    -- FIXME Probably chekc whether parameter is indeed of this constructor in applicability test
-    fwd = FDecl (Forall [] [] (adtRT `TArrow` fieldRT)) ["a"] ["b"] (IRApply (IRVar fieldName) (IRVar "a")) (IRConst $ VBool True) True [("a", IRConst $ VFloat 1)]
+    -- Reading a field is only applicable to a sample carrying the constructor
+    -- that declares it; see 'invConstr'.
+    fwd = FDecl (Forall [] [] (adtRT `TArrow` fieldRT)) ["a"] ["b"] (IRApply (IRVar fieldName) (IRVar "a")) (isConstrGuard ownerName (IRVar "a")) True [("a", IRConst $ VFloat 1)]
     inv = FDecl (Forall [] [] (fieldRT `TArrow` adtRT)) ["b"] ["a"] (allAnyFieldsExcept constr fieldName (IRVar "b")) (IRConst $ VBool True) False [("b", IRConst $ VFloat 1)]
+
+-- | Runtime test that @v@ carries constructor @cName@, used as the
+-- applicability guard of every inverse that deconstructs an ADT sample. A
+-- marginal wildcard passes: @ANY@ stands for a value of any constructor, and
+-- the enclosing inference handles it through its own Any-safe path.
+isConstrGuard :: String -> IRExpr -> IRExpr
+isConstrGuard cName v =
+  IRIf (IRUnaryOp OpIsAny v) (IRConst $ VBool True) (IRApply (IRVar ("is" ++ cName)) v)
 
 allAnyFieldsExcept :: ADTConstructorDecl -> String -> IRExpr -> IRExpr
 allAnyFieldsExcept (constrName, fields) toFill fillExpr = foldl IRApply (IRVar constrName) fieldValues
