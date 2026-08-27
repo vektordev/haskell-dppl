@@ -433,6 +433,14 @@ only). The corpus rows that pin it target its *structural* semantics
 rather than a zero test — notably `normal p(40.0)`, a 40-sigma tail whose
 density underflows to a hard `0.0` while `imposs` must stay `False`.
 
+A query point is written in the *value* grammar (`Parser.pValue`), which
+covers ADT constructor values by juxtaposition — `p(Leaf)`,
+`p(Node Leaf Leaf)`, `p(Node (Node Leaf Leaf) 0.5)`; a field that is itself
+an application needs parentheses. Prefer querying an ADT program at a point
+over querying a `Bool`/`Float` projection of it: the projection never
+reaches a sibling constructor's field accessors, which is how
+`forward-missing-constructor-guard` shipped.
+
 ### Slow tests
 
 **The `Slow` group is currently known-broken** — it is not green, and
