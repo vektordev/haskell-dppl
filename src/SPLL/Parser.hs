@@ -242,7 +242,44 @@ unaryFs = [
   ]
 
 pValue :: MonadParser m => m Value
-pValue = choice [pBool, try pFloat, pIntVal, try pUnitVal, pTupleVal, pEither, pAny, pList <&> constructVList, pThetaTree <&> VThetaTree]
+pValue = choice [pBool, try pFloat, pIntVal, try pUnitVal, try pTupleVal, pEither, pAny, pList <&> constructVList, pThetaTree <&> VThetaTree, pADTVal]
+
+-- | An ADT value: a constructor name applied to its field values, written by
+-- juxtaposition as in the expression syntax -- @Leaf@, @Node Leaf Leaf@,
+-- @Node (Node Leaf Leaf) Leaf@. This is what lets a .tst file (or a CLI @-x@)
+-- name an ADT-valued query point; without it the corpus can only reach an ADT
+-- program through a Bool/Float projection of it.
+--
+-- The parser has no access to the ADT declarations, so it takes the arity from
+-- what is written; a wrong arity or an unknown constructor surfaces in typing,
+-- not here. Fields are parsed as atoms, so a field that is itself a
+-- constructor application, a @Left@/@Right@, or anything else written by
+-- juxtaposition must be parenthesised.
+pADTVal :: MonadParser m => m Value
+pADTVal = VADT <$> pConstructorName <*> many pValueAtom
+
+-- | An upper-case identifier that is not one of the value keywords the value
+-- grammar already spells (@True@/@False@/@ANY@/@Left@/@Right@/@ThetaTree@).
+pConstructorName :: MonadParser m => m String
+pConstructorName = lexeme $ try $ do
+  x <- upperChar
+  xs <- many (alphaNumChar <|> char '\'' <|> char '_')
+  let ident = x:xs
+  if ident `elem` reserved || ident `elem` ["True", "False", "ANY"]
+    then fail ("reserved word: " ++ ident)
+    else return ident
+
+-- | Values allowed in a constructor field position: everything that is not
+-- itself an application. A parenthesised 'pValue' escapes the restriction.
+pValueAtom :: MonadParser m => m Value
+pValueAtom = choice
+  [ pBool, try pFloat, pIntVal
+  , try pUnitVal, try pTupleVal, parens pValue
+  , pAny
+  , pList <&> constructVList
+  , pThetaTree <&> VThetaTree
+  , VADT <$> pConstructorName <*> pure []
+  ]
 
 pUnitVal :: MonadParser m => m Value
 pUnitVal = do

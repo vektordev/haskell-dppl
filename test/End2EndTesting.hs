@@ -363,10 +363,10 @@ juliaBatchTestCode projectDir allCases =
 -- not stripped from the emitted code, hence the nested dim access below.
 juliaModuleTestCases :: String -> [TestCase] -> String
 juliaModuleTestCases modName tcs =
-  modName ++ ".main_gen(" ++ intercalate ", " (map juliaVal exampleParams) ++ ")\n" ++
+  modName ++ ".main_gen(" ++ intercalate ", " (map jVal exampleParams) ++ ")\n" ++
   concat (map (\tc ->
     let (name, sample, params, outProb, outDim, expImposs) = unpackTestCase tc
-        call = modName ++ "." ++ mainName tc ++ "(" ++ juliaVal sample ++ ", " ++ intercalate ", " (map juliaVal params) ++ ")"
+        call = modName ++ "." ++ mainName tc ++ "(" ++ jVal sample ++ ", " ++ intercalate ", " (map jVal params) ++ ")"
     in "tmp = " ++ call ++ "\n\
        \if abs(tmp[1] - " ++ juliaVal outProb ++ ") > " ++ show probTolerance ++ "\n\
        \  error(\"Probability wrong: \" * string(tmp[1]) * \"/=\" * string(" ++ juliaVal outProb ++ ") * \"in test case " ++ name ++ "\")\n\
@@ -381,6 +381,26 @@ juliaModuleTestCases modName tcs =
     unpackTestCase (CumulTestCase name sample params (outProb, outDim) imp) = (name, sample, params, outProb, outDim, imp)
     mainName (ProbTestCase _ _ _ _ _) = "main_prob"
     mainName (CumulTestCase _ _ _ _ _) = "main_integ"
+    -- Each program is wrapped in its own module, so its ADT constructors are
+    -- not in scope where the harness writes the query point. Python's harness
+    -- splices the source into the same namespace and needs no such qualifying.
+    jVal = juliaVal . qualifyConstructors modName
+
+-- | Prefix every ADT constructor name in a value with @modName.@, so an
+-- ADT-valued query point names constructors that live inside the generated
+-- module.
+qualifyConstructors :: String -> IRValue -> IRValue
+qualifyConstructors modName = go
+  where
+    go (VADT cn fs)          = VADT (modName ++ "." ++ cn) (map go fs)
+    go (VTuple a b)          = VTuple (go a) (go b)
+    go (VEither (Left a))    = VEither (Left (go a))
+    go (VEither (Right b))   = VEither (Right (go b))
+    go (VList l)             = VList (goList l)
+    go v                     = v
+    goList EmptyList         = EmptyList
+    goList AnyList           = AnyList
+    goList (ListCont x xs)   = ListCont (go x) (goList xs)
 
 -- The emitted result is (prob, (dim, impossible)), so the impossibility flag --
 -- checked only when the .tst line declared an expectation for it -- sits at

@@ -495,6 +495,34 @@ prop_observeNamedPredicateDesugarsToApply =
        (Left err, _) -> counterexample ("src1 failed: " ++ errorBundlePretty err) False
        (_, Left err) -> counterexample ("src2 failed: " ++ errorBundlePretty err) False
 
+-- ADT constructor values in the value grammar (not the expression grammar):
+-- what lets a .tst expectation or a CLI @-x@ name an ADT-valued query point.
+-- Fields are juxtaposed, so a nested constructor application needs parens.
+parseVal :: String -> Either String Value
+parseVal src = case runParser (runStateT (pValue <* eof) (0 :: Int)) "" src of
+  Right (v, _) -> Right v
+  Left err     -> Left (errorBundlePretty err)
+
+prop_parsesNullaryConstructorValue :: Property
+prop_parsesNullaryConstructorValue = parseVal "Leaf" === Right (VADT "Leaf" [])
+
+prop_parsesAppliedConstructorValue :: Property
+prop_parsesAppliedConstructorValue =
+  parseVal "Node Leaf Leaf" === Right (VADT "Node" [VADT "Leaf" [], VADT "Leaf" []])
+
+prop_parsesNestedConstructorValue :: Property
+prop_parsesNestedConstructorValue =
+  parseVal "Node (Node Leaf Leaf) 0.5"
+    === Right (VADT "Node" [VADT "Node" [VADT "Leaf" [], VADT "Leaf" []], VFloat 0.5])
+
+-- The value keywords keep winning over the constructor rule.
+prop_constructorValueYieldsToKeywords :: Property
+prop_constructorValueYieldsToKeywords =
+  conjoin [ parseVal "True" === Right (VBool True)
+          , parseVal "ANY" === Right VAny
+          , parseVal "Left 1.0" === Right (VEither (Left (VFloat 1.0)))
+          ]
+
 return []
 
 parserTests :: TestTree
