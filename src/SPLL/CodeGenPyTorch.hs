@@ -12,6 +12,7 @@ import SPLL.IntermediateRepresentation
 import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..))
+import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage)
 import Data.List (intercalate, intersperse, isPrefixOf)
 import Data.Char (toUpper)
 import Data.Maybe (fromMaybe)
@@ -166,9 +167,12 @@ generateADTClass (name, fields) =
         ["return True"]
       )
   ) ++ [""] ++
-  -- Is function
+  -- Is function. The ANY refusal keeps this in step with the interpreter's
+  -- 'isImpl'; `isinstance` would answer False for a hole and silently drop the
+  -- branch. See 'anyCtorTestMessage'.
   ["def is" ++ name ++ "(x):"] ++
-  indentOnce ["return isinstance(x, " ++ name ++ ")"] ++
+  indentOnce ["if isAny(x): throw(" ++ show (anyCtorTestMessage name) ++ ")",
+              "return isinstance(x, " ++ name ++ ")"] ++
   -- Field acceessors
   concatMap (\f ->
     ("def " ++ f ++ "(x):") :

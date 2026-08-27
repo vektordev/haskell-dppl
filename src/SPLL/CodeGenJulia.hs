@@ -9,6 +9,7 @@ import SPLL.Lang.Lang
 import Data.List (intercalate)
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..))
+import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage)
 import Data.Maybe (fromMaybe)
 import Data.Functor ((<&>))
 import Control.Monad.State (StateT (runStateT), MonadState (get, put), MonadTrans (lift))
@@ -98,8 +99,9 @@ generateADTClass (name, fields) =
     indentOnce fieldNames
   ) ++
   ["end"] ++
-  -- Is function
-  ["is" ++ name ++ "(x) = x isa " ++ name] ++
+  -- Is function. Refuses a hole rather than answering False, matching the
+  -- interpreter's 'isImpl' -- see 'anyCtorTestMessage'.
+  ["is" ++ name ++ "(x) = isAny(x) ? throw(" ++ show (anyCtorTestMessage name) ++ ") : x isa " ++ name] ++
   -- Equals function
   ("Base.:(==)(other::Any, self::" ++ name ++") = begin"):
     indentOnce

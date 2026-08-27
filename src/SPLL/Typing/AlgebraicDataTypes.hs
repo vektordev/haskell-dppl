@@ -4,7 +4,8 @@ module SPLL.Typing.AlgebraicDataTypes (
   implicitFunctionNames,
   implicitFunctionImpl,
   implicitFunctionsToEnv,
-  lookupRType
+  lookupRType,
+  anyCtorTestMessage
 ) where
 import SPLL.Lang.Types
 import SPLL.Typing.RType
@@ -65,8 +66,26 @@ implicitFunctionImpl _ fName params = error $ "somethigng went wrong with implic
 
 isImpl :: Show a => String -> GenericValue a -> GenericValue a
 isImpl constr (VADT name _) = VBool $ name == constr
+isImpl constr VAny = error (anyCtorTestMessage constr)
 -- TODO should also error if type is from the wrong ADT
 isImpl _ x = error ("Parameter is not an ADT: " ++ show x)
+
+-- | What every backend says when a constructor predicate is applied to a
+-- marginal wildcard. A hole has no constructor yet, so both answers are wrong:
+-- @True@ invents one, and @False@ asserts "not this constructor" and silently
+-- deletes that branch's mass -- which is what the two scalar backends used to
+-- do, while the interpreter crashed, so the same program answered differently
+-- depending on where it ran (task
+-- @is-ctor-on-any-slot-diverges-across-backends@). All three now refuse, with
+-- this message, so the divergence cannot come back quietly.
+--
+-- Deliberately not extended to 'VAnyExcept': @isRed (VAnyExcept [Red])@ is
+-- genuinely @False@ and answerable, which is separate work rather than a
+-- refusal.
+anyCtorTestMessage :: String -> String
+anyCtorTestMessage ctor =
+  "is" ++ ctor ++ ": constructor test on an unobserved value (ANY); the "
+  ++ "enclosing inference must marginalise or refuse before testing a hole"
 
 -- Returns constructor and field index
 findField :: [ADTDecl] -> String -> (String, Int)

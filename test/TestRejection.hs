@@ -20,8 +20,13 @@ import SPLL.Typing.RType (RType(..))
 import SPLL.Examples
 import SPLL.Validator (validateProgram)
 import SPLL.Prelude (compile, runProb, runInteg, uniform, constB, constF, (#+#), (#<#))
-import SPLL.IntermediateRepresentation (defaultCompilerConfig, checkQueryType)
+import SPLL.IntermediateRepresentation (defaultCompilerConfig, checkQueryType, noIntegrate)
 import SPLL.Typing.Infer (addTypeInfo)
+import SPLL.Parser (tryParseProgram)
+import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage)
+import qualified SPLL.CodeGenPyTorch
+import qualified SPLL.CodeGenJulia
+import SPLL.Prelude (compile)
 
 import Control.Exception (try, evaluate, SomeException)
 import Data.List (isInfixOf)
@@ -35,6 +40,7 @@ rejectionTests = testGroup "Rejection"
   , compileRejectsTests
   , queryTypeGuardTests
   , typeInferenceTests
+  , anyCtorTestTests
   ]
 
 -- ----------------------------------------------------------------------------
@@ -182,4 +188,76 @@ queryTypeGuardTests = testGroup "QueryTypeGuard"
         Left e  -> assertBool ("guard should be off, but a conformance error was raised: " ++ show e)
                               (not ("does not conform" `isInfixOf` show e))
         Right _ -> return ()
+  ]
+
+
+-- ----------------------------------------------------------------------------
+-- Constructor test on a marginal wildcard. A hole has no constructor, so both
+-- answers are wrong; the two scalar backends used to answer False (silently
+-- deleting that branch's mass) while the interpreter crashed, so the same
+-- program gave different numbers depending on where it ran (task
+-- is-ctor-on-any-slot-diverges-across-backends). All three must now refuse with
+-- the same message.
+--
+-- The runtime half can only be pinned on the interpreter: the failing shape
+-- needs a neural ADT latent, and neural programs are filtered out of the Julia
+-- and Python query groups (End2EndTesting.nonNeuralsQueries). The other two
+-- backends are pinned at the codegen level instead -- that the emitted
+-- predicate carries the refusal and does not fall through to a bare
+-- isinstance/isa. Batched mode is out of scope: pythonLibBatched.py has no
+-- isAny at all, because batched mode has no marginal-wildcard representation.
+-- ----------------------------------------------------------------------------
+
+-- A neural ADT latent observed through a non-point-invertible test (isRed), so
+-- the reconstruction carries a hole in the colour slot and the compiled code
+-- reaches isRed(ANY).
+anyCtorProgSrc :: String
+anyCtorProgSrc = unlines
+  [ "data Color = Red | Green | Blue"
+  , "data Obj = Mk c :: Color, f :: Bool"
+  , "neural readObj :: (Symbol -> Obj)"
+  , "main sym = let o = readObj sym in (if isRed (c o) then 0 else 1, f o)"
+  ]
+
+-- A plain two-constructor ADT: enough to pin what the backends emit for
+-- is<Ctor>, which does not depend on the rest of the program.
+adtCodegenProgSrc :: String
+adtCodegenProgSrc = unlines
+  [ "data Coin = Heads | Tails"
+  , "main = isHeads (if Uniform < 0.3 then Heads else Tails)"
+  ]
+
+withParsed :: String -> (Program -> IO ()) -> IO ()
+withParsed src k = case tryParseProgram "" src of
+  Left err -> assertFailure ("test program failed to parse: " ++ show err)
+  Right p  -> k p
+
+anyCtorTestTests :: TestTree
+anyCtorTestTests = testGroup "AnyConstructorTest"
+  [ testCase "interpreter refuses a constructor test on an ANY slot" $
+      withParsed anyCtorProgSrc $ \prog -> do
+        let conf = defaultCompilerConfig { noIntegrate = True }
+            args = [VTuple (VInt 2) (constructVList [ VFloat v | v <- [1.0, 0.5, 0.3, 0.2, 0.4, 0.6] ])]
+        res <- forced (runProb conf prog args (VTuple (VInt 0) (VBool True)))
+        case res of
+          Left e  -> assertBool ("expected the ANY constructor-test refusal, got: " ++ show e)
+                                (anyCtorTestMessage "Red" `isInfixOf` show e)
+          Right _ -> assertFailure
+            "a constructor test on an ANY slot silently produced a number"
+  , testCase "emitted Python refuses rather than answering False" $
+      withParsed adtCodegenProgSrc $ \prog ->
+        case compile defaultCompilerConfig prog of
+          Left err -> assertFailure ("compile failed: " ++ show err)
+          Right env -> do
+            let src = unlines (SPLL.CodeGenPyTorch.generateFunctions True env)
+            assertBool "emitted isHeads carries no ANY refusal"
+                       (anyCtorTestMessage "Heads" `isInfixOf` src)
+  , testCase "emitted Julia refuses rather than answering False" $
+      withParsed adtCodegenProgSrc $ \prog ->
+        case compile defaultCompilerConfig prog of
+          Left err -> assertFailure ("compile failed: " ++ show err)
+          Right env -> do
+            let src = unlines (SPLL.CodeGenJulia.generateFunctions env)
+            assertBool "emitted isHeads carries no ANY refusal"
+                       (anyCtorTestMessage "Heads" `isInfixOf` src)
   ]
