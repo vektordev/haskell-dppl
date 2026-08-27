@@ -126,6 +126,10 @@ generateFunctions env0 = do
   let callableNames = [ n ++ "_gen"
                       | IRFunGroup{groupName=n, genFun=Just (e, _)} <- funcs
                       , null (fst (unwrapLambdas e)) ]
+                      -- nullary ADT constructors must be emitted as instantiations,
+                      -- otherwise the bare struct type never compares equal to an
+                      -- instance (same rule as CodeGenPyTorch's callableNames).
+                      ++ [ cName | decl <- adts, (cName, fields) <- constructors decl, null fields ]
   let funcGroupsMonadic = concatMapM generateFunctionGroup funcs
   let (funcStrs, (globalVars, _)) = evalSupply $ runStateT funcGroupsMonadic ([], callableNames)
   let varsStr = map (\(mv, name)-> name ++ " = " ++ juliaMultiVal mv) globalVars
