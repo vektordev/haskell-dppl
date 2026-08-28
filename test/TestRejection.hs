@@ -220,6 +220,19 @@ anyCtorProgSrc = unlines
   , "main sym = let o = readObj sym in (if isRed (c o) then 0 else 1, f o)"
   ]
 
+-- A constructor named after a Python keyword. Emitting it verbatim produced
+-- @class None:@, a SyntaxError (task
+-- codegen-adt-name-collides-with-target-keyword); the backends now mangle it.
+-- The corpus (testCases/adtKeywordNames*) pins that the emitted code runs; what
+-- it cannot pin is the invariant below -- that mangling the *identifier* leaves
+-- the *diagnostic* still naming what the user wrote, so all three backends and
+-- the interpreter keep saying the same words.
+keywordCtorProgSrc :: String
+keywordCtorProgSrc = unlines
+  [ "data Flag = None | Some end::Float"
+  , "main = if Uniform < 0.3 then None else Some Uniform"
+  ]
+
 -- A plain two-constructor ADT: enough to pin what the backends emit for
 -- is<Ctor>, which does not depend on the rest of the program.
 adtCodegenProgSrc :: String
@@ -261,6 +274,32 @@ anyCtorTestTests = testGroup "AnyConstructorTest"
             let src = unlines (SPLL.CodeGenJulia.generateFunctions env)
             assertBool "emitted isHeads carries no ANY refusal"
                        (anyCtorTestMessage "Heads" `isInfixOf` src)
+  , testCase "a keyword constructor is mangled in Python identifiers but not in its diagnostic" $
+      withParsed keywordCtorProgSrc $ \prog ->
+        case compile defaultCompilerConfig prog of
+          Left err -> assertFailure ("compile failed: " ++ show err)
+          Right env -> do
+            let src = unlines (SPLL.CodeGenPyTorch.generateFunctions True env)
+            assertBool "Python identifier for constructor None was not mangled"
+                       ("class None_:" `isInfixOf` src)
+            assertBool "a bare `class None:` survived; the emitted file cannot parse"
+                       (not ("class None:" `isInfixOf` src))
+            -- The refusal must still quote the source name, or Python says
+            -- isNone_ where the interpreter says isNone.
+            assertBool "the ANY refusal names the mangled identifier instead of the source constructor"
+                       (anyCtorTestMessage "None" `isInfixOf` src)
+  , testCase "a keyword field is mangled in Julia identifiers" $
+      withParsed keywordCtorProgSrc $ \prog ->
+        case compile defaultCompilerConfig prog of
+          Left err -> assertFailure ("compile failed: " ++ show err)
+          Right env -> do
+            let src = unlines (SPLL.CodeGenJulia.generateFunctions env)
+            -- `end` closes the struct; unmangled, the module was mis-parsed
+            -- rather than rejected at the offending token.
+            assertBool "the field accessor was not emitted under a mangled name"
+                       ("function end_(x" `isInfixOf` src)
+            assertBool "an unmangled `end` accessor is still emitted"
+                       (not ("function end(x" `isInfixOf` src))
   ]
 
 

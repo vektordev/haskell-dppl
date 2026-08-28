@@ -1,6 +1,7 @@
 module SPLL.CodeGenJulia (
   generateFunctions,
-  juliaVal
+  juliaVal,
+  juliaMangle
 ) where
 
 import SPLL.IntermediateRepresentation
@@ -74,7 +75,7 @@ juliaVal (VEither (Right a)) = "Right(" ++ juliaVal a ++ ")"
 juliaVal (VThetaTree tt) = juliaValTree tt
   where juliaValTree (ThetaTree val trees) = "([" ++ intercalate ", " (map show val) ++ "], [" ++ intercalate ", " (map juliaValTree trees) ++ "])"
 juliaVal VUnit = "nothing"
-juliaVal (VADT cName params) = cName ++ "(" ++ intercalate ", " (map juliaVal params) ++ ")"
+juliaVal (VADT cName params) = juliaCtorRef cName ++ "(" ++ intercalate ", " (map juliaVal params) ++ ")"
 juliaVal VAny = "\"ANY\""
 juliaVal (VError e) = "throw(\"" ++ e ++ "\")"
 juliaVal x = error ("unknown juliaVal for " ++ show x)
@@ -84,45 +85,86 @@ juliaMultiVal (MultiDiscretes vals) = "(\"D\", [" ++ intercalate ", " (map (juli
 juliaMultiVal (MultiTuple l r) = "(\"T\", (" ++ juliaMultiVal l ++ ", " ++ juliaMultiVal r ++ "))"
 juliaMultiVal (MultiEither l r) = "(\"E\", (" ++ juliaMultiVal l ++ ", " ++ juliaMultiVal r ++ "))"
 juliaMultiVal (MultiADT constrs) = "(\"A\", [" ++ intercalate ", " (map (\(cName, fields) ->
-  "(\"" ++ cName ++ "\", [" ++ intercalate ", " (map juliaMultiVal fields) ++ "])"
+  "(\"" ++ juliaMangle cName ++ "\", [" ++ intercalate ", " (map juliaMultiVal fields) ++ "])"
   ) constrs) ++ "] )"
 juliaMultiVal x = error ("unknown juliaMultiVal for " ++ show x)
+
+-- | Julia's reserved words. Unlike Python's, every one of them is lowercase,
+-- so a constructor name (which SPLL capitalises) can never collide -- but a
+-- *field* name can, and does so far more destructively than in Python: a field
+-- named @end@ emits @struct Mk / end / end@, which closes the struct two lines
+-- early and is mis-parsed rather than rejected at the offending token.
+--
+-- Contextual keywords that are legal identifiers elsewhere (@new@, @outer@,
+-- @var@, and the @abstract@/@mutable@/@primitive@ modifiers) are included:
+-- mangling a name that would have worked costs nothing, while missing one that
+-- would not costs a silently mis-parsed module.
+juliaKeywords :: [String]
+juliaKeywords =
+  [ "abstract", "baremodule", "begin", "break", "catch", "const", "continue"
+  , "do", "else", "elseif", "end", "export", "false", "for", "function"
+  , "global", "if", "import", "in", "isa", "let", "local", "macro", "module"
+  , "mutable", "new", "outer", "primitive", "quote", "return", "struct", "true"
+  , "try", "type", "using", "var", "where", "while"
+  ]
+
+-- | Make a name safe to emit as a Julia identifier. Same trailing-underscore
+-- convention as 'SPLL.CodeGenPyTorch.pyMangle', and safe for the same reason:
+-- no keyword ends in an underscore, so the mapping cannot land on another
+-- keyword and stays injective.
+juliaMangle :: String -> String
+juliaMangle name
+  | name `elem` juliaKeywords = name ++ "_"
+  | otherwise                 = name
+
+-- | 'juliaMangle' for a constructor reference in a rendered value. The test
+-- harness qualifies query-point constructors with the generated module name
+-- (@Prog1.Leaf@); only the final segment is an identifier this backend owns.
+juliaCtorRef :: String -> String
+juliaCtorRef name = case break (== '.') (reverse name) of
+  (revLast, '.':revQual) -> reverse revQual ++ "." ++ juliaMangle (reverse revLast)
+  _                      -> juliaMangle name
 
 generateADTClasses :: [ADTDecl] -> [String]
 generateADTClasses decls = concatMap generateADTClass (concatMap constructors decls)
 
+-- Every identifier printed here goes through 'juliaMangle'; the declaration
+-- keeps the user's names (see 'renameADTIdentifiers'), and 'anyCtorTestMessage'
+-- deliberately still quotes the source constructor name so the diagnostic reads
+-- the same here, in Python, and in the interpreter.
 generateADTClass :: ADTConstructorDecl -> [String]
 generateADTClass (name, fields) =
   -- Struct declaration
-  ["struct " ++ name]++
+  ["struct " ++ struct]++
   indentOnce (
     indentOnce fieldNames
   ) ++
   ["end"] ++
   -- Is function. Refuses a hole rather than answering False, matching the
   -- interpreter's 'isImpl' -- see 'anyCtorTestMessage'.
-  ["is" ++ name ++ "(x) = isAny(x) ? throw(" ++ show (anyCtorTestMessage name) ++ ") : x isa " ++ name] ++
+  ["is" ++ struct ++ "(x) = isAny(x) ? throw(" ++ show (anyCtorTestMessage name) ++ ") : x isa " ++ struct] ++
   -- Equals function
-  ("Base.:(==)(other::Any, self::" ++ name ++") = begin"):
+  ("Base.:(==)(other::Any, self::" ++ struct ++") = begin"):
     indentOnce
-      (("if (!(other isa " ++ name ++ ")) return false end"):
+      (("if (!(other isa " ++ struct ++ ")) return false end"):
       -- Compare every field
       map (\f -> "if(!eq(self." ++ f ++ ", other." ++ f ++ ")) return false end") fieldNames ++ 
       ["return true"]) ++
   ["end"] ++
   -- Field acceessors
   concatMap (\f ->
-    ("function " ++ f ++ "(x :: " ++ name ++ ")") :
+    ("function " ++ f ++ "(x :: " ++ struct ++ ")") :
     indentOnce ["return x." ++ f] ++
     ["end"]
   ) fieldNames
-  where fieldNames = map fst fields
+  where struct = juliaMangle name
+        fieldNames = map juliaMangle (map fst fields)
 
 generateFunctions :: IREnv -> [String]
 generateFunctions env0 = do
   -- Scalar backend: lower any IRSelect back to IRIf up front (pytorch-tensorizer
   -- M1, strategy B), so the rest of codegen never encounters it.
-  let IREnv funcs adts consts = desugarSelectEnv env0
+  let IREnv funcs adts consts = renameADTIdentifiers juliaMangle (desugarSelectEnv env0)
   let adtClasses = generateADTClasses adts
   let constsStr = map (\(name, val) -> name ++ " = " ++ juliaVal val) consts
   let callableNames = [ n ++ "_gen"
@@ -131,7 +173,7 @@ generateFunctions env0 = do
                       -- nullary ADT constructors must be emitted as instantiations,
                       -- otherwise the bare struct type never compares equal to an
                       -- instance (same rule as CodeGenPyTorch's callableNames).
-                      ++ [ cName | decl <- adts, (cName, fields) <- constructors decl, null fields ]
+                      ++ [ juliaMangle cName | decl <- adts, (cName, fields) <- constructors decl, null fields ]
   let funcGroupsMonadic = concatMapM generateFunctionGroup funcs
   let (funcStrs, (globalVars, _)) = evalSupply $ runStateT funcGroupsMonadic ([], callableNames)
   let varsStr = map (\(mv, name)-> name ++ " = " ++ juliaMultiVal mv) globalVars

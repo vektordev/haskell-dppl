@@ -44,7 +44,7 @@ module SPLL.CodeGenPyTorchBatched
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types (CompilerError, GenericValue(..), GenericList(..), MultiValue(..), ADTDecl(..), Value)
 import SPLL.Lang.Lang (multiValueToValueList)
-import SPLL.CodeGenPyTorch (envToLUT, replaceCalls)
+import SPLL.CodeGenPyTorch (envToLUT, replaceCalls, pyMangle)
 import Data.Char (toUpper)
 import Data.List (intercalate, isSuffixOf, nub)
 import Data.Maybe (fromMaybe, isJust)
@@ -79,7 +79,13 @@ import Control.Monad.State (State, evalState, get, put)
 -- Accepted per Viktor (2026-07-22) as the honest cost of a hard, uniform
 -- contract, rather than special-casing the stub back in for this one shape.
 generateFunctionsBatched :: Bool -> IREnv -> Either CompilerError [String]
-generateFunctionsBatched genBoil env@(IREnv funcs adts consts) = do
+generateFunctionsBatched genBoil env0 = do
+      -- Same identifier hygiene as the scalar backend: ADT names that are
+      -- Python keywords are mangled in the emitted code, and every IR
+      -- reference to them is renamed to match. The declarations keep the
+      -- user's names, so 'ctorNames' below -- which is analysis, matched
+      -- against IR variable names rather than printed -- is mangled explicitly.
+      let env@(IREnv funcs adts consts) = renameADTIdentifiers pyMangle env0
       let lut = envToLUT env
           -- Every group's generate method, raw (pre-rename) name and body: the
           -- self-contained recursion check ('hasGenCycle') walks these
@@ -92,7 +98,7 @@ generateFunctionsBatched genBoil env@(IREnv funcs adts consts) = do
       () <- checkCallGraph funcs
       -- Every ADT constructor name, so the dichotomy guard can recognise a
       -- constructor-tagged value as *structure* (M2).
-      let ctorNames = [ cn | d <- adts, (cn, _) <- constructors d ]
+      let ctorNames = [ pyMangle cn | d <- adts, (cn, _) <- constructors d ]
       classes <- mapM (generateClass ctorNames lut genArities genRaw) funcs
       constLines <- mapM renderConst consts
       let body = generateADTClassesBatched adts ++ constLines
@@ -116,8 +122,9 @@ generateFunctionsBatched genBoil env@(IREnv funcs adts consts) = do
 generateADTClassesBatched :: [ADTDecl] -> [String]
 generateADTClassesBatched decls = concatMap one (concatMap constructors decls)
   where
-    one (name, fieldDecls) =
-      let fields = map fst fieldDecls in
+    one (rawName, fieldDecls) =
+      let name   = pyMangle rawName
+          fields = map (pyMangle . fst) fieldDecls in
       ["class " ++ name ++ ":"]
       ++ indentOnce (("def __init__(self" ++ concatMap (", " ++) fields ++ "):")
            : indentOnce (map (\f -> "self." ++ f ++ " = " ++ f) fields
@@ -217,7 +224,7 @@ domainVal (VBool b)  = Just (if b then "True" else "False")
 domainVal (VTuple a b) = (\x y -> "T(" ++ x ++ ", " ++ y ++ ")") <$> domainVal a <*> domainVal b
 domainVal (VEither (Left v))  = (\x -> "Left("  ++ x ++ ")") <$> domainVal v
 domainVal (VEither (Right v)) = (\x -> "Right(" ++ x ++ ")") <$> domainVal v
-domainVal (VADT cn fs) = (\xs -> cn ++ "(" ++ intercalate ", " xs ++ ")") <$> mapM domainVal fs
+domainVal (VADT cn fs) = (\xs -> pyMangle cn ++ "(" ++ intercalate ", " xs ++ ")") <$> mapM domainVal fs
 domainVal _ = Nothing
 
 -- | @\<method\>_dense@ / @\<method\>_at@ for one inference method, when its

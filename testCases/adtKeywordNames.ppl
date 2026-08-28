@@ -1,0 +1,2 @@
+data Kw = None | Some end::Float
+main = if Uniform < 0.4 then None else Some Uniform

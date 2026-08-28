@@ -1,0 +1,2 @@
+data Flag = None | Some end::Float
+main = if isNone (if Uniform < 0.3 then None else Some Uniform) then 1 else 0

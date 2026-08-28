@@ -28,6 +28,8 @@ module SPLL.IntermediateRepresentation (
 , pattern VProbDim
 , pattern VProbDimBC
 , resultImpossible
+, adtIdentifierRenaming
+, renameADTIdentifiers
 ) where
 
 import SPLL.Lang.Types
@@ -596,3 +598,94 @@ irPrintFlat (IRIndex _ _) = "IRIndex"
 irPrintFlat (IRError _) = "IRError"
 irPrintFlat (IRConformsTo _ _) = "IRConformsTo"
 
+
+-- ----------------------------------------------------------------------------
+-- Target-language identifier hygiene for ADT names
+--
+-- ADT constructor and field names reach the emitted Python/Julia verbatim, as
+-- class/struct names, accessor function names, and every reference to them in
+-- the compiled expressions. A source name that happens to be a keyword of the
+-- target language then produces code that does not compile -- @data Opt = None
+-- | Some w::Float@ emitted @class None:@ (a Python SyntaxError), and a field
+-- named @end@ emitted a Julia @struct@ that closed two lines early and was
+-- silently mis-parsed (task codegen-adt-name-collides-with-target-keyword).
+--
+-- The fix is to mangle rather than to reject: SPLL is the source language, and
+-- whether a program is legal must not depend on which backend it is aimed at.
+-- Mangling happens once, over the whole 'IREnv', before any emission -- not at
+-- the individual emission sites. That matters because the *same* name appears
+-- both as a definition (@class None:@) and as a reference carried in the IR
+-- (@IRVar "None"@, @IRVar "isNone"@, @IRVar "w"@); renaming the environment
+-- keeps the two halves in step by construction, whereas per-site mangling
+-- would have to be repeated at every one of the ~20 places a name is printed
+-- and would silently desynchronise the moment one was missed.
+--
+-- Only ADT-derived names are renamed. Local binders and compiler-generated
+-- temporaries are deliberately left alone: they are never ADT names, and
+-- renaming references without also renaming their binders is exactly the
+-- desynchronisation this pass exists to avoid.
+-- ----------------------------------------------------------------------------
+
+-- | Every identifier an ADT declaration contributes to the emitted code,
+-- paired with what @mangle@ turns it into -- but only where the two differ,
+-- so a program with no colliding name produces an empty renaming and emitted
+-- code identical to before.
+--
+-- Three families per constructor: the constructor itself (a class/struct name
+-- and a callable), its @is\<Ctor\>@ predicate, and its field accessors. The
+-- predicate is derived from the *mangled* constructor name, matching how the
+-- backends spell it (@"is" ++ name@ over the already-renamed declaration), so
+-- @None@ becoming @None_@ takes @isNone@ to @isNone_@.
+--
+-- Field names are global across a program (accessor lookup in
+-- 'SPLL.Typing.AlgebraicDataTypes.findField' searches every declaration), so a
+-- flat association list is the right shape.
+adtIdentifierRenaming :: (String -> String) -> [ADTDecl] -> [(String, String)]
+adtIdentifierRenaming mangle decls =
+  [ (from, to)
+  | decl <- decls
+  , (cName, fields) <- constructors decl
+  , (from, to) <- (cName, mangle cName)
+                : ("is" ++ cName, "is" ++ mangle cName)
+                : [ (fName, mangle fName) | (fName, _) <- fields ]
+  , from /= to
+  ]
+
+-- | Apply an 'adtIdentifierRenaming' to every 'IRVar' reference in every
+-- compiled function body.
+--
+-- The 'ADTDecl's are deliberately left alone, so they keep the names the user
+-- wrote. The declarations are printed by exactly one function per backend
+-- (@generateADTClass@), which applies @mangle@ itself at each identifier it
+-- emits -- and can therefore still spell the *source* constructor name into
+-- 'SPLL.Typing.AlgebraicDataTypes.anyCtorTestMessage', which all three backends
+-- and the interpreter must agree on word for word (task
+-- is-ctor-on-any-slot-diverges-across-backends). Renaming the declaration would
+-- have made Python say @isNone_@ where the interpreter says @isNone@, quietly
+-- undoing that agreement for precisely the programs this pass exists for.
+--
+-- The definition and reference halves stay in step because both go through the
+-- same @mangle@, which is a pure function of the name: neither side needs to
+-- know what the other did.
+--
+-- Constants and 'IRConst' values are likewise not rewritten. A @VADT@ reaches
+-- the output through the backend's value renderer ('pyVal', 'juliaVal'), which
+-- mangles there -- including for query points fed in by the test harness and
+-- the CLI, which never pass through this pass at all.
+renameADTIdentifiers :: (String -> String) -> IREnv -> IREnv
+renameADTIdentifiers mangle env@(IREnv groups decls consts)
+  | null renaming = env
+  | otherwise     = IREnv (map onGroup groups) decls consts
+  where
+    renaming = adtIdentifierRenaming mangle decls
+    rename n = maybe n id (lookup n renaming)
+    onGroup g = g
+      { genFun    = fmap onBody (genFun g)
+      , probFun   = fmap onBody (probFun g)
+      , integFun  = fmap onBody (integFun g)
+      , encodeFun = fmap onBody (encodeFun g)
+      , normalFun = fmap onBody (normalFun g)
+      }
+    onBody (body, doc) = (irMap onVar body, doc)
+    onVar (IRVar n) = IRVar (rename n)
+    onVar e         = e

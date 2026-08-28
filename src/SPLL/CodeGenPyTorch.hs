@@ -5,7 +5,8 @@ module SPLL.CodeGenPyTorch (
   generateFunctions,
   pyVal,
   envToLUT,
-  replaceCalls
+  replaceCalls,
+  pyMangle
 ) where
 
 import SPLL.IntermediateRepresentation
@@ -83,7 +84,7 @@ pyVal (VEither (Right a)) = "Right(" ++ pyVal a ++ ")"
 pyVal VUnit = "None"
 pyVal (VThetaTree tt) = pyValTree tt
   where pyValTree (ThetaTree val trees) = "([" ++ intercalate ", " (map show val) ++ "], [" ++ intercalate ", " (map pyValTree trees) ++ "])"
-pyVal (VADT cName params) = cName ++ "(" ++ intercalate ", " (map pyVal params) ++ ")"
+pyVal (VADT cName params) = pyCtorRef cName ++ "(" ++ intercalate ", " (map pyVal params) ++ ")"
 pyVal (VAny) = "'ANY'"
 pyVal (VError e) = "throw(\"" ++ e ++ "\")"
 pyVal x = error ("unknown pyVal for " ++ show x)
@@ -94,8 +95,45 @@ pyMultiVal (MultiDiscretes vals) = "(\"D\", [" ++ intercalate ", " (map (pyVal .
 pyMultiVal (MultiTuple l r) = "(\"T\", (" ++ pyMultiVal l ++ ", " ++ pyMultiVal r ++ "))"
 pyMultiVal (MultiEither l r) = "(\"E\", (" ++ pyMultiVal l ++ ", " ++ pyMultiVal r ++ "))"
 pyMultiVal (MultiADT constrs) = "(\"A\", [" ++ intercalate ", " (map (\(cName, fields) -> 
-  "(" ++ cName ++ ", [" ++ intercalate ", " (map pyMultiVal fields) ++ "])"
+  "(" ++ pyCtorRef cName ++ ", [" ++ intercalate ", " (map pyMultiVal fields) ++ "])"
   ) constrs) ++ "])"
+
+-- | Python's reserved words. A name in this set cannot be an identifier at all,
+-- so emitting one produces a file that does not parse -- @class None:@ is a
+-- @SyntaxError@, not a shadowing hazard. Kept here, beside the code that prints
+-- identifiers, rather than in a shared module: Julia's list is different and
+-- the two must be free to diverge.
+--
+-- Soft keywords (@match@, @case@, @type@, @_@) are deliberately absent: they
+-- are contextually valid as ordinary identifiers, so mangling them would rename
+-- names that work. Names merely *exported by* @pythonLib@ (@eq@, @T@, @isAny@,
+-- ...) are also absent -- shadowing one is a real hazard but a different one,
+-- and it needs the library's whole surface rather than a fixed keyword list.
+pythonKeywords :: [String]
+pythonKeywords =
+  [ "False", "None", "True", "and", "as", "assert", "async", "await", "break"
+  , "class", "continue", "def", "del", "elif", "else", "except", "finally"
+  , "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal"
+  , "not", "or", "pass", "raise", "return", "try", "while", "with", "yield"
+  ]
+
+-- | Make a name safe to emit as a Python identifier. A trailing underscore is
+-- the conventional Python escape for exactly this, and no keyword ends in one,
+-- so the mapping cannot collide a mangled name with another keyword and is
+-- injective over any set of source names that was itself collision-free.
+pyMangle :: String -> String
+pyMangle name
+  | name `elem` pythonKeywords = name ++ "_"
+  | otherwise                  = name
+
+-- | 'pyMangle' for a constructor reference in a rendered value, which the test
+-- harness may have qualified with a module path. Only the final segment is an
+-- identifier this backend owns; a qualifier is the caller's and is passed
+-- through untouched.
+pyCtorRef :: String -> String
+pyCtorRef name = case break (== '.') (reverse name) of
+  (revLast, '.':revQual) -> reverse revQual ++ "." ++ pyMangle (reverse revLast)
+  _                      -> pyMangle name
 
 onHead :: (a -> a) -> [a] -> [a]
 onHead f (x:xs) = f x : xs
@@ -106,14 +144,14 @@ generateFunctions genBoil env0 =
     -- Scalar backend: lower any IRSelect (from batched mode's select pass) back
     -- to IRIf up front, so the rest of codegen never sees it (pytorch-tensorizer
     -- M1, strategy B).
-    let env@(IREnv funcs adts consts) = desugarSelectEnv env0
+    let env@(IREnv funcs adts consts) = renameADTIdentifiers pyMangle (desugarSelectEnv env0)
         lut = envToLUT env ++ stdLib
         callableNames = [ fromMaybe (n ++ "_gen") (lookup (n ++ "_gen") lut)
                         | IRFunGroup{groupName=n, genFun=Just (e, _)} <- funcs
                         , null (fst (unwrapLambdas e)) ]
                         -- nullary ADT constructors must be emitted as instantiations,
                         -- otherwise the bare class never compares equal to enumerated instances
-                        ++ [ cName | decl <- adts, (cName, fields) <- constructors decl, null fields ]
+                        ++ [ pyMangle cName | decl <- adts, (cName, fields) <- constructors decl, null fields ]
     in if genBoil then
       ["from pythonLib import *",
       "import functools",
@@ -146,10 +184,14 @@ generateInitializations (IREnv funcs _ _) = map (\IRFunGroup {groupName=n} -> n 
 generateADTClasses :: [ADTDecl] -> [String]
 generateADTClasses decls = concatMap generateADTClass (concatMap constructors decls)
 
+-- Every identifier printed here goes through 'pyMangle'; the declaration itself
+-- keeps the names the user wrote (see 'renameADTIdentifiers'). The one place
+-- the *source* name is used instead is 'anyCtorTestMessage', which must read
+-- identically across all three backends and the interpreter.
 generateADTClass :: ADTConstructorDecl -> [String]
 generateADTClass (name, fields) =
   -- Class declaration
-  ["class " ++ name ++ ":"]++
+  ["class " ++ cls ++ ":"]++
   indentOnce (
     -- Constructor
     ("def __init__(self, " ++ intercalate ", " fieldNames ++ "):") :
@@ -162,7 +204,7 @@ generateADTClass (name, fields) =
   indentOnce (
     "def __eq__(self, other):":
       indentOnce (
-        ("if not isinstance(other, " ++ name ++ "): return False"):
+        ("if not isinstance(other, " ++ cls ++ "): return False"):
         map (\f -> "if not eq(self." ++ f ++ ", other." ++ f ++ "): return False") fieldNames ++
         ["return True"]
       )
@@ -170,15 +212,16 @@ generateADTClass (name, fields) =
   -- Is function. The ANY refusal keeps this in step with the interpreter's
   -- 'isImpl'; `isinstance` would answer False for a hole and silently drop the
   -- branch. See 'anyCtorTestMessage'.
-  ["def is" ++ name ++ "(x):"] ++
+  ["def is" ++ cls ++ "(x):"] ++
   indentOnce ["if isAny(x): throw(" ++ show (anyCtorTestMessage name) ++ ")",
-              "return isinstance(x, " ++ name ++ ")"] ++
+              "return isinstance(x, " ++ cls ++ ")"] ++
   -- Field acceessors
   concatMap (\f ->
     ("def " ++ f ++ "(x):") :
     indentOnce ["return x." ++ f]
   ) fieldNames
-  where fieldNames = map fst fields
+  where cls = pyMangle name
+        fieldNames = map pyMangle (map fst fields)
 
 generateClass :: [(String, String)] -> [String] -> IRFunGroup -> [String]
 generateClass lut callableNames (IRFunGroup name gen prob integ encode normal doc _) = let
