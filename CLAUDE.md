@@ -167,9 +167,17 @@ marginalisation, a proper `Maybe`-valued distribution for free
 The base must be let-bound, not spliced in twice (else a probabilistic
 base becomes two independent draws), and a literal lambda predicate is
 beta-reduced at parse time — otherwise the bound variable is invisible to
-inversion and compilation fails. Known gap: `p(Just ANY)` hard-errors on a
-*continuous* observation (set-witness can't handle `ANY` inside a
-constructor slot).
+inversion and compilation fails.
+
+On a **continuous** observation the denominator `p(Just ANY)` is answered by
+the set-witness engine: a wildcard in a constructor slot leaves the tag pinned
+but the payload unconstrained, so the point constraint is dropped and the
+observation's interval kept, measured as a CDF difference (dim 0) rather than
+a density. `intersectSet` spells that as `WChoice`, a *runtime* choice of
+constraint set — the wildcard is a property of the query sample and has no
+static trace in the witness template. Known gap: the inverter has no case for
+the boolean connectives, so a two-sided predicate must be written as nested
+`if`s, not `(v > lo) && (v < hi)`.
 
 ## Additional Features
 
