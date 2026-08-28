@@ -1,13 +1,14 @@
 module SPLL.CodeGenJulia (
   generateFunctions,
   juliaVal,
-  juliaMangle
+  juliaMangle,
+  juliaKeywords
 ) where
 
 import SPLL.IntermediateRepresentation
 import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.Lang.Lang
-import Data.List (intercalate)
+import Data.List (intercalate, dropWhileEnd)
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..))
 import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage)
@@ -108,14 +109,15 @@ juliaKeywords =
   , "try", "type", "using", "var", "where", "while"
   ]
 
--- | Make a name safe to emit as a Julia identifier. Same trailing-underscore
--- convention as 'SPLL.CodeGenPyTorch.pyMangle', and safe for the same reason:
--- no keyword ends in an underscore, so the mapping cannot land on another
--- keyword and stays injective.
+-- | Make a name safe to emit as a Julia identifier. Same rule as
+-- 'SPLL.CodeGenPyTorch.pyMangle', including the escape of a keyword followed by
+-- a run of underscores -- without it the distinct fields @end@ and @end_@ would
+-- both emit @end_@, and Julia rejects the resulting struct for a duplicate
+-- field name. See that function for why injectivity stops at this family.
 juliaMangle :: String -> String
 juliaMangle name
-  | name `elem` juliaKeywords = name ++ "_"
-  | otherwise                 = name
+  | dropWhileEnd (== '_') name `elem` juliaKeywords = name ++ "_"
+  | otherwise                                       = name
 
 -- | 'juliaMangle' for a constructor reference in a rendered value. The test
 -- harness qualifies query-point constructors with the generated module name

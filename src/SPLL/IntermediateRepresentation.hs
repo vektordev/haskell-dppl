@@ -37,7 +37,7 @@ import SPLL.Typing.RType (RType(..))
 import SPLL.Typing.PType()
 import SPLL.Typing.Typing()
 import Data.Data()
-import Data.List (isSuffixOf)
+import Data.List (isSuffixOf, sort, group)
 import qualified Data.Set as Set
 
 -- | The probability-mode result layout, as produced by 'SPLL.IRCompiler.packResult':
@@ -640,16 +640,56 @@ irPrintFlat (IRConformsTo _ _) = "IRConformsTo"
 -- Field names are global across a program (accessor lookup in
 -- 'SPLL.Typing.AlgebraicDataTypes.findField' searches every declaration), so a
 -- flat association list is the right shape.
+--
+-- This is also the only place with enough context to catch a mangling
+-- /collision/. Each @mangle@ sees one name at a time -- which is what lets
+-- 'SPLL.CodeGenPyTorch.pyVal' mangle a query point that never passed through
+-- this pass -- so it cannot know that a field named @isNone_@ lands on the same
+-- emitted name as constructor @None@'s derived predicate. Here the whole
+-- declaration set is in scope, so two distinct source identifiers sharing one
+-- emitted name is a refusal rather than two definitions of which the second
+-- silently wins.
 adtIdentifierRenaming :: (String -> String) -> [ADTDecl] -> [(String, String)]
-adtIdentifierRenaming mangle decls =
-  [ (from, to)
-  | decl <- decls
-  , (cName, fields) <- constructors decl
-  , (from, to) <- (cName, mangle cName)
-                : ("is" ++ cName, "is" ++ mangle cName)
-                : [ (fName, mangle fName) | (fName, _) <- fields ]
-  , from /= to
-  ]
+adtIdentifierRenaming mangle decls
+  | not (null introduced) = error (mangleCollisionMessage introduced)
+  | otherwise             = [ (from, to) | (from, to) <- allPairs, from /= to ]
+  where
+    allPairs =
+      [ pair
+      | decl <- decls
+      , (cName, fields) <- constructors decl
+      , pair <- (cName, mangle cName)
+              : ("is" ++ cName, "is" ++ mangle cName)
+              : [ (fName, mangle fName) | (fName, _) <- fields ]
+      ]
+    -- Collisions that mangling *introduced*: two identifiers the user kept
+    -- apart that land on one emitted name. Distinct sources sharing an emitted
+    -- name is exactly that, so the test needs nothing more.
+    --
+    -- A name that was already duplicated before mangling (two ADTs sharing a
+    -- constructor or field name) collapses to a single source here and is
+    -- deliberately not reported: it is a pre-existing ambiguity in accessor
+    -- lookup, and failing on it would reject programs that compile today.
+    introduced =
+      [ (sources, to)
+      | to <- dedup (map snd allPairs)
+      , let sources = dedup [ from | (from, to') <- allPairs, to' == to ]
+      , length sources > 1
+      ]
+    dedup = map head . group . sort
+
+-- | Raised when mangling maps two distinct ADT identifiers onto one emitted
+-- name -- the residue 'SPLL.CodeGenPyTorch.pyMangle' cannot see on its own,
+-- since it only ever looks at one name. Left as an 'error': the two scalar
+-- backends have no error channel at this point, and a loud refusal is strictly
+-- better than what the collision otherwise produces, which is two definitions
+-- of the same name where the second silently shadows the first.
+mangleCollisionMessage :: [([String], String)] -> String
+mangleCollisionMessage clashes = unlines
+  ( "Target-language name mangling collided. These ADT identifiers are distinct \
+    \in the program but would be emitted under one name:"
+  : [ "  " ++ show sources ++ " all become " ++ show to | (sources, to) <- clashes ]
+ ++ ["Rename one of them in the `data` declaration."] )
 
 -- | Apply an 'adtIdentifierRenaming' to every 'IRVar' reference in every
 -- compiled function body.

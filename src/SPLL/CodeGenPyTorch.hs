@@ -6,7 +6,8 @@ module SPLL.CodeGenPyTorch (
   pyVal,
   envToLUT,
   replaceCalls,
-  pyMangle
+  pyMangle,
+  pythonKeywords
 ) where
 
 import SPLL.IntermediateRepresentation
@@ -14,7 +15,7 @@ import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..))
 import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage)
-import Data.List (intercalate, intersperse, isPrefixOf)
+import Data.List (intercalate, intersperse, isPrefixOf, dropWhileEnd)
 import Data.Char (toUpper)
 import Data.Maybe (fromMaybe)
 import Control.Monad.State (StateT (runStateT), MonadState (get, put), MonadTrans (lift))
@@ -117,14 +118,30 @@ pythonKeywords =
   , "not", "or", "pass", "raise", "return", "try", "while", "with", "yield"
   ]
 
--- | Make a name safe to emit as a Python identifier. A trailing underscore is
--- the conventional Python escape for exactly this, and no keyword ends in one,
--- so the mapping cannot collide a mangled name with another keyword and is
--- injective over any set of source names that was itself collision-free.
+-- | Make a name safe to emit as a Python identifier, by appending the
+-- conventional trailing underscore.
+--
+-- The rule fires not only on a keyword but on a keyword followed by any run of
+-- underscores, and that is what makes it injective. Mangling only exact
+-- keywords would map the distinct source names @None@ and @None_@ onto the
+-- same @None_@ -- emitting two @class None_:@ definitions, the second silently
+-- shadowing the first, so values of one constructor would answer the other's
+-- predicate. Escaping the whole family instead shifts @kw@, @kw_@, @kw__@, ...
+-- each one underscore along; the family maps into itself injectively, every
+-- other name maps to itself, and the two images are disjoint because anything
+-- of the form @kw_@+ is by definition in the family.
+--
+-- Injectivity holds within this family, not across the whole ADT namespace: a
+-- field named @isNone_@ in a program that also declares a constructor @None@
+-- still collides with that constructor's derived predicate. Nothing here can
+-- see that -- mangling is deliberately a pure function of one name, which is
+-- what lets 'pyVal' mangle a query point that never passed through
+-- 'renameADTIdentifiers'. 'adtIdentifierRenaming' carries the cross-family
+-- check instead, where the whole declaration set is in scope.
 pyMangle :: String -> String
 pyMangle name
-  | name `elem` pythonKeywords = name ++ "_"
-  | otherwise                  = name
+  | dropWhileEnd (== '_') name `elem` pythonKeywords = name ++ "_"
+  | otherwise                                        = name
 
 -- | 'pyMangle' for a constructor reference in a rendered value, which the test
 -- harness may have qualified with a module path. Only the final segment is an

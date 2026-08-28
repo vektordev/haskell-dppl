@@ -25,11 +25,13 @@ import SPLL.Typing.Infer (addTypeInfo)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, adtCdfMessage)
 import qualified SPLL.CodeGenPyTorch
+import SPLL.CodeGenPyTorch (pyMangle, pythonKeywords)
+import SPLL.CodeGenJulia (juliaMangle, juliaKeywords)
 import qualified SPLL.CodeGenJulia
 import SPLL.Prelude (compile)
 
 import Control.Exception (try, evaluate, SomeException)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, nub)
 import Data.Either (isLeft)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertFailure)
@@ -300,7 +302,53 @@ anyCtorTestTests = testGroup "AnyConstructorTest"
                        ("function end_(x" `isInfixOf` src)
             assertBool "an unmangled `end` accessor is still emitted"
                        (not ("function end(x" `isInfixOf` src))
+  , testCase "mangling a keyword does not collide with a name already spelled that way" $ do
+      -- The naive rule (mangle exact keywords only) sends the distinct source
+      -- names None and None_ both to None_, emitting two `class None_:` where
+      -- the second silently shadows the first. Escaping the whole
+      -- keyword-plus-underscores family keeps the map injective.
+      assertBool "None and None_ collapse onto one Python identifier"
+                 (pyMangle "None" /= pyMangle "None_")
+      assertBool "end and end_ collapse onto one Julia identifier"
+                 (juliaMangle "end" /= juliaMangle "end_")
+      assertBool "the escape does not shift a name that needs no mangling"
+                 (pyMangle "Some" == "Some" && juliaMangle "fld" == "fld")
+      -- Injectivity over the family the escape exists for. Mangling is
+      -- deliberately *not* idempotent here: re-mangling shifts one more
+      -- underscore along, which is what keeps the members apart.
+      assertBool "the keyword-plus-underscores family is not mangled injectively"
+                 (length (nub (map pyMangle ["None", "None_", "None__"])) == 3)
+      -- No output is itself a keyword, so nothing needs a second round.
+      assertBool "a mangled name is still a Python keyword"
+                 (not (any ((`elem` pythonKeywords) . pyMangle) pythonKeywords))
+      assertBool "a mangled name is still a Julia keyword"
+                 (not (any ((`elem` juliaKeywords) . juliaMangle) juliaKeywords))
+  , testCase "a collision mangling cannot see is refused, not silently emitted" $
+      -- Residue of the name-local design: pyMangle sees one name at a time, so
+      -- a field named isNone_ colliding with constructor None's derived
+      -- predicate is invisible to it. 'adtIdentifierRenaming' has the whole
+      -- declaration set and refuses.
+      withParsed collidingNamesProgSrc $ \prog -> do
+        res <- forced (Right (compileToPython prog) :: Either String String)
+        case res of
+          Left e  -> assertBool ("expected the mangling-collision refusal, got: " ++ show e)
+                                ("mangling collided" `isInfixOf` show e)
+          Right _ -> assertFailure
+            "two ADT identifiers were emitted under one name instead of being refused"
   ]
+
+-- A field whose name is what constructor @None@'s predicate mangles to. The two
+-- are distinct in the source and indistinguishable in the output.
+collidingNamesProgSrc :: String
+collidingNamesProgSrc = unlines
+  [ "data T = None | Mk isNone_::Float"
+  , "main = Mk Uniform"
+  ]
+
+compileToPython :: Program -> String
+compileToPython prog = case compile defaultCompilerConfig prog of
+  Left err  -> error ("compile failed: " ++ show err)
+  Right env -> unlines (SPLL.CodeGenPyTorch.generateFunctions True env)
 
 
 -- ----------------------------------------------------------------------------
