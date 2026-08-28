@@ -1,5 +1,8 @@
 module PredefinedFunctions (
 globalFEnv,
+lookupFPair,
+soleOutputVar,
+inversionFor,
 FPair(..),
 FDecl(..),
 FEnv,
@@ -16,7 +19,7 @@ renameDecl
 import SPLL.Typing.RType (RType(..), Scheme(..), TVarR(..), ClassConstraint(..))
 import SPLL.IntermediateRepresentation (IRExpr, IRExpr(..), Operand(..), UnaryOperand(..), irMap, IREnv (IREnv), getIRSubExprs) --FIXME
 import SPLL.Lang.Lang
-import Data.Maybe (fromJust)
+import Data.Maybe (fromJust, fromMaybe)
 import SPLL.Lang.Types
 import IRInterpreter
 import qualified Data.Bifunctor
@@ -27,6 +30,29 @@ data FDecl = FDecl {contract :: Scheme, inputVars :: [String], outputVars :: [St
 -- Forward, inverse
 data FPair = FPair {forwardDecl :: FDecl, inverseDecl :: [FDecl]} deriving (Show, Eq)
 type FEnv = [(String, FPair)]
+
+-- | The forward/inverse declaration pair of a known InjF. Every InjF name in an
+-- annotated AST was resolved against this same environment by the parser, which
+-- rejects the unknown ones, so a miss downstream is an internal inconsistency
+-- rather than anything an SPLL program can express.
+lookupFPair :: [ADTDecl] -> String -> FPair
+lookupFPair adtsDecl name = fromMaybe (error ("Unknown InjF: " ++ name)) (lookup name (globalFEnv adtsDecl))
+
+-- | The single output variable of an InjF declaration. Every FDecl in
+-- 'globalFEnv' has exactly one; the field is a list only to mirror 'inputVars'.
+soleOutputVar :: FDecl -> String
+soleOutputVar FDecl{outputVars=[v]} = v
+soleOutputVar d = error ("InjF declaration has output variables " ++ show (outputVars d)
+                         ++ "; exactly one is required")
+
+-- | The one inverse declaration that solves for @v@. An InjF declares at most
+-- one inversion per input variable, so both "none" and "several" mean the
+-- declaration table disagrees with the caller about which variable is invertible.
+inversionFor :: String -> String -> [FDecl] -> FDecl
+inversionFor name v inversions = case [d | d <- inversions, outputVars d == [v]] of
+  [d] -> d
+  ds  -> error ("InjF '" ++ name ++ "' has " ++ show (length ds)
+                ++ " inversions solving for '" ++ v ++ "'; exactly one is required")
 
 -- ============================ UNARY ARITHMETIC ============================
 
@@ -408,7 +434,7 @@ propagateValues adtsDecl name values = case results of
     letInBlocks = map (foldr (\(n, p) e -> IRLetIn n (IRConst (fmap failConversionFwd p)) e) fwdExpr) namedParams
     namedParams = map (zip paramNames) valueProd
     valueProd = sequence values
-    Just (FPair FDecl {inputVars = paramNames, body = fwdExpr} _) = lookup name (globalFEnv adtsDecl)
+    FPair FDecl {inputVars = paramNames, body = fwdExpr} _ = lookupFPair adtsDecl name
 
 parameterCount :: [ADTDecl] -> String -> Int
 parameterCount adtsDecl name = do

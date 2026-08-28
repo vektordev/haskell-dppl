@@ -486,9 +486,11 @@ simplify _ x@(IRSelect cond left right) =
       else right
     else x
 simplify _ x@(IRCons left right) =
-  if isValue left && isValue right
-    then let (VList tl) = unval right in IRConst (VList (ListCont (unval left) tl))
-    else x 
+  case (isValue left && isValue right, unval right) of
+    -- A non-list tail is ill-typed rather than merely unsimplifiable, but the
+    -- optimizer is not the place to reject it: leave the cons alone.
+    (True, VList tl) -> IRConst (VList (ListCont (unval left) tl))
+    _ -> x
 simplify _ (IRHead (IRCons a _)) = a
 simplify _ (IRTail (IRCons _ b)) = b
 simplify _ (IRTFst (IRTCons a _)) = a

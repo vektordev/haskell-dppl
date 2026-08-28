@@ -1,3 +1,8 @@
+-- The pattern-match coverage checker exceeds its default 30-model budget on
+-- 'toIRGenerate's Var case (a 4-way match over @Maybe (RType, Bool)@ with a
+-- nested RType pattern), and then reports that exhaustive match as incomplete.
+-- Raising the budget lets it finish rather than hiding the result.
+{-# OPTIONS_GHC -fmax-pmcheck-models=1000 #-}
 module SPLL.IRCompiler (
   envToIR,
   envToIRUnoptimized,
@@ -795,13 +800,50 @@ isForwardOnly adtDecls' name = case lookup name (globalFEnv adtDecls') of
   Just (FPair _ []) -> True
   _                 -> False
 
+-- | The two input variables of an InjF used as a binary function.
+binaryInputVars :: String -> FDecl -> (String, String)
+binaryInputVars _ FDecl{inputVars=[a, b]} = (a, b)
+binaryInputVars name d = error ("InjF '" ++ name ++ "' is applied as a binary function but declares input variables " ++ show (inputVars d))
+
+-- | The lambda that forward chaining resolves a chain name to. These sites are
+-- reached only after the clause set has established the equivalence, so a miss
+-- (or a non-lambda) means chaining and compilation disagree.
+-- Returns (resolved chain name, bound variable, body chain name, invocation tag).
+equivalentLambda :: String -> FCData -> ChainName -> (ChainName, String, ChainName, String)
+equivalentLambda ctx fcd cn = case findEquivalentExpression fcd cn of
+  Just (rCN, LambdaInfo boundVar bodyCN, tag) -> (rCN, boundVar, bodyCN, tag)
+  other -> error (ctx ++ ": chain name '" ++ cn ++ "' should resolve to a lambda, but resolved to " ++ show other)
+
+-- | As 'equivalentLambda', but where only the resolved chain name is wanted and
+-- the expression behind it need not be a lambda.
+equivalentChainName :: String -> FCData -> ChainName -> ChainName
+equivalentChainName ctx fcd cn = case findEquivalentExpression fcd cn of
+  Just (equivCN, _, _) -> equivCN
+  Nothing -> error (ctx ++ ": chain name '" ++ cn ++ "' has no equivalent expression")
+
+-- | The derivative of an inverse with respect to the variable it solves for.
+-- Declared alongside the inverse body, so a miss is a gap in the InjF table.
+inverseDerivative :: String -> String -> [(String, IRExpr)] -> IRExpr
+inverseDerivative name v derivs = fromMaybe
+  (error ("The inverse of InjF '" ++ name ++ "' declares no derivative for '" ++ v ++ "'"))
+  (lookup v derivs)
+
+-- | The index of the single probabilistic parameter, on the paths whose guard
+-- has already established that there is exactly one.
+theProbIndex :: String -> [Expr] -> Int
+theProbIndex name params = fromMaybe
+  (error ("InjF '" ++ name ++ "' was selected for single-probabilistic-parameter inference, but no parameter is probabilistic"))
+  (getProbIndex params)
+
 -- | Extend the type environment for a Lambda parameter: determine whether the
 -- parameter itself takes a function argument (hasInference = True, so that
 -- downstream Var lookups append _gen/_prob/_integ suffixes when the parameter is
 -- applied) or is a plain value (False).
 extendMetaForLambda :: CompilerMetadata -> TypeInfo -> String -> CompilerMetadata
 extendMetaForLambda meta t name =
-  let (TArrow paramRType _) = rType t
+  let paramRType = case rType t of
+        TArrow p _ -> p
+        other -> error ("extendMetaForLambda: parameter '" ++ name ++ "' of a non-function type " ++ show other)
       hasInference = case paramRType of { TArrow (TArrow _ _) _ -> True; _ -> False }
   in meta { typeEnv = (name, (paramRType, hasInference)) : typeEnv meta }
 
@@ -1404,7 +1446,7 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
   let lChainName = chainName (getTypeInfo l)
 
   -- This logic is here to wrap the expression back into lambdas if the lambda we look at returns a lambda
-  let Just (lResolvedCN, LambdaInfo toInvCN lambdaBodyCN, tag) = findEquivalentExpression (fcData meta) lChainName
+  let (lResolvedCN, toInvCN, lambdaBodyCN, tag) = equivalentLambda "toIRInference/Apply" (fcData meta) lChainName
   let (boundVar, lambdaVars) = unwrapLambdas (fcData meta) lambdaBodyCN
   let wrapInLambdas ex = foldr IRLambda ex lambdaVars
 
@@ -1528,26 +1570,6 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
           let anyW = IRUnaryOp OpIsAny appliedSample
           let guardAny ok whenAnySink = IRIf anyW (if bindingIsSink then whenAnySink else refuse) ok
           return (mapResult wrapInLambdas (guardedZero (zipResult guardAny combined bodyRes)))
-    -- Forward chaining may have messed with the structure of the expression. We may have too many or too few lambdas.
-    -- Every lambda, which is not applied, inside of the callable should be present in the retuned IRExpr.
-    -- Exclude the lambda, which is applied here and all lambdas, which are already present
-    {-let Just lBound = findBoundVariable clauses lChainName
-    let freeVars = (getUnappliedLambdas clauses lChainName \\ [lBound]) \\ findLambdaVars p
-    let wrapInLambdas ex = foldr IRLambda ex freeVars
-    -- If the parameter is a lambda, the return value here is a lambda.
-    -- We find the bound variable in the program and apply its value here
-    let (retP, retD, retBC) = case rType (getTypeInfo v) of
-          TArrow _ _ -> do
-            let ret = IRInvoke (applyLambdas clauses adts p)
-            if countBranches (compilerConfig meta) then
-              (IRTFst ret, IRTFst (IRTSnd ret), IRTFst (IRTSnd ret))
-            else
-              (IRTFst ret, IRTSnd ret, const0)
-          _ -> (p, d, bc)
-    -- If the result is a function, we must wrap the return into a tuple
-    case rt of
-      TArrow _ _ -> return (wrapInLambdas (if countBranches (compilerConfig meta) then IRTCons retP (IRTCons retD retBC) else IRTCons retP retD), const0, const0)
-      _ -> return (wrapInLambdas retP, wrapInLambdas retD, wrapInLambdas retBC)-}
 
 toIRInference _ _ (Expr TypeInfo{rType=_} (Apply _ _)) _ = error "This instance of apply is not yet implemented"
 -- Generic inference for multi-field constructor InjFs (Cons, TCons, user-ADT
@@ -1561,14 +1583,15 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt} (InjF (Named name) params
   | isFieldConstructor (adtDecls meta) name && countProbParams params >= 1 = do
   let resolvedName = resolveInjF rt name
   FPair fwd inversions <- instantiate mkVariable (adtDecls meta) resolvedName
-  let FDecl {inputVars=inVars, outputVars=[outV]} = fwd
+  let inVars = inputVars fwd
+  let outV = soleOutputVar fwd
   -- Inline the sample directly into each inverse body (instead of binding it to
   -- outV) so the optimizer can fold deconstructions like head(prepend(s, ANY))
   -- back to s. A let-binding referenced by every field plus the guard would
   -- survive optimization and force materialising the reconstructed container.
   let inlineSample = irMap (\e -> case e of IRVar n | n == outV -> sample; _ -> e)
   fieldResults <- forM (zip inVars params) $ \(inV, p) -> do
-    let [inv] = filter (\FDecl {outputVars=[w]} -> w == inV) inversions
+    let inv = inversionFor resolvedName inV inversions
     let FDecl {body=invBody, applicability=appT, deconstructing=decons} = inv
     -- Deconstructing inverses need the Any-safe inference variant.
     let probF = if decons then toIRInferenceSave else toIRInference
@@ -1586,7 +1609,9 @@ toIRInference meta cumulative (Expr ti (InjF (Named name) params)) sample | isHi
   -- FPair of the InjF with unique names
   fPair <- instantiate mkVariable localAdts resolvedName
   -- Unary InjF has a single inversion
-  let FPair _ [inv] = fPair
+  let inv = case fPair of
+        FPair _ [i] -> i
+        FPair _ is -> error ("Higher-order InjF '" ++ resolvedName ++ "' must declare exactly one inversion, but declares " ++ show (length is))
   let FDecl {inputVars=inVars, body=invExpr, applicability=appTest, deconstructing=decons, derivatives=derivs} = inv
   --Handle the function being in different positions of the signature
   let aPoss = [0 .. (length params - 1)] \\ getFunctionParamIdx localAdts name
@@ -1597,7 +1622,7 @@ toIRInference meta cumulative (Expr ti (InjF (Named name) params)) sample | isHi
   let aVar = inVars !! aPos
   let fs = map (params !!) (getFunctionParamIdx localAdts name)
   let fVars = map (inVars !!) (getFunctionParamIdx localAdts name)
-  let Just invDerivExpr = lookup aVar derivs
+  let invDerivExpr = inverseDerivative resolvedName aVar derivs
   -- Set sample value to the variable name in the InjF
   setVariables [(aVar, sample)]
   -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
@@ -1635,18 +1660,21 @@ toIRInference meta cumulative (Expr TypeInfo {tags=_} (InjF (Named name) params)
   | hasAnyExcept (adtDecls meta) name = do
   -- FPair of the InjF with unique names
   FPair fwd inversions <- instantiate mkVariable (adtDecls meta) name
-  let FDecl{inputVars=inVars, outputVars=[v1]} = fwd
+  let inVars = inputVars fwd
+  let v1 = soleOutputVar fwd
   -- Index of the deterministic and the probabilistic parameter (Left -> 0, Right -> 1)
-  let Just probIdx = getProbIndex params
+  let probIdx = theProbIndex name params
   let detIdxs = [0..length params - 1] \\ [probIdx]
   -- Find the inversion with all deterministic input parameters
-  let [invDecl] = filter (\FDecl {outputVars=[w1]} -> (inVars !! probIdx)==w1) inversions   --This should only return one inversion
+  let invDecl = inversionFor name (inVars !! probIdx) inversions
   let FDecl {inputVars=invVars, body=invExpr, applicability=appTest, deconstructing=decons, derivatives=invDerivs} = invDecl
   -- All deterministic variable names
   let detVars = filter (v1 /=) invVars
   let detEs = map (params !!) detIdxs
 
-  let IRIf (IRVar v1') invPosExpr invNegExpr = invExpr
+  let (v1', invPosExpr, invNegExpr) = case invExpr of
+        IRIf (IRVar v) pos neg -> (v, pos, neg)
+        _ -> error ("Form of InjF is not supported, its inverse must be an if on the sample: " ++ name)
   when (v1 /= v1') $ error $ "Form of InjF is not supported, sample has to be the condition: " ++ name
   let (isPosAny, nonAnyExpr, exceptExpr) =
         case (invPosExpr, invNegExpr) of
@@ -1655,7 +1683,7 @@ toIRInference meta cumulative (Expr TypeInfo {tags=_} (InjF (Named name) params)
           _ -> error "AnyExcept in InjF must be the first expression inside the if"
 
   -- Find the relevant derivative of the inversion
-  let Just invDeriv = lookup v1 invDerivs
+  let invDeriv = inverseDerivative name v1 invDerivs
   -- Generate the probabilistic sub expressions
   mapM_ (\(eVar, e) -> toIRGenerate meta e >>= \x -> setVariables [(eVar, x)]) (zip detVars detEs)
   setVariables [(v1, sample)]
@@ -1693,7 +1721,8 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
   let enumList = head [x | DiscreteValues x <- tags (getTypeInfo randExprSrc)]
   fPair <- instantiate mkVariable (adtDecls meta) resolvedName
   let FPair fwd _ = fPair
-  let FDecl {inputVars=[v1, v2], body=f} = fwd
+  let (v1, v2) = binaryInputVars resolvedName fwd
+  let f = body fwd
   let (detVar, randVar) = if leftDet then (v1, v2) else (v2, v1)
   detIR <- toIRGenerate meta detExprSrc
   setVariables [(detVar, detIR)]
@@ -1717,7 +1746,8 @@ toIRInference meta True (Expr TypeInfo {rType=rt} (InjF (Named name) [left, righ
   let enumList = head [x | DiscreteValues x <- tags (getTypeInfo randExprSrc)]
   fPair <- instantiate mkVariable (adtDecls meta) resolvedName
   let FPair fwd _ = fPair
-  let FDecl {inputVars=[v1, v2], body=f} = fwd
+  let (v1, v2) = binaryInputVars resolvedName fwd
+  let f = body fwd
   let (detVar, randVar) = if leftDet then (v1, v2) else (v2, v1)
   detIR <- toIRGenerate meta detExprSrc
   setVariables [(detVar, detIR)]
@@ -1734,19 +1764,20 @@ toIRInference meta cumulative (Expr TypeInfo {tags=_, rType=rt} (InjF (Named nam
   let resolvedName = resolveInjF rt name
   -- FPair of the InjF with unique names
   FPair fwd inversions <- instantiate mkVariable (adtDecls meta) resolvedName
-  let FDecl{inputVars=inVars, outputVars=[v1]} = fwd
+  let inVars = inputVars fwd
+  let v1 = soleOutputVar fwd
   -- Index of the deterministic and the probabilistic parameter (Left -> 0, Right -> 1)
-  let Just probIdx = getProbIndex params
+  let probIdx = theProbIndex name params
   let detIdxs = [0..length params - 1] \\ [probIdx]
   -- Find the inversion with all deterministic input parameters
-  let [invDecl] = filter (\FDecl {outputVars=[w1]} -> (inVars !! probIdx)==w1) inversions   --This should only return one inversion
+  let invDecl = inversionFor name (inVars !! probIdx) inversions
   let FDecl {inputVars=invVars, body=invExpr, applicability=appTest, deconstructing=decons, derivatives=invDerivs} = invDecl
   -- All deterministic variable names
   let detVars = filter (v1 /=) invVars
   let detEs = map (params !!) detIdxs
 
   -- Find the relevant derivative of the inversion
-  let Just invDeriv = lookup v1 invDerivs
+  let invDeriv = inverseDerivative name v1 invDerivs
   -- Generate the probabilistic sub expressions
   mapM_ (\(eVar, e) -> toIRGenerate meta e >>= \x -> setVariables [(eVar, x)]) (zip detVars detEs)
   setVariables [(v1, sample)]
@@ -1768,7 +1799,8 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
   let enumListR = head [x | DiscreteValues x <- tags (getTypeInfo right)]
   fPair <- instantiate mkVariable (adtDecls meta) resolvedName
   let FPair fwd _ = fPair
-  let FDecl {inputVars=[v1, v2], body=f} = fwd
+  let (v1, v2) = binaryInputVars resolvedName fwd
+  let f = body fwd
   let sr = semiringOf meta
   mTblL <- materializeOperandTable meta left
   mTblR <- materializeOperandTable meta right
@@ -1793,10 +1825,11 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
 
   fPair <- instantiate mkVariable (adtDecls meta) resolvedName -- FPair of the InjF with unique names
   let FPair fwd inversions = fPair
-  let FDecl {inputVars=[_, v3], outputVars=[_]} = fwd
+  let (_, v3) = binaryInputVars resolvedName fwd
   -- We get the inversion to the right side
-  let [invDecl] = filter (\(FDecl {outputVars=[w1]}) -> v3==w1) inversions   --This should only return one inversion
-  let FDecl {inputVars=[x2, x3], body=invExpr} = invDecl
+  let invDecl = inversionFor resolvedName v3 inversions
+  let (x2, x3) = binaryInputVars resolvedName invDecl
+  let invExpr = body invDecl
 
   -- We now compute
   -- for each e in leftEnum:
@@ -1861,7 +1894,8 @@ toIRInference meta True (Expr TypeInfo {rType=rt} (InjF (Named name) [left, righ
 
   fPair <- instantiate mkVariable (adtDecls meta) resolvedName -- FPair of the InjF with unique names
   let FPair fwd _ = fPair
-  let FDecl {inputVars=[v1, v2], body=f} = fwd
+  let (v1, v2) = binaryInputVars resolvedName fwd
+  let f = body fwd
   let sr = semiringOf meta
   -- Compute the loop body in a nested writer so its bindings can be captured rather
   -- than leaking to the enclosing function scope: those bindings reference the enum
@@ -1954,7 +1988,7 @@ createHOInverse meta (fVar, f) = do
   let (inverseF0, inverseCoV0, _inverseGuard0) = toInvExpr fcData' localAdts (chainName $ getTypeInfo f)
   inverseF   <- materializeAnchors meta inverseF0
   inverseCoV <- materializeAnchors meta inverseCoV0
-  let Just (_, LambdaInfo _ lBodyChainName, tag) = findEquivalentExpression fcData' (chainName $ getTypeInfo f)
+  let (_, _, lBodyChainName, tag) = equivalentLambda "createHOInverse" fcData' (chainName $ getTypeInfo f)
   let inverseLambdaProb = IRLambda (lBodyChainName ++ tag) inverseF
   let inverseLambdaCoV = IRLambda (lBodyChainName ++ tag) inverseCoV
   -- Rename all occurances of f^-1 from the definition to f_prob
@@ -2065,10 +2099,6 @@ equalityGuardBody self (TEither lr rr) v sample =
     (IRIf (IRIsLeft sample) (IRConst $ VBool False) (self rr (IRFromRight v) (IRFromRight sample)))
 equalityGuardBody _    _ v sample = IROp OpEq sample v
 
-findLambdaVars :: IRExpr -> [String]
-findLambdaVars (IRLambda n expr) = n:findLambdaVars expr
-findLambdaVars expr = concatMap findLambdaVars (getIRSubExprs expr)
-
 
 -- Must be used in conjunction with irMap, as it does not recurse
 uniqueify :: [Varname] -> String -> IRExpr -> IRExpr
@@ -2130,7 +2160,6 @@ toIRGenerate meta (Expr _ (Apply l v)) = do
 toIRGenerate meta (Expr _ (ReadNN name subexpr)) = do
   sub <- toIRGenerate meta subexpr
   return $ IRApply (IRVar (name ++ "_auto_gen")) sub
-toIRGenerate _ x = error ("found no way to convert to IRGen: " ++ show x)
 
 
 packParamsIntoLetinsGen :: CompilerMetadata -> [String] -> [Expr] -> IRExpr -> CompilerMonad  IRExpr
@@ -2151,7 +2180,7 @@ packParamsIntoLetinsGen meta (v:vars) (p:params) expr = do
 enumerateAppliedLambda :: CompilerMetadata -> Bool -> Expr -> Expr -> IRExpr -> CompilerMonad PResult
 enumerateAppliedLambda meta cumulative l v sample = do
   let lCn = chainName (getTypeInfo l)
-  let Just (_, LambdaInfo boundVar bodyCn, _) = findEquivalentExpression (fcData meta) lCn
+  let (_, boundVar, bodyCn, _) = equivalentLambda "enumerateAppliedLambda" (fcData meta) lCn
   let fExprs = map snd (functions (compilingProgram meta))
   let lBodyExpr = findExprWithCN fExprs bodyCn
   let newTypeEnv = (boundVar, (rType (getTypeInfo v), False)):typeEnv meta
@@ -2172,7 +2201,7 @@ toIREnumerate meta cumulative (Expr _ (Apply l v)) sample
   | isEnumerableApplication l v =
   enumerateAppliedLambda meta cumulative l v sample
 toIREnumerate meta cumulative (Expr TypeInfo{chainName=cn} (Var _)) sample = do
-  let Just (equivCN, _, _) = findEquivalentExpression (fcData meta) cn
+  let equivCN = equivalentChainName "toIREnumerate/Var" (fcData meta) cn
   let fs = map snd (functions (compilingProgram meta))
   let equivExpr = findExprWithCN fs equivCN
   toIREnumerate meta cumulative equivExpr sample
@@ -3911,8 +3940,10 @@ planWorldDim w = length [ () | PLeafPt {} <- pwCons w ]
 -- between 'measurePlanWorlds' and the milestone-4 value grouping so a collapsed
 -- group's factor measures exactly as the worlds it replaced.
 planWorldMass :: String -> PlanWorld -> IRExpr
-planWorldMass nnRaw (PlanWorld guards cons pairs factor) =
-    foldr (\g acc -> IRIf g acc const0) (mulFactor factor (prodMass cons pairs)) guards
+planWorldMass nnRaw w =
+    foldr (\g acc -> IRIf g acc const0)
+          (mulFactor (pwFactor w) (prodMass (pwCons w) (pwPairs w)))
+          (pwGuards w)
   where
     prodMass []  []  = const1
     prodMass cs prs = foldr1 (IROp OpMult) (map leafMass cs ++ map pairMass prs)

@@ -62,6 +62,7 @@ pPrintIRExpr (IROp OpEq e1 e2) n = binOpIR "==" e1 e2 n
 pPrintIRExpr (IROp OpApprox e1 e2) n = "isclose(" ++ pPrintIRExpr e1 (n + 1) ++ ", " ++ pPrintIRExpr e2 (n + 1) ++ ")"
 pPrintIRExpr (IROp OpOr e1 e2) n = binOpIR "||" e1 e2 n
 pPrintIRExpr (IROp OpAnd e1 e2) n = binOpIR "&&" e1 e2 n
+pPrintIRExpr (IROp OpMax e1 e2) n = "max(" ++ pPrintIRExpr e1 (n + 1) ++ ", " ++ pPrintIRExpr e2 (n + 1) ++ ")"
 pPrintIRExpr (IRUnaryOp OpNeg e) n = "-(" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRUnaryOp OpAbs e) n = "abs(" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRUnaryOp OpNot e) n = "!(" ++ pPrintIRExpr e (n + 1) ++ ")"
@@ -141,6 +142,12 @@ pPrintValue (VInt a) = show a
 pPrintValue (VSymbol a) = a
 pPrintValue VUnit = "()"
 pPrintValue (VError e) = "error(" ++ e ++ ")"
+pPrintValue (VThetaTree t) = show t
+pPrintValue (VClosure env x _) = "closure(\\" ++ x ++ " -> _){" ++ intercalate "," (map fst env) ++ "}"
+pPrintValue (VADT name []) = name
+pPrintValue (VADT name args) = "(" ++ name ++ " " ++ unwords (map pPrintValue args) ++ ")"
+pPrintValue VAny = "ANY"
+pPrintValue (VAnyExcept _) = "ANY_EXCEPT"
 
 indent :: Int -> String
 indent n = replicate (2 * n) ' '

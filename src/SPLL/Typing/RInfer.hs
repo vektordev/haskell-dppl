@@ -106,8 +106,6 @@ instance Substitutable RType where
   apply (Subst s) t@(TVarR a) = Map.findWithDefault t a s
   apply s (GreaterType t1 t2) = apply s t1 `GreaterType` apply s t2
   apply _ NotSetYet = NotSetYet
-  -- rest of RType arent used as of now
-  apply _ val = error ("Missing Substitute: " ++ show val)
 
   ftv (ListOf t) = ftv t
   ftv (Tuple t1 t2) = Set.union (ftv t1) (ftv t2)
@@ -282,14 +280,19 @@ infer adtsDecl expr
           let argConstraint = Constraint funcTy (argTy `TArrow` (rType ti)) (Just "Apply")
           return (rType ti, [argConstraint] ++ c1 ++ c2, Expr ti (Apply funcExprTy argExprTy))
           --expr `usingScheme` (Forall [TV "a", TV "b"] (((TVarR $ TV "a") `TArrow` (TVarR $ TV "b")) `TArrow` (TVarR $ TV "a") `TArrow` (TVarR $ TV "b")))
-        e@(Expr _ (InjF (Named name) _)) -> do
-          let Just (FPair FDecl {contract=scheme} _) = lookup name (globalFEnv adtsDecl)
-          usingScheme adtsDecl e scheme
+        e@(Expr _ (InjF (Named name) _)) ->
+          case lookup name (globalFEnv adtsDecl) of
+            Just (FPair FDecl {contract=scheme} _) -> usingScheme adtsDecl e scheme
+            Nothing -> throwError $ UnboundVariable ("InjF " ++ name)
         (Expr ti (ReadNN name sym)) -> do
           t <- lookupTEnv name
           (symTy, c1, symTyExpr) <- infer adtsDecl sym
           let argConstraint = Constraint t (symTy `TArrow` (rType ti)) (Just "ReadNN")
           return (rType ti, [argConstraint] ++ c1, Expr ti (ReadNN name symTyExpr))
+        -- 'specialTreatment' is the guard on this branch; the two must list the
+        -- same stubs, so a node reaching here means one of them was extended
+        -- without the other.
+        e -> error ("infer: " ++ show (toStub e) ++ " passes specialTreatment but has no case in it")
     | solvesSimply expr =
         let
           plausibleAlgs = filter (checkExprMatches expr) allAlgorithms
@@ -335,6 +338,8 @@ rescope (Forall tvars cs rty) = do
   modify (\s -> s { collectedClassConstraints = renamedCs ++ collectedClassConstraints s })
   return (Forall newvars renamedCs substituted)
     where unwrap (TVarR tv) = tv
+          -- 'fresh' only ever yields a type variable.
+          unwrap t = error ("rescope: fresh produced " ++ show t ++ ", not a type variable")
 
 -- instantiate a Scheme: Substitute each ForAll'd TV with a fresh var.
 instantiate :: Scheme -> Infer RType

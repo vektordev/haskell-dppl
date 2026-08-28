@@ -43,15 +43,44 @@ failures, always store the test output to a temporary file and grep that.
 ### Compiler warnings
 
 `src/` and `app/` build under `-Wall -Wcompat -Wincomplete-record-updates
--Wredundant-constraints` (set in `package.yaml`; the `.cabal` is
-hpack-generated and gitignored). Everything that enables is clean, except a
-`-Wno-*` backlog listed there -- `incomplete-uni-patterns`,
-`incomplete-patterns`, `unused-top-binds`, `type-defaults` -- to be retired
-one at a time, after which the block becomes `-Wall -Werror`. **Do not add a
-`-Wno-*` to silence new code.** Five default-on warnings still fire
-(`-Woverlapping-patterns` x3, `-Wdeprecations` x2) and are left visible
-deliberately: each marks real dead code. `test/` has not had the pass and
-carries no warning flags yet.
+-Wredundant-constraints -Werror` (set in `package.yaml`; the `.cabal` is
+hpack-generated and gitignored) with **zero warnings**. The backlog is empty:
+there are no `-Wno-*` flags and none may be added. Fix the code instead, or --
+for a genuine false positive -- scope an `OPTIONS_GHC` pragma to the one module
+and say why. `test/` has not had the pass and carries no warning flags yet.
+
+The last five to go were three `-Woverlapping-patterns` and two
+`-Wdeprecations`, each a real defect rather than noise:
+
+- `juliaUnaryOps` / `RInfer`'s `apply` / `toIRGenerate` each ended in an
+  unreachable `error` catch-all over an already-exhaustive match. Deleted:
+  `-Wincomplete-patterns` flags a future missing constructor at compile time,
+  which strictly beats the runtime `error` the catch-all offered. (The
+  neighbouring `juliaOps` catch-all is *not* redundant and stays.)
+- `Prelude`'s `pPrintIfVerbose`/`pPrintIfMoreVerbose` used
+  `Debug.Pretty.Simple.pTraceShow`, which is `DEPRECATED` precisely to nag
+  about leftover debug traces. These are real `-v` functionality, so they now
+  compose the non-deprecated pieces directly: `trace (TL.unpack (pShow s))`.
+
+and the two `unused-top-binds`: `IRCompiler`'s `findLambdaVars`, live only via
+a commented-out block that referenced three functions (`findBoundVariable`,
+`getUnappliedLambdas`, `applyLambdas`) which no longer exist anywhere -- block
+and function both deleted; and `PlanWorld`'s `pwFactor`, whose field was only
+ever read positionally, so `planWorldMass` now reads its world through the
+selectors.
+
+The two incomplete-pattern categories were retired by filling in the missing
+cases, mostly as named helpers that state the invariant and `error` with the
+offending value (`soleOutputVar`/`inversionFor`/`lookupFPair` in
+`PredefinedFunctions`, `binaryInputVars`/`equivalentLambda`/`inverseDerivative`
+in `IRCompiler`, `asLambda` in `ForwardChaining`, `mockLogits` in `MockNN`),
+and in a few places by routing a genuine failure into an existing error channel
+instead (`Prelude`'s `runProb`/`runIntegNamedC` now answer `Left` when a
+definition has no compiled variant for that mode; the `Parser` builder maps
+answer `Left` on a wrong argument count). `IRCompiler` carries an
+`OPTIONS_GHC -fmax-pmcheck-models=1000` pragma: the coverage checker exceeds
+its default 30-model budget on two `Maybe (RType, Bool)` cases and then reports
+those exhaustive matches as incomplete.
 
 Note that a plain rebuild will not re-emit warnings for unchanged modules;
 `stack build --ghc-options="-fforce-recomp"` is what shows the true count.

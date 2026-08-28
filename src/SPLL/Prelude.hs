@@ -96,7 +96,9 @@ import SPLL.Typing.Determinism (knownAnchors)
 import qualified Data.Set as Set
 import Text.PrettyPrint.Annotated.HughesPJClass()
 import PrettyPrint (pPrintProg, pPrintIREnv)
-import Debug.Pretty.Simple
+import Text.Pretty.Simple (pShow)
+import qualified Data.Text.Lazy as TL
+import Data.Char (toUpper)
 import Data.Maybe (isJust, fromMaybe)
 import Data.List (find)
 
@@ -445,20 +447,24 @@ runProbC p compiled = runProbNamedC p compiled "main"
 -- behaviour of individual documented definitions, not just @main@.
 runGenNamedC :: (RandomGen g) => Program -> IREnv -> String -> [IRValue] -> Rand g IRValue
 runGenNamedC p compiled name args =
-  let Just (gen, _) = genFun (lookupIREnv name compiled)
-  in generateRand (neurals p) (encodeDecls p) compiled (map IRConst args) gen
+  case genFun (lookupIREnv name compiled) of
+    Just (gen, _) -> generateRand (neurals p) (encodeDecls p) compiled (map IRConst args) gen
+    -- Unlike the prob/integ runners there is no error channel in the return
+    -- type to report this through.
+    Nothing -> error (missingVariant "generate" name)
 
 runProbNamedC :: Program -> IREnv -> String -> [IRValue] -> IRValue -> Either CompilerError IRValue
 runProbNamedC p compiled name args x =
-  let Just (prob, _) = probFun (lookupIREnv name compiled)
+  case probFun (lookupIREnv name compiled) of
+    Nothing -> Left (missingVariant "probability" name)
+    Just (prob, _) -> generateDet (neurals p) (encodeDecls p) compiled (map IRConst args') prob
       -- topK-compiled prob functions take an accumulated-probability parameter
       -- right after the sample; seed it with the semiring's multiplicative
       -- identity at the query root -- linear 1.0, or log-space 0.0. Hardcoding
       -- 1.0 here silently discarded all probability mass under logSpace, since
       -- the compiled cutoff comparisons expect a log-space accumulator
       -- (task topk-logspace-unsound).
-      args' = if compiledWithTopK compiled then x : accProbInit compiled : args else x : args
-  in generateDet (neurals p) (encodeDecls p) compiled (map IRConst args') prob
+      where args' = if compiledWithTopK compiled then x : accProbInit compiled : args else x : args
 
 -- The IRCompiler emits the TOP_K_CUTOFF constant iff topKThreshold was set,
 -- so a compiled IREnv carries its own marker for the extra acc_prob parameter.
@@ -476,8 +482,20 @@ runIntegC p compiled = runIntegNamedC p compiled "main"
 
 runIntegNamedC :: Program -> IREnv -> String -> [IRValue] -> IRValue -> Either CompilerError IRValue
 runIntegNamedC p compiled name args sample =
-  let Just (integ, _) = integFun (lookupIREnv name compiled)
-  in generateDet (neurals p) (encodeDecls p) compiled (map IRConst (sample:args)) integ
+  case integFun (lookupIREnv name compiled) of
+    Just (integ, _) -> generateDet (neurals p) (encodeDecls p) compiled (map IRConst (sample:args)) integ
+    Nothing -> Left (missingVariant "integrate" name)
+
+-- | Modality inference decides per definition which of the three variants are
+-- tractable, and the --noGenerate/--noProbability/--noIntegrate flags suppress
+-- them outright, so asking a compiled group for a variant it does not have is a
+-- normal outcome rather than an internal inconsistency.
+missingVariant :: String -> String -> CompilerError
+missingVariant variant name =
+  "'" ++ name ++ "' has no compiled " ++ variant ++ " function: it is either "
+  ++ "intractable for that mode or was suppressed by the --no" ++ capitalise variant ++ " flag"
+  where capitalise (c:cs) = toUpper c : cs
+        capitalise []     = []
 
 -- | Run the encode function of the function group named `target`. Each decoder
 -- declaration `name :: Symbol -> X` contributes a group `<name>_auto` whose encode
@@ -502,11 +520,11 @@ printIfMoreVerbose CompilerConfig {verbose=v} s | v >= 2 = trace s (return ())
 printIfMoreVerbose _ _ = return ()
 
 pPrintIfVerbose :: (Monad m, Show a) => CompilerConfig -> a -> m ()
-pPrintIfVerbose CompilerConfig {verbose=v} s | v >= 1 = pTraceShow s (return ())
+pPrintIfVerbose CompilerConfig {verbose=v} s | v >= 1 = trace (TL.unpack (pShow s)) (return ())
 pPrintIfVerbose _ _ = return ()
 
 pPrintIfMoreVerbose :: (Monad m, Show a) => CompilerConfig -> a -> m ()
-pPrintIfMoreVerbose CompilerConfig {verbose=v} s | v >= 2 = pTraceShow s (return ())
+pPrintIfMoreVerbose CompilerConfig {verbose=v} s | v >= 2 = trace (TL.unpack (pShow s)) (return ())
 pPrintIfMoreVerbose _ _ = return ()
 
 -- Print a labeled intermediate compilation stage showing the full annotated AST tree.

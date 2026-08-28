@@ -5,7 +5,7 @@ generateRand
 
 import Statistics.Distribution (quantile)
 import SPLL.IntermediateRepresentation
-import SPLL.Lang.Lang (elementAt, lookupNeural, floatApproxEqThresh, multiValueToValueList, valueInMultiValue)
+import SPLL.Lang.Lang (elementAt, lookupNeural, floatApproxEqThresh, multiValueToValueList, valueInMultiValue, neuralValueType)
 import StandardLibrary
 import MockNN
 import SPLL.AutoNeural
@@ -13,7 +13,7 @@ import SPLL.AutoNeural
 import Control.Monad.Random
 import Statistics.Distribution.Normal (normalDistr)
 import Data.Number.Erf
-import Data.Maybe (fromJust, isJust, catMaybes)
+import Data.Maybe (fromJust, fromMaybe, isJust, catMaybes)
 import Data.List (isSuffixOf, isPrefixOf)
 import SPLL.Lang.Types
 import SPLL.Typing.RType
@@ -21,6 +21,25 @@ import Data.Functor ((<&>))
 import Data.Foldable (foldrM)
 import SPLL.Typing.AlgebraicDataTypes
 import Data.Vector.Internal.Check (HasCallStack)
+
+-- | A neural declaration's type is @Symbol -> target@; the partition plan is
+-- built from the target. Validation rejects any other shape, so a mismatch here
+-- is a declaration that bypassed it.
+neuralOutputType :: String -> RType -> RType
+neuralOutputType name rt = fromMaybe
+  (error ("Neural network '" ++ name ++ "' is declared as " ++ show rt
+          ++ "; a decoder must have type Symbol -> <output type>"))
+  (neuralValueType rt)
+
+-- | 'IRTheta'/'IRSubtree' index into the theta tree their argument evaluates to.
+asThetaTree :: IRValue -> ThetaTree
+asThetaTree (VThetaTree t) = t
+asThetaTree v = error ("Type error: theta access on a non-theta-tree value: " ++ show v)
+
+-- | The enum-sum reducers fold probabilities, which are always floats.
+enumSumReducerError :: String -> IRValue -> IRValue -> a
+enumSumReducerError which a b = error
+  (which ++ ": expected float probabilities to reduce, got " ++ show a ++ " and " ++ show b)
 
 data RandomFunctions m a = RandomFunctions {uniformGen:: m IRValue, normalGen:: m IRValue}
 
@@ -56,8 +75,8 @@ generate _ _ _ _ _ env [] (IRLambda name expr) = do
   return $ VClosure env name expr
 generate f neurals' registry adts' globalEnv env [] (IRApply (IRVar name) sym)
   | Just (rt, tags') <- lookupNeural name neurals' = do
-    let realRT (TSymbol `TArrow` r) = r
-    let partPlan = makePartitionPlan adts' (realRT rt) (resolvePartitionAnnotation registry (realRT rt) tags')
+    let realRT = neuralOutputType name rt
+    let partPlan = makePartitionPlan adts' realRT (resolvePartitionAnnotation registry realRT tags')
     symVal <- generate f neurals' registry adts' globalEnv env [] sym
     return $ evaluateMockNN partPlan symVal
 generate f neurals' registry adts' globalEnv env [] (IRApply expr val) = do
@@ -253,11 +272,11 @@ generate f neurals' registry adts' globalEnv env [] (IRUnaryOp OpIsAny a) = do
     _ -> return $ VBool False
 generate f neurals' registry adts' globalEnv env [] (IRTheta a i) = do
   tt <- generate f neurals' registry adts' globalEnv env [] a
-  let VThetaTree (ThetaTree thetas _) = tt
+  let ThetaTree thetas _ = asThetaTree tt
   return $ VFloat (thetas!!i)
 generate f neurals' registry adts' globalEnv env [] (IRSubtree a i) = do
   tt <- generate f neurals' registry adts' globalEnv env [] a
-  let VThetaTree (ThetaTree _ subtrees) = tt
+  let ThetaTree _ subtrees = asThetaTree tt
   return $ VThetaTree (subtrees!!i)
 generate _ _ _ _ _ _ [] (IRConst val) = return val
 generate f neurals' registry adts' globalEnv env [] (IRCons hd tl) = do
@@ -371,8 +390,7 @@ generate f neurals' registry adts' globalEnv env args (IRLetIn name decl body) =
 -- In case somebody decides to invoke neurals with IRVar
 generate f neurals' registry adts' globalEnv env args (IRVar name) | "_mock" `isSuffixOf` name && isJust (lookupNeural (iterate init name !! 5) neurals') = do
   let (rt, tags') = fromJust (lookupNeural (iterate init name !! 5) neurals')
-  let realRT (TSymbol `TArrow` r) = r
-  let partPlan = makePartitionPlan adts' (realRT rt) tags'
+  let partPlan = makePartitionPlan adts' (neuralOutputType name rt) tags'
   case lookup symbolEnvName env of
     Nothing -> error "No symbol found in the environment"
     Just sym -> do
@@ -385,7 +403,7 @@ generate f neurals' registry adts' globalEnv env args (IRVar name) | "_mock" `is
 generate f neurals' registry adts' globalEnv env args (IRVar name) | "_adt" `isSuffixOf` name && (iterate init name !! 4) `elem` implicitFunctionNames adts' = do
   let realName = iterate init name !! 4
   let rt = lookupRType realName adts'
-  let lookupParams = sequence [lookup ("x" ++ show x) env | x <- [0..(arity rt - 1)]]
+  let lookupParams = sequence [lookup ("x" ++ show x) env | x <- [0 :: Int .. arity rt - 1]]
   case lookupParams of
     Nothing -> error ("No parameter found for " ++ name ++ " in environment")
     Just val -> do
@@ -403,7 +421,8 @@ generate f neurals' registry adts' globalEnv env [] (IREnumSum varname values ex
     x <- generate f neurals' registry adts' globalEnv env [IRConst v] (IRLambda varname expr)
     return $ sumValues x acc
     ) (VFloat 0) (fmap valueToIR (multiValueToValueList values))
-  where sumValues = \(VFloat a) (VFloat b) -> VFloat $ a+b
+  where sumValues (VFloat a) (VFloat b) = VFloat $ a+b
+        sumValues a b = enumSumReducerError "IREnumSum" a b
 -- | Log-space sibling of IREnumSum (task log-space-probability-computation):
 -- reduces the enumerated per-value log-probabilities by log-sum-exp instead
 -- of a plain sum, starting from the semiring zero (-infinity, the log-sum-exp
@@ -418,6 +437,7 @@ generate f neurals' registry adts' globalEnv env [] (IRLogEnumSum varname values
       | isInfinite a && a < 0 = VFloat b
       | isInfinite b && b < 0 = VFloat a
       | otherwise = let m = max a b in VFloat (m + log (exp (a - m) + exp (b - m)))
+    logSumExpValues a b = enumSumReducerError "IRLogEnumSum" a b
 -- | Paired sibling of the two above (fuzz-qc-compiler-bugs item 3): a single
 -- pass over the enumerated support whose body yields a @(prob, branches)@
 -- tuple. The probability component reduces exactly as 'IREnumSum'
@@ -486,6 +506,7 @@ irPDF _ x = error ("Expression must be the density of a valid distribution" ++ s
 irCDF :: Distribution -> IRValue -> IRValue
 irCDF IRUniform (VFloat x) = VFloat $ if x < 0 then 0 else if x > 1 then 1 else x
 irCDF IRNormal (VFloat x) = VFloat $ (1/2)*(1 + erf(x/sqrt(2)))
+irCDF _ x = error ("Expression must be the CDF of a valid distribution" ++ show x)
 
 -- | Native log-pdf/log-cdf (task log-space-probability-computation): computed
 -- directly from the formula rather than as @log (irPDF ...)@, so a deep tail

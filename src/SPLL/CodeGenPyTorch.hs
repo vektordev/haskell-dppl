@@ -98,6 +98,10 @@ pyMultiVal (MultiEither l r) = "(\"E\", (" ++ pyMultiVal l ++ ", " ++ pyMultiVal
 pyMultiVal (MultiADT constrs) = "(\"A\", [" ++ intercalate ", " (map (\(cName, fields) -> 
   "(" ++ pyCtorRef cName ++ ", [" ++ intercalate ", " (map pyMultiVal fields) ++ "])"
   ) constrs) ++ "])"
+-- MultiAuto and MultiTypeRef are resolved by AutoNeural before codegen: the
+-- first by auto-derivation from the RType, the second by unrolling the
+-- depth-bounded recursion. Reaching codegen means that pass was skipped.
+pyMultiVal x = error ("unresolved MultiValue in codegen: " ++ show x)
 
 -- | Python's reserved words. A name in this set cannot be an identifier at all,
 -- so emitting one produces a file that does not parse -- @class None:@ is a
@@ -154,6 +158,7 @@ pyCtorRef name = case break (== '.') (reverse name) of
 
 onHead :: (a -> a) -> [a] -> [a]
 onHead f (x:xs) = f x : xs
+onHead _ [] = []
 
 generateFunctions :: Bool -> IREnv -> [String]
 --contrary to the julia backend, we want to aggregate gen and prob into one classes. Ugly implementation, but it'll do for now.

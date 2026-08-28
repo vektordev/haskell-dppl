@@ -140,6 +140,7 @@ multiValueToValueList :: MultiValue -> [Value]
 -- A continuous slot has no enumerable values: any composite containing it also has none.
 multiValueToValueList MultiContinuous = []
 multiValueToValueList MultiAuto = error "multiValueToValueList: unresolved auto-placeholder (_); this should have been resolved before discrete-value propagation"
+multiValueToValueList (MultiTypeRef n) = error ("multiValueToValueList: unresolved recursion reference to '" ++ n ++ "'; resolveMultiValueTypeDecl should have unrolled it")
 multiValueToValueList (MultiDiscretes vals) = vals
 multiValueToValueList (MultiEither ls rs) = map (VEither . Left) lVals ++ map (VEither . Right) rVals
   where
@@ -221,6 +222,11 @@ valueInMultiValue (MultiTuple mf ms) (VTuple f s) = valueInMultiValue mf f && va
 valueInMultiValue (MultiADT mConstrs) (VADT cName vals) = fromMaybe False (do
   constr <- lookup cName mConstrs
   return $ all (uncurry valueInMultiValue) (zip constr vals))
+valueInMultiValue MultiAuto _ = error "valueInMultiValue: unresolved auto-placeholder (_); resolveMultiAuto should have run first"
+valueInMultiValue (MultiTypeRef n) _ = error ("valueInMultiValue: unresolved recursion reference to '" ++ n ++ "'; resolveMultiValueTypeDecl should have unrolled it")
+-- Any remaining pair is a value whose shape does not match the value set's, so
+-- it is simply not a member.
+valueInMultiValue _ _ = False
 
 unionMultiValues :: MultiValue -> MultiValue -> MultiValue
 unionMultiValues MultiContinuous MultiContinuous = MultiContinuous
@@ -231,6 +237,10 @@ unionMultiValues (MultiADT constrs1) (MultiADT constrs2) = MultiADT (map (\cn ->
   where
     cNames = nub $ map fst constrs1 ++ map fst constrs2
     unionConstr cn = zipWith unionMultiValues (fromMaybe [] (lookup cn constrs1)) (fromMaybe [] (lookup cn constrs2))
+-- Both operands describe the same RType (they are the two arms of one
+-- conditional), so a shape mismatch here is an upstream inconsistency, not a
+-- union this function is entitled to widen.
+unionMultiValues a b = error ("unionMultiValues: mismatched value-set shapes " ++ show a ++ " and " ++ show b)
 
 -- | Attempt to derive the full MultiValue enumeration for an RType without any explicit
 -- annotation. Succeeds for types with a finite, statically-known set of values (Bool, Float
@@ -303,6 +313,14 @@ resolveMultiValueTypeDecl depthLeft (MultiEither l r) decl =
 resolveMultiValueTypeDecl depthLeft (MultiADT cons) decl =
   MultiADT [(cname, map (\mv -> resolveMultiValueTypeDecl depthLeft mv decl) args) |
             (cname, args) <- cons]
+-- Only the one binder introduced by `Nx.` (or by the `depth N` auto-derivation)
+-- is in scope, and its body has to be the constructor set the last level drops
+-- recursive constructors from. Anything else is a reference this unroller
+-- cannot close.
+resolveMultiValueTypeDecl 1 (MultiTypeRef refName) (_, declVal) =
+  error ("Cannot unroll recursion reference '" ++ refName ++ "': its binder is " ++ show declVal ++ ", not a constructor set")
+resolveMultiValueTypeDecl _ (MultiTypeRef refName) (declName, _) =
+  error ("Unknown recursion reference '" ++ refName ++ "'; the only bound name is '" ++ declName ++ "'")
 
 containsMultiValueTypeRef :: String -> MultiValue -> Bool
 containsMultiValueTypeRef _ (MultiDiscretes _) = False
@@ -339,6 +357,15 @@ getRType (VList EmptyList) = NullList
 getRType (VTuple t1 t2) = Tuple (getRType t1) (getRType t2)
 getRType (VEither (Left a)) = TEither (getRType a) SPLL.Typing.RType.NotSetYet
 getRType (VEither (Right a)) = TEither SPLL.Typing.RType.NotSetYet (getRType a)
+getRType (VList AnyList) = ListOf SPLL.Typing.RType.NotSetYet
+getRType (VThetaTree _) = TThetaTree
+getRType (VADT name _) = TADT name
+-- A closure's argument and result types are not recoverable from the runtime
+-- value, and the marginal wildcards deliberately stand for values of any type.
+getRType v@(VClosure {}) = error ("getRType: no return type for " ++ show v)
+getRType VAny = error "getRType: ANY is a marginal-query wildcard, not a typed value"
+getRType (VAnyExcept _) = error "getRType: ANY-except is a marginal-query wildcard, not a typed value"
+getRType (VError e) = error ("getRType: on an error value: " ++ e)
 
 lookupNeural :: String -> [NeuralDecl] -> Maybe (RType, Maybe MultiValue)
 lookupNeural name decls = foldr (\(n, r, t) ret -> if n == name then Just (r, t) else ret) Nothing decls
@@ -368,7 +395,7 @@ prettyPrintNeural (name, ty, range) = l1:l2:(l3 range):[]
     l1 = ("--- Neural: " ++ name ++ "---")
     l2 = ("\t :: " ++ show ty)
     l3 (Just (MultiDiscretes lst)) = ("\t" ++ (show $ length lst))
-    l3 (Nothing) = ("\t" ++ (show $ 0))
+    l3 (Nothing) = ("\t" ++ show (0 :: Int))
     l3 _ = "prettyprint not implemented"
 
 prettyPrintDecl :: (TypeInfo -> String) -> FnDecl -> [String]

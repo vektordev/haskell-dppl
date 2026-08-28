@@ -83,6 +83,9 @@ getValuesFromExpr :: Expr -> Maybe MultiValue
 getValuesFromExpr e = case [mv | DiscreteValues mv <- tags $ getTypeInfo e] of
   [mv] -> Just mv
   [] -> Nothing
+  -- Annotation is written once per node; a second tag means an earlier pass
+  -- ran twice or disagreed with itself, and silently picking one would hide it.
+  mvs -> error ("getValuesFromExpr: " ++ show (length mvs) ++ " DiscreteValues tags on one node")
 
 -- The FCData certificate is built once in 'Prelude.compile' and threaded in,
 -- rather than rebuilt here (modality-split-forwardchaining).

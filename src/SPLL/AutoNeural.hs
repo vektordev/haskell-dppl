@@ -21,7 +21,7 @@ import StandardLibrary
 
 import Data.List (find, elemIndex, isPrefixOf, intercalate)
 import Utils
-import Data.Maybe (fromJust, isJust, listToMaybe, maybeToList)
+import Data.Maybe (fromJust, fromMaybe, isJust, listToMaybe, maybeToList)
 import Control.Applicative ((<|>))
 
 -- basic strucutre:
@@ -175,6 +175,22 @@ planLayoutString plan =
     rangeStr ix n = if n <= 1 then show ix else show ix ++ ".." ++ show (ix + n - 1)
 
 
+-- | The @data@ declaration a plan names. Plans are built against the same
+-- declaration list they are later walked with, so a miss is a mismatched
+-- environment rather than anything the SPLL program can express.
+lookupADTDecl :: String -> [ADTDecl] -> ADTDecl
+lookupADTDecl name adtDecls = fromMaybe
+  (error ("AutoNeural: no `data` declaration for ADT '" ++ name ++ "'"))
+  (find ((== name) . dataName) adtDecls)
+
+-- | 'makePartitionPlan' is the only producer of 'Discretes', and it only builds
+-- one from an explicit enumeration. Any other tag in that slot means a plan was
+-- assembled by hand and its logit layout is undefined.
+discretesTagError :: String -> RType -> MultiValue -> a
+discretesTagError fn ty tag = error
+  (fn ++ ": Discretes plan for " ++ show ty ++ " carries " ++ show tag
+      ++ " instead of an explicit enumeration")
+
 data PartitionPlan = TuplePlan PartitionPlan PartitionPlan -- Logit layout: first, then second.
                    | EitherPlan PartitionPlan PartitionPlan -- Logit layout: flag, then left, then right
                    | Discretes RType MultiValue -- Logit layout: Enumerated values in order of "tagToValues"
@@ -214,6 +230,7 @@ makeProb adtDecls _conf plan = IRLambda vector (IRLambda "sample"
 -- step 2: Use IRApply "indexOf" to find the index of the value in the list
 indexOf :: MultiValue -> IRExpr -> IRExpr
 indexOf (MultiDiscretes vals) sample = invokeStandardFunction stdIndexOf [sample, IRConst (constructVList (map valueToIR vals))]
+indexOf tag _ = error ("indexOf: expected an explicit enumeration, got " ++ show tag)
 
 
 makeProbRec :: [ADTDecl] -> PartitionPlan -> Int -> IRExpr -> (IRExpr, IRExpr, IRExpr)
@@ -249,7 +266,7 @@ makeProbRec adtDecls (EitherPlan a b) ix sample = (noAny sample
     pIsRight = IROp OpSub (IRConst $ VFloat 1) pIsLeft
 makeProbRec adtDecls (ADTPlan adtName plans) ix sample = (noAny sample p, noAny0 sample dim, noAny0 sample bc)
   where
-    Just adt = find ((== adtName) . dataName) adtDecls
+    adt = lookupADTDecl adtName adtDecls
     constrsInPlan = filter ((`elem` map fst plans) . fst) (constructors adt)
     constrsWithPlan = mapToTup (fromJust . (`lookup` plans) . fst) constrsInPlan
     constrsWithPlanAndIx = mapAppendTup constrsWithPlan constrIx
@@ -291,6 +308,7 @@ makeGenRec _adtDecls Continuous ix = IROp OpPlus
 -- constructors at its deepest level, so `length plans` can be smaller than the full
 -- `constructors adt`; the value region must start right after the flags that actually exist.
 makeGenRec adtDecls (ADTPlan _ plans) ix = constructorLottery adtDecls plans ix (ix + length plans)
+makeGenRec _adtDecls (Discretes ty tag) _ = discretesTagError "makeGenRec" ty tag
 
 makeGenADTConstr :: [ADTDecl] -> [PartitionPlan] -> String -> Int -> IRExpr
 makeGenADTConstr adtDecls plans name ix = foldl IRApply (IRVar name) gens
@@ -333,6 +351,7 @@ getSize :: PartitionPlan -> Int
 getSize (TuplePlan a b) = getSize a + getSize b
 getSize (EitherPlan a b) = getSize a + getSize b + 1
 getSize (Discretes _ (MultiDiscretes vals)) = length vals
+getSize (Discretes ty tag) = discretesTagError "getSize" ty tag
 getSize (ADTPlan _ plans) = sum (map (sum . map getSize . snd) plans) + length plans
 getSize Continuous = 2
 
@@ -358,10 +377,16 @@ makePartitionPlan adtDecls (Tuple a b) (Just (MultiTuple tag1 tag2)) = TuplePlan
 makePartitionPlan adtDecls (TEither l r) (Just (MultiEither lVal rVal)) = EitherPlan (makePartitionPlan adtDecls l (Just lVal)) (makePartitionPlan adtDecls r (Just rVal))
 makePartitionPlan adtDecls (TADT name) (Just (MultiADT cVals)) = ADTPlan name (map (\(cn, fields) -> (cn, map (uncurry (makePartitionPlan adtDecls)) fields)) fieldMultiVals)
   where
-    Just adt = find ((== name) . dataName) adtDecls
+    adt = lookupADTDecl name adtDecls
     constrs = constructors adt
     fieldRTypes = map (\(c, fs) -> (c, map snd fs)) constrs
-    fieldMultiVals = map (\(mCn, mVals) -> let Just c = lookup mCn fieldRTypes in (mCn, (zip c (map Just mVals)))) cVals
+    -- An annotation may cover a subset of the constructors (a depth-limited
+    -- recursive type prunes some), but never one the `data` declaration lacks.
+    constrFieldRTypes mCn = fromMaybe
+      (error ("MultiValue annotation for ADT '" ++ name ++ "' names constructor '"
+              ++ mCn ++ "', which that type does not declare"))
+      (lookup mCn fieldRTypes)
+    fieldMultiVals = map (\(mCn, mVals) -> (mCn, zip (constrFieldRTypes mCn) (map Just mVals))) cVals
 makePartitionPlan _adtDecls ty@(Tuple {}) (Just tag) = error ("MultiValue annotation for tuple type " ++ show ty ++ " must be a matching tuple, e.g. (..., ...), but got: " ++ show tag)
 makePartitionPlan _adtDecls ty@(TEither {}) (Just tag) = error ("MultiValue annotation for Either type " ++ show ty ++ " must be a matching Either, e.g. (... | ...), but got: " ++ show tag)
 makePartitionPlan _adtDecls ty@(TADT _) (Just tag) = error ("MultiValue annotation for ADT type " ++ show ty ++ " must be a matching ADT, e.g. {...}, but got: " ++ show tag)
@@ -451,6 +476,8 @@ makeEncodePlan wrap probFnName normalFnName norm plan outerArgs = case plan of
                 (Just (pCtorAny cp)) fp
           | (j, fp) <- zip [0 :: Int ..] fps ]
     in concatLists (irList [ slot (pCtorAny cp) | cp <- ctors ] : map ctorFields ctors)
+
+  Discretes ty tag -> discretesTagError "makeEncodePlan" ty tag
   where
     rec w nf n p = makeEncodePlan w probFnName nf n p outerArgs
     irList       = foldr IRCons emptyList

@@ -33,6 +33,16 @@ evaluateMockNN part (VTuple a lst@(VList vals)) | a == VInt 2 =
     then lst
     else error $ "Literal mock NN vector has length " ++ show (length (toList vals))
               ++ ", but the partition plan needs " ++ show (getSize part)
+evaluateMockNN _ v = error $ "Mock NN parameter " ++ show v ++ " is not one of the three\n"
+                          ++ "supported forms: (0, seed) random, (1, (spikeAt, seed)) spiking,\n"
+                          ++ "or (2, [logit0, ...]) literal."
+
+-- | Every mock-NN result is the flat logit vector its partition plan sizes.
+-- Naming the invariant reports a violation here, with the offending value,
+-- instead of as a bare pattern-match panic at each unpacking site.
+mockLogits :: IRValue -> [IRValue]
+mockLogits (VList l) = toList l
+mockLogits v = error ("Mock NN produced a non-vector result: " ++ show v)
 
 randomMockNN :: RandomGen g => PartitionPlan -> Rand g IRValue
 --randomMockNN part | trace ("randomMockNN: " ++ show part) False = undefined
@@ -45,17 +55,13 @@ randomMockNN part@(Discretes _ _) = do
 randomMockNN (EitherPlan planL planR) = do
   selector <- getRandom
   leftMock <- randomMockNN planL
-  let VList lMockL = leftMock
   rightMock <- randomMockNN planR
-  let VList rMockL = rightMock
-  let res = VFloat selector : toList lMockL ++ toList rMockL
+  let res = VFloat selector : mockLogits leftMock ++ mockLogits rightMock
   return (constructVList res)
 randomMockNN (TuplePlan planF planS) = do
   fstMock <- randomMockNN planF
-  let VList fMockL = fstMock
   sndMock <- randomMockNN planS
-  let VList sMockL = sndMock
-  let res = toList fMockL ++ toList sMockL
+  let res = mockLogits fstMock ++ mockLogits sndMock
   return (constructVList res)
 randomMockNN Continuous = do
   mu <- getRandom
@@ -66,7 +72,7 @@ randomMockNN (ADTPlan _ constrs) = do
   selectors <- randomList cntConstrs
   let selectorsNorm = map (/ sum selectors) selectors
   mockedFieldLists <- concatMapM (mapM randomMockNN . snd) constrs
-  let mockedFields = concatMap (\(VList l) -> toList l) mockedFieldLists
+  let mockedFields = concatMap mockLogits mockedFieldLists
   let res = map VFloat selectorsNorm ++ mockedFields
   return (constructVList res)
 
@@ -91,30 +97,27 @@ spikingMockNN Continuous (VFloat x) = do
   return $ constructVList [VFloat (x + noise), VFloat (0.1 + abs noise)]
 spikingMockNN (TuplePlan planF planS) (VTuple fVal sVal) = do
   fMock <- spikingMockNN planF fVal
-  let VList fMockL = fMock
   sMock <- spikingMockNN planS sVal
-  let VList sMockL = sMock
-  return $ constructVList (toList fMockL ++ toList sMockL)
+  return $ constructVList (mockLogits fMock ++ mockLogits sMock)
 spikingMockNN (EitherPlan planL planR) (VEither v) = do
   case v of
         Left l -> do
           selector <- getRandomR (0.8, 1.0) :: RandomGen g => Rand g Double
           leftMock <- spikingMockNN planL l
-          let VList lMockL = leftMock
           rightMock <- randomMockNN planR
-          let VList rMockL = rightMock
-          let res = VFloat selector : toList lMockL ++ toList rMockL
+          let res = VFloat selector : mockLogits leftMock ++ mockLogits rightMock
           return (constructVList res)
         Right r -> do
           selector <- getRandomR (0.0, 0.2) :: RandomGen g => Rand g Double
           leftMock <- randomMockNN planL
-          let VList lMockL = leftMock
           rightMock <- spikingMockNN planR r
-          let VList rMockL = rightMock
-          let res = VFloat selector : toList lMockL ++ toList rMockL
+          let res = VFloat selector : mockLogits leftMock ++ mockLogits rightMock
           return (constructVList res)
 spikingMockNN (ADTPlan _ constrs) (VList lst) = do
-  let VInt constrSelect:fieldSpikes = toList lst
+  let (constrSelect, fieldSpikes) = case toList lst of
+        VInt i : rest -> (i, rest)
+        other -> error ("Spiking mock NN for an ADT needs a value list headed by the\n"
+                     ++ "constructor index, got: " ++ show other)
 
   let cntConstrs = length constrs
   selectors <- randomList cntConstrs
@@ -124,8 +127,11 @@ spikingMockNN (ADTPlan _ constrs) (VList lst) = do
 
   let constrFactory (cPlans, cIdx) = if cIdx == constrSelect then zipWithM spikingMockNN cPlans fieldSpikes else mapM randomMockNN cPlans
   mockedFieldLists <- concatMapM constrFactory (zip (map snd constrs) [0..(cntConstrs - 1)])
-  let mockedFields = concatMap (\(VList l) -> toList l) mockedFieldLists
+  let mockedFields = concatMap mockLogits mockedFieldLists
   return $ constructVList (selectorsLst ++ mockedFields)
+spikingMockNN plan v = error $ "Mock NN cannot spike value " ++ show v
+                            ++ " against partition plan " ++ show plan
+                            ++ ": the value's shape does not match the plan's."
 
 randomList :: (RandomGen g, Random a) => Int -> Rand g [a]
 randomList 0 = return []

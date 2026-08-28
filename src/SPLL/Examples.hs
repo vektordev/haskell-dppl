@@ -13,6 +13,9 @@ module SPLL.Examples
   , simpleTuple
   , constantProg
   , simpleCall
+  , testMultLeft
+  , testNeg
+  , testNegFail
   , testInjF
   , testInjFPlusLeft
   , testInjFPlusRight

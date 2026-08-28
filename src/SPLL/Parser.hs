@@ -31,7 +31,7 @@ import PredefinedFunctions (globalFEnv, parameterCount)
 import SPLL.Prelude
 import Data.Functor ((<&>))
 import Control.Monad.State
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 
 --import Text.Megaparsec.Debug (dbg)
 
@@ -328,9 +328,7 @@ pInt :: MonadParser m => m Int
 pInt = do
   sign <- optional (symbol "-")
   i <- lexeme L.decimal
-  case sign of
-    Nothing -> return i
-    Just "-" -> return (-i)
+  return (if isJust sign then -i else i)
 
 pEither :: MonadParser m => m Value
 pEither = do
@@ -736,7 +734,10 @@ normalize prog =
 -- Build maps from identifiers to expression builders
 buildNeuralMap :: MonadState Int m => [NeuralDecl] -> BuilderMap m
 buildNeuralMap decls = Map.fromList
-  [(name, \[arg] -> return $ Right $ readNN name arg) | (name, _, _) <- decls]
+  [(name, \args -> return $ case args of
+      [arg] -> Right $ readNN name arg
+      _     -> Left ("Neural network '" ++ name ++ "' takes exactly one argument, but was applied to " ++ show (length args)))
+   | (name, _, _) <- decls]
 
 buildInvMap :: MonadState Int m => [ADTDecl] -> BuilderMap m
 buildInvMap adts_ = Map.fromList
@@ -752,15 +753,24 @@ buildInvMap adts_ = Map.fromList
   where fNames = map fst (globalFEnv adts_)
 
 globalFunctions :: MonadState Int m =>  Program -> BuilderMap m
-globalFunctions prog = Map.fromList ([(name, \[] -> return $ Right $ var name) | (name, _) <- functions prog])
+globalFunctions prog = Map.fromList ([(name, atomicBuilder name (var name)) | (name, _) <- functions prog])
+
+-- | An atomic builder stands for the identifier itself and is only ever looked
+-- up in the no-argument position, so a non-empty argument list means the
+-- normalizer applied it as if it were parametric.
+atomicBuilder :: Monad m => String -> a -> [Expr] -> m (Either String a)
+atomicBuilder _ built [] = return (Right built)
+atomicBuilder name _ args = return (Left ("'" ++ name ++ "' takes no arguments here, but was applied to " ++ show (length args)))
 
 buildInjFMap:: MonadState Int m => Program -> BuilderMap m
 buildInjFMap prog = Map.fromList 
-  [(name, \[] -> do
-      substituteParamIDs <- replicateM (parameterCount (adts prog) name) demandUniqueNumber
-      let substituteParamNames = map (("p_m" ++) . show) substituteParamIDs
-      let args = map var substituteParamNames
-      return $ Right $ foldl (flip (#->#)) (injF name args) substituteParamNames)
+  [(name, \outerArgs -> case outerArgs of
+      [] -> do
+        substituteParamIDs <- replicateM (parameterCount (adts prog) name) demandUniqueNumber
+        let substituteParamNames = map (("p_m" ++) . show) substituteParamIDs
+        let args = map var substituteParamNames
+        return $ Right $ foldl (flip (#->#)) (injF name args) substituteParamNames
+      _ -> return (Left ("'" ++ name ++ "' takes no arguments here, but was applied to " ++ show (length outerArgs))))
     | (name, _) <- globalFEnv (adts prog)]
 
 -- Main expression normalization function
