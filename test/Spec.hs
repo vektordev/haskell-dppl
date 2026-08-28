@@ -100,13 +100,7 @@ corpusTests probPool = localOption (QuickCheckMaxRatio 20) $ testGroup "Corpus"
       | (n, tc@(_, inp, _, (_, outDim))) <- probPool
       , sampleable inp, outDim == VFloat 0 || outDim == VFloat 1 ]
   , testProperty "TopKInterprets" (forAllNamed (checkTopKInterprets topK005Envs))
-  -- testCases/dice (recursive float dice) diverges under branch-counting
-  -- compilation: the BC-compiled prob function never terminates although plain
-  -- and topK compilation interpret it in milliseconds. Genuine BC bug on
-  -- recursive parameterized functions (NeST_internal_docs task
-  -- bc-recursive-prob-divergence); excluded from the pool until it is fixed.
-  , testProperty "ProbWithBranchCounting"
-      (forAllNamedIn (filter ((/= "dice") . fst) probPool) (checkProbTestCasesWithBC bcEnvs))
+  , testProperty "ProbWithBranchCounting" (forAllNamed (checkProbTestCasesWithBC bcEnvs))
   , testProperty "MarginalAnyIsOne" (forAllNamed (checkProbAny defaultEnvs))
   , testProperty "TopKZeroThreshMatchesExact" (forAllNamed (checkTopKZeroMatchesExact topK0Envs defaultEnvs))
   , testProperty "TopKNeverInflates" (forAllNamed (checkTopKNeverInflates topK01Envs defaultEnvs))
@@ -479,6 +473,53 @@ prop_BCConsistency = once $ ioProperty $ do
     (VProbDimBC _ _ diceBC, VProbDimBC _ _ diceAddBC) ->
       return $ counterexample ("dice BC=" ++ show diceBC ++ ", diceAdd BC=" ++ show diceAddBC ++ " (expected both=6)") (diceBC == diceAddBC)
     _ -> return $ counterexample "Return type was no tuple" False
+
+-- Leaf-anchor consistency (task bc-recursive-prob-divergence). Branch count is
+-- anchored on "every terminal leaf resolution counts 1, deterministic or
+-- random", so the same deterministic value carried into the same branch
+-- position must produce the same count regardless of which AST constructor
+-- spells it. These three programs are the same distribution, reached through
+-- three different toIRInference leaf cases:
+--   x          -- Var-is-a-local-variable
+--   x + 0.0    -- InjF with no probabilistic parameter
+--   ident x    -- deterministic Apply (closure applied to a deterministic arg)
+-- All three must agree AND equal 2 (one leaf per if-arm: the leaf under test,
+-- plus the constant 3.0 in the else). The absolute value is pinned as well as
+-- the agreement because before the fix all three sites returned 0 branches --
+-- they agreed with each other at BC=1 (the outer if's condition alone, via the
+-- old cond+left+right-1 formula) while every one of them was wrong.
+prop_BCLeafSpellingIndependence :: Property
+prop_BCLeafSpellingIndependence = once $ ioProperty $ do
+  let srcs = [ ("bare Var",              "f x = if Uniform < 0.5 then x else 3.0\nmain = f 2.0")
+             , ("InjF, no prob param",   "f x = if Uniform < 0.5 then x + 0.0 else 3.0\nmain = f 2.0")
+             , ("deterministic Apply",   "ident y = y\nf x = if Uniform < 0.5 then ident x else 3.0\nmain = f 2.0") ]
+  return $ conjoin
+    [ case tryParseProgram lbl src of
+        Left err -> counterexample ("parse failed for " ++ lbl ++ ": " ++ show err) False
+        Right prog -> case irDensity bcConf prog (VFloat 2.0) [] of
+          VProbDimBC _ _ bc -> counterexample (lbl ++ ": expected BC=2, got " ++ show bc) (bc == 2.0)
+          x -> counterexample (lbl ++ ": unexpected result shape: " ++ show x) False
+    | (lbl, src) <- srcs ]
+
+-- Recursion-depth fidelity (task bc-recursive-prob-divergence). testCases/dice.ppl
+-- is genuinely self-recursive (dice x = ... else dice (x-1), from dice 4.0), unlike
+-- the dice 6 builder above which is a Haskell-side unrolled if-tree. Its branch
+-- count must be exactly the recursion depth, 4 -- one leaf resolution per level --
+-- and independent of the queried value, since only the recursion-control conditions
+-- (x == 1.0, Uniform < 1/x) decide which paths are dead, never the sample. Two
+-- separate bugs used to show up right here: the count diverged outright (the dead
+-- arm's recursive call was evaluated strictly, so x counted down past 1.0 forever),
+-- and once that was fixed it collapsed to a constant 1.0 (every level's leaf was a
+-- bare Var, which contributed 0). 5.0 is out of support: probability 0, but the
+-- compiled artifact still traverses the same 4 leaves.
+prop_BCRecursiveDiceDepth :: Property
+prop_BCRecursiveDiceDepth = once $ ioProperty $ do
+  prog <- parseProgram "testCases/dice.ppl"
+  return $ conjoin
+    [ case irDensity bcConf prog (VFloat v) [] of
+        VProbDimBC _ _ bc -> counterexample ("p(" ++ show v ++ "): expected BC=4, got " ++ show bc) (bc == 4.0)
+        x -> counterexample ("p(" ++ show v ++ "): unexpected result shape: " ++ show x) False
+    | v <- [1.0, 2.0, 3.0, 4.0, 5.0] ]
 
 -- dice 6 has equal 1/6 marginal probability per face regardless of tree structure.
 -- Global topK therefore either prunes all branches or none:

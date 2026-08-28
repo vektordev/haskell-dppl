@@ -1225,14 +1225,29 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
   -- two structurally-impossible operands wrongly report "not equal" (i.e.
   -- "live"), the wrong direction for a check whose job is to skip evaluating
   -- an arm that may hold a nonterminating recursive call.
-  let liveArm c = if srLogSpace sr then notIR (IROp OpEq c (srZero sr))
-                                   else notIR (IROp OpApprox c (srZero sr))
+  let deadArm c = if srLogSpace sr then IROp OpEq c (srZero sr)
+                                   else IROp OpApprox c (srZero sr)
+  let liveArm = notIR . deadArm
   mul1Zeroed <- shareResult sr "armT" [liveArm condTrueExpr] binds1 mul1Raw
   mul2Zeroed <- shareResult sr "armF" [liveArm condFalseExpr] binds2 mul2Raw
   let leftBranchesExpr  = rBranches mul1Zeroed
   let rightBranchesExpr = rBranches mul2Zeroed
-  -- Shared condition: its branches are counted once for both arms, hence the -1.
-  let branches = IROp OpSub (IROp OpPlus (rBranches condTrue) (IROp OpPlus leftBranchesExpr rightBranchesExpr)) const1
+  -- Dispatching is free: a node that delegates to sub-computations contributes
+  -- no branch of its own, so the count is the sum of whichever arms were
+  -- actually alive -- no term for evaluating the condition, and no -1 wash.
+  -- (The previous formula, cond + left + right - 1, telescoped to left + right
+  -- only because every condition tested so far happened to be leaf-shaped with
+  -- its own count of exactly 1; a compound condition -- a nested if, a call --
+  -- inflated the parent by its dispatch cost for no principled reason. Every
+  -- other combinator here -- IREnumSum, toIREnumerate, the topK dispatch --
+  -- already sums surviving children and adds nothing for dispatching.)
+  -- Each arm is zero-checked with the same IRIf short-circuit the probability
+  -- fields use, so a dead arm's count -- and any recursive call inside it --
+  -- is never evaluated. That is what makes a recursive program's branch count
+  -- terminate at all (task bc-recursive-prob-divergence).
+  let zeroCheckBC c bc = IRIf (deadArm c) const0 bc
+  let branches = IROp OpPlus (zeroCheckBC condTrueExpr  leftBranchesExpr)
+                             (zeroCheckBC condFalseExpr rightBranchesExpr)
   addRes <- mixP sr branches mul1Zeroed mul2Zeroed
   case thr of
     Just _ -> do
@@ -1339,9 +1354,13 @@ toIRInference meta False (Expr TypeInfo{rType=rt} (Apply l v)) sample | pType (g
   -- The result is not a tuple if the return value is a closure
   case rt of
     TArrow _ _ -> return (detP (IRApply lIR vIR))
-    _ -> do
-      let comp = IROp OpEq (IRApply lIR vIR) sample
-      return (impossibleWhen (notIR comp) (detP (maskSR (semiringOf meta) comp)))
+    _ ->
+      -- A leaf resolution: a deterministically-known value compared against the
+      -- sample, exactly as the 'Constant'/'ThetaI' cases do, so it counts as one
+      -- branch like they do ('indicatorP', not 'detP' -- which is reserved for
+      -- results that produce no value at all, i.e. closures). See the leaf-anchor
+      -- note on the 'Var'-is-a-local-variable case below.
+      return (indicatorP (semiringOf meta) (IROp OpEq (IRApply lIR vIR) sample))
 -- Deterministic lambda and bound expression CDF
 toIRInference meta True (Expr TypeInfo{rType=rt} (Apply l v)) sample | pType (getTypeInfo l) == Deterministic && pType (getTypeInfo v) == Deterministic = do
   vIR <- toIRGenerate meta v
@@ -1349,8 +1368,8 @@ toIRInference meta True (Expr TypeInfo{rType=rt} (Apply l v)) sample | pType (ge
   -- The result is not a tuple if the return value is a closure
   case rt of
     TArrow _ _ -> return (detP (IRApply lIR vIR))
-    _ -> do
-      return (detP (compareValueExpr (semiringOf meta) rt (IRApply lIR vIR) sample))
+    _ ->
+      return (mass (compareValueExpr (semiringOf meta) rt (IRApply lIR vIR) sample))
 -- Enumerable conditional lambda applied to a probabilistic discrete argument:
 -- enumerate the argument's discrete support and weight each value by its probability,
 -- compiling the body via toIREnumerate. The body need not be deterministic given the
@@ -1608,14 +1627,15 @@ toIRInference meta False e@(Expr TypeInfo {tags=_, rType=rt} (InjF (Named _) par
   -- There is no probabilistic parameter
   -- Check whether the value of the function is equal to the sample
   expr <- toIRGenerate meta e
-  let comp = equalityGuard rt expr sample
-  return (impossibleWhen (notIR comp) (detP (maskSR (semiringOf meta) comp)))
+  -- Leaf resolution, one branch -- see the leaf-anchor note on the
+  -- 'Var'-is-a-local-variable case below.
+  return (indicatorP (semiringOf meta) (equalityGuard rt expr sample))
 toIRInference meta True e@(Expr TypeInfo {tags=_, rType=rt} (InjF (Named _) params)) sample
   | countProbParams params == 0 = do
   -- There is no probabilistic parameter
   -- Check whether the value of the function is less than the sample
   expr <- toIRGenerate meta e
-  return (detP (compareValueExpr (semiringOf meta) rt expr sample))
+  return (mass (compareValueExpr (semiringOf meta) rt expr sample))
 toIRInference meta cumulative (Expr TypeInfo {tags=_} (InjF (Named name) params)) sample
   | hasAnyExcept (adtDecls meta) name = do
   -- FPair of the InjF with unique names
@@ -1891,12 +1911,21 @@ toIRInference meta cumulative (Expr TypeInfo {rType=rt} (Var n)) sample = do
       setVariables [(var, callExpr)]
       return (unpackResult (IRVar var))
     -- Var is a local variable
-    Just (_, False) -> do
+    -- A bound parameter used directly as a return value is a LEAF resolution:
+    -- it compares a deterministically-known value against the sample and stops,
+    -- the identical operation the 'Constant'/'ThetaI' cases perform. It
+    -- therefore counts as one branch like they do -- 'mass'/'indicatorP', not
+    -- 'detP'. The branch-count anchor is "every terminal leaf counts 1,
+    -- deterministic or random", so which AST constructor happens to carry the
+    -- same value into the same comparison must not change the count (task
+    -- bc-recursive-prob-divergence; pinned by prop_BCLeafSpellingIndependence).
+    -- 'detP' -- zero branches -- stays for results that resolve to no value at
+    -- all: closures, lambdas, the TArrow arms above.
+    Just (_, False) ->
       if cumulative then
-        return (detP (compareValueExpr (semiringOf meta) rt (IRVar n) sample))
-      else do
-        let comp = equalityGuard rt (IRVar n) sample
-        return (impossibleWhen (notIR comp) (detP (maskSR (semiringOf meta) comp)))
+        return (mass (compareValueExpr (semiringOf meta) rt (IRVar n) sample))
+      else
+        return (indicatorP (semiringOf meta) (equalityGuard rt (IRVar n) sample))
     Nothing -> error ("Could not find name in TypeEnv: " ++ n)
 toIRInference _ _ (Expr _ (Subtree _ _)) _ = error "Cannot infer prob on subtree expression. Please check your syntax"
 toIRInference _ _ x _ = error ("found no way to convert to IR: " ++ show x)

@@ -262,7 +262,8 @@ scaledNormalDensity sr z scaleFactors
 --   enumSum                            sum p   0        sum b
 --   change-of-variables scaling        f p     unchanged
 --   guard / select                     f p     f d, f b (same f)
---   leaf                               given   0 or any-guarded 1
+--   leaf                               given   0 or any-guarded 1  1
+--   closure / lambda (no value)        given   0        0
 --
 -- The combinators below are the whole algebra; cases name one instead of
 -- re-deriving all three fields inline.
@@ -280,7 +281,14 @@ density p sample = PResult (P p) (anyGuardedDim sample) const1 constFalseIR
 mass :: IRExpr -> PResult
 mass p = PResult (P p) const0 const1 constFalseIR
 
--- | A deterministic result (indicator, local variable, closure): dim 0, no branch.
+-- | A result that resolves to no value of its own -- a closure, a lambda, an
+-- error: dim 0, and NO branch. Zero branches is the exception, not the rule:
+-- the branch-count anchor is that every terminal LEAF resolution counts 1,
+-- whether it evaluates a distribution primitive or compares a
+-- deterministically-known value against the sample. A deterministic leaf is
+-- therefore 'mass'/'indicatorP', not this -- see the leaf-anchor note on
+-- IRCompiler.hs's Var-is-a-local-variable case (task
+-- bc-recursive-prob-divergence).
 detP :: IRExpr -> PResult
 detP p = PResult (P p) const0 const0 constFalseIR
 

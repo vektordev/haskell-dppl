@@ -315,9 +315,28 @@ synonyms and `resultImpossible`, never the raw tuple shape.
 
 `countBranches :: Bool` controls whether the result's third field,
 `branchCount`, survives into emitted code (`stripBranchCount` removes it
-otherwise). It records how many enumerated branches were actually
-traversed (leaves emit 0 or 1, branches sum their children); a pruned
-`topK` branch contributes 0.
+otherwise). It records how many leaf resolutions the *compiled* evaluation
+actually traverses, anchored on one rule: **every terminal leaf counts 1,
+deterministic or random** — a distribution primitive, or a
+deterministically-known value compared against the sample, whichever AST
+constructor spells it (`Constant`, `ThetaI`, a bound `Var`, a deterministic
+`Apply`, an `InjF` with no probabilistic parameter). Only results that
+resolve to no value at all — closures and lambdas — count 0. Combinators
+add nothing for the act of dispatching: an `IfThenElse` is the sum of its
+two arms' counts (no term for the condition), an enum-sum is the sum over
+its enumerated values, and a call forwards the callee's own count
+unmodified, so a recursive program's count is its traversed recursion
+depth. An arm whose condition has probability exactly zero contributes 0
+and — via `IRIf`, not a strict multiply — is never evaluated; that
+short-circuit is what makes a recursive program's branch count terminate.
+A pruned `topK` branch likewise contributes 0.
+
+`bc` measures the compiled artifact's leaf-evaluation cost, not an
+invariant of the distribution: it is stable under respelling the same leaf
+(`x` vs `x+0.0`), but not under rewrites that change the number of explicit
+branch points — `Uniform < 0.5` gives 1 while the extensionally identical
+`if Uniform < 0.5 then True else False` gives 2, because the latter really
+does compile to two leaf indicators.
 
 ### Query-Type Guard
 
