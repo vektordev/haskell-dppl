@@ -4,8 +4,11 @@
 -- is the dim-0 mass of the complement, measured through the CDF by the
 -- set-valued witness machinery (design set-valued-witnesses).
 --
--- `p(Right ANY)` (= P(Just ANY) = 0.5) is NOT queried here: structural MAR
--- inside a constructor slot of a *continuous* comparison target is the known
--- open gap of observe-partials-umbrella. It crashes rather than answering, so
--- it graduates into this .tst when that gap closes.
+-- `p(Right ANY)` (= P(Just ANY) = 0.5) is the denominator of the
+-- renormalization identity: dividing the kept arm by it turns the restricted
+-- density into a proper truncated Normal, `2*phi(v)*1[v>0]`. Structural MAR
+-- inside a constructor slot of a continuous comparison target used to crash
+-- here (observe-partials-umbrella's "known adjacent gap"); it is answered by
+-- the set-witness engine's runtime point-or-interval choice, task
+-- set-witness-any-in-constructor-slot.
 main = let v = Normal in if v > 0.0 then right v else left ()

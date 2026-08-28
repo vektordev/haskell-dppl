@@ -38,6 +38,7 @@ import Test.Tasty.QuickCheck (testProperties)
 import System.Random (StdGen)
 import Control.Monad.Random (Rand)
 import Control.Monad (forM_)
+import Data.Number.Erf (erf)
 
 
 prop_tMapId :: Expr -> Property
@@ -1939,6 +1940,7 @@ sumTypeShowcaseTests = testGroup "sumTypeShowcase"
   , test_showcasePoeThreeSensors
   , test_showcasePoePosteriorRenormalizes
   , test_showcaseConstructorMarginalsSumToOne
+  , test_observeContinuousRenormalizes
   ]
 
 -- | Parse a corpus program, failing the test (rather than the whole run) on a
@@ -1953,8 +1955,14 @@ loadCorpusProgram baseName = do
 
 -- | The probability of one query point of a compiled corpus program.
 showcaseProb :: Program -> [IRValue] -> IRValue -> IO Double
-showcaseProb prog params sample = case runProb defaultCompilerConfig prog params sample of
-  Right (VProbDim p _) -> return p
+showcaseProb prog params sample = fst <$> showcaseProbDim prog params sample
+
+-- | 'showcaseProb', keeping the dimension: whether a marginal came back as a
+-- discrete mass or as a density is part of what makes it right, and the
+-- number alone does not say.
+showcaseProbDim :: Program -> [IRValue] -> IRValue -> IO (Double, Double)
+showcaseProbDim prog params sample = case runProb defaultCompilerConfig prog params sample of
+  Right (VProbDim p d) -> return (p, d)
   other -> assertFailure ("expected a probability tuple, got: " ++ show other)
 
 -- | A mock-network symbol in random-logit mode (see MockNN): the logits depend
@@ -2051,6 +2059,9 @@ test_showcaseConstructorMarginalsSumToOne = testCase "showcaseConstructorMargina
     , ("showcase_either_marginal_injf", [])
     , ("showcase_observe_trivial", [])
     , ("showcase_observe_discrete_filter", [mockSymbol 42])
+    -- Continuous base: the Just marginal is a CDF mass over the truncation
+    -- interval, not a density -- see 'test_observeContinuousRenormalizes'.
+    , ("showcase_observe_inequality", [])
     ]
   where
     check (name, params) = do
@@ -2059,6 +2070,59 @@ test_showcaseConstructorMarginalsSumToOne = testCase "showcaseConstructorMargina
       r <- showcaseProb prog params (VEither (Right VAny))
       assertBool (name ++ ": p(Left ANY) = " ++ show l ++ " and p(Right ANY) = " ++ show r
                   ++ " do not sum to one") (abs (l + r - 1) < 1e-9)
+
+-- | Standard normal CDF, same erf identity 'IRInterpreter.irCDF' uses. Shared
+-- library, so this is not an independent reimplementation of the *numerics* --
+-- it is not meant to be: what 'test_observeContinuousRenormalizes' pins is the
+-- STRUCTURE of the denominator (a CDF difference over the observed interval),
+-- and the numerics of a single normal CDF are pinned by the corpus elsewhere.
+normalCDF :: Double -> Double
+normalCDF x = 0.5 * (1 + erf (x / sqrt 2))
+
+-- | On a CONTINUOUS @observe@, @p(Just ANY)@ is the denominator that
+-- normalizes the kept arm (task set-witness-any-in-constructor-slot). For
+-- @let v = Normal in if v in I then right v else left ()@ the identity is
+--
+-- >   p(Right x) / p(Right ANY)  ==  phi(x) / (Phi(hi) - Phi(lo))    for x in I
+--
+-- i.e. exactly the truncated-Normal density on @I@ -- for the one-sided
+-- program, @2*phi(x)*1[x>0]@.
+--
+-- Kept as a direct HUnit assertion rather than as more .tst rows because the
+-- harness checks each query point in isolation, whereas the content here is
+-- the RELATION between two of them: a dim-1 density divided by a dim-0 mass.
+-- The dimensions are asserted too, since that is what separates the three ways
+-- the wildcard could have been handled -- dropping the point constraint and
+-- keeping the interval (dim 0, correct), keeping the point (dim 1, what the
+-- crash was reaching for), or marginalising the whole observation away
+-- (dim 0 but mass 1, the full-ANY short-circuit's answer).
+--
+-- The two-sided program earns its place by having a denominator that is a CDF
+-- *difference*: the one-sided 0.5 is also what several wrong answers produce.
+test_observeContinuousRenormalizes :: TestTree
+test_observeContinuousRenormalizes = testCase "observeContinuousRenormalizes" $
+  mapM_ check
+    [ ("showcase_observe_inequality", 0.0, 1 / 0, [0.25, 1.0, 2.0], [-0.25, -3.0])
+    , ("observeTwoSidedInterval",     0.0, 1.0,   [0.25, 0.5, 0.75], [-0.25, 1.5])
+    ]
+  where
+    stdNormalPdf x = exp (negate (x * x) / 2) / sqrt (2 * pi)
+    check (name, lo, hi, inside, outside) = do
+      prog <- loadCorpusProgram name
+      (z, zDim) <- showcaseProbDim prog [] (VEither (Right VAny))
+      let expectedZ = normalCDF hi - normalCDF lo
+      assertBool (name ++ ": p(Just ANY) = " ++ show z ++ ", expected the interval mass "
+                   ++ show expectedZ) (abs (z - expectedZ) < 1e-9)
+      assertEqual (name ++ ": p(Just ANY) must be a discrete mass, not a density") 0.0 zDim
+      forM_ inside $ \x -> do
+        (px, pxDim) <- showcaseProbDim prog [] (VEither (Right (VFloat x)))
+        assertEqual (name ++ ": p(Just " ++ show x ++ ") must stay a density") 1.0 pxDim
+        assertBool (name ++ ": p(Just " ++ show x ++ ")/p(Just ANY) = " ++ show (px / z)
+                     ++ " is not the truncated density " ++ show (stdNormalPdf x / expectedZ))
+                   (abs (px / z - stdNormalPdf x / expectedZ) < 1e-9)
+      forM_ outside $ \x -> do
+        (px, _) <- showcaseProbDim prog [] (VEither (Right (VFloat x)))
+        assertEqual (name ++ ": p(Just " ++ show x ++ ") outside the observed interval") 0.0 px
 
 internalsTests :: TestTree
 internalsTests = testGroup "Internals"

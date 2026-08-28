@@ -245,6 +245,7 @@ logSpaceUncoveredPrograms =
   [ "letProbIntervalPair", "letProbIf", "letProbCmp", "letProbAbsNormal"
   , "setWitnessTupleDisjointFields", "letBoundEitherDestructure"
   , "eitherIfDeconstructObserve", "observeKeywordTruncated", "showcase_observe_inequality"
+  , "observeTwoSidedInterval"
   ]
 
 checkLogSpaceMatchesLinear :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property

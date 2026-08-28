@@ -2316,6 +2316,18 @@ data WSet = WPoint IRExpr IRExpr     -- witness value, |d inverse / d observatio
           | WInterval WBound WBound
           | WFull
           | WEmpty
+          -- | Runtime choice of constraint set: the Bool-valued IR condition
+          -- picks the first set, else the second. Needed because whether a
+          -- constraint is a point or an interval can depend on the query
+          -- SAMPLE rather than on the program -- a marginal wildcard sitting
+          -- in a constructor slot (@p(Right ANY)@) leaves the tag pinned but
+          -- the payload unconstrained, which is an interval where a concrete
+          -- payload would have been a point. Unlike the ANY that N6's
+          -- 'irRuntimeContainsAny' handles (injected at compile time by a
+          -- lossy inverse, hence syntactically visible in the witness
+          -- template), this one has no static trace at all, so it cannot be
+          -- resolved into a single 'WSet' at compile time.
+          | WChoice IRExpr WSet WSet
 
 -- | Mirrors an inverse-witness expression's structure to build a runtime Bool
 -- expression that evaluates to True iff the value that expression produces
@@ -2377,12 +2389,42 @@ intersectSet WFull s = ([], s)
 intersectSet s WFull = ([], s)
 intersectSet WEmpty _ = ([], WEmpty)
 intersectSet _ WEmpty = ([], WEmpty)
+intersectSet (WChoice c a b) s = distributeChoice c (intersectSet a s) (intersectSet b s)
+intersectSet s (WChoice c a b) = distributeChoice c (intersectSet s a) (intersectSet s b)
 intersectSet (WPoint p1 c1) (WPoint p2 c2) =
   ([IROp OpEq p1 p2], WPoint (mergeWitnessValue p1 p2) (IROp OpMult c1 c2))
-intersectSet (WPoint p c) (WInterval lo hi) = (boundGuards p lo hi, WPoint p c)
-intersectSet (WInterval lo hi) (WPoint p c) = (boundGuards p lo hi, WPoint p c)
+intersectSet (WPoint p c) (WInterval lo hi) = pointInInterval p c lo hi
+intersectSet (WInterval lo hi) (WPoint p c) = pointInInterval p c lo hi
 intersectSet (WInterval lo1 hi1) (WInterval lo2 hi2) =
   ([], WInterval (maxWBound lo1 lo2) (minWBound hi1 hi2))
+
+-- | A point constraint meeting an interval one. The point normally wins (it is
+-- the strictly smaller set), guarded by membership -- but when the point is the
+-- marginal wildcard at runtime it constrains nothing, and the intersection is
+-- the interval alone: @p(Right ANY)@ on a truncated Normal must answer the
+-- CDF mass of the truncation interval (dim 0), not a density at an unknown
+-- point. Which of the two it is cannot be decided at compile time, hence the
+-- 'WChoice'; the membership guards are made wildcard-tolerant to match, so the
+-- comparison that would crash on a 'VAny' operand is never reached.
+pointInInterval :: IRExpr -> IRExpr -> WBound -> WBound -> ([IRExpr], WSet)
+pointInInterval p c lo hi =
+  ( [tolerateAny p g | g <- boundGuards p lo hi]
+  , WChoice (IRUnaryOp OpIsAny p) (WInterval lo hi) (WPoint p c) )
+
+-- | @g@, but automatically satisfied when @p@ is the marginal wildcard.
+-- Spelled as a nested 'IRIf', never 'orIR': both operands of an IR boolean op
+-- are evaluated, and @g@ is exactly the comparison that errors on a 'VAny'
+-- operand (the same rule 'equalityGuard' and 'impossibleWhen' follow).
+tolerateAny :: IRExpr -> IRExpr -> IRExpr
+tolerateAny p g = IRIf (IRUnaryOp OpIsAny p) constTrueIR g
+
+-- | Lifts an intersection performed separately on each side of a 'WChoice'
+-- back into one. The two sides' guard lists are conjoined branch-locally --
+-- again as nested 'IRIf', so a guard still protects the ones after it, the
+-- property 'guardP' relies on at the world level.
+distributeChoice :: IRExpr -> ([IRExpr], WSet) -> ([IRExpr], WSet) -> ([IRExpr], WSet)
+distributeChoice c (ga, sa) (gb, sb) = ([IRIf c (conjIR ga) (conjIR gb)], WChoice c sa sb)
+  where conjIR = foldr (\g acc -> IRIf g acc constFalseIR) constTrueIR
 
 -- | Picks, field-by-field, whichever side of two witnesses for the same
 -- variable is not ANY-tainted (checked fresh via 'irRuntimeContainsAny' at
@@ -2434,6 +2476,7 @@ memberGuard _ val (WInterval lo hi) = case boundGuards val lo hi of
   gs -> foldr1 (IROp OpAnd) gs
 memberGuard _ _ WFull  = constTrueIR
 memberGuard _ _ WEmpty = IRConst (VBool False)
+memberGuard rt val (WChoice c a b) = IRIf c (memberGuard rt val a) (memberGuard rt val b)
 
 subtreeCNs :: Expr -> [ChainName]
 subtreeCNs e = chainName (getTypeInfo e) : concatMap subtreeCNs (getSubExprs e)
@@ -2535,6 +2578,19 @@ measureSet meta v (WInterval lo hi) = do
             (mkPResult (unsafeLinearP clamped) const0 bc constFalseIR))
 measureSet _ _ WFull  = return (mass const1)
 measureSet _ _ WEmpty = return (impossibleP linearSemiring)
+-- Each side is measured in its own writer scope and keeps its own bindings, so
+-- the untaken side's work sits under the selecting 'IRIf' rather than being
+-- hoisted in front of it -- the same reason 'measureWorld' scopes a world's
+-- measure under its guards. It matters here: the point side evaluates a
+-- density at the witness value, which is precisely the 'VAny' this choice
+-- exists to avoid touching.
+measureSet meta v (WChoice c a b) = do
+  ra <- scopedMeasure a
+  rb <- scopedMeasure b
+  return (zipResult (IRIf c) ra rb)
+  where scopedMeasure s = do
+          (r, binds) <- lift (runWriterT (measureSet meta v s))
+          return (mapResult (generateLetInExpr binds) r)
 
 cdfAtBound :: CompilerMetadata -> Expr -> WBound -> CompilerMonad (IRExpr, IRExpr)
 cdfAtBound _ _ WNegInf = return (const0, const1)
