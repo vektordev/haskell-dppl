@@ -44,10 +44,16 @@ failures, always store the test output to a temporary file and grep that.
 
 `src/` and `app/` build under `-Wall -Wcompat -Wincomplete-record-updates
 -Wredundant-constraints -Werror` (set in `package.yaml`; the `.cabal` is
-hpack-generated and gitignored) with **zero warnings**. The backlog is empty:
-there are no `-Wno-*` flags and none may be added. Fix the code instead, or --
-for a genuine false positive -- scope an `OPTIONS_GHC` pragma to the one module
-and say why. `test/` has not had the pass and carries no warning flags yet.
+hpack-generated and gitignored) with **zero warnings**, and so does `test/`
+under the same flags. The backlog is empty: there are no `-Wno-*` flags in
+`package.yaml` and none may be added. Fix the code instead, or -- for a genuine
+false positive -- scope an `OPTIONS_GHC` pragma to the one module and say why.
+
+Exactly one module does that today: `test/ArbitrarySPLL.hs` carries
+`-Wno-orphans`, because its `Arbitrary` instances for `Program`/`Expr`/`Value`/
+`TypeInfo` are test fixtures, and the only way to un-orphan them would be to
+declare them in `SPLL.Lang.*` -- putting a QuickCheck dependency on the
+library.
 
 The last five to go were three `-Woverlapping-patterns` and two
 `-Wdeprecations`, each a real defect rather than noise:
@@ -68,6 +74,37 @@ a commented-out block that referenced three functions (`findBoundVariable`,
 and function both deleted; and `PlanWorld`'s `pwFactor`, whose field was only
 ever read positionally, so `planWorldMass` now reads its world through the
 selectors.
+
+The `test/` pass (168 warnings) was mostly mechanical, but four findings were
+not:
+
+- `TestParser`'s `testExpressions`, a table of hand-written lambda/apply
+  expressions, had no driver at all -- the module's tests are `$(allProperties)`
+  and nothing referenced the table. It now has one
+  (`prop_ListedExpressionsRoundtrip`), which passes; that is the 1484th test.
+- `TestFuzz`'s `$(allProperties)` was silently skipping
+  `prop_Fuzz_SamplingMatchesPDF`, which is defined *after* the splice and so is
+  not in scope at it. That exclusion is wanted (the property is a SuperSlow
+  tier registered by hand), but it was load-bearing on definition order. The
+  binding is now `fuzzSamplingMatchesPDF`, excluded by not matching the `prop_`
+  prefix, with the tasty-visible name unchanged.
+- `TestParser`'s `programToString` never rendered `data` declarations, and the
+  two helpers written for that (`adtDeclToString`/`adtConstructorToString`)
+  were unreachable. That is *currently* harmless -- `Arbitrary Program` always
+  builds an empty ADT list -- so the helpers are gone and the constraint is
+  now a comment on `programToString` instead of silent dead code.
+- `ArbitrarySPLL`'s `exprGens` had four entries commented out with three of
+  their generators (`mkThetaI`/`mkMultI`/`mkPlusI`) left defined-but-unused --
+  and a fourth, `mkGreaterThan`, whose commented entry had outlived its
+  definition entirely. All four are retired, with a comment recording that
+  re-enabling any of them means writing the generator again.
+
+Two module-wide idioms did most of the mechanical work: `TestCaseParser`'s
+`symbol` now returns `()` rather than the matched text no caller wanted (23
+`-Wunused-do-bind`s at once), and the shadowing of `Test.QuickCheck`'s
+`sample`/`total`/`label`/`collect` and `System.Process`'s `env`/`cwd` was
+fixed at the import (`hiding`, or an explicit import list) rather than by
+renaming ~50 local bindings.
 
 The two incomplete-pattern categories were retired by filling in the missing
 cases, mostly as named helpers that state the invariant and `error` with the

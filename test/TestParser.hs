@@ -19,16 +19,12 @@ import Test.Tasty.QuickCheck (testProperties)
 import SPLL.Examples
 import SPLL.Parser
 import ArbitrarySPLL
-import Text.Megaparsec (parse, errorBundlePretty)
 import PrettyPrint
-import Debug.Trace (trace)
 import Data.List (sortBy, intercalate)
 import Data.Ord (comparing)
 import Control.Monad.State
-import Control.Monad (MonadPlus)
 import Text.Megaparsec hiding (State)
 import Data.Void
-import Data.Maybe (fromMaybe)
 
 
 rTypeToString :: RType -> String
@@ -37,6 +33,7 @@ rTypeToString TSymbol = "Symbol"
 rTypeToString TInt = "Int"
 rTypeToString TBool = "Bool"
 rTypeToString (TArrow rt1 rt2) = rTypeToString rt1 ++ " -> " ++ rTypeToString rt2
+rTypeToString rt = error ("TestParser.rTypeToString has no rendering for " ++ show rt)
 
 multiValueToString :: MultiValue -> String
 multiValueToString (MultiDiscretes vals) = "[" ++ intercalate ", " (map show vals) ++ "]"
@@ -51,6 +48,7 @@ valToString (VList lst) = "[" ++ intercalate ", " (map valToString (listElems ls
   where listElems EmptyList      = []
         listElems (ListCont x xs) = x : listElems xs
         listElems AnyList         = []
+valToString v = error ("TestParser.valToString has no rendering for " ++ show v)
 
 bracket :: Expr -> String
 bracket e = "(" ++ exprToString e ++ ")"
@@ -79,14 +77,11 @@ neuralDeclToString (name, rty, Nothing) = "neural " ++ name ++ " :: " ++ rTypeTo
 neuralDeclToString (name, rty, Just tag) =
     "neural " ++ name ++ " :: " ++ rTypeToString rty ++ " of " ++ multiValueToString tag
 
-adtDeclToString :: ADTDecl -> String
-adtDeclToString ADTDecl{dataName=name, constructors=constrs, adtDepth=d} =
-  name ++ " = " ++ intercalate " | " (map adtConstructorToString constrs)
-    ++ maybe "" (\n -> " depth " ++ show n) d
-
-adtConstructorToString :: ADTConstructorDecl -> String
-adtConstructorToString (name, rts) = name ++ " " ++ unwords (map show rts)
-
+-- Renders only functions and neural declarations. That is enough because
+-- 'Arbitrary Program' always builds its programs with an empty ADT list, so
+-- the roundtrip properties never see one; a generator that starts emitting
+-- ADTs has to grow a renderer for them here, or the roundtrip will silently
+-- compare against a program with its `data` declarations dropped.
 programToString :: Program -> String
 programToString (Program fnDecls neuralDecls _adts _enc) =
     unlines (map fnDeclToString fnDecls ++ map neuralDeclToString neuralDecls)
@@ -152,6 +147,12 @@ testExpressions = [
          ]))))
     ]
 
+-- The table above is the assertion: every listed expression must survive a
+-- print/parse roundtrip. Driven here rather than left as unreferenced data.
+prop_ListedExpressionsRoundtrip :: Property
+prop_ListedExpressionsRoundtrip = once $ conjoin
+  [ counterexample name (prop_parseShowRoundtrip e) | (name, e) <- testExpressions ]
+
 examples :: [Program]
 examples = [
   simpleAdd,
@@ -185,7 +186,7 @@ prop_parseShowRoundtrip expr = --trace ("\n === \n" ++ show expr ++ "\n\n") $
                                         Left err -> errorBundlePretty err) $
     case parseResult of
       Right parsed -> parsed == expr
-      Left err -> False
+      Left _ -> False
   where
     parseResult = tryParseExpr "test" (exprToString expr)
     repr e = unlines [pPrintExpr e 0, "  = " ++ show e, " == " ++ exprToString e]
@@ -249,8 +250,7 @@ prop_inverseParsing =
             parsedProgram = tryParseProgram "" programStr
         in
             case parsedProgram of
-                Right reconstructed -> matchProg reconstructed program --counterexample debug (reconstructed == program)
-                  where debug = unlines ["original program:", show program, pPrintProg program, "parsed program", show reconstructed, pPrintProg reconstructed, "String input:", programToString program]
+                Right reconstructed -> matchProg reconstructed program
                 Left err -> counterexample ("Failed to parse: " ++ programStr ++ "\n" ++ errorBundlePretty err) False
 
 
@@ -273,7 +273,7 @@ matchProg p1 p2
 
     -- Auxiliary function to compare two lists element by element with context
     matchList :: String -> (a -> a -> Property) -> [a] -> [a] -> Property
-    matchList label matcher xs ys = conjoin $ zipWith (checkMatch label matcher)  xs ys
+    matchList ctx matcher xs ys = conjoin $ zipWith (checkMatch ctx matcher)  xs ys
       where
         checkMatch :: String -> (b -> b -> Property) -> b -> b -> Property
         checkMatch lbl matcher2 x y = counterexample ("Mismatch in " ++ lbl ++ ": ") (matcher2 x y)

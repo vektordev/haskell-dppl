@@ -25,17 +25,13 @@ import Data.List (isPrefixOf)
 import SPLL.Parser (tryParseProgram, pValue)
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types
-import SPLL.Lang.Lang
 
 import qualified Text.Megaparsec.Char.Lexer as L
 import Text.Megaparsec hiding (State)
 import Text.Megaparsec.Char
 import Data.Void
-import Debug.Trace
 import Control.Monad.State
-import Control.Monad (MonadPlus)
-import Text.Megaparsec hiding (State)
-import Data.Void
+import Control.Monad (MonadPlus, void)
 
 
 -- Which execution backends a .tst file's cases run against. Declared via an
@@ -103,17 +99,19 @@ testCaseName (ArgmaxPTestCase name _ _) = name
 testCaseName (EncodingLengthTestCase name _ _ _) = name
 testCaseName (EncodingSlotTestCase name _ _ _ _) = name
 
-type Parser = Parsec Void String
 type MonadParser m = (MonadParsec Void String m, MonadPlus m, MonadFail m, MonadState Int m)
 
 sc :: MonadParser m => m ()
 sc = L.space hspace1 (L.skipLineComment "--") (L.skipBlockComment "{-" "-}")
 
-symbol :: MonadParser m => String -> m String
-symbol = L.symbol sc
+-- L.symbol yields the matched text, which no caller in this module wants:
+-- every use is a delimiter in `>>`, `between`, `sepBy` or `<*`. Returning ()
+-- keeps a bare `symbol "..."` in a do block from discarding a result.
+symbol :: MonadParser m => String -> m ()
+symbol = void . L.symbol sc
 
 -- Either a windows or a linux newline
-pNewline :: MonadParser m => m String
+pNewline :: MonadParser m => m ()
 pNewline = choice [symbol "\n", symbol "\r\n"]
 
 -- Full-file whitespace: blank lines and whole-line `--`/`{- -}` comments.

@@ -1,5 +1,10 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE FlexibleInstances #-}
+-- The Arbitrary instances for Program/Expr/Value/TypeInfo are orphans by
+-- design: they are test-suite fixtures, and the only way to un-orphan them
+-- would be to declare them in SPLL.Lang.*, which would put a QuickCheck
+-- dependency on the library itself.
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 module ArbitrarySPLL (
   genExpr
@@ -148,8 +153,8 @@ instance Arbitrary Program where
     numFuncs <- choose (0, 5)  -- reasonable limit for test cases
     numNeurals <- choose (0, 5)
     funcs <- vectorOf numFuncs genFunctionDecl
-    neurals <- vectorOf numNeurals genNeuralDecl
-    return $ Program funcs neurals [] []
+    neuralDecls <- vectorOf numNeurals genNeuralDecl
+    return $ Program funcs neuralDecls [] []
 
 genFunctionDecl :: Gen FnDecl
 genFunctionDecl = do
@@ -175,8 +180,8 @@ genRawFuzzProgram = do
   mainArgs <- choose (0, 3) >>= flip vectorOf genValidIdentifier
   let mainDecl = ("main", foldr (\x acc -> Expr makeTypeInfo (Lambda x acc)) mainBody mainArgs)
   extraFuncs <- vectorOf numExtraFuncs genRawFuzzFunctionDecl
-  neurals <- vectorOf numNeurals genNeuralDecl
-  return $ Program (mainDecl : extraFuncs) neurals [] []
+  neuralDecls <- vectorOf numNeurals genNeuralDecl
+  return $ Program (mainDecl : extraFuncs) neuralDecls [] []
 
 genRawFuzzFunctionDecl :: Gen FnDecl
 genRawFuzzFunctionDecl = do
@@ -214,38 +219,33 @@ genExprNames names = sized (genExprNames' names)
 
 genExprNames' :: [String] -> Int -> Gen Expr
 genExprNames' varnames size = do
-  generator <- elements $ map snd (filter (\(sizeReq, gen) -> sizeReq <= size) exprGens)
+  generator <- elements $ map snd (filter (\(sizeReq, _) -> sizeReq <= size) exprGens)
   generator varnames size
 
 exprGens :: [(Int, [String] -> Int -> Gen Expr)]
+-- ThetaI, greaterThan, and the Int-typed arithmetic InjFs (multI/plusI) were
+-- each commented out of this list at some point with no recorded reason, and
+-- their generators left behind unreferenced. The generators are gone now, so
+-- re-enabling any of them means writing it again -- which is the honest state
+-- of things: one of the four, mkGreaterThan, had already lost its definition
+-- while its commented entry stayed.
 exprGens = [
     (0, mkNormal),
     (0, mkUniform),
-    --(0, mkThetaI),
-    --(2, mkGreaterThan),
     (2, mkMultF),
-    --(2, mkMultI),
     (2, mkPlusF),
-    --(2, mkPlusI),
     (3, mkConditional)
   ]
 
 mkNormal :: [String] -> Int -> Gen Expr
-mkNormal varnames size = do
+mkNormal _varnames _size = do
   ti <- arbitrary
   return $ Expr ti (Var "Normal")
 
 mkUniform :: [String] -> Int -> Gen Expr
-mkUniform varnames size = do
+mkUniform _varnames _size = do
   ti <- arbitrary
   return $ Expr ti (Var "Uniform")
-
-mkThetaI :: [String] -> Int -> Gen Expr
-mkThetaI varnames size = do
-  t0 <- arbitrary
-  t1 <- arbitrary
-  ix <- arbitrary
-  return $ Expr t0 (ThetaI (Expr t1 (Var "thetas")) ix)
 
 mkMultF :: [String] -> Int -> Gen Expr
 mkMultF varnames size = do
@@ -254,26 +254,12 @@ mkMultF varnames size = do
   e2 <- genExprNames' varnames (size `div` 2)
   return (Expr t (InjF (Named "mult") [e1, e2]))
 
-mkMultI :: [String] -> Int -> Gen Expr
-mkMultI varnames size = do
-  t <- arbitrary
-  e1 <- genExprNames' varnames (size `div` 2)
-  e2 <- genExprNames' varnames (size `div` 2)
-  return (Expr t (InjF (Named "multI") [e1, e2]))
-
 mkPlusF :: [String] -> Int -> Gen Expr
 mkPlusF varnames size = do
   t <- arbitrary
   e1 <- genExprNames' varnames (size `div` 2)
   e2 <- genExprNames' varnames (size `div` 2)
   return (Expr t (InjF (Named "plus") [e1, e2]))
-
-mkPlusI :: [String] -> Int -> Gen Expr
-mkPlusI varnames size = do
-  t <- arbitrary
-  e1 <- genExprNames' varnames (size `div` 2)
-  e2 <- genExprNames' varnames (size `div` 2)
-  return (Expr t (InjF (Named "plusI") [e1, e2]))
 
 mkConditional :: [String] -> Int -> Gen Expr
 mkConditional varnames size = do
@@ -304,11 +290,6 @@ genProgNames names = do
 -- covers Float/Int/Bool scalars (no lambdas/tuples/lists/ADTs/neural nets) --
 -- narrow by design, so almost every generated 'Program' compiles.
 data Ty = TyFloat | TyInt | TyBool deriving (Show, Eq)
-
-tyToRType :: Ty -> RType
-tyToRType TyFloat = TFloat
-tyToRType TyInt = TInt
-tyToRType TyBool = TBool
 
 -- | A well-typed nullary "main" program of a randomly chosen scalar type.
 genTypedProgram :: Gen Program
@@ -343,7 +324,6 @@ genTypedRec ty n =
   ] ++ tyRec
   where
     half = n `div` 2
-    third = n `div` 3
     tyRec = case ty of
       TyFloat ->
         [ (#+#) <$> genTypedExpr TyFloat half <*> genTypedExpr TyFloat half

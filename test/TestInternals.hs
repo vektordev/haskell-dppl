@@ -8,11 +8,11 @@ module TestInternals (
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
 
-import ArbitrarySPLL
+import ArbitrarySPLL ()
 
-import Test.QuickCheck
+import Test.QuickCheck hiding (collect, label, sample, total)
 import SPLL.Typing.RInfer (tryAddRTypeInfo, RTypeError(..))
-import SPLL.Typing.RType (ClassConstraint(..), TVarR(..), RType(..))
+import SPLL.Typing.RType (RType(..))
 import SPLL.Prelude
 import SPLL.Parser (tryParseProgram)
 import SPLL.Analysis (annotateEnumsProg, materializationDomain, withinMaterializationBudget)
@@ -21,13 +21,10 @@ import SPLL.Typing.ForwardChaining (FCData, annotateProg, progToFCData, isInvert
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan)
-import qualified SPLL.AutoNeural as AutoNeural (getSize)
 import SPLL.IntermediateRepresentation
 import SPLL.IROptimizer (postProcess)
 import SPLL.CodeGenPyTorchBatched (batchedGuard, generateFunctionsBatched)
 import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts)
-import SPLL.Typing.PType (PType(..))
-import IRInterpreter (generateDet)
 import Data.Foldable (toList)
 import Data.List (isInfixOf, intercalate)
 import Control.Exception (try, evaluate, ErrorCall(..))
@@ -40,6 +37,17 @@ import Control.Monad.Random (Rand)
 import Control.Monad (forM_)
 import Data.Number.Erf (erf)
 
+
+-- | The (prob, dim) pair a probability query must return; a different shape
+-- is a compiler bug rather than a wrong number, so say which.
+probDimOf :: IRValue -> (Double, Double)
+probDimOf (VProbDim p d) = (p, d)
+probDimOf v = error ("probability query returned " ++ show v ++ ", not a (prob, dim) pair")
+
+-- | As 'probDimOf', for a countBranches build's (prob, dim, branchCount).
+probDimBCOf :: IRValue -> (Double, Double, Double)
+probDimBCOf (VProbDimBC p d bc) = (p, d, bc)
+probDimBCOf v = error ("probability query returned " ++ show v ++ ", not a (prob, dim, bc) triple")
 
 prop_tMapId :: Expr -> Property
 prop_tMapId expr = tMap getTypeInfo expr === expr
@@ -409,7 +417,9 @@ test_nnHoistedOutOfEnumSum = testCase "nnHoistedOutOfEnumSum" $ do
       case compile defaultCompilerConfig prog of
         Left err -> assertFailure ("Compile error: " ++ show err)
         Right irEnv -> do
-          let Just (probExpr, _) = probFun (lookupIREnv "main" irEnv)
+          (probExpr, _) <- case probFun (lookupIREnv "main" irEnv) of
+            Just pf -> return pf
+            Nothing -> assertFailure "compiled main has no probability variant"
           assertBool "readMNist forward call should be hoisted outside IREnumSum" $
             not (nnCallInsideEnumSum "readMNist" probExpr)
 
@@ -942,7 +952,7 @@ anyRefusalTests = testGroup "witnessed-inference ANY refusal"
   ]
 
 expectMarginalRefusal :: String -> IRValue -> String -> IO ()
-expectMarginalRefusal src sample var = do
+expectMarginalRefusal src sample varName = do
   let prog = either (\e -> error ("parse failed: " ++ show e)) id (tryParseProgram "test" src)
   r <- try (case runProb defaultCompilerConfig prog [] sample of
               Left cerr -> return (Left cerr)
@@ -951,8 +961,8 @@ expectMarginalRefusal src sample var = do
     Left (ErrorCall msg) -> do
       assertBool ("expected the marginal-refusal diagnostic, got: " ++ msg)
         ("cannot compute marginal" `isInfixOf` msg)
-      assertBool ("diagnostic should name the binding '" ++ var ++ "', got: " ++ msg)
-        (("'" ++ var ++ "'") `isInfixOf` msg)
+      assertBool ("diagnostic should name the binding '" ++ varName ++ "', got: " ++ msg)
+        (("'" ++ varName ++ "'") `isInfixOf` msg)
     Right (Left cerr) -> assertFailure ("expected runtime refusal, got compile error: " ++ show cerr)
     Right (Right v) -> assertFailure ("expected runtime refusal, got value: " ++ show v)
 
@@ -1048,10 +1058,10 @@ planEnumTopKAndBCTest testName baseName = testCase testName $ do
   let cBoth = compiledWith defaultCompilerConfig{topKThreshold = Just 0.05, countBranches = True}
   let evalWith c ps s = either (error . show) id (runProbC prog c ps s)
   mapM_ (\(s, ps, expected) -> do
-          let VProbDim pDef dimDef      = evalWith cDef ps s
-          let VProbDim pTopK _          = evalWith cTopK ps s
-          let VProbDimBC pBC dimBC bc   = evalWith cBC ps s
-          let VProbDimBC pBoth _ bcBoth = evalWith cBoth ps s
+          let (pDef, dimDef)      = probDimOf   (evalWith cDef ps s)
+          let (pTopK, _)          = probDimOf   (evalWith cTopK ps s)
+          let (pBC, dimBC, bc)    = probDimBCOf (evalWith cBC ps s)
+          let (pBoth, _, bcBoth)  = probDimBCOf (evalWith cBoth ps s)
           assertBool ("default prob " ++ show pDef ++ " differs from .tst " ++ show expected)
             (abs (pDef - expected) < 1e-4)
           assertEqual "all-discrete plan worlds have dim 0" 0 dimDef
@@ -1082,8 +1092,8 @@ planEnumStructuralADTTests = testGroup "planEnumStructuralADT"
       let cLazy = either (error . show) id (compile cfg lazyProg)
       let cMat  = either (error . show) id (compile cfg matProg)
       forM_ queries $ \(label, q) -> do
-        let VProbDim pLazy dLazy = either (error . show) id (runProbC lazyProg cLazy [sym] q)
-        let VProbDim pMat  dMat  = either (error . show) id (runProbC matProg  cMat  [sym] q)
+        let (pLazy, dLazy) = probDimOf (either (error . show) id (runProbC lazyProg cLazy [sym] q))
+        let (pMat,  dMat)  = probDimOf (either (error . show) id (runProbC matProg  cMat  [sym] q))
         assertBool (label ++ ": lazy " ++ show pLazy ++ " vs materialized " ++ show pMat)
           (abs (pLazy - pMat) < 1e-9)
         assertEqual (label ++ ": dim") dMat dLazy
@@ -1094,7 +1104,7 @@ planEnumStructuralADTTests = testGroup "planEnumStructuralADT"
       -- would still agree.
       prog <- parseOrFailSrc (progSrc "")
       let c = either (error . show) id (compile defaultCompilerConfig prog)
-      let ps = [ p | (_, q) <- queries, let VProbDim p _ = either (error . show) id (runProbC prog c [sym] q) ]
+      let ps = [ fst (probDimOf (either (error . show) id (runProbC prog c [sym] q))) | (_, q) <- queries ]
       assertBool ("outputs sum to " ++ show (sum ps) ++ ", expected 1") (abs (sum ps - 1) < 1e-9)
   ]
   where
@@ -1159,7 +1169,7 @@ planEnumStructuralPartialTests = testGroup "planEnumStructuralPartial"
   [ testCase "partial filter's outputs carry exactly the defined inputs' mass" $ do
       prog <- parseOrFailSrc src
       let c = either (error . show) id (compile defaultCompilerConfig prog)
-      let ps = [ p | q <- queries, let VProbDim p _ = either (error . show) id (runProbC prog c [sym] q) ]
+      let ps = [ fst (probDimOf (either (error . show) id (runProbC prog c [sym] q))) | q <- queries ]
       -- pSceneIsList is logit slot 0: every defined input has a List at the root.
       assertBool ("outputs sum to " ++ show (sum ps) ++ ", expected " ++ show pSceneIsList)
         (abs (sum ps - pSceneIsList) < 1e-9)
@@ -1222,7 +1232,8 @@ test_planEnumStructuralGrouped = testCase "planEnumStructuralGrouped" $ do
         , "            then List (hd old) (filterGreen (tl old))"
         , "            else List Nil (filterGreen (tl old))"
         ]
-  let sizeAt d = do
+  let sizeAt :: Int -> IO Int
+      sizeAt d = do
         p <- parseOrFailSrc (prog d)
         case compile defaultCompilerConfig p of
           Left e   -> assertFailure ("compile error at depth " ++ show d ++ ": " ++ show e)
@@ -1315,7 +1326,8 @@ test_planEnumM4Polynomial = testCase "planEnumM4Polynomial" $ do
         , "numRed s = if isEmpty s then 0.0 else (if isObj (obj s) then (if isRed (color (obj s)) then 1.0 else 0.0) else 0.0) + numRed (rest s)"
         , "main sym = let scene = readScene sym in if numRed scene > 1.5 then 1 else 0"
         ]
-  let sizeAt d = case tryParseProgram "m4" (prog d) of
+  let sizeAt :: Int -> IO Int
+      sizeAt d = case tryParseProgram "m4" (prog d) of
         Left e  -> assertFailure ("parse error at depth " ++ show d ++ ": " ++ show e)
         Right p -> case compile defaultCompilerConfig p of
           Left e   -> assertFailure ("compile error at depth " ++ show d ++ ": " ++ show e)
@@ -1358,7 +1370,8 @@ test_planEnumBoolCtorPolynomial = testCase "planEnumBoolCtorPolynomial" $ do
         , "existsRed s = if isEmpty s then False else (if isObj (obj s) then (if isRed (color (obj s)) then True else existsRed (rest s)) else existsRed (rest s))"
         , "main sym = let scene = readScene sym in if existsRed scene then 1 else 0"
         ]
-  let sizeAt d = case tryParseProgram "boolctor" (prog d) of
+  let sizeAt :: Int -> IO Int
+      sizeAt d = case tryParseProgram "boolctor" (prog d) of
         Left e  -> assertFailure ("parse error at depth " ++ show d ++ ": " ++ show e)
         Right p -> case compile defaultCompilerConfig p of
           Left e   -> assertFailure ("compile error at depth " ++ show d ++ ": " ++ show e)
@@ -1401,7 +1414,8 @@ test_planEnumFusedJointStatePolynomial = testCase "planEnumFusedJointStatePolyno
         , "              else go (rest s) red lg)))"
         , "main sym = let scene = readScene sym in go scene False 0"
         ]
-  let sizeAt d = case tryParseProgram "joint" (prog d) of
+  let sizeAt :: Int -> IO Int
+      sizeAt d = case tryParseProgram "joint" (prog d) of
         Left e  -> assertFailure ("parse error at depth " ++ show d ++ ": " ++ show e)
         Right p -> case compile defaultCompilerConfig p of
           Left e   -> assertFailure ("compile error at depth " ++ show d ++ ": " ++ show e)

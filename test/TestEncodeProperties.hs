@@ -36,7 +36,6 @@ import Data.Maybe (isJust)
 import SPLL.Prelude (runEncode, compile, runEncodeC, runProbNamedC, runGenNamedC)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Lang.Types
-import SPLL.Lang.Lang (Program(..))
 import SPLL.AutoNeural (makeAutoNeural, makePartitionPlan, makeProb, getSize, PartitionPlan(..))
 import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType (RType(..))
@@ -351,7 +350,7 @@ encodeInvariant_outputDimMatchesPlan :: TestTree
 encodeInvariant_outputDimMatchesPlan = testGroup "outputDimMatchesPlan"
   [ testCase name $ do
       prog <- parseOrFail src
-      let (_, TArrow _ target, nnTag) = head (neurals prog)
+      let (target, nnTag) = firstNeuralTarget prog
           plan        = makePartitionPlan (adts prog) target nnTag
           expectedLen = getSize plan
       slots <- encodeSlots prog (defaultArgs n)
@@ -421,9 +420,17 @@ decoderGroup :: Program -> IRFunGroup
 decoderGroup prog =
   makeAutoNeural (adts prog) defaultCompilerConfig [] (head (neurals prog))
 
+-- | Output type and annotation of a program's first neural declaration. Every
+-- decoder fixture is declared as `Symbol -> <output>`; any other shape is a
+-- malformed fixture rather than a test failure.
+firstNeuralTarget :: Program -> (RType, Maybe MultiValue)
+firstNeuralTarget prog = case neurals prog of
+  (_, TArrow _ target, tag) : _ -> (target, tag)
+  other -> error ("expected a `Symbol -> out` neural declaration, got " ++ show other)
+
 decoderPlan :: Program -> PartitionPlan
 decoderPlan prog =
-  let (_, TArrow _ target, tag) = head (neurals prog)
+  let (target, tag) = firstNeuralTarget prog
   in makePartitionPlan (adts prog) target tag
 
 -- Decoder programs exercising ADT-with-field layouts, plus reuse of the cross-program list.
@@ -583,15 +590,22 @@ logitIdentityCase name p = testCase (name ++ ".logitIdentity") $ do
   compiled <- compileOrFail p
   let plan = endpointPlan p "main"
   forM_ [0 .. 4 :: Int] $ \seed -> do
-    let vec@(VList slots) = evaluateMockNN plan (VTuple (VInt 0) (VInt seed))
+    let vec = evaluateMockNN plan (VTuple (VInt 0) (VInt seed))
+    slots <- case vec of
+      VList l -> return l
+      other   -> assertFailure (name ++ ": mock NN returned a non-vector: " ++ show other)
     case runEncodeC p compiled "main" [VTuple (VInt 2) vec] of
       Left err -> assertFailure (name ++ ": encode failed: " ++ show err)
       Right (VList out) -> do
         assertEqual (name ++ ": roundtripped vector length") (length (toList slots)) (length (toList out))
-        forM_ (zip3 [0 :: Int ..] (toList slots) (toList out)) $ \(i, VFloat vIn, VFloat vOut) ->
-          assertBool (name ++ ": logit slot " ++ show i ++ " fed " ++ show vIn
-                      ++ " but encode returned " ++ show vOut)
-                     (abs (vIn - vOut) < 1e-6)
+        forM_ (zip3 [0 :: Int ..] (toList slots) (toList out)) $ \(i, sIn, sOut) ->
+          case (sIn, sOut) of
+            (VFloat vIn, VFloat vOut) ->
+              assertBool (name ++ ": logit slot " ++ show i ++ " fed " ++ show vIn
+                          ++ " but encode returned " ++ show vOut)
+                         (abs (vIn - vOut) < 1e-6)
+            _ -> assertFailure (name ++ ": logit slot " ++ show i
+                                ++ " is not a float pair: " ++ show (sIn, sOut))
       Right other -> assertFailure (name ++ ": encode returned non-list: " ++ show other)
 
 -- distribution -> logits -> distribution: the endpoint's encoded vector,

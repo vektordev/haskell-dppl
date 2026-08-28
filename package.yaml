@@ -77,14 +77,17 @@ executables:
 
 tests:
   haskell-dppl-test:
-    # No -Wall yet: test/ has not had the cleanup pass the library has
-    # (~300 warnings, mostly -Wname-shadowing and -Wunused-imports).
     main:                Spec.hs
     source-dirs:         test
     ghc-options:
     - -threaded
     - -rtsopts
     - -with-rtsopts=-N
+    - -Wall
+    - -Wcompat
+    - -Wincomplete-record-updates
+    - -Wredundant-constraints
+    - -Werror
     dependencies:
     - haskell-dppl
     - tasty

@@ -57,7 +57,20 @@ loadCorpusCases = do
     (backends, _slow, tcs) <- parseTestCases tst
     return (takeBaseName ppl, prog, backends, tcs)) files
   let usable = [(n, p, tcs) | (n, p, backends, tcs) <- pairs, Interpreter `elem` backends, null (neurals p)]
-  return [(n, (p, sample, params, expected)) | (n, p, tcs) <- usable, ProbTestCase _ sample params expected _ <- tcs]
+  return [(n, (p, queryPoint, params, expected)) | (n, p, tcs) <- usable, ProbTestCase _ queryPoint params expected _ <- tcs]
+
+-- | A .tst probability expectation is always a (prob, dim) pair of floats;
+-- anything else means the corpus parser handed us a malformed row, which is a
+-- broken fixture rather than a property counterexample.
+expectedProbDim :: (IRValue, IRValue) -> (Double, Double)
+expectedProbDim (VFloat out, VFloat outDim) = (out, outDim)
+expectedProbDim other = error ("malformed probability expectation in .tst corpus: " ++ show other)
+
+-- | A compile the test asserts must succeed. Failing here is a broken fixture,
+-- so surface the compiler's own message instead of a pattern-match panic.
+expectCompiled :: Either CompilerError IREnv -> IREnv
+expectCompiled (Right env) = env
+expectCompiled (Left err)  = error ("test fixture failed to compile: " ++ show err)
 
 invalidTestCases :: [Program]
 invalidTestCases = [invalidDuplicateDecl1, invalidDuplicateDecl2, invalidDuplicateDecl3, invalidDuplicateDecl4, invalidDuplicateDecl5, invalidMissingDecl, invalidMissingInjF, invalidReservedName, invalidReservedName2, invalidWrongArgCount]
@@ -165,7 +178,7 @@ prop_CheckReadmeCodeListing1 = ioProperty $ do
       gen <- evalRandIO gen'
       case runProb defaultCompilerConfig twoDice [] gen of
         Left err -> return $ counterexample err False
-        Right (VProbDim prob dim) -> do
+        Right (VProbDim prob _dim) -> do
           -- Original Listing above, Tests below
           if gen == (VInt 2) || gen == (VInt 12) then
             return $ (VFloat prob) `reasonablyClose` (VFloat $ 1/36)
@@ -181,6 +194,8 @@ prop_CheckReadmeCodeListing1 = ioProperty $ do
             return $ (VFloat prob) `reasonablyClose` (VFloat $ 6/36)
           else
             return $ counterexample ("No valid dice roll " ++ show gen) False
+        Right other -> return $ counterexample ("probability query returned " ++ show other
+                                                 ++ ", not a (prob, dim) pair") False
 
 -- DO NOT CHANGE THIS CODE WITHOUT ALSO CHANGING THE CODE IN THE README
 prop_CheckReadmeCodeListing2 :: Property
@@ -192,10 +207,13 @@ prop_CheckReadmeCodeListing2 = ioProperty $ do
       gen <- evalRandIO gen'
       case runProb defaultCompilerConfig dist [] gen of
         Left err -> return $ counterexample err False
-        Right (VProbDim prob dim) -> do
+        Right (VProbDim prob _dim) -> case gen of
           -- Original Listing above, Tests below
-          let (VFloat genF) = gen
-          return $ (VFloat prob) `reasonablyClose` (VFloat (normalPDF ((genF - 1) / 2) / 2))
+          VFloat genF ->
+            return $ (VFloat prob) `reasonablyClose` (VFloat (normalPDF ((genF - 1) / 2) / 2))
+          other -> return $ counterexample ("expected a float sample, got " ++ show other) False
+        Right other -> return $ counterexample ("probability query returned " ++ show other
+                                                 ++ ", not a (prob, dim) pair") False
 
 checkValidPrograms :: (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
 checkValidPrograms (p, _, _, _) = case validateProgram p of
@@ -217,7 +235,8 @@ checkTopKInterprets envs n (p, inp, params, _) = ioProperty $ do
 -- corpus-wide probTolerance (as the End2End checks do), and skip the dim check
 -- for zero probability (a zero result carries no meaningful dimension).
 checkProbTestCasesWithBC :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
-checkProbTestCasesWithBC envs n (p, inp, params, (VFloat out, VFloat outDim)) = ioProperty $ do
+checkProbTestCasesWithBC envs n (p, inp, params, expected) = ioProperty $ do
+  let (out, outDim) = expectedProbDim expected
   let actualOutput = irDensityC envs n p params inp
   case actualOutput of
     VProbDimBC a d _ -> return $
@@ -249,7 +268,8 @@ logSpaceUncoveredPrograms =
   ]
 
 checkLogSpaceMatchesLinear :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
-checkLogSpaceMatchesLinear envs n (p, inp, params, (VFloat out, VFloat outDim)) = ioProperty $ do
+checkLogSpaceMatchesLinear envs n (p, inp, params, expected) = ioProperty $ do
+  let (out, outDim) = expectedProbDim expected
   let actualOutput = irDensityC envs n p params inp
   case actualOutput of
     VProbDim logP d ->
@@ -636,7 +656,7 @@ prop_stripBranchCountReturnShape = once $ ioProperty $ do
 prop_TopKConstantPresentInEnv :: Property
 prop_TopKConstantPresentInEnv = once $ ioProperty $ do
   let conf = defaultCompilerConfig { topKThreshold = Just 0.005 }
-      Right irEnv = compile conf testDice
+      irEnv = expectCompiled (compile conf testDice)
       IREnv _ _ consts = irEnv
   return $ case lookup "TOP_K_CUTOFF" consts of
     Just (VFloat v) -> counterexample ("Expected 0.005, got " ++ show v) (abs (v - 0.005) < 1e-12)
@@ -646,18 +666,17 @@ prop_TopKConstantPresentInEnv = once $ ioProperty $ do
 -- When topKThreshold is Nothing, no TOP_K_CUTOFF constant should appear in IREnv.
 prop_TopKConstantAbsentWithoutFlag :: Property
 prop_TopKConstantAbsentWithoutFlag = once $ ioProperty $ do
-  let Right irEnv = compile defaultCompilerConfig testDice
+  let irEnv = expectCompiled (compile defaultCompilerConfig testDice)
       IREnv _ _ consts = irEnv
   return $ counterexample "TOP_K_CUTOFF should not appear when topK is disabled"
     (isNothing (lookup "TOP_K_CUTOFF" consts))
-  where isNothing Nothing = True; isNothing _ = False
 
 -- The generated Python should contain a plain assignment `TOP_K_CUTOFF = <value>`,
 -- not a class definition.
 prop_TopKPythonConstantIsPlainAssignment :: Property
 prop_TopKPythonConstantIsPlainAssignment = once $ ioProperty $ do
   let conf = defaultCompilerConfig { topKThreshold = Just 0.001 }
-      Right irEnv = compile conf testDice
+      irEnv = expectCompiled (compile conf testDice)
       pyLines = SPLL.CodeGenPyTorch.generateFunctions True irEnv
   let hasAssignment = any ("TOP_K_CUTOFF = " `isInfixOf`) pyLines
       hasClass       = any ("class TOP_K_CUTOFF" `isInfixOf`) pyLines
@@ -669,7 +688,7 @@ prop_TopKPythonConstantValueMatchesConfig :: Property
 prop_TopKPythonConstantValueMatchesConfig = once $ ioProperty $ do
   let thresh = 0.0042 :: Double
       conf = defaultCompilerConfig { topKThreshold = Just thresh }
-      Right irEnv = compile conf testDice
+      irEnv = expectCompiled (compile conf testDice)
       pyLines = SPLL.CodeGenPyTorch.generateFunctions True irEnv
       assignmentLines = filter ("TOP_K_CUTOFF = " `isInfixOf`) pyLines
   return $ case assignmentLines of

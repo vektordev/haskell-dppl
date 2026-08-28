@@ -35,8 +35,9 @@
 -- CompilerConfigs, so this module lives in the opt-in Slow test group
 -- (NEST_SLOW_TESTS=1) rather than the default `stack test` run.
 --
--- A further property, 'prop_Fuzz_SamplingMatchesPDF' (exported via
--- 'superSlowFuzzTests'), is central enough to be worth its own even-slower
+-- A further property, 'fuzzSamplingMatchesPDF' (exported via
+-- 'superSlowFuzzTests' under the test name "prop_Fuzz_SamplingMatchesPDF"),
+-- is central enough to be worth its own even-slower
 -- opt-in tier (NEST_SUPERSLOW_TESTS=1): it is the only property here that
 -- cross-checks `generate` against `probability` (every other property only
 -- cross-checks different CompilerConfigs against each other on the *same*
@@ -44,7 +45,7 @@
 -- dynamically from the density at the query point (see its docs).
 module TestFuzz (fuzzTests, superSlowFuzzTests) where
 
-import Test.QuickCheck
+import Test.QuickCheck hiding (sample)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.QuickCheck (testProperties, testProperty)
 import Control.Exception (try, evaluate, throwIO, fromException, SomeException, SomeAsyncException(..))
@@ -661,8 +662,8 @@ maxRetries = 4
 -- (so they are always in-support), then checked together against one shared
 -- batch of forward samples sized to the hardest (lowest-density) point among
 -- them (see 'drawQueryPoints' / 'runSamplingCheck').
-prop_Fuzz_SamplingMatchesPDF :: Property
-prop_Fuzz_SamplingMatchesPDF = withMaxSuccess 20 $ forAll (resize fuzzSize genTypedProgram) $ \p -> ioProperty $ withinSuperSlowBudget $ do
+fuzzSamplingMatchesPDF :: Property
+fuzzSamplingMatchesPDF = withMaxSuccess 20 $ forAll (resize fuzzSize genTypedProgram) $ \p -> ioProperty $ withinSuperSlowBudget $ do
   compiled <- compileSafe defaultCompilerConfig p
   case compiled of
     Nothing -> return discardVacuous
@@ -677,4 +678,4 @@ prop_Fuzz_SamplingMatchesPDF = withMaxSuccess 20 $ forAll (resize fuzzSize genTy
               runSamplingCheck p irEnv points initialBatch maxRetries
 
 superSlowFuzzTests :: TestTree
-superSlowFuzzTests = testGroup "Fuzz" [testProperty "prop_Fuzz_SamplingMatchesPDF" prop_Fuzz_SamplingMatchesPDF]
+superSlowFuzzTests = testGroup "Fuzz" [testProperty "prop_Fuzz_SamplingMatchesPDF" fuzzSamplingMatchesPDF]

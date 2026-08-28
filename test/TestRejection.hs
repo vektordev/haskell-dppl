@@ -15,7 +15,7 @@ module TestRejection (rejectionTests) where
 -- that changes which rule fires is pinpointed to the offending program.
 
 import SPLL.Lang.Lang
-import SPLL.Lang.Types (Program(..), makeTypeInfo, GenericValue(..), MultiValue(..), Expr(..), ExprF(..))
+import SPLL.Lang.Types (makeTypeInfo, GenericValue(..), MultiValue(..))
 import SPLL.Typing.RType (RType(..))
 import SPLL.Examples
 import SPLL.Validator (validateProgram)
@@ -28,7 +28,6 @@ import qualified SPLL.CodeGenPyTorch
 import SPLL.CodeGenPyTorch (pyMangle, pythonKeywords)
 import SPLL.CodeGenJulia (juliaMangle, juliaKeywords)
 import qualified SPLL.CodeGenJulia
-import SPLL.Prelude (compile)
 
 import Control.Exception (try, evaluate, SomeException)
 import Data.List (isInfixOf, nub)

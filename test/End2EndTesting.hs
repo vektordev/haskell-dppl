@@ -2,26 +2,22 @@
 
 module End2EndTesting where
 
-import System.Directory (listDirectory, getCurrentDirectory, doesFileExist)
+import System.Directory (listDirectory, getCurrentDirectory)
 import System.FilePath (stripExtension, isExtensionOf, takeBaseName)
 import System.IO.Temp (withSystemTempFile)
 import System.IO (hPutStr, hClose, hPutStrLn, stderr)
 import System.Environment (lookupEnv)
-import System.Process
+import System.Process (createProcess, proc, readProcessWithExitCode, waitForProcess)
 import System.Exit
 import Data.List (groupBy)
 import Data.Function (on)
-import Control.Monad (zipWithM)
 import Control.Monad.Random
-import System.Random (mkStdGen)
 import Data.Maybe
 import Data.List (intercalate, nub, isInfixOf, isPrefixOf, transpose, zip4)
 import Data.Text (replace, pack, unpack)
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
 import SPLL.Prelude
-import SPLL.Parser (tryParseProgram, pValue)
-import qualified Text.Megaparsec.Char.Lexer as L
 import SPLL.CodeGenJulia
 import SPLL.CodeGenPyTorch
 import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
@@ -34,10 +30,9 @@ import SPLL.Typing.Infer (addTypeInfo)
 import SPLL.Typing.ForwardChaining (annotateProg)
 import SPLL.Analysis (annotateEnumsProg)
 import Data.Foldable (toList)
-import Test.QuickCheck hiding (verbose)
+import Test.QuickCheck hiding (sample, verbose)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.QuickCheck (testProperty)
-import Debug.Trace
 import Control.Exception (try, evaluate, throwIO, SomeException)
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
@@ -78,10 +73,10 @@ selectNoOp _ _ = property True
 selectNoOpCmp :: Program -> String -> (IREnv -> Either CompilerError IRValue) -> Property
 selectNoOpCmp p name run = ioProperty $ do
   scalar  <- forceResult (compile defaultCompilerConfig p >>= run)
-  batched <- forceResult (compile defaultCompilerConfig{batched = True} p >>= run)
+  batchedRes <- forceResult (compile defaultCompilerConfig{batched = True} p >>= run)
   return $ counterexample
-    ("select pass is not a no-op for " ++ name ++ ": scalar=" ++ show scalar ++ ", batched=" ++ show batched)
-    (resultsAgree scalar batched)
+    ("select pass is not a no-op for " ++ name ++ ": scalar=" ++ show scalar ++ ", batched=" ++ show batchedRes)
+    (resultsAgree scalar batchedRes)
 
 resultsAgree :: Either String IRValue -> Either String IRValue -> Bool
 resultsAgree (Right (VProbDim p1 d1)) (Right (VProbDim p2 d2)) = abs (p1 - p2) < probTolerance && d1 == d2
@@ -112,6 +107,14 @@ checkImposs name (Just expected) v = case resultImpossible v of
   Just actual -> counterexample
     ("Impossibility flag differs for test case " ++ name ++ ". Expected: " ++ show expected ++ " Got: " ++ show actual)
     (actual == expected)
+
+-- | The transpiled harnesses only ever emit prob/cumulative cases; anything
+-- else arriving here means the caller's routing filter and this emitter
+-- disagree.
+harnessRoutingError :: String -> TestCase -> String
+harnessRoutingError backend tc =
+  backend ++ " harness: test case " ++ testCaseName tc
+          ++ " is neither a probability nor a cumulative case"
 
 testInterpreter :: Program -> Either CompilerError IREnv -> TestCase -> Property
 testInterpreter p compiledE (ProbTestCase name sample params (VFloat expectedProb, VFloat expectedDim) expImposs) = ioProperty $ do
@@ -178,6 +181,11 @@ testInterpreter p compiledE (ArgmaxPTestCase name params res) = ioProperty $ do
         | resDim /= 0 -> return $ counterexample ("Test case " ++ name ++ ": argmax_p does not support continuous (dim > 0) results") False
         | otherwise -> evalRandIO (argmaxLoop p compiled name mockedParams res resP [res] resP 0)
       Right x -> return $ counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
+-- The prob/cumulative equations above also destructure the .tst expectation as
+-- a (VFloat, VFloat) pair, so a malformed corpus row lands here.
+testInterpreter _ _ tc = counterexample
+  ("malformed expected result in test case " ++ testCaseName tc
+    ++ ": the probability and dimension must both be floats") (property False)
 
 -- Number of consecutive repeat draws (samples already in the bucket) after
 -- which we give up: if normalization held, the accumulated mass of a fully
@@ -271,16 +279,16 @@ discreteProbsNormalized p compiledE = case compiledE of
     sampleCnt = 1000
     sufficientlyNormal = 0.99
     prob :: IRValue -> Double
-    prob (VProbDim p _) = p
+    prob (VProbDim pr _) = pr
     prob v = error ("not a probability result: " ++ show v)
     dim :: IRValue -> IRValue
     dim (VProbDim _ d) = VFloat d
     dim v = error ("not a probability result: " ++ show v)
 
 progParameterCount :: Program -> Int
-progParameterCount Program{functions=f} = countLambdas main
+progParameterCount Program{functions=f} =
+  countLambdas (fromMaybe (error "progParameterCount: program has no 'main'") (lookup "main" f))
   where
-    Just main = lookup "main" f
     countLambdas (Expr _ (Lambda _ e)) = 1 + countLambdas e
     countLambdas _ = 0
 
@@ -379,8 +387,10 @@ juliaModuleTestCases modName tcs =
     (_, _, exampleParams, _, _, _) = unpackTestCase (head tcs)
     unpackTestCase (ProbTestCase name sample params (outProb, outDim) imp) = (name, sample, params, outProb, outDim, imp)
     unpackTestCase (CumulTestCase name sample params (outProb, outDim) imp) = (name, sample, params, outProb, outDim, imp)
+    unpackTestCase tc = error (harnessRoutingError "Julia" tc)
     mainName (ProbTestCase _ _ _ _ _) = "main_prob"
     mainName (CumulTestCase _ _ _ _ _) = "main_integ"
+    mainName tc = error (harnessRoutingError "Julia" tc)
     -- Each program is wrapped in its own module, so its ADT constructors are
     -- not in scope where the harness writes the query point. Python's harness
     -- splices the source into the same namespace and needs no such qualifying.
@@ -427,8 +437,10 @@ pythonTestCode src tcs =
     (_, _, exampleParams, _, _, _) = unpackTestCase (head tcs)
     unpackTestCase (ProbTestCase name sample params (outProb, outDim) imp) = (name, sample, params, outProb, outDim, imp)
     unpackTestCase (CumulTestCase name sample params (outProb, outDim) imp) = (name, sample, params, outProb, outDim, imp)
+    unpackTestCase tc = error (harnessRoutingError "Python" tc)
     mainName (ProbTestCase _ _ _ _ _) = "main.forward"
     mainName (CumulTestCase _ _ _ _ _) = "main.integrate"
+    mainName tc = error (harnessRoutingError "Python" tc)
 
 -- The emitted result is (prob, (dim, impossible)), so the impossibility flag --
 -- checked only when the .tst line declared an expectation for it -- sits at
@@ -1739,7 +1751,7 @@ loadEnd2EndCases keep = do
 buildEnd2EndTree :: String -> Bool
                   -> [(String, Program, Either CompilerError IREnv, [Backend], [TestCase])]
                   -> TestTree
-buildEnd2EndTree groupName includeBackends compiledCases = testGroup groupName $
+buildEnd2EndTree treeName includeBackends compiledCases = testGroup treeName $
     [ testGroup "Interpreter"
         [ testProperty n (once $ conjoin (map (testInterpreter p c) tcs)) | (n, p, c, bs, tcs) <- compiledCases, Interpreter `elem` bs ]
     -- Re-run every interpreter case at -O0 to confirm the optimizer changes no answer.

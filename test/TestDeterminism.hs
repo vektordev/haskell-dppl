@@ -13,12 +13,11 @@
 module TestDeterminism (determinismTests) where
 
 import qualified Data.Map.Strict as Map
-import Data.Map.Strict (Map)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, (@?=))
 
 import SPLL.Lang.Types
-import SPLL.Lang.Lang (getTypeInfo, getSubExprs, Expr(..), ExprF(..))
+import SPLL.Lang.Lang (getTypeInfo, getSubExprs)
 import SPLL.Analysis (annotateEnumsProg)
 import SPLL.Typing.ForwardChaining (annotateProg)
 import SPLL.Typing.Determinism
