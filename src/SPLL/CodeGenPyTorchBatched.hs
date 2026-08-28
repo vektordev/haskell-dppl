@@ -854,6 +854,11 @@ emittable e = case e of
   IRApply{}      -> True   -- network call / cross-function decoder call (M2b)
   IRIndex{}      -> True   -- logit-vector slice or per-element gather (M2b)
   IREnumSum _ mv _  -> scalarDiscreteMulti mv  -- enum sum, unrolled over the enum axis (M2b)
+  -- Paired (probability, branchCount) enum sum -- only built by a
+  -- countBranches compile. Same unrolling as 'IREnumSum', reduced
+  -- componentwise; the log-space variant is refused, exactly as the
+  -- single-scalar 'IRLogEnumSum' is.
+  IREnumSumPaired lg _ mv _ -> not lg && scalarDiscreteMulti mv
   IRIsPossible mv _ -> scalarDiscreteMulti mv  -- membership over a scalar enum (M2b)
   IRError{}      -> True   -- refusal arm, emitted as a selected-away NaN poison (M3)
   IRSample{}     -> True   -- a fresh random draw, batched via rand(n)/randn(n) (M4);
@@ -962,6 +967,8 @@ reason e = case e of
   IRLambda{}      -> "inner lambda (IRLambda)"
   IRIsPossible{}  -> "membership check (IRIsPossible) over a non-scalar enumeration"
   IREnumSum{}     -> "enumeration sum (IREnumSum) over a non-scalar enumeration"
+  IREnumSumPaired True _ _ _ -> "log-space paired enumeration sum (IREnumSumPaired)"
+  IREnumSumPaired{}  -> "paired enumeration sum (IREnumSumPaired) over a non-scalar enumeration"
   IRConformsTo{}  -> "type-conformance check (IRConformsTo)"
   IRConst VAny        -> "marginal ANY sentinel (IRConst VAny); marginal queries are outside the tensor fragment"
   IRConst (VAnyExcept _) -> "marginal ANY-except sentinel (IRConst VAnyExcept); marginal queries are outside the tensor fragment"
@@ -1088,6 +1095,14 @@ batchedExpr env (IRIndex l idx) =
 batchedExpr env (IREnumSum name multiVal expr) =
   "sum(map((lambda " ++ name ++ ": " ++ batchedExpr env expr ++ "), ["
     ++ intercalate ", " (map (batchedValOrDie . valueToIR) (multiValueToValueList multiVal)) ++ "]))"
+-- The paired form of the above: the body yields a (probability, branchCount)
+-- pair per enumerated value, and the two components reduce independently.
+-- Evaluating the body once per value and reducing componentwise is the whole
+-- point of the node (see 'IREnumSumPaired'), so the unrolled body must appear
+-- exactly once here too.
+batchedExpr env (IREnumSumPaired _ name multiVal expr) =
+  "enum_sum_paired(list(map((lambda " ++ name ++ ": " ++ batchedExpr env expr ++ "), ["
+    ++ intercalate ", " (map (batchedValOrDie . valueToIR) (multiValueToValueList multiVal)) ++ "])))"
 -- A membership test @x in {v0, ..}@ over a scalar enumeration (e.g. \"is the
 -- residual @c - a@ a valid digit?\" in MNIST addition). Rendered as an
 -- elementwise @[B]@ bool mask via 'is_member', which evaluates @x@ once.

@@ -146,6 +146,12 @@ def is_member(x, vals):
 # --- tuple (structure-of-arrays leaf carrier) --------------------------------
 # Identical to pythonLib.T; a fixed tuple whose leaves are [B] tensors.
 
+# Componentwise reduction of an unrolled paired enum-sum (IREnumSumPaired):
+# each element is a (probability, branchCount) pair evaluated against the whole
+# batch, and the two components sum independently over the enum axis.
+def enum_sum_paired(pairs):
+  return T(sum(p.t1 for p in pairs), sum(p.t2 for p in pairs))
+
 class T:
   def __init__(self, t1, t2):
     self.t1 = t1

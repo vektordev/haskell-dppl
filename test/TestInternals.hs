@@ -1249,6 +1249,52 @@ test_planEnumThreadedTopKAndBC = planEnumTopKAndBCTest "planEnumThreadedTopKAndB
 test_planEnumRecTopKAndBC :: TestTree
 test_planEnumRecTopKAndBC = planEnumTopKAndBCTest "planEnumRecTopKAndBC" "planEnumRecChain"
 
+-- | Branch counting must not multiply the IR (fuzz-qc-compiler-bugs item 3).
+--
+-- A probability sum over an enumerated support needs two reductions over the
+-- same loop body when @countBranches@ is on -- the probability and the branch
+-- count. Read off an unshared body, each carries its own full copy of that
+-- body; and since the body is the recursively-compiled sub-inference, at every
+-- level of a nested enumerable chain that doubles what the level above copies,
+-- which is exponential in the nesting depth. Measured before the single-loop
+-- paired enum sum went in: 12.0 MB of shown IR at depth 6 against 0.72 MB
+-- without branch counting (16.7x), 2x more per added level, and depth 8 did
+-- not finish.
+--
+-- Pinned as a ratio against the same program's default compile at two depths,
+-- because the failure mode is a per-level multiplier: any surviving
+-- duplication shows up as a ratio that grows with depth, whichever level
+-- reintroduces it. Same @length (show ir)@ node-count proxy the plan-enum
+-- polynomial tests use.
+--
+-- The nesting is built as a Haskell 'Expr' rather than written as SPLL source
+-- on purpose (it mirrors what the fuzz generator builds): SPLL-level recursion
+-- compiles to a single shared 'IRApply' call, so a recursive @.ppl@ would not
+-- exercise this inline-duplication class at all. Measured at -O0 for the same
+-- reason -- the question is what the compiler emits, not what the optimizer
+-- can claw back afterwards.
+test_branchCountingDoesNotMultiplyIR :: TestTree
+test_branchCountingDoesNotMultiplyIR = testCase "branchCountingDoesNotMultiplyIR" $ do
+  -- Both operands of the outer plusI are enumerable and non-deterministic, so
+  -- every level routes through the enumerated-sum path, and the right operand
+  -- nests the next level inside an if.
+  let nest :: Int -> Expr
+      nest 0 = dice 3
+      nest d = negIF (dice 5)
+                 #<+># ifThenElse (bernoulli 0.4 #||# bernoulli 0.6) (dice 3) (nest (d - 1))
+      prog d = Program [("main", nest d)] [] [] []
+      sizeAt cb d =
+        case compile defaultCompilerConfig{countBranches = cb, optimizerLevel = 0} (prog d) of
+          Left e   -> assertFailure ("compile error at depth " ++ show d ++ ": " ++ show e)
+          Right ir -> return (length (show ir))
+  forM_ [4, 7] $ \d -> do
+    plain <- sizeAt False d
+    counted <- sizeAt True d
+    let ratio = fromIntegral counted / fromIntegral plain :: Double
+    assertBool ("branch counting multiplied the depth-" ++ show d ++ " IR: "
+                ++ show plain ++ " -> " ++ show counted ++ " (" ++ show ratio ++ "x)")
+      (counted < 2 * plain)
+
 -- | Milestone-4 value-grouped DP acceptance: a counting fold compared against
 -- a deterministic bound compiles to polynomially-sized IR. At milestone 2 the
 -- fold enumerated 2^depth (value, world) pairs, so the IR grew exponentially;
@@ -2047,6 +2093,7 @@ internalsTests = testGroup "Internals"
   , autoNeuralDerivationTests
   , enumContinuousRefusalTests
   , test_planEnumThreadedTopKAndBC
+  , test_branchCountingDoesNotMultiplyIR
   , test_planEnumM4Polynomial
   , test_planEnumBoolCtorPolynomial
   , test_planEnumFusedJointStatePolynomial

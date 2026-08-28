@@ -345,6 +345,11 @@ generateExpression (IRLogEnumSum name enumRange expr) = do
     e <- generateExpression expr
     var <- addOrGetFromGlobalStorage enumRange
     return $ "logsumexp(map((" ++ name ++ " -> " ++ e ++ "), multiValueToValueList(" ++ var ++")))"
+generateExpression (IREnumSumPaired logSp name enumRange expr) = do
+    e <- generateExpression expr
+    var <- addOrGetFromGlobalStorage enumRange
+    return $ "enumSumPaired((" ++ name ++ " -> " ++ e ++ "), multiValueToValueList(" ++ var
+             ++ "), " ++ (if logSp then "true" else "false") ++ ")"
 generateExpression (IRIndex lst idx) = do
     l <- generateExpression lst
     i <- generateExpression idx

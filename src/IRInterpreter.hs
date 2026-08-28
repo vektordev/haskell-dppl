@@ -417,6 +417,25 @@ generate f neurals registry adts globalEnv env [] (IRLogEnumSum varname values e
       | isInfinite a && a < 0 = VFloat b
       | isInfinite b && b < 0 = VFloat a
       | otherwise = let m = max a b in VFloat (m + log (exp (a - m) + exp (b - m)))
+-- | Paired sibling of the two above (fuzz-qc-compiler-bugs item 3): a single
+-- pass over the enumerated support whose body yields a @(prob, branches)@
+-- tuple. The probability component reduces exactly as 'IREnumSum'
+-- (log-sum-exp when the flag is set), the branch count always by a plain sum.
+generate f neurals registry adts globalEnv env [] (IREnumSumPaired logSp varname values expr) = do
+  foldrM (\v acc -> do
+    x <- generate f neurals registry adts globalEnv env [IRConst v] (IRLambda varname expr)
+    return $ pairwise x acc
+    ) (VTuple (VFloat zeroP) (VFloat 0)) (fmap valueToIR (multiValueToValueList values))
+  where
+    zeroP = if logSp then (-1)/0 else 0
+    plusP a b
+      | not logSp = a + b
+      | isInfinite a && a < 0 = b
+      | isInfinite b && b < 0 = a
+      | otherwise = let m = max a b in m + log (exp (a - m) + exp (b - m))
+    pairwise (VTuple (VFloat pa) (VFloat ba)) (VTuple (VFloat pb) (VFloat bb)) =
+      VTuple (VFloat (plusP pa pb)) (VFloat (ba + bb))
+    pairwise a b = error ("IREnumSumPaired: non-(prob, branches) body: " ++ show (a, b))
 generate f neurals registry adts globalEnv env [] (IRIsPossible multiVal expr) = do
   val <- generate f neurals registry adts globalEnv env [] expr
   return $ VBool (valueInMultiValue multiVal (fmap (error "Failed conversion") val))

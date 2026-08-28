@@ -1,6 +1,6 @@
 module JuliaSPPLLib
 
-export density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, log_density_IRUniform, log_density_IRNormal, log_cumulative_IRUniform, log_cumulative_IRNormal, logsumexp, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, mapList, eq, isPossible, isclose, indexOf, listProd, T, Either, Left, Right, fromLeft, fromRight, multiValueToValueList,==
+export density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, log_density_IRUniform, log_density_IRNormal, log_cumulative_IRUniform, log_cumulative_IRNormal, logsumexp, enumSumPaired, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, mapList, eq, isPossible, isclose, indexOf, listProd, T, Either, Left, Right, fromLeft, fromRight, multiValueToValueList,==
 
 
 function isAny(x)
@@ -83,6 +83,22 @@ function logsumexp(xs)
         return -Inf
     end
     return m + log(sum(exp(x - m) for x in xs))
+end
+
+# One pass over an enumerated support whose body returns a (probability,
+# branchCount) pair, reducing the probability by a plain sum (or log-sum-exp
+# in log space) and the branch count by a plain sum. The paired form exists so
+# a branch-counting compile evaluates the body once per enumerated value
+# instead of once per loop (see IREnumSumPaired).
+function enumSumPaired(f, values, logSpace)
+    probs = Float64[]
+    branches = 0.0
+    for v in values
+        r = f(v)
+        push!(probs, r[1])
+        branches += r[2]
+    end
+    return T(logSpace ? logsumexp(probs) : sum(probs), branches)
 end
 
 function eq(a, b)

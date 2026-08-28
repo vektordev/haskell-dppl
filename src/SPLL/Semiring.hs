@@ -421,34 +421,46 @@ anySafe sr sample wrap (PResult p d bc imp) = PResult
 -- counts sum, the result is a discrete mass (dim 0). @wrap@ post-processes the
 -- assembled sums (variable uniqueification at the double-enumeration site).
 --
--- Builds TWO separate enum-sum loops -- one summing 'rProb', one summing
--- 'rBranches' -- because the enum-sum IR nodes only accumulate a single
--- scalar, so the two sums cannot share one loop body. When @r@'s own
--- per-iteration computation is expensive (e.g. it is itself built from a
--- recursively enumerable sub-expression), that duplicates the whole
--- computation, and compounds into an exponential blowup when this fires at
--- every level of a recursively-nested enumerable structure
--- (fuzz-qc-compiler-bugs item 3, residual mechanism beyond the topK-specific
--- one fixed alongside this: a plusI/negI chain over nested
--- dice-style IfThenElse-of-Uniform-threshold splits with both operands
--- enumerable hits this at every level even without topK). 'rBranches' is a
--- pure side channel with no feedback into 'rProb'/'rDim'/'rImposs' anywhere
--- in the compiler, and is discarded wholesale by 'stripBranchCount' as a
--- post-pass whenever @countBranches@ is off -- so when it is off, computing
--- an accurate branches sum here is guaranteed-wasted work: skip the second
--- loop and fall back to a cheap placeholder instead of paying (and
--- compounding) the duplication for a value nobody reads. When
--- @countBranches@ is on, the exact sum is still computed as before -- this
--- is purely an argument-shape change (Semiring + Bool instead of the full
--- CompilerMetadata IRCompiler.hs used to pass), so this module needs no
--- knowledge of CompilerMetadata.
-enumSumP :: Semiring -> Bool -> (IRExpr -> IRExpr) -> Varname -> MultiValue -> PResult -> CompilerMonad PResult
-enumSumP sr countBranches wrap v vals r =
-  opaqueMass sr (wrap (enumSumNode sr v vals (unP (rProb r)))) branchesSum
-  where
-    branchesSum
-      | countBranches = wrap (IREnumSum v vals (rBranches r))
-      | otherwise = const0
+-- Takes the per-iteration result PACKED (as 'packResult' builds it), not as a
+-- 'PResult'. A 'PResult' here would already be four projections off the same
+-- expression, so every field this reads would carry its own full copy of the
+-- body -- and the body is the recursively-compiled sub-inference, the single
+-- most expensive thing in the loop. Packed, it can be bound once /inside/ the
+-- loop body (a binding outside is impossible: the body reads the loop
+-- variable) and every field read off that binding.
+--
+-- Both sums are taken in a SINGLE loop, over exactly one copy of @r@'s
+-- per-iteration computation. Two single-scalar loops -- one summing 'rProb',
+-- one summing 'rBranches' -- cannot share a loop body or a binding inside it,
+-- so each re-embedded that computation in full; when @r@ is itself built from
+-- a recursively enumerable sub-expression, that doubles the IR at every level
+-- of the nesting and compounds exponentially (fuzz-qc-compiler-bugs item 3,
+-- third mechanism: a plusI/negI chain over nested dice-style
+-- IfThenElse-of-Uniform-threshold splits with both operands enumerable hits
+-- this at every level, even with topK off).
+--
+-- When @countBranches@ is off the branch sum is not computed at all, and the
+-- ordinary single-scalar node is used: 'rBranches' is a pure side channel with
+-- no feedback into 'rProb'/'rDim'/'rImposs' anywhere in the compiler, and is
+-- discarded wholesale by 'stripBranchCount' as a post-pass, so summing it
+-- would be provably-unread work. When it is on, 'IREnumSumPaired' reduces a
+-- @(probability, branchCount)@ body in one pass, the probability component
+-- exactly as 'enumSumNode' would have. Either way this module needs no
+-- knowledge of CompilerMetadata -- @countBranches@ arrives as a plain Bool.
+enumSumP :: Semiring -> Bool -> (IRExpr -> IRExpr) -> Varname -> MultiValue -> IRExpr -> CompilerMonad PResult
+enumSumP sr countBranches wrap v vals packed
+  -- Only the probability is read, so the packed body is projected directly --
+  -- one copy, no binding to clean up afterwards.
+  | not countBranches =
+      opaqueMass sr (wrap (enumSumNode sr v vals (unP (rProb (unpackResult packed))))) const0
+  | otherwise = do
+      body <- mkVariable "enum_body"
+      let r = unpackResult (IRVar body)
+      paired <- mkVariable "enum_paired"
+      setVariables [(paired, wrap (IREnumSumPaired (srLogSpace sr) v vals
+                                     (IRLetIn body packed
+                                       (IRTCons (unP (rProb r)) (rBranches r)))))]
+      opaqueMass sr (IRTFst (IRVar paired)) (IRTSnd (IRVar paired))
 
 -- | The IR node an enumerated sum of probabilities is built from: 'IRLogEnumSum'
 -- (log-sum-exp reduction) in log space, plain 'IREnumSum' (linear sum)

@@ -429,12 +429,14 @@ usedInEnumSumBodyInvariant var val scope =
 usedInEnumSumBody :: String -> IRExpr -> Bool
 usedInEnumSumBody var (IREnumSum _ _ body) = countUses var body > 0
 usedInEnumSumBody var (IRLogEnumSum _ _ body) = countUses var body > 0
+usedInEnumSumBody var (IREnumSumPaired _ _ _ body) = countUses var body > 0
 usedInEnumSumBody var expr = any (usedInEnumSumBody var) (getIRSubExprs expr)
 
 -- | Collect all variables bound by IREnumSum/IRLogEnumSum nodes in an expression.
 enumSumBoundVars :: IRExpr -> [String]
 enumSumBoundVars (IREnumSum n _ body) = n : enumSumBoundVars body
 enumSumBoundVars (IRLogEnumSum n _ body) = n : enumSumBoundVars body
+enumSumBoundVars (IREnumSumPaired _ n _ body) = n : enumSumBoundVars body
 enumSumBoundVars expr = concatMap enumSumBoundVars (getIRSubExprs expr)
 
 evalConstantDistr :: IRExpr -> IRExpr
@@ -638,6 +640,7 @@ forceAnyCheck _ (IRLogCumulative _ _) = IRConst $ VBool False
 forceAnyCheck _ (IRSample _) = IRConst $ VBool False
 forceAnyCheck _ (IREnumSum _ _ _) = IRConst $ VBool False
 forceAnyCheck _ (IRLogEnumSum _ _ _) = IRConst $ VBool False
+forceAnyCheck _ (IREnumSumPaired _ _ _ _) = IRConst $ VBool False
 -- Push the check through the binding forms, so a scalar body above can decide
 -- it. Only kept when it actually decided: otherwise this would just relocate
 -- the test (and, for an if, duplicate it).
@@ -674,6 +677,7 @@ propagateAnyGuard (IRIf c@(IRUnaryOp OpIsAny (IRVar v)) t e) =
     binderOf (IRLambda n _)       = Set.singleton n
     binderOf (IREnumSum n _ _)    = Set.singleton n
     binderOf (IRLogEnumSum n _ _) = Set.singleton n
+    binderOf (IREnumSumPaired _ n _ _) = Set.singleton n
     binderOf _                    = Set.empty
 propagateAnyGuard x = x
 
@@ -750,6 +754,7 @@ optimizeCommonSubexprCounted det topExpr = runState (scan (annotateIR det topExp
       IRLambda n _    | [b] <- annKids a -> IRLambda n <$> scan b
       IREnumSum n v _ | [b] <- annKids a -> IREnumSum n v <$> scan b
       IRLogEnumSum n v _ | [b] <- annKids a -> IRLogEnumSum n v <$> scan b
+      IREnumSumPaired lg n v _ | [b] <- annKids a -> IREnumSumPaired lg n v <$> scan b
       e -> do
         kids <- mapM descendToScanRoots (annKids a)
         return (setIRSubExprs e kids)
@@ -765,6 +770,7 @@ optimizeCommonSubexprCounted det topExpr = runState (scan (annotateIR det topExp
       IRLambda n _    | [b] <- annKids a -> IRLambda n <$> scan b
       IREnumSum n v _ | [b] <- annKids a -> IREnumSum n v <$> scan b
       IRLogEnumSum n v _ | [b] <- annKids a -> IRLogEnumSum n v <$> scan b
+      IREnumSumPaired lg n v _ | [b] <- annKids a -> IREnumSumPaired lg n v <$> scan b
       e -> do
         kids <- mapM route (annKids a)
         return (setIRSubExprs e kids)
@@ -827,6 +833,7 @@ mkAnnIR det e kids = AnnIR e kids h sz smp bnd
       IRLambda n _    -> Set.insert n kidsBound
       IREnumSum n _ _ -> Set.insert n kidsBound
       IRLogEnumSum n _ _ -> Set.insert n kidsBound
+      IREnumSumPaired _ n _ _ -> Set.insert n kidsBound
       _               -> kidsBound
 
 -- | Replace every subtree structurally equal to `sub` by `rep`, rebuilding
@@ -893,6 +900,7 @@ headHash e = case e of
   IRLogDensity d _    -> hashMix 34 (hashStr (show d))
   IRLogCumulative d _ -> hashMix 35 (hashStr (show d))
   IRLogEnumSum n v _  -> hashMix (hashMix 36 (hashStr n)) (hashStr (show v))
+  IREnumSumPaired lg n v _ -> hashMix (hashMix (hashMix 37 (if lg then 1 else 0)) (hashStr n)) (hashStr (show v))
 
 -- | The largest hoistable common subexpression of a node (candidates are in
 -- first-occurrence order and ties break like the historical
@@ -948,6 +956,7 @@ unconditionalAnns a0 = go True a0 []
       IRLambda{}  -> acc
       IREnumSum{} -> acc
       IRLogEnumSum{} -> acc
+      IREnumSumPaired{} -> acc
       IRApply{}   -> case annKids a of
         [fn, arg] -> go (not (isApplication (annExpr fn))) fn (go True arg acc)
         kids      -> foldr (go True) acc kids
@@ -1006,6 +1015,7 @@ setIRSubExprs (IRLambda n _) [a] = IRLambda n a
 setIRSubExprs (IRApply{}) [a, b] = IRApply a b
 setIRSubExprs (IREnumSum n val _) [a] = IREnumSum n val a
 setIRSubExprs (IRLogEnumSum n val _) [a] = IRLogEnumSum n val a
+setIRSubExprs (IREnumSumPaired lg n val _) [a] = IREnumSumPaired lg n val a
 setIRSubExprs (IRIndex{}) [a, b] = IRIndex a b
 setIRSubExprs (IRConformsTo t _) [a] = IRConformsTo t a
 setIRSubExprs e [] = e  -- leaves: IRConst, IRSample, IRVar, IRError
@@ -1018,6 +1028,7 @@ freeVarsIR (IRLetIn n decl body) = freeVarsIR decl ++ filter (/= n) (freeVarsIR 
 freeVarsIR (IRLambda n body) = filter (/= n) (freeVarsIR body)
 freeVarsIR (IREnumSum n _ body) = filter (/= n) (freeVarsIR body)
 freeVarsIR (IRLogEnumSum n _ body) = filter (/= n) (freeVarsIR body)
+freeVarsIR (IREnumSumPaired _ n _ body) = filter (/= n) (freeVarsIR body)
 freeVarsIR e = concatMap freeVarsIR (getIRSubExprs e)
 
 -- | Every variable name occurring anywhere in the expression, as a variable
@@ -1033,6 +1044,7 @@ allNamesIR = go Set.empty
       IRLambda n _    -> foldl' go (Set.insert n acc) (getIRSubExprs e)
       IREnumSum n _ _ -> foldl' go (Set.insert n acc) (getIRSubExprs e)
       IRLogEnumSum n _ _ -> foldl' go (Set.insert n acc) (getIRSubExprs e)
+      IREnumSumPaired _ n _ _ -> foldl' go (Set.insert n acc) (getIRSubExprs e)
       _               -> foldl' go acc (getIRSubExprs e)
 
 -- | Replace an application of a lambda to a non-value argument by a let binding:

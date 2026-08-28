@@ -894,6 +894,7 @@ freeInIR v (IRIndex a b)        = freeInIR v a  || freeInIR v b
 freeInIR v (IRMap f x)          = freeInIR v f  || freeInIR v x
 freeInIR v (IREnumSum n _ body) = v /= n && freeInIR v body
 freeInIR v (IRLogEnumSum n _ body) = v /= n && freeInIR v body
+freeInIR v (IREnumSumPaired _ n _ body) = v /= n && freeInIR v body
 freeInIR v (IRDensity _ x)      = freeInIR v x
 freeInIR v (IRCumulative _ x)   = freeInIR v x
 freeInIR v (IRLogDensity _ x)   = freeInIR v x
@@ -1852,7 +1853,7 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
   let (outerBinds, innerTuple) = hoistInvariantBindings x2 irTuple
   let renameHoisted (n, v) = (if n `elem` [x2, x3] then uniquePrefix ++ n else n, applyUnique v)
   setVariables (map renameHoisted outerBinds)
-  enumSumP (semiringOf meta) (countBranches (compilerConfig meta)) applyUnique x2 enumListL (unpackResult innerTuple)
+  enumSumP (semiringOf meta) (countBranches (compilerConfig meta)) applyUnique x2 enumListL innerTuple
 -- For the cumulative case we cant get around two enum sums
 toIRInference meta True (Expr TypeInfo {rType=rt} (InjF (Named name) [left, right])) sample
   | isEnumerable (tags (getTypeInfo left)) && isEnumerable (tags (getTypeInfo right))
@@ -2092,6 +2093,7 @@ uniqueify vars prefix (IRVar name) | name `elem` vars = IRVar (prefix ++ name)
 uniqueify vars prefix (IRLetIn name boundExpr bodyExpr) | name `elem` vars = IRLetIn (prefix ++ name) (uniqueify vars prefix boundExpr) (uniqueify vars prefix bodyExpr)
 uniqueify vars prefix (IREnumSum name lst bodyExpr) | name `elem` vars = IREnumSum (prefix ++ name) lst (uniqueify vars prefix bodyExpr)
 uniqueify vars prefix (IRLogEnumSum name lst bodyExpr) | name `elem` vars = IRLogEnumSum (prefix ++ name) lst (uniqueify vars prefix bodyExpr)
+uniqueify vars prefix (IREnumSumPaired lg name lst bodyExpr) | name `elem` vars = IREnumSumPaired lg (prefix ++ name) lst (uniqueify vars prefix bodyExpr)
 uniqueify _ _ e = e
 
 --folding detGen and Gen into one, as the distinction is one to make sure things that are det are indeed det.
@@ -2178,7 +2180,7 @@ enumerateAppliedLambda meta cumulative l v sample = do
   let discreteVVals = head [x | DiscreteValues x <- tags (getTypeInfo v)]
   let (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
   setVariables outerBinds
-  enumSumP (semiringOf meta) (countBranches (compilerConfig meta)) id boundVar discreteVVals (unpackResult innerTuple)
+  enumSumP (semiringOf meta) (countBranches (compilerConfig meta)) id boundVar discreteVVals innerTuple
 
 toIREnumerate :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PResult
 -- Nested enumerable application (e.g. an inner `let` binding a fresh discrete draw):
@@ -2268,6 +2270,9 @@ stripBranchCount (IREnv funcs adts consts) = IREnv (map stripGroup funcs) adts c
         IREnumSum n val (strip (rebind n False callResults) body)
       IRLogEnumSum n val body ->
         IRLogEnumSum n val (strip (rebind n False callResults) body)
+      -- Only ever built when countBranches is on, i.e. never when this pass runs.
+      IREnumSumPaired lg n val body ->
+        IREnumSumPaired lg n val (strip (rebind n False callResults) body)
       _ -> irDescend (strip callResults) e
 
     rebind n True  = Set.insert n

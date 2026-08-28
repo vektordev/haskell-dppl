@@ -27,7 +27,7 @@ import TestModalityInfer (modalityInferTests)
 import TestDeterminism (determinismTests)
 import TestEncodeProperties (encodeTests, encodeRoundtripTests)
 import TestShowcase (showcaseTests)
-import End2EndTesting (end2endTests, slowEnd2EndTests, getAllTestFiles, selectPassDifferentialTests, batchedPythonTests, batchedRefusalTests)
+import End2EndTesting (end2endTests, slowEnd2EndTests, getAllTestFiles, selectPassDifferentialTests, batchedPythonTests, batchedRefusalTests, branchCountBackendTests)
 import TestFuzz (fuzzTests, superSlowFuzzTests)
 import TestCaseParser (parseProgram, parseTestCases, TestCase(..), Backend(..))
 import TestTolerances (probTolerance, reasonablyCloseTolerance, samplingTolerance)
@@ -704,6 +704,7 @@ main = do
   e2e <- end2endTests
   selectDiff <- selectPassDifferentialTests
   batchedPy <- batchedPythonTests
+  branchCountBackends <- branchCountBackendTests
   detTests <- determinismTests
   showcase <- showcaseTests
   corpusPool <- loadCorpusCases
@@ -738,6 +739,7 @@ main = do
     , selectDiff
     , batchedPy
     , batchedRefusalTests
+    , branchCountBackends
     , slow
     , superSlow
     ]

@@ -250,6 +250,25 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               -- otherwise mirror 'IREnumSum' exactly (same optimizer/CSE
               -- treatment, same scoping).
               | IRLogEnumSum Varname MultiValue IRExpr
+              -- | Paired sibling of 'IREnumSum'/'IRLogEnumSum': ONE loop over
+              -- the enumerated support whose body evaluates to a
+              -- @(probability, branchCount)@ tuple, reducing the first
+              -- component the way the other two nodes reduce their single
+              -- scalar (log-sum-exp when the 'Bool' is True, a plain add when
+              -- False) and the second component by a plain add. The result is
+              -- the reduced tuple.
+              --
+              -- Exists because a branch-counting compile needs BOTH sums over
+              -- the same body, and two single-scalar loops cannot share one
+              -- loop body or a binding inside it -- so each re-embedded the
+              -- whole per-iteration computation, doubling the IR at every
+              -- level of a recursively-enumerable structure
+              -- (fuzz-qc-compiler-bugs item 3, third mechanism). The flag is a
+              -- field rather than a third constructor because only the
+              -- probability component's reduction varies with 'logSpace';
+              -- everything else (bound variable, scoping, optimizer and CSE
+              -- treatment) is identical to 'IREnumSum'.
+              | IREnumSumPaired Bool Varname MultiValue IRExpr
               | IRIsPossible MultiValue IRExpr
               | IRIndex IRExpr IRExpr
               | IRError String
@@ -411,6 +430,7 @@ getIRSubExprs (IRLambda _ a) = [a]
 getIRSubExprs (IRApply a b) = [a, b]
 getIRSubExprs (IREnumSum _ _ a) = [a]
 getIRSubExprs (IRLogEnumSum _ _ a) = [a]
+getIRSubExprs (IREnumSumPaired _ _ _ a) = [a]
 getIRSubExprs (IRIndex a b) = [a, b]
 getIRSubExprs (IRError _) = []
 getIRSubExprs (IRConformsTo _ a) = [a]
@@ -503,6 +523,7 @@ irDescend f x = case x of
   (IRApply a b) -> IRApply (f a) (f b)
   (IREnumSum name val scope) -> IREnumSum name val (f scope)
   (IRLogEnumSum name val scope) -> IRLogEnumSum name val (f scope)
+  (IREnumSumPaired lg name val scope) -> IREnumSumPaired lg name val (f scope)
   (IRIndex left right) -> IRIndex (f left) (f right)
   (IRTheta a i) -> IRTheta (f a) i
   (IRSubtree a i) -> IRSubtree (f a) i
@@ -547,6 +568,7 @@ irDescendM f x = case x of
   (IRApply a b) -> IRApply <$> f a <*> f b
   (IREnumSum name val scope) -> IREnumSum name val <$> f scope
   (IRLogEnumSum name val scope) -> IRLogEnumSum name val <$> f scope
+  (IREnumSumPaired lg name val scope) -> IREnumSumPaired lg name val <$> f scope
   (IRIndex left right) -> IRIndex <$> f left <*> f right
   (IRTheta a i) -> flip IRTheta i <$> f a
   (IRSubtree a i) -> flip IRSubtree i <$> f a
@@ -594,6 +616,7 @@ irPrintFlat (IRVar _) = "IRVar"
 irPrintFlat (IRLambda _ _) = "IRLambda"
 irPrintFlat (IRApply _ _) = "IRApply"
 irPrintFlat (IREnumSum _ _ _) = "IREnumSum"
+irPrintFlat (IREnumSumPaired _ _ _ _) = "IREnumSumPaired"
 irPrintFlat (IRIndex _ _) = "IRIndex"
 irPrintFlat (IRError _) = "IRError"
 irPrintFlat (IRConformsTo _ _) = "IRConformsTo"

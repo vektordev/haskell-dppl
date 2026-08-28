@@ -48,6 +48,20 @@ def logsumexp(xs):
     return -math.inf
   return m + math.log(sum(math.exp(x - m) for x in xs))
 
+# One pass over an enumerated support whose body returns a (probability,
+# branchCount) pair, reducing the probability by a plain sum (or log-sum-exp
+# in log space) and the branch count by a plain sum. The paired form exists so
+# a branch-counting compile evaluates the body once per enumerated value
+# instead of once per loop (see IREnumSumPaired).
+def enumSumPaired(f, values, logSpace):
+  probs = []
+  branches = 0.0
+  for v in values:
+    r = f(v)
+    probs.append(r[0])
+    branches += r[1]
+  return T(logsumexp(probs) if logSpace else sum(probs), branches)
+
 def rand():
   return random()
 

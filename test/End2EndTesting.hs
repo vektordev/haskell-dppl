@@ -1537,6 +1537,176 @@ generateDriver nonNeuralProbes neuralProbes = unlines $
 -- Excluded from end2endTests; covered instead by slowEnd2EndTests, which
 -- Spec.hs includes only when NEST_SLOW_TESTS is set (see Spec.hs's Slow
 -- group).
+-- ===========================================================================
+-- Branch-counted backend coverage (fuzz-qc-compiler-bugs item 3)
+-- ===========================================================================
+
+-- | Corpus programs whose probability body enumerates two enumerable operands
+-- -- the shape that reaches 'SPLL.Semiring.enumSumP', and therefore the only
+-- one that builds an 'IREnumSumPaired'. Asserted, not filtered: if a compiler
+-- change stops routing these through the paired node, the group says so rather
+-- than silently testing nothing.
+branchCountPairedPrograms :: [String]
+branchCountPairedPrograms =
+  ["plusPolyInt", "minusPolyInt", "twoCoins", "discreteFloats", "letTwoEnumerable"]
+
+-- | Backend coverage for the branch-counted paired enum sum.
+--
+-- Branch counting is an opt-in diagnostic flag, so no corpus row runs under it
+-- -- which means the emitted-code path for the one IR node a countBranches
+-- compile builds and a default compile never does ('IREnumSumPaired', the
+-- single-loop @(probability, branchCount)@ enum sum) is otherwise executed by
+-- no backend at all. This group compiles the programs above with
+-- @countBranches = True@, runs the emitted Python and Julia, and checks the
+-- whole @(prob, dim, branchCount)@ triple against the interpreter's answer for
+-- the same query points. It is a differential -- no branch count is written
+-- down here, so the group needs no maintenance when a count legitimately
+-- changes.
+branchCountBackendTests :: IO TestTree
+branchCountBackendTests = do
+  loaded <- mapM loadBranchCountCase branchCountPairedPrograms
+  return $ testGroup "BranchCountBackends"
+    [ testGroup "uses the paired enum sum"
+        [ testProperty n (once (counterexample
+            (n ++ " no longer compiles to an IREnumSumPaired under countBranches; \
+                  \pick a program that does, or this group tests nothing")
+            (any (irAnyNode isPaired) (irEnvBodies env))))
+        | (n, _, env, _) <- loaded ]
+    -- The paired node's log-space reduction (log-sum-exp on the probability
+    -- component, a plain sum on the branch count) is a second code path in
+    -- every backend that has one. Checked through the interpreter only, which
+    -- is where the corpus checks log space generally.
+    , testGroup "log space agrees with linear"
+        [ testProperty n (once (branchCountLogSpace n prog rows)) | (n, prog, _, rows) <- loaded ]
+    -- One julia process for all of them: startup dominates the work here.
+    , testProperty "Julia" (once (branchCountJulia loaded))
+    , testGroup "Python"
+        [ testProperty n (once (branchCountPython n env rows)) | (n, _, env, rows) <- loaded ]
+    ]
+  where isPaired IREnumSumPaired{} = True
+        isPaired _                 = False
+
+-- | A program, its branch-counted compile, and one row per pinned query point
+-- carrying the interpreter's @(prob, dim, branchCount)@ for it.
+type BranchCountCase = (String, Program, IREnv, [(TestCase, Double, Double, Double)])
+
+loadBranchCountCase :: String -> IO BranchCountCase
+loadBranchCountCase name = do
+  prog <- parseProgram ("testCases/" ++ name ++ ".ppl")
+  (_, _, tcs) <- parseTestCases ("testCases/" ++ name ++ ".tst")
+  let env = either (error . ((name ++ ": ") ++) . show) id
+              (compile defaultCompilerConfig{countBranches = True} prog)
+      queries = filter (\t -> isProbTestCase t || isCumulTestCase t) tcs
+      row t = case runOf t of
+        Right (VProbDimBC p d bc) -> (t, p, d, bc)
+        other -> error (name ++ ": branch-counted run gave " ++ show other)
+        where runOf (ProbTestCase _ s ps _ _)  = runProbC prog env ps s
+              runOf (CumulTestCase _ s ps _ _) = runIntegC prog env ps s
+              runOf _ = error "not a query case"
+  return (name, prog, env, map row queries)
+
+-- | Every node in every compiled function body of an environment.
+irEnvBodies :: IREnv -> [IRExpr]
+irEnvBodies (IREnv groups _ _) = concatMap bodies groups
+  where bodies g = [e | Just (e, _) <- [genFun g, probFun g, integFun g, encodeFun g, normalFun g]]
+
+irAnyNode :: (IRExpr -> Bool) -> IRExpr -> Bool
+irAnyNode f e = f e || any (irAnyNode f) (getIRSubExprs e)
+
+-- With countBranches on the emitted result is @(prob, (dim, (bc, imposs)))@,
+-- one field deeper than the default @(prob, (dim, imposs))@ the other backend
+-- harnesses in this module read.
+branchCountPython :: String -> IREnv -> [(TestCase, Double, Double, Double)] -> Property
+branchCountPython name env rows = ioProperty $ do
+  let src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True env)
+      checks = concatMap (\(tc, p, d, bc) ->
+        let (sample, params, fn) = pyCall tc
+        in "tmp = " ++ fn ++ "(" ++ intercalate ", " (map pyVal (sample : params)) ++ ")\n\
+           \_chk(\"" ++ name ++ "/" ++ tcName tc ++ "\", tmp[0], tmp[1][0], tmp[1][1][0], "
+           ++ show p ++ ", " ++ show d ++ ", " ++ show bc ++ ")\n") rows
+      code = unpack (replace (pack "from torch.nn import Module")
+                             (pack "\nclass Module:\n  pass\n") (pack src))
+             ++ "\ndef _chk(what, p, d, bc, ep, ed, ebc):\n\
+                \  if abs(p - ep) > " ++ show probTolerance ++ ":\n\
+                \    raise ValueError(what + ': prob ' + str(p) + ' != ' + str(ep))\n\
+                \  if p != 0 and abs(d - ed) > " ++ show probTolerance ++ ":\n\
+                \    raise ValueError(what + ': dim ' + str(d) + ' != ' + str(ed))\n\
+                \  if abs(bc - ebc) > " ++ show probTolerance ++ ":\n\
+                \    raise ValueError(what + ': branch count ' + str(bc) + ' != ' + str(ebc))\n"
+             ++ checks
+  (_, _, _, h) <- createProcess (proc "python3" ["-c", code])
+  c <- waitForProcess h
+  return $ case c of
+    ExitSuccess   -> property True
+    ExitFailure _ -> counterexample (name ++ ": branch-counted Python differed from the interpreter") False
+  where pyCall (ProbTestCase _ s ps _ _)  = (s, ps, "main.forward")
+        pyCall (CumulTestCase _ s ps _ _) = (s, ps, "main.integrate")
+        pyCall _ = error "not a query case"
+
+branchCountJulia :: [BranchCountCase] -> Property
+branchCountJulia loaded = ioProperty $ do
+  projectDir <- getCurrentDirectory
+  let prelude = "include(\"" ++ projectDir ++ "/juliaLib.jl\")\n\
+                \using .JuliaSPPLLib\n\
+                \function chk(what, p, d, bc, ep, ed, ebc)\n\
+                \  if abs(p - ep) > " ++ show probTolerance ++ "\n\
+                \    error(what * \": prob \" * string(p) * \" != \" * string(ep))\n\
+                \  end\n\
+                \  if p != 0 && abs(d - ed) > " ++ show probTolerance ++ "\n\
+                \    error(what * \": dim \" * string(d) * \" != \" * string(ed))\n\
+                \  end\n\
+                \  if abs(bc - ebc) > " ++ show probTolerance ++ "\n\
+                \    error(what * \": branch count \" * string(bc) * \" != \" * string(ebc))\n\
+                \  end\n\
+                \end\n"
+      body = concatMap (\(idx, (name, _, env, rows)) ->
+        let m = "BCProg" ++ show (idx :: Int)
+        in "module " ++ m ++ "\nusing ..JuliaSPPLLib\n"
+           ++ intercalate "\n" (SPLL.CodeGenJulia.generateFunctions env) ++ "\nend\n"
+           ++ concatMap (\(tc, p, d, bc) ->
+                let (sample, params, fn) = jlCall tc
+                in "tmp = " ++ m ++ "." ++ fn ++ "("
+                   ++ intercalate ", " (map (juliaVal . qualifyConstructors m) (sample : params)) ++ ")\n\
+                   \chk(\"" ++ name ++ "/" ++ tcName tc ++ "\", tmp[1], tmp[2][1], tmp[2][2][1], "
+                   ++ show p ++ ", " ++ show d ++ ", " ++ show bc ++ ")\n") rows)
+        (zip [0..] loaded)
+  code <- withSystemTempFile "julia_bc.jl" $ \tmpPath tmpHandle -> do
+    hPutStr tmpHandle (prelude ++ body)
+    hClose tmpHandle
+    (_, _, _, h) <- createProcess (proc "julia" [tmpPath])
+    waitForProcess h
+  return $ case code of
+    ExitSuccess   -> property True
+    ExitFailure _ -> counterexample "branch-counted Julia differed from the interpreter" False
+  where jlCall (ProbTestCase _ s ps _ _)  = (s, ps, "main_prob")
+        jlCall (CumulTestCase _ s ps _ _) = (s, ps, "main_integ")
+        jlCall _ = error "not a query case"
+
+-- | exp() of the log-space branch-counted probability must reproduce the linear
+-- one, and the branch count -- which is never a log-space value -- must be
+-- identical.
+branchCountLogSpace :: String -> Program -> [(TestCase, Double, Double, Double)] -> Property
+branchCountLogSpace name prog rows =
+  case compile defaultCompilerConfig{countBranches = True, logSpace = True} prog of
+    Left err -> counterexample (name ++ ": log-space compile failed: " ++ show err) False
+    Right env -> conjoin (map (check env) rows)
+  where
+    check env (tc, p, _, bc) = case runOf env tc of
+      Right (VProbDimBC lp _ lbc) -> conjoin
+        [ counterexample (name ++ "/" ++ tcName tc ++ ": exp(" ++ show lp ++ ") /= " ++ show p)
+            (abs (exp lp - p) < probTolerance)
+        , counterexample (name ++ "/" ++ tcName tc ++ ": branch count " ++ show lbc ++ " /= " ++ show bc)
+            (lbc == bc) ]
+      other -> counterexample (name ++ ": log-space run gave " ++ show other) False
+    runOf env (ProbTestCase _ s ps _ _)  = runProbC prog env ps s
+    runOf env (CumulTestCase _ s ps _ _) = runIntegC prog env ps s
+    runOf _ _ = error "not a query case"
+
+tcName :: TestCase -> String
+tcName (ProbTestCase n _ _ _ _)  = n
+tcName (CumulTestCase n _ _ _ _) = n
+tcName _ = "?"
+
 end2endTests :: IO TestTree
 end2endTests = do
   compiled <- loadEnd2EndCases (\slow -> not slow)
