@@ -10,7 +10,6 @@ module SPLL.IROptimizer (
 
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types
-import Data.Functor ( (<&>) )
 import Data.Number.Erf (erf)
 import Data.Bits (xor)
 import Data.List (maximumBy, foldl', findIndex, partition, intercalate)
@@ -18,19 +17,19 @@ import Data.Ord (comparing)
 import Data.Foldable (toList)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import Control.Monad.State (State, evalState, runState, get, put, modify')
+import Control.Monad.State (State, runState, get, put, modify')
 import Debug.Trace (trace)
 import SPLL.Lang.Lang (floatApproxEqThresh)
 
 
 optimizeEnv :: CompilerConfig -> IREnv -> IREnv
-optimizeEnv conf (IREnv funcs adts consts) = reportStats conf report (IREnv funcs' adts consts)
+optimizeEnv conf (IREnv funcs adtsDecl consts) = reportStats conf report (IREnv funcs' adtsDecl consts)
   where
     optGroup :: IRFunGroup -> State [(String, OptStats)] IRFunGroup
     (funcs', report) = runState (mapM optGroup funcs) []
     -- Bound once for the whole environment, not per function.
     det = OptEnv (deterministicGens funcs)
-                 (Set.fromList ["is" ++ cn | d <- adts, (cn, _) <- constructors d])
+                 (Set.fromList ["is" ++ cn | d <- adtsDecl, (cn, _) <- constructors d])
     optGroup fg = do
       g <- onFun (groupName fg ++ "_gen")   (genFun fg)
       pr <- onFun (groupName fg ++ "_prob")  (probFun fg)
@@ -191,10 +190,6 @@ fixedPointIteration :: (Eq a, Show a) => (a -> a) -> a -> a
 fixedPointIteration f x = if fx == x then x else fixedPointIteration f fx
   where fx = f x
 
--- | One optimizer pass, discarding the telemetry.
-optimize :: CompilerConfig -> OptEnv -> IRExpr -> IRExpr
-optimize conf det = fst . optimizeStats conf det
-
 -- | One optimizer pass, plus a count of how many nodes each rewrite rule
 -- changed. The tally is what @--optStats@ reports; a rule is credited once per
 -- node whose value it altered, so a stage that is idempotent with respect to
@@ -270,9 +265,9 @@ irMapM f x = irDescendM (irMapM f) x >>= f
 
 indexmagic :: IRExpr -> IRExpr
 -- if calling Apply ("indexOf") elem [0..], replace with elem
-indexmagic (IRApply (IRApply (IRVar "indexOf") elem) (IRConst (VList list)))
-  | isNaturals valList = elem
-  | Just vals <- constEnumList valList = indexOfChain elem vals
+indexmagic (IRApply (IRApply (IRVar "indexOf") elemExpr) (IRConst (VList list)))
+  | isNaturals valList = elemExpr
+  | Just vals <- constEnumList valList = indexOfChain elemExpr vals
   where
     valList = toList list
     isNaturals lst = and (zipWith (==) [0..] (map toNatural lst))
@@ -716,8 +711,6 @@ propagateAnyGuard x = x
 -- replacing the pairwise subexpression comparisons that, together with the
 -- historical per-node re-scans, made this pass roughly cubic in the length of
 -- world-sum spines (see task iroptimizer-superlinear-scaling).
-optimizeCommonSubexpr :: OptEnv -> IRExpr -> IRExpr
-optimizeCommonSubexpr det = fst . optimizeCommonSubexprCounted det
 
 -- | CSE plus the number of bindings it hoisted. Unlike the per-node rules this
 -- is a whole-expression pass, so "fired once" would say nothing about how much
@@ -794,10 +787,10 @@ optimizeCommonSubexprCounted det topExpr = runState (scan (annotateIR det topExp
 -- | True if any of the given (hash, size) keys occurs at least twice in the
 -- node's unconditional skeleton.
 keysRepeatedIn :: Set.Set (Int, Int) -> AnnIR -> Bool
-keysRepeatedIn keys ann = any (>= (2 :: Int)) (Map.elems counts)
+keysRepeatedIn keys annIR = any (>= (2 :: Int)) (Map.elems counts)
   where
     counts = Map.fromListWith (+)
-      [ (k, 1) | a <- unconditionalAnns ann
+      [ (k, 1) | a <- unconditionalAnns annIR
                , let k = (annHash a, annSize a)
                , k `Set.member` keys ]
 
@@ -908,12 +901,12 @@ headHash e = case e of
 -- (hash, size) keys of repeated pure candidates that were refused only for
 -- capture reasons (and may become extractable further down).
 bestCommonSubexpr :: AnnIR -> (Maybe AnnIR, Set.Set (Int, Int))
-bestCommonSubexpr ann =
+bestCommonSubexpr annIR =
   ( if null candidates then Nothing else Just (maximumBy (comparing annSize) candidates)
   , Set.fromList [ (annHash a, annSize a) | a <- blocked ] )
   where
-    skeleton = unconditionalAnns ann
-    bound = annBound ann
+    skeleton = unconditionalAnns annIR
+    bound = annBound annIR
     repeated = [ a | (a, n) <- tallyAnns skeleton
                    , n >= 2
                    , annSize a > 1

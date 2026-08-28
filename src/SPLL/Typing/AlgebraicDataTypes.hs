@@ -14,7 +14,7 @@ import SPLL.IntermediateRepresentation (IRExpr (..))
 import Data.Vector.Internal.Check (HasCallStack)
 
 implicitFunctionsRTypeProg :: Program -> [(String, RType)]
-implicitFunctionsRTypeProg Program {adts=adts} = concatMap implicitFunctionRTypes adts
+implicitFunctionsRTypeProg Program {adts=adtDecls} = concatMap implicitFunctionRTypes adtDecls
 
 implicitFunctionRTypes :: ADTDecl -> [(String, RType)]
 implicitFunctionRTypes ADTDecl{dataName=name, constructors=constrs} = concatMap (implicitFunctionRTypesConstr name) constrs

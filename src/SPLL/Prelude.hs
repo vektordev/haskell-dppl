@@ -77,7 +77,7 @@ module SPLL.Prelude
   ) where
 
 import SPLL.Lang.Lang
-import SPLL.Lang.Types (makeTypeInfo, GenericValue (..), CompilerError, Expr(..), ExprF(..))
+import SPLL.Lang.Types (makeTypeInfo, GenericValue (..), CompilerError)
 import SPLL.AutoNeural (validateEncodeGaussian)
 import SPLL.IntermediateRepresentation
 import SPLL.Analysis
@@ -261,7 +261,7 @@ right x = injF "right" [x]
 -- would be two independent draws rather than one observed value. Callers supply
 -- a fresh name (the parser uses 'demandUniqueNumber').
 observe :: String -> Expr -> Expr -> Expr
-observe binder base pred = observeBound binder base (apply pred (var binder))
+observe binder base predicate = observeBound binder base (apply predicate (var binder))
 
 -- | 'observe' with the predicate already applied to the binder -- i.e. the
 -- beta-reduced form @let binder = base in if cond then right binder else

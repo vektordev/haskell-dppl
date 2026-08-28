@@ -267,10 +267,10 @@ methodArgs lut (expr0, _) = fst (unwrapLambdas (prepBatchedBody (irMap (replaceC
 -- @VAny@), check the residue lies in the tensor fragment, then render it as a
 -- let-spine ending in a @return@.
 generateMethod :: [String] -> [(String, String)] -> String -> String -> IRFunDecl -> Either CompilerError [String]
-generateMethod ctors lut methodName groupName (expr0, doc) = do
+generateMethod ctors lut methodName groupNameStr (expr0, doc) = do
   let expr = irMap (replaceCalls lut) expr0
       (args, body) = unwrapLambdas (prepBatchedBody expr)
-  () <- batchedGuard ctors groupName methodName body
+  () <- batchedGuard ctors groupNameStr methodName body
   let l1 = "def " ++ methodName ++ "(self" ++ concatMap (", " ++) args ++ "):"
       docLines = map ("# " ++) (lines doc)
   return $ docLines ++ [l1] ++ indentOnce (batchedBlock [] body)
@@ -339,23 +339,23 @@ batchNVar = "_batchN"
 --      neural decoder's own 'EitherPlan'/'ADTPlan' output shape -- see the
 --      header comment above), etc.
 renderGen :: [String] -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> String -> IRFunDecl -> Either CompilerError [String]
-renderGen ctors lut genArities genRaw groupName (expr0, doc)
-  | hasGenCycle genRaw (groupName ++ "_gen") =
-      if producesList (lookup (groupName ++ "_gen") genRaw)
-        then Right (heterogeneousGenStub groupName)
-        else Left $ "batched mode: " ++ groupName ++ "'s generate function recurses (directly "
+renderGen ctors lut genArities genRaw groupNameStr (expr0, doc)
+  | hasGenCycle genRaw (groupNameStr ++ "_gen") =
+      if producesList (lookup (groupNameStr ++ "_gen") genRaw)
+        then Right (heterogeneousGenStub groupNameStr)
+        else Left $ "batched mode: " ++ groupNameStr ++ "'s generate function recurses (directly "
           ++ "or through a call chain); data-dependent recursion is outside the tensor fragment "
           ++ "(design pytorch-tensorizer) and both-arm-eager select semantics would not terminate."
   | otherwise =
       let expr = irMap (attachBatchCall genArities . replaceCalls lut) expr0
           (args, body) = unwrapLambdas (prepBatchedBody expr)
-      in case batchedGuard ctors groupName "generate" body of
+      in case batchedGuard ctors groupNameStr "generate" body of
            -- Drawing a *structurally heterogeneous* sample -- a value-dependent
            -- branch between two shapes -- is the same Component 4 situation as
            -- the recursive list case above: the shapes are the output, so there
            -- is nothing to bucket on. Stub it rather than refusing the whole
            -- program, whose inference over such samples buckets fine.
-           Left why | structureBranch ctors body -> Right (heterogeneousGenStub groupName)
+           Left why | structureBranch ctors body -> Right (heterogeneousGenStub groupNameStr)
                     | otherwise                 -> Left why
            Right () ->
              let l1 = "def generate(self" ++ concatMap (", " ++) (args ++ [batchNVar]) ++ "):"
@@ -377,14 +377,14 @@ renderGen ctors lut genArities genRaw groupName (expr0, doc)
 -- scoped by construction to a recursion that constructs a list, so
 -- @twiceApplication@ (the accepted cost of the hard rule) is unaffected.
 heterogeneousGenStub :: String -> [String]
-heterogeneousGenStub groupName =
-  [ "# Batched generate for " ++ groupName ++ " is not available: it draws a"
+heterogeneousGenStub groupNameStr =
+  [ "# Batched generate for " ++ groupNameStr ++ " is not available: it draws a"
   , "# structurally heterogeneous sample (its shape is decided per element), which"
   , "# is design heterogeneous-batch-inference Component 4. Inference *over* such"
   , "# samples batches fine -- the bucketing wrapper partitions by shape -- but"
   , "# drawing them cannot, because the shapes are the output."
   , "def generate(self, *args, **kwargs):"
-  , "    raise NotImplementedError(\"batched generate: " ++ groupName
+  , "    raise NotImplementedError(\"batched generate: " ++ groupNameStr
       ++ " draws a structurally heterogeneous sample \""
   , "                              \"(list length / constructor tag decided per element); that is design "
       ++ "heterogeneous-batch-inference Component 4 (per-element dynamic iteration).\")"
@@ -804,11 +804,11 @@ allVarNames e = [n | IRVar n <- [e]] ++ concatMap allVarNames (getIRSubExprs e)
 -- body (guard/isAny stripped), so the only nodes it should see are the ones
 -- 'batchedExpr' knows how to emit.
 batchedGuard :: [String] -> String -> String -> IRExpr -> Either CompilerError ()
-batchedGuard ctors groupName methodName body =
+batchedGuard ctors groupNameStr methodName body =
   case offenders [] body of
     []      -> Right ()
     (why:_) -> Left $
-      "batched mode: " ++ groupName ++ "'s " ++ methodName
+      "batched mode: " ++ groupNameStr ++ "'s " ++ methodName
       ++ " uses a construct outside the tensor fragment: " ++ why
       ++ ". The tensor fragment (design pytorch-tensorizer) admits only "
       ++ "float/int/bool leaves in fixed-shape tuples -- no lists, ADTs, "
@@ -1038,8 +1038,8 @@ structuralCond env e = case e of
 -- | Emit an expression as branch-free, elementwise Python. Every conditional is
 -- a @torch.where@; math functions and boolean operators are their tensor twins.
 batchedExpr :: SEnv -> IRExpr -> String
-batchedExpr env (IRConst v)   = batchedValOrDie v
-batchedExpr env (IRVar name)  = name
+batchedExpr _env (IRConst v)   = batchedValOrDie v
+batchedExpr _env (IRVar name)  = name
 batchedExpr env (IROp OpApprox l r) = "isclose(" ++ batchedExpr env l ++ ", " ++ batchedExpr env r ++ ")"
 batchedExpr env (IROp OpAnd l r)    = "(" ++ batchedExpr env l ++ " & " ++ batchedExpr env r ++ ")"
 batchedExpr env (IROp OpOr l r)     = "(" ++ batchedExpr env l ++ " | " ++ batchedExpr env r ++ ")"
@@ -1063,8 +1063,8 @@ batchedExpr env (IRIf c t f)     = torchWhere env c t f
 -- Both arms of an enclosing select draw independently (see the M4 header
 -- comment above 'batchNVar'), so this is correct even under eager both-arm
 -- evaluation.
-batchedExpr env (IRSample IRNormal)  = "randn(" ++ batchNVar ++ ")"
-batchedExpr env (IRSample IRUniform) = "rand(" ++ batchNVar ++ ")"
+batchedExpr _env (IRSample IRNormal)  = "randn(" ++ batchNVar ++ ")"
+batchedExpr _env (IRSample IRUniform) = "rand(" ++ batchNVar ++ ")"
 batchedExpr env (IRTCons a b)    = "T(" ++ batchedExpr env a ++ ", " ++ batchedExpr env b ++ ")"
 batchedExpr env (IRTFst e)       = "(" ++ batchedExpr env e ++ ")[0]"
 batchedExpr env (IRTSnd e)       = "(" ++ batchedExpr env e ++ ")[1]"
@@ -1130,7 +1130,7 @@ batchedExpr env (IRIsRight e)   = "isinstance(" ++ batchedExpr env e ++ ", Right
 -- A refusal/error arm has no batched value; emit a NaN poison constant that the
 -- enclosing torch.where selects away (design M3). A poison that survives into
 -- the output shows up as NaN, caught by the value differential.
-batchedExpr env (IRError _) = "poison()"
+batchedExpr _env (IRError _) = "poison()"
 batchedExpr _ e = error ("batched PyTorch codegen: unexpected node " ++ irPrintFlat e)
 
 -- | @torch.where@: the condition is coerced to a bool tensor ('asmask') so a

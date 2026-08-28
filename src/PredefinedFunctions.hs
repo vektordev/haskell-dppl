@@ -326,13 +326,13 @@ globalFenv' = [("double", FPair doubleFwd [doubleInv]),
               ("isNull", FPair isNullFwd [isNullInv])]
 
 globalFEnv :: [ADTDecl] -> FEnv
-globalFEnv adts = globalFenv' ++ concatMap fPairsFromADT adts
+globalFEnv adtsDecl = globalFenv' ++ concatMap fPairsFromADT adtsDecl
 
 -- Creates a instance of a FPair, that has identifier names given by a monadic function. m should be a supply monad
 -- Works by having each identifier renamed using this function
 instantiate :: (Monad m) => (String -> m String) -> [ADTDecl] -> String -> m FPair
-instantiate gen adts n = do
-  let (FPair fwd inv) = case lookup n (globalFEnv adts) of
+instantiate gen adtsDecl n = do
+  let (FPair fwd inv) = case lookup n (globalFEnv adtsDecl) of
                              Just f -> f
                              Nothing -> error ("InjF " ++ n ++ " not found!")
   let FDecl {inputVars=v1, outputVars=v2} = fwd
@@ -367,8 +367,8 @@ renameDecl old new FDecl {contract=sig, inputVars=inVars, outputVars=outVars, bo
 -- multi-argument InjFs. Single-field constructors are excluded; they are already
 -- handled correctly by the single-probabilistic-parameter InjF path.
 isFieldConstructor :: [ADTDecl] -> String -> Bool
-isFieldConstructor adts name =
-  case lookup name (globalFEnv adts) of
+isFieldConstructor adtsDecl name =
+  case lookup name (globalFEnv adtsDecl) of
     Just (FPair FDecl{inputVars=ins, outputVars=[_]} invs) ->
          length ins >= 2
       && length invs == length ins
@@ -376,8 +376,8 @@ isFieldConstructor adts name =
     _ -> False
 
 isHigherOrder :: [ADTDecl] -> String -> Bool
-isHigherOrder adts name =
-  case lookup name (globalFEnv adts) of
+isHigherOrder adtsDecl name =
+  case lookup name (globalFEnv adtsDecl) of
     Nothing -> False
     Just (FPair FDecl {contract=Forall _ _ c} _) -> hasArrowParameter c
   where
@@ -388,8 +388,8 @@ isHigherOrder adts name =
         _ -> False
 
 getFunctionParamIdx :: [ADTDecl] -> String -> [Int]
-getFunctionParamIdx adts name =
-  case lookup name (globalFEnv adts) of
+getFunctionParamIdx adtsDecl name =
+  case lookup name (globalFEnv adtsDecl) of
     Nothing -> []
     Just (FPair FDecl {contract=Forall _ _ c} _) -> findArrowParameter c
   where
@@ -400,25 +400,25 @@ getFunctionParamIdx adts name =
         _ -> []
 
 propagateValues :: [ADTDecl] -> String -> [[Value]] -> [Value]
-propagateValues adts name values = case results of
+propagateValues adtsDecl name values = case results of
   Left _ -> []
   Right l -> map (fmap failConversionRev) l
   where
-    results = mapM (generateDet [] [] (IREnv [] adts []) []) letInBlocks
+    results = mapM (generateDet [] [] (IREnv [] adtsDecl []) []) letInBlocks
     letInBlocks = map (foldr (\(n, p) e -> IRLetIn n (IRConst (fmap failConversionFwd p)) e) fwdExpr) namedParams
     namedParams = map (zip paramNames) valueProd
     valueProd = sequence values
-    Just (FPair FDecl {inputVars = paramNames, body = fwdExpr} _) = lookup name (globalFEnv adts)
+    Just (FPair FDecl {inputVars = paramNames, body = fwdExpr} _) = lookup name (globalFEnv adtsDecl)
 
 parameterCount :: [ADTDecl] -> String -> Int
-parameterCount adts name = do
-  case lookup name (globalFEnv adts) of
+parameterCount adtsDecl name = do
+  case lookup name (globalFEnv adtsDecl) of
     Just (FPair FDecl {inputVars=params} _) -> length params
     _ -> error $ "Unknown InjF: " ++ name
 
 hasAnyExcept :: [ADTDecl] -> String -> Bool
-hasAnyExcept adts name = 
-  case lookup name (globalFEnv adts) of
+hasAnyExcept adtsDecl name =
+  case lookup name (globalFEnv adtsDecl) of
     Just (FPair _ invs) -> any (hasAnyExceptExpr . body) invs
     _ -> error $ "Unknown InjF: " ++ name
 

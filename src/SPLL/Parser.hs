@@ -35,6 +35,7 @@ import Data.Maybe (fromMaybe)
 
 --import Text.Megaparsec.Debug (dbg)
 
+dbg :: a -> b -> b
 dbg _ y = y
 --dbg x y = traceShow x y
 
@@ -44,7 +45,6 @@ dbg _ y = y
 --TODO: This can't parse type annotations.
 -- At some point this deserves fixing.
 
-type Parser = Parsec Void String
 type MonadParser m = (MonadParsec Void String m, MonadPlus m, MonadFail m, MonadState Int m)
 
 demandUniqueNumber :: MonadState Int m => m Int
@@ -103,23 +103,23 @@ pNormal = do
   return normal
 
 pIfThenElse :: MonadParser m => [ADTDecl] -> m Expr
-pIfThenElse adts = do
+pIfThenElse adts_ = do
   _ <- keyword "if"
-  a <- pExpr adts
+  a <- pExpr adts_
   _ <- keyword "then"
-  b <- pExpr adts
+  b <- pExpr adts_
   _ <- keyword "else"
-  c <- pExpr adts
+  c <- pExpr adts_
   return (ifThenElse a b c)
 
 pLetIn :: MonadParser m => [ADTDecl] -> m Expr
-pLetIn adts = do
-  keyword "let"
-  lhs <- pExpr adts
-  symbol "="
-  definition <- pExpr adts
-  keyword "in"
-  scope <- pExpr adts
+pLetIn adts_ = do
+  _ <- keyword "let"
+  lhs <- pExpr adts_
+  _ <- symbol "="
+  definition <- pExpr adts_
+  _ <- keyword "in"
+  scope <- pExpr adts_
   destr <- letInDestructor lhs
   return $ destr definition scope
 
@@ -141,8 +141,8 @@ letInDestructor (Expr _ (Constant (VList EmptyList))) = return $ \v b -> ifThenE
 letInDestructor (Expr _ (InjF (Named "Cons") [x, xs])) = do
   x' <- letInDestructor x
   xs' <- letInDestructor xs
-  id <- demandUniqueNumber
-  let varName = "p_d" ++ show id
+  id_ <- demandUniqueNumber
+  let varName = "p_d" ++ show id_
   return $ \v body -> letIn varName v (x' (lhead (var varName)) (xs' (ltail (var varName)) body))
 letInDestructor _ = fail "LHS of a letIn sould be an identifier or a complex type of identifiers"
 
@@ -157,10 +157,10 @@ letInDestructor _ = fail "LHS of a letIn sould be an identifier or a complex typ
 -- the mass), and marginalising the binder out with @p(Just ANY)@ is the
 -- renormalisation denominator.
 pObserve :: MonadParser m => [ADTDecl] -> m Expr
-pObserve adts = do
-  keyword "observe"
-  base <- atom adts
-  predicate <- atom adts
+pObserve adts_ = do
+  _ <- keyword "observe"
+  base <- atom adts_
+  predicate <- atom adts_
   case predicate of
     -- A literal lambda is beta-reduced here rather than left as an 'Apply': the
     -- binder becomes the lambda's own parameter and the body becomes the
@@ -180,10 +180,10 @@ pObserve adts = do
 
 pError :: MonadParser m => m Expr
 pError = do
-  keyword "error"
-  char '"'
+  _ <- keyword "error"
+  _ <- char '"'
   message <- many (noneOf "\"")
-  char '"'
+  _ <- char '"'
   return (Expr makeTypeInfo (Constant (VError message)))
 
 pExpr :: MonadParser m => [ADTDecl] -> m Expr
@@ -192,18 +192,18 @@ pExpr = expr
 -- TODO: I think this parser should accept any pExpr instead of identifiers. Might get ambiguous parses though.
 
 pTheta :: MonadParser m => [ADTDecl] -> m Expr
-pTheta adts = dbg "theta" $ do
-  keyword "theta"
-  thetaExpr <- pExpr adts
-  symbol "@"
+pTheta adts_ = dbg "theta" $ do
+  _ <- keyword "theta"
+  thetaExpr <- pExpr adts_
+  _ <- symbol "@"
   ix <- pInt
   return $ theta thetaExpr ix
 
 pSubtree :: MonadParser m => [ADTDecl] -> m Expr
-pSubtree adts = dbg "subtree" $ do
-  keyword "subtree"
-  thetaExpr <- pExpr adts
-  symbol "@"
+pSubtree adts_ = dbg "subtree" $ do
+  _ <- keyword "subtree"
+  thetaExpr <- pExpr adts_
+  _ <- symbol "@"
   ix <- pInt
   return $ subtree thetaExpr ix
 
@@ -283,17 +283,17 @@ pValueAtom = choice
 
 pUnitVal :: MonadParser m => m Value
 pUnitVal = do
-  symbol "("
-  symbol ")"
+  _ <- symbol "("
+  _ <- symbol ")"
   return VUnit
 
 pTupleVal :: MonadParser m => m Value
 pTupleVal = do
-  (symbol "(")
+  _ <- (symbol "(")
   val1 <- pValue
   _ <- symbol ","
   val2 <- pValue
-  (symbol ")")
+  _ <- (symbol ")")
   return (VTuple val1 val2)
 
 pConst :: MonadParser m => m Expr
@@ -343,18 +343,18 @@ pEither = do
 
 pAny :: MonadParser m => m Value
 pAny = do
-  keyword "ANY"
+  _ <- keyword "ANY"
   return VAny
 
 pThetaTree :: MonadParser m => m ThetaTree
 pThetaTree = do
-  keyword "ThetaTree"
-  symbol "["
+  _ <- keyword "ThetaTree"
+  _ <- symbol "["
   thetas <- (L.signed sc (lexeme L.float)) `sepBy` symbol ","
-  symbol "]"
-  symbol "["
+  _ <- symbol "]"
+  _ <- symbol "["
   subtrees <- pThetaTree `sepBy` symbol ","
-  symbol "]"
+  _ <- symbol "]"
   return $ ThetaTree thetas subtrees
 
 parseFromList :: MonadParser m => [(String, b)] -> m b
@@ -374,17 +374,17 @@ pType = dbg "type" $ choice [pEitherType, try pCompoundType, pSimpleType]
 
 pEitherType :: MonadParser m => m RType
 pEitherType = dbg "EitherType" $ do
-  keyword "Either"
+  _ <- keyword "Either"
   lType <- SPLL.Parser.pType
-  rType <- SPLL.Parser.pType
-  return $ TEither lType rType
+  rType_ <- SPLL.Parser.pType
+  return $ TEither lType rType_
 
 pCompoundType :: MonadParser m => m RType
 pCompoundType = dbg "CompoundType" $ parens $ do
-  left <- SPLL.Parser.pType
+  left_ <- SPLL.Parser.pType
   combinator <- pTypeCombinator
-  right <- SPLL.Parser.pType
-  return $ combinator left right
+  right_ <- SPLL.Parser.pType
+  return $ combinator left_ right_
     where
       pTypeCombinator = parseFromList combinators
       combinators = [("->", TArrow), ("," , Tuple)]
@@ -395,22 +395,22 @@ pSimpleType = dbg "SimpleType" $
 
 pUnitType :: MonadParser m => m RType
 pUnitType = do
-  symbol "("
-  symbol ")"
+  _ <- symbol "("
+  _ <- symbol ")"
   return TUnit
 
 pList :: MonadParser m => m [Value]
 pList = do
-  (symbol "[")
+  _ <- (symbol "[")
   values <- pCSV
-  (symbol "]")
+  _ <- (symbol "]")
   return values
 
 pListExpr :: MonadParser m => [ADTDecl] -> m Expr
-pListExpr adts = do
-  (symbol "[")
-  exprs <- expr adts `sepBy` (symbol ",")
-  (symbol "]")
+pListExpr adts_ = do
+  _ <- (symbol "[")
+  exprs <- expr adts_ `sepBy` (symbol ",")
+  _ <- (symbol "]")
   return (foldr cons nul exprs)
 
 valueParser :: MonadParser m => m Value
@@ -420,8 +420,8 @@ pCSV :: MonadParser m => m [Value]
 pCSV = valueParser `sepBy` (symbol ",")
 
 pDefinition :: MonadParser m => [ADTDecl] -> m (Either FnDecl NeuralDecl)
-pDefinition adts = do
-  x <- choice [fmap Right pNeural, fmap Left (pFunction adts)]
+pDefinition adts_ = do
+  x <- choice [fmap Right pNeural, fmap Left (pFunction adts_)]
   return x
 
 --TODO: Add validation via AutoNeural.
@@ -455,7 +455,7 @@ pMultiTypeDef :: MonadParser m => m MultiValue
 pMultiTypeDef = do
   depth <- pInt
   name <- pIdentifier
-  symbol "."
+  _ <- symbol "."
   inner <- pNeuralMultiValue
   return (resolveMultiValueTypeDecl depth inner (name, inner))
 
@@ -464,51 +464,51 @@ pMultiTypeRef = pIdentifier <&> MultiTypeRef
 
 pMultiDiscretes :: MonadParser m => m MultiValue
 pMultiDiscretes = dbg "multiDisc" $ do
-  symbol "["
+  _ <- symbol "["
   csv <- pCSV
-  symbol "]"
+  _ <- symbol "]"
   return $ MultiDiscretes csv
 
 pMultiEither :: MonadParser m => m MultiValue
 pMultiEither = dbg "multiEith" $ parens $ do
   l <- pNeuralMultiValue
-  symbol "|"
+  _ <- symbol "|"
   r <- pNeuralMultiValue
   return $ MultiEither l r
 
 pMultiTuple :: MonadParser m => m MultiValue
 pMultiTuple = dbg "multiTuple" $ parens $ do
   l <- pNeuralMultiValue
-  symbol ","
+  _ <- symbol ","
   r <- pNeuralMultiValue
   return $ MultiTuple l r
 
 pMultiADT :: MonadParser m => m MultiValue
 pMultiADT = dbg "multiADT" $ do
-  symbol "{"
+  _ <- symbol "{"
   constrs <- sepBy (
     (do
       cName <- pIdentifier
       params <- many pNeuralMultiValue
       return (cName, params))
     ) (symbol "|")
-  symbol "}"
+  _ <- symbol "}"
   return $ MultiADT constrs
 
 pFunction :: MonadParser m => [ADTDecl] -> m FnDecl
-pFunction adts = dbg "function" $ do
+pFunction adts_ = dbg "function" $ do
   name <- pIdentifier
   args <- many pIdentifier
   _ <- symbol "="
-  e <- pExpr adts
+  e <- pExpr adts_
   let lambdas = foldr (#->#) e args
   return (name, lambdas)
 
 pADT :: MonadParser m => m ADTDecl
 pADT = dbg "ADT" $ do
-  keyword "data"
+  _ <- keyword "data"
   name <- pIdentifier
-  symbol "="
+  _ <- symbol "="
   constrs <- pADTConstructor `sepBy` symbol "|"
   -- Optional trailing `depth N`: the default unroll depth used when a neural net
   -- auto-derives an enumeration of this (recursive) type. See ADTDecl.adtDepth.
@@ -524,7 +524,7 @@ pADTConstructor = dbg "ADT Constr" $ do
 pADTField :: MonadParser m => m (String, RType)
 pADTField = do
     fieldName <- pIdentifier
-    symbol "::"
+    _ <- symbol "::"
     fieldType <- choice [SPLL.Parser.pType <&> Left, pIdentifier <&> Right]
     let fieldRT = case fieldType of
                     Left rt -> rt
@@ -533,11 +533,11 @@ pADTField = do
 
 pProg :: MonadParser m => m Program
 pProg = do
-  adts <- dbg "trying ADTs" (many (try (scTop *> pADT)))
-  defs <- dbg "trying definition" (many (try (scTop *> pDefinition adts)))
+  adtsDecls <- dbg "trying ADTs" (many (try (scTop *> pADT)))
+  defs <- dbg "trying definition" (many (try (scTop *> pDefinition adtsDecls)))
   scTop
   _ <- eof
-  return (aggregateDefinitions adts defs)
+  return (aggregateDefinitions adtsDecls defs)
 
 -- | "neural encode :: T of M" registers a standalone PartitionPlan annotation for the
 -- RType T (the registry; see SPLL.Lang.Types.encodeDecls), rather than declaring a
@@ -545,18 +545,18 @@ pProg = do
 -- NeuralDecl's "of" clause is sugar that also registers into this registry, keyed by
 -- the declaration's target/source type (see 'neuralValueType').
 aggregateDefinitions :: [ADTDecl] -> [Either FnDecl NeuralDecl] -> Program
-aggregateDefinitions adts (Left fn : tail) = Program (fn:fns) neurals adtz enc
+aggregateDefinitions adts_ (Left fn : tail_) = Program (fn:fns) neurals_ adtz enc
   where
-    Program fns neurals adtz enc = aggregateDefinitions adts tail
-aggregateDefinitions adts (Right nr@(name, ty, mtag) : tail)
-  | name == "encode" = Program fns neurals adtz ((ty, fromMaybe MultiAuto mtag) : enc)
-  | otherwise = Program fns (nr:neurals) adtz (sugar ++ enc)
+    Program fns neurals_ adtz enc = aggregateDefinitions adts_ tail_
+aggregateDefinitions adts_ (Right nr@(name, ty, mtag) : tail_)
+  | name == "encode" = Program fns neurals_ adtz ((ty, fromMaybe MultiAuto mtag) : enc)
+  | otherwise = Program fns (nr:neurals_) adtz (sugar ++ enc)
   where
-    Program fns neurals adtz enc = aggregateDefinitions adts tail
+    Program fns neurals_ adtz enc = aggregateDefinitions adts_ tail_
     sugar = case (mtag, neuralValueType ty) of
       (Just mv, Just target) -> [(target, mv)]
       _ -> []
-aggregateDefinitions adts [] = Program [] [] adts []
+aggregateDefinitions adts_ [] = Program [] [] adts_ []
 
 tryParseExpr :: FilePath -> String -> Either (ParseErrorBundle String Void) Expr
 tryParseExpr filename src = do
@@ -567,7 +567,7 @@ tryParseProgram :: FilePath -> String -> Either (ParseErrorBundle String Void) P
 tryParseProgram filename src = do
   (prog, _) <- runParser (runStateT pProg 0) filename src
   case normalize prog of
-    Right prog -> Right prog
+    Right prog_ -> Right prog_
     Left err -> Left $ ParseErrorBundle ((FancyError 0 (Set.singleton (ErrorFail err))) :| []) emptyPosState
 
 emptyPosState :: PosState String
@@ -587,18 +587,18 @@ pNull = do
 -- right-nested if/accessor chain) cost O(2^N) instead of O(N) -- 12 levels of
 -- nesting alone measured at 160+ seconds to parse (testCases/planEnumInlineWide).
 pTuple :: MonadParser m => [ADTDecl] -> m Expr
-pTuple adts = parens $ do
-  x <- expr adts
-  rest <- optional (symbol "," *> expr adts)
+pTuple adts_ = parens $ do
+  x <- expr adts_
+  rest <- optional (symbol "," *> expr adts_)
   return $ maybe x (tuple x) rest
 
 
 -- | Parse atomic expressions (no recursion)
 atom :: MonadParser m => [ADTDecl] -> m Expr
-atom adts = choice [
+atom adts_ = choice [
     pNull,
-    try (pListExpr adts),
-    try (pTuple adts),  -- "(expr)" and "(expr, expr)" -- see pTuple
+    try (pListExpr adts_),
+    try (pTuple adts_),  -- "(expr)" and "(expr, expr)" -- see pTuple
     pUniform,     -- Built-in distributions
     pNormal,
     pConst,       -- Constants (numbers)
@@ -607,45 +607,45 @@ atom adts = choice [
 
 -- | Parse expressions that start with keywords
 keywordExpr :: MonadParser m => [ADTDecl] -> m Expr
-keywordExpr adts = dbg "keywordExpr" $ choice [
-    pIfThenElse adts,
-    pLetIn adts,
-    pLambda adts,
-    pTheta adts,
-    pSubtree adts,
-    pObserve adts,
+keywordExpr adts_ = dbg "keywordExpr" $ choice [
+    pIfThenElse adts_,
+    pLetIn adts_,
+    pLambda adts_,
+    pTheta adts_,
+    pSubtree adts_,
+    pObserve adts_,
     pError
   ] <* sc
 
 -- | Lambda expressions
 pLambda :: MonadParser m => [ADTDecl] -> m Expr
-pLambda adts = do
+pLambda adts_ = do
     _ <- symbol "\\"
     params <- some pIdentifier
     _ <- symbol "->"
-    body <- expr adts
+    body <- expr adts_
     return $ foldr (#->#) body params
 
 -- | Parse function application
 -- This handles both normal application and built-in functions like multF
 application :: MonadParser m => [ADTDecl] -> m Expr
-application adts = dbg "application" $ do
-    func <- try (atom adts)
+application adts_ = dbg "application" $ do
+    func <- try (atom adts_)
     -- atom already covers "(expr)"/"(expr, expr)" via pTuple; a separate
     -- parens(expr) fallback here would re-parse the same paren contents a
     -- second time on every atom-alternative failure (see pTuple's comment).
-    args <- try $ many (try (atom adts))
+    args <- try $ many (try (atom adts_))
     case func of
         Expr _ (Var name) -> case lookup name binaryFs of
             Just constructor -> return (construct2 constructor args)
             Nothing -> case lookup name unaryFs of
                 Just constructor -> return (construct1 constructor args)
-                Nothing -> case lookup name (globalFEnv adts) of
-                  Just _ -> 
-                    if length args == (parameterCount adts name) then
-                      return (constructN (parameterCount adts name) (injF name) args)
-                    else if length args < (parameterCount adts name) then
-                      constructNPartial (parameterCount adts name) (injF name) args
+                Nothing -> case lookup name (globalFEnv adts_) of
+                  Just _ ->
+                    if length args == (parameterCount adts_ name) then
+                      return (constructN (parameterCount adts_ name) (injF name) args)
+                    else if length args < (parameterCount adts_ name) then
+                      constructNPartial (parameterCount adts_ name) (injF name) args
                     else
                       fail $ "Function " ++ name ++ " expects " ++ show (parameterCount [] name) ++ " parameters, but got " ++ show (length args)
                   Nothing -> return $ foldl apply func args
@@ -654,12 +654,12 @@ application adts = dbg "application" $ do
 
 -- | Main expression parser using makeExprParser
 expr :: MonadParser m => [ADTDecl] -> m Expr
-expr adts = dbg "expr" $ makeExprParser term opTable
+expr adts_ = dbg "expr" $ makeExprParser term opTable
   where
     term = choice [
-        try (application adts),
-        try (keywordExpr adts),
-        atom adts
+        try (application adts_),
+        try (keywordExpr adts_),
+        atom adts_
       ]
 
 -- | Top level entry point
@@ -739,17 +739,17 @@ buildNeuralMap decls = Map.fromList
   [(name, \[arg] -> return $ Right $ readNN name arg) | (name, _, _) <- decls]
 
 buildInvMap :: MonadState Int m => [ADTDecl] -> BuilderMap m
-buildInvMap adts = Map.fromList
+buildInvMap adts_ = Map.fromList
   [(name, \args -> case args of
-    a | length a /= parameterCount adts name -> do
-      let missingParamCnt = parameterCount adts name - length a
+    a | length a /= parameterCount adts_ name -> do
+      let missingParamCnt = parameterCount adts_ name - length a
       substituteParamIDs <- replicateM missingParamCnt demandUniqueNumber
       let substituteParamNames = map (("p_m" ++) . show) substituteParamIDs
       let extendedArgs = args ++ map var substituteParamNames
       return $ Right $ foldl (flip (#->#)) (injF name extendedArgs) substituteParamNames
     _ -> return $ Right $ injF name args)
    | name <- fNames]
-  where fNames = map fst (globalFEnv adts)
+  where fNames = map fst (globalFEnv adts_)
 
 globalFunctions :: MonadState Int m =>  Program -> BuilderMap m
 globalFunctions prog = Map.fromList ([(name, \[] -> return $ Right $ var name) | (name, _) <- functions prog])
@@ -765,8 +765,8 @@ buildInjFMap prog = Map.fromList
 
 -- Main expression normalization function
 normalizeExpr :: MonadState Int m => (BuilderMap m, BuilderMap m, Set.Set String) -> Expr -> m (Either String Expr)
-normalizeExpr env@(parametricBuilders, atomicBuilders, benign) expr =
-  case expr of
+normalizeExpr env@(parametricBuilders, atomicBuilders, benign) expr_ =
+  case expr_ of
     -- Handle scopes first, adding bound variables before processing sub-expressions
     Expr ti (Lambda name body) -> do
       let body' = normalizeExpr (parametricBuilders, atomicBuilders, Set.insert name benign) body
@@ -774,8 +774,8 @@ normalizeExpr env@(parametricBuilders, atomicBuilders, benign) expr =
 
     -- For all other expressions, normalize sub-expressions first then check for Apply pattern
     _ -> do
-      subExprs <- fmap sequence (mapM (normalizeExpr env) (getSubExprs expr))
-      let mExpr = fmap (setSubExprs expr) subExprs
+      subExprs <- fmap sequence (mapM (normalizeExpr env) (getSubExprs expr_))
+      let mExpr = fmap (setSubExprs expr_) subExprs
       case mExpr of
         Left s -> return $ Left s
         Right expr' ->
@@ -783,7 +783,7 @@ normalizeExpr env@(parametricBuilders, atomicBuilders, benign) expr =
             -- Start of an Apply chain
             Expr _ (Apply (Expr _ (Apply _ _)) _) ->
               -- Need to collect all args in the chain and find base function.
-              -- Collect from expr' (not expr) so the args keep their normalization.
+              -- Collect from expr' (not expr_) so the args keep their normalization.
               let (base, args) = collectApplyChain expr'
               in case base of
                 Expr _ (Var fname) | Just builder <- Map.lookup fname parametricBuilders -> do
@@ -809,8 +809,8 @@ normalizeExpr env@(parametricBuilders, atomicBuilders, benign) expr =
 
 -- Returns (base expression, arguments in application order)
 collectApplyChain :: Expr -> (Expr, [Expr])
-collectApplyChain (Expr _ (Apply left arg)) =
-  let (base, args) = collectApplyChain left
+collectApplyChain (Expr _ (Apply left_ arg)) =
+  let (base, args) = collectApplyChain left_
   in (base, args ++ [arg])  -- maintain order of application
 -- Quick and dirty fix for multi parameter InjFs. The normalizatzion first creates a 1 parameter InjF and then stops with the normalization
 -- We bypass this by tricking the normalization  that the InjF is in reality an application on a variable
@@ -820,7 +820,7 @@ collectApplyChain e = (e, [])
 -- Helper to map over all expressions in a program
 mapExprInProgram :: MonadState Int m => (Expr -> m (Either String Expr)) -> Program -> m (Either String Program)
 mapExprInProgram f prog = do
-  newFuncs <- mapM (\(name, expr) -> f expr >>= \e -> return (name, e)) (functions prog)
+  newFuncs <- mapM (\(name, expr_) -> f expr_ >>= \e -> return (name, e)) (functions prog)
   let newFuncs' = mapM (\(s, e) -> (e <&> \ex -> (s, ex))) newFuncs
   case newFuncs' of
     Right fs -> return $ Right $ prog { functions = fs }

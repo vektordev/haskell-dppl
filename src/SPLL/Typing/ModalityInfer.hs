@@ -239,14 +239,14 @@ toMod (IWit m)    = toMod m   -- the serialisable form carries only the standalo
 -- an un-@of@'d neural ADT output is a finite mixture whose density exists,
 -- even though nobody intends to materialize its support.
 tagFin :: [ADTDecl] -> TypeInfo -> GroundMod -> GroundMod
-tagFin adts ti g
+tagFin adtsDecl ti g
   | finFromTags (tags ti) == Finite = g { gFin = Finite }
-  | finiteRType adts (rType ti)     = g { gFin = Finite }
+  | finiteRType adtsDecl (rType ti)     = g { gFin = Finite }
   | otherwise                       = g
 
 tagFinMod :: [ADTDecl] -> TypeInfo -> IMod -> IMod
-tagFinMod adts ti (IG g)   = IG (tagFin adts ti g)
-tagFinMod adts ti (IWit m) = IWit (tagFinMod adts ti m)
+tagFinMod adtsDecl ti (IG g)   = IG (tagFin adtsDecl ti g)
+tagFinMod adtsDecl ti (IWit m) = IWit (tagFinMod adtsDecl ti m)
 tagFinMod _    _  m        = m
 
 -- | Structural finiteness of a type: does it have finitely many inhabitants?
@@ -254,14 +254,14 @@ tagFinMod _    _  m        = m
 -- plans are finite, but the type itself is not; milestone 2 revisits this
 -- alongside recursive predicates).
 finiteRType :: [ADTDecl] -> RType -> Bool
-finiteRType adts = go []
+finiteRType adtsDecl = go []
   where
     go _ TBool            = True
     go seen (Tuple a b)   = go seen a && go seen b
     go seen (TEither a b) = go seen a && go seen b
     go seen (TADT name)
       | name `elem` seen = False
-      | otherwise = case find ((== name) . dataName) adts of
+      | otherwise = case find ((== name) . dataName) adtsDecl of
           Just decl -> all (all (go (name : seen) . snd) . snd) (constructors decl)
           Nothing   -> False
     go _ _ = False
@@ -353,7 +353,7 @@ inferE ctx env expr = case expr of
 
   Expr ti (InjF name@(Named fname) args) ->
     let rs   = map (inferE ctx env) args
-        mods = [ m  | (m,_,_) <- rs ]
+        mods = [ md  | (md,_,_) <- rs ]
         es'  = [ e  | (_,e,_) <- rs ]
         acc  = concat [ a | (_,_,a) <- rs ]
         m    = gateScalarFamily (rType ti) (tagFinMod (icADTs ctx) ti (injFMod (icADTs ctx) fname mods))
@@ -462,11 +462,11 @@ compareGround a b
 -- fresh latent beyond one in the combination floors the result — that is what
 -- keeps the two-residual guard at 'Bottom'.
 injFMod :: [ADTDecl] -> String -> [IMod] -> IMod
-injFMod adts name mods =
+injFMod adtsDecl name mods =
   case tryNormalClosure name (map projectI mods) of
     Just pt -> witWrap (IG (fromClosurePType pt))
     Nothing
-      | isFieldConstructor adts name, (m0:rest) <- mods -> foldl IProd m0 rest
+      | isFieldConstructor adtsDecl name, (m0:rest) <- mods -> foldl IProd m0 rest
       | name == "fst", [m] <- mods -> projFst m
       | name == "snd", [m] <- mods -> projSnd m
       | otherwise -> floorCombine
@@ -574,7 +574,7 @@ tryNormalClosure _      _                           = Nothing
 -- changes the fixpoint. (Pure non-terminating recursion would sit at the top —
 -- the totality axis, design §10, is the principled handle and is deferred.)
 summaries :: [ADTDecl] -> FCData -> [FnDecl] -> Env
-summaries adts fcData decls = foldl solve Map.empty components
+summaries adtsDecl fcData decls = foldl solve Map.empty components
   where
     declNames  = Set.fromList (map fst decls)
     components = stronglyConnComp
@@ -597,7 +597,7 @@ summaries adts fcData decls = foldl solve Map.empty components
 
     inferDecl env b = fst3 (inferE (declCtx b) env b)
     fst3 (x,_,_) = x
-    declCtx b = ICtx adts fcData (cnOf b)
+    declCtx b = ICtx adtsDecl fcData (cnOf b)
 
 -- ---------------------------------------------------------------------------
 -- Public entry points

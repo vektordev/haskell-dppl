@@ -245,12 +245,12 @@ parseProgram path = do
     Right prog -> return prog
 
 codeGenToLang :: Language -> Bool -> CompilerConfig -> Program -> Either CompilerError String
-codeGenToLang lang trunc conf prog = do
+codeGenToLang lang truncOut conf prog = do
   compiled <- compile conf prog
   case lang of
     Python
-      | batched conf -> intercalate "\n" <$> generateFunctionsBatched (not trunc) compiled
-      | otherwise    -> Right $ intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions (not trunc) compiled)
+      | batched conf -> intercalate "\n" <$> generateFunctionsBatched (not truncOut) compiled
+      | otherwise    -> Right $ intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions (not truncOut) compiled)
     Julia -> Right $ intercalate "\n" (SPLL.CodeGenJulia.generateFunctions compiled)
 
 writeOutputFile :: String -> String -> IO()

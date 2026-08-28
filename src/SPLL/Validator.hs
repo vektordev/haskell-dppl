@@ -22,7 +22,7 @@ validateProgram p@Program{functions=fn, neurals=nrls, encodeDecls=enc} = sequenc
     exprValidations = concatMap (\(_, expr) -> validateAllSubexpressions p expr expr) fn
     -- All Results from all subexpressions
     validateAllSubexpressions :: Program -> Expr -> Expr -> [Either String ()]
-    validateAllSubexpressions p topLevel expr = validateExpression p topLevel expr : concatMap (validateAllSubexpressions p topLevel) (getSubExprs expr)
+    validateAllSubexpressions prog topLevel expr = validateExpression prog topLevel expr : concatMap (validateAllSubexpressions prog topLevel) (getSubExprs expr)
 
 -- | The PartitionPlan annotation registry (explicit "neural encode :: T of M"
 -- declarations, plus sugar from every NeuralDecl's "of" clause) may register a given
@@ -62,12 +62,12 @@ validateMainExists fn
   | otherwise = Left "Compiler Error: Program has no 'main' function defined."
 
 validateExpression :: Program -> Expr -> Expr -> Either String ()
-validateExpression Program {adts=adts} _ (Expr _ (InjF (Named name) _)) | isNothing (lookup name (globalFEnv adts)) = Left ("Cannot find InjF: " ++ name)
-validateExpression Program {adts=adts} _ (Expr _ (InjF (Named name) params)) | parameterCount adts name /= length params = Left("Wrong number of arguments for InjF " ++ name ++ "expected: " ++ show (parameterCount adts name) ++ " got: " ++ show (length params))
+validateExpression Program {adts=adtsDecl} _ (Expr _ (InjF (Named name) _)) | isNothing (lookup name (globalFEnv adtsDecl)) = Left ("Cannot find InjF: " ++ name)
+validateExpression Program {adts=adtsDecl} _ (Expr _ (InjF (Named name) params)) | parameterCount adtsDecl name /= length params = Left("Wrong number of arguments for InjF " ++ name ++ "expected: " ++ show (parameterCount adtsDecl name) ++ " got: " ++ show (length params))
 validateExpression _ _ (Expr _ (Var name)) | name `elem` distributionPrimitiveNames = Right ()
 validateExpression p topLevel (Expr _ (Var name)) | usedBeforeDeclaration name topLevel && notElem name (getFunctionNames p) = Left ("Identifier is used without declaration: " ++ name)
 validateExpression _ _ (Expr _ (Lambda name body)) | declarationsCount name body > 0 = Left ("Duplicate declaration of identifier (Shawdowing is not allowed): " ++ name)
-validateExpression Program {adts=adts} _ (Expr _ (Lambda name _)) | isJust (lookup name (globalFEnv adts)) = Left ("Identifier name is already used by an InjF: " ++ name)
+validateExpression Program {adts=adtsDecl} _ (Expr _ (Lambda name _)) | isJust (lookup name (globalFEnv adtsDecl)) = Left ("Identifier name is already used by an InjF: " ++ name)
 validateExpression p _ (Expr _ (Lambda name _)) | name `elem` getFunctionNames p = Left ("Identifier is already a function name: " ++ name)
 validateExpression _ _ (Expr _ (Apply l v)) | not (null (declaredVariables l `intersect` declaredVariables v)) = Left ("Identifiers " ++ show (declaredVariables l `intersect` declaredVariables v) ++ " are possibly declared multiple times")
 validateExpression _ _ (Expr _ (Constant VAny)) = Left "ANY may not be used in program declaration"

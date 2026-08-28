@@ -448,10 +448,10 @@ anySafe sr sample wrap (PResult p d bc imp) = PResult
 -- exactly as 'enumSumNode' would have. Either way this module needs no
 -- knowledge of CompilerMetadata -- @countBranches@ arrives as a plain Bool.
 enumSumP :: Semiring -> Bool -> (IRExpr -> IRExpr) -> Varname -> MultiValue -> IRExpr -> CompilerMonad PResult
-enumSumP sr countBranches wrap v vals packed
+enumSumP sr withBranchCount wrap v vals packed
   -- Only the probability is read, so the packed body is projected directly --
   -- one copy, no binding to clean up afterwards.
-  | not countBranches =
+  | not withBranchCount =
       opaqueMass sr (wrap (enumSumNode sr v vals (unP (rProb (unpackResult packed))))) const0
   | otherwise = do
       body <- mkVariable "enum_body"

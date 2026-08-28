@@ -161,20 +161,20 @@ generateFunctions genBoil env0 =
     -- Scalar backend: lower any IRSelect (from batched mode's select pass) back
     -- to IRIf up front, so the rest of codegen never sees it (pytorch-tensorizer
     -- M1, strategy B).
-    let env@(IREnv funcs adts consts) = renameADTIdentifiers pyMangle (desugarSelectEnv env0)
+    let env@(IREnv funcs adtsEnv consts) = renameADTIdentifiers pyMangle (desugarSelectEnv env0)
         lut = envToLUT env ++ stdLib
         callableNames = [ fromMaybe (n ++ "_gen") (lookup (n ++ "_gen") lut)
                         | IRFunGroup{groupName=n, genFun=Just (e, _)} <- funcs
                         , null (fst (unwrapLambdas e)) ]
                         -- nullary ADT constructors must be emitted as instantiations,
                         -- otherwise the bare class never compares equal to enumerated instances
-                        ++ [ pyMangle cName | decl <- adts, (cName, fields) <- constructors decl, null fields ]
+                        ++ [ pyMangle cName | decl <- adtsEnv, (cName, fields) <- constructors decl, null fields ]
     in if genBoil then
       ["from pythonLib import *",
       "import functools",
       "import math",
       "from torch.nn import Module", ""] ++
-      generateADTClasses adts ++
+      generateADTClasses adtsEnv ++
       map (\(name, val) -> name ++ " = " ++ pyVal val) consts ++
       (if null consts then [] else [""]) ++
       concatMap (generateClass lut callableNames) funcs ++
@@ -214,9 +214,9 @@ generateADTClass (name, fields) =
     ("def __init__(self, " ++ intercalate ", " fieldNames ++ "):") :
     case fieldNames of
       [] -> indentOnce ["pass"]
-      fieldNames -> indentOnce (
-        map (\f -> "self." ++f ++ " = " ++ f) fieldNames ++
-        ["self._fields = [" ++ intercalate ", " fieldNames ++ "]"])
+      fieldNamesList -> indentOnce (
+        map (\f -> "self." ++f ++ " = " ++ f) fieldNamesList ++
+        ["self._fields = [" ++ intercalate ", " fieldNamesList ++ "]"])
   ) ++ [""] ++
   indentOnce (
     "def __eq__(self, other):":
@@ -242,8 +242,8 @@ generateADTClass (name, fields) =
 
 generateClass :: [(String, String)] -> [String] -> IRFunGroup -> [String]
 generateClass lut callableNames (IRFunGroup name gen prob integ encode normal doc _) = let
-  funcStringFromMaybe name func = case func of
-    Just a -> generateFunction True (name, replaceCallsDecl a)
+  funcStringFromMaybe fname func = case func of
+    Just a -> generateFunction True (fname, replaceCallsDecl a)
     Nothing -> return []
   ((i, p, g, e, n), (globalVars, _)) = evalSupply $ runStateT (do
     i' <- funcStringFromMaybe "integrate" integ
@@ -254,9 +254,9 @@ generateClass lut callableNames (IRFunGroup name gen prob integ encode normal do
     return (i', p', g', e', n')) ([], callableNames)
   commentLines = map ("# " ++) (lines doc)
   initLine = "class " ++ onHead toUpper name ++ "(Module):"
-  globalVarDecls = map (\(mv, name)-> name ++ " = " ++ pyMultiVal mv) globalVars
+  globalVarDecls = map (\(mv, varName)-> varName ++ " = " ++ pyMultiVal mv) globalVars
   funcs = i ++ [""] ++ p ++ [""] ++ g ++ [""] ++ e ++ [""] ++ n
-  replaceCallsDecl (e, d) = (irMap (replaceCalls lut) e, d)
+  replaceCallsDecl (expr, d) = (irMap (replaceCalls lut) expr, d)
   in commentLines ++ initLine:indentOnce globalVarDecls ++ indentOnce funcs
 
 generateFunction :: Bool -> (String, IRFunDecl) -> GlobalVariableSupply [String]

@@ -87,10 +87,10 @@ envToIR conf fcDat p
 -- The FCData certificate is built once in 'Prelude.compile' and threaded in,
 -- rather than rebuilt here (modality-split-forwardchaining).
 envToIRUnoptimized :: CompilerConfig -> FCData -> Program -> IREnv
-envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb, noGenerate=noGen} fcDat p@Program{adts=adts} = IREnv (
-  map (makeAutoNeural adts conf (encodeDecls p)) (neurals p) ++
+envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb, noGenerate=noGen} fcDat p@Program{adts=progADTs} = IREnv (
+  map (makeAutoNeural progADTs conf (encodeDecls p)) (neurals p) ++
   concatMap (\(name, binding) ->
-    let typeEnv = getGlobalTypeEnv p
+    let progTypeEnv = getGlobalTypeEnv p
         bindingParamNames = extractParamNames binding
         pt = pType $ getTypeInfo binding
         -- Every logit-representable top-level function gets its own encodeFun, keyed to its
@@ -100,7 +100,7 @@ envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb
         -- prob/normal functions were generated; non-representable functions keep
         -- encodeFun = Nothing (purely additive, no new error surface).
         encodeF =
-              makeTopLevelEncodeFun adts conf (encodeDecls p)
+              makeTopLevelEncodeFun progADTs conf (encodeDecls p)
                 name
                 (rType (getTypeInfo (stripLambdas binding)))
                 bindingParamNames
@@ -144,35 +144,35 @@ envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb
         -- a separate axis this deliberately does not touch.
         sampleDom = listToMaybe $ filter multiValueIsFinite $
           [mv | DiscreteValues mv <- tags (getTypeInfo (stripLambdas binding))]
-          ++ [mv | Right mv <- [autoDeriveMultiValue adts returnRType]]
+          ++ [mv | Right mv <- [autoDeriveMultiValue progADTs returnRType]]
         baseFunGroup = IRFunGroup {groupName=name, encodeFun=encodeF, sampleDomain=sampleDom,
          integFun =
           if not noInteg && (pt == Deterministic || pt == Integrate || pt == PNormal || pt == PLogNormal) then
-            Just (appendDoc guardNote (toIntegDecl name (IRLambda "sample" (guardQuery "cdf" (runCompile (meta typeEnv) (toIRInferenceSave (meta typeEnv) True binding (IRVar "sample")))))))
+            Just (appendDoc guardNote (toIntegDecl name (IRLambda "sample" (guardQuery "cdf" (runCompile (meta progTypeEnv) (toIRInferenceSave (meta progTypeEnv) True binding (IRVar "sample")))))))
           else Nothing,
           probFun =
             if not noProb && (pt == Deterministic || pt == Integrate || pt == PNormal || pt == PLogNormal) then
-              let metaBase = meta typeEnv
-                  body m = runCompile m (toIRInferenceSave m False binding (IRVar "sample"))
+              let metaBase = meta progTypeEnv
+                  compileBody m = runCompile m (toIRInferenceSave m False binding (IRVar "sample"))
               in Just (appendDoc guardNote $ toProbDecl name $ case topKThreshold conf of
-                   Just _ -> IRLambda "sample" $ IRLambda "acc_prob" $ guardQuery "p" $ body (metaBase { accProb = IRVar "acc_prob" })
-                   Nothing -> IRLambda "sample" $ guardQuery "p" $ body metaBase)
+                   Just _ -> IRLambda "sample" $ IRLambda "acc_prob" $ guardQuery "p" $ compileBody (metaBase { accProb = IRVar "acc_prob" })
+                   Nothing -> IRLambda "sample" $ guardQuery "p" $ compileBody metaBase)
             else Nothing,
           genFun =
             if not noGen then
-              Just (toGenDecl name (fst $ evalSupply $ runWriterT $ toIRGenerate (meta typeEnv) binding))
+              Just (toGenDecl name (fst $ evalSupply $ runWriterT $ toIRGenerate (meta progTypeEnv) binding))
             else
               Nothing,
           normalFun =
             if (pt == PNormal || pt == PLogNormal) && isNormalExtractable binding then
-              Just (toNormalDecl name (compileNormalExpr (meta typeEnv) binding))
+              Just (toNormalDecl name (compileNormalExpr (meta progTypeEnv) binding))
             else
               Nothing,
           groupDoc="Function group " ++ name}
         -- Generate per-component normal functions for tuple outputs
-        tupleNormalFuns = generateTupleComponentNormalFunctions (meta typeEnv) name binding
+        tupleNormalFuns = generateTupleComponentNormalFunctions (meta progTypeEnv) name binding
     in [baseFunGroup] ++ tupleNormalFuns) (functions p))
-  adts
+  progADTs
   -- The cutoff must live in the same space as the accumulated probability it's
   -- compared against: under logSpace that's log(thresh), not the raw linear
   -- threshold. The comparison operators themselves (OpLessThan/OpGreaterThan)
@@ -197,12 +197,12 @@ envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb
     -- probability mass under logSpace, since every branch's accumulated weight
     -- was then a linear 1.0 multiplied against log (negative) per-branch terms
     -- (task topk-logspace-unsound).
-    meta typeEnv = CompilerMetadata conf fcDat typeEnv adts p (srOne (mkSemiring (logSpace conf))) [] verdicts
+    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring (logSpace conf))) [] verdicts
     -- One walk of the whole program, shared by every 'meta' built below.
     verdicts = materializationVerdicts p
-    extractParamNames (Expr _ (Lambda name body)) = name : extractParamNames body
+    extractParamNames (Expr _ (Lambda name lambdaBody)) = name : extractParamNames lambdaBody
     extractParamNames _ = []
-    stripLambdas (Expr _ (Lambda _ body)) = stripLambdas body
+    stripLambdas (Expr _ (Lambda _ lambdaBody)) = stripLambdas lambdaBody
     stripLambdas e = e
 
 
@@ -240,7 +240,7 @@ compileNormalExpr meta expr =
 -- handler and cannot be processed by toIRNormalParams.  Mirrors the
 -- hasOwnInferenceHandler predicate used by toIRInference.
 isNormalExtractable :: Expr -> Bool
-isNormalExtractable (Expr _ (Lambda _ body))            = isNormalExtractable body
+isNormalExtractable (Expr _ (Lambda _ lambdaBody))            = isNormalExtractable lambdaBody
 isNormalExtractable (Expr _ (Apply  _ _))               = False
 isNormalExtractable (Expr _ (InjF (Named "Cons")  _))   = False
 isNormalExtractable (Expr _ (InjF (Named "TCons") _))   = False
@@ -255,7 +255,7 @@ isNormalExtractable _                            = True
 generateTupleComponentNormalFunctions :: CompilerMetadata -> String -> Expr -> [IRFunGroup]
 generateTupleComponentNormalFunctions meta baseName expr = go expr id
   where
-    go (Expr ti (Lambda name body)) wrap = go body (\e -> wrap (Expr ti (Lambda name e)))
+    go (Expr ti (Lambda name lambdaBody)) wrap = go lambdaBody (\e -> wrap (Expr ti (Lambda name e)))
     go (Expr _ (InjF (Named "TCons") [fstExpr, sndExpr])) wrap =
       catMaybes
         [ generateComponentNormalFunction meta (baseName ++ "_normal_fst") (wrap fstExpr) (getTypeInfo fstExpr)
@@ -366,8 +366,8 @@ latentDependencies scope (Expr _ (IfThenElse c t e)) =
   mconcat <$> mapM (latentDependencies scope) [c, t, e]
 latentDependencies scope (Expr _ (InjF _ params)) =
   mconcat <$> mapM (latentDependencies scope) params
-latentDependencies scope (Expr _ (Apply (Expr _ (Lambda x body)) v)) =
-  latentDependencies (bindLatent scope x v) body
+latentDependencies scope (Expr _ (Apply (Expr _ (Lambda x lambdaBody)) v)) =
+  latentDependencies (bindLatent scope x v) lambdaBody
 latentDependencies scope (Expr _ (Apply l v)) =
   mconcat <$> mapM (latentDependencies scope) [l, v]
 
@@ -457,8 +457,8 @@ latentVerdictWalk bindParams = go Map.empty
     go scope e = case node e of
       InjF _ [l, r] ->
         (chainName (getTypeInfo e), sharesEnumeratedLatent scope l r) : go scope l ++ go scope r
-      Apply (Expr _ (Lambda x body)) v -> go (bindLatent scope x v) body ++ go scope v
-      Lambda x body | bindParams -> go (bindLambdaParam scope (chainName (getTypeInfo e)) x) body
+      Apply (Expr _ (Lambda x lambdaBody)) v -> go (bindLatent scope x v) lambdaBody ++ go scope v
+      Lambda x lambdaBody | bindParams -> go (bindLambdaParam scope (chainName (getTypeInfo e)) x) lambdaBody
       _ -> concatMap (go scope) (getSubExprs e)
 
 -- | Bind a bare lambda parameter, whose value comes from a call site this walk
@@ -791,7 +791,7 @@ resolveInjF _    n      = n
 -- discrete inference enumerates both operand grids and filters by the forward value
 -- rather than inverting one side.
 isForwardOnly :: [ADTDecl] -> String -> Bool
-isForwardOnly adts name = case lookup name (globalFEnv adts) of
+isForwardOnly adtDecls' name = case lookup name (globalFEnv adtDecls') of
   Just (FPair _ []) -> True
   _                 -> False
 
@@ -825,7 +825,7 @@ retypeDetGiven [] e = e
 retypeDetGiven names e = go names e
   where
     go ns (Expr ti (Var n)) | n `elem` ns = Expr (ti {pType = Deterministic}) (Var n)
-    go ns (Expr ti (Lambda n body)) = Expr ti (Lambda n (go (filter (/= n) ns) body))
+    go ns (Expr ti (Lambda n lambdaBody)) = Expr ti (Lambda n (go (filter (/= n) ns) lambdaBody))
     go ns ex =
       let ex' = setSubExprs ex (map (go ns) (getSubExprs ex))
       in case ex' of
@@ -862,17 +862,11 @@ pruneDeadLetIns e =
     prune (IRLetIn n _ b) | not (freeInIR n b) = b
     prune x = x
 
-negInf :: IRExpr
-negInf = IRConst (VFloat (-9999999))
-
-posInf :: IRExpr
-posInf = IRConst (VFloat 9999999)
-
 -- | True if the given variable name appears free in an IR expression.
 freeInIR :: String -> IRExpr -> Bool
 freeInIR v (IRVar v')           = v == v'
-freeInIR v (IRLetIn n val body) = freeInIR v val || (v /= n && freeInIR v body)
-freeInIR v (IRLambda n body)    = v /= n && freeInIR v body
+freeInIR v (IRLetIn n val irBody) = freeInIR v val || (v /= n && freeInIR v irBody)
+freeInIR v (IRLambda n irBody)    = v /= n && freeInIR v irBody
 freeInIR v (IRApply f a)        = freeInIR v f  || freeInIR v a
 freeInIR v (IROp _ a b)         = freeInIR v a  || freeInIR v b
 freeInIR v (IRUnaryOp _ e)      = freeInIR v e
@@ -892,9 +886,9 @@ freeInIR v (IRCons a b)         = freeInIR v a  || freeInIR v b
 freeInIR v (IRElementOf a b)    = freeInIR v a  || freeInIR v b
 freeInIR v (IRIndex a b)        = freeInIR v a  || freeInIR v b
 freeInIR v (IRMap f x)          = freeInIR v f  || freeInIR v x
-freeInIR v (IREnumSum n _ body) = v /= n && freeInIR v body
-freeInIR v (IRLogEnumSum n _ body) = v /= n && freeInIR v body
-freeInIR v (IREnumSumPaired _ n _ body) = v /= n && freeInIR v body
+freeInIR v (IREnumSum n _ irBody) = v /= n && freeInIR v irBody
+freeInIR v (IRLogEnumSum n _ irBody) = v /= n && freeInIR v irBody
+freeInIR v (IREnumSumPaired _ n _ irBody) = v /= n && freeInIR v irBody
 freeInIR v (IRDensity _ x)      = freeInIR v x
 freeInIR v (IRCumulative _ x)   = freeInIR v x
 freeInIR v (IRLogDensity _ x)   = freeInIR v x
@@ -906,7 +900,7 @@ freeInIR _ _                    = False
 
 -- | Flatten all leading IRLetIn bindings into a list, returning the core expression.
 flattenLetIns :: IRExpr -> ([(String, IRExpr)], IRExpr)
-flattenLetIns (IRLetIn n v body) = let (rest, core) = flattenLetIns body in ((n, v) : rest, core)
+flattenLetIns (IRLetIn n v irBody) = let (rest, core) = flattenLetIns irBody in ((n, v) : rest, core)
 flattenLetIns e = ([], e)
 
 -- | Rebuild an IRLetIn chain from a list of bindings around a core expression.
@@ -1104,7 +1098,7 @@ hasOwnInferenceHandler _    (Expr _ (Apply _ _))            = True
 -- fields, which can be PNormal even though the container itself cannot be
 -- inferred by toIRNormal. They have their own construction handler, so the
 -- PNormal/PLogNormal catch-alls must not intercept them.
-hasOwnInferenceHandler adts (Expr _ (InjF (Named name) _)) = isFieldConstructor adts name
+hasOwnInferenceHandler adtDecls' (Expr _ (InjF (Named name) _)) = isFieldConstructor adtDecls' name
 hasOwnInferenceHandler _    _                        = False
 
 toIRInference :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PResult
@@ -1406,7 +1400,7 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
   -- The inverse can not be created using recursive descend, therefor we use forward chaining for the inverse only
   -- Chain name of the callable
   let clauses = fcData meta
-  let adts = adtDecls meta
+  let localAdts = adtDecls meta
   let lChainName = chainName (getTypeInfo l)
 
   -- This logic is here to wrap the expression back into lambdas if the lambda we look at returns a lambda
@@ -1436,7 +1430,7 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
    planRes <- planWitnessApply meta cumulative rt lResolvedCN lambdaBodyCN tag v sample
    case planRes of
     Right result -> return result
-    Left planDiag -> case toInvExprMaybe clauses adts lChainName of
+    Left planDiag -> case toInvExprMaybe clauses localAdts lChainName of
      -- No occurrence of the bound variable is point-invertible from the
      -- observation either. Fall back to set-valued witnesses: invert the
      -- observation structurally into guarded constraint sets on the bound
@@ -1587,22 +1581,22 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt} (InjF (Named name) params
   let guardCond = foldr1 (IROp OpAnd) (map snd fieldResults)
   return (guardP (semiringOf meta) [guardCond] combined)
 toIRInference meta cumulative (Expr ti (InjF (Named name) params)) sample | isHigherOrder (adtDecls meta) name = do
-  let adts = adtDecls meta
+  let localAdts = adtDecls meta
   let resolvedName = resolveInjF (rType ti) name
   -- FPair of the InjF with unique names
-  fPair <- instantiate mkVariable adts resolvedName
+  fPair <- instantiate mkVariable localAdts resolvedName
   -- Unary InjF has a single inversion
   let FPair _ [inv] = fPair
   let FDecl {inputVars=inVars, body=invExpr, applicability=appTest, deconstructing=decons, derivatives=derivs} = inv
   --Handle the function being in different positions of the signature
-  let aPoss = [0 .. (length params - 1)] \\ getFunctionParamIdx adts name
+  let aPoss = [0 .. (length params - 1)] \\ getFunctionParamIdx localAdts name
   let aPos = case aPoss of
         [n] -> n
         x -> error $ "Expected exectly one non-ho parameter, but got " ++ show (length x)
   let a = params !! aPos
   let aVar = inVars !! aPos
-  let fs = map (params !!) (getFunctionParamIdx adts name)
-  let fVars = map (inVars !!) (getFunctionParamIdx adts name)
+  let fs = map (params !!) (getFunctionParamIdx localAdts name)
+  let fVars = map (inVars !!) (getFunctionParamIdx localAdts name)
   let Just invDerivExpr = lookup aVar derivs
   -- Set sample value to the variable name in the InjF
   setVariables [(aVar, sample)]
@@ -1944,20 +1938,20 @@ materializeAnchors meta expr = foldM bindAnchor expr usedAnchors
     fns = map snd (functions (compilingProgram meta))
     -- The free var is a (possibly invocation-tagged) anchor chain name; the
     -- source node to generate its value from is the untagged original.
-    bindAnchor body cn = do
+    bindAnchor irBody cn = do
       anchorIR <- toIRGenerate meta (findExprWithCN fns (untag cn))
-      return (IRLetIn cn anchorIR body)
+      return (IRLetIn cn anchorIR irBody)
 
 createHOInverse :: CompilerMetadata -> (String, Expr) -> CompilerMonad (IRExpr -> IRExpr)
 createHOInverse meta (fVar, f) = do
   let fcData' = fcData meta
-  let adts = adtDecls meta
+  let localAdts = adtDecls meta
   -- NB: the applicability guard (3rd component, see observe-partials-umbrella
   -- N1b) is not threaded through the higher-order inverse path yet -- a
   -- deconstructing InjF crossed while inverting a user-defined function passed
   -- through createHOInverse can still crash. Not hit by any current test case;
   -- tracked as follow-up alongside the other HO-inverse gaps.
-  let (inverseF0, inverseCoV0, _inverseGuard0) = toInvExpr fcData' adts (chainName $ getTypeInfo f)
+  let (inverseF0, inverseCoV0, _inverseGuard0) = toInvExpr fcData' localAdts (chainName $ getTypeInfo f)
   inverseF   <- materializeAnchors meta inverseF0
   inverseCoV <- materializeAnchors meta inverseCoV0
   let Just (_, LambdaInfo _ lBodyChainName, tag) = findEquivalentExpression fcData' (chainName $ getTypeInfo f)
@@ -2070,17 +2064,6 @@ equalityGuardBody self (TEither lr rr) v sample =
     (IRIf (IRIsLeft sample) (self lr (IRFromLeft v) (IRFromLeft sample)) (IRConst $ VBool False))
     (IRIf (IRIsLeft sample) (IRConst $ VBool False) (self rr (IRFromRight v) (IRFromRight sample)))
 equalityGuardBody _    _ v sample = IROp OpEq sample v
-
-packParamsIntoLetinsProb :: [String] -> [Expr] -> IRExpr -> IRExpr -> Supply IRExpr
---packParamsIntoLetinsProb [] [] expr _ = do
---  return expr
---packParamsIntoLetinsProb [] _ _ _ = error "More parameters than variables"
---packParamsIntoLetinsProb _ [] _ _ = error "More variables than parameters"
---packParamsIntoLetinsProb (v:vars) (p:params) expr sample = do
---  e <- packParamsIntoLetinsProb vars params expr sample
---  return $ IRLetIn v sample e --TODO sample austauschen durch teil von sample falls multivariable
-packParamsIntoLetinsProb [v] [_] expr sample = do
-  return $ IRLetIn v sample expr    --FIXME sample to auch toIRProbt werden
 
 findLambdaVars :: IRExpr -> [String]
 findLambdaVars (IRLambda n expr) = n:findLambdaVars expr
@@ -2200,8 +2183,8 @@ toIREnumerate meta cumulative (Expr TypeInfo{rType=rt} (IfThenElse c t e)) sampl
   eIR <- toIRGenerate meta e
   --(pBranch, _, _) <- toIRInference meta False distr elem
   -- Due to eager evaluation, we must make sure, that the wrong branch is not executed
-  let condSelector e = IRIf cIR e (srZero sr)
-  let notCondSelector e = IRIf (IRUnaryOp OpNot cIR) e (srZero sr)
+  let condSelector resultExpr = IRIf cIR resultExpr (srZero sr)
+  let notCondSelector resultExpr = IRIf (IRUnaryOp OpNot cIR) resultExpr (srZero sr)
   let cmpOp = case rt of { TFloat -> OpApprox; TVarR _ -> OpApprox; _ -> OpEq }
   let thenSelector = if cumulative then compareValueExpr sr rt tIR sample else maskSR sr (IROp cmpOp tIR sample)
   let elseSelector = if cumulative then compareValueExpr sr rt eIR sample else maskSR sr (IROp cmpOp eIR sample)
@@ -2232,7 +2215,7 @@ toIREnumerate meta cumulative e sample = do
 -- The impossibility flag is NOT stripped: it is the last field either way, and a
 -- called function's callers read it (see 'unpackResult').
 stripBranchCount :: IREnv -> IREnv
-stripBranchCount (IREnv funcs adts consts) = IREnv (map stripGroup funcs) adts consts
+stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) adtDecls'' consts
   where
     stripGroup fg = fg { probFun  = fmap stripFun (probFun fg)
                        , integFun = fmap stripFun (integFun fg)
@@ -2261,18 +2244,18 @@ stripBranchCount (IREnv funcs adts consts) = IREnv (map stripGroup funcs) adts c
       IRTSnd (IRTSnd (IRTSnd (IRVar x))) | x `Set.member` callResults -> IRTSnd (IRTSnd (IRVar x))
       -- Binding forms: rebind the name, so shadowing cannot leak a stale
       -- classification into an inner scope.
-      IRLetIn n v body ->
+      IRLetIn n v irBody ->
         let v' = strip callResults v
-        in IRLetIn n v' (strip (rebind n (holdsCalleeResult callResults v') callResults) body)
-      IRLambda n body ->
-        IRLambda n (stripOuterTriple (strip (rebind n False callResults) body))
-      IREnumSum n val body ->
-        IREnumSum n val (strip (rebind n False callResults) body)
-      IRLogEnumSum n val body ->
-        IRLogEnumSum n val (strip (rebind n False callResults) body)
+        in IRLetIn n v' (strip (rebind n (holdsCalleeResult callResults v') callResults) irBody)
+      IRLambda n irBody ->
+        IRLambda n (stripOuterTriple (strip (rebind n False callResults) irBody))
+      IREnumSum n val irBody ->
+        IREnumSum n val (strip (rebind n False callResults) irBody)
+      IRLogEnumSum n val irBody ->
+        IRLogEnumSum n val (strip (rebind n False callResults) irBody)
       -- Only ever built when countBranches is on, i.e. never when this pass runs.
-      IREnumSumPaired lg n val body ->
-        IREnumSumPaired lg n val (strip (rebind n False callResults) body)
+      IREnumSumPaired lg n val irBody ->
+        IREnumSumPaired lg n val (strip (rebind n False callResults) irBody)
       _ -> irDescend (strip callResults) e
 
     rebind n True  = Set.insert n
@@ -2285,15 +2268,15 @@ stripBranchCount (IREnv funcs adts consts) = IREnv (map stripGroup funcs) adts c
     holdsCalleeResult env v = case v of
       IRApply _ _      -> True
       IRVar x          -> x `Set.member` env
-      IRLetIn n b body -> holdsCalleeResult (rebind n (holdsCalleeResult env b) env) body
+      IRLetIn n b irBody -> holdsCalleeResult (rebind n (holdsCalleeResult env b) env) irBody
       IRIf _ t f       -> holdsCalleeResult env t || holdsCalleeResult env f
       _                -> False
 
     -- Collapse (prob, (dim, _)) → (prob, dim) peeling through IRLambda/IRLetIn wrappers,
     -- and through the query-type guard's IRIf (whose then-branch carries the real triple;
     -- the else-branch is an IRError, left untouched by the catch-all).
-    stripOuterTriple (IRLambda n body)         = IRLambda n (stripOuterTriple body)
-    stripOuterTriple (IRLetIn n v body)        = IRLetIn n v (stripOuterTriple body)
+    stripOuterTriple (IRLambda n irBody)         = IRLambda n (stripOuterTriple irBody)
+    stripOuterTriple (IRLetIn n v irBody)        = IRLetIn n v (stripOuterTriple irBody)
     stripOuterTriple (IRIf c t e)              = IRIf c (stripOuterTriple t) (stripOuterTriple e)
     stripOuterTriple (IRTCons a (IRTCons b (IRTCons _ imp))) = IRTCons a (IRTCons b imp)
     stripOuterTriple e                         = e
@@ -2364,7 +2347,7 @@ substIRVar n val = irMap (\e -> case e of { IRVar n' | n' == n -> val; _ -> e })
 
 -- | Guards are Bool-valued IR over the sample and deterministic scope; a world
 -- contributes only when all guards hold.
-data WWorld = WWorld { wGuards :: [IRExpr], wSet :: WSet }
+data WWorld = WWorld [IRExpr] WSet
 
 addGuard :: IRExpr -> WWorld -> WWorld
 addGuard g (WWorld gs s) = WWorld (g:gs) s
@@ -2603,22 +2586,22 @@ cdfAtBound meta v (WFinite e) = do
 -- variable (occurrences @occs@). Nothing when some node on the way is not
 -- supported — the caller refuses with a diagnostic.
 invertToWorlds :: CompilerMetadata -> [ChainName] -> Expr -> WSet -> CompilerMonad (Maybe [WWorld])
-invertToWorlds meta occs body target
+invertToWorlds meta occs exprBody target
   -- x-free subtree: deterministic given scope reduces to a membership test of
   -- its value against the target; anything else draws fresh randomness, and
   -- folding that in alongside set constraints is not supported (the
   -- point-witness path's body-factor folding handles the point case).
-  | not (subtreeHasOcc occs body) =
-      if pType (getTypeInfo body) == Deterministic
+  | not (subtreeHasOcc occs exprBody) =
+      if pType (getTypeInfo exprBody) == Deterministic
         then do
-          bIR <- toIRGenerate meta body
-          return (Just [WWorld [memberGuard (rType (getTypeInfo body)) bIR target] WFull])
+          bIR <- toIRGenerate meta exprBody
+          return (Just [WWorld [memberGuard (rType (getTypeInfo exprBody)) bIR target] WFull])
         else return Nothing
-invertToWorlds meta occs body target = do
-  direct <- transportDirect meta occs body target
+invertToWorlds meta occs exprBody target = do
+  direct <- transportDirect meta occs exprBody target
   case direct of
     Just ws -> return (Just ws)
-    Nothing -> case body of
+    Nothing -> case exprBody of
       Expr _ (IfThenElse c t e)
         | not (subtreeHasOcc occs c) && pType (getTypeInfo c) == Deterministic -> do
             g <- toIRGenerate meta c
@@ -2658,7 +2641,7 @@ invertToWorlds meta occs body target = do
 -- one of them would silently drop the others' constraints — the structural
 -- cases above split those instead.
 transportDirect :: CompilerMetadata -> [ChainName] -> Expr -> WSet -> CompilerMonad (Maybe [WWorld])
-transportDirect meta occs body target = case filter (`elem` subtreeCNs body) occs of
+transportDirect meta occs exprBody target = case filter (`elem` subtreeCNs exprBody) occs of
   [occ] -> case target of
     WPoint s c0 -> case toSeededInvExpr (fcData meta) (adtDecls meta) bodyCN occ of
       Nothing -> return Nothing
@@ -2697,7 +2680,7 @@ transportDirect meta occs body target = case filter (`elem` subtreeCNs body) occ
         return (Just [WWorld [] (WInterval lo' hi')])
     _ -> return Nothing
   _ -> return Nothing
-  where bodyCN = chainName (getTypeInfo body)
+  where bodyCN = chainName (getTypeInfo exprBody)
 
 -- | Worlds of a comparison node: the side carrying the bound variable is
 -- confined to a half-line whose direction depends on the observed boolean;
@@ -3014,17 +2997,17 @@ adtCtorBases off ctorPlans = scanl (+) (off + length ctorPlans) (map (sum . map 
 -- | Look up an ADT field accessor name across the declared ADTs: yields the
 -- owning constructor's name and the field's index within it.
 lookupADTAccessor :: [ADTDecl] -> String -> Maybe (String, Int)
-lookupADTAccessor adts name = listToMaybe
+lookupADTAccessor adtDecls' name = listToMaybe
   [ (cName, fj)
-  | adt <- adts, (cName, fields) <- constructors adt
+  | adt <- adtDecls', (cName, fields) <- constructors adt
   , Just fj <- [elemIndex name (map fst fields)] ]
 
 -- | The fields (accessor name and type) of a declared ADT constructor, in field
 -- order -- i.e. "is @name@ a constructor, and what does applying it take?".
 -- Nullary constructors yield @Just []@.
 lookupADTConstructor :: [ADTDecl] -> String -> Maybe [(String, RType)]
-lookupADTConstructor adts name = listToMaybe
-  [ fields | adt <- adts, (cName, fields) <- constructors adt, cName == name ]
+lookupADTConstructor adtDecls' name = listToMaybe
+  [ fields | adt <- adtDecls', (cName, fields) <- constructors adt, cName == name ]
 
 -- | Runtime test that @y@ carries constructor @nm@.
 planIsCtor :: String -> IRExpr -> IRExpr
@@ -3048,9 +3031,9 @@ planIsCtor nm y = IRApply (IRVar ("is" ++ nm)) y
 -- well-formed dummy answers False cleanly and the chain stays total. Which
 -- dummy is irrelevant: the enclosing guard discards the whole world.
 planSafeField :: [ADTDecl] -> String -> String -> RType -> IRExpr -> Either String IRExpr
-planSafeField adts nm f fty y = do
+planSafeField adtDecls' nm f fty y = do
   dummy <- maybe (Left ("no canonical value for field type " ++ show fty ++ " of constructor " ++ nm)) Right
-                 (planCanonicalValue adts [] fty)
+                 (planCanonicalValue adtDecls' [] fty)
   return (IRIf (planIsCtor nm y) (IRApply (IRVar f) y) (IRConst dummy))
 
 -- | Some well-formed value of an RType, used only as a discarded placeholder
@@ -3058,7 +3041,7 @@ planSafeField adts nm f fty y = do
 -- what makes this terminate on recursive types; @seen@ breaks any remaining
 -- cycle by refusing rather than looping.
 planCanonicalValue :: [ADTDecl] -> [String] -> RType -> Maybe IRValue
-planCanonicalValue adts seen ty = case ty of
+planCanonicalValue adtDecls' seen ty = case ty of
   TFloat      -> Just (VFloat 0)
   TInt        -> Just (VInt 0)
   TBool       -> Just (VBool False)
@@ -3068,12 +3051,12 @@ planCanonicalValue adts seen ty = case ty of
   Tuple a b   -> VTuple <$> rec a <*> rec b
   TEither l _ -> (VEither . Left) <$> rec l
   TADT n | n `notElem` seen -> do
-    decl <- find ((== n) . dataName) adts
+    decl <- find ((== n) . dataName) adtDecls'
     let ctors = constructors decl
     (cn, fields) <- listToMaybe ([c | c@(_, []) <- ctors] ++ ctors)
-    VADT cn <$> mapM (planCanonicalValue adts (n : seen) . snd) fields
+    VADT cn <$> mapM (planCanonicalValue adtDecls' (n : seen) . snd) fields
   _ -> Nothing
-  where rec = planCanonicalValue adts seen
+  where rec = planCanonicalValue adtDecls' seen
 
 -- | Generate-mode IR for a subtree that is deterministic given scope.
 -- Inside a specialized callee body, occurrences of det-bound parameters
@@ -3141,20 +3124,20 @@ planRefWorlds _ (PlanRef (Discretes rty (MultiDiscretes vals)) off) cons tgt =
   Right [pw1 (insertLeafCon
           (PLeafCon off [ (i, planDetGuard rty (IRConst (valueToIR v)) tgt) | (i, v) <- zip [0..] vals ])
           cons)]
-planRefWorlds adts (PlanRef (TuplePlan a b) off) cons (PTPoint s) = do
-  wa <- planRefWorlds adts (PlanRef a off) cons (PTPoint (IRTFst s))
-  wb <- planRefWorlds adts (PlanRef b (off + getSize a)) [] (PTPoint (IRTSnd s))
+planRefWorlds adtDecls' (PlanRef (TuplePlan a b) off) cons (PTPoint s) = do
+  wa <- planRefWorlds adtDecls' (PlanRef a off) cons (PTPoint (IRTFst s))
+  wb <- planRefWorlds adtDecls' (PlanRef b (off + getSize a)) [] (PTPoint (IRTSnd s))
   return [ intersectPlanW x y | x <- wa, y <- wb ]
 planRefWorlds _ (PlanRef (ADTPlan _ ctorPlans) off) cons (PTPoint s)
   | all (null . snd) ctorPlans =
       Right [pw1 (insertLeafCon
               (PLeafCon off [ (i, planIsCtor cn s) | (i, (cn, _)) <- zip [0..] ctorPlans ])
               cons)]
-planRefWorlds adts (PlanRef (ADTPlan adtName ctorPlans) off) cons (PTPoint s) =
+planRefWorlds adtDecls' (PlanRef (ADTPlan adtName ctorPlans) off) cons (PTPoint s) =
   concat <$> mapM ctorWorlds (zip3 [0 ..] ctorPlans (adtCtorBases off ctorPlans))
   where
     ctorWorlds (ci, (cn, fps), cbase) = do
-      fields <- maybe (Left (missing cn)) Right (lookupADTConstructor adts cn)
+      fields <- maybe (Left (missing cn)) Right (lookupADTConstructor adtDecls' cn)
       -- The flag slot carries the guard, so a world for the wrong constructor
       -- measures zero; the field reads below are individually safe anyway
       -- ('planSafeField'), since floated bindings escape the guard.
@@ -3162,8 +3145,8 @@ planRefWorlds adts (PlanRef (ADTPlan adtName ctorPlans) off) cons (PTPoint s) =
       fieldWorlds <- mapM (fieldW cn cbase fps) (zip3 [0 ..] fps fields)
       return (foldl (\acc ws -> [ intersectPlanW x y | x <- acc, y <- ws ]) [flagWorld] fieldWorlds)
     fieldW cn cbase fps (j, fp, (fname, fty)) = do
-      sub <- planSafeField adts cn fname fty s
-      planRefWorlds adts (PlanRef fp (cbase + sum (map getSize (take j fps)))) [] (PTPoint sub)
+      sub <- planSafeField adtDecls' cn fname fty s
+      planRefWorlds adtDecls' (PlanRef fp (cbase + sum (map getSize (take j fps)))) [] (PTPoint sub)
     missing cn = "constructor " ++ cn ++ " of ADT " ++ adtName ++ " is in the partition plan "
                  ++ "but not among the declared constructors"
 planRefWorlds _ (PlanRef Continuous off) cons (PTPoint s) =
@@ -3232,20 +3215,20 @@ planPeelSlice meta env = go
 -- The plan-backed analogue of 'invertToWorlds'. Left carries a diagnostic
 -- naming the unsupported node; the caller falls through to set-witnesses.
 planInvert :: CompilerMetadata -> PlanEnv -> Expr -> PTarget -> PlanM (Either String [PlanWorld])
-planInvert meta env body target
+planInvert meta env planBody target
   -- Plan-free subtree: deterministic given scope reduces to a membership
   -- guard of its value against the target; anything else draws fresh
   -- randomness. (Det-bound parameter occurrences are deterministic here.)
-  | not (subtreeHasOcc (planEnvOccs env) body) =
-      if pType (getTypeInfo body) == Deterministic
+  | not (subtreeHasOcc (planEnvOccs env) planBody) =
+      if pType (getTypeInfo planBody) == Deterministic
         then do
-          bIR <- planGenDet meta env body
-          return (Right [PlanWorld [planDetGuard (rType (getTypeInfo body)) bIR target] [] [] const1])
-        else return (Left ("a subtree independent of the plan-bound variables draws fresh randomness: " ++ planNodeName body))
-planInvert meta env body target
-  | Just refE <- planEvalRef meta env body =
+          bIR <- planGenDet meta env planBody
+          return (Right [PlanWorld [planDetGuard (rType (getTypeInfo planBody)) bIR target] [] [] const1])
+        else return (Left ("a subtree independent of the plan-bound variables draws fresh randomness: " ++ planNodeName planBody))
+planInvert meta env planBody target
+  | Just refE <- planEvalRef meta env planBody =
       return (refE >>= \(ref, cons) -> planRefWorlds (adtDecls meta) ref cons target)
-planInvert meta env body target = case body of
+planInvert meta env planBody target = case planBody of
   Expr _ (IfThenElse c t e)
     | not (subtreeHasOcc occs c) && pType (getTypeInfo c) == Deterministic -> do
         g <- planGenDet meta env c
@@ -3309,7 +3292,7 @@ planInvert meta env body target = case body of
     | planDep b, isDetSide a -> planLeafEq b a
   Expr _ (InjF (Named "lt") [a, b]) -> planCmp False a b
   Expr _ (InjF (Named "gt") [a, b]) -> planCmp True  a b
-  Expr _ (Apply {}) -> planApplyTarget meta env body target
+  Expr _ (Apply {}) -> planApplyTarget meta env planBody target
   -- Structural inversion of a *constructed* ADT value. The observation must
   -- carry this constructor, and each field's observation is pushed onto the
   -- corresponding argument, the field worlds intersecting. This is what keeps a
@@ -3330,7 +3313,7 @@ planInvert meta env body target = case body of
             return $ do
               wss <- sequence fieldsE
               return (map (planAddGuard (planIsCtor nm y)) (foldl liveIntersects [pw1 []] wss))
-  _ -> return (Left ("unsupported node in plan traversal: " ++ planNodeName body))
+  _ -> return (Left ("unsupported node in plan traversal: " ++ planNodeName planBody))
   where
     occs = planEnvOccs env
     planDep = subtreeHasOcc occs
@@ -3597,9 +3580,9 @@ planGroupValues pairs = do
     mergeGroup nnRaw (v, ws) = do
       let common = commonDiscreteCons ws
           residual w = w { pwCons = filter (\c -> not (any (conEq c) common)) (pwCons w) }
-      let mass = foldr1 (IROp OpPlus) (map (planWorldMass nnRaw . residual) ws)
+      let groupMass = foldr1 (IROp OpPlus) (map (planWorldMass nnRaw . residual) ws)
       mv <- lift (mkVariable "cnt_mass")
-      lift (setVariables [(mv, mass)])
+      lift (setVariables [(mv, groupMass)])
       return (IRConst v, PlanWorld [] common [] (IRVar mv))
     -- discrete leaf constraints present (identically) in every world's cons
     commonDiscreteCons (w:ws') =
@@ -3617,27 +3600,27 @@ planGroupValues pairs = do
 -- through the milestone-4 value DP ('planGroupValues') so same-value worlds
 -- collapse at every level -- without it counting folds are 2^depth.
 planEnumValues :: CompilerMetadata -> PlanEnv -> Expr -> PlanM (Either String [(IRExpr, PlanWorld)])
-planEnumValues meta env body = do
-  r <- planEnumValuesRaw meta env body
+planEnumValues meta env planBodyExpr = do
+  r <- planEnumValuesRaw meta env planBodyExpr
   case r of
     Left why    -> return (Left why)
     Right pairs -> Right <$> planGroupValues pairs
 
 planEnumValuesRaw :: CompilerMetadata -> PlanEnv -> Expr -> PlanM (Either String [(IRExpr, PlanWorld)])
-planEnumValuesRaw meta env body
-  | not (subtreeHasOcc occs body) =
-      if pType (getTypeInfo body) == Deterministic
+planEnumValuesRaw meta env bodyExpr
+  | not (subtreeHasOcc occs bodyExpr) =
+      if pType (getTypeInfo bodyExpr) == Deterministic
         then do
-          ir <- planGenDet meta env body
+          ir <- planGenDet meta env bodyExpr
           return (Right [(ir, pw1 [])])
-        else return (Left ("a subtree independent of the plan-bound variables draws fresh randomness: " ++ planNodeName body))
-  | Just refE <- planEvalRef meta env body = return $ case refE of
+        else return (Left ("a subtree independent of the plan-bound variables draws fresh randomness: " ++ planNodeName bodyExpr))
+  | Just refE <- planEvalRef meta env bodyExpr = return $ case refE of
       Left why -> Left why
       Right (PlanRef (Discretes _ (MultiDiscretes vals)) off, cons) ->
         Right [ (IRConst (valueToIR v), pw1 (insertLeafCon (PLeafCon off [(i, constTrueIR)]) cons))
               | (i, v) <- zip [0..] vals ]
       Right _ -> Left "value enumeration is only supported for enum plan leaves"
-  | otherwise = case body of
+  | otherwise = case bodyExpr of
       Expr _ (IfThenElse c t e)
         | not (subtreeHasOcc occs c) && pType (getTypeInfo c) == Deterministic -> do
             g <- planGenDet meta env c
@@ -3666,18 +3649,18 @@ planEnumValuesRaw meta env body
         vsB <- planEnumValues meta env b
         return ((\as bs -> livePairs [ (IROp op va vb, intersectPlanW wa wb) | (va, wa) <- as, (vb, wb) <- bs ]) <$> vsA <*> vsB)
       Expr _ (Apply {}) -> do
-        specE <- planResolveApply meta env body
+        specE <- planResolveApply meta env bodyExpr
         case specE of
           Left why -> return (Left why)
           Right spec
-            | rType (getTypeInfo body) == TBool -> do
+            | rType (getTypeInfo bodyExpr) == TBool -> do
                 r <- planSpecializeBool spec
                 return ((\(tw, fw) -> [ (constTrueIR, addSpecCons spec w)          | w <- tw ]
                                    ++ [ (IRConst (VBool False), addSpecCons spec w) | w <- fw ]) <$> r)
             | otherwise -> do
                 r <- planSpecializeEnum spec
                 return ((\pairs -> [ (v, addSpecCons spec w) | (v, w) <- pairs ]) <$> r)
-      _ -> return (Left ("unsupported node in plan value enumeration: " ++ planNodeName body))
+      _ -> return (Left ("unsupported node in plan value enumeration: " ++ planNodeName bodyExpr))
   where
     occs = planEnvOccs env
     arithOp n = lookup n [("plus", OpPlus), ("mult", OpMult)]
@@ -3706,8 +3689,8 @@ addSpecCons spec w = w { pwCons = foldr insertLeafCon (pwCons w) (spCons spec) }
 -- argument either an accessor chain into the plan (bound 'PBPlan') or
 -- deterministic given scope (generated at the call site, bound 'PBDet').
 planResolveApply :: CompilerMetadata -> PlanEnv -> Expr -> PlanM (Either String PlanSpec)
-planResolveApply meta env body = case collectApply body [] of
-  Nothing -> return (Left ("unsupported callee in plan traversal (only directly-applied top-level functions can be specialized): " ++ planNodeName body))
+planResolveApply meta env planBodyExpr = case collectApply planBodyExpr [] of
+  Nothing -> return (Left ("unsupported callee in plan traversal (only directly-applied top-level functions can be specialized): " ++ planNodeName planBodyExpr))
   Just (fname, args) -> case lookup fname (functions (compilingProgram meta)) of
     Nothing -> return (Left ("call to '" ++ fname ++ "': not a top-level function (higher-order callees are not specializable)"))
     Just decl -> do
@@ -3843,11 +3826,11 @@ planSpecializeTarget spec target = planEnterSpec spec $ do
 -- (so both polarities share one memo entry); anything else through value
 -- enumeration.
 planApplyTarget :: CompilerMetadata -> PlanEnv -> Expr -> PTarget -> PlanM (Either String [PlanWorld])
-planApplyTarget meta env body target = do
-  specE <- planResolveApply meta env body
+planApplyTarget meta env planBodyExpr target = do
+  specE <- planResolveApply meta env planBodyExpr
   case specE of
     Left why -> return (Left why)
-    Right spec -> case rType (getTypeInfo body) of
+    Right spec -> case rType (getTypeInfo planBodyExpr) of
       TBool -> do
         r <- planSpecializeBool spec
         return ((\(tw, fw) -> map (addSpecCons spec) (planBoolWorlds target tw fw)) <$> r)

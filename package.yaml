@@ -48,6 +48,23 @@ dependencies:
 
 library:
   source-dirs: src
+  # Warning cleanup is staged. Everything -Wall enables outside the -Wno-* list
+  # below is clean in src/ today; the -Wno-* list is the remaining backlog.
+  # Retire those one at a time, then swap the whole block for `-Wall -Werror`.
+  # Do not add a -Wno-* to silence new code.
+  #
+  # -Woverlapping-patterns (3) and -Wdeprecations (2) still fire and are meant
+  # to: they are default-on and each one flags real dead code.
+  ghc-options:
+  - -Wall
+  - -Wcompat
+  - -Wincomplete-record-updates
+  - -Wredundant-constraints
+  # Backlog, with the count at the time this block landed:
+  - -Wno-incomplete-uni-patterns   # 71
+  - -Wno-incomplete-patterns       # 28
+  - -Wno-unused-top-binds          #  5
+  - -Wno-type-defaults             #  2
 
 executables:
   haskell-dppl-exe:
@@ -57,11 +74,21 @@ executables:
     - -threaded
     - -rtsopts
     - -with-rtsopts=-N
+    - -Wall
+    - -Wcompat
+    - -Wincomplete-record-updates
+    - -Wredundant-constraints
+    - -Wno-incomplete-uni-patterns
+    - -Wno-incomplete-patterns
+    - -Wno-unused-top-binds
+    - -Wno-type-defaults
     dependencies:
     - haskell-dppl
 
 tests:
   haskell-dppl-test:
+    # No -Wall yet: test/ has not had the cleanup pass the library has
+    # (~300 warnings, mostly -Wname-shadowing and -Wunused-imports).
     main:                Spec.hs
     source-dirs:         test
     ghc-options:

@@ -40,6 +40,22 @@ debug intermediates (see below), and the long-form `--pruneAnyChecks`,
 To prevent having to run `stack test` repeatedly, e.g. to grep for specific
 failures, always store the test output to a temporary file and grep that.
 
+### Compiler warnings
+
+`src/` and `app/` build under `-Wall -Wcompat -Wincomplete-record-updates
+-Wredundant-constraints` (set in `package.yaml`; the `.cabal` is
+hpack-generated and gitignored). Everything that enables is clean, except a
+`-Wno-*` backlog listed there -- `incomplete-uni-patterns`,
+`incomplete-patterns`, `unused-top-binds`, `type-defaults` -- to be retired
+one at a time, after which the block becomes `-Wall -Werror`. **Do not add a
+`-Wno-*` to silence new code.** Five default-on warnings still fire
+(`-Woverlapping-patterns` x3, `-Wdeprecations` x2) and are left visible
+deliberately: each marks real dead code. `test/` has not had the pass and
+carries no warning flags yet.
+
+Note that a plain rebuild will not re-emit warnings for unchanged modules;
+`stack build --ghc-options="-fforce-recomp"` is what shows the true count.
+
 ## Compilation Pipeline
 
 ```

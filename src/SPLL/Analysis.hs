@@ -8,7 +8,7 @@ module SPLL.Analysis (
 
 import SPLL.Lang.Types
 import SPLL.Lang.Lang
-import Data.Maybe (maybeToList, listToMaybe)
+import Data.Maybe (maybeToList)
 import Data.List (nub)
 import Data.Bifunctor
 import SPLL.Typing.Typing (setTags)
@@ -19,11 +19,11 @@ import SPLL.Typing.ForwardChaining (FCData, ExprInfo (LambdaInfo), findEquivalen
 type TagEnv = [(String, [Tag])]
 
 annotateEnumsProg :: Program -> Program
-annotateEnumsProg p@Program {functions=f, neurals=n, adts=adts} = p{functions = finalExprEnv}
+annotateEnumsProg p@Program {functions=f, neurals=n, adts=adtsDecls} = p{functions = finalExprEnv}
   --TODO this is really unclean. It does the the job of initializing the environment with correct tags, and also prevents infinite recursion, by only evaluating twice, but annotates the program twice
   where
     finalExprEnv = fixpoint iterateExprEnv []
-    iterateExprEnv eEnv = map (second (annotate adts (neuralEnv ++ map (second $ tags . getTypeInfo) eEnv))) f
+    iterateExprEnv eEnv = map (second (annotate adtsDecls (neuralEnv ++ map (second $ tags . getTypeInfo) eEnv))) f
     -- Resolve "_" (MultiAuto) placeholders against the declared output/input type before
     -- this MultiValue is used for discrete-value propagation.
     -- A MultiValue with a continuous (Real) leaf has no finite enumeration; tagging it
@@ -33,7 +33,7 @@ annotateEnumsProg p@Program {functions=f, neurals=n, adts=adts} = p{functions = 
     neuralEnv = [(name, [DiscreteValues mv]) | (name, declType, Just rawMv) <- n,
                  let mv = resolveTag declType rawMv,
                  not (multiValueContainsContinuous mv)]
-    resolveTag declType mv = maybe mv (\ty -> resolveMultiAuto adts ty mv) (neuralValueType declType)
+    resolveTag declType mv = maybe mv (\ty -> resolveMultiAuto adtsDecls ty mv) (neuralValueType declType)
 
 annotate :: [ADTDecl] -> TagEnv -> Expr -> Expr
 --annotate _ e | trace ((show e)) False = undefined
@@ -43,23 +43,23 @@ annotate _ env e@(Expr ti (Var n)) = case lookup n env of
 annotate _ env e@(Expr ti (ReadNN n _)) = case lookup n env of
   (Just tgs) -> setTypeInfo e (ti{tags=tgs})
   _ -> e
-annotate adts env e = withNewTypeInfo
+annotate adtsParam env e = withNewTypeInfo
   where
     oldTags = tags $ getTypeInfo e
     withNewSubExpr = case e of
       Expr _ (Apply l@(Expr _ (Lambda _ _)) v) -> do
-        let annotatedV = annotate adts env v
-            annotatedL = annotate adts env l in
+        let annotatedV = annotate adtsParam env v
+            annotatedL = annotate adtsParam env l in
               setSubExprs e [annotatedL, annotatedV]
-      _ -> setSubExprs e (map (annotate adts env) (getSubExprs e))
-    valueTgs = discretesTags adts withNewSubExpr
+      _ -> setSubExprs e (map (annotate adtsParam env) (getSubExprs e))
+    valueTgs = discretesTags adtsParam withNewSubExpr
     newTags = valueTgs ++ oldTags
     withNewTypeInfo = setTypeInfo withNewSubExpr (setTags (getTypeInfo withNewSubExpr) newTags)
 
 discretesTags :: [ADTDecl] -> Expr -> [Tag]
 -- The continuous-leaf filter mirrors neuralEnv above: never emit a DiscreteValues
 -- tag whose enumeration would be a discrete residue of a partly-continuous set.
-discretesTags adts e = [DiscreteValues mv | mv <- maybeToList values, not (multiValueContainsContinuous mv)]
+discretesTags adtsParam e = [DiscreteValues mv | mv <- maybeToList values, not (multiValueContainsContinuous mv)]
   where
     values = case e of
       (Expr _ (Constant a)) -> Just $ MultiDiscretes [a]
@@ -72,24 +72,17 @@ discretesTags adts e = [DiscreteValues mv | mv <- maybeToList values, not (multi
       (Expr _ (InjF (Named name) params)) -> do
         paramValues <- mapM getValuesFromExpr params
         let unpackedMultiVals = map multiValueToValueList paramValues
-        return $ valueListToMultiValue $ nub $ propagateValues adts name unpackedMultiVals
+        return $ valueListToMultiValue $ nub $ propagateValues adtsParam name unpackedMultiVals
       (Expr _ (IfThenElse _ left right)) -> do
         valuesLeft <- getValuesFromExpr left
         valuesRight <- getValuesFromExpr right
         return $ unionMultiValues valuesLeft valuesRight
       _ -> Nothing
 
-getSingleDiscrete :: Expr -> Maybe Double
-getSingleDiscrete e = listToMaybe [x | DiscreteValues (MultiDiscretes [VFloat x]) <- tags (getTypeInfo e)]
-
 getValuesFromExpr :: Expr -> Maybe MultiValue
 getValuesFromExpr e = case [mv | DiscreteValues mv <- tags $ getTypeInfo e] of
   [mv] -> Just mv
   [] -> Nothing
-
-isRecursive :: String -> Expr -> Bool
-isRecursive name (Expr _ (Var n)) | name == n = True
-isRecursive n e = any (isRecursive n) (getSubExprs e)
 
 -- The FCData certificate is built once in 'Prelude.compile' and threaded in,
 -- rather than rebuilt here (modality-split-forwardchaining).

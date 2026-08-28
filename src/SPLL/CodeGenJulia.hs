@@ -166,8 +166,8 @@ generateFunctions :: IREnv -> [String]
 generateFunctions env0 = do
   -- Scalar backend: lower any IRSelect back to IRIf up front (pytorch-tensorizer
   -- M1, strategy B), so the rest of codegen never encounters it.
-  let IREnv funcs adts consts = renameADTIdentifiers juliaMangle (desugarSelectEnv env0)
-  let adtClasses = generateADTClasses adts
+  let IREnv funcs adtDecls consts = renameADTIdentifiers juliaMangle (desugarSelectEnv env0)
+  let adtClasses = generateADTClasses adtDecls
   let constsStr = map (\(name, val) -> name ++ " = " ++ juliaVal val) consts
   let callableNames = [ n ++ "_gen"
                       | IRFunGroup{groupName=n, genFun=Just (e, _)} <- funcs
@@ -175,7 +175,7 @@ generateFunctions env0 = do
                       -- nullary ADT constructors must be emitted as instantiations,
                       -- otherwise the bare struct type never compares equal to an
                       -- instance (same rule as CodeGenPyTorch's callableNames).
-                      ++ [ juliaMangle cName | decl <- adts, (cName, fields) <- constructors decl, null fields ]
+                      ++ [ juliaMangle cName | decl <- adtDecls, (cName, fields) <- constructors decl, null fields ]
   let funcGroupsMonadic = concatMapM generateFunctionGroup funcs
   let (funcStrs, (globalVars, _)) = evalSupply $ runStateT funcGroupsMonadic ([], callableNames)
   let varsStr = map (\(mv, name)-> name ++ " = " ++ juliaMultiVal mv) globalVars
@@ -190,7 +190,7 @@ generateFunctionGroup IRFunGroup {groupName=n, genFun=g, probFun=p, integFun=i, 
   enc <- fromMaybe (return []) (e <&> genF n "_encode")
   norm <- fromMaybe (return []) (nrm <&> genF n "_normal")
   return $ preemble ++ gen ++ prob ++ integ ++ enc ++ norm
-  where genF name suffix (e, d) = generateFunction (name ++ suffix) d e
+  where genF name suffix (fnBody, d) = generateFunction (name ++ suffix) d fnBody
 
 generateFunction :: String -> String -> IRExpr -> GlobalVariableSupply [String]
 generateFunction name doc expr = do

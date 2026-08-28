@@ -41,7 +41,7 @@ import qualified Data.Set as Set
 import Data.Set (Set)
 
 import SPLL.Lang.Types (Expr(..), ExprF(..), Program(..), TypeInfo(..), ChainName)
-import SPLL.Lang.Lang (getTypeInfo, getSubExprs)
+import SPLL.Lang.Lang (getTypeInfo)
 
 -- | Per-node determinism, keyed by the chain name assigned by
 -- @ForwardChaining.annotateProg@ (so this pass must run after it).

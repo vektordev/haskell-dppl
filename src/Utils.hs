@@ -29,10 +29,6 @@ splitByString split orig | split `isPrefixOf` orig = ("", orig)
 splitByString split (c:orig) = let (x, y) = splitByString split orig in (c:x, y)
 splitByString _ [] = ("", "")
 
-concatMap2 :: (a -> ([b], [c])) -> [a] -> ([b], [c])
-concatMap2 f xs = (concat as, concat bs)
-  where (as, bs) = unzip (map f xs)
-
 mapTup3 :: (a -> b) -> (a, a, a) -> (b, b, b)
 mapTup3 f (a, b, c) = (f a, f b, f c)
 
@@ -44,9 +40,6 @@ mapAppendTup = zipWith (curry (\((x, y), z) -> (x, y, z)))
 
 mapAppendTup3 :: [(a, b, c)] -> [d] -> [(a, b, c, d)]
 mapAppendTup3 = zipWith (curry (\((x, y, z), a) -> (x, y, z, a)))
-
-uncurry3 :: (a -> b -> c -> d) -> (a, b, c) -> d
-uncurry3 f (a, b, c) = f a b c
 
 uncurry4 :: (a -> b -> c -> d -> e) -> (a, b, c, d) -> e
 uncurry4 f (a, b, c, d) = f a b c d
@@ -86,7 +79,7 @@ topSortDAG :: DAGEdge a => [a] -> [a]
 topSortDAG lst = sortedLst
   where
     zippedIndices = zip [0..] lst
-    edges = [(i,j) | (i,x) <- zippedIndices, (j,y) <- zippedIndices, edge x y]
-    graph = buildG (0, length lst - 1) edges
+    edgeList = [(i,j) | (i,x) <- zippedIndices, (j,y) <- zippedIndices, edge x y]
+    graph = buildG (0, length lst - 1) edgeList
     sorted = topSort graph
     sortedLst = map (lst !!) sorted

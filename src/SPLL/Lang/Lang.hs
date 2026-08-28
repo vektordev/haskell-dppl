@@ -241,9 +241,9 @@ autoDeriveMultiValue _ TFloat = Right MultiContinuous
 autoDeriveMultiValue _ TBool = Right (MultiDiscretes [VBool True, VBool False])
 autoDeriveMultiValue _ TInt = Left "cannot auto-derive an enumeration for Int (unbounded) - specify the values explicitly, e.g. [0,1,2,...,10]"
 autoDeriveMultiValue _ TSymbol = Left "cannot auto-derive an enumeration for Symbol - specify the values explicitly"
-autoDeriveMultiValue adts (Tuple a b) = MultiTuple <$> autoDeriveMultiValue adts a <*> autoDeriveMultiValue adts b
-autoDeriveMultiValue adts (TEither a b) = MultiEither <$> autoDeriveMultiValue adts a <*> autoDeriveMultiValue adts b
-autoDeriveMultiValue adts (TADT name) = case find ((== name) . dataName) adts of
+autoDeriveMultiValue adtDecls (Tuple a b) = MultiTuple <$> autoDeriveMultiValue adtDecls a <*> autoDeriveMultiValue adtDecls b
+autoDeriveMultiValue adtDecls (TEither a b) = MultiEither <$> autoDeriveMultiValue adtDecls a <*> autoDeriveMultiValue adtDecls b
+autoDeriveMultiValue adtDecls (TADT name) = case find ((== name) . dataName) adtDecls of
   Nothing -> Left ("unknown ADT '" ++ name ++ "' referenced in neural declaration")
   Just adt
     | isRecursive adt -> case adtDepth adt of
@@ -258,27 +258,27 @@ autoDeriveMultiValue adts (TADT name) = case find ((== name) . dataName) adts of
     | otherwise -> MultiADT <$> mapM deriveConstructor (constructors adt)
   where
     isRecursive adt = any (any ((== TADT name) . snd) . snd) (constructors adt)
-    deriveConstructor (cName, fields) = (,) cName <$> mapM (autoDeriveMultiValue adts . snd) fields
+    deriveConstructor (cName, fields) = (,) cName <$> mapM (autoDeriveMultiValue adtDecls . snd) fields
     -- A directly self-referential field becomes a MultiTypeRef for the unroller;
     -- every other field auto-derives as usual. (Only direct recursion is detected;
     -- nested `ListOf (TADT name)` or mutual recursion still needs an explicit `of`.)
     deriveConstructorRec (cName, fields) = (,) cName <$> mapM deriveField fields
     deriveField (_, TADT n) | n == name = Right (MultiTypeRef name)
-    deriveField (_, ft)                 = autoDeriveMultiValue adts ft
+    deriveField (_, ft)                 = autoDeriveMultiValue adtDecls ft
 autoDeriveMultiValue _ ty = Left ("cannot auto-derive a MultiValue for type " ++ show ty ++ " - specify it explicitly")
 
 -- | Resolve "_" (MultiAuto) placeholders within a (possibly partial) MultiValue annotation,
 -- recursing alongside the corresponding RType. Leaves everything else untouched.
 resolveMultiAuto :: [ADTDecl] -> RType -> MultiValue -> MultiValue
-resolveMultiAuto adts ty MultiAuto = either error id (autoDeriveMultiValue adts ty)
-resolveMultiAuto adts (Tuple a b) (MultiTuple l r) = MultiTuple (resolveMultiAuto adts a l) (resolveMultiAuto adts b r)
-resolveMultiAuto adts (TEither a b) (MultiEither l r) = MultiEither (resolveMultiAuto adts a l) (resolveMultiAuto adts b r)
-resolveMultiAuto adts (TADT name) (MultiADT cs) = MultiADT (map resolveConstr cs)
+resolveMultiAuto adtDecls ty MultiAuto = either error id (autoDeriveMultiValue adtDecls ty)
+resolveMultiAuto adtDecls (Tuple a b) (MultiTuple l r) = MultiTuple (resolveMultiAuto adtDecls a l) (resolveMultiAuto adtDecls b r)
+resolveMultiAuto adtDecls (TEither a b) (MultiEither l r) = MultiEither (resolveMultiAuto adtDecls a l) (resolveMultiAuto adtDecls b r)
+resolveMultiAuto adtDecls (TADT name) (MultiADT cs) = MultiADT (map resolveConstr cs)
   where
-    fieldTypes = case find ((== name) . dataName) adts of
+    fieldTypes = case find ((== name) . dataName) adtDecls of
       Just adt -> [(cn, map snd fs) | (cn, fs) <- constructors adt]
       Nothing -> []
-    resolveConstr (cn, mvs) = (cn, zipWith (resolveMultiAuto adts) (fromMaybe [] (lookup cn fieldTypes)) mvs)
+    resolveConstr (cn, mvs) = (cn, zipWith (resolveMultiAuto adtDecls) (fromMaybe [] (lookup cn fieldTypes)) mvs)
 resolveMultiAuto _ _ mv = mv
 
 -- | Unroll a recursive MultiValue to a finite depth. The @(String, MultiValue)@
@@ -357,7 +357,7 @@ prettyPrintProgRTyOnly :: Program -> [String]
 prettyPrintProgRTyOnly = prettyPrintProgCustomTI prettyRTypeOnly
 
 prettyPrintProgCustomTI :: (TypeInfo -> String) -> Program -> [String]
-prettyPrintProgCustomTI fn (Program decls neurals adts _) = concatMap prettyPrintADTs adts ++  concatMap (prettyPrintDecl fn) decls ++ concatMap prettyPrintNeural neurals
+prettyPrintProgCustomTI fn (Program decls neuralsDecl adtsDecl _) = concatMap prettyPrintADTs adtsDecl ++  concatMap (prettyPrintDecl fn) decls ++ concatMap prettyPrintNeural neuralsDecl
 
 prettyPrintADTs :: ADTDecl  -> [String]
 prettyPrintADTs ADTDecl{dataName=name, constructors=constr, adtDepth=d} = ("data " ++ name ++ "::" ++ maybe "" (\n -> " depth " ++ show n) d):map (\rts -> "\n|"++ show rts) constr
