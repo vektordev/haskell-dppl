@@ -22,7 +22,11 @@ The TST file consists of any number of assertions for the probabilistic inferenc
 
 Test cases, regardless of type, take Values as inputs. Make sure that the values you pass only use Value syntax and not expression syntax. E.g., Either types can be created using the uppercase "Left" or lowercase "left" syntax in expressions. The first is Value syntax, while the latter is expression syntax and invokes the "left" constructor. In this case, only the uppercase version may be used.
 
-ADTs are currently not supported by the test case parser, because they depend on the ADT declaration in the PPL file.
+ADT values are written by juxtaposing a constructor with its fields, exactly as in the value grammar: `p(Leaf)`, `p(Node Leaf Leaf)`, `p(Node (Node Leaf Leaf) 0.5)`. A field that is itself a constructor application needs parentheses. The marginal wildcard `ANY` may stand in for any field, at any depth: `p(Node ANY Leaf)`, `p(Link ANY (Link ANY Nil))`.
+
+Prefer querying an ADT-valued program at an ADT point over querying a `Float`/`Bool` projection of it. A projection only ever exercises the accessors of the constructor it reads, so it never reaches a sibling constructor's field accessors -- which is how a missing guard on those accessors survived the whole corpus once already.
+
+`cdf(...)` is not available for an ADT-valued program: an ADT is an unordered sum, so there is no order for a cumulative distribution to integrate along. Such a query is refused with a diagnostic (pinned by the `Rejection.AdtCumulative` test group), not answered.
 
 #### PDF/CDF assertions
 These are the most basic types of assertions. They test that the PDF or CDF has an expected value at a given position. The following snippet shows one PDF and one CDF assertion:
@@ -53,4 +57,4 @@ The key difference to PDF/CDF testing is that we don't specify a test point. All
 
 For example, an MNist addition program, that would normally take two images as symbol inputs, could be tested using: ```argmax_p(3, 7)=10``` to test that for an image showing a 3 and an image showing a 7, 10 would be the most likely outcome of the program.
 
-Neural networks that output a ADT can currently be tested by creating a list with the head being the index of the constructor and each further element representing a field. This is a workaround for the test case parser not supporting ADTs
+Neural networks that output an ADT can be tested by creating a list with the head being the index of the constructor and each further element representing a field. This encoding predates the parser's ADT support and is still what the `argmax_p` path expects; PDF/CDF query points use the constructor syntax above.

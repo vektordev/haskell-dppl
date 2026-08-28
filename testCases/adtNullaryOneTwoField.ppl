@@ -1,0 +1,2 @@
+data Mix = Zero | One u::Float | Two p1::Float, p2::Float
+main = if Uniform < 0.2 then Zero else (if Uniform < 0.5 then One Uniform else Two Uniform Uniform)

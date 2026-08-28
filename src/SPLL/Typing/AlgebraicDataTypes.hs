@@ -5,7 +5,8 @@ module SPLL.Typing.AlgebraicDataTypes (
   implicitFunctionImpl,
   implicitFunctionsToEnv,
   lookupRType,
-  anyCtorTestMessage
+  anyCtorTestMessage,
+  adtCdfMessage
 ) where
 import SPLL.Lang.Types
 import SPLL.Typing.RType
@@ -86,6 +87,20 @@ anyCtorTestMessage :: String -> String
 anyCtorTestMessage ctor =
   "is" ++ ctor ++ ": constructor test on an unobserved value (ANY); the "
   ++ "enclosing inference must marginalise or refuse before testing a hole"
+
+-- | What a @cdf()@ query says when the program it is asked about returns an
+-- ADT. A cumulative distribution integrates along an order, and an ADT has
+-- none: its constructors are an unordered sum, so there is no "at or below
+-- @Node Leaf Leaf@" to accumulate. Defining one would mean fixing a
+-- declaration order as semantics, which is a design decision rather than a
+-- missing case, so the compiler refuses instead of inventing one. Point
+-- queries (@p()@) are unaffected -- they compare structurally and need no
+-- order. Pinned by TestRejection's @AdtCumulative@ group.
+adtCdfMessage :: String -> String
+adtCdfMessage tyName =
+  "cdf(): no cumulative distribution is defined over the ADT '" ++ tyName
+  ++ "' -- its constructors carry no order to integrate along. Use p() for a "
+  ++ "point query on this program."
 
 -- Returns constructor and field index
 findField :: [ADTDecl] -> String -> (String, Int)

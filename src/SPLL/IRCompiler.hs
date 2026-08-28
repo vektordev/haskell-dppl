@@ -2008,7 +2008,11 @@ compareValueExpr sr (TVarR _) v sample = IRIf (IROp OpLessThan sample v) (srZero
 -- Cons chain yields the semiring one, the multiplicative identity, so a list
 -- CDF reduces to the product of its element CDFs).
 compareValueExpr sr (ListOf _) v sample = maskSR sr (IROp OpEq sample v)
-compareValueExpr _ (TADT _) _ _= IRError "Not yet implemented" -- TODO implement for ADTs
+-- An ADT carries no order, so there is nothing for a CDF to integrate along.
+-- This is the only 'compareValueExpr' case that is not merely unimplemented:
+-- every call site is on the @cumulative = True@ path, so reaching it means a
+-- cdf() query was asked of an ADT-valued program. See 'adtCdfMessage'.
+compareValueExpr _ (TADT n) _ _ = IRError (adtCdfMessage n)
 compareValueExpr _ rt _ _ = error $ "Comparison not implemented for type: " ++ show rt
 
 -- | Bool-valued IR: is deterministic value @v@ equal to @sample@? This is the

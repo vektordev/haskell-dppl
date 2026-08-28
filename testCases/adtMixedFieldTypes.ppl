@@ -1,0 +1,2 @@
+data Rec = C1 f1::Float, f2::Bool | C2 f3::Float
+main = if Uniform < 0.4 then C1 Uniform (Uniform < 0.25) else C2 Uniform

@@ -23,7 +23,7 @@ import SPLL.Prelude (compile, runProb, runInteg, uniform, constB, constF, (#+#),
 import SPLL.IntermediateRepresentation (defaultCompilerConfig, checkQueryType, noIntegrate)
 import SPLL.Typing.Infer (addTypeInfo)
 import SPLL.Parser (tryParseProgram)
-import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage)
+import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, adtCdfMessage)
 import qualified SPLL.CodeGenPyTorch
 import qualified SPLL.CodeGenJulia
 import SPLL.Prelude (compile)
@@ -41,6 +41,7 @@ rejectionTests = testGroup "Rejection"
   , queryTypeGuardTests
   , typeInferenceTests
   , anyCtorTestTests
+  , adtCumulativeTests
   ]
 
 -- ----------------------------------------------------------------------------
@@ -260,4 +261,48 @@ anyCtorTestTests = testGroup "AnyConstructorTest"
             let src = unlines (SPLL.CodeGenJulia.generateFunctions env)
             assertBool "emitted isHeads carries no ANY refusal"
                        (anyCtorTestMessage "Heads" `isInfixOf` src)
+  ]
+
+
+-- ----------------------------------------------------------------------------
+-- cdf() on an ADT-valued program. An ADT is an unordered sum, so there is no
+-- order for a cumulative distribution to integrate along; the compiler refuses
+-- rather than inventing one out of declaration order (task
+-- adt-valued-query-corpus-sweep, the "cdf" axis -- pin the refusal, do not
+-- silently omit it). The corpus cannot express this: a .tst cdf row asserts a
+-- number, and this query has none.
+--
+-- p() on the same program is unaffected and stays covered by the corpus
+-- (testCases/recursiveAdtMultiCtor and friends); the third case here guards
+-- against the refusal creeping from the cumulative path onto the point one.
+-- ----------------------------------------------------------------------------
+
+-- A two-constructor recursive ADT returned directly by main -- the smallest
+-- program whose query type is a TADT.
+adtValuedProgSrc :: String
+adtValuedProgSrc = unlines
+  [ "data DTree = Leaf | Node l::DTree, r::DTree"
+  , "genT = if Uniform < 0.6 then Leaf else Node genT genT"
+  , "main = genT"
+  ]
+
+adtCumulativeTests :: TestTree
+adtCumulativeTests = testGroup "AdtCumulative"
+  [ testCase "cdf() refuses an ADT-valued program with a diagnostic" $
+      withParsed adtValuedProgSrc $ \prog -> do
+        res <- forced (runInteg defaultCompilerConfig prog [] (VADT "Leaf" []))
+        case res of
+          Left e  -> assertBool ("expected the ADT-cdf refusal, got: " ++ show e)
+                                (adtCdfMessage "DTree" `isInfixOf` show e)
+          Right _ -> assertFailure
+            "cdf() on an ADT-valued program produced a number; an ADT has no order to integrate along"
+  , testCase "the refusal names the ADT, not a generic placeholder" $
+      assertBool "adtCdfMessage does not mention the type it was given"
+                 ("DTree" `isInfixOf` adtCdfMessage "DTree")
+  , testCase "p() on the same program is unaffected" $
+      withParsed adtValuedProgSrc $ \prog -> do
+        res <- forced (runProb defaultCompilerConfig prog [] (VADT "Leaf" []))
+        case res of
+          Left e  -> assertFailure ("point query on an ADT-valued program was rejected: " ++ show e)
+          Right _ -> return ()
   ]

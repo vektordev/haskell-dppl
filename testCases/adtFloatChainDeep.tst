@@ -1,0 +1,7 @@
+p(Nil)=(0.5, 0.0, False)
+p(Link 0.5 Nil)=(0.25, 1.0, False)
+p(Link 0.5 (Link 0.25 Nil))=(0.125, 2.0, False)
+p(Link 0.5 (Link 0.25 (Link 0.75 Nil)))=(0.0625, 3.0, False)
+p(Link ANY Nil)=(0.25, 0.0, False)
+p(Link 0.5 ANY)=(0.5, 1.0, False)
+p(Link ANY (Link ANY Nil))=(0.125, 0.0, False)

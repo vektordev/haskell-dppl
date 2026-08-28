@@ -1,0 +1,3 @@
+data Chain = Nil | Link v::Float, next::Chain
+genC = if Uniform < 0.5 then Nil else Link Uniform genC
+main = genC

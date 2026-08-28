@@ -1,0 +1,2 @@
+data Opt = Absent | Present w::Float
+main = Present Uniform
