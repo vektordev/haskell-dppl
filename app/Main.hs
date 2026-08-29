@@ -7,7 +7,7 @@ import SPLL.Parser
 import Data.Char (toLower)
 import Text.Megaparsec.Error (errorBundlePretty)
 import SPLL.Lang.Types (CompilerError)
-import SPLL.Prelude (runProb, runInteg, runGen, compile)
+import SPLL.Prelude (runProb, runInteg, runGen, compile, batchedRefusal)
 import Control.Monad.Random (evalRandIO)
 import qualified SPLL.CodeGenJulia
 import qualified SPLL.CodeGenPyTorch
@@ -17,6 +17,8 @@ import Text.Megaparsec (runParser)
 import Control.Monad.State (runStateT)
 import Data.Maybe (fromMaybe)
 import System.Exit (exitFailure, exitWith, ExitCode (ExitFailure))
+import System.IO (hPutStrLn, stderr)
+import Control.Exception (SomeException, evaluate, try)
 
 data GlobalOpts = GlobalOpts {
   inputFile :: String,
@@ -213,7 +215,12 @@ transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, 
     CompileOpts{language=lang, outputFile=outFile, trunc=trnc} -> do
       case codeGenToLang lang trnc conf prog of
         Left err -> handleError err
-        Right trans -> writeOutputFile outFile trans
+        Right trans -> do
+          writeOutputFile outFile trans
+          -- After the real compile, not before: the advisory is a closing note
+          -- on a compile that succeeded, and there is nothing to advise about
+          -- batching a program that does not compile scalar in the first place.
+          reportBatchedEligibility conf prog
     GenerateOpts {paramsG=params} -> do
       -- TODO: Nicer Output
       case runGen conf prog params of
@@ -260,3 +267,41 @@ handleError :: CompilerError -> IO ()
 handleError err = do
   putStrLn ("Error during execution: " ++ err)
   exitWith (ExitFailure 1)
+
+-- | Scalar-mode advisory (task @batched-scalar-mode-eligibility-warning@): tell
+-- a user compiling normally whether @--batched@ would take this program, rather
+-- than making them flip the flag and read a refusal.
+--
+-- Deliberately behind @-v@ and nothing lower. The check re-runs the whole
+-- pipeline in batched mode and walks every prob/integ/generate body, which is
+-- pure cost for the many programs nobody intends to batch; the corpus already
+-- gets the same information for free from the @.tst@ @batched@ declaration's
+-- @eligibility-gain-note@, so this is for the single-program case only.
+--
+-- It reports the *first* offender, matching the guard's own contract. An
+-- advisory arguably wants the full list, but that is a different traversal —
+-- so the note says so out loud instead of implying the one construct is all
+-- there is.
+--
+-- Runs in 'IO' with the check forced under 'try' so that a compiler @error@ in
+-- the batched pipeline degrades to an "unknown" line rather than killing a
+-- scalar compile that had already succeeded on its own terms.
+reportBatchedEligibility :: CompilerConfig -> Program -> IO ()
+reportBatchedEligibility conf prog
+  | verbose conf < 1 || batched conf = return ()
+  | otherwise = do
+      verdict <- try (evaluate (forceDiag (batchedRefusal conf prog)))
+      hPutStrLn stderr $ case verdict of
+        Left e ->
+          "=== Batched Mode: eligibility unknown ===\n  the check itself failed: "
+            ++ show (e :: SomeException)
+        Right Nothing ->
+          "=== Batched Mode: eligible ===\n  this program also compiles with --batched."
+        Right (Just diag) ->
+          "=== Batched Mode: not eligible ===\n  " ++ diag
+            ++ "\n  (first offending construct only; more may be behind it.)"
+  where
+    -- 'batchedRefusal' is lazy in the diagnostic, so the guard has not actually
+    -- run until the message is demanded -- force it inside the 'try'.
+    forceDiag m@(Just s) = length s `seq` m
+    forceDiag m = m

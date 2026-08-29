@@ -620,9 +620,16 @@ gainNoteProp gained = ioProperty $ do
 -- synthetic-IR rows in "TestInternals" (@batchedRefusalUnitTests@), because on
 -- any real program another guard always fires first.
 batchedRefusalTests :: TestTree
-batchedRefusalTests = testGroup "BatchedRefusal"
+batchedRefusalTests = testGroup "BatchedRefusal" $
   [ testProperty (prog ++ " -- " ++ needle) (once (refusalRow prog needle))
   | (prog, needle) <- batchedRefusalTable ]
+  ++ [ testProperty (prog ++ " -- scalar advisory reports eligible")
+         (once (ioProperty (advisoryRow prog Nothing <$> parseProgram ("testCases/" ++ prog ++ ".ppl"))))
+     -- The advisory's other direction: on a program batched mode *does* take,
+     -- it must stay quiet rather than cry wolf. Two shapes, since the guard has
+     -- two independent halves (the per-body fragment walk and the call graph):
+     -- a plain scalar program and a neural one whose decoder batches.
+     | prog <- ["coin", "mNistAdd"] ]
 
 -- | @(corpus program base name, diagnostic substring pinning the construct)@.
 -- The substring names the offending IR node rather than quoting prose, so a
@@ -703,6 +710,21 @@ refusalRow prog needle = ioProperty $ do
       Left msg -> counterexample ("batched refusal for " ++ prog ++ " does not mention "
                                   ++ show needle ++ "; actual diagnostic: " ++ msg)
                     (needle `isInfixOf` msg)
+             .&&. advisoryRow prog (Just msg) p
+
+-- | The scalar-mode advisory ('SPLL.Prelude.batchedRefusal', CLI @-v@, task
+-- @batched-scalar-mode-eligibility-warning@) must answer with exactly the
+-- refusal batched mode would have given — that is its whole contract: a user
+-- who has not flipped @--batched@ is told what flipping it would say. Called
+-- from a /scalar/ config, since that is the situation it exists for.
+advisoryRow :: String -> Maybe String -> Program -> Property
+advisoryRow prog expected p =
+  counterexample ("scalar-mode advisory for " ++ prog ++ " disagrees with the batched "
+                  ++ "backend.\n  advisory: " ++ describe (batchedRefusal defaultCompilerConfig p)
+                  ++ "\n  backend:  " ++ describe expected)
+    (batchedRefusal defaultCompilerConfig p == expected)
+  where
+    describe = maybe "eligible" ("refused: " ++)
 
 -- | A batchable group: all query points sharing the same query kind (prob vs
 -- cumulative), rendered into one batched call. 'bgParamExprs' is the Python

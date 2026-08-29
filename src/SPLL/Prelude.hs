@@ -57,6 +57,7 @@ module SPLL.Prelude
   , readNN
   , fix
   , compile
+  , batchedRefusal
   , runGen
   , runProb
   , runInteg
@@ -89,6 +90,7 @@ import Control.Monad.Random (Rand, RandomGen)
 import SPLL.IRCompiler
 import SPLL.IROptimizer (optimizeEnv)
 import SPLL.IRSelectPass (selectPassEnv)
+import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
 import Debug.Trace
 import Data.Either
 import SPLL.Typing.ForwardChaining (annotateProg)
@@ -402,6 +404,35 @@ compile conf p = do
   printIfVerbose conf (pPrintIREnv compiled)
   printStageIR conf "After Optimization" compiled
   return compiled
+
+-- | Would batched mode (@--batched@) take this program? 'Nothing' if it would,
+-- @Just diag@ otherwise, carrying the same diagnostic the batched backend would
+-- have refused with.
+--
+-- This is the fragment guard ('SPLL.CodeGenPyTorchBatched.batchedGuard' +
+-- @checkCallGraph@ + @hasGenCycle@) run *ahead of* a decision to batch, so a
+-- user compiling normally can be told whether flipping @--batched@ would work
+-- instead of finding out by trying it (task
+-- @batched-scalar-mode-eligibility-warning@). It re-runs the whole pipeline
+-- with @batched = True@ — the select pass changes which 'IRIf's are 'IRSelect's,
+-- and the guard reads exactly that — so it is not free, which is why the CLI
+-- only asks for it under @-v@.
+--
+-- The re-compile is silenced ('verbose', 'showIntermediates' and 'optStats'
+-- forced off): the caller has just compiled this program for real and must not
+-- see every stage dumped a second time.
+--
+-- Note the diagnostic names the *first* offending construct the guard walk
+-- finds, not all of them: fixing it may reveal more behind it. That is the
+-- deliberate scope (review 2026-08-28) — reporting all offenders is a different
+-- traversal, and the guard's contract is refusal, not enumeration.
+batchedRefusal :: CompilerConfig -> Program -> Maybe CompilerError
+batchedRefusal conf p =
+  case compile quiet p >>= generateFunctionsBatched True of
+    Left err -> Just err
+    Right _  -> Nothing
+  where
+    quiet = conf{batched = True, verbose = 0, showIntermediates = False, optStats = False}
 
 runGen :: (RandomGen g) => CompilerConfig -> Program -> [IRValue] -> Either CompilerError (Rand g IRValue)
 runGen _ p _ | isLeft (validateProgram p) = fmap (error "Impossible case") (validateProgram p)
