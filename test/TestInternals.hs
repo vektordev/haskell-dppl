@@ -22,7 +22,7 @@ import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan)
 import SPLL.IntermediateRepresentation
-import SPLL.IROptimizer (postProcess)
+import SPLL.IROptimizer (postProcess, optimizeEnv, deterministicGens, distributeIf, OptEnv(..))
 import SPLL.CodeGenPyTorchBatched (adtEnv, batchedGuard, generateFunctionsBatched, structural)
 import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts)
 import Data.Foldable (toList)
@@ -1505,6 +1505,136 @@ optimizerPurityTests = testGroup "optimizer purity (ir-effectful-var-purity)"
   ]
 
 -- ---------------------------------------------------------------------------
+-- Stochastic calls and shared conditions (task stochastic-call-cse-unsound)
+-- ---------------------------------------------------------------------------
+
+-- | The @_gen@ half of an environment is not referentially transparent: calling
+-- it twice is meant to draw twice. Every optimizer rewrite that either /shares/
+-- two occurrences of an expression (CSE) or /drops/ one of several syntactically
+-- equal copies ('distributeIf') must therefore consult the purity analysis, and
+-- that analysis has to see through a whole-program call graph -- a call into a
+-- recursive generate group holds no 'IRSample' of its own, only a reference to a
+-- group whose body has one.
+--
+-- The reported repros were a branching-recursive generate function
+-- (@Node (genT thetas) (genT thetas)@ collapsing to one shared subtree) and a
+-- two-argument version of the same shape emitting a partially applied call. Both
+-- are covered today -- by 'deterministicGens' feeding 'isPureGiven', and by
+-- CSE's refusal to hoist a partial application -- so these rows are the
+-- regression pins rather than a new fix. The 'distributeIf' rows are the one
+-- live hole the same audit found: it kept a single copy of a condition the
+-- tuple evaluated once per leaf.
+stochasticCallTests :: TestTree
+stochasticCallTests = testGroup "stochastic calls (stochastic-call-cse-unsound)"
+  -- The whole-program analysis, directly. A generate group is deterministic
+  -- exactly when nothing it can reach draws.
+  [ testCase "deterministicGens classifies a call graph" $ do
+      let det = deterministicGens
+            [ genGroup "stoch" (IRSample IRUniform)
+            , genGroup "pureG" (IRConst (VFloat 1.0))
+            , genGroup "selfRec" (IRApply (IRVar "selfRec_gen") (IRConst (VFloat 1.0)))
+            , genGroup "caller" (IRApply (IRVar "stoch_gen") (IRConst (VFloat 1.0)))
+            , genGroup "neuralCaller" (IRApply (IRVar "nn_auto_gen") (IRConst (VFloat 1.0)))
+            ]
+      assertBool "a body that samples is not deterministic" (not (Set.member "stoch_gen" det))
+      assertBool "a sample-free body is deterministic" (Set.member "pureG_gen" det)
+      assertBool "self-recursion alone does not refute determinism"
+        (Set.member "selfRec_gen" det)
+      assertBool "calling a stochastic group is not deterministic"
+        (not (Set.member "caller_gen" det))
+      assertBool "calling a generator with no visible group is not deterministic"
+        (not (Set.member "neuralCaller_gen" det))
+  -- Repro 2 of the task, at IR level: two saturated calls into a stochastic,
+  -- self-recursive generate group are two independent draws and must both survive.
+  , testCase "CSE keeps both calls into a stochastic generate group" $ do
+      let call = IRApply (IRVar "genT_gen") (IRVar "thetas")
+          body = IRIf (IROp OpLessThan (IRSample IRUniform) (IRConst (VFloat 0.6)))
+                      (IRConst (VFloat 0.0))
+                      (IRTCons call call)
+      assertEqual "both recursive draws survive" 2
+        (countIRVar "genT_gen" (optimizedGen "genT" [genGroup "genT" body]))
+  -- ...and the positive control: the identical shape with a *deterministic*
+  -- callee is shared, so the refusal above is about effects, not about calls.
+  , testCase "CSE still shares calls into a deterministic generate group" $ do
+      let call = IRApply (IRVar "detT_gen") (IRVar "thetas")
+          body = IRIf (IROp OpLessThan (IRVar "thetas") (IRConst (VFloat 0.6)))
+                      (IRConst (VFloat 0.0))
+                      (IRTCons call call)
+          env  = [ genGroup "caller" body
+                 , genGroup "detT" (IRConst (VFloat 1.0)) ]
+      assertEqual "the deterministic call is read once through a shared binding" 1
+        (countIRVar "detT_gen" (optimizedGen "caller" env))
+  -- distributeIf keeps one copy of a condition the tuple evaluated once per
+  -- leaf, so an effectful condition would have its draws fused --
+  -- @(if Uniform < 0.5 then 0 else 1, if Uniform < 0.5 then 0 else 1)@ would
+  -- stop producing the mixed outcomes altogether
+  -- (testCases/tupleSharedCondIndependentDraws).
+  , testCase "distributeIf refuses to fuse an effectful shared condition" $ do
+      let cond = IROp OpLessThan (IRSample IRUniform) (IRConst (VFloat 0.5))
+          arm x y = IRIf cond (IRConst (VInt x)) (IRConst (VInt y))
+          tup = IRTCons (arm 0 1) (arm 0 1)
+      assertEqual "the tuple is left alone" tup (distributeIf noDetGens False tup)
+      assertEqual "...also under the -O3 constant-merging variant" tup
+        (distributeIf noDetGens True tup)
+  -- The pure direction still distributes, so the gate above is not a blanket
+  -- disabling of the rewrite.
+  , testCase "distributeIf still hoists a pure shared condition" $ do
+      let cond = IROp OpLessThan (IRVar "x") (IRConst (VFloat 0.5))
+          arm x y = IRIf cond (IRConst (VInt x)) (IRConst (VInt y))
+          tup = IRTCons (arm 0 1) (arm 2 3)
+      assertEqual "condition hoisted in front of the tuple"
+        (IRIf cond (IRTCons (IRConst (VInt 0)) (IRConst (VInt 2)))
+                   (IRTCons (IRConst (VInt 1)) (IRConst (VInt 3))))
+        (distributeIf noDetGens False tup)
+  -- A condition that calls a generate group is judged by the whole-program
+  -- analysis, not by the name alone: the same tuple is refused when the callee
+  -- samples and hoisted when it does not.
+  , testCase "distributeIf judges a generator condition by deterministicGens" $ do
+      let cond = IROp OpLessThan (IRApply (IRVar "c_gen") (IRVar "t")) (IRConst (VFloat 0.5))
+          arm x y = IRIf cond (IRConst (VInt x)) (IRConst (VInt y))
+          tup = IRTCons (arm 0 1) (arm 2 3)
+          envWith b = OptEnv (deterministicGens [genGroup "c" b]) Set.empty
+      assertEqual "a stochastic callee blocks the hoist" tup
+        (distributeIf (envWith (IRSample IRUniform)) False tup)
+      assertBool "a deterministic callee does not"
+        (distributeIf (envWith (IRConst (VFloat 1.0))) False tup /= tup)
+  -- Repro 1 of the task: the two calls differ in their *second* argument, so the
+  -- shared @genS_gen thetas@ prefix is a partial application. Hoisting it emits
+  -- a call with the wrong arity (the scalar backends flatten an application
+  -- spine into one call site), which crashed the generated Python with a
+  -- TypeError. Both calls must stay written out in full.
+  , testCase "CSE does not hoist a shared partial-application prefix" $ do
+      let call a = IRApply (IRApply (IRVar "genS_gen") (IRVar "thetas")) a
+          body = IRIf (IROp OpLessThan (IRSample IRUniform) (IRConst (VFloat 0.6)))
+                      (IRVar "cont")
+                      (call (IRCons (IRConst (VInt 1)) (call (IRVar "cont"))))
+          opt = optimizedGen "genS" [genGroup "genS" body]
+      assertEqual "both call sites keep their own head" 2 (countIRVar "genS_gen" opt)
+      assertBool "no binding holds a partially applied generator"
+        (not (any hoistedGenPrefix (irLetBindings opt)))
+  ]
+  where
+    noDetGens = OptEnv Set.empty Set.empty
+    genGroup n body = IRFunGroup { groupName = n, genFun = Just (body, "")
+                                 , probFun = Nothing, integFun = Nothing
+                                 , encodeFun = Nothing, normalFun = Nothing
+                                 , groupDoc = "", sampleDomain = Nothing }
+    -- Optimize a whole environment (so 'deterministicGens' sees the call graph)
+    -- and hand back the named group's generate body.
+    optimizedGen n groups =
+      case optimizeEnv defaultCompilerConfig (IREnv groups [] []) of
+        IREnv groups' _ _ ->
+          case [b | g <- groups', groupName g == n, Just (b, _) <- [genFun g]] of
+            (b:_) -> b
+            []    -> error ("optimizedGen: no generate body for " ++ n)
+    irLetBindings e = [v | IRLetIn _ v _ <- flatten e]
+    flatten e = e : concatMap flatten (getIRSubExprs e)
+    -- @genS_gen@ is binary here, so a one-argument spine bound to a let is
+    -- necessarily the partial application repro 1 crashed on.
+    hoistedGenPrefix (IRApply (IRVar n) _) = isEffectfulVar n
+    hoistedGenPrefix _                     = False
+
+-- ---------------------------------------------------------------------------
 -- Batched-mode refusals with no corpus trigger (design pytorch-tensorizer)
 -- ---------------------------------------------------------------------------
 
@@ -2256,6 +2386,7 @@ internalsTests = testGroup "Internals"
   , planOverCouplingRefusalTests
   , test_tstBackendsHeader
   , optimizerPurityTests
+  , stochasticCallTests
   , batchedRefusalUnitTests
   , decomposabilityGateTests
   , materializationGuardTests

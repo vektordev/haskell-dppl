@@ -6,6 +6,8 @@ module SPLL.IROptimizer (
 , OptStats(..)
 , OptEnv(..)
 , optimizeStats
+, deterministicGens
+, distributeIf
 ) where
 
 import SPLL.IntermediateRepresentation
@@ -243,7 +245,7 @@ optimizeStats' conf det stages e0 = runState (nodeWise e0 >>= commonSubexprStage
     letInStage = loopStage "letIn" (oLvl >= 2) (optimizeLetIns det)
     constantDistrStage = loopStage "constantDistr" (oLvl >= 2) evalConstantDistr
     simplifyStage = loopStage "simplify" (oLvl >= 1) (simplify det)
-    distributeConditionals = loopStage "distributeIf" (oLvl >= 2) (distributeIf (oLvl >= 3))
+    distributeConditionals = loopStage "distributeIf" (oLvl >= 2) (distributeIf det (oLvl >= 3))
     -- No telemetry either way (it only runs under --pruneAnyChecks), so it keeps
     -- the conservative placement.
     pruneAnyCkecksStage = loopStage "pruneAnyChecks" (pruneAnyChecks conf) pruneAnyCkecksExpr
@@ -329,8 +331,17 @@ indexOfChain elemExpr vals = go (zip [0 ..] vals)
 -- scan. Measured on the corpus it cuts emitted code ~13% and halves the
 -- enumerated work in neural-enumeration programs, while
 -- @testCases/planEnumRecDeepCount.ppl@ goes from 1.2s to 9.0s to compile.
-distributeIf :: Bool -> IRExpr -> IRExpr
-distributeIf mergeOverConstants e@(IRTCons _ _)
+--
+-- The shared condition must be __pure__ ('isPureGiven'), for the same reason
+-- CSE and 'optimizeLetIns' consult purity (tasks ir-effectful-var-purity,
+-- stochastic-call-cse-unsound): the rewrite keeps one copy of a condition that
+-- the tuple evaluated once per leaf, so an effectful condition would have its
+-- draws fused. @(if Uniform < 0.5 then 1 else 2, if Uniform < 0.5 then 1 else
+-- 2)@ is two independent coin flips in the source and the two syntactically
+-- equal conditions are two distinct draws in the IR; distributing them made the
+-- mixed outcomes @(1,2)@ and @(2,1)@ unreachable, silently and with no crash.
+distributeIf :: OptEnv -> Bool -> IRExpr -> IRExpr
+distributeIf det mergeOverConstants e@(IRTCons _ _)
   | leavesShareCond = IRIf cond (mapTupleLeaves ifThen e) (mapTupleLeaves ifElse e)
   where
     leaves = tupleTreeLeaves e
@@ -340,6 +351,7 @@ distributeIf mergeOverConstants e@(IRTCons _ _)
     isConditional _            = False
     leavesShareCond = not (null conds)
       && all (== head conds) (tail conds)
+      && isPureGiven (optDetGens det) (head conds)
       && if mergeOverConstants
            then length conds >= 2 && all isValue nonConditional
            else null nonConditional
@@ -348,7 +360,7 @@ distributeIf mergeOverConstants e@(IRTCons _ _)
     ifThen x = x
     ifElse (IRIf _ _ el) = el
     ifElse x = x
-distributeIf _ x = x
+distributeIf _ _ x = x
 
 -- | The leaves of a tree of nested IRTCons (everything that is not itself an IRTCons).
 tupleTreeLeaves :: IRExpr -> [IRExpr]
