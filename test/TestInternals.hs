@@ -29,7 +29,8 @@ import Data.Foldable (toList)
 import Data.List (isInfixOf, intercalate)
 import Control.Exception (try, evaluate, ErrorCall(..))
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure)
+import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure, (@?=))
+import IRInterpreter (generateDet)
 import TestCaseParser (Backend(..), TestCase(..), defaultBackends, parseTestCasesFromString)
 import Test.Tasty.QuickCheck (testProperties)
 import System.Random (StdGen)
@@ -397,10 +398,27 @@ test_encodeBoolExactProbs = testCase "encodeBoolExactProbs" $ do
     Right other -> assertFailure ("expected VList, got: " ++ show other)
 
 -- | True if `name` is directly applied (IRApply (IRVar name) _) anywhere inside
--- an IREnumSum body.  Used to check that NN forward calls are hoisted out of loops.
+-- an enumeration loop body.  Used to check that NN forward calls are hoisted
+-- out of loops.
+--
+-- The loop is a tensor map since the enum-sum lowering (design
+-- ir-tensor-values): matching 'IREnumSum' here would make the assertion below
+-- vacuously true, because no 'IREnumSum' survives that pass.
 nnCallInsideEnumSum :: String -> IRExpr -> Bool
 nnCallInsideEnumSum name (IREnumSum _ _ body) = containsDirectNNApply name body
+nnCallInsideEnumSum name (IRBuiltin BMap [IRLambda _ body, _]) = containsDirectNNApply name body
 nnCallInsideEnumSum name expr = any (nnCallInsideEnumSum name) (getIRSubExprs expr)
+
+-- | Is there an enumeration loop anywhere in this expression, under either
+-- spelling? Guards the hoisting assertion above against going vacuous.
+irAnyLoop :: IRExpr -> Bool
+irAnyLoop e = isLoop e || any irAnyLoop (getIRSubExprs e)
+  where
+    isLoop IREnumSum{} = True
+    isLoop IRLogEnumSum{} = True
+    isLoop IREnumSumPaired{} = True
+    isLoop (IRBuiltin BMap _) = True
+    isLoop _ = False
 
 containsDirectNNApply :: String -> IRExpr -> Bool
 containsDirectNNApply name (IRApply (IRVar v) _) = v == name
@@ -420,7 +438,14 @@ test_nnHoistedOutOfEnumSum = testCase "nnHoistedOutOfEnumSum" $ do
           (probExpr, _) <- case probFun (lookupIREnv "main" irEnv) of
             Just pf -> return pf
             Nothing -> assertFailure "compiled main has no probability variant"
-          assertBool "readMNist forward call should be hoisted outside IREnumSum" $
+          -- Assert the loop is there before asserting nothing is inside it:
+          -- the property is "hoisted out of the loop", so a compile with no
+          -- loop at all would satisfy the negative check vacuously. That is
+          -- not hypothetical -- it is what happened when the enum-sum lowering
+          -- (design ir-tensor-values) replaced IREnumSum with a tensor map.
+          assertBool "mNistAdd's probability body should still contain an enumeration loop" $
+            irAnyLoop probExpr
+          assertBool "readMNist forward call should be hoisted outside the enumeration loop" $
             not (nnCallInsideEnumSum "readMNist" probExpr)
 
 -- A program with no "main" function must be rejected with a descriptive
@@ -2349,6 +2374,7 @@ test_observeContinuousRenormalizes = testCase "observeContinuousRenormalizes" $
 internalsTests :: TestTree
 internalsTests = testGroup "Internals"
   [ testProperties "properties" $(allProperties)
+  , testGroup "tensor builtins" tensorBuiltinTests
   , classConstraintTests
   , forwardChainingCertTests
   , witnessedBindingTests
@@ -2405,4 +2431,92 @@ internalsTests = testGroup "Internals"
 slowInternalsTests :: TestTree
 slowInternalsTests = testGroup "Internals (slow)"
   [ test_planEnumRecTopKAndBC
+  ]
+
+-- ===========================================================================
+-- Tensor builtins: the general-rank interpreter semantics (ir-tensor-values)
+-- ===========================================================================
+
+-- The compiler only ever builds rank-1 tensors today (an enumeration is one
+-- axis), and every backend emits rank 1 only. The interpreter, as the reference
+-- semantics, implements the general rank -- so these are what keep that code
+-- live and pin the layout convention the rest of the compiler is written
+-- against. Without them the stride arithmetic would be unreachable code.
+
+-- | Evaluate a closed IR expression with no neural networks or globals.
+evalClosedIR :: IRExpr -> Either String IRValue
+evalClosedIR = generateDet [] [] (IREnv [] [] []) []
+
+vfs :: [Double] -> [IRValue]
+vfs = map VFloat
+
+-- | A rank-2 tensor is flat and row-major, outermost axis first: shape [2,3]
+-- over 1..6 means row 0 is [1,2,3]. Reducing axis 0 adds down the columns,
+-- reducing axis 1 adds along the rows -- and the two disagree, which is the
+-- point of pinning it.
+test_tensorRank2Reduce :: TestTree
+test_tensorRank2Reduce = testCase "tensorRank2Reduce" $ do
+  let t = IRBuiltin (BTensor [EFixed 2, EFixed 3]) (map (IRConst . VFloat) [1,2,3,4,5,6])
+  evalClosedIR (IRBuiltin (BReduce ROpAdd 0) [t])
+    @?= Right (VTensor [EFixed 3] (vfs [5, 7, 9]))
+  evalClosedIR (IRBuiltin (BReduce ROpAdd 1) [t])
+    @?= Right (VTensor [EFixed 2] (vfs [6, 15]))
+
+-- | Reducing the last remaining axis yields a scalar, not a rank-0 tensor:
+-- rank 0 is not an inhabited shape (design tensors-in-core-language §2.3).
+test_tensorReduceToScalar :: TestTree
+test_tensorReduceToScalar = testCase "tensorReduceToScalar" $ do
+  let t = IRBuiltin (BTensor [EFixed 3]) (map (IRConst . VFloat) [1,2,3])
+  evalClosedIR (IRBuiltin (BReduce ROpAdd 0) [t]) @?= Right (VFloat 6)
+  let t2 = IRBuiltin (BTensor [EFixed 2, EFixed 2]) (map (IRConst . VFloat) [1,2,3,4])
+  evalClosedIR (IRBuiltin (BReduce ROpAdd 0) [IRBuiltin (BReduce ROpAdd 1) [t2]])
+    @?= Right (VFloat 10)
+
+-- | Indexing drops the indexed axis, and which axis it drops matters.
+test_tensorRank2Index :: TestTree
+test_tensorRank2Index = testCase "tensorRank2Index" $ do
+  let t = IRBuiltin (BTensor [EFixed 2, EFixed 3]) (map (IRConst . VFloat) [1,2,3,4,5,6])
+  -- row 1
+  evalClosedIR (IRBuiltin (BIndex 0) [t, IRConst (VInt 1)])
+    @?= Right (VTensor [EFixed 3] (vfs [4, 5, 6]))
+  -- column 2
+  evalClosedIR (IRBuiltin (BIndex 1) [t, IRConst (VInt 2)])
+    @?= Right (VTensor [EFixed 2] (vfs [3, 6]))
+  -- a rank-1 index is a scalar
+  let t1 = IRBuiltin (BTensor [EFixed 3]) (map (IRConst . VFloat) [7,8,9])
+  evalClosedIR (IRBuiltin (BIndex 0) [t1, IRConst (VInt 2)]) @?= Right (VFloat 9)
+
+-- | A map preserves shape and touches every element, at any rank.
+test_tensorMapPreservesShape :: TestTree
+test_tensorMapPreservesShape = testCase "tensorMapPreservesShape" $ do
+  let t = IRBuiltin (BTensor [EFixed 2, EFixed 2]) (map (IRConst . VFloat) [1,2,3,4])
+      doubled = IRBuiltin BMap
+        [IRLambda "x" (IROp OpMult (IRVar "x") (IRConst (VFloat 2))), t]
+  evalClosedIR doubled @?= Right (VTensor [EFixed 2, EFixed 2] (vfs [2, 4, 6, 8]))
+
+-- | log-sum-exp reduces with the right identity, and absorbs the log-space
+-- zero (-inf) rather than producing a NaN through exp(-inf - -inf).
+test_tensorLogSumExpZero :: TestTree
+test_tensorLogSumExpZero = testCase "tensorLogSumExpZero" $ do
+  let t = IRBuiltin (BTensor [EFixed 2])
+            [IRConst (VFloat (-1/0)), IRConst (VFloat (-1/0))]
+  evalClosedIR (IRBuiltin (BReduce ROpLogSumExp 0) [t]) @?= Right (VFloat (-1/0))
+  let t2 = IRBuiltin (BTensor [EFixed 2]) [IRConst (VFloat (-1/0)), IRConst (VFloat 0)]
+  evalClosedIR (IRBuiltin (BReduce ROpLogSumExp 0) [t2]) @?= Right (VFloat 0)
+
+-- | An empty axis reduces to the operator's identity rather than failing.
+test_tensorEmptyReduce :: TestTree
+test_tensorEmptyReduce = testCase "tensorEmptyReduce" $ do
+  let t = IRBuiltin (BTensor [EFixed 0]) []
+  evalClosedIR (IRBuiltin (BReduce ROpAdd 0) [t]) @?= Right (VFloat 0)
+  evalClosedIR (IRBuiltin (BReduce ROpLogSumExp 0) [t]) @?= Right (VFloat (-1/0))
+
+tensorBuiltinTests :: [TestTree]
+tensorBuiltinTests =
+  [ test_tensorRank2Reduce
+  , test_tensorReduceToScalar
+  , test_tensorRank2Index
+  , test_tensorMapPreservesShape
+  , test_tensorLogSumExpZero
+  , test_tensorEmptyReduce
   ]
