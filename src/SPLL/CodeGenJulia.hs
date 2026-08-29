@@ -10,7 +10,7 @@ import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.Lang.Lang
 import Data.List (intercalate, dropWhileEnd)
 import SPLL.Lang.Types
-import SPLL.Typing.RType (RType(..))
+import SPLL.Typing.RType (RType(..), shapeRank)
 import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage)
 import Data.Maybe (fromMaybe)
 import Data.Functor ((<&>))
@@ -357,33 +357,37 @@ generateExpression (IRLetIn name val body) = do
     v <- generateExpression val
     b <- generateExpression body
     return $ "(let " ++ name ++ " = " ++ v ++ "; " ++ b ++ " end)"
--- The dense builtins (design ir-tensor-values); see the note in
--- CodeGenPyTorch. A Julia dense axis is a Vector, so BIndex is an O(1) read
+-- The tensor builtins (design ir-tensor-values); see the note in
+-- CodeGenPyTorch. A Julia rank-1 tensor is a Vector, so BIndex is an O(1) read
 -- against IRIndex's cons walk. Indices are 1-based, hence the "+ 1" that
--- IRIndex also carries.
-generateExpression (IRBuiltin BDense elems) = do
-    es <- mapM generateExpression elems
-    return $ "[" ++ intercalate ", " es ++ "]"
-generateExpression (IRBuiltin BMap [IRLambda v body, d]) = do
+-- IRIndex also carries. Rank > 1 and axis > 0 are refused, as there too.
+generateExpression (IRBuiltin (BTensor sh) elems)
+    | shapeRank sh == 1 = do
+        es <- mapM generateExpression elems
+        return $ "[" ++ intercalate ", " es ++ "]"
+    | otherwise = error (juliaRankUnsupported "BTensor" (shapeRank sh))
+generateExpression (IRBuiltin BMap [IRLambda v body, t]) = do
     b <- generateExpression body
-    dd <- generateExpression d
-    return $ "[" ++ b ++ " for " ++ v ++ " in " ++ dd ++ "]"
-generateExpression (IRBuiltin BMap [f, d]) = do
+    tt <- generateExpression t
+    return $ "[" ++ b ++ " for " ++ v ++ " in " ++ tt ++ "]"
+generateExpression (IRBuiltin BMap [f, t]) = do
     ff <- generateExpression f
-    dd <- generateExpression d
-    return $ "map(" ++ ff ++ ", " ++ dd ++ ")"
+    tt <- generateExpression t
+    return $ "map(" ++ ff ++ ", " ++ tt ++ ")"
 -- sum needs an explicit init: Julia raises on a reduction over an empty
 -- collection, where a zero-extent axis must reduce to the operator identity.
-generateExpression (IRBuiltin (BReduce ROpAdd) [d]) = do
-    dd <- generateExpression d
-    return $ "sum(" ++ dd ++ "; init=0.0)"
-generateExpression (IRBuiltin (BReduce ROpLogSumExp) [d]) = do
-    dd <- generateExpression d
-    return $ "logsumexp(" ++ dd ++ ")"
-generateExpression (IRBuiltin BIndex [d, k]) = do
-    dd <- generateExpression d
+generateExpression (IRBuiltin (BReduce ROpAdd 0) [t]) = do
+    tt <- generateExpression t
+    return $ "sum(" ++ tt ++ "; init=0.0)"
+generateExpression (IRBuiltin (BReduce ROpLogSumExp 0) [t]) = do
+    tt <- generateExpression t
+    return $ "logsumexp(" ++ tt ++ ")"
+generateExpression (IRBuiltin (BReduce _ ax) _) = error (juliaAxisUnsupported "BReduce" ax)
+generateExpression (IRBuiltin (BIndex 0) [t, k]) = do
+    tt <- generateExpression t
     kk <- generateExpression k
-    return $ "(" ++ dd ++ ")[" ++ kk ++ " + 1]"
+    return $ "(" ++ tt ++ ")[" ++ kk ++ " + 1]"
+generateExpression (IRBuiltin (BIndex ax) _) = error (juliaAxisUnsupported "BIndex" ax)
 generateExpression (IRError e) =
     return $ "throw(\"" ++ escapeStr e ++ "\")"
 generateExpression (IRConformsTo t x) = do
@@ -441,3 +445,15 @@ getLambdaNames :: IRExpr -> ([String], IRExpr)
 getLambdaNames (IRLambda n body) = (n:names, rest)
   where (names, rest) = getLambdaNames body
 getLambdaNames x = ([], x)
+
+-- | Diagnostics for the tensor ranks and axes this backend does not emit; see
+-- the note on the tensor builtins above.
+juliaRankUnsupported :: String -> Int -> String
+juliaRankUnsupported what r =
+  what ++ ": only rank-1 tensors are emitted, got rank " ++ show r
+       ++ " (the representation admits it; no backend lowers it yet)"
+
+juliaAxisUnsupported :: String -> Int -> String
+juliaAxisUnsupported what ax =
+  what ++ ": only axis 0 is emitted, got axis " ++ show ax
+       ++ " (the representation admits it; no backend lowers it yet)"

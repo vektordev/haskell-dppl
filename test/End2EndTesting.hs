@@ -1577,8 +1577,9 @@ generateDriver nonNeuralProbes neuralProbes = unlines $
 
 -- | Corpus programs whose probability body enumerates two enumerable operands
 -- -- the shape that reaches 'SPLL.Semiring.enumSumP', and therefore the only
--- one that builds an 'IREnumSumPaired'. Asserted, not filtered: if a compiler
--- change stops routing these through the paired node, the group says so rather
+-- one that needs a @(probability, branchCount)@ pair reduced out of a single
+-- pass over the enumeration. Asserted, not filtered: if a compiler change
+-- stops routing these through the shared-loop node, the group says so rather
 -- than silently testing nothing.
 branchCountPairedPrograms :: [String]
 branchCountPairedPrograms =
@@ -1600,11 +1601,11 @@ branchCountBackendTests :: IO TestTree
 branchCountBackendTests = do
   loaded <- mapM loadBranchCountCase branchCountPairedPrograms
   return $ testGroup "BranchCountBackends"
-    [ testGroup "uses the paired enum sum"
+    [ testGroup "shares one enumeration pass between both reductions"
         [ testProperty n (once (counterexample
-            (n ++ " no longer compiles to an IREnumSumPaired under countBranches; \
+            (n ++ " no longer compiles to a shared enumeration pass under countBranches; \
                   \pick a program that does, or this group tests nothing")
-            (any (irAnyNode isPaired) (irEnvBodies env))))
+            (any sharesOneMapAcrossTwoReduces (irEnvBodies env))))
         | (n, _, env, _) <- loaded ]
     -- The paired node's log-space reduction (log-sum-exp on the probability
     -- component, a plain sum on the branch count) is a second code path in
@@ -1617,8 +1618,32 @@ branchCountBackendTests = do
     , testGroup "Python"
         [ testProperty n (once (branchCountPython n env rows)) | (n, _, env, rows) <- loaded ]
     ]
-  where isPaired IREnumSumPaired{} = True
-        isPaired _                 = False
+-- | The property 'IREnumSumPaired' existed to provide, checked structurally on
+-- the tensor lowering that replaced it (design ir-tensor-values): some
+-- let-bound tensor map is read by two or more separate reductions.
+--
+-- This is the load-bearing half of that node. A branch-counting compile needs
+-- both a probability sum and a branch-count sum over one enumeration, and two
+-- single-scalar loops could not share a loop body -- so before the tensor
+-- lowering each re-embedded the whole per-iteration computation, doubling the
+-- IR at every level of a recursively-enumerable structure (fuzz-qc-compiler-bugs
+-- item 3). Naming the mapped axis is what makes the sharing expressible, so
+-- asserting the shared read is a stronger check than asserting a constructor:
+-- it fails if a future rewrite reintroduces the duplication under any spelling.
+sharesOneMapAcrossTwoReduces :: IRExpr -> Bool
+sharesOneMapAcrossTwoReduces = irAnyNode shared
+  where
+    shared (IRLetIn n (IRBuiltin BMap _) body) = reducesOf n body >= 2
+    shared _ = False
+    -- Reductions in `body` whose operand mentions the bound axis `n`.
+    reducesOf n body = length
+      [ () | e <- irNodes body
+           , IRBuiltin (BReduce _ _) [t] <- [e]
+           , irAnyNode (== IRVar n) t ]
+
+-- | Every node of an expression, itself included.
+irNodes :: IRExpr -> [IRExpr]
+irNodes e = e : concatMap irNodes (getIRSubExprs e)
 
 -- | A program, its branch-counted compile, and one row per pinned query point
 -- carrying the interpreter's @(prob, dim, branchCount)@ for it.

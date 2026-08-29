@@ -468,51 +468,84 @@ generate f neurals' registry adts' globalEnv env args (IRIndex lstExpr idxExpr) 
       VInt i -> return $ l `elementAt` i
       _ -> error "Index must be an integer"
     _ -> error "Expression must be a list"
--- The dense builtins (design ir-tensor-values). The interpreter is the
--- reference semantics: a dense axis is a flat list of values here, and the
--- speed the axis exists for is a codegen concern (a dense of primitives lowers
--- to a real tensor/array), not an interpreter one.
-generate f neurals' registry adts' globalEnv env args (IRBuiltin BDense elems) = do
+-- The tensor builtins (design ir-tensor-values). The interpreter is the
+-- reference semantics, and it is the one consumer that implements the general
+-- rank: a tensor is a shape plus a flat row-major block here, so reducing or
+-- indexing along an arbitrary axis is stride arithmetic rather than new
+-- machinery. The backends emit rank 1 only; these cases are what pin the
+-- layout convention the rest of the compiler is written against.
+generate f neurals' registry adts' globalEnv env args (IRBuiltin (BTensor sh) elems) = do
   vals <- mapM (generate f neurals' registry adts' globalEnv env args) elems
-  return $ VDense vals
-generate f neurals' registry adts' globalEnv env args (IRBuiltin BMap [fExpr, denseExpr]) = do
-  denseVal <- generate f neurals' registry adts' globalEnv env args denseExpr
-  case denseVal of
-    VDense xs -> do
+  if length vals == shapeNumel sh
+    then return $ VTensor sh vals
+    else error ("BTensor: shape " ++ show sh ++ " needs " ++ show (shapeNumel sh)
+                ++ " elements, got " ++ show (length vals))
+generate f neurals' registry adts' globalEnv env args (IRBuiltin BMap [fExpr, tExpr]) = do
+  tVal <- generate f neurals' registry adts' globalEnv env args tExpr
+  case tVal of
+    VTensor sh xs -> do
       ys <- mapM (\x -> generate f neurals' registry adts' globalEnv env args (IRApply fExpr (IRConst x))) xs
-      return $ VDense ys
-    _ -> error ("BMap: not a dense axis: " ++ show denseVal)
--- Reduction starts from the operator's identity and folds right, matching the
--- association order the enum-sum family uses (foldrM over the same domain), so
--- a lowering from IREnumSum reduces the same terms in the same order.
-generate f neurals' registry adts' globalEnv env args (IRBuiltin (BReduce op) [denseExpr]) = do
-  denseVal <- generate f neurals' registry adts' globalEnv env args denseExpr
-  case denseVal of
-    VDense xs -> return $ foldr (reduceStep op) (reduceIdentity op) xs
-    _ -> error ("BReduce: not a dense axis: " ++ show denseVal)
-generate f neurals' registry adts' globalEnv env args (IRBuiltin BIndex [denseExpr, keyExpr]) = do
-  denseVal <- generate f neurals' registry adts' globalEnv env args denseExpr
+      return $ VTensor sh ys
+    _ -> error ("BMap: not a tensor: " ++ show tVal)
+-- Reduction folds right within each fibre, matching the association order the
+-- enum-sum family uses (foldrM over the same domain), so a lowering from
+-- IREnumSum reduces the same terms in the same order.
+generate f neurals' registry adts' globalEnv env args (IRBuiltin (BReduce op ax) [tExpr]) = do
+  tVal <- generate f neurals' registry adts' globalEnv env args tExpr
+  case tVal of
+    VTensor sh xs -> case fibres ax sh xs of
+      Nothing -> error ("BReduce: axis " ++ show ax ++ " out of range for shape " ++ show sh)
+      Just (sh', groups) ->
+        return $ rewrap sh' (map (foldr (reduceStep op) (reduceIdentity op)) groups)
+    _ -> error ("BReduce: not a tensor: " ++ show tVal)
+generate f neurals' registry adts' globalEnv env args (IRBuiltin (BIndex ax) [tExpr, keyExpr]) = do
+  tVal <- generate f neurals' registry adts' globalEnv env args tExpr
   keyVal <- generate f neurals' registry adts' globalEnv env args keyExpr
-  case (denseVal, keyVal) of
-    (VDense xs, VInt i)
-      | i >= 0 && i < length xs -> return (xs !! i)
-      | otherwise -> error ("BIndex: key " ++ show i ++ " out of bounds for extent " ++ show (length xs))
-    (VDense _, k) -> error ("BIndex: key must be an integer, got " ++ show k)
-    (d, _) -> error ("BIndex: not a dense axis: " ++ show d)
+  case (tVal, keyVal) of
+    (VTensor sh xs, VInt i) -> case fibres ax sh xs of
+      Nothing -> error ("BIndex: axis " ++ show ax ++ " out of range for shape " ++ show sh)
+      Just (sh', groups)
+        | i >= 0 && i < extentSize (sh !! ax) -> return $ rewrap sh' (map (!! i) groups)
+        | otherwise -> error ("BIndex: key " ++ show i ++ " out of bounds for axis "
+                              ++ show ax ++ " of shape " ++ show sh)
+    (VTensor _ _, k) -> error ("BIndex: key must be an integer, got " ++ show k)
+    (t, _) -> error ("BIndex: not a tensor: " ++ show t)
 generate _ _ _ _ _ _ _ e@(IRBuiltin b args) =
-  error ("Malformed dense builtin " ++ show b ++ " with " ++ show (length args)
+  error ("Malformed tensor builtin " ++ show b ++ " with " ++ show (length args)
          ++ " arguments: " ++ show e)
 generate _ _ _ _ _ _ _ (IRError s) = error $ "Error during interpretation: " ++ s
 generate _ _ _ _ _ _ _ expr = error ("Expression is not yet implemented " ++ show expr)
 
 
--- | The identity element of a dense reduction, which is also the result of
+-- | Regroup a flat row-major block into the fibres along one axis: every group
+-- is the sequence of elements that differ only in their @ax@ coordinate, in
+-- increasing order of it, and the returned shape is the input shape with that
+-- axis dropped. Reducing or indexing an axis is then a map over the groups.
+--
+-- 'Nothing' if the axis is out of range. For the rank-1 case everything today
+-- takes, this is one group holding the whole block.
+fibres :: Int -> Shape -> [a] -> Maybe (Shape, [[a]])
+fibres ax sh xs = do
+  sh' <- dropAxis ax sh
+  let n     = extentSize (sh !! ax)
+      inner = shapeNumel (drop (ax + 1) sh)   -- stride between consecutive ax coordinates
+      outer = shapeNumel (take ax sh)
+      at o i j = xs !! (((o * n) + i) * inner + j)
+  return (sh', [ [ at o i j | i <- [0 .. n - 1] ] | o <- [0 .. outer - 1], j <- [0 .. inner - 1] ])
+
+-- | Rebuild a value from the per-fibre results: a scalar when the remaining
+-- shape is empty (rank 0 is not an inhabited tensor), a tensor otherwise.
+rewrap :: Shape -> [GenericValue a] -> GenericValue a
+rewrap [] [v] = v
+rewrap sh vs  = VTensor sh vs
+
+-- | The identity element of a tensor reduction, which is also the result of
 -- reducing an empty axis.
 reduceIdentity :: ReduceOp -> IRValue
 reduceIdentity ROpAdd = VFloat 0
 reduceIdentity ROpLogSumExp = VFloat ((-1) / 0)
 
--- | One step of a dense reduction. Log-sum-exp guards both infinities the way
+-- | One step of a tensor reduction. Log-sum-exp guards both infinities the way
 -- IRLogEnumSum does, so a -inf term (the log-space zero) is absorbed rather
 -- than producing a NaN via @exp (-inf - -inf)@.
 reduceStep :: ReduceOp -> IRValue -> IRValue -> IRValue

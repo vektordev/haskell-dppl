@@ -143,6 +143,62 @@ def is_member(x, vals):
     mask = mask | (xt == v)
   return mask
 
+# --- tensors (design ir-tensor-values) --------------------------------------
+# A rank-1 tensor reaches emitted batched code as a Python list of [B] tensors
+# -- one entry per element of a statically-known extent E. The list is what a
+# BMap produces, because a map's body is arbitrary IR that has to be evaluated
+# once per element; the vectorization opportunity is in the *consumers* below,
+# which stack the list into one [E, B] tensor and run a single kernel over it
+# instead of E-1 sequential ones.
+#
+# That stack is the "tensor of primitive lowers to a real tensor"
+# specialization: here an element is a [B] tensor, so it always applies. A
+# zero-extent axis reduces to the operator identity, and a lone element needs
+# no stack at all.
+
+def _tensor_stack(xs):
+  # [E, B] from a list of [B] tensors. Elements that are Python scalars (a
+  # folded constant arm) are broadcast up against the tensor elements, so a
+  # partially-folded axis still stacks.
+  ts = [x for x in xs if torch.is_tensor(x)]
+  if not ts:
+    return torch.stack([astensor(x) for x in xs])
+  ref = ts[0]
+  return torch.stack([x if torch.is_tensor(x) else torch.full_like(ref, float(x))
+                      for x in xs])
+
+def tensor_sum(xs):
+  if not xs:
+    return torch.tensor(0.0)
+  if len(xs) == 1:
+    return xs[0]
+  return _tensor_stack(xs).sum(0)
+
+def tensor_logsumexp(xs):
+  if not xs:
+    return torch.tensor(-math.inf)
+  if len(xs) == 1:
+    return xs[0]
+  return torch.logsumexp(_tensor_stack(xs), 0)
+
+def tensor_index(xs, idx):
+  # Read one element per batch position: xs is the axis (length E, each [B]),
+  # idx a [B] integer tensor choosing which element each position reads. One
+  # gather over the [E, B] stack, rather than an E-arm torch.where cascade that
+  # evaluates every arm.
+  #
+  # The index is clamped for the same reason nn_gather's is: under select
+  # semantics an out-of-range position still reaches this read even though the
+  # enclosing mask discards its value.
+  if not xs:
+    raise Exception("tensor_index on a zero-extent axis")
+  stacked = _tensor_stack(xs)
+  idx_t = idx.long() if torch.is_tensor(idx) else torch.tensor(int(idx))
+  idx_t = idx_t.clamp(0, stacked.shape[0] - 1)
+  if idx_t.dim() == 0:
+    return stacked[idx_t]
+  return stacked.gather(0, idx_t.unsqueeze(0).expand(1, stacked.shape[1])).squeeze(0)
+
 # --- tuple (structure-of-arrays leaf carrier) --------------------------------
 # Identical to pythonLib.T; a fixed tuple whose leaves are [B] tensors.
 

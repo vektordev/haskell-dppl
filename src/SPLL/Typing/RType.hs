@@ -2,6 +2,12 @@
 module SPLL.Typing.RType
   ( TVarR(..)
   , RType(..)
+  , Shape
+  , Extent(..)
+  , extentSize
+  , shapeNumel
+  , shapeRank
+  , dropAxis
   , ClassConstraint(..)
   , Scheme(..)
   , matches
@@ -12,6 +18,43 @@ module SPLL.Typing.RType
 
 newtype TVarR = TV String
   deriving (Show, Eq, Ord)
+
+-- | The shape of a tensor: the extent of each axis, outermost first. The rank
+-- is the length. Lives beside 'RType' rather than in the IR because the typed
+-- surface tensor of design tensors-in-core-language (§2.2) is
+-- @TTensor Shape RType@ over this same type -- so when that lands, the surface
+-- type lowers onto the IR value already carrying the shape, with nothing to
+-- re-represent.
+type Shape = [Extent]
+
+-- | The extent of one axis.
+--
+-- A sum type with a single constructor on purpose (design
+-- tensors-in-core-language §9.4, hedge 1): shape /variables/ are deliberately
+-- out of v1, and spelling this @type Shape = [Int]@ would make admitting an
+-- @EVar@ later a change to the arity of every shape pattern in the compiler
+-- rather than one new constructor.
+newtype Extent = EFixed Int
+  deriving (Show, Eq, Ord)
+
+extentSize :: Extent -> Int
+extentSize (EFixed n) = n
+
+-- | The number of elements a shape holds -- the product of its extents. A
+-- rank-0 shape has one element by this rule, but rank 0 is not an inhabited
+-- shape (see the note on 'shapeRank').
+shapeNumel :: Shape -> Int
+shapeNumel = product . map extentSize
+
+shapeRank :: Shape -> Int
+shapeRank = length
+
+-- | Drop one axis from a shape, as a reduction or an index along that axis
+-- does. 'Nothing' when the axis is out of range.
+dropAxis :: Int -> Shape -> Maybe Shape
+dropAxis i sh
+  | i >= 0 && i < length sh = Just (take i sh ++ drop (i + 1) sh)
+  | otherwise = Nothing
   
 data RType = TBool
            | TInt

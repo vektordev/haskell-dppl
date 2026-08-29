@@ -13,7 +13,7 @@ module SPLL.CodeGenPyTorch (
 import SPLL.IntermediateRepresentation
 import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.Lang.Types
-import SPLL.Typing.RType (RType(..))
+import SPLL.Typing.RType (RType(..), shapeRank)
 import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage)
 import Data.List (intercalate, intersperse, isPrefixOf, dropWhileEnd)
 import Data.Char (toUpper)
@@ -445,7 +445,21 @@ generateExpressionLifted expr = do
   e <- generateExpression expr
   return ([], str e)
 
--- | The Python runtime function reducing a dense axis with each operator.
+-- | Diagnostics for the tensor ranks and axes the backends do not emit. Shared
+-- by all three scalar-ish backends via their own copies of the guard; the
+-- message names the node so a future higher-rank producer fails with a pointer
+-- rather than a mystery.
+rankUnsupported :: String -> Int -> String
+rankUnsupported what r =
+  what ++ ": only rank-1 tensors are emitted, got rank " ++ show r
+       ++ " (the representation admits it; no backend lowers it yet)"
+
+axisUnsupported :: String -> Int -> String
+axisUnsupported what ax =
+  what ++ ": only axis 0 is emitted, got axis " ++ show ax
+       ++ " (the representation admits it; no backend lowers it yet)"
+
+-- | The Python runtime function reducing a tensor axis with each operator.
 -- Both are pythonLib.py builtins: sum is Python's own, logsumexp is the
 -- library's (already backing IRLogEnumSum).
 pyReduceOp :: ReduceOp -> String
@@ -626,33 +640,45 @@ generateExpression (IRLetIn name val body) = do
   v <- generateExpression val
   b <- generateExpression body
   return ("((" ++ name ++ ":=" ++ v ++ "), " ++ b ++ ")[1]")
--- The dense builtins (design ir-tensor-values). A scalar-mode dense axis is a
--- Python list: scalar pythonLib.py is pure-Python (probabilities are floats,
--- there is no torch in scope), so there is no tensor to lower a "dense of
--- primitive" to here -- that specialization lives in the batched backend,
--- where an element is a [B] tensor and a reduce really is a stacked sum.
--- What scalar mode does get is an O(1) BIndex, against IRIndex's cons walk.
-generateExpression (IRBuiltin BDense elems) = do
-  es <- mapM generateExpression elems
-  return ("[" ++ intercalate ", " es ++ "]")
+-- The tensor builtins (design ir-tensor-values). A scalar-mode tensor is a
+-- flat Python list: scalar pythonLib.py is pure-Python (probabilities are
+-- floats, there is no torch in scope), so there is no real tensor to lower a
+-- "tensor of primitive" to here -- that specialization lives in the batched
+-- backend, where an element is a [B] tensor and a reduce really is a stacked
+-- sum. What scalar mode does get is an O(1) BIndex, against IRIndex's cons
+-- walk.
+--
+-- Only rank 1 is emitted. The representation admits any rank, but nothing
+-- produces a higher-rank tensor yet and untested stride arithmetic in three
+-- backends would be dead weight; the guard says so rather than emitting
+-- something plausible and wrong.
+generateExpression (IRBuiltin (BTensor sh) elems)
+  | shapeRank sh == 1 = do
+      es <- mapM generateExpression elems
+      return ("[" ++ intercalate ", " es ++ "]")
+  | otherwise = error (rankUnsupported "BTensor" (shapeRank sh))
 -- A comprehension rather than map(lambda ...): it binds the loop variable
 -- directly, saving a Python call per element, and the bound name is already a
 -- valid identifier.
-generateExpression (IRBuiltin BMap [IRLambda v body, d]) = do
+generateExpression (IRBuiltin BMap [IRLambda v body, t]) = do
   b <- generateExpression body
-  dd <- generateExpression d
-  return ("[" ++ b ++ " for " ++ v ++ " in " ++ dd ++ "]")
-generateExpression (IRBuiltin BMap [f, d]) = do
+  tt <- generateExpression t
+  return ("[" ++ b ++ " for " ++ v ++ " in " ++ tt ++ "]")
+generateExpression (IRBuiltin BMap [f, t]) = do
   ff <- generateExpression f
-  dd <- generateExpression d
-  return ("list(map(" ++ ff ++ ", " ++ dd ++ "))")
-generateExpression (IRBuiltin (BReduce op) [d]) = do
-  dd <- generateExpression d
-  return (pyReduceOp op ++ "(" ++ dd ++ ")")
-generateExpression (IRBuiltin BIndex [d, k]) = do
-  dd <- generateExpression d
-  kk <- generateExpression k
-  return ("(" ++ dd ++ ")[" ++ kk ++ "]")
+  tt <- generateExpression t
+  return ("list(map(" ++ ff ++ ", " ++ tt ++ "))")
+generateExpression (IRBuiltin (BReduce op ax) [t])
+  | ax == 0 = do
+      tt <- generateExpression t
+      return (pyReduceOp op ++ "(" ++ tt ++ ")")
+  | otherwise = error (axisUnsupported "BReduce" ax)
+generateExpression (IRBuiltin (BIndex ax) [t, k])
+  | ax == 0 = do
+      tt <- generateExpression t
+      kk <- generateExpression k
+      return ("(" ++ tt ++ ")[" ++ kk ++ "]")
+  | otherwise = error (axisUnsupported "BIndex" ax)
 generateExpression (IRError e) =
   return ("throw(\"" ++ escapeStr e ++ "\")")
 generateExpression (IRConformsTo t x) = do

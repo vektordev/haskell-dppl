@@ -9,6 +9,7 @@ import SPLL.Lang.Lang
 import Data.List (intercalate)
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types
+import SPLL.Typing.RType (extentSize)
 import Data.Foldable
 import Data.Functor ((<&>))
 import Data.Maybe (catMaybes)
@@ -101,10 +102,14 @@ pPrintIRExpr (IREnumSum varname val e) n = "enumSum " ++ varname ++ " = " ++ sho
 pPrintIRExpr (IRLogEnumSum varname val e) n = "logEnumSum " ++ varname ++ " = " ++ show val ++ " in (\n" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IREnumSumPaired lg varname val e) n = (if lg then "logEnumSumPaired " else "enumSumPaired ") ++ varname ++ " = " ++ show val ++ " in (\n" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRIndex e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ ")[" ++ pPrintIRExpr e2 (n + 1) ++ "]"
-pPrintIRExpr (IRBuiltin BDense args) n = "<" ++ intercalate ", " (map (`pPrintIRExpr` (n + 1)) args) ++ ">"
-pPrintIRExpr (IRBuiltin BMap [f, d]) n = "map (" ++ pPrintIRExpr f (n + 1) ++ ") over (" ++ pPrintIRExpr d (n + 1) ++ ")"
-pPrintIRExpr (IRBuiltin (BReduce op) [d]) n = "reduce " ++ reduceOpName op ++ " (" ++ pPrintIRExpr d (n + 1) ++ ")"
-pPrintIRExpr (IRBuiltin BIndex [d, k]) n = "(" ++ pPrintIRExpr d (n + 1) ++ ")@[" ++ pPrintIRExpr k (n + 1) ++ "]"
+pPrintIRExpr (IRBuiltin (BTensor sh) args) n =
+  "<" ++ intercalate "x" (map (show . extentSize) sh) ++ ":"
+      ++ intercalate ", " (map (`pPrintIRExpr` (n + 1)) args) ++ ">"
+pPrintIRExpr (IRBuiltin BMap [f, t]) n = "map (" ++ pPrintIRExpr f (n + 1) ++ ") over (" ++ pPrintIRExpr t (n + 1) ++ ")"
+pPrintIRExpr (IRBuiltin (BReduce op ax) [t]) n =
+  "reduce " ++ reduceOpName op ++ "/" ++ show ax ++ " (" ++ pPrintIRExpr t (n + 1) ++ ")"
+pPrintIRExpr (IRBuiltin (BIndex ax) [t, k]) n =
+  "(" ++ pPrintIRExpr t (n + 1) ++ ")@" ++ show ax ++ "[" ++ pPrintIRExpr k (n + 1) ++ "]"
 -- A malformed builtin is a compiler bug, but the pretty-printer is exactly what
 -- someone reaches for while debugging one, so it renders rather than crashing.
 pPrintIRExpr (IRBuiltin b args) n = show b ++ "(" ++ intercalate ", " (map (`pPrintIRExpr` (n + 1)) args) ++ ")"
@@ -155,12 +160,14 @@ pPrintValue (VADT name []) = name
 pPrintValue (VADT name args) = "(" ++ name ++ " " ++ unwords (map pPrintValue args) ++ ")"
 pPrintValue VAny = "ANY"
 pPrintValue (VAnyExcept _) = "ANY_EXCEPT"
-pPrintValue (VDense xs) = "<" ++ intercalate "," (map pPrintValue xs) ++ ">"
+pPrintValue (VTensor sh xs) =
+  "<" ++ intercalate "x" (map (show . extentSize) sh) ++ ":"
+      ++ intercalate "," (map pPrintValue xs) ++ ">"
 
 indent :: Int -> String
 indent n = replicate (2 * n) ' '
 
--- | Short display name for a dense reduction operator.
+-- | Short display name for a tensor reduction operator.
 reduceOpName :: ReduceOp -> String
 reduceOpName ROpAdd = "add"
 reduceOpName ROpLogSumExp = "lse"

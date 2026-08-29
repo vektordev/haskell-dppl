@@ -69,6 +69,14 @@ selectPassExpr = irMap convert
 -- results; it decides only which nodes carry the tag (visible under @-d@) and
 -- is the honest precursor of the M2 fragment guard.
 isTensorFragment :: IRExpr -> Bool
+-- A dense map's lambda is a compile-time unroll over a statically-known
+-- extent, not the data-dependent application 'IRLambda' is excluded for, so
+-- the fragment is checked *through* it. Without this case the dense lowering
+-- would shrink the tensor fragment wherever an enumerable sum appears -- the
+-- enum-sum constructors it replaces were in the fragment (design
+-- ir-tensor-values).
+isTensorFragment (IRBuiltin BMap [IRLambda _ body, d]) =
+  isTensorFragment body && isTensorFragment d
 isTensorFragment expr = ok expr && all isTensorFragment (getIRSubExprs expr)
   where
     ok e = case e of

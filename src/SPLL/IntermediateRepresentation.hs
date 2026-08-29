@@ -10,6 +10,8 @@ module SPLL.IntermediateRepresentation (
 , UnaryOperand(..)
 , Builtin(..)
 , ReduceOp(..)
+, Shape
+, Extent(..)
 , builtinArity
 , expectBuiltinArgs
 , Distribution(..)
@@ -37,7 +39,7 @@ module SPLL.IntermediateRepresentation (
 ) where
 
 import SPLL.Lang.Types
-import SPLL.Typing.RType (RType(..))
+import SPLL.Typing.RType (RType(..), Shape, Extent(..), shapeNumel)
 import SPLL.Typing.PType()
 import SPLL.Typing.Typing()
 import Data.Data()
@@ -190,7 +192,7 @@ data UnaryOperand = OpNeg
                   | OpIsAny
                   deriving (Show, Eq)
 
--- | The reduction operators a dense axis can be folded with. A field of
+-- | The reduction operators a tensor axis can be folded with. A field of
 -- 'BReduce' rather than a constructor per operator: the enum-sum family split
 -- 'IREnumSum' from 'IRLogEnumSum' on exactly this axis and paid for it in
 -- every generic pass.
@@ -198,43 +200,62 @@ data ReduceOp = ROpAdd        -- ^ Sum. Identity 0.
               | ROpLogSumExp  -- ^ Log-sum-exp, the log-space sibling of 'ROpAdd'. Identity -inf.
               deriving (Show, Eq)
 
--- | Operations over the dense axis (design ir-tensor-values). Deliberately
--- four and no more: a dense value, a map, a reduce with a named operator, and
--- an index by a runtime key. Multi-axis shape, broadcasting, reshape, linear
--- algebra and scatter/segment-reduce are all out of scope and belong to
--- tensors-in-core-language.
+-- | Operations over a tensor (design ir-tensor-values). Deliberately four and
+-- no more: build, map, reduce along an axis, and index along an axis by a
+-- runtime key.
+--
+-- The /representation/ carries a full 'Shape', so the typed surface tensor of
+-- tensors-in-core-language lowers onto it directly. The /operation set/ stays
+-- at these four, and that restraint is a soundness matter rather than an
+-- effort one (that design, §4.2): broadcasting would put one latent in every
+-- element and silently drop the correlation from @p(t) = \prod p(t_i)@;
+-- reducing a probabilistic axis is a convolution, which SPLL has no engine
+-- for; a general linear map has a non-diagonal Jacobian that @FDecl@\'s
+-- per-input scalar derivatives cannot express. 'BReduce' here is safe because
+-- it reduces already-computed probabilities, not random variables.
 data Builtin
-  -- | @BDense [e1 .. eN]@ -- build a dense axis of static extent N from its
-  -- element expressions. Any arity, including 0.
-  = BDense
-  -- | @BMap [IRLambda v body, dense]@ -- apply the lambda to every element,
-  -- yielding a dense axis of the same extent. The lambda is the binder; see
-  -- the note on 'IRBuiltin'.
+  -- | @BTensor sh [e1 .. eN]@ -- build a tensor of shape @sh@ from its
+  -- elements in row-major order (outermost axis first). @N@ must be
+  -- @shapeNumel sh@.
+  = BTensor Shape
+  -- | @BMap [IRLambda v body, t]@ -- apply the lambda to every element,
+  -- yielding a tensor of the same shape. The lambda is the binder; see the
+  -- note on 'IRBuiltin'. Shape-preserving, so it needs no axis and no shape
+  -- field of its own.
   | BMap
-  -- | @BReduce op [dense]@ -- fold the axis with @op@. Note it does /not/
-  -- take a lambda: reduce is separate from map rather than fused with it,
-  -- which is the whole point -- one 'BMap' can be let-bound and reduced
-  -- twice, which is the sharing 'IREnumSumPaired' exists to fake.
-  | BReduce ReduceOp
-  -- | @BIndex [dense, key]@ -- read one element by a runtime integer key.
-  -- Distinct from 'IRIndex', which indexes a cons-list in an O(n) walk; this
-  -- is an O(1) read on a flat axis.
-  | BIndex
+  -- | @BReduce op axis [t]@ -- fold @t@ along @axis@ with @op@, dropping that
+  -- axis. Reducing the last axis of a rank-1 tensor yields a scalar, not a
+  -- rank-0 tensor: rank 0 is not an inhabited shape.
+  --
+  -- Note it does /not/ take a lambda: reduce is separate from map rather than
+  -- fused with it, which is the whole point -- one 'BMap' can be let-bound and
+  -- reduced twice, which is the sharing 'IREnumSumPaired' exists to fake.
+  | BReduce ReduceOp Int
+  -- | @BIndex axis [t, key]@ -- read along @axis@ at a runtime integer key,
+  -- dropping that axis (rank 1 therefore yields a scalar). Distinct from
+  -- 'IRIndex', which indexes a cons-list in an O(n) walk; this is an O(1) read
+  -- into a flat block.
+  | BIndex Int
   deriving (Show, Eq)
 
--- | The argument count each 'Builtin' takes, or 'Nothing' for variadic
--- ('BDense'). The single source of truth for the shapes documented above; a
--- malformed 'IRBuiltin' is a compiler bug, so consumers that must have a
--- shape use 'expectBuiltinArgs' and 'error' rather than degrading.
+-- | The argument count each 'Builtin' takes, or 'Nothing' for the variadic
+-- 'BTensor' (whose count is its shape\'s @shapeNumel@). The single source of
+-- truth for the shapes documented above; a malformed 'IRBuiltin' is a compiler
+-- bug, so consumers that must have a shape use 'expectBuiltinArgs' and 'error'
+-- rather than degrading.
 builtinArity :: Builtin -> Maybe Int
-builtinArity BDense      = Nothing
-builtinArity BMap        = Just 2
-builtinArity (BReduce _) = Just 1
-builtinArity BIndex      = Just 2
+builtinArity (BTensor _)   = Nothing
+builtinArity BMap          = Just 2
+builtinArity (BReduce _ _) = Just 1
+builtinArity (BIndex _)    = Just 2
 
--- | Check an 'IRBuiltin''s argument list against 'builtinArity', failing loudly
--- with the offending node. Used by consumers that pattern-match a fixed shape.
+-- | Check an 'IRBuiltin'\'s argument list against 'builtinArity' -- and, for
+-- 'BTensor', against its shape -- failing loudly with the offending node.
 expectBuiltinArgs :: Builtin -> [IRExpr] -> [IRExpr]
+expectBuiltinArgs b@(BTensor sh) args
+  | length args == shapeNumel sh = args
+  | otherwise = error ("IRBuiltin " ++ show b ++ " needs " ++ show (shapeNumel sh)
+                       ++ " elements for shape " ++ show sh ++ ", got " ++ show (length args))
 expectBuiltinArgs b args = case builtinArity b of
   Nothing -> args
   Just n | length args == n -> args
@@ -327,10 +348,10 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               | IREnumSumPaired Bool Varname MultiValue IRExpr
               | IRIsPossible MultiValue IRExpr
               | IRIndex IRExpr IRExpr
-              -- | A named operation over the dense axis (design
-              -- ir-tensor-values). One constructor rather than a family:
-              -- which operation, and any operator it is parameterised by,
-              -- live in the 'Builtin' tag, so a new dense operation costs an
+              -- | A named operation over a tensor (design ir-tensor-values).
+              -- One constructor rather than a family:
+              -- which operation, and any shape/operator/axis it is parameterised
+              -- by, live in the 'Builtin' tag, so a new tensor operation costs an
               -- enum case and not another binder for every generic pass to
               -- special-case -- which is precisely how the enum-sum family
               -- grew a constructor per reduction operator.

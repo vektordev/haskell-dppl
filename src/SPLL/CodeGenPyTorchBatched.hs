@@ -44,6 +44,7 @@ module SPLL.CodeGenPyTorchBatched
   ) where
 
 import SPLL.IntermediateRepresentation
+import SPLL.Typing.RType (shapeRank)
 import SPLL.Lang.Types (CompilerError, GenericValue(..), GenericList(..), MultiValue(..), ADTDecl(..), Value)
 import SPLL.Lang.Lang (multiValueToValueList)
 import SPLL.CodeGenPyTorch (envToLUT, replaceCalls, pyMangle)
@@ -864,6 +865,15 @@ batchedGuard env0 groupNameStr methodName body =
                    ++ [ structureSelectReason | structureSelect env e ]
                    ++ case e of
                         IRLetIn n v b -> offenders env v ++ offenders (bindS env n v) b
+                        -- A tensor map's binder is an IRLambda, which the
+                        -- fragment otherwise refuses as data-dependent
+                        -- application. Here it is a compile-time unroll over a
+                        -- static extent -- exactly what the IREnumSum this
+                        -- lowering replaces did with a Varname field -- so the
+                        -- walk goes through it to the body, skipping the
+                        -- lambda node itself (design ir-tensor-values).
+                        IRBuiltin BMap [IRLambda _ b, t] ->
+                          offenders env b ++ offenders env t
                         _             -> concatMap (offenders env) (getIRSubExprs e)
     -- The dichotomy guard (design heterogeneous-batch-inference): a per-element
     -- branch may not choose between two *structures*. Bucketing removes the
@@ -906,6 +916,12 @@ emittable e = case e of
   -- single-scalar 'IRLogEnumSum' is.
   IREnumSumPaired lg _ mv _ -> not lg && scalarDiscreteMulti mv
   IRIsPossible mv _ -> scalarDiscreteMulti mv  -- membership over a scalar enum (M2b)
+  -- The tensor builtins (design ir-tensor-values). All four are emittable: a
+  -- tensor is a Python list of [B] tensors, uniform across a bucket, and its
+  -- shape is static, so a map is a bucket-uniform unroll and a reduce/index is
+  -- one kernel over the [E, B] stack. Nothing here is value-dependent
+  -- branching, which is the only thing the batched backend cannot bucket.
+  IRBuiltin{}    -> True
   IRError{}      -> True   -- refusal arm, emitted as a selected-away NaN poison (M3)
   IRSample{}     -> True   -- a fresh random draw, batched via rand(n)/randn(n) (M4);
                            -- only ever produced by a generate body, never prob/integ
@@ -1161,6 +1177,34 @@ batchedExpr env (IREnumSumPaired _ name multiVal expr) =
 batchedExpr env (IRIsPossible multiVal expr) =
   "is_member(" ++ batchedExpr env expr ++ ", ["
     ++ intercalate ", " (map (batchedValOrDie . valueToIR) (multiValueToValueList multiVal)) ++ "])"
+-- The tensor builtins (design ir-tensor-values). 'BTensor' and 'BMap' produce
+-- a Python list of [B] tensors: a map's body is arbitrary IR, so it is
+-- evaluated once per element exactly as the enum-sum unrolling above does. The
+-- vectorization is in the consumers -- 'BReduce' and 'BIndex' stack that list
+-- into one [E, B] tensor and run a single kernel, instead of the E-1
+-- sequential adds a Python `sum` over tensors performs, or the E-arm
+-- torch.where cascade an if-chain read compiles to. That stacking is the
+-- "tensor of primitive lowers to a real tensor" specialization; here an
+-- element is always a [B] tensor, so it always applies.
+--
+-- Rank 1 and axis 0 only, as in the scalar backends: the [E, B] stack already
+-- spends the one axis torch is given, and the batch is the other.
+batchedExpr env (IRBuiltin (BTensor sh) elems)
+  | shapeRank sh == 1 = "[" ++ intercalate ", " (map (batchedExpr env) elems) ++ "]"
+  | otherwise = error (batchedRankUnsupported "BTensor" (shapeRank sh))
+batchedExpr env (IRBuiltin BMap [IRLambda name body, t]) =
+  "[" ++ batchedExpr env body ++ " for " ++ name ++ " in " ++ batchedExpr env t ++ "]"
+batchedExpr env (IRBuiltin BMap [f, t]) =
+  "list(map(" ++ batchedExpr env f ++ ", " ++ batchedExpr env t ++ "))"
+batchedExpr env (IRBuiltin (BReduce op 0) [t]) =
+  batchedReduceOp op ++ "(" ++ batchedExpr env t ++ ")"
+batchedExpr env (IRBuiltin (BIndex 0) [t, k]) =
+  "tensor_index(" ++ batchedExpr env t ++ ", " ++ batchedExpr env k ++ ")"
+batchedExpr _ (IRBuiltin (BReduce _ ax) _) = error (batchedAxisUnsupported "BReduce" ax)
+batchedExpr _ (IRBuiltin (BIndex ax) _) = error (batchedAxisUnsupported "BIndex" ax)
+batchedExpr _ e@(IRBuiltin b args) =
+  error ("batched PyTorch codegen: malformed tensor builtin " ++ show b ++ " with "
+         ++ show (length args) ++ " arguments: " ++ irPrintFlat e)
 batchedExpr env (IRLetIn name val body) =
   "((" ++ name ++ " := " ++ batchedExpr env val ++ "), "
   ++ batchedExpr (bindS env name val) body ++ ")[1]"
@@ -1192,6 +1236,23 @@ torchWhere :: SEnv -> IRExpr -> IRExpr -> IRExpr -> String
 torchWhere env c t f =
   "torch.where(asmask(" ++ batchedExpr env c ++ "), "
   ++ batchedExpr env t ++ ", " ++ batchedExpr env f ++ ")"
+
+-- | The batched runtime function reducing a tensor axis with each operator.
+-- Both stack the axis and run one kernel; see pythonLibBatched.py.
+batchedReduceOp :: ReduceOp -> String
+batchedReduceOp ROpAdd = "tensor_sum"
+batchedReduceOp ROpLogSumExp = "tensor_logsumexp"
+
+-- | Diagnostics for the tensor ranks and axes this backend does not emit.
+batchedRankUnsupported :: String -> Int -> String
+batchedRankUnsupported what r =
+  what ++ ": only rank-1 tensors are emitted, got rank " ++ show r
+       ++ " (the representation admits it; no backend lowers it yet)"
+
+batchedAxisUnsupported :: String -> Int -> String
+batchedAxisUnsupported what ax =
+  what ++ ": only axis 0 is emitted, got axis " ++ show ax
+       ++ " (the representation admits it; no backend lowers it yet)"
 
 batchedOp :: Operand -> String
 batchedOp OpPlus        = "+"

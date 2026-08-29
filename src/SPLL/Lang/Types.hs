@@ -160,23 +160,29 @@ data GenericValue a = VBool Bool
            | VThetaTree ThetaTree
            | VClosure [(String, a)] String a
            | VADT String [GenericValue a]
-           -- | A dense homogeneous axis of known static extent: a flat vector
-           -- of values with no spine, as opposed to 'VList''s cons cells.
-           -- Produced and consumed only by the dense builtins ('BDense',
-           -- 'BMap', 'BReduce', 'BIndex') -- the surface language has no
-           -- syntax for it and the parser never builds one, so it is
-           -- unreachable in a 'Value' that came from a .ppl file. It lives in
-           -- 'GenericValue' rather than a type of its own because the
-           -- interpreter's let-environments are typed as 'IRValue', and a
-           -- mapped axis has to be let-bindable for one map to feed two
-           -- reduces (design ir-tensor-values).
+           -- | A tensor: a statically-shaped, flat, homogeneous block of
+           -- values. The element list is in row-major order (outermost axis
+           -- first) and its length is always @shapeNumel@ of the shape, which
+           -- is the invariant every producer maintains and 'tensorWellFormed'
+           -- checks.
            --
-           -- Element type is unconstrained on purpose: homogeneity of
-           -- *primitives* is not a typing obligation here but a codegen
-           -- opportunity -- a dense of float/int/bool lowers to a real tensor
-           -- or array with an O(1) index and a vectorized reduce, anything
-           -- else falls back to a generic list.
-           | VDense [GenericValue a]
+           -- Flat with an explicit shape, as against 'VList''s cons spine:
+           -- extent is known statically, so an index is O(1) and a reduction
+           -- is one pass rather than a walk. Produced and consumed only by the
+           -- tensor builtins ('BTensor', 'BMap', 'BReduce', 'BIndex') -- the
+           -- surface language has no syntax for it and the parser never builds
+           -- one, so it is unreachable in a 'Value' that came from a .ppl
+           -- file. It lives in 'GenericValue' rather than a type of its own
+           -- because the interpreter's let-environments are typed as
+           -- 'IRValue', and a mapped tensor has to be let-bindable for one map
+           -- to feed two reduces (design ir-tensor-values).
+           --
+           -- Element type is unconstrained here: homogeneity of /primitives/
+           -- is not a typing obligation at this layer but a codegen
+           -- opportunity -- a tensor of float/int/bool lowers to a real torch
+           -- tensor with an O(1) gather and a vectorized reduce, anything else
+           -- falls back to a generic list.
+           | VTensor Shape [GenericValue a]
            | VAny -- Only used for marginal queries
            | VAnyExcept [a] -- Only used for marginal queries
            | VError String
@@ -195,7 +201,7 @@ instance Functor GenericValue where
   fmap _ (VThetaTree x) = VThetaTree x
   fmap f (VClosure e n ex) = VClosure (map (Data.Bifunctor.second f) e) n (f ex)
   fmap f (VADT n adt) = VADT n (map (fmap f) adt)
-  fmap f (VDense xs) = VDense (map (fmap f) xs)
+  fmap f (VTensor sh xs) = VTensor sh (map (fmap f) xs)
   fmap f (VAnyExcept x) = VAnyExcept (map f x)
   fmap _ VAny = VAny
   fmap _ (VError s) = VError s

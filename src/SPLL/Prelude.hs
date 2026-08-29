@@ -90,6 +90,7 @@ import Control.Monad.Random (Rand, RandomGen)
 import SPLL.IRCompiler
 import SPLL.IROptimizer (optimizeEnv)
 import SPLL.IRSelectPass (selectPassEnv)
+import SPLL.IRTensorPass (tensorPassEnv)
 import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
 import Debug.Trace
 import Data.Either
@@ -395,7 +396,13 @@ compile conf p = do
   -- selects before the optimizer, which would otherwise fold the conditionals
   -- away and obscure the transformation. Runs only under --batched; in M1 it is
   -- a scalar no-op, so the default pipeline is byte-identical.
-  let selected = if batched conf then selectPassEnv stripped else stripped
+  -- Lower the enum-sum family onto tensors (design ir-tensor-values).
+  -- Backend-agnostic and unconditional, so every backend sees one IR; the
+  -- batched select pass below then runs against the tensor form.
+  let tensored = tensorPassEnv stripped
+  printStageIR conf "After Tensor Lowering" tensored
+
+  let selected = if batched conf then selectPassEnv tensored else tensored
   printStageIR conf "After Select Pass" selected
 
   let compiled = optimizeEnv conf selected

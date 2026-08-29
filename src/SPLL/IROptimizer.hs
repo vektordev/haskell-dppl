@@ -668,14 +668,14 @@ forceAnyCheck _ (IRSample _) = IRConst $ VBool False
 forceAnyCheck _ (IREnumSum _ _ _) = IRConst $ VBool False
 forceAnyCheck _ (IRLogEnumSum _ _ _) = IRConst $ VBool False
 forceAnyCheck _ (IREnumSumPaired _ _ _ _) = IRConst $ VBool False
--- A dense axis is a computed aggregate and a reduction of one is a computed
+-- A tensor is a computed aggregate and a reduction of one is a computed
 -- scalar; neither can be the ANY sentinel, for the same reason the enumerated
 -- sums above cannot. 'BIndex' is deliberately absent: it reads back an element
--- someone else put in the axis, so it is only not-ANY if that value was, which
--- is not decidable here -- it falls through to a real runtime check.
-forceAnyCheck _ (IRBuiltin BDense _) = IRConst $ VBool False
+-- someone else put in the tensor, so it is only not-ANY if that value was,
+-- which is not decidable here -- it falls through to a real runtime check.
+forceAnyCheck _ (IRBuiltin (BTensor _) _) = IRConst $ VBool False
 forceAnyCheck _ (IRBuiltin BMap _) = IRConst $ VBool False
-forceAnyCheck _ (IRBuiltin (BReduce _) _) = IRConst $ VBool False
+forceAnyCheck _ (IRBuiltin (BReduce _ _) _) = IRConst $ VBool False
 -- Push the check through the binding forms, so a scalar body above can decide
 -- it. Only kept when it actually decided: otherwise this would just relocate
 -- the test (and, for an if, duplicate it).
