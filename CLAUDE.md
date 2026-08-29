@@ -132,6 +132,7 @@ SPLL source (.spll/.ppl)
   → Typing/ModalityInfer.hs (PTypes) → Analysis.hs (IsConditional tags)
   → IRCompiler.hs → IR (IntermediateRepresentation.hs)
      Three compilation branches: generate, probability, integrate
+  → IRTensorPass.hs (enum sums → tensor map/reduce)
   → IRSelectPass.hs (batched only) → IROptimizer.hs (const folding, CSE, let-in)
   → CodeGenPyTorch.hs, CodeGenPyTorchBatched.hs, or CodeGenJulia.hs
 ```
@@ -156,7 +157,8 @@ deterministic).
   `InjF`s.
 - **IRExpr** (`src/SPLL/IntermediateRepresentation.hs`): IR after
   compilation — `IRIf`, `IROp`, `IRLetIn`, `IRLambda`, `IRDensity`,
-  `IRSample`, etc.
+  `IRSample`, etc., plus `IRBuiltin Builtin [IRExpr]` for the tensor
+  operations (see Tensors in the IR below).
 - **TypeInfo**: `rType` (return type: `TFloat`, `TBool`, `TInt`, `TSymbol`,
   `ListOf`, `Tuple`, `TEither`, `TADT`, `TArrow`, etc.), `pType`
   (probabilistic: `Deterministic`, `PNormal`, `PLogNormal`, `Integrate`,
@@ -350,6 +352,53 @@ digit read is 10 IR nodes, while an arbitrary enumerable if-tree can be
 thousands, where copying per value cost 14x the IR and turned a 0.17s
 compile into 16s.
 
+### Tensors in the IR
+
+`IRBuiltin Builtin [IRExpr]` carries four operations over a **tensor** — a
+statically-shaped, flat, homogeneous block of values (`VTensor Shape [Value]`,
+row-major, outermost axis first), as against `VList`'s cons spine:
+
+| builtin | shape | means |
+|---|---|---|
+| `BTensor sh` | variadic, `shapeNumel sh` args | build a tensor from its elements |
+| `BMap` | `[IRLambda v body, t]` | elementwise map, shape-preserving |
+| `BReduce op axis` | `[t]` | fold along `axis` with `op`, dropping it |
+| `BIndex axis` | `[t, key]` | read along `axis` at a runtime key, dropping it |
+
+`Shape`/`Extent` live in `Typing/RType.hs`, because the typed surface tensor of
+the `tensors-in-core-language` design is `TTensor Shape RType` over the same
+type. `Extent` is a one-constructor sum (`EFixed Int`) deliberately: admitting
+shape *variables* later is then a new constructor rather than an arity change
+to every shape pattern.
+
+**The map binds its variable by taking an `IRLambda` argument**, not by
+carrying a `Varname` field. That keeps the flat argument list, and most generic
+passes then need no new case at all — `freeVarsIR`, `binderOf`, CSE scoping and
+`allNamesIR` already handle `IRLambda`. Three places *do* need to see through
+it, because they would otherwise refuse or mis-scope a compile-time unroll:
+`IRSelectPass.isTensorFragment`, `CodeGenPyTorchBatched`'s `batchedGuard`, and
+`IROptimizer.loopBinder` (which is also the one place listing which forms
+iterate, so the loop-invariance analyses stop re-matching a constructor set).
+
+`SPLL.IRTensorPass` rewrites the enum-sum family onto this, for every backend:
+`IREnumSum`/`IRLogEnumSum` become `reduce op (map f domain)`, and
+`IREnumSumPaired` becomes **one** let-bound map reduced **twice** — which is
+the sharing that node existed to fake. The enum-sum constructors themselves are
+not retired (task `retire-irenumsum`); the pass leaves them unreachable rather
+than absent.
+
+Only **rank 1 and axis 0** are emitted. The representation admits any rank and
+the interpreter implements it (`fibres`/`rewrap` do the stride arithmetic, and
+`Internals/tensor builtins` pins the layout); the three backends refuse higher
+rank with a named diagnostic rather than emitting something plausible. Nothing
+produces a rank > 1 tensor today.
+
+Measured against the pre-lowering compiler: emitted scalar Python is 0–4%
+*smaller* and 1.09x faster with bit-identical results; batched Python is
+byte-identical in size and 1.00–1.04x, bit-identical at two enumeration terms
+and within 7.5e-9 at four (the reduce reassociates). The larger speedups the
+design predicts belong to the `BIndex` consumer, which nothing wires up yet.
+
 ### Dimension Counting
 
 Every probability-mode result is a
@@ -453,6 +502,7 @@ fully-annotated AST after each pipeline stage to stderr via
 | After Modality Inference | `pType` populated |
 | After Conditional Annotation | `IsConditional` tags appear on conditioned distributions |
 | After IR Compilation (pre-optimization) | Pseudo-code IR before any optimizer passes |
+| After Tensor Lowering | Enum sums rewritten to `map`/`reduce` over a tensor |
 | After Select Pass | `IRIf` → `IRSelect` retagging (a no-op unless `--batched`) |
 | After Optimization | Pseudo-code IR after constant folding, CSE, let-in optimization |
 
