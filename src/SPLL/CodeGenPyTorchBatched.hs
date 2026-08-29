@@ -99,7 +99,14 @@ generateFunctionsBatched genBoil env0 = do
       -- Every ADT constructor name, so the dichotomy guard can recognise a
       -- constructor-tagged value as *structure* (M2).
       let ctorNames = [ pyMangle cn | d <- adts, (cn, _) <- constructors d ]
-      classes <- mapM (generateClass ctorNames lut genArities genRaw) funcs
+      -- Nullary constructors additionally have to be *emitted* as
+      -- instantiations (@Heads()@, not @Heads@) -- the same rule, and the same
+      -- reason, as 'SPLL.CodeGenPyTorch.generateFunctions'' callableNames: the
+      -- compiler refers to a nullary constructor by a bare 'IRVar', and the
+      -- bare class neither compares equal to an instance nor answers an
+      -- @is\<Ctor\>@ predicate.
+      let nullaryCtorNames = [ pyMangle cn | d <- adts, (cn, []) <- constructors d ]
+      classes <- mapM (generateClass ctorNames nullaryCtorNames lut genArities genRaw) funcs
       constLines <- mapM renderConst consts
       let body = generateADTClassesBatched adts ++ constLines
              ++ (if null consts then [] else [""])
@@ -159,11 +166,11 @@ renderConst (n, v) = case batchedVal v of
 -- (task neural-generate-parity: generate's ineligibility used to degrade to a
 -- runtime-raising stub per class, M4; it is now a compile-time refusal like
 -- forward/integrate, see 'renderGen').
-generateClass :: [String] -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> IRFunGroup -> Either CompilerError [String]
-generateClass ctors lut genArities genMethods (IRFunGroup name gen prob integ _ _ doc dom) = do
-  p <- maybe (Right []) (generateMethod ctors lut "forward" name) prob
-  i <- maybe (Right []) (generateMethod ctors lut "integrate" name) integ
-  g <- maybe (Right []) (renderGen ctors lut genArities genMethods name) gen
+generateClass :: [String] -> [String] -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> IRFunGroup -> Either CompilerError [String]
+generateClass ctors nullaryCtors lut genArities genMethods (IRFunGroup name gen prob integ _ _ doc dom) = do
+  p <- maybe (Right []) (generateMethod ctors nullaryCtors lut "forward" name) prob
+  i <- maybe (Right []) (generateMethod ctors nullaryCtors lut "integrate" name) integ
+  g <- maybe (Right []) (renderGen ctors nullaryCtors lut genArities genMethods name) gen
   let commentLines = map ("# " ++) (lines doc)
       initLine = "class " ++ onHead toUpper name ++ "(Module):"
       -- Dense enumeration (M3): rendered domain, and the two extra methods per
@@ -266,14 +273,14 @@ methodArgs lut (expr0, _) = fst (unwrapLambdas (prepBatchedBody (irMap (replaceC
 -- query-type guard and any @isAny@ marginal branches (batched v1 excludes
 -- @VAny@), check the residue lies in the tensor fragment, then render it as a
 -- let-spine ending in a @return@.
-generateMethod :: [String] -> [(String, String)] -> String -> String -> IRFunDecl -> Either CompilerError [String]
-generateMethod ctors lut methodName groupNameStr (expr0, doc) = do
+generateMethod :: [String] -> [String] -> [(String, String)] -> String -> String -> IRFunDecl -> Either CompilerError [String]
+generateMethod ctors nullaryCtors lut methodName groupNameStr (expr0, doc) = do
   let expr = irMap (replaceCalls lut) expr0
       (args, body) = unwrapLambdas (prepBatchedBody expr)
   () <- batchedGuard ctors groupNameStr methodName body
   let l1 = "def " ++ methodName ++ "(self" ++ concatMap (", " ++) args ++ "):"
       docLines = map ("# " ++) (lines doc)
-  return $ docLines ++ [l1] ++ indentOnce (batchedBlock [] body)
+  return $ docLines ++ [l1] ++ indentOnce (batchedBlock (emitEnv nullaryCtors) body)
 
 unwrapLambdas :: IRExpr -> ([String], IRExpr)
 unwrapLambdas (IRLambda name rest) = (name : otherNames, plainTree)
@@ -338,8 +345,8 @@ batchNVar = "_batchN"
 --      as forward/integrate): lists, ADTs, Either dispatch (including a
 --      neural decoder's own 'EitherPlan'/'ADTPlan' output shape -- see the
 --      header comment above), etc.
-renderGen :: [String] -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> String -> IRFunDecl -> Either CompilerError [String]
-renderGen ctors lut genArities genRaw groupNameStr (expr0, doc)
+renderGen :: [String] -> [String] -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> String -> IRFunDecl -> Either CompilerError [String]
+renderGen ctors nullaryCtors lut genArities genRaw groupNameStr (expr0, doc)
   | hasGenCycle genRaw (groupNameStr ++ "_gen") =
       if producesList (lookup (groupNameStr ++ "_gen") genRaw)
         then Right (heterogeneousGenStub groupNameStr)
@@ -360,7 +367,7 @@ renderGen ctors lut genArities genRaw groupNameStr (expr0, doc)
            Right () ->
              let l1 = "def generate(self" ++ concatMap (", " ++) (args ++ [batchNVar]) ++ "):"
                  docLines = map ("# " ++) (lines doc)
-             in Right (docLines ++ [l1] ++ indentOnce (batchedBlock [] body))
+             in Right (docLines ++ [l1] ++ indentOnce (batchedBlock (emitEnv nullaryCtors) body))
 
 -- | A generate that draws a /structurally heterogeneous/ sample -- a recursion
 -- that builds a list, or a value-dependent branch between two shapes -- is the
@@ -396,7 +403,7 @@ heterogeneousGenStub groupNameStr =
 structureBranch :: [String] -> IRExpr -> Bool
 structureBranch ctors e = here e || any (structureBranch ctors) (getIRSubExprs e)
   where here (IRSelect _ t f) = listValued ctors t || listValued ctors f
-        here (IRIf c t f)     = not (structural [] c)
+        here (IRIf c t f)     = not (structural analysisEnv c)
                              && (listValued ctors t || listValued ctors f)
         here _                = False
 
@@ -560,9 +567,27 @@ projTuple False e              = IRTSnd e
 -- hold (a value-dependent branch that chooses between different structures).
 -- ---------------------------------------------------------------------------
 
--- | Names bound to a structurally-determined (batch-independent, Python-bool)
--- value.
-type SEnv = [String]
+-- | What the emitter and the structural analyses need to know about names: the
+-- ones bound to a structurally-determined (batch-independent, Python-bool)
+-- value, plus the program's nullary ADT constructors, which are emitted as
+-- instantiations rather than as bare class references (see 'batchedExpr').
+--
+-- The constructor list is emission-only; passes that merely ask 'structural'
+-- questions use 'analysisEnv', which leaves it empty.
+data SEnv = SEnv
+  { sBound        :: [String]
+  , sNullaryCtors :: [String]
+  }
+
+-- | The environment for a pass that only classifies expressions and never
+-- emits: no names bound yet, and no constructor list because nothing is printed.
+analysisEnv :: SEnv
+analysisEnv = SEnv [] []
+
+-- | The environment a method body is emitted in: nothing bound yet, and the
+-- program's nullary ADT constructors, which 'batchedExpr' instantiates.
+emitEnv :: [String] -> SEnv
+emitEnv = SEnv []
 
 -- | Is this expression's value fixed by the sample's /shape/ alone, hence a
 -- plain Python value that is constant across a bucket?
@@ -577,7 +602,7 @@ type SEnv = [String]
 structural :: SEnv -> IRExpr -> Bool
 structural env e = case e of
   IRConst _         -> True
-  IRVar n           -> n `elem` env
+  IRVar n           -> n `elem` sBound env
   -- An Either tag test is pure structure: which arm a value is in is part of
   -- its signature, so it is uniform across a bucket (M2).
   IRIsLeft _        -> True
@@ -592,8 +617,8 @@ structural env e = case e of
 -- | Extend the structural environment with a @let@ binding (shadowing a
 -- previously-structural name that is rebound to a per-element value).
 bindS :: SEnv -> String -> IRExpr -> SEnv
-bindS env n v | structural env v = nub (n : env)
-              | otherwise        = filter (/= n) env
+bindS env n v | structural env v = env { sBound = nub (n : sBound env) }
+              | otherwise        = env { sBound = filter (/= n) (sBound env) }
 
 isEmptyListConst :: IRExpr -> Bool
 isEmptyListConst (IRConst (VList EmptyList)) = True
@@ -634,7 +659,7 @@ listValued ctors e = case e of
 -- Expressions containing no structural @if@ are returned untouched, so this is a
 -- no-op for every program in the original (non-heterogeneous) tensor fragment.
 hoistStructural :: IRExpr -> IRExpr
-hoistStructural top = evalState (stmt [] top) 0
+hoistStructural top = evalState (stmt analysisEnv top) 0
   where
     -- Statement position: the binding forms keep their shape, everything else
     -- collects hoisted bindings and wraps them around itself.
@@ -718,7 +743,7 @@ checkCallGraph funcs = do
             go seen (n:ns)
               | n `elem` seen = go seen ns
               | otherwise     = go (n : seen) (callees n ++ ns)
-    checkRecursion (n, body) = case recOffenders cyclic [] False body of
+    checkRecursion (n, body) = case recOffenders cyclic analysisEnv False body of
       []      -> Right ()
       (why:_) -> Left $ "batched mode: " ++ n ++ " " ++ why
                      ++ ". Structure-directed recursion is admitted (design "
@@ -805,7 +830,7 @@ allVarNames e = [n | IRVar n <- [e]] ++ concatMap allVarNames (getIRSubExprs e)
 -- 'batchedExpr' knows how to emit.
 batchedGuard :: [String] -> String -> String -> IRExpr -> Either CompilerError ()
 batchedGuard ctors groupNameStr methodName body =
-  case offenders [] body of
+  case offenders analysisEnv body of
     []      -> Right ()
     (why:_) -> Left $
       "batched mode: " ++ groupNameStr ++ "'s " ++ methodName
@@ -1039,7 +1064,13 @@ structuralCond env e = case e of
 -- a @torch.where@; math functions and boolean operators are their tensor twins.
 batchedExpr :: SEnv -> IRExpr -> String
 batchedExpr _env (IRConst v)   = batchedValOrDie v
-batchedExpr _env (IRVar name)  = name
+-- A nullary ADT constructor is referred to by a bare 'IRVar', but the emitted
+-- name is a *class*: it never satisfies an @is\<Ctor\>@ predicate and never
+-- compares equal to an instance. Instantiate it, exactly as the scalar backend's
+-- callableNames does.
+batchedExpr env (IRVar name)
+  | name `elem` sNullaryCtors env = "(" ++ name ++ ")()"
+  | otherwise                     = name
 batchedExpr env (IROp OpApprox l r) = "isclose(" ++ batchedExpr env l ++ ", " ++ batchedExpr env r ++ ")"
 batchedExpr env (IROp OpAnd l r)    = "(" ++ batchedExpr env l ++ " & " ++ batchedExpr env r ++ ")"
 batchedExpr env (IROp OpOr l r)     = "(" ++ batchedExpr env l ++ " | " ++ batchedExpr env r ++ ")"

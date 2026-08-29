@@ -1630,6 +1630,25 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       case generateFunctionsBatched False (recGenEnv (IRSample IRNormal)) of
         Right _  -> return ()
         Left msg -> assertFailure ("batched mode refused a plain generate body: " ++ msg)
+  -- Task batched-nullary-adt-ctor-emitted-as-bare-class: the compiler refers to
+  -- a nullary constructor by a bare 'IRVar', so an emitter that prints the name
+  -- verbatim yields the *class*, which never satisfies an @is\<Ctor\>@ predicate
+  -- and never compares equal to an instance. The scalar backend instantiates it
+  -- (its @callableNames@); the batched one has to do the same.
+  , testCase "a nullary ADT constructor is emitted as an instantiation" $
+      case generateFunctionsBatched False (nullaryCtorEnv (IRVar "Nada")) of
+        Left msg -> assertFailure ("batched mode refused a nullary constructor reference: " ++ msg)
+        Right ls -> do
+          assertBool ("nullary constructor emitted as a bare class: " ++ unlines ls)
+            (any ("(Nada)()" `isInfixOf`) ls)
+          assertBool ("nullary constructor still emitted bare somewhere: " ++ unlines ls)
+            (not (any (\l -> "isNada(Nada)" `isInfixOf` l) ls))
+  , testCase "an applied ADT constructor is left as a call, not instantiated twice" $
+      -- Only the *nullary* clause fires: @Just1 x@ is already a call.
+      case generateFunctionsBatched False (nullaryCtorEnv (IRApply (IRVar "Just1") (IRVar "sample"))) of
+        Left msg -> assertFailure ("batched mode refused an applied constructor: " ++ msg)
+        Right ls -> assertBool ("applied constructor mis-emitted: " ++ unlines ls)
+                      (any ("Just1(sample)" `isInfixOf`) ls)
   , testCase "a list-building recursive generate degrades to a stub, not a refusal" $
       -- The one narrow exception to the hard whole-program refusal rule: a
       -- generate whose recursion *builds a list* has per-element depth (design
@@ -1642,6 +1661,22 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                       (any ("NotImplementedError" `isInfixOf`) ls)
   ]
   where
+    -- A one-group environment declaring a mixed-arity ADT, whose prob method
+    -- tests the given constructor reference. The ADT itself is only *consumed*
+    -- (the method answers a float), which is the one shape that reaches a
+    -- constructor through the batched path -- an ADT-valued query is refused.
+    nullaryCtorEnv ctorRef = IREnv
+      [IRFunGroup { groupName = "main"
+                  , probFun = Just (IRLambda "sample"
+                      (IRIf (IRApply (IRVar "isNada") ctorRef)
+                            (IRConst (VFloat 1.0)) (IRConst (VFloat 0.0))), "")
+                  , genFun = Nothing, integFun = Nothing
+                  , encodeFun = Nothing, normalFun = Nothing, groupDoc = ""
+                  , sampleDomain = Nothing }]
+      [ADTDecl { dataName = "Opt"
+               , constructors = [("Nada", []), ("Just1", [("v", TFloat)])]
+               , adtDepth = Nothing }]
+      []
     -- A one-group environment whose only method is generate, with the given
     -- body (either self-referential or not).
     recGenEnv body = IREnv
