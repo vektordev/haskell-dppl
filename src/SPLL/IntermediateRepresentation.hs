@@ -8,6 +8,10 @@ module SPLL.IntermediateRepresentation (
 , Tag(..)
 , Operand(..)
 , UnaryOperand(..)
+, Builtin(..)
+, ReduceOp(..)
+, builtinArity
+, expectBuiltinArgs
 , Distribution(..)
 , Varname
 , IRValue
@@ -186,6 +190,58 @@ data UnaryOperand = OpNeg
                   | OpIsAny
                   deriving (Show, Eq)
 
+-- | The reduction operators a dense axis can be folded with. A field of
+-- 'BReduce' rather than a constructor per operator: the enum-sum family split
+-- 'IREnumSum' from 'IRLogEnumSum' on exactly this axis and paid for it in
+-- every generic pass.
+data ReduceOp = ROpAdd        -- ^ Sum. Identity 0.
+              | ROpLogSumExp  -- ^ Log-sum-exp, the log-space sibling of 'ROpAdd'. Identity -inf.
+              deriving (Show, Eq)
+
+-- | Operations over the dense axis (design ir-tensor-values). Deliberately
+-- four and no more: a dense value, a map, a reduce with a named operator, and
+-- an index by a runtime key. Multi-axis shape, broadcasting, reshape, linear
+-- algebra and scatter/segment-reduce are all out of scope and belong to
+-- tensors-in-core-language.
+data Builtin
+  -- | @BDense [e1 .. eN]@ -- build a dense axis of static extent N from its
+  -- element expressions. Any arity, including 0.
+  = BDense
+  -- | @BMap [IRLambda v body, dense]@ -- apply the lambda to every element,
+  -- yielding a dense axis of the same extent. The lambda is the binder; see
+  -- the note on 'IRBuiltin'.
+  | BMap
+  -- | @BReduce op [dense]@ -- fold the axis with @op@. Note it does /not/
+  -- take a lambda: reduce is separate from map rather than fused with it,
+  -- which is the whole point -- one 'BMap' can be let-bound and reduced
+  -- twice, which is the sharing 'IREnumSumPaired' exists to fake.
+  | BReduce ReduceOp
+  -- | @BIndex [dense, key]@ -- read one element by a runtime integer key.
+  -- Distinct from 'IRIndex', which indexes a cons-list in an O(n) walk; this
+  -- is an O(1) read on a flat axis.
+  | BIndex
+  deriving (Show, Eq)
+
+-- | The argument count each 'Builtin' takes, or 'Nothing' for variadic
+-- ('BDense'). The single source of truth for the shapes documented above; a
+-- malformed 'IRBuiltin' is a compiler bug, so consumers that must have a
+-- shape use 'expectBuiltinArgs' and 'error' rather than degrading.
+builtinArity :: Builtin -> Maybe Int
+builtinArity BDense      = Nothing
+builtinArity BMap        = Just 2
+builtinArity (BReduce _) = Just 1
+builtinArity BIndex      = Just 2
+
+-- | Check an 'IRBuiltin''s argument list against 'builtinArity', failing loudly
+-- with the offending node. Used by consumers that pattern-match a fixed shape.
+expectBuiltinArgs :: Builtin -> [IRExpr] -> [IRExpr]
+expectBuiltinArgs b args = case builtinArity b of
+  Nothing -> args
+  Just n | length args == n -> args
+         | otherwise -> error ("IRBuiltin " ++ show b ++ " expects " ++ show n
+                               ++ " arguments, got " ++ show (length args)
+                               ++ ": " ++ show args)
+
 data Distribution = IRNormal | IRUniform deriving (Show, Eq)
 
 data IRExpr = IRIf IRExpr IRExpr IRExpr
@@ -271,6 +327,27 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               | IREnumSumPaired Bool Varname MultiValue IRExpr
               | IRIsPossible MultiValue IRExpr
               | IRIndex IRExpr IRExpr
+              -- | A named operation over the dense axis (design
+              -- ir-tensor-values). One constructor rather than a family:
+              -- which operation, and any operator it is parameterised by,
+              -- live in the 'Builtin' tag, so a new dense operation costs an
+              -- enum case and not another binder for every generic pass to
+              -- special-case -- which is precisely how the enum-sum family
+              -- grew a constructor per reduction operator.
+              --
+              -- Shaped as @Builtin [IRExpr]@ so it follows 'IRMap''s stated
+              -- fate under the ir-reengineering refactor (demotion to a
+              -- stdlib call or an @IRBuiltin@ variant) rather than becoming
+              -- another constructor family that refactor has to collapse.
+              -- Argument counts and shapes are documented per 'Builtin';
+              -- 'builtinArity' is the single place they are checked.
+              --
+              -- Note the map binds its variable by taking an 'IRLambda' as an
+              -- argument, not by carrying a 'Varname' field. That keeps the
+              -- flat argument list, at the price of the optimizer's
+              -- loop-invariance analysis having to recognise a binder
+              -- generically instead of by matching a constructor list.
+              | IRBuiltin Builtin [IRExpr]
               | IRError String
               -- Runtime type-tag check: True iff the value of the sub-expression
               -- structurally conforms to the given RType. Emitted only as the
@@ -432,6 +509,7 @@ getIRSubExprs (IREnumSum _ _ a) = [a]
 getIRSubExprs (IRLogEnumSum _ _ a) = [a]
 getIRSubExprs (IREnumSumPaired _ _ _ a) = [a]
 getIRSubExprs (IRIndex a b) = [a, b]
+getIRSubExprs (IRBuiltin _ args) = args
 getIRSubExprs (IRError _) = []
 getIRSubExprs (IRConformsTo _ a) = [a]
 
@@ -525,6 +603,7 @@ irDescend f x = case x of
   (IRLogEnumSum name val scope) -> IRLogEnumSum name val (f scope)
   (IREnumSumPaired lg name val scope) -> IREnumSumPaired lg name val (f scope)
   (IRIndex left right) -> IRIndex (f left) (f right)
+  (IRBuiltin b args) -> IRBuiltin b (map f args)
   (IRTheta a i) -> IRTheta (f a) i
   (IRSubtree a i) -> IRSubtree (f a) i
   (IRConst _) -> x
@@ -570,6 +649,7 @@ irDescendM f x = case x of
   (IRLogEnumSum name val scope) -> IRLogEnumSum name val <$> f scope
   (IREnumSumPaired lg name val scope) -> IREnumSumPaired lg name val <$> f scope
   (IRIndex left right) -> IRIndex <$> f left <*> f right
+  (IRBuiltin b args) -> IRBuiltin b <$> mapM f args
   (IRTheta a i) -> flip IRTheta i <$> f a
   (IRSubtree a i) -> flip IRSubtree i <$> f a
   (IRConst _) -> pure x
@@ -618,6 +698,7 @@ irPrintFlat (IRApply _ _) = "IRApply"
 irPrintFlat (IREnumSum _ _ _) = "IREnumSum"
 irPrintFlat (IREnumSumPaired _ _ _ _) = "IREnumSumPaired"
 irPrintFlat (IRIndex _ _) = "IRIndex"
+irPrintFlat (IRBuiltin b _) = "IRBuiltin " ++ show b
 irPrintFlat (IRError _) = "IRError"
 irPrintFlat (IRConformsTo _ _) = "IRConformsTo"
 

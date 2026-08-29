@@ -366,6 +366,11 @@ getRType v@(VClosure {}) = error ("getRType: no return type for " ++ show v)
 getRType VAny = error "getRType: ANY is a marginal-query wildcard, not a typed value"
 getRType (VAnyExcept _) = error "getRType: ANY-except is a marginal-query wildcard, not a typed value"
 getRType (VError e) = error ("getRType: on an error value: " ++ e)
+-- A dense axis has no surface RType: it is an IR-internal value produced by the
+-- dense builtins and never appears in a program's return type. Giving it one
+-- would be the start of tensors-in-core-language, which is explicitly out of
+-- scope for design ir-tensor-values.
+getRType (VDense _) = error "getRType: a dense axis is IR-internal and has no surface RType"
 
 lookupNeural :: String -> [NeuralDecl] -> Maybe (RType, Maybe MultiValue)
 lookupNeural name decls = foldr (\(n, r, t) ret -> if n == name then Just (r, t) else ret) Nothing decls

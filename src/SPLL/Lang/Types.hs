@@ -160,6 +160,23 @@ data GenericValue a = VBool Bool
            | VThetaTree ThetaTree
            | VClosure [(String, a)] String a
            | VADT String [GenericValue a]
+           -- | A dense homogeneous axis of known static extent: a flat vector
+           -- of values with no spine, as opposed to 'VList''s cons cells.
+           -- Produced and consumed only by the dense builtins ('BDense',
+           -- 'BMap', 'BReduce', 'BIndex') -- the surface language has no
+           -- syntax for it and the parser never builds one, so it is
+           -- unreachable in a 'Value' that came from a .ppl file. It lives in
+           -- 'GenericValue' rather than a type of its own because the
+           -- interpreter's let-environments are typed as 'IRValue', and a
+           -- mapped axis has to be let-bindable for one map to feed two
+           -- reduces (design ir-tensor-values).
+           --
+           -- Element type is unconstrained on purpose: homogeneity of
+           -- *primitives* is not a typing obligation here but a codegen
+           -- opportunity -- a dense of float/int/bool lowers to a real tensor
+           -- or array with an O(1) index and a vectorized reduce, anything
+           -- else falls back to a generic list.
+           | VDense [GenericValue a]
            | VAny -- Only used for marginal queries
            | VAnyExcept [a] -- Only used for marginal queries
            | VError String
@@ -178,6 +195,7 @@ instance Functor GenericValue where
   fmap _ (VThetaTree x) = VThetaTree x
   fmap f (VClosure e n ex) = VClosure (map (Data.Bifunctor.second f) e) n (f ex)
   fmap f (VADT n adt) = VADT n (map (fmap f) adt)
+  fmap f (VDense xs) = VDense (map (fmap f) xs)
   fmap f (VAnyExcept x) = VAnyExcept (map f x)
   fmap _ VAny = VAny
   fmap _ (VError s) = VError s

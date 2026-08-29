@@ -357,6 +357,33 @@ generateExpression (IRLetIn name val body) = do
     v <- generateExpression val
     b <- generateExpression body
     return $ "(let " ++ name ++ " = " ++ v ++ "; " ++ b ++ " end)"
+-- The dense builtins (design ir-tensor-values); see the note in
+-- CodeGenPyTorch. A Julia dense axis is a Vector, so BIndex is an O(1) read
+-- against IRIndex's cons walk. Indices are 1-based, hence the "+ 1" that
+-- IRIndex also carries.
+generateExpression (IRBuiltin BDense elems) = do
+    es <- mapM generateExpression elems
+    return $ "[" ++ intercalate ", " es ++ "]"
+generateExpression (IRBuiltin BMap [IRLambda v body, d]) = do
+    b <- generateExpression body
+    dd <- generateExpression d
+    return $ "[" ++ b ++ " for " ++ v ++ " in " ++ dd ++ "]"
+generateExpression (IRBuiltin BMap [f, d]) = do
+    ff <- generateExpression f
+    dd <- generateExpression d
+    return $ "map(" ++ ff ++ ", " ++ dd ++ ")"
+-- sum needs an explicit init: Julia raises on a reduction over an empty
+-- collection, where a zero-extent axis must reduce to the operator identity.
+generateExpression (IRBuiltin (BReduce ROpAdd) [d]) = do
+    dd <- generateExpression d
+    return $ "sum(" ++ dd ++ "; init=0.0)"
+generateExpression (IRBuiltin (BReduce ROpLogSumExp) [d]) = do
+    dd <- generateExpression d
+    return $ "logsumexp(" ++ dd ++ ")"
+generateExpression (IRBuiltin BIndex [d, k]) = do
+    dd <- generateExpression d
+    kk <- generateExpression k
+    return $ "(" ++ dd ++ ")[" ++ kk ++ " + 1]"
 generateExpression (IRError e) =
     return $ "throw(\"" ++ escapeStr e ++ "\")"
 generateExpression (IRConformsTo t x) = do

@@ -101,6 +101,13 @@ pPrintIRExpr (IREnumSum varname val e) n = "enumSum " ++ varname ++ " = " ++ sho
 pPrintIRExpr (IRLogEnumSum varname val e) n = "logEnumSum " ++ varname ++ " = " ++ show val ++ " in (\n" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IREnumSumPaired lg varname val e) n = (if lg then "logEnumSumPaired " else "enumSumPaired ") ++ varname ++ " = " ++ show val ++ " in (\n" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRIndex e1 e2) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ ")[" ++ pPrintIRExpr e2 (n + 1) ++ "]"
+pPrintIRExpr (IRBuiltin BDense args) n = "<" ++ intercalate ", " (map (`pPrintIRExpr` (n + 1)) args) ++ ">"
+pPrintIRExpr (IRBuiltin BMap [f, d]) n = "map (" ++ pPrintIRExpr f (n + 1) ++ ") over (" ++ pPrintIRExpr d (n + 1) ++ ")"
+pPrintIRExpr (IRBuiltin (BReduce op) [d]) n = "reduce " ++ reduceOpName op ++ " (" ++ pPrintIRExpr d (n + 1) ++ ")"
+pPrintIRExpr (IRBuiltin BIndex [d, k]) n = "(" ++ pPrintIRExpr d (n + 1) ++ ")@[" ++ pPrintIRExpr k (n + 1) ++ "]"
+-- A malformed builtin is a compiler bug, but the pretty-printer is exactly what
+-- someone reaches for while debugging one, so it renders rather than crashing.
+pPrintIRExpr (IRBuiltin b args) n = show b ++ "(" ++ intercalate ", " (map (`pPrintIRExpr` (n + 1)) args) ++ ")"
 pPrintIRExpr (IRError e) _ = "error(" ++ e ++")"
 pPrintIRExpr (IRConformsTo t e) n = "conformsTo " ++ show t ++ " (" ++ pPrintIRExpr e (n + 1) ++ ")"
 
@@ -148,6 +155,12 @@ pPrintValue (VADT name []) = name
 pPrintValue (VADT name args) = "(" ++ name ++ " " ++ unwords (map pPrintValue args) ++ ")"
 pPrintValue VAny = "ANY"
 pPrintValue (VAnyExcept _) = "ANY_EXCEPT"
+pPrintValue (VDense xs) = "<" ++ intercalate "," (map pPrintValue xs) ++ ">"
 
 indent :: Int -> String
 indent n = replicate (2 * n) ' '
+
+-- | Short display name for a dense reduction operator.
+reduceOpName :: ReduceOp -> String
+reduceOpName ROpAdd = "add"
+reduceOpName ROpLogSumExp = "lse"

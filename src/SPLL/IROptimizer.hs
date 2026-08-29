@@ -423,28 +423,46 @@ duplicableBinding det val = isValue val || (isBareVar val && isPureGiven (optDet
   where isBareVar (IRVar _) = True
         isBareVar _         = False
 
--- | True if `var` is used inside an IREnumSum body in `scope` AND `val` does not
--- reference any loop variable of those IREnumSums.  Such a binding is
+-- | An /iterating/ form: one whose body is evaluated once per element of a
+-- domain, together with the variable it binds over that body. This is the one
+-- place that knows which constructors iterate; the analyses below are written
+-- against it rather than re-matching the constructor set each time, which is
+-- how the enum-sum family came to be spelled out in four separate walks
+-- (design ir-tensor-values).
+--
+-- Note what is deliberately /not/ here: a bare 'IRLambda'. A lambda's body is
+-- evaluated once per application, which is usually once, so treating every
+-- lambda as a loop would change hoisting decisions for every program with a
+-- lambda in it -- a behaviour change well beyond adding a dense axis. A
+-- 'BMap''s lambda /is/ listed, because a map applies it once per element by
+-- construction.
+loopBinder :: IRExpr -> Maybe (Varname, IRExpr)
+loopBinder (IREnumSum n _ body) = Just (n, body)
+loopBinder (IRLogEnumSum n _ body) = Just (n, body)
+loopBinder (IREnumSumPaired _ n _ body) = Just (n, body)
+loopBinder (IRBuiltin BMap [IRLambda n body, _]) = Just (n, body)
+loopBinder _ = Nothing
+
+-- | True if `var` is used inside an iterating body in `scope` AND `val` does not
+-- reference any loop variable of those forms.  Such a binding is
 -- loop-invariant and should be hoisted rather than inlined into the loop body.
 usedInEnumSumBodyInvariant :: String -> IRExpr -> IRExpr -> Bool
 usedInEnumSumBodyInvariant var val scope =
   usedInEnumSumBody var scope &&
   all (\loopVar -> countUses loopVar val == 0) (enumSumBoundVars scope)
 
--- | True if `var` appears free inside at least one IREnumSum/IRLogEnumSum
--- body in `expr`.
+-- | True if `var` appears free inside at least one iterating body in `expr`.
 usedInEnumSumBody :: String -> IRExpr -> Bool
-usedInEnumSumBody var (IREnumSum _ _ body) = countUses var body > 0
-usedInEnumSumBody var (IRLogEnumSum _ _ body) = countUses var body > 0
-usedInEnumSumBody var (IREnumSumPaired _ _ _ body) = countUses var body > 0
-usedInEnumSumBody var expr = any (usedInEnumSumBody var) (getIRSubExprs expr)
+usedInEnumSumBody var expr = case loopBinder expr of
+  Just (_, body) -> countUses var body > 0
+  Nothing -> any (usedInEnumSumBody var) (getIRSubExprs expr)
 
--- | Collect all variables bound by IREnumSum/IRLogEnumSum nodes in an expression.
+-- | Collect all variables bound by an iterating form in an expression.
 enumSumBoundVars :: IRExpr -> [String]
-enumSumBoundVars (IREnumSum n _ body) = n : enumSumBoundVars body
-enumSumBoundVars (IRLogEnumSum n _ body) = n : enumSumBoundVars body
-enumSumBoundVars (IREnumSumPaired _ n _ body) = n : enumSumBoundVars body
-enumSumBoundVars expr = concatMap enumSumBoundVars (getIRSubExprs expr)
+enumSumBoundVars expr = case loopBinder expr of
+  Just (n, _) -> n : rest
+  Nothing -> rest
+  where rest = concatMap enumSumBoundVars (getIRSubExprs expr)
 
 evalConstantDistr :: IRExpr -> IRExpr
 evalConstantDistr (IRDensity IRNormal (IRConst (VFloat x))) = IRConst (VFloat ((1 / sqrt (2 * pi)) * exp (-0.5 * x * x)))
@@ -650,6 +668,14 @@ forceAnyCheck _ (IRSample _) = IRConst $ VBool False
 forceAnyCheck _ (IREnumSum _ _ _) = IRConst $ VBool False
 forceAnyCheck _ (IRLogEnumSum _ _ _) = IRConst $ VBool False
 forceAnyCheck _ (IREnumSumPaired _ _ _ _) = IRConst $ VBool False
+-- A dense axis is a computed aggregate and a reduction of one is a computed
+-- scalar; neither can be the ANY sentinel, for the same reason the enumerated
+-- sums above cannot. 'BIndex' is deliberately absent: it reads back an element
+-- someone else put in the axis, so it is only not-ANY if that value was, which
+-- is not decidable here -- it falls through to a real runtime check.
+forceAnyCheck _ (IRBuiltin BDense _) = IRConst $ VBool False
+forceAnyCheck _ (IRBuiltin BMap _) = IRConst $ VBool False
+forceAnyCheck _ (IRBuiltin (BReduce _) _) = IRConst $ VBool False
 -- Push the check through the binding forms, so a scalar body above can decide
 -- it. Only kept when it actually decided: otherwise this would just relocate
 -- the test (and, for an if, duplicate it).
@@ -908,6 +934,7 @@ headHash e = case e of
   IRLogCumulative d _ -> hashMix 35 (hashStr (show d))
   IRLogEnumSum n v _  -> hashMix (hashMix 36 (hashStr n)) (hashStr (show v))
   IREnumSumPaired lg n v _ -> hashMix (hashMix (hashMix 37 (if lg then 1 else 0)) (hashStr n)) (hashStr (show v))
+  IRBuiltin b _       -> hashMix 38 (hashStr (show b))
 
 -- | The largest hoistable common subexpression of a node (candidates are in
 -- first-occurrence order and ties break like the historical
@@ -1025,6 +1052,7 @@ setIRSubExprs (IRLogEnumSum n val _) [a] = IRLogEnumSum n val a
 setIRSubExprs (IREnumSumPaired lg n val _) [a] = IREnumSumPaired lg n val a
 setIRSubExprs (IRIndex{}) [a, b] = IRIndex a b
 setIRSubExprs (IRConformsTo t _) [a] = IRConformsTo t a
+setIRSubExprs (IRBuiltin b _) kids = IRBuiltin b kids
 setIRSubExprs e [] = e  -- leaves: IRConst, IRSample, IRVar, IRError
 setIRSubExprs e kids = error ("setIRSubExprs: arity mismatch for " ++ irPrintFlat e ++ " with " ++ show (length kids) ++ " children")
 

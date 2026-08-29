@@ -445,6 +445,13 @@ generateExpressionLifted expr = do
   e <- generateExpression expr
   return ([], str e)
 
+-- | The Python runtime function reducing a dense axis with each operator.
+-- Both are pythonLib.py builtins: sum is Python's own, logsumexp is the
+-- library's (already backing IRLogEnumSum).
+pyReduceOp :: ReduceOp -> String
+pyReduceOp ROpAdd = "sum"
+pyReduceOp ROpLogSumExp = "logsumexp"
+
 str :: String -> ShowS
 str = showString
 
@@ -619,6 +626,33 @@ generateExpression (IRLetIn name val body) = do
   v <- generateExpression val
   b <- generateExpression body
   return ("((" ++ name ++ ":=" ++ v ++ "), " ++ b ++ ")[1]")
+-- The dense builtins (design ir-tensor-values). A scalar-mode dense axis is a
+-- Python list: scalar pythonLib.py is pure-Python (probabilities are floats,
+-- there is no torch in scope), so there is no tensor to lower a "dense of
+-- primitive" to here -- that specialization lives in the batched backend,
+-- where an element is a [B] tensor and a reduce really is a stacked sum.
+-- What scalar mode does get is an O(1) BIndex, against IRIndex's cons walk.
+generateExpression (IRBuiltin BDense elems) = do
+  es <- mapM generateExpression elems
+  return ("[" ++ intercalate ", " es ++ "]")
+-- A comprehension rather than map(lambda ...): it binds the loop variable
+-- directly, saving a Python call per element, and the bound name is already a
+-- valid identifier.
+generateExpression (IRBuiltin BMap [IRLambda v body, d]) = do
+  b <- generateExpression body
+  dd <- generateExpression d
+  return ("[" ++ b ++ " for " ++ v ++ " in " ++ dd ++ "]")
+generateExpression (IRBuiltin BMap [f, d]) = do
+  ff <- generateExpression f
+  dd <- generateExpression d
+  return ("list(map(" ++ ff ++ ", " ++ dd ++ "))")
+generateExpression (IRBuiltin (BReduce op) [d]) = do
+  dd <- generateExpression d
+  return (pyReduceOp op ++ "(" ++ dd ++ ")")
+generateExpression (IRBuiltin BIndex [d, k]) = do
+  dd <- generateExpression d
+  kk <- generateExpression k
+  return ("(" ++ dd ++ ")[" ++ kk ++ "]")
 generateExpression (IRError e) =
   return ("throw(\"" ++ escapeStr e ++ "\")")
 generateExpression (IRConformsTo t x) = do

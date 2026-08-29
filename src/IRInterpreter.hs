@@ -468,9 +468,61 @@ generate f neurals' registry adts' globalEnv env args (IRIndex lstExpr idxExpr) 
       VInt i -> return $ l `elementAt` i
       _ -> error "Index must be an integer"
     _ -> error "Expression must be a list"
+-- The dense builtins (design ir-tensor-values). The interpreter is the
+-- reference semantics: a dense axis is a flat list of values here, and the
+-- speed the axis exists for is a codegen concern (a dense of primitives lowers
+-- to a real tensor/array), not an interpreter one.
+generate f neurals' registry adts' globalEnv env args (IRBuiltin BDense elems) = do
+  vals <- mapM (generate f neurals' registry adts' globalEnv env args) elems
+  return $ VDense vals
+generate f neurals' registry adts' globalEnv env args (IRBuiltin BMap [fExpr, denseExpr]) = do
+  denseVal <- generate f neurals' registry adts' globalEnv env args denseExpr
+  case denseVal of
+    VDense xs -> do
+      ys <- mapM (\x -> generate f neurals' registry adts' globalEnv env args (IRApply fExpr (IRConst x))) xs
+      return $ VDense ys
+    _ -> error ("BMap: not a dense axis: " ++ show denseVal)
+-- Reduction starts from the operator's identity and folds right, matching the
+-- association order the enum-sum family uses (foldrM over the same domain), so
+-- a lowering from IREnumSum reduces the same terms in the same order.
+generate f neurals' registry adts' globalEnv env args (IRBuiltin (BReduce op) [denseExpr]) = do
+  denseVal <- generate f neurals' registry adts' globalEnv env args denseExpr
+  case denseVal of
+    VDense xs -> return $ foldr (reduceStep op) (reduceIdentity op) xs
+    _ -> error ("BReduce: not a dense axis: " ++ show denseVal)
+generate f neurals' registry adts' globalEnv env args (IRBuiltin BIndex [denseExpr, keyExpr]) = do
+  denseVal <- generate f neurals' registry adts' globalEnv env args denseExpr
+  keyVal <- generate f neurals' registry adts' globalEnv env args keyExpr
+  case (denseVal, keyVal) of
+    (VDense xs, VInt i)
+      | i >= 0 && i < length xs -> return (xs !! i)
+      | otherwise -> error ("BIndex: key " ++ show i ++ " out of bounds for extent " ++ show (length xs))
+    (VDense _, k) -> error ("BIndex: key must be an integer, got " ++ show k)
+    (d, _) -> error ("BIndex: not a dense axis: " ++ show d)
+generate _ _ _ _ _ _ _ e@(IRBuiltin b args) =
+  error ("Malformed dense builtin " ++ show b ++ " with " ++ show (length args)
+         ++ " arguments: " ++ show e)
 generate _ _ _ _ _ _ _ (IRError s) = error $ "Error during interpretation: " ++ s
 generate _ _ _ _ _ _ _ expr = error ("Expression is not yet implemented " ++ show expr)
 
+
+-- | The identity element of a dense reduction, which is also the result of
+-- reducing an empty axis.
+reduceIdentity :: ReduceOp -> IRValue
+reduceIdentity ROpAdd = VFloat 0
+reduceIdentity ROpLogSumExp = VFloat ((-1) / 0)
+
+-- | One step of a dense reduction. Log-sum-exp guards both infinities the way
+-- IRLogEnumSum does, so a -inf term (the log-space zero) is absorbed rather
+-- than producing a NaN via @exp (-inf - -inf)@.
+reduceStep :: ReduceOp -> IRValue -> IRValue -> IRValue
+reduceStep ROpAdd (VFloat a) (VFloat b) = VFloat (a + b)
+reduceStep ROpLogSumExp (VFloat a) (VFloat b)
+  | isInfinite a && a < 0 = VFloat b
+  | isInfinite b && b < 0 = VFloat a
+  | otherwise = let m = max a b in VFloat (m + log (exp (a - m) + exp (b - m)))
+reduceStep op a b =
+  error ("BReduce " ++ show op ++ ": non-numeric terms: " ++ show (a, b))
 
 -- Reduces the complex data structure of an IREnv to a simpler reduced form
 -- Does this by creating a list of Maybe IRExpressions for each triple of gen, prob, and integ functions and then removes the Nothings
