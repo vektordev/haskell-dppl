@@ -39,6 +39,8 @@ module SPLL.CodeGenPyTorchBatched
   , prepBatchedBody
   , structural
   , hoistStructural
+  , SEnv(..)
+  , adtEnv
   ) where
 
 import SPLL.IntermediateRepresentation
@@ -95,18 +97,14 @@ generateFunctionsBatched genBoil env0 = do
           -- thread the batch-size parameter through cross-function generate
           -- calls ('attachBatchCalls'), which runs after the same renaming.
           genArities = [ (fromMaybe raw (lookup raw lut), length (fst (unwrapLambdas e))) | (raw, e) <- genRaw ]
-      () <- checkCallGraph funcs
-      -- Every ADT constructor name, so the dichotomy guard can recognise a
-      -- constructor-tagged value as *structure* (M2).
-      let ctorNames = [ pyMangle cn | d <- adts, (cn, _) <- constructors d ]
-      -- Nullary constructors additionally have to be *emitted* as
-      -- instantiations (@Heads()@, not @Heads@) -- the same rule, and the same
-      -- reason, as 'SPLL.CodeGenPyTorch.generateFunctions'' callableNames: the
-      -- compiler refers to a nullary constructor by a bare 'IRVar', and the
-      -- bare class neither compares equal to an instance nor answers an
-      -- @is\<Ctor\>@ predicate.
-      let nullaryCtorNames = [ pyMangle cn | d <- adts, (cn, []) <- constructors d ]
-      classes <- mapM (generateClass ctorNames nullaryCtorNames lut genArities genRaw) funcs
+      -- The ADT-derived name sets every pass below shares: constructor names
+      -- (the dichotomy guard's notion of *structure*, M2), the nullary ones
+      -- (emitted as instantiations, the same rule and reason as
+      -- 'SPLL.CodeGenPyTorch.generateFunctions'' callableNames) and the
+      -- @is\<Ctor\>@ predicates ('structural' shape-directed conditions).
+      let env' = adtEnv adts
+      () <- checkCallGraph env' funcs
+      classes <- mapM (generateClass env' lut genArities genRaw) funcs
       constLines <- mapM renderConst consts
       let body = generateADTClassesBatched adts ++ constLines
              ++ (if null consts then [] else [""])
@@ -166,19 +164,19 @@ renderConst (n, v) = case batchedVal v of
 -- (task neural-generate-parity: generate's ineligibility used to degrade to a
 -- runtime-raising stub per class, M4; it is now a compile-time refusal like
 -- forward/integrate, see 'renderGen').
-generateClass :: [String] -> [String] -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> IRFunGroup -> Either CompilerError [String]
-generateClass ctors nullaryCtors lut genArities genMethods (IRFunGroup name gen prob integ _ _ doc dom) = do
-  p <- maybe (Right []) (generateMethod ctors nullaryCtors lut "forward" name) prob
-  i <- maybe (Right []) (generateMethod ctors nullaryCtors lut "integrate" name) integ
-  g <- maybe (Right []) (renderGen ctors nullaryCtors lut genArities genMethods name) gen
+generateClass :: SEnv -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> IRFunGroup -> Either CompilerError [String]
+generateClass env lut genArities genMethods (IRFunGroup name gen prob integ _ _ doc dom) = do
+  p <- maybe (Right []) (generateMethod env lut "forward" name) prob
+  i <- maybe (Right []) (generateMethod env lut "integrate" name) integ
+  g <- maybe (Right []) (renderGen env lut genArities genMethods name) gen
   let commentLines = map ("# " ++) (lines doc)
       initLine = "class " ++ onHead toUpper name ++ "(Module):"
       -- Dense enumeration (M3): rendered domain, and the two extra methods per
       -- inference method whose signature it fits. Purely additive -- `forward`,
       -- `integrate` and `generate` above are byte-identical either way.
       domLines = denseDomainLines dom
-      pDense = if null domLines then [] else denseMethods lut "forward" prob
-      iDense = if null domLines then [] else denseMethods lut "integrate" integ
+      pDense = if null domLines then [] else denseMethods env lut "forward" prob
+      iDense = if null domLines then [] else denseMethods env lut "integrate" integ
       -- Emit the domain constant only if something reads it: a finite domain on
       -- a group whose methods all take extra per-point arguments is real, but
       -- has no dense entry point to justify the constant.
@@ -240,10 +238,10 @@ domainVal _ = Nothing
 -- shared across the batch and broadcasts). A method taking a further per-point
 -- argument -- a neural symbol -- is excluded: its dense result would be
 -- @[B, V]@, which amortises over nothing.
-denseMethods :: [(String, String)] -> String -> Maybe IRFunDecl -> [String]
-denseMethods _ _ Nothing = []
-denseMethods lut methodName (Just fd)
-  | denseArgs (methodArgs lut fd) =
+denseMethods :: SEnv -> [(String, String)] -> String -> Maybe IRFunDecl -> [String]
+denseMethods _ _ _ Nothing = []
+denseMethods env lut methodName (Just fd)
+  | denseArgs (methodArgs env lut fd) =
       [ "def " ++ methodName ++ "_dense(self, *args):"
       ] ++ indentOnce
       [ "# The whole [V] vector: the kernel above, evaluated once with the domain"
@@ -265,22 +263,22 @@ denseMethods lut methodName (Just fd)
 
 -- | The parameter names 'generateMethod' will emit for a method, without
 -- rendering it (or committing to its fragment check succeeding).
-methodArgs :: [(String, String)] -> IRFunDecl -> [String]
-methodArgs lut (expr0, _) = fst (unwrapLambdas (prepBatchedBody (irMap (replaceCalls lut) expr0)))
+methodArgs :: SEnv -> [(String, String)] -> IRFunDecl -> [String]
+methodArgs env lut (expr0, _) = fst (unwrapLambdas (prepBatchedBody env (irMap (replaceCalls lut) expr0)))
 
 -- | Emit one method: rewrite cross-function call names to Python @class.method@
 -- form (the same @_prob@ → @.forward@ LUT the scalar backend uses), peel the
 -- query-type guard and any @isAny@ marginal branches (batched v1 excludes
 -- @VAny@), check the residue lies in the tensor fragment, then render it as a
 -- let-spine ending in a @return@.
-generateMethod :: [String] -> [String] -> [(String, String)] -> String -> String -> IRFunDecl -> Either CompilerError [String]
-generateMethod ctors nullaryCtors lut methodName groupNameStr (expr0, doc) = do
+generateMethod :: SEnv -> [(String, String)] -> String -> String -> IRFunDecl -> Either CompilerError [String]
+generateMethod env lut methodName groupNameStr (expr0, doc) = do
   let expr = irMap (replaceCalls lut) expr0
-      (args, body) = unwrapLambdas (prepBatchedBody expr)
-  () <- batchedGuard ctors groupNameStr methodName body
+      (args, body) = unwrapLambdas (prepBatchedBody env expr)
+  () <- batchedGuard env groupNameStr methodName body
   let l1 = "def " ++ methodName ++ "(self" ++ concatMap (", " ++) args ++ "):"
       docLines = map ("# " ++) (lines doc)
-  return $ docLines ++ [l1] ++ indentOnce (batchedBlock (emitEnv nullaryCtors) body)
+  return $ docLines ++ [l1] ++ indentOnce (batchedBlock env body)
 
 unwrapLambdas :: IRExpr -> ([String], IRExpr)
 unwrapLambdas (IRLambda name rest) = (name : otherNames, plainTree)
@@ -345,8 +343,8 @@ batchNVar = "_batchN"
 --      as forward/integrate): lists, ADTs, Either dispatch (including a
 --      neural decoder's own 'EitherPlan'/'ADTPlan' output shape -- see the
 --      header comment above), etc.
-renderGen :: [String] -> [String] -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> String -> IRFunDecl -> Either CompilerError [String]
-renderGen ctors nullaryCtors lut genArities genRaw groupNameStr (expr0, doc)
+renderGen :: SEnv -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> String -> IRFunDecl -> Either CompilerError [String]
+renderGen env lut genArities genRaw groupNameStr (expr0, doc)
   | hasGenCycle genRaw (groupNameStr ++ "_gen") =
       if producesList (lookup (groupNameStr ++ "_gen") genRaw)
         then Right (heterogeneousGenStub groupNameStr)
@@ -355,19 +353,19 @@ renderGen ctors nullaryCtors lut genArities genRaw groupNameStr (expr0, doc)
           ++ "(design pytorch-tensorizer) and both-arm-eager select semantics would not terminate."
   | otherwise =
       let expr = irMap (attachBatchCall genArities . replaceCalls lut) expr0
-          (args, body) = unwrapLambdas (prepBatchedBody expr)
-      in case batchedGuard ctors groupNameStr "generate" body of
+          (args, body) = unwrapLambdas (prepBatchedBody env expr)
+      in case batchedGuard env groupNameStr "generate" body of
            -- Drawing a *structurally heterogeneous* sample -- a value-dependent
            -- branch between two shapes -- is the same Component 4 situation as
            -- the recursive list case above: the shapes are the output, so there
            -- is nothing to bucket on. Stub it rather than refusing the whole
            -- program, whose inference over such samples buckets fine.
-           Left why | structureBranch ctors body -> Right (heterogeneousGenStub groupNameStr)
+           Left why | structureBranch env body -> Right (heterogeneousGenStub groupNameStr)
                     | otherwise                 -> Left why
            Right () ->
              let l1 = "def generate(self" ++ concatMap (", " ++) (args ++ [batchNVar]) ++ "):"
                  docLines = map ("# " ++) (lines doc)
-             in Right (docLines ++ [l1] ++ indentOnce (batchedBlock (emitEnv nullaryCtors) body))
+             in Right (docLines ++ [l1] ++ indentOnce (batchedBlock env body))
 
 -- | A generate that draws a /structurally heterogeneous/ sample -- a recursion
 -- that builds a list, or a value-dependent branch between two shapes -- is the
@@ -400,11 +398,11 @@ heterogeneousGenStub groupNameStr =
 -- | Does this body contain a /value-dependent/ branch whose arms have different
 -- structure -- the shape the dichotomy guard refuses? In a generate body that
 -- means the drawn sample's structure is itself random.
-structureBranch :: [String] -> IRExpr -> Bool
-structureBranch ctors e = here e || any (structureBranch ctors) (getIRSubExprs e)
-  where here (IRSelect _ t f) = listValued ctors t || listValued ctors f
-        here (IRIf c t f)     = not (structural analysisEnv c)
-                             && (listValued ctors t || listValued ctors f)
+structureBranch :: SEnv -> IRExpr -> Bool
+structureBranch env e = here e || any (structureBranch env) (getIRSubExprs e)
+  where here (IRSelect _ t f) = listValued env t || listValued env f
+        here (IRIf c t f)     = not (structural env c)
+                             && (listValued env t || listValued env f)
         here _                = False
 
 -- | Does this generate body construct a list?
@@ -482,9 +480,9 @@ attachBatchCall _ e = e
 --   4. hoist structural (shape-directed) 'IRIf's out of expression positions,
 --      so each becomes a real Python @if@ statement (design
 --      heterogeneous-batch-inference, Component 1).
-prepBatchedBody :: IRExpr -> IRExpr
-prepBatchedBody (IRLambda n b) = IRLambda n (prepBatchedBody b)
-prepBatchedBody e = hoistStructural (distributeSelects (foldConst (pruneAny (stripRootGuard e))))
+prepBatchedBody :: SEnv -> IRExpr -> IRExpr
+prepBatchedBody env (IRLambda n b) = IRLambda n (prepBatchedBody env b)
+prepBatchedBody env e = hoistStructural env (distributeSelects (foldConst (pruneAny (stripRootGuard e))))
 
 -- | Strip a root query-type guard @if (sample conforms) then body else error@,
 -- taking the conforming arm. Leaves a guard-less body untouched.
@@ -567,27 +565,41 @@ projTuple False e              = IRTSnd e
 -- hold (a value-dependent branch that chooses between different structures).
 -- ---------------------------------------------------------------------------
 
--- | What the emitter and the structural analyses need to know about names: the
--- ones bound to a structurally-determined (batch-independent, Python-bool)
--- value, plus the program's nullary ADT constructors, which are emitted as
--- instantiations rather than as bare class references (see 'batchedExpr').
+-- | What every pass over a batched body needs to know about names. One value is
+-- built per program by 'adtEnv' and threaded through analysis and emission
+-- alike, so the two can never disagree about whether a given node is structure.
 --
--- The constructor list is emission-only; passes that merely ask 'structural'
--- questions use 'analysisEnv', which leaves it empty.
+-- Only 'sBound' varies as a body is walked ('bindS'); the three ADT-derived
+-- sets are fixed for the whole program.
 data SEnv = SEnv
-  { sBound        :: [String]
+  { -- | Names @let@-bound to a structurally-determined (batch-independent,
+    -- Python-bool) value.
+    sBound        :: [String]
+    -- | Every constructor name: a value tagged with one is /structure/, which
+    -- is what the dichotomy guard refuses to select between.
+  , sCtors        :: [String]
+    -- | The nullary constructors, which 'batchedExpr' emits as instantiations
+    -- rather than as bare class references.
   , sNullaryCtors :: [String]
+    -- | The @is\<Ctor\>@ predicate names, which 'structural' recognises as
+    -- shape-directed conditions.
+  , sCtorPreds    :: [String]
   }
 
--- | The environment for a pass that only classifies expressions and never
--- emits: no names bound yet, and no constructor list because nothing is printed.
-analysisEnv :: SEnv
-analysisEnv = SEnv [] []
-
--- | The environment a method body is emitted in: nothing bound yet, and the
--- program's nullary ADT constructors, which 'batchedExpr' instantiates.
-emitEnv :: [String] -> SEnv
-emitEnv = SEnv []
+-- | The environment for one program: nothing bound yet, and the three name sets
+-- its ADT declarations contribute.
+--
+-- The predicate spelling is @\"is\" ++ mangled@, matching both
+-- 'generateADTClassesBatched' (which prints it) and
+-- 'SPLL.IntermediateRepresentation.adtIdentifierRenaming' (which renames IR
+-- references to it) -- the constructor is mangled first, then prefixed.
+adtEnv :: [ADTDecl] -> SEnv
+adtEnv decls = SEnv
+  { sBound        = []
+  , sCtors        = [ pyMangle cn        | d <- decls, (cn, _)  <- constructors d ]
+  , sNullaryCtors = [ pyMangle cn        | d <- decls, (cn, []) <- constructors d ]
+  , sCtorPreds    = [ "is" ++ pyMangle cn | d <- decls, (cn, _)  <- constructors d ]
+  }
 
 -- | Is this expression's value fixed by the sample's /shape/ alone, hence a
 -- plain Python value that is constant across a bucket?
@@ -612,6 +624,15 @@ structural env e = case e of
   IROp OpOr  a b    -> structural env a && structural env b
   IRUnaryOp OpNot a -> structural env a
   IRLetIn n v b     -> structural (bindS env n v) b
+  -- An ADT constructor test is the same fact as the Either tag test above:
+  -- which constructor a value carries is part of its bucket signature, so the
+  -- emitted @is\<Ctor\>@ answers a plain Python bool ('generateADTClassesBatched')
+  -- that is uniform across the call. Recognising it is what keeps a sibling
+  -- constructor's field accessor out of a masked-away @torch.where@ arm, which
+  -- would evaluate it eagerly and raise (task
+  -- batched-ctor-test-not-structural-eager-accessor).
+  _ | (IRVar n, [_]) <- collectApplyChain e
+    , n `elem` sCtorPreds env -> True
   _                 -> False
 
 -- | Extend the structural environment with a @let@ binding (shadowing a
@@ -631,22 +652,22 @@ isEmptyListConst _                           = False
 -- with -- that is precisely the "structure-dependent branching" the bucketing
 -- wrapper exists to eliminate, and a program that still contains one after
 -- bucketing is outside the fragment.
-listValued :: [String] -> IRExpr -> Bool
-listValued ctors e = case e of
+listValued :: SEnv -> IRExpr -> Bool
+listValued env e = case e of
   IRCons{}            -> True
   IRTail{}            -> True
   IRConst (VList _)   -> True
   IRLeft{}            -> True
   IRRight{}           -> True
   IRConst (VEither _) -> True
-  IRLetIn _ _ b       -> listValued ctors b
-  IRIf _ t f          -> listValued ctors t || listValued ctors f
-  IRSelect _ t f      -> listValued ctors t || listValued ctors f
+  IRLetIn _ _ b       -> listValued env b
+  IRIf _ t f          -> listValued env t || listValued env f
+  IRSelect _ t f      -> listValued env t || listValued env f
   IRConst (VADT _ _)  -> True
   -- An ADT constructor: a bare nullary one (`Heads`) is a reference to the
   -- emitted class, an applied one is a call to it. Either way it builds a
   -- constructor-tagged value, which is structure.
-  _ | (IRVar n, _) <- collectApplyChain e -> n `elem` ctors
+  _ | (IRVar n, _) <- collectApplyChain e -> n `elem` sCtors env
   _                   -> False
 
 -- | Lift every structural 'IRIf' out of expression position into a @let@-bound
@@ -658,8 +679,8 @@ listValued ctors e = case e of
 --
 -- Expressions containing no structural @if@ are returned untouched, so this is a
 -- no-op for every program in the original (non-heterogeneous) tensor fragment.
-hoistStructural :: IRExpr -> IRExpr
-hoistStructural top = evalState (stmt analysisEnv top) 0
+hoistStructural :: SEnv -> IRExpr -> IRExpr
+hoistStructural env0 top = evalState (stmt env0 top) 0
   where
     -- Statement position: the binding forms keep their shape, everything else
     -- collects hoisted bindings and wraps them around itself.
@@ -727,10 +748,10 @@ hasStructuralIf env e = case e of
 -- generate is now sometimes emitted, but it is checked and rendered
 -- independently (per class, best-effort) rather than through this hard,
 -- whole-program graph -- see 'hasGenCycle' for its own, separate cycle check.
-checkCallGraph :: [IRFunGroup] -> Either CompilerError ()
-checkCallGraph funcs = do
+checkCallGraph :: SEnv -> [IRFunGroup] -> Either CompilerError ()
+checkCallGraph env funcs = do
     () <$ foldM (walk []) [] roots
-    mapM_ checkRecursion [(n, prepBatchedBody b) | (n, b) <- methods, isEmittedMethod n]
+    mapM_ checkRecursion [(n, prepBatchedBody env b) | (n, b) <- methods, isEmittedMethod n]
   where
     methods  = concatMap groupMethods funcs
     roots    = [n | (n, _) <- methods, isEmittedMethod n]
@@ -743,7 +764,7 @@ checkCallGraph funcs = do
             go seen (n:ns)
               | n `elem` seen = go seen ns
               | otherwise     = go (n : seen) (callees n ++ ns)
-    checkRecursion (n, body) = case recOffenders cyclic analysisEnv False body of
+    checkRecursion (n, body) = case recOffenders cyclic env False body of
       []      -> Right ()
       (why:_) -> Left $ "batched mode: " ++ n ++ " " ++ why
                      ++ ". Structure-directed recursion is admitted (design "
@@ -828,9 +849,9 @@ allVarNames e = [n | IRVar n <- [e]] ++ concatMap allVarNames (getIRSubExprs e)
 -- with a diagnostic naming the first offender. Runs on the already-prepared
 -- body (guard/isAny stripped), so the only nodes it should see are the ones
 -- 'batchedExpr' knows how to emit.
-batchedGuard :: [String] -> String -> String -> IRExpr -> Either CompilerError ()
-batchedGuard ctors groupNameStr methodName body =
-  case offenders analysisEnv body of
+batchedGuard :: SEnv -> String -> String -> IRExpr -> Either CompilerError ()
+batchedGuard env0 groupNameStr methodName body =
+  case offenders env0 body of
     []      -> Right ()
     (why:_) -> Left $
       "batched mode: " ++ groupNameStr ++ "'s " ++ methodName
@@ -850,9 +871,9 @@ batchedGuard ctors groupNameStr methodName body =
     -- is value-dependent has no tensor form at all (torch.where cannot select
     -- between lists of different length), so it is refused here rather than
     -- emitted as something that dies at run time.
-    structureSelect _   (IRSelect _ t f) = listValued ctors t || listValued ctors f
+    structureSelect env (IRSelect _ t f) = listValued env t || listValued env f
     structureSelect env (IRIf c t f)     = not (structural env c)
-                                        && (listValued ctors t || listValued ctors f)
+                                        && (listValued env t || listValued env f)
     structureSelect _   _                = False
     structureSelectReason =
       "a value-dependent branch (select) whose arms have different structure; "

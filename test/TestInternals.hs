@@ -23,7 +23,7 @@ import qualified Data.Map.Strict as Map
 import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan)
 import SPLL.IntermediateRepresentation
 import SPLL.IROptimizer (postProcess)
-import SPLL.CodeGenPyTorchBatched (batchedGuard, generateFunctionsBatched)
+import SPLL.CodeGenPyTorchBatched (adtEnv, batchedGuard, generateFunctionsBatched, structural)
 import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts)
 import Data.Foldable (toList)
 import Data.List (isInfixOf, intercalate)
@@ -1630,6 +1630,35 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       case generateFunctionsBatched False (recGenEnv (IRSample IRNormal)) of
         Right _  -> return ()
         Left msg -> assertFailure ("batched mode refused a plain generate body: " ++ msg)
+  -- Task batched-ctor-test-not-structural-eager-accessor: a constructor tag is
+  -- part of the bucket signature (M2), exactly as an Either tag is, so
+  -- `is<Ctor>` is a shape-directed condition and its `if` stays lazy Python
+  -- control flow. Emitting it as a torch.where instead evaluates both arms, and
+  -- the masked-away one reaches a sibling constructor's field accessor.
+  , testCase "an ADT constructor test is a structural condition" $ do
+      let env = adtEnv [ADTDecl { dataName = "Opt"
+                                , constructors = [("Nada", []), ("Just1", [("v", TFloat)])]
+                                , adtDepth = Nothing }]
+      assertBool "isNada(x) is not classified as structural"
+        (structural env (IRApply (IRVar "isNada") (IRVar "x")))
+      assertBool "isJust1(x) is not classified as structural"
+        (structural env (IRApply (IRVar "isJust1") (IRVar "x")))
+      assertBool "a name bound to a constructor test is not structural"
+        (structural env (IRLetIn "t" (IRApply (IRVar "isNada") (IRVar "x")) (IRVar "t")))
+      assertBool "an unrelated is-prefixed call must not be structural"
+        (not (structural env (IRApply (IRVar "isClose") (IRVar "x"))))
+      assertBool "a per-element comparison must not be structural"
+        (not (structural env (IROp OpGreaterThan (IRVar "x") (IRConst (VFloat 0.0)))))
+  , testCase "a constructor-tested arm is emitted lazily, not as a torch.where" $
+      -- The accessor in the taken arm belongs to `Just1`, so evaluating it
+      -- eagerly on a `Nada` would raise. It must sit inside an `if:` block.
+      case generateFunctionsBatched False (nullaryCtorEnv' (IRVar "sample")) of
+        Left msg -> assertFailure ("batched mode refused a constructor-guarded accessor: " ++ msg)
+        Right ls -> do
+          assertBool ("constructor test not emitted as an if statement: " ++ unlines ls)
+            (any ("if isJust1(sample):" `isInfixOf`) ls)
+          assertBool ("accessor still evaluated eagerly under torch.where: " ++ unlines ls)
+            (not (any (\l -> "torch.where" `isInfixOf` l && "v(sample)" `isInfixOf` l) ls))
   -- Task batched-nullary-adt-ctor-emitted-as-bare-class: the compiler refers to
   -- a nullary constructor by a bare 'IRVar', so an emitter that prints the name
   -- verbatim yields the *class*, which never satisfies an @is\<Ctor\>@ predicate
@@ -1677,6 +1706,20 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                , constructors = [("Nada", []), ("Just1", [("v", TFloat)])]
                , adtDepth = Nothing }]
       []
+    -- The same declaration, with a method whose accessor is legal only in the
+    -- constructor-tested arm.
+    nullaryCtorEnv' q = IREnv
+      [IRFunGroup { groupName = "main"
+                  , probFun = Just (IRLambda "sample"
+                      (IRIf (IRApply (IRVar "isJust1") q)
+                            (IRApply (IRVar "v") q) (IRConst (VFloat 0.0))), "")
+                  , genFun = Nothing, integFun = Nothing
+                  , encodeFun = Nothing, normalFun = Nothing, groupDoc = ""
+                  , sampleDomain = Nothing }]
+      [ADTDecl { dataName = "Opt"
+               , constructors = [("Nada", []), ("Just1", [("v", TFloat)])]
+               , adtDepth = Nothing }]
+      []
     -- A one-group environment whose only method is generate, with the given
     -- body (either self-referential or not).
     recGenEnv body = IREnv
@@ -1689,11 +1732,11 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
     -- these rows check the guard itself, and prepping would rewrite away the very
     -- nodes some of them are about (pruneAny turns an OpIsAny check into a plain
     -- constant, which is legitimately in the fragment).
-    assertRefusal needle e = case batchedGuard [] "g" "forward" e of
+    assertRefusal needle e = case batchedGuard (adtEnv []) "g" "forward" e of
       Right () -> assertFailure ("batchedGuard accepted a node it must refuse; expected: " ++ needle)
       Left msg -> assertBool ("batched refusal does not mention " ++ show needle
                               ++ "; actual diagnostic: " ++ msg) (needle `isInfixOf` msg)
-    assertAccepted e = case batchedGuard [] "g" "forward" e of
+    assertAccepted e = case batchedGuard (adtEnv []) "g" "forward" e of
       Right () -> return ()
       Left msg -> assertFailure ("batchedGuard refused a node inside the fragment: " ++ msg)
 
