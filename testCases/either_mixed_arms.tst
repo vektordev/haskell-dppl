@@ -1,3 +1,4 @@
+backends: interpreter, julia, python, batched
 p(Left 0.0)=(0.1994, 1.0)
 p(Right 1.0)=(0.5, 0.0)
 p(Right 0.5)=(0.0, 0.0)

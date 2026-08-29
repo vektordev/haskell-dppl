@@ -1,3 +1,4 @@
+backends: interpreter, julia, python, batched
 p((0.5, 0.25))=(2.0, 2.0)
 p((0.5, 0.75))=(0.0, 2.0)
 p((0.5, ANY))=(1.0, 1.0)
