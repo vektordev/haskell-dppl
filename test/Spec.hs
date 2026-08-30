@@ -33,6 +33,7 @@ import TestCaseParser (parseProgram, parseTestCases, TestCase(..), Backend(..))
 import TestTolerances (probTolerance, reasonablyCloseTolerance, samplingTolerance)
 import SPLL.Prelude
 import qualified SPLL.CodeGenPyTorch
+import qualified SPLL.CodeGenJulia
 import Data.List (isInfixOf, nubBy)
 import Data.Function (on)
 import qualified Data.Map.Strict as Map
@@ -695,6 +696,38 @@ prop_TopKPythonConstantValueMatchesConfig = once $ ioProperty $ do
     [line] -> counterexample ("Assignment line: " ++ line)
                 (show thresh `isInfixOf` line)
     other  -> counterexample ("Expected exactly one assignment line, got: " ++ show other) False
+
+-- A log-space compile must render its zero as a literal the *target language*
+-- knows. Haskell's 'show' spells the non-finite doubles @Infinity@/@-Infinity@/
+-- @NaN@, and log space reaches them constantly -- its zero is @-1/0@
+-- ('SPLL.Semiring.negInfIR'), so every impossible arm carries one. @Infinity@
+-- is not a Python name and @-Infinity@ is not Julia syntax, so emitting it
+-- produced code that died with a NameError at run time rather than failing the
+-- compile.
+--
+-- The suite missed this for as long as it existed because the log-space corpus
+-- properties route through the interpreter, which never renders a literal --
+-- these two are the only tests that put a log-space compile through a text
+-- backend.
+--
+-- Both halves are asserted deliberately: the "no bare Infinity" half is the
+-- regression, and the "does emit the mapped literal" half is what keeps the
+-- test from going vacuous if log-space zero ever stops reaching codegen.
+prop_LogSpacePythonRendersInfinity :: Property
+prop_LogSpacePythonRendersInfinity = once $ ioProperty $ do
+  let conf = defaultCompilerConfig { logSpace = True }
+      src  = unlines (SPLL.CodeGenPyTorch.generateFunctions True
+                        (expectCompiled (compile conf testDice)))
+  return $ counterexample ("emitted Python:\n" ++ src)
+    (not ("Infinity" `isInfixOf` src) && "float('-inf')" `isInfixOf` src)
+
+prop_LogSpaceJuliaRendersInfinity :: Property
+prop_LogSpaceJuliaRendersInfinity = once $ ioProperty $ do
+  let conf = defaultCompilerConfig { logSpace = True }
+      src  = unlines (SPLL.CodeGenJulia.generateFunctions
+                        (expectCompiled (compile conf testDice)))
+  return $ counterexample ("emitted Julia:\n" ++ src)
+    (not ("Infinity" `isInfixOf` src) && "-Inf" `isInfixOf` src)
 
 -- The interpreter must resolve IRVar "TOP_K_CUTOFF" via the constant in IREnv:
 -- a topK compile with threshold=0.001 on testDice should agree with exact inference

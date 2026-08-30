@@ -47,7 +47,11 @@ import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType (shapeRank)
 import SPLL.Lang.Types (CompilerError, GenericValue(..), GenericList(..), MultiValue(..), ADTDecl(..), Value)
 import SPLL.Lang.Lang (multiValueToValueList)
-import SPLL.CodeGenPyTorch (envToLUT, replaceCalls, pyMangle)
+-- 'pyDouble' is shared with the scalar backend for the same reason
+-- 'pyMangle' is: it renders a *Python language* literal, not a call into
+-- pythonLib.py. The ban below is on 'pyVal', whose hazard is naming runtime
+-- constructors that pythonLibBatched.py does not define.
+import SPLL.CodeGenPyTorch (envToLUT, replaceCalls, pyMangle, pyDouble)
 import Data.Char (toUpper)
 import Data.List (intercalate, isSuffixOf, nub)
 import Data.Maybe (fromMaybe, isJust)
@@ -224,7 +228,7 @@ denseDomainLines dom = case nub <$> (dom >>= (mapM domainVal . multiValueToValue
 -- 'batchedVal', which answers a different question -- what may appear as a
 -- constant *inside* a kernel body -- and must not silently gain cases here.
 domainVal :: Value -> Maybe String
-domainVal (VFloat f) = Just (show f)
+domainVal (VFloat f) = Just (pyDouble f)
 domainVal (VInt i)   = Just (show i)
 domainVal (VBool b)  = Just (if b then "True" else "False")
 domainVal (VTuple a b) = (\x y -> "T(" ++ x ++ ", " ++ y ++ ")") <$> domainVal a <*> domainVal b
@@ -967,7 +971,7 @@ emittable e = case e of
 -- predicate per call site. The module does not import @pyVal@ at all, so the
 -- compiler enforces that.
 batchedVal :: IRValue -> Maybe String
-batchedVal (VFloat f) = Just (show f)
+batchedVal (VFloat f) = Just (pyDouble f)
 batchedVal (VInt i)   = Just (show i)
 batchedVal (VBool b)  = Just (if b then "True" else "False")
 -- The empty-list constant is the one list constant with a batched form: it is

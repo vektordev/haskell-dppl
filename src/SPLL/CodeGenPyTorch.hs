@@ -7,6 +7,7 @@ module SPLL.CodeGenPyTorch (
   envToLUT,
   replaceCalls,
   pyMangle,
+  pyDouble,
   pythonKeywords
 ) where
 
@@ -72,19 +73,34 @@ pyUnaryOps OpLog = "math.log"
 pyUnaryOps OpSign = "sign"
 pyUnaryOps OpIsAny = "isAny"
 
+-- | A 'Double' as a Python float literal.
+--
+-- Haskell's 'show' renders the three non-finite doubles as @Infinity@,
+-- @-Infinity@ and @NaN@ -- none of which is a Python name. Emitting them
+-- produced code that raised @NameError@ at run time instead of failing the
+-- compile, and log space reaches them constantly: its zero is @-1/0@
+-- ('SPLL.Semiring.negInfIR'), so every impossible arm of a @--logSpace@
+-- program carried an undefined name. @float('inf')@ needs no import, unlike
+-- @math.inf@.
+pyDouble :: Double -> String
+pyDouble f
+  | isNaN f      = "float('nan')"
+  | isInfinite f = if f > 0 then "float('inf')" else "float('-inf')"
+  | otherwise    = show f
+
 pyVal :: IRValue -> String
 pyVal (VList EmptyList) = "EmptyInferenceList()"
 pyVal (VList AnyList) = "AnyInferenceList()"
 pyVal (VList (ListCont x xs)) = "ConsInferenceList(" ++ pyVal x ++ ", " ++ pyVal (VList xs) ++ ")"
 pyVal (VInt i) = show i
-pyVal (VFloat f) = show f
+pyVal (VFloat f) = pyDouble f
 pyVal (VBool f) = if f then "True" else "False"
 pyVal (VTuple a b) = "T(" ++ pyVal a ++ ", " ++ pyVal b ++ ")"
 pyVal (VEither (Left a)) = "Left(" ++ pyVal a ++ ")"
 pyVal (VEither (Right a)) = "Right(" ++ pyVal a ++ ")"
 pyVal VUnit = "None"
 pyVal (VThetaTree tt) = pyValTree tt
-  where pyValTree (ThetaTree val trees) = "([" ++ intercalate ", " (map show val) ++ "], [" ++ intercalate ", " (map pyValTree trees) ++ "])"
+  where pyValTree (ThetaTree val trees) = "([" ++ intercalate ", " (map pyDouble val) ++ "], [" ++ intercalate ", " (map pyValTree trees) ++ "])"
 pyVal (VADT cName params) = pyCtorRef cName ++ "(" ++ intercalate ", " (map pyVal params) ++ ")"
 pyVal (VAny) = "'ANY'"
 pyVal (VError e) = "throw(\"" ++ e ++ "\")"

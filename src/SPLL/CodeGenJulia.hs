@@ -62,18 +62,29 @@ juliaUnaryOps OpLog = "log"
 juliaUnaryOps OpSign = "sign"
 juliaUnaryOps OpIsAny = "isAny"
 
+-- | A 'Double' as a Julia float literal. Haskell's 'show' renders the
+-- non-finite doubles as @Infinity@/@-Infinity@/@NaN@; Julia spells the
+-- infinities @Inf@/@-Inf@ and only @NaN@ agrees, so an unmapped @-Infinity@
+-- was an undefined name in emitted Julia. Log space hits this on every
+-- impossible arm -- its zero is @-1/0@ ('SPLL.Semiring.negInfIR').
+juliaDouble :: Double -> String
+juliaDouble f
+  | isNaN f      = "NaN"
+  | isInfinite f = if f > 0 then "Inf" else "-Inf"
+  | otherwise    = show f
+
 juliaVal :: IRValue -> String
 juliaVal (VList EmptyList) = "EmptyInferenceList()"
 juliaVal (VList AnyList) = "AnyInferenceList()"
 juliaVal (VList (ListCont x xs)) = "ConsInferenceList(" ++ juliaVal x ++ ", " ++ juliaVal (VList xs) ++ ")"
 juliaVal (VInt i) = show i
-juliaVal (VFloat f) = show f
+juliaVal (VFloat f) = juliaDouble f
 juliaVal (VBool f) = if f then "true" else "false"
 juliaVal (VTuple a b) = "T(" ++ juliaVal a ++ ", " ++ juliaVal b ++ ")"
 juliaVal (VEither (Left a)) = "Left(" ++ juliaVal a ++ ")"
 juliaVal (VEither (Right a)) = "Right(" ++ juliaVal a ++ ")"
 juliaVal (VThetaTree tt) = juliaValTree tt
-  where juliaValTree (ThetaTree val trees) = "([" ++ intercalate ", " (map show val) ++ "], [" ++ intercalate ", " (map juliaValTree trees) ++ "])"
+  where juliaValTree (ThetaTree val trees) = "([" ++ intercalate ", " (map juliaDouble val) ++ "], [" ++ intercalate ", " (map juliaValTree trees) ++ "])"
 juliaVal VUnit = "nothing"
 juliaVal (VADT cName params) = juliaCtorRef cName ++ "(" ++ intercalate ", " (map juliaVal params) ++ ")"
 juliaVal VAny = "\"ANY\""

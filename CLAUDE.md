@@ -665,6 +665,27 @@ is behind `-v` rather than on by default, and it names the **first**
 offending construct only — fixing that one may reveal more behind it. Its
 verdict is pinned against the backend's own refusals by the
 `BatchedRefusal` test group.
+### Emitting float literals
+
+Haskell's `show` renders the non-finite doubles as `Infinity`, `-Infinity` and
+`NaN`. **None of those is a Python name, and `-Infinity` is not Julia syntax**,
+so a backend that `show`s a `VFloat` straight into its output emits code that
+dies with a `NameError` at run time instead of failing the compile. Log space
+reaches this constantly — its zero is `-1/0` (`Semiring.negInfIR`), so every
+impossible arm of a `--logSpace` program carried one.
+
+All four value renderers therefore go through a per-language helper —
+`pyDouble` (`float('inf')`/`float('-inf')`/`float('nan')`, needing no import),
+shared by `CodeGenPyTorch`'s `pyVal` and `CodeGenPyTorchBatched`'s `batchedVal`
+and `domainVal`, and `juliaDouble` (`Inf`/`-Inf`/`NaN`) for `juliaVal`. Adding a
+new site that emits a `Double` means routing it through one of those.
+
+This survived 1507 tests because the corpus's log-space properties compare
+against the **interpreter**, which never renders a literal.
+`Spec.prop_LogSpace{Python,Julia}RendersInfinity` are the only tests putting a
+log-space compile through a text backend, and each asserts both halves — no
+bare `Infinity`, *and* the mapped literal present — so neither can go vacuous.
+
 
 ## Runtime Libraries
 
