@@ -112,7 +112,8 @@ corpusTests probPool = localOption (QuickCheckMaxRatio 20) $ testGroup "Corpus"
   , testProperty "SamplingMatchesPDF" $ once $ conjoin
       [ counterexample ("corpus case: " ++ n) (testSamplingProb defaultEnvs n (samplingEps outDim) 1000 5 tc)
       | (n, tc@(_, inp, _, (_, outDim))) <- probPool
-      , sampleable inp, outDim == VFloat 0 || outDim == VFloat 1 ]
+      , sampleable inp, outDim == VFloat 0 || outDim == VFloat 1
+      , n `notElem` degenerateSupportPrograms ]
   , testProperty "TopKInterprets" (forAllNamed (checkTopKInterprets topK005Envs))
   , testProperty "ProbWithBranchCounting" (forAllNamed (checkProbTestCasesWithBC bcEnvs))
   , testProperty "MarginalAnyIsOne" (forAllNamed (checkProbAny defaultEnvs))
@@ -142,6 +143,18 @@ corpusTests probPool = localOption (QuickCheckMaxRatio 20) $ testGroup "Corpus"
   , testProperty "TopKLogSpaceMatchesLinear"
       (forAllNamedIn (filter ((`notElem` logSpaceUncoveredPrograms) . fst) probPool)
         (checkTopKLogSpaceMatchesLinear topK005LogEnvs topK005Envs))
+  -- task multi-path-recovery-unmaterialized-crash: the IROptimizer must not be
+  -- load-bearing for whether a compiled probability function is even runnable.
+  -- That ticket's second witness (`let x = Uniform in (x, x+x)`) crashed with
+  -- "Variable ast4 not declared" at optimizerLevel 0 while answering correctly
+  -- at the default 2 -- constant folding happened to delete the dangling
+  -- chain-name reference before anything evaluated it, so the whole suite
+  -- (which only ever compiles at the default level) stayed green over a real
+  -- codegen defect. Comparing the two levels on the same corpus points closes
+  -- that blind spot: the optimizer is a rewrite, so agreement is exact, not
+  -- approximate.
+  , testProperty "UnoptimizedMatchesOptimized"
+      (forAllNamed (checkUnoptimizedMatchesOptimized unoptEnvs defaultEnvs))
   ]
   where
     -- Compile each corpus program once per config, shared by every invariant and
@@ -155,6 +168,7 @@ corpusTests probPool = localOption (QuickCheckMaxRatio 20) $ testGroup "Corpus"
     bcEnvs      = compileCorpusPrograms bcConf progs
     logEnvs     = compileCorpusPrograms (defaultCompilerConfig {logSpace = True}) progs
     topK005LogEnvs = compileCorpusPrograms (topKConf 0.05) {logSpace = True} progs
+    unoptEnvs   = compileCorpusPrograms (defaultCompilerConfig {optimizerLevel = 0}) progs
     -- Enumerate the whole (filtered) pool deterministically so any failing corpus
     -- case surfaces on every run, rather than only when a random draw selects it.
     forAllNamedIn pool f = once $ conjoin [counterexample ("corpus case: " ++ n) (f n tc) | (n, tc) <- pool]
@@ -299,6 +313,23 @@ checkTopKLogSpaceMatchesLinear logEnvs linEnvs n (p, inp, params, _) = ioPropert
         .&&. (expLogP === 0 .||. logD === linD)
     _ -> return $ counterexample "Return type was no tuple" False
 
+-- task multi-path-recovery-unmaterialized-crash: an optimizerLevel-0 compile must
+-- answer exactly what the default level-2 compile answers. The optimizer only
+-- rewrites (constant folding, CSE, let-in), so this is an equality, not a
+-- tolerance -- and a mismatch is as likely to be a crash (a dangling reference
+-- the folder happened to delete) as a wrong number.
+checkUnoptimizedMatchesOptimized :: CompiledPrograms -> CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
+checkUnoptimizedMatchesOptimized unoptEnvs optEnvs n (p, inp, params, _) = ioProperty $ do
+  let unoptResult = irDensityC unoptEnvs n p params inp
+  let optResult   = irDensityC optEnvs n p params inp
+  case (unoptResult, optResult) of
+    (VProbDim unoptP unoptD, VProbDim optP optD) ->
+      return $
+        counterexample ("unoptimized " ++ show unoptP ++ " /= optimized " ++ show optP)
+          (property $ abs (unoptP - optP) < probTolerance)
+        .&&. unoptD === optD
+    _ -> return $ counterexample "Return type was no tuple" False
+
 checkProbAny :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
 checkProbAny envs n (p, _, params, _) = ioProperty $ do
   let actualOutput = irDensityC envs n p params VAny
@@ -354,6 +385,26 @@ sampleMatches epsilon (VList expected) (VList actual) =
   length es == length as && and (zipWith (sampleMatches epsilon) es as)
   where (es, as) = (toList expected, toList actual)
 sampleMatches _ _ _ = False
+
+-- Corpus programs whose support is a lower-dimensional MANIFOLD inside the
+-- queried coordinates -- the sample has more float slots than the result has
+-- dimensions, because two slots are pinned to each other. 'testSamplingProb'
+-- cannot estimate a density there and the failure is in the estimator, not the
+-- compiler: it counts draws inside a max-norm hypercube of side epsilon and
+-- divides by epsilon^dim, which is only the right volume when the support is
+-- full-dimensional in those coordinates. On `(x, x+x)` the cube meets the
+-- support over an x-interval of half-width epsilon/2 (slot 2 moves at twice
+-- slot 1's rate), so the estimate comes out at half the density regardless of
+-- sample count -- 0.49 against the exact 1.0, and no number of retries closes
+-- it. Every other corpus program is either full-dimensional in its float slots
+-- or dim >= 2 (already filtered out above).
+--
+-- Which density such a program *should* report on its degenerate support is a
+-- separate, genuinely open question -- see task warn-correlated-slots; this
+-- list takes no position on it, it only keeps an estimator out of a shape it
+-- does not apply to.
+degenerateSupportPrograms :: [String]
+degenerateSupportPrograms = ["degenerateSameLatentSum"]
 
 -- Shapes testSamplingProb can estimate a PDF for; everything else is discarded.
 sampleable :: IRValue -> Bool

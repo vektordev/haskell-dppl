@@ -769,10 +769,26 @@ annotateExpr = tMapM (\ex -> demandUniqueNumber <&> ("ast" ++) . show <&> setCha
 -- recently fulfilled first), matching the legacy accumulation order downstream
 -- code (findConcludingHornClause / topSortDAG) relies on.
 --
--- Each clause group contributes at most one fulfilled clause (the first whose
--- premises are all already known). We track used groups by index and known
--- conclusions in 'Set's, so membership tests are logarithmic rather than the
--- linear list 'delete'/'elem' scans this used to do (cleanup-forward-chaining).
+-- Each clause group contributes at most one fulfilled clause: the first whose
+-- premises are all already known AND whose conclusion is not already derived.
+-- We track used groups by index and known conclusions in 'Set's, so membership
+-- tests are logarithmic rather than the linear list 'delete'/'elem' scans this
+-- used to do (cleanup-forward-chaining).
+--
+-- The conclusion test is what keeps the fulfilled set ACYCLIC, and it is
+-- load-bearing rather than an optimisation. A chain name reachable by two
+-- routes (an over-determined observation: @(x, (x+y+3, x+y+2))@, where both
+-- tuple slots recover @y@ and hence @x@) used to fulfil both routes -- the
+-- second one only after the cycle had already closed the long way round --
+-- yielding two clauses concluding the same name, one of them with a premise
+-- that no earlier clause binds. 'topSortDAG' cannot order a cycle, so codegen
+-- emitted a shadowing @let ast18 = ast14@ over an unbound @ast14@ and the query
+-- died at run time with "Variable ast14 not declared" (task
+-- multi-path-recovery-unmaterialized-crash). Since forward chaining's premise
+-- is that two routes to a name are semantically equal, the second derivation
+-- carries no information; dropping it loses nothing, and the redundancy is
+-- still paid for where it belongs -- in the deterministic-slot consistency
+-- indicator IRCompiler emits for the observation as a whole.
 solveHCSet :: [[HornClause]] -> [HornClause]
 solveHCSet hcs = go Set.empty Set.empty []
   where
@@ -781,7 +797,8 @@ solveHCSet hcs = go Set.empty Set.empty []
       case [ (i, c) | (i, g) <- groups
                     , not (i `Set.member` usedGroups)
                     , c <- g
-                    , all (`Set.member` detVars) (premises c) ] of
+                    , all (`Set.member` detVars) (premises c)
+                    , not (conclusion c `Set.member` detVars) ] of
         [] -> fulfilled
         ((i, c):_) -> go (Set.insert i usedGroups) (Set.insert (conclusion c) detVars) (c : fulfilled)
 
