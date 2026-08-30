@@ -916,8 +916,16 @@ emittable e = case e of
   IREnumSum _ mv _  -> scalarDiscreteMulti mv  -- enum sum, unrolled over the enum axis (M2b)
   -- Paired (probability, branchCount) enum sum -- only built by a
   -- countBranches compile. Same unrolling as 'IREnumSum', reduced
-  -- componentwise; the log-space variant is refused, exactly as the
-  -- single-scalar 'IRLogEnumSum' is.
+  -- componentwise; the log-space variant is refused here, exactly as the
+  -- single-scalar 'IRLogEnumSum' is (which has no case at all, so it falls to
+  -- the catch-all below).
+  --
+  -- Both refusals are now unreachable in a default pipeline:
+  -- 'SPLL.IRTensorPass' rewrites the whole enum-sum family before this guard
+  -- runs, and a log-space sum arrives as @BReduce ROpLogSumExp@, which the
+  -- blanket 'IRBuiltin' case admits and 'tensor_logsumexp' implements. The
+  -- cases are kept for the un-lowered IR this predicate is still total over,
+  -- not because they gate anything today.
   IREnumSumPaired lg _ mv _ -> not lg && scalarDiscreteMulti mv
   IRIsPossible mv _ -> scalarDiscreteMulti mv  -- membership over a scalar enum (M2b)
   -- The tensor builtins (design ir-tensor-values). All four are emittable: a

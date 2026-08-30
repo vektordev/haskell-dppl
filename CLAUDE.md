@@ -393,6 +393,18 @@ the interpreter implements it (`fibres`/`rewrap` do the stride arithmetic, and
 rank with a named diagnostic rather than emitting something plausible. Nothing
 produces a rank > 1 tensor today.
 
+One refusal the pass did **not** preserve, contrary to its own doc comment:
+`--batched --logSpace`. `CodeGenPyTorchBatched`'s `emittable` has no
+`IRLogEnumSum` case (and refuses the log variant of `IREnumSumPaired`
+explicitly), so a log-space batched compile used to be rejected at the guard.
+After lowering there is no `IRLogEnumSum` left to reject — the node is a
+`BReduce ROpLogSumExp`, which `emittable`'s blanket `IRBuiltin{} -> True`
+admits and which `tensor_logsumexp` in `pythonLibBatched.py` already
+implements. The combination now compiles and gives correct answers, so this
+reads as a capability the pass gained for free rather than a hole; but nothing
+in the suite covers it (no `.tst` carries a log-space token), and the comment
+at `emittable`'s paired case still claims a refusal that no longer bites.
+
 Measured against the pre-lowering compiler: emitted scalar Python is 0–4%
 *smaller* and 1.09x faster with bit-identical results; batched Python is
 byte-identical in size and 1.00–1.04x, bit-identical at two enumeration terms
@@ -427,6 +439,7 @@ probability** — use `srComplement`/`srZero`, not raw arithmetic, since
 under log space those are silently different numbers. Full vocabulary,
 the rest of the log-space gotchas, and the `shareResult` zero-guard
 placement bug: `docs/semiring-presult-internals.md`.
+
 `anySafe` guards each of the four `PResult` fields with its own `isAny` test
 and wraps each in the sub-result's let-in block, so a block **two** fields read
 was emitted twice — and for an enumerated sum that block holds the most
@@ -456,7 +469,6 @@ neural-forward call sites to one and 31, CLEVR compiles in 0.84s against 1.5s,
 and the whole test suite runs in 89s against 128s. Twenty-five small programs
 grow by up to 18% — the tuple ceremony against a small loop — which is the
 intended trade: bytes for a halved loop.
-
 
 ### Impossibility flag
 
@@ -695,6 +707,7 @@ is behind `-v` rather than on by default, and it names the **first**
 offending construct only — fixing that one may reveal more behind it. Its
 verdict is pinned against the backend's own refusals by the
 `BatchedRefusal` test group.
+
 ### Emitting float literals
 
 Haskell's `show` renders the non-finite doubles as `Infinity`, `-Infinity` and
@@ -715,7 +728,6 @@ against the **interpreter**, which never renders a literal.
 `Spec.prop_LogSpace{Python,Julia}RendersInfinity` are the only tests putting a
 log-space compile through a text backend, and each asserts both halves — no
 bare `Infinity`, *and* the mapped literal present — so neither can go vacuous.
-
 
 ## Runtime Libraries
 
