@@ -3,6 +3,7 @@ module SPLL.Typing.AlgebraicDataTypes (
   implicitFunctionsRTypeProg,
   implicitFunctionNames,
   implicitFunctionImpl,
+  implicitFunctionApplicable,
   implicitFunctionsToEnv,
   lookupRType,
   anyCtorTestMessage,
@@ -64,6 +65,32 @@ implicitFunctionImpl decls fName [param] =
     _ -> error $ "Value must but be an ADT type for field lookup: " ++ show param
   where (cName, fIdx) = findField decls fName
 implicitFunctionImpl _ fName params = error $ "somethigng went wrong with implicit function implementations. function: " ++ fName ++ " parameters: " ++ show params
+
+-- | Is 'implicitFunctionImpl' defined at this argument?
+--
+-- Constructors are total, but the other two implicit functions are not: a field
+-- accessor reads a field of *one* constructor (@b1@ has nothing to say about an
+-- @A@), and a constructor test needs an ADT value to test. 'implicitFunctionImpl'
+-- answers those with 'error', which is right for a runtime evaluation that
+-- should never get there -- but 'PredefinedFunctions.propagateValues' walks a
+-- whole enumerable domain through the forward function at compile time, and a
+-- multi-constructor domain necessarily contains values every accessor is
+-- undefined on. It asks this first and skips them, so an accessor's enumerated
+-- domain is the values of its own constructor rather than a compiler crash.
+implicitFunctionApplicable :: [ADTDecl] -> String -> [GenericValue a] -> Bool
+implicitFunctionApplicable decls fName [param] | fName `elem` isFNames = isADTValue param
+  where isFNames = concatMap (map (("is" ++) . fst) . constructors) decls
+implicitFunctionApplicable decls fName _ | fName `elem` constrFNames = True
+  where constrFNames = concatMap (map fst . constructors) decls
+implicitFunctionApplicable decls fName [param] | fName `elem` implicitFunctionNames decls =
+  case param of
+    VADT constr _ -> constr == fst (findField decls fName)
+    _ -> False
+implicitFunctionApplicable _ _ _ = True
+
+isADTValue :: GenericValue a -> Bool
+isADTValue (VADT _ _) = True
+isADTValue _ = False
 
 isImpl :: Show a => String -> GenericValue a -> GenericValue a
 isImpl constr (VADT name _) = VBool $ name == constr

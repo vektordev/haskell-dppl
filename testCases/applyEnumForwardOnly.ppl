@@ -1,0 +1,6 @@
+-- Same applied-helper shape as applyEnumOperandPair, but under `&&`, which has
+-- no inverse: the forward-only clause must enumerate BOTH operands, so neither
+-- can fall back on being inverted onto.
+notB x = if x then False else True
+fl = Uniform < 0.3
+main = notB fl && notB fl

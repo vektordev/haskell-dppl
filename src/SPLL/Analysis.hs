@@ -18,12 +18,18 @@ import SPLL.Typing.ForwardChaining (FCData, ExprInfo (LambdaInfo), findEquivalen
 
 type TagEnv = [(String, [Tag])]
 
+-- | The top-level function bodies, so 'annotate' can look *through* an
+-- application to the callee's body (see 'applyTags'). Held separately from
+-- 'TagEnv' because a function has no one fixed tag: what its result enumerates
+-- over depends on what its argument enumerates over.
+type FunEnv = [(String, Expr)]
+
 annotateEnumsProg :: Program -> Program
 annotateEnumsProg p@Program {functions=f, neurals=n, adts=adtsDecls} = p{functions = finalExprEnv}
   --TODO this is really unclean. It does the the job of initializing the environment with correct tags, and also prevents infinite recursion, by only evaluating twice, but annotates the program twice
   where
     finalExprEnv = fixpoint iterateExprEnv []
-    iterateExprEnv eEnv = map (second (annotate adtsDecls (neuralEnv ++ map (second $ tags . getTypeInfo) eEnv))) f
+    iterateExprEnv eEnv = map (second (annotate adtsDecls f (neuralEnv ++ map (second $ tags . getTypeInfo) eEnv))) f
     -- Resolve "_" (MultiAuto) placeholders against the declared output/input type before
     -- this MultiValue is used for discrete-value propagation.
     -- A MultiValue with a continuous (Real) leaf has no finite enumeration; tagging it
@@ -35,31 +41,51 @@ annotateEnumsProg p@Program {functions=f, neurals=n, adts=adtsDecls} = p{functio
                  not (multiValueContainsContinuous mv)]
     resolveTag declType mv = maybe mv (\ty -> resolveMultiAuto adtsDecls ty mv) (neuralValueType declType)
 
-annotate :: [ADTDecl] -> TagEnv -> Expr -> Expr
---annotate _ e | trace ((show e)) False = undefined
-annotate _ env e@(Expr ti (Var n)) = case lookup n env of
+annotate :: [ADTDecl] -> FunEnv -> TagEnv -> Expr -> Expr
+annotate adtsParam funEnv = annotateIn adtsParam funEnv []
+
+-- | 'annotate', carrying the set of top-level function names currently being
+-- looked through by 'applyTags'. Re-entering one of them would not terminate,
+-- so it refuses instead (see 'applyTags').
+annotateIn :: [ADTDecl] -> FunEnv -> [String] -> TagEnv -> Expr -> Expr
+--annotateIn _ _ _ e | trace ((show e)) False = undefined
+annotateIn _ _ _ env e@(Expr ti (Var n)) = case lookup n env of
   (Just tgs) -> setTypeInfo e (ti{tags=tgs})
   _ -> e
-annotate _ env e@(Expr ti (ReadNN n _)) = case lookup n env of
+annotateIn _ _ _ env e@(Expr ti (ReadNN n _)) = case lookup n env of
   (Just tgs) -> setTypeInfo e (ti{tags=tgs})
   _ -> e
-annotate adtsParam env e = withNewTypeInfo
+annotateIn adtsParam funEnv visited env e = withNewTypeInfo
   where
+    rec = annotateIn adtsParam funEnv visited env
     oldTags = tags $ getTypeInfo e
+    -- A directly-applied lambda is `let`: inside the body the parameter *is* the
+    -- argument, so the body is annotated with the argument's tags bound to it.
+    -- Without this a `let`-bound enumerable is invisible to its own body.
     withNewSubExpr = case e of
-      Expr _ (Apply l@(Expr _ (Lambda _ _)) v) -> do
-        let annotatedV = annotate adtsParam env v
-            annotatedL = annotate adtsParam env l in
-              setSubExprs e [annotatedL, annotatedV]
-      _ -> setSubExprs e (map (annotate adtsParam env) (getSubExprs e))
-    valueTgs = discretesTags adtsParam withNewSubExpr
-    newTags = valueTgs ++ oldTags
+      Expr _ (Apply l@(Expr _ (Lambda param lamBody)) v) ->
+        let annotatedV = rec v
+            bodyEnv = (param, tags (getTypeInfo annotatedV)) : env
+            annotatedL = setSubExprs l [annotateIn adtsParam funEnv visited bodyEnv lamBody]
+        in setSubExprs e [annotatedL, annotatedV]
+      _ -> setSubExprs e (map rec (getSubExprs e))
+    valueTgs = discretesTags adtsParam funEnv visited env withNewSubExpr
+    -- Idempotent in DiscreteValues: this pass owns that tag, so re-annotating a
+    -- node replaces its tag rather than appending a second one -- which
+    -- 'getValuesFromExpr' treats as an error. 'applyTags' re-annotates an inline
+    -- lambda's body that the enclosing traversal has already annotated, so this
+    -- is reached on every `(\x -> ..) v` under an application spine.
+    newTags = valueTgs ++ filter (not . isDiscreteValues) oldTags
+    isDiscreteValues (DiscreteValues _) = True
+    isDiscreteValues IsConditional = False
     withNewTypeInfo = setTypeInfo withNewSubExpr (setTags (getTypeInfo withNewSubExpr) newTags)
 
-discretesTags :: [ADTDecl] -> Expr -> [Tag]
+discretesTags :: [ADTDecl] -> FunEnv -> [String] -> TagEnv -> Expr -> [Tag]
 -- The continuous-leaf filter mirrors neuralEnv above: never emit a DiscreteValues
 -- tag whose enumeration would be a discrete residue of a partly-continuous set.
-discretesTags adtsParam e = [DiscreteValues mv | mv <- maybeToList values, not (multiValueContainsContinuous mv)]
+discretesTags adtsParam funEnv visited env e = case e of
+  (Expr _ (Apply _ _)) -> applyTags adtsParam funEnv visited env e
+  _ -> [DiscreteValues mv | mv <- maybeToList values, not (multiValueContainsContinuous mv)]
   where
     values = case e of
       (Expr _ (Constant a)) -> Just $ MultiDiscretes [a]
@@ -72,12 +98,78 @@ discretesTags adtsParam e = [DiscreteValues mv | mv <- maybeToList values, not (
       (Expr _ (InjF (Named name) params)) -> do
         paramValues <- mapM getValuesFromExpr params
         let unpackedMultiVals = map multiValueToValueList paramValues
-        return $ valueListToMultiValue $ nub $ propagateValues adtsParam name unpackedMultiVals
+        -- No values at all is an *absence* of a domain, not an empty one: either
+        -- the forward function could not be evaluated, or (for a partial ADT
+        -- accessor) no operand value is in its domain. Tagging that as an empty
+        -- enumeration would make downstream inference sum over nothing and
+        -- report probability zero, so decline the tag instead.
+        case nub (propagateValues adtsParam name unpackedMultiVals) of
+          [] -> Nothing
+          vals -> return (valueListToMultiValue vals)
       (Expr _ (IfThenElse _ left right)) -> do
         valuesLeft <- getValuesFromExpr left
         valuesRight <- getValuesFromExpr right
         return $ unionMultiValues valuesLeft valuesRight
       _ -> Nothing
+
+-- | The 'DiscreteValues' tag of a one-argument application.
+--
+-- An arrow-typed callee cannot carry one fixed tag in the 'TagEnv' -- what its
+-- result enumerates over depends on what its argument enumerates over -- so the
+-- tag has to be computed per call site. This resolves the application's head to
+-- a lambda (a literal one, or a top-level function looked up in the 'FunEnv'),
+-- binds the argument's tags to the parameter, and re-annotates the body under
+-- that environment: the body's own 'InjF'/'IfThenElse' cases then fire exactly
+-- as they do when the helper is inlined by hand.
+--
+-- Without it, `f x ++ f y` has no tag on either operand, so IRCompiler's
+-- enumerate-both clauses never match and the enclosing 'InjF' falls off the end
+-- of 'toIRInference' (task enumerable-injf-operand-loses-tag-across-apply).
+--
+-- Everything it cannot resolve answers @[]@ -- the status quo before this
+-- existed -- rather than a guess:
+--
+--   * a head that is neither a lambda nor a known top-level function
+--     (a higher-order parameter, a projection out of a tuple),
+--   * a curried spine of two or more arguments. In `f a b`, `a` sits where
+--     IRCompiler's enumerate path cannot reach it: 'enumerateAppliedLambda'
+--     marginalises the argument of the single 'Apply' node it is handed, and the
+--     partial application `f a` is not even tagged 'IsConditional' (only 'Var'
+--     and 'Lambda' nodes are). Tagging the spine would advertise a marginal the
+--     compiler then cannot compute -- it takes an enumerate clause and dies
+--     inverting the partial application (testCases/sharedLatentNestedLet is the
+--     canary). Deciding it per argument position would need 'pType', which this
+--     pass runs too early to see (ModalityInfer comes after it).
+--   * a partial application: the result is still arrow-typed, so it enumerates
+--     over nothing. This needs no case of its own -- the callee's body is then
+--     another 'Lambda', which has no 'DiscreteValues' of its own.
+--   * recursion: a function already being looked through. Unrolling it has no
+--     termination story, and the enclosing fixpoint would not converge, so the
+--     recursive call site is left untagged. This is why @visited@ is threaded
+--     through 'annotateIn' rather than being local here.
+applyTags :: [ADTDecl] -> FunEnv -> [String] -> TagEnv -> Expr -> [Tag]
+applyTags adtsParam funEnv visited env e = case appSpine e of
+  (Expr _ (Var n), [arg])
+    | n `notElem` visited
+    , Just calleeBody <- lookup n funEnv -> tagOf (n:visited) calleeBody arg
+  (l@(Expr _ (Lambda _ _)), [arg]) -> tagOf visited l arg
+  _ -> []
+  where
+    -- The argument sits at the call site, so it is already annotated in the right
+    -- environment; only the callee's body needs re-annotating, with the
+    -- argument's tags bound to the parameter.
+    tagOf vis (Expr _ (Lambda param lamBody)) a =
+      let bodyEnv = (param, tags (getTypeInfo a)) : env
+      in [DiscreteValues mv | DiscreteValues mv <- tags (getTypeInfo (annotateIn adtsParam funEnv vis bodyEnv lamBody))]
+    -- A named callee whose body is not a lambda at all: it takes no argument, so
+    -- this application is over-applied and has no result to enumerate.
+    tagOf _ _ _ = []
+
+-- | An application split into its head and its arguments, outermost-last:
+-- @f a b@ is @(f, [a, b])@.
+appSpine :: Expr -> (Expr, [Expr])
+appSpine (Expr _ (Apply l v)) = let (h, as) = appSpine l in (h, as ++ [v])
+appSpine e = (e, [])
 
 getValuesFromExpr :: Expr -> Maybe MultiValue
 getValuesFromExpr e = case [mv | DiscreteValues mv <- tags $ getTypeInfo e] of

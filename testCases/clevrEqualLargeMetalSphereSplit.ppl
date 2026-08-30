@@ -1,0 +1,20 @@
+-- Split-per-object formulation of clevrEqualLargeMetalSphere: one neural read
+-- per object rather than one read of the whole scene, with the same reusable
+-- per-object contribution helper summed over the three objects.
+--
+-- This is the shape that used to fail outright (task
+-- enumerable-injf-operand-loses-tag-across-apply): `contrib (readObj a)` lost
+-- the operand's DiscreteValues tag across the application, so the enclosing
+-- `++` found no enumerate clause and fell off the end of toIRInference.
+
+data Size     = Small | Large
+data Shape    = Cube | Sphere | Cylinder
+data Material = Rubber | Metal
+
+neural readObj :: (Symbol -> (Size, (Shape, Material))) of ({Small | Large}, ({Cube | Sphere | Cylinder}, {Rubber | Metal}))
+
+isLargeObj o = isLarge (fst o)
+isMetalSphere o = isSphere (fst (snd o)) && isMetal (snd (snd o))
+
+contrib o = (if isLargeObj o then 1 else 0) ++ (if isMetalSphere o then (-1) else 0)
+main a b c = (contrib (readObj a) ++ contrib (readObj b) ++ contrib (readObj c)) == 0

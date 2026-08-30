@@ -311,11 +311,22 @@ isEnumerable = any isDiscrete
 --     deterministic input (e.g. `dice 4.0`, where `4.0` carries a DiscreteValues tag)
 --     is a fixed value with nothing to marginalise over, and must take the ordinary
 --     application path instead of being enumerated.
+--   * the application is saturated -- its result is a value, not another
+--     function. Enumerating a *partial* application would generate a closure and
+--     compare it against the sample, which is not a comparison at all (the
+--     interpreter rejects it: "Equals can only evaluate on two values"). No
+--     program reaches this today, because Analysis declines to tag a curried
+--     spine at all ('SPLL.Analysis.applyTags'); it is stated here because it is
+--     a precondition of enumerating, not a consequence of that refusal.
 isEnumerableApplication :: Expr -> Expr -> Bool
 isEnumerableApplication l v =
      IsConditional `elem` tags (getTypeInfo l)
   && isEnumerable (tags (getTypeInfo v))
   && pType (getTypeInfo v) /= Deterministic
+  && not (returnsFunction (rType (getTypeInfo l)))
+  where
+    returnsFunction (TArrow _ (TArrow _ _)) = True
+    returnsFunction _ = False
 
 -- ===== Decomposability gate (design decomposability-gate-shared-latent) =====
 --

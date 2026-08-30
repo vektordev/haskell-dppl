@@ -1,0 +1,6 @@
+-- The applied-helper operand under a comparison rather than an arithmetic InjF.
+-- `lt` is forward-only, so the operand has to be enumerated; a bare `selF fl`
+-- with no DiscreteValues tag left the comparison with no clause to take.
+selF x = if x then 1.0 else 0.0
+fl = Uniform < 0.5
+main = (selF fl + selF fl) < 1.5

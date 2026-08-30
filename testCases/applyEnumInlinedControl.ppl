@@ -1,0 +1,7 @@
+-- Control for applyEnumOperandPair: the same distribution written WITHOUT an
+-- application, once as a nullary top-level binding (left operand) and once with
+-- the helper body inlined at the use site (right operand). Both shapes compiled
+-- before the applied form did, and must keep compiling to the same answer.
+coin = if Uniform < 0.5 then 0 else 1
+bumped = coin ++ 1
+main = bumped ++ (coin ++ 1)

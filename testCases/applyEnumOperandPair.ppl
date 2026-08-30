@@ -1,0 +1,7 @@
+-- Two operands of an enumerable `++`, each a call to the same reusable helper.
+-- The tag that lets the enumerate-both clause fire has to be derived through the
+-- application (task enumerable-injf-operand-loses-tag-across-apply); before that,
+-- both operands carried no DiscreteValues and the `++` had no clause at all.
+sel x = if x then 1 else 0
+fl = Uniform < 0.5
+main = sel fl ++ sel fl

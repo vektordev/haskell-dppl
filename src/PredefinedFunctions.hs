@@ -24,6 +24,7 @@ import SPLL.Lang.Types
 import IRInterpreter
 import qualified Data.Bifunctor
 import StandardLibrary (invokeStandardFunction, stdListProd)
+import SPLL.Typing.AlgebraicDataTypes (implicitFunctionApplicable)
 
 -- InputVars, OutputVars, fwd, grad
 data FDecl = FDecl {contract :: Scheme, inputVars :: [String], outputVars :: [String], body :: IRExpr, applicability :: IRExpr, deconstructing :: Bool, derivatives :: [(String, IRExpr)]} deriving (Show, Eq)
@@ -432,7 +433,13 @@ propagateValues adtsDecl name values = case results of
   where
     results = mapM (generateDet [] [] (IREnv [] adtsDecl []) []) letInBlocks
     letInBlocks = map (foldr (\(n, p) e -> IRLetIn n (IRConst (fmap failConversionFwd p)) e) fwdExpr) namedParams
-    namedParams = map (zip paramNames) valueProd
+    namedParams = map (zip paramNames) applicableProd
+    -- An ADT field accessor / constructor test is partial: it is undefined on a
+    -- value of a sibling constructor, and 'implicitFunctionImpl' says so with an
+    -- 'error', not a 'Left' this could catch. Enumerating a multi-constructor
+    -- domain therefore has to drop those tuples before evaluating, leaving the
+    -- accessor's domain as its own constructor's values.
+    applicableProd = filter (implicitFunctionApplicable adtsDecl name) valueProd
     valueProd = sequence values
     FPair FDecl {inputVars = paramNames, body = fwdExpr} _ = lookupFPair adtsDecl name
 

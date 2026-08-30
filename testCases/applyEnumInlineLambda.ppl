@@ -1,0 +1,4 @@
+-- The applied helper written as an inline lambda rather than a named function:
+-- the application spine's head is the Lambda itself, with no name to look up.
+fl = Uniform < 0.5
+main = ((\x -> if x then 1 else 0) fl) ++ ((\x -> if x then 1 else 0) fl)
