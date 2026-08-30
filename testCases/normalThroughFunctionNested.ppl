@@ -1,0 +1,3 @@
+shifted mu sigma = Normal * sigma + mu
+
+main = shifted 1.0 2.0 * 3.0

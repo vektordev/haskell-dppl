@@ -98,6 +98,7 @@ envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb
     let progTypeEnv = getGlobalTypeEnv p
         bindingParamNames = extractParamNames binding
         pt = pType $ getTypeInfo binding
+        ptUnderLambdas = pType $ getTypeInfo $ stripLambdas binding
         -- Every logit-representable top-level function gets its own encodeFun, keyed to its
         -- own <name>_prob / <name>_normal functions, with no neural declaration required
         -- (task encode-per-function-endpoints; `main` is just the name == "main" case).
@@ -169,7 +170,14 @@ envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb
             else
               Nothing,
           normalFun =
-            if (pt == PNormal || pt == PLogNormal) && isNormalExtractable binding then
+            -- The modality read under the parameter lambdas, not on the binding
+            -- itself: a curried function's outer Lambda is Deterministic (its
+            -- result is a closure), so `pt` only reports PNormal for a
+            -- zero-or-one-argument function. compileNormalExpr strips the
+            -- lambdas anyway, and a two-argument helper is exactly as much a
+            -- Normal shortcut as a one-argument one
+            -- (task normal-shortcut-crashes-through-function-call).
+            if (ptUnderLambdas == PNormal || ptUnderLambdas == PLogNormal) && isNormalExtractable binding then
               Just (toNormalDecl name (compileNormalExpr (meta progTypeEnv) binding))
             else
               Nothing,
@@ -1115,7 +1123,43 @@ toIRNormalParams meta (Expr _ (ReadNN name arg)) = do
   var <- mkVariable "nn_out"
   setVariables [(var, IRApply (IRVar name) sym)]
   return (IRIndex (IRVar var) (IRConst (VInt 0)), IRIndex (IRVar var) (IRConst (VInt 1)))
+toIRNormalParams meta e | Just act <- normalParamsViaCall meta PNormal e = act
 toIRNormalParams _ e = error $ "toIRNormalParams: cannot extract Normal params from " ++ show (pType (getTypeInfo e)) ++ " | expr: " ++ show e
+
+-- | A *saturated* call to a top-level function whose result is Normal-derived.
+-- Reuse the callee's own compiled @<name>_normal@ (which returns its (mu, sigma)
+-- pair) instead of re-deriving the params here: the callee's definition is an
+-- unapplied Lambda whose Normal draw is parametrized by its own arguments, so
+-- there is no single Normal to read params off, and descending into it hit the
+-- fallthrough error (task normal-shortcut-crashes-through-function-call).
+--
+-- The guards mirror exactly the conditions under which 'envToIR' gives the
+-- callee a 'normalFun' at all; anything else falls through to the caller's
+-- error, which is the status quo.
+normalParamsViaCall :: CompilerMetadata -> PType -> Expr -> Maybe (CompilerMonad (IRExpr, IRExpr))
+normalParamsViaCall meta wanted expr = do
+  (fname, args) <- collectCall expr []
+  decl <- lookup fname (functions (compilingProgram meta))
+  if pType (getTypeInfo (stripDeclLambdas decl)) == wanted
+       && isNormalExtractable decl
+       && length (lambdaParams decl) == length args
+       -- A probabilistic argument would be *sampled* by toIRGenerate rather
+       -- than conditioned on, which is not a Normal shortcut at all.
+       && all ((== Deterministic) . pType . getTypeInfo) args
+    then Just $ do
+      argIRs <- mapM (toIRGenerate meta) args
+      var <- mkVariable "normal_params"
+      setVariables [(var, foldl IRApply (IRVar (fname ++ "_normal")) argIRs)]
+      return (IRTFst (IRVar var), IRTSnd (IRVar var))
+    else Nothing
+  where
+    collectCall (Expr _ (Apply f a)) acc      = collectCall f (a : acc)
+    collectCall (Expr _ (Var n)) acc@(_ : _)  = Just (n, acc)
+    collectCall _ _                           = Nothing
+    lambdaParams (Expr _ (Lambda n sub)) = n : lambdaParams sub
+    lambdaParams _                       = []
+    stripDeclLambdas (Expr _ (Lambda _ sub)) = stripDeclLambdas sub
+    stripDeclLambdas e                       = e
 
 -- | Standard-normal CDF at 0 of the difference of two PNormal expressions.
 -- left - right ~ Normal(muL - muR, sqrt(sL^2 + sR^2)); returns Phi((0 - mu) / sigma),
@@ -1174,12 +1218,27 @@ toIRLogNormalParams meta (Expr ti (InjF f@(Named n) [Expr _ (Var name)]))
       toIRLogNormalParams meta (Expr ti (InjF f [expr]))
 toIRLogNormalParams meta (Expr _ (Var name))
   | Just expr <- lookup name (functions (compilingProgram meta)) = toIRLogNormalParams meta expr
+toIRLogNormalParams meta e | Just act <- normalParamsViaCall meta PLogNormal e = act
 toIRLogNormalParams _ e = error $ "toIRLogNormalParams: cannot extract LogNormal params from " ++ show (pType (getTypeInfo e))
+
+-- | True for a function type, i.e. an expression that evaluates to a callable
+-- rather than to a value a density can be taken of.
+isTArrowType :: RType -> Bool
+isTArrowType (TArrow _ _) = True
+isTArrowType _            = False
 
 --in this implementation, I'll forget about the distinction between PDFs and Probabilities. Might need to fix that later.
 -- | Expressions that have their own toIRInference handlers and must not be
 -- intercepted by the PNormal/PLogNormal catch-alls below.
 hasOwnInferenceHandler :: [ADTDecl] -> Expr -> Bool
+-- An arrow-typed expression is a function *value*, not a distribution: what
+-- probability mode wants from it is the callee's own probability function (an
+-- IRLambda), which the Var and Lambda handlers produce. toIRNormalParams has no
+-- Lambda case at all, and its function-name lookup resolves a Var to that
+-- unapplied Lambda, so letting the catch-all in here crashed every program that
+-- factors a Normal-derived computation into a helper function
+-- (task normal-shortcut-crashes-through-function-call).
+hasOwnInferenceHandler _    e | isTArrowType (rType (getTypeInfo e)) = True
 hasOwnInferenceHandler _    (Expr _ (Apply _ _))            = True
 -- Field constructors (Cons/TCons/user-ADT constructors) carry the PType of their
 -- fields, which can be PNormal even though the container itself cannot be
@@ -1472,15 +1531,12 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt} (Apply l v)) sample | pTy
       setVariables [(retVal, IRApply lIR vIR)]
       return (unpackResult (IRVar retVal))
 -- Probabilistic bound expression
-toIRInference meta cumulative (Expr TypeInfo{rType=_, chainName=_} (Apply l v)) sample | isTArrow (rType (getTypeInfo v)) && (pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal) = do
+toIRInference meta cumulative (Expr TypeInfo{rType=_, chainName=_} (Apply l v)) sample | isTArrowType (rType (getTypeInfo v)) && (pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal) = do
   lIR <- toIRGenerate meta l
   vIR <- (unP . rProb) <$> toIRInference meta cumulative v sample
   applied <- mkVariable "call"
   setVariables [(applied, IRApply lIR vIR)]
   return (unpackResult (IRVar applied))
-  where
-    isTArrow (TArrow _ _) = True
-    isTArrow _ = False
 toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v)) sample | pType (getTypeInfo v) == Integrate || pType (getTypeInfo v) == PNormal || pType (getTypeInfo v) == PLogNormal = do
   -- This is the probabilistic inference of a known, deterministic lambda with a probabilistic parameter
   -- The inference looks like this: p(l(v) == sample) = p(l^-1(sample) == v)

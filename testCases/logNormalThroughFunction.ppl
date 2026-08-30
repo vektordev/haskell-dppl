@@ -1,0 +1,3 @@
+scaleLogNormal s = exp (Normal * s)
+
+main = scaleLogNormal 2.0 * scaleLogNormal 3.0
