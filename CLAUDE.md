@@ -238,6 +238,33 @@ no occurrence of the bound variable is point-invertible at all. Full
 mechanism, examples, and the `testCases/planEnum*` pointers:
 `docs/witness-inversion-engines.md`.
 
+### Forward chaining never re-derives a chain name it already has
+
+`ForwardChaining.solveHCSet` fulfils, per clause group, the first clause whose
+premises are all known **and whose conclusion is not already derived**. The
+second half of that test is what keeps the fulfilled clause set acyclic, and it
+is a correctness requirement, not an optimisation.
+
+A chain name reachable by two routes makes it bite. In an over-determined
+observation — `let x = Uniform in let y = Uniform in (x, (x+y+3, x+y+2))`, where
+both inner slots recover `y` and hence `x` — each occurrence of `x` sits in its
+own bidirectional equivalence group with the binding. Chaining reaches the
+binding through slot 1, walks all the way round through the second slot's
+occurrence, and (without the test) fulfils a *second* clause concluding the same
+binding, closing a cycle. `topSortDAG` has no defined behaviour on a cycle and
+`cutList` then truncates, so codegen emitted a shadowing `let ast18 = ast14`
+over an `ast14` no earlier clause binds — `Variable ast14 not declared` at run
+time, on every backend, with the query having type-checked and compiled
+cleanly.
+
+Dropping the second derivation loses nothing: forward chaining's premise
+throughout (`mergeExpr`'s candidate merge says so explicitly) is that two routes
+to a name are semantically equal. The redundancy is still *paid for* — the
+observation's manifold constraint is carried by the deterministic-slot
+consistency check IRCompiler emits for the query as a whole, a dim-0 indicator
+factor, so `p((a,(b,c)))` above is `p(a)·p(b−a−3)·[c−b == −1]` at dim 2.
+Corpus: `overDeterminedSharedLatent`, `degenerateSameLatentSum`.
+
 ### Enumerated branches are compiled forward, and that premise is checked
 
 `toIREnumerate` compiles the condition and both arms of an enumerated
@@ -685,7 +712,10 @@ into the top-level groups (`--ta '-l'` prints the current list):
 - `test/Spec.hs` — main entry, the static `Spec` properties, and the
   `Corpus` group of metamorphic properties generated from `testCases/`
   (validation, sampling-vs-PDF, topK, branch counting, P(ANY)=1, log-space
-  vs linear)
+  vs linear, and `-O0` vs the default `-O2` — the optimizer is a rewrite, so
+  the two levels must agree exactly on every corpus query point; a `.tst`
+  expectation alone would not have caught a dangling chain-name reference that
+  constant folding happened to delete)
 - `test/TestParser.hs` / `TestInternals.hs` — parser and internal-function
   unit tests
 - `test/TestRejection.hs` — unhappy-path: invalid or ill-typed programs must
