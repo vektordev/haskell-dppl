@@ -112,8 +112,7 @@ corpusTests probPool = localOption (QuickCheckMaxRatio 20) $ testGroup "Corpus"
   , testProperty "SamplingMatchesPDF" $ once $ conjoin
       [ counterexample ("corpus case: " ++ n) (testSamplingProb defaultEnvs n (samplingEps outDim) 1000 5 tc)
       | (n, tc@(_, inp, _, (_, outDim))) <- probPool
-      , sampleable inp, outDim == VFloat 0 || outDim == VFloat 1
-      , n `notElem` degenerateSupportPrograms ]
+      , sampleable inp, outDim == VFloat 0 || outDim == VFloat 1 ]
   , testProperty "TopKInterprets" (forAllNamed (checkTopKInterprets topK005Envs))
   , testProperty "ProbWithBranchCounting" (forAllNamed (checkProbTestCasesWithBC bcEnvs))
   , testProperty "MarginalAnyIsOne" (forAllNamed (checkProbAny defaultEnvs))
@@ -377,34 +376,97 @@ reasonablyClose a b = a === b
 
 -- Does a drawn sample match the expected value, within an epsilon-wide window
 -- (maximum norm) on continuous components and exactly on discrete ones?
-sampleMatches :: Double -> IRValue -> IRValue -> Bool
-sampleMatches epsilon (VFloat expected) (VFloat actual) = abs (actual - expected) <= epsilon / 2
-sampleMatches _ (VInt expected) (VInt actual) = expected == actual
-sampleMatches epsilon (VTuple e1 e2) (VTuple a1 a2) = sampleMatches epsilon e1 a1 && sampleMatches epsilon e2 a2
-sampleMatches epsilon (VList expected) (VList actual) =
-  length es == length as && and (zipWith (sampleMatches epsilon) es as)
-  where (es, as) = (toList expected, toList actual)
-sampleMatches _ _ _ = False
+-- 'Nothing' windows every continuous component; 'Just sel' windows only the
+-- float coordinates whose position (numbered left to right over the value) is
+-- in @sel@ and ignores the rest -- see 'coordinateSubsets' for why that is
+-- ever the right thing to do. Discrete components are matched exactly either
+-- way: they carry no dimension, so they are never a coordinate to project onto.
+sampleMatchesOn :: Maybe [Int] -> Double -> IRValue -> IRValue -> Bool
+sampleMatchesOn sel epsilon expected actual = fst (go 0 expected actual)
+  where
+    windowed i = maybe True (i `elem`) sel
+    go i (VFloat e) (VFloat a) = (not (windowed i) || abs (a - e) <= epsilon / 2, i + 1)
+    go i (VInt e) (VInt a) = (e == a, i)
+    go i (VTuple e1 e2) (VTuple a1 a2) =
+      let (ok1, i1) = go i e1 a1
+          (ok2, i2) = go i1 e2 a2
+      in (ok1 && ok2, i2)
+    go i (VList e) (VList a)
+      | length es /= length as = (False, i)
+      | otherwise = foldl step (True, i) (zip es as)
+      where (es, as) = (toList e, toList a)
+            step (ok, j) (ev, av) = let (ok', j') = go j ev av in (ok && ok', j')
+    go i _ _ = (False, i)
 
--- Corpus programs whose support is a lower-dimensional MANIFOLD inside the
--- queried coordinates -- the sample has more float slots than the result has
--- dimensions, because two slots are pinned to each other. 'testSamplingProb'
--- cannot estimate a density there and the failure is in the estimator, not the
--- compiler: it counts draws inside a max-norm hypercube of side epsilon and
--- divides by epsilon^dim, which is only the right volume when the support is
--- full-dimensional in those coordinates. On `(x, x+x)` the cube meets the
--- support over an x-interval of half-width epsilon/2 (slot 2 moves at twice
--- slot 1's rate), so the estimate comes out at half the density regardless of
--- sample count -- 0.49 against the exact 1.0, and no number of retries closes
--- it. Every other corpus program is either full-dimensional in its float slots
--- or dim >= 2 (already filtered out above).
+-- How many continuous (float) coordinates the queried value has. This is the
+-- AMBIENT dimension; the result's own rDim is the dimension of its support,
+-- and the two differ exactly when the support is a lower-dimensional manifold
+-- inside those coordinates.
+floatCoordCount :: IRValue -> Int
+floatCoordCount (VFloat _) = 1
+floatCoordCount (VTuple a b) = floatCoordCount a + floatCoordCount b
+floatCoordCount (VList l) = sum (map floatCoordCount (toList l))
+floatCoordCount _ = 0
+
+-- Which coordinate windows 'testSamplingProb' should try, given the ambient
+-- float-coordinate count and the result's reported dimension.
 --
--- Which density such a program *should* report on its degenerate support is a
--- separate, genuinely open question -- see task warn-correlated-slots; this
--- list takes no position on it, it only keeps an estimator out of a shape it
--- does not apply to.
-degenerateSupportPrograms :: [String]
-degenerateSupportPrograms = ["degenerateSameLatentSum"]
+-- When they agree (every corpus case but the degenerate-support ones) there is
+-- exactly one window, over all coordinates: today's estimator, unchanged.
+--
+-- When the ambient count EXCEEDS the dimension, the support is a manifold and
+-- windowing every coordinate measures the wrong thing. On `(x, x+x)` at
+-- (0.3, 0.6) the ambient cube is |x-0.3| <= eps/2 AND |2x-0.6| <= eps/2, i.e.
+-- |x-0.3| <= eps/4 -- half the interval eps^1 divides by, so the estimate
+-- converges to half the density no matter how many samples are drawn. The
+-- factor is the manifold's stretch, so no epsilon or sample count removes it:
+-- the ambient cube converges to the marginal density on the FASTEST-STRETCHING
+-- coordinate (slot 2 is Uniform(0,2), density 0.5), while the compiler reports
+-- the marginal on the slot it witnessed the latent through (slot 1 is
+-- Uniform(0,1), density 1.0). Both are honest densities of the same
+-- distribution; they just differ in which coordinate they are taken with
+-- respect to, and rDim fixes the exponent without fixing that choice.
+--
+-- So we enumerate every dim-sized subset of the coordinates and window on that
+-- subset alone, and 'testSamplingProb' accepts if ANY of them reproduces the
+-- compiler's value -- the claim being that the reported density is the marginal
+-- on SOME dim-sized set of the observed coordinates, which is what witnessed
+-- inference computes (it inverts the observation onto latents through a chosen
+-- set of slots). A wrong value still fails, because it has to miss every
+-- subset. Caveat: a manifold that self-intersects under the chosen projection
+-- would over-count, which can only turn a failure into a pass, never the
+-- reverse -- no such corpus shape exists today.
+--
+-- Note what this deliberately does NOT decide: with more than one admissible
+-- chart it accepts the marginal on any of them, so it would pass a compiler
+-- reporting 0.5 (the slot-2 chart) just as it passes the 1.0 it reports today.
+-- That is the right scope for a metamorphic property -- both numbers really are
+-- densities of the same distribution -- and the .tst expectation pins the
+-- convention exactly, checked value-for-value by the End2End backends. Which
+-- convention SHOULD be the language's is open; see task warn-correlated-slots.
+--
+-- A projected window says nothing about whether the query is ON the manifold --
+-- it drops exactly the coordinates that decide that -- so 'testSamplingProb'
+-- keeps the two questions apart, the way the compiled result itself does (a
+-- dim-0 support indicator times a dim-'outDim' density): the ambient window is
+-- an existence test for support, and only once some draw lands in it does a
+-- projected window get to carry the measure. Off the manifold no draw lands in
+-- the ambient window and the estimate is 0, which is what the compiler answers
+-- there. Without that split, `p((0.3, 0.7)) = 0` on `(x, x+x)` estimates 1.0:
+-- projecting onto slot 1 alone cannot tell 0.7 from the 0.6 the manifold
+-- carries.
+--
+-- dim 0 keeps the all-coordinate window: an atom is pinned in every coordinate,
+-- and a 0-sized subset would window nothing at all and count every draw.
+coordinateSubsets :: Int -> Int -> [Maybe [Int]]
+coordinateSubsets coords dim
+  | dim <= 0 || coords <= dim = [Nothing]
+  | otherwise = map Just (subsetsOfSize dim [0 .. coords - 1])
+
+subsetsOfSize :: Int -> [a] -> [[a]]
+subsetsOfSize 0 _ = [[]]
+subsetsOfSize _ [] = []
+subsetsOfSize k (x:xs) = map (x:) (subsetsOfSize (k - 1) xs) ++ subsetsOfSize k xs
 
 -- Shapes testSamplingProb can estimate a PDF for; everything else is discarded.
 sampleable :: IRValue -> Bool
@@ -421,19 +483,31 @@ testSamplingProb envs n epsilon samples retries tc@(p, inp, params, (VFloat out,
     let compiledEnv = either error id (lookupCompiled envs n)
     let gen = runGenC p compiledEnv params
     drawn <- replicateM samples gen
-    let countInside = length (filter (sampleMatches epsilon inp) drawn)
-    let ratioInside = fromIntegral countInside / fromIntegral samples
     -- The maximum norm creates an outDim-dimensional hypercube of volume
-    -- epsilon^outDim; for purely discrete samples outDim is 0 and no division happens.
-    let estimatePDF = ratioInside / (epsilon ** outDim)
-    let valid = abs (estimatePDF - out) <= samplingTolerance
+    -- epsilon^outDim; for purely discrete samples outDim is 0 and no division
+    -- happens. One estimate per candidate coordinate window -- a single
+    -- all-coordinate one unless the support is a lower-dimensional manifold,
+    -- see 'coordinateSubsets'.
+    let estimateOn sel =
+          let countInside = length (filter (sampleMatchesOn sel epsilon inp) drawn)
+              ratioInside = fromIntegral countInside / fromIntegral samples
+          in ratioInside / (epsilon ** outDim)
+    let windows = coordinateSubsets (floatCoordCount inp) (round outDim)
+    -- On a manifold the ambient window no longer carries the measure, so it
+    -- serves as the support test instead: no draw inside it means the query is
+    -- off-support and the density is 0. Where the ambient window IS the only
+    -- window (full-dimensional support) this is subsumed -- an empty window
+    -- already estimates 0 -- so the branch changes nothing there.
+    let onSupport = windows == [Nothing] || any (sampleMatchesOn Nothing epsilon inp) drawn
+    let estimates = if onSupport then map estimateOn windows else [0]
+    let valid = any (\e -> abs (e - out) <= samplingTolerance) estimates
     if valid then
       return $ property True
     else
       if retries > 0 then
         return $ testSamplingProb envs n epsilon (samples * 2) (retries - 1) tc
       else
-        return $ counterexample ("Sampled PDF is: " ++ show estimatePDF ++ ", but should be: " ++ show out) (property valid)
+        return $ counterexample ("Sampled PDF is: " ++ show estimates ++ ", but should be: " ++ show out) (property valid)
 testSamplingProb _ _ _ _ _ _ = False ==> False
 
 -- Two-level nesting: inner true branch has global prob 0.12*0.12=0.0144 < thresh=0.1, so it is
