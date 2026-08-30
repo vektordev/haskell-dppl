@@ -53,6 +53,13 @@ getAllTestFiles = do
 -- select pass) must return the same result as the default pipeline. Reuses the
 -- same corpus loader as 'end2endTests', restricted to the non-slow,
 -- interpreter-routed cases.
+--
+-- Each program is compiled once per config here, not once per query point:
+-- 'compile' depends only on the (program, config) pair, so re-running it for
+-- every row of a multi-row .tst file was pure waste -- measured at ~1100
+-- corpus query rows against ~200 eligible programs, that was ~5x more compiles
+-- than the differential needs, and this group's own cost (~25s) came from
+-- exactly that.
 selectPassDifferentialTests :: IO TestTree
 selectPassDifferentialTests = do
   files <- getAllTestFiles
@@ -61,19 +68,26 @@ selectPassDifferentialTests = do
                 | ((pplPath, _), (p, (bs, slow, tcs))) <- zip files cases
                 , not slow, Interpreter `elem` bs ]
   return $ testGroup "SelectPassNoOp"
-    [ testProperty n (once $ conjoin (map (selectNoOp p) tcs)) | (n, p, tcs) <- entries ]
+    [ testProperty n (once $ conjoin (map (selectNoOp p scalarEnv batchedEnv) tcs))
+    | (n, p, tcs) <- entries
+    , let scalarEnv  = compile defaultCompilerConfig p
+    , let batchedEnv = compile defaultCompilerConfig{batched = True} p ]
 
 -- | Assert one corpus query point is unchanged by the select pass. Non-query
 -- cases (encode/argmax) are skipped: the pass only touches prob/integ bodies.
-selectNoOp :: Program -> TestCase -> Property
-selectNoOp p (ProbTestCase  name sample params _ _) = selectNoOpCmp p name (\c -> runProbC  p c params sample)
-selectNoOp p (CumulTestCase name sample params _ _) = selectNoOpCmp p name (\c -> runIntegC p c params sample)
-selectNoOp _ _ = property True
+-- Takes the program's scalar/batched compiles already done, shared across
+-- every query point of that program.
+selectNoOp :: Program -> Either CompilerError IREnv -> Either CompilerError IREnv -> TestCase -> Property
+selectNoOp p scalarEnv batchedEnv (ProbTestCase  name sample params _ _) =
+  selectNoOpCmp scalarEnv batchedEnv name (\c -> runProbC  p c params sample)
+selectNoOp p scalarEnv batchedEnv (CumulTestCase name sample params _ _) =
+  selectNoOpCmp scalarEnv batchedEnv name (\c -> runIntegC p c params sample)
+selectNoOp _ _ _ _ = property True
 
-selectNoOpCmp :: Program -> String -> (IREnv -> Either CompilerError IRValue) -> Property
-selectNoOpCmp p name run = ioProperty $ do
-  scalar  <- forceResult (compile defaultCompilerConfig p >>= run)
-  batchedRes <- forceResult (compile defaultCompilerConfig{batched = True} p >>= run)
+selectNoOpCmp :: Either CompilerError IREnv -> Either CompilerError IREnv -> String -> (IREnv -> Either CompilerError IRValue) -> Property
+selectNoOpCmp scalarEnv batchedEnv name run = ioProperty $ do
+  scalar  <- forceResult (scalarEnv >>= run)
+  batchedRes <- forceResult (batchedEnv >>= run)
   return $ counterexample
     ("select pass is not a no-op for " ++ name ++ ": scalar=" ++ show scalar ++ ", batched=" ++ show batchedRes)
     (resultsAgree scalar batchedRes)
@@ -1275,17 +1289,20 @@ topKDiffThresholds = [0.3, 0.6]
 topKEntries :: [(String, Program, [TestCase])] -> ([(String, String, [BatchGroup], [String])], [String])
 topKEntries entries = (map fst built, nub [n | ((n, _, _, _), True) <- built])
   where
+    -- env0 (the plain default compile, used only to retarget expectations) does
+    -- not depend on the threshold, so it is bound once per program -- outside
+    -- the per-threshold loop -- rather than once per (program, threshold) pair.
     built =
       [ ((n ++ "@k=" ++ show thresh, src, groups', netNames), bites)
-      | thresh <- topKDiffThresholds
-      , let confK = defaultCompilerConfig{topKThreshold = Just thresh}
-      , (n, p, tcs) <- entries
+      | (n, p, tcs) <- entries
       , let qtcs = filter isProbTestCase tcs
       , not (null qtcs)
       , let netNames = [nm | (nm, _, _) <- neurals p]
+      , Right env0 <- [compile defaultCompilerConfig p]
+      , thresh <- topKDiffThresholds
+      , let confK = defaultCompilerConfig{topKThreshold = Just thresh}
       , Right envK    <- [compile confK{batched = True}  p]
       , Right envKint <- [compile confK{batched = False} p]
-      , Right env0    <- [compile defaultCompilerConfig p]
       , Right srcLines <- [generateFunctionsBatched True envK]
       , Just groups  <- [batchGroups (not (null netNames)) qtcs]
       , Just groups' <- [mapM (retarget p envKint) groups]
@@ -1833,6 +1850,19 @@ loadEnd2EndCases keep = do
   return [ (takeBaseName pplPath, p, compile defaultCompilerConfig p, bs, tcs)
          | ((pplPath, _), (p, (bs, slow, tcs))) <- zip files cases, keep slow ]
 
+-- | Programs whose -O0 recompilation is disproportionately expensive relative
+-- to the regression class the "Interpreter Unoptimized" group exists to catch
+-- (the optimizer changing an answer). 'recursiveAdtMultiCtor' pairs an
+-- unbounded self-recursive ADT with several deep ANY-marginal queries; without
+-- CSE (there is none at -O0) the interpreter re-walks the shared recursive
+-- structure once per partial-match world, costing ~9s alone -- as much as the
+-- other ~245 programs in the group combined. Its -O2 (default) Interpreter,
+-- Julia and Python coverage is untouched; only the O0 differential is skipped
+-- for it, and only here -- the same program still anchors the fast group's
+-- recursive-ADT/ANY-marginal coverage.
+unoptimizedRecompileExempt :: [String]
+unoptimizedRecompileExempt = ["recursiveAdtMultiCtor"]
+
 -- | Builds the standard End2End test groups from already-loaded/compiled
 -- cases. includeBackends controls whether the Normalization/Julia/Python
 -- groups are built (skipped for the slow subset, whose programs are
@@ -1846,6 +1876,7 @@ buildEnd2EndTree treeName includeBackends compiledCases = testGroup treeName $
     -- Re-run every interpreter case at -O0 to confirm the optimizer changes no answer.
     , testGroup "Interpreter Unoptimized"
         [ testProperty n (once $ conjoin (map (testInterpreter p c) tcs)) | (n, p, _, bs, tcs) <- compiledCases, Interpreter `elem` bs
+        , n `notElem` unoptimizedRecompileExempt
         , let c = compile defaultCompilerConfig{optimizerLevel = 0} p ]
     ] ++
     ( if not includeBackends then [] else
