@@ -26,11 +26,12 @@ import SPLL.Analysis (materializationDomain, withinMaterializationBudget)
 import SPLL.Typing.PType
 import Data.Maybe
 import Data.Either (isRight, partitionEithers)
-import Data.List (isPrefixOf, (\\), find, elemIndex, nub)
+import Data.List (isPrefixOf, (\\), find, elemIndex, nub, intercalate)
 import Data.Functor ((<&>))
 import Control.Monad.Writer.Lazy
 import SPLL.AutoNeural
 import SPLL.Typing.ForwardChaining
+import SPLL.Typing.Determinism (functionSummaries)
 import SPLL.Typing.AlgebraicDataTypes
 import SPLL.Semiring
 import Utils
@@ -71,7 +72,14 @@ data CompilerMetadata = CompilerMetadata {
   -- convolving them separately. Precomputed once per compile because the
   -- verdict depends on the 'let'-scope lexically enclosing the node, which a
   -- 'toIRInference' case looking at a node in isolation cannot reconstruct.
-  latentVerdicts :: Map.Map ChainName Bool
+  latentVerdicts :: Map.Map ChainName Bool,
+  -- | The @_gen@ function names whose evaluation draws no randomness, from
+  -- 'SPLL.Typing.Determinism.functionSummaries'. Consumed by
+  -- 'requireDeterministicUnderEnum' (and only there) as the deterministic-generator
+  -- set 'isPureGiven' needs: 'isEffectfulVar' is a name test that calls /every/
+  -- @_gen@ reference random, and an enumerated inference body is written almost
+  -- entirely in terms of deterministic helper calls.
+  detGenNames :: Set.Set Varname
 }
 
 semiringOf :: CompilerMetadata -> Semiring
@@ -210,9 +218,12 @@ envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb
     -- probability mass under logSpace, since every branch's accumulated weight
     -- was then a linear 1.0 multiplied against log (negative) per-branch terms
     -- (task topk-logspace-unsound).
-    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring (logSpace conf))) [] verdicts
+    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring (logSpace conf))) [] verdicts detGens
     -- One walk of the whole program, shared by every 'meta' built below.
     verdicts = materializationVerdicts p
+    -- Likewise one call-graph fixpoint, shared: which generate functions are
+    -- deterministic when applied to deterministic arguments.
+    detGens = Set.fromList [n ++ "_gen" | (n, True) <- Map.toList (functionSummaries p)]
     extractParamNames (Expr _ (Lambda name lambdaBody)) = name : extractParamNames lambdaBody
     extractParamNames _ = []
     stripLambdas (Expr _ (Lambda _ lambdaBody)) = stripLambdas lambdaBody
@@ -2324,6 +2335,54 @@ enumerateAppliedLambda meta cumulative l v sample = do
   setVariables outerBinds
   enumSumP (semiringOf meta) (countBranches (compilerConfig meta)) id boundVar discreteVVals innerTuple
 
+-- | Refuse a generate-backed probability. 'toIREnumerate' compiles its operands
+-- /forward/ on the premise stated at its fallback equation: with the enclosing
+-- discrete latents pinned to concrete enumerated values, the operand is
+-- deterministic, so generating it and comparing the result against the sample is
+-- an exact indicator. When that premise does not hold the same code emits a
+-- fresh random draw compared against the query value -- which is not a
+-- probability at all, but a number that differs on every call with the same
+-- argument, with no crash and no diagnostic on the Python and Julia backends
+-- (task @self-recursive-prob-nondeterministic-fallback@).
+--
+-- The shape that reaches it is an unbounded self-recursive branch with no
+-- decreasing argument (@main = ... if a == b then a else main@): @main@'s own
+-- @_gen@ call is spliced into @main_prob@. NeST does exact inference, so this is
+-- refused at compile time rather than emitted -- matching the sibling
+-- witness-construction failures, which fail loudly. Solving the resulting
+-- fixed-point equation algebraically was considered and declined: it would make
+-- \"does my program infer?\" unpredictable from the source.
+--
+-- This is the local guard for the enumeration path only; the central \"no
+-- generate call in any probability-mode body\" invariant is investigation
+-- @generate-backed-inference-sweep@.
+requireDeterministicUnderEnum :: CompilerMetadata -> String -> Expr -> IRExpr -> CompilerMonad ()
+requireDeterministicUnderEnum meta what src ir =
+  case nub (randomDrawSites (detGenNames meta) ir) of
+    [] -> return ()
+    sites -> error $ unlines
+      [ "probability-mode compilation reached a generate-backed fallback."
+      , "The " ++ what ++ " of an enumerated conditional (chain name " ++ cn ++ ") is compiled"
+      , "forward, which only measures the query correctly when it is deterministic given the"
+      , "enumerated latents. It is not: it draws " ++ intercalate ", " sites ++ "."
+      , "Emitting it would produce a probability function that returns a different number on"
+      , "every call with the same query value. NeST does exact inference, so this is refused."
+      , "This is the shape of an unbounded self-recursive branch (`... else main`) with no"
+      , "decreasing argument. Rewrite the recursion so it has a decreasing argument, or use"
+      , "the program in generate mode only."
+      , "(task self-recursive-prob-nondeterministic-fallback)" ]
+  where cn = chainName (getTypeInfo src)
+
+-- | The randomness sources in a generate-mode IR expression, named for a
+-- diagnostic; empty exactly when 'isPureGiven' would call the expression pure.
+-- The two are the optimizer's own notions of effect: an 'IRSample', and a
+-- reference to a generate function not proven deterministic.
+randomDrawSites :: Set.Set Varname -> IRExpr -> [String]
+randomDrawSites det ir = case ir of
+  IRSample d -> ["from " ++ show d]
+  IRVar n | isEffectfulVar n && not (Set.member n det) -> ["by calling " ++ n]
+  _ -> concatMap (randomDrawSites det) (getIRSubExprs ir)
+
 toIREnumerate :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PResult
 -- Nested enumerable application (e.g. an inner `let` binding a fresh discrete draw):
 -- recurse with enumeration + weighting rather than generating the draw forward.
@@ -2340,6 +2399,9 @@ toIREnumerate meta cumulative (Expr TypeInfo{rType=rt} (IfThenElse c t e)) sampl
   cIR <- toIRGenerate meta c
   tIR <- toIRGenerate meta t
   eIR <- toIRGenerate meta e
+  requireDeterministicUnderEnum meta "condition" c cIR
+  requireDeterministicUnderEnum meta "then branch" t tIR
+  requireDeterministicUnderEnum meta "else branch" e eIR
   --(pBranch, _, _) <- toIRInference meta False distr elem
   -- Due to eager evaluation, we must make sure, that the wrong branch is not executed
   let condSelector resultExpr = IRIf cIR resultExpr (srZero sr)
@@ -2360,6 +2422,7 @@ toIREnumerate meta cumulative (Expr TypeInfo{rType=rt} (IfThenElse c t e)) sampl
 -- This covers shapes whose root is not an if, e.g. an InjF sum of conditional terms.
 toIREnumerate meta cumulative e sample = do
   eIR <- toIRGenerate meta e
+  requireDeterministicUnderEnum meta "expression" e eIR
   let rt = rType (getTypeInfo e)
   let cmpOp = case rt of { TFloat -> OpApprox; TVarR _ -> OpApprox; _ -> OpEq }
   if cumulative

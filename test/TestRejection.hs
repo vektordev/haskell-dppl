@@ -43,6 +43,7 @@ rejectionTests = testGroup "Rejection"
   , typeInferenceTests
   , anyCtorTestTests
   , adtCumulativeTests
+  , generateBackedTests
   ]
 
 -- ----------------------------------------------------------------------------
@@ -390,5 +391,66 @@ adtCumulativeTests = testGroup "AdtCumulative"
         res <- forced (runProb defaultCompilerConfig prog [] (VADT "Leaf" []))
         case res of
           Left e  -> assertFailure ("point query on an ADT-valued program was rejected: " ++ show e)
+          Right _ -> return ()
+  ]
+
+-- ----------------------------------------------------------------------------
+-- Generate-backed inference: 'toIREnumerate' compiles an enumerated conditional's
+-- operands forward, which measures the query correctly only while they are
+-- deterministic given the enumerated latents. A branch that is not -- an
+-- unbounded self-recursive call with no decreasing argument -- used to compile
+-- to `main.generate() == sample`, a "probability" that returns a different
+-- number on every call with the same query value, with no crash and no
+-- diagnostic on the Python and Julia backends. It must be refused instead: NeST
+-- does exact inference (task self-recursive-prob-nondeterministic-fallback).
+-- ----------------------------------------------------------------------------
+
+-- "resample both grammars and try again if they disagree". Terminates almost
+-- surely under sampling (the recursion is geometric in the disagreement
+-- probability) but has no static bound, unlike dice.ppl's `x + (-1.0)`.
+selfRecursiveAgreeSrc :: String
+selfRecursiveAgreeSrc = unlines
+  [ "data Sym = A | B"
+  , "genA = if Uniform < 0.7 then A else B"
+  , "genB = if Uniform < 0.4 then A else B"
+  , "main = let a = genA in"
+  , "       let b = genB in"
+  , "       if a == b then a else main"
+  ]
+
+-- The same enumeration with a constant else branch: deterministic given the
+-- enumerated latents, so the forward-and-compare premise holds and it must
+-- still compile. Guards the refusal against firing on the shape it was
+-- written to leave alone.
+enumeratedConstantElseSrc :: String
+enumeratedConstantElseSrc = unlines
+  [ "data Sym = A | B"
+  , "genA = if Uniform < 0.7 then A else B"
+  , "genB = if Uniform < 0.4 then A else B"
+  , "main = let a = genA in"
+  , "       let b = genB in"
+  , "       if a == b then a else A"
+  ]
+
+generateBackedTests :: TestTree
+generateBackedTests = testGroup "GenerateBackedInference"
+  [ testCase "unbounded self-recursion in an enumerated branch is refused" $
+      withParsed selfRecursiveAgreeSrc $ \prog -> do
+        res <- forced (runProb defaultCompilerConfig prog [] (VADT "A" []))
+        case res of
+          Left e  -> assertBool ("expected the generate-backed refusal, got: " ++ show e)
+                                ("generate-backed fallback" `isInfixOf` show e)
+          Right _ -> assertFailure
+            "a probability function that draws fresh randomness on every call was accepted"
+  , testCase "the refusal names the generator it would have called" $
+      withParsed selfRecursiveAgreeSrc $ \prog -> do
+        res <- forced (runProb defaultCompilerConfig prog [] (VADT "A" []))
+        assertBool "the refusal does not name main_gen, so it does not say what is wrong"
+                   (either (\e -> "main_gen" `isInfixOf` show e) (const False) res)
+  , testCase "a deterministic else branch under the same enumeration still compiles" $
+      withParsed enumeratedConstantElseSrc $ \prog -> do
+        res <- forced (runProb defaultCompilerConfig prog [] (VADT "A" []))
+        case res of
+          Left e  -> assertFailure ("a deterministic enumerated branch was refused: " ++ show e)
           Right _ -> return ()
   ]
