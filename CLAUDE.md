@@ -238,6 +238,48 @@ no occurrence of the bound variable is point-invertible at all. Full
 mechanism, examples, and the `testCases/planEnum*` pointers:
 `docs/witness-inversion-engines.md`.
 
+### Enumerated branches are compiled forward, and that premise is checked
+
+`toIREnumerate` compiles the condition and both arms of an enumerated
+conditional with `toIRGenerate` and compares the result against the sample. That
+is exact only while the operand is **deterministic given the enumerated
+latents** — the premise its own fallback equation states. Where the premise
+failed, the same code emitted a fresh random draw compared against the query
+value: a "probability" returning a different number on every call with the same
+argument, with no crash and no diagnostic on the Python and Julia backends.
+
+The reachable shape is unbounded self-recursion with no decreasing argument
+(`main = let a = genA in let b = genB in if a == b then a else main` — resample
+and retry on disagreement), which spliced `main_gen()` into `main_prob`.
+`dice.ppl`-style recursion is unaffected: it recurses on `x + (-1.0)`, which
+statically decreases.
+
+`requireDeterministicUnderEnum` now checks each generated operand and refuses at
+compile time, naming the generator it would have called — matching the sibling
+witness-construction failures, which fail loudly. Solving the fixed point
+algebraically (the marginal *is* closed-form for that program) was declined: it
+would make "does my program infer?" unpredictable from the source. The refusal
+is lazy and lives inside the prob/integ bodies, so `generate` and
+`--noProbability --noIntegrate` compiles of such a program still work.
+
+The purity verdict is the optimizer's own `isPureGiven` (an `IRSample`, or a
+`_gen` reference not proven deterministic), told which generators are
+deterministic by `CompilerMetadata.detGenNames` — built once per compile from
+`Typing/Determinism.functionSummaries`. `isEffectfulVar` alone is a name test
+that calls *every* `_gen` reference random, and an enumerated inference body is
+written almost entirely in terms of deterministic helper calls, so a name test
+would refuse the whole corpus.
+
+Two things this is **not**. It is the local guard for the enumeration path only;
+the central "no `generate` call in any probability-mode body" invariant is the
+docs-repo investigation `generate-backed-inference-sweep`. And it needed a
+soundness fix in `Determinism` first: a *nullary* top-level function is
+referenced as a bare `Var` with no `Apply` node, so `genA` in `let a = genA`
+fell through to the unbound-name `True` default and a whole random draw was
+reported as a known anchor. `detExpr`'s `Var` rule now consults the call-graph
+summary, which can only move `True → False` and so under-approximates in the
+direction the module already documents as safe.
+
 ### `observe` (Maybe-valued conditioning)
 
 `observe base pred` is parser sugar, not a dedicated `Expr` constructor —
