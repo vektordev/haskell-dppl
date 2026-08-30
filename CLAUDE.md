@@ -553,6 +553,54 @@ compiles incorrectly. `IRCompiler` selects the inference algorithm per
 node directly from the `pType`/`DiscreteValues` annotations visible after
 Modality Inference.
 
+### Enumerability across a function call
+
+`SPLL.Analysis.annotateEnumsProg` derives a node's `DiscreteValues` tag from
+its shape (`Constant`, `InjF` via `propagateValues`, `IfThenElse` as the union
+of its arms). An arrow-typed function cannot carry one fixed tag in the
+environment -- what its result enumerates over depends on what its argument
+enumerates over -- so `applyTags` computes the tag **per call site**: it
+resolves the application's head to a lambda (a literal one, or a top-level
+function looked up in the raw function environment), binds the argument's tags
+to the parameter, and re-annotates the callee's body under that environment.
+`f x ++ f y` then selects the same enumerate clause the hand-inlined body does.
+The directly-applied-lambda (`let`) case likewise binds the parameter before
+annotating the body, so a `let`-bound enumerable is visible inside it.
+
+Three refusals, each answering "no tag" -- the status quo before this existed:
+
+- **Curried spines of two or more arguments.** In `f a b`, `a` sits where
+  IRCompiler's enumerate path cannot reach it: `enumerateAppliedLambda`
+  marginalises the argument of the single `Apply` node it is handed, and the
+  partial application `f a` is not even tagged `IsConditional` (only `Var` and
+  `Lambda` nodes are). Deciding it per argument position would need `pType`,
+  and **this pass runs before ModalityInfer, so every `pType` still reads
+  `NotSetYet` here** -- `rType` is available, `pType` is not.
+- **Recursion.** A function already being looked through is refused; unrolling
+  has no termination story and the enclosing tag fixpoint would not converge.
+- **An empty propagated domain.** No values at all is an *absence* of a domain,
+  not an empty one; tagging it would make downstream inference sum over nothing
+  and report probability zero.
+
+Enumerating an ADT domain through a **field accessor or constructor test** is
+partial -- `b1` has nothing to say about an `A`, and `implicitFunctionImpl`
+answers that with an `error`, not a `Left`. `propagateValues` asks
+`implicitFunctionApplicable` first and drops the tuples the function is
+undefined on, so an accessor's enumerated domain is its own constructor's
+values rather than a compiler crash. Before applied helpers were tagged, a
+multi-constructor domain never reached an accessor at compile time.
+
+Corpus: `applyEnum*` (the four shapes plus the no-application control) and
+`clevrEqualLargeMetalSphereSplit` (one neural read per object, contributions
+summed through a shared helper -- the split sibling of
+`clevrEqualLargeMetalSphereNatural`, which reads the whole scene at once).
+
+A **non-conditional** helper (`bump x = x ++ 1`, no `if`) now compiles where it
+used to be rejected, but its emitted probability function is generate-backed
+and therefore not a probability function at all -- a pre-existing defect
+reachable at HEAD by `bump coin ++ 1`, tracked by the docs-repo investigation
+`generate-backed-inference-sweep`, not by the tag.
+
 ### Neural Declarations
 
 Neural networks are declared separately as
