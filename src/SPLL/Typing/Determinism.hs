@@ -131,11 +131,23 @@ detExpr phi env e = case node e of
   Subtree s _ -> here True (snd (detExpr phi env s))
 
   -- Variables: bound ⇒ their context determinism; a distribution primitive ⇒
-  -- random; otherwise (top-level function reference / free name) ⇒ known,
-  -- matching PInfer2's default of Deterministic for an unbound Var.
+  -- random; a reference to a top-level function ⇒ that function's summary; any
+  -- other free name ⇒ known, matching PInfer2's default of Deterministic for an
+  -- unbound Var.
+  --
+  -- The summary lookup is what makes a /nullary/ top-level function honest: in
+  -- @main = let a = genA in ...@, @genA@ is a bare 'Var' standing for a whole
+  -- random draw, and answering the unbound-name default 'True' for it claimed a
+  -- random value was a known anchor -- exactly what the module's soundness
+  -- stance forbids. For an arrow-typed function the summary describes the
+  -- fully-applied result rather than the closure value, so reading it here can
+  -- only turn a 'True' into a 'False' (a function whose result is deterministic
+  -- keeps its 'True'): under-approximating, which costs FC precision and
+  -- nothing else.
   Var name
     | name `Map.member` env          -> here (env Map.! name) Map.empty
     | name `Set.member` randomPrimitives -> here False Map.empty
+    | name `Map.member` phi          -> here (phi Map.! name) Map.empty
     | otherwise                      -> here True Map.empty
 
   -- Neural reads draw from a (categorical / Gaussian) law: never deterministic.

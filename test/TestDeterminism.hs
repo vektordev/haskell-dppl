@@ -128,6 +128,20 @@ unitTests = testGroup "unit rules"
   , testCase "summary of a pure function is True" $ do
       let p = prep "f y = y + 1.0\nmain t = f (theta t @ 0)"
       Map.lookup "f" (functionSummaries p) @?= Just True
+
+  -- A nullary top-level function is referenced as a bare 'Var', with no Apply
+  -- node for the call-graph rule to fire on. Answering the unbound-name default
+  -- for it claimed a whole random draw was a known anchor, which is the one
+  -- direction the pass's soundness stance rules out.
+  , testCase "a reference to a random nullary function is not an anchor" $ do
+      let p = prep "genA = if Uniform < 0.7 then 0.0 else 1.0\nmain = let a = genA in a"
+      Map.lookup "genA" (functionSummaries p) @?= Just False
+      rootDet "main" p (determinismMap p) @?= False
+
+  , testCase "a reference to a deterministic nullary function stays an anchor" $ do
+      let p = prep "c = 1.0\nmain = let a = c in a"
+      Map.lookup "c" (functionSummaries p) @?= Just True
+      rootDet "main" p (determinismMap p) @?= True
   ]
 
 -- ---------------------------------------------------------------------------
