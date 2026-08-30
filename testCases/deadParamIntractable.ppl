@@ -1,0 +1,8 @@
+-- The same dead-argument reduction reached through a *named* top-level
+-- function rather than a directly-applied lambda (so ModalityInfer types the
+-- node via `applyI`, not the let rule), and with a Bool-typed intractable
+-- argument rather than a Float one -- the argument's return type is as
+-- irrelevant as its distribution when nothing reads it. Companion to
+-- deadBindingIntractable.ppl.
+ignoreArg x = Normal
+main = ignoreArg ((Uniform * Uniform) > 0.5)

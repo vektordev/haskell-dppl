@@ -814,6 +814,40 @@ equivalentLambda ctx fcd cn = case findEquivalentExpression fcd cn of
   Just (rCN, LambdaInfo boundVar bodyCN, tag) -> (rCN, boundVar, bodyCN, tag)
   other -> error (ctx ++ ": chain name '" ++ cn ++ "' should resolve to a lambda, but resolved to " ++ show other)
 
+-- | The body of the lambda applied at an @Apply l v@ node, when the application
+-- is a *dead* binding: the bound variable has no occurrence in that body, so the
+-- argument's value is never read and @p(l v = s) = p(body = s)@.
+--
+-- 'Nothing' when the callee does not resolve to a lambda at all, or when the
+-- binding is live. Total where 'equivalentLambda' is partial, because the
+-- Bottom-argument arm asks the question about callees the tractable arms never
+-- reach: an unknown chain name answers "not a dead binding" rather than
+-- crashing. A chain name that resolves to a lambda but carries no
+-- 'lambdaVarOccurrences' entry counts as dead, matching the @fromMaybe []@ the
+-- probabilistic arm's own check uses.
+deadBindingBodyCN :: CompilerMetadata -> Expr -> Maybe ChainName
+deadBindingBodyCN meta l = do
+  let fcd = fcData meta
+  let cn = chainName (getTypeInfo l)
+  _ <- lookup cn (chainNameInfo fcd)
+  (resolvedCN, info, _) <- findEquivalentExpression fcd cn
+  bodyCN <- case info of
+    LambdaInfo _ b -> Just b
+    _ -> Nothing
+  if null (fromMaybe [] (lookup resolvedCN (lambdaVarOccurrences fcd)))
+    then Just bodyCN
+    else Nothing
+
+-- | 'deadBindingBodyCN' resolved to the body expression itself.
+deadBindingBody :: CompilerMetadata -> Expr -> Maybe Expr
+deadBindingBody meta l = exprWithCN meta <$> deadBindingBodyCN meta l
+
+-- | The expression carrying a chain name, looked up in the program being compiled.
+exprWithCN :: CompilerMetadata -> ChainName -> Expr
+exprWithCN meta cn =
+  let Program{functions=fs} = compilingProgram meta
+  in findExprWithCN (map snd fs) cn
+
 -- | As 'equivalentLambda', but where only the resolved chain name is wanted and
 -- the expression behind it need not be a lambda.
 equivalentChainName :: String -> FCData -> ChainName -> ChainName
@@ -1453,11 +1487,13 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
   -- Dead binding: if the bound variable never appears in the body, the body is independent
   -- of the argument. In that case p(result = sample) = p(body = sample).
   -- Scoped to THIS lambda's body: a same-named variable bound elsewhere must not count.
-  let deadBinding = null (fromMaybe [] (lookup lResolvedCN (lambdaVarOccurrences (fcData meta))))
-  if deadBinding then do
-    let Program{functions=fs} = compilingProgram meta
-    let bodyExpr = findExprWithCN (map snd fs) lambdaBodyCN
-    toIRInference meta cumulative bodyExpr sample
+  -- 'deadBindingBodyCN' is the shared predicate; the Bottom-argument arm below asks it
+  -- too, so a dead binding compiles the same way whether or not its argument happens
+  -- to have a measurable distribution. It returns this very 'lambdaBodyCN' -- both
+  -- resolve l's chain name through 'findEquivalentExpression'.
+  let deadBinding = isJust (deadBindingBodyCN meta l)
+  if deadBinding then
+    toIRInference meta cumulative (exprWithCN meta lambdaBodyCN) sample
   else do
    -- Plan-guided lazy enumeration (design plan-guided-lazy-enumeration): when
    -- the bound value is a neural network's structured output, its distribution
@@ -1571,7 +1607,34 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
           let guardAny ok whenAnySink = IRIf anyW (if bindingIsSink then whenAnySink else refuse) ok
           return (mapResult wrapInLambdas (guardedZero (zipResult guardAny combined bodyRes)))
 
-toIRInference _ _ (Expr TypeInfo{rType=_} (Apply _ _)) _ = error "This instance of apply is not yet implemented"
+-- Dead binding over an *intractable* argument. The arms above all require the
+-- argument's own pType to be one the compiler can measure (Deterministic, or one
+-- of the three probabilistic rungs); a `Bottom` argument matches none of them and
+-- used to reach the catch-all below. But a dead binding never reads the value, so
+-- the argument's tractability is beside the point: p(result = sample) =
+-- p(body = sample), exactly the reduction the probabilistic arm makes at its own
+-- `deadBinding` check -- and the same predicate ('deadBindingBodyCN') decides it, so
+-- the two agree on branch counts as well as on probability. This is what makes
+-- `let x = Uniform * Uniform in Uniform` compile: the binding is unmeasurable and
+-- unread, and ModalityInfer types the application by the *body*, so the program as
+-- a whole is not Bottom and does get a probability function.
+toIRInference meta cumulative (Expr TypeInfo{rType=_} (Apply l _)) sample
+  | Just bodyExpr <- deadBindingBody meta l =
+  toIRInference meta cumulative bodyExpr sample
+-- What is left is an application whose argument has no measurable distribution and
+-- whose value the body actually reads. There is no probability to compute: the
+-- correct answer would be an integral over the argument's law, which is precisely
+-- what `Bottom` says is unavailable. Reaching here is normally impossible --
+-- a live occurrence of a Bottom-typed binding makes the body, hence the
+-- application, Bottom too, and ModalityInfer then emits no probability function
+-- at all -- so this is a diagnostic for a modality/codegen disagreement rather
+-- than a user-facing refusal.
+toIRInference _ cumulative (Expr TypeInfo{rType=rt} (Apply l v)) _ =
+  error ("Cannot compile an application in " ++ (if cumulative then "cumulative" else "probability")
+    ++ " mode: the argument has pType " ++ show (pType (getTypeInfo v))
+    ++ " (no measurable distribution) and the callee (pType "
+    ++ show (pType (getTypeInfo l)) ++ ", chain name '" ++ chainName (getTypeInfo l)
+    ++ "') reads its value. Result type: " ++ show rt)
 -- Generic inference for multi-field constructor InjFs (Cons, TCons, user-ADT
 -- constructors). Each field is independently recoverable from the constructed
 -- sample via a deconstructing inverse, so we infer each field against its

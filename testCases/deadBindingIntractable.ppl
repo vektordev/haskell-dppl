@@ -1,0 +1,10 @@
+-- A dead let-binding whose right-hand side has no measurable distribution.
+-- `Uniform * Uniform` is a product of two independent random variables: the
+-- modality engine types it Bottom, so none of IRCompiler's Apply arms that
+-- require a measurable argument pType applies. But `x` never occurs in the
+-- body, so the argument's law integrates out to 1 and the program is just
+-- `Uniform` -- which is what ModalityInfer says too, since a directly-applied
+-- lambda takes its pType from the *body*. Before investigation
+-- 60_toIRInference-apply-gap this crashed the compiler with a bare
+-- "This instance of apply is not yet implemented".
+main = let x = Uniform * Uniform in Uniform
