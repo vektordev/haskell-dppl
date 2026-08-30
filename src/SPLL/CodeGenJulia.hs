@@ -58,7 +58,7 @@ juliaUnaryOps OpNeg = "-"
 juliaUnaryOps OpExp = "exp"
 juliaUnaryOps OpAbs = "abs"
 juliaUnaryOps OpNot = "!"
-juliaUnaryOps OpLog = "log"
+juliaUnaryOps OpLog = "safe_log"
 juliaUnaryOps OpSign = "sign"
 juliaUnaryOps OpIsAny = "isAny"
 

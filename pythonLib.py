@@ -7,6 +7,37 @@ import itertools
 def sign(x):
   return -1 if x < 0 else 0 if x == 0 else 1
 
+# --- IEEE-conforming unary math ------------------------------------------
+#
+# The reference semantics for every backend is the interpreter's, i.e.
+# Haskell's: `exp` saturates to `inf` past the representable range, `log 0` is
+# `-inf` and `log` of a negative is `NaN`. CPython's `math` module instead
+# *raises* on all three (`OverflowError` / `ValueError`), so emitted code that
+# called `math.exp`/`math.log` directly crashed where the interpreter and Julia
+# answer a number.
+#
+# This is reachable, not theoretical: an InjF inverse's monotonicity-direction
+# guard evaluates the inverse derivative eagerly to read its sign, so
+# `cdf(1000.0)` on `main = log Uniform` emits `math.exp(1000.0) > 0.0` and took
+# down the whole query with `OverflowError` instead of answering 1.0.
+#
+# `log` is currently safe only by accident -- every reachable call site happens
+# to sit behind an InjF `applicability` guard -- which is a property of today's
+# inverse set, not an invariant. Both go through a wrapper so a future inverse
+# cannot reintroduce the same class of bug. (The batched backend already did
+# this: `safe_log` in `pythonLibBatched.py` is the torch-side twin.)
+
+def safe_exp(x):
+  try:
+    return math.exp(x)
+  except OverflowError:
+    return math.inf
+
+def safe_log(x):
+  if x > 0:
+    return math.log(x)
+  return -math.inf if x == 0 else math.nan
+
 def density_uniform(x):
   return 1 if 0 <= x <= 1 else 0
 

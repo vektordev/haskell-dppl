@@ -66,10 +66,10 @@ pyDistName IRUniform = "uniform"
 
 pyUnaryOps :: UnaryOperand -> String
 pyUnaryOps OpNeg = "-"
-pyUnaryOps OpExp = "math.exp"
+pyUnaryOps OpExp = "safe_exp"
 pyUnaryOps OpAbs = "abs"
 pyUnaryOps OpNot = "not"
-pyUnaryOps OpLog = "math.log"
+pyUnaryOps OpLog = "safe_log"
 pyUnaryOps OpSign = "sign"
 pyUnaryOps OpIsAny = "isAny"
 

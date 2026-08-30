@@ -1,10 +1,26 @@
 module JuliaSPPLLib
 
-export density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, log_density_IRUniform, log_density_IRNormal, log_cumulative_IRUniform, log_cumulative_IRNormal, logsumexp, enumSumPaired, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, mapList, eq, isPossible, isclose, indexOf, listProd, T, Either, Left, Right, fromLeft, fromRight, multiValueToValueList,==
+export safe_log, density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, log_density_IRUniform, log_density_IRNormal, log_cumulative_IRUniform, log_cumulative_IRNormal, logsumexp, enumSumPaired, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, mapList, eq, isPossible, isclose, indexOf, listProd, T, Either, Left, Right, fromLeft, fromRight, multiValueToValueList,==
 
 
 function isAny(x)
     x == "ANY" || x isa AnyInferenceList
+end
+
+# Julia's `log` throws a DomainError on a negative argument, where the
+# interpreter (Haskell's `log`) answers NaN. Every reachable call site sits
+# behind an InjF `applicability` guard today, but that is a property of the
+# current inverse set rather than an invariant, so the op is routed through a
+# wrapper -- the twin of `safe_log` in `pythonLib.py`. Julia needs no `safe_exp`
+# counterpart: `exp(1e6)` already saturates to `Inf`, as Haskell's does.
+function safe_log(x)
+    if x > 0.0
+        return log(x)
+    elseif x == 0.0
+        return -Inf
+    else
+        return NaN
+    end
 end
 
 function density_IRUniform(x)

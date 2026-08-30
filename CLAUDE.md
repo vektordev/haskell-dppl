@@ -729,6 +729,36 @@ against the **interpreter**, which never renders a literal.
 log-space compile through a text backend, and each asserts both halves — no
 bare `Infinity`, *and* the mapped literal present — so neither can go vacuous.
 
+### Unary math must not raise where the interpreter answers
+
+The interpreter is the reference semantics, so a backend's unary math has to be
+IEEE-conforming the way Haskell's is: `exp` **saturates** to `inf` past the
+representable range, `log 0` is `-inf`, and `log` of a negative is `NaN`.
+CPython's `math` module *raises* on all three (`OverflowError` /
+`ValueError`), and Julia's `log` throws `DomainError` on a negative.
+
+That is reachable, not hypothetical. An `InjF` inverse's monotonicity-direction
+guard evaluates the inverse derivative **eagerly** just to read its sign, so
+`cdf(1000.0)` on `main = log Uniform` emitted `math.exp(1000.0) > 0.0` and took
+the whole query down with an `OverflowError` before any branch was chosen — a
+crash rather than a wrong number, and one nothing in the corpus caught, because
+`exp`'s forward `applicability` is unconditionally `True` and so no guard
+stands between a large query and the eager call.
+
+`OpExp`/`OpLog` therefore route through `safe_exp`/`safe_log` in `pythonLib.py`
+and `safe_log` in `juliaLib.jl` rather than the raw stdlib name
+(`CodeGenPyTorch.pyUnaryOps`, `CodeGenJulia.juliaUnaryOps`). Julia needs no
+`safe_exp` — its `exp` already saturates. The batched backend was already right
+by construction (`torch.exp` saturates, and `safe_log` in `pythonLibBatched.py`
+exists for a different reason: gradient safety under `torch.where`, which
+evaluates both arms).
+
+`log` is *currently* safe on every reachable path anyway, because each of its
+call sites happens to sit behind an inverse's `applicability` guard — but that
+is a property of today's set of `InjF` inverses, not an enforced invariant, so
+it is wrapped too. Pinned by `testCases/uniformLog.tst`'s `cdf(1000.0)` row and
+`testCases/multExp.tst`'s `cdf(-5.0)`.
+
 ## Runtime Libraries
 
 Generated Python code depends on `pythonLib.py` (scalar) or
