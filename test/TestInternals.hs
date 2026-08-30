@@ -2406,9 +2406,7 @@ internalsTests = testGroup "Internals"
   , enumContinuousRefusalTests
   , test_planEnumThreadedTopKAndBC
   , test_branchCountingDoesNotMultiplyIR
-  , test_planEnumM4Polynomial
   , test_planEnumBoolCtorPolynomial
-  , test_planEnumFusedJointStatePolynomial
   , planOverCouplingRefusalTests
   , test_tstBackendsHeader
   , optimizerPurityTests
@@ -2420,17 +2418,28 @@ internalsTests = testGroup "Internals"
   , materializationVerdictTests
   , planEnumStructuralADTTests
   , planEnumStructuralPartialTests
-  , test_planEnumStructuralGrouped
   , sumTypeShowcaseTests
   ]
 
--- | Tests heavy enough (multiple full compiles of a depth-3/depth-10 plan
+-- | Tests heavy enough (multiple full compiles of a depth-3/depth-10+ plan
 -- enumeration program) to noticeably slow day-to-day `stack test`, and
 -- unlikely to catch regressions outside plan-guided-lazy-enumeration work.
 -- Opt in with NEST_SLOW_TESTS=1 (see Spec.hs's Slow group).
+--
+-- 'test_planEnumM4Polynomial' (depth 30), 'test_planEnumFusedJointStatePolynomial'
+-- (depth-6 fused automaton) and 'test_planEnumStructuralGrouped' (depth-5
+-- structural inversion) moved here from the fast 'internalsTests' group: each
+-- pins asymptotic IR-size behaviour of an already-shipped milestone rather than
+-- day-to-day compiler surface, and together they cost ~70s of the ~114s a plain
+-- `stack test` used to take. 'test_planEnumBoolCtorPolynomial' stays in the fast
+-- group -- its depth pair (8/12) was deliberately chosen to fail in about a
+-- minute rather than OOM (see its own comment), and it is cheap (well under 1s).
 slowInternalsTests :: TestTree
 slowInternalsTests = testGroup "Internals (slow)"
   [ test_planEnumRecTopKAndBC
+  , test_planEnumM4Polynomial
+  , test_planEnumFusedJointStatePolynomial
+  , test_planEnumStructuralGrouped
   ]
 
 -- ===========================================================================

@@ -493,8 +493,20 @@ pyImpossCheck name (Just expected) =
 -- code, but batched mode supplies a torch mock, so they were admitted
 -- regardless of the Python routing header (design pytorch-tensorizer M2b). That
 -- special case is gone — a neural program simply lists @batched@ itself.)
-batchedPythonTests :: IO TestTree
-batchedPythonTests = do
+-- | Everything both 'batchedPythonTests' and 'slowBatchedPythonTests' need:
+-- loading the corpus once, working out batched/dense eligibility, and finding
+-- a torch-enabled python. Shared so the two functions agree on exactly which
+-- programs are eligible, at the cost of loading the corpus twice when both
+-- run (only NEST_SLOW_TESTS=1 does that, and corpus loading itself is cheap --
+-- the expense here is the torch subprocess, not the Haskell side).
+batchedPythonFixtures :: IO ( [(String, Either String (String, [BatchGroup], [String]))]
+                             , [String]
+                             , [(String, String, [BatchGroup], [String])]
+                             , [(String, String, [BatchGroup], [String])]
+                             , ([(String, String, [BatchGroup], [String])], [String])
+                             , [(String, String, [BatchGroup], [String])]
+                             , Maybe FilePath )
+batchedPythonFixtures = do
   files <- getAllTestFiles
   cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
   -- `slow`-headered programs stay out of batched coverage by construction, the
@@ -512,7 +524,6 @@ batchedPythonTests = do
   undeclared <- mapM (\(n, p, _, tcs) -> (,) n <$> batchedEligibility p tcs)
                      [ e | e@(_, _, bs, _) <- entries, Batched `notElem` bs ]
   let eligible = [ (n, src, gs, nets) | (n, Right (src, gs, nets)) <- declared ]
-      refused  = [ (n, msg) | (n, Left msg) <- declared ]
       gained   = [ n | (n, Right _) <- undeclared ]
       topkEligible = topKEntries batchedDeclared
       -- M3: a program declaring `dense` must actually get dense entry points.
@@ -520,10 +531,6 @@ batchedPythonTests = do
       -- a `dense` declaration on a program that is not even batched-eligible is
       -- already caught above.
       denseDeclared = [ e | e@(n, _, _, _) <- eligible, n `elem` denseNames ]
-      denseRefused = [ n | n <- denseNames
-                         , n `notElem` [ m | (m, src, _, _) <- eligible, not (null (denseEntryPoints src)) ] ]
-      denseGained = [ n | (n, src, _, _) <- eligible
-                        , n `notElem` denseNames, not (null (denseEntryPoints src)) ]
       -- M3 x M5: the same topK-recompiled entries the per-element topK
       -- differential uses, narrowed to the dense-declaring programs. Their
       -- expectations are already retargeted to the *interpreter's* value at
@@ -533,6 +540,23 @@ batchedPythonTests = do
                       , takeWhile (/= '@') n `elem` denseNames
                       , not (null (denseEntryPoints src)) ]
   mpy <- findTorchPython
+  return (declared, gained, eligible, denseDeclared, topkEligible, denseTopK, mpy)
+
+-- | The cheap, always-on half of the batched-mode differential: pure-Haskell
+-- eligibility bookkeeping (no torch, no subprocess) plus the two value
+-- differentials cheap enough to run on every `stack test`
+-- ('runBatchedPython'/'runBatchedGradients'/'runBatchedGenerate'/
+-- 'runBatchedDense' False -- each well under 5s). The topK-threshold
+-- differentials live in 'slowBatchedPythonTests' instead -- see there for why.
+batchedPythonTests :: IO TestTree
+batchedPythonTests = do
+  (declared, gained, eligible, denseDeclared, _, _, mpy) <- batchedPythonFixtures
+  let refused  = [ (n, msg) | (n, Left msg) <- declared ]
+      denseNames = map (\(n, _, _, _) -> n) denseDeclared
+      denseRefused = [ n | n <- denseNames
+                         , n `notElem` [ m | (m, src, _, _) <- eligible, not (null (denseEntryPoints src)) ] ]
+      denseGained = [ n | (n, src, _, _) <- eligible
+                        , n `notElem` denseNames, not (null (denseEntryPoints src)) ]
   return $ testGroup "BatchedPython" $
     [ testProperty "declared-batched-eligible" (once (declaredEligibleProp (length declared) refused))
     , testProperty "eligibility-gain-note" (once (gainNoteProp gained))
@@ -548,9 +572,27 @@ batchedPythonTests = do
         [ testProperty "batched-vs-expected" (once (runBatchedPython py eligible))
         , testProperty "gradients-nan-free" (once (runBatchedGradients py eligible))
         , testProperty "generate-density-matches-expected" (once (runBatchedGenerate py eligible))
-        , testProperty "dense-matches-expected" (once (runBatchedDense False py denseDeclared))
-        , testProperty "dense-inherits-topk" (once (runBatchedDense True py denseTopK))
-        , testProperty "topk-is-per-element" (once (runBatchedTopK py topkEligible)) ]
+        , testProperty "dense-matches-expected" (once (runBatchedDense False py denseDeclared)) ]
+
+-- | The topK-threshold half of the M5 differential ('topk-is-per-element',
+-- 'dense-inherits-topk'): each recompiles every batched-declaring program at
+-- every threshold in 'topKDiffThresholds' (batched, scalar and interpreter
+-- variants) and runs the lot through one torch subprocess. Measured at ~30s
+-- and ~19s respectively -- the two most expensive individual tests in the
+-- whole suite, well out of proportion to the rest of the batched differential
+-- (each under 5s). They pin a real behaviour (topK pruning survives the
+-- batched/dense lowering) but a narrower one than 'batched-vs-expected'
+-- itself, so -- same tradeoff as 'test_planEnumRecTopKAndBC' in
+-- TestInternals.hs -- they move to the opt-in Slow group
+-- (NEST_SLOW_TESTS=1) rather than taxing every default run.
+slowBatchedPythonTests :: IO TestTree
+slowBatchedPythonTests = do
+  (_, _, _, _, topkEligible, denseTopK, mpy) <- batchedPythonFixtures
+  return $ testGroup "BatchedPython (slow)" $ case mpy of
+    Nothing -> []
+    Just py ->
+      [ testProperty "dense-inherits-topk" (once (runBatchedDense True py denseTopK))
+      , testProperty "topk-is-per-element" (once (runBatchedTopK py topkEligible)) ]
 
 -- | Everything the batched differential needs from one corpus program, or a
 -- diagnostic saying why batched mode cannot take it: the three eligibility

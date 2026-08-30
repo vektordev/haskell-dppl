@@ -27,7 +27,7 @@ import TestModalityInfer (modalityInferTests)
 import TestDeterminism (determinismTests)
 import TestEncodeProperties (encodeTests, encodeRoundtripTests)
 import TestShowcase (showcaseTests)
-import End2EndTesting (end2endTests, slowEnd2EndTests, getAllTestFiles, selectPassDifferentialTests, batchedPythonTests, batchedRefusalTests, branchCountBackendTests)
+import End2EndTesting (end2endTests, slowEnd2EndTests, getAllTestFiles, selectPassDifferentialTests, batchedPythonTests, slowBatchedPythonTests, batchedRefusalTests, branchCountBackendTests)
 import TestFuzz (fuzzTests, superSlowFuzzTests)
 import TestCaseParser (parseProgram, parseTestCases, TestCase(..), Backend(..))
 import TestTolerances (probTolerance, reasonablyCloseTolerance, samplingTolerance)
@@ -769,7 +769,8 @@ main = do
   runSlow <- lookupEnv "NEST_SLOW_TESTS"
   slow <- if isNothing runSlow then return (testGroup "Slow" []) else do
     slowE2e <- slowEnd2EndTests
-    return $ testGroup "Slow" [slowInternalsTests, slowE2e, fuzzTests]
+    slowBatchedPy <- slowBatchedPythonTests
+    return $ testGroup "Slow" [slowInternalsTests, slowE2e, slowBatchedPy, fuzzTests]
   -- 'prop_Fuzz_SamplingMatchesPDF' (the sampling-vs-PDF cross-check between
   -- `generate` and `probability`) draws up to tens of thousands of forward
   -- samples per case, dwarfing every other Slow test's runtime, so it gets
