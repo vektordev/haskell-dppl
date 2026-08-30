@@ -46,7 +46,7 @@ module SPLL.Semiring (
   -- * PResult combinators
   density, mass, detP, impossibleP, indicatorP, impossibleWhen,
   prodP, onProb, onDim, onBranches, mapResult, guardP, zipResult,
-  scaleCoV, anySafe, enumSumP, enumSumNode, opaqueMass, shareResult,
+  scaleCoV, anySafe, anySafeShared, enumSumP, enumSumNode, opaqueMass, shareResult,
   packResult, unpackResult, mixP, mixSubP, mixWith,
   -- * Compiler monad plumbing (generic; not Semiring-specific, but shared by
   -- combinators that bind fresh variables)
@@ -416,6 +416,112 @@ anySafe sr sample wrap (PResult p d bc imp) = PResult
   -- body would have said.
   (if imp == constFalseIR then constFalseIR else IRIf isAnySample constFalseIR (wrap imp))
   where isAnySample = IRUnaryOp OpIsAny sample
+
+-- | 'anySafe', sharing the sub-result's let-in block when more than one field
+-- reads it.
+--
+-- 'anySafe' guards each of the four fields with its own @isAny@ test and wraps
+-- each in the block ('wrapBlockIfRead'), so a block that two fields read is
+-- emitted twice -- and for an enumerated sum that block holds the single most
+-- expensive node in the program. 'opaqueMass' deliberately let-binds the sum
+-- so the impossibility flag reads the value instead of recomputing it; the
+-- per-field wrap then undoes exactly that, handing @rProb@ one copy of the
+-- enumeration and @rImposs@ -- which is only @that value == srZero@ -- another.
+--
+-- CSE cannot merge them afterwards, and should not: the two copies sit in the
+-- else-arms of two different @isAny@ ifs, so sharing them means hoisting the
+-- enumeration above the guard whose whole job is to skip it on a marginal
+-- (ANY) query.
+--
+-- Measured over the corpus at the time of writing: 33 of 247 programs
+-- re-emitted such an expression, topped by @clevrEqualLargeMetalSphereNatural@
+-- at 189 KB, 16% of its emitted Python -- and, being evaluated rather than
+-- merely printed, twice the work at run time.
+--
+-- The sharing rule is 'shareResult's, for 'shareResult's reasons: bind the
+-- packed result once, and project out of it only the fields that actually read
+-- the block, so a statically-known dim or flag stays the constant it is
+-- instead of being routed through an opaque tuple where folding cannot see it.
+anySafeShared :: Semiring -> IRExpr -> [(Varname, IRExpr)] -> PResult
+              -> CompilerMonad PResult
+anySafeShared sr sample binds (PResult p d bc imp)
+  -- Below two readers there is no duplication to remove, and the tuple is not
+  -- free; 'shareResult' declines on the same test. The second condition is the
+  -- one documented at 'blockIterates'.
+  | length readers <= 1 || not (any (blockIterates . snd) binds) =
+      return (anySafe sr sample (wrapBlockIfRead binds) (PResult p d bc imp))
+  | otherwise = do
+      v <- mkVariable "any_shared"
+      setVariables [(v, IRIf isAnySample
+                          (packMany [dflt | (_, _, dflt) <- readers])
+                          (generateLetInExpr binds (packMany [e | (_, e, _) <- readers])))]
+      let -- A reading field is projected out of the one shared tuple. A
+          -- non-reading one keeps 'anySafe''s own guarded form and stays out of
+          -- the tuple entirely, so a statically-known dim or flag remains the
+          -- constant it is rather than being routed through an opaque tuple
+          -- where folding cannot see it ('shareResult' makes the same split).
+          field i e dflt = case lookup i (zip [j | (j, _, _) <- readers] [0 ..]) of
+            Just k  -> projMany k (length readers) (IRVar v)
+            Nothing -> IRIf isAnySample dflt e
+      return (PResult (P (field (0 :: Int) (unP p) (srOne sr)))
+                      (field 1 d  const0)
+                      (field 2 bc const0)
+                      (if imp == constFalseIR
+                         then constFalseIR
+                         else field 3 imp constFalseIR))
+  where
+    isAnySample = IRUnaryOp OpIsAny sample
+    -- A constant-False flag reads nothing and must stay the bare constant
+    -- 'anySafe' gives it, guard and all.
+    reads' e    = e /= constFalseIR && mentionsAny (map fst binds) e
+    -- Each field beside the value a marginal (ANY) query gives it.
+    fields      = [(unP p, srOne sr), (d, const0), (bc, const0), (imp, constFalseIR)]
+    readers     = [ (i, e, dflt)
+                  | (i, (e, dflt)) <- zip [0 :: Int ..] fields, reads' e ]
+
+-- | Does this block contain a loop -- a form whose body is evaluated once per
+-- element of a domain?
+--
+-- This is the gate on sharing, and it is a statement about /run time/, not
+-- size: what makes a second copy of the block cost anything is that it is a
+-- second traversal. A block of constants and arithmetic folds to a handful of
+-- literals, so duplicating it costs nothing and hiding it behind a tuple costs
+-- something -- the pack, the projections, and the per-arm split-and-rebuild
+-- the optimizer does to a tuple binding. Worse, a folded field routed through
+-- an opaque tuple is hidden from constant folding, which is the pessimization
+-- 'shareResult' documents.
+--
+-- A pre-optimization node count was tried here first and is the wrong
+-- question: @testCases\/equalsCoin@ builds a block of ~100 nodes that folds to
+-- four literals, so it passes any size gate while having nothing worth
+-- sharing. Whether the block /iterates/ survives folding, and is exactly the
+-- property that made the enumerated sums this exists for expensive.
+blockIterates :: IRExpr -> Bool
+blockIterates e = iterates e || any blockIterates (getIRSubExprs e)
+  where
+    iterates x = case x of
+      IREnumSum{}                 -> True
+      IRLogEnumSum{}              -> True
+      IREnumSumPaired{}           -> True
+      IRMap{}                     -> True
+      IRBuiltin BMap _            -> True
+      IRBuiltin (BReduce _ _) _   -> True
+      _                           -> False
+
+-- | Pack values into one right-nested tuple; a single value packs to itself.
+-- Only the fields that read the shared block go in, so the common
+-- probability-and-flag pair costs one 'IRTCons' rather than the three a full
+-- 'packResult' would build and the optimizer would then split and rebuild.
+packMany :: [IRExpr] -> IRExpr
+packMany []     = error "packMany: nothing to pack"
+packMany [x]    = x
+packMany (x:xs) = IRTCons x (packMany xs)
+
+-- | Read element @k@ of the @n@ that 'packMany' packed.
+projMany :: Int -> Int -> IRExpr -> IRExpr
+projMany _ 1 t = t
+projMany 0 _ t = IRTFst t
+projMany k n t = projMany (k - 1) (n - 1) (IRTSnd t)
 
 -- | Sum a result over an enumerated variable's support: probabilities and branch
 -- counts sum, the result is a discrete mass (dim 0). @wrap@ post-processes the

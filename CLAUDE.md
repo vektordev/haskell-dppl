@@ -427,6 +427,36 @@ probability** — use `srComplement`/`srZero`, not raw arithmetic, since
 under log space those are silently different numbers. Full vocabulary,
 the rest of the log-space gotchas, and the `shareResult` zero-guard
 placement bug: `docs/semiring-presult-internals.md`.
+`anySafe` guards each of the four `PResult` fields with its own `isAny` test
+and wraps each in the sub-result's let-in block, so a block **two** fields read
+was emitted twice — and for an enumerated sum that block holds the most
+expensive node in the program. `opaqueMass` let-binds the sum precisely so the
+impossibility flag reads the value rather than recomputing it; the per-field
+wrap then undid exactly that, handing `rProb` one copy of the enumeration and
+`rImposs` (only `that value == srZero`) another. CSE cannot merge them and
+should not: the copies sit in the else-arms of two different `isAny` ifs, so
+sharing them means hoisting the enumeration above the guard whose job is to
+skip it on a marginal query.
+
+`anySafeShared` binds the packed result once instead, on `shareResult`'s rules
+— only the fields that actually read the block go into the tuple, so a
+statically-known dim or flag stays the constant it is rather than being hidden
+from folding. It is gated on `blockIterates`: share only when the block
+contains a **loop** (an enum-sum, `IRMap`, `BMap`, or `BReduce`). That gate is
+a claim about run time, not size — what makes a second copy cost anything is
+that it is a second traversal, and a block of constants and arithmetic folds to
+a few literals whether copied or not. A pre-optimization node count was tried
+first and is the wrong question: `testCases/equalsCoin` builds ~100 nodes that
+fold to four literals, passing any size gate with nothing worth sharing.
+
+Measured over the corpus: emitted scalar Python totals 68% of its former size
+(`clevrEqualLargeMetalSphere*` 2.8x smaller, the `mNistAdd` family 1.6–1.8x),
+`mNistAdd4`'s probability function goes from two enumeration passes and 62
+neural-forward call sites to one and 31, CLEVR compiles in 0.84s against 1.5s,
+and the whole test suite runs in 89s against 128s. Twenty-five small programs
+grow by up to 18% — the tuple ceremony against a small loop — which is the
+intended trade: bytes for a halved loop.
+
 
 ### Impossibility flag
 
