@@ -245,6 +245,12 @@ class AnyInferenceList(InferenceList):
 
 class ConsInferenceList(InferenceList):
   def __init__(self, value, tail: InferenceList):
+    # The scalar "ANY" is not a list, and a tail must be one. Nothing the
+    # compiler emits should reach this any more -- an inverse that
+    # reconstructs a list around a hole now uses the list-shaped any-value
+    # (see PredefinedFunctions.anyOfType) -- but the coercion stays as a
+    # backstop, and it is why the pre-fix -O0 output ran here while the same
+    # value was a hard MethodError in Julia.
     if tail == "ANY":
       self.next = AnyInferenceList()
     else:

@@ -26,6 +26,30 @@ import qualified Data.Bifunctor
 import StandardLibrary (invokeStandardFunction, stdListProd)
 import SPLL.Typing.AlgebraicDataTypes (implicitFunctionApplicable)
 
+-- | The placeholder value standing for "anything at all" in the slot typed
+-- @rt@ of a container an inverse reconstructs.
+--
+-- Several inverses rebuild a container purely so the caller can immediately
+-- tear it apart again: @head L == s@ inverts to @L = Cons(s, <hole>)@, whose
+-- head and tail the construction branch then reads back out. The hole is never
+-- meant to exist as a value, but it *is* emitted, and at @-O0@ nothing folds
+-- the round trip away -- so the emitted Julia and Python evaluate it for real.
+--
+-- Both backends model a list as a distinct runtime type (@InferenceList@),
+-- so a scalar hole in a *list* slot is not merely useless but ill-typed:
+-- @prepend(x, "ANY")@ is a Julia @MethodError@. The list-shaped hole
+-- (@AnyInferenceList@ / 'AnyList') is a legal member of that type, and
+-- @isAny@ recognises it in all three backends, so it behaves identically
+-- wherever the scalar one would have worked.
+--
+-- Every other slot takes the scalar 'VAny': the container types are
+-- structurally typed at runtime and @isAny@ only recognises these two forms,
+-- so a "recursive" hole such as @VTuple VAny VAny@ would read as an ordinary
+-- tuple and be compared component-wise instead of matching anything.
+anyOfType :: RType -> GenericValue a
+anyOfType (ListOf _) = VList AnyList
+anyOfType _          = VAny
+
 -- InputVars, OutputVars, fwd, grad
 data FDecl = FDecl {contract :: Scheme, inputVars :: [String], outputVars :: [String], body :: IRExpr, applicability :: IRExpr, deconstructing :: Bool, derivatives :: [(String, IRExpr)]} deriving (Show, Eq)
 -- Forward, inverse
@@ -267,7 +291,9 @@ sndInv = FDecl (Forall [TV "a", TV "b"] [] (TVarR (TV "b") `TArrow` Tuple (TVarR
 headFwd :: FDecl
 headFwd = FDecl (Forall [TV "a"] [] (ListOf (TVarR (TV "a")) `TArrow` TVarR (TV "a"))) ["a"] ["b"] (IRHead (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
 headInv :: FDecl
-headInv = FDecl (Forall [TV "a"] [] (TVarR (TV "a") `TArrow` ListOf (TVarR (TV "a")))) ["b"] ["a"] (IRCons (IRVar "b") (IRConst VAny)) (IRConst (VBool True)) False [("b", IRConst (VFloat 1))]
+-- The reconstructed tail is a list slot, so its hole must be the list-shaped
+-- any-value; a scalar one is ill-typed on both text backends. See 'anyOfType'.
+headInv = FDecl (Forall [TV "a"] [] (TVarR (TV "a") `TArrow` ListOf (TVarR (TV "a")))) ["b"] ["a"] (IRCons (IRVar "b") (IRConst (anyOfType (ListOf (TVarR (TV "a")))))) (IRConst (VBool True)) False [("b", IRConst (VFloat 1))]
 
 tailFwd :: FDecl
 tailFwd = FDecl (Forall [TV "a"] [] (ListOf (TVarR (TV "a")) `TArrow` ListOf (TVarR (TV "a")))) ["a"] ["b"] (IRTail (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
@@ -499,7 +525,7 @@ fPaisOfADTIsFunction adtName (constrName, rTypes) = (isFName, fPair)
     isFName = "is" ++ constrName 
     fPair = FPair fwdIs [invIs]
     fwdIs = FDecl (Forall [] [] (TADT adtName `TArrow` TBool)) ["a"] ["b"] (IRApply (IRVar isFName) (IRVar "a")) (IRConst $ VBool True) False [("a", IRConst $ VFloat 1)]
-    constrWithAnys = foldl (\e _ -> IRApply e (IRConst VAny)) (IRVar constrName) rTypes  -- One Any for each parameter
+    constrWithAnys = foldl (\e (_, fieldRT) -> IRApply e (IRConst (anyOfType fieldRT))) (IRVar constrName) rTypes  -- One position-correct Any for each parameter
     invIs = FDecl (Forall [] [] (TBool `TArrow` TADT adtName)) ["b"] ["a"] (IRIf (IRVar "b") constrWithAnys (IRConst $ VAnyExcept [constrWithAnys])) (IRConst $ VBool True) False [("b", IRConst $ VFloat 1)]
 
 fPairFromADTField :: RType -> ADTConstructorDecl -> (String, RType) -> (String, FPair)
@@ -521,4 +547,4 @@ isConstrGuard cName v =
 allAnyFieldsExcept :: ADTConstructorDecl -> String -> IRExpr -> IRExpr
 allAnyFieldsExcept (constrName, fields) toFill fillExpr = foldl IRApply (IRVar constrName) fieldValues
   where
-    fieldValues = map (\(fieldName, _) -> if fieldName == toFill then fillExpr else IRConst VAny) fields
+    fieldValues = map (\(fieldName, fieldRT) -> if fieldName == toFill then fillExpr else IRConst (anyOfType fieldRT)) fields

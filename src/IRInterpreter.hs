@@ -269,6 +269,12 @@ generate f neurals' registry adts' globalEnv env [] (IRUnaryOp OpIsAny a) = do
   aVal <- generate f neurals' registry adts' globalEnv env [] a
   case aVal of
     VAny -> return $ VBool True
+    -- The list-shaped hole is an any-value too. Julia's and Python's isAny
+    -- both accept it, as does the optimizer's constant fold ('forceAnyCheck'),
+    -- so the interpreter answering False here was the one dissent -- and one
+    -- that only stayed invisible because 'IRTail' happens to hand back a
+    -- scalar VAny for a ListCont _ AnyList.
+    VList AnyList -> return $ VBool True
     _ -> return $ VBool False
 generate f neurals' registry adts' globalEnv env [] (IRTheta a i) = do
   tt <- generate f neurals' registry adts' globalEnv env [] a
