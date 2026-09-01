@@ -357,14 +357,26 @@ testJuliaAll programCases = ioProperty $ do
         ExitSuccess -> True === True
         ExitFailure _ -> counterexample "Julia batch test failed. See Julia error message above." False
 
+-- The program goes to a temp file rather than @python3 -c@, matching
+-- 'testJuliaAll'. An emitted program is not argv-sized: several -O0 compiles
+-- exceed the kernel's per-argument limit and the spawn fails with "Argument
+-- list too long" -- a harness failure indistinguishable, in the report, from
+-- the program being wrong.
 testPython :: Either CompilerError IREnv -> [TestCase] -> Property
 testPython compiledE tc = ioProperty $ do
   case compiledE of
     Left err -> return $ counterexample err False
     Right compiled -> do
       let src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True compiled)
-      (_, _, _, handle) <- createProcess (proc "python3" ["-c", pythonTestCode src tc])
-      code <- waitForProcess handle
+      -- Run as a file, so sys.path[0] is the temp dir rather than the project;
+      -- pythonLib has to be put back on the path explicitly.
+      projectDir <- getCurrentDirectory
+      code <- withSystemTempFile "spll_test.py" $ \tmpPath tmpHandle -> do
+        hPutStr tmpHandle ("import sys\nsys.path.insert(0, " ++ show projectDir ++ ")\n"
+                           ++ pythonTestCode src tc)
+        hClose tmpHandle
+        (_, _, _, handle) <- createProcess (proc "python3" [tmpPath])
+        waitForProcess handle
       case code of
         ExitSuccess -> return $ True === True
         ExitFailure _ -> return $ counterexample ("Python test " ++ testCaseName (head tc) ++ " failed. See Python error message") False
@@ -1863,6 +1875,53 @@ loadEnd2EndCases keep = do
 unoptimizedRecompileExempt :: [String]
 unoptimizedRecompileExempt = ["recursiveAdtMultiCtor"]
 
+-- | Programs the -O0 *codegen* groups cannot run yet, for a defect that is not
+-- the optimizer changing an answer but the optimizer being required to produce
+-- a well-formed call at all.
+--
+-- 'toIRInference' compiles @Apply@ by let-binding each step of a curried
+-- application spine (@let c0 = f(sample) in let c1 = c0(5.0) in ...@), while
+-- the scalar backends emit a user function uncurried and flatten a *contiguous*
+-- spine into one @f(sample, 5.0)@ call site. At the default -O the let-inliner
+-- rejoins the spine before codegen sees it; at -O0 nothing does, so each half is
+-- emitted as its own call and Julia answers @MethodError: no method matching
+-- distr_prob(::Float64)@ -- an arity error, not a wrong number. It is the same
+-- "the optimizer is load-bearing" family as investigation
+-- 'any-placeholder-reconstruction-fragility' and is tracked separately by
+-- 'curried-call-spine-needs-optimizer-to-typecheck'.
+--
+-- These three are the whole corpus incidence: every other program's -O0
+-- Julia agrees with its .tst.
+unoptimizedCodegenExempt :: [String]
+unoptimizedCodegenExempt = ["call", "normalThroughFunction", "dice"]
+
+-- | The corpus subset the -O0 *codegen* groups run, on both text backends.
+--
+-- Deliberately a smoke test rather than the whole corpus. The full sweep was
+-- run once while investigation 'any-placeholder-reconstruction-fragility' was
+-- open and is worth recording: every -O0 program bar the three in
+-- 'unoptimizedCodegenExempt' agrees with its .tst. But it costs ~147s of Julia
+-- JIT (the -O0 sources are big and there are ~250 of them), against 89s for
+-- the entire rest of the suite, and it re-confirms one already-known class.
+--
+-- These are the programs whose inference reconstructs a container around an
+-- any-hole -- list, tuple, Either and ADT-field shapes -- which is where the
+-- placeholders live, so this is the coverage the fix actually needs. Widening
+-- it is fine; it is a runtime budget, not a correctness boundary.
+--
+-- Both backends run the same list, but for different failure modes. Julia is
+-- where an ill-typed placeholder is fatal: 'prepend' takes an InferenceList,
+-- so the scalar hole was a MethodError. Python is dynamically typed and
+-- quietly coerced the same value, so what it adds is the codegen-side class --
+-- a placeholder no 'pyVal' case can render aborts the compile outright.
+unoptimizedCodegenSmoke :: [String]
+unoptimizedCodegenSmoke =
+  [ "head", "tail", "fst", "sndCall"
+  , "listConsDeconstruction", "listLiteralDeconstruction"
+  , "either_prob_inner", "eitherIntegral", "letBoundEitherDestructure"
+  , "maybeFromLeftNested"
+  , "adt", "adtMixedFieldTypes", "adtMixedArityCtors", "adtFloatChainDeep" ]
+
 -- | Builds the standard End2End test groups from already-loaded/compiled
 -- cases. includeBackends controls whether the Normalization/Julia/Python
 -- groups are built (skipped for the slow subset, whose programs are
@@ -1875,13 +1934,15 @@ buildEnd2EndTree treeName includeBackends compiledCases = testGroup treeName $
         [ testProperty n (once $ conjoin (map (testInterpreter p c) tcs)) | (n, p, c, bs, tcs) <- compiledCases, Interpreter `elem` bs ]
     -- Re-run every interpreter case at -O0 to confirm the optimizer changes no answer.
     , testGroup "Interpreter Unoptimized"
-        [ testProperty n (once $ conjoin (map (testInterpreter p c) tcs)) | (n, p, _, bs, tcs) <- compiledCases, Interpreter `elem` bs
-        , n `notElem` unoptimizedRecompileExempt
-        , let c = compile defaultCompilerConfig{optimizerLevel = 0} p ]
+        [ testProperty n (once $ conjoin (map (testInterpreter p c) tcs)) | (n, p, c, bs, tcs) <- unoptCases, Interpreter `elem` bs ]
     ] ++
     ( if not includeBackends then [] else
       let queryTestCases = [(n, p, c, bs, filter (\x -> isProbTestCase x || isCumulTestCase x) tcs) | (n, p, c, bs, tcs) <- compiledCases]
           nonNeuralsQueries b = [(n, c, tcs) | (n, p, c, bs, tcs) <- queryTestCases, b `elem` bs, null (neurals p), not (null tcs)]
+          unoptQueries b = [(n, c, tcs') | (n, p, c, bs, tcs) <- unoptCases, b `elem` bs, null (neurals p)
+                           , n `elem` unoptimizedCodegenSmoke
+                           , n `notElem` unoptimizedCodegenExempt
+                           , let tcs' = filter (\x -> isProbTestCase x || isCumulTestCase x) tcs, not (null tcs')]
           neuralP = [(n, p, c) | (n, p, c, bs, _) <- compiledCases, Interpreter `elem` bs, not (null (neurals p))]
       in [ testGroup "Normalization"
              [ testProperty n (once $ discreteProbsNormalized p c) | (n, p, c) <- neuralP ]
@@ -1889,5 +1950,28 @@ buildEnd2EndTree treeName includeBackends compiledCases = testGroup treeName $
          , testProperty "Julia" (once $ testJuliaAll [(c, tcs) | (_, c, tcs) <- nonNeuralsQueries Julia])
          , testGroup "Python"
              [ testProperty n (once $ testPython c tcs) | (n, c, tcs) <- nonNeuralsQueries Python ]
+         -- The same corpus through the text backends at -O0. See
+         -- \'unoptCases\' for why this is not merely a duplicate of the
+         -- optimized groups.
+         , testProperty "Julia Unoptimized" (once $ testJuliaAll [(c, tcs) | (_, c, tcs) <- unoptQueries Julia])
+         , testGroup "Python Unoptimized"
+             [ testProperty n (once $ testPython c tcs) | (n, c, tcs) <- unoptQueries Python ]
          ]
     )
+  where
+    -- Every corpus program recompiled at -O0, shared by all the "Unoptimized"
+    -- groups so the extra compile is paid once.
+    --
+    -- The optimizer is meant to be a rewrite, not a correctness pass, and the
+    -- text backends are where that claim is testable: a value the optimizer
+    -- would have folded away survives to codegen at -O0 and is evaluated for
+    -- real. Investigation \'any-placeholder-reconstruction-fragility\' is the
+    -- worked example -- \'head\'/\'tail\'/\'fst\'/\'snd\' inference reconstructs a
+    -- container around a placeholder purely to tear it apart again, and while
+    -- the fold at oLvl >= 1 cancelled the round trip, at -O0 the placeholder
+    -- reached Julia and every such program died with a MethodError. The
+    -- interpreter never saw it (it is dynamically typed and forgiving), so the
+    -- pre-existing "Interpreter Unoptimized" group could not catch the class.
+    unoptCases = [ (n, p, compile defaultCompilerConfig{optimizerLevel = 0} p, bs, tcs)
+                 | (n, p, _, bs, tcs) <- compiledCases
+                 , n `notElem` unoptimizedRecompileExempt ]
