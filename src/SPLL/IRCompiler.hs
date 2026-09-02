@@ -1240,6 +1240,41 @@ toIRInferenceSave meta cumulative expr sample = do
   (res, letins) <- lift $ runWriterT $ toIRInference meta cumulative expr sample
   anySafeShared (semiringOf meta) sample letins res
 
+-- | Isolate a sub-inference's own let-in bindings into a fresh writer scope
+-- and re-embed them gated on @guards@ -- baking the guard into the bound
+-- value via 'shareResult' -- rather than running the action directly in the
+-- ambient scope and applying a guard to the returned 'PResult' only
+-- afterwards (task recursive-list-prob-missed-cse).
+--
+-- Every call site of 'toIRInferenceSave'/'toIRInference' below this point
+-- that follows its result with a 'guardP' or a 'zipResult'-style runtime
+-- selection has exactly this shape: the sub-inference is compiled first,
+-- unconditionally, and the guard is layered on top of the finished
+-- 'PResult'. That is fine as long as the sub-inference's own let-in
+-- bindings stay lexically embedded at their point of use -- which is what
+-- 'anySafeShared' does when it declines to share (the 'anySafe' fallback,
+-- gated by 'blockIterates'). But 'anySafeShared' may instead choose to
+-- SHARE a sub-inference's own bindings, e.g. when they contain a call
+-- that is itself expensive or self-recursive (the standard "coin-flip
+-- list" pattern, @main = if Uniform>p then [] else X:main@, whose tail
+-- field is compiled exactly through this path). Sharing binds the block
+-- via a plain 'setVariables' with no guard of its own, in the AMBIENT
+-- scope -- which, without this wrapper, is the guard-free scope the
+-- caller compiles in, ahead of any 'guardP'/'zipResult' that comes after.
+-- A deconstructing inverse applied on the wrong arm crashes
+-- (observe-partials-umbrella N1b's reasoning applies here identically),
+-- and a self-referential recursive call can fail to terminate.
+--
+-- Isolating the writer scope here and re-threading it through
+-- 'shareResult' with @guards@ fixes that: whether or not the inner call
+-- decides to share, the guard ends up baked inside the returned value
+-- itself, so any later, unguarded read of it (another 'setVariables', a
+-- CSE'd duplicate, an enclosing combinator's own eager bind) still only
+-- evaluates the protected computation when the guard holds.
+guardedSubInference :: CompilerMetadata -> [IRExpr] -> CompilerMonad PResult -> CompilerMonad PResult
+guardedSubInference meta guards action = do
+  (res0, binds) <- lift (runWriterT action)
+  shareResult (semiringOf meta) "guarded" guards binds res0
 
 -- | Dispatch to the appropriate param extractor based on PType.
 -- Returns (mu, sigma) for PNormal and (mu_log, sigma) for PLogNormal.
@@ -1954,8 +1989,14 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt} (InjF (Named name) params
     let FDecl {body=invBody, applicability=appT, deconstructing=decons} = inv
     -- Deconstructing inverses need the Any-safe inference variant.
     let probF = if decons then toIRInferenceSave else toIRInference
-    fieldRes <- probF meta cumulative p (inlineSample invBody)
-    return (fieldRes, inlineSample appT)
+    let appTExpr = inlineSample appT
+    -- A field can be a self-recursive probability call -- the tail of a
+    -- recursive list, e.g. 'main = if Uniform>p then [] else X:main'
+    -- compiles its tail field exactly here -- so this field's own
+    -- computation is isolated and re-guarded on its own applicability test
+    -- rather than left in the ambient scope (see 'guardedSubInference').
+    fieldRes <- guardedSubInference meta [appTExpr] (probF meta cumulative p (inlineSample invBody))
+    return (fieldRes, appTExpr)
   -- The fields are independent, so the whole construction is their product.
   let combined = foldl1 (prodP (semiringOf meta)) (map fst fieldResults)
   -- Guard the result by the conjunction of all field applicability tests (e.g.
@@ -1998,7 +2039,11 @@ toIRInference meta cumulative (Expr ti (InjF (Named name) params)) sample | isHi
           let deepCheck = mkDeepAnyCheck (TEither undefined undefined) sample
           in IRIf deepCheck (mkSafeInvExpr sample) renamedInvExpr
         _ -> renamedInvExpr
-  paramRes <- probF meta cumulative a finalInvExpr
+  -- Isolated and re-guarded on appTest (see 'guardedSubInference') so a
+  -- shared let-in block from inside 'a's own compilation -- e.g. a
+  -- self-recursive probability call -- cannot escape into the ambient
+  -- scope ahead of the applicability test 'guardP' applies below.
+  paramRes <- guardedSubInference meta [appTest] (probF meta cumulative a finalInvExpr)
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
   return (mapResult renVar (guardP (semiringOf meta) [appTest] (scaleCoV (semiringOf meta) cumulative invDerivExpr paramRes)))
 toIRInference meta False e@(Expr TypeInfo {tags=_, rType=rt} (InjF (Named _) params)) sample
@@ -2048,10 +2093,20 @@ toIRInference meta cumulative (Expr TypeInfo {tags=_} (InjF (Named name) params)
   setVariables [(v1, sample)]
   -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
   let probF = if decons then toIRInferenceSave else toIRInference
-  -- Get the probabilistic inference expression of the non-deterministic subexpression
-  nonAnyRes <- probF meta cumulative (params !! probIdx) nonAnyExpr
+  -- Get the probabilistic inference expression of the non-deterministic
+  -- subexpression. Both 'nonAnyRes' and 'exceptRes' are compiled here
+  -- unconditionally and only later selected between at runtime by
+  -- 'ifSample'/'zipResult' below -- so, mirroring that selection exactly,
+  -- each is isolated and re-guarded on the condition under which it is the
+  -- one actually read (see 'guardedSubInference'): a shared let-in block
+  -- from inside either's own compilation (e.g. a deconstructing inverse
+  -- crashing on the untaken arm, or a self-recursive call) must not run
+  -- when that arm is not selected.
+  let subResGuard = if isPosAny then IRVar v1 else notIR (IRVar v1)
+  let nonAnyGuard = notIR subResGuard
+  nonAnyRes <- guardedSubInference meta [nonAnyGuard] (probF meta cumulative (params !! probIdx) nonAnyExpr)
   anyRes    <- toIRInferenceSave meta cumulative (params !! probIdx) (IRConst $ VAny)
-  exceptRes <- probF meta cumulative (params !! probIdx) exceptExpr
+  exceptRes <- guardedSubInference meta [subResGuard] (probF meta cumulative (params !! probIdx) exceptExpr)
   let ifSample a na = if isPosAny then IRIf (IRVar v1) a na else IRIf (IRVar v1) na a
   -- The ANY arm is the marginal minus the excepted value's mass; its branch count
   -- is the excepted value's, not a sum (this is a select between the two arms).
@@ -2142,8 +2197,11 @@ toIRInference meta cumulative (Expr TypeInfo {tags=_, rType=rt} (InjF (Named nam
   setVariables [(v1, sample)]
   -- Use the save probabilistic inference in case the InjF decustructs types (for Any checks)
   let probF = if decons then toIRInferenceSave else toIRInference
-  -- Get the probabilistic inference expression of the non-deterministic subexpression
-  paramRes <- probF meta cumulative (params !! probIdx) invExpr
+  -- Get the probabilistic inference expression of the non-deterministic
+  -- subexpression, isolated and re-guarded on appTest (see
+  -- 'guardedSubInference') so a shared let-in block cannot escape the
+  -- applicability test 'guardP' applies below.
+  paramRes <- guardedSubInference meta [appTest] (probF meta cumulative (params !! probIdx) invExpr)
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula if dim > 0
   return (guardP (semiringOf meta) [appTest] (scaleCoV (semiringOf meta) cumulative invDeriv paramRes))
 -- Enumerate-both discrete path for forward-only binary InjFs (and/or). No point

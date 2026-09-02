@@ -29,6 +29,7 @@ import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts)
 import Data.Foldable (toList)
 import Data.List (isInfixOf, intercalate)
 import Control.Exception (try, evaluate, ErrorCall(..))
+import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure, (@?=))
 import IRInterpreter (generateDet)
@@ -1333,6 +1334,76 @@ test_branchCountingDoesNotMultiplyIR = testCase "branchCountingDoesNotMultiplyIR
                 ++ show plain ++ " -> " ++ show counted ++ " (" ++ show ratio ++ "x)")
       (counted < 2 * plain)
 
+-- | Task recursive-list-prob-missed-cse: probability-mode compilation of a
+-- self-recursive list (@main = if Uniform > p then [] else X : main@, the
+-- README's own "Recursive lists" example) must cost work LINEAR in the query
+-- list's length, not exponential.
+--
+-- Unlike 'test_branchCountingDoesNotMultiplyIR' just above -- whose own
+-- comment notes that SPLL-level recursion compiles to a single shared
+-- 'IRApply' call site, so it deliberately builds its nested-nonrecursive
+-- 'Expr' by hand to exercise inline duplication -- the bug this pins lived
+-- one level down: the recursive call site itself was never duplicated, but
+-- the field-constructor equation for the list's Cons cell read the tail
+-- field's (prob, dim, branch count, impossibility) result several times
+-- (2-3x observed), each read re-triggering 'anySafeShared's decision to
+-- SHARE that read afresh, without any guard of its own protecting it from
+-- the caller's later applicability check. That multiplies once per list
+-- element, giving the ~11-20x-per-element blowup the task doc measured
+-- (Python: 0.0004s / 0.0071s / 0.1346s / 2.7250s at lengths 1-4), and
+-- reproduces identically against the interpreter (measured while writing
+-- this test: a clean ~3x-per-element blowup, 0.010s at length 3 to 23.4s at
+-- length 10, on this exact program).
+--
+-- This is timed rather than sized. 'test_branchCountingDoesNotMultiplyIR'
+-- and the plan-enum polynomial tests above pin their bugs against
+-- @length (show ir)@ because those bugs unroll a bounded structure at
+-- compile time, so a regression shows up as bigger IR. This bug is
+-- different: the recursive function is compiled exactly ONCE regardless of
+-- query length (genuine self-recursion, not compile-time unrolling), and
+-- 'branchCount' -- the other structural instrument this suite uses -- is
+-- *also* the wrong tool here (tried first; verified empirically): it counts
+-- logical leaf resolutions, which stayed perfectly linear (2n+1) even on the
+-- unpatched, exponentially-slow code, because every duplicate copy of the
+-- tail field computes the *same* final count. The duplication was pure
+-- wasted re-evaluation at runtime, invisible to any static count -- so wall
+-- time is the only signal that actually distinguishes the two.
+--
+-- A linear implementation answers the length-18 query in low milliseconds;
+-- the measured ~3x/element interpreter blowup above would need roughly
+-- 3^8 =~ 6500x longer than length-10's 23s to reach length-18, so the
+-- generous budget below still fails promptly on a regression.
+test_recursiveListMissedCSE :: TestTree
+test_recursiveListMissedCSE = testCase "recursiveListMissedCSE" $ do
+  let src = unlines
+        [ "data Sym = A"
+        , "rec = if Uniform < 0.5 then [] else A : rec"
+        , "main = rec"
+        ]
+  prog <- case tryParseProgram "recursiveListMissedCSE" src of
+    Left err -> assertFailure ("parse error: " ++ show err)
+    Right p  -> return p
+  let compiled = either (\e -> error ("compile error: " ++ show e)) id (compile defaultCompilerConfig prog)
+  let n = 18 :: Int
+  let queryOfLength = VList (iterate (ListCont (VADT "A" [])) EmptyList !! n)
+  let expected = 0.5 ^^ (n + 1) -- p(stop) * p(not stop)^n
+  -- Force the (prob, dim) fields inside the timeout so it measures the
+  -- recursive evaluation rather than returning instantly with an
+  -- unevaluated thunk.
+  result <- timeout (5 * 1000000) (evaluate (probDimOf' (runProbC prog compiled [] queryOfLength)))
+  case result of
+    Nothing -> assertFailure
+      ("probability query on a " ++ show n ++ "-element recursive-list sample did not \
+       \finish within 5s -- this is exactly the exponential missed-CSE blowup task \
+       \recursive-list-prob-missed-cse fixed (a correct, linear implementation answers \
+       \this in low milliseconds)")
+    Just (p, _) ->
+      assertBool ("probability " ++ show p ++ " does not match the expected " ++ show expected)
+        (abs (p - expected) < 1e-9)
+  where
+    probDimOf' (Left e)  = error ("prob query error: " ++ show e)
+    probDimOf' (Right v) = let (p, d) = probDimOf v in p `seq` d `seq` (p, d)
+
 -- | Milestone-4 value-grouped DP acceptance: a counting fold compared against
 -- a deterministic bound compiles to polynomially-sized IR. At milestone 2 the
 -- fold enumerated 2^depth (value, world) pairs, so the IR grew exponentially;
@@ -2575,6 +2646,7 @@ internalsTests = testGroup "Internals"
   , enumContinuousRefusalTests
   , test_planEnumThreadedTopKAndBC
   , test_branchCountingDoesNotMultiplyIR
+  , test_recursiveListMissedCSE
   , test_planEnumBoolCtorPolynomial
   , planOverCouplingRefusalTests
   , test_tstBackendsHeader

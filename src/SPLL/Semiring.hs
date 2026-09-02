@@ -560,7 +560,8 @@ anySafeShared sr sample binds (PResult p d bc imp)
                   | (i, (e, dflt)) <- zip [0 :: Int ..] fields, reads' e ]
 
 -- | Does this block contain a loop -- a form whose body is evaluated once per
--- element of a domain?
+-- element of a domain -- or a function call, whose cost is opaque to the
+-- compiler at this point and may itself be recursive?
 --
 -- This is the gate on sharing, and it is a statement about /run time/, not
 -- size: what makes a second copy of the block cost anything is that it is a
@@ -576,6 +577,33 @@ anySafeShared sr sample binds (PResult p d bc imp)
 -- four literals, so it passes any size gate while having nothing worth
 -- sharing. Whether the block /iterates/ survives folding, and is exactly the
 -- property that made the enumerated sums this exists for expensive.
+--
+-- 'IRApply' is included for the same reason (task
+-- recursive-list-prob-missed-cse): a self-recursive probability function
+-- (the standard "coin-flip list" pattern, @main = if Uniform > p then []
+-- else X : main@) compiles its tail field through exactly this path, and the
+-- 'IRApply' calling @main_prob@ neither folds away nor is a syntactic loop --
+-- but naively duplicating it per reading field (as 'anySafe' does when this
+-- gate declines) re-invokes the recursive call once per field at every
+-- nesting level, which is exponential in recursion depth. CSE cannot recover
+-- this afterwards: each duplicate lands inside a differently-shaped guard
+-- (a distinct @isAny@/@isclose@ context per field), so the copies never sit
+-- in CSE's unconditional skeleton together. Unlike the loop constructors
+-- above, an 'IRApply' is not proof the call is expensive -- it may be a cheap
+-- local lambda or a non-recursive helper -- but its cost is unknown at this
+-- point in the pipeline, so treating it as iterating is the conservative
+-- choice performance-wise: a spurious extra tuple projection over one
+-- avoidable re-evaluation, unlike the reverse. It is NOT automatically safe
+-- on its own, though: sharing binds the block via a plain 'setVariables'
+-- with no guard of its own, in whatever scope the call happens to run in --
+-- fine when that scope is unconditional, wrong when a caller meant to guard
+-- the sub-inference first and only apply the guard to the returned
+-- 'PResult' afterwards (a deconstructing inverse's domain test, an InjF's
+-- applicability test). 'IRCompiler.guardedSubInference' is the fix for that
+-- half: every call site below 'toIRInferenceSave' that follows it with such
+-- a guard now isolates the sub-inference's own bindings and re-threads them
+-- through 'shareResult' with that same guard, so the two changes are a
+-- matched pair.
 blockIterates :: IRExpr -> Bool
 blockIterates e = iterates e || any blockIterates (getIRSubExprs e)
   where
@@ -586,6 +614,7 @@ blockIterates e = iterates e || any blockIterates (getIRSubExprs e)
       IRMap{}                     -> True
       IRBuiltin BMap _            -> True
       IRBuiltin (BReduce _ _) _   -> True
+      IRApply{}                   -> True
       _                           -> False
 
 -- | Pack values into one right-nested tuple; a single value packs to itself.
