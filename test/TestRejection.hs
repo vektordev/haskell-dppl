@@ -44,6 +44,7 @@ rejectionTests = testGroup "Rejection"
   , anyCtorTestTests
   , adtCumulativeTests
   , generateBackedTests
+  , generateBackedReadNNSymbolTests
   , generateBackedProjectionTests
   , vAnyExceptCodegenTests
   ]
@@ -454,6 +455,68 @@ generateBackedTests = testGroup "GenerateBackedInference"
         res <- forced (runProb defaultCompilerConfig prog [] (VADT "A" []))
         case res of
           Left e  -> assertFailure ("a deterministic enumerated branch was refused: " ++ show e)
+          Right _ -> return ()
+  ]
+
+-- ----------------------------------------------------------------------------
+-- A random 'Symbol' argument to 'ReadNN': the two 'toIRGenerate' calls in the
+-- 'ReadNN' inference equation and in 'toIRNormalParams' have no guard that
+-- their argument is 'Deterministic', so 'readMNist(if Uniform < 0.5 then s
+-- else t)' used to compile a probability function that drew the coin *inside*
+-- the compiled body -- a different network input, and hence a different
+-- number, on every call with the same query (task
+-- readnn-random-symbol-generate-backed). This is a special case of the same
+-- generate-backed-inference defect as 'GenerateBackedInference' above, so it
+-- is caught by the same central guard (task
+-- central-generate-backed-prob-body-guard, 'requireNoGenerateBacked') that
+-- landed after this task was filed -- Phase 1b of the task's own workflow: no
+-- code change needed, this group is the regression test that pins it.
+-- ----------------------------------------------------------------------------
+
+-- The symbol argument to readMNist is itself the result of a coin flip
+-- between the two program parameters.
+readNNRandomSymbolSrc :: String
+readNNRandomSymbolSrc = unlines
+  [ "neural readMNist :: (Symbol -> Int) of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"
+  , "main s t = readMNist(if Uniform < 0.5 then s else t) ++ 1"
+  ]
+
+-- Not affected: the symbol argument is a bound parameter with no random
+-- choice above it, so the guard must not fire here.
+readNNDeterministicSymbolSrc :: String
+readNNDeterministicSymbolSrc = unlines
+  [ "neural readMNist :: (Symbol -> Int) of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"
+  , "main s = readMNist(s) ++ 1"
+  ]
+
+-- These exercise 'compile' directly rather than 'runProb'/'runInteg':  the
+-- refusal fires while assembling the 'IREnv' (which bundles the prob and
+-- integ bodies together), before any query value or MockNN-formatted
+-- argument would be needed, and using 'compile' keeps that pinned regardless
+-- of MockNN's own input-shape requirements.
+generateBackedReadNNSymbolTests :: TestTree
+generateBackedReadNNSymbolTests = testGroup "GenerateBackedReadNNSymbol"
+  [ testCase "a randomly-chosen Symbol argument to ReadNN is refused" $
+      withParsed readNNRandomSymbolSrc $ \prog -> do
+        res <- forced (compile defaultCompilerConfig prog)
+        case res of
+          Left e  -> assertBool ("expected the central generate-backed refusal, got: " ++ show e)
+                                ("central-generate-backed-prob-body-guard" `isInfixOf` show e)
+          Right _ -> assertFailure
+            "a probability/integrate function that samples which network input to read was accepted"
+  , testCase "the refusal names the offending functions and their randomness source" $
+      withParsed readNNRandomSymbolSrc $ \prog -> do
+        res <- forced (compile defaultCompilerConfig prog)
+        assertBool "the refusal does not name main.prob, main.integ and IRUniform, so it does not say what is wrong"
+                   (either (\e -> "main.prob" `isInfixOf` show e
+                               && "main.integ" `isInfixOf` show e
+                               && "IRUniform" `isInfixOf` show e)
+                           (const False) res)
+  , testCase "a deterministic Symbol argument to ReadNN still compiles" $
+      withParsed readNNDeterministicSymbolSrc $ \prog -> do
+        res <- forced (compile defaultCompilerConfig prog)
+        case res of
+          Left e  -> assertFailure ("a bound, non-random Symbol argument was refused: " ++ show e)
           Right _ -> return ()
   ]
 
