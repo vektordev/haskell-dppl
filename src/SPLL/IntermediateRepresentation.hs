@@ -36,6 +36,8 @@ module SPLL.IntermediateRepresentation (
 , resultImpossible
 , adtIdentifierRenaming
 , renameADTIdentifiers
+, firstAnyExceptIR
+, anyExceptCodegenRefusal
 ) where
 
 import SPLL.Lang.Types
@@ -44,6 +46,7 @@ import SPLL.Typing.PType()
 import SPLL.Typing.Typing()
 import Data.Data()
 import Data.List (isSuffixOf, sort, group)
+import Data.Maybe (mapMaybe, listToMaybe)
 import qualified Data.Set as Set
 
 -- | The probability-mode result layout, as produced by 'SPLL.IRCompiler.packResult':
@@ -493,6 +496,53 @@ lookupIREnv name (IREnv env _ _) =
     [] -> error ("function " ++ show name ++ "not found in environment")
     [a] -> a
     lst -> head lst
+
+-- | The first unconsumed @VAnyExcept@ placeholder reachable from any compiled
+-- function body in an 'IREnv', if any. @VAnyExcept@ ("any value other than
+-- this one") is the @False@-branch witness an @==@ inverse
+-- ('PredefinedFunctions.eqInv1'/'eqInv2') or an ADT constructor-test inverse
+-- ('PredefinedFunctions.invIs') materialises during inference; it is a
+-- symbolic set, not a runtime value. The optimizer normally consumes it before
+-- codegen, but where it survives, neither scalar text backend has anywhere to
+-- put it: unlike @VAny@/@AnyList@, which both render as real sentinel values,
+-- a set has no runtime representation to lower to, so there is no correct
+-- string to emit -- only a refusal (task
+-- @vanyexcept-unrenderable-in-text-backends@).
+firstAnyExceptIR :: IREnv -> Maybe IRExpr
+firstAnyExceptIR (IREnv groups _ _) =
+  listToMaybe (filter isAnyExceptConst (concatMap allSubExprsOf funBodies))
+  where
+    funBodies = concatMap groupBodies groups
+    groupBodies IRFunGroup{genFun=g, probFun=p, integFun=i, encodeFun=e, normalFun=n} =
+      map fst (mapMaybe id [g, p, i, e, n])
+    allSubExprsOf ir = ir : concatMap allSubExprsOf (getIRSubExprs ir)
+    isAnyExceptConst (IRConst (VAnyExcept _)) = True
+    isAnyExceptConst _ = False
+
+-- | Refuse to compile to a scalar text backend (Python or Julia) if a
+-- @VAnyExcept@ placeholder survived to codegen, naming the construct rather
+-- than letting 'SPLL.CodeGenPyTorch.pyVal'/'SPLL.CodeGenJulia.juliaVal' fall
+-- through to their generic "unknown value" panic -- which named an internal
+-- IR variable and a source line, not the actual defect. The interpreter is
+-- unaffected: it answers these programs directly (its 'VAnyExcept' handling
+-- predates this refusal), and that answer is the reference this diagnostic
+-- points readers at. The batched backend needs no equivalent call: it already
+-- refuses every marginal-query construct, 'VAnyExcept' included, through its
+-- own @emittable@/@reason@ guard.
+anyExceptCodegenRefusal :: String -> IREnv -> Either CompilerError ()
+anyExceptCodegenRefusal lang env = case firstAnyExceptIR env of
+  Nothing -> Right ()
+  Just ir -> Left $ unlines
+    [ lang ++ " codegen cannot render a VAnyExcept placeholder: " ++ show ir
+    , "VAnyExcept (\"any value other than this one\") is the False-branch witness"
+    , "an == inverse or ADT constructor-test inverse materialises during"
+    , "inference. It is a symbolic set, not a runtime value -- unlike"
+    , "VAny/AnyList, which both render as real sentinels in the " ++ lang
+    , "runtime library, a set has no runtime representation to lower to, so"
+    , "there is no correct output to emit. NeST refuses at compile time rather"
+    , "than crash inside codegen."
+    , "The interpreter answers this program directly; this backend does not."
+    , "(task vanyexcept-unrenderable-in-text-backends)" ]
 
 getIRSubExprs :: IRExpr -> [IRExpr]
 getIRSubExprs (IRIf a b c) = [a, b, c]

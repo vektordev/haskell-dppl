@@ -89,6 +89,18 @@ juliaVal VUnit = "nothing"
 juliaVal (VADT cName params) = juliaCtorRef cName ++ "(" ++ intercalate ", " (map juliaVal params) ++ ")"
 juliaVal VAny = "\"ANY\""
 juliaVal (VError e) = "throw(\"" ++ e ++ "\")"
+-- See 'SPLL.CodeGenPyTorch.pyVal's matching case: 'VAnyExcept' has no runtime
+-- representation in the Julia runtime library either, so this is a backstop
+-- only -- the intended refusal point is
+-- 'SPLL.IntermediateRepresentation.anyExceptCodegenRefusal', called from
+-- 'Main.codeGenToLang' before 'generateFunctions' is ever reached (task
+-- vanyexcept-unrenderable-in-text-backends).
+juliaVal v@(VAnyExcept _) = error (unlines
+  [ "juliaVal: unconsumed VAnyExcept placeholder reached Julia codegen: " ++ show v
+  , "This should have been refused earlier by"
+  , "SPLL.IntermediateRepresentation.anyExceptCodegenRefusal; a caller reached"
+  , "generateFunctions without that guard."
+  , "(task vanyexcept-unrenderable-in-text-backends)" ])
 juliaVal x = error ("unknown juliaVal for " ++ show x)
 juliaMultiVal :: MultiValue -> String
 juliaMultiVal MultiContinuous = "(\"C\", nothing)"
