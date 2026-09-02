@@ -629,6 +629,16 @@ structural env e = case e of
   IROp OpOr  a b    -> structural env a && structural env b
   IRUnaryOp OpNot a -> structural env a
   IRLetIn n v b     -> structural (bindS env n v) b
+  -- A conditional whose guard and both arms are themselves structural is a
+  -- structural value: CSE routinely names a structural condition through
+  -- exactly this idiom (`let cse_0 = (if isLeft(sample) then True else
+  -- False) in ...`), and without this case 'bindS' judged the *value*
+  -- non-structural (despite the binding's own condition, 'IRIsLeft', being
+  -- recognised) and dropped `cse_0` from 'sBound' -- so every later use of
+  -- `cse_0` as a guard fell through to the 'batchedExpr' torch.where catch-all,
+  -- which evaluates both arms eagerly and reached an unguarded `fromLeft` on a
+  -- `Right` bucket (task batched-cse-lifts-fromleft-above-its-guard).
+  IRIf c t f        -> structural env c && structural env t && structural env f
   -- An ADT constructor test is the same fact as the Either tag test above:
   -- which constructor a value carries is part of its bucket signature, so the
   -- emitted @is\<Ctor\>@ answers a plain Python bool ('generateADTClassesBatched')

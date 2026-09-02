@@ -1843,6 +1843,35 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                                    ++ "instead of stubbing it: " ++ msg)
         Right ls -> assertBool ("stub does not raise NotImplementedError: " ++ unlines ls)
                       (any ("NotImplementedError" `isInfixOf`) ls)
+  -- Task batched-cse-lifts-fromleft-above-its-guard: CSE routinely names a
+  -- structural condition through the `let cse_0 = (if isLeft(sample) then
+  -- True else False) in ...` idiom. Before this fix `structural` had no case
+  -- for 'IRIf', so the *value* bound to `cse_0` was judged non-structural
+  -- (even though its own condition, 'IRIsLeft', is recognised) and `bindS`
+  -- dropped `cse_0` from the structural environment. Every later use of
+  -- `cse_0` as a guard then fell through to the eager torch.where emission,
+  -- reaching an arm-legal `fromLeft` accessor on a `Right` sample.
+  , testCase "a let-bound alias of a structural if-then-else is structural" $ do
+      let env = adtEnv []
+          isLeftBool = IRIf (IRIsLeft (IRVar "sample"))
+                             (IRConst (VBool True)) (IRConst (VBool False))
+      assertBool "the isLeft(sample) if-then-else idiom is not itself structural"
+        (structural env isLeftBool)
+      assertBool "a name bound to it is not classified as structural"
+        (structural env (IRLetIn "cse_0" isLeftBool (IRVar "cse_0")))
+      assertBool "a per-element if-then-else must not be structural"
+        (not (structural env (IRIf (IROp OpGreaterThan (IRVar "x") (IRConst (VFloat 0.0)))
+                                    (IRConst (VBool True)) (IRConst (VBool False)))))
+  , testCase "an arm-legal accessor guarded by a let-bound structural alias stays lazy" $
+      -- `fromLeft(sample)` is legal only under `cse_0`; emitting the guard as
+      -- torch.where would evaluate it unconditionally, on every bucket.
+      case generateFunctionsBatched False (structuralAliasEnv (IRVar "sample")) of
+        Left msg -> assertFailure ("batched mode refused a structural-alias-guarded accessor: " ++ msg)
+        Right ls -> do
+          assertBool ("structural alias not emitted as an if statement: " ++ unlines ls)
+            (any ("if cse_0:" `isInfixOf`) ls)
+          assertBool ("accessor still evaluated eagerly under torch.where: " ++ unlines ls)
+            (not (any (\l -> "torch.where" `isInfixOf` l && "fromLeft(sample)" `isInfixOf` l) ls))
   ]
   where
     -- A one-group environment declaring a mixed-arity ADT, whose prob method
@@ -1875,6 +1904,20 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                , constructors = [("Nada", []), ("Just1", [("v", TFloat)])]
                , adtDepth = Nothing }]
       []
+    -- No ADT needed: an Either-typed prob body whose accessor is legal only
+    -- under a *let-bound alias* of the structural isLeft(sample) test -- the
+    -- exact shape 'IROptimizer's CSE produces (`let cse_0 = (if isLeft(sample)
+    -- then True else False) in ...`).
+    structuralAliasEnv q = IREnv
+      [IRFunGroup { groupName = "main"
+                  , probFun = Just (IRLambda "sample"
+                      (IRLetIn "cse_0"
+                          (IRIf (IRIsLeft q) (IRConst (VBool True)) (IRConst (VBool False)))
+                          (IRIf (IRVar "cse_0") (IRFromLeft q) (IRConst (VFloat 0.0)))), "")
+                  , genFun = Nothing, integFun = Nothing
+                  , encodeFun = Nothing, normalFun = Nothing, groupDoc = ""
+                  , sampleDomain = Nothing }]
+      [] []
     -- A one-group environment whose only method is generate, with the given
     -- body (either self-referential or not).
     recGenEnv body = IREnv
