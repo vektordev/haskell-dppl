@@ -104,6 +104,20 @@ pyVal (VThetaTree tt) = pyValTree tt
 pyVal (VADT cName params) = pyCtorRef cName ++ "(" ++ intercalate ", " (map pyVal params) ++ ")"
 pyVal (VAny) = "'ANY'"
 pyVal (VError e) = "throw(\"" ++ e ++ "\")"
+-- 'VAnyExcept' has no runtime representation in the Python runtime library
+-- (unlike VAny/AnyList above, which both render as real sentinels), so there
+-- is no string to emit here -- this is a backstop only. The intended refusal
+-- point is 'SPLL.IntermediateRepresentation.anyExceptCodegenRefusal', called
+-- from 'Main.codeGenToLang' before 'generateFunctions' is ever reached; a
+-- direct caller of 'generateFunctions' that skips that check lands here
+-- instead of the generic "unknown pyVal" panic below (task
+-- vanyexcept-unrenderable-in-text-backends).
+pyVal v@(VAnyExcept _) = error (unlines
+  [ "pyVal: unconsumed VAnyExcept placeholder reached Python codegen: " ++ show v
+  , "This should have been refused earlier by"
+  , "SPLL.IntermediateRepresentation.anyExceptCodegenRefusal; a caller reached"
+  , "generateFunctions without that guard."
+  , "(task vanyexcept-unrenderable-in-text-backends)" ])
 pyVal x = error ("unknown pyVal for " ++ show x)
 
 pyMultiVal :: MultiValue -> String

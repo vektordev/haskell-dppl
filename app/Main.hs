@@ -257,8 +257,12 @@ codeGenToLang lang truncOut conf prog = do
   case lang of
     Python
       | batched conf -> intercalate "\n" <$> generateFunctionsBatched (not truncOut) compiled
-      | otherwise    -> Right $ intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions (not truncOut) compiled)
-    Julia -> Right $ intercalate "\n" (SPLL.CodeGenJulia.generateFunctions compiled)
+      | otherwise    -> do
+          anyExceptCodegenRefusal "Python" compiled
+          Right $ intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions (not truncOut) compiled)
+    Julia -> do
+      anyExceptCodegenRefusal "Julia" compiled
+      Right $ intercalate "\n" (SPLL.CodeGenJulia.generateFunctions compiled)
 
 writeOutputFile :: String -> String -> IO()
 writeOutputFile = writeFile

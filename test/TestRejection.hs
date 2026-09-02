@@ -20,7 +20,7 @@ import SPLL.Typing.RType (RType(..))
 import SPLL.Examples
 import SPLL.Validator (validateProgram)
 import SPLL.Prelude (compile, runProb, runInteg, uniform, constB, constF, (#+#), (#<#))
-import SPLL.IntermediateRepresentation (defaultCompilerConfig, checkQueryType, noIntegrate)
+import SPLL.IntermediateRepresentation (defaultCompilerConfig, checkQueryType, noIntegrate, firstAnyExceptIR, anyExceptCodegenRefusal)
 import SPLL.Typing.Infer (addTypeInfo)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, adtCdfMessage)
@@ -44,6 +44,7 @@ rejectionTests = testGroup "Rejection"
   , anyCtorTestTests
   , adtCumulativeTests
   , generateBackedTests
+  , vAnyExceptCodegenTests
   ]
 
 -- ----------------------------------------------------------------------------
@@ -453,4 +454,59 @@ generateBackedTests = testGroup "GenerateBackedInference"
         case res of
           Left e  -> assertFailure ("a deterministic enumerated branch was refused: " ++ show e)
           Right _ -> return ()
+  ]
+
+-- ----------------------------------------------------------------------------
+-- VAnyExcept codegen refusal. 'eqInv1'/'eqInv2' (the False-branch witness of an
+-- == inverse) and the ADT is<Ctor> inverse materialise 'VAnyExcept' -- "any
+-- value other than this one" -- a symbolic set with no runtime representation.
+-- The optimizer normally consumes it before codegen; where it survives, the
+-- two scalar text backends used to crash deep inside pyVal/juliaVal with an
+-- internal IR variable name and a source line ("unknown pyVal for VAnyExcept
+-- [...]"), while the interpreter answered the same program correctly. Both
+-- scalar backends now refuse at compile time with a diagnostic naming the
+-- construct instead (task vanyexcept-unrenderable-in-text-backends).
+-- ----------------------------------------------------------------------------
+
+-- Three lines, no neural network: an == observation on a constructor field
+-- (reached through head/col) inverts to VAnyExcept on its False branch.
+vAnyExceptProgSrc :: String
+vAnyExceptProgSrc = unlines
+  [ "data Color = Red | Green"
+  , "data Obj = Obj col :: Color"
+  , "main = let scene = [if Uniform < 0.5 then Obj Red else Obj Green] in col (head scene) == Red"
+  ]
+
+vAnyExceptCodegenTests :: TestTree
+vAnyExceptCodegenTests = testGroup "VAnyExceptCodegenRefusal"
+  [ testCase "the interpreter answers the reproducer directly (the reference this refusal is measured against)" $
+      withParsed vAnyExceptProgSrc $ \prog -> do
+        res <- forced (runProb defaultCompilerConfig prog [] (VBool True))
+        case res of
+          Left e  -> assertFailure ("interpreter should answer this program, got: " ++ show e)
+          Right _ -> return ()
+  , testCase "the compiled IR does carry a VAnyExcept placeholder (guards against a stale reproducer)" $
+      withParsed vAnyExceptProgSrc $ \prog ->
+        case compile defaultCompilerConfig prog of
+          Left err -> assertFailure ("compile failed: " ++ show err)
+          Right env -> case firstAnyExceptIR env of
+            Just _  -> return ()
+            Nothing -> assertFailure
+              "expected a VAnyExcept placeholder in the compiled IR; the reproducer may have stopped reproducing"
+  , testCase "Python codegen refuses with a diagnostic naming VAnyExcept, not a pyVal panic" $
+      withParsed vAnyExceptProgSrc $ \prog ->
+        case compile defaultCompilerConfig prog of
+          Left err -> assertFailure ("compile failed: " ++ show err)
+          Right env -> case anyExceptCodegenRefusal "Python" env of
+            Left msg -> assertBool ("diagnostic does not name VAnyExcept: " ++ msg)
+                                    ("VAnyExcept" `isInfixOf` msg)
+            Right () -> assertFailure "expected a VAnyExcept refusal, none was raised"
+  , testCase "Julia codegen refuses with a diagnostic naming VAnyExcept, not a juliaVal panic" $
+      withParsed vAnyExceptProgSrc $ \prog ->
+        case compile defaultCompilerConfig prog of
+          Left err -> assertFailure ("compile failed: " ++ show err)
+          Right env -> case anyExceptCodegenRefusal "Julia" env of
+            Left msg -> assertBool ("diagnostic does not name VAnyExcept: " ++ msg)
+                                    ("VAnyExcept" `isInfixOf` msg)
+            Right () -> assertFailure "expected a VAnyExcept refusal, none was raised"
   ]
