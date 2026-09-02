@@ -37,7 +37,6 @@ import SPLL.Typing.AlgebraicDataTypes
 import SPLL.Semiring
 import Utils
 import Control.Monad (foldM, forM, when, zipWithM)
-import Data.Foldable (foldrM)
 import Control.Monad.State.Strict (StateT, evalStateT, get, gets, put, modify)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -766,42 +765,51 @@ convolveTables meta dom buckets = do
   return (zip dom cells)
   where
     sr = semiringOf meta
+    -- One cell per domain value: a 'BMap' over that value's own bucket of the
+    -- operand grid (task batched-enumsum-materialization), reduced by one
+    -- 'BReduce'. This replaces the old hand-rolled fold -- a right-associated
+    -- chain of 'srPlus' nodes, log-space additionally let-binding a running
+    -- accumulator per term ('logSumExpIR' reads both its operands three
+    -- times, so an unbound accumulator grew the cell 3^n in the term count)
+    -- -- with two tensor builtins whose body text is written once and
+    -- reused per pair, instead of duplicated per pair. 'BReduce's own
+    -- interpreter/codegen lowerings already fold right-to-left over the
+    -- tensor's element order (matching 'IREnumSum's), so listing the bucket
+    -- in grid order (as it already comes) keeps the tabulated cell
+    -- bit-identical to the re-descending loop it replaces, the same claim the
+    -- old fold made.
+    --
+    -- Buckets of size 0 or 1 skip the tensor machinery entirely: there is
+    -- nothing to reduce (0) or share (1), and building one would only add
+    -- nodes.
     cellFor v = do
-      cellExpr <- sumTerms [term lc rc | (lc, rc) <- Map.findWithDefault [] (valueKey v) buckets]
+      let bucket = Map.findWithDefault [] (valueKey v) buckets
+      cellExpr <- case bucket of
+        []         -> return (srZero sr)
+        [(lc, rc)] -> return (term lc rc)
+        _          -> do
+          pairVar <- mkVariable "mat_pair"
+          let gridTensor = IRBuiltin (BTensor [EFixed (length bucket)])
+                             [IRTCons lc rc | (lc, rc) <- bucket]
+              mapBody  = term (IRTFst (IRVar pairVar)) (IRTSnd (IRVar pairVar))
+              mapped   = IRBuiltin BMap [IRLambda pairVar mapBody, gridTensor]
+              reduceOp = if srLogSpace sr then ROpLogSumExp else ROpAdd
+          return (IRBuiltin (BReduce reduceOp 0) [mapped])
       cellName <- mkVariable "mat_cell"
       setVariables [(cellName, cellExpr)]
       return (IRVar cellName)
     -- The topK guard, in the same shape and on the same accProb the in-loop
     -- cutoff uses (see the TOPK note above). No membership test is needed: the
     -- grid only holds pairs that are in both operands' domains by construction,
-    -- where today's loop has to test the inverted value at runtime.
+    -- where today's loop has to test the inverted value at runtime. This is
+    -- the map's per-element body when a bucket goes through 'BMap'/'BReduce'
+    -- above, so its 'IRIf' -- the "masked" half of "masked reduce" -- is
+    -- written once per cell rather than once per pair.
     term lc rc = case topKThreshold (compilerConfig meta) of
       Nothing -> srTimes sr lc rc
       Just _  -> IRIf (IROp OpGreaterThan (srTimes sr (accProb meta) lc) (IRVar "TOP_K_CUTOFF"))
                       (srTimes sr lc rc)
                       (srZero sr)
-    -- Right fold from the semiring zero, over the terms in the left operand's
-    -- domain order: exactly how the 'IREnumSum' this replaces is reduced in
-    -- the interpreter, so the tabulated cell is bit-identical to the value the
-    -- re-descending loop produced rather than merely equal within tolerance.
-    -- (Dropping the pairs that contribute nothing does not perturb that: the
-    -- terms they would contribute are the semiring zero, and both @x + 0.0@
-    -- and @logSumExp x (-inf)@ are exactly @x@.) The emitted backends fold
-    -- their own way -- Python's IREnumSum is a left-folding @sum()@ -- so the
-    -- bit-identity claim is per-backend, not universal; the corpus tolerance
-    -- covers the rest.
-    --
-    -- In log space the running accumulator is let-bound: 'logSumExpIR' reads
-    -- both its operands three times, so an unbound accumulator would grow the
-    -- cell 3^n in the number of terms.
-    sumTerms :: [IRExpr] -> CompilerMonad IRExpr
-    sumTerms = foldrM step (srZero sr)
-    step t acc
-      | srLogSpace sr = do
-          accName <- mkVariable "mat_acc"
-          setVariables [(accName, acc)]
-          return (srPlus sr t (IRVar accName))
-      | otherwise = return (srPlus sr t acc)
 
 -- | The base case: one let-bound cell per domain value, each the ordinary
 -- point-query inference of @e@ at that (compile-time constant) value. This is
@@ -870,21 +878,52 @@ irNodeCount e = 1 + sum (map irNodeCount (getIRSubExprs e))
 maxTabulatedLeafNodes :: Int
 maxTabulatedLeafNodes = 100
 
--- | Read a materialized marginal at a runtime key: an unrolled if-chain over
--- the tabulated domain. The final @else@ is the semiring zero, which is what a
--- key outside the domain must contribute (and is unreachable when the key is an
--- enumeration variable ranging over exactly this domain). @key@ is read once per
--- arm, so callers pass a variable, not an expression.
-lookupMarginal :: Semiring -> MarginalTable -> IRExpr -> IRExpr
-lookupMarginal sr tbl key =
-  foldr (\(v, cell) rest -> IRIf (IROp OpEq key (IRConst (valueToIR v))) cell rest) (srZero sr) tbl
+-- | Read a materialized marginal at a runtime key. Two lowerings, chosen by
+-- 'CompilerConfig''s 'batched' flag rather than left to per-backend codegen:
+--
+-- * __Scalar__: the short-circuiting if-chain this always was. It stops at
+--   the first match, which is faster than reading a tensor for the small
+--   domains this fires on, so scalar emission is unchanged.
+-- * __Batched__: an O(1) gather ('BIndex') into a 'BTensor' of the cells,
+--   worth 1.7-2.4x measured end to end (task
+--   batched-enumsum-materialization) -- a @torch.where@ cascade evaluates
+--   every arm, so the if-chain form costs O(|domain|) tensor selects per
+--   read where the index form costs one.
+--
+-- The index is found by a small if-chain of its own (@idxExpr@), over
+-- integer positions rather than the (possibly large) cell expressions -- so
+-- it stays cheap even though it is itself a cascade. A key matching nothing
+-- in the table resolves to position 0, an arbitrary in-bounds sentinel: safe
+-- because 'tensor_index' (pythonLibBatched.py) clamps rather than reads out
+-- of bounds, and because every caller that can pass an off-domain key (the
+-- inverted-value case in the two-operand enumerate path below) discards this
+-- read's result behind a separate 'IRIsPossible' guard before it reaches the
+-- output -- exactly the pattern 'nn_gather' already relies on for the same
+-- reason. The final @else@ of the scalar if-chain is the semiring zero, which
+-- is what a key outside the domain must contribute there (and is unreachable
+-- when the key is an enumeration variable ranging over exactly this domain).
+-- @key@ is read once per arm either way, so callers pass a variable, not an
+-- expression.
+lookupMarginal :: CompilerMetadata -> MarginalTable -> IRExpr -> IRExpr
+lookupMarginal meta tbl key
+  | batched (compilerConfig meta) = indexLookup
+  | otherwise                     = ifChainLookup
+  where
+    sr = semiringOf meta
+    ifChainLookup =
+      foldr (\(v, cell) rest -> IRIf (IROp OpEq key (IRConst (valueToIR v))) cell rest) (srZero sr) tbl
+    indexLookup =
+      IRBuiltin (BIndex 0) [IRBuiltin (BTensor [EFixed (length tbl)]) (map snd tbl), idxExpr]
+    idxExpr =
+      foldr (\(i, (v, _)) rest -> IRIf (IROp OpEq key (IRConst (valueToIR v))) (IRConst (VInt i)) rest)
+            (IRConst (VInt 0)) (zip [0 :: Int ..] tbl)
 
 -- | @p(operand = key)@ for one of the enumerable-InjF loop bodies: a
 -- materialized-table read when the operand was tabulated, today's re-descent
 -- otherwise. Only the probability is taken either way -- see the rIMPOSS note
 -- above for why that is not a loss.
 operandProb :: CompilerMetadata -> Maybe MarginalTable -> Expr -> IRExpr -> CompilerMonad IRExpr
-operandProb meta (Just tbl) _ key = return (lookupMarginal (semiringOf meta) tbl key)
+operandProb meta (Just tbl) _ key = return (lookupMarginal meta tbl key)
 operandProb meta Nothing    e key = (unP . rProb) <$> toIRInference meta False e key
 
 -- | Map the polymorphic InjF name to the concrete integer variant when the
@@ -2119,7 +2158,7 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
           Just tbl -> do
             keyName <- mkVariable "mat_key"
             setVariables [(keyName, invExpr)]
-            return (mass (lookupMarginal sr tbl (IRVar keyName)))
+            return (mass (lookupMarginal meta tbl (IRVar keyName)))
           Nothing -> toIRInference meta False right invExpr
     let pRight = unP (rProb pRightRes)
     let wrapR e = generateLetInExpr pRightBinds e
