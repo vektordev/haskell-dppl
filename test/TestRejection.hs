@@ -44,6 +44,7 @@ rejectionTests = testGroup "Rejection"
   , anyCtorTestTests
   , adtCumulativeTests
   , generateBackedTests
+  , generateBackedProjectionTests
   , vAnyExceptCodegenTests
   ]
 
@@ -454,6 +455,86 @@ generateBackedTests = testGroup "GenerateBackedInference"
         case res of
           Left e  -> assertFailure ("a deterministic enumerated branch was refused: " ++ show e)
           Right _ -> return ()
+  ]
+
+-- ----------------------------------------------------------------------------
+-- 'fst'/'snd' discarding an intractable ('Bottom') sibling. ModalityInfer's
+-- 'projFst'/'projSnd' are the only pType-*raising* constructs in the
+-- language: 'fst (Uniform, Uniform * Uniform)' types 'Integrate' at the
+-- projection even though the discarded second component is 'Bottom'.
+-- 'toIRInference's "no probabilistic parameter" 'InjF' clauses used to test
+-- this via 'countProbParams params == 0', which only counts the three
+-- tractable rungs (Integrate/PNormal/PLogNormal) and so treated a 'Bottom'
+-- sibling exactly like an absent one -- falling through to 'toIRGenerate'
+-- and comparing a *fresh* random draw against the query sample: silently
+-- wrong on every call, not a crash, on the Python and Julia backends (task
+-- projection-discards-intractable-sibling-generate-backed). Both "count == k"
+-- guards (0 and 1 probabilistic parameters) now additionally require every
+-- parameter to be measurable (no 'Bottom' among them); a 'fst'/'snd' node
+-- with a 'Bottom' sibling then matches no 'InjF' clause at all and falls to
+-- 'toIRInference's own catch-all ("found no way to convert to IR"),
+-- refusing the program at compile time instead of silently miscompiling it.
+-- ----------------------------------------------------------------------------
+
+fstBottomSiblingSrc :: String
+fstBottomSiblingSrc = "main = fst (Uniform, Uniform * Uniform)"
+
+sndBottomSiblingSrc :: String
+sndBottomSiblingSrc = "main = snd (Uniform * Uniform, Uniform)"
+
+-- Not affected: the discarded sibling is itself measurable (Normal), so
+-- every parameter really is either Deterministic or tractable and the fixed
+-- guard still fires.
+fstNormalSiblingSrc :: String
+fstNormalSiblingSrc = "main = fst (Uniform, Normal)"
+
+-- Not affected for a different reason: here it is the *projected* side that
+-- is Bottom, not the discarded sibling, so the whole 'fst' node's own pType
+-- is Bottom (the meet) and ModalityInfer emits no probability function for
+-- 'main' at all -- a clean, pre-existing "no compiled variant for this mode"
+-- refusal, not the no-clause-matches crash the buggy predicate produced.
+fstProjectedBottomSrc :: String
+fstProjectedBottomSrc = "main = fst (Uniform * Uniform, Uniform)"
+
+generateBackedProjectionTests :: TestTree
+generateBackedProjectionTests = testGroup "GenerateBackedProjection"
+  [ testCase "fst discarding a Bottom sibling is refused, not generate-backed" $
+      withParsed fstBottomSiblingSrc $ \prog -> do
+        res <- forced (runProb defaultCompilerConfig prog [] (VFloat 0.5))
+        case res of
+          Left e  -> assertBool ("expected the no-clause-matches refusal, got: " ++ show e)
+                                ("found no way to convert to IR" `isInfixOf` show e)
+          Right _ -> assertFailure
+            "fst (Uniform, Uniform * Uniform) compiled to a probability function -- \
+            \it must be refused, not silently generate-backed"
+  , testCase "snd discarding a Bottom sibling is refused, not generate-backed" $
+      withParsed sndBottomSiblingSrc $ \prog -> do
+        res <- forced (runProb defaultCompilerConfig prog [] (VFloat 0.5))
+        case res of
+          Left e  -> assertBool ("expected the no-clause-matches refusal, got: " ++ show e)
+                                ("found no way to convert to IR" `isInfixOf` show e)
+          Right _ -> assertFailure
+            "snd (Uniform * Uniform, Uniform) compiled to a probability function -- \
+            \it must be refused, not silently generate-backed"
+  , testCase "fst over a tractable (Normal) sibling still compiles" $
+      withParsed fstNormalSiblingSrc $ \prog -> do
+        res <- forced (runProb defaultCompilerConfig prog [] (VFloat 0.5))
+        case res of
+          Left e  -> assertFailure ("fst (Uniform, Normal) was refused: " ++ show e)
+          Right _ -> return ()
+  , testCase "fst projecting the Bottom side is refused for intractability, not a clause-match crash" $
+      -- Deliberately not routed through 'forced': that helper only tells crash
+      -- from no-crash (both an ordinary Left and an ordinary Right show without
+      -- throwing), and the point of this case is to tell apart two different
+      -- *Left*s -- the pre-existing, graceful "no compiled variant" answer from
+      -- the buggy no-clause-matches crash the other cases in this group pin.
+      withParsed fstProjectedBottomSrc $ \prog ->
+        case runProb defaultCompilerConfig prog [] (VFloat 0.5) of
+          Left e  -> assertBool ("expected the ordinary Bottom/no-compiled-variant refusal, got: " ++ e)
+                                ("has no compiled probability function" `isInfixOf` e)
+          Right v -> assertFailure
+            ("fst (Uniform * Uniform, Uniform) compiled to a probability function (" ++ show v
+              ++ "), but the whole node is Bottom and should have none")
   ]
 
 -- ----------------------------------------------------------------------------

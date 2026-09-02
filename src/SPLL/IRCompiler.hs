@@ -2002,7 +2002,7 @@ toIRInference meta cumulative (Expr ti (InjF (Named name) params)) sample | isHi
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
   return (mapResult renVar (guardP (semiringOf meta) [appTest] (scaleCoV (semiringOf meta) cumulative invDerivExpr paramRes)))
 toIRInference meta False e@(Expr TypeInfo {tags=_, rType=rt} (InjF (Named _) params)) sample
-  | countProbParams params == 0 = do
+  | countProbParams params == 0 && allParamsMeasurable params = do
   -- There is no probabilistic parameter
   -- Check whether the value of the function is equal to the sample
   expr <- toIRGenerate meta e
@@ -2010,7 +2010,7 @@ toIRInference meta False e@(Expr TypeInfo {tags=_, rType=rt} (InjF (Named _) par
   -- 'Var'-is-a-local-variable case below.
   return (indicatorP (semiringOf meta) (equalityGuard rt expr sample))
 toIRInference meta True e@(Expr TypeInfo {tags=_, rType=rt} (InjF (Named _) params)) sample
-  | countProbParams params == 0 = do
+  | countProbParams params == 0 && allParamsMeasurable params = do
   -- There is no probabilistic parameter
   -- Check whether the value of the function is less than the sample
   expr <- toIRGenerate meta e
@@ -2119,7 +2119,7 @@ toIRInference meta True (Expr TypeInfo {rType=rt} (InjF (Named name) [left, righ
   setVariables outerBinds
   opaqueMass sr (enumSumNode sr randVar enumList body') const0
 toIRInference meta cumulative (Expr TypeInfo {tags=_, rType=rt} (InjF (Named name) params)) sample
-  | countProbParams params == 1 = do
+  | countProbParams params == 1 && allParamsMeasurable params = do
   let resolvedName = resolveInjF rt name
   -- FPair of the InjF with unique names
   FPair fwd inversions <- instantiate mkVariable (adtDecls meta) resolvedName
@@ -2362,6 +2362,24 @@ countProbParams es = length probParams
     probParams = filter (\p -> p == Integrate || p == PNormal || p == PLogNormal) pTypes
     pt x = pType (getTypeInfo x)
     pTypes = map pt es
+
+-- True when no parameter is 'Bottom' -- i.e. every parameter is either
+-- 'Deterministic' or one of the three tractable probabilistic rungs
+-- (Integrate/PNormal/PLogNormal). A 'countProbParams params == k' guard by
+-- itself only counts the tractable rungs, so a 'Bottom' parameter (no
+-- measurable distribution at all -- "nothing better than sampling is
+-- available") is silently indistinguishable from an absent one: a clause
+-- guarded by 'countProbParams params == 0' would treat "every parameter is
+-- Deterministic" and "one parameter is Bottom, the rest Deterministic" as
+-- the same case, and fall through to 'toIRGenerate' on the Bottom
+-- parameter -- a fresh random draw compared against the query sample,
+-- silently wrong rather than refused (task
+-- projection-discards-intractable-sibling-generate-backed, reached via
+-- 'fst'/'snd' projecting away an intractable sibling: 'fst (Uniform,
+-- Uniform * Uniform)'). Every 'countProbParams params == k' guard on an
+-- InjF clause must therefore also assert this.
+allParamsMeasurable :: [Expr] -> Bool
+allParamsMeasurable = all ((/= Bottom) . pType . getTypeInfo)
 
 getProbIndex :: HasCallStack => [Expr] -> Maybe Int
 --getProbIndex es | traceShow es False = undefined
