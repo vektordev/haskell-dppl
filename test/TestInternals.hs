@@ -22,6 +22,7 @@ import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan)
 import SPLL.IntermediateRepresentation
+import SPLL.Semiring (semiringSuffix)
 import SPLL.IROptimizer (postProcess, optimizeEnv, deterministicGens, distributeIf, OptEnv(..))
 import SPLL.CodeGenPyTorchBatched (adtEnv, batchedGuard, generateFunctionsBatched, structural)
 import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts)
@@ -2148,6 +2149,131 @@ materializationTests = testGroup "Tier 0 marginal materialization"
           other -> assertFailure ("expected branch-counted tuples, got: " ++ show other)
   ]
 
+-- | p(main = sample) under the given family's extra probability-mode group
+-- ("main_map" for 'SRMaxProduct'), as a Double. Mirrors 'probUnder', but reads
+-- the extra group 'IRCompiler.hs's 'extraFunGroups' compiles alongside the
+-- ordinary one rather than "main" itself -- see 'SPLL.Semiring.semiringSuffix'
+-- for the name mapping.
+extraProbUnder :: SemiringFamily -> CompilerConfig -> Program -> [IRValue] -> IRValue -> IO Double
+extraProbUnder fam conf prog params sample = case compile conf { extraSemirings = [fam] } prog of
+  Left err -> assertFailure ("compilation failed: " ++ show err)
+  Right ir -> case runProbNamedC prog ir ("main_" ++ semiringSuffix fam) params sample of
+    Right (VProbDim pr _) -> return pr
+    other -> assertFailure ("expected a probability tuple from the extra group, got: " ++ show other)
+
+-- | Task semiring-parametric-marginals: the max-product (MAP) semiring, which
+-- swaps 'prodP'/'mixP'/'enumSumP''s mixture-combine (⊕) from sum/log-sum-exp to
+-- max, computing the probability of a query value's single most likely
+-- derivation instead of the total over every derivation. Each case below is
+-- independently hand-derived (not cross-checked against the compiler's own
+-- sum-product output beyond the "single derivation, no divergence expected"
+-- sanity checks), and each pins one of the three structurally different sites
+-- the mixture-combine reaches -- 'mixWith' (an ordinary 'IfThenElse'),
+-- 'enumSumP' via the double-enumeration ("enumerate-both") path, and 'enumSumP'
+-- via Tier 0's materialized-marginal convolution ('convolveTables') -- since
+-- MAP reuses the identical machinery at each and a bug can be specific to one.
+semiringMapTests :: TestTree
+semiringMapTests = testGroup "Semiring: max-product (MAP)"
+  [ testCase "does not change the ordinary (sum-product) group at all" $ do
+      -- extraSemirings is documented purely additive -- requesting the MAP
+      -- group alongside the ordinary one must not perturb "main" itself.
+      let src = "main = if Uniform < 0.9 then (if Uniform < 0.5 then 2.0 else 3.0) else (if Uniform < 0.1 then 2.0 else 4.0)"
+      prog <- case tryParseProgram "<test>" src of
+        Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
+        Right p  -> return p
+      forM_ [2.0, 3.0, 4.0] $ \q -> do
+        plain <- probUnder defaultCompilerConfig prog [] (VFloat q)
+        withExtra <- probUnder (defaultCompilerConfig { extraSemirings = [SRMaxProduct] }) prog [] (VFloat q)
+        assertEqual ("main's own p(" ++ show q ++ ") must be unaffected by extraSemirings") plain withExtra
+  , testCase "IfThenElse mixture (mixWith): overlapping derivations, MAP takes the max" $ do
+      -- 2.0 is reachable two ways: the 0.9-branch's 0.5-subbranch (0.9*0.5 =
+      -- 0.45) and the 0.1-branch's 0.1-subbranch (0.1*0.1 = 0.01). Sum-product
+      -- sums them (0.46); MAP is the winning derivation alone (0.45). 3.0 and
+      -- 4.0 each have exactly one derivation, so MAP must equal sum-product
+      -- there -- the case that would catch an accidentally-always-different MAP.
+      let src = "main = if Uniform < 0.9 then (if Uniform < 0.5 then 2.0 else 3.0) else (if Uniform < 0.1 then 2.0 else 4.0)"
+      prog <- case tryParseProgram "<test>" src of
+        Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
+        Right p  -> return p
+      p2 <- extraProbUnder SRMaxProduct defaultCompilerConfig prog [] (VFloat 2.0)
+      p3 <- extraProbUnder SRMaxProduct defaultCompilerConfig prog [] (VFloat 3.0)
+      p4 <- extraProbUnder SRMaxProduct defaultCompilerConfig prog [] (VFloat 4.0)
+      assertBool ("p_map(2.0) = 0.45, got " ++ show p2) (abs (p2 - 0.45) < 1e-9)
+      assertBool ("p_map(3.0) = 0.45, got " ++ show p3) (abs (p3 - 0.45) < 1e-9)
+      assertBool ("p_map(4.0) = 0.09, got " ++ show p4) (abs (p4 - 0.09) < 1e-9)
+  , testCase "double-enumeration (enumSumP, applyUnique-uniquified): MAP over both orderings" $ do
+      -- testCases/applyEnumOperandPair.ppl's own shape: sel fl ++ sel fl, both
+      -- operands the SAME latent, exercised via the enumerate-both path (task
+      -- enumerable-injf-operand-loses-tag-across-apply). p(1) sums two ways to
+      -- get 1 (fl selects the 0-slot on one side and the 1-slot on the other),
+      -- each independently 0.5*0.5 = 0.25 under this path's own (documented)
+      -- as-if-independent treatment -- so sum-product's p(1) = 0.5 and MAP's
+      -- p(1) = 0.25, the max of the two equal-probability orderings. p(0)/p(2)
+      -- have one ordering each, so MAP must match sum-product exactly there --
+      -- the regression canary for the 'uniqueify'/'IRLambda' binder bug found
+      -- and fixed during this task (a NameError in the emitted Python, not a
+      -- wrong number, so this also stands as an "it compiles and runs at all"
+      -- check for the code path 'IRBuiltin'-based direct tensor emission for
+      -- 'ROpMax' added).
+      let src = unlines
+            [ "sel x = if x then 1 else 0"
+            , "fl = Uniform < 0.5"
+            , "main = sel fl ++ sel fl"
+            ]
+      prog <- case tryParseProgram "<test>" src of
+        Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
+        Right p  -> return p
+      p0sp <- probUnder defaultCompilerConfig prog [] (VInt 0)
+      p1sp <- probUnder defaultCompilerConfig prog [] (VInt 1)
+      p2sp <- probUnder defaultCompilerConfig prog [] (VInt 2)
+      assertBool "sum-product p(0) = 0.25 (corpus expectation)" (abs (p0sp - 0.25) < 1e-9)
+      assertBool "sum-product p(1) = 0.5 (corpus expectation)"  (abs (p1sp - 0.5)  < 1e-9)
+      assertBool "sum-product p(2) = 0.25 (corpus expectation)" (abs (p2sp - 0.25) < 1e-9)
+      p0 <- extraProbUnder SRMaxProduct defaultCompilerConfig prog [] (VInt 0)
+      p1 <- extraProbUnder SRMaxProduct defaultCompilerConfig prog [] (VInt 1)
+      p2 <- extraProbUnder SRMaxProduct defaultCompilerConfig prog [] (VInt 2)
+      assertBool ("p_map(0) = 0.25, got " ++ show p0) (abs (p0 - 0.25) < 1e-9)
+      assertBool ("p_map(1) = 0.25, got " ++ show p1) (abs (p1 - 0.25) < 1e-9)
+      assertBool ("p_map(2) = 0.25, got " ++ show p2) (abs (p2 - 0.25) < 1e-9)
+  , testCase "Tier 0 materialized convolution (convolveTables): MAP over a 3-term independent sum" $ do
+      -- sel fl1 + sel fl2 + sel fl3, three INDEPENDENT Bernoulli(0.9/0.5/0.5)
+      -- latents summed via a nested enumerable chain -- exactly the shape Tier
+      -- 0 tabulates ("fires on a three-term chain" above, mNistAdd3's
+      -- non-neural sibling). Hand-derived binomial-type probabilities:
+      --   p(0) = 0.1*0.5*0.5 = 0.025                 (one derivation)
+      --   p(1) = 0.9*0.5*0.5 + 0.1*0.5*0.5 + 0.1*0.5*0.5 = 0.275 (three)
+      --   p(2) = 0.9*0.5*0.5 + 0.9*0.5*0.5 + 0.1*0.5*0.5 = 0.475 (three)
+      --   p(3) = 0.9*0.5*0.5 = 0.225                  (one derivation)
+      -- MAP takes the max of each value's derivation set: p(0) and p(3) have
+      -- only one derivation each (MAP = sum-product there); p(1)'s and p(2)'s
+      -- three derivations include one dominant 0.225 term each, strictly below
+      -- their sum-product totals -- the case that pins 'IRCompiler.hs's
+      -- 'convolveTables' actually reading 'srReduceOp' (it was hardcoded to
+      -- ROpAdd/ROpLogSumExp before this task, silently ignoring the active
+      -- semiring for every materialized cell).
+      let src = unlines
+            [ "sel x = if x then 1 else 0"
+            , "fl1 = Uniform < 0.9"
+            , "fl2 = Uniform < 0.5"
+            , "fl3 = Uniform < 0.5"
+            , "main = (sel fl1 ++ sel fl2) ++ sel fl3"
+            ]
+      prog <- case tryParseProgram "<test>" src of
+        Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
+        Right p  -> return p
+      cells <- compilesWithCells defaultCompilerConfig prog
+      assertBool "this 3-term independent chain must actually be materialized (Tier 0)" cells
+      let expectedSumProduct = [0.025, 0.275, 0.475, 0.225]
+          expectedMap        = [0.025, 0.225, 0.225, 0.225]
+      forM_ (zip3 [0 :: Int ..] expectedSumProduct expectedMap) $ \(q, esp, emap) -> do
+        sp <- probUnder defaultCompilerConfig prog [] (VInt q)
+        mp <- extraProbUnder SRMaxProduct defaultCompilerConfig prog [] (VInt q)
+        assertBool ("sum-product p(" ++ show q ++ ") = " ++ show esp ++ ", got " ++ show sp)
+                   (abs (sp - esp) < 1e-9)
+        assertBool ("p_map(" ++ show q ++ ") = " ++ show emap ++ ", got " ++ show mp)
+                   (abs (mp - emap) < 1e-9)
+  ]
+
 -- | The consumer-grade decomposability walk. Unlike 'injFLatentVerdicts' it
 -- binds bare lambda parameters -- see 'materializationVerdicts'.
 materializationVerdictTests :: TestTree
@@ -2458,6 +2584,7 @@ internalsTests = testGroup "Internals"
   , decomposabilityGateTests
   , materializationGuardTests
   , materializationTests
+  , semiringMapTests
   , materializationVerdictTests
   , planEnumStructuralADTTests
   , planEnumStructuralPartialTests

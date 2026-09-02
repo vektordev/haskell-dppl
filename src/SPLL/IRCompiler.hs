@@ -79,11 +79,22 @@ data CompilerMetadata = CompilerMetadata {
   -- set 'isPureGiven' needs: 'isEffectfulVar' is a name test that calls /every/
   -- @_gen@ reference random, and an enumerated inference body is written almost
   -- entirely in terms of deterministic helper calls.
-  detGenNames :: Set.Set Varname
+  detGenNames :: Set.Set Varname,
+  -- | Which 'SemiringFamily' 'semiringOf' builds this compile's 'Semiring'
+  -- from (task semiring-parametric-marginals). 'SRSumProduct' for every
+  -- ordinary compiled body; overridden to one of 'extraSemirings''s entries
+  -- only for the extra probability-mode 'IRFunGroup's 'envToIRUnoptimized''
+  -- builds alongside the ordinary ones -- see 'extraSemiringGroups'. Kept on
+  -- 'CompilerMetadata' rather than read straight off 'CompilerConfig' so that
+  -- override is a plain record update at the one call site that needs it,
+  -- with every recursive call (all ~50 of which read 'semiringOf meta', not
+  -- 'compilerConfig meta', for exactly this reason) automatically compiling
+  -- under the overridden family with no change of its own.
+  semiringFamily :: SemiringFamily
 }
 
 semiringOf :: CompilerMetadata -> Semiring
-semiringOf meta = mkSemiring (logSpace (compilerConfig meta))
+semiringOf meta = mkSemiring (semiringFamily meta) (logSpace (compilerConfig meta))
 
 envToIR :: CompilerConfig -> FCData -> Program -> IREnv
 envToIR conf fcDat p
@@ -256,7 +267,42 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
           groupDoc="Function group " ++ name}
         -- Generate per-component normal functions for tuple outputs
         tupleNormalFuns = generateTupleComponentNormalFunctions (meta progTypeEnv) name binding
-    in [baseFunGroup] ++ tupleNormalFuns) (functions p))
+        -- One extra 'IRFunGroup' per 'extraSemirings' entry (task
+        -- semiring-parametric-marginals, design materialized-marginals-semiring
+        -- Tier 1): "<name>_<suffix>" (e.g. "main_map"), with ONLY 'probFun'
+        -- populated, compiled by the exact same 'toIRInferenceSave' call as
+        -- 'baseFunGroup's own 'probFun' -- the sole difference is 'metaBase'
+        -- carrying the requested 'semiringFamily' instead of 'SRSumProduct', so
+        -- 'semiringOf' (and every one of 'prodP'/'mixP'/'enumSumP'/the leaf
+        -- combinators built on it) picks the alternate 'Semiring' with no
+        -- change to the recursive compilation code itself. A distinct group,
+        -- not a field on 'baseFunGroup', because every downstream generic pass
+        -- (tensor lowering, select pass, the optimizer, the generate-backed
+        -- guard, branch-count stripping, and every backend's codegen) already
+        -- maps over 'IREnv's group list uniformly, so this needs no changes
+        -- there at all -- and it is what lets several semirings land in the
+        -- same output file as ordinary named entry points, per the task's
+        -- acceptance criteria, rather than a whole-artifact mode switch.
+        --
+        -- Scope cuts, both documented on 'extraSemirings' itself: no
+        -- 'integFun'/'genFun'/'normalFun'/'encodeFun' (CDF and generation have
+        -- no settled meaning under max-product), and no topK interaction (the
+        -- 'acc_prob' extra parameter/'TOP_K_CUTOFF' plumbing 'baseFunGroup's
+        -- own 'probFun' has under 'topKThreshold' is not replicated here).
+        extraFunGroups =
+          [ IRFunGroup { groupName = name ++ "_" ++ semiringSuffix fam, encodeFun = Nothing, sampleDomain = Nothing
+                        , integFun = Nothing
+                        , probFun =
+                            if not noProb && (pt == Deterministic || pt == Integrate || pt == PNormal || pt == PLogNormal) then
+                              let metaExtra = (meta progTypeEnv) { semiringFamily = fam }
+                                  compileBody m = runCompile m (toIRInferenceSave m False binding (IRVar "sample"))
+                              in Just (appendDoc guardNote $ toProbDecl name $ IRLambda "sample" $ guardQuery "p" $ compileBody metaExtra)
+                            else Nothing
+                        , genFun = Nothing
+                        , normalFun = Nothing
+                        , groupDoc = "Function group " ++ name ++ " under the " ++ show fam ++ " semiring" }
+          | fam <- extraSemirings conf ]
+    in [baseFunGroup] ++ tupleNormalFuns ++ extraFunGroups) (functions p))
   progADTs
   -- The cutoff must live in the same space as the accumulated probability it's
   -- compared against: under logSpace that's log(thresh), not the raw linear
@@ -282,7 +328,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
     -- probability mass under logSpace, since every branch's accumulated weight
     -- was then a linear 1.0 multiplied against log (negative) per-branch terms
     -- (task topk-logspace-unsound).
-    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring (logSpace conf))) [] verdicts detGens
+    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) [] verdicts detGens SRSumProduct
     -- One walk of the whole program, shared by every 'meta' built below.
     verdicts = materializationVerdicts p
     -- Likewise one call-graph fixpoint, shared: which generate functions are
@@ -793,7 +839,18 @@ convolveTables meta dom buckets = do
                              [IRTCons lc rc | (lc, rc) <- bucket]
               mapBody  = term (IRTFst (IRVar pairVar)) (IRTSnd (IRVar pairVar))
               mapped   = IRBuiltin BMap [IRLambda pairVar mapBody, gridTensor]
-              reduceOp = if srLogSpace sr then ROpLogSumExp else ROpAdd
+              -- Task semiring-parametric-marginals: was hardcoded to
+              -- 'ROpLogSumExp'/'ROpAdd' by 'srLogSpace' alone, which is
+              -- exactly what 'srReduceOp' already computes for the two
+              -- families that existed before this task (so this is a
+              -- behaviour-preserving read, not a new choice) -- and, unlike
+              -- the hardcoded version, also picks 'ROpMax' under the
+              -- max-product (MAP) semiring. Tier 1's whole premise is that it
+              -- rides Tier 0's identical table; leaving this hardcoded would
+              -- have silently kept every materialized cell on plain sum
+              -- reduction under '--semiring=map', the one path this task
+              -- exists to cover.
+              reduceOp = srReduceOp sr
           return (IRBuiltin (BReduce reduceOp 0) [mapped])
       cellName <- mkVariable "mat_cell"
       setVariables [(cellName, cellExpr)]
@@ -2409,6 +2466,20 @@ uniqueify vars prefix (IRLetIn name boundExpr bodyExpr) | name `elem` vars = IRL
 uniqueify vars prefix (IREnumSum name lst bodyExpr) | name `elem` vars = IREnumSum (prefix ++ name) lst (uniqueify vars prefix bodyExpr)
 uniqueify vars prefix (IRLogEnumSum name lst bodyExpr) | name `elem` vars = IRLogEnumSum (prefix ++ name) lst (uniqueify vars prefix bodyExpr)
 uniqueify vars prefix (IREnumSumPaired lg name lst bodyExpr) | name `elem` vars = IREnumSumPaired lg (prefix ++ name) lst (uniqueify vars prefix bodyExpr)
+-- Task semiring-parametric-marginals: the max-product (MAP) semiring's
+-- 'SPLL.Semiring.enumSumNode'/'enumSumP' build their reduction directly in
+-- tensor form ('IRBuiltin BMap [IRLambda v body, ...]') rather than through
+-- 'IREnumSum', reusing the SAME enumeration variable name as the 'IRLambda's
+-- binder. Without this case, 'irMap's generic descent (this function relies
+-- on for recursion -- see the comment above) renames free occurrences of that
+-- name inside 'bodyExpr' (correctly, per the 'IRVar' case above) while
+-- leaving the 'IRLambda' binder untouched, splitting one identifier into two:
+-- every *use* of the loop variable pointed at a name nothing bound any more.
+-- Reachable at HEAD only via the double-enumeration ('applyUnique') site under
+-- '--semiring=map' (testCases/applyEnumOperandPair.ppl is the canary) --
+-- 'IRLambda' bindings built everywhere else in the compiler are always freshly
+-- 'mkVariable'd, so this never collided with '[x2, x3]' before this task.
+uniqueify vars prefix (IRLambda name bodyExpr) | name `elem` vars = IRLambda (prefix ++ name) (uniqueify vars prefix bodyExpr)
 uniqueify _ _ e = e
 
 --folding detGen and Gen into one, as the distinction is one to make sure things that are det are indeed det.

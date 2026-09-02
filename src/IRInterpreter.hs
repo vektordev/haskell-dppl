@@ -544,6 +544,7 @@ rewrap sh vs  = VTensor sh vs
 reduceIdentity :: ReduceOp -> IRValue
 reduceIdentity ROpAdd = VFloat 0
 reduceIdentity ROpLogSumExp = VFloat ((-1) / 0)
+reduceIdentity ROpMax = VFloat ((-1) / 0)
 
 -- | One step of a tensor reduction. Log-sum-exp guards both infinities the way
 -- IRLogEnumSum does, so a -inf term (the log-space zero) is absorbed rather
@@ -554,6 +555,7 @@ reduceStep ROpLogSumExp (VFloat a) (VFloat b)
   | isInfinite a && a < 0 = VFloat b
   | isInfinite b && b < 0 = VFloat a
   | otherwise = let m = max a b in VFloat (m + log (exp (a - m) + exp (b - m)))
+reduceStep ROpMax (VFloat a) (VFloat b) = VFloat (max a b)
 reduceStep op a b =
   error ("BReduce " ++ show op ++ ": non-numeric terms: " ++ show (a, b))
 

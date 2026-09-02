@@ -170,3 +170,4 @@ indent n = replicate (2 * n) ' '
 reduceOpName :: ReduceOp -> String
 reduceOpName ROpAdd = "add"
 reduceOpName ROpLogSumExp = "lse"
+reduceOpName ROpMax = "max"

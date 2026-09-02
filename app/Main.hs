@@ -35,6 +35,7 @@ data GlobalOpts = GlobalOpts {
   batchedMode :: Bool,
   logSpaceMode :: Bool,
   optStatsMode :: Bool,
+  extraSemiringsMode :: [SemiringFamily],
   commandOpts :: CommandOpts
 }
 
@@ -79,10 +80,30 @@ readValue = eitherReader (\s ->
     Right (val, _) -> Right (valueToIR val))
 
 readValueList :: ReadM [IRValue]
-readValueList = eitherReader (\s -> 
+readValueList = eitherReader (\s ->
   case runParser (runStateT pCSV 0) "CLI" s of
     Left err -> Left (errorBundlePretty err)
     Right (val, _) -> Right (map valueToIR val))
+
+-- | Parses "--semiring=map" (task semiring-parametric-marginals) into
+-- 'CompilerConfig's 'extraSemirings': a comma-separated list of the CLI-facing
+-- names 'SPLL.Semiring.semiringSuffix' assigns each non-default
+-- 'SemiringFamily' that actually has a sound 'SPLL.Semiring.Semiring'
+-- instance -- 'SRSumProduct' is never a valid token here (it names the
+-- ordinary compile every program already gets, not an extra one to request),
+-- and 'SRCounting' is refused with a message pointing at the long comment
+-- on it: the natural leaf-reweighting implementation is unsound under this
+-- codebase's Boolean-condition representation (found and reverted during this
+-- task rather than shipped), not merely unimplemented.
+readSemiringList :: ReadM [SemiringFamily]
+readSemiringList = eitherReader (\s -> mapM parseOne (splitOn ',' s))
+  where
+    parseOne "map"   = Right SRMaxProduct
+    parseOne "count" = Left "--semiring=count: model counting has no sound implementation in this compiler (see the SRCounting comment in SPLL.IntermediateRepresentation) -- not merely unimplemented, refused"
+    parseOne tok     = Left ("Unknown --semiring entry " ++ show tok ++ ": expected \"map\"")
+    splitOn sep s' = case break (== sep) s' of
+      (chunk, [])       -> [chunk]
+      (chunk, _:rest)   -> chunk : splitOn sep rest
 
 optionalList :: Alternative f => f [a] -> f [a]
 optionalList x = fmap (fromMaybe []) (optional x)
@@ -142,6 +163,10 @@ parseGlobalOpts = GlobalOpts
         <*> switch
             ( long "optStats"
             <> help "Report optimizer telemetry on stderr: how many fixed-point iterations the IR optimizer needed for each emitted function, plus a per-rule firing tally. Add -v for the per-iteration breakdown (which rule fired how often in which iteration). Diagnostic only -- it does not change what is compiled.")
+        <*> optionalList (option readSemiringList
+            ( long "semiring"
+            <> metavar "FAMILY,..."
+            <> help "Compile extra probability-mode entry points alongside the ordinary one (task semiring-parametric-marginals), one per comma-separated family: 'map' adds \"<name>_map\", the probability of the single most likely derivation of the query value (MAP/Viterbi) instead of the total over every derivation. Lands in the SAME output file as the ordinary generate/probability/integrate functions. Probability-mode only (no generate/integrate/normal_params variant), and not composed with --topKCutoff."))
         <*> hsubparser (
           command "compile" (info parseCompileOpts (progDesc "Compiles the program with inference interface into target language"))
           <> command "generate" (info parseGenerateOpts (progDesc "Runs the generate pass of the program"))
@@ -208,9 +233,9 @@ main = transpile =<< execParser opts
             <> header "Haskell DPPL" )
 
 transpile :: GlobalOpts -> IO ()
-transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl, pruneAnys=anyChecks, noInteg=nInteg, noProb=nProb, noGen=nGen, debugIntermediates=dbgInter, noTypeCheck=nTypeChk, batchedMode=batchedFlag, logSpaceMode=logSpaceFlag, optStatsMode=optStatsFlag}) = do
+transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl, pruneAnys=anyChecks, noInteg=nInteg, noProb=nProb, noGen=nGen, debugIntermediates=dbgInter, noTypeCheck=nTypeChk, batchedMode=batchedFlag, logSpaceMode=logSpaceFlag, optStatsMode=optStatsFlag, extraSemiringsMode=extraSR}) = do
   prog <- parseProgram inFile
-  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen, showIntermediates=dbgInter, checkQueryType=not nTypeChk, batched=batchedFlag, logSpace=logSpaceFlag, optStats=optStatsFlag, materializationCardinality=defaultMaterializationCardinality})
+  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen, showIntermediates=dbgInter, checkQueryType=not nTypeChk, batched=batchedFlag, logSpace=logSpaceFlag, optStats=optStatsFlag, materializationCardinality=defaultMaterializationCardinality, extraSemirings=extraSR})
   case options of
     CompileOpts{language=lang, outputFile=outFile, trunc=trnc} -> do
       case codeGenToLang lang trnc conf prog of

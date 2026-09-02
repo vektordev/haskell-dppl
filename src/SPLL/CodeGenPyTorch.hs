@@ -490,11 +490,16 @@ axisUnsupported what ax =
        ++ " (the representation admits it; no backend lowers it yet)"
 
 -- | The Python runtime function reducing a tensor axis with each operator.
--- Both are pythonLib.py builtins: sum is Python's own, logsumexp is the
--- library's (already backing IRLogEnumSum).
+-- sum/max are Python's own builtins (both take an iterable, same as
+-- logsumexp's own signature below), logsumexp is pythonLib.py's (already
+-- backing IRLogEnumSum). max on an empty iterable raises in real Python,
+-- same as every other reduction here has no defined empty-domain behaviour
+-- (an enumerable domain from Analysis.materializationDomain is never empty --
+-- see the "empty propagated domain" refusal in Analysis).
 pyReduceOp :: ReduceOp -> String
 pyReduceOp ROpAdd = "sum"
 pyReduceOp ROpLogSumExp = "logsumexp"
+pyReduceOp ROpMax = "max"
 
 str :: String -> ShowS
 str = showString
