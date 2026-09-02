@@ -3,6 +3,10 @@
 
 module TestCaseParser (
   TestCase(..),
+  Expectation(..),
+  expectationProb,
+  expectationDim,
+  expectationImposs,
   Backend(..),
   allBackends,
   defaultBackends,
@@ -61,19 +65,62 @@ allBackends = [minBound .. maxBound]
 defaultBackends :: [Backend]
 defaultBackends = [Interpreter, Julia, Python]
 
--- The last field of Prob/CumulTestCase is the OPTIONAL expected impossibility
--- flag (the fourth field of the compiled inference result, see CLAUDE.md's
--- "Impossibility flag"): @Just b@ when the .tst line spelled a third component,
--- @Nothing@ when it declared only (prob, dim) and the flag is not to be checked.
-data TestCase = ProbTestCase String IRValue [IRValue] (IRValue, IRValue) (Maybe Bool)
-              | CumulTestCase String IRValue [IRValue] (IRValue, IRValue) (Maybe Bool)
+-- | The expected result of a prob/cumulative query. Two shapes, spelled
+-- distinctly in a .tst file rather than folded into one tuple (see
+-- CLAUDE.md's ".tst dim expectations" note, task
+-- tst-dim-unasserted-at-zero-probability):
+--
+-- * @Possible prob dim mImp@ -- an ordinary point: @(prob, dim)@ or
+--   @(prob, dim, imposs)@ in the .tst source. Both @prob@ and @dim@ are
+--   always checked (unconditionally -- there is no "probability happened to
+--   compute to zero so skip the dim check" special case any more); @mImp@ is
+--   @Just b@ when the .tst line spelled a third component, @Nothing@ when it
+--   did not (impossibility flag not checked).
+--
+-- * @Impossible@ -- the dedicated shape for a genuinely impossible query
+--   point (wrong Either arm, off-support sample, unmatched indicator, ...),
+--   spelled @is impossible@ in the .tst source instead of a numeric tuple.
+--   At such a point the dim has no fact of the matter (a hard zero is
+--   neither a density nor a mass), so none is stated or checked; the
+--   probability is asserted zero and the impossibility flag is asserted
+--   @True@, both unconditionally. This is the *only* way to spell a
+--   zero-probability, impossible point -- 'pTupleExpectation' refuses a
+--   @(0.0, dim, True)@ tuple, so a .tst author can never write a dim number
+--   that silently goes unchecked.
+data Expectation = Possible IRValue IRValue (Maybe Bool)
+                  | Impossible
+  deriving (Show, Eq)
+
+-- | The expected probability, always meaningful regardless of shape.
+expectationProb :: Expectation -> Double
+expectationProb (Possible (VFloat p) _ _) = p
+expectationProb (Possible other _ _) = error ("expected probability must be a float, got: " ++ show other)
+expectationProb Impossible = 0.0
+
+-- | The expected dim, when the shape states one. 'Impossible' states none --
+-- callers that need a dim to compare against should skip such rows, not
+-- invent a placeholder.
+expectationDim :: Expectation -> Maybe Double
+expectationDim (Possible _ (VFloat d) _) = Just d
+expectationDim (Possible _ other _) = error ("expected dim must be a float, got: " ++ show other)
+expectationDim Impossible = Nothing
+
+-- | The expected impossibility flag. 'Impossible' always declares 'True';
+-- 'Possible' declares whatever its optional third component said, or
+-- 'Nothing' (not checked) if it stated none.
+expectationImposs :: Expectation -> Maybe Bool
+expectationImposs (Possible _ _ mImp) = mImp
+expectationImposs Impossible = Just True
+
+data TestCase = ProbTestCase String IRValue [IRValue] Expectation
+              | CumulTestCase String IRValue [IRValue] Expectation
               | ArgmaxPTestCase String [IRValue] IRValue
               | EncodingLengthTestCase String String [IRValue] Int             -- target fn, explicit args, expected output list length
               | EncodingSlotTestCase String String [IRValue] IRValue Double  -- target fn, explicit args, indexOf-value, expected float
               deriving (Show)
 
 isProbTestCase :: TestCase -> Bool
-isProbTestCase (ProbTestCase _ _ _ _ _) = True
+isProbTestCase (ProbTestCase _ _ _ _) = True
 isProbTestCase _ = False
 
 isArgmaxPTestCase :: TestCase -> Bool
@@ -81,7 +128,7 @@ isArgmaxPTestCase (ArgmaxPTestCase _ _ _) = True
 isArgmaxPTestCase _ = False
 
 isCumulTestCase :: TestCase -> Bool
-isCumulTestCase (CumulTestCase _ _ _ _ _) = True
+isCumulTestCase (CumulTestCase _ _ _ _) = True
 isCumulTestCase _ = False
 
 isEncodingLengthTestCase :: TestCase -> Bool
@@ -93,8 +140,8 @@ isEncodingSlotTestCase (EncodingSlotTestCase {}) = True
 isEncodingSlotTestCase _ = False
 
 testCaseName :: TestCase -> String
-testCaseName (ProbTestCase name _ _ _ _) = name
-testCaseName (CumulTestCase name _ _ _ _) = name
+testCaseName (ProbTestCase name _ _ _) = name
+testCaseName (CumulTestCase name _ _ _) = name
 testCaseName (ArgmaxPTestCase name _ _) = name
 testCaseName (EncodingLengthTestCase name _ _ _) = name
 testCaseName (EncodingSlotTestCase name _ _ _ _) = name
@@ -124,38 +171,63 @@ scn = L.space space1 (L.skipLineComment "--") (L.skipBlockComment "{-" "-}")
 pIRValue :: MonadParser m => m IRValue
 pIRValue = pValue >>= return . valueToIR
 
--- | The expected inference result of a prob/cumulative line: @(prob, dim)@, or
--- @(prob, dim, imposs)@ where the optional third component is the expected
--- impossibility flag, spelled with the same @True@/@False@ literals 'pValue'
--- uses for booleans everywhere else. Omitting it (the shape every pre-existing
--- corpus line has) means "check prob and dim only, do not check the flag".
+-- | The expected result of a prob/cumulative line. Two shapes -- see
+-- 'Expectation':
+--
+-- * @is impossible@ -- 'Impossible'.
+-- * @(prob, dim)@ or @(prob, dim, imposs)@ -- 'Possible', via
+--   'pTupleExpectation'.
 --
 -- Spelled out here rather than delegating to 'pValue' because SPLL's own tuple
 -- syntax is strictly binary: a three-component expectation is a .tst-level
 -- expectation triple, not an SPLL value.
-pExpectedResult :: MonadParser m => m (IRValue, IRValue, Maybe Bool)
-pExpectedResult = do
+pExpectation :: MonadParser m => m Expectation
+pExpectation = choice
+  [ Impossible <$ symbol "is impossible"
+  , pTupleExpectation
+  ]
+
+-- | The @(prob, dim)@ / @(prob, dim, imposs)@ tuple shape. The third
+-- component is spelled with the same @True@/@False@ literals 'pValue' uses
+-- for booleans everywhere else; omitting it (the shape most pre-existing
+-- corpus lines have) means "do not check the flag".
+--
+-- A row whose probability is @0@ and whose impossibility flag would be
+-- @True@ is refused here: that combination is a genuinely impossible point
+-- with nothing to say about @dim@, and must be spelled @is impossible@
+-- instead, so there is exactly one way to state it and it can never carry an
+-- unchecked, misleading dim number (task
+-- tst-dim-unasserted-at-zero-probability).
+pTupleExpectation :: MonadParser m => m Expectation
+pTupleExpectation = do
+  symbol "="
   symbol "("
   resP <- pIRValue
   symbol ","
   resD <- pIRValue
   mImp <- optional (symbol "," >> pIRValue)
   symbol ")"
-  case mImp of
-    Nothing        -> return (resP, resD, Nothing)
-    Just (VBool b) -> return (resP, resD, Just b)
+  mImp' <- case mImp of
+    Nothing        -> return Nothing
+    Just (VBool b) -> return (Just b)
     Just other     -> fail ("the third component of an expected result is the impossibility flag "
                             ++ "and must be True or False, got: " ++ show other)
+  case (resP, mImp') of
+    (VFloat 0.0, Just True) -> fail
+      ("a row whose probability is 0 and impossibility flag is True is a genuinely "
+       ++ "impossible point and must be spelled `is impossible`, not a (prob, dim, True) "
+       ++ "tuple -- the tuple's dim would go unchecked and misleading")
+    _ -> return (Possible resP resD mImp')
 
 pProbTestCase :: MonadParser m => String -> m TestCase
 pProbTestCase name = do
   symbol "p("
   params <- pIRValue `sepBy` symbol ","
-  symbol ")="
-  (resP, resD, mImp) <- pExpectedResult
+  symbol ")"
+  expct <- pExpectation
   case params of
     [] -> fail "ProbTestCase must have at least one parameter (the sample)"
-    _  -> return $ ProbTestCase name (head params) (tail params) (resP, resD) mImp
+    _  -> return $ ProbTestCase name (head params) (tail params) expct
 
 pArgmaxPTestCase :: MonadParser m => String -> m TestCase
 pArgmaxPTestCase name = do
@@ -169,11 +241,11 @@ pCumulParser :: MonadParser m => String -> m TestCase
 pCumulParser name = do
   symbol "cdf("
   params <- pIRValue `sepBy` symbol ","
-  symbol ")="
-  (resP, resD, mImp) <- pExpectedResult
+  symbol ")"
+  expct <- pExpectation
   case params of
     [] -> fail "ProbTestCase must have at least one parameter (the sample)"
-    _  -> return $ CumulTestCase name (head params) (tail params) (resP, resD) mImp
+    _  -> return $ CumulTestCase name (head params) (tail params) expct
 
 -- Optional endpoint addressing: `[fn]` selects which top-level function's encode to query.
 -- Defaults to "main" (the f == main case of the one per-function-encode rule).

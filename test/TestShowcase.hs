@@ -37,7 +37,7 @@ import SPLL.Lang.Types
 import SPLL.Parser (tryParseProgram)
 import SPLL.Prelude (compile, runGenC, runProbC, runIntegC, runProbNamedC, runIntegNamedC)
 import SPLL.IntermediateRepresentation (defaultCompilerConfig, IREnv, IRValue, pattern VProbDim)
-import TestCaseParser (TestCase(..), parseTestCasesFromString,
+import TestCaseParser (TestCase(..), expectationProb, parseTestCasesFromString,
                        FreezeCase(..), FreezeMode(..), parseFreezeCasesFromString)
 import TestTolerances (probTolerance)
 
@@ -175,10 +175,10 @@ assertTstMatches cases p = case compile defaultCompilerConfig p of
   Right env -> forM_ cases (checkCase p env)
 
 checkCase :: Program -> IREnv -> TestCase -> IO ()
-checkCase p env (ProbTestCase name sample params (VFloat expProb, _) _) =
-  checkQuery "probability" name (runProbC p env params sample) expProb
-checkCase p env (CumulTestCase name sample params (VFloat expProb, _) _) =
-  checkQuery "cumulative" name (runIntegC p env params sample) expProb
+checkCase p env (ProbTestCase name sample params expct) =
+  checkQuery "probability" name (runProbC p env params sample) (expectationProb expct)
+checkCase p env (CumulTestCase name sample params expct) =
+  checkQuery "cumulative" name (runIntegC p env params sample) (expectationProb expct)
 checkCase _ _ _ = return ()  -- showcase.tst only carries prob/cdf cases
 
 checkQuery :: String -> String -> Either e IRValue -> Double -> IO ()

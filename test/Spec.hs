@@ -29,7 +29,7 @@ import TestEncodeProperties (encodeTests, encodeRoundtripTests)
 import TestShowcase (showcaseTests)
 import End2EndTesting (end2endTests, slowEnd2EndTests, getAllTestFiles, selectPassDifferentialTests, batchedPythonTests, slowBatchedPythonTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, branchCountBackendTests)
 import TestFuzz (fuzzTests, superSlowFuzzTests)
-import TestCaseParser (parseProgram, parseTestCases, TestCase(..), Backend(..))
+import TestCaseParser (parseProgram, parseTestCases, TestCase(..), Expectation(..), Backend(..))
 import TestTolerances (probTolerance, reasonablyCloseTolerance, samplingTolerance)
 import SPLL.Prelude
 import qualified SPLL.CodeGenPyTorch
@@ -58,7 +58,13 @@ loadCorpusCases = do
     (backends, _slow, tcs) <- parseTestCases tst
     return (takeBaseName ppl, prog, backends, tcs)) files
   let usable = [(n, p, tcs) | (n, p, backends, tcs) <- pairs, Interpreter `elem` backends, null (neurals p)]
-  return [(n, (p, queryPoint, params, expected)) | (n, p, tcs) <- usable, ProbTestCase _ queryPoint params expected _ <- tcs]
+  -- 'Impossible' rows (task tst-dim-unasserted-at-zero-probability) carry no
+  -- dim, so they are excluded from this pool rather than plumbed through as a
+  -- placeholder: every metamorphic property below that draws on 'expected'
+  -- already treats an actual-zero probability as carrying no dim information
+  -- (its own "a === 0 .||. d === outDim" checks), so those rows contributed
+  -- nothing to this pool's properties even when they were included.
+  return [(n, (p, queryPoint, params, (prob, dim))) | (n, p, tcs) <- usable, ProbTestCase _ queryPoint params (Possible prob dim _) <- tcs]
 
 -- | A .tst probability expectation is always a (prob, dim) pair of floats;
 -- anything else means the corpus parser handed us a malformed row, which is a

@@ -31,7 +31,7 @@ import Control.Exception (try, evaluate, ErrorCall(..))
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure, (@?=))
 import IRInterpreter (generateDet)
-import TestCaseParser (Backend(..), TestCase(..), defaultBackends, parseTestCasesFromString)
+import TestCaseParser (Backend(..), TestCase(..), expectationProb, defaultBackends, parseTestCasesFromString)
 import Test.Tasty.QuickCheck (testProperties)
 import System.Random (StdGen)
 import Control.Monad.Random (Rand)
@@ -1073,7 +1073,7 @@ planEnumTopKAndBCTest testName baseName = testCase testName $ do
   (_, _, tcs) <- case parseTestCasesFromString tstPath tstSrc of
     Left err -> assertFailure ("tst parse error: " ++ err)
     Right r  -> return r
-  let probCases = [ (s, ps, out) | ProbTestCase _ s ps (VFloat out, _) _ <- tcs ]
+  let probCases = [ (s, ps, expectationProb expct) | ProbTestCase _ s ps expct <- tcs ]
   assertBool (baseName ++ ".tst should contain prob cases") (not (null probCases))
   -- compile once per config, evaluate every pinned case against each
   let compiledWith conf = either (error . show) id (compile conf prog)
