@@ -754,6 +754,26 @@ only). The corpus rows that pin it target its *structural* semantics
 rather than a zero test — notably `normal p(40.0)`, a 40-sigma tail whose
 density underflows to a hard `0.0` while `imposs` must stay `False`.
 
+**A row whose actual probability is 0 does not assert its dim.** All three
+scalar backends and the interpreter check `dim` only when the computed
+probability is nonzero (`outProb === 0 .||. outDim === expectedDim` in
+`test/End2EndTesting.hs`) — at an impossible point the dim carries no
+information (is it a density that underflowed, or a mass that never matched?),
+so any number typed there is silently unchecked and can drift from reality
+without a red test. This is deliberate, not a gap to close by asserting dim
+there too — but it does mean a `.tst` author gets no feedback from the dim
+field on such a row. Two ways to still assert something at an impossible
+point: add the third `imposs` component (below), which *is* checked
+unconditionally when present, or match the corpus convention of stating the
+dim the value would carry if it weren't out of support/off-support (e.g. `0.0`
+for a discrete mismatch, `1.0` for a univariate density's tail, `2.0` for a
+bivariate one) — self-documenting even though unchecked, and what a reader
+should keep it consistent with when editing a row nearby. Found and the
+corpus swept for drifted instances by
+`tst-dim-unasserted-at-zero-probability`; six pre-existing rows across
+`multExp.tst`, `if.tst`, `tail.tst`, `maybeFromLeftMismatch.tst` and
+`uniformLog.tst` had already drifted and were corrected there.
+
 A query point is written in the *value* grammar (`Parser.pValue`), which
 covers ADT constructor values by juxtaposition — `p(Leaf)`,
 `p(Node Leaf Leaf)`, `p(Node (Node Leaf Leaf) 0.5)`; a field that is itself
