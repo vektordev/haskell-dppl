@@ -1302,6 +1302,11 @@ torchWhere env c t f =
 batchedReduceOp :: ReduceOp -> String
 batchedReduceOp ROpAdd = "tensor_sum"
 batchedReduceOp ROpLogSumExp = "tensor_logsumexp"
+-- Task semiring-parametric-marginals scopes the max-product (MAP) semiring's
+-- extra probability-mode entry points to the scalar backends only -- named
+-- refusal rather than a real tensor_max kernel, matching this backend's other
+-- axis/rank refusals (batchedAxisUnsupported/batchedRankUnsupported) in style.
+batchedReduceOp ROpMax = error "CodeGenPyTorchBatched: the max-product (MAP) semiring's extra probability entry points are not supported under --batched"
 
 -- | Diagnostics for the tensor ranks and axes this backend does not emit.
 batchedRankUnsupported :: String -> Int -> String

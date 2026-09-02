@@ -38,6 +38,8 @@ module SPLL.Semiring (
   PResult, rProb, rDim, rBranches, rImposs, mkPResult,
   -- * Semiring
   Semiring(..), mkSemiring, linearSemiring, logSemiring,
+  maxLinearSemiring, maxLogSemiring,
+  semiringSuffix,
   negInfIR, logSumExpIR, logSubExpIR, maskSR,
   distDensity, distCumulative, scaledNormalDensity,
   -- * IR boolean/constant helpers
@@ -55,6 +57,7 @@ module SPLL.Semiring (
 
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types
+import SPLL.Lang.Lang (multiValueToValueList)
 import Utils
 import Control.Monad.Writer.Lazy
 import qualified Data.Set as Set
@@ -179,25 +182,102 @@ anyGuardedDim sample = IRIf (IRUnaryOp OpIsAny sample) const0 const1
 -- linear-only under 'logSpace'.
 data Semiring = Semiring
   { srLogSpace :: Bool                        -- ^ picks the IR *node* (e.g. IRDensity vs IRLogDensity), where the operator alone isn't enough
+  , srReduceOp :: ReduceOp                    -- ^ picks the IR *reduction* 'enumSumP' folds an enumerated support with -- see 'srPlus' below for why this can't just read off that function
   , srZero     :: IRExpr                      -- ^ probability zero / structurally impossible
   , srOne      :: IRExpr                      -- ^ multiplicative identity
   , srTimes    :: IRExpr -> IRExpr -> IRExpr  -- ^ independent conjunction (prodP, change-of-variables scaling)
-  , srPlus     :: IRExpr -> IRExpr -> IRExpr  -- ^ mixture / alternative sum (mixP)
+  , srPlus     :: IRExpr -> IRExpr -> IRExpr  -- ^ mixture / alternative sum (mixP). Pairwise only -- 'srReduceOp' is this same operator's identity for 'enumSumP's fold over a whole (possibly large) enumerated domain, kept as a separate field because the fold has to pick an IR *reduction node* (design ir-tensor-values' 'BReduce'), which no binary 'IRExpr -> IRExpr -> IRExpr' function can name.
   , srMinus    :: IRExpr -> IRExpr -> IRExpr  -- ^ AnyExcept: marginal minus one branch (mixSubP)
   , srComplement :: IRExpr -> IRExpr          -- ^ CDF flip under a decreasing transform: 1 - x linear, log(1 - exp x) log
   }
 
-mkSemiring :: Bool -> Semiring
-mkSemiring False = linearSemiring
-mkSemiring True  = logSemiring
+-- | Build the 'Semiring' for a family (task semiring-parametric-marginals) and
+-- arithmetic domain (log-space-probability-computation). Orthogonal axes:
+-- every family has both a linear and a log-space instance.
+--
+-- 'SemiringFamily' also names 'SRCounting' (model counting/#SAT), which this
+-- function deliberately has no real instance for -- see the long comment on
+-- 'SRCounting' in "SPLL.IntermediateRepresentation" for why a leaf-reweighting
+-- semiring (one whose leaves report unit weight instead of their real
+-- probability) is unsound under this codebase's Boolean-condition
+-- representation, discovered and reverted during this task rather than
+-- shipped. 'CompilerConfig.extraSemirings' is never populated with it by any
+-- accepted CLI/API surface, so this arm is a defensive error, not a reachable
+-- path.
+mkSemiring :: SemiringFamily -> Bool -> Semiring
+mkSemiring SRSumProduct False = linearSemiring
+mkSemiring SRSumProduct True  = logSemiring
+mkSemiring SRMaxProduct False = maxLinearSemiring
+mkSemiring SRMaxProduct True  = maxLogSemiring
+mkSemiring SRCounting   _     = error $ "Semiring.mkSemiring: SRCounting has no sound Semiring "
+  ++ "instance (see the SRCounting comment in SPLL.IntermediateRepresentation) and should "
+  ++ "never have reached here -- this is a defensive check, not a documented refusal path."
 
 linearSemiring :: Semiring
-linearSemiring = Semiring False const0 const1 (IROp OpMult) (IROp OpPlus) (IROp OpSub)
+linearSemiring = Semiring False ROpAdd const0 const1 (IROp OpMult) (IROp OpPlus) (IROp OpSub)
                           (IROp OpSub const1)
 
 logSemiring :: Semiring
-logSemiring = Semiring True negInfIR const0 (IROp OpPlus) logSumExpIR logSubExpIR
+logSemiring = Semiring True ROpLogSumExp negInfIR const0 (IROp OpPlus) logSumExpIR logSubExpIR
                        (\x -> IRUnaryOp OpLog (IROp OpSub const1 (IRUnaryOp OpExp x)))
+
+-- | Max-product (MAP/Viterbi), linear domain: independent conjunction is still
+-- plain multiply (maximizing a product of independent factors over independent
+-- choices is the product of their own maxima), but the mixture/enumSum
+-- combinator becomes max instead of sum -- the actual Viterbi swap, computing
+-- the probability of the single most likely derivation of a value rather than
+-- the total over every derivation. 0.0 is a valid max-identity here (every
+-- probability is >= 0, so max(x, 0) = x), the same value linear sum-product
+-- already uses for its zero -- 'opaqueMass's zero-test and every impossibility
+-- comparison stay meaningful unchanged.
+--
+-- 'srMinus' has no sound definition: max has no inverse (recovering the
+-- runner-up when the excepted branch WAS the max needs more state than a
+-- scalar carries), so AnyExcept under this family is refused with a named
+-- error at the point it would be compiled -- see 'mapHasNoExcept'.
+maxLinearSemiring :: Semiring
+maxLinearSemiring = Semiring False ROpMax const0 const1 (IROp OpMult) maxPairIR
+                             mapHasNoExcept (IROp OpSub const1)
+
+-- | Max-product, log domain: 'srTimes' is add (as in ordinary log-space
+-- sum-product -- independent factors still combine by adding their logs), and
+-- the mixture combinator is a bare comparison of the two log-values rather
+-- than 'logSumExpIR': max commutes with the monotone log transform, so picking
+-- the larger log-probability already picks the larger probability, with no
+-- need for log-sum-exp's numerical-stability machinery (there is no sum to
+-- stabilize).
+maxLogSemiring :: Semiring
+maxLogSemiring = Semiring True ROpMax negInfIR const0 (IROp OpPlus) maxPairIR
+                          mapHasNoExcept (\x -> IRUnaryOp OpLog (IROp OpSub const1 (IRUnaryOp OpExp x)))
+
+-- | Pairwise max of two already-let-bound values (both 'mixWith' and
+-- 'enumSumP' bind their operands before combining them, so this never
+-- duplicates evaluation). Valid in both linear and log domain: whichever
+-- representation, "greater" means "more probable".
+maxPairIR :: IRExpr -> IRExpr -> IRExpr
+maxPairIR a b = IRIf (IROp OpGreaterThan a b) a b
+
+-- | 'srMinus' for both max-product instances: max has no algebraic inverse, so
+-- there is no way to recover "the marginal excluding one branch" from the
+-- marginal's own max alone (see 'maxLinearSemiring'). Fires as a Haskell
+-- 'error' at the point IRCompiler would otherwise build the AnyExcept/mixSubP
+-- IR -- i.e. at compile time, on the one program shape (a marginal-except
+-- query) that reaches it, not at every compile under this family.
+mapHasNoExcept :: IRExpr -> IRExpr -> IRExpr
+mapHasNoExcept = error $ "Semiring: this program compiles a marginal-except query "
+  ++ "(AnyExcept -- e.g. P(x != v)), which has no defined meaning under the "
+  ++ "max-product (MAP) semiring: max has no subtraction, so \"the best "
+  ++ "derivation excluding one specific branch\" cannot be recovered from the "
+  ++ "marginal's own max alone. Compile this program without requesting the "
+  ++ "MAP semiring, or restructure the query to avoid marginal-except."
+
+-- | The suffix 'SPLL.IRCompiler' appends to a function's name for an
+-- 'extraSemirings' entry's compiled group (e.g. "main" + 'SRMaxProduct' ->
+-- "main_map"), and what the CLI's @--semiring=@ list parses back from.
+semiringSuffix :: SemiringFamily -> String
+semiringSuffix SRSumProduct = "sumprod" -- unused today (never an *extra* entry), named for completeness
+semiringSuffix SRMaxProduct = "map"
+semiringSuffix SRCounting   = "count"
 
 negInfIR :: IRExpr
 negInfIR = IRConst (VFloat (-1/0))
@@ -559,6 +639,23 @@ enumSumP sr withBranchCount wrap v vals packed
   -- one copy, no binding to clean up afterwards.
   | not withBranchCount =
       opaqueMass sr (wrap (enumSumNode sr v vals (unP (rProb (unpackResult packed))))) const0
+  -- 'ROpMax' has no 'IREnumSumPaired'-shaped legacy node (see 'enumSumNode'):
+  -- build the paired reduction directly in already-lowered tensor form,
+  -- mirroring 'SPLL.IRTensorPass's own 'IREnumSumPaired' rewrite -- one
+  -- let-bound map over the domain, its two projections ('rProb'/'rBranches')
+  -- each reduced on their own axis, the probability with 'ROpMax' and the
+  -- branch count (unaffected by which semiring is active) with plain 'ROpAdd'.
+  | srReduceOp sr == ROpMax = do
+      n <- mkVariable "enum_max_axis"
+      body <- mkVariable "enum_body"
+      let r = unpackResult (IRVar body)
+          mapped = IRBuiltin BMap [IRLambda v (IRLetIn body packed (IRTCons (unP (rProb r)) (rBranches r))), tensorDomainSR vals]
+          probs  = IRBuiltin BMap [IRLambda (n ++ "_p") (IRTFst (IRVar (n ++ "_p"))), IRVar n]
+          bcs    = IRBuiltin BMap [IRLambda (n ++ "_b") (IRTSnd (IRVar (n ++ "_b"))), IRVar n]
+      paired <- mkVariable "enum_paired"
+      setVariables [(paired, wrap (IRLetIn n mapped
+                                     (IRTCons (IRBuiltin (BReduce ROpMax 0) [probs]) (IRBuiltin (BReduce ROpAdd 0) [bcs]))))]
+      opaqueMass sr (IRTFst (IRVar paired)) (IRTSnd (IRVar paired))
   | otherwise = do
       body <- mkVariable "enum_body"
       let r = unpackResult (IRVar body)
@@ -568,13 +665,34 @@ enumSumP sr withBranchCount wrap v vals packed
                                        (IRTCons (unP (rProb r)) (rBranches r)))))]
       opaqueMass sr (IRTFst (IRVar paired)) (IRTSnd (IRVar paired))
 
--- | The IR node an enumerated sum of probabilities is built from: 'IRLogEnumSum'
--- (log-sum-exp reduction) in log space, plain 'IREnumSum' (linear sum)
--- otherwise. Shared by 'enumSumP' and the hand-rolled double-enumeration
--- cases in IRCompiler.hs's 'toIRInference' that build an 'IREnumSum' directly
--- rather than through 'enumSumP'.
+-- | The IR node an enumerated sum/max of probabilities is built from:
+-- 'IRLogEnumSum' (log-sum-exp reduction) in log space, plain 'IREnumSum'
+-- (linear sum) otherwise -- both legacy front-end nodes 'SPLL.IRTensorPass'
+-- lowers into the tensor builtins later, same as every other backend sees.
+-- 'ROpMax' (max-product/MAP) has no such legacy node: it is built directly in
+-- already-lowered tensor form ('IRBuiltin BMap'/'BReduce'), since a THIRD
+-- front-end constructor would need the same traversal-function updates
+-- 'IREnumSum'/'IRLogEnumSum' together paid for, for no benefit -- nothing
+-- between 'SPLL.IRCompiler' and 'SPLL.IRTensorPass' cares which form a node
+-- already in tensor shape arrived in, and 'SPLL.IRTensorPass's rewrite passes
+-- an unrecognised expression through unchanged. Shared by 'enumSumP' and the
+-- hand-rolled double-enumeration cases in IRCompiler.hs's 'toIRInference' that
+-- build an 'IREnumSum'/max reduction directly rather than through 'enumSumP'.
 enumSumNode :: Semiring -> Varname -> MultiValue -> IRExpr -> IRExpr
-enumSumNode sr = if srLogSpace sr then IRLogEnumSum else IREnumSum
+enumSumNode sr v vals body = case srReduceOp sr of
+  ROpAdd       -> IREnumSum v vals body
+  ROpLogSumExp -> IRLogEnumSum v vals body
+  ROpMax       -> IRBuiltin (BReduce ROpMax 0) [IRBuiltin BMap [IRLambda v body, tensorDomainSR vals]]
+
+-- | The enumerated domain as a rank-1 tensor of constants, in the same order
+-- 'IREnumSum'/'IRLogEnumSum' would have looped over it -- the direct-tensor
+-- sibling of 'SPLL.IRTensorPass's own (unexported) @tensorDomain@, duplicated
+-- rather than imported so this module (which 'SPLL.IRCompiler' -- and hence,
+-- transitively, everything -- depends on) does not gain an edge onto a later
+-- compiler *pass*.
+tensorDomainSR :: MultiValue -> IRExpr
+tensorDomainSR mv = IRBuiltin (BTensor [EFixed (length vals)]) (map (IRConst . valueToIR) vals)
+  where vals = multiValueToValueList mv
 
 -- | A discrete mass assembled by summing contributions (an enumerated support,
 -- a set of plan worlds), with its branch count.

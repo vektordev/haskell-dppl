@@ -18,6 +18,7 @@ module SPLL.IntermediateRepresentation (
 , Varname
 , IRValue
 , CompilerConfig(..)
+, SemiringFamily(..)
 , defaultCompilerConfig
 , defaultMaterializationCardinality
 , irMap
@@ -201,6 +202,12 @@ data UnaryOperand = OpNeg
 -- every generic pass.
 data ReduceOp = ROpAdd        -- ^ Sum. Identity 0.
               | ROpLogSumExp  -- ^ Log-sum-exp, the log-space sibling of 'ROpAdd'. Identity -inf.
+              | ROpMax        -- ^ Max (task semiring-parametric-marginals): the
+                               -- reduction the max-product (MAP/tropical) semiring's
+                               -- enumerated-sum sites fold with, in place of 'ROpAdd'.
+                               -- Identity -inf, same as 'ROpLogSumExp' (max is
+                               -- domain-agnostic: linear and log-space probabilities
+                               -- compare in the same order since log is monotone).
               deriving (Show, Eq)
 
 -- | Operations over a tensor (design ir-tensor-values). Deliberately four and
@@ -473,8 +480,93 @@ data CompilerConfig = CompilerConfig {
   -- (set/bag-valued 2^k intermediates); it is a config field rather than a
   -- literal so the plumbing already exists if it ever needs to be
   -- user-servicable.
-  materializationCardinality :: Int
+  materializationCardinality :: Int,
+  -- | Additional per-function probability-mode variants to compile alongside
+  -- the ordinary sum-product one (task semiring-parametric-marginals, design
+  -- materialized-marginals-semiring Tier 1): each entry in this list adds one
+  -- more 'IRFunGroup' per top-level function, named "<name>_<suffix>" (see
+  -- 'SPLL.Semiring.semiringSuffix'), whose only populated slot is 'probFun',
+  -- compiled with 'SPLL.Semiring.mkSemiring' fed this family instead of the
+  -- default 'SRSumProduct' -- everything else ('prodP'/'mixP'/'enumSumP' and
+  -- every leaf combinator built on 'SPLL.Semiring.Semiring') is unchanged, so
+  -- the extra group rides the exact same compilation code the ordinary
+  -- probability function does. Purely additive: '[]' (the default) changes
+  -- nothing about any existing group, so every pre-existing compiled program
+  -- is byte-for-byte unaffected. CLI: @--semiring=map@ (comma list of one
+  -- token today; @map@ maps onto 'SRMaxProduct', the only family with a real
+  -- 'SPLL.Semiring.Semiring' instance -- see 'SemiringFamily').
+  --
+  -- Scope: each extra family only gets a probability-mode entry point (no
+  -- 'integFun'/'genFun'/'normalFun'/'encodeFun') -- CDF and generation have no
+  -- settled meaning under max-product (see the task's write-up), and
+  -- 'topKThreshold' combined with an extra semiring is untested (topK is
+  -- itself already an approximate max-plus mechanism; layering it under an
+  -- *exact* 'SRMaxProduct' compile is redundant, not composed).
+  extraSemirings :: [SemiringFamily]
 } deriving (Show)
+
+-- | The probability-mode semiring families 'extraSemirings' can request
+-- besides the implicit default 'SRSumProduct' (task
+-- semiring-parametric-marginals). Lives here, not in "SPLL.Semiring", purely
+-- so 'CompilerConfig' -- itself defined in this module -- can name it in a
+-- field without an import cycle; "SPLL.Semiring" re-exports it as part of the
+-- same abstraction.
+data SemiringFamily = SRSumProduct
+                       -- ^ The default: exact probability/density. ⊗ = multiply
+                       -- (linear) / add (log), ⊕ = add (linear) / log-sum-exp
+                       -- (log). Never requested via 'extraSemirings' --
+                       -- it is what every program already compiles with.
+                     | SRMaxProduct
+                       -- ^ MAP / Viterbi: the probability of the single most
+                       -- likely derivation of a query value, rather than the
+                       -- total over every derivation. ⊗ unchanged from
+                       -- sum-product (independent factors still multiply/add);
+                       -- ⊕ becomes max instead of sum/log-sum-exp. AnyExcept
+                       -- (marginal-minus-one-branch) has no defined inverse
+                       -- under max, so a program reaching that path under this
+                       -- family is refused with a named error at compile time.
+                     | SRCounting
+                       -- ^ Model counting (#SAT) -- NOT implemented, and NOT
+                       -- reachable via any accepted CLI/API surface ('Main.hs'
+                       -- 's @--semiring=@ parser only accepts @map@;
+                       -- 'SPLL.Semiring.mkSemiring' 'error's on this
+                       -- constructor rather than emit a wrong answer). Kept as
+                       -- a named, documented gap rather than deleted, so the
+                       -- next attempt starts from the finding instead of
+                       -- rediscovering it: the natural implementation --
+                       -- leaves report unit weight instead of their real
+                       -- probability, everything else unchanged -- is UNSOUND
+                       -- under this codebase's Boolean-condition
+                       -- representation. 'IfThenElse'/gt-lt/two-Normal
+                       -- comparisons derive @p(cond=False)@ as
+                       -- @'SPLL.Semiring.srComplement' p(cond=True)@ (@1 -
+                       -- p(cond=True)@ linear) rather than compiling @cond@'s
+                       -- False case separately, to avoid an O(2^depth) blowup
+                       -- on nested conditions (see the comment at the
+                       -- 'IfThenElse' case in IRCompiler.hs). That identity is
+                       -- a probability-conservation law: it holds only because
+                       -- real probabilities of an exhaustive two-way partition
+                       -- sum to 1. A "count" leaf that reports unit weight
+                       -- whenever its event is merely POSSIBLE breaks it --
+                       -- @main = if Uniform < 0.5 then 1.0 else 2.0@ compiled
+                       -- @p(cond=True)@ to the constant 1 (both branches are
+                       -- possible, so both get unit weight under the natural
+                       -- reading), and @srComplement 1 = 1 - 1 = 0@ then
+                       -- reported the False branch -- and hence @count(2.0)@
+                       -- -- as impossible: measured @0.0@ against the true
+                       -- @1.0@. No 'Semiring'-level fix exists: 'srComplement'
+                       -- is a plain @IRExpr -> IRExpr@ function, and the
+                       -- correct False-branch weight (0 if @cond@ is
+                       -- deterministically true, 1 otherwise) is not a
+                       -- function of the collapsed True-branch weight alone --
+                       -- it needs the *pre-collapse* probability the collapse
+                       -- already discarded. A sound instance needs either a
+                       -- richer 'Semiring' interface (e.g. 'srComplement'
+                       -- taking the pre-collapse value alongside the collapsed
+                       -- one) or accepting the O(2^depth) separate-compile
+                       -- cost this identity exists to avoid -- a design
+                       -- question for a follow-up task, not a mechanical fix.
+                     deriving (Show, Eq, Ord)
 
 -- | The default cardinality budget for marginal materialization. See
 -- 'materializationCardinality' for what the number means and why it is 10000.
@@ -482,7 +574,7 @@ defaultMaterializationCardinality :: Int
 defaultMaterializationCardinality = 10000
 
 defaultCompilerConfig :: CompilerConfig
-defaultCompilerConfig = CompilerConfig {countBranches = False, topKThreshold = Nothing, optimizerLevel = 2, verbose = 0, pruneAnyChecks = False, noIntegrate=False, noProbability=False, noGenerate=False, showIntermediates=False, checkQueryType=True, batched=False, logSpace=False, optStats=False, materializationCardinality=defaultMaterializationCardinality}
+defaultCompilerConfig = CompilerConfig {countBranches = False, topKThreshold = Nothing, optimizerLevel = 2, verbose = 0, pruneAnyChecks = False, noIntegrate=False, noProbability=False, noGenerate=False, showIntermediates=False, checkQueryType=True, batched=False, logSpace=False, optStats=False, materializationCardinality=defaultMaterializationCardinality, extraSemirings=[]}
 --3: convert algortihm-and-type-annotated Exprs into abstract representation of explicit computation:
 --    Fold enum ranges, algorithms, etc. into a representation of computation that can be directly converted into code.
 

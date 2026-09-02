@@ -401,6 +401,9 @@ generateExpression (IRBuiltin (BReduce ROpAdd 0) [t]) = do
 generateExpression (IRBuiltin (BReduce ROpLogSumExp 0) [t]) = do
     tt <- generateExpression t
     return $ "logsumexp(" ++ tt ++ ")"
+generateExpression (IRBuiltin (BReduce ROpMax 0) [t]) = do
+    tt <- generateExpression t
+    return $ "maximum(" ++ tt ++ "; init=-Inf)"
 generateExpression (IRBuiltin (BReduce _ ax) _) = error (juliaAxisUnsupported "BReduce" ax)
 generateExpression (IRBuiltin (BIndex 0) [t, k]) = do
     tt <- generateExpression t
