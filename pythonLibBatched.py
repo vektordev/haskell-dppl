@@ -83,6 +83,43 @@ def safe_div(a, b):
 def poison():
   return torch.tensor(float('nan'))
 
+# --- runtime NaN guard (task batched-adt-cdf-refusal-becomes-nan) -----------
+# A poison is meant to be selected away by an enclosing torch.where before it
+# reaches a caller. That invariant does not always hold: an ADT-valued
+# program's cdf() body (SPLL.IRCompiler.compareValueExpr's TADT case -- an ADT
+# has no order to integrate along) is an IRError with nothing above it to
+# select from, so the poison reaches the top-level return unmasked. Without
+# this guard that surfaces as a plain NaN, indistinguishable from a genuine
+# floating-point bug.
+#
+# The compiler routes every emitted forward/integrate/generate return through
+# this function (SPLL.CodeGenPyTorchBatched.batchedBlock's 'ctx' parameter),
+# so a NaN reaching any of them raises here instead. The message cannot say
+# *which* of the two causes fired -- that would need the provenance an already
+# NaN-valued float has lost -- but it gives the two live possibilities: a
+# malformed floating-point operation upstream, or an unmasked poison(), most
+# commonly a cdf() query on an ADT-valued program (compareValueExpr has no
+# case for an ADT's order because there isn't one -- use p() instead).
+def _has_nan(x):
+  if torch.is_tensor(x):
+    return bool(torch.isnan(x).any())
+  if isinstance(x, T):
+    return _has_nan(x.t1) or _has_nan(x.t2)
+  if isinstance(x, float):
+    return math.isnan(x)
+  # int/bool/ADT instances/etc. carry no float to be NaN.
+  return False
+
+def check_result(x, ctx):
+  if _has_nan(x):
+    raise ValueError(
+      ctx + ": result is NaN. This is either a malformed floating-point "
+      "operation, or an unmasked poison() -- a refused computation (most "
+      "commonly cdf() on an ADT-valued program, which has no order to "
+      "integrate along; use p() instead) reaching the output because nothing "
+      "selected it away.")
+  return x
+
 # --- elementwise predicates --------------------------------------------------
 
 def isclose(a, b):

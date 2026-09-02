@@ -21,6 +21,7 @@ import SPLL.Prelude
 import SPLL.CodeGenJulia
 import SPLL.CodeGenPyTorch
 import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
+import SPLL.Parser (tryParseProgram)
 import TestCaseParser
 import TestTolerances (probTolerance, encodeSlotTolerance, normalizationTolerance, samplingTolerance)
 import SPLL.IntermediateRepresentation
@@ -762,6 +763,101 @@ batchedRefusalTable =
   , ("either_arith_inv",          "main's forward uses a construct outside the tensor fragment: inner lambda (IRLambda)")
   , ("injApply",                  "main's integrate uses a construct outside the tensor fragment: inner lambda (IRLambda)")
   , ("twiceApplication",          "main's generate uses a construct outside the tensor fragment: inner lambda (IRLambda)")
+  ]
+
+-- ===========================================================================
+-- Batched ADT-cdf NaN guard (task batched-adt-cdf-refusal-becomes-nan)
+-- ===========================================================================
+--
+-- A cdf() query on an ADT-valued program has no order to integrate along
+-- ('SPLL.IRCompiler.compareValueExpr's TADT case), so it answers 'IRError'.
+-- Unlike every other 'IRError' arm, this one is not behind a select: it *is*
+-- the whole body, so the batched backend's usual "poison() gets selected
+-- away by an enclosing torch.where" story does not apply, and the query used
+-- to silently answer @NaN@ instead of a refusal. The decision recorded on the
+-- task (2026-09-01 review) was not to add a new compile-time refusal --
+-- batched mode already has a narrower contract than the scalar backends, and
+-- the ADT-cdf refusal is exactly the kind of thing that contract already
+-- excludes -- but to make the existing NaN self-diagnosing: every emitted
+-- forward/integrate/generate return is routed through
+-- @pythonLibBatched.check_result@, which raises naming the two live causes
+-- (a malformed float op, or an unmasked @poison()@) rather than returning
+-- @NaN@ silently.
+--
+-- 'adtValuedProgSrc' in "TestRejection" pins the *scalar*/interpreter refusal
+-- on a recursive ADT (@DTree@), which is batched-ineligible for an unrelated
+-- reason (value-dependent recursion) and so cannot see this at all. This
+-- fixture is deliberately non-recursive so it stays batched-eligible.
+
+-- | Two nullary constructors, no recursion -- the smallest program whose
+-- query type is a TADT and which batched mode actually accepts.
+adtCdfCoinSrc :: String
+adtCdfCoinSrc = unlines
+  [ "data Coin = Heads | Tails"
+  , "main = if Uniform < 0.3 then Heads else Tails"
+  ]
+
+-- | Compile 'adtCdfCoinSrc' for batched mode, or fail the property naming
+-- where the pipeline broke (parse/compile/batched-emission), so a genuine
+-- regression in an earlier stage does not masquerade as this guard missing.
+compiledAdtCdfCoin :: IO (Either String [String])
+compiledAdtCdfCoin = return $ do
+  p <- either (Left . ("fixture failed to parse: " ++) . show) Right
+              (tryParseProgram "" adtCdfCoinSrc)
+  env <- either (Left . ("fixture failed to compile: " ++)) Right
+                (compile defaultCompilerConfig{batched = True} p)
+  let refusalPrefix = "batched mode refused the non-recursive ADT fixture (it "
+                    ++ "should be eligible -- see adtCdfCoinSrc's header): "
+  either (Left . (refusalPrefix ++)) Right (generateFunctionsBatched True env)
+
+batchedAdtCdfNaNGuardTests :: TestTree
+batchedAdtCdfNaNGuardTests = testGroup "batched ADT-cdf NaN guard" $
+  [ testProperty "the emitted integrate body routes its return through check_result, not a bare poison()" $
+      once $ ioProperty $ do
+        res <- compiledAdtCdfCoin
+        return $ case res of
+          Left err -> counterexample err False
+          Right srcLines ->
+            let code = unlines srcLines in
+            counterexample ("expected \"return check_result(\" somewhere in main's integrate "
+                            ++ "method; got:\n" ++ code)
+              ("return check_result(" `isInfixOf` code)
+  , testProperty "running it raises a diagnostic naming the poison, instead of returning NaN" $
+      once $ ioProperty $ do
+        mpy <- findTorchPython
+        case mpy of
+          Nothing -> do
+            hPutStrLn stderr "batched ADT-cdf NaN guard: runtime check skipped -- no torch-enabled python found (set NEST_TORCH_PYTHON)."
+            return (property True)
+          Just py -> do
+            res <- compiledAdtCdfCoin
+            case res of
+              Left err -> return (counterexample err False)
+              Right srcLines -> do
+                cwd <- getCurrentDirectory
+                let code = unlines srcLines
+                    script = "import sys\nsys.path.insert(0, " ++ show cwd ++ ")\n" ++ code
+                      ++ unlines
+                         [ "try:"
+                         , "    r = main.integrate(Heads())"
+                         , "    print('NO_EXCEPTION:' + repr(r))"
+                         , "except Exception as e:"
+                         , "    print('EXCEPTION:' + str(e))"
+                         ]
+                (exitCode, out, err) <- withSystemTempFile "adt_cdf_nan_guard.py" $ \tmpPath tmpHandle -> do
+                  hPutStr tmpHandle script
+                  hClose tmpHandle
+                  readProcessWithExitCode py [tmpPath] ""
+                return $ case exitCode of
+                  ExitFailure _ -> counterexample ("script crashed instead of catching the exception:\n" ++ out ++ err) False
+                  ExitSuccess
+                    | "NO_EXCEPTION" `isPrefixOf` out ->
+                        counterexample ("cdf() on the ADT-valued fixture returned a value instead of raising: " ++ out) False
+                    | not ("EXCEPTION:" `isPrefixOf` out) ->
+                        counterexample ("unexpected script output:\n" ++ out ++ err) False
+                    | not ("poison()" `isInfixOf` out) ->
+                        counterexample ("raised, but the message does not name the unmasked poison() as a cause:\n" ++ out) False
+                    | otherwise -> property True
   ]
 
 -- | One table row: the program must compile, and only then be refused by the

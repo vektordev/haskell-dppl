@@ -283,7 +283,7 @@ generateMethod env lut methodName groupNameStr (expr0, doc) = do
   () <- batchedGuard env groupNameStr methodName body
   let l1 = "def " ++ methodName ++ "(self" ++ concatMap (", " ++) args ++ "):"
       docLines = map ("# " ++) (lines doc)
-  return $ docLines ++ [l1] ++ indentOnce (batchedBlock env body)
+  return $ docLines ++ [l1] ++ indentOnce (batchedBlock (Just (groupNameStr ++ "." ++ methodName)) env body)
 
 unwrapLambdas :: IRExpr -> ([String], IRExpr)
 unwrapLambdas (IRLambda name rest) = (name : otherNames, plainTree)
@@ -370,7 +370,7 @@ renderGen env lut genArities genRaw groupNameStr (expr0, doc)
            Right () ->
              let l1 = "def generate(self" ++ concatMap (", " ++) (args ++ [batchNVar]) ++ "):"
                  docLines = map ("# " ++) (lines doc)
-             in Right (docLines ++ [l1] ++ indentOnce (batchedBlock env body))
+             in Right (docLines ++ [l1] ++ indentOnce (batchedBlock (Just (groupNameStr ++ ".generate")) env body))
 
 -- | A generate that draws a /structurally heterogeneous/ sample -- a recursion
 -- that builds a list, or a value-dependent branch between two shapes -- is the
@@ -934,7 +934,17 @@ emittable e = case e of
   -- one kernel over the [E, B] stack. Nothing here is value-dependent
   -- branching, which is the only thing the batched backend cannot bucket.
   IRBuiltin{}    -> True
-  IRError{}      -> True   -- refusal arm, emitted as a selected-away NaN poison (M3)
+  -- Refusal arm, emitted as a NaN 'poison()' constant (M3). Usually an
+  -- enclosing torch.where selects it away, but not always: an ADT-valued
+  -- program's cdf() body ('SPLL.IRCompiler.compareValueExpr's @TADT@ case) is
+  -- an 'IRError' with nothing above it to select from, so the poison reaches
+  -- the top-level return as-is. 'batchedBlock' routes every such return
+  -- through 'check_result' (pythonLibBatched.py) so that case raises a
+  -- diagnostic instead of silently answering NaN (task
+  -- batched-adt-cdf-refusal-becomes-nan) -- this predicate stays permissive
+  -- either way, since refusing 'IRError' outright would also reject the
+  -- ordinary selected-away arms the poison mechanism exists for.
+  IRError{}      -> True
   IRSample{}     -> True   -- a fresh random draw, batched via rand(n)/randn(n) (M4);
                            -- only ever produced by a generate body, never prob/integ
   -- Structure-of-arrays list access (design heterogeneous-batch-inference, M1):
@@ -1063,19 +1073,43 @@ reason e = case e of
 -- result tuple's components are lifted to assignments (like the scalar backend's
 -- 'SPLL.CodeGenPyTorch.generateStatementBlock') so a deep world-sum spine stays
 -- a sequence of statements rather than one pathologically long expression.
-batchedBlock :: SEnv -> IRExpr -> [String]
-batchedBlock env (IRLetIn name val body) =
-  batchedAssign env name val ++ batchedBlock (bindS env name val) body
+--
+-- @ctx@, when present, names the method every @return@ statement in this body
+-- belongs to (@"GroupName.methodName"@) and routes the returned value through
+-- @check_result@ (pythonLibBatched.py) rather than returning it bare. A
+-- structural if/else can have more than one @return@ (one per shape-directed
+-- branch, see below), so this has to be a property threaded through the
+-- recursion rather than something a caller could bolt on to a single call site
+-- afterwards.
+--
+-- This exists because a refusal arm ('IRError', emitted as a NaN @poison()@,
+-- see 'emittable') is not always behind a @torch.where@ that would select it
+-- away: 'SPLL.IRCompiler.compareValueExpr's @TADT@ case answers @IRError@
+-- unconditionally, so a @cdf()@ query on an ADT-valued program has *no* select
+-- to hide behind and the poison reaches the return as-is (task
+-- batched-adt-cdf-refusal-becomes-nan). @check_result@ turns that NaN into a
+-- raised diagnostic instead of a silently wrong number, without teaching this
+-- guard a static reachability analysis of which 'IRError's are dominated by a
+-- select and which are not.
+batchedBlock :: Maybe String -> SEnv -> IRExpr -> [String]
+batchedBlock ctx env (IRLetIn name val body) =
+  batchedAssign env name val ++ batchedBlock ctx (bindS env name val) body
 -- A structural (shape-directed) if is real Python control flow: within a shape
 -- bucket its condition is a plain Python bool, so only one arm runs -- which is
 -- what makes structure-directed recursion terminate and what keeps an arm that
 -- is illegal for this shape (e.g. `head sample` on an empty list) unevaluated.
-batchedBlock env (IRIf c t f) | structural env c =
-  ["if " ++ structuralCond env c ++ ":"] ++ indentOnce (batchedBlock env t)
-  ++ ["else:"] ++ indentOnce (batchedBlock env f)
-batchedBlock env (IRTCons f s) =
-  batchedAssign env "_r0" f ++ batchedAssign env "_r1" s ++ ["return T(_r0, _r1)"]
-batchedBlock env e = ["return " ++ batchedExpr env e]
+batchedBlock ctx env (IRIf c t f) | structural env c =
+  ["if " ++ structuralCond env c ++ ":"] ++ indentOnce (batchedBlock ctx env t)
+  ++ ["else:"] ++ indentOnce (batchedBlock ctx env f)
+batchedBlock ctx env (IRTCons f s) =
+  batchedAssign env "_r0" f ++ batchedAssign env "_r1" s ++ [returnStmt ctx "T(_r0, _r1)"]
+batchedBlock ctx env e = [returnStmt ctx (batchedExpr env e)]
+
+-- | One @return@ statement, optionally routed through the runtime NaN guard.
+-- See 'batchedBlock's header for why this can't just wrap a call site instead.
+returnStmt :: Maybe String -> String -> String
+returnStmt Nothing expr     = "return " ++ expr
+returnStmt (Just ctx) expr  = "return check_result(" ++ expr ++ ", " ++ show ctx ++ ")"
 
 -- | Emit a let binding as one or more assignment statements, splitting a
 -- let-spine and a tuple construction into separate statements so sharing and
@@ -1235,9 +1269,14 @@ batchedExpr env (IRFromLeft e)  = "fromLeft(" ++ batchedExpr env e ++ ")"
 batchedExpr env (IRFromRight e) = "fromRight(" ++ batchedExpr env e ++ ")"
 batchedExpr env (IRIsLeft e)    = "isinstance(" ++ batchedExpr env e ++ ", Left)"
 batchedExpr env (IRIsRight e)   = "isinstance(" ++ batchedExpr env e ++ ", Right)"
--- A refusal/error arm has no batched value; emit a NaN poison constant that the
--- enclosing torch.where selects away (design M3). A poison that survives into
--- the output shows up as NaN, caught by the value differential.
+-- A refusal/error arm has no batched value; emit a NaN poison constant. Usually
+-- an enclosing torch.where selects it away (design M3); a poison that survives
+-- selection into the output shows up as NaN, caught by the value differential.
+-- But not every 'IRError' sits behind a select -- an ADT-valued program's
+-- cdf() body is one unconditionally (task batched-adt-cdf-refusal-becomes-nan)
+-- -- so 'batchedBlock' additionally routes the top-level return through
+-- 'check_result' (pythonLibBatched.py), turning a poison that reaches it
+-- unmasked into a raised diagnostic instead of a silent NaN.
 batchedExpr _env (IRError _) = "poison()"
 batchedExpr _ e = error ("batched PyTorch codegen: unexpected node " ++ irPrintFlat e)
 
