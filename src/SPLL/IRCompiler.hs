@@ -337,6 +337,17 @@ isEnumerable = any isDiscrete
 --     program reaches this today, because Analysis declines to tag a curried
 --     spine at all ('SPLL.Analysis.applyTags'); it is stated here because it is
 --     a precondition of enumerating, not a consequence of that refusal.
+-- | Peel a curried application spine (@Apply (Apply (Apply f a) b) c@) down to
+-- its head and the left-to-right list of arguments applied to it
+-- (@(f, [a, b, c])@). Used to build a whole saturated call to a top-level
+-- function in one shot instead of one 'IRApply' per source-level argument
+-- (task curried-call-spine-needs-optimizer-to-typecheck).
+flattenApplySpine :: Expr -> (Expr, [Expr])
+flattenApplySpine = go []
+  where
+    go args (Expr _ (Apply l v)) = go (v : args) l
+    go args e = (e, args)
+
 isEnumerableApplication :: Expr -> Expr -> Bool
 isEnumerableApplication l v =
      IsConditional `elem` tags (getTypeInfo l)
@@ -1530,6 +1541,53 @@ toIRInference meta True (Expr TypeInfo{rType=rt} (Apply l v)) sample | pType (ge
 toIRInference meta cumulative (Expr TypeInfo {rType=_} (Apply l v)) sample
   | isEnumerableApplication l v =
   enumerateAppliedLambda meta cumulative l v sample
+-- Deterministic curried call spine rooted at a known top-level function: build
+-- the WHOLE application (the query sample, plus every source-level argument)
+-- as one contiguous 'IRApply' chain and let-bind it exactly once, instead of
+-- recursing per 'Apply' node -- which is what the general "Deterministic
+-- bound expression" case below does, and which let-binds the callee's partial
+-- application (awaiting the remaining curried arguments) *before* applying
+-- the rest of the spine to it.
+--
+-- That per-level split is invisible at the default -O, where the let-inliner
+-- collapses the single-use intermediate bindings back into one spine before
+-- codegen ever sees it. At -O0 nothing does, so codegen is handed
+-- @let c0 = f_prob(sample) in c0(x)@: a *contiguous* 'IRApply' spine is what
+-- the scalar backends flatten into one @f_prob(sample, x)@ call site
+-- ('IROptimizer.unconditionalAnns' states the same invariant, from the CSE
+-- side, for why it refuses to hoist a partial spine), and a spine broken
+-- across a let is exactly what that flattening cannot see through. Julia
+-- calls a partial application as if it were the fully-applied one-argument
+-- function and gets an arity 'MethodError'; Python would raise 'TypeError'
+-- for the same reason (task
+-- curried-call-spine-needs-optimizer-to-typecheck).
+--
+-- Guarded to the shapes this can handle soundly: every argument in the spine
+-- must be Deterministic (a probabilistic argument needs inversion machinery,
+-- handled by the existing per-argument cases below, which this equation
+-- leaves untouched since its guard then fails), and the spine's head must be
+-- a bare reference to a top-level function -- matching exactly the case the
+-- 'Var' equation further down would otherwise have let-bound as the spine's
+-- first, innermost partial call.
+toIRInference meta cumulative expr@(Expr TypeInfo{rType=rt} (Apply _ _)) sample
+  | (Expr _ (Var n), args@(_:_)) <- flattenApplySpine expr
+  , all ((== Deterministic) . pType . getTypeInfo) args
+  , Just (TArrow _ _, hasInference) <- lookup n (typeEnv meta) = do
+      argIRs <- mapM (toIRGenerate meta) args
+      let functionSuffix = if cumulative then "_integ" else "_prob"
+      let name = if hasInference then n ++ functionSuffix else n
+      let base = if hasInference
+            then case topKThreshold (compilerConfig meta) of
+              Just _ -> IRApply (IRApply (IRVar name) sample) (accProb meta)
+              Nothing -> IRApply (IRVar name) sample
+            else IRApply (IRVar name) sample
+      let wholeCall = foldl IRApply base argIRs
+      case rt of
+        TArrow _ _ -> return (detP wholeCall)
+        _ -> do
+          retVal <- mkVariable "call"
+          setVariables [(retVal, wholeCall)]
+          return (unpackResult (IRVar retVal))
 -- Deterministic bound expression
 toIRInference meta cumulative (Expr TypeInfo{rType=rt} (Apply l v)) sample | pType (getTypeInfo v) == Deterministic = do
   vIR <- toIRGenerate meta v
