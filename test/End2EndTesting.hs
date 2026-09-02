@@ -79,9 +79,9 @@ selectPassDifferentialTests = do
 -- Takes the program's scalar/batched compiles already done, shared across
 -- every query point of that program.
 selectNoOp :: Program -> Either CompilerError IREnv -> Either CompilerError IREnv -> TestCase -> Property
-selectNoOp p scalarEnv batchedEnv (ProbTestCase  name sample params _ _) =
+selectNoOp p scalarEnv batchedEnv (ProbTestCase  name sample params _) =
   selectNoOpCmp scalarEnv batchedEnv name (\c -> runProbC  p c params sample)
-selectNoOp p scalarEnv batchedEnv (CumulTestCase name sample params _ _) =
+selectNoOp p scalarEnv batchedEnv (CumulTestCase name sample params _) =
   selectNoOpCmp scalarEnv batchedEnv name (\c -> runIntegC p c params sample)
 selectNoOp _ _ _ _ = property True
 
@@ -131,24 +131,35 @@ harnessRoutingError backend tc =
   backend ++ " harness: test case " ++ testCaseName tc
           ++ " is neither a probability nor a cumulative case"
 
+-- | Check an actual (prob, dim) result against a query's 'Expectation'. Dim
+-- is checked unconditionally for a 'Possible' expectation -- there is no more
+-- "skip the dim check because the actual probability happened to be zero"
+-- special case (see CLAUDE.md's ".tst dim expectations" note, task
+-- tst-dim-unasserted-at-zero-probability) -- and not checked at all for
+-- 'Impossible', which asserts prob=0 and imposs=True instead of a dim.
+checkExpectation :: String -> String -> Expectation -> Double -> Double -> IRValue -> Property
+checkExpectation probLabel name (Possible (VFloat expectedProb) (VFloat expectedDim) mImp) outProb outDim res =
+  counterexample (probLabel ++ " differs for test case " ++ name ++ ". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < probTolerance) .&&.
+    counterexample ("Dimensionality differs for test case " ++ name ++ ". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outDim === expectedDim) .&&.
+    checkImposs name mImp res
+checkExpectation _ name (Possible other _ _) _ _ _ =
+  counterexample ("malformed expected result in test case " ++ name ++ ": the probability must be a float, got " ++ show other) False
+checkExpectation probLabel name Impossible outProb _outDim res =
+  counterexample (probLabel ++ " differs for test case " ++ name ++ ". Expected: 0.0 Got: " ++ show outProb) (abs outProb < probTolerance) .&&.
+    checkImposs name (Just True) res
+
 testInterpreter :: Program -> Either CompilerError IREnv -> TestCase -> Property
-testInterpreter p compiledE (ProbTestCase name sample params (VFloat expectedProb, VFloat expectedDim) expImposs) = ioProperty $ do
+testInterpreter p compiledE (ProbTestCase name sample params expct) = ioProperty $ do
   result <- try (let r = compiledE >>= \c -> runProbC p c params sample in evaluate (length (show r)) >> return r) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of
-    Right (Right res@(VProbDim outProb outDim)) ->
-      counterexample ("Probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < probTolerance) .&&.
-        counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim) .&&.
-        checkImposs name expImposs res
+    Right (Right res@(VProbDim outProb outDim)) -> checkExpectation "Probability" name expct outProb outDim res
     Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
     Right (Left err) -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
     Left err -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
-testInterpreter p compiledE (CumulTestCase name sample params (VFloat expectedProb, VFloat expectedDim) expImposs) = ioProperty $ do
+testInterpreter p compiledE (CumulTestCase name sample params expct) = ioProperty $ do
   result <- try (let r = compiledE >>= \c -> runIntegC p c params sample in evaluate (length (show r)) >> return r) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of
-    Right (Right res@(VProbDim outProb outDim)) ->
-      counterexample ("Cmulative probability differs for test case " ++ name ++". Expected: " ++ show expectedProb ++ " Got: " ++ show outProb) ((abs (outProb - expectedProb)) < probTolerance) .&&.
-        counterexample ("Dimensionality differs for test case " ++ name ++". Expected: " ++ show expectedDim ++ " Got: " ++ show outDim) (outProb === 0 .||. outDim === expectedDim) .&&.
-        checkImposs name expImposs res
+    Right (Right res@(VProbDim outProb outDim)) -> checkExpectation "Cmulative probability" name expct outProb outDim res
     Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
     Right (Left err) -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
     Left err -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
@@ -196,11 +207,10 @@ testInterpreter p compiledE (ArgmaxPTestCase name params res) = ioProperty $ do
         | resDim /= 0 -> return $ counterexample ("Test case " ++ name ++ ": argmax_p does not support continuous (dim > 0) results") False
         | otherwise -> evalRandIO (argmaxLoop p compiled name mockedParams res resP [res] resP 0)
       Right x -> return $ counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
--- The prob/cumulative equations above also destructure the .tst expectation as
--- a (VFloat, VFloat) pair, so a malformed corpus row lands here.
-testInterpreter _ _ tc = counterexample
-  ("malformed expected result in test case " ++ testCaseName tc
-    ++ ": the probability and dimension must both be floats") (property False)
+-- No trailing catch-all clause: the five equations above cover every
+-- 'TestCase' constructor exhaustively (a malformed prob/cumul expectation is
+-- now caught inside 'checkExpectation' instead of by falling through a
+-- pattern-match miss here -- see its 'Possible other _ _' case).
 
 -- Number of consecutive repeat draws (samples already in the bucket) after
 -- which we give up: if normalization held, the accumulated mass of a fully
@@ -395,28 +405,36 @@ juliaBatchTestCode projectDir allCases =
 
 -- The compiled result is (prob, (dim, impossible)) -- the trailing field is the
 -- internal impossibility flag (design inference-result-side-channels), which is
--- not stripped from the emitted code, hence the nested dim access below.
+-- not stripped from the emitted code, hence the nested dim access below. The
+-- dim check line is emitted only when the .tst row's 'Expectation' actually
+-- states a dim ('Possible') -- unconditionally, not gated on the runtime
+-- probability any more -- and omitted entirely for 'Impossible' rows, which
+-- have none to check (see CLAUDE.md's ".tst dim expectations" note).
 juliaModuleTestCases :: String -> [TestCase] -> String
 juliaModuleTestCases modName tcs =
   modName ++ ".main_gen(" ++ intercalate ", " (map jVal exampleParams) ++ ")\n" ++
   concat (map (\tc ->
-    let (name, sample, params, outProb, outDim, expImposs) = unpackTestCase tc
+    let (name, sample, params, expct) = unpackTestCase tc
         call = modName ++ "." ++ mainName tc ++ "(" ++ jVal sample ++ ", " ++ intercalate ", " (map jVal params) ++ ")"
+        outProb = VFloat (expectationProb expct)
+        dimCheck = case expectationDim expct of
+          Nothing -> ""
+          Just d  ->
+            "if tmp[2][1] != " ++ juliaVal (VFloat d) ++ "\n\
+            \  error(\"Dimensionality wrong: \" * string(tmp[2][1]) * \"/=\" * string(" ++ juliaVal (VFloat d) ++ ") * \"in test case " ++ name ++ "\")\n\
+            \end\n"
     in "tmp = " ++ call ++ "\n\
        \if abs(tmp[1] - " ++ juliaVal outProb ++ ") > " ++ show probTolerance ++ "\n\
        \  error(\"Probability wrong: \" * string(tmp[1]) * \"/=\" * string(" ++ juliaVal outProb ++ ") * \"in test case " ++ name ++ "\")\n\
-       \end\n\
-       \if tmp[1] != 0 && tmp[2][1] != " ++ juliaVal outDim ++ "\n\
-       \  error(\"Dimensionality wrong: \" * string(tmp[2][1]) * \"/=\" * string(" ++ juliaVal outDim ++ ") * \"in test case " ++ name ++ "\")\n\
-       \end\n" ++ juliaImpossCheck name expImposs
+       \end\n" ++ dimCheck ++ juliaImpossCheck name (expectationImposs expct)
     ) tcs)
   where
-    (_, _, exampleParams, _, _, _) = unpackTestCase (head tcs)
-    unpackTestCase (ProbTestCase name sample params (outProb, outDim) imp) = (name, sample, params, outProb, outDim, imp)
-    unpackTestCase (CumulTestCase name sample params (outProb, outDim) imp) = (name, sample, params, outProb, outDim, imp)
+    (_, _, exampleParams, _) = unpackTestCase (head tcs)
+    unpackTestCase (ProbTestCase name sample params expct) = (name, sample, params, expct)
+    unpackTestCase (CumulTestCase name sample params expct) = (name, sample, params, expct)
     unpackTestCase tc = error (harnessRoutingError "Julia" tc)
-    mainName (ProbTestCase _ _ _ _ _) = "main_prob"
-    mainName (CumulTestCase _ _ _ _ _) = "main_integ"
+    mainName (ProbTestCase _ _ _ _) = "main_prob"
+    mainName (CumulTestCase _ _ _ _) = "main_integ"
     mainName tc = error (harnessRoutingError "Julia" tc)
     -- Each program is wrapped in its own module, so its ADT constructors are
     -- not in scope where the harness writes the query point. Python's harness
@@ -453,21 +471,32 @@ pythonTestCode :: String -> [TestCase] -> String
 pythonTestCode src tcs = 
   unpack (replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n") (pack src)) ++ "\n" ++   -- Importing pyTorch is really slow and not needed
   "main.generate(" ++ intercalate ", " (map pyVal exampleParams) ++ ")\n" ++
-  concat (map (\tc -> let (name, sample, params, outProb, outDim, expImposs) = unpackTestCase tc in
-    "tmp = " ++ mainName tc ++ "(" ++  pyVal sample ++ ", " ++ intercalate ", " (map pyVal params) ++ ")\n\
-    \if abs(tmp[0] - " ++ pyVal outProb ++ ") > " ++ show probTolerance ++ ":\n\
-    \  raise ValueError(\"Probability wrong: \" + str(tmp[0]) + \"!=\" + str(" ++ pyVal outProb ++ ") + \"in test case " ++ name ++ "\")\n\
-    \if tmp[0] != 0 and tmp[1][0] != " ++ pyVal outDim ++ ":\n\
-    \  raise ValueError(\"Dimensionality wrong: \" + str(tmp[1][0]) + \"/=\" + str(" ++ pyVal outDim ++ ") + \"in test case " ++ name ++ "\")\n\
-    \" ++ pyImpossCheck name expImposs) tcs)
+  concatMap pyCase tcs
   where
-    (_, _, exampleParams, _, _, _) = unpackTestCase (head tcs)
-    unpackTestCase (ProbTestCase name sample params (outProb, outDim) imp) = (name, sample, params, outProb, outDim, imp)
-    unpackTestCase (CumulTestCase name sample params (outProb, outDim) imp) = (name, sample, params, outProb, outDim, imp)
+    (_, _, exampleParams, _) = unpackTestCase (head tcs)
+    unpackTestCase (ProbTestCase name sample params expct) = (name, sample, params, expct)
+    unpackTestCase (CumulTestCase name sample params expct) = (name, sample, params, expct)
     unpackTestCase tc = error (harnessRoutingError "Python" tc)
-    mainName (ProbTestCase _ _ _ _ _) = "main.forward"
-    mainName (CumulTestCase _ _ _ _ _) = "main.integrate"
+    mainName (ProbTestCase _ _ _ _) = "main.forward"
+    mainName (CumulTestCase _ _ _ _) = "main.integrate"
     mainName tc = error (harnessRoutingError "Python" tc)
+    -- Dim check line emitted only when the .tst row's 'Expectation' states a
+    -- dim ('Possible') -- unconditionally, not gated on the runtime
+    -- probability any more -- and omitted for 'Impossible' rows, which have
+    -- none to check (see CLAUDE.md's ".tst dim expectations" note).
+    pyCase tc =
+      let (name, sample, params, expct) = unpackTestCase tc
+          outProb = VFloat (expectationProb expct)
+          dimCheck = case expectationDim expct of
+            Nothing -> ""
+            Just d  ->
+              "if tmp[1][0] != " ++ pyVal (VFloat d) ++ ":\n\
+              \  raise ValueError(\"Dimensionality wrong: \" + str(tmp[1][0]) + \"/=\" + str(" ++ pyVal (VFloat d) ++ ") + \"in test case " ++ name ++ "\")\n"
+      in
+        "tmp = " ++ mainName tc ++ "(" ++  pyVal sample ++ ", " ++ intercalate ", " (map pyVal params) ++ ")\n\
+        \if abs(tmp[0] - " ++ pyVal outProb ++ ") > " ++ show probTolerance ++ ":\n\
+        \  raise ValueError(\"Probability wrong: \" + str(tmp[0]) + \"!=\" + str(" ++ pyVal outProb ++ ") + \"in test case " ++ name ++ "\")\n" ++
+        dimCheck ++ pyImpossCheck name (expectationImposs expct)
 
 -- The emitted result is (prob, (dim, impossible)), so the impossibility flag --
 -- checked only when the .tst line declared an expectation for it -- sits at
@@ -939,8 +968,11 @@ batchGroups isNeural tcs = mapM build grouped
                             , bgExpProb = [ep | (_, _, _, ep, _) <- g]
                             , bgExpDim  = [ed | (_, _, _, _, ed) <- g] }
     build [] = Nothing
-    asQuery (ProbTestCase _ s ps (VFloat ep, VFloat ed) _)  = Just (False, ps, s, ep, ed)
-    asQuery (CumulTestCase _ s ps (VFloat ep, VFloat ed) _) = Just (True,  ps, s, ep, ed)
+    -- 'Impossible' rows (no stated dim) fall through to the final wildcard and
+    -- are simply not batched, the same treatment 'containsAnyV' above gives a
+    -- marginal query point.
+    asQuery (ProbTestCase _ s ps (Possible (VFloat ep) (VFloat ed) _))  = Just (False, ps, s, ep, ed)
+    asQuery (CumulTestCase _ s ps (Possible (VFloat ep) (VFloat ed) _)) = Just (True,  ps, s, ep, ed)
     asQuery _ = Nothing
 
 -- | Batch the positional symbol arguments of a neural program across points.
@@ -1826,8 +1858,8 @@ loadBranchCountCase name = do
       row t = case runOf t of
         Right (VProbDimBC p d bc) -> (t, p, d, bc)
         other -> error (name ++ ": branch-counted run gave " ++ show other)
-        where runOf (ProbTestCase _ s ps _ _)  = runProbC prog env ps s
-              runOf (CumulTestCase _ s ps _ _) = runIntegC prog env ps s
+        where runOf (ProbTestCase _ s ps _)  = runProbC prog env ps s
+              runOf (CumulTestCase _ s ps _) = runIntegC prog env ps s
               runOf _ = error "not a query case"
   return (name, prog, env, map row queries)
 
@@ -1865,8 +1897,8 @@ branchCountPython name env rows = ioProperty $ do
   return $ case c of
     ExitSuccess   -> property True
     ExitFailure _ -> counterexample (name ++ ": branch-counted Python differed from the interpreter") False
-  where pyCall (ProbTestCase _ s ps _ _)  = (s, ps, "main.forward")
-        pyCall (CumulTestCase _ s ps _ _) = (s, ps, "main.integrate")
+  where pyCall (ProbTestCase _ s ps _)  = (s, ps, "main.forward")
+        pyCall (CumulTestCase _ s ps _) = (s, ps, "main.integrate")
         pyCall _ = error "not a query case"
 
 branchCountJulia :: [BranchCountCase] -> Property
@@ -1904,8 +1936,8 @@ branchCountJulia loaded = ioProperty $ do
   return $ case code of
     ExitSuccess   -> property True
     ExitFailure _ -> counterexample "branch-counted Julia differed from the interpreter" False
-  where jlCall (ProbTestCase _ s ps _ _)  = (s, ps, "main_prob")
-        jlCall (CumulTestCase _ s ps _ _) = (s, ps, "main_integ")
+  where jlCall (ProbTestCase _ s ps _)  = (s, ps, "main_prob")
+        jlCall (CumulTestCase _ s ps _) = (s, ps, "main_integ")
         jlCall _ = error "not a query case"
 
 -- | exp() of the log-space branch-counted probability must reproduce the linear
@@ -1924,13 +1956,13 @@ branchCountLogSpace name prog rows =
         , counterexample (name ++ "/" ++ tcName tc ++ ": branch count " ++ show lbc ++ " /= " ++ show bc)
             (lbc == bc) ]
       other -> counterexample (name ++ ": log-space run gave " ++ show other) False
-    runOf env (ProbTestCase _ s ps _ _)  = runProbC prog env ps s
-    runOf env (CumulTestCase _ s ps _ _) = runIntegC prog env ps s
+    runOf env (ProbTestCase _ s ps _)  = runProbC prog env ps s
+    runOf env (CumulTestCase _ s ps _) = runIntegC prog env ps s
     runOf _ _ = error "not a query case"
 
 tcName :: TestCase -> String
-tcName (ProbTestCase n _ _ _ _)  = n
-tcName (CumulTestCase n _ _ _ _) = n
+tcName (ProbTestCase n _ _ _)  = n
+tcName (CumulTestCase n _ _ _) = n
 tcName _ = "?"
 
 end2endTests :: IO TestTree

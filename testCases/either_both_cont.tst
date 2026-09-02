@@ -1,7 +1,7 @@
 backends: interpreter, julia, python, batched
 p(Left 0.5)=(0.4, 1.0, False)
 p(Right 0.7)=(0.6, 1.0)
-p(Left 1.5)=(0.0, 0.0, True)
+p(Left 1.5) is impossible
 p(Left ANY)=(0.4, 0.0)
 p(Right ANY)=(0.6, 0.0)
 cdf(Left 0.5)=(0.2, 0.0)

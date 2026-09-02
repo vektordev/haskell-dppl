@@ -2,5 +2,5 @@ p(Right ANY)=(0.5, 0.0, False)
 p(Left ANY)=(0.5, 0.0, False)
 p(Right 1.0)=(0.24197072451914337, 1.0, False)
 p(Right 0.5)=(0.3520653267642995, 1.0, False)
-p(Right -1.0)=(0.0, 0.0, True)
+p(Right -1.0) is impossible
 p(Left ())=(0.5, 0.0, False)

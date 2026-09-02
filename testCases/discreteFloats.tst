@@ -2,7 +2,7 @@ backends: interpreter, julia, python, batched, dense
 p(2.0)=(0.25, 0.0, False)
 p(3.0)=(0.5, 0.0)
 p(4.0)=(0.25, 0.0)
-p(5.0)=(0.0, 0.0, True)
+p(5.0) is impossible
 cdf(2.0)=(0.25, 0.0)
 cdf(3.0)=(0.75, 0.0)
 cdf(4.0)=(1.0, 0.0)

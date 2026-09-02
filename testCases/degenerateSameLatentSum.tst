@@ -4,5 +4,5 @@
 -- unoptimized path only, so keep this pinned at both optimization levels.
 backends: interpreter, julia, python, batched
 p((0.3, 0.6))=(1.0, 1.0, False)
-p((0.3, 0.7))=(0.0, 1.0, True)
-p((1.4, 2.8))=(0.0, 1.0, True)
+p((0.3, 0.7)) is impossible
+p((1.4, 2.8)) is impossible
