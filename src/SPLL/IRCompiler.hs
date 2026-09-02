@@ -6,6 +6,7 @@
 module SPLL.IRCompiler (
   envToIR,
   envToIRUnoptimized,
+  generateBackedSites,
   stripBranchCount,
   toIRNormal,
   sharesEnumeratedLatent,
@@ -99,8 +100,72 @@ envToIR conf fcDat p
 
 -- The FCData certificate is built once in 'Prelude.compile' and threaded in,
 -- rather than rebuilt here (modality-split-forwardchaining).
+--
+-- Wraps the actual compilation ('envToIRUnoptimized'') with the central
+-- generate-backed-inference guard (task central-generate-backed-prob-body-guard):
+-- every probability/integrate/normal/encode body this stage produces is
+-- required to be free of randomness before it can reach the optimizer or any
+-- backend. This is the single point where 'genFun'/'probFun'/'integFun'/
+-- 'normalFun'/'encodeFun' are assembled, so the check sees every site
+-- regardless of which combinator produced it and needs no per-site edits.
 envToIRUnoptimized :: CompilerConfig -> FCData -> Program -> IREnv
-envToIRUnoptimized conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb, noGenerate=noGen} fcDat p@Program{adts=progADTs} = IREnv (
+envToIRUnoptimized conf fcDat p = requireNoGenerateBacked (envToIRUnoptimized' conf fcDat p)
+
+-- | Refuse at compile time rather than hand back an 'IREnv' containing a
+-- generate-backed probability/integrate/normal/encode body -- see
+-- 'generateBackedSites' for what that means and why a syntactic test would be
+-- wrong. This converts every present and future generate-backed inference
+-- path (a compiled body that resamples instead of computing an exact
+-- probability, so it returns a different number on every call with the same
+-- query) from a silent wrong answer into a named refusal.
+requireNoGenerateBacked :: IREnv -> IREnv
+requireNoGenerateBacked env = case generateBackedSites env of
+  [] -> env
+  bad -> error $ unlines $
+    [ "envToIRUnoptimized: a compiled probability/integrate/normal/encode body draws"
+    , "randomness instead of computing an exact probability, so it would return a"
+    , "different number on every call with the same query value. NeST does exact"
+    , "inference, so this is refused at compile time rather than emitted. Offending"
+    , "function(s), each with the randomness source(s) it reaches:" ]
+    ++ [ "  " ++ nm ++ ": " ++ intercalate ", " ws | (nm, ws) <- bad ]
+    ++ [ "(task central-generate-backed-prob-body-guard)" ]
+
+-- | Every "<group>.<prob|integ|normal|encode>" site in the whole 'IREnv' whose
+-- compiled body is generate-backed -- i.e. not provably free of randomness --
+-- paired with the randomness source(s) 'randomDrawSites' finds in it.
+--
+-- The oracle has to be transitive purity, not a syntactic "mentions a @_gen@
+-- 'IRVar'" test: a pure higher-order helper can carry a @_gen@ reference in
+-- its plumbing without the *caller* drawing randomness. `testCases/hoTopLevel.ppl`
+-- (@f g = g 1.0@, @main = f (\\x -> Uniform + x)@) compiles @main.forward@ to
+-- @f_gen(\<the density continuation\>)@: @f_gen@'s own body is pure (it never
+-- itself samples), so a syntactic test naming every @_gen@ mention would flag
+-- this false positive where a purity oracle does not.
+--
+-- 'deterministicGens' already computes exactly that oracle, as a whole-program
+-- fixed point over 'genFun' bodies via 'isPureGiven' -- purely from the
+-- compiled IR, needing no separate determinism pass over the source
+-- ('CompilerMetadata.detGenNames', built from 'Typing.Determinism', is too
+-- coarse for this central check: see 'requireDeterministicUnderEnum', whose
+-- narrower local guard it correctly serves). A generator this pass never saw
+-- a body for (e.g. under @--noGenerate@) is never a candidate, so any
+-- reference to it is conservatively random; self- and mutual recursion is
+-- handled because the fixed point is global, not a per-site descent.
+-- 'randomDrawSites', reused unmodified from the local enumeration guard, then
+-- names the actual sources against that same oracle.
+generateBackedSites :: IREnv -> [(String, [String])]
+generateBackedSites (IREnv groups _ _) =
+  [ (nm, ws) | (nm, ws) <- concatMap chk groups, not (null ws) ]
+  where
+    det = deterministicGens groups
+    chk g =
+      [ (groupName g ++ "." ++ lbl, nub (randomDrawSites det b))
+      | (lbl, Just (b, _)) <- [ ("prob", probFun g), ("integ", integFun g)
+                              , ("normal", normalFun g), ("encode", encodeFun g) ]
+      ]
+
+envToIRUnoptimized' :: CompilerConfig -> FCData -> Program -> IREnv
+envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb, noGenerate=noGen} fcDat p@Program{adts=progADTs} = IREnv (
   map (makeAutoNeural progADTs conf (encodeDecls p)) (neurals p) ++
   concatMap (\(name, binding) ->
     let progTypeEnv = getGlobalTypeEnv p
