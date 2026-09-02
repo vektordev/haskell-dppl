@@ -329,12 +329,6 @@ generate f neurals' registry adts' globalEnv env args (IRMap fExpr listExpr) = d
       newLst <- mapM (\x -> generate f neurals' registry adts' globalEnv env args (IRApply fExpr (IRConst x))) lst
       return $ VList newLst
     _ ->  error "Type error: map must be called on a list"
-generate f neurals' registry adts' globalEnv env [] (IRElementOf elemExpr listExpr) = do
-  elemVal <- generate f neurals' registry adts' globalEnv env [] elemExpr
-  listVal <- generate f neurals' registry adts' globalEnv env [] listExpr
-  case listVal of
-    VList a -> return $ VBool (elemVal `elem` a)
-    _ -> error "Type error: ElementOf must be called on a list"
 generate f neurals' registry adts' globalEnv env [] (IRLeft expr) = do
   x <- generate f neurals' registry adts' globalEnv env [] expr
   return $ VEither (Left x)

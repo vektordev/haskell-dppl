@@ -1056,7 +1056,6 @@ scalarDiscreteMulti _ = False
 reason :: IRExpr -> String
 reason e = case e of
   IRMap{}         -> "list map (IRMap)"
-  IRElementOf{}   -> "list membership (IRElementOf)"
   IRApply{}       -> "function application (IRApply); a call did not inline"
   IRLambda{}      -> "inner lambda (IRLambda)"
   IRIsPossible{}  -> "membership check (IRIsPossible) over a non-scalar enumeration"

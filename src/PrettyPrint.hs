@@ -79,7 +79,6 @@ pPrintIRExpr (IRTCons e1 e2) n = binOpIR "," e1 e2 n
 pPrintIRExpr (IRHead e) n = "head (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRTail e) n = "tail (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRMap f e) n = "map (" ++ pPrintIRExpr f (n + 1) ++ ", " ++ pPrintIRExpr e (n + 1) ++ ")"
-pPrintIRExpr (IRElementOf e lst) n = "(" ++ pPrintIRExpr e (n + 1) ++ ") in (" ++ pPrintIRExpr lst (n + 1) ++ ")"
 pPrintIRExpr (IRTFst e) n = "fst (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRTSnd e) n = "snd (" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRLeft e) n = "left (" ++ pPrintIRExpr e (n + 1) ++ ")"

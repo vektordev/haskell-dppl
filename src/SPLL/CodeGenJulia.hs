@@ -287,10 +287,6 @@ generateExpression (IRCons hd tl) = do
     h <- generateExpression hd
     t <- generateExpression tl
     return $ "prepend(" ++ h ++ ", " ++ t ++ ")"
-generateExpression (IRElementOf el lst) = do
-    e <- generateExpression el
-    l <- generateExpression lst
-    return $ "(" ++ e ++ " in " ++ l ++ ")"
 generateExpression (IRTCons fs sn) = do
     f <- generateExpression fs
     s <- generateExpression sn

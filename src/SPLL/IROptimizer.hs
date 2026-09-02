@@ -905,7 +905,6 @@ headHash e = case e of
   IRSubtree _ i     -> hashMix 5 i
   IRConst v         -> hashMix 6 (hashStr (show v))
   IRCons{}          -> 7
-  IRElementOf{}     -> 8
   IRTCons{}         -> 9
   IRHead{}          -> 10
   IRTail{}          -> 11
@@ -1030,7 +1029,6 @@ setIRSubExprs (IRTCons{}) [a, b] = IRTCons a b
 setIRSubExprs (IRHead{}) [a] = IRHead a
 setIRSubExprs (IRTail{}) [a] = IRTail a
 setIRSubExprs (IRMap{}) [a, b] = IRMap a b
-setIRSubExprs (IRElementOf{}) [a, b] = IRElementOf a b
 setIRSubExprs (IRTFst{}) [a] = IRTFst a
 setIRSubExprs (IRTSnd{}) [a] = IRTSnd a
 setIRSubExprs (IRLeft{}) [a] = IRLeft a

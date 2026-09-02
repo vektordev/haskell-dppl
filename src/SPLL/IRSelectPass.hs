@@ -85,7 +85,6 @@ isTensorFragment expr = ok expr && all isTensorFragment (getIRSubExprs expr)
       IRTail _          -> False
       IRMap _ _         -> False
       IRIndex _ _       -> False
-      IRElementOf _ _   -> False
       IRLeft _          -> False
       IRRight _         -> False
       IRFromLeft _      -> False

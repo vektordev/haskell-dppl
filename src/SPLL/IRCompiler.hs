@@ -1104,7 +1104,6 @@ freeInIR v (IRFromRight a)      = freeInIR v a
 freeInIR v (IRIsLeft a)         = freeInIR v a
 freeInIR v (IRIsRight a)        = freeInIR v a
 freeInIR v (IRCons a b)         = freeInIR v a  || freeInIR v b
-freeInIR v (IRElementOf a b)    = freeInIR v a  || freeInIR v b
 freeInIR v (IRIndex a b)        = freeInIR v a  || freeInIR v b
 freeInIR v (IRMap f x)          = freeInIR v f  || freeInIR v x
 freeInIR v (IREnumSum n _ irBody) = v /= n && freeInIR v irBody

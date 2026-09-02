@@ -287,7 +287,6 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               | IRSubtree IRExpr Int
               | IRConst IRValue
               | IRCons IRExpr IRExpr
-              | IRElementOf IRExpr IRExpr
               | IRTCons IRExpr IRExpr
               | IRHead IRExpr
               | IRTail IRExpr
@@ -557,7 +556,6 @@ getIRSubExprs (IRTCons a b) = [a, b]
 getIRSubExprs (IRHead a) = [a]
 getIRSubExprs (IRTail a) = [a]
 getIRSubExprs (IRMap f a) = [f, a]
-getIRSubExprs (IRElementOf a b) = [a, b]
 getIRSubExprs (IRTFst a) = [a]
 getIRSubExprs (IRTSnd a) = [a]
 getIRSubExprs (IRLeft a) = [a]
@@ -653,7 +651,6 @@ irDescend f x = case x of
   (IRHead expr) -> IRHead (f expr)
   (IRTail expr) -> IRTail (f expr)
   (IRMap fe expr) -> IRMap (f fe) (f expr)
-  (IRElementOf ele lst) -> IRElementOf (f ele) (f lst)
   (IRTFst expr) -> IRTFst (f expr)
   (IRTSnd expr) -> IRTSnd (f expr)
   (IRLeft expr) -> IRLeft (f expr)
@@ -699,7 +696,6 @@ irDescendM f x = case x of
   (IRHead expr) -> IRHead <$> f expr
   (IRTail expr) -> IRTail <$> f expr
   (IRMap fe expr) -> IRMap <$> f fe <*> f expr
-  (IRElementOf ele lst) -> IRElementOf <$> f ele <*> f lst
   (IRTFst expr) -> IRTFst <$> f expr
   (IRTSnd expr) -> IRTSnd <$> f expr
   (IRLeft expr) -> IRLeft <$> f expr
@@ -746,7 +742,6 @@ irPrintFlat (IRTCons _ _) = "IRTCons"
 irPrintFlat (IRHead _) = "IRHead"
 irPrintFlat (IRTail _) = "IRTail"
 irPrintFlat (IRMap _ _) = "IRMap"
-irPrintFlat (IRElementOf _ _) = "IRElementOf"
 irPrintFlat (IRTFst _) = "IRTFst"
 irPrintFlat (IRTSnd _) = "IRTSnd"
 irPrintFlat (IRLeft _) = "IRLeft"
