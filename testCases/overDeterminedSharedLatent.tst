@@ -8,6 +8,6 @@
 backends: interpreter, julia, python, batched
 p((0.3, (3.7, 2.7)))=(1.0, 2.0, False)
 p((0.8, (4.0, 3.0)))=(1.0, 2.0, False)
-p((0.3, (3.7, 2.6)))=(0.0, 2.0, True)
-p((0.3, (5.0, 4.0)))=(0.0, 2.0, True)
-p((1.5, (5.2, 4.2)))=(0.0, 2.0, True)
+p((0.3, (3.7, 2.6))) is impossible
+p((0.3, (5.0, 4.0))) is impossible
+p((1.5, (5.2, 4.2))) is impossible

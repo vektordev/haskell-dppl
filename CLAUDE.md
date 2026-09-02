@@ -747,32 +747,44 @@ the file and line. Beware CRLF files when adding a token by script —
 append before the `\r`.
 
 Expected values are compared with `probTolerance` (1e-4). A `p(...)`/
-`cdf(...)` expectation takes an optional third component, the expected
-impossibility flag: `p(x) = (prob, dim, imposs)`, checked by all three
-backends when declared (a two-component expectation checks prob/dim
-only). The corpus rows that pin it target its *structural* semantics
-rather than a zero test — notably `normal p(40.0)`, a 40-sigma tail whose
-density underflows to a hard `0.0` while `imposs` must stay `False`.
+`cdf(...)` expectation has two shapes (`TestCaseParser.Expectation`):
 
-**A row whose actual probability is 0 does not assert its dim.** All three
-scalar backends and the interpreter check `dim` only when the computed
-probability is nonzero (`outProb === 0 .||. outDim === expectedDim` in
-`test/End2EndTesting.hs`) — at an impossible point the dim carries no
-information (is it a density that underflowed, or a mass that never matched?),
-so any number typed there is silently unchecked and can drift from reality
-without a red test. This is deliberate, not a gap to close by asserting dim
-there too — but it does mean a `.tst` author gets no feedback from the dim
-field on such a row. Two ways to still assert something at an impossible
-point: add the third `imposs` component (below), which *is* checked
-unconditionally when present, or match the corpus convention of stating the
-dim the value would carry if it weren't out of support/off-support (e.g. `0.0`
-for a discrete mismatch, `1.0` for a univariate density's tail, `2.0` for a
-bivariate one) — self-documenting even though unchecked, and what a reader
-should keep it consistent with when editing a row nearby. Found and the
-corpus swept for drifted instances by
-`tst-dim-unasserted-at-zero-probability`; six pre-existing rows across
-`multExp.tst`, `if.tst`, `tail.tst`, `maybeFromLeftMismatch.tst` and
-`uniformLog.tst` had already drifted and were corrected there.
+- **`p(x) = (prob, dim)`** or **`p(x) = (prob, dim, imposs)`** — an ordinary
+  point. `prob` and `dim` are *both always checked*, by all three scalar
+  backends and the interpreter, unconditionally — there is no "probability
+  happened to compute to zero so skip the dim check" special case. The
+  optional third component is the expected impossibility flag, checked when
+  present; omitting it (most pre-existing corpus lines) means "don't check
+  the flag". The corpus rows that pin it target its *structural* semantics
+  rather than a zero test — notably `normal p(40.0)`, a 40-sigma tail whose
+  density underflows to a hard `0.0` while `imposs` must stay `False` and
+  `dim` must still state the true `1.0` (it's on-support, just a tiny
+  density — dim is meaningful there and is checked like any other row).
+
+- **`p(x) is impossible`** / **`cdf(x) is impossible`** — the dedicated
+  shape for a genuinely impossible query point (wrong `Either` arm,
+  off-support sample, unmatched indicator, ...). At such a point the dim has
+  no fact of the matter (a hard zero is neither a density nor a mass), so
+  none is stated or checked; `prob` is asserted `0` and `imposs` is asserted
+  `True`, both unconditionally. This is the *only* way to spell a
+  zero-probability, impossible point — `TestCaseParser.pTupleExpectation`
+  refuses a `(0.0, dim, True)` tuple outright (a hard parse-time error naming
+  the file and line), so a `.tst` author can never write a numeric dim that
+  silently goes unchecked. Task `tst-dim-unasserted-at-zero-probability`
+  closed that gap: an earlier, purely-documentary pass over this same task
+  (corpus sweep + a note, no grammar change) was reopened and redone
+  properly once a human review pointed out it left the structural hole open;
+  the whole corpus was swept mechanically at the time (25 files' worth of
+  `(0.0, dim, True)` rows rewritten to `is impossible`) and every remaining
+  zero-probability `(prob, dim)` row was verified against the interpreter
+  under the new unconditional dim check.
+
+A zero-probability point that is *not* impossible (the rare on-support
+underflow case, `normal p(40.0)`-style) still uses the ordinary tuple shape
+with an explicit `imposs = False` third component — omitting the third
+component on a zero-probability tuple row is legal (means "don't check the
+flag") but unusual, since such a row is exactly the case where stating and
+checking `imposs` is most informative.
 
 A query point is written in the *value* grammar (`Parser.pValue`), which
 covers ADT constructor values by juxtaposition — `p(Leaf)`,

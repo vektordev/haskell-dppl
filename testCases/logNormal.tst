@@ -1,6 +1,6 @@
 backends: interpreter, julia, python, batched
 p(1.0)=(0.398942, 1.0, False)
 p(2.0)=(0.156874, 1.0)
-p(-1.0)=(0.0, 1.0, True)
+p(-1.0) is impossible
 cdf(1.0)=(0.5, 0.0)
 cdf(2.0)=(0.755891, 0.0)

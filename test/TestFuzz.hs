@@ -57,6 +57,7 @@ import Data.Number.Erf (erf)
 
 import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
+import SPLL.IRCompiler (generateBackedSites)
 import SPLL.Prelude
 import SPLL.Validator (validateProgram)
 import ArbitrarySPLL (genRawFuzzProgram, genTypedProgram, genTypedExpr, Ty(..))
@@ -215,6 +216,38 @@ prop_Fuzz_TypedCompileNeverCrashes = withMaxSuccess 40 $ forAll (resize fuzzSize
       sample <- drawSample p irEnv
       _ <- evaluate (fmap forceShow (runProbC p irEnv [] sample))
       return $ property True
+
+-- | 'compile' never hands back an 'IREnv' whose probability/integrate/
+-- normal/encode bodies draw randomness (task
+-- central-generate-backed-prob-body-guard) -- checked here by recomputing
+-- 'generateBackedSites' independently of the central guard wired into
+-- 'SPLL.IRCompiler.envToIRUnoptimized', which already refuses to *return*
+-- such an env by throwing instead. Structurally that makes the "bad" branch
+-- below unreachable through the guard as currently wired: this property's
+-- real job is as a regression backstop against the guard's wiring coming
+-- unstuck (e.g. a future refactor that starts calling the unwrapped
+-- 'envToIRUnoptimized'' or otherwise bypasses 'requireNoGenerateBacked')
+-- rather than the guard itself, which -- if the wiring ever did slip --
+-- would surface as a silently wrong-but-crash-free probability function
+-- instead of the loud, targeted counterexample this gives.
+--
+-- Close to vacuous today, deliberately: 'genTypedProgram' has no 'Apply',
+-- 'Lambda', 'let', tuples, ADTs, neural declarations or recursion, and every
+-- known generate-backed instance needs at least one of those. It earns its
+-- keep once 'typed-program-generator-expansion' lands (tuples + fst/snd is
+-- the cheapest addition that reaches instance 4's minimal witness,
+-- @fst (Uniform, Uniform * Uniform)@). Cheap in the meantime: unlike the
+-- properties below it never draws a sample or calls 'runProbC', so 3000
+-- draws is affordable at this module's per-case budget.
+prop_Fuzz_ProbNeverGenerateBacked :: Property
+prop_Fuzz_ProbNeverGenerateBacked = withMaxSuccess 3000 $
+  forAll (resize fuzzSize genTypedProgram) $ \p -> ioProperty $ withinBudget $ do
+    r <- trySync (evaluate (forceShow (compile defaultCompilerConfig p)))
+    return $ case r of
+      Right (Right irEnv) -> case generateBackedSites irEnv of
+        []  -> property True
+        bad -> counterexample ("GENERATE-BACKED: " ++ show bad ++ "\nPROGRAM: " ++ show p) False
+      _ -> property True
 
 -- ---------------------------------------------------------------------------
 -- Well-typed scalar fuzzing: the inference invariants.
