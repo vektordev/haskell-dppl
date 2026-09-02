@@ -122,10 +122,43 @@ def check_result(x, ctx):
 
 # --- elementwise predicates --------------------------------------------------
 
+# Safety margin for isclose's tolerance, in ULPs of the looser operand dtype.
+# A witness value is commonly reconstructed by one or more chained
+# subtractions (x = observed - y), each losing on the order of one ULP of
+# precision relative to the dtype actually in play -- so this has to absorb a
+# short chain of those, not just one, while staying far below the magnitude
+# of a genuine mismatch (a different branch/constructor, not roundoff).
+#
+# Calibrated against two corpus pairs that bound it from opposite sides, at
+# float32 (eps ~1.19e-7): 'floatEquality' needs a *rejection* at a ~1e-6
+# absolute difference around magnitude 0.3 (0.1+0.2 vs 0.299999/0.300001), and
+# 'letWitnessedTupleFpUlp'/'letWitnessedEitherFpUlp' need an *acceptance* of a
+# ~1.5e-8 subtraction residual around magnitude 0.2-0.9. 8 ULPs sits in that
+# window with margin on both sides (~2.9e-7 at magnitude 0.3, comfortably
+# under the 1e-6 rejection and comfortably over the 1.5e-8 residual) -- do not
+# raise this without rechecking 'floatEquality' can still tell 0.299999/
+# 0.300001 apart from 0.3.
+_ISCLOSE_ULPS = 8
+
 def isclose(a, b):
-  # Elementwise |a - b| <= tol, returning a bool tensor. Mirrors pythonLib's
-  # scalar isclose tolerance.
-  return torch.abs(astensor(a) - astensor(b)) <= 1e-9
+  # Elementwise |a - b| <= tol, returning a bool tensor. The tolerance used
+  # to be a flat constant copied from pythonLib's scalar float64 tolerance
+  # (1e-9), which sits *below one float32 ULP*: the batched runtime packs
+  # query samples as float32 by default (see astensor/_pack), so a
+  # subtraction-based witness check could never pass there -- task
+  # batched-isclose-tolerance-below-float32-ulp. The tolerance here instead
+  # tracks the dtype and magnitude actually being compared: a few ULPs of the
+  # looser input dtype, scaled by the operands' own magnitude and floored at
+  # that dtype's own eps -- not at 1.0, which would hand every sub-unit
+  # comparison the same oversized tolerance and blind 'floatEquality' to a
+  # genuine ~1e-6 mismatch -- so a near-zero comparison still gets a tolerance
+  # rather than one that collapses to exactly zero.
+  at = astensor(a)
+  bt = astensor(b)
+  eps = max(torch.finfo(at.dtype).eps, torch.finfo(bt.dtype).eps)
+  scale = torch.maximum(torch.abs(at), torch.abs(bt)).clamp(min=eps)
+  tol = _ISCLOSE_ULPS * eps * scale
+  return torch.abs(at - bt) <= tol
 
 # --- helpers -----------------------------------------------------------------
 # astensor has no leading underscore so `from pythonLibBatched import *` exports
