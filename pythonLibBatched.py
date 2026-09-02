@@ -436,6 +436,13 @@ def _pack(vs):
     return Left(_pack([s.val for s in vs]))
   if isinstance(head, Right):
     return Right(_pack([s.val for s in vs]))
+  if head is None:
+    # Unit payload (e.g. Left ()'s val, from `Nothing = left ()`): no
+    # per-element data to stack, so the packed leaf stays a single None
+    # rather than a [B] tensor. A kernel that reaches this arm at all
+    # branches on the tag alone (isinstance(sample, Left/Right)) and never
+    # indexes into a unit payload, so nothing downstream needs it shaped.
+    return None
   if torch.is_tensor(head) and head.dim() > 0:
     return torch.stack([astensor(v) for v in vs])
   if isinstance(head, bool):
