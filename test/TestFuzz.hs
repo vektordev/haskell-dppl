@@ -158,8 +158,25 @@ probDim _ = Nothing
 -- is reported as a failure (with its quickcheck-replay seed), same as a
 -- crash: a compiler that never terminates on some input is exactly the kind
 -- of robustness gap this module exists to surface.
+--
+-- Was 1s (task fuzz-qc-compiler-bugs, 2026-09-02 review: re-evaluate it,
+-- since Slow can afford more than a tight per-case bound). At 1s, a
+-- legitimately-terminating topK-guarded and\/or-heavy Int compile (the
+-- residual this module's own history already documents -- see
+-- IRCompiler's topK-guarded IfThenElse notes) was routinely timing out and
+-- being misreported as a hang, which is a false failure, not a finding.
+-- Measured directly: replaying the two \'TopKZeroMatchesExact\'\/
+-- \'TopKNeverInflates\' seeds recorded against a 1s budget, both completed
+-- in 4.2-4.6s once given the room. 5s covers that with margin while keeping
+-- a Slow run's aggregate wall-clock bounded (this module has one property,
+-- \'MixtureFollowsCombinationRules\', already scaled 10x above this
+-- constant). It does not make the timeout vacuous: replaying past-1s
+-- failures at a 30s\/300s-scaled budget still produced a genuine
+-- non-terminating draw (filed as its own item, not fixed here) rather than
+-- merely a slow one, which is exactly the "never terminates" signal this
+-- comment already commits to treating as a real failure.
 perCaseBudgetMicros :: Int
-perCaseBudgetMicros = 1 * 1000 * 1000
+perCaseBudgetMicros = 5 * 1000 * 1000
 
 -- | QuickCheck's default size schedule grows 0..~99 across a property's
 -- successes; left unbounded, later draws produce deeply nested expressions
