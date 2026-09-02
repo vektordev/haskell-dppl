@@ -1971,25 +1971,33 @@ loadEnd2EndCases keep = do
 unoptimizedRecompileExempt :: [String]
 unoptimizedRecompileExempt = ["recursiveAdtMultiCtor"]
 
--- | Programs the -O0 *codegen* groups cannot run yet, for a defect that is not
--- the optimizer changing an answer but the optimizer being required to produce
--- a well-formed call at all.
+-- | Programs the -O0 *codegen* groups could not run, for a defect that was
+-- not the optimizer changing an answer but the optimizer being required to
+-- produce a well-formed call at all.
 --
--- 'toIRInference' compiles @Apply@ by let-binding each step of a curried
--- application spine (@let c0 = f(sample) in let c1 = c0(5.0) in ...@), while
--- the scalar backends emit a user function uncurried and flatten a *contiguous*
--- spine into one @f(sample, 5.0)@ call site. At the default -O the let-inliner
--- rejoins the spine before codegen sees it; at -O0 nothing does, so each half is
--- emitted as its own call and Julia answers @MethodError: no method matching
--- distr_prob(::Float64)@ -- an arity error, not a wrong number. It is the same
--- "the optimizer is load-bearing" family as investigation
--- 'any-placeholder-reconstruction-fragility' and is tracked separately by
--- 'curried-call-spine-needs-optimizer-to-typecheck'.
+-- 'toIRInference' used to compile @Apply@ by let-binding each step of a
+-- curried application spine (@let c0 = f(sample) in let c1 = c0(5.0) in ...@),
+-- while the scalar backends emit a user function uncurried and flatten a
+-- *contiguous* spine into one @f(sample, 5.0)@ call site. At the default -O
+-- the let-inliner rejoined the spine before codegen saw it; at -O0 nothing
+-- did, so each half was emitted as its own call and Julia answered
+-- @MethodError: no method matching distr_prob(::Float64)@ -- an arity error,
+-- not a wrong number. It was the same "the optimizer is load-bearing" family
+-- as investigation 'any-placeholder-reconstruction-fragility', tracked
+-- separately by task 'curried-call-spine-needs-optimizer-to-typecheck'.
 --
--- These three are the whole corpus incidence: every other program's -O0
--- Julia agrees with its .tst.
+-- Fixed at the root (that task's direction 2): a dedicated 'toIRInference'
+-- equation now recognizes a curried spine whose head is a known top-level
+-- function and every argument is Deterministic, and builds the whole
+-- application -- the query sample plus every source-level argument -- as one
+-- contiguous 'IRApply' chain, let-bound exactly once, instead of one
+-- 'IRApply'/'let' pair per source-level argument. The spine is then
+-- contiguous at every -O level, not just after the let-inliner runs, so the
+-- backends' existing flattening (@f(sample, 5.0)@) sees it whether or not the
+-- optimizer ran. This list is empty and kept only as the hook the acceptance
+-- criterion (an empty list, the group green with these three restored) names.
 unoptimizedCodegenExempt :: [String]
-unoptimizedCodegenExempt = ["call", "normalThroughFunction", "dice"]
+unoptimizedCodegenExempt = []
 
 -- | The corpus subset the -O0 *codegen* groups run, on both text backends.
 --
