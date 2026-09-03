@@ -36,9 +36,9 @@ optimizeEnv conf (IREnv funcs adtsDecl consts) = reportStats conf report (IREnv 
       g <- onFun (groupName fg ++ "_gen")   (genFun fg)
       pr <- onFun (groupName fg ++ "_prob")  (probFun fg)
       i <- onFun (groupName fg ++ "_integ") (integFun fg)
-      e <- onFun (groupName fg ++ "_encode") (encodeFun fg)
+      e <- onFun (groupName fg ++ "_writeLogits") (writeLogitsFun fg)
       n <- onFun (groupName fg ++ "_normal") (normalFun fg)
-      return fg { genFun = g, probFun = pr, integFun = i, encodeFun = e, normalFun = n }
+      return fg { genFun = g, probFun = pr, integFun = i, writeLogitsFun = e, normalFun = n }
     onFun :: String -> Maybe IRFunDecl -> State [(String, OptStats)] (Maybe IRFunDecl)
     onFun _ Nothing = return Nothing
     onFun label (Just (expr, doc)) = do
@@ -163,7 +163,7 @@ data OptEnv = OptEnv
 -- the empty set would never let a self-recursive generate function in.
 --
 -- A generator this analysis cannot see (a name with no group, e.g. a neural
--- @_auto_gen@ wrapper, which samples from the decoder anyway) is absent from
+-- @_auto_gen@ wrapper, which samples from the read-logits network anyway) is absent from
 -- the candidate set and therefore refutes any body mentioning it -- the same
 -- answer 'isEffectfulVar' alone would have given.
 deterministicGens :: [IRFunGroup] -> Set.Set Varname

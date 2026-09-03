@@ -235,7 +235,7 @@ prop_Fuzz_TypedCompileNeverCrashes = withMaxSuccess 40 $ forAll (resize fuzzSize
       return $ property True
 
 -- | 'compile' never hands back an 'IREnv' whose probability/integrate/
--- normal/encode bodies draw randomness (task
+-- normal/writeLogits bodies draw randomness (task
 -- central-generate-backed-prob-body-guard) -- checked here by recomputing
 -- 'generateBackedSites' independently of the central guard wired into
 -- 'SPLL.IRCompiler.envToIRUnoptimized', which already refuses to *return*

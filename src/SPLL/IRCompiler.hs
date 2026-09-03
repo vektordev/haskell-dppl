@@ -113,16 +113,16 @@ envToIR conf fcDat p
 --
 -- Wraps the actual compilation ('envToIRUnoptimized'') with the central
 -- generate-backed-inference guard (task central-generate-backed-prob-body-guard):
--- every probability/integrate/normal/encode body this stage produces is
+-- every probability/integrate/normal/writeLogits body this stage produces is
 -- required to be free of randomness before it can reach the optimizer or any
 -- backend. This is the single point where 'genFun'/'probFun'/'integFun'/
--- 'normalFun'/'encodeFun' are assembled, so the check sees every site
+-- 'normalFun'/'writeLogitsFun' are assembled, so the check sees every site
 -- regardless of which combinator produced it and needs no per-site edits.
 envToIRUnoptimized :: CompilerConfig -> FCData -> Program -> IREnv
 envToIRUnoptimized conf fcDat p = requireNoGenerateBacked (envToIRUnoptimized' conf fcDat p)
 
 -- | Refuse at compile time rather than hand back an 'IREnv' containing a
--- generate-backed probability/integrate/normal/encode body -- see
+-- generate-backed probability/integrate/normal/writeLogits body -- see
 -- 'generateBackedSites' for what that means and why a syntactic test would be
 -- wrong. This converts every present and future generate-backed inference
 -- path (a compiled body that resamples instead of computing an exact
@@ -132,7 +132,7 @@ requireNoGenerateBacked :: IREnv -> IREnv
 requireNoGenerateBacked env = case generateBackedSites env of
   [] -> env
   bad -> error $ unlines $
-    [ "envToIRUnoptimized: a compiled probability/integrate/normal/encode body draws"
+    [ "envToIRUnoptimized: a compiled probability/integrate/normal/writeLogits body draws"
     , "randomness instead of computing an exact probability, so it would return a"
     , "different number on every call with the same query value. NeST does exact"
     , "inference, so this is refused at compile time rather than emitted. Offending"
@@ -140,7 +140,7 @@ requireNoGenerateBacked env = case generateBackedSites env of
     ++ [ "  " ++ nm ++ ": " ++ intercalate ", " ws | (nm, ws) <- bad ]
     ++ [ "(task central-generate-backed-prob-body-guard)" ]
 
--- | Every "<group>.<prob|integ|normal|encode>" site in the whole 'IREnv' whose
+-- | Every "<group>.<prob|integ|normal|writeLogits>" site in the whole 'IREnv' whose
 -- compiled body is generate-backed -- i.e. not provably free of randomness --
 -- paired with the randomness source(s) 'randomDrawSites' finds in it.
 --
@@ -171,25 +171,25 @@ generateBackedSites (IREnv groups _ _) =
     chk g =
       [ (groupName g ++ "." ++ lbl, nub (randomDrawSites det b))
       | (lbl, Just (b, _)) <- [ ("prob", probFun g), ("integ", integFun g)
-                              , ("normal", normalFun g), ("encode", encodeFun g) ]
+                              , ("normal", normalFun g), ("writeLogits", writeLogitsFun g) ]
       ]
 
 envToIRUnoptimized' :: CompilerConfig -> FCData -> Program -> IREnv
 envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noProb, noGenerate=noGen} fcDat p@Program{adts=progADTs} = IREnv (
-  map (makeAutoNeural progADTs conf (encodeDecls p)) (neurals p) ++
+  map (makeAutoNeural progADTs conf (writeLogitsDecls p)) (neurals p) ++
   concatMap (\(name, binding) ->
     let progTypeEnv = getGlobalTypeEnv p
         bindingParamNames = extractParamNames binding
         pt = pType $ getTypeInfo binding
         ptUnderLambdas = pType $ getTypeInfo $ stripLambdas binding
-        -- Every logit-representable top-level function gets its own encodeFun, keyed to its
+        -- Every logit-representable top-level function gets its own writeLogitsFun, keyed to its
         -- own <name>_prob / <name>_normal functions, with no neural declaration required
         -- (task encode-per-function-endpoints; `main` is just the name == "main" case).
         -- Lazily references baseFunGroup/tupleNormalFuns to read whether this function's
         -- prob/normal functions were generated; non-representable functions keep
-        -- encodeFun = Nothing (purely additive, no new error surface).
-        encodeF =
-              makeTopLevelEncodeFun progADTs conf (encodeDecls p)
+        -- writeLogitsFun = Nothing (purely additive, no new error surface).
+        writeLogitsF =
+              makeTopLevelWriteLogitsFun progADTs conf (writeLogitsDecls p)
                 name
                 (rType (getTypeInfo (stripLambdas binding)))
                 bindingParamNames
@@ -234,7 +234,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
         sampleDom = listToMaybe $ filter multiValueIsFinite $
           [mv | DiscreteValues mv <- tags (getTypeInfo (stripLambdas binding))]
           ++ [mv | Right mv <- [autoDeriveMultiValue progADTs returnRType]]
-        baseFunGroup = IRFunGroup {groupName=name, encodeFun=encodeF, sampleDomain=sampleDom,
+        baseFunGroup = IRFunGroup {groupName=name, writeLogitsFun=writeLogitsF, sampleDomain=sampleDom,
          integFun =
           if not noInteg && (pt == Deterministic || pt == Integrate || pt == PNormal || pt == PLogNormal) then
             Just (appendDoc guardNote (toIntegDecl name (IRLambda "sample" (guardQuery "cdf" (runCompile (meta progTypeEnv) (toIRInferenceSave (meta progTypeEnv) True binding (IRVar "sample")))))))
@@ -285,12 +285,12 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
         -- acceptance criteria, rather than a whole-artifact mode switch.
         --
         -- Scope cuts, both documented on 'extraSemirings' itself: no
-        -- 'integFun'/'genFun'/'normalFun'/'encodeFun' (CDF and generation have
+        -- 'integFun'/'genFun'/'normalFun'/'writeLogitsFun' (CDF and generation have
         -- no settled meaning under max-product), and no topK interaction (the
         -- 'acc_prob' extra parameter/'TOP_K_CUTOFF' plumbing 'baseFunGroup's
         -- own 'probFun' has under 'topKThreshold' is not replicated here).
         extraFunGroups =
-          [ IRFunGroup { groupName = name ++ "_" ++ semiringSuffix fam, encodeFun = Nothing, sampleDomain = Nothing
+          [ IRFunGroup { groupName = name ++ "_" ++ semiringSuffix fam, writeLogitsFun = Nothing, sampleDomain = Nothing
                         , integFun = Nothing
                         , probFun =
                             if not noProb && (pt == Deterministic || pt == Integrate || pt == PNormal || pt == PLogNormal) then
@@ -3556,7 +3556,7 @@ planIsCtor nm y = IRApply (IRVar ("is" ++ nm)) y
 -- The else-branch is a canonical value of the field's type, NOT 'VAny': these
 -- reads nest (@hd (tl y)@), so the fallback is itself fed to the next level's
 -- @is<Ctor>@, and the convention everywhere else in the compiler is that
--- @is<Ctor>@ is only ever reached after an 'isAny' test (see the decoder's own
+-- @is<Ctor>@ is only ever reached after an 'isAny' test (see the read-logits network's own
 -- reader) -- 'isImpl' errors on a wildcard rather than answering it. A
 -- well-formed dummy answers False cleanly and the chain stays total. Which
 -- dummy is irrelevant: the enclosing guard discards the whole world.
@@ -4490,7 +4490,7 @@ planWitnessApply meta cumulative rt lResolvedCN lambdaBodyCN tag v sample
   , not (isArrow rt)
   , Expr _ (ReadNN nnName symArg) <- v
   , Just (_, TArrow TSymbol targetTy, declTag) <- find (\(n, _, _) -> n == nnName) (neurals (compilingProgram meta))
-  , let resolved = resolvePartitionAnnotation (encodeDecls (compilingProgram meta)) targetTy declTag
+  , let resolved = resolvePartitionAnnotation (writeLogitsDecls (compilingProgram meta)) targetTy declTag
   , isJust resolved || isRight (autoDeriveMultiValue (adtDecls meta) targetTy)
   = do
       let plan = makePartitionPlan (adtDecls meta) targetTy resolved

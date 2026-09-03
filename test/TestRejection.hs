@@ -64,20 +64,21 @@ anyInProgramProg = Program [("main", Expr makeTypeInfo (Constant VAny))] [] [] [
 
 -- Two PartitionPlan annotations for the same RType (Int) that disagree must be
 -- rejected as a conflicting registration -- not reachable via the invalid* family,
--- so it is constructed locally here (see SPLL.Validator.validateEncodeDecls).
-encodeCollisionProg :: Program
-encodeCollisionProg = Program [("main", constF 1.0)] [] []
+-- so it is constructed locally here (see SPLL.Validator.validateWriteLogitsDecls).
+writeLogitsCollisionProg :: Program
+writeLogitsCollisionProg = Program [("main", constF 1.0)] [] []
   [ (TInt, MultiDiscretes [VInt 0, VInt 1])
   , (TInt, MultiDiscretes [VInt 0, VInt 1, VInt 2])
   ]
 
--- The (source -> Symbol) "Encoder" neural declaration direction has been removed: it named
--- an external network (NN2) with no SPLL call site. Such a declaration must be rejected at
--- validation, pointing the user at the registry syntax ("neural encode :: T of M").
-encoderDeclProg :: Program
-encoderDeclProg = Program [("main", constB True)] [("ren", TArrow TBool TSymbol, Nothing)] [] []
+-- The reverse (source -> Symbol) neural declaration shape has been removed: it used to
+-- name an external network (NN2) with no SPLL call site. Such a declaration must be
+-- rejected at validation, pointing the user at the registry syntax ("neural writeLogits ::
+-- T of M").
+reversedNeuralShapeProg :: Program
+reversedNeuralShapeProg = Program [("main", constB True)] [("ren", TArrow TBool TSymbol, Nothing)] [] []
 
--- A neural declaration whose type is not an arrow at all (nor the Encoder-direction
+-- A neural declaration whose type is not an arrow at all (nor the reversed-shape
 -- arrow above): must be rejected at validation for the same reason -- neural
 -- declarations must have the form (Symbol -> target). Previously this fell through
 -- validateNeuralShape's catch-all (Right ()) and crashed later, deep in AutoNeural's
@@ -102,8 +103,8 @@ validatorCases =
   , ("reservedName2",    invalidReservedName2,   "already used by an InjF")
   , ("noMain",           noMainProg,             "no 'main' function")
   , ("anyInProgram",     anyInProgramProg,       "ANY may not be used")
-  , ("encodeCollision",  encodeCollisionProg,    "conflicting PartitionPlan annotations")
-  , ("encoderDecl",      encoderDeclProg,        "neural encode")
+  , ("writeLogitsCollision", writeLogitsCollisionProg, "conflicting PartitionPlan annotations")
+  , ("reversedNeuralShapeDecl", reversedNeuralShapeProg, "neural writeLogits")
   , ("malformedNeuralDecl", malformedNeuralDeclProg, "must have the form (Symbol -> target)")
   ]
 

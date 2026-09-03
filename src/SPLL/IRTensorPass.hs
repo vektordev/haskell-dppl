@@ -42,7 +42,7 @@ tensorPassEnv (IREnv groups adts globals) =
       { genFun    = fmap onBody (genFun g)
       , probFun   = fmap onBody (probFun g)
       , integFun  = fmap onBody (integFun g)
-      , encodeFun = fmap onBody (encodeFun g)
+      , writeLogitsFun = fmap onBody (writeLogitsFun g)
       , normalFun = fmap onBody (normalFun g)
       }
     onBody (body, doc) = (tensorPassExpr body, doc)

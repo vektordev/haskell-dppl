@@ -108,9 +108,9 @@ data Program = Program {
                     neurals :: [NeuralDecl],
                     adts :: [ADTDecl],
                     -- | Standalone PartitionPlan annotations, keyed by RType: either
-                    -- explicit @neural encode :: T of M@ declarations, or sugar registered
+                    -- explicit @neural writeLogits :: T of M@ declarations, or sugar registered
                     -- from a NeuralDecl's @of@ clause for its target/source type.
-                    encodeDecls :: [(RType, MultiValue)]
+                    writeLogitsDecls :: [(RType, MultiValue)]
                     } deriving (Show, Eq)
 
 type FnDecl = (String, Expr)

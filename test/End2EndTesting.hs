@@ -23,7 +23,7 @@ import SPLL.CodeGenPyTorch
 import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
 import SPLL.Parser (tryParseProgram)
 import TestCaseParser
-import TestTolerances (probTolerance, encodeSlotTolerance, normalizationTolerance, samplingTolerance)
+import TestTolerances (probTolerance, writeLogitsSlotTolerance, normalizationTolerance, samplingTolerance)
 import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType
 import SPLL.AutoNeural (makePartitionPlan, planIndexOf, resolvePartitionAnnotation, PartitionPlan)
@@ -75,7 +75,7 @@ selectPassDifferentialTests = do
     , let batchedEnv = compile defaultCompilerConfig{batched = True} p ]
 
 -- | Assert one corpus query point is unchanged by the select pass. Non-query
--- cases (encode/argmax) are skipped: the pass only touches prob/integ bodies.
+-- cases (writeLogits/argmax) are skipped: the pass only touches prob/integ bodies.
 -- Takes the program's scalar/batched compiles already done, shared across
 -- every query point of that program.
 selectNoOp :: Program -> Either CompilerError IREnv -> Either CompilerError IREnv -> TestCase -> Property
@@ -163,20 +163,20 @@ testInterpreter p compiledE (CumulTestCase name sample params expct) = ioPropert
     Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a probability tuple: " ++ show x) False
     Right (Left err) -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
     Left err -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
-testInterpreter p compiledE (EncodingLengthTestCase name target explicitArgs expectedLen) = ioProperty $ do
-  let args = encodeArgsFor p explicitArgs
-  result <- try $ evaluate $ (compiledE >>= \c -> runEncodeC p c target args) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
+testInterpreter p compiledE (WriteLogitsLengthTestCase name target explicitArgs expectedLen) = ioProperty $ do
+  let args = writeLogitsArgsFor p explicitArgs
+  result <- try $ evaluate $ (compiledE >>= \c -> runWriteLogitsC p c target args) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of
     Right (Right (VList lst)) ->
       counterexample ("Encode length differs for test case " ++ name ++ " (target " ++ target ++ "). Expected: " ++ show expectedLen ++ " Got: " ++ show (length lst)) (length lst == expectedLen)
     Right (Right x) -> counterexample ("Output of test case " ++ name ++ " is not a list: " ++ show x) False
     Right (Left err) -> counterexample ("Test case " ++ name ++ " raised a compiler error: " ++ show err) False
     Left err -> counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
-testInterpreter p compiledE (EncodingSlotTestCase name target explicitArgs idxOf expected) = ioProperty $ do
-  let args = encodeArgsFor p explicitArgs
+testInterpreter p compiledE (WriteLogitsSlotTestCase name target explicitArgs idxOf expected) = ioProperty $ do
+  let args = writeLogitsArgsFor p explicitArgs
       plan = endpointPlan p target
       slotIdx = planIndexOf plan idxOf
-  result <- try $ evaluate $ (compiledE >>= \c -> runEncodeC p c target args) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
+  result <- try $ evaluate $ (compiledE >>= \c -> runWriteLogitsC p c target args) :: IO (Either SomeException (Either CompilerError (GenericValue IRExpr)))
   return $ case result of
     Right (Right (VList lst)) ->
       let items = toList lst
@@ -184,7 +184,7 @@ testInterpreter p compiledE (EncodingSlotTestCase name target explicitArgs idxOf
          then counterexample ("Slot index " ++ show slotIdx ++ " out of bounds (list length " ++ show (length items) ++ ") in test case " ++ name) False
          else case items !! slotIdx of
            VFloat actual ->
-             counterexample ("Encode slot " ++ show slotIdx ++ " for " ++ name ++ ": expected " ++ show expected ++ ", got " ++ show actual ++ " (tolerance " ++ show encodeSlotTolerance ++ ")") (abs (actual - expected) < encodeSlotTolerance)
+             counterexample ("WriteLogits slot " ++ show slotIdx ++ " for " ++ name ++ ": expected " ++ show expected ++ ", got " ++ show actual ++ " (tolerance " ++ show writeLogitsSlotTolerance ++ ")") (abs (actual - expected) < writeLogitsSlotTolerance)
            other -> counterexample ("Slot is not VFloat: " ++ show other ++ " in " ++ name) False
     Right (Right x) -> counterexample ("Output is not a list: " ++ show x ++ " in " ++ name) False
     Right (Left err) -> counterexample ("Compiler error in " ++ name ++ ": " ++ show err) False
@@ -273,12 +273,12 @@ discreteProbsNormalized p compiledE = case compiledE of
       let randomParams :: RandomGen g => Rand g [IRValue]
           randomParams = replicateM paramCnt (fmap (\x -> VTuple (VInt 0) (VInt x)) (getRandomR (1, 100000)))
           randomParamsForSamples = evalRand (replicateM sampleCnt randomParams) (mkStdGen 42)
-          gens = map (\args -> generateRand (neurals p) (encodeDecls p) compiled (map IRConst args) genExpr) randomParamsForSamples
+          gens = map (\args -> generateRand (neurals p) (writeLogitsDecls p) compiled (map IRConst args) genExpr) randomParamsForSamples
           pSamples = evalRand (sequence gens) (mkStdGen 42)
           uniqueSamples = nub pSamples
           counts = map (\u -> length (filter (== u) pSamples)) uniqueSamples
       -- The per-sample prob queries are independent and pure; force them in parallel.
-      probResults <- parEval (map (\sam -> generateDet (neurals p) (encodeDecls p) compiled (map IRConst (sam:params)) probExpr) uniqueSamples)
+      probResults <- parEval (map (\sam -> generateDet (neurals p) (writeLogitsDecls p) compiled (map IRConst (sam:params)) probExpr) uniqueSamples)
       return $ case sequence probResults of
           Left err -> counterexample err False
           Right t
@@ -317,26 +317,26 @@ progParameterCount Program{functions=f} =
     countLambdas (Expr _ (Lambda _ e)) = 1 + countLambdas e
     countLambdas _ = 0
 
--- | Build the argument list for an encode query from the directive's explicit args.
+-- | Build the argument list for a writeLogits query from the directive's explicit args.
 --
---   * No-NN programs (per-function encode over real values): args are passed verbatim
---     (e.g. `encode_at[isRed](0.3, indexOf(True))` calls isRed's encode with s = 0.3).
---   * Decoder programs: each explicit arg is the value to spike the mock NN at, wrapped in
+--   * No-NN programs (per-function writeLogits over real values): args are passed verbatim
+--     (e.g. `writeLogits_at[isRed](0.3, indexOf(True))` calls isRed's writeLogits with s = 0.3).
+--   * Read-logits programs: each explicit arg is the value to spike the mock NN at, wrapped in
 --     the mock-sym envelope `(mode=1, (spikeVal, seed=0))` so the mock network peaks there.
---   * Decoder programs with no explicit args (legacy `encode_len=N`): one neutral mock sym
---     per outer parameter of main.
-encodeArgsFor :: Program -> [IRValue] -> [IRValue]
-encodeArgsFor p explicitArgs
+--   * Read-logits programs with no explicit args (legacy `writeLogits_len=N`): one neutral
+--     mock sym per outer parameter of main.
+writeLogitsArgsFor :: Program -> [IRValue] -> [IRValue]
+writeLogitsArgsFor p explicitArgs
   | not (null explicitArgs) = if null (neurals p) then explicitArgs else map spike explicitArgs
   | null (neurals p)        = []
   | otherwise               = replicate (progParameterCount p) (VTuple (VInt 0) (VInt 42))
   where spike v = VTuple (VInt 1) (VTuple v (VInt 0))
 
 -- | The logit layout for an endpoint function's own output type, resolved exactly as the
--- compiler resolves it when emitting that function's encodeFun (registry entry, else
+-- compiler resolves it when emitting that function's writeLogitsFun (registry entry, else
 -- auto-derive). Used to map an `indexOf(value)` directive to a flat slot index.
 endpointPlan :: Program -> String -> PartitionPlan
-endpointPlan p target = makePartitionPlan (adts p) rt (resolvePartitionAnnotation (encodeDecls p) rt Nothing)
+endpointPlan p target = makePartitionPlan (adts p) rt (resolvePartitionAnnotation (writeLogitsDecls p) rt Nothing)
   where rt = endpointReturnRType p target
 
 endpointReturnRType :: Program -> String -> RType
@@ -726,7 +726,7 @@ batchedRefusalTests = testGroup "BatchedRefusal" $
      -- The advisory's other direction: on a program batched mode *does* take,
      -- it must stay quiet rather than cry wolf. Two shapes, since the guard has
      -- two independent halves (the per-body fragment walk and the call graph):
-     -- a plain scalar program and a neural one whose decoder batches.
+     -- a plain scalar program and a neural one whose read-logits network batches.
      | prog <- ["coin", "mNistAdd"] ]
 
 -- | @(corpus program base name, diagnostic substring pinning the construct)@.
@@ -755,7 +755,7 @@ batchedRefusalTable =
   -- right ..`), so the sample's structure is per element and there is no bucket
   -- to run it in.
   , ("either_isleft",             "arms have different structure")
-  -- `eitherNeural`'s decoder (Either Int Bool) used to be refused here too --
+  -- `eitherNeural`'s read-logits network (Either Int Bool) used to be refused here too --
   -- not for the Either shape itself (M2 handles that), but because its Bool
   -- arm's enum-index lookup built an `indexOf(x, [True, False])` call that
   -- 'SPLL.IROptimizer.indexmagic' could not fold (only `[0..n]` naturals lists
@@ -1580,8 +1580,8 @@ gradientDriver probes = unlines $
 -- ===========================================================================
 
 -- | Acceptance test for M4 (batched generate), extended to neural (task
--- neural-generate-parity) to cover decoder-own sampling (categorical/Gaussian)
--- and cross-decoder composition (e.g. MNIST addition).
+-- neural-generate-parity) to cover a read-logits network's own sampling
+-- (categorical/Gaussian) and cross-network composition (e.g. MNIST addition).
 --
 -- There is no per-draw ground truth for a stochastic 'generate' (unlike
 -- forward/integrate, which have an exact expected value at each query point),
@@ -1597,7 +1597,7 @@ gradientDriver probes = unlines $
 -- Non-neural programs draw one shared @main.generate(_batchN)@ batch and
 -- check it against every point (the distribution does not depend on the
 -- point). Neural programs' distribution *does* depend on the point (each
--- point supplies its own decoder input symbol, per the corpus's mode-2
+-- point supplies its own read-logits input symbol, per the corpus's mode-2
 -- verbatim-logit convention), so each point gets its own
 -- @main.generate(sym, _batchN)@ call: the point's row is sliced out of the
 -- group's already-batched symbol tensor ('bgParamExprs', the same per-point
@@ -1657,7 +1657,7 @@ isScalarSample v = isNum v || isBoolV v
 -- | The single Python script for the generate check: for each non-neural
 -- program, draw one shared large batch and test it against every query
 -- point's epsilon-window density estimate; for each neural program, draw a
--- fresh per-point batch (the point's own decoder symbol, repeated) and test
+-- fresh per-point batch (the point's own read-logits symbol, repeated) and test
 -- that point alone. Single-shot rather than retried -- the batch size is
 -- fixed large enough, and the seed is pinned, to keep this non-flaky.
 generateDriver :: [(String, String, [(String, Double, Double)])]
@@ -1705,7 +1705,7 @@ generateDriver nonNeuralProbes neuralProbes = unlines $
       , "except Exception as _e:"
       , "    failures.append(" ++ show name ++ " + ': exception ' + repr(_e) + '\\n' + traceback.format_exc())"
       ]
-    -- Each point supplies its own decoder symbol (a row of the group's [B, n]
+    -- Each point supplies its own read-logits symbol (a row of the group's [B, n]
     -- symbol tensor, per argument position), so it needs its own generate call
     -- and its own arity check (the signature is the same for every point of a
     -- program, but checking it once per point keeps this block symmetric with
@@ -1866,7 +1866,7 @@ loadBranchCountCase name = do
 -- | Every node in every compiled function body of an environment.
 irEnvBodies :: IREnv -> [IRExpr]
 irEnvBodies (IREnv groups _ _) = concatMap bodies groups
-  where bodies g = [e | Just (e, _) <- [genFun g, probFun g, integFun g, encodeFun g, normalFun g]]
+  where bodies g = [e | Just (e, _) <- [genFun g, probFun g, integFun g, writeLogitsFun g, normalFun g]]
 
 irAnyNode :: (IRExpr -> Bool) -> IRExpr -> Bool
 irAnyNode f e = f e || any (irAnyNode f) (getIRSubExprs e)

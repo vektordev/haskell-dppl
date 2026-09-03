@@ -331,10 +331,10 @@ containsMultiValueTypeRef n (MultiEither l r) = containsMultiValueTypeRef n l ||
 containsMultiValueTypeRef n (MultiTuple l r) = containsMultiValueTypeRef n l || containsMultiValueTypeRef n r
 containsMultiValueTypeRef n (MultiADT constrs) = any (\(_, args) -> any (containsMultiValueTypeRef n) args) constrs
 
--- | The output (target) RType of a Decoder neural declaration's "Symbol -> target" arrow
--- type - i.e. the type a NeuralDecl's MultiValue annotation describes.  The (source ->
--- Symbol) Encoder direction has been removed (rejected at validation), so only the decoder
--- shape resolves to a value type.
+-- | The output (target) RType of a read-logits neural declaration's "Symbol -> target"
+-- arrow type - i.e. the type a NeuralDecl's MultiValue annotation describes.  The reverse
+-- (source -> Symbol) shape has been removed (rejected at validation), so only the
+-- read-logits shape resolves to a value type.
 neuralValueType :: RType -> Maybe RType
 neuralValueType (TArrow TSymbol target) = Just target
 neuralValueType _ = Nothing

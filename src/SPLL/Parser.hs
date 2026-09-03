@@ -537,9 +537,9 @@ pProg = do
   _ <- eof
   return (aggregateDefinitions adtsDecls defs)
 
--- | "neural encode :: T of M" registers a standalone PartitionPlan annotation for the
--- RType T (the registry; see SPLL.Lang.Types.encodeDecls), rather than declaring a
--- callable neural network -- 'encode' is therefore a reserved network name. Every other
+-- | "neural writeLogits :: T of M" registers a standalone PartitionPlan annotation for the
+-- RType T (the registry; see SPLL.Lang.Types.writeLogitsDecls), rather than declaring a
+-- callable neural network -- 'writeLogits' is therefore a reserved network name. Every other
 -- NeuralDecl's "of" clause is sugar that also registers into this registry, keyed by
 -- the declaration's target/source type (see 'neuralValueType').
 aggregateDefinitions :: [ADTDecl] -> [Either FnDecl NeuralDecl] -> Program
@@ -547,7 +547,7 @@ aggregateDefinitions adts_ (Left fn : tail_) = Program (fn:fns) neurals_ adtz en
   where
     Program fns neurals_ adtz enc = aggregateDefinitions adts_ tail_
 aggregateDefinitions adts_ (Right nr@(name, ty, mtag) : tail_)
-  | name == "encode" = Program fns neurals_ adtz ((ty, fromMaybe MultiAuto mtag) : enc)
+  | name == "writeLogits" = Program fns neurals_ adtz ((ty, fromMaybe MultiAuto mtag) : enc)
   | otherwise = Program fns (nr:neurals_) adtz (sugar ++ enc)
   where
     Program fns neurals_ adtz enc = aggregateDefinitions adts_ tail_

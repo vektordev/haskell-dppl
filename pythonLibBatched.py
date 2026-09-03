@@ -178,7 +178,7 @@ def _dtype(x):
   return x.dtype if torch.is_tensor(x) else torch.get_default_dtype()
 
 # --- neural: gather a per-element logit slot ---------------------------------
-# A neural decoder reads `logits[sample]`: for each batch element, the logit
+# A neural read-logits network reads `logits[sample]`: for each batch element, the logit
 # slot selected by that element's (integer) sample. `out` is the [B, n] logit
 # tensor, `idx` a [B] integer tensor; the result is the [B] tensor of selected
 # logits. (A constant slot is emitted inline as out[..., i]; this handles the

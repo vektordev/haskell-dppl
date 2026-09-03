@@ -13,8 +13,8 @@ module TestCaseParser (
   isProbTestCase,
   isCumulTestCase,
   isArgmaxPTestCase,
-  isEncodingLengthTestCase,
-  isEncodingSlotTestCase,
+  isWriteLogitsLengthTestCase,
+  isWriteLogitsSlotTestCase,
   testCaseName,
   parseTestCases,
   parseTestCasesFromString,
@@ -115,8 +115,8 @@ expectationImposs Impossible = Just True
 data TestCase = ProbTestCase String IRValue [IRValue] Expectation
               | CumulTestCase String IRValue [IRValue] Expectation
               | ArgmaxPTestCase String [IRValue] IRValue
-              | EncodingLengthTestCase String String [IRValue] Int             -- target fn, explicit args, expected output list length
-              | EncodingSlotTestCase String String [IRValue] IRValue Double  -- target fn, explicit args, indexOf-value, expected float
+              | WriteLogitsLengthTestCase String String [IRValue] Int             -- target fn, explicit args, expected output list length
+              | WriteLogitsSlotTestCase String String [IRValue] IRValue Double  -- target fn, explicit args, indexOf-value, expected float
               deriving (Show)
 
 isProbTestCase :: TestCase -> Bool
@@ -131,20 +131,20 @@ isCumulTestCase :: TestCase -> Bool
 isCumulTestCase (CumulTestCase _ _ _ _) = True
 isCumulTestCase _ = False
 
-isEncodingLengthTestCase :: TestCase -> Bool
-isEncodingLengthTestCase (EncodingLengthTestCase {}) = True
-isEncodingLengthTestCase _ = False
+isWriteLogitsLengthTestCase :: TestCase -> Bool
+isWriteLogitsLengthTestCase (WriteLogitsLengthTestCase {}) = True
+isWriteLogitsLengthTestCase _ = False
 
-isEncodingSlotTestCase :: TestCase -> Bool
-isEncodingSlotTestCase (EncodingSlotTestCase {}) = True
-isEncodingSlotTestCase _ = False
+isWriteLogitsSlotTestCase :: TestCase -> Bool
+isWriteLogitsSlotTestCase (WriteLogitsSlotTestCase {}) = True
+isWriteLogitsSlotTestCase _ = False
 
 testCaseName :: TestCase -> String
 testCaseName (ProbTestCase name _ _ _) = name
 testCaseName (CumulTestCase name _ _ _) = name
 testCaseName (ArgmaxPTestCase name _ _) = name
-testCaseName (EncodingLengthTestCase name _ _ _) = name
-testCaseName (EncodingSlotTestCase name _ _ _ _) = name
+testCaseName (WriteLogitsLengthTestCase name _ _ _) = name
+testCaseName (WriteLogitsSlotTestCase name _ _ _ _) = name
 
 type MonadParser m = (MonadParsec Void String m, MonadPlus m, MonadFail m, MonadState Int m)
 
@@ -247,34 +247,34 @@ pCumulParser name = do
     [] -> fail "ProbTestCase must have at least one parameter (the sample)"
     _  -> return $ CumulTestCase name (head params) (tail params) expct
 
--- Optional endpoint addressing: `[fn]` selects which top-level function's encode to query.
--- Defaults to "main" (the f == main case of the one per-function-encode rule).
-pEncodeTarget :: MonadParser m => m String
-pEncodeTarget = option "main" (between (symbol "[") (symbol "]") pTargetName)
+-- Optional endpoint addressing: `[fn]` selects which top-level function's writeLogits to query.
+-- Defaults to "main" (the f == main case of the one per-function-writeLogits rule).
+pWriteLogitsTarget :: MonadParser m => m String
+pWriteLogitsTarget = option "main" (between (symbol "[") (symbol "]") pTargetName)
   where pTargetName = L.lexeme sc (some (alphaNumChar <|> char '_'))
 
--- Optional explicit argument list passed verbatim to the endpoint's encode (e.g. `(0.3)`
+-- Optional explicit argument list passed verbatim to the endpoint's writeLogits (e.g. `(0.3)`
 -- for `isRed s` with s = 0.3). Empty when omitted; the harness then falls back to mock-NN
--- argument fabrication for decoder programs.
-pEncodeArgs :: MonadParser m => m [IRValue]
-pEncodeArgs = option [] (between (symbol "(") (symbol ")") (pIRValue `sepBy` symbol ","))
+-- argument fabrication for read-logits programs.
+pWriteLogitsArgs :: MonadParser m => m [IRValue]
+pWriteLogitsArgs = option [] (between (symbol "(") (symbol ")") (pIRValue `sepBy` symbol ","))
 
-pEncodingLengthTestCase :: MonadParser m => String -> m TestCase
-pEncodingLengthTestCase name = do
-  symbol "encode_len"
-  target <- pEncodeTarget
-  args <- pEncodeArgs
+pWriteLogitsLengthTestCase :: MonadParser m => String -> m TestCase
+pWriteLogitsLengthTestCase name = do
+  symbol "writeLogits_len"
+  target <- pWriteLogitsTarget
+  args <- pWriteLogitsArgs
   symbol "="
   n <- L.decimal
-  return $ EncodingLengthTestCase name target args n
+  return $ WriteLogitsLengthTestCase name target args n
 
--- encode_at[fn](arg1, ..., indexOf(v)) ~= e
+-- writeLogits_at[fn](arg1, ..., indexOf(v)) ~= e
 -- The values before the trailing `indexOf(...)` are the endpoint's explicit arguments
 -- (possibly none); `indexOf(v)` selects the logit slot for value v within the endpoint's plan.
-pEncodingSlotTestCase :: MonadParser m => String -> m TestCase
-pEncodingSlotTestCase name = do
-  symbol "encode_at"
-  target <- pEncodeTarget
+pWriteLogitsSlotTestCase :: MonadParser m => String -> m TestCase
+pWriteLogitsSlotTestCase name = do
+  symbol "writeLogits_at"
+  target <- pWriteLogitsTarget
   symbol "("
   args <- many (try (pIRValue <* symbol ","))
   symbol "indexOf("
@@ -283,10 +283,10 @@ pEncodingSlotTestCase name = do
   symbol ")"
   symbol "~="
   expected <- L.float
-  return $ EncodingSlotTestCase name target args idxOf expected
+  return $ WriteLogitsSlotTestCase name target args idxOf expected
 
 pTestCases :: MonadParser m => String -> m [TestCase]
-pTestCases name = choice [pProbTestCase name, pCumulParser name, pArgmaxPTestCase name, pEncodingLengthTestCase name, pEncodingSlotTestCase name] `sepEndBy` pNewline
+pTestCases name = choice [pProbTestCase name, pCumulParser name, pArgmaxPTestCase name, pWriteLogitsLengthTestCase name, pWriteLogitsSlotTestCase name] `sepEndBy` pNewline
 
 pBackend :: MonadParser m => m Backend
 pBackend = choice

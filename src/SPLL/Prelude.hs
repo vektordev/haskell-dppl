@@ -61,14 +61,14 @@ module SPLL.Prelude
   , runGen
   , runProb
   , runInteg
-  , runEncode
+  , runWriteLogits
   , runGenC
   , runProbC
   , runIntegC
   , runGenNamedC
   , runProbNamedC
   , runIntegNamedC
-  , runEncodeC
+  , runWriteLogitsC
   , printIfVerbose
   , printIfMoreVerbose
   , pPrintIfVerbose
@@ -79,7 +79,7 @@ module SPLL.Prelude
 
 import SPLL.Lang.Lang
 import SPLL.Lang.Types (makeTypeInfo, GenericValue (..), CompilerError)
-import SPLL.AutoNeural (validateEncodeGaussian)
+import SPLL.AutoNeural (validateWriteLogitsGaussian)
 import SPLL.IntermediateRepresentation
 import SPLL.Analysis
 import SPLL.Typing.Infer (addModalityInfo)
@@ -459,15 +459,15 @@ runInteg conf p args sample = do
   compiled <- compile conf p
   runIntegC p compiled args sample
 
--- | Run the encode function of the named function group (e.g. "decA_auto" for a
--- decoder declaration `decA :: Symbol -> ...`).
+-- | Run the writeLogits function of the named function group (e.g. "decA_auto" for a
+-- read-logits declaration `decA :: Symbol -> ...`).
 -- outerArgs mirrors main's outer parameter list: pass one IRValue per outer lambda in main,
 -- or an empty list for closed-form programs with no outer parameters.
-runEncode :: CompilerConfig -> Program -> String -> [IRValue] -> Either CompilerError IRValue
-runEncode _ p _ _ | isLeft (validateProgram p) = fmap (error "Impossible case") (validateProgram p)
-runEncode conf p target outerArgs = do
+runWriteLogits :: CompilerConfig -> Program -> String -> [IRValue] -> Either CompilerError IRValue
+runWriteLogits _ p _ _ | isLeft (validateProgram p) = fmap (error "Impossible case") (validateProgram p)
+runWriteLogits conf p target outerArgs = do
   compiled <- compile conf p
-  runEncodeC p compiled target outerArgs
+  runWriteLogitsC p compiled target outerArgs
 
 -- Variants of the run* functions that take an already-compiled IREnv, so that
 -- callers issuing many queries against the same program pay for compilation once.
@@ -486,7 +486,7 @@ runProbC p compiled = runProbNamedC p compiled "main"
 runGenNamedC :: (RandomGen g) => Program -> IREnv -> String -> [IRValue] -> Rand g IRValue
 runGenNamedC p compiled name args =
   case genFun (lookupIREnv name compiled) of
-    Just (gen, _) -> generateRand (neurals p) (encodeDecls p) compiled (map IRConst args) gen
+    Just (gen, _) -> generateRand (neurals p) (writeLogitsDecls p) compiled (map IRConst args) gen
     -- Unlike the prob/integ runners there is no error channel in the return
     -- type to report this through.
     Nothing -> error (missingVariant "generate" name)
@@ -495,7 +495,7 @@ runProbNamedC :: Program -> IREnv -> String -> [IRValue] -> IRValue -> Either Co
 runProbNamedC p compiled name args x =
   case probFun (lookupIREnv name compiled) of
     Nothing -> Left (missingVariant "probability" name)
-    Just (prob, _) -> generateDet (neurals p) (encodeDecls p) compiled (map IRConst args') prob
+    Just (prob, _) -> generateDet (neurals p) (writeLogitsDecls p) compiled (map IRConst args') prob
       -- topK-compiled prob functions take an accumulated-probability parameter
       -- right after the sample; seed it with the semiring's multiplicative
       -- identity at the query root -- linear 1.0, or log-space 0.0. Hardcoding
@@ -521,7 +521,7 @@ runIntegC p compiled = runIntegNamedC p compiled "main"
 runIntegNamedC :: Program -> IREnv -> String -> [IRValue] -> IRValue -> Either CompilerError IRValue
 runIntegNamedC p compiled name args sample =
   case integFun (lookupIREnv name compiled) of
-    Just (integ, _) -> generateDet (neurals p) (encodeDecls p) compiled (map IRConst (sample:args)) integ
+    Just (integ, _) -> generateDet (neurals p) (writeLogitsDecls p) compiled (map IRConst (sample:args)) integ
     Nothing -> Left (missingVariant "integrate" name)
 
 -- | Modality inference decides per definition which of the three variants are
@@ -535,19 +535,20 @@ missingVariant variant name =
   where capitalise (c:cs) = toUpper c : cs
         capitalise []     = []
 
--- | Run the encode function of the function group named `target`. Each decoder
--- declaration `name :: Symbol -> X` contributes a group `<name>_auto` whose encode
+-- | Run the writeLogits function of the function group named `target`. Each read-logits
+-- declaration `name :: Symbol -> X` contributes a group `<name>_auto` whose writeLogits
 -- is independently scoped to that declaration's own target type, so the target name
--- selects which decoder's encode to run (rather than relying on declaration order).
-runEncodeC :: Program -> IREnv -> String -> [IRValue] -> Either CompilerError IRValue
-runEncodeC p compiled target outerArgs = do
-  validateEncodeGaussian (adts p) (encodeDecls p) (neurals p) compiled
+-- selects which read-logits network's writeLogits to run (rather than relying on
+-- declaration order).
+runWriteLogitsC :: Program -> IREnv -> String -> [IRValue] -> Either CompilerError IRValue
+runWriteLogitsC p compiled target outerArgs = do
+  validateWriteLogitsGaussian (adts p) (writeLogitsDecls p) (neurals p) compiled
   let IREnv groups _ _ = compiled
   case find ((== target) . groupName) groups of
     Nothing  -> Left ("No function group named " ++ show target ++ " in compiled program")
-    Just grp -> case encodeFun grp of
-      Nothing       -> Left ("Function group " ++ show target ++ " has no encode function")
-      Just (enc, _) -> generateDet (neurals p) (encodeDecls p) compiled (map IRConst outerArgs) enc
+    Just grp -> case writeLogitsFun grp of
+      Nothing       -> Left ("Function group " ++ show target ++ " has no writeLogits function")
+      Just (enc, _) -> generateDet (neurals p) (writeLogitsDecls p) compiled (map IRConst outerArgs) enc
 
 printIfVerbose :: (Monad m) => CompilerConfig -> String -> m ()
 printIfVerbose CompilerConfig {verbose=v} s | v >= 1 = trace s (return ())

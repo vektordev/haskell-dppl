@@ -5,7 +5,7 @@ module TestTolerances (
   probTolerance,
   reasonablyCloseTolerance,
   samplingTolerance,
-  encodeSlotTolerance,
+  writeLogitsSlotTolerance,
   normalizationTolerance
 ) where
 
@@ -22,9 +22,9 @@ reasonablyCloseTolerance = 1e-5
 samplingTolerance :: Double
 samplingTolerance = 0.1
 
--- | Allowed deviation for a single AutoNeural encode slot value.
-encodeSlotTolerance :: Double
-encodeSlotTolerance = 0.15
+-- | Allowed deviation for a single AutoNeural writeLogits slot value.
+writeLogitsSlotTolerance :: Double
+writeLogitsSlotTolerance = 0.15
 
 -- | Allowed deviation from 1 of the summed probability of a discrete support.
 normalizationTolerance :: Double

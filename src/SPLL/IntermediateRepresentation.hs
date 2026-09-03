@@ -392,7 +392,7 @@ type IRValue = GenericValue IRExpr
 data IREnv = IREnv [IRFunGroup] [ADTDecl] [(String, IRValue)] deriving (Show)
 
 
-data IRFunGroup = IRFunGroup {groupName::String, genFun::Maybe IRFunDecl, probFun::Maybe IRFunDecl, integFun::Maybe IRFunDecl, encodeFun::Maybe IRFunDecl, normalFun::Maybe IRFunDecl, groupDoc::String,
+data IRFunGroup = IRFunGroup {groupName::String, genFun::Maybe IRFunDecl, probFun::Maybe IRFunDecl, integFun::Maybe IRFunDecl, writeLogitsFun::Maybe IRFunDecl, normalFun::Maybe IRFunDecl, groupDoc::String,
   -- | The finite enumeration of values a query against this group's prob/integ
   -- function can take, when the sample domain is statically finite -- the
   -- function's own return type, /not/ the domain of anything it enumerates
@@ -447,7 +447,7 @@ data CompilerConfig = CompilerConfig {
   -- meaningless. Scope (see the task's written invasiveness verdict): the
   -- core PResult combinators, the Uniform/Normal leaves, discrete
   -- value-equality masses ('compareValueExpr'), and enumerable-InjF sums
-  -- ('enumSumP') are log-aware; 'ReadNN'/'AutoNeural' neural decoder logit
+  -- ('enumSumP') are log-aware; 'ReadNN'/'AutoNeural' neural read-logits logit
   -- reads, the set-witness/plan-enum continuous measurement machinery, and
   -- batched mode are NOT -- they remain linear-only, so a program reaching
   -- those paths under 'logSpace' will not get the numerical-stability
@@ -497,7 +497,7 @@ data CompilerConfig = CompilerConfig {
   -- 'SPLL.Semiring.Semiring' instance -- see 'SemiringFamily').
   --
   -- Scope: each extra family only gets a probability-mode entry point (no
-  -- 'integFun'/'genFun'/'normalFun'/'encodeFun') -- CDF and generation have no
+  -- 'integFun'/'genFun'/'normalFun'/'writeLogitsFun') -- CDF and generation have no
   -- settled meaning under max-product (see the task's write-up), and
   -- 'topKThreshold' combined with an extra semiring is untested (topK is
   -- itself already an approximate max-plus mechanism; layering it under an
@@ -604,7 +604,7 @@ firstAnyExceptIR (IREnv groups _ _) =
   listToMaybe (filter isAnyExceptConst (concatMap allSubExprsOf funBodies))
   where
     funBodies = concatMap groupBodies groups
-    groupBodies IRFunGroup{genFun=g, probFun=p, integFun=i, encodeFun=e, normalFun=n} =
+    groupBodies IRFunGroup{genFun=g, probFun=p, integFun=i, writeLogitsFun=e, normalFun=n} =
       map fst (mapMaybe id [g, p, i, e, n])
     allSubExprsOf ir = ir : concatMap allSubExprsOf (getIRSubExprs ir)
     isAnyExceptConst (IRConst (VAnyExcept _)) = True
@@ -985,7 +985,7 @@ renameADTIdentifiers mangle env@(IREnv groups decls consts)
       { genFun    = fmap onBody (genFun g)
       , probFun   = fmap onBody (probFun g)
       , integFun  = fmap onBody (integFun g)
-      , encodeFun = fmap onBody (encodeFun g)
+      , writeLogitsFun = fmap onBody (writeLogitsFun g)
       , normalFun = fmap onBody (normalFun g)
       }
     onBody (body, doc) = (irMap onVar body, doc)

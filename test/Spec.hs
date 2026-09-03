@@ -25,7 +25,7 @@ import TestRejection (rejectionTests)
 import TestModality (modalityTests)
 import TestModalityInfer (modalityInferTests)
 import TestDeterminism (determinismTests)
-import TestEncodeProperties (encodeTests, encodeRoundtripTests)
+import TestWriteLogitsProperties (writeLogitsTests, writeLogitsRoundtripTests)
 import TestShowcase (showcaseTests)
 import End2EndTesting (end2endTests, slowEnd2EndTests, getAllTestFiles, selectPassDifferentialTests, batchedPythonTests, slowBatchedPythonTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, branchCountBackendTests)
 import TestFuzz (fuzzTests, superSlowFuzzTests)
@@ -892,7 +892,7 @@ main = do
   detTests <- determinismTests
   showcase <- showcaseTests
   corpusPool <- loadCorpusCases
-  encodeRoundtrip <- encodeRoundtripTests
+  writeLogitsRoundtrip <- writeLogitsRoundtripTests
   -- A handful of tests (deep plan enumeration, mainly) are expensive enough
   -- to noticeably slow day-to-day `stack test` while rarely catching
   -- regressions outside the code they pin. They're skipped unless
@@ -917,8 +917,8 @@ main = do
     , modalityTests
     , modalityInferTests
     , detTests
-    , encodeTests
-    , encodeRoundtrip
+    , writeLogitsTests
+    , writeLogitsRoundtrip
     , showcase
     , e2e
     , selectDiff

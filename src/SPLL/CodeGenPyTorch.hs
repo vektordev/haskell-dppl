@@ -276,7 +276,7 @@ generateADTClass (name, fields) =
         fieldNames = map pyMangle (map fst fields)
 
 generateClass :: [(String, String)] -> [String] -> IRFunGroup -> [String]
-generateClass lut callableNames (IRFunGroup name gen prob integ encode normal doc _) = let
+generateClass lut callableNames (IRFunGroup name gen prob integ writeLogits normal doc _) = let
   funcStringFromMaybe fname func = case func of
     Just a -> generateFunction True (fname, replaceCallsDecl a)
     Nothing -> return []
@@ -284,7 +284,7 @@ generateClass lut callableNames (IRFunGroup name gen prob integ encode normal do
     i' <- funcStringFromMaybe "integrate" integ
     p' <- funcStringFromMaybe "forward" prob
     g' <- funcStringFromMaybe "generate" gen
-    e' <- funcStringFromMaybe "encode" encode
+    e' <- funcStringFromMaybe "writeLogits" writeLogits
     n' <- funcStringFromMaybe "normal_params" normal
     return (i', p', g', e', n')) ([], callableNames)
   commentLines = map ("# " ++) (lines doc)

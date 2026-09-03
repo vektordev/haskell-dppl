@@ -8,9 +8,9 @@ module SPLL.AutoNeural(
 , makeProb
 , getSize
 , planIndexOf
-, validateEncodeGaussian
-, makeTopLevelEncodeFun
-, neuralDecoderSuffix
+, validateWriteLogitsGaussian
+, makeTopLevelWriteLogitsFun
+, neuralReadLogitsSuffix
 ) where
 
 import SPLL.Lang.Types
@@ -31,54 +31,55 @@ import Control.Applicative ((<|>))
 --  index into vector and interpret as distribution.
 --  provide sampling and inference.
 
--- Neural declarations forward-declare a Decoder (Symbol -> RType): NN1, which SPLL reads.
--- Each builds an `<name>_auto` IRFunGroup with sampling and probability/density readers.
--- It hosts NO encode function: the encode bridge ("turn an SPLL output value into logits")
--- belongs to whichever SPLL *function* produces that value, keyed to that function's own
--- prob/normal (see 'makeTopLevelEncodeFun' / task encode-per-function-endpoints).  The
--- (source -> Symbol) "Encoder" direction has been removed; it is rejected at validation.
+-- Neural declarations forward-declare a read-logits network (Symbol -> RType): NN1, which
+-- SPLL reads. Each builds an `<name>_auto` IRFunGroup with sampling and probability/density
+-- readers. It hosts NO writeLogits function: the logit-vector bridge ("turn an SPLL output
+-- value into logits") belongs to whichever SPLL *function* produces that value, keyed to
+-- that function's own prob/normal (see 'makeTopLevelWriteLogitsFun' / task
+-- encode-per-function-endpoints).  The reverse (source -> Symbol) shape has been removed; it
+-- is rejected at validation.
 --
--- registry: the standalone PartitionPlan annotation registry (Program.encodeDecls).
+-- registry: the standalone PartitionPlan annotation registry (Program.writeLogitsDecls).
 -- An entry for this declaration's target type takes precedence over the declaration's own
 -- "of" clause -- see 'resolvePartitionAnnotation'.
 makeAutoNeural :: [ADTDecl] -> CompilerConfig -> [(RType, MultiValue)] -> NeuralDecl -> IRFunGroup
 makeAutoNeural adtDecls conf registry decl@(name, declType, tag) =
   case declType of
     TArrow TSymbol target ->
-      -- Decoder case: Symbol -> target. The forward-decl string (NN1's required output
+      -- Read-logits case: Symbol -> target. The forward-decl string (NN1's required output
       -- layout) rides along as the group's doc so codegen emits it beside the readers.
-      makeDecoderFunGroup adtDecls conf name target (resolvePartitionAnnotation registry target tag) (makeForwardDecl adtDecls registry decl)
+      makeReadLogitsFunGroup adtDecls conf name target (resolvePartitionAnnotation registry target tag) (makeForwardDecl adtDecls registry decl)
     _ -> error $ "Invalid neural declaration for " ++ name ++ ": Neural networks must have Symbol on the left of the arrow (Symbol -> target)"
 
 -- | Resolve the MultiValue annotation for a PartitionPlan target/source type: an
--- explicit registry entry (SPLL.Lang.Types.encodeDecls, populated from "neural encode ::
--- T of M" declarations and from every NeuralDecl's own "of" clause as sugar) wins over
--- the tag passed in directly. 'makePartitionPlan' falls back to 'autoDeriveMultiValue'
--- when this resolves to 'Nothing'.
+-- explicit registry entry (SPLL.Lang.Types.writeLogitsDecls, populated from "neural
+-- writeLogits :: T of M" declarations and from every NeuralDecl's own "of" clause as sugar)
+-- wins over the tag passed in directly. 'makePartitionPlan' falls back to
+-- 'autoDeriveMultiValue' when this resolves to 'Nothing'.
 resolvePartitionAnnotation :: [(RType, MultiValue)] -> RType -> Maybe MultiValue -> Maybe MultiValue
 resolvePartitionAnnotation registry ty tag = lookup ty registry <|> tag
 
--- | The naming convention 'makeDecoderFunGroup' uses to mark a decoder's own
+-- | The naming convention 'makeReadLogitsFunGroup' uses to mark a read-logits network's own
 -- 'IRFunGroup' (as opposed to the value-producing SPLL function that reads
 -- it): its group name is the network's declared name with this suffix
 -- appended.
-neuralDecoderSuffix :: String
-neuralDecoderSuffix = "_auto"
+neuralReadLogitsSuffix :: String
+neuralReadLogitsSuffix = "_auto"
 
--- Decoder: Symbol -> target. Generates sampling and probability reader functions for NN1.
--- It hosts no encode function (the encode lives on the value-producing SPLL function).
+-- Read-logits: Symbol -> target. Generates sampling and probability reader functions for NN1.
+-- It hosts no writeLogits function (that lives on the value-producing SPLL function).
 -- fwdDecl is the human-readable forward declaration (NN1's required output layout); it is
 -- stored as the group's doc so codegen emits it as a header comment beside the readers.
-makeDecoderFunGroup :: [ADTDecl] -> CompilerConfig -> String -> RType -> Maybe MultiValue -> String -> IRFunGroup
-makeDecoderFunGroup adtDecls conf name target tag fwdDecl =
-  IRFunGroup (name ++ neuralDecoderSuffix)
+makeReadLogitsFunGroup :: [ADTDecl] -> CompilerConfig -> String -> RType -> Maybe MultiValue -> String -> IRFunGroup
+makeReadLogitsFunGroup adtDecls conf name target tag fwdDecl =
+  IRFunGroup (name ++ neuralReadLogitsSuffix)
     (Just (IRLambda symbol $ makeGen adtDecls plan name, "Wrapper for the neural network function"))
     (Just (makeProb adtDecls conf plan, "Inference function for neural network function"))
     Nothing
     Nothing
     Nothing
     fwdDecl
-    -- The decoder's own query domain is its target type's (M3). Every decoder
+    -- The read-logits network's own query domain is its target type's (M3). Every such
     -- group's prob also takes the symbol, so the batched backend's arity rule
     -- keeps dense mode off them for now; recording it here is the truthful
     -- answer rather than a placeholder.
@@ -86,14 +87,14 @@ makeDecoderFunGroup adtDecls conf name target tag fwdDecl =
     where plan = makePartitionPlan adtDecls target tag
 
 -- | Forward declaration of a neural network (NN1): a human-readable description of the
--- decoder's required logit-vector output layout.  Emitted by codegen via the decoder group's
--- doc (see 'makeDecoderFunGroup').  The (source -> Symbol) Encoder direction has been removed,
--- so only the decoder shape is rendered.
+-- read-logits network's required logit-vector output layout.  Emitted by codegen via the
+-- group's doc (see 'makeReadLogitsFunGroup').  The reverse (source -> Symbol) shape has been
+-- removed, so only the read-logits shape is rendered.
 makeForwardDecl :: [ADTDecl] -> [(RType, MultiValue)] -> NeuralDecl -> String
 makeForwardDecl adtDecls registry (name, declType, tag) =
   case declType of
     TArrow TSymbol target ->
-      "neural Decoder " ++ name ++ " :: (Symbol -> " ++ show target ++ "); NN1 required output "
+      "neural ReadLogits " ++ name ++ " :: (Symbol -> " ++ show target ++ "); NN1 required output "
         ++ planLayoutString (makePartitionPlan adtDecls target (resolvePartitionAnnotation registry target tag))
     _ -> "neural Declaration " ++ name ++ " :: " ++ show declType ++ " (invalid: a neural network must be Symbol -> target)"
 
@@ -101,9 +102,10 @@ makeForwardDecl adtDecls registry (name, declType, tag) =
 -- layout.  One row per leaf slot, with columns: index-range / constraint / semantic note.
 -- The note carries the structural path (fst/snd, Either L/R, ctor/field) down to the leaf's
 -- meaning, so every row names both its real logit slot(s) and what they encode.  Documents
--- both the decoder forward-declaration (NN1's required output, via 'makeForwardDecl') and
--- each endpoint's encode function (NN2's input, via the encode doc).  Multi-line output is
--- safe: codegen comments every line of a doc (see CodeGenPyTorch/CodeGenJulia).
+-- both the read-logits network's forward-declaration (NN1's required output, via
+-- 'makeForwardDecl') and each endpoint's writeLogits function (NN2's input, via the
+-- writeLogits doc).  Multi-line output is safe: codegen comments every line of a doc
+-- (see CodeGenPyTorch/CodeGenJulia).
 planLayoutString :: PartitionPlan -> String
 planLayoutString plan =
   intercalate "\n" (heading : tableLine headerRow : tableLine sepRow : map tableLine rows)
@@ -204,7 +206,7 @@ vector = "l_x_neural_out"
 symbol :: String
 symbol = "l_x_neural_in"
 
--- The decoder's reader assembles its result tuple by hand rather than through
+-- The read-logits network's reader assembles its result tuple by hand rather than through
 -- IRCompiler's PResult algebra, so the impossibility flag (design
 -- inference-result-side-channels) has to be supplied here too -- callers unpack
 -- all four fields. There is no guard or indicator to take the fact from: the
@@ -422,18 +424,18 @@ makePartitionPlan _adtDecls x y = error ("erroneous combination of type and tag 
 -- to the compiled SPLL inference functions (prob, normal).
 --
 -- This one walker serves both the root and the arms.  It used to be two -- a full
--- top-level dispatch plus a `makeEncodeEitherArm` that handled only Discretes arms and
+-- top-level dispatch plus a `makeWriteLogitsEitherArm` that handled only Discretes arms and
 -- zero-stubbed every composite one, so an ADT field of any non-Discretes plan (a nested
--- enum ADT, a tuple, an Either) encoded as zeros while still occupying its slots.  Keeping
+-- enum ADT, a tuple, an Either) was written as zeros while still occupying its slots.  Keeping
 -- them separate is what let the arm walker fall behind; hence the single function.
-makeEncodePlan :: (IRValue -> IRValue)  -- ^ wrap: rebuild the full sample value for a marginal query
+makeWriteLogitsPlan :: (IRValue -> IRValue)  -- ^ wrap: rebuild the full sample value for a marginal query
                -> String                -- ^ prob function name
                -> String                -- ^ normal function name for this position
                -> Maybe IRExpr          -- ^ arm normaliser: P(enclosing arm), or Nothing at the root
                -> PartitionPlan
                -> [IRExpr]              -- ^ outer parameters in scope
                -> IRExpr
-makeEncodePlan wrap probFnName normalFnName norm plan outerArgs = case plan of
+makeWriteLogitsPlan wrap probFnName normalFnName norm plan outerArgs = case plan of
   Discretes _ (MultiDiscretes vals) ->
     irList [ slot (marginal (wrap (valueToIR v))) | v <- vals ]
 
@@ -441,8 +443,8 @@ makeEncodePlan wrap probFnName normalFnName norm plan outerArgs = case plan of
     -- Call normalFnName(outerArgs...) → IRTCons mu sigma, then emit [mu, sigma].
     -- 'norm' is necessarily Nothing here: a continuous leaf inside an arm would need an
     -- arm-conditional (mu, sigma) that the IRCompiler does not generate, and
-    -- 'requiredNormalFns' names it so 'makeTopLevelEncodeFun'/'validateEncodeGaussian'
-    -- refuse the whole encode before reaching this point.
+    -- 'requiredNormalFns' names it so 'makeTopLevelWriteLogitsFun'/'validateWriteLogitsGaussian'
+    -- refuse the whole writeLogits build before reaching this point.
     let normalResult = foldl IRApply (IRVar normalFnName) outerArgs
     in irList [IRTFst normalResult, IRTSnd normalResult]
 
@@ -477,9 +479,9 @@ makeEncodePlan wrap probFnName normalFnName norm plan outerArgs = case plan of
           | (j, fp) <- zip [0 :: Int ..] fps ]
     in concatLists (irList [ slot (pCtorAny cp) | cp <- ctors ] : map ctorFields ctors)
 
-  Discretes ty tag -> discretesTagError "makeEncodePlan" ty tag
+  Discretes ty tag -> discretesTagError "makeWriteLogitsPlan" ty tag
   where
-    rec w nf n p = makeEncodePlan w probFnName nf n p outerArgs
+    rec w nf n p = makeWriteLogitsPlan w probFnName nf n p outerArgs
     irList       = foldr IRCons emptyList
     emptyList    = IRConst (VList EmptyList)
     marginal s   = IRTFst (foldl IRApply (IRApply (IRVar probFnName) (IRConst s)) outerArgs)
@@ -494,15 +496,15 @@ makeEncodePlan wrap probFnName normalFnName norm plan outerArgs = case plan of
     isEmptyList (IRConst (VList EmptyList)) = True
     isEmptyList _                           = False
 
--- Build the encode function body, wrapped in one lambda per outer parameter of main.
--- encode(p1)(p2)... derives the logit vector from compiled SPLL inference functions
+-- Build the writeLogits function body, wrapped in one lambda per outer parameter of main.
+-- writeLogits(p1)(p2)... derives the logit vector from compiled SPLL inference functions
 -- (main_prob, main_normal) — it does NOT call the NN or accept a sample argument.
-makeEncode :: [ADTDecl] -> CompilerConfig -> PartitionPlan -> String -> String -> [String] -> IRExpr
-makeEncode _adtDecls _conf plan probFnName normalFnName paramNames =
+makeWriteLogits :: [ADTDecl] -> CompilerConfig -> PartitionPlan -> String -> String -> [String] -> IRExpr
+makeWriteLogits _adtDecls _conf plan probFnName normalFnName paramNames =
   foldr IRLambda body paramNames
   where
     outerArgs = map IRVar paramNames
-    body = makeEncodePlan id probFnName normalFnName Nothing plan outerArgs
+    body = makeWriteLogitsPlan id probFnName normalFnName Nothing plan outerArgs
 
 -- Find the flat logit-vector index for a given value within a plan.
 -- For TuplePlan, searches the left sub-plan first, then the right at offset getSize a.
@@ -528,52 +530,52 @@ noAny0 :: IRExpr -> IRExpr -> IRExpr
 noAny0 sample = IRIf (IRUnaryOp OpIsAny sample) (IRConst $ VFloat 0)
 
 ------------------------------------------------------------------------
--- Encode-mode Gaussian validation.
+-- WriteLogits-mode Gaussian validation.
 --
--- A `Continuous` slot in a decoder's plan is encoded by querying the SPLL program's
--- normal-parameter function (`main_normal`, or `main_normal_fst`/`_snd` for tuple
--- components) — see `makeEncodePlan`.  That function only exists when the
+-- A `Continuous` slot in a read-logits network's plan is written by querying the SPLL
+-- program's normal-parameter function (`main_normal`, or `main_normal_fst`/`_snd` for tuple
+-- components) — see `makeWriteLogitsPlan`.  That function only exists when the
 -- corresponding output node is Gaussian (PType `PNormal`/`PLogNormal`); for a non-Gaussian
 -- continuous output (a mixture produced by `if`, a product of random variables, etc.) the
--- IRCompiler does not generate it.  Encoding such an output would otherwise dangle on a
+-- IRCompiler does not generate it.  Writing such an output would otherwise dangle on a
 -- missing function reference at runtime.  This check turns that into a clean, attributed
 -- compile error pointing at `collapse` (task encode-07).
 --
--- The check is encode-specific: a non-Gaussian continuous program is perfectly valid for
+-- The check is writeLogits-specific: a non-Gaussian continuous program is perfectly valid for
 -- probability/generate/integrate inference, so this must not be folded into the shared
 -- `compile` path.
-validateEncodeGaussian :: [ADTDecl] -> [(RType, MultiValue)] -> [NeuralDecl] -> IREnv -> Either CompilerError ()
-validateEncodeGaussian adtDecls registry neuralDecls env = mapM_ checkDecl decoderDecls
+validateWriteLogitsGaussian :: [ADTDecl] -> [(RType, MultiValue)] -> [NeuralDecl] -> IREnv -> Either CompilerError ()
+validateWriteLogitsGaussian adtDecls registry neuralDecls env = mapM_ checkDecl readLogitsDecls
   where
-    -- Only decoder declarations (Symbol -> target) build a query-based encode function.
-    decoderDecls = [ (name, target, tag) | (name, TArrow TSymbol target, tag) <- neuralDecls ]
+    -- Only read-logits declarations (Symbol -> target) build a query-based writeLogits function.
+    readLogitsDecls = [ (name, target, tag) | (name, TArrow TSymbol target, tag) <- neuralDecls ]
     available = availableNormalFns env
     checkDecl (name, target, tag) =
       let plan     = makePartitionPlan adtDecls target (resolvePartitionAnnotation registry target tag)
           required = requiredNormalFns "main_normal" plan
           missing  = filter (`notElem` available) required
-      in if null missing then Right () else Left (encodeGaussianError name)
-    encodeGaussianError name =
-      "encode: neural declaration '" ++ name ++ "' has a continuous output slot that cannot "
-      ++ "be encoded. Either it is not Gaussian (a mixture produced by `if`, a product of "
+      in if null missing then Right () else Left (writeLogitsGaussianError name)
+    writeLogitsGaussianError name =
+      "writeLogits: neural declaration '" ++ name ++ "' has a continuous output slot that cannot "
+      ++ "be written. Either it is not Gaussian (a mixture produced by `if`, a product of "
       ++ "random variables), or it is a continuous arm inside an Either/ADT — the latter is "
       ++ "not yet supported (its arm-conditional (mu, sigma) is not generated), so it is "
       ++ "refused rather than silently zero-stubbed."
 
--- | Normal-parameter function names that `encode` references for the Continuous slots of a
--- plan.  Mirrors the name threading in `makeEncodePlan` (top-level `main_normal`,
+-- | Normal-parameter function names that `writeLogits` references for the Continuous slots of a
+-- plan.  Mirrors the name threading in `makeWriteLogitsPlan` (top-level `main_normal`,
 -- tuple components suffixed `_fst`/`_snd`).
 --
 -- Either/ADT arms recurse too: a continuous leaf inside an arm names an arm-conditional
 -- normal function (`_left`/`_right`, `_<ctor>_<field>`) that the IRCompiler does not yet
 -- generate.  By surfacing that leaf as a required-but-absent normal function,
--- `makeTopLevelEncodeFun`'s `normalsOk` check refuses to build such an encode (and
--- `validateEncodeGaussian` refuses to run it) rather than silently emitting a zero for the
--- arm's `(mu, sigma)`.  A fully-discrete arm contributes no requirement, so a discrete
--- Either/ADT of any nesting depth stays buildable — `makeEncodePlan` encodes those arms
+-- `makeTopLevelWriteLogitsFun`'s `normalsOk` check refuses to build such a writeLogits function
+-- (and `validateWriteLogitsGaussian` refuses to run it) rather than silently emitting a zero for
+-- the arm's `(mu, sigma)`.  A fully-discrete arm contributes no requirement, so a discrete
+-- Either/ADT of any nesting depth stays buildable — `makeWriteLogitsPlan` writes those arms
 -- for real, and this list is exactly the continuous residue it cannot.
 --
--- The names generated here must match `makeEncodePlan`'s `normalFnName` threading case for
+-- The names generated here must match `makeWriteLogitsPlan`'s `normalFnName` threading case for
 -- case; they are a single scheme spelled in two places, one deciding refusal and one
 -- deciding emission.
 requiredNormalFns :: String -> PartitionPlan -> [String]
@@ -598,37 +600,37 @@ availableNormalFns (IREnv groups _ _) =
       | "_component_" `isPrefixOf` groupName g = drop (length "_component_") (groupName g)
       | otherwise                              = groupName g ++ "_normal"
 
--- MAR semantics for EitherPlan encoding are implemented in makeEncodePlan.
+-- MAR semantics for EitherPlan writing are implemented in makeWriteLogitsPlan.
 
 ------------------------------------------------------------------------
--- A top-level function's own encode function (auto-derive slice of PartitionPlan decoupling).
+-- A top-level function's own writeLogits function (auto-derive slice of PartitionPlan decoupling).
 --
--- `makeEncode`'s logic only needs a PartitionPlan for some RType plus that function's
+-- `makeWriteLogits`'s logic only needs a PartitionPlan for some RType plus that function's
 -- `<fn>_prob`/`<fn>_normal` functions; it does not need a `neural :: Symbol -> target`
--- declaration -- that's merely a historical trigger.  This builds an encode function for any
+-- declaration -- that's merely a historical trigger.  This builds a writeLogits function for any
 -- logit-representable top-level binding directly from its own output RType, querying that
 -- function's own prob/normal functions, with no neural declaration involved.  `main` is just
 -- the `fn == "main"` case.  See tasks encode-main-auto-derived / encode-per-function-endpoints
 -- and design encode-partitionplan-decoupling.
 --
 -- This is purely additive: it returns Nothing (never an error) when
---   * the type is neither in the encodeDecls registry nor auto-derivable -- i.e. it
+--   * the type is neither in the writeLogitsDecls registry nor auto-derivable -- i.e. it
 --     involves Int, Symbol, or a recursive ADT (these need an explicit annotation that the
 --     auto-derive-only slice does not supply), or
 --   * a Continuous slot would reference a `main_normal` function that wasn't generated
 --     because the output isn't Gaussian -- the same requiredNormalFns/availableNormalFns
---     check `validateEncodeGaussian` applies to decoder declarations, or
+--     check `validateWriteLogitsGaussian` applies to read-logits declarations, or
 --   * a discrete/Either/ADT slot would reference an absent `main_prob` function.
-makeTopLevelEncodeFun :: [ADTDecl] -> CompilerConfig -> [(RType, MultiValue)]
+makeTopLevelWriteLogitsFun :: [ADTDecl] -> CompilerConfig -> [(RType, MultiValue)]
                       -> String       -- ^ host function name (e.g. "main", "isRed")
                       -> RType        -- ^ the binding's (return) RType
                       -> [String]     -- ^ outer parameter names of the host function
                       -> Bool         -- ^ whether the host's prob function was generated
                       -> [IRFunGroup] -- ^ groups carrying the host's normal functions (base + tuple components)
                       -> Maybe IRFunDecl
-makeTopLevelEncodeFun adtDecls conf registry fnName rty paramNames probAvailable normalGroups
+makeTopLevelWriteLogitsFun adtDecls conf registry fnName rty paramNames probAvailable normalGroups
   | not buildable       = Nothing
-  | normalsOk && probOk = Just (makeEncode adtDecls conf plan probFnName normalFnName paramNames, doc)
+  | normalsOk && probOk = Just (makeWriteLogits adtDecls conf plan probFnName normalFnName paramNames, doc)
   | otherwise           = Nothing
   where
     probFnName   = fnName ++ "_prob"
@@ -643,9 +645,9 @@ makeTopLevelEncodeFun adtDecls conf registry fnName rty paramNames probAvailable
     available    = availableNormalFns (IREnv normalGroups [] [])
     normalsOk    = all (`elem` available) (requiredNormalFns normalFnName plan)
     probOk       = not (planUsesProb plan) || probAvailable
-    doc          = "Encoding function for " ++ fnName ++ "'s own output type; " ++ planLayoutString plan
+    doc          = "WriteLogits function for " ++ fnName ++ "'s own output type; " ++ planLayoutString plan
 
--- | Whether an encode plan references the program's prob function: true for any discrete /
+-- | Whether a writeLogits plan references the program's prob function: true for any discrete /
 -- Either / ADT slot, false for a pure-Continuous plan (which queries only the normal
 -- function).
 planUsesProb :: PartitionPlan -> Bool

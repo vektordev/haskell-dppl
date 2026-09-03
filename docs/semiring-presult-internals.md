@@ -17,7 +17,7 @@ skip can run anyway (`dice` stops terminating).
 `rProb` is a newtype `P` that only `SPLL.Semiring` can construct, so
 `IRCompiler.hs` must route probabilities through a Semiring-aware
 combinator or one of two escape hatches: `unsafeLinearP` (linear-only
-subsystems — set-witness/plan-enum measurement, AutoNeural decoder reads)
+subsystems — set-witness/plan-enum measurement, AutoNeural read-logits reads)
 or `sealP` (bespoke `PResult`s assembled from already-trusted values).
 Grepping `unsafeLinearP` is the "which subsystems ignore `logSpace`" audit.
 
@@ -38,7 +38,7 @@ semiring-aware too. Two consequences worth internalising before touching
   `srZero sr`, not the literal `0.0`, and log space compares against
   `-inf` with exact `OpEq` rather than `OpApprox`, because
   `(-inf) - (-inf)` is `NaN`.
-- **Not everything is semiring-aware.** The `ReadNN`/AutoNeural decoder and
+- **Not everything is semiring-aware.** The `ReadNN`/AutoNeural read-logits network and
   the set-witness/plan-enum continuous measurement machinery build bespoke
   `IRExpr` formulas and stay linear-only under `logSpace`. `Spec.hs`'s
   `logSpaceUncoveredPrograms` lists the corpus programs that reach them and

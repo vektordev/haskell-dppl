@@ -20,7 +20,7 @@
 --   * 'unsafeLinearP', the one sanctioned escape hatch for the handful of
 --     subsystems that are deliberately linear-only regardless of 'logSpace'
 --     (set-witness continuous measurement, plan-guided lazy enumeration,
---     AutoNeural's decoder logit reads -- see each call site's comment), or
+--     AutoNeural's read-logits logit reads -- see each call site's comment), or
 --   * 'sealP', for the smaller number of call sites in IRCompiler.hs that
 --     build a bespoke 'PResult' shape none of the combinators fit, out of
 --     values that already went through a Semiring operator or a trusted
@@ -79,7 +79,7 @@ newtype P = P { unP :: IRExpr }
 
 -- | Escape hatch for subsystems that are deliberately linear-only regardless
 -- of 'logSpace' (set-witness continuous measurement, plan-guided lazy
--- enumeration, AutoNeural's decoder reads). Named distinctly from 'sealP' so
+-- enumeration, AutoNeural's read-logits reads). Named distinctly from 'sealP' so
 -- a grep for this name alone is the "which subsystems ignore logSpace" audit.
 unsafeLinearP :: IRExpr -> P
 unsafeLinearP = P
@@ -175,7 +175,7 @@ anyGuardedDim sample = IRIf (IRUnaryOp OpIsAny sample) const0 const1
 -- value rather than a second code path threaded through every case.
 --
 -- NOT semiring-aware (see the task's written invasiveness verdict): the
--- ReadNN/AutoNeural neural decoder's own logit-read construction, and the
+-- ReadNN/AutoNeural neural read-logits network's own logit-read construction, and the
 -- set-witness/plan-enum continuous measurement machinery in IRCompiler.hs
 -- (both build PResult leaves from their own bespoke IRExpr formulas, routed
 -- through 'unsafeLinearP', not through this vocabulary). Those remain

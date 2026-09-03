@@ -28,7 +28,7 @@ import Data.Vector.Internal.Check (HasCallStack)
 neuralOutputType :: String -> RType -> RType
 neuralOutputType name rt = fromMaybe
   (error ("Neural network '" ++ name ++ "' is declared as " ++ show rt
-          ++ "; a decoder must have type Symbol -> <output type>"))
+          ++ "; a read-logits declaration must have type Symbol -> <output type>"))
   (neuralValueType rt)
 
 -- | 'IRTheta'/'IRSubtree' index into the theta tree their argument evaluates to.
@@ -564,14 +564,14 @@ reduceStep op a b =
 reduceIREnv :: IREnv -> ReducedIREnv
 reduceIREnv (IREnv funcs _ consts) =
   map (\(name, val) -> (name, IRConst val)) consts ++
-  concatMap (\(IRFunGroup name gen prob integ encode normal _ _) ->
+  concatMap (\(IRFunGroup name gen prob integ writeLogits normal _ _) ->
     -- Special handling for per-component normal functions (created with "_component_" prefix)
     if "_component_" `isPrefixOf` name then
       -- Extract the actual component name and register without suffix
       let componentName = drop 11 name  -- Remove "_component_" prefix
       in catMaybes [normal <&> \(expr, _) -> (componentName, expr)]
     else
-      catMaybes [gen <&> red name "_gen", prob <&> red name "_prob", integ <&> red name "_integ", encode <&> red name "_encode", normal <&> red name "_normal"]) funcs
+      catMaybes [gen <&> red name "_gen", prob <&> red name "_prob", integ <&> red name "_integ", writeLogits <&> red name "_writeLogits", normal <&> red name "_normal"]) funcs
   where red name suffix (expr, _) = (name ++ suffix, expr)
 
 irSample :: (RandomGen g) => Distribution -> Rand g IRValue

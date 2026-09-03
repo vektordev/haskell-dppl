@@ -66,10 +66,11 @@ import Control.Monad.State (State, evalState, get, put)
 --
 -- Generate ineligibility (recursive, or a still-unsupported shape) is a hard
 -- 'Left' here, exactly like forward/integrate (task neural-generate-parity,
--- an explicit choice over keeping M4's per-class stub now that neural decoder
--- generate is usually eligible). M4 originally made a single class's generate
--- ineligibility degrade to a runtime-raising stub rather than aborting the
--- whole compile, because every neural decoder group unconditionally had a
+-- an explicit choice over keeping M4's per-class stub now that a neural
+-- read-logits network's generate is usually eligible). M4 originally made a
+-- single class's generate ineligibility degrade to a runtime-raising stub
+-- rather than aborting the whole compile, because every neural read-logits
+-- group unconditionally had a
 -- 'genFun' and batched generate did not yet support any of them -- a hard
 -- failure would have broken batched compilation of every neural corpus
 -- program the moment generate was attempted at all.
@@ -78,7 +79,7 @@ import Control.Monad.State (State, evalState, get, put)
 -- (@main = (\f -> f (f Uniform)) (\x -> x * 2.0)@, a nullary higher-order
 -- application) has forward/integrate bodies the optimizer beta-reduces down
 -- to plain arithmetic, but a *generate* body that still contains a literal,
--- un-reduced 'IRLambda'/'IRApply' -- unrelated to neural decoders, and not
+-- un-reduced 'IRLambda'/'IRApply' -- unrelated to neural read-logits networks, and not
 -- something this task's fragment additions cover. Under M4's stub it still
 -- contributed forward/integrate coverage to the batched differential; under
 -- this hard rule the whole program is refused, dropping it out of batched
@@ -307,8 +308,8 @@ onHead _ []     = []
 -- as the scalar generate, just with (harmless) extra randomness drawn for the
 -- untaken arm.
 --
--- A neural decoder's own generate body ('SPLL.AutoNeural.makeGenRec') draws
--- from the decoder's output distribution: a sequential weighted lottery for a
+-- A neural read-logits network's own generate body ('SPLL.AutoNeural.makeGenRec') draws
+-- from its output distribution: a sequential weighted lottery for a
 -- discrete/categorical leaf (nested 'IRIf'/'IRSample' 'IRUniform' comparisons
 -- against running normalised weight -- mathematically a categorical draw, the
 -- same shape 'lottery' already builds for the *scalar* backend, not a fresh
@@ -317,12 +318,12 @@ onHead _ []     = []
 -- over 'IRTCons' for tuples. None of that needed new IR nodes or new
 -- 'pythonLibBatched.py' primitives: every node 'makeGenRec' emits was already
 -- in the tensor fragment ('emittable' below), so removing the blanket
--- @isNeuralDecoderGroup@ exclusion this milestone had is sufficient. What
+-- @isNeuralReadLogitsGroup@ exclusion this milestone had is sufficient. What
 -- remains excluded -- 'EitherPlan' (@IRLeft@/@IRRight@ construction has no
 -- tensor representation) and 'ADTPlan' (ADTs are refused for the whole batched
 -- compile already, see 'generateFunctionsBatched') -- is refused by the same
 -- 'batchedGuard' forward/integrate already goes through, which is no loss:
--- a decoder with an Either/ADT-shaped output already fails to batch-compile at
+-- a read-logits network with an Either/ADT-shaped output already fails to batch-compile at
 -- all, since its *probability* reader ('SPLL.AutoNeural.makeProb') hits the
 -- same excluded constructs.
 -- ---------------------------------------------------------------------------
@@ -346,7 +347,7 @@ batchNVar = "_batchN"
 --      concern -- Python would stack-overflow actually calling it).
 --   2. Any other construct outside the tensor fragment ('batchedGuard', same
 --      as forward/integrate): lists, ADTs, Either dispatch (including a
---      neural decoder's own 'EitherPlan'/'ADTPlan' output shape -- see the
+--      neural read-logits network's own 'EitherPlan'/'ADTPlan' output shape -- see the
 --      header comment above), etc.
 renderGen :: SEnv -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> String -> IRFunDecl -> Either CompilerError [String]
 renderGen env lut genArities genRaw groupNameStr (expr0, doc)
@@ -748,8 +749,8 @@ hasStructuralIf env e = case e of
 -- Call-graph guard: recursion and non-emitted-method calls
 -- ---------------------------------------------------------------------------
 
--- | Batched mode admits cross-function calls (the neural decoder pattern:
--- @main_prob@ → @decoder_prob@ → a network invocation), but only to functions
+-- | Batched mode admits cross-function calls (the neural read-logits pattern:
+-- @main_prob@ → @readLogits_prob@ → a network invocation), but only to functions
 -- it actually emits from a prob/integ path -- the @forward@ (@_prob@) and
 -- @integrate@ (@_integ@) methods -- and only when the call graph is acyclic.
 -- Two constructs it must keep refusing (both were caught for free by the old
@@ -843,7 +844,7 @@ groupMethods (IRFunGroup n gen prob integ enc normal _ _) =
      [(n ++ "_gen",    b) | Just (b, _) <- [gen]]
   ++ [(n ++ "_prob",   b) | Just (b, _) <- [prob]]
   ++ [(n ++ "_integ",  b) | Just (b, _) <- [integ]]
-  ++ [(n ++ "_encode", b) | Just (b, _) <- [enc]]
+  ++ [(n ++ "_writeLogits", b) | Just (b, _) <- [enc]]
   ++ [(n ++ "_normal", b) | Just (b, _) <- [normal]]
 
 -- | The only call targets a prob/integ path may reach ('checkCallGraph').
@@ -921,7 +922,7 @@ emittable e = case e of
   IRSubtree{}    -> True
   IRDensity{}    -> True
   IRCumulative{} -> True
-  IRApply{}      -> True   -- network call / cross-function decoder call (M2b)
+  IRApply{}      -> True   -- network call / cross-function read-logits call (M2b)
   IRIndex{}      -> True   -- logit-vector slice or per-element gather (M2b)
   IREnumSum _ mv _  -> scalarDiscreteMulti mv  -- enum sum, unrolled over the enum axis (M2b)
   -- Paired (probability, branchCount) enum sum -- only built by a
@@ -987,7 +988,7 @@ emittable e = case e of
 -- produces batched Python that dies with a @NameError@ at run time instead of
 -- being refused at compile time. Borrowing @pyVal@ here was a live defect, not
 -- a hypothetical one: six corpus programs (the @planEnumCont*@ family,
--- @planEnumInlineBool@, @autoNeuralEncodeTupleDiscrete@) passed 'batchedGuard'
+-- @planEnumInlineBool@, @autoNeuralWriteLogitsTupleDiscrete@) passed 'batchedGuard'
 -- and emitted @indexOf(..., ConsInferenceList(True, ...))@ — the enum-index
 -- lookup 'SPLL.AutoNeural.indexOf' builds over a 'VList' constant, which the
 -- old blanket @IRConst{} -> True@ admitted. The list survives to codegen
@@ -1039,7 +1040,7 @@ batchedValOrDie v = fromMaybe
 -- an assumption.
 --
 -- The composite-'MultiValue' direction is not reachable from a real program
--- (an Either/ADT-shaped decoder trips 'IRIsLeft' or the ADT-declaration bail
+-- (an Either/ADT-shaped read-logits network trips 'IRIsLeft' or the ADT-declaration bail
 -- first), so its positive control is the synthetic-IR row in
 -- @TestInternals.batchedRefusalUnitTests@ rather than a corpus program.
 scalarDiscreteMulti :: MultiValue -> Bool
@@ -1196,7 +1197,7 @@ batchedExpr env (IRSubtree e i)  = "(" ++ batchedExpr env e ++ ")[1][" ++ show i
 batchedExpr env (IRDensity d e)    = "density_" ++ batchedDist d ++ "(" ++ batchedExpr env e ++ ")"
 batchedExpr env (IRCumulative d e) = "cumulative_" ++ batchedDist d ++ "(" ++ batchedExpr env e ++ ")"
 -- A call chain: the raw network invocation @net(sym)@ (returning a @[B, n]@
--- logit tensor) or a cross-function decoder call @decoder.forward(logits, sample)@
+-- logit tensor) or a cross-function read-logits call @readLogits.forward(logits, sample)@
 -- (the function name already rewritten to @class.method@ form by the LUT).
 batchedExpr env e@(IRApply _ _) =
   let (fn, args) = collectApplyChain e

@@ -16,7 +16,7 @@ distributionPrimitiveNames = ["Uniform", "Normal"]
 -- This function returns nothing if the program is valid and an error else
 validateProgram :: Program -> Either String ()
 -- We sequence the either monads so we either have a list of errors(Lefts) or discard the Rights
-validateProgram p@Program{functions=fn, neurals=nrls, encodeDecls=enc} = sequence_ (validateMainExists fn : validateEncodeDecls enc : map validateNeuralShape nrls ++ exprValidations)
+validateProgram p@Program{functions=fn, neurals=nrls, writeLogitsDecls=enc} = sequence_ (validateMainExists fn : validateWriteLogitsDecls enc : map validateNeuralShape nrls ++ exprValidations)
   where
     -- Validate all expressions potentially unsing the context of their top level declaration and their program
     exprValidations = concatMap (\(_, expr) -> validateAllSubexpressions p expr expr) fn
@@ -24,13 +24,13 @@ validateProgram p@Program{functions=fn, neurals=nrls, encodeDecls=enc} = sequenc
     validateAllSubexpressions :: Program -> Expr -> Expr -> [Either String ()]
     validateAllSubexpressions prog topLevel expr = validateExpression prog topLevel expr : concatMap (validateAllSubexpressions prog topLevel) (getSubExprs expr)
 
--- | The PartitionPlan annotation registry (explicit "neural encode :: T of M"
+-- | The PartitionPlan annotation registry (explicit "neural writeLogits :: T of M"
 -- declarations, plus sugar from every NeuralDecl's "of" clause) may register a given
 -- RType at most once: two differing MultiValue annotations for the same type is a
--- loud, hard error. Identical re-registrations (e.g. a decoder's own "of" clause
--- agreeing with an explicit "neural encode" entry for the same type) are not a conflict.
-validateEncodeDecls :: [(RType, MultiValue)] -> Either String ()
-validateEncodeDecls decls = mapM_ checkGroup grouped
+-- loud, hard error. Identical re-registrations (e.g. a read-logits network's own "of" clause
+-- agreeing with an explicit "neural writeLogits" entry for the same type) are not a conflict.
+validateWriteLogitsDecls :: [(RType, MultiValue)] -> Either String ()
+validateWriteLogitsDecls decls = mapM_ checkGroup grouped
   where
     grouped = groupBy ((==) `on` fst) (sortOn fst decls)
     checkGroup g = case nub (map snd g) of
@@ -38,17 +38,18 @@ validateEncodeDecls decls = mapM_ checkGroup grouped
                         ++ show (fst (head g)) ++ ": " ++ show (map snd g))
       _ -> Right ()
 
--- | A neural declaration forward-declares a Decoder (Symbol -> target): NN1, whose logits
--- SPLL reads.  The (source -> Symbol) "Encoder" direction has been removed: it named an
--- external network (NN2) with no SPLL call site, and the encode bridge it tried to host now
--- lives on the value-producing SPLL function instead.  Reject it with a pointer at the
--- registry syntax that covers the only job it still had (registering a type's logit layout).
+-- | A neural declaration forward-declares the read-logits network (Symbol -> target): NN1,
+-- whose logits SPLL reads. The reverse (source -> Symbol) shape used to name a second,
+-- external network (NN2) with no SPLL call site; that role has been removed, and the
+-- logit-vector bridge it tried to host now lives on the value-producing SPLL function
+-- instead. Reject the reverse shape with a pointer at the registry syntax that covers the
+-- only job it still had (registering a type's logit layout).
 validateNeuralShape :: NeuralDecl -> Either String ()
 validateNeuralShape (_, TArrow TSymbol _, _) = Right ()
 validateNeuralShape (name, TArrow _ TSymbol, _) =
   Left ("Compiler Error: neural declaration '" ++ name ++ "' has the form (source -> Symbol), "
-        ++ "the Encoder direction, which is no longer supported. To register a logit layout "
-        ++ "for a type, write `neural encode :: <type> of <multivalue>`; the encode for a "
+        ++ "which is no longer supported. To register a logit layout "
+        ++ "for a type, write `neural writeLogits :: <type> of <multivalue>`; the logit vector for a "
         ++ "value is generated on the SPLL function that produces it.")
 validateNeuralShape (name, ty, _) =
   Left ("Compiler Error: neural declaration '" ++ name ++ "' has type " ++ show ty

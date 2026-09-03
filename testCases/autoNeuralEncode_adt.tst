@@ -1,1 +1,1 @@
-encode_len=7
+writeLogits_len=7

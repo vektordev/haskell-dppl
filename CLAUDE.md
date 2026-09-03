@@ -703,6 +703,32 @@ declaration (`data T = … depth N`) — otherwise give a depth-bounded
 override (`3x.{...}`) or compilation errors. Only *direct* self-recursion
 is auto-detected.
 
+### AutoNeural naming: `readLogits` / `writeLogits`
+
+Two independent directions live in `SPLL.AutoNeural`, and both are named for
+the data flow rather than for "encode"/"decode" — those words used to collide
+(both nominally "produce logits"), which made the actual opposite pair
+(reading a logit vector vs. writing one) unreadable from the names alone.
+
+- **`readLogits`** (`makeReadLogitsFunGroup`, `neuralReadLogitsSuffix =
+  "_auto"`): a neural declaration `name :: Symbol -> target` forward-declares
+  a network (NN1) whose logit-vector output SPLL *reads* into a
+  value/distribution. Emits the `<name>_auto` group's `gen`/`prob` readers;
+  it never hosts a `writeLogits` function itself.
+- **`writeLogits`** (`makeWriteLogits`, `makeTopLevelWriteLogitsFun`,
+  `IRFunGroup`'s `writeLogitsFun` field, generated as a `_writeLogits`
+  suffix / `writeLogits` Python method): the compiler-generated inverse —
+  it derives a logit vector from a value-producing SPLL function's own
+  compiled `_prob`/`_normal` functions, for a hypothetical downstream
+  network (NN2). Built per function endpoint (task
+  `encode-per-function-endpoints`), not per neural declaration.
+- The registry keyword is `neural writeLogits :: T of M`
+  (`SPLL.Lang.Types.writeLogitsDecls`), and the `.tst` probes are
+  `writeLogits_len`/`writeLogits_at` (`TestCaseParser`).
+- A third, historical direction (`source -> Symbol`, once called "Encoder")
+  named an external network with no SPLL call site; it has been removed and
+  is rejected at validation (`SPLL.Validator.validateNeuralShape`).
+
 ## Test Structure
 
 The suite runs under tasty (`tasty-quickcheck` for properties, `tasty-hunit`
@@ -724,8 +750,8 @@ into the top-level groups (`--ta '-l'` prints the current list):
   and its projection; hand-verified modalities the engine must pin
 - `test/TestDeterminism.hs` — the forward determinism dataflow and its
   call-graph fixpoint
-- `test/TestEncodeProperties.hs` — AutoNeural encode, plus corpus-driven
-  encode/decode roundtrip checks on slot layout and semantics
+- `test/TestWriteLogitsProperties.hs` — AutoNeural writeLogits, plus corpus-driven
+  writeLogits/readLogits roundtrip checks on slot layout and semantics
 - `test/TestShowcase.hs` — documentation drift guard: `examples/showcase.*`
   (incl. the `.freeze` definitions) and every ` ```spll ` block in
   `README.md` as a doctest

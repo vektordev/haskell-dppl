@@ -34,8 +34,8 @@ DIGITS = 10
 
 
 def make_net(seed=0):
-    """A small MNIST-ish classifier. Softmax output, because the emitted decoder
-    reads its output as a categorical distribution over the 10 digits."""
+    """A small MNIST-ish classifier. Softmax output, because the emitted read-logits
+    network reads its output as a categorical distribution over the 10 digits."""
     torch.manual_seed(seed)
     return nn.Sequential(
         nn.Linear(IMG, 128), nn.ReLU(),

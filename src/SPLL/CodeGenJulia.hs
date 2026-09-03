@@ -204,12 +204,12 @@ generateFunctions env0 = do
   adtClasses ++ constsStr ++ varsStr ++ funcStrs
 
 generateFunctionGroup :: IRFunGroup -> GlobalVariableSupply [String]
-generateFunctionGroup IRFunGroup {groupName=n, genFun=g, probFun=p, integFun=i, encodeFun=e, normalFun=nrm, groupDoc=doc} = do
+generateFunctionGroup IRFunGroup {groupName=n, genFun=g, probFun=p, integFun=i, writeLogitsFun=e, normalFun=nrm, groupDoc=doc} = do
   let preemble = ("# === Function Group " ++ n ++ " ===") : map ("# " ++) (lines doc)
   gen <- fromMaybe (return []) (g <&> genF n "_gen")
   prob <- fromMaybe (return []) (p <&> genF n "_prob")
   integ <- fromMaybe (return []) (i <&> genF n "_integ")
-  enc <- fromMaybe (return []) (e <&> genF n "_encode")
+  enc <- fromMaybe (return []) (e <&> genF n "_writeLogits")
   norm <- fromMaybe (return []) (nrm <&> genF n "_normal")
   return $ preemble ++ gen ++ prob ++ integ ++ enc ++ norm
   where genF name suffix (fnBody, d) = generateFunction (name ++ suffix) d fnBody

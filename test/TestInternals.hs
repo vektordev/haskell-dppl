@@ -129,18 +129,18 @@ classConstraintTests = testGroup "classConstraints"
   ]
 
 -- Specification test: a closed-form tuple-of-normals program with known, constant
--- parameters.  The encoder is expected to recover those parameters directly from the
--- compiled SPLL distribution rather than reading the raw NN logit-vector slots.
+-- parameters.  The writeLogits function is expected to recover those parameters directly
+-- from the compiled SPLL distribution rather than reading the raw NN logit-vector slots.
 --
--- Expected encode output: [mu1, sigma1, mu2, sigma2] = [2.0, 1.5, -1.0, 0.5]
+-- Expected writeLogits output: [mu1, sigma1, mu2, sigma2] = [2.0, 1.5, -1.0, 0.5]
 -- regardless of which sample is passed in.
 --
--- makeEncodePlan handles TuplePlan by delegating each Continuous sub-plan to
+-- makeWriteLogitsPlan handles TuplePlan by delegating each Continuous sub-plan to
 -- the per-component normal function (main_normal_fst / main_normal_snd), which
 -- returns (mu, sigma) derived from the compiled SPLL program rather than the raw
 -- NN logit vector.
-test_encodeTupleGaussianParams :: TestTree
-test_encodeTupleGaussianParams = testCase "encodeTupleGaussianParams" $ do
+test_writeLogitsTupleGaussianParams :: TestTree
+test_writeLogitsTupleGaussianParams = testCase "writeLogitsTupleGaussianParams" $ do
   let src = unlines
         [ "neural tupleNN :: (Symbol -> (Float, Float))"
         , "main = (1.5 * Normal + 2.0, 0.5 * Normal + (-1.0))"
@@ -148,14 +148,15 @@ test_encodeTupleGaussianParams = testCase "encodeTupleGaussianParams" $ do
   prog <- case tryParseProgram "<test>" src of
     Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
     Right p  -> return p
-  -- Closed-form program: no outer params, so runEncode takes an empty arg list.
-  -- The encode lives on main (the value producer), derived from its (Float, Float) output.
-  case runEncode defaultCompilerConfig prog "main" [] of
-    Left err -> assertFailure ("runEncode failed: " ++ err)
+  -- Closed-form program: no outer params, so runWriteLogits takes an empty arg list.
+  -- The writeLogits function lives on main (the value producer), derived from its
+  -- (Float, Float) output.
+  case runWriteLogits defaultCompilerConfig prog "main" [] of
+    Left err -> assertFailure ("runWriteLogits failed: " ++ err)
     Right (VList lst) -> do
       let items = toList lst
-      assertEqual "encode length" 4 (length items)
-      -- The encoder must recover the actual distribution parameters,
+      assertEqual "writeLogits length" 4 (length items)
+      -- writeLogits must recover the actual distribution parameters,
       -- not the mock NN's random output.
       let checkSlot i expected = case items !! i of
             VFloat actual ->
@@ -169,12 +170,13 @@ test_encodeTupleGaussianParams = testCase "encodeTupleGaussianParams" $ do
       checkSlot 3   0.5   -- sigma2
     Right other -> assertFailure ("expected VList, got: " ++ show other)
 
--- Property: for a discrete-output program, the encode output (probability vector) should
+-- Property: for a discrete-output program, the writeLogits output (probability vector) should
 -- sum to approximately 1.0 for any mock NN sym input.
 -- Tests with the discrete nonidentity program: main sym = if discreteNN sym == 0 then 2 else 0
--- Output type Int with values [0,1,2], so encode returns [P(0), P(1), P(2)] which must sum to 1.
-test_encodeDiscreteSumsToOne :: TestTree
-test_encodeDiscreteSumsToOne = testCase "encodeDiscreteSumsToOne" $ do
+-- Output type Int with values [0,1,2], so writeLogits returns [P(0), P(1), P(2)] which must
+-- sum to 1.
+test_writeLogitsDiscreteSumsToOne :: TestTree
+test_writeLogitsDiscreteSumsToOne = testCase "writeLogitsDiscreteSumsToOne" $ do
   let src = unlines
         [ "neural discreteNN :: (Symbol -> Int) of [0, 1, 2]"
         , "main sym = if discreteNN sym == 0 then 2 else 0"
@@ -184,20 +186,20 @@ test_encodeDiscreteSumsToOne = testCase "encodeDiscreteSumsToOne" $ do
     Right p  -> return p
   -- Try several different mock syms; each should give a prob vector summing to 1.
   let mockSyms = [ VTuple (VInt 0) (VInt s) | s <- [0, 1, 42, 100, 999] ]
-  mapM_ (\sym -> case runEncode defaultCompilerConfig prog "main" [sym] of
-    Left err -> assertFailure ("runEncode failed: " ++ err)
+  mapM_ (\sym -> case runWriteLogits defaultCompilerConfig prog "main" [sym] of
+    Left err -> assertFailure ("runWriteLogits failed: " ++ err)
     Right (VList lst) -> do
       let items = toList lst
           total = sum [ x | VFloat x <- items ]
-      assertBool ("encode probs should sum to ~1.0, got " ++ show total)
+      assertBool ("writeLogits probs should sum to ~1.0, got " ++ show total)
                  (abs (total - 1.0) < 1.0e-4)
     Right other -> assertFailure ("expected VList, got: " ++ show other)
     ) mockSyms
 
--- Property: for the Gaussian identity program, encode always returns exactly 2 elements
+-- Property: for the Gaussian identity program, writeLogits always returns exactly 2 elements
 -- and sigma > 0, regardless of mock sym.
-test_encodeGaussianSigmaPositive :: TestTree
-test_encodeGaussianSigmaPositive = testCase "encodeGaussianSigmaPositive" $ do
+test_writeLogitsGaussianSigmaPositive :: TestTree
+test_writeLogitsGaussianSigmaPositive = testCase "writeLogitsGaussianSigmaPositive" $ do
   let src = unlines
         [ "neural gaussNN :: (Symbol -> Float)"
         , "main sym = gaussNN sym"
@@ -206,11 +208,11 @@ test_encodeGaussianSigmaPositive = testCase "encodeGaussianSigmaPositive" $ do
     Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
     Right p  -> return p
   let mockSyms = [ VTuple (VInt 0) (VInt s) | s <- [0, 1, 7, 42] ]
-  mapM_ (\sym -> case runEncode defaultCompilerConfig prog "main" [sym] of
-    Left err -> assertFailure ("runEncode failed: " ++ err)
+  mapM_ (\sym -> case runWriteLogits defaultCompilerConfig prog "main" [sym] of
+    Left err -> assertFailure ("runWriteLogits failed: " ++ err)
     Right (VList lst) -> do
       let items = toList lst
-      assertEqual "encode length for Gaussian" 2 (length items)
+      assertEqual "writeLogits length for Gaussian" 2 (length items)
       case items of
         [_, VFloat sigma] ->
           assertBool ("sigma should be positive, got " ++ show sigma) (sigma > 0)
@@ -218,14 +220,14 @@ test_encodeGaussianSigmaPositive = testCase "encodeGaussianSigmaPositive" $ do
     Right other -> assertFailure ("expected VList, got: " ++ show other)
     ) mockSyms
 
--- A standalone "neural encode :: Int of [...]" declaration registers a PartitionPlan
+-- A standalone "neural writeLogits :: Int of [...]" declaration registers a PartitionPlan
 -- annotation for Int without declaring any callable network. main's Int output picks up
--- that registry entry, so main's own encode group produces the registered number of slots
--- (3) even though Int is not auto-derivable on its own.
-test_encodeUsesStandaloneRegistration :: TestTree
-test_encodeUsesStandaloneRegistration = testCase "encodeUsesStandaloneRegistration" $ do
+-- that registry entry, so main's own writeLogits group produces the registered number of
+-- slots (3) even though Int is not auto-derivable on its own.
+test_writeLogitsUsesStandaloneRegistration :: TestTree
+test_writeLogitsUsesStandaloneRegistration = testCase "writeLogitsUsesStandaloneRegistration" $ do
   let src = unlines
-        [ "neural encode :: Int of [0, 1, 2]"
+        [ "neural writeLogits :: Int of [0, 1, 2]"
         , "neural decA :: (Symbol -> Int)"
         , "main sym = decA sym"
         ]
@@ -233,40 +235,41 @@ test_encodeUsesStandaloneRegistration = testCase "encodeUsesStandaloneRegistrati
     Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
     Right p  -> return p
   let sym = VTuple (VInt 0) (VInt 42)
-  case runEncode defaultCompilerConfig prog "main" [sym] of
-    Left err          -> assertFailure ("runEncode main failed: " ++ err)
-    Right (VList lst) -> assertEqual "main encode length" 3 (length (toList lst))
+  case runWriteLogits defaultCompilerConfig prog "main" [sym] of
+    Left err          -> assertFailure ("runWriteLogits main failed: " ++ err)
+    Right (VList lst) -> assertEqual "main writeLogits length" 3 (length (toList lst))
     Right other       -> assertFailure ("expected VList, got: " ++ show other)
 
 -- A program with no neural declarations at all, whose main has an auto-derivable output
--- type (Bool), still gets an encodeFun on its own "main" group (task
--- encode-main-auto-derived). The encode is a probability vector over [True, False],
--- queried from main_prob, so it must sum to ~1.0.
-test_encodeMainAutoDerivedBool :: TestTree
-test_encodeMainAutoDerivedBool = testCase "encodeMainAutoDerivedBool" $ do
+-- type (Bool), still gets an writeLogitsFun on its own "main" group (task
+-- encode-main-auto-derived). The writeLogits output is a probability vector over
+-- [True, False], queried from main_prob, so it must sum to ~1.0.
+test_writeLogitsMainAutoDerivedBool :: TestTree
+test_writeLogitsMainAutoDerivedBool = testCase "writeLogitsMainAutoDerivedBool" $ do
   let src = unlines
         [ "main = if Uniform < 0.3 then True else False"
         ]
   prog <- case tryParseProgram "<test>" src of
     Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
     Right p  -> return p
-  case runEncode defaultCompilerConfig prog "main" [] of
-    Left err -> assertFailure ("runEncode main failed: " ++ err)
+  case runWriteLogits defaultCompilerConfig prog "main" [] of
+    Left err -> assertFailure ("runWriteLogits main failed: " ++ err)
     Right (VList lst) -> do
       let items = toList lst
           total = sum [ x | VFloat x <- items ]
-      assertEqual "encode length over [True, False]" 2 (length items)
-      assertBool ("encode probs should sum to ~1.0, got " ++ show total)
+      assertEqual "writeLogits length over [True, False]" 2 (length items)
+      assertBool ("writeLogits probs should sum to ~1.0, got " ++ show total)
                  (abs (total - 1.0) < 1.0e-4)
     Right other -> assertFailure ("expected VList, got: " ++ show other)
 
--- Registry-first: main's Int output is not auto-derivable, but the decoder's "of [0,1,2]"
--- registers a PartitionPlan for Int into encodeDecls (the of-clause sugar). So main's own
--- group gets an encodeFun, sliced by that registry entry (length 3) — the registry ∪
--- auto-derive rule from the parent design (encode-partitionplan-decoupling). The decoder
--- group itself hosts no encode (it is an NN1 reader).
-test_encodeMainIntViaRegistry :: TestTree
-test_encodeMainIntViaRegistry = testCase "encodeMainIntViaRegistry" $ do
+-- Registry-first: main's Int output is not auto-derivable, but the read-logits network's
+-- "of [0,1,2]" registers a PartitionPlan for Int into writeLogitsDecls (the of-clause
+-- sugar). So main's own group gets an writeLogitsFun, sliced by that registry entry
+-- (length 3) — the registry ∪ auto-derive rule from the parent design
+-- (encode-partitionplan-decoupling). The read-logits group itself hosts no writeLogits
+-- (it is an NN1 reader).
+test_writeLogitsMainIntViaRegistry :: TestTree
+test_writeLogitsMainIntViaRegistry = testCase "writeLogitsMainIntViaRegistry" $ do
   let src = unlines
         [ "neural decA :: (Symbol -> Int) of [0, 1, 2]"
         , "main sym = decA sym"
@@ -275,38 +278,38 @@ test_encodeMainIntViaRegistry = testCase "encodeMainIntViaRegistry" $ do
     Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
     Right p  -> return p
   let sym = VTuple (VInt 0) (VInt 42)
-      encodeLen target = case runEncode defaultCompilerConfig prog target [sym] of
-        Left err          -> assertFailure ("runEncode " ++ target ++ " failed: " ++ err) >> return (-1)
+      writeLogitsLen target = case runWriteLogits defaultCompilerConfig prog target [sym] of
+        Left err          -> assertFailure ("runWriteLogits " ++ target ++ " failed: " ++ err) >> return (-1)
         Right (VList lst) -> return (length (toList lst))
         Right other       -> assertFailure ("expected VList, got: " ++ show other) >> return (-1)
-  lenMain <- encodeLen "main"
-  assertEqual "main encode length (registry Int)" 3 lenMain
-  -- The decoder group is an NN1 reader and hosts no encode.
-  case runEncode defaultCompilerConfig prog "decA_auto" [sym] of
+  lenMain <- writeLogitsLen "main"
+  assertEqual "main writeLogits length (registry Int)" 3 lenMain
+  -- The read-logits group is an NN1 reader and hosts no writeLogits.
+  case runWriteLogits defaultCompilerConfig prog "decA_auto" [sym] of
     Left _  -> return ()
-    Right v -> assertFailure ("decA_auto should host no encode, got: " ++ show v)
+    Right v -> assertFailure ("decA_auto should host no writeLogits, got: " ++ show v)
 
 -- A program with no neural declarations whose main has a type that is neither
--- auto-derivable nor in the registry (a list) gets NO encodeFun — the addition is purely
--- additive and degrades to a clean "no encode function" error rather than crashing.
-test_encodeMainNotRepresentable :: TestTree
-test_encodeMainNotRepresentable = testCase "encodeMainNotRepresentable" $ do
+-- auto-derivable nor in the registry (a list) gets NO writeLogitsFun — the addition is purely
+-- additive and degrades to a clean "no writeLogits function" error rather than crashing.
+test_writeLogitsMainNotRepresentable :: TestTree
+test_writeLogitsMainNotRepresentable = testCase "writeLogitsMainNotRepresentable" $ do
   let src = unlines
         [ "main = (Normal : (Normal : []))"
         ]
   prog <- case tryParseProgram "<test>" src of
     Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
     Right p  -> return p
-  case runEncode defaultCompilerConfig prog "main" [] of
-    Left err -> assertBool ("error should mention main has no encode function, got: " ++ err)
+  case runWriteLogits defaultCompilerConfig prog "main" [] of
+    Left err -> assertBool ("error should mention main has no writeLogits function, got: " ++ err)
                            ("main" `isInfixOf` err)
-    Right v  -> assertFailure ("expected main to have no encodeFun, got: " ++ show v)
+    Right v  -> assertFailure ("expected main to have no writeLogitsFun, got: " ++ show v)
 
--- main's output type is auto-derivable (Bool); main carries its own encodeFun even when a
--- decoder declaration shares that type. The decoder group itself hosts no encode (it is an
--- NN1 reader), so only "main" is addressable for encode.
-test_encodeMainAndDecoderShareType :: TestTree
-test_encodeMainAndDecoderShareType = testCase "encodeMainAndDecoderShareType" $ do
+-- main's output type is auto-derivable (Bool); main carries its own writeLogitsFun even when a
+-- read-logits declaration shares that type. The read-logits group itself hosts no writeLogits
+-- (it is an NN1 reader), so only "main" is addressable for writeLogits.
+test_writeLogitsMainAndReadLogitsShareType :: TestTree
+test_writeLogitsMainAndReadLogitsShareType = testCase "writeLogitsMainAndReadLogitsShareType" $ do
   let src = unlines
         [ "neural decB :: (Symbol -> Bool)"
         , "main sym = if decB sym then True else False"
@@ -315,34 +318,34 @@ test_encodeMainAndDecoderShareType = testCase "encodeMainAndDecoderShareType" $ 
     Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
     Right p  -> return p
   let sym = VTuple (VInt 0) (VInt 42)
-  case runEncode defaultCompilerConfig prog "main" [sym] of
-    Left err          -> assertFailure ("runEncode main failed: " ++ err)
-    Right (VList lst) -> assertEqual "main encode length over [True, False]" 2 (length (toList lst))
+  case runWriteLogits defaultCompilerConfig prog "main" [sym] of
+    Left err          -> assertFailure ("runWriteLogits main failed: " ++ err)
+    Right (VList lst) -> assertEqual "main writeLogits length over [True, False]" 2 (length (toList lst))
     Right other       -> assertFailure ("expected VList, got: " ++ show other)
-  -- The decoder group is an NN1 reader and hosts no encode.
-  case runEncode defaultCompilerConfig prog "decB_auto" [sym] of
+  -- The read-logits group is an NN1 reader and hosts no writeLogits.
+  case runWriteLogits defaultCompilerConfig prog "decB_auto" [sym] of
     Left _  -> return ()
-    Right v -> assertFailure ("decB_auto should host no encode, got: " ++ show v)
+    Right v -> assertFailure ("decB_auto should host no writeLogits, got: " ++ show v)
 
 -- An *auxiliary* (non-main) function with sum-type output gets a correct, non-stub Either
--- encode via its OWN prob function (classify_prob) — proving the old null-probFnName stub
+-- writeLogits via its OWN prob function (classify_prob) — proving the old null-probFnName stub
 -- arms are gone (they emitted all-zero vectors). The flag slot is a real P(Left) = P(cond).
 -- (task encode-per-function-endpoints, encode_aux_either)
-test_encodeAuxEither :: TestTree
-test_encodeAuxEither = testCase "encodeAuxEither" $ do
+test_writeLogitsAuxEither :: TestTree
+test_writeLogitsAuxEither = testCase "writeLogitsAuxEither" $ do
   let src = unlines
-        [ "neural encode :: Either Int Bool of ([0] | _)"
+        [ "neural writeLogits :: Either Int Bool of ([0] | _)"
         , "classify s = if Uniform < s then left 0 else right True"
         , "main s = classify s"
         ]
   prog <- case tryParseProgram "<test>" src of
     Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
     Right p  -> return p
-  case runEncode defaultCompilerConfig prog "classify" [VFloat 0.4] of
-    Left err -> assertFailure ("runEncode classify failed: " ++ err)
+  case runWriteLogits defaultCompilerConfig prog "classify" [VFloat 0.4] of
+    Left err -> assertFailure ("runWriteLogits classify failed: " ++ err)
     Right (VList lst) -> do
       let items = toList lst
-      assertEqual "Either encode length (flag + Int[0] + Bool[True,False])" 4 (length items)
+      assertEqual "Either writeLogits length (flag + Int[0] + Bool[True,False])" 4 (length items)
       case items of
         (VFloat flag : _) -> do
           assertBool ("flag should be a real P(Left) ~= 0.4, not a zero stub, got " ++ show flag)
@@ -350,12 +353,13 @@ test_encodeAuxEither = testCase "encodeAuxEither" $ do
         _ -> assertFailure ("expected a VFloat flag slot, got: " ++ show items)
     Right other -> assertFailure ("expected VList, got: " ++ show other)
 
--- encode(decode(L)) ≈ normalise(L): for an identity `main sym = nnB sym` over a Bool decoder,
--- encode reproduces the (normalised) decoder distribution. Spiking the mock NN toward a value
--- shifts the encoded distribution toward that value, and the slots always sum to 1 — i.e.
--- decoding then re-encoding is a no-op on the normalised logit vector. (encode_roundtrip_noop)
-test_encodeRoundtripNoop :: TestTree
-test_encodeRoundtripNoop = testCase "encodeRoundtripNoop" $ do
+-- writeLogits(readLogits(L)) ≈ normalise(L): for an identity `main sym = nnB sym` over a Bool
+-- read-logits network, writeLogits reproduces the (normalised) read-logits distribution.
+-- Spiking the mock NN toward a value shifts the written distribution toward that value, and
+-- the slots always sum to 1 — i.e. reading then re-writing is a no-op on the normalised
+-- logit vector. (encode_roundtrip_noop)
+test_writeLogitsRoundtripNoop :: TestTree
+test_writeLogitsRoundtripNoop = testCase "writeLogitsRoundtripNoop" $ do
   let src = unlines
         [ "neural nnB :: (Symbol -> Bool)"
         , "main sym = nnB sym"
@@ -364,34 +368,34 @@ test_encodeRoundtripNoop = testCase "encodeRoundtripNoop" $ do
     Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
     Right p  -> return p
   let spike v = VTuple (VInt 1) (VTuple v (VInt 0))
-      encSlots sym = case runEncode defaultCompilerConfig prog "main" [sym] of
-        Left err          -> assertFailure ("runEncode main failed: " ++ err) >> return []
+      encSlots sym = case runWriteLogits defaultCompilerConfig prog "main" [sym] of
+        Left err          -> assertFailure ("runWriteLogits main failed: " ++ err) >> return []
         Right (VList lst) -> return [ x | VFloat x <- toList lst ]
         Right other       -> assertFailure ("expected VList, got: " ++ show other) >> return []
   slotsTrue  <- encSlots (spike (VBool True))
   slotsFalse <- encSlots (spike (VBool False))
-  assertEqual "Bool encode length" 2 (length slotsTrue)
+  assertEqual "Bool writeLogits length" 2 (length slotsTrue)
   assertBool ("True-spiked slots should sum to ~1, got " ++ show slotsTrue)
              (abs (sum slotsTrue - 1.0) < 1.0e-4)
   assertBool ("False-spiked slots should sum to ~1, got " ++ show slotsFalse)
              (abs (sum slotsFalse - 1.0) < 1.0e-4)
-  assertBool ("decode→encode should track the input: True-spiked P(True) > 0.5, got " ++ show (head slotsTrue))
+  assertBool ("readLogits->writeLogits should track the input: True-spiked P(True) > 0.5, got " ++ show (head slotsTrue))
              (head slotsTrue > 0.5)
-  assertBool ("decode→encode should track the input: False-spiked P(True) < 0.5, got " ++ show (head slotsFalse))
+  assertBool ("readLogits->writeLogits should track the input: False-spiked P(True) < 0.5, got " ++ show (head slotsFalse))
              (head slotsFalse < 0.5)
 
--- Sibling positive case to the encoder-decl rejection (TestRejection/encoderDecl): with the
--- (Bool -> Symbol) encoder declaration gone, Bool auto-derives and main's own encode yields
--- the exact [P(True), P(False)] vector — confirming the registration job survives via honest
--- syntax / auto-derivation.
-test_encodeBoolExactProbs :: TestTree
-test_encodeBoolExactProbs = testCase "encodeBoolExactProbs" $ do
+-- Sibling positive case to the reversed-shape rejection (TestRejection/reversedNeuralShapeDecl):
+-- with the (Bool -> Symbol) reversed declaration gone, Bool auto-derives and main's own
+-- writeLogits yields the exact [P(True), P(False)] vector — confirming the registration job
+-- survives via honest syntax / auto-derivation.
+test_writeLogitsBoolExactProbs :: TestTree
+test_writeLogitsBoolExactProbs = testCase "writeLogitsBoolExactProbs" $ do
   let src = "main = if Uniform < 0.4 then True else False"
   prog <- case tryParseProgram "<test>" src of
     Left err -> assertFailure ("Parse failed: " ++ show err) >> return undefined
     Right p  -> return p
-  case runEncode defaultCompilerConfig prog "main" [] of
-    Left err -> assertFailure ("runEncode main failed: " ++ err)
+  case runWriteLogits defaultCompilerConfig prog "main" [] of
+    Left err -> assertFailure ("runWriteLogits main failed: " ++ err)
     Right (VList lst) -> case [ x | VFloat x <- toList lst ] of
       [pT, pF] -> do
         assertBool ("P(True) should be ~0.4, got " ++ show pT) (abs (pT - 0.4) < 1.0e-4)
@@ -1160,7 +1164,7 @@ planEnumStructuralADTTests = testGroup "planEnumStructuralADT"
       ]
     -- Verbatim mock logits (mode 2), so both paths read one fixed distribution.
     sym = VTuple (VInt 2) (constructVList (map VFloat logits))
-    -- 13 slots, exactly the plan the compiler prints as the decoder's required
+    -- 13 slots, exactly the plan the compiler prints as the read-logits network's required
     -- output layout; every softmax group sums to 1.
     logits = [ 0.6, 0.4          -- 0..1   Scene ctor flags: List|Empty
              , 0.3, 0.7          -- 2..3   List/f0 Object ctor flags: Nil|Obj
@@ -1714,7 +1718,7 @@ stochasticCallTests = testGroup "stochastic calls (stochastic-call-cse-unsound)"
     noDetGens = OptEnv Set.empty Set.empty
     genGroup n body = IRFunGroup { groupName = n, genFun = Just (body, "")
                                  , probFun = Nothing, integFun = Nothing
-                                 , encodeFun = Nothing, normalFun = Nothing
+                                 , writeLogitsFun = Nothing, normalFun = Nothing
                                  , groupDoc = "", sampleDomain = Nothing }
     -- Optimize a whole environment (so 'deterministicGens' sees the call graph)
     -- and hand back the named group's generate body.
@@ -1739,7 +1743,7 @@ stochasticCallTests = testGroup "stochastic calls (stochastic-call-cse-unsound)"
 -- cover every batched fragment refusal a real @.ppl@ can reach. A handful cannot
 -- be reached from any program, because another guard always fires first — most
 -- notably the non-scalar 'MultiValue' gate on 'IREnumSum'/'IRIsPossible': every
--- Either/ADT-shaped decoder emits an 'IRIsLeft', or trips the ADT-declaration
+-- Either/ADT-shaped read-logits network emits an 'IRIsLeft', or trips the ADT-declaration
 -- bail, long before a composite enumeration could reach the emitter. That
 -- ordering makes the gate correct today but leaves it with no positive control,
 -- so a refactor could silently delete it — and deleting it emits Python naming
@@ -1956,7 +1960,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                       (IRIf (IRApply (IRVar "isNada") ctorRef)
                             (IRConst (VFloat 1.0)) (IRConst (VFloat 0.0))), "")
                   , genFun = Nothing, integFun = Nothing
-                  , encodeFun = Nothing, normalFun = Nothing, groupDoc = ""
+                  , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
                   , sampleDomain = Nothing }]
       [ADTDecl { dataName = "Opt"
                , constructors = [("Nada", []), ("Just1", [("v", TFloat)])]
@@ -1970,7 +1974,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                       (IRIf (IRApply (IRVar "isJust1") q)
                             (IRApply (IRVar "v") q) (IRConst (VFloat 0.0))), "")
                   , genFun = Nothing, integFun = Nothing
-                  , encodeFun = Nothing, normalFun = Nothing, groupDoc = ""
+                  , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
                   , sampleDomain = Nothing }]
       [ADTDecl { dataName = "Opt"
                , constructors = [("Nada", []), ("Just1", [("v", TFloat)])]
@@ -1987,7 +1991,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                           (IRIf (IRIsLeft q) (IRConst (VBool True)) (IRConst (VBool False)))
                           (IRIf (IRVar "cse_0") (IRFromLeft q) (IRConst (VFloat 0.0)))), "")
                   , genFun = Nothing, integFun = Nothing
-                  , encodeFun = Nothing, normalFun = Nothing, groupDoc = ""
+                  , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
                   , sampleDomain = Nothing }]
       [] []
     -- A one-group environment whose only method is generate, with the given
@@ -1995,7 +1999,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
     recGenEnv body = IREnv
       [IRFunGroup { groupName = "rec", genFun = Just (body, "")
                   , probFun = Nothing, integFun = Nothing
-                  , encodeFun = Nothing, normalFun = Nothing, groupDoc = ""
+                  , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
                   , sampleDomain = Nothing }]
       [] []
     -- 'batchedGuard' is called on the raw term, *not* through 'prepBatchedBody':
@@ -2619,18 +2623,18 @@ internalsTests = testGroup "Internals"
   , forwardChainingCertTests
   , witnessedBindingTests
   , anyRefusalTests
-  , testGroup "encode"
-      [ test_encodeTupleGaussianParams
-      , test_encodeDiscreteSumsToOne
-      , test_encodeGaussianSigmaPositive
-      , test_encodeUsesStandaloneRegistration
-      , test_encodeMainAutoDerivedBool
-      , test_encodeMainIntViaRegistry
-      , test_encodeMainNotRepresentable
-      , test_encodeMainAndDecoderShareType
-      , test_encodeAuxEither
-      , test_encodeRoundtripNoop
-      , test_encodeBoolExactProbs
+  , testGroup "writeLogits"
+      [ test_writeLogitsTupleGaussianParams
+      , test_writeLogitsDiscreteSumsToOne
+      , test_writeLogitsGaussianSigmaPositive
+      , test_writeLogitsUsesStandaloneRegistration
+      , test_writeLogitsMainAutoDerivedBool
+      , test_writeLogitsMainIntViaRegistry
+      , test_writeLogitsMainNotRepresentable
+      , test_writeLogitsMainAndReadLogitsShareType
+      , test_writeLogitsAuxEither
+      , test_writeLogitsRoundtripNoop
+      , test_writeLogitsBoolExactProbs
       , test_nnHoistedOutOfEnumSum
       ]
   , test_missingMainFunction
