@@ -218,7 +218,7 @@ symbol = "l_x_neural_in"
 makeProb :: [ADTDecl] -> CompilerConfig -> PartitionPlan -> IRExpr
 makeProb adtDecls _conf plan = IRLambda vector (IRLambda "sample"
   (IRLetIn probVar m (IRLetIn dimVar dim
-    (IRTCons (IRVar probVar) (IRTCons (IRVar dimVar) (IRTCons bc imposs))))))
+    (IRConstruct TgTuple [IRVar probVar, IRConstruct TgTuple [IRVar dimVar, IRConstruct TgTuple [bc, imposs]]]))))
   where
     (m, dim, bc) = makeProbRec adtDecls plan 0 (IRVar "sample")
     probVar = "l_dec_p"
@@ -253,17 +253,17 @@ makeProbRec _adtDecls Continuous ix sample = (noAny sample p, noAny0 sample (IRC
 --  branch counts of both sides should be added.
 makeProbRec adtDecls (TuplePlan a b) ix sample = (noAny sample (IROp OpMult pa pb), noAny0 sample (IROp OpPlus dima dimb), noAny0 sample (IROp OpPlus bca bcb))
   where
-    (pa, dima, bca) = makeProbRec adtDecls a ix (IRTFst sample)
-    (pb, dimb, bcb) = makeProbRec adtDecls b (ix + getSize a) (IRTSnd sample)
+    (pa, dima, bca) = makeProbRec adtDecls a ix (IRDestruct AcFst sample)
+    (pb, dimb, bcb) = makeProbRec adtDecls b (ix + getSize a) (IRDestruct AcSnd sample)
 makeProbRec adtDecls (EitherPlan a b) ix sample = (noAny sample
-  (IRIf (IRIsLeft sample)
+  (IRIf (IRDestruct AcIsLeft sample)
     (IROp OpMult pIsLeft aP)
     (IROp OpMult pIsRight bP)),
   -- Is choosing the bc here correct, or should they be added?
-  noAny0 sample (IRIf (IRIsLeft sample) aDim bDim), noAny0 sample (IRIf (IRIsLeft sample) aBc bBc))
+  noAny0 sample (IRIf (IRDestruct AcIsLeft sample) aDim bDim), noAny0 sample (IRIf (IRDestruct AcIsLeft sample) aBc bBc))
   where
-    (aP, aDim, aBc) = makeProbRec adtDecls a (ix + 1) (IRFromLeft sample)
-    (bP, bDim, bBc) = makeProbRec adtDecls b (ix + 1 + getSize a) (IRFromRight sample)
+    (aP, aDim, aBc) = makeProbRec adtDecls a (ix + 1) (IRDestruct AcFromLeft sample)
+    (bP, bDim, bBc) = makeProbRec adtDecls b (ix + 1 + getSize a) (IRDestruct AcFromRight sample)
     pIsLeft = IRBuiltin BListIndex [IRVar vector, IRConst (VInt ix)]
     pIsRight = IROp OpSub (IRConst $ VFloat 1) pIsLeft
 makeProbRec adtDecls (ADTPlan adtName plans) ix sample = (noAny sample p, noAny0 sample dim, noAny0 sample bc)
@@ -296,11 +296,11 @@ makeGen :: [ADTDecl] -> PartitionPlan -> String ->  IRExpr
 makeGen adtDecls plan nn_name = IRLetIn vector (IRApply (IRVar nn_name) (IRVar "l_x_neural_in")) (makeGenRec adtDecls plan 0)
 
 makeGenRec :: [ADTDecl] -> PartitionPlan -> Int -> IRExpr
-makeGenRec adtDecls (TuplePlan a b) ix = IRTCons (makeGenRec adtDecls a ix) (makeGenRec adtDecls b (ix + getSize a))
+makeGenRec adtDecls (TuplePlan a b) ix = IRConstruct TgTuple [makeGenRec adtDecls a ix, makeGenRec adtDecls b (ix + getSize a)]
 makeGenRec adtDecls (EitherPlan a b) ix = IRIf
   (IROp OpLessThan (IRSample IRUniform) (IRBuiltin BListIndex [IRVar vector, IRConst (VInt ix)]))
-    (IRLeft $ makeGenRec adtDecls a (ix + 1))
-    (IRRight $ makeGenRec adtDecls b (ix + 1 + getSize a))
+    (IRConstruct TgLeft [makeGenRec adtDecls a (ix + 1)])
+    (IRConstruct TgRight [makeGenRec adtDecls b (ix + 1 + getSize a)])
 makeGenRec _adtDecls (Discretes _rty (MultiDiscretes vals)) ix = lottery (map valueToIR vals) ix
 makeGenRec _adtDecls Continuous ix = IROp OpPlus
   (IROp OpMult (IRSample IRNormal) (IRBuiltin BListIndex [IRVar vector, IRConst (VInt $ ix + 1)]))
@@ -440,13 +440,13 @@ makeWriteLogitsPlan wrap probFnName normalFnName norm plan outerArgs = case plan
     irList [ slot (marginal (wrap (valueToIR v))) | v <- vals ]
 
   Continuous ->
-    -- Call normalFnName(outerArgs...) → IRTCons mu sigma, then emit [mu, sigma].
+    -- Call normalFnName(outerArgs...) → a (mu, sigma) tuple, then emit [mu, sigma].
     -- 'norm' is necessarily Nothing here: a continuous leaf inside an arm would need an
     -- arm-conditional (mu, sigma) that the IRCompiler does not generate, and
     -- 'requiredNormalFns' names it so 'makeTopLevelWriteLogitsFun'/'validateWriteLogitsGaussian'
     -- refuse the whole writeLogits build before reaching this point.
     let normalResult = foldl IRApply (IRVar normalFnName) outerArgs
-    in irList [IRTFst normalResult, IRTSnd normalResult]
+    in irList [IRDestruct AcFst normalResult, IRDestruct AcSnd normalResult]
 
   TuplePlan a b -> concatLists
     [ rec (\v -> wrap (VTuple v VAny)) (normalFnName ++ "_fst") norm a
@@ -482,9 +482,9 @@ makeWriteLogitsPlan wrap probFnName normalFnName norm plan outerArgs = case plan
   Discretes ty tag -> discretesTagError "makeWriteLogitsPlan" ty tag
   where
     rec w nf n p = makeWriteLogitsPlan w probFnName nf n p outerArgs
-    irList       = foldr IRCons emptyList
+    irList       = foldr (\x acc -> IRConstruct TgCons [x, acc]) emptyList
     emptyList    = IRConst (VList EmptyList)
-    marginal s   = IRTFst (foldl IRApply (IRApply (IRVar probFnName) (IRConst s)) outerArgs)
+    marginal s   = IRDestruct AcFst (foldl IRApply (IRApply (IRVar probFnName) (IRConst s)) outerArgs)
     slot p       = maybe p (IROp OpDiv p) norm
 
     -- Statically-empty segments are dropped before folding rather than concatenated

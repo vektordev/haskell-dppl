@@ -2885,10 +2885,20 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
     -- Collapse (prob, (dim, _)) → (prob, dim) peeling through IRLambda/IRLetIn wrappers,
     -- and through the query-type guard's IRIf (whose then-branch carries the real triple;
     -- the else-branch is an IRError, left untouched by the catch-all).
+    --
+    -- Two literal shapes are matched for the same triple: 'IRTCons' chains, built by this
+    -- module's own 'packResult' (design ir-reengineering, slice S1e -- not yet migrated), and
+    -- 'IRConstruct TgTuple' chains, built by 'SPLL.AutoNeural.makeProb' (slice S1b, migrated).
+    -- Both producers assemble the same "(prob, (dim, (bc, imposs)))" nesting by hand rather
+    -- than through a shared combinator, so this consumer has to recognise whichever shape the
+    -- particular function's own body used -- dropping either arm would leave that producer's
+    -- functions with an un-stripped branch-count field when 'countBranches' is off.
     stripOuterTriple (IRLambda n irBody)         = IRLambda n (stripOuterTriple irBody)
     stripOuterTriple (IRLetIn n v irBody)        = IRLetIn n v (stripOuterTriple irBody)
     stripOuterTriple (IRIf c t e)              = IRIf c (stripOuterTriple t) (stripOuterTriple e)
     stripOuterTriple (IRTCons a (IRTCons b (IRTCons _ imp))) = IRTCons a (IRTCons b imp)
+    stripOuterTriple (IRConstruct TgTuple [a, IRConstruct TgTuple [b, IRConstruct TgTuple [_, imp]]]) =
+      IRConstruct TgTuple [a, IRConstruct TgTuple [b, imp]]
     stripOuterTriple e                         = e
 
 -- ===== Set-valued witnesses (design set-valued-witnesses) =====
