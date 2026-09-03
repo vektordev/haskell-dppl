@@ -325,6 +325,53 @@ generateExpression (IRIsLeft x) = do
 generateExpression (IRIsRight x) = do
     e <- generateExpression x
     return $ "(" ++ e ++ " isa Right)"
+-- The new-shape constructor/accessor family (design ir-reengineering, slice
+-- S1a): dead code today, mirroring the old-shape cases above one for one
+-- (including Julia's 1-based indexing).
+generateExpression (IRConstruct TgTuple [fs, sn]) = do
+    f <- generateExpression fs
+    s <- generateExpression sn
+    return $ "T(" ++ f ++ ", " ++ s ++ ")"
+generateExpression (IRConstruct TgCons [hd, tl]) = do
+    h <- generateExpression hd
+    t <- generateExpression tl
+    return $ "prepend(" ++ h ++ ", " ++ t ++ ")"
+generateExpression (IRConstruct TgLeft [x]) = do
+    e <- generateExpression x
+    return $ "Left(" ++ e ++ ")"
+generateExpression (IRConstruct TgRight [x]) = do
+    e <- generateExpression x
+    return $ "Right(" ++ e ++ ")"
+generateExpression (IRDestruct AcFst x) = do
+    e <- generateExpression x
+    return $ "(" ++ e ++ ")[1]"
+generateExpression (IRDestruct AcSnd x) = do
+    e <- generateExpression x
+    return $ "(" ++ e ++ ")[2]"
+generateExpression (IRDestruct AcHead x) = do
+    e <- generateExpression x
+    return $ "head(" ++ e ++ ")"
+generateExpression (IRDestruct AcTail x) = do
+    e <- generateExpression x
+    return $ "tail(" ++ e ++ ")"
+generateExpression (IRDestruct AcFromLeft x) = do
+    e <- generateExpression x
+    return $ "fromLeft(" ++ e ++ ")"
+generateExpression (IRDestruct AcFromRight x) = do
+    e <- generateExpression x
+    return $ "fromRight(" ++ e ++ ")"
+generateExpression (IRDestruct AcIsLeft x) = do
+    e <- generateExpression x
+    return $ "(" ++ e ++ " isa Left)"
+generateExpression (IRDestruct AcIsRight x) = do
+    e <- generateExpression x
+    return $ "(" ++ e ++ " isa Right)"
+generateExpression (IRDestruct (AcTheta i) x) = do
+    e <- generateExpression x
+    return $ "(" ++ e ++ ")[1][" ++ show (i + 1) ++ "]"
+generateExpression (IRDestruct (AcSubtree i) x) = do
+    e <- generateExpression x
+    return $ "(" ++ e ++ ")[2][" ++ show (i + 1) ++ "]"
 generateExpression (IRDensity dist Linear x) = do
     e <- generateExpression x
     return $ "density_" ++ show dist ++ "(" ++ e ++ ")"

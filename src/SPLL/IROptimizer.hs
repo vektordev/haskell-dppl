@@ -8,6 +8,7 @@ module SPLL.IROptimizer (
 , optimizeStats
 , deterministicGens
 , distributeIf
+, headHash
 ) where
 
 import SPLL.IntermediateRepresentation
@@ -341,9 +342,15 @@ indexOfChain elemExpr vals = go (zip [0 ..] vals)
 -- equal conditions are two distinct draws in the IR; distributing them made the
 -- mixed outcomes @(1,2)@ and @(2,1)@ unreachable, silently and with no crash.
 distributeIf :: OptEnv -> Bool -> IRExpr -> IRExpr
-distributeIf det mergeOverConstants e@(IRTCons _ _)
-  | leavesShareCond = IRIf cond (mapTupleLeaves ifThen e) (mapTupleLeaves ifElse e)
+distributeIf det mergeOverConstants e
+  | isTupleShape e, leavesShareCond = IRIf cond (mapTupleLeaves ifThen e) (mapTupleLeaves ifElse e)
   where
+    -- 'IRConstruct TgTuple' (design ir-reengineering, slice S1a) is dead code
+    -- today; this guard is what lets it fire the rule above once a producer
+    -- migrates, without a second copy of the whole equation.
+    isTupleShape (IRTCons _ _) = True
+    isTupleShape (IRConstruct TgTuple _) = True
+    isTupleShape _ = False
     leaves = tupleTreeLeaves e
     conds = [c | IRIf c _ _ <- leaves]
     nonConditional = [l | l <- leaves, not (isConditional l)]
@@ -365,11 +372,13 @@ distributeIf _ _ x = x
 -- | The leaves of a tree of nested IRTCons (everything that is not itself an IRTCons).
 tupleTreeLeaves :: IRExpr -> [IRExpr]
 tupleTreeLeaves (IRTCons a b) = tupleTreeLeaves a ++ tupleTreeLeaves b
+tupleTreeLeaves (IRConstruct TgTuple [a, b]) = tupleTreeLeaves a ++ tupleTreeLeaves b
 tupleTreeLeaves x = [x]
 
 -- | Rebuild a tree of nested IRTCons, applying f to each leaf.
 mapTupleLeaves :: (IRExpr -> IRExpr) -> IRExpr -> IRExpr
 mapTupleLeaves f (IRTCons a b) = IRTCons (mapTupleLeaves f a) (mapTupleLeaves f b)
+mapTupleLeaves f (IRConstruct TgTuple [a, b]) = IRConstruct TgTuple [mapTupleLeaves f a, mapTupleLeaves f b]
 mapTupleLeaves f x = f x
 
 --TODO: We can also optimize index magic, potentially here. i.e. a head tail tail x can be simplified.
@@ -525,6 +534,18 @@ simplify _ (IRHead (IRCons a _)) = a
 simplify _ (IRTail (IRCons _ b)) = b
 simplify _ (IRTFst (IRTCons a _)) = a
 simplify _ (IRTSnd (IRTCons _ b)) = b
+-- The new-shape counterparts (design ir-reengineering, slice S1a): dead code
+-- today (nothing constructs 'IRConstruct'/'IRDestruct' yet), added alongside
+-- the old-shape rules above so a future producer slice gets these folds for
+-- free rather than silently losing them.
+simplify _ x@(IRConstruct TgCons [left, right]) =
+  case (isValue left && isValue right, unval right) of
+    (True, VList tl) -> IRConst (VList (ListCont (unval left) tl))
+    _ -> x
+simplify _ (IRDestruct AcHead (IRConstruct TgCons [a, _])) = a
+simplify _ (IRDestruct AcTail (IRConstruct TgCons [_, b])) = b
+simplify _ (IRDestruct AcFst  (IRConstruct TgTuple [a, _])) = a
+simplify _ (IRDestruct AcSnd  (IRConstruct TgTuple [_, b])) = b
 --simplify (IRHead (IRConst (VList (ListCont a _)))) = IRConst a
 --simplify (IRTail (IRConst (VList (ListCont _ a)))) = IRConst (VList a)
 simplify _ x = x
@@ -554,6 +575,10 @@ softForceLogic OpAnd (IRConst (VBool False)) _ = IRConst (VBool False)
 softForceLogic OpAnd _ (IRConst (VBool False)) = IRConst (VBool False)
 softForceLogic OpEq (IRCons _ _) (IRConst (VList EmptyList)) = IRConst $ VBool False
 softForceLogic OpEq (IRConst (VList EmptyList)) (IRCons _ _)  = IRConst $ VBool False
+-- The new-shape counterpart (design ir-reengineering, slice S1a): dead code
+-- today, added for parity with the rule above.
+softForceLogic OpEq (IRConstruct TgCons _) (IRConst (VList EmptyList)) = IRConst $ VBool False
+softForceLogic OpEq (IRConst (VList EmptyList)) (IRConstruct TgCons _) = IRConst $ VBool False
 -- numeric arithmetic, shared between Int and Float via isNumZero / isNumOne.
 -- The matched zero/one constant is reused so the result keeps the operand's type.
 softForceLogic OpPlus (IRConst z) right | isNumZero z = right
@@ -649,6 +674,11 @@ forceAnyCheck _ (IRCons _ _) = IRConst $ VBool False  -- Lists can never be any
 forceAnyCheck _ (IRTCons _ _) = IRConst $ VBool False -- Tuples can never be any
 forceAnyCheck _ (IRLeft _) = IRConst $ VBool False -- Eithers can never be any
 forceAnyCheck _ (IRRight _) = IRConst $ VBool False -- Eithers can never be any
+-- The new-shape counterpart (design ir-reengineering, slice S1a): dead code
+-- today, but one arm covers all four 'ConTag's at once -- a computed
+-- construct of any tag can never be the ANY sentinel, same reasoning as the
+-- four old-shape rules above.
+forceAnyCheck _ (IRConstruct _ _) = IRConst $ VBool False
 -- A computed scalar is never the ANY sentinel. ANY reaches an expression only
 -- as a query value -- an IRConst VAny or a parameter carrying one -- and does
 -- NOT propagate through arithmetic: every operator case in 'IRInterpreter'
@@ -928,6 +958,8 @@ headHash e = case e of
   IRLogEnumSum n v _  -> hashMix (hashMix 36 (hashStr n)) (hashStr (show v))
   IREnumSumPaired lg n v _ -> hashMix (hashMix (hashMix 37 (if lg then 1 else 0)) (hashStr n)) (hashStr (show v))
   IRBuiltin b _       -> hashMix 38 (hashStr (show b))
+  IRConstruct t _     -> hashMix 39 (hashStr (show t))
+  IRDestruct a _      -> hashMix 40 (hashStr (show a))
 
 -- | The largest hoistable common subexpression of a node (candidates are in
 -- first-occurrence order and ties break like the historical
@@ -1030,6 +1062,8 @@ setIRSubExprs (IRFromLeft{}) [a] = IRFromLeft a
 setIRSubExprs (IRFromRight{}) [a] = IRFromRight a
 setIRSubExprs (IRIsLeft{}) [a] = IRIsLeft a
 setIRSubExprs (IRIsRight{}) [a] = IRIsRight a
+setIRSubExprs (IRConstruct t _) kids = IRConstruct t kids
+setIRSubExprs (IRDestruct a _) [c] = IRDestruct a c
 setIRSubExprs (IRIsPossible val _) [a] = IRIsPossible val a
 setIRSubExprs (IRDensity d ls _) [a] = IRDensity d ls a
 setIRSubExprs (IRCumulative d ls _) [a] = IRCumulative d ls a

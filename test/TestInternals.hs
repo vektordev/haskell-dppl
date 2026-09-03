@@ -23,8 +23,10 @@ import qualified Data.Map.Strict as Map
 import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan)
 import SPLL.IntermediateRepresentation
 import SPLL.Semiring (semiringSuffix)
-import SPLL.IROptimizer (postProcess, optimizeEnv, deterministicGens, distributeIf, OptEnv(..))
+import SPLL.IROptimizer (postProcess, optimizeEnv, deterministicGens, distributeIf, headHash, OptEnv(..))
 import SPLL.CodeGenPyTorchBatched (adtEnv, batchedGuard, generateFunctionsBatched, structural)
+import qualified SPLL.CodeGenPyTorch as CGPy
+import qualified SPLL.CodeGenJulia as CGJl
 import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts)
 import Data.Foldable (toList)
 import Data.List (isInfixOf, intercalate)
@@ -1948,6 +1950,26 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
             (any ("if cse_0:" `isInfixOf`) ls)
           assertBool ("accessor still evaluated eagerly under torch.where: " ++ unlines ls)
             (not (any (\l -> "torch.where" `isInfixOf` l && "fromLeft(sample)" `isInfixOf` l) ls))
+  -- IRConstruct/IRDestruct (design ir-reengineering, slice S1a): dead code
+  -- today, but 'emittable' admits every tag/accessor unconditionally, mirroring
+  -- every one of their old-shape counterparts above (all of which are already
+  -- accepted here).
+  , testCase "IRConstruct/IRDestruct are accepted (mirror their old-shape counterparts)" $
+      mapM_ assertAccepted
+        [ IRConstruct TgTuple [IRVar "a", IRVar "b"]
+        , IRConstruct TgCons [IRVar "a", IRVar "b"]
+        , IRConstruct TgLeft [IRVar "a"]
+        , IRConstruct TgRight [IRVar "a"]
+        , IRDestruct AcFst (IRVar "a")
+        , IRDestruct AcSnd (IRVar "a")
+        , IRDestruct AcHead (IRVar "a")
+        , IRDestruct AcTail (IRVar "a")
+        , IRDestruct AcFromLeft (IRVar "a")
+        , IRDestruct AcFromRight (IRVar "a")
+        , IRDestruct AcIsLeft (IRVar "a")
+        , IRDestruct AcIsRight (IRVar "a")
+        , IRDestruct (AcTheta 0) (IRVar "a")
+        , IRDestruct (AcSubtree 0) (IRVar "a") ]
   ]
   where
     -- A one-group environment declaring a mixed-arity ADT, whose prob method
@@ -2615,6 +2637,135 @@ test_observeContinuousRenormalizes = testCase "observeContinuousRenormalizes" $
         (px, _) <- showcaseProbDim prog [] (VEither (Right (VFloat x)))
         assertEqual (name ++ ": p(Just " ++ show x ++ ") outside the observed interval") 0.0 px
 
+-- ---------------------------------------------------------------------------
+-- IRConstruct / IRDestruct scaffolding (design ir-reengineering, slice S1a)
+--
+-- Nothing in the compiler builds these yet -- every row here hand-constructs
+-- an IR fragment to validate the dispatch tables added in this slice before
+-- any real producer exercises them for the first time (S1b/S1c/S1d/S1e).
+-- ---------------------------------------------------------------------------
+
+-- | 'headHash' must give every 'ConTag' and every 'Accessor' its own hash
+-- contribution -- the parent design's own risk section calls this out
+-- explicitly, since a collision would let CSE silently share two distinct
+-- nodes as though they were equal.
+test_headHashDistinguishesConTagsAndAccessors :: TestTree
+test_headHashDistinguishesConTagsAndAccessors = testCase
+  "headHash separates every ConTag and every Accessor" $ do
+    let conTags   = [TgTuple, TgCons, TgLeft, TgRight]
+        accessors = [ AcFst, AcSnd, AcHead, AcTail, AcFromLeft, AcFromRight
+                    , AcIsLeft, AcIsRight, AcTheta 0, AcSubtree 0 ]
+        conHashes = [ ("IRConstruct " ++ show t, headHash (IRConstruct t (replicate (conTagArity t) (IRVar "x"))))
+                    | t <- conTags ]
+        accHashes = [ ("IRDestruct " ++ show a, headHash (IRDestruct a (IRVar "x"))) | a <- accessors ]
+        allHashes = conHashes ++ accHashes
+        dupes = [ (n1, n2) | (i, (n1, h1)) <- zip [0 :: Int ..] allHashes
+                            , (n2, h2) <- drop (i + 1) allHashes
+                            , h1 == h2 ]
+    assertBool ("headHash collision(s) among ConTag/Accessor: " ++ show dupes) (null dupes)
+
+-- | 'IRInterpreter.generate' must evaluate 'IRConstruct'/'IRDestruct' exactly
+-- like the old-shape node it stands in for.
+test_irConstructDestructInterpreterDispatch :: TestTree
+test_irConstructDestructInterpreterDispatch = testCase
+  "IRConstruct/IRDestruct interpret like their old-shape counterparts" $ do
+    let a = IRConst (VFloat 1.0)
+        b = IRConst (VFloat 2.0)
+        tup = IRConstruct TgTuple [a, b]
+        consE = IRConstruct TgCons [a, IRConst (VList EmptyList)]
+        leftE = IRConstruct TgLeft [a]
+        rightE = IRConstruct TgRight [a]
+        tt = VThetaTree (ThetaTree [10.0, 20.0] [ThetaTree [99.0] []])
+    evalClosedIR tup                            @?= Right (VTuple (VFloat 1.0) (VFloat 2.0))
+    evalClosedIR (IRDestruct AcFst tup)          @?= Right (VFloat 1.0)
+    evalClosedIR (IRDestruct AcSnd tup)          @?= Right (VFloat 2.0)
+    evalClosedIR consE                          @?= Right (VList (ListCont (VFloat 1.0) EmptyList))
+    evalClosedIR (IRDestruct AcHead consE)       @?= Right (VFloat 1.0)
+    evalClosedIR (IRDestruct AcTail consE)       @?= Right (VList EmptyList)
+    evalClosedIR leftE                          @?= Right (VEither (Left (VFloat 1.0)))
+    evalClosedIR rightE                         @?= Right (VEither (Right (VFloat 1.0)))
+    evalClosedIR (IRDestruct AcFromLeft leftE)   @?= Right (VFloat 1.0)
+    evalClosedIR (IRDestruct AcFromRight rightE) @?= Right (VFloat 1.0)
+    evalClosedIR (IRDestruct AcIsLeft leftE)     @?= Right (VBool True)
+    evalClosedIR (IRDestruct AcIsRight leftE)    @?= Right (VBool False)
+    evalClosedIR (IRDestruct (AcTheta 1) (IRConst tt))   @?= Right (VFloat 20.0)
+    evalClosedIR (IRDestruct (AcSubtree 0) (IRConst tt)) @?= Right (VThetaTree (ThetaTree [99.0] []))
+
+-- | The scalar Python and Julia backends must emit textually identical code
+-- for an 'IRConstruct'/'IRDestruct' expression and its old-shape counterpart:
+-- they are meant to be the exact same operation under two different names, so
+-- nothing downstream should be able to tell them apart.
+test_irConstructDestructScalarCodegenMatchesOldShape :: TestTree
+test_irConstructDestructScalarCodegenMatchesOldShape = testCase
+  "IRConstruct/IRDestruct scalar codegen matches the old-shape node" $
+    forM_ pairs $ \(name, oldE, newE) -> do
+      assertEqual (name ++ ": Python codegen diverges from the old-shape node")
+        (CGPy.generateFunctions False (mkEnv oldE)) (CGPy.generateFunctions False (mkEnv newE))
+      assertEqual (name ++ ": Julia codegen diverges from the old-shape node")
+        (CGJl.generateFunctions (mkEnv oldE)) (CGJl.generateFunctions (mkEnv newE))
+  where
+    pairs =
+      [ ("tuple fst", IRTFst (IRTCons (IRVar "a") (IRVar "b")),
+                       IRDestruct AcFst (IRConstruct TgTuple [IRVar "a", IRVar "b"]))
+      , ("tuple snd", IRTSnd (IRTCons (IRVar "a") (IRVar "b")),
+                       IRDestruct AcSnd (IRConstruct TgTuple [IRVar "a", IRVar "b"]))
+      , ("cons head", IRHead (IRCons (IRVar "a") (IRVar "b")),
+                       IRDestruct AcHead (IRConstruct TgCons [IRVar "a", IRVar "b"]))
+      , ("cons tail", IRTail (IRCons (IRVar "a") (IRVar "b")),
+                       IRDestruct AcTail (IRConstruct TgCons [IRVar "a", IRVar "b"]))
+      , ("either fromLeft", IRFromLeft (IRLeft (IRVar "a")),
+                       IRDestruct AcFromLeft (IRConstruct TgLeft [IRVar "a"]))
+      , ("either fromRight", IRFromRight (IRRight (IRVar "a")),
+                       IRDestruct AcFromRight (IRConstruct TgRight [IRVar "a"]))
+      , ("either isLeft", IRIsLeft (IRLeft (IRVar "a")),
+                       IRDestruct AcIsLeft (IRConstruct TgLeft [IRVar "a"]))
+      , ("either isRight", IRIsRight (IRRight (IRVar "a")),
+                       IRDestruct AcIsRight (IRConstruct TgRight [IRVar "a"]))
+      , ("theta", IRTheta (IRVar "a") 2, IRDestruct (AcTheta 2) (IRVar "a"))
+      , ("subtree", IRSubtree (IRVar "a") 3, IRDestruct (AcSubtree 3) (IRVar "a"))
+      ]
+    mkEnv e = IREnv
+      [IRFunGroup { groupName = "main"
+                  , probFun = Just (IRLambda "a" (IRLambda "b" e), "")
+                  , genFun = Nothing, integFun = Nothing
+                  , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
+                  , sampleDomain = Nothing }]
+      [] []
+
+-- | The one gap in this slice with a real correctness stake (see the task
+-- doc's note on 'hasTailDescent'): a recursion-guarding argument spelled as
+-- 'IRDestruct AcTail' must be recognised as a structural descent exactly like
+-- 'IRTail' is, or a legitimately batched-eligible recursive program would be
+-- falsely refused the moment a producer migrates to the new shape.
+test_hasTailDescentRecognisesNewShape :: TestTree
+test_hasTailDescentRecognisesNewShape = testCase
+  "a recursive call descending via IRDestruct AcTail is accepted like IRTail" $ do
+    -- Positive control: the old shape is already recognised.
+    case generateFunctionsBatched False (recEnv (IRTail (IRVar "sample"))) of
+      Left msg -> assertFailure ("batched mode refused a legitimate IRTail descent: " ++ msg)
+      Right _  -> return ()
+    -- The fix under test: the new shape must be recognised identically.
+    case generateFunctionsBatched False (recEnv (IRDestruct AcTail (IRVar "sample"))) of
+      Left msg -> assertFailure ("batched mode refused a legitimate IRDestruct AcTail descent: " ++ msg)
+      Right _  -> return ()
+    -- Negative control: an undescended recursive argument is still refused, so
+    -- the two acceptances above are not merely a guard that has gone slack.
+    case generateFunctionsBatched False (recEnv (IRVar "sample")) of
+      Left msg -> assertBool ("wrong diagnostic for an undescended recursive call: " ++ msg)
+                    ("without descending into the tail" `isInfixOf` msg)
+      Right _  -> assertFailure "batched mode accepted a non-descending recursive call"
+  where
+    recEnv tailArg = IREnv
+      [IRFunGroup { groupName = "main"
+                  , probFun = Just (IRLambda "sample"
+                      (IRIf (IROp OpEq (IRVar "sample") (IRConst (VList EmptyList)))
+                            (IRConst (VFloat 1.0))
+                            (IRApply (IRVar "main_prob") tailArg)), "")
+                  , genFun = Nothing, integFun = Nothing
+                  , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
+                  , sampleDomain = Nothing }]
+      [] []
+
 internalsTests :: TestTree
 internalsTests = testGroup "Internals"
   [ testProperties "properties" $(allProperties)
@@ -2665,6 +2816,10 @@ internalsTests = testGroup "Internals"
   , planEnumStructuralADTTests
   , planEnumStructuralPartialTests
   , sumTypeShowcaseTests
+  , test_headHashDistinguishesConTagsAndAccessors
+  , test_irConstructDestructInterpreterDispatch
+  , test_irConstructDestructScalarCodegenMatchesOldShape
+  , test_hasTailDescentRecognisesNewShape
   ]
 
 -- | Tests heavy enough (multiple full compiles of a depth-3/depth-10+ plan

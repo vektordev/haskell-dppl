@@ -1166,6 +1166,8 @@ freeInIR v (IRFromRight a)      = freeInIR v a
 freeInIR v (IRIsLeft a)         = freeInIR v a
 freeInIR v (IRIsRight a)        = freeInIR v a
 freeInIR v (IRCons a b)         = freeInIR v a  || freeInIR v b
+freeInIR v (IRConstruct _ args) = any (freeInIR v) args
+freeInIR v (IRDestruct _ a)     = freeInIR v a
 -- 'IRBuiltin' as a whole is not covered by the catch-all below (it has no
 -- generic case here, matching this function's per-constructor style rather
 -- than 'getIRSubExprs'), so 'BMapList'/'BListIndex' need their own arms --

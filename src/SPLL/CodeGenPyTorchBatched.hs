@@ -837,6 +837,13 @@ recOffenders cyc env guarded e = case e of
 -- | Does this argument expression take the tail of a list anywhere?
 hasTailDescent :: IRExpr -> Bool
 hasTailDescent IRTail{} = True
+-- The new-shape counterpart (design ir-reengineering, slice S1a): required,
+-- not just parity -- see the task doc's note on this function. Without this
+-- arm, a producer that migrates a recursion-guarding 'IRTail' to
+-- 'IRDestruct AcTail' would make 'recOffenders' silently stop recognising the
+-- descent (the fallback below re-checks children but never the node itself),
+-- falsely refusing a legitimately batched-eligible recursive program.
+hasTailDescent (IRDestruct AcTail _) = True
 hasTailDescent e        = any hasTailDescent (getIRSubExprs e)
 
 groupMethods :: IRFunGroup -> [(String, IRExpr)]
@@ -983,6 +990,15 @@ emittable e = case e of
   IRFromRight{}  -> True
   IRLeft{}       -> True
   IRRight{}      -> True
+  -- The new-shape constructor/accessor family (design ir-reengineering, slice
+  -- S1a): dead code today (nothing constructs 'IRConstruct'/'IRDestruct'
+  -- yet). Every 'ConTag' and every 'Accessor' mirrors an old-shape case that
+  -- is already 'True' above (IRTCons/IRCons/IRLeft/IRRight, and every one of
+  -- IRTFst/IRTSnd/IRHead/IRTail/IRFromLeft/IRFromRight/IRIsLeft/IRIsRight/
+  -- IRTheta/IRSubtree), so both collapse to a flat 'True' rather than
+  -- repeating that answer fourteen times over.
+  IRConstruct{}  -> True
+  IRDestruct{}   -> True
   _              -> False
 
 -- | Render a constant as batched Python, or 'Nothing' if its shape has no
@@ -1080,6 +1096,11 @@ reason e = case e of
                      ++ "(see batchedVal), so only float/int/bool leaves in "
                      ++ "fixed-shape tuples are admitted"
   IRUnaryOp OpIsAny _ -> "marginal (ANY) check (IRUnaryOp OpIsAny)"
+  -- Unreachable while 'emittable' admits every 'IRConstruct'/'IRDestruct'
+  -- (design ir-reengineering, slice S1a); named explicitly rather than left
+  -- to the catch-all below, matching every other case in this function.
+  IRConstruct{}   -> irPrintFlat e
+  IRDestruct{}    -> irPrintFlat e
   _               -> irPrintFlat e
 
 -- ---------------------------------------------------------------------------
@@ -1122,6 +1143,11 @@ batchedBlock ctx env (IRIf c t f) | structural env c =
   ++ ["else:"] ++ indentOnce (batchedBlock ctx env f)
 batchedBlock ctx env (IRTCons f s) =
   batchedAssign env "_r0" f ++ batchedAssign env "_r1" s ++ [returnStmt ctx "T(_r0, _r1)"]
+-- The new-shape tuple counterpart (design ir-reengineering, slice S1a): dead
+-- code today; parity, not required (the fallback below emits an equivalent
+-- single-expression return instead of a flattened multi-statement one).
+batchedBlock ctx env (IRConstruct TgTuple [f, s]) =
+  batchedAssign env "_r0" f ++ batchedAssign env "_r1" s ++ [returnStmt ctx "T(_r0, _r1)"]
 batchedBlock ctx env e = [returnStmt ctx (batchedExpr env e)]
 
 -- | One @return@ statement, optionally routed through the runtime NaN guard.
@@ -1141,6 +1167,12 @@ batchedAssign env name (IRIf c t f) | structural env c =
   ["if " ++ structuralCond env c ++ ":"] ++ indentOnce (batchedAssign env name t)
   ++ ["else:"] ++ indentOnce (batchedAssign env name f)
 batchedAssign env name (IRTCons f s) =
+  batchedAssign env (name ++ "_0") f
+  ++ batchedAssign env (name ++ "_1") s
+  ++ [name ++ " = T(" ++ name ++ "_0, " ++ name ++ "_1)"]
+-- The new-shape tuple counterpart (design ir-reengineering, slice S1a): dead
+-- code today; parity, not required (see 'batchedBlock').
+batchedAssign env name (IRConstruct TgTuple [f, s]) =
   batchedAssign env (name ++ "_0") f
   ++ batchedAssign env (name ++ "_1") s
   ++ [name ++ " = T(" ++ name ++ "_0, " ++ name ++ "_1)"]
@@ -1291,6 +1323,23 @@ batchedExpr env (IRFromLeft e)  = "fromLeft(" ++ batchedExpr env e ++ ")"
 batchedExpr env (IRFromRight e) = "fromRight(" ++ batchedExpr env e ++ ")"
 batchedExpr env (IRIsLeft e)    = "isinstance(" ++ batchedExpr env e ++ ", Left)"
 batchedExpr env (IRIsRight e)   = "isinstance(" ++ batchedExpr env e ++ ", Right)"
+-- The new-shape constructor/accessor family (design ir-reengineering, slice
+-- S1a): dead code today, mirroring the old-shape cases above one for one.
+batchedExpr env (IRConstruct TgTuple [a, b]) = "T(" ++ batchedExpr env a ++ ", " ++ batchedExpr env b ++ ")"
+batchedExpr env (IRConstruct TgCons [a, b])  =
+  "ConsInferenceList(" ++ batchedExpr env a ++ ", " ++ batchedExpr env b ++ ")"
+batchedExpr env (IRConstruct TgLeft [a])     = "Left(" ++ batchedExpr env a ++ ")"
+batchedExpr env (IRConstruct TgRight [a])    = "Right(" ++ batchedExpr env a ++ ")"
+batchedExpr env (IRDestruct AcFst e)         = "(" ++ batchedExpr env e ++ ")[0]"
+batchedExpr env (IRDestruct AcSnd e)         = "(" ++ batchedExpr env e ++ ")[1]"
+batchedExpr env (IRDestruct AcHead e)        = "(" ++ batchedExpr env e ++ ")[0]"
+batchedExpr env (IRDestruct AcTail e)        = "(" ++ batchedExpr env e ++ ")[1:]"
+batchedExpr env (IRDestruct AcFromLeft e)    = "fromLeft(" ++ batchedExpr env e ++ ")"
+batchedExpr env (IRDestruct AcFromRight e)   = "fromRight(" ++ batchedExpr env e ++ ")"
+batchedExpr env (IRDestruct AcIsLeft e)      = "isinstance(" ++ batchedExpr env e ++ ", Left)"
+batchedExpr env (IRDestruct AcIsRight e)     = "isinstance(" ++ batchedExpr env e ++ ", Right)"
+batchedExpr env (IRDestruct (AcTheta i) e)   = "(" ++ batchedExpr env e ++ ")[0][" ++ show i ++ "]"
+batchedExpr env (IRDestruct (AcSubtree i) e) = "(" ++ batchedExpr env e ++ ")[1][" ++ show i ++ "]"
 -- A refusal/error arm has no batched value; emit a NaN poison constant. Usually
 -- an enclosing torch.where selects it away (design M3); a poison that survives
 -- selection into the output shows up as NaN, caught by the value differential.

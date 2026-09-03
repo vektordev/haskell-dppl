@@ -360,6 +360,8 @@ containsIf (IRBuiltin BListIndex [l, i]) = containsIf l || containsIf i
 containsIf (IRCons h t)    = containsIf h || containsIf t
 containsIf (IRTheta x _)   = containsIf x
 containsIf (IRSubtree x _) = containsIf x
+containsIf (IRConstruct _ args) = any containsIf args
+containsIf (IRDestruct _ x)     = containsIf x
 containsIf _               = False
 
 -- | Like generateExpression, but lifts complex IRIf nodes into temp variables,
@@ -461,6 +463,52 @@ generateExpressionLifted (IRTCons f s) = do
   (fs, fe) <- generateExpressionLifted f
   (ss, se) <- generateExpressionLifted s
   return (fs ++ ss, str "T(" . fe . str ", " . se . str ")")
+-- The new-shape constructor/accessor family (design ir-reengineering, slice
+-- S1a): dead code today, mirroring the old-shape cases above one for one.
+generateExpressionLifted (IRConstruct TgTuple [f, s]) = do
+  (fs, fe) <- generateExpressionLifted f
+  (ss, se) <- generateExpressionLifted s
+  return (fs ++ ss, str "T(" . fe . str ", " . se . str ")")
+generateExpressionLifted (IRConstruct TgCons [hd, tl]) = do
+  (hs, he) <- generateExpressionLifted hd
+  (ts, te) <- generateExpressionLifted tl
+  return (hs ++ ts, str "ConsInferenceList(" . he . str ", " . te . str ")")
+generateExpressionLifted (IRConstruct TgLeft [x]) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, str "Left(" . sx . str ")")
+generateExpressionLifted (IRConstruct TgRight [x]) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, str "Right(" . sx . str ")")
+generateExpressionLifted (IRDestruct AcFst x) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, sx . str "[0]")
+generateExpressionLifted (IRDestruct AcSnd x) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, sx . str "[1]")
+generateExpressionLifted (IRDestruct AcHead x) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, sx . str "[0]")
+generateExpressionLifted (IRDestruct AcTail x) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, sx . str "[1:]")
+generateExpressionLifted (IRDestruct AcFromLeft x) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, str "fromLeft(" . sx . str ")")
+generateExpressionLifted (IRDestruct AcFromRight x) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, str "fromRight(" . sx . str ")")
+generateExpressionLifted (IRDestruct AcIsLeft x) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, str "isinstance(" . sx . str ", Left)")
+generateExpressionLifted (IRDestruct AcIsRight x) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, str "isinstance(" . sx . str ", Right)")
+generateExpressionLifted (IRDestruct (AcTheta i) x) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, sx . str ("[0][" ++ show i ++ "]"))
+generateExpressionLifted (IRDestruct (AcSubtree i) x) = do
+  (ss, sx) <- generateExpressionLifted x
+  return (ss, sx . str ("[1][" ++ show i ++ "]"))
 generateExpressionLifted expr@(IRApply _ _) = do
   let (fn, args) = collectApplyChain expr
   (fss, fn') <- generateExpressionLifted fn
@@ -526,6 +574,19 @@ generateStatementBlock (IRTCons f s) = do
   fStmts <- generateLetInStatement "_r0" f
   sStmts <- generateLetInStatement "_r1" s
   return (fStmts ++ sStmts ++ ["return T(_r0, _r1)"])
+-- The new-shape tuple counterpart (design ir-reengineering, slice S1a): dead
+-- code today; parity with the old-shape cases above, not required for
+-- correctness (the fallback below emits an equivalent single-expression
+-- return instead of a flattened multi-statement one).
+generateStatementBlock (IRConstruct TgTuple [IRConstruct TgTuple [f, s], bc]) = do
+  fStmts  <- generateLetInStatement "_r0" f
+  sStmts  <- generateLetInStatement "_r1" s
+  bcStmts <- generateLetInStatement "_r2" bc
+  return (fStmts ++ sStmts ++ bcStmts ++ ["return T(T(_r0, _r1), _r2)"])
+generateStatementBlock (IRConstruct TgTuple [f, s]) = do
+  fStmts <- generateLetInStatement "_r0" f
+  sStmts <- generateLetInStatement "_r1" s
+  return (fStmts ++ sStmts ++ ["return T(_r0, _r1)"])
 generateStatementBlock expr = do
   (stmts, e) <- generateExpressionLifted expr
   return (stmts ++ ["return " ++ renderLifted e])
@@ -540,6 +601,12 @@ generateLetInStatement name (IRIf cond left right) = do
   rightStmts <- generateLetInStatement name right
   return $ condStmts ++ ["if " ++ renderLifted c ++ ":"] ++ indentOnce leftStmts ++ mergeElif rightStmts
 generateLetInStatement name (IRTCons f s) = do
+  fStmts <- generateLetInStatement (name ++ "_0") f
+  sStmts <- generateLetInStatement (name ++ "_1") s
+  return (fStmts ++ sStmts ++ [name ++ " = T(" ++ name ++ "_0, " ++ name ++ "_1)"])
+-- The new-shape tuple counterpart (design ir-reengineering, slice S1a): dead
+-- code today; parity, not required (see 'generateStatementBlock').
+generateLetInStatement name (IRConstruct TgTuple [f, s]) = do
   fStmts <- generateLetInStatement (name ++ "_0") f
   sStmts <- generateLetInStatement (name ++ "_1") s
   return (fStmts ++ sStmts ++ [name ++ " = T(" ++ name ++ "_0, " ++ name ++ "_1)"])
@@ -618,6 +685,52 @@ generateExpression (IRIsLeft x) = do
 generateExpression (IRIsRight x) = do
   sx <- generateExpression x
   return ("isinstance(" ++ sx ++ ", Right)")
+-- The new-shape constructor/accessor family (design ir-reengineering, slice
+-- S1a): dead code today, mirroring the old-shape cases above one for one.
+generateExpression (IRConstruct TgTuple [f, s]) = do
+  ff <- generateExpression f
+  ss <- generateExpression s
+  return ("T(" ++ ff ++ ", " ++ ss ++ ")")
+generateExpression (IRConstruct TgCons [hd, tl]) = do
+  h <- generateExpression hd
+  t <- generateExpression tl
+  return ("ConsInferenceList(" ++ h ++ ", " ++ t ++ ")")
+generateExpression (IRConstruct TgLeft [x]) = do
+  sx <- generateExpression x
+  return ("Left(" ++ sx ++ ")")
+generateExpression (IRConstruct TgRight [x]) = do
+  sx <- generateExpression x
+  return ("Right(" ++ sx ++ ")")
+generateExpression (IRDestruct AcFst x) = do
+  sx <- generateExpression x
+  return (sx ++ "[0]")
+generateExpression (IRDestruct AcSnd x) = do
+  sx <- generateExpression x
+  return (sx ++ "[1]")
+generateExpression (IRDestruct AcHead x) = do
+  sx <- generateExpression x
+  return (sx ++ "[0]")
+generateExpression (IRDestruct AcTail x) = do
+  sx <- generateExpression x
+  return (sx ++ "[1:]")
+generateExpression (IRDestruct AcFromLeft x) = do
+  sx <- generateExpression x
+  return ("fromLeft(" ++ sx ++ ")")
+generateExpression (IRDestruct AcFromRight x) = do
+  sx <- generateExpression x
+  return ("fromRight(" ++ sx ++ ")")
+generateExpression (IRDestruct AcIsLeft x) = do
+  sx <- generateExpression x
+  return ("isinstance(" ++ sx ++ ", Left)")
+generateExpression (IRDestruct AcIsRight x) = do
+  sx <- generateExpression x
+  return ("isinstance(" ++ sx ++ ", Right)")
+generateExpression (IRDestruct (AcTheta i) x) = do
+  sx <- generateExpression x
+  return (sx ++ "[0][" ++ show i ++ "]")
+generateExpression (IRDestruct (AcSubtree i) x) = do
+  sx <- generateExpression x
+  return (sx ++ "[1][" ++ show i ++ "]")
 generateExpression (IRDensity dist Linear x) = do
   sx <- generateExpression x
   return ("density_" ++ pyDistName dist ++ "(" ++ sx ++ ")")

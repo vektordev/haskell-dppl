@@ -14,6 +14,10 @@ module SPLL.IntermediateRepresentation (
 , Extent(..)
 , builtinArity
 , expectBuiltinArgs
+, ConTag(..)
+, Accessor(..)
+, conTagArity
+, expectConTagArgs
 , Distribution(..)
 , LogSpace(..)
 , Varname
@@ -301,6 +305,54 @@ data Distribution = IRNormal | IRUniform deriving (Show, Eq)
 -- what the node fundamentally is.
 data LogSpace = Linear | Log deriving (Show, Eq)
 
+-- | The data-structure /constructor/ tag for 'IRConstruct' (design
+-- ir-reengineering, slice S1a). Four shapes, matching the four families the
+-- fourteen retiring constructors group into (tuples, cons lists, and the two
+-- 'Either' arms) -- see "Tuples stay binary" in the design for why there is no
+-- fifth, N-ary tag. Named @ConTag@, not @Tag@: "SPLL.Lang.Types" already
+-- exports @Tag@ (@DiscreteValues@ / @IsConditional@), which this module
+-- re-exports, so reusing the name would shadow it in every module that needs
+-- both.
+data ConTag
+  = TgTuple       -- ^ A pair. Exactly 2 children.
+  | TgCons        -- ^ List cons. Exactly 2 children.
+  | TgLeft        -- ^ 'Either' left. Exactly 1 child.
+  | TgRight       -- ^ 'Either' right. Exactly 1 child.
+  deriving (Show, Eq)
+
+-- | The number of children an 'IRConstruct' of this 'ConTag' must carry -- the
+-- single source of truth 'expectConTagArgs' checks against, mirroring
+-- 'builtinArity' for 'IRBuiltin'.
+conTagArity :: ConTag -> Int
+conTagArity TgTuple = 2
+conTagArity TgCons  = 2
+conTagArity TgLeft  = 1
+conTagArity TgRight = 1
+
+-- | Check an 'IRConstruct'\'s argument list against 'conTagArity', failing
+-- loudly with the offending node -- the same discipline 'expectBuiltinArgs'
+-- applies to 'IRBuiltin': a malformed construct is a compiler bug, so it
+-- should 'error' at construction rather than degrade silently in a backend.
+expectConTagArgs :: ConTag -> [IRExpr] -> [IRExpr]
+expectConTagArgs t args
+  | length args == conTagArity t = args
+  | otherwise = error ("IRConstruct " ++ show t ++ " expects " ++ show (conTagArity t)
+                       ++ " arguments, got " ++ show (length args) ++ ": " ++ show args)
+
+-- | The /destructor/ tag for 'IRDestruct': which projection or predicate to
+-- apply to its one child. 'AcTheta'/'AcSubtree' index a 'VThetaTree' rather
+-- than project a tuple -- see "AcTheta / AcSubtree are their own accessors" in
+-- the design -- but they cost nothing extra in the seven generic passes, which
+-- is all that distinction needs to be free.
+data Accessor
+  = AcFst | AcSnd              -- ^ Tuple projection.
+  | AcHead | AcTail            -- ^ List cons projection.
+  | AcFromLeft | AcFromRight   -- ^ 'Either' payload projection (partial: wrong arm errors).
+  | AcIsLeft | AcIsRight       -- ^ 'Either' arm test.
+  | AcTheta Int                -- ^ Theta tree: leaf parameter @i@.
+  | AcSubtree Int              -- ^ Theta tree: child subtree @i@.
+  deriving (Show, Eq)
+
 data IRExpr = IRIf IRExpr IRExpr IRExpr
               -- | A /select/ (design pytorch-tensorizer, M1): semantically an
               -- if whose /both/ arms are evaluated and combined by a mask on the
@@ -331,6 +383,20 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               | IRFromRight IRExpr
               | IRIsLeft IRExpr
               | IRIsRight IRExpr
+              -- | A named data-structure construction (design ir-reengineering,
+              -- slice S1a): the collapse target for 'IRCons'/'IRTCons'/'IRLeft'/
+              -- 'IRRight' above. Argument count is fixed per 'ConTag'
+              -- ('conTagArity'/'expectConTagArgs'); nothing in the compiler
+              -- builds this yet -- it lands here, and in every consumer below,
+              -- purely as dead-but-correct scaffolding so later slices can
+              -- migrate one producer module at a time without re-touching the
+              -- seven generic passes per migration.
+              | IRConstruct ConTag [IRExpr]
+              -- | A named data-structure projection or test (design
+              -- ir-reengineering, slice S1a): the collapse target for
+              -- 'IRHead'/'IRTail'/'IRTFst'/'IRTSnd'/'IRLeft'-arm accessors/
+              -- 'IRTheta'/'IRSubtree' above. See 'IRConstruct'.
+              | IRDestruct Accessor IRExpr
               -- | @IRDensity dist ls e@ -- density of @dist@ at @e@.
               -- @ls == 'Log'@ selects the native log-pdf leaf (task
               -- log-space-probability-computation) rather than the linear pdf
@@ -683,6 +749,8 @@ getIRSubExprs (IRFromLeft a) = [a]
 getIRSubExprs (IRFromRight a) = [a]
 getIRSubExprs (IRIsLeft a) = [a]
 getIRSubExprs (IRIsRight a) = [a]
+getIRSubExprs (IRConstruct _ children) = children
+getIRSubExprs (IRDestruct _ child) = [child]
 getIRSubExprs (IRIsPossible _ a) = [a]
 getIRSubExprs (IRDensity _ _ a) = [a]
 getIRSubExprs (IRCumulative _ _ a) = [a]
@@ -774,6 +842,8 @@ irDescend f x = case x of
   (IRFromRight expr) -> IRFromRight (f expr)
   (IRIsLeft expr) -> IRIsLeft (f expr)
   (IRIsRight expr) -> IRIsRight (f expr)
+  (IRConstruct t cs) -> IRConstruct t (map f cs)
+  (IRDestruct a c) -> IRDestruct a (f c)
   (IRIsPossible val expr) -> IRIsPossible val (f expr)
   (IRDensity a ls expr) -> IRDensity a ls (f expr)
   (IRCumulative a ls expr) -> IRCumulative a ls (f expr)
@@ -815,6 +885,8 @@ irDescendM f x = case x of
   (IRFromRight expr) -> IRFromRight <$> f expr
   (IRIsLeft expr) -> IRIsLeft <$> f expr
   (IRIsRight expr) -> IRIsRight <$> f expr
+  (IRConstruct t cs) -> IRConstruct t <$> mapM f cs
+  (IRDestruct a c) -> IRDestruct a <$> f c
   (IRIsPossible val expr) -> IRIsPossible val <$> f expr
   (IRDensity a ls expr) -> IRDensity a ls <$> f expr
   (IRCumulative a ls expr) -> IRCumulative a ls <$> f expr
@@ -857,6 +929,8 @@ irPrintFlat (IRFromLeft _) = "IRFromLeft"
 irPrintFlat (IRFromRight _) = "IRFromRight"
 irPrintFlat (IRIsLeft _) = "IRIsLeft"
 irPrintFlat (IRIsRight _) = "IRIsRight"
+irPrintFlat (IRConstruct t _) = "IRConstruct " ++ show t
+irPrintFlat (IRDestruct a _) = "IRDestruct " ++ show a
 irPrintFlat (IRIsPossible _ _) = "IRIsPossible"
 irPrintFlat (IRDensity _ _ _) = "IRDensity"
 irPrintFlat (IRCumulative _ _ _) = "IRCumulative"
