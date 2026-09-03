@@ -1,9 +1,10 @@
 -- Two-sided companion to showcase_observe_inequality: the observe predicate
 -- confines the base to a bounded interval, so the set-valued witness engine
 -- has to tighten one interval against another before meeting the query point.
--- Written as nested `if`s rather than `(v > 0.0) && (v < 1.0)` because the
--- inverter has no case for the boolean connectives (task
--- set-witness-any-in-constructor-slot records that as a separate gap).
+-- Written as nested `if`s rather than `(v > 0.0) && (v < 1.0)` for historical
+-- reasons only -- both spellings compile identically since task
+-- set-witness-boolean-connectives; observeTwoSidedIntervalAnd is the `&&` twin
+-- that pins the two agree value-for-value.
 --
 -- `p(Right ANY)` is then a CDF *difference*, Phi(1) - Phi(0), where the
 -- one-sided program's is a single tail -- the case that distinguishes

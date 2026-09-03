@@ -3154,6 +3154,40 @@ invertToWorlds meta occs exprBody target = do
         | otherwise -> return Nothing
       Expr _ (InjF (Named "lt") [lop, rop]) -> comparisonWorlds meta occs False lop rop target
       Expr _ (InjF (Named "gt") [lop, rop]) -> comparisonWorlds meta occs True lop rop target
+      -- Boolean connectives: invert each leaf at both canonical polarities
+      -- (via 'invertBoolToWorlds', which is exactly the device the
+      -- IfThenElse condition case above already uses on itself), then
+      -- recombine. 'and'/'or' observed at their "natural" polarity (and+True,
+      -- or+False) are a plain intersection; the other polarity needs the
+      -- disjoint decomposition from the task sketch --
+      -- not(a&&b) = not(a) or (a&&not(b)), a||b = a or (not(a)&&b) -- so the
+      -- two (generally overlapping) sets of worlds are never both measured.
+      -- 'not' just swaps which list is which. Mirrors 'planInvert's
+      -- "not"/"and"/"or" cases, the plan-guided engine's analogous fold over
+      -- (True-worlds, False-worlds) pairs.
+      Expr _ (InjF (Named "not") [a]) -> do
+        ab <- invertBoolToWorlds meta occs a
+        return (case ab of
+          Just (at, af) -> Just (boolWorlds target af at)
+          Nothing       -> Nothing)
+      Expr _ (InjF (Named "and") [a, b]) -> do
+        ab <- invertBoolToWorlds meta occs a
+        bb <- invertBoolToWorlds meta occs b
+        case (ab, bb) of
+          (Just (at, af), Just (bt, bf)) ->
+            let tw = [intersectW aw bw | aw <- at, bw <- bt]
+                fw = af ++ [intersectW aw bw | aw <- at, bw <- bf]
+            in return (Just (boolWorlds target tw fw))
+          _ -> return Nothing
+      Expr _ (InjF (Named "or") [a, b]) -> do
+        ab <- invertBoolToWorlds meta occs a
+        bb <- invertBoolToWorlds meta occs b
+        case (ab, bb) of
+          (Just (at, af), Just (bt, bf)) ->
+            let tw = at ++ [intersectW aw bw | aw <- af, bw <- bt]
+                fw = [intersectW aw bw | aw <- af, bw <- bf]
+            in return (Just (boolWorlds target tw fw))
+          _ -> return Nothing
       Expr _ (InjF (Named "TCons") [pa, pb]) -> case target of
         WPoint s _ -> do
           wsA <- invertToWorlds meta occs pa (WPoint (IRTFst s) const1)
@@ -3212,6 +3246,27 @@ transportDirect meta occs exprBody target = case filter (`elem` subtreeCNs exprB
   _ -> return Nothing
   where bodyCN = chainName (getTypeInfo exprBody)
 
+-- | Combine the canonical (outcome-True, outcome-False) worlds of a
+-- Bool-valued node against the actual target: True-worlds apply when the
+-- target requires True, False-worlds when it requires False -- exactly
+-- 'comparisonWorlds's original inline construction, now shared with the
+-- boolean-connective cases of 'invertToWorlds'.
+boolWorlds :: WSet -> [WWorld] -> [WWorld] -> [WWorld]
+boolWorlds target ts fs =
+     map (addGuard (memberGuard TBool constTrueIR target)) ts
+  ++ map (addGuard (memberGuard TBool (IRConst (VBool False)) target)) fs
+
+-- | (worlds where @e@ observes True, worlds where it observes False), for a
+-- Bool-valued node reached while inverting a boolean connective. Reuses
+-- 'invertToWorlds' itself at each canonical polarity target -- the same
+-- device the 'IfThenElse' case above already uses to invert its own
+-- condition.
+invertBoolToWorlds :: CompilerMetadata -> [ChainName] -> Expr -> CompilerMonad (Maybe ([WWorld], [WWorld]))
+invertBoolToWorlds meta occs e = do
+  wsT <- invertToWorlds meta occs e (WPoint constTrueIR const1)
+  wsF <- invertToWorlds meta occs e (WPoint (IRConst (VBool False)) const1)
+  return ((,) <$> wsT <*> wsF)
+
 -- | Worlds of a comparison node: the side carrying the bound variable is
 -- confined to a half-line whose direction depends on the observed boolean;
 -- the other side must be deterministic.
@@ -3233,11 +3288,7 @@ comparisonWorlds meta occs isGT lop rop target
       let (setT, setF) = if isGT /= flipped then (upper, lower) else (lower, upper)
       wsT <- invertToWorlds meta occs side setT
       wsF <- invertToWorlds meta occs side setF
-      case (wsT, wsF) of
-        (Just ts, Just fs) -> return (Just (
-             map (addGuard (memberGuard TBool constTrueIR target)) ts
-          ++ map (addGuard (memberGuard TBool (IRConst (VBool False)) target)) fs))
-        _ -> return Nothing
+      return (boolWorlds target <$> wsT <*> wsF)
 
 -- ===== Plan-guided lazy enumeration (design plan-guided-lazy-enumeration, M1) =====
 --

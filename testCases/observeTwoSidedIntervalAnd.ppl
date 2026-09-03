@@ -1,0 +1,7 @@
+-- Same distribution and truncation as observeTwoSidedInterval, but spelled with
+-- the `&&` connective the nested-if version exists to work around (see the
+-- nested-if file's own comment): task set-witness-boolean-connectives gives
+-- `invertToWorlds` cases for `and`/`or`/`not`, so the natural surface syntax
+-- for a two-sided truncation now compiles too, and must agree value-for-value
+-- with its nested-if twin.
+main = let v = Normal in if (v > 0.0) && (v < 1.0) then right v else left ()

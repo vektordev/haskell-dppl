@@ -1,0 +1,9 @@
+-- Disjunctive observe predicate (task set-witness-boolean-connectives): the
+-- excluded middle keeps the two tails of a standard Normal. `or` observed
+-- True is `at ++ intersect(af, bt)` (a disjoint decomposition, see
+-- IRCompiler.hs's invertToWorlds) -- getting that wrong double-counts the
+-- overlap and inflates p(Right ANY) past the true two-tail mass. `or`
+-- observed False (p(Left ANY)) is the plain intersection of both arms' False
+-- worlds, so this program also exercises that polarity in the same query set
+-- observeTwoSidedIntervalAnd exercises for `and`.
+main = let v = Normal in if (v < -1.0) || (v > 1.0) then right v else left ()

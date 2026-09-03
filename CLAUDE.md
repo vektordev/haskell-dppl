@@ -328,9 +328,21 @@ but the payload unconstrained, so the point constraint is dropped and the
 observation's interval kept, measured as a CDF difference (dim 0) rather than
 a density. `intersectSet` spells that as `WChoice`, a *runtime* choice of
 constraint set — the wildcard is a property of the query sample and has no
-static trace in the witness template. Known gap: the inverter has no case for
-the boolean connectives, so a two-sided predicate must be written as nested
-`if`s, not `(v > lo) && (v < hi)`.
+static trace in the witness template.
+
+`invertToWorlds` has cases for the boolean connectives (`and`/`or`/`not`), so
+`(v > lo) && (v < hi)` compiles the same as the nested-if spelling: each leaf
+is inverted at both canonical polarities (`invertBoolToWorlds`, reusing
+`invertToWorlds` itself the same way the `IfThenElse` condition case already
+does), then recombined. `and`/`or` at their "natural" polarity (and+True,
+or+False) intersect directly; the other polarity needs a disjoint
+decomposition (`not(a&&b) = not(a) or (a&&not(b))`, `a||b = a or
+(not(a)&&b)`) so the two possibly-overlapping sets of worlds are never both
+measured — getting that wrong double-counts the overlap. `not` just swaps
+which list is which. Mirrors the plan-guided engine's analogous
+`planInvert`/`planInvertBool` fold over (True-worlds, False-worlds) pairs.
+Corpus: `observeTwoSidedIntervalAnd` (the `&&` twin of `observeTwoSidedInterval`)
+and `observeDisjointTails` (`||`, the double-counting canary).
 
 ## Additional Features
 

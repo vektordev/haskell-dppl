@@ -1,0 +1,7 @@
+p(Right ANY)=(0.3413447460685429, 0.0, False)
+p(Left ANY)=(0.6586552539314571, 0.0, False)
+p(Left ())=(0.6586552539314571, 0.0, False)
+p(Right 0.5)=(0.3520653267642995, 1.0, False)
+p(Right 0.25)=(0.38666811680284924, 1.0, False)
+p(Right 1.5) is impossible
+p(Right -0.5) is impossible
