@@ -341,25 +341,11 @@ containsIf (IRIf _ _ _)    = True
 containsIf (IROp _ l r)    = containsIf l || containsIf r
 containsIf (IRUnaryOp _ e) = containsIf e
 containsIf (IRApply f x)   = containsIf f || containsIf x
-containsIf (IRTCons f s)   = containsIf f || containsIf s
-containsIf (IRTFst x)      = containsIf x
-containsIf (IRTSnd x)      = containsIf x
 containsIf (IRLetIn _ v b) = containsIf v || containsIf b
-containsIf (IRHead x)      = containsIf x
-containsIf (IRTail x)      = containsIf x
-containsIf (IRLeft x)      = containsIf x
-containsIf (IRRight x)     = containsIf x
-containsIf (IRFromLeft x)  = containsIf x
-containsIf (IRFromRight x) = containsIf x
-containsIf (IRIsLeft x)    = containsIf x
-containsIf (IRIsRight x)   = containsIf x
 containsIf (IRDensity _ _ x) = containsIf x
 containsIf (IRCumulative _ _ x) = containsIf x
 containsIf (IRBuiltin BMapList [f, x])   = containsIf f || containsIf x
 containsIf (IRBuiltin BListIndex [l, i]) = containsIf l || containsIf i
-containsIf (IRCons h t)    = containsIf h || containsIf t
-containsIf (IRTheta x _)   = containsIf x
-containsIf (IRSubtree x _) = containsIf x
 containsIf (IRConstruct _ args) = any containsIf args
 containsIf (IRDestruct _ x)     = containsIf x
 containsIf _               = False
@@ -399,36 +385,6 @@ generateExpressionLifted (IROp op l r) = do
 generateExpressionLifted (IRUnaryOp op e) = do
   (ss, se) <- generateExpressionLifted e
   return (ss, str (pyUnaryOps op) . str "(" . se . str ")")
-generateExpressionLifted (IRTFst x) = do
-  (ss, sx) <- generateExpressionLifted x
-  return (ss, sx . str "[0]")
-generateExpressionLifted (IRTSnd x) = do
-  (ss, sx) <- generateExpressionLifted x
-  return (ss, sx . str "[1]")
-generateExpressionLifted (IRHead x) = do
-  (ss, sx) <- generateExpressionLifted x
-  return (ss, sx . str "[0]")
-generateExpressionLifted (IRTail x) = do
-  (ss, sx) <- generateExpressionLifted x
-  return (ss, sx . str "[1:]")
-generateExpressionLifted (IRLeft x) = do
-  (ss, sx) <- generateExpressionLifted x
-  return (ss, str "Left(" . sx . str ")")
-generateExpressionLifted (IRRight x) = do
-  (ss, sx) <- generateExpressionLifted x
-  return (ss, str "Right(" . sx . str ")")
-generateExpressionLifted (IRFromLeft x) = do
-  (ss, sx) <- generateExpressionLifted x
-  return (ss, str "fromLeft(" . sx . str ")")
-generateExpressionLifted (IRFromRight x) = do
-  (ss, sx) <- generateExpressionLifted x
-  return (ss, str "fromRight(" . sx . str ")")
-generateExpressionLifted (IRIsLeft x) = do
-  (ss, sx) <- generateExpressionLifted x
-  return (ss, str "isinstance(" . sx . str ", Left)")
-generateExpressionLifted (IRIsRight x) = do
-  (ss, sx) <- generateExpressionLifted x
-  return (ss, str "isinstance(" . sx . str ", Right)")
 generateExpressionLifted (IRDensity dist Linear x) = do
   (ss, sx) <- generateExpressionLifted x
   return (ss, str ("density_" ++ pyDistName dist) . str "(" . sx . str ")")
@@ -445,26 +401,10 @@ generateExpressionLifted (IRBuiltin BMapList [f, x]) = do
   (fs, fe) <- generateExpressionLifted f
   (xs, xe) <- generateExpressionLifted x
   return (fs ++ xs, str "mapList(" . fe . str ", " . xe . str ")")
-generateExpressionLifted (IRCons hd tl) = do
-  (hs, he) <- generateExpressionLifted hd
-  (ts, te) <- generateExpressionLifted tl
-  return (hs ++ ts, str "ConsInferenceList(" . he . str ", " . te . str ")")
 generateExpressionLifted (IRBuiltin BListIndex [lst, idx]) = do
   (ls, le) <- generateExpressionLifted lst
   (is, ie) <- generateExpressionLifted idx
   return (ls ++ is, str "(" . le . str ")[" . ie . str "]")
-generateExpressionLifted (IRTheta x i) = do
-  (ss, sx) <- generateExpressionLifted x
-  return (ss, sx . str ("[0][" ++ show i ++ "]"))
-generateExpressionLifted (IRSubtree x i) = do
-  (ss, sx) <- generateExpressionLifted x
-  return (ss, sx . str ("[1][" ++ show i ++ "]"))
-generateExpressionLifted (IRTCons f s) = do
-  (fs, fe) <- generateExpressionLifted f
-  (ss, se) <- generateExpressionLifted s
-  return (fs ++ ss, str "T(" . fe . str ", " . se . str ")")
--- The new-shape constructor/accessor family (design ir-reengineering, slice
--- S1a): dead code today, mirroring the old-shape cases above one for one.
 generateExpressionLifted (IRConstruct TgTuple [f, s]) = do
   (fs, fe) <- generateExpressionLifted f
   (ss, se) <- generateExpressionLifted s
@@ -565,19 +505,6 @@ generateStatementBlock (IRIf cond left right) = do
   cRight <- generateStatementBlock right
   let l1 = "if " ++ renderLifted cCond ++ ":"
   return $ condStmts ++ [l1] ++ indentOnce cLeft ++ mergeElif cRight
-generateStatementBlock (IRTCons (IRTCons f s) bc) = do
-  fStmts  <- generateLetInStatement "_r0" f
-  sStmts  <- generateLetInStatement "_r1" s
-  bcStmts <- generateLetInStatement "_r2" bc
-  return (fStmts ++ sStmts ++ bcStmts ++ ["return T(T(_r0, _r1), _r2)"])
-generateStatementBlock (IRTCons f s) = do
-  fStmts <- generateLetInStatement "_r0" f
-  sStmts <- generateLetInStatement "_r1" s
-  return (fStmts ++ sStmts ++ ["return T(_r0, _r1)"])
--- The new-shape tuple counterpart (design ir-reengineering, slice S1a): dead
--- code today; parity with the old-shape cases above, not required for
--- correctness (the fallback below emits an equivalent single-expression
--- return instead of a flattened multi-statement one).
 generateStatementBlock (IRConstruct TgTuple [IRConstruct TgTuple [f, s], bc]) = do
   fStmts  <- generateLetInStatement "_r0" f
   sStmts  <- generateLetInStatement "_r1" s
@@ -600,12 +527,6 @@ generateLetInStatement name (IRIf cond left right) = do
   leftStmts  <- generateLetInStatement name left
   rightStmts <- generateLetInStatement name right
   return $ condStmts ++ ["if " ++ renderLifted c ++ ":"] ++ indentOnce leftStmts ++ mergeElif rightStmts
-generateLetInStatement name (IRTCons f s) = do
-  fStmts <- generateLetInStatement (name ++ "_0") f
-  sStmts <- generateLetInStatement (name ++ "_1") s
-  return (fStmts ++ sStmts ++ [name ++ " = T(" ++ name ++ "_0, " ++ name ++ "_1)"])
--- The new-shape tuple counterpart (design ir-reengineering, slice S1a): dead
--- code today; parity, not required (see 'generateStatementBlock').
 generateLetInStatement name (IRConstruct TgTuple [f, s]) = do
   fStmts <- generateLetInStatement (name ++ "_0") f
   sStmts <- generateLetInStatement (name ++ "_1") s
@@ -635,58 +556,12 @@ generateExpression (IROp op left right) = do
 generateExpression (IRUnaryOp op expr) = do
   e <- generateExpression expr
   return (pyUnaryOps op ++ "(" ++ e ++ ")")
-generateExpression (IRTheta x i) = do
-  sx <- generateExpression x
-  return (sx ++ "[0][" ++ show i ++ "]")
-generateExpression (IRSubtree x i) = do
-  sx <- generateExpression x
-  return (sx ++ "[1][" ++ show i ++ "]")
 generateExpression (IRConst v) =
   return (pyVal v)
-generateExpression (IRCons hd tl) = do
-  h <- generateExpression hd
-  t <- generateExpression tl
-  return ("ConsInferenceList(" ++ h ++ ", " ++ t ++ ")")
-generateExpression (IRTCons fs sn) = do
-  f <- generateExpression fs
-  s <- generateExpression sn
-  return ("T(" ++ f ++ ", " ++ s ++ ")")
-generateExpression (IRHead x) = do
-  sx <- generateExpression x
-  return (sx ++ "[0]")
-generateExpression (IRTail x) = do
-  sx <- generateExpression x
-  return (sx ++ "[1:]")
 generateExpression (IRBuiltin BMapList [f, x]) = do
   ff <- generateExpression f
   xx <- generateExpression x
   return ("mapList(" ++ ff ++ ", " ++ xx ++ ")")
-generateExpression (IRTFst x) = do
-  sx <- generateExpression x
-  return (sx ++ "[0]")
-generateExpression (IRTSnd x) = do
-  sx <- generateExpression x
-  return (sx ++ "[1]")
-generateExpression (IRLeft x) = do
-  sx <- generateExpression x
-  return ("Left(" ++ sx ++ ")")
-generateExpression (IRRight x) = do
-  sx <- generateExpression x
-  return ("Right(" ++ sx ++ ")")
-generateExpression (IRFromLeft x) = do
-  sx <- generateExpression x
-  return ("fromLeft(" ++ sx ++ ")")
-generateExpression (IRFromRight x) = do
-  sx <- generateExpression x
-  return ("fromRight(" ++ sx ++ ")")
-generateExpression (IRIsLeft x) = do
-  sx <- generateExpression x
-  return ("isinstance(" ++ sx ++ ", Left)")
-generateExpression (IRIsRight x) = do
-  sx <- generateExpression x
-  return ("isinstance(" ++ sx ++ ", Right)")
--- The new-shape constructor/accessor family (design ir-reengineering, slice
--- S1a): dead code today, mirroring the old-shape cases above one for one.
 generateExpression (IRConstruct TgTuple [f, s]) = do
   ff <- generateExpression f
   ss <- generateExpression s

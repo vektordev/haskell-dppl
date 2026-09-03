@@ -368,34 +368,18 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               | IRSelect IRExpr IRExpr IRExpr
               | IROp Operand IRExpr IRExpr
               | IRUnaryOp UnaryOperand IRExpr
-              | IRTheta IRExpr Int
-              | IRSubtree IRExpr Int
               | IRConst IRValue
-              | IRCons IRExpr IRExpr
-              | IRTCons IRExpr IRExpr
-              | IRHead IRExpr
-              | IRTail IRExpr
-              | IRTFst IRExpr
-              | IRTSnd IRExpr
-              | IRLeft IRExpr
-              | IRRight IRExpr
-              | IRFromLeft IRExpr
-              | IRFromRight IRExpr
-              | IRIsLeft IRExpr
-              | IRIsRight IRExpr
               -- | A named data-structure construction (design ir-reengineering,
-              -- slice S1a): the collapse target for 'IRCons'/'IRTCons'/'IRLeft'/
-              -- 'IRRight' above. Argument count is fixed per 'ConTag'
-              -- ('conTagArity'/'expectConTagArgs'); nothing in the compiler
-              -- builds this yet -- it lands here, and in every consumer below,
-              -- purely as dead-but-correct scaffolding so later slices can
-              -- migrate one producer module at a time without re-touching the
-              -- seven generic passes per migration.
+              -- slice S1). Collapses the former 'IRCons'/'IRTCons'/'IRLeft'/
+              -- 'IRRight' constructors into one node parameterised by 'ConTag'.
+              -- Argument count is fixed per 'ConTag' ('conTagArity'/
+              -- 'expectConTagArgs').
               | IRConstruct ConTag [IRExpr]
               -- | A named data-structure projection or test (design
-              -- ir-reengineering, slice S1a): the collapse target for
+              -- ir-reengineering, slice S1). Collapses the former
               -- 'IRHead'/'IRTail'/'IRTFst'/'IRTSnd'/'IRLeft'-arm accessors/
-              -- 'IRTheta'/'IRSubtree' above. See 'IRConstruct'.
+              -- 'IRTheta'/'IRSubtree' constructors into one node parameterised
+              -- by 'Accessor'. See 'IRConstruct'.
               | IRDestruct Accessor IRExpr
               -- | @IRDensity dist ls e@ -- density of @dist@ at @e@.
               -- @ls == 'Log'@ selects the native log-pdf leaf (task
@@ -734,21 +718,7 @@ getIRSubExprs (IRIf a b c) = [a, b, c]
 getIRSubExprs (IRSelect a b c) = [a, b, c]
 getIRSubExprs (IROp _ a b) = [a, b]
 getIRSubExprs (IRUnaryOp _ a) = [a]
-getIRSubExprs (IRTheta a _) = [a]
-getIRSubExprs (IRSubtree a _) = [a]
 getIRSubExprs (IRConst _) = []
-getIRSubExprs (IRCons a b) = [a, b]
-getIRSubExprs (IRTCons a b) = [a, b]
-getIRSubExprs (IRHead a) = [a]
-getIRSubExprs (IRTail a) = [a]
-getIRSubExprs (IRTFst a) = [a]
-getIRSubExprs (IRTSnd a) = [a]
-getIRSubExprs (IRLeft a) = [a]
-getIRSubExprs (IRRight a) = [a]
-getIRSubExprs (IRFromLeft a) = [a]
-getIRSubExprs (IRFromRight a) = [a]
-getIRSubExprs (IRIsLeft a) = [a]
-getIRSubExprs (IRIsRight a) = [a]
 getIRSubExprs (IRConstruct _ children) = children
 getIRSubExprs (IRDestruct _ child) = [child]
 getIRSubExprs (IRIsPossible _ a) = [a]
@@ -823,25 +793,13 @@ irMap f x = f (irDescend (irMap f) x)
 -- traversal. This is what a scope-aware rewrite needs: it can handle the
 -- binding forms itself (threading an environment through 'IRLetIn'/'IRLambda'/
 -- 'IREnumSum' scopes) and delegate every other constructor here, instead of
--- re-listing the whole 35-constructor AST.
+-- re-listing the whole 21-constructor AST.
 irDescend :: (IRExpr -> IRExpr) -> IRExpr -> IRExpr
 irDescend f x = case x of
   (IRIf cond left right) -> IRIf (f cond) (f left) (f right)
   (IRSelect cond left right) -> IRSelect (f cond) (f left) (f right)
   (IROp op left right) -> IROp op (f left) (f right)
   (IRUnaryOp op expr) -> IRUnaryOp op (f expr)
-  (IRCons left right) -> IRCons (f left) (f right)
-  (IRTCons left right) -> IRTCons (f left) (f right)
-  (IRHead expr) -> IRHead (f expr)
-  (IRTail expr) -> IRTail (f expr)
-  (IRTFst expr) -> IRTFst (f expr)
-  (IRTSnd expr) -> IRTSnd (f expr)
-  (IRLeft expr) -> IRLeft (f expr)
-  (IRRight expr) -> IRRight (f expr)
-  (IRFromLeft expr) -> IRFromLeft (f expr)
-  (IRFromRight expr) -> IRFromRight (f expr)
-  (IRIsLeft expr) -> IRIsLeft (f expr)
-  (IRIsRight expr) -> IRIsRight (f expr)
   (IRConstruct t cs) -> IRConstruct t (map f cs)
   (IRDestruct a c) -> IRDestruct a (f c)
   (IRIsPossible val expr) -> IRIsPossible val (f expr)
@@ -854,8 +812,6 @@ irDescend f x = case x of
   (IRLogEnumSum name val scope) -> IRLogEnumSum name val (f scope)
   (IREnumSumPaired lg name val scope) -> IREnumSumPaired lg name val (f scope)
   (IRBuiltin b args) -> IRBuiltin b (map f args)
-  (IRTheta a i) -> IRTheta (f a) i
-  (IRSubtree a i) -> IRSubtree (f a) i
   (IRConst _) -> x
   (IRSample _) -> x
   (IRVar _) -> x
@@ -873,18 +829,6 @@ irDescendM f x = case x of
   (IRSelect cond left right) -> IRSelect <$> f cond <*> f left <*> f right
   (IROp op left right) -> IROp op <$> f left <*> f right
   (IRUnaryOp op expr) -> IRUnaryOp op <$> f expr
-  (IRCons left right) -> IRCons <$> f left <*> f right
-  (IRTCons left right) -> IRTCons <$> f left <*> f right
-  (IRHead expr) -> IRHead <$> f expr
-  (IRTail expr) -> IRTail <$> f expr
-  (IRTFst expr) -> IRTFst <$> f expr
-  (IRTSnd expr) -> IRTSnd <$> f expr
-  (IRLeft expr) -> IRLeft <$> f expr
-  (IRRight expr) -> IRRight <$> f expr
-  (IRFromLeft expr) -> IRFromLeft <$> f expr
-  (IRFromRight expr) -> IRFromRight <$> f expr
-  (IRIsLeft expr) -> IRIsLeft <$> f expr
-  (IRIsRight expr) -> IRIsRight <$> f expr
   (IRConstruct t cs) -> IRConstruct t <$> mapM f cs
   (IRDestruct a c) -> IRDestruct a <$> f c
   (IRIsPossible val expr) -> IRIsPossible val <$> f expr
@@ -897,8 +841,6 @@ irDescendM f x = case x of
   (IRLogEnumSum name val scope) -> IRLogEnumSum name val <$> f scope
   (IREnumSumPaired lg name val scope) -> IREnumSumPaired lg name val <$> f scope
   (IRBuiltin b args) -> IRBuiltin b <$> mapM f args
-  (IRTheta a i) -> flip IRTheta i <$> f a
-  (IRSubtree a i) -> flip IRSubtree i <$> f a
   (IRConst _) -> pure x
   (IRSample _) -> pure x
   (IRVar _) -> pure x
@@ -914,21 +856,7 @@ irPrintFlat (IRIf _ _ _) = "IRIf"
 irPrintFlat (IRSelect _ _ _) = "IRSelect"
 irPrintFlat (IROp _ _ _) = "IROp"
 irPrintFlat (IRUnaryOp _ _) = "IRUnaryOp"
-irPrintFlat (IRTheta _ _) = "IRTheta"
-irPrintFlat (IRSubtree _ _) = "IRSubtree"
 irPrintFlat (IRConst _) = "IRConst"
-irPrintFlat (IRCons _ _) = "IRCons"
-irPrintFlat (IRTCons _ _) = "IRTCons"
-irPrintFlat (IRHead _) = "IRHead"
-irPrintFlat (IRTail _) = "IRTail"
-irPrintFlat (IRTFst _) = "IRTFst"
-irPrintFlat (IRTSnd _) = "IRTSnd"
-irPrintFlat (IRLeft _) = "IRLeft"
-irPrintFlat (IRRight _) = "IRRight"
-irPrintFlat (IRFromLeft _) = "IRFromLeft"
-irPrintFlat (IRFromRight _) = "IRFromRight"
-irPrintFlat (IRIsLeft _) = "IRIsLeft"
-irPrintFlat (IRIsRight _) = "IRIsRight"
 irPrintFlat (IRConstruct t _) = "IRConstruct " ++ show t
 irPrintFlat (IRDestruct a _) = "IRDestruct " ++ show a
 irPrintFlat (IRIsPossible _ _) = "IRIsPossible"

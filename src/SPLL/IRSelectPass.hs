@@ -80,27 +80,15 @@ isTensorFragment (IRBuiltin BMap [IRLambda _ body, d]) =
 isTensorFragment expr = ok expr && all isTensorFragment (getIRSubExprs expr)
   where
     ok e = case e of
-      IRCons _ _        -> False
-      IRHead _          -> False
-      IRTail _          -> False
       IRBuiltin BMapList _   -> False
       IRBuiltin BListIndex _ -> False
-      IRLeft _          -> False
-      IRRight _         -> False
-      IRFromLeft _      -> False
-      IRFromRight _     -> False
-      IRIsLeft _        -> False
-      IRIsRight _       -> False
       IRApply _ _       -> False
       IRLambda _ _      -> False
       IRError _         -> False
       IRConformsTo _ _  -> False
-      -- The new-shape counterparts (design ir-reengineering, slice S1a): dead
-      -- code today (nothing constructs 'IRConstruct'/'IRDestruct' yet), split
-      -- the same way as their old-shape counterparts above -- cons/either
-      -- refused, tuple construction and its accessors (including
-      -- theta/subtree) fall through to the 'True' catch-all below, same as
-      -- 'IRTCons'/'IRTFst'/'IRTSnd'/'IRTheta'/'IRSubtree' do today.
+      -- List cons and either construction/destruction are excluded, same as
+      -- above; tuple construction and its accessors (including theta/subtree)
+      -- fall through to the 'True' catch-all below.
       IRConstruct TgCons _      -> False
       IRConstruct TgLeft _      -> False
       IRConstruct TgRight _     -> False

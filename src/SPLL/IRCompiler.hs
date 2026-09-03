@@ -363,16 +363,16 @@ generateLetInBlock _ codeGen =
     (res, binds) = codeGen
 
 -- | Compile a PNormal/PLogNormal expression to a function returning (mu, sigma) as
--- an IRTCons pair.  Lambda wrappers are preserved so the result has the same arity
--- as the original binding; parameter types are added to the type environment so that
--- inner Var references resolve correctly.
+-- an @IRConstruct TgTuple@ pair.  Lambda wrappers are preserved so the result has
+-- the same arity as the original binding; parameter types are added to the type
+-- environment so that inner Var references resolve correctly.
 compileNormalExpr :: CompilerMetadata -> Expr -> IRExpr
 compileNormalExpr meta (Expr _ (Lambda name subExpr)) =
   let newMeta = meta { typeEnv = (name, (rType (getTypeInfo subExpr), False)) : typeEnv meta }
   in IRLambda name (compileNormalExpr newMeta subExpr)
 compileNormalExpr meta expr =
   let ((mu, sigma), binds) = evalSupply $ runWriterT $ toIRNormal meta expr
-  in generateLetInExpr binds (IRTCons mu sigma)
+  in generateLetInExpr binds (IRConstruct TgTuple [mu, sigma])
 
 -- | True when the expression (with lambdas stripped) has its own toIRInference
 -- handler and cannot be processed by toIRNormalParams.  Mirrors the
@@ -841,8 +841,8 @@ convolveTables meta dom buckets = do
         _          -> do
           pairVar <- mkVariable "mat_pair"
           let gridTensor = IRBuiltin (BTensor [EFixed (length bucket)])
-                             [IRTCons lc rc | (lc, rc) <- bucket]
-              mapBody  = term (IRTFst (IRVar pairVar)) (IRTSnd (IRVar pairVar))
+                             [IRConstruct TgTuple [lc, rc] | (lc, rc) <- bucket]
+              mapBody  = term (IRDestruct AcFst (IRVar pairVar)) (IRDestruct AcSnd (IRVar pairVar))
               mapped   = IRBuiltin BMap [IRLambda pairVar mapBody, gridTensor]
               -- Task semiring-parametric-marginals: was hardcoded to
               -- 'ROpLogSumExp'/'ROpAdd' by 'srLogSpace' alone, which is
@@ -1154,18 +1154,6 @@ freeInIR v (IRApply f a)        = freeInIR v f  || freeInIR v a
 freeInIR v (IROp _ a b)         = freeInIR v a  || freeInIR v b
 freeInIR v (IRUnaryOp _ e)      = freeInIR v e
 freeInIR v (IRIf c a b)         = freeInIR v c  || freeInIR v a  || freeInIR v b
-freeInIR v (IRTCons a b)        = freeInIR v a  || freeInIR v b
-freeInIR v (IRTFst a)           = freeInIR v a
-freeInIR v (IRTSnd a)           = freeInIR v a
-freeInIR v (IRHead a)           = freeInIR v a
-freeInIR v (IRTail a)           = freeInIR v a
-freeInIR v (IRLeft a)           = freeInIR v a
-freeInIR v (IRRight a)          = freeInIR v a
-freeInIR v (IRFromLeft a)       = freeInIR v a
-freeInIR v (IRFromRight a)      = freeInIR v a
-freeInIR v (IRIsLeft a)         = freeInIR v a
-freeInIR v (IRIsRight a)        = freeInIR v a
-freeInIR v (IRCons a b)         = freeInIR v a  || freeInIR v b
 freeInIR v (IRConstruct _ args) = any (freeInIR v) args
 freeInIR v (IRDestruct _ a)     = freeInIR v a
 -- 'IRBuiltin' as a whole is not covered by the catch-all below (it has no
@@ -1181,8 +1169,6 @@ freeInIR v (IREnumSumPaired _ n _ irBody) = v /= n && freeInIR v irBody
 freeInIR v (IRDensity _ _ x)    = freeInIR v x
 freeInIR v (IRCumulative _ _ x) = freeInIR v x
 freeInIR v (IRIsPossible _ x)   = freeInIR v x
-freeInIR v (IRTheta x _)        = freeInIR v x
-freeInIR v (IRSubtree x _)      = freeInIR v x
 freeInIR _ _                    = False
 
 -- | Flatten all leading IRLetIn bindings into a list, returning the core expression.
@@ -1215,7 +1201,7 @@ hoistInvariantBindings loopVar expr =
 
 -- | True when `sample` is VAny or contains VAny one level inside a Left/Right wrapper.
 -- Used to detect samples like (Left ANY) that would crash arithmetic inverses.
--- Only IRIsLeft/IRFromLeft/IRFromRight are used here; these are already VAny-safe.
+-- Only the Either tag test and payload accessors are used here; these are already VAny-safe.
 mkDeepAnyCheck :: RType -> IRExpr -> IRExpr
 mkDeepAnyCheck (TEither _ _) sample =
   IRIf (IRUnaryOp OpIsAny sample)
@@ -1405,7 +1391,7 @@ normalParamsViaCall meta wanted expr = do
       argIRs <- mapM (toIRGenerate meta) args
       var <- mkVariable "normal_params"
       setVariables [(var, foldl IRApply (IRVar (fname ++ "_normal")) argIRs)]
-      return (IRTFst (IRVar var), IRTSnd (IRVar var))
+      return (IRDestruct AcFst (IRVar var), IRDestruct AcSnd (IRVar var))
     else Nothing
   where
     collectCall (Expr _ (Apply f a)) acc      = collectCall f (a : acc)
@@ -2577,7 +2563,7 @@ compareValueExpr _ rt _ _ = error $ "Comparison not implemented for type: " ++ s
 -- 'cmp', pythonLib's 'T'/'Left'/'Right' '__eq__') already treat a VAny
 -- operand at *any* depth as an automatic match (a partial marginal query
 -- like @p((0.5, ANY))@ or @p(Left ANY)@). Once the comparison is decomposed
--- into per-field IR (IRTFst/IRFromLeft), that recursive Any-awareness must
+-- into per-field IR (IRDestruct AcFst/AcFromLeft), that recursive Any-awareness must
 -- be rebuilt explicitly at each step, or a nested ANY reaches a leaf
 -- comparison op that errors (OpApprox on a non-float) or silently returns
 -- False (OpEq's own base case treats VAny as never equal to anything --
@@ -2935,14 +2921,14 @@ data WSet = WPoint IRExpr IRExpr     -- witness value, |d inverse / d observatio
 -- a lossy inverse reconstruction -- e.g. isLeft's inverse (always: @if tag then
 -- Left VAny else Right VAny@), the Nothing arm of fromLeft's total inverse
 -- (@if isRight m then Left (fromRight m) else Right VAny@, only ANY-tainted on
--- one branch), or a tuple projection's inverse (fst's: @TCons(b, VAny)@, tainted
+-- one branch), or a tuple projection's inverse (fst's: @IRConstruct TgTuple [b, VAny]@, tainted
 -- only in the second slot). A single static "is this any-tainted" flag can't
 -- capture either of the latter two -- one depends on which branch is taken,
 -- the other differs per field of a composite value -- so this produces a
 -- same-shaped runtime expression instead of a compile-time Bool, queried fresh
 -- per (sub)value by 'mergeWitnessValue' rather than computed once for a whole
 -- witness. Recognises the specific shapes this module's inverse FDecls build
--- (IRConst/IRIf/IRLeft/IRRight/IRLetIn); anything else falls back to a
+-- (IRConst/IRIf/IRConstruct TgLeft or TgRight/IRLetIn); anything else falls back to a
 -- shallow runtime OpIsAny check on the whole subexpression (safe: OpIsAny only
 -- misses ANY nested below the top level, under-approximating "any-tainted",
 -- which only affects which side 'mergeWitnessValue' prefers -- its OpEq guard
@@ -2950,8 +2936,6 @@ data WSet = WPoint IRExpr IRExpr     -- witness value, |d inverse / d observatio
 irRuntimeContainsAny :: IRExpr -> IRExpr
 irRuntimeContainsAny (IRConst v) = if valueContainsAny v then constTrueIR else IRConst (VBool False)
 irRuntimeContainsAny (IRIf c t e) = IRIf c (irRuntimeContainsAny t) (irRuntimeContainsAny e)
-irRuntimeContainsAny (IRLeft a) = irRuntimeContainsAny a
-irRuntimeContainsAny (IRRight a) = irRuntimeContainsAny a
 irRuntimeContainsAny (IRConstruct TgLeft [a]) = irRuntimeContainsAny a
 irRuntimeContainsAny (IRConstruct TgRight [a]) = irRuntimeContainsAny a
 irRuntimeContainsAny (IRLetIn n v b) = IRLetIn n v (irRuntimeContainsAny b)
@@ -3032,17 +3016,16 @@ distributeChoice c (ga, sa) (gb, sb) = ([IRIf c (conjIR ga) (conjIR gb)], WChoic
 -- variable is not ANY-tainted (checked fresh via 'irRuntimeContainsAny' at
 -- each position, since informativeness can differ per field of a composite
 -- witness -- e.g. one side recovers only a tuple's first field via fst's
--- inverse, the other only its second via snd's). Recurses through IRTCons so
--- such complementary partial witnesses combine into a single fully concrete
--- value instead of one silently overriding the other -- mirrors the
--- equivalent merge already used on the ordinary, non-set-witness
--- point-inversion path, ForwardChaining.hs's 'mergeExpr2' IRTCons/VAny cases.
+-- inverse, the other only its second via snd's). Recurses through
+-- @IRConstruct TgTuple@ so such complementary partial witnesses combine into
+-- a single fully concrete value instead of one silently overriding the other
+-- -- mirrors the equivalent merge already used on the ordinary, non-set-witness
+-- point-inversion path, ForwardChaining.hs's 'mergeExpr2' @IRConstruct
+-- TgTuple@/VAny cases.
 -- Compatibility is 'intersectSet's job (a single guard on the whole value,
 -- not per field -- see there for why); this function never rejects, only
 -- chooses.
 mergeWitnessValue :: IRExpr -> IRExpr -> IRExpr
-mergeWitnessValue (IRTCons a1 b1) (IRTCons a2 b2) =
-  IRTCons (mergeWitnessValue a1 a2) (mergeWitnessValue b1 b2)
 mergeWitnessValue (IRConstruct TgTuple [a1, b1]) (IRConstruct TgTuple [a2, b2]) =
   IRConstruct TgTuple [mergeWitnessValue a1 a2, mergeWitnessValue b1 b2]
 mergeWitnessValue p1 p2 = IRIf (irRuntimeContainsAny p1) p2 p1
@@ -3312,8 +3295,8 @@ transportDirect meta occs exprBody target = case filter (`elem` subtreeCNs exprB
         -- observe-partials-umbrella N1b.
         -- Substitute eagerly (rather than leaving an IRApply/IRLambda shell
         -- for the interpreter to beta-reduce at runtime) so the witness value
-        -- is a genuinely literal expression -- e.g. IRTCons (IRTFst sample)
-        -- (IRConst VAny) rather than that same tree hidden behind an
+        -- is a genuinely literal expression -- e.g. @IRConstruct TgTuple
+        -- [IRDestruct AcFst sample, IRConst VAny]@ rather than that same tree hidden behind an
         -- application -- for 'mergeWitnessValue' (see 'intersectSet') to
         -- pattern-match on directly when this witness is later intersected
         -- with another occurrence's.

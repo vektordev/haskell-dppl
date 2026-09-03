@@ -899,11 +899,11 @@ bindFlags fa fb = (,) <$> bindFlag "impA" fa <*> bindFlag "impB" fb
   where
     -- Constants and plain reads are cheap and pure; binding them would only add
     -- a let for every mixture, and world folds mix once per world.
-    atomic (IRConst _)  = True
-    atomic (IRVar _)    = True
-    atomic (IRTFst e)   = atomic e
-    atomic (IRTSnd e)   = atomic e
-    atomic _            = False
+    atomic (IRConst _)          = True
+    atomic (IRVar _)            = True
+    atomic (IRDestruct AcFst e) = atomic e
+    atomic (IRDestruct AcSnd e) = atomic e
+    atomic _                    = False
     bindFlag name f
       | atomic f  = return f
       | otherwise = do

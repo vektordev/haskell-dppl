@@ -31,7 +31,7 @@ neuralOutputType name rt = fromMaybe
           ++ "; a read-logits declaration must have type Symbol -> <output type>"))
   (neuralValueType rt)
 
--- | 'IRTheta'/'IRSubtree' index into the theta tree their argument evaluates to.
+-- | 'AcTheta'/'AcSubtree' index into the theta tree their argument evaluates to.
 asThetaTree :: IRValue -> ThetaTree
 asThetaTree (VThetaTree t) = t
 asThetaTree v = error ("Type error: theta access on a non-theta-tree value: " ++ show v)
@@ -272,18 +272,10 @@ generate f neurals' registry adts' globalEnv env [] (IRUnaryOp OpIsAny a) = do
     -- The list-shaped hole is an any-value too. Julia's and Python's isAny
     -- both accept it, as does the optimizer's constant fold ('forceAnyCheck'),
     -- so the interpreter answering False here was the one dissent -- and one
-    -- that only stayed invisible because 'IRTail' happens to hand back a
-    -- scalar VAny for a ListCont _ AnyList.
+    -- that only stayed invisible because the tail accessor happens to hand
+    -- back a scalar VAny for a ListCont _ AnyList.
     VList AnyList -> return $ VBool True
     _ -> return $ VBool False
-generate f neurals' registry adts' globalEnv env [] (IRTheta a i) = do
-  tt <- generate f neurals' registry adts' globalEnv env [] a
-  let ThetaTree thetas _ = asThetaTree tt
-  return $ VFloat (thetas!!i)
-generate f neurals' registry adts' globalEnv env [] (IRSubtree a i) = do
-  tt <- generate f neurals' registry adts' globalEnv env [] a
-  let ThetaTree _ subtrees = asThetaTree tt
-  return $ VThetaTree (subtrees!!i)
 generate f neurals' registry adts' globalEnv env [] (IRDestruct (AcTheta i) a) = do
   tt <- generate f neurals' registry adts' globalEnv env [] a
   let ThetaTree thetas _ = asThetaTree tt
@@ -293,48 +285,9 @@ generate f neurals' registry adts' globalEnv env [] (IRDestruct (AcSubtree i) a)
   let ThetaTree _ subtrees = asThetaTree tt
   return $ VThetaTree (subtrees!!i)
 generate _ _ _ _ _ _ [] (IRConst val) = return val
-generate f neurals' registry adts' globalEnv env [] (IRCons hd tl) = do
-  ls <- generate f neurals' registry adts' globalEnv env [] tl
-  case ls of
-    VList xs -> do
-      x <- generate f neurals' registry adts' globalEnv env [] hd
-      return $ VList $ ListCont x xs
-    VAny -> do
-      x <- generate f neurals' registry adts' globalEnv env [] hd
-      return $ VList $ ListCont x AnyList
-    _ -> error "Type error: Tail of cons is not a list"
-generate f neurals' registry adts' globalEnv env [] (IRTCons fstExpr sndExpr) = do
-  fstVal <- generate f neurals' registry adts' globalEnv env [] fstExpr
-  sndVal <- generate f neurals' registry adts' globalEnv env [] sndExpr
-  return $ VTuple fstVal sndVal
-generate f neurals' registry adts' globalEnv env args (IRTFst expr) = do
-  val <- generate f neurals' registry adts' globalEnv env args expr
-  case val of
-    VTuple first _ -> return first
-    VClosure cEnv n cExpr -> return $ VClosure cEnv n (IRTFst cExpr)
-    _ -> error ("Type error: Expression of Fst is not a tuple: " ++ show val)
-generate f neurals' registry adts' globalEnv env args (IRTSnd expr) = do
-  val <- generate f neurals' registry adts' globalEnv env args expr
-  case val of
-    VTuple _ second -> return second
-    VClosure cEnv n cExpr -> return $ VClosure cEnv n (IRTSnd cExpr)
-    _ -> error ("Type error: Expression of Snd is not a tuple: " ++ show val)
-generate f neurals' registry adts' globalEnv env args (IRHead listExpr) = do
-  listVal <- generate f neurals' registry adts' globalEnv env args listExpr
-  case listVal of
-    VList (ListCont a _) -> return a
-    _ -> error "Type error: head must be called on a non-empty list"
-generate f neurals' registry adts' globalEnv env args (IRTail listExpr) = do
-  listVal <- generate f neurals' registry adts' globalEnv env args listExpr
-  case listVal of
-    VList (ListCont _ AnyList) -> return VAny
-    VList (ListCont _ a) -> return $ VList a
-    _ -> error "Type error: tail must be called on a non-empty list"
--- The new-shape constructor/accessor family (design ir-reengineering, slice
--- S1a): dead code today (nothing builds 'IRConstruct'/'IRDestruct' yet),
--- dispatching on 'ConTag'/'Accessor' exactly the way the old-shape cases above
--- dispatch on the constructor itself -- same value semantics, same
--- 'VClosure' push-through for the tuple projections.
+-- The constructor/accessor family (design ir-reengineering), dispatching on
+-- 'ConTag'/'Accessor' -- same value semantics, same 'VClosure' push-through
+-- for the tuple projections.
 generate f neurals' registry adts' globalEnv env [] (IRConstruct TgTuple [fstExpr, sndExpr]) = do
   fstVal <- generate f neurals' registry adts' globalEnv env [] fstExpr
   sndVal <- generate f neurals' registry adts' globalEnv env [] sndExpr
@@ -385,34 +338,6 @@ generate f neurals' registry adts' globalEnv env args (IRBuiltin BMapList [fExpr
       newLst <- mapM (\x -> generate f neurals' registry adts' globalEnv env args (IRApply fExpr (IRConst x))) lst
       return $ VList newLst
     _ ->  error "Type error: map must be called on a list"
-generate f neurals' registry adts' globalEnv env [] (IRLeft expr) = do
-  x <- generate f neurals' registry adts' globalEnv env [] expr
-  return $ VEither (Left x)
-generate f neurals' registry adts' globalEnv env [] (IRRight expr) = do
-  x <- generate f neurals' registry adts' globalEnv env [] expr
-  return $ VEither (Right x)
-generate f neurals' registry adts' globalEnv env [] (IRFromLeft expr) = do
-  x <- generate f neurals' registry adts' globalEnv env [] expr
-  case x of
-    VEither (Left l) -> return l
-    _ -> error $ "Type error: fromLeftrequires an either left: " ++ show x
-generate f neurals' registry adts' globalEnv env [] (IRFromRight expr) = do
-  x <- generate f neurals' registry adts' globalEnv env [] expr
-  case x of
-    VEither (Right r) -> return r
-    _ -> error $ "Type error: fromRight requires an either right: " ++ show x
-generate f neurals' registry adts' globalEnv env [] (IRIsLeft expr) = do
-  x <- generate f neurals' registry adts' globalEnv env [] expr
-  case x of
-    VEither (Left _) -> return (VBool True)
-    VEither (Right _) -> return (VBool False)
-    _ -> error $ "Type error: isLeft requires an either: " ++ show x
-generate f neurals' registry adts' globalEnv env [] (IRIsRight expr) = do
-  x <- generate f neurals' registry adts' globalEnv env [] expr
-  case x of
-    VEither (Left _) -> return (VBool False)
-    VEither (Right _) -> return (VBool True)
-    _ -> error $ "Type error: isLeft requires an either: " ++ show x
 generate f neurals' registry adts' globalEnv env [] (IRDestruct AcFromLeft expr) = do
   x <- generate f neurals' registry adts' globalEnv env [] expr
   case x of

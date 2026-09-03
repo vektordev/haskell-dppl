@@ -25,8 +25,6 @@ import SPLL.IntermediateRepresentation
 import SPLL.Semiring (semiringSuffix)
 import SPLL.IROptimizer (postProcess, optimizeEnv, deterministicGens, distributeIf, headHash, OptEnv(..))
 import SPLL.CodeGenPyTorchBatched (adtEnv, batchedGuard, generateFunctionsBatched, structural)
-import qualified SPLL.CodeGenPyTorch as CGPy
-import qualified SPLL.CodeGenJulia as CGJl
 import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts)
 import Data.Foldable (toList)
 import Data.List (isInfixOf, intercalate)
@@ -666,7 +664,7 @@ test_letBoundEitherDestructureUsesSample = testCase "letBoundEitherDestructureUs
 -- magnitude (a marginal always integrates to exactly 1, masking the loss) but
 -- visible in the dimensionality (1.0 instead of the correct 2.0, one
 -- continuous dimension short). Fixed by 'mergeWitnessValue' recursing through
--- IRTCons to pick whichever side of each field is not ANY-tainted, checked
+-- IRConstruct TgTuple to pick whichever side of each field is not ANY-tainted, checked
 -- fresh per field via 'irRuntimeContainsAny' (a first attempt that checked
 -- with 'OpEq' per decomposed field, mirroring the sibling Either fix, broke
 -- this: OpEq's VAny-wildcard tolerance only applies to a VAny *nested inside*
@@ -1653,7 +1651,7 @@ stochasticCallTests = testGroup "stochastic calls (stochastic-call-cse-unsound)"
       let call = IRApply (IRVar "genT_gen") (IRVar "thetas")
           body = IRIf (IROp OpLessThan (IRSample IRUniform) (IRConst (VFloat 0.6)))
                       (IRConst (VFloat 0.0))
-                      (IRTCons call call)
+                      (IRConstruct TgTuple [call, call])
       assertEqual "both recursive draws survive" 2
         (countIRVar "genT_gen" (optimizedGen "genT" [genGroup "genT" body]))
   -- ...and the positive control: the identical shape with a *deterministic*
@@ -1662,7 +1660,7 @@ stochasticCallTests = testGroup "stochastic calls (stochastic-call-cse-unsound)"
       let call = IRApply (IRVar "detT_gen") (IRVar "thetas")
           body = IRIf (IROp OpLessThan (IRVar "thetas") (IRConst (VFloat 0.6)))
                       (IRConst (VFloat 0.0))
-                      (IRTCons call call)
+                      (IRConstruct TgTuple [call, call])
           env  = [ genGroup "caller" body
                  , genGroup "detT" (IRConst (VFloat 1.0)) ]
       assertEqual "the deterministic call is read once through a shared binding" 1
@@ -1675,7 +1673,7 @@ stochasticCallTests = testGroup "stochastic calls (stochastic-call-cse-unsound)"
   , testCase "distributeIf refuses to fuse an effectful shared condition" $ do
       let cond = IROp OpLessThan (IRSample IRUniform) (IRConst (VFloat 0.5))
           arm x y = IRIf cond (IRConst (VInt x)) (IRConst (VInt y))
-          tup = IRTCons (arm 0 1) (arm 0 1)
+          tup = IRConstruct TgTuple [arm 0 1, arm 0 1]
       assertEqual "the tuple is left alone" tup (distributeIf noDetGens False tup)
       assertEqual "...also under the -O3 constant-merging variant" tup
         (distributeIf noDetGens True tup)
@@ -1684,10 +1682,10 @@ stochasticCallTests = testGroup "stochastic calls (stochastic-call-cse-unsound)"
   , testCase "distributeIf still hoists a pure shared condition" $ do
       let cond = IROp OpLessThan (IRVar "x") (IRConst (VFloat 0.5))
           arm x y = IRIf cond (IRConst (VInt x)) (IRConst (VInt y))
-          tup = IRTCons (arm 0 1) (arm 2 3)
+          tup = IRConstruct TgTuple [arm 0 1, arm 2 3]
       assertEqual "condition hoisted in front of the tuple"
-        (IRIf cond (IRTCons (IRConst (VInt 0)) (IRConst (VInt 2)))
-                   (IRTCons (IRConst (VInt 1)) (IRConst (VInt 3))))
+        (IRIf cond (IRConstruct TgTuple [IRConst (VInt 0), IRConst (VInt 2)])
+                   (IRConstruct TgTuple [IRConst (VInt 1), IRConst (VInt 3)]))
         (distributeIf noDetGens False tup)
   -- A condition that calls a generate group is judged by the whole-program
   -- analysis, not by the name alone: the same tuple is refused when the callee
@@ -1695,7 +1693,7 @@ stochasticCallTests = testGroup "stochastic calls (stochastic-call-cse-unsound)"
   , testCase "distributeIf judges a generator condition by deterministicGens" $ do
       let cond = IROp OpLessThan (IRApply (IRVar "c_gen") (IRVar "t")) (IRConst (VFloat 0.5))
           arm x y = IRIf cond (IRConst (VInt x)) (IRConst (VInt y))
-          tup = IRTCons (arm 0 1) (arm 2 3)
+          tup = IRConstruct TgTuple [arm 0 1, arm 2 3]
           envWith b = OptEnv (deterministicGens [genGroup "c" b]) Set.empty
       assertEqual "a stochastic callee blocks the hoist" tup
         (distributeIf (envWith (IRSample IRUniform)) False tup)
@@ -1710,7 +1708,7 @@ stochasticCallTests = testGroup "stochastic calls (stochastic-call-cse-unsound)"
       let call a = IRApply (IRApply (IRVar "genS_gen") (IRVar "thetas")) a
           body = IRIf (IROp OpLessThan (IRSample IRUniform) (IRConst (VFloat 0.6)))
                       (IRVar "cont")
-                      (call (IRCons (IRConst (VInt 1)) (call (IRVar "cont"))))
+                      (call (IRConstruct TgCons [IRConst (VInt 1), call (IRVar "cont")]))
           opt = optimizedGen "genS" [genGroup "genS" body]
       assertEqual "both call sites keep their own head" 2 (countIRVar "genS_gen" opt)
       assertBool "no binding holds a partially applied generator"
@@ -1745,7 +1743,7 @@ stochasticCallTests = testGroup "stochastic calls (stochastic-call-cse-unsound)"
 -- cover every batched fragment refusal a real @.ppl@ can reach. A handful cannot
 -- be reached from any program, because another guard always fires first — most
 -- notably the non-scalar 'MultiValue' gate on 'IREnumSum'/'IRIsPossible': every
--- Either/ADT-shaped read-logits network emits an 'IRIsLeft', or trips the ADT-declaration
+-- Either/ADT-shaped read-logits network emits an 'IRDestruct AcIsLeft', or trips the ADT-declaration
 -- bail, long before a composite enumeration could reach the emitter. That
 -- ordering makes the gate correct today but leaves it with no positive control,
 -- so a refactor could silently delete it — and deleting it emits Python naming
@@ -1809,14 +1807,14 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       -- `isinstance(x, Left)` is a Python bool and the arm accessor the emitted
       -- code takes is always the legal one.
       mapM_ assertAccepted
-        [ IRLeft (IRVar "x"), IRRight (IRVar "x")
-        , IRFromLeft (IRVar "e"), IRFromRight (IRVar "e")
-        , IRIsLeft (IRVar "e"), IRIsRight (IRVar "e")
+        [ IRConstruct TgLeft [IRVar "x"], IRConstruct TgRight [IRVar "x"]
+        , IRDestruct AcFromLeft (IRVar "e"), IRDestruct AcFromRight (IRVar "e")
+        , IRDestruct AcIsLeft (IRVar "e"), IRDestruct AcIsRight (IRVar "e")
         , IRConst (VEither (Left (VFloat 1.0))) ]
   , testCase "a value-dependent select between Either arms is refused" $
       assertRefusal "arms have different structure"
         (IRSelect (IROp OpGreaterThan (IRVar "x") (IRConst (VFloat 0.0)))
-                  (IRLeft (IRVar "x")) (IRRight (IRVar "x")))
+                  (IRConstruct TgLeft [IRVar "x"]) (IRConstruct TgRight [IRVar "x"]))
   , testCase "an offender nested deep in a let-spine is still found" $
       -- 'batchedGuard' walks the whole tree, not just the root.
       assertRefusal "list map (IRMap)"
@@ -1829,9 +1827,9 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
   -- ones; a value-dependent one is a genuine refusal.
   , testCase "SoA list access (head/tail/cons, empty-list constant) is accepted" $
       mapM_ assertAccepted
-        [ IRHead (IRVar "xs")
-        , IRTail (IRVar "xs")
-        , IRCons (IRVar "x") (IRConst (VList EmptyList))
+        [ IRDestruct AcHead (IRVar "xs")
+        , IRDestruct AcTail (IRVar "xs")
+        , IRConstruct TgCons [IRVar "x", IRConst (VList EmptyList)]
         , IROp OpEq (IRVar "xs") (IRConst (VList EmptyList)) ]
   , testCase "a non-empty list constant is still refused" $
       -- It carries per-element data, not structure: the batched runtime has no
@@ -1841,7 +1839,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
   , testCase "a value-dependent select between two structures is refused" $
       assertRefusal "arms have different structure"
         (IRSelect (IROp OpGreaterThan (IRVar "x") (IRConst (VFloat 0.0)))
-                  (IRCons (IRVar "x") (IRConst (VList EmptyList)))
+                  (IRConstruct TgCons [IRVar "x", IRConst (VList EmptyList)])
                   (IRConst (VList EmptyList)))
   , testCase "a shape-directed if between two structures is accepted" $
       -- The same shape, but branching on an emptiness probe: uniform within a
@@ -1849,7 +1847,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       assertAccepted
         (IRIf (IROp OpEq (IRVar "xs") (IRConst (VList EmptyList)))
               (IRConst (VList EmptyList))
-              (IRCons (IRVar "x") (IRConst (VList EmptyList))))
+              (IRConstruct TgCons [IRVar "x", IRConst (VList EmptyList)]))
   -- Generate-only recursion ('hasGenCycle'): unreachable from the corpus,
   -- because a recursive program's *prob* path trips 'checkCallGraph' first
   -- (e.g. dice). Driven through 'generateFunctionsBatched' on a group that has
@@ -1916,7 +1914,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       -- generate whose recursion *builds a list* has per-element depth (design
       -- heterogeneous-batch-inference Component 4), but refusing the whole
       -- program for it would take the program's bucketable prob/integ down too.
-      case generateFunctionsBatched False (recGenEnv (IRCons (IRSample IRNormal) (IRVar "rec_gen"))) of
+      case generateFunctionsBatched False (recGenEnv (IRConstruct TgCons [IRSample IRNormal, IRVar "rec_gen"])) of
         Left msg -> assertFailure ("batched mode refused a list-valued recursive generate "
                                    ++ "instead of stubbing it: " ++ msg)
         Right ls -> assertBool ("stub does not raise NotImplementedError: " ++ unlines ls)
@@ -1925,13 +1923,13 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
   -- structural condition through the `let cse_0 = (if isLeft(sample) then
   -- True else False) in ...` idiom. Before this fix `structural` had no case
   -- for 'IRIf', so the *value* bound to `cse_0` was judged non-structural
-  -- (even though its own condition, 'IRIsLeft', is recognised) and `bindS`
+  -- (even though its own condition, 'IRDestruct AcIsLeft', is recognised) and `bindS`
   -- dropped `cse_0` from the structural environment. Every later use of
   -- `cse_0` as a guard then fell through to the eager torch.where emission,
   -- reaching an arm-legal `fromLeft` accessor on a `Right` sample.
   , testCase "a let-bound alias of a structural if-then-else is structural" $ do
       let env = adtEnv []
-          isLeftBool = IRIf (IRIsLeft (IRVar "sample"))
+          isLeftBool = IRIf (IRDestruct AcIsLeft (IRVar "sample"))
                              (IRConst (VBool True)) (IRConst (VBool False))
       assertBool "the isLeft(sample) if-then-else idiom is not itself structural"
         (structural env isLeftBool)
@@ -2010,8 +2008,8 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       [IRFunGroup { groupName = "main"
                   , probFun = Just (IRLambda "sample"
                       (IRLetIn "cse_0"
-                          (IRIf (IRIsLeft q) (IRConst (VBool True)) (IRConst (VBool False)))
-                          (IRIf (IRVar "cse_0") (IRFromLeft q) (IRConst (VFloat 0.0)))), "")
+                          (IRIf (IRDestruct AcIsLeft q) (IRConst (VBool True)) (IRConst (VBool False)))
+                          (IRIf (IRVar "cse_0") (IRDestruct AcFromLeft q) (IRConst (VFloat 0.0)))), "")
                   , genFun = Nothing, integFun = Nothing
                   , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
                   , sampleDomain = Nothing }]
@@ -2664,11 +2662,11 @@ test_headHashDistinguishesConTagsAndAccessors = testCase
                             , h1 == h2 ]
     assertBool ("headHash collision(s) among ConTag/Accessor: " ++ show dupes) (null dupes)
 
--- | 'IRInterpreter.generate' must evaluate 'IRConstruct'/'IRDestruct' exactly
--- like the old-shape node it stands in for.
+-- | 'IRInterpreter.generate' must evaluate every 'ConTag'/'Accessor' shape of
+-- 'IRConstruct'/'IRDestruct' correctly.
 test_irConstructDestructInterpreterDispatch :: TestTree
 test_irConstructDestructInterpreterDispatch = testCase
-  "IRConstruct/IRDestruct interpret like their old-shape counterparts" $ do
+  "IRConstruct/IRDestruct interpret correctly for every ConTag/Accessor" $ do
     let a = IRConst (VFloat 1.0)
         b = IRConst (VFloat 2.0)
         tup = IRConstruct TgTuple [a, b]
@@ -2691,60 +2689,13 @@ test_irConstructDestructInterpreterDispatch = testCase
     evalClosedIR (IRDestruct (AcTheta 1) (IRConst tt))   @?= Right (VFloat 20.0)
     evalClosedIR (IRDestruct (AcSubtree 0) (IRConst tt)) @?= Right (VThetaTree (ThetaTree [99.0] []))
 
--- | The scalar Python and Julia backends must emit textually identical code
--- for an 'IRConstruct'/'IRDestruct' expression and its old-shape counterpart:
--- they are meant to be the exact same operation under two different names, so
--- nothing downstream should be able to tell them apart.
-test_irConstructDestructScalarCodegenMatchesOldShape :: TestTree
-test_irConstructDestructScalarCodegenMatchesOldShape = testCase
-  "IRConstruct/IRDestruct scalar codegen matches the old-shape node" $
-    forM_ pairs $ \(name, oldE, newE) -> do
-      assertEqual (name ++ ": Python codegen diverges from the old-shape node")
-        (CGPy.generateFunctions False (mkEnv oldE)) (CGPy.generateFunctions False (mkEnv newE))
-      assertEqual (name ++ ": Julia codegen diverges from the old-shape node")
-        (CGJl.generateFunctions (mkEnv oldE)) (CGJl.generateFunctions (mkEnv newE))
-  where
-    pairs =
-      [ ("tuple fst", IRTFst (IRTCons (IRVar "a") (IRVar "b")),
-                       IRDestruct AcFst (IRConstruct TgTuple [IRVar "a", IRVar "b"]))
-      , ("tuple snd", IRTSnd (IRTCons (IRVar "a") (IRVar "b")),
-                       IRDestruct AcSnd (IRConstruct TgTuple [IRVar "a", IRVar "b"]))
-      , ("cons head", IRHead (IRCons (IRVar "a") (IRVar "b")),
-                       IRDestruct AcHead (IRConstruct TgCons [IRVar "a", IRVar "b"]))
-      , ("cons tail", IRTail (IRCons (IRVar "a") (IRVar "b")),
-                       IRDestruct AcTail (IRConstruct TgCons [IRVar "a", IRVar "b"]))
-      , ("either fromLeft", IRFromLeft (IRLeft (IRVar "a")),
-                       IRDestruct AcFromLeft (IRConstruct TgLeft [IRVar "a"]))
-      , ("either fromRight", IRFromRight (IRRight (IRVar "a")),
-                       IRDestruct AcFromRight (IRConstruct TgRight [IRVar "a"]))
-      , ("either isLeft", IRIsLeft (IRLeft (IRVar "a")),
-                       IRDestruct AcIsLeft (IRConstruct TgLeft [IRVar "a"]))
-      , ("either isRight", IRIsRight (IRRight (IRVar "a")),
-                       IRDestruct AcIsRight (IRConstruct TgRight [IRVar "a"]))
-      , ("theta", IRTheta (IRVar "a") 2, IRDestruct (AcTheta 2) (IRVar "a"))
-      , ("subtree", IRSubtree (IRVar "a") 3, IRDestruct (AcSubtree 3) (IRVar "a"))
-      ]
-    mkEnv e = IREnv
-      [IRFunGroup { groupName = "main"
-                  , probFun = Just (IRLambda "a" (IRLambda "b" e), "")
-                  , genFun = Nothing, integFun = Nothing
-                  , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
-                  , sampleDomain = Nothing }]
-      [] []
-
--- | The one gap in this slice with a real correctness stake (see the task
--- doc's note on 'hasTailDescent'): a recursion-guarding argument spelled as
--- 'IRDestruct AcTail' must be recognised as a structural descent exactly like
--- 'IRTail' is, or a legitimately batched-eligible recursive program would be
--- falsely refused the moment a producer migrates to the new shape.
+-- | A recursion-guarding argument spelled as 'IRDestruct AcTail' must be
+-- recognised as a structural descent by 'hasTailDescent', or a legitimately
+-- batched-eligible recursive program would be falsely refused.
 test_hasTailDescentRecognisesNewShape :: TestTree
 test_hasTailDescentRecognisesNewShape = testCase
-  "a recursive call descending via IRDestruct AcTail is accepted like IRTail" $ do
-    -- Positive control: the old shape is already recognised.
-    case generateFunctionsBatched False (recEnv (IRTail (IRVar "sample"))) of
-      Left msg -> assertFailure ("batched mode refused a legitimate IRTail descent: " ++ msg)
-      Right _  -> return ()
-    -- The fix under test: the new shape must be recognised identically.
+  "a recursive call descending via IRDestruct AcTail is accepted" $ do
+    -- The behaviour under test: a tail descent must be recognised.
     case generateFunctionsBatched False (recEnv (IRDestruct AcTail (IRVar "sample"))) of
       Left msg -> assertFailure ("batched mode refused a legitimate IRDestruct AcTail descent: " ++ msg)
       Right _  -> return ()
@@ -2818,7 +2769,6 @@ internalsTests = testGroup "Internals"
   , sumTypeShowcaseTests
   , test_headHashDistinguishesConTagsAndAccessors
   , test_irConstructDestructInterpreterDispatch
-  , test_irConstructDestructScalarCodegenMatchesOldShape
   , test_hasTailDescentRecognisesNewShape
   ]
 

@@ -315,13 +315,14 @@ onHead _ []     = []
 -- same shape 'lottery' already builds for the *scalar* backend, not a fresh
 -- policy invented here) and a Gaussian reparameterisation
 -- (@mu + sample*sigma@, 'IRSample' 'IRNormal') for a continuous leaf, composed
--- over 'IRTCons' for tuples. None of that needed new IR nodes or new
--- 'pythonLibBatched.py' primitives: every node 'makeGenRec' emits was already
--- in the tensor fragment ('emittable' below), so removing the blanket
+-- over @IRConstruct TgTuple@ for tuples. None of that needed new IR nodes or
+-- new 'pythonLibBatched.py' primitives: every node 'makeGenRec' emits was
+-- already in the tensor fragment ('emittable' below), so removing the blanket
 -- @isNeuralReadLogitsGroup@ exclusion this milestone had is sufficient. What
--- remains excluded -- 'EitherPlan' (@IRLeft@/@IRRight@ construction has no
--- tensor representation) and 'ADTPlan' (ADTs are refused for the whole batched
--- compile already, see 'generateFunctionsBatched') -- is refused by the same
+-- remains excluded -- 'EitherPlan' (@IRConstruct TgLeft@/@TgRight@
+-- construction has no tensor representation) and 'ADTPlan' (ADTs are refused
+-- for the whole batched compile already, see 'generateFunctionsBatched') --
+-- is refused by the same
 -- 'batchedGuard' forward/integrate already goes through, which is no loss:
 -- a read-logits network with an Either/ADT-shaped output already fails to batch-compile at
 -- all, since its *probability* reader ('SPLL.AutoNeural.makeProb') hits the
@@ -416,9 +417,9 @@ producesList :: Maybe IRExpr -> Bool
 producesList Nothing  = False
 producesList (Just e) = go e
   where go x = case x of
-          IRCons{}          -> True
-          IRConst (VList _) -> True
-          _                 -> any go (getIRSubExprs x)
+          IRConstruct TgCons _ -> True
+          IRConst (VList _)    -> True
+          _                    -> any go (getIRSubExprs x)
 
 -- | Is there a cycle reachable from @root@ in the call graph restricted to
 -- generate methods (@_gen@-suffixed names only, mirroring 'checkCallGraph's
@@ -520,55 +521,53 @@ foldConst = irMap f
 -- @select c (T a b) (T x y)  ->  T (select c a x) (select c b y)@.
 --
 -- An arm is tuple-valued when, after peeling its @let@-spine, it is an
--- 'IRTCons' (the whole-result guard @select c (let … in T p (T d i)) (T 0 …)@
--- is exactly this shape). Projection is pushed through the let-spine
--- ('projTuple'), so each component select carries the bindings it needs; the
--- optimizer's own field-splitting already duplicates such spines, so this only
--- mirrors that.
+-- @IRConstruct TgTuple@ (the whole-result guard @select c (let … in T p (T d
+-- i)) (T 0 …)@ is exactly this shape). Projection is pushed through the
+-- let-spine ('projTuple'), so each component select carries the bindings it
+-- needs; the optimizer's own field-splitting already duplicates such spines,
+-- so this only mirrors that.
 distributeSelects :: IRExpr -> IRExpr
 distributeSelects = irMap d
   where
     d (IRSelect c t f) | tupleValued t || tupleValued f =
-      IRTCons (distributeSelects (IRSelect c (projTuple True t)  (projTuple True f)))
-              (distributeSelects (IRSelect c (projTuple False t) (projTuple False f)))
+      IRConstruct TgTuple
+        [ distributeSelects (IRSelect c (projTuple True t)  (projTuple True f))
+        , distributeSelects (IRSelect c (projTuple False t) (projTuple False f)) ]
     d (IRIf c t f) | tupleValued t || tupleValued f =
-      IRTCons (distributeSelects (IRIf c (projTuple True t)  (projTuple True f)))
-              (distributeSelects (IRIf c (projTuple False t) (projTuple False f)))
+      IRConstruct TgTuple
+        [ distributeSelects (IRIf c (projTuple True t)  (projTuple True f))
+        , distributeSelects (IRIf c (projTuple False t) (projTuple False f)) ]
     d e = e
 
--- | Does this expression evaluate to a tuple (an 'IRTCons', or the new-shape
--- 'IRConstruct TgTuple', under its let-spine)?
+-- | Does this expression evaluate to a tuple (an @IRConstruct TgTuple@, under
+-- its let-spine)?
 --
--- Both shapes have to be recognised here, not just accepted by 'batchedExpr's
--- unconditional catch-all further down: this predicate gates whether
--- 'distributeSelects' pushes a select through the tuple's components at all.
--- Missing the new shape does not fall back to a degraded-but-safe emission the
--- way most of this file's dual-shape gaps do -- it leaves the select
--- undistributed, and 'torchWhere' then hands @torch.where@ a whole Python
--- tuple object where it expects a tensor, which is a runtime 'TypeError', not
--- a compile-time refusal. Found via the design ir-reengineering S1e landing:
--- 'packResult' (Semiring.hs) switching to 'IRConstruct TgTuple' made this the
--- shape of every probability-mode function's own result tuple, which is
--- exactly what a whole-result 'IRSelect' guard selects between.
+-- This predicate gates whether 'distributeSelects' pushes a select through
+-- the tuple's components at all -- not just accepted by 'batchedExpr's
+-- unconditional catch-all further down. Missing the case does not fall back
+-- to a degraded-but-safe emission the way most of this file's dual-shape gaps
+-- do -- it leaves the select undistributed, and 'torchWhere' then hands
+-- @torch.where@ a whole Python tuple object where it expects a tensor, which
+-- is a runtime 'TypeError', not a compile-time refusal. Found via the design
+-- ir-reengineering S1e landing: 'packResult' (Semiring.hs) switching to
+-- 'IRConstruct TgTuple' made this the shape of every probability-mode
+-- function's own result tuple, which is exactly what a whole-result
+-- 'IRSelect' guard selects between.
 tupleValued :: IRExpr -> Bool
 tupleValued (IRLetIn _ _ b)         = tupleValued b
-tupleValued (IRTCons _ _)           = True
 tupleValued (IRConstruct TgTuple _) = True
 tupleValued _                       = False
 
 -- | Project the first (@fst=True@) or second component out of a tuple-valued
--- expression, pushing the projection through the let-spine so bindings stay in
--- scope. Falls back to 'IRTFst'/'IRTSnd' for a non-literal tuple -- safe for
--- either concrete shape, since the fallback is a generic runtime projection,
--- not a shape-specific rebuild.
+-- expression, pushing the projection through the let-spine so bindings stay
+-- in scope. Falls back to 'IRDestruct AcFst'/'AcSnd' for a non-literal tuple
+-- -- a generic runtime projection, not a shape-specific rebuild.
 projTuple :: Bool -> IRExpr -> IRExpr
-projTuple fstp (IRLetIn n v b)              = IRLetIn n v (projTuple fstp b)
-projTuple True  (IRTCons a _)               = a
-projTuple False (IRTCons _ b)               = b
+projTuple fstp (IRLetIn n v b)               = IRLetIn n v (projTuple fstp b)
 projTuple True  (IRConstruct TgTuple [a, _]) = a
 projTuple False (IRConstruct TgTuple [_, b]) = b
-projTuple True  e                           = IRTFst e
-projTuple False e                           = IRTSnd e
+projTuple True  e                            = IRDestruct AcFst e
+projTuple False e                            = IRDestruct AcSnd e
 
 -- ---------------------------------------------------------------------------
 -- Structural (shape-directed) control flow -- design
@@ -641,16 +640,12 @@ structural env e = case e of
   IRVar n           -> n `elem` sBound env
   -- An Either tag test is pure structure: which arm a value is in is part of
   -- its signature, so it is uniform across a bucket (M2).
-  IRIsLeft _        -> True
-  IRIsRight _       -> True
-  -- The new-shape spelling of the same tag test (design ir-reengineering,
-  -- slice S1d): 'PredefinedFunctions' now builds 'isLeftFwd'/'isRightFwd' as
-  -- 'IRDestruct AcIsLeft'/'AcIsRight' rather than 'IRIsLeft'/'IRIsRight', so
-  -- without this arm the exact same tag test silently stopped being
-  -- recognised as structural and fell through to the 'batchedExpr'
-  -- torch.where catch-all -- eagerly evaluating a 'fromLeft'/'fromRight' on
-  -- the wrong-tagged bucket half, the same failure mode
-  -- 'batched-cse-lifts-fromleft-above-its-guard' already names.
+  -- 'PredefinedFunctions' builds 'isLeftFwd'/'isRightFwd' as 'IRDestruct
+  -- AcIsLeft'/'AcIsRight', so this is the tag test's only spelling: without
+  -- it, the tag test silently stops being recognised as structural and falls
+  -- through to the 'batchedExpr' torch.where catch-all -- eagerly evaluating
+  -- a 'fromLeft'/'fromRight' on the wrong-tagged bucket half, the same
+  -- failure mode 'batched-cse-lifts-fromleft-above-its-guard' already names.
   IRDestruct AcIsLeft _  -> True
   IRDestruct AcIsRight _ -> True
   IROp OpEq a b     -> isEmptyListConst a || isEmptyListConst b
@@ -662,7 +657,7 @@ structural env e = case e of
   -- structural value: CSE routinely names a structural condition through
   -- exactly this idiom (`let cse_0 = (if isLeft(sample) then True else
   -- False) in ...`), and without this case 'bindS' judged the *value*
-  -- non-structural (despite the binding's own condition, 'IRIsLeft', being
+  -- non-structural (despite the binding's own condition, 'IRDestruct AcIsLeft', being
   -- recognised) and dropped `cse_0` from 'sBound' -- so every later use of
   -- `cse_0` as a guard fell through to the 'batchedExpr' torch.where catch-all,
   -- which evaluates both arms eagerly and reached an unguarded `fromLeft` on a
@@ -698,13 +693,9 @@ isEmptyListConst _                           = False
 -- bucketing is outside the fragment.
 listValued :: SEnv -> IRExpr -> Bool
 listValued env e = case e of
-  IRCons{}            -> True
-  IRTail{}            -> True
   IRConst (VList _)   -> True
-  IRLeft{}            -> True
-  IRRight{}           -> True
-  -- The new-shape spelling (design ir-reengineering, slice S1d): see the
-  -- matching note on 'structural' above for why this arm is not optional.
+  -- See the matching note on 'structural' above for why these arms are not
+  -- optional.
   IRConstruct TgCons _  -> True
   IRDestruct AcTail _   -> True
   IRConstruct TgLeft _  -> True
@@ -737,7 +728,8 @@ hoistStructural env0 top = evalState (stmt env0 top) 0
     stmt :: SEnv -> IRExpr -> State Int IRExpr
     stmt env (IRLambda n b)   = IRLambda n <$> stmt env b
     stmt env (IRLetIn n v b)  = IRLetIn n <$> stmt env v <*> stmt (bindS env n v) b
-    stmt env (IRTCons a b)    = IRTCons <$> stmt env a <*> stmt env b
+    stmt env (IRConstruct TgTuple [a, b]) =
+      (\a' b' -> IRConstruct TgTuple [a', b']) <$> stmt env a <*> stmt env b
     stmt env (IRIf c t f)
       | structural env c      = IRIf c <$> stmt env t <*> stmt env f
     stmt env e = do
@@ -870,15 +862,8 @@ recOffenders cyc env guarded e = case e of
 
 -- | Does this argument expression take the tail of a list anywhere?
 hasTailDescent :: IRExpr -> Bool
-hasTailDescent IRTail{} = True
--- The new-shape counterpart (design ir-reengineering, slice S1a): required,
--- not just parity -- see the task doc's note on this function. Without this
--- arm, a producer that migrates a recursion-guarding 'IRTail' to
--- 'IRDestruct AcTail' would make 'recOffenders' silently stop recognising the
--- descent (the fallback below re-checks children but never the node itself),
--- falsely refusing a legitimately batched-eligible recursive program.
 hasTailDescent (IRDestruct AcTail _) = True
-hasTailDescent e        = any hasTailDescent (getIRSubExprs e)
+hasTailDescent e                     = any hasTailDescent (getIRSubExprs e)
 
 groupMethods :: IRFunGroup -> [(String, IRExpr)]
 groupMethods (IRFunGroup n gen prob integ enc normal _ _) =
@@ -956,11 +941,6 @@ emittable e = case e of
   IRConst v      -> isJust (batchedVal v)   -- scalar/tuple leaves only; see 'batchedVal'
   IRVar{}        -> True
   IRLetIn{}      -> True
-  IRTCons{}      -> True
-  IRTFst{}       -> True
-  IRTSnd{}       -> True
-  IRTheta{}      -> True
-  IRSubtree{}    -> True
   -- Linear only: batched mode has never had a log-space density/cumulative
   -- lowering (the former 'IRLogDensity'/'IRLogCumulative' had no arm here
   -- either, and fell to the catch-all 'False' below); preserved exactly by
@@ -1012,25 +992,15 @@ emittable e = case e of
   -- within a shape bucket a list is a fixed-length Python spine whose leaves are
   -- [B] tensors, so head/tail/cons are the same Python operations the scalar
   -- backend emits -- they are shape operations, uniform across the bucket.
-  IRHead{}       -> True
-  IRTail{}       -> True
-  IRCons{}       -> True
+  --
   -- Either dispatch (M2): the tag is part of the shape signature, so within a
   -- bucket `isinstance(x, Left)` is a bucket-uniform Python bool and the arm
   -- accessor is always the legal one.
-  IRIsLeft{}     -> True
-  IRIsRight{}    -> True
-  IRFromLeft{}   -> True
-  IRFromRight{}  -> True
-  IRLeft{}       -> True
-  IRRight{}      -> True
-  -- The new-shape constructor/accessor family (design ir-reengineering, slice
-  -- S1a): dead code today (nothing constructs 'IRConstruct'/'IRDestruct'
-  -- yet). Every 'ConTag' and every 'Accessor' mirrors an old-shape case that
-  -- is already 'True' above (IRTCons/IRCons/IRLeft/IRRight, and every one of
-  -- IRTFst/IRTSnd/IRHead/IRTail/IRFromLeft/IRFromRight/IRIsLeft/IRIsRight/
-  -- IRTheta/IRSubtree), so both collapse to a flat 'True' rather than
-  -- repeating that answer fourteen times over.
+  --
+  -- Every 'ConTag' and every 'Accessor' (list cons/head/tail, tuple fst/snd,
+  -- either left/right/fromLeft/fromRight/isLeft/isRight, theta/subtree) is
+  -- 'True', so both constructors collapse to a flat answer rather than
+  -- repeating it fourteen times over.
   IRConstruct{}  -> True
   IRDestruct{}   -> True
   _              -> False
@@ -1099,7 +1069,7 @@ batchedValOrDie v = fromMaybe
 -- an assumption.
 --
 -- The composite-'MultiValue' direction is not reachable from a real program
--- (an Either/ADT-shaped read-logits network trips 'IRIsLeft' or the ADT-declaration bail
+-- (an Either/ADT-shaped read-logits network trips the Either tag test or the ADT-declaration bail
 -- first), so its positive control is the synthetic-IR row in
 -- @TestInternals.batchedRefusalUnitTests@ rather than a corpus program.
 scalarDiscreteMulti :: MultiValue -> Bool
@@ -1130,9 +1100,9 @@ reason e = case e of
                      ++ "(see batchedVal), so only float/int/bool leaves in "
                      ++ "fixed-shape tuples are admitted"
   IRUnaryOp OpIsAny _ -> "marginal (ANY) check (IRUnaryOp OpIsAny)"
-  -- Unreachable while 'emittable' admits every 'IRConstruct'/'IRDestruct'
-  -- (design ir-reengineering, slice S1a); named explicitly rather than left
-  -- to the catch-all below, matching every other case in this function.
+  -- Unreachable while 'emittable' admits every 'IRConstruct'/'IRDestruct';
+  -- named explicitly rather than left to the catch-all below, matching every
+  -- other case in this function.
   IRConstruct{}   -> irPrintFlat e
   IRDestruct{}    -> irPrintFlat e
   _               -> irPrintFlat e
@@ -1175,11 +1145,6 @@ batchedBlock ctx env (IRLetIn name val body) =
 batchedBlock ctx env (IRIf c t f) | structural env c =
   ["if " ++ structuralCond env c ++ ":"] ++ indentOnce (batchedBlock ctx env t)
   ++ ["else:"] ++ indentOnce (batchedBlock ctx env f)
-batchedBlock ctx env (IRTCons f s) =
-  batchedAssign env "_r0" f ++ batchedAssign env "_r1" s ++ [returnStmt ctx "T(_r0, _r1)"]
--- The new-shape tuple counterpart (design ir-reengineering, slice S1a): dead
--- code today; parity, not required (the fallback below emits an equivalent
--- single-expression return instead of a flattened multi-statement one).
 batchedBlock ctx env (IRConstruct TgTuple [f, s]) =
   batchedAssign env "_r0" f ++ batchedAssign env "_r1" s ++ [returnStmt ctx "T(_r0, _r1)"]
 batchedBlock ctx env e = [returnStmt ctx (batchedExpr env e)]
@@ -1200,12 +1165,6 @@ batchedAssign env name (IRLetIn innerName innerVal body) =
 batchedAssign env name (IRIf c t f) | structural env c =
   ["if " ++ structuralCond env c ++ ":"] ++ indentOnce (batchedAssign env name t)
   ++ ["else:"] ++ indentOnce (batchedAssign env name f)
-batchedAssign env name (IRTCons f s) =
-  batchedAssign env (name ++ "_0") f
-  ++ batchedAssign env (name ++ "_1") s
-  ++ [name ++ " = T(" ++ name ++ "_0, " ++ name ++ "_1)"]
--- The new-shape tuple counterpart (design ir-reengineering, slice S1a): dead
--- code today; parity, not required (see 'batchedBlock').
 batchedAssign env name (IRConstruct TgTuple [f, s]) =
   batchedAssign env (name ++ "_0") f
   ++ batchedAssign env (name ++ "_1") s
@@ -1264,11 +1223,6 @@ batchedExpr env (IRIf c t f)     = torchWhere env c t f
 -- evaluation.
 batchedExpr _env (IRSample IRNormal)  = "randn(" ++ batchNVar ++ ")"
 batchedExpr _env (IRSample IRUniform) = "rand(" ++ batchNVar ++ ")"
-batchedExpr env (IRTCons a b)    = "T(" ++ batchedExpr env a ++ ", " ++ batchedExpr env b ++ ")"
-batchedExpr env (IRTFst e)       = "(" ++ batchedExpr env e ++ ")[0]"
-batchedExpr env (IRTSnd e)       = "(" ++ batchedExpr env e ++ ")[1]"
-batchedExpr env (IRTheta e i)    = "(" ++ batchedExpr env e ++ ")[0][" ++ show i ++ "]"
-batchedExpr env (IRSubtree e i)  = "(" ++ batchedExpr env e ++ ")[1][" ++ show i ++ "]"
 -- Batched mode has never had a log-space density/cumulative lowering (no arm
 -- existed for the former 'IRLogDensity'/'IRLogCumulative' either); a 'Log'
 -- node still falls through to the catch-all below, unchanged in behaviour.
@@ -1345,20 +1299,11 @@ batchedExpr env (IRLetIn name val body) =
 -- Structure-of-arrays list access (design heterogeneous-batch-inference, M1):
 -- the spine is a Python object, uniform across the bucket; the leaves are [B]
 -- tensors. These are exactly the scalar backend's forms.
-batchedExpr env (IRHead e)   = "(" ++ batchedExpr env e ++ ")[0]"
-batchedExpr env (IRTail e)   = "(" ++ batchedExpr env e ++ ")[1:]"
-batchedExpr env (IRCons a b) =
-  "ConsInferenceList(" ++ batchedExpr env a ++ ", " ++ batchedExpr env b ++ ")"
--- Either: the same forms the scalar backend emits. The tag test is structural,
--- so it only ever ends up in a Python `if`, never in a torch.where mask.
-batchedExpr env (IRLeft e)      = "Left(" ++ batchedExpr env e ++ ")"
-batchedExpr env (IRRight e)     = "Right(" ++ batchedExpr env e ++ ")"
-batchedExpr env (IRFromLeft e)  = "fromLeft(" ++ batchedExpr env e ++ ")"
-batchedExpr env (IRFromRight e) = "fromRight(" ++ batchedExpr env e ++ ")"
-batchedExpr env (IRIsLeft e)    = "isinstance(" ++ batchedExpr env e ++ ", Left)"
-batchedExpr env (IRIsRight e)   = "isinstance(" ++ batchedExpr env e ++ ", Right)"
--- The new-shape constructor/accessor family (design ir-reengineering, slice
--- S1a): dead code today, mirroring the old-shape cases above one for one.
+-- Structure-of-arrays list access (design heterogeneous-batch-inference, M1):
+-- the spine is a Python object, uniform across the bucket; the leaves are [B]
+-- tensors. Either: the same forms the scalar backend emits. The tag test is
+-- structural, so it only ever ends up in a Python `if`, never in a
+-- torch.where mask.
 batchedExpr env (IRConstruct TgTuple [a, b]) = "T(" ++ batchedExpr env a ++ ", " ++ batchedExpr env b ++ ")"
 batchedExpr env (IRConstruct TgCons [a, b])  =
   "ConsInferenceList(" ++ batchedExpr env a ++ ", " ++ batchedExpr env b ++ ")"

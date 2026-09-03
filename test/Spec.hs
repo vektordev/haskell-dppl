@@ -733,7 +733,7 @@ prop_BCConditionalLambda = once $ ioProperty $ do
 -- killAll coverage: a program that calls a sub-function via Var with a non-trivial
 -- change-of-variables correction.  testNormalScaledViaVar uses injF "mult" with factor
 -- 2.0, whose inverse derivative is 1/2.  If killAll fails to rewrite the dim extraction
--- from the sub-function result (IRTFst(IRTSnd(IRVar x)) → IRTSnd(IRVar x)), dim would
+-- from the sub-function result (IRDestruct AcFst(IRDestruct AcSnd(IRVar x)) → IRDestruct AcSnd(IRVar x)), dim would
 -- be 0 and the CoV factor would be skipped, giving normalPDF(1.0) instead of
 -- the correct normalPDF(1.0) * 0.5.
 -- P(main = 2.0) = normalPDF(1.0) * 0.5.

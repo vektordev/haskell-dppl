@@ -275,59 +275,14 @@ generateExpression (IROp op left right) = do
 generateExpression (IRUnaryOp op expr) = do
     e <- generateExpression expr
     return $ juliaUnaryOps op ++ "(" ++ e ++ ")"
-generateExpression (IRTheta expr i) = do
-    e <- generateExpression expr
-    return $ "(" ++ e ++ ")[1][" ++ show (i + 1) ++ "]"
-generateExpression (IRSubtree expr i) = do
-    e <- generateExpression expr
-    return $ "(" ++ e ++ ")[2][" ++ show (i + 1) ++ "]"
 generateExpression (IRConst v) =
     return $ juliaVal v
-generateExpression (IRCons hd tl) = do
-    h <- generateExpression hd
-    t <- generateExpression tl
-    return $ "prepend(" ++ h ++ ", " ++ t ++ ")"
-generateExpression (IRTCons fs sn) = do
-    f <- generateExpression fs
-    s <- generateExpression sn
-    return $ "T(" ++ f ++ ", " ++ s ++ ")"
-generateExpression (IRHead x) = do
-    e <- generateExpression x
-    return $ "head(" ++ e ++ ")"
-generateExpression (IRTail x) = do
-    e <- generateExpression x
-    return $ "tail(" ++ e ++ ")"
 generateExpression (IRBuiltin BMapList [f, x]) = do
     ff <- generateExpression f
     xx <- generateExpression x
     return $ "mapList(" ++ ff ++ ", " ++ xx ++ ")"
-generateExpression (IRTFst x) = do
-    e <- generateExpression x
-    return $ "(" ++ e ++ ")[1]"
-generateExpression (IRTSnd x) = do
-    e <- generateExpression x
-    return $ "(" ++ e ++ ")[2]"
-generateExpression (IRLeft x) = do
-    e <- generateExpression x
-    return $ "Left(" ++ e ++ ")"
-generateExpression (IRRight x) = do
-    e <- generateExpression x
-    return $ "Right(" ++ e ++ ")"
-generateExpression (IRFromLeft x) = do
-    e <- generateExpression x
-    return $ "fromLeft(" ++ e ++ ")"
-generateExpression (IRFromRight x) = do
-    e <- generateExpression x
-    return $ "fromRight(" ++ e ++ ")"
-generateExpression (IRIsLeft x) = do
-    e <- generateExpression x
-    return $ "(" ++ e ++ " isa Left)"
-generateExpression (IRIsRight x) = do
-    e <- generateExpression x
-    return $ "(" ++ e ++ " isa Right)"
--- The new-shape constructor/accessor family (design ir-reengineering, slice
--- S1a): dead code today, mirroring the old-shape cases above one for one
--- (including Julia's 1-based indexing).
+-- The constructor/accessor family (design ir-reengineering), mirroring
+-- Julia's 1-based indexing for the theta/subtree accessors.
 generateExpression (IRConstruct TgTuple [fs, sn]) = do
     f <- generateExpression fs
     s <- generateExpression sn
