@@ -1,8 +1,12 @@
 -- The pattern-match coverage checker exceeds its default 30-model budget on
 -- 'toIRGenerate's Var case (a 4-way match over @Maybe (RType, Bool)@ with a
 -- nested RType pattern), and then reports that exhaustive match as incomplete.
--- Raising the budget lets it finish rather than hiding the result.
-{-# OPTIONS_GHC -fmax-pmcheck-models=1000 #-}
+-- Raising the budget lets it finish rather than hiding the result. Two more
+-- guarded clauses at the top of 'toIRInference' (task
+-- set-witness-eq-o2-optimizer-crash) pushed a second check -- 'toIRGenerate's
+-- Var case again, per the checker's own report site -- over 1000 as well;
+-- raised again rather than split the check.
+{-# OPTIONS_GHC -fmax-pmcheck-models=4000 #-}
 module SPLL.IRCompiler (
   envToIR,
   envToIRUnoptimized,
@@ -1276,6 +1280,34 @@ guardedSubInference meta guards action = do
   (res0, binds) <- lift (runWriterT action)
   shareResult (semiringOf meta) "guarded" guards binds res0
 
+-- | Recognise a sample that is an 'IRIf' selecting between a plain value and
+-- the 'VAnyExcept' placeholder -- the shape 'transportDirect' produces when it
+-- substitutes a known True/False polarity into a seeded '==' (or ADT
+-- constructor-test) inversion without reducing the 'IRIf' away. Returns
+-- (condition, which polarity is the AnyExcept side, the non-AnyExcept arm, the
+-- excepted expression), mirroring the destructuring the InjF 'hasAnyExcept'
+-- combinator performs on an inverse's own two arms.
+anyExceptIfSplit :: IRExpr -> Maybe (IRExpr, Bool, IRExpr, IRExpr)
+anyExceptIfSplit (IRIf c pos (IRConst (VAnyExcept [ex]))) = Just (c, False, pos, ex)
+anyExceptIfSplit (IRIf c (IRConst (VAnyExcept [ex])) neg) = Just (c, True, neg, ex)
+anyExceptIfSplit _ = Nothing
+
+-- | Peel a sample's leading 'IRLetIn' chain (e.g. 'transportDirect's
+-- materialised anchors) off to see whether the expression underneath is a
+-- 'VAnyExcept' placeholder -- bare, or still 'IRIf'-wrapped ('anyExceptIfSplit').
+-- Returns the peeled bindings alongside whichever shape matched, so a caller
+-- that reconstructs a result from the pieces inside can re-wrap it in the same
+-- bindings (the pieces may reference names those bindings introduce).
+anyExceptSampleShape :: IRExpr -> Maybe ([(Varname, IRExpr)], Either IRExpr (IRExpr, Bool, IRExpr, IRExpr))
+anyExceptSampleShape sample = case core of
+  IRConst (VAnyExcept [ex]) -> Just (binds, Left ex)
+  _ | Just split <- anyExceptIfSplit core -> Just (binds, Right split)
+  _ -> Nothing
+  where
+    (binds, core) = stripLetIns sample
+    stripLetIns (IRLetIn v val inner) = let (bs, c) = stripLetIns inner in ((v, val) : bs, c)
+    stripLetIns e = ([], e)
+
 -- | Dispatch to the appropriate param extractor based on PType.
 -- Returns (mu, sigma) for PNormal and (mu_log, sigma) for PLogNormal.
 toIRNormal :: CompilerMetadata -> Expr -> CompilerMonad (IRExpr, IRExpr)
@@ -1466,6 +1498,48 @@ hasOwnInferenceHandler _    _                        = False
 
 toIRInference :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PResult
 --toIRInference meta cumulative expr sample | trace (show expr) False = undefined
+-- A witnessed sample can itself be the 'VAnyExcept' placeholder an '==' (or ADT
+-- constructor-test) inverse produces on its False branch ("any value other
+-- than this one") -- either bare, or still wrapped in the 'IRIf' that selects
+-- it. 'transportDirect' produces exactly this shape when it probes the
+-- True/False polarity of a comparison the witnessed variable occurs in (the
+-- set-valued-witnesses engine's handling of an 'IfThenElse' whose condition
+-- mentions the bound variable) and hands the result straight to the bound
+-- distribution's own inference, rather than through the InjF-probability
+-- 'hasAnyExcept' combinator below (which only fires when the comparison
+-- itself, not some downstream consumer of its witness, is the thing being
+-- queried). Arithmetic on the sentinel -- a density's '(sample - mu)/sigma',
+-- say -- is undefined: 'VAnyExcept' names a set, not a point. Previously that
+-- reached 'IROptimizer.forceOp' and the interpreter's own operator evaluator
+-- as a raw operand and crashed both (task set-witness-eq-o2-optimizer-crash).
+-- Splitting here, generically over whichever leaf is being inferred (Normal,
+-- Uniform, a user function, ...), mirrors the split the direct InjF case
+-- performs: the ANY-branch mass minus the excepted point's own mass/density.
+toIRInference meta cumulative e sample
+  | Just (binds, shape) <- anyExceptSampleShape sample = do
+  let sr = semiringOf meta
+  -- 'binds' are 'sample's own leading let-bindings (e.g. 'transportDirect's
+  -- materialised anchors), stripped off to see the shape beneath. Registering
+  -- them via 'setVariables' -- the same mechanism the InjF 'hasAnyExcept'
+  -- combinator below uses for its own seeded variables -- rather than
+  -- rewrapping the result afterwards keeps them properly threaded through
+  -- 'guardedSubInference'/'shareResult's own let-hoisting, which floats a
+  -- sub-result's binding to a scope a post-hoc rewrap would sit below.
+  setVariables binds
+  case shape of
+    Left ex -> do
+      anyRes    <- toIRInferenceSave meta cumulative e (IRConst VAny)
+      exceptRes <- toIRInferenceSave meta cumulative e ex
+      mixSubP sr (rBranches exceptRes) anyRes exceptRes
+    Right (cond, isPosAny, nonAnyExpr, exceptExpr) -> do
+      let subGuard = if isPosAny then cond else notIR cond
+      let nonGuard = notIR subGuard
+      nonAnyRes <- guardedSubInference meta [nonGuard] (toIRInference meta cumulative e nonAnyExpr)
+      anyRes    <- toIRInferenceSave meta cumulative e (IRConst VAny)
+      exceptRes <- guardedSubInference meta [subGuard] (toIRInference meta cumulative e exceptExpr)
+      subRes <- mixSubP sr (rBranches exceptRes) anyRes exceptRes
+      let ifSample a na = if isPosAny then IRIf cond a na else IRIf cond na a
+      return (zipResult ifSample subRes nonAnyRes)
 -- CDFs on Booleans make little sense. We define that False < True. Therefor cdf(True) = 1 and cdf(False) = pdf(False)
 toIRInference meta True expr sample | rType (getTypeInfo expr) == TBool = do
   false <- toIRInference meta False expr (IRConst (VBool False))
