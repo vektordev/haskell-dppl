@@ -38,6 +38,7 @@ import Control.Exception (try, evaluate, throwIO, SomeException)
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import IRInterpreter (generateRand, generateDet)
+import MockNN (evaluateMockNN)
 
 getAllTestFiles :: IO [(FilePath, FilePath)]
 getAllTestFiles = do
@@ -351,13 +352,101 @@ endpointReturnRType p target =
     stripLambdasE (Expr _ (Lambda _ b)) = stripLambdasE b
     stripLambdasE e = e
 
-testJuliaAll :: [(Either CompilerError IREnv, [TestCase])] -> Property
+-- ===========================================================================
+-- Routing neural programs onto the Julia/Python text backends
+-- (design route-neural-programs-to-julia-python-backends)
+-- ===========================================================================
+
+-- | The names 'main' binds as its own lambda parameters, in order. Mirrors
+-- 'progParameterCount', which counts the same spine.
+mainParamNames :: Program -> [String]
+mainParamNames Program{functions=fs} = go (mainBinding fs)
+  where
+    go (Expr _ (Lambda n e)) = n : go e
+    go _ = []
+
+mainBinding :: [FnDecl] -> Expr
+mainBinding fs = fromMaybe (error "mainParamNames: program has no 'main'") (lookup "main" fs)
+
+-- | Every @(paramVar, networkName)@ pair where a 'ReadNN' call is applied
+-- directly to a bound variable, anywhere in an expression -- generic over the
+-- whole 'ExprF' shape via its derived 'Foldable' instance, so this needs no
+-- per-constructor case beyond the one it is looking for and still finds a
+-- match nested inside an if/let/tuple. A 'ReadNN' applied to anything other
+-- than a bare 'Var' (an indirect argument) yields no pair for that call --
+-- the envelope resolution below simply leaves such a parameter's .tst value
+-- untouched, which is fine for the corpus this routes (task
+-- route-neural-programs-to-julia-python-backends): every neural .tst reads
+-- its mock straight off a lambda parameter.
+readNNOfVar :: Expr -> [(String, String)]
+readNNOfVar (Expr _ e) = case e of
+  ReadNN name (Expr _ (Var v)) -> (v, name) : rest
+  _                             -> rest
+  where rest = concatMap readNNOfVar (toList e)
+
+-- | The 'PartitionPlan' governing a declared network's mock output -- the
+-- same construction 'IRInterpreter' builds at the special-cased
+-- @IRApply (IRVar name) sym@ site, mirrored here because the plan only needs
+-- the network's own declaration, not a compiled IR.
+networkPlan :: Program -> String -> PartitionPlan
+networkPlan p name = case lookupNeural name (neurals p) of
+  Nothing -> error ("networkPlan: no neural declaration named " ++ name)
+  Just (rt, tag) ->
+    let realRT = fromMaybe
+          (error ("networkPlan: " ++ name ++ " is not declared Symbol -> _"))
+          (neuralValueType rt)
+    in makePartitionPlan (adts p) realRT (resolvePartitionAnnotation (writeLogitsDecls p) realRT tag)
+
+-- | Per parameter position of 'main', the plan of the network it feeds
+-- directly (as @net(paramVar)@), or 'Nothing' for a position that feeds no
+-- network.
+paramNetworkPlans :: Program -> [Maybe PartitionPlan]
+paramNetworkPlans p = [ networkPlan p <$> lookup v varToNet | v <- mainParamNames p ]
+  where varToNet = readNNOfVar (mainBinding (functions p))
+
+-- | Replace every parameter that is a mock-NN envelope (@(0, seed)@ random,
+-- @(1, (spike, seed))@ spiking, or @(2, [logits])@ literal) with the raw logit
+-- vector 'evaluateMockNN' computes for it -- the same computation
+-- 'IRInterpreter'\'s special-cased 'ReadNN' case performs at run time. Julia
+-- and Python have no such mock dispatch built in (their emitted code just
+-- calls the network's bare name, since a real deployment supplies it): the
+-- harness installs an identity network (@net(sym) = sym@,
+-- 'juliaBatchTestCode'\/'testPython') and hands it this pre-resolved vector
+-- directly, so a mode-0/1 envelope never needs MockNN's RNG reimplemented in
+-- either target language -- only mode-2's plain vector-passthrough would work
+-- for those two identically, which is why this resolves *all three* modes to
+-- one shape uniformly rather than special-casing mode-2 as already-done.
+resolveNeuralParams :: Program -> [IRValue] -> [IRValue]
+resolveNeuralParams p params = zipWith resolve (paramNetworkPlans p) params
+  where
+    resolve (Just plan) v = evaluateMockNN plan v
+    resolve Nothing     v = v
+
+-- | 'resolveNeuralParams' applied to a query test case's own parameter list.
+-- A no-op on a non-neural program (every parameter position resolves to
+-- 'Nothing') and on any non-prob/cumulative case.
+resolveNeuralTestCase :: Program -> TestCase -> TestCase
+resolveNeuralTestCase p (ProbTestCase n s ps e)  = ProbTestCase  n s (resolveNeuralParams p ps) e
+resolveNeuralTestCase p (CumulTestCase n s ps e) = CumulTestCase n s (resolveNeuralParams p ps) e
+resolveNeuralTestCase _ tc                       = tc
+
+-- | A program's declared network names, in declaration order -- what the
+-- Julia/Python harnesses install identity mocks for.
+networkNames :: Program -> [String]
+networkNames p = [ nm | (nm, _, _) <- neurals p ]
+
+-- | The network names attached to each program feed a per-module identity
+-- mock (@net(sym) = sym@, task route-neural-programs-to-julia-python-backends):
+-- the .tst rows' mock-NN parameters are already resolved to raw logit vectors
+-- by 'resolveNeuralTestCase' before they reach here, so the network itself
+-- only has to be pass-through. Empty for a non-neural program.
+testJuliaAll :: [(Either CompilerError IREnv, [TestCase], [String])] -> Property
 testJuliaAll programCases = ioProperty $ do
-  let results = [(c, tcs) | (c, tcs) <- programCases, not (null tcs)]
-  case [err | (Left err, _) <- results] of
+  let results = [(c, tcs, nets) | (c, tcs, nets) <- programCases, not (null tcs)]
+  case [err | (Left err, _, _) <- results] of
     (err:_) -> return $ counterexample err False
     [] -> do
-      let srcs = [(intercalate "\n" (SPLL.CodeGenJulia.generateFunctions c), tcs) | (Right c, tcs) <- results]
+      let srcs = [(intercalate "\n" (SPLL.CodeGenJulia.generateFunctions c), tcs, nets) | (Right c, tcs, nets) <- results]
       projectDir <- getCurrentDirectory
       code <- withSystemTempFile "julia_batch.jl" $ \tmpPath tmpHandle -> do
         hPutStr tmpHandle (juliaBatchTestCode projectDir srcs)
@@ -373,18 +462,22 @@ testJuliaAll programCases = ioProperty $ do
 -- exceed the kernel's per-argument limit and the spawn fails with "Argument
 -- list too long" -- a harness failure indistinguishable, in the report, from
 -- the program being wrong.
-testPython :: Either CompilerError IREnv -> [TestCase] -> Property
-testPython compiledE tc = ioProperty $ do
+--
+-- @netNames@ (empty for a non-neural program) gets one identity-mock
+-- definition apiece -- see 'testJuliaAll'\'s note.
+testPython :: [String] -> Either CompilerError IREnv -> [TestCase] -> Property
+testPython netNames compiledE tc = ioProperty $ do
   case compiledE of
     Left err -> return $ counterexample err False
     Right compiled -> do
       let src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True compiled)
+          mockDefs = concatMap (\nm -> "def " ++ nm ++ "(s):\n    return s\n") netNames
       -- Run as a file, so sys.path[0] is the temp dir rather than the project;
       -- pythonLib has to be put back on the path explicitly.
       projectDir <- getCurrentDirectory
       code <- withSystemTempFile "spll_test.py" $ \tmpPath tmpHandle -> do
         hPutStr tmpHandle ("import sys\nsys.path.insert(0, " ++ show projectDir ++ ")\n"
-                           ++ pythonTestCode src tc)
+                           ++ mockDefs ++ pythonTestCode src tc)
         hClose tmpHandle
         (_, _, _, handle) <- createProcess (proc "python3" [tmpPath])
         waitForProcess handle
@@ -392,13 +485,14 @@ testPython compiledE tc = ioProperty $ do
         ExitSuccess -> return $ True === True
         ExitFailure _ -> return $ counterexample ("Python test " ++ testCaseName (head tc) ++ " failed. See Python error message") False
 
-juliaBatchTestCode :: FilePath -> [(String, [TestCase])] -> String
+juliaBatchTestCode :: FilePath -> [(String, [TestCase], [String])] -> String
 juliaBatchTestCode projectDir allCases =
   "include(\"" ++ projectDir ++ "/juliaLib.jl\")\n\
   \using .JuliaSPPLLib\n" ++
-  concatMap (\(idx, (src, tcs)) ->
+  concatMap (\(idx, (src, tcs, nets)) ->
     let modName = "Prog" ++ show (idx :: Int)
     in "module " ++ modName ++ "\nusing ..JuliaSPPLLib\n" ++
+       concatMap (\nm -> nm ++ "(s) = s\n") nets ++
        src ++ "\nend\n" ++
        juliaModuleTestCases modName tcs
   ) (zip [0..] allCases)
@@ -2074,7 +2168,25 @@ buildEnd2EndTree treeName includeBackends compiledCases = testGroup treeName $
     ] ++
     ( if not includeBackends then [] else
       let queryTestCases = [(n, p, c, bs, filter (\x -> isProbTestCase x || isCumulTestCase x) tcs) | (n, p, c, bs, tcs) <- compiledCases]
-          nonNeuralsQueries b = [(n, c, tcs) | (n, p, c, bs, tcs) <- queryTestCases, b `elem` bs, null (neurals p), not (null tcs)]
+          -- A query program routes onto every backend it lists, same as
+          -- before, except that Python now also takes a neural program
+          -- (@includeNeural = True@): the filter that used to drop one there
+          -- existed only because Python has no network to call at runtime,
+          -- not because the routing was otherwise unsound (task
+          -- route-neural-programs-to-julia-python-backends). Once an identity
+          -- mock is installed for each declared network ('testPython') and
+          -- the .tst row's own mock-NN parameters are pre-resolved to the raw
+          -- vectors that mock would have produced ('resolveNeuralTestCase'),
+          -- a neural program is just another program. Julia keeps the old
+          -- exclusion for now (@includeNeural = False@) -- the design doc's
+          -- own recommendation (agreed on review) is Python first, Julia
+          -- decided on the evidence of what that catches; 'testJuliaAll'
+          -- gained the same identity-mock plumbing so extending it later is a
+          -- routing-only change, not a harness one.
+          routedQueries includeNeural b =
+            [ (n, c, if null (neurals p) then tcs else map (resolveNeuralTestCase p) tcs, networkNames p)
+            | (n, p, c, bs, tcs) <- queryTestCases, b `elem` bs, not (null tcs)
+            , includeNeural || null (neurals p) ]
           unoptQueries b = [(n, c, tcs') | (n, p, c, bs, tcs) <- unoptCases, b `elem` bs, null (neurals p)
                            , n `elem` unoptimizedCodegenSmoke
                            , n `notElem` unoptimizedCodegenExempt
@@ -2083,15 +2195,16 @@ buildEnd2EndTree treeName includeBackends compiledCases = testGroup treeName $
       in [ testGroup "Normalization"
              [ testProperty n (once $ discreteProbsNormalized p c) | (n, p, c) <- neuralP ]
          -- All Julia programs share one batch file (and one julia process) to amortize startup.
-         , testProperty "Julia" (once $ testJuliaAll [(c, tcs) | (_, c, tcs) <- nonNeuralsQueries Julia])
+         , testProperty "Julia" (once $ testJuliaAll [(c, tcs, nets) | (_, c, tcs, nets) <- routedQueries False Julia])
          , testGroup "Python"
-             [ testProperty n (once $ testPython c tcs) | (n, c, tcs) <- nonNeuralsQueries Python ]
+             [ testProperty n (once $ testPython nets c tcs) | (n, c, tcs, nets) <- routedQueries True Python ]
          -- The same corpus through the text backends at -O0. See
          -- \'unoptCases\' for why this is not merely a duplicate of the
-         -- optimized groups.
-         , testProperty "Julia Unoptimized" (once $ testJuliaAll [(c, tcs) | (_, c, tcs) <- unoptQueries Julia])
+         -- optimized groups. None of 'unoptimizedCodegenSmoke' is neural, so
+         -- this stays on the plain (non-mock-resolved) test cases.
+         , testProperty "Julia Unoptimized" (once $ testJuliaAll [(c, tcs, []) | (_, c, tcs) <- unoptQueries Julia])
          , testGroup "Python Unoptimized"
-             [ testProperty n (once $ testPython c tcs) | (n, c, tcs) <- unoptQueries Python ]
+             [ testProperty n (once $ testPython [] c tcs) | (n, c, tcs) <- unoptQueries Python ]
          ]
     )
   where
