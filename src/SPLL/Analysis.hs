@@ -241,9 +241,9 @@ stripLambdas e = e
 -- LOAD-BEARING COINCIDENCE, do not let it drift: this is the SAME predicate as
 -- the let-unrolling affordability condition. Tier 0 materializes a table as
 -- let-bound scalar cells rather than as a runtime array (IRExpr has no dense
--- array type; 'IRIndex' is an O(n) cons-cell walk), so "the domain is small
--- enough to tabulate" and "the unrolling is affordable" are one question, not
--- two. A change to either side has to be made on both.
+-- array type; @IRBuiltin BListIndex@ is an O(n) cons-cell walk), so "the domain
+-- is small enough to tabulate" and "the unrolling is affordable" are one
+-- question, not two. A change to either side has to be made on both.
 materializationDomain :: Int -> [Tag] -> Maybe [Value]
 materializationDomain bound tgs = case [mv | DiscreteValues mv <- tgs] of
   (mv:_) | multiValueIsFinite mv

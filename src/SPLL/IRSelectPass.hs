@@ -83,8 +83,8 @@ isTensorFragment expr = ok expr && all isTensorFragment (getIRSubExprs expr)
       IRCons _ _        -> False
       IRHead _          -> False
       IRTail _          -> False
-      IRMap _ _         -> False
-      IRIndex _ _       -> False
+      IRBuiltin BMapList _   -> False
+      IRBuiltin BListIndex _ -> False
       IRLeft _          -> False
       IRRight _         -> False
       IRFromLeft _      -> False

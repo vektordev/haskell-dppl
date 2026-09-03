@@ -322,7 +322,7 @@ generate f neurals' registry adts' globalEnv env args (IRTail listExpr) = do
     VList (ListCont _ AnyList) -> return VAny
     VList (ListCont _ a) -> return $ VList a
     _ -> error "Type error: tail must be called on a non-empty list"
-generate f neurals' registry adts' globalEnv env args (IRMap fExpr listExpr) = do
+generate f neurals' registry adts' globalEnv env args (IRBuiltin BMapList [fExpr, listExpr]) = do
   listVal <- generate f neurals' registry adts' globalEnv env args listExpr
   case listVal of
     VList lst -> do
@@ -460,7 +460,7 @@ generate f neurals' registry adts' globalEnv env [] (IREnumSumPaired logSp varna
 generate f neurals' registry adts' globalEnv env [] (IRIsPossible multiVal expr) = do
   val <- generate f neurals' registry adts' globalEnv env [] expr
   return $ VBool (valueInMultiValue multiVal (fmap (error "Failed conversion") val))
-generate f neurals' registry adts' globalEnv env args (IRIndex lstExpr idxExpr) = do
+generate f neurals' registry adts' globalEnv env args (IRBuiltin BListIndex [lstExpr, idxExpr]) = do
   lst <- generate f neurals' registry adts' globalEnv env args lstExpr
   idx <- generate f neurals' registry adts' globalEnv env args idxExpr
   case lst of

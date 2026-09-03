@@ -908,7 +908,6 @@ headHash e = case e of
   IRTCons{}         -> 9
   IRHead{}          -> 10
   IRTail{}          -> 11
-  IRMap{}           -> 12
   IRTFst{}          -> 13
   IRTSnd{}          -> 14
   IRLeft{}          -> 15
@@ -926,7 +925,6 @@ headHash e = case e of
   IRApply{}         -> 27
   IREnumSum n v _   -> hashMix (hashMix 28 (hashStr n)) (hashStr (show v))
   IRIsPossible v _  -> hashMix 29 (hashStr (show v))
-  IRIndex{}         -> 30
   IRError s         -> hashMix 31 (hashStr s)
   IRConformsTo t _  -> hashMix 32 (hashStr (show t))
   IRLogDensity d _    -> hashMix 34 (hashStr (show d))
@@ -1028,7 +1026,6 @@ setIRSubExprs (IRCons{}) [a, b] = IRCons a b
 setIRSubExprs (IRTCons{}) [a, b] = IRTCons a b
 setIRSubExprs (IRHead{}) [a] = IRHead a
 setIRSubExprs (IRTail{}) [a] = IRTail a
-setIRSubExprs (IRMap{}) [a, b] = IRMap a b
 setIRSubExprs (IRTFst{}) [a] = IRTFst a
 setIRSubExprs (IRTSnd{}) [a] = IRTSnd a
 setIRSubExprs (IRLeft{}) [a] = IRLeft a
@@ -1048,7 +1045,6 @@ setIRSubExprs (IRApply{}) [a, b] = IRApply a b
 setIRSubExprs (IREnumSum n val _) [a] = IREnumSum n val a
 setIRSubExprs (IRLogEnumSum n val _) [a] = IRLogEnumSum n val a
 setIRSubExprs (IREnumSumPaired lg n val _) [a] = IREnumSumPaired lg n val a
-setIRSubExprs (IRIndex{}) [a, b] = IRIndex a b
 setIRSubExprs (IRConformsTo t _) [a] = IRConformsTo t a
 setIRSubExprs (IRBuiltin b _) kids = IRBuiltin b kids
 setIRSubExprs e [] = e  -- leaves: IRConst, IRSample, IRVar, IRError

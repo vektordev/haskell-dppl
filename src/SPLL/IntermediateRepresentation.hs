@@ -243,9 +243,23 @@ data Builtin
   | BReduce ReduceOp Int
   -- | @BIndex axis [t, key]@ -- read along @axis@ at a runtime integer key,
   -- dropping that axis (rank 1 therefore yields a scalar). Distinct from
-  -- 'IRIndex', which indexes a cons-list in an O(n) walk; this is an O(1) read
-  -- into a flat block.
+  -- 'BListIndex', which indexes a cons-list in an O(n) walk; this is an O(1)
+  -- read into a flat block.
   | BIndex Int
+  -- | @BMapList [f, xs]@ -- apply @f@ to every element of a cons-list @xs@,
+  -- yielding a list of the same length (design ir-reengineering, slice S2).
+  -- The list-walking sibling of 'BMap': that node is shape-preserving over a
+  -- static-extent tensor, this one walks an ordinary 'IRCons' spine
+  -- (@mapList(f, xs)@ in both scalar backends), and the batched backend
+  -- refuses it outright (no tensor shape to bucket).
+  | BMapList
+  -- | @BListIndex [xs, i]@ -- the @i@\'th element of a cons-list @xs@, an
+  -- O(n) walk via 'elementAt' in the interpreter. Distinct from 'BIndex',
+  -- which is an O(1) read into a flat tensor block; a point
+  -- "SPLL.IRCompiler" relies on when arguing why materialized marginal cells
+  -- are let-bound scalars rather than a table (design ir-reengineering, slice
+  -- S2).
+  | BListIndex
   deriving (Show, Eq)
 
 -- | The argument count each 'Builtin' takes, or 'Nothing' for the variadic
@@ -258,6 +272,8 @@ builtinArity (BTensor _)   = Nothing
 builtinArity BMap          = Just 2
 builtinArity (BReduce _ _) = Just 1
 builtinArity (BIndex _)    = Just 2
+builtinArity BMapList      = Just 2
+builtinArity BListIndex    = Just 2
 
 -- | Check an 'IRBuiltin'\'s argument list against 'builtinArity' -- and, for
 -- 'BTensor', against its shape -- failing loudly with the offending node.
@@ -297,7 +313,6 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               | IRTCons IRExpr IRExpr
               | IRHead IRExpr
               | IRTail IRExpr
-              | IRMap IRExpr IRExpr
               | IRTFst IRExpr
               | IRTSnd IRExpr
               | IRLeft IRExpr
@@ -356,7 +371,6 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               -- treatment) is identical to 'IREnumSum'.
               | IREnumSumPaired Bool Varname MultiValue IRExpr
               | IRIsPossible MultiValue IRExpr
-              | IRIndex IRExpr IRExpr
               -- | A named operation over a tensor (design ir-tensor-values).
               -- One constructor rather than a family:
               -- which operation, and any shape/operator/axis it is parameterised
@@ -365,12 +379,13 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               -- special-case -- which is precisely how the enum-sum family
               -- grew a constructor per reduction operator.
               --
-              -- Shaped as @Builtin [IRExpr]@ so it follows 'IRMap''s stated
-              -- fate under the ir-reengineering refactor (demotion to a
-              -- stdlib call or an @IRBuiltin@ variant) rather than becoming
-              -- another constructor family that refactor has to collapse.
-              -- Argument counts and shapes are documented per 'Builtin';
-              -- 'builtinArity' is the single place they are checked.
+              -- Shaped as @Builtin [IRExpr]@ so a new tensor operation lands
+              -- here rather than becoming another constructor family to
+              -- collapse later -- exactly the demotion 'BMapList'/'BListIndex'
+              -- (design ir-reengineering, slice S2) gave the former @IRMap@/
+              -- @IRIndex@ constructors. Argument counts and shapes are
+              -- documented per 'Builtin'; 'builtinArity' is the single place
+              -- they are checked.
               --
               -- Note the map binds its variable by taking an 'IRLambda' as an
               -- argument, not by carrying a 'Varname' field. That keeps the
@@ -647,7 +662,6 @@ getIRSubExprs (IRCons a b) = [a, b]
 getIRSubExprs (IRTCons a b) = [a, b]
 getIRSubExprs (IRHead a) = [a]
 getIRSubExprs (IRTail a) = [a]
-getIRSubExprs (IRMap f a) = [f, a]
 getIRSubExprs (IRTFst a) = [a]
 getIRSubExprs (IRTSnd a) = [a]
 getIRSubExprs (IRLeft a) = [a]
@@ -669,7 +683,6 @@ getIRSubExprs (IRApply a b) = [a, b]
 getIRSubExprs (IREnumSum _ _ a) = [a]
 getIRSubExprs (IRLogEnumSum _ _ a) = [a]
 getIRSubExprs (IREnumSumPaired _ _ _ a) = [a]
-getIRSubExprs (IRIndex a b) = [a, b]
 getIRSubExprs (IRBuiltin _ args) = args
 getIRSubExprs (IRError _) = []
 getIRSubExprs (IRConformsTo _ a) = [a]
@@ -742,7 +755,6 @@ irDescend f x = case x of
   (IRTCons left right) -> IRTCons (f left) (f right)
   (IRHead expr) -> IRHead (f expr)
   (IRTail expr) -> IRTail (f expr)
-  (IRMap fe expr) -> IRMap (f fe) (f expr)
   (IRTFst expr) -> IRTFst (f expr)
   (IRTSnd expr) -> IRTSnd (f expr)
   (IRLeft expr) -> IRLeft (f expr)
@@ -762,7 +774,6 @@ irDescend f x = case x of
   (IREnumSum name val scope) -> IREnumSum name val (f scope)
   (IRLogEnumSum name val scope) -> IRLogEnumSum name val (f scope)
   (IREnumSumPaired lg name val scope) -> IREnumSumPaired lg name val (f scope)
-  (IRIndex left right) -> IRIndex (f left) (f right)
   (IRBuiltin b args) -> IRBuiltin b (map f args)
   (IRTheta a i) -> IRTheta (f a) i
   (IRSubtree a i) -> IRSubtree (f a) i
@@ -787,7 +798,6 @@ irDescendM f x = case x of
   (IRTCons left right) -> IRTCons <$> f left <*> f right
   (IRHead expr) -> IRHead <$> f expr
   (IRTail expr) -> IRTail <$> f expr
-  (IRMap fe expr) -> IRMap <$> f fe <*> f expr
   (IRTFst expr) -> IRTFst <$> f expr
   (IRTSnd expr) -> IRTSnd <$> f expr
   (IRLeft expr) -> IRLeft <$> f expr
@@ -807,7 +817,6 @@ irDescendM f x = case x of
   (IREnumSum name val scope) -> IREnumSum name val <$> f scope
   (IRLogEnumSum name val scope) -> IRLogEnumSum name val <$> f scope
   (IREnumSumPaired lg name val scope) -> IREnumSumPaired lg name val <$> f scope
-  (IRIndex left right) -> IRIndex <$> f left <*> f right
   (IRBuiltin b args) -> IRBuiltin b <$> mapM f args
   (IRTheta a i) -> flip IRTheta i <$> f a
   (IRSubtree a i) -> flip IRSubtree i <$> f a
@@ -833,7 +842,6 @@ irPrintFlat (IRCons _ _) = "IRCons"
 irPrintFlat (IRTCons _ _) = "IRTCons"
 irPrintFlat (IRHead _) = "IRHead"
 irPrintFlat (IRTail _) = "IRTail"
-irPrintFlat (IRMap _ _) = "IRMap"
 irPrintFlat (IRTFst _) = "IRTFst"
 irPrintFlat (IRTSnd _) = "IRTSnd"
 irPrintFlat (IRLeft _) = "IRLeft"
@@ -855,7 +863,6 @@ irPrintFlat (IRLambda _ _) = "IRLambda"
 irPrintFlat (IRApply _ _) = "IRApply"
 irPrintFlat (IREnumSum _ _ _) = "IREnumSum"
 irPrintFlat (IREnumSumPaired _ _ _ _) = "IREnumSumPaired"
-irPrintFlat (IRIndex _ _) = "IRIndex"
 irPrintFlat (IRBuiltin b _) = "IRBuiltin " ++ show b
 irPrintFlat (IRError _) = "IRError"
 irPrintFlat (IRConformsTo _ _) = "IRConformsTo"

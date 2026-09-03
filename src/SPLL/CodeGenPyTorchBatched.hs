@@ -923,7 +923,12 @@ emittable e = case e of
   IRDensity{}    -> True
   IRCumulative{} -> True
   IRApply{}      -> True   -- network call / cross-function read-logits call (M2b)
-  IRIndex{}      -> True   -- logit-vector slice or per-element gather (M2b)
+  IRBuiltin BListIndex _ -> True   -- logit-vector slice or per-element gather (M2b)
+  -- List map (design ir-reengineering, slice S2 -- formerly IRMap) has no
+  -- batched form: an arbitrary-length cons list has no fixed tensor shape to
+  -- bucket. Refused explicitly, ahead of the blanket 'IRBuiltin{} -> True'
+  -- below, which admits the shape-carrying tensor ops but must not admit this.
+  IRBuiltin BMapList _   -> False
   IREnumSum _ mv _  -> scalarDiscreteMulti mv  -- enum sum, unrolled over the enum axis (M2b)
   -- Paired (probability, branchCount) enum sum -- only built by a
   -- countBranches compile. Same unrolling as 'IREnumSum', reduced
@@ -1056,7 +1061,7 @@ scalarDiscreteMulti _ = False
 -- list/Either constructs heterogeneous M1/M2 admitted.
 reason :: IRExpr -> String
 reason e = case e of
-  IRMap{}         -> "list map (IRMap)"
+  IRBuiltin BMapList _ -> "list map (IRMap)"
   IRApply{}       -> "function application (IRApply); a call did not inline"
   IRLambda{}      -> "inner lambda (IRLambda)"
   IRIsPossible{}  -> "membership check (IRIsPossible) over a non-scalar enumeration"
@@ -1205,9 +1210,9 @@ batchedExpr env e@(IRApply _ _) =
 -- Indexing a @[B, n]@ logit tensor. A constant logit slot is the last-axis
 -- select @out[..., i]@ (dim 0 stays the batch); a per-element index (a @[B]@
 -- @sample@ tensor) is a batched gather @nn_gather(out, idx)@.
-batchedExpr env (IRIndex l (IRConst (VInt i))) =
+batchedExpr env (IRBuiltin BListIndex [l, IRConst (VInt i)]) =
   "(" ++ batchedExpr env l ++ ")[..., " ++ show i ++ "]"
-batchedExpr env (IRIndex l idx) =
+batchedExpr env (IRBuiltin BListIndex [l, idx]) =
   "nn_gather(" ++ batchedExpr env l ++ ", " ++ batchedExpr env idx ++ ")"
 -- An enumeration sum: sum the body over its enumerable values. The enum axis is
 -- known at compile time (a resolved 'MultiValue'), so we unroll it inline —

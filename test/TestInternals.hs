@@ -1785,7 +1785,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
   -- Further 'reason' rows with no corpus trigger.
   [ testCase "IRMap is refused" $
       assertRefusal "list map (IRMap)"
-        (IRMap (IRLambda "x" (IRVar "x")) (IRVar "xs"))
+        (IRBuiltin BMapList [IRLambda "x" (IRVar "x"), IRVar "xs"])
   , testCase "the VAnyExcept marginal sentinel is refused" $
       assertRefusal "marginal ANY-except sentinel (IRConst VAnyExcept)"
         (IROp OpEq (IRVar "sample") (IRConst (VAnyExcept [IRConst (VInt 0)])))
@@ -1819,7 +1819,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       -- 'batchedGuard' walks the whole tree, not just the root.
       assertRefusal "list map (IRMap)"
         (IRLetIn "a" (IRConst (VFloat 1.0))
-          (IRLetIn "b" (IROp OpPlus (IRVar "a") (IRMap (IRLambda "x" (IRVar "x")) (IRVar "xs"))) (IRVar "b")))
+          (IRLetIn "b" (IROp OpPlus (IRVar "a") (IRBuiltin BMapList [IRLambda "x" (IRVar "x"), IRVar "xs"])) (IRVar "b")))
   -- Heterogeneous batching, M1: the list *spine* operations are in the fragment
   -- (within a shape bucket they are uniform Python structure over [B] leaves),
   -- but the branch that would have to *choose* between two structures is not --

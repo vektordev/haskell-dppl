@@ -666,10 +666,11 @@ bindLambdaParam scope lambdaCn x =
 -- THREE DESIGN POINTS, each load-bearing:
 --
 --  1. Cells are LET-BOUND SCALARS, not a table in the IR. 'IRExpr' has no dense
---     array type and 'IRIndex' is an O(n) cons-cell walk in the interpreter, so
---     a runtime table would turn the O(n*range) DP into O(n*range^2) on the path
---     the whole corpus runs on. The domains are compile-time known and small, so
---     unrolling is both possible and the cheaper choice -- which is why the
+--     array type and @IRBuiltin BListIndex@ is an O(n) cons-cell walk in the
+--     interpreter, so a runtime table would turn the O(n*range) DP into
+--     O(n*range^2) on the path the whole corpus runs on. The domains are
+--     compile-time known and small, so unrolling is both possible and the
+--     cheaper choice -- which is why the
 --     cardinality guard ('materializationDomain') and the unrolling
 --     affordability condition are literally the same predicate.
 --
@@ -1161,8 +1162,13 @@ freeInIR v (IRFromRight a)      = freeInIR v a
 freeInIR v (IRIsLeft a)         = freeInIR v a
 freeInIR v (IRIsRight a)        = freeInIR v a
 freeInIR v (IRCons a b)         = freeInIR v a  || freeInIR v b
-freeInIR v (IRIndex a b)        = freeInIR v a  || freeInIR v b
-freeInIR v (IRMap f x)          = freeInIR v f  || freeInIR v x
+-- 'IRBuiltin' as a whole is not covered by the catch-all below (it has no
+-- generic case here, matching this function's per-constructor style rather
+-- than 'getIRSubExprs'), so 'BMapList'/'BListIndex' need their own arms --
+-- same as the 'IRMap'/'IRIndex' arms they replace (design ir-reengineering,
+-- slice S2).
+freeInIR v (IRBuiltin BMapList [f, x])   = freeInIR v f || freeInIR v x
+freeInIR v (IRBuiltin BListIndex [a, b]) = freeInIR v a || freeInIR v b
 freeInIR v (IREnumSum n _ irBody) = v /= n && freeInIR v irBody
 freeInIR v (IRLogEnumSum n _ irBody) = v /= n && freeInIR v irBody
 freeInIR v (IREnumSumPaired _ n _ irBody) = v /= n && freeInIR v irBody
@@ -1339,7 +1345,7 @@ toIRNormalParams meta (Expr _ (ReadNN name arg)) = do
   sym <- toIRGenerate meta arg
   var <- mkVariable "nn_out"
   setVariables [(var, IRApply (IRVar name) sym)]
-  return (IRIndex (IRVar var) (IRConst (VInt 0)), IRIndex (IRVar var) (IRConst (VInt 1)))
+  return (IRBuiltin BListIndex [IRVar var, IRConst (VInt 0)], IRBuiltin BListIndex [IRVar var, IRConst (VInt 1)])
 toIRNormalParams meta e | Just act <- normalParamsViaCall meta PNormal e = act
 toIRNormalParams _ e = error $ "toIRNormalParams: cannot extract Normal params from " ++ show (pType (getTypeInfo e)) ++ " | expr: " ++ show e
 
@@ -4527,7 +4533,7 @@ planWorldMass nnRaw w =
     slotRead base (i, g)
       | g == constTrueIR = vecRead (base + i)
       | otherwise        = IRIf g (vecRead (base + i)) const0
-    vecRead k = IRIndex (IRVar nnRaw) (IRConst (VInt k))
+    vecRead k = IRBuiltin BListIndex [IRVar nnRaw, IRConst (VInt k)]
 
 -- | Entry point of the plan-guided dispatch, tried from the probabilistic
 -- Apply arm after point inversion failed and before the set-witness fallback.
