@@ -619,18 +619,18 @@ blockIterates e = iterates e || any blockIterates (getIRSubExprs e)
 
 -- | Pack values into one right-nested tuple; a single value packs to itself.
 -- Only the fields that read the shared block go in, so the common
--- probability-and-flag pair costs one 'IRTCons' rather than the three a full
--- 'packResult' would build and the optimizer would then split and rebuild.
+-- probability-and-flag pair costs one 'IRConstruct' rather than the three a
+-- full 'packResult' would build and the optimizer would then split and rebuild.
 packMany :: [IRExpr] -> IRExpr
 packMany []     = error "packMany: nothing to pack"
 packMany [x]    = x
-packMany (x:xs) = IRTCons x (packMany xs)
+packMany (x:xs) = IRConstruct TgTuple [x, packMany xs]
 
 -- | Read element @k@ of the @n@ that 'packMany' packed.
 projMany :: Int -> Int -> IRExpr -> IRExpr
 projMany _ 1 t = t
-projMany 0 _ t = IRTFst t
-projMany k n t = projMany (k - 1) (n - 1) (IRTSnd t)
+projMany 0 _ t = IRDestruct AcFst t
+projMany k n t = projMany (k - 1) (n - 1) (IRDestruct AcSnd t)
 
 -- | Sum a result over an enumerated variable's support: probabilities and branch
 -- counts sum, the result is a discrete mass (dim 0). @wrap@ post-processes the
@@ -678,21 +678,21 @@ enumSumP sr withBranchCount wrap v vals packed
       n <- mkVariable "enum_max_axis"
       body <- mkVariable "enum_body"
       let r = unpackResult (IRVar body)
-          mapped = IRBuiltin BMap [IRLambda v (IRLetIn body packed (IRTCons (unP (rProb r)) (rBranches r))), tensorDomainSR vals]
-          probs  = IRBuiltin BMap [IRLambda (n ++ "_p") (IRTFst (IRVar (n ++ "_p"))), IRVar n]
-          bcs    = IRBuiltin BMap [IRLambda (n ++ "_b") (IRTSnd (IRVar (n ++ "_b"))), IRVar n]
+          mapped = IRBuiltin BMap [IRLambda v (IRLetIn body packed (IRConstruct TgTuple [unP (rProb r), rBranches r])), tensorDomainSR vals]
+          probs  = IRBuiltin BMap [IRLambda (n ++ "_p") (IRDestruct AcFst (IRVar (n ++ "_p"))), IRVar n]
+          bcs    = IRBuiltin BMap [IRLambda (n ++ "_b") (IRDestruct AcSnd (IRVar (n ++ "_b"))), IRVar n]
       paired <- mkVariable "enum_paired"
       setVariables [(paired, wrap (IRLetIn n mapped
-                                     (IRTCons (IRBuiltin (BReduce ROpMax 0) [probs]) (IRBuiltin (BReduce ROpAdd 0) [bcs]))))]
-      opaqueMass sr (IRTFst (IRVar paired)) (IRTSnd (IRVar paired))
+                                     (IRConstruct TgTuple [IRBuiltin (BReduce ROpMax 0) [probs], IRBuiltin (BReduce ROpAdd 0) [bcs]])))]
+      opaqueMass sr (IRDestruct AcFst (IRVar paired)) (IRDestruct AcSnd (IRVar paired))
   | otherwise = do
       body <- mkVariable "enum_body"
       let r = unpackResult (IRVar body)
       paired <- mkVariable "enum_paired"
       setVariables [(paired, wrap (IREnumSumPaired (srLogSpace sr) v vals
                                      (IRLetIn body packed
-                                       (IRTCons (unP (rProb r)) (rBranches r)))))]
-      opaqueMass sr (IRTFst (IRVar paired)) (IRTSnd (IRVar paired))
+                                       (IRConstruct TgTuple [unP (rProb r), rBranches r]))))]
+      opaqueMass sr (IRDestruct AcFst (IRVar paired)) (IRDestruct AcSnd (IRVar paired))
 
 -- | The IR node an enumerated sum/max of probabilities is built from:
 -- 'IRLogEnumSum' (log-sum-exp reduction) in log space, plain 'IREnumSum'
@@ -784,10 +784,10 @@ shareResult sr tag guards binds r
       setVariables [(v, foldr (\g acc -> IRIf g acc (packResult (impossibleP sr))) block guards)]
       let proj prj e = if reads' e then prj (IRVar v) else guarded const0 e
       return (PResult
-        (P (IRTFst (IRVar v)))
-        (proj (IRTFst . IRTSnd) (rDim r))
-        (if reads' (rBranches r) then IRTFst (IRTSnd (IRTSnd (IRVar v))) else rBranches r)
-        (if reads' (rImposs r)   then IRTSnd (IRTSnd (IRTSnd (IRVar v)))
+        (P (IRDestruct AcFst (IRVar v)))
+        (proj (IRDestruct AcFst . IRDestruct AcSnd) (rDim r))
+        (if reads' (rBranches r) then IRDestruct AcFst (IRDestruct AcSnd (IRDestruct AcSnd (IRVar v))) else rBranches r)
+        (if reads' (rImposs r)   then IRDestruct AcSnd (IRDestruct AcSnd (IRDestruct AcSnd (IRVar v)))
                                  else guarded constTrueIR (rImposs r)))
   where
     reads' = mentionsAny (map fst binds)
@@ -824,11 +824,13 @@ generateLetInExpr binds e = foldr (\(var, val) expr -> IRLetIn var val expr) e b
 -- places that know it -- and, since the P newtype went in, the only places
 -- that cross the P/IRExpr boundary for a whole result at once.
 packResult :: PResult -> IRExpr
-packResult (PResult p d bc imp) = IRTCons (unP p) (IRTCons d (IRTCons bc imp))
+packResult (PResult p d bc imp) =
+  IRConstruct TgTuple [unP p, IRConstruct TgTuple [d, IRConstruct TgTuple [bc, imp]]]
 
 unpackResult :: IRExpr -> PResult
-unpackResult e = PResult (P (IRTFst e)) (IRTFst (IRTSnd e))
-                         (IRTFst (IRTSnd (IRTSnd e))) (IRTSnd (IRTSnd (IRTSnd e)))
+unpackResult e = PResult (P (IRDestruct AcFst e)) (IRDestruct AcFst (IRDestruct AcSnd e))
+                         (IRDestruct AcFst (IRDestruct AcSnd (IRDestruct AcSnd e)))
+                         (IRDestruct AcSnd (IRDestruct AcSnd (IRDestruct AcSnd e)))
 
 -- | Mixture of two alternatives (branch / disjunction): whichever side is
 -- non-zero wins, ties add, and the smaller dimension wins (a discrete mass and

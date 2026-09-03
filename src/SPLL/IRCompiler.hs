@@ -2850,8 +2850,8 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
     strip callResults e = case e of
       -- Projections off a callee's result: the bc slot is gone (read 0), and
       -- the flag that followed it moves up into the slot bc vacated.
-      IRTFst (IRTSnd (IRTSnd (IRVar x))) | x `Set.member` callResults -> IRConst (VFloat 0)
-      IRTSnd (IRTSnd (IRTSnd (IRVar x))) | x `Set.member` callResults -> IRTSnd (IRTSnd (IRVar x))
+      IRDestruct AcFst (IRDestruct AcSnd (IRDestruct AcSnd (IRVar x))) | x `Set.member` callResults -> IRConst (VFloat 0)
+      IRDestruct AcSnd (IRDestruct AcSnd (IRDestruct AcSnd (IRVar x))) | x `Set.member` callResults -> IRDestruct AcSnd (IRDestruct AcSnd (IRVar x))
       -- Binding forms: rebind the name, so shadowing cannot leak a stale
       -- classification into an inner scope.
       IRLetIn n v irBody ->
@@ -2872,9 +2872,9 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
     rebind n False = Set.delete n
 
     -- Does this bound value come from calling a function whose body we just
-    -- collapsed? Only an application does; a locally assembled 'IRTCons' keeps
-    -- its four fields. Both branch forms must agree, and an alias inherits the
-    -- classification of what it aliases.
+    -- collapsed? Only an application does; a locally assembled 'IRConstruct'
+    -- keeps its four fields. Both branch forms must agree, and an alias
+    -- inherits the classification of what it aliases.
     holdsCalleeResult env v = case v of
       IRApply _ _      -> True
       IRVar x          -> x `Set.member` env
@@ -2886,17 +2886,14 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
     -- and through the query-type guard's IRIf (whose then-branch carries the real triple;
     -- the else-branch is an IRError, left untouched by the catch-all).
     --
-    -- Two literal shapes are matched for the same triple: 'IRTCons' chains, built by this
-    -- module's own 'packResult' (design ir-reengineering, slice S1e -- not yet migrated), and
-    -- 'IRConstruct TgTuple' chains, built by 'SPLL.AutoNeural.makeProb' (slice S1b, migrated).
-    -- Both producers assemble the same "(prob, (dim, (bc, imposs)))" nesting by hand rather
-    -- than through a shared combinator, so this consumer has to recognise whichever shape the
-    -- particular function's own body used -- dropping either arm would leave that producer's
-    -- functions with an un-stripped branch-count field when 'countBranches' is off.
+    -- One literal shape is matched for the triple: 'IRConstruct TgTuple' chains, built by
+    -- both this module's own 'packResult' (migrated in design ir-reengineering, slice S1e)
+    -- and 'SPLL.AutoNeural.makeProb' (slice S1b). Before S1e landed, the two producers
+    -- disagreed (packResult still built 'IRTCons'), so this had two clauses for the same
+    -- triple; they collapsed into one once packResult moved onto the shared encoding.
     stripOuterTriple (IRLambda n irBody)         = IRLambda n (stripOuterTriple irBody)
     stripOuterTriple (IRLetIn n v irBody)        = IRLetIn n v (stripOuterTriple irBody)
     stripOuterTriple (IRIf c t e)              = IRIf c (stripOuterTriple t) (stripOuterTriple e)
-    stripOuterTriple (IRTCons a (IRTCons b (IRTCons _ imp))) = IRTCons a (IRTCons b imp)
     stripOuterTriple (IRConstruct TgTuple [a, IRConstruct TgTuple [b, IRConstruct TgTuple [_, imp]]]) =
       IRConstruct TgTuple [a, IRConstruct TgTuple [b, imp]]
     stripOuterTriple e                         = e

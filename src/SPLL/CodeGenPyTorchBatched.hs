@@ -536,21 +536,39 @@ distributeSelects = irMap d
               (distributeSelects (IRIf c (projTuple False t) (projTuple False f)))
     d e = e
 
--- | Does this expression evaluate to a tuple (an 'IRTCons' under its let-spine)?
+-- | Does this expression evaluate to a tuple (an 'IRTCons', or the new-shape
+-- 'IRConstruct TgTuple', under its let-spine)?
+--
+-- Both shapes have to be recognised here, not just accepted by 'batchedExpr's
+-- unconditional catch-all further down: this predicate gates whether
+-- 'distributeSelects' pushes a select through the tuple's components at all.
+-- Missing the new shape does not fall back to a degraded-but-safe emission the
+-- way most of this file's dual-shape gaps do -- it leaves the select
+-- undistributed, and 'torchWhere' then hands @torch.where@ a whole Python
+-- tuple object where it expects a tensor, which is a runtime 'TypeError', not
+-- a compile-time refusal. Found via the design ir-reengineering S1e landing:
+-- 'packResult' (Semiring.hs) switching to 'IRConstruct TgTuple' made this the
+-- shape of every probability-mode function's own result tuple, which is
+-- exactly what a whole-result 'IRSelect' guard selects between.
 tupleValued :: IRExpr -> Bool
-tupleValued (IRLetIn _ _ b) = tupleValued b
-tupleValued (IRTCons _ _)   = True
-tupleValued _               = False
+tupleValued (IRLetIn _ _ b)         = tupleValued b
+tupleValued (IRTCons _ _)           = True
+tupleValued (IRConstruct TgTuple _) = True
+tupleValued _                       = False
 
 -- | Project the first (@fst=True@) or second component out of a tuple-valued
 -- expression, pushing the projection through the let-spine so bindings stay in
--- scope. Falls back to 'IRTFst'/'IRTSnd' for a non-literal tuple.
+-- scope. Falls back to 'IRTFst'/'IRTSnd' for a non-literal tuple -- safe for
+-- either concrete shape, since the fallback is a generic runtime projection,
+-- not a shape-specific rebuild.
 projTuple :: Bool -> IRExpr -> IRExpr
-projTuple fstp (IRLetIn n v b) = IRLetIn n v (projTuple fstp b)
-projTuple True  (IRTCons a _)  = a
-projTuple False (IRTCons _ b)  = b
-projTuple True  e              = IRTFst e
-projTuple False e              = IRTSnd e
+projTuple fstp (IRLetIn n v b)              = IRLetIn n v (projTuple fstp b)
+projTuple True  (IRTCons a _)               = a
+projTuple False (IRTCons _ b)               = b
+projTuple True  (IRConstruct TgTuple [a, _]) = a
+projTuple False (IRConstruct TgTuple [_, b]) = b
+projTuple True  e                           = IRTFst e
+projTuple False e                           = IRTSnd e
 
 -- ---------------------------------------------------------------------------
 -- Structural (shape-directed) control flow -- design
