@@ -78,11 +78,11 @@ tensorPassExpr e = evalState (go e) 0
       n <- fresh
       let axis  = "_tensor" ++ show n
           -- Two projections over the one shared axis, each reduced on its own.
-          probs = IRBuiltin BMap [IRLambda (axis ++ "_p") (IRTFst (IRVar (axis ++ "_p"))), IRVar axis]
-          bcs   = IRBuiltin BMap [IRLambda (axis ++ "_b") (IRTSnd (IRVar (axis ++ "_b"))), IRVar axis]
+          probs = IRBuiltin BMap [IRLambda (axis ++ "_p") (IRDestruct AcFst (IRVar (axis ++ "_p"))), IRVar axis]
+          bcs   = IRBuiltin BMap [IRLambda (axis ++ "_b") (IRDestruct AcSnd (IRVar (axis ++ "_b"))), IRVar axis]
           opP   = if logSp then ROpLogSumExp else ROpAdd
       pure $ IRLetIn axis (mapOver name body mv)
-               (IRTCons (reduceOver opP probs) (reduceOver ROpAdd bcs))
+               (IRConstruct TgTuple [reduceOver opP probs, reduceOver ROpAdd bcs])
     rewrite x = pure x
 
     fresh :: State Int Int
