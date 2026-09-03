@@ -245,7 +245,7 @@ makeProbRec _adtDecls Continuous ix sample = (noAny sample p, noAny0 sample (IRC
     sigma = IRBuiltin BListIndex [IRVar vector, IRConst (VInt $ ix + 1)]
     mu = IRBuiltin BListIndex [IRVar vector, IRConst (VInt ix)]
     p = IROp OpDiv
-          (IRDensity IRNormal (IROp OpDiv (IROp OpSub sample mu) sigma))
+          (IRDensity IRNormal Linear (IROp OpDiv (IROp OpSub sample mu) sigma))
           sigma
 --Not entirely sure how to combine elements in the next case. For now:
 --  probabilities of the two tuple elements are multiplied.

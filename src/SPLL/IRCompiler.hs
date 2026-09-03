@@ -1176,10 +1176,8 @@ freeInIR v (IRBuiltin BListIndex [a, b]) = freeInIR v a || freeInIR v b
 freeInIR v (IREnumSum n _ irBody) = v /= n && freeInIR v irBody
 freeInIR v (IRLogEnumSum n _ irBody) = v /= n && freeInIR v irBody
 freeInIR v (IREnumSumPaired _ n _ irBody) = v /= n && freeInIR v irBody
-freeInIR v (IRDensity _ x)      = freeInIR v x
-freeInIR v (IRCumulative _ x)   = freeInIR v x
-freeInIR v (IRLogDensity _ x)   = freeInIR v x
-freeInIR v (IRLogCumulative _ x) = freeInIR v x
+freeInIR v (IRDensity _ _ x)    = freeInIR v x
+freeInIR v (IRCumulative _ _ x) = freeInIR v x
 freeInIR v (IRIsPossible _ x)   = freeInIR v x
 freeInIR v (IRTheta x _)        = freeInIR v x
 freeInIR v (IRSubtree x _)      = freeInIR v x
@@ -4589,7 +4587,7 @@ planWorldMass nnRaw w =
            (WFinite _, WFinite _) -> IRIf (IROp OpGreaterThan diff const0) diff const0
            _                      -> diff
     leafMass (PLeafPt base v cov gs) =
-      let dens = IROp OpDiv (IRDensity IRNormal (zScore base v)) (vecRead (base + 1))
+      let dens = IROp OpDiv (IRDensity IRNormal Linear (zScore base v)) (vecRead (base + 1))
           scaled = if cov == const1 then dens else IROp OpMult dens (IRUnaryOp OpAbs cov)
       in foldr (\g acc -> IRIf g acc const0) scaled gs
     -- P(leaf@a > leaf@b) for independent Gaussians: Phi((mu_a - mu_b) / sqrt(s_a^2 + s_b^2))
@@ -4599,10 +4597,10 @@ planWorldMass nnRaw w =
           var = IROp OpPlus (sq (vecRead (a + 1))) (sq (vecRead (b + 1)))
           -- sqrt spelled as exp(log/2): the IR has no sqrt primitive
           sd = IRUnaryOp OpExp (IROp OpMult (IRConst (VFloat 0.5)) (IRUnaryOp OpLog var))
-      in IRCumulative IRNormal (IROp OpDiv num sd)
+      in IRCumulative IRNormal Linear (IROp OpDiv num sd)
     cdfAt _ WNegInf = const0
     cdfAt _ WPosInf = const1
-    cdfAt base (WFinite e) = IRCumulative IRNormal (zScore base e)
+    cdfAt base (WFinite e) = IRCumulative IRNormal Linear (zScore base e)
     zScore base e = IROp OpDiv (IROp OpSub e (vecRead base)) (vecRead (base + 1))
     slotRead base (i, g)
       | g == constTrueIR = vecRead (base + i)

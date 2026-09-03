@@ -325,16 +325,16 @@ generateExpression (IRIsLeft x) = do
 generateExpression (IRIsRight x) = do
     e <- generateExpression x
     return $ "(" ++ e ++ " isa Right)"
-generateExpression (IRDensity dist x) = do
+generateExpression (IRDensity dist Linear x) = do
     e <- generateExpression x
     return $ "density_" ++ show dist ++ "(" ++ e ++ ")"
-generateExpression (IRCumulative dist x) = do
+generateExpression (IRCumulative dist Linear x) = do
     e <- generateExpression x
     return $ "cumulative_" ++ show dist ++ "(" ++ e ++ ")"
-generateExpression (IRLogDensity dist x) = do
+generateExpression (IRDensity dist Log x) = do
     e <- generateExpression x
     return $ "log_density_" ++ show dist ++ "(" ++ e ++ ")"
-generateExpression (IRLogCumulative dist x) = do
+generateExpression (IRCumulative dist Log x) = do
     e <- generateExpression x
     return $ "log_cumulative_" ++ show dist ++ "(" ++ e ++ ")"
 generateExpression (IRSample IRNormal) =

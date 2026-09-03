@@ -465,14 +465,14 @@ enumSumBoundVars expr = case loopBinder expr of
   where rest = concatMap enumSumBoundVars (getIRSubExprs expr)
 
 evalConstantDistr :: IRExpr -> IRExpr
-evalConstantDistr (IRDensity IRNormal (IRConst (VFloat x))) = IRConst (VFloat ((1 / sqrt (2 * pi)) * exp (-0.5 * x * x)))
-evalConstantDistr (IRCumulative IRNormal (IRConst (VFloat x))) = IRConst (VFloat ((1/2) * (1 + erf (x/sqrt (2)))))
-evalConstantDistr (IRDensity IRUniform (IRConst (VFloat x))) = IRConst (VFloat (if x >= 0 && x <= 1 then 1 else 0))
-evalConstantDistr (IRCumulative IRUniform (IRConst (VFloat x))) = IRConst (VFloat (if x < 0 then 0 else if x > 1 then 1 else x))
-evalConstantDistr (IRLogDensity IRNormal (IRConst (VFloat x))) = IRConst (VFloat ((-0.5) * x * x - 0.5 * log (2 * pi)))
-evalConstantDistr (IRLogCumulative IRNormal (IRConst (VFloat x))) = IRConst (VFloat (log ((1/2) * (1 + erf (x/sqrt (2))))))
-evalConstantDistr (IRLogDensity IRUniform (IRConst (VFloat x))) = IRConst (VFloat (if x >= 0 && x <= 1 then 0 else (-1)/0))
-evalConstantDistr (IRLogCumulative IRUniform (IRConst (VFloat x))) = IRConst (VFloat (log (if x < 0 then 0 else if x > 1 then 1 else x)))
+evalConstantDistr (IRDensity IRNormal Linear (IRConst (VFloat x))) = IRConst (VFloat ((1 / sqrt (2 * pi)) * exp (-0.5 * x * x)))
+evalConstantDistr (IRCumulative IRNormal Linear (IRConst (VFloat x))) = IRConst (VFloat ((1/2) * (1 + erf (x/sqrt (2)))))
+evalConstantDistr (IRDensity IRUniform Linear (IRConst (VFloat x))) = IRConst (VFloat (if x >= 0 && x <= 1 then 1 else 0))
+evalConstantDistr (IRCumulative IRUniform Linear (IRConst (VFloat x))) = IRConst (VFloat (if x < 0 then 0 else if x > 1 then 1 else x))
+evalConstantDistr (IRDensity IRNormal Log (IRConst (VFloat x))) = IRConst (VFloat ((-0.5) * x * x - 0.5 * log (2 * pi)))
+evalConstantDistr (IRCumulative IRNormal Log (IRConst (VFloat x))) = IRConst (VFloat (log ((1/2) * (1 + erf (x/sqrt (2))))))
+evalConstantDistr (IRDensity IRUniform Log (IRConst (VFloat x))) = IRConst (VFloat (if x >= 0 && x <= 1 then 0 else (-1)/0))
+evalConstantDistr (IRCumulative IRUniform Log (IRConst (VFloat x))) = IRConst (VFloat (log (if x < 0 then 0 else if x > 1 then 1 else x)))
 evalConstantDistr x = x
 
 simplify :: OptEnv -> IRExpr -> IRExpr
@@ -660,10 +660,8 @@ forceAnyCheck _ (IRRight _) = IRConst $ VBool False -- Eithers can never be any
 -- of the whole value expression it tests, next to the equality it guards.
 forceAnyCheck _ (IROp _ _ _) = IRConst $ VBool False
 forceAnyCheck _ (IRUnaryOp _ _) = IRConst $ VBool False
-forceAnyCheck _ (IRDensity _ _) = IRConst $ VBool False
-forceAnyCheck _ (IRCumulative _ _) = IRConst $ VBool False
-forceAnyCheck _ (IRLogDensity _ _) = IRConst $ VBool False
-forceAnyCheck _ (IRLogCumulative _ _) = IRConst $ VBool False
+forceAnyCheck _ (IRDensity _ _ _) = IRConst $ VBool False
+forceAnyCheck _ (IRCumulative _ _ _) = IRConst $ VBool False
 forceAnyCheck _ (IRSample _) = IRConst $ VBool False
 forceAnyCheck _ (IREnumSum _ _ _) = IRConst $ VBool False
 forceAnyCheck _ (IRLogEnumSum _ _ _) = IRConst $ VBool False
@@ -916,8 +914,8 @@ headHash e = case e of
   IRFromRight{}     -> 18
   IRIsLeft{}        -> 19
   IRIsRight{}       -> 20
-  IRDensity d _     -> hashMix 21 (hashStr (show d))
-  IRCumulative d _  -> hashMix 22 (hashStr (show d))
+  IRDensity d ls _  -> hashMix 21 (hashMix (hashStr (show d)) (hashStr (show ls)))
+  IRCumulative d ls _ -> hashMix 22 (hashMix (hashStr (show d)) (hashStr (show ls)))
   IRSample d        -> hashMix 23 (hashStr (show d))
   IRLetIn n _ _     -> hashMix 24 (hashStr n)
   IRVar n           -> hashMix 25 (hashStr n)
@@ -927,8 +925,6 @@ headHash e = case e of
   IRIsPossible v _  -> hashMix 29 (hashStr (show v))
   IRError s         -> hashMix 31 (hashStr s)
   IRConformsTo t _  -> hashMix 32 (hashStr (show t))
-  IRLogDensity d _    -> hashMix 34 (hashStr (show d))
-  IRLogCumulative d _ -> hashMix 35 (hashStr (show d))
   IRLogEnumSum n v _  -> hashMix (hashMix 36 (hashStr n)) (hashStr (show v))
   IREnumSumPaired lg n v _ -> hashMix (hashMix (hashMix 37 (if lg then 1 else 0)) (hashStr n)) (hashStr (show v))
   IRBuiltin b _       -> hashMix 38 (hashStr (show b))
@@ -1035,10 +1031,8 @@ setIRSubExprs (IRFromRight{}) [a] = IRFromRight a
 setIRSubExprs (IRIsLeft{}) [a] = IRIsLeft a
 setIRSubExprs (IRIsRight{}) [a] = IRIsRight a
 setIRSubExprs (IRIsPossible val _) [a] = IRIsPossible val a
-setIRSubExprs (IRDensity d _) [a] = IRDensity d a
-setIRSubExprs (IRCumulative d _) [a] = IRCumulative d a
-setIRSubExprs (IRLogDensity d _) [a] = IRLogDensity d a
-setIRSubExprs (IRLogCumulative d _) [a] = IRLogCumulative d a
+setIRSubExprs (IRDensity d ls _) [a] = IRDensity d ls a
+setIRSubExprs (IRCumulative d ls _) [a] = IRCumulative d ls a
 setIRSubExprs (IRLetIn n _ _) [a, b] = IRLetIn n a b
 setIRSubExprs (IRLambda n _) [a] = IRLambda n a
 setIRSubExprs (IRApply{}) [a, b] = IRApply a b

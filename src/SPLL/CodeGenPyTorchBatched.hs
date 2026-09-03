@@ -920,8 +920,12 @@ emittable e = case e of
   IRTSnd{}       -> True
   IRTheta{}      -> True
   IRSubtree{}    -> True
-  IRDensity{}    -> True
-  IRCumulative{} -> True
+  -- Linear only: batched mode has never had a log-space density/cumulative
+  -- lowering (the former 'IRLogDensity'/'IRLogCumulative' had no arm here
+  -- either, and fell to the catch-all 'False' below); preserved exactly by
+  -- matching the 'LogSpace' field rather than admitting both with a wildcard.
+  IRDensity _ Linear _    -> True
+  IRCumulative _ Linear _ -> True
   IRApply{}      -> True   -- network call / cross-function read-logits call (M2b)
   IRBuiltin BListIndex _ -> True   -- logit-vector slice or per-element gather (M2b)
   -- List map (design ir-reengineering, slice S2 -- formerly IRMap) has no
@@ -1199,8 +1203,11 @@ batchedExpr env (IRTFst e)       = "(" ++ batchedExpr env e ++ ")[0]"
 batchedExpr env (IRTSnd e)       = "(" ++ batchedExpr env e ++ ")[1]"
 batchedExpr env (IRTheta e i)    = "(" ++ batchedExpr env e ++ ")[0][" ++ show i ++ "]"
 batchedExpr env (IRSubtree e i)  = "(" ++ batchedExpr env e ++ ")[1][" ++ show i ++ "]"
-batchedExpr env (IRDensity d e)    = "density_" ++ batchedDist d ++ "(" ++ batchedExpr env e ++ ")"
-batchedExpr env (IRCumulative d e) = "cumulative_" ++ batchedDist d ++ "(" ++ batchedExpr env e ++ ")"
+-- Batched mode has never had a log-space density/cumulative lowering (no arm
+-- existed for the former 'IRLogDensity'/'IRLogCumulative' either); a 'Log'
+-- node still falls through to the catch-all below, unchanged in behaviour.
+batchedExpr env (IRDensity d Linear e)    = "density_" ++ batchedDist d ++ "(" ++ batchedExpr env e ++ ")"
+batchedExpr env (IRCumulative d Linear e) = "cumulative_" ++ batchedDist d ++ "(" ++ batchedExpr env e ++ ")"
 -- A call chain: the raw network invocation @net(sym)@ (returning a @[B, n]@
 -- logit tensor) or a cross-function read-logits call @readLogits.forward(logits, sample)@
 -- (the function name already rewritten to @class.method@ form by the LUT).

@@ -181,7 +181,7 @@ anyGuardedDim sample = IRIf (IRUnaryOp OpIsAny sample) const0 const1
 -- through 'unsafeLinearP', not through this vocabulary). Those remain
 -- linear-only under 'logSpace'.
 data Semiring = Semiring
-  { srLogSpace :: Bool                        -- ^ picks the IR *node* (e.g. IRDensity vs IRLogDensity), where the operator alone isn't enough
+  { srLogSpace :: Bool                        -- ^ picks the 'LogSpace' field on nodes like 'IRDensity' (@Log@ vs @Linear@), where the operator alone isn't enough
   , srReduceOp :: ReduceOp                    -- ^ picks the IR *reduction* 'enumSumP' folds an enumerated support with -- see 'srPlus' below for why this can't just read off that function
   , srZero     :: IRExpr                      -- ^ probability zero / structurally impossible
   , srOne      :: IRExpr                      -- ^ multiplicative identity
@@ -316,10 +316,10 @@ maskSR sr cond = IRIf cond (srOne sr) (srZero sr)
 -- takes the log, so precision is already lost by the time the log is taken.
 -- These emit the log formula directly in each backend instead.
 distDensity :: Semiring -> Distribution -> IRExpr -> IRExpr
-distDensity sr d s = if srLogSpace sr then IRLogDensity d s else IRDensity d s
+distDensity sr d s = IRDensity d (if srLogSpace sr then Log else Linear) s
 
 distCumulative :: Semiring -> Distribution -> IRExpr -> IRExpr
-distCumulative sr d s = if srLogSpace sr then IRLogCumulative d s else IRCumulative d s
+distCumulative sr d s = IRCumulative d (if srLogSpace sr then Log else Linear) s
 
 -- | The base normal density scaled by change-of-variables factors (division
 -- by one or more positive scale terms -- sigma for PNormal, sigma*sample for
@@ -329,8 +329,8 @@ distCumulative sr d s = if srLogSpace sr then IRLogCumulative d s else IRCumulat
 -- round trip through the linear leaf.
 scaledNormalDensity :: Semiring -> IRExpr -> [IRExpr] -> IRExpr
 scaledNormalDensity sr z scaleFactors
-  | srLogSpace sr = foldl (\acc s -> IROp OpSub acc (IRUnaryOp OpLog s)) (IRLogDensity IRNormal z) scaleFactors
-  | otherwise     = foldl (\acc s -> IROp OpDiv acc s) (IRDensity IRNormal z) scaleFactors
+  | srLogSpace sr = foldl (\acc s -> IROp OpSub acc (IRUnaryOp OpLog s)) (IRDensity IRNormal Log z) scaleFactors
+  | otherwise     = foldl (\acc s -> IROp OpDiv acc s) (IRDensity IRNormal Linear z) scaleFactors
 
 -- ===== PResult combinators (design presult-combinators) =====
 --

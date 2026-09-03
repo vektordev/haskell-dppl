@@ -15,6 +15,7 @@ module SPLL.IntermediateRepresentation (
 , builtinArity
 , expectBuiltinArgs
 , Distribution(..)
+, LogSpace(..)
 , Varname
 , IRValue
 , CompilerConfig(..)
@@ -291,6 +292,15 @@ expectBuiltinArgs b args = case builtinArity b of
 
 data Distribution = IRNormal | IRUniform deriving (Show, Eq)
 
+-- | Whether an 'IRDensity'/'IRCumulative' leaf computes the linear pdf/cdf or
+-- the native log-pdf/log-cdf formula (design ir-reengineering, slice S4). A
+-- field rather than a constructor split ('IRLogDensity'/'IRLogCumulative'
+-- used to exist as siblings of 'IRDensity'/'IRCumulative') -- exactly the axis
+-- 'ReduceOp' folds the same way for 'BReduce', and for the same reason: the
+-- distinction paid for a constructor in every generic pass without changing
+-- what the node fundamentally is.
+data LogSpace = Linear | Log deriving (Show, Eq)
+
 data IRExpr = IRIf IRExpr IRExpr IRExpr
               -- | A /select/ (design pytorch-tensorizer, M1): semantically an
               -- if whose /both/ arms are evaluated and combined by a mask on the
@@ -321,20 +331,22 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               | IRFromRight IRExpr
               | IRIsLeft IRExpr
               | IRIsRight IRExpr
-              | IRDensity Distribution IRExpr
-              | IRCumulative Distribution IRExpr
-              -- | Native log-density / log-cumulative leaves for the two
-              -- builtin distributions (task log-space-probability-computation).
-              -- Distinct from @log (IRDensity ...)@: the latter computes the
-              -- linear pdf (which underflows in a deep tail, e.g. exp(-z^2/2)
-              -- for large z) and only then takes the log, so precision is
-              -- already lost by the time the log is taken. These nodes let
-              -- each backend emit the log-pdf/log-cdf formula directly (e.g.
-              -- Normal log-pdf = -0.5*z^2 - 0.5*log(2*pi)), so a compile-time
-              -- log-space mode never round-trips through a linear value that
-              -- could have underflowed to zero first.
-              | IRLogDensity Distribution IRExpr
-              | IRLogCumulative Distribution IRExpr
+              -- | @IRDensity dist ls e@ -- density of @dist@ at @e@.
+              -- @ls == 'Log'@ selects the native log-pdf leaf (task
+              -- log-space-probability-computation) rather than the linear pdf
+              -- with a separate @log@ applied afterwards: the latter computes
+              -- the linear pdf first (which underflows in a deep tail, e.g.
+              -- exp(-z^2/2) for large z) and only then takes the log, so
+              -- precision is already lost by the time the log is taken. The
+              -- native leaf lets each backend emit the log-pdf/log-cdf formula
+              -- directly instead (e.g. Normal log-pdf = -0.5*z^2 -
+              -- 0.5*log(2*pi)), so a compile-time log-space mode never
+              -- round-trips through a linear value that could have
+              -- underflowed to zero first. A field on 'LogSpace' rather than a
+              -- constructor split (formerly 'IRLogDensity'/'IRLogCumulative'),
+              -- design ir-reengineering slice S4.
+              | IRDensity Distribution LogSpace IRExpr
+              | IRCumulative Distribution LogSpace IRExpr
               | IRSample Distribution
               | IRLetIn Varname IRExpr IRExpr
               | IRVar Varname
@@ -454,8 +466,9 @@ data CompilerConfig = CompilerConfig {
   -- ones (times becomes IROp OpPlus, mixture-sum becomes log-sum-exp, the
   -- multiplicative unit 1.0 becomes the additive unit 0.0, the zero
   -- probability becomes negative infinity), and the two builtin continuous
-  -- distributions emit native log-pdf/log-cdf IR leaves ('IRLogDensity'/
-  -- 'IRLogCumulative') rather than logging an already-computed linear value,
+  -- distributions emit native log-pdf/log-cdf IR leaves ('IRDensity'/
+  -- 'IRCumulative' with their 'LogSpace' field set to 'Log') rather than
+  -- logging an already-computed linear value,
   -- so a deep tail never underflows to a hard float zero before its log is
   -- taken. Motivation: deep conjunctions and long enumerations of small
   -- probabilities underflow in linear space long before they are numerically
@@ -671,10 +684,8 @@ getIRSubExprs (IRFromRight a) = [a]
 getIRSubExprs (IRIsLeft a) = [a]
 getIRSubExprs (IRIsRight a) = [a]
 getIRSubExprs (IRIsPossible _ a) = [a]
-getIRSubExprs (IRDensity _ a) = [a]
-getIRSubExprs (IRCumulative _ a) = [a]
-getIRSubExprs (IRLogDensity _ a) = [a]
-getIRSubExprs (IRLogCumulative _ a) = [a]
+getIRSubExprs (IRDensity _ _ a) = [a]
+getIRSubExprs (IRCumulative _ _ a) = [a]
 getIRSubExprs (IRSample _) = []
 getIRSubExprs (IRLetIn _ a b) = [a, b]
 getIRSubExprs (IRVar _) = []
@@ -764,10 +775,8 @@ irDescend f x = case x of
   (IRIsLeft expr) -> IRIsLeft (f expr)
   (IRIsRight expr) -> IRIsRight (f expr)
   (IRIsPossible val expr) -> IRIsPossible val (f expr)
-  (IRDensity a expr) -> IRDensity a (f expr)
-  (IRCumulative a expr) -> IRCumulative a (f expr)
-  (IRLogDensity a expr) -> IRLogDensity a (f expr)
-  (IRLogCumulative a expr) -> IRLogCumulative a (f expr)
+  (IRDensity a ls expr) -> IRDensity a ls (f expr)
+  (IRCumulative a ls expr) -> IRCumulative a ls (f expr)
   (IRLetIn name left right) -> IRLetIn name (f left) (f right)
   (IRLambda name scope) -> IRLambda name (f scope)
   (IRApply a b) -> IRApply (f a) (f b)
@@ -807,10 +816,8 @@ irDescendM f x = case x of
   (IRIsLeft expr) -> IRIsLeft <$> f expr
   (IRIsRight expr) -> IRIsRight <$> f expr
   (IRIsPossible val expr) -> IRIsPossible val <$> f expr
-  (IRDensity a expr) -> IRDensity a <$> f expr
-  (IRCumulative a expr) -> IRCumulative a <$> f expr
-  (IRLogDensity a expr) -> IRLogDensity a <$> f expr
-  (IRLogCumulative a expr) -> IRLogCumulative a <$> f expr
+  (IRDensity a ls expr) -> IRDensity a ls <$> f expr
+  (IRCumulative a ls expr) -> IRCumulative a ls <$> f expr
   (IRLetIn name left right) -> IRLetIn name <$> f left <*> f right
   (IRLambda name scope) -> IRLambda name <$> f scope
   (IRApply a b) -> IRApply <$> f a <*> f b
@@ -851,10 +858,8 @@ irPrintFlat (IRFromRight _) = "IRFromRight"
 irPrintFlat (IRIsLeft _) = "IRIsLeft"
 irPrintFlat (IRIsRight _) = "IRIsRight"
 irPrintFlat (IRIsPossible _ _) = "IRIsPossible"
-irPrintFlat (IRDensity _ _) = "IRDensity"
-irPrintFlat (IRCumulative _ _) = "IRCumulative"
-irPrintFlat (IRLogDensity _ _) = "IRLogDensity"
-irPrintFlat (IRLogCumulative _ _) = "IRLogCumulative"
+irPrintFlat (IRDensity _ _ _) = "IRDensity"
+irPrintFlat (IRCumulative _ _ _) = "IRCumulative"
 irPrintFlat (IRLogEnumSum _ _ _) = "IRLogEnumSum"
 irPrintFlat (IRSample _) = "IRSample"
 irPrintFlat (IRLetIn _ _ _) = "IRLetIn"

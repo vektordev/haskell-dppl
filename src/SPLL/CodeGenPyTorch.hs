@@ -353,10 +353,8 @@ containsIf (IRFromLeft x)  = containsIf x
 containsIf (IRFromRight x) = containsIf x
 containsIf (IRIsLeft x)    = containsIf x
 containsIf (IRIsRight x)   = containsIf x
-containsIf (IRDensity _ x) = containsIf x
-containsIf (IRCumulative _ x) = containsIf x
-containsIf (IRLogDensity _ x) = containsIf x
-containsIf (IRLogCumulative _ x) = containsIf x
+containsIf (IRDensity _ _ x) = containsIf x
+containsIf (IRCumulative _ _ x) = containsIf x
 containsIf (IRBuiltin BMapList [f, x])   = containsIf f || containsIf x
 containsIf (IRBuiltin BListIndex [l, i]) = containsIf l || containsIf i
 containsIf (IRCons h t)    = containsIf h || containsIf t
@@ -429,16 +427,16 @@ generateExpressionLifted (IRIsLeft x) = do
 generateExpressionLifted (IRIsRight x) = do
   (ss, sx) <- generateExpressionLifted x
   return (ss, str "isinstance(" . sx . str ", Right)")
-generateExpressionLifted (IRDensity dist x) = do
+generateExpressionLifted (IRDensity dist Linear x) = do
   (ss, sx) <- generateExpressionLifted x
   return (ss, str ("density_" ++ pyDistName dist) . str "(" . sx . str ")")
-generateExpressionLifted (IRCumulative dist x) = do
+generateExpressionLifted (IRCumulative dist Linear x) = do
   (ss, sx) <- generateExpressionLifted x
   return (ss, str ("cumulative_" ++ pyDistName dist) . str "(" . sx . str ")")
-generateExpressionLifted (IRLogDensity dist x) = do
+generateExpressionLifted (IRDensity dist Log x) = do
   (ss, sx) <- generateExpressionLifted x
   return (ss, str ("log_density_" ++ pyDistName dist) . str "(" . sx . str ")")
-generateExpressionLifted (IRLogCumulative dist x) = do
+generateExpressionLifted (IRCumulative dist Log x) = do
   (ss, sx) <- generateExpressionLifted x
   return (ss, str ("log_cumulative_" ++ pyDistName dist) . str "(" . sx . str ")")
 generateExpressionLifted (IRBuiltin BMapList [f, x]) = do
@@ -620,16 +618,16 @@ generateExpression (IRIsLeft x) = do
 generateExpression (IRIsRight x) = do
   sx <- generateExpression x
   return ("isinstance(" ++ sx ++ ", Right)")
-generateExpression (IRDensity dist x) = do
+generateExpression (IRDensity dist Linear x) = do
   sx <- generateExpression x
   return ("density_" ++ pyDistName dist ++ "(" ++ sx ++ ")")
-generateExpression (IRCumulative dist x) = do
+generateExpression (IRCumulative dist Linear x) = do
   sx <- generateExpression x
   return ("cumulative_" ++ pyDistName dist ++ "(" ++ sx ++ ")")
-generateExpression (IRLogDensity dist x) = do
+generateExpression (IRDensity dist Log x) = do
   sx <- generateExpression x
   return ("log_density_" ++ pyDistName dist ++ "(" ++ sx ++ ")")
-generateExpression (IRLogCumulative dist x) = do
+generateExpression (IRCumulative dist Log x) = do
   sx <- generateExpression x
   return ("log_cumulative_" ++ pyDistName dist ++ "(" ++ sx ++ ")")
 generateExpression (IRSample IRNormal) =

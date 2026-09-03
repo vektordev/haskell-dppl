@@ -360,22 +360,22 @@ generate f neurals' registry adts' globalEnv env [] (IRIsRight expr) = do
 generate f neurals' registry adts' globalEnv env [] (IRConformsTo t expr) = do
   x <- generate f neurals' registry adts' globalEnv env [] expr
   return $ VBool (valueConformsTo t x)
-generate f neurals' registry adts' globalEnv env [] (IRDensity IRUniform expr) = do
+generate f neurals' registry adts' globalEnv env [] (IRDensity IRUniform Linear expr) = do
   x <- generate f neurals' registry adts' globalEnv env [] expr
   return $ irPDF IRUniform x
-generate f neurals' registry adts' globalEnv env [] (IRDensity IRNormal expr) = do
+generate f neurals' registry adts' globalEnv env [] (IRDensity IRNormal Linear expr) = do
   x <- generate f neurals' registry adts' globalEnv env [] expr
   return $ irPDF IRNormal x
-generate f neurals' registry adts' globalEnv env [] (IRCumulative IRUniform expr) = do
+generate f neurals' registry adts' globalEnv env [] (IRCumulative IRUniform Linear expr) = do
   x <- generate f neurals' registry adts' globalEnv env [] expr
   return $ irCDF IRUniform x
-generate f neurals' registry adts' globalEnv env [] (IRCumulative IRNormal expr) = do
+generate f neurals' registry adts' globalEnv env [] (IRCumulative IRNormal Linear expr) = do
   x <- generate f neurals' registry adts' globalEnv env [] expr
   return $ irCDF IRNormal x
-generate f neurals' registry adts' globalEnv env [] (IRLogDensity dist expr) = do
+generate f neurals' registry adts' globalEnv env [] (IRDensity dist Log expr) = do
   x <- generate f neurals' registry adts' globalEnv env [] expr
   return $ irLogPDF dist x
-generate f neurals' registry adts' globalEnv env [] (IRLogCumulative dist expr) = do
+generate f neurals' registry adts' globalEnv env [] (IRCumulative dist Log expr) = do
   x <- generate f neurals' registry adts' globalEnv env [] expr
   return $ irLogCDF dist x
 generate f _ _ _ _ _ [] (IRSample IRUniform) =
