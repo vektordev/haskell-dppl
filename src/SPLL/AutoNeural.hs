@@ -238,12 +238,12 @@ indexOf tag _ = error ("indexOf: expected an explicit enumeration, got " ++ show
 makeProbRec :: [ADTDecl] -> PartitionPlan -> Int -> IRExpr -> (IRExpr, IRExpr, IRExpr)
 makeProbRec _adtDecls (Discretes _rty tag) ix sample = (noAny sample p, IRConst $ VFloat 0, IRConst (VFloat 0))
   where
-    p = IRIndex (IRVar vector) (IROp OpPlus (indexOf tag sample) (IRConst (VInt ix)))
+    p = IRBuiltin BListIndex [IRVar vector, IROp OpPlus (indexOf tag sample) (IRConst (VInt ix))]
 makeProbRec _adtDecls Continuous ix sample = (noAny sample p, noAny0 sample (IRConst $ VFloat 1), IRConst (VFloat 0))
   where
     -- density of μ + σ·z at x: φ((x − μ)/σ)/σ, with μ = vec[ix], σ = vec[ix+1]
-    sigma = IRIndex (IRVar vector) (IRConst (VInt $ ix + 1))
-    mu = IRIndex (IRVar vector) (IRConst (VInt ix))
+    sigma = IRBuiltin BListIndex [IRVar vector, IRConst (VInt $ ix + 1)]
+    mu = IRBuiltin BListIndex [IRVar vector, IRConst (VInt ix)]
     p = IROp OpDiv
           (IRDensity IRNormal (IROp OpDiv (IROp OpSub sample mu) sigma))
           sigma
@@ -264,7 +264,7 @@ makeProbRec adtDecls (EitherPlan a b) ix sample = (noAny sample
   where
     (aP, aDim, aBc) = makeProbRec adtDecls a (ix + 1) (IRFromLeft sample)
     (bP, bDim, bBc) = makeProbRec adtDecls b (ix + 1 + getSize a) (IRFromRight sample)
-    pIsLeft = IRIndex (IRVar vector) (IRConst (VInt ix))
+    pIsLeft = IRBuiltin BListIndex [IRVar vector, IRConst (VInt ix)]
     pIsRight = IROp OpSub (IRConst $ VFloat 1) pIsLeft
 makeProbRec adtDecls (ADTPlan adtName plans) ix sample = (noAny sample p, noAny0 sample dim, noAny0 sample bc)
   where
@@ -280,7 +280,7 @@ makeProbRec adtDecls (ADTPlan adtName plans) ix sample = (noAny sample p, noAny0
     opPlus3 (a1, b1, c1) (a2, b2, c2) = (IROp OpPlus a1 a2, IROp OpPlus b1 b2, IROp OpPlus c1 c2)
     (p, dim, bc) = foldr opPlus3 (IRConst $ VFloat 0, IRConst $ VFloat 0, IRConst $ VFloat 0) constrProbsFields
     flagIx = [ix .. ix + length plans]
-    flagProbs = map (\fIx -> IRIndex (IRVar vector) (IRConst (VInt fIx))) flagIx
+    flagProbs = map (\fIx -> IRBuiltin BListIndex [IRVar vector, IRConst (VInt fIx)]) flagIx
 
 
 makeProbADTConstr :: [ADTDecl] -> [PartitionPlan] -> ADTConstructorDecl -> Int -> IRExpr -> (IRExpr, IRExpr, IRExpr)
@@ -298,13 +298,13 @@ makeGen adtDecls plan nn_name = IRLetIn vector (IRApply (IRVar nn_name) (IRVar "
 makeGenRec :: [ADTDecl] -> PartitionPlan -> Int -> IRExpr
 makeGenRec adtDecls (TuplePlan a b) ix = IRTCons (makeGenRec adtDecls a ix) (makeGenRec adtDecls b (ix + getSize a))
 makeGenRec adtDecls (EitherPlan a b) ix = IRIf
-  (IROp OpLessThan (IRSample IRUniform) (IRIndex (IRVar vector) (IRConst (VInt ix))))
+  (IROp OpLessThan (IRSample IRUniform) (IRBuiltin BListIndex [IRVar vector, IRConst (VInt ix)]))
     (IRLeft $ makeGenRec adtDecls a (ix + 1))
     (IRRight $ makeGenRec adtDecls b (ix + 1 + getSize a))
 makeGenRec _adtDecls (Discretes _rty (MultiDiscretes vals)) ix = lottery (map valueToIR vals) ix
 makeGenRec _adtDecls Continuous ix = IROp OpPlus
-  (IROp OpMult (IRSample IRNormal) (IRIndex (IRVar vector) (IRConst (VInt $ ix + 1))))
-  (IRIndex (IRVar vector) (IRConst (VInt ix)))
+  (IROp OpMult (IRSample IRNormal) (IRBuiltin BListIndex [IRVar vector, IRConst (VInt $ ix + 1)]))
+  (IRBuiltin BListIndex [IRVar vector, IRConst (VInt ix)])
 -- Flags occupy one slot per constructor *present in the plan* (length plans), then the
 -- fields follow -- matching getSize and makeProbRec.  A depth-limited recursive ADT prunes
 -- constructors at its deepest level, so `length plans` can be smaller than the full
@@ -328,7 +328,7 @@ totalSize :: (String, [PartitionPlan]) -> Int
 totalSize ps = sum (map getSize (snd ps))
 
 vecAt :: Int -> IRExpr
-vecAt ix = (IRIndex (IRVar vector) (IRConst (VInt ix)))
+vecAt ix = IRBuiltin BListIndex [IRVar vector, IRConst (VInt ix)]
 
 -- could probably be simplified by memoizing the total weights, or assuming normalization.
 lottery :: [IRValue] -> Int -> IRExpr

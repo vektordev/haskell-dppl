@@ -357,8 +357,8 @@ containsIf (IRDensity _ x) = containsIf x
 containsIf (IRCumulative _ x) = containsIf x
 containsIf (IRLogDensity _ x) = containsIf x
 containsIf (IRLogCumulative _ x) = containsIf x
-containsIf (IRMap f x)     = containsIf f || containsIf x
-containsIf (IRIndex l i)   = containsIf l || containsIf i
+containsIf (IRBuiltin BMapList [f, x])   = containsIf f || containsIf x
+containsIf (IRBuiltin BListIndex [l, i]) = containsIf l || containsIf i
 containsIf (IRCons h t)    = containsIf h || containsIf t
 containsIf (IRTheta x _)   = containsIf x
 containsIf (IRSubtree x _) = containsIf x
@@ -441,7 +441,7 @@ generateExpressionLifted (IRLogDensity dist x) = do
 generateExpressionLifted (IRLogCumulative dist x) = do
   (ss, sx) <- generateExpressionLifted x
   return (ss, str ("log_cumulative_" ++ pyDistName dist) . str "(" . sx . str ")")
-generateExpressionLifted (IRMap f x) = do
+generateExpressionLifted (IRBuiltin BMapList [f, x]) = do
   (fs, fe) <- generateExpressionLifted f
   (xs, xe) <- generateExpressionLifted x
   return (fs ++ xs, str "mapList(" . fe . str ", " . xe . str ")")
@@ -449,7 +449,7 @@ generateExpressionLifted (IRCons hd tl) = do
   (hs, he) <- generateExpressionLifted hd
   (ts, te) <- generateExpressionLifted tl
   return (hs ++ ts, str "ConsInferenceList(" . he . str ", " . te . str ")")
-generateExpressionLifted (IRIndex lst idx) = do
+generateExpressionLifted (IRBuiltin BListIndex [lst, idx]) = do
   (ls, le) <- generateExpressionLifted lst
   (is, ie) <- generateExpressionLifted idx
   return (ls ++ is, str "(" . le . str ")[" . ie . str "]")
@@ -592,7 +592,7 @@ generateExpression (IRHead x) = do
 generateExpression (IRTail x) = do
   sx <- generateExpression x
   return (sx ++ "[1:]")
-generateExpression (IRMap f x) = do
+generateExpression (IRBuiltin BMapList [f, x]) = do
   ff <- generateExpression f
   xx <- generateExpression x
   return ("mapList(" ++ ff ++ ", " ++ xx ++ ")")
@@ -663,7 +663,7 @@ generateExpression (IRIsPossible multiVal expr) = do
   e <- generateExpression expr
   varName <- addOrGetFromGlobalStorage multiVal
   return ("isPossible(self." ++ varName ++ ", " ++ e ++ ")")
-generateExpression (IRIndex lst idx) = do
+generateExpression (IRBuiltin BListIndex [lst, idx]) = do
   l <- generateExpression lst
   i <- generateExpression idx
   return ("(" ++ l ++ ")[" ++ i ++ "]")
@@ -676,7 +676,7 @@ generateExpression (IRLetIn name val body) = do
 -- floats, there is no torch in scope), so there is no real tensor to lower a
 -- "tensor of primitive" to here -- that specialization lives in the batched
 -- backend, where an element is a [B] tensor and a reduce really is a stacked
--- sum. What scalar mode does get is an O(1) BIndex, against IRIndex's cons
+-- sum. What scalar mode does get is an O(1) BIndex, against BListIndex's cons
 -- walk.
 --
 -- Only rank 1 is emitted. The representation admits any rank, but nothing

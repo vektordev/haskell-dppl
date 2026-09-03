@@ -17,7 +17,7 @@ renameDecl
 ) where
 
 import SPLL.Typing.RType (RType(..), Scheme(..), TVarR(..), ClassConstraint(..))
-import SPLL.IntermediateRepresentation (IRExpr, IRExpr(..), Operand(..), UnaryOperand(..), irMap, IREnv (IREnv), getIRSubExprs) --FIXME
+import SPLL.IntermediateRepresentation (IRExpr, IRExpr(..), Operand(..), UnaryOperand(..), Builtin(..), irMap, IREnv (IREnv), getIRSubExprs) --FIXME
 import SPLL.Lang.Lang
 import Data.Maybe (fromJust, fromMaybe)
 import SPLL.Lang.Types
@@ -315,10 +315,10 @@ applyInv :: FDecl
 applyInv = FDecl (Forall [TV "b", TV "a"] [] ((TVarR (TV "a") `TArrow` TVarR (TV "b")) `TArrow` (TVarR (TV "b") `TArrow` TVarR (TV "a")))) ["f", "b"] ["a"] (IRApply (IRVar "f^-1") (IRVar "b")) (IRConst (VBool True)) True [("b", IRApply (IRVar "f^-1'") (IRVar "b"))]
 
 mapFwd :: FDecl
-mapFwd = FDecl (Forall [TV "a", TV "b"] [] ((TVarR (TV "a") `TArrow` TVarR (TV "b")) `TArrow` (ListOf (TVarR (TV "a")) `TArrow` ListOf (TVarR (TV "b"))))) ["f", "a"] ["b"] (IRMap (IRVar "f") (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
+mapFwd = FDecl (Forall [TV "a", TV "b"] [] ((TVarR (TV "a") `TArrow` TVarR (TV "b")) `TArrow` (ListOf (TVarR (TV "a")) `TArrow` ListOf (TVarR (TV "b"))))) ["f", "a"] ["b"] (IRBuiltin BMapList [IRVar "f", IRVar "a"]) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
 --FIXME: The derivative here is probably wron in general, if the list represents a degenerate distribution. This should probably be something like the determinant of the jacobian
 mapInv :: FDecl
-mapInv = FDecl (Forall [TV "a", TV "b"] [] ((TVarR (TV "b") `TArrow` TVarR (TV "a")) `TArrow` (ListOf (TVarR (TV "b")) `TArrow` ListOf (TVarR (TV "a"))))) ["f", "b"] ["a"] (IRMap (IRVar "f^-1") (IRVar "b")) (IRConst (VBool True)) True [("b", invokeStandardFunction stdListProd [IRMap (IRVar "f^-1'") (IRVar "b")])]
+mapInv = FDecl (Forall [TV "a", TV "b"] [] ((TVarR (TV "b") `TArrow` TVarR (TV "a")) `TArrow` (ListOf (TVarR (TV "b")) `TArrow` ListOf (TVarR (TV "a"))))) ["f", "b"] ["a"] (IRBuiltin BMapList [IRVar "f^-1", IRVar "b"]) (IRConst (VBool True)) True [("b", invokeStandardFunction stdListProd [IRBuiltin BMapList [IRVar "f^-1'", IRVar "b"]])]
 
 mapLeftFwd :: FDecl
 mapLeftFwd = FDecl (Forall [TV "a", TV "b", TV "c"] [] ((TVarR (TV "a") `TArrow` TVarR (TV "c")) `TArrow` (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TEither (TVarR (TV "c")) (TVarR (TV "b"))))) ["f", "a"] ["b"]

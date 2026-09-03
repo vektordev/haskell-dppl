@@ -611,7 +611,7 @@ blockIterates e = iterates e || any blockIterates (getIRSubExprs e)
       IREnumSum{}                 -> True
       IRLogEnumSum{}              -> True
       IREnumSumPaired{}           -> True
-      IRMap{}                     -> True
+      IRBuiltin BMapList _        -> True
       IRBuiltin BMap _            -> True
       IRBuiltin (BReduce _ _) _   -> True
       IRApply{}                   -> True

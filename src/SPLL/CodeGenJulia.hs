@@ -297,7 +297,7 @@ generateExpression (IRHead x) = do
 generateExpression (IRTail x) = do
     e <- generateExpression x
     return $ "tail(" ++ e ++ ")"
-generateExpression (IRMap f x) = do
+generateExpression (IRBuiltin BMapList [f, x]) = do
     ff <- generateExpression f
     xx <- generateExpression x
     return $ "mapList(" ++ ff ++ ", " ++ xx ++ ")"
@@ -368,7 +368,7 @@ generateExpression (IREnumSumPaired logSp name enumRange expr) = do
     var <- addOrGetFromGlobalStorage enumRange
     return $ "enumSumPaired((" ++ name ++ " -> " ++ e ++ "), multiValueToValueList(" ++ var
              ++ "), " ++ (if logSp then "true" else "false") ++ ")"
-generateExpression (IRIndex lst idx) = do
+generateExpression (IRBuiltin BListIndex [lst, idx]) = do
     l <- generateExpression lst
     i <- generateExpression idx
     return $ "(" ++ l ++ ")[" ++ i ++ " + 1]"
@@ -378,8 +378,8 @@ generateExpression (IRLetIn name val body) = do
     return $ "(let " ++ name ++ " = " ++ v ++ "; " ++ b ++ " end)"
 -- The tensor builtins (design ir-tensor-values); see the note in
 -- CodeGenPyTorch. A Julia rank-1 tensor is a Vector, so BIndex is an O(1) read
--- against IRIndex's cons walk. Indices are 1-based, hence the "+ 1" that
--- IRIndex also carries. Rank > 1 and axis > 0 are refused, as there too.
+-- against BListIndex's cons walk. Indices are 1-based, hence the "+ 1" that
+-- BListIndex also carries. Rank > 1 and axis > 0 are refused, as there too.
 generateExpression (IRBuiltin (BTensor sh) elems)
     | shapeRank sh == 1 = do
         es <- mapM generateExpression elems

@@ -409,7 +409,7 @@ irUniverse e = e : concatMap irUniverse (getIRSubExprs e)
 -- indexOf(...) for discrete leaves, so we also take the constant operand of a `+`.
 vectorIndices :: IRExpr -> [Int]
 vectorIndices root =
-  [ i | IRIndex (IRVar v) idx <- irUniverse root, v == vectorOut, i <- idxConsts idx ]
+  [ i | IRBuiltin BListIndex [IRVar v, idx] <- irUniverse root, v == vectorOut, i <- idxConsts idx ]
   where
     idxConsts (IRConst (VInt i)) = [i]
     idxConsts (IROp OpPlus a b)  = constOperand a ++ constOperand b
