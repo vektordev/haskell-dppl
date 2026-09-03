@@ -1220,9 +1220,9 @@ mkDeepAnyCheck :: RType -> IRExpr -> IRExpr
 mkDeepAnyCheck (TEither _ _) sample =
   IRIf (IRUnaryOp OpIsAny sample)
     (IRConst (VBool True))
-    (IRIf (IRIsLeft sample)
-      (IRUnaryOp OpIsAny (IRFromLeft sample))
-      (IRUnaryOp OpIsAny (IRFromRight sample)))
+    (IRIf (IRDestruct AcIsLeft sample)
+      (IRUnaryOp OpIsAny (IRDestruct AcFromLeft sample))
+      (IRUnaryOp OpIsAny (IRDestruct AcFromRight sample)))
 mkDeepAnyCheck _ sample = IRUnaryOp OpIsAny sample
 
 -- | For a deconstructing Either InjF, returns a safe alternative invExpr that avoids
@@ -1230,9 +1230,9 @@ mkDeepAnyCheck _ sample = IRUnaryOp OpIsAny sample
 -- value, so downstream OpEq comparisons handle it correctly.
 mkSafeInvExpr :: IRExpr -> IRExpr
 mkSafeInvExpr sample =
-  IRIf (IRIsLeft sample)
-    (IRLeft (IRConst VAny))
-    (IRRight (IRConst VAny))
+  IRIf (IRDestruct AcIsLeft sample)
+    (IRConstruct TgLeft [IRConst VAny])
+    (IRConstruct TgRight [IRConst VAny])
 
 renameVar :: String -> String -> IRExpr -> IRExpr
 renameVar old new = irMap (renameVar' old new)
@@ -1595,10 +1595,10 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (Constant value)) sample = do
 toIRInference meta True (Expr TypeInfo {rType=rt} (Constant value)) sample = return (mass (compareValueExpr (semiringOf meta) rt (IRConst (valueToIR value)) sample))
 toIRInference meta True (Expr _ (ThetaI a i)) sample = do
   a' <- toIRGenerate meta a
-  return (mass (IRIf (IROp OpLessThan sample (IRTheta a' i)) (srZero (semiringOf meta)) (srOne (semiringOf meta))))
+  return (mass (IRIf (IROp OpLessThan sample (IRDestruct (AcTheta i) a')) (srZero (semiringOf meta)) (srOne (semiringOf meta))))
 toIRInference meta False (Expr _ (ThetaI a i)) sample = do
   a' <- toIRGenerate meta a
-  return (indicatorP (semiringOf meta) (IROp OpApprox sample (IRTheta a' i)))
+  return (indicatorP (semiringOf meta) (IROp OpApprox sample (IRDestruct (AcTheta i) a')))
 toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
   var_condT_p <- mkVariable "condT"
   var_condF_p <- mkVariable "condF"
@@ -2541,11 +2541,11 @@ compareValueExpr sr TFloat v sample = IRIf (IROp OpLessThan sample v) (srZero sr
 compareValueExpr sr TInt v sample = IRIf (IROp OpLessThan sample v) (srZero sr) (srOne sr)
 compareValueExpr sr TBool v sample = IRIf (IROp OpAnd (IRUnaryOp OpNot sample) v) (srZero sr) (srOne sr)
 compareValueExpr sr TUnit _ _ = srOne sr
-compareValueExpr sr (Tuple ft st) v sample = srTimes sr (compareValueExpr sr ft (IRTFst v) (IRTFst sample)) (compareValueExpr sr st (IRTSnd v) (IRTSnd sample))
+compareValueExpr sr (Tuple ft st) v sample = srTimes sr (compareValueExpr sr ft (IRDestruct AcFst v) (IRDestruct AcFst sample)) (compareValueExpr sr st (IRDestruct AcSnd v) (IRDestruct AcSnd sample))
 compareValueExpr sr (TEither lr rr) v sample =
-  IRIf (IRIsLeft v)
-    (IRIf (IRIsLeft sample) (compareValueExpr sr lr (IRFromLeft v) (IRFromLeft sample)) (srZero sr))
-    (IRIf (IRIsRight sample) (compareValueExpr sr rr (IRFromRight v) (IRFromRight sample)) (srZero sr))
+  IRIf (IRDestruct AcIsLeft v)
+    (IRIf (IRDestruct AcIsLeft sample) (compareValueExpr sr lr (IRDestruct AcFromLeft v) (IRDestruct AcFromLeft sample)) (srZero sr))
+    (IRIf (IRDestruct AcIsRight sample) (compareValueExpr sr rr (IRDestruct AcFromRight v) (IRDestruct AcFromRight sample)) (srZero sr))
 compareValueExpr sr (TVarR _) v sample = IRIf (IROp OpLessThan sample v) (srZero sr) (srOne sr)
 -- A deterministic list contributes an equality indicator: it is the semiring
 -- one exactly when the sample matches (in particular the empty-list base of a
@@ -2607,11 +2607,11 @@ equalityGuardBody _    TFloat    v sample = IROp OpApprox sample v
 equalityGuardBody _    (TVarR _) v sample = IROp OpApprox sample v
 equalityGuardBody _    TUnit _ _ = constTrueIR
 equalityGuardBody self (Tuple ft st) v sample =
-  IROp OpAnd (self ft (IRTFst v) (IRTFst sample)) (self st (IRTSnd v) (IRTSnd sample))
+  IROp OpAnd (self ft (IRDestruct AcFst v) (IRDestruct AcFst sample)) (self st (IRDestruct AcSnd v) (IRDestruct AcSnd sample))
 equalityGuardBody self (TEither lr rr) v sample =
-  IRIf (IRIsLeft v)
-    (IRIf (IRIsLeft sample) (self lr (IRFromLeft v) (IRFromLeft sample)) (IRConst $ VBool False))
-    (IRIf (IRIsLeft sample) (IRConst $ VBool False) (self rr (IRFromRight v) (IRFromRight sample)))
+  IRIf (IRDestruct AcIsLeft v)
+    (IRIf (IRDestruct AcIsLeft sample) (self lr (IRDestruct AcFromLeft v) (IRDestruct AcFromLeft sample)) (IRConst $ VBool False))
+    (IRIf (IRDestruct AcIsLeft sample) (IRConst $ VBool False) (self rr (IRDestruct AcFromRight v) (IRDestruct AcFromRight sample)))
 equalityGuardBody _    _ v sample = IROp OpEq sample v
 
 
@@ -2648,10 +2648,10 @@ toIRGenerate meta (Expr _ (IfThenElse cond left right)) = do
   return $ IRIf c l r
 toIRGenerate meta (Expr _ (ThetaI a ix)) = do
   a' <- toIRGenerate meta a
-  return $ IRTheta a' ix
+  return $ IRDestruct (AcTheta ix) a'
 toIRGenerate meta (Expr _ (Subtree a ix)) = do
   a' <- toIRGenerate meta a
-  return $ IRSubtree a' ix
+  return $ IRDestruct (AcSubtree ix) a'
 toIRGenerate _ (Expr _ (Constant (VError e))) = return $ IRError e
 toIRGenerate _ (Expr _ (Constant x)) = return (IRConst (fmap failConversion x))
 -- Distribution primitives (reserved-name Vars): each occurrence is a fresh draw.
@@ -2955,6 +2955,8 @@ irRuntimeContainsAny (IRConst v) = if valueContainsAny v then constTrueIR else I
 irRuntimeContainsAny (IRIf c t e) = IRIf c (irRuntimeContainsAny t) (irRuntimeContainsAny e)
 irRuntimeContainsAny (IRLeft a) = irRuntimeContainsAny a
 irRuntimeContainsAny (IRRight a) = irRuntimeContainsAny a
+irRuntimeContainsAny (IRConstruct TgLeft [a]) = irRuntimeContainsAny a
+irRuntimeContainsAny (IRConstruct TgRight [a]) = irRuntimeContainsAny a
 irRuntimeContainsAny (IRLetIn n v b) = IRLetIn n v (irRuntimeContainsAny b)
 irRuntimeContainsAny e = IRUnaryOp OpIsAny e
 
@@ -3044,6 +3046,8 @@ distributeChoice c (ga, sa) (gb, sb) = ([IRIf c (conjIR ga) (conjIR gb)], WChoic
 mergeWitnessValue :: IRExpr -> IRExpr -> IRExpr
 mergeWitnessValue (IRTCons a1 b1) (IRTCons a2 b2) =
   IRTCons (mergeWitnessValue a1 a2) (mergeWitnessValue b1 b2)
+mergeWitnessValue (IRConstruct TgTuple [a1, b1]) (IRConstruct TgTuple [a2, b2]) =
+  IRConstruct TgTuple [mergeWitnessValue a1 a2, mergeWitnessValue b1 b2]
 mergeWitnessValue p1 p2 = IRIf (irRuntimeContainsAny p1) p2 p1
 
 -- Membership guards of a point against interval bounds. Strictness is
@@ -3280,8 +3284,8 @@ invertToWorlds meta occs exprBody target = do
           _ -> return Nothing
       Expr _ (InjF (Named "TCons") [pa, pb]) -> case target of
         WPoint s _ -> do
-          wsA <- invertToWorlds meta occs pa (WPoint (IRTFst s) const1)
-          wsB <- invertToWorlds meta occs pb (WPoint (IRTSnd s) const1)
+          wsA <- invertToWorlds meta occs pa (WPoint (IRDestruct AcFst s) const1)
+          wsB <- invertToWorlds meta occs pb (WPoint (IRDestruct AcSnd s) const1)
           case (wsA, wsB) of
             (Just as, Just bs) -> return (Just [intersectW a b | a <- as, b <- bs])
             _ -> return Nothing
@@ -3796,8 +3800,8 @@ planRefWorlds _ (PlanRef (Discretes rty (MultiDiscretes vals)) off) cons tgt =
           (PLeafCon off [ (i, planDetGuard rty (IRConst (valueToIR v)) tgt) | (i, v) <- zip [0..] vals ])
           cons)]
 planRefWorlds adtDecls' (PlanRef (TuplePlan a b) off) cons (PTPoint s) = do
-  wa <- planRefWorlds adtDecls' (PlanRef a off) cons (PTPoint (IRTFst s))
-  wb <- planRefWorlds adtDecls' (PlanRef b (off + getSize a)) [] (PTPoint (IRTSnd s))
+  wa <- planRefWorlds adtDecls' (PlanRef a off) cons (PTPoint (IRDestruct AcFst s))
+  wb <- planRefWorlds adtDecls' (PlanRef b (off + getSize a)) [] (PTPoint (IRDestruct AcSnd s))
   return [ intersectPlanW x y | x <- wa, y <- wb ]
 planRefWorlds _ (PlanRef (ADTPlan _ ctorPlans) off) cons (PTPoint s)
   | all (null . snd) ctorPlans =

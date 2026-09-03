@@ -17,7 +17,7 @@ renameDecl
 ) where
 
 import SPLL.Typing.RType (RType(..), Scheme(..), TVarR(..), ClassConstraint(..))
-import SPLL.IntermediateRepresentation (IRExpr, IRExpr(..), Operand(..), UnaryOperand(..), Builtin(..), irMap, IREnv (IREnv), getIRSubExprs) --FIXME
+import SPLL.IntermediateRepresentation (IRExpr, IRExpr(..), Operand(..), UnaryOperand(..), Builtin(..), ConTag(..), Accessor(..), irMap, IREnv (IREnv), getIRSubExprs) --FIXME
 import SPLL.Lang.Lang
 import Data.Maybe (fromJust, fromMaybe)
 import SPLL.Lang.Types
@@ -126,19 +126,19 @@ sqInv :: FDecl
 sqInv = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["b"] ["a"] (IRUnaryOp OpExp (IROp OpMult (IRConst (VFloat 0.5)) (IRUnaryOp OpLog (IRVar "b")))) (IROp OpGreaterThan (IRVar "b") (IRConst (VFloat 0))) False [("b", IROp OpDiv (IRConst (VFloat 0.5)) (IRUnaryOp OpExp (IROp OpMult (IRConst (VFloat 0.5)) (IRUnaryOp OpLog (IRVar "b")))))]
 
 leftFwd :: FDecl
-leftFwd = FDecl (Forall [TV "a", TV "b"] [] (TVarR (TV "a") `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b")))) ["a"] ["b"] (IRLeft (IRVar "a")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1))]
+leftFwd = FDecl (Forall [TV "a", TV "b"] [] (TVarR (TV "a") `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b")))) ["a"] ["b"] (IRConstruct TgLeft [IRVar "a"]) (IRConst (VBool True)) False [("a", IRConst (VFloat 1))]
 -- Partial extractor, kept only to serve as `left`'s inverse (guarded by
 -- applicability = isLeft, as before). Not exposed under the "fromLeft" name
 -- any more -- see fromLeftMaybeFwd/fromLeftMaybeInv below for that.
 fromLeftFwd :: FDecl
-fromLeftFwd = FDecl (Forall [TV "a", TV "b"] [] (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "a"))) ["b"] ["a"] (IRFromLeft (IRVar "b")) (IRIsLeft (IRVar "b")) True [("b", IRConst (VFloat 1))]
+fromLeftFwd = FDecl (Forall [TV "a", TV "b"] [] (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "a"))) ["b"] ["a"] (IRDestruct AcFromLeft (IRVar "b")) (IRDestruct AcIsLeft (IRVar "b")) True [("b", IRConst (VFloat 1))]
 
 rightFwd :: FDecl
-rightFwd = FDecl (Forall [TV "a", TV "b"] [] (TVarR (TV "b") `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b")))) ["a"] ["b"] (IRRight (IRVar "a")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1))]
+rightFwd = FDecl (Forall [TV "a", TV "b"] [] (TVarR (TV "b") `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b")))) ["a"] ["b"] (IRConstruct TgRight [IRVar "a"]) (IRConst (VBool True)) False [("a", IRConst (VFloat 1))]
 -- Partial extractor, kept only to serve as `right`'s inverse. See fromRightFwd's
 -- comment above.
 fromRightFwd :: FDecl
-fromRightFwd = FDecl (Forall [TV "a", TV "b"] [] (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "b"))) ["b"] ["a"] (IRFromRight (IRVar "b")) (IRIsRight (IRVar "b")) True [("b", IRConst (VFloat 1))]
+fromRightFwd = FDecl (Forall [TV "a", TV "b"] [] (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "b"))) ["b"] ["a"] (IRDestruct AcFromRight (IRVar "b")) (IRDestruct AcIsRight (IRVar "b")) True [("b", IRConst (VFloat 1))]
 
 -- Total, Maybe-returning fromLeft/fromRight (the surfaced "fromLeft"/"fromRight"
 -- InjF names). Maybe a is represented as Either () a (Haskell convention:
@@ -148,32 +148,32 @@ fromRightFwd = FDecl (Forall [TV "a", TV "b"] [] (TEither (TVarR (TV "a")) (TVar
 fromLeftMaybeFwd :: FDecl
 fromLeftMaybeFwd = FDecl (Forall [TV "a", TV "b"] [] (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TEither TUnit (TVarR (TV "a"))))
   ["b"] ["m"]
-  (IRIf (IRIsLeft (IRVar "b")) (IRRight (IRFromLeft (IRVar "b"))) (IRLeft (IRConst VUnit)))
+  (IRIf (IRDestruct AcIsLeft (IRVar "b")) (IRConstruct TgRight [IRDestruct AcFromLeft (IRVar "b")]) (IRConstruct TgLeft [IRConst VUnit]))
   (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
 fromLeftMaybeInv :: FDecl
 fromLeftMaybeInv = FDecl (Forall [TV "a", TV "b"] [] (TEither TUnit (TVarR (TV "a")) `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b"))))
   ["m"] ["b"]
-  (IRIf (IRIsRight (IRVar "m")) (IRLeft (IRFromRight (IRVar "m"))) (IRRight (IRConst VAny)))
+  (IRIf (IRDestruct AcIsRight (IRVar "m")) (IRConstruct TgLeft [IRDestruct AcFromRight (IRVar "m")]) (IRConstruct TgRight [IRConst VAny]))
   (IRConst (VBool True)) True [("m", IRConst (VFloat 1))]
 
 fromRightMaybeFwd :: FDecl
 fromRightMaybeFwd = FDecl (Forall [TV "a", TV "b"] [] (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TEither TUnit (TVarR (TV "b"))))
   ["b"] ["m"]
-  (IRIf (IRIsRight (IRVar "b")) (IRRight (IRFromRight (IRVar "b"))) (IRLeft (IRConst VUnit)))
+  (IRIf (IRDestruct AcIsRight (IRVar "b")) (IRConstruct TgRight [IRDestruct AcFromRight (IRVar "b")]) (IRConstruct TgLeft [IRConst VUnit]))
   (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
 fromRightMaybeInv :: FDecl
 fromRightMaybeInv = FDecl (Forall [TV "a", TV "b"] [] (TEither TUnit (TVarR (TV "b")) `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b"))))
   ["m"] ["b"]
-  (IRIf (IRIsRight (IRVar "m")) (IRRight (IRFromRight (IRVar "m"))) (IRLeft (IRConst VAny)))
+  (IRIf (IRDestruct AcIsRight (IRVar "m")) (IRConstruct TgRight [IRDestruct AcFromRight (IRVar "m")]) (IRConstruct TgLeft [IRConst VAny]))
   (IRConst (VBool True)) True [("m", IRConst (VFloat 1))]
 
 isLeftFwd :: FDecl
-isLeftFwd = FDecl (Forall [TV "a", TV "b"] [] (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TBool)) ["a"] ["b"] (IRIsLeft (IRVar "a")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1))]
+isLeftFwd = FDecl (Forall [TV "a", TV "b"] [] (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TBool)) ["a"] ["b"] (IRDestruct AcIsLeft (IRVar "a")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1))]
 isLeftInv :: FDecl
 isLeftInv = FDecl (Forall [TV "a", TV "b"] [] (TBool `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b")))) ["b"] ["a"] (IRIf (IRVar "b") (IRConst $ VEither (Left VAny)) (IRConst $ VEither (Right VAny))) (IRConst (VBool True)) False [("b", IRConst (VFloat 1))]
 
 isRightFwd :: FDecl
-isRightFwd = FDecl (Forall [TV "a", TV "b"] [] (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TBool)) ["a"] ["b"] (IRIsRight (IRVar "a")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1))]
+isRightFwd = FDecl (Forall [TV "a", TV "b"] [] (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TBool)) ["a"] ["b"] (IRDestruct AcIsRight (IRVar "a")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1))]
 isRightInv :: FDecl
 isRightInv = FDecl (Forall [TV "a", TV "b"] [] (TBool `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b")))) ["b"] ["a"] (IRIf (IRVar "b") (IRConst $ VEither (Right VAny)) (IRConst $ VEither (Left VAny))) (IRConst (VBool True)) False [("b", IRConst (VFloat 1))]
 
@@ -266,39 +266,39 @@ listNonEmpty :: IRExpr
 listNonEmpty = IRUnaryOp OpNot (IROp OpEq (IRVar "b") (IRConst (VList EmptyList)))
 
 consFwd :: FDecl
-consFwd = FDecl (Forall [TV "a"] [] (TVarR (TV "a") `TArrow` (ListOf (TVarR (TV "a")) `TArrow` ListOf (TVarR (TV "a"))))) ["h", "t"] ["b"] (IRCons (IRVar "h") (IRVar "t")) (IRConst (VBool True)) False [("h", IRConst (VFloat 1)), ("t", IRConst (VFloat 1))]
+consFwd = FDecl (Forall [TV "a"] [] (TVarR (TV "a") `TArrow` (ListOf (TVarR (TV "a")) `TArrow` ListOf (TVarR (TV "a"))))) ["h", "t"] ["b"] (IRConstruct TgCons [IRVar "h", IRVar "t"]) (IRConst (VBool True)) False [("h", IRConst (VFloat 1)), ("t", IRConst (VFloat 1))]
 consInvHead :: FDecl
-consInvHead = FDecl (Forall [TV "a"] [] (ListOf (TVarR (TV "a")) `TArrow` TVarR (TV "a"))) ["b"] ["h"] (IRHead (IRVar "b")) listNonEmpty True [("b", IRConst (VFloat 1))]
+consInvHead = FDecl (Forall [TV "a"] [] (ListOf (TVarR (TV "a")) `TArrow` TVarR (TV "a"))) ["b"] ["h"] (IRDestruct AcHead (IRVar "b")) listNonEmpty True [("b", IRConst (VFloat 1))]
 consInvTail :: FDecl
-consInvTail = FDecl (Forall [TV "a"] [] (ListOf (TVarR (TV "a")) `TArrow` ListOf (TVarR (TV "a")))) ["b"] ["t"] (IRTail (IRVar "b")) listNonEmpty True [("b", IRConst (VFloat 1))]
+consInvTail = FDecl (Forall [TV "a"] [] (ListOf (TVarR (TV "a")) `TArrow` ListOf (TVarR (TV "a")))) ["b"] ["t"] (IRDestruct AcTail (IRVar "b")) listNonEmpty True [("b", IRConst (VFloat 1))]
 
 tConsFwd :: FDecl
-tConsFwd = FDecl (Forall [TV "a", TV "b"] [] (TVarR (TV "a") `TArrow` (TVarR (TV "b") `TArrow` Tuple (TVarR (TV "a")) (TVarR (TV "b"))))) ["x", "y"] ["b"] (IRTCons (IRVar "x") (IRVar "y")) (IRConst (VBool True)) False [("x", IRConst (VFloat 1)), ("y", IRConst (VFloat 1))]
+tConsFwd = FDecl (Forall [TV "a", TV "b"] [] (TVarR (TV "a") `TArrow` (TVarR (TV "b") `TArrow` Tuple (TVarR (TV "a")) (TVarR (TV "b"))))) ["x", "y"] ["b"] (IRConstruct TgTuple [IRVar "x", IRVar "y"]) (IRConst (VBool True)) False [("x", IRConst (VFloat 1)), ("y", IRConst (VFloat 1))]
 tConsInvFst :: FDecl
-tConsInvFst = FDecl (Forall [TV "a", TV "b"] [] (Tuple (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "a"))) ["b"] ["x"] (IRTFst (IRVar "b")) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
+tConsInvFst = FDecl (Forall [TV "a", TV "b"] [] (Tuple (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "a"))) ["b"] ["x"] (IRDestruct AcFst (IRVar "b")) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
 tConsInvSnd :: FDecl
-tConsInvSnd = FDecl (Forall [TV "a", TV "b"] [] (Tuple (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "b"))) ["b"] ["y"] (IRTSnd (IRVar "b")) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
+tConsInvSnd = FDecl (Forall [TV "a", TV "b"] [] (Tuple (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "b"))) ["b"] ["y"] (IRDestruct AcSnd (IRVar "b")) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
 
 fstFwd :: FDecl
-fstFwd = FDecl (Forall [TV "a", TV "b"] [] (Tuple (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "a"))) ["a"] ["b"] (IRTFst (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
+fstFwd = FDecl (Forall [TV "a", TV "b"] [] (Tuple (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "a"))) ["a"] ["b"] (IRDestruct AcFst (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
 fstInv :: FDecl
-fstInv = FDecl (Forall [TV "a", TV "b"] [] (TVarR (TV "a") `TArrow` Tuple (TVarR (TV "a")) (TVarR (TV "b")))) ["b"] ["a"] (IRTCons (IRVar "b") (IRConst VAny)) (IRConst (VBool True)) False [("b", IRConst (VFloat 1))]
+fstInv = FDecl (Forall [TV "a", TV "b"] [] (TVarR (TV "a") `TArrow` Tuple (TVarR (TV "a")) (TVarR (TV "b")))) ["b"] ["a"] (IRConstruct TgTuple [IRVar "b", IRConst VAny]) (IRConst (VBool True)) False [("b", IRConst (VFloat 1))]
 sndFwd :: FDecl
-sndFwd = FDecl (Forall [TV "a", TV "b"] [] (Tuple (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "b"))) ["a"] ["b"] (IRTSnd (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
+sndFwd = FDecl (Forall [TV "a", TV "b"] [] (Tuple (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TVarR (TV "b"))) ["a"] ["b"] (IRDestruct AcSnd (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
 sndInv :: FDecl
-sndInv = FDecl (Forall [TV "a", TV "b"] [] (TVarR (TV "b") `TArrow` Tuple (TVarR (TV "a")) (TVarR (TV "b")))) ["b"] ["a"] (IRTCons (IRConst VAny) (IRVar "b")) (IRConst (VBool True)) False [("b", IRConst (VFloat 1))]
+sndInv = FDecl (Forall [TV "a", TV "b"] [] (TVarR (TV "b") `TArrow` Tuple (TVarR (TV "a")) (TVarR (TV "b")))) ["b"] ["a"] (IRConstruct TgTuple [IRConst VAny, IRVar "b"]) (IRConst (VBool True)) False [("b", IRConst (VFloat 1))]
 
 headFwd :: FDecl
-headFwd = FDecl (Forall [TV "a"] [] (ListOf (TVarR (TV "a")) `TArrow` TVarR (TV "a"))) ["a"] ["b"] (IRHead (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
+headFwd = FDecl (Forall [TV "a"] [] (ListOf (TVarR (TV "a")) `TArrow` TVarR (TV "a"))) ["a"] ["b"] (IRDestruct AcHead (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
 headInv :: FDecl
 -- The reconstructed tail is a list slot, so its hole must be the list-shaped
 -- any-value; a scalar one is ill-typed on both text backends. See 'anyOfType'.
-headInv = FDecl (Forall [TV "a"] [] (TVarR (TV "a") `TArrow` ListOf (TVarR (TV "a")))) ["b"] ["a"] (IRCons (IRVar "b") (IRConst (anyOfType (ListOf (TVarR (TV "a")))))) (IRConst (VBool True)) False [("b", IRConst (VFloat 1))]
+headInv = FDecl (Forall [TV "a"] [] (TVarR (TV "a") `TArrow` ListOf (TVarR (TV "a")))) ["b"] ["a"] (IRConstruct TgCons [IRVar "b", IRConst (anyOfType (ListOf (TVarR (TV "a"))))]) (IRConst (VBool True)) False [("b", IRConst (VFloat 1))]
 
 tailFwd :: FDecl
-tailFwd = FDecl (Forall [TV "a"] [] (ListOf (TVarR (TV "a")) `TArrow` ListOf (TVarR (TV "a")))) ["a"] ["b"] (IRTail (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
+tailFwd = FDecl (Forall [TV "a"] [] (ListOf (TVarR (TV "a")) `TArrow` ListOf (TVarR (TV "a")))) ["a"] ["b"] (IRDestruct AcTail (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
 tailInv :: FDecl
-tailInv = FDecl (Forall [TV "a"] [] (ListOf (TVarR (TV "a")) `TArrow` ListOf (TVarR (TV "a")))) ["b"] ["a"] (IRCons (IRConst VAny) (IRVar "b")) (IRConst (VBool True)) False [("b", IRConst (VFloat 1))]
+tailInv = FDecl (Forall [TV "a"] [] (ListOf (TVarR (TV "a")) `TArrow` ListOf (TVarR (TV "a")))) ["b"] ["a"] (IRConstruct TgCons [IRConst VAny, IRVar "b"]) (IRConst (VBool True)) False [("b", IRConst (VFloat 1))]
 
 isNullFwd :: FDecl
 isNullFwd = FDecl (Forall [TV "a"] [] (ListOf (TVarR (TV "a")) `TArrow` TBool)) ["a"] ["b"] (IROp OpEq (IRVar "a") (IRConst (VList EmptyList))) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
@@ -322,17 +322,17 @@ mapInv = FDecl (Forall [TV "a", TV "b"] [] ((TVarR (TV "b") `TArrow` TVarR (TV "
 
 mapLeftFwd :: FDecl
 mapLeftFwd = FDecl (Forall [TV "a", TV "b", TV "c"] [] ((TVarR (TV "a") `TArrow` TVarR (TV "c")) `TArrow` (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TEither (TVarR (TV "c")) (TVarR (TV "b"))))) ["f", "a"] ["b"]
-              (IRIf (IRIsLeft (IRVar "a")) (IRLeft (IRApply (IRVar "f") (IRFromLeft (IRVar "a")))) (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
+              (IRIf (IRDestruct AcIsLeft (IRVar "a")) (IRConstruct TgLeft [IRApply (IRVar "f") (IRDestruct AcFromLeft (IRVar "a"))]) (IRVar "a")) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
 mapLeftInv :: FDecl
 mapLeftInv = FDecl (Forall [TV "a", TV "b", TV "c"] [] ((TVarR (TV "c") `TArrow` TVarR (TV "a")) `TArrow` (TEither (TVarR (TV "c")) (TVarR (TV "b")) `TArrow` TEither (TVarR (TV "a")) (TVarR (TV "b"))))) ["f", "b"] ["a"]
-              (IRIf (IRIsLeft (IRVar "b")) (IRLeft (IRApply (IRVar "f^-1") (IRFromLeft (IRVar "b")))) (IRVar "b")) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
+              (IRIf (IRDestruct AcIsLeft (IRVar "b")) (IRConstruct TgLeft [IRApply (IRVar "f^-1") (IRDestruct AcFromLeft (IRVar "b"))]) (IRVar "b")) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
 
 mapEitherFwd :: FDecl
 mapEitherFwd = FDecl (Forall [TV "a", TV "b", TV "c", TV "d"] [] ((TVarR (TV "a") `TArrow` TVarR (TV "c")) `TArrow` ((TVarR (TV "b") `TArrow` TVarR (TV "d")) `TArrow` (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TEither (TVarR (TV "c")) (TVarR (TV "d")))))) ["f", "g", "a"] ["b"]
-              (IRIf (IRIsLeft (IRVar "a")) (IRLeft (IRApply (IRVar "f") (IRFromLeft (IRVar "a")))) (IRRight (IRApply (IRVar "g") (IRFromRight (IRVar "a"))))) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
+              (IRIf (IRDestruct AcIsLeft (IRVar "a")) (IRConstruct TgLeft [IRApply (IRVar "f") (IRDestruct AcFromLeft (IRVar "a"))]) (IRConstruct TgRight [IRApply (IRVar "g") (IRDestruct AcFromRight (IRVar "a"))])) (IRConst (VBool True)) True [("a", IRConst (VFloat 1))]
 mapEitherInv :: FDecl
 mapEitherInv = FDecl (Forall [TV "a", TV "b", TV "c", TV "d"] [] ((TVarR (TV "c") `TArrow` TVarR (TV "a")) `TArrow` ((TVarR (TV "d") `TArrow` TVarR (TV "b")) `TArrow` (TEither (TVarR (TV "a")) (TVarR (TV "b")) `TArrow` TEither (TVarR (TV "c")) (TVarR (TV "d")))))) ["f", "g", "b"] ["a"]
-              (IRIf (IRIsLeft (IRVar "b")) (IRLeft (IRApply (IRVar "f^-1") (IRFromLeft (IRVar "b")))) (IRRight (IRApply (IRVar "g^-1") (IRFromRight (IRVar "b"))))) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
+              (IRIf (IRDestruct AcIsLeft (IRVar "b")) (IRConstruct TgLeft [IRApply (IRVar "f^-1") (IRDestruct AcFromLeft (IRVar "b"))]) (IRConstruct TgRight [IRApply (IRVar "g^-1") (IRDestruct AcFromRight (IRVar "b"))])) (IRConst (VBool True)) True [("b", IRConst (VFloat 1))]
 
 
 

@@ -625,6 +625,16 @@ structural env e = case e of
   -- its signature, so it is uniform across a bucket (M2).
   IRIsLeft _        -> True
   IRIsRight _       -> True
+  -- The new-shape spelling of the same tag test (design ir-reengineering,
+  -- slice S1d): 'PredefinedFunctions' now builds 'isLeftFwd'/'isRightFwd' as
+  -- 'IRDestruct AcIsLeft'/'AcIsRight' rather than 'IRIsLeft'/'IRIsRight', so
+  -- without this arm the exact same tag test silently stopped being
+  -- recognised as structural and fell through to the 'batchedExpr'
+  -- torch.where catch-all -- eagerly evaluating a 'fromLeft'/'fromRight' on
+  -- the wrong-tagged bucket half, the same failure mode
+  -- 'batched-cse-lifts-fromleft-above-its-guard' already names.
+  IRDestruct AcIsLeft _  -> True
+  IRDestruct AcIsRight _ -> True
   IROp OpEq a b     -> isEmptyListConst a || isEmptyListConst b
   IROp OpAnd a b    -> structural env a && structural env b
   IROp OpOr  a b    -> structural env a && structural env b
@@ -675,6 +685,12 @@ listValued env e = case e of
   IRConst (VList _)   -> True
   IRLeft{}            -> True
   IRRight{}           -> True
+  -- The new-shape spelling (design ir-reengineering, slice S1d): see the
+  -- matching note on 'structural' above for why this arm is not optional.
+  IRConstruct TgCons _  -> True
+  IRDestruct AcTail _   -> True
+  IRConstruct TgLeft _  -> True
+  IRConstruct TgRight _ -> True
   IRConst (VEither _) -> True
   IRLetIn _ _ b       -> listValued env b
   IRIf _ t f          -> listValued env t || listValued env f

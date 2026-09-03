@@ -434,6 +434,8 @@ mergeExpr2 bindings (IRLetIn n v bodyExpr1, cov1, g1) expr2 = mergeExpr2 (bindin
 mergeExpr2 bindings expr1 (IRLetIn n v bodyExpr2, cov2, g2) = mergeExpr2 (bindings . IRLetIn n v) expr1 (bodyExpr2, cov2, g2)
 mergeExpr2 bindings (IRTCons (IRConst VAny) b, cov1, g1) (IRTCons a (IRConst VAny), cov2, g2) = (bindings $ IRTCons a b, IROp OpMult cov1 cov2, IROp OpAnd g1 g2)
 mergeExpr2 bindings (IRTCons a (IRConst VAny), cov1, g1) (IRTCons (IRConst VAny) b, cov2, g2)  = (bindings $ IRTCons a b, IROp OpMult cov1 cov2, IROp OpAnd g1 g2)
+mergeExpr2 bindings (IRConstruct TgTuple [IRConst VAny, b], cov1, g1) (IRConstruct TgTuple [a, IRConst VAny], cov2, g2) = (bindings $ IRConstruct TgTuple [a, b], IROp OpMult cov1 cov2, IROp OpAnd g1 g2)
+mergeExpr2 bindings (IRConstruct TgTuple [a, IRConst VAny], cov1, g1) (IRConstruct TgTuple [IRConst VAny, b], cov2, g2) = (bindings $ IRConstruct TgTuple [a, b], IROp OpMult cov1 cov2, IROp OpAnd g1 g2)
 -- Expressions are not compatible. Assume they are semantically equal. Then just take the first
 -- TODO: Maybe one of the two is compatible with a third expression, then we would want to take this one
 mergeExpr2 bindings (expr1, cov1, g1) _ = (bindings expr1, cov1, g1)
