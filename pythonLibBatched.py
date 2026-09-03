@@ -278,6 +278,35 @@ def tensor_index(xs, idx):
 def enum_sum_paired(pairs):
   return T(sum(p.t1 for p in pairs), sum(p.t2 for p in pairs))
 
+# --- ANY (design heterogeneous-batch-inference, Component 3/M4) -------------
+# ANY-ness is a structural marker, exactly like a list length or a constructor
+# tag (M1/M2): whether a given slot of the sample is a wildcard is part of its
+# bucket *signature*, so within one bucket a slot is either always-ANY or
+# always-concrete, never a per-element mix. That is what lets `isAny` answer a
+# plain Python bool (no per-element mask tensor needed) and what lets `signature`
+# below key on it the same way it already keys on length/tag. Mirrors
+# pythonLib.py's two ANY spellings exactly, so a sample built by the scalar
+# value renderer ('SPLL.CodeGenPyTorch.pyVal') is valid batched-sample syntax
+# unchanged: a bare wildcard is the string "ANY" (`pyVal VAny`), a wildcard
+# list is 'AnyInferenceList()' (`pyVal (VList AnyList)`).
+
+def isAny(x):
+  if x == "ANY":
+    return True
+  if isinstance(x, AnyInferenceList):
+    return True
+  return False
+
+def eq(o1, o2):
+  # A nested ANY is a wildcard (matches anything at that position) -- the
+  # bucket-uniform counterpart of pythonLib.py's eq(). A *bare* top-level ANY
+  # is never compared this way: it is intercepted by a structural isAny check
+  # upstream (mirrors 'SPLL.IRCompiler.mkDeepAnyCheck'/'tolerateAny'), the same
+  # invariant the scalar/interpreter backends already rely on.
+  if isAny(o1) or isAny(o2):
+    return True
+  return o1 == o2
+
 class T:
   def __init__(self, t1, t2):
     self.t1 = t1
@@ -286,10 +315,12 @@ class T:
   def __eq__(self, other):
     # Structure-of-arrays tuple equality is elementwise: two batches of tuples
     # are equal per element iff every leaf is. Returns a [B] bool tensor (the
-    # leaves recurse through this method for nested tuples).
+    # leaves recurse through this method for nested tuples). A leaf that is a
+    # bucket-uniform ANY wildcard (M4) compares equal via 'eq' rather than
+    # torch's own (possibly erroring) comparison against a non-tensor.
     if not isinstance(other, T):
       return NotImplemented
-    return (self.t1 == other.t1) & (self.t2 == other.t2)
+    return eq(self.t1, other.t1) & eq(self.t2, other.t2)
 
   def __getitem__(self, index):
     if index == 0:
@@ -347,22 +378,37 @@ class InferenceList:
   def __eq__(self, other):
     # Length disagreement is a *structural* fact, uniform across the bucket, so
     # it answers with a plain Python bool (which `asmask` broadcasts). Equal
-    # lengths compare elementwise through the leaves, like T.__eq__, giving a
-    # [B] bool tensor. `sample == EmptyInferenceList()` -- the emptiness probe
-    # the compiler emits -- therefore always lands in the Python-bool case.
+    # lengths compare elementwise through the leaves via 'eq' (M4: a leaf may be
+    # a bucket-uniform ANY wildcard), giving a [B] bool tensor. `sample ==
+    # EmptyInferenceList()` -- the emptiness probe the compiler emits --
+    # therefore always lands in the Python-bool case.
     if not isinstance(other, InferenceList):
       return NotImplemented
     if len(self) != len(other):
       return False
     acc = True
     for a, b in zip(self, other):
-      acc = (a == b) if acc is True else (acc & (a == b))
+      acc = eq(a, b) if acc is True else (acc & eq(a, b))
     return acc
 
   def prepend(self, value):
     return ConsInferenceList(value, self)
 
 class EmptyInferenceList(InferenceList):
+  def __init__(self):
+    self.next = None
+    self.value = None
+
+# A whole list that is a wildcard (design heterogeneous-batch-inference, M4):
+# the batched twin of pythonLib.py's AnyInferenceList, matching its shape (no
+# `.next`/`.value`) so 'pyVal (VList AnyList)' -- "AnyInferenceList()" -- is
+# valid syntax against this library unchanged. Bucketed like any other shape
+# ('signature' below); never iterated (nothing this length-0-looking, so a
+# stray '==' against a concrete list falls through 'InferenceList.__eq__''s
+# length check rather than an 'isAny' short-circuit -- reachable only if a
+# comparison skips the compiler's own isAny guard, the same backstop
+# 'pythonLib.py' documents for its own AnyInferenceList).
+class AnyInferenceList(InferenceList):
   def __init__(self):
     self.next = None
     self.value = None
@@ -390,10 +436,11 @@ class Left:
 
   def __eq__(self, other):
     # Tag mismatch is structural (Python bool); matching tags compare payloads
-    # elementwise, like T.__eq__ and InferenceList.__eq__.
+    # elementwise via 'eq' (M4: the payload may be a bucket-uniform ANY
+    # wildcard), like T.__eq__ and InferenceList.__eq__.
     if not isinstance(other, Left):
       return False
-    return self.val == other.val
+    return eq(self.val, other.val)
 
 class Right:
   def __init__(self, val):
@@ -402,7 +449,7 @@ class Right:
   def __eq__(self, other):
     if not isinstance(other, Right):
       return False
-    return self.val == other.val
+    return eq(self.val, other.val)
 
 def fromLeft(l):
   if not isinstance(l, Left):
@@ -429,6 +476,11 @@ def fromRight(r):
 def signature(v):
   # The full structural skeleton (the design's approved granularity): list
   # lengths and nested tuple shape, with every scalar leaf erased to 'x'.
+  # ANY-ness (M4) is itself a structural marker, checked before every other
+  # case: an 'AnyInferenceList' is also an 'InferenceList' (len 0, same as
+  # Empty) and would otherwise silently collide with the empty-list bucket.
+  if isAny(v):
+    return 'ANY'
   if isinstance(v, InferenceList):
     return ('L',) + tuple(signature(x) for x in v)
   if isinstance(v, T):
@@ -456,8 +508,14 @@ def bucket_count(samples):
 
 def _pack(vs):
   # Structure-of-arrays pack: a homogeneous list of samples becomes one sample
-  # whose leaves are stacked [B] tensors.
+  # whose leaves are stacked [B] tensors. An ANY-marked slot (M4) is bucket-
+  # uniform by construction -- every sample in this call shares 'signature',
+  # so every element of 'vs' here is the *same* wildcard object -- and is
+  # passed through unchanged rather than stacked, exactly like a structural
+  # tag. Checked first for the same reason 'signature' checks it first.
   head = vs[0]
+  if isAny(head):
+    return head
   if isinstance(head, InferenceList):
     return toList([_pack([s[i] for s in vs]) for i in range(len(head))])
   if isinstance(head, T):
@@ -557,7 +615,14 @@ def bucketed(fn, samples, *args):
 def denskey(v):
   # A hashable structural rendering of a sample value, used to look a query up
   # in the domain. Mirrors `signature` but keeps the leaves, since here it is
-  # the value and not just the shape that selects the slot.
+  # the value and not just the shape that selects the slot. An ANY wildcard
+  # (M4) has no single domain slot -- it is a marginal over (potentially) the
+  # whole domain, not a point in it -- so it gets a key no real domain value
+  # can ever produce (every domain entry is a finite concrete value), which
+  # makes it a guaranteed miss and routes it through the existing off-domain
+  # fallback below rather than crashing on 'float(\"ANY\")'.
+  if isAny(v):
+    return ('ANY',)
   if isinstance(v, InferenceList):
     return ('L',) + tuple(denskey(x) for x in v)
   if isinstance(v, T):

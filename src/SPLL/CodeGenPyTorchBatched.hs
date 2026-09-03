@@ -149,7 +149,9 @@ generateADTClassesBatched decls = concatMap one (concatMap constructors decls)
            : indentOnce (("if not isinstance(other, " ++ name ++ "): return False")
                : [if null fields then "return True"
                   else "return " ++ intercalate " & "
-                         [ "(self." ++ f ++ " == other." ++ f ++ ")" | f <- fields ]]))
+                         -- M4: 'eq', not raw '==' -- a field may be a
+                         -- bucket-uniform ANY wildcard (pythonLibBatched.py).
+                         [ "eq(self." ++ f ++ ", other." ++ f ++ ")" | f <- fields ]]))
       ++ [""]
       ++ ["def is" ++ name ++ "(x):"] ++ indentOnce ["return isinstance(x, " ++ name ++ ")"]
       ++ concatMap (\f -> ("def " ++ f ++ "(x):") : indentOnce ["return x." ++ f]) fields
@@ -480,16 +482,18 @@ attachBatchCall _ e = e
 --   1. strip the root query-type guard (@IRConformsTo@ 'IRIf') — its @isinstance@
 --      check is meaningless on a tensor, and the fragment guard supplants it at
 --      compile time;
---   2. prune @isAny@ marginal checks to 'False' (batched v1 excludes @VAny@) and
---      fold the now-constant selects away;
+--   2. constant-fold trivially-decidable selects/ifs;
 --   3. push selects through tuple construction so every 'IRSelect' arm is a
 --      scalar tensor (a @torch.where@ cannot select whole Python @T@ objects).
 --   4. hoist structural (shape-directed) 'IRIf's out of expression positions,
 --      so each becomes a real Python @if@ statement (design
---      heterogeneous-batch-inference, Component 1).
+--      heterogeneous-batch-inference, Component 1) — an @isAny@ check is one
+--      of these (Component 3/M4: ANY-ness is itself a structural marker, so
+--      whether a given slot is a wildcard is bucket-uniform, just like a list
+--      length or constructor tag).
 prepBatchedBody :: SEnv -> IRExpr -> IRExpr
 prepBatchedBody env (IRLambda n b) = IRLambda n (prepBatchedBody env b)
-prepBatchedBody env e = hoistStructural env (distributeSelects (foldConst (pruneAny (stripRootGuard e))))
+prepBatchedBody env e = hoistStructural env (distributeSelects env (foldConst (stripRootGuard e)))
 
 -- | Strip a root query-type guard @if (sample conforms) then body else error@,
 -- taking the conforming arm. Leaves a guard-less body untouched.
@@ -497,14 +501,7 @@ stripRootGuard :: IRExpr -> IRExpr
 stripRootGuard (IRIf (IRConformsTo _ _) body _) = body
 stripRootGuard e = e
 
--- | Replace every @isAny@ check by 'False': batched v1 has no @VAny@ sample, so
--- a marginal branch is statically not taken.
-pruneAny :: IRExpr -> IRExpr
-pruneAny = irMap p
-  where p (IRUnaryOp OpIsAny _) = IRConst (VBool False)
-        p e                     = e
-
--- | Constant-fold the selects/ifs that pruning made trivial: a literal-mask
+-- | Constant-fold selects/ifs whose guard is already a literal: a literal-mask
 -- select picks an arm; equal arms collapse. Bottom-up so inner folds expose
 -- outer ones.
 foldConst :: IRExpr -> IRExpr
@@ -526,18 +523,36 @@ foldConst = irMap f
 -- let-spine ('projTuple'), so each component select carries the bindings it
 -- needs; the optimizer's own field-splitting already duplicates such spines,
 -- so this only mirrors that.
-distributeSelects :: IRExpr -> IRExpr
-distributeSelects = irMap d
+--
+-- A *structural* 'IRIf' is deliberately excluded: 'hoistStructural' (below)
+-- turns it into a real Python @if@/@else@, which assigns a whole tuple object
+-- directly and has none of @torch.where@'s per-leaf restriction, so pushing it
+-- through here would only duplicate the arms' whole subtree for nothing. That
+-- duplication is not just wasted work: an arm that is itself (or contains) a
+-- recursive call under an ANY guard (design heterogeneous-batch-inference,
+-- Component 3/M4) gets re-invoked once per tuple leaf every distribution
+-- pushes through, and since the arm recurses, each level's fan-out multiplies
+-- the next level's — a recursive list program's compile-time-fine, four-leaf
+-- 'PResult' duplication (already the accepted 'anySafe' cost, see
+-- @docs/semiring-presult-internals.md@) turns into runtime-exponential blowup
+-- in the recursion depth. distributeSelects therefore needs 'SEnv' -- the same
+-- structural-name tracking 'hoistStructural' uses -- purely to make this one
+-- exclusion, since a value-dependent 'IRIf' still needs the same treatment an
+-- 'IRSelect' does.
+distributeSelects :: SEnv -> IRExpr -> IRExpr
+distributeSelects env0 = go env0
   where
-    d (IRSelect c t f) | tupleValued t || tupleValued f =
+    go env (IRLambda n b)  = IRLambda n (go env b)
+    go env (IRLetIn n v b) = IRLetIn n (go env v) (go (bindS env n v) b)
+    go env (IRSelect c t f) | tupleValued t || tupleValued f =
       IRConstruct TgTuple
-        [ distributeSelects (IRSelect c (projTuple True t)  (projTuple True f))
-        , distributeSelects (IRSelect c (projTuple False t) (projTuple False f)) ]
-    d (IRIf c t f) | tupleValued t || tupleValued f =
+        [ go env (IRSelect c (projTuple True t)  (projTuple True f))
+        , go env (IRSelect c (projTuple False t) (projTuple False f)) ]
+    go env (IRIf c t f) | not (structural env c), tupleValued t || tupleValued f =
       IRConstruct TgTuple
-        [ distributeSelects (IRIf c (projTuple True t)  (projTuple True f))
-        , distributeSelects (IRIf c (projTuple False t) (projTuple False f)) ]
-    d e = e
+        [ go env (IRIf c (projTuple True t)  (projTuple True f))
+        , go env (IRIf c (projTuple False t) (projTuple False f)) ]
+    go env e = irDescend (go env) e
 
 -- | Does this expression evaluate to a tuple (an @IRConstruct TgTuple@, under
 -- its let-spine)?
@@ -648,6 +663,14 @@ structural env e = case e of
   -- failure mode 'batched-cse-lifts-fromleft-above-its-guard' already names.
   IRDestruct AcIsLeft _  -> True
   IRDestruct AcIsRight _ -> True
+  -- ANY-ness is itself a structural marker (design heterogeneous-batch-
+  -- inference, Component 3/M4): whether a slot is a wildcard is part of its
+  -- bucket signature ('pythonLibBatched.signature'), so uniform within a
+  -- bucket the same way a list length or an Either tag is. Unconditional --
+  -- unlike the tag test above, 'OpIsAny' needs no companion check on its
+  -- argument, because every position ANY can occupy is already keyed into the
+  -- bucket signature by construction.
+  IRUnaryOp OpIsAny _ -> True
   IROp OpEq a b     -> isEmptyListConst a || isEmptyListConst b
   IROp OpAnd a b    -> structural env a && structural env b
   IROp OpOr  a b    -> structural env a && structural env b
@@ -764,11 +787,22 @@ hoistStructural env0 top = evalState (stmt env0 top) 0
 
 -- | Does a structural 'IRIf' occur anywhere in this expression (with @let@
 -- scopes threaded, so a name bound to a shape probe counts)?
+-- 'IRBuiltin BMap [IRLambda n body, t]' is a scope boundary this predicate
+-- must not see through: 'body' renders as a Python comprehension element
+-- ('batchedExpr'), a single expression with no place for a hoisted
+-- statement-level @if@/@_hsN =@ binding to live, and @n@ (the comprehension's
+-- own bound name) is not in scope outside it either way. A structural if
+-- inside 'body' still renders correctly where it sits (an ANY check there is
+-- always false in practice, since a 'BMap' domain is a compile-time-enumerated
+-- literal list, never a runtime-ANY-carrying sample) — it is only *hoisting*
+-- it out that would be wrong, so this stops the search at the boundary rather
+-- than refusing anything.
 hasStructuralIf :: SEnv -> IRExpr -> Bool
 hasStructuralIf env e = case e of
   IRIf c t f | structural env c -> True
              | otherwise        -> any (hasStructuralIf env) [c, t, f]
   IRLetIn n v b -> hasStructuralIf env v || hasStructuralIf (bindS env n v) b
+  IRBuiltin BMap [IRLambda _ _, t] -> hasStructuralIf env t
   _             -> any (hasStructuralIf env) (getIRSubExprs e)
 
 -- ---------------------------------------------------------------------------
@@ -937,7 +971,7 @@ emittable e = case e of
   IRIf{}         -> True   -- defensive: a residual if lowers like a select
   IRSelect{}     -> True
   IROp{}         -> True
-  IRUnaryOp op _ -> op /= OpIsAny   -- isAny must have been pruned
+  IRUnaryOp{}    -> True   -- includes OpIsAny (M4: compiles to a structural check)
   IRConst v      -> isJust (batchedVal v)   -- scalar/tuple leaves only; see 'batchedVal'
   IRVar{}        -> True
   IRLetIn{}      -> True
@@ -1013,7 +1047,7 @@ emittable e = case e of
 -- over @IRValue@ against the *scalar* @pythonLib.py@, so it happily names
 -- runtime constructors that do not exist in @pythonLibBatched.py@ —
 -- @ConsInferenceList@/@EmptyInferenceList@ for lists, @Left@/@Right@ for
--- 'VEither', ADT constructors, @'ANY'@, @throw@, @None@. Emitting any of those
+-- 'VEither', ADT constructors, @throw@, @None@. Emitting any of those
 -- produces batched Python that dies with a @NameError@ at run time instead of
 -- being refused at compile time. Borrowing @pyVal@ here was a live defect, not
 -- a hypothetical one: six corpus programs (the @planEnumCont*@ family,
@@ -1023,6 +1057,12 @@ emittable e = case e of
 -- old blanket @IRConst{} -> True@ admitted. The list survives to codegen
 -- whenever 'SPLL.IROptimizer.indexmagic' cannot fold it away (it only fires for
 -- a @[0..n]@ naturals list, so a @[True, False]@ enumeration keeps the call).
+--
+-- @'ANY'@/@AnyInferenceList()@ (design heterogeneous-batch-inference, M4) are
+-- the one deliberate exception: 'pythonLibBatched.py' defines both, spelled
+-- and behaving exactly as their 'SPLL.CodeGenPyTorch.pyVal' counterparts, so
+-- those two cases are admitted here even though the rest of @pyVal@ is not
+-- reused.
 --
 -- Keeping this partial, and gating 'IRConst' on it in 'emittable', makes the
 -- whole class of defect a compile-time refusal by construction rather than one
@@ -1039,6 +1079,9 @@ batchedVal (VBool b)  = Just (if b then "True" else "False")
 -- the enumeration `SPLL.AutoNeural.indexOf` builds over, see task
 -- batched-bool-enum-index) that the batched runtime has no reader for.
 batchedVal (VList EmptyList) = Just "EmptyInferenceList()"
+-- A wildcard list -- "any length, any content" -- is pure structure (its own
+-- bucket, M4), same spelling as the scalar backend's.
+batchedVal (VList AnyList) = Just "AnyInferenceList()"
 -- An Either constant is a tag plus a payload: the tag is structure (uniform
 -- across the bucket), the payload is whatever it is (M2).
 batchedVal (VEither (Left v))  = ("Left("  ++) . (++ ")") <$> batchedVal v
@@ -1047,6 +1090,13 @@ batchedVal (VTuple a b) = do
   a' <- batchedVal a
   b' <- batchedVal b
   return ("T(" ++ a' ++ ", " ++ b' ++ ")")
+-- A bare wildcard (M4): pure structure, its own bucket -- 'pyVal'-compatible
+-- so a query-point literal survives the shared Bucketed rendering path
+-- unchanged. 'VAnyExcept' (a wildcard excluding specific values, used only in
+-- narrower marginal-exclusion contexts) is a known, deliberate gap: it is not
+-- just an ANY-flavoured structural marker (the exclusion set matters to
+-- enumeration semantics elsewhere), so it stays refused, same as before.
+batchedVal VAny = Just "'ANY'"
 batchedVal _ = Nothing
 
 -- | 'batchedVal' for the emitters, which run only on a body 'batchedGuard' has
@@ -1093,13 +1143,13 @@ reason e = case e of
   IREnumSumPaired True _ _ _ -> "log-space paired enumeration sum (IREnumSumPaired)"
   IREnumSumPaired{}  -> "paired enumeration sum (IREnumSumPaired) over a non-scalar enumeration"
   IRConformsTo{}  -> "type-conformance check (IRConformsTo)"
-  IRConst VAny        -> "marginal ANY sentinel (IRConst VAny); marginal queries are outside the tensor fragment"
+  -- 'VAny'/'VList AnyList' are admitted by 'batchedVal' (M4); 'VAnyExcept' is
+  -- the one ANY-flavoured sentinel that stays refused (see 'batchedVal').
   IRConst (VAnyExcept _) -> "marginal ANY-except sentinel (IRConst VAnyExcept); marginal queries are outside the tensor fragment"
   IRConst v       -> "constant with no batched representation (" ++ show v
                      ++ "); the batched runtime lib defines no counterpart for it "
                      ++ "(see batchedVal), so only float/int/bool leaves in "
                      ++ "fixed-shape tuples are admitted"
-  IRUnaryOp OpIsAny _ -> "marginal (ANY) check (IRUnaryOp OpIsAny)"
   -- Unreachable while 'emittable' admits every 'IRConstruct'/'IRDestruct';
   -- named explicitly rather than left to the catch-all below, matching every
   -- other case in this function.
@@ -1215,6 +1265,9 @@ batchedExpr env (IRUnaryOp OpLog e) = "safe_log(" ++ batchedExpr env e ++ ")"
 -- fully constant-folded subexpression (e.g. a literal theta scale) can still be.
 batchedExpr env (IRUnaryOp OpAbs e) = "torch.abs(astensor(" ++ batchedExpr env e ++ "))"
 batchedExpr env (IRUnaryOp OpSign e) = "sign(" ++ batchedExpr env e ++ ")"
+-- M4: bucket-uniform (see 'structural'), so this is a plain Python bool at
+-- run time, not a per-element mask -- 'isAny' in pythonLibBatched.py.
+batchedExpr env (IRUnaryOp OpIsAny e) = "isAny(" ++ batchedExpr env e ++ ")"
 batchedExpr env (IRSelect c t f) = torchWhere env c t f
 batchedExpr env (IRIf c t f)     = torchWhere env c t f
 -- A fresh random draw (M4): the whole batch's worth at once, shape [_batchN].

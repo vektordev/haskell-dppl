@@ -807,7 +807,7 @@ gainNoteProp gained = ioProperty $ do
 -- differential skips itself there (the single predecessor of this table,
 -- @refusalProp@, sat inside the torch-gated branch and so never ran without
 -- torch). Refusals with no corpus trigger — list membership, the @VAnyExcept@
--- sentinel, a residual @IRConformsTo@/@OpIsAny@, a composite-'MultiValue'
+-- sentinel, a residual (not-at-root) @IRConformsTo@, a composite-'MultiValue'
 -- @IREnumSum@/@IRIsPossible@, and generate-only recursion — are covered by the
 -- synthetic-IR rows in "TestInternals" (@batchedRefusalUnitTests@), because on
 -- any real program another guard always fires first.
@@ -873,12 +873,16 @@ batchedRefusalTable =
   -- leaves -- `gaussList` is an eligible program now, checked in
   -- 'batchedPythonTests'); what stays refused is *value*-dependent recursion,
   -- where eager both-arm select semantics would not terminate.
-  , ("dice",                      "calls dice_prob recursively from a position that is not guarded")
+  -- M4 (ANY-ness is a structural marker) makes one of dice's recursive call
+  -- sites newly recognised as guarded (it sits under an isAny check, which is
+  -- now correctly structural) -- true and unrelated to why it stays refused,
+  -- which is the *other* reason 'recOffenders' still finds for it: the call
+  -- does not descend into the tail of a list argument, since dice's recursion
+  -- is genuinely value-dependent (a coin flip), not structure-directed.
+  , ("dice",                      "calls dice_prob recursively without descending into the tail of a list argument")
   -- a prob/integ path reaching a method batched mode does not emit
   , ("factorial",                 "calls factorial_gen, which is not a forward/integrate method")
   , ("flip",                      "calls flip_gen, which is not a forward/integrate method")
-  -- the marginal ANY sentinel
-  , ("sndCall",                   "marginal ANY sentinel (IRConst VAny)")
   -- an inner lambda that did not reduce, once in each of the three method
   -- bodies (twiceApplication's forward/integrate *do* reduce; only its
   -- generate body keeps the literal lambda -- the accepted cost of generate's
@@ -1040,13 +1044,16 @@ data BatchGroup = BatchGroup
 batchGroups :: Bool -> [TestCase] -> Maybe [BatchGroup]
 batchGroups isNeural tcs = mapM build grouped
   where
-    -- Marginal (ANY) query points are dropped rather than disqualifying the
-    -- whole program: batched v1 has no VAny representation at all (the compiler
-    -- prunes isAny to False, and design heterogeneous-batch-inference Component
-    -- 3 is the designated successor for batched marginals), so such a point is
-    -- simply not a batched query. Before this, one ANY point kept every *other*
-    -- point of that program out of the differential too.
-    keyed = [ q | t <- tcs, Just q@(_, _, sm, _, _) <- [asQuery t], not (containsAnyV sm) ]
+    -- Marginal (ANY) query points are included as of design
+    -- heterogeneous-batch-inference Component 3/M4: ANY-ness is a structural
+    -- marker like a list length or Either tag ('containsStructureV'/'shapeSig'
+    -- below), so such a point routes through the bucketing wrapper into its own
+    -- bucket rather than being dropped. 'VAnyExcept' (a narrower
+    -- marginal-exclusion sentinel, not just an ANY-flavoured structural marker)
+    -- is the one still-unsupported case and is dropped, the same treatment
+    -- 'containsAnyExceptV' below gives it -- one such point no longer keeps
+    -- every *other* point of that program out of the differential either.
+    keyed = [ q | t <- tcs, Just q@(_, _, sm, _, _) <- [asQuery t], not (containsAnyExceptV sm) ]
     grouped
       | isNeural  = groupBy ((==) `on` (\(c, _, _, _, _) -> c)) keyed
       | otherwise = groupBy ((==) `on` (\(c, ps, _, _, _) -> (c, show ps))) keyed
@@ -1063,8 +1070,8 @@ batchGroups isNeural tcs = mapM build grouped
                             , bgExpDim  = [ed | (_, _, _, _, ed) <- g] }
     build [] = Nothing
     -- 'Impossible' rows (no stated dim) fall through to the final wildcard and
-    -- are simply not batched, the same treatment 'containsAnyV' above gives a
-    -- marginal query point.
+    -- are simply not batched, the same treatment 'containsAnyExceptV' above
+    -- gives a 'VAnyExcept'-carrying query point.
     asQuery (ProbTestCase _ s ps (Possible (VFloat ep) (VFloat ed) _))  = Just (False, ps, s, ep, ed)
     asQuery (CumulTestCase _ s ps (Possible (VFloat ep) (VFloat ed) _)) = Just (True,  ps, s, ep, ed)
     asQuery _ = Nothing
@@ -1122,35 +1129,49 @@ data SampleBatch
   | Bucketed String Int
 
 -- | The Python form of a group's samples, or 'Nothing' if they are not
--- batchable at all (a marginal @ANY@ sample, or a leaf that is neither
--- numeric, bool, nor a structure of those).
+-- batchable at all (a @VAnyExcept@ sample, or a leaf that is neither numeric,
+-- bool, nor a structure of those).
 batchSamples :: [IRValue] -> Maybe SampleBatch
 batchSamples vs
-  | any containsAnyV vs  = Nothing
+  | any containsAnyExceptV vs  = Nothing
   | any containsStructureV vs =
       Just (Bucketed ("[" ++ intercalate ", " (map pyVal vs) ++ "]")
                      (length (nub (map shapeSig vs))))
   | otherwise            = SoA <$> batchLiteral vs
 
--- | Does this sample carry structure a batch can differ in — a list length or
--- an Either tag? Such a group goes through the bucketing wrapper.
+-- | Does this sample carry structure a batch can differ in — a list length, an
+-- Either tag, or (design heterogeneous-batch-inference, Component 3/M4) a bare
+-- ANY wildcard, which is a structural marker of exactly the same kind. A list
+-- (any list, including @AnyList@) or an Either is always structure regardless
+-- of its leaves, so a nested wildcard inside one needs no separate case here.
+-- Such a group goes through the bucketing wrapper.
 containsStructureV :: IRValue -> Bool
 containsStructureV (VList _)    = True
 containsStructureV (VEither _)  = True
 containsStructureV (VTuple a b) = containsStructureV a || containsStructureV b
+containsStructureV VAny         = True
 containsStructureV _            = False
 
-containsAnyV :: IRValue -> Bool
-containsAnyV VAny           = True
-containsAnyV (VAnyExcept _) = True
-containsAnyV (VList l)      = any containsAnyV (toList l)
-containsAnyV (VEither e)    = either containsAnyV containsAnyV e
-containsAnyV (VTuple a b)   = containsAnyV a || containsAnyV b
-containsAnyV _              = False
+-- | 'VAnyExcept' (a wildcard excluding specific values) is the one ANY-like
+-- sentinel this milestone (M4) does not give a batched representation to (see
+-- 'SPLL.CodeGenPyTorchBatched.batchedVal') — its exclusion set matters to
+-- enumeration semantics elsewhere, so it is not just a structural marker like
+-- plain ANY, and a query point carrying it is dropped from the differential.
+containsAnyExceptV :: IRValue -> Bool
+containsAnyExceptV (VAnyExcept _) = True
+containsAnyExceptV (VList l)      = any containsAnyExceptV (toList l)
+containsAnyExceptV (VEither e)    = either containsAnyExceptV containsAnyExceptV e
+containsAnyExceptV (VTuple a b)   = containsAnyExceptV a || containsAnyExceptV b
+containsAnyExceptV _              = False
 
 -- | The Haskell twin of @pythonLibBatched.signature@: the sample's structural
--- skeleton with every scalar leaf erased. Used only to predict the bucket count.
+-- skeleton with every scalar leaf erased, ANY-ness (M4) checked first exactly
+-- as @signature@ checks @isAny@ first (a bare 'VAny' or an @AnyList@ nested
+-- under a concrete constructor is its own bucket, not conflated with the
+-- concrete case at that position). Used only to predict the bucket count.
 shapeSig :: IRValue -> String
+shapeSig VAny                 = "ANY"
+shapeSig (VList AnyList)      = "ANY"
 shapeSig (VList l)            = "L(" ++ intercalate "," (map shapeSig (toList l)) ++ ")"
 shapeSig (VTuple a b)         = "T(" ++ shapeSig a ++ "," ++ shapeSig b ++ ")"
 shapeSig (VEither (Left v))   = "L?(" ++ shapeSig v ++ ")"
@@ -1230,7 +1251,7 @@ batchedDriver accArg eligible = unlines $
   [ "import torch, sys, traceback"
   -- T for structure-of-arrays tuple sample batches; the list constructors and
   -- the bucketing wrapper for heterogeneous (list-shaped) samples.
-  , "from pythonLibBatched import T, ConsInferenceList, EmptyInferenceList, Left, Right, bucketed, bucket_count"
+  , "from pythonLibBatched import T, ConsInferenceList, EmptyInferenceList, AnyInferenceList, Left, Right, bucketed, bucket_count"
   , "TOL = " ++ show probTolerance
   , "failures = []"
   , "def _bucket_count(name, samples, expected):"
@@ -1412,7 +1433,7 @@ runBatchedDense accArg py entries = ioProperty $ do
 denseDriver :: Bool -> [(String, String, [BatchGroup], [String])] -> String
 denseDriver accArg entries = unlines $
   [ "import torch, sys, traceback"
-  , "from pythonLibBatched import T, ConsInferenceList, EmptyInferenceList, Left, Right"
+  , "from pythonLibBatched import T, ConsInferenceList, EmptyInferenceList, AnyInferenceList, Left, Right"
   , "TOL = " ++ show probTolerance
   , "failures = []"
   , "def _leaf(x, i):"

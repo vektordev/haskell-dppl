@@ -1794,11 +1794,11 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       -- anywhere else would reach the emitter, which has no case for it.
       assertRefusal "type-conformance check (IRConformsTo)"
         (IROp OpAnd (IRVar "b") (IRConformsTo TFloat (IRVar "sample")))
-  , testCase "a residual isAny check is refused" $
-      -- pruneAny rewrites these away, so reaching the guard with one means the
-      -- pruning pass was bypassed or regressed.
-      assertRefusal "marginal (ANY) check (IRUnaryOp OpIsAny)"
-        (IRUnaryOp OpIsAny (IRVar "sample"))
+  , testCase "isAny is accepted (M4: ANY-ness is part of the bucket signature)" $
+      -- Design heterogeneous-batch-inference, Component 3/M4: whether a slot is
+      -- an ANY wildcard is structural, exactly like a list length or an Either
+      -- tag, so 'OpIsAny' compiles rather than being refused or pruned.
+      assertAccepted (IRUnaryOp OpIsAny (IRVar "sample"))
   , testCase "an inner lambda is refused" $
       assertRefusal "inner lambda (IRLambda)"
         (IROp OpPlus (IRVar "x") (IRApply (IRLambda "y" (IRVar "y")) (IRVar "x")))
@@ -2023,9 +2023,8 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                   , sampleDomain = Nothing }]
       [] []
     -- 'batchedGuard' is called on the raw term, *not* through 'prepBatchedBody':
-    -- these rows check the guard itself, and prepping would rewrite away the very
-    -- nodes some of them are about (pruneAny turns an OpIsAny check into a plain
-    -- constant, which is legitimately in the fragment).
+    -- these rows check the guard itself, and prepping (e.g. 'stripRootGuard',
+    -- 'foldConst') would rewrite away the very nodes some of them are about.
     assertRefusal needle e = case batchedGuard (adtEnv []) "g" "forward" e of
       Right () -> assertFailure ("batchedGuard accepted a node it must refuse; expected: " ++ needle)
       Left msg -> assertBool ("batched refusal does not mention " ++ show needle

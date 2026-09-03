@@ -60,10 +60,12 @@ selectPassExpr = irMap convert
 -- broadcasts fine and stays in. Excluded are the structural / control
 -- constructs (design pytorch-tensorizer, "Central insight"): list operations
 -- (which have no fixed tensor shape), 'Either' constructor dispatch (a runtime
--- @isinstance@ branch), function application / lambdas (data-dependent
--- recursion depth), 'IRError' refusal arms (poison-masking is M3), and the
--- root-only query-type guard. A conditional is convertible only when its whole
--- condition and both arms lie in this fragment.
+-- @isinstance@ branch), an ANY-wildcard check (design heterogeneous-batch-
+-- inference, Component 3/M4 -- a structural marker of exactly the same kind),
+-- function application / lambdas (data-dependent recursion depth), 'IRError'
+-- refusal arms (poison-masking is M3), and the root-only query-type guard. A
+-- conditional is convertible only when its whole condition and both arms lie
+-- in this fragment.
 --
 -- Because M1 lowers select identically to lazy, this predicate cannot affect
 -- results; it decides only which nodes carry the tag (visible under @-d@) and
@@ -98,6 +100,19 @@ isTensorFragment expr = ok expr && all isTensorFragment (getIRSubExprs expr)
       IRDestruct AcFromRight _  -> False
       IRDestruct AcIsLeft _     -> False
       IRDestruct AcIsRight _    -> False
+      -- ANY-ness (design heterogeneous-batch-inference, Component 3/M4) is a
+      -- structural marker exactly like a list length or an Either tag -- the
+      -- three lines above -- so an 'IRIf' guarded by it must stay an 'IRIf'
+      -- too, for the same reason: a batched backend's own structural-condition
+      -- recognition ('SPLL.CodeGenPyTorchBatched.structural') only looks at
+      -- 'IRIf', and a node already retagged 'IRSelect' here never reaches that
+      -- check, so it would fall to an eager, both-arms-eager @torch.where@
+      -- instead of a real @if@/@else@. That is not just a missed optimisation:
+      -- the arm the guard exists to skip is frequently unsafe to evaluate on a
+      -- bucket-uniform ANY value at all (e.g. a density formula given the bare
+      -- 'ANY' sentinel where a tensor is expected), so retagging it turned a
+      -- correct compile into a runtime crash.
+      IRUnaryOp OpIsAny _       -> False
       _                 -> True
 
 -- | Lower every 'IRSelect' back to an 'IRIf' throughout an environment. This is
