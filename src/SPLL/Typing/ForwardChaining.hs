@@ -16,6 +16,7 @@ module SPLL.Typing.ForwardChaining
   , findExprWithCN
   , unwrapLambdas
   , untag
+  , getTag
   , showClause
   , showClauseGroup
   , showClauseGroups

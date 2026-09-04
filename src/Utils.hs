@@ -24,6 +24,18 @@ import Data.Graph
 import Data.List (isPrefixOf)
 import Data.Functor ((<&>))
 
+-- | Split at the __first__ occurrence of the delimiter, which is kept at the
+-- head of the second half: @splitByString "|" "a|b|c" == ("a", "|b|c")@.
+--
+-- Nothing is ever dropped -- the two halves always concatenate back to the
+-- input. In particular, when the delimiter does not occur the whole input
+-- comes back in the first half and the second is empty
+-- (@splitByString "|" "abc" == ("abc", "")@). The @("", "")@ produced by the
+-- @[]@ clause below is only the recursion's base case, reached with an empty
+-- remainder; the prefix consumed on the way down is rebuilt on the way out by
+-- @(c:x, y)@. (Reading that clause as the no-match result is what prompted
+-- task @utils-splitbystring-drops-input-without-delimiter@; the contract is
+-- pinned by @Utils.splitByString@ in test/TestInternals.hs.)
 splitByString :: String -> String -> (String, String)
 splitByString split orig | split `isPrefixOf` orig = ("", orig)
 splitByString split (c:orig) = let (x, y) = splitByString split orig in (c:x, y)

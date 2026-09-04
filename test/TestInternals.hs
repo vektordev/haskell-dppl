@@ -17,7 +17,7 @@ import SPLL.Prelude
 import SPLL.Parser (tryParseProgram)
 import SPLL.Analysis (annotateEnumsProg, materializationDomain, withinMaterializationBudget)
 import SPLL.Typing.Infer (addTypeInfo)
-import SPLL.Typing.ForwardChaining (FCData, annotateProg, progToFCData, isInvertibleLambda, isWitnessedLambda)
+import SPLL.Typing.ForwardChaining (FCData, annotateProg, progToFCData, isInvertibleLambda, isWitnessedLambda, untag, getTag)
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan)
@@ -27,18 +27,19 @@ import SPLL.IROptimizer (postProcess, optimizeEnv, deterministicGens, distribute
 import SPLL.CodeGenPyTorchBatched (adtEnv, batchedGuard, generateFunctionsBatched, structural)
 import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts)
 import Data.Foldable (toList)
-import Data.List (isInfixOf, intercalate)
+import Data.List (isInfixOf, intercalate, isPrefixOf)
 import Control.Exception (try, evaluate, ErrorCall(..))
 import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure, (@?=))
 import IRInterpreter (generateDet)
 import TestCaseParser (Backend(..), TestCase(..), expectationProb, defaultBackends, parseTestCasesFromString)
-import Test.Tasty.QuickCheck (testProperties)
+import Test.Tasty.QuickCheck (testProperties, testProperty)
 import System.Random (StdGen)
 import Control.Monad.Random (Rand)
 import Control.Monad (forM_)
 import Data.Number.Erf (erf)
+import Utils (splitByString)
 
 
 -- | The (prob, dim) pair a probability query must return; a different shape
@@ -2716,10 +2717,95 @@ test_hasTailDescentRecognisesNewShape = testCase
                   , sampleDomain = Nothing }]
       [] []
 
+-- ======== Utils.splitByString ========
+
+-- These two properties are deliberately *not* @prop_@-prefixed. This module's
+-- @$(allProperties)@ splice reifies each @prop_@ name it finds in the source,
+-- and a binding this far down the file is not yet reifiable at the splice, so
+-- the prefix would earn a "found in source file but was not in scope" warning
+-- rather than a registration. They are registered by hand below instead --
+-- the same arrangement 'TestFuzz' uses for @fuzzSamplingMatchesPDF@.
+
+-- | Strings over a small alphabet, so that a generated delimiter actually
+-- occurs in a generated input often enough to exercise the matching path.
+splitByStringOperand :: Gen String
+splitByStringOperand = listOf (elements "ab_t")
+
+-- | 'splitByString' never drops input: the two halves always concatenate back
+-- to the original, delimiter present or not.
+--
+-- This is the property the task
+-- @utils-splitbystring-drops-input-without-delimiter@ asked for. Its premise
+-- -- that a delimiter-free input comes back as @("", "")@ -- is false: that
+-- result belongs to the @[]@ clause, which terminates the recursion, and the
+-- prefix consumed on the way down is rebuilt on the way out by @(c:x, y)@. A
+-- delimiter-free input therefore comes back whole in the first half.
+splitByStringLosesNothing :: Property
+splitByStringLosesNothing =
+  forAll splitByStringOperand $ \d ->
+  forAll splitByStringOperand $ \s ->
+    uncurry (++) (splitByString d s) === s
+
+-- | The split is at the *first* occurrence: the delimiter stays at the head of
+-- the second half and never appears in the first. 'getTag' depends on the
+-- former (a tag is returned with its @_t@ prefix attached) and 'untag' on the
+-- latter.
+splitByStringSplitsAtFirstOccurrence :: Property
+splitByStringSplitsAtFirstOccurrence =
+  forAll (splitByStringOperand `suchThat` (not . null)) $ \d ->
+  forAll splitByStringOperand $ \s ->
+    let (before, after) = splitByString d s
+    in not (d `isInfixOf` before) .&&. (null after || d `isPrefixOf` after)
+
+-- | Table-driven companion to the two properties above, plus the contract the
+-- only two callers in the tree rely on.
+--
+-- @untag@ and @getTag@ (SPLL.Typing.ForwardChaining) split a chain name on the
+-- @_t@ tag prefix, and the delimiter-absent case is not a corner: instrumenting
+-- them showed 21 distinct untagged names reaching @untag@ across three small
+-- corpus programs. @untag@ must be the identity there, because its result is
+-- handed to @findExprWithCN@, which @error@s on a name it cannot find -- so the
+-- alleged @("", "")@ behaviour would be a hard compile failure on every
+-- program, not a silent wrong answer.
+splitByStringTests :: TestTree
+splitByStringTests = testGroup "Utils.splitByString"
+  [ testCase "delimiter absent: the whole input survives in the first half" $
+      splitByString "|" "abc" @?= ("abc", "")
+  , testCase "delimiter absent, empty input" $
+      splitByString "|" "" @?= ("", "")
+  , testCase "delimiter absent, delimiter longer than the input" $
+      splitByString "abcd" "abc" @?= ("abc", "")
+  , testCase "match at the start" $
+      splitByString "|" "|cd" @?= ("", "|cd")
+  , testCase "match in the middle keeps the delimiter on the tail" $
+      splitByString "|" "ab|cd" @?= ("ab", "|cd")
+  , testCase "match at the end" $
+      splitByString "|" "ab|" @?= ("ab", "|")
+  , testCase "multi-character delimiter" $
+      splitByString "::" "ab::cd" @?= ("ab", "::cd")
+  , testCase "splits at the first occurrence only" $
+      splitByString "|" "a|b|c" @?= ("a", "|b|c")
+  , testCase "empty delimiter matches immediately" $
+      splitByString "" "abc" @?= ("", "abc")
+  , testCase "untag is the identity on an untagged chain name" $
+      untag "ast14" @?= "ast14"
+  , testCase "getTag is empty on an untagged chain name" $
+      getTag "ast14" @?= ""
+  , testCase "untag strips a tag" $
+      untag "ast17_t1" @?= "ast17"
+  , testCase "getTag returns the tag with its prefix attached" $
+      getTag "ast0_t0" @?= "_t0"
+  , testCase "untag and getTag partition a tagged chain name" $
+      (untag "ast12_t1" ++ getTag "ast12_t1") @?= "ast12_t1"
+  , testProperty "concatenating the halves recovers the input" splitByStringLosesNothing
+  , testProperty "splits at the first occurrence" splitByStringSplitsAtFirstOccurrence
+  ]
+
 internalsTests :: TestTree
 internalsTests = testGroup "Internals"
   [ testProperties "properties" $(allProperties)
   , testGroup "tensor builtins" tensorBuiltinTests
+  , splitByStringTests
   , classConstraintTests
   , forwardChainingCertTests
   , witnessedBindingTests
