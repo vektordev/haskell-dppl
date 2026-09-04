@@ -62,6 +62,22 @@ annotateIn adtsParam funEnv visited env e = withNewTypeInfo
     -- A directly-applied lambda is `let`: inside the body the parameter *is* the
     -- argument, so the body is annotated with the argument's tags bound to it.
     -- Without this a `let`-bound enumerable is invisible to its own body.
+    --
+    -- DO NOT delete this case as dead code, however green the suite looks. It
+    -- is currently unpinned by any test: removing it and falling back to the
+    -- generic recursion leaves all 1675 tests passing and emits byte-identical
+    -- Python for all 266 corpus programs (investigation
+    -- analysis-lambda-discrete-binding). That is not because it is redundant
+    -- but because 'applyTags' independently recomputes the same tag for the
+    -- 'Apply' node itself, so only *interior* nodes -- the bound variable's own
+    -- 'Var' occurrences, and any 'InjF' whose operand set they complete -- lose
+    -- their 'DiscreteValues'. Nothing downstream happens to read those today.
+    --
+    -- It has already been deleted once on exactly that reasoning: the binding
+    -- sat here unused from 985d450 (2024-10-17), was swept as an unused-binding
+    -- warning in e0993e8 (2026-06-06), and had to be reinstated and actually
+    -- threaded in c63277a (2026-08-30) to fix
+    -- enumerable-injf-operand-loses-tag-across-apply.
     withNewSubExpr = case e of
       Expr _ (Apply l@(Expr _ (Lambda param lamBody)) v) ->
         let annotatedV = rec v
