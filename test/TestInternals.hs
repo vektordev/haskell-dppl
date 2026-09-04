@@ -2255,6 +2255,68 @@ extraProbUnder fam conf prog params sample = case compile conf { extraSemirings 
     Right (VProbDim pr _) -> return pr
     other -> assertFailure ("expected a probability tuple from the extra group, got: " ++ show other)
 
+-- | Parse a source string or fail the test with the parse error.
+parseOrFail :: String -> IO Program
+parseOrFail src = case tryParseProgram "<test>" src of
+  Left err -> assertFailure ("Parse failed: " ++ show err)
+  Right p  -> return p
+
+-- | Task semiring-second-instance-and-kbest, decision question 1.
+--
+-- Satisfiability ("does this query value have any derivation at all?") needs NO
+-- semiring of its own: it is already answered, soundly, by the impossibility
+-- flag every probability-mode result carries ('resultImpossible'). These cases
+-- pin that, because the claim is load-bearing -- it is the reason the task
+-- shipped no boolean 'SemiringFamily'.
+--
+-- Why it works where a *counting* semiring does not, which is the whole finding:
+-- possibility is a function of the real probability, so it can ride the
+-- sum-product computation and inherit its correctness. Multiplicity is not, so
+-- model counting cannot -- it must reweight leaves to unit, which destroys the
+-- probability-conservation law that @p(cond=False) = 1 - p(cond=True)@ depends
+-- on. Cases B/C/D below are exactly the shapes that expose the difference: one
+-- branch has zero models, and a leaf-reweighting counting semiring reports 1
+-- for it (measured, see the task write-up) while the flag correctly reports
+-- impossible.
+semiringSatisfiabilityTests :: TestTree
+semiringSatisfiabilityTests = testGroup "Satisfiability via the impossibility flag"
+  [ testCase "both branches reachable: neither value is impossible" $ do
+      -- The exact program whose count() the first counting attempt got wrong.
+      prog <- parseOrFail "main = if Uniform < 0.5 then 1.0 else 2.0"
+      expectSat prog 1.0 False
+      expectSat prog 2.0 False
+  , testCase "condition always true: the else-branch value is impossible" $ do
+      prog <- parseOrFail "main = if Uniform < 2.0 then 1.0 else 2.0"
+      expectSat prog 1.0 False
+      expectSat prog 2.0 True
+  , testCase "condition always false: the then-branch value is impossible" $ do
+      prog <- parseOrFail "main = if Uniform < 0.0 then 1.0 else 2.0"
+      expectSat prog 1.0 True
+      expectSat prog 2.0 False
+  , testCase "deterministic condition: the untaken branch is impossible" $ do
+      prog <- parseOrFail "main = if 0.1 < 0.5 then 1.0 else 2.0"
+      expectSat prog 1.0 False
+      expectSat prog 2.0 True
+  , testCase "a value the program cannot produce at all is impossible" $ do
+      prog <- parseOrFail "main = if Uniform < 0.5 then 1.0 else 2.0"
+      expectSat prog 7.0 True
+  ]
+
+-- | Assert the impossibility flag of @p(sample)@, and -- since the two must
+-- agree for the flag to mean anything -- that a possible point has nonzero
+-- probability and an impossible one has zero.
+expectSat :: Program -> Double -> Bool -> IO ()
+expectSat prog q expected =
+  case runProb defaultCompilerConfig prog [] (VFloat q) of
+    Left err -> assertFailure ("compilation/run failed: " ++ show err)
+    Right v -> do
+      assertEqual ("imposs flag at p(" ++ show q ++ ")") (Just expected) (resultImpossible v)
+      case v of
+        VProbDim pr _ -> assertBool
+          ("p(" ++ show q ++ ") = " ++ show pr ++ " disagrees with imposs = " ++ show expected)
+          (if expected then pr == 0 else pr > 0)
+        _ -> assertFailure ("expected a probability tuple, got: " ++ show v)
+
 -- | Task semiring-parametric-marginals: the max-product (MAP) semiring, which
 -- swaps 'prodP'/'mixP'/'enumSumP''s mixture-combine (⊕) from sum/log-sum-exp to
 -- max, computing the probability of a query value's single most likely
@@ -2366,6 +2428,52 @@ semiringMapTests = testGroup "Semiring: max-product (MAP)"
                    (abs (sp - esp) < 1e-9)
         assertBool ("p_map(" ++ show q ++ ") = " ++ show emap ++ ", got " ++ show mp)
                    (abs (mp - emap) < 1e-9)
+  , testCase "the requested semiring survives a top-level function call" $ do
+      -- Task semiring-second-instance-and-kbest. An 'extraSemirings' group
+      -- compiles only its OWN body under the alternate semiring; a call to
+      -- another top-level function used to resolve to that callee's
+      -- SUM-PRODUCT group ("h_prob"), so any mixture living behind a function
+      -- boundary was summed instead of maxed -- silently, producing a
+      -- plausible number rather than a crash. Fixed by 'calleeInferenceName'
+      -- routing the callee through 'semiringGroupInfix'.
+      --
+      -- The two programs below are the same distribution written two ways, so
+      -- MAP must give the same answer for both. Before the fix the second gave
+      -- 0.46 -- exactly the sum-product total -- against a true MAP of 0.45.
+      -- 2.0 is the discriminating query: it is the only value with more than
+      -- one derivation, so it is the only one where max and sum differ.
+      let body = "if Uniform < 0.9 then (if Uniform < 0.5 then 2.0 else 3.0) "
+                 ++ "else (if Uniform < 0.1 then 2.0 else 4.0)"
+      inlined <- parseOrFail ("main = " ++ body)
+      behindCall <- parseOrFail (unlines ["h = " ++ body, "main = h"])
+      forM_ [(2.0 :: Double, 0.46, 0.45), (3.0, 0.45, 0.45), (4.0, 0.09, 0.09)] $
+        \(q, esp, emap) -> forM_ [("inlined", inlined), ("behind a call", behindCall)] $
+          \(what, prog) -> do
+            sp <- probUnder defaultCompilerConfig prog [] (VFloat q)
+            mp <- extraProbUnder SRMaxProduct defaultCompilerConfig prog [] (VFloat q)
+            assertBool (what ++ ": sum-product p(" ++ show q ++ ") = " ++ show esp
+                        ++ ", got " ++ show sp) (abs (sp - esp) < 1e-9)
+            assertBool (what ++ ": p_map(" ++ show q ++ ") = " ++ show emap
+                        ++ ", got " ++ show mp) (abs (mp - emap) < 1e-9)
+  , testCase "a CDF query through a call is refused, not mis-routed" $ do
+      -- The other half of the same defect. An extra-semiring group is compiled
+      -- in probability mode only ('extraFunGroups' sets integFun = Nothing,
+      -- because a CDF has no settled meaning under max-product), so there is no
+      -- "h_map_integ" for a cumulative call to reach. Routing it to the
+      -- sum-product "h_integ" would be the same silent-wrong-answer bug; the
+      -- compiler refuses by name instead, as 'mapHasNoExcept' already does for
+      -- AnyExcept under MAP.
+      prog <- parseOrFail (unlines
+        [ "h = Uniform"
+        , "main = if h > 0.5 then 1.0 else 2.0"
+        ])
+      r <- try (evaluate (either (error . show) (length . show)
+                  (compile defaultCompilerConfig { extraSemirings = [SRMaxProduct] } prog)))
+      case r of
+        Left (ErrorCall msg) -> assertBool
+          ("expected the cumulative-under-extra-semiring diagnostic, got: " ++ msg)
+          ("no defined meaning under the SRMaxProduct semiring" `isInfixOf` msg)
+        Right _ -> assertFailure "expected a compile-time refusal, but compilation succeeded"
   ]
 
 -- | The consumer-grade decomposability walk. Unlike 'injFLatentVerdicts' it
@@ -2847,6 +2955,7 @@ internalsTests = testGroup "Internals"
   , materializationGuardTests
   , materializationTests
   , semiringMapTests
+  , semiringSatisfiabilityTests
   , materializationVerdictTests
   , planEnumStructuralADTTests
   , planEnumStructuralPartialTests

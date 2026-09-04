@@ -37,7 +37,7 @@ module SPLL.Semiring (
   -- * PResult
   PResult, rProb, rDim, rBranches, rImposs, mkPResult,
   -- * Semiring
-  Semiring(..), mkSemiring, linearSemiring, logSemiring,
+  Semiring(..), mkSemiring, linearSemiring, logSemiring, semiringGroupInfix,
   maxLinearSemiring, maxLogSemiring,
   semiringSuffix,
   negInfIR, logSumExpIR, logSubExpIR, maskSR,
@@ -278,6 +278,24 @@ semiringSuffix :: SemiringFamily -> String
 semiringSuffix SRSumProduct = "sumprod" -- unused today (never an *extra* entry), named for completeness
 semiringSuffix SRMaxProduct = "map"
 semiringSuffix SRCounting   = "count"
+
+-- | The group-name infix a compile under @fam@ must insert when referencing
+-- ANOTHER top-level function's compiled inference function: @""@ for the
+-- default family (so every pre-existing compile emits the identical
+-- @<callee>_prob@ it always did), and @"_map"@ etc. for an extra one, so
+-- that @main_map@'s body calls @h_map_prob@ rather than @h_prob@.
+--
+-- Without this, an extra-semiring group was only semiring-correct for the part
+-- of the program inlined into its OWN body: a call to a top-level function
+-- resolved to that callee's sum-product group, so any mixture living behind a
+-- function call was summed rather than combined with the requested operator --
+-- silently, with a plausible number rather than a crash. Measured at the time
+-- this was fixed (task semiring-second-instance-and-kbest): with the mixture
+-- inline in @main@, @main_map@ correctly gave 0.45; with the identical mixture
+-- moved behind @h@ and @main = h@, it gave 0.46, the sum-product answer.
+semiringGroupInfix :: SemiringFamily -> String
+semiringGroupInfix SRSumProduct = ""
+semiringGroupInfix fam          = "_" ++ semiringSuffix fam
 
 negInfIR :: IRExpr
 negInfIR = IRConst (VFloat (-1/0))

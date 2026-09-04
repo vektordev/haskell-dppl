@@ -1836,8 +1836,7 @@ toIRInference meta cumulative expr@(Expr TypeInfo{rType=rt} (Apply _ _)) sample
   , all ((== Deterministic) . pType . getTypeInfo) args
   , Just (TArrow _ _, hasInference) <- lookup n (typeEnv meta) = do
       argIRs <- mapM (toIRGenerate meta) args
-      let functionSuffix = if cumulative then "_integ" else "_prob"
-      let name = if hasInference then n ++ functionSuffix else n
+      let name = if hasInference then calleeInferenceName meta cumulative n else n
       let base = if hasInference
             then case topKThreshold (compilerConfig meta) of
               Just _ -> IRApply (IRApply (IRVar name) sample) (accProb meta)
@@ -2401,12 +2400,11 @@ toIRInference meta True (Expr TypeInfo {rType=rt} (InjF (Named name) [left, righ
   opaqueMass sr (enumSumNode sr v1 enumListL v1Body) const0
 toIRInference meta cumulative (Expr TypeInfo {rType=rt} (Var n)) sample = do
   -- Variable might be a function
-  let functionSuffix = if cumulative then "_integ" else "_prob"
   case lookup n (typeEnv meta) of
     -- Var is a function
     Just(TArrow _ _, hasInference) -> do
       var <- mkVariable "call"
-      let name = if hasInference then n ++ functionSuffix else n
+      let name = if hasInference then calleeInferenceName meta cumulative n else n
       let callExpr = if hasInference
             then case topKThreshold (compilerConfig meta) of
               Just _ -> IRApply (IRApply (IRVar name) sample) (accProb meta)
@@ -2418,9 +2416,10 @@ toIRInference meta cumulative (Expr TypeInfo {rType=rt} (Var n)) sample = do
     -- Var is a top level declaration (an therefor has a _prob function)
     Just (_, True) -> do
       var <- mkVariable "call"
+      let calleeName = calleeInferenceName meta cumulative n
       let callExpr = case topKThreshold (compilerConfig meta) of
-            Just _ -> IRApply (IRApply (IRVar (n ++ functionSuffix)) sample) (accProb meta)
-            Nothing -> IRApply (IRVar (n ++ functionSuffix)) sample
+            Just _ -> IRApply (IRApply (IRVar calleeName) sample) (accProb meta)
+            Nothing -> IRApply (IRVar calleeName) sample
       setVariables [(var, callExpr)]
       return (unpackResult (IRVar var))
     -- Var is a local variable
@@ -4653,3 +4652,31 @@ planWitnessApply meta cumulative rt lResolvedCN lambdaBodyCN tag v sample
   where
     isArrow (TArrow _ _) = True
     isArrow _            = False
+
+-- | The compiled inference function a call to top-level function @n@ must
+-- reference, given the semiring the CALLER is being compiled under.
+--
+-- Under the default family this is exactly the @n ++ "_prob"@ / @n ++ "_integ"@
+-- it has always been. Under an 'extraSemirings' family it is that family's own
+-- group for the callee (@n ++ "_map_prob"@), because otherwise the call falls
+-- back to the callee's sum-product group and the requested semiring silently
+-- stops applying at the first function boundary -- see 'semiringGroupInfix' for
+-- the measured symptom.
+--
+-- Cumulative position under a non-default family is REFUSED rather than
+-- mis-routed: an extra-semiring group deliberately has no @integFun@ at all
+-- (a CDF has no settled meaning under max-product -- see 'extraFunGroups'), so
+-- there is no @n ++ "_map_integ"@ to call. Failing loudly here is the same
+-- choice 'mapHasNoExcept' already makes for AnyExcept under MAP; the
+-- alternative is emitting a reference to a function that was never generated.
+calleeInferenceName :: CompilerMetadata -> Bool -> String -> String
+calleeInferenceName meta cumulative n = case semiringFamily meta of
+  SRSumProduct -> n ++ (if cumulative then "_integ" else "_prob")
+  fam
+    | cumulative -> error ("IRCompiler: this program takes a cumulative (CDF) "
+        ++ "query through a call to the top-level function " ++ show n ++ ", which has "
+        ++ "no defined meaning under the " ++ show fam ++ " semiring: an extra-semiring "
+        ++ "function group is compiled in probability mode only, so there is no "
+        ++ show (n ++ semiringGroupInfix fam ++ "_integ") ++ " to call. Compile this "
+        ++ "program without requesting that semiring, or inline the call.")
+    | otherwise -> n ++ semiringGroupInfix fam ++ "_prob"
