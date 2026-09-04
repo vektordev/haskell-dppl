@@ -91,8 +91,16 @@ expFwd = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["a"] ["b"] (IRUnaryOp OpEx
 expInv :: FDecl
 expInv = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["b"] ["a"] (IRUnaryOp OpLog (IRVar "b")) (IROp OpGreaterThan (IRVar "b") (IRConst $ VFloat 0)) False [("b", IROp OpDiv (IRConst (VFloat 1)) (IRVar "b"))]
 
+-- 'negFwd' is CNum-generic like 'plusFwd'/'multFwd', not Float-only: the
+-- surface '-' operator desugars to 'a + negF b' (SPLL.Prelude), so an
+-- Int-only 'neg' scheme forced every subtraction to TFloat regardless of
+-- operand type (task int-comparison-and-subtraction-force-float). Its
+-- inverse stays a single Float scheme -- inversion of an Int occurrence
+-- goes through 'negI'/'negIInv' instead, via 'IRCompiler.resolveInjF'
+-- (which already special-cased "neg" -> "negI" before this scheme was
+-- generalized, in anticipation of exactly this fix).
 negFwd :: FDecl
-negFwd = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["a"] ["b"] (IRUnaryOp OpNeg (IRVar "a")) (IRConst (VBool True)) False [("a", IRConst (VFloat (-1)))]
+negFwd = FDecl (Forall [TV "a"] [CNum (TV "a")] (TVarR (TV "a") `TArrow` TVarR (TV "a"))) ["a"] ["b"] (IRUnaryOp OpNeg (IRVar "a")) (IRConst (VBool True)) False [("a", IRConst (VFloat (-1)))]
 negInv :: FDecl
 negInv = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["b"] ["a"] (IRUnaryOp OpNeg (IRVar "b")) (IRConst (VBool True)) False [("b", IRConst (VFloat (-1)))]
 negIFwd :: FDecl
@@ -226,10 +234,20 @@ orFwd = FDecl (Forall [] [] (TBool `TArrow` (TBool `TArrow` TBool))) ["a", "b"] 
 -- same as the old bespoke GreaterThan/LessThan constructors did); the empty
 -- inverse list here only routes the both-enumerable-discrete case to the
 -- generic enumerate-both path (task gt-lt-range-propagation).
+--
+-- CNum-generic (mirroring 'eqFwd's fully-generic scheme and 'plusFwd's
+-- CNum-constrained one), not Float-only: 'IROp OpGreaterThan'/'OpLessThan'
+-- are already Int-aware everywhere they're consumed (IROptimizer's
+-- constant-folding 'forceOp', and every backend's rendered ">"/"<"), and
+-- ModalityInfer's 'compareNode' decides the comparison's modality from the
+-- operands' own capabilities, never from 'rType' -- so nothing downstream
+-- needed the restriction. Task int-comparison-and-subtraction-force-float:
+-- an Int-only 'rType' unification made it impossible to compare two
+-- Int-typed expressions with '>'/'<' at all.
 gtFwd :: FDecl
-gtFwd = FDecl (Forall [] [] (TFloat `TArrow` (TFloat `TArrow` TBool))) ["a", "b"] ["c"] (IROp OpGreaterThan (IRVar "a") (IRVar "b")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))]
+gtFwd = FDecl (Forall [TV "a"] [CNum (TV "a")] (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TBool))) ["a", "b"] ["c"] (IROp OpGreaterThan (IRVar "a") (IRVar "b")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))]
 ltFwd :: FDecl
-ltFwd = FDecl (Forall [] [] (TFloat `TArrow` (TFloat `TArrow` TBool))) ["a", "b"] ["c"] (IROp OpLessThan (IRVar "a") (IRVar "b")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))]
+ltFwd = FDecl (Forall [TV "a"] [CNum (TV "a")] (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TBool))) ["a", "b"] ["c"] (IROp OpLessThan (IRVar "a") (IRVar "b")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))]
 
 -- max: also forward-only, like gt/lt -- given max(a,b)=c there is no single
 -- functional inverse recovering one operand from the other. If a is known
