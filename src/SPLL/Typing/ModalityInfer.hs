@@ -48,8 +48,9 @@ import Data.List (find)
 
 import SPLL.Lang.Types
   ( Expr(..), ExprF(..), Program(..), TypeInfo(..), InjFName(..), ChainName, ADTDecl, CompilerError, FnDecl
+  , Tag(..)
   , dataName, constructors )
-import SPLL.Lang.Lang (getTypeInfo, containedVars, varsOfExpr)
+import SPLL.Lang.Lang (getTypeInfo, containedVars, varsOfExpr, multiValueContainsContinuous)
 import SPLL.Typing.Typing (setPType)
 import SPLL.Typing.PType (PType(..))
 import SPLL.Typing.RType (RType(..))
@@ -311,6 +312,11 @@ data ICtx = ICtx
   { icADTs :: [ADTDecl]
   , icFC   :: FCData
   , icObs  :: ChainName
+    -- | Does this declaration contain a 'ReadNN'? If so, a comparison in it may
+    -- be compiled by the plan-guided engine, whose applicability this pass
+    -- cannot see — so 'compareGround' keeps its historical verdict there rather
+    -- than guessing. See the note on 'compareGround'.
+  , icPlan :: Bool
   }
 
 cnOf :: Expr -> ChainName
@@ -413,16 +419,85 @@ inferE ctx env expr = case expr of
     compareNode ti fname a b =
       let (ma, a', aacc) = inferE ctx env a
           (mb, b', bacc) = inferE ctx env b
-          g = tagFin (icADTs ctx) ti (compareGround (outerI ma) (outerI mb))
+          g = tagFin (icADTs ctx) ti
+                (compareGround (icPlan ctx)
+                               (enumerableOperand a) (enumerableOperand b)
+                               (outerI ma) (outerI mb))
       in done (IG g) (Expr (setPType ti (projectGround g)) (InjF (Named fname) [a', b'])) (aacc ++ bacc)
 
--- | Comparison (@>@/@<@): the Boolean result is a Bernoulli (finite support).
--- Both deterministic ⇒ a known Boolean; both integral-ready ⇒ exact tail
--- probability via the CDF; both samplable ⇒ Monte-Carlo only; else opaque.
-compareGround :: GroundMod -> GroundMod -> GroundMod
-compareGround a b
+-- | Does this declaration body contain a neural read anywhere?
+--
+-- The question 'compareGround' actually wants is "could the plan-guided engine
+-- compile a comparison in this declaration?", and that engine exists only for
+-- observations over a neural network's structured output. A declaration with no
+-- 'ReadNN' in it can never reach the engine, so there the closed forms
+-- 'compareGround' enumerates are exhaustive. This is the coarse, conservative
+-- direction of that question: the engine's real applicability depends on which
+-- @let@ is being inverted and what the plan slices look like, which this pass
+-- cannot see.
+hasReadNN :: Expr -> Bool
+hasReadNN (Expr _ (ReadNN _ _)) = True
+hasReadNN (Expr _ f)            = any hasReadNN f
+
+-- | Mirror of @IRCompiler.isEnumerable@: does this operand carry a
+-- 'DiscreteValues' domain the enumerate-both grid can actually loop over?
+--
+-- Deliberately a different test from 'finFromTags' / 'gFin', which also answer
+-- 'Finite' for structural type finiteness and for a domain with a continuous
+-- leaf in it. The grid can loop neither, so keying 'compareGround' off 'gFin'
+-- would re-open the same over-promise this function exists to close.
+enumerableOperand :: Expr -> Bool
+enumerableOperand e = any isDiscrete (tags (getTypeInfo e))
+  where isDiscrete (DiscreteValues mv) = not (multiValueContainsContinuous mv)
+        isDiscrete _                   = False
+
+-- | Comparison (@>@\/@<@): the Boolean result is a Bernoulli (finite support).
+-- @plan@ says the enclosing declaration could reach the plan-guided engine
+-- ('hasReadNN'); @enumA@\/@enumB@ say whether the left\/right operand is
+-- enumerable ('enumerableOperand').
+--
+-- The capability rung is decided by whether a closed form for /this pair of
+-- operands/ exists, not by whether each operand separately owns a CDF. Owning a
+-- CDF each says nothing about the law of the difference: @Uniform > exp(Uniform)@
+-- has two 'DensInt' operands and no closed-form answer at all. Claiming 'DensInt'
+-- there typed the node 'Integrate', which sent 'toIRInference' looking for an
+-- equation that does not exist and out the other side as the catch-all
+-- @error "found no way to convert to IR"@ -- a compiler crash on a well-typed
+-- program (task @ircompiler-integrate-comparison-no-conversion-crash@; the same
+-- over-promise, one rung up, as the 'IntegralOnly' note below).
+--
+-- 'SampleOnly' is the honest answer for the rest: the program still compiles and
+-- still gets its @generate@ function, and a probability query is declined with a
+-- message naming the mode instead of taking the process down.
+--
+-- The three closed forms admitted here each mirror one @toIRInference@ equation,
+-- and this list must not outrun that one:
+--
+--   * __one side 'Exact'__ — the random side's own CDF evaluated at the fixed
+--     bound (@fixed_bound@\/@rhs_integral@\/@lhs_integral@).
+--   * __both sides Gaussian__ — the difference is Gaussian, so the answer is its
+--     CDF at zero (@normalDiffCdfAtZero@). 'FamNormal' specifically, not merely
+--     equal families: two 'FamLogNormal' operands enjoy no such closure and
+--     IRCompiler has no equation for them.
+--   * __both sides enumerable__ — the forward-only @|L|x|R|@ grid, which reads
+--     the operands' 'DiscreteValues' tags, hence the flags.
+--
+-- The @plan@ flag is the fourth, and the one this pass cannot decide: the
+-- plan-guided engine measures a pairwise comparison of two continuous leaves of
+-- a neural plan by that same difference Gaussian (@testCases\/planEnumContPair@),
+-- but the leaves reach the comparison as @fst p@\/@snd p@ off a @let@-bound
+-- neural read, and by then their Gaussian family is long gone from the flat
+-- ground — a @(Float, Float)@ net is one family-free 'gIntegrate'. Rather than
+-- guess at the engine's applicability, the narrowing simply does not apply to a
+-- declaration containing a 'ReadNN': such a declaration keeps exactly the
+-- verdict it had before this rule existed, so no neural program's typing moves.
+-- The residue — a genuinely unsupported comparison inside a neural program still
+-- reaching the IRCompiler catch-all — is the follow-up item
+-- @comparison-closed-form-verdict-for-plan-leaves@.
+compareGround :: Bool -> Bool -> Bool -> GroundMod -> GroundMod -> GroundMod
+compareGround plan enumA enumB a b
   | gCap a == Exact && gCap b == Exact = groundMod Exact        Finite FamNone
-  | okInt a && okInt b                 = groundMod DensInt      Finite FamNone
+  | closedForm                         = groundMod DensInt      Finite FamNone
   | canSample a && canSample b         = groundMod SampleOnly   Finite FamNone
   | otherwise                          = groundMod Opaque       Finite FamNone
   -- 'DensInt'/'Exact' are the only ground states with a real, usable CDF here.
@@ -437,6 +512,11 @@ compareGround a b
   -- for e.g. @Normal*c > Uniform+Normal@ instead of 'Bottom'.
   where okInt g     = gCap g == DensInt || gCap g == Exact
         canSample g = leqCap SampleOnly (gCap g)
+        closedForm  = okInt a && okInt b
+                   && (  plan
+                      || gCap a == Exact || gCap b == Exact
+                      || (gFam a == FamNormal && gFam b == FamNormal)
+                      || (enumA && enumB) )
 
 -- | Modality of an 'InjF' application. Resolution order:
 --
@@ -597,7 +677,7 @@ summaries adtsDecl fcData decls = foldl solve Map.empty components
 
     inferDecl env b = fst3 (inferE (declCtx b) env b)
     fst3 (x,_,_) = x
-    declCtx b = ICtx adtsDecl fcData (cnOf b)
+    declCtx b = ICtx adtsDecl fcData (cnOf b) (hasReadNN b)
 
 -- ---------------------------------------------------------------------------
 -- Public entry points
@@ -618,7 +698,8 @@ inferProgram fcData (Program decls nns adtDecls enc) =
   (Program decls' nns adtDecls enc, concat accs)
   where
     env = summaries adtDecls fcData decls
-    results = [ (n, inferE (ICtx adtDecls fcData (cnOf b)) env b) | (n, b) <- decls ]
+    results = [ (n, inferE (ICtx adtDecls fcData (cnOf b) (hasReadNN b)) env b)
+              | (n, b) <- decls ]
     decls'  = [ (n, e) | (n, (_, e, _)) <- results ]
     accs    = [ a | (_, (_, _, a)) <- results ]
 

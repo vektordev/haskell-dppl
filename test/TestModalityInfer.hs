@@ -131,6 +131,51 @@ modalityInferTests = testGroup "ModalityInfer"
           -- this exact shape trying to honor the bogus 'Integrate' claim.
           assertEqual "" Bottom
             (mainPType "main = 2.0 * Normal > Uniform + Normal")
+      , testCase "a comparison of two CDF-owning operands is Bottom, not Integrate" $
+          -- Regression, task
+          -- @ircompiler-integrate-comparison-no-conversion-crash@ (found by
+          -- TestFuzz's typed generator, minimized 2026-09-02): both operands
+          -- here are honest 'DensInt' -- 'Uniform' and an 'exp' of one -- so
+          -- 'compareGround's old "both integral-ready" branch admitted the pair
+          -- and typed the comparison 'Integrate'. But owning a CDF each says
+          -- nothing about the law of the *difference*, which is what a
+          -- comparison needs; IRCompiler has no equation for this pair and
+          -- crashed with "found no way to convert to IR" honoring the claim.
+          -- Sampling-only ('Bottom') is the sound answer: the program keeps its
+          -- generate function and a probability query is declined by name.
+          assertEqual "" Bottom
+            (mainPType "main = Uniform > exp(Uniform)")
+      , testCase "a comparison of two Uniforms is Bottom" $
+          assertEqual "" Bottom (mainPType "main = Uniform > Uniform")
+      , testCase "a Normal-vs-non-Normal comparison is Bottom" $
+          -- The Gaussian-difference closed form needs *both* sides Gaussian;
+          -- one Gaussian side buys nothing on its own.
+          assertEqual "" Bottom (mainPType "main = Normal > Uniform")
+      , testCase "a comparison of two LogNormals is Bottom" $
+          -- Equal families is not the test -- 'FamNormal' is. The difference of
+          -- two log-normals has no closed form and IRCompiler has no equation
+          -- for the pair.
+          assertEqual "" Bottom (mainPType "main = exp(Normal) > exp(Normal)")
+      , testCase "the Gaussian-difference comparison stays Integrate" $
+          -- The one genuinely closed-form two-random-operand comparison
+          -- ('normalDiffCdfAtZero'). Guards the narrowing above against
+          -- over-refusing.
+          assertEqual "" Integrate (mainPType "main = Normal > Normal")
+      , testCase "a comparison against a deterministic bound stays Integrate" $
+          -- The fixed-bound equation: the random side's own CDF at the bound.
+          assertEqual "" Integrate (mainPType "main = Uniform > 0.5")
+      , testCase "a comparison against a deterministic bound is symmetric" $
+          assertEqual "" Integrate (mainPType "main = 0.5 < Normal")
+      , testCase "a comparison of two constants is Deterministic" $
+          assertEqual "" Deterministic (mainPType "main = 1.0 > 2.0")
+      , testCase "a comparison of two enumerable operands stays Integrate" $
+          -- The forward-only |L|x|R| grid. Both operands are TFloat but carry a
+          -- 'DiscreteValues' domain, which is what the grid loops -- so this is
+          -- the case 'compareGround' reads the operand tags for rather than
+          -- keying off 'gFin'.
+          assertEqual "" Integrate $
+            mainPType
+              "main = (if Uniform < 0.5 then 1.0 else 2.0) > (if Uniform < 0.3 then 1.5 else 0.5)"
       , testCase "a function node carries its body pType (IRCompiler contract)" $
           -- Milestone 5: a function-typed node projects to its /body/ pType, not
           -- the lossy outer-closure 'Deterministic'. @IRCompiler@ selects

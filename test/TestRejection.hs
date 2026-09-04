@@ -15,12 +15,12 @@ module TestRejection (rejectionTests) where
 -- that changes which rule fires is pinpointed to the offending program.
 
 import SPLL.Lang.Lang
-import SPLL.Lang.Types (makeTypeInfo, GenericValue(..), MultiValue(..))
+import SPLL.Lang.Types (makeTypeInfo, GenericValue(..), MultiValue(..), CompilerError)
 import SPLL.Typing.RType (RType(..))
 import SPLL.Examples
 import SPLL.Validator (validateProgram)
 import SPLL.Prelude (compile, runProb, runInteg, uniform, constB, constF, (#+#), (#<#))
-import SPLL.IntermediateRepresentation (defaultCompilerConfig, checkQueryType, noIntegrate, firstAnyExceptIR, anyExceptCodegenRefusal)
+import SPLL.IntermediateRepresentation (defaultCompilerConfig, checkQueryType, noIntegrate, firstAnyExceptIR, anyExceptCodegenRefusal, IRValue)
 import SPLL.Typing.Infer (addTypeInfo)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, adtCdfMessage)
@@ -47,6 +47,7 @@ rejectionTests = testGroup "Rejection"
   , generateBackedReadNNSymbolTests
   , generateBackedProjectionTests
   , vAnyExceptCodegenTests
+  , intractableComparisonTests
   ]
 
 -- ----------------------------------------------------------------------------
@@ -654,4 +655,67 @@ vAnyExceptCodegenTests = testGroup "VAnyExceptCodegenRefusal"
             Left msg -> assertBool ("diagnostic does not name VAnyExcept: " ++ msg)
                                     ("VAnyExcept" `isInfixOf` msg)
             Right () -> assertFailure "expected a VAnyExcept refusal, none was raised"
+  ]
+
+-- ----------------------------------------------------------------------------
+-- Comparisons with no closed form (task
+-- ircompiler-integrate-comparison-no-conversion-crash)
+-- ----------------------------------------------------------------------------
+
+-- Two operands that each own a CDF, whose *difference* has no closed form.
+-- ModalityInfer used to call this pair integral-ready and type the comparison
+-- 'Integrate'; IRCompiler, which has an equation only for a fixed bound, two
+-- Gaussians, or two enumerable domains, then fell through to its catch-all
+-- @error "found no way to convert to IR"@ -- a compiler crash on a well-typed
+-- program, and the shape TestFuzz's typed generator kept rediscovering.
+--
+-- The fix is a typing verdict, not a codegen one: the comparison is
+-- sampling-only, so the program keeps its generate function and a probability
+-- query is declined by name.
+intractableComparisonSrc :: String
+intractableComparisonSrc = "main = Uniform > exp(Uniform)\n"
+
+-- The Gaussian-difference case, which *is* closed-form ('normalDiffCdfAtZero').
+-- The positive control: it guards the narrowing against over-refusing, which
+-- would be just as wrong and much quieter.
+gaussianComparisonSrc :: String
+gaussianComparisonSrc = "main = Normal > Normal\n"
+
+-- | Run a probability query, forcing it fully so a lazy 'error' surfaces here
+-- rather than escaping the assertion. @Left@ is a crash, @Right@ the (declined
+-- or answered) result -- a distinction the tests below turn on, since the whole
+-- point is that this shape must reach the /declined/ side.
+forcedProb :: Program -> IRValue -> IO (Either SomeException (Either CompilerError IRValue))
+forcedProb prog x = do
+  let res = runProb defaultCompilerConfig prog [] x
+  outcome <- try (evaluate (length (show res)))
+  return (fmap (const res) outcome)
+
+intractableComparisonTests :: TestTree
+intractableComparisonTests = testGroup "IntractableComparison"
+  [ testCase "a comparison with no closed form is declined, not crashed" $
+      withParsed intractableComparisonSrc $ \prog -> do
+        res <- forcedProb prog (VBool True)
+        case res of
+          Left ex -> assertFailure
+            ("the query crashed instead of being declined: " ++ show ex)
+          Right (Left e) -> assertBool
+            ("expected the missing-variant diagnostic, got: " ++ e)
+            ("has no compiled probability function" `isInfixOf` e)
+          Right (Right _) -> assertFailure
+            "a comparison with no closed-form answer was accepted for probability mode"
+  , testCase "the decline is not the found-no-way-to-convert crash" $
+      -- Pins the *manner* of the refusal as well as its existence: this string
+      -- is the IRCompiler catch-all, i.e. the bug itself.
+      withParsed intractableComparisonSrc $ \prog -> do
+        res <- forcedProb prog (VBool True)
+        assertBool "the IRCompiler catch-all fired instead of a typing verdict"
+                   (not ("found no way to convert to IR" `isInfixOf` show res))
+  , testCase "the Gaussian-difference comparison is still accepted" $
+      withParsed gaussianComparisonSrc $ \prog -> do
+        res <- forcedProb prog (VBool True)
+        case res of
+          Left ex        -> assertFailure ("the closed-form comparison crashed: " ++ show ex)
+          Right (Left e) -> assertFailure ("the closed-form comparison was refused: " ++ e)
+          Right (Right _) -> return ()
   ]
