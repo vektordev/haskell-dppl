@@ -119,9 +119,6 @@ answer `Left` on a wrong argument count). `IRCompiler` carries an
 its default 30-model budget on two `Maybe (RType, Bool)` cases and then reports
 those exhaustive matches as incomplete.
 
-Note that a plain rebuild will not re-emit warnings for unchanged modules;
-`stack build --ghc-options="-fforce-recomp"` is what shows the true count.
-
 ## Compilation Pipeline
 
 ```
