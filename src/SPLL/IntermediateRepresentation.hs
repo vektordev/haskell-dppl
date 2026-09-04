@@ -572,6 +572,17 @@ data CompilerConfig = CompilerConfig {
   -- 'topKThreshold' combined with an extra semiring is untested (topK is
   -- itself already an approximate max-plus mechanism; layering it under an
   -- *exact* 'SRMaxProduct' compile is redundant, not composed).
+  --
+  -- The requested family follows the program ACROSS top-level function calls:
+  -- a body compiled under an extra family references the callee's group of the
+  -- same family ("h_map_prob"), via 'SPLL.Semiring.semiringGroupInfix'. That is
+  -- not cosmetic -- before it, an extra group was only semiring-correct for the
+  -- code inlined into its own body, and any mixture behind a function boundary
+  -- was silently summed rather than combined with the requested operator (task
+  -- semiring-second-instance-and-kbest). Because extra groups have no
+  -- 'integFun', a CDF query that reaches a top-level call under a non-default
+  -- family is refused by name at compile time rather than routed to the
+  -- callee's sum-product CDF.
   extraSemirings :: [SemiringFamily]
 } deriving (Show)
 
@@ -630,12 +641,44 @@ data SemiringFamily = SRSumProduct
                        -- deterministically true, 1 otherwise) is not a
                        -- function of the collapsed True-branch weight alone --
                        -- it needs the *pre-collapse* probability the collapse
-                       -- already discarded. A sound instance needs either a
-                       -- richer 'Semiring' interface (e.g. 'srComplement'
-                       -- taking the pre-collapse value alongside the collapsed
-                       -- one) or accepting the O(2^depth) separate-compile
-                       -- cost this identity exists to avoid -- a design
-                       -- question for a follow-up task, not a mechanical fix.
+                       -- already discarded.
+                       --
+                       -- Follow-up task semiring-second-instance-and-kbest
+                       -- then MEASURED the two candidate repairs and declined
+                       -- both. (a) The proposed shortcut @srComplement = const
+                       -- 1@ ("the complement of a count is always
+                       -- satisfiable") does fix the program above, but is
+                       -- wrong wherever one branch has zero models: on
+                       -- @Uniform < 2.0@, @Uniform < 0.0@ and a
+                       -- constant-folded condition it reported count 1 for a
+                       -- branch with no models at all. (b) Paying the
+                       -- O(2^depth) cost -- compiling @cond@'s False case as a
+                       -- genuine second recursive call -- repairs ONLY the
+                       -- 'IfThenElse' site. The other three 'srComplement'
+                       -- sites (gt/lt against a deterministic bound,
+                       -- two-Normal comparisons, and the decreasing-transform
+                       -- CDF flip in 'SPLL.Semiring.scaleCoV') complement a
+                       -- CUMULATIVE value, where there is no "other branch" to
+                       -- recompile: the false-side weight is
+                       -- @[1 - realCdf > 0]@, and the IR has only a lower-tail
+                       -- 'IRCumulative'. Both repairs therefore end at the
+                       -- same place -- the counting value must be carried
+                       -- ALONGSIDE the real probability rather than in place
+                       -- of it -- which is a widening of the 'Semiring'
+                       -- interface, declined on cost/benefit. Counting also
+                       -- fails independently on multiplicity (two summed coins
+                       -- measured 0.25/0.5/0.25 rather than 1/2/1).
+                       --
+                       -- Satisfiability -- the boolean half this family was
+                       -- partly wanted for -- needs none of that, and is
+                       -- already answered soundly by the impossibility flag
+                       -- ('resultImpossible'), pinned by TestInternals'
+                       -- "Satisfiability via the impossibility flag" group on
+                       -- the very shapes (b) gets wrong. That works precisely
+                       -- because possibility IS a function of the real
+                       -- probability, so it rides the sum-product computation;
+                       -- multiplicity is not, which is the whole reason
+                       -- counting cannot.
                      deriving (Show, Eq, Ord)
 
 -- | The default cardinality budget for marginal materialization. See
