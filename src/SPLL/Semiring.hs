@@ -608,9 +608,6 @@ blockIterates :: IRExpr -> Bool
 blockIterates e = iterates e || any blockIterates (getIRSubExprs e)
   where
     iterates x = case x of
-      IREnumSum{}                 -> True
-      IRLogEnumSum{}              -> True
-      IREnumSumPaired{}           -> True
       IRBuiltin BMapList _        -> True
       IRBuiltin BMap _            -> True
       IRBuiltin (BReduce _ _) _   -> True
@@ -668,14 +665,16 @@ enumSumP sr withBranchCount wrap v vals packed
   -- one copy, no binding to clean up afterwards.
   | not withBranchCount =
       opaqueMass sr (wrap (enumSumNode sr v vals (unP (rProb (unpackResult packed))))) const0
-  -- 'ROpMax' has no 'IREnumSumPaired'-shaped legacy node (see 'enumSumNode'):
-  -- build the paired reduction directly in already-lowered tensor form,
-  -- mirroring 'SPLL.IRTensorPass's own 'IREnumSumPaired' rewrite -- one
-  -- let-bound map over the domain, its two projections ('rProb'/'rBranches')
-  -- each reduced on their own axis, the probability with 'ROpMax' and the
-  -- branch count (unaffected by which semiring is active) with plain 'ROpAdd'.
-  | srReduceOp sr == ROpMax = do
-      n <- mkVariable "enum_max_axis"
+  -- ONE let-bound map over the domain, its two projections ('rProb' and
+  -- 'rBranches') each reduced on their own axis: the probability with the
+  -- semiring's own operator, the branch count always with plain 'ROpAdd'
+  -- (a count is a count whichever semiring is active). Let-binding the mapped
+  -- axis is what lets the two components reduce independently while the body
+  -- is evaluated once -- the sharing the retired 'IREnumSumPaired' node
+  -- existed to fake before the IR could name a vector of per-iteration
+  -- results (task retire-irenumsum).
+  | otherwise = do
+      n <- mkVariable "enum_axis"
       body <- mkVariable "enum_body"
       let r = unpackResult (IRVar body)
           mapped = IRBuiltin BMap [IRLambda v (IRLetIn body packed (IRConstruct TgTuple [unP (rProb r), rBranches r])), tensorDomainSR vals]
@@ -683,42 +682,31 @@ enumSumP sr withBranchCount wrap v vals packed
           bcs    = IRBuiltin BMap [IRLambda (n ++ "_b") (IRDestruct AcSnd (IRVar (n ++ "_b"))), IRVar n]
       paired <- mkVariable "enum_paired"
       setVariables [(paired, wrap (IRLetIn n mapped
-                                     (IRConstruct TgTuple [IRBuiltin (BReduce ROpMax 0) [probs], IRBuiltin (BReduce ROpAdd 0) [bcs]])))]
-      opaqueMass sr (IRDestruct AcFst (IRVar paired)) (IRDestruct AcSnd (IRVar paired))
-  | otherwise = do
-      body <- mkVariable "enum_body"
-      let r = unpackResult (IRVar body)
-      paired <- mkVariable "enum_paired"
-      setVariables [(paired, wrap (IREnumSumPaired (srLogSpace sr) v vals
-                                     (IRLetIn body packed
-                                       (IRConstruct TgTuple [unP (rProb r), rBranches r]))))]
+                                     (IRConstruct TgTuple [ IRBuiltin (BReduce (srReduceOp sr) 0) [probs]
+                                                          , IRBuiltin (BReduce ROpAdd 0) [bcs] ])))]
       opaqueMass sr (IRDestruct AcFst (IRVar paired)) (IRDestruct AcSnd (IRVar paired))
 
--- | The IR node an enumerated sum/max of probabilities is built from:
--- 'IRLogEnumSum' (log-sum-exp reduction) in log space, plain 'IREnumSum'
--- (linear sum) otherwise -- both legacy front-end nodes 'SPLL.IRTensorPass'
--- lowers into the tensor builtins later, same as every other backend sees.
--- 'ROpMax' (max-product/MAP) has no such legacy node: it is built directly in
--- already-lowered tensor form ('IRBuiltin BMap'/'BReduce'), since a THIRD
--- front-end constructor would need the same traversal-function updates
--- 'IREnumSum'/'IRLogEnumSum' together paid for, for no benefit -- nothing
--- between 'SPLL.IRCompiler' and 'SPLL.IRTensorPass' cares which form a node
--- already in tensor shape arrived in, and 'SPLL.IRTensorPass's rewrite passes
--- an unrecognised expression through unchanged. Shared by 'enumSumP' and the
--- hand-rolled double-enumeration cases in IRCompiler.hs's 'toIRInference' that
--- build an 'IREnumSum'/max reduction directly rather than through 'enumSumP'.
+-- | The IR node an enumerated sum/max of probabilities is built from: a
+-- 'BMap' of the body over the domain, reduced along that one axis with the
+-- semiring's own operator.
+--
+-- Until task retire-irenumsum this had a front-end constructor per reduction
+-- operator ('IREnumSum' for 'ROpAdd', 'IRLogEnumSum' for 'ROpLogSumExp')
+-- that a later pass lowered into exactly this shape, and 'ROpMax' -- added
+-- last -- skipped them and built the tensor form here. Every generic pass
+-- paid for that split with a case per constructor, and a fourth reduction
+-- would have cost a fourth. The operator is a field of 'BReduce', so it now
+-- costs nothing: this function is total in 'srReduceOp' by construction.
+--
+-- Shared by 'enumSumP' and the hand-rolled double-enumeration cases in
+-- IRCompiler.hs's 'toIRInference' that build an enumerated reduction directly
+-- rather than through 'enumSumP'.
 enumSumNode :: Semiring -> Varname -> MultiValue -> IRExpr -> IRExpr
-enumSumNode sr v vals body = case srReduceOp sr of
-  ROpAdd       -> IREnumSum v vals body
-  ROpLogSumExp -> IRLogEnumSum v vals body
-  ROpMax       -> IRBuiltin (BReduce ROpMax 0) [IRBuiltin BMap [IRLambda v body, tensorDomainSR vals]]
+enumSumNode sr v vals body =
+  IRBuiltin (BReduce (srReduceOp sr) 0) [IRBuiltin BMap [IRLambda v body, tensorDomainSR vals]]
 
--- | The enumerated domain as a rank-1 tensor of constants, in the same order
--- 'IREnumSum'/'IRLogEnumSum' would have looped over it -- the direct-tensor
--- sibling of 'SPLL.IRTensorPass's own (unexported) @tensorDomain@, duplicated
--- rather than imported so this module (which 'SPLL.IRCompiler' -- and hence,
--- transitively, everything -- depends on) does not gain an edge onto a later
--- compiler *pass*.
+-- | The enumerated domain as a rank-1 tensor of constants, in the order the
+-- enumeration loops over it.
 tensorDomainSR :: MultiValue -> IRExpr
 tensorDomainSR mv = IRBuiltin (BTensor [EFixed (length vals)]) (map (IRConst . valueToIR) vals)
   where vals = multiValueToValueList mv
@@ -728,7 +716,7 @@ tensorDomainSR mv = IRBuiltin (BTensor [EFixed (length vals)]) (map (IRConst . v
 --
 -- This is the one place the impossibility flag is read off the value rather
 -- than taken from structure: whether ANY enumerated value contributed is not
--- expressible as a Bool over the summed body (there is no boolean IREnumSum).
+-- expressible as a Bool over the summed body (there is no boolean reduction).
 -- It is sound here in a way it is not in a mixture, because this is a discrete
 -- MASS -- an exact zero means no value in the support matched, i.e. the event
 -- really is impossible. A density, which may underflow while remaining

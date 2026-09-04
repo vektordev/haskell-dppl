@@ -1156,16 +1156,17 @@ freeInIR v (IRUnaryOp _ e)      = freeInIR v e
 freeInIR v (IRIf c a b)         = freeInIR v c  || freeInIR v a  || freeInIR v b
 freeInIR v (IRConstruct _ args) = any (freeInIR v) args
 freeInIR v (IRDestruct _ a)     = freeInIR v a
--- 'IRBuiltin' as a whole is not covered by the catch-all below (it has no
--- generic case here, matching this function's per-constructor style rather
--- than 'getIRSubExprs'), so 'BMapList'/'BListIndex' need their own arms --
--- same as the 'IRMap'/'IRIndex' arms they replace (design ir-reengineering,
--- slice S2).
-freeInIR v (IRBuiltin BMapList [f, x])   = freeInIR v f || freeInIR v x
-freeInIR v (IRBuiltin BListIndex [a, b]) = freeInIR v a || freeInIR v b
-freeInIR v (IREnumSum n _ irBody) = v /= n && freeInIR v irBody
-freeInIR v (IRLogEnumSum n _ irBody) = v /= n && freeInIR v irBody
-freeInIR v (IREnumSumPaired _ n _ irBody) = v /= n && freeInIR v irBody
+-- Every builtin, over all its arguments. This arm is deliberately generic:
+-- 'BMapList'/'BListIndex' once had one each, and the tensor builtins had none
+-- at all -- so a variable free inside a 'BMap' body was answered "not free"
+-- by the catch-all below. That was latent rather than harmless: 'freeInIR' is
+-- what 'pruneDeadLetIns' asks before dropping a binding, so a wrong "no"
+-- deletes a binding the loop body still reads. It only ever fired on the
+-- max-product semiring, whose enumerated reduction was the one built in
+-- tensor form; task retire-irenumsum put EVERY enumerated reduction in that
+-- form, which would have made it the common case. A binder inside a builtin
+-- is always an 'IRLambda' argument, and that arm above already excludes it.
+freeInIR v (IRBuiltin _ args)   = any (freeInIR v) args
 freeInIR v (IRDensity _ _ x)    = freeInIR v x
 freeInIR v (IRCumulative _ _ x) = freeInIR v x
 freeInIR v (IRIsPossible _ x)   = freeInIR v x
@@ -2605,22 +2606,18 @@ equalityGuardBody _    _ v sample = IROp OpEq sample v
 uniqueify :: [Varname] -> String -> IRExpr -> IRExpr
 uniqueify vars prefix (IRVar name) | name `elem` vars = IRVar (prefix ++ name)
 uniqueify vars prefix (IRLetIn name boundExpr bodyExpr) | name `elem` vars = IRLetIn (prefix ++ name) (uniqueify vars prefix boundExpr) (uniqueify vars prefix bodyExpr)
-uniqueify vars prefix (IREnumSum name lst bodyExpr) | name `elem` vars = IREnumSum (prefix ++ name) lst (uniqueify vars prefix bodyExpr)
-uniqueify vars prefix (IRLogEnumSum name lst bodyExpr) | name `elem` vars = IRLogEnumSum (prefix ++ name) lst (uniqueify vars prefix bodyExpr)
-uniqueify vars prefix (IREnumSumPaired lg name lst bodyExpr) | name `elem` vars = IREnumSumPaired lg (prefix ++ name) lst (uniqueify vars prefix bodyExpr)
--- Task semiring-parametric-marginals: the max-product (MAP) semiring's
--- 'SPLL.Semiring.enumSumNode'/'enumSumP' build their reduction directly in
--- tensor form ('IRBuiltin BMap [IRLambda v body, ...]') rather than through
--- 'IREnumSum', reusing the SAME enumeration variable name as the 'IRLambda's
--- binder. Without this case, 'irMap's generic descent (this function relies
--- on for recursion -- see the comment above) renames free occurrences of that
--- name inside 'bodyExpr' (correctly, per the 'IRVar' case above) while
--- leaving the 'IRLambda' binder untouched, splitting one identifier into two:
--- every *use* of the loop variable pointed at a name nothing bound any more.
--- Reachable at HEAD only via the double-enumeration ('applyUnique') site under
--- '--semiring=map' (testCases/applyEnumOperandPair.ppl is the canary) --
--- 'IRLambda' bindings built everywhere else in the compiler are always freshly
--- 'mkVariable'd, so this never collided with '[x2, x3]' before this task.
+-- 'SPLL.Semiring.enumSumNode'/'enumSumP' build an enumerated reduction as
+-- 'IRBuiltin BMap [IRLambda v body, ...]', reusing the SAME enumeration
+-- variable name as the 'IRLambda's binder. Without this case, 'irMap's generic
+-- descent (this function relies on for recursion -- see the comment above)
+-- renames free occurrences of that name inside 'bodyExpr' (correctly, per the
+-- 'IRVar' case above) while leaving the 'IRLambda' binder untouched, splitting
+-- one identifier into two: every *use* of the loop variable pointed at a name
+-- nothing bound any more. Added for the max-product semiring, whose reduction
+-- was the first built in tensor form (testCases/applyEnumOperandPair.ppl under
+-- '--semiring=map' is the canary); task retire-irenumsum made every enumerated
+-- reduction that shape, so it now guards the whole double-enumeration
+-- ('applyUnique') site rather than one semiring's corner of it.
 uniqueify vars prefix (IRLambda name bodyExpr) | name `elem` vars = IRLambda (prefix ++ name) (uniqueify vars prefix bodyExpr)
 uniqueify _ _ e = e
 
@@ -2845,13 +2842,16 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
         in IRLetIn n v' (strip (rebind n (holdsCalleeResult callResults v') callResults) irBody)
       IRLambda n irBody ->
         IRLambda n (stripOuterTriple (strip (rebind n False callResults) irBody))
-      IREnumSum n val irBody ->
-        IREnumSum n val (strip (rebind n False callResults) irBody)
-      IRLogEnumSum n val irBody ->
-        IRLogEnumSum n val (strip (rebind n False callResults) irBody)
-      -- Only ever built when countBranches is on, i.e. never when this pass runs.
-      IREnumSumPaired lg n val irBody ->
-        IREnumSumPaired lg n val (strip (rebind n False callResults) irBody)
+      -- A tensor map's lambda is an enumeration LOOP binder, not a function
+      -- body, so it gets the rebind but NOT 'stripOuterTriple' -- which exists
+      -- to collapse the result triple a compiled function returns. Before task
+      -- retire-irenumsum the loop was 'IREnumSum'/'IRLogEnumSum', a
+      -- constructor of its own that could not be confused with a lambda; now
+      -- that it is a 'BMap' over an 'IRLambda', the distinction has to be made
+      -- here or the generic 'IRLambda' arm above would claim it.
+      IRBuiltin BMap [IRLambda n lamBody, t] ->
+        IRBuiltin BMap [ IRLambda n (strip (rebind n False callResults) lamBody)
+                       , strip callResults t ]
       _ -> irDescend (strip callResults) e
 
     rebind n True  = Set.insert n
