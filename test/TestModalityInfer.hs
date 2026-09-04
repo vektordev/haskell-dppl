@@ -15,16 +15,22 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertEqual, assertBool, assertFailure)
 
 import Control.Exception (evaluate)
-import Data.List (intercalate)
+import Data.List (intercalate, isSuffixOf)
+import System.Directory (listDirectory)
 import System.Timeout (timeout)
 
-import SPLL.Lang.Types (Program(..), Expr(..), ExprF(..), TypeInfo(..))
+import SPLL.Lang.Types (Program(..), Expr(..), ExprF(..), TypeInfo(..), ChainName)
 import SPLL.Lang.Lang (getTypeInfo, getSubExprs)
 import SPLL.Typing.PType (PType(..))
 import SPLL.Parser (tryParseProgram)
 import SPLL.Analysis (annotateEnumsProg)
-import SPLL.Typing.ForwardChaining (annotateProg)
+import SPLL.Typing.ForwardChaining (annotateProg, progToFCData)
 import SPLL.Typing.Infer (addTypeInfo)
+import SPLL.Typing.RInfer (addRTypeInfo)
+import SPLL.Typing.Determinism (knownAnchors)
+import SPLL.Typing.ModalityInfer (perNodeOuterGrounds)
+import SPLL.Typing.Modality (GroundMod(gCap), CapabilitySet(..))
+import TestCaseParser (parseProgram)
 
 -- | Run the modality pipeline on a source string and return the typed program.
 -- Goes through 'addTypeInfo' (RInfer → FC certificate → ModalityInfer) so the
@@ -387,7 +393,94 @@ modalityInferTests = testGroup "ModalityInfer"
               -- the value is fixed by whatever the caller enumerates it into.
               assertEqual "" (replicate n Deterministic) pts
       ]
+
+  -- Task @modality-dead-exports-and-partial-set-check@ (review decision:
+  -- restore the invariant, not delete the dead exports). The design
+  -- (@modality-typesystem-port@ §6/§7) claims the partial capability sets
+  -- {S,D}/{S,I} ('DensityOnly'/'IntegralOnly') never occur across the corpus --
+  -- 'projectGround' floors them to 'Bottom' unconditionally, so the claim is a
+  -- fail-safe rather than a soundness requirement, but nothing has monitored it
+  -- since the milestone-4 diff harness that fed 'perNodeOuterGrounds' was
+  -- deleted at the milestone-5 cutover. This gives 'perNodeOuterGrounds'/'toMod'
+  -- a real consumer again and re-establishes the early-warning net: a future
+  -- program that reaches a partial ground here fails this test instead of
+  -- silently losing precision to the floor (surfacing only as an unexplained
+  -- 'Bottom' where 'Integrate' was expected).
+  --
+  -- The "never occurs" claim turns out to be false in one well-understood,
+  -- narrow shape: 'testCases/deadBindingIntractable.ppl' and
+  -- 'deadParamIntractable.ppl' (added 2026-08-30, investigation
+  -- 60_toIRInference-apply-gap -- after the diff harness was already deleted,
+  -- so its historical "0 partial-set flags" run never saw them, and that run
+  -- was itself vacuous: the harness's candidate side was still the PInfer2
+  -- stub for its whole lifetime, so the flag never fired against a real
+  -- 'Mod'-producing engine at all). Both deliberately combine two continuous,
+  -- non-family operands (@Uniform * Uniform@) inside a **dead** binding whose
+  -- result is never read. 'marginalize' drops 'CanDensity' whenever neither
+  -- side is 'Finite' (see its @keepD@ guard), so that node's outer ground truly
+  -- is 'IntegralOnly' -- not a bug, but the exact fail-safe path these two
+  -- programs exist to pin (the floor was what fixed the crash the comment in
+  -- each @.ppl@ describes). Excluded by name below rather than silently
+  -- dropped: the exclusion list is itself the record of every corpus program
+  -- known to legitimately hit this path, so it grows only on a fresh, examined
+  -- case, and a new unexplained hit still fails the test.
+  , corpusPartialSetTests
   ]
+
+-- | Corpus programs that legitimately reach a partial capability set (see the
+-- comment above 'corpusPartialSetTests'). Both combine two continuous operands
+-- inside a dead binding whose result is never read -- 'marginalize' correctly
+-- reports 'IntegralOnly' for that node, and 'projectGround' floors it to
+-- 'Bottom' exactly as designed. Not a soundness gap: this /is/ the fail-safe
+-- path working.
+knownPartialSetExceptions :: [FilePath]
+knownPartialSetExceptions =
+  [ "testCases/deadBindingIntractable.ppl"
+  , "testCases/deadParamIntractable.ppl"
+  ]
+
+-- | Every 'testCases/*.ppl' program (minus 'knownPartialSetExceptions'),
+-- walked through the same RType inference -> enum annotation -> chain naming
+-- -> FCData sequence 'SPLL.Prelude.compile' uses (deliberately NOT
+-- 'typeProg''s order above, which runs enum/chain annotation before RType
+-- inference for test convenience -- 'perNodeOuterGrounds' needs the FCData
+-- built the production way, from the RType'd and chain-named program).
+-- Asserts 'perNodeOuterGrounds' never reports a 'DensityOnly'/'IntegralOnly'
+-- ground for any node in any other corpus program.
+corpusPartialSetTests :: TestTree
+corpusPartialSetTests = testGroup "corpus-wide partial-set invariant"
+  [ testCase "no testCases/*.ppl node (outside the known exceptions) lands \
+             \in DensityOnly/IntegralOnly" $ do
+      files <- listDirectory "testCases"
+      let pplFiles = [ "testCases/" ++ f | f <- files, ".ppl" `isSuffixOf` f
+                      , ("testCases/" ++ f) `notElem` knownPartialSetExceptions ]
+      violations <- concat <$> mapM filePartialSetViolations pplFiles
+      assertBool (partialSetViolationsMessage violations) (null violations)
+  ]
+
+-- | The partial-ground violations ('DensityOnly'/'IntegralOnly' outer grounds)
+-- found in one corpus program, keyed by the offending chain name.
+filePartialSetViolations :: FilePath -> IO [(FilePath, ChainName, CapabilitySet)]
+filePartialSetViolations fp = do
+  p <- parseProgram fp
+  case addRTypeInfo p of
+    Left e -> error ("addRTypeInfo failed on " ++ fp ++ ": " ++ e)
+    Right rtyped ->
+      let preAnnotated   = annotateEnumsProg rtyped
+          forwardChained = annotateProg preAnnotated
+          fcData         = progToFCData (knownAnchors forwardChained) forwardChained
+          grounds        = perNodeOuterGrounds fcData forwardChained
+      in return [ (fp, cn, cap)
+                | (cn, g) <- grounds
+                , let cap = gCap g
+                , cap == DensityOnly || cap == IntegralOnly ]
+
+partialSetViolationsMessage :: [(FilePath, ChainName, CapabilitySet)] -> String
+partialSetViolationsMessage vs =
+  "a node reached a partial capability set (DensityOnly/IntegralOnly) that \
+  \'projectGround' floors to Bottom -- the design's \"never occurs\" claim \
+  \(modality-typesystem-port SS6/SS7) no longer holds for:\n"
+  ++ intercalate "\n" [ f ++ ": " ++ cn ++ " -> " ++ show cap | (f, cn, cap) <- vs ]
 
 -- | @main s1 .. sn = readMNist(s1) ++ .. ++ readMNist(sn)@ -- the n-ary curried
 -- declaration whose parameter annotations the test above forces.
