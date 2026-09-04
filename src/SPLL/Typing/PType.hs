@@ -1,12 +1,6 @@
 module SPLL.Typing.PType
   ( TVar(..)
   , PType(..)
-  , isBasicType
-  , downgrade
-  , downgrade2
-  , upgrade
-  , mostChaotic
-  , mostStructured
   ) where
 
 newtype TVar = TV String
@@ -29,54 +23,21 @@ data PType = Deterministic
 -- (e.g. erf for the Gaussian) -- not necessarily closed-form. The old density-only
 -- rung (density known, CDF only via in-house quadrature) was provably uninhabited
 -- under the no-Class-B-quadrature policy and has been removed.
+--
+-- This module deliberately carries no lattice *operations*. 'PType' is the flat,
+-- lossy projection of the real capability lattice, which lives in
+-- 'SPLL.Typing.Modality' -- 'leqGround'/'joinGround'/'meetGround' over
+-- (capability set x support-finiteness x distribution family), flattened onto the
+-- rungs above by 'projectGround'. The meet of the two incomparable siblings, for
+-- instance, is not a special case there but a consequence: 'meetFamily' of two
+-- distinct families is 'FamNone', which 'projectGround' reads as 'Integrate'.
+--
+-- A superseded set of combinators (isBasicType, strictlyBelow, partialOrd,
+-- downgrade, downgrade2, upgrade, and the foldl1 wrappers mostChaotic /
+-- mostStructured) used to live here. Their last callers went away with
+-- 48c0543, which simplified 'InferenceRule' to a return-type rule and dropped its
+-- resultingPType field; they survived only because the explicit export list hides
+-- dead code from -Wunused-top-binds. Deleted by task
+-- ptype-mostchaotic-foldl1-empty-input.
 
 infixr `PArr`
-
-basicPTypes :: [PType]
-basicPTypes = [Deterministic, PNormal, PLogNormal, Integrate, Bottom]
-
-isBasicType :: PType -> Bool
-isBasicType ty = ty `elem` basicPTypes
-
--- | Elements strictly below a given PType in the lattice.
-strictlyBelow :: PType -> [PType]
-strictlyBelow Deterministic = [PNormal, PLogNormal, Integrate, Bottom]
-strictlyBelow PNormal       = [Integrate, Bottom]
-strictlyBelow PLogNormal    = [Integrate, Bottom]
-strictlyBelow Integrate     = [Bottom]
-strictlyBelow _             = []
-
-partialOrd :: PType -> PType -> Maybe Ordering
-partialOrd ty1 ty2
-  | not (isBasicType ty1)         = Nothing
-  | not (isBasicType ty2)         = Nothing
-  | ty1 == ty2                    = Just EQ
-  | ty2 `elem` strictlyBelow ty1 = Just GT
-  | ty1 `elem` strictlyBelow ty2 = Just LT
-  | otherwise                     = Nothing
-    
-
-downgrade :: PType -> PType -> PType
--- Incomparable siblings: meet is their greatest lower bound = Integrate
-downgrade PNormal    PLogNormal = Integrate
-downgrade PLogNormal PNormal    = Integrate
-downgrade ty1 ty2 = maybe Bottom (\ord -> if ord == LT then ty1 else ty2) order
-  where order = partialOrd ty1 ty2
-
-downgrade2 :: PType -> PType -> PType
-downgrade2 leftP rightP = if upgrade leftP rightP == Deterministic
-              then downgrade leftP rightP
-              else Bottom
-
-upgrade :: PType -> PType -> PType
--- Incomparable siblings: join is their least upper bound = Deterministic
-upgrade PNormal    PLogNormal = Deterministic
-upgrade PLogNormal PNormal    = Deterministic
-upgrade ty1 ty2 = maybe Bottom (\ord -> if ord == GT then ty1 else ty2) order
-  where order = partialOrd ty1 ty2
-
-mostChaotic :: [PType] -> PType
-mostChaotic = foldl1 downgrade
-
-mostStructured :: [PType] -> PType
-mostStructured = foldl1 upgrade
