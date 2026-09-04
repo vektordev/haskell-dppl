@@ -389,18 +389,18 @@ applyConstant x = x
 optimizeAssociativity :: IRExpr -> IRExpr
 -- Associative Addition
 optimizeAssociativity (IROp OpPlus leftV (IROp OpPlus rightV1 rightV2))
-  | isValue leftV && isValue rightV1 = IROp OpPlus (IRConst (forceOp OpPlus (unval leftV) (unval rightV1))) rightV2   -- a + (b + c) = (a + b) + c
-  | isValue leftV && isValue rightV2 = IROp OpPlus (IRConst (forceOp OpPlus (unval leftV) (unval rightV2))) rightV1   -- a + (b + c) = b + (a + c)
+  | isValue leftV && isValue rightV1, not (isNaNResult (forceOp OpPlus (unval leftV) (unval rightV1))) = IROp OpPlus (IRConst (forceOp OpPlus (unval leftV) (unval rightV1))) rightV2   -- a + (b + c) = (a + b) + c
+  | isValue leftV && isValue rightV2, not (isNaNResult (forceOp OpPlus (unval leftV) (unval rightV2))) = IROp OpPlus (IRConst (forceOp OpPlus (unval leftV) (unval rightV2))) rightV1   -- a + (b + c) = b + (a + c)
 optimizeAssociativity (IROp OpPlus (IROp OpPlus leftV1 leftV2) rightV )
-  | isValue leftV1 && isValue rightV = IROp OpPlus (IRConst (forceOp OpPlus (unval leftV1) (unval rightV))) leftV2   -- a + (b + c) = (a + b) + c
-  | isValue leftV2 && isValue rightV = IROp OpPlus (IRConst (forceOp OpPlus (unval leftV2) (unval rightV))) leftV1   -- a + (b + c) = b + (a + c)
+  | isValue leftV1 && isValue rightV, not (isNaNResult (forceOp OpPlus (unval leftV1) (unval rightV))) = IROp OpPlus (IRConst (forceOp OpPlus (unval leftV1) (unval rightV))) leftV2   -- a + (b + c) = (a + b) + c
+  | isValue leftV2 && isValue rightV, not (isNaNResult (forceOp OpPlus (unval leftV2) (unval rightV))) = IROp OpPlus (IRConst (forceOp OpPlus (unval leftV2) (unval rightV))) leftV1   -- a + (b + c) = b + (a + c)
 -- Associative Multiplication
 optimizeAssociativity (IROp OpMult leftV (IROp OpMult rightV1 rightV2))
-  | isValue leftV && isValue rightV1 = IROp OpMult (IRConst (forceOp OpMult (unval leftV) (unval rightV1))) rightV2   -- a * (b * c) = (a * b) * c
-  | isValue leftV && isValue rightV2 = IROp OpMult (IRConst (forceOp OpMult (unval leftV) (unval rightV2))) rightV1   -- a * (b * c) = (a * c) * b
+  | isValue leftV && isValue rightV1, not (isNaNResult (forceOp OpMult (unval leftV) (unval rightV1))) = IROp OpMult (IRConst (forceOp OpMult (unval leftV) (unval rightV1))) rightV2   -- a * (b * c) = (a * b) * c
+  | isValue leftV && isValue rightV2, not (isNaNResult (forceOp OpMult (unval leftV) (unval rightV2))) = IROp OpMult (IRConst (forceOp OpMult (unval leftV) (unval rightV2))) rightV1   -- a * (b * c) = (a * c) * b
 optimizeAssociativity (IROp OpMult (IROp OpMult leftV1 leftV2) rightV )
-  | isValue leftV1 && isValue rightV = IROp OpMult (IRConst (forceOp OpMult (unval leftV1) (unval rightV))) leftV2   -- a + (b + c) = (a + b) + c
-  | isValue leftV2 && isValue rightV = IROp OpMult (IRConst (forceOp OpMult (unval leftV2) (unval rightV))) leftV1   -- a + (b + c) = b + (a + c)
+  | isValue leftV1 && isValue rightV, not (isNaNResult (forceOp OpMult (unval leftV1) (unval rightV))) = IROp OpMult (IRConst (forceOp OpMult (unval leftV1) (unval rightV))) leftV2   -- a + (b + c) = (a + b) + c
+  | isValue leftV2 && isValue rightV, not (isNaNResult (forceOp OpMult (unval leftV2) (unval rightV))) = IROp OpMult (IRConst (forceOp OpMult (unval leftV2) (unval rightV))) leftV1   -- a + (b + c) = b + (a + c)
 optimizeAssociativity x = x
 
 optimizeLetIns :: OptEnv -> IRExpr -> IRExpr
@@ -479,7 +479,8 @@ evalConstantDistr x = x
 
 simplify :: OptEnv -> IRExpr -> IRExpr
 simplify _ (IROp op leftV rightV)
-  | isValue leftV && isValue rightV = IRConst (forceOp op (unval leftV) (unval rightV))
+  | isValue leftV && isValue rightV
+  , not (isNaNResult (forceOp op (unval leftV) (unval rightV))) = IRConst (forceOp op (unval leftV) (unval rightV))
   | isValue leftV || isValue rightV = softForceLogic op leftV rightV
 -- Mask fusion: a semiring indicator times a value becomes a branch on the
 -- indicator's condition, so the value is evaluated only where the indicator
@@ -497,7 +498,8 @@ simplify det (IROp op left right)
   | Just (c, z) <- semiringMask op left, isPureGiven (optDetGens det) right = IRIf c right z
   | Just (c, z) <- semiringMask op right, isPureGiven (optDetGens det) left = IRIf c left z
 simplify det (IRUnaryOp OpIsAny x) = forceAnyCheck det x
-simplify _ (IRUnaryOp op val) | isValue val = IRConst $ forceUnaryOp op (unval val)
+simplify _ (IRUnaryOp op val)
+  | isValue val, not (isNaNResult (forceUnaryOp op (unval val))) = IRConst $ forceUnaryOp op (unval val)
 simplify _ (IRIf _ left right) | left == right = left
 simplify _ x@(IRIf cond left right) =
   if isValue cond
@@ -595,6 +597,30 @@ isNumOne :: IRValue -> Bool
 isNumOne (VInt 1) = True
 isNumOne (VFloat 1) = True
 isNumOne _ = False
+
+-- | A NaN float result. Unlike Infinity (where @Infinity == Infinity@ holds),
+-- @NaN == NaN@ is 'False' for every IEEE float, including two syntactically
+-- identical 'VFloat' literals built from the same computation. Constant
+-- folding a NaN into the tree therefore poisons every later structural-
+-- equality check that expression sits under -- most importantly
+-- 'postProcessStats'\'s own fixed-point test (@e' /= e@ never turns
+-- 'False'), which does not merely mis-optimize but never terminates: each
+-- iteration re-finds "a change" against itself, and the per-iteration tally
+-- list it accumulates while doing so grows without bound (task
+-- mixture-combination-rules-compile-hang -- reached via a deterministic
+-- scale factor going into @log@ while deriving a PLogNormal expression's
+-- closed-form parameters, e.g. @(-51.84) * exp(Normal-derived)@, where the
+-- scale's sign makes the family classification unsound but nothing upstream
+-- of the optimizer checks that; only 'toIRLogNormalParams' assumes a
+-- positive scale). Every fold site below that calls 'forceOp'/'forceUnaryOp'
+-- checks this before embedding an 'IRConst': on a NaN result the rewrite
+-- backs off and leaves the operation symbolic, so it is still evaluated (via
+-- the runtime's own IEEE-conforming semantics, or a backend's @safe_log@)
+-- but never becomes a literal the fixpoint check can get stuck comparing to
+-- itself.
+isNaNResult :: IRValue -> Bool
+isNaNResult (VFloat x) = isNaN x
+isNaNResult _ = False
 
 forceOp :: Operand -> IRValue -> IRValue -> IRValue
 forceOp OpEq (VList AnyList) (VList _) = VBool True

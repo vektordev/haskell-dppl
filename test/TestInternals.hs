@@ -1405,6 +1405,51 @@ test_recursiveListMissedCSE = testCase "recursiveListMissedCSE" $ do
     probDimOf' (Left e)  = error ("prob query error: " ++ show e)
     probDimOf' (Right v) = let (p, d) = probDimOf v in p `seq` d `seq` (p, d)
 
+-- | Task mixture-combination-rules-compile-hang: a deterministic-times-
+-- PLogNormal 'mult' whose deterministic side evaluates negative used to hang
+-- the compiler forever instead of merely compiling slowly.
+--
+-- 'toIRLogNormalParams'\'s mult clause derives the scaled expression's
+-- closed-form (mu, sigma) as @mu + log(det)@, which assumes @det > 0@ (only
+-- a positive scale keeps a LogNormal's support positive) but is reached
+-- regardless of sign -- nothing upstream checks it. With a negative @det@,
+-- constant-folding that @log@ at optimization time produces a NaN literal
+-- ('IROptimizer.forceUnaryOp'). Unlike Infinity (where @Infinity == Infinity@
+-- holds), @NaN == NaN@ is 'False' for every IEEE float, so embedding that NaN
+-- as an 'IRConst' poisoned 'IROptimizer.postProcessStats'\'s own fixed-point
+-- termination check (@e' /= e@ never turned 'False' again): the loop never
+-- converged, and the per-iteration tally list it accumulates while retrying
+-- grew without bound -- confirmed by measurement (not merely inferred from
+-- the mechanism) to actually be an unbounded memory leak, not a spin: RSS
+-- climbed past 5GB within 40s on this exact expression before being killed,
+-- rather than settling at a bounded "just slow" plateau.
+--
+-- Found by 'prop_Fuzz_MixtureFollowsCombinationRules' (falsifying seed
+-- 433163, quickcheck-replay unstable per this module's own standing caveat)
+-- and minimized by hand from that draw's negative-scale mult/exp arm:
+-- @(-5.19 + -(5.95 * 7.84)) * exp(-(Normal * 9.01))@, i.e. a negative
+-- deterministic constant times a LogNormal-shaped expression. The fix
+-- ('SPLL.IROptimizer.isNaNResult') makes every constant-folding call site
+-- that invokes 'forceOp'/'forceUnaryOp' decline to fold when the result
+-- would be NaN, leaving the operation symbolic instead (still evaluated at
+-- runtime by the interpreter/backends' own IEEE-conforming semantics) --
+-- so the tree the fixpoint check compares never contains a NaN literal to
+-- begin with.
+test_mixtureNegativeLogNormalScaleCompiles :: TestTree
+test_mixtureNegativeLogNormalScaleCompiles = testCase "mixtureNegativeLogNormalScaleCompiles" $ do
+  let negativeScale = constF (-5.189575131567416)
+                         #+# negF (constF 5.950341749659227 #*# constF 7.837027585890002)
+      logNormalArm = expF (negF (normal #*# constF 9.011136056794598))
+      expr = negativeScale #*# logNormalArm
+      prog = Program [("main", expr)] [] [] []
+  result <- timeout (10 * 1000000) (evaluate (length (show (compile defaultCompilerConfig prog))))
+  case result of
+    Nothing -> assertFailure
+      "compiling a negative-deterministic-scale * PLogNormal 'mult' did not finish \
+      \within 10s -- this is the NaN-poisons-the-optimizer-fixpoint non-termination \
+      \bug task mixture-combination-rules-compile-hang fixed"
+    Just n -> assertBool ("unexpectedly empty compiled IR (" ++ show n ++ " chars)") (n > 0)
+
 -- | Milestone-4 value-grouped DP acceptance: a counting fold compared against
 -- a deterministic bound compiles to polynomially-sized IR. At milestone 2 the
 -- fold enumerated 2^depth (value, world) pairs, so the IR grew exponentially;
@@ -2945,6 +2990,7 @@ internalsTests = testGroup "Internals"
   , test_planEnumThreadedTopKAndBC
   , test_branchCountingDoesNotMultiplyIR
   , test_recursiveListMissedCSE
+  , test_mixtureNegativeLogNormalScaleCompiles
   , test_planEnumBoolCtorPolynomial
   , planOverCouplingRefusalTests
   , test_tstBackendsHeader
