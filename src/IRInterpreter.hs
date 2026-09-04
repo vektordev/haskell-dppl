@@ -5,7 +5,7 @@ generateRand
 
 import Statistics.Distribution (quantile)
 import SPLL.IntermediateRepresentation
-import SPLL.Lang.Lang (elementAt, lookupNeural, floatApproxEqThresh, multiValueToValueList, valueInMultiValue, neuralValueType)
+import SPLL.Lang.Lang (elementAt, lookupNeural, floatApproxEqThresh, valueInMultiValue, neuralValueType)
 import StandardLibrary
 import MockNN
 import SPLL.AutoNeural
@@ -18,7 +18,6 @@ import Data.List (isSuffixOf, isPrefixOf)
 import SPLL.Lang.Types
 import SPLL.Typing.RType
 import Data.Functor ((<&>))
-import Data.Foldable (foldrM)
 import SPLL.Typing.AlgebraicDataTypes
 import Data.Vector.Internal.Check (HasCallStack)
 
@@ -35,11 +34,6 @@ neuralOutputType name rt = fromMaybe
 asThetaTree :: IRValue -> ThetaTree
 asThetaTree (VThetaTree t) = t
 asThetaTree v = error ("Type error: theta access on a non-theta-tree value: " ++ show v)
-
--- | The enum-sum reducers fold probabilities, which are always floats.
-enumSumReducerError :: String -> IRValue -> IRValue -> a
-enumSumReducerError which a b = error
-  (which ++ ": expected float probabilities to reduce, got " ++ show a ++ " and " ++ show b)
 
 data RandomFunctions m a = RandomFunctions {uniformGen:: m IRValue, normalGen:: m IRValue}
 
@@ -419,47 +413,6 @@ generate f neurals' registry adts' globalEnv env args (IRVar name) =
   case lookup name env of
     Just expr -> generate f neurals' registry adts' globalEnv env args expr
     Nothing -> error ("Variable " ++ name ++ " not declared")
-generate f neurals' registry adts' globalEnv env [] (IREnumSum varname values expr) = do    --TODO Untested
-  foldrM (\v acc -> do
-    x <- generate f neurals' registry adts' globalEnv env [IRConst v] (IRLambda varname expr)
-    return $ sumValues x acc
-    ) (VFloat 0) (fmap valueToIR (multiValueToValueList values))
-  where sumValues (VFloat a) (VFloat b) = VFloat $ a+b
-        sumValues a b = enumSumReducerError "IREnumSum" a b
--- | Log-space sibling of IREnumSum (task log-space-probability-computation):
--- reduces the enumerated per-value log-probabilities by log-sum-exp instead
--- of a plain sum, starting from the semiring zero (-infinity, the log-sum-exp
--- identity) instead of 0.0.
-generate f neurals' registry adts' globalEnv env [] (IRLogEnumSum varname values expr) = do
-  foldrM (\v acc -> do
-    x <- generate f neurals' registry adts' globalEnv env [IRConst v] (IRLambda varname expr)
-    return $ logSumExpValues x acc
-    ) (VFloat ((-1)/0)) (fmap valueToIR (multiValueToValueList values))
-  where
-    logSumExpValues (VFloat a) (VFloat b)
-      | isInfinite a && a < 0 = VFloat b
-      | isInfinite b && b < 0 = VFloat a
-      | otherwise = let m = max a b in VFloat (m + log (exp (a - m) + exp (b - m)))
-    logSumExpValues a b = enumSumReducerError "IRLogEnumSum" a b
--- | Paired sibling of the two above (fuzz-qc-compiler-bugs item 3): a single
--- pass over the enumerated support whose body yields a @(prob, branches)@
--- tuple. The probability component reduces exactly as 'IREnumSum'
--- (log-sum-exp when the flag is set), the branch count always by a plain sum.
-generate f neurals' registry adts' globalEnv env [] (IREnumSumPaired logSp varname values expr) = do
-  foldrM (\v acc -> do
-    x <- generate f neurals' registry adts' globalEnv env [IRConst v] (IRLambda varname expr)
-    return $ pairwise x acc
-    ) (VTuple (VFloat zeroP) (VFloat 0)) (fmap valueToIR (multiValueToValueList values))
-  where
-    zeroP = if logSp then (-1)/0 else 0
-    plusP a b
-      | not logSp = a + b
-      | isInfinite a && a < 0 = b
-      | isInfinite b && b < 0 = a
-      | otherwise = let m = max a b in m + log (exp (a - m) + exp (b - m))
-    pairwise (VTuple (VFloat pa) (VFloat ba)) (VTuple (VFloat pb) (VFloat bb)) =
-      VTuple (VFloat (plusP pa pb)) (VFloat (ba + bb))
-    pairwise a b = error ("IREnumSumPaired: non-(prob, branches) body: " ++ show (a, b))
 generate f neurals' registry adts' globalEnv env [] (IRIsPossible multiVal expr) = do
   val <- generate f neurals' registry adts' globalEnv env [] expr
   return $ VBool (valueInMultiValue multiVal (fmap (error "Failed conversion") val))
@@ -491,8 +444,8 @@ generate f neurals' registry adts' globalEnv env args (IRBuiltin BMap [fExpr, tE
       return $ VTensor sh ys
     _ -> error ("BMap: not a tensor: " ++ show tVal)
 -- Reduction folds right within each fibre, matching the association order the
--- enum-sum family uses (foldrM over the same domain), so a lowering from
--- IREnumSum reduces the same terms in the same order.
+-- retired enum-sum family used (foldrM over the same domain), so the terms of
+-- an enumeration are reduced in the same order they always were.
 generate f neurals' registry adts' globalEnv env args (IRBuiltin (BReduce op ax) [tExpr]) = do
   tVal <- generate f neurals' registry adts' globalEnv env args tExpr
   case tVal of
@@ -549,9 +502,9 @@ reduceIdentity ROpAdd = VFloat 0
 reduceIdentity ROpLogSumExp = VFloat ((-1) / 0)
 reduceIdentity ROpMax = VFloat ((-1) / 0)
 
--- | One step of a tensor reduction. Log-sum-exp guards both infinities the way
--- IRLogEnumSum does, so a -inf term (the log-space zero) is absorbed rather
--- than producing a NaN via @exp (-inf - -inf)@.
+-- | One step of a tensor reduction. Log-sum-exp guards both infinities, so a
+-- -inf term (the log-space zero) is absorbed rather than producing a NaN via
+-- @exp (-inf - -inf)@.
 reduceStep :: ReduceOp -> IRValue -> IRValue -> IRValue
 reduceStep ROpAdd (VFloat a) (VFloat b) = VFloat (a + b)
 reduceStep ROpLogSumExp (VFloat a) (VFloat b)

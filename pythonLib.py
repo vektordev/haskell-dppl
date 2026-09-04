@@ -79,20 +79,6 @@ def logsumexp(xs):
     return -math.inf
   return m + math.log(sum(math.exp(x - m) for x in xs))
 
-# One pass over an enumerated support whose body returns a (probability,
-# branchCount) pair, reducing the probability by a plain sum (or log-sum-exp
-# in log space) and the branch count by a plain sum. The paired form exists so
-# a branch-counting compile evaluates the body once per enumerated value
-# instead of once per loop (see IREnumSumPaired).
-def enumSumPaired(f, values, logSpace):
-  probs = []
-  branches = 0.0
-  for v in values:
-    r = f(v)
-    probs.append(r[0])
-    branches += r[1]
-  return T(logsumexp(probs) if logSpace else sum(probs), branches)
-
 def rand():
   return random()
 
@@ -259,8 +245,8 @@ class ConsInferenceList(InferenceList):
 
 def toList(lst):
   back = EmptyInferenceList()
-  # Materialise first: callers pass lazy iterables (map/itertools.product
-  # results from multiValueToValueList), which are not reversible.
+  # Materialise first: callers may pass lazy iterables (map/itertools.product
+  # results), which are not reversible.
   for x in reversed(list(lst)):
     back = back.prepend(x)
   return back
@@ -319,45 +305,10 @@ def isPossible(multiVal, expr):
             return False
     return foundConstr
   
-# The enumerated support of a MultiValue is a program constant: the emitted
-# code passes the same module-level `_globalMultiN` description at every
-# enum-sum site, and re-derives the whole cartesian product on each call. For a
-# multi-object neural scene that product is the dominant allocation in the
-# query (12^5 = 248832 tuples, ~0.2s, rebuilt several times per query), so it is
-# memoised on the description. The key is the description's repr -- small,
-# hashable and structural, unlike the description itself, which nests lists.
-# Sound because the returned InferenceList is immutable: prepend/mapList/toList
-# all build fresh cells rather than mutating.
-_multiValueCache = {}
-
-def multiValueToValueList(multiVal):
-  key = repr(multiVal)
-  cached = _multiValueCache.get(key)
-  if cached is not None:
-    return cached
-  result = _multiValueToValueList(multiVal)
-  _multiValueCache[key] = result
-  return result
-
-def _multiValueToValueList(multiVal):
-  if multiVal[0] == "C":
-    # A continuous (Float) slot has no enumerable values.
-    return EmptyInferenceList()
-  elif multiVal[0] == "D":
-    return toList(multiVal[1])
-  elif multiVal[0] == "T":
-    cartesian = itertools.product(multiValueToValueList(multiVal[1][0]), multiValueToValueList(multiVal[1][1]))
-    tuples = map(lambda x: T(x[0], x[1]), cartesian)
-    return toList(tuples)
-  elif multiVal[0] == "E":
-    lefts = [Left(x) for x in multiValueToValueList(multiVal[1][0])]
-    rights = [Right(x) for x in multiValueToValueList(multiVal[1][1])]
-    return toList(lefts + rights)
-  elif multiVal[0] == "A":
-    vals = []
-    for (cClass, cMultiFields) in multiVal[1]:
-      cFields = map(multiValueToValueList, cMultiFields)
-      for x in itertools.product(*cFields):
-        vals.append(cClass(*x))
-    return toList(vals)
-    
+# NOTE (task retire-irenumsum): `multiValueToValueList` stood here, deriving a
+# MultiValue's enumerated support at run time (with a memo cache, because a
+# multi-object neural scene's cartesian product dominated the query). Nothing
+# emits a call to it any more: an enumerated sum is now a tensor reduce over a
+# map over a *literal* list of the domain's values, built at compile time, so
+# the product is computed once by the compiler instead of on every query.
+# `isPossible` above walks the description structurally and never needed it.

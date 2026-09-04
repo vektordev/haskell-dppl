@@ -655,9 +655,9 @@ projMany k n t = projMany (k - 1) (n - 1) (IRDestruct AcSnd t)
 -- ordinary single-scalar node is used: 'rBranches' is a pure side channel with
 -- no feedback into 'rProb'/'rDim'/'rImposs' anywhere in the compiler, and is
 -- discarded wholesale by 'stripBranchCount' as a post-pass, so summing it
--- would be provably-unread work. When it is on, 'IREnumSumPaired' reduces a
--- @(probability, branchCount)@ body in one pass, the probability component
--- exactly as 'enumSumNode' would have. Either way this module needs no
+-- would be provably-unread work. When it is on, one let-bound map over the
+-- domain is reduced twice, so a @(probability, branchCount)@ body is evaluated
+-- in one pass, the probability component exactly as 'enumSumNode' would. Either way this module needs no
 -- knowledge of CompilerMetadata -- @countBranches@ arrives as a plain Bool.
 enumSumP :: Semiring -> Bool -> (IRExpr -> IRExpr) -> Varname -> MultiValue -> IRExpr -> CompilerMonad PResult
 enumSumP sr withBranchCount wrap v vals packed
@@ -670,7 +670,7 @@ enumSumP sr withBranchCount wrap v vals packed
   -- semiring's own operator, the branch count always with plain 'ROpAdd'
   -- (a count is a count whichever semiring is active). Let-binding the mapped
   -- axis is what lets the two components reduce independently while the body
-  -- is evaluated once -- the sharing the retired 'IREnumSumPaired' node
+  -- is evaluated once -- the sharing the retired @IREnumSumPaired@ node
   -- existed to fake before the IR could name a vector of per-iteration
   -- results (task retire-irenumsum).
   | otherwise = do
@@ -691,7 +691,7 @@ enumSumP sr withBranchCount wrap v vals packed
 -- semiring's own operator.
 --
 -- Until task retire-irenumsum this had a front-end constructor per reduction
--- operator ('IREnumSum' for 'ROpAdd', 'IRLogEnumSum' for 'ROpLogSumExp')
+-- operator (@IREnumSum@ for 'ROpAdd', @IRLogEnumSum@ for 'ROpLogSumExp')
 -- that a later pass lowered into exactly this shape, and 'ROpMax' -- added
 -- last -- skipped them and built the tensor form here. Every generic pass
 -- paid for that split with a case per constructor, and a fourth reduction

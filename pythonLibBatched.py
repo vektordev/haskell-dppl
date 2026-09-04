@@ -272,12 +272,6 @@ def tensor_index(xs, idx):
 # --- tuple (structure-of-arrays leaf carrier) --------------------------------
 # Identical to pythonLib.T; a fixed tuple whose leaves are [B] tensors.
 
-# Componentwise reduction of an unrolled paired enum-sum (IREnumSumPaired):
-# each element is a (probability, branchCount) pair evaluated against the whole
-# batch, and the two components sum independently over the enum axis.
-def enum_sum_paired(pairs):
-  return T(sum(p.t1 for p in pairs), sum(p.t2 for p in pairs))
-
 # --- ANY (design heterogeneous-batch-inference, Component 3/M4) -------------
 # ANY-ness is a structural marker, exactly like a list length or a constructor
 # tag (M1/M2): whether a given slot of the sample is a wildcard is part of its

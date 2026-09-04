@@ -808,7 +808,7 @@ gainNoteProp gained = ioProperty $ do
 -- @refusalProp@, sat inside the torch-gated branch and so never ran without
 -- torch). Refusals with no corpus trigger — list membership, the @VAnyExcept@
 -- sentinel, a residual (not-at-root) @IRConformsTo@, a composite-'MultiValue'
--- @IREnumSum@/@IRIsPossible@, and generate-only recursion — are covered by the
+-- @IRIsPossible@, and generate-only recursion — are covered by the
 -- synthetic-IR rows in "TestInternals" (@batchedRefusalUnitTests@), because on
 -- any real program another guard always fires first.
 batchedRefusalTests :: TestTree
@@ -1902,10 +1902,10 @@ branchCountPairedPrograms =
 -- | Backend coverage for the branch-counted paired enum sum.
 --
 -- Branch counting is an opt-in diagnostic flag, so no corpus row runs under it
--- -- which means the emitted-code path for the one IR node a countBranches
--- compile builds and a default compile never does ('IREnumSumPaired', the
--- single-loop @(probability, branchCount)@ enum sum) is otherwise executed by
--- no backend at all. This group compiles the programs above with
+-- -- which means the emitted-code path for the IR shape a countBranches compile
+-- builds and a default compile never does (one enumeration map read by two
+-- reductions, the probability sum and the branch-count sum) is otherwise
+-- executed by no backend at all. This group compiles the programs above with
 -- @countBranches = True@, runs the emitted Python and Julia, and checks the
 -- whole @(prob, dim, branchCount)@ triple against the interpreter's answer for
 -- the same query points. It is a differential -- no branch count is written
@@ -1932,14 +1932,16 @@ branchCountBackendTests = do
     , testGroup "Python"
         [ testProperty n (once (branchCountPython n env rows)) | (n, _, env, rows) <- loaded ]
     ]
--- | The property 'IREnumSumPaired' existed to provide, checked structurally on
--- the tensor lowering that replaced it (design ir-tensor-values): some
--- let-bound tensor map is read by two or more separate reductions.
+-- | The property the retired @IREnumSumPaired@ existed to provide, checked
+-- structurally on the tensor form that replaced it (design ir-tensor-values,
+-- task retire-irenumsum): some let-bound tensor map is read by two or more
+-- separate reductions.
 --
--- This is the load-bearing half of that node. A branch-counting compile needs
+-- This is the load-bearing half of that node, and the acceptance criterion
+-- retire-irenumsum was most likely to fail. A branch-counting compile needs
 -- both a probability sum and a branch-count sum over one enumeration, and two
 -- single-scalar loops could not share a loop body -- so before the tensor
--- lowering each re-embedded the whole per-iteration computation, doubling the
+-- form each re-embedded the whole per-iteration computation, doubling the
 -- IR at every level of a recursively-enumerable structure (fuzz-qc-compiler-bugs
 -- item 3). Naming the mapped axis is what makes the sharing expressible, so
 -- asserting the shared read is a stronger check than asserting a constructor:

@@ -84,9 +84,6 @@ pPrintIRExpr (IRLetIn varname e1 e2) n = "let " ++ varname ++ " = (" ++ pPrintIR
 pPrintIRExpr (IRVar varname) _ = varname
 pPrintIRExpr (IRLambda varname body) n = "\\" ++ varname ++ " -> (" ++ pPrintIRExpr body (n + 1) ++ ")"
 pPrintIRExpr (IRApply e1 e2) n = pPrintIRExpr e1 (n + 1) ++ "(" ++ pPrintIRExpr e2 (n + 1) ++ ")"
-pPrintIRExpr (IREnumSum varname val e) n = "enumSum " ++ varname ++ " = " ++ show val ++ " in (\n" ++ pPrintIRExpr e (n + 1) ++ ")"
-pPrintIRExpr (IRLogEnumSum varname val e) n = "logEnumSum " ++ varname ++ " = " ++ show val ++ " in (\n" ++ pPrintIRExpr e (n + 1) ++ ")"
-pPrintIRExpr (IREnumSumPaired lg varname val e) n = (if lg then "logEnumSumPaired " else "enumSumPaired ") ++ varname ++ " = " ++ show val ++ " in (\n" ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRBuiltin BMapList [f, e]) n = "map (" ++ pPrintIRExpr f (n + 1) ++ ", " ++ pPrintIRExpr e (n + 1) ++ ")"
 pPrintIRExpr (IRBuiltin BListIndex [e1, e2]) n = "(" ++ pPrintIRExpr e1 (n + 1) ++ ")[" ++ pPrintIRExpr e2 (n + 1) ++ "]"
 pPrintIRExpr (IRBuiltin (BTensor sh) args) n =

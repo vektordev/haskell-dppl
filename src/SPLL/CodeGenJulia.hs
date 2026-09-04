@@ -357,19 +357,6 @@ generateExpression (IRIsPossible multiVal expr) = do
     e <- generateExpression expr
     var <- addOrGetFromGlobalStorage multiVal
     return $ "isPossible(" ++ var ++ ", " ++ e ++ ")"
-generateExpression (IREnumSum name enumRange expr) = do
-    e <- generateExpression expr
-    var <- addOrGetFromGlobalStorage enumRange
-    return $ "sum(map((" ++ name ++ " -> " ++ e ++ "), multiValueToValueList(" ++ var ++")))"
-generateExpression (IRLogEnumSum name enumRange expr) = do
-    e <- generateExpression expr
-    var <- addOrGetFromGlobalStorage enumRange
-    return $ "logsumexp(map((" ++ name ++ " -> " ++ e ++ "), multiValueToValueList(" ++ var ++")))"
-generateExpression (IREnumSumPaired logSp name enumRange expr) = do
-    e <- generateExpression expr
-    var <- addOrGetFromGlobalStorage enumRange
-    return $ "enumSumPaired((" ++ name ++ " -> " ++ e ++ "), multiValueToValueList(" ++ var
-             ++ "), " ++ (if logSp then "true" else "false") ++ ")"
 generateExpression (IRBuiltin BListIndex [lst, idx]) = do
     l <- generateExpression lst
     i <- generateExpression idx

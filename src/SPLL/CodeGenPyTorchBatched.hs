@@ -204,8 +204,8 @@ generateClass env lut genArities genMethods (IRFunGroup name gen prob integ _ _ 
 -- whole domain as the batch gives the @[V]@ probability vector, and any query is
 -- a gather into it (@pythonLibBatched.dense_query@). The @[V]@ axis is the
 -- ordinary batch axis: nothing inside the kernel changes, and the enumeration a
--- program does *internally* ('IREnumSum') is a separate axis dense mode sits
--- above rather than replaces.
+-- program does *internally* (a 'BReduce' over a 'BMap') is a separate axis
+-- dense mode sits above rather than replaces.
 --
 -- Everything here is additive. A domain that cannot be rendered, or a method
 -- whose signature does not fit, yields no dense methods -- never a refusal,
@@ -943,10 +943,10 @@ batchedGuard env0 groupNameStr methodName body =
                         -- A tensor map's binder is an IRLambda, which the
                         -- fragment otherwise refuses as data-dependent
                         -- application. Here it is a compile-time unroll over a
-                        -- static extent -- exactly what the IREnumSum this
-                        -- lowering replaces did with a Varname field -- so the
-                        -- walk goes through it to the body, skipping the
-                        -- lambda node itself (design ir-tensor-values).
+                        -- static extent -- exactly what the retired IREnumSum
+                        -- did with a Varname field -- so the walk goes through
+                        -- it to the body, skipping the lambda node itself
+                        -- (design ir-tensor-values).
                         IRBuiltin BMap [IRLambda _ b, t] ->
                           offenders env b ++ offenders env t
                         _             -> concatMap (offenders env) (getIRSubExprs e)
@@ -988,20 +988,17 @@ emittable e = case e of
   -- bucket. Refused explicitly, ahead of the blanket 'IRBuiltin{} -> True'
   -- below, which admits the shape-carrying tensor ops but must not admit this.
   IRBuiltin BMapList _   -> False
-  IREnumSum _ mv _  -> scalarDiscreteMulti mv  -- enum sum, unrolled over the enum axis (M2b)
-  -- Paired (probability, branchCount) enum sum -- only built by a
-  -- countBranches compile. Same unrolling as 'IREnumSum', reduced
-  -- componentwise; the log-space variant is refused here, exactly as the
-  -- single-scalar 'IRLogEnumSum' is (which has no case at all, so it falls to
-  -- the catch-all below).
-  --
-  -- Both refusals are now unreachable in a default pipeline:
-  -- 'SPLL.IRTensorPass' rewrites the whole enum-sum family before this guard
-  -- runs, and a log-space sum arrives as @BReduce ROpLogSumExp@, which the
-  -- blanket 'IRBuiltin' case admits and 'tensor_logsumexp' implements. The
-  -- cases are kept for the un-lowered IR this predicate is still total over,
-  -- not because they gate anything today.
-  IREnumSumPaired lg _ mv _ -> not lg && scalarDiscreteMulti mv
+  -- Enumerated sums used to have three arms here, gating the enum axis on
+  -- 'scalarDiscreteMulti' and refusing the log-space one outright. Task
+  -- retire-irenumsum removed the constructors: an enumerated sum is now a
+  -- 'BReduce' over a 'BMap' over a 'BTensor' of the domain, admitted by the
+  -- blanket 'IRBuiltin' case below. The gate is not lost -- the domain's
+  -- values are ordinary 'IRConst' children of the 'BTensor', and 'batchedVal'
+  -- refuses each composite one for the same reason 'scalarDiscreteMulti' did.
+  -- The log-space refusal genuinely is gone: @BReduce ROpLogSumExp@ is
+  -- admitted here and 'tensor_logsumexp' in @pythonLibBatched.py@ implements
+  -- it, so @--batched --logSpace@ compiles and answers correctly (a capability
+  -- the lowering gained; still uncovered by any @.tst@).
   IRIsPossible mv _ -> scalarDiscreteMulti mv  -- membership over a scalar enum (M2b)
   -- The tensor builtins (design ir-tensor-values). All four are emittable: a
   -- tensor is a Python list of [B] tensors, uniform across a bucket, and its
@@ -1109,14 +1106,13 @@ batchedValOrDie v = fromMaybe
   (batchedVal v)
 
 -- | A 'MultiValue' that is a flat enumeration of scalar values — the only shape
--- the two 'MultiValue'-carrying nodes may have. Their emitters ('IRIsPossible' →
--- an elementwise @x in {..}@ mask, 'IREnumSum' → an inline unrolling over the
--- enum axis) render each enumerated value individually, so a composite
--- 'MultiValue' would need a composite constant — refused by 'batchedVal' for the
--- reasons given there. Tuple leaves are excluded here (rather than deferred to
--- 'batchedVal') because neither @is_member@ nor the enum unrolling is known to
--- behave correctly on a structure-of-arrays @T@; widening that needs a test, not
--- an assumption.
+-- 'IRIsPossible' — the one remaining 'MultiValue'-carrying node — may have. Its
+-- emitter renders each enumerated value individually as an elementwise
+-- @x in {..}@ mask, so a composite 'MultiValue' would need a composite constant
+-- — refused by 'batchedVal' for the reasons given there. Tuple leaves are
+-- excluded here (rather than deferred to 'batchedVal') because @is_member@ is
+-- not known to behave correctly on a structure-of-arrays @T@; widening that
+-- needs a test, not an assumption.
 --
 -- The composite-'MultiValue' direction is not reachable from a real program
 -- (an Either/ADT-shaped read-logits network trips the Either tag test or the ADT-declaration bail
@@ -1139,9 +1135,6 @@ reason e = case e of
   IRApply{}       -> "function application (IRApply); a call did not inline"
   IRLambda{}      -> "inner lambda (IRLambda)"
   IRIsPossible{}  -> "membership check (IRIsPossible) over a non-scalar enumeration"
-  IREnumSum{}     -> "enumeration sum (IREnumSum) over a non-scalar enumeration"
-  IREnumSumPaired True _ _ _ -> "log-space paired enumeration sum (IREnumSumPaired)"
-  IREnumSumPaired{}  -> "paired enumeration sum (IREnumSumPaired) over a non-scalar enumeration"
   IRConformsTo{}  -> "type-conformance check (IRConformsTo)"
   -- 'VAny'/'VList AnyList' are admitted by 'batchedVal' (M4); 'VAnyExcept' is
   -- the one ANY-flavoured sentinel that stays refused (see 'batchedVal').
@@ -1294,24 +1287,6 @@ batchedExpr env (IRBuiltin BListIndex [l, IRConst (VInt i)]) =
   "(" ++ batchedExpr env l ++ ")[..., " ++ show i ++ "]"
 batchedExpr env (IRBuiltin BListIndex [l, idx]) =
   "nn_gather(" ++ batchedExpr env l ++ ", " ++ batchedExpr env idx ++ ")"
--- An enumeration sum: sum the body over its enumerable values. The enum axis is
--- known at compile time (a resolved 'MultiValue'), so we unroll it inline —
--- binding @name@ to each value and summing the resulting @[B]@ tensors — rather
--- than going through the scalar backend's runtime @multiValueToValueList@
--- storage (the batched backend keeps no global-storage state). This is the
--- @[E, B]@ enum-axis stack of the design's "Central insight": each arm is
--- evaluated against the whole batch, then reduced over the enum axis.
-batchedExpr env (IREnumSum name multiVal expr) =
-  "sum(map((lambda " ++ name ++ ": " ++ batchedExpr env expr ++ "), ["
-    ++ intercalate ", " (map (batchedValOrDie . valueToIR) (multiValueToValueList multiVal)) ++ "]))"
--- The paired form of the above: the body yields a (probability, branchCount)
--- pair per enumerated value, and the two components reduce independently.
--- Evaluating the body once per value and reducing componentwise is the whole
--- point of the node (see 'IREnumSumPaired'), so the unrolled body must appear
--- exactly once here too.
-batchedExpr env (IREnumSumPaired _ name multiVal expr) =
-  "enum_sum_paired(list(map((lambda " ++ name ++ ": " ++ batchedExpr env expr ++ "), ["
-    ++ intercalate ", " (map (batchedValOrDie . valueToIR) (multiValueToValueList multiVal)) ++ "])))"
 -- A membership test @x in {v0, ..}@ over a scalar enumeration (e.g. \"is the
 -- residual @c - a@ a valid digit?\" in MNIST addition). Rendered as an
 -- elementwise @[B]@ bool mask via 'is_member', which evaluates @x@ once.
@@ -1320,7 +1295,7 @@ batchedExpr env (IRIsPossible multiVal expr) =
     ++ intercalate ", " (map (batchedValOrDie . valueToIR) (multiValueToValueList multiVal)) ++ "])"
 -- The tensor builtins (design ir-tensor-values). 'BTensor' and 'BMap' produce
 -- a Python list of [B] tensors: a map's body is arbitrary IR, so it is
--- evaluated once per element exactly as the enum-sum unrolling above does. The
+-- evaluated once per element, which is how an enumeration unrolls. The
 -- vectorization is in the consumers -- 'BReduce' and 'BIndex' stack that list
 -- into one [E, B] tensor and run a single kernel, instead of the E-1
 -- sequential adds a Python `sum` over tensors performs, or the E-arm

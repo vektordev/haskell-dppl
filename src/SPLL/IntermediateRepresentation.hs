@@ -202,9 +202,9 @@ data UnaryOperand = OpNeg
                   deriving (Show, Eq)
 
 -- | The reduction operators a tensor axis can be folded with. A field of
--- 'BReduce' rather than a constructor per operator: the enum-sum family split
--- 'IREnumSum' from 'IRLogEnumSum' on exactly this axis and paid for it in
--- every generic pass.
+-- 'BReduce' rather than a constructor per operator: the retired enum-sum family
+-- split @IREnumSum@ from @IRLogEnumSum@ on exactly this axis and paid for it in
+-- every generic pass (task retire-irenumsum).
 data ReduceOp = ROpAdd        -- ^ Sum. Identity 0.
               | ROpLogSumExp  -- ^ Log-sum-exp, the log-space sibling of 'ROpAdd'. Identity -inf.
               | ROpMax        -- ^ Max (task semiring-parametric-marginals): the
@@ -244,7 +244,8 @@ data Builtin
   --
   -- Note it does /not/ take a lambda: reduce is separate from map rather than
   -- fused with it, which is the whole point -- one 'BMap' can be let-bound and
-  -- reduced twice, which is the sharing 'IREnumSumPaired' exists to fake.
+  -- reduced twice, which is the sharing the retired @IREnumSumPaired@ existed
+  -- to fake (task retire-irenumsum).
   | BReduce ReduceOp Int
   -- | @BIndex axis [t, key]@ -- read along @axis@ at a runtime integer key,
   -- dropping that axis (rank 1 therefore yields a scalar). Distinct from
@@ -402,44 +403,35 @@ data IRExpr = IRIf IRExpr IRExpr IRExpr
               | IRVar Varname
               | IRLambda String IRExpr
               | IRApply IRExpr IRExpr
-              -- auxiliary construct to aid enumeration: bind each enumerated Value to the Varname and evaluate the subexpr. Sum results.
-              -- maybe we can instead move this into some kind of standard library.
-              | IREnumSum Varname MultiValue IRExpr
-              -- | Log-space sibling of 'IREnumSum': sums a discrete mass over
-              -- an enumerated support by log-sum-exp instead of a plain add,
-              -- so a "long enumeration" (the second motivating case in the
-              -- task, alongside deep products) never forms the linear sum of
-              -- many small probabilities. Bound variable and body semantics
-              -- otherwise mirror 'IREnumSum' exactly (same optimizer/CSE
-              -- treatment, same scoping).
-              | IRLogEnumSum Varname MultiValue IRExpr
-              -- | Paired sibling of 'IREnumSum'/'IRLogEnumSum': ONE loop over
-              -- the enumerated support whose body evaluates to a
-              -- @(probability, branchCount)@ tuple, reducing the first
-              -- component the way the other two nodes reduce their single
-              -- scalar (log-sum-exp when the 'Bool' is True, a plain add when
-              -- False) and the second component by a plain add. The result is
-              -- the reduced tuple.
+              -- NOTE (task retire-irenumsum): three constructors stood here
+              -- -- @IREnumSum@, @IRLogEnumSum@ and @IREnumSumPaired@ -- one
+              -- per reduction operator plus one for a two-component
+              -- accumulator, each binding a 'Varname' over a 'MultiValue'
+              -- domain. They are gone. An enumerated sum is now built by
+              -- 'SPLL.Semiring.enumSumNode'/@enumSumP@ as
+              -- @BReduce op 0 [BMap [IRLambda v body, BTensor dom]]@: the
+              -- operator is a field of 'BReduce', and the paired form is one
+              -- let-bound 'BMap' reduced twice, which is the loop-body sharing
+              -- @IREnumSumPaired@ existed to fake before the IR could name a
+              -- vector of per-iteration results (design ir-tensor-values).
               --
-              -- Exists because a branch-counting compile needs BOTH sums over
-              -- the same body, and two single-scalar loops cannot share one
-              -- loop body or a binding inside it -- so each re-embedded the
-              -- whole per-iteration computation, doubling the IR at every
-              -- level of a recursively-enumerable structure
-              -- (fuzz-qc-compiler-bugs item 3, third mechanism). The flag is a
-              -- field rather than a third constructor because only the
-              -- probability component's reduction varies with 'logSpace';
-              -- everything else (bound variable, scoping, optimizer and CSE
-              -- treatment) is identical to 'IREnumSum'.
-              | IREnumSumPaired Bool Varname MultiValue IRExpr
+              -- 'IRIsPossible' below is the residue: it also carries a
+              -- 'MultiValue', but it is a membership TEST rather than a loop,
+              -- emitted as a single runtime-library call ('isPossible' in
+              -- @pythonLib.py@/@juliaLib.jl@) that walks the value's structure
+              -- against the domain's. Expressing it on the dense axis would
+              -- mean building the domain as a tensor and reducing an equality
+              -- map with a boolean OR -- a reduction operator that exists for
+              -- no other purpose, replacing an O(1)-looking library call with
+              -- a materialised domain. It stays.
               | IRIsPossible MultiValue IRExpr
               -- | A named operation over a tensor (design ir-tensor-values).
               -- One constructor rather than a family:
               -- which operation, and any shape/operator/axis it is parameterised
               -- by, live in the 'Builtin' tag, so a new tensor operation costs an
               -- enum case and not another binder for every generic pass to
-              -- special-case -- which is precisely how the enum-sum family
-              -- grew a constructor per reduction operator.
+              -- special-case -- which is precisely how the retired enum-sum
+              -- family grew a constructor per reduction operator.
               --
               -- Shaped as @Builtin [IRExpr]@ so a new tensor operation lands
               -- here rather than becoming another constructor family to
@@ -473,7 +465,7 @@ data IRFunGroup = IRFunGroup {groupName::String, genFun::Maybe IRFunDecl, probFu
   -- | The finite enumeration of values a query against this group's prob/integ
   -- function can take, when the sample domain is statically finite -- the
   -- function's own return type, /not/ the domain of anything it enumerates
-  -- internally (that is 'IREnumSum', a separate axis). 'Nothing' whenever the
+  -- internally (that is a 'BReduce' over a 'BMap', a separate axis). 'Nothing' whenever the
   -- domain is continuous, unbounded (Int/Symbol), or not statically derivable.
   --
   -- Consumed only by the batched backend's dense-enumeration mode (design
@@ -729,9 +721,6 @@ getIRSubExprs (IRLetIn _ a b) = [a, b]
 getIRSubExprs (IRVar _) = []
 getIRSubExprs (IRLambda _ a) = [a]
 getIRSubExprs (IRApply a b) = [a, b]
-getIRSubExprs (IREnumSum _ _ a) = [a]
-getIRSubExprs (IRLogEnumSum _ _ a) = [a]
-getIRSubExprs (IREnumSumPaired _ _ _ a) = [a]
 getIRSubExprs (IRBuiltin _ args) = args
 getIRSubExprs (IRError _) = []
 getIRSubExprs (IRConformsTo _ a) = [a]
@@ -791,9 +780,9 @@ irMap f x = f (irDescend (irMap f) x)
 -- | Apply @f@ to the immediate children of a node, rebuilding it. One level
 -- only -- unlike 'irMap' it does not recurse, so the caller controls the
 -- traversal. This is what a scope-aware rewrite needs: it can handle the
--- binding forms itself (threading an environment through 'IRLetIn'/'IRLambda'/
--- 'IREnumSum' scopes) and delegate every other constructor here, instead of
--- re-listing the whole 21-constructor AST.
+-- binding forms itself (threading an environment through 'IRLetIn'/'IRLambda'
+-- scopes) and delegate every other constructor here, instead of
+-- re-listing the whole AST.
 irDescend :: (IRExpr -> IRExpr) -> IRExpr -> IRExpr
 irDescend f x = case x of
   (IRIf cond left right) -> IRIf (f cond) (f left) (f right)
@@ -808,9 +797,6 @@ irDescend f x = case x of
   (IRLetIn name left right) -> IRLetIn name (f left) (f right)
   (IRLambda name scope) -> IRLambda name (f scope)
   (IRApply a b) -> IRApply (f a) (f b)
-  (IREnumSum name val scope) -> IREnumSum name val (f scope)
-  (IRLogEnumSum name val scope) -> IRLogEnumSum name val (f scope)
-  (IREnumSumPaired lg name val scope) -> IREnumSumPaired lg name val (f scope)
   (IRBuiltin b args) -> IRBuiltin b (map f args)
   (IRConst _) -> x
   (IRSample _) -> x
@@ -837,9 +823,6 @@ irDescendM f x = case x of
   (IRLetIn name left right) -> IRLetIn name <$> f left <*> f right
   (IRLambda name scope) -> IRLambda name <$> f scope
   (IRApply a b) -> IRApply <$> f a <*> f b
-  (IREnumSum name val scope) -> IREnumSum name val <$> f scope
-  (IRLogEnumSum name val scope) -> IRLogEnumSum name val <$> f scope
-  (IREnumSumPaired lg name val scope) -> IREnumSumPaired lg name val <$> f scope
   (IRBuiltin b args) -> IRBuiltin b <$> mapM f args
   (IRConst _) -> pure x
   (IRSample _) -> pure x
@@ -862,14 +845,11 @@ irPrintFlat (IRDestruct a _) = "IRDestruct " ++ show a
 irPrintFlat (IRIsPossible _ _) = "IRIsPossible"
 irPrintFlat (IRDensity _ _ _) = "IRDensity"
 irPrintFlat (IRCumulative _ _ _) = "IRCumulative"
-irPrintFlat (IRLogEnumSum _ _ _) = "IRLogEnumSum"
 irPrintFlat (IRSample _) = "IRSample"
 irPrintFlat (IRLetIn _ _ _) = "IRLetIn"
 irPrintFlat (IRVar _) = "IRVar"
 irPrintFlat (IRLambda _ _) = "IRLambda"
 irPrintFlat (IRApply _ _) = "IRApply"
-irPrintFlat (IREnumSum _ _ _) = "IREnumSum"
-irPrintFlat (IREnumSumPaired _ _ _ _) = "IREnumSumPaired"
 irPrintFlat (IRBuiltin b _) = "IRBuiltin " ++ show b
 irPrintFlat (IRError _) = "IRError"
 irPrintFlat (IRConformsTo _ _) = "IRConformsTo"

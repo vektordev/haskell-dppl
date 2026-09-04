@@ -1,6 +1,6 @@
 module JuliaSPPLLib
 
-export safe_log, density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, log_density_IRUniform, log_density_IRNormal, log_cumulative_IRUniform, log_cumulative_IRNormal, logsumexp, enumSumPaired, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, mapList, eq, isPossible, isclose, indexOf, listProd, T, Either, Left, Right, fromLeft, fromRight, multiValueToValueList,==
+export safe_log, density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, log_density_IRUniform, log_density_IRNormal, log_cumulative_IRUniform, log_cumulative_IRNormal, logsumexp, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, mapList, eq, isPossible, isclose, indexOf, listProd, T, Either, Left, Right, fromLeft, fromRight,==
 
 
 function isAny(x)
@@ -99,22 +99,6 @@ function logsumexp(xs)
         return -Inf
     end
     return m + log(sum(exp(x - m) for x in xs))
-end
-
-# One pass over an enumerated support whose body returns a (probability,
-# branchCount) pair, reducing the probability by a plain sum (or log-sum-exp
-# in log space) and the branch count by a plain sum. The paired form exists so
-# a branch-counting compile evaluates the body once per enumerated value
-# instead of once per loop (see IREnumSumPaired).
-function enumSumPaired(f, values, logSpace)
-    probs = Float64[]
-    branches = 0.0
-    for v in values
-        r = f(v)
-        push!(probs, r[1])
-        branches += r[2]
-    end
-    return T(logSpace ? logsumexp(probs) : sum(probs), branches)
 end
 
 function eq(a, b)
@@ -359,50 +343,13 @@ function isclose(a::Float64, b::Float64)
     return abs(a - b) <= 10e-10
 end
 
-# The enumerated support of a MultiValue is a program constant: the emitted code
-# passes the same `_globalMultiN` description at every enum-sum site and
-# re-derives the whole cartesian product on each call. Memoised on the
-# description's string form -- small and structural, unlike the description
-# itself. Sound because the returned list is never mutated by callers.
-const _multiValueCache = Dict{String,Any}()
-
-function multiValueToValueList(multiVal)
-    key = string(multiVal)
-    cached = get(_multiValueCache, key, nothing)
-    if cached !== nothing
-        return cached
-    end
-    result = _multiValueToValueList(multiVal)
-    _multiValueCache[key] = result
-    return result
-end
-
-function _multiValueToValueList(multiVal)
-    if multiVal[1] == "C"
-        # A continuous (Float) slot has no enumerable values.
-        return []
-    elseif multiVal[1] == "D"
-        return multiVal[2]
-    elseif multiVal[1] == "T"
-        cart = collect(Iterators.product(multiValueToValueList(multiVal[2][1]), multiValueToValueList(multiVal[2][2])))
-        return [T(x[1], x[2]) for x in cart]
-    elseif multiVal[1] == "E"
-        lefts = [Left(x) for x in multiValueToValueList(multiVal[2][1])]
-        rights = [Right(x) for x in multiValueToValueList(multiVal[2][2])]
-        return vcat(lefts, rights)
-    elseif multiVal[1] == "A"
-        result = []
-        for c in multiVal[2]
-            cName = c[1]
-            cFields = [multiValueToValueList(f) for f in c[2]]
-            cart = collect(Iterators.product(cFields...))
-            append!(result, [eval(Symbol(cName))(x...) for x in cart])
-        end
-        return result
-    else
-        error("Unknown multiVal tag: " * string(multiVal[1]))
-    end
-end
+# NOTE (task retire-irenumsum): `multiValueToValueList` stood here, deriving a
+# MultiValue's enumerated support at run time (memoised, because a multi-object
+# neural scene's cartesian product dominated the query). Nothing emits a call to
+# it any more: an enumerated sum is now a tensor reduce over a map over a
+# *literal* list of the domain's values, built at compile time, so the product
+# is computed once by the compiler instead of on every query. `isPossible`
+# walks the description structurally and never needed it.
 
 end
 

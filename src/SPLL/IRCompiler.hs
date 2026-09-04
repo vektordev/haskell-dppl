@@ -233,7 +233,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
         -- there for why a partial enumeration would be worse than none.
         --
         -- This is the domain of the function's own *result*, i.e. of a query
-        -- against it; the domains it enumerates internally are 'IREnumSum's,
+        -- against it; the domains it enumerates internally are tensor reductions,
         -- a separate axis this deliberately does not touch.
         sampleDom = listToMaybe $ filter multiValueIsFinite $
           [mv | DiscreteValues mv <- tags (getTypeInfo (stripLambdas binding))]
@@ -656,7 +656,7 @@ bindLambdaParam scope lambdaCn x =
 -- computed before the topK cutoff, which only gates the right-hand descent),
 -- so a nested chain costs T(n) = |D(n-1)| * T(n-1) -- super-exponential, and
 -- invisible to every optimizer pass we have: the recomputation is a runtime
--- loop re-entry, not duplicated IR, and CSE deliberately stops at IREnumSum
+-- loop re-entry, not duplicated IR, and CSE deliberately stops at a loop body
 -- bodies. Measured (task measure-marginal-recomputation) at 10.7x redundant
 -- neural-cell evaluations for a 3-term MNIST-digit sum and 4021x for a 6-term
 -- one, tracking wall clock almost exactly.
@@ -825,7 +825,7 @@ convolveTables meta dom buckets = do
     -- -- with two tensor builtins whose body text is written once and
     -- reused per pair, instead of duplicated per pair. 'BReduce's own
     -- interpreter/codegen lowerings already fold right-to-left over the
-    -- tensor's element order (matching 'IREnumSum's), so listing the bucket
+    -- tensor's element order (matching the enumeration's), so listing the bucket
     -- in grid order (as it already comes) keeps the tabulated cell
     -- bit-identical to the re-descending loop it replaces, the same claim the
     -- old fold made.
@@ -1664,7 +1664,7 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
   -- only because every condition tested so far happened to be leaf-shaped with
   -- its own count of exactly 1; a compound condition -- a nested if, a call --
   -- inflated the parent by its dispatch cost for no principled reason. Every
-  -- other combinator here -- IREnumSum, toIREnumerate, the topK dispatch --
+  -- other combinator here -- the enumerated sum, toIREnumerate, the topK dispatch --
   -- already sums surviving children and adds nothing for dispatching.)
   -- Each arm is zero-checked with the same IRIf short-circuit the probability
   -- fields use, so a dead arm's count -- and any recursive call inside it --
@@ -2845,7 +2845,7 @@ stripBranchCount (IREnv funcs adtDecls'' consts) = IREnv (map stripGroup funcs) 
       -- A tensor map's lambda is an enumeration LOOP binder, not a function
       -- body, so it gets the rebind but NOT 'stripOuterTriple' -- which exists
       -- to collapse the result triple a compiled function returns. Before task
-      -- retire-irenumsum the loop was 'IREnumSum'/'IRLogEnumSum', a
+      -- retire-irenumsum the loop was @IREnumSum@/@IRLogEnumSum@, a
       -- constructor of its own that could not be confused with a lambda; now
       -- that it is a 'BMap' over an 'IRLambda', the distinction has to be made
       -- here or the generic 'IRLambda' arm above would claim it.
@@ -3372,7 +3372,7 @@ comparisonWorlds meta occs isGT lop rop target
 -- per plan slot -- softmax regions for enums and constructor flags, (mu,
 -- sigma) pairs for continuous leaves -- and the plan is depth-unrolled, hence
 -- finite. So instead of materializing the argument's (possibly astronomically
--- large) discrete support into an IREnumSum, the observation is inverted into
+-- large) discrete support into an enumerated sum, the observation is inverted into
 -- worlds whose constraints live on individual plan LEAVES: each world maps
 -- constrained leaf regions to their still-allowed logit slots (with optional
 -- per-slot runtime guards) and is measured as the product of the constrained

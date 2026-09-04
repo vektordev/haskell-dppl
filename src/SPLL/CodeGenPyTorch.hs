@@ -477,8 +477,8 @@ axisUnsupported what ax =
 
 -- | The Python runtime function reducing a tensor axis with each operator.
 -- sum/max are Python's own builtins (both take an iterable, same as
--- logsumexp's own signature below), logsumexp is pythonLib.py's (already
--- backing IRLogEnumSum). max on an empty iterable raises in real Python,
+-- logsumexp's own signature below), logsumexp is pythonLib.py's. max on an
+-- empty iterable raises in real Python,
 -- same as every other reduction here has no defined empty-domain behaviour
 -- (an enumerable domain from Analysis.materializationDomain is never empty --
 -- see the "empty propagated domain" refusal in Analysis).
@@ -632,19 +632,6 @@ generateExpression expr@(IRApply _ _) = do
   fn' <- generateExpression fn
   args' <- mapM generateExpression args
   return (fn' ++ "(" ++ intercalate ", " args' ++ ")")
-generateExpression (IREnumSum name enumRange expr) = do
-  e <- generateExpression expr
-  varName <- addOrGetFromGlobalStorage enumRange
-  return ("sum(map((lambda " ++ name ++ ": " ++ e ++ "), multiValueToValueList(self." ++ varName ++ ")))")
-generateExpression (IRLogEnumSum name enumRange expr) = do
-  e <- generateExpression expr
-  varName <- addOrGetFromGlobalStorage enumRange
-  return ("logsumexp(map((lambda " ++ name ++ ": " ++ e ++ "), multiValueToValueList(self." ++ varName ++ ")))")
-generateExpression (IREnumSumPaired logSp name enumRange expr) = do
-  e <- generateExpression expr
-  varName <- addOrGetFromGlobalStorage enumRange
-  return ("enumSumPaired((lambda " ++ name ++ ": " ++ e ++ "), multiValueToValueList(self."
-          ++ varName ++ "), " ++ (if logSp then "True" else "False") ++ ")")
 generateExpression (IRIsPossible multiVal expr) = do
   e <- generateExpression expr
   varName <- addOrGetFromGlobalStorage multiVal

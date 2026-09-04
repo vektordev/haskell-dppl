@@ -129,7 +129,6 @@ SPLL source (.spll/.ppl)
   → Typing/ModalityInfer.hs (PTypes) → Analysis.hs (IsConditional tags)
   → IRCompiler.hs → IR (IntermediateRepresentation.hs)
      Three compilation branches: generate, probability, integrate
-  → IRTensorPass.hs (enum sums → tensor map/reduce)
   → IRSelectPass.hs (batched only) → IROptimizer.hs (const folding, CSE, let-in)
   → CodeGenPyTorch.hs, CodeGenPyTorchBatched.hs, or CodeGenJulia.hs
 ```
@@ -458,12 +457,29 @@ it, because they would otherwise refuse or mis-scope a compile-time unroll:
 `IROptimizer.loopBinder` (which is also the one place listing which forms
 iterate, so the loop-invariance analyses stop re-matching a constructor set).
 
-`SPLL.IRTensorPass` rewrites the enum-sum family onto this, for every backend:
-`IREnumSum`/`IRLogEnumSum` become `reduce op (map f domain)`, and
-`IREnumSumPaired` becomes **one** let-bound map reduced **twice** — which is
-the sharing that node existed to fake. The enum-sum constructors themselves are
-not retired (task `retire-irenumsum`); the pass leaves them unreachable rather
-than absent.
+**An enumerated sum is built in this form and no other.**
+`SPLL.Semiring`'s `enumSumNode` emits `reduce op (map (\v -> body) domain)`,
+where `op` is `srReduceOp` — so a new reduction is a `ReduceOp` case, not a
+constructor. `enumSumP`'s branch-counting path emits **one** let-bound map
+reduced **twice**, once for the probability and once for the branch count,
+which is the loop-body sharing that needs no second traversal of the body.
+
+There used to be three `IRExpr` constructors here — `IREnumSum`,
+`IRLogEnumSum`, `IREnumSumPaired` — plus a whole pipeline stage
+(`SPLL.IRTensorPass`) lowering them into the above. Task `retire-irenumsum`
+deleted all four: the producers build the tensor form directly, so there is
+nothing left to lower. `IRExpr` went from 23 constructors to 20, and the
+`-d` dump lost its "After Tensor Lowering" row because the stage is gone.
+Emitted code is byte-identical for a default compile; a `-c` (branch-counting)
+compile differs only in generated variable names, the loop axis now being named
+by `mkVariable` rather than by the pass's own counter.
+
+`IRIsPossible` is the deliberate **residue**: it also carries a `MultiValue`,
+but it is a membership *test*, not a loop, emitted as a single
+runtime-library call (`isPossible`) that walks the value against the domain
+description. Putting it on the dense axis would mean materialising the domain
+as a tensor and reducing an equality map with a boolean OR — a reduction
+operator existing for no other purpose — so it stays as it is.
 
 Only **rank 1 and axis 0** are emitted. The representation admits any rank and
 the interpreter implements it (`fibres`/`rewrap` do the stride arithmetic, and
@@ -471,20 +487,27 @@ the interpreter implements it (`fibres`/`rewrap` do the stride arithmetic, and
 rank with a named diagnostic rather than emitting something plausible. Nothing
 produces a rank > 1 tensor today.
 
-One refusal the pass did **not** preserve, contrary to its own doc comment:
-`--batched --logSpace`. `CodeGenPyTorchBatched`'s `emittable` has no
-`IRLogEnumSum` case (and refuses the log variant of `IREnumSumPaired`
-explicitly), so a log-space batched compile used to be rejected at the guard.
-After lowering there is no `IRLogEnumSum` left to reject — the node is a
-`BReduce ROpLogSumExp`, which `emittable`'s blanket `IRBuiltin{} -> True`
-admits and which `tensor_logsumexp` in `pythonLibBatched.py` already
-implements. The combination now compiles and gives correct answers, so this
-reads as a capability the pass gained for free rather than a hole; but nothing
-in the suite covers it (no `.tst` carries a log-space token), and the comment
-at `emittable`'s paired case still claims a refusal that no longer bites.
+One refusal this form does **not** preserve: `--batched --logSpace`.
+`CodeGenPyTorchBatched`'s `emittable` used to have no `IRLogEnumSum` case (and
+refused the log variant of `IREnumSumPaired` explicitly), so a log-space
+batched compile was rejected at the guard. There is no such node to reject any
+more — a log-space enumerated sum is a `BReduce ROpLogSumExp`, which
+`emittable`'s blanket `IRBuiltin{} -> True` admits and which `tensor_logsumexp`
+in `pythonLibBatched.py` implements. The combination compiles and gives correct
+answers, so this reads as a capability gained for free rather than a hole; but
+nothing in the suite covers it (no `.tst` carries a log-space token).
 
-Measured against the pre-lowering compiler: emitted scalar Python is 0–4%
-*smaller* and 1.09x faster with bit-identical results; batched Python is
+The non-scalar `MultiValue` gate those cases also carried is *not* lost. A
+domain's values are now ordinary `IRConst` children of a `BTensor`, and
+`batchedVal` refuses each composite one for the same reason
+`scalarDiscreteMulti` did — so the refusal is per-constant rather than
+per-node. `IRIsPossible` keeps its own `scalarDiscreteMulti` gate, and the
+synthetic rows in `TestInternals.batchedRefusalUnitTests` (which had no corpus
+trigger) now cover that node alone.
+
+Measured when the lowering first landed, against the compiler before it:
+emitted scalar Python is 0–4% *smaller* and 1.09x faster with bit-identical
+results; batched Python is
 byte-identical in size and 1.00–1.04x, bit-identical at two enumeration terms
 and within 7.5e-9 at four (the reduce reassociates). The larger speedups the
 design predicts belong to the `BIndex` consumer, which nothing wires up yet.
@@ -533,7 +556,7 @@ skip it on a marginal query.
 — only the fields that actually read the block go into the tuple, so a
 statically-known dim or flag stays the constant it is rather than being hidden
 from folding. It is gated on `blockIterates`: share only when the block
-contains a **loop** (an enum-sum, `IRMap`, `BMap`, or `BReduce`). That gate is
+contains a **loop** (`IRMap`, `BMap`, or `BReduce`). That gate is
 a claim about run time, not size — what makes a second copy cost anything is
 that it is a second traversal, and a block of constants and arithmetic folds to
 a few literals whether copied or not. A pre-optimization node count was tried
@@ -622,7 +645,6 @@ fully-annotated AST after each pipeline stage to stderr via
 | After Modality Inference | `pType` populated |
 | After Conditional Annotation | `IsConditional` tags appear on conditioned distributions |
 | After IR Compilation (pre-optimization) | Pseudo-code IR before any optimizer passes |
-| After Tensor Lowering | Enum sums rewritten to `map`/`reduce` over a tensor |
 | After Select Pass | `IRIf` → `IRSelect` retagging (a no-op unless `--batched`) |
 | After Optimization | Pseudo-code IR after constant folding, CSE, let-in optimization |
 

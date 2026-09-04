@@ -408,22 +408,18 @@ test_writeLogitsBoolExactProbs = testCase "writeLogitsBoolExactProbs" $ do
 -- an enumeration loop body.  Used to check that NN forward calls are hoisted
 -- out of loops.
 --
--- The loop is a tensor map since the enum-sum lowering (design
--- ir-tensor-values): matching 'IREnumSum' here would make the assertion below
--- vacuously true, because no 'IREnumSum' survives that pass.
+-- The loop is a tensor map: an enumerated sum is built as 'BReduce' over
+-- 'BMap' over 'BTensor' (design ir-tensor-values; the @IREnumSum@ spelling this
+-- once also matched was retired by task retire-irenumsum).
 nnCallInsideEnumSum :: String -> IRExpr -> Bool
-nnCallInsideEnumSum name (IREnumSum _ _ body) = containsDirectNNApply name body
 nnCallInsideEnumSum name (IRBuiltin BMap [IRLambda _ body, _]) = containsDirectNNApply name body
 nnCallInsideEnumSum name expr = any (nnCallInsideEnumSum name) (getIRSubExprs expr)
 
--- | Is there an enumeration loop anywhere in this expression, under either
--- spelling? Guards the hoisting assertion above against going vacuous.
+-- | Is there an enumeration loop anywhere in this expression? Guards the
+-- hoisting assertion above against going vacuous.
 irAnyLoop :: IRExpr -> Bool
 irAnyLoop e = isLoop e || any irAnyLoop (getIRSubExprs e)
   where
-    isLoop IREnumSum{} = True
-    isLoop IRLogEnumSum{} = True
-    isLoop IREnumSumPaired{} = True
     isLoop (IRBuiltin BMap _) = True
     isLoop _ = False
 
@@ -432,7 +428,7 @@ containsDirectNNApply name (IRApply (IRVar v) _) = v == name
 containsDirectNNApply name expr = any (containsDirectNNApply name) (getIRSubExprs expr)
 
 -- | mNistAdd: readMNist(a) ++ readMNist(b) — the NN forward pass is loop-invariant
--- w.r.t. the IREnumSum over digit values, so it must be hoisted outside the loop.
+-- w.r.t. the enumeration over digit values, so it must be hoisted outside the loop.
 test_nnHoistedOutOfEnumSum :: TestTree
 test_nnHoistedOutOfEnumSum = testCase "nnHoistedOutOfEnumSum" $ do
   src <- readFile "testCases/mNistAdd.ppl"
@@ -449,7 +445,7 @@ test_nnHoistedOutOfEnumSum = testCase "nnHoistedOutOfEnumSum" $ do
           -- the property is "hoisted out of the loop", so a compile with no
           -- loop at all would satisfy the negative check vacuously. That is
           -- not hypothetical -- it is what happened when the enum-sum lowering
-          -- (design ir-tensor-values) replaced IREnumSum with a tensor map.
+          -- (design ir-tensor-values) replaced the loop with a tensor map.
           assertBool "mNistAdd's probability body should still contain an enumeration loop" $
             irAnyLoop probExpr
           assertBool "readMNist forward call should be hoisted outside the enumeration loop" $
@@ -1743,7 +1739,7 @@ stochasticCallTests = testGroup "stochastic calls (stochastic-call-cse-unsound)"
 -- | The corpus-driven rows in "End2EndTesting" ('End2EndTesting.batchedRefusalTests')
 -- cover every batched fragment refusal a real @.ppl@ can reach. A handful cannot
 -- be reached from any program, because another guard always fires first — most
--- notably the non-scalar 'MultiValue' gate on 'IREnumSum'/'IRIsPossible': every
+-- notably the non-scalar 'MultiValue' gate on 'IRIsPossible': every
 -- Either/ADT-shaped read-logits network emits an 'IRDestruct AcIsLeft', or trips the ADT-declaration
 -- bail, long before a composite enumeration could reach the emitter. That
 -- ordering makes the gate correct today but leaves it with no positive control,
@@ -1753,15 +1749,19 @@ stochasticCallTests = testGroup "stochastic calls (stochastic-call-cse-unsound)"
 -- being refused. These rows call the guards directly on hand-built 'IRExpr'
 -- values, and include the accepting direction so a gate that refused everything
 -- would not pass.
+--
+-- @IREnumSum@ carried the same gate and had the same rows until task
+-- retire-irenumsum removed the constructor. Its enumerated domain is now a
+-- 'BTensor' of 'IRConst' children, so the composite-'MultiValue' refusal is
+-- 'batchedVal''s per-constant one -- covered by the @IRConst@ rows further
+-- down rather than by a node-specific gate.
 batchedRefusalUnitTests :: TestTree
 batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
   -- Composite MultiValues: both MultiValue-carrying nodes must refuse each.
   [ testCase (nodeName ++ " over " ++ mvName ++ " is refused") $
       assertRefusal needle (mkNode mv)
   | (nodeName, needle, mkNode) <-
-      [ ("IREnumSum",    "enumeration sum (IREnumSum)",
-         \mv -> IREnumSum "v" mv (IRVar "v"))
-      , ("IRIsPossible", "membership check (IRIsPossible)",
+      [ ("IRIsPossible", "membership check (IRIsPossible)",
          \mv -> IRIsPossible mv (IRVar "sample")) ]
   , (mvName, mv) <-
       [ ("MultiTuple",     MultiTuple (MultiDiscretes [VInt 0, VInt 1]) (MultiDiscretes [VBool True]))
@@ -1780,8 +1780,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
         >> assertAccepted (mkNode (MultiDiscretes [VBool True, VBool False]))
         >> assertAccepted (mkNode (MultiDiscretes [VFloat 0.5]))
   | (nodeName, mkNode) <-
-      [ ("IREnumSum",    \mv -> IREnumSum "v" mv (IRVar "v"))
-      , ("IRIsPossible", \mv -> IRIsPossible mv (IRVar "sample")) ]
+      [ ("IRIsPossible", \mv -> IRIsPossible mv (IRVar "sample")) ]
   ] ++
   -- Further 'reason' rows with no corpus trigger.
   [ testCase "IRMap is refused" $

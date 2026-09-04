@@ -442,9 +442,6 @@ duplicableBinding det val = isValue val || (isBareVar val && isPureGiven (optDet
 -- 'BMap''s lambda /is/ listed, because a map applies it once per element by
 -- construction.
 loopBinder :: IRExpr -> Maybe (Varname, IRExpr)
-loopBinder (IREnumSum n _ body) = Just (n, body)
-loopBinder (IRLogEnumSum n _ body) = Just (n, body)
-loopBinder (IREnumSumPaired _ n _ body) = Just (n, body)
 loopBinder (IRBuiltin BMap [IRLambda n body, _]) = Just (n, body)
 loopBinder _ = Nothing
 
@@ -665,9 +662,6 @@ forceAnyCheck _ (IRUnaryOp _ _) = IRConst $ VBool False
 forceAnyCheck _ (IRDensity _ _ _) = IRConst $ VBool False
 forceAnyCheck _ (IRCumulative _ _ _) = IRConst $ VBool False
 forceAnyCheck _ (IRSample _) = IRConst $ VBool False
-forceAnyCheck _ (IREnumSum _ _ _) = IRConst $ VBool False
-forceAnyCheck _ (IRLogEnumSum _ _ _) = IRConst $ VBool False
-forceAnyCheck _ (IREnumSumPaired _ _ _ _) = IRConst $ VBool False
 -- A tensor is a computed aggregate and a reduction of one is a computed
 -- scalar; neither can be the ANY sentinel, for the same reason the enumerated
 -- sums above cannot. 'BIndex' is deliberately absent: it reads back an element
@@ -710,9 +704,6 @@ propagateAnyGuard (IRIf c@(IRUnaryOp OpIsAny (IRVar v)) t e) =
         go x = irDescend go x
     binderOf (IRLetIn n _ _)      = Set.singleton n
     binderOf (IRLambda n _)       = Set.singleton n
-    binderOf (IREnumSum n _ _)    = Set.singleton n
-    binderOf (IRLogEnumSum n _ _) = Set.singleton n
-    binderOf (IREnumSumPaired _ n _ _) = Set.singleton n
     binderOf _                    = Set.empty
 propagateAnyGuard x = x
 
@@ -734,7 +725,8 @@ propagateAnyGuard x = x
 --     in scope;
 --   * unconditionally evaluated — it occurs at least twice in the node's
 --     "unconditional skeleton" (positions reached on every evaluation, i.e. not
---     inside an IRIf branch, IREnumSum body, or lambda body).  Because IRLetIn is
+--     inside an IRIf branch or a lambda body -- an enumeration loop body being a
+--     'BMap''s lambda).  Because IRLetIn is
 --     strict in both the interpreter and generated code, this guarantees the
 --     hoisted binding is forced exactly when one of its original occurrences
 --     would have been, so no extra evaluation is introduced.
@@ -785,9 +777,6 @@ optimizeCommonSubexprCounted det topExpr = runState (scan (annotateIR det topExp
       IRIf{}          | [c, t, el] <- annKids a -> IRIf <$> descendToScanRoots c <*> scan t <*> scan el
       IRSelect{}      | [c, t, el] <- annKids a -> IRSelect <$> descendToScanRoots c <*> scan t <*> scan el
       IRLambda n _    | [b] <- annKids a -> IRLambda n <$> scan b
-      IREnumSum n v _ | [b] <- annKids a -> IREnumSum n v <$> scan b
-      IRLogEnumSum n v _ | [b] <- annKids a -> IRLogEnumSum n v <$> scan b
-      IREnumSumPaired lg n v _ | [b] <- annKids a -> IREnumSumPaired lg n v <$> scan b
       e -> do
         kids <- mapM descendToScanRoots (annKids a)
         return (setIRSubExprs e kids)
@@ -801,9 +790,6 @@ optimizeCommonSubexprCounted det topExpr = runState (scan (annotateIR det topExp
       IRIf{}          | [c, t, el] <- annKids a -> IRIf <$> route c <*> scan t <*> scan el
       IRSelect{}      | [c, t, el] <- annKids a -> IRSelect <$> route c <*> scan t <*> scan el
       IRLambda n _    | [b] <- annKids a -> IRLambda n <$> scan b
-      IREnumSum n v _ | [b] <- annKids a -> IREnumSum n v <$> scan b
-      IRLogEnumSum n v _ | [b] <- annKids a -> IRLogEnumSum n v <$> scan b
-      IREnumSumPaired lg n v _ | [b] <- annKids a -> IREnumSumPaired lg n v <$> scan b
       e -> do
         kids <- mapM route (annKids a)
         return (setIRSubExprs e kids)
@@ -864,9 +850,6 @@ mkAnnIR det e kids = AnnIR e kids h sz smp bnd
     bnd = case e of
       IRLetIn n _ _   -> Set.insert n kidsBound
       IRLambda n _    -> Set.insert n kidsBound
-      IREnumSum n _ _ -> Set.insert n kidsBound
-      IRLogEnumSum n _ _ -> Set.insert n kidsBound
-      IREnumSumPaired _ n _ _ -> Set.insert n kidsBound
       _               -> kidsBound
 
 -- | Replace every subtree structurally equal to `sub` by `rep`, rebuilding
@@ -909,12 +892,9 @@ headHash e = case e of
   IRVar n           -> hashMix 25 (hashStr n)
   IRLambda n _      -> hashMix 26 (hashStr n)
   IRApply{}         -> 27
-  IREnumSum n v _   -> hashMix (hashMix 28 (hashStr n)) (hashStr (show v))
   IRIsPossible v _  -> hashMix 29 (hashStr (show v))
   IRError s         -> hashMix 31 (hashStr s)
   IRConformsTo t _  -> hashMix 32 (hashStr (show t))
-  IRLogEnumSum n v _  -> hashMix (hashMix 36 (hashStr n)) (hashStr (show v))
-  IREnumSumPaired lg n v _ -> hashMix (hashMix (hashMix 37 (if lg then 1 else 0)) (hashStr n)) (hashStr (show v))
   IRBuiltin b _       -> hashMix 38 (hashStr (show b))
   IRConstruct t _     -> hashMix 39 (hashStr (show t))
   IRDestruct a _      -> hashMix 40 (hashStr (show a))
@@ -949,9 +929,9 @@ bestCommonSubexpr annIR =
     captureSafe a = not (any (`Set.member` bound) (freeVarsIR (annExpr a)))
 
 -- | Subexpressions reached on every evaluation of the node.  We descend through
--- ordinary nodes but stop at the branches of an IRIf, the body of an IREnumSum,
--- and the body of a lambda, since those are only conditionally, repeatedly, or
--- never evaluated.
+-- ordinary nodes but stop at the branches of an IRIf and the body of a lambda
+-- (an enumeration loop is a 'BMap' over one, so its body is stopped at there),
+-- since those are only conditionally, repeatedly, or never evaluated.
 --
 -- One node shape is descended into but never LISTED: the function half of an
 -- application that is itself an application, i.e. a partially applied call.
@@ -971,9 +951,6 @@ unconditionalAnns a0 = go True a0 []
       -- guarded subexpression must not be counted as hoistable above the guard.
       IRSelect{}  -> case annKids a of { (c:_) -> go True c acc; [] -> acc }
       IRLambda{}  -> acc
-      IREnumSum{} -> acc
-      IRLogEnumSum{} -> acc
-      IREnumSumPaired{} -> acc
       IRApply{}   -> case annKids a of
         [fn, arg] -> go (not (isApplication (annExpr fn))) fn (go True arg acc)
         kids      -> foldr (go True) acc kids
@@ -1014,9 +991,6 @@ setIRSubExprs (IRCumulative d ls _) [a] = IRCumulative d ls a
 setIRSubExprs (IRLetIn n _ _) [a, b] = IRLetIn n a b
 setIRSubExprs (IRLambda n _) [a] = IRLambda n a
 setIRSubExprs (IRApply{}) [a, b] = IRApply a b
-setIRSubExprs (IREnumSum n val _) [a] = IREnumSum n val a
-setIRSubExprs (IRLogEnumSum n val _) [a] = IRLogEnumSum n val a
-setIRSubExprs (IREnumSumPaired lg n val _) [a] = IREnumSumPaired lg n val a
 setIRSubExprs (IRConformsTo t _) [a] = IRConformsTo t a
 setIRSubExprs (IRBuiltin b _) kids = IRBuiltin b kids
 setIRSubExprs e [] = e  -- leaves: IRConst, IRSample, IRVar, IRError
@@ -1027,9 +1001,6 @@ freeVarsIR :: IRExpr -> [String]
 freeVarsIR (IRVar v) = [v]
 freeVarsIR (IRLetIn n decl body) = freeVarsIR decl ++ filter (/= n) (freeVarsIR body)
 freeVarsIR (IRLambda n body) = filter (/= n) (freeVarsIR body)
-freeVarsIR (IREnumSum n _ body) = filter (/= n) (freeVarsIR body)
-freeVarsIR (IRLogEnumSum n _ body) = filter (/= n) (freeVarsIR body)
-freeVarsIR (IREnumSumPaired _ n _ body) = filter (/= n) (freeVarsIR body)
 freeVarsIR e = concatMap freeVarsIR (getIRSubExprs e)
 
 -- | Every variable name occurring anywhere in the expression, as a variable
@@ -1043,9 +1014,6 @@ allNamesIR = go Set.empty
       IRVar n         -> Set.insert n acc
       IRLetIn n _ _   -> foldl' go (Set.insert n acc) (getIRSubExprs e)
       IRLambda n _    -> foldl' go (Set.insert n acc) (getIRSubExprs e)
-      IREnumSum n _ _ -> foldl' go (Set.insert n acc) (getIRSubExprs e)
-      IRLogEnumSum n _ _ -> foldl' go (Set.insert n acc) (getIRSubExprs e)
-      IREnumSumPaired _ n _ _ -> foldl' go (Set.insert n acc) (getIRSubExprs e)
       _               -> foldl' go acc (getIRSubExprs e)
 
 -- | Replace an application of a lambda to a non-value argument by a let binding:
