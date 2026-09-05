@@ -103,7 +103,7 @@ outerI :: IMod -> GroundMod
 outerI (IG g)      = g
 outerI (IArr rho _)= rho
 outerI (IProd a b) = (meetGround (outerI a) (outerI b))            { gFam = FamNone }
-outerI (ISum t a b)= (meetGround t (meetGround (outerI a) (outerI b))) { gFam = FamNone }
+outerI (ISum t a b)= (meetGround t (meetGroundMixture (outerI a) (outerI b))) { gFam = FamNone }
 outerI (IRec s e)  = (meetGround s (outerI e))                    { gFam = FamNone }
 outerI (IWit m)    = outerI m   -- witnessing never lifts the standalone law
 
@@ -155,20 +155,27 @@ applyI other          arg = applyOuterI (outerI other) arg
 
 -- | Pointwise /meet/ of two same-shape modalities — the combinator for @if@/case
 -- branches. The result of a mixture is only as capable as the /weakest/ branch
--- (you need every branch's machinery to evaluate the mixture), so this is the
--- meet, not the join. (Using the join is the prototype's known "mixture join
--- optimism" unsoundness — design §9 — which would type a continuous mixture as
--- 'Deterministic'.) The shape-mismatch fallback meets the outer grounds.
+-- (you need every branch's machinery to evaluate the mixture), so the
+-- capability set is the meet, not the join. (Using the join is the prototype's
+-- known "mixture join optimism" unsoundness — design §9 — which would type a
+-- continuous mixture as 'Deterministic'.) The shape-mismatch fallback meets the
+-- outer grounds.
+--
+-- Every ground combined here describes /alternative/ branches of one mixed
+-- value, so — unlike a genuinely orthogonal combination such as an 'IProd'
+-- pair's own two components — the 'Fin' axis wants 'meetGroundMixture', not
+-- plain 'meetGround': a mixture's support is the union of the branch supports,
+-- finite only when both branches are (task @modality-mixture-fin-joins-not-meets@).
 meetI :: IMod -> IMod -> IMod
 meetI (IWit a)     (IWit b)      = iwit (meetI a b)   -- both alternatives witnessed
 meetI (IWit a)     b             = meetI a b
 meetI a            (IWit b)      = meetI a b
-meetI (IG a)       (IG b)        = IG (meetGround a b)
+meetI (IG a)       (IG b)        = IG (meetGroundMixture a b)
 meetI (IProd a1 a2)(IProd b1 b2) = IProd (meetI a1 b1) (meetI a2 b2)
-meetI (IArr r1 p1) (IArr r2 p2)  = IArr (meetGround r1 r2) (\m -> meetI (p1 m) (p2 m))
-meetI (ISum t1 a1 b1)(ISum t2 a2 b2) = ISum (meetGround t1 t2) (meetI a1 a2) (meetI b1 b2)
-meetI (IRec s1 e1) (IRec s2 e2)  = IRec (meetGround s1 s2) (meetI e1 e2)
-meetI a b = IG (meetGround (outerI a) (outerI b))
+meetI (IArr r1 p1) (IArr r2 p2)  = IArr (meetGroundMixture r1 r2) (\m -> meetI (p1 m) (p2 m))
+meetI (ISum t1 a1 b1)(ISum t2 a2 b2) = ISum (meetGroundMixture t1 t2) (meetI a1 a2) (meetI b1 b2)
+meetI (IRec s1 e1) (IRec s2 e2)  = IRec (meetGroundMixture s1 s2) (meetI e1 e2)
+meetI a b = IG (meetGroundMixture (outerI a) (outerI b))
 
 -- | The greatest modality at a type shape — the /seed for the recursion
 -- fixpoint/. Because every operation only ever loses capability (the rules are

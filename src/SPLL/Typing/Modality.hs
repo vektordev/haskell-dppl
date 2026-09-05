@@ -35,7 +35,7 @@ module SPLL.Typing.Modality
   , groundMod
   , validGroundMod
   , topGround, bottomGround
-  , leqGround, joinGround, meetGround
+  , leqGround, joinGround, meetGround, meetGroundMixture
     -- * The universal marginalization combinator (the doc's "▷")
   , marginalize
     -- * Structured modalities
@@ -226,6 +226,27 @@ meetGround (GroundMod c1 f1 m1) (GroundMod c2 f2 m2) =
             (if f1 == Finite || f2 == Finite then Finite else Infinite)
             (meetFamily m1 m2)
 
+-- | Combine two /alternative/ (mixture/union) branch grounds: a genuinely
+-- different rule from 'meetGround' on the 'Fin' axis, needed wherever two
+-- grounds describe branches of the /same/ value rather than orthogonal facts
+-- about it. The capability set still meets (a mixture is only as capable as
+-- its weakest branch), but the support of a union is the union of the branch
+-- supports, so it is finite only when /both/ branches are — that's 'joinFin',
+-- not 'meetGround''s lattice-meet Fin rule (which answers 'Finite' as soon as
+-- either side is, because 'Finite' is the order-least fixpoint seed under
+-- 'leqGround', not because a mixture with one finite branch has finite
+-- support). Used for 'if'/case branch combination and for eliminating an
+-- 'MSum'/'ISum''s two alternative payloads into one ground fact; not for
+-- genuinely orthogonal combination (an 'MProd' pair, an 'MSum''s own tag
+-- against its combined payload, an 'MRec' spine against its element), which
+-- keep 'meetGround'. Task @modality-mixture-fin-joins-not-meets@: without
+-- this, @if c then 1.0 else Uniform@ mistypes as finite-support and a
+-- downstream continuous combination (@... + Normal@) crashes the IR compiler
+-- rather than falling back to sampling-only.
+meetGroundMixture :: GroundMod -> GroundMod -> GroundMod
+meetGroundMixture (GroundMod c1 f1 m1) (GroundMod c2 f2 m2) =
+  GroundMod (meetCap c1 c2) (joinFin f1 f2) (meetFamily m1 m2)
+
 -- | The /universal marginalization combinator/ — the design doc's @▷@.
 --
 -- It returns the modality of a generic binary combination @z = g(x,y)@ with no
@@ -338,7 +359,7 @@ outerGround :: Mod -> GroundMod
 outerGround (MGround g)  = g
 outerGround (MArr rho _) = rho
 outerGround (MProd a b)  = meetGround (outerGround a) (outerGround b)
-outerGround (MSum t a b) = meetGround t (meetGround (outerGround a) (outerGround b))
+outerGround (MSum t a b) = meetGround t (meetGroundMixture (outerGround a) (outerGround b))
 outerGround (MRec s e)   = meetGround s (outerGround e)
 
 -- | Pointwise join of two modalities of the same shape (used for @if@ branches).

@@ -125,6 +125,20 @@ modalityInferTests = testGroup "ModalityInfer"
           -- {S,I} (integral but no density) projects to Bottom, matching
           -- PInfer2's resolvePlusCons.
           assertEqual "" Bottom (mainPType "main = Uniform + Normal")
+      , testCase "an if-mixture with one continuous branch is not finite (Bottom)" $
+          -- Regression, task @modality-mixture-fin-joins-not-meets@: 'meetI'
+          -- used to combine branch grounds with plain 'meetGround', whose 'Fin'
+          -- axis computes the /lattice/ meet (bottom = 'Finite') rather than
+          -- "finite iff both branches are". A mixture of a point mass (1.0,
+          -- Finite) and a continuous 'Uniform' (Infinite) was thus wrongly
+          -- typed 'Finite', which fed 'marginalize''s 'keepD' guard on the
+          -- surrounding @+ Normal@ and manufactured a closed density that
+          -- doesn't exist -- IRCompiler had no equation for it and hit its
+          -- "found no way to convert to IR" catch-all. This mixture must type
+          -- exactly like its un-mixed sibling above: 'Bottom' (sampling-only),
+          -- not a crash.
+          assertEqual "" Bottom
+            (mainPType "main = (if Uniform < 0.5 then 1.0 else Uniform) + Normal")
       , testCase "comparison against a Bottom operand is Bottom, not Integrate" $
           -- Regression (found by TestFuzz's typed generator, 2026-07-20):
           -- 'compareGround's "both integral-ready" branch used to accept the
@@ -178,7 +192,11 @@ modalityInferTests = testGroup "ModalityInfer"
           -- The forward-only |L|x|R| grid. Both operands are TFloat but carry a
           -- 'DiscreteValues' domain, which is what the grid loops -- so this is
           -- the case 'compareGround' reads the operand tags for rather than
-          -- keying off 'gFin'.
+          -- keying off 'gFin'. Also doubles as task
+          -- @modality-mixture-fin-joins-not-meets@'s acceptance criterion 2: a
+          -- mixture of two *genuinely* finite branches on each side must stay
+          -- 'Integrate', guarding the fix above (join, not meet, on 'Fin')
+          -- against over-refusing.
           assertEqual "" Integrate $
             mainPType
               "main = (if Uniform < 0.5 then 1.0 else 2.0) > (if Uniform < 0.3 then 1.5 else 0.5)"
