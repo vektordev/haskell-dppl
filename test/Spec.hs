@@ -730,6 +730,56 @@ prop_BCConditionalLambda = once $ ioProperty $ do
       return $ counterexample ("Expected BC=2, got " ++ show bc) (bc == 2.0)
     _ -> return $ counterexample ("Unexpected result shape: " ++ show result) False
 
+-- Investigation program-equivalence-invariants, required invariant #1:
+-- `apply (var "f") (discrete_arg)` (routed through IsConditional + toIREnumerate,
+-- same shape as testConditionalLambdaBC above) vs. the fully hand-inlined
+-- if-else over the same discrete argument must agree on (prob, dim, bc) at
+-- every query point. This is the exact program pair the investigation
+-- reported diverging (named selector: BC=0, inline if-else: BC>=2); as of
+-- task bc-recursive-prob-divergence's anchor fix (43017e4) the two agree.
+prop_BCNamedConditionalEqualsInline :: Property
+prop_BCNamedConditionalEqualsInline = once $ ioProperty $ do
+  let coin = ifThenElse (bernoulli 0.5) (constF 2.0) (constF 1.0)
+      named = Program
+        [ ("main",     apply (var "selector") coin)
+        , ("selector", "x" #-># ifThenElse (var "x" #># constF 1.5) (constF 1.0) (constF 0.0))
+        ] [] [] []
+      inlined = Program
+        [ ("main", ifThenElse (coin #># constF 1.5) (constF 1.0) (constF 0.0)) ] [] [] []
+  return $ conjoin
+    [ case (irDensity bcConf named (VFloat q) [], irDensity bcConf inlined (VFloat q) []) of
+        (VProbDimBC pN dN bcN, VProbDimBC pI dI bcI) ->
+          counterexample
+            ("q=" ++ show q ++ ": named=(" ++ show pN ++ "," ++ show dN ++ "," ++ show bcN
+              ++ ") inline=(" ++ show pI ++ "," ++ show dI ++ "," ++ show bcI ++ ")")
+            (pN == pI && dN == dI && bcN == bcI)
+        (r1, r2) -> counterexample ("Unexpected result shapes: " ++ show r1 ++ ", " ++ show r2) False
+    | q <- [0.0, 1.0] ]
+
+-- Investigation program-equivalence-invariants, required invariant #3:
+-- a named non-conditional wrapper function applied to an enumerable argument
+-- must give the same (prob, dim, bc) as inlining the wrapper's body at the
+-- call site, for the callee's own contribution -- "a call forwards the
+-- callee's own count unmodified" (CLAUDE.md, Branch Counting).
+prop_BCNamedWrapperEqualsInline :: Property
+prop_BCNamedWrapperEqualsInline = once $ ioProperty $ do
+  let coin = ifThenElse (bernoulli 0.5) (constF 2.0) (constF 1.0)
+      named = Program
+        [ ("main", apply (var "wrap") coin)
+        , ("wrap", "x" #-># injF "plus" [var "x", constF 1.0])
+        ] [] [] []
+      inlined = Program
+        [ ("main", injF "plus" [coin, constF 1.0]) ] [] [] []
+  return $ conjoin
+    [ case (irDensity bcConf named (VFloat q) [], irDensity bcConf inlined (VFloat q) []) of
+        (VProbDimBC pN dN bcN, VProbDimBC pI dI bcI) ->
+          counterexample
+            ("q=" ++ show q ++ ": named=(" ++ show pN ++ "," ++ show dN ++ "," ++ show bcN
+              ++ ") inline=(" ++ show pI ++ "," ++ show dI ++ "," ++ show bcI ++ ")")
+            (pN == pI && dN == dI && bcN == bcI)
+        (r1, r2) -> counterexample ("Unexpected result shapes: " ++ show r1 ++ ", " ++ show r2) False
+    | q <- [2.0, 3.0] ]
+
 -- killAll coverage: a program that calls a sub-function via Var with a non-trivial
 -- change-of-variables correction.  testNormalScaledViaVar uses injF "mult" with factor
 -- 2.0, whose inverse derivative is 1/2.  If killAll fails to rewrite the dim extraction
