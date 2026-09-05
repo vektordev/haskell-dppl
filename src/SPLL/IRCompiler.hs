@@ -31,7 +31,7 @@ import SPLL.Analysis (materializationDomain, withinMaterializationBudget)
 import SPLL.Typing.PType
 import Data.Maybe
 import Data.Either (isRight, partitionEithers)
-import Data.List (isPrefixOf, (\\), find, elemIndex, nub, intercalate)
+import Data.List (isPrefixOf, isSuffixOf, stripPrefix, (\\), find, elemIndex, nub, intercalate)
 import Data.Functor ((<&>))
 import Control.Monad.Writer.Lazy
 import SPLL.AutoNeural
@@ -123,7 +123,7 @@ envToIR conf fcDat p
 -- 'normalFun'/'writeLogitsFun' are assembled, so the check sees every site
 -- regardless of which combinator produced it and needs no per-site edits.
 envToIRUnoptimized :: CompilerConfig -> FCData -> Program -> IREnv
-envToIRUnoptimized conf fcDat p = requireNoGenerateBacked (envToIRUnoptimized' conf fcDat p)
+envToIRUnoptimized conf fcDat p = requireNoGenerateBacked conf (envToIRUnoptimized' conf fcDat p)
 
 -- | Refuse at compile time rather than hand back an 'IREnv' containing a
 -- generate-backed probability/integrate/normal/writeLogits body -- see
@@ -132,17 +132,68 @@ envToIRUnoptimized conf fcDat p = requireNoGenerateBacked (envToIRUnoptimized' c
 -- path (a compiled body that resamples instead of computing an exact
 -- probability, so it returns a different number on every call with the same
 -- query) from a silent wrong answer into a named refusal.
-requireNoGenerateBacked :: IREnv -> IREnv
-requireNoGenerateBacked env = case generateBackedSites env of
+--
+-- Task @nogenerate-dangling-cross-function-generate-call@: under
+-- @--noGenerate@, every 'IRFunGroup''s 'genFun' is 'Nothing' regardless of
+-- whether that function's own generate body would have been pure, so a
+-- reference to another (or the same) function's now-absent @<name>_gen@ is
+-- conservatively flagged the same as genuine randomness by
+-- 'generateBackedSites' -- correctly refused, but with a message
+-- ("draws randomness") that is misleading when the callee is actually
+-- deterministic and the only real defect is that the user asked for it not
+-- to be emitted. When every randomness source the refusal names is exactly
+-- such a suppressed-by-the-flag reference, name the flag as the cause
+-- instead of the generic message: the reviewed resolution is that
+-- @--noGenerate@ promising "no generate code at all" and a query that
+-- structurally depends on another function's generator are incompatible,
+-- and NeST says so rather than emitting a call to a method it agreed not to
+-- write.
+requireNoGenerateBacked :: CompilerConfig -> IREnv -> IREnv
+requireNoGenerateBacked conf env@(IREnv groups _ _) = case generateBackedSites env of
   [] -> env
-  bad -> error $ unlines $
-    [ "envToIRUnoptimized: a compiled probability/integrate/normal/writeLogits body draws"
-    , "randomness instead of computing an exact probability, so it would return a"
-    , "different number on every call with the same query value. NeST does exact"
-    , "inference, so this is refused at compile time rather than emitted. Offending"
-    , "function(s), each with the randomness source(s) it reaches:" ]
-    ++ [ "  " ++ nm ++ ": " ++ intercalate ", " ws | (nm, ws) <- bad ]
-    ++ [ "(task central-generate-backed-prob-body-guard)" ]
+  bad
+    | noGenerate conf, not (null suppressedFns) -> error $ unlines $
+      [ "envToIRUnoptimized: --noGenerate suppressed the generate function(s) of "
+        ++ intercalate ", " (Set.toList suppressedFns) ++ ", but the following compiled"
+      , "probability/integrate/normal/writeLogits body/bodies still need to call into"
+      , "them (each with the call site name(s) it reaches):" ]
+      ++ [ "  " ++ nm ++ ": " ++ intercalate ", " ws | (nm, ws) <- bad ]
+      ++ [ "NeST will not silently emit a call to a generate function you asked it not"
+         , "to compile, nor drop the call and emit code that fails at run time instead."
+         , "--noGenerate and this query are incompatible: drop --noGenerate, or restructure"
+         , "the program so this query does not depend on another function's generator."
+         , "(task nogenerate-dangling-cross-function-generate-call)" ]
+    | otherwise -> error $ unlines $
+      [ "envToIRUnoptimized: a compiled probability/integrate/normal/writeLogits body draws"
+      , "randomness instead of computing an exact probability, so it would return a"
+      , "different number on every call with the same query value. NeST does exact"
+      , "inference, so this is refused at compile time rather than emitted. Offending"
+      , "function(s), each with the randomness source(s) it reaches:" ]
+      ++ [ "  " ++ nm ++ ": " ++ intercalate ", " ws | (nm, ws) <- bad ]
+      ++ [ "(task central-generate-backed-prob-body-guard)" ]
+    where
+      groupsByName = Map.fromList [(groupName g, g) | g <- groups]
+      -- A randomness-source string is exactly "from <dist>" (a real
+      -- 'IRSample') or "by calling <name>" ('randomDrawSites'). Only the
+      -- latter can ever be a suppressed generator; a bare 'IRSample' is
+      -- randomness --noGenerate had nothing to do with.
+      dropGenSuffix n
+        | "_gen" `isSuffixOf` n = Just (take (length n - length "_gen") n)
+        | otherwise = Nothing
+      suppressedCallee w = do
+        n <- stripPrefix "by calling " w
+        base <- dropGenSuffix n
+        g <- Map.lookup base groupsByName
+        if isNothing (genFun g) then Just base else Nothing
+      -- Attribute the whole refusal to --noGenerate only when *every*
+      -- randomness source of *every* offending function is such a
+      -- suppressed reference -- a genuine 'IRSample' anywhere falls back to
+      -- the generic message rather than mislabeling real randomness as a
+      -- flag artifact.
+      suppressedFns
+        | all (all (isJust . suppressedCallee) . snd) bad =
+            Set.fromList [ base | (_, ws) <- bad, w <- ws, Just base <- [suppressedCallee w] ]
+        | otherwise = Set.empty
 
 -- | Every "<group>.<prob|integ|normal|writeLogits>" site in the whole 'IREnv' whose
 -- compiled body is generate-backed -- i.e. not provably free of randomness --

@@ -20,7 +20,7 @@ import SPLL.Typing.RType (RType(..))
 import SPLL.Examples
 import SPLL.Validator (validateProgram)
 import SPLL.Prelude (compile, runProb, runInteg, uniform, constB, constF, (#+#), (#<#))
-import SPLL.IntermediateRepresentation (defaultCompilerConfig, checkQueryType, noIntegrate, firstAnyExceptIR, anyExceptCodegenRefusal, IRValue)
+import SPLL.IntermediateRepresentation (CompilerConfig, defaultCompilerConfig, checkQueryType, noIntegrate, noGenerate, firstAnyExceptIR, anyExceptCodegenRefusal, IRValue)
 import SPLL.Typing.Infer (addTypeInfo)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, adtCdfMessage)
@@ -48,6 +48,7 @@ rejectionTests = testGroup "Rejection"
   , generateBackedProjectionTests
   , vAnyExceptCodegenTests
   , intractableComparisonTests
+  , noGenerateSuppressedGeneratorTests
   ]
 
 -- ----------------------------------------------------------------------------
@@ -718,4 +719,80 @@ intractableComparisonTests = testGroup "IntractableComparison"
           Left ex        -> assertFailure ("the closed-form comparison crashed: " ++ show ex)
           Right (Left e) -> assertFailure ("the closed-form comparison was refused: " ++ e)
           Right (Right _) -> return ()
+  ]
+
+-- ----------------------------------------------------------------------------
+-- Task nogenerate-dangling-cross-function-generate-call: under --noGenerate,
+-- every 'IRFunGroup''s genFun is Nothing regardless of whether that
+-- function's own generate body would have been pure, so a probability body
+-- calling another function's now-absent generator is caught by the same
+-- central guard as genuine randomness ('generateBackedTests' /
+-- 'generateBackedReadNNSymbolTests' above) -- correctly refused already, but
+-- with the generic "draws randomness" message, which is misleading here: 'f'
+-- is fully deterministic, and the only real defect is that --noGenerate
+-- deleted a method 'main' still calls. 'requireNoGenerateBacked' now names
+-- --noGenerate as the cause whenever every randomness source of every
+-- offending function is exactly such a suppressed reference.
+-- ----------------------------------------------------------------------------
+
+-- 'f's only randomness is a query-independent addition; its generate body
+-- would be pure if compiled, but --noGenerate deletes it anyway. Matches
+-- testCases/hoTopLevel.ppl.
+hoTopLevelSrc :: String
+hoTopLevelSrc = unlines
+  [ "f g = g 1.0"
+  , "main = f (\\x -> Uniform + x)"
+  ]
+
+-- Not affected: no cross-function generator dependency at all, so the guard
+-- (under either message) must not fire.
+noCrossFunctionGenSrc :: String
+noCrossFunctionGenSrc = "main = Uniform + 1.0"
+
+noGenerateConf :: CompilerConfig
+noGenerateConf = defaultCompilerConfig { noGenerate = True }
+
+noGenerateSuppressedGeneratorTests :: TestTree
+noGenerateSuppressedGeneratorTests = testGroup "NoGenerateSuppressedGenerator"
+  [ testCase "a cross-function generate call suppressed by --noGenerate is still refused" $
+      withParsed hoTopLevelSrc $ \prog -> do
+        res <- forced (compile noGenerateConf prog)
+        case res of
+          Left _  -> return ()
+          Right _ -> assertFailure
+            "main.prob calling f's now-absent generator was accepted under --noGenerate"
+  , testCase "the refusal blames --noGenerate by name, not the generic randomness message" $
+      withParsed hoTopLevelSrc $ \prog -> do
+        res <- forced (compile noGenerateConf prog)
+        case res of
+          Left e -> do
+            assertBool ("expected the --noGenerate-specific refusal, got: " ++ show e)
+                       ("nogenerate-dangling-cross-function-generate-call" `isInfixOf` show e)
+            assertBool ("the misleading generic message leaked through: " ++ show e)
+                       (not ("central-generate-backed-prob-body-guard" `isInfixOf` show e))
+          Right _ -> assertFailure "expected a compile-time refusal"
+  , testCase "the refusal names the suppressed function and the call sites reaching it" $
+      withParsed hoTopLevelSrc $ \prog -> do
+        res <- forced (compile noGenerateConf prog)
+        assertBool "the refusal does not name f, main.prob and main.integ"
+                   (either (\e -> "of f" `isInfixOf` show e
+                               && "main.prob" `isInfixOf` show e
+                               && "main.integ" `isInfixOf` show e)
+                           (const False) res)
+  , testCase "a program with no cross-function generate dependency still compiles under --noGenerate" $
+      withParsed noCrossFunctionGenSrc $ \prog ->
+        case compile noGenerateConf prog of
+          Left err -> assertFailure ("unaffected program was refused under --noGenerate: " ++ show err)
+          Right _  -> return ()
+  , testCase "genuine randomness under --noGenerate keeps the generic message, not the flag-specific one" $
+      withParsed readNNRandomSymbolSrc $ \prog -> do
+        res <- forced (compile noGenerateConf prog)
+        case res of
+          Left e -> do
+            assertBool ("expected the generic generate-backed refusal, got: " ++ show e)
+                       ("central-generate-backed-prob-body-guard" `isInfixOf` show e)
+            assertBool ("the --noGenerate-specific message fired for genuine randomness: " ++ show e)
+                       (not ("nogenerate-dangling-cross-function-generate-call" `isInfixOf` show e))
+          Right _ -> assertFailure
+            "a probability/integrate function that samples which network input to read was accepted"
   ]
