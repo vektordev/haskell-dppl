@@ -1,0 +1,4 @@
+-- Nested-let twin of `if (Uniform * (0.0 - 1.0)) > (0.0 - 0.3)`: the inner
+-- binding is a DECREASING function of x, so the interval on y transports
+-- onto x with its endpoints swapped. P(U < 0.3) = 0.3.
+main = let x = Uniform in let y = 0.0 - x in if y > (0.0 - 0.3) then 1.0 else 0.0

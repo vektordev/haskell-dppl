@@ -1,0 +1,4 @@
+-- Nested-let twin of the two-sided single-let probe: two comparisons on the
+-- inner binding intersect on y before the interval is transported onto x.
+-- Phi(1) - Phi(-1) for the middle arm, Phi(-1) for each tail.
+main = let x = Normal in let y = x + 1.0 in if y > 0.0 then (if y < 2.0 then 1.0 else 2.0) else 3.0

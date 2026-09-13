@@ -1,0 +1,4 @@
+-- The degenerate nested let: a bare rename (`let y = x`). The inner
+-- right-hand side is the occurrence itself, so forward chaining must seed a
+-- monotone inversion at a root that is its own occurrence. 1 - Phi(-1).
+main = let x = Normal in let y = x in if y > (0.0 - 1.0) then 1.0 else 0.0

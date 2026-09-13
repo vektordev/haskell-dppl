@@ -285,6 +285,12 @@ logSpaceUncoveredPrograms =
   , "setWitnessTupleDisjointFields", "letBoundEitherDestructure"
   , "eitherIfDeconstructObserve", "observeKeywordTruncated", "showcase_observe_inequality"
   , "observeTwoSidedInterval", "observeTwoSidedIntervalAnd", "observeDisjointTails"
+  -- task set-witness-nested-let-classifier: the nested-let family inverts
+  -- through an inner binding but is measured by the same linear-pinned
+  -- measureWorld/measureSet, so it is uncovered for the same reason.
+  , "setWitnessNestedLetShift", "setWitnessNestedLetDecreasing", "setWitnessNestedLetRename"
+  , "setWitnessNestedLetTwoSided", "setWitnessNestedLetChain", "setWitnessNestedLetObserve"
+  , "setWitnessNestedLetPointArm"
   ]
 
 checkLogSpaceMatchesLinear :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property

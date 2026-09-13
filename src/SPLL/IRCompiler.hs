@@ -3321,6 +3321,84 @@ invertToWorlds meta occs exprBody target = do
             _ -> return Nothing
         -- a multivariate CDF over correlated components is not defined here
         _ -> return Nothing
+      -- Nested let (`let y = e in b`, which the parser desugars to this Apply
+      -- of a literal lambda): invert in two stages (task
+      -- set-witness-nested-let-classifier). Every structural case above only
+      -- fires when it sits DIRECTLY under the bound let, so an intermediate
+      -- named binding between the random source and the comparison that
+      -- constrains it -- `let x = Normal in let y = x + 1.0 in if y > 0.0 ...`,
+      -- even the trivial rename `let y = x in ...` -- used to fall to the
+      -- catch-all. The occurrence of x sits in `e`, so `e` is never x-free and
+      -- the deterministic-given-scope admission cannot apply; the fix is to
+      -- invert THROUGH the binding rather than to look past it.
+      Expr _ (Apply (Expr lamTI (Lambda _ b)) e)
+        -- x in `e` only. With x in `b` as well, x-sets from `e` and y-sets
+        -- from `b` would have to be mixed in one intersection, and with x in
+        -- `b` alone the worlds on `b` would reference the inner binding's
+        -- value, which is not in scope where the worlds are measured; both
+        -- keep today's refusal.
+        | subtreeHasOcc occs e && not (subtreeHasOcc occs b) -> do
+            -- Stage 1: invert the body onto y, using y's own occurrence list
+            -- exactly as 'setWitnessApply' does for the outer variable. The
+            -- lambda is literal, so its own chain name is the key (no
+            -- 'equivalentLambda' resolution of a Var to a top-level function
+            -- is involved). Every structural case -- if-splits, comparisons,
+            -- connectives, tuples, multiple occurrences of y -- works here
+            -- unchanged; a dead y makes `b` y-free and reduces to the
+            -- membership test of a deterministic body.
+            let occsY = fromMaybe [] (lookup (chainName lamTI) (lambdaVarOccurrences (fcData meta)))
+            wsY <- invertToWorlds meta occsY b target
+            case wsY of
+              Nothing -> return Nothing
+              Just ys -> do
+                -- Stage 2: each y-set is the target for inverting `e` onto x.
+                -- 'invertToWorlds' takes an arbitrary target set, so an
+                -- interval on y becomes an interval on x through
+                -- 'transportDirect''s existing monotone transport (decreasing
+                -- case included) and a point on y through its point transport,
+                -- whose change-of-variables factor composes with the one the
+                -- y-world already carries (chain rule). Stage-1 guards only
+                -- arise from y-free deterministic subtrees or the target, so
+                -- they never mention y's value and need no rebinding.
+                -- A 'WFull'/'WEmpty' y-set says nothing about y's value, hence
+                -- nothing about x's, and `e` is not consulted at all
+                -- ('transportDirect' has no case for those targets). A
+                -- fresh-randomness `e` is refused where a single let refuses
+                -- it: 'transportDirect' finds no seeded inverse through the
+                -- extra draw.
+                let through gY setY = case setY of
+                      WFull  -> return (Just [WWorld gY WFull])
+                      WEmpty -> return (Just [WWorld gY WEmpty])
+                      -- A runtime choice of y-set -- what every point
+                      -- constraint meeting an interval constraint produces
+                      -- ('pointInInterval'), i.e. the `if y > 0.0 then right
+                      -- y else left ()` shape -- transports side by side.
+                      -- Since a LIST of worlds is returned here, the choice
+                      -- becomes two mutually exclusive guard groups rather
+                      -- than a 'WChoice' on x: a side may transport to
+                      -- several worlds, and there is no single 'WSet' to put
+                      -- those into. 'guardP' nests a world's guards in list
+                      -- order, so this measures the same as 'measureSet''s
+                      -- 'IRIf c' over the two sides -- provided the choice
+                      -- condition sits AFTER the y-guards (it reads the
+                      -- witness value, e.g. @isAny (fromRight s)@, which is
+                      -- only safe to evaluate once the applicability guard
+                      -- @isRight s@ among them has held) and BEFORE the
+                      -- x-guards (whose transport of that same value is only
+                      -- meaningful on the chosen side).
+                      WChoice c sa sb -> do
+                        wa <- through (gY ++ [c]) sa
+                        wb <- through (gY ++ [notIR c]) sb
+                        return ((++) <$> wa <*> wb)
+                      _ -> do
+                        wsX <- invertToWorlds meta occs e setY
+                        return (map (\(WWorld gX setX) -> WWorld (gY ++ gX) setX) <$> wsX)
+                xs <- forM ys $ \(WWorld gY setY) -> through gY setY
+                -- The y-worlds partition the observation and each one's
+                -- x-worlds partition that y-set's preimage, so the result is
+                -- their union with guards concatenated -- the same rule the
+                -- 'TCons' and if-condition cases use.
+                return (concat <$> sequence xs)
       _ -> return Nothing
 
 -- | Point/interval transport of a whole subtree onto its single occurrence of

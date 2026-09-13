@@ -1,0 +1,9 @@
+-- The observe shape through a nested let: the then-arm is a POINT constraint
+-- on y meeting the condition's INTERVAL constraint, which `intersectSet`
+-- spells as a runtime `WChoice` (wildcard payload => interval, concrete
+-- payload => point). Stage 2 transports both sides of the choice onto x as
+-- two mutually exclusive guard groups. The choice condition reads
+-- `fromRight s`, so its guard has to sit behind the `isRight s`
+-- applicability guard: the `Left` rows crash if it does not.
+-- y = 2x, y > 0.5 iff x > 0.25; p(Right y) = p_x(y/2) * 1/2.
+main = let x = Uniform in let y = 2.0 * x in if y > 0.5 then right y else left ()

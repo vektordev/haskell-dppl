@@ -49,6 +49,7 @@ rejectionTests = testGroup "Rejection"
   , vAnyExceptCodegenTests
   , intractableComparisonTests
   , noGenerateSuppressedGeneratorTests
+  , setWitnessNestedLetTests
   ]
 
 -- ----------------------------------------------------------------------------
@@ -796,3 +797,64 @@ noGenerateSuppressedGeneratorTests = testGroup "NoGenerateSuppressedGenerator"
           Right _ -> assertFailure
             "a probability/integrate function that samples which network input to read was accepted"
   ]
+
+-- ----------------------------------------------------------------------------
+-- Task set-witness-nested-let-classifier: 'invertToWorlds' inverts THROUGH a
+-- nested let (`Apply (Lambda y b) e`) in two stages -- body onto y, then the
+-- right-hand side onto x with each y-set as target. The corpus
+-- (testCases/setWitnessNestedLet*) pins the shapes that now compile; this
+-- group pins the two shapes the case deliberately still refuses, and that they
+-- refuse with the engine's existing diagnostic rather than a new crash.
+-- ----------------------------------------------------------------------------
+
+-- x occurs in BOTH the inner right-hand side and the inner body: x-sets from
+-- `e` and y-sets from `b` would have to be mixed in one intersection.
+nestedLetSharedOccurrenceSrc :: String
+nestedLetSharedOccurrenceSrc =
+  "main = let x = Normal in let y = x + 1.0 in if y > x then 1.0 else 0.0"
+
+-- The inner right-hand side draws fresh randomness between the outer binding
+-- and the comparison: 'transportDirect' finds no seeded inverse through the
+-- second draw, exactly as it does not for the flattened `(x + Normal) > 0.0`.
+nestedLetFreshRandomnessSrc :: String
+nestedLetFreshRandomnessSrc =
+  "main = let x = Normal in let y = x + Normal in if y > 0.0 then 1.0 else 0.0"
+
+-- Positive control from the task's probes: the same comparison one let-level
+-- down compiles and agrees with its flattened twin (Phi(1)).
+nestedLetShiftSrc :: String
+nestedLetShiftSrc =
+  "main = let x = Normal in let y = x + 1.0 in if y > 0.0 then 1.0 else 0.0"
+
+setWitnessDiagnostic :: String
+setWitnessDiagnostic = "set-valued witness construction failed for the binding of 'x'"
+
+setWitnessNestedLetTests :: TestTree
+setWitnessNestedLetTests = testGroup "SetWitnessNestedLet"
+  [ testCase "x occurring in both the inner binding and its body is still refused" $
+      withParsed nestedLetSharedOccurrenceSrc $ \prog -> do
+        res <- forcedProb prog (VFloat 1.0)
+        assertSetWitnessRefusal "a shared occurrence across the inner let" res
+  , testCase "an inner binding drawing fresh randomness is still refused" $
+      withParsed nestedLetFreshRandomnessSrc $ \prog -> do
+        res <- forcedProb prog (VFloat 1.0)
+        assertSetWitnessRefusal "fresh randomness in the inner binding" res
+  , testCase "the plain shifted nested let compiles and matches Phi(1)" $
+      withParsed nestedLetShiftSrc $ \prog -> do
+        res <- forcedProb prog (VFloat 1.0)
+        case res of
+          Left ex -> assertFailure ("the nested let crashed: " ++ show ex)
+          Right (Left e) -> assertFailure ("the nested let was refused: " ++ e)
+          Right (Right (VTuple (VFloat p) _)) ->
+            assertBool ("expected Phi(1) = 0.8413, got " ++ show p) (abs (p - 0.8413447460685429) < 1e-4)
+          Right (Right v) -> assertFailure ("unexpected result shape: " ++ show v)
+  ]
+  where
+    assertSetWitnessRefusal what res = case res of
+      Left ex -> assertBool
+        ("expected the set-witness diagnostic for " ++ what ++ ", got: " ++ show ex)
+        (setWitnessDiagnostic `isInfixOf` show ex
+          && "neither point-invertible" `isInfixOf` show ex)
+      Right (Left e) -> assertFailure
+        (what ++ " was declined by a different stage instead of the set-witness engine: " ++ e)
+      Right (Right _) -> assertFailure (what ++ " was accepted")

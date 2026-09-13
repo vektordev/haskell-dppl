@@ -1,0 +1,5 @@
+-- A Float-valued nested-let body whose then-arm returns the inner binding
+-- itself: exercises the point transport with a change-of-variables factor
+-- composed across both stages (y = 2x, so |dx/dy| = 1/2), alongside the
+-- mass-valued else-arm. p(v) for v > 0 is phi(v/2)/2; p(-1.0) = P(y <= 0) = 1/2.
+main = let x = Normal in let y = 2.0 * x in if y > 0.0 then y else 0.0 - 1.0

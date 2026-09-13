@@ -1,0 +1,4 @@
+-- Two intermediate bindings: stage 1 of the nested-let inversion recurses
+-- into the same case for `z`, so chains come for free. z > 0 iff x > -1:
+-- Phi(1).
+main = let x = Normal in let y = x + 1.0 in let z = y * 2.0 in if z > 0.0 then 1.0 else 0.0
