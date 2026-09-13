@@ -100,6 +100,74 @@ data CompilerMetadata = CompilerMetadata {
 semiringOf :: CompilerMetadata -> Semiring
 semiringOf meta = mkSemiring (semiringFamily meta) (logSpace (compilerConfig meta))
 
+-- | Compile a sub-expression with topK pruning switched off.
+--
+-- A topK-pruned probability is a LOWER bound on the exact one: a dropped arm
+-- contributes zero, never less than zero. Lower bounds compose under the
+-- operations the rest of this module applies to them -- products, sums, and
+-- the lowest-dimension-wins mixture -- but not under a complement or a
+-- subtraction: @1 - lower@ and @a - lower@ are UPPER bounds. So the operand of
+-- every 'srComplement' / 'srMinus' ('mixSubP') / CDF-difference site must be
+-- compiled through this wrapper, or pruning below it silently inflates the
+-- result above the exact value (task topk-inflates-probability-int-comparison-mix:
+-- @if (if Uniform < 0.95 then False else True) then 1.0 else 2.0@ answered
+-- @p(2.0) = 1.0@ at threshold 0.1, because the condition's own True-probability
+-- pruned to 0 and its else-weight was then the complement 1 - 0).
+--
+-- Pruning is switched off by seeding the accumulated path probability with the
+-- semiring's infinity rather than by a flag: every guard in this module (the
+-- 'IfThenElse' arms, the enumerable-'InjF' term filter, the materialised
+-- table's per-cell test) compares @accProb ⊗ p@ against @TOP_K_CUTOFF@, and
+-- @∞ ⊗ p = ∞@ fails every "below cutoff" test in both the linear (@∞ · p@) and
+-- the log (@∞ + log p@) semiring. Being a value rather than a flag is what lets
+-- it cross a function-call boundary unchanged: a callee's @_prob@ takes its
+-- @acc_prob@ as an argument and needs no second, unpruned variant. The one
+-- corner is @p = 0@, where @∞ ⊗ 0@ is NaN: every comparison against NaN is
+-- False, so such an arm is not pruned -- the same outcome the dead-arm
+-- short-circuit ('deadArm') already gives a zero-probability arm.
+--
+-- The cost is that nothing under a complement is pruned. That is the intended
+-- trade: inferring the operand twice (once at each polarity, both pruned) was
+-- the shape the 'IfThenElse' case explicitly retreated from because it is
+-- O(2^d) in nested Bool conditions (fuzz-qc-compiler-bugs item 3), and it
+-- would not have helped the subtraction sites anyway.
+unpruned :: CompilerMetadata -> CompilerMetadata
+unpruned meta = meta { accProb = IRConst (VFloat (1 / 0)) }
+
+-- | A call into another definition's compiled inference function. Under
+-- 'topKThreshold' a @_prob@ function takes the caller's accumulated path
+-- probability as a second parameter (see 'baseFunGroup''s @probFun@); an
+-- @_integ@ function does not -- its root seeds its own 'accProb' with the
+-- semiring's one -- so a cumulative-mode call passes only the sample. (Passing
+-- @acc_prob@ there applied the callee's result tuple to a second argument:
+-- "Expression is not a closure" on every topK CDF query through a call.) A
+-- callee integral pruned from its own root rather than the caller's is pruned
+-- less, never more, so the lower-bound reading of topK is unaffected.
+inferenceCall :: CompilerMetadata -> Bool -> IRExpr -> IRExpr -> IRExpr
+inferenceCall meta cumulative callee sample =
+  case topKThreshold (compilerConfig meta) of
+    Just _ | not cumulative -> IRApply (IRApply callee sample) (accProb meta)
+    _                       -> IRApply callee sample
+
+-- | Whether an inverse's derivative is a literal positive constant, so that in
+-- cumulative mode 'scaleCoV' will pass the operand's CDF through unflipped.
+-- Only then may the operand stay pruned: a decreasing (or not statically
+-- signed) transform flips the CDF through 'srComplement', which needs an
+-- 'unpruned' operand. 'plus'/'plusI' declare literal @1@; 'neg' declares @-1@
+-- and 'mult' a @1 / a@ that is only known at run time, so both compile their
+-- cumulative operand unpruned.
+staticallyIncreasing :: IRExpr -> Bool
+staticallyIncreasing (IRConst (VFloat d)) = d > 0
+staticallyIncreasing _                    = False
+
+-- | The metadata to compile an inverted operand under: pruned in probability
+-- mode (the Jacobian is a positive factor), and in cumulative mode only when
+-- the CDF is statically known not to be flipped -- see 'staticallyIncreasing'.
+covOperandMeta :: Bool -> IRExpr -> CompilerMetadata -> CompilerMetadata
+covOperandMeta cumulative deriv meta
+  | cumulative && not (staticallyIncreasing deriv) = unpruned meta
+  | otherwise                                      = meta
+
 envToIR :: CompilerConfig -> FCData -> Program -> IREnv
 envToIR conf fcDat p
   | any (null . chainName . getTypeInfo . snd) (functions p) =
@@ -1570,17 +1638,21 @@ toIRInference meta cumulative e sample
   -- 'guardedSubInference'/'shareResult's own let-hoisting, which floats a
   -- sub-result's binding to a scope a post-hoc rewrap would sit below.
   setVariables binds
+  -- Both operands of the subtraction are compiled 'unpruned': a pruned
+  -- excepted mass would inflate the difference, and a pruned marginal could
+  -- drive it negative.
+  let metaSub = unpruned meta
   case shape of
     Left ex -> do
-      anyRes    <- toIRInferenceSave meta cumulative e (IRConst VAny)
-      exceptRes <- toIRInferenceSave meta cumulative e ex
+      anyRes    <- toIRInferenceSave metaSub cumulative e (IRConst VAny)
+      exceptRes <- toIRInferenceSave metaSub cumulative e ex
       mixSubP sr (rBranches exceptRes) anyRes exceptRes
     Right (cond, isPosAny, nonAnyExpr, exceptExpr) -> do
       let subGuard = if isPosAny then cond else notIR cond
       let nonGuard = notIR subGuard
       nonAnyRes <- guardedSubInference meta [nonGuard] (toIRInference meta cumulative e nonAnyExpr)
-      anyRes    <- toIRInferenceSave meta cumulative e (IRConst VAny)
-      exceptRes <- guardedSubInference meta [subGuard] (toIRInference meta cumulative e exceptExpr)
+      anyRes    <- toIRInferenceSave metaSub cumulative e (IRConst VAny)
+      exceptRes <- guardedSubInference metaSub [subGuard] (toIRInference metaSub cumulative e exceptExpr)
       subRes <- mixSubP sr (rBranches exceptRes) anyRes exceptRes
       let ifSample a na = if isPosAny then IRIf cond a na else IRIf cond na a
       return (zipResult ifSample subRes nonAnyRes)
@@ -1659,7 +1731,10 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
   -- is @log(1 - exp x)@ and a linear @1 - x@ is simply a different number
   -- (this is what 'LogSpaceMatchesLinear' catches).
   let sr = semiringOf meta
-  condTrue <- toIRInference meta False cond (IRConst (VBool True))
+  -- The condition is compiled 'unpruned': its False-weight is the complement
+  -- of its True-probability, and the complement of a pruned (lower-bound)
+  -- value is an upper bound -- see 'unpruned'. The arms below keep pruning.
+  condTrue <- toIRInference (unpruned meta) False cond (IRConst (VBool True))
   let condTrueExpr  = unP (rProb condTrue)
   let condFalseExpr = srComplement sr condTrueExpr
   let condFalse = mkPResult (sealP condFalseExpr) (rDim condTrue) const0
@@ -1774,7 +1849,7 @@ toIRInference meta False (Expr _ (InjF (Named "gt") [left, right])) sample
     var <- mkVariable "fixed_bound"
     l <- toIRGenerate meta left
     setVariables [(var, l)]
-    integ <- toIRInference meta True right (IRVar var)
+    integ <- toIRInference (unpruned meta) True right (IRVar var)  -- complemented below, see 'unpruned'
     var2 <- mkVariable "rhs_integral"
     let returnExpr = IRIf sample (IRVar var2) (srComplement (semiringOf meta) (IRVar var2))
     setVariables [(var2, unP (rProb integ))]
@@ -1784,7 +1859,7 @@ toIRInference meta False (Expr _ (InjF (Named "gt") [left, right])) sample
     var <- mkVariable "fixed_bound"
     r <- toIRGenerate meta right
     setVariables [(var, r)]
-    integ <- toIRInference meta True left (IRVar var)
+    integ <- toIRInference (unpruned meta) True left (IRVar var)  -- complemented below, see 'unpruned'
     var2 <- mkVariable "lhs_integral"
     let returnExpr = IRIf sample (srComplement (semiringOf meta) (IRVar var2)) (IRVar var2)
     setVariables [(var2, unP (rProb integ))]
@@ -1795,7 +1870,7 @@ toIRInference meta False (Expr _ (InjF (Named "lt") [left, right])) sample
     var <- mkVariable "fixed_bound"
     l <- toIRGenerate meta left
     setVariables [(var, l)]
-    integ <- toIRInference meta True right (IRVar var)
+    integ <- toIRInference (unpruned meta) True right (IRVar var)  -- complemented below, see 'unpruned'
     var2 <- mkVariable "rhs_integral"
     let returnExpr = IRIf sample (srComplement (semiringOf meta) (IRVar var2)) (IRVar var2)
     setVariables [(var2, unP (rProb integ))]
@@ -1805,7 +1880,7 @@ toIRInference meta False (Expr _ (InjF (Named "lt") [left, right])) sample
     var <- mkVariable "fixed_bound"
     r <- toIRGenerate meta right
     setVariables [(var, r)]
-    integ <- toIRInference meta True left (IRVar var)
+    integ <- toIRInference (unpruned meta) True left (IRVar var)  -- complemented below, see 'unpruned'
     var2 <- mkVariable "lhs_integral"
     setVariables [(var2, unP (rProb integ))]
     let returnExpr = IRIf sample (IRVar var2) (srComplement (semiringOf meta) (IRVar var2))
@@ -1889,9 +1964,7 @@ toIRInference meta cumulative expr@(Expr TypeInfo{rType=rt} (Apply _ _)) sample
       argIRs <- mapM (toIRGenerate meta) args
       let name = if hasInference then calleeInferenceName meta cumulative n else n
       let base = if hasInference
-            then case topKThreshold (compilerConfig meta) of
-              Just _ -> IRApply (IRApply (IRVar name) sample) (accProb meta)
-              Nothing -> IRApply (IRVar name) sample
+            then inferenceCall meta cumulative (IRVar name) sample
             else IRApply (IRVar name) sample
       let wholeCall = foldl IRApply base argIRs
       case rt of
@@ -1981,8 +2054,9 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
       -- evaluation of the untaken branch, same as the existing appTestExpr/zeroCheck
       -- idiom elsewhere in this module.
       let guard = IRApply (IRLambda (boundVar ++ tag) invExprGuard) sample
-      -- Do probabilistic inference using the applied inverse
-      res <- toIRInference meta cumulative v appliedSample
+      -- Do probabilistic inference using the applied inverse; unpruned when the
+      -- cumulative CoV below may flip it through a complement ('covOperandMeta').
+      res <- toIRInference (covOperandMeta cumulative appliedCoV meta) cumulative v appliedSample
       let sr = semiringOf meta
       -- Change of variables for the inverse the observation was pushed through.
       let scaled = scaleCoV sr cumulative appliedCoV res
@@ -2160,7 +2234,9 @@ toIRInference meta cumulative (Expr ti (InjF (Named name) params)) sample | isHi
   -- shared let-in block from inside 'a's own compilation -- e.g. a
   -- self-recursive probability call -- cannot escape into the ambient
   -- scope ahead of the applicability test 'guardP' applies below.
-  paramRes <- guardedSubInference meta [appTest] (probF meta cumulative a finalInvExpr)
+  -- Unpruned when the cumulative CoV below may flip it through a complement.
+  let metaOp = covOperandMeta cumulative invDerivExpr meta
+  paramRes <- guardedSubInference metaOp [appTest] (probF metaOp cumulative a finalInvExpr)
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula
   return (mapResult renVar (guardP (semiringOf meta) [appTest] (scaleCoV (semiringOf meta) cumulative invDerivExpr paramRes)))
 toIRInference meta False e@(Expr TypeInfo {tags=_, rType=rt} (InjF (Named _) params)) sample
@@ -2221,9 +2297,14 @@ toIRInference meta cumulative (Expr TypeInfo {tags=_} (InjF (Named name) params)
   -- when that arm is not selected.
   let subResGuard = if isPosAny then IRVar v1 else notIR (IRVar v1)
   let nonAnyGuard = notIR subResGuard
-  nonAnyRes <- guardedSubInference meta [nonAnyGuard] (probF meta cumulative (params !! probIdx) nonAnyExpr)
-  anyRes    <- toIRInferenceSave meta cumulative (params !! probIdx) (IRConst $ VAny)
-  exceptRes <- guardedSubInference meta [subResGuard] (probF meta cumulative (params !! probIdx) exceptExpr)
+  -- The subtraction's operands are compiled 'unpruned' (a pruned excepted
+  -- mass inflates the difference); the plain arm only needs that when the
+  -- cumulative CoV below may flip it through a complement.
+  let metaNon = covOperandMeta cumulative invDeriv meta
+  let metaSub = unpruned meta
+  nonAnyRes <- guardedSubInference metaNon [nonAnyGuard] (probF metaNon cumulative (params !! probIdx) nonAnyExpr)
+  anyRes    <- toIRInferenceSave metaSub cumulative (params !! probIdx) (IRConst $ VAny)
+  exceptRes <- guardedSubInference metaSub [subResGuard] (probF metaSub cumulative (params !! probIdx) exceptExpr)
   let ifSample a na = if isPosAny then IRIf (IRVar v1) a na else IRIf (IRVar v1) na a
   -- The ANY arm is the marginal minus the excepted value's mass; its branch count
   -- is the excepted value's, not a sum (this is a select between the two arms).
@@ -2318,7 +2399,9 @@ toIRInference meta cumulative (Expr TypeInfo {tags=_, rType=rt} (InjF (Named nam
   -- subexpression, isolated and re-guarded on appTest (see
   -- 'guardedSubInference') so a shared let-in block cannot escape the
   -- applicability test 'guardP' applies below.
-  paramRes <- guardedSubInference meta [appTest] (probF meta cumulative (params !! probIdx) invExpr)
+  -- Unpruned when the cumulative CoV below may flip it through a complement.
+  let metaOp = covOperandMeta cumulative invDeriv meta
+  paramRes <- guardedSubInference metaOp [appTest] (probF metaOp cumulative (params !! probIdx) invExpr)
   -- Add a test whether the inversion is applicable. Scale the result according to the CoV formula if dim > 0
   return (guardP (semiringOf meta) [appTest] (scaleCoV (semiringOf meta) cumulative invDeriv paramRes))
 -- Enumerate-both discrete path for forward-only binary InjFs (and/or). No point
@@ -2457,9 +2540,7 @@ toIRInference meta cumulative (Expr TypeInfo {rType=rt} (Var n)) sample = do
       var <- mkVariable "call"
       let name = if hasInference then calleeInferenceName meta cumulative n else n
       let callExpr = if hasInference
-            then case topKThreshold (compilerConfig meta) of
-              Just _ -> IRApply (IRApply (IRVar name) sample) (accProb meta)
-              Nothing -> IRApply (IRVar name) sample
+            then inferenceCall meta cumulative (IRVar name) sample
             else IRApply (IRVar name) sample
       setVariables [(var, callExpr)]
       -- The return value is still a function. No need to do dim and branch counting here
@@ -2468,9 +2549,7 @@ toIRInference meta cumulative (Expr TypeInfo {rType=rt} (Var n)) sample = do
     Just (_, True) -> do
       var <- mkVariable "call"
       let calleeName = calleeInferenceName meta cumulative n
-      let callExpr = case topKThreshold (compilerConfig meta) of
-            Just _ -> IRApply (IRApply (IRVar calleeName) sample) (accProb meta)
-            Nothing -> IRApply (IRVar calleeName) sample
+      let callExpr = inferenceCall meta cumulative (IRVar calleeName) sample
       setVariables [(var, callExpr)]
       return (unpackResult (IRVar var))
     -- Var is a local variable
@@ -3233,7 +3312,8 @@ cdfAtBound :: CompilerMetadata -> Expr -> WBound -> CompilerMonad (IRExpr, IRExp
 cdfAtBound _ _ WNegInf = return (const0, const1)
 cdfAtBound _ _ WPosInf = return (const1, const1)
 cdfAtBound meta v (WFinite e) = do
-  res <- toIRInference meta True v e
+  -- An interval's mass is a CDF difference, so both bounds are 'unpruned'.
+  res <- toIRInference (unpruned meta) True v e
   return (unP (rProb res), rBranches res)
 
 -- | Invert the observation @body ∈ target@ into constraint worlds on the bound

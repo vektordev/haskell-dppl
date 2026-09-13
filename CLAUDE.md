@@ -366,8 +366,55 @@ branches by `accProb * p_left`.
 
 Pruning is **lossy** — a dropped branch's mass is simply gone. Hence the
 one-sided invariants: topK never *inflates* a probability
-(`Corpus.TopKNeverInflates`), and only threshold 0 is exact
-(`Corpus.TopKZeroThreshMatchesExact`).
+(`Corpus.TopKNeverInflates`, its CDF twin `Corpus.TopKNeverInflatesCdf`, and
+the fuzz property `prop_Fuzz_TopKNeverInflates`), and only threshold 0 is
+exact (`Corpus.TopKZeroThreshMatchesExact`).
+
+"Never inflates" holds only at equal dimension. Pruning removes alternatives
+from a mixture, and the mixture reports the *lowest* dim among the
+alternatives it still has, so the pruned dim can only rise — and a pruned
+point mass can leave a sibling density behind
+(`testCases/topKPrunesMassArm`: exact `(0.05, dim 0)` at `1.0`, pruned
+`(0.95, dim 1)`). A mass and a density are not comparable, so the properties
+compare values at equal dim and otherwise require the pruned dim to be the
+higher one.
+
+### A pruned probability is a lower bound — and complements are not
+
+A pruned result is a **lower bound** on the exact one, and lower bounds
+compose under products, sums and the lowest-dim-wins mixture — but not under a
+complement or a subtraction: `1 − lower` and `a − lower` are *upper* bounds.
+`IRCompiler.unpruned` (accumulated probability seeded with `∞`, which fails
+every "below cutoff" test in both semirings and crosses a call boundary as a
+plain argument) therefore compiles the operand of every such site with pruning
+off, and any new `srComplement`/`srMinus`/CDF-difference site must do the
+same:
+
+- an `IfThenElse` *condition* (its False-weight is the complement of its
+  True-probability — `testCases/topKComplementCondition`, the minimized shape
+  of the fuzz counterexample this was found by: a condition that is itself an
+  `if` had its True-probability pruned to `0`, so its else-weight became `1`);
+- the integral behind a `gt`/`lt` against a deterministic bound
+  (`topKComplementBound`);
+- both operands of the `AnyExcept` subtraction `p(ANY) − p(v)`
+  (`topKComplementAnyExcept`; a pruned marginal could even go negative);
+- an inverted operand in cumulative mode whose transform is not statically
+  increasing, since `scaleCoV` then flips its CDF through a complement
+  (`topKComplementCdfFlip`; `covOperandMeta`/`staticallyIncreasing` — `plus`
+  declares a literal `1` and stays pruned, `neg`'s `-1` and `mult`'s runtime
+  `1/a` do not);
+- both bounds of a set-witness interval measure (`cdfAtBound`).
+
+The alternative — inferring a condition at both polarities, each pruned — was
+rejected: it is the O(2^d) double compile the `IfThenElse` case retreated from,
+and it would not have helped the subtraction sites anyway.
+
+Separately, an `_integ` function takes no `acc_prob` parameter, so a
+cumulative-mode call into another definition passes only the sample
+(`inferenceCall`); passing the accumulator there applied the callee's result
+tuple to a second argument, and every topK CDF query through a call crashed
+with "Expression is not a closure" until `TopKNeverInflatesCdf` reached
+`varAlias`.
 
 ### Marginal Materialization
 

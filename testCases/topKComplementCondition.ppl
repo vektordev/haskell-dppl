@@ -1,0 +1,1 @@
+main = if (if Uniform < 0.95 then False else True) then 1.0 else 2.0

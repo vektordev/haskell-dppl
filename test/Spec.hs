@@ -66,6 +66,18 @@ loadCorpusCases = do
   -- nothing to this pool's properties even when they were included.
   return [(n, (p, queryPoint, params, (prob, dim))) | (n, p, tcs) <- usable, ProbTestCase _ queryPoint params (Possible prob dim _) <- tcs]
 
+-- | The cdf(...) rows of the same corpus slice, for the invariants that hold
+-- of a CDF as much as of a point probability ('TopKNeverInflatesCdf').
+loadCorpusCdfCases :: IO [CorpusProbCase]
+loadCorpusCdfCases = do
+  files <- getAllTestFiles
+  pairs <- mapM (\(ppl, tst) -> do
+    prog <- parseProgram ppl
+    (backends, _slow, tcs) <- parseTestCases tst
+    return (takeBaseName ppl, prog, backends, tcs)) files
+  let usable = [(n, p, tcs) | (n, p, backends, tcs) <- pairs, Interpreter `elem` backends, null (neurals p)]
+  return [(n, (p, queryPoint, params, (prob, dim))) | (n, p, tcs) <- usable, CumulTestCase _ queryPoint params (Possible prob dim _) <- tcs]
+
 -- | A .tst probability expectation is always a (prob, dim) pair of floats;
 -- anything else means the corpus parser handed us a malformed row, which is a
 -- broken fixture rather than a property counterexample.
@@ -103,8 +115,8 @@ prop_CheckInvalidPrograms = forAll (elements invalidTestCases) checkInvalidProgr
 -- both heavy-tailed lognormal products and log-domain programs whose inverse
 -- overflows. Convergence is instead encoded in the corpus itself as an upper-tail
 -- cdf(x)=(1.0, 0.0) line per program.
-corpusTests :: [CorpusProbCase] -> TestTree
-corpusTests probPool = localOption (QuickCheckMaxRatio 20) $ testGroup "Corpus"
+corpusTests :: [CorpusProbCase] -> [CorpusProbCase] -> TestTree
+corpusTests probPool cdfPool = localOption (QuickCheckMaxRatio 20) $ testGroup "Corpus"
   [ testProperty "ValidPrograms" (forAllNamed (\_ tc -> checkValidPrograms tc))
   -- dim 0 means the expectation refers to an atom, not a density: match drawn
   -- samples against it with a near-exact window (wide enough for float noise like
@@ -124,6 +136,7 @@ corpusTests probPool = localOption (QuickCheckMaxRatio 20) $ testGroup "Corpus"
   , testProperty "MarginalAnyIsOne" (forAllNamed (checkProbAny defaultEnvs))
   , testProperty "TopKZeroThreshMatchesExact" (forAllNamed (checkTopKZeroMatchesExact topK0Envs defaultEnvs))
   , testProperty "TopKNeverInflates" (forAllNamed (checkTopKNeverInflates topK01Envs defaultEnvs))
+  , testProperty "TopKNeverInflatesCdf" (forAllNamedIn cdfPool (checkTopKNeverInflatesCdf topK01Envs defaultEnvs))
   -- task log-space-probability-computation: compiling with logSpace=True makes
   -- p()/cdf() return a log-probability instead of a linear one, so exp(actual)
   -- must reproduce the same corpus expectation as the linear compile. Excludes
@@ -165,7 +178,7 @@ corpusTests probPool = localOption (QuickCheckMaxRatio 20) $ testGroup "Corpus"
     -- Compile each corpus program once per config, shared by every invariant and
     -- every .tst line drawn from that program (compile depends only on the pair,
     -- never on the queried sample/params).
-    progs = uniqueCorpusPrograms probPool
+    progs = uniqueCorpusPrograms (probPool ++ cdfPool)
     defaultEnvs = compileCorpusPrograms defaultCompilerConfig progs
     topK005Envs = compileCorpusPrograms (topKConf 0.05) progs
     topK0Envs   = compileCorpusPrograms (topKConf 0.0) progs
@@ -397,6 +410,9 @@ lookupCompiled envs n = fromMaybe (error ("no compiled entry for corpus program 
 irDensityC :: CompiledPrograms -> String -> Program -> [IRValue] -> IRValue -> IRValue
 irDensityC envs n p params s = either error id (lookupCompiled envs n >>= \c -> runProbC p c params s)
 
+irCumulativeC :: CompiledPrograms -> String -> Program -> [IRValue] -> IRValue -> IRValue
+irCumulativeC envs n p params s = either error id (lookupCompiled envs n >>= \c -> runIntegC p c params s)
+
 reasonablyClose :: IRValue -> IRValue -> Property
 reasonablyClose (VFloat a) (VFloat b) = counterexample (show a ++ "/=" ++ show b) (property $ abs (a - b) <= reasonablyCloseTolerance)
 reasonablyClose a b = a === b
@@ -588,10 +604,35 @@ checkTopKNeverInflates :: CompiledPrograms -> CompiledPrograms -> String -> (Pro
 checkTopKNeverInflates topKEnvs defEnvs n (p, inp, params, _) = ioProperty $ do
   let topKResult = irDensityC topKEnvs n p params inp
   let exactResult = irDensityC defEnvs n p params inp
-  case (topKResult, exactResult) of
-    (VProbDim topKP _, VProbDim exactP _) ->
-      return $ counterexample (show topKP ++ " > " ++ show exactP) (topKP <= exactP + 1e-9)
-    _ -> return $ counterexample "Return type was no tuple" False
+  return (topKNeverInflates topKResult exactResult)
+
+-- | The CDF half of 'checkTopKNeverInflates' (task
+-- topk-inflates-probability-int-comparison-mix): a CDF is a probability too,
+-- and the cumulative path has its own complement site (the change-of-variables
+-- flip under a decreasing inverse, 'scaleCoV') that the point-query pool never
+-- exercises -- 'topKComplementCdfFlip' is its canary.
+checkTopKNeverInflatesCdf :: CompiledPrograms -> CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
+checkTopKNeverInflatesCdf topKEnvs defEnvs n (p, inp, params, _) = ioProperty $ do
+  let topKResult = irCumulativeC topKEnvs n p params inp
+  let exactResult = irCumulativeC defEnvs n p params inp
+  return (topKNeverInflates topKResult exactResult)
+
+-- | The one-sided topK invariant on a (pruned, exact) result pair. A pruned
+-- probability is a lower bound on the exact one -- but only at the same
+-- dimension. Pruning removes alternatives from a mixture, and the mixture
+-- reports the LOWEST dim among the alternatives it still has, so the pruned
+-- dim can only rise (testCases/topKPrunesMassArm: pruning the then-arm's
+-- point mass at 1.0 leaves the else-arm's density, (0.95, dim 1) against the
+-- exact (0.05, dim 0) -- a density and a mass are not comparable). So: equal
+-- dims compare values, unequal dims require the pruned one to be higher.
+topKNeverInflates :: IRValue -> IRValue -> Property
+topKNeverInflates topKResult exactResult = case (topKResult, exactResult) of
+    (VProbDim topKP topKD, VProbDim exactP exactD)
+      | topKD == exactD ->
+          counterexample (show topKP ++ " > " ++ show exactP ++ " at dim " ++ show exactD) (topKP <= exactP + 1e-9)
+      | otherwise ->
+          counterexample ("pruned dim " ++ show topKD ++ " below exact dim " ++ show exactD) (topKD > exactD)
+    _ -> counterexample "Return type was no tuple" False
 
 -- BC counts both if-else leaf branches and InjF enumerable branches.
 -- testDiceAdd = plusI(dice6, dice6): for P(sum=7), all 6 die combinations are valid,
@@ -963,6 +1004,7 @@ main = do
   detTests <- determinismTests
   showcase <- showcaseTests
   corpusPool <- loadCorpusCases
+  corpusCdfPool <- loadCorpusCdfCases
   writeLogitsRoundtrip <- writeLogitsRoundtripTests
   -- A handful of tests (deep plan enumeration, mainly) are expensive enough
   -- to noticeably slow day-to-day `stack test` while rarely catching
@@ -981,7 +1023,7 @@ main = do
   let superSlow = if isNothing runSuperSlow then testGroup "SuperSlow" [] else testGroup "SuperSlow" [superSlowFuzzTests]
   defaultMain $ testGroup "Tests"
     [ specTests
-    , corpusTests corpusPool
+    , corpusTests corpusPool corpusCdfPool
     , parserTests
     , internalsTests
     , rejectionTests

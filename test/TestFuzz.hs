@@ -338,8 +338,13 @@ prop_Fuzz_TopKNeverInflates = withMaxSuccess 40 $ forAll (resize fuzzSize genTyp
       sample <- drawSample p exactEnv
       return $ case (irProb p exactEnv sample, irProb p topKEnv sample) of
         (Just exactR, Just topKR) -> case (probDim exactR, probDim topKR) of
-          (Just (pe, _), Just (pt, _)) ->
-            counterexample (show pt ++ " > " ++ show pe) (pt <= pe + 1e-9)
+          -- Same rule as Spec's corpus 'topKNeverInflates': values compare
+          -- only at equal dim; pruning drops mixture alternatives and the
+          -- lowest dim wins, so an unequal pruned dim must be the higher one
+          -- (a pruned point mass leaving a sibling density behind).
+          (Just (pe, de), Just (pt, dt))
+            | dt == de  -> counterexample (show pt ++ " > " ++ show pe ++ " at dim " ++ show de) (pt <= pe + 1e-9)
+            | otherwise -> counterexample ("pruned dim " ++ show dt ++ " below exact dim " ++ show de) (dt > de)
           _ -> counterexample "unexpected result shapes" False
         _ -> discardVacuous
     _ -> return discardVacuous
