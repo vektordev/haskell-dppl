@@ -234,6 +234,17 @@ no occurrence of the bound variable is point-invertible at all. Full
 mechanism, examples, and the `testCases/planEnum*` pointers:
 `docs/witness-inversion-engines.md`.
 
+A set-witness world can carry **residue factors** (`WWorld [guard] WSet
+[PResult]`): when `transportDirect` inverts a single-occurrence subtree
+through a field constructor (`(x, e)`, `x : e`, a user ADT constructor, also
+under `right`), the deconstructing inverse (`fst s`) never consults the
+sibling `e`, so the subtree is additionally compiled against its target with
+the bound variable fixed at its witness (`residueFactor`, the point-witness
+body-factor fold per world) — a dim-0 consistency indicator for a
+deterministic sibling, the sibling's own density for a fresh draw. Without
+it `if x > 0.5 then (x, 1.0) else (x, 0.0)` answered `1.0` at `(0.7, 0.0)`.
+Corpus `testCases/setWitnessSibling*`.
+
 An interval constraint reaching the bound variable through a chain of
 monotone `InjF` steps is transported by `toSeededMonotoneInvExpr` (direction
 table `stepMonotonicity`), with each step's input first clamped into that

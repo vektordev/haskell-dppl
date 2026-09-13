@@ -319,6 +319,13 @@ logSpaceUncoveredPrograms =
   , "setWitnessTransportDouble"
   , "setWitnessTransportNeg"
   , "setWitnessTransportLog"
+  -- task set-witness-transport-drops-sibling-field-constraint: a point
+  -- transport through a field constructor now carries the subtree's residue
+  -- as a world factor, measured by the same linear-pinned measureWorld.
+  , "setWitnessSiblingConst", "setWitnessSiblingMirror", "setWitnessSiblingFresh"
+  , "setWitnessSiblingEither", "setWitnessSiblingCons", "setWitnessSiblingNested"
+  , "setWitnessSiblingTwoOcc", "setWitnessSiblingNestedLet", "setWitnessSiblingBoolAny"
+  , "setWitnessSiblingAdt"
   ]
 
 checkLogSpaceMatchesLinear :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property

@@ -1,0 +1,1 @@
+main = let s = Normal in if s < 0.0 then (s, Normal) else (0.0, 0.0)

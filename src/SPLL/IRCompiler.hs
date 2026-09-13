@@ -2703,13 +2703,15 @@ compareValueExpr _ rt _ _ = error $ "Comparison not implemented for type: " ++ s
 -- exactly the op that would crash on a genuine VAny operand.
 --
 -- 'equalityGuardStatic' is the same structural recursion without that guard,
--- for the set-witness ('memberGuard') and plan-guided-lazy-enumeration
--- ('planDetGuard') callers: both build purely compile-time constraint IR
--- over concrete plan/witness values that are never themselves a runtime
--- VAny, and the Any-check nodes confuse those engines' own static analysis
--- of the guard IR (occurrence counting for accessor pruning) -- adding it
--- there produced spurious "constructor ... not present in the plan"
--- refusals on the plan-enum corpus without fixing anything the guard is for.
+-- for the plan-guided-lazy-enumeration caller ('planDetGuard'): it builds
+-- purely compile-time constraint IR over concrete plan values that are never
+-- themselves a runtime VAny, and the Any-check nodes confuse that engine's
+-- own static analysis of the guard IR (occurrence counting for accessor
+-- pruning) -- adding it there produced spurious "constructor ... not present
+-- in the plan" refusals on the plan-enum corpus without fixing anything the
+-- guard is for. The set-witness engine's 'memberGuard' used to share it and
+-- no longer does: its point is a projection of the query sample, which a
+-- marginal query does make a runtime VAny (see there).
 equalityGuard :: RType -> IRExpr -> IRExpr -> IRExpr
 equalityGuard rt v sample =
   IRIf (IRUnaryOp OpIsAny v) constTrueIR
@@ -3078,15 +3080,21 @@ substIRVar :: String -> IRExpr -> IRExpr -> IRExpr
 substIRVar n val = irMap (\e -> case e of { IRVar n' | n' == n -> val; _ -> e })
 
 -- | Guards are Bool-valued IR over the sample and deterministic scope; a world
--- contributes only when all guards hold.
-data WWorld = WWorld [IRExpr] WSet
+-- contributes only when all guards hold. The factors are independent
+-- probability results multiplied into the world's measure ('prodP': dims
+-- and branch counts add) -- each one the residue of a subtree that
+-- 'transportDirect' inverted through a field constructor, compiled with the
+-- bound variable fixed at its witness (see 'residueFactor'). They are
+-- self-contained IR (their bindings are folded in at construction) and are
+-- evaluated under the world's guards, never before them.
+data WWorld = WWorld [IRExpr] WSet [PResult]
 
 addGuard :: IRExpr -> WWorld -> WWorld
-addGuard g (WWorld gs s) = WWorld (g:gs) s
+addGuard g (WWorld gs s fs) = WWorld (g:gs) s fs
 
 intersectW :: WWorld -> WWorld -> WWorld
-intersectW (WWorld g1 s1) (WWorld g2 s2) =
-  let (g3, s3) = intersectSet s1 s2 in WWorld (g1 ++ g2 ++ g3) s3
+intersectW (WWorld g1 s1 f1) (WWorld g2 s2 f2) =
+  let (g3, s3) = intersectSet s1 s2 in WWorld (g1 ++ g2 ++ g3) s3 (f1 ++ f2)
 
 -- Two constraints on the SAME draw. Point-point must agree: the compatibility
 -- guard is a single 'OpEq' on the whole, undecomposed values -- deliberately
@@ -3185,8 +3193,15 @@ minWBound _ WNegInf = WNegInf
 minWBound (WFinite a) (WFinite b) = WFinite (IRIf (IROp OpLessThan a b) a b)
 
 -- | Bool-valued IR: is @val@ (a deterministic value) inside the target set?
+-- The point case is the wildcard-aware 'equalityGuard', not the static one:
+-- the point of a target set is a projection of the query sample, so a
+-- marginal wildcard can sit in it at any depth (@p((ANY, 0.3))@ against an
+-- x-free arm @(0.0, 0.0)@), where a static float comparison errors and a
+-- static discrete one silently answers False; a wildcard slot constrains
+-- nothing, so the membership holds there, as it does for the interval case
+-- through 'tolerateAny'.
 memberGuard :: RType -> IRExpr -> WSet -> IRExpr
-memberGuard rt val (WPoint p _) = equalityGuardStatic rt p val
+memberGuard rt val (WPoint p _) = equalityGuard rt p val
 memberGuard _ val (WInterval lo hi) = case boundGuards val lo hi of
   [] -> constTrueIR
   gs -> foldr1 (IROp OpAnd) gs
@@ -3264,11 +3279,14 @@ setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag planDiag v sam
 -- in its own writer scope and kept under the world's guards, so bindings whose
 -- evaluation is only valid when the guards hold are not hoisted past them.
 measureWorld :: CompilerMetadata -> Expr -> WWorld -> CompilerMonad PResult
-measureWorld meta v (WWorld guards set) = do
+measureWorld meta v (WWorld guards set factors) = do
   (res, binds) <- lift (runWriterT (measureSet meta v set))
   let wrap = generateLetInExpr binds
+  -- The set's measure and the residue factors are independent: the product
+  -- rule, exactly as the point-witness path's body-factor fold applies it.
+  let combined = foldl (prodP linearSemiring) (mapResult wrap res) factors
   -- A world whose guards fail is not part of the observation at all.
-  return (guardP linearSemiring guards (mapResult wrap res))
+  return (guardP linearSemiring guards combined)
 
 measureSet :: CompilerMetadata -> Expr -> WSet -> CompilerMonad PResult
 measureSet meta v (WPoint p cov) = do
@@ -3329,7 +3347,7 @@ invertToWorlds meta occs exprBody target
       if pType (getTypeInfo exprBody) == Deterministic
         then do
           bIR <- toIRGenerate meta exprBody
-          return (Just [WWorld [memberGuard (rType (getTypeInfo exprBody)) bIR target] WFull])
+          return (Just [WWorld [memberGuard (rType (getTypeInfo exprBody)) bIR target] WFull []])
         else return Nothing
 invertToWorlds meta occs exprBody target = do
   direct <- transportDirect meta occs exprBody target
@@ -3446,9 +3464,9 @@ invertToWorlds meta occs exprBody target = do
                 -- fresh-randomness `e` is refused where a single let refuses
                 -- it: 'transportDirect' finds no seeded inverse through the
                 -- extra draw.
-                let through gY setY = case setY of
-                      WFull  -> return (Just [WWorld gY WFull])
-                      WEmpty -> return (Just [WWorld gY WEmpty])
+                let through gY fY setY = case setY of
+                      WFull  -> return (Just [WWorld gY WFull fY])
+                      WEmpty -> return (Just [WWorld gY WEmpty fY])
                       -- A runtime choice of y-set -- what every point
                       -- constraint meeting an interval constraint produces
                       -- ('pointInInterval'), i.e. the `if y > 0.0 then right
@@ -3467,13 +3485,16 @@ invertToWorlds meta occs exprBody target = do
                       -- x-guards (whose transport of that same value is only
                       -- meaningful on the chosen side).
                       WChoice c sa sb -> do
-                        wa <- through (gY ++ [c]) sa
-                        wb <- through (gY ++ [notIR c]) sb
+                        wa <- through (gY ++ [c]) fY sa
+                        wb <- through (gY ++ [notIR c]) fY sb
                         return ((++) <$> wa <*> wb)
                       _ -> do
                         wsX <- invertToWorlds meta occs e setY
-                        return (map (\(WWorld gX setX) -> WWorld (gY ++ gX) setX) <$> wsX)
-                xs <- forM ys $ \(WWorld gY setY) -> through gY setY
+                        -- A y-world's residue factors read y at its observed
+                        -- value, a function of the sample alone, so they
+                        -- carry over to the x-worlds unchanged.
+                        return (map (\(WWorld gX setX fX) -> WWorld (gY ++ gX) setX (fY ++ fX)) <$> wsX)
+                xs <- forM ys $ \(WWorld gY setY fY) -> through gY fY setY
                 -- The y-worlds partition the observation and each one's
                 -- x-worlds partition that y-set's preimage, so the result is
                 -- their union with guards concatenated -- the same rule the
@@ -3486,6 +3507,24 @@ invertToWorlds meta occs exprBody target = do
 -- fires for exactly one occurrence: with several, a point inversion through
 -- one of them would silently drop the others' constraints — the structural
 -- cases above split those instead.
+--
+-- One occurrence is not enough for the transport to carry the whole
+-- observation, though. Every step of the inverse path consumes its sibling
+-- operands as premises (`x + c` is inverted as `s - c`), EXCEPT a field
+-- constructor's: the deconstructing inverse of `(x, e)` is `fst s`, and `e`
+-- is never looked at -- so `(x, 1.0)` observed at `(0.7, 0.0)` transported
+-- to `x = 0.7` with full density, and `(s, Normal)` lost the sibling's
+-- density altogether (task set-witness-transport-drops-sibling-field-
+-- constraint). A spine that crosses a field constructor therefore also
+-- carries the subtree's residue as a world factor: the subtree compiled
+-- against the same target with the bound variable fixed at its witness
+-- ('residueFactor'), which is the point-witness path's body-factor fold
+-- applied per world. For a residue that is deterministic given the witness
+-- that factor is the missing consistency indicator (dim 0); for one that
+-- draws fresh randomness it is the sibling's own density (dims add). The
+-- factor is omitted where no field constructor is crossed, because there
+-- the inverse path already consumed every sibling and the indicator would
+-- be an always-true tautology on every transported subtree in the corpus.
 transportDirect :: CompilerMetadata -> [ChainName] -> Expr -> WSet -> CompilerMonad (Maybe [WWorld])
 transportDirect meta occs exprBody target = case filter (`elem` subtreeCNs exprBody) occs of
   [occ] -> case target of
@@ -3509,7 +3548,14 @@ transportDirect meta occs exprBody target = case filter (`elem` subtreeCNs exprB
         -- pattern-match on directly when this witness is later intersected
         -- with another occurrence's.
         let value = substIRVar bodyCN s g
-        return (Just [WWorld [applyTo guard s] (WPoint value (IROp OpMult c0 (applyTo cov s)))])
+        factors <- case pathToCN occ exprBody of
+          Just spine@(_:_)
+            | any (isFieldCtorNode meta) (init spine)
+            , Expr occTI (Var boundName) <- last spine -> do
+                f <- residueFactor meta exprBody boundName (rType occTI) value s
+                return [f]
+          _ -> return []
+        return (Just [WWorld [applyTo guard s] (WPoint value (IROp OpMult c0 (applyTo cov s))) factors])
     WInterval lo hi -> case toSeededMonotoneInvExpr (fcData meta) (adtDecls meta) bodyCN occ of
       Nothing -> return Nothing
       Just (g0, dir) -> do
@@ -3523,10 +3569,48 @@ transportDirect meta occs exprBody target = case filter (`elem` subtreeCNs exprB
         let (lo', hi') = case dir of
               MonInc -> (tr lo, tr hi)
               MonDec -> (flipInf (tr hi), flipInf (tr lo))
-        return (Just [WWorld [] (WInterval lo' hi')])
+        -- No residue factor: the monotone table has no field-constructor
+        -- step, so an interval never transports through one.
+        return (Just [WWorld [] (WInterval lo' hi') []])
     _ -> return Nothing
   _ -> return Nothing
   where bodyCN = chainName (getTypeInfo exprBody)
+
+-- | The nodes from @e@'s root down to (and including) the node carrying chain
+-- name @cn@, root first; Nothing when no node in @e@ carries it.
+pathToCN :: ChainName -> Expr -> Maybe [Expr]
+pathToCN cn e
+  | chainName (getTypeInfo e) == cn = Just [e]
+  | otherwise = listToMaybe (mapMaybe (fmap (e :) . pathToCN cn) (getSubExprs e))
+
+-- | Is this node a multi-field constructor application (tuple, cons, user
+-- ADT constructor)? These are the InjFs whose inverse for one field is
+-- deconstructing -- it reads the sample's projection and consults no sibling
+-- field -- so they are exactly the steps a point transport can pass through
+-- while dropping constraints ('transportDirect').
+isFieldCtorNode :: CompilerMetadata -> Expr -> Bool
+isFieldCtorNode meta (Expr _ (InjF (Named n) _)) = isFieldConstructor (adtDecls meta) n
+isFieldCtorNode _ _ = False
+
+-- | The residue factor of a transported subtree: @subtree@ compiled as an
+-- ordinary point observation against @target@, with the bound variable
+-- @boundName@ fixed at its transported witness @value@. The variable is
+-- re-typed 'Deterministic' for dispatch ('retypeDetGiven', as the
+-- point-witness fold does for the recovered variable) and bound by an
+-- 'IRLetIn' around the compiled block, so the block is self-contained: its
+-- floated bindings stay under that binding (they may read it, and evaluation
+-- is strict), and the result can be multiplied into a world's measure
+-- anywhere under the world's guards. The four result projections of the one
+-- block are what 'unpackResult' hands out; CSE recovers the sharing, the
+-- same trade the fold makes.
+residueFactor :: CompilerMetadata -> Expr -> String -> RType -> IRExpr -> IRExpr -> CompilerMonad PResult
+residueFactor meta subtree boundName boundRT value target = do
+  let recovered = boundName : recoveredVars meta
+  let retyped = retypeDetGiven recovered subtree
+  let fMeta = meta { typeEnv = (boundName, (boundRT, False)) : typeEnv meta
+                   , recoveredVars = recovered }
+  block <- lift (runWriterT (toIRInference fMeta False retyped target)) <&> generateLetInBlock fMeta
+  return (unpackResult (IRLetIn boundName value block))
 
 -- | Combine the canonical (outcome-True, outcome-False) worlds of a
 -- Bool-valued node against the actual target: True-worlds apply when the

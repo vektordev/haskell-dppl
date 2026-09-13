@@ -1,0 +1,1 @@
+main = let x = Uniform in if x > 0.5 then right (x, 1.0) else left ()

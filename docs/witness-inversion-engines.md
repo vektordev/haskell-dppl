@@ -37,7 +37,8 @@ let x = Normal in if x < 0.0 then 0.0 - x else x
 
 yields the `|Normal|` density `2φ(y)` (`testCases/letProbAbsNormal`). Bodies
 drawing fresh randomness alongside such constraints are refused with a
-diagnostic.
+diagnostic, except inside a transported field constructor (see "Residue
+factors" below).
 
 A nested `let` between the source and the constraint — `let x = Normal in
 let y = x + 1.0 in if y > 0.0 then 1.0 else 0.0`, which the parser desugars
@@ -63,6 +64,52 @@ right-hand side drawing fresh randomness (`let y = x + Normal in …`), which
 point-valued-arm shapes); refusals pinned in `TestRejection`'s
 `SetWitnessNestedLet` group. The engine stays linear-only, so these programs
 are on `Spec.logSpaceUncoveredPrograms` like their single-`let` siblings.
+
+### Residue factors of a transported subtree
+
+A subtree with a *single* occurrence of the bound variable is transported
+whole onto that occurrence by `transportDirect`, through the forward-chaining
+inverse seeded at the subtree's root. Every step of that inverse consumes its
+sibling operands as premises (`x + c` inverts to `s - c`), except a **field
+constructor's**: the deconstructing inverse of `(x, e)` is `fst s`, and `e` is
+never consulted. So in
+
+```
+let x = Uniform in if x > 0.5 then (x, 1.0) else (x, 0.0)
+```
+
+the point `(0.7, 0.0)` transported to `x = 0.7` with full density, and
+`p((ANY, 1.0))` answered `1.0` instead of `0.5`; with a fresh draw in the
+sibling slot, `(s, Normal)`, the sibling's density was silently omitted
+(task `set-witness-transport-drops-sibling-field-constraint`). `TCons`,
+`Cons`, user ADT constructors, and any of those under a unary wrapper
+(`right (x, 1.0)`) all had it.
+
+When the spine from the subtree's root to the occurrence crosses a field
+constructor (`isFieldConstructor`), the world now also carries the subtree's
+**residue factor**: the subtree compiled as an ordinary point observation
+against the same target, with the bound variable re-typed `Deterministic`
+and let-bound to its transported witness (`residueFactor`). That is the
+point-witness path's body-factor fold, applied per world. For a residue
+that is deterministic given the witness the factor is the missing
+consistency indicator (`(x, 1.0) == s` with `x := fst s`, dim 0); for one
+that draws fresh randomness it is the sibling's own density, and dims add,
+so `(s, Normal)` at `(-0.5, 0.3)` is `φ(-0.5)·φ(0.3)` at dim 2. `WWorld`
+carries the factors as a list of `PResult`s; `intersectW` concatenates them,
+the nested-`let` case carries a y-world's factors over to its x-worlds
+unchanged (they read `y` at its observed value, a function of the sample
+alone), and `measureWorld` multiplies them in with `prodP` under the world's
+guards. No factor is emitted where no field constructor is crossed, since
+the inverse path consumed every sibling there and the indicator would be an
+always-true tautology on every transported subtree in the corpus; the
+emitted IR of the existing set-witness programs is unchanged.
+
+`memberGuard`'s point case (the x-free deterministic arm, `(0.0, 0.0)`
+against `(ANY, 0.3)`) is the wildcard-aware `equalityGuard`, since a target
+point is a projection of the query sample and a marginal wildcard can sit
+in it at any depth: the static guard errored on a float slot and silently
+answered `False` (zero mass) on a discrete one. Corpus:
+`testCases/setWitnessSibling*`.
 
 ### Interval transport through monotone `InjF` steps
 
