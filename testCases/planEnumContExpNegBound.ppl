@@ -1,0 +1,8 @@
+-- M3 peel through exp against a NEGATIVE bound: exp leaf > -1 always holds.
+-- The bound is clamped into exp's image before the peeled inverse (log) sees
+-- it, so it transports to -inf and the True world has full mass; it used to
+-- be log(-1) = NaN, reported as a NaN probability (task
+-- set-witness-interval-partial-inverse).
+neural readObj :: (Symbol -> (Bool, Float))
+
+main sym = let o = readObj sym in if exp (snd o) > (0.0 - 1.0) then 1 else 0

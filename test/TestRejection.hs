@@ -50,6 +50,7 @@ rejectionTests = testGroup "Rejection"
   , intractableComparisonTests
   , noGenerateSuppressedGeneratorTests
   , setWitnessNestedLetTests
+  , setWitnessTransportTests
   ]
 
 -- ----------------------------------------------------------------------------
@@ -858,3 +859,30 @@ setWitnessNestedLetTests = testGroup "SetWitnessNestedLet"
       Right (Left e) -> assertFailure
         (what ++ " was declined by a different stage instead of the set-witness engine: " ++ e)
       Right (Right _) -> assertFailure (what ++ " was accepted")
+
+-- Task set-witness-interval-partial-inverse: interval transport through a
+-- monotone InjF chain covers exactly 'ForwardChaining.stepMonotonicity's
+-- table. Anything else must be REFUSED with the set-witness diagnostic --
+-- never a silent number. These pin the refusal for the InjFs outside the
+-- table (sqrt/recip/sq: partial domain or non-monotone on the line) and for
+-- mult by a deterministic operand that is not a literal, whose sign -- and
+-- so the transported endpoints' order -- is not statically known.
+setWitnessTransportTests :: TestTree
+setWitnessTransportTests = testGroup "SetWitnessTransport"
+  [ refused "sqrt on the spine" "main = let x = Normal in if sqrt x > 0.5 then 1.0 else 0.0"
+  , refused "recip on the spine" "main = let x = Normal in if recip x > 0.5 then 1.0 else 0.0"
+  , refused "sq on the spine" "main = let x = Normal in if sq x > 0.5 then 1.0 else 0.0"
+  , refused "mult by a non-literal deterministic operand"
+      "main = let x = Normal in if (x * (0.0 - 2.0)) > 1.0 then 1.0 else 0.0"
+  ]
+  where
+    refused what src = testCase (what ++ " is refused, not silently measured") $
+      withParsed src $ \prog -> do
+        res <- forcedProb prog (VFloat 1.0)
+        case res of
+          Left ex -> assertBool
+            ("expected the set-witness diagnostic for " ++ what ++ ", got: " ++ show ex)
+            (setWitnessDiagnostic `isInfixOf` show ex)
+          Right (Left e) -> assertFailure
+            (what ++ " was declined by a different stage instead of the set-witness engine: " ++ e)
+          Right (Right v) -> assertFailure (what ++ " was accepted and answered " ++ show v)

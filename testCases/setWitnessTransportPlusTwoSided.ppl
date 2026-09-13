@@ -1,0 +1,3 @@
+-- Two comparisons on the same plus chain, intersected by the nested if:
+-- 0 < x + 1 < 2 iff -1 < x < 1: Phi(1) - Phi(-1).
+main = let x = Normal in if (x + 1.0) > 0.0 then (if (x + 1.0) < 2.0 then 1.0 else 2.0) else 3.0

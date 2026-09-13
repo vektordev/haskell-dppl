@@ -1,0 +1,2 @@
+-- Interval transport through plus: (x + 1) > 0 iff x > -1: 1 - Phi(-1).
+main = let x = Normal in if (x + 1.0) > 0.0 then 1.0 else 0.0

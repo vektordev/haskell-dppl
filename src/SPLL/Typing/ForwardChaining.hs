@@ -10,6 +10,11 @@ module SPLL.Typing.ForwardChaining
   , toSeededInvExpr
   , toSeededMonotoneInvExpr
   , Monotonicity(..)
+  , Image(..)
+  , fullImage
+  , injFImage
+  , clampToImage
+  , imageGuards
   , isInvertibleLambda
   , isWitnessedLambda
   , findEquivalentExpression
@@ -291,6 +296,15 @@ data Monotonicity = MonInc | MonDec deriving (Eq, Show)
 -- there is no path or when a step on the value-carrying spine has no statically
 -- known direction (e.g. multiplication by a non-literal operand) or is not a
 -- scalar monotone float function at all.
+--
+-- Each spine step's input is first clamped into that step's forward
+-- 'injFImage' ('clampToImage'), so an endpoint the forward function can never
+-- produce is moved onto the image's boundary before the (partial) inverse
+-- sees it, instead of being laundered into NaN and thence a silent zero mass
+-- (task set-witness-interval-partial-inverse). Doing it per step, on the
+-- step's own input, is what makes nested chains right: in @exp (exp x) > 0.5@
+-- the outer step maps the bound to @log 0.5 < 0@, which the inner @exp@ can
+-- never produce, so the inner step clamps it to 0 and answers @-inf@.
 toSeededMonotoneInvExpr :: FCData -> [ADTDecl] -> ChainName -> ChainName -> Maybe (IRExpr, Monotonicity)
 toSeededMonotoneInvExpr fcData adtsDecls seedCN occCN = do
   let clauses = hornClauses fcData
@@ -298,7 +312,72 @@ toSeededMonotoneInvExpr fcData adtsDecls seedCN occCN = do
   spine <- chainSpine fcData path seedCN occCN
   dirs <- mapM (stepMonotonicity fcData) spine
   let dir = if odd (length (filter (== MonDec) dirs)) then MonDec else MonInc
-  return (toLetInBlock clauses adtsDecls path, dir)
+  let clampInput c e
+        | c `elem` spine
+        , ExprHornClause _ _ (InjFInfo name) inv <- c, inv > 0
+        , Just parent <- spineParent fcData c
+        = substVar parent (clampToImage (injFImage name) (IRVar parent)) e
+        | otherwise = e
+  return (toLetInBlockWith clampInput clauses adtsDecls path, dir)
+  where
+    -- Every occurrence of the step's value-carrying premise inside the step's
+    -- own inverse body. Not capture-avoiding: chain names are globally unique
+    -- and an inverse FDecl body binds nothing.
+    substVar n val = irMap (\e -> case e of { IRVar n' | n' == n -> val; _ -> e })
+
+-- | The image of a monotone spine step's forward function in its
+-- value-carrying argument -- the observed values that step can produce at
+-- all. 'Nothing' on a side means unbounded there. Read next to
+-- 'stepMonotonicity': an entry there whose inverse is partial needs an entry
+-- here too, or an interval endpoint outside the image reaches the inverse
+-- and comes back NaN.
+data Image = Image { imageLo :: Maybe Double, imageHi :: Maybe Double }
+  deriving (Eq, Show)
+
+fullImage :: Image
+fullImage = Image Nothing Nothing
+
+-- | Per-InjF image table, keyed like 'stepMonotonicity'. Only @exp@ has a
+-- proper sub-image today; every other monotone step in that table is onto
+-- the reals (@log@ has a partial DOMAIN, not a partial image -- its inverse
+-- @exp@ is total). The plan-guided engine's 'planPeelSlice' reads the same
+-- table, so the two transports agree.
+injFImage :: String -> Image
+injFImage "exp" = Image (Just 0) Nothing
+injFImage _     = fullImage
+
+-- | Move a bound into the image before handing it to the step's inverse:
+-- @max lo (min hi b)@, spelled with 'IRIf' since the IR has no float min/max
+-- on every backend. A finite endpoint outside the image lands on the image's
+-- boundary, which the inverse maps to the argument's own infinity (for
+-- @exp@, @0 |-> log 0 = -inf@) -- exactly the preimage's endpoint; an
+-- interval lying wholly outside the image collapses onto that boundary point
+-- and so measures zero. Infinite bounds never reach this (the callers pass
+-- them through untouched), which is right because the one entry with a
+-- proper sub-image, @exp@, is continuous and strictly monotone on the whole
+-- real line, so its image is open and its boundary IS the argument's
+-- infinity -- an entry that attained its image boundary at a finite argument
+-- would need the callers to clamp infinite bounds too. Identity on a full
+-- image.
+clampToImage :: Image -> IRExpr -> IRExpr
+clampToImage (Image lo hi) b = clampLo lo (clampHi hi b)
+  where
+    clampLo Nothing e  = e
+    clampLo (Just l) e = let c = IRConst (VFloat l) in IRIf (IROp OpLessThan e c) c e
+    clampHi Nothing e  = e
+    clampHi (Just h) e = let c = IRConst (VFloat h) in IRIf (IROp OpGreaterThan e c) c e
+
+-- | The point-transport counterpart of 'clampToImage': Bool guards that hold
+-- iff an observed POINT lies inside the image. A point outside it is not
+-- moved but impossible (the world carrying it measures zero, and the
+-- inverse is never evaluated on it). The tests are strict, which is exact
+-- for @exp@'s open image and immaterial at the boundary of a closed one --
+-- a single point of a continuous observation carries no mass.
+-- Empty on a full image.
+imageGuards :: Image -> IRExpr -> [IRExpr]
+imageGuards (Image lo hi) b =
+     [IROp OpGreaterThan b (IRConst (VFloat l)) | Just l <- [lo]]
+  ++ [IROp OpLessThan b (IRConst (VFloat h))    | Just h <- [hi]]
 
 -- The value-carrying spine of an inversion path: walking from the occurrence
 -- back towards the seed, at each step the clause concluding the current node
@@ -446,13 +525,22 @@ getAllOriginatingEquivalenceHornClauses clauses cn = concatMap (filter (\hc -> i
 -- We do this by declaring a new variable named after the conclusion of the clause
 -- The value of this letIn depends on the type of Horn clause, but is in general either the forward path or an inversion of the expression used to create the clause
 toLetInBlock :: [[HornClause]] -> [ADTDecl] -> [HornClause] -> IRExpr
-toLetInBlock _ _ [] = error "Cannot convert empty clause set to LetIn block"
-toLetInBlock clauses adtsDecls cs = wrapInLetInBlock clauses adtsDecls (init cs) (hornClauseToIRExpr clauses adtsDecls (last cs))
+toLetInBlock = toLetInBlockWith (const id)
+
+-- | 'toLetInBlock' with a hook rewriting each clause's expression before it
+-- is bound (or, for the last clause, returned). 'toSeededMonotoneInvExpr'
+-- uses it to clamp a spine step's input into the step's image.
+toLetInBlockWith :: (HornClause -> IRExpr -> IRExpr) -> [[HornClause]] -> [ADTDecl] -> [HornClause] -> IRExpr
+toLetInBlockWith _ _ _ [] = error "Cannot convert empty clause set to LetIn block"
+toLetInBlockWith post clauses adtsDecls cs = wrapInLetInBlockWith post clauses adtsDecls (init cs) (post (last cs) (hornClauseToIRExpr clauses adtsDecls (last cs)))
 
 wrapInLetInBlock :: [[HornClause]] -> [ADTDecl] -> [HornClause] -> IRExpr -> IRExpr
-wrapInLetInBlock clauses adtsDecls (ParameterHornClause _:cs) inner = wrapInLetInBlock clauses adtsDecls cs inner
-wrapInLetInBlock clauses adtsDecls (c:cs) inner = IRLetIn (conclusion c) (hornClauseToIRExpr clauses adtsDecls c) (wrapInLetInBlock clauses adtsDecls cs inner)
-wrapInLetInBlock _ _ [] inner = inner
+wrapInLetInBlock = wrapInLetInBlockWith (const id)
+
+wrapInLetInBlockWith :: (HornClause -> IRExpr -> IRExpr) -> [[HornClause]] -> [ADTDecl] -> [HornClause] -> IRExpr -> IRExpr
+wrapInLetInBlockWith post clauses adtsDecls (ParameterHornClause _:cs) inner = wrapInLetInBlockWith post clauses adtsDecls cs inner
+wrapInLetInBlockWith post clauses adtsDecls (c:cs) inner = IRLetIn (conclusion c) (post c (hornClauseToIRExpr clauses adtsDecls c)) (wrapInLetInBlockWith post clauses adtsDecls cs inner)
+wrapInLetInBlockWith _ _ _ [] inner = inner
 
 -- Generates IRExpr from Horn clauses
 hornClauseToIRExpr :: [[HornClause]] -> [ADTDecl] -> HornClause -> IRExpr

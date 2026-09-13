@@ -1,0 +1,5 @@
+-- M3 peel through exp against a bound inside its image: exp leaf > 2 iff
+-- leaf > log 2 with N(0,1): 1 - Phi(log 2).
+neural readObj :: (Symbol -> (Bool, Float))
+
+main sym = let o = readObj sym in if exp (snd o) > 2.0 then 1 else 0

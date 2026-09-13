@@ -1,0 +1,6 @@
+-- M3 peel through exp, POINT observation outside the image: exp leaf == -1
+-- is impossible (the image guard makes the True world measure zero without
+-- evaluating log(-1)); the False outcome is the complement of a null set.
+neural readObj :: (Symbol -> (Bool, Float))
+
+main sym = let o = readObj sym in if exp (snd o) == (0.0 - 1.0) then 1 else 0

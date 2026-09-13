@@ -3939,28 +3939,35 @@ planRefWorlds _ (PlanRef Continuous off) cons (PTUpTo s) =
 planRefWorlds _ (PlanRef sub _) _ _ =
   Left ("this plan slice cannot be matched against the observation directly: " ++ head (words (show sub)))
 
+-- | One peeled step of a monotone chain over a continuous plan leaf, in the
+-- direction the observation travels: observed value -> the step's operand.
+data PeelStep = PeelStep
+  { peelInv   :: IRExpr -> IRExpr  -- ^ the forward step's inverse
+  , peelCov   :: IRExpr -> IRExpr  -- ^ |d operand / d observed| at the observed value
+  , peelImage :: Image             -- ^ the forward step's image ('injFImage')
+  }
+
 -- | Peel invertible monotone float transforms off a plan-dependent operand
 -- down to a Continuous plan slice (milestone 3). Supports the same static
 -- envelope as ForwardChaining.stepMonotonicity: plus/neg/double/exp/log
 -- unconditionally, mult only by a literal constant (any other deterministic
 -- operand has no statically known direction). Yields the slice, its accessor
--- constraints, a pure transformer from an observed bound to (leaf-space
--- bound, |d leaf-space bound / d observed bound| change-of-variables factor),
--- and the chain's net monotonicity. Nothing: not such a chain over a
--- continuous slice -- the caller tries its other rules (in particular, this
--- deliberately declines chains bottoming out at discrete slices, which the
--- value-enumeration path already covers).
-planPeelSlice :: CompilerMetadata -> PlanEnv -> Expr -> PlanM (Maybe (Either String (PlanRef, [PLeafCon], IRExpr -> (IRExpr, IRExpr), Monotonicity)))
+-- constraints, the chain's steps outermost first (compose them with
+-- 'peelPoint' or 'peelBound'), and the chain's net monotonicity. Nothing:
+-- not such a chain over a continuous slice -- the caller tries its other
+-- rules (in particular, this deliberately declines chains bottoming out at
+-- discrete slices, which the value-enumeration path already covers).
+planPeelSlice :: CompilerMetadata -> PlanEnv -> Expr -> PlanM (Maybe (Either String (PlanRef, [PLeafCon], [PeelStep], Monotonicity)))
 planPeelSlice meta env = go
   where
     go e | Just refE <- planEvalRef meta env e = return $ case refE of
       Right (ref@(PlanRef Continuous _), cons) ->
-        Just (Right (ref, cons, \b -> (b, const1), MonInc))
+        Just (Right (ref, cons, [], MonInc))
       _ -> Nothing
-    go (Expr _ (InjF (Named "neg") [a]))    = chain a (IRUnaryOp OpNeg) (const const1) MonDec
-    go (Expr _ (InjF (Named "double") [a])) = chain a (\b -> IROp OpDiv b (IRConst (VFloat 2))) (const (IRConst (VFloat 0.5))) MonInc
-    go (Expr _ (InjF (Named "exp") [a]))    = chain a (IRUnaryOp OpLog) (\b -> IROp OpDiv const1 b) MonInc
-    go (Expr _ (InjF (Named "log") [a]))    = chain a (IRUnaryOp OpExp) (IRUnaryOp OpExp) MonInc
+    go (Expr _ (InjF (Named "neg") [a]))    = chain a "neg" (IRUnaryOp OpNeg) (const const1) MonDec
+    go (Expr _ (InjF (Named "double") [a])) = chain a "double" (\b -> IROp OpDiv b (IRConst (VFloat 2))) (const (IRConst (VFloat 0.5))) MonInc
+    go (Expr _ (InjF (Named "exp") [a]))    = chain a "exp" (IRUnaryOp OpLog) (\b -> IROp OpDiv const1 b) MonInc
+    go (Expr _ (InjF (Named "log") [a]))    = chain a "log" (IRUnaryOp OpExp) (IRUnaryOp OpExp) MonInc
     go (Expr _ (InjF (Named "plus") [a, b]))
       | pdep a, pfree b = plusStep a b
       | pdep b, pfree a = plusStep b a
@@ -3972,27 +3979,69 @@ planPeelSlice meta env = go
     pfree x = not (pdep x) && pType (getTypeInfo x) == Deterministic
     plusStep pe de = do
       d <- planGenDet meta env de
-      chain pe (\b -> IROp OpSub b d) (const const1) MonInc
+      chain pe "plus" (\b -> IROp OpSub b d) (const const1) MonInc
     multStep pe de = do
       d <- planGenDet meta env de
       case d of
         IRConst (VFloat f) | f /= 0 ->
-          chain pe (\b -> IROp OpDiv b d) (const (IRConst (VFloat (1 / abs f))))
+          chain pe "mult" (\b -> IROp OpDiv b d) (const (IRConst (VFloat (1 / abs f))))
                    (if f > 0 then MonInc else MonDec)
         _ -> return (Just (Left "multiplication of a continuous plan leaf by a non-literal deterministic operand has no statically known monotonicity direction"))
-    -- Compose one peeled step (observed -> operand space) with the rest of
+    -- Prepend one peeled step (observed -> operand space) to the rest of
     -- the chain (operand space -> leaf space).
-    chain pe stepF covF stepDir = do
+    chain pe name stepF covF stepDir = do
       innerM <- go pe
-      return $ fmap (fmap (\(ref, cons, invT, dir) ->
+      return $ fmap (fmap (\(ref, cons, steps, dir) ->
         ( ref, cons
-        , \b -> let (bi, covI) = invT (stepF b) in (bi, mulCov (covF b) covI)
+        , PeelStep stepF covF (injFImage name) : steps
         , if stepDir == MonDec then flipDir dir else dir ))) innerM
     flipDir MonInc = MonDec
     flipDir MonDec = MonInc
+
+-- | Transport an observed POINT down a peeled chain: (leaf-space point,
+-- |d leaf-space point / d observed point| change-of-variables factor, image
+-- guards). A step whose forward image is not the whole line ('injFImage')
+-- contributes 'imageGuards' on its own input -- a point the step can never
+-- produce makes the world impossible rather than reaching the partial
+-- inverse (@log@ of a negative observation is NaN, which used to become a
+-- NaN probability; task set-witness-interval-partial-inverse). Such a step's
+-- input is let-bound first so the guards, the inverse and the factor share
+-- one evaluation; a full-image step binds nothing, keeping the emitted IR of
+-- the pre-existing corpus unchanged.
+peelPoint :: [PeelStep] -> IRExpr -> PlanM (IRExpr, IRExpr, [IRExpr])
+peelPoint [] b = return (b, const1, [])
+peelPoint (s : ss) b0 = do
+  b <- bindPeelInput s b0
+  (bi, covI, gs) <- peelPoint ss (peelInv s b)
+  return (bi, mulCov (peelCov s b) covI, imageGuards (peelImage s) b ++ gs)
+  where
     mulCov x y | x == const1 = y
                | y == const1 = x
                | otherwise   = IROp OpMult x y
+
+-- | Transport an observed interval ENDPOINT down a peeled chain: the
+-- leaf-space endpoint. Each step's input is clamped into the step's image
+-- first ('clampToImage'), the same per-step discipline as
+-- 'ForwardChaining.toSeededMonotoneInvExpr' -- a bound outside the image is
+-- moved onto its boundary, which the inverse carries to the leaf's own
+-- infinity, so an always-true comparison measures 1 and an always-false one
+-- 0 instead of NaN. No change-of-variables factor: interval mass needs none.
+peelBound :: [PeelStep] -> IRExpr -> PlanM IRExpr
+peelBound [] b = return b
+peelBound (s : ss) b0 = do
+  b <- bindPeelInput s b0
+  peelBound ss (peelInv s (clampToImage (peelImage s) b))
+
+-- Let-bind a step's input when the step will read it more than once (only
+-- a step with a proper sub-image does), unless it already is a variable.
+bindPeelInput :: PeelStep -> IRExpr -> PlanM IRExpr
+bindPeelInput s b
+  | peelImage s == fullImage = return b
+  | IRVar _ <- b = return b
+  | otherwise = do
+      v <- lift (mkVariable "peel_in")
+      lift (setVariables [(v, b)])
+      return (IRVar v)
 
 -- | Invert the observation @body ∈ target@ into plan-leaf constraint worlds.
 -- The plan-backed analogue of 'invertToWorlds'. Left carries a diagnostic
@@ -4129,7 +4178,7 @@ planInvert meta env planBody target = case planBody of
         -- full-measure set (the point is a null set).
         Just (Right (PlanRef Continuous off, cons)) -> do
           dv <- bindDetSide "eq_rhs" de
-          contEqWorlds off cons (IRVar dv) const1
+          contEqWorlds off cons (IRVar dv) const1 []
         Just (Left why) -> return (Left why)
         _ -> do
           peelM <- planPeelSlice meta env pe
@@ -4137,12 +4186,12 @@ planInvert meta env planBody target = case planBody of
             -- A monotone transform chain over a continuous leaf (milestone
             -- 3): pin the leaf at the inverse-transformed value, with the
             -- change-of-variables factor of the inverse chain.
-            Just (Right (PlanRef _ off, cons, invT, _)) -> do
+            Just (Right (PlanRef _ off, cons, steps, _)) -> do
               dv <- bindDetSide "eq_rhs" de
-              let (bnd, cov) = invT (IRVar dv)
+              (bnd, cov, imgGs) <- peelPoint steps (IRVar dv)
               bv <- lift (mkVariable "eq_bnd")
               lift (setVariables [(bv, bnd)])
-              contEqWorlds off cons (IRVar bv) cov
+              contEqWorlds off cons (IRVar bv) cov imgGs
             Just (Left why) -> return (Left why)
             -- Not a continuous shape: enumerate the plan-dependent side's
             -- values (milestone 2) and guard each against the deterministic
@@ -4158,8 +4207,12 @@ planInvert meta env planBody target = case planBody of
                   let tw = [ planAddGuard (eqG v) w                    | (v, w) <- pairs ]
                   let fw = [ planAddGuard (IRUnaryOp OpNot (eqG v)) w | (v, w) <- pairs ]
                   return (Right (planBoolWorlds target tw fw))
-    contEqWorlds off cons v cov = do
-      let tw = [pw1 (insertLeafCon (PLeafPt off v cov []) cons)]
+    -- @gs@: image guards from 'peelPoint' -- the True outcome is impossible
+    -- (its world measures zero, the point never evaluated) when the observed
+    -- value lies outside some peeled step's image; the False outcome is the
+    -- complement of a null set either way.
+    contEqWorlds off cons v cov gs = do
+      let tw = [pw1 (insertLeafCon (PLeafPt off v cov gs) cons)]
       let fw = [pw1 cons]
       return (Right (planBoolWorlds target tw fw))
     -- Comparison of an enum leaf against a deterministic bound: each leaf
@@ -4190,9 +4243,9 @@ planInvert meta env planBody target = case planBody of
           -- A monotone transform chain over a continuous leaf (milestone 3):
           -- transport the bound through the inverse chain; a net-decreasing
           -- chain flips which half-line the True outcome selects.
-          Just (Right (PlanRef _ off, cons, invT, dir)) -> do
+          Just (Right (PlanRef _ off, cons, steps, dir)) -> do
             dv <- bindDetSide "cmp_rhs" de
-            let (bnd, _) = invT (IRVar dv)
+            bnd <- peelBound steps (IRVar dv)
             bv <- lift (mkVariable "cmp_bnd")
             lift (setVariables [(bv, bnd)])
             contCmpWorlds off cons (IRVar bv) ((isGT /= flipped) == (dir == MonInc))
@@ -4660,11 +4713,14 @@ measurePlanWorlds nnRaw worlds
       -- A dim-0 world's mass vanishing means its slots were not selected, i.e.
       -- the world is impossible; a dim-1 (point-constrained continuous) world's
       -- density may be arbitrarily small while remaining possible, so it never
-      -- derives the flag from its value.
+      -- derives the flag from its value -- it is impossible exactly when one of
+      -- its structural guards fails (the world's own, or the point
+      -- constraint's membership/image guards: an observation outside a
+      -- peeled step's image, `exp leaf == -1.0`).
       ws <- forM worlds $ \w ->
               if planWorldDim w == 0
                 then onBranches (const branchSum) <$> opaqueMass linearSemiring (worldMass w) branchSum
-                else return (mkPResult (unsafeLinearP (worldMass w)) (dimC (planWorldDim w)) branchSum constFalseIR)
+                else return (mkPResult (unsafeLinearP (worldMass w)) (dimC (planWorldDim w)) branchSum (guardsFail w))
       case ws of
         []     -> return (impossibleP linearSemiring)
         -- Every world whose guards hold was traversed, so the branch count is the
@@ -4677,6 +4733,9 @@ measurePlanWorlds nnRaw worlds
     worldMass = planWorldMass nnRaw
     branchSum = sumUp (map branch worlds)
     branch w = foldr (\g acc -> IRIf g acc const0) const1 (pwGuards w)
+    guardsFail w = case pwGuards w ++ concat [ gs | PLeafPt _ _ _ gs <- pwCons w ] of
+      [] -> constFalseIR
+      gs -> notIR (foldr1 andIR gs)
 
 -- | Dimensionality of a world's mass: one per point constraint (a univariate
 -- density); discrete slots, CDF intervals, pairwise couplings and the carried

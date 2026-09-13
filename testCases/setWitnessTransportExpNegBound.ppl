@@ -1,0 +1,6 @@
+-- Interval transport through exp against a NEGATIVE bound: exp x > -1 holds
+-- for every x. Before task set-witness-interval-partial-inverse the bound was
+-- handed to the partial inverse (log(-1) = NaN) and the world silently
+-- measured 0; the bound is now clamped into exp's image (0, inf) first, so it
+-- transports to log 0 = -inf and the True world has full mass.
+main = let x = Normal in if exp x > (0.0 - 1.0) then 1.0 else 0.0

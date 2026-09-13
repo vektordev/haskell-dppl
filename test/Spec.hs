@@ -291,6 +291,21 @@ logSpaceUncoveredPrograms =
   , "setWitnessNestedLetShift", "setWitnessNestedLetDecreasing", "setWitnessNestedLetRename"
   , "setWitnessNestedLetTwoSided", "setWitnessNestedLetChain", "setWitnessNestedLetObserve"
   , "setWitnessNestedLetPointArm"
+  -- task set-witness-interval-partial-inverse: interval transport through
+  -- monotone InjF steps (and its image clamp), measured by the same linear
+  -- measureSet.
+  , "setWitnessTransportExpNegBound"
+  , "setWitnessTransportExpLt"
+  , "setWitnessTransportExpTwoSided"
+  , "setWitnessTransportExpNested"
+  , "setWitnessTransportExpOfNeg"
+  , "setWitnessTransportPlus"
+  , "setWitnessTransportPlusTwoSided"
+  , "setWitnessTransportMultNeg"
+  , "setWitnessTransportMultPos"
+  , "setWitnessTransportDouble"
+  , "setWitnessTransportNeg"
+  , "setWitnessTransportLog"
   ]
 
 checkLogSpaceMatchesLinear :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property

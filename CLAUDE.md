@@ -234,6 +234,18 @@ no occurrence of the bound variable is point-invertible at all. Full
 mechanism, examples, and the `testCases/planEnum*` pointers:
 `docs/witness-inversion-engines.md`.
 
+An interval constraint reaching the bound variable through a chain of
+monotone `InjF` steps is transported by `toSeededMonotoneInvExpr` (direction
+table `stepMonotonicity`), with each step's input first clamped into that
+step's forward image (`injFImage`/`clampToImage`, same module) — an
+endpoint the forward function can never produce, like the `-1` in
+`exp x > -1.0`, must not reach the partial inverse (`log(-1) = NaN`, which
+the empty-interval clamp then turned into a silent zero). The plan engine's
+`planPeelSlice` reads the same table (`peelBound` clamps, `peelPoint`
+guards). Adding a monotone step whose inverse is partial means adding its
+image there too. Details in the doc above; corpus
+`testCases/setWitnessTransport*`, `planEnumContExp*`.
+
 ### Forward chaining never re-derives a chain name it already has
 
 `ForwardChaining.solveHCSet` fulfils, per clause group, the first clause whose

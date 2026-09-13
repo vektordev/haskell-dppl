@@ -63,3 +63,40 @@ right-hand side drawing fresh randomness (`let y = x + Normal in …`), which
 point-valued-arm shapes); refusals pinned in `TestRejection`'s
 `SetWitnessNestedLet` group. The engine stays linear-only, so these programs
 are on `Spec.logSpaceUncoveredPrograms` like their single-`let` siblings.
+
+### Interval transport through monotone `InjF` steps
+
+An interval on a subtree that is a chain of monotone float functions over
+the bound variable — `exp x > -1.0`, `(x + 1.0) > 0.0`, `x * (-2.0) > 1.0`,
+`exp (exp x) < 2.0` — is carried down to the variable by
+`ForwardChaining.toSeededMonotoneInvExpr`: the point inverse of the chain
+plus a static direction certificate (`Monotonicity`; a net-decreasing chain
+swaps the endpoints, infinities included). The direction table is
+`stepMonotonicity` (`plus`/`double`/`exp`/`log` increasing, `neg`
+decreasing, `mult` by a *literal* by its sign; anything else refuses the
+transport with the set-witness diagnostic — `sqrt`, `recip`, `sq`, and
+`mult` by a non-literal such as `(0.0 - 2.0)` all land there).
+
+Every step's input is first clamped into that step's forward **image**
+(`injFImage`, next to the direction table; `clampToImage`), because a bound
+the forward function can never produce must not reach a partial inverse:
+`exp`'s inverse `log` turned `exp x > -1.0` into `log(-1) = NaN`, which
+`measureSet`'s empty-interval clamp then laundered into a silent zero mass
+on every backend. Clamped, `-1` becomes `0`, `log 0 = -inf`, and the world
+has full mass; an interval wholly outside the image collapses onto the
+boundary point and measures zero (`exp x < -1.0` is impossible). The clamp
+is applied per spine step on the step's own input, which is what makes a
+nested chain right — `exp (exp x) > 0.5` sends `log 0.5 < 0` into the inner
+`exp`, which clamps it again. Infinite bounds bypass the clamp: `exp`'s
+image boundary *is* the argument's infinity, so `(-inf, 5)` on `exp x`
+transports to `(-inf, log 5)` directly. `log` has a partial *domain* but a
+full image, so it clamps nothing; its `-inf` endpoint stays `-inf` rather
+than becoming `exp(-inf) = 0`, which happens to agree with sampling (`log`
+of a negative is `NaN`, and `NaN > c` is `False` on every backend). The
+plan-guided engine's `planPeelSlice` reads the same image table: its
+interval transport (`peelBound`) clamps per step the same way, and its
+point transport (`peelPoint`) adds strict image-membership guards instead,
+so `exp leaf == -1.0` is impossible rather than a NaN density. Corpus:
+`testCases/setWitnessTransport*` (one program per table entry plus the
+nested, two-sided and always-false `exp` shapes) and
+`testCases/planEnumContExp*`.
