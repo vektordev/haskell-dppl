@@ -372,15 +372,20 @@ inferE ctx env expr = case expr of
         m    = gateScalarFamily (rType ti) (tagFinMod (icADTs ctx) ti (injFMod (icADTs ctx) fname mods))
     in done m (Expr (setPType ti (projectI m)) (InjF name es')) acc
 
+  -- The arms are inferred under an environment in which every random variable
+  -- the condition reads has been /conditioned/ on the condition's outcome:
+  -- see 'conditionEnv'. The condition itself is inferred under the unrefined
+  -- environment (it reads the variable's standalone law).
   Expr ti (IfThenElse c t f) ->
     let (mc, c', ca) = inferE ctx env c
-        (mt, t', ta) = inferE ctx env t
-        (mf, f', fa) = inferE ctx env f
+        armEnv       = conditionEnv env c
+        (mt, t', ta) = inferE ctx armEnv t
+        (mf, f', fa) = inferE ctx armEnv f
         m = applyOuterI (outerI mc) (meetI mt mf)
     in done m (Expr (setPType ti (projectI m)) (IfThenElse c' t' f')) (ca ++ ta ++ fa)
 
   Expr ti (Lambda x body) ->
-    let argTy = case rType ti of TArrow a _ -> a; _ -> TFloat
+    let (argTy, bodyTy) = case rType ti of TArrow a b -> (a, b); _ -> (TFloat, TFloat)
         arr   = IArr gExact (\m -> let (im,_,_) = inferE ctx (Map.insert x m env) body in im)
         (bodyRepMod, body', ba) = inferE ctx (Map.insert x (repIMod argTy) env) body
     -- The internal modality is the closure 'arr' (so application β-reduces), but
@@ -388,7 +393,17 @@ inferE ctx env expr = case expr of
     -- closure 'Deterministic' — IRCompiler selects prob/integrate codegen from the
     -- function node's pType (e.g. a top-level @distr x = 2*Uniform+x@ must read
     -- 'Integrate', not the lossy outer 'Deterministic'). Matches @PInfer2@.
-    in done arr (Expr (setPType ti (projectI bodyRepMod)) (Lambda x body')) ba
+    --
+    -- Through 'projectNode', not 'projectI': for a curried @f x y = ...@ the
+    -- body is itself a lambda, whose /outer/ ground is the Dirac closure, so
+    -- 'projectI' read every two-or-more-parameter function as 'Deterministic'
+    -- whatever its result was -- and IRCompiler's variant gate then compiled a
+    -- probability function for a 'Bottom' body and crashed in it (the
+    -- @sim_fpi speed thetas@ repro of task
+    -- @continuous-recursive-gate-witness-failure@; the one-parameter twin was
+    -- declined cleanly). 'projectNode' recurses down the arrow spine to the
+    -- final result, the same way a 'Var' referencing the function is annotated.
+    in done arr (Expr (setPType ti (projectNode bodyTy bodyRepMod)) (Lambda x body')) ba
 
   Expr ti (Apply f arg) ->
     let (argMod, arg', aa) = inferE ctx env arg
@@ -445,6 +460,65 @@ inferE ctx env expr = case expr of
 hasReadNN :: Expr -> Bool
 hasReadNN (Expr _ (ReadNN _ _)) = True
 hasReadNN (Expr _ f)            = any hasReadNN f
+
+-- | The environment an @if@'s arms are inferred under: every let-bound random
+-- variable the condition reads is rebound to its law /conditioned on the
+-- condition's outcome/ ('conditionI').
+--
+-- Inside @let v = Normal in if v < b then x else y@, the @v@ that @x@ sees is
+-- not a Normal: it is the Normal's negative part, a truncated distribution
+-- (and @y@ sees the positive part). A truncation keeps every query
+-- capability the standalone law had -- a density that is the original one
+-- restricted and renormalised, a CDF that is the original one shifted and
+-- rescaled -- but it is a different law, of no closed family. Binding the
+-- arm occurrences at the standalone law instead let 'tryNormalClosure' type
+-- @v + Normal@ inside the arm as 'PNormal' and admit a program no engine can
+-- compile (the sum of a truncated Normal and a Normal is neither Gaussian nor
+-- anything the set-witness engine can invert onto @v@): task
+-- @continuous-recursive-gate-witness-failure@. The same holds for a
+-- condition that constrains @v@ in any other way -- @f v@, @v * v < 1@,
+-- @v < w@ -- which is why the refinement keys off the condition's free
+-- variables rather than off the @v < bound@ spelling.
+--
+-- Only /random/ bindings are conditioned: a deterministic condition
+-- partitions nothing (there is one value), and a Dirac law is unchanged by
+-- restriction. Variables the condition does not read are untouched -- their
+-- law is independent of the outcome. The condition itself is inferred under
+-- the unrefined environment.
+conditionEnv :: Env -> Expr -> Env
+conditionEnv env c = foldr refine env (Set.toList (freeVarsOf c))
+  where refine v e = case Map.lookup v e of
+          Just m | gCap (outerI m) /= Exact -> Map.insert v (conditionI m) e
+          _                                 -> e
+
+-- | A law restricted to the event some condition on its value holds. The
+-- capability set survives (restriction preserves having a density / CDF /
+-- being samplable), and so does support finiteness (a subset of a finite
+-- support is finite); what is lost is
+--
+--   * the distribution __family__ -- the restriction of a Normal to a
+--     half-line is not a Normal, so the family closures must not fire on it;
+--   * the __witness__ flag -- 'IWit' says the observation determines the value
+--     on every path; inside one arm it does so only if /that arm/ recovers it,
+--     and the free-Exact treatment a witnessed operand gets in 'floorCombine'
+--     is exactly what admitted @v + Normal@ in an arm that does not.
+--
+-- Applied structurally: a conditioned tuple's fields are conditioned (the
+-- event is on the whole value, so no field's family survives either).
+conditionI :: IMod -> IMod
+conditionI (IWit m)      = conditionI m
+conditionI (IG g)        = IG g { gFam = FamNone }
+conditionI (IProd a b)   = IProd (conditionI a) (conditionI b)
+conditionI (ISum t a b)  = ISum t { gFam = FamNone } (conditionI a) (conditionI b)
+conditionI (IRec s e)    = IRec s { gFam = FamNone } (conditionI e)
+conditionI m@(IArr _ _)  = m   -- a function has no law to restrict
+
+-- | The free variables of an expression: 'Var' occurrences not bound by an
+-- enclosing 'Lambda' within it. ('containedVars' does not see binders.)
+freeVarsOf :: Expr -> Set.Set String
+freeVarsOf (Expr _ (Var v))       = Set.singleton v
+freeVarsOf (Expr _ (Lambda x b))  = Set.delete x (freeVarsOf b)
+freeVarsOf (Expr _ f)             = foldr (Set.union . freeVarsOf) Set.empty f
 
 -- | Mirror of @IRCompiler.isEnumerable@: does this operand carry a
 -- 'DiscreteValues' domain the enumerate-both grid can actually loop over?
