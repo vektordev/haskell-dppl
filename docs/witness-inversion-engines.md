@@ -38,3 +38,28 @@ let x = Normal in if x < 0.0 then 0.0 - x else x
 yields the `|Normal|` density `2φ(y)` (`testCases/letProbAbsNormal`). Bodies
 drawing fresh randomness alongside such constraints are refused with a
 diagnostic.
+
+A nested `let` between the source and the constraint — `let x = Normal in
+let y = x + 1.0 in if y > 0.0 then 1.0 else 0.0`, which the parser desugars
+to `Apply (Lambda y b) e` — is inverted *through* the inner binding in two
+stages rather than looked past: `invertToWorlds` first inverts the body `b`
+onto `y` (using `y`'s own `lambdaVarOccurrences` entry, so every structural
+case above applies unchanged), then inverts `e` onto `x` with each y-world's
+set as the target, so an interval or point on `y` transports onto `x` through
+the same monotone/point machinery (change-of-variables factors compose;
+decreasing right-hand sides swap endpoints; a bare rename `let y = x` needs
+no special case). A `WFull`/`WEmpty` y-set passes through untouched, and a
+`WChoice` y-set — what every point constraint meeting an interval produces,
+i.e. the `observe` shape — is transported side by side into two mutually
+exclusive guard groups, with the choice condition ordered after the y-guards
+(it reads the witness value, which only the y-guards make safe to evaluate)
+and before the x-guards. Two shapes keep the existing refusal: `x` occurring
+in the inner *body* at all (its worlds would reference the inner binding's
+value, which is not in scope where worlds are measured), and an inner
+right-hand side drawing fresh randomness (`let y = x + Normal in …`), which
+`transportDirect` cannot seed through — exactly where the flattened
+`(x + Normal) > 0.0` refuses. Corpus: `testCases/setWitnessNestedLet*`
+(seven programs, incl. the two-sided, chained, `observe` and
+point-valued-arm shapes); refusals pinned in `TestRejection`'s
+`SetWitnessNestedLet` group. The engine stays linear-only, so these programs
+are on `Spec.logSpaceUncoveredPrograms` like their single-`let` siblings.
