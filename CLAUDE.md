@@ -124,7 +124,8 @@ those exhaustive matches as incomplete.
 ```
 SPLL source (.spll/.ppl)
   → Parser.hs (megaparsec) → AST (Lang/Lang.hs, Lang/Types.hs)
-  → Validator.hs → Typing/RInfer.hs (return types)
+  → Validator.hs → CalleeNormalize.hs (function values in callee position)
+  → Typing/RInfer.hs (return types)
   → Analysis.hs (DiscreteValues tags) → Typing/ForwardChaining.hs (chain names)
   → Typing/ModalityInfer.hs (PTypes) → Typing/LetInline.hs (fixpoint, usually a no-op)
   → Analysis.hs (IsConditional tags)
@@ -357,6 +358,73 @@ implements; they are still admitted and still die in the set-witness refusal
 inlining its comparison is measured by the linear-pinned set-witness engine, the
 same reason its `setWitnessTransport*` neighbours are listed; its eight siblings
 return the sum itself and go through the log-aware core combinators.
+
+### Callee Normalization
+
+Probability mode compiles `Apply l v` by inverting the observation through
+`l`'s body, which presupposes `l` names a lambda the compiler can see:
+`ForwardChaining.findEquivalentExpression` has to resolve `l`'s chain name to a
+`LambdaInfo`. That holds for a lambda literal and for a bare name (a top-level
+function, or a `let`-bound one -- FC's equivalence classes walk through a
+variable). It fails for every *other* way a program can produce a function
+value, and the failures were not graceful: a lambda projected out of a tuple or
+taken from a list hit an internal "should resolve to a lambda" `error`, and one
+chosen by an `if` compiled a mixture that multiplied a branch weight by a
+closure and died in the interpreter with a type error at run time.
+
+`SPLL.CalleeNormalize` removes the selection rather than teaching each engine to
+see through it. Two purely syntactic rewrites, run by `Prelude.compile` on the
+freshly parsed program (before RInfer, so every node it builds is annotated by
+the rest of the pipeline like any other -- no re-chain-naming round, unlike
+`LetInline`):
+
+- **An `if` in callee position is distributed into its arms**:
+  `(if c then f else g) v` becomes `if c then f v else g v`. The arms are
+  alternatives, so no draw in `v` is duplicated -- only one arm is ever realised
+  -- and the result is the ordinary mixture the `IfThenElse` rules already
+  compile, over the two applications' *probabilities* rather than over closures.
+  This is what makes a probabilistic function value a real capability
+  (`testCases/arrowApplyRandomFunction`) instead of a runtime crash.
+- **A callee denoting a lambda literal is replaced by it**: `fst`/`snd` of a
+  tuple literal, `head`/`tail` of a list literal, and `let`-bound names standing
+  for either, reduced until a `Lambda` falls out. Only a reduction that bottoms
+  out at a lambda is taken, so nothing else is ever moved.
+
+The one selection it deliberately leaves alone is a **bare name** in callee
+position, precisely because that is the one FC already resolves. An earlier
+draft substituted those too and moved two working programs onto a different
+path: `hoProbValueLambda` (`(\x -> x 1.0) (\y -> Uniform + y)`) became a dead
+binding whose arrow-typed probabilistic argument arm generates rather than
+infers, tripping the central generate-backed-body guard, and `twiceApplication`
+stopped being refused by batched mode. It also would not terminate on a
+recursive function. Descending under a binder drops every environment entry
+whose value mentions that name, so a lambda is never moved into a scope where
+one of its free variables means something else.
+
+Corpus: `arrowApply*` (the probe table of investigation
+`modality-function-space-test-coverage`, rows 1-6 and 8). Row 7,
+`(\x -> x + x) Normal`, is a *wontfix* precision gap -- the family layer is
+right that `2X` of a Gaussian is Gaussian, but the set-witness engine cannot
+propagate an observation onto a variable occurring on both sides of its own
+sum -- and is pinned as a refusal by `TestRejection`'s `ArrowApplySelfSum`.
+
+A second, independent half of the same task: the `PNormal`/`PLogNormal`
+catch-alls in `IRCompiler` now also decline a **local `Var`** and an
+**`IfThenElse`**, neither of which `toIRNormalParams` has any `(mu, sigma)` to
+read off, so the catch-all could only ever reach its fallthrough `error`.
+A local `Var` is reached by a nested `let` (`let x = Normal in let y = x + 1.0
+in y`: the body-factor fold retypes `x + 1.0` Deterministic but leaves `y`
+labelled `PNormal`), and `hasOwnInferenceHandler` now asks the type environment
+the same `Just (_, False)` question the `Var` equation itself dispatches on. An
+`IfThenElse` is a mixture -- of two Gaussians it is not a Gaussian -- and its
+own equation measures the arms and mixes them, which is right whether the
+condition is deterministic (`ifSelectNormalDet`, which `TestModalityInfer`
+already typed `PNormal` while the pipeline crashed on it) or probabilistic
+(`ifSelectNormalMixture`, an even mixture of `N(1,1)` and `N(0,2)` that now
+answers exactly). `isNormalExtractable`, the mirror predicate gating whether a
+top-level function gets a `normalFun` at all, excludes `IfThenElse` for the same
+reason. Corpus: `letChainNormalVar`, `letChainNormalVarTuple`,
+`ifSelectNormalDet`, `ifSelectNormalMixture`.
 
 ### Forward chaining never re-derives a chain name it already has
 
@@ -810,6 +878,7 @@ fully-annotated AST after each pipeline stage to stderr via
 | Stage | What becomes visible |
 |---|---|
 | After Parsing | All fields `NotSetYet`, tags empty |
+| After Callee Normalization | printed **only** when a callee was rewritten — still unannotated (see Callee Normalization below) |
 | After RType Inference | `rType` populated; `pType` still `NotSetYet` |
 | After Enum Annotation | `DiscreteValues` tags appear |
 | After Forward Chaining | `chainName` fields filled |
