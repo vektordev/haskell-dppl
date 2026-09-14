@@ -2191,25 +2191,29 @@ buildEnd2EndTree treeName includeBackends compiledCases = testGroup treeName $
     ] ++
     ( if not includeBackends then [] else
       let queryTestCases = [(n, p, c, bs, filter (\x -> isProbTestCase x || isCumulTestCase x) tcs) | (n, p, c, bs, tcs) <- compiledCases]
-          -- A query program routes onto every backend it lists, same as
-          -- before, except that Python now also takes a neural program
-          -- (@includeNeural = True@): the filter that used to drop one there
-          -- existed only because Python has no network to call at runtime,
-          -- not because the routing was otherwise unsound (task
-          -- route-neural-programs-to-julia-python-backends). Once an identity
-          -- mock is installed for each declared network ('testPython') and
-          -- the .tst row's own mock-NN parameters are pre-resolved to the raw
-          -- vectors that mock would have produced ('resolveNeuralTestCase'),
-          -- a neural program is just another program. Julia keeps the old
-          -- exclusion for now (@includeNeural = False@) -- the design doc's
-          -- own recommendation (agreed on review) is Python first, Julia
-          -- decided on the evidence of what that catches; 'testJuliaAll'
-          -- gained the same identity-mock plumbing so extending it later is a
-          -- routing-only change, not a harness one.
-          routedQueries includeNeural b =
+          -- A query program routes onto every backend it lists, neural or
+          -- not. The @null (neurals p)@ filter that used to stand here
+          -- existed only because neither text backend has a network to call
+          -- at runtime, not because the routing was otherwise unsound (task
+          -- route-neural-programs-to-julia-python-backends dropped it for
+          -- Python, route-neural-programs-to-julia-backend for Julia). Once
+          -- an identity mock is installed for each declared network
+          -- ('testPython', 'juliaBatchTestCode') and the .tst row's own
+          -- mock-NN parameters are pre-resolved to the raw vectors that mock
+          -- would have produced ('resolveNeuralTestCase'), a neural program
+          -- is just another program. The Julia flip was a routing-only
+          -- change: the mock plumbing had been built for both backends at
+          -- once, and adding @julia@ to the five .tst headers that still
+          -- listed @interpreter, python, batched@ was the rest of it. Every
+          -- newly-routed program agreed with the interpreter on the first
+          -- run, mode-0 seeded envelopes included.
+          --
+          -- 'unoptQueries' below still filters neural out, and deliberately:
+          -- it is scoped to 'unoptimizedCodegenSmoke', none of which is
+          -- neural.
+          routedQueries b =
             [ (n, c, if null (neurals p) then tcs else map (resolveNeuralTestCase p) tcs, networkNames p)
-            | (n, p, c, bs, tcs) <- queryTestCases, b `elem` bs, not (null tcs)
-            , includeNeural || null (neurals p) ]
+            | (n, p, c, bs, tcs) <- queryTestCases, b `elem` bs, not (null tcs) ]
           unoptQueries b = [(n, c, tcs') | (n, p, c, bs, tcs) <- unoptCases, b `elem` bs, null (neurals p)
                            , n `elem` unoptimizedCodegenSmoke
                            , n `notElem` unoptimizedCodegenExempt
@@ -2218,9 +2222,9 @@ buildEnd2EndTree treeName includeBackends compiledCases = testGroup treeName $
       in [ testGroup "Normalization"
              [ testProperty n (once $ discreteProbsNormalized p c) | (n, p, c) <- neuralP ]
          -- All Julia programs share one batch file (and one julia process) to amortize startup.
-         , testProperty "Julia" (once $ testJuliaAll [(c, tcs, nets) | (_, c, tcs, nets) <- routedQueries False Julia])
+         , testProperty "Julia" (once $ testJuliaAll [(c, tcs, nets) | (_, c, tcs, nets) <- routedQueries Julia])
          , testGroup "Python"
-             [ testProperty n (once $ testPython nets c tcs) | (n, c, tcs, nets) <- routedQueries True Python ]
+             [ testProperty n (once $ testPython nets c tcs) | (n, c, tcs, nets) <- routedQueries Python ]
          -- The same corpus through the text backends at -O0. See
          -- \'unoptCases\' for why this is not merely a duplicate of the
          -- optimized groups. None of 'unoptimizedCodegenSmoke' is neural, so
