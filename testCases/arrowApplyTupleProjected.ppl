@@ -1,0 +1,1 @@
+main = let p = (\x -> x + 1.0, 2.0) in (fst p) Normal

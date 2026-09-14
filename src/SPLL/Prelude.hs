@@ -85,6 +85,7 @@ import SPLL.Analysis
 import SPLL.Typing.Infer (addModalityInfo)
 import SPLL.Typing.RInfer (addRTypeInfo)
 import SPLL.Validator (validateProgram)
+import SPLL.CalleeNormalize (normalizeCallees)
 import IRInterpreter (generateRand, generateDet)
 import Control.Monad.Random (Rand, RandomGen)
 import SPLL.IRCompiler
@@ -339,6 +340,22 @@ compile conf p = do
   printIfVerbose conf (pPrintProg p)
   printStage conf "After Parsing (no annotations)" p
 
+  -- Callee normalisation (task modality-arrow-apply-crashes): resolve a
+  -- function *value* in callee position back to the lambda literal it denotes,
+  -- and distribute an application over an `if` that chooses between two of
+  -- them. Probability mode inverts an observation through the callee's body, so
+  -- it needs a lambda forward chaining can name; a tuple-projected, list-taken
+  -- or if-selected lambda has none, and crashed the compiler (or, for a
+  -- randomly selected one, multiplied a branch weight by a closure at runtime).
+  -- Purely syntactic, so it runs here, on the unannotated program: every node
+  -- it builds is annotated by the stages below like any other.
+  normalized <- case normalizeCallees p of
+    Nothing -> return p
+    Just rewritten -> do
+      printIfMoreVerbose conf "\n=== Callee normalisation rewrote the program ==="
+      printStage conf "After Callee Normalization" rewritten
+      return rewritten
+
   -- RType inference now runs first, directly on the freshly parsed program --
   -- it needs no chain names or enum tags (SPLL.Typing.RInfer reads only the
   -- Expr shape and PredefinedFunctions' contracts). Running it here, rather
@@ -348,7 +365,7 @@ compile conf p = do
   -- partial-function crash on genuinely ill-typed input; (2) every later pass
   -- -- enum annotation, forward chaining, the modality pass -- sees real RType
   -- instead of NotSetYet, in case any of them can make use of it.
-  rtyped <- addRTypeInfo p
+  rtyped <- addRTypeInfo normalized
   printIfMoreVerbose conf "\n=== RType-inferred Program ==="
   pPrintIfMoreVerbose conf rtyped
   printStage conf "After RType Inference" rtyped

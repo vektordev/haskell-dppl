@@ -506,6 +506,51 @@ modalityInferTests = testGroup "ModalityInfer"
   -- known to legitimately hit this path, so it grows only on a fresh, examined
   -- case, and a new unexplained hit still fails the test.
   , corpusPartialSetTests
+
+  -- Task @modality-arrow-apply-crashes@: the arrow-space probe table of
+  -- investigation @modality-function-space-test-coverage@, pinned at the type
+  -- level. The engine's verdict was already correct on every row -- what was
+  -- broken was downstream, in 'SPLL.IRCompiler' -- so these assertions are the
+  -- half of the regression net that guards the *verdict* while the
+  -- @testCases/arrowApply*@ corpus pairs guard the compiled answer. Row 7
+  -- (@\x -> x + x@) is a wontfix precision gap and is pinned as a refusal in
+  -- 'TestRejection' instead.
+  , testGroup "arrow space: a function value reaching an application"
+      [ testCase "row 1: a named function applied to a Normal is PNormal" $
+          assertEqual "" PNormal $
+            mainPType "f x = x + 1.0\nmain = f Normal"
+      , testCase "row 2: a curried call with the Normal first is PNormal" $
+          assertEqual "" PNormal $
+            mainPType "add x y = x + y\nmain = (add Normal) 1.0"
+      , testCase "row 3: a lambda literal passed as an argument is PNormal" $
+          assertEqual "" PNormal $
+            mainPType "main = (\\f -> f Normal) (\\x -> x + 1.0)"
+      , testCase "row 4: a lambda projected out of a tuple is PNormal" $
+          assertEqual "" PNormal $
+            mainPType "main = let p = (\\x -> x + 1.0, 2.0) in (fst p) Normal"
+      , testCase "row 5: a lambda taken from a list is PNormal" $
+          assertEqual "" PNormal $
+            mainPType "main = (head [\\x -> x + 1.0]) Normal"
+      , testCase "row 6: a deterministically selected lambda is PNormal" $
+          assertEqual "" PNormal $
+            mainPType "main = (if 0.1 < 0.5 then (\\x -> x + 1.0) else (\\x -> x * 2.0)) Normal"
+      , testCase "row 7: the affine-in-itself argument is still PNormal" $
+          -- The family layer is right that 2X of a Gaussian is Gaussian; the
+          -- precision gap is in the witness engine, not here (see
+          -- TestRejection's ArrowApplySelfSum).
+          assertEqual "" PNormal $
+            mainPType "main = (\\x -> x + x) Normal"
+      , testCase "row 8: a randomly selected function value is Integrate" $
+          -- The correct ceiling: the mixture of two deterministic results is
+          -- measurable but carries no family.
+          assertEqual "" Integrate $
+            mainPType "main = (if Uniform < 0.5 then (\\x -> x + 1.0) else (\\x -> x * 2.0)) 3.0"
+      , testCase "a let-chained PNormal variable keeps the family" $
+          -- The no-function-value reach of the same IRCompiler fallthrough
+          -- (bug A, 2026-09-13): the verdict is right, the shortcut was not.
+          assertEqual "" PNormal $
+            mainPType "main = let x = Normal in let y = x + 1.0 in y"
+      ]
   ]
 
 -- | Corpus programs that legitimately reach a partial capability set (see the

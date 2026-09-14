@@ -54,6 +54,7 @@ rejectionTests = testGroup "Rejection"
   , setWitnessSharedLatentTests
   , setWitnessTransportTests
   , gatedContinuousFeedsFreshDrawTests
+  , arrowApplySelfSumTests
   ]
 
 -- ----------------------------------------------------------------------------
@@ -1067,6 +1068,39 @@ setWitnessTransportTests = testGroup "SetWitnessTransport"
           Right (Left e) -> assertFailure
             (what ++ " was declined by a different stage instead of the set-witness engine: " ++ e)
           Right (Right v) -> assertFailure (what ++ " was accepted and answered " ++ show v)
+
+-- ----------------------------------------------------------------------------
+-- Task modality-arrow-apply-crashes, row 7 of investigation
+-- modality-function-space-test-coverage's probe table: the one shape of the
+-- eight that is a deliberate precision gap rather than a defect.
+--
+-- `(\x -> x + x) Normal` is family-correct -- 2X of a Gaussian is Gaussian, and
+-- ModalityInfer says PNormal (pinned in TestModalityInfer) -- but the
+-- set-valued witness engine cannot propagate the observation onto a variable
+-- that occurs on both sides of its own sum, and refuses with the designed
+-- diagnostic. Settled as a wontfix on 2026-09-14: telling `x + x` from the tame
+-- `x * 2` in general is a rabbit hole with no closing move.
+--
+-- Pinned as a *refusal*, so that the day someone does close the gap this test
+-- fails and is deleted deliberately, rather than the shape silently drifting
+-- into a different crash.
+-- ----------------------------------------------------------------------------
+
+arrowApplySelfSumTests :: TestTree
+arrowApplySelfSumTests = testGroup "ArrowApplySelfSum"
+  [ testCase "the affine-in-itself argument is refused, not silently measured" $
+      withParsed "main = (\\x -> x + x) Normal" $ \prog -> do
+        res <- forcedProb prog (VFloat 0.5)
+        case res of
+          Left ex -> assertBool
+            ("expected the set-witness diagnostic, got: " ++ show ex)
+            (setWitnessDiagnostic `isInfixOf` show ex)
+          Right (Left e) -> assertFailure
+            ("declined by a different stage than the set-witness engine: " ++ e)
+          Right (Right v) -> assertFailure
+            ("the self-sum shape was accepted and answered " ++ show v
+             ++ " -- if the precision gap has been closed, delete this pin")
+  ]
 
 -- ----------------------------------------------------------------------------
 -- Task continuous-recursive-gate-witness-failure: a continuous let-bound value
