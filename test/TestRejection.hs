@@ -51,6 +51,7 @@ rejectionTests = testGroup "Rejection"
   , intractableComparisonTests
   , noGenerateSuppressedGeneratorTests
   , setWitnessNestedLetTests
+  , setWitnessSharedLatentTests
   , setWitnessTransportTests
   , gatedContinuousFeedsFreshDrawTests
   ]
@@ -953,6 +954,92 @@ setWitnessNestedLetTests = testGroup "SetWitnessNestedLet"
       Right (Left e) -> assertFailure
         (what ++ " was declined by a different stage instead of the set-witness engine: " ++ e)
       Right (Right _) -> assertFailure (what ++ " was accepted")
+
+-- ----------------------------------------------------------------------------
+-- A shared Gaussian latent: design pipeline-coherence's F2 row, still open
+-- ----------------------------------------------------------------------------
+
+-- These two pin a *defect*, not a contract, and they are here so that the
+-- remaining half of task @unwitnessed-gaussian-let-chain-admitted-but-crashes@
+-- has an executable instance rather than only prose in the docs repo. Its
+-- single-use half was closed at @003f933@ by 'SPLL.Typing.LetInline'; the
+-- multi-use half below is untouched by that pass and is filed as
+-- @correlated-gaussian-let-shares-latent@.
+--
+-- The family layer admits both programs (@tryNormalClosure "plus"
+-- [PNormal, PNormal]@ types each sum @PNormal@), and no engine compiles them:
+-- @x@ has two uses, so substitution is unavailable — it would replace one
+-- shared draw with two independent ones and silently decorrelate the output —
+-- and the honest density is a *bivariate* Gaussian (covariance @[[2,1],[1,2]]@
+-- for the first program) that nothing in the compiler represents.
+--
+-- __When these fail, read them before changing them.__ Three landings move
+-- them, and each wants a different edit:
+--
+-- * [[static-refusals-become-absent-variants]] (P1) makes a static refusal an
+--   absent variant. The refusal then arrives as @Right (Left …)@ and the whole
+--   compile survives, so 'assertSharedLatentRefusal' moves to the declined
+--   branch and the third case below inverts: @compile@ succeeds and @generate@
+--   works. That is the fix landing, and the cases must be updated, not deleted.
+-- * [[engine-applicability-as-data]] (P3) floors a binding no engine claims, so
+--   these type @Bottom@ and report a missing variant. Same edit.
+-- * A multivariate-Gaussian capability answers them for real. Then they stop
+--   being rejection cases and become corpus cases pinning the correlated
+--   density — at a point where it differs from the decorrelated one, which for
+--   @(a, b)@ at @(0, 0)@ is @1/(2*pi*sqrt 3) = 0.0918882@ against
+--   @1/(4*pi) = 0.0795775@. A rewrite that decorrelates them passes any weaker
+--   check.
+--
+-- What must never happen is one of these quietly starting to return a number
+-- without one of those three landing: that is the decorrelated answer, and it
+-- is wrong by 15% at the origin.
+
+-- Two sums over one latent. Both slots recover the same @x@, correlating them.
+sharedLatentTwoSumsSrc :: String
+sharedLatentTwoSumsSrc =
+  "main = let x = Normal in let a = x + Normal in let b = x + Normal in (a, b)"
+
+-- The same shape with the sum itself shared rather than the latent.
+sharedLatentTwoUsesSrc :: String
+sharedLatentTwoUsesSrc =
+  "main = let x = Normal in let y = Normal in (x + y, x + y)"
+
+setWitnessSharedLatentTests :: TestTree
+setWitnessSharedLatentTests = testGroup "SetWitnessSharedLatent"
+  [ testCase "two sums over one latent are refused, never silently decorrelated" $
+      withParsed sharedLatentTwoSumsSrc $ \prog -> do
+        res <- forcedProb prog (VTuple (VFloat 0.0) (VFloat 0.0))
+        assertSharedLatentRefusal "two sums over one latent" res
+  , testCase "two uses of one sum are refused, never silently decorrelated" $
+      withParsed sharedLatentTwoUsesSrc $ \prog -> do
+        res <- forcedProb prog (VTuple (VFloat 0.0) (VFloat 0.0))
+        assertSharedLatentRefusal "two uses of one sum" res
+  , testCase "the refusal is eager: it takes the whole compile down, generate with it" $
+      withParsed sharedLatentTwoSumsSrc $ \prog -> do
+        res <- forced (compile defaultCompilerConfig prog)
+        case res of
+          Left ex -> assertBool
+            ("expected the set-witness diagnostic from compile itself, got: " ++ show ex)
+            (setWitnessDiagnostic `isInfixOf` show ex)
+          Right _ -> assertFailure
+            "compile survived -- if static-refusals-become-absent-variants landed, \
+            \invert this case and move the two above to the declined branch"
+  ]
+  where
+    -- Deliberately not 'setWitnessNestedLetTests's assertion: that one also
+    -- requires the "neither point-invertible" sentence, which is about the
+    -- nested-let path. Here the only claim is that the set-witness engine is
+    -- the stage that declines, and that no number comes back.
+    assertSharedLatentRefusal what res = case res of
+      Left ex -> assertBool
+        ("expected the set-witness diagnostic for " ++ what ++ ", got: " ++ show ex)
+        (setWitnessDiagnostic `isInfixOf` show ex)
+      Right (Left e) -> assertFailure
+        (what ++ " was declined by a different stage instead of the set-witness engine: " ++ e)
+      Right (Right v) -> assertFailure
+        (what ++ " was ACCEPTED, returning " ++ show v ++ " -- a shared latent has a \
+         \bivariate density no engine implements, so a number here is the \
+         \decorrelated one (0.0795775 against the correct 0.0918882 at the origin)")
 
 -- Task set-witness-interval-partial-inverse: interval transport through a
 -- monotone InjF chain covers exactly 'ForwardChaining.stepMonotonicity's
