@@ -1,4 +1,0 @@
--- The same unwitnessed chain returned in a tuple's left slot (task
--- unwitnessed-gaussian-let-chain-admitted-but-crashes). The deterministic
--- sibling contributes a dim-0 indicator, so the pair is still dim 1.
-main = let x = Normal in let y = x + Normal in (y, 1.0)

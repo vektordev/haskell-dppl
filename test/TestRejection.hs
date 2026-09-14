@@ -885,10 +885,8 @@ noGenerateSuppressedGeneratorTests = testGroup "NoGenerateSuppressedGenerator"
 -- nested let (`Apply (Lambda y b) e`) in two stages -- body onto y, then the
 -- right-hand side onto x with each y-set as target. The corpus
 -- (testCases/setWitnessNestedLet*) pins the shapes that now compile; this
--- group pins the shape the case deliberately still refuses -- with the engine's
--- existing diagnostic rather than a new crash -- alongside the two that are
--- measured, one of them by the let-inlining of task
--- @unwitnessed-gaussian-let-chain-admitted-but-crashes@.
+-- group pins the two shapes the case deliberately still refuses, and that they
+-- refuse with the engine's existing diagnostic rather than a new crash.
 -- ----------------------------------------------------------------------------
 
 -- x occurs in BOTH the inner right-hand side and the inner body: x-sets from
@@ -898,14 +896,8 @@ nestedLetSharedOccurrenceSrc =
   "main = let x = Normal in let y = x + 1.0 in if y > x then 1.0 else 0.0"
 
 -- The inner right-hand side draws fresh randomness between the outer binding
--- and the comparison, so 'transportDirect' finds no seeded inverse through the
--- second draw -- but it no longer has to. This is the repro shape of task
--- @unwitnessed-gaussian-let-chain-admitted-but-crashes@: @x@ has a single use,
--- inside a @plus@ the family layer certifies, so 'SPLL.Typing.LetInline'
--- substitutes the binding away before codegen and the inline Gaussian shortcut
--- measures @N(0,2)@. It used to be refused here (the set-witness engine's
--- diagnostic, raised eagerly enough to take @generate@ down with it); it now
--- answers P(N(0,2) > 0) = 1/2.
+-- and the comparison: 'transportDirect' finds no seeded inverse through the
+-- second draw, exactly as it does not for the flattened `(x + Normal) > 0.0`.
 nestedLetFreshRandomnessSrc :: String
 nestedLetFreshRandomnessSrc =
   "main = let x = Normal in let y = x + Normal in if y > 0.0 then 1.0 else 0.0"
@@ -925,10 +917,10 @@ setWitnessNestedLetTests = testGroup "SetWitnessNestedLet"
       withParsed nestedLetSharedOccurrenceSrc $ \prog -> do
         res <- forcedProb prog (VFloat 1.0)
         assertSetWitnessRefusal "a shared occurrence across the inner let" res
-  , testCase "an inner binding drawing fresh randomness is inlined and measured" $
+  , testCase "an inner binding drawing fresh randomness is still refused" $
       withParsed nestedLetFreshRandomnessSrc $ \prog -> do
         res <- forcedProb prog (VFloat 1.0)
-        assertProbIs "the inlined fresh-randomness nested let" 0.5 res
+        assertSetWitnessRefusal "fresh randomness in the inner binding" res
   , testCase "the plain shifted nested let compiles and matches Phi(1)" $
       withParsed nestedLetShiftSrc $ \prog -> do
         res <- forcedProb prog (VFloat 1.0)
@@ -940,13 +932,6 @@ setWitnessNestedLetTests = testGroup "SetWitnessNestedLet"
           Right (Right v) -> assertFailure ("unexpected result shape: " ++ show v)
   ]
   where
-    assertProbIs what expected res = case res of
-      Left ex -> assertFailure (what ++ " crashed: " ++ show ex)
-      Right (Left e) -> assertFailure (what ++ " was refused: " ++ e)
-      Right (Right (VTuple (VFloat p) _)) -> assertBool
-        (what ++ ": expected " ++ show expected ++ ", got " ++ show p)
-        (abs (p - expected) < 1e-4)
-      Right (Right v) -> assertFailure (what ++ ": unexpected result shape: " ++ show v)
     assertSetWitnessRefusal what res = case res of
       Left ex -> assertBool
         ("expected the set-witness diagnostic for " ++ what ++ ", got: " ++ show ex)
@@ -963,8 +948,12 @@ setWitnessNestedLetTests = testGroup "SetWitnessNestedLet"
 -- These two pin a *defect*, not a contract, and they are here so that the
 -- remaining half of task @unwitnessed-gaussian-let-chain-admitted-but-crashes@
 -- has an executable instance rather than only prose in the docs repo. Its
--- single-use half was closed at @003f933@ by 'SPLL.Typing.LetInline'; the
--- multi-use half below is untouched by that pass and is filed as
+-- single-use half (@let x = Normal in let y = x + Normal in y@) was briefly
+-- closed at @003f933@ by a substitution pass, @SPLL.Typing.LetInline@, which
+-- has since been reverted: substitution answers the single-use shape only, and
+-- the multi-use shape below is the same defect with the remedy removed. Both
+-- halves are now owned by @affine-gaussian-forms@, which represents the latent
+-- rather than rewriting it away. The multi-use half is also filed as
 -- @correlated-gaussian-let-shares-latent@.
 --
 -- The family layer admits both programs (@tryNormalClosure "plus"
@@ -984,7 +973,8 @@ setWitnessNestedLetTests = testGroup "SetWitnessNestedLet"
 --   works. That is the fix landing, and the cases must be updated, not deleted.
 -- * [[engine-applicability-as-data]] (P3) floors a binding no engine claims, so
 --   these type @Bottom@ and report a missing variant. Same edit.
--- * A multivariate-Gaussian capability answers them for real. Then they stop
+-- * A multivariate-Gaussian capability (@affine-gaussian-forms@) answers them
+--   for real. Then they stop
 --   being rejection cases and become corpus cases pinning the correlated
 --   density — at a point where it differs from the decorrelated one, which for
 --   @(a, b)@ at @(0, 0)@ is @1/(2*pi*sqrt 3) = 0.0918882@ against

@@ -1,4 +1,0 @@
--- The same shape without the second let: the unwitnessed binding's single use
--- sits directly in the tuple's family-closure slot (task
--- unwitnessed-gaussian-let-chain-admitted-but-crashes).
-main = let x = Normal in (1.0, x + Normal)

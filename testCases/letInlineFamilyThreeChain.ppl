@@ -1,5 +1,0 @@
--- A three-deep chain: inlining 'x' into 'y' and 'y' into 'z' collapses to
--- Normal + Normal + Normal = N(0, 3). Pins that the rewrite reaches a fixpoint
--- rather than stopping after the first binding (task
--- unwitnessed-gaussian-let-chain-admitted-but-crashes).
-main = let x = Normal in let y = x + Normal in let z = y + Normal in z

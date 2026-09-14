@@ -94,9 +94,8 @@ import SPLL.IRSelectPass (selectPassEnv)
 import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
 import Debug.Trace
 import Data.Either
-import SPLL.Typing.ForwardChaining (annotateProg, FCData)
+import SPLL.Typing.ForwardChaining (annotateProg)
 import SPLL.Typing.Determinism (knownAnchors)
-import SPLL.Typing.LetInline (inlineFamilyClosureLets, letBindingCount)
 import qualified Data.Set as Set
 import Text.PrettyPrint.Annotated.HughesPJClass()
 import PrettyPrint (pPrintProg, pPrintIREnv)
@@ -395,18 +394,7 @@ compile conf p = do
   -- (modality-witnessed-inference, milestone 2). The same FCData is returned
   -- here and threaded to both remaining consumers (conditional annotation and
   -- IR codegen).
-  -- Stage 3: family-closure let inlining (task
-  -- unwitnessed-gaussian-let-chain-admitted-but-crashes). The modality pass
-  -- admits `let x = Normal in let y = x + Normal in y` -- the sum really is
-  -- Gaussian -- but the closed form is only realised on an *inline*
-  -- `Normal + Normal`, and through a let the unwitnessed binding reaches no
-  -- engine at all. Substituting a single-use binding into its use puts the two
-  -- draws next to each other, so the shortcut fires. The rewrite needs pTypes
-  -- to decide, hence it runs *after* the modality pass and re-runs the enum /
-  -- chain-name / modality stages on the rewritten program; when nothing is
-  -- eligible (every program that does not exhibit the shape) the loop stops on
-  -- the first iteration and costs one 'Eq Program' comparison.
-  (typed, fcData) <- inlineLoop conf (letBindingCount forwardChained) forwardChained
+  (typed, fcData) <- addModalityInfo forwardChained
   printIfMoreVerbose conf "\n=== Typed Program ==="
   pPrintIfMoreVerbose conf typed
   printStage conf "After Modality Inference (PType)" typed
@@ -576,34 +564,6 @@ runWriteLogitsC p compiled target outerArgs = do
     Just grp -> case writeLogitsFun grp of
       Nothing       -> Left ("Function group " ++ show target ++ " has no writeLogits function")
       Just (enc, _) -> generateDet (neurals p) (writeLogitsDecls p) compiled (map IRConst outerArgs) enc
-
--- | The modality pass, then family-closure let inlining, to a fixpoint (task
--- @unwitnessed-gaussian-let-chain-admitted-but-crashes@).
---
--- Each iteration types the program, asks 'inlineFamilyClosureLets' whether any
--- binding is both admitted and engine-less, and — when one is — substitutes it
--- into its single use and re-annotates from enum tagging onwards, because the
--- rewrite invalidates chain names. Returns the typed program and the 'FCData'
--- built from the same (final) chain names, exactly as a single
--- 'addModalityInfo' would.
---
--- @fuel@ is the program's @let@ count: a round removes at least one @let@, so
--- that bounds the iteration. Running out means 'inlineFamilyClosureLets'
--- reported a change without removing a binding, which is a compiler bug rather
--- than a bad program — hence the diagnostic rather than a silent fallthrough.
-inlineLoop :: CompilerConfig -> Int -> Program -> Either CompilerError (Program, FCData)
-inlineLoop conf fuel chained = do
-  (typed, fcData) <- addModalityInfo chained
-  case inlineFamilyClosureLets fcData typed of
-    Nothing -> return (typed, fcData)
-    Just rewritten
-      | fuel <= 0 -> Left "family-closure let inlining did not reach a fixpoint \
-                          \(task unwitnessed-gaussian-let-chain-admitted-but-crashes)"
-      | otherwise -> do
-          let rechained = annotateProg (annotateEnumsProg rewritten)
-          printIfMoreVerbose conf "\n=== Family-closure let inlining rewrote the program ==="
-          printStage conf "After Family-Closure Let Inlining" rechained
-          inlineLoop conf (fuel - 1) rechained
 
 printIfVerbose :: (Monad m) => CompilerConfig -> String -> m ()
 printIfVerbose CompilerConfig {verbose=v} s | v >= 1 = trace s (return ())

@@ -38,7 +38,6 @@ module SPLL.Typing.ModalityInfer
   , IMod(..)
   , inferProgram
   , toMod
-  , tryNormalClosure
   ) where
 
 import qualified Data.Map.Strict as Map

@@ -1,5 +1,0 @@
--- The other family-table entry with a random second operand: a product of two
--- log-normals is log-normal. Pins that 'mult' of two PLogNormals is inlined the
--- same way 'plus' of two PNormals is (task
--- unwitnessed-gaussian-let-chain-admitted-but-crashes).
-main = let x = exp Normal in let y = x * exp Normal in y
