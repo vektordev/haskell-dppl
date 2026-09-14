@@ -11,7 +11,7 @@ import SPLL.Lang.Lang
 import Data.List (intercalate, dropWhileEnd)
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..), shapeRank)
-import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage)
+import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, accessorMismatchMessage, fieldAccessorOwners)
 import Data.Maybe (fromMaybe)
 import Data.Functor ((<&>))
 import Control.Monad.State (StateT (runStateT), MonadState (get, put), MonadTrans (lift))
@@ -150,7 +150,9 @@ juliaCtorRef name = case break (== '.') (reverse name) of
   _                      -> juliaMangle name
 
 generateADTClasses :: [ADTDecl] -> [String]
-generateADTClasses decls = concatMap generateADTClass (concatMap constructors decls)
+generateADTClasses decls =
+  concatMap generateADTClass (concatMap constructors decls)
+  ++ concatMap (uncurry generateADTAccessor) (fieldAccessorOwners decls)
 
 -- Every identifier printed here goes through 'juliaMangle'; the declaration
 -- keeps the user's names (see 'renameADTIdentifiers'), and 'anyCtorTestMessage'
@@ -174,15 +176,27 @@ generateADTClass (name, fields) =
       -- Compare every field
       map (\f -> "if(!eq(self." ++ f ++ ", other." ++ f ++ ")) return false end") fieldNames ++ 
       ["return true"]) ++
-  ["end"] ++
-  -- Field acceessors
-  concatMap (\f ->
-    ("function " ++ f ++ "(x :: " ++ struct ++ ")") :
-    indentOnce ["return x." ++ f] ++
-    ["end"]
-  ) fieldNames
+  ["end"]
   where struct = juliaMangle name
         fieldNames = map juliaMangle (map fst fields)
+
+-- | One field accessor, guarded on the constructor that owns the field.
+--
+-- The signature used to be @function color(x :: Obj)@, so a sibling
+-- constructor produced Julia's own @MethodError: no method matching
+-- color(::Nil)@ -- and, where two constructors declared the same field name,
+-- two methods that both dispatched, where the interpreter admits only the
+-- first ('fieldAccessorOwners'). The parameter is now untyped with an explicit
+-- check, which makes the diagnostic the compiler's own and the resolution the
+-- interpreter's. See 'accessorMismatchMessage'.
+generateADTAccessor :: String -> String -> [String]
+generateADTAccessor fieldName ctorName =
+  ("function " ++ juliaMangle fieldName ++ "(x)") :
+  indentOnce [ "if !(x isa " ++ juliaMangle ctorName ++ ") throw("
+                 ++ show (accessorMismatchMessage fieldName ctorName)
+                 ++ " * \" Got: \" * string(typeof(x))) end"
+             , "return x." ++ juliaMangle fieldName ] ++
+  ["end"]
 
 generateFunctions :: IREnv -> [String]
 generateFunctions env0 = do

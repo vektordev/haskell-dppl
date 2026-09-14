@@ -130,6 +130,18 @@ generateFunctionsBatched genBoil env0 = do
 -- within a kernel call), so the predicate answers a plain Python bool; the
 -- fields are @[B]@ tensors, so @__eq__@ is elementwise like @T.__eq__@ -- except
 -- on a tag mismatch, which is structural and answers a Python @False@.
+--
+-- The accessors stay unguarded here, unlike the scalar backend's
+-- ('SPLL.CodeGenPyTorch.generateADTAccessor', task
+-- @adt-accessor-type-too-permissive@), which refuses a read off a sibling
+-- constructor with 'SPLL.Typing.AlgebraicDataTypes.accessorMismatchMessage'.
+-- Raising is the wrong shape in batched mode: both arms of a select are
+-- evaluated, which is exactly why a refusal here is a NaN @poison()@ rather
+-- than a throw ('batchedExpr's 'IRError' case), and @throw@ is not even a name
+-- pythonLibBatched.py defines. Whether the batched twin should poison, refuse
+-- at compile time, or keep the target language's own @AttributeError@ is a
+-- semantics decision that task did not own, so it was left alone rather than
+-- guessed at.
 generateADTClassesBatched :: [ADTDecl] -> [String]
 generateADTClassesBatched decls = concatMap one (concatMap constructors decls)
   where

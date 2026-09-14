@@ -23,7 +23,7 @@ import SPLL.Prelude (compile, runProb, runInteg, uniform, constB, constF, (#+#),
 import SPLL.IntermediateRepresentation (CompilerConfig, defaultCompilerConfig, checkQueryType, noIntegrate, noGenerate, firstAnyExceptIR, anyExceptCodegenRefusal, IRValue)
 import SPLL.Typing.Infer (addTypeInfo)
 import SPLL.Parser (tryParseProgram)
-import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, adtCdfMessage)
+import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, adtCdfMessage, accessorMismatchMessage)
 import qualified SPLL.CodeGenPyTorch
 import SPLL.CodeGenPyTorch (pyMangle, pythonKeywords)
 import SPLL.CodeGenJulia (juliaMangle, juliaKeywords)
@@ -33,7 +33,7 @@ import Control.Exception (try, evaluate, SomeException)
 import Data.List (isInfixOf, nub)
 import Data.Either (isLeft)
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (testCase, assertBool, assertFailure)
+import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure)
 
 rejectionTests :: TestTree
 rejectionTests = testGroup "Rejection"
@@ -42,6 +42,7 @@ rejectionTests = testGroup "Rejection"
   , queryTypeGuardTests
   , typeInferenceTests
   , anyCtorTestTests
+  , accessorMismatchTests
   , adtCumulativeTests
   , generateBackedTests
   , generateBackedReadNNSymbolTests
@@ -380,6 +381,83 @@ adtValuedProgSrc = unlines
   [ "data DTree = Leaf | Node l::DTree, r::DTree"
   , "genT = if Uniform < 0.6 then Leaf else Node genT genT"
   , "main = genT"
+  ]
+
+-- ----------------------------------------------------------------------------
+-- Field accessor applied to the wrong constructor
+-- ----------------------------------------------------------------------------
+
+-- `color` is a field of `Obj` only, so `color Nil` is undefined -- yet it
+-- typechecks, because the accessor's RType is `TADT "Object" -> TFloat` and
+-- `Nil` is an `Object`. The type system is not being changed (see
+-- 'accessorMismatchMessage'); what is pinned here is that all four runtimes
+-- fail the same way, and say what went wrong.
+accessorMismatchProgSrc :: String
+accessorMismatchProgSrc = unlines
+  [ "data Object = Nil | Obj color::Float"
+  , "main = color Nil"
+  ]
+
+-- Two constructors declaring the same field name. `findField` resolves `v` to
+-- `A` (first wins), so every backend must emit one `v` that accepts an `A`.
+-- Emitting an accessor per constructor made Python last-wins and Julia
+-- accept-both.
+accessorDuplicateFieldSrc :: String
+accessorDuplicateFieldSrc = unlines
+  [ "data T = A v::Float | B v::Float"
+  , "main = v (A 0.5)"
+  ]
+
+accessorMismatchTests :: TestTree
+accessorMismatchTests = testGroup "AccessorMismatch"
+  [ testCase "the interpreter names the accessor and its owning constructor" $
+      withParsed accessorMismatchProgSrc $ \prog -> do
+        res <- forced (runProb defaultCompilerConfig prog [] (VFloat 0.5))
+        case res of
+          Left e  -> assertBool ("expected the accessor-mismatch refusal, got: " ++ show e)
+                                (accessorMismatchMessage "color" "Obj" `isInfixOf` show e)
+          Right _ -> assertFailure
+            "reading a field off the wrong constructor silently produced a number"
+  , testCase "the refusal names both the accessor and the constructor it belongs to" $ do
+      let msg = accessorMismatchMessage "color" "Obj"
+      assertBool "the diagnostic does not name the accessor" ("color" `isInfixOf` msg)
+      assertBool "the diagnostic does not name the owning constructor" ("Obj" `isInfixOf` msg)
+  , testCase "emitted Python guards the accessor rather than raising AttributeError" $
+      withParsed accessorMismatchProgSrc $ \prog ->
+        case compile defaultCompilerConfig prog of
+          Left err -> assertFailure ("compile failed: " ++ show err)
+          Right env -> do
+            let src = unlines (SPLL.CodeGenPyTorch.generateFunctions True env)
+            assertBool "emitted color() carries no constructor guard"
+                       ("if not isinstance(x, Obj): throw(" `isInfixOf` src)
+            assertBool "emitted color() carries no accessor-mismatch diagnostic"
+                       (accessorMismatchMessage "color" "Obj" `isInfixOf` src)
+  , testCase "emitted Julia guards the accessor rather than relying on MethodError" $
+      withParsed accessorMismatchProgSrc $ \prog ->
+        case compile defaultCompilerConfig prog of
+          Left err -> assertFailure ("compile failed: " ++ show err)
+          Right env -> do
+            let src = unlines (SPLL.CodeGenJulia.generateFunctions env)
+            assertBool "emitted color() carries no constructor guard"
+                       ("if !(x isa Obj) throw(" `isInfixOf` src)
+            assertBool "emitted color() carries no accessor-mismatch diagnostic"
+                       (accessorMismatchMessage "color" "Obj" `isInfixOf` src)
+  , testCase "a field name shared by two constructors resolves to the first, in every backend" $
+      withParsed accessorDuplicateFieldSrc $ \prog ->
+        case compile defaultCompilerConfig prog of
+          Left err -> assertFailure ("compile failed: " ++ show err)
+          Right env -> do
+            let py = lines (unlines (SPLL.CodeGenPyTorch.generateFunctions True env))
+                jl = lines (unlines (SPLL.CodeGenJulia.generateFunctions env))
+            assertEqual "Python emitted more than one accessor for the shared field name"
+                        1 (length (filter ("def v(x):" `isInfixOf`) py))
+            assertEqual "Julia emitted more than one accessor for the shared field name"
+                        1 (length (filter ("function v(x)" `isInfixOf`) jl))
+            -- `findField` answers A, so the guards must too.
+            assertBool "the Python accessor is owned by the wrong constructor"
+                       (accessorMismatchMessage "v" "A" `isInfixOf` unlines py)
+            assertBool "the Julia accessor is owned by the wrong constructor"
+                       (accessorMismatchMessage "v" "A" `isInfixOf` unlines jl)
   ]
 
 adtCumulativeTests :: TestTree

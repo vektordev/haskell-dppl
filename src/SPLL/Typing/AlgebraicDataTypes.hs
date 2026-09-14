@@ -6,12 +6,16 @@ module SPLL.Typing.AlgebraicDataTypes (
   implicitFunctionApplicable,
   implicitFunctionsToEnv,
   lookupRType,
+  fieldAccessorOwners,
   anyCtorTestMessage,
+  accessorMismatchMessage,
   adtCdfMessage
 ) where
 import SPLL.Lang.Types
 import SPLL.Typing.RType
 import SPLL.IntermediateRepresentation (IRExpr (..))
+import Data.Function (on)
+import Data.List (nubBy)
 import Data.Vector.Internal.Check (HasCallStack)
 
 implicitFunctionsRTypeProg :: Program -> [(String, RType)]
@@ -34,6 +38,22 @@ isRType tyName name = ("is" ++ name, TADT tyName `TArrow` TBool)
 
 implicitFunctionNames :: [ADTDecl] -> [String]
 implicitFunctionNames decls = map fst (concatMap implicitFunctionRTypes decls)
+
+-- | Every field accessor paired with the constructor whose field it reads,
+-- with the *first* declaration of a name winning.
+--
+-- That tie-break is not a choice: 'findField' already resolves a duplicated
+-- field name to the first constructor declaring it, and 'lookupRType' picks the
+-- first entry too, so first-wins is what the type environment and the
+-- interpreter both mean. The text backends used to emit one accessor per
+-- constructor, which made Python last-wins (the later @def@ shadows the
+-- earlier) and Julia accept-both (the two typed methods dispatch), so the same
+-- program answered three different ways. They now emit one accessor per name,
+-- from this list.
+fieldAccessorOwners :: [ADTDecl] -> [(String, String)]
+fieldAccessorOwners decls = nubBy ((==) `on` fst)
+  [ (fName, cName)
+  | decl <- decls, (cName, fields) <- constructors decl, (fName, _) <- fields ]
 
 lookupRType :: String -> [ADTDecl] -> RType 
 lookupRType name decl = case lookup name (concatMap implicitFunctionRTypes decl) of
@@ -59,7 +79,7 @@ implicitFunctionImpl decls fName [param] =
   case param of
     VADT constr fields ->
       if constr /= cName then
-        error ("Value is of the wrong ADT type. Is type: " ++ constr ++ " but should be: " ++ fName)
+        error (accessorMismatchMessage fName cName ++ " Got: " ++ constr)
       else
         fields !! fIdx
     _ -> error $ "Value must but be an ADT type for field lookup: " ++ show param
@@ -114,6 +134,33 @@ anyCtorTestMessage :: String -> String
 anyCtorTestMessage ctor =
   "is" ++ ctor ++ ": constructor test on an unobserved value (ANY); the "
   ++ "enclosing inference must marginalise or refuse before testing a hole"
+
+-- | What every runtime says when a field accessor is applied to a value built
+-- by a constructor that has no such field -- @color Nil@, where @color@ is a
+-- field of @Obj@.
+--
+-- An accessor's generated 'RType' is @TADT ty -> fieldType@: it accepts *any*
+-- value of the ADT, so 'RInfer' cannot reject this. Refining the type per
+-- constructor was considered and declined -- the constructor of a value is a
+-- runtime property, and encoding it in the type is not something Haskell itself
+-- solves in a principled way either. So the accessor stays partial and the
+-- failure stays at run time; what this fixes is that the failure used to be
+-- unreadable and different everywhere: a bare @AttributeError: \'Nil\' object
+-- has no attribute \'color\'@ in Python, a @MethodError@ in Julia, and an
+-- interpreter message that named the *field* where it said "type"
+-- (@"Is type: Nil but should be: color"@).
+--
+-- The wording mirrors GHC's own diagnostic for the same mistake on a record
+-- selector (@No match in record selector color@), extended with the owning
+-- constructor, which is the fact that tells the reader why the call is wrong.
+-- Every runtime appends the constructor it actually saw as @" Got: <name>"@;
+-- the core below is byte-identical across the interpreter and all three text
+-- backends, so a regression in one of them cannot hide.
+accessorMismatchMessage :: String -> String -> String
+accessorMismatchMessage accessor ctor =
+  "No match in field accessor '" ++ accessor ++ "': it selects a field of "
+  ++ "constructor '" ++ ctor ++ "' and is undefined on a value built by any "
+  ++ "other constructor."
 
 -- | What a @cdf()@ query says when the program it is asked about returns an
 -- ADT. A cumulative distribution integrates along an order, and an ADT has

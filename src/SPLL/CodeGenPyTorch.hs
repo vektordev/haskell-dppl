@@ -15,7 +15,7 @@ import SPLL.IntermediateRepresentation
 import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..), shapeRank)
-import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage)
+import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, accessorMismatchMessage, fieldAccessorOwners)
 import Data.List (intercalate, intersperse, isPrefixOf, dropWhileEnd)
 import Data.Char (toUpper)
 import Data.Maybe (fromMaybe)
@@ -234,7 +234,9 @@ generateInitializations :: IREnv -> [String]
 generateInitializations (IREnv funcs _ _) = map (\IRFunGroup {groupName=n} -> n ++ " = " ++ onHead toUpper n ++ "()") funcs
 
 generateADTClasses :: [ADTDecl] -> [String]
-generateADTClasses decls = concatMap generateADTClass (concatMap constructors decls)
+generateADTClasses decls =
+  concatMap generateADTClass (concatMap constructors decls)
+  ++ concatMap (uncurry generateADTAccessor) (fieldAccessorOwners decls)
 
 -- Every identifier printed here goes through 'pyMangle'; the declaration itself
 -- keeps the names the user wrote (see 'renameADTIdentifiers'). The one place
@@ -266,14 +268,28 @@ generateADTClass (name, fields) =
   -- branch. See 'anyCtorTestMessage'.
   ["def is" ++ cls ++ "(x):"] ++
   indentOnce ["if isAny(x): throw(" ++ show (anyCtorTestMessage name) ++ ")",
-              "return isinstance(x, " ++ cls ++ ")"] ++
-  -- Field acceessors
-  concatMap (\f ->
-    ("def " ++ f ++ "(x):") :
-    indentOnce ["return x." ++ f]
-  ) fieldNames
+              "return isinstance(x, " ++ cls ++ ")"]
   where cls = pyMangle name
         fieldNames = map pyMangle (map fst fields)
+
+-- | One field accessor, guarded on the constructor that owns the field.
+--
+-- Without the guard this was @return x.color@, so reading a field off a sibling
+-- constructor raised @AttributeError: \'Nil\' object has no attribute
+-- \'color\'@ -- a target-language accident with no SPLL-level content, and one
+-- the type checker cannot rule out ('accessorMismatchMessage' says why). The
+-- accessor is still partial; it now says so in the compiler's own words. The
+-- @Got:@ suffix keeps the one thing the @AttributeError@ did tell you.
+--
+-- Emitted once per field *name*, not once per constructor: see
+-- 'fieldAccessorOwners'.
+generateADTAccessor :: String -> String -> [String]
+generateADTAccessor fieldName ctorName =
+  ("def " ++ pyMangle fieldName ++ "(x):") :
+  indentOnce [ "if not isinstance(x, " ++ pyMangle ctorName ++ "): throw("
+                 ++ show (accessorMismatchMessage fieldName ctorName)
+                 ++ " + \" Got: \" + type(x).__name__)"
+             , "return x." ++ pyMangle fieldName ]
 
 generateClass :: [(String, String)] -> [String] -> IRFunGroup -> [String]
 generateClass lut callableNames (IRFunGroup name gen prob integ writeLogits normal doc _) = let
