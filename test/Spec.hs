@@ -326,6 +326,11 @@ logSpaceUncoveredPrograms =
   , "setWitnessSiblingEither", "setWitnessSiblingCons", "setWitnessSiblingNested"
   , "setWitnessSiblingTwoOcc", "setWitnessSiblingNestedLet", "setWitnessSiblingBoolAny"
   , "setWitnessSiblingAdt"
+  -- task continuous-recursive-gate-witness-failure: the gated value returned
+  -- as itself is letProbAbsNormal's shape, measured by the same linear-pinned
+  -- world sum; its p(0.0) row (atom vs density, dim 0 wins) is where the
+  -- mismatch shows.
+  , "gatedContinuousTruncated"
   ]
 
 checkLogSpaceMatchesLinear :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property

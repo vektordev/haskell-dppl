@@ -221,6 +221,48 @@ rungs. Read those two modules before changing what an expression is allowed to
 do — notably, `PNormal` and `Integrate` are the same capability rung differing
 only by family, and `Bottom` is a collapse of four distinct levels.
 
+### An `if`'s arms see a gated variable's conditioned law
+
+`ModalityInfer` infers the two arms of an `IfThenElse` under an environment in
+which every *random* let-bound variable the condition reads is rebound to its
+law **given the condition** (`conditionEnv`/`conditionI`). In
+`let s = Normal in if s < 0.0 then x else y`, the `s` that `x` sees is the
+Normal's negative part: a truncated law that keeps every capability the
+standalone law had (its density is the original restricted and renormalised,
+its CDF the original shifted and rescaled) but belongs to **no family** and is
+**no longer witnessed** on that arm (`IWit` says the observation determines
+the value on every path; inside one arm it does so only if that arm recovers
+it). The condition itself is inferred under the unrefined environment, and a
+deterministic condition conditions nothing.
+
+Without this, the arm occurrences were bound at the standalone witnessed
+`PNormal`, so `tryNormalClosure` typed `s + Normal` inside an arm as `PNormal`
+and `sim_fpi s2 thetas` (a recursive call threading `s2` into a further draw)
+as `Integrate`: the program was admitted, the set-witness engine refused it at
+compile time ("draws fresh randomness"), and because that refusal is eager it
+took the `generate` variant down with it. The sum of a truncated Normal and a
+Normal has no closed form any engine implements (one level is an `erf`
+expression; the nested stopping-time shape is an orthant integral), so the
+honest verdict is `Bottom`: `generate` compiles, `probability` is declined by
+`missingVariant`. The shapes that *do* have an engine — the gated value
+returned as itself, an affine image of it, a tuple of such parts — keep
+`Integrate` and their existing set-witness answers
+(`testCases/gatedContinuousTruncated`, `letProbAbsNormal`).
+
+The refinement keys off the condition's free variables, not off the
+`v < bound` spelling, so `if isNeg s`, `if s * s < 1.0` and `if s < w` all
+condition `s`. Pinned by the `conditioning` group in `test/TestModalityInfer.hs`
+and `Rejection.GatedContinuousFeedsFreshDraw`.
+
+The same task fixed the Lambda rule's annotation: a curried `f x y = …` node
+projected its body — the inner lambda's Dirac closure — as `Deterministic`
+whatever the result was, and IRCompiler's variant gate reads exactly that
+node's `pType`, so a two-parameter function with a `Bottom` body still had a
+probability function compiled (and crashed in it) where its one-parameter
+twin was declined. `projectNode` now recurses down the arrow spine, as it
+already did for a `Var` referencing the function; IRCompiler's `pt` and
+`ptUnderLambdas` therefore agree.
+
 ### Inference for non-invertible observations
 
 Two IRCompiler engines handle `let`-bindings whose observation can't be

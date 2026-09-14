@@ -51,6 +51,7 @@ rejectionTests = testGroup "Rejection"
   , noGenerateSuppressedGeneratorTests
   , setWitnessNestedLetTests
   , setWitnessTransportTests
+  , gatedContinuousFeedsFreshDrawTests
   ]
 
 -- ----------------------------------------------------------------------------
@@ -886,3 +887,63 @@ setWitnessTransportTests = testGroup "SetWitnessTransport"
           Right (Left e) -> assertFailure
             (what ++ " was declined by a different stage instead of the set-witness engine: " ++ e)
           Right (Right v) -> assertFailure (what ++ " was accepted and answered " ++ show v)
+
+-- ----------------------------------------------------------------------------
+-- Task continuous-recursive-gate-witness-failure: a continuous let-bound value
+-- that gates an if AND feeds a fresh draw inside an arm. Inside the arm the
+-- value is a truncated law, not a Normal, and its sum with a fresh Normal has
+-- no closed form any engine implements. ModalityInfer now types these Bottom
+-- (the arms are inferred under the conditioned law: 'conditionEnv'), so the
+-- probability variant is *absent* -- the graceful missing-variant answer --
+-- instead of being compiled and crashing eagerly in the set-witness engine,
+-- which used to take `generate` down with it.
+-- ----------------------------------------------------------------------------
+
+gatedFreshDrawSrc :: String
+gatedFreshDrawSrc = "main = let s = Normal in if s < 0.0 then s + Normal else 0.0"
+
+gatedUnrolledSrc :: String
+gatedUnrolledSrc =
+  "main = let s1 = 3.0 + Normal in if s1 < 0.0 then 0.0 else \
+  \let s2 = s1 + Normal in if s2 < 0.0 then 0.0 else \
+  \let s3 = s2 + Normal in if s3 < 0.0 then 0.0 else s3"
+
+gatedRecursiveSrc :: String
+gatedRecursiveSrc =
+  "walk s = let s2 = s + Normal in if s2 < 0.0 then s2 else walk s2\n\
+  \main = walk 3.0"
+
+-- Curried: the recursive declaration takes two parameters. Its outer lambda
+-- node used to read Deterministic whatever the body was, so the variant gate
+-- compiled a probability function for it regardless.
+gatedCurriedRecursiveSrc :: String
+gatedCurriedRecursiveSrc =
+  "sim s k = let s2 = s + k * Normal in if s2 < 0.0 then s2 else sim s2 k\n\
+  \main = sim 3.0 1.0"
+
+gatedContinuousFeedsFreshDrawTests :: TestTree
+gatedContinuousFeedsFreshDrawTests = testGroup "GatedContinuousFeedsFreshDraw"
+  [ declined "a gated variable plus a fresh Normal in an arm" gatedFreshDrawSrc
+  , declined "three manually unrolled gated steps" gatedUnrolledSrc
+  , declined "a self-recursive gated walk" gatedRecursiveSrc
+  , declined "a curried self-recursive gated walk" gatedCurriedRecursiveSrc
+  ]
+  where
+    declined what src = testGroup what
+      [ testCase "probability is a missing variant, not a crash" $
+          withParsed src $ \prog -> do
+            res <- forcedProb prog (VFloat 0.5)
+            case res of
+              Left ex -> assertFailure (what ++ " crashed the compiler: " ++ show ex)
+              Right (Left e) -> assertBool
+                ("expected the missing-variant answer, got: " ++ e)
+                ("has no compiled probability function" `isInfixOf` e)
+              Right (Right v) -> assertFailure
+                (what ++ " compiled to a probability function (" ++ show v ++ ")")
+      , testCase "the program still compiles (generate survives)" $
+          withParsed src $ \prog -> do
+            res <- forced (compile defaultCompilerConfig prog)
+            case res of
+              Left ex -> assertFailure ("compile crashed: " ++ show ex)
+              Right _ -> return ()
+      ]

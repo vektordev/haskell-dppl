@@ -108,6 +108,69 @@ modalityInferTests = testGroup "ModalityInfer"
           assertBool "expected a non-Deterministic continuous result" $
             mainPType "main = Uniform + Normal" /= Deterministic
       ]
+  -- Conditioning (task @continuous-recursive-gate-witness-failure@): the arms
+  -- of an @if@ see every random variable its condition reads at that
+  -- variable's law /given the condition/ ('conditionEnv'/'conditionI'). Inside
+  -- @let s = Normal in if s < 0.0 then x else y@, the @s@ that @x@ sees is the
+  -- Normal's negative part -- a truncated law with a density and a CDF but no
+  -- family, and no longer observation-determined on that arm. Binding it at
+  -- the standalone (witnessed, PNormal) law let the family closure type
+  -- @s + Normal@ in an arm as PNormal and admit a program no engine compiles
+  -- (the set-witness refusal "draws fresh randomness", reached from `generate`
+  -- too because the refusal is eager).
+  , testGroup "conditioning: an if's arms see the gated variable's truncated law"
+      [ testCase "the arm occurrence of the gated variable has no family" $
+          -- path: Apply [0] -> Lambda [0] -> IfThenElse [1] = the then-arm @s@.
+          assertEqual "" Integrate $
+            pTypeAt "main" [0, 0, 1] "main = let s = Normal in if s < 0.0 then s else 0.0"
+      , testCase "the condition's own occurrence keeps the standalone law" $
+          -- path: ... IfThenElse [0] = the condition, [0] = its left operand @s@.
+          assertEqual "" PNormal $
+            pTypeAt "main" [0, 0, 0, 0] "main = let s = Normal in if s < 0.0 then s else 0.0"
+      , testCase "returning the gated variable keeps its capability (Integrate)" $
+          assertEqual "" Integrate $
+            mainPType "main = let s = Normal in if s < 0.0 then 0.0 else s"
+      , testCase "an affine image of the gated variable keeps its capability" $
+          assertEqual "" Integrate $
+            mainPType "main = let s = Normal in if s < 0.0 then s + 1.0 else 0.0"
+      , testCase "a gated variable combined with a fresh draw is Bottom" $
+          -- The truncated law is no Normal, so tryNormalClosure must not fire;
+          -- the floor sees two infinite-support latents and drops the density.
+          assertEqual "" Bottom $
+            mainPType "main = let s = Normal in if s < 0.0 then s + Normal else 0.0"
+      , testCase "the gate is keyed on the condition, not the spelling: f s" $
+          assertEqual "" Bottom $
+            mainPType "isNeg x = x < 0.0\n\
+                      \main = let s = Normal in if isNeg s then s + Normal else 0.0"
+      , testCase "a deterministic condition conditions nothing" $
+          -- The control: same arms, a Dirac condition -- the family survives.
+          assertEqual "" PNormal $
+            mainPType "main = let s = Normal in if 0.1 < 0.5 then s + 1.0 else s"
+      , testCase "a variable the condition does not read is untouched" $
+          -- @c@ is conditioned in the arms, @s@ is not: @s + 1.0@ stays a witnessed
+          -- PNormal image on each arm; only the random-condition mixture drops it.
+          assertEqual "" Integrate $
+            mainPType "main = let s = Normal in let c = Uniform in \
+                      \if c < 0.5 then s + 1.0 else s"
+      , testCase "three manually unrolled gated steps are Bottom" $
+          assertEqual "" Bottom $
+            mainPType "main = let s1 = 3.0 + Normal in if s1 < 0.0 then 0.0 else \
+                      \let s2 = s1 + Normal in if s2 < 0.0 then 0.0 else \
+                      \let s3 = s2 + Normal in if s3 < 0.0 then 0.0 else s3"
+      , testCase "a self-recursive gated walk is Bottom at the declaration and the call" $ do
+          assertEqual "walk" Bottom $ rootPTypeOf "walk" recursiveWalkSrc
+          assertEqual "main" Bottom $ mainPType recursiveWalkSrc
+      , testCase "a curried two-parameter function node carries its final body's pType" $ do
+          -- 'projectNode', not 'projectI', on the Lambda rule: the outer lambda of
+          -- @sim s k@ used to read Deterministic (the inner lambda's Dirac closure),
+          -- which is what IRCompiler's variant gate consults -- so it compiled a
+          -- probability function for a Bottom body and crashed inside it.
+          assertEqual "sim" Bottom $ rootPTypeOf "sim" curriedWalkSrc
+          assertEqual "main" Bottom $ mainPType curriedWalkSrc
+      , testCase "a curried two-parameter function with a tractable body reads that body's pType" $
+          assertEqual "" Integrate $
+            rootPTypeOf "shift" "shift a b = Uniform + a + b\nmain = shift 1.0 2.0"
+      ]
   , testGroup "ground rules vs PInfer2 parity"
       [ testCase "Normal is PNormal" $
           assertEqual "" PNormal (mainPType "main = Normal")
@@ -512,3 +575,17 @@ curriedNeuralChain n =
 allNodes :: Program -> [Expr]
 allNodes prog = concatMap (universeE . snd) (functions prog)
   where universeE e = e : concatMap universeE (getSubExprs e)
+
+-- | A stochastic walk that stops when its own continuous state crosses a
+-- bound: the minimal shape of task @continuous-recursive-gate-witness-failure@.
+recursiveWalkSrc :: String
+recursiveWalkSrc =
+  "walk s = let s2 = s + Normal in if s2 < 0.0 then s2 else walk s2\n\
+  \main = walk 3.0"
+
+-- | The same walk with a second (scale) parameter, so the recursive
+-- declaration is a curried two-parameter function.
+curriedWalkSrc :: String
+curriedWalkSrc =
+  "sim s k = let s2 = s + k * Normal in if s2 < 0.0 then s2 else sim s2 k\n\
+  \main = sim 3.0 1.0"

@@ -1,0 +1,7 @@
+-- A continuous let-bound value that gates an if and is returned as itself on
+-- one arm (task continuous-recursive-gate-witness-failure). Inside the arms
+-- `s` is not a Normal: the else arm sees its positive part, a truncated law.
+-- The modality engine types the arm occurrences Integrate (no family) and the
+-- set-witness engine measures the two worlds: a point of density phi(y) on
+-- the half-line y >= 0, and the atom 0.0 carrying the mass P(s < 0) = 0.5.
+main = let s = Normal in if s < 0.0 then 0.0 else s
