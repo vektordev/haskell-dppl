@@ -23,6 +23,7 @@ module SPLL.Lang.Lang (
 , setSubExprs
 , containedVars
 , varsOfExpr
+, containsRandomSource
 , predicateExpr
 , predicateFlat
 , predicateProg
@@ -47,6 +48,7 @@ module SPLL.Lang.Lang (
 ) where
 
 import SPLL.Lang.Types
+import SPLL.Typing.PType (PType(Deterministic))
 import SPLL.Typing.RType
 import SPLL.Typing.AlgebraicDataTypes
 
@@ -73,6 +75,19 @@ floatApproxEqThresh = 1e-10
 
 predicateFlat :: (Expr -> Bool) -> Expr -> Bool
 predicateFlat f e = f e && all (predicateFlat f) (getSubExprs e)
+
+-- | True if the expression contains a source of randomness: a reference to a
+-- non-deterministic variable (the builtin distributions @Uniform@/@Normal@ are
+-- 'Var' nodes, as are references to probabilistic top-level functions) or a
+-- neural-network read. Run this on a body already passed through
+-- 'SPLL.IRCompiler.retypeDetGiven', so recovered variables are 'Deterministic'
+-- and don't count.
+containsRandomSource :: Expr -> Bool
+containsRandomSource e = isSource e || any containsRandomSource (getSubExprs e)
+  where
+    isSource (Expr ti (Var _))    = pType ti /= Deterministic
+    isSource (Expr _ (ReadNN {})) = True
+    isSource _                    = False
 
 containedVars :: (Expr -> Set.Set String) -> Expr -> Set.Set String
 containedVars f e = Set.union (f e) (foldl Set.union Set.empty (map (containedVars f) (getSubExprs e)))
