@@ -1,0 +1,11 @@
+-- Pins the continuous-`==` True-branch *density* convention (task
+-- sampling-matches-pdf-continuous-equality-density): `Normal == 0.5` is a
+-- null-probability event, but the True branch reports the underlying Normal's
+-- density at 0.5 rather than a hard 0 mass. Wrapped in `observe` so the point
+-- observation's weight is visible as a Maybe-valued distribution -- the context
+-- the convention is actually for, and a non-sampleable return shape, which is
+-- what keeps the row out of Corpus.SamplingMatchesPDF's pool (a density at a
+-- null-probability point is inaccessible to Monte Carlo by construction).
+-- Letfree, so inference runs through the InjF `hasAnyExcept` combinator;
+-- observeContinuousEqualsLetBound is the set-witness engine's sibling.
+main = observe (if Normal == 0.5 then 1 else 2) (\v -> v < 2)

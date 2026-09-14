@@ -1,0 +1,10 @@
+-- The let-bound sibling of observeContinuousEqualsLetfree. Binding the latent
+-- routes inference through the set-valued-witnesses engine instead of the InjF
+-- `hasAnyExcept` combinator, and the two engines agree on the True branch (both
+-- report the underlying Normal's density at the compared point) but not on its
+-- complement: this program's `Left ()` is 1.0 (a single point has measure zero,
+-- so its complement has measure one) where the letfree sibling's is
+-- `1 - density` = 0.6479.... Pinning both makes that divergence a visible,
+-- guarded fact rather than an accident -- see the task doc for why it is still
+-- open.
+main = observe (let x = Normal in if x == 0.0 then 0 else 2) (\v -> v < 2)
