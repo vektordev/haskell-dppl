@@ -1,0 +1,3 @@
+-- The right-slot twin of letInlineFamilyTupleLeft (task
+-- unwitnessed-gaussian-let-chain-admitted-but-crashes).
+main = let x = Normal in let y = x + Normal in (1.0, y)

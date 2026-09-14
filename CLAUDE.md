@@ -126,7 +126,8 @@ SPLL source (.spll/.ppl)
   → Parser.hs (megaparsec) → AST (Lang/Lang.hs, Lang/Types.hs)
   → Validator.hs → Typing/RInfer.hs (return types)
   → Analysis.hs (DiscreteValues tags) → Typing/ForwardChaining.hs (chain names)
-  → Typing/ModalityInfer.hs (PTypes) → Analysis.hs (IsConditional tags)
+  → Typing/ModalityInfer.hs (PTypes) → Typing/LetInline.hs (fixpoint, usually a no-op)
+  → Analysis.hs (IsConditional tags)
   → IRCompiler.hs → IR (IntermediateRepresentation.hs)
      Three compilation branches: generate, probability, integrate
   → IRSelectPass.hs (batched only) → IROptimizer.hs (const folding, CSE, let-in)
@@ -298,6 +299,64 @@ the empty-interval clamp then turned into a silent zero). The plan engine's
 guards). Adding a monotone step whose inverse is partial means adding its
 image there too. Details in the doc above; corpus
 `testCases/setWitnessTransport*`, `planEnumContExp*`.
+
+### Family-closure let inlining
+
+`ModalityInfer`'s family layer (`tryNormalClosure`) types `x + Normal` as
+`PNormal` whether or not `x` is `let`-bound, because the sum of two Gaussians is
+Gaussian. But the only place that closed form is *realised* is the Gaussian
+shortcut on an **inline** `Normal + Normal`: through a `let`, IRCompiler's
+probabilistic `Apply` arm first tries to recover the bound variable, and for an
+unwitnessed binding whose sibling operand draws fresh randomness neither point
+inversion nor the set-valued witness engine has an equation. The refusal is an
+eager `error`, so `main = let x = Normal in let y = x + Normal in y` took
+`generate` down with it too.
+
+`Typing/LetInline.hs` closes that from the other side: `let x = e in body` with a
+**single** use of `x` is `body[e/x]`, so substituting the binding away puts the
+two draws next to each other and the existing shortcut fires. `Prelude.compile`
+runs it as a fixpoint interleaved with the modality pass (the predicate reads
+`pType`, and a rewrite invalidates chain names, so an inlining round re-runs enum
+annotation → chain naming → modality); when nothing is eligible the loop stops on
+the first iteration at the cost of one `Eq Program` comparison, which is every
+program that does not exhibit the shape.
+
+`eligibleBinding` is deliberately narrow — it fires only where *no* engine exists
+today, so no working program changes path:
+
+- The use sits under an unbroken chain of `tryNormalClosure`-**certified**
+  `InjF`s, one of whose siblings draws fresh randomness. Certification is the
+  family layer's own table, so the pass and the rule that admitted the program
+  agree by construction. Reading the ancestor's `pType` instead is *not*
+  equivalent and was the first attempt's bug: `injFMod`'s floor also labels a
+  unary passthrough `log x`/`sqrt x`/`double x` `PNormal`, where no closed form
+  exists and `toIRNormalParams` dies — that broke eight corpus properties and the
+  `setWitnessTransport*` refusal tests at once. The chain (not just the parent) is
+  searched because the use may be scaled first: in `x * 2.0 + Normal` the fresh
+  operand is the *grandparent's* sibling.
+- Exactly one use, evaluated at most once. Two uses are correlated draws that
+  inlining would decorrelate; `singleUseAncestors` also refuses a use under a
+  lambda that is not *directly applied*, where one shared draw would become one
+  per call. A directly-applied lambda is a `let` and stays transparent, which is
+  what admits the nested-let repro shape.
+- Neither witnessed (`isWitnessedLambda`) nor point-invertible
+  (`toInvExprMaybe`) — precisely the condition under which IRCompiler falls
+  through to `setWitnessApply`.
+
+The surviving intersection is `plus` of two Gaussians and `mult` of two
+log-normals: the only family-table entries admitting a second random operand.
+
+What this does **not** fix is the multi-use shape —
+`let x = Normal in (x + Normal, x + Normal)`, and `let x = Normal in let y =
+Normal in (x + y, x + y)`. Those outputs are genuinely correlated, inlining would
+decorrelate them, and the honest density is a bivariate Gaussian no engine
+implements; they are still admitted and still die in the set-witness refusal
+(one instance of the broader "admits, codegen crashes" class the docs-repo design
+`pipeline-coherence` tracks). Corpus: `letInlineFamily*`.
+`letInlineFamilyGate` is on `Spec.logSpaceUncoveredPrograms` because after
+inlining its comparison is measured by the linear-pinned set-witness engine, the
+same reason its `setWitnessTransport*` neighbours are listed; its eight siblings
+return the sum itself and go through the log-aware core combinators.
 
 ### Forward chaining never re-derives a chain name it already has
 
@@ -754,6 +813,7 @@ fully-annotated AST after each pipeline stage to stderr via
 | After RType Inference | `rType` populated; `pType` still `NotSetYet` |
 | After Enum Annotation | `DiscreteValues` tags appear |
 | After Forward Chaining | `chainName` fields filled |
+| After Family-Closure Let Inlining | printed **only** when a binding was inlined — the rewritten, re-chain-named program (see Family-Closure Let Inlining below) |
 | After Modality Inference | `pType` populated |
 | After Conditional Annotation | `IsConditional` tags appear on conditioned distributions |
 | After IR Compilation (pre-optimization) | Pseudo-code IR before any optimizer passes |

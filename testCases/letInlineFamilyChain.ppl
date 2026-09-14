@@ -1,0 +1,7 @@
+-- Task unwitnessed-gaussian-let-chain-admitted-but-crashes: the repro shape.
+-- 'x' is unwitnessed (its only occurrence is an operand of a plus whose other
+-- operand is fresh), so no inference engine could reach it and the set-witness
+-- refusal killed the whole compile -- generate included. SPLL.Typing.LetInline
+-- substitutes the single-use binding away, so the inline Gaussian shortcut sees
+-- Normal + Normal and answers N(0, 2).
+main = let x = Normal in let y = x + Normal in y
