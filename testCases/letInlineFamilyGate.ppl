@@ -1,0 +1,4 @@
+-- The inlined chain gating a comparison: P(N(0, 2) > 0) = 1/2 either way. This
+-- is the shape TestRejection's SetWitnessNestedLet group used to pin as a
+-- refusal (task unwitnessed-gaussian-let-chain-admitted-but-crashes).
+main = let x = Normal in let y = x + Normal in if y > 0.0 then 1.0 else 0.0

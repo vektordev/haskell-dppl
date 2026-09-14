@@ -331,6 +331,14 @@ logSpaceUncoveredPrograms =
   -- world sum; its p(0.0) row (atom vs density, dim 0 wins) is where the
   -- mismatch shows.
   , "gatedContinuousTruncated"
+  -- task unwitnessed-gaussian-let-chain-admitted-but-crashes: the inlining
+  -- makes this one `let y = Normal + Normal in if y > 0.0 ...`, whose
+  -- comparison is measured by the same linear-pinned measureSet. Its eight
+  -- siblings are NOT here -- they return the sum itself, so the Gaussian
+  -- shortcut measures them through the log-aware core combinators. The
+  -- hand-inlined twin is uncovered at HEAD for the same reason, so this is the
+  -- set-witness engine's documented linear-only scope, not a new gap.
+  , "letInlineFamilyGate"
   ]
 
 checkLogSpaceMatchesLinear :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property

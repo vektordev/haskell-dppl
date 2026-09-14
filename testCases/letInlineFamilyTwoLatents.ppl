@@ -1,0 +1,4 @@
+-- Two separately let-bound Gaussians meeting in one sum: both bindings are
+-- unwitnessed and single-use, so both are inlined in the same round and the sum
+-- is N(0, 2) (task unwitnessed-gaussian-let-chain-admitted-but-crashes).
+main = let x = Normal in let y = Normal in let z = x + y in z

@@ -1236,18 +1236,6 @@ retypeDetGiven names e = go names e
                  Expr (ti {pType = Deterministic}) (InjF f params)
            _ -> ex'
 
--- | True if the expression contains a source of randomness: a reference to a
--- non-deterministic variable (the builtin distributions @Uniform@/@Normal@ are
--- 'Var' nodes, as are references to probabilistic top-level functions) or a
--- neural-network read. Run this on a body already passed through
--- 'retypeDetGiven', so recovered variables are 'Deterministic' and don't count.
-containsRandomSource :: Expr -> Bool
-containsRandomSource e = isSource e || any containsRandomSource (getSubExprs e)
-  where
-    isSource (Expr ti (Var _))  = pType ti /= Deterministic
-    isSource (Expr _ (ReadNN {})) = True
-    isSource _           = False
-
 -- | Drop dead let-bindings from a forward-chaining inverse expression.
 -- 'toValueExpr' deliberately over-emits: its letin chain can bind clause
 -- values unrelated to the recovered variable ("superfluous clauses ... easily

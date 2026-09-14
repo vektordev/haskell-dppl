@@ -1,0 +1,4 @@
+-- The use is nested one InjF deeper than the plus that certifies the closure:
+-- x * 2.0 is itself PNormal, so the sum is N(0, 4 + 1) (task
+-- unwitnessed-gaussian-let-chain-admitted-but-crashes).
+main = let x = Normal in let y = x * 2.0 + Normal in y
