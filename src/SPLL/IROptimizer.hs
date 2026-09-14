@@ -501,6 +501,13 @@ simplify det (IRUnaryOp OpIsAny x) = forceAnyCheck det x
 simplify _ (IRUnaryOp op val)
   | isValue val, not (isNaNResult (forceUnaryOp op (unval val))) = IRConst $ forceUnaryOp op (unval val)
 simplify _ (IRIf _ left right) | left == right = left
+-- A branch that answers the two Bool constants IS its own condition. Worth a
+-- rule of its own because a condition is rendered inline while an IRIf in value
+-- position becomes a statement block per backend arm: the short-circuiting
+-- "or" that a strict OpOr cannot express (both operands would be evaluated) is
+-- spelled `IRIf a True b`, and where b folds to a constant this is what is
+-- left of it.
+simplify _ (IRIf cond (IRConst (VBool True)) (IRConst (VBool False))) = cond
 simplify _ x@(IRIf cond left right) =
   if isValue cond
     then if unval cond == VBool True
