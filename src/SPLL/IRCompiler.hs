@@ -499,6 +499,7 @@ compileNormalExpr meta expr =
 isNormalExtractable :: Expr -> Bool
 isNormalExtractable (Expr _ (Lambda _ lambdaBody))            = isNormalExtractable lambdaBody
 isNormalExtractable (Expr _ (Apply  _ _))               = False
+isNormalExtractable (Expr _ (IfThenElse _ _ _))         = False
 isNormalExtractable (Expr _ (InjF (Named "Cons")  _))   = False
 isNormalExtractable (Expr _ (InjF (Named "TCons") _))   = False
 isNormalExtractable _                            = True
@@ -1579,7 +1580,7 @@ isTArrowType _            = False
 --in this implementation, I'll forget about the distinction between PDFs and Probabilities. Might need to fix that later.
 -- | Expressions that have their own toIRInference handlers and must not be
 -- intercepted by the PNormal/PLogNormal catch-alls below.
-hasOwnInferenceHandler :: [ADTDecl] -> Expr -> Bool
+hasOwnInferenceHandler :: CompilerMetadata -> Expr -> Bool
 -- An arrow-typed expression is a function *value*, not a distribution: what
 -- probability mode wants from it is the callee's own probability function (an
 -- IRLambda), which the Var and Lambda handlers produce. toIRNormalParams has no
@@ -1589,11 +1590,32 @@ hasOwnInferenceHandler :: [ADTDecl] -> Expr -> Bool
 -- (task normal-shortcut-crashes-through-function-call).
 hasOwnInferenceHandler _    e | isTArrowType (rType (getTypeInfo e)) = True
 hasOwnInferenceHandler _    (Expr _ (Apply _ _))            = True
+-- A Var standing for a *local* binding -- a lambda parameter, or the variable a
+-- `let` binds -- has no (mu, sigma) to read off: the Normal that earned it its
+-- PNormal label was drawn at the binding site, not here, and toIRNormalParams'
+-- Var equation only resolves top-level declarations. Its own equation compiles
+-- it as the leaf it is (an indicator against the sample, with the value in
+-- scope). Reached by a nested let whose outer variable an enclosing body-factor
+-- fold has already recovered: in `let x = Normal in let y = x + 1.0 in y`, the
+-- fold retypes `x + 1.0` Deterministic but leaves `y` labelled PNormal, and the
+-- catch-all took the inner `Var y` (task modality-arrow-apply-crashes, bug A).
+-- `Just (_, False)` is exactly the local-variable case the Var equation itself
+-- dispatches on: a top-level function carries True, and Normal/Uniform are not
+-- in the environment at all.
+hasOwnInferenceHandler meta (Expr _ (Var n))
+  | Just (_, False) <- lookup n (typeEnv meta)              = True
+-- A conditional is a *mixture*, and a mixture of two Gaussians is not a
+-- Gaussian -- there is no (mu, sigma) to extract even when both arms have one,
+-- and toIRNormalParams has no equation for it at all, so the catch-all could
+-- only ever reach its fallthrough error. The IfThenElse equation measures the
+-- arms separately and mixes them, which is right whether the condition is
+-- deterministic (one arm selected) or probabilistic (a genuine mixture).
+hasOwnInferenceHandler _    (Expr _ (IfThenElse _ _ _))     = True
 -- Field constructors (Cons/TCons/user-ADT constructors) carry the PType of their
 -- fields, which can be PNormal even though the container itself cannot be
 -- inferred by toIRNormal. They have their own construction handler, so the
 -- PNormal/PLogNormal catch-alls must not intercept them.
-hasOwnInferenceHandler adtDecls' (Expr _ (InjF (Named name) _)) = isFieldConstructor adtDecls' name
+hasOwnInferenceHandler meta (Expr _ (InjF (Named name) _)) = isFieldConstructor (adtDecls meta) name
 hasOwnInferenceHandler _    _                        = False
 
 toIRInference :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PResult
@@ -1650,14 +1672,14 @@ toIRInference meta True expr sample | rType (getTypeInfo expr) == TBool = do
   -- cdf(True) = 1 is always attainable; cdf(False) inherits the False case.
   return (mkPResult (sealP (IRIf sample (srOne (semiringOf meta)) (unP (rProb false)))) const0 (rBranches false)
                   (IRIf sample constFalseIR (rImposs false)))
-toIRInference meta False e sample | pType (getTypeInfo e) == PNormal, not (hasOwnInferenceHandler (adtDecls meta) e) = do
+toIRInference meta False e sample | pType (getTypeInfo e) == PNormal, not (hasOwnInferenceHandler meta e) = do
   (mu, sigma) <- toIRNormalParams meta e
   let p = scaledNormalDensity (semiringOf meta) (IROp OpDiv (IROp OpSub sample mu) sigma) [sigma]
   return (density p sample)
-toIRInference meta True e sample | pType (getTypeInfo e) == PNormal, not (hasOwnInferenceHandler (adtDecls meta) e) = do
+toIRInference meta True e sample | pType (getTypeInfo e) == PNormal, not (hasOwnInferenceHandler meta e) = do
   (mu, sigma) <- toIRNormalParams meta e
   return (mass (distCumulative (semiringOf meta) IRNormal (IROp OpDiv (IROp OpSub sample mu) sigma)))
-toIRInference meta False e sample | pType (getTypeInfo e) == PLogNormal, not (hasOwnInferenceHandler (adtDecls meta) e) = do
+toIRInference meta False e sample | pType (getTypeInfo e) == PLogNormal, not (hasOwnInferenceHandler meta e) = do
   (mu, sigma) <- toIRLogNormalParams meta e
   let sr = semiringOf meta
   let correctedSample = IROp OpDiv (IROp OpSub (IRUnaryOp OpLog sample) mu) sigma
@@ -1668,7 +1690,7 @@ toIRInference meta False e sample | pType (getTypeInfo e) == PLogNormal, not (ha
   -- merely unlikely. Support boundaries are the one way a *density* leaf can be
   -- a structural zero, and they are known statically here.
   return (impossibleWhen (notIR positive) (onProb negativeGuard (density p sample)))
-toIRInference meta True e sample | pType (getTypeInfo e) == PLogNormal, not (hasOwnInferenceHandler (adtDecls meta) e) = do
+toIRInference meta True e sample | pType (getTypeInfo e) == PLogNormal, not (hasOwnInferenceHandler meta e) = do
   (mu, sigma) <- toIRLogNormalParams meta e
   let sr = semiringOf meta
   let correctedSample = IROp OpDiv (IROp OpSub (IRUnaryOp OpLog sample) mu) sigma
