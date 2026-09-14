@@ -977,6 +977,34 @@ anyRefusalTests = testGroup "witnessed-inference ANY refusal"
       expectMarginalRefusal
         "main = let x = Uniform in let y = x + Uniform in let z = y + Uniform in (x, (y, z))"
         (VTuple (VFloat 0.5) (VTuple VAny (VFloat 1.5))) "y"
+  -- The four below are the cases where the wildcard is not the recovered
+  -- witness itself but an OPERAND the inverse chain reads on its way to one.
+  -- Testing "is the witness ANY" evaluates that chain, so each of these used to
+  -- die in the interpreter's arithmetic or deconstruction with a raw type error
+  -- (`Minus ... (VAny, VFloat 3.0)`, `Fst is not a tuple: VAny`) instead of the
+  -- refusal -- task fc-inverse-refuses-on-any-input. 'readsAnyChain' is what
+  -- makes them reach it.
+  , testCase "ANY read by an over-determined slot's inverse arithmetic refuses, naming y" $
+      -- Both inner slots recover y (and hence x); the merged path takes the
+      -- first, whose Minus reads the wildcard slot.
+      expectMarginalRefusal
+        "main = let x = Uniform in let y = Uniform in (x, (x+y+3.0, x+y+2.0))"
+        (VTuple (VFloat 0.3) (VTuple VAny (VFloat 2.7))) "y"
+  , testCase "ANY in the summed slot refuses, naming x" $
+      expectMarginalRefusal
+        "main = let x = Uniform in let y = Uniform in (x+y, (x, y))"
+        (VTuple VAny (VTuple (VFloat 0.4) (VFloat 0.5))) "x"
+  , testCase "ANY read by a shifted let's inverse refuses, naming x" $
+      expectMarginalRefusal
+        "main = let x = Uniform in let z = x + 1.0 in (z, Uniform)"
+        (VTuple VAny (VFloat 0.5)) "x"
+  , testCase "ANY reached through an Either arm's deconstruction refuses, naming x" $
+      -- Here the wildcard is read by `fst`, not by arithmetic: fromLeft of
+      -- `Left ANY` is ANY, and the tuple deconstruction that follows has no
+      -- tuple to take apart.
+      expectMarginalRefusal
+        "main = let x = Uniform in left (x, x + Uniform)"
+        (VEither (Left VAny)) "x"
   ]
 
 expectMarginalRefusal :: String -> IRValue -> String -> IO ()

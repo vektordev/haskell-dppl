@@ -5,6 +5,7 @@ module SPLL.Typing.ForwardChaining
   , ExprInfo(..)
   , annotateProg
   , progToFCData
+  , InvChain(..)
   , toInvExpr
   , toInvExprMaybe
   , toSeededInvExpr
@@ -183,11 +184,27 @@ isWitnessedLambda fcData adtsDecls obsCN lambdaCN = case inversionSetup fcData l
     in any (isJust . toValueExpr (hornClauses fcData) [obsClause] adtsDecls) toInvCNs
   Nothing -> False
 
+-- | One inversion chain, as codegen consumes it. The three IR expressions past
+-- 'invValue' are all tests or corrections *about* that value, and every one of
+-- them is only meaningful together with it, which is why they travel as a
+-- record rather than as separate builders that could drift apart: they are all
+-- derived from the same clause path.
+data InvChain = InvChain
+  { invValue :: IRExpr
+    -- ^ The recovered value of the witnessed variable, free in the seed.
+  , invCoV :: IRExpr
+    -- ^ The derivative of that inverse, for the change of variables.
+  , invGuard :: IRExpr
+    -- ^ See 'guardChain': False exactly when a step is out of its domain, in
+    -- which case 'invValue' must not be evaluated at all.
+  , invReadsAny :: IRExpr
+    -- ^ See 'readsAnyChain': True exactly when a step would read a marginal
+    -- wildcard, in which case 'invValue' must not be evaluated at all either.
+  }
+
 -- Takes the chainName of a function (May be a lambda, a variable, an Apply ...) and returns the inverse function of that lambda together with the derivative of the inverse
--- | Returns (value, derivative, guard) -- see 'toValueExpr' for the guard's
--- meaning; callers must gate evaluation of value/derivative on it.
-toInvExpr :: FCData -> [ADTDecl] -> ChainName -> (IRExpr, IRExpr, IRExpr)
-toInvExpr fcData adtsDecls lambdaCN = (mergedM, mergedCoV, mergedGuard)
+toInvExpr :: FCData -> [ADTDecl] -> ChainName -> InvChain
+toInvExpr fcData adtsDecls lambdaCN = merged
   where
     clauseSet = hornClauses fcData
     (toInvVarName, toInvCNs, paramClause) = case inversionSetup fcData lambdaCN of
@@ -196,13 +213,13 @@ toInvExpr fcData adtsDecls lambdaCN = (mergedM, mergedCoV, mergedGuard)
     -- Create the expression that calculates each occurrence; merge those that
     -- carry complementary information.
     valueExprs = mapMaybe (toValueExpr clauseSet [paramClause] adtsDecls) toInvCNs
-    (mergedM, mergedCoV, mergedGuard) = mergeExpr toInvVarName lambdaCN toInvCNs valueExprs
+    merged = mergeExpr toInvVarName lambdaCN toInvCNs valueExprs
 
 -- | 'toInvExpr' with a recoverable outcome: Nothing when no occurrence of the
 -- bound variable yields an inversion path (where 'toInvExpr' dies in
 -- 'mergeExpr'). The set-valued witness fallback in IRCompiler dispatches on
 -- this instead of the hard error.
-toInvExprMaybe :: FCData -> [ADTDecl] -> ChainName -> Maybe (IRExpr, IRExpr, IRExpr)
+toInvExprMaybe :: FCData -> [ADTDecl] -> ChainName -> Maybe InvChain
 toInvExprMaybe fcData adtsDecls lambdaCN = do
   (toInvVarName, toInvCNs, paramClause) <- inversionSetup fcData lambdaCN
   case mapMaybe (toValueExpr (hornClauses fcData) [paramClause] adtsDecls) toInvCNs of
@@ -215,7 +232,7 @@ toInvExprMaybe fcData adtsDecls lambdaCN = do
 -- 'isWitnessedLambda' exposed for codegen: the set-valued witness fallback
 -- inverts if-branches and comparison operands from their own roots rather than
 -- from the lambda body.
-toSeededInvExpr :: FCData -> [ADTDecl] -> ChainName -> ChainName -> Maybe (IRExpr, IRExpr, IRExpr)
+toSeededInvExpr :: FCData -> [ADTDecl] -> ChainName -> ChainName -> Maybe InvChain
 toSeededInvExpr fcData adtsDecls seedCN occCN =
   toValueExpr (hornClauses fcData) [ParameterHornClause seedCN] adtsDecls occCN
 
@@ -227,13 +244,18 @@ toSeededInvExpr fcData adtsDecls seedCN occCN =
 -- entirely when the guard is False (wrap with IRIf guard ... , not just zero the
 -- result afterward): the value expression itself crashes on out-of-domain input
 -- (observe-partials-umbrella N1b).
-toValueExpr :: [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> Maybe (IRExpr, IRExpr, IRExpr)
+toValueExpr :: [[HornClause]] -> [HornClause] -> [ADTDecl] -> ChainName -> Maybe InvChain
 toValueExpr clauses paramClauses adtsDecls startCN = do
   relevantSortedClauses <- toValuePath clauses paramClauses startCN
   -- Calculate the symbolic derivative
   let deriv = derivativeOfPath adtsDecls relevantSortedClauses
   -- Generate code
-  Just (toLetInBlock clauses adtsDecls relevantSortedClauses, wrapInLetInBlock clauses adtsDecls relevantSortedClauses deriv, guardChain clauses adtsDecls relevantSortedClauses)
+  Just InvChain
+    { invValue    = toLetInBlock clauses adtsDecls relevantSortedClauses
+    , invCoV    = wrapInLetInBlock clauses adtsDecls relevantSortedClauses deriv
+    , invGuard    = guardChain clauses adtsDecls relevantSortedClauses
+    , invReadsAny = readsAnyChain clauses adtsDecls relevantSortedClauses
+    }
 
 -- | A Bool IRExpr, safe to evaluate unconditionally, that is True iff every step
 -- of the chain is within its inverse FDecl's applicability domain -- i.e. the
@@ -251,6 +273,73 @@ guardChain clauses adtsDecls (c:cs) =
     appTest -> IRIf appTest
                  (IRLetIn (conclusion c) (hornClauseToIRExpr clauses adtsDecls c) (guardChain clauses adtsDecls cs))
                  (IRConst (VBool False))
+
+-- | A Bool IRExpr, safe to evaluate unconditionally, that is True iff some step
+-- of the chain would read a marginal wildcard ('VAny') as an operand. An
+-- inverse step's arithmetic and its deconstructions are both undefined there
+-- -- @Minus (VAny, 3.0)@, @Fst VAny@ -- and the interpreter and the typed
+-- backends answer a raw type error rather than the engine's refusal, so the
+-- caller must test this BEFORE evaluating the value expression
+-- (task fc-inverse-refuses-on-any-input).
+--
+-- A wildcard only ever enters at the seed and only ever travels along the
+-- chain's *deconstructing* steps: an arithmetic step handed one does not
+-- produce a wildcard, it dies, and by then this test has already answered True.
+-- So the carriers -- the chain names whose runtime value can be a wildcard --
+-- are the seed plus what the deconstructions reach from it, and each of them
+-- has a direct accessor expression on the seed. That is what keeps this test
+-- cheap: it never re-emits the chain's let-in block (which would double the
+-- inverse at every nesting level of a let chain), only a handful of @isAny@
+-- tests over accessor paths.
+--
+-- Nested like 'guardChain', for the same reason and with the same shape: a
+-- step's premises are only inspected once every earlier step is known to be
+-- in-domain, and a step that is out of its domain short-circuits to False
+-- rather than True -- such a chain read no wildcard, and zeroing it is
+-- 'guardChain's job, not this test's to refuse over.
+--
+-- What stays False here is a wildcard merely *copied* out of the chain, by an
+-- equivalence step or as the final value: that is the *sink* case, decided at
+-- the call site by testing the recovered value itself.
+readsAnyChain :: [[HornClause]] -> [ADTDecl] -> [HornClause] -> IRExpr
+readsAnyChain _ adtsDecls = go []
+  where
+    go _ [] = IRConst (VBool False)
+    go carriers (c:cs) = foldr anyTest (afterTests carriers c cs) (readHits carriers c)
+    anyTest e acc = IRIf (IRUnaryOp OpIsAny e) (IRConst (VBool True)) acc
+    -- The carrier-valued premises this step computes with, in premise order.
+    readHits carriers (ExprHornClause pre _ (InjFInfo _) _) = mapMaybe (`lookup` carriers) pre
+    readHits _        _                                     = []
+    afterTests carriers c cs = case c of
+      -- The seed: the observation itself, which is what a marginal query puts
+      -- a wildcard into.
+      ParameterHornClause conc -> go ((conc, IRVar conc) : carriers) cs
+      -- A copy, not a computation.
+      EquivalenceHornClause [p] conc _ _
+        | Just e <- lookup p carriers -> go ((conc, e) : carriers) cs
+      _ | Just (inVar, bodyE, appE) <- deconstructionDecl adtsDecls c
+        , Just src <- lookup inVar carriers ->
+            let sub  = irMap (\e -> case e of IRVar n | n == inVar -> src; _ -> e)
+                rest = go ((conclusion c, sub bodyE) : carriers) cs
+            in case sub appE of
+                 IRConst (VBool True) -> rest
+                 appTest              -> IRIf appTest rest (IRConst (VBool False))
+      _ -> go carriers cs
+
+-- | The single-input FDecl a Horn clause invokes when that FDecl @deconstructing@s
+-- its input -- @(input variable, body, applicability)@, all in the clause's own
+-- premise names. These are the steps a wildcard survives (see 'readsAnyChain'):
+-- @fst@/@snd@, @fromLeft@/@fromRight@, an ADT field accessor. Every other step
+-- computes, and is handed the wildcard rather than passing it on.
+deconstructionDecl :: [ADTDecl] -> HornClause -> Maybe (ChainName, IRExpr, IRExpr)
+deconstructionDecl adtsDecls (ExprHornClause preVars _ (InjFInfo name) inv) =
+  let FPair fwd invs = lookupFPair adtsDecls name
+      decl           = if inv == 0 then fwd else invs !! (inv - 1)
+      renamed        = foldr (\(old, new) d -> renameDecl old new d) decl (zip (inputVars decl) preVars)
+  in case (deconstructing decl, inputVars renamed) of
+       (True, [inVar]) -> Just (inVar, body renamed, applicability renamed)
+       _               -> Nothing
+deconstructionDecl _ _ = Nothing
 
 -- | The applicability test of the inverse FDecl a Horn clause invokes (renamed
 -- to the clause's own premise variables), or an unconditional True for clauses
@@ -496,7 +585,7 @@ unwrapLambdas fcData cn = case lookup cn (chainNameInfo fcData) of
 -- The first three arguments are purely diagnostic context for the failure case below:
 -- the name of the variable being witnessed, the chain name of the lambda being inverted,
 -- and the candidate occurrences (chain names) that were attempted and yielded no path.
-mergeExpr :: String -> ChainName -> [ChainName] -> [(IRExpr, IRExpr, IRExpr)] -> (IRExpr, IRExpr, IRExpr)
+mergeExpr :: String -> ChainName -> [ChainName] -> [InvChain] -> InvChain
 mergeExpr varName lambdaCN candidateCNs [] = error $ unlines
   [ "Forward chaining failed to find a solution: no inversion path could be constructed for variable \"" ++ varName ++ "\""
   , "while inverting the function bound at chain name " ++ lambdaCN ++ "."
@@ -509,14 +598,17 @@ mergeExpr varName lambdaCN candidateCNs [] = error $ unlines
 mergeExpr _ _ _ [x] = x
 mergeExpr varName lambdaCN candidateCNs (x:xs) = mergeExpr2 id x (mergeExpr varName lambdaCN candidateCNs xs)
 
-mergeExpr2 :: (IRExpr -> IRExpr) -> (IRExpr, IRExpr, IRExpr) -> (IRExpr, IRExpr, IRExpr) -> (IRExpr, IRExpr, IRExpr)
-mergeExpr2 bindings (IRLetIn n v bodyExpr1, cov1, g1) expr2 = mergeExpr2 (bindings . IRLetIn n v) (bodyExpr1, cov1, g1) expr2
-mergeExpr2 bindings expr1 (IRLetIn n v bodyExpr2, cov2, g2) = mergeExpr2 (bindings . IRLetIn n v) expr1 (bodyExpr2, cov2, g2)
-mergeExpr2 bindings (IRConstruct TgTuple [IRConst VAny, b], cov1, g1) (IRConstruct TgTuple [a, IRConst VAny], cov2, g2) = (bindings $ IRConstruct TgTuple [a, b], IROp OpMult cov1 cov2, IROp OpAnd g1 g2)
-mergeExpr2 bindings (IRConstruct TgTuple [a, IRConst VAny], cov1, g1) (IRConstruct TgTuple [IRConst VAny, b], cov2, g2) = (bindings $ IRConstruct TgTuple [a, b], IROp OpMult cov1 cov2, IROp OpAnd g1 g2)
+-- The wildcard test merges by disjunction wherever the guards merge by
+-- conjunction: a merged value is built out of both paths, so either path
+-- reading a wildcard makes the merged value unevaluable.
+mergeExpr2 :: (IRExpr -> IRExpr) -> InvChain -> InvChain -> InvChain
+mergeExpr2 bindings c1@InvChain{invValue = IRLetIn n v bodyExpr1} c2 = mergeExpr2 (bindings . IRLetIn n v) c1{invValue = bodyExpr1} c2
+mergeExpr2 bindings c1 c2@InvChain{invValue = IRLetIn n v bodyExpr2} = mergeExpr2 (bindings . IRLetIn n v) c1 c2{invValue = bodyExpr2}
+mergeExpr2 bindings (InvChain (IRConstruct TgTuple [IRConst VAny, b]) cov1 g1 ra1) (InvChain (IRConstruct TgTuple [a, IRConst VAny]) cov2 g2 ra2) = InvChain (bindings $ IRConstruct TgTuple [a, b]) (IROp OpMult cov1 cov2) (IROp OpAnd g1 g2) (IROp OpOr ra1 ra2)
+mergeExpr2 bindings (InvChain (IRConstruct TgTuple [a, IRConst VAny]) cov1 g1 ra1) (InvChain (IRConstruct TgTuple [IRConst VAny, b]) cov2 g2 ra2) = InvChain (bindings $ IRConstruct TgTuple [a, b]) (IROp OpMult cov1 cov2) (IROp OpAnd g1 g2) (IROp OpOr ra1 ra2)
 -- Expressions are not compatible. Assume they are semantically equal. Then just take the first
 -- TODO: Maybe one of the two is compatible with a third expression, then we would want to take this one
-mergeExpr2 bindings (expr1, cov1, g1) _ = (bindings expr1, cov1, g1)
+mergeExpr2 bindings c1 _ = c1{invValue = bindings (invValue c1)}
 
 getAllOriginatingEquivalenceHornClauses :: [[HornClause]] -> ChainName -> [HornClause]
 getAllOriginatingEquivalenceHornClauses clauses cn = concatMap (filter (\hc -> isEquivalenceHornClause hc && conclusion hc == cn)) clauses

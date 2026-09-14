@@ -2025,10 +2025,11 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
      -- intersections across occurrences) and measure them against the bound
      -- distribution (design set-valued-witnesses).
      Nothing -> setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag planDiag v sample
-     Just (invExprP0, invExprCoV0, invExprGuard0) -> do
-      invExprP     <- pruneDeadLetIns <$> materializeAnchors meta invExprP0
-      invExprCoV   <- pruneDeadLetIns <$> materializeAnchors meta invExprCoV0
-      invExprGuard <- pruneDeadLetIns <$> materializeAnchors meta invExprGuard0
+     Just (InvChain invExprP0 invExprCoV0 invExprGuard0 invExprReadsAny0) -> do
+      invExprP        <- pruneDeadLetIns <$> materializeAnchors meta invExprP0
+      invExprCoV      <- pruneDeadLetIns <$> materializeAnchors meta invExprCoV0
+      invExprGuard    <- pruneDeadLetIns <$> materializeAnchors meta invExprGuard0
+      invExprReadsAny <- pruneDeadLetIns <$> materializeAnchors meta invExprReadsAny0
       let appliedCoV = IRApply (IRLambda (boundVar ++ tag) invExprCoV) sample
       let lInv = IRLambda (boundVar ++ tag) invExprP
       -- Apply the sample to the inverse
@@ -2113,8 +2114,31 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
                 ++ "' is unobserved (ANY in its witnessing slot), but its value feeds"
                 ++ " observed slots or further randomness; integrating it out is beyond"
                 ++ " this engine (design modality-witnessed-inference)")
-          let anyW = IRUnaryOp OpIsAny appliedSample
-          let guardAny ok whenAnySink = IRIf anyW (if bindingIsSink then whenAnySink else refuse) ok
+          -- Asking whether the recovered witness IS a wildcard evaluates the
+          -- inverse, and an inverse whose own arithmetic READS one has no value
+          -- to evaluate to: it dies in the interpreter's `Minus` / `Fst` with a
+          -- raw type error, and in the typed backends on the string "ANY" (task
+          -- fc-inverse-refuses-on-any-input). 'invReadsAny' is the chain's own
+          -- static answer to which of its steps read the observation, as a
+          -- runtime disjunction over their inputs, so testing it FIRST is what
+          -- makes the question below safe to ask at all.
+          --
+          -- It is folded into 'anyW' rather than wrapped around the result,
+          -- which would be a fifth IRIf level per field: every field already
+          -- reads 'anyW', so putting it here adds no reader and no nesting,
+          -- where 'mapResult' around the whole result grew the emitted chain
+          -- programs up to 6x (the duplication 'shareResult' documents).
+          let readsAnyW = IRApply (IRLambda (boundVar ++ tag) invExprReadsAny) sample
+          let anyW = IRIf readsAnyW (IRConst (VBool True)) (IRUnaryOp OpIsAny appliedSample)
+          -- A sink's body factor absorbs a wildcard-VALUED witness, which is
+          -- why it may answer with the body alone. It cannot absorb an
+          -- unevaluable one: there is no witness to bind, and letting the body
+          -- proceed with a wildcard in its place is exactly the silent p = 1.0
+          -- this refusal exists to prevent. So a sink refuses here too.
+          let whenAny whenAnySink
+                | bindingIsSink = IRIf readsAnyW refuse whenAnySink
+                | otherwise     = refuse
+          let guardAny ok whenAnySink = IRIf anyW (whenAny whenAnySink) ok
           return (mapResult wrapInLambdas (guardedZero (zipResult guardAny combined bodyRes)))
 
 -- Dead binding over an *intractable* argument. The arms above all require the
@@ -2586,7 +2610,7 @@ createHOInverse meta (fVar, f) = do
   -- deconstructing InjF crossed while inverting a user-defined function passed
   -- through createHOInverse can still crash. Not hit by any current test case;
   -- tracked as follow-up alongside the other HO-inverse gaps.
-  let (inverseF0, inverseCoV0, _inverseGuard0) = toInvExpr fcData' localAdts (chainName $ getTypeInfo f)
+  let InvChain{invValue = inverseF0, invCoV = inverseCoV0} = toInvExpr fcData' localAdts (chainName $ getTypeInfo f)
   inverseF   <- materializeAnchors meta inverseF0
   inverseCoV <- materializeAnchors meta inverseCoV0
   let (_, _, lBodyChainName, tag) = equivalentLambda "createHOInverse" fcData' (chainName $ getTypeInfo f)
@@ -3518,7 +3542,7 @@ transportDirect meta occs exprBody target = case filter (`elem` subtreeCNs exprB
   [occ] -> case target of
     WPoint s c0 -> case toSeededInvExpr (fcData meta) (adtDecls meta) bodyCN occ of
       Nothing -> return Nothing
-      Just (g0, cov0, guard0) -> do
+      Just (InvChain g0 cov0 guard0 _) -> do
         g     <- pruneDeadLetIns <$> materializeAnchors meta g0
         cov   <- pruneDeadLetIns <$> materializeAnchors meta cov0
         guard <- pruneDeadLetIns <$> materializeAnchors meta guard0
