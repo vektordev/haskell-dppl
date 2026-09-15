@@ -32,6 +32,7 @@ module SPLL.Lang.Lang (
 , multiValueToValueList
 , multiValueContainsContinuous
 , multiValueIsFinite
+, multiValueCardinality
 , valueListToMultiValue
 , valueInMultiValue
 , unionMultiValues
@@ -206,6 +207,33 @@ multiValueIsFinite (MultiEither a b) = multiValueIsFinite a && multiValueIsFinit
 -- A nullary constructor has no fields, so @all _ []@ is vacuously true and the
 -- constructor contributes exactly one value -- which is what we want.
 multiValueIsFinite (MultiADT constrs) = not (null constrs) && all (all multiValueIsFinite . snd) constrs
+
+-- | The number of values 'multiValueToValueList' would yield, computed
+-- structurally WITHOUT building the list. 'Nothing' when the domain is not
+-- statically finite (exactly when 'multiValueIsFinite' is 'False'), so a
+-- caller gets "no answer" rather than a misleading count.
+--
+-- This exists because the count is the only thing a budget check needs, and
+-- the list it counts can be astronomically large: a depth-unrolled recursive
+-- ADT is a cross-product, so @length . 'multiValueToValueList'@ is itself the
+-- blow-up a budget check is there to avoid paying. 'Integer' rather than
+-- 'Int' for the same reason -- the product overflows a machine word long
+-- before any caller would want to materialize it, and an overflowed count
+-- that wraps to something small would wave through exactly the domain the
+-- budget exists to refuse.
+multiValueCardinality :: MultiValue -> Maybe Integer
+multiValueCardinality MultiContinuous = Nothing
+multiValueCardinality MultiAuto = Nothing
+multiValueCardinality (MultiTypeRef _) = Nothing
+multiValueCardinality (MultiDiscretes vals) = if null vals then Nothing else Just (toInteger (length vals))
+multiValueCardinality (MultiTuple a b) = (*) <$> multiValueCardinality a <*> multiValueCardinality b
+multiValueCardinality (MultiEither a b) = (+) <$> multiValueCardinality a <*> multiValueCardinality b
+-- Mirrors 'multiValueIsFinite'/'multiValueToValueList': a constructor's fields
+-- multiply (the 'sequence' cross-product), constructors sum, and a nullary
+-- constructor contributes the empty product, 1.
+multiValueCardinality (MultiADT constrs)
+  | null constrs = Nothing
+  | otherwise = sum <$> mapM (fmap product . mapM multiValueCardinality . snd) constrs
 
 valueListToMultiValue :: [Value] -> MultiValue
 valueListToMultiValue lst@((VEither _):_) | all isVEither lst = MultiEither lVals rVals

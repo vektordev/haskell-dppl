@@ -608,6 +608,33 @@ isEnumerableApplication l v =
     returnsFunction (TArrow _ (TArrow _ _)) = True
     returnsFunction _ = False
 
+-- | Is the domain this enumerable application would materialize small enough to
+-- be worth materializing? Reads the same 'DiscreteValues' tag
+-- 'enumerateAppliedLambda' will use (its @head@ of the tag list) and measures its
+-- cardinality against 'materializationCardinality' -- the same budget
+-- 'SPLL.Analysis.materializationDomain' enforces for Tier-0 marginal
+-- materialization, which this path previously escaped.
+--
+-- The count comes from 'multiValueCardinality', NOT from @length
+-- (multiValueToValueList mv)@: the list is the cross-product whose size is
+-- precisely what is being refused, so counting it by building it would pay the
+-- cost the guard exists to avoid. The 'Integer' count is clamped into 'Int' at
+-- one above the bound before the budget check, which cannot change the verdict
+-- (anything above the bound is over budget) and keeps an astronomically large
+-- product from having to fit a machine word.
+--
+-- 'Nothing' (no tag, or a non-finite domain) answers 'False': there is no domain
+-- to enumerate, so this arm must not claim the node. 'isEnumerableApplication'
+-- has already established a tag exists, so this is a total-function guard
+-- rather than a reachable case.
+enumerationWithinMaterializationBudget :: CompilerMetadata -> [Tag] -> Bool
+enumerationWithinMaterializationBudget meta tgs = case [mv | DiscreteValues mv <- tgs] of
+  (mv:_) -> maybe False withinBudget (multiValueCardinality mv)
+  []     -> False
+  where
+    bound = materializationCardinality (compilerConfig meta)
+    withinBudget n = withinMaterializationBudget bound (fromInteger (min n (toInteger bound + 1)))
+
 -- ===== Decomposability gate (design decomposability-gate-shared-latent) =====
 --
 -- A static analysis answering, for a binary enumerable InjF node, whether its
@@ -2074,8 +2101,19 @@ toIRInference meta True (Expr TypeInfo{rType=rt} (Apply l v)) sample | pType (ge
 -- compiling the body via toIREnumerate. The body need not be deterministic given the
 -- bound variable -- toIREnumerate recurses into further enumerable applications
 -- (nested enumerable `let`s), so this rule no longer requires `pType l == Deterministic`.
+-- Gated on the materialization budget (task of-annotation-forces-dense-enumeration):
+-- this arm materializes the argument's whole support, and it is the FIRST matching
+-- 'Apply' equation, so an `of` annotation alone used to force dense enumeration and
+-- make the plan-guided lazy path below unreachable -- a 423x pessimization on an
+-- otherwise identical program. The budget that already bounds Tier-0 marginal
+-- materialization now bounds this too; over budget, the equation declines and
+-- dispatch falls through to the plan-guided arm ('planWitnessApply'), which
+-- factorizes over the 'PartitionPlan' slots without ever materializing the support.
+-- Under budget nothing changes: every program the suite already routes here still
+-- routes here, so this is strictly a refusal to blow up, not a reordering.
 toIRInference meta cumulative (Expr TypeInfo {rType=_} (Apply l v)) sample
-  | isEnumerableApplication l v =
+  | isEnumerableApplication l v
+  , enumerationWithinMaterializationBudget meta (tags (getTypeInfo v)) =
   -- The agreement fusion (task categorical-product-ov-fusion) is tried first
   -- and answers 'Nothing' for everything it does not recognise or will not
   -- take, so the ordinary joint enumeration stays the default path.

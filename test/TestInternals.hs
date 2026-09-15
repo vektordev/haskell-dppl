@@ -1119,6 +1119,35 @@ enumContinuousRefusalTests = testGroup "enum annotation refuses continuous leave
         (not (multiValueContainsContinuous (MultiTypeRef "T"))
          && not (multiValueIsFinite (MultiTypeRef "T")))
       assertBool "empty enumeration is not finite" (not (multiValueIsFinite (MultiDiscretes [])))
+  -- 'multiValueCardinality' is the budget gate's counter (task
+  -- of-annotation-forces-dense-enumeration). Two properties are load-bearing:
+  -- it agrees exactly with the list it refuses to build, and it answers
+  -- 'Nothing' on precisely the values 'multiValueIsFinite' rejects -- so the
+  -- gate can never wave a non-finite domain through on a bogus count.
+  , testCase "multiValueCardinality counts without building the list" $ do
+      let agrees mv = multiValueCardinality mv
+                        @?= Just (toInteger (length (multiValueToValueList mv)))
+      agrees (MultiDiscretes [VInt 0, VInt 1, VInt 2])
+      agrees (MultiTuple (MultiDiscretes [VInt 0, VInt 1]) (MultiDiscretes [VBool True, VBool False]))
+      agrees (MultiEither (MultiDiscretes [VInt 0, VInt 1]) (MultiDiscretes [VBool True]))
+      agrees (MultiADT [("A", []), ("B", [MultiDiscretes [VInt 0, VInt 1], MultiDiscretes [VInt 7]])])
+      -- Refused exactly where 'multiValueIsFinite' refuses: no count is better
+      -- than a count of the discrete residue.
+      mapM_ (\mv -> assertBool "non-finite has no cardinality"
+                      (multiValueCardinality mv == Nothing && not (multiValueIsFinite mv)))
+        [ MultiContinuous
+        , MultiAuto
+        , MultiTypeRef "T"
+        , MultiDiscretes []
+        , MultiEither (MultiDiscretes [VInt 0]) MultiContinuous
+        , MultiADT [] ]
+      -- The reason the counter exists: a depth-unrolled recursive ADT is a
+      -- cross-product, so the count is astronomically larger than anything a
+      -- caller would materialize -- and larger than 'Int' on a 32-bit word.
+      -- Ten nested binary-branching levels of a ten-value leaf:
+      let deep 0 = MultiADT [("End", [])]
+          deep k = MultiADT [("End", []), ("Cons", [MultiDiscretes (map VInt [0 .. 9]), deep (k - 1 :: Int)])]
+      multiValueCardinality (deep 10) @?= Just 11111111111
   ]
 
 -- | Plan-guided lazy enumeration milestone 2 (design

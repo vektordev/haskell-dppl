@@ -1,0 +1,29 @@
+-- A DECLARED `of` enumeration that is over the materialization budget, so it
+-- routes to the plan-guided lazy path instead of dense enumeration (task
+-- of-annotation-forces-dense-enumeration). The domain this annotation names has
+-- 21845 inhabitants (N_k = 1 + 4*N_{k-1}, N_0 = 1, at depth 7), over the 10000
+-- of `defaultMaterializationCardinality`, so `enumerateAppliedLambda` declines
+-- and dispatch falls through to `planWitnessApply`.
+--
+-- Before the budget gate the `of` annotation alone forced dense enumeration and
+-- hid the plan path -- a pessimization switch, measured at 423x on this very
+-- program at depth 8 (27,080,216 bytes emitted with the annotation against
+-- 63,942 without it, the two being semantically identical).
+--
+-- ORACLE for the expected values below: the same program with the `of` line
+-- deleted. That variant has no DiscreteValues tag, so it has always taken the
+-- plan path and is untouched by the gate; at these logits it answers
+-- p(1) = 0.03941878760821129 and p(0) = 0.9605812123917887, and the two
+-- programs now emit byte-identical modules. Dense enumeration over the full
+-- 21845-value domain agrees to within a few ulps (0.9605812123917892 /
+-- 0.03941878760821113) -- the difference is summation order, 21845 accumulated
+-- terms against the value-grouped DP, not a difference in meaning.
+data Color = Red | Green | Blue
+data Object = NoObj | Obj color::Color
+data Scene = Empty | SCons obj::Object, rest::Scene depth 7
+
+neural readScene :: (Symbol -> Scene) of 7x.{Empty | SCons {NoObj | Obj {Red|Green|Blue}} x}
+
+numRed s = if isEmpty s then 0.0 else (if isObj (obj s) then (if isRed (color (obj s)) then 1.0 else 0.0) else 0.0) + numRed (rest s)
+
+main sym = let scene = readScene sym in if numRed scene > 1.5 then 1 else 0
