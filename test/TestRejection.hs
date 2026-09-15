@@ -15,7 +15,7 @@ module TestRejection (rejectionTests) where
 -- that changes which rule fires is pinpointed to the offending program.
 
 import SPLL.Lang.Lang
-import SPLL.Lang.Types (makeTypeInfo, GenericValue(..), MultiValue(..), CompilerError)
+import SPLL.Lang.Types (makeTypeInfo, GenericValue(..), MultiValue(..), CompilerError, ADTDecl(..))
 import SPLL.Typing.RType (RType(..))
 import SPLL.Examples
 import SPLL.Validator (validateProgram)
@@ -38,6 +38,7 @@ import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure)
 rejectionTests :: TestTree
 rejectionTests = testGroup "Rejection"
   [ validatorTests
+  , nameCollisionPositiveControlTests
   , compileRejectsTests
   , queryTypeGuardTests
   , typeInferenceTests
@@ -79,6 +80,33 @@ writeLogitsCollisionProg = Program [("main", constF 1.0)] [] []
   , (TInt, MultiDiscretes [VInt 0, VInt 1, VInt 2])
   ]
 
+-- An ADT constructor's auto-generated `is<Ctor>` predicate can spell the name
+-- of an existing predefined function: `data X = Null | ...` generates
+-- `isNull`, colliding with the predefined list-emptiness test. Left
+-- unchecked, the predefined function silently won the slot and the ADT's own
+-- test typechecked against list semantics instead (task
+-- adt-accessor-name-collision-unchecked; the concrete example the task was
+-- filed from).
+adtCtorCollidesWithPredefinedProg :: Program
+adtCtorCollidesWithPredefinedProg =
+  Program [("main", constB True)] []
+    [ADTDecl "X" [("Null", []), ("Other", [("v", TFloat)])] Nothing] []
+
+-- Two different ADTs declaring the same constructor name. Unlike a shared
+-- *field* name (see accessorDuplicateFieldSrc below), nothing resolves this
+-- on purpose: the second ADT's own constructor of that name is unreachable.
+adtCtorNameSharedAcrossAdtsProg :: Program
+adtCtorNameSharedAcrossAdtsProg =
+  Program [("main", constB True)] []
+    [ADTDecl "A" [("Shared", [])] Nothing, ADTDecl "B" [("Shared", [])] Nothing] []
+
+-- An ADT constructor whose generated name matches a user-defined top-level
+-- function.
+adtCtorCollidesWithUserFunctionProg :: Program
+adtCtorCollidesWithUserFunctionProg =
+  Program [("main", constB True), ("Foo", constB True)] []
+    [ADTDecl "X" [("Foo", [])] Nothing] []
+
 -- The reverse (source -> Symbol) neural declaration shape has been removed: it used to
 -- name an external network (NN2) with no SPLL call site. Such a declaration must be
 -- rejected at validation, pointing the user at the registry syntax ("neural writeLogits ::
@@ -114,6 +142,9 @@ validatorCases =
   , ("writeLogitsCollision", writeLogitsCollisionProg, "conflicting PartitionPlan annotations")
   , ("reversedNeuralShapeDecl", reversedNeuralShapeProg, "neural writeLogits")
   , ("malformedNeuralDecl", malformedNeuralDeclProg, "must have the form (Symbol -> target)")
+  , ("adtCtorCollidesWithPredefined", adtCtorCollidesWithPredefinedProg, "claimed by more than one declaration")
+  , ("adtCtorNameSharedAcrossAdts", adtCtorNameSharedAcrossAdtsProg, "claimed by more than one declaration")
+  , ("adtCtorCollidesWithUserFunction", adtCtorCollidesWithUserFunctionProg, "claimed by more than one declaration")
   ]
 
 validatorTests :: TestTree
@@ -125,6 +156,32 @@ validatorTests = testGroup "Validator"
           ++ "\nGot: " ++ err)
         (needle `isInfixOf` err)
   | (name, prog, needle) <- validatorCases ]
+
+-- A field name shared between two constructors is an intentional,
+-- already-tested feature (findField/fieldAccessorOwners resolve it to the
+-- first declaration -- see accessorDuplicateFieldSrc below), not a collision.
+-- The new name-collision check must not flag it, whether the two
+-- constructors sharing the field belong to the same 'ADTDecl' or to two
+-- different ones.
+fieldSharedWithinAdtProg, fieldSharedAcrossAdtsProg :: Program
+fieldSharedWithinAdtProg =
+  Program [("main", constB True)] []
+    [ADTDecl "T" [("A", [("v", TFloat)]), ("B", [("v", TFloat)])] Nothing] []
+fieldSharedAcrossAdtsProg =
+  Program [("main", constB True)] []
+    [ADTDecl "A" [("MkA", [("v", TFloat)])] Nothing, ADTDecl "B" [("MkB", [("v", TFloat)])] Nothing] []
+
+nameCollisionPositiveControlTests :: TestTree
+nameCollisionPositiveControlTests = testGroup "NameCollisionPositiveControl"
+  [ testCase "a field name shared between two constructors of the same ADT validates" $
+      case validateProgram fieldSharedWithinAdtProg of
+        Right () -> return ()
+        Left err -> assertFailure ("wrongly rejected an intentional shared field name: " ++ err)
+  , testCase "a field name shared between two different ADTs validates" $
+      case validateProgram fieldSharedAcrossAdtsProg of
+        Right () -> return ()
+        Left err -> assertFailure ("wrongly rejected an intentional shared field name: " ++ err)
+  ]
 
 -- ----------------------------------------------------------------------------
 -- Compile stage: the public entry point must propagate the rejection as a Left.

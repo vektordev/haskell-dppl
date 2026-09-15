@@ -1491,7 +1491,7 @@ test_planEnumM4Polynomial :: TestTree
 test_planEnumM4Polynomial = testCase "planEnumM4Polynomial" $ do
   let prog d = unlines
         [ "data Color = Red | Green | Blue"
-        , "data Object = Null | Obj color::Color"
+        , "data Object = NoObj | Obj color::Color"
         , "data Scene = Empty | SCons obj::Object, rest::Scene depth " ++ show d
         , "neural readScene :: (Symbol -> Scene)"
         , "numRed s = if isEmpty s then 0.0 else (if isObj (obj s) then (if isRed (color (obj s)) then 1.0 else 0.0) else 0.0) + numRed (rest s)"
@@ -1511,7 +1511,7 @@ test_planEnumM4Polynomial = testCase "planEnumM4Polynomial" $ do
 
 -- | The same value-grouped DP acceptance, on the BOOL path ('planGroupBool').
 -- A recursive Bool predicate reaches its recursive call through one disjoint
--- world per @Object@ constructor (here: @obj@ is @Null@, or it is @Obj@ with a
+-- world per @Object@ constructor (here: @obj@ is @NoObj@, or it is @Obj@ with a
 -- non-Red colour), so before grouping the polarity world sets multiplied by
 -- the constructor count at every level -- measured at 2.0x per level for a
 -- 2-constructor Object and 3.0x for a 3-constructor one. Grouping collapses
@@ -1535,7 +1535,7 @@ test_planEnumBoolCtorPolynomial :: TestTree
 test_planEnumBoolCtorPolynomial = testCase "planEnumBoolCtorPolynomial" $ do
   let prog d = unlines
         [ "data Color = Red | Green | Blue"
-        , "data Object = Null | Obj color::Color"
+        , "data Object = NoObj | Obj color::Color"
         , "data Scene = Empty | SCons obj::Object, rest::Scene depth " ++ show d
         , "neural readScene :: (Symbol -> Scene)"
         , "existsRed s = if isEmpty s then False else (if isObj (obj s) then (if isRed (color (obj s)) then True else existsRed (rest s)) else existsRed (rest s))"

@@ -7,7 +7,7 @@
 -- and planEnumInline* cases. Expected values from an independent DP oracle
 -- over the factorized per-level distribution (P(#red >= 2) at depth 12).
 data Color = Red | Green | Blue
-data Object = Null | Obj color::Color
+data Object = NoObj | Obj color::Color
 data Scene = Empty | SCons obj::Object, rest::Scene depth 12
 
 neural readScene :: (Symbol -> Scene)

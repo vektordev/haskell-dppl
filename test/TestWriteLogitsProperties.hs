@@ -392,7 +392,7 @@ writeLogitsError_continuousMixtureRequiresCollapse = testCase "continuousMixture
 -- an aliased slot (a field overlapping the constructor flags) means it is sampling from
 -- the wrong logits.  This is the regression guard for the `makeGenADTConstr` field-offset
 -- bug: an ADT constructor's fields were laid out from index 0 rather than from the
--- constructor's own base index, so for `data Object = Null | Object shape, color` the
+-- constructor's own base index, so for `data Object = NoObj | Object shape, color` the
 -- generated sampler read the Shape field off the constructor-flag slots and never touched
 -- the last Color slot.
 
@@ -443,7 +443,7 @@ readLogitsPrograms =
               , "main sym = adtNN sym" ]
     , 1 )
   , ( "clevr_reduced"  -- reduced from the CLEVR scene read-logits network; field-carrying + nested ADTs
-    , unlines [ "data Object = Null | Object shape :: Shape, color :: Color"
+    , unlines [ "data Object = NoObj | Object shape :: Shape, color :: Color"
               , "data Shape = Cube | Sphere"
               , "data Color = Red | Blue"
               , "neural extractCLEVR :: (Symbol -> Object)"

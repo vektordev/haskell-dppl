@@ -1,12 +1,13 @@
 module SPLL.Validator (
   validateProgram
 ) where
-import SPLL.Lang.Types (Program(..), GenericValue(..), FnDecl, NeuralDecl, MultiValue)
+import SPLL.Lang.Types (Program(..), GenericValue(..), FnDecl, NeuralDecl, MultiValue, ADTDecl(..))
 import SPLL.Lang.Lang (Expr(..), ExprF(..), getSubExprs, getFunctionNames, InjFName(..))
 import SPLL.Typing.RType (RType(..))
 import Data.Maybe (isJust, isNothing)
 import PredefinedFunctions (globalFEnv, parameterCount)
-import Data.List (intersect, groupBy, sortOn, nub)
+import SPLL.Typing.AlgebraicDataTypes (fieldAccessorOwners)
+import Data.List (intersect, groupBy, sortOn, nub, intercalate)
 import Data.Function (on)
 
 -- Reserved Var names bound to prelude-primitive distributions; not user declarations.
@@ -16,7 +17,7 @@ distributionPrimitiveNames = ["Uniform", "Normal"]
 -- This function returns nothing if the program is valid and an error else
 validateProgram :: Program -> Either String ()
 -- We sequence the either monads so we either have a list of errors(Lefts) or discard the Rights
-validateProgram p@Program{functions=fn, neurals=nrls, writeLogitsDecls=enc} = sequence_ (validateMainExists fn : validateWriteLogitsDecls enc : map validateNeuralShape nrls ++ exprValidations)
+validateProgram p@Program{functions=fn, neurals=nrls, writeLogitsDecls=enc, adts=adtsDecl} = sequence_ (validateMainExists fn : validateNoNameCollisions adtsDecl fn : validateWriteLogitsDecls enc : map validateNeuralShape nrls ++ exprValidations)
   where
     -- Validate all expressions potentially unsing the context of their top level declaration and their program
     exprValidations = concatMap (\(_, expr) -> validateAllSubexpressions p expr expr) fn
@@ -61,6 +62,63 @@ validateMainExists :: [FnDecl] -> Either String ()
 validateMainExists fn
   | "main" `elem` map fst fn = Right ()
   | otherwise = Left "Compiler Error: Program has no 'main' function defined."
+
+-- | Every name a @data@ declaration puts into the global function
+-- environment (a constructor, its @is\<Ctor\>@ predicate, or a field
+-- accessor), labeled with where it came from. Field accessor names are
+-- pre-deduplicated via 'fieldAccessorOwners' (first constructor declaring a
+-- field wins): two constructors sharing a field name is an intentional,
+-- already-tested feature (task adt-accessor-type-too-permissive), not a
+-- collision this check should flag. A constructor name or an is\<Ctor\>
+-- predicate carries no such tie-break -- nothing resolves a shared one on
+-- purpose -- so those keep every occurrence, including duplicates within a
+-- single 'ADTDecl'.
+adtGeneratedNameSources :: [ADTDecl] -> [(String, String)]
+adtGeneratedNameSources decls =
+  [ (cName, "constructor '" ++ cName ++ "' of data " ++ dName)
+  | ADTDecl {dataName = dName, constructors = cs} <- decls, (cName, _) <- cs ]
+  ++
+  [ ("is" ++ cName, "the auto-generated 'is" ++ cName ++ "' test for constructor '"
+                    ++ cName ++ "' of data " ++ dName)
+  | ADTDecl {dataName = dName, constructors = cs} <- decls, (cName, _) <- cs ]
+  ++
+  [ (fName, "field accessor '" ++ fName ++ "' (of constructor '" ++ cName ++ "')")
+  | (fName, cName) <- fieldAccessorOwners decls ]
+
+-- | Names entering the environment from outside any @data@ declaration:
+-- 'PredefinedFunctions.globalFEnv' called with no ADTs gives exactly the
+-- predefined names (an ADT contributes nothing to that function when there
+-- are no ADTs to contribute from), and 'fn' is the program's own top-level
+-- declarations.
+predefinedNameSources :: [(String, String)]
+predefinedNameSources = [ (name, "the predefined function '" ++ name ++ "'") | (name, _) <- globalFEnv [] ]
+
+userFunctionNameSources :: [FnDecl] -> [(String, String)]
+userFunctionNameSources fn = [ (name, "the user-defined function '" ++ name ++ "'") | (name, _) <- fn ]
+
+-- | Reject a program the moment two of {a predefined function, a name a
+-- @data@ declaration auto-generates, a user-defined top-level function}
+-- would enter the global environment under the same name. Left unchecked,
+-- the loser is silently discarded by whichever merge happens to run
+-- (@Map.fromList@'s last-wins, or a first-wins @lookup@) rather than
+-- rejected, so a name like @isNull@ -- entirely natural for a constructor
+-- called @Null@ -- silently resolves to the predefined list-emptiness test
+-- instead of the ADT's own, and a program that looks like it type-checks
+-- runs with someone else's semantics. See docs task
+-- adt-accessor-name-collision-unchecked.
+validateNoNameCollisions :: [ADTDecl] -> [FnDecl] -> Either String ()
+validateNoNameCollisions adtsDecl fn = case filter ((> 1) . length) grouped of
+  [] -> Right ()
+  (dupGroup : _) -> Left (collisionMessage dupGroup)
+  where
+    allSources = adtGeneratedNameSources adtsDecl ++ predefinedNameSources ++ userFunctionNameSources fn
+    grouped = groupBy ((==) `on` fst) (sortOn fst allSources)
+
+collisionMessage :: [(String, String)] -> String
+collisionMessage entries@((name, _) : _) =
+  "Compiler Error: the name '" ++ name ++ "' is claimed by more than one declaration: "
+  ++ intercalate " and by " (map snd entries)
+collisionMessage [] = error "collisionMessage: no entries"
 
 validateExpression :: Program -> Expr -> Expr -> Either String ()
 validateExpression Program {adts=adtsDecl} _ (Expr _ (InjF (Named name) _)) | isNothing (lookup name (globalFEnv adtsDecl)) = Left ("Cannot find InjF: " ++ name)

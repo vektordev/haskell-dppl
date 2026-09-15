@@ -5,7 +5,7 @@
 -- parameters; the (mu, sigma) slots are ignored by the compiled prob).
 data Color = Red | Green | Blue
 data Position = Pos x::Float, y::Float
-data Object = Null | Obj color::Color, position::Position
+data Object = NoObj | Obj color::Color, position::Position
 data Scene = Empty | SCons obj::Object, rest::Scene depth 3
 
 neural readScene :: (Symbol -> Scene)

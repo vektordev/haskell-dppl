@@ -5,7 +5,7 @@
 -- (value-grouped DP is milestone 4). Expected value hand-computed
 -- (P(>=2 reds), reds r=[.4,.07,.15], lengths s=[.7,.6,.5]): 0.024801.
 data Color = Red | Green | Blue
-data Object = Null | Obj color::Color
+data Object = NoObj | Obj color::Color
 data Scene = Empty | SCons obj::Object, rest::Scene depth 3
 
 neural readScene :: (Symbol -> Scene)

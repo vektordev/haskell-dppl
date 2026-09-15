@@ -4,7 +4,7 @@
 -- entries per level. Expected value hand-computed (exactly one green object
 -- among up to 3, greens g=[.24,.42,.30], lengths s=[.7,.6,.5]): 0.2586192.
 data Color = Red | Green | Blue
-data Object = Null | Obj color::Color
+data Object = NoObj | Obj color::Color
 data Scene = Empty | SCons obj::Object, rest::Scene depth 3
 
 neural readScene :: (Symbol -> Scene)
