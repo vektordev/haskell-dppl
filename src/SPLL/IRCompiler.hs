@@ -17,7 +17,9 @@ module SPLL.IRCompiler (
   latentDependencies,
   injFLatentVerdicts,
   materializationVerdicts,
-  isCandidateBinaryEnumInjF
+  isCandidateBinaryEnumInjF,
+  -- white-box: the plan factorization's independence guard (see its haddock)
+  planFactorExternals
 )where
 
 import SPLL.IntermediateRepresentation
@@ -4258,6 +4260,65 @@ bindPeelInput s b
       lift (setVariables [(v, b)])
       return (IRVar v)
 
+-- | The free variables of a subtree that name an ENCLOSING random binding --
+-- the one way the factorization's independence assumption can be violated,
+-- and the reason this check exists rather than a comment asserting it cannot
+-- happen.
+--
+-- 'subtreeHasOcc' establishes that a subtree does not mention the plan-bound
+-- variable. That makes it independent of the PLAN, whose randomness is the
+-- neural net's alone. It does not by itself make two such subtrees
+-- independent of EACH OTHER, and the world measure multiplies their factors.
+-- Fresh 'Normal'/'Uniform' leaves and calls to top-level stochastic functions
+-- are per-occurrence draws, so two occurrences never share; the only shared
+-- random source reachable from inside the traversal is a variable bound by an
+-- enclosing @let@, which SPLL's @let@ makes a single draw shared by every
+-- occurrence (design let-binding-semantics: the existing @let@ is the eager
+-- form, @Apply (Lambda x body) expr@). The traversal cannot descend INTO such
+-- a let itself -- 'planResolveApply's 'collectApply' declines a Lambda callee,
+-- and 'classifyArg' declines a non-deterministic argument -- but a let
+-- enclosing the whole plan-bound binding puts its variable in scope here.
+--
+-- A variable is flagged when it is a local binding of the ambient scope
+-- (@typeEnv@ marks top-level functions with True; 'Normal'/'Uniform' are
+-- absent from it entirely) and its occurrence is not 'Deterministic' given
+-- scope. Variables bound INSIDE the subtree are not in the ambient scope and
+-- so are not flagged -- correctly, since the sub-compile is one
+-- 'toIRInference' call that models their sharing itself. A recovered witness
+-- variable is deterministic by 'retypeDetGiven' and excluded twice over.
+--
+-- The check is deliberately LOCAL and conservative: it refuses any factor
+-- carrying such a variable, rather than tracking which factors end up
+-- multiplied into the same world. A shared source between two factors is the
+-- actual unsoundness, but that relation depends on how worlds combine, which
+-- is exactly the thing a future change could alter silently. Refusing at the
+-- factor keeps the guarantee local to this function. Nothing in the corpus is
+-- refused by it (see 'planFreeStochastic*'), and the shape it protects is
+-- independently unreachable today.
+--
+-- Takes the ambient scope and the recovered-witness list rather than a whole
+-- 'CompilerMetadata' so that it is directly testable: the hazard it guards is
+-- unreachable end-to-end today (every enclosing random binding of the shapes
+-- tried is refused by the outer engine first), so a white-box test is the only
+-- way to pin its behaviour. See 'planFactorExternalsTests' in TestInternals.
+planFactorExternals :: TypeEnv -> [String] -> Expr -> [String]
+planFactorExternals env recovered = nub . go
+  where
+    go e = self e ++ concatMap go (getSubExprs e)
+    self (Expr ti (Var n))
+      | Just (_, False) <- lookup n env
+      , n `notElem` recovered
+      , pType ti /= Deterministic = [n]
+    self _ = []
+
+-- | Diagnostic for a factor refused by 'planFactorExternals'.
+planSharedSourceWhy :: String -> [String] -> Expr -> String
+planSharedSourceWhy what vs sub = what
+  ++ " is independent of the plan-bound variables but reads the enclosing random binding"
+  ++ (if length vs > 1 then "s " else " ") ++ intercalate ", " (map show vs)
+  ++ ": factorizing it would treat that shared draw as independent of its other uses ("
+  ++ planNodeName sub ++ ")"
+
 -- | Factorize a plan-free subtree that draws fresh randomness (task
 -- plan-free-stochastic-subtree-not-factorized).
 --
@@ -4283,6 +4344,9 @@ planFactorFree meta env sub target
   | subtreeHasOcc (planEnvDetOccs env) sub =
       return (Left ("a subtree independent of the plan-bound variables draws fresh randomness and also reads a specialized parameter: "
                     ++ planNodeName sub))
+  -- see 'planFactorExternals': refuse rather than silently assume independence
+  | (vs@(_:_)) <- planFactorExternals (typeEnv meta) (recoveredVars meta) sub =
+      return (Left (planSharedSourceWhy "a subtree" vs sub))
   | otherwise = do
       let (cumulative, sample) = case target of
             PTPoint s -> (False, s)
@@ -4301,6 +4365,8 @@ planFactorBool meta env c
   | subtreeHasOcc (planEnvDetOccs env) c =
       return (Left ("an if condition independent of the plan-bound variables draws fresh randomness and also reads a specialized parameter: "
                     ++ planNodeName c))
+  | (vs@(_:_)) <- planFactorExternals (typeEnv meta) (recoveredVars meta) c =
+      return (Left (planSharedSourceWhy "an if condition" vs c))
   | otherwise = do
       t <- polarity constTrueIR
       f <- polarity (IRConst (VBool False))

@@ -46,6 +46,28 @@ no counterpart through a full inference compile. A factored world is never
 collapsed by the milestone-4 value DP (`planGroupValues`), whose group mass is
 built from `planWorldMass`, which measures plan leaves only.
 
+**The independence is checked, not assumed.** Occurrence-freedom buys
+independence from the *plan*; it does not by itself buy independence between
+two factors multiplied into the same world. Fresh `Normal`/`Uniform` leaves and
+calls to top-level stochastic functions are per-occurrence draws, so two
+occurrences never share one. The one shared random source reachable from inside
+the traversal is a variable bound by an enclosing `let`, which SPLL's `let`
+makes a single draw shared by every occurrence (see
+`NeST_internal_docs/designs/let-binding-semantics.md` — the existing `let` is
+the *eager* form, `Apply (Lambda x body) expr`; the lazy/substituting `let~` is
+only proposed). The traversal cannot descend into such a `let` itself, but one
+enclosing the whole plan-bound binding puts its variable in scope, so
+`planFactorExternals` refuses any factor that reads a non-`Deterministic` local
+of the ambient scope. The check is deliberately local to the factor rather than
+tracking which factors share a world: the "same world" relation depends on how
+worlds combine, which is the part a future change could alter silently.
+
+No program reaches that hazard today — every enclosing random binding that
+would put such a variable in scope is refused by the outer engine before the
+plan traversal runs. So the guard is belt-and-braces, and is pinned white-box
+(`TestInternals`, `plan factorization independence guard`) precisely because no
+corpus program would notice it breaking.
+
 Still refused, and genuinely not a product: value *enumeration* of a plan-free
 stochastic subtree (`planEnumValuesRaw` — a stochastic subtree has no single
 value to enumerate, it has a weighted support), and a comparison operand that

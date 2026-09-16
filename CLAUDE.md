@@ -291,6 +291,21 @@ non-factorizable: value enumeration of a plan-free stochastic subtree, and a
 comparison operand convolving a plan leaf with fresh noise
 (`snd o + Normal * 0.5 > 2.0`).
 
+Independence there is not assumed, it is **checked**. Occurrence-freedom makes
+a subtree independent of the *plan*, whose randomness is the net's alone; it
+does not make two factors of the same world independent of *each other*. Fresh
+distribution leaves and top-level calls are per-occurrence draws, so the only
+shared source reachable from the traversal is a variable bound by an enclosing
+`let` — which SPLL's `let` makes a single shared draw
+(`designs/let-binding-semantics.md`: the existing form is the eager one). The
+traversal cannot descend into a `let` (`collectApply` declines a Lambda callee,
+`classifyArg` declines a non-deterministic argument), but an *enclosing* one
+puts its variable in scope, so `planFactorExternals` refuses any factor reading
+a non-`Deterministic` local of the ambient scope. That shape has no end-to-end
+spelling today — the outer engine refuses every such binding first — so the
+guard is pinned white-box in `TestInternals`
+(`plan factorization independence guard`) rather than by a corpus program.
+
 A set-witness world can carry **residue factors** (`WWorld [guard] WSet
 [PResult]`): when `transportDirect` inverts a single-occurrence subtree
 through a field constructor (`(x, e)`, `x : e`, a user ADT constructor, also
