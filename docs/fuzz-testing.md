@@ -7,7 +7,8 @@ expected values. `genRawFuzzProgram`/`genRawFuzzExpr` cover the full AST
 space and are only useful for crash-freedom (almost every draw is
 ill-typed); `genTypedProgram`/`genTypedExpr` build well-typed programs
 over scalars, tuples, `Either` and lists (roughly half of all draws are
-structured) and drive the real invariants (programs validate, P(ANY)=1,
+structured) with `let`-bindings (about 70% of draws carry one) and drive the
+real invariants (programs validate, P(ANY)=1,
 probability is never negative, topK at threshold 0 reproduces exact
 inference and at a real threshold never inflates it, branch counting
 doesn't change the probability value, and mixtures follow the
@@ -18,14 +19,26 @@ rather than `property True`, so QuickCheck's own discard-ratio accounting
 reports this honestly instead of it being invisible inside an inflated
 success count.
 
-**The `Fuzz` group is currently red**, and legitimately so: widening the
-typed generator to structured types (design `typed-program-generator-expansion`
+**The `Fuzz` group is currently red**, and legitimately so. Widening the typed
+generator to structured types (design `typed-program-generator-expansion`
 milestone M1) turned up three distinct compiler bugs, tracked as
-`fuzz-structured-type-bugs` in the internal-docs repo. 7 of 11 properties
-fail, all tracing back to those three causes — `head []` throwing inside the
-IR interpreter, a compile-time blowup specific to structured shapes, and the
-generate-backed-prob guard reporting by `error` rather than `Left`. The
-default suite is unaffected; per the design, findings are filed rather than
+`fuzz-structured-type-bugs` in the internal-docs repo — `head []` throwing
+inside the IR interpreter, a compile-time blowup specific to structured
+shapes, and the generate-backed-prob guard reporting by `error` rather than
+`Left`.
+
+Milestone M2 (`let`-bindings) widened the reach of the last of those a great
+deal: **43% of typed draws now make `compile` throw instead of returning
+`Left`**, measured over 200 draws, and 62% of the witness-shaped ones do. Four
+distinct messages account for all of them — the set-valued witness engine's own
+refusal (`setWitnessApply`'s `refuse`, ~72% of the crashes), the
+generate-backed-fallback guard, `toIRInference`'s "found no way to convert to
+IR" fallthrough, and `PredefinedFunctions`' "has 0 inversions solving for". All
+four report by `error`, which is what makes them crashes rather than refusals;
+the last one needs no `let` at all. Tracked as `fuzz-let-witness-bugs` in the
+internal-docs repo.
+
+The default suite is unaffected; per the design, findings are filed rather than
 fixed so that coverage work is not blocked behind bug triage.
 
 ## Shrinking
@@ -41,14 +54,14 @@ The shrink is **type-preserving**, and has to be: almost every structural
 reduction of a well-typed SPLL expression is ill-typed, so it is discarded
 downstream and reduces nothing. `tyOfTypedExpr` recovers a node's `Ty`
 from its shape alone (the generator annotates everything `makeTypeInfo`),
-and the shrinker offers only strictly-smaller candidates of a compatible
-type: the smallest inhabitant of the node's type, either arm of an
+and the shrinker offers only strictly-smaller candidates whose type is at
+least as general (see below): the smallest inhabitant of the node's type, either arm of an
 `IfThenElse`, a type-matching argument of an `InjF`, and
 one-child-at-a-time recursion. A node `tyOfTypedExpr` does not recognise
 simply does not shrink, so the shrinker is safe to point at any `Expr`.
 
 Structured types made type recovery **partial**, so the contract is
-compatibility rather than equality. A `left x` node fixes only the left
+*generality* rather than equality. A `left x` node fixes only the left
 component of its `Either` and says nothing about the right, which
 `tyOfTypedExpr` records as `TyAny`; the arms of an `if` are joined rather
 than one being picked. Replacing a node whose type was pinned only by both
@@ -57,7 +70,33 @@ strictly *more general*. What keeps that sound is that `typedLeaves` never
 offers a leaf committing a free position — `typedLeaves TyAny = []`, and
 that propagates through the structured cases — so a shrink may leave a
 position free but can never disagree about a fixed one. For the scalar
-fragment, compatibility and equality coincide.
+fragment, generality and equality coincide.
+
+The test is `tyGeneralizes`, and it is deliberately **asymmetric**. M1 stated
+it as `tyJoin`-compatibility, which is too weak: a join succeeds whenever no
+position actively disagrees, so a `TyAny` on the *node's* side absorbs an
+unrelated type on the replacement's. `left (right 0)` recovers as
+`Either (Either ? Int) ?` and its own argument `right 0` as `Either ? Int`;
+those join, so the argument was offered as a shrink of the node — stripping a
+constructor and changing the expression's type. M2's deeper nesting made that
+reachable in practice, and `tyGeneralizes` refuses it while still admitting
+every reduction the symmetric test was meant to allow. Pinned by the
+`Shrinker` group's "a constructor stack is not stripped a layer".
+
+`let`-bindings add a **scope** to all three directions. Generation, recovery and
+shrinking are indexed by a `TyEnv` as well as a `Ty`; `collapses` may reduce a
+`let` to its bound value always, but to its body only when the binding is dead,
+since otherwise the "shrink" would strand an unbound variable — a different and
+invalid program rather than a smaller one. Every leaf `typedLeaves` offers is
+closed, which is what makes the workhorse reduction scope-safe everywhere.
+
+One consequence of `let` worth knowing: the generator names binders after their
+scope depth and then alpha-renames the whole draw with `uniquifyBinders`, because
+`SPLL.Validator` is stricter than lexical scoping. It rejects shadowing outright,
+and it rejects an `Apply` whose two sides declare any name in common — which two
+*sibling* `let`s in disjoint scopes do. A caller composing two independent draws
+into one program (`genMixturePair`) has to re-prefix one of them with
+`uniquifyBindersFrom`, since both start numbering at `v0`.
 
 Its contract is pinned by the `Shrinker` group, which — alone in this
 module — lives in the **default** suite, not in `Slow`: it is pure and
@@ -75,10 +114,24 @@ depth buckets. Without it, a generator that silently collapses to a
 single shape after a refactor still gives a fully green run — every
 invariant holds vacuously on `Normal` alone.
 
-Measured at 200 draws when this landed: 100% compile, 35% reach a
+It also reports the target type and shape, and (since M2) the `let` shape:
+`NoLet`, `PlainLet`, or `WitnessLet` — the last being a continuous binding
+observed only through an `if` whose condition reads it. That classifier is
+*syntactic*: it says which shape was generated, not which engine ran, there
+being no hook on `setWitnessApply` to read. It is a sound proxy nonetheless,
+because a `WitnessLet` reaches its bound variable only through a comparison and
+an `if`, which is exactly what forward chaining cannot point-invert — so a
+witness-shaped draw that ends up with a probability function got it from the
+set-witness engine and from nowhere else.
+
+Measured at 200 draws when M-I landed: 100% compile, 35% reach a
 probability function, and the realized `pType` splits 65% `Bottom` / 23%
 `Integrate` / 9.5% `Deterministic` / 1.5% `PNormal` / 1% `PLogNormal`.
-The property's `cover` bounds are set well below those and are
+After M2, over 500 draws: 71% carry a `let` (51% witness-shaped, 19%
+plain), the scalar/structured split is unchanged at 55/45, and the outcome
+split is 43% compile-crashed / 35% with a probability function / 17%
+without / 4% rejected. The `cover` bounds are set well below all of those and
+are
 deliberately *not* wrapped in `checkCoverage`, so a miss prints
 "Only N% ..., but expected M%" as a warning rather than failing the run —
 observe first, enforce once the distribution has been characterized over

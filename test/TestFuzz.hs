@@ -66,8 +66,9 @@ import SPLL.Analysis (annotateEnumsProg)
 import SPLL.Typing.Infer (addTypeInfo)
 import ArbitrarySPLL (genRawFuzzProgram, genTypedProgram, genTypedExpr, Ty(..),
                       shrinkTypedProgram, shrinkTypedExpr, tyOfTypedExpr,
-                      tyCompatible,
-                      typedExprSize, typedExprDepth)
+                      tyGeneralizes,
+                      typedExprSize, typedExprDepth,
+                      LetShape(..), letShapeOf, uniquifyBindersFrom)
 
 -- | `show`ing a value forces every field, catching lazily-hidden crashes
 -- (partial functions/undefined) that a bare WHNF `seq` would miss.
@@ -441,8 +442,11 @@ prop_Fuzz_MixtureFollowsCombinationRules =
 genMixturePair :: Gen (Expr, Expr, Double)
 genMixturePair = do
   ty <- elements [TyFloat, TyInt, TyBool]
-  a  <- resize mixtureArmSize (sized (genTypedExpr ty))
-  b  <- resize mixtureArmSize (sized (genTypedExpr ty))
+  -- Re-prefixed apart: each arm's own binders are already distinct, but both
+  -- draws start numbering at v0, and the mixture program below puts them in
+  -- one expression where the validator refuses the collision.
+  a  <- uniquifyBindersFrom "va" <$> resize mixtureArmSize (sized (genTypedExpr ty))
+  b  <- uniquifyBindersFrom "vb" <$> resize mixtureArmSize (sized (genTypedExpr ty))
   q  <- choose (0.1, 0.9)
   return (a, b, q)
 
@@ -533,6 +537,7 @@ data DrawSummary = DrawSummary
   , dsSize           :: Int
   , dsDepth          :: Int
   , dsStructured     :: Bool
+  , dsLetShape       :: LetShape
   } deriving (Show, Eq)
 
 summarizeDraw :: Program -> IO DrawSummary
@@ -547,6 +552,7 @@ summarizeDraw p = do
     <*> guardAxis 0 (maybe 0 typedExprSize body)
     <*> guardAxis 0 (maybe 0 typedExprDepth body)
     <*> guardAxis False (isStructured p)
+    <*> guardAxis NoLet (maybe NoLet letShapeOf body)
 
 -- | The modality pass's verdict on @main@, as a label. This is the axis that
 -- catches a collapse into a single inference regime, which the outcome split
@@ -614,6 +620,7 @@ prop_Fuzz_GeneratorCoverage = withMaxSuccess 200 $
       $ tabulate "target shape"     [dsShapeLabel s]
       $ tabulate "target type"      [dsTargetTyLabel s]
       $ tabulate "top constructor"  [dsTopConstructor s]
+      $ tabulate "let shape"        [show (dsLetShape s)]
       $ tabulate "node count"       [bucket (dsSize s)]
       $ tabulate "depth"            [bucket depth]
       -- Recorded rates at the time of writing: ~35% reach a probability
@@ -627,6 +634,18 @@ prop_Fuzz_GeneratorCoverage = withMaxSuccess 200 $
       -- deliberately slack floor, per the design's observe-first decision on
       -- thresholds -- it fires on a collapse back to scalars, not on drift.
       $ cover 15 (dsStructured s)                 "structured target type"
+      -- M2's acceptance criterion. 'letShapeOf' is a *syntactic* classifier --
+      -- it reports which shape was generated, not which engine ran, there
+      -- being no hook on 'setWitnessApply' to read. It is a sound proxy for
+      -- the second bound nonetheless: a 'WitnessLet' reaches its bound
+      -- variable only through a comparison and an @if@, which is exactly the
+      -- shape forward chaining cannot point-invert, so a witness-shaped draw
+      -- that ends up with a probability function got it from the set-witness
+      -- engine and from nowhere else.
+      $ cover 10 (dsLetShape s /= NoLet)          "contains a let"
+      $ cover 1  (dsLetShape s == WitnessLet
+                  && outcome == CompiledWithProbFun)
+                 "witness-shaped let reaches a probability function"
       $ property True
 
 return []
@@ -685,11 +704,14 @@ buriedNormal =
 -- right, so the recovered type carries 'TyAny' there. Replacing an
 -- @Either (Bool,Float) (Either Float Float)@ node (a type only pinned by
 -- *both* arms of an enclosing if) with @left (False, 0.0)@ is a perfectly
--- well-typed shrink whose recovered type is strictly more general. So the
--- contract is "joinable with", not "equal to" -- a shrink may leave a
--- position free, and may never disagree about one that is fixed.
+-- well-typed shrink whose recovered type is strictly more general.
+--
+-- So the contract is directional: the shrink's type must be at least as
+-- *general* as the original's. It was stated as symmetric joinability until
+-- M2, which is weaker than intended and let a genuinely type-changing
+-- reduction through -- see 'tyGeneralizes'.
 compatibleTys :: Maybe Ty -> Maybe Ty -> Bool
-compatibleTys (Just a) (Just b) = tyCompatible a b
+compatibleTys (Just a) (Just b) = a `tyGeneralizes` b
 compatibleTys Nothing  Nothing  = True
 compatibleTys _        _        = False
 
@@ -744,6 +766,16 @@ errorChannelTests = testGroup "Error channels"
       return (lbl === crashedAxis)
   ]
 
+-- | A @let@ whose body never mentions the binding. The shrinker must be able
+-- to drop the whole binding, since removing it strands nothing.
+deadLet :: Expr
+deadLet = letIn "v0" uniform (constF 1.0)
+
+-- | A @let@ whose body does mention the binding. Collapsing to the body would
+-- leave @v0@ unbound -- a different, invalid program rather than a smaller one.
+liveLet :: Expr
+liveLet = letIn "v0" uniform (Expr makeTypeInfo (Var "v0") #+# constF 1.0)
+
 shrinkerTests :: TestTree
 shrinkerTests = testGroup "Shrinker"
   [ testProperty "every shrink preserves the expression's type" $
@@ -770,6 +802,24 @@ shrinkerTests = testGroup "Shrinker"
       let m = minimizeBy containsNormal buriedNormal
       in counterexample (show m)
            (typedExprSize buriedNormal > 10 .&&. typedExprSize m === 1)
+  , testProperty "a dead let shrinks away entirely" $ once $
+      counterexample (show (shrinkTypedExpr deadLet))
+        (property (constF 1.0 `elem` shrinkTypedExpr deadLet))
+  , testProperty "a live let is never collapsed onto its body" $ once $
+      -- Every candidate must still be a *valid program*: that is the property
+      -- an unbound v0 would break, and validation is what would catch it.
+      conjoin [ counterexample (show e')
+                  (validateProgram (Program [("main", e')] [] [] []) === Right ())
+              | e' <- shrinkTypedExpr liveLet ]
+  , testProperty "a constructor stack is not stripped a layer" $ once $
+      -- @left (right 0)@ recovers as @Either (Either ? Int) ?@ and its argument
+      -- @right 0@ as @Either ? Int@. Those two join, so the original
+      -- 'tyJoin'-compatibility test admitted the argument as a shrink of the
+      -- node -- stripping the @left@ and changing the expression's type. The
+      -- asymmetric 'tyGeneralizes' test refuses it.
+      let e = left (right (constI 0))
+      in counterexample (show (shrinkTypedExpr e))
+           (property (right (constI 0) `notElem` shrinkTypedExpr e))
   , testProperty "minimization keeps the failing feature and never grows" $
       forAll (resize fuzzSize genTypedProgram) $ \p ->
         case mainBody p of
