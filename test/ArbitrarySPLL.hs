@@ -17,9 +17,15 @@ module ArbitrarySPLL (
 , genValueWide
 , genRawFuzzExpr
 , genRawFuzzProgram
+, tyOfTypedExpr
+, typedExprSize
+, typedExprDepth
+, shrinkTypedExpr
+, shrinkTypedProgram
 )where
 
 import Test.QuickCheck
+import Data.List (nub)
 
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
@@ -344,3 +350,137 @@ genTypedRec ty n =
         , (#>#) <$> genTypedExpr TyFloat half <*> genTypedExpr TyFloat half
         , (#<#) <$> genTypedExpr TyFloat half <*> genTypedExpr TyFloat half
         ]
+
+-- ---------------------------------------------------------------------------
+-- Type-preserving shrinking for the typed generator.
+--
+-- Design: typed-program-generator-expansion, Axis 2 / milestone M-S.
+--
+-- QuickCheck's default (absent) shrink leaves a failure reported as a
+-- '--quickcheck-replay' seed against a large opaque draw, and those seeds
+-- replay the RNG stream rather than the draw, so they do not survive an edit
+-- to the generator or the property. A structural shrink would not help
+-- either: almost every structural reduction of a well-typed SPLL expression
+-- is ill-typed, so it is rejected downstream and reduces nothing.
+--
+-- Shrinking therefore has to be type-directed for the same reason generation
+-- is. Because generation already is, the two are the same per-'Ty' table read
+-- in opposite directions: 'genTypedLeaf' answers "some inhabitant of this Ty",
+-- 'typedLeaves' answers "the smallest inhabitants of this Ty".
+
+-- | The 'Ty' a 'genTypedExpr' output is guaranteed to have, recovered from the
+-- node shape alone (the generator annotates every node with 'makeTypeInfo',
+-- so the annotation carries nothing to read).
+--
+-- Total over the typed generator's output space and 'Nothing' outside it,
+-- which is what makes 'shrinkTypedExpr' safe to apply to an arbitrary 'Expr':
+-- an unrecognised node simply does not shrink, rather than shrinking to
+-- something ill-typed.
+tyOfTypedExpr :: Expr -> Maybe Ty
+tyOfTypedExpr e = case node e of
+  Constant (VFloat _) -> Just TyFloat
+  Constant (VInt _)   -> Just TyInt
+  Constant (VBool _)  -> Just TyBool
+  Var "Uniform"       -> Just TyFloat
+  Var "Normal"        -> Just TyFloat
+  -- Both arms carry the node's type; either one answers, and a draw whose
+  -- first arm is somehow unrecognised can still be classified by the second.
+  IfThenElse _ t f    -> maybe (tyOfTypedExpr f) Just (tyOfTypedExpr t)
+  InjF (Named f) _    -> lookup f typedInjFResultTy
+  _                   -> Nothing
+
+-- | Result type of every InjF the typed generator can emit. Note that some
+-- generator combinators expand into others ('#-#' is @plus a (neg b)@,
+-- 'bernoulli' is @lt uniform (constF p)@, 'dice' is nested 'ifThenElse'), so
+-- this list covers the realized constructor space, not the combinator list.
+typedInjFResultTy :: [(String, Ty)]
+typedInjFResultTy =
+  [ ("mult", TyFloat), ("plus", TyFloat), ("neg", TyFloat), ("exp", TyFloat)
+  , ("plusI", TyInt), ("negI", TyInt)
+  , ("gt", TyBool), ("lt", TyBool), ("and", TyBool), ("or", TyBool)
+  , ("not", TyBool)
+  ]
+
+-- | Node count. Used both as the shrinker's well-foundedness measure and by
+-- the coverage instrumentation in TestFuzz.
+typedExprSize :: Expr -> Int
+typedExprSize e = 1 + sum (map typedExprSize (children e))
+
+-- | Longest root-to-leaf path, counting the root as depth 1.
+typedExprDepth :: Expr -> Int
+typedExprDepth e = case children e of
+  [] -> 1
+  cs -> 1 + maximum (map typedExprDepth cs)
+
+children :: Expr -> [Expr]
+children e = case node e of
+  IfThenElse c t f -> [c, t, f]
+  InjF _ args      -> args
+  _                -> []
+
+-- | The smallest inhabitants of a 'Ty' -- the shrinker's workhorse reduction,
+-- "replace any subexpression with a type-correct leaf". Constants only: a
+-- distribution leaf ('normal'/'uniform') is the same size but strictly more
+-- interesting, so offering it as a shrink target would let the shrinker walk
+-- sideways forever.
+typedLeaves :: Ty -> [Expr]
+typedLeaves TyFloat = [constF 0]
+typedLeaves TyInt   = [constI 0]
+typedLeaves TyBool  = [constB False, constB True]
+
+-- | Type-preserving shrink for an expression produced by 'genTypedExpr'.
+--
+-- Every candidate has the same 'Ty' as its input and a strictly smaller node
+-- count, so the result is well-founded and never hands the property an
+-- ill-typed program (which would be discarded, minimizing nothing).
+shrinkTypedExpr :: Expr -> [Expr]
+shrinkTypedExpr e = case tyOfTypedExpr e of
+  Nothing -> []
+  Just ty -> nub (filter smaller (typedLeaves ty ++ collapses ty e ++ childShrinks e))
+  where
+    smaller c = typedExprSize c < typedExprSize e
+
+-- | Replace the node by one of its own same-typed subexpressions: either
+-- branch of an 'IfThenElse' (both share the node's type), or a type-matching
+-- argument of an InjF/comparison (@neg x@ and @x + y@ shrink to @x@; @x > y@
+-- does not, its arguments being Float where it is Bool).
+collapses :: Ty -> Expr -> [Expr]
+collapses ty e = filter (\c -> tyOfTypedExpr c == Just ty) $ case node e of
+  IfThenElse _ t f -> [t, f]
+  InjF _ args      -> args
+  _                -> []
+
+-- | Shrink one child at a time, keeping the node and every sibling. This is
+-- what actually minimizes a deep program: the collapses above cut whole
+-- subtrees, this reduces the ones that have to stay.
+childShrinks :: Expr -> [Expr]
+childShrinks e = case node e of
+  IfThenElse c t f ->
+    [ rebuild (IfThenElse c' t f) | c' <- shrinkTypedExpr c ]
+    ++ [ rebuild (IfThenElse c t' f) | t' <- shrinkTypedExpr t ]
+    ++ [ rebuild (IfThenElse c t f') | f' <- shrinkTypedExpr f ]
+  InjF name args ->
+    [ rebuild (InjF name args') | args' <- shrinkOne shrinkTypedExpr args ]
+  _ -> []
+  where rebuild = Expr (ann e)
+
+-- | All the ways to replace exactly one list element by one of its shrinks.
+shrinkOne :: (a -> [a]) -> [a] -> [[a]]
+shrinkOne _ [] = []
+shrinkOne f (x:xs) =
+  [ x' : xs | x' <- f x ] ++ [ x : xs' | xs' <- shrinkOne f xs ]
+
+-- | Type-preserving shrink for a 'genTypedProgram' draw: shrink the body of
+-- @main@ and leave the (empty) neural/ADT/writeLogits sections alone. Extra
+-- function declarations, if a later milestone adds them, are preserved
+-- untouched -- a wrong-but-conservative shrink is a big counterexample, while
+-- a wrong-and-aggressive one is a *different* counterexample, which is worse.
+shrinkTypedProgram :: Program -> [Program]
+shrinkTypedProgram p = case lookup "main" (functions p) of
+  Nothing   -> []
+  Just body ->
+    [ p { functions = map (replaceMain body') (functions p) }
+    | body' <- shrinkTypedExpr body
+    ]
+  where
+    replaceMain body' (n, b) = if n == "main" then (n, body') else (n, b)

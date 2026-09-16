@@ -43,7 +43,7 @@
 -- cross-checks different CompilerConfigs against each other on the *same*
 -- prob function), but doing so needs many forward samples per case, chosen
 -- dynamically from the density at the query point (see its docs).
-module TestFuzz (fuzzTests, superSlowFuzzTests) where
+module TestFuzz (fuzzTests, shrinkerTests, superSlowFuzzTests) where
 
 import Test.QuickCheck hiding (sample)
 import Test.Tasty (TestTree, testGroup)
@@ -60,7 +60,13 @@ import SPLL.IntermediateRepresentation
 import SPLL.IRCompiler (generateBackedSites)
 import SPLL.Prelude
 import SPLL.Validator (validateProgram)
-import ArbitrarySPLL (genRawFuzzProgram, genTypedProgram, genTypedExpr, Ty(..))
+import SPLL.Lang.Lang (toStub, getTypeInfo)
+import SPLL.Typing.ForwardChaining (annotateProg)
+import SPLL.Analysis (annotateEnumsProg)
+import SPLL.Typing.Infer (addTypeInfo)
+import ArbitrarySPLL (genRawFuzzProgram, genTypedProgram, genTypedExpr, Ty(..),
+                      shrinkTypedProgram, shrinkTypedExpr, tyOfTypedExpr,
+                      typedExprSize, typedExprDepth)
 
 -- | `show`ing a value forces every field, catching lazily-hidden crashes
 -- (partial functions/undefined) that a bare WHNF `seq` would miss.
@@ -225,7 +231,7 @@ prop_Fuzz_CompileNeverCrashes = withMaxSuccess 40 $ forAll (resize fuzzSize genR
 -- | Well-typed scalar programs: a stronger, unguarded crash-freedom check
 -- (see module header for why this differs from the invariant properties).
 prop_Fuzz_TypedCompileNeverCrashes :: Property
-prop_Fuzz_TypedCompileNeverCrashes = withMaxSuccess 40 $ forAll (resize fuzzSize genTypedProgram) $ \p -> ioProperty $ withinBudget $ do
+prop_Fuzz_TypedCompileNeverCrashes = withMaxSuccess 40 $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
   compiled <- evaluate (forceShow (compile defaultCompilerConfig p))
   case compiled of
     Left _ -> return $ property True
@@ -258,7 +264,7 @@ prop_Fuzz_TypedCompileNeverCrashes = withMaxSuccess 40 $ forAll (resize fuzzSize
 -- draws is affordable at this module's per-case budget.
 prop_Fuzz_ProbNeverGenerateBacked :: Property
 prop_Fuzz_ProbNeverGenerateBacked = withMaxSuccess 3000 $
-  forAll (resize fuzzSize genTypedProgram) $ \p -> ioProperty $ withinBudget $ do
+  forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
     r <- trySync (evaluate (forceShow (compile defaultCompilerConfig p)))
     return $ case r of
       Right (Right irEnv) -> case generateBackedSites irEnv of
@@ -273,7 +279,7 @@ prop_Fuzz_ProbNeverGenerateBacked = withMaxSuccess 3000 $
 -- doesn't, either the generator or the validator disagrees with the type
 -- system about what's well-typed.
 prop_Fuzz_TypedProgramsValidate :: Property
-prop_Fuzz_TypedProgramsValidate = withMaxSuccess 200 $ forAll (resize fuzzSize genTypedProgram) $ \p ->
+prop_Fuzz_TypedProgramsValidate = withMaxSuccess 200 $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p ->
   case validateProgram p of
     Right _ -> property True
     Left err -> counterexample ("well-typed generated program failed validation: " ++ err) False
@@ -284,7 +290,7 @@ prop_Fuzz_TypedProgramsValidate = withMaxSuccess 200 $ forAll (resize fuzzSize g
 -- some currently hit unsupported IR shapes, caught by
 -- 'prop_Fuzz_TypedCompileNeverCrashes' instead -- both are discarded here).
 prop_Fuzz_MarginalAnyIsOne :: Property
-prop_Fuzz_MarginalAnyIsOne = withMaxSuccess 40 $ forAll (resize fuzzSize genTypedProgram) $ \p -> ioProperty $ withinBudget $ do
+prop_Fuzz_MarginalAnyIsOne = withMaxSuccess 40 $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
   compiled <- compileSafe defaultCompilerConfig p
   case compiled >>= \irEnv -> irProb p irEnv VAny of
     Nothing -> return discardVacuous
@@ -297,7 +303,7 @@ prop_Fuzz_MarginalAnyIsOne = withMaxSuccess 40 $ forAll (resize fuzzSize genType
 -- mass/density everywhere; a negative result means the change-of-variables
 -- or mixture-combination arithmetic somewhere in IRCompiler has a sign bug).
 prop_Fuzz_ProbabilityNeverNegative :: Property
-prop_Fuzz_ProbabilityNeverNegative = withMaxSuccess 40 $ forAll (resize fuzzSize genTypedProgram) $ \p -> ioProperty $ withinBudget $ do
+prop_Fuzz_ProbabilityNeverNegative = withMaxSuccess 40 $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
   compiled <- compileSafe defaultCompilerConfig p
   case compiled of
     Nothing -> return discardVacuous
@@ -312,7 +318,7 @@ prop_Fuzz_ProbabilityNeverNegative = withMaxSuccess 40 $ forAll (resize fuzzSize
 -- | topK with threshold 0 prunes nothing, so it must reproduce exact
 -- inference exactly, at a sample point drawn from the program itself.
 prop_Fuzz_TopKZeroMatchesExact :: Property
-prop_Fuzz_TopKZeroMatchesExact = withMaxSuccess 40 $ forAll (resize fuzzSize genTypedProgram) $ \p -> ioProperty $ withinBudget $ do
+prop_Fuzz_TopKZeroMatchesExact = withMaxSuccess 40 $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
   exact <- compileSafe defaultCompilerConfig p
   topK <- compileSafe (defaultCompilerConfig { topKThreshold = Just 0.0 }) p
   case (exact, topK) of
@@ -330,7 +336,7 @@ prop_Fuzz_TopKZeroMatchesExact = withMaxSuccess 40 $ forAll (resize fuzzSize gen
 -- | Pruning can only zero out branches, never inflate probability above the
 -- exact value, at a sample point drawn from the program itself.
 prop_Fuzz_TopKNeverInflates :: Property
-prop_Fuzz_TopKNeverInflates = withMaxSuccess 40 $ forAll (resize fuzzSize genTypedProgram) $ \p -> ioProperty $ withinBudget $ do
+prop_Fuzz_TopKNeverInflates = withMaxSuccess 40 $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
   exact <- compileSafe defaultCompilerConfig p
   topK <- compileSafe (defaultCompilerConfig { topKThreshold = Just 0.1 }) p
   case (exact, topK) of
@@ -352,7 +358,7 @@ prop_Fuzz_TopKNeverInflates = withMaxSuccess 40 $ forAll (resize fuzzSize genTyp
 -- | Enabling branch counting must not alter the probability value, only add
 -- a third result component, at a sample point drawn from the program itself.
 prop_Fuzz_BranchCountingDoesNotChangeProbability :: Property
-prop_Fuzz_BranchCountingDoesNotChangeProbability = withMaxSuccess 40 $ forAll (resize fuzzSize genTypedProgram) $ \p -> ioProperty $ withinBudget $ do
+prop_Fuzz_BranchCountingDoesNotChangeProbability = withMaxSuccess 40 $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
   def <- compileSafe defaultCompilerConfig p
   bc <- compileSafe (defaultCompilerConfig { countBranches = True }) p
   case (def, bc) of
@@ -446,10 +452,172 @@ genMixturePair = do
 mixtureArmSize :: Int
 mixtureArmSize = 6
 
+-- ---------------------------------------------------------------------------
+-- Generator coverage instrumentation.
+--
+-- Design: typed-program-generator-expansion, Axis 3 / milestone M-I.
+--
+-- Without this, a generator that silently collapses to a single shape after a
+-- refactor still produces a full green run: every invariant above holds
+-- vacuously on `Normal` alone. The ad-hoc "~55% compile, ~32% have a
+-- probability function" figures that motivated the design were a one-time
+-- measurement; this makes them a per-run artifact, printed by tasty-quickcheck
+-- alongside the property's result.
+--
+-- Per the design's open question 3 (decided 2026-09-16: "observe first, but do
+-- some very conservative bounds that at least spot out a warning"), the
+-- thresholds are 'cover' *without* 'checkCoverage': QuickCheck prints
+-- "Only N% ..., but expected M%" when one is missed and the property still
+-- passes. They are set well under the measured rates, so a miss means the
+-- generator really has narrowed, not that a bound was optimistic.
+
+-- | What became of one generated draw. Ordered worst-to-best so the 'cover'
+-- bounds below can be stated as ">= this rung".
+data DrawOutcome
+  = ValidateFailed     -- ^ 'validateProgram' rejected it (should not happen)
+  | CompileCrashed     -- ^ the compiler threw instead of returning 'Left'
+  | CompileRejected    -- ^ an honest 'Left CompilerError'
+  | CompiledNoProbFun  -- ^ compiled, but generate-only
+  | CompiledWithProbFun
+  deriving (Show, Eq, Ord)
+
+classifyDraw :: Program -> IO DrawOutcome
+classifyDraw p = case validateProgram p of
+  Left _  -> return ValidateFailed
+  Right _ -> do
+    r <- trySync (evaluate (forceShow (compile defaultCompilerConfig p)))
+    return $ case r of
+      Left _          -> CompileCrashed
+      Right (Left _)  -> CompileRejected
+      Right (Right e) | hasProbFun e -> CompiledWithProbFun
+                      | otherwise    -> CompiledNoProbFun
+
+-- | The modality pass's verdict on @main@, as a label. This is the axis that
+-- catches a collapse into a single inference regime, which the outcome split
+-- alone would not: every draw can compile and still all be 'Deterministic'.
+realizedPTypeLabel :: Program -> String
+realizedPTypeLabel p =
+  case addTypeInfo (annotateProg (annotateEnumsProg p)) of
+    Left _ -> "<not typed>"
+    Right (typed, _) -> case lookup "main" (functions typed) of
+      Nothing   -> "<no main>"
+      Just body -> show (pType (getTypeInfo body))
+
+mainBodyOf :: Program -> Maybe Expr
+mainBodyOf p = lookup "main" (functions p)
+
+-- | Bucketed rather than exact: the point is to see the distribution move, and
+-- a hundred singleton rows in the tabulate output would show nothing.
+bucket :: Int -> String
+bucket n
+  | n <= 2    = "1-2"
+  | n <= 5    = "3-5"
+  | n <= 10   = "6-10"
+  | n <= 20   = "11-20"
+  | otherwise = ">20"
+
+prop_Fuzz_GeneratorCoverage :: Property
+prop_Fuzz_GeneratorCoverage = withMaxSuccess 200 $
+  forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudgetScaled 2 $ do
+    outcome <- classifyDraw p
+    let body   = mainBodyOf p
+        shape  = maybe "<no main>" (show . toStub) body
+        size   = maybe 0 typedExprSize body
+        depth  = maybe 0 typedExprDepth body
+    return
+      $ tabulate "outcome"          [show outcome]
+      $ tabulate "realized pType"   [realizedPTypeLabel p]
+      $ tabulate "top constructor"  [shape]
+      $ tabulate "node count"       [bucket size]
+      $ tabulate "depth"            [bucket depth]
+      -- Recorded rates at the time of writing: ~55% compile, ~32% reach a
+      -- probability function. Both bounds sit far below that.
+      $ cover 25 (outcome >= CompiledNoProbFun)   "compiles"
+      $ cover 10 (outcome == CompiledWithProbFun) "has a probability function"
+      $ cover 10 (depth >= 3)                     "non-trivial structure"
+      $ property True
+
 return []
 
 fuzzTests :: TestTree
 fuzzTests = testGroup "Fuzz" [testProperties "properties" $(allProperties)]
+
+-- ---------------------------------------------------------------------------
+-- Shrinker contract (design typed-program-generator-expansion, milestone M-S).
+--
+-- These are pure and fast -- no compile, no sampling -- so unlike everything
+-- else in this module they belong in the default suite rather than in `Slow`,
+-- and Spec.hs wires them there. That matters: the shrinker is what makes every
+-- other property in here debuggable, so a break in it must not hide behind an
+-- opt-in tier (and `Slow` is documented as known-red, which would hide it).
+--
+-- Named without the `prop_` prefix so the `$(allProperties)` splice above does
+-- not also collect them into the Slow group -- the same mechanism
+-- 'fuzzSamplingMatchesPDF' below uses.
+
+-- | Does this expression contain a @Normal@ leaf? Stands in for "this draw
+-- exhibits the bug" in the minimization test below.
+containsNormal :: Expr -> Bool
+containsNormal e = case node e of
+  Var "Normal"     -> True
+  IfThenElse c t f -> any containsNormal [c, t, f]
+  InjF _ args      -> any containsNormal args
+  _                -> False
+
+-- | The greedy loop QuickCheck itself runs: repeatedly take the first shrink
+-- that still exhibits the failure, until none does.
+minimizeBy :: (Expr -> Bool) -> Expr -> Expr
+minimizeBy p e = case filter p (shrinkTypedExpr e) of
+  (e' : _) -> minimizeBy p e'
+  []       -> e
+
+mainBody :: Program -> Maybe Expr
+mainBody p = lookup "main" (functions p)
+
+-- | A deliberately bulky well-typed draw with a single @Normal@ buried four
+-- levels down. Minimizing it under "still contains a Normal" must reach the
+-- bare leaf -- this is the design's M-S acceptance criterion ("minimizes to a
+-- <5-node program automatically") pinned deterministically, rather than by
+-- reverting a fix in a sandbox.
+buriedNormal :: Expr
+buriedNormal =
+  ifThenElse (uniform #<# constF 0.5)
+    (((normal #+# constF 1.0) #*# (uniform #-# constF 2.0)) #+# expF (constF 3.0))
+    (negF (uniform #*# constF 4.0))
+
+shrinkerTests :: TestTree
+shrinkerTests = testGroup "Shrinker"
+  [ testProperty "every shrink preserves the expression's type" $
+      forAll (resize fuzzSize genTypedProgram) $ \p ->
+        case mainBody p of
+          Nothing -> property True
+          Just b  -> conjoin
+            [ counterexample (show b') (tyOfTypedExpr b' === tyOfTypedExpr b)
+            | b' <- shrinkTypedExpr b ]
+  , testProperty "every shrink is strictly smaller" $
+      forAll (resize fuzzSize genTypedProgram) $ \p ->
+        case mainBody p of
+          Nothing -> property True
+          Just b  -> conjoin
+            [ counterexample (show b') (typedExprSize b' < typedExprSize b)
+            | b' <- shrinkTypedExpr b ]
+  , testProperty "every shrunk program still validates" $
+      forAll (resize fuzzSize genTypedProgram) $ \p ->
+        conjoin [ counterexample (show p') (validateProgram p' === Right ())
+                | p' <- shrinkTypedProgram p ]
+  , testProperty "a buried Normal minimizes to the bare leaf" $ once $
+      let m = minimizeBy containsNormal buriedNormal
+      in counterexample (show m)
+           (typedExprSize buriedNormal > 10 .&&. typedExprSize m === 1)
+  , testProperty "minimization keeps the failing feature and never grows" $
+      forAll (resize fuzzSize genTypedProgram) $ \p ->
+        case mainBody p of
+          Nothing -> property True
+          Just b  -> containsNormal b ==>
+            let m = minimizeBy containsNormal b
+            in counterexample (show m)
+                 (containsNormal m .&&. typedExprSize m <= typedExprSize b)
+  ]
 
 -- ---------------------------------------------------------------------------
 -- SuperSlow: sampling-vs-PDF self-consistency. Wired up with a plain
@@ -718,7 +886,7 @@ maxRetries = 4
 -- batch of forward samples sized to the hardest (lowest-density) point among
 -- them (see 'drawQueryPoints' / 'runSamplingCheck').
 fuzzSamplingMatchesPDF :: Property
-fuzzSamplingMatchesPDF = withMaxSuccess 20 $ forAll (resize fuzzSize genTypedProgram) $ \p -> ioProperty $ withinSuperSlowBudget $ do
+fuzzSamplingMatchesPDF = withMaxSuccess 20 $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinSuperSlowBudget $ do
   compiled <- compileSafe defaultCompilerConfig p
   case compiled of
     Nothing -> return discardVacuous

@@ -998,7 +998,9 @@ into the top-level groups (`--ta '-l'` prints the current list):
   `README.md` as a doctest
 - `test/End2EndTesting.hs` — `.ppl`/`.tst` integration against interpreter,
   Julia and Python, plus the batched groups (see Batched Mode below)
-- `test/TestFuzz.hs` — `Fuzz`, inside the opt-in `Slow`/`SuperSlow` groups
+- `test/TestFuzz.hs` — `Fuzz`, inside the opt-in `Slow`/`SuperSlow` groups,
+  plus `Shrinker` (the typed generator's shrink contract), which is in the
+  default suite
 - `test/TestCaseParser.hs` / `ArbitrarySPLL.hs` / `TestTolerances.hs` — the
   `.tst` parser, QuickCheck generators, shared numeric tolerances
 
@@ -1102,8 +1104,13 @@ metamorphic invariants the hand-written corpus checks — P(ANY)=1, topK
 never inflates probability, branch counting doesn't change the
 probability value, probability is never negative, mixtures follow the
 dimension-combination rules — rather than known expected values, plus
-crash-freedom on both generators. Details, the raw-vs-typed split, and the
-`SuperSlow` sampling-vs-PDF tier: `docs/fuzz-testing.md`.
+crash-freedom on both generators. Typed draws **shrink** (type-preserving,
+`shrinkTypedProgram` in `ArbitrarySPLL.hs`; the properties use `forAllShrink`),
+and `prop_Fuzz_GeneratorCoverage` `tabulate`s what the generator actually
+produced each run so a silent collapse to one shape can't pass green. The
+shrinker's own contract is the `Shrinker` group, which is pure and fast and so
+lives in the **default** suite rather than in `Slow`. Details, the raw-vs-typed
+split, and the `SuperSlow` sampling-vs-PDF tier: `docs/fuzz-testing.md`.
 
 ### Batched Mode (PyTorch tensorizer)
 
