@@ -5,8 +5,9 @@
 hand-written corpus checks in `Spec.hs`'s Corpus group, rather than known
 expected values. `genRawFuzzProgram`/`genRawFuzzExpr` cover the full AST
 space and are only useful for crash-freedom (almost every draw is
-ill-typed); `genTypedProgram`/`genTypedExpr` build well-typed scalar
-programs and drive the real invariants (programs validate, P(ANY)=1,
+ill-typed); `genTypedProgram`/`genTypedExpr` build well-typed programs
+over scalars, tuples, `Either` and lists (roughly half of all draws are
+structured) and drive the real invariants (programs validate, P(ANY)=1,
 probability is never negative, topK at threshold 0 reproduces exact
 inference and at a real threshold never inflates it, branch counting
 doesn't change the probability value, and mixtures follow the
@@ -16,6 +17,16 @@ probability function to check, every such branch returns `discardVacuous`
 rather than `property True`, so QuickCheck's own discard-ratio accounting
 reports this honestly instead of it being invisible inside an inflated
 success count.
+
+**The `Fuzz` group is currently red**, and legitimately so: widening the
+typed generator to structured types (design `typed-program-generator-expansion`
+milestone M1) turned up three distinct compiler bugs, tracked as
+`fuzz-structured-type-bugs` in the internal-docs repo. 7 of 11 properties
+fail, all tracing back to those three causes — `head []` throwing inside the
+IR interpreter, a compile-time blowup specific to structured shapes, and the
+generate-backed-prob guard reporting by `error` rather than `Left`. The
+default suite is unaffected; per the design, findings are filed rather than
+fixed so that coverage work is not blocked behind bug triage.
 
 ## Shrinking
 
@@ -30,11 +41,23 @@ The shrink is **type-preserving**, and has to be: almost every structural
 reduction of a well-typed SPLL expression is ill-typed, so it is discarded
 downstream and reduces nothing. `tyOfTypedExpr` recovers a node's `Ty`
 from its shape alone (the generator annotates everything `makeTypeInfo`),
-and the shrinker offers only same-typed, strictly-smaller candidates:
-the smallest constant of the node's type, either arm of an `IfThenElse`,
-a type-matching argument of an `InjF`, and one-child-at-a-time recursion.
-A node `tyOfTypedExpr` does not recognise simply does not shrink, so the
-shrinker is safe to point at any `Expr`.
+and the shrinker offers only strictly-smaller candidates of a compatible
+type: the smallest inhabitant of the node's type, either arm of an
+`IfThenElse`, a type-matching argument of an `InjF`, and
+one-child-at-a-time recursion. A node `tyOfTypedExpr` does not recognise
+simply does not shrink, so the shrinker is safe to point at any `Expr`.
+
+Structured types made type recovery **partial**, so the contract is
+compatibility rather than equality. A `left x` node fixes only the left
+component of its `Either` and says nothing about the right, which
+`tyOfTypedExpr` records as `TyAny`; the arms of an `if` are joined rather
+than one being picked. Replacing a node whose type was pinned only by both
+arms with a single-arm leaf is a well-typed shrink whose recovered type is
+strictly *more general*. What keeps that sound is that `typedLeaves` never
+offers a leaf committing a free position — `typedLeaves TyAny = []`, and
+that propagates through the structured cases — so a shrink may leave a
+position free but can never disagree about a fixed one. For the scalar
+fragment, compatibility and equality coincide.
 
 Its contract is pinned by the `Shrinker` group, which — alone in this
 module — lives in the **default** suite, not in `Slow`: it is pure and
