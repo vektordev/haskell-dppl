@@ -52,6 +52,17 @@ the already-filed M2 messages, reached again because a neural draw's body is an
 ordinary generated expression and can contain a witness-`let` like any other.
 Tracked as `fuzz-neural-plan-bugs` in the internal-docs repo.
 
+**The Slow `Fuzz` group no longer completes on this machine.** A full run stalls
+for over 25 minutes inside `prop_Fuzz_TopKNeverInflates`, and
+`prop_Fuzz_NeuralMaterializedTwinAgrees` was abandoned after 40 minutes against
+a worst case of about 18 by its own per-case budget. That overrun is a hang
+`System.Timeout.timeout` cannot interrupt — it does not stop a pure loop that
+allocates nothing — so the per-case budget these properties rely on is not the
+guarantee it reads as. The likely culprit is the non-terminating draw recorded
+as item 2 of `fuzz-structured-type-bugs`, now hit routinely rather than
+occasionally. Run individual properties rather than the group until that is
+addressed.
+
 The default suite is unaffected; per the design, findings are filed rather than
 fixed so that coverage work is not blocked behind bug triage.
 
