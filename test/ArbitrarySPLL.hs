@@ -29,12 +29,21 @@ module ArbitrarySPLL (
 , LetShape(..)
 , letShapeOf
 , mentionsVar
+, tyToRType
+, rTypeToTy
+, tyAllDiscrete
+, genNeuralProgram
+, genNeuralTwinProgram
+, neuralTwin
+, typedMainCoreExpr
+, typedMainCoreTy
+, hasNeural
 , uniquifyBinders
 , uniquifyBindersFrom
 )where
 
 import Test.QuickCheck
-import Data.List (nub)
+import Data.List (nub, find)
 import Data.Maybe (fromMaybe)
 
 import SPLL.Lang.Lang
@@ -350,9 +359,23 @@ genTy n
 tyDepth :: Int
 tyDepth = 2
 
--- | A well-typed nullary "main" program of a randomly chosen type.
+-- | A well-typed "main" program of a randomly chosen type.
+--
+-- Most draws are nullary. One in five (milestone M3) instead declares a neural
+-- network and reads it: @main sym = let s = nn sym in \<observations of s\>@.
+-- Those draws are the only way the plan-guided enumeration engine is reached
+-- at all, and they cost the properties nothing extra -- the same eight
+-- invariants apply unchanged. See 'genNeuralProgram'.
+--
+-- A neural draw's @main@ takes an argument, so a caller running it has to
+-- supply a mock-network symbol rather than the empty argument list every other
+-- draw wants. TestFuzz's @fuzzArgs@ derives that from the program.
 genTypedProgram :: Gen Program
-genTypedProgram = do
+genTypedProgram = frequency [(4, genPlainProgram), (1, genNeuralProgram)]
+
+-- | The nullary shape: @main = \<expr\>@, with no neural declaration.
+genPlainProgram :: Gen Program
+genPlainProgram = do
   ty <- genTy tyDepth
   body <- sized (genTypedExpr ty)
   return $ Program [("main", body)] [] [] []
@@ -657,6 +680,13 @@ uniquifyBindersFrom prefix e0 = fst (go 0 [] e0)
       InjF nm args ->
         let (args', i') = goMany i args
         in (rebuild (InjF nm args'), i')
+      -- The symbol a milestone-M3 neural read is applied to is a 'Var' under
+      -- the generated @main@'s own lambda, so it has to be renamed with it.
+      -- Without this case the read keeps referring to the pre-rename name and
+      -- the validator rejects the draw outright.
+      ReadNN nm arg ->
+        let (arg', i') = go i sub arg
+        in (rebuild (ReadNN nm arg'), i')
       _ -> (e, i)
       where
         rebuild = Expr (ann e)
@@ -664,6 +694,306 @@ uniquifyBindersFrom prefix e0 = fst (go 0 [] e0)
         goMany j (a : as) = let (a', j')   = go j sub a
                                 (as', j'') = goMany j' as
                             in (a' : as', j'')
+
+-- ---------------------------------------------------------------------------
+-- Milestone M3: neural declarations and the plan-guided enumeration surface.
+--
+-- Design: typed-program-generator-expansion, Axis 1b (second half).
+--
+-- The engine with the least generated coverage is plan-guided lazy
+-- enumeration: it is reached only through a @ReadNN@ whose result is observed,
+-- and nothing in the scalar/structured/let generator can emit one. The shape
+-- this produces is the corpus' @planEnum*@ shape,
+--
+--   neural nn :: (Symbol -> T)          -- optionally `of <MultiValue>`
+--   main sym = let s = nn sym in if <observation of s> then _ else _
+--
+-- which is three separate pieces of machinery the earlier milestones lack: a
+-- declaration generator, a target-type lattice narrower than 'Ty' (not every
+-- type has a partition plan), and an observation generator that actually
+-- *reads* the network rather than binding it and dropping it.
+--
+-- The `of` clause is what makes this milestone's second oracle free. A neural
+-- declaration with an `of` clause over a purely discrete target gets a
+-- 'DiscreteValues' tag (SPLL.Analysis.annotateEnumsProg), so it compiles by
+-- materializing the whole support into an @IREnumSum@; without one it compiles
+-- through the lazy plan-backed path. The two must agree to the last bit, which
+-- is exactly what the corpus' hand-written @planEnumRec*@/@*Materialized@ file
+-- pairs pin -- and here it comes without writing a second program.
+
+-- | How a generated neural declaration is annotated, and hence which
+-- compilation path its reads take.
+data NeuralAnn
+  = AnnAuto      -- ^ No @of@ clause: the lazy, plan-backed path.
+  | AnnAutoOf    -- ^ @of _@ over a discrete target: the materializing twin.
+  | AnnInts Int  -- ^ @of [0 .. k-1]@ on an @Int@ target: a k-way categorical.
+  deriving (Show, Eq)
+
+-- | The 'RType' a generated 'Ty' denotes. Total, because every 'Ty' the
+-- generator targets is representable; 'TyAny' is never a generation target and
+-- maps to 'TFloat' only so this stays a function.
+tyToRType :: Ty -> RType
+tyToRType TyFloat        = TFloat
+tyToRType TyInt          = TInt
+tyToRType TyBool         = TBool
+tyToRType TyAny          = TFloat
+tyToRType (TyTuple a b)  = Tuple (tyToRType a) (tyToRType b)
+tyToRType (TyEither a b) = TEither (tyToRType a) (tyToRType b)
+tyToRType (TyList a)     = ListOf (tyToRType a)
+
+-- | Partial inverse of 'tyToRType', for reading a neural declaration's target
+-- back out of a 'Program'. 'Nothing' for anything the typed generator cannot
+-- build inhabitants of.
+rTypeToTy :: RType -> Maybe Ty
+rTypeToTy TFloat        = Just TyFloat
+rTypeToTy TInt          = Just TyInt
+rTypeToTy TBool         = Just TyBool
+rTypeToTy (Tuple a b)   = TyTuple  <$> rTypeToTy a <*> rTypeToTy b
+rTypeToTy (TEither a b) = TyEither <$> rTypeToTy a <*> rTypeToTy b
+rTypeToTy (ListOf a)    = TyList   <$> rTypeToTy a
+rTypeToTy _             = Nothing
+
+-- | Does this type's partition plan consist of discrete slots only? Only then
+-- does an @of@ clause change anything: 'SPLL.Analysis.annotateEnumsProg'
+-- declines to tag a 'MultiValue' with a continuous leaf, because enumerating
+-- it would sum over the discrete residue and silently drop the continuous
+-- mass. A @Float@ anywhere in the target therefore makes @of _@ a no-op, and
+-- the materialized-twin oracle vacuous.
+tyAllDiscrete :: Ty -> Bool
+tyAllDiscrete TyBool         = True
+tyAllDiscrete (TyTuple a b)  = tyAllDiscrete a && tyAllDiscrete b
+tyAllDiscrete (TyEither a b) = tyAllDiscrete a && tyAllDiscrete b
+tyAllDiscrete _              = False
+
+-- | Target types 'SPLL.Lang.Lang.autoDeriveMultiValue' can produce a plan for
+-- with no annotation: @Float@ (one continuous slot), @Bool@ (a two-way
+-- discrete), and tuples\/Eithers of those. Not @Int@ (unbounded domain, needs
+-- explicit values), not lists, not ADTs -- ADT targets are milestone M4.
+--
+-- Depth-bounded hard: every leaf costs logits (2 for a continuous slot, 2 for
+-- a Bool, plus a selector per Either), and the mock network has to produce a
+-- vector of exactly the plan's width on every single draw.
+genAutoNeuralTy :: Int -> Gen Ty
+genAutoNeuralTy n
+  | n <= 0 = elements [TyFloat, TyBool]
+  | otherwise = frequency
+      [ (5, elements [TyFloat, TyBool])
+      , (2, TyTuple  <$> rec <*> rec)
+      , (1, TyEither <$> rec <*> rec)
+      ]
+  where rec = genAutoNeuralTy (n - 1)
+
+-- | 'genAutoNeuralTy' restricted to 'tyAllDiscrete' targets, for the draws
+-- whose @of@ clause is supposed to *do* something.
+genDiscreteNeuralTy :: Int -> Gen Ty
+genDiscreteNeuralTy n
+  | n <= 0 = pure TyBool
+  | otherwise = frequency
+      [ (4, pure TyBool)
+      , (2, TyTuple  <$> rec <*> rec)
+      , (1, TyEither <$> rec <*> rec)
+      ]
+  where rec = genDiscreteNeuralTy (n - 1)
+
+-- | Depth budget for a neural target type. One less than 'tyDepth': the plan
+-- width grows with the leaf count, and every draw pays it in mock logits.
+neuralTyDepth :: Int
+neuralTyDepth = 2
+
+-- | A neural declaration plus the 'Ty' of its target, so callers do not have
+-- to invert 'tyToRType' to find out what they generated.
+--
+-- Three flavours, because they reach different parts of the plan machinery:
+-- 'AnnAuto' is the lazy path over anything auto-derivable (continuous slots
+-- included), 'AnnAutoOf' the materializing path over a discrete target, and
+-- 'AnnInts' the k-way categorical that @Bool@ alone cannot produce -- without
+-- ADTs (M4), an explicit @of [0,1,..]@ on an @Int@ target is the only way to
+-- get a plan slot wider than two.
+genTypedNeuralDecl :: Gen (NeuralDecl, Ty)
+genTypedNeuralDecl = do
+  (annot, nty) <- frequency
+    [ (3, (,) AnnAuto   <$> genAutoNeuralTy neuralTyDepth)
+    , (2, (,) AnnAutoOf <$> genDiscreteNeuralTy neuralTyDepth)
+    , (2, do k <- choose (2, 4)
+             return (AnnInts k, TyInt))
+    ]
+  return ((neuralName, TArrow TSymbol (tyToRType nty), annMultiValue annot), nty)
+
+annMultiValue :: NeuralAnn -> Maybe MultiValue
+annMultiValue AnnAuto     = Nothing
+annMultiValue AnnAutoOf   = Just MultiAuto
+annMultiValue (AnnInts k) = Just (MultiDiscretes (map VInt [0 .. fromIntegral k - 1]))
+
+-- | The one declared network's name. Fixed rather than generated: a second
+-- network would multiply the plan width without reaching any shape one does
+-- not, and a fixed name keeps counterexamples readable.
+neuralName :: String
+neuralName = "nn"
+
+-- | The symbol parameter of a neural @main@. Renamed by 'uniquifyBinders'
+-- before the program is handed out, like every other binder.
+neuralSymName :: String
+neuralSymName = "sym"
+
+-- | @main sym = let s = nn sym in \<core\>@ with a matching declaration.
+genNeuralProgram :: Gen Program
+genNeuralProgram = do
+  (decl, nty) <- genTypedNeuralDecl
+  ty <- genTy tyDepth
+  body <- sized (genNeuralMain nty ty)
+  return $ Program [("main", body)] [decl] [] []
+
+-- | The body of a neural @main@, at a given network target type and program
+-- result type.
+genNeuralMain :: Ty -> Ty -> Int -> Gen Expr
+genNeuralMain nty ty n = do
+  let s    = "s"
+      env  = [(s, nty)]
+  core <- genNeuralCore env s nty ty n
+  return $ uniquifyBinders
+         $ neuralSymName #-># letIn s (readNN neuralName (varE neuralSymName)) core
+
+-- | The body under the neural binding.
+--
+-- Usually an explicit observation at the top, for the same reason
+-- 'genWitnessLet' forces its @if@: a @let@ whose bound variable is never
+-- *read* reaches none of the machinery the milestone exists to exercise, and
+-- relying on 'genTypedLeafIn' to pick the variable up by chance does not work
+-- once the network's type is structured (the eliminator productions draw the
+-- other tuple component at random, so they rarely line up with it).
+--
+-- The remaining quarter is left to the ordinary generator, which does still
+-- reach @s@ when its type is scalar, and otherwise produces the
+-- bound-but-unobserved shape -- a legitimate program the generate path has to
+-- handle, and the control case for the observed one.
+genNeuralCore :: TyEnv -> String -> Ty -> Ty -> Int -> Gen Expr
+genNeuralCore env s nty ty n = frequency
+  [ (3, do obs <- genNeuralObs (varE s) nty
+           t <- genTypedExprIn env ty half
+           f <- genTypedExprIn env ty half
+           return (ifThenElse obs t f))
+  , (1, genTypedExprIn env ty n)
+  ]
+  where half = n `div` 2
+
+-- | A Bool-valued observation of a neural read: project the value down to one
+-- plan leaf and test that leaf.
+--
+-- This is what puts a *condition* in front of the enumeration engine, which is
+-- the whole point -- a plan slot that is merely returned is never enumerated
+-- over. The projections are limited to the eliminators the typed generator
+-- already emits (and hence that 'tyOfTypedExpr' already recovers through):
+-- @fst@\/@snd@ descend into a tuple, and an @Either@ is tested for which side
+-- it is, there being no @fromLeft@\/@fromRight@ production to descend with.
+genNeuralObs :: Expr -> Ty -> Gen Expr
+genNeuralObs e TyBool = oneof
+  [ pure e
+  , pure ((#!#) e)
+  , (e #==#) . constB <$> arbitrary
+  ]
+genNeuralObs e TyFloat = do
+  op <- elements [(#>#), (#<#)]
+  c  <- choose (-2, 2)
+  return (op e (constF c))
+-- The comparison value is drawn a little wider than the widest `of` clause
+-- 'genTypedNeuralDecl' emits, so some draws test a value outside the declared
+-- support. That branch is unreachable, which is a shape the engine has to get
+-- right (zero mass, not a crash), not a malformed draw.
+genNeuralObs e TyInt = (e #==#) . constI <$> choose (0, 4)
+genNeuralObs e (TyTuple a b) = oneof
+  [ genNeuralObs (tfst e) a
+  , genNeuralObs (tsnd e) b
+  ]
+genNeuralObs e (TyEither _ _) = elements [sisLeft e, sisRight e]
+-- Neither is a neural target type ('genAutoNeuralTy' emits neither, and an
+-- Int target is always a bare leaf), so these exist only to keep the function
+-- total.
+genNeuralObs e (TyList _) = pure (isNull e)
+genNeuralObs _ TyAny      = constB <$> arbitrary
+
+-- | Does this program declare a neural network?
+hasNeural :: Program -> Bool
+hasNeural = not . null . neurals
+
+-- | The part of @main@ the typed generator is responsible for, and the scope
+-- it sits in.
+--
+-- For a plain draw that is the whole body in the empty scope. For a neural
+-- draw the body is wrapped in a lambda and a @let@ whose bound value is a
+-- 'ReadNN' -- neither of which 'tyOfTypedExpr' can recover a type for, the
+-- network's target type living in the 'Program' rather than on the node. Every
+-- consumer of the generator's output (the shrinker, and TestFuzz's coverage
+-- axes) therefore goes through here rather than reading @main@ directly, or a
+-- neural draw would report as unrecognised and silently stop shrinking.
+typedMainCore :: Program -> Maybe (TyEnv, Expr)
+typedMainCore p = fst <$> typedMainParts p
+
+-- | The generated core of @main@, for consumers that only want the expression.
+typedMainCoreExpr :: Program -> Maybe Expr
+typedMainCoreExpr p = snd <$> typedMainCore p
+
+-- | The 'Ty' of the generated core of @main@, recovered in the scope the core
+-- actually sits in -- which for a neural draw is non-empty.
+typedMainCoreTy :: Program -> Maybe Ty
+typedMainCoreTy p = typedMainCore p >>= \(env, core) -> tyOfTypedExprIn env core
+
+-- | 'typedMainCore' plus the rebuilder that puts a replacement core back
+-- inside whatever wrapper it came out of.
+typedMainParts :: Program -> Maybe ((TyEnv, Expr), Expr -> Expr)
+typedMainParts p = do
+  body <- lookup "main" (functions p)
+  case node body of
+    Lambda sym inner
+      | Just (s, val, core) <- asLet inner
+      , ReadNN nn _ <- node val
+      , Just (_, nrt, _) <- find ((== nn) . fst3) (neurals p)
+      , Just nty <- rTypeToTy (neuralTarget nrt)
+      -> Just ( ((s, nty) : [], core)
+              , \core' -> Expr (ann body) (Lambda sym (letIn s val core')) )
+    _ -> Just (([], body), id)
+  where
+    fst3 (a, _, _) = a
+    neuralTarget (TArrow _ t) = t
+    neuralTarget t            = t
+
+-- | The same program with its neural declaration's @of@ clause flipped on or
+-- off -- the materializing twin of a lazy draw, or the reverse.
+--
+-- 'Nothing' unless the flip actually changes the compilation path: exactly one
+-- declaration, its target auto-derivable *and* free of continuous slots, and
+-- its annotation either absent or @of _@. An explicit value list
+-- ('AnnInts') is left alone -- its target does not auto-derive, so there is no
+-- annotation-free twin to compare it against.
+neuralTwin :: Program -> Maybe Program
+neuralTwin p = case neurals p of
+  [(n, rt@(TArrow TSymbol target), annot)]
+    | Just nty <- rTypeToTy target
+    , tyAllDiscrete nty
+    , Just annot' <- flipAnn annot
+    -> Just p { neurals = [(n, rt, annot')] }
+  _ -> Nothing
+  where
+    flipAnn Nothing          = Just (Just MultiAuto)
+    flipAnn (Just MultiAuto) = Just Nothing
+    flipAnn _                = Nothing
+
+-- | A lazily-compiled neural draw and its materializing twin, for the
+-- differential oracle. Both sides are the same program up to the @of@ clause,
+-- so any disagreement in the answers is a disagreement between the two
+-- engines and nothing else.
+genNeuralTwinProgram :: Gen (Program, Program)
+genNeuralTwinProgram = do
+  nty <- genDiscreteNeuralTy neuralTyDepth
+  ty  <- genTy tyDepth
+  body <- sized (genNeuralMain nty ty)
+  let decl = (neuralName, TArrow TSymbol (tyToRType nty), Nothing)
+      lazyP = Program [("main", body)] [decl] [] []
+  case neuralTwin lazyP of
+    Just materialized -> return (lazyP, materialized)
+    -- Unreachable: the target came from 'genDiscreteNeuralTy'. Fall back to
+    -- the identical pair rather than failing the generator, so a future change
+    -- to the lattice degrades the oracle instead of breaking the run.
+    Nothing -> return (lazyP, lazyP)
 
 -- ---------------------------------------------------------------------------
 -- Type-preserving shrinking for the typed generator.
@@ -757,7 +1087,8 @@ typedInjFResultTy :: [(String, Ty)]
 typedInjFResultTy =
   [ ("mult", TyFloat), ("plus", TyFloat), ("neg", TyFloat), ("exp", TyFloat)
   , ("plusI", TyInt), ("negI", TyInt)
-  , ("gt", TyBool), ("lt", TyBool), ("and", TyBool), ("or", TyBool)
+  , ("gt", TyBool), ("lt", TyBool), ("eq", TyBool)
+  , ("and", TyBool), ("or", TyBool)
   , ("not", TyBool)
   , ("isNull", TyBool), ("isLeft", TyBool), ("isRight", TyBool)
   ]
@@ -922,17 +1253,26 @@ shrinkOne _ [] = []
 shrinkOne f (x:xs) =
   [ x' : xs | x' <- f x ] ++ [ x : xs' | xs' <- shrinkOne f xs ]
 
--- | Type-preserving shrink for a 'genTypedProgram' draw: shrink the body of
--- @main@ and leave the (empty) neural/ADT/writeLogits sections alone. Extra
--- function declarations, if a later milestone adds them, are preserved
--- untouched -- a wrong-but-conservative shrink is a big counterexample, while
--- a wrong-and-aggressive one is a *different* counterexample, which is worse.
+-- | Type-preserving shrink for a 'genTypedProgram' draw: shrink the part of
+-- @main@ the generator owns and leave the neural/ADT/writeLogits sections
+-- alone. Extra function declarations, if a later milestone adds them, are
+-- preserved untouched -- a wrong-but-conservative shrink is a big
+-- counterexample, while a wrong-and-aggressive one is a *different*
+-- counterexample, which is worse.
+--
+-- For a milestone-M3 neural draw, "the part the generator owns" is the core
+-- under the @sym@ lambda and the @let@ that binds the network read, with the
+-- bound variable in scope ('typedMainParts'). The wrapper is rebuilt around
+-- every candidate rather than shrunk: the declaration, the read and the
+-- binding are what makes the draw a neural draw at all, so reducing them would
+-- minimize a plan-enumeration counterexample into a program that no longer
+-- reaches the engine.
 shrinkTypedProgram :: Program -> [Program]
-shrinkTypedProgram p = case lookup "main" (functions p) of
-  Nothing   -> []
-  Just body ->
-    [ p { functions = map (replaceMain body') (functions p) }
-    | body' <- shrinkTypedExpr body
+shrinkTypedProgram p = case typedMainParts p of
+  Nothing -> []
+  Just ((env, core), rebuild) ->
+    [ p { functions = map (replaceMain (rebuild core')) (functions p) }
+    | core' <- shrinkTypedExprIn env core
     ]
   where
     replaceMain body' (n, b) = if n == "main" then (n, body') else (n, b)

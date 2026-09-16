@@ -43,7 +43,8 @@
 -- cross-checks different CompilerConfigs against each other on the *same*
 -- prob function), but doing so needs many forward samples per case, chosen
 -- dynamically from the density at the query point (see its docs).
-module TestFuzz (fuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests) where
+module TestFuzz (fuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
+                 neuralGeneratorTests) where
 
 import Test.QuickCheck hiding (sample)
 import Test.Tasty (TestTree, testGroup)
@@ -65,10 +66,12 @@ import SPLL.Typing.ForwardChaining (annotateProg)
 import SPLL.Analysis (annotateEnumsProg)
 import SPLL.Typing.Infer (addTypeInfo)
 import ArbitrarySPLL (genRawFuzzProgram, genTypedProgram, genTypedExpr, Ty(..),
-                      shrinkTypedProgram, shrinkTypedExpr, tyOfTypedExpr,
+                      shrinkTypedProgram, shrinkTypedExpr,
                       tyGeneralizes,
                       typedExprSize, typedExprDepth,
-                      LetShape(..), letShapeOf, uniquifyBindersFrom)
+                      LetShape(..), letShapeOf, uniquifyBindersFrom,
+                      genNeuralProgram, genNeuralTwinProgram, neuralTwin,
+                      typedMainCoreExpr, typedMainCoreTy, hasNeural)
 
 -- | `show`ing a value forces every field, catching lazily-hidden crashes
 -- (partial functions/undefined) that a bare WHNF `seq` would miss.
@@ -107,8 +110,37 @@ compileSafe conf p = do
     Right (Right irEnv) -> Just irEnv
     _ -> Nothing
 
+-- | The arguments @main@ needs to be run.
+--
+-- Empty for every draw except a milestone-M3 neural one, whose @main@ takes
+-- the symbol its declared network reads. The interpreter substitutes
+-- 'MockNN.evaluateMockNN' for the network, whose @(0, seed)@ form produces a
+-- random logit vector of exactly the partition plan's width -- so this needs
+-- to know nothing about the plan, which is the point: a literal @(2, [...])@
+-- vector would have to be sized against a plan this module would then have to
+-- recompute for every draw.
+--
+-- The seed is derived from the declaration rather than drawn. Deriving it
+-- keeps a draw's network output fixed under shrinking -- the declaration is
+-- the one part of a neural draw the shrinker never touches -- which matters
+-- more here than logit variety does: a seed that moved as the program
+-- minimized would let the failing behaviour evaporate mid-shrink, which is
+-- precisely the "re-run until it reproduces" workflow the shrinker exists to
+-- retire. Variety across draws still comes for free, since different target
+-- types hash differently and, having different plans, would consume the
+-- generator differently regardless.
+fuzzArgs :: Program -> [IRValue]
+fuzzArgs p = case neurals p of
+  []              -> []
+  decls@((_, rt, _) : _) -> [VTuple (VInt 0) (VInt (mockSeed (show rt ++ show (length decls))))]
+
+-- | A small deterministic string hash. Any spread will do -- this only has to
+-- give different declarations different mock networks.
+mockSeed :: String -> Int
+mockSeed = foldl (\acc c -> (acc * 33 + fromEnum c) `mod` 100003) 7
+
 drawSample :: Program -> IREnv -> IO IRValue
-drawSample p compiled = evalRandIO (runGenC p compiled [])
+drawSample p compiled = evalRandIO (runGenC p compiled (fuzzArgs p))
 
 -- 'runProbC'/'runProbNamedC' irrefutably pattern-match on `probFun` being
 -- `Just` (SPLL.Prelude:401) -- calling them on a compiled-but-generate-only
@@ -124,7 +156,7 @@ hasProbFun compiled = isJust (probFun (lookupIREnv "main" compiled))
 irProb :: Program -> IREnv -> IRValue -> Maybe IRValue
 irProb p compiled sample
   | not (hasProbFun compiled) = Nothing
-  | otherwise = either (const Nothing) Just (runProbC p compiled [] sample)
+  | otherwise = either (const Nothing) Just (runProbC p compiled (fuzzArgs p) sample)
 
 hasIntegFun :: IREnv -> Bool
 hasIntegFun compiled = isJust (integFun (lookupIREnv "main" compiled))
@@ -134,7 +166,7 @@ hasIntegFun compiled = isJust (integFun (lookupIREnv "main" compiled))
 irInteg :: Program -> IREnv -> IRValue -> Maybe Double
 irInteg p compiled x
   | not (hasIntegFun compiled) = Nothing
-  | otherwise = case runIntegC p compiled [] x of
+  | otherwise = case runIntegC p compiled (fuzzArgs p) x of
       Right (VProbDim c _) -> Just c
       _ -> Nothing
 
@@ -227,7 +259,7 @@ prop_Fuzz_CompileNeverCrashes = withMaxSuccess 40 $ forAll (resize fuzzSize genR
     Left _ -> return $ property True
     Right irEnv -> do
       sample <- drawSample p irEnv
-      _ <- evaluate (fmap forceShow (runProbC p irEnv [] sample))
+      _ <- evaluate (fmap forceShow (runProbC p irEnv (fuzzArgs p) sample))
       return $ property True
 
 -- | Well-typed scalar programs: a stronger, unguarded crash-freedom check
@@ -239,7 +271,7 @@ prop_Fuzz_TypedCompileNeverCrashes = withMaxSuccess 40 $ forAllShrink (resize fu
     Left _ -> return $ property True
     Right irEnv -> do
       sample <- drawSample p irEnv
-      _ <- evaluate (fmap forceShow (runProbC p irEnv [] sample))
+      _ <- evaluate (fmap forceShow (runProbC p irEnv (fuzzArgs p) sample))
       return $ property True
 
 -- | 'compile' never hands back an 'IREnv' whose probability/integrate/
@@ -457,6 +489,62 @@ genMixturePair = do
 mixtureArmSize :: Int
 mixtureArmSize = 6
 
+-- | Milestone M3's differential oracle, and the only property here whose two
+-- sides are different *compilation strategies* rather than different
+-- 'CompilerConfig's.
+--
+-- A neural declaration over a purely discrete target compiles two ways. With
+-- no @of@ clause the reads go through plan-guided lazy enumeration, which
+-- never builds the joint support -- that is the whole point of it, the corpus'
+-- @planEnumInlineWide@ having a 3^12 support. With @of _@ the same declaration
+-- gets a 'DiscreteValues' tag and the support is materialized into an
+-- @IREnumSum@ instead. The two are the same distribution computed by two
+-- engines, so they must agree exactly; the corpus pins this with hand-written
+-- @planEnumRec*@/@*Materialized@ file pairs, and here each draw supplies its
+-- own pair for free.
+--
+-- Both sides get the same mock network, because 'fuzzArgs' derives its seed
+-- from the declaration and the twin's declaration differs only in the
+-- annotation -- which 'mockSeed' does not read. A sample is drawn from the
+-- lazy side and both are queried at it, rather than each being sampled: the
+-- point is agreement at a point, and two independent samples would compare
+-- nothing.
+--
+-- Discarded rather than failed when only one side compiles: which shapes each
+-- engine supports is not this property's subject, and a one-sided refusal is
+-- already 'prop_Fuzz_TypedCompileNeverCrashes'' business.
+-- | Shrink the pair by shrinking the *lazy* side and re-deriving the twin from
+-- it, never the two independently. Shrinking them apart would let the two
+-- sides drift into different programs, at which point a disagreement says
+-- nothing -- and the twin is a pure function of the lazy side anyway.
+--
+-- A candidate whose twin no longer exists is dropped rather than paired with
+-- itself. 'neuralTwin' returns 'Nothing' exactly when the @of@ flip would stop
+-- changing the compilation path, and a pair like that is vacuous.
+shrinkNeuralTwin :: (Program, Program) -> [(Program, Program)]
+shrinkNeuralTwin (lazyP, _) =
+  [ (l, m) | l <- shrinkTypedProgram lazyP, Just m <- [neuralTwin l] ]
+
+prop_Fuzz_NeuralMaterializedTwinAgrees :: Property
+prop_Fuzz_NeuralMaterializedTwinAgrees = withMaxSuccess 40 $
+  forAllShrink genNeuralTwinProgram shrinkNeuralTwin $ \(lazyP, matP) -> ioProperty $ withinBudgetScaled 2 $ do
+    lazyE <- compileSafe defaultCompilerConfig lazyP
+    matE  <- compileSafe defaultCompilerConfig matP
+    case (lazyE, matE) of
+      (Just le, Just me) | hasProbFun le && hasProbFun me -> do
+        sample <- drawSample lazyP le
+        return $ case (irProb lazyP le sample, irProb matP me sample) of
+          (Just lr, Just mr) -> case (probDim lr, probDim mr) of
+            (Just (pl, dl), Just (pm, dm)) ->
+              counterexample
+                ("at x=" ++ show sample
+                 ++ ": lazy plan=(" ++ show pl ++ ", dim " ++ show dl
+                 ++ ") materialized=(" ++ show pm ++ ", dim " ++ show dm ++ ")")
+                (abs (pl - pm) <= 1e-9 * max 1 (abs pm) && dl == dm)
+            _ -> counterexample "unexpected result shapes" False
+          _ -> discardVacuous
+      _ -> return discardVacuous
+
 -- ---------------------------------------------------------------------------
 -- Generator coverage instrumentation.
 --
@@ -480,28 +568,52 @@ mixtureArmSize = 6
 -- bounds below can be stated as ">= this rung".
 data DrawOutcome
   = ValidateFailed     -- ^ 'validateProgram' rejected it (should not happen)
+  | CompileTimedOut    -- ^ the compiler did not finish inside the per-case budget
   | CompileCrashed     -- ^ the compiler threw instead of returning 'Left'
   | CompileRejected    -- ^ an honest 'Left CompilerError'
   | CompiledNoProbFun  -- ^ compiled, but generate-only
   | CompiledWithProbFun
   deriving (Show, Eq, Ord)
 
+-- | Force a value under both guards this property needs: a synchronous
+-- exception or an overrun of the per-case budget yields @fallback@ instead of
+-- propagating.
+--
+-- The timeout half matters as much as the exception half, and for the same
+-- reason. A draw that does not terminate is a finding -- but it is
+-- 'prop_Fuzz_TypedCompileNeverCrashes'' finding, reported there as a failure
+-- with a shrunk counterexample. Here it used to abort the whole run, losing
+-- every tabulated row gathered up to that point; a property whose entire
+-- purpose is to report a distribution cannot be the one that dies of a single
+-- draw. There is at least one such draw in the current generator's range (the
+-- structured-shape compile blowup tracked as @fuzz-structured-type-bugs@), so
+-- this is not a hypothetical.
+guardedBy :: Show a => a -> a -> IO a
+guardedBy fallback x = do
+  r <- timeout perCaseBudgetMicros (trySync (evaluate (forceShow x)))
+  return $ case r of
+    Just (Right v) -> v
+    _              -> fallback
+
 classifyDraw :: Program -> IO DrawOutcome
 classifyDraw p = do
   -- 'validateProgram' is guarded too: it walks the same AST, so "the validator
   -- itself threw" is still a crashing draw, and classifying it is this
   -- function's whole job.
-  v <- trySync (evaluate (forceShow (validateProgram p)))
+  v <- timeout perCaseBudgetMicros (trySync (evaluate (forceShow (validateProgram p))))
   case v of
-    Left _          -> return CompileCrashed
-    Right (Left _)  -> return ValidateFailed
-    Right (Right _) -> do
-      r <- trySync (evaluate (forceShow (compile defaultCompilerConfig p)))
+    Nothing               -> return CompileTimedOut
+    Just (Left _)         -> return CompileCrashed
+    Just (Right (Left _)) -> return ValidateFailed
+    Just (Right (Right _)) -> do
+      r <- timeout perCaseBudgetMicros
+             (trySync (evaluate (forceShow (compile defaultCompilerConfig p))))
       return $ case r of
-        Left _          -> CompileCrashed
-        Right (Left _)  -> CompileRejected
-        Right (Right e) | hasProbFun e -> CompiledWithProbFun
-                        | otherwise    -> CompiledNoProbFun
+        Nothing                -> CompileTimedOut
+        Just (Left _)          -> CompileCrashed
+        Just (Right (Left _))  -> CompileRejected
+        Just (Right (Right e)) | hasProbFun e -> CompiledWithProbFun
+                               | otherwise    -> CompiledNoProbFun
 
 -- | Force one tabulate axis inside an exception guard, substituting @fallback@
 -- if it throws.
@@ -515,7 +627,7 @@ classifyDraw p = do
 -- every draw, so a crash in an axis has to become a label
 -- (task compiler-throws-instead-of-returning-left, defect 3).
 guardAxis :: Show a => a -> a -> IO a
-guardAxis fallback x = either (const fallback) id <$> trySync (evaluate (forceShow x))
+guardAxis = guardedBy
 
 -- | The label 'guardAxis' substitutes for an axis that threw. It is a visible
 -- row in the tabulation rather than a silent fallback: a run where these show
@@ -538,6 +650,7 @@ data DrawSummary = DrawSummary
   , dsDepth          :: Int
   , dsStructured     :: Bool
   , dsLetShape       :: LetShape
+  , dsNeuralLabel    :: String
   } deriving (Show, Eq)
 
 summarizeDraw :: Program -> IO DrawSummary
@@ -553,6 +666,7 @@ summarizeDraw p = do
     <*> guardAxis 0 (maybe 0 typedExprDepth body)
     <*> guardAxis False (isStructured p)
     <*> guardAxis NoLet (maybe NoLet letShapeOf body)
+    <*> guardAxis crashedAxis (neuralLabel p)
 
 -- | The modality pass's verdict on @main@, as a label. This is the axis that
 -- catches a collapse into a single inference regime, which the outcome split
@@ -565,8 +679,15 @@ realizedPTypeLabel p =
       Nothing   -> "<no main>"
       Just body -> show (pType (getTypeInfo body))
 
+-- | The part of @main@ the typed generator owns, and the scope it sits in.
+--
+-- Not @lookup "main"@: a milestone-M3 neural draw wraps its generated core in
+-- a @sym@ lambda and a @let@ binding the network read, neither of which
+-- 'tyOfTypedExpr' recovers a type for (the target type lives in the 'Program',
+-- not on the node). Reading @main@ directly would report every neural draw as
+-- @\<unrecognised\>@ on four separate axes at once.
 mainBodyOf :: Program -> Maybe Expr
-mainBodyOf p = lookup "main" (functions p)
+mainBodyOf = typedMainCoreExpr
 
 -- | Bucketed rather than exact: the point is to see the distribution move, and
 -- a hundred singleton rows in the tabulate output would show nothing.
@@ -584,7 +705,9 @@ bucket n
 -- components it leaves free print as @?@ -- that is information, not noise
 -- (a draw reported as @Either Float ?@ never observed its right side).
 targetTyLabel :: Program -> String
-targetTyLabel p = maybe "<no main>" (maybe "<unrecognised>" showTy . tyOfTypedExpr) (mainBodyOf p)
+targetTyLabel p
+  | isJust (mainBodyOf p) = maybe "<unrecognised>" showTy (typedMainCoreTy p)
+  | otherwise             = "<no main>"
 
 showTy :: Ty -> String
 showTy TyFloat         = "Float"
@@ -598,19 +721,39 @@ showTy (TyList a)      = "[" ++ showTy a ++ "]"
 -- | Coarser than 'showTy': just which outer shape the draw landed on, so the
 -- scalar/structured split is one readable row rather than a long tail.
 tyShapeLabel :: Program -> String
-tyShapeLabel p = case mainBodyOf p >>= tyOfTypedExpr of
+tyShapeLabel p = case typedMainCoreTy p of
   Nothing             -> "<unrecognised>"
   Just TyTuple{}      -> "tuple"
   Just TyEither{}     -> "either"
   Just TyList{}       -> "list"
   Just _              -> "scalar"
 
+-- | Which neural declaration the draw carries, if any, as a label.
+--
+-- The annotation is the interesting half, not the mere presence of a network:
+-- it is what decides whether the reads compile through plan-guided lazy
+-- enumeration (@lazy@) or by materializing the support into an @IREnumSum@
+-- (@materialized@ / @explicit@). A run where @materialized@ never appears is
+-- a run where the milestone-M3 differential oracle never fired.
+neuralLabel :: Program -> String
+neuralLabel p = case neurals p of
+  []                              -> "none"
+  [(_, _, Nothing)]               -> "lazy"
+  [(_, _, Just MultiAuto)]        -> "materialized (of _)"
+  [(_, _, Just MultiDiscretes{})] -> "explicit (of [..])"
+  _                               -> "other"
+
 isStructured :: Program -> Bool
 isStructured p = tyShapeLabel p `elem` ["tuple", "either", "list"]
 
 prop_Fuzz_GeneratorCoverage :: Property
 prop_Fuzz_GeneratorCoverage = withMaxSuccess 200 $
-  forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudgetScaled 2 $ do
+  -- Four times the per-case budget, because the guards inside 'summarizeDraw'
+  -- are per-step: classification may spend one budget in the validator and
+  -- another in 'compile', and the realized-pType axis re-runs inference for a
+  -- third. The outer bound has to sit above their sum or it would pre-empt
+  -- them and lose the labelling they exist to produce.
+  forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudgetScaled 4 $ do
     s <- summarizeDraw p
     let outcome = dsOutcome s
         depth   = dsDepth s
@@ -621,6 +764,14 @@ prop_Fuzz_GeneratorCoverage = withMaxSuccess 200 $
       $ tabulate "target type"      [dsTargetTyLabel s]
       $ tabulate "top constructor"  [dsTopConstructor s]
       $ tabulate "let shape"        [show (dsLetShape s)]
+      $ tabulate "neural"           [dsNeuralLabel s]
+      -- Cross-tabulated, and only over the neural draws. At one draw in five
+      -- the neural surface's own outcome split is invisible in the aggregate
+      -- "outcome" row above, and that split is the thing M3 is actually about:
+      -- whether a generated plan-enumeration program reaches a probability
+      -- function or is refused.
+      $ tabulate "neural outcome"
+          [ dsNeuralLabel s ++ " -> " ++ show outcome | dsNeuralLabel s /= "none" ]
       $ tabulate "node count"       [bucket (dsSize s)]
       $ tabulate "depth"            [bucket depth]
       -- Recorded rates at the time of writing: ~35% reach a probability
@@ -646,6 +797,15 @@ prop_Fuzz_GeneratorCoverage = withMaxSuccess 200 $
       $ cover 1  (dsLetShape s == WitnessLet
                   && outcome == CompiledWithProbFun)
                  "witness-shaped let reaches a probability function"
+      -- M3's acceptance criterion, same observe-first shape as the two above.
+      -- 'genTypedProgram' draws a neural program one time in five, and the two
+      -- materializing annotations are 4/7 of those, so both bounds are set
+      -- well under the nominal rate. A miss means the neural production has
+      -- stopped firing, which no other axis would show.
+      $ cover 8  (dsNeuralLabel s /= "none")     "declares a neural network"
+      $ cover 3  (dsNeuralLabel s == "materialized (of _)"
+                  || dsNeuralLabel s == "explicit (of [..])")
+                 "neural draw that materializes its support"
       $ property True
 
 return []
@@ -716,6 +876,54 @@ compatibleTys Nothing  Nothing  = True
 compatibleTys _        _        = False
 
 -- ---------------------------------------------------------------------------
+-- The neural generator's contract (milestone M3).
+--
+-- Pure and fast -- these validate and inspect, they never compile -- so like
+-- the shrinker contract above they live in the default suite. What they pin is
+-- the machinery the M3 properties depend on being *correct* about, as distinct
+-- from what those properties measure: that a neural draw is a program the
+-- validator accepts, that its generated core is still recoverable and so still
+-- shrinks, and that shrinking never quietly turns a neural draw into an
+-- ordinary one -- which would minimize a plan-enumeration counterexample into
+-- a program that no longer reaches the engine, and report it as the same bug.
+
+-- | The node count of the part of a draw the generator owns, which is what the
+-- shrinker actually reduces. Zero for a program with no recognisable core.
+coreSize :: Program -> Int
+coreSize = maybe 0 typedExprSize . typedMainCoreExpr
+
+neuralGeneratorTests :: TestTree
+neuralGeneratorTests = testGroup "Neural generator"
+  [ testProperty "a neural draw validates" $
+      forAll (resize fuzzSize genNeuralProgram) $ \p ->
+        counterexample (show p) (validateProgram p === Right ())
+  , testProperty "a neural draw declares exactly one network, read by main" $
+      forAll (resize fuzzSize genNeuralProgram) $ \p ->
+        counterexample (show p) (length (neurals p) === 1 .&&. property (hasNeural p))
+  , testProperty "a neural draw's core type is recoverable" $
+      -- This is the M1/M2 invariant restated for the new shape, and it is
+      -- load-bearing rather than cosmetic: an unrecoverable core does not
+      -- shrink at all, so a regression here would show up only as
+      -- counterexamples quietly getting bigger.
+      forAll (resize fuzzSize genNeuralProgram) $ \p ->
+        counterexample (show p) (property (isJust (typedMainCoreTy p)))
+  , testProperty "shrinking a neural draw keeps it neural and valid" $
+      forAll (resize fuzzSize genNeuralProgram) $ \p -> conjoin
+        [ counterexample (show p')
+            (property (hasNeural p')
+             .&&. neurals p' === neurals p
+             .&&. validateProgram p' === Right ())
+        | p' <- shrinkTypedProgram p ]
+  , testProperty "the materializing twin differs only in the of clause" $
+      forAll genNeuralTwinProgram $ \(lazyP, matP) ->
+        counterexample (show (lazyP, matP)) $
+              functions lazyP === functions matP
+         .&&. map annOf (neurals lazyP) === [Nothing]
+         .&&. map annOf (neurals matP)  === [Just MultiAuto]
+  ]
+  where annOf (_, _, a) = a
+
+-- ---------------------------------------------------------------------------
 -- Error-channel regressions (task compiler-throws-instead-of-returning-left).
 --
 -- Fast and deterministic -- one tiny compile and two hand-built programs -- so
@@ -778,22 +986,23 @@ liveLet = letIn "v0" uniform (Expr makeTypeInfo (Var "v0") #+# constF 1.0)
 
 shrinkerTests :: TestTree
 shrinkerTests = testGroup "Shrinker"
+  -- Stated over the *program* rather than over @main@'s body, because since
+  -- M3 the two differ: a neural draw's body is a lambda around a @let@ around
+  -- the generated core, and 'shrinkTypedExpr' pointed at that lambda recovers
+  -- nothing and offers nothing. Reading the core out ('typedMainCoreTy',
+  -- which recovers it in the scope the network binding creates) keeps these
+  -- two contracts biting on every draw rather than silently skipping a fifth
+  -- of them.
   [ testProperty "every shrink preserves the expression's type" $
-      forAll (resize fuzzSize genTypedProgram) $ \p ->
-        case mainBody p of
-          Nothing -> property True
-          Just b  -> conjoin
-            [ counterexample (show b' ++ "\n  shrink ty: " ++ show (tyOfTypedExpr b')
-                              ++ "\n  orig ty:   " ++ show (tyOfTypedExpr b))
-                             (property (compatibleTys (tyOfTypedExpr b') (tyOfTypedExpr b)))
-            | b' <- shrinkTypedExpr b ]
+      forAll (resize fuzzSize genTypedProgram) $ \p -> conjoin
+        [ counterexample (show p' ++ "\n  shrink ty: " ++ show (typedMainCoreTy p')
+                          ++ "\n  orig ty:   " ++ show (typedMainCoreTy p))
+                         (property (compatibleTys (typedMainCoreTy p') (typedMainCoreTy p)))
+        | p' <- shrinkTypedProgram p ]
   , testProperty "every shrink is strictly smaller" $
-      forAll (resize fuzzSize genTypedProgram) $ \p ->
-        case mainBody p of
-          Nothing -> property True
-          Just b  -> conjoin
-            [ counterexample (show b') (typedExprSize b' < typedExprSize b)
-            | b' <- shrinkTypedExpr b ]
+      forAll (resize fuzzSize genTypedProgram) $ \p -> conjoin
+        [ counterexample (show p') (coreSize p' < coreSize p)
+        | p' <- shrinkTypedProgram p ]
   , testProperty "every shrunk program still validates" $
       forAll (resize fuzzSize genTypedProgram) $ \p ->
         conjoin [ counterexample (show p') (validateProgram p' === Right ())

@@ -7,7 +7,8 @@ expected values. `genRawFuzzProgram`/`genRawFuzzExpr` cover the full AST
 space and are only useful for crash-freedom (almost every draw is
 ill-typed); `genTypedProgram`/`genTypedExpr` build well-typed programs
 over scalars, tuples, `Either` and lists (roughly half of all draws are
-structured) with `let`-bindings (about 70% of draws carry one) and drive the
+structured) with `let`-bindings (about 65% of draws carry one), one draw in
+five declaring and reading a neural network, and drive the
 real invariants (programs validate, P(ANY)=1,
 probability is never negative, topK at threshold 0 reproduces exact
 inference and at a real threshold never inflates it, branch counting
@@ -37,6 +38,19 @@ IR" fallthrough, and `PredefinedFunctions`' "has 0 inversions solving for". All
 four report by `error`, which is what makes them crashes rather than refusals;
 the last one needs no `let` at all. Tracked as `fuzz-let-witness-bugs` in the
 internal-docs repo.
+
+Milestone M3 (neural declarations) is the same story again and sharper: **76%
+of neural draws make `compile` throw**, measured over 300, against 43% of typed
+draws overall. The dominant message is new -- a generate-backed fallback
+reported from *an enumerated conditional*, which is the plan/enumeration path's
+own variant of the guard M2 found on the ordinary path, at 58% of the neural
+crashes on its own. Two more are new and rarer: `unionMultiValues` reporting a
+mismatch between an empty `MultiDiscretes` and a `MultiEither`, which is an
+internal invariant violation rather than a refusal, and a `toIRNormalParams`
+failure to extract Normal parameters from a `PNormal` expression. The rest are
+the already-filed M2 messages, reached again because a neural draw's body is an
+ordinary generated expression and can contain a witness-`let` like any other.
+Tracked as `fuzz-neural-plan-bugs` in the internal-docs repo.
 
 The default suite is unaffected; per the design, findings are filed rather than
 fixed so that coverage work is not blocked behind bug triage.
@@ -114,6 +128,20 @@ depth buckets. Without it, a generator that silently collapses to a
 single shape after a refactor still gives a fully green run — every
 invariant holds vacuously on `Normal` alone.
 
+Since M3 it also reports which neural annotation a draw carries (`none` /
+`lazy` / `materialized (of _)` / `explicit (of [..])`) and cross-tabulates the
+outcome over just the neural draws -- at one draw in five, the neural surface's
+own compile/refuse/succeed split is invisible in the aggregate row, and that
+split is the thing M3 is about.
+
+A draw that does not terminate is now *classified* (`CompileTimedOut`) rather
+than failing this property. Reporting a hang is
+`prop_Fuzz_TypedCompileNeverCrashes`' job, and it still does; a property whose
+whole purpose is to print a distribution must not be the one that dies of a
+single draw and loses every row gathered before it. There is at least one such
+draw in the current generator's range, so this was not hypothetical -- before
+the change, a full-length coverage run reported nothing at all.
+
 It also reports the target type and shape, and (since M2) the `let` shape:
 `NoLet`, `PlainLet`, or `WitnessLet` — the last being a continuous binding
 observed only through an `if` whose condition reads it. That classifier is
@@ -153,3 +181,54 @@ cases it exists to bound.
 The interpreter substitutes a mock for every declared neural network
 (`MockNN.hs`); `(2, [logit0, ...])` (a verbatim logit vector) is the only
 deterministic mode, used to pin exact densities in `.tst` files.
+
+## The neural surface (milestone M3)
+
+A neural draw is the corpus' `planEnum*` shape, generated:
+
+```
+neural nn :: (Symbol -> T)            -- optionally `of <MultiValue>`
+main sym = let s = nn sym in if <observation of s> then _ else _
+```
+
+Three things make it different from every other draw.
+
+**`main` takes an argument.** `TestFuzz.fuzzArgs` supplies it: `(0, seed)`, the
+mock network's random mode, which produces a logit vector of exactly the
+partition plan's width whatever that plan is -- so nothing here has to
+recompute the plan. The seed is *derived from the declaration* rather than
+drawn, because the declaration is the one part of a neural draw the shrinker
+never touches: a seed that moved as the program minimized would let the failing
+behaviour evaporate mid-shrink, which is the workflow the shrinker exists to
+retire.
+
+**The generated core is wrapped.** `tyOfTypedExpr` cannot recover a type for
+the `sym` lambda or for the `ReadNN` (the network's target type lives in the
+`Program`, not on the node), so everything that consumes a draw goes through
+`ArbitrarySPLL.typedMainCore` instead of reading `main` directly. Without that
+indirection every neural draw would report as `<unrecognised>` and, worse,
+would silently stop shrinking. The shrinker reduces the core and rebuilds the
+wrapper around each candidate; it never reduces the declaration, the read or
+the binding, since those are what make the draw a neural draw at all.
+
+**The `of` clause is a second oracle, for free.** A declaration over a purely
+discrete target compiles two ways: with no `of` clause the reads go through
+plan-guided lazy enumeration, and with `of _` the same declaration gets a
+`DiscreteValues` tag and the support is materialized into an `IREnumSum`
+instead. The two are one distribution computed by two engines and must agree
+exactly. The corpus pins this with hand-written `planEnumRec*`/`*Materialized`
+file pairs; `prop_Fuzz_NeuralMaterializedTwinAgrees` gets a fresh pair out of
+every draw. `of _` over a target containing a `Float` is *not* such a pair:
+`annotateEnumsProg` declines to tag a `MultiValue` with a continuous leaf, so
+the twin would be the same compilation. `genNeuralTwinProgram` draws from the
+discrete-only lattice for that reason.
+
+Target types are narrower than `Ty`: `Float`, `Bool`, and tuples/`Either`s of
+those (what `autoDeriveMultiValue` can produce a plan for), plus `Int` with an
+explicit `of [0..k-1]` -- which without ADTs is the only way to get a plan slot
+wider than two. ADT targets and recursion are milestone M4.
+
+The `Neural generator` group (default suite, beside `Shrinker`) pins the
+machinery the properties depend on being right about: that a neural draw
+validates, that its core type is still recoverable and so still shrinks, and
+that shrinking never quietly turns a neural draw into an ordinary one.
