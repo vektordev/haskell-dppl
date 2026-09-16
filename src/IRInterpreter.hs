@@ -1,3 +1,5 @@
+{-# LANGUAGE RankNTypes #-}
+
 module IRInterpreter (
 generateDet,
 generateRand
@@ -35,7 +37,29 @@ asThetaTree :: IRValue -> ThetaTree
 asThetaTree (VThetaTree t) = t
 asThetaTree v = error ("Type error: theta access on a non-theta-tree value: " ++ show v)
 
-data RandomFunctions m a = RandomFunctions {uniformGen:: m IRValue, normalGen:: m IRValue}
+-- | The capabilities 'generate' needs from whichever monad it is interpreting
+-- in: how to draw randomness, and how to report a program-level failure.
+--
+-- 'failWith' is what keeps a malformed or partial program from killing the
+-- compiler. 'generateDet' runs in @Either String@ and is called from
+-- compile-time constant folding ('PredefinedFunctions.propagateValues'), whose
+-- caller already handles a 'Left'; an 'error' there is an imprecise exception
+-- that walks straight past the 'Either' plumbing and out of the compiler
+-- (task compiler-throws-instead-of-returning-left). Every program-level
+-- failure in 'generate' therefore goes through this field rather than through
+-- 'error'. 'generateRand' runs in @Rand g@, which has no failure channel, so
+-- there it is still 'error' -- unchanged behaviour on the sampling path.
+--
+-- Rank-2 so the comparison helpers, which answer in @m Bool@ rather than
+-- @m IRValue@, can fail the same way.
+data RandomFunctions m a = RandomFunctions
+  { uniformGen :: m IRValue
+  , normalGen :: m IRValue
+  -- 'HasCallStack' so the failing destructor's own source location still
+  -- appears in a 'generateRand' crash; without it every runtime failure would
+  -- be reported at this record's definition site instead.
+  , failWith :: forall b. HasCallStack => String -> m b
+  }
 
 -- Name, Body
 type ReducedIREnv = [(String, IRExpr)]
@@ -45,7 +69,8 @@ generateRand neurals' registry env = generate f neurals' registry adts' starting
   where
     f = RandomFunctions {
       uniformGen = irSample IRUniform,
-      normalGen= irSample IRNormal}
+      normalGen = irSample IRNormal,
+      failWith = error}
     startingEnv = reduceIREnv env ++ standardEnv ++ map neuralRTypeToEnv neurals' ++ concatMap implicitFunctionsToEnv adts'
     (IREnv _ adts' _) = env
 
@@ -55,7 +80,8 @@ generateDet neurals' registry env = generate f neurals' registry adts' startingE
   where
     f = RandomFunctions {
       uniformGen = Left "Uniform Gen is not det",
-      normalGen = Left "Normal Gen is not det"}
+      normalGen = Left "Normal Gen is not det",
+      failWith = Left}
     startingEnv = reduceIREnv env ++ standardEnv ++ map neuralRTypeToEnv neurals' ++ concatMap implicitFunctionsToEnv adts'
     (IREnv _ adts' _) = env
 
@@ -80,13 +106,13 @@ generate f neurals' registry adts' globalEnv env [] (IRApply expr val) = do
     (VClosure closEnv name lambda) -> do
       let constClosEnv = (name, IRConst valVal):closEnv
       generate f neurals' registry adts' globalEnv constClosEnv [] lambda
-    _ -> error ("Type error: Expression is not a closure: " ++ show exprVal)
+    _ -> failWith f ("Type error: Expression is not a closure: " ++ show exprVal)
 generate f neurals' registry adts' globalEnv env args (IRIf cond thenCase elseCase) = do
   condVal <- generate f neurals' registry adts' globalEnv env args cond
   case condVal of
     VBool True -> generate f neurals' registry adts' globalEnv env args thenCase
     VBool False -> generate f neurals' registry adts' globalEnv env args elseCase
-    _ -> error $ "Type error: Condition is not a boolean: " ++ show condVal
+    _ -> failWith f $ "Type error: Condition is not a boolean: " ++ show condVal
 -- A select lowers to the lazy if under scalar interpretation (design
 -- pytorch-tensorizer, M1): only a batched backend distinguishes the two.
 generate f neurals' registry adts' globalEnv env args (IRSelect cond thenCase elseCase) =
@@ -99,7 +125,7 @@ generate f neurals' registry adts' globalEnv env [] (IROp OpPlus a b) = do
     (VInt af, VInt bf) -> return $ VInt (af + bf)
     --(VAny, _) -> return VAny
     --(_, VAny) -> return VAny
-    _ -> error ("Type error: Plus can only add up numbers (of the same type): " ++ show (aVal, bVal))
+    _ -> failWith f ("Type error: Plus can only add up numbers (of the same type): " ++ show (aVal, bVal))
 generate f neurals' registry adts' globalEnv env [] (IROp OpMult a b) = do
   aVal <- generate f neurals' registry adts' globalEnv env [] a
   bVal <- generate f neurals' registry adts' globalEnv env [] b
@@ -108,33 +134,35 @@ generate f neurals' registry adts' globalEnv env [] (IROp OpMult a b) = do
     (VInt af, VInt bf) -> return $ VInt (af * bf)
     --(VAny, _) -> return VAny
     --(_, VAny) -> return VAny
-    _ -> error ("Type error: Mult can only multiply numbers (of the same type): " ++ show (aVal, bVal))
+    _ -> failWith f ("Type error: Mult can only multiply numbers (of the same type): " ++ show (aVal, bVal))
 generate f neurals' registry adts' globalEnv env [] (IROp OpGreaterThan aOrig bOrig) = do
   aVal <- generate f neurals' registry adts' globalEnv env [] aOrig
   bVal <- generate f neurals' registry adts' globalEnv env [] bOrig
-  return $ VBool $ gt aVal bVal
+  VBool <$> gt aVal bVal
+  -- Answers in the evaluation monad rather than in 'Bool' so its failures
+  -- reach 'failWith' like every other program-level failure here.
   where gt a b = case (a, b) of
-          (VFloat af, VFloat bf) -> af > bf
-          (VInt af, VInt bf) -> af > bf
-          (VTuple af1 af2, VTuple bf1 bf2) -> gt af1 bf1 && gt af2 bf2
-          (VList (ListCont _ _), VList EmptyList) -> error "When comparing lists, they must be of the same length"
-          (VList EmptyList, VList (ListCont _ _)) -> error "When comparing lists, they must be of the same length"
-          (VList EmptyList, VList EmptyList) -> False
-          (VList (ListCont aHead aTail), VList (ListCont bHead bTail)) -> gt aHead bHead && gt (VList aTail) (VList bTail)
-          _ -> error ("Type error: greater than can only compare two numbers (of the same type): " ++ show (a, b))
+          (VFloat af, VFloat bf) -> return (af > bf)
+          (VInt af, VInt bf) -> return (af > bf)
+          (VTuple af1 af2, VTuple bf1 bf2) -> (&&) <$> gt af1 bf1 <*> gt af2 bf2
+          (VList (ListCont _ _), VList EmptyList) -> failWith f "When comparing lists, they must be of the same length"
+          (VList EmptyList, VList (ListCont _ _)) -> failWith f "When comparing lists, they must be of the same length"
+          (VList EmptyList, VList EmptyList) -> return False
+          (VList (ListCont aHead aTail), VList (ListCont bHead bTail)) -> (&&) <$> gt aHead bHead <*> gt (VList aTail) (VList bTail)
+          _ -> failWith f ("Type error: greater than can only compare two numbers (of the same type): " ++ show (a, b))
 generate f neurals' registry adts' globalEnv env [] (IROp OpLessThan aOrig bOrig) = do
   aVal <- generate f neurals' registry adts' globalEnv env [] aOrig
   bVal <- generate f neurals' registry adts' globalEnv env [] bOrig
-  return $ VBool $ lt aVal bVal
+  VBool <$> lt aVal bVal
   where lt a b = case (a, b) of
-          (VFloat af, VFloat bf) -> af < bf
-          (VInt af, VInt bf) -> af < bf
-          (VTuple af1 af2, VTuple bf1 bf2) -> lt af1 bf1 && lt af2 bf2
-          (VList (ListCont _ _), VList EmptyList) -> error "When comparing lists, they must be of the same length"
-          (VList EmptyList, VList (ListCont _ _)) -> error "When comparing lists, they must be of the same length"
-          (VList EmptyList, VList EmptyList) -> False
-          (VList (ListCont aHead aTail), VList (ListCont bHead bTail)) -> lt aHead bHead && lt (VList aTail) (VList bTail)
-          _ -> error ("Type error: less than can only compare two numbers (of the same type): " ++ show (a, b))
+          (VFloat af, VFloat bf) -> return (af < bf)
+          (VInt af, VInt bf) -> return (af < bf)
+          (VTuple af1 af2, VTuple bf1 bf2) -> (&&) <$> lt af1 bf1 <*> lt af2 bf2
+          (VList (ListCont _ _), VList EmptyList) -> failWith f "When comparing lists, they must be of the same length"
+          (VList EmptyList, VList (ListCont _ _)) -> failWith f "When comparing lists, they must be of the same length"
+          (VList EmptyList, VList EmptyList) -> return False
+          (VList (ListCont aHead aTail), VList (ListCont bHead bTail)) -> (&&) <$> lt aHead bHead <*> lt (VList aTail) (VList bTail)
+          _ -> failWith f ("Type error: less than can only compare two numbers (of the same type): " ++ show (a, b))
 generate f neurals' registry adts' globalEnv env [] (IROp OpDiv a b) = do
   aVal <- generate f neurals' registry adts' globalEnv env [] a
   bVal <- generate f neurals' registry adts' globalEnv env [] b
@@ -142,7 +170,7 @@ generate f neurals' registry adts' globalEnv env [] (IROp OpDiv a b) = do
     (VFloat af, VFloat bf) -> return $ VFloat (af / bf)
     --(VAny, _) -> return VAny
     --(_, VAny) -> return VAny
-    _ -> error ("Type error: Divide can only divide two numbers (of the same type): " ++ show (aVal, bVal))
+    _ -> failWith f ("Type error: Divide can only divide two numbers (of the same type): " ++ show (aVal, bVal))
 generate f neurals' registry adts' globalEnv env [] (IROp OpSub a b) = do
   aVal <- generate f neurals' registry adts' globalEnv env [] a
   bVal <- generate f neurals' registry adts' globalEnv env [] b
@@ -151,14 +179,14 @@ generate f neurals' registry adts' globalEnv env [] (IROp OpSub a b) = do
     (VInt af, VInt bf) -> return $ VInt (af - bf)
     --(VAny, _) -> return VAny
     --(_, VAny) -> return VAny
-    _ -> error ("Type error: Minus can only subtract two numbers (of the same type): " ++ show (aVal, bVal))
+    _ -> failWith f ("Type error: Minus can only subtract two numbers (of the same type): " ++ show (aVal, bVal))
 generate f neurals' registry adts' globalEnv env [] (IROp OpMax a b) = do
   aVal <- generate f neurals' registry adts' globalEnv env [] a
   bVal <- generate f neurals' registry adts' globalEnv env [] b
   case (aVal, bVal) of
     (VFloat af, VFloat bf) -> return $ VFloat (max af bf)
     (VInt af, VInt bf) -> return $ VInt (max af bf)
-    _ -> error ("Type error: Max can only compare two numbers (of the same type): " ++ show (aVal, bVal))
+    _ -> failWith f ("Type error: Max can only compare two numbers (of the same type): " ++ show (aVal, bVal))
 generate f neurals' registry adts' globalEnv env [] (IROp OpOr a b) = do
   aVal <- generate f neurals' registry adts' globalEnv env [] a
   bVal <- generate f neurals' registry adts' globalEnv env [] b
@@ -166,7 +194,7 @@ generate f neurals' registry adts' globalEnv env [] (IROp OpOr a b) = do
     (VBool af, VBool bf) -> return $ VBool (af || bf)
     --(VAny, _) -> return VAny
     --(_, VAny) -> return VAny
-    _ -> error ("Type error: Or can only evaluate on two booleans: " ++ show (aVal, bVal))
+    _ -> failWith f ("Type error: Or can only evaluate on two booleans: " ++ show (aVal, bVal))
 generate f neurals' registry adts' globalEnv env [] (IROp OpAnd a b) = do
   aVal <- generate f neurals' registry adts' globalEnv env [] a
   bVal <- generate f neurals' registry adts' globalEnv env [] b
@@ -174,73 +202,77 @@ generate f neurals' registry adts' globalEnv env [] (IROp OpAnd a b) = do
     (VBool af, VBool bf) -> return $ VBool (af && bf)
     --(VAny, _) -> return VAny
     --(_, VAny) -> return VAny
-    _ -> error ("Type error: Or can only evaluate on two booleans: " ++ show (aVal, bVal))
+    _ -> failWith f ("Type error: Or can only evaluate on two booleans: " ++ show (aVal, bVal))
 generate f neurals' registry adts' globalEnv env [] (IROp OpEq a b) = do
   aVal' <- generate f neurals' registry adts' globalEnv env [] a
   bVal' <- generate f neurals' registry adts' globalEnv env [] b
+  -- Answers in the evaluation monad rather than in 'Bool' so its fallthrough
+  -- reaches 'failWith' like every other program-level failure here.
   let cmp aVal bVal = case (aVal, bVal) of
-        (VBool af, VBool bf) -> af == bf
-        (VFloat af, VFloat bf) -> af == bf
-        (VInt af, VInt bf) -> af == bf
-        (VList AnyList, VList _) -> True
-        (VList _, VList AnyList) -> True
-        (VList EmptyList, VList EmptyList) -> True
+        (VBool af, VBool bf) -> return (af == bf)
+        (VFloat af, VFloat bf) -> return (af == bf)
+        (VInt af, VInt bf) -> return (af == bf)
+        (VList AnyList, VList _) -> return True
+        (VList _, VList AnyList) -> return True
+        (VList EmptyList, VList EmptyList) -> return True
         (VList (ListCont VAny as), VList (ListCont _ bs)) -> cmp (VList as) (VList bs)
         (VList (ListCont _ as), VList (ListCont VAny bs)) -> cmp (VList as) (VList bs)
-        (VList (ListCont aElem aTail), VList (ListCont bElem bTail)) -> cmp aElem bElem && cmp (VList aTail) (VList bTail)
-        (VList _, VList _) -> False
+        (VList (ListCont aElem aTail), VList (ListCont bElem bTail)) -> (&&) <$> cmp aElem bElem <*> cmp (VList aTail) (VList bTail)
+        (VList _, VList _) -> return False
         (VTuple af1 af2, VTuple bf1 bf2) ->
           let eqAny xVal yVal = case (xVal, yVal) of
                 (VAny, _) -> True
                 (_, VAny) -> True
                 (xEq, yEq) -> xEq == yEq in
-                (eqAny af1 bf1 && eqAny af2 bf2)
-        (VEither (Left _), VEither (Right _)) -> False
-        (VEither (Right _), VEither (Left _)) -> False
-        (VEither (Left VAny), VEither (Left _)) -> True
-        (VEither (Left _), VEither (Left VAny)) -> True
-        (VEither (Right VAny), VEither (Right _)) -> True
-        (VEither (Right _), VEither (Right VAny)) -> True
+                return (eqAny af1 bf1 && eqAny af2 bf2)
+        (VEither (Left _), VEither (Right _)) -> return False
+        (VEither (Right _), VEither (Left _)) -> return False
+        (VEither (Left VAny), VEither (Left _)) -> return True
+        (VEither (Left _), VEither (Left VAny)) -> return True
+        (VEither (Right VAny), VEither (Right _)) -> return True
+        (VEither (Right _), VEither (Right VAny)) -> return True
         (VEither (Left aElem), VEither (Left bElem)) -> cmp aElem bElem
         (VEither (Right aElem), VEither (Right bElem)) -> cmp aElem bElem
-        (VADT n1 vs1, VADT n2 vs2) -> n1 == n2 && all (\(v1, v2) -> v1 == VAny || v2 == VAny || cmp v1 v2) (zip vs1 vs2)
-        (VUnit, VUnit) -> True
+        (VADT n1 vs1, VADT n2 vs2)
+          | n1 /= n2 -> return False
+          | otherwise -> and <$> mapM (\(v1, v2) -> if v1 == VAny || v2 == VAny then return True else cmp v1 v2) (zip vs1 vs2)
+        (VUnit, VUnit) -> return True
         -- Any is not equal to anything
-        (VAny, _) -> False
-        (_, VAny) -> False
-        _ -> error ("Type error: Equals can only evaluate on two values: " ++ show (aVal, bVal))
-  return $ VBool (cmp aVal' bVal')
+        (VAny, _) -> return False
+        (_, VAny) -> return False
+        _ -> failWith f ("Type error: Equals can only evaluate on two values: " ++ show (aVal, bVal))
+  VBool <$> cmp aVal' bVal'
 generate f neurals' registry adts' globalEnv env [] (IROp OpApprox a b) = do
   aVal <- generate f neurals' registry adts' globalEnv env [] a
   bVal <- generate f neurals' registry adts' globalEnv env [] b
   case (aVal, bVal) of
     (VFloat af, VFloat bf) -> return $ VBool $ abs (af - bf) <= floatApproxEqThresh
-    _ -> error ("Type error: Approx can only evaluate on two floats: " ++ show (aVal, bVal))
+    _ -> failWith f ("Type error: Approx can only evaluate on two floats: " ++ show (aVal, bVal))
 generate f neurals' registry adts' globalEnv env [] (IRUnaryOp OpNot a) = do
   aVal <- generate f neurals' registry adts' globalEnv env [] a
   case aVal of
     VBool af -> return $ VBool (not af)
     --VAny -> return VAny
-    _ -> error "Type error: Not can only evaluate on a Bool"
+    _ -> failWith f "Type error: Not can only evaluate on a Bool"
 generate f neurals' registry adts' globalEnv env [] (IRUnaryOp OpExp a) = do
   aVal <- generate f neurals' registry adts' globalEnv env [] a
   case aVal of
     VFloat af -> return $ VFloat $ exp af
     --VAny -> return VAny
-    _ -> error "Type error: Exp can only evaluate on a floating point numbers"
+    _ -> failWith f "Type error: Exp can only evaluate on a floating point numbers"
 generate f neurals' registry adts' globalEnv env [] (IRUnaryOp OpLog a) = do
   aVal <- generate f neurals' registry adts' globalEnv env [] a
   case aVal of
     VFloat af -> return $ VFloat $ log af
     --VAny -> return VAny
-    _ -> error "Type error: Log can only evaluate on a floating point numbers"
+    _ -> failWith f "Type error: Log can only evaluate on a floating point numbers"
 generate f neurals' registry adts' globalEnv env [] (IRUnaryOp OpNeg a) = do
   aVal <- generate f neurals' registry adts' globalEnv env [] a
   case aVal of
     VFloat af -> return $ VFloat (-af)
     VInt af -> return $ VInt (-af)
     --VAny -> return VAny
-    _ -> error "Type error: Neg can only evaluate on a number"
+    _ -> failWith f "Type error: Neg can only evaluate on a number"
 generate f neurals' registry adts' globalEnv env [] (IRUnaryOp OpSign a) = do
   aVal <- generate f neurals' registry adts' globalEnv env [] a
   case aVal of
@@ -251,14 +283,14 @@ generate f neurals' registry adts' globalEnv env [] (IRUnaryOp OpSign a) = do
     VInt af | af == 0 -> return $ VInt (0)
     VInt af | af > 0 -> return $ VInt (1)
     --VAny -> return VAny
-    _ -> error "Type error: Neg can only evaluate on a number"
+    _ -> failWith f "Type error: Neg can only evaluate on a number"
 generate f neurals' registry adts' globalEnv env [] (IRUnaryOp OpAbs a) = do
   aVal <- generate f neurals' registry adts' globalEnv env [] a
   case aVal of
     VFloat af -> return $ VFloat (abs af)
     VInt af -> return $ VInt (abs af)
     --VAny -> return VAny
-    _ -> error "Type error: Abs can only evaluate on a number"
+    _ -> failWith f "Type error: Abs can only evaluate on a number"
 generate f neurals' registry adts' globalEnv env [] (IRUnaryOp OpIsAny a) = do
   aVal <- generate f neurals' registry adts' globalEnv env [] a
   case aVal of
@@ -295,7 +327,7 @@ generate f neurals' registry adts' globalEnv env [] (IRConstruct TgCons [hd, tl]
     VAny -> do
       x <- generate f neurals' registry adts' globalEnv env [] hd
       return $ VList $ ListCont x AnyList
-    _ -> error "Type error: Tail of cons is not a list"
+    _ -> failWith f "Type error: Tail of cons is not a list"
 generate f neurals' registry adts' globalEnv env [] (IRConstruct TgLeft [expr]) = do
   x <- generate f neurals' registry adts' globalEnv env [] expr
   return $ VEither (Left x)
@@ -307,53 +339,53 @@ generate f neurals' registry adts' globalEnv env args (IRDestruct AcFst expr) = 
   case val of
     VTuple first _ -> return first
     VClosure cEnv n cExpr -> return $ VClosure cEnv n (IRDestruct AcFst cExpr)
-    _ -> error ("Type error: Expression of Fst is not a tuple: " ++ show val)
+    _ -> failWith f ("Type error: Expression of Fst is not a tuple: " ++ show val)
 generate f neurals' registry adts' globalEnv env args (IRDestruct AcSnd expr) = do
   val <- generate f neurals' registry adts' globalEnv env args expr
   case val of
     VTuple _ second -> return second
     VClosure cEnv n cExpr -> return $ VClosure cEnv n (IRDestruct AcSnd cExpr)
-    _ -> error ("Type error: Expression of Snd is not a tuple: " ++ show val)
+    _ -> failWith f ("Type error: Expression of Snd is not a tuple: " ++ show val)
 generate f neurals' registry adts' globalEnv env args (IRDestruct AcHead listExpr) = do
   listVal <- generate f neurals' registry adts' globalEnv env args listExpr
   case listVal of
     VList (ListCont a _) -> return a
-    _ -> error "Type error: head must be called on a non-empty list"
+    _ -> failWith f "Type error: head must be called on a non-empty list"
 generate f neurals' registry adts' globalEnv env args (IRDestruct AcTail listExpr) = do
   listVal <- generate f neurals' registry adts' globalEnv env args listExpr
   case listVal of
     VList (ListCont _ AnyList) -> return VAny
     VList (ListCont _ a) -> return $ VList a
-    _ -> error "Type error: tail must be called on a non-empty list"
+    _ -> failWith f "Type error: tail must be called on a non-empty list"
 generate f neurals' registry adts' globalEnv env args (IRBuiltin BMapList [fExpr, listExpr]) = do
   listVal <- generate f neurals' registry adts' globalEnv env args listExpr
   case listVal of
     VList lst -> do
       newLst <- mapM (\x -> generate f neurals' registry adts' globalEnv env args (IRApply fExpr (IRConst x))) lst
       return $ VList newLst
-    _ ->  error "Type error: map must be called on a list"
+    _ ->  failWith f "Type error: map must be called on a list"
 generate f neurals' registry adts' globalEnv env [] (IRDestruct AcFromLeft expr) = do
   x <- generate f neurals' registry adts' globalEnv env [] expr
   case x of
     VEither (Left l) -> return l
-    _ -> error $ "Type error: fromLeftrequires an either left: " ++ show x
+    _ -> failWith f $ "Type error: fromLeftrequires an either left: " ++ show x
 generate f neurals' registry adts' globalEnv env [] (IRDestruct AcFromRight expr) = do
   x <- generate f neurals' registry adts' globalEnv env [] expr
   case x of
     VEither (Right r) -> return r
-    _ -> error $ "Type error: fromRight requires an either right: " ++ show x
+    _ -> failWith f $ "Type error: fromRight requires an either right: " ++ show x
 generate f neurals' registry adts' globalEnv env [] (IRDestruct AcIsLeft expr) = do
   x <- generate f neurals' registry adts' globalEnv env [] expr
   case x of
     VEither (Left _) -> return (VBool True)
     VEither (Right _) -> return (VBool False)
-    _ -> error $ "Type error: isLeft requires an either: " ++ show x
+    _ -> failWith f $ "Type error: isLeft requires an either: " ++ show x
 generate f neurals' registry adts' globalEnv env [] (IRDestruct AcIsRight expr) = do
   x <- generate f neurals' registry adts' globalEnv env [] expr
   case x of
     VEither (Left _) -> return (VBool False)
     VEither (Right _) -> return (VBool True)
-    _ -> error $ "Type error: isLeft requires an either: " ++ show x
+    _ -> failWith f $ "Type error: isLeft requires an either: " ++ show x
 generate f neurals' registry adts' globalEnv env [] (IRConformsTo t expr) = do
   x <- generate f neurals' registry adts' globalEnv env [] expr
   return $ VBool (valueConformsTo t x)
@@ -389,7 +421,7 @@ generate f neurals' registry adts' globalEnv env args (IRVar name) | "_mock" `is
   let (rt, tags') = fromJust (lookupNeural (iterate init name !! 5) neurals')
   let partPlan = makePartitionPlan adts' (neuralOutputType name rt) tags'
   case lookup symbolEnvName env of
-    Nothing -> error "No symbol found in the environment"
+    Nothing -> failWith f "No symbol found in the environment"
     Just sym -> do
       symVal <- generate f neurals' registry adts' globalEnv env args sym
       return $ evaluateMockNN partPlan symVal
@@ -402,7 +434,7 @@ generate f neurals' registry adts' globalEnv env args (IRVar name) | "_adt" `isS
   let rt = lookupRType realName adts'
   let lookupParams = sequence [lookup ("x" ++ show x) env | x <- [0 :: Int .. arity rt - 1]]
   case lookupParams of
-    Nothing -> error ("No parameter found for " ++ name ++ " in environment")
+    Nothing -> failWith f ("No parameter found for " ++ name ++ " in environment")
     Just val -> do
       paramVal <- mapM (generate f neurals' registry adts' globalEnv env args) val
       return $ implicitFunctionImpl adts' realName paramVal
@@ -412,7 +444,7 @@ generate f neurals' registry adts' globalEnv env args (IRVar name) | "_adt" `isS
 generate f neurals' registry adts' globalEnv env args (IRVar name) =
   case lookup name env of
     Just expr -> generate f neurals' registry adts' globalEnv env args expr
-    Nothing -> error ("Variable " ++ name ++ " not declared")
+    Nothing -> failWith f ("Variable " ++ name ++ " not declared")
 generate f neurals' registry adts' globalEnv env [] (IRIsPossible multiVal expr) = do
   val <- generate f neurals' registry adts' globalEnv env [] expr
   return $ VBool (valueInMultiValue multiVal (fmap (error "Failed conversion") val))
@@ -422,8 +454,8 @@ generate f neurals' registry adts' globalEnv env args (IRBuiltin BListIndex [lst
   case lst of
     VList l -> case idx of
       VInt i -> return $ l `elementAt` i
-      _ -> error "Index must be an integer"
-    _ -> error "Expression must be a list"
+      _ -> failWith f "Index must be an integer"
+    _ -> failWith f "Expression must be a list"
 -- The tensor builtins (design ir-tensor-values). The interpreter is the
 -- reference semantics, and it is the one consumer that implements the general
 -- rank: a tensor is a shape plus a flat row-major block here, so reducing or
@@ -434,7 +466,7 @@ generate f neurals' registry adts' globalEnv env args (IRBuiltin (BTensor sh) el
   vals <- mapM (generate f neurals' registry adts' globalEnv env args) elems
   if length vals == shapeNumel sh
     then return $ VTensor sh vals
-    else error ("BTensor: shape " ++ show sh ++ " needs " ++ show (shapeNumel sh)
+    else failWith f ("BTensor: shape " ++ show sh ++ " needs " ++ show (shapeNumel sh)
                 ++ " elements, got " ++ show (length vals))
 generate f neurals' registry adts' globalEnv env args (IRBuiltin BMap [fExpr, tExpr]) = do
   tVal <- generate f neurals' registry adts' globalEnv env args tExpr
@@ -442,7 +474,7 @@ generate f neurals' registry adts' globalEnv env args (IRBuiltin BMap [fExpr, tE
     VTensor sh xs -> do
       ys <- mapM (\x -> generate f neurals' registry adts' globalEnv env args (IRApply fExpr (IRConst x))) xs
       return $ VTensor sh ys
-    _ -> error ("BMap: not a tensor: " ++ show tVal)
+    _ -> failWith f ("BMap: not a tensor: " ++ show tVal)
 -- Reduction folds right within each fibre, matching the association order the
 -- retired enum-sum family used (foldrM over the same domain), so the terms of
 -- an enumeration are reduced in the same order they always were.
@@ -450,27 +482,37 @@ generate f neurals' registry adts' globalEnv env args (IRBuiltin (BReduce op ax)
   tVal <- generate f neurals' registry adts' globalEnv env args tExpr
   case tVal of
     VTensor sh xs -> case fibres ax sh xs of
-      Nothing -> error ("BReduce: axis " ++ show ax ++ " out of range for shape " ++ show sh)
+      Nothing -> failWith f ("BReduce: axis " ++ show ax ++ " out of range for shape " ++ show sh)
       Just (sh', groups) ->
         return $ rewrap sh' (map (foldr (reduceStep op) (reduceIdentity op)) groups)
-    _ -> error ("BReduce: not a tensor: " ++ show tVal)
+    _ -> failWith f ("BReduce: not a tensor: " ++ show tVal)
 generate f neurals' registry adts' globalEnv env args (IRBuiltin (BIndex ax) [tExpr, keyExpr]) = do
   tVal <- generate f neurals' registry adts' globalEnv env args tExpr
   keyVal <- generate f neurals' registry adts' globalEnv env args keyExpr
   case (tVal, keyVal) of
     (VTensor sh xs, VInt i) -> case fibres ax sh xs of
-      Nothing -> error ("BIndex: axis " ++ show ax ++ " out of range for shape " ++ show sh)
+      Nothing -> failWith f ("BIndex: axis " ++ show ax ++ " out of range for shape " ++ show sh)
       Just (sh', groups)
         | i >= 0 && i < extentSize (sh !! ax) -> return $ rewrap sh' (map (!! i) groups)
-        | otherwise -> error ("BIndex: key " ++ show i ++ " out of bounds for axis "
+        | otherwise -> failWith f ("BIndex: key " ++ show i ++ " out of bounds for axis "
                               ++ show ax ++ " of shape " ++ show sh)
-    (VTensor _ _, k) -> error ("BIndex: key must be an integer, got " ++ show k)
-    (t, _) -> error ("BIndex: not a tensor: " ++ show t)
-generate _ _ _ _ _ _ _ e@(IRBuiltin b args) =
-  error ("Malformed tensor builtin " ++ show b ++ " with " ++ show (length args)
+    (VTensor _ _, k) -> failWith f ("BIndex: key must be an integer, got " ++ show k)
+    (t, _) -> failWith f ("BIndex: not a tensor: " ++ show t)
+generate f _ _ _ _ _ _ e@(IRBuiltin b args) =
+  failWith f ("Malformed tensor builtin " ++ show b ++ " with " ++ show (length args)
          ++ " arguments: " ++ show e)
+-- 'IRError' is deliberately left throwing. It is not a compiler-internal
+-- failure that escaped a channel -- it is a node the compiler *emitted on
+-- purpose* to represent a run-time failure of the user's program (a
+-- nonconforming query value, an unanswerable marginal), and the backends
+-- render it as a raise. Routing it into 'generateDet's 'Left' would make a
+-- data-dependent runtime refusal indistinguishable from a compile-time
+-- rejection in @runProb@'s 'Either', which is a distinction several tests in
+-- TestInternals/TestRejection exist to keep. Out of scope for task
+-- compiler-throws-instead-of-returning-left, which is about compile-time
+-- paths.
 generate _ _ _ _ _ _ _ (IRError s) = error $ "Error during interpretation: " ++ s
-generate _ _ _ _ _ _ _ expr = error ("Expression is not yet implemented " ++ show expr)
+generate f _ _ _ _ _ _ expr = failWith f ("Expression is not yet implemented " ++ show expr)
 
 
 -- | Regroup a flat row-major block into the fibres along one axis: every group

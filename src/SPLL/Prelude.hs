@@ -404,7 +404,7 @@ compile conf p = do
   pPrintIfMoreVerbose conf annotated
   printStage conf "After Conditional Annotation (IsConditional tags)" annotated
 
-  let unoptimized = envToIRUnoptimized conf fcData annotated
+  unoptimized <- envToIRUnoptimized conf fcData annotated
   printStageIR conf "After IR Compilation (pre-optimization)" unoptimized
   let stripped = if countBranches conf then unoptimized else stripBranchCount unoptimized
 

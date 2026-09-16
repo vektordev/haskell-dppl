@@ -43,7 +43,7 @@
 -- cross-checks different CompilerConfigs against each other on the *same*
 -- prob function), but doing so needs many forward samples per case, chosen
 -- dynamically from the density at the query point (see its docs).
-module TestFuzz (fuzzTests, shrinkerTests, superSlowFuzzTests) where
+module TestFuzz (fuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests) where
 
 import Test.QuickCheck hiding (sample)
 import Test.Tasty (TestTree, testGroup)
@@ -483,15 +483,70 @@ data DrawOutcome
   deriving (Show, Eq, Ord)
 
 classifyDraw :: Program -> IO DrawOutcome
-classifyDraw p = case validateProgram p of
-  Left _  -> return ValidateFailed
-  Right _ -> do
-    r <- trySync (evaluate (forceShow (compile defaultCompilerConfig p)))
-    return $ case r of
-      Left _          -> CompileCrashed
-      Right (Left _)  -> CompileRejected
-      Right (Right e) | hasProbFun e -> CompiledWithProbFun
-                      | otherwise    -> CompiledNoProbFun
+classifyDraw p = do
+  -- 'validateProgram' is guarded too: it walks the same AST, so "the validator
+  -- itself threw" is still a crashing draw, and classifying it is this
+  -- function's whole job.
+  v <- trySync (evaluate (forceShow (validateProgram p)))
+  case v of
+    Left _          -> return CompileCrashed
+    Right (Left _)  -> return ValidateFailed
+    Right (Right _) -> do
+      r <- trySync (evaluate (forceShow (compile defaultCompilerConfig p)))
+      return $ case r of
+        Left _          -> CompileCrashed
+        Right (Left _)  -> CompileRejected
+        Right (Right e) | hasProbFun e -> CompiledWithProbFun
+                        | otherwise    -> CompiledNoProbFun
+
+-- | Force one tabulate axis inside an exception guard, substituting @fallback@
+-- if it throws.
+--
+-- 'prop_Fuzz_GeneratorCoverage' used to evaluate its axes outside any guard,
+-- and one of them -- 'realizedPTypeLabel', via @addTypeInfo (annotateProg ...)@
+-- -- reaches the compile-time constant folding in
+-- 'PredefinedFunctions.propagateValues'. A draw whose *compilation* was
+-- correctly classified as 'CompileCrashed' could therefore still kill the
+-- whole property while being labelled. The property's contract is to classify
+-- every draw, so a crash in an axis has to become a label
+-- (task compiler-throws-instead-of-returning-left, defect 3).
+guardAxis :: Show a => a -> a -> IO a
+guardAxis fallback x = either (const fallback) id <$> trySync (evaluate (forceShow x))
+
+-- | The label 'guardAxis' substitutes for an axis that threw. It is a visible
+-- row in the tabulation rather than a silent fallback: a run where these show
+-- up is telling you something.
+crashedAxis :: String
+crashedAxis = "<crashed>"
+
+-- | Everything 'prop_Fuzz_GeneratorCoverage' tabulates about a single draw,
+-- with every axis already forced under 'guardAxis'. Separated from the
+-- property so that "a crashing draw is still fully classified and tabulated"
+-- is directly testable (see 'coverageGuardTests') rather than only observable
+-- as the property not blowing up.
+data DrawSummary = DrawSummary
+  { dsOutcome        :: DrawOutcome
+  , dsPTypeLabel     :: String
+  , dsShapeLabel     :: String
+  , dsTargetTyLabel  :: String
+  , dsTopConstructor :: String
+  , dsSize           :: Int
+  , dsDepth          :: Int
+  , dsStructured     :: Bool
+  } deriving (Show, Eq)
+
+summarizeDraw :: Program -> IO DrawSummary
+summarizeDraw p = do
+  outcome <- classifyDraw p
+  let body = mainBodyOf p
+  DrawSummary outcome
+    <$> guardAxis crashedAxis (realizedPTypeLabel p)
+    <*> guardAxis crashedAxis (tyShapeLabel p)
+    <*> guardAxis crashedAxis (targetTyLabel p)
+    <*> guardAxis crashedAxis (maybe "<no main>" (show . toStub) body)
+    <*> guardAxis 0 (maybe 0 typedExprSize body)
+    <*> guardAxis 0 (maybe 0 typedExprDepth body)
+    <*> guardAxis False (isStructured p)
 
 -- | The modality pass's verdict on @main@, as a label. This is the axis that
 -- catches a collapse into a single inference regime, which the outcome split
@@ -550,18 +605,16 @@ isStructured p = tyShapeLabel p `elem` ["tuple", "either", "list"]
 prop_Fuzz_GeneratorCoverage :: Property
 prop_Fuzz_GeneratorCoverage = withMaxSuccess 200 $
   forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudgetScaled 2 $ do
-    outcome <- classifyDraw p
-    let body   = mainBodyOf p
-        shape  = maybe "<no main>" (show . toStub) body
-        size   = maybe 0 typedExprSize body
-        depth  = maybe 0 typedExprDepth body
+    s <- summarizeDraw p
+    let outcome = dsOutcome s
+        depth   = dsDepth s
     return
       $ tabulate "outcome"          [show outcome]
-      $ tabulate "realized pType"   [realizedPTypeLabel p]
-      $ tabulate "target shape"     [tyShapeLabel p]
-      $ tabulate "target type"      [targetTyLabel p]
-      $ tabulate "top constructor"  [shape]
-      $ tabulate "node count"       [bucket size]
+      $ tabulate "realized pType"   [dsPTypeLabel s]
+      $ tabulate "target shape"     [dsShapeLabel s]
+      $ tabulate "target type"      [dsTargetTyLabel s]
+      $ tabulate "top constructor"  [dsTopConstructor s]
+      $ tabulate "node count"       [bucket (dsSize s)]
       $ tabulate "depth"            [bucket depth]
       -- Recorded rates at the time of writing: ~35% reach a probability
       -- function, 100% compile. Both bounds sit far below that.
@@ -573,7 +626,7 @@ prop_Fuzz_GeneratorCoverage = withMaxSuccess 200 $
       -- target ~40% of the time (a 6:2:2:2 split at the top level); 15% is a
       -- deliberately slack floor, per the design's observe-first decision on
       -- thresholds -- it fires on a collapse back to scalars, not on drift.
-      $ cover 15 (isStructured p)                 "structured target type"
+      $ cover 15 (dsStructured s)                 "structured target type"
       $ property True
 
 return []
@@ -639,6 +692,57 @@ compatibleTys :: Maybe Ty -> Maybe Ty -> Bool
 compatibleTys (Just a) (Just b) = tyCompatible a b
 compatibleTys Nothing  Nothing  = True
 compatibleTys _        _        = False
+
+-- ---------------------------------------------------------------------------
+-- Error-channel regressions (task compiler-throws-instead-of-returning-left).
+--
+-- Fast and deterministic -- one tiny compile and two hand-built programs -- so
+-- these belong in the default suite rather than behind NEST_SLOW_TESTS, next
+-- to the shrinker contract above. They pin, by construction, the two things
+-- 'prop_Fuzz_TypedCompileNeverCrashes' and 'prop_Fuzz_GeneratorCoverage' can
+-- only show statistically: that a compile-time failure travels as a value, and
+-- that a draw which *does* crash is still classified rather than propagated.
+
+-- | The draw from the sibling investigation: @tail (tail (Cons (left 0) nul))@.
+-- Statically empty, so compile-time constant folding reaches the IR
+-- interpreter's @tail@ destructor with an empty list. That destructor used to
+-- report by 'error', which walked straight past the 'Either' in
+-- 'PredefinedFunctions.propagateValues' and out of the compiler.
+--
+-- Note what is *not* asserted: which of 'Left' or 'Right' comes back. What
+-- @head []@/@tail []@ should mean is the open question owned by
+-- 'fuzz-structured-type-bugs'; this test is only about the compiler surviving
+-- long enough to have an opinion.
+staticallyEmptyTailProgram :: Program
+staticallyEmptyTailProgram =
+  Program [("main", ltail (ltail (cons (left (constI 0)) nul)))] [] [] []
+
+-- | A draw that crashes the compiler no matter how the error channels are
+-- wired: the bottom is inside a constant, so every pass that forces it throws.
+-- Stands in for "some future compiler crash" in the coverage test below --
+-- 'prop_Fuzz_GeneratorCoverage' must classify such a draw, not die of it.
+crashingProgram :: Program
+crashingProgram =
+  Program [("main", constI (error "deliberate crash: this draw crashes the compiler"))] [] [] []
+
+errorChannelTests :: TestTree
+errorChannelTests = testGroup "Error channels"
+  [ testProperty "compile returns a value on a statically-empty tail" $ once $ ioProperty $ do
+      r <- trySync (evaluate (forceShow (compile defaultCompilerConfig staticallyEmptyTailProgram)))
+      return $ counterexample (show r) (either (const False) (const True) r)
+  , testProperty "a crashing draw is classified, not propagated" $ once $ ioProperty $ do
+      r <- trySync (evaluate . forceShow =<< summarizeDraw crashingProgram)
+      return $ counterexample (show r) $ case r of
+        Left _  -> property False
+        -- Both halves matter: the outcome is the tabulated classification,
+        -- and 'dsPTypeLabel' is the axis that used to escape the guard --
+        -- @realizedPTypeLabel@ throws on this draw, and the property records
+        -- that as a row instead of dying of it (defect 3).
+        Right s -> dsOutcome s === CompileCrashed .&&. dsPTypeLabel s === crashedAxis
+  , testProperty "a tabulate axis that throws becomes a label" $ once $ ioProperty $ do
+      lbl <- guardAxis crashedAxis (error "axis blew up" :: String)
+      return (lbl === crashedAxis)
+  ]
 
 shrinkerTests :: TestTree
 shrinkerTests = testGroup "Shrinker"

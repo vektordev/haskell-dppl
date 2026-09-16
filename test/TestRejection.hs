@@ -234,6 +234,25 @@ boolProg = Program [("main", uniform #<# constF 0.5)] [] [] []
 forced :: (Show e, Show a) => Either e a -> IO (Either SomeException Int)
 forced = try . evaluate . length . show
 
+-- | The refusal text for a compile that is expected to fail, whichever channel
+-- carries it: 'Nothing' means it did not fail at all.
+--
+-- 'requireNoGenerateBacked' used to refuse by throwing and now returns a
+-- 'Left CompilerError' (task compiler-throws-instead-of-returning-left,
+-- defect 2). The groups below that assert on a refusal's *text* care that the
+-- refusal happens and that it says what is wrong -- not which mechanism
+-- carries it -- so they read it through here and keep working across that
+-- change. Where the channel itself is the point (TestInternals'
+-- 'expectMarginalRefusal', which distinguishes a data-dependent runtime
+-- refusal from a compile-time rejection), the test still pins the channel.
+refusal :: (Show e, Show a) => Either e a -> IO (Maybe String)
+refusal (Left e)  = return (Just (show e))
+refusal (Right v) = do
+  r <- try (evaluate (length (show v))) :: IO (Either SomeException Int)
+  return $ case r of
+    Left ex -> Just (show ex)
+    Right _ -> Nothing
+
 queryTypeGuardTests :: TestTree
 queryTypeGuardTests = testGroup "QueryTypeGuard"
   [ testCase "p() rejects a float query against a Bool program" $ do
@@ -641,20 +660,20 @@ generateBackedReadNNSymbolTests :: TestTree
 generateBackedReadNNSymbolTests = testGroup "GenerateBackedReadNNSymbol"
   [ testCase "a randomly-chosen Symbol argument to ReadNN is refused" $
       withParsed readNNRandomSymbolSrc $ \prog -> do
-        res <- forced (compile defaultCompilerConfig prog)
+        res <- refusal (compile defaultCompilerConfig prog)
         case res of
-          Left e  -> assertBool ("expected the central generate-backed refusal, got: " ++ show e)
-                                ("central-generate-backed-prob-body-guard" `isInfixOf` show e)
-          Right _ -> assertFailure
+          Just e  -> assertBool ("expected the central generate-backed refusal, got: " ++ e)
+                                ("central-generate-backed-prob-body-guard" `isInfixOf` e)
+          Nothing -> assertFailure
             "a probability/integrate function that samples which network input to read was accepted"
   , testCase "the refusal names the offending functions and their randomness source" $
       withParsed readNNRandomSymbolSrc $ \prog -> do
-        res <- forced (compile defaultCompilerConfig prog)
+        res <- refusal (compile defaultCompilerConfig prog)
         assertBool "the refusal does not name main.prob, main.integ and IRUniform, so it does not say what is wrong"
-                   (either (\e -> "main.prob" `isInfixOf` show e
-                               && "main.integ" `isInfixOf` show e
-                               && "IRUniform" `isInfixOf` show e)
-                           (const False) res)
+                   (maybe False (\e -> "main.prob" `isInfixOf` e
+                                    && "main.integ" `isInfixOf` e
+                                    && "IRUniform" `isInfixOf` e)
+                          res)
   , testCase "a deterministic Symbol argument to ReadNN still compiles" $
       withParsed readNNDeterministicSymbolSrc $ \prog -> do
         res <- forced (compile defaultCompilerConfig prog)
@@ -896,29 +915,29 @@ noGenerateSuppressedGeneratorTests :: TestTree
 noGenerateSuppressedGeneratorTests = testGroup "NoGenerateSuppressedGenerator"
   [ testCase "a cross-function generate call suppressed by --noGenerate is still refused" $
       withParsed hoTopLevelSrc $ \prog -> do
-        res <- forced (compile noGenerateConf prog)
+        res <- refusal (compile noGenerateConf prog)
         case res of
-          Left _  -> return ()
-          Right _ -> assertFailure
+          Just _  -> return ()
+          Nothing -> assertFailure
             "main.prob calling f's now-absent generator was accepted under --noGenerate"
   , testCase "the refusal blames --noGenerate by name, not the generic randomness message" $
       withParsed hoTopLevelSrc $ \prog -> do
-        res <- forced (compile noGenerateConf prog)
+        res <- refusal (compile noGenerateConf prog)
         case res of
-          Left e -> do
-            assertBool ("expected the --noGenerate-specific refusal, got: " ++ show e)
-                       ("nogenerate-dangling-cross-function-generate-call" `isInfixOf` show e)
-            assertBool ("the misleading generic message leaked through: " ++ show e)
-                       (not ("central-generate-backed-prob-body-guard" `isInfixOf` show e))
-          Right _ -> assertFailure "expected a compile-time refusal"
+          Just e -> do
+            assertBool ("expected the --noGenerate-specific refusal, got: " ++ e)
+                       ("nogenerate-dangling-cross-function-generate-call" `isInfixOf` e)
+            assertBool ("the misleading generic message leaked through: " ++ e)
+                       (not ("central-generate-backed-prob-body-guard" `isInfixOf` e))
+          Nothing -> assertFailure "expected a compile-time refusal"
   , testCase "the refusal names the suppressed function and the call sites reaching it" $
       withParsed hoTopLevelSrc $ \prog -> do
-        res <- forced (compile noGenerateConf prog)
+        res <- refusal (compile noGenerateConf prog)
         assertBool "the refusal does not name f, main.prob and main.integ"
-                   (either (\e -> "of f" `isInfixOf` show e
-                               && "main.prob" `isInfixOf` show e
-                               && "main.integ" `isInfixOf` show e)
-                           (const False) res)
+                   (maybe False (\e -> "of f" `isInfixOf` e
+                                    && "main.prob" `isInfixOf` e
+                                    && "main.integ" `isInfixOf` e)
+                          res)
   , testCase "a program with no cross-function generate dependency still compiles under --noGenerate" $
       withParsed noCrossFunctionGenSrc $ \prog ->
         case compile noGenerateConf prog of
@@ -926,14 +945,14 @@ noGenerateSuppressedGeneratorTests = testGroup "NoGenerateSuppressedGenerator"
           Right _  -> return ()
   , testCase "genuine randomness under --noGenerate keeps the generic message, not the flag-specific one" $
       withParsed readNNRandomSymbolSrc $ \prog -> do
-        res <- forced (compile noGenerateConf prog)
+        res <- refusal (compile noGenerateConf prog)
         case res of
-          Left e -> do
-            assertBool ("expected the generic generate-backed refusal, got: " ++ show e)
-                       ("central-generate-backed-prob-body-guard" `isInfixOf` show e)
-            assertBool ("the --noGenerate-specific message fired for genuine randomness: " ++ show e)
-                       (not ("nogenerate-dangling-cross-function-generate-call" `isInfixOf` show e))
-          Right _ -> assertFailure
+          Just e -> do
+            assertBool ("expected the generic generate-backed refusal, got: " ++ e)
+                       ("central-generate-backed-prob-body-guard" `isInfixOf` e)
+            assertBool ("the --noGenerate-specific message fired for genuine randomness: " ++ e)
+                       (not ("nogenerate-dangling-cross-function-generate-call" `isInfixOf` e))
+          Nothing -> assertFailure
             "a probability/integrate function that samples which network input to read was accepted"
   ]
 

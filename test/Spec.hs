@@ -28,7 +28,7 @@ import TestDeterminism (determinismTests)
 import TestWriteLogitsProperties (writeLogitsTests, writeLogitsRoundtripTests)
 import TestShowcase (showcaseTests)
 import End2EndTesting (end2endTests, slowEnd2EndTests, getAllTestFiles, selectPassDifferentialTests, batchedPythonTests, slowBatchedPythonTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, branchCountBackendTests)
-import TestFuzz (fuzzTests, shrinkerTests, superSlowFuzzTests)
+import TestFuzz (fuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests)
 import TestCaseParser (parseProgram, parseTestCases, TestCase(..), Expectation(..), Backend(..))
 import TestTolerances (probTolerance, reasonablyCloseTolerance, samplingTolerance)
 import SPLL.Prelude
@@ -1039,6 +1039,7 @@ main = do
     , parserTests
     , internalsTests
     , shrinkerTests
+    , errorChannelTests
     , rejectionTests
     , modalityTests
     , modalityInferTests

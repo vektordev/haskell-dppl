@@ -175,7 +175,11 @@ envToIR conf fcDat p
   | any (null . chainName . getTypeInfo . snd) (functions p) =
       error "envToIR: one or more top-level expressions have empty chainNames — did you call annotateProg before envToIR?"
   | otherwise =
-      let unopt    = envToIRUnoptimized conf fcDat p
+      -- This entry point has no error channel of its own, so a refusal from
+      -- 'requireNoGenerateBacked' can only be thrown here. 'Prelude.compile',
+      -- the entry point everything actually uses, threads the 'Left' instead
+      -- (task compiler-throws-instead-of-returning-left).
+      let unopt    = either error id (envToIRUnoptimized conf fcDat p)
           stripped = if countBranches conf then unopt else stripBranchCount unopt
           -- Batched mode: retag elementwise ifs to selects before optimizing
           -- (design pytorch-tensorizer). Mirrors 'Prelude.compile'.
@@ -192,7 +196,7 @@ envToIR conf fcDat p
 -- backend. This is the single point where 'genFun'/'probFun'/'integFun'/
 -- 'normalFun'/'writeLogitsFun' are assembled, so the check sees every site
 -- regardless of which combinator produced it and needs no per-site edits.
-envToIRUnoptimized :: CompilerConfig -> FCData -> Program -> IREnv
+envToIRUnoptimized :: CompilerConfig -> FCData -> Program -> Either CompilerError IREnv
 envToIRUnoptimized conf fcDat p = requireNoGenerateBacked conf (envToIRUnoptimized' conf fcDat p)
 
 -- | Refuse at compile time rather than hand back an 'IREnv' containing a
@@ -218,11 +222,21 @@ envToIRUnoptimized conf fcDat p = requireNoGenerateBacked conf (envToIRUnoptimiz
 -- structurally depends on another function's generator are incompatible,
 -- and NeST says so rather than emitting a call to a method it agreed not to
 -- write.
-requireNoGenerateBacked :: CompilerConfig -> IREnv -> IREnv
+--
+-- The refusal is a 'Left' rather than an 'error': it is a verdict on the user's
+-- program, and 'Prelude.compile' already reports program-level verdicts through
+-- 'CompilerError'. Throwing made an established, correct refusal
+-- indistinguishable from a compiler crash -- which is exactly what
+-- 'prop_Fuzz_TypedCompileNeverCrashes' is there to tell apart
+-- (task compiler-throws-instead-of-returning-left). Whether the guard should
+-- fire at all on a given draw is a separate question, owned by
+-- 'fuzz-structured-type-bugs'; this only changes how an already-decided refusal
+-- travels.
+requireNoGenerateBacked :: CompilerConfig -> IREnv -> Either CompilerError IREnv
 requireNoGenerateBacked conf env@(IREnv groups _ _) = case generateBackedSites env of
-  [] -> env
+  [] -> Right env
   bad
-    | noGenerate conf, not (null suppressedFns) -> error $ unlines $
+    | noGenerate conf, not (null suppressedFns) -> Left $ unlines $
       [ "envToIRUnoptimized: --noGenerate suppressed the generate function(s) of "
         ++ intercalate ", " (Set.toList suppressedFns) ++ ", but the following compiled"
       , "probability/integrate/normal/writeLogits body/bodies still need to call into"
@@ -233,7 +247,7 @@ requireNoGenerateBacked conf env@(IREnv groups _ _) = case generateBackedSites e
          , "--noGenerate and this query are incompatible: drop --noGenerate, or restructure"
          , "the program so this query does not depend on another function's generator."
          , "(task nogenerate-dangling-cross-function-generate-call)" ]
-    | otherwise -> error $ unlines $
+    | otherwise -> Left $ unlines $
       [ "envToIRUnoptimized: a compiled probability/integrate/normal/writeLogits body draws"
       , "randomness instead of computing an exact probability, so it would return a"
       , "different number on every call with the same query value. NeST does exact"
