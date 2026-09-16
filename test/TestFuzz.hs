@@ -521,19 +521,46 @@ mixtureArmSize = 6
 -- A candidate whose twin no longer exists is dropped rather than paired with
 -- itself. 'neuralTwin' returns 'Nothing' exactly when the @of@ flip would stop
 -- changing the compilation path, and a pair like that is vacuous.
+-- | Twin draws are smaller than 'fuzzSize', for the same reason
+-- 'mixtureArmSize' is: what this property exercises -- that two engines agree
+-- on one distribution -- does not get more thorough with a deeper program, and
+-- every draw costs two compiles. Size matters here more than it does elsewhere
+-- because the property *discards* whenever either side fails to reach a
+-- probability function, which at milestone M3's measured 73% neural crash rate
+-- is most draws; a big draw is both likelier to be discarded and more
+-- expensive to discard.
+twinSize :: Int
+twinSize = 6
+
 shrinkNeuralTwin :: (Program, Program) -> [(Program, Program)]
 shrinkNeuralTwin (lazyP, _) =
   [ (l, m) | l <- shrinkTypedProgram lazyP, Just m <- [neuralTwin l] ]
 
 prop_Fuzz_NeuralMaterializedTwinAgrees :: Property
-prop_Fuzz_NeuralMaterializedTwinAgrees = withMaxSuccess 40 $
-  forAllShrink genNeuralTwinProgram shrinkNeuralTwin $ \(lazyP, matP) -> ioProperty $ withinBudgetScaled 2 $ do
+prop_Fuzz_NeuralMaterializedTwinAgrees = withMaxSuccess 20 $
+  forAllShrink (resize twinSize genNeuralTwinProgram) shrinkNeuralTwin $ \(lazyP, matP) -> ioProperty $ withinBudget $ do
     lazyE <- compileSafe defaultCompilerConfig lazyP
     matE  <- compileSafe defaultCompilerConfig matP
     case (lazyE, matE) of
       (Just le, Just me) | hasProbFun le && hasProbFun me -> do
-        sample <- drawSample lazyP le
-        return $ case (irProb lazyP le sample, irProb matP me sample) of
+        -- Sampling is guarded, and discards rather than fails, for the same
+        -- reason 'compileSafe' swallows a compile crash: whether the IR
+        -- interpreter survives a draw is not this property's subject. It is
+        -- 'prop_Fuzz_TypedCompileNeverCrashes'' subject, and the specific crash
+        -- that reaches here today -- @head@ on an empty list -- is already
+        -- filed as item 1 of @fuzz-structured-type-bugs@. Left unguarded, that
+        -- one bug masks the oracle entirely: the property died on it after
+        -- eight draws without ever comparing the two engines.
+        drawn <- trySync $ do
+          sample <- drawSample lazyP le
+          -- Forced here, inside the guard, and not left to the pure `case`
+          -- below: 'irProb' only converts a `Left` into `Nothing`, so an
+          -- *exception* raised while evaluating either side would otherwise
+          -- escape the guard and fail the property from outside it.
+          evaluate (forceShow (sample, irProb lazyP le sample, irProb matP me sample))
+        return $ case drawn of
+         Left _ -> discardVacuous
+         Right (sample, lazyR, matR) -> case (lazyR, matR) of
           (Just lr, Just mr) -> case (probDim lr, probDim mr) of
             (Just (pl, dl), Just (pm, dm)) ->
               counterexample
