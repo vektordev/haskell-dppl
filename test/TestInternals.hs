@@ -25,7 +25,8 @@ import SPLL.IntermediateRepresentation
 import SPLL.Semiring (semiringSuffix)
 import SPLL.IROptimizer (postProcess, optimizeEnv, deterministicGens, distributeIf, headHash, OptEnv(..))
 import SPLL.CodeGenPyTorchBatched (adtEnv, batchedGuard, generateFunctionsBatched, structural)
-import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts)
+import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts, planFactorExternals)
+import SPLL.Typing.PType (PType(Integrate, Deterministic))
 import Data.Foldable (toList)
 import Data.List (isInfixOf, intercalate, isPrefixOf)
 import Control.Exception (try, evaluate, ErrorCall(..))
@@ -1612,6 +1613,60 @@ planOverCouplingRefusalTests = testGroup "plan-guided M3 over-coupling refusal"
         "neural readTri :: (Symbol -> (Float, (Float, Float)))\nmain sym = let p = readTri sym in if fst p > fst (snd p) then (if fst p > snd (snd p) then 2 else 1) else 0\n"
   ]
 
+-- | The plan factorization's independence guard (task
+-- plan-free-stochastic-subtree-not-factorized). 'planFactorFree' may only
+-- multiply a plan-free subtree's probability into a world when that subtree
+-- shares no random source with the other factors of the same world. Fresh
+-- distribution leaves and top-level calls are per-occurrence draws, so the
+-- only shared source reachable from the traversal is a variable bound by an
+-- enclosing (eager, single-draw) 'let'. This is the check that spots one.
+--
+-- Tested white-box because the hazard has no end-to-end spelling today: every
+-- enclosing random binding that would put such a variable in scope is refused
+-- by the outer engine before the plan traversal runs (verified for the
+-- let/if, let/tuple, and stochastic-function-argument spellings). That makes
+-- the guard belt-and-braces rather than load-bearing -- which is exactly why
+-- it needs a test of its own, since no corpus program would notice it
+-- breaking.
+planFactorExternalsTests :: TestTree
+planFactorExternalsTests = testGroup "plan factorization independence guard"
+  [ testCase "an enclosing random let-bound variable is flagged" $
+      assertEqual "z is a shared draw" ["z"]
+        (planFactorExternals scope [] (cmp (vr "z" Integrate)))
+  , testCase "a deterministic local (a parameter, a recovered witness) is not" $ do
+      assertEqual "theta is a value" []
+        (planFactorExternals scope [] (cmp (vr "theta" Deterministic)))
+      -- a witness recovered by an enclosing body-factor fold is retyped
+      -- Deterministic; excluded on the name as well, belt and braces
+      assertEqual "recovered z is conditioned on, not shared" []
+        (planFactorExternals scope ["z"] (cmp (vr "z" Integrate)))
+  , testCase "a top-level stochastic function is not (each call draws fresh)" $
+      assertEqual "g is re-invoked per occurrence" []
+        (planFactorExternals scope [] (cmp (vr "g" Integrate)))
+  , testCase "a distribution leaf is not (absent from the ambient scope)" $
+      assertEqual "Normal is a fresh draw per occurrence" []
+        (planFactorExternals scope [] (cmp (vr "Normal" Integrate)))
+  , testCase "a variable bound inside the subtree is not flagged" $
+      -- 'w' is not in the ambient scope: the sub-compile is a single
+      -- toIRInference call that models its sharing itself
+      assertEqual "internal binding is the sub-compile's business" []
+        (planFactorExternals scope [] (cmp (vr "w" Integrate)))
+  , testCase "every offending variable is reported, deduplicated" $
+      assertEqual "both shared draws named once each" ["z", "y"]
+        (planFactorExternals scope [] (ti Integrate `wrap` InjF (Named "plus")
+          [cmp (vr "z" Integrate), cmp (vr "y" Integrate), cmp (vr "z" Integrate)]))
+  ]
+  where
+    -- ambient scope: two enclosing local bindings, one deterministic
+    -- parameter, one top-level function. 'Normal'/'w' are deliberately absent.
+    scope = [ ("z", (TFloat, False)), ("y", (TFloat, False))
+            , ("theta", (TFloat, False)), ("g", (TFloat, True)) ]
+    ti p = makeTypeInfo { pType = p }
+    wrap t n = Expr t n
+    vr n p = Expr (ti p) (Var n)
+    -- the shape the guard actually sees: a comparison, not a bare Var
+    cmp e = ti Integrate `wrap` InjF (Named "gt") [e, ti Deterministic `wrap` Constant (VFloat 0)]
+
 expectOrthantRefusal :: String -> IO ()
 expectOrthantRefusal src = do
   let prog = either (\e -> error ("parse failed: " ++ show e)) id (tryParseProgram "test" src)
@@ -3021,6 +3076,7 @@ internalsTests = testGroup "Internals"
   , test_mixtureNegativeLogNormalScaleCompiles
   , test_planEnumBoolCtorPolynomial
   , planOverCouplingRefusalTests
+  , planFactorExternalsTests
   , test_tstBackendsHeader
   , optimizerPurityTests
   , stochasticCallTests
