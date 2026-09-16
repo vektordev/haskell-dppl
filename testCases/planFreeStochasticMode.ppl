@@ -1,0 +1,19 @@
+-- Task plan-free-stochastic-subtree-not-factorized: the neural leaf picks a
+-- discrete MODE and each arm runs its own fresh two-step Gaussian chain. Each
+-- arm mentions no plan-bound variable, so it is independent of everything the
+-- plan constrains: the joint factorizes and the arm is measured by the ordinary
+-- probability compiler and multiplied into the world ('planFactorFree').
+-- Before this task the traversal refused any plan-free subtree that was not
+-- Deterministic, so this program had no probability function at all.
+--
+-- ((mu + N*0.5) * 0.9 + N*0.5) > 2.0 has sd = sqrt(0.45^2 + 0.5^2) = 0.6726812;
+-- mu = 1.5 -> 1 - Phi(0.65/sd)  = 0.1669514
+-- mu = 0.5 -> 1 - Phi(1.55/sd)  = 0.0106054
+-- Plan (Bool, Float) = [0.7, 0.3, mu, sigma]; the continuous leaf is a free
+-- marginal here, so p(1) = 0.7 * 0.1669514 + 0.3 * 0.0106054 = 0.1200476.
+neural readObj :: (Symbol -> (Bool, Float))
+
+main sym = let o = readObj sym in
+  if fst o
+    then (if ((((1.5 + (Normal * 0.5)) * 0.9) + (Normal * 0.5)) > 2.0) then 1 else 0)
+    else (if ((((0.5 + (Normal * 0.5)) * 0.9) + (Normal * 0.5)) > 2.0) then 1 else 0)

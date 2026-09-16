@@ -3762,11 +3762,18 @@ plcBase (PLeafPt b _ _ _) = b
 -- 'planGroupValues'): a group of same-value worlds is merged into one world
 -- with empty constraints and this factor, so counting folds stay O(depth)
 -- instead of 2^depth.
-data PlanWorld = PlanWorld { pwGuards :: [IRExpr], pwCons :: [PLeafCon], pwPairs :: [(Int, Int)], pwFactor :: IRExpr }
+-- 'pwFactors' (task plan-free-stochastic-subtree-not-factorized) carries
+-- whole independent sub-inferences, the plan analogue of 'WWorld's residue
+-- factor list: a subtree of the body that mentions no plan-bound variable is
+-- independent of everything the plan constrains, so the joint factorizes and
+-- the subtree can be measured by the ordinary probability compiler and
+-- multiplied in ('prodP': dims and branch counts add). Unlike 'pwFactor'
+-- these are full 'PResult's, so a factor may carry its own dimension.
+data PlanWorld = PlanWorld { pwGuards :: [IRExpr], pwCons :: [PLeafCon], pwPairs :: [(Int, Int)], pwFactor :: IRExpr, pwFactors :: [PResult] }
 
 -- | An unguarded world from leaf constraints alone.
 pw1 :: [PLeafCon] -> PlanWorld
-pw1 cs = PlanWorld [] cs [] const1
+pw1 cs = PlanWorld [] cs [] const1 []
 
 -- | The observation target: the plan-leaf analogue of the point/interval
 -- split in 'WSet'. PTUpTo is the cumulative target (body <= sample).
@@ -3792,6 +3799,16 @@ type PlanEnv = [([ChainName], PlanBinding)]
 planEnvOccs :: PlanEnv -> [ChainName]
 planEnvOccs env = concat [cns | (cns, PBPlan _) <- env]
 
+-- | Occurrence chain names bound to call-site deterministic values. These are
+-- deliberately NOT plan occurrences, but a subtree mentioning one is not
+-- self-contained either: 'planGenDet' compiles it and then rewrites the bare
+-- parameter variable to its call-site value. The factorization of a plan-free
+-- *stochastic* subtree ('planFactorFree') has no such rewrite available (the
+-- parameter can appear anywhere inside a full inference compile, including
+-- inside bindings the sub-compile hoists), so it declines such subtrees.
+planEnvDetOccs :: PlanEnv -> [ChainName]
+planEnvDetOccs env = concat [cns | (cns, PBDet _ _) <- env]
+
 planEnvLookup :: PlanEnv -> ChainName -> Maybe PlanBinding
 planEnvLookup env cn = listToMaybe [b | (cns, b) <- env, cn `elem` cns]
 
@@ -3813,7 +3830,7 @@ staticBool _ = Nothing
 -- die, and the branch body -- containing the recursive call -- is never
 -- traversed. This is the recursion base of the milestone-2 specialization.
 pwUnsat :: PlanWorld -> Bool
-pwUnsat (PlanWorld gs cons pairs _) = any conUnsat cons
+pwUnsat (PlanWorld gs cons pairs _ _) = any conUnsat cons
                                  || any ((== Just False) . staticBool) gs
                                  || any (\(a, b) -> (b, a) `elem` pairs || a == b) pairs
   where
@@ -3829,7 +3846,7 @@ pwUnsat (PlanWorld gs cons pairs _) = any conUnsat cons
 -- excludes by design (see "Hard residual" in the design doc). Returns a
 -- diagnostic for the first offending world.
 pwOverCoupled :: PlanWorld -> Maybe String
-pwOverCoupled (PlanWorld _ cons pairs _)
+pwOverCoupled (PlanWorld _ cons pairs _ _)
   | (base:_) <- overCoupled = Just
       ("a world couples the continuous leaf at logit offset " ++ show base
        ++ " to other random leaves more than once (or couples it and also"
@@ -3926,8 +3943,8 @@ insertLeafCon c (c':cs) | plcBase c == plcBase c' = intersectLeafCon c' c : cs
                         | otherwise               = c' : insertLeafCon c cs
 
 intersectPlanW :: PlanWorld -> PlanWorld -> PlanWorld
-intersectPlanW (PlanWorld g1 c1 p1 f1) (PlanWorld g2 c2 p2 f2) =
-  PlanWorld (g1 ++ g2) (foldl (flip insertLeafCon) c1 c2) (nub (p1 ++ p2)) (mulFactor f1 f2)
+intersectPlanW (PlanWorld g1 c1 p1 f1 rs1) (PlanWorld g2 c2 p2 f2 rs2) =
+  PlanWorld (g1 ++ g2) (foldl (flip insertLeafCon) c1 c2) (nub (p1 ++ p2)) (mulFactor f1 f2) (rs1 ++ rs2)
 
 -- | Cross-intersect two world sets, dropping statically unsatisfiable
 -- results. This is what keeps the world count of an if-chain over several
@@ -4241,6 +4258,63 @@ bindPeelInput s b
       lift (setVariables [(v, b)])
       return (IRVar v)
 
+-- | Factorize a plan-free subtree that draws fresh randomness (task
+-- plan-free-stochastic-subtree-not-factorized).
+--
+-- @subtreeHasOcc occs sub == False@ says the subtree mentions no plan-bound
+-- variable. Every random draw in SPLL is a syntactic leaf, and the plan
+-- traversal only ever descends into an inlined expression tree (a shared
+-- @let@-bound draw would be an 'Apply' of a 'Lambda' and would be plan-free as
+-- a WHOLE, reaching this case at that node instead), so a plan-free subtree
+-- shares no draw with the plan leaves: it is genuinely independent, not merely
+-- occurrence-free. Under independence the joint factorizes, so the subtree is
+-- handed to the ordinary probability compiler against the same target and its
+-- 'PResult' multiplied into the world ('prodP' in 'measurePlanWorlds': dims and
+-- branch counts add, so a continuous factor's dimension is accounted for
+-- rather than assumed zero).
+--
+-- The sub-inference is compiled into a self-contained block (its own writer
+-- scope folded in via 'generateLetInBlock'), exactly as 'residueFactor' does
+-- for the set-witness path, so it may be evaluated under the world's guards.
+planFactorFree :: CompilerMetadata -> PlanEnv -> Expr -> PTarget -> PlanM (Either String [PlanWorld])
+planFactorFree meta env sub target
+  -- see 'planEnvDetOccs': no rewrite of a specialized callee's parameters is
+  -- available through a full inference compile
+  | subtreeHasOcc (planEnvDetOccs env) sub =
+      return (Left ("a subtree independent of the plan-bound variables draws fresh randomness and also reads a specialized parameter: "
+                    ++ planNodeName sub))
+  | otherwise = do
+      let (cumulative, sample) = case target of
+            PTPoint s -> (False, s)
+            PTUpTo  s -> (True,  s)
+      block <- lift (lift (runWriterT (toIRInference meta cumulative sub sample)))
+                 <&> generateLetInBlock meta
+      return (Right [(pw1 []) { pwFactors = [unpackResult block] }])
+
+-- | The two polarity factors of a plan-free condition that draws fresh
+-- randomness: @(P(c = True), P(c = False))@, each a self-contained compiled
+-- block. Same independence argument as 'planFactorFree' -- @c@ mentions no
+-- plan-bound variable and shares no draw with the branches, so the if is a
+-- mixture whose weights factor out of the plan measure.
+planFactorBool :: CompilerMetadata -> PlanEnv -> Expr -> PlanM (Either String (PResult, PResult))
+planFactorBool meta env c
+  | subtreeHasOcc (planEnvDetOccs env) c =
+      return (Left ("an if condition independent of the plan-bound variables draws fresh randomness and also reads a specialized parameter: "
+                    ++ planNodeName c))
+  | otherwise = do
+      t <- polarity constTrueIR
+      f <- polarity (IRConst (VBool False))
+      return (Right (t, f))
+  where
+    polarity v = do
+      block <- lift (lift (runWriterT (toIRInference meta False c v)))
+                 <&> generateLetInBlock meta
+      return (unpackResult block)
+
+-- | Attach an independent factor to a world.
+planAddFactor :: PResult -> PlanWorld -> PlanWorld
+planAddFactor r w = w { pwFactors = r : pwFactors w }
+
 -- | Invert the observation @body ∈ target@ into plan-leaf constraint worlds.
 -- The plan-backed analogue of 'invertToWorlds'. Left carries a diagnostic
 -- naming the unsupported node; the caller falls through to set-witnesses.
@@ -4253,8 +4327,8 @@ planInvert meta env planBody target
       if pType (getTypeInfo planBody) == Deterministic
         then do
           bIR <- planGenDet meta env planBody
-          return (Right [PlanWorld [planDetGuard (rType (getTypeInfo planBody)) bIR target] [] [] const1])
-        else return (Left ("a subtree independent of the plan-bound variables draws fresh randomness: " ++ planNodeName planBody))
+          return (Right [PlanWorld [planDetGuard (rType (getTypeInfo planBody)) bIR target] [] [] const1 []])
+        else planFactorFree meta env planBody target
 planInvert meta env planBody target
   | Just refE <- planEvalRef meta env planBody =
       return (refE >>= \(ref, cons) -> planRefWorlds (adtDecls meta) ref cons target)
@@ -4282,7 +4356,17 @@ planInvert meta env planBody target = case planBody of
               ts <- wsT
               es <- wsE
               return (liveIntersects cts ts ++ liveIntersects cfs es)
-    | otherwise -> return (Left "an if condition independent of the plan-bound variables draws fresh randomness")
+    -- The condition is plan-free but stochastic: the if is an ordinary
+    -- mixture whose two weights are independent of the plan, so each branch's
+    -- worlds simply carry the corresponding polarity's mass as a factor.
+    | otherwise -> do
+        cf <- planFactorBool meta env c
+        case cf of
+          Left why -> return (Left why)
+          Right (fT, fF) -> do
+            wsT <- planInvert meta env t target
+            wsE <- planInvert meta env e target
+            return ((\ts es -> map (planAddFactor fT) ts ++ map (planAddFactor fF) es) <$> wsT <*> wsE)
   Expr _ (InjF (Named "not") [a]) -> do
     ab <- planInvertBool meta env a
     return ((\(t, f) -> planBoolWorlds target f t) <$> ab)
@@ -4596,7 +4680,11 @@ planGroupValues pairs = do
     classify (ve, w)
       | Just v <- foldValueConst ve, canMerge w = Left (show v, (v, [w]))
       | otherwise                               = Right (ve, w)
-    canMerge w = null (pwPairs w) && not (any isPt (pwCons w))
+    -- A world carrying an independent sub-inference factor is never merged:
+    -- 'planWorldMass' (which is what a group's collapsed mass is built from)
+    -- measures the plan leaves only, so baking a group would silently drop
+    -- the factor. Such worlds pass through ungrouped.
+    canMerge w = null (pwPairs w) && null (pwFactors w) && not (any isPt (pwCons w))
     isPt PLeafPt{} = True
     isPt _         = False
     -- group same-value worlds, keeping ascending value-key order for
@@ -4617,7 +4705,7 @@ planGroupValues pairs = do
       let groupMass = foldr1 (IROp OpPlus) (map (planWorldMass nnRaw . residual) ws)
       mv <- lift (mkVariable "cnt_mass")
       lift (setVariables [(mv, groupMass)])
-      return (IRConst v, PlanWorld [] common [] (IRVar mv))
+      return (IRConst v, PlanWorld [] common [] (IRVar mv) [])
     -- discrete leaf constraints present (identically) in every world's cons
     commonDiscreteCons (w:ws') =
       [ c | c@(PLeafCon _ _) <- pwCons w, all (\w' -> any (conEq c) (pwCons w')) ws' ]
@@ -4906,7 +4994,11 @@ planApplyTarget meta env planBodyExpr target = do
 -- stays pinned to 'linearSemiring' regardless of the 'logSpace' config flag.
 measurePlanWorlds :: String -> [PlanWorld] -> CompilerMonad PResult
 measurePlanWorlds nnRaw worlds
-  | all ((== 0) . planWorldDim) worlds = opaqueMass linearSemiring (sumUp (map worldMass worlds)) branchSum
+  -- The all-dim-0 fast path sums raw masses, which has no place to put a
+  -- factor's own dimension or impossibility flag, so a factored world always
+  -- takes the general 'mixP' path below.
+  | all (null . pwFactors) worlds
+  , all ((== 0) . planWorldDim) worlds = opaqueMass linearSemiring (sumUp (map worldMass worlds)) branchSum
   | otherwise = do
       -- A dim-0 world's mass vanishing means its slots were not selected, i.e.
       -- the world is impossible; a dim-1 (point-constrained continuous) world's
@@ -4915,10 +5007,19 @@ measurePlanWorlds nnRaw worlds
       -- its structural guards fails (the world's own, or the point
       -- constraint's membership/image guards: an observation outside a
       -- peeled step's image, `exp leaf == -1.0`).
-      ws <- forM worlds $ \w ->
-              if planWorldDim w == 0
-                then onBranches (const branchSum) <$> opaqueMass linearSemiring (worldMass w) branchSum
-                else return (mkPResult (unsafeLinearP (worldMass w)) (dimC (planWorldDim w)) branchSum (guardsFail w))
+      ws <- forM worlds $ \w -> do
+              base <- if planWorldDim w == 0
+                        then onBranches (const branchSum) <$> opaqueMass linearSemiring (worldMass w) branchSum
+                        else return (mkPResult (unsafeLinearP (worldMass w)) (dimC (planWorldDim w)) branchSum (guardsFail w))
+              -- Independent sub-inference factors multiply in. The world's
+              -- guards are already baked into 'worldMass', but a factor is a
+              -- whole compiled block that must not be evaluated when they
+              -- fail, so the product is re-guarded (a no-op on the numbers,
+              -- which 'worldMass' has already zeroed).
+              return $ if null (pwFactors w)
+                then base
+                else guardP linearSemiring (pwGuards w)
+                       (foldl (prodP linearSemiring) base (pwFactors w))
       case ws of
         []     -> return (impossibleP linearSemiring)
         -- Every world whose guards hold was traversed, so the branch count is the
@@ -4935,9 +5036,11 @@ measurePlanWorlds nnRaw worlds
       [] -> constFalseIR
       gs -> notIR (foldr1 andIR gs)
 
--- | Dimensionality of a world's mass: one per point constraint (a univariate
--- density); discrete slots, CDF intervals, pairwise couplings and the carried
--- mass factor are all dim 0.
+-- | Dimensionality of a world's PLAN-LEAF mass: one per point constraint (a
+-- univariate density); discrete slots, CDF intervals, pairwise couplings and
+-- the carried scalar mass factor are all dim 0. Independent sub-inference
+-- factors ('pwFactors') are NOT counted here -- their dimension is a runtime
+-- 'IRExpr' and is added by 'prodP' in 'measurePlanWorlds'.
 planWorldDim :: PlanWorld -> Int
 planWorldDim w = length [ () | PLeafPt {} <- pwCons w ]
 

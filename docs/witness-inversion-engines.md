@@ -22,6 +22,37 @@ across the milestone levels (inline predicates, recursive user-function
 specialization, value-grouped DP for counting folds, and continuous-leaf
 constraints).
 
+### Independent factors of a plan-free subtree
+
+A subtree of the body that mentions no plan-bound variable is *independent of
+the plan*, not merely occurrence-free: every random draw in SPLL is a
+syntactic leaf, and the traversal only ever descends an inlined expression
+tree (a shared `let`-bound draw is an `Apply` of a `Lambda`, which is
+plan-free as a whole and is caught at that node instead), so such a subtree
+shares no draw with the plan leaves. Under independence the joint factorizes,
+so the subtree is compiled by the *ordinary* probability compiler against the
+same target and multiplied into the world (`PlanWorld`'s `pwFactors`,
+combined with `prodP` in `measurePlanWorlds`: probabilities multiply, dims and
+branch counts add). This is the plan analogue of the set-witness residue
+factor below, and it is what lets a plan-enumerated neural declaration coexist
+with fresh continuous randomness at all.
+
+Two entry points: `planFactorFree`, for a whole plan-free subtree in an
+observation position, and `planFactorBool`, for a plan-free *if-condition*,
+whose two polarity masses become the mixture weights of the two branches'
+worlds. Both decline a subtree that also reads a specialized callee's
+deterministic parameter (`planEnvDetOccs`) — `planGenDet`'s name rewrite has
+no counterpart through a full inference compile. A factored world is never
+collapsed by the milestone-4 value DP (`planGroupValues`), whose group mass is
+built from `planWorldMass`, which measures plan leaves only.
+
+Still refused, and genuinely not a product: value *enumeration* of a plan-free
+stochastic subtree (`planEnumValuesRaw` — a stochastic subtree has no single
+value to enumerate, it has a weighted support), and a comparison operand that
+mixes a plan leaf with fresh randomness (`snd o + Normal * 0.5 > 2.0`), which
+is a convolution of the leaf's Gaussian with the noise, not a factorization.
+Corpus `testCases/planFreeStochastic*`.
+
 ## Set-valued witnesses
 
 `setWitnessApply` is the last resort: it fires once `toInvExprMaybe` reports

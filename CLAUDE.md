@@ -277,6 +277,20 @@ no occurrence of the bound variable is point-invertible at all. Full
 mechanism, examples, and the `testCases/planEnum*` pointers:
 `docs/witness-inversion-engines.md`.
 
+A plan world can carry **independent factors** (`PlanWorld`'s `pwFactors`):
+a body subtree mentioning no plan-bound variable is independent of the plan,
+so the joint factorizes — the subtree is compiled by the ordinary probability
+compiler against the same target and multiplied in with `prodP` (dims and
+branch counts add). `planFactorFree` handles a whole plan-free subtree,
+`planFactorBool` a plan-free `if`-condition (its two polarity masses become
+the branches' mixture weights). Before this, the traversal accepted a
+plan-free subtree only when it was `Deterministic`, so a neural declaration
+and any fresh randomness could not appear in one probability-mode body.
+Corpus `testCases/planFreeStochastic*`. Still refused as genuinely
+non-factorizable: value enumeration of a plan-free stochastic subtree, and a
+comparison operand convolving a plan leaf with fresh noise
+(`snd o + Normal * 0.5 > 2.0`).
+
 A set-witness world can carry **residue factors** (`WWorld [guard] WSet
 [PResult]`): when `transportDirect` inverts a single-occurrence subtree
 through a field constructor (`(x, e)`, `x : e`, a user ADT constructor, also

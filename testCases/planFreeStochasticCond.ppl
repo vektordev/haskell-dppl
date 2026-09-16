@@ -1,0 +1,14 @@
+-- Task plan-free-stochastic-subtree-not-factorized, third refusal site: the
+-- if CONDITION mentions no plan-bound variable but draws fresh randomness,
+-- while the branches are plan-dependent. The condition is independent of the
+-- plan and shares no draw with the branches, so the if is an ordinary mixture
+-- whose two weights factor out of the plan measure ('planFactorBool').
+--
+-- Plan (Bool, Float) = [0.7, 0.3, mu, sigma]; P(Normal > 0.0) = 0.5.
+--   p(1) = 0.5 * 0.7 = 0.35
+--   p(0) = 0.5 * 0.3 = 0.15
+--   p(2) = 0.5
+neural readObj :: (Symbol -> (Bool, Float))
+
+main sym = let o = readObj sym in
+  if Normal > 0.0 then (if fst o then 1 else 0) else 2

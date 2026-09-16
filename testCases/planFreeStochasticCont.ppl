@@ -1,0 +1,15 @@
+-- Task plan-free-stochastic-subtree-not-factorized, dimension bookkeeping: the
+-- factored plan-free subtree is CONTINUOUS here, so its factor carries dim 1.
+-- 'planWorldDim' counts plan-leaf point constraints only; the factor's own dim
+-- is added by 'prodP' in 'measurePlanWorlds', which is what keeps the mixture's
+-- dimension right (and lets the dim-0 arm win where it applies).
+--
+-- Plan (Bool, Float) = [0.6, 0.4, mu, sigma]; the continuous leaf is a free
+-- marginal. p(x) = 0.6 * phi(x) + 0.4 * phi((x-3)/0.5)/0.5, both dim 1:
+--   p(0.3) = 0.6 * 0.3813878 + 0.4 * 4.02e-8 = 0.2288328
+--   p(3.0) = 0.6 * 0.0044318 + 0.4 * 0.7978846 = 0.3218130
+-- cdf(x) = 0.6 * Phi(x) + 0.4 * Phi((x-3)/0.5), dim 0.
+neural readObj :: (Symbol -> (Bool, Float))
+
+main sym = let o = readObj sym in
+  if fst o then (Normal) else ((Normal * 0.5) + 3.0)
