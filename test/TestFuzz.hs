@@ -66,6 +66,7 @@ import SPLL.Analysis (annotateEnumsProg)
 import SPLL.Typing.Infer (addTypeInfo)
 import ArbitrarySPLL (genRawFuzzProgram, genTypedProgram, genTypedExpr, Ty(..),
                       shrinkTypedProgram, shrinkTypedExpr, tyOfTypedExpr,
+                      tyCompatible,
                       typedExprSize, typedExprDepth)
 
 -- | `show`ing a value forces every field, catching lazily-hidden crashes
@@ -516,6 +517,36 @@ bucket n
   | n <= 20   = "11-20"
   | otherwise = ">20"
 
+-- | The generated program's *target type*, as a shape label. This is the axis
+-- milestone M1 exists to move: before it, every draw was one of the three
+-- scalars. 'tyOfTypedExpr' recovers only what the node itself pins down, so
+-- components it leaves free print as @?@ -- that is information, not noise
+-- (a draw reported as @Either Float ?@ never observed its right side).
+targetTyLabel :: Program -> String
+targetTyLabel p = maybe "<no main>" (maybe "<unrecognised>" showTy . tyOfTypedExpr) (mainBodyOf p)
+
+showTy :: Ty -> String
+showTy TyFloat         = "Float"
+showTy TyInt           = "Int"
+showTy TyBool          = "Bool"
+showTy TyAny           = "?"
+showTy (TyTuple a b)   = "(" ++ showTy a ++ ", " ++ showTy b ++ ")"
+showTy (TyEither a b)  = "Either " ++ showTy a ++ " " ++ showTy b
+showTy (TyList a)      = "[" ++ showTy a ++ "]"
+
+-- | Coarser than 'showTy': just which outer shape the draw landed on, so the
+-- scalar/structured split is one readable row rather than a long tail.
+tyShapeLabel :: Program -> String
+tyShapeLabel p = case mainBodyOf p >>= tyOfTypedExpr of
+  Nothing             -> "<unrecognised>"
+  Just TyTuple{}      -> "tuple"
+  Just TyEither{}     -> "either"
+  Just TyList{}       -> "list"
+  Just _              -> "scalar"
+
+isStructured :: Program -> Bool
+isStructured p = tyShapeLabel p `elem` ["tuple", "either", "list"]
+
 prop_Fuzz_GeneratorCoverage :: Property
 prop_Fuzz_GeneratorCoverage = withMaxSuccess 200 $
   forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudgetScaled 2 $ do
@@ -527,14 +558,22 @@ prop_Fuzz_GeneratorCoverage = withMaxSuccess 200 $
     return
       $ tabulate "outcome"          [show outcome]
       $ tabulate "realized pType"   [realizedPTypeLabel p]
+      $ tabulate "target shape"     [tyShapeLabel p]
+      $ tabulate "target type"      [targetTyLabel p]
       $ tabulate "top constructor"  [shape]
       $ tabulate "node count"       [bucket size]
       $ tabulate "depth"            [bucket depth]
-      -- Recorded rates at the time of writing: ~55% compile, ~32% reach a
-      -- probability function. Both bounds sit far below that.
+      -- Recorded rates at the time of writing: ~35% reach a probability
+      -- function, 100% compile. Both bounds sit far below that.
       $ cover 25 (outcome >= CompiledNoProbFun)   "compiles"
       $ cover 10 (outcome == CompiledWithProbFun) "has a probability function"
       $ cover 10 (depth >= 3)                     "non-trivial structure"
+      -- M1's acceptance criterion, standing rather than one-off: the generator
+      -- must keep reaching the structured shapes. 'genTy' draws a structured
+      -- target ~40% of the time (a 6:2:2:2 split at the top level); 15% is a
+      -- deliberately slack floor, per the design's observe-first decision on
+      -- thresholds -- it fires on a collapse back to scalars, not on drift.
+      $ cover 15 (isStructured p)                 "structured target type"
       $ property True
 
 return []
@@ -585,6 +624,22 @@ buriedNormal =
     (((normal #+# constF 1.0) #*# (uniform #-# constF 2.0)) #+# expF (constF 3.0))
     (negF (uniform #*# constF 4.0))
 
+-- | The type-preservation contract, stated over *recovered* types.
+--
+-- Before M1 this was equality, which is what it still amounts to for the
+-- scalar fragment. Structured types made recovery partial: a @left x@ node
+-- fixes only the left component of its Either and says nothing about the
+-- right, so the recovered type carries 'TyAny' there. Replacing an
+-- @Either (Bool,Float) (Either Float Float)@ node (a type only pinned by
+-- *both* arms of an enclosing if) with @left (False, 0.0)@ is a perfectly
+-- well-typed shrink whose recovered type is strictly more general. So the
+-- contract is "joinable with", not "equal to" -- a shrink may leave a
+-- position free, and may never disagree about one that is fixed.
+compatibleTys :: Maybe Ty -> Maybe Ty -> Bool
+compatibleTys (Just a) (Just b) = tyCompatible a b
+compatibleTys Nothing  Nothing  = True
+compatibleTys _        _        = False
+
 shrinkerTests :: TestTree
 shrinkerTests = testGroup "Shrinker"
   [ testProperty "every shrink preserves the expression's type" $
@@ -592,7 +647,9 @@ shrinkerTests = testGroup "Shrinker"
         case mainBody p of
           Nothing -> property True
           Just b  -> conjoin
-            [ counterexample (show b') (tyOfTypedExpr b' === tyOfTypedExpr b)
+            [ counterexample (show b' ++ "\n  shrink ty: " ++ show (tyOfTypedExpr b')
+                              ++ "\n  orig ty:   " ++ show (tyOfTypedExpr b))
+                             (property (compatibleTys (tyOfTypedExpr b') (tyOfTypedExpr b)))
             | b' <- shrinkTypedExpr b ]
   , testProperty "every shrink is strictly smaller" $
       forAll (resize fuzzSize genTypedProgram) $ \p ->
