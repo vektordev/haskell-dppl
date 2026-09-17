@@ -44,11 +44,12 @@
 -- prob function), but doing so needs many forward samples per case, chosen
 -- dynamically from the density at the query point (see its docs).
 module TestFuzz (fuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
-                 neuralGeneratorTests, fuzzScalingTests) where
+                 neuralGeneratorTests, fuzzScalingTests, injFCatalogTests) where
 
 import Test.QuickCheck hiding (sample)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.QuickCheck (testProperties, testProperty)
+import Test.Tasty.HUnit (testCase, assertEqual, assertBool, assertFailure)
 import Control.Exception (try, evaluate, throwIO, fromException, SomeException, SomeAsyncException(..))
 import Control.Monad (replicateM)
 import Control.Monad.Random (evalRandIO)
@@ -57,6 +58,7 @@ import System.Environment (lookupEnv)
 import System.IO.Unsafe (unsafePerformIO)
 import Text.Read (readMaybe)
 import Data.Maybe (isJust)
+import Data.List (sort, nub, intersect)
 import Data.Number.Erf (erf)
 
 import SPLL.Lang.Types
@@ -64,11 +66,14 @@ import SPLL.IntermediateRepresentation
 import SPLL.IRCompiler (generateBackedSites)
 import SPLL.Prelude
 import SPLL.Validator (validateProgram)
+import PredefinedFunctions (globalFEnv, parameterCount, FPair(..), applicability)
 import SPLL.Lang.Lang (toStub, getTypeInfo)
 import SPLL.Typing.ForwardChaining (annotateProg)
 import SPLL.Analysis (annotateEnumsProg)
 import SPLL.Typing.Infer (addTypeInfo)
 import ArbitrarySPLL (genRawFuzzProgram, genTypedProgram, genTypedExpr, Ty(..),
+                      InjFSig(..), injFCatalog, injFExcluded, InjFExclusion(..),
+                      injFNamesOf, injFLeafApp, tyOfTypedExpr,
                       shrinkTypedProgram, shrinkTypedExpr,
                       tyGeneralizes,
                       typedExprSize, typedExprDepth,
@@ -1032,6 +1037,109 @@ neuralGeneratorTests = testGroup "Neural generator"
 -- ---------------------------------------------------------------------------
 -- The depth knob's contract (design typed-program-generator-expansion, Axis 4).
 --
+-- ---------------------------------------------------------------------------
+-- The InjF catalog (design typed-program-generator-expansion, Axis 1).
+--
+-- Default suite, beside 'Shrinker', 'Error channels' and 'Fuzz scaling', and
+-- for the same reason: pure, instant, and upstream of everything else in this
+-- module. The whole point of deriving the generator's InjF productions from
+-- 'globalFEnv' is that the two cannot drift apart; these tests are what turns
+-- "cannot" into "does not", by pinning the partition of 'globalFEnv' into
+-- generated and deliberately-excluded. A predefined function added to the
+-- compiler lands in one bucket or the other, changes a pinned list, and goes
+-- red until someone has decided which it should have been. Without that, the
+-- silent outcome is the old one: a new function that is simply never
+-- generated, with a full green run.
+injFCatalogTests :: TestTree
+injFCatalogTests = testGroup "InjF catalog"
+  [ testCase "the catalog and the exclusions partition globalFEnv" $ do
+      let names    = map fst (globalFEnv [])
+          included = nub (map injFName injFCatalog)
+          excluded = map fst injFExcluded
+      assertEqual "no name is both generated and excluded"
+        [] (included `intersect` excluded)
+      assertEqual "every predefined function is accounted for"
+        (sort names) (sort (included ++ excluded))
+
+  , testCase "the generated scalar fragment is what we think it is" $
+      -- Pinned by name. The list is not a specification of what *should* be
+      -- generatable -- 'injFCatalog' derives that -- it is a tripwire on
+      -- 'PredefinedFunctions' changing under the generator.
+      assertEqual "generated InjF names"
+        [ "and", "double", "eq", "exp", "gt", "lt", "max", "mult", "multI"
+        , "neg", "negI", "not", "or", "plus", "plusI", "recip", "sq" ]
+        (sort (nub (map injFName injFCatalog)))
+
+  , testCase "the exclusions are what we think they are, with reasons" $
+      -- 'InjFGuarded' is the one that matters for correctness: @log@ and
+      -- @sqrt@ are partial on their argument type, and generating them
+      -- unguarded would manufacture NaN densities that say nothing about the
+      -- compiler. The rest are shape, not safety -- 'genTypedRec' owns the
+      -- container productions because they need a target type to drive them.
+      assertEqual "excluded InjF names and reasons"
+        [ ("Cons", InjFNotScalar), ("TCons", InjFPolyArity)
+        , ("apply", InjFPolyArity)
+        , ("fromLeft", InjFPolyArity), ("fromLeftPartial", InjFGuarded)
+        , ("fromRight", InjFPolyArity), ("fromRightPartial", InjFGuarded)
+        , ("fst", InjFPolyArity)
+        , ("head", InjFNotScalar)
+        , ("isLeft", InjFPolyArity), ("isNull", InjFNotScalar)
+        , ("isRight", InjFPolyArity)
+        , ("left", InjFPolyArity), ("log", InjFGuarded)
+        , ("map", InjFPolyArity), ("mapEither", InjFPolyArity)
+        , ("mapLeft", InjFPolyArity)
+        , ("right", InjFPolyArity)
+        , ("snd", InjFPolyArity), ("sqrt", InjFGuarded)
+        , ("tail", InjFNotScalar) ]
+        (sort injFExcluded)
+
+  , testCase "every catalog entry is scalar, non-nullary and unconditional" $
+      -- The last of these is the safety condition restated as a check on the
+      -- result rather than on the derivation, so that loosening
+      -- 'injFUnconditional' by accident cannot pass quietly.
+      mapM_ (\sig -> do
+        let nm = injFName sig
+        assertBool (nm ++ " has no arguments") (not (null (injFArgs sig)))
+        assertBool (nm ++ " is not scalar")
+          (all isScalar (injFArgs sig) && isScalar (injFResult sig))
+        assertBool (nm ++ " is guarded and must not be generated")
+          (unconditionalFwd nm)) injFCatalog
+
+  , testCase "catalog arity agrees with the compiler's own parameterCount" $
+      -- Two independent readings of the same declaration. A disagreement
+      -- means 'arrowParts' has misread a contract, which would show up as
+      -- generated programs the validator rejects rather than as anything
+      -- obviously wrong here.
+      mapM_ (\sig ->
+        assertEqual ("arity of " ++ injFName sig)
+          (parameterCount [] (injFName sig)) (length (injFArgs sig)))
+        injFCatalog
+
+  , testCase "type recovery agrees with the catalog on every entry" $
+      -- The generation table and the recovery table are the same data read in
+      -- two directions (M-S's design note). If they disagree,
+      -- 'tyOfTypedExpr' returns 'Nothing' for that shape, the shrinker
+      -- declines to shrink it, and every counterexample containing it comes
+      -- out full-size -- with nothing failing to say so.
+      mapM_ (\sig -> case injFLeafApp sig of
+        Nothing -> assertFailure ("no leaf application for " ++ injFName sig)
+        Just e  -> assertEqual ("recovered type of " ++ injFName sig)
+                     (Just (injFResult sig)) (tyOfTypedExpr e)) injFCatalog
+
+  , testProperty "the generator only ever emits names the compiler defines" $
+      withMaxSuccess (fuzzCases 50) $
+      forAll (resize fuzzSize genTypedProgram) $ \prog ->
+        let defined = map fst (globalFEnv [])
+            used    = nub (concatMap injFNamesOf (map snd (functions prog)))
+        in counterexample (show (filter (`notElem` defined) used))
+             (all (`elem` defined) used)
+  ]
+  where
+    isScalar t = t `elem` [TyFloat, TyInt, TyBool]
+    unconditionalFwd nm = case lookup nm (globalFEnv []) of
+      Just (FPair fwd _) -> applicability fwd == IRConst (VBool True)
+      Nothing            -> False
+
 -- Default suite, beside 'Shrinker' and 'Error channels', and for the same
 -- reason: these are pure and instant, and the knob is upstream of every other
 -- property in this module. A knob that silently reads as 1 would turn a

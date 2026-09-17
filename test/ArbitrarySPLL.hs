@@ -40,6 +40,13 @@ module ArbitrarySPLL (
 , hasNeural
 , uniquifyBinders
 , uniquifyBindersFrom
+, InjFSig(..)
+, injFCatalog
+, injFCatalogFor
+, injFExcluded
+, InjFExclusion(..)
+, injFNamesOf
+, injFLeafApp
 )where
 
 import Test.QuickCheck
@@ -50,7 +57,8 @@ import SPLL.Lang.Lang
 import SPLL.Lang.Types
 import SPLL.Typing.RType
 import SPLL.Parser (reserved)
-import PredefinedFunctions (globalFEnv, parameterCount)
+import PredefinedFunctions (globalFEnv, parameterCount, FPair(..), FDecl, contract, applicability)
+import SPLL.IntermediateRepresentation (IRExpr(..))
 import SPLL.Prelude
 
 -- Arbitrary instances for generating test data.
@@ -466,30 +474,33 @@ genTypedRec env ty n =
   where
     gen = genTypedExprIn env
     half = n `div` 2
+    -- Scalar InjF applications are drawn from 'injFCatalog', which is derived
+    -- from the compiler's own 'globalFEnv' (Axis 1). The hand-written
+    -- per-type table this replaced had drifted: it never emitted @double@,
+    -- @sq@, @recip@ or @max@, never compared Ints, and never used @eq@ at
+    -- all, none of which was a decision anyone took.
+    catalogProds t = [ injF (injFName sig) <$> mapM argAt (injFArgs sig)
+                     | sig <- injFCatalogFor t
+                     , let arity = length (injFArgs sig)
+                     , let argAt a = gen a (if arity <= 1 then n - 1 else n `div` arity)
+                     ]
     tyRec = case ty of
       TyAny -> []
+      -- The subtraction sugars stay explicit alongside the catalog: @a - b@ is
+      -- @plus a (neg b)@, a *composite* shape the catalog cannot name, and the
+      -- realized nesting is the point of having it.
       TyFloat ->
-        [ (#+#) <$> gen TyFloat half <*> gen TyFloat half
-        , (#-#) <$> gen TyFloat half <*> gen TyFloat half
-        , (#*#) <$> gen TyFloat half <*> gen TyFloat half
-        , negF <$> gen TyFloat (n - 1)
-        , expF <$> gen TyFloat (n - 1)
-        ]
+        catalogProds TyFloat ++
+        [ (#-#) <$> gen TyFloat half <*> gen TyFloat half ]
       TyInt ->
-        [ (#<+>#) <$> gen TyInt half <*> gen TyInt half
-        , (#<->#) <$> gen TyInt half <*> gen TyInt half
-        , negIF <$> gen TyInt (n - 1)
-        ]
+        catalogProds TyInt ++
+        [ (#<->#) <$> gen TyInt half <*> gen TyInt half ]
       TyBool ->
-        [ (#&&#) <$> gen TyBool half <*> gen TyBool half
-        , (#||#) <$> gen TyBool half <*> gen TyBool half
-        , (#!#) <$> gen TyBool (n - 1)
-        , (#>#) <$> gen TyFloat half <*> gen TyFloat half
-        , (#<#) <$> gen TyFloat half <*> gen TyFloat half
+        catalogProds TyBool ++
         -- Structural tests: the only Bool-producing eliminators for lists and
         -- Either, and the reason those shapes get *observed* rather than just
         -- constructed and returned.
-        , do a <- genTy 1
+        [ do a <- genTy 1
              isNull <$> gen (TyList a) half
         , do a <- genTy 1
              b <- genTy 1
@@ -1077,21 +1088,219 @@ tyOfTypedInjF env "tail"  [x]    = tyOfTypedExprIn env x >>= \t -> case t of
   _        -> Nothing
 tyOfTypedInjF env "left"  [x]    = (`TyEither` TyAny) <$> tyOfTypedExprIn env x
 tyOfTypedInjF env "right" [x]    = TyEither TyAny <$> tyOfTypedExprIn env x
-tyOfTypedInjF _   f       _      = lookup f typedInjFResultTy
+-- The structural predicates. Their result is 'TyBool' whatever they test, but
+-- they are *not* catalog entries -- the catalog is the scalar fragment, and
+-- these take a container. Recovering them here rather than letting them fall
+-- through matters more than it looks: an unrecognised node yields no shrinks,
+-- so omitting these would silently stop minimization on every draw whose
+-- condition happens to be a structural test, with nothing going red to say so.
+tyOfTypedInjF env "isNull" [x]   = tyOfTypedExprIn env x >>= \t -> case t of
+  TyList _ -> Just TyBool
+  TyAny    -> Just TyBool
+  _        -> Nothing
+tyOfTypedInjF env "isLeft" [x]   = tyOfTypedEitherTest env x
+tyOfTypedInjF env "isRight" [x]  = tyOfTypedEitherTest env x
+-- Everything else is a scalar application, and its result type is whatever
+-- the catalog entry matching the *recovered argument types* produces. This is
+-- the same table 'genTypedRec' generates from, read backwards -- which is what
+-- keeps a polymorphic InjF shrinkable: 'plus' has no single result type, and
+-- the monomorphic table this replaced could only ever have claimed one of
+-- them.
+--
+-- A recovered 'TyAny' argument (a position no node commits) matches any
+-- catalog argument, so recovery stays as total as it was; an ambiguous match
+-- yields 'Nothing' rather than a guess, because a wrong type here is a
+-- type-changing "shrink", which M2 established is worse than no shrink.
+tyOfTypedInjF env f args = do
+  argTys <- mapM (tyOfTypedExprIn env) args
+  case nub [ injFResult s
+           | s <- injFCatalog
+           , injFName s == f
+           , length (injFArgs s) == length argTys
+           , and (zipWith argMatches (injFArgs s) argTys) ] of
+    [t] -> Just t
+    _   -> Nothing
+  where argMatches want got = got == TyAny || want == got
 
--- | Result type of every *scalar* InjF the typed generator can emit. Note that
--- some generator combinators expand into others ('#-#' is @plus a (neg b)@,
--- 'bernoulli' is @lt uniform (constF p)@, 'dice' is nested 'ifThenElse'), so
--- this list covers the realized constructor space, not the combinator list.
-typedInjFResultTy :: [(String, Ty)]
-typedInjFResultTy =
-  [ ("mult", TyFloat), ("plus", TyFloat), ("neg", TyFloat), ("exp", TyFloat)
-  , ("plusI", TyInt), ("negI", TyInt)
-  , ("gt", TyBool), ("lt", TyBool), ("eq", TyBool)
-  , ("and", TyBool), ("or", TyBool)
-  , ("not", TyBool)
-  , ("isNull", TyBool), ("isLeft", TyBool), ("isRight", TyBool)
+-- | @isLeft@/@isRight@ recover to 'TyBool' exactly when their argument is an
+-- 'Either' (or an as-yet-uncommitted position).
+tyOfTypedEitherTest :: TyEnv -> Expr -> Maybe Ty
+tyOfTypedEitherTest env x = tyOfTypedExprIn env x >>= \t -> case t of
+  TyEither _ _ -> Just TyBool
+  TyAny        -> Just TyBool
+  _            -> Nothing
+
+-- | Every InjF name appearing anywhere in an expression. Used by the
+-- @InjF catalog@ group to check that the generator never emits a name the
+-- compiler does not define -- the failure a derived catalog is supposed to
+-- make impossible, pinned rather than assumed.
+injFNamesOf :: Expr -> [String]
+injFNamesOf e =
+  [ n | InjF (Named n) _ <- [node e] ] ++ concatMap injFNamesOf (children e)
+
+-- | A catalog entry applied to the smallest inhabitant of each argument type.
+-- This is the generation table and the recovery table meeting in the middle:
+-- if 'tyOfTypedExpr' disagrees with 'injFResult' here, the shrinker has
+-- quietly stopped working on every draw using that entry.
+injFLeafApp :: InjFSig -> Maybe Expr
+injFLeafApp sig = injF (injFName sig) <$> mapM leafOf (injFArgs sig)
+  where leafOf t = case typedLeaves t of
+                     (l:_) -> Just l
+                     []    -> Nothing
+
+-- ---------------------------------------------------------------------------
+-- The InjF catalog: predefined-function productions derived from 'globalFEnv'.
+--
+-- Design: typed-program-generator-expansion, Axis 1 -- "InjF applications must
+-- draw arity and argument types from 'globalFEnv'/'FDecl' rather than being
+-- hard-coded, so the table stays correct as predefined functions change."
+-- Milestone M1 deferred this and extended the hand-written table instead; this
+-- is the deferred half.
+--
+-- Why it matters is rot, not breadth. A hand-maintained per-type table is a
+-- second copy of 'globalFEnv' with no mechanism keeping the two in step: a
+-- predefined function added to the compiler is simply never generated, and
+-- nothing goes red to say so. Deriving the productions removes the copy, and
+-- 'injFExcluded' makes the *deliberate* omissions a stated, testable list
+-- rather than the residue of what nobody got round to adding.
+--
+-- The catalog covers the first-order scalar fragment only. Everything with a
+-- container in its signature ('Cons', 'head', 'fst', 'left', 'isNull', ...)
+-- already has a dedicated production in 'genTypedRec', because building and
+-- eliminating structure needs the target type to drive the *shape*, not just
+-- the argument list -- see 'InjFNotScalar'.
+
+-- | One concrete scalar instantiation of a predefined function: the argument
+-- types it is applied at and the type it produces. A polymorphic declaration
+-- contributes one entry per instantiation ('plus' appears at both Float and
+-- Int), which is precisely the coverage a monomorphic table silently lost.
+data InjFSig = InjFSig
+  { injFName   :: String
+  , injFArgs   :: [Ty]
+  , injFResult :: Ty
+  } deriving (Show, Eq)
+
+-- | Why a name in 'globalFEnv' has no catalog entry. Every exclusion is
+-- derived from the declaration, never from a list of names, so it stays true
+-- as 'PredefinedFunctions' changes.
+data InjFExclusion
+  = InjFGuarded     -- ^ the forward direction carries an applicability test
+  | InjFNotScalar   -- ^ a container or function appears in the signature
+  | InjFPolyArity   -- ^ more than one type variable; no instantiation rule
+  deriving (Show, Eq, Ord)
+
+-- | Is this forward direction total on its argument types? @applicability@ is
+-- the declaration's own statement of that, and @IRConst (VBool True)@ is how
+-- it says "always" (api/src/PredefinedFunctions.md).
+--
+-- This is the safety condition for *generating* an application. @log@ and
+-- @sqrt@ are defined only on the positive reals, and a generator that emitted
+-- @log <any Float>@ would manufacture NaN densities at a rate that says
+-- nothing about the compiler. Reading the guard off the declaration keeps that
+-- judgment in one place: a predefined function that later gains an
+-- applicability test drops out of the catalog automatically, and one that
+-- loses a spurious test is picked up.
+injFUnconditional :: FDecl -> Bool
+injFUnconditional d = applicability d == IRConst (VBool True)
+
+-- | Flatten an arrow chain into (arguments, result).
+arrowParts :: RType -> ([RType], RType)
+arrowParts (TArrow a b) = let (as, r) = arrowParts b in (a:as, r)
+arrowParts t            = ([], t)
+
+-- | The scalar types a type variable may be instantiated at, given its class
+-- constraints. 'CNum' rules out Bool; an unconstrained variable (@eq@) admits
+-- all three. Only the constraints that actually occur in 'globalFEnv' are
+-- handled -- an unrecognised one yields no instantiations rather than a wrong
+-- one, so the name drops out of the catalog instead of being generated at a
+-- type it does not support.
+tyVarInstances :: [ClassConstraint] -> [Ty]
+tyVarInstances cs
+  | any isNum cs      = [TyFloat, TyInt]
+  | any isDiscrete cs = [TyInt, TyBool]
+  | any unhandled cs  = []
+  | otherwise         = [TyFloat, TyInt, TyBool]
+  where
+    isNum      (CNum _)        = True
+    isNum      _               = False
+    isDiscrete (CDiscrete _)   = True
+    isDiscrete _               = False
+    unhandled  (CFractional _) = True
+    unhandled  _               = False
+
+-- | Every concrete scalar signature a declaration's contract admits, or the
+-- reason it admits none.
+injFSigsOf :: String -> FDecl -> Either InjFExclusion [InjFSig]
+injFSigsOf name d
+  | not (injFUnconditional d) = Left InjFGuarded
+  | otherwise = case tvs of
+      []   -> scalarSig []
+      [tv] -> case concatMap (\t -> either (const []) id (scalarSig [(tv, t)]))
+                             (tyVarInstances cs) of
+                [] -> Left InjFNotScalar
+                ss -> Right ss
+      _    -> Left InjFPolyArity
+  where
+    Forall tvs cs body = contract d
+    scalarSig subst =
+      let (as, r) = arrowParts (substRType subst body)
+      in case (mapM rTypeToTy as, rTypeToTy r) of
+           (Just argTys, Just resTy)
+             -- Scalar in *every* position, not merely convertible. A
+             -- container anywhere means the target type has to drive the
+             -- shape rather than just the argument list -- @Cons@ needs an
+             -- element type, @head@ needs a list to eliminate -- and
+             -- 'genTypedRec' already owns those productions, drawing the
+             -- element type from 'genTy' rather than from the three scalars.
+             -- Admitting them here would double-cover them and narrow them at
+             -- the same time.
+             | not (null argTys)
+             , all isScalarTy argTys
+             , isScalarTy resTy -> Right [InjFSig name argTys resTy]
+           _ -> Left InjFNotScalar
+
+-- | The three types with no internal structure.
+isScalarTy :: Ty -> Bool
+isScalarTy TyFloat = True
+isScalarTy TyInt   = True
+isScalarTy TyBool  = True
+isScalarTy _       = False
+
+-- | Substitute concrete scalar types for type variables in a contract.
+substRType :: [(TVarR, Ty)] -> RType -> RType
+substRType sub (TVarR v)    = maybe (TVarR v) tyToRType (lookup v sub)
+substRType sub (TArrow a b) = TArrow (substRType sub a) (substRType sub b)
+substRType sub (Tuple a b)  = Tuple (substRType sub a) (substRType sub b)
+substRType sub (TEither a b)= TEither (substRType sub a) (substRType sub b)
+substRType sub (ListOf a)   = ListOf (substRType sub a)
+substRType _   t            = t
+
+-- | Every scalar InjF application the typed generator may emit, derived from
+-- the compiler's own function environment. Called with no ADTs: user ADT
+-- constructors enter 'globalFEnv' per declaration, and the typed generator
+-- declares none (that is milestone M4).
+injFCatalog :: [InjFSig]
+injFCatalog =
+  [ sig
+  | (name, FPair fwd _) <- globalFEnv []
+  , sig <- either (const []) id (injFSigsOf name fwd)
   ]
+
+-- | The names 'globalFEnv' offers that the catalog deliberately does not, each
+-- with the reason read off its declaration. Pinned by the @InjF catalog@ test
+-- group: adding a predefined function moves it into one of these buckets or
+-- into the catalog, and either way the pinned partition changes and goes red
+-- until someone has decided which it should be.
+injFExcluded :: [(String, InjFExclusion)]
+injFExcluded =
+  [ (name, why)
+  | (name, FPair fwd _) <- globalFEnv []
+  , Left why <- [injFSigsOf name fwd]
+  ]
+
+-- | Catalog entries producing a given scalar target type.
+injFCatalogFor :: Ty -> [InjFSig]
+injFCatalogFor ty = [ s | s <- injFCatalog, injFResult s == ty ]
 
 -- | Least upper bound of two recovered types: 'TyAny' is the unknown that
 -- either side may fill in, and two concrete types join only if they are equal

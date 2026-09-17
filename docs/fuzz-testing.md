@@ -214,6 +214,49 @@ The interpreter substitutes a mock for every declared neural network
 (`MockNN.hs`); `(2, [logit0, ...])` (a verbatim logit vector) is the only
 deterministic mode, used to pin exact densities in `.tst` files.
 
+## The InjF catalog
+
+The typed generator does not keep its own list of predefined functions. The
+scalar InjF productions are *derived* from the compiler's `globalFEnv`
+(`injFCatalog` in `test/ArbitrarySPLL.hs`), which is the design's Axis 1
+requirement and what milestone M1 deferred.
+
+The reason is drift, not breadth. A hand-maintained per-type table is a second
+copy of `globalFEnv` with nothing keeping the two in step, and the failure is
+silent: a predefined function added to the compiler is simply never generated,
+and the run stays green. The table it replaced had in fact drifted — it never
+emitted `double`, `sq`, `recip` or `max`, never compared `Int`s, and never used
+`eq` at all, none of which was a decision anyone took.
+
+A declaration enters the catalog when its *forward* direction is total on its
+argument types — `applicability` is `IRConst (VBool True)`, the declaration's
+own statement of that — and every position in its contract is a scalar. The
+first condition is the safety one: `log` and `sqrt` are defined only on the
+positive reals, and generating them unguarded would manufacture NaN densities
+that say nothing about the compiler. Reading the guard off the declaration
+keeps that judgment in one place, so a function that later gains an
+applicability test drops out automatically.
+
+A polymorphic contract contributes one entry per instantiation, which is
+coverage a monomorphic table could not express: `plus` is generated at both
+`Float` and `Int`, `eq` at all three scalars.
+
+Everything with a container in its signature (`Cons`, `head`, `fst`, `left`,
+`isNull`, …) is excluded and keeps its dedicated production in `genTypedRec`,
+because those need the target type to drive the *shape* rather than just the
+argument list — and their element types come from `genTy`, which is wider than
+the three scalars the catalog would have offered.
+
+`tyOfTypedExpr` reads the same catalog backwards to recover an application's
+result type. That is not an optimization: generation and recovery must agree,
+or the shrinker silently declines to shrink the shapes they disagree on, and
+counterexamples come back full-size with nothing going red. The `InjF catalog`
+test group (default suite, 7 tests) pins the agreement, pins the partition of
+`globalFEnv` into generated and excluded — each exclusion carrying its derived
+reason — and checks that no draw ever names a function the compiler does not
+define. Adding a predefined function changes that partition and fails the
+group until someone has decided which bucket it belongs in.
+
 ## The depth knob (`NEST_FUZZ_SCALE`)
 
 Structural size and case count are the two dials that decide how much program
