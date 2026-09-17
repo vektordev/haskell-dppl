@@ -1,0 +1,19 @@
+-- Task categorical-product-ov-fusion, the negative case: an agreement whose
+-- two operands are NOT independent. `b` is derived from `a`, so the two share
+-- an enumerated latent and p(a == b) is emphatically not sum_k P_a(k)*P_b(k) --
+-- multiplying the two marginals would treat one draw as two.
+--
+-- The fusion must decline here and leave the joint enumeration in place. That
+-- refusal is the decomposability gate (`latentVerdicts`); this program is the
+-- corpus canary for it, and TestInternals additionally asserts that no
+-- elementwise product is emitted for it.
+--
+-- Chosen so a wrong answer is loud rather than subtle: `a + 1` can never equal
+-- `a`, so the agreement is impossible and every `Right` query is a hard zero,
+-- while a fusion that fired anyway would multiply two overlapping marginals
+-- and report a positive mass.
+neural camNN :: (Symbol -> Int) of [0, 1, 2]
+main img =
+  let a = camNN img in
+  let b = a + 1 in
+  if a == b then right a else left ()

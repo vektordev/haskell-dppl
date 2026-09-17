@@ -1328,6 +1328,28 @@ batchedExpr env (IRBuiltin (BReduce op 0) [t]) =
   batchedReduceOp op ++ "(" ++ batchedExpr env t ++ ")"
 batchedExpr env (IRBuiltin (BIndex 0) [t, k]) =
   "tensor_index(" ++ batchedExpr env t ++ ", " ++ batchedExpr env k ++ ")"
+-- Elementwise zip (task categorical-product-ov-fusion). A batched "tensor" is
+-- a Python list of [B] tensors, so this is a comprehension over 'zip' and each
+-- pair combines with the ordinary batched binary operator -- which broadcasts
+-- over the batch axis by itself.
+--
+-- The loop names are fixed rather than generated: a Python 3 comprehension has
+-- its own scope, so a nested 'BZip' (the agreement fusion emits one) shadows
+-- safely instead of leaking.
+--
+-- Restricted to the arithmetic operands, which is the whole set the fusion
+-- emits. The rest are refused by name rather than routed through 'batchedOp':
+-- 'OpDiv' and the comparisons have bespoke gradient-safe lowerings in the
+-- scalar 'IROp' cases above ('safe_div', 'isclose', mask logic), and silently
+-- picking the raw operator here would reintroduce exactly the NaN-gradient
+-- bug those exist to prevent.
+batchedExpr env (IRBuiltin (BZip op) [a, b])
+  | op `elem` [OpPlus, OpMult, OpSub] =
+      "[(_za " ++ batchedOp op ++ " _zb) for _za, _zb in zip("
+        ++ batchedExpr env a ++ ", " ++ batchedExpr env b ++ ")]"
+  | otherwise = error ("batched PyTorch codegen: BZip " ++ show op ++ " is not supported; "
+                       ++ "only the arithmetic operands (OpPlus, OpMult, OpSub) have a "
+                       ++ "gradient-safe elementwise lowering.")
 batchedExpr _ (IRBuiltin (BReduce _ ax) _) = error (batchedAxisUnsupported "BReduce" ax)
 batchedExpr _ (IRBuiltin (BIndex ax) _) = error (batchedAxisUnsupported "BIndex" ax)
 batchedExpr _ e@(IRBuiltin b args) =

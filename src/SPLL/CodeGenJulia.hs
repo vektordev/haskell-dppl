@@ -413,6 +413,14 @@ generateExpression (IRBuiltin (BIndex 0) [t, k]) = do
     kk <- generateExpression k
     return $ "(" ++ tt ++ ")[" ++ kk ++ " + 1]"
 generateExpression (IRBuiltin (BIndex ax) _) = error (juliaAxisUnsupported "BIndex" ax)
+-- Elementwise zip of two equal-length Vectors (task
+-- categorical-product-ov-fusion). Julia spells this as a broadcast, which is
+-- both the idiomatic form and the vectorized one -- unlike the Python
+-- comprehension, it needs no loop variables and so cannot shadow anything.
+generateExpression (IRBuiltin (BZip op) [a, b]) = do
+    aa <- generateExpression a
+    bb <- generateExpression b
+    return $ "((" ++ aa ++ ") ." ++ juliaOps op ++ " (" ++ bb ++ "))"
 generateExpression (IRError e) =
     return $ "throw(\"" ++ escapeStr e ++ "\")"
 generateExpression (IRConformsTo t x) = do
