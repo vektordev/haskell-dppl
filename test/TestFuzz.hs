@@ -44,7 +44,7 @@
 -- prob function), but doing so needs many forward samples per case, chosen
 -- dynamically from the density at the query point (see its docs).
 module TestFuzz (fuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
-                 neuralGeneratorTests) where
+                 neuralGeneratorTests, fuzzScalingTests) where
 
 import Test.QuickCheck hiding (sample)
 import Test.Tasty (TestTree, testGroup)
@@ -53,6 +53,9 @@ import Control.Exception (try, evaluate, throwIO, fromException, SomeException, 
 import Control.Monad (replicateM)
 import Control.Monad.Random (evalRandIO)
 import System.Timeout (timeout)
+import System.Environment (lookupEnv)
+import System.IO.Unsafe (unsafePerformIO)
+import Text.Read (readMaybe)
 import Data.Maybe (isJust)
 import Data.Number.Erf (erf)
 
@@ -215,8 +218,78 @@ probDim _ = Nothing
 -- non-terminating draw (filed as its own item, not fixed here) rather than
 -- merely a slow one, which is exactly the "never terminates" signal this
 -- comment already commits to treating as a real failure.
+-- ---------------------------------------------------------------------------
+-- The depth knob (design typed-program-generator-expansion, Axis 4).
+--
+-- Structural size and case count are the two dials that decide how much
+-- program space a run actually visits, and before this they moved
+-- independently: 'fuzzSize' was a source constant (an edit, a rebuild) while
+-- the count was a command-line flag ('stack test --ta \'--quickcheck-tests
+-- N\''). "Same code, shallow in CI, deep nightly" needed both turned
+-- together, so a cron could not express it in one switch.
+--
+-- 'NEST_FUZZ_SCALE' is that switch: a positive multiplier, default 1,
+-- applied to the structural size, to every property's success count, and
+-- (upwards only, see 'perCaseBudgetMicros') to the per-case wall-clock
+-- budget. It reads the environment once through 'unsafePerformIO' because
+-- the things it feeds -- 'resize', 'withMaxSuccess' -- are pure and are
+-- evaluated while tasty builds the tree, before any property runs.
+--
+-- It deliberately scales *down* as well as up, which is not what Axis 4
+-- originally asked for. The Slow \'Fuzz\' group does not currently complete on
+-- this machine (see docs\/fuzz-testing.md): the draws that hang are the large
+-- structured ones, so @NEST_FUZZ_SCALE=0.5@ is the mechanism for getting a
+-- verdict out of the already-written oracles while the underlying bugs are
+-- drained, rather than having no run at all.
+fuzzScaleEnvVar :: String
+fuzzScaleEnvVar = "NEST_FUZZ_SCALE"
+
+-- | The unscaled structural size. See 'fuzzSize'.
+defaultFuzzSize :: Int
+defaultFuzzSize = 12
+
+-- | The unscaled per-case budget. See 'perCaseBudgetMicros'.
+defaultPerCaseBudgetMicros :: Int
+defaultPerCaseBudgetMicros = 5 * 1000 * 1000
+
+-- | The scaling law, factored out so the default suite can pin it without an
+-- environment. Never returns less than 1: a scale small enough to round a
+-- count or a size to zero must still run one case at the smallest size, since
+-- a silently empty property is indistinguishable from a passing one.
+scaleFuzz :: Double -> Int -> Int
+scaleFuzz s n = max 1 (round (fromIntegral n * s))
+
+-- | Reading of 'fuzzScaleEnvVar'. Anything that is not a positive, finite
+-- number -- unset, empty, unparseable, zero, negative, NaN, infinity --
+-- falls back to 1 rather than failing the run: this is a convenience dial on
+-- a test suite, and a typo in a cron line should leave the suite doing its
+-- ordinary job, not report a fake regression.
+parseFuzzScale :: Maybe String -> Double
+parseFuzzScale ms = case ms >>= readMaybe of
+  Just d | d > 0, not (isNaN d), not (isInfinite d) -> d
+  _                                                 -> 1
+
+{-# NOINLINE fuzzScale #-}
+fuzzScale :: Double
+fuzzScale = parseFuzzScale (unsafePerformIO (lookupEnv fuzzScaleEnvVar))
+
+-- | Scale a property's success count. Every @withMaxSuccess@ in this module
+-- goes through this, so one switch moves the whole module's case budget.
+fuzzCases :: Int -> Int
+fuzzCases = scaleFuzz fuzzScale
+
+-- | The knob's effective setting, for the coverage property's own output.
+fuzzScaleLabel :: String
+fuzzScaleLabel = show fuzzScale ++ " (size " ++ show fuzzSize ++ ")"
+
+-- The constant itself is 'defaultPerCaseBudgetMicros'; the knob scales it
+-- *upwards only*. A deeper run draws bigger programs and needs the room, but
+-- a shallower one must not have its budget shrunk with it: the budget exists
+-- to tell a hang from a slow draw, and a scaled-down budget would start
+-- reporting ordinary draws as hangs, which is the false failure the 1s-to-5s
+-- history above already paid for once.
 perCaseBudgetMicros :: Int
-perCaseBudgetMicros = 5 * 1000 * 1000
+perCaseBudgetMicros = scaleFuzz (max 1 fuzzScale) defaultPerCaseBudgetMicros
 
 -- | QuickCheck's default size schedule grows 0..~99 across a property's
 -- successes; left unbounded, later draws produce deeply nested expressions
@@ -226,8 +299,9 @@ perCaseBudgetMicros = 5 * 1000 * 1000
 -- actual non-termination bug. 'withinBudget' is the safety net for real
 -- hangs; capping structural size keeps ordinary draws fast so a whole
 -- property doesn't spend its entire run on a handful of huge programs.
+-- Scaled by 'fuzzScaleEnvVar'; the unscaled value is 'defaultFuzzSize'.
 fuzzSize :: Int
-fuzzSize = 12
+fuzzSize = scaleFuzz fuzzScale defaultFuzzSize
 
 withinBudget :: IO Property -> IO Property
 withinBudget = withinBudgetScaled 1
@@ -253,7 +327,7 @@ withinBudgetScaled factor act = do
 -- and queries its own probability, exercising the generate/probability code
 -- paths too, not just the compile pipeline itself.
 prop_Fuzz_CompileNeverCrashes :: Property
-prop_Fuzz_CompileNeverCrashes = withMaxSuccess 40 $ forAll (resize fuzzSize genRawFuzzProgram) $ \p -> ioProperty $ withinBudget $ do
+prop_Fuzz_CompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAll (resize fuzzSize genRawFuzzProgram) $ \p -> ioProperty $ withinBudget $ do
   compiled <- evaluate (forceShow (compile defaultCompilerConfig p))
   case compiled of
     Left _ -> return $ property True
@@ -265,7 +339,7 @@ prop_Fuzz_CompileNeverCrashes = withMaxSuccess 40 $ forAll (resize fuzzSize genR
 -- | Well-typed scalar programs: a stronger, unguarded crash-freedom check
 -- (see module header for why this differs from the invariant properties).
 prop_Fuzz_TypedCompileNeverCrashes :: Property
-prop_Fuzz_TypedCompileNeverCrashes = withMaxSuccess 40 $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
+prop_Fuzz_TypedCompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
   compiled <- evaluate (forceShow (compile defaultCompilerConfig p))
   case compiled of
     Left _ -> return $ property True
@@ -297,7 +371,7 @@ prop_Fuzz_TypedCompileNeverCrashes = withMaxSuccess 40 $ forAllShrink (resize fu
 -- properties below it never draws a sample or calls 'runProbC', so 3000
 -- draws is affordable at this module's per-case budget.
 prop_Fuzz_ProbNeverGenerateBacked :: Property
-prop_Fuzz_ProbNeverGenerateBacked = withMaxSuccess 3000 $
+prop_Fuzz_ProbNeverGenerateBacked = withMaxSuccess (fuzzCases 3000) $
   forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
     r <- trySync (evaluate (forceShow (compile defaultCompilerConfig p)))
     return $ case r of
@@ -313,7 +387,7 @@ prop_Fuzz_ProbNeverGenerateBacked = withMaxSuccess 3000 $
 -- doesn't, either the generator or the validator disagrees with the type
 -- system about what's well-typed.
 prop_Fuzz_TypedProgramsValidate :: Property
-prop_Fuzz_TypedProgramsValidate = withMaxSuccess 200 $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p ->
+prop_Fuzz_TypedProgramsValidate = withMaxSuccess (fuzzCases 200) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p ->
   case validateProgram p of
     Right _ -> property True
     Left err -> counterexample ("well-typed generated program failed validation: " ++ err) False
@@ -324,7 +398,7 @@ prop_Fuzz_TypedProgramsValidate = withMaxSuccess 200 $ forAllShrink (resize fuzz
 -- some currently hit unsupported IR shapes, caught by
 -- 'prop_Fuzz_TypedCompileNeverCrashes' instead -- both are discarded here).
 prop_Fuzz_MarginalAnyIsOne :: Property
-prop_Fuzz_MarginalAnyIsOne = withMaxSuccess 40 $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
+prop_Fuzz_MarginalAnyIsOne = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
   compiled <- compileSafe defaultCompilerConfig p
   case compiled >>= \irEnv -> irProb p irEnv VAny of
     Nothing -> return discardVacuous
@@ -337,7 +411,7 @@ prop_Fuzz_MarginalAnyIsOne = withMaxSuccess 40 $ forAllShrink (resize fuzzSize g
 -- mass/density everywhere; a negative result means the change-of-variables
 -- or mixture-combination arithmetic somewhere in IRCompiler has a sign bug).
 prop_Fuzz_ProbabilityNeverNegative :: Property
-prop_Fuzz_ProbabilityNeverNegative = withMaxSuccess 40 $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
+prop_Fuzz_ProbabilityNeverNegative = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
   compiled <- compileSafe defaultCompilerConfig p
   case compiled of
     Nothing -> return discardVacuous
@@ -352,7 +426,7 @@ prop_Fuzz_ProbabilityNeverNegative = withMaxSuccess 40 $ forAllShrink (resize fu
 -- | topK with threshold 0 prunes nothing, so it must reproduce exact
 -- inference exactly, at a sample point drawn from the program itself.
 prop_Fuzz_TopKZeroMatchesExact :: Property
-prop_Fuzz_TopKZeroMatchesExact = withMaxSuccess 40 $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
+prop_Fuzz_TopKZeroMatchesExact = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
   exact <- compileSafe defaultCompilerConfig p
   topK <- compileSafe (defaultCompilerConfig { topKThreshold = Just 0.0 }) p
   case (exact, topK) of
@@ -370,7 +444,7 @@ prop_Fuzz_TopKZeroMatchesExact = withMaxSuccess 40 $ forAllShrink (resize fuzzSi
 -- | Pruning can only zero out branches, never inflate probability above the
 -- exact value, at a sample point drawn from the program itself.
 prop_Fuzz_TopKNeverInflates :: Property
-prop_Fuzz_TopKNeverInflates = withMaxSuccess 40 $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
+prop_Fuzz_TopKNeverInflates = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
   exact <- compileSafe defaultCompilerConfig p
   topK <- compileSafe (defaultCompilerConfig { topKThreshold = Just 0.1 }) p
   case (exact, topK) of
@@ -392,7 +466,7 @@ prop_Fuzz_TopKNeverInflates = withMaxSuccess 40 $ forAllShrink (resize fuzzSize 
 -- | Enabling branch counting must not alter the probability value, only add
 -- a third result component, at a sample point drawn from the program itself.
 prop_Fuzz_BranchCountingDoesNotChangeProbability :: Property
-prop_Fuzz_BranchCountingDoesNotChangeProbability = withMaxSuccess 40 $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
+prop_Fuzz_BranchCountingDoesNotChangeProbability = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
   def <- compileSafe defaultCompilerConfig p
   bc <- compileSafe (defaultCompilerConfig { countBranches = True }) p
   case (def, bc) of
@@ -433,7 +507,7 @@ prop_Fuzz_MixtureFollowsCombinationRules =
   -- Occasional draws still exceed it and are reported as failures per this
   -- module's convention; observed failures here have been budget overruns, not
   -- rule violations, so read the counterexample before believing the latter.
-  withMaxSuccess 25 $ forAll genMixturePair $ \(exprA, exprB, q) -> ioProperty $ withinBudgetScaled 10 $ do
+  withMaxSuccess (fuzzCases 25) $ forAll genMixturePair $ \(exprA, exprB, q) -> ioProperty $ withinBudgetScaled 10 $ do
     let progA = Program [("main", exprA)] [] [] []
         progB = Program [("main", exprB)] [] [] []
         progM = Program [("main", ifThenElse (bernoulli q) exprA exprB)] [] [] []
@@ -537,7 +611,7 @@ shrinkNeuralTwin (lazyP, _) =
   [ (l, m) | l <- shrinkTypedProgram lazyP, Just m <- [neuralTwin l] ]
 
 prop_Fuzz_NeuralMaterializedTwinAgrees :: Property
-prop_Fuzz_NeuralMaterializedTwinAgrees = withMaxSuccess 20 $
+prop_Fuzz_NeuralMaterializedTwinAgrees = withMaxSuccess (fuzzCases 20) $
   forAllShrink (resize twinSize genNeuralTwinProgram) shrinkNeuralTwin $ \(lazyP, matP) -> ioProperty $ withinBudget $ do
     lazyE <- compileSafe defaultCompilerConfig lazyP
     matE  <- compileSafe defaultCompilerConfig matP
@@ -774,7 +848,7 @@ isStructured :: Program -> Bool
 isStructured p = tyShapeLabel p `elem` ["tuple", "either", "list"]
 
 prop_Fuzz_GeneratorCoverage :: Property
-prop_Fuzz_GeneratorCoverage = withMaxSuccess 200 $
+prop_Fuzz_GeneratorCoverage = withMaxSuccess (fuzzCases 200) $
   -- Four times the per-case budget, because the guards inside 'summarizeDraw'
   -- are per-step: classification may spend one budget in the validator and
   -- another in 'compile', and the realized-pType axis re-runs inference for a
@@ -785,6 +859,11 @@ prop_Fuzz_GeneratorCoverage = withMaxSuccess 200 $
     let outcome = dsOutcome s
         depth   = dsDepth s
     return
+      -- What the knob was actually set to. Without this row a nightly run
+      -- deep enough to be worth reading cannot be told apart from a default
+      -- one in its own output, and the distribution rows below mean
+      -- different things at different sizes.
+      $ tabulate "fuzz scale"       [fuzzScaleLabel]
       $ tabulate "outcome"          [show outcome]
       $ tabulate "realized pType"   [dsPTypeLabel s]
       $ tabulate "target shape"     [dsShapeLabel s]
@@ -949,6 +1028,54 @@ neuralGeneratorTests = testGroup "Neural generator"
          .&&. map annOf (neurals matP)  === [Just MultiAuto]
   ]
   where annOf (_, _, a) = a
+
+-- ---------------------------------------------------------------------------
+-- The depth knob's contract (design typed-program-generator-expansion, Axis 4).
+--
+-- Default suite, beside 'Shrinker' and 'Error channels', and for the same
+-- reason: these are pure and instant, and the knob is upstream of every other
+-- property in this module. A knob that silently reads as 1 would turn a
+-- nightly deep run into an ordinary one and nothing would go red -- the run
+-- would simply pass, shallowly, and the whole point of having the switch would
+-- be lost without a symptom. 'parseFuzzScale' and 'scaleFuzz' are split out of
+-- 'fuzzScale' precisely so they can be pinned here without an environment.
+fuzzScalingTests :: TestTree
+fuzzScalingTests = testGroup "Fuzz scaling"
+  [ testProperty "an absent, empty or unparseable setting reads as 1" $ once $
+      conjoin [ counterexample (show inp) (parseFuzzScale inp === 1)
+              | inp <- [Nothing, Just "", Just "  ", Just "abc", Just "2x"] ]
+  , testProperty "a non-positive or non-finite setting reads as 1" $ once $
+      -- Zero and negatives would scale every count to the 'scaleFuzz' floor,
+      -- which is a silently near-empty suite; "1e400" parses as Infinity and
+      -- would make 'round' meaningless. All are typos, so all fall back.
+      conjoin [ counterexample (show inp) (parseFuzzScale inp === 1)
+              | inp <- [Just "0", Just "-1", Just "-0.5", Just "1e400"] ]
+  , testProperty "a positive setting is taken at face value" $ once $
+      conjoin [ counterexample inp (parseFuzzScale (Just inp) === want)
+              | (inp, want) <- [("1", 1), ("2", 2), ("0.5", 0.5), ("4.0", 4)] ]
+  , testProperty "scale 1 is the identity on the defaults" $ once $
+           scaleFuzz 1 defaultFuzzSize === defaultFuzzSize
+      .&&. scaleFuzz 1 defaultPerCaseBudgetMicros === defaultPerCaseBudgetMicros
+  , testProperty "no setting can scale a count away" $
+      -- The floor is the whole reason 'scaleFuzz' exists rather than a bare
+      -- multiplication: a property that runs zero cases reports as passing.
+      forAll (choose (0.001, 100)) $ \sc ->
+      forAll (choose (1, 5000)) $ \n ->
+        scaleFuzz sc n >= 1
+  , testProperty "scaling up never shrinks a count" $
+      forAll (choose (0.01, 50)) $ \a ->
+      forAll (choose (0.01, 50)) $ \b ->
+      forAll (choose (1, 5000)) $ \n ->
+        let (lo, hi) = (min a b, max a b)
+        in counterexample (show (lo, hi, n)) $ scaleFuzz lo n <= scaleFuzz hi n
+  , testProperty "the per-case budget never scales down" $
+      -- 'perCaseBudgetMicros' applies @max 1@ to the scale before scaling the
+      -- budget, so a shallow run keeps the full budget. Without this a
+      -- @NEST_FUZZ_SCALE=0.25@ run would start reporting ordinary draws as
+      -- hangs, which is a false failure rather than a finding.
+      forAll (choose (0.001, 50)) $ \sc ->
+        scaleFuzz (max 1 sc) defaultPerCaseBudgetMicros >= defaultPerCaseBudgetMicros
+  ]
 
 -- ---------------------------------------------------------------------------
 -- Error-channel regressions (task compiler-throws-instead-of-returning-left).
@@ -1140,8 +1267,9 @@ sampleHit _ _ _ = False
 -- ever reaching the timeout check -- observed directly while tuning this
 -- budget (a 30s cap OOM-killed the whole test process rather than cleanly
 -- failing one case).
+-- Scaled upwards only, for the same reason as 'perCaseBudgetMicros'.
 perCaseSuperSlowBudgetMicros :: Int
-perCaseSuperSlowBudgetMicros = 8 * 1000 * 1000
+perCaseSuperSlowBudgetMicros = scaleFuzz (max 1 fuzzScale) 8000000
 
 withinSuperSlowBudget :: IO Property -> IO Property
 withinSuperSlowBudget act = do
@@ -1333,7 +1461,7 @@ maxRetries = 4
 -- batch of forward samples sized to the hardest (lowest-density) point among
 -- them (see 'drawQueryPoints' / 'runSamplingCheck').
 fuzzSamplingMatchesPDF :: Property
-fuzzSamplingMatchesPDF = withMaxSuccess 20 $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinSuperSlowBudget $ do
+fuzzSamplingMatchesPDF = withMaxSuccess (fuzzCases 20) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinSuperSlowBudget $ do
   compiled <- compileSafe defaultCompilerConfig p
   case compiled of
     Nothing -> return discardVacuous
