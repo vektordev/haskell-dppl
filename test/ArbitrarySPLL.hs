@@ -8,7 +8,6 @@
 
 module ArbitrarySPLL (
   genExpr
-, genProg
 , genIdentifier
 , genValidIdentifier
 , Ty(..)
@@ -234,81 +233,6 @@ genNeuralDecl = do
 
 instance Arbitrary TypeInfo where
   arbitrary = return makeTypeInfo -- TODO: generates untyped programs for now.
-
-genProg :: Gen Program
-genProg = do
-  names <- varNames
-  genProgNames names
-
-varNames :: Gen [String]
-varNames = do
-  size <- getSize
-  let nNames = (size `div` 10) + 1
-  k <- choose (0,nNames)
-  vector k
-
-genExprNames :: [String] -> Gen Expr
-genExprNames names = sized (genExprNames' names)
-
-genExprNames' :: [String] -> Int -> Gen Expr
-genExprNames' varnames size = do
-  generator <- elements $ map snd (filter (\(sizeReq, _) -> sizeReq <= size) exprGens)
-  generator varnames size
-
-exprGens :: [(Int, [String] -> Int -> Gen Expr)]
--- ThetaI, greaterThan, and the Int-typed arithmetic InjFs (multI/plusI) were
--- each commented out of this list at some point with no recorded reason, and
--- their generators left behind unreferenced. The generators are gone now, so
--- re-enabling any of them means writing it again -- which is the honest state
--- of things: one of the four, mkGreaterThan, had already lost its definition
--- while its commented entry stayed.
-exprGens = [
-    (0, mkNormal),
-    (0, mkUniform),
-    (2, mkMultF),
-    (2, mkPlusF),
-    (3, mkConditional)
-  ]
-
-mkNormal :: [String] -> Int -> Gen Expr
-mkNormal _varnames _size = do
-  ti <- arbitrary
-  return $ Expr ti (Var "Normal")
-
-mkUniform :: [String] -> Int -> Gen Expr
-mkUniform _varnames _size = do
-  ti <- arbitrary
-  return $ Expr ti (Var "Uniform")
-
-mkMultF :: [String] -> Int -> Gen Expr
-mkMultF varnames size = do
-  t <- arbitrary
-  e1 <- genExprNames' varnames (size `div` 2)
-  e2 <- genExprNames' varnames (size `div` 2)
-  return (Expr t (InjF (Named "mult") [e1, e2]))
-
-mkPlusF :: [String] -> Int -> Gen Expr
-mkPlusF varnames size = do
-  t <- arbitrary
-  e1 <- genExprNames' varnames (size `div` 2)
-  e2 <- genExprNames' varnames (size `div` 2)
-  return (Expr t (InjF (Named "plus") [e1, e2]))
-
-mkConditional :: [String] -> Int -> Gen Expr
-mkConditional varnames size = do
-  t <- arbitrary
-  e1 <- genExprNames' varnames (size `div` 3)
-  e2 <- genExprNames' varnames (size `div` 3)
-  e3 <- genExprNames' varnames (size `div` 3)
-  return (Expr t (IfThenElse e1 e2 e3))
-
-genProgNames ::  [String] -> Gen Program
-genProgNames names = do
-  def_names <- choose (0, length names)
-  defs <- mapM (\name -> do
-    expr <- genExprNames names
-    return (name, expr)) (take def_names names)
-  return (Program defs [] [] [])
 
 -- ---------------------------------------------------------------------------
 -- Well-typed-by-construction generator (scalar fragment: Float/Int/Bool).
