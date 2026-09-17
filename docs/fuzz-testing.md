@@ -84,11 +84,20 @@ which is the first *minimized* repro for that item (it was recorded there as
 "large program, re-derive via replay").
 
 **The group now completes, because each property carries a whole-property
-deadline as well as a per-case one** (see "Two budgets" below). The underlying
-bug is untouched — the draws still hang, and the properties reporting it are
-still red — but a run now ends and prints what it found instead of having to be
-abandoned, so a red `Fuzz` result is readable again. Running at a reduced
-`NEST_FUZZ_SCALE` remains the way to get *more* draws through in the same time.
+deadline as well as a per-case one** (see "Two budgets" below). Measured at
+scale 1: the whole group finishes in **123s** (9 of 23 failing), and
+`prop_Fuzz_NeuralMaterializedTwinAgrees` alone in **124s** — against a stall of
+over 25 minutes and a 40-minute abandonment for that one property. Four
+properties spend their deadline and say so by name on stderr
+(`TopKZeroMatchesExact`, `TopKNeverInflates`, `NeuralMaterializedTwinAgrees`,
+`ProbNeverGenerateBacked`); the group total is under the sum of their budgets
+because tasty runs them in parallel.
+
+The underlying bug is untouched — the draws still hang, and the properties
+reporting it are still red — but a run now ends and prints what it found instead
+of having to be killed, so a red `Fuzz` result is readable again. Running at a
+reduced `NEST_FUZZ_SCALE` remains the way to get *more* draws through in the
+same time; the deadline caps the clock, it does not buy coverage.
 
 The default suite is unaffected; per the design, findings are filed rather than
 fixed so that coverage work is not blocked behind bug triage.
