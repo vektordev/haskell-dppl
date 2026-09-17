@@ -170,6 +170,46 @@ irProb p compiled sample
   | not (hasProbFun compiled) = Nothing
   | otherwise = either (const Nothing) Just (runProbC p compiled (fuzzArgs p) sample)
 
+-- | Draw a sample from @genEnv@ and force the probability computation @k@ at
+-- it, both inside the caller's per-case 'timeout' and behind a
+-- synchronous-exception guard. 'Nothing' means "this draw had nothing to
+-- check"; the caller discards on it.
+--
+-- Both halves are load-bearing.
+--
+-- *Forcing.* 'irProb' is pure, so a property that merely returns
+-- @return $ case irProb ... of ...@ hands QuickCheck an unforced thunk.
+-- 'withinBudgetScaled' wraps 'timeout' around the 'IO Property', and
+-- 'ioProperty''s rose tree is forced by the driver *after* that 'timeout' has
+-- already returned -- so the whole IR interpretation would run outside the
+-- per-case budget, i.e. unbounded, since the whole-property deadline is only
+-- consulted at the entry of the *next* case, which a hang never reaches. Only
+-- 'compileSafe' would actually be bounded. Forcing here puts 'runProbC' back
+-- under the budget. (The same reasoning is written out at
+-- 'prop_Fuzz_NeuralMaterializedTwinAgrees', which had it first.)
+--
+-- *Discarding.* An exception raised while computing the probability -- today
+-- that is @head@ on an empty list, item 1 of @fuzz-structured-type-bugs@ --
+-- is discarded rather than failed, deliberately and consistently with the
+-- twin oracle. Crash-freedom of the compile/sample/probability path is
+-- 'prop_Fuzz_TypedCompileNeverCrashes'' subject: it draws from the same
+-- generator at the same size and calls 'runProbC' on its own sample, so the
+-- bug is already reported, loudly and in one place. These four properties are
+-- about what the inference engines *compute* on programs that got that far --
+-- which is why they already use 'compileSafe', whose whole job is to swallow
+-- a compile-time crash for exactly this reason. Failing here as well would
+-- redden five properties for one bug while hiding the invariant each exists
+-- to check behind it, which is the masking the twin oracle's guard was
+-- introduced to undo.
+forcedProbAt :: Show a => Program -> IREnv -> (IRValue -> a) -> IO (Maybe (IRValue, a))
+forcedProbAt p genEnv k = do
+  drawn <- trySync $ do
+    sample <- drawSample p genEnv
+    evaluate (forceShow (sample, k sample))
+  return $ case drawn of
+    Left _  -> Nothing
+    Right r -> Just r
+
 hasIntegFun :: IREnv -> Bool
 hasIntegFun compiled = isJust (integFun (lookupIREnv "main" compiled))
 
@@ -268,14 +308,31 @@ defaultPerCaseBudgetMicros = 5 * 1000 * 1000
 scaleFuzz :: Double -> Int -> Int
 scaleFuzz s n = max 1 (round (fromIntegral n * s))
 
+-- | The largest setting that is taken at face value; anything above it is
+-- clamped to it. Rejecting-to-1 would be wrong here (a deliberate 5000 is a
+-- typo for nothing, and silently running shallow is the failure mode the knob
+-- exists to avoid), but accepting an arbitrary Double is worse than it looks:
+-- 'scaleFuzz' rounds @fromIntegral n * s@ into an 'Int', so
+-- @NEST_FUZZ_SCALE=1e30@ overflows, and 'scaleFuzz''s @max 1@ catches a
+-- negative result but not a wrapped-positive one. A wrapped-negative
+-- 'perCaseBudgetMicros' is the sharp end: @System.Timeout.timeout n@ with
+-- @n < 0@ never fires, so the per-case bound would be *disabled* by a typo --
+-- exactly the "leave the suite doing its ordinary job" promise inverted.
+-- 1000 is far past any run anyone would wait for (120000s of property budget)
+-- and keeps every product here inside 'Int'.
+maxFuzzScale :: Double
+maxFuzzScale = 1000
+
 -- | Reading of 'fuzzScaleEnvVar'. Anything that is not a positive, finite
 -- number -- unset, empty, unparseable, zero, negative, NaN, infinity --
 -- falls back to 1 rather than failing the run: this is a convenience dial on
 -- a test suite, and a typo in a cron line should leave the suite doing its
--- ordinary job, not report a fake regression.
+-- ordinary job, not report a fake regression. An absurdly large finite
+-- setting is clamped to 'maxFuzzScale' rather than dropped, for the reasons
+-- given there.
 parseFuzzScale :: Maybe String -> Double
 parseFuzzScale ms = case ms >>= readMaybe of
-  Just d | d > 0, not (isNaN d), not (isInfinite d) -> d
+  Just d | d > 0, not (isNaN d), not (isInfinite d) -> min maxFuzzScale d
   _                                                 -> 1
 
 {-# NOINLINE fuzzScale #-}
@@ -361,6 +418,17 @@ propertyBudgetMicros = scaleFuzz (max 1 fuzzScale) defaultPropertyBudgetMicros
 -- | Deadline per property name, in monotonic microseconds. An assoc list
 -- rather than a 'Map': there are a dozen properties and this is read once per
 -- case.
+--
+-- Process-global and never reset, which is a real constraint on the harness
+-- rather than an oversight: this table (and 'exhaustionAnnounced') assumes the
+-- test tree is executed at most *once* per process. Run it twice in one
+-- process -- @tasty-rerun@, a second 'defaultMain', a future retry option --
+-- and every deadline is already in the past on the second pass, so every case
+-- of every fuzz property is discarded and the group reports a uniform "gave
+-- up" having executed nothing. Nothing in 'Spec.hs' does that today. Anything
+-- that starts to must reset both 'IORef's between passes ('writeIORef' to
+-- @[]@) and should key them by pass rather than by name alone if the passes
+-- are meant to be independent.
 {-# NOINLINE propertyDeadlines #-}
 propertyDeadlines :: IORef [(String, Word64)]
 propertyDeadlines = unsafePerformIO (newIORef [])
@@ -510,9 +578,17 @@ prop_Fuzz_TypedProgramsValidate = withMaxSuccess (fuzzCases 200) $ forAllShrink 
 prop_Fuzz_MarginalAnyIsOne :: Property
 prop_Fuzz_MarginalAnyIsOne = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget "prop_Fuzz_MarginalAnyIsOne" $ do
   compiled <- compileSafe defaultCompilerConfig p
-  case compiled >>= \irEnv -> irProb p irEnv VAny of
-    Nothing -> return discardVacuous
-    Just result -> return $ case probDim result of
+  -- Deep-forced here, inside the budget, and under the same
+  -- discard-on-exception policy as 'forcedProbAt' -- see its haddock for both
+  -- halves of the reasoning. Scrutinising the 'Maybe' alone would force
+  -- 'runProbC' only to WHNF, leaving the rest of the result -- and any crash
+  -- hiding in it -- to be forced by the QuickCheck driver after the per-case
+  -- 'timeout' has returned.
+  forced <- trySync (evaluate (forceShow (compiled >>= \irEnv -> irProb p irEnv VAny)))
+  return $ case forced of
+    Left _ -> discardVacuous
+    Right Nothing -> discardVacuous
+    Right (Just result) -> case probDim result of
       Just (pr, _) -> counterexample ("P(ANY) = " ++ show pr ++ ", expected ~1") (abs (pr - 1) < 1e-6)
       Nothing -> counterexample ("unexpected result shape: " ++ show result) False
 
@@ -526,10 +602,11 @@ prop_Fuzz_ProbabilityNeverNegative = withMaxSuccess (fuzzCases 40) $ forAllShrin
   case compiled of
     Nothing -> return discardVacuous
     Just irEnv -> do
-      sample <- drawSample p irEnv
-      return $ case irProb p irEnv sample of
+      drawn <- forcedProbAt p irEnv (irProb p irEnv)
+      return $ case drawn of
         Nothing -> discardVacuous
-        Just result -> case probDim result of
+        Just (_, Nothing) -> discardVacuous
+        Just (sample, Just result) -> case probDim result of
           Just (pr, _) -> counterexample ("P(" ++ show sample ++ ") = " ++ show pr ++ ", expected >= 0") (pr >= -1e-9)
           Nothing -> counterexample ("unexpected result shape: " ++ show result) False
 
@@ -541,14 +618,14 @@ prop_Fuzz_TopKZeroMatchesExact = withMaxSuccess (fuzzCases 40) $ forAllShrink (r
   topK <- compileSafe (defaultCompilerConfig { topKThreshold = Just 0.0 }) p
   case (exact, topK) of
     (Just exactEnv, Just topKEnv) -> do
-      sample <- drawSample p exactEnv
-      return $ case (irProb p exactEnv sample, irProb p topKEnv sample) of
-        (Just exactR, Just topKR) -> case (probDim exactR, probDim topKR) of
+      drawn <- forcedProbAt p exactEnv (\s -> (irProb p exactEnv s, irProb p topKEnv s))
+      return $ case drawn of
+        Just (_, (Just exactR, Just topKR)) -> case (probDim exactR, probDim topKR) of
           (Just (pe, de), Just (pt, dt)) ->
             counterexample ("exact=" ++ show (pe, de) ++ " topK0=" ++ show (pt, dt))
               (abs (pe - pt) < 1e-6 && abs (de - dt) < 1e-6)
           _ -> counterexample "unexpected result shapes" False
-        _ -> discardVacuous  -- one side lacks a prob function: not this property's concern
+        _ -> discardVacuous  -- one side lacks a prob function, or the draw raised
     _ -> return discardVacuous
 
 -- | Pruning can only zero out branches, never inflate probability above the
@@ -559,9 +636,9 @@ prop_Fuzz_TopKNeverInflates = withMaxSuccess (fuzzCases 40) $ forAllShrink (resi
   topK <- compileSafe (defaultCompilerConfig { topKThreshold = Just 0.1 }) p
   case (exact, topK) of
     (Just exactEnv, Just topKEnv) -> do
-      sample <- drawSample p exactEnv
-      return $ case (irProb p exactEnv sample, irProb p topKEnv sample) of
-        (Just exactR, Just topKR) -> case (probDim exactR, probDim topKR) of
+      drawn <- forcedProbAt p exactEnv (\s -> (irProb p exactEnv s, irProb p topKEnv s))
+      return $ case drawn of
+        Just (_, (Just exactR, Just topKR)) -> case (probDim exactR, probDim topKR) of
           -- Same rule as Spec's corpus 'topKNeverInflates': values compare
           -- only at equal dim; pruning drops mixture alternatives and the
           -- lowest dim wins, so an unequal pruned dim must be the higher one
@@ -581,9 +658,9 @@ prop_Fuzz_BranchCountingDoesNotChangeProbability = withMaxSuccess (fuzzCases 40)
   bc <- compileSafe (defaultCompilerConfig { countBranches = True }) p
   case (def, bc) of
     (Just defEnv, Just bcEnv) -> do
-      sample <- drawSample p defEnv
-      return $ case (irProb p defEnv sample, irProb p bcEnv sample) of
-        (Just defR, Just bcR) -> case (probDim defR, probDim bcR) of
+      drawn <- forcedProbAt p defEnv (\s -> (irProb p defEnv s, irProb p bcEnv s))
+      return $ case drawn of
+        Just (_, (Just defR, Just bcR)) -> case (probDim defR, probDim bcR) of
           (Just (pd, _), Just (pb, _)) ->
             counterexample ("default=" ++ show pd ++ " bc=" ++ show pb) (abs (pd - pb) < 1e-9)
           _ -> counterexample "unexpected result shapes" False
@@ -625,9 +702,16 @@ prop_Fuzz_MixtureFollowsCombinationRules =
     case envs of
       [Just envA, Just envB, Just envM]
         | all hasProbFun [envA, envB, envM] -> do
-            x <- drawSample progM envM
-            return $ case (runProbC progA envA [] x, runProbC progB envB [] x, runProbC progM envM [] x) of
-              (Right resA, Right resB, Right resM)
+            -- Forced and guarded by 'forcedProbAt' for the reasons given
+            -- there: the three 'runProbC' calls are pure, so returning them
+            -- inside an unforced 'case' would run all three IR
+            -- interpretations *after* the per-case 'timeout' had returned.
+            drawn <- forcedProbAt progM envM
+                       (\x -> ( runProbC progA envA [] x
+                               , runProbC progB envB [] x
+                               , runProbC progM envM [] x ))
+            return $ case drawn of
+              Just (x, (Right resA, Right resB, Right resM))
                 | Just (pA, dA) <- probDim resA
                 , Just (pB, dB) <- probDim resB
                 , Just (pM, dM) <- probDim resM
@@ -1172,14 +1256,20 @@ injFCatalogTests = testGroup "InjF catalog"
       -- 'PredefinedFunctions' changing under the generator.
       assertEqual "generated InjF names"
         [ "and", "double", "eq", "exp", "gt", "lt", "max", "mult", "multI"
-        , "neg", "negI", "not", "or", "plus", "plusI", "recip", "sq" ]
+        , "neg", "negI", "not", "or", "plus", "plusI", "sq" ]
         (sort (nub (map injFName injFCatalog)))
 
   , testCase "the exclusions are what we think they are, with reasons" $
-      -- 'InjFGuarded' is the one that matters for correctness: @log@ and
-      -- @sqrt@ are partial on their argument type, and generating them
-      -- unguarded would manufacture NaN densities that say nothing about the
-      -- compiler. The rest are shape, not safety -- 'genTypedRec' owns the
+      -- 'InjFGuarded' is the one that matters for correctness: @log@, @sqrt@
+      -- and @recip@ are partial on their argument type, and generating them
+      -- unguarded would manufacture NaN/Infinity densities that say nothing
+      -- about the compiler. @recip@ is the cautionary one: it was generated
+      -- until its forward declaration was corrected to state the @a /= 0@
+      -- domain it always had, and because @typedLeaves TyFloat@ is @0@, the
+      -- shrinker minimized any failing draw containing it *towards* @recip 0@
+      -- -- turning real counterexamples into Infinity artifacts, the exact
+      -- false-counterexample class the shrinker exists to prevent.
+      -- The rest are shape, not safety -- 'genTypedRec' owns the
       -- container productions because they need a target type to drive them.
       assertEqual "excluded InjF names and reasons"
         [ ("Cons", InjFNotScalar), ("TCons", InjFPolyArity)
@@ -1193,6 +1283,7 @@ injFCatalogTests = testGroup "InjF catalog"
         , ("left", InjFPolyArity), ("log", InjFGuarded)
         , ("map", InjFPolyArity), ("mapEither", InjFPolyArity)
         , ("mapLeft", InjFPolyArity)
+        , ("recip", InjFGuarded)
         , ("right", InjFPolyArity)
         , ("snd", InjFPolyArity), ("sqrt", InjFGuarded)
         , ("tail", InjFNotScalar) ]
@@ -1266,6 +1357,20 @@ fuzzScalingTests = testGroup "Fuzz scaling"
   , testProperty "a positive setting is taken at face value" $ once $
       conjoin [ counterexample inp (parseFuzzScale (Just inp) === want)
               | (inp, want) <- [("1", 1), ("2", 2), ("0.5", 0.5), ("4.0", 4)] ]
+  , testProperty "an absurd but finite setting is clamped, not taken" $ once $
+      -- Unclamped, 'scaleFuzz' would overflow 'Int' on these and could hand
+      -- 'timeout' a negative budget, which disables it outright -- a typo
+      -- would switch the per-case bound *off* rather than leave the suite
+      -- doing its ordinary job.
+      conjoin [ counterexample inp (parseFuzzScale (Just inp) === maxFuzzScale)
+              | inp <- ["1e30", "1e9", "1001", "1e300"] ]
+  , testProperty "the cap keeps every scaled budget a sane positive Int" $
+      forAll (choose (0.001, 1e300)) $ \raw ->
+        let sc = parseFuzzScale (Just (show (raw :: Double)))
+            budgets = [ scaleFuzz (max 1 sc) defaultPerCaseBudgetMicros
+                      , scaleFuzz (max 1 sc) defaultPropertyBudgetMicros ]
+        in counterexample (show (raw, sc, budgets)) $
+             sc <= maxFuzzScale && all (> 0) budgets
   , testProperty "scale 1 is the identity on the defaults" $ once $
            scaleFuzz 1 defaultFuzzSize === defaultFuzzSize
       .&&. scaleFuzz 1 defaultPerCaseBudgetMicros === defaultPerCaseBudgetMicros

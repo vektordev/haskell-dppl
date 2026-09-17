@@ -7,14 +7,18 @@ expected values. `genRawFuzzProgram`/`genRawFuzzExpr` cover the full AST
 space and are only useful for crash-freedom (almost every draw is
 ill-typed); `genTypedProgram`/`genTypedExpr` build well-typed programs
 over scalars, tuples, `Either` and lists (roughly half of all draws are
-structured) with `let`-bindings (about 65% of draws carry one), one draw in
-five declaring and reading a neural network, and drive the
+structured) with `let`-bindings (most draws carry one — see "how many draws
+carry a `let`" below, and read the figure the coverage property prints for the
+run in front of you rather than any number written down here), one draw in
+five to six declaring and reading a neural network, and drive the
 real invariants (programs validate, P(ANY)=1,
 probability is never negative, topK at threshold 0 reproduces exact
 inference and at a real threshold never inflates it, branch counting
 doesn't change the probability value, and mixtures follow the
-dimension-combination rules). Each property caps structural size and
-wraps each case in a wall-clock timeout. Since most draws end up with no
+dimension-combination rules). Each property caps structural size and wraps each
+case in a wall-clock timeout — and, since a QuickCheck property is a *lazy*
+value, each one that computes a probability must force that computation inside
+the timed action (`forcedProbAt`), or the bound covers only the compile. Since most draws end up with no
 probability function to check, every such branch returns `discardVacuous`
 rather than `property True`, so QuickCheck's own discard-ratio accounting
 reports this honestly instead of it being invisible inside an inflated
@@ -39,12 +43,19 @@ four report by `error`, which is what makes them crashes rather than refusals;
 the last one needs no `let` at all. Tracked as `fuzz-let-witness-bugs` in the
 internal-docs repo.
 
-Milestone M3 (neural declarations) is the same story again and sharper: **76%
-of neural draws make `compile` throw**, measured over 300, against 43% of typed
-draws overall. The dominant message is new -- a generate-backed fallback
-reported from *an enumerated conditional*, which is the plan/enumeration path's
-own variant of the guard M2 found on the ordinary path, at 58% of the neural
-crashes on its own. Two more are new and rarer: `unionMultiValues` reporting a
+Milestone M3 (neural declarations) is the same story again and sharper:
+**roughly three quarters of neural draws make `compile` throw**, against 43% of
+typed draws overall. The exact figure is *not* pinned, and the record disagrees
+with itself: this file said 76% over 300 draws, the design's own progress note
+says 73% and "222 of 300" (which is 74%), and an independent 200-draw run in
+the ninth shift saw 26 of 34 neural draws crash (76%, but n=34). Take "about
+three quarters" and re-measure if a number has to carry weight. The dominant
+message is new -- a generate-backed fallback reported from *an enumerated
+conditional*, which is the plan/enumeration path's own variant of the guard M2
+found on the ordinary path, and is the majority of the neural crashes on its
+own (recorded as 58% here and 68% in the design; neither was re-derived, and
+the coverage instrumentation does not break crashes down by message, so this
+one cannot be settled without a fresh instrumented run). Two more are new and rarer: `unionMultiValues` reporting a
 mismatch between an empty `MultiDiscretes` and a `MultiEither`, which is an
 internal invariant violation rather than a refusal, and a `toIRNormalParams`
 failure to extract Normal parameters from a `PNormal` expression. The rest are
@@ -52,10 +63,13 @@ the already-filed M2 messages, reached again because a neural draw's body is an
 ordinary generated expression and can contain a witness-`let` like any other.
 Tracked as `fuzz-neural-plan-bugs` in the internal-docs repo.
 
-**The Slow `Fuzz` group does not complete at the default size on this machine.**
-A full run stalls for over 25 minutes inside `prop_Fuzz_TopKNeverInflates`, and
+**Historical (superseded, kept because the diagnosis below is built on it):**
+before the whole-property deadline landed, the Slow `Fuzz` group did not
+complete at the default size on this machine. A full run stalled for over 25
+minutes inside `prop_Fuzz_TopKNeverInflates`, and
 `prop_Fuzz_NeuralMaterializedTwinAgrees` was abandoned after 40 minutes against
-a worst case of about 18 by its own per-case budget.
+a worst case of about 18 by its own per-case budget. The group completes today
+— see "The group now completes" below for the current measurement.
 
 **The earlier reading of that overrun — a hang `System.Timeout.timeout` cannot
 interrupt — is wrong, and the correction matters.** Run at
@@ -84,14 +98,21 @@ which is the first *minimized* repro for that item (it was recorded there as
 "large program, re-derive via replay").
 
 **The group now completes, because each property carries a whole-property
-deadline as well as a per-case one** (see "Two budgets" below). Measured at
-scale 1: the whole group finishes in **123s** (9 of 23 failing), and
-`prop_Fuzz_NeuralMaterializedTwinAgrees` alone in **124s** — against a stall of
-over 25 minutes and a 40-minute abandonment for that one property. Four
-properties spend their deadline and say so by name on stderr
-(`TopKZeroMatchesExact`, `TopKNeverInflates`, `NeuralMaterializedTwinAgrees`,
-`ProbNeverGenerateBacked`); the group total is under the sum of their budgets
-because tasty runs them in parallel.
+deadline as well as a per-case one** (see "Two budgets" below), and because
+every property that computes a probability now forces it inside the per-case
+timeout (`forcedProbAt`) rather than handing the driver a thunk. Measured at
+scale 1 over four runs in the ninth shift: the whole group finishes in
+**128–131s**, against a stall of over 25 minutes and a 40-minute abandonment
+for a single property before the deadline landed. Which properties are green
+and which spend their deadline **moves from run to run** — the draws are seeded
+differently and several properties sit near the 120s line — so read the run in
+front of you rather than a list written here. A typical run: 5 of 12 properties
+green, two (`TopKZeroMatchesExact`, `TopKNeverInflates`) announcing budget
+exhaustion by name on stderr, the rest reporting `did not terminate within
+5000000us` against a shrunk counterexample. The group total is well under the
+sum of the budgets because tasty runs the properties in parallel — which also
+means each property's *wall-clock* deadline is contended, and 120s of deadline
+does not buy 120s of one property's compute.
 
 The underlying bug is untouched — the draws still hang, and the properties
 reporting it are still red — but a run now ends and prints what it found instead
@@ -202,10 +223,27 @@ set-witness engine and from nowhere else.
 Measured at 200 draws when M-I landed: 100% compile, 35% reach a
 probability function, and the realized `pType` splits 65% `Bottom` / 23%
 `Integrate` / 9.5% `Deterministic` / 1.5% `PNormal` / 1% `PLogNormal`.
-After M2, over 500 draws: 71% carry a `let` (51% witness-shaped, 19%
-plain), the scalar/structured split is unchanged at 55/45, and the outcome
-split is 43% compile-crashed / 35% with a probability function / 17%
-without / 4% rejected. The `cover` bounds are set well below all of those and
+
+**How many draws carry a `let`** has been measured three times and come out
+differently each time, because the generator kept changing under it and because
+the runs differ in `n`:
+
+| When | n | witness / plain / none | carry a `let` |
+|---|---|---|---|
+| After M2 | 500 | 51 / 19 / 29 | 71% |
+| Sixth shift (catalog widened) | 400 | 55 / 25 / 20 | 80% |
+| Ninth shift (after `recip` left the catalog) | 200 | 52.5 / 17.5 / 30 | 70% |
+
+Read it as "most draws, roughly 70–80%", and take the exact split from the
+coverage property's own output for the run in front of you — that is what the
+instrumentation is for. Earlier versions of this file quoted 65% in one place
+and 71% in another, neither traceable to a run still reproducible.
+
+The ninth shift's 200-draw run also gives the current outcome split: 51.5%
+compile-crashed / 30% with a probability function / 15.5% without / 2%
+rejected / 1% timed out, with 73% of realized `pType`s `Integrate`. Compare
+M2's 43% / 35% / 17% / 4% — the crash rate has gone *up* as the generator
+widened, which is the instrumentation doing its job. The `cover` bounds are set well below all of those and
 are
 deliberately *not* wrapped in `checkCoverage`, so a miss prints
 "Only N% ..., but expected M%" as a warning rather than failing the run —
@@ -241,16 +279,32 @@ copy of `globalFEnv` with nothing keeping the two in step, and the failure is
 silent: a predefined function added to the compiler is simply never generated,
 and the run stays green. The table it replaced had in fact drifted — it never
 emitted `double`, `sq`, `recip` or `max`, never compared `Int`s, and never used
-`eq` at all, none of which was a decision anyone took.
+`eq` at all, none of which was a decision anyone took. (`recip` is excluded
+again today, but deliberately and by derivation — see below.)
 
-A declaration enters the catalog when its *forward* direction is total on its
-argument types — `applicability` is `IRConst (VBool True)`, the declaration's
-own statement of that — and every position in its contract is a scalar. The
-first condition is the safety one: `log` and `sqrt` are defined only on the
-positive reals, and generating them unguarded would manufacture NaN densities
-that say nothing about the compiler. Reading the guard off the declaration
-keeps that judgment in one place, so a function that later gains an
-applicability test drops out automatically.
+A declaration enters the catalog when its *forward* direction **claims** to be
+total on its argument types — `applicability` is `IRConst (VBool True)`, which
+is the declaration's own statement about its domain — and every position in its
+contract is a scalar. The first condition is the safety one: `log`, `sqrt` and
+`recip` are defined only on part of `Float`, and generating them unguarded
+would manufacture NaN/Infinity densities that say nothing about the compiler.
+Reading the guard off the declaration keeps that judgment in one place, so a
+function that later gains an applicability test drops out automatically.
+
+**What `applicability` guarantees is what the declaration claims, not that the
+claim is true.** The catalog is exactly as honest as `PredefinedFunctions`, and
+`recip` was the counterexample: body `1/a`, applicability `True`, while its own
+inverse two lines below carried a `b /= 0` guard with a comment about NaN/Inf
+densities. It was generated for eight shifts — 47 occurrences in 400 draws —
+and because `typedLeaves TyFloat = [constF 0]`, the shrinker *preferentially*
+minimized any failing draw containing it toward `recip 0`, turning genuine
+counterexamples into `Infinity` artifacts: the exact false-counterexample class
+the shrinker work exists to prevent. The fix was to correct the declaration
+(`recipFwd` now states `a /= 0`) rather than to exclude the name test-side, so
+that the derivation stays the one place the judgment is made; nothing in the
+compiler reads a *forward* applicability test, so that correction is a
+statement of domain and not a behaviour change. `recip` is now an
+`InjFGuarded` exclusion, derived rather than listed.
 
 A polymorphic contract contributes one entry per instantiation, which is
 coverage a monomorphic table could not express: `plus` is generated at both
@@ -285,7 +339,13 @@ said in one switch.
 per-case wall-clock budgets. Anything that is not a positive finite number
 (unset, empty, unparseable, `0`, negative, `1e400`) falls back to 1: a typo in a
 cron line should leave the suite doing its ordinary job rather than report a
-fake regression. It is read once through `unsafePerformIO`, because the things
+fake regression. An absurd but *finite* setting is **clamped** to
+`maxFuzzScale` (1000) rather than dropped, which is the other half of that
+promise: `scaleFuzz` rounds into an `Int`, so `NEST_FUZZ_SCALE=1e30` overflowed
+it, and while `scaleFuzz`'s `max 1` catches a negative result it does not catch
+a wrapped-positive one — a wrapped-negative `perCaseBudgetMicros` would have
+handed `System.Timeout.timeout` a negative argument, which never fires, so a
+typo could switch the per-case bound *off*. It is read once through `unsafePerformIO`, because the things
 it feeds — `resize`, `withMaxSuccess` — are pure and are evaluated while tasty
 builds the test tree, before any property runs.
 
@@ -305,9 +365,25 @@ It does not bound the **property**. QuickCheck keeps drawing until it has
 it re-runs the case for every shrink candidate besides — so a property that
 discards most of its draws and meets a draw that reliably burns its whole
 per-case budget multiplies the two together, with no ceiling on either factor.
-That is what stopped the group completing, and it is not a hang the timeout
-failed to catch: the timeout fires every time, and there are simply too many
-firings.
+That is what stopped the group completing. For the properties whose per-case
+work is genuinely inside the timed action, it is not a hang the timeout failed
+to catch: the timeout fires every time, and there are simply too many firings.
+
+That qualification is not pedantry — the unqualified version of this sentence
+let a real hole survive three shifts. `withinBudgetScaled` wraps `timeout`
+around an `IO Property`, so it bounds only what that action actually *forces*.
+Five properties returned their probability comparison as an unforced thunk
+(`return $ case irProb … of …`); `ioProperty`'s rose tree is forced by the
+QuickCheck driver *after* `timeout` has returned `Just prop`, so `runProbC` —
+the entire IR interpretation — ran outside the bound, and only `compileSafe`
+was actually guarded. A draw that failed to terminate inside `runProbC` could
+therefore hang the group with no timeout able to fire, the whole-property
+deadline included (it is consulted at the *entry* of the next case, which never
+arrives). The repair is `forcedProbAt`: draw the sample and `evaluate` the
+comparison inside the timed action, which is what
+`prop_Fuzz_NeuralMaterializedTwinAgrees` had done from the start. Anything
+added here that computes a probability must do the same; returning a lazy
+`Property` from `withinBudget` silently opts out of both budgets.
 
 So each property also carries a **whole-property wall-clock deadline**
 (`propertyBudgetMicros`, 120s, scaled upwards only by `NEST_FUZZ_SCALE`; 600s in
@@ -325,8 +401,21 @@ precondition.
 This is a wall-clock bound on a test and so is machine-dependent, in exactly the
 way the per-case budget already is. The default is set well above what any
 property needs when it is behaving — the slowest, `prop_Fuzz_GeneratorCoverage`,
-takes ~11s at scale 1 — so hitting it means something is genuinely wrong rather
-than that the bound was tight. The deadline is fixed at the property's first
+takes ~11s at scale 1 solo (34–37s when the whole group runs) — so hitting it
+means something is genuinely wrong rather than that the bound was tight.
+
+That "solo" is worth spelling out, because tasty runs ~12 of these properties
+**in parallel** and a wall-clock deadline is therefore contended: a property's
+120s buys it rather less than 120s of compute. The ninth shift checked whether
+that had quietly turned any well-behaved property into a permanent give-up, and
+it had not: `prop_Fuzz_ProbNeverGenerateBacked`, the suspected victim, spends
+~78–116s of its deadline but **fails on a real per-case timeout**, `did not
+terminate within 5000000us` against a shrunk counterexample, rather than
+exhausting the deadline — and it is not a property that "does no compiling", it
+compiles every draw and some of those compiles hang. So the deadline was left
+alone. If a property ever *does* start giving up for timekeeping reasons, the
+fix is to lower its `withMaxSuccess` to what the deadline can buy, not to raise
+the deadline: the deadline exists to make the group terminate. The deadline is fixed at the property's first
 case and does not slide forward, which is what makes it an aggregate bound
 rather than a second per-case one; `budgetStep` is split out pure and pinned by
 the `Fuzz scaling` group, since a bound that silently never fired would let the
