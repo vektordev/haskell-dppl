@@ -29,7 +29,8 @@ import TestWriteLogitsProperties (writeLogitsTests, writeLogitsRoundtripTests)
 import TestShowcase (showcaseTests)
 import End2EndTesting (end2endTests, slowEnd2EndTests, getAllTestFiles, selectPassDifferentialTests, batchedPythonTests, slowBatchedPythonTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, branchCountBackendTests)
 import TestFuzz (fuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
-                 neuralGeneratorTests, fuzzScalingTests, injFCatalogTests)
+                 neuralGeneratorTests, arrowGeneratorTests, fuzzScalingTests,
+                 injFCatalogTests)
 import TestCaseParser (parseProgram, parseTestCases, TestCase(..), Expectation(..), Backend(..))
 import TestTolerances (probTolerance, reasonablyCloseTolerance, samplingTolerance)
 import SPLL.Prelude
@@ -1041,6 +1042,7 @@ main = do
     , internalsTests
     , shrinkerTests
     , neuralGeneratorTests
+    , arrowGeneratorTests
     , errorChannelTests
     , fuzzScalingTests
     , injFCatalogTests

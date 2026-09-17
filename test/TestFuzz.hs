@@ -44,11 +44,12 @@
 -- prob function), but doing so needs many forward samples per case, chosen
 -- dynamically from the density at the query point (see its docs).
 module TestFuzz (fuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
-                 neuralGeneratorTests, fuzzScalingTests, injFCatalogTests) where
+                 neuralGeneratorTests, arrowGeneratorTests, fuzzScalingTests,
+                 injFCatalogTests) where
 
 import Test.QuickCheck hiding (sample)
-import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.QuickCheck (testProperties, testProperty)
+import Test.Tasty (TestTree, testGroup, localOption)
+import Test.Tasty.QuickCheck (testProperties, testProperty, QuickCheckMaxRatio(..))
 import Test.Tasty.HUnit (testCase, assertEqual, assertBool, assertFailure)
 import Control.Exception (try, evaluate, throwIO, fromException, SomeException, SomeAsyncException(..))
 import Control.Monad (replicateM)
@@ -82,6 +83,8 @@ import ArbitrarySPLL (genRawFuzzProgram, genTypedProgram, genTypedExpr, Ty(..),
                       tyGeneralizes,
                       typedExprSize, typedExprDepth,
                       LetShape(..), letShapeOf, uniquifyBindersFrom,
+                      ArrowShape(..), arrowShapeOf, arrowShapeOfProgram,
+                      genHelperProgram, typedLeaves,
                       genNeuralProgram, genNeuralTwinProgram, neuralTwin,
                       typedMainCoreExpr, typedMainCoreTy, hasNeural)
 
@@ -945,6 +948,7 @@ data DrawSummary = DrawSummary
   , dsDepth          :: Int
   , dsStructured     :: Bool
   , dsLetShape       :: LetShape
+  , dsArrowShape     :: ArrowShape
   , dsNeuralLabel    :: String
   } deriving (Show, Eq)
 
@@ -961,6 +965,10 @@ summarizeDraw p = do
     <*> guardAxis 0 (maybe 0 typedExprDepth body)
     <*> guardAxis False (isStructured p)
     <*> guardAxis NoLet (maybe NoLet letShapeOf body)
+    -- Read off the whole program, not off @main@'s core: a helper draw's
+    -- function value is a top-level declaration, and a neural draw's core
+    -- sits inside a wrapper this axis has no reason to exclude.
+    <*> guardAxis NoArrow (arrowShapeOfProgram p)
     <*> guardAxis crashedAxis (neuralLabel p)
 
 -- | The modality pass's verdict on @main@, as a label. This is the axis that
@@ -1012,6 +1020,7 @@ showTy TyAny           = "?"
 showTy (TyTuple a b)   = "(" ++ showTy a ++ ", " ++ showTy b ++ ")"
 showTy (TyEither a b)  = "Either " ++ showTy a ++ " " ++ showTy b
 showTy (TyList a)      = "[" ++ showTy a ++ "]"
+showTy (TyArrow a b)   = showTy a ++ " -> " ++ showTy b
 
 -- | Coarser than 'showTy': just which outer shape the draw landed on, so the
 -- scalar/structured split is one readable row rather than a long tail.
@@ -1021,6 +1030,9 @@ tyShapeLabel p = case typedMainCoreTy p of
   Just TyTuple{}      -> "tuple"
   Just TyEither{}     -> "either"
   Just TyList{}       -> "list"
+  -- Never drawn as a program's target type ('genTy' cannot emit an arrow);
+  -- here so that a future one is reported rather than counted as a scalar.
+  Just TyArrow{}      -> "arrow"
   Just _              -> "scalar"
 
 -- | Which neural declaration the draw carries, if any, as a label.
@@ -1064,6 +1076,7 @@ prop_Fuzz_GeneratorCoverage = withMaxSuccess (fuzzCases 200) $
       $ tabulate "target type"      [dsTargetTyLabel s]
       $ tabulate "top constructor"  [dsTopConstructor s]
       $ tabulate "let shape"        [show (dsLetShape s)]
+      $ tabulate "arrow shape"      [show (dsArrowShape s)]
       $ tabulate "neural"           [dsNeuralLabel s]
       -- Cross-tabulated, and only over the neural draws. At one draw in five
       -- the neural surface's own outcome split is invisible in the aggregate
@@ -1097,6 +1110,20 @@ prop_Fuzz_GeneratorCoverage = withMaxSuccess (fuzzCases 200) $
       $ cover 1  (dsLetShape s == WitnessLet
                   && outcome == CompiledWithProbFun)
                  "witness-shaped let reaches a probability function"
+      -- The arrow axis's acceptance criterion (task
+      -- fuzz-arrow-generator-coverage), same observe-first shape as the
+      -- others. One draw in five is a 'genHelperProgram', which applies a
+      -- named function by construction, so the first bound fires on the
+      -- arrow productions disappearing entirely rather than on drift (a third
+      -- of draws carry a function value: 33.5% and 35% on two 200-draw runs).
+      -- The second bound is deliberately slack against a rate that moves a
+      -- lot between runs -- 9% and 16% on those same two -- because what it
+      -- guards is categorical: a *computed* callee, an @if@ between two
+      -- lambdas or one projected out of a tuple or list, is the shape
+      -- 'SPLL.CalleeNormalize' exists for, and a run without one has stopped
+      -- testing it.
+      $ cover 8  (dsArrowShape s /= NoArrow)      "applies a function value"
+      $ cover 3  (dsArrowShape s >= SelectedFun)  "applies a computed function value"
       -- M3's acceptance criterion, same observe-first shape as the two above.
       -- 'genTypedProgram' draws a neural program one time in five, and the two
       -- materializing annotations are 4/7 of those, so both bounds are set
@@ -1222,6 +1249,62 @@ neuralGeneratorTests = testGroup "Neural generator"
          .&&. map annOf (neurals matP)  === [Just MultiAuto]
   ]
   where annOf (_, _, a) = a
+
+-- ---------------------------------------------------------------------------
+-- The arrow generator's contract (task fuzz-arrow-generator-coverage).
+--
+-- Pure and fast, like the two groups above, and in the default suite for the
+-- same reason: these pin the machinery the Slow properties rely on being
+-- correct about, as opposed to what those properties measure. The classifier
+-- cases come first because every coverage bound in this module is stated in
+-- terms of it, and it is the one piece with a genuinely ambiguous input --
+-- a @let@ is an 'Apply' of a 'Lambda', so "contains an Apply" and "applies a
+-- function value" are different questions about the same node.
+arrowGeneratorTests :: TestTree
+arrowGeneratorTests = testGroup "Arrow generator"
+  [ testCase "a let is not a function value" $
+      assertEqual "" NoArrow (arrowShapeOf (letIn "v0" uniform (constF 1.0)))
+  , testCase "applying a named function is AppliedFun" $
+      assertEqual "" AppliedFun (arrowShapeOf (apply (var "helper") (constF 1.0)))
+  , testCase "applying an if-selected function is SelectedFun" $
+      assertEqual "" SelectedFun
+        (arrowShapeOf (apply (ifThenElse (constB True) incLam incLam) (constF 1.0)))
+  , testCase "applying two arguments in a row is CurriedFun" $
+      assertEqual "" CurriedFun
+        (arrowShapeOf (apply (apply (var "helper") (constF 1.0)) (constF 2.0)))
+  , testCase "a let-bound function value's type is recoverable" $
+      -- Recovery pushes the argument type into the callee, so the parameter
+      -- the 'Lambda' node does not record is pinned at the call site. Without
+      -- this the whole function-value surface would generate but never shrink.
+      assertEqual "" (Just TyFloat)
+        (tyOfTypedExpr (letIn "v0" incLam (apply (var "v0") (constF 1.0))))
+  , testCase "a function value shrinks to a constant function, not from within" $
+      -- The soundness rule the 'Shrinker' group's type-preservation property
+      -- caught the violation of: at a bare lambda nothing says what the
+      -- parameter was bound at, so the body is not descended into, and the
+      -- only candidate is the closed constant function.
+      assertEqual "" [ "v0" #-># constF 0 ]
+        (shrinkTypedExpr ("v0" #-># (var "v0" #+# constF 1.0)))
+  , testCase "the constant-function leaf ignores its argument" $
+      assertEqual "" [ "p" #-># constF 0 ] (typedLeaves (TyArrow TyBool TyFloat))
+  , testProperty "a helper draw validates and applies its helper" $
+      forAll (resize fuzzSize genHelperProgram) $ \p ->
+        counterexample (show p) $
+              validateProgram p === Right ()
+         .&&. length (functions p) === 2
+         -- At least: the helper's body and the argument are ordinary draws and
+         -- may contain a computed callee of their own.
+         .&&. property (arrowShapeOfProgram p >= AppliedFun)
+  , testProperty "a helper draw's main type is recoverable" $
+      forAll (resize fuzzSize genHelperProgram) $ \p ->
+        counterexample (show p) (property (isJust (typedMainCoreTy p)))
+  , testProperty "shrinking a helper draw keeps both declarations and validates" $
+      forAll (resize fuzzSize genHelperProgram) $ \p -> conjoin
+        [ counterexample (show p')
+            (length (functions p') === 2 .&&. validateProgram p' === Right ())
+        | p' <- shrinkTypedProgram p ]
+  ]
+  where incLam = "x" #-># (var "x" #+# constF 1.0)
 
 -- ---------------------------------------------------------------------------
 -- The depth knob's contract (design typed-program-generator-expansion, Axis 4).
@@ -1538,7 +1621,18 @@ shrinkerTests = testGroup "Shrinker"
       let e = left (right (constI 0))
       in counterexample (show (shrinkTypedExpr e))
            (property (right (constI 0) `notElem` shrinkTypedExpr e))
-  , testProperty "minimization keeps the failing feature and never grows" $
+  , localOption (QuickCheckMaxRatio 30) $
+    testProperty "minimization keeps the failing feature and never grows" $
+      -- The guard below ("this draw contains a Normal") is satisfied by about
+      -- one draw in ten -- 98 passes against 1000 discards, measured on the
+      -- run that first exceeded QuickCheck's default 10:1 budget -- so the
+      -- default gives up just short of 100 successes. Two things pushed it
+      -- there, both from the arrow axis: a 'genHelperProgram' draw's @main@ is
+      -- a single call, with the body (and any Normal in it) in the
+      -- declaration this property does not look at, and an application spends
+      -- budget on nodes that are not leaves. Raising the ratio keeps the
+      -- property's power (it still wants 100 real successes) rather than
+      -- weakening what it checks.
       forAll (resize fuzzSize genTypedProgram) $ \p ->
         case mainBody p of
           Nothing -> property True

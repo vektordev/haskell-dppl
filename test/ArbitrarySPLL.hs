@@ -15,6 +15,7 @@ module ArbitrarySPLL (
 , tyJoin
 , tyGeneralizes
 , genTypedProgram
+, genHelperProgram
 , genTypedExpr
 , genValueWide
 , genRawFuzzExpr
@@ -27,6 +28,9 @@ module ArbitrarySPLL (
 , typedLeaves
 , LetShape(..)
 , letShapeOf
+, ArrowShape(..)
+, arrowShapeOf
+, arrowShapeOfProgram
 , mentionsVar
 , tyToRType
 , rTypeToTy
@@ -50,7 +54,7 @@ module ArbitrarySPLL (
 
 import Test.QuickCheck
 import Data.List (nub, find)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, listToMaybe)
 
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
@@ -252,14 +256,26 @@ instance Arbitrary TypeInfo where
 -- type recovery and shrinking are all now indexed by a 'TyEnv' as well as by
 -- a 'Ty'.
 --
+-- The arrow axis (task fuzz-arrow-generator-coverage) adds 'TyArrow', which is
+-- a generation target like any other *except* that 'genTy' never draws one:
+-- an arrow-typed @main@ is a closure, and asking for its density or sampling
+-- it is meaningless. Arrow-typed positions are opened by the productions that
+-- immediately consume them -- an application, a function-valued @let@, a
+-- top-level helper -- so every function value the generator emits is applied
+-- (or bound and then applied) rather than returned.
+--
 -- 'TyAny' is not a generation target. It is the "this position's type is not
 -- determined by the node itself" marker that type *recovery* needs: a
 -- @left x@ node fixes only the left component, a @right y@ node only the
--- right, and neither says anything about the other. See 'tyOfTypedExpr'.
+-- right, and neither says anything about the other. A 'Lambda' is the third
+-- such node -- nothing on it records what its parameter was bound at -- so a
+-- function value recovers as @TyArrow TyAny r@ unless it is read at an
+-- application, where the argument pins the parameter. See 'tyOfTypedExpr'.
 data Ty = TyFloat | TyInt | TyBool
         | TyTuple Ty Ty
         | TyEither Ty Ty
         | TyList Ty
+        | TyArrow Ty Ty
         | TyAny
   deriving (Show, Eq)
 
@@ -271,7 +287,13 @@ type TyEnv = [(String, Ty)]
 -- | Size-bounded target types. Deliberately scalar-heavy: a structured target
 -- multiplies the expression budget across components, and the invariant
 -- properties still want a solid mass of the scalar shapes that reach a
--- probability function. Never emits 'TyAny'.
+-- probability function.
+--
+-- Never emits 'TyAny', and never emits 'TyArrow': this is the type of a
+-- *result* -- a program's, a binding's, an argument's -- and every one of
+-- those positions is one a function value must not be returned into. The
+-- arrow productions open arrow-typed positions themselves, directly around
+-- the application that eliminates them.
 genTy :: Int -> Gen Ty
 genTy n
   | n <= 0 = scalarTy
@@ -293,17 +315,24 @@ tyDepth = 2
 
 -- | A well-typed "main" program of a randomly chosen type.
 --
--- Most draws are nullary. One in five (milestone M3) instead declares a neural
--- network and reads it: @main sym = let s = nn sym in \<observations of s\>@.
--- Those draws are the only way the plan-guided enumeration engine is reached
--- at all, and they cost the properties nothing extra -- the same eight
--- invariants apply unchanged. See 'genNeuralProgram'.
+-- Three shapes. Three draws in five are nullary. One in five (milestone M3)
+-- instead declares a neural network and reads it:
+-- @main sym = let s = nn sym in \<observations of s\>@. Those draws are the
+-- only way the plan-guided enumeration engine is reached at all, and they
+-- cost the properties nothing extra -- the same invariants apply unchanged.
+-- See 'genNeuralProgram'. The remaining one in five declares a named
+-- top-level function and calls it (task fuzz-arrow-generator-coverage); see
+-- 'genHelperProgram'.
 --
 -- A neural draw's @main@ takes an argument, so a caller running it has to
 -- supply a mock-network symbol rather than the empty argument list every other
 -- draw wants. TestFuzz's @fuzzArgs@ derives that from the program.
 genTypedProgram :: Gen Program
-genTypedProgram = frequency [(4, genPlainProgram), (1, genNeuralProgram)]
+genTypedProgram = frequency
+  [ (3, genPlainProgram)
+  , (1, genHelperProgram)
+  , (1, genNeuralProgram)
+  ]
 
 -- | The nullary shape: @main = \<expr\>@, with no neural declaration.
 genPlainProgram :: Gen Program
@@ -311,6 +340,44 @@ genPlainProgram = do
   ty <- genTy tyDepth
   body <- sized (genTypedExpr ty)
   return $ Program [("main", body)] [] [] []
+
+-- | @helper x = \<expr\>; main = helper \<expr\>@ -- the named top-level
+-- function with a probabilistic argument, which is the *low bar* of the arrow
+-- axis: the one shape in it that already worked before the axis existed
+-- (rows 1-2 of @modality-function-space-test-coverage@'s table).
+--
+-- It is a program-level production rather than an expression-level one
+-- because that is what a top-level function is. Generating it matters for
+-- two reasons beyond the shape itself: a bare name in callee position is the
+-- one callee 'SPLL.CalleeNormalize' deliberately leaves alone, so nothing
+-- else in the generator reaches the path forward chaining resolves by
+-- itself; and the helper's body is generated in a scope holding only its
+-- parameter, so the argument's randomness crosses a function boundary to
+-- reach it.
+--
+-- The two functions' binders are renamed from *different* prefixes.
+-- 'SPLL.Validator' is stricter than lexical scoping about name reuse (see
+-- 'uniquifyBinders'), and two independently generated bodies both start at
+-- @v0@.
+genHelperProgram :: Gen Program
+genHelperProgram = sized $ \n -> do
+  aty <- genTy 1
+  rty <- genTy 1
+  hbody <- genTypedExprIn [(helperParam, aty)] rty (n `div` 2)
+  arg   <- genTypedExprIn [(helperName, TyArrow aty rty)] aty (n `div` 2)
+  let helper = uniquifyBindersFrom "h" (helperParam #-># hbody)
+      body   = uniquifyBinders (apply (varE helperName) arg)
+  return $ Program [(helperName, helper), ("main", body)] [] [] []
+
+-- | The generated top-level function's name and parameter. Neither may
+-- collide with a predefined function or a distribution leaf; both are
+-- rewritten by 'uniquifyBindersFrom' before they reach a program, except the
+-- name itself, which is a declaration rather than a binder.
+helperName :: String
+helperName = "helper"
+
+helperParam :: String
+helperParam = "hp"
 
 -- | Generate at a type in the empty scope. The scope-carrying worker is
 -- 'genTypedExprIn'; this is the entry point every property uses.
@@ -367,12 +434,23 @@ genTypedLeaf TyBool = oneof
   , bernoulli <$> choose (0.01, 0.99)
   ]
 genTypedLeaf TyAny = genTypedLeaf TyFloat
+-- The smallest function value is a constant one. It ignores its argument,
+-- which is not a degenerate case to be avoided but a shape worth covering:
+-- whatever randomness the argument carries is dropped on the floor, and the
+-- inference engines have to agree that it was.
+genTypedLeaf (TyArrow _ b) = (arrowLeafParam #->#) <$> genTypedLeaf b
 genTypedLeaf (TyTuple a b) = tuple <$> genTypedLeaf a <*> genTypedLeaf b
 genTypedLeaf (TyEither a b) = oneof
   [ left <$> genTypedLeaf a
   , right <$> genTypedLeaf b
   ]
 genTypedLeaf (TyList a) = (`cons` nul) <$> genTypedLeaf a
+
+-- | The binder of a closed function leaf. Any name does: 'uniquifyBinders'
+-- renames every binder in the finished expression anyway, and a leaf is by
+-- construction the innermost thing there is.
+arrowLeafParam :: String
+arrowLeafParam = "p"
 
 genTypedRec :: TyEnv -> Ty -> Int -> [Gen Expr]
 genTypedRec env ty n =
@@ -394,6 +472,12 @@ genTypedRec env ty n =
   ++ [ genPlainLet env ty n
      , genWitnessLet env ty n
      ]
+  -- The arrow surface (task fuzz-arrow-generator-coverage). Withheld below a
+  -- size threshold and at an arrow target, which keeps the function values
+  -- shallow: a first-order function applied to a first-order argument is the
+  -- whole region the task is about, and letting these fire all the way down
+  -- would spend the budget building third-order shapes nothing infers.
+  ++ (if n >= arrowProdSize && not (isArrowTy ty) then arrowProds env ty n else [])
   ++ tyRec
   where
     gen = genTypedExprIn env
@@ -446,6 +530,115 @@ genTypedRec env ty n =
         [ cons <$> gen a half <*> gen (TyList a) half
         , ltail <$> gen (TyList a) (n - 1)
         ]
+      -- A lambda literal. Everything else that produces a function value --
+      -- an @if@ choosing between two of them, a tuple or list one is
+      -- projected out of, a variable bound to one -- comes from the
+      -- *generic* productions above, which are indexed by the target type
+      -- and so now fire at an arrow target like any other.
+      TyArrow a b ->
+        [ do let v = freshName env
+             body <- genTypedExprIn ((v, a) : env) b (n - 1)
+             return (v #-># body)
+        ]
+
+-- ---------------------------------------------------------------------------
+-- The arrow surface (task fuzz-arrow-generator-coverage).
+--
+-- Three productions, matching the three ways a function value reaches an
+-- argument in a program somebody would actually write: applied where it is
+-- written, bound and then applied, and applied to two arguments in a row.
+-- What *kind* of function value each one applies is not decided here -- it is
+-- drawn at the arrow target by the ordinary productions, so a lambda literal,
+-- an @if@ between two of them, one projected out of a tuple or list, and a
+-- variable bound to any of those all arise without a production of their own.
+--
+-- The one shape deliberately *not* produced is a function value returned from
+-- @main@: 'genTy' never draws an arrow, so every arrow-typed position the
+-- generator opens is eliminated by the production that opened it.
+
+-- | The size below which the arrow productions do not fire.
+arrowProdSize :: Int
+arrowProdSize = 4
+
+isArrowTy :: Ty -> Bool
+isArrowTy TyArrow{} = True
+isArrowTy _         = False
+
+-- The three share *one* slot in the node's production set rather than taking
+-- three of them. 'genTypedExprIn' picks with 'oneof', so every production
+-- added at a node dilutes all the others equally, and three more would have
+-- cut the existing ones by about a fifth at every level. That is not a
+-- cosmetic concern: the properties that draw a *pair* of programs
+-- (@prop_Fuzz_MixtureFollowsCombinationRules@, and the neural twin oracle)
+-- need both halves to reach a probability function, so they see the square of
+-- that rate, and at three slots both stopped falsifying and started giving up
+-- on their discard ratio -- a measured loss of power in properties that were
+-- finding real bugs. One slot still puts a function value in a good third of
+-- all draws (see the @arrow shape@ row of the coverage property).
+arrowProds :: TyEnv -> Ty -> Int -> [Gen Expr]
+arrowProds env ty n =
+  [ oneof
+      [ genApply env ty n
+      , genFunctionLet env ty n
+      , genCurriedApply env ty n
+      ]
+  ]
+
+-- | @\<function value\> \<argument\>@.
+--
+-- The argument type is drawn to *match an in-scope function* where one
+-- returns the target type, on the same reasoning 'genTypedLeafIn' prefers a
+-- variable to a closed leaf: a bound function nothing ever calls is a dead
+-- binding, and the engines this exists to reach never see it. Note that a
+-- lambda literal drawn for the callee here makes the node a @let@ -- that is
+-- not a degenerate outcome but the "directly-applied lambda" shape, spelled
+-- the way the compiler spells every @let@ ('SPLL.Prelude.letIn').
+genApply :: TyEnv -> Ty -> Int -> Gen Expr
+genApply env ty n = do
+  aty <- argTyFor env ty
+  f   <- genTypedExprIn env (TyArrow aty ty) half
+  arg <- genTypedExprIn env aty half
+  return (apply f arg)
+  where half = n `div` 2
+
+-- | An argument type for an application returning @ty@: one an in-scope
+-- function already takes, where there is one.
+argTyFor :: TyEnv -> Ty -> Gen Ty
+argTyFor env ty = case [ a | (_, TyArrow a b) <- env, b == ty ] of
+  [] -> genTy 1
+  as -> frequency [ (1, genTy 1), (2, elements as) ]
+
+-- | @(\\f -> f \<arg\>) \<function value\>@ -- a function value passed as an
+-- argument and applied inside the body, which is 'SPLL.Prelude.letIn' of a
+-- function value and so also the @let f = \\x -> ... in f ...@ shape.
+--
+-- Unlike 'genApply' this one *builds* the call rather than hoping the body
+-- draws it, because the shape is the point: the bound variable is the
+-- function, so the compiler has to resolve a callee that is a lambda
+-- parameter -- the case whose absence was bug A of
+-- @modality-arrow-apply-crashes@.
+genFunctionLet :: TyEnv -> Ty -> Int -> Gen Expr
+genFunctionLet env ty n = do
+  aty <- genTy 0
+  let fv  = freshName env
+      fty = TyArrow aty ty
+  fun <- genTypedExprIn env fty half
+  arg <- genTypedExprIn ((fv, fty) : env) aty half
+  return (apply (fv #-># apply (varE fv) arg) fun)
+  where half = n `div` 2
+
+-- | @f a b@ -- two arguments to one function value, which is where
+-- 'SPLL.Typing.ModalityInfer''s @TArrow@ arm is exercised at more than one
+-- nesting depth.
+genCurriedApply :: TyEnv -> Ty -> Int -> Gen Expr
+genCurriedApply env ty n = do
+  aty <- genTy 0
+  bty <- genTy 0
+  f <- genTypedExprIn env (TyArrow aty (TyArrow bty ty)) third
+  a <- genTypedExprIn env aty third
+  b <- genTypedExprIn env bty third
+  return (apply (apply f a) b)
+  where third = n `div` 3
 
 -- | A binder name that cannot collide with anything in scope, with any
 -- predefined function, or with the two distribution leaves. Scopes only ever
@@ -547,6 +740,51 @@ letShapeOf e = maximum (here : map letShapeOf (children e))
       Just (x, val, body)
         | isContinuousLeaf val, observedOnlyByCondition x body -> WitnessLet
         | otherwise -> PlainLet
+
+-- ---------------------------------------------------------------------------
+-- Recognising a generated function value (task fuzz-arrow-generator-coverage).
+
+-- | How much of the arrow surface a draw reaches. Ordered, so a whole-program
+-- verdict is the maximum over its nodes -- by how much machinery the shape
+-- puts in front of the compiler, not by how interesting it is.
+--
+-- 'NoArrow' is not "no 'Apply' node": every @let@ is one
+-- ('SPLL.Prelude.letIn'), so a draw with no function value in it at all still
+-- contains applications and lambdas. What the other three rungs have in
+-- common is a callee the compiler cannot read off as a lambda literal
+-- standing right there.
+data ArrowShape
+  = NoArrow      -- ^ every application is a @let@: a literal lambda called
+                 --   where it is written
+  | AppliedFun   -- ^ a *named* function value is applied -- a top-level
+                 --   function, or a variable bound to a function value. The
+                 --   one callee shape 'SPLL.CalleeNormalize' leaves for
+                 --   forward chaining to resolve
+  | SelectedFun  -- ^ the callee is *computed*: an @if@ between two function
+                 --   values, or one projected out of a tuple or a list
+  | CurriedFun   -- ^ two arguments reach one function value
+  deriving (Show, Eq, Ord)
+
+-- | A syntactic classifier, like 'letShapeOf' and for the same reason: the
+-- compiler exposes no hook saying which callee path ran.
+arrowShapeOf :: Expr -> ArrowShape
+arrowShapeOf e = maximum (here : map arrowShapeOf (children e))
+  where
+    here = case node e of
+      Apply f _
+        -- A @let@. Classified first, so that @(let x = v in b) a@ -- applying
+        -- the *result* of a let -- is not miscounted as a curried call.
+        | Just _ <- asLet e               -> NoArrow
+        | Apply{} <- node f
+        , Nothing <- asLet f              -> CurriedFun
+        | Var{} <- node f                 -> AppliedFun
+        | otherwise                       -> SelectedFun
+      _ -> NoArrow
+
+-- | The whole program's verdict, which for a 'genHelperProgram' draw has to
+-- include the declaration as well as @main@.
+arrowShapeOfProgram :: Program -> ArrowShape
+arrowShapeOfProgram p = maximum (NoArrow : map (arrowShapeOf . snd) (functions p))
 
 -- | @let x = v in b@, as the 'Apply'/'Lambda' pair 'SPLL.Prelude.letIn' builds.
 asLet :: Expr -> Maybe (String, Expr, Expr)
@@ -678,6 +916,7 @@ tyToRType TyAny          = TFloat
 tyToRType (TyTuple a b)  = Tuple (tyToRType a) (tyToRType b)
 tyToRType (TyEither a b) = TEither (tyToRType a) (tyToRType b)
 tyToRType (TyList a)     = ListOf (tyToRType a)
+tyToRType (TyArrow a b)  = TArrow (tyToRType a) (tyToRType b)
 
 -- | Partial inverse of 'tyToRType', for reading a neural declaration's target
 -- back out of a 'Program'. 'Nothing' for anything the typed generator cannot
@@ -848,6 +1087,11 @@ genNeuralObs e (TyEither _ _) = elements [sisLeft e, sisRight e]
 -- total.
 genNeuralObs e (TyList _) = pure (isNull e)
 genNeuralObs _ TyAny      = constB <$> arbitrary
+-- A network's target type is never an arrow: neither 'genAutoNeuralTy' nor
+-- 'genDiscreteNeuralTy' can draw one, and 'autoDeriveMultiValue' has no plan
+-- for a function anyway. Answering with a constant keeps this total rather
+-- than adding an 'error' for a case the types cannot rule out.
+genNeuralObs _ TyArrow{}  = constB <$> arbitrary
 
 -- | Does this program declare a neural network?
 hasNeural :: Program -> Bool
@@ -886,13 +1130,56 @@ typedMainParts p = do
       , ReadNN nn _ <- node val
       , Just (_, nrt, _) <- find ((== nn) . fst3) (neurals p)
       , Just nty <- rTypeToTy (neuralTarget nrt)
-      -> Just ( ((s, nty) : [], core)
+      -> Just ( ((s, nty) : helperEnv p, core)
               , \core' -> Expr (ann body) (Lambda sym (letIn s val core')) )
-    _ -> Just (([], body), id)
+    _ -> Just ((helperEnv p, body), id)
   where
     fst3 (a, _, _) = a
     neuralTarget (TArrow _ t) = t
     neuralTarget t            = t
+
+-- | Every top-level function other than @main@, with its arrow type recovered.
+-- A 'genHelperProgram' draw's @main@ is a call to one of these, so without
+-- them in scope its body recovers nothing and the whole draw would silently
+-- stop shrinking.
+--
+-- A declaration is a bare 'Lambda', and nothing on it records what its
+-- parameter was generated at -- so the parameter type is taken from **the
+-- call site in @main@**, the same push-down 'tyOfApplied' does at an ordinary
+-- application. That is not a refinement but the difference between recovering
+-- and not: a helper that *destructures* its parameter (@fst h0@, @head h0@)
+-- recovers nothing at all under a free parameter, since the eliminators
+-- demand a concrete shape, and those are a good half of the draws.
+--
+-- Where @main@ does not apply the function -- it cannot happen in a generated
+-- draw, but this is total over any 'Program' -- the free-parameter reading is
+-- the fallback, which is what a function value read but not called recovers
+-- as anyway.
+helperEnv :: Program -> TyEnv
+helperEnv p =
+  [ (nm, t)
+  | (nm, e) <- functions p
+  , nm /= "main"
+  , Just t <- [declaredTy nm e]
+  ]
+  where
+    declaredTy nm e = case node e of
+      Lambda x body
+        | Just aty <- callSiteArgTy nm
+        -> TyArrow aty <$> tyOfTypedExprIn [(x, aty)] body
+      _ -> tyOfTypedExprIn [] e
+    -- Recovered in the *empty* scope, which both terminates and is right: an
+    -- argument mentioning the function being typed cannot pin its parameter.
+    callSiteArgTy nm = do
+      body <- lookup "main" (functions p)
+      arg  <- appliedTo nm body
+      tyOfTypedExprIn [] arg
+
+-- | The first argument @nm@ is applied to anywhere in an expression.
+appliedTo :: String -> Expr -> Maybe Expr
+appliedTo nm e = case node e of
+  Apply f arg | Var v <- node f, v == nm -> Just arg
+  _ -> listToMaybe [ a | c <- children e, Just a <- [appliedTo nm c] ]
 
 -- | The same program with its neural declaration's @of@ clause flipped on or
 -- off -- the materializing twin of a lazy draw, or the reverse.
@@ -983,12 +1270,40 @@ tyOfTypedExprIn env e = case node e of
     (Just a, Nothing) -> Just a
     (Nothing, mb)     -> mb
   InjF (Named f) args -> tyOfTypedInjF env f args
-  -- A 'let': the binding's recovered type extends the scope for the body, and
-  -- the body's type is the node's. An 'Apply' of anything but a literal lambda
-  -- is outside the generator's space and recovers nothing.
-  Apply l val | Lambda x body <- node l ->
-    tyOfTypedExprIn env val >>= \vty -> tyOfTypedExprIn ((x, vty) : env) body
+  -- An application: the argument's type pins the callee's parameter, so the
+  -- node's type is whatever the callee returns *given that argument type*
+  -- ('tyOfApplied'). A @let@ is this case with a literal lambda for the
+  -- callee, which is how 'SPLL.Prelude.letIn' spells one.
+  Apply f val         -> tyOfTypedExprIn env val >>= \vty -> tyOfApplied env vty f
+  -- A function value read somewhere other than at an application -- bound by
+  -- a @let@, passed as an argument, chosen by an @if@. Nothing on a 'Lambda'
+  -- node records what its parameter was bound at, so the parameter position
+  -- stays free and the result is recovered under it. That is the same 'TyAny'
+  -- contract @left@/@right@ already use for the component they do not pin.
+  Lambda x body       -> TyArrow TyAny <$> tyOfTypedExprIn ((x, TyAny) : env) body
   _                   -> Nothing
+
+-- | The type of applying @f@ to an argument of type @aty@.
+--
+-- The argument type is pushed *into* the callee rather than read off it,
+-- which is the only way a lambda literal or an @if@ between two of them is
+-- recoverable at all: neither node records its own parameter type, but at an
+-- application the context knows it. Anything else must have a recoverable
+-- arrow type of its own -- a variable bound to a function value, a top-level
+-- function, or a nested application returning one.
+tyOfApplied :: TyEnv -> Ty -> Expr -> Maybe Ty
+tyOfApplied env aty f = case node f of
+  Lambda x body    -> tyOfTypedExprIn ((x, aty) : env) body
+  -- Both arms are applied to the same argument, so each is pushed the same
+  -- type and the results are joined -- the same treatment, for the same
+  -- reason, that 'tyOfTypedExprIn' gives an @if@'s own arms.
+  IfThenElse _ t g -> case (tyOfApplied env aty t, tyOfApplied env aty g) of
+    (Just a, Just b)  -> tyJoin a b
+    (Just a, Nothing) -> Just a
+    (Nothing, mb)     -> mb
+  _ -> tyOfTypedExprIn env f >>= \tf -> case tf of
+    TyArrow _ r -> Just r
+    _           -> Nothing
 
 -- | Result type of an InjF application the typed generator can emit. The
 -- structured entries are computed from the arguments rather than looked up:
@@ -1251,6 +1566,12 @@ tyJoin t TyAny = Just t
 tyJoin (TyTuple a b)  (TyTuple c d)  = TyTuple  <$> tyJoin a c <*> tyJoin b d
 tyJoin (TyEither a b) (TyEither c d) = TyEither <$> tyJoin a c <*> tyJoin b d
 tyJoin (TyList a)     (TyList b)     = TyList   <$> tyJoin a b
+-- Both positions join covariantly, including the parameter. The parameter of
+-- a recovered arrow is not a declared domain that a caller must satisfy -- it
+-- is whatever an application was seen to pin it to, and 'TyAny' when none
+-- was. Joining two such observations is the same "fill in what the other side
+-- knows" operation it is everywhere else.
+tyJoin (TyArrow a b)  (TyArrow c d)  = TyArrow  <$> tyJoin a c <*> tyJoin b d
 tyJoin a b
   | a == b    = Just a
   | otherwise = Nothing
@@ -1279,6 +1600,13 @@ tyGeneralizes TyAny _ = True
 tyGeneralizes (TyTuple a b)  (TyTuple c d)  = tyGeneralizes a c && tyGeneralizes b d
 tyGeneralizes (TyEither a b) (TyEither c d) = tyGeneralizes a c && tyGeneralizes b d
 tyGeneralizes (TyList a)     (TyList b)     = tyGeneralizes a b
+-- Covariant in the parameter too, for the reason 'tyJoin' gives: a free
+-- parameter position means "no application pinned this", so a replacement
+-- that leaves it free is more general, and one that commits it is not. The
+-- shrink this admits is the one worth having -- @\\p -> 0@ replacing a
+-- function of a known argument type, which is well-typed precisely because it
+-- ignores the argument.
+tyGeneralizes (TyArrow a b)  (TyArrow c d)  = tyGeneralizes a c && tyGeneralizes b d
 tyGeneralizes a b = a == b
 
 -- | Node count. Used both as the shrinker's well-foundedness measure and by
@@ -1327,6 +1655,9 @@ typedLeaves (TyEither a b) =
   [ left x  | x <- take 1 (typedLeaves a) ]
   ++ [ right y | y <- take 1 (typedLeaves b) ]
 typedLeaves (TyList a) = [ cons x nul | x <- take 1 (typedLeaves a) ]
+-- A constant function, which is closed and (being independent of its
+-- argument) inhabits @TyArrow a b@ for every @a@ at once.
+typedLeaves (TyArrow _ b) = [ arrowLeafParam #-># x | x <- take 1 (typedLeaves b) ]
 
 -- | Type-preserving shrink for an expression produced by 'genTypedExpr'.
 --
@@ -1336,8 +1667,16 @@ typedLeaves (TyList a) = [ cons x nul | x <- take 1 (typedLeaves a) ]
 -- 'tyGeneralizes'). So the result is well-founded and never hands the property
 -- an ill-typed or ill-scoped program (either of which would be discarded,
 -- minimizing nothing).
+-- Candidates are re-uniquified, for the reason 'uniquifyBinders' gives about
+-- generation: a shrink can *introduce* a binder. The constant-function leaf
+-- ('typedLeaves' at an arrow type) is a lambda, so replacing two function
+-- values with it puts two identically-named binders in one program, and
+-- 'SPLL.Validator' rejects that ("Duplicate declaration of identifier")
+-- although nothing about it is ambiguous. Renaming here rather than inventing
+-- a fresh name inside 'typedLeaves' keeps the leaf a *closed* expression,
+-- which is what makes it safe to drop in at an arbitrary position.
 shrinkTypedExpr :: Expr -> [Expr]
-shrinkTypedExpr = shrinkTypedExprIn []
+shrinkTypedExpr e = map uniquifyBinders (shrinkTypedExprIn [] e)
 
 shrinkTypedExprIn :: TyEnv -> Expr -> [Expr]
 shrinkTypedExprIn env e = case tyOfTypedExprIn env e of
@@ -1392,6 +1731,37 @@ childShrinks env e = case asLet e of
       ++ [ rebuild (IfThenElse c t f') | f' <- shrinkTypedExprIn env f ]
     InjF name args ->
       [ rebuild (InjF name args') | args' <- shrinkOne (shrinkTypedExprIn env) args ]
+    -- The arrow surface. A @let@ is an 'Apply' of a literal lambda and is
+    -- handled above; this is every *other* application -- a named or selected
+    -- function value called on an argument -- and the lambda itself where it
+    -- is read as a value rather than called.
+    --
+    -- The callee is shrunk in the outer scope like any other subexpression:
+    -- its recovered type is an arrow, and 'shrinkTypedExprIn' offers the
+    -- constant-function leaf for it, which is how a selected or named callee
+    -- minimizes away.
+    Apply f a ->
+      [ rebuild (Apply f' a) | f' <- shrinkTypedExprIn env f ]
+      ++ [ rebuild (Apply f a') | a' <- shrinkTypedExprIn env a ]
+    -- A lambda read as a *value* offers no child shrinks, because at this
+    -- node nothing says what its parameter was bound at, and the shrinker has
+    -- no type for a binder it cannot name.
+    --
+    -- Binding it at 'TyAny' and descending anyway is wrong, and not subtly:
+    -- 'tyGeneralizes' reads 'TyAny' as "this position is free, so anything may
+    -- fill it", which is true of a position *no node commits* and false of a
+    -- variable whose type merely was not recovered. With @v : TyAny@ in scope,
+    -- @collapses@ accepts @v@ as a replacement for any node at all, and
+    -- @fst (v, xs)@ -- whose value is @v@ -- duly shrank to @fst v@, which is
+    -- @fst@ of an Int. (Found by the @Shrinker@ group's type-preservation
+    -- property, which is exactly its job.)
+    --
+    -- Nothing is lost that matters: the lambda itself still reduces, to the
+    -- constant function 'typedLeaves' offers at its arrow type, so a large
+    -- function value in a counterexample minimizes to @\\p -> 0@ rather than
+    -- being minimized from within. Where a lambda *is* applied, its parameter
+    -- type is known from the argument, and that is the @let@ case above.
+    Lambda{} -> []
     _ -> []
   where
     rebuild = Expr (ann e)
@@ -1421,7 +1791,7 @@ shrinkTypedProgram :: Program -> [Program]
 shrinkTypedProgram p = case typedMainParts p of
   Nothing -> []
   Just ((env, core), rebuild) ->
-    [ p { functions = map (replaceMain (rebuild core')) (functions p) }
+    [ p { functions = map (replaceMain (uniquifyBinders (rebuild core'))) (functions p) }
     | core' <- shrinkTypedExprIn env core
     ]
   where
