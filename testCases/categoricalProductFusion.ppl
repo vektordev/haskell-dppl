@@ -1,0 +1,14 @@
+-- Task categorical-product-ov-fusion: the agreement combination of two
+-- categorical marginals, which must compile to an O(V) elementwise product of
+-- two [V] probability vectors rather than an O(V^2) joint enumeration.
+--
+-- Both experts are given LITERAL logit vectors by the test harness (the
+-- `(2, [..])` mock-NN form), and both are non-uniform, so every expected value
+-- below is a hand-computed product rather than a number read back out of the
+-- compiler. The `.tst` derivation is written out there.
+neural camNN   :: (Symbol -> Int) of [0, 1, 2]
+neural depthNN :: (Symbol -> Int) of [0, 1, 2]
+main img depth =
+  let v = camNN img in
+  let w = depthNN depth in
+  if v == w then right v else left ()

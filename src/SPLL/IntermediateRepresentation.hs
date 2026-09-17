@@ -215,19 +215,30 @@ data ReduceOp = ROpAdd        -- ^ Sum. Identity 0.
                                -- compare in the same order since log is monotone).
               deriving (Show, Eq)
 
--- | Operations over a tensor (design ir-tensor-values). Deliberately four and
--- no more: build, map, reduce along an axis, and index along an axis by a
--- runtime key.
+-- | Operations over a tensor (design ir-tensor-values): build, map, reduce
+-- along an axis, index along an axis by a runtime key, and zip two tensors
+-- elementwise.
 --
 -- The /representation/ carries a full 'Shape', so the typed surface tensor of
--- tensors-in-core-language lowers onto it directly. The /operation set/ stays
--- at these four, and that restraint is a soundness matter rather than an
+-- tensors-in-core-language lowers onto it directly. The /operation set/ is
+-- deliberately small, and that restraint is a soundness matter rather than an
 -- effort one (that design, §4.2): broadcasting would put one latent in every
 -- element and silently drop the correlation from @p(t) = \prod p(t_i)@;
 -- reducing a probabilistic axis is a convolution, which SPLL has no engine
 -- for; a general linear map has a non-diagonal Jacobian that @FDecl@\'s
--- per-input scalar derivatives cannot express. 'BReduce' here is safe because
--- it reduces already-computed probabilities, not random variables.
+-- per-input scalar derivatives cannot express.
+--
+-- 'BReduce' is safe because it reduces already-computed probabilities, not
+-- random variables. 'BZip' (task categorical-product-ov-fusion) is admitted on
+-- exactly that ground and no wider one: elementwise-multiplying two @[V]@
+-- vectors of already-computed marginals is the sum-product algebra's own
+-- factor product, not an operation on random variables. It is /not/ a licence
+-- to multiply two arbitrary tensors -- the answer is a correct joint only when
+-- the two marginals' subexpressions are independent, which is a property of
+-- the program, not of the node. Establishing it is the producer's obligation:
+-- 'SPLL.IRCompiler.enumerateAgreement' discharges it with the decomposability
+-- gate ('SPLL.IRCompiler.shareEnumeratedLatent'), and refuses to fuse rather
+-- than assume when two operands may read a shared enumerated latent.
 data Builtin
   -- | @BTensor sh [e1 .. eN]@ -- build a tensor of shape @sh@ from its
   -- elements in row-major order (outermost axis first). @N@ must be
@@ -252,6 +263,30 @@ data Builtin
   -- 'BListIndex', which indexes a cons-list in an O(n) walk; this is an O(1)
   -- read into a flat block.
   | BIndex Int
+  -- | @BZip op [a, b]@ -- elementwise binary @op@ over two tensors of the
+  -- /same/ shape, yielding a tensor of that shape (task
+  -- categorical-product-ov-fusion).
+  --
+  -- The operation the agreement fusion is built on: multiplying two dense
+  -- @[V]@ categorical marginals is @BZip OpMult@, one vectorizable node, in
+  -- O(V). Writing the same product as a @BMap@ whose body evaluates both
+  -- marginals per element is also O(V) on paper but keeps the per-element
+  -- work inside a scalar loop, which at vocabulary scale (V in the tens of
+  -- thousands) is the difference between a @torch.mul@ and fifty thousand
+  -- interpreter steps -- see 'SPLL.IRCompiler.enumerateAgreement'.
+  --
+  -- Takes an 'Operand' rather than having a constructor per operation, for
+  -- the same reason 'BReduce' takes a 'ReduceOp': a second elementwise
+  -- operation is then a call site, not a new node every generic pass must
+  -- learn. Shape-preserving, so like 'BMap' it needs no axis field.
+  --
+  -- Shape agreement is the producer's obligation. 'expectBuiltinArgs' checks
+  -- the argument /count/, but nothing checks the two operands' extents
+  -- statically -- 'IRExpr' carries no shape on a general expression, only on
+  -- a 'BTensor' literal. The interpreter checks at run time and fails loudly;
+  -- every producer in the compiler builds both operands from the same
+  -- enumerated domain, so a mismatch is a compiler bug.
+  | BZip Operand
   -- | @BMapList [f, xs]@ -- apply @f@ to every element of a cons-list @xs@,
   -- yielding a list of the same length (design ir-reengineering, slice S2).
   -- The list-walking sibling of 'BMap': that node is shape-preserving over a
@@ -278,6 +313,7 @@ builtinArity (BTensor _)   = Nothing
 builtinArity BMap          = Just 2
 builtinArity (BReduce _ _) = Just 1
 builtinArity (BIndex _)    = Just 2
+builtinArity (BZip _)      = Just 2
 builtinArity BMapList      = Just 2
 builtinArity BListIndex    = Just 2
 

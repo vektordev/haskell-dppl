@@ -699,6 +699,20 @@ generateExpression (IRBuiltin (BIndex ax) [t, k])
       kk <- generateExpression k
       return ("(" ++ tt ++ ")[" ++ kk ++ "]")
   | otherwise = error (axisUnsupported "BIndex" ax)
+-- Elementwise zip of two equal-length rank-1 tensors (task
+-- categorical-product-ov-fusion). A comprehension over `zip`, for the same
+-- reason BMap is a comprehension rather than `map(lambda ...)`: it binds the
+-- two element names directly instead of paying a Python call per element.
+--
+-- The names are generated rather than fixed so a nested BZip (the agreement
+-- fusion emits `(ta * tb) * tT`) cannot shadow the outer one's bindings.
+generateExpression (IRBuiltin (BZip op) [a, b]) = do
+  aa <- generateExpression a
+  bb <- generateExpression b
+  n <- lift demandUniqueNumber
+  let (x, y) = ("_z" ++ show n ++ "a", "_z" ++ show n ++ "b")
+  return ("[((" ++ x ++ ") " ++ pyOps op ++ " (" ++ y ++ ")) for "
+          ++ x ++ ", " ++ y ++ " in zip(" ++ aa ++ ", " ++ bb ++ ")]")
 generateExpression (IRError e) =
   return ("throw(\"" ++ escapeStr e ++ "\")")
 generateExpression (IRConformsTo t x) = do

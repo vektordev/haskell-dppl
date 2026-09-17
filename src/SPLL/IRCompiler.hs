@@ -1954,7 +1954,12 @@ toIRInference meta True (Expr TypeInfo{rType=rt} (Apply l v)) sample | pType (ge
 -- (nested enumerable `let`s), so this rule no longer requires `pType l == Deterministic`.
 toIRInference meta cumulative (Expr TypeInfo {rType=_} (Apply l v)) sample
   | isEnumerableApplication l v =
-  enumerateAppliedLambda meta cumulative l v sample
+  -- The agreement fusion (task categorical-product-ov-fusion) is tried first
+  -- and answers 'Nothing' for everything it does not recognise or will not
+  -- take, so the ordinary joint enumeration stays the default path.
+  case agreementShape meta l v of
+    Just ag -> enumerateAgreement meta cumulative ag sample
+    Nothing -> enumerateAppliedLambda meta cumulative l v sample
 -- Deterministic curried call spine rooted at a known top-level function: build
 -- the WHOLE application (the query sample, plus every source-level argument)
 -- as one contiguous 'IRApply' chain and let-bind it exactly once, instead of
@@ -2963,6 +2968,217 @@ enumerateAppliedLambda meta cumulative l v sample = do
   setVariables outerBinds
   enumSumP (semiringOf meta) (countBranches (compilerConfig meta)) id boundVar discreteVVals innerTuple
 
+
+-- ===== Agreement fusion (task categorical-product-ov-fusion) =====
+--
+-- Two categorical variables combined by /agreement/ -- @let a = .. in let b =
+-- .. in if a == b then X else Y@ -- are the product-of-experts shape: the kept
+-- mass is @P_a(k) * P_b(k)@ per class, and @sum_k P_a(k) * P_b(k)@ is the
+-- fusion evidence. The corpus spells it as @showcase_poe_discrete@ and
+-- @observeDiscretePoE@.
+--
+-- Compiled by the ordinary path this is a /joint/ enumeration: the outer
+-- 'enumerateAppliedLambda' loops over @a@'s domain and, inside that loop,
+-- 'toIREnumerate' reaches the inner @let@ and loops over @b@'s domain again,
+-- evaluating @b@'s marginal V times per outer value. That is O(V^2) and it
+-- calls the second network V^2 times. At the vocabulary scale this exists for
+-- (V in the tens of thousands) V^2 is four to five orders of magnitude too
+-- slow, so the complexity bound is the feature, not an optimisation of it.
+--
+-- The fusion rewrites the double sum into dense vector algebra over the shared
+-- domain. Writing @pa@/@pb@ for the two marginals, @T@/@E@ for the two arms'
+-- masses against the query, and @Sb = sum_k pb(k)@:
+--
+-- @
+--   sum_j pa(j) * sum_k pb(k) * ( [j==k] * T(j) + [j/=k] * E(j) )
+--     = sum_j pa(j) * pb(j) * T(j)          -- the diagonal
+--     + sum_j pa(j) * (Sb - pb(j)) * E(j)   -- everything off it
+-- @
+--
+-- Both lines are O(V): four 'BMap's build the @[V]@ vectors, a 'BZip' with the
+-- semiring's own multiply is the elementwise product the task is named for,
+-- and a 'BReduce' sums. @Sb@ is one reduction of a vector that is built once.
+--
+-- The off-diagonal line is a /subtraction/, and that is forced rather than
+-- chosen: any O(V) form of "sum over everything but the diagonal" is the total
+-- minus the diagonal, because summing the off-diagonal terms directly is the
+-- O(V^2) we are removing. It loses precision exactly when the agreement mass
+-- approaches @Sa*Sb@ (near-certain agreement), which is the same cancellation
+-- the existing @AnyExcept@ marginal-minus-one-branch site already accepts, and
+-- is why 'srMinus' rather than a hand-rolled @-@ is used: log space needs
+-- 'logSubExpIR'.
+--
+-- WHAT IS NOT FUSED, and why each refusal is cheap. Every one of them falls
+-- back to 'enumerateAppliedLambda', so the behaviour is exactly today's:
+--
+--   * __branch counting__ (@-c@). The fused artifact really does traverse
+--     fewer leaves, so its branch count is not the enumerated path's -- and
+--     'bc' is documented as a measure of the compiled artifact rather than an
+--     invariant of the distribution, so it /should/ differ. Refusing under
+--     @-c@ keeps every existing @-c@ number exactly as it was and, better,
+--     turns the corpus's own "branch counting does not change the
+--     probability" property into a differential test of the fused path
+--     against the unfused one.
+--   * __topK__. Pruning is a per-branch decision inside the enumeration
+--     loop, and the fused form has no per-branch site to hang it on. A fused
+--     result would silently ignore the cutoff.
+--   * __the max-product semiring__. The algebra above distributes a product
+--     over a /sum/ and takes a complement; neither is valid for max, whose
+--     'srMinus' is 'mapHasNoExcept' for the same reason.
+--   * __an arm that reads the inner variable__. Then @E@ is @E(j,k)@, the
+--     off-diagonal sum does not factor, and there is no O(V) form at all.
+--   * __unequal domains__, which would make the elementwise product a
+--     shape error.
+--   * __operands that may share an enumerated latent__. This is the
+--     correctness gate, not a performance one: @sum_k pa(k) * pb(k)@ is the
+--     right joint only when the two subexpressions are independent. It is
+--     answered by the decomposability analysis ('latentVerdicts'), which is
+--     keyed by binary-'InjF' chain name and scope-correct -- and the
+--     agreement condition @a == b@ /is/ a binary 'InjF', so the verdict for
+--     exactly this node's two operands is already computed. That analysis was
+--     built (design materialize-discrete-marginals) with no consumer; this is
+--     its consumer. @let a = camNN i in let b = f a in if a == b then ..@ is
+--     the shape it refuses.
+data AgreementShape = AgreementShape
+  { agVar    :: Varname     -- ^ the outer bound variable, reused as the loop variable of every emitted 'BMap'
+  , agInner  :: Varname     -- ^ the inner bound variable, which the arms must not read
+  , agOpA    :: Expr        -- ^ the outer operand, whose marginal is the left factor
+  , agOpB    :: Expr        -- ^ the inner operand, whose marginal is the right factor
+  , agDomain :: MultiValue  -- ^ the shared enumerated domain
+  , agThen   :: Expr        -- ^ the arm taken when the two agree
+  , agElse   :: Expr        -- ^ the arm taken when they do not
+  , agRType  :: RType       -- ^ the conditional's return type, picking the query comparison
+  }
+
+-- | Recognise the agreement shape at an enumerable application, or answer
+-- 'Nothing' so the caller takes the ordinary enumeration.
+--
+-- Recognition is at the surface-language level -- it matches the SPLL AST
+-- (a nested enumerable @let@ whose body is an @if@ over an @InjF (Named "eq")@ of the
+-- two bound variables), not an IR peephole. An IR-level rewrite would have to
+-- prove that an arbitrary loop body is affine in an equality indicator, which
+-- is symbolic algebra over IR; the source shape states it outright.
+--
+-- Callable only where 'enumerateAppliedLambda' is, since it resolves chain
+-- names with the same partial 'equivalentLambda'.
+-- | 'Control.Monad.guard' for 'Maybe', spelled locally: this module already
+-- binds @guard@ as a local name for an IR guard expression in two unrelated
+-- places, and importing the 'Alternative' one would shadow them.
+require :: Bool -> Maybe ()
+require True  = Just ()
+require False = Nothing
+
+agreementShape :: CompilerMetadata -> Expr -> Expr -> Maybe AgreementShape
+agreementShape meta l v = do
+  let cfg = compilerConfig meta
+  -- Refusals that do not depend on the shape at all, checked first so the
+  -- common non-fusing compile does no AST walking.
+  require (not (countBranches cfg))
+  require (topKThreshold cfg == Nothing)
+  require (srReduceOp (semiringOf meta) /= ROpMax)
+  let fcd = fcData meta
+      fExprs = map snd (functions (compilingProgram meta))
+      (_, vOuter, bodyACN, _) = equivalentLambda "agreementShape" fcd (chainName (getTypeInfo l))
+      bodyA = findExprWithCN fExprs bodyACN
+  (l2, v2) <- case node bodyA of
+    Apply a b | isEnumerableApplication a b -> Just (a, b)
+    _ -> Nothing
+  let (_, vInner, bodyBCN, _) = equivalentLambda "agreementShape/inner" fcd (chainName (getTypeInfo l2))
+      bodyB = findExprWithCN fExprs bodyBCN
+  (cond, thenE, elseE) <- case node bodyB of
+    IfThenElse c t e -> Just (c, t, e)
+    _ -> Nothing
+  -- The condition must be exactly the two bound variables compared for
+  -- equality, in either order.
+  case node cond of
+    InjF (Named "eq") [Expr _ (Var x), Expr _ (Var y)]
+      | (x, y) == (vOuter, vInner) || (x, y) == (vInner, vOuter) -> Just ()
+    _ -> Nothing
+  -- Neither arm may read the inner variable: the off-diagonal sum only
+  -- factors because the arms are constant in it.
+  require (Set.notMember vInner (varsOfExpr thenE))
+  require (Set.notMember vInner (varsOfExpr elseE))
+  -- Independence, from the decomposability analysis keyed by this very node.
+  require (Map.lookup (chainName (getTypeInfo cond)) (latentVerdicts meta) == Just False)
+  domA <- enumeratedDomain v
+  domB <- enumeratedDomain v2
+  require (domA == domB)
+  return AgreementShape
+    { agVar = vOuter, agInner = vInner, agOpA = v, agOpB = v2
+    , agDomain = domA, agThen = thenE, agElse = elseE
+    , agRType = rType (getTypeInfo bodyB) }
+
+-- | A node's single 'DiscreteValues' domain, if it has exactly one. Total
+-- where 'enumerateAppliedLambda' uses a @head@ on the same list, because a
+-- missing tag here means "do not fuse" rather than a compiler bug.
+enumeratedDomain :: Expr -> Maybe MultiValue
+enumeratedDomain e = case [x | DiscreteValues x <- tags (getTypeInfo e)] of
+  (d:_) -> Just d
+  []    -> Nothing
+
+-- | Emit the fused O(V) form for a recognised 'AgreementShape'. See the
+-- commentary on 'AgreementShape' for the algebra this implements.
+enumerateAgreement :: CompilerMetadata -> Bool -> AgreementShape -> IRExpr -> CompilerMonad PResult
+enumerateAgreement meta cumulative ag sample = do
+  let sr    = semiringOf meta
+      v     = agVar ag
+      dom   = agDomain ag
+      rt    = agRType ag
+      cmpOp = case rt of { TFloat -> OpApprox; TVarR _ -> OpApprox; _ -> OpEq }
+      -- Both bound variables enter the type environment exactly as the nested
+      -- enumeration would have bound them, so the arms and the operands are
+      -- compiled in the scope they were written in.
+      metaV = meta { typeEnv = (agVar ag,   (rType (getTypeInfo (agOpA ag)), False))
+                            : (agInner ag, (rType (getTypeInfo (agOpB ag)), False))
+                            : typeEnv meta }
+      -- One compiled body, as a function of the shared loop variable.
+      -- Bindings the sub-compilation floated are bound INSIDE the body, since
+      -- it becomes a 'BMap' lambda and a loop-variable read must not escape
+      -- its binder -- except for those that do not mention the loop variable
+      -- at all, which are lifted out by 'hoistInvariantBindings' exactly as
+      -- 'enumerateAppliedLambda' lifts them. That split is not cosmetic: the
+      -- raw network call (@camNN(img)@) is loop-invariant, and leaving it
+      -- inside would run the network once per class instead of once, turning
+      -- an O(V) probability computation back into O(V) *network invocations*
+      -- -- which at vocabulary scale is the whole cost.
+      closeOver m = do
+        (e, binds) <- m
+        let (invariant, inner) = hoistInvariantBindings v (generateLetInExpr binds e)
+        setVariables invariant
+        return inner
+  paBody <- closeOver (lift (runWriterT ((unP . rProb) <$> toIRInference metaV False (agOpA ag) (IRVar v))))
+  pbBody <- closeOver (lift (runWriterT ((unP . rProb) <$> toIRInference metaV False (agOpB ag) (IRVar v))))
+  -- The arms are generated forward and compared against the query, exactly as
+  -- 'toIREnumerate's 'IfThenElse' equation does -- including its premise
+  -- check, since the fused form generates the same operands it does.
+  let armMass e = do
+        eIR <- toIRGenerate metaV e
+        requireDeterministicUnderEnum metaV "agreement arm" e eIR
+        return (if cumulative then compareValueExpr sr rt eIR sample
+                              else maskSR sr (IROp cmpOp eIR sample))
+  thenBody <- closeOver (lift (runWriterT (armMass (agThen ag))))
+  elseBody <- closeOver (lift (runWriterT (armMass (agElse ag))))
+  let mkMap b = IRBuiltin BMap [IRLambda v b, tensorDomainSR dom]
+      zipSR a b  = IRBuiltin (BZip (srTimesOp sr)) [a, b]
+      reduceSR t = IRBuiltin (BReduce (srReduceOp sr) 0) [t]
+  -- The two marginal vectors are each read twice (the diagonal and the
+  -- off-diagonal line), so they are bound once rather than rebuilt.
+  paV <- mkVariable "agree_pa"
+  pbV <- mkVariable "agree_pb"
+  sbV <- mkVariable "agree_pb_total"
+  cV  <- mkVariable "agree_complement"
+  setVariables [ (paV, mkMap paBody)
+               , (pbV, mkMap pbBody)
+               , (sbV, reduceSR (IRVar pbV)) ]
+  let -- the elementwise product of the two [V] marginals: the whole point
+      product' = zipSR (IRVar paV) (IRVar pbV)
+      diagonal = reduceSR (zipSR product' (mkMap thenBody))
+      -- (Sb - pb(j)) per element. A BMap rather than a second BZip because
+      -- 'srMinus' is 'logSubExpIR' under log space, which is not an Operand.
+      complement = IRBuiltin BMap [IRLambda cV (srMinus sr (IRVar sbV) (IRVar cV)), IRVar pbV]
+      offDiagonal = reduceSR (zipSR (zipSR (IRVar paV) complement) (mkMap elseBody))
+  opaqueMass sr (srPlus sr diagonal offDiagonal) const0
+
 -- | Refuse a generate-backed probability. 'toIREnumerate' compiles its operands
 -- /forward/ on the premise stated at its fallback equation: with the enclosing
 -- discrete latents pinned to concrete enumerated values, the operand is
@@ -3016,7 +3232,9 @@ toIREnumerate :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PRe
 -- recurse with enumeration + weighting rather than generating the draw forward.
 toIREnumerate meta cumulative (Expr _ (Apply l v)) sample
   | isEnumerableApplication l v =
-  enumerateAppliedLambda meta cumulative l v sample
+  case agreementShape meta l v of
+    Just ag -> enumerateAgreement meta cumulative ag sample
+    Nothing -> enumerateAppliedLambda meta cumulative l v sample
 toIREnumerate meta cumulative (Expr TypeInfo{chainName=cn} (Var _)) sample = do
   let equivCN = equivalentChainName "toIREnumerate/Var" (fcData meta) cn
   let fs = map snd (functions (compilingProgram meta))

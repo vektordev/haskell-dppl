@@ -638,9 +638,81 @@ digit read is 10 IR nodes, while an arbitrary enumerable if-tree can be
 thousands, where copying per value cost 14x the IR and turned a 0.17s
 compile into 16s.
 
+### Agreement fusion: two categoricals multiply in O(V)
+
+Combining two categorical variables by **agreement** — `let a = camNN i in
+let b = depthNN d in if a == b then right a else left ()` — is the
+product-of-experts shape: the kept mass is `P_a(k)·P_b(k)` per class and
+`Z = Σ_k P_a(k)·P_b(k)` is the fusion evidence. It compiled to a *joint*
+enumeration, O(V²), evaluating the second expert's marginal V times per
+outer value. Correct, and unusable at the vocabulary scale it exists for.
+
+`IRCompiler.enumerateAgreement` rewrites the double sum into dense vector
+algebra over the shared domain. Writing `T`/`E` for the two arms' masses
+against the query and `Sb = Σ_k pb(k)`:
+
+```
+Σ_j pa(j) · Σ_k pb(k) · ( [j==k]·T(j) + [j≠k]·E(j) )
+  = Σ_j pa(j)·pb(j)·T(j)          -- the diagonal: the elementwise product
+  + Σ_j pa(j)·(Sb − pb(j))·E(j)   -- everything off it
+```
+
+Four `BMap`s build the `[V]` vectors, `BZip` (with the semiring's *own*
+multiply — `OpMult` linear, `OpPlus` in log space, which is why `Semiring`
+gained `srTimesOp` alongside `srReduceOp`) is the elementwise product, and
+`BReduce` sums. Measured on emitted Python over two decades of domain size,
+against the same source compiled the old way: V=10 0.028ms vs 0.305ms,
+V=100 0.229ms vs 25.5ms, V=1000 2.20ms vs 2551ms — fused time grows 78x
+across a 100x domain, the joint path 8366x. Bit-identical on the diagonal,
+within 9e-16 on the complement.
+
+The off-diagonal subtraction is **forced, not chosen**: any O(V) form of
+"sum over everything but the diagonal" is the total minus the diagonal,
+because summing those terms directly is the O(V²) being removed. It is
+spelled with `srMinus` (so log space gets `logSubExpIR`) and loses precision
+only as agreement approaches certainty — the same cancellation the
+`AnyExcept` site already accepts.
+
+Six refusals, each falling back to the ordinary enumeration so behaviour is
+exactly as before:
+
+- **branch counting** (`-c`) and **topK**. The fused artifact traverses
+  fewer leaves, so its `bc` is legitimately not the enumerated path's, and
+  topK's per-branch cutoff has no per-branch site to hang on. Refusing keeps
+  every existing `-c`/topK number intact — and turns the corpus's own
+  "branch counting doesn't change the probability" property into a
+  differential test of fused against unfused, which is how the fusion is
+  covered at every corpus query point rather than only where a `.tst` says so.
+- **the max-product semiring**, whose `srMinus` is `mapHasNoExcept` for the
+  same reason the algebra above is sum-product-only.
+- **an arm that reads the inner variable**, where the off-diagonal sum does
+  not factor and no O(V) form exists.
+- **unequal domains**, a shape error for the product.
+- **operands that may share an enumerated latent** — the correctness gate,
+  and the only one whose failure would be a silent wrong number. Answered by
+  `latentVerdicts`, the decomposability analysis (design
+  `materialize-discrete-marginals`) which until now had *no consumer*: it is
+  keyed by binary-`InjF` chain name and the agreement condition `a == b` is
+  a binary `InjF`, so the scope-correct verdict for exactly these two
+  operands is already computed. Canary: `testCases/agreementSharedLatent`.
+
+Corpus: `categoricalProductFusion` (hand-derived posteriors, non-uniform on
+both operands, including the zero-product impossibility rows),
+`agreementSharedLatent` (the refusal), and the pre-existing
+`showcase_poe_discrete`/`observeDiscretePoE`, whose pinned values are
+unchanged by the rewrite. Structural coverage is
+`TestInternals.agreementFusesToElementwiseProduct`, which asserts the fused
+body has no reduction inside a loop body while the same source under `-c`
+does — a shape assertion rather than a wall-clock one, since the timing
+belongs in `benchmarks/stressAgreementProduct.ppl`.
+
+**Not yet fused**: a *conjunction* of agreements, `if (v == c) && (v == d)`,
+which is how `showcase_poe_with_prior` and `showcase_poe_three_sensors`
+spell three-way fusion. Those stay O(V²)/O(V³).
+
 ### Tensors in the IR
 
-`IRBuiltin Builtin [IRExpr]` carries four operations over a **tensor** — a
+`IRBuiltin Builtin [IRExpr]` carries five operations over a **tensor** — a
 statically-shaped, flat, homogeneous block of values (`VTensor Shape [Value]`,
 row-major, outermost axis first), as against `VList`'s cons spine:
 
@@ -650,6 +722,7 @@ row-major, outermost axis first), as against `VList`'s cons spine:
 | `BMap` | `[IRLambda v body, t]` | elementwise map, shape-preserving |
 | `BReduce op axis` | `[t]` | fold along `axis` with `op`, dropping it |
 | `BIndex axis` | `[t, key]` | read along `axis` at a runtime key, dropping it |
+| `BZip op` | `[a, b]` | elementwise binary `op` over two same-shaped tensors |
 
 `Shape`/`Extent` live in `Typing/RType.hs`, because the typed surface tensor of
 the `tensors-in-core-language` design is `TTensor Shape RType` over the same

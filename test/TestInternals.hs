@@ -2730,6 +2730,85 @@ expertClassProb = do
     Right p  -> return p
   return (\seed k -> showcaseProb prog [mockSymbol seed] (VInt k))
 
+-- | Does any loop body perform a reduction over the domain? That is the
+-- structural signature of a joint enumeration: one pass over @V@ values, each
+-- of which itself sums over @V@ values, i.e. O(V^2).
+--
+-- Asked of 'BMap' bodies rather than as a nesting depth of 'BReduce' nodes,
+-- because the compiler floats a loop body into a let-binding as a sharing
+-- device -- under @-c@ the two reductions of the shared map are siblings of
+-- the binding, not descendants of each other, so a depth count reads a genuine
+-- double enumeration as flat. The loop body is where the per-element cost
+-- actually lives, and a binding the body depends on stays lexically inside it
+-- ('hoistInvariantBindings' only lifts the ones that do not).
+reduceInsideLoopBody :: IRExpr -> Bool
+reduceInsideLoopBody (IRBuiltin BMap [IRLambda _ body, t]) =
+  containsReduce body || reduceInsideLoopBody t
+reduceInsideLoopBody e = any reduceInsideLoopBody (getIRSubExprs e)
+
+containsReduce :: IRExpr -> Bool
+containsReduce e = isReduce e || any containsReduce (getIRSubExprs e)
+  where
+    isReduce (IRBuiltin (BReduce _ _) _) = True
+    isReduce _ = False
+
+-- | Is the elementwise product the fusion is named for actually present?
+containsZipProduct :: IRExpr -> Bool
+containsZipProduct e = isZip e || any containsZipProduct (getIRSubExprs e)
+  where
+    isZip (IRBuiltin (BZip OpMult) _) = True
+    isZip (IRBuiltin (BZip OpPlus) _) = True   -- the log-space spelling of times
+    isZip _ = False
+
+-- | The probability-mode body of a corpus program's @main@, under a given
+-- config.
+corpusProbBody :: CompilerConfig -> String -> IO IRExpr
+corpusProbBody cfg baseName = do
+  prog <- loadCorpusProgram baseName
+  case compile cfg prog of
+    Left err -> assertFailure ("Compile error in " ++ baseName ++ ": " ++ show err)
+    Right irEnv -> case probFun (lookupIREnv "main" irEnv) of
+      Just (pf, _) -> return pf
+      Nothing      -> assertFailure (baseName ++ " has no probability variant")
+
+-- | Task categorical-product-ov-fusion: an agreement combination of two
+-- categoricals must compile to a single pass over the domain -- an elementwise
+-- product of two [V] marginal vectors -- not to a joint enumeration of both
+-- operands.
+--
+-- Asserted structurally rather than by wall clock. The complexity bound is the
+-- feature, and what delivers it is that the inner enumeration is gone; a
+-- timing test asserting the same thing would be measuring the CI box. The
+-- measured runtimes that back this up are in the task document.
+--
+-- The @-c@ half is what stops the test being an assertion about nothing. The
+-- fusion deliberately declines under branch counting (it would change the
+-- counts), so the same program compiled with @countBranches@ still takes the
+-- joint path -- and the test pins the *difference* between the two shapes,
+-- which no accident of compilation could produce.
+test_agreementFusesToElementwiseProduct :: TestTree
+test_agreementFusesToElementwiseProduct = testCase "agreementFusesToElementwiseProduct" $ do
+  fused <- corpusProbBody defaultCompilerConfig "categoricalProductFusion"
+  assertBool "the fused body should still contain an enumeration over the domain" $
+    irAnyLoop fused
+  assertBool "the agreement should compile to an elementwise product (BZip)" $
+    containsZipProduct fused
+  assertBool "the fused body must not reduce over the domain inside a loop body" $
+    not (reduceInsideLoopBody fused)
+  -- The control: branch counting declines the fusion, so this is the shape the
+  -- fusion replaces, compiled from the very same source.
+  joint <- corpusProbBody defaultCompilerConfig{countBranches = True} "categoricalProductFusion"
+  assertBool "the unfused control should not contain an elementwise product" $
+    not (containsZipProduct joint)
+  assertBool "the unfused control is the joint enumeration this replaces" $
+    reduceInsideLoopBody joint
+  -- The correctness refusal: two operands that may share an enumerated latent
+  -- are not independent, so their marginals must not be multiplied. This is
+  -- the one gate whose failure would be silent -- a wrong number, not a crash.
+  shared <- corpusProbBody defaultCompilerConfig "agreementSharedLatent"
+  assertBool "an agreement over a shared latent must not fuse to a product" $
+    not (containsZipProduct shared)
+
 -- | Level 4: fusing two sensors by observing their agreement is a *product* of
 -- experts, not a mixture -- p(Just k) = P_cam(k) * P_depth(k). The evidence
 -- Z = p(Just ANY) is that product summed over the support, and the rejected
@@ -3058,6 +3137,7 @@ internalsTests = testGroup "Internals"
       , test_writeLogitsRoundtripNoop
       , test_writeLogitsBoolExactProbs
       , test_nnHoistedOutOfEnumSum
+      , test_agreementFusesToElementwiseProduct
       ]
   , test_missingMainFunction
   , test_farTailEitherDensityNotZeroed

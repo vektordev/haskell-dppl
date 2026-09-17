@@ -498,6 +498,33 @@ generate f neurals' registry adts' globalEnv env args (IRBuiltin (BIndex ax) [tE
                               ++ show ax ++ " of shape " ++ show sh)
     (VTensor _ _, k) -> failWith f ("BIndex: key must be an integer, got " ++ show k)
     (t, _) -> failWith f ("BIndex: not a tensor: " ++ show t)
+-- Elementwise binary op over two tensors of the same shape (task
+-- categorical-product-ov-fusion).
+--
+-- Each pair is combined by recursing on @IROp op (IRConst x) (IRConst y)@
+-- rather than by a second scalar-arithmetic implementation here -- the same
+-- trick 'BMap' uses for its lambda. That is what makes a zipped multiply
+-- *definitionally* the scalar multiply this interpreter already agrees with
+-- the three backends on, rather than a copy that has to be kept in step with
+-- it (notably for the operands with non-obvious semantics: 'OpApprox's
+-- tolerance, 'OpEq' over non-numeric values).
+--
+-- The shape check is an equality, not a broadcast: 'BZip' deliberately does
+-- not broadcast (see the soundness note on 'Builtin'), so unequal shapes are
+-- a compiler bug and fail loudly.
+generate f neurals' registry adts' globalEnv env args (IRBuiltin (BZip op) [aExpr, bExpr]) = do
+  aVal <- generate f neurals' registry adts' globalEnv env args aExpr
+  bVal <- generate f neurals' registry adts' globalEnv env args bExpr
+  case (aVal, bVal) of
+    (VTensor shA xs, VTensor shB ys)
+      | shA == shB -> do
+          zs <- zipWithM (\x y -> generate f neurals' registry adts' globalEnv env args
+                                    (IROp op (IRConst x) (IRConst y))) xs ys
+          return $ VTensor shA zs
+      | otherwise -> failWith f ("BZip " ++ show op ++ ": shape mismatch, "
+                            ++ show shA ++ " against " ++ show shB)
+    (VTensor _ _, b) -> failWith f ("BZip: right operand is not a tensor: " ++ show b)
+    (a, _) -> failWith f ("BZip: left operand is not a tensor: " ++ show a)
 generate f _ _ _ _ _ _ e@(IRBuiltin b args) =
   failWith f ("Malformed tensor builtin " ++ show b ++ " with " ++ show (length args)
          ++ " arguments: " ++ show e)

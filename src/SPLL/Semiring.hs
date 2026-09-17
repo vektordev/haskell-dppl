@@ -48,7 +48,7 @@ module SPLL.Semiring (
   -- * PResult combinators
   density, mass, detP, impossibleP, indicatorP, impossibleWhen,
   prodP, onProb, onDim, onBranches, mapResult, guardP, zipResult,
-  scaleCoV, anySafe, anySafeShared, enumSumP, enumSumNode, opaqueMass, shareResult,
+  scaleCoV, anySafe, anySafeShared, enumSumP, enumSumNode, tensorDomainSR, opaqueMass, shareResult,
   packResult, unpackResult, mixP, mixSubP, mixWith,
   -- * Compiler monad plumbing (generic; not Semiring-specific, but shared by
   -- combinators that bind fresh variables)
@@ -186,6 +186,7 @@ data Semiring = Semiring
   , srZero     :: IRExpr                      -- ^ probability zero / structurally impossible
   , srOne      :: IRExpr                      -- ^ multiplicative identity
   , srTimes    :: IRExpr -> IRExpr -> IRExpr  -- ^ independent conjunction (prodP, change-of-variables scaling)
+  , srTimesOp  :: Operand                     -- ^ the 'Operand' 'srTimes' is spelled with, for the same reason 'srReduceOp' exists: an /elementwise/ product over two tensors ('BZip', task categorical-product-ov-fusion) has to name an operator inside a node, which no binary @IRExpr -> IRExpr -> IRExpr@ function can do. Must stay in step with 'srTimes' -- @OpMult@ linear, @OpPlus@ in log space, where getting it wrong silently computes a different number rather than failing
   , srPlus     :: IRExpr -> IRExpr -> IRExpr  -- ^ mixture / alternative sum (mixP). Pairwise only -- 'srReduceOp' is this same operator's identity for 'enumSumP's fold over a whole (possibly large) enumerated domain, kept as a separate field because the fold has to pick an IR *reduction node* (design ir-tensor-values' 'BReduce'), which no binary 'IRExpr -> IRExpr -> IRExpr' function can name.
   , srMinus    :: IRExpr -> IRExpr -> IRExpr  -- ^ AnyExcept: marginal minus one branch (mixSubP)
   , srComplement :: IRExpr -> IRExpr          -- ^ CDF flip under a decreasing transform: 1 - x linear, log(1 - exp x) log
@@ -214,11 +215,11 @@ mkSemiring SRCounting   _     = error $ "Semiring.mkSemiring: SRCounting has no 
   ++ "never have reached here -- this is a defensive check, not a documented refusal path."
 
 linearSemiring :: Semiring
-linearSemiring = Semiring False ROpAdd const0 const1 (IROp OpMult) (IROp OpPlus) (IROp OpSub)
+linearSemiring = Semiring False ROpAdd const0 const1 (IROp OpMult) OpMult (IROp OpPlus) (IROp OpSub)
                           (IROp OpSub const1)
 
 logSemiring :: Semiring
-logSemiring = Semiring True ROpLogSumExp negInfIR const0 (IROp OpPlus) logSumExpIR logSubExpIR
+logSemiring = Semiring True ROpLogSumExp negInfIR const0 (IROp OpPlus) OpPlus logSumExpIR logSubExpIR
                        (\x -> IRUnaryOp OpLog (IROp OpSub const1 (IRUnaryOp OpExp x)))
 
 -- | Max-product (MAP/Viterbi), linear domain: independent conjunction is still
@@ -236,7 +237,7 @@ logSemiring = Semiring True ROpLogSumExp negInfIR const0 (IROp OpPlus) logSumExp
 -- scalar carries), so AnyExcept under this family is refused with a named
 -- error at the point it would be compiled -- see 'mapHasNoExcept'.
 maxLinearSemiring :: Semiring
-maxLinearSemiring = Semiring False ROpMax const0 const1 (IROp OpMult) maxPairIR
+maxLinearSemiring = Semiring False ROpMax const0 const1 (IROp OpMult) OpMult maxPairIR
                              mapHasNoExcept (IROp OpSub const1)
 
 -- | Max-product, log domain: 'srTimes' is add (as in ordinary log-space
@@ -247,7 +248,7 @@ maxLinearSemiring = Semiring False ROpMax const0 const1 (IROp OpMult) maxPairIR
 -- need for log-sum-exp's numerical-stability machinery (there is no sum to
 -- stabilize).
 maxLogSemiring :: Semiring
-maxLogSemiring = Semiring True ROpMax negInfIR const0 (IROp OpPlus) maxPairIR
+maxLogSemiring = Semiring True ROpMax negInfIR const0 (IROp OpPlus) OpPlus maxPairIR
                           mapHasNoExcept (\x -> IRUnaryOp OpLog (IROp OpSub const1 (IRUnaryOp OpExp x)))
 
 -- | Pairwise max of two already-let-bound values (both 'mixWith' and
