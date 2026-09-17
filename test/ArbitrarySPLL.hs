@@ -402,7 +402,10 @@ genTypedRec env ty n =
     -- from the compiler's own 'globalFEnv' (Axis 1). The hand-written
     -- per-type table this replaced had drifted: it never emitted @double@,
     -- @sq@, @recip@ or @max@, never compared Ints, and never used @eq@ at
-    -- all, none of which was a decision anyone took.
+    -- all, none of which was a decision anyone took. (@recip@ is out again
+    -- since, deliberately this time: its forward declaration was corrected to
+    -- state the @a \/= 0@ domain it always had, so 'injFUnconditional' now
+    -- excludes it -- the derivation working as designed.)
     catalogProds t = [ injF (injFName sig) <$> mapM argAt (injFArgs sig)
                      | sig <- injFCatalogFor t
                      , let arity = length (injFArgs sig)
@@ -1113,17 +1116,28 @@ data InjFExclusion
   | InjFPolyArity   -- ^ more than one type variable; no instantiation rule
   deriving (Show, Eq, Ord)
 
--- | Is this forward direction total on its argument types? @applicability@ is
--- the declaration's own statement of that, and @IRConst (VBool True)@ is how
--- it says "always" (api/src/PredefinedFunctions.md).
+-- | Does this forward direction *claim* to be total on its argument types?
+-- @applicability@ is the declaration's own statement about its domain, and
+-- @IRConst (VBool True)@ is how it says "always"
+-- (api/src/PredefinedFunctions.md).
 --
--- This is the safety condition for *generating* an application. @log@ and
--- @sqrt@ are defined only on the positive reals, and a generator that emitted
--- @log <any Float>@ would manufacture NaN densities at a rate that says
--- nothing about the compiler. Reading the guard off the declaration keeps that
--- judgment in one place: a predefined function that later gains an
+-- That claim is the safety condition for *generating* an application. @log@
+-- and @sqrt@ are defined only on the positive reals, and a generator that
+-- emitted @log <any Float>@ would manufacture NaN densities at a rate that
+-- says nothing about the compiler. Reading the guard off the declaration keeps
+-- that judgment in one place: a predefined function that later gains an
 -- applicability test drops out of the catalog automatically, and one that
 -- loses a spurious test is picked up.
+--
+-- What it is *not* is a proof of totality. The catalog is exactly as honest as
+-- the declarations it reads, and a declaration that understates its domain
+-- admits a partial function silently. @recip@ did precisely that -- body
+-- @1\/a@, applicability @True@, while its own inverse carried a @b \/= 0@
+-- guard -- and was generated for eight shifts, with @typedLeaves TyFloat =
+-- [constF 0]@ making @recip 0@ the shrinker's preferred minimum. The repair
+-- for that class belongs in 'PredefinedFunctions' (state the domain), not in a
+-- name-based exclusion here, so that this derivation stays the single place
+-- the judgment is made.
 injFUnconditional :: FDecl -> Bool
 injFUnconditional d = applicability d == IRConst (VBool True)
 
@@ -1316,9 +1330,12 @@ typedLeaves (TyList a) = [ cons x nul | x <- take 1 (typedLeaves a) ]
 
 -- | Type-preserving shrink for an expression produced by 'genTypedExpr'.
 --
--- Every candidate has a 'tyCompatible' 'Ty' and a strictly smaller node count,
--- so the result is well-founded and never hands the property an ill-typed or
--- ill-scoped program (either of which would be discarded, minimizing nothing).
+-- Every candidate has a strictly smaller node count and a 'Ty' that
+-- 'tyGeneralizes' the node's own -- the *asymmetric* test, not a symmetric
+-- compatibility/join one, which M1 used and which was too weak (see
+-- 'tyGeneralizes'). So the result is well-founded and never hands the property
+-- an ill-typed or ill-scoped program (either of which would be discarded,
+-- minimizing nothing).
 shrinkTypedExpr :: Expr -> [Expr]
 shrinkTypedExpr = shrinkTypedExprIn []
 

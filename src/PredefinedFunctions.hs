@@ -108,8 +108,16 @@ negIFwd = FDecl (Forall [] [] (TArrow TInt TInt)) ["a"] ["b"] (IRUnaryOp OpNeg (
 negIInv :: FDecl
 negIInv = FDecl (Forall [] [] (TArrow TInt TInt)) ["b"] ["a"] (IRUnaryOp OpNeg (IRVar "b")) (IRConst (VBool True)) False [("b", IRConst (VFloat (-1)))]
 
+-- 1/a is undefined at a = 0, so the forward direction is partial on TFloat and
+-- says so. Nothing in the compiler reads a *forward* applicability test today
+-- (only inverses' tests are compiled in, see 'IRCompiler.guardedSubInference'
+-- and 'ForwardChaining'), so this is a declaration of domain rather than a
+-- behaviour change -- but it is the declaration the test-side InjF catalog
+-- reads to decide what it may generate, and claiming totality here put
+-- @recip@ into the generated fragment while @typedLeaves TyFloat = [constF 0]@
+-- made @recip 0@ the shrinker's preferred minimum.
 recipFwd :: FDecl
-recipFwd = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["a"] ["b"] (IROp OpDiv (IRConst (VFloat 1)) (IRVar "a")) (IRConst (VBool True)) False [("a", IRUnaryOp OpNeg (IROp OpDiv (IRConst (VFloat 1)) (IROp OpMult (IRVar "a") (IRVar "a"))))]
+recipFwd = FDecl (Forall [] [] (TArrow TFloat TFloat)) ["a"] ["b"] (IROp OpDiv (IRConst (VFloat 1)) (IRVar "a")) (IRUnaryOp OpNot (IROp OpEq (IRVar "a") (IRConst $ VFloat 0))) False [("a", IRUnaryOp OpNeg (IROp OpDiv (IRConst (VFloat 1)) (IROp OpMult (IRVar "a") (IRVar "a"))))]
 recipInv :: FDecl
 -- 1/a is never 0, so a zero observation is impossible rather than a division
 -- by zero producing NaN/Inf in the reported density.
