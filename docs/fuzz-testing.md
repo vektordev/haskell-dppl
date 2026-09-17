@@ -9,8 +9,10 @@ ill-typed); `genTypedProgram`/`genTypedExpr` build well-typed programs
 over scalars, tuples, `Either` and lists (roughly half of all draws are
 structured) with `let`-bindings (most draws carry one — see "how many draws
 carry a `let`" below, and read the figure the coverage property prints for the
-run in front of you rather than any number written down here), one draw in
-five to six declaring and reading a neural network, and drive the
+run in front of you rather than any number written down here) and function
+values (about a third of draws — see "The arrow surface" below), one draw in
+five declaring and reading a neural network and one in five declaring a named
+top-level function, and drive the
 real invariants (programs validate, P(ANY)=1,
 probability is never negative, topK at threshold 0 reproduces exact
 inference and at a real threshold never inflates it, branch counting
@@ -492,3 +494,57 @@ The `Neural generator` group (default suite, beside `Shrinker`) pins the
 machinery the properties depend on being right about: that a neural draw
 validates, that its core type is still recoverable and so still shrinks, and
 that shrinking never quietly turns a neural draw into an ordinary one.
+
+## The arrow surface (task `fuzz-arrow-generator-coverage`)
+
+The generator emits function *values* — a lambda bound, passed, selected by an
+`if`, projected out of a tuple or list, or declared at the top level — and
+applies them. Mechanism and productions: `api/test/ArbitrarySPLL.md` in the
+internal-docs repo. What matters here is what it costs and what it found.
+
+**It is deliberately one production slot, not three.** `genTypedExprIn` picks
+with `oneof`, so anything added at a node dilutes everything else there
+equally. At three slots the axis measurably cost the two properties that draw
+a *pair* of programs — `prop_Fuzz_MixtureFollowsCombinationRules` and the
+neural twin oracle — their power: both need two draws to reach a probability
+function, so they see the square of that rate, and both stopped falsifying and
+started giving up on their discard ratio. At one slot the rate of draws
+reaching a probability function is 20–26% against a 31% pre-axis baseline, the
+compile-crash rate is 52–54% against 51.5%, and a third of draws still carry a
+function value.
+
+**`Slow` was red before this and is red after it.** Three full runs: 8 of the
+25 `Fuzz` properties fail without the axis, then 9 and 7 with it. Read that as
+"the same eight-ish properties, all of them falsifications of the already-filed
+`fuzz-structured-type-bugs` / `fuzz-let-witness-bugs` / `fuzz-neural-plan-bugs`
+families, plus or minus a seed" — **the count is not stable enough to carry an
+argument**. Each property is bounded by a wall-clock budget rather than by a
+draw count, so which ones get far enough to falsify moves between runs. The
+one property that failed with the axis and not without it,
+`prop_Fuzz_MixtureFollowsCombinationRules`, did not fail on the third run
+either.
+
+What the axis found, in one run each:
+
+- The **curried-callee crash** (`toIRInference/Apply: chain name 'ast2' should
+  resolve to a lambda, but resolved to … IfInfo …`), which is gap 1 of the
+  already-filed `callee-normalize-curried-and-accessor-gaps` — an independent
+  rediscovery of a known defect, which is the axis working as intended.
+- A **new** crash with no function value in it at all:
+  `main = 6 * (if Uniform < 0.5 then 1 else 0)` dies in `forceOp` at `-O2` and
+  in the interpreter at `-O0`, because the `Int` multiplication inverse is
+  written with a division that neither evaluator defines. Filed as
+  `int-mult-inversion-divides-and-crashes`. The axis only changed which draw
+  the search reached first.
+- A **compile blowup** on a draw carrying function values, filed as
+  `mixture-blowup-on-function-value-draws` — unminimized, seed-dependent (it
+  reproduced in one run of two at the same commit), and not established to be
+  caused by the function values rather than by the 19-comparison chain in the
+  same draw.
+
+The `Arrow generator` group (default suite, beside `Shrinker` and `Neural
+generator`) pins the classifier every coverage bound is stated in terms of,
+that a helper draw validates and applies its helper, and the one soundness
+rule the shrinker has to respect here: a function value reduces to the
+constant function as a whole and is never minimized from within, because
+nothing at a bare lambda says what its parameter was bound at.
