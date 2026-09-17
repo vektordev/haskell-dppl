@@ -52,16 +52,37 @@ the already-filed M2 messages, reached again because a neural draw's body is an
 ordinary generated expression and can contain a witness-`let` like any other.
 Tracked as `fuzz-neural-plan-bugs` in the internal-docs repo.
 
-**The Slow `Fuzz` group no longer completes on this machine.** A full run stalls
-for over 25 minutes inside `prop_Fuzz_TopKNeverInflates`, and
+**The Slow `Fuzz` group does not complete at the default size on this machine.**
+A full run stalls for over 25 minutes inside `prop_Fuzz_TopKNeverInflates`, and
 `prop_Fuzz_NeuralMaterializedTwinAgrees` was abandoned after 40 minutes against
-a worst case of about 18 by its own per-case budget. That overrun is a hang
-`System.Timeout.timeout` cannot interrupt — it does not stop a pure loop that
-allocates nothing — so the per-case budget these properties rely on is not the
-guarantee it reads as. The likely culprit is the non-terminating draw recorded
-as item 2 of `fuzz-structured-type-bugs`, now hit routinely rather than
-occasionally. Run individual properties rather than the group until that is
-addressed.
+a worst case of about 18 by its own per-case budget.
+
+**The earlier reading of that overrun — a hang `System.Timeout.timeout` cannot
+interrupt — is wrong, and the correction matters.** Run at
+`NEST_FUZZ_SCALE=0.9` (see below), `prop_Fuzz_NeuralMaterializedTwinAgrees`
+finishes in 50s and *fails properly*: `did not terminate within 5000000us`,
+reported as a counterexample and then **shrunk four times**. The per-case budget
+fires, is caught, and minimizes. What is unbounded is the **aggregate**, not any
+one case. The property discards ~95% of its draws, needs 20 successes, and
+spends a full 5s budget on each hanging draw *and on each of its shrink
+candidates* — so a run costs (draws + shrinks) × 5s with no ceiling on either
+factor. A per-case timeout bounds a case; it does not bound QuickCheck's search.
+
+The minimized draw confirms the culprit is item 2 of
+`fuzz-structured-type-bugs`, and sharpens it: **the network is not involved at
+all.** The bound variable is dead — the read is applied and then ignored — so
+the non-terminating core is pure structured-accessor code,
+
+```
+snd (head (Cons (TCons (right (Uniform < 0.79))
+                       (TCons (TCons (Uniform < 0.84) (Uniform < 0.65))
+                              (Cons (if False then 3 else if False then 2 else 1) [])))
+                []))
+```
+
+which is the first *minimized* repro for that item (it was recorded there as
+"large program, re-derive via replay"). Until it is addressed, run the group at
+a reduced `NEST_FUZZ_SCALE`, or run individual properties.
 
 The default suite is unaffected; per the design, findings are filed rather than
 fixed so that coverage work is not blocked behind bug triage.
@@ -192,6 +213,49 @@ cases it exists to bound.
 The interpreter substitutes a mock for every declared neural network
 (`MockNN.hs`); `(2, [logit0, ...])` (a verbatim logit vector) is the only
 deterministic mode, used to pin exact densities in `.tst` files.
+
+## The depth knob (`NEST_FUZZ_SCALE`)
+
+Structural size and case count are the two dials that decide how much program
+space a run visits, and they used to move independently: `fuzzSize` was a source
+constant (edit, rebuild) while the count was a flag (`stack test --ta
+'--quickcheck-tests N'`). "Same code, shallow in CI, deep nightly" could not be
+said in one switch.
+
+`NEST_FUZZ_SCALE` is that switch — a positive multiplier, default 1, applied to
+`fuzzSize`, to every `withMaxSuccess` in the module, and (upwards only) to the
+per-case wall-clock budgets. Anything that is not a positive finite number
+(unset, empty, unparseable, `0`, negative, `1e400`) falls back to 1: a typo in a
+cron line should leave the suite doing its ordinary job rather than report a
+fake regression. It is read once through `unsafePerformIO`, because the things
+it feeds — `resize`, `withMaxSuccess` — are pure and are evaluated while tasty
+builds the test tree, before any property runs.
+
+The budgets scale **up only**. A deeper run draws bigger programs and needs the
+room; a shallower one must keep the full budget, or ordinary draws start being
+reported as hangs — the false failure the 1s-to-5s history above already paid
+for once.
+
+It scales **down** as well as up, which is not what the design originally asked
+for but is the more useful direction today: the draws that hang are the large
+structured ones, so a reduced scale is how a verdict gets out of the
+already-written oracles while the underlying bugs are drained. Measured on
+`prop_Fuzz_GeneratorCoverage`: 0.01s at `0.02`, 0.89s at `0.25`, 10.6s at `1`.
+Cost grows faster than the scale, since size and count both move.
+
+`prop_Fuzz_GeneratorCoverage` tabulates the effective setting, so a nightly run
+deep enough to be worth reading can be told apart from an ordinary one in its
+own output.
+
+The contract is pinned by the `Fuzz scaling` group in the **default** suite,
+beside `Shrinker` and `Error channels`. A knob that silently read as 1 would
+turn a nightly deep run into an ordinary one with nothing going red — the run
+would simply pass, shallowly — so `parseFuzzScale` and `scaleFuzz` are split out
+of `fuzzScale` to be testable without an environment.
+
+There is no CI configuration in this repository, so the design's "CI-vs-nightly
+split that actually invokes it" has nothing to attach to yet; the knob is the
+half that can exist without one.
 
 ## The neural surface (milestone M3)
 
