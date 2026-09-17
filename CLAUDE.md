@@ -1071,6 +1071,13 @@ are making. Do not treat a red `NEST_SLOW_TESTS=1` run as a regression
 without first confirming the same failure on an untouched checkout. The
 default (non-slow) suite is the gate.
 
+It does, however, **complete**. Each `Fuzz` property carries a whole-property
+wall-clock deadline (120s, `NEST_FUZZ_SCALE`-scalable) on top of its per-case
+one, so a property that would otherwise multiply a high discard rate by a
+5s-per-draw hang now drains its remaining draws as discards and reports "Gave
+up" instead of having to be abandoned. A one-line note on stderr names any
+property that hit it. See `docs/fuzz-testing.md`, "Two budgets".
+
 Tests expensive enough to noticeably slow `stack test` but unlikely to
 catch regressions elsewhere are skipped by default, run via
 `NEST_SLOW_TESTS=1 stack test`: a `.tst` file's `slow` header, a

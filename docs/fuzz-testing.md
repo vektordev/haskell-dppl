@@ -81,8 +81,23 @@ snd (head (Cons (TCons (right (Uniform < 0.79))
 ```
 
 which is the first *minimized* repro for that item (it was recorded there as
-"large program, re-derive via replay"). Until it is addressed, run the group at
-a reduced `NEST_FUZZ_SCALE`, or run individual properties.
+"large program, re-derive via replay").
+
+**The group now completes, because each property carries a whole-property
+deadline as well as a per-case one** (see "Two budgets" below). Measured at
+scale 1: the whole group finishes in **123s** (9 of 23 failing), and
+`prop_Fuzz_NeuralMaterializedTwinAgrees` alone in **124s** — against a stall of
+over 25 minutes and a 40-minute abandonment for that one property. Four
+properties spend their deadline and say so by name on stderr
+(`TopKZeroMatchesExact`, `TopKNeverInflates`, `NeuralMaterializedTwinAgrees`,
+`ProbNeverGenerateBacked`); the group total is under the sum of their budgets
+because tasty runs them in parallel.
+
+The underlying bug is untouched — the draws still hang, and the properties
+reporting it are still red — but a run now ends and prints what it found instead
+of having to be killed, so a red `Fuzz` result is readable again. Running at a
+reduced `NEST_FUZZ_SCALE` remains the way to get *more* draws through in the
+same time; the deadline caps the clock, it does not buy coverage.
 
 The default suite is unaffected; per the design, findings are filed rather than
 fixed so that coverage work is not blocked behind bug triage.
@@ -278,6 +293,44 @@ The budgets scale **up only**. A deeper run draws bigger programs and needs the
 room; a shallower one must keep the full budget, or ordinary draws start being
 reported as hangs — the false failure the 1s-to-5s history above already paid
 for once.
+
+## Two budgets, and they bound different things
+
+The per-case budget (`perCaseBudgetMicros`, 5s; 8s in the SuperSlow tier) bounds
+**one case**. It works: a non-terminating draw is cut off, reported as a
+counterexample, and shrunk.
+
+It does not bound the **property**. QuickCheck keeps drawing until it has
+`withMaxSuccess` successes or has discarded `maxDiscardRatio` times as many, and
+it re-runs the case for every shrink candidate besides — so a property that
+discards most of its draws and meets a draw that reliably burns its whole
+per-case budget multiplies the two together, with no ceiling on either factor.
+That is what stopped the group completing, and it is not a hang the timeout
+failed to catch: the timeout fires every time, and there are simply too many
+firings.
+
+So each property also carries a **whole-property wall-clock deadline**
+(`propertyBudgetMicros`, 120s, scaled upwards only by `NEST_FUZZ_SCALE`; 600s in
+the SuperSlow tier, whose length is expected rather than pathological). Once it
+is spent, the remaining cases are **discarded** rather than failed, so the
+property drains in milliseconds and QuickCheck's own "Gave up! Passed only N
+tests" is the verdict. Failing instead would be actively misleading: every
+shrink candidate would also be over budget and fail instantly, so the run would
+report an arbitrary minimal program as the counterexample for what is really a
+timekeeping event. A one-line note naming the property and the budget goes to
+stderr, because a discarded case's `label`/`counterexample` does not survive into
+the give-up report, and "gave up" alone cannot be told from a picky
+precondition.
+
+This is a wall-clock bound on a test and so is machine-dependent, in exactly the
+way the per-case budget already is. The default is set well above what any
+property needs when it is behaving — the slowest, `prop_Fuzz_GeneratorCoverage`,
+takes ~11s at scale 1 — so hitting it means something is genuinely wrong rather
+than that the bound was tight. The deadline is fixed at the property's first
+case and does not slide forward, which is what makes it an aggregate bound
+rather than a second per-case one; `budgetStep` is split out pure and pinned by
+the `Fuzz scaling` group, since a bound that silently never fired would let the
+stall it exists to prevent come back unnoticed.
 
 It scales **down** as well as up, which is not what the design originally asked
 for but is the more useful direction today: the draws that hang are the large

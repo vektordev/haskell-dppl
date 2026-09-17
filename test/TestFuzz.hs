@@ -55,7 +55,11 @@ import Control.Monad (replicateM)
 import Control.Monad.Random (evalRandIO)
 import System.Timeout (timeout)
 import System.Environment (lookupEnv)
+import System.IO (hPutStrLn, stderr)
 import System.IO.Unsafe (unsafePerformIO)
+import Data.IORef (IORef, newIORef, atomicModifyIORef')
+import Data.Word (Word64)
+import GHC.Clock (getMonotonicTimeNSec)
 import Text.Read (readMaybe)
 import Data.Maybe (isJust)
 import Data.List (sort, nub, intersect)
@@ -308,18 +312,119 @@ perCaseBudgetMicros = scaleFuzz (max 1 fuzzScale) defaultPerCaseBudgetMicros
 fuzzSize :: Int
 fuzzSize = scaleFuzz fuzzScale defaultFuzzSize
 
-withinBudget :: IO Property -> IO Property
-withinBudget = withinBudgetScaled 1
+-- ---------------------------------------------------------------------------
+-- Two budgets, and they bound different things.
+--
+-- 'perCaseBudgetMicros' bounds *one case*. That is what tells a hang from a
+-- slow draw, and it works: run at a reduced 'NEST_FUZZ_SCALE', a
+-- non-terminating draw is caught, reported as a counterexample and shrunk.
+--
+-- It does not bound the *property*, and the difference is not academic.
+-- QuickCheck keeps drawing until it has 'withMaxSuccess' successes or has
+-- discarded 'maxDiscardRatio' times as many, and it re-runs the case for
+-- every shrink candidate besides. A property that discards most of its draws
+-- (the twin oracle discards ~95%: most generated programs have no probability
+-- function to compare) and meets a draw that reliably burns its whole per-case
+-- budget therefore multiplies the two together. Measured: at scale 1 the twin
+-- oracle was abandoned after 40 minutes against a nominal worst case of 18,
+-- and a full 'Fuzz' run stalled for over 25 minutes inside a property nothing
+-- had changed. The group stopped completing on this machine, which costs more
+-- than any single verdict it might have produced -- a test that does not
+-- terminate reports nothing at all, and the two already-written oracles
+-- ('prop_Fuzz_NeuralMaterializedTwinAgrees', 'fuzzSamplingMatchesPDF') have
+-- still never returned one.
+--
+-- So each property also gets a whole-property wall-clock budget. Once it is
+-- spent, remaining cases are *discarded* rather than failed: a discard costs
+-- nothing, so the property drains in milliseconds instead of burning a
+-- per-case budget per remaining draw, and QuickCheck's own "Gave up! Passed
+-- only N tests" is then the verdict. Failing instead would be worse than
+-- useless -- every shrink candidate would also be over budget and fail
+-- instantly, so the run would report some arbitrary minimal program as the
+-- counterexample for what is really a timekeeping event.
+--
+-- This is a wall-clock bound on a test, so it is machine-dependent in exactly
+-- the way the per-case budget already is; that trade was made deliberately
+-- there and is made again here for the same reason. The default is set well
+-- above what any property needs when it is behaving (the slowest,
+-- 'prop_Fuzz_GeneratorCoverage', takes ~11s at scale 1), so hitting it means
+-- something is genuinely wrong rather than that the bound was tight.
+defaultPropertyBudgetMicros :: Int
+defaultPropertyBudgetMicros = 120 * 1000 * 1000
+
+-- | Scaled *upwards only*, on the same reasoning as 'perCaseBudgetMicros': a
+-- shallow run must not have its budget shrunk with it, or ordinary draws start
+-- being reported as a stall.
+propertyBudgetMicros :: Int
+propertyBudgetMicros = scaleFuzz (max 1 fuzzScale) defaultPropertyBudgetMicros
+
+-- | Deadline per property name, in monotonic microseconds. An assoc list
+-- rather than a 'Map': there are a dozen properties and this is read once per
+-- case.
+{-# NOINLINE propertyDeadlines #-}
+propertyDeadlines :: IORef [(String, Word64)]
+propertyDeadlines = unsafePerformIO (newIORef [])
+
+-- | Names whose exhaustion has already been announced, so the note is printed
+-- once per property rather than once per drained draw.
+{-# NOINLINE exhaustionAnnounced #-}
+exhaustionAnnounced :: IORef [String]
+exhaustionAnnounced = unsafePerformIO (newIORef [])
+
+nowMicros :: IO Word64
+nowMicros = (`div` 1000) <$> getMonotonicTimeNSec
+
+-- | The pure core of the deadline bookkeeping, split out of
+-- 'withinBudgetScaled' so the default suite can pin it without a clock or an
+-- environment -- the same reason 'parseFuzzScale' and 'scaleFuzz' are split
+-- out of 'fuzzScale'. A budget that silently never fired would let the stall
+-- it exists to bound come back unnoticed.
+--
+-- The first case of a property establishes the deadline and always runs: a
+-- budget of zero must still buy one case, or a property could report "gave up"
+-- having executed nothing.
+budgetStep :: Int -> String -> Word64 -> [(String, Word64)] -> ([(String, Word64)], Bool)
+budgetStep budget name now table = case lookup name table of
+  Just deadline -> (table, now < deadline)
+  Nothing       -> ((name, now + fromIntegral (max 0 budget)) : table, True)
+
+-- | Printed to stderr rather than carried in the property's own output,
+-- because a discarded case's 'label'/'counterexample' does not survive into
+-- QuickCheck's give-up report -- and "Gave up! Passed only N tests" without
+-- this line would leave a reader unable to tell a genuinely picky precondition
+-- from a property that ran out of clock.
+noteExhaustion :: String -> Int -> IO ()
+noteExhaustion name budget = do
+  fresh <- atomicModifyIORef' exhaustionAnnounced $ \seen ->
+    if name `elem` seen then (seen, False) else (name : seen, True)
+  if fresh
+    then hPutStrLn stderr
+           (name ++ ": property wall-clock budget of " ++ show budget
+              ++ "us exhausted; remaining draws are discarded. Raise it with "
+              ++ fuzzScaleEnvVar ++ ".")
+    else return ()
+
+withinBudget :: String -> IO Property -> IO Property
+withinBudget name = withinBudgetScaled name 1
 
 -- | 'withinBudget' for properties that do more than one compile per draw, so
 -- that a slow-but-terminating draw is not reported as a hang.
-withinBudgetScaled :: Int -> IO Property -> IO Property
-withinBudgetScaled factor act = do
-  let budget = factor * perCaseBudgetMicros
-  result <- timeout budget act
-  return $ case result of
-    Just prop -> prop
-    Nothing -> counterexample ("did not terminate within " ++ show budget ++ "us") False
+--
+-- The name is passed explicitly rather than derived, so that adding a property
+-- is a compile error until it has said which budget it draws against.
+withinBudgetScaled :: String -> Int -> IO Property -> IO Property
+withinBudgetScaled name factor act = do
+  now <- nowMicros
+  hasBudget <- atomicModifyIORef' propertyDeadlines
+                 (budgetStep propertyBudgetMicros name now)
+  if not hasBudget
+    then noteExhaustion name propertyBudgetMicros >> return discardVacuous
+    else do
+      let budget = factor * perCaseBudgetMicros
+      result <- timeout budget act
+      return $ case result of
+        Just prop -> prop
+        Nothing -> counterexample ("did not terminate within " ++ show budget ++ "us") False
 
 -- ---------------------------------------------------------------------------
 -- Crash-freedom: the compiler must never throw a Haskell exception, only
@@ -332,7 +437,7 @@ withinBudgetScaled factor act = do
 -- and queries its own probability, exercising the generate/probability code
 -- paths too, not just the compile pipeline itself.
 prop_Fuzz_CompileNeverCrashes :: Property
-prop_Fuzz_CompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAll (resize fuzzSize genRawFuzzProgram) $ \p -> ioProperty $ withinBudget $ do
+prop_Fuzz_CompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAll (resize fuzzSize genRawFuzzProgram) $ \p -> ioProperty $ withinBudget "prop_Fuzz_CompileNeverCrashes" $ do
   compiled <- evaluate (forceShow (compile defaultCompilerConfig p))
   case compiled of
     Left _ -> return $ property True
@@ -344,7 +449,7 @@ prop_Fuzz_CompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAll (resize f
 -- | Well-typed scalar programs: a stronger, unguarded crash-freedom check
 -- (see module header for why this differs from the invariant properties).
 prop_Fuzz_TypedCompileNeverCrashes :: Property
-prop_Fuzz_TypedCompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
+prop_Fuzz_TypedCompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget "prop_Fuzz_TypedCompileNeverCrashes" $ do
   compiled <- evaluate (forceShow (compile defaultCompilerConfig p))
   case compiled of
     Left _ -> return $ property True
@@ -377,7 +482,7 @@ prop_Fuzz_TypedCompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAllShrin
 -- draws is affordable at this module's per-case budget.
 prop_Fuzz_ProbNeverGenerateBacked :: Property
 prop_Fuzz_ProbNeverGenerateBacked = withMaxSuccess (fuzzCases 3000) $
-  forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
+  forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget "prop_Fuzz_ProbNeverGenerateBacked" $ do
     r <- trySync (evaluate (forceShow (compile defaultCompilerConfig p)))
     return $ case r of
       Right (Right irEnv) -> case generateBackedSites irEnv of
@@ -403,7 +508,7 @@ prop_Fuzz_TypedProgramsValidate = withMaxSuccess (fuzzCases 200) $ forAllShrink 
 -- some currently hit unsupported IR shapes, caught by
 -- 'prop_Fuzz_TypedCompileNeverCrashes' instead -- both are discarded here).
 prop_Fuzz_MarginalAnyIsOne :: Property
-prop_Fuzz_MarginalAnyIsOne = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
+prop_Fuzz_MarginalAnyIsOne = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget "prop_Fuzz_MarginalAnyIsOne" $ do
   compiled <- compileSafe defaultCompilerConfig p
   case compiled >>= \irEnv -> irProb p irEnv VAny of
     Nothing -> return discardVacuous
@@ -416,7 +521,7 @@ prop_Fuzz_MarginalAnyIsOne = withMaxSuccess (fuzzCases 40) $ forAllShrink (resiz
 -- mass/density everywhere; a negative result means the change-of-variables
 -- or mixture-combination arithmetic somewhere in IRCompiler has a sign bug).
 prop_Fuzz_ProbabilityNeverNegative :: Property
-prop_Fuzz_ProbabilityNeverNegative = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
+prop_Fuzz_ProbabilityNeverNegative = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget "prop_Fuzz_ProbabilityNeverNegative" $ do
   compiled <- compileSafe defaultCompilerConfig p
   case compiled of
     Nothing -> return discardVacuous
@@ -431,7 +536,7 @@ prop_Fuzz_ProbabilityNeverNegative = withMaxSuccess (fuzzCases 40) $ forAllShrin
 -- | topK with threshold 0 prunes nothing, so it must reproduce exact
 -- inference exactly, at a sample point drawn from the program itself.
 prop_Fuzz_TopKZeroMatchesExact :: Property
-prop_Fuzz_TopKZeroMatchesExact = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
+prop_Fuzz_TopKZeroMatchesExact = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget "prop_Fuzz_TopKZeroMatchesExact" $ do
   exact <- compileSafe defaultCompilerConfig p
   topK <- compileSafe (defaultCompilerConfig { topKThreshold = Just 0.0 }) p
   case (exact, topK) of
@@ -449,7 +554,7 @@ prop_Fuzz_TopKZeroMatchesExact = withMaxSuccess (fuzzCases 40) $ forAllShrink (r
 -- | Pruning can only zero out branches, never inflate probability above the
 -- exact value, at a sample point drawn from the program itself.
 prop_Fuzz_TopKNeverInflates :: Property
-prop_Fuzz_TopKNeverInflates = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
+prop_Fuzz_TopKNeverInflates = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget "prop_Fuzz_TopKNeverInflates" $ do
   exact <- compileSafe defaultCompilerConfig p
   topK <- compileSafe (defaultCompilerConfig { topKThreshold = Just 0.1 }) p
   case (exact, topK) of
@@ -471,7 +576,7 @@ prop_Fuzz_TopKNeverInflates = withMaxSuccess (fuzzCases 40) $ forAllShrink (resi
 -- | Enabling branch counting must not alter the probability value, only add
 -- a third result component, at a sample point drawn from the program itself.
 prop_Fuzz_BranchCountingDoesNotChangeProbability :: Property
-prop_Fuzz_BranchCountingDoesNotChangeProbability = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget $ do
+prop_Fuzz_BranchCountingDoesNotChangeProbability = withMaxSuccess (fuzzCases 40) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudget "prop_Fuzz_BranchCountingDoesNotChangeProbability" $ do
   def <- compileSafe defaultCompilerConfig p
   bc <- compileSafe (defaultCompilerConfig { countBranches = True }) p
   case (def, bc) of
@@ -512,7 +617,7 @@ prop_Fuzz_MixtureFollowsCombinationRules =
   -- Occasional draws still exceed it and are reported as failures per this
   -- module's convention; observed failures here have been budget overruns, not
   -- rule violations, so read the counterexample before believing the latter.
-  withMaxSuccess (fuzzCases 25) $ forAll genMixturePair $ \(exprA, exprB, q) -> ioProperty $ withinBudgetScaled 10 $ do
+  withMaxSuccess (fuzzCases 25) $ forAll genMixturePair $ \(exprA, exprB, q) -> ioProperty $ withinBudgetScaled "prop_Fuzz_MixtureFollowsCombinationRules" 10 $ do
     let progA = Program [("main", exprA)] [] [] []
         progB = Program [("main", exprB)] [] [] []
         progM = Program [("main", ifThenElse (bernoulli q) exprA exprB)] [] [] []
@@ -617,7 +722,7 @@ shrinkNeuralTwin (lazyP, _) =
 
 prop_Fuzz_NeuralMaterializedTwinAgrees :: Property
 prop_Fuzz_NeuralMaterializedTwinAgrees = withMaxSuccess (fuzzCases 20) $
-  forAllShrink (resize twinSize genNeuralTwinProgram) shrinkNeuralTwin $ \(lazyP, matP) -> ioProperty $ withinBudget $ do
+  forAllShrink (resize twinSize genNeuralTwinProgram) shrinkNeuralTwin $ \(lazyP, matP) -> ioProperty $ withinBudget "prop_Fuzz_NeuralMaterializedTwinAgrees" $ do
     lazyE <- compileSafe defaultCompilerConfig lazyP
     matE  <- compileSafe defaultCompilerConfig matP
     case (lazyE, matE) of
@@ -859,7 +964,7 @@ prop_Fuzz_GeneratorCoverage = withMaxSuccess (fuzzCases 200) $
   -- another in 'compile', and the realized-pType axis re-runs inference for a
   -- third. The outer bound has to sit above their sum or it would pre-empt
   -- them and lose the labelling they exist to produce.
-  forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudgetScaled 4 $ do
+  forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudgetScaled "prop_Fuzz_GeneratorCoverage" 4 $ do
     s <- summarizeDraw p
     let outcome = dsOutcome s
         depth   = dsDepth s
@@ -1183,6 +1288,43 @@ fuzzScalingTests = testGroup "Fuzz scaling"
       -- hangs, which is a false failure rather than a finding.
       forAll (choose (0.001, 50)) $ \sc ->
         scaleFuzz (max 1 sc) defaultPerCaseBudgetMicros >= defaultPerCaseBudgetMicros
+  , testProperty "the property budget never scales down either" $
+      forAll (choose (0.001, 50)) $ \sc ->
+        scaleFuzz (max 1 sc) defaultPropertyBudgetMicros >= defaultPropertyBudgetMicros
+  , testProperty "a property's first case always runs" $
+      -- Even at a zero budget. A property that gave up having executed
+      -- nothing would report as a give-up indistinguishable from a picky
+      -- precondition, and would make the bound impossible to set safely.
+      forAll (choose (0, 1000000)) $ \b ->
+      forAll (choose (0, 1000000000)) $ \t ->
+        snd (budgetStep b "p" (fromIntegral (t :: Int)) []) === True
+  , testProperty "the first case fixes the deadline, and later ones read it" $
+      forAll (choose (1000, 1000000)) $ \b ->
+        let t0 = 5000 :: Word64
+            (tbl, first) = budgetStep b "p" t0 []
+        in     counterexample "first case" (first === True)
+          .&&. counterexample "deadline stored"
+                 (lookup "p" tbl === Just (t0 + fromIntegral b))
+          -- Inside the budget the table is left alone, so the deadline is
+          -- fixed at the property's start rather than sliding forward with
+          -- each case -- which is what makes it an aggregate bound rather
+          -- than a second per-case one.
+          .&&. counterexample "still inside"
+                 (budgetStep b "p" (t0 + fromIntegral b - 1) tbl === (tbl, True))
+          .&&. counterexample "exactly at the deadline"
+                 (budgetStep b "p" (t0 + fromIntegral b) tbl === (tbl, False))
+          .&&. counterexample "past the deadline"
+                 (budgetStep b "p" (t0 + fromIntegral b + 1) tbl === (tbl, False))
+  , testProperty "properties do not share a budget" $
+      -- Each property is bounded on its own clock; one that exhausts its
+      -- budget must not drain a sibling that has not started yet.
+      let b = 1000 :: Int
+          (tbl1, _) = budgetStep b "a" 0 []
+          (tbl2, bStarts) = budgetStep b "b" 5000 tbl1
+      in     counterexample "a is spent" (snd (budgetStep b "a" 5000 tbl1) === False)
+        .&&. counterexample "b still starts" (bStarts === True)
+        .&&. counterexample "b got its own deadline"
+               (lookup "b" tbl2 === Just 6000)
   ]
 
 -- ---------------------------------------------------------------------------
@@ -1379,12 +1521,27 @@ sampleHit _ _ _ = False
 perCaseSuperSlowBudgetMicros :: Int
 perCaseSuperSlowBudgetMicros = scaleFuzz (max 1 fuzzScale) 8000000
 
-withinSuperSlowBudget :: IO Property -> IO Property
-withinSuperSlowBudget act = do
-  result <- timeout perCaseSuperSlowBudgetMicros act
-  return $ case result of
-    Just prop -> prop
-    Nothing -> counterexample ("did not terminate within " ++ show perCaseSuperSlowBudgetMicros ++ "us") False
+-- | Carries a whole-property deadline too, on the same reasoning as
+-- 'withinBudgetScaled' -- and with more force here, since this property's
+-- per-case budget is 8s and it is the other oracle that has never returned a
+-- verdict. Its budget is the SuperSlow tier's own, not the Slow one's: the
+-- tier is opt-in and expected to be long, so bounding it at 120s would report
+-- a give-up for the ordinary reason that it is slow.
+superSlowPropertyBudgetMicros :: Int
+superSlowPropertyBudgetMicros = scaleFuzz (max 1 fuzzScale) (600 * 1000 * 1000)
+
+withinSuperSlowBudget :: String -> IO Property -> IO Property
+withinSuperSlowBudget name act = do
+  now <- nowMicros
+  hasBudget <- atomicModifyIORef' propertyDeadlines
+                 (budgetStep superSlowPropertyBudgetMicros name now)
+  if not hasBudget
+    then noteExhaustion name superSlowPropertyBudgetMicros >> return discardVacuous
+    else do
+      result <- timeout perCaseSuperSlowBudgetMicros act
+      return $ case result of
+        Just prop -> prop
+        Nothing -> counterexample ("did not terminate within " ++ show perCaseSuperSlowBudgetMicros ++ "us") False
 
 -- ---------------------------------------------------------------------------
 -- Statistics: classify an empirical hit rate against the compiler's claimed
@@ -1569,7 +1726,7 @@ maxRetries = 4
 -- batch of forward samples sized to the hardest (lowest-density) point among
 -- them (see 'drawQueryPoints' / 'runSamplingCheck').
 fuzzSamplingMatchesPDF :: Property
-fuzzSamplingMatchesPDF = withMaxSuccess (fuzzCases 20) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinSuperSlowBudget $ do
+fuzzSamplingMatchesPDF = withMaxSuccess (fuzzCases 20) $ forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinSuperSlowBudget "prop_Fuzz_SamplingMatchesPDF" $ do
   compiled <- compileSafe defaultCompilerConfig p
   case compiled of
     Nothing -> return discardVacuous
