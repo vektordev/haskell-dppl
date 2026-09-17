@@ -202,6 +202,29 @@ modalityInferTests = testGroup "ModalityInfer"
           -- not a crash.
           assertEqual "" Bottom
             (mainPType "main = (if Uniform < 0.5 then 1.0 else Uniform) + Normal")
+      , testCase "a finite mixture plus a Normal keeps its closed density (Integrate)" $
+          -- Task @marginalize-keepd-overclaims-density-for-generic-plus-mult@.
+          -- The counterpart to the case above, and the reason that one is about
+          -- 'Fin' rather than about 'keepD': here BOTH branches of the `if` are
+          -- genuinely finite, so the mixture really is a finite set of point
+          -- masses and 'marginalize''s 'keepD' guard is mathematically right --
+          -- a finite mixture convolved with a Normal has a closed-form density
+          -- (a k-term Gaussian mixture). This used to type 'Integrate' and then
+          -- crash in IRCompiler, which had no equation to build it; the fix was
+          -- to add that equation (the mixed enumerate-and-shift convolution),
+          -- NOT to retract the typing claim. Pinned here so a future narrowing
+          -- of 'keepD' cannot silently downgrade this to 'Bottom' and quietly
+          -- lose a density the compiler can actually produce -- the numbers it
+          -- produces are pinned by testCases/mixtureFinitePlusNormal.
+          assertEqual "" Integrate
+            (mainPType "main = exp(if Uniform < 0.5 then 1.0 else 2.0) + Normal")
+      , testCase "a finite mixture times a LogNormal keeps its closed density (Integrate)" $
+          -- Same shape one operator over, and the case whose change of
+          -- variables is non-trivial: `mult`'s inverse carries a 1/e Jacobian
+          -- (testCases/mixtureFiniteTimesLogNormal pins the values, and
+          -- testCases/mixtureFiniteNegTimesNormal the negative-scale CDF flip).
+          assertEqual "" Integrate
+            (mainPType "main = (if Uniform < 0.5 then 1.0 else 2.0) * exp(Normal)")
       , testCase "comparison against a Bottom operand is Bottom, not Integrate" $
           -- Regression (found by TestFuzz's typed generator, 2026-07-20):
           -- 'compareGround's "both integral-ready" branch used to accept the

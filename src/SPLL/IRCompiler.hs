@@ -2619,6 +2619,82 @@ toIRInference meta cumulative (Expr TypeInfo {rType=rt} (Var n)) sample = do
       else
         return (indicatorP (semiringOf meta) (equalityGuard rt (IRVar n) sample))
     Nothing -> error ("Could not find name in TypeEnv: " ++ n)
+-- Mixed enumerate-and-shift/scale convolution: exactly ONE operand is a
+-- finite-discrete enumerable (a `DiscreteValues`-tagged mixture of point
+-- masses), the other is a continuous scalar with a density. The marginal
+--
+--   f_Z(z) = sum_e p_X(e) * f_Y(g^-1_y(e, z)) * |d g^-1_y / dz|
+--
+-- is exactly what 'marginalize's `keepD` guard promises for this shape (a
+-- finite mixture convolved with a Normal/LogNormal has a closed-form density),
+-- and until task marginalize-keepd-overclaims-density-for-generic-plus-mult
+-- nothing here built it: the node typed 'Integrate', matched no equation, and
+-- fell through to the catch-all `error` below.
+--
+-- It is the composition of the two clauses either side of it: the
+-- both-enumerable path's `enumSumP` loop over the finite operand's support,
+-- with the generic single-inversion path's body (invert to the continuous
+-- operand, evaluate its density there, apply the change-of-variables Jacobian)
+-- as the loop body. The `IRIsPossible` membership test the both-enumerable
+-- path applies to the inverted value is absent here on purpose: the other
+-- operand is continuous, so every inverted point is in its support.
+--
+-- The result's `dim` cannot come through 'enumSumP', which packs only
+-- (prob, branches) and hardcodes dim 0 for the discrete mass it normally
+-- builds. It is supplied here instead, and it is a static property rather
+-- than a per-iteration one: the enumerated side contributes dim 0, the
+-- change of variables is dimension-preserving, so the node's dim is the
+-- continuous operand's. In probability mode that is dim 1, ANY-guarded on
+-- this node's own sample; in cumulative mode a CDF value is a mass, so it is
+-- dim 0 (what the continuous operand's own cumulative result reports). The
+-- guard's `rType` test is what earns reading that off statically: a
+-- non-'Deterministic', non-enumerable 'TFloat' operand under
+-- 'allParamsMeasurable' is a continuous scalar.
+--
+-- The override happens outside the loop and so does not disturb 'scaleCoV',
+-- which reads the per-iteration operand's own `rDim` inside it.
+toIRInference meta cumulative (Expr TypeInfo {rType=rt} (InjF (Named name) [left, right])) sample
+  | rt == TFloat
+  , not (isForwardOnly (adtDecls meta) (resolveInjF rt name))
+  , pType (getTypeInfo left) /= Deterministic
+  , pType (getTypeInfo right) /= Deterministic
+  , isEnumerable (tags (getTypeInfo left)) /= isEnumerable (tags (getTypeInfo right))
+  , rType (getTypeInfo (if isEnumerable (tags (getTypeInfo left)) then right else left)) == TFloat
+  , allParamsMeasurable [left, right] = do
+  let resolvedName = resolveInjF rt name
+  let leftEnum = isEnumerable (tags (getTypeInfo left))
+  let (enumE, contE) = if leftEnum then (left, right) else (right, left)
+  let enumList = head [x | DiscreteValues x <- tags (getTypeInfo enumE)]
+  FPair fwd inversions <- instantiate mkVariable (adtDecls meta) resolvedName
+  let (vL, vR) = binaryInputVars resolvedName fwd
+  let contVar = if leftEnum then vR else vL
+  -- The inversion that solves for the CONTINUOUS operand; its two inputs are
+  -- the enumerated operand's value and this node's observation.
+  let invDecl = inversionFor resolvedName contVar inversions
+  let FDecl {body=invExpr, applicability=appTest, deconstructing=decons, derivatives=invDerivs} = invDecl
+  let (xEnum, xSample) = binaryInputVars resolvedName invDecl
+  -- d(inverse)/d(observation), keyed by the forward declaration's output var
+  -- (for `mult` this is the 1/e that makes the scaled mixture integrate to 1).
+  let invDeriv = inverseDerivative resolvedName (soleOutputVar fwd) invDerivs
+  let sr = semiringOf meta
+  let probF = if decons then toIRInferenceSave else toIRInference
+  let metaOp = covOperandMeta cumulative invDeriv meta
+  mTblEnum <- materializeOperandTable meta enumE
+  irTuple <- lift (runWriterT (do
+    setVariables [(xSample, sample)]
+    pEnum <- operandProb meta mTblEnum enumE (IRVar xEnum)
+    contRes <- guardedSubInference metaOp [appTest]
+                 (probF metaOp cumulative contE invExpr)
+    let scaled = guardP sr [appTest] (scaleCoV sr cumulative invDeriv contRes)
+    return (prodP sr (mass pEnum) scaled)
+    )) <&> generateLetInBlock meta
+  uniquePrefix <- mkVariable ""
+  let applyUnique = irMap (uniqueify [xEnum, xSample] uniquePrefix)
+  let (outerBinds, innerTuple) = hoistInvariantBindings xEnum irTuple
+  let renameHoisted (n, v) = (if n `elem` [xEnum, xSample] then uniquePrefix ++ n else n, applyUnique v)
+  setVariables (map renameHoisted outerBinds)
+  summed <- enumSumP sr (countBranches (compilerConfig meta)) applyUnique xEnum enumList innerTuple
+  return (onDim (const (if cumulative then const0 else anyGuardedDim sample)) summed)
 toIRInference _ _ (Expr _ (Subtree _ _)) _ = error "Cannot infer prob on subtree expression. Please check your syntax"
 toIRInference _ _ x _ = error ("found no way to convert to IR: " ++ show x)
 

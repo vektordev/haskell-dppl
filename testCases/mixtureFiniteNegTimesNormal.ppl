@@ -1,0 +1,1 @@
+main = (if Uniform < 0.5 then 0.0 - 2.0 else 3.0) * Normal
