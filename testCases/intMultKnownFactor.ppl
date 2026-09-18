@@ -1,0 +1,1 @@
+main = 6 * (if Uniform < 0.5 then 1 else 0)

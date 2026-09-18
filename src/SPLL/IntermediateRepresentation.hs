@@ -190,6 +190,22 @@ data Operand = OpPlus
              -- codegen case exists, since the probe's corpus test declares
              -- `backends: interpreter` only.
              | OpMax
+             -- Exact integer division/remainder (task
+             -- int-mult-inversion-divides-and-crashes): 'multI's inverse needs
+             -- to recover a factor via c/a on TInt, which OpDiv has never
+             -- supported (its only equation is VFloat/VFloat; VInt/VInt is a
+             -- deliberate 'forceOp' refusal, since a *truncating* division
+             -- would silently return a wrong-but-domain-valid factor whenever
+             -- the dividend isn't a multiple of the divisor -- e.g. 6 'div' 4
+             -- truncates to 1, and 1 may well be a legal domain member even
+             -- though 4*1/=6). These two are therefore only ever emitted
+             -- guarded by an applicability test asserting OpMod is zero first
+             -- (see 'PredefinedFunctions.multIInv1'/'multIInv2'), at which
+             -- point every rounding convention agrees and cross-backend
+             -- truncation-direction differences (Python '//' floors, Julia
+             -- 'div' truncates toward zero) cannot bite.
+             | OpIntDiv
+             | OpMod
              deriving (Show, Eq)
 
 data UnaryOperand = OpNeg

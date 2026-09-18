@@ -645,6 +645,11 @@ forceOp OpPlus (VInt x) (VInt y) = VInt (x+y)
 forceOp OpPlus (VFloat x) (VFloat y) = VFloat (x+y)
 forceOp OpDiv (VInt _) (VInt _) = error "tried to do integer division in forceOp"
 forceOp OpDiv (VFloat x) (VFloat y) = VFloat (x/y)
+-- Only ever emitted guarded by an OpMod==0 applicability test (see
+-- IntermediateRepresentation's OpIntDiv/OpMod haddock), so every rounding
+-- convention agrees here; 'div'/'mod' (floor-style) are as good as any.
+forceOp OpIntDiv (VInt x) (VInt y) = VInt (x `div` y)
+forceOp OpMod (VInt x) (VInt y) = VInt (x `mod` y)
 forceOp OpSub (VInt x) (VInt y) = VInt (x-y)
 forceOp OpSub (VFloat x) (VFloat y) = VFloat (x-y)
 forceOp OpOr (VBool x) (VBool y) = VBool (x || y)

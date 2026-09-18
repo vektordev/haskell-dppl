@@ -48,7 +48,7 @@ import Data.List (find)
 
 import SPLL.Lang.Types
   ( Expr(..), ExprF(..), Program(..), TypeInfo(..), InjFName(..), ChainName, ADTDecl, CompilerError, FnDecl
-  , Tag(..)
+  , Tag(..), GenericValue(..)
   , dataName, constructors )
 import SPLL.Lang.Lang (getTypeInfo, containedVars, varsOfExpr, multiValueContainsContinuous)
 import SPLL.Typing.Typing (setPType)
@@ -329,6 +329,13 @@ data ICtx = ICtx
 cnOf :: Expr -> ChainName
 cnOf = chainName . getTypeInfo
 
+-- | A literal zero, in either numeric type -- 'mult'/'multI's absorbing
+-- element. See the InjF "mult" clause in 'inferE'.
+isZeroConstant :: Expr -> Bool
+isZeroConstant (Expr _ (Constant (VFloat 0))) = True
+isZeroConstant (Expr _ (Constant (VInt 0))) = True
+isZeroConstant _ = False
+
 -- | Infer the modality of an expression, returning the modality, the
 -- pType-annotated expression, and the per-node outer-ground accumulation.
 inferE :: ICtx -> Env -> Expr -> (IMod, Expr, GAcc)
@@ -363,6 +370,34 @@ inferE ctx env expr = case expr of
   -- dispatch (task gt-lt-range-propagation).
   Expr ti (InjF (Named fname) [a, b])
     | fname `elem` ["gt", "lt"] -> compareNode ti fname a b
+
+  -- mult(0, y) = 0 for every y, regardless of y's own modality -- a
+  -- degenerate point mass, not (as the generic 'tryNormalClosure' "mult"
+  -- [PNormal, Deterministic] closure claims) whatever family y belongs to
+  -- (task mult-inversion-unguarded-at-zero, symptom 1: "0.0 * Normal" typed
+  -- PNormal, so IRCompiler's own zero-guard on the inversion's applicability
+  -- never even ran -- 'scaleCoV' unconditionally read the (undefined at a=0)
+  -- Jacobian instead of skipping it, and IROptimizer's constant folder
+  -- crashed on the literal division by zero *at compile time*, before any
+  -- runtime guard could matter). Recognising a literal zero operand here
+  -- routes the whole node through the ordinary Deterministic-leaf machinery
+  -- (an equality/CDF-step indicator against the known value 0), which never
+  -- constructs 'mult's inversion or its Jacobian at all.
+  --
+  -- This intentionally only catches a *literal* Constant 0 -- e.g. a `let`-
+  -- bound Deterministic value that merely happens to evaluate to 0 at
+  -- runtime (a trained ThetaI, a neural readout) is not recognised, since
+  -- deciding "this Deterministic value's possible range includes 0" in
+  -- general needs value-level support information the modality layer
+  -- (deliberately) doesn't carry -- see the task doc's fork on this point.
+  -- That general case is a known, explicitly scoped-out gap, not silently
+  -- mishandled: it still goes through the ordinary 'injFMod' floor exactly as
+  -- before this fix, unchanged.
+  Expr ti (InjF (Named fname) [a, b])
+    | fname `elem` ["mult", "multI"], isZeroConstant a || isZeroConstant b ->
+        let (_, a', aAcc) = inferE ctx env a
+            (_, b', bAcc) = inferE ctx env b
+        in done (IG gExact) (Expr (setPType ti Deterministic) (InjF (Named fname) [a', b'])) (aAcc ++ bAcc)
 
   Expr ti (InjF name@(Named fname) args) ->
     let rs   = map (inferE ctx env) args

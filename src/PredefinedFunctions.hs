@@ -202,10 +202,14 @@ plusInv2 = FDecl (Forall [] [] (TFloat `TArrow` (TFloat `TArrow` TFloat))) ["b",
 
 multFwd :: FDecl
 multFwd = FDecl (Forall [TV "a"] [CNum (TV "a")] (TVarR (TV "a") `TArrow` (TVarR (TV "a") `TArrow` TVarR (TV "a")))) ["a", "b"] ["c"] (IROp OpMult (IRVar "a") (IRVar "b")) (IRConst (VBool True)) False [("a", IRVar "b"), ("b", IRVar "a")]
+-- a*b=c is invertible for b (resp. a) only away from the other factor being
+-- zero (tasks mult-enumerable-zero-divisor-crash / mult-inverse-unguarded-zero-division):
+-- dividing by a zero operand is undefined, not merely inconvenient, since
+-- mult(0, y) = 0 for every y -- the fiber is the whole domain, not a point.
 multInv1 :: FDecl
-multInv1 = FDecl (Forall [] [] (TFloat `TArrow` (TFloat `TArrow` TFloat))) ["a", "c"] ["b"] (IROp OpDiv (IRVar "c") (IRVar "a")) (IRConst (VBool True)) False [("a", IRUnaryOp OpNeg (IROp OpDiv (IRVar "c") (IROp OpMult (IRVar "a") (IRVar "a")))), ("c", IROp OpDiv (IRConst (VFloat 1)) (IRVar "a"))]
+multInv1 = FDecl (Forall [] [] (TFloat `TArrow` (TFloat `TArrow` TFloat))) ["a", "c"] ["b"] (IROp OpDiv (IRVar "c") (IRVar "a")) (IRUnaryOp OpNot (IROp OpEq (IRVar "a") (IRConst $ VFloat 0))) False [("a", IRUnaryOp OpNeg (IROp OpDiv (IRVar "c") (IROp OpMult (IRVar "a") (IRVar "a")))), ("c", IROp OpDiv (IRConst (VFloat 1)) (IRVar "a"))]
 multInv2 :: FDecl
-multInv2 = FDecl (Forall [] [] (TFloat `TArrow` (TFloat `TArrow` TFloat))) ["b", "c"] ["a"] (IROp OpDiv (IRVar "c") (IRVar "b")) (IRConst (VBool True)) False [("b", IRUnaryOp OpNeg (IROp OpDiv (IRVar "c") (IROp OpMult (IRVar "b") (IRVar "b")))), ("c", IROp OpDiv (IRConst (VFloat 1)) (IRVar "b"))]
+multInv2 = FDecl (Forall [] [] (TFloat `TArrow` (TFloat `TArrow` TFloat))) ["b", "c"] ["a"] (IROp OpDiv (IRVar "c") (IRVar "b")) (IRUnaryOp OpNot (IROp OpEq (IRVar "b") (IRConst $ VFloat 0))) False [("b", IRUnaryOp OpNeg (IROp OpDiv (IRVar "c") (IROp OpMult (IRVar "b") (IRVar "b")))), ("c", IROp OpDiv (IRConst (VFloat 1)) (IRVar "b"))]
 
 plusIFwd :: FDecl
 plusIFwd = FDecl (Forall [] [] (TInt `TArrow` (TInt `TArrow` TInt))) ["a", "b"] ["c"] (IROp OpPlus (IRVar "a") (IRVar "b")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1)), ("b", IRConst (VFloat 1))]
@@ -216,10 +220,34 @@ plusIInv2 = FDecl (Forall [] [] (TInt `TArrow` (TInt `TArrow` TInt))) ["b", "c"]
 
 multIFwd :: FDecl
 multIFwd = FDecl (Forall [] [] (TInt `TArrow` (TInt `TArrow` TInt))) ["a", "b"] ["c"] (IROp OpMult (IRVar "a") (IRVar "b")) (IRConst (VBool True)) False [("a", IRVar "b"), ("b", IRVar "a")]
+-- The Int twin (task int-mult-inversion-divides-and-crashes) additionally
+-- needs the quotient to be *exact*: OpDiv is undefined on Int altogether
+-- (nothing implements it -- IROptimizer's forceOp and the interpreter both
+-- refuse VInt/VInt), so the body uses the dedicated 'OpIntDiv', and a
+-- truncating quotient would otherwise silently return a wrong-but-domain-valid
+-- factor (6 `div` 4 = 1, and 1 may well be a legal domain member even though
+-- 4*1/=6). The exactness check is threaded through an 'IRIf', not 'OpAnd' --
+-- both operands of an IR boolean op are evaluated, so an 'OpAnd' would still
+-- take the modulo of a possibly-zero divisor.
 multIInv1 :: FDecl
-multIInv1 = FDecl (Forall [] [] (TInt `TArrow` (TInt `TArrow` TInt))) ["a", "c"] ["b"] (IROp OpDiv (IRVar "c") (IRVar "a")) (IRConst (VBool True)) False [("a", IRUnaryOp OpNeg (IROp OpDiv (IRVar "c") (IROp OpMult (IRVar "a") (IRVar "a")))), ("c", IROp OpDiv (IRConst (VFloat 1)) (IRVar "a"))]
+multIInv1 = FDecl (Forall [] [] (TInt `TArrow` (TInt `TArrow` TInt))) ["a", "c"] ["b"]
+  (IROp OpIntDiv (IRVar "c") (IRVar "a"))
+  (IRIf (IRUnaryOp OpNot (IROp OpEq (IRVar "a") (IRConst $ VInt 0)))
+        (IROp OpEq (IROp OpMod (IRVar "c") (IRVar "a")) (IRConst $ VInt 0))
+        (IRConst (VBool False)))
+  False
+  -- A discrete (TInt) scheme's dim is always 0, so 'scaleCoV' never reads
+  -- these -- placeholders only, not the (undefined) derivative of integer
+  -- division.
+  [("a", IRConst (VFloat 1)), ("c", IRConst (VFloat 1))]
 multIInv2 :: FDecl
-multIInv2 = FDecl (Forall [] [] (TInt `TArrow` (TInt `TArrow` TInt))) ["b", "c"] ["a"] (IROp OpDiv (IRVar "c") (IRVar "b")) (IRConst (VBool True)) False [("b", IRUnaryOp OpNeg (IROp OpDiv (IRVar "c") (IROp OpMult (IRVar "b") (IRVar "b")))), ("c", IROp OpDiv (IRConst (VFloat 1)) (IRVar "b"))]
+multIInv2 = FDecl (Forall [] [] (TInt `TArrow` (TInt `TArrow` TInt))) ["b", "c"] ["a"]
+  (IROp OpIntDiv (IRVar "c") (IRVar "b"))
+  (IRIf (IRUnaryOp OpNot (IROp OpEq (IRVar "b") (IRConst $ VInt 0)))
+        (IROp OpEq (IROp OpMod (IRVar "c") (IRVar "b")) (IRConst $ VInt 0))
+        (IRConst (VBool False)))
+  False
+  [("b", IRConst (VFloat 1)), ("c", IRConst (VFloat 1))]
 
 notFwd :: FDecl
 notFwd = FDecl (Forall [] [] (TBool `TArrow` TBool)) ["a"] ["b"] (IRUnaryOp OpNot (IRVar "a")) (IRConst (VBool True)) False [("a", IRConst (VFloat 1))]

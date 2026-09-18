@@ -1912,6 +1912,23 @@ toIRInference meta False (Expr _ (InjF (Named "lt") [left, right])) sample
     let returnExpr = IRIf sample (IRVar var2) (srComplement (semiringOf meta) (IRVar var2))
     -- A comparison's mass, not a structural choice: possible either way.
     return (mkPResult (sealP returnExpr) const0 (rBranches integ) constFalseIR)
+-- mult(0, y) = 0 for every y, whatever y's own distribution or shape (task
+-- mult-inversion-unguarded-at-zero, symptom 1): this is a genuine point mass,
+-- compiled exactly like a literal 'Constant' of the same value (the clause a
+-- few cases up) rather than through 'mult's own inversion, which is what
+-- 'ModalityInfer' now also types this node as -- but IRCompiler's own InjF
+-- dispatch picks its clause from the OPERANDS' pTypes (e.g. 'countProbParams'
+-- below), not the node's own annotation, so retyping it upstream alone does
+-- not change which clause fires here; this is the matching compiler-side
+-- half. Placed ahead of every other 'mult' clause (structural, not
+-- pType-gated) so it also covers an enumerable non-zero operand, not just a
+-- continuous one.
+toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named "mult") [left, right])) sample
+  | isZeroConstant left || isZeroConstant right =
+      return (indicatorP (semiringOf meta) (equalityGuard rt (IRConst (valueToIR (zeroValueOf rt))) sample))
+toIRInference meta True (Expr TypeInfo {rType=rt} (InjF (Named "mult") [left, right])) sample
+  | isZeroConstant left || isZeroConstant right =
+      return (mass (compareValueExpr (semiringOf meta) rt (IRConst (valueToIR (zeroValueOf rt))) sample))
 toIRInference meta _ (Expr _ (ReadNN name symbol)) sample = do
   nnRaw <- mkVariable "nn_raw"
   var <- mkVariable "callNN"
@@ -2494,6 +2511,9 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
   let extrasRight = tags $ getTypeInfo right
   let enumListL = head [x | DiscreteValues x <- extrasLeft]
   let enumListR = head [x | DiscreteValues x <- extrasRight]
+  -- mult/multI's own absorbing element, in this node's type -- see the
+  -- zero-atom mix below.
+  let zeroValL = zeroValueOf rt
 
   fPair <- instantiate mkVariable (adtDecls meta) resolvedName -- FPair of the InjF with unique names
   let FPair fwd inversions = fPair
@@ -2502,6 +2522,7 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
   let invDecl = inversionFor resolvedName v3 inversions
   let (x2, x3) = binaryInputVars resolvedName invDecl
   let invExpr = body invDecl
+  let appTest = applicability invDecl
 
   -- We now compute
   -- for each e in leftEnum:
@@ -2531,7 +2552,13 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
           Nothing -> toIRInference meta False right invExpr
     let pRight = unP (rProb pRightRes)
     let wrapR e = generateLetInExpr pRightBinds e
-    let possible = IRIsPossible enumListR invExpr
+    -- The inversion's own applicability (task mult-enumerable-zero-divisor-crash):
+    -- 'invExpr' (e.g. mult's c/e) is undefined at some enumerated values (e.g.
+    -- e=0), and it sits as an argument to 'IRIsPossible', so it must be
+    -- evaluated before any membership test can run. Gating via 'IRIf' rather
+    -- than 'OpAnd' matters here: both operands of an IR boolean op are
+    -- evaluated, so an 'OpAnd' would still divide by zero.
+    let possible = IRIf appTest (IRIsPossible enumListR invExpr) (IRConst (VBool False))
     -- accProb * pLeft is a semiring product (srTimes): under logSpace both
     -- operands are log-probabilities, so a hardcoded OpMult here silently
     -- pruned every branch (task topk-logspace-unsound). The comparison against
@@ -2552,7 +2579,23 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
   let (outerBinds, innerTuple) = hoistInvariantBindings x2 irTuple
   let renameHoisted (n, v) = (if n `elem` [x2, x3] then uniquePrefix ++ n else n, applyUnique v)
   setVariables (map renameHoisted outerBinds)
-  enumSumP (semiringOf meta) (countBranches (compilerConfig meta)) applyUnique x2 enumListL innerTuple
+  summed <- enumSumP (semiringOf meta) (countBranches (compilerConfig meta)) applyUnique x2 enumListL innerTuple
+  -- mult(0, y) = 0 for every y: the applicability guard above correctly drops
+  -- that enumerated cell (a=0 is not point-invertible -- its fiber is the
+  -- whole right-hand domain, not a point), but dropping it silently
+  -- under-reports p(sample=0) by exactly P(a=0) (task
+  -- mult-inverse-unguarded-zero-division: "the marginal should be trivially
+  -- 1" for that cell). Mixed back in the same way an explicit
+  -- `if coinflip then ... else 0` mixture already is: as its own alternative,
+  -- picked by 'mixP' (lower dim / possibility wins) rather than folded into
+  -- the enumerated sum, which assumes every term is a point-invertible
+  -- density/mass of the same shape.
+  if resolvedName `elem` ["mult", "multI"] && zeroValL `elem` multiValueToValueList enumListL
+    then do
+      pLeftZero <- operandProb meta mTblL left (IRConst (valueToIR zeroValL))
+      let zeroAtom = prodP sr (mass pLeftZero) (indicatorP sr (equalityGuard rt sample (IRConst (valueToIR zeroValL))))
+      mixP sr (IROp OpPlus (rBranches summed) (rBranches zeroAtom)) zeroAtom summed
+    else return summed
 -- For the cumulative case we cant get around two enum sums
 toIRInference meta True (Expr TypeInfo {rType=rt} (InjF (Named name) [left, right])) sample
   | isEnumerable (tags (getTypeInfo left)) && isEnumerable (tags (getTypeInfo right))
@@ -2699,7 +2742,25 @@ toIRInference meta cumulative (Expr TypeInfo {rType=rt} (InjF (Named name) [left
   let renameHoisted (n, v) = (if n `elem` [xEnum, xSample] then uniquePrefix ++ n else n, applyUnique v)
   setVariables (map renameHoisted outerBinds)
   summed <- enumSumP sr (countBranches (compilerConfig meta)) applyUnique xEnum enumList innerTuple
-  return (onDim (const (if cumulative then const0 else anyGuardedDim sample)) summed)
+  let summedTyped = onDim (const (if cumulative then const0 else anyGuardedDim sample)) summed
+  -- mult(0, y) = 0 for every y (task mult-inversion-unguarded-at-zero, symptom
+  -- 3): 'appTest' above already keeps the guarded scaling from dividing by
+  -- e=0, but that just drops the term -- the true contribution of that
+  -- enumerated cell is the DEGENERATE law "the result is deterministically 0",
+  -- an atom the density sum can't represent (it has no Lebesgue density).
+  -- Mixed back in exactly the way an explicit `if coinflip then 0 else 2*Normal`
+  -- already is: as its own alternative, picked by 'mixP' (lower dim wins) in
+  -- probability mode, or added in cumulative mode where both sides are dim 0
+  -- CDF contributions anyway.
+  if resolvedName == "mult" && VFloat 0 `elem` multiValueToValueList enumList
+    then do
+      pEnumZero <- operandProb meta mTblEnum enumE (IRConst (VFloat 0))
+      let zeroIndicator = if cumulative
+                            then mass (compareValueExpr sr rt (IRConst (VFloat 0)) sample)
+                            else indicatorP sr (equalityGuard rt sample (IRConst (VFloat 0)))
+      let zeroAtom = prodP sr (mass pEnumZero) zeroIndicator
+      mixP sr (IROp OpPlus (rBranches summedTyped) (rBranches zeroAtom)) zeroAtom summedTyped
+    else return summedTyped
 toIRInference _ _ (Expr _ (Subtree _ _)) _ = error "Cannot infer prob on subtree expression. Please check your syntax"
 toIRInference _ _ x _ = error ("found no way to convert to IR: " ++ show x)
 
@@ -2777,6 +2838,21 @@ getProbIndex es =
     pt x = pType (getTypeInfo x)
     pTypes = map pt es
     zipped = zip pTypes [0..]
+
+-- | 'mult'/'multI's absorbing element, in a given return type -- shared by the
+-- zero-multiplier InjF clause above and the enumerable-domain zero-atom fixes
+-- below (tasks mult-inversion-unguarded-at-zero,
+-- mult-enumerable-zero-divisor-crash, mult-inverse-unguarded-zero-division).
+zeroValueOf :: RType -> Value
+zeroValueOf TInt = VInt 0
+zeroValueOf _    = VFloat 0
+
+-- | A literal zero operand, in either numeric type. See the 'mult'
+-- zero-multiplier InjF clause above.
+isZeroConstant :: Expr -> Bool
+isZeroConstant (Expr _ (Constant (VFloat 0))) = True
+isZeroConstant (Expr _ (Constant (VInt 0))) = True
+isZeroConstant _ = False
 
 -- | Discrete value-equality / step-CDF masses (used both for a deterministic
 -- Constant's cumulative "0 below, 1 at-or-above" step function and for

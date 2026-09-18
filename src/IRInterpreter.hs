@@ -171,6 +171,22 @@ generate f neurals' registry adts' globalEnv env [] (IROp OpDiv a b) = do
     --(VAny, _) -> return VAny
     --(_, VAny) -> return VAny
     _ -> failWith f ("Type error: Divide can only divide two numbers (of the same type): " ++ show (aVal, bVal))
+-- Exact integer division/remainder (task int-mult-inversion-divides-and-crashes):
+-- only ever emitted guarded by an applicability test asserting the modulo is
+-- zero first (see PredefinedFunctions.multIInv1/multIInv2), so the rounding
+-- direction never matters here.
+generate f neurals' registry adts' globalEnv env [] (IROp OpIntDiv a b) = do
+  aVal <- generate f neurals' registry adts' globalEnv env [] a
+  bVal <- generate f neurals' registry adts' globalEnv env [] b
+  case (aVal, bVal) of
+    (VInt af, VInt bf) -> return $ VInt (af `div` bf)
+    _ -> failWith f ("Type error: IntDiv can only divide two ints: " ++ show (aVal, bVal))
+generate f neurals' registry adts' globalEnv env [] (IROp OpMod a b) = do
+  aVal <- generate f neurals' registry adts' globalEnv env [] a
+  bVal <- generate f neurals' registry adts' globalEnv env [] b
+  case (aVal, bVal) of
+    (VInt af, VInt bf) -> return $ VInt (af `mod` bf)
+    _ -> failWith f ("Type error: Mod can only apply to two ints: " ++ show (aVal, bVal))
 generate f neurals' registry adts' globalEnv env [] (IROp OpSub a b) = do
   aVal <- generate f neurals' registry adts' globalEnv env [] a
   bVal <- generate f neurals' registry adts' globalEnv env [] b

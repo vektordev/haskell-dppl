@@ -57,6 +57,8 @@ pPrintIRExpr (IROp OpPlus e1 e2) n = binOpIR "+" e1 e2 n
 pPrintIRExpr (IROp OpSub e1 e2) n = binOpIR "-" e1 e2 n
 pPrintIRExpr (IROp OpMult e1 e2) n = binOpIR "*" e1 e2 n
 pPrintIRExpr (IROp OpDiv e1 e2) n = binOpIR "/" e1 e2 n
+pPrintIRExpr (IROp OpIntDiv e1 e2) n = binOpIR "div" e1 e2 n
+pPrintIRExpr (IROp OpMod e1 e2) n = binOpIR "mod" e1 e2 n
 pPrintIRExpr (IROp OpGreaterThan e1 e2) n = binOpIR ">" e1 e2 n
 pPrintIRExpr (IROp OpLessThan e1 e2) n = binOpIR "<" e1 e2 n
 pPrintIRExpr (IROp OpEq e1 e2) n = binOpIR "==" e1 e2 n
