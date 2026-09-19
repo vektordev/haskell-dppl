@@ -66,7 +66,7 @@ showcaseTests = do
   freezeSrc <- readFile showcaseFreezePath
   readmeSrc <- readFile readmePath
   let scProg       = tryParseProgram showcasePath scSrc
-      tstCases     = either (const []) (\(_, _, tcs) -> tcs) (parseTestCasesFromString showcaseTstPath tstSrc)
+      tstCases     = either (const []) (\(_, _, _, tcs) -> tcs) (parseTestCasesFromString showcaseTstPath tstSrc)
       freezeParsed = parseFreezeCasesFromString showcaseFreezePath freezeSrc
       readmeBlocks = spllBlocksWithExpected readmeSrc
   return $ testGroup "Showcase"
@@ -125,7 +125,7 @@ readmeTests blocks = testGroup "README ```spll examples" $
             Nothing       -> return ()
             Just expected -> case parseTestCasesFromString label expected of
               Left perr           -> assertFailure ("expected-output block failed to parse:\n" ++ perr)
-              Right (_, _, cases) -> assertTstMatches cases prog
+              Right (_, _, _, cases) -> assertTstMatches cases prog
   | (i, (block, mexp)) <- zip [1 :: Int ..] blocks
   , let label = readmePath ++ " ```spll block " ++ show i
   ] ++

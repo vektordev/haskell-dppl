@@ -10,6 +10,7 @@ module TestCaseParser (
   Backend(..),
   allBackends,
   defaultBackends,
+  ExpectFailure(..),
   isProbTestCase,
   isCumulTestCase,
   isArgmaxPTestCase,
@@ -21,10 +22,15 @@ module TestCaseParser (
   FreezeCase(..),
   FreezeMode(..),
   parseFreezeCasesFromString,
-  parseProgram
+  parseProgram,
+  corpusRoot,
+  listCorpusPplFiles,
+  corpusPplPath,
+  corpusTstPath
 ) where
 
 import Data.List (isPrefixOf)
+import Control.Monad (forM)
 
 import SPLL.Parser (tryParseProgram, pValue)
 import SPLL.IntermediateRepresentation
@@ -36,6 +42,8 @@ import Text.Megaparsec.Char
 import Data.Void
 import Control.Monad.State
 import Control.Monad (MonadPlus, void)
+import System.Directory (listDirectory, doesDirectoryExist)
+import System.FilePath ((</>), isExtensionOf, takeBaseName, stripExtension)
 
 
 -- Which execution backends a .tst file's cases run against. Declared via an
@@ -314,33 +322,79 @@ pSlowHeader = do
   pNewline
   return ()
 
--- Both headers are optional and may appear in either order (or not at all).
--- A missing `backends:` header means 'defaultBackends' (the three scalar
--- backends), never 'allBackends': `batched` must be opted into explicitly.
-pHeaders :: MonadParser m => m ([Backend], Bool)
-pHeaders = go defaultBackends False
-  where
-    go bs slow =
-      (try pBackendsHeader >>= \bs' -> go bs' slow) <|>
-      (try pSlowHeader >> go bs True) <|>
-      return (bs, slow)
+-- | The kind of compile-time failure a @tests/cases/known-issues/@ program is
+-- pinned to keep reproducing (design testcases-corpus-restructure). A
+-- 'known-issues' repro carries an @expect-failure:@ header naming which of
+-- these four shapes it demonstrates:
+--
+-- * 'ExpectCrash' -- an uncaught exception/panic during compilation, with no
+--   particular diagnostic pinned.
+-- * 'ExpectDiagnostic' -- 'compile' returns @Left@, and the message contains
+--   the given substring.
+-- * 'ExpectNoCode' -- 'compile' succeeds, but the queried variant
+--   (generate/probability/integrate) is silently absent rather than compiled.
+-- * 'ExpectWrongResult' -- compiles and runs, and the ordinary @p(...)@/
+--   @cdf(...)@ rows below pin the value the bug actually produces (which is
+--   known to be wrong). This shape needs no new assertion machinery -- the
+--   header exists purely to document *why* the pinned number is wrong, since
+--   the ordinary tuple comparison already fails loudly the day a fix changes
+--   the computed value.
+data ExpectFailure
+  = ExpectCrash
+  | ExpectDiagnostic String
+  | ExpectNoCode
+  | ExpectWrongResult
+  deriving (Show, Eq)
 
-pTestFile :: MonadParser m => String -> m ([Backend], Bool, [TestCase])
+-- | A double-quoted diagnostic substring, e.g. @"set-valued witness
+-- construction failed"@. No escape handling -- a diagnostic is prose, never
+-- itself containing a literal quote.
+pQuotedString :: MonadParser m => m String
+pQuotedString = L.lexeme sc (char '"' *> manyTill (satisfy (/= '"')) (char '"'))
+
+-- An optional standalone `expect-failure: ...` header line, order-independent
+-- with `backends:`/`slow`. See 'ExpectFailure' for the four shapes.
+pExpectFailureHeader :: MonadParser m => m ExpectFailure
+pExpectFailureHeader = do
+  symbol "expect-failure:"
+  ef <- choice
+    [ ExpectDiagnostic <$> (symbol "diagnostic" >> pQuotedString)
+    , ExpectCrash <$ symbol "crash"
+    , ExpectNoCode <$ symbol "no-code"
+    , ExpectWrongResult <$ symbol "wrong-result"
+    ]
+  pNewline
+  return ef
+
+-- All three headers are optional and may appear in any order. A missing
+-- `backends:` header means 'defaultBackends' (the three scalar backends),
+-- never 'allBackends': `batched` must be opted into explicitly. A missing
+-- `expect-failure:` header means 'Nothing' -- an ordinary corpus program.
+pHeaders :: MonadParser m => m ([Backend], Bool, Maybe ExpectFailure)
+pHeaders = go defaultBackends False Nothing
+  where
+    go bs slow ef =
+      (try pBackendsHeader >>= \bs' -> go bs' slow ef) <|>
+      (try pSlowHeader >> go bs True ef) <|>
+      (try pExpectFailureHeader >>= \ef' -> go bs slow (Just ef')) <|>
+      return (bs, slow, ef)
+
+pTestFile :: MonadParser m => String -> m ([Backend], Bool, Maybe ExpectFailure, [TestCase])
 pTestFile name = do
   scn
-  (bs, slow) <- pHeaders
+  (bs, slow, ef) <- pHeaders
   tcs <- pTestCases name
   scn
   eof
-  return (bs, slow, tcs)
+  return (bs, slow, ef, tcs)
 
-parseTestCasesFromString :: FilePath -> String -> Either String ([Backend], Bool, [TestCase])
+parseTestCasesFromString :: FilePath -> String -> Either String ([Backend], Bool, Maybe ExpectFailure, [TestCase])
 parseTestCasesFromString fp content =
   case runParser (runStateT (pTestFile fp) 0) fp content of
     Left err -> Left (errorBundlePretty err)
     Right (val, _) -> Right val
 
-parseTestCases :: FilePath -> IO ([Backend], Bool, [TestCase])
+parseTestCases :: FilePath -> IO ([Backend], Bool, Maybe ExpectFailure, [TestCase])
 parseTestCases fp = do
   content <- readFile fp
   either error return (parseTestCasesFromString fp content)
@@ -396,3 +450,53 @@ parseProgram fp = do
   case prog of
     Left str -> error $ "Error parsing " ++ fp ++ ": " ++ errorBundlePretty str
     Right p -> return p
+
+-- ---------------------------------------------------------------------------
+-- Corpus discovery (design testcases-corpus-restructure)
+-- ---------------------------------------------------------------------------
+-- The corpus moved from a flat `testCases/` into topic folders under
+-- `tests/cases/`. A base name is unique across the whole corpus regardless of
+-- which topic folder it lives in, so callers that used to hardcode
+-- `"testCases/" ++ name ++ ".ppl"` resolve the name through 'corpusPplPath'
+-- instead of needing to know its folder.
+
+-- | Root of the corpus.
+corpusRoot :: FilePath
+corpusRoot = "tests/cases"
+
+-- | Every @.ppl@ file under 'corpusRoot', found by recursing into topic
+-- folders -- a flat 'listDirectory' would miss everything not directly at the
+-- top level.
+listCorpusPplFiles :: IO [FilePath]
+listCorpusPplFiles = walk corpusRoot
+  where
+    walk dir = do
+      entries <- listDirectory dir
+      fmap concat $ forM entries $ \e -> do
+        let full = dir </> e
+        isDir <- doesDirectoryExist full
+        if isDir
+          then walk full
+          else return [full | ".ppl" `isExtensionOf` full]
+
+-- | Resolve a corpus base name (no directory, no extension) to its @.ppl@
+-- path. Errors loudly -- rather than returning 'Nothing' -- on zero or more
+-- than one match: a typo or a duplicated name should fail the suite, not
+-- silently test nothing, or the wrong program.
+corpusPplPath :: FilePath -> IO FilePath
+corpusPplPath baseName = do
+  matches <- filter ((== baseName) . takeBaseName) <$> listCorpusPplFiles
+  case matches of
+    [one] -> return one
+    []    -> error ("corpusPplPath: no corpus program named " ++ baseName
+                    ++ " found under " ++ corpusRoot)
+    ms    -> error ("corpusPplPath: ambiguous corpus program name " ++ baseName
+                    ++ ": " ++ show ms)
+
+-- | The @.tst@ sibling of a base name's @.ppl@ path.
+corpusTstPath :: FilePath -> IO FilePath
+corpusTstPath baseName = do
+  p <- corpusPplPath baseName
+  case stripExtension ".ppl" p of
+    Just base -> return (base ++ ".tst")
+    Nothing   -> error ("corpusTstPath: not a .ppl path: " ++ p)

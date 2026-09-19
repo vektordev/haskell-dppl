@@ -34,7 +34,8 @@ import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure, (@?=))
 import IRInterpreter (generateDet)
-import TestCaseParser (Backend(..), TestCase(..), expectationProb, defaultBackends, parseTestCasesFromString)
+import TestCaseParser (Backend(..), TestCase(..), ExpectFailure(..), expectationProb, defaultBackends,
+                        parseTestCasesFromString, corpusPplPath, corpusTstPath)
 import Test.Tasty.QuickCheck (testProperties, testProperty)
 import System.Random (StdGen)
 import Control.Monad.Random (Rand)
@@ -432,7 +433,8 @@ containsDirectNNApply name expr = any (containsDirectNNApply name) (getIRSubExpr
 -- w.r.t. the enumeration over digit values, so it must be hoisted outside the loop.
 test_nnHoistedOutOfEnumSum :: TestTree
 test_nnHoistedOutOfEnumSum = testCase "nnHoistedOutOfEnumSum" $ do
-  src <- readFile "testCases/mNistAdd.ppl"
+  path <- corpusPplPath "mNistAdd"
+  src <- readFile path
   case tryParseProgram "mNistAdd.ppl" src of
     Left err -> assertFailure ("Parse error: " ++ show err)
     Right prog ->
@@ -790,42 +792,79 @@ autoNeuralDerivationTests = testGroup "autoNeuralDerivation"
 -- cases to a subset of the End2End backends; no header means the three scalar
 -- backends (`defaultBackends`) -- notably NOT the opt-in `batched` token.
 -- They may also carry an optional `slow` header (in either order relative to
--- `backends:`) that moves the file into the opt-in Slow test group.
+-- `backends:`) that moves the file into the opt-in Slow test group, and an
+-- optional `expect-failure:` header (design testcases-corpus-restructure)
+-- that marks the file as a known-issues pinned repro.
 test_tstBackendsHeader :: TestTree
 test_tstBackendsHeader = testCase "tstBackendsHeader" $ do
   let parse = parseTestCasesFromString "header.tst"
   case parse "p(0.5)=(1.0, 1.0)\n" of
     Left err -> assertFailure err
-    Right (bs, slow, tcs) -> do
+    Right (bs, slow, ef, tcs) -> do
       assertEqual "no header defaults to the scalar backends" defaultBackends bs
       assertEqual "no header defaults to not slow" False slow
+      assertEqual "no header defaults to no expected failure" Nothing ef
       assertEqual "test case count without header" 1 (length tcs)
   case parse "backends: interpreter\np(0.5)=(1.0, 1.0)\n" of
     Left err -> assertFailure err
-    Right (bs, _, tcs) -> do
+    Right (bs, _, _, tcs) -> do
       assertEqual "interpreter-only routing" [Interpreter] bs
       assertEqual "test case count with header" 1 (length tcs)
   case parse "backends: julia, python\ncdf(0.5)=(0.5, 0.0)\n" of
     Left err -> assertFailure err
-    Right (bs, _, _) -> assertEqual "two-backend routing" [Julia, Python] bs
+    Right (bs, _, _, _) -> assertEqual "two-backend routing" [Julia, Python] bs
   case parse "slow\np(0.5)=(1.0, 1.0)\n" of
     Left err -> assertFailure err
-    Right (bs, slow, _) -> do
+    Right (bs, slow, _, _) -> do
       assertEqual "slow header alone still defaults to the scalar backends" defaultBackends bs
       assertEqual "slow header is recognized" True slow
   case parse "backends: python, batched\np(0.5)=(1.0, 1.0)\n" of
     Left err -> assertFailure err
-    Right (bs, _, _) -> assertEqual "batched is an explicit opt-in token" [Python, Batched] bs
+    Right (bs, _, _, _) -> assertEqual "batched is an explicit opt-in token" [Python, Batched] bs
   case parse "backends: interpreter\nslow\np(0.5)=(1.0, 1.0)\n" of
     Left err -> assertFailure err
-    Right (bs, slow, _) -> do
+    Right (bs, slow, _, _) -> do
       assertEqual "backends-then-slow routing" [Interpreter] bs
       assertEqual "backends-then-slow is recognized" True slow
   case parse "slow\nbackends: interpreter\np(0.5)=(1.0, 1.0)\n" of
     Left err -> assertFailure err
-    Right (bs, slow, _) -> do
+    Right (bs, slow, _, _) -> do
       assertEqual "slow-then-backends routing" [Interpreter] bs
       assertEqual "slow-then-backends is recognized" True slow
+
+-- The four `expect-failure:` shapes (design testcases-corpus-restructure),
+-- order-independent with `backends:`/`slow` like the other two headers.
+test_tstExpectFailureHeader :: TestTree
+test_tstExpectFailureHeader = testCase "tstExpectFailureHeader" $ do
+  let parse = parseTestCasesFromString "header.tst"
+  case parse "expect-failure: crash\n" of
+    Left err -> assertFailure err
+    Right (_, _, ef, tcs) -> do
+      assertEqual "crash shape" (Just ExpectCrash) ef
+      assertEqual "a known-issue file need not carry any p()/cdf() rows" 0 (length tcs)
+  case parse "expect-failure: diagnostic \"set-valued witness construction failed\"\n" of
+    Left err -> assertFailure err
+    Right (_, _, ef, _) ->
+      assertEqual "diagnostic shape carries its substring"
+        (Just (ExpectDiagnostic "set-valued witness construction failed")) ef
+  case parse "expect-failure: no-code\n" of
+    Left err -> assertFailure err
+    Right (_, _, ef, _) -> assertEqual "no-code shape" (Just ExpectNoCode) ef
+  case parse "expect-failure: wrong-result\np(0.5)=(1.0, 1.0)\n" of
+    Left err -> assertFailure err
+    Right (_, _, ef, tcs) -> do
+      assertEqual "wrong-result shape" (Just ExpectWrongResult) ef
+      assertEqual "wrong-result rows parse as ordinary test cases" 1 (length tcs)
+  case parse "backends: interpreter\nexpect-failure: crash\n" of
+    Left err -> assertFailure err
+    Right (bs, _, ef, _) -> do
+      assertEqual "expect-failure coexists with backends:" [Interpreter] bs
+      assertEqual "backends-then-expect-failure is recognized" (Just ExpectCrash) ef
+  case parse "expect-failure: crash\nbackends: interpreter\n" of
+    Left err -> assertFailure err
+    Right (bs, _, ef, _) -> do
+      assertEqual "expect-failure-then-backends routing" [Interpreter] bs
+      assertEqual "expect-failure-then-backends is recognized" (Just ExpectCrash) ef
 
 return []
 
@@ -1095,14 +1134,14 @@ enumContinuousRefusalTests = testGroup "enum annotation refuses continuous leave
 -- compiles) stays in slowInternalsTests.
 planEnumTopKAndBCTest :: String -> String -> TestTree
 planEnumTopKAndBCTest testName baseName = testCase testName $ do
-  let pplPath = "testCases/" ++ baseName ++ ".ppl"
-      tstPath = "testCases/" ++ baseName ++ ".tst"
+  pplPath <- corpusPplPath baseName
+  tstPath <- corpusTstPath baseName
   src <- readFile pplPath
   prog <- case tryParseProgram pplPath src of
     Left err -> assertFailure ("Parse error: " ++ show err)
     Right p  -> return p
   tstSrc <- readFile tstPath
-  (_, _, tcs) <- case parseTestCasesFromString tstPath tstSrc of
+  (_, _, _, tcs) <- case parseTestCasesFromString tstPath tstSrc of
     Left err -> assertFailure ("tst parse error: " ++ err)
     Right r  -> return r
   let probCases = [ (s, ps, expectationProb expct) | ProbTestCase _ s ps expct <- tcs ]
@@ -1794,7 +1833,7 @@ stochasticCallTests = testGroup "stochastic calls (stochastic-call-cse-unsound)"
   -- leaf, so an effectful condition would have its draws fused --
   -- @(if Uniform < 0.5 then 0 else 1, if Uniform < 0.5 then 0 else 1)@ would
   -- stop producing the mixed outcomes altogether
-  -- (testCases/tupleSharedCondIndependentDraws).
+  -- (tests/cases/data-structures/tupleSharedCondIndependentDraws).
   , testCase "distributeIf refuses to fuse an effectful shared condition" $ do
       let cond = IROp OpLessThan (IRSample IRUniform) (IRConst (VFloat 0.5))
           arm x y = IRIf cond (IRConst (VInt x)) (IRConst (VInt y))
@@ -2210,7 +2249,7 @@ mainBodyTags prog = case lookup "main" (functions prog) of
 materializationGuardTests :: TestTree
 materializationGuardTests = testGroup "Cardinality guard for marginal materialization"
   [ testCase "permits mNistAdd: sum domain, both operand domains, and the operand grid" $ do
-      prog <- prepTypedProgFile "testCases/mNistAdd.ppl"
+      prog <- corpusPplPath "mNistAdd" >>= prepTypedProgFile
       let (nodeTags, leftTags, rightTags) = mainInjFTags prog
           bound = defaultMaterializationCardinality
       case (materializationDomain bound nodeTags,
@@ -2256,7 +2295,7 @@ materializationGuardTests = testGroup "Cardinality guard for marginal materializ
       assertEqual "an empty enumeration is not a domain"
         Nothing (materializationDomain bound [DiscreteValues (MultiDiscretes [])])
   , testCase "a non-positive budget is the off-switch" $ do
-      prog <- prepTypedProgFile "testCases/mNistAdd.ppl"
+      prog <- corpusPplPath "mNistAdd" >>= prepTypedProgFile
       let (nodeTags, _, _) = mainInjFTags prog
       assertEqual "cardinality 0 refuses everything"
         Nothing (materializationDomain 0 nodeTags)
@@ -2486,7 +2525,7 @@ semiringMapTests = testGroup "Semiring: max-product (MAP)"
       assertBool ("p_map(3.0) = 0.45, got " ++ show p3) (abs (p3 - 0.45) < 1e-9)
       assertBool ("p_map(4.0) = 0.09, got " ++ show p4) (abs (p4 - 0.09) < 1e-9)
   , testCase "double-enumeration (enumSumP, applyUnique-uniquified): MAP over both orderings" $ do
-      -- testCases/applyEnumOperandPair.ppl's own shape: sel fl ++ sel fl, both
+      -- tests/cases/enumerability/applyEnumOperandPair.ppl's own shape: sel fl ++ sel fl, both
       -- operands the SAME latent, exercised via the enumerate-both path (task
       -- enumerable-injf-operand-loses-tag-across-apply). p(1) sums two ways to
       -- get 1 (fl selects the 0-slot on one side and the 1-slot on the other),
@@ -2613,7 +2652,7 @@ materializationVerdictTests = testGroup "Decomposability gate: materialization c
       -- OUTER ++ combines two independent things (the inner chain, and w),
       -- while the INNER one's operands are both u and must not be tabulated
       -- separately. The program's other binary InjFs are the two `<` nodes.
-      prog <- prepTypedProgFile "testCases/sharedLatentNestedChain.ppl"
+      prog <- corpusPplPath "sharedLatentNestedChain" >>= prepTypedProgFile
       let verdicts = Map.elems (materializationVerdicts prog)
       assertEqual "four binary InjF nodes: 2 comparisons, the outer ++, the inner ++"
         4 (length verdicts)
@@ -2621,7 +2660,7 @@ materializationVerdictTests = testGroup "Decomposability gate: materialization c
         1 (length (filter id verdicts))
   , testCase "mNistAdd3/4: every node independent, so every level may be tabulated" $ do
       forM_ ["mNistAdd3", "mNistAdd4"] $ \name -> do
-        prog <- prepTypedProgFile ("testCases/" ++ name ++ ".ppl")
+        prog <- corpusPplPath name >>= prepTypedProgFile
         assertBool (name ++ ": digit reads through deterministic symbols are independent")
           (not (or (Map.elems (materializationVerdicts prog))))
   , testCase "a latent threaded through a function parameter is never a candidate" $ do
@@ -2645,27 +2684,27 @@ materializationVerdictTests = testGroup "Decomposability gate: materialization c
 decomposabilityGateTests :: TestTree
 decomposabilityGateTests = testGroup "Decomposability gate: shared enumerated latent"
   [ testCase "canary: letThreadEnumerable's shared u is flagged" $ do
-      prog <- prepTypedProgFile "testCases/letThreadEnumerable.ppl"
+      prog <- corpusPplPath "letThreadEnumerable" >>= prepTypedProgFile
       assertBool "u used on both sides of ++ must be flagged as shared" (mainOuterVerdict prog)
   , testCase "sharedLatentCallChain: latent crosses a two-level call boundary" $ do
-      prog <- prepTypedProgFile "testCases/sharedLatentCallChain.ppl"
+      prog <- corpusPplPath "sharedLatentCallChain" >>= prepTypedProgFile
       assertBool "shared through the inner/contrib call chain" (mainOuterVerdict prog)
   , testCase "sharedLatentTupleSlot: latent reaches both uses via a tuple slot" $ do
-      prog <- prepTypedProgFile "testCases/sharedLatentTupleSlot.ppl"
+      prog <- corpusPplPath "sharedLatentTupleSlot" >>= prepTypedProgFile
       assertBool "shared through the (u, 1) tuple argument" (mainOuterVerdict prog)
   , testCase "sharedLatentThreeUses: transitively closed across 3 occurrences" $ do
-      prog <- prepTypedProgFile "testCases/sharedLatentThreeUses.ppl"
+      prog <- corpusPplPath "sharedLatentThreeUses" >>= prepTypedProgFile
       assertBool "a pairwise-only check would miss 3-way sharing; must be transitively closed"
         (mainOuterVerdict prog)
   , testCase "sharedLatentNestedLet: dependency threads through a derived let binding" $ do
-      prog <- prepTypedProgFile "testCases/sharedLatentNestedLet.ppl"
+      prog <- corpusPplPath "sharedLatentNestedLet" >>= prepTypedProgFile
       assertBool "v = contrib u 1 must still carry u's identity forward" (mainOuterVerdict prog)
   , testCase "sharedLatentOneSideOnly: gate permits genuinely independent operands" $ do
-      prog <- prepTypedProgFile "testCases/sharedLatentOneSideOnly.ppl"
+      prog <- corpusPplPath "sharedLatentOneSideOnly" >>= prepTypedProgFile
       assertBool "u and v are distinct lets; must NOT be flagged as shared"
         (not (mainOuterVerdict prog))
   , testCase "sharedLatentPlusFresh: identical-looking draws bound to distinct lets are independent" $ do
-      prog <- prepTypedProgFile "testCases/sharedLatentPlusFresh.ppl"
+      prog <- corpusPplPath "sharedLatentPlusFresh" >>= prepTypedProgFile
       assertBool "u and v draw from the same distribution shape but are distinct latents"
         (not (mainOuterVerdict prog))
   , testCase "two independent raw draws with no let are never flagged" $ do
@@ -2693,7 +2732,7 @@ sumTypeShowcaseTests = testGroup "sumTypeShowcase"
 -- parse error.
 loadCorpusProgram :: String -> IO Program
 loadCorpusProgram baseName = do
-  let path = "testCases/" ++ baseName ++ ".ppl"
+  path <- corpusPplPath baseName
   src <- readFile path
   case tryParseProgram path src of
     Left err -> assertFailure ("Parse error in " ++ path ++ ": " ++ show err)
@@ -3158,6 +3197,7 @@ internalsTests = testGroup "Internals"
   , planOverCouplingRefusalTests
   , planFactorExternalsTests
   , test_tstBackendsHeader
+  , test_tstExpectFailureHeader
   , optimizerPurityTests
   , stochasticCallTests
   , batchedRefusalUnitTests

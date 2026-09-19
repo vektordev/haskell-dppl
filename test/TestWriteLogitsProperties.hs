@@ -535,13 +535,13 @@ writeLogitsTests = testGroup "WriteLogits"
 --    dependent-slot program would need excluding here, since writeLogits
 --    deliberately marginalises cross-slot correlations, design § 3.7).
 
--- Corpus pool: every interpreter-routed testCases/*.ppl with its test cases.
+-- Corpus pool: every interpreter-routed corpus program with its test cases.
 loadRoundtripPool :: IO [(String, Program, [TestCase])]
 loadRoundtripPool = do
   files <- getAllTestFiles
   pool <- mapM (\(ppl, tst) -> do
     prog <- parseProgram ppl
-    (backends, slow, tcs) <- parseTestCases tst
+    (backends, slow, _ef, tcs) <- parseTestCases tst
     return (takeBaseName ppl, prog, backends, slow, tcs)) files
   return [(n, p, tcs) | (n, p, backends, slow, tcs) <- pool, Interpreter `elem` backends, not slow]
 

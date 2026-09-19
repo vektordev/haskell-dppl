@@ -2,8 +2,8 @@
 
 module End2EndTesting where
 
-import System.Directory (listDirectory, getCurrentDirectory)
-import System.FilePath (stripExtension, isExtensionOf, takeBaseName)
+import System.Directory (getCurrentDirectory)
+import System.FilePath (stripExtension, takeBaseName)
 import System.IO.Temp (withSystemTempFile)
 import System.IO (hPutStr, hClose, hPutStrLn, stderr)
 import System.Environment (lookupEnv)
@@ -42,9 +42,7 @@ import MockNN (evaluateMockNN)
 
 getAllTestFiles :: IO [(FilePath, FilePath)]
 getAllTestFiles = do
-  files <- listDirectory "testCases"
-  let pplFiles = filter (".ppl" `isExtensionOf`) files
-  let pplFullPath = map ("testCases/" ++) pplFiles
+  pplFullPath <- listCorpusPplFiles
   let testCaseFiles = map ((++ ".tst") . (fromJust . stripExtension ".ppl")) pplFullPath
   return (zip pplFullPath testCaseFiles)
 
@@ -67,7 +65,7 @@ selectPassDifferentialTests = do
   files <- getAllTestFiles
   cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
   let entries = [ (takeBaseName pplPath, p, tcs)
-                | ((pplPath, _), (p, (bs, slow, tcs))) <- zip files cases
+                | ((pplPath, _), (p, (bs, slow, _ef, tcs))) <- zip files cases
                 , not slow, Interpreter `elem` bs ]
   return $ testGroup "SelectPassNoOp"
     [ testProperty n (once $ conjoin (map (selectNoOp p scalarEnv batchedEnv) tcs))
@@ -662,7 +660,7 @@ batchedPythonFixtures = do
   -- `slow`-headered programs stay out of batched coverage by construction, the
   -- same way they stay out of the Interpreter groups.
   let entries = [ (takeBaseName pplPath, p, bs, tcs)
-                | ((pplPath, _), (p, (bs, slow, tcs))) <- zip files cases
+                | ((pplPath, _), (p, (bs, slow, _ef, tcs))) <- zip files cases
                 , not slow ]
       -- The topK differential (M5) recompiles the `batched`-declaring programs
       -- at a cutoff, so it draws from the same declaration, not from a second
@@ -816,7 +814,7 @@ batchedRefusalTests = testGroup "BatchedRefusal" $
   [ testProperty (prog ++ " -- " ++ needle) (once (refusalRow prog needle))
   | (prog, needle) <- batchedRefusalTable ]
   ++ [ testProperty (prog ++ " -- scalar advisory reports eligible")
-         (once (ioProperty (advisoryRow prog Nothing <$> parseProgram ("testCases/" ++ prog ++ ".ppl"))))
+         (once (ioProperty (advisoryRow prog Nothing <$> (corpusPplPath prog >>= parseProgram))))
      -- The advisory's other direction: on a program batched mode *does* take,
      -- it must stay quiet rather than cry wolf. Two shapes, since the guard has
      -- two independent halves (the per-body fragment walk and the call graph):
@@ -991,7 +989,7 @@ batchedAdtCdfNaNGuardTests = testGroup "batched ADT-cdf NaN guard" $
 -- batched backend with a diagnostic containing @needle@.
 refusalRow :: String -> String -> Property
 refusalRow prog needle = ioProperty $ do
-  p <- parseProgram ("testCases/" ++ prog ++ ".ppl")
+  p <- corpusPplPath prog >>= parseProgram
   return $ case compile defaultCompilerConfig{batched = True} p of
     Left err -> counterexample (prog ++ " failed to compile at all, so this row proves "
                                 ++ "nothing about the batched refusal: " ++ err) False
@@ -1967,8 +1965,8 @@ type BranchCountCase = (String, Program, IREnv, [(TestCase, Double, Double, Doub
 
 loadBranchCountCase :: String -> IO BranchCountCase
 loadBranchCountCase name = do
-  prog <- parseProgram ("testCases/" ++ name ++ ".ppl")
-  (_, _, tcs) <- parseTestCases ("testCases/" ++ name ++ ".tst")
+  prog <- corpusPplPath name >>= parseProgram
+  (_, _, _, tcs) <- corpusTstPath name >>= parseTestCases
   let env = either (error . ((name ++ ": ") ++) . show) id
               (compile defaultCompilerConfig{countBranches = True} prog)
       queries = filter (\t -> isProbTestCase t || isCumulTestCase t) tcs
@@ -2097,7 +2095,7 @@ slowEnd2EndTests = do
   return $ buildEnd2EndTree "End2End (slow)" False compiled
 
 -- | Parses and compiles (default -O2, and -O0 to check the optimizer is
--- harmless) every testCases/*.ppl+.tst pair whose `slow` header (see
+-- harmless) every tests/cases/**/*.ppl+.tst pair whose `slow` header (see
 -- TestCaseParser) satisfies `keep`.
 loadEnd2EndCases :: (Bool -> Bool)
                   -> IO [(String, Program, Either CompilerError IREnv, [Backend], [TestCase])]
@@ -2105,7 +2103,7 @@ loadEnd2EndCases keep = do
   files <- getAllTestFiles
   cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
   return [ (takeBaseName pplPath, p, compile defaultCompilerConfig p, bs, tcs)
-         | ((pplPath, _), (p, (bs, slow, tcs))) <- zip files cases, keep slow ]
+         | ((pplPath, _), (p, (bs, slow, _ef, tcs))) <- zip files cases, keep slow ]
 
 -- | Programs whose -O0 recompilation is disproportionately expensive relative
 -- to the regression class the "Interpreter Unoptimized" group exists to catch

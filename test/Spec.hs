@@ -31,7 +31,7 @@ import End2EndTesting (end2endTests, slowEnd2EndTests, getAllTestFiles, selectPa
 import TestFuzz (fuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
                  neuralGeneratorTests, arrowGeneratorTests, fuzzScalingTests,
                  injFCatalogTests)
-import TestCaseParser (parseProgram, parseTestCases, TestCase(..), Expectation(..), Backend(..))
+import TestCaseParser (parseProgram, parseTestCases, corpusPplPath, TestCase(..), Expectation(..), Backend(..))
 import TestTolerances (probTolerance, reasonablyCloseTolerance, samplingTolerance)
 import SPLL.Prelude
 import qualified SPLL.CodeGenPyTorch
@@ -45,7 +45,7 @@ normalPDF :: Double -> Double
 normalPDF x = (1 / sqrt (2 * pi)) * exp (-0.5 * x * x)
 
 -- The expected-value tables that used to live here have moved into the
--- testCases/*.ppl + *.tst corpus (see the End2End groups). The metamorphic
+-- tests/cases corpus (see the End2End groups). The metamorphic
 -- properties below draw their (program, sample, params, expected) pool from
 -- that corpus instead: every interpreter-routed, non-neural prob/cdf case.
 -- Neural programs are excluded because their parameters are mock symbols that
@@ -57,7 +57,7 @@ loadCorpusCases = do
   files <- getAllTestFiles
   pairs <- mapM (\(ppl, tst) -> do
     prog <- parseProgram ppl
-    (backends, _slow, tcs) <- parseTestCases tst
+    (backends, _slow, _ef, tcs) <- parseTestCases tst
     return (takeBaseName ppl, prog, backends, tcs)) files
   let usable = [(n, p, tcs) | (n, p, backends, tcs) <- pairs, Interpreter `elem` backends, null (neurals p)]
   -- 'Impossible' rows (task tst-dim-unasserted-at-zero-probability) carry no
@@ -75,7 +75,7 @@ loadCorpusCdfCases = do
   files <- getAllTestFiles
   pairs <- mapM (\(ppl, tst) -> do
     prog <- parseProgram ppl
-    (backends, _slow, tcs) <- parseTestCases tst
+    (backends, _slow, _ef, tcs) <- parseTestCases tst
     return (takeBaseName ppl, prog, backends, tcs)) files
   let usable = [(n, p, tcs) | (n, p, backends, tcs) <- pairs, Interpreter `elem` backends, null (neurals p)]
   return [(n, (p, queryPoint, params, (prob, dim))) | (n, p, tcs) <- usable, CumulTestCase _ queryPoint params (Possible prob dim _) <- tcs]
@@ -635,7 +635,7 @@ checkTopKNeverInflatesCdf topKEnvs defEnvs n (p, inp, params, _) = ioProperty $ 
 -- probability is a lower bound on the exact one -- but only at the same
 -- dimension. Pruning removes alternatives from a mixture, and the mixture
 -- reports the LOWEST dim among the alternatives it still has, so the pruned
--- dim can only rise (testCases/topKPrunesMassArm: pruning the then-arm's
+-- dim can only rise (tests/cases/topk-pruning/topKPrunesMassArm: pruning the then-arm's
 -- point mass at 1.0 leaves the else-arm's density, (0.95, dim 1) against the
 -- exact (0.05, dim 0) -- a density and a mass are not comparable). So: equal
 -- dims compare values, unequal dims require the pruned one to be higher.
@@ -730,7 +730,7 @@ prop_BCLeafSpellingIndependence = once $ ioProperty $ do
           x -> counterexample (lbl ++ ": unexpected result shape: " ++ show x) False
     | (lbl, src) <- srcs ]
 
--- Recursion-depth fidelity (task bc-recursive-prob-divergence). testCases/dice.ppl
+-- Recursion-depth fidelity (task bc-recursive-prob-divergence). tests/cases/conditionals/dice.ppl
 -- is genuinely self-recursive (dice x = ... else dice (x-1), from dice 4.0), unlike
 -- the dice 6 builder above which is a Haskell-side unrolled if-tree. Its branch
 -- count must be exactly the recursion depth, 4 -- one leaf resolution per level --
@@ -743,7 +743,7 @@ prop_BCLeafSpellingIndependence = once $ ioProperty $ do
 -- compiled artifact still traverses the same 4 leaves.
 prop_BCRecursiveDiceDepth :: Property
 prop_BCRecursiveDiceDepth = once $ ioProperty $ do
-  prog <- parseProgram "testCases/dice.ppl"
+  prog <- corpusPplPath "dice" >>= parseProgram
   return $ conjoin
     [ case irDensity bcConf prog (VFloat v) [] of
         VProbDimBC _ _ bc -> counterexample ("p(" ++ show v ++ "): expected BC=4, got " ++ show bc) (bc == 4.0)
@@ -781,13 +781,13 @@ prop_TopKInjFEnum = once $ ioProperty $ do
             .&&. counterexample ("threshold=0.2 should prune all InjF enum branches: P=" ++ show hP) (hP == 0.0)
     _ -> return $ counterexample "Return type was no tuple" False
 
--- Parses testCases/dice.ppl (d4, equal P=0.25 per face) and runs it through the full
+-- Parses tests/cases/conditionals/dice.ppl (d4, equal P=0.25 per face) and runs it through the full
 -- parsing + compilation pipeline with topK enabled, via the public runProb API
 -- (which threads the initial acc_prob for topK-compiled programs).
 -- threshold=0.1 (<0.25): no branch is pruned; each face should have P=0.25.
 prop_TopKEndToEnd :: Property
 prop_TopKEndToEnd = once $ ioProperty $ do
-  prog <- parseProgram "testCases/dice.ppl"
+  prog <- corpusPplPath "dice" >>= parseProgram
   let results = map (\v -> irDensity (topKConf 0.1) prog (VFloat v) []) [1.0, 2.0, 3.0, 4.0]
   return $ conjoin
     [ case r of

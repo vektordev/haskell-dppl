@@ -15,8 +15,7 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertEqual, assertBool, assertFailure)
 
 import Control.Exception (evaluate)
-import Data.List (intercalate, isSuffixOf)
-import System.Directory (listDirectory)
+import Data.List (intercalate)
 import System.Timeout (timeout)
 
 import SPLL.Lang.Types (Program(..), Expr(..), ExprF(..), TypeInfo(..), ChainName)
@@ -30,7 +29,7 @@ import SPLL.Typing.RInfer (addRTypeInfo)
 import SPLL.Typing.Determinism (knownAnchors)
 import SPLL.Typing.ModalityInfer (perNodeOuterGrounds)
 import SPLL.Typing.Modality (GroundMod(gCap), CapabilitySet(..))
-import TestCaseParser (parseProgram)
+import TestCaseParser (parseProgram, corpusRoot, listCorpusPplFiles)
 
 -- | Run the modality pipeline on a source string and return the typed program.
 -- Goes through 'addTypeInfo' (RInfer → FC certificate → ModalityInfer) so the
@@ -215,14 +214,14 @@ modalityInferTests = testGroup "ModalityInfer"
           -- NOT to retract the typing claim. Pinned here so a future narrowing
           -- of 'keepD' cannot silently downgrade this to 'Bottom' and quietly
           -- lose a density the compiler can actually produce -- the numbers it
-          -- produces are pinned by testCases/mixtureFinitePlusNormal.
+          -- produces are pinned by tests/cases/distributions/mixtureFinitePlusNormal.
           assertEqual "" Integrate
             (mainPType "main = exp(if Uniform < 0.5 then 1.0 else 2.0) + Normal")
       , testCase "a finite mixture times a LogNormal keeps its closed density (Integrate)" $
           -- Same shape one operator over, and the case whose change of
           -- variables is non-trivial: `mult`'s inverse carries a 1/e Jacobian
-          -- (testCases/mixtureFiniteTimesLogNormal pins the values, and
-          -- testCases/mixtureFiniteNegTimesNormal the negative-scale CDF flip).
+          -- (tests/cases/distributions/mixtureFiniteTimesLogNormal pins the values, and
+          -- tests/cases/distributions/mixtureFiniteNegTimesNormal the negative-scale CDF flip).
           assertEqual "" Integrate
             (mainPType "main = (if Uniform < 0.5 then 1.0 else 2.0) * exp(Normal)")
       , testCase "comparison against a Bottom operand is Bottom, not Integrate" $
@@ -404,7 +403,7 @@ modalityInferTests = testGroup "ModalityInfer"
   -- landed via the ExpressiveNeurals merge: the IRCompiler's body-factor
   -- folding in the Apply arm is exactly that fold, and the body is re-typed
   -- deterministic-given-the-recovered-variable for dispatch (retypeDetGiven).
-  -- Milestone 4's end-to-end pinning lives in @testCases/@:
+  -- Milestone 4's end-to-end pinning lives in @tests/cases/@:
   -- letWitnessedSharedLatent(Mult), letTwoUniformIndirect. The same-latent
   -- shape @(x, x+x)@ compiles (to p_x·indicator, dim 1, at parity with
   -- ExpressiveNeurals) but is NOT corpus-pinned: its degenerate support makes
@@ -512,7 +511,7 @@ modalityInferTests = testGroup "ModalityInfer"
   -- 'Bottom' where 'Integrate' was expected).
   --
   -- The "never occurs" claim turns out to be false in one well-understood,
-  -- narrow shape: 'testCases/deadBindingIntractable.ppl' and
+  -- narrow shape: 'tests/cases/let-bindings/deadBindingIntractable.ppl' and
   -- 'deadParamIntractable.ppl' (added 2026-08-30, investigation
   -- 60_toIRInference-apply-gap -- after the diff harness was already deleted,
   -- so its historical "0 partial-set flags" run never saw them, and that run
@@ -535,7 +534,7 @@ modalityInferTests = testGroup "ModalityInfer"
   -- level. The engine's verdict was already correct on every row -- what was
   -- broken was downstream, in 'SPLL.IRCompiler' -- so these assertions are the
   -- half of the regression net that guards the *verdict* while the
-  -- @testCases/arrowApply*@ corpus pairs guard the compiled answer. Row 7
+  -- @tests/cases/higher-order/arrowApply*@ corpus pairs guard the compiled answer. Row 7
   -- (@\x -> x + x@) is a wontfix precision gap and is pinned as a refusal in
   -- 'TestRejection' instead.
   , testGroup "arrow space: a function value reaching an application"
@@ -584,25 +583,25 @@ modalityInferTests = testGroup "ModalityInfer"
 -- path working.
 knownPartialSetExceptions :: [FilePath]
 knownPartialSetExceptions =
-  [ "testCases/deadBindingIntractable.ppl"
-  , "testCases/deadParamIntractable.ppl"
+  [ corpusRoot ++ "/let-bindings/deadBindingIntractable.ppl"
+  , corpusRoot ++ "/let-bindings/deadParamIntractable.ppl"
   ]
 
--- | Every 'testCases/*.ppl' program (minus 'knownPartialSetExceptions'),
--- walked through the same RType inference -> enum annotation -> chain naming
--- -> FCData sequence 'SPLL.Prelude.compile' uses (deliberately NOT
--- 'typeProg''s order above, which runs enum/chain annotation before RType
--- inference for test convenience -- 'perNodeOuterGrounds' needs the FCData
--- built the production way, from the RType'd and chain-named program).
--- Asserts 'perNodeOuterGrounds' never reports a 'DensityOnly'/'IntegralOnly'
--- ground for any node in any other corpus program.
+-- | Every corpus @.ppl@ program under 'corpusRoot' (minus
+-- 'knownPartialSetExceptions'), walked through the same RType inference ->
+-- enum annotation -> chain naming -> FCData sequence 'SPLL.Prelude.compile'
+-- uses (deliberately NOT 'typeProg''s order above, which runs enum/chain
+-- annotation before RType inference for test convenience --
+-- 'perNodeOuterGrounds' needs the FCData built the production way, from the
+-- RType'd and chain-named program). Asserts 'perNodeOuterGrounds' never
+-- reports a 'DensityOnly'/'IntegralOnly' ground for any node in any other
+-- corpus program.
 corpusPartialSetTests :: TestTree
 corpusPartialSetTests = testGroup "corpus-wide partial-set invariant"
-  [ testCase "no testCases/*.ppl node (outside the known exceptions) lands \
+  [ testCase "no corpus .ppl node (outside the known exceptions) lands \
              \in DensityOnly/IntegralOnly" $ do
-      files <- listDirectory "testCases"
-      let pplFiles = [ "testCases/" ++ f | f <- files, ".ppl" `isSuffixOf` f
-                      , ("testCases/" ++ f) `notElem` knownPartialSetExceptions ]
+      allFiles <- listCorpusPplFiles
+      let pplFiles = [ f | f <- allFiles, f `notElem` knownPartialSetExceptions ]
       violations <- concat <$> mapM filePartialSetViolations pplFiles
       assertBool (partialSetViolationsMessage violations) (null violations)
   ]
