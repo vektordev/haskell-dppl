@@ -783,10 +783,18 @@ constructInjFHornClause subst _ name decl inv = ExprHornClause (map lookupSubst 
 -- Find the chainName this a given chain name is equivalent to
 -- TODO: Can multiple equivalences happen? What then?
 getEquivCN :: [[HornClause]] -> ChainName -> ChainName
-getEquivCN clauses cn = case [hc | hc@(EquivalenceHornClause [pre] _ _ _) <- equiv, pre == cn] of
-  [EquivalenceHornClause _ back _ _] -> back
-  [] -> error $ "Found no equivalent chain name to: " ++ cn
-  _ ->  error $ "Found multiple equivalent chain name to: " ++ cn
+getEquivCN clauses cn = fromMaybe (error $ "Found no equivalent chain name to: " ++ cn) (getEquivCNMaybe clauses cn)
+
+-- 'getEquivCN', recoverable: 'Nothing' where that errors with "no equivalent
+-- chain name" (a value with no single equivalence -- e.g. an if-selected
+-- mixture of closures, which has no ONE body an equivalence clause could name).
+-- Still errors on more than one candidate -- that is a genuine invariant
+-- violation elsewhere, not a shape this caller is meant to tolerate.
+getEquivCNMaybe :: [[HornClause]] -> ChainName -> Maybe ChainName
+getEquivCNMaybe clauses cn = case [hc | hc@(EquivalenceHornClause [pre] _ _ _) <- equiv, pre == cn] of
+  [EquivalenceHornClause _ back _ _] -> Just back
+  []                                 -> Nothing
+  _ -> error $ "Found multiple equivalent chain name to: " ++ cn
   where
     equiv = filter isEquivalenceHornClause (map head clauses)
 
@@ -834,19 +842,36 @@ constructEquivalenceClauses clauses exprs (Expr TypeInfo{chainName=exCn} (Apply 
       -- If it is a function we have the problems if the function is invoked multiple times, because different invokations may have differrnt return values.
       -- This is not possible, because we identify values by their chainName, which is the same for different invokations
       -- Solve this by duplicating the sub-AST of the function and tagging each chainName with a tag unique for each invokation
-      TArrow _ _ -> do
-        -- Fing the lambda bound
-        let vLambdaCn = case v of
-              (Expr TypeInfo{chainName = vlCn} (Lambda _ _)) -> vlCn
-              _ -> getEquivCN clauses (getChainName v)
-        let (_, vBody) = asLambda "constructEquivalenceClauses" (findExprWithCN exprs vLambdaCn)
-        -- Get all horn clauses, which corresspond to expressions in the sub-AST of the lambda
-        let dependent = getDependentGroups clauses (getChainName vBody)
-        -- Supply each invokation with a unique tag and create the corresponding clauses
-        let (varClauses, applyCnt) = evalSupply $ associateFunctionVariable lVar vLambdaCn lTag lBody
-        -- Create a tagged copy of the dependent Hron clauses
-        let taggedDependents = concatMap (\tag -> map (tagGroup tag) dependent) [0..applyCnt - 1]
-        appliedGroup:varClauses ++ taggedDependents
+      TArrow _ _ ->
+        -- Find the lambda bound. A value that does not resolve to exactly one
+        -- lambda body -- e.g. an if-selected mixture of two different closures
+        -- (task arrow-lifted-mixture-for-function-values) -- has no single body
+        -- to tag per-invocation copies against: there is nothing to make the
+        -- multiple-invocation distinction FOR here, since there is no one
+        -- lambda whose sub-AST could be duplicated and tagged. Skip the
+        -- tagging (this Apply's own equivalence-to-its-body clause still
+        -- stands) rather than crash building a certificate that a mixture's
+        -- OWN compilation path (the pointwise-lifted mixture combinator in
+        -- IRCompiler) never consults anyway.
+        case resolveVLambdaCn of
+          Nothing -> [appliedGroup]
+          Just vLambdaCn -> do
+            let (_, vBody) = asLambda "constructEquivalenceClauses" (findExprWithCN exprs vLambdaCn)
+            -- Get all horn clauses, which corresspond to expressions in the sub-AST of the lambda
+            let dependent = getDependentGroups clauses (getChainName vBody)
+            -- Supply each invokation with a unique tag and create the corresponding clauses
+            let (varClauses, applyCnt) = evalSupply $ associateFunctionVariable lVar vLambdaCn lTag lBody
+            -- Create a tagged copy of the dependent Hron clauses
+            let taggedDependents = concatMap (\tag -> map (tagGroup tag) dependent) [0..applyCnt - 1]
+            appliedGroup:varClauses ++ taggedDependents
+        where
+          resolveVLambdaCn = case v of
+            Expr TypeInfo{chainName = vlCn} (Lambda _ _) -> Just vlCn
+            _ -> do
+              cn <- getEquivCNMaybe clauses (getChainName v)
+              case findExprWithCN exprs cn of
+                Expr _ Lambda{} -> Just cn
+                _               -> Nothing
       -- Easy if the applied value is no function, because it is constant across the program.
       _ ->
         -- We still need to create a tagged group if our original lambda was tagged

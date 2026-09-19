@@ -1766,8 +1766,6 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
   let condFalse = mkPResult (sealP condFalseExpr) (rDim condTrue) const0
                           (IROp OpEq condFalseExpr (srZero sr))
   setVariables [(var_condT_p, condTrueExpr), (var_condF_p, condFalseExpr)]
-  -- p(y) = if p_cond < thresh then p_else(y) * (1-p_cond(y)) else if p_cond > 1 - thresh then p_then(y) * p_cond(y) else p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
-  let thr = topKThreshold (compilerConfig meta)
 
   -- The arm is weighted by the condition's probability -- an independent factor,
   -- so 'prodP'. The branch count is the exception to the product rule: both arms
@@ -1776,23 +1774,6 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
   let weighByCond v condRes armRes =
         onBranches (const (rBranches armRes))
           (prodP sr (mkPResult (sealP (IRVar v)) (rDim condRes) const0 (rImposs condRes)) armRes)
-
-  -- We need to restart the monad stack, because variables inside the branches may not be valid outside
-  -- E.g. if length(a) > 0 then a[0] else ...
-  -- If we were to access a[0] outside of the branch we would error
-  (mul1Raw, binds1) <- lift (runWriterT (do
-    let metaTrue = meta { accProb = srTimes sr (accProb meta) (IRVar var_condT_p) }
-    weighByCond var_condT_p condTrue <$> toIRInference metaTrue cumulative left sample))
-  (mul2Raw, binds2) <- lift (runWriterT (do
-    let metaFalse = meta { accProb = srTimes sr (accProb meta) (IRVar var_condF_p) }
-    weighByCond var_condF_p condFalse <$> toIRInference metaFalse cumulative right sample))
-  -- If probability of this branch is 0 then set the product to 0 manually. This branch could throw an error multiplied by 0
-  -- A condition that cannot hold makes its arm an impossible event, which is
-  -- exactly what the mixture below needs to know to drop it -- so record it
-  -- rather than leaving the zeroed product to be recognised numerically.
-  -- The check is the arm block's guard (see 'shareResult'), so an arm whose
-  -- condition cannot hold is never evaluated -- it may hold the recursive call
-  -- the check exists to skip.
   -- Whether the condition's own probability is (approximately) the semiring
   -- zero: linear 0.0, or log-space negative infinity. Comparing against the
   -- literal 0.0 here would falsely treat every log-space arm as live (a log
@@ -1805,57 +1786,130 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
   let deadArm c = if srLogSpace sr then IROp OpEq c (srZero sr)
                                    else IROp OpApprox c (srZero sr)
   let liveArm = notIR . deadArm
-  mul1Zeroed <- shareResult sr "armT" [liveArm condTrueExpr] binds1 mul1Raw
-  mul2Zeroed <- shareResult sr "armF" [liveArm condFalseExpr] binds2 mul2Raw
-  let leftBranchesExpr  = rBranches mul1Zeroed
-  let rightBranchesExpr = rBranches mul2Zeroed
-  -- Dispatching is free: a node that delegates to sub-computations contributes
-  -- no branch of its own, so the count is the sum of whichever arms were
-  -- actually alive -- no term for evaluating the condition, and no -1 wash.
-  -- (The previous formula, cond + left + right - 1, telescoped to left + right
-  -- only because every condition tested so far happened to be leaf-shaped with
-  -- its own count of exactly 1; a compound condition -- a nested if, a call --
-  -- inflated the parent by its dispatch cost for no principled reason. Every
-  -- other combinator here -- the enumerated sum, toIREnumerate, the topK dispatch --
-  -- already sums surviving children and adds nothing for dispatching.)
   -- Each arm is zero-checked with the same IRIf short-circuit the probability
   -- fields use, so a dead arm's count -- and any recursive call inside it --
   -- is never evaluated. That is what makes a recursive program's branch count
   -- terminate at all (task bc-recursive-prob-divergence).
   let zeroCheckBC c bc = IRIf (deadArm c) const0 bc
-  let branches = IROp OpPlus (zeroCheckBC condTrueExpr  leftBranchesExpr)
-                             (zeroCheckBC condFalseExpr rightBranchesExpr)
-  addRes <- mixP sr branches mul1Zeroed mul2Zeroed
-  case thr of
-    Just _ -> do
-      -- Pick among the three whole packed results ONCE, bound to a single
-      -- variable, rather than wrapping each of the four PResult fields in
-      -- its own copy of the accTrue/accFalse IRIf (the previous shape):
-      -- that field-wise wrapping is exactly the duplication pattern
-      -- 'shareResult' exists to avoid (see its docs) -- here it wasn't
-      -- routed through shareResult at all, so it re-embedded mul1Zeroed's/
-      -- mul2Zeroed's/addRes's own fields FOUR times per level. Since this
-      -- whole 'IfThenElse' case can itself be 'cond' of an enclosing
-      -- topK-guarded IfThenElse, that 4x-per-level duplication compounds
-      -- with nesting depth into an exponential blowup independent of (and
-      -- compounding on top of) the condTrue/condFalse fix above
-      -- (fuzz-qc-compiler-bugs item 3: nested topK-guarded conditions timed
-      -- out well before the plain default-config case did).
-      accTrueV <- mkVariable "accTrue"
-      accFalseV <- mkVariable "accFalse"
-      setVariables [(accTrueV, srTimes sr (accProb meta) (IRVar var_condT_p))]
-      setVariables [(accFalseV, srTimes sr (accProb meta) (IRVar var_condF_p))]
-      prunedV <- mkVariable "pruned"
-      let prunedExpr = IRIf
-            (IROp OpLessThan (IRVar accTrueV) (IRVar "TOP_K_CUTOFF"))
-            (packResult mul2Zeroed)
-            (IRIf (IROp OpLessThan (IRVar accFalseV) (IRVar "TOP_K_CUTOFF"))
-              (packResult mul1Zeroed)
-              (packResult addRes))
-      setVariables [(prunedV, prunedExpr)]
-      return (unpackResult (IRVar prunedV))
-    -- p(y) = p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
-    Nothing -> return addRes
+
+  let rt = rType (getTypeInfo left)
+  case rt of
+    -- Arrow-typed arms: each arm's compiled 'rProb' is itself a CLOSURE (see
+    -- the 'Lambda' equation two cases up -- 'detP (IRLambda name irTuple)'),
+    -- not a scalar, so weighing it by the condition's probability ('prodP')
+    -- or summing the two arms ('mixP') is arithmetic on a function value --
+    -- exactly the crash task arrow-lifted-mixture-for-function-values exists
+    -- to fix ("Mult can only multiply numbers ...: VClosure"). Lift the
+    -- combinators pointwise instead of applying them to the closures
+    -- directly: mix(p_c, t, g) == \z -> mix(p_c, unpack(t z), unpack(g z)).
+    -- Build a NEW closure over a fresh argument 'z' whose body, once applied,
+    -- reduces to the ordinary scalar mixture of each arm's own
+    -- (prob, dim, bc, imposs) AT that point -- ordinary, because opening a
+    -- closure at one concrete 'z' always yields a plain value's PResult (a
+    -- still-arrow-typed result, i.e. a curried multi-argument mixture,
+    -- recurses through this very equation the next time IT is combined --
+    -- not handled here; see task callee-normalize-curried-and-accessor-gaps
+    -- and the arrow-lift task's own declined-scope note).
+    --
+    -- topK pruning is NOT implemented for this path: the pruned selection
+    -- above picks among three PRE-COMPUTED packed alternatives, and here the
+    -- "alternative" only exists once applied to an argument that isn't known
+    -- yet. Always computing the exact (unpruned) mixture is a strict
+    -- refinement of what topK would have approximated -- never a regression
+    -- from the pre-fix behaviour of crashing outright -- so 'thr' is simply
+    -- not consulted on this branch.
+    TArrow _ _ -> do
+      let metaTrue  = meta { accProb = srTimes sr (accProb meta) (IRVar var_condT_p) }
+      let metaFalse = meta { accProb = srTimes sr (accProb meta) (IRVar var_condF_p) }
+      trueClosure  <- toIRInference metaTrue  cumulative left  sample
+      falseClosure <- toIRInference metaFalse cumulative right sample
+      zVar <- mkVariable "argZ"
+      closureBody <- lift (runWriterT (do
+        trueCallV  <- mkVariable "armTcall"
+        falseCallV <- mkVariable "armFcall"
+        let trueBind  = (trueCallV,  IRApply (unP (rProb trueClosure))  (IRVar zVar))
+            falseBind = (falseCallV, IRApply (unP (rProb falseClosure)) (IRVar zVar))
+        -- Let-bind each arm's application ONCE (mirroring the ReadNN/curried-
+        -- call-spine idiom elsewhere in this module) rather than calling
+        -- 'unpackResult' directly on the raw 'IRApply': that destructures its
+        -- argument into four separate projections, which would otherwise
+        -- inline four copies of a call that may itself be an arbitrarily
+        -- expensive (or recursive) sub-inference. 'shareResult' places the
+        -- binding inside the dead-arm guard below, so a call whose condition
+        -- cannot hold is still never evaluated.
+        trueAtZ  <- shareResult sr "armTz" [liveArm condTrueExpr]  [trueBind]  (unpackResult (IRVar trueCallV))
+        falseAtZ <- shareResult sr "armFz" [liveArm condFalseExpr] [falseBind] (unpackResult (IRVar falseCallV))
+        let weighedTrue  = weighByCond var_condT_p condTrue  trueAtZ
+            weighedFalse = weighByCond var_condF_p condFalse falseAtZ
+            branchesZ = IROp OpPlus (zeroCheckBC condTrueExpr  (rBranches weighedTrue))
+                                    (zeroCheckBC condFalseExpr (rBranches weighedFalse))
+        mixP sr branchesZ weighedTrue weighedFalse)) <&> generateLetInBlock meta
+      return (detP (IRLambda zVar closureBody))
+    _ -> do
+      -- p(y) = if p_cond < thresh then p_else(y) * (1-p_cond(y)) else if p_cond > 1 - thresh then p_then(y) * p_cond(y) else p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
+      let thr = topKThreshold (compilerConfig meta)
+      -- We need to restart the monad stack, because variables inside the branches may not be valid outside
+      -- E.g. if length(a) > 0 then a[0] else ...
+      -- If we were to access a[0] outside of the branch we would error
+      (mul1Raw, binds1) <- lift (runWriterT (do
+        let metaTrue = meta { accProb = srTimes sr (accProb meta) (IRVar var_condT_p) }
+        weighByCond var_condT_p condTrue <$> toIRInference metaTrue cumulative left sample))
+      (mul2Raw, binds2) <- lift (runWriterT (do
+        let metaFalse = meta { accProb = srTimes sr (accProb meta) (IRVar var_condF_p) }
+        weighByCond var_condF_p condFalse <$> toIRInference metaFalse cumulative right sample))
+      -- If probability of this branch is 0 then set the product to 0 manually. This branch could throw an error multiplied by 0
+      -- A condition that cannot hold makes its arm an impossible event, which is
+      -- exactly what the mixture below needs to know to drop it -- so record it
+      -- rather than leaving the zeroed product to be recognised numerically.
+      -- The check is the arm block's guard (see 'shareResult'), so an arm whose
+      -- condition cannot hold is never evaluated -- it may hold the recursive call
+      -- the check exists to skip.
+      mul1Zeroed <- shareResult sr "armT" [liveArm condTrueExpr] binds1 mul1Raw
+      mul2Zeroed <- shareResult sr "armF" [liveArm condFalseExpr] binds2 mul2Raw
+      let leftBranchesExpr  = rBranches mul1Zeroed
+      let rightBranchesExpr = rBranches mul2Zeroed
+      -- Dispatching is free: a node that delegates to sub-computations contributes
+      -- no branch of its own, so the count is the sum of whichever arms were
+      -- actually alive -- no term for evaluating the condition, and no -1 wash.
+      -- (The previous formula, cond + left + right - 1, telescoped to left + right
+      -- only because every condition tested so far happened to be leaf-shaped with
+      -- its own count of exactly 1; a compound condition -- a nested if, a call --
+      -- inflated the parent by its dispatch cost for no principled reason. Every
+      -- other combinator here -- the enumerated sum, toIREnumerate, the topK dispatch --
+      -- already sums surviving children and adds nothing for dispatching.)
+      let branches = IROp OpPlus (zeroCheckBC condTrueExpr  leftBranchesExpr)
+                                 (zeroCheckBC condFalseExpr rightBranchesExpr)
+      addRes <- mixP sr branches mul1Zeroed mul2Zeroed
+      case thr of
+        Just _ -> do
+          -- Pick among the three whole packed results ONCE, bound to a single
+          -- variable, rather than wrapping each of the four PResult fields in
+          -- its own copy of the accTrue/accFalse IRIf (the previous shape):
+          -- that field-wise wrapping is exactly the duplication pattern
+          -- 'shareResult' exists to avoid (see its docs) -- here it wasn't
+          -- routed through shareResult at all, so it re-embedded mul1Zeroed's/
+          -- mul2Zeroed's/addRes's own fields FOUR times per level. Since this
+          -- whole 'IfThenElse' case can itself be 'cond' of an enclosing
+          -- topK-guarded IfThenElse, that 4x-per-level duplication compounds
+          -- with nesting depth into an exponential blowup independent of (and
+          -- compounding on top of) the condTrue/condFalse fix above
+          -- (fuzz-qc-compiler-bugs item 3: nested topK-guarded conditions timed
+          -- out well before the plain default-config case did).
+          accTrueV <- mkVariable "accTrue"
+          accFalseV <- mkVariable "accFalse"
+          setVariables [(accTrueV, srTimes sr (accProb meta) (IRVar var_condT_p))]
+          setVariables [(accFalseV, srTimes sr (accProb meta) (IRVar var_condF_p))]
+          prunedV <- mkVariable "pruned"
+          let prunedExpr = IRIf
+                (IROp OpLessThan (IRVar accTrueV) (IRVar "TOP_K_CUTOFF"))
+                (packResult mul2Zeroed)
+                (IRIf (IROp OpLessThan (IRVar accFalseV) (IRVar "TOP_K_CUTOFF"))
+                  (packResult mul1Zeroed)
+                  (packResult addRes))
+          setVariables [(prunedV, prunedExpr)]
+          return (unpackResult (IRVar prunedV))
+        -- p(y) = p_then(y) * p_cond(y) + p_else(y) * (1-p_cond(y))
+        Nothing -> return addRes
 -- Both sides Gaussian: left - right ~ Normal(muL - muR, sqrt(sL^2 + sR^2)), so the
 -- comparison is that difference's CDF evaluated at 0. Neither side is Deterministic,
 -- so the bound-based equations below do not apply. resolveCompCons types this Bool

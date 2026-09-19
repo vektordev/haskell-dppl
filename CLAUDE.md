@@ -396,6 +396,51 @@ top-level function gets a `normalFun` at all, excludes `IfThenElse` for the same
 reason. Corpus: `letChainNormalVar`, `letChainNormalVarTuple`,
 `ifSelectNormalDet`, `ifSelectNormalMixture`.
 
+### An arrow-typed `if`-mixture is lifted pointwise, not multiplied
+
+`CalleeNormalize`'s `if`-distribution rule only reaches a selection *syntactically
+in callee position*; a probabilistic function value reached any other way --
+notably `let f = if Uniform < 0.5 then g else h in f v`, where `f` is a bare
+name applied elsewhere -- still compiled a mixture that multiplied a branch
+weight by a `VClosure` (`Mult can only multiply numbers ...: VClosure`), since
+`toIRInference`'s `IfThenElse` equation treated each arm's `rProb` (itself a
+closure, `detP (IRLambda ...)`, for an arrow-typed arm) as a scalar to
+`prodP`/`mixP`.
+
+Before that arithmetic is ever reached, `ForwardChaining.constructEquivalenceClauses`
+builds a certificate for *every* `Apply` node unconditionally, and its `TArrow`
+branch (the per-invocation tagging machinery for a function-valued binding)
+assumed the bound value always resolves to exactly one lambda body via
+`getEquivCN` -- an if-selected mixture has no such single body, so this crashed
+first, one layer earlier than the arithmetic bug ("Found no equivalent chain
+name to: ..."). `getEquivCNMaybe` makes that lookup recoverable; when it fails,
+the branch degrades to just the Apply-is-equivalent-to-its-body clause (no
+tagging) rather than erroring -- sound because nothing on the mixture's own
+compilation path below ever consults that tagging for this shape.
+
+`toIRInference`'s `IfThenElse` equation now dispatches on the arms' `rType`: for
+`TArrow`, it builds a **new closure** over a fresh argument, whose body opens
+each arm's own closure at that argument (`unpackResult (IRApply armClosure z)`,
+let-bound once each to avoid `unpackResult`'s four-way destructuring
+duplicating a possibly-expensive call) and runs the *ordinary* scalar
+`weighByCond`/`mixP` combinators on the opened, scalar results --
+`mix(p_c, t, g) == \z -> mix(p_c, unpack(t z), unpack(g z))`. `shareResult`'s
+existing dead-arm guard carries over unchanged, so an arm whose condition
+cannot hold is still never evaluated. topK pruning is not implemented on this
+path (it always computes the exact, unpruned mixture -- a valid refinement of
+what pruning would have approximated, never a regression from the pre-fix
+crash) and the scalar path is untouched. Corpus:
+`arrowApplyLetBoundRandomFunction`.
+
+Two closely related shapes are deliberately **not** covered yet and are filed
+separately, since they turned out to be blocked by different bugs, not by this
+mechanism: a curried multi-argument selection in callee position (blocked by
+`CalleeNormalize`'s own curried-spine gap) and a *named function's* call
+resolving to an if-selected lambda, even with no randomness involved (a
+different `ForwardChaining` crash, in the `l`-side resolution of the same
+`constructEquivalenceClauses` function). See task
+`arrow-lifted-mixture-for-function-values` and its `depends_on`.
+
 ### Forward chaining never re-derives a chain name it already has
 
 `ForwardChaining.solveHCSet` fulfils, per clause group, the first clause whose
