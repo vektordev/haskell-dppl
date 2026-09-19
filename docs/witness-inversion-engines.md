@@ -17,7 +17,7 @@ reads — no `of` clause or support materialization needed.
 Point inversion's inverses would otherwise crash on these shapes, which is
 why the engine intercepts rather than backstops. Bodies its traversal
 declines are untouched: they fall through to point inversion, and only then
-to set-valued witnesses. See `testCases/planEnum*` for worked examples
+to set-valued witnesses. See `tests/cases/plan-enumeration/planEnum*` for worked examples
 across the milestone levels (inline predicates, recursive user-function
 specialization, value-grouped DP for counting folds, and continuous-leaf
 constraints).
@@ -73,7 +73,7 @@ stochastic subtree (`planEnumValuesRaw` — a stochastic subtree has no single
 value to enumerate, it has a weighted support), and a comparison operand that
 mixes a plan leaf with fresh randomness (`snd o + Normal * 0.5 > 2.0`), which
 is a convolution of the leaf's Gaussian with the noise, not a factorization.
-Corpus `testCases/planFreeStochastic*`.
+Corpus `tests/cases/plan-enumeration/planFreeStochastic*`.
 
 ## Set-valued witnesses
 
@@ -88,7 +88,7 @@ intersections across multiple occurrences) — e.g.
 let x = Normal in if x < 0.0 then 0.0 - x else x
 ```
 
-yields the `|Normal|` density `2φ(y)` (`testCases/letProbAbsNormal`). Bodies
+yields the `|Normal|` density `2φ(y)` (`tests/cases/distributions/letProbAbsNormal`). Bodies
 drawing fresh randomness alongside such constraints are refused with a
 diagnostic, except inside a transported field constructor (see "Residue
 factors" below).
@@ -112,7 +112,7 @@ in the inner *body* at all (its worlds would reference the inner binding's
 value, which is not in scope where worlds are measured), and an inner
 right-hand side drawing fresh randomness (`let y = x + Normal in …`), which
 `transportDirect` cannot seed through — exactly where the flattened
-`(x + Normal) > 0.0` refuses. Corpus: `testCases/setWitnessNestedLet*`
+`(x + Normal) > 0.0` refuses. Corpus: `tests/cases/set-witness/setWitnessNestedLet*`
 (seven programs, incl. the two-sided, chained, `observe` and
 point-valued-arm shapes); refusals pinned in `TestRejection`'s
 `SetWitnessNestedLet` group. The engine stays linear-only, so these programs
@@ -162,7 +162,7 @@ against `(ANY, 0.3)`) is the wildcard-aware `equalityGuard`, since a target
 point is a projection of the query sample and a marginal wildcard can sit
 in it at any depth: the static guard errored on a float slot and silently
 answered `False` (zero mass) on a discrete one. Corpus:
-`testCases/setWitnessSibling*`.
+`tests/cases/set-witness/setWitnessSibling*`.
 
 ### Interval transport through monotone `InjF` steps
 
@@ -197,6 +197,6 @@ plan-guided engine's `planPeelSlice` reads the same image table: its
 interval transport (`peelBound`) clamps per step the same way, and its
 point transport (`peelPoint`) adds strict image-membership guards instead,
 so `exp leaf == -1.0` is impossible rather than a NaN density. Corpus:
-`testCases/setWitnessTransport*` (one program per table entry plus the
+`tests/cases/set-witness/setWitnessTransport*` (one program per table entry plus the
 nested, two-sided and always-false `exp` shapes) and
-`testCases/planEnumContExp*`.
+`tests/cases/plan-enumeration/planEnumContExp*`.

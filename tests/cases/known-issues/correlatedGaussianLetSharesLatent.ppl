@@ -1,0 +1,1 @@
+main = let x = Normal in let a = x + Normal in let b = x + Normal in (a, b)

@@ -327,10 +327,13 @@ pSlowHeader = do
 -- 'known-issues' repro carries an @expect-failure:@ header naming which of
 -- these four shapes it demonstrates:
 --
--- * 'ExpectCrash' -- an uncaught exception/panic during compilation, with no
---   particular diagnostic pinned.
--- * 'ExpectDiagnostic' -- 'compile' returns @Left@, and the message contains
---   the given substring.
+-- * 'ExpectCrash' -- forcing @compile@'s result throws an uncaught
+--   exception/panic, with no particular message pinned.
+-- * 'ExpectDiagnostic' -- forcing @compile@'s result throws an uncaught
+--   exception whose message contains the given substring. A graceful @Left@
+--   (an ordinary, intended refusal) does not satisfy either of these two --
+--   that is what "TestRejection" already covers; a known issue is a *bug*,
+--   not a deliberate rejection.
 -- * 'ExpectNoCode' -- 'compile' succeeds, but the queried variant
 --   (generate/probability/integrate) is silently absent rather than compiled.
 -- * 'ExpectWrongResult' -- compiles and runs, and the ordinary @p(...)@/
@@ -464,9 +467,17 @@ parseProgram fp = do
 corpusRoot :: FilePath
 corpusRoot = "tests/cases"
 
--- | Every @.ppl@ file under 'corpusRoot', found by recursing into topic
--- folders -- a flat 'listDirectory' would miss everything not directly at the
--- top level.
+-- | The @known-issues@ folder is a sibling of the topic folders, not one of
+-- them: its programs are *expected* to fail to compile (see
+-- "TestKnownIssues"), so it is excluded from 'listCorpusPplFiles' -- every
+-- ordinary corpus sweep (End2End, the batched groups, the @Corpus@
+-- metamorphic properties, ...) assumes a corpus program compiles cleanly.
+knownIssuesDirName :: String
+knownIssuesDirName = "known-issues"
+
+-- | Every @.ppl@ file under 'corpusRoot' (excluding 'knownIssuesDirName'),
+-- found by recursing into topic folders -- a flat 'listDirectory' would miss
+-- everything not directly at the top level.
 listCorpusPplFiles :: IO [FilePath]
 listCorpusPplFiles = walk corpusRoot
   where
@@ -476,7 +487,7 @@ listCorpusPplFiles = walk corpusRoot
         let full = dir </> e
         isDir <- doesDirectoryExist full
         if isDir
-          then walk full
+          then if e == knownIssuesDirName then return [] else walk full
           else return [full | ".ppl" `isExtensionOf` full]
 
 -- | Resolve a corpus base name (no directory, no extension) to its @.ppl@

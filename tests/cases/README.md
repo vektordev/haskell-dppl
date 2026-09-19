@@ -4,6 +4,50 @@ This folder contains the test cases for the automatic End-to-End testing framewo
 
 Every test case consists of a program specified in a ".ppl" file and a set of assertions specified in a ".tst" file.
 
+## Folder layout
+
+Pairs are grouped into subfolders by language feature (`distributions/`,
+`data-structures/`, `set-witness/`, `neural/`, ...) rather than flat, so
+finding "the tests for X" doesn't mean grepping several hundred files. A
+`.ppl`/`.tst` pair always lives together in the same folder; the test runner
+(`End2EndTesting.getAllTestFiles`, `TestModalityInfer`'s corpus-wide sweep)
+discovers them by recursing into every folder here, so a base name is unique
+across the whole corpus and findable regardless of which folder it is in
+(`TestCaseParser.corpusPplPath`/`corpusTstPath`). Which folder a new pair goes
+into is a judgment call -- put it next to the pair it's most similar to.
+
+`known-issues/` is a sibling of the topic folders, not one of them, and is
+**excluded** from the recursive discovery above: every program there is
+*expected* to fail to compile, pinning a specific, still-open compiler bug
+rather than testing a working feature. See the next section.
+
+## Pinning a known bug (`known-issues/`)
+
+Filing a mechanical repro for a bug that must *keep failing* until it's fixed
+doesn't need a hand-written Haskell test group -- drop a `.ppl`/`.tst` pair
+into `known-issues/` whose `.tst` carries an `expect-failure:` header (in the
+same style as `backends:`/`slow`) naming one of four shapes:
+
+```
+expect-failure: crash                              -- an uncaught exception, message unpinned
+expect-failure: diagnostic "some substring"        -- an uncaught exception whose message contains this
+expect-failure: no-code                            -- compiles, but generate/probability/integrate is silently absent
+expect-failure: wrong-result                       -- compiles and runs; the p()/cdf() rows below pin the known-wrong value
+```
+
+`crash`/`diagnostic` are checked against an *uncaught exception* thrown while
+forcing `compile`'s result -- a graceful `Left` (an intended, working refusal)
+does not count; that's what `TestRejection` is for. `wrong-result` needs no
+special assertion machinery: the ordinary `p(...)`/`cdf(...)` rows below the
+header already pin the value the bug produces, and the corpus's usual tuple
+comparison already fails loudly the day a fix changes the computed number.
+
+`TestKnownIssues.hs` discovers every pair here and checks it against its
+header. This coexists with `TestRejection.hs` rather than replacing it: a
+genuinely bespoke, multi-assertion regression (e.g. one that also checks a
+*different*, unaffected code path) stays a hand-written HUnit group there.
+This mechanism is for the common single-diagnostic shape only.
+
 ## What is tested
 The automatic End-to-End testing framework tests that every program provided compiles correctly and produces a value in the generative direction. We test that for given sample values in the TST file, the value of the PDF matches the provided expected value. All of these steps are done with the built-in interpreter and a version of the program compiled into Python as well as Julia.
 

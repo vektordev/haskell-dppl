@@ -248,7 +248,7 @@ honest verdict is `Bottom`: `generate` compiles, `probability` is declined by
 `missingVariant`. The shapes that *do* have an engine — the gated value
 returned as itself, an affine image of it, a tuple of such parts — keep
 `Integrate` and their existing set-witness answers
-(`testCases/gatedContinuousTruncated`, `letProbAbsNormal`).
+(`tests/cases/distributions/gatedContinuousTruncated`, `letProbAbsNormal`).
 
 The refinement keys off the condition's free variables, not off the
 `v < bound` spelling, so `if isNeg s`, `if s * s < 1.0` and `if s < w` all
@@ -274,7 +274,7 @@ that cross a comparison or `if`). Plan enumeration is tried *before*
 forward-chaining point inversion, whose inverses would otherwise crash on
 those shapes; set-valued witnesses are the fallback *after* it, taken when
 no occurrence of the bound variable is point-invertible at all. Full
-mechanism, examples, and the `testCases/planEnum*` pointers:
+mechanism, examples, and the `tests/cases/plan-enumeration/planEnum*` pointers:
 `docs/witness-inversion-engines.md`.
 
 A plan world can carry **independent factors** (`PlanWorld`'s `pwFactors`):
@@ -286,7 +286,7 @@ branch counts add). `planFactorFree` handles a whole plan-free subtree,
 the branches' mixture weights). Before this, the traversal accepted a
 plan-free subtree only when it was `Deterministic`, so a neural declaration
 and any fresh randomness could not appear in one probability-mode body.
-Corpus `testCases/planFreeStochastic*`. Still refused as genuinely
+Corpus `tests/cases/plan-enumeration/planFreeStochastic*`. Still refused as genuinely
 non-factorizable: value enumeration of a plan-free stochastic subtree, and a
 comparison operand convolving a plan leaf with fresh noise
 (`snd o + Normal * 0.5 > 2.0`).
@@ -315,7 +315,7 @@ the bound variable fixed at its witness (`residueFactor`, the point-witness
 body-factor fold per world) — a dim-0 consistency indicator for a
 deterministic sibling, the sibling's own density for a fresh draw. Without
 it `if x > 0.5 then (x, 1.0) else (x, 0.0)` answered `1.0` at `(0.7, 0.0)`.
-Corpus `testCases/setWitnessSibling*`.
+Corpus `tests/cases/set-witness/setWitnessSibling*`.
 
 An interval constraint reaching the bound variable through a chain of
 monotone `InjF` steps is transported by `toSeededMonotoneInvExpr` (direction
@@ -327,7 +327,7 @@ the empty-interval clamp then turned into a silent zero). The plan engine's
 `planPeelSlice` reads the same table (`peelBound` clamps, `peelPoint`
 guards). Adding a monotone step whose inverse is partial means adding its
 image there too. Details in the doc above; corpus
-`testCases/setWitnessTransport*`, `planEnumContExp*`.
+`tests/cases/set-witness/setWitnessTransport*`, `tests/cases/plan-enumeration/planEnumContExp*`.
 
 ### Callee Normalization
 
@@ -354,7 +354,7 @@ own):
   -- and the result is the ordinary mixture the `IfThenElse` rules already
   compile, over the two applications' *probabilities* rather than over closures.
   This is what makes a probabilistic function value a real capability
-  (`testCases/arrowApplyRandomFunction`) instead of a runtime crash.
+  (`tests/cases/higher-order/arrowApplyRandomFunction`) instead of a runtime crash.
 - **A callee denoting a lambda literal is replaced by it**: `fst`/`snd` of a
   tuple literal, `head`/`tail` of a list literal, and `let`-bound names standing
   for either, reduced until a `Lambda` falls out. Only a reduction that bottoms
@@ -569,7 +569,7 @@ exact (`Corpus.TopKZeroThreshMatchesExact`).
 from a mixture, and the mixture reports the *lowest* dim among the
 alternatives it still has, so the pruned dim can only rise — and a pruned
 point mass can leave a sibling density behind
-(`testCases/topKPrunesMassArm`: exact `(0.05, dim 0)` at `1.0`, pruned
+(`tests/cases/topk-pruning/topKPrunesMassArm`: exact `(0.05, dim 0)` at `1.0`, pruned
 `(0.95, dim 1)`). A mass and a density are not comparable, so the properties
 compare values at equal dim and otherwise require the pruned dim to be the
 higher one.
@@ -586,7 +586,7 @@ off, and any new `srComplement`/`srMinus`/CDF-difference site must do the
 same:
 
 - an `IfThenElse` *condition* (its False-weight is the complement of its
-  True-probability — `testCases/topKComplementCondition`, the minimized shape
+  True-probability — `tests/cases/topk-pruning/topKComplementCondition`, the minimized shape
   of the fuzz counterexample this was found by: a condition that is itself an
   `if` had its True-probability pruned to `0`, so its else-weight became `1`);
 - the integral behind a `gt`/`lt` against a deterministic bound
@@ -658,8 +658,8 @@ Two preconditions gate it, and both refuse rather than analyse:
 
 - **Decomposability** (`materializationVerdicts`): tabulating two
   operands separately is wrong if they share an enumerated latent
-  (`testCases/letThreadEnumerable` is the canary,
-  `testCases/sharedLatentNestedChain` the nested one). Unlike
+  (`tests/cases/let-bindings/letThreadEnumerable` is the canary,
+  `tests/cases/let-bindings/sharedLatentNestedChain` the nested one). Unlike
   `injFLatentVerdicts`, this walk binds lambda parameters, each to a
   latent identity of its own.
 - **Cardinality** (`materializationCardinality :: Int`, default 10000, in
@@ -739,7 +739,7 @@ exactly as before:
   `materialize-discrete-marginals`) which until now had *no consumer*: it is
   keyed by binary-`InjF` chain name and the agreement condition `a == b` is
   a binary `InjF`, so the scope-correct verdict for exactly these two
-  operands is already computed. Canary: `testCases/agreementSharedLatent`.
+  operands is already computed. Canary: `tests/cases/neural/agreementSharedLatent`.
 
 Corpus: `categoricalProductFusion` (hand-derived posteriors, non-uniform on
 both operands, including the zero-product impossibility rows),
@@ -887,7 +887,7 @@ contains a **loop** (`IRMap`, `BMap`, or `BReduce`). That gate is
 a claim about run time, not size — what makes a second copy cost anything is
 that it is a second traversal, and a block of constants and arithmetic folds to
 a few literals whether copied or not. A pre-optimization node count was tried
-first and is the wrong question: `testCases/equalsCoin` builds ~100 nodes that
+first and is the wrong question: `tests/cases/arithmetic/equalsCoin` builds ~100 nodes that
 fold to four literals, passing any size gate with nothing worth sharing.
 
 Measured over the corpus: emitted scalar Python totals 68% of its former size
@@ -1095,7 +1095,7 @@ for unit tests). Each module exports a `TestTree` which `Spec.hs` assembles
 into the top-level groups (`--ta '-l'` prints the current list):
 
 - `test/Spec.hs` — main entry, the static `Spec` properties, and the
-  `Corpus` group of metamorphic properties generated from `testCases/`
+  `Corpus` group of metamorphic properties generated from `tests/cases/`
   (validation, sampling-vs-PDF, topK, branch counting, P(ANY)=1, log-space
   vs linear, and `-O0` vs the default `-O2` — the optimizer is a rewrite, so
   the two levels must agree exactly on every corpus query point; a `.tst`
@@ -1116,18 +1116,23 @@ into the top-level groups (`--ta '-l'` prints the current list):
   `README.md` as a doctest
 - `test/End2EndTesting.hs` — `.ppl`/`.tst` integration against interpreter,
   Julia and Python, plus the batched groups (see Batched Mode below)
+- `test/TestKnownIssues.hs` — drives `tests/cases/known-issues/`: pinned
+  repros of open compiler bugs, each declaring which of four failure shapes
+  it demonstrates (see "Known-issues corpus" below)
 - `test/TestFuzz.hs` — `Fuzz`, inside the opt-in `Slow`/`SuperSlow` groups,
   plus `Shrinker` (the typed generator's shrink contract), which is in the
   default suite
 - `test/TestCaseParser.hs` / `ArbitrarySPLL.hs` / `TestTolerances.hs` — the
   `.tst` parser, QuickCheck generators, shared numeric tolerances
 
-A `.tst` file may start with two optional header lines, in either order: a
+A `.tst` file may start with three optional header lines, in any order: a
 routing header `backends: interpreter, julia, python` (any non-empty
-subset; default is all three scalar backends) and a standalone `slow`
+subset; default is all three scalar backends), a standalone `slow`
 line, plus two opt-in tokens: `batched` (declares batched-mode
 eligibility, asserted by the `BatchedPython` group rather than filtered)
-and `dense` (declares a finite query domain, presupposes `batched`).
+and `dense` (declares a finite query domain, presupposes `batched`); and,
+for a `tests/cases/known-issues/` file only, `expect-failure: <shape>`
+(design testcases-corpus-restructure — see "Known-issues corpus" below).
 Comments are only allowed as a leading/trailing block, not interleaved
 between test cases; an unparseable line is a hard parse failure naming
 the file and line. Beware CRLF files when adding a token by script —
@@ -1180,6 +1185,40 @@ an application needs parentheses. Prefer querying an ADT program at a point
 over querying a `Bool`/`Float` projection of it: the projection never
 reaches a sibling constructor's field accessors, which is how
 `forward-missing-constructor-guard` shipped.
+
+### Known-issues corpus (`tests/cases/known-issues/`)
+
+A sibling of `tests/cases/`'s topic folders (design
+testcases-corpus-restructure), holding `.ppl`/`.tst` pairs pinned to a
+*specific, still-open compiler bug* rather than a working feature. It is
+**excluded** from every ordinary corpus sweep (`TestCaseParser.listCorpusPplFiles`,
+so End2End, the batched groups and the `Corpus` properties never see it) —
+those all assume a corpus program compiles cleanly, which a known issue by
+definition does not. `TestKnownIssues.hs` discovers this folder on its own and
+checks each pair's `.tst` against its `expect-failure:` header instead:
+
+```
+expect-failure: crash                          -- an uncaught exception, message unpinned
+expect-failure: diagnostic "some substring"    -- an uncaught exception whose message contains this
+expect-failure: no-code                        -- compiles, but generate/probability/integrate is silently absent
+expect-failure: wrong-result                   -- compiles and runs; the p()/cdf() rows below pin the known-wrong value
+```
+
+`crash`/`diagnostic` are checked against an exception thrown while *forcing*
+`compile`'s result — a graceful `Left` (an intended, working refusal) does not
+satisfy either; that is what `TestRejection.hs` is for. `wrong-result` needs
+no new assertion machinery: the ordinary `p(...)`/`cdf(...)` rows below the
+header already pin the value the bug produces, and the corpus's usual tuple
+comparison already fails loudly the day a fix changes the computed number.
+
+This coexists with `TestRejection.hs` rather than replacing it: a genuinely
+bespoke, multi-assertion regression (e.g. one that additionally checks a
+*different*, unaffected variant) stays a hand-written HUnit group there — this
+mechanism is for the common single-diagnostic shape only, and migrating the
+existing `TestRejection.hs` groups onto it is out of scope. Seeded with
+`correlatedGaussianLetSharesLatent` (task
+correlated-gaussian-let-shares-latent), the `diagnostic` shape, whose fuller
+multi-assertion sibling is `TestRejection.SetWitnessSharedLatent`.
 
 ### Slow tests
 
@@ -1309,8 +1348,8 @@ evaluates both arms).
 `log` is *currently* safe on every reachable path anyway, because each of its
 call sites happens to sit behind an inverse's `applicability` guard — but that
 is a property of today's set of `InjF` inverses, not an enforced invariant, so
-it is wrapped too. Pinned by `testCases/uniformLog.tst`'s `cdf(1000.0)` row and
-`testCases/multExp.tst`'s `cdf(-5.0)`.
+it is wrapped too. Pinned by `tests/cases/distributions/uniformLog.tst`'s `cdf(1000.0)` row and
+`tests/cases/arithmetic/multExp.tst`'s `cdf(-5.0)`.
 
 ## Runtime Libraries
 

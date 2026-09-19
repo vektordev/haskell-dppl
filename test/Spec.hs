@@ -28,6 +28,7 @@ import TestDeterminism (determinismTests)
 import TestWriteLogitsProperties (writeLogitsTests, writeLogitsRoundtripTests)
 import TestShowcase (showcaseTests)
 import End2EndTesting (end2endTests, slowEnd2EndTests, getAllTestFiles, selectPassDifferentialTests, batchedPythonTests, slowBatchedPythonTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, branchCountBackendTests)
+import TestKnownIssues (knownIssuesTests)
 import TestFuzz (fuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
                  neuralGeneratorTests, arrowGeneratorTests, fuzzScalingTests,
                  injFCatalogTests)
@@ -1020,6 +1021,7 @@ main = do
   corpusPool <- loadCorpusCases
   corpusCdfPool <- loadCorpusCdfCases
   writeLogitsRoundtrip <- writeLogitsRoundtripTests
+  knownIssues <- knownIssuesTests
   -- A handful of tests (deep plan enumeration, mainly) are expensive enough
   -- to noticeably slow day-to-day `stack test` while rarely catching
   -- regressions outside the code they pin. They're skipped unless
@@ -1053,6 +1055,7 @@ main = do
     , writeLogitsTests
     , writeLogitsRoundtrip
     , showcase
+    , knownIssues
     , e2e
     , selectDiff
     , batchedPy
