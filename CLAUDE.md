@@ -21,7 +21,13 @@ stack run -- -i file.ppl compile -o output.jl -l julia    # Compile to Julia
 stack run -- -i file.ppl generate                         # Forward sampling
 stack run -- -i file.ppl probability -x 0.5               # Query P(X=0.5)
 stack run -- -i file.ppl cumulative -x 0.5                # CDF query P(X<=0.5)
-# Test selection (tasty patterns; `--ta '-l'` lists every group and test name):
+# Test selection (tasty patterns; `--ta '-l'` lists every group and test name).
+# `stack test` runs TWO test-suites (haskell-dppl-test and, separately,
+# haskell-dppl-test-corpus for the Corpus group -- see Test Structure below);
+# a bare `stack test --ta PATTERN` applies PATTERN to both processes, and a
+# pattern that matches nothing in one of them just reports "All 0 tests
+# passed" there, not an error. Target one binary explicitly to skip the other
+# process entirely, e.g. `stack test haskell-dppl-test-corpus --ta '-p ...'`.
 stack test --ta '-p Spec'                # run one group
 stack test --ta '-p "!/End2End/"'        # everything except a group
 stack test --ta '-p TopK'                # any test whose name matches a substring
@@ -1091,16 +1097,39 @@ the data flow rather than for "encode"/"decode" — those words used to collide
 ## Test Structure
 
 The suite runs under tasty (`tasty-quickcheck` for properties, `tasty-hunit`
-for unit tests). Each module exports a `TestTree` which `Spec.hs` assembles
-into the top-level groups (`--ta '-l'` prints the current list):
+for unit tests). It is split across **two cabal test-suites**, each its own
+executable/OS process: `haskell-dppl-test` (`test/Spec.hs`, everything below
+except Corpus) and `haskell-dppl-test-corpus` (`test-corpus/SpecCorpus.hs`,
+just the `Corpus` group, module `TestCorpus`). `stack test` builds and runs
+both automatically; `--ta` patterns only reach whichever one you invoke
+directly (`stack test haskell-dppl-test-corpus --ta '-p ...'`), since each
+process gets its own tasty CLI. This split exists because `Corpus` compiles
+the whole `tests/cases/` corpus 8 times over (once per config it needs to
+cross-check), and tasty holds its whole `TestTree` — including those
+compiled-program closures — alive for a process's entire run; sharing a
+process with the rest of the suite meant that ~1.4GB+ never got released
+before End2End/Fuzz/etc. piled their own allocations on top, which is what
+drove a combined `stack test` to an OOM kill (`SIGKILL`/`-9`, no assertion
+failure) on a memory-constrained machine. See `TestCorpus`'s module haddock
+for the measurements. `TestSupport.hs` holds the handful of compile/query
+helpers (`topKConf`, `irDensity`, `reasonablyClose`, ...) both suites need,
+since they can't import each other's `main-is` module.
 
-- `test/Spec.hs` — main entry, the static `Spec` properties, and the
-  `Corpus` group of metamorphic properties generated from `tests/cases/`
-  (validation, sampling-vs-PDF, topK, branch counting, P(ANY)=1, log-space
-  vs linear, and `-O0` vs the default `-O2` — the optimizer is a rewrite, so
-  the two levels must agree exactly on every corpus query point; a `.tst`
-  expectation alone would not have caught a dangling chain-name reference that
-  constant folding happened to delete)
+Each module exports a `TestTree` which `Spec.hs` (or, for Corpus,
+`SpecCorpus.hs`) assembles into the top-level groups (`--ta '-l'` prints the
+current list for whichever binary you run):
+
+- `test/Spec.hs` — main entry and the static `Spec` properties.
+- `test-corpus/SpecCorpus.hs` / `test/TestCorpus.hs` — the `Corpus` group of
+  metamorphic properties generated from `tests/cases/` (validation,
+  sampling-vs-PDF, topK, branch counting, P(ANY)=1, log-space vs linear, and
+  `-O0` vs the default `-O2` — the optimizer is a rewrite, so the two levels
+  must agree exactly on every corpus query point; a `.tst` expectation alone
+  would not have caught a dangling chain-name reference that constant
+  folding happened to delete). Four of its eight compiled-config variants
+  differ only in `topKThreshold` (or `topKThreshold` + `logSpace`) — see the
+  filed follow-up task `runtime-parametric-topk-threshold` in
+  `NeST_internal_docs/tasks/` for folding those into fewer compiles.
 - `test/TestParser.hs` / `TestInternals.hs` — parser and internal-function
   unit tests
 - `test/TestRejection.hs` — unhappy-path: invalid or ill-typed programs must

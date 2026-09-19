@@ -94,3 +94,39 @@ tests:
     - tasty-hunit
     - tasty-quickcheck
     - temporary
+  # The Corpus tasty group, split into its own executable/process so its
+  # ~8x-duplicated full-corpus compile isn't held resident (via tasty's own
+  # TestTree retention) for the rest of a combined `stack test` run -- see
+  # TestCorpus's module haddock. `stack test` runs this alongside
+  # haskell-dppl-test automatically, each its own process.
+  haskell-dppl-test-corpus:
+    main:                SpecCorpus.hs
+    source-dirs:
+    - test-corpus
+    - test
+    # Explicit, rather than hpack's directory-scan default: source-dirs
+    # includes test/, which also holds haskell-dppl-test's own Spec.hs
+    # (module Main) -- auto-discovery would pull that in as a bogus
+    # other-module and collide with this stanza's own Main (SpecCorpus.hs).
+    # This lists exactly TestCorpus's own transitive test-local dependencies.
+    other-modules:
+    - TestCorpus
+    - TestSupport
+    - TestCaseParser
+    - End2EndTesting
+    - TestTolerances
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    - -Wall
+    - -Wcompat
+    - -Wincomplete-record-updates
+    - -Wredundant-constraints
+    - -Werror
+    dependencies:
+    - haskell-dppl
+    - tasty
+    - tasty-hunit
+    - tasty-quickcheck
+    - temporary

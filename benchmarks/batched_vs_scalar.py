@@ -9,8 +9,8 @@ program, same network weights, same points -- and checks both paths agree.
 
 Usage (from the repository root):
 
-    stack run -- -i testCases/mNistAdd.ppl compile -l python -o /tmp/mnist_scalar.py
-    stack run -- -i testCases/mNistAdd.ppl compile -l python -o /tmp/mnist_batched.py --batched
+    stack run -- -i tests/cases/neural/mNistAdd.ppl compile -l python -o /tmp/mnist_scalar.py
+    stack run -- -i tests/cases/neural/mNistAdd.ppl compile -l python -o /tmp/mnist_batched.py --batched
     python benchmarks/batched_vs_scalar.py --scalar /tmp/mnist_scalar.py \
                                            --batched /tmp/mnist_batched.py
 
