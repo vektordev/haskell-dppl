@@ -313,7 +313,7 @@ anyCtorProgSrc = unlines
 -- A constructor named after a Python keyword. Emitting it verbatim produced
 -- @class None:@, a SyntaxError (task
 -- codegen-adt-name-collides-with-target-keyword); the backends now mangle it.
--- The corpus (tests/cases/data-structures/adtKeywordNames*) pins that the emitted code runs; what
+-- The corpus (test/cases/data-structures/adtKeywordNames*) pins that the emitted code runs; what
 -- it cannot pin is the invariant below -- that mangling the *identifier* leaves
 -- the *diagnostic* still naming what the user wrote, so all three backends and
 -- the interpreter keep saying the same words.
@@ -448,7 +448,7 @@ compileToPython prog = case compile defaultCompilerConfig prog of
 -- number, and this query has none.
 --
 -- p() on the same program is unaffected and stays covered by the corpus
--- (tests/cases/data-structures/recursiveAdtMultiCtor and friends); the third case here guards
+-- (test/cases/data-structures/recursiveAdtMultiCtor and friends); the third case here guards
 -- against the refusal creeping from the cumulative path onto the point one.
 -- ----------------------------------------------------------------------------
 
@@ -896,7 +896,7 @@ intractableComparisonTests = testGroup "IntractableComparison"
 
 -- 'f's only randomness is a query-independent addition; its generate body
 -- would be pure if compiled, but --noGenerate deletes it anyway. Matches
--- tests/cases/higher-order/hoTopLevel.ppl.
+-- test/cases/higher-order/hoTopLevel.ppl.
 hoTopLevelSrc :: String
 hoTopLevelSrc = unlines
   [ "f g = g 1.0"
@@ -960,7 +960,7 @@ noGenerateSuppressedGeneratorTests = testGroup "NoGenerateSuppressedGenerator"
 -- Task set-witness-nested-let-classifier: 'invertToWorlds' inverts THROUGH a
 -- nested let (`Apply (Lambda y b) e`) in two stages -- body onto y, then the
 -- right-hand side onto x with each y-set as target. The corpus
--- (tests/cases/set-witness/setWitnessNestedLet*) pins the shapes that now compile; this
+-- (test/cases/set-witness/setWitnessNestedLet*) pins the shapes that now compile; this
 -- group pins the two shapes the case deliberately still refuses, and that they
 -- refuse with the engine's existing diagnostic rather than a new crash.
 -- ----------------------------------------------------------------------------

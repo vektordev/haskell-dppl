@@ -2095,7 +2095,7 @@ slowEnd2EndTests = do
   return $ buildEnd2EndTree "End2End (slow)" False compiled
 
 -- | Parses and compiles (default -O2, and -O0 to check the optimizer is
--- harmless) every tests/cases/**/*.ppl+.tst pair whose `slow` header (see
+-- harmless) every test/cases/**/*.ppl+.tst pair whose `slow` header (see
 -- TestCaseParser) satisfies `keep`.
 loadEnd2EndCases :: (Bool -> Bool)
                   -> IO [(String, Program, Either CompilerError IREnv, [Backend], [TestCase])]

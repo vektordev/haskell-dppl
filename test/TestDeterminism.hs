@@ -7,7 +7,7 @@
 --   * /unit/ cases on small hand-written programs pin the propagation rules
 --     (anchors, randomness sources, let bindings, top-level calls, the
 --     fixpoint);
---   * /corpus invariants/ assert across every @tests/cases/@ program that the
+--   * /corpus invariants/ assert across every @test/cases/@ program that the
 --     self-sufficient anchors (Constant / ThetaI / Subtree) are always known
 --     and the randomness leaves (Uniform / Normal / ReadNN) never are.
 module TestDeterminism (determinismTests) where

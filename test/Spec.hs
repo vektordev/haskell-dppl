@@ -224,7 +224,7 @@ prop_BCLeafSpellingIndependence = once $ ioProperty $ do
           x -> counterexample (lbl ++ ": unexpected result shape: " ++ show x) False
     | (lbl, src) <- srcs ]
 
--- Recursion-depth fidelity (task bc-recursive-prob-divergence). tests/cases/conditionals/dice.ppl
+-- Recursion-depth fidelity (task bc-recursive-prob-divergence). test/cases/conditionals/dice.ppl
 -- is genuinely self-recursive (dice x = ... else dice (x-1), from dice 4.0), unlike
 -- the dice 6 builder above which is a Haskell-side unrolled if-tree. Its branch
 -- count must be exactly the recursion depth, 4 -- one leaf resolution per level --
@@ -275,7 +275,7 @@ prop_TopKInjFEnum = once $ ioProperty $ do
             .&&. counterexample ("threshold=0.2 should prune all InjF enum branches: P=" ++ show hP) (hP == 0.0)
     _ -> return $ counterexample "Return type was no tuple" False
 
--- Parses tests/cases/conditionals/dice.ppl (d4, equal P=0.25 per face) and runs it through the full
+-- Parses test/cases/conditionals/dice.ppl (d4, equal P=0.25 per face) and runs it through the full
 -- parsing + compilation pipeline with topK enabled, via the public runProb API
 -- (which threads the initial acc_prob for topK-compiled programs).
 -- threshold=0.1 (<0.25): no branch is pruned; each face should have P=0.25.

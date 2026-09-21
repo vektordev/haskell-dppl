@@ -1,5 +1,5 @@
 {-# LANGUAGE PatternSynonyms #-}
--- | Drives @tests/cases/known-issues/@ (design testcases-corpus-restructure):
+-- | Drives @test/cases/known-issues/@ (design testcases-corpus-restructure):
 -- a folder of @.ppl@/@.tst@ pairs pinned to a *specific*, known compiler bug,
 -- each carrying an @expect-failure:@ header naming the shape it demonstrates
 -- (see 'TestCaseParser.ExpectFailure'). Unlike the rest of the corpus (whose

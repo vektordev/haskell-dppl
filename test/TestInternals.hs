@@ -1833,7 +1833,7 @@ stochasticCallTests = testGroup "stochastic calls (stochastic-call-cse-unsound)"
   -- leaf, so an effectful condition would have its draws fused --
   -- @(if Uniform < 0.5 then 0 else 1, if Uniform < 0.5 then 0 else 1)@ would
   -- stop producing the mixed outcomes altogether
-  -- (tests/cases/data-structures/tupleSharedCondIndependentDraws).
+  -- (test/cases/data-structures/tupleSharedCondIndependentDraws).
   , testCase "distributeIf refuses to fuse an effectful shared condition" $ do
       let cond = IROp OpLessThan (IRSample IRUniform) (IRConst (VFloat 0.5))
           arm x y = IRIf cond (IRConst (VInt x)) (IRConst (VInt y))
@@ -2525,7 +2525,7 @@ semiringMapTests = testGroup "Semiring: max-product (MAP)"
       assertBool ("p_map(3.0) = 0.45, got " ++ show p3) (abs (p3 - 0.45) < 1e-9)
       assertBool ("p_map(4.0) = 0.09, got " ++ show p4) (abs (p4 - 0.09) < 1e-9)
   , testCase "double-enumeration (enumSumP, applyUnique-uniquified): MAP over both orderings" $ do
-      -- tests/cases/enumerability/applyEnumOperandPair.ppl's own shape: sel fl ++ sel fl, both
+      -- test/cases/enumerability/applyEnumOperandPair.ppl's own shape: sel fl ++ sel fl, both
       -- operands the SAME latent, exercised via the enumerate-both path (task
       -- enumerable-injf-operand-loses-tag-across-apply). p(1) sums two ways to
       -- get 1 (fl selects the 0-slot on one side and the 1-slot on the other),

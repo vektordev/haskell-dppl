@@ -322,7 +322,7 @@ pSlowHeader = do
   pNewline
   return ()
 
--- | The kind of compile-time failure a @tests/cases/known-issues/@ program is
+-- | The kind of compile-time failure a @test/cases/known-issues/@ program is
 -- pinned to keep reproducing (design testcases-corpus-restructure). A
 -- 'known-issues' repro carries an @expect-failure:@ header naming which of
 -- these five shapes it demonstrates:
@@ -471,14 +471,14 @@ parseProgram fp = do
 -- Corpus discovery (design testcases-corpus-restructure)
 -- ---------------------------------------------------------------------------
 -- The corpus moved from a flat `testCases/` into topic folders under
--- `tests/cases/`. A base name is unique across the whole corpus regardless of
+-- `test/cases/`. A base name is unique across the whole corpus regardless of
 -- which topic folder it lives in, so callers that used to hardcode
 -- `"testCases/" ++ name ++ ".ppl"` resolve the name through 'corpusPplPath'
 -- instead of needing to know its folder.
 
 -- | Root of the corpus.
 corpusRoot :: FilePath
-corpusRoot = "tests/cases"
+corpusRoot = "test/cases"
 
 -- | The @known-issues@ folder is a sibling of the topic folders, not one of
 -- them: its programs are *expected* to fail to compile (see

@@ -214,14 +214,14 @@ modalityInferTests = testGroup "ModalityInfer"
           -- NOT to retract the typing claim. Pinned here so a future narrowing
           -- of 'keepD' cannot silently downgrade this to 'Bottom' and quietly
           -- lose a density the compiler can actually produce -- the numbers it
-          -- produces are pinned by tests/cases/distributions/mixtureFinitePlusNormal.
+          -- produces are pinned by test/cases/distributions/mixtureFinitePlusNormal.
           assertEqual "" Integrate
             (mainPType "main = exp(if Uniform < 0.5 then 1.0 else 2.0) + Normal")
       , testCase "a finite mixture times a LogNormal keeps its closed density (Integrate)" $
           -- Same shape one operator over, and the case whose change of
           -- variables is non-trivial: `mult`'s inverse carries a 1/e Jacobian
-          -- (tests/cases/distributions/mixtureFiniteTimesLogNormal pins the values, and
-          -- tests/cases/distributions/mixtureFiniteNegTimesNormal the negative-scale CDF flip).
+          -- (test/cases/distributions/mixtureFiniteTimesLogNormal pins the values, and
+          -- test/cases/distributions/mixtureFiniteNegTimesNormal the negative-scale CDF flip).
           assertEqual "" Integrate
             (mainPType "main = (if Uniform < 0.5 then 1.0 else 2.0) * exp(Normal)")
       , testCase "comparison against a Bottom operand is Bottom, not Integrate" $
@@ -403,7 +403,7 @@ modalityInferTests = testGroup "ModalityInfer"
   -- landed via the ExpressiveNeurals merge: the IRCompiler's body-factor
   -- folding in the Apply arm is exactly that fold, and the body is re-typed
   -- deterministic-given-the-recovered-variable for dispatch (retypeDetGiven).
-  -- Milestone 4's end-to-end pinning lives in @tests/cases/@:
+  -- Milestone 4's end-to-end pinning lives in @test/cases/@:
   -- letWitnessedSharedLatent(Mult), letTwoUniformIndirect. The same-latent
   -- shape @(x, x+x)@ compiles (to p_x·indicator, dim 1, at parity with
   -- ExpressiveNeurals) but is NOT corpus-pinned: its degenerate support makes
@@ -511,7 +511,7 @@ modalityInferTests = testGroup "ModalityInfer"
   -- 'Bottom' where 'Integrate' was expected).
   --
   -- The "never occurs" claim turns out to be false in one well-understood,
-  -- narrow shape: 'tests/cases/let-bindings/deadBindingIntractable.ppl' and
+  -- narrow shape: 'test/cases/let-bindings/deadBindingIntractable.ppl' and
   -- 'deadParamIntractable.ppl' (added 2026-08-30, investigation
   -- 60_toIRInference-apply-gap -- after the diff harness was already deleted,
   -- so its historical "0 partial-set flags" run never saw them, and that run
@@ -534,7 +534,7 @@ modalityInferTests = testGroup "ModalityInfer"
   -- level. The engine's verdict was already correct on every row -- what was
   -- broken was downstream, in 'SPLL.IRCompiler' -- so these assertions are the
   -- half of the regression net that guards the *verdict* while the
-  -- @tests/cases/higher-order/arrowApply*@ corpus pairs guard the compiled answer. Row 7
+  -- @test/cases/higher-order/arrowApply*@ corpus pairs guard the compiled answer. Row 7
   -- (@\x -> x + x@) is a wontfix precision gap and is pinned as a refusal in
   -- 'TestRejection' instead.
   , testGroup "arrow space: a function value reaching an application"

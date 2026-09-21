@@ -1,5 +1,5 @@
 -- | The @Corpus@ tasty group: metamorphic properties driven by the whole
--- @tests/cases/**/*.ppl@+@.tst@ corpus (validation, sampling-vs-PDF, topK, branch
+-- @test/cases/**/*.ppl@+@.tst@ corpus (validation, sampling-vs-PDF, topK, branch
 -- counting, P(ANY)=1, log-space vs linear, and -O0 vs the default -O2).
 --
 -- This lives in its own module -- and, via @haskell-dppl-test-corpus@ in
@@ -61,7 +61,7 @@ import TestTolerances (probTolerance, samplingTolerance)
 import TestSupport (topKConf, bcConf, reasonablyClose)
 
 -- The expected-value tables that used to live here have moved into the
--- tests/cases/**/*.ppl + *.tst corpus (see the End2End groups). The metamorphic
+-- test/cases/**/*.ppl + *.tst corpus (see the End2End groups). The metamorphic
 -- properties below draw their (program, sample, params, expected) pool from
 -- that corpus instead: every interpreter-routed, non-neural prob/cdf case.
 -- Neural programs are excluded because their parameters are mock symbols that
@@ -524,7 +524,7 @@ checkTopKNeverInflatesCdf topKEnvs defEnvs n (p, inp, params, _) = ioProperty $ 
 -- probability is a lower bound on the exact one -- but only at the same
 -- dimension. Pruning removes alternatives from a mixture, and the mixture
 -- reports the LOWEST dim among the alternatives it still has, so the pruned
--- dim can only rise (tests/cases/topk-pruning/topKPrunesMassArm: pruning the then-arm's
+-- dim can only rise (test/cases/topk-pruning/topKPrunesMassArm: pruning the then-arm's
 -- point mass at 1.0 leaves the else-arm's density, (0.95, dim 1) against the
 -- exact (0.05, dim 0) -- a density and a mass are not comparable). So: equal
 -- dims compare values, unequal dims require the pruned one to be higher.
