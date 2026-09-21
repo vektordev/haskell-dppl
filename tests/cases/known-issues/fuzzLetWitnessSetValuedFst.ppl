@@ -1,0 +1,4 @@
+main = fst ((\v1 -> if v1 > 1.9259387643561787
+               then ([-3.4677722571286225], left 0)
+               else ([Normal], right False))
+     Normal)

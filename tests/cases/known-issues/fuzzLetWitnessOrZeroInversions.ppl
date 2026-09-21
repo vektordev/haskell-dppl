@@ -1,0 +1,3 @@
+main = snd (if False || isLeft (left Uniform)
+              then (False, left 0)
+              else (False, left 0))

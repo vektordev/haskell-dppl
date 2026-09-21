@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 -- | Drives @tests/cases/known-issues/@ (design testcases-corpus-restructure):
 -- a folder of @.ppl@/@.tst@ pairs pinned to a *specific*, known compiler bug,
 -- each carrying an @expect-failure:@ header naming the shape it demonstrates
@@ -28,10 +29,17 @@ import System.FilePath ((</>), isExtensionOf, takeBaseName)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertFailure)
 
-import SPLL.Lang.Types (CompilerError, Program)
-import SPLL.IntermediateRepresentation (IREnv, defaultCompilerConfig, lookupIREnv, genFun, probFun, integFun)
-import SPLL.Prelude (compile)
-import TestCaseParser (ExpectFailure(..), corpusRoot, parseProgram, parseTestCasesFromString)
+import SPLL.Lang.Types (CompilerError, Program, GenericValue(..))
+import SPLL.IntermediateRepresentation
+  ( IREnv, IRValue, defaultCompilerConfig, lookupIREnv
+  , genFun, probFun, integFun, resultImpossible, pattern VProbDim
+  )
+import SPLL.Prelude (compile, runProbC, runIntegC)
+import TestCaseParser
+  ( ExpectFailure(..), TestCase(..), Expectation(..), corpusRoot
+  , parseProgram, parseTestCasesFromString
+  )
+import TestTolerances (probTolerance)
 
 knownIssuesDir :: FilePath
 knownIssuesDir = corpusRoot </> "known-issues"
@@ -58,19 +66,19 @@ knownIssueTest baseName = testCase baseName $ do
       tstPath = knownIssuesDir </> (baseName ++ ".tst")
   prog <- parseProgram pplPath
   tstSrc <- readFile tstPath
-  (_, _, mEf, _tcs) <- either error return (parseTestCasesFromString tstPath tstSrc)
+  (_, _, mEf, tcs) <- either error return (parseTestCasesFromString tstPath tstSrc)
   case mEf of
     Nothing -> assertFailure (tstPath ++ " is a known-issues .tst but declares no \
                               \`expect-failure:` header -- every case here must name \
-                              \which of the four shapes it pins")
-    Just ef -> checkExpectFailure baseName prog ef
+                              \which of the five shapes it pins")
+    Just ef -> checkExpectFailure baseName prog ef tcs
 
-checkExpectFailure :: String -> Program -> ExpectFailure -> IO ()
-checkExpectFailure name prog ExpectCrash =
+checkExpectFailure :: String -> Program -> ExpectFailure -> [TestCase] -> IO ()
+checkExpectFailure name prog ExpectCrash _ =
   assertCrashes name (compile defaultCompilerConfig prog) Nothing
-checkExpectFailure name prog (ExpectDiagnostic needle) =
+checkExpectFailure name prog (ExpectDiagnostic needle) _ =
   assertCrashes name (compile defaultCompilerConfig prog) (Just needle)
-checkExpectFailure name prog ExpectNoCode = do
+checkExpectFailure name prog ExpectNoCode _ = do
   result <- forced (compile defaultCompilerConfig prog)
   case result of
     Left ex -> assertFailure (name ++ ": expected compile to succeed with a silently absent \
@@ -86,7 +94,59 @@ checkExpectFailure name prog ExpectNoCode = do
 -- Documentation only: the ordinary p()/cdf() rows below the header already
 -- pin the (known-wrong) value, and the corpus's usual tuple comparison
 -- already fails loudly the day a fix changes the computed number.
-checkExpectFailure _ _ ExpectWrongResult = return ()
+checkExpectFailure _ _ ExpectWrongResult _ = return ()
+-- The mechanism is unpinned: the rows below state the *idealized* value, and
+-- the case passes as long as the compiled program does not yet produce it.
+checkExpectFailure name prog ExpectBroken tcs = do
+  result <- forced (compile defaultCompilerConfig prog)
+  case result of
+    Left _ -> return ()      -- crashed at compile time: still broken
+    Right _ -> case compile defaultCompilerConfig prog of
+      Left _ -> return ()    -- refused outright: still broken
+      Right env -> mapM_ (assertStillBroken name prog env) tcs
+
+-- | One idealized row: run it through the interpreter and assert the result
+-- does not yet match the documented-correct value. A runtime crash, a
+-- refused query, or a non-prob/dim result are all still "broken"; only an
+-- exact (within-tolerance) match to the idealized row counts as "may be
+-- fixed now".
+assertStillBroken :: String -> Program -> IREnv -> TestCase -> IO ()
+assertStillBroken name prog env (ProbTestCase caseName sample params expct) =
+  checkStillBroken name caseName expct (runProbC prog env params sample)
+assertStillBroken name prog env (CumulTestCase caseName sample params expct) =
+  checkStillBroken name caseName expct (runIntegC prog env params sample)
+-- Not a p()/cdf() row (e.g. argmax_p, writeLogits) -- the anti-pin check only
+-- covers the two ordinary probability query shapes, so anything else is not
+-- itself a candidate for "may be fixed" and is left unchecked.
+assertStillBroken _ _ _ _ = return ()
+
+checkStillBroken :: String -> String -> Expectation -> Either CompilerError IRValue -> IO ()
+checkStillBroken name caseName expct er = do
+  r <- try (evaluate (length (show er)) >> return er)
+         :: IO (Either SomeException (Either CompilerError IRValue))
+  case r of
+    Left _ -> return ()               -- runtime crash: still broken
+    Right (Left _) -> return ()       -- query refused outright: still broken
+    Right (Right res@(VProbDim outProb outDim)) ->
+      assertBool
+        (name ++ "/" ++ caseName ++ ": now matches the documented idealized value -- \
+                 \this known issue may be fixed; if so, tighten or move this case out \
+                 \of known-issues")
+        (not (matchesExpectation expct outProb outDim res))
+    Right (Right _) -> return ()      -- not a prob/dim result: still broken
+
+matchesExpectation :: Expectation -> Double -> Double -> IRValue -> Bool
+matchesExpectation (Possible (VFloat expectedProb) (VFloat expectedDim) mImp) outProb outDim res =
+  abs (outProb - expectedProb) < probTolerance
+    && outDim == expectedDim
+    && matchesImposs mImp res
+matchesExpectation (Possible {}) _ _ _ = False
+matchesExpectation Impossible outProb _ res =
+  abs outProb < probTolerance && matchesImposs (Just True) res
+
+matchesImposs :: Maybe Bool -> IRValue -> Bool
+matchesImposs Nothing _ = True
+matchesImposs (Just expected) res = resultImpossible res == Just expected
 
 -- | Force a compile result, catching either a genuine crash (an uncaught
 -- exception thrown while forcing it) or an ordinary, non-crashing result

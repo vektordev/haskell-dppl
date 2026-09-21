@@ -1,0 +1,2 @@
+main = head (fst ((\v0 -> ([(left 5.605168764426174, if Uniform < 0.5 then 2 else 1)], Uniform))
+           (right (if Uniform < 0.5 then 2 else 1))))

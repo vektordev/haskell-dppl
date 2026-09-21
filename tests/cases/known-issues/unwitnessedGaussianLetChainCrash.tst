@@ -1,0 +1,13 @@
+-- `x` is unwitnessed (its only occurrence is a `plus`
+-- operand whose other operand is fresh), so the let rule types `x + Normal`
+-- as PNormal via the family layer's Gaussian shortcut -- mathematically
+-- right, the sum is N(0,2) with a closed-form density -- but that shortcut
+-- is only realised for an *inline* `Normal + Normal`; through a `let`, the
+-- probabilistic Apply arm has no equation for it and falls to
+-- setWitnessApply, which refuses eagerly (killing `generate` too, a
+-- separate defect owned by static-refusals-become-absent-variants).
+-- Idealized, per the doc's own acceptance criteria: `probability` should
+-- either answer N(0,2)'s density or report a missing variant -- never a
+-- compile-time error -- but which of those two is correct is blocked on the
+-- affine-gaussian-forms design, so no numeric row is pinned here.
+expect-failure: diagnostic "set-valued witness construction failed"

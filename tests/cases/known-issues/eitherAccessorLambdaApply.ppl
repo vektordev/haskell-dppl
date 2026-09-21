@@ -1,0 +1,1 @@
+main = let e = left (\x -> x + 1.0) in (fromLeftPartial e) Normal

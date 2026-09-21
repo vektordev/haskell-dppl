@@ -1,0 +1,10 @@
+data Paren = LP | RP
+
+genS thetas cont =
+  if Uniform < (theta thetas @ 0) then cont
+  else LP : (genNested thetas cont)
+
+genNested thetas cont = genS thetas (RP : (genCont thetas cont))
+genCont thetas cont = genS thetas cont
+
+main thetas = genS thetas []

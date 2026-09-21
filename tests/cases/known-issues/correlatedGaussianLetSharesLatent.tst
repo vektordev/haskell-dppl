@@ -1,5 +1,4 @@
--- Pinned by task correlated-gaussian-let-shares-latent (NeST_internal_docs):
--- a Gaussian latent read by two outputs (x used in both `a` and `b`) has a
+-- A Gaussian latent read by two outputs (x used in both `a` and `b`) has a
 -- closed-form bivariate density -- covariance [[2,1],[1,2]] -- that nothing
 -- in the compiler represents yet, so the set-witness engine's eager `error`
 -- takes the whole compile down instead of the compiler either answering the

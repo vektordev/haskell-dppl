@@ -1,0 +1,1 @@
+main = (if 0.1 < 0.5 then (\x -> \y -> x + y) else (\x -> \y -> x * y)) 1.0 Normal

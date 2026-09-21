@@ -325,7 +325,7 @@ pSlowHeader = do
 -- | The kind of compile-time failure a @tests/cases/known-issues/@ program is
 -- pinned to keep reproducing (design testcases-corpus-restructure). A
 -- 'known-issues' repro carries an @expect-failure:@ header naming which of
--- these four shapes it demonstrates:
+-- these five shapes it demonstrates:
 --
 -- * 'ExpectCrash' -- forcing @compile@'s result throws an uncaught
 --   exception/panic, with no particular message pinned.
@@ -342,11 +342,23 @@ pSlowHeader = do
 --   header exists purely to document *why* the pinned number is wrong, since
 --   the ordinary tuple comparison already fails loudly the day a fix changes
 --   the computed value.
+-- * 'ExpectBroken' -- the mechanism of failure is not pinned at all. The
+--   ordinary @p(...)@/@cdf(...)@ rows below state the *idealized* (correct,
+--   once-fixed) value instead of the currently-wrong one, and the check is
+--   inverted: the case passes as long as the compiled program does *not yet*
+--   produce that value (a crash, a refusal, a missing variant, or simply a
+--   different number all count as "still broken"). Reaches for this when a
+--   repro is migrated without characterizing exactly how it currently fails
+--   -- it still trips the moment a fix makes the idealized value correct,
+--   without committing to a crash message or a specific wrong number that a
+--   later, unrelated change could shift and make the case noisy for no
+--   reason.
 data ExpectFailure
   = ExpectCrash
   | ExpectDiagnostic String
   | ExpectNoCode
   | ExpectWrongResult
+  | ExpectBroken
   deriving (Show, Eq)
 
 -- | A double-quoted diagnostic substring, e.g. @"set-valued witness
@@ -356,7 +368,7 @@ pQuotedString :: MonadParser m => m String
 pQuotedString = L.lexeme sc (char '"' *> manyTill (satisfy (/= '"')) (char '"'))
 
 -- An optional standalone `expect-failure: ...` header line, order-independent
--- with `backends:`/`slow`. See 'ExpectFailure' for the four shapes.
+-- with `backends:`/`slow`. See 'ExpectFailure' for the five shapes.
 pExpectFailureHeader :: MonadParser m => m ExpectFailure
 pExpectFailureHeader = do
   symbol "expect-failure:"
@@ -365,6 +377,7 @@ pExpectFailureHeader = do
     , ExpectCrash <$ symbol "crash"
     , ExpectNoCode <$ symbol "no-code"
     , ExpectWrongResult <$ symbol "wrong-result"
+    , ExpectBroken <$ symbol "broken"
     ]
   pNewline
   return ef

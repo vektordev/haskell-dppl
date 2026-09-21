@@ -1,0 +1,2 @@
+mk b = if b then (\x -> x + 1.0) else (\x -> x * 2.0)
+main = (mk True) 3.0

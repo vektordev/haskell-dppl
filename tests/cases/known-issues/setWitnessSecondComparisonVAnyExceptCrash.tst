@@ -1,0 +1,11 @@
+-- A let-bound continuous latent
+-- compared with `==` and also consumed by any second comparison crashes, in
+-- either nesting order, with or without `observe`. The False-polarity
+-- inverse of `==` yields a VAnyExcept sentinel wrapped in a WPoint witness;
+-- a second comparison's guard (`applyTo guard`) or an intersecting witness
+-- (`intersectSet`) then applies raw arithmetic/comparison to that sentinel,
+-- crashing at both -O0 and -O2. What "correct" should answer is an open
+-- design question (whether p(x /= c) for continuous x is 1.0 or
+-- 1-density(x,c), see the doc) -- no idealized row is pinned, only that
+-- crashing is wrong regardless of which way that's settled.
+expect-failure: diagnostic "VAnyExcept"

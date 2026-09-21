@@ -1231,6 +1231,7 @@ expect-failure: crash                          -- an uncaught exception, message
 expect-failure: diagnostic "some substring"    -- an uncaught exception whose message contains this
 expect-failure: no-code                        -- compiles, but generate/probability/integrate is silently absent
 expect-failure: wrong-result                   -- compiles and runs; the p()/cdf() rows below pin the known-wrong value
+expect-failure: broken                         -- mechanism unpinned; the p()/cdf() rows below state the idealized value instead
 ```
 
 `crash`/`diagnostic` are checked against an exception thrown while *forcing*
@@ -1239,6 +1240,19 @@ satisfy either; that is what `TestRejection.hs` is for. `wrong-result` needs
 no new assertion machinery: the ordinary `p(...)`/`cdf(...)` rows below the
 header already pin the value the bug produces, and the corpus's usual tuple
 comparison already fails loudly the day a fix changes the computed number.
+
+`broken` is the loose fallback for a repro that was migrated without
+characterizing exactly how it currently fails (no exact crash message or
+wrong value pinned down by hand). The rows below the header instead state the
+*idealized* value -- what the fixed compiler should produce -- and
+`TestKnownIssues.hs` runs each row through the interpreter and asserts the
+compiled program does **not yet** match it, within the ordinary
+`probTolerance`; a runtime crash, a refused compile, a missing variant, or a
+merely different number are all "still broken" and pass, while an exact match
+fails loudly ("may be fixed now"). This trades away the free "which exact
+mechanism regressed" signal `diagnostic`/`wrong-result` give for robustness
+against unrelated code churn shifting a pinned message or number -- appropriate
+when nobody has run the repro yet to observe its actual failure mode.
 
 This coexists with `TestRejection.hs` rather than replacing it: a genuinely
 bespoke, multi-assertion regression (e.g. one that additionally checks a

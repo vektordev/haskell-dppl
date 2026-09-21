@@ -1,0 +1,1 @@
+main = ((\x -> (\y -> (x, y))) Normal) Normal
