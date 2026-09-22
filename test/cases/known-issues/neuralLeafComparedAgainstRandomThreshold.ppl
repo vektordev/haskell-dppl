@@ -1,0 +1,2 @@
+neural readObj :: (Symbol -> (Bool, Float))
+main sym = let o = readObj sym in if (snd o) > (2.0 + (Normal * 0.5)) then 1 else 0
