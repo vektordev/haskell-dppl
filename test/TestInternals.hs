@@ -3253,6 +3253,7 @@ internalsTests = testGroup "Internals"
   , test_planEnumThreadedTopKAndBC
   , test_branchCountingDoesNotMultiplyIR
   , test_recursiveListMissedCSE
+  , test_recursiveListBranchPruning
   , test_mixtureNegativeLogNormalScaleCompiles
   , test_planEnumBoolCtorPolynomial
   , planOverCouplingRefusalTests
@@ -3384,3 +3385,64 @@ tensorBuiltinTests =
   , test_tensorLogSumExpZero
   , test_tensorEmptyReduce
   ]
+
+-- | Task recursive-list-prob-missed-cse, second half: a BRANCHING recursive
+-- list (two alternative symbols, each continuing the recursion) used to cost
+-- 2x per list element, because the field-constructor product evaluated every
+-- field regardless of whether an earlier field had already ruled the whole
+-- construction out.
+--
+-- Mechanism, and why it is NOT the first half of that task: each arm of the
+-- 'A : rec' / 'B : rec' mixture compiles to a two-field product (head
+-- indicator, tail recursion). For a query word, the head indicator is false in
+-- all but one arm -- but the tail recursion in the ruled-out arm was computed
+-- anyway and only then multiplied into a product already known to be
+-- impossible. Both recursive calls are genuinely distinct and each is emitted
+-- exactly once, so this is a missed BRANCH PRUNING, not the duplicate
+-- evaluation of one call that the task's first half fixed; CSE and the
+-- sharing in 'anySafeShared' are both irrelevant to it. Two calls per level
+-- compounds to 2^n in list length.
+--
+-- Measured on this exact program before the fix: exactly 2.0x per element
+-- (length 12 0.15s, 13 0.31s, 14 0.63s), so a length-48 query would take on
+-- the order of 10^7 seconds. Afterwards it is linear -- length 48 in ~2ms,
+-- length 128 in ~6ms -- so the generous budget below fails promptly and
+-- unambiguously on a regression rather than merely being slow.
+--
+-- The probability is checked relatively, not absolutely: 0.5^97 is far below
+-- any absolute tolerance worth writing, so an absolute comparison would pass
+-- against almost any wrong answer, including zero.
+--
+-- 'noIntegrate' is set because generating a CDF for this program hits a
+-- separate, pre-existing gap unrelated to this task (a list-typed
+-- 'compareValueExpr' reached with rType 'NullList'); the task document notes
+-- the same '--noIntegrate' requirement for its own repro.
+test_recursiveListBranchPruning :: TestTree
+test_recursiveListBranchPruning = testCase "recursiveListBranchPruning" $ do
+  let src = unlines
+        [ "data Sym = A | B"
+        , "rec = if Uniform < 0.5 then [] else (if Uniform < 0.5 then A : rec else B : rec)"
+        , "main = rec"
+        ]
+  prog <- case tryParseProgram "recursiveListBranchPruning" src of
+    Left err -> assertFailure ("parse error: " ++ show err)
+    Right p  -> return p
+  let compiled = either (\e -> error ("compile error: " ++ show e)) id
+                   (compile defaultCompilerConfig{noIntegrate=True} prog)
+  let n = 48 :: Int
+  let queryOfLength = VList (iterate (ListCont (VADT "A" [])) EmptyList !! n)
+  -- p(one specific word of length n) = p(continue)^n * p(this symbol)^n * p(stop)
+  let expected = 0.5 ^^ (2 * n + 1)
+  result <- timeout (10 * 1000000) (evaluate (probDimOfBP (runProbC prog compiled [] queryOfLength)))
+  case result of
+    Nothing -> assertFailure
+      ("probability query on a " ++ show n ++ "-element branching recursive-list \
+       \sample did not finish within 10s -- this is the missed branch-pruning \
+       \blowup (2x per element) task recursive-list-prob-missed-cse fixed; a \
+       \pruning implementation answers this in single-digit milliseconds")
+    Just (p, _) ->
+      assertBool ("probability " ++ show p ++ " does not match the expected " ++ show expected)
+        (abs (p - expected) <= 1e-9 * abs expected)
+  where
+    probDimOfBP (Left e)  = error ("prob query error: " ++ show e)
+    probDimOfBP (Right v) = let (p, d) = probDimOf v in p `seq` d `seq` (p, d)
