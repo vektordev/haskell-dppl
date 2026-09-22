@@ -1361,6 +1361,57 @@ toIRInferenceSave meta cumulative expr sample = do
   (res, letins) <- lift $ runWriterT $ toIRInference meta cumulative expr sample
   anySafeShared (semiringOf meta) sample letins res
 
+-- | Does every value of this type necessarily contribute dimension 0 -- i.e.
+-- is it discrete through and through?
+--
+-- This exists to bound the branch pruning in the field-constructor equation
+-- (task recursive-list-prob-missed-cse). Pruning a field that an earlier field
+-- has already ruled out means not evaluating it, which means its dimension
+-- contribution is reported as 0 rather than whatever it would have been. That
+-- is only safe when the two are the same number.
+--
+-- It has to be a TYPE-level test, and it is genuinely not possible to do
+-- better by inspecting the compiled field: a recursive call's 'rDim' is a
+-- projection off the call's own result ('IRDestruct AcFst (IRDestruct AcSnd
+-- (IRVar "l_9_guarded"))'), so reading the true dimension requires performing
+-- exactly the recursion the pruning exists to avoid. Dimension and pruning are
+-- mutually exclusive for any field that can carry a continuous payload, which
+-- is why this predicate is the boundary rather than something cleverer.
+--
+-- The convention it protects is pinned by 'test/cases/data-structures/
+-- tupleRoundtrip.tst': @p((0.5, 2.5))=(0.0, 2.0)@ -- an out-of-support query
+-- against a tuple of two continuous fields still reports dimension 2, not 0.
+-- Dimensionality there is a property of the branch, not of the query point.
+-- ('mixWith' is the opposite case and needs no protection: it discards an
+-- impossible side's dimension outright before comparing.)
+--
+-- Conservative in both directions that matter: an unknown, open or
+-- not-yet-resolved type answers 'False' (no pruning, current behaviour), and a
+-- recursive ADT terminates via @seen@ rather than being assumed either way.
+dimZeroByType :: [ADTDecl] -> RType -> Bool
+dimZeroByType decls = go []
+  where
+    go seen ty = case ty of
+      TBool        -> True
+      TInt         -> True
+      TSymbol      -> True
+      TUnit        -> True
+      NullList     -> True
+      ListOf t     -> go seen t
+      Tuple a b    -> go seen a && go seen b
+      TEither a b  -> go seen a && go seen b
+      -- A recursive ADT is dimension-0 as long as no reachable field is
+      -- continuous; revisiting a name already on the stack adds no new
+      -- field types, so it answers 'True' and lets the other arms decide.
+      TADT n
+        | n `elem` seen -> True
+        | otherwise     -> case find ((== n) . dataName) decls of
+            Nothing -> False
+            Just d  -> all (go (n : seen) . snd) (concatMap snd (constructors d))
+      -- TFloat, TVarR (may be instantiated continuous), TThetaTree, TArrow,
+      -- BottomTuple, GreaterType, NotSetYet.
+      _            -> False
+
 -- | Isolate a sub-inference's own let-in bindings into a fresh writer scope
 -- and re-embed them gated on @guards@ -- baking the guard into the bound
 -- value via 'shareResult' -- rather than running the action directly in the
@@ -2293,7 +2344,8 @@ toIRInference _ cumulative (Expr TypeInfo{rType=rt} (Apply l v)) _ =
 toIRInference meta cumulative (Expr TypeInfo{rType=rt} (InjF (Named name) params)) sample
   | isFieldConstructor (adtDecls meta) name && countProbParams params >= 1 = do
   let resolvedName = resolveInjF rt name
-  FPair fwd inversions <- instantiate mkVariable (adtDecls meta) resolvedName
+  let localAdts = adtDecls meta
+  FPair fwd inversions <- instantiate mkVariable localAdts resolvedName
   let inVars = inputVars fwd
   let outV = soleOutputVar fwd
   -- Inline the sample directly into each inverse body (instead of binding it to
@@ -2301,19 +2353,63 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt} (InjF (Named name) params
   -- back to s. A let-binding referenced by every field plus the guard would
   -- survive optimization and force materialising the reconstructed container.
   let inlineSample = irMap (\e -> case e of IRVar n | n == outV -> sample; _ -> e)
-  fieldResults <- forM (zip inVars params) $ \(inV, p) -> do
-    let inv = inversionFor resolvedName inV inversions
-    let FDecl {body=invBody, applicability=appT, deconstructing=decons} = inv
-    -- Deconstructing inverses need the Any-safe inference variant.
-    let probF = if decons then toIRInferenceSave else toIRInference
-    let appTExpr = inlineSample appT
-    -- A field can be a self-recursive probability call -- the tail of a
-    -- recursive list, e.g. 'main = if Uniform>p then [] else X:main'
-    -- compiles its tail field exactly here -- so this field's own
-    -- computation is isolated and re-guarded on its own applicability test
-    -- rather than left in the ambient scope (see 'guardedSubInference').
-    fieldRes <- guardedSubInference meta [appTExpr] (probF meta cumulative p (inlineSample invBody))
-    return (fieldRes, appTExpr)
+  -- Fields are compiled LEFT TO RIGHT rather than independently, threading the
+  -- disjunction of the impossibility flags established so far, so that a field
+  -- whose predecessors have already ruled this construction out is never
+  -- evaluated (task recursive-list-prob-missed-cse, second half). The product
+  -- below is impossible as soon as any one factor is ('prodP' ORs the flags),
+  -- so a later factor's value cannot affect the answer once an earlier one has
+  -- set its flag -- but 'prodP' is an arithmetic combination of already-computed
+  -- results, so without this the later factor is computed regardless and only
+  -- then multiplied into a product known to be impossible.
+  --
+  -- This matters exactly where a cheap discriminating field precedes an
+  -- expensive one, which is the shape of every branching recursive list: an
+  -- 'A : rec' / 'B : rec' mixture compiles each arm as (head indicator, tail
+  -- recursion), and the head indicator rules its arm out for all but one
+  -- symbol. Unpruned, BOTH arms recurse at every level, doubling the work per
+  -- element -- measured at exactly 2.0x/element, i.e. 2^n in list length, on
+  -- 'rec = if Uniform < 0.5 then [] else (if Uniform < 0.5 then A : rec else
+  -- B : rec)'. This is NOT the duplicate-evaluation bug the first half of that
+  -- task fixed (that was one call emitted twice); here the two recursive calls
+  -- are distinct and each emitted once, just not pruned by a sample that has
+  -- already ruled one out.
+  --
+  -- The guard is threaded through 'guardedSubInference' -- the same mechanism
+  -- the applicability test already uses -- so it is baked INTO the bound value
+  -- by 'shareResult' rather than applied to the returned 'PResult' afterwards.
+  -- That is what makes it prune rather than merely zero: a shared let-in block
+  -- is evaluated where it is bound, so a guard layered on top of the result
+  -- would come too late to stop the recursion.
+  --
+  -- 'rImposs' is taken AFTER guarding, so it already carries this field's own
+  -- applicability test and prune guard; a field is thus pruned if any
+  -- predecessor was impossible for any reason, not only an indicator mismatch.
+  -- An all-constant accumulator adds no guard at all, which is what keeps
+  -- cumulative mode untouched: its deterministic fields are 'mass'es with no
+  -- impossibility flag, so nothing ever accumulates there.
+  let pruneGuards fieldType accImposs
+        | accImposs == constFalseIR        = []
+        | not (dimZeroByType localAdts fieldType) = []
+        | otherwise                        = [notIR accImposs]
+  (revFieldResults, _) <- foldM
+    (\(acc, accImposs) (inV, p) -> do
+      let inv = inversionFor resolvedName inV inversions
+      let FDecl {body=invBody, applicability=appT, deconstructing=decons} = inv
+      -- Deconstructing inverses need the Any-safe inference variant.
+      let probF = if decons then toIRInferenceSave else toIRInference
+      let appTExpr = inlineSample appT
+      -- A field can be a self-recursive probability call -- the tail of a
+      -- recursive list, e.g. 'main = if Uniform>p then [] else X:main'
+      -- compiles its tail field exactly here -- so this field's own
+      -- computation is isolated and re-guarded on its own applicability test
+      -- rather than left in the ambient scope (see 'guardedSubInference').
+      fieldRes <- guardedSubInference meta
+                    (appTExpr : pruneGuards (rType (getTypeInfo p)) accImposs)
+                    (probF meta cumulative p (inlineSample invBody))
+      return ((fieldRes, appTExpr) : acc, orIR accImposs (rImposs fieldRes)))
+    ([], constFalseIR) (zip inVars params)
+  let fieldResults = reverse revFieldResults
   -- The fields are independent, so the whole construction is their product.
   let combined = foldl1 (prodP (semiringOf meta)) (map fst fieldResults)
   -- Guard the result by the conjunction of all field applicability tests (e.g.
