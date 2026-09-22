@@ -3154,6 +3154,66 @@ splitByStringTests = testGroup "Utils.splitByString"
   , testProperty "splits at the first occurrence" splitByStringSplitsAtFirstOccurrence
   ]
 
+-- ===========================================================================
+-- let-binder DiscreteValues threading (pin-analysis-let-binder-tag)
+-- ===========================================================================
+
+-- The directly-applied-lambda (`let`) case in 'SPLL.Analysis.annotateIn' binds
+-- the argument's tags to the parameter before annotating the lambda body, so a
+-- let-bound enumerable is visible *inside* its own body.
+--
+-- This cannot be pinned by a '.tst' corpus entry, which is why it is a unit
+-- test: 'applyTags' independently recomputes the same tag for the 'Apply' node
+-- itself, so the node IRCompiler actually reads keeps its 'DiscreteValues'
+-- either way. Only *interior* nodes differ -- the bound variable's own 'Var'
+-- occurrences, and any 'InjF' whose operand set they complete -- and nothing
+-- downstream reads those today. Deleting the case therefore leaves the whole
+-- suite green and emits byte-identical Python for every corpus program
+-- (investigation analysis-lambda-discrete-binding), so the assertion has to be
+-- made against the annotated AST directly.
+--
+-- That green suite is not hypothetical: the branch was swept as dead code once
+-- already (e0993e8, 2026-06-06) and had to be reinstated (c63277a, 2026-08-30).
+-- These two assertions are what make the next such sweep fail.
+
+-- | @let s = <enumerable Int> in s ++ 1@ -- the smallest shape with both an
+-- interior 'Var' occurrence of the bound name and an 'InjF' whose operand set
+-- only that occurrence's tag can complete.
+letBinderSrc :: String
+letBinderSrc = "main = let s = (if (Uniform < 0.5) then 1 else 0) in s ++ 1\n"
+
+-- | Parse, RType-infer, enum-annotate: the pipeline prefix 'SPLL.Prelude' runs
+-- before anything reads a 'DiscreteValues' tag.
+annotatedLetBinder :: Program
+annotatedLetBinder = annotateEnumsProg rtyped
+  where
+    parsed = either (\e -> error ("parse failed: " ++ show e)) id
+               (tryParseProgram "test" letBinderSrc)
+    rtyped = either (\e -> error ("rtype inference failed: " ++ show e)) id
+               (tryAddRTypeInfo parsed)
+
+-- | The 'DiscreteValues' payloads carried by the annotated nodes matching a
+-- predicate. An untagged node contributes nothing, so a dropped tag shows up
+-- as @[]@ rather than as a missing node.
+discretesAt :: (Expr -> Bool) -> Program -> [MultiValue]
+discretesAt matches prog =
+  [mv | e <- allNodes prog, matches e, DiscreteValues mv <- tags (getTypeInfo e)]
+
+letBinderTagTests :: TestTree
+letBinderTagTests = testGroup "let binder threads DiscreteValues into the body"
+  [ testCase "the bound variable's interior Var occurrence carries the argument's tag" $
+      assertEqual "Var s" [MultiDiscretes [VInt 1, VInt 0]]
+        (discretesAt isVarS annotatedLetBinder)
+  , testCase "the InjF whose operand set that Var completes is tagged" $
+      assertEqual "InjF plusI" [MultiDiscretes [VInt 2, VInt 1]]
+        (discretesAt isPlusI annotatedLetBinder)
+  ]
+  where
+    isVarS (Expr _ (Var n)) = n == "s"
+    isVarS _ = False
+    isPlusI (Expr _ (InjF (Named n) _)) = n == "plusI"
+    isPlusI _ = False
+
 internalsTests :: TestTree
 internalsTests = testGroup "Internals"
   [ testProperties "properties" $(allProperties)
@@ -3189,6 +3249,7 @@ internalsTests = testGroup "Internals"
   , test_setWitnessMergesComplementaryTupleFields
   , autoNeuralDerivationTests
   , enumContinuousRefusalTests
+  , letBinderTagTests
   , test_planEnumThreadedTopKAndBC
   , test_branchCountingDoesNotMultiplyIR
   , test_recursiveListMissedCSE
