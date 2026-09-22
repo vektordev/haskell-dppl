@@ -63,15 +63,20 @@ annotateIn adtsParam funEnv visited env e = withNewTypeInfo
     -- argument, so the body is annotated with the argument's tags bound to it.
     -- Without this a `let`-bound enumerable is invisible to its own body.
     --
-    -- DO NOT delete this case as dead code, however green the suite looks. It
-    -- is currently unpinned by any test: removing it and falling back to the
-    -- generic recursion leaves all 1675 tests passing and emits byte-identical
-    -- Python for all 266 corpus programs (investigation
+    -- DO NOT delete this case as dead code, however green the end-to-end suite
+    -- looks. Removing it and falling back to the generic recursion emits
+    -- byte-identical Python for all 266 corpus programs (investigation
     -- analysis-lambda-discrete-binding). That is not because it is redundant
     -- but because 'applyTags' independently recomputes the same tag for the
     -- 'Apply' node itself, so only *interior* nodes -- the bound variable's own
     -- 'Var' occurrences, and any 'InjF' whose operand set they complete -- lose
     -- their 'DiscreteValues'. Nothing downstream happens to read those today.
+    --
+    -- What does catch the deletion is the unit test group "let binder threads
+    -- DiscreteValues into the body" in test/TestInternals.hs, which asserts on
+    -- those interior tags directly (task pin-analysis-let-binder-tag). It has
+    -- to be a unit test rather than a '.tst' corpus entry precisely because no
+    -- end-to-end program distinguishes the two behaviours.
     --
     -- It has already been deleted once on exactly that reasoning: the binding
     -- sat here unused from 985d450 (2024-10-17), was swept as an unused-binding
