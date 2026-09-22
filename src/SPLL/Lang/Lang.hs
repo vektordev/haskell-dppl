@@ -427,9 +427,27 @@ prettyFullTypeInfo ti = show ti
 prettyRTypeOnly :: TypeInfo -> String
 prettyRTypeOnly ti = prettyRType (rType ti)
 
+-- | Render an 'RType' in the vocabulary a *user* writes, not the constructor
+-- names the solver carries. A type in a diagnostic should be one the reader can
+-- find in their own source: @[Object]@, not @ListOf (TADT "Object")@.
 prettyRType :: RType -> String
 prettyRType (TArrow a b) = "(" ++ prettyRType a ++ ") -> (" ++ prettyRType b ++ ")"
 prettyRType (TVarR (SPLL.Typing.RType.TV name)) = name
+prettyRType TBool = "Bool"
+prettyRType TInt = "Int"
+prettyRType TSymbol = "Symbol"
+prettyRType TFloat = "Float"
+prettyRType TUnit = "()"
+prettyRType TThetaTree = "ThetaTree"
+prettyRType (ListOf t) = "[" ++ prettyRType t ++ "]"
+prettyRType (Tuple a b) = "(" ++ prettyRType a ++ ", " ++ prettyRType b ++ ")"
+prettyRType (TEither a b) = "Either " ++ prettyRType a ++ " " ++ prettyRType b
+-- An ADT is named by its `data` declaration, so the name is the whole story.
+prettyRType (TADT name) = name
+prettyRType NullList = "[]"
+-- The remainder are solver-internal and have no surface spelling: an
+-- unconstrained tuple, a least-upper-bound obligation, and the pre-inference
+-- placeholder. Showing the constructor is the honest rendering.
 prettyRType other = show other
 
 prettyPrint :: Expr -> [String]

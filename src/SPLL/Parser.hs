@@ -121,7 +121,61 @@ pLetIn adts_ = do
   _ <- keyword "in"
   scope <- pExpr adts_
   destr <- letInDestructor lhs
-  return $ destr definition scope
+  return $ stampSynthesized lhs (destr definition scope)
+
+-- | Give the nodes 'letInDestructor' *synthesized* a span pointing back at the
+-- pattern the user actually wrote.
+--
+-- @let h : t = e in b@ becomes applications of the built-in @head@\/@tail@
+-- InjFs over a generated binder. Those nodes are real and can fail to typecheck
+-- -- that is the whole of task @opaque-user-facing-errors@ -- but a diagnostic
+-- that printed them would be showing the user code they never wrote. Only nodes
+-- with no span of their own are stamped, so @e@ and @b@, which were parsed,
+-- keep their own positions.
+stampSynthesized :: Expr -> Expr -> Expr
+stampSynthesized lhs = fillMissingSpans marker
+  where
+    marker = case srcPos (ann lhs) of
+      Nothing -> Nothing
+      Just sp -> Just $ case node lhs of
+        -- A plain @let x = ...@ desugars to a LetIn and nothing else; calling
+        -- that "the pattern: x" would be noise.
+        Var _ -> sp
+        _     -> desugaredSpan ("the pattern: " ++ patternPhrase lhs) sp
+
+-- | Give every node with no span of its own the supplied one.
+--
+-- Nodes that already carry a span were parsed and keep their own position;
+-- everything else was built by desugaring or normalization and belongs, as far
+-- as the user is concerned, to the construct being rewritten.
+fillMissingSpans :: Maybe SourceSpan -> Expr -> Expr
+fillMissingSpans marker = tMap fill
+  where
+    fill e = case srcPos (ann e) of
+      Just _  -> ann e
+      Nothing -> (ann e) { srcPos = marker }
+
+-- | Render a let-binding LHS back to the surface syntax the user wrote, for
+-- use in diagnostics. Total by construction: the shapes here are exactly the
+-- ones 'letInDestructor' accepts, and anything else is rejected by it anyway.
+patternPhrase :: Expr -> String
+patternPhrase (Expr _ (Var n)) = n
+patternPhrase (Expr _ (InjF (Named "Cons") [x, xs])) = patternPhrase x ++ " : " ++ patternPhrase xs
+patternPhrase (Expr _ (InjF (Named "TCons") [a, b])) = "(" ++ patternPhrase a ++ ", " ++ patternPhrase b ++ ")"
+patternPhrase (Expr _ (InjF (Named "left") [x])) = "Left " ++ patternPhrase x
+patternPhrase (Expr _ (InjF (Named "right") [x])) = "Right " ++ patternPhrase x
+patternPhrase (Expr _ (Constant (VList EmptyList))) = "[]"
+patternPhrase _ = "<pattern>"
+
+-- | Record the source extent of everything a parser consumed on the node it
+-- produced. Applied at the term and expression level in 'expr', which covers
+-- every node the grammar builds directly.
+withSpan :: MonadParser m => m Expr -> m Expr
+withSpan p = do
+  start <- getSourcePos
+  e <- p
+  end <- getSourcePos
+  return (Expr (ann e) { srcPos = Just (SourceSpan start end Nothing) } (node e))
 
 -- Parses the identifier part of the letIn and constructs a accessors for letIns
 -- Return type is a \v, b -> Let n = v in b
@@ -628,11 +682,15 @@ pLambda adts_ = do
 -- This handles both normal application and built-in functions like multF
 application :: MonadParser m => [ADTDecl] -> m Expr
 application adts_ = dbg "application" $ do
-    func <- try (atom adts_)
+    -- Both the callee and the arguments are stamped here rather than relying on
+    -- 'expr'/'term': those wrap the application as a whole, so an argument atom
+    -- would otherwise reach the solver with no position of its own, and a type
+    -- error blamed on an argument would have nowhere to point.
+    func <- try (withSpan (atom adts_))
     -- atom already covers "(expr)"/"(expr, expr)" via pTuple; a separate
     -- parens(expr) fallback here would re-parse the same paren contents a
     -- second time on every atom-alternative failure (see pTuple's comment).
-    args <- try $ many (try (atom adts_))
+    args <- try $ many (try (withSpan (atom adts_)))
     case func of
         Expr _ (Var name) -> case lookup name binaryFs of
             Just constructor -> return (construct2 constructor args)
@@ -652,9 +710,12 @@ application adts_ = dbg "application" $ do
 
 -- | Main expression parser using makeExprParser
 expr :: MonadParser m => [ADTDecl] -> m Expr
-expr adts_ = dbg "expr" $ makeExprParser term opTable
+expr adts_ = dbg "expr" $ withSpan (makeExprParser term opTable)
   where
-    term = choice [
+    -- Both levels are stamped: 'term' gives each operand its own span, and the
+    -- outer 'withSpan' covers the node 'makeExprParser' builds for an infix
+    -- operator, which no operand's span would reach.
+    term = withSpan $ choice [
         try (application adts_),
         try (keywordExpr adts_),
         atom adts_
@@ -800,7 +861,7 @@ normalizeExpr env@(parametricBuilders, atomicBuilders, benign) expr_ =
                   build <- builder args
                   case build of
                     Left _ -> return $ Right expr' -- This prevents InjFs, which have multiple arguments from failing to build because here only one argument is applied
-                    e -> return e
+                    e -> return (keepSpanOf expr' e)
                 _ -> return $ Right expr'
             Expr _ (Apply (Expr _ (Var fname)) arg)
               | not (Set.member fname benign)
@@ -808,11 +869,17 @@ normalizeExpr env@(parametricBuilders, atomicBuilders, benign) expr_ =
                 build <- builder [arg]
                 case build of
                   Left _ -> return $ Right expr' -- This prevents InjFs, which have multiple arguments from failing to build because here only one argument is applied
-                  e -> return e
+                  e -> return (keepSpanOf expr' e)
             Expr _ (Var fname)
               | not (Set.member fname benign)
-              , Just builder <- Map.lookup fname atomicBuilders -> builder []
+              , Just builder <- Map.lookup fname atomicBuilders -> fmap (keepSpanOf expr') (builder [])
             _ -> return $ Right expr'
+
+-- | A builder rebuilds an application into a @ReadNN@\/@InjF@\/projector node
+-- with a fresh 'makeTypeInfo', which would otherwise throw away the position of
+-- the application it is replacing. Hand the replacement the original's span.
+keepSpanOf :: Expr -> Either String Expr -> Either String Expr
+keepSpanOf original = fmap (fillMissingSpans (srcPos (ann original)))
 
 --replaceExpr :: Expr -> Expr -> Expr
 --replaceExpr
