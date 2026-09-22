@@ -176,6 +176,19 @@ showExamples = do
 -- Properties to test
 
 
+-- | '===' but comparing with 'Equiv' rather than 'Eq', so that source positions
+-- are ignored.
+--
+-- Every use below compares either a parsed value against a constructed one, or
+-- two parses of *different* source strings that are meant to denote the same
+-- program. Both questions are about structure, and since the parser started
+-- stamping spans (task @opaque-user-facing-errors@) '==' answers a stricter
+-- question than these properties are asking.
+(=~=) :: (Equiv a, Show a) => a -> a -> Property
+x =~= y = counterexample (show x ++ "\n  is not structurally equivalent to\n" ++ show y) (x ~= y)
+
+infix 4 =~=
+
 -- Basic roundtrip property: parse . show = id
 -- observed to hang for a bit sometimes, needs additional testing.
 prop_parseShowRoundtrip :: Expr -> Property
@@ -185,7 +198,7 @@ prop_parseShowRoundtrip expr = --trace ("\n === \n" ++ show expr ++ "\n\n") $
                                         Right parsed -> repr parsed
                                         Left err -> errorBundlePretty err) $
     case parseResult of
-      Right parsed -> parsed == expr
+      Right parsed -> parsed ~= expr
       Left _ -> False
   where
     parseResult = tryParseExpr "test" (exprToString expr)
@@ -257,7 +270,7 @@ prop_inverseParsing =
 matchProg :: Program -> Program -> Property
 matchProg p1 p2
     -- Check if programs are directly equal
-    | p1 == p2 = property True
+    | p1 ~= p2 = property True
 
     -- Sort lists by names and match using matchNeural and matchFn
     | otherwise = conjoin [
@@ -307,7 +320,7 @@ prop_blankLineBetweenDefs =
   let src1 = "coin = if Uniform < 0.5 then 1 else 0\nmain = coin"
       src2 = "coin = if Uniform < 0.5 then 1 else 0\n\nmain = coin"
   in case (tryParseProgram "" src1, tryParseProgram "" src2) of
-       (Right p1, Right p2) -> p1 === p2
+       (Right p1, Right p2) -> p1 =~= p2
        (Left err, _) -> counterexample ("src1 failed: " ++ errorBundlePretty err) False
        (_, Left err) -> counterexample ("src2 failed: " ++ errorBundlePretty err) False
 
@@ -325,7 +338,7 @@ prop_multiLineLetIn =
   let src1 = "main = let u = Uniform in u + 1.0"
       src2 = "main =\n  let u = Uniform\n  in u + 1.0"
   in case (tryParseProgram "" src1, tryParseProgram "" src2) of
-       (Right p1, Right p2) -> p1 === p2
+       (Right p1, Right p2) -> p1 =~= p2
        (Left err, _) -> counterexample ("src1 failed: " ++ errorBundlePretty err) False
        (_, Left err) -> counterexample ("src2 failed: " ++ errorBundlePretty err) False
 
@@ -335,7 +348,7 @@ prop_multiLineIfThenElse =
   let src1 = "main = if Uniform < 0.5 then 0 else 1"
       src2 = "main = if Uniform < 0.5\n  then 0\n  else 1"
   in case (tryParseProgram "" src1, tryParseProgram "" src2) of
-       (Right p1, Right p2) -> p1 === p2
+       (Right p1, Right p2) -> p1 =~= p2
        (Left err, _) -> counterexample ("src1 failed: " ++ errorBundlePretty err) False
        (_, Left err) -> counterexample ("src2 failed: " ++ errorBundlePretty err) False
 
@@ -369,7 +382,7 @@ prop_multiParamLambda =
   let src1 = "(\\x -> \\y -> x + y) 1.0 2.0"
       src2 = "(\\x y -> x + y) 1.0 2.0"
   in case (tryParseExpr "" src1, tryParseExpr "" src2) of
-       (Right e1, Right e2) -> e1 === e2
+       (Right e1, Right e2) -> e1 =~= e2
        (Left err, _) -> counterexample ("src1 failed: " ++ errorBundlePretty err) False
        (_, Left err) -> counterexample ("src2 failed: " ++ errorBundlePretty err) False
 
@@ -481,7 +494,7 @@ prop_observeLambdaDesugarsToLetIdiom =
   let src1 = "main = observe Normal (\\v -> v > 0.0)"
       src2 = "main = let v = Normal in if v > 0.0 then right v else left ()"
   in case (tryParseProgram "" src1, tryParseProgram "" src2) of
-       (Right p1, Right p2) -> p1 === p2
+       (Right p1, Right p2) -> p1 =~= p2
        (Left err, _) -> counterexample ("src1 failed: " ++ errorBundlePretty err) False
        (_, Left err) -> counterexample ("src2 failed: " ++ errorBundlePretty err) False
 
@@ -492,7 +505,7 @@ prop_observeNamedPredicateDesugarsToApply =
   let src1 = "isPos v = v > 0.0\nmain = observe Normal isPos"
       src2 = "isPos v = v > 0.0\nmain = let p_ob0 = Normal in if isPos p_ob0 then right p_ob0 else left ()"
   in case (tryParseProgram "" src1, tryParseProgram "" src2) of
-       (Right p1, Right p2) -> p1 === p2
+       (Right p1, Right p2) -> p1 =~= p2
        (Left err, _) -> counterexample ("src1 failed: " ++ errorBundlePretty err) False
        (_, Left err) -> counterexample ("src2 failed: " ++ errorBundlePretty err) False
 

@@ -121,7 +121,52 @@ pLetIn adts_ = do
   _ <- keyword "in"
   scope <- pExpr adts_
   destr <- letInDestructor lhs
-  return $ destr definition scope
+  return $ stampSynthesized lhs (destr definition scope)
+
+-- | Give the nodes 'letInDestructor' *synthesized* a span pointing back at the
+-- pattern the user actually wrote.
+--
+-- @let h : t = e in b@ becomes applications of the built-in @head@\/@tail@
+-- InjFs over a generated binder. Those nodes are real and can fail to typecheck
+-- -- that is the whole of task @opaque-user-facing-errors@ -- but a diagnostic
+-- that printed them would be showing the user code they never wrote. Only nodes
+-- with no span of their own are stamped, so @e@ and @b@, which were parsed,
+-- keep their own positions.
+stampSynthesized :: Expr -> Expr -> Expr
+stampSynthesized lhs = tMap fill
+  where
+    marker = case srcPos (ann lhs) of
+      Nothing -> Nothing
+      Just sp -> Just $ case node lhs of
+        -- A plain @let x = ...@ desugars to a LetIn and nothing else; calling
+        -- that "the pattern: x" would be noise.
+        Var _ -> sp
+        _     -> desugaredSpan ("the pattern: " ++ patternPhrase lhs) sp
+    fill e = case srcPos (ann e) of
+      Just _  -> ann e
+      Nothing -> (ann e) { srcPos = marker }
+
+-- | Render a let-binding LHS back to the surface syntax the user wrote, for
+-- use in diagnostics. Total by construction: the shapes here are exactly the
+-- ones 'letInDestructor' accepts, and anything else is rejected by it anyway.
+patternPhrase :: Expr -> String
+patternPhrase (Expr _ (Var n)) = n
+patternPhrase (Expr _ (InjF (Named "Cons") [x, xs])) = patternPhrase x ++ " : " ++ patternPhrase xs
+patternPhrase (Expr _ (InjF (Named "TCons") [a, b])) = "(" ++ patternPhrase a ++ ", " ++ patternPhrase b ++ ")"
+patternPhrase (Expr _ (InjF (Named "left") [x])) = "Left " ++ patternPhrase x
+patternPhrase (Expr _ (InjF (Named "right") [x])) = "Right " ++ patternPhrase x
+patternPhrase (Expr _ (Constant (VList EmptyList))) = "[]"
+patternPhrase _ = "<pattern>"
+
+-- | Record the source extent of everything a parser consumed on the node it
+-- produced. Applied at the term and expression level in 'expr', which covers
+-- every node the grammar builds directly.
+withSpan :: MonadParser m => m Expr -> m Expr
+withSpan p = do
+  start <- getSourcePos
+  e <- p
+  end <- getSourcePos
+  return (Expr (ann e) { srcPos = Just (SourceSpan start end Nothing) } (node e))
 
 -- Parses the identifier part of the letIn and constructs a accessors for letIns
 -- Return type is a \v, b -> Let n = v in b
@@ -652,9 +697,12 @@ application adts_ = dbg "application" $ do
 
 -- | Main expression parser using makeExprParser
 expr :: MonadParser m => [ADTDecl] -> m Expr
-expr adts_ = dbg "expr" $ makeExprParser term opTable
+expr adts_ = dbg "expr" $ withSpan (makeExprParser term opTable)
   where
-    term = choice [
+    -- Both levels are stamped: 'term' gives each operand its own span, and the
+    -- outer 'withSpan' covers the node 'makeExprParser' builds for an infix
+    -- operator, which no operand's span would reach.
+    term = withSpan $ choice [
         try (application adts_),
         try (keywordExpr adts_),
         atom adts_
