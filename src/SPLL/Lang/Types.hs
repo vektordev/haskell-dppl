@@ -11,6 +11,10 @@ module SPLL.Lang.Types
   , ExprStub(..)
   , TypeInfo(..)
   , makeTypeInfo
+  , SourceSpan(..)
+  , spanPretty
+  , desugaredSpan
+  , Equiv(..)
   , Name
   , Program(..)
   , FnDecl
@@ -33,6 +37,8 @@ module SPLL.Lang.Types
 import SPLL.Typing.PType
 import SPLL.Typing.RType
 import Data.Bifunctor (second)
+import Data.Foldable (toList)
+import Text.Megaparsec.Pos (SourcePos, sourcePosPretty)
 
 
 type ChainName = String
@@ -86,11 +92,41 @@ data ExprStub = StubIfThenElse
               | StubReadNN
               deriving (Show, Eq)
 --Do not use this constructor, use makeTypeInfo instead
+-- | Where in the source a construct came from, for diagnostics.
+--
+-- @spanDesugaredFrom@ is what makes this usable for nodes the parser
+-- *synthesizes* rather than reads. @letInDestructor@ turns @let h : t = e@ into
+-- applications of the built-in @head@\/@tail@ InjFs, and a context chain that
+-- printed those would be showing the user machine-generated code they never
+-- wrote. So a synthesized node carries the span of the construct it was
+-- desugared from, plus a human phrase naming it (@"the pattern: h : t"@), and
+-- the renderer prints the phrase instead of the node.
+data SourceSpan = SourceSpan
+  { spanStart :: SourcePos
+  , spanEnd :: SourcePos
+  -- | @Just phrase@ when this node was synthesized by desugaring; the span then
+  -- refers to the surface construct, not to this node.
+  , spanDesugaredFrom :: Maybe String
+  } deriving (Show, Eq)
+
+-- | @file:line:col@, matching the shape Megaparsec already uses for parse
+-- errors so both kinds of diagnostic read the same.
+spanPretty :: SourceSpan -> String
+spanPretty = sourcePosPretty . spanStart
+
+-- | Re-stamp a span as having been desugared from the named construct.
+desugaredSpan :: String -> SourceSpan -> SourceSpan
+desugaredSpan phrase sp = sp { spanDesugaredFrom = Just phrase }
+
 data TypeInfo = TypeInfo
   { rType :: RType
   , pType :: PType
   , chainName :: ChainName
-  , tags :: [Tag]} deriving (Show, Eq)
+  , tags :: [Tag]
+  -- | Source provenance. 'Nothing' on every node not built by the parser --
+  -- the prelude, "SPLL.Examples", and anything a pass synthesizes after
+  -- parsing. Diagnostics degrade gracefully rather than requiring it.
+  , srcPos :: Maybe SourceSpan} deriving (Show, Eq)
 -- only use ord instance for algorithmic convenience, not for up/downgrades / lattice work.
 
 makeTypeInfo :: TypeInfo
@@ -98,7 +134,54 @@ makeTypeInfo = TypeInfo
     { rType = SPLL.Typing.RType.NotSetYet
     , pType = SPLL.Typing.PType.NotSetYet
     , chainName = ""
-    , tags = []}
+    , tags = []
+    , srcPos = Nothing}
+
+-- | Structural equivalence that ignores 'srcPos'.
+--
+-- 'Eq' stays derived and honest: two 'TypeInfo's from different places in the
+-- source really are different values, and a pass that wants to know that can
+-- still ask. But the parser tests compare a parsed 'Expr' against a constructed
+-- one, or two parses of *different* source strings that should mean the same
+-- thing, and for those questions position is noise. @('~=')@ is the operation
+-- those tests want; on values whose 'srcPos' is 'Nothing' throughout it agrees
+-- with '==' exactly.
+class Equiv a where
+  (~=) :: a -> a -> Bool
+
+infix 4 ~=
+
+instance Equiv TypeInfo where
+  a ~= b = a { srcPos = Nothing } == b { srcPos = Nothing }
+
+instance Equiv Expr where
+  -- @fmap (const ())@ erases the children, so this compares the constructor and
+  -- every non-recursive field; 'toList' then supplies the children in order.
+  Expr a1 n1 ~= Expr a2 n2 =
+    a1 ~= a2
+      && fmap (const ()) n1 == fmap (const ()) n2
+      && and (zipWith (~=) (toList n1) (toList n2))
+
+instance Equiv Program where
+  p1 ~= p2 =
+    map fst (functions p1) == map fst (functions p2)
+      && and (zipWith (~=) (map snd (functions p1)) (map snd (functions p2)))
+      && neurals p1 == neurals p2
+      && adts p1 == adts p2
+      && writeLogitsDecls p1 == writeLogitsDecls p2
+
+instance Equiv a => Equiv [a] where
+  xs ~= ys = length xs == length ys && and (zipWith (~=) xs ys)
+
+instance (Equiv a, Equiv b) => Equiv (Either a b) where
+  Left a ~= Left b = a ~= b
+  Right a ~= Right b = a ~= b
+  _ ~= _ = False
+
+-- | For the common @parse x === parse y@ shape, where the left side is an
+-- error string and the right side is the value of interest.
+instance Equiv Char where
+  (~=) = (==)
 
 
 type Name = String
