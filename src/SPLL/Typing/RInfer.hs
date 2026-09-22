@@ -4,7 +4,10 @@
 
 module SPLL.Typing.RInfer (
   RTypeError (..)
+, Provenance (..)
 , addRTypeInfo
+, addRTypeInfoAt
+, renderRTypeError
 , tryAddRTypeInfo
 ) where
 
@@ -16,6 +19,7 @@ import Control.Monad.Identity
 import qualified Data.Set as Set
 
 import Data.Foldable (foldl')
+import Data.List (intercalate)
 import qualified Data.Map as Map
 
 
@@ -25,7 +29,7 @@ import SPLL.Typing.RType
 --import SPLL.Typing.PType( PType(..) )
 import SPLL.InferenceRule
 import PredefinedFunctions (globalFEnv, FPair(..), FDecl(..))
-import SPLL.Lang.Types (FnDecl, ADTDecl, CompilerError, GenericValue(..))
+import SPLL.Lang.Types (FnDecl, ADTDecl, CompilerError, GenericValue(..), SourceSpan(..), spanPretty)
 import SPLL.Typing.AlgebraicDataTypes
 import Data.Bifunctor
 import Control.Monad (replicateM)
@@ -35,8 +39,38 @@ import Control.Monad (replicateM)
 -- The typing environment is a plain Data.Map from variable name to its Scheme.
 type TEnv = Map.Map Name Scheme
 
+-- | Where a constraint came from, in the user's terms.
+--
+-- The solver used to carry a 'Maybe String' here that only ever held the name
+-- of the inference phase that emitted the constraint (@"Apply"@, @"Constant"@,
+-- @"inferResultingType"@) -- true, and of no use to anyone who did not write
+-- this module. What a diagnostic needs instead is the *source* each side came
+-- from, which is what this records.
+data Provenance = Provenance
+  { provSpan :: Maybe SourceSpan
+  -- | A context chain, innermost first, in the shape of GHC's
+  -- @In the expression: ...@ lines.
+  , provContext :: [String]
+  } deriving (Show, Eq)
+
+-- | Build provenance from the expression that produced a constraint.
+provenanceOf :: Expr -> Maybe Provenance
+provenanceOf e = Just (Provenance (srcPos (ann e)) [describeExpr e])
+
+-- | Name an expression the way a user would refer to it.
+describeExpr :: Expr -> String
+describeExpr (Expr _ (InjF (Named n) _)) = "the function '" ++ n ++ "'"
+describeExpr (Expr _ (Var n)) = "the variable '" ++ n ++ "'"
+describeExpr (Expr _ (Apply _ _)) = "a function application"
+describeExpr (Expr _ (Lambda n _)) = "the lambda '\\" ++ n ++ " -> ...'"
+describeExpr (Expr _ (Constant _)) = "a literal"
+describeExpr (Expr _ (IfThenElse {})) = "an if-then-else"
+describeExpr (Expr _ (ReadNN n _)) = "the neural network read 'readNN " ++ n ++ "'"
+describeExpr (Expr _ (ThetaI _ i)) = "the parameter 'theta ... @ " ++ show i ++ "'"
+describeExpr (Expr _ (Subtree _ i)) = "the subtree 'subtree ... @ " ++ show i ++ "'"
+
 data RTypeError
-  = UnificationFail RType RType
+  = UnificationFail RType RType (Maybe Provenance)
   | InfiniteType TVarR RType
   | UnboundVariable String
   | UnificationMismatch [RType] [RType]
@@ -62,7 +96,7 @@ data InferState = InferState { var_count :: Int, collectedClassConstraints :: [C
 initInfer :: InferState
 initInfer = InferState { var_count = 0, collectedClassConstraints = [] }
 
-data Constraint = Constraint RType RType (Maybe String)
+data Constraint = Constraint RType RType (Maybe Provenance)
   deriving (Eq, Show)
 
 type Unifier = (Subst, [Constraint])
@@ -146,7 +180,34 @@ instance Substitutable a => Substitutable [a] where
 
 showConstraint :: Constraint -> String
 showConstraint (Constraint a b Nothing) = prettyRType a ++ " :==: " ++ prettyRType b
-showConstraint (Constraint a b (Just c)) = prettyRType a ++ " :==: " ++ prettyRType b ++ " (from " ++ c ++ ")"
+showConstraint (Constraint a b (Just c)) =
+  prettyRType a ++ " :==: " ++ prettyRType b ++ " (from " ++ intercalate ", " (provContext c) ++ ")"
+
+-- | Render a type error the way GHC renders one: the position, the two types
+-- that failed to reconcile, and a context chain of what the user wrote.
+--
+-- This is deliberately *not* a table of special cases keyed on pairs of types.
+-- A rule that recognised, say, an ADT meeting a list and emitted bespoke prose
+-- about cons patterns would improve exactly one program shape and would have to
+-- be re-derived at the next site. Naming the source instead improves every
+-- unification failure in the compiler at once, and lets the reader draw the
+-- conclusion -- which is the whole point of task @opaque-user-facing-errors@.
+renderRTypeError :: RTypeError -> String
+renderRTypeError (UnificationFail t1 t2 prov) =
+  unlines (location ++ [header] ++ context)
+  where
+    location = case prov >>= provSpan of
+      Just sp -> [spanPretty sp ++ ":"]
+      Nothing -> []
+    header = "    Couldn't match type '" ++ prettyRType t1
+               ++ "' with '" ++ prettyRType t2 ++ "'"
+    -- A node the parser synthesized names the construct it was desugared from,
+    -- so the chain never mentions a binder the user never wrote.
+    desugarNote = case prov >>= provSpan >>= spanDesugaredFrom of
+      Just phrase -> ["      In " ++ phrase]
+      Nothing -> []
+    context = map ("      In " ++) (maybe [] provContext prov) ++ desugarNote
+renderRTypeError e = show e
 
 
 --build the basic type environment: Take all invertible functions; ignore their inverses
@@ -181,20 +242,32 @@ checkClassConstraints subst cs = mapM_ check cs
                       else Left $ ClassConstraintViolation cc t
 
 addRTypeInfo :: Program -> Either CompilerError Program
-addRTypeInfo p =
+addRTypeInfo = addRTypeInfoAt 0
+
+-- | 'addRTypeInfo', with the solver dump gated on verbosity.
+--
+-- The dump -- the pretty-printed program, every constraint, and the leftover
+-- constraints after simplification -- used to be appended to *every* type
+-- error: 88 lines of solver internals for a five-line program, none of it
+-- meaningful to a user. It is a real debugging aid for someone working on this
+-- module, so it is kept and moved behind @-v@ rather than deleted.
+addRTypeInfoAt :: Int -> Program -> Either CompilerError Program
+addRTypeInfoAt verbosity p =
   case runInfer (basicTEnv (adts p)) (inferProg p) of
-    Left err -> Left ("Error in addRTypeInfo: " ++ show err)
+    Left err -> Left (renderRTypeError err)
     Right (cs, classCs, p2) -> case runSolve cs of
-      Left err -> Left (
-        "error in solve addRTypeInfo: " ++ show err
-        ++ "\n\nprog = \n" ++ (unlines $ prettyPrintProgRTyOnly p2)
-        ++ "\n\nconstraints = \n" ++ (unlines $ map showConstraint cs)
-        ++ "\n\nsimplified prog = \n" ++ (unlines $ prettyPrintProgRTyOnly (subst `apply` p2))
-        ++ "\n\nleftover constraints = \n" ++ (unlines $ map showConstraint leftoverConstraints))
+      Left err -> Left (renderRTypeError err ++ dump)
           where
             (subst, leftoverConstraints) = simplify (emptySubst, cs)
+            dump
+              | verbosity < 1 = ""
+              | otherwise =
+                  "\nprog = \n" ++ (unlines $ prettyPrintProgRTyOnly p2)
+                  ++ "\n\nconstraints = \n" ++ (unlines $ map showConstraint cs)
+                  ++ "\n\nsimplified prog = \n" ++ (unlines $ prettyPrintProgRTyOnly (subst `apply` p2))
+                  ++ "\n\nleftover constraints = \n" ++ (unlines $ map showConstraint leftoverConstraints)
       Right subst -> case checkClassConstraints subst classCs of
-        Left err -> Left ("Class constraint violation: " ++ show err)
+        Left err -> Left ("Class constraint violation: " ++ renderRTypeError err)
         Right () -> Right (apply subst p2)
 
 tryAddRTypeInfo :: Program -> Either RTypeError Program
@@ -225,7 +298,7 @@ inferProg p = do
   cts <- mapM ((inTEnvF typeEnv . infer adtsDecl) . snd) decls
   -- building the constraints that the built type variables of the functions equal
   -- the inferred function type
-  let tcs = zipWith (\t1 t2 -> Constraint t1 t2 (Just "TopLevel")) (map (rtFromScheme . snd) func_tvs) (map fst3cts cts)
+  let tcs = zipWith (\t1 t2 -> Constraint t1 t2 Nothing) (map (rtFromScheme . snd) func_tvs) (map fst3cts cts)
   -- combine all constraints
   return (tcs ++ concatMap snd3cts cts, Program (zip (map fst decls) (map trd3cts cts)) nns adtsDecl enc)
 
@@ -258,11 +331,11 @@ infer adtsDecl expr
         (Expr ty (Constant (VError msg))) -> do
           -- An error can occur in place of any type, so its type is unconstrained.
           tVal <- fresh
-          let constraint = Constraint (rType ty) tVal (Just "Constant")
+          let constraint = Constraint (rType ty) tVal (provenanceOf expr)
           return (rType ty, [constraint], Expr ty (Constant (VError msg)))
         (Expr ty (Constant val)) -> do
           let tVal = getRType val
-          let constraint = Constraint (rType ty) tVal (Just "Constant")
+          let constraint = Constraint (rType ty) tVal (provenanceOf expr)
           return (rType ty, [constraint], expr)
         (Expr ti (Lambda name inExpr)) -> do
           -- rare case of needing an extra TV, because the var doesn't get one initially
@@ -277,7 +350,7 @@ infer adtsDecl expr
         (Expr ti (Apply func arg)) -> do
           (funcTy, c1, funcExprTy) <- infer adtsDecl func
           (argTy, c2, argExprTy) <- infer adtsDecl arg
-          let argConstraint = Constraint funcTy (argTy `TArrow` (rType ti)) (Just "Apply")
+          let argConstraint = Constraint funcTy (argTy `TArrow` (rType ti)) (provenanceOf expr)
           return (rType ti, [argConstraint] ++ c1 ++ c2, Expr ti (Apply funcExprTy argExprTy))
           --expr `usingScheme` (Forall [TV "a", TV "b"] (((TVarR $ TV "a") `TArrow` (TVarR $ TV "b")) `TArrow` (TVarR $ TV "a") `TArrow` (TVarR $ TV "b")))
         e@(Expr _ (InjF (Named name) _)) ->
@@ -287,7 +360,7 @@ infer adtsDecl expr
         (Expr ti (ReadNN name sym)) -> do
           t <- lookupTEnv name
           (symTy, c1, symTyExpr) <- infer adtsDecl sym
-          let argConstraint = Constraint t (symTy `TArrow` (rType ti)) (Just "ReadNN")
+          let argConstraint = Constraint t (symTy `TArrow` (rType ti)) (provenanceOf expr)
           return (rType ti, [argConstraint] ++ c1, Expr ti (ReadNN name symTyExpr))
         -- 'specialTreatment' is the guard on this branch; the two must list the
         -- same stubs, so a node reaching here means one of them was extended
@@ -317,7 +390,7 @@ usingScheme adtsDecl expr scheme = do
   let subExprTypes = map fst3cts tuples
   let typedSubExprs = map trd3cts tuples
   rescoped <- rescope scheme
-  (resultingtype, recursiveConstraints) <- inferResultingType rescoped subExprTypes
+  (resultingtype, recursiveConstraints) <- inferResultingType (provenanceOf expr) rescoped subExprTypes
   return (resultingtype, recursiveConstraints ++ localConstraints, reformExpr expr typedSubExprs resultingtype)
 
 solvesSimply :: Expr -> Bool
@@ -359,22 +432,22 @@ reformExpr original subexprs ownTy = tMapHead (const newTy) $ setSubExprs origin
 
 --take a scheme like Forall [a,b,c] (a -> b -> c) and apply a list of types Int, Float to the scheme.
 -- should yield (c, [a=Int, b=Float])
-inferResultingType :: Scheme -> [RType] -> Infer (RType, [Constraint])
-inferResultingType (Forall _ _ rtype) [] = return (rtype, [])
-inferResultingType (Forall vars _ (TArrow fromTy toTy)) (fstTy:rtypes2) =
+inferResultingType :: Maybe Provenance -> Scheme -> [RType] -> Infer (RType, [Constraint])
+inferResultingType _ (Forall _ _ rtype) [] = return (rtype, [])
+inferResultingType prov (Forall vars _ (TArrow fromTy toTy)) (fstTy:rtypes2) =
   do
-    let constraint = Constraint fromTy fstTy (Just "inferResultingType")
+    let constraint = Constraint fromTy fstTy prov
     -- Class constraints (cs) are emitted by rescope before inferResultingType runs;
     -- the recursive Scheme here is for type application only, not re-emission.
-    (resultingType, moreConstraints) <- inferResultingType (Forall vars [] toTy) rtypes2
+    (resultingType, moreConstraints) <- inferResultingType prov (Forall vars [] toTy) rtypes2
     return (resultingType, constraint:moreConstraints)
-inferResultingType (Forall vars _ fTy) (fstTy:rtypes2) = do
+inferResultingType prov (Forall vars _ fTy) (fstTy:rtypes2) = do
   --introduce a new TV for the result.
   resultingTV <- fresh
-  let constraint = Constraint fTy (fstTy `TArrow` (resultingTV)) (Just "inferResultingType")
+  let constraint = Constraint fTy (fstTy `TArrow` (resultingTV)) prov
   -- Class constraints (cs) are emitted by rescope before inferResultingType runs;
   -- the recursive Scheme here is for type application only, not re-emission.
-  (resultingType, moreConstraints) <- inferResultingType (Forall vars [] resultingTV) rtypes2
+  (resultingType, moreConstraints) <- inferResultingType prov (Forall vars [] resultingTV) rtypes2
   return (resultingType, constraint:moreConstraints)
 --inferResultingType a b = error ("undefined inferResulting from " ++ show a ++ " //// " ++ show b)
 
@@ -451,7 +524,7 @@ runSolve cs = runIdentity $ runExceptT $ solver st
 simplify :: Unifier -> Unifier
 simplify (su, []) = (su, [])
 simplify (su, ((Constraint t1 t2 c): cs0)) =
-  case runIdentity $ runExceptT $ unifies t1 t2 of
+  case runIdentity $ runExceptT $ unifies c t1 t2 of
     -- can't simplify the t1, t2 constraint, put it in the unusable bin.
     Left _ -> addLeftoverConstraint (simplify (su, cs0)) (Constraint t1 t2 c)
     Right newSubst -> simplify (newSubst `compose` su, apply newSubst cs0)
@@ -464,42 +537,44 @@ solver :: Unifier -> Solve Subst
 solver (su, cs) =
   case cs of
     [] -> return su
-    ((Constraint t1 t2 _): cs0) -> do
-      su1  <- unifies t1 t2
+    ((Constraint t1 t2 prov): cs0) -> do
+      su1  <- unifies prov t1 t2
       solver (su1 `compose` su, apply su1 cs0)
 
-unifies :: RType -> RType -> Solve Subst
-unifies t1 t2 | t1 `matches` t2 = return emptySubst
-unifies (Tuple _ _) BottomTuple = return emptySubst
-unifies BottomTuple (Tuple _ _) = return emptySubst
-unifies (ListOf _) NullList = return emptySubst
-unifies NullList (ListOf _) = return emptySubst
-unifies (ListOf t1) (ListOf t2) = unifies t1 t2
-unifies t1 (GreaterType (TVarR v) t3) = if t1 `matches` t3 then v `bind` t1 else
-  throwError $ UnificationFail t1 t3
-unifies t1 (GreaterType t3 (TVarR v)) = if t1 `matches` t3 then v `bind` t1 else
-  throwError $ UnificationFail t1 t3
-unifies (TVarR v) (GreaterType t2 t3) = case greaterType t2 t3 of
-  Nothing -> throwError $ UnificationFail t2 t3
+-- The 'Maybe Provenance' is carried purely so that a failure can say where the
+-- constraint came from; it takes no part in unification itself.
+unifies :: Maybe Provenance -> RType -> RType -> Solve Subst
+unifies _ t1 t2 | t1 `matches` t2 = return emptySubst
+unifies _ (Tuple _ _) BottomTuple = return emptySubst
+unifies _ BottomTuple (Tuple _ _) = return emptySubst
+unifies _ (ListOf _) NullList = return emptySubst
+unifies _ NullList (ListOf _) = return emptySubst
+unifies p (ListOf t1) (ListOf t2) = unifies p t1 t2
+unifies p t1 (GreaterType (TVarR v) t3) = if t1 `matches` t3 then v `bind` t1 else
+  throwError $ UnificationFail t1 t3 p
+unifies p t1 (GreaterType t3 (TVarR v)) = if t1 `matches` t3 then v `bind` t1 else
+  throwError $ UnificationFail t1 t3 p
+unifies p (TVarR v) (GreaterType t2 t3) = case greaterType t2 t3 of
+  Nothing -> throwError $ UnificationFail t2 t3 p
   Just t -> v `bind` t
-unifies t1 (GreaterType t2 t3) = if t1 `matches` t2 && t2 `matches` t3 then return emptySubst else
+unifies p t1 (GreaterType t2 t3) = if t1 `matches` t2 && t2 `matches` t3 then return emptySubst else
   (case greaterType t2 t3 of
-    Nothing -> throwError $ UnificationFail t1 (GreaterType t2 t3)
-    Just tt -> if t1 `matches` tt then return emptySubst else throwError $  UnificationFail t1 (GreaterType t2 t3))
-unifies (TVarR v) t = v `bind` t
-unifies t (TVarR v) = v `bind` t
-unifies (TArrow t1 t2) (TArrow t3 t4) = unifyMany [t1, t2] [t3, t4]
-unifies (Tuple t1 t2) (Tuple t3 t4) = unifyMany [t1, t2] [t3, t4]
-unifies (TEither t1 t2) (TEither t3 t4) = unifyMany [t1, t2] [t3, t4]
-unifies t1 t2 = throwError $ UnificationFail t1 t2
+    Nothing -> throwError $ UnificationFail t1 (GreaterType t2 t3) p
+    Just tt -> if t1 `matches` tt then return emptySubst else throwError $  UnificationFail t1 (GreaterType t2 t3) p)
+unifies _ (TVarR v) t = v `bind` t
+unifies _ t (TVarR v) = v `bind` t
+unifies p (TArrow t1 t2) (TArrow t3 t4) = unifyMany p [t1, t2] [t3, t4]
+unifies p (Tuple t1 t2) (Tuple t3 t4) = unifyMany p [t1, t2] [t3, t4]
+unifies p (TEither t1 t2) (TEither t3 t4) = unifyMany p [t1, t2] [t3, t4]
+unifies p t1 t2 = throwError $ UnificationFail t1 t2 p
 
-unifyMany :: [RType] -> [RType] -> Solve Subst
-unifyMany [] [] = return emptySubst
-unifyMany (t1 : ts1) (t2 : ts2) =
-  do su1 <- unifies t1 t2
-     su2 <- unifyMany (apply su1 ts1) (apply su1 ts2)
+unifyMany :: Maybe Provenance -> [RType] -> [RType] -> Solve Subst
+unifyMany _ [] [] = return emptySubst
+unifyMany p (t1 : ts1) (t2 : ts2) =
+  do su1 <- unifies p t1 t2
+     su2 <- unifyMany p (apply su1 ts1) (apply su1 ts2)
      return (su2 `compose` su1)
-unifyMany t1 t2 = throwError $ UnificationMismatch t1 t2
+unifyMany _ t1 t2 = throwError $ UnificationMismatch t1 t2
 
 bind ::  TVarR -> RType -> Solve Subst
 bind a t | t `matches` TVarR a = return emptySubst
