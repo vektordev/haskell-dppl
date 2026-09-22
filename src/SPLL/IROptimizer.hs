@@ -572,7 +572,12 @@ softForceLogic OpMult _ z@(IRConst zv) | isNumZero zv = z
 softForceLogic OpMult (IRConst o) right | isNumOne o = right
 softForceLogic OpMult left (IRConst o) | isNumOne o = left
 softForceLogic OpDiv left (IRConst o) | isNumOne o = left
-softForceLogic OpDiv _ (IRConst z) | isNumZero z = error "tried to divide by zero in softForceArithmetic"
+-- A literal zero divisor is simply a case folding cannot handle: it falls
+-- through to the catch-all below and the IROp survives untouched. This used to
+-- `error`, which escaped the compiler's `Either CompilerError` contract
+-- entirely. It also fired on statically dead divisions, since folding runs
+-- bottom-up with no regard for reachability (task
+-- optimizer-literal-zero-divisor-panic).
 softForceLogic OpDiv z@(IRConst zv) _ | isNumZero zv = z
 softForceLogic OpSub left (IRConst z) | isNumZero z = left
 softForceLogic op left right = IROp op left right     -- Nothing can be done
