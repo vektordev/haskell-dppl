@@ -1,0 +1,14 @@
+-- The sibling shape of enumLetGatesFreshDrawArms: here the fresh draw is in
+-- the CONDITION of the `if` and the enumerable let-bound latent `b` is what
+-- the arms read. Same engine, same eager `error`, same misdiagnosis as
+-- unbounded self-recursion.
+--
+-- Pinned separately because the two shapes would need different fixes: this
+-- one is a mixture over a fresh Bernoulli whose arms are deterministic given
+-- the enumerated latent, the other a selection by the enumerated latent over
+-- probabilistic arms. Idealized values are the same 0.45/0.05/0.05/0.45 as
+-- its sibling (the program is the same noisy-flip model, respelled).
+--
+-- Found by the `exact-eig-question-asking` experiment. See task
+-- enum-let-latent-gates-fresh-draw.
+expect-failure: diagnostic "generate-backed fallback"
