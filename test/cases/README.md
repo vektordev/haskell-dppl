@@ -26,13 +26,14 @@ rather than testing a working feature. See the next section.
 Filing a mechanical repro for a bug that must *keep failing* until it's fixed
 doesn't need a hand-written Haskell test group -- drop a `.ppl`/`.tst` pair
 into `known-issues/` whose `.tst` carries an `expect-failure:` header (in the
-same style as `backends:`/`slow`) naming one of four shapes:
+same style as `backends:`/`slow`) naming one of five shapes:
 
 ```
 expect-failure: crash                              -- an uncaught exception, message unpinned
 expect-failure: diagnostic "some substring"        -- an uncaught exception whose message contains this
 expect-failure: no-code                            -- compiles, but generate/probability/integrate is silently absent
 expect-failure: wrong-result                       -- compiles and runs; the p()/cdf() rows below pin the known-wrong value
+expect-failure: broken                             -- mechanism unpinned; the p()/cdf() rows below state the idealized value instead
 ```
 
 `crash`/`diagnostic` are checked against an *uncaught exception* thrown while
@@ -41,6 +42,21 @@ does not count; that's what `TestRejection` is for. `wrong-result` needs no
 special assertion machinery: the ordinary `p(...)`/`cdf(...)` rows below the
 header already pin the value the bug produces, and the corpus's usual tuple
 comparison already fails loudly the day a fix changes the computed number.
+
+`broken` is the loose fallback for a repro nobody has characterized yet -- no
+exact crash message, no wrong value pinned by hand. The rows below the header
+state the *idealized* value instead (what a fixed compiler should produce), and
+`TestKnownIssues.hs` asserts the compiled program does **not yet** match it: a
+crash, a refused compile, a missing variant or a merely different number all
+count as "still broken" and pass, while an exact match fails loudly ("may be
+fixed now"). It trades the "which exact mechanism regressed" signal that
+`diagnostic`/`wrong-result` give for robustness against unrelated churn
+shifting a pinned message or number.
+
+**Prefer `broken` over not filing at all.** If you have a program that
+misbehaves but you have not worked out precisely how, `broken` is the header
+for it -- writing down the idealized value is enough. A repro that exists is
+worth far more than a precisely-characterized one that never got committed.
 
 `TestKnownIssues.hs` discovers every pair here and checks it against its
 header. This coexists with `TestRejection.hs` rather than replacing it: a
