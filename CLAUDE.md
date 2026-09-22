@@ -1394,6 +1394,71 @@ is a property of today's set of `InjF` inverses, not an enforced invariant, so
 it is wrapped too. Pinned by `test/cases/distributions/uniformLog.tst`'s `cdf(1000.0)` row and
 `test/cases/arithmetic/multExp.tst`'s `cdf(-5.0)`.
 
+### Type errors carry the source they came from
+
+A unification failure is reported the way GHC reports one -- a position, the two
+types in the vocabulary the *user* writes, and a context chain naming what they
+wrote:
+
+```
+prog.spll:1:12:
+    Couldn't match type '[s]' with '(u, v)'
+      In the function 'tail'
+      In the pattern: h : t
+```
+
+`RInfer`'s `Constraint` carries a `Maybe Provenance` (the originating
+expression's `srcPos` plus a description from `describeExpr`). It used to carry
+a `Maybe String` holding only the *phase* that emitted the constraint
+(`"Apply"`, `"inferResultingType"`), and `solver` discarded even that before
+throwing, so `addRTypeInfo` could only print
+`UnificationFail (TADT "Scene") (ListOf (TADT "Object"))` followed by 88 lines
+of program and constraint dump. That dump still exists and is still useful for
+work on `RInfer`; it is behind `-v`.
+
+**There is deliberately no table keyed on pairs of types.** A rule that
+recognised, say, an ADT meeting a list and emitted bespoke prose about cons
+patterns would improve one program shape and have to be re-derived at the next
+site; naming the source improves every unification failure at once. New
+diagnostics here should follow that: make the mechanism carry more, do not add
+a case. `TestRejection.TypeErrorDiagnostic` includes a case on an unrelated
+ill-typed program precisely so this cannot silently degenerate.
+
+Three things keep positions available, and each is load-bearing:
+
+- `TypeInfo.srcPos :: Maybe SourceSpan`, defaulted by `makeTypeInfo`, so adding
+  it changed no construction site. It is `Nothing` on everything the parser did
+  not build (the prelude, `SPLL.Examples`, anything a later pass synthesizes),
+  and every diagnostic degrades gracefully rather than requiring it.
+- `Parser.withSpan` wraps `term` and `expr` -- **and the atoms inside
+  `application`**, which calls `atom` directly and so would otherwise leave
+  every argument position-less. Cross-function type errors had no position at
+  all until that was fixed.
+- Nodes that are *built* rather than parsed inherit a span through
+  `fillMissingSpans`, which only fills where `srcPos` is `Nothing`:
+  `stampSynthesized` gives `letInDestructor`'s generated `head`/`tail`
+  scaffolding the span of the pattern it came from (plus
+  `spanDesugaredFrom`, the `In the pattern: h : t` line), and `keepSpanOf`
+  gives `normalizeExpr`'s rebuilt `ReadNN`/`InjF`/projector nodes the span of
+  the application they replaced. Without these a message could point at, or
+  print, the generated `p_d0` binder -- pinned against by
+  `TestRejection.TypeErrorDiagnostic`.
+
+`Eq` on `TypeInfo`/`Expr`/`Program` stays **derived and structural**: two values
+from different source positions really are different. The position-blind
+comparison is a separate `Equiv`/`(~=)` class in `SPLL.Lang.Types`, identical to
+the derived `Eq` on spanless values, used by the parser tests that compare a
+parse against a constructed value or two parses of different source strings.
+`TestParser`'s `prop_EquivAgreesWithEqWithoutSpans`/`prop_EquivIgnoresSpans` pin
+both halves, so the switch neither weakened those tests nor made them vacuous.
+
+**Known limitation**: a failure has two sides and is reported against one --
+whichever constraint the solver reached when the contradiction materialised,
+which is ordering-dependent. Naming both needs provenance on *types* rather than
+constraints; docs-repo task `type-error-blames-one-side-only`. The broader
+triage of every other user-facing error site is the docs-repo investigation
+`user-facing-error-site-inventory`.
+
 ## Runtime Libraries
 
 Generated Python code depends on `pythonLib.py` (scalar) or
