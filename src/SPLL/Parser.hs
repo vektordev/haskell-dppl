@@ -133,7 +133,7 @@ pLetIn adts_ = do
 -- with no span of their own are stamped, so @e@ and @b@, which were parsed,
 -- keep their own positions.
 stampSynthesized :: Expr -> Expr -> Expr
-stampSynthesized lhs = tMap fill
+stampSynthesized lhs = fillMissingSpans marker
   where
     marker = case srcPos (ann lhs) of
       Nothing -> Nothing
@@ -142,6 +142,15 @@ stampSynthesized lhs = tMap fill
         -- that "the pattern: x" would be noise.
         Var _ -> sp
         _     -> desugaredSpan ("the pattern: " ++ patternPhrase lhs) sp
+
+-- | Give every node with no span of its own the supplied one.
+--
+-- Nodes that already carry a span were parsed and keep their own position;
+-- everything else was built by desugaring or normalization and belongs, as far
+-- as the user is concerned, to the construct being rewritten.
+fillMissingSpans :: Maybe SourceSpan -> Expr -> Expr
+fillMissingSpans marker = tMap fill
+  where
     fill e = case srcPos (ann e) of
       Just _  -> ann e
       Nothing -> (ann e) { srcPos = marker }
@@ -673,11 +682,15 @@ pLambda adts_ = do
 -- This handles both normal application and built-in functions like multF
 application :: MonadParser m => [ADTDecl] -> m Expr
 application adts_ = dbg "application" $ do
-    func <- try (atom adts_)
+    -- Both the callee and the arguments are stamped here rather than relying on
+    -- 'expr'/'term': those wrap the application as a whole, so an argument atom
+    -- would otherwise reach the solver with no position of its own, and a type
+    -- error blamed on an argument would have nowhere to point.
+    func <- try (withSpan (atom adts_))
     -- atom already covers "(expr)"/"(expr, expr)" via pTuple; a separate
     -- parens(expr) fallback here would re-parse the same paren contents a
     -- second time on every atom-alternative failure (see pTuple's comment).
-    args <- try $ many (try (atom adts_))
+    args <- try $ many (try (withSpan (atom adts_)))
     case func of
         Expr _ (Var name) -> case lookup name binaryFs of
             Just constructor -> return (construct2 constructor args)
@@ -848,7 +861,7 @@ normalizeExpr env@(parametricBuilders, atomicBuilders, benign) expr_ =
                   build <- builder args
                   case build of
                     Left _ -> return $ Right expr' -- This prevents InjFs, which have multiple arguments from failing to build because here only one argument is applied
-                    e -> return e
+                    e -> return (keepSpanOf expr' e)
                 _ -> return $ Right expr'
             Expr _ (Apply (Expr _ (Var fname)) arg)
               | not (Set.member fname benign)
@@ -856,11 +869,17 @@ normalizeExpr env@(parametricBuilders, atomicBuilders, benign) expr_ =
                 build <- builder [arg]
                 case build of
                   Left _ -> return $ Right expr' -- This prevents InjFs, which have multiple arguments from failing to build because here only one argument is applied
-                  e -> return e
+                  e -> return (keepSpanOf expr' e)
             Expr _ (Var fname)
               | not (Set.member fname benign)
-              , Just builder <- Map.lookup fname atomicBuilders -> builder []
+              , Just builder <- Map.lookup fname atomicBuilders -> fmap (keepSpanOf expr') (builder [])
             _ -> return $ Right expr'
+
+-- | A builder rebuilds an application into a @ReadNN@\/@InjF@\/projector node
+-- with a fresh 'makeTypeInfo', which would otherwise throw away the position of
+-- the application it is replacing. Hand the replacement the original's span.
+keepSpanOf :: Expr -> Either String Expr -> Either String Expr
+keepSpanOf original = fmap (fillMissingSpans (srcPos (ann original)))
 
 --replaceExpr :: Expr -> Expr -> Expr
 --replaceExpr

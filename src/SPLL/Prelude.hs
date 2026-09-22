@@ -83,7 +83,7 @@ import SPLL.AutoNeural (validateWriteLogitsGaussian)
 import SPLL.IntermediateRepresentation
 import SPLL.Analysis
 import SPLL.Typing.Infer (addModalityInfo)
-import SPLL.Typing.RInfer (addRTypeInfo)
+import SPLL.Typing.RInfer (addRTypeInfoAt)
 import SPLL.Validator (validateProgram)
 import SPLL.CalleeNormalize (normalizeCallees)
 import IRInterpreter (generateRand, generateDet)
@@ -364,7 +364,7 @@ compile conf p = do
   -- partial-function crash on genuinely ill-typed input; (2) every later pass
   -- -- enum annotation, forward chaining, the modality pass -- sees real RType
   -- instead of NotSetYet, in case any of them can make use of it.
-  rtyped <- addRTypeInfo normalized
+  rtyped <- addRTypeInfoAt (verbose conf) normalized
   printIfMoreVerbose conf "\n=== RType-inferred Program ==="
   pPrintIfMoreVerbose conf rtyped
   printStage conf "After RType Inference" rtyped
