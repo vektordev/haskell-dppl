@@ -30,6 +30,7 @@ import SPLL.CodeGenJulia (juliaMangle, juliaKeywords)
 import qualified SPLL.CodeGenJulia
 
 import Control.Exception (try, evaluate, SomeException)
+import Control.Monad (forM_)
 import Data.List (isInfixOf, nub)
 import Data.Either (isLeft)
 import Test.Tasty (TestTree, testGroup)
@@ -56,6 +57,7 @@ rejectionTests = testGroup "Rejection"
   , setWitnessTransportTests
   , gatedContinuousFeedsFreshDrawTests
   , arrowApplySelfSumTests
+  , typeErrorDiagnosticTests
   ]
 
 -- ----------------------------------------------------------------------------
@@ -1227,3 +1229,89 @@ gatedContinuousFeedsFreshDrawTests = testGroup "GatedContinuousFeedsFreshDraw"
               Left ex -> assertFailure ("compile crashed: " ++ show ex)
               Right _ -> return ()
       ]
+
+-- ----------------------------------------------------------------------------
+-- Task opaque-user-facing-errors: a type error is reported the way GHC reports
+-- one -- a source position, the two types in the vocabulary the user writes,
+-- and a context chain naming what they wrote -- rather than as a raw
+-- @UnificationFail@ constructor followed by 88 lines of solver dump.
+--
+-- These pin the *shape* of the message, not its exact wording, because the
+-- renderer is a general mechanism rather than a table of per-program strings:
+-- what must not regress is that the position, both type names and the
+-- originating construct are present, and that no machine-generated binder
+-- reaches the user.
+-- ----------------------------------------------------------------------------
+
+-- The CLEVR shape the task was filed for: `:` destructures built-in lists, but
+-- `Scene` is an ADT, so the built-in head/tail the pattern desugars to cannot
+-- apply.
+consPatternOnADTSrc :: String
+consPatternOnADTSrc = unlines
+  [ "data Color  = Red | Blue"
+  , "data Object = Object color::Color"
+  , "data Scene  = List hd::Object, tl::Scene depth 10"
+  , "neural extractCLEVR :: (Symbol -> Scene)"
+  , "main symbol = let h : t = extractCLEVR symbol in (color h == Red)"
+  ]
+
+-- A cons pattern against a tuple, where the failing constraint is the
+-- desugared head/tail InjF itself -- so the message additionally names the
+-- pattern the user wrote rather than the binder the parser generated for it.
+consPatternOnTupleSrc :: String
+consPatternOnTupleSrc = "main = let h : t = (1.0, 2.0) in h"
+
+-- | The rejection message for an ill-typed program.
+-- A real source name is passed, not "", because the position is rendered
+-- through Megaparsec's 'sourcePosPretty' -- an empty name yields a bare
+-- "5:27" and would not exercise the file:line:col shape a user actually sees.
+typeErrorFor :: String -> IO String
+typeErrorFor src = case tryParseProgram "prog.spll" src of
+  Left err -> assertFailure ("test program failed to parse: " ++ show err)
+  Right p  -> case addTypeInfo p of
+    Right _ -> assertFailure "ill-typed program was accepted by type inference"
+    Left e  -> return e
+
+typeErrorDiagnosticTests :: TestTree
+typeErrorDiagnosticTests = testGroup "TypeErrorDiagnostic"
+  [ testCase "names both types in the user's own vocabulary" $ do
+      msg <- typeErrorFor consPatternOnADTSrc
+      assertBool ("expected the ADT's name in: " ++ msg) ("Scene" `isInfixOf` msg)
+      assertBool ("expected list-of-Object written as [Object] in: " ++ msg)
+        ("[Object]" `isInfixOf` msg)
+      assertBool ("solver constructor names leaked into: " ++ msg)
+        (not ("ListOf" `isInfixOf` msg) && not ("TADT" `isInfixOf` msg))
+
+  , testCase "carries a source position" $ do
+      msg <- typeErrorFor consPatternOnADTSrc
+      -- The repro's only type error is on line 5.
+      assertBool ("expected a file:line:col position in: " ++ msg)
+        ("prog.spll:5:" `isInfixOf` msg)
+
+  , testCase "never shows the binder the cons desugaring generated" $ do
+      forM_ [consPatternOnADTSrc, consPatternOnTupleSrc] $ \src -> do
+        msg <- typeErrorFor src
+        assertBool ("a generated binder reached the user: " ++ msg)
+          (not ("p_d" `isInfixOf` msg))
+
+  , testCase "a failure inside a desugaring names the pattern, not the desugaring" $ do
+      msg <- typeErrorFor consPatternOnTupleSrc
+      assertBool ("expected the source pattern to be named in: " ++ msg)
+        ("h : t" `isInfixOf` msg)
+
+  , testCase "the solver dump is not in the default message" $ do
+      msg <- typeErrorFor consPatternOnADTSrc
+      assertBool ("the constraint dump is still being shown by default: " ++ msg)
+        (not ("constraints = " `isInfixOf` msg))
+      assertBool ("the message is still enormous (" ++ show (length (lines msg)) ++ " lines)")
+        (length (lines msg) <= 10)
+
+  , testCase "the mechanism is general, not keyed to the cons-pattern shape" $ do
+      -- An unrelated ill-typed program must gain the same context chain.
+      msg <- typeErrorFor "g x = x + 1.0\nmain = g True"
+      assertBool ("expected both type names in: " ++ msg)
+        ("Float" `isInfixOf` msg && "Bool" `isInfixOf` msg)
+      assertBool ("expected a file:line:col position in: " ++ msg)
+        ("prog.spll:2:" `isInfixOf` msg)
+      assertBool ("expected a context chain in: " ++ msg) ("In " `isInfixOf` msg)
+  ]

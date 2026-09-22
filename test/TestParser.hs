@@ -537,6 +537,33 @@ prop_constructorValueYieldsToKeywords =
           , parseVal "Left 1.0" === Right (VEither (Left (VFloat 1.0)))
           ]
 
+-- | Task opaque-user-facing-errors: '(~=)' must be exactly today's derived
+-- 'Eq' on values that carry no spans, so switching a test to it weakens
+-- nothing. 'Arbitrary' builds every 'TypeInfo' through 'makeTypeInfo', whose
+-- 'srcPos' is 'Nothing', so these draws are precisely the spanless case.
+prop_EquivAgreesWithEqWithoutSpans :: Expr -> Expr -> Property
+prop_EquivAgreesWithEqWithoutSpans x y =
+  conjoin
+    [ counterexample "(~=) is not reflexive" (x ~= x)
+    , counterexample "(~=) disagreed with (==)" ((x ~= y) === (x == y))
+    ]
+
+-- | And the other half: on a *parsed* program, where spans are populated,
+-- '(~=)' must ignore them where '(==)' does not -- otherwise the parser tests
+-- that switched to it would be vacuous.
+prop_EquivIgnoresSpans :: Property
+prop_EquivIgnoresSpans = once $
+  case tryParseProgram "prog.spll" "main = 1.0 + 2.0" of
+    Left err -> counterexample (errorBundlePretty err) False
+    Right p ->
+      let stripped = p { functions = [ (n, stripSpans e) | (n, e) <- functions p ] }
+      in conjoin
+           [ counterexample "the parsed program carried no spans to ignore" (p /= stripped)
+           , counterexample "(~=) did not ignore spans" (p ~= stripped)
+           ]
+  where
+    stripSpans = tMap (\e -> (ann e) { srcPos = Nothing })
+
 return []
 
 parserTests :: TestTree
