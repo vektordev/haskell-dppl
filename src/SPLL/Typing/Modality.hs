@@ -35,7 +35,7 @@ module SPLL.Typing.Modality
   , groundMod
   , validGroundMod
   , topGround, bottomGround
-  , leqGround, joinGround, meetGround, meetGroundMixture
+  , leqGround, joinGround, meetGround, meetGroundMixture, meetGroundParts
     -- * The universal marginalization combinator (the doc's "▷")
   , marginalize
     -- * Structured modalities
@@ -236,16 +236,33 @@ meetGround (GroundMod c1 f1 m1) (GroundMod c2 f2 m2) =
 -- either side is, because 'Finite' is the order-least fixpoint seed under
 -- 'leqGround', not because a mixture with one finite branch has finite
 -- support). Used for 'if'/case branch combination and for eliminating an
--- 'MSum'/'ISum''s two alternative payloads into one ground fact; not for
--- genuinely orthogonal combination (an 'MProd' pair, an 'MSum''s own tag
--- against its combined payload, an 'MRec' spine against its element), which
--- keep 'meetGround'. Task @modality-mixture-fin-joins-not-meets@: without
--- this, @if c then 1.0 else Uniform@ mistypes as finite-support and a
--- downstream continuous combination (@... + Normal@) crashes the IR compiler
--- rather than falling back to sampling-only.
+-- 'MSum'/'ISum''s two alternative payloads into one ground fact. Task
+-- @modality-mixture-fin-joins-not-meets@: without this, @if c then 1.0 else
+-- Uniform@ mistypes as finite-support and a downstream continuous combination
+-- (@... + Normal@) crashes the IR compiler rather than falling back to
+-- sampling-only.
 meetGroundMixture :: GroundMod -> GroundMod -> GroundMod
 meetGroundMixture (GroundMod c1 f1 m1) (GroundMod c2 f2 m2) =
   GroundMod (meetCap c1 c2) (joinFin f1 f2) (meetFamily m1 m2)
+
+-- | Summarise the /parts of one composite value/ -- a pair's two components,
+-- a sum's tag against its payload, a recursive value's spine against its
+-- element -- into the ground fact about the whole value ('outerGround' /
+-- @ModalityInfer.outerI@). The capability set meets, exactly as in
+-- 'meetGround' (the whole is only as capable as its weakest part). The 'Fin'
+-- axis is the /support of the composite/, which is the product of the parts'
+-- supports: finite only when every part's is -- 'joinFin', the same rule
+-- 'marginalize' already applies to a combination's result. 'meetGround''s
+-- lattice-meet 'Fin' answers 'Finite' as soon as /either/ part is, so
+-- @[Uniform]@ (a 'Cons' of a continuous head and a constant tail) summarised
+-- as finite-support, @head [Uniform]@ inherited it through the generic floor,
+-- and @Normal + head [Uniform]@ -- which is just @Normal + Uniform@ -- got a
+-- closed density from 'marginalize''s @keepD@ that no 'IRCompiler' equation
+-- builds (task @toirinference-fallthrough-throws@). Numerically this is
+-- 'meetGroundMixture'; the separate name records that the justification is
+-- product support, not union support.
+meetGroundParts :: GroundMod -> GroundMod -> GroundMod
+meetGroundParts = meetGroundMixture
 
 -- | The /universal marginalization combinator/ — the design doc's @▷@.
 --
@@ -358,9 +375,9 @@ applyOuter rho (MRec s e)   = MRec (marginalize rho s) (applyOuter rho e)
 outerGround :: Mod -> GroundMod
 outerGround (MGround g)  = g
 outerGround (MArr rho _) = rho
-outerGround (MProd a b)  = meetGround (outerGround a) (outerGround b)
-outerGround (MSum t a b) = meetGround t (meetGroundMixture (outerGround a) (outerGround b))
-outerGround (MRec s e)   = meetGround s (outerGround e)
+outerGround (MProd a b)  = meetGroundParts (outerGround a) (outerGround b)
+outerGround (MSum t a b) = meetGroundParts t (meetGroundMixture (outerGround a) (outerGround b))
+outerGround (MRec s e)   = meetGroundParts s (outerGround e)
 
 -- | Pointwise join of two modalities of the same shape (used for @if@ branches).
 joinModality :: Mod -> Mod -> Mod

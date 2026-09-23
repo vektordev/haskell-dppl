@@ -762,6 +762,19 @@ generateBackedProjectionTests = testGroup "GenerateBackedProjection"
           Right v -> assertFailure
             ("fst (Uniform * Uniform, Uniform) compiled to a probability function (" ++ show v
               ++ "), but the whole node is Bottom and should have none")
+  , testCase "a projection out of a list with a continuous sibling is declined, not a clause-match crash" $
+      -- Task toirinference-fallthrough-throws: the shrunk typed-fuzz draw.
+      -- The modality engine used to claim a closed density for this @plus@
+      -- (a finite-support over-claim on the list's outer summary), and
+      -- toIRInference, which has no equation for it, hit its catch-all
+      -- `error`. It must now be the ordinary Bottom-root refusal.
+      withParsed "main = Normal + fst (head [(-4.159874869840349, [Uniform])])" $ \prog ->
+        case runProb defaultCompilerConfig prog [] (VFloat 0.5) of
+          Left e  -> assertBool ("expected the ordinary Bottom/no-compiled-variant refusal, got: " ++ e)
+                                ("has no compiled probability function" `isInfixOf` e)
+          Right v -> assertFailure
+            ("the list-projection repro compiled to a probability function (" ++ show v
+              ++ "), but it is Normal plus a continuous-support value and should have none")
   ]
 
 -- ----------------------------------------------------------------------------

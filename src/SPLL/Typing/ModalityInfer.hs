@@ -102,9 +102,9 @@ isWitI _        = False
 outerI :: IMod -> GroundMod
 outerI (IG g)      = g
 outerI (IArr rho _)= rho
-outerI (IProd a b) = (meetGround (outerI a) (outerI b))            { gFam = FamNone }
-outerI (ISum t a b)= (meetGround t (meetGroundMixture (outerI a) (outerI b))) { gFam = FamNone }
-outerI (IRec s e)  = (meetGround s (outerI e))                    { gFam = FamNone }
+outerI (IProd a b) = (meetGroundParts (outerI a) (outerI b))       { gFam = FamNone }
+outerI (ISum t a b)= (meetGroundParts t (meetGroundMixture (outerI a) (outerI b))) { gFam = FamNone }
+outerI (IRec s e)  = (meetGroundParts s (outerI e))               { gFam = FamNone }
 outerI (IWit m)    = outerI m   -- witnessing never lifts the standalone law
 
 -- | Project an 'IMod' onto the flat 'PType' (the per-node annotation).

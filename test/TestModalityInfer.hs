@@ -201,6 +201,35 @@ modalityInferTests = testGroup "ModalityInfer"
           -- not a crash.
           assertEqual "" Bottom
             (mainPType "main = (if Uniform < 0.5 then 1.0 else Uniform) + Normal")
+      , testCase "a list holding a continuous element is not finite (Bottom)" $
+          -- Regression, task @toirinference-fallthrough-throws@: the same
+          -- meet-vs-join 'Fin' error as the case above, one rule over. 'outerI'
+          -- summarised a composite value's parts ('IProd'/'ISum'/'IRec') with
+          -- 'meetGround', whose 'Fin' answers 'Finite' as soon as /either/ part
+          -- is -- but a composite's support is the product of its parts', finite
+          -- only if all are. @[Uniform]@ is a 'Cons' of a continuous head and a
+          -- (finite) constant tail, so it typed finite-support, @head@ passed
+          -- that through the generic floor, and @Normal + head [Uniform]@ --
+          -- which is just @Normal + Uniform@ -- got a closed density from
+          -- 'keepD' that IRCompiler has no equation for ("found no way to
+          -- convert to IR"). It must type like @Uniform + Normal@: 'Bottom'.
+          assertEqual "" Bottom (mainPType "main = Normal + head([Uniform])")
+      , testCase "the fuzz repro: a projection out of a list of tuples is Bottom" $
+          -- The shrunk typed-fuzz draw the task was filed from (pinned until
+          -- now as known-issues/toIRInferenceFallthroughNormalPlusProjection).
+          -- The value *is* the constant, but the engine sees @fst (head ...)@
+          -- only through the list's outer summary, which carries the
+          -- @[Uniform]@ sibling -- recovering it is design
+          -- @modality-tuple-projection@'s territory, not this fix's. Declining
+          -- (generate-only) is the honest answer until then.
+          assertEqual "" Bottom
+            (mainPType "main = Normal + fst (head [(-4.159874869840349, [Uniform])])")
+      , testCase "a list of finite parts stays finite (Integrate)" $
+          -- The control for the two cases above: joining the parts' 'Fin'
+          -- must keep a composite finite when every part is, so a finite
+          -- mixture reached through @head@ still convolves with a Normal.
+          assertEqual "" Integrate
+            (mainPType "main = head([if Uniform < 0.5 then 1.0 else 2.0, 3.0]) + Normal")
       , testCase "a finite mixture plus a Normal keeps its closed density (Integrate)" $
           -- Task @marginalize-keepd-overclaims-density-for-generic-plus-mult@.
           -- The counterpart to the case above, and the reason that one is about
