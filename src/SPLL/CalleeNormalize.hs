@@ -23,11 +23,19 @@
 --   makes a /probabilistic/ function value work end-to-end: the mixture is
 --   taken over the two applications' probabilities, never over the closures.
 --
--- * __A callee that denotes a lambda literal is replaced by it__:
---   @fst@ \/ @snd@ of a tuple literal, @head@ \/ @tail@ of a list literal, and
---   @let@-bound names standing for either, are reduced until a @Lambda@ falls
---   out ('reduceCallee'). Only a reduction that bottoms out at a lambda literal
---   is taken, so nothing else is ever moved.
+-- * __A callee that denotes a lambda literal is replaced by it__: any accessor
+--   applied to a literal application of the constructor it belongs to —
+--   @fst@ \/ @snd@ of a tuple literal, @head@ \/ @tail@ of a list literal,
+--   @fromLeftPartial@ \/ @fromRightPartial@ of a literal @left@ \/ @right@, a
+--   user-ADT field accessor of a literal constructor application — and
+--   @let@-bound names standing for any of those, are reduced until a @Lambda@
+--   falls out ('reduceCallee'). Only a reduction that bottoms out at a lambda
+--   literal is taken, so nothing else is ever moved.
+--
+-- Both rewrites reach a fixpoint at the application node, which matters for a
+-- /curried/ spine: in @(if c then f else g) a b@ the outer application\'s callee
+-- is itself an application, and only re-dispatching on it once rewritten keeps
+-- an @if@ from being left in callee position.
 --
 -- What it deliberately does /not/ do: rewrite a callee that is already a bare
 -- name. Forward chaining resolves a variable to the lambda it stands for by
@@ -45,6 +53,7 @@ module SPLL.CalleeNormalize
   ( normalizeCallees
   ) where
 
+import Data.Maybe (listToMaybe)
 import qualified Data.Set as Set
 
 import SPLL.Lang.Lang
@@ -65,44 +74,61 @@ normalizeCallees prog
   | rewritten == prog = Nothing
   | otherwise         = Just rewritten
   where
-    rewritten = prog { functions = [ (n, rewrite [] body) | (n, body) <- functions prog ] }
+    rewritten = prog { functions = [ (n, rewrite (adts prog) [] body) | (n, body) <- functions prog ] }
 
 -- | Rewrite one expression under the @let@-bindings enclosing it.
-rewrite :: Env -> Expr -> Expr
-rewrite env e = case node e of
-  Apply l v            -> rewriteApply env (ann e) l v
-  Lambda x lambdaBody  -> Expr (ann e) (Lambda x (rewrite (dropBinder x env) lambdaBody))
-  other                -> Expr (ann e) (fmap (rewrite env) other)
+rewrite :: [ADTDecl] -> Env -> Expr -> Expr
+rewrite decls env e = case node e of
+  Apply l v            -> rewriteApply decls env (ann e) l v
+  Lambda x lambdaBody  -> Expr (ann e) (Lambda x (rewrite decls (dropBinder x env) lambdaBody))
+  other                -> Expr (ann e) (fmap (rewrite decls env) other)
 
 -- | The application cases. @ti@ is the application node's own annotation, which
 -- every node this builds inherits: they all stand for the same value, and at
 -- this point in the pipeline it is @NotSetYet@ anyway.
-rewriteApply :: Env -> TypeInfo -> Expr -> Expr -> Expr
-rewriteApply env ti l v = case node l of
+rewriteApply :: [ADTDecl] -> Env -> TypeInfo -> Expr -> Expr -> Expr
+rewriteApply decls env ti l v = case node l of
   -- `let x = v in body`. The callee is already a lambda literal; what this case
   -- is here for is to record the binding, so a use of `x` further in can be
   -- reduced by 'reduceCallee'.
   Lambda x lambdaBody ->
-    let v' = rewrite env v
+    let v' = rewrite decls env v
         bodyEnv = (x, v') : dropBinder x env
-    in Expr ti (Apply (Expr (ann l) (Lambda x (rewrite bodyEnv lambdaBody))) v')
+    in Expr ti (Apply (Expr (ann l) (Lambda x (rewrite decls bodyEnv lambdaBody))) v')
   -- An `if` choosing between function values: push the application into both
   -- arms. Re-walked, so a nested selection (`(if a then (if b then f else g)
   -- else h) x`) collapses in the same pass.
   IfThenElse c t f ->
-    rewrite env (Expr ti (IfThenElse c (Expr ti (Apply t v)) (Expr ti (Apply f v))))
+    rewrite decls env (Expr ti (IfThenElse c (Expr ti (Apply t v)) (Expr ti (Apply f v))))
   -- A *named* callee is left alone: forward chaining resolves a variable to the
   -- lambda it stands for by itself (that is what its equivalence classes are
   -- for), so this is the one selection the existing engines already see
   -- through. Substituting it anyway would rewrite working programs onto a
   -- different path -- `testCases/hoProbValueLambda` and `twiceApplication`
   -- both changed answer when an earlier draft did.
-  Var _ -> Expr ti (Apply l (rewrite env v))
+  Var _ -> Expr ti (Apply l (rewrite decls env v))
   -- A callee that denotes a lambda literal: use the lambda. Only taken when the
   -- reduction really bottoms out at a `Lambda`, so a callee that stays a
   -- projection or a selection is left exactly as it was.
-  _ | Just lam <- reduceCallee env l -> Expr ti (Apply (rewrite env lam) (rewrite env v))
-  _ -> Expr ti (Apply (rewrite env l) (rewrite env v))
+  _ | Just lam <- reduceCallee decls env l -> Expr ti (Apply (rewrite decls env lam) (rewrite decls env v))
+  -- Fallthrough. The callee is some other expression -- most importantly an
+  -- `Apply`, which is what the outer node of a *curried* spine
+  -- `Apply (Apply (if ...) a) b` sees below it. Rewriting that callee turns it
+  -- into an `IfThenElse` (the inner node distributes its own application into
+  -- the arms), so rebuilding around the result would leave an `if` sitting in
+  -- callee position at this node -- exactly the crash this pass exists to
+  -- prevent, and why the one-argument twin worked while this one did not.
+  --
+  -- So dispatch again on the *rewritten* callee. `IfThenElse` is the only shape
+  -- rewriting can newly expose: `rewrite` preserves the head constructor of
+  -- every node except `Apply`, which it may turn into `IfThenElse`. That also
+  -- bounds the recursion at one extra step, since the `IfThenElse` case
+  -- consumes it rather than returning here.
+  _ ->
+    let l' = rewrite decls env l
+    in case node l' of
+         IfThenElse{} -> rewriteApply decls env ti l' v
+         _            -> Expr ti (Apply l' (rewrite decls env v))
 
 -- | The lambda literal a callee expression denotes, if that is statically
 -- decidable: a literal lambda, a field of a tuple literal, an element of a list
@@ -110,8 +136,8 @@ rewriteApply env ti l v = case node l of
 --
 -- 'Nothing' for everything else — including a name bound to a randomly selected
 -- function, whose selection must stay at its binding site.
-reduceCallee :: Env -> Expr -> Maybe Expr
-reduceCallee env l = case reduce [] l of
+reduceCallee :: [ADTDecl] -> Env -> Expr -> Maybe Expr
+reduceCallee decls env l = case reduce [] l of
   lam@(Expr _ Lambda{}) -> Just lam
   _                     -> Nothing
   where
@@ -121,15 +147,49 @@ reduceCallee env l = case reduce [] l of
     -- cannot loop.
     reduce seen e = case node e of
       Var n | n `notElem` seen, Just bound <- lookup n env -> reduce (n : seen) bound
-      InjF (Named "fst") [p]
-        | Expr _ (InjF (Named "TCons") [a, _]) <- reduce seen p -> reduce seen a
-      InjF (Named "snd") [p]
-        | Expr _ (InjF (Named "TCons") [_, b]) <- reduce seen p -> reduce seen b
-      InjF (Named "head") [xs]
-        | Expr _ (InjF (Named "Cons") [h, _]) <- reduce seen xs -> reduce seen h
-      InjF (Named "tail") [xs]
-        | Expr _ (InjF (Named "Cons") [_, t]) <- reduce seen xs -> reduce seen t
+      -- One projection step, stated once for every constructor rather than per
+      -- accessor: an accessor applied to a literal application of the
+      -- constructor it belongs to is that constructor's corresponding field.
+      -- Both the built-in shapes (@fst@\/@snd@, @head@\/@tail@,
+      -- @fromLeftPartial@\/@fromRightPartial@) and user-ADT field accessors are
+      -- the same step, so they share the same case; 'accessorField' is the only
+      -- thing that knows which is which.
+      InjF (Named accessor) [p]
+        | Expr _ (InjF (Named ctor) fields) <- reduce seen p
+        , Just i <- accessorField decls ctor accessor
+        , i < length fields -> reduce seen (fields !! i)
       _ -> e
+
+-- | Which field of @ctor@ the accessor named @accessor@ projects out, if it is
+-- an accessor of that constructor at all.
+--
+-- The built-in constructors are listed explicitly because their accessors are
+-- not named after fields; a user ADT's are read off its declaration, where the
+-- field name /is/ the accessor name ('SPLL.PredefinedFunctions.fPairsFromADT'
+-- registers one @InjF@ per field under exactly that name).
+--
+-- Only the /partial/ Either extractors appear here. @fromLeft@ is the total,
+-- @Maybe@-returning one — @fromLeft (left x)@ is @Right x@, not @x@ — so it is
+-- not a projection and must not reduce like one.
+--
+-- A field name shared by sibling constructors is not ambiguous here, because
+-- the constructor is already known: the lookup is keyed on the pair.
+accessorField :: [ADTDecl] -> String -> String -> Maybe Int
+accessorField decls ctor accessor = case (ctor, accessor) of
+  ("TCons", "fst")               -> Just 0
+  ("TCons", "snd")               -> Just 1
+  ("Cons",  "head")              -> Just 0
+  ("Cons",  "tail")              -> Just 1
+  ("left",  "fromLeftPartial")   -> Just 0
+  ("right", "fromRightPartial")  -> Just 0
+  _ -> listToMaybe
+         [ i
+         | decl <- decls
+         , (cName, fields) <- constructors decl
+         , cName == ctor
+         , (i, (fName, _)) <- zip [0 ..] fields
+         , fName == accessor
+         ]
 
 -- | Names a binder shadows: drop its own entry, and any entry whose value
 -- mentions it. Moving such a value inwards would rebind it to the wrong
