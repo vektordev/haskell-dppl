@@ -36,6 +36,7 @@ module SPLL.ObservationMask
   , localSlotLatents
     -- * Correlation and self-containment
   , correlationClasses
+  , hasCorrelatedSlots
   , SlotVerdict(..)
   , slotVerdicts
   , selfContained
@@ -380,6 +381,16 @@ correlationClasses table = map fst (foldl' insertSlot [] table)
       in disjoint ++ [(slots', latents')]
     overlapsAny ls ls' =
       or [ latentsOverlap a b | a <- Set.toList ls, b <- Set.toList ls' ]
+
+-- | The trigger [[warn-correlated-slots]] asks for: does some correlation class
+-- hold two or more slots?
+--
+-- That task is only @proposed@, so this is the one-line hook rather than a wired
+-- warning: when it is approved, the diagnostic reads this and names the class's
+-- slots. Nothing consults it today beyond the @--marginals@ report, which prints
+-- the classes themselves.
+hasCorrelatedSlots :: [[Slot]] -> Bool
+hasCorrelatedSlots = any ((> 1) . length)
 
 -- | Why a slot is enumerated, or that it is not.
 data SlotVerdict
