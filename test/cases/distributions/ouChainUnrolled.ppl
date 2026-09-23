@@ -1,0 +1,4 @@
+main = let x0 = Normal in
+       let x1 = 0.9 * x0 + 0.5 * Normal in
+       let x2 = 0.9 * x1 + 0.5 * Normal in
+       [x0, x1, x2]
