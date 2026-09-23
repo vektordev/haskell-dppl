@@ -1,0 +1,17 @@
+-- M4 value-grouped DP on a fold that threads a deterministic ACCUMULATOR
+-- argument (the weight w, incremented per level) rather than reading only
+-- literals: the isbn_checksum shape (task m4-grouping-for-value-reading-folds).
+-- Below the first level w is a spec_arg variable, so the per-level value
+-- (w or 0.0) only groups when the grouping sees through that variable to its
+-- known constant. Expected values from an independent exact (rational) oracle
+-- over the factorized per-level distribution: P(sum of the weights of the Red
+-- objects > 2.5) at depth 5.
+data Color = Red | Green | Blue
+data Object = NoObj | Obj color::Color
+data Scene = Empty | SCons obj::Object, rest::Scene depth 5
+
+neural readScene :: (Symbol -> Scene)
+
+weightedRed w s = if isEmpty s then 0.0 else (if isObj (obj s) then (if isRed (color (obj s)) then w else 0.0) else 0.0) + weightedRed (w + 1.0) (rest s)
+
+main sym = draw scene = readScene sym in if weightedRed 1.0 scene > 2.5 then 1 else 0

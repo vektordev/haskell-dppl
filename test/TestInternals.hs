@@ -1639,6 +1639,38 @@ test_planEnumBoolCtorPolynomial = testCase "planEnumBoolCtorPolynomial" $ do
               ++ show s8 ++ " s12=" ++ show s12 ++ " ratio=" ++ show (fromIntegral s12 / fromIntegral s8 :: Double))
     (s12 < 6 * s8)
 
+-- | The value-grouped DP on a fold that threads a deterministic ACCUMULATOR
+-- through its recursive call (task m4-grouping-for-value-reading-folds, the
+-- isbn_checksum shape @w*(dig ds) + checksumSum (w+1) (rest ds)@). The call
+-- site binds @w + 1.0@ to a fresh @spec_arg@ variable, so every per-level value
+-- below the first reads that variable; the grouping must see through it to the
+-- constant it holds ('psDetConsts'), or no level merges and the fold is
+-- exponential. Measured on this size proxy: ungrouped 14.3x (20 s, and
+-- 2.9 GB RSS for the depth-8 compile), grouped 3.0x (1 s), so the 6x
+-- threshold has ~2x headroom on both sides. Depths kept at 4/8 so a
+-- regression fails red in ~20 s rather than exhausting memory.
+test_planEnumAccumulatorFoldPolynomial :: TestTree
+test_planEnumAccumulatorFoldPolynomial = testCase "planEnumAccumulatorFoldPolynomial" $ do
+  let prog d = unlines
+        [ "data Color = Red | Green | Blue"
+        , "data Object = NoObj | Obj color::Color"
+        , "data Scene = Empty | SCons obj::Object, rest::Scene depth " ++ show d
+        , "neural readScene :: (Symbol -> Scene)"
+        , "weightedRed w s = if isEmpty s then 0.0 else (if isObj (obj s) then (if isRed (color (obj s)) then w else 0.0) else 0.0) + weightedRed (w + 1.0) (rest s)"
+        , "main sym = draw scene = readScene sym in if weightedRed 1.0 scene > 2.5 then 1 else 0"
+        ]
+  let sizeAt :: Int -> IO Int
+      sizeAt d = case tryParseProgram "accfold" (prog d) of
+        Left e  -> assertFailure ("parse error at depth " ++ show d ++ ": " ++ show e)
+        Right p -> case compile defaultCompilerConfig p of
+          Left e   -> assertFailure ("compile error at depth " ++ show d ++ ": " ++ show e)
+          Right ir -> return (length (show ir))
+  s4 <- sizeAt 4
+  s8 <- sizeAt 8
+  assertBool ("depth-8 accumulator-fold IR is growing at the ungrouped rate (ungrouped ~14x, grouped ~3x): s4="
+              ++ show s4 ++ " s8=" ++ show s8 ++ " ratio=" ++ show (fromIntegral s8 / fromIntegral s4 :: Double))
+    (s8 < 6 * s4)
+
 -- | Fused joint-state DP acceptance. Two predicates over one scene are
 -- exponential (two readers turn 'psMerge' off); folding them into ONE
 -- traversal that threads a joint automaton state through deterministic
@@ -3391,6 +3423,7 @@ internalsTests = testGroup "Internals"
   , test_recursiveListBranchPruning
   , test_mixtureNegativeLogNormalScaleCompiles
   , test_planEnumBoolCtorPolynomial
+  , test_planEnumAccumulatorFoldPolynomial
   , planOverCouplingRefusalTests
   , planFactorExternalsTests
   , test_tstBackendsHeader

@@ -4522,10 +4522,21 @@ data PlanState = PlanState
     -- would double-count them. Enabled iff the plan-bound variable occurs once
     -- in the observation (see 'planWitnessApply').
   , psMerge    :: Bool
+    -- | Statically known values of the specialization argument variables
+    -- ('planResolveApply' binds a non-trivial deterministic call-site argument
+    -- to a fresh @spec_arg@ variable). A fold that threads a deterministic
+    -- accumulator parameter -- @checksumSum (w+1) (rest ds)@ -- reads that
+    -- variable in every per-level value, so without this environment the value
+    -- (@spec_arg * d@) never folds to a constant and 'planGroupValues' merges
+    -- nothing below the first level (task m4-grouping-for-value-reading-folds).
+    -- Consulted only by the grouping's classification and when folding further
+    -- argument bindings; the variables themselves are still emitted, so the
+    -- generated IR is unchanged wherever grouping was already firing.
+  , psDetConsts :: [(String, IRValue)]
   }
 
 emptyPlanState :: String -> Bool -> PlanState
-emptyPlanState nnRaw merge = PlanState Map.empty Map.empty [] nnRaw merge
+emptyPlanState nnRaw merge = PlanState Map.empty Map.empty [] nnRaw merge []
 
 -- (CompilerMonad spelled out: it is an unsaturated synonym application otherwise)
 type PlanM a = StateT PlanState (WriterT [(String, IRExpr)] Supply) a
@@ -5309,10 +5320,9 @@ planGroupBool (ts, fs) = do
 -- kept ungrouped. Specialization memoization was never the problem there
 -- (measured 19 distinct keys at depth 4, 31 at depth 6 -- linear, ~6 per level,
 -- exactly the joint states); the pair list was.
-foldValueConst :: IRExpr -> Maybe IRValue
-foldValueConst = foldConstIn []
-
--- | 'foldValueConst' under an environment of let-bound constants.
+--
+-- The environment holds let-bound constants met while folding, seeded by the
+-- caller with the specialization arguments of known value ('psDetConsts').
 foldConstIn :: [(String, IRValue)] -> IRExpr -> Maybe IRValue
 foldConstIn _   (IRConst v) = Just v
 foldConstIn env (IRVar n)   = lookup n env
@@ -5362,6 +5372,11 @@ planGroupValues :: [(IRExpr, PlanWorld)] -> PlanM [(IRExpr, PlanWorld)]
 planGroupValues pairs = do
   merge <- gets psMerge
   nnRaw <- gets psNnRaw
+  consts <- gets psDetConsts
+  let (mergeable, keep) = partitionEithers (map (classify consts) pairs)
+      -- group same-value worlds, keeping ascending value-key order for
+      -- reproducible IR
+      grouped = Map.elems (Map.fromListWith comb mergeable)
   if not merge
     -- unsafe to collapse (the fold shares leaves with a sibling predicate);
     -- keep the milestone-2 world-per-path enumeration unchanged
@@ -5370,10 +5385,11 @@ planGroupValues pairs = do
       merged <- mapM (mergeGroup nnRaw) grouped
       return (merged ++ keep)
   where
-    (mergeable, keep) = partitionEithers (map classify pairs)
-    classify (ve, w)
-      | Just v <- foldValueConst ve, canMerge w = Left (show v, (v, [w]))
-      | otherwise                               = Right (ve, w)
+    -- the value may read specialization argument variables of known value
+    -- (a threaded deterministic accumulator); see 'psDetConsts'
+    classify consts (ve, w)
+      | Just v <- foldConstIn consts ve, canMerge w = Left (show v, (v, [w]))
+      | otherwise                                   = Right (ve, w)
     -- A world carrying an independent sub-inference factor is never merged:
     -- 'planWorldMass' (which is what a group's collapsed mass is built from)
     -- measures the plan leaves only, so baking a group would silently drop
@@ -5381,9 +5397,6 @@ planGroupValues pairs = do
     canMerge w = null (pwPairs w) && null (pwFactors w) && not (any isPt (pwCons w))
     isPt PLeafPt{} = True
     isPt _         = False
-    -- group same-value worlds, keeping ascending value-key order for
-    -- reproducible IR
-    grouped = Map.elems (Map.fromListWith comb mergeable)
     comb (v, ws1) (_, ws2) = (v, ws1 ++ ws2)
     mergeGroup _ (v, [w]) = return (IRConst v, w)
     -- Merge same-value worlds. Constraints shared identically by every world
@@ -5519,7 +5532,7 @@ planResolveApply meta env planBodyExpr = case collectApply planBodyExpr [] of
           case sequence classesE of
             Left why -> return (Left why)
             Right classes -> do
-              frame <- lift (mapM bindParam (zip params classes))
+              frame <- mapM bindParam (zip params classes)
               let planOffs = [ off | ArgPlan (PlanRef _ off) _ <- classes ]
               let detKeys  = [ show ir | ArgDet ir <- classes ]
               let key = (chainName (getTypeInfo calleeBody), planOffs, detKeys)
@@ -5544,6 +5557,10 @@ planResolveApply meta env planBodyExpr = case collectApply planBodyExpr [] of
       | otherwise = return (Left ("call argument is neither a plan slice (accessor chain) nor deterministic given scope: " ++ planNodeName argE))
     -- Bind a non-trivial det argument to a fresh variable once; constants and
     -- variables pass through (also keeps memo keys small and collision-free).
+    -- A bound argument that folds to a constant under the already-known
+    -- argument values is recorded in 'psDetConsts', so the value grouping can
+    -- see through it (the variable is still emitted as before).
+    bindParam :: ((String, TypeInfo, ChainName), ArgClass) -> PlanM ([ChainName], PlanBinding)
     bindParam ((pname, _, pcn), cls) = case cls of
       ArgPlan ref _ -> return (occsOf pcn, PBPlan ref)
       ArgDet ir -> do
@@ -5551,8 +5568,12 @@ planResolveApply meta env planBodyExpr = case collectApply planBodyExpr [] of
           IRConst _ -> return ir
           IRVar _   -> return ir
           _ -> do
-            nm <- mkVariable "spec_arg"
-            setVariables [(nm, ir)]
+            nm <- lift (mkVariable "spec_arg")
+            lift (setVariables [(nm, ir)])
+            consts <- gets psDetConsts
+            case foldConstIn consts ir of
+              Just c  -> modify (\s -> s { psDetConsts = (nm, c) : psDetConsts s })
+              Nothing -> return ()
             return (IRVar nm)
         return (occsOf pcn, PBDet pname v)
     occsOf cn = fromMaybe [] (lookup cn (lambdaVarOccurrences (fcData meta)))
