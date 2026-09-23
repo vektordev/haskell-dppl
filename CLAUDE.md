@@ -41,7 +41,8 @@ Global flags (before the subcommand): `-v` verbosity, `-O LEVEL`
 optimization (0-2), `-k CUTOFF` top-K threshold, `-c` count branches, `-d`
 debug intermediates (see below), and the long-form `--pruneAnyChecks`,
 `--noIntegrate`/`--noProbability`/`--noGenerate`, `--noTypeCheck`,
-`--batched`, `--logSpace`. Per-subcommand flags: `--help`.
+`--batched`, `--logSpace`, `--marginals`, `--marginalSlots N`.
+Per-subcommand flags: `--help`.
 
 To prevent having to run `stack test` repeatedly, e.g. to grep for specific
 failures, always store the test output to a temporary file and grep that.
@@ -179,8 +180,9 @@ deterministic).
 - **CompilerConfig**: Controls verbosity, optimization level, top-K
   threshold, branch counting, the marginal-materialization cardinality budget
   (`materializationCardinality`, default 10000 — see Marginal Materialization
-  below), plus flags `pruneAnyChecks`, `noIntegrate`, `noProbability`,
-  `noGenerate`, `batched`, `logSpace`.
+  below), the per-function enumerated-slot budget (`marginalSlots`, default 4 —
+  see Observation masks below), plus flags `pruneAnyChecks`, `noIntegrate`,
+  `noProbability`, `noGenerate`, `batched`, `logSpace`.
 
 ## Internal Details
 
@@ -962,6 +964,78 @@ consumed by the three scalar backends; batched mode strips the root guard
 instead) — without it, a wrong-typed query either silently returns a bogus
 number or hits a deep panic. The marginal wildcard (`VAny`) is accepted at
 every level so marginal queries aren't penalized.
+
+### Observation masks: which `ANY` queries a function can answer
+
+A query with `ANY` holes is not a point query with a wildcard value — it is an
+observation of a **different shape**, so a different density is the answer.
+`SPLL.ObservationMask` is the analysis that says what those shapes are, and the
+rewrite that turns one into an ordinary program (design
+`witnessed-per-query-capability`, task 2; task 3 compiles the variants and the
+dispatcher, and is not landed).
+
+The **observation tree** of a declaration strips parameter lambdas, descends
+`let` bodies, follows a root `Var` to its bound value *when that variable has
+exactly one occurrence*, and stops at a constructor application (`TCons`,
+`Cons`, `left`/`right`, user ADT constructors), whose fields it descends in
+turn. Everything else is a **leaf slot**, identified by its accessor path from
+the root (`fst`, `snd.fromLeft`, a field name). A root that is not a constructor
+tree — an `if`, a call, a comparison — has exactly one leaf, the root itself,
+and nothing here applies to it.
+
+A slot's **latents** are the random sources it reaches through `let` bindings.
+Identity is per *occurrence*, keyed by chain name, which is what makes SPLL's
+eager `let` come out right: two slots reading the same bound variable reach one
+`Expr` node and so one latent, while two syntactic `Uniform`s are two draws.
+A `ReadNN` contributes one latent **per `PartitionPlan` leaf it is read
+through**, so `fst o` and `snd o` off one neural read are independent — and
+that is why the plan-guided corpus gets no variants and keeps its per-leaf
+wildcard handling. Overlap is equality for draws and *prefix* comparison for
+neural paths (reading the whole output and reading one field of it are the same
+source; two distinct fields are not). No `MultiValue` is consulted: an accessor
+chain can only go as deep as the plan's own structure, so distinct incomparable
+paths cannot name one leaf.
+
+A slot is **self-contained** when it shares no latent with another slot *and*
+every draw it depends on happens inside its own sub-expression; a deterministic
+slot is self-contained trivially. For those the existing per-field `anySafe`
+guard is already exact. Every other slot is **enumerated**, and masks range over
+those. Slots partition into **correlation classes** (connected components under
+shared latents) — the trigger `warn-correlated-slots` wants is "some class has
+two or more slots", and it falls out here for free.
+
+`pruneObservation mask decl` replaces each masked leaf's sub-expression by a
+**hole**: `Constant VAny` carrying the leaf's `rType`. That marker is
+unambiguous because `Validator.hs` forbids `Constant VAny` in a user program.
+Everything below pruning then runs on an ordinary program: a hole is `Exact` in
+the modality lattice, a premise-free clause in forward chaining, and
+deliberately carries **no** `DiscreteValues` tag (its domain is *absent*, not
+the singleton `{ANY}` — tagging it would make the enumerated sum range over a
+wildcard). A latent that only fed masked slots loses its last occurrence and the
+existing dead-binding arm drops it; a latent recovered from a masked slot is
+re-witnessed from the remaining slots by ordinary forward chaining.
+
+**The per-mask capability is therefore the projected `pType` of the masked
+program** — there is no second computation to disagree with it. `Prelude`'s
+`maskTable`/`marginalReport` produce it, and `compile` is split at the
+post-RInfer seam (`compileRTyped`) precisely because a pruned program enters
+there: it cannot re-enter at the top, since validation forbids its holes.
+
+`--marginals` prints the report (slots and their accessor paths, correlation
+classes, which slots are enumerated and why, and the mask table).
+`--marginalSlots N` (default 4, `CompilerConfig.marginalSlots`) bounds the
+enumerated slots per function — `k` of them means `2^k` masks — and a function
+over budget is reported as over budget and compiles exactly as it does today.
+The budget is a cost ceiling the user may raise, not a correctness gate, which
+is why it sits beside `materializationCardinality`.
+
+Verified against the design's programs: `W`/`O`/`N`/`C`/`B` come out one
+correlation class each, `I` two singletons, and `let x = Uniform in (x, Uniform)`
+two classes with slot 1 enumerated and slot 2 self-contained. The mask tables
+reproduce the design's hand-verified rows — W `(ANY, _) -> Bottom` (a
+convolution) with `(_, _)` and `(_, ANY)` `Integrate`; C `(_, (ANY, concrete))`
+`Bottom` while `(_, (ANY, ANY))` is admitted. Tests:
+`test/TestObservationMask.hs`.
 
 ### Debug: Intermediate Stage Dump (`-d`)
 
