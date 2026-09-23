@@ -1,0 +1,23 @@
+-- An over-budget `of` enumeration (21845 values, over the 10000 of
+-- `defaultMaterializationCardinality`) whose body builds a tuple. The
+-- materialization budget gate (tasks of-annotation-forces-dense-enumeration and
+-- enumeration-budget-gate-misses-nested-application) declines dense
+-- enumeration here and hands the binding to the plan-guided path, whose
+-- traversal has no case for a tuple constructor, so the whole compile is
+-- refused by the set-witness fallback's diagnostic. Before the gate this
+-- compiled densely (a 5,971,459-byte Python module). Dense fallback was
+-- explicitly rejected (the user's 2026-09-16 decision on
+-- of-annotation-forces-dense-enumeration), so the fix is plan-traversal
+-- coverage of the tuple, not re-opening dense enumeration. Nested spellings
+-- (`let c = .. in let scene = .. in (numRed scene, c)`, or `numRed scene +
+-- (if c then 1.0 else 0.0)`, refused on `InjF plus`) fail the same way.
+-- Generate-only compiles (`--noProbability --noIntegrate`) still succeed.
+data Color = Red | Green | Blue
+data Object = NoObj | Obj color::Color
+data Scene = Empty | SCons obj::Object, rest::Scene depth 7
+
+neural readScene :: (Symbol -> Scene) of 7x.{Empty | SCons {NoObj | Obj {Red|Green|Blue}} x}
+
+numRed s = if isEmpty s then 0.0 else (if isObj (obj s) then (if isRed (color (obj s)) then 1.0 else 0.0) else 0.0) + numRed (rest s)
+
+main sym = let scene = readScene sym in (numRed scene, numRed scene)

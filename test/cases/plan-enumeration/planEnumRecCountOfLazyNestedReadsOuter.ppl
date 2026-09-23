@@ -1,0 +1,21 @@
+-- The nested over-budget shape of planEnumRecCountOfLazyNested, but the inner
+-- body READS the outer enumerated variable `c`, through an `if` in a
+-- comparison bound. Once the inner application leaves the enumeration for the
+-- plan-guided path (task enumeration-budget-gate-misses-nested-application),
+-- `c` is a loop variable fixed at one domain value, not a random binding: it
+-- is recorded in `recoveredVars` and re-typed Deterministic in the plan body.
+-- Without that, the plan traversal refused this program twice over -- first as
+-- "reads the enclosing random binding c", then as "some side is neither
+-- plan-dependent nor deterministic" -- where the pre-fix dense path compiled it.
+--
+-- ORACLE: the pre-fix dense compile, p(0) = 0.8155399046520659 and
+-- p(1) = 0.184460095347934; the plan answers agree to a few ulps.
+data Color = Red | Green | Blue
+data Object = NoObj | Obj color::Color
+data Scene = Empty | SCons obj::Object, rest::Scene depth 7
+
+neural readScene :: (Symbol -> Scene) of 7x.{Empty | SCons {NoObj | Obj {Red|Green|Blue}} x}
+
+numRed s = if isEmpty s then 0.0 else (if isObj (obj s) then (if isRed (color (obj s)) then 1.0 else 0.0) else 0.0) + numRed (rest s)
+
+main sym = let c = Uniform < 0.5 in let scene = readScene sym in if numRed scene > (if c then 1.5 else 0.5) then 1 else 0

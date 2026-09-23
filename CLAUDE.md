@@ -691,6 +691,43 @@ digit read is 10 IR nodes, while an arbitrary enumerable if-tree can be
 thousands, where copying per value cost 14x the IR and turned a 0.17s
 compile into 16s.
 
+### The dense-enumeration budget gate
+
+An enumerable application (`let x = <discrete draw> in body`, with a
+`DiscreteValues` tag on the draw -- which an `of` annotation always supplies)
+is enumerated densely by `enumerateAppliedLambda`: the whole domain becomes one
+`BTensor` literal. `enumerationWithinMaterializationBudget` refuses that above
+`materializationCardinality`, at **both** sites that enumerate:
+`toIRInference`'s enumerable-`Apply` equation (it declines and dispatch falls
+through to `planWitnessApply`) and `toIREnumerate`'s nested twin (it hands the
+inner application to `toIRInference`, since `toIREnumerate` has no plan path
+of its own and its catch-all would refuse the random draw). Before the gate an
+`of` annotation forced dense enumeration of a 21845-value scene (6-27MB
+modules). Tasks `of-annotation-forces-dense-enumeration`,
+`enumeration-budget-gate-misses-nested-application`.
+
+The gate is a refusal to blow up and must be nothing else: its count,
+`enumeratedCount`, is exactly the length of the list the loop would run over,
+empty enumerations counting zero. (`multiValueCardinality` answers `Nothing` on
+an empty enumeration, which made the gate decline and reroute a two-value
+`right ..` domain.)
+
+Inside an enumeration loop the bound variable holds one fixed value, so
+`enumerateAppliedLambda` records it in `recoveredVars`, and `planWitnessApply`
+re-types its re-fetched body with `retypeDetGiven` (which now also lifts an
+`if` whose condition and arms are all `Deterministic`). Without that, an
+over-budget inner application whose body reads the outer variable was refused
+by the plan traversal as reading "an enclosing random binding".
+
+**Known cost**: over budget, the plan traversal is the only route, so a body
+it does not cover (a tuple constructor, `plus` of a plan leaf and something
+else) is refused -- eagerly, taking `generate` down with the default compile --
+where dense enumeration used to compile it. Dense fallback was explicitly
+rejected; the fix is plan coverage. Pinned by
+`test/cases/known-issues/planOverBudgetOfTupleRefused`. Corpus:
+`planEnumRecCountOfLazy*`; structural test
+`Internals.nestedEnumerationHonoursBudget`.
+
 ### Agreement fusion: two categoricals multiply in O(V)
 
 Combining two categorical variables by **agreement** — `let a = camNN i in

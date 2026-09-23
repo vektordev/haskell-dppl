@@ -19,7 +19,9 @@ module SPLL.IRCompiler (
   materializationVerdicts,
   isCandidateBinaryEnumInjF,
   -- white-box: the plan factorization's independence guard (see its haddock)
-  planFactorExternals
+  planFactorExternals,
+  -- white-box: the dense-enumeration budget gate's count (see its haddock)
+  enumeratedCount
 )where
 
 import SPLL.IntermediateRepresentation
@@ -629,11 +631,36 @@ isEnumerableApplication l v =
 -- rather than a reachable case.
 enumerationWithinMaterializationBudget :: CompilerMetadata -> [Tag] -> Bool
 enumerationWithinMaterializationBudget meta tgs = case [mv | DiscreteValues mv <- tgs] of
-  (mv:_) -> maybe False withinBudget (multiValueCardinality mv)
+  (mv:_) -> maybe False withinBudget (enumeratedCount mv)
   []     -> False
   where
     bound = materializationCardinality (compilerConfig meta)
     withinBudget n = withinMaterializationBudget bound (fromInteger (min n (toInteger bound + 1)))
+
+-- | How many values 'enumerateAppliedLambda' would loop over: the length of
+-- 'multiValueToValueList', computed without building it. This is the budget
+-- gate's count, and it must measure exactly that list, because the gate is a
+-- refusal to blow up and nothing else -- any domain it declines for another
+-- reason is silently rerouted.
+--
+-- It differs from 'multiValueCardinality' in one place: an EMPTY enumeration
+-- counts as zero values rather than "no domain". A value known to be @right
+-- ..@ is tagged @MultiEither (MultiDiscretes []) rs@, whose list has exactly
+-- @rs@'s values; 'multiValueCardinality' answers 'Nothing' there (it mirrors
+-- 'multiValueIsFinite', which rejects an empty enumeration), and the gate then
+-- declined a two-value domain as if it were unbounded
+-- (task enumeration-budget-gate-misses-nested-application; the program is
+-- test/cases/known-issues/fuzzLetWitnessGenerateBackedFallback). 'Nothing' is
+-- kept for the leaves with no enumerable list at all.
+enumeratedCount :: MultiValue -> Maybe Integer
+enumeratedCount mv = case mv of
+  MultiContinuous  -> Nothing
+  MultiAuto        -> Nothing
+  MultiTypeRef _   -> Nothing
+  MultiDiscretes vs -> Just (toInteger (length vs))
+  MultiTuple a b   -> (*) <$> enumeratedCount a <*> enumeratedCount b
+  MultiEither a b  -> (+) <$> enumeratedCount a <*> enumeratedCount b
+  MultiADT cs      -> sum <$> mapM (fmap product . mapM enumeratedCount . snd) cs
 
 -- ===== Decomposability gate (design decomposability-gate-shared-latent) =====
 --
@@ -1278,6 +1305,13 @@ retypeDetGiven names e = go names e
            Expr ti (InjF f params)
              | all ((== Deterministic) . pType . getTypeInfo) params ->
                  Expr (ti {pType = Deterministic}) (InjF f params)
+           -- A selection among deterministic values by a deterministic
+           -- condition is deterministic (task
+           -- enumeration-budget-gate-misses-nested-application: a plan body
+           -- comparing against @if c then .. else ..@ with @c@ fixed).
+           Expr ti (IfThenElse ec et ee)
+             | all ((== Deterministic) . pType . getTypeInfo) [ec, et, ee] ->
+                 Expr (ti {pType = Deterministic}) (IfThenElse ec et ee)
            _ -> ex'
 
 -- | Drop dead let-bindings from a forward-chaining inverse expression.
@@ -3225,7 +3259,14 @@ enumerateAppliedLambda meta cumulative l v sample = do
   let sr = semiringOf meta
   irTuple <- lift (runWriterT (do
     pBranch <- (unP . rProb) <$> toIRInference meta False v (IRVar boundVar)
-    bodyRes <- toIREnumerate meta{typeEnv=newTypeEnv} cumulative lBodyExpr sample
+    -- Inside the loop the bound variable holds one fixed domain value, so it is
+    -- recorded as recovered, exactly as 'residueFactor' records a variable fixed
+    -- at its witness. Only a body that leaves the enumeration for 'toIRInference'
+    -- reads this (the over-budget nested application in 'toIREnumerate'); there
+    -- the plan traversal must see the loop variable as fixed, not as an enclosing
+    -- random binding shared across factors ('planFactorExternals').
+    let bodyMeta = meta{typeEnv=newTypeEnv, recoveredVars = boundVar : recoveredVars meta}
+    bodyRes <- toIREnumerate bodyMeta cumulative lBodyExpr sample
     return (onProb (\p -> srTimes sr p pBranch) bodyRes))) <&> generateLetInBlock meta
   let discreteVVals = head [x | DiscreteValues x <- tags (getTypeInfo v)]
   let (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
@@ -3494,11 +3535,26 @@ randomDrawSites det ir = case ir of
 toIREnumerate :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PResult
 -- Nested enumerable application (e.g. an inner `let` binding a fresh discrete draw):
 -- recurse with enumeration + weighting rather than generating the draw forward.
-toIREnumerate meta cumulative (Expr _ (Apply l v)) sample
+--
+-- Gated on the same materialization budget as 'toIRInference''s enumerable
+-- 'Apply' equation (task enumeration-budget-gate-misses-nested-application):
+-- without it a small outer enumeration passes that gate and then materializes
+-- an over-budget inner one densely, one level down. Over budget, the inner
+-- application is handed to 'toIRInference' rather than falling through here --
+-- the remaining 'toIREnumerate' equations have no plan path, and the catch-all
+-- compiles the node forward and refuses it as a generate-backed fallback. In
+-- 'toIRInference' the same gate declines again and dispatch reaches the
+-- plan-guided arm. That is sound for the same reason 'enumerateAppliedLambda'
+-- calls 'toIRInference' on its own argument: the enclosing bound variables are
+-- already in 'typeEnv' as locals, so P(application = sample) there is exactly
+-- the conditional this equation would otherwise have enumerated.
+toIREnumerate meta cumulative e@(Expr _ (Apply l v)) sample
   | isEnumerableApplication l v =
-  case agreementShape meta l v of
-    Just ag -> enumerateAgreement meta cumulative ag sample
-    Nothing -> enumerateAppliedLambda meta cumulative l v sample
+  if not (enumerationWithinMaterializationBudget meta (tags (getTypeInfo v)))
+    then toIRInference meta cumulative (retypeDetGiven (recoveredVars meta) e) sample
+    else case agreementShape meta l v of
+      Just ag -> enumerateAgreement meta cumulative ag sample
+      Nothing -> enumerateAppliedLambda meta cumulative l v sample
 toIREnumerate meta cumulative (Expr TypeInfo{chainName=cn} (Var _)) sample = do
   let equivCN = equivalentChainName "toIREnumerate/Var" (fcData meta) cn
   let fs = map snd (functions (compilingProgram meta))
@@ -5746,7 +5802,12 @@ planWitnessApply meta cumulative rt lResolvedCN lambdaBodyCN tag v sample
   = do
       let plan = makePartitionPlan (adtDecls meta) targetTy resolved
       let Program{functions=fs} = compilingProgram meta
-      let bodyExpr = findExprWithCN (map snd fs) lambdaBodyCN
+      -- Re-typed after the fetch, as the point-witness fold does: the fetch
+      -- returns original annotations, but a variable fixed by an enclosing
+      -- construct (a recovered witness, or an enumeration's loop variable when
+      -- this is reached from an over-budget nested application) is
+      -- Deterministic here and must dispatch as such.
+      let bodyExpr = retypeDetGiven (recoveredVars meta) (findExprWithCN (map snd fs) lambdaBodyCN)
       let occs = fromMaybe [] (lookup lResolvedCN (lambdaVarOccurrences (fcData meta)))
       let env = [(occs, PBPlan (PlanRef plan 0))]
       let target = if cumulative then PTUpTo sample else PTPoint sample

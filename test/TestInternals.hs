@@ -26,7 +26,7 @@ import SPLL.Semiring (semiringSuffix)
 import SPLL.IROptimizer (postProcess, optimizeEnv, deterministicGens, distributeIf, headHash, OptEnv(..))
 import SPLL.CodeGenPyTorchBatched (adtEnv, batchedGuard, generateFunctionsBatched, structural)
 import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage)
-import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts, planFactorExternals)
+import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts, planFactorExternals, enumeratedCount)
 import SPLL.Typing.PType (PType(Integrate, Deterministic))
 import Data.Foldable (toList)
 import Data.List (isInfixOf, intercalate, isPrefixOf)
@@ -1148,6 +1148,22 @@ enumContinuousRefusalTests = testGroup "enum annotation refuses continuous leave
       let deep 0 = MultiADT [("End", [])]
           deep k = MultiADT [("End", []), ("Cons", [MultiDiscretes (map VInt [0 .. 9]), deep (k - 1 :: Int)])]
       multiValueCardinality (deep 10) @?= Just 11111111111
+  -- 'enumeratedCount' is what the gate actually measures (task
+  -- enumeration-budget-gate-misses-nested-application): the length of the list
+  -- 'enumerateAppliedLambda' loops over, empty enumerations included. A value
+  -- known to be `right ..` has an empty Left side; counting that as "no
+  -- domain" made the gate decline a two-value domain and reroute it.
+  , testCase "enumeratedCount measures exactly the enumerated list" $ do
+      let agrees mv = enumeratedCount mv
+                        @?= Just (toInteger (length (multiValueToValueList mv)))
+      agrees (MultiEither (MultiDiscretes []) (MultiDiscretes [VInt 2, VInt 1]))
+      agrees (MultiTuple (MultiDiscretes [VInt 0, VInt 1]) (MultiEither (MultiDiscretes [VBool True]) (MultiDiscretes [])))
+      agrees (MultiADT [("A", []), ("B", [MultiDiscretes [VInt 0, VInt 1, VInt 2]])])
+      let deep 0 = MultiADT [("End", [])]
+          deep k = MultiADT [("End", []), ("Cons", [MultiDiscretes (map VInt [0 .. 9]), deep (k - 1 :: Int)])]
+      agrees (deep 3)
+      enumeratedCount (deep 10) @?= Just 11111111111
+      enumeratedCount (MultiTuple (MultiDiscretes [VInt 0]) MultiContinuous) @?= Nothing
   ]
 
 -- | Plan-guided lazy enumeration milestone 2 (design
@@ -2932,6 +2948,39 @@ test_agreementFusesToElementwiseProduct = testCase "agreementFusesToElementwiseP
   assertBool "an agreement over a shared latent must not fuse to a product" $
     not (containsZipProduct shared)
 
+-- | The largest dense enumeration domain a compiled body materializes: the
+-- element count of its widest 'BTensor' literal. A dense enumeration emits its
+-- whole domain as one such literal, so this is the size of what was enumerated.
+largestTensorLiteral :: IRExpr -> Int
+largestTensorLiteral e = maximum (here e : map largestTensorLiteral (getIRSubExprs e))
+  where
+    here (IRBuiltin (BTensor _) xs) = length xs
+    here _ = 0
+
+-- | Task enumeration-budget-gate-misses-nested-application: the materialization
+-- budget gate must hold at a NESTED enumerable application, not only at the
+-- outermost one. A two-valued outer enumeration wraps a 21845-valued inner one;
+-- the inner must decline and take the plan-guided path, so no over-budget
+-- domain is materialized anywhere in the body.
+--
+-- The control is what keeps this from asserting nothing: raising the budget
+-- past the inner domain puts the very same source back on the dense path, and
+-- its body then does carry the whole 21845-value domain. The difference between
+-- the two shapes is the gate, and nothing else could produce it.
+test_nestedEnumerationHonoursBudget :: TestTree
+test_nestedEnumerationHonoursBudget = testCase "nestedEnumerationHonoursBudget" $ do
+  let budget = materializationCardinality defaultCompilerConfig
+  mapM_ (\name -> do
+          gated <- corpusProbBody defaultCompilerConfig name
+          let widest = largestTensorLiteral gated
+          assertBool (name ++ " materializes a " ++ show widest
+                      ++ "-value domain, over the " ++ show budget ++ " budget") $
+            widest <= budget)
+        ["planEnumRecCountOfLazyNested", "planEnumRecCountOfLazyNestedReadsOuter"]
+  dense <- corpusProbBody defaultCompilerConfig{materializationCardinality = 100000}
+             "planEnumRecCountOfLazyNested"
+  largestTensorLiteral dense @?= 21845
+
 -- | Level 4: fusing two sensors by observing their agreement is a *product* of
 -- experts, not a mixture -- p(Just k) = P_cam(k) * P_depth(k). The evidence
 -- Z = p(Just ANY) is that product summed over the support, and the rejected
@@ -3321,6 +3370,7 @@ internalsTests = testGroup "Internals"
       , test_writeLogitsBoolExactProbs
       , test_nnHoistedOutOfEnumSum
       , test_agreementFusesToElementwiseProduct
+      , test_nestedEnumerationHonoursBudget
       ]
   , test_missingMainFunction
   , test_farTailEitherDensityNotZeroed

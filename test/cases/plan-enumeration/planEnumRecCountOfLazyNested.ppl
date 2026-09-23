@@ -1,0 +1,23 @@
+-- A small outer enumeration (`c`, two values) wrapping an over-budget inner
+-- one (`scene`, 21845 values under the `of` annotation, over the 10000 of
+-- `defaultMaterializationCardinality`). Task
+-- enumeration-budget-gate-misses-nested-application: the budget gate used to
+-- guard only the outer application, so `c` passed it and `toIREnumerate` then
+-- materialized `scene`'s whole domain densely inside the loop over `c` (a
+-- 5,971,686-byte Python module). The inner application now declines too and is
+-- compiled by the plan-guided path, with `c` fixed at the loop value (55,820
+-- bytes).
+--
+-- ORACLE: the pre-fix dense compile, which answers p(1) = 0.019709393804105566
+-- and p(0) = 0.9802906061958933 -- and analytically p(1) is half of
+-- planEnumRecCountOfLazy's 0.03941878760821129. The plan answers agree to a
+-- few ulps (summation order).
+data Color = Red | Green | Blue
+data Object = NoObj | Obj color::Color
+data Scene = Empty | SCons obj::Object, rest::Scene depth 7
+
+neural readScene :: (Symbol -> Scene) of 7x.{Empty | SCons {NoObj | Obj {Red|Green|Blue}} x}
+
+numRed s = if isEmpty s then 0.0 else (if isObj (obj s) then (if isRed (color (obj s)) then 1.0 else 0.0) else 0.0) + numRed (rest s)
+
+main sym = let c = Uniform < 0.5 in let scene = readScene sym in if c then (if numRed scene > 1.5 then 1 else 0) else 0
