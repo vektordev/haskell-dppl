@@ -83,6 +83,27 @@ def safe_div(a, b):
 def poison():
   return torch.tensor(float('nan'))
 
+# --- throw (task batched-adt-accessor-unguarded) ----------------------------
+# The scalar pythonLib.py's `throw`, defined here for the same reason and with
+# the same shape: a field accessor applied to a value built by a sibling
+# constructor is a programmer error, and every other runtime says so in the
+# compiler's own words (AlgebraicDataTypes.accessorMismatchMessage).
+#
+# Raising is safe here even though a torch.where evaluates both arms. The
+# emitted guard is `if not isinstance(x, Ctor): throw(...)`, which fires only
+# where the bare `return x.field` it fronts would already have raised
+# AttributeError -- a sibling constructor has no such attribute. So this
+# converts an existing crash into a legible one; it never turns a working
+# program into a crash.
+#
+# It is deliberately NOT a poison(). A NaN would make a programmer error
+# silent, which is what the shared diagnostic exists to prevent, and an
+# unmasked poison is itself the failure mode the runtime NaN guard below was
+# added for.
+
+def throw(e):
+  raise Exception(e)
+
 # --- runtime NaN guard (task batched-adt-cdf-refusal-becomes-nan) -----------
 # A poison is meant to be selected away by an enclosing torch.where before it
 # reaches a caller. That invariant does not always hold: an ADT-valued
