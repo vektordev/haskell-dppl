@@ -1681,9 +1681,39 @@ shrinkTypedExpr e = map uniquifyBinders (shrinkTypedExprIn [] e)
 shrinkTypedExprIn :: TyEnv -> Expr -> [Expr]
 shrinkTypedExprIn env e = case tyOfTypedExprIn env e of
   Nothing -> []
-  Just ty -> nub (filter smaller (typedLeaves ty ++ collapses env ty e ++ childShrinks env e))
+  Just ty -> nub (filter (\c -> smaller c && preserves ty c)
+                         (typedLeaves ty ++ collapses e ++ childShrinks env e))
   where
     smaller c = typedExprSize c < typedExprSize e
+    -- Every candidate is re-typed *here*, at this node, including the ones
+    -- 'childShrinks' rebuilt around a shrunk child -- not only the ones this
+    -- node proposes itself. Type preservation is not preserved by contexts:
+    -- recovery is partial and context-sensitive, so a child replacement that
+    -- 'tyGeneralizes' the child at its own site can still change what the
+    -- enclosing node recovers. Two ways it happens (both found by the
+    -- 'Shrinker' group's type-preservation property, task
+    -- shrinker-type-recovery-flake):
+    --
+    --   * 'TyAny' at the child's site reads as "free", but may only mean "not
+    --     recovered": @sq a@ with @a : ?@ collapses to @a@, and an enclosing
+    --     polymorphic @neg@ then recovers 'Nothing'.
+    --   * The replacement is recovered by a *different, more precise* rule once
+    --     it sits in the parent: a callee @(\\v0 -> \\v1 -> v1) x@ collapses to
+    --     the literal @\\v1 -> v1@, the enclosing 'Apply' becomes a @let@ that
+    --     pushes the argument type in, and a position the original left free
+    --     is now committed.
+    --
+    -- Checking at every level of the recursion means a candidate that reaches
+    -- the root has been verified against every node on its path, which is what
+    -- the property actually asks. The price is that rejected candidates cost a
+    -- re-typing per enclosing level (quadratic in depth), accepted as cheaper
+    -- than a shrinker that hands the property ill-typed programs.
+    --
+    -- Judged in the node's own scope: a @let@ collapse that only type-checks
+    -- under the binding being removed is not a candidate at all. And judged
+    -- asymmetrically ('tyGeneralizes') -- the replacement must be at least as
+    -- general as the node it replaces, never merely joinable with it.
+    preserves ty c = maybe False (`tyGeneralizes` ty) (tyOfTypedExprIn env c)
 
 -- | Replace the node by one of its own same-typed subexpressions: either
 -- branch of an 'IfThenElse' (both share the node's type), a type-matching
@@ -1695,19 +1725,16 @@ shrinkTypedExprIn env e = case tyOfTypedExprIn env e of
 -- @x@ free in @b@ has no well-scoped reduction to @b@, and offering one anyway
 -- would replace a counterexample with an invalid program rather than a
 -- smaller one.
-collapses :: TyEnv -> Ty -> Expr -> [Expr]
-collapses env ty e = filter compatible $ case asLet e of
+--
+-- Unfiltered: the type test is applied by 'shrinkTypedExprIn' to every
+-- candidate uniformly, these included.
+collapses :: Expr -> [Expr]
+collapses e = case asLet e of
   Just (x, val, body) -> [val] ++ [ body | not (mentionsVar x body) ]
   Nothing -> case node e of
     IfThenElse _ t f -> [t, f]
     InjF _ args      -> args
     _                -> []
-  where
-    -- Judged in the *outer* scope: a candidate that only type-checks under the
-    -- binding being removed is not a candidate at all. And judged
-    -- asymmetrically -- the replacement must be at least as general as the
-    -- node it replaces, never merely joinable with it.
-    compatible c = maybe False (`tyGeneralizes` ty) (tyOfTypedExprIn env c)
 
 -- | Shrink one child at a time, keeping the node and every sibling. This is
 -- what actually minimizes a deep program: the collapses above cut whole

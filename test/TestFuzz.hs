@@ -1219,6 +1219,16 @@ compatibleTys (Just a) (Just b) = a `tyGeneralizes` b
 compatibleTys Nothing  Nothing  = True
 compatibleTys _        _        = False
 
+-- | Every shrink of a fixed expression passes 'compatibleTys' against it --
+-- the type-preservation property, stated for one expression rather than a draw.
+shrinkPreservesTy :: Expr -> Property
+shrinkPreservesTy e =
+  counterexample ("orig ty: " ++ show (tyOfTypedExpr e)) $
+    isJust (tyOfTypedExpr e) .&&. conjoin
+      [ counterexample (show e' ++ "\n  shrink ty: " ++ show (tyOfTypedExpr e'))
+                       (compatibleTys (tyOfTypedExpr e') (tyOfTypedExpr e))
+      | e' <- shrinkTypedExpr e ]
+
 -- ---------------------------------------------------------------------------
 -- The neural generator's contract (milestone M3).
 --
@@ -1594,6 +1604,32 @@ deadLet = letIn "v0" uniform (constF 1.0)
 liveLet :: Expr
 liveLet = letIn "v0" uniform (Expr makeTypeInfo (Var "v0") #+# constF 1.0)
 
+-- | The two ways a shrink that preserves the type *at its own site* can still
+-- change what an enclosing node recovers (task shrinker-type-recovery-flake).
+-- Both were found by the type-preservation property below at roughly one
+-- failing draw in 30,000 -- too rare to go red on a default run, so they are
+-- pinned here deterministically.
+--
+-- 'TyAny' read as "free" where it only meant "not recovered": the argument of
+-- @sq@ applies a variable bound to a function value, which recovers as '?'.
+-- @sq@ is Float-only, so @sq a@ is Float and collapsing it to @a@ passes the
+-- site-local test -- but the enclosing @neg@ is polymorphic, and @neg a@
+-- recovers as 'Nothing'.
+shrinkUnderPolymorphicParent :: Expr
+shrinkUnderPolymorphicParent =
+  negF (injF "sq" [letIn "f" ("y" #-># var "y") (apply (var "f") (constF 1.0))])
+
+-- | A callee shrink that changes which recovery rule the enclosing
+-- application uses. @(let a = 0 in \\b -> b) xs@ has a non-literal callee, so
+-- its type is read off the callee's arrow, @? -> ?@, giving '?'. Collapsing the
+-- dead @let@ leaves the literal @\\b -> b@, which turns the application into a
+-- @let@ that pushes @xs@'s type in and recovers @List Bool@ -- committing, in
+-- the enclosing tuple, a position the original left free.
+shrinkChangesParentRule :: Expr
+shrinkChangesParentRule =
+  tuple (apply (letIn "a" (constF 0.0) ("b" #-># var "b")) (cons (constB True) nul))
+        (constF 0.0)
+
 shrinkerTests :: TestTree
 shrinkerTests = testGroup "Shrinker"
   -- Stated over the *program* rather than over @main@'s body, because since
@@ -1639,6 +1675,10 @@ shrinkerTests = testGroup "Shrinker"
       let e = left (right (constI 0))
       in counterexample (show (shrinkTypedExpr e))
            (property (right (constI 0) `notElem` shrinkTypedExpr e))
+  , testProperty "a shrink is re-typed under a polymorphic parent" $ once $
+      shrinkPreservesTy shrinkUnderPolymorphicParent
+  , testProperty "a shrink is re-typed when it changes the parent's recovery rule" $ once $
+      shrinkPreservesTy shrinkChangesParentRule
   , localOption (QuickCheckMaxRatio 30) $
     testProperty "minimization keeps the failing feature and never grows" $
       -- The guard below ("this draw contains a Normal") is satisfied by about
