@@ -25,6 +25,7 @@ import SPLL.IntermediateRepresentation
 import SPLL.Semiring (semiringSuffix)
 import SPLL.IROptimizer (postProcess, optimizeEnv, deterministicGens, distributeIf, headHash, OptEnv(..))
 import SPLL.CodeGenPyTorchBatched (adtEnv, batchedGuard, generateFunctionsBatched, structural)
+import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage)
 import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts, planFactorExternals)
 import SPLL.Typing.PType (PType(Integrate, Deterministic))
 import Data.Foldable (toList)
@@ -2057,6 +2058,45 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
             (any ("if isJust1(sample):" `isInfixOf`) ls)
           assertBool ("accessor still evaluated eagerly under torch.where: " ++ unlines ls)
             (not (any (\l -> "torch.where" `isInfixOf` l && "v(sample)" `isInfixOf` l) ls))
+  -- Task batched-adt-accessor-unguarded: the batched backend's field accessors
+  -- used to be a bare `return x.v`, so a read off a sibling constructor was
+  -- whatever AttributeError torch-land raised, while the interpreter and the
+  -- two scalar backends all answered with 'accessorMismatchMessage'. The guard
+  -- is safe despite eager select evaluation precisely because it is *weaker*
+  -- than the attribute read it fronts: wherever `isinstance(x, Just1)` is
+  -- False, `x.v` had already raised.
+  , testCase "a batched ADT field accessor is guarded with the shared diagnostic" $
+      case generateFunctionsBatched False (nullaryCtorEnv' (IRVar "sample")) of
+        Left msg -> assertFailure ("batched mode refused a constructor-guarded accessor: " ++ msg)
+        Right ls -> do
+          assertBool ("accessor emitted unguarded: " ++ unlines ls)
+            (any ("if not isinstance(x, Just1): throw(" `isInfixOf`) ls)
+          assertBool ("accessor guard does not carry the shared diagnostic: " ++ unlines ls)
+            (any (accessorMismatchMessage "v" "Just1" `isInfixOf`) ls)
+          assertBool ("accessor guard does not append the constructor it saw: " ++ unlines ls)
+            (any ("type(x).__name__" `isInfixOf`) ls)
+  -- The same task's second half, and the one place the guard is not free: a
+  -- field name declared by *two* constructors emitted one `def` per
+  -- constructor here, which in Python is last-wins -- and, since the bare
+  -- `x.f` is accidentally polymorphic over two constructors that both carry
+  -- the attribute, it also *worked* on both. It no longer does. That matches
+  -- 'fieldAccessorOwners' first-wins, which is what the interpreter's
+  -- 'findField' and the type environment's 'lookupRType' already mean and
+  -- what the scalar backends already emit; batched was the odd one out being
+  -- accidentally more capable than the reference semantics. Making the shape
+  -- genuinely work everywhere is known-issue
+  -- adtSiblingSharedFieldAccessorUnreachable, not this task.
+  , testCase "a field name declared twice emits one accessor, owned first-wins" $
+      case generateFunctionsBatched False dupFieldEnv of
+        Left msg -> assertFailure ("batched mode refused a duplicated field name: " ++ msg)
+        Right ls -> do
+          assertEqual ("accessor emitted more than once: " ++ unlines ls) 1
+            (length (filter ("def f(x):" `isInfixOf`) ls))
+          assertBool ("duplicated field accessor is not owned by the first constructor: "
+                      ++ unlines ls)
+            (any ("if not isinstance(x, A1): throw(" `isInfixOf`) ls)
+          assertBool ("the later constructor still owns an accessor: " ++ unlines ls)
+            (not (any ("if not isinstance(x, B1): throw(" `isInfixOf`) ls))
   -- Task batched-nullary-adt-ctor-emitted-as-bare-class: the compiler refers to
   -- a nullary constructor by a bare 'IRVar', so an emitter that prints the name
   -- verbatim yields the *class*, which never satisfies an @is\<Ctor\>@ predicate
@@ -2165,6 +2205,21 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                   , sampleDomain = Nothing }]
       [ADTDecl { dataName = "Opt"
                , constructors = [("Nada", []), ("Just1", [("v", TFloat)])]
+               , adtDepth = Nothing }]
+      []
+    -- One field name, @f@, declared by both constructors. 'fieldAccessorOwners'
+    -- resolves it to the first, @A1@, which is what the interpreter's
+    -- 'findField' and the type environment's 'lookupRType' already mean.
+    dupFieldEnv = IREnv
+      [IRFunGroup { groupName = "main"
+                  , probFun = Just (IRLambda "sample"
+                      (IRIf (IRApply (IRVar "isA1") (IRVar "sample"))
+                            (IRApply (IRVar "f") (IRVar "sample")) (IRConst (VFloat 0.0))), "")
+                  , genFun = Nothing, integFun = Nothing
+                  , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
+                  , sampleDomain = Nothing }]
+      [ADTDecl { dataName = "Dup"
+               , constructors = [("A1", [("f", TFloat)]), ("B1", [("f", TFloat)])]
                , adtDepth = Nothing }]
       []
     -- No ADT needed: an Either-typed prob body whose accessor is legal only

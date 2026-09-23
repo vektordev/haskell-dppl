@@ -52,6 +52,7 @@ import SPLL.Lang.Lang (multiValueToValueList)
 -- pythonLib.py. The ban below is on 'pyVal', whose hazard is naming runtime
 -- constructors that pythonLibBatched.py does not define.
 import SPLL.CodeGenPyTorch (envToLUT, replaceCalls, pyMangle, pyDouble)
+import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage, fieldAccessorOwners)
 import Data.Char (toUpper)
 import Data.List (intercalate, isSuffixOf, nub)
 import Data.Maybe (fromMaybe, isJust)
@@ -131,20 +132,66 @@ generateFunctionsBatched genBoil env0 = do
 -- fields are @[B]@ tensors, so @__eq__@ is elementwise like @T.__eq__@ -- except
 -- on a tag mismatch, which is structural and answers a Python @False@.
 --
--- The accessors stay unguarded here, unlike the scalar backend's
+-- The accessors are **guarded**, exactly as the scalar backend's are
 -- ('SPLL.CodeGenPyTorch.generateADTAccessor', task
--- @adt-accessor-type-too-permissive@), which refuses a read off a sibling
--- constructor with 'SPLL.Typing.AlgebraicDataTypes.accessorMismatchMessage'.
--- Raising is the wrong shape in batched mode: both arms of a select are
--- evaluated, which is exactly why a refusal here is a NaN @poison()@ rather
--- than a throw ('batchedExpr's 'IRError' case), and @throw@ is not even a name
--- pythonLibBatched.py defines. Whether the batched twin should poison, refuse
--- at compile time, or keep the target language's own @AttributeError@ is a
--- semantics decision that task did not own, so it was left alone rather than
--- guessed at.
+-- @adt-accessor-type-too-permissive@): a read off a sibling constructor
+-- refuses with 'SPLL.Typing.AlgebraicDataTypes.accessorMismatchMessage'
+-- rather than with whatever torch-land happens to raise (task
+-- @batched-adt-accessor-unguarded@).
+--
+-- The worry that kept this out of that task was that a throw is the wrong
+-- shape in a backend whose refusals are a NaN @poison()@ precisely because
+-- both arms of a select are evaluated -- so a guard could turn a
+-- currently-correct program, one whose wrong-constructor read is selected
+-- away, into a crash. That worry does not survive contact with what the guard
+-- actually replaces. Where the field name is declared by **one** constructor
+-- -- every shape the worry was about -- the guard is strictly weaker than the
+-- attribute read it fronts: where @isinstance(x, Ctor)@ is False, the bare
+-- @return x.color@ already raised @AttributeError@, because a sibling has no
+-- such attribute. Eager evaluation of a masked-away arm crashes today, guarded
+-- or not; all that changes is that it crashes in the compiler's own words.
+-- (The eager-accessor crash itself is fixed elsewhere and differently, by
+-- keeping constructor tests out of expression position -- 'structural', task
+-- @batched-ctor-test-not-structural-eager-accessor@.)
+--
+-- There is exactly one shape where @x.color@ *does* succeed on a sibling, and
+-- it is worth being precise about, because there the change is not free: a
+-- field name declared by **two** constructors, where both instances carry the
+-- attribute, so the bare read is accidentally polymorphic over them. That
+-- read is now refused. This is deliberate and is the second half of the task:
+-- 'fieldAccessorOwners' resolves such a name first-wins, which is what
+-- 'findField' (the interpreter) and 'lookupRType' (the type environment) both
+-- already mean, while emitting one @def@ per constructor made Python
+-- last-wins. Accessors are therefore emitted once per field *name*, out here
+-- rather than inside 'one'.
+--
+-- So batched loses a leniency the reference semantics never had: the
+-- interpreter *errors* on that read, with this very message. Being
+-- accidentally more capable than the reference is the divergence this task
+-- exists to remove, not a capability worth keeping. Making the shared-field
+-- case actually *work* -- in every runtime at once -- is a live, separately
+-- owned bug: known-issue @adtSiblingSharedFieldAccessorUnreachable@
+-- (@test/cases/known-issues/@), which batched now shares with the scalar
+-- backends instead of sidestepping.
+--
+-- 'throw' is a new name in pythonLibBatched.py, added for this and
+-- deliberately raising rather than poisoning: a poison would convert a
+-- programmer error into a silent NaN, which is the opposite of what the
+-- shared diagnostic is for, and NaN propagation through a @torch.where@ is
+-- the failure mode @batched-adt-cdf-refusal-becomes-nan@ had to add a runtime
+-- guard for.
 generateADTClassesBatched :: [ADTDecl] -> [String]
-generateADTClassesBatched decls = concatMap one (concatMap constructors decls)
+generateADTClassesBatched decls =
+  concatMap one (concatMap constructors decls)
+  ++ concatMap (uncurry accessor) (fieldAccessorOwners decls)
   where
+    accessor fieldName ctorName =
+      ("def " ++ pyMangle fieldName ++ "(x):")
+      : indentOnce [ "if not isinstance(x, " ++ pyMangle ctorName ++ "): throw("
+                       ++ show (accessorMismatchMessage fieldName ctorName)
+                       ++ " + \" Got: \" + type(x).__name__)"
+                   , "return x." ++ pyMangle fieldName ]
+      ++ [""]
     one (rawName, fieldDecls) =
       let name   = pyMangle rawName
           fields = map (pyMangle . fst) fieldDecls in
@@ -166,7 +213,6 @@ generateADTClassesBatched decls = concatMap one (concatMap constructors decls)
                          [ "eq(self." ++ f ++ ", other." ++ f ++ ")" | f <- fields ]]))
       ++ [""]
       ++ ["def is" ++ name ++ "(x):"] ++ indentOnce ["return isinstance(x, " ++ name ++ ")"]
-      ++ concatMap (\f -> ("def " ++ f ++ "(x):") : indentOnce ["return x." ++ f]) fields
       ++ [""]
 
 -- | Render a top-level constant binding, refusing one whose shape has no
