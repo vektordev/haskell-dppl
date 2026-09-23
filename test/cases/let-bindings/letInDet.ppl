@@ -1,1 +1,1 @@
-main = let a = 1.0 in Uniform + a
+main = draw a = 1.0 in Uniform + a

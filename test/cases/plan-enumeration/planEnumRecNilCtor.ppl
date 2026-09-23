@@ -20,4 +20,4 @@ existsRed s = if isEmpty s
             then existsRed (rest s)
             else (if isRed (color (obj s)) then True else existsRed (rest s)))
 
-main sym = let scene = readScene sym in if existsRed scene then 0 else 1
+main sym = draw scene = readScene sym in if existsRed scene then 0 else 1

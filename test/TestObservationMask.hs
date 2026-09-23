@@ -94,13 +94,13 @@ assertRow rows key expected = case lookup key rows of
 -- ---------------------------------------------------------------------------
 
 progW, progO, progN, progI, progC, progB, progS1 :: String
-progW  = "main = let x = Uniform in let y = x + Uniform in (x, y)"
-progO  = "main = let x = Uniform in let y = Uniform in (x, (x+y+3.0, x+y+2.0))"
-progN  = "main = let x = Uniform in let y = Uniform in (x+y, (x, y))"
-progI  = "main = let x = Uniform in let y = Uniform in (x, y)"
-progC  = "main = let x = Uniform in let y = x + Uniform in let z = y + Uniform in (x, (y, z))"
-progB  = "main = let x = Uniform in (x, 1.0 - x)"
-progS1 = "main = let x = Uniform in (x, Uniform)"
+progW  = "main = draw x = Uniform in draw y = x + Uniform in (x, y)"
+progO  = "main = draw x = Uniform in draw y = Uniform in (x, (x+y+3.0, x+y+2.0))"
+progN  = "main = draw x = Uniform in draw y = Uniform in (x+y, (x, y))"
+progI  = "main = draw x = Uniform in draw y = Uniform in (x, y)"
+progC  = "main = draw x = Uniform in draw y = x + Uniform in draw z = y + Uniform in (x, (y, z))"
+progB  = "main = draw x = Uniform in (x, 1.0 - x)"
+progS1 = "main = draw x = Uniform in (x, Uniform)"
 
 -- ---------------------------------------------------------------------------
 -- 1. The tree walk
@@ -117,7 +117,7 @@ treeWalkTests = testGroup "observation tree walk"
       assertEqual "slots" ["fst", "snd.fromLeft"] (slotNames decls t)
 
   , testCase "a single-occurrence let-bound tuple root is followed" $ do
-      (decls, t, _) <- treeOf "main" "main = let t = (Uniform, Uniform) in t"
+      (decls, t, _) <- treeOf "main" "main = draw t = (Uniform, Uniform) in t"
       assertEqual "slots" ["fst", "snd"] (slotNames decls t)
 
   , testCase "a root Var occurring twice is NOT followed" $ do
@@ -125,7 +125,7 @@ treeWalkTests = testGroup "observation tree walk"
       -- accessor path from the root no longer identifies the sub-expression and
       -- the descent must stop.
       (decls, t, _) <- treeOf "main"
-        "main = let t = (Uniform, 0.5) in let u = fst t + 1.0 in t"
+        "main = draw t = (Uniform, 0.5) in draw u = fst t + 1.0 in t"
       assertEqual "slots" ["<root>"] (slotNames decls t)
 
   , testCase "an if root yields one leaf" $ do
@@ -153,7 +153,7 @@ classTests = testGroup "leaf slots and correlation classes"
   , testCase "I has two singleton classes" $
       classesOf "main" progI >>= assertEqual "classes" [["fst"], ["snd"]]
 
-  , testCase "let x = Uniform in (x, Uniform): two classes, slot 1 enumerated" $ do
+  , testCase "draw x = Uniform in (x, Uniform): two classes, slot 1 enumerated" $ do
       classesOf "main" progS1 >>= assertEqual "classes" [["fst"], ["snd"]]
       verdictsOf "main" progS1
         >>= assertEqual "verdicts" [("fst", False), ("snd", True)]

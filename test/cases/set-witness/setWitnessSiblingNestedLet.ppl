@@ -1,1 +1,1 @@
-main = let x = Normal in let y = x + 1.0 in if y > 0.0 then (y, Normal) else (0.0, 0.0)
+main = draw x = Normal in draw y = x + 1.0 in if y > 0.0 then (y, Normal) else (0.0, 0.0)

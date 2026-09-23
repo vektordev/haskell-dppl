@@ -941,12 +941,12 @@ witnessedBindingTests :: TestTree
 witnessedBindingTests = testGroup "ForwardChaining witnessed-binding query"
   [ testCase "additive witness: x is recovered from the observed tuple" $
       let (prog, fc) = prepTypedFC
-            "main = let x = Uniform in let y = x + Uniform in (x, y)"
+            "main = draw x = Uniform in draw y = x + Uniform in (x, y)"
       in assertBool "x should be witnessed via fst"
            (isWitnessedLambda fc (adts prog) (declRootCN "main" prog) (letLambdaCN "x" prog))
   , testCase "multiplicative witness: x is recovered from the observed tuple" $
       let (prog, fc) = prepTypedFC
-            "main = let x = Uniform in let y = x * Uniform in (x, y)"
+            "main = draw x = Uniform in draw y = x * Uniform in (x, y)"
       in assertBool "x should be witnessed via fst"
            (isWitnessedLambda fc (adts prog) (declRootCN "main" prog) (letLambdaCN "x" prog))
   , testCase "y-only: x is NOT witnessed (genuine convolution)" $
@@ -954,7 +954,7 @@ witnessedBindingTests = testGroup "ForwardChaining witnessed-binding query"
       -- fc-recovers-capability-marginalize-floors): observing only y = x + u2
       -- gives one equation for two fresh draws, so x must not be witnessed.
       let (prog, fc) = prepTypedFC
-            "main = let x = Uniform in let y = x + Uniform in y"
+            "main = draw x = Uniform in draw y = x + Uniform in y"
       in assertBool "x must not be witnessed from y alone"
            (not (isWitnessedLambda fc (adts prog) (declRootCN "main" prog) (letLambdaCN "x" prog)))
   , testCase "y-only: the y-binding itself IS witnessed (why x is the discriminator)" $
@@ -962,7 +962,7 @@ witnessedBindingTests = testGroup "ForwardChaining witnessed-binding query"
       -- both programs — consulting it cannot separate the witness from the
       -- convolution. Pins why milestone 2 must key on the x-binding's verdict.
       let (prog, fc) = prepTypedFC
-            "main = let x = Uniform in let y = x + Uniform in y"
+            "main = draw x = Uniform in draw y = x + Uniform in y"
       in assertBool "y is the observed value itself"
            (isWitnessedLambda fc (adts prog) (declRootCN "main" prog) (letLambdaCN "y" prog))
   , testCase "two residual latents: x itself is still witnessed (floor guards the rest)" $
@@ -970,7 +970,7 @@ witnessedBindingTests = testGroup "ForwardChaining witnessed-binding query"
       -- program at Bottom is the marginalize floor's job (u2 + u3 in one slot),
       -- pinned in TestModalityInfer's permanent guards.
       let (prog, fc) = prepTypedFC
-            "main = let x = Uniform in (x, x + Uniform + Uniform)"
+            "main = draw x = Uniform in (x, x + Uniform + Uniform)"
       in assertBool "x is observed directly"
            (isWitnessedLambda fc (adts prog) (declRootCN "main" prog) (letLambdaCN "x" prog))
   , testCase "let-chain: the observation reaches x through chained equivalences" $
@@ -978,7 +978,7 @@ witnessedBindingTests = testGroup "ForwardChaining witnessed-binding query"
       -- shape (milestone 1's open question): the observed tuple chains through
       -- z and y back to x.
       let (prog, fc) = prepTypedFC
-            "main = let x = Uniform in let y = x + Uniform in let z = 2.0 * y in (x, z)"
+            "main = draw x = Uniform in draw y = x + Uniform in draw z = 2.0 * y in (x, z)"
       in assertBool "x should be witnessed through the chain"
            (isWitnessedLambda fc (adts prog) (declRootCN "main" prog) (letLambdaCN "x" prog))
   , testCase "let under a many-to-one context: witnessed says False where the certificate says True" $
@@ -986,7 +986,7 @@ witnessedBindingTests = testGroup "ForwardChaining witnessed-binding query"
       -- (x + 1.0) would recover x if it were observed, but the enclosing (> 0.5)
       -- is many-to-one, so the declaration's observation witnesses nothing.
       let (prog, fc) = prepTypedFC
-            "main = (let x = Uniform in x + 1.0) > 0.5"
+            "main = (draw x = Uniform in x + 1.0) > 0.5"
           lamCN = letLambdaCN "x" prog
       in do assertBool "own-body certificate claims invertibility"
               (isInvertibleLambda fc (adts prog) lamCN)
@@ -1005,18 +1005,18 @@ anyRefusalTests :: TestTree
 anyRefusalTests = testGroup "witnessed-inference ANY refusal"
   [ testCase "ANY in the witnessing slot of the additive witness refuses, naming x" $
       expectMarginalRefusal
-        "main = let x = Uniform in let y = x + Uniform in (x, y)"
+        "main = draw x = Uniform in draw y = x + Uniform in (x, y)"
         (VTuple VAny (VFloat 1.0)) "x"
   , testCase "ANY in the witnessing slot of the multiplicative witness refuses, naming x" $
       expectMarginalRefusal
-        "main = let x = Uniform in let y = x * Uniform in (x, y)"
+        "main = draw x = Uniform in draw y = x * Uniform in (x, y)"
         (VTuple VAny (VFloat 0.25)) "x"
   , testCase "mid-chain ANY with an observed dependent slot refuses, naming y" $
       -- z = y + u3 is observed, so recovering u3 needs y's value: a genuine
       -- convolution. The guard must fire at the y-binding, not crash at the
       -- z-binding's inverse arithmetic.
       expectMarginalRefusal
-        "main = let x = Uniform in let y = x + Uniform in let z = y + Uniform in (x, (y, z))"
+        "main = draw x = Uniform in draw y = x + Uniform in draw z = y + Uniform in (x, (y, z))"
         (VTuple (VFloat 0.5) (VTuple VAny (VFloat 1.5))) "y"
   -- The four below are the cases where the wildcard is not the recovered
   -- witness itself but an OPERAND the inverse chain reads on its way to one.
@@ -1029,22 +1029,22 @@ anyRefusalTests = testGroup "witnessed-inference ANY refusal"
       -- Both inner slots recover y (and hence x); the merged path takes the
       -- first, whose Minus reads the wildcard slot.
       expectMarginalRefusal
-        "main = let x = Uniform in let y = Uniform in (x, (x+y+3.0, x+y+2.0))"
+        "main = draw x = Uniform in draw y = Uniform in (x, (x+y+3.0, x+y+2.0))"
         (VTuple (VFloat 0.3) (VTuple VAny (VFloat 2.7))) "y"
   , testCase "ANY in the summed slot refuses, naming x" $
       expectMarginalRefusal
-        "main = let x = Uniform in let y = Uniform in (x+y, (x, y))"
+        "main = draw x = Uniform in draw y = Uniform in (x+y, (x, y))"
         (VTuple VAny (VTuple (VFloat 0.4) (VFloat 0.5))) "x"
   , testCase "ANY read by a shifted let's inverse refuses, naming x" $
       expectMarginalRefusal
-        "main = let x = Uniform in let z = x + 1.0 in (z, Uniform)"
+        "main = draw x = Uniform in draw z = x + 1.0 in (z, Uniform)"
         (VTuple VAny (VFloat 0.5)) "x"
   , testCase "ANY reached through an Either arm's deconstruction refuses, naming x" $
       -- Here the wildcard is read by `fst`, not by arithmetic: fromLeft of
       -- `Left ANY` is ANY, and the tuple deconstruction that follows has no
       -- tuple to take apart.
       expectMarginalRefusal
-        "main = let x = Uniform in left (x, x + Uniform)"
+        "main = draw x = Uniform in left (x, x + Uniform)"
         (VEither (Left VAny)) "x"
   ]
 
@@ -1258,7 +1258,7 @@ planEnumStructuralADTTests = testGroup "planEnumStructuralADT"
       , "data Object = Nil | Obj color::Color"
       , "data Scene = List hd::Object, tl::Scene | Empty depth 2"
       , "neural readScene :: (Symbol -> Scene)" ++ ofClause
-      , "main symbol = let scene = readScene symbol in filterGreen scene"
+      , "main symbol = draw scene = readScene symbol in filterGreen scene"
       -- Recurses to the end of the spine, replacing every non-green object with
       -- Nil. Deliberately total (the `isEmpty old` case comes first): the
       -- materializing oracle evaluates the filter at *every* scene in the
@@ -1324,7 +1324,7 @@ planEnumStructuralPartialTests = testGroup "planEnumStructuralPartial"
       , "data Object = Nil | Obj color::Color"
       , "data Scene = List hd::Object, tl::Scene | Empty depth 2"
       , "neural readScene :: (Symbol -> Scene)"
-      , "main symbol = let scene = readScene symbol in filterGreen scene"
+      , "main symbol = draw scene = readScene symbol in filterGreen scene"
       , "filterGreen old = if isEmpty (tl old)"
       , "    then if isNil (hd old)"
       , "        then List Nil Empty"
@@ -1365,7 +1365,7 @@ test_planEnumStructuralGrouped = testCase "planEnumStructuralGrouped" $ do
         , "data Object = Nil | Obj color::Color"
         , "data Scene = List hd::Object, tl::Scene | Empty depth " ++ show d
         , "neural readScene :: (Symbol -> Scene)"
-        , "main symbol = let scene = readScene symbol in filterGreen scene"
+        , "main symbol = draw scene = readScene symbol in filterGreen scene"
         , "filterGreen old = if isEmpty old"
         , "    then Empty"
         , "    else if isNil (hd old)"
@@ -1581,7 +1581,7 @@ test_planEnumM4Polynomial = testCase "planEnumM4Polynomial" $ do
         , "data Scene = Empty | SCons obj::Object, rest::Scene depth " ++ show d
         , "neural readScene :: (Symbol -> Scene)"
         , "numRed s = if isEmpty s then 0.0 else (if isObj (obj s) then (if isRed (color (obj s)) then 1.0 else 0.0) else 0.0) + numRed (rest s)"
-        , "main sym = let scene = readScene sym in if numRed scene > 1.5 then 1 else 0"
+        , "main sym = draw scene = readScene sym in if numRed scene > 1.5 then 1 else 0"
         ]
   let sizeAt :: Int -> IO Int
       sizeAt d = case tryParseProgram "m4" (prog d) of
@@ -1625,7 +1625,7 @@ test_planEnumBoolCtorPolynomial = testCase "planEnumBoolCtorPolynomial" $ do
         , "data Scene = Empty | SCons obj::Object, rest::Scene depth " ++ show d
         , "neural readScene :: (Symbol -> Scene)"
         , "existsRed s = if isEmpty s then False else (if isObj (obj s) then (if isRed (color (obj s)) then True else existsRed (rest s)) else existsRed (rest s))"
-        , "main sym = let scene = readScene sym in if existsRed scene then 1 else 0"
+        , "main sym = draw scene = readScene sym in if existsRed scene then 1 else 0"
         ]
   let sizeAt :: Int -> IO Int
       sizeAt d = case tryParseProgram "boolctor" (prog d) of
@@ -1669,7 +1669,7 @@ test_planEnumFusedJointStatePolynomial = testCase "planEnumFusedJointStatePolyno
         , "      else (if isLarge (size (obj s))"
         , "              then (if lg == 0 then go (rest s) red 1 else go (rest s) red 2)"
         , "              else go (rest s) red lg)))"
-        , "main sym = let scene = readScene sym in go scene False 0"
+        , "main sym = draw scene = readScene sym in go scene False 0"
         ]
   let sizeAt :: Int -> IO Int
       sizeAt d = case tryParseProgram "joint" (prog d) of
@@ -1692,10 +1692,10 @@ planOverCouplingRefusalTests :: TestTree
 planOverCouplingRefusalTests = testGroup "plan-guided M3 over-coupling refusal"
   [ testCase "coupled leaf additionally bounded refuses with the orthant diagnostic" $
       expectOrthantRefusal
-        "neural readPair :: (Symbol -> (Float, Float))\nmain sym = let p = readPair sym in if fst p > snd p then (if fst p > 0.5 then 2 else 1) else 0\n"
+        "neural readPair :: (Symbol -> (Float, Float))\nmain sym = draw p = readPair sym in if fst p > snd p then (if fst p > 0.5 then 2 else 1) else 0\n"
   , testCase "leaf coupled twice refuses with the orthant diagnostic" $
       expectOrthantRefusal
-        "neural readTri :: (Symbol -> (Float, (Float, Float)))\nmain sym = let p = readTri sym in if fst p > fst (snd p) then (if fst p > snd (snd p) then 2 else 1) else 0\n"
+        "neural readTri :: (Symbol -> (Float, (Float, Float)))\nmain sym = draw p = readTri sym in if fst p > fst (snd p) then (if fst p > snd (snd p) then 2 else 1) else 0\n"
   ]
 
 -- | The plan factorization's independence guard (task
@@ -2776,7 +2776,7 @@ materializationVerdictTests = testGroup "Decomposability gate: materialization c
       let prog = either (error . show) id
             (tryParseProgram "test"
               ("twice x = x ++ x\n"
-               ++ "main = let u = Uniform < 0.3 in twice (if u then 1 else 0)"))
+               ++ "main = draw u = Uniform < 0.3 in twice (if u then 1 else 0)"))
       cells <- compilesWithCells defaultCompilerConfig prog
       assertBool "a parameter-fed chain must not be tabulated" (not cells)
   ]
@@ -3313,7 +3313,7 @@ splitByStringTests = testGroup "Utils.splitByString"
 -- interior 'Var' occurrence of the bound name and an 'InjF' whose operand set
 -- only that occurrence's tag can complete.
 letBinderSrc :: String
-letBinderSrc = "main = let s = (if (Uniform < 0.5) then 1 else 0) in s ++ 1\n"
+letBinderSrc = "main = draw s = (if (Uniform < 0.5) then 1 else 0) in s ++ 1\n"
 
 -- | Parse, RType-infer, enum-annotate: the pipeline prefix 'SPLL.Prelude' runs
 -- before anything reads a 'DiscreteValues' tag.

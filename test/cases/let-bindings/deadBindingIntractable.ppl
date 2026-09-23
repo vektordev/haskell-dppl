@@ -7,4 +7,4 @@
 -- lambda takes its pType from the *body*. Before investigation
 -- 60_toIRInference-apply-gap this crashed the compiler with a bare
 -- "This instance of apply is not yet implemented".
-main = let x = Uniform * Uniform in Uniform
+main = draw x = Uniform * Uniform in Uniform

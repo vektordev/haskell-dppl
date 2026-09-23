@@ -1,0 +1,4 @@
+-- Design let-binding-semantics: `draw` binds a single sample, shared by every
+-- use of the name. (c, c) is one fair coin read twice, so the off-diagonal
+-- outcomes are impossible. Sibling of defineIndependentDraws.
+main = draw c = Uniform < 0.5 in (c, c)

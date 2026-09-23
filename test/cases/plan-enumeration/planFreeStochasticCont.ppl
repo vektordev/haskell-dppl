@@ -11,5 +11,5 @@
 -- cdf(x) = 0.6 * Phi(x) + 0.4 * Phi((x-3)/0.5), dim 0.
 neural readObj :: (Symbol -> (Bool, Float))
 
-main sym = let o = readObj sym in
+main sym = draw o = readObj sym in
   if fst o then (Normal) else ((Normal * 0.5) + 3.0)

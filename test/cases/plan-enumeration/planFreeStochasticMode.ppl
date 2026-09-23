@@ -13,7 +13,7 @@
 -- marginal here, so p(1) = 0.7 * 0.1669514 + 0.3 * 0.0106054 = 0.1200476.
 neural readObj :: (Symbol -> (Bool, Float))
 
-main sym = let o = readObj sym in
+main sym = draw o = readObj sym in
   if fst o
     then (if ((((1.5 + (Normal * 0.5)) * 0.9) + (Normal * 0.5)) > 2.0) then 1 else 0)
     else (if ((((0.5 + (Normal * 0.5)) * 0.9) + (Normal * 0.5)) > 2.0) then 1 else 0)

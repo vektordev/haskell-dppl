@@ -1,4 +1,4 @@
 -- Two-sided interval on exp x, one bound outside the image: the True/True arm
 -- is exp x in (-1, 2) = (0, 2), i.e. x < log 2: Phi(log 2). The clamped lower
 -- endpoint (-inf) intersects with the finite upper one through maxWBound.
-main = let x = Normal in if exp x > (0.0 - 1.0) then (if exp x < 2.0 then 1.0 else 2.0) else 3.0
+main = draw x = Normal in if exp x > (0.0 - 1.0) then (if exp x < 2.0 then 1.0 else 2.0) else 3.0

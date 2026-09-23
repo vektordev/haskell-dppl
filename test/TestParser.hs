@@ -20,7 +20,7 @@ import SPLL.Examples
 import SPLL.Parser
 import ArbitrarySPLL
 import PrettyPrint
-import Data.List (sortBy, intercalate)
+import Data.List (sortBy, intercalate, isInfixOf)
 import Data.Ord (comparing)
 import Control.Monad.State
 import Text.Megaparsec hiding (State)
@@ -335,8 +335,8 @@ prop_commentBetweenDefs =
 -- Multi-line let-in parses to the same AST as single-line
 prop_multiLineLetIn :: Property
 prop_multiLineLetIn =
-  let src1 = "main = let u = Uniform in u + 1.0"
-      src2 = "main =\n  let u = Uniform\n  in u + 1.0"
+  let src1 = "main = draw u = Uniform in u + 1.0"
+      src2 = "main =\n  draw u = Uniform\n  in u + 1.0"
   in case (tryParseProgram "" src1, tryParseProgram "" src2) of
        (Right p1, Right p2) -> p1 =~= p2
        (Left err, _) -> counterexample ("src1 failed: " ++ errorBundlePretty err) False
@@ -492,7 +492,7 @@ prop_neuralOfClauseRegistersSugar =
 prop_observeLambdaDesugarsToLetIdiom :: Property
 prop_observeLambdaDesugarsToLetIdiom =
   let src1 = "main = observe Normal (\\v -> v > 0.0)"
-      src2 = "main = let v = Normal in if v > 0.0 then right v else left ()"
+      src2 = "main = draw v = Normal in if v > 0.0 then right v else left ()"
   in case (tryParseProgram "" src1, tryParseProgram "" src2) of
        (Right p1, Right p2) -> p1 =~= p2
        (Left err, _) -> counterexample ("src1 failed: " ++ errorBundlePretty err) False
@@ -503,7 +503,7 @@ prop_observeLambdaDesugarsToLetIdiom =
 prop_observeNamedPredicateDesugarsToApply :: Property
 prop_observeNamedPredicateDesugarsToApply =
   let src1 = "isPos v = v > 0.0\nmain = observe Normal isPos"
-      src2 = "isPos v = v > 0.0\nmain = let p_ob0 = Normal in if isPos p_ob0 then right p_ob0 else left ()"
+      src2 = "isPos v = v > 0.0\nmain = draw p_ob0 = Normal in if isPos p_ob0 then right p_ob0 else left ()"
   in case (tryParseProgram "" src1, tryParseProgram "" src2) of
        (Right p1, Right p2) -> p1 =~= p2
        (Left err, _) -> counterexample ("src1 failed: " ++ errorBundlePretty err) False
@@ -563,6 +563,75 @@ prop_EquivIgnoresSpans = once $
            ]
   where
     stripSpans = tMap (\e -> (ann e) { srcPos = Nothing })
+
+-- Design let-binding-semantics: two binding forms, differing only for a
+-- stochastic right-hand side.
+
+-- Parse two programs and compare them structurally.
+sameProgram :: String -> String -> Property
+sameProgram src1 src2 = case (tryParseProgram "" src1, tryParseProgram "" src2) of
+  (Right p1, Right p2) -> p1 =~= p2
+  (Left err, _) -> counterexample ("src1 failed: " ++ errorBundlePretty err) False
+  (_, Left err) -> counterexample ("src2 failed: " ++ errorBundlePretty err) False
+
+-- `draw` is the eager, single-sample binding: exactly the Apply-of-a-Lambda that
+-- `let` desugared to, so the argument is evaluated once.
+prop_drawDesugarsToAppliedLambda :: Property
+prop_drawDesugarsToAppliedLambda =
+  sameProgram "main = draw u = Uniform in u + u" "main = (\\u -> u + u) Uniform"
+
+-- `define` is the lazy binding: it leaves no binding behind at all, only the
+-- definition written out at each use -- so each use is its own draw.
+prop_defineSubstitutesEveryUse :: Property
+prop_defineSubstitutesEveryUse =
+  sameProgram "main = define u = Uniform in u + u" "main = Uniform + Uniform"
+
+prop_defineUnusedVanishes :: Property
+prop_defineUnusedVanishes =
+  sameProgram "main = define u = Normal in 1.0" "main = 1.0"
+
+-- An inner binder of the same name shadows the definition.
+prop_defineRespectsShadowing :: Property
+prop_defineRespectsShadowing =
+  sameProgram "main = define x = Uniform in (x, (\\x -> x) 1.0)"
+              "main = (Uniform, (\\x -> x) 1.0)"
+
+-- Capture avoidance: the definition mentions the parameter `y`, and is used
+-- under a lambda that binds another `y`. That inner binder is renamed, so the
+-- substituted copy still reads the outer `y`.
+prop_defineAvoidsCapture :: Property
+prop_defineAvoidsCapture =
+  sameProgram "f y = define x = y + Uniform in (\\y -> x + y)\nmain = f 1.0 2.0"
+              "f y = \\y_s0 -> (y + Uniform) + y_s0\nmain = f 1.0 2.0"
+
+-- The definition is scoped like `draw`'s: a free occurrence of the bound name
+-- inside it refers to the outer binding, not to itself.
+prop_defineIsNotRecursive :: Property
+prop_defineIsNotRecursive =
+  sameProgram "f x = define x = x + 1.0 in x * x\nmain = f Uniform"
+              "f x = (x + 1.0) * (x + 1.0)\nmain = f Uniform"
+
+-- `let` is retired: it is refused, at the `let` itself, with both
+-- replacements spelled out -- and every `let` in the file is reported.
+prop_letIsRefusedWithBothForms :: Property
+prop_letIsRefusedWithBothForms =
+  case tryParseProgram "" "f y = let a = y in a\nmain = let u = Uniform in u" of
+    Right _ -> counterexample "a `let` binding parsed" False
+    Left err ->
+      let msg = errorBundlePretty err
+      in counterexample msg $ conjoin
+           [ property ("draw x = e in body" `isInfixOf` msg)
+           , property ("define x = e in body" `isInfixOf` msg)
+           , property ("1:7:" `isInfixOf` msg)
+           , property ("2:8:" `isInfixOf` msg)
+           ]
+
+-- Both new keywords are reserved.
+prop_drawAndDefineAreReserved :: Property
+prop_drawAndDefineAreReserved = conjoin
+  [ counterexample kw (isLeft (tryParseProgram "" ("main = " ++ kw)))
+  | kw <- ["draw", "define", "let"] ]
+  where isLeft = either (const True) (const False)
 
 return []
 

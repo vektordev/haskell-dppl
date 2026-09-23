@@ -14,6 +14,6 @@
 -- and report a positive mass.
 neural camNN :: (Symbol -> Int) of [0, 1, 2]
 main img =
-  let a = camNN img in
-  let b = a + 1 in
+  draw a = camNN img in
+  draw b = a + 1 in
   if a == b then right a else left ()

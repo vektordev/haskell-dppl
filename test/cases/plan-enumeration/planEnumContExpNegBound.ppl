@@ -5,4 +5,4 @@
 -- set-witness-interval-partial-inverse).
 neural readObj :: (Symbol -> (Bool, Float))
 
-main sym = let o = readObj sym in if exp (snd o) > (0.0 - 1.0) then 1 else 0
+main sym = draw o = readObj sym in if exp (snd o) > (0.0 - 1.0) then 1 else 0

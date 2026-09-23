@@ -1,1 +1,1 @@
-main = let x = Normal in if exp x == 1.0 then 1.0 else 0.0
+main = draw x = Normal in if exp x == 1.0 then 1.0 else 0.0

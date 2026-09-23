@@ -1,1 +1,1 @@
-main = let x = Uniform in 2.0 * exp x
+main = draw x = Uniform in 2.0 * exp x

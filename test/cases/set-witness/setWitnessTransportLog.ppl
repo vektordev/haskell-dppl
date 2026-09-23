@@ -3,4 +3,4 @@
 -- keeps the -inf endpoint untouched (x < 1, Phi(1)) rather than exp(-inf) = 0:
 -- for x <= 0 the forward log is NaN and NaN > 0 is False on every backend, so
 -- that is also what sampling answers.
-main = let x = Normal in if log x > 0.0 then 1.0 else 0.0
+main = draw x = Normal in if log x > 0.0 then 1.0 else 0.0

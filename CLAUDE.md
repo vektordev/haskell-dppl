@@ -184,6 +184,25 @@ deterministic).
   see Observation masks below), plus flags `pruneAnyChecks`, `noIntegrate`,
   `noProbability`, `noGenerate`, `batched`, `logSpace`.
 
+## Binding forms: `draw` and `define`
+
+There is no `let` in the surface language (design `let-binding-semantics`).
+The two binding forms differ only when the right-hand side is random, and there
+they give different distributions, so the author has to pick:
+
+- `draw x = e in body` — **eager**: `x` is one sample of `e`, shared by every
+  use. The parser desugars it to `(\x -> body) e` (`SPLL.Prelude.letIn`), which
+  is the shape every downstream pass calls a "let". This is what `let` used to
+  mean.
+- `define x = e in body` — **lazy**: `x` stands for `e` itself, so every use is
+  an independent draw. The parser eliminates it on the spot by capture-avoiding
+  substitution (`SPLL.Lang.Lang.substituteVar`); no later pass ever sees it.
+
+Both accept the destructuring patterns (`(a, b)`, `h : t`, `Left x`, `[]`), and a
+destructuring `define` is lazy per name. `let` stays reserved and is refused
+with a diagnostic naming both forms. Prose elsewhere in this file (and in
+`docs/`) says "`let`" for the eager binding; read it as `draw`.
+
 ## Internal Details
 
 Every AST node carries a `TypeInfo` record (`rType` from RInfer, `pType`
@@ -304,8 +323,10 @@ a subtree independent of the *plan*, whose randomness is the net's alone; it
 does not make two factors of the same world independent of *each other*. Fresh
 distribution leaves and top-level calls are per-occurrence draws, so the only
 shared source reachable from the traversal is a variable bound by an enclosing
-`let` — which SPLL's `let` makes a single shared draw
-(`designs/let-binding-semantics.md`: the existing form is the eager one). The
+`let` — a surface `draw`, which is a single shared draw
+(`designs/let-binding-semantics.md`). The lazy `define` needs no guard: it is
+substituted away in the parser, so every binding that reaches this pass is a
+`draw`, and its uses of a defined name are fresh draws by construction. The
 traversal cannot descend into a `let` (`collectApply` declines a Lambda callee,
 `classifyArg` declines a non-deterministic argument), but an *enclosing* one
 puts its variable in scope, so `planFactorExternals` refuses any factor reading

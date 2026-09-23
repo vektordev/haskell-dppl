@@ -11,4 +11,4 @@ neural readScene :: (Symbol -> Scene)
 
 existsRed s = if isEmpty s then False else (if isObj (obj s) then (if isRed (color (obj s)) then True else existsRed (rest s)) else existsRed (rest s))
 
-main sym = let scene = readScene sym in if existsRed scene then 1 else 0
+main sym = draw scene = readScene sym in if existsRed scene then 1 else 0

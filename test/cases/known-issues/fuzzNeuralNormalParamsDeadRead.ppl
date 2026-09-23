@@ -1,2 +1,2 @@
 neural nn :: (Symbol -> Float)
-main sym = let s = nn sym in snd (snd (right False, (False, Normal)))
+main sym = draw s = nn sym in snd (snd (right False, (False, Normal)))

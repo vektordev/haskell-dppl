@@ -6,7 +6,7 @@ neural camNN   :: (Symbol -> Int) of [0, 1, 2]
 neural depthNN :: (Symbol -> Int) of [0, 1, 2]
 prior = if Uniform < 0.5 then 0 else if Uniform < 0.5 then 1 else 2
 main img depth =
-  let v = prior in
-  let c = camNN img in
-  let d = depthNN depth in
+  draw v = prior in
+  draw c = camNN img in
+  draw d = depthNN depth in
   if (v == c) && (v == d) then right v else left ()

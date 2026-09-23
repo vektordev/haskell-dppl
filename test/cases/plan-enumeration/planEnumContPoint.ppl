@@ -7,4 +7,4 @@
 -- cdf(x)  = 0.7 * Phi(x) + 0.3 * [5 <= x].
 neural readObj :: (Symbol -> (Bool, Float))
 
-main sym = let o = readObj sym in if fst o then snd o else 5.0
+main sym = draw o = readObj sym in if fst o then snd o else 5.0

@@ -1,3 +1,3 @@
 -- Interval transport through neg (spelled 0 - x, i.e. plus 0 (neg x): two
 -- spine steps, net decreasing): -x > 1 iff x < -1: Phi(-1).
-main = let x = Normal in if (0.0 - x) > 1.0 then 1.0 else 0.0
+main = draw x = Normal in if (0.0 - x) > 1.0 then 1.0 else 0.0

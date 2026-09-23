@@ -26,7 +26,7 @@ numRed s = if isEmpty s then 0.0 else (if isRed (color (obj s)) then 1.0 else 0.
 allSmall s = if isEmpty s then True else (if isSmall (size (obj s)) then allSmall (rest s) else False)
 
 main sym =
-  let scene = readScene sym in
+  draw scene = readScene sym in
   if existsRed scene then 0
   else if existsBlue scene then 1
   else if exactlyOneGreen scene then 2

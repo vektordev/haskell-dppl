@@ -1,0 +1,4 @@
+-- Design let-binding-semantics: `define x = Uniform in (x, x)` is two
+-- independent uniforms, a joint density of 1 on the unit square (dimension 2).
+-- With `draw` it is one uniform on the diagonal (degenerateSameLatentSum).
+main = define x = Uniform in (x, x)

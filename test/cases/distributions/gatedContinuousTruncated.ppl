@@ -4,4 +4,4 @@
 -- The modality engine types the arm occurrences Integrate (no family) and the
 -- set-witness engine measures the two worlds: a point of density phi(y) on
 -- the half-line y >= 0, and the atom 0.0 carrying the mass P(s < 0) = 0.5.
-main = let s = Normal in if s < 0.0 then 0.0 else s
+main = draw s = Normal in if s < 0.0 then 0.0 else s

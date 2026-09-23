@@ -107,8 +107,8 @@ unitTests = testGroup "unit rules"
       and (detsWhere isThetaNode p dm) @?= True
 
   , testCase "let binds the argument's determinism" $ do
-      let pDet  = prep "main t = let x = theta t @ 0 in x + 1.0"
-          pRand = prep "main = let x = Normal in x + 1.0"
+      let pDet  = prep "main t = draw x = theta t @ 0 in x + 1.0"
+          pRand = prep "main = draw x = Normal in x + 1.0"
       rootDet "main" pDet  (determinismMap pDet)  @?= True
       rootDet "main" pRand (determinismMap pRand) @?= False
 
@@ -134,12 +134,12 @@ unitTests = testGroup "unit rules"
   -- for it claimed a whole random draw was a known anchor, which is the one
   -- direction the pass's soundness stance rules out.
   , testCase "a reference to a random nullary function is not an anchor" $ do
-      let p = prep "genA = if Uniform < 0.7 then 0.0 else 1.0\nmain = let a = genA in a"
+      let p = prep "genA = if Uniform < 0.7 then 0.0 else 1.0\nmain = draw a = genA in a"
       Map.lookup "genA" (functionSummaries p) @?= Just False
       rootDet "main" p (determinismMap p) @?= False
 
   , testCase "a reference to a deterministic nullary function stays an anchor" $ do
-      let p = prep "c = 1.0\nmain = let a = c in a"
+      let p = prep "c = 1.0\nmain = draw a = c in a"
       Map.lookup "c" (functionSummaries p) @?= Just True
       rootDet "main" p (determinismMap p) @?= True
   ]

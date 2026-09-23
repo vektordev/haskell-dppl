@@ -4,4 +4,4 @@
 data Color = Red | Green | Blue
 data Obj = Mk c :: Color, f :: Bool
 neural readObj :: (Symbol -> Obj)
-main sym = let o = readObj sym in if isRed (c o) then (if f o then 0 else 1) else 2
+main sym = draw o = readObj sym in if isRed (c o) then (if f o then 0 else 1) else 2

@@ -3,4 +3,4 @@
 -- never produce, so the inner step clamps it to 0 (-> -inf) instead of
 -- computing log(log 0.5) = NaN. exp (exp x) > 0.5 always holds; exp (exp x)
 -- < 2 iff x < log (log 2).
-main = let x = Normal in if exp (exp x) > 0.5 then (if exp (exp x) < 2.0 then 1.0 else 2.0) else 3.0
+main = draw x = Normal in if exp (exp x) > 0.5 then (if exp (exp x) < 2.0 then 1.0 else 2.0) else 3.0

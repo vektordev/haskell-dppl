@@ -34,4 +34,4 @@ go s red lg = if isEmpty s
               then (if lg == 0 then go (rest s) red 1 else go (rest s) red 2)
               else go (rest s) red lg)))
 
-main sym = let scene = readScene sym in go scene False 0
+main sym = draw scene = readScene sym in go scene False 0

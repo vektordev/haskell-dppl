@@ -72,14 +72,14 @@ modalityInferTests = testGroup "ModalityInfer"
           -- fst/snd recover the per-component family; the affine sum of two
           -- Normals is Normal (design program 1).
           assertEqual "" PNormal $
-            mainPType "main = let pair = (Normal + 1.0, 2.0 * Normal) \
+            mainPType "main = draw pair = (Normal + 1.0, 2.0 * Normal) \
                       \in fst pair + snd pair"
       , testCase "MArr/phi: family survives application (β-reduction)" $
           -- g(f(Normal)) with f,g affine: the closure transfer keeps the family
           -- through application, which a flat layer cannot (design program 2).
           assertEqual "" PNormal $
-            mainPType "main = let f = \\x -> x + 1.0 \
-                      \in let g = \\y -> 2.0 * y in g (f Normal)"
+            mainPType "main = draw f = \\x -> x + 1.0 \
+                      \in draw g = \\y -> 2.0 * y in g (f Normal)"
       , testCase "MSum mixture is a deliberate non-goal: stays Integrate" $
           -- a marginalised random-tag mixture of two Gaussians is not Gaussian
           -- (design program 4): the family must be dropped.
@@ -97,7 +97,7 @@ modalityInferTests = testGroup "ModalityInfer"
           -- (binder defaults to det); the modality engine binds it to the
           -- argument's real law.
           assertEqual "" Integrate $
-            mainPType "main = let x = Uniform in x + 1.0"
+            mainPType "main = draw x = Uniform in x + 1.0"
       , testCase "continuous if-mixture is not Deterministic (meet, not join)" $
           -- the prototype's join optimism would type this Deterministic; the
           -- meet of the branches is the sound answer.
@@ -121,41 +121,41 @@ modalityInferTests = testGroup "ModalityInfer"
       [ testCase "the arm occurrence of the gated variable has no family" $
           -- path: Apply [0] -> Lambda [0] -> IfThenElse [1] = the then-arm @s@.
           assertEqual "" Integrate $
-            pTypeAt "main" [0, 0, 1] "main = let s = Normal in if s < 0.0 then s else 0.0"
+            pTypeAt "main" [0, 0, 1] "main = draw s = Normal in if s < 0.0 then s else 0.0"
       , testCase "the condition's own occurrence keeps the standalone law" $
           -- path: ... IfThenElse [0] = the condition, [0] = its left operand @s@.
           assertEqual "" PNormal $
-            pTypeAt "main" [0, 0, 0, 0] "main = let s = Normal in if s < 0.0 then s else 0.0"
+            pTypeAt "main" [0, 0, 0, 0] "main = draw s = Normal in if s < 0.0 then s else 0.0"
       , testCase "returning the gated variable keeps its capability (Integrate)" $
           assertEqual "" Integrate $
-            mainPType "main = let s = Normal in if s < 0.0 then 0.0 else s"
+            mainPType "main = draw s = Normal in if s < 0.0 then 0.0 else s"
       , testCase "an affine image of the gated variable keeps its capability" $
           assertEqual "" Integrate $
-            mainPType "main = let s = Normal in if s < 0.0 then s + 1.0 else 0.0"
+            mainPType "main = draw s = Normal in if s < 0.0 then s + 1.0 else 0.0"
       , testCase "a gated variable combined with a fresh draw is Bottom" $
           -- The truncated law is no Normal, so tryNormalClosure must not fire;
           -- the floor sees two infinite-support latents and drops the density.
           assertEqual "" Bottom $
-            mainPType "main = let s = Normal in if s < 0.0 then s + Normal else 0.0"
+            mainPType "main = draw s = Normal in if s < 0.0 then s + Normal else 0.0"
       , testCase "the gate is keyed on the condition, not the spelling: f s" $
           assertEqual "" Bottom $
             mainPType "isNeg x = x < 0.0\n\
-                      \main = let s = Normal in if isNeg s then s + Normal else 0.0"
+                      \main = draw s = Normal in if isNeg s then s + Normal else 0.0"
       , testCase "a deterministic condition conditions nothing" $
           -- The control: same arms, a Dirac condition -- the family survives.
           assertEqual "" PNormal $
-            mainPType "main = let s = Normal in if 0.1 < 0.5 then s + 1.0 else s"
+            mainPType "main = draw s = Normal in if 0.1 < 0.5 then s + 1.0 else s"
       , testCase "a variable the condition does not read is untouched" $
           -- @c@ is conditioned in the arms, @s@ is not: @s + 1.0@ stays a witnessed
           -- PNormal image on each arm; only the random-condition mixture drops it.
           assertEqual "" Integrate $
-            mainPType "main = let s = Normal in let c = Uniform in \
+            mainPType "main = draw s = Normal in draw c = Uniform in \
                       \if c < 0.5 then s + 1.0 else s"
       , testCase "three manually unrolled gated steps are Bottom" $
           assertEqual "" Bottom $
-            mainPType "main = let s1 = 3.0 + Normal in if s1 < 0.0 then 0.0 else \
-                      \let s2 = s1 + Normal in if s2 < 0.0 then 0.0 else \
-                      \let s3 = s2 + Normal in if s3 < 0.0 then 0.0 else s3"
+            mainPType "main = draw s1 = 3.0 + Normal in if s1 < 0.0 then 0.0 else \
+                      \draw s2 = s1 + Normal in if s2 < 0.0 then 0.0 else \
+                      \draw s3 = s2 + Normal in if s3 < 0.0 then 0.0 else s3"
       , testCase "a self-recursive gated walk is Bottom at the declaration and the call" $ do
           assertEqual "walk" Bottom $ rootPTypeOf "walk" recursiveWalkSrc
           assertEqual "main" Bottom $ mainPType recursiveWalkSrc
@@ -321,7 +321,7 @@ modalityInferTests = testGroup "ModalityInfer"
           -- only confirms the MSum eliminator's modality; the bug's own fix
           -- compiles the idiom in @IRCompiler@ and is not owned here.
           assertEqual "" Integrate $
-            mainPType "main = let e = if Uniform < 0.5 then left Normal else right 0.0 \
+            mainPType "main = draw e = if Uniform < 0.5 then left Normal else right 0.0 \
                       \in if isLeft e then fromLeft e else fromRight e"
       , testCase "both branches continuous: Integrate" $
           assertEqual "" Integrate $
@@ -413,27 +413,27 @@ modalityInferTests = testGroup "ModalityInfer"
           -- x recovered from fst, then u2 = y - x from snd (Jacobian 1): the
           -- joint p(x)·p(y-x) is a full density, dim 2.
           assertEqual "" Integrate $
-            mainPType "main = let x = Uniform in let y = x + Uniform in (x, y)"
+            mainPType "main = draw x = Uniform in draw y = x + Uniform in (x, y)"
       , testCase "witness (multiplicative): shared-latent tuple recovers Integrate" $
           -- Same shape with @mult@: u2 = y / x (Jacobian 1/|x|) — the recovery
           -- is not specific to @plus@.
           assertEqual "" Integrate $
-            mainPType "main = let x = Uniform in let y = x * Uniform in (x, y)"
+            mainPType "main = draw x = Uniform in draw y = x * Uniform in (x, y)"
       , testCase "direct witness without the intermediate let" $
           -- The same recovery with the combination inline in the observed slot.
           assertEqual "" Integrate $
-            mainPType "main = let x = Uniform in (x, x + Uniform)"
-      , testCase "family preservation: let x = Normal in x stays PNormal" $
+            mainPType "main = draw x = Uniform in (x, x + Uniform)"
+      , testCase "family preservation: draw x = Normal in x stays PNormal" $
           -- The once-counting rule binds x witnessed WITHOUT erasing its
           -- standalone law — the naive Exact binding would regress this to
           -- Deterministic (or, via meet with the rhs, to Integrate).
           assertEqual "" PNormal $
-            mainPType "main = let x = Normal in x"
+            mainPType "main = draw x = Normal in x"
       , testCase "family survives a witnessed affine combination" $
           -- x + 1.0 is a deterministic image of the witnessed x: still
           -- witnessed downstream, and tryNormalClosure keeps the family.
           assertEqual "" PNormal $
-            mainPType "main = let x = Normal in x + 1.0"
+            mainPType "main = draw x = Normal in x + 1.0"
       ]
 
   -- Permanent soundness guards. Unlike the characterization group above, these MUST
@@ -448,9 +448,9 @@ modalityInferTests = testGroup "ModalityInfer"
           -- The discriminator vs the additive witness: FC's @isInvertibleLambda@ for
           -- the @x@-binding is False here (x is not observed) but True in the witness.
           assertEqual "" Bottom $
-            mainPType "main = let x = Uniform in let y = x + Uniform in y"
+            mainPType "main = draw x = Uniform in draw y = x + Uniform in y"
       , testCase "let-bound sum of two continuous laws" $
-          assertEqual "" Bottom (mainPType "main = let z = Uniform + Normal in z")
+          assertEqual "" Bottom (mainPType "main = draw z = Uniform + Normal in z")
       , testCase "product of two unobserved continuous laws" $
           assertEqual "" Bottom (mainPType "main = Uniform * Uniform")
       , testCase "a convolution component floors the whole tuple" $
@@ -462,7 +462,7 @@ modalityInferTests = testGroup "ModalityInfer"
           -- key guard that the witnessed-inference fix promotes ONLY single-residual
           -- recoveries, never a genuine multi-latent convolution.
           assertEqual "" Bottom $
-            mainPType "main = let x = Uniform in (x, x + Uniform + Uniform)"
+            mainPType "main = draw x = Uniform in (x, x + Uniform + Uniform)"
       ]
 
   -- Task @modality-param-ptype-exponential@: the annotation on a lambda-bound
@@ -549,7 +549,7 @@ modalityInferTests = testGroup "ModalityInfer"
             mainPType "main = (\\f -> f Normal) (\\x -> x + 1.0)"
       , testCase "row 4: a lambda projected out of a tuple is PNormal" $
           assertEqual "" PNormal $
-            mainPType "main = let p = (\\x -> x + 1.0, 2.0) in (fst p) Normal"
+            mainPType "main = draw p = (\\x -> x + 1.0, 2.0) in (fst p) Normal"
       , testCase "row 5: a lambda taken from a list is PNormal" $
           assertEqual "" PNormal $
             mainPType "main = (head [\\x -> x + 1.0]) Normal"
@@ -571,7 +571,7 @@ modalityInferTests = testGroup "ModalityInfer"
           -- The no-function-value reach of the same IRCompiler fallthrough
           -- (bug A, 2026-09-13): the verdict is right, the shortcut was not.
           assertEqual "" PNormal $
-            mainPType "main = let x = Normal in let y = x + 1.0 in y"
+            mainPType "main = draw x = Normal in draw y = x + 1.0 in y"
       ]
   ]
 
@@ -647,12 +647,12 @@ allNodes prog = concatMap (universeE . snd) (functions prog)
 -- bound: the minimal shape of task @continuous-recursive-gate-witness-failure@.
 recursiveWalkSrc :: String
 recursiveWalkSrc =
-  "walk s = let s2 = s + Normal in if s2 < 0.0 then s2 else walk s2\n\
+  "walk s = draw s2 = s + Normal in if s2 < 0.0 then s2 else walk s2\n\
   \main = walk 3.0"
 
 -- | The same walk with a second (scale) parameter, so the recursive
 -- declaration is a curried two-parameter function.
 curriedWalkSrc :: String
 curriedWalkSrc =
-  "sim s k = let s2 = s + k * Normal in if s2 < 0.0 then s2 else sim s2 k\n\
+  "sim s k = draw s2 = s + k * Normal in if s2 < 0.0 then s2 else sim s2 k\n\
   \main = sim 3.0 1.0"

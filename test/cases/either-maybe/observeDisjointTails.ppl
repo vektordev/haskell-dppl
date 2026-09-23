@@ -6,4 +6,4 @@
 -- observed False (p(Left ANY)) is the plain intersection of both arms' False
 -- worlds, so this program also exercises that polarity in the same query set
 -- observeTwoSidedIntervalAnd exercises for `and`.
-main = let v = Normal in if (v < -1.0) || (v > 1.0) then right v else left ()
+main = draw v = Normal in if (v < -1.0) || (v > 1.0) then right v else left ()

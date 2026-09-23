@@ -1,2 +1,2 @@
 data Pair = P a::Float, b::Float
-main = let x = Uniform in if x > 0.5 then P x 1.0 else P x 0.0
+main = draw x = Uniform in if x > 0.5 then P x 1.0 else P x 0.0

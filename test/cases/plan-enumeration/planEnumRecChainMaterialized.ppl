@@ -18,4 +18,4 @@ exactlyOneGreen s = goOne s False
 
 numLarge s = if isEmpty s then 0.0 else (if isLarge (size (obj s)) then 1.0 else 0.0) + numLarge (rest s)
 
-main sym = let scene = readScene sym in if existsRed scene then 0 else (if exactlyOneGreen scene then 1 else (if numLarge scene > 1.5 then 2 else 3))
+main sym = draw scene = readScene sym in if existsRed scene then 0 else (if exactlyOneGreen scene then 1 else (if numLarge scene > 1.5 then 2 else 3))

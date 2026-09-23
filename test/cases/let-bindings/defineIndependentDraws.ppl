@@ -1,0 +1,5 @@
+-- Design let-binding-semantics: `define` names a random process, so every use
+-- of the name is an independent draw. (c, c) is therefore two independent fair
+-- coins -- the sibling of drawSharedDraw, where the same program with `draw`
+-- is one coin read twice.
+main = define c = Uniform < 0.5 in (c, c)

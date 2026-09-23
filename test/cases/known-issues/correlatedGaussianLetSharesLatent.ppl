@@ -1,1 +1,1 @@
-main = let x = Normal in let a = x + Normal in let b = x + Normal in (a, b)
+main = draw x = Normal in draw a = x + Normal in draw b = x + Normal in (a, b)

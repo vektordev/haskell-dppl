@@ -1,1 +1,1 @@
-main = let u = Uniform in let v = u * 4.0 in v * 2.0
+main = draw u = Uniform in draw v = u * 4.0 in v * 2.0

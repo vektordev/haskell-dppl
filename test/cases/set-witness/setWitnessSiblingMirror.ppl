@@ -1,1 +1,1 @@
-main = let x = Uniform in if x > 0.5 then (1.0, x) else (0.0, x)
+main = draw x = Uniform in if x > 0.5 then (1.0, x) else (0.0, x)

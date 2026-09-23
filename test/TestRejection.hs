@@ -309,7 +309,7 @@ anyCtorProgSrc = unlines
   [ "data Color = Red | Green | Blue"
   , "data Obj = Mk c :: Color, f :: Bool"
   , "neural readObj :: (Symbol -> Obj)"
-  , "main sym = let o = readObj sym in (if isRed (c o) then 0 else 1, f o)"
+  , "main sym = draw o = readObj sym in (if isRed (c o) then 0 else 1, f o)"
   ]
 
 -- A constructor named after a Python keyword. Emitting it verbatim produced
@@ -580,8 +580,8 @@ selfRecursiveAgreeSrc = unlines
   [ "data Sym = A | B"
   , "genA = if Uniform < 0.7 then A else B"
   , "genB = if Uniform < 0.4 then A else B"
-  , "main = let a = genA in"
-  , "       let b = genB in"
+  , "main = draw a = genA in"
+  , "       draw b = genB in"
   , "       if a == b then a else main"
   ]
 
@@ -594,8 +594,8 @@ enumeratedConstantElseSrc = unlines
   [ "data Sym = A | B"
   , "genA = if Uniform < 0.7 then A else B"
   , "genB = if Uniform < 0.4 then A else B"
-  , "main = let a = genA in"
-  , "       let b = genB in"
+  , "main = draw a = genA in"
+  , "       draw b = genB in"
   , "       if a == b then a else A"
   ]
 
@@ -782,7 +782,7 @@ vAnyExceptProgSrc :: String
 vAnyExceptProgSrc = unlines
   [ "data Color = Red | Green"
   , "data Obj = Obj col :: Color"
-  , "main = let scene = [if Uniform < 0.5 then Obj Red else Obj Green] in col (head scene) == Red"
+  , "main = draw scene = [if Uniform < 0.5 then Obj Red else Obj Green] in col (head scene) == Red"
   ]
 
 vAnyExceptCodegenTests :: TestTree
@@ -971,20 +971,20 @@ noGenerateSuppressedGeneratorTests = testGroup "NoGenerateSuppressedGenerator"
 -- `e` and y-sets from `b` would have to be mixed in one intersection.
 nestedLetSharedOccurrenceSrc :: String
 nestedLetSharedOccurrenceSrc =
-  "main = let x = Normal in let y = x + 1.0 in if y > x then 1.0 else 0.0"
+  "main = draw x = Normal in draw y = x + 1.0 in if y > x then 1.0 else 0.0"
 
 -- The inner right-hand side draws fresh randomness between the outer binding
 -- and the comparison: 'transportDirect' finds no seeded inverse through the
 -- second draw, exactly as it does not for the flattened `(x + Normal) > 0.0`.
 nestedLetFreshRandomnessSrc :: String
 nestedLetFreshRandomnessSrc =
-  "main = let x = Normal in let y = x + Normal in if y > 0.0 then 1.0 else 0.0"
+  "main = draw x = Normal in draw y = x + Normal in if y > 0.0 then 1.0 else 0.0"
 
 -- Positive control from the task's probes: the same comparison one let-level
 -- down compiles and agrees with its flattened twin (Phi(1)).
 nestedLetShiftSrc :: String
 nestedLetShiftSrc =
-  "main = let x = Normal in let y = x + 1.0 in if y > 0.0 then 1.0 else 0.0"
+  "main = draw x = Normal in draw y = x + 1.0 in if y > 0.0 then 1.0 else 0.0"
 
 setWitnessDiagnostic :: String
 setWitnessDiagnostic = "set-valued witness construction failed for the binding of 'x'"
@@ -1066,12 +1066,12 @@ setWitnessNestedLetTests = testGroup "SetWitnessNestedLet"
 -- Two sums over one latent. Both slots recover the same @x@, correlating them.
 sharedLatentTwoSumsSrc :: String
 sharedLatentTwoSumsSrc =
-  "main = let x = Normal in let a = x + Normal in let b = x + Normal in (a, b)"
+  "main = draw x = Normal in draw a = x + Normal in draw b = x + Normal in (a, b)"
 
 -- The same shape with the sum itself shared rather than the latent.
 sharedLatentTwoUsesSrc :: String
 sharedLatentTwoUsesSrc =
-  "main = let x = Normal in let y = Normal in (x + y, x + y)"
+  "main = draw x = Normal in draw y = Normal in (x + y, x + y)"
 
 setWitnessSharedLatentTests :: TestTree
 setWitnessSharedLatentTests = testGroup "SetWitnessSharedLatent"
@@ -1119,11 +1119,11 @@ setWitnessSharedLatentTests = testGroup "SetWitnessSharedLatent"
 -- so the transported endpoints' order -- is not statically known.
 setWitnessTransportTests :: TestTree
 setWitnessTransportTests = testGroup "SetWitnessTransport"
-  [ refused "sqrt on the spine" "main = let x = Normal in if sqrt x > 0.5 then 1.0 else 0.0"
-  , refused "recip on the spine" "main = let x = Normal in if recip x > 0.5 then 1.0 else 0.0"
-  , refused "sq on the spine" "main = let x = Normal in if sq x > 0.5 then 1.0 else 0.0"
+  [ refused "sqrt on the spine" "main = draw x = Normal in if sqrt x > 0.5 then 1.0 else 0.0"
+  , refused "recip on the spine" "main = draw x = Normal in if recip x > 0.5 then 1.0 else 0.0"
+  , refused "sq on the spine" "main = draw x = Normal in if sq x > 0.5 then 1.0 else 0.0"
   , refused "mult by a non-literal deterministic operand"
-      "main = let x = Normal in if (x * (0.0 - 2.0)) > 1.0 then 1.0 else 0.0"
+      "main = draw x = Normal in if (x * (0.0 - 2.0)) > 1.0 then 1.0 else 0.0"
   ]
   where
     refused what src = testCase (what ++ " is refused, not silently measured") $
@@ -1182,17 +1182,17 @@ arrowApplySelfSumTests = testGroup "ArrowApplySelfSum"
 -- ----------------------------------------------------------------------------
 
 gatedFreshDrawSrc :: String
-gatedFreshDrawSrc = "main = let s = Normal in if s < 0.0 then s + Normal else 0.0"
+gatedFreshDrawSrc = "main = draw s = Normal in if s < 0.0 then s + Normal else 0.0"
 
 gatedUnrolledSrc :: String
 gatedUnrolledSrc =
-  "main = let s1 = 3.0 + Normal in if s1 < 0.0 then 0.0 else \
-  \let s2 = s1 + Normal in if s2 < 0.0 then 0.0 else \
-  \let s3 = s2 + Normal in if s3 < 0.0 then 0.0 else s3"
+  "main = draw s1 = 3.0 + Normal in if s1 < 0.0 then 0.0 else \
+  \draw s2 = s1 + Normal in if s2 < 0.0 then 0.0 else \
+  \draw s3 = s2 + Normal in if s3 < 0.0 then 0.0 else s3"
 
 gatedRecursiveSrc :: String
 gatedRecursiveSrc =
-  "walk s = let s2 = s + Normal in if s2 < 0.0 then s2 else walk s2\n\
+  "walk s = draw s2 = s + Normal in if s2 < 0.0 then s2 else walk s2\n\
   \main = walk 3.0"
 
 -- Curried: the recursive declaration takes two parameters. Its outer lambda
@@ -1200,7 +1200,7 @@ gatedRecursiveSrc =
 -- compiled a probability function for it regardless.
 gatedCurriedRecursiveSrc :: String
 gatedCurriedRecursiveSrc =
-  "sim s k = let s2 = s + k * Normal in if s2 < 0.0 then s2 else sim s2 k\n\
+  "sim s k = draw s2 = s + k * Normal in if s2 < 0.0 then s2 else sim s2 k\n\
   \main = sim 3.0 1.0"
 
 gatedContinuousFeedsFreshDrawTests :: TestTree
@@ -1252,14 +1252,14 @@ consPatternOnADTSrc = unlines
   , "data Object = Object color::Color"
   , "data Scene  = List hd::Object, tl::Scene depth 10"
   , "neural extractCLEVR :: (Symbol -> Scene)"
-  , "main symbol = let h : t = extractCLEVR symbol in (color h == Red)"
+  , "main symbol = draw h : t = extractCLEVR symbol in (color h == Red)"
   ]
 
 -- A cons pattern against a tuple, where the failing constraint is the
 -- desugared head/tail InjF itself -- so the message additionally names the
 -- pattern the user wrote rather than the binder the parser generated for it.
 consPatternOnTupleSrc :: String
-consPatternOnTupleSrc = "main = let h : t = (1.0, 2.0) in h"
+consPatternOnTupleSrc = "main = draw h : t = (1.0, 2.0) in h"
 
 -- | The rejection message for an ill-typed program.
 -- A real source name is passed, not "", because the position is rendered

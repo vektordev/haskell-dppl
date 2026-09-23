@@ -16,4 +16,4 @@ goOne s found = if isEmpty s then found else (if isGreen (color (obj s)) then (i
 
 exactlyOneGreen s = goOne s False
 
-main sym = let scene = readScene sym in if exactlyOneGreen scene then 1 else 0
+main sym = draw scene = readScene sym in if exactlyOneGreen scene then 1 else 0

@@ -1,1 +1,1 @@
-main = let x = Uniform in (x, x+x)
+main = draw x = Uniform in (x, x+x)

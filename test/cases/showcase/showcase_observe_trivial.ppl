@@ -3,8 +3,8 @@
 -- out directly, with the convention `Just x = right x`, `Nothing = left ()`
 -- (observe-partials-umbrella N3).
 --
---   observe base pred  ==  let v = base in if pred v then right v else left ()
+--   observe base pred  ==  draw v = base in if pred v then right v else left ()
 --
 -- The base must be let-bound: it occurs twice, and a probabilistic base spliced
 -- in twice would be two independent draws.
-main = let v = if Uniform < 0.5 then 1 else 0 in if v == 1 then right v else left ()
+main = draw v = if Uniform < 0.5 then 1 else 0 in if v == 1 then right v else left ()

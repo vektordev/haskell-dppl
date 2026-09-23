@@ -82,7 +82,7 @@ The `of ...` clause enumerates the possible outputs of a neural network. When a 
 ```spll
 data FList = FCons hd::Float, tl::FList | FNil depth 2
 neural genList :: (Symbol -> FList) of _
-main sym = let xs = genList sym in if isFNil xs then 0.0 else hd xs
+main sym = draw xs = genList sym in if isFNil xs then 0.0 else hd xs
 ```
 
 An explicit `of <N> <binder>.{...}` overrides the default per declaration (and is required when a field's domain can't be auto-derived, e.g. an `Int`), where `<binder>` is the self-reference name used inside the braces:

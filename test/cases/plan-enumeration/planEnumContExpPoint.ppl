@@ -3,4 +3,4 @@
 -- at dim 1; the False outcome has full mass at dim 0.
 neural readObj :: (Symbol -> (Bool, Float))
 
-main sym = let o = readObj sym in if exp (snd o) == 2.0 then 1 else 0
+main sym = draw o = readObj sym in if exp (snd o) == 2.0 then 1 else 0

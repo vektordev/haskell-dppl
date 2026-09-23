@@ -77,7 +77,7 @@ symbol :: MonadParser m => String -> m String
 symbol = L.symbol sc
 
 reserved :: [String]
-reserved = ["data", "if", "then", "else", "let", "in", "theta", "subtree", "error", "observe", "ThetaTree", "Left", "Right", "Real", "Uniform", "Normal"]
+reserved = ["data", "if", "then", "else", "let", "draw", "define", "in", "theta", "subtree", "error", "observe", "ThetaTree", "Left", "Right", "Real", "Uniform", "Normal"]
 
 keyword :: MonadParser m => String -> m String
 keyword kw = lexeme $ try (string kw <* notFollowedBy (alphaNumChar <|> char '\'' <|> char '_'))
@@ -112,16 +112,65 @@ pIfThenElse adts_ = do
   c <- pExpr adts_
   return (ifThenElse a b c)
 
-pLetIn :: MonadParser m => [ADTDecl] -> m Expr
-pLetIn adts_ = do
-  _ <- keyword "let"
+-- | The two binding forms (design @let-binding-semantics@). They differ only
+-- for a stochastic right-hand side, and there they give different
+-- distributions, which is why neither is spelled @let@: the keyword makes the
+-- author choose.
+data BindingKind
+  = DrawBinding    -- ^ @draw x = e in b@: one sample of @e@, shared by every use of @x@
+  | DefineBinding  -- ^ @define x = e in b@: @x@ names @e@ itself; every use is a fresh draw
+
+-- | How a binding kind attaches a name to a value inside a body.
+--
+-- @draw@ is the eager, single-sample reading: an 'Apply' of a 'Lambda', so the
+-- argument is evaluated once and the parameter stands for that one value.
+--
+-- @define@ is the lazy reading, eliminated right here by capture-avoiding
+-- substitution: the result is structurally what the author would have got by
+-- writing @e@ at every use site, so no later pass ever sees the binding. That
+-- is deliberate rather than a shortcut -- every binding that survives parsing
+-- is a shared draw, so a pass that needs to tell a shared random source from a
+-- fresh one (plan factorization's 'planFactorExternals' guard) can key on the
+-- 'Apply'/'Lambda' shape alone.
+bindWith :: BindingKind -> String -> Expr -> Expr -> Expr
+bindWith DrawBinding = letIn
+bindWith DefineBinding = substituteVar
+
+pBinding :: MonadParser m => [ADTDecl] -> m Expr
+pBinding adts_ = do
+  kind <- choice
+    [ DrawBinding <$ keyword "draw"
+    , DefineBinding <$ keyword "define"
+    , retiredLet
+    ]
   lhs <- pExpr adts_
   _ <- symbol "="
   definition <- pExpr adts_
   _ <- keyword "in"
   scope <- pExpr adts_
-  destr <- letInDestructor lhs
+  destr <- letInDestructor (bindWith kind) lhs
   return $ stampSynthesized lhs (destr definition scope)
+
+-- | @let@ was the single binding form before @draw@\/@define@ split it in two.
+-- It stays reserved so that old source is refused with the choice spelled out.
+--
+-- The refusal is *registered* (a delayed error) rather than thrown, and parsing
+-- carries on reading the binding as a @draw@. A thrown failure would not reach
+-- the user: declarations are parsed under 'try', so it is backtracked over and
+-- replaced by an unhelpful "unexpected 'm'" at the start of the declaration.
+-- A registered error survives, is reported at the @let@ itself, and fails the
+-- parse all the same -- and every @let@ in the file is reported, not only the
+-- first.
+retiredLet :: MonadParser m => m BindingKind
+retiredLet = do
+  off <- getOffset
+  _ <- keyword "let"
+  registerParseError $ FancyError off $ Set.singleton $ ErrorFail $
+       "`let` is no longer a binding form; choose one of\n"
+    ++ "  draw x = e in body     -- x is one sample of e, shared by every use of x\n"
+    ++ "  define x = e in body   -- x stands for e itself; every use of x is an independent draw\n"
+    ++ "(`draw` is what `let` used to mean)"
+  return DrawBinding
 
 -- | Give the nodes 'letInDestructor' *synthesized* a span pointing back at the
 -- pattern the user actually wrote.
@@ -179,26 +228,31 @@ withSpan p = do
 
 -- Parses the identifier part of the letIn and constructs a accessors for letIns
 -- Return type is a \v, b -> Let n = v in b
-letInDestructor :: MonadParser m => Expr -> m (Expr -> Expr -> Expr)
-letInDestructor (Expr _ (Var name)) = return $ letIn name
-letInDestructor (Expr _ (InjF (Named "TCons") [a, b])) = do
-  a' <- letInDestructor a
-  b' <- letInDestructor b
+--
+-- @bind@ attaches a name to a value in a body -- 'bindWith' of the binding's
+-- kind -- and is used for the generated binders too, so a destructuring
+-- @define@ stays lazy all the way down: @define (a, b) = e in body@ reads each
+-- of @a@ and @b@ from its own draw of @e@.
+letInDestructor :: MonadParser m => (String -> Expr -> Expr -> Expr) -> Expr -> m (Expr -> Expr -> Expr)
+letInDestructor bind (Expr _ (Var name)) = return $ bind name
+letInDestructor bind (Expr _ (InjF (Named "TCons") [a, b])) = do
+  a' <- letInDestructor bind a
+  b' <- letInDestructor bind b
   return $ \v body -> a' (tfst v) (b' (tsnd v) body)
-letInDestructor (Expr _ (InjF (Named "left") [x])) = do
-  x' <- letInDestructor x
+letInDestructor bind (Expr _ (InjF (Named "left") [x])) = do
+  x' <- letInDestructor bind x
   return $ \v -> x' (sfromLeftPartial v)
-letInDestructor (Expr _ (InjF (Named "right") [x])) = do
-  x' <- letInDestructor x
+letInDestructor bind (Expr _ (InjF (Named "right") [x])) = do
+  x' <- letInDestructor bind x
   return $ \v -> x' (sfromRightPartial v)
-letInDestructor (Expr _ (Constant (VList EmptyList))) = return $ \v b -> ifThenElse (isNull v) b (Expr makeTypeInfo (Constant (VError "RHS of letin is longer than LHS")))
-letInDestructor (Expr _ (InjF (Named "Cons") [x, xs])) = do
-  x' <- letInDestructor x
-  xs' <- letInDestructor xs
+letInDestructor _ (Expr _ (Constant (VList EmptyList))) = return $ \v b -> ifThenElse (isNull v) b (Expr makeTypeInfo (Constant (VError "RHS of letin is longer than LHS")))
+letInDestructor bind (Expr _ (InjF (Named "Cons") [x, xs])) = do
+  x' <- letInDestructor bind x
+  xs' <- letInDestructor bind xs
   id_ <- demandUniqueNumber
   let varName = "p_d" ++ show id_
-  return $ \v body -> letIn varName v (x' (lhead (var varName)) (xs' (ltail (var varName)) body))
-letInDestructor _ = fail "LHS of a letIn sould be an identifier or a complex type of identifiers"
+  return $ \v body -> bind varName v (x' (lhead (var varName)) (xs' (ltail (var varName)) body))
+letInDestructor _ _ = fail "the left-hand side of a binding should be an identifier or a pattern of identifiers"
 
 -- | @observe base pred@ -- conditioning as a total, Maybe-returning expression
 -- (design mar-sum-types-observe §2/§5). Both arguments are atoms, as for any
@@ -661,7 +715,7 @@ atom adts_ = choice [
 keywordExpr :: MonadParser m => [ADTDecl] -> m Expr
 keywordExpr adts_ = dbg "keywordExpr" $ choice [
     pIfThenElse adts_,
-    pLetIn adts_,
+    pBinding adts_,
     pLambda adts_,
     pTheta adts_,
     pSubtree adts_,

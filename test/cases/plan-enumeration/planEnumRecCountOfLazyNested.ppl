@@ -20,4 +20,4 @@ neural readScene :: (Symbol -> Scene) of 7x.{Empty | SCons {NoObj | Obj {Red|Gre
 
 numRed s = if isEmpty s then 0.0 else (if isObj (obj s) then (if isRed (color (obj s)) then 1.0 else 0.0) else 0.0) + numRed (rest s)
 
-main sym = let c = Uniform < 0.5 in let scene = readScene sym in if c then (if numRed scene > 1.5 then 1 else 0) else 0
+main sym = draw c = Uniform < 0.5 in draw scene = readScene sym in if c then (if numRed scene > 1.5 then 1 else 0) else 0

@@ -1,1 +1,1 @@
-main = let x = Uniform in (x < 0.3, x < 0.7)
+main = draw x = Uniform in (x < 0.3, x < 0.7)

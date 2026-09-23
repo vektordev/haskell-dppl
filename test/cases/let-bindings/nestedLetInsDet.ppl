@@ -1,1 +1,1 @@
-main = let a = 1.0 in let b = 2.0 in a + b + Uniform
+main = draw a = 1.0 in draw b = 2.0 in a + b + Uniform

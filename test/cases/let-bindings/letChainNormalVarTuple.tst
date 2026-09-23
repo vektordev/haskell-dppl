@@ -6,7 +6,7 @@
 -- failed comparison zeroes the probability through an indicator without
 -- raising the structural flag. That is the long-standing behaviour of this
 -- path, not something this program's fix introduced -- the Uniform twin
--- (`let x = Uniform in let y = x + 1.0 in (y > 1.5, y)`), which compiles
+-- (`draw x = Uniform in draw y = x + 1.0 in (y > 1.5, y)`), which compiles
 -- unchanged, answers identically.
 backends: interpreter, julia, python, batched
 p((True, 0.5))=(0.3520653, 1.0, False)

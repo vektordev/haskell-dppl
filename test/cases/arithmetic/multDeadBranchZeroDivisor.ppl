@@ -1,1 +1,1 @@
-main = if Uniform < 0.5 then (let x = 0.0 in Uniform * x) else Uniform
+main = if Uniform < 0.5 then (draw x = 0.0 in Uniform * x) else Uniform

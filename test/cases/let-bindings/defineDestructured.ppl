@@ -1,0 +1,5 @@
+-- Design let-binding-semantics: a destructuring `define` stays lazy all the way
+-- down -- each name bound by the pattern reads its own draw of the definition.
+-- The definition is a perfectly correlated pair, but `a` and `b` come from
+-- different draws of it, so they are independent fair coins.
+main = define (a, b) = (if Uniform < 0.5 then (True, True) else (False, False)) in (a, b)

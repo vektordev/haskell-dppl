@@ -1,2 +1,2 @@
 contrib u x = if u then x else 0
-main = let u = Uniform < 0.3 in let v = contrib u 1 in v ++ (contrib u 1)
+main = draw u = Uniform < 0.3 in draw v = contrib u 1 in v ++ (contrib u 1)

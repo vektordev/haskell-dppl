@@ -1,3 +1,3 @@
 neural nn :: (Symbol -> (Bool, Bool)) of _
-main sym = let s = nn sym in
+main sym = draw s = nn sym in
   if isLeft (left [if Uniform < 0.5 then 2 else 1]) then [[False]] else [[False]]

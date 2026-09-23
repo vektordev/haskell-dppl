@@ -1,1 +1,1 @@
-main = let x = Normal in if x > 0.0 then right x else left ()
+main = draw x = Normal in if x > 0.0 then right x else left ()

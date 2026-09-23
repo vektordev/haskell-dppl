@@ -1,1 +1,1 @@
-main = let left a = left 1.0 in let right b = right 2.0 in (Uniform + a) + b
+main = draw left a = left 1.0 in draw right b = right 2.0 in (Uniform + a) + b

@@ -13,9 +13,9 @@ dice sides =
 
 -- set-witness continuous inference: comparisons on both sides of a
 -- stochastic let-binding, forcing interval-witness compilation
-absNormal = let x = Normal in if x < 0.0 then 0.0 - x else x
+absNormal = draw x = Normal in if x < 0.0 then 0.0 - x else x
 
-absNormal2 = let y = Normal * 2.0 in if y < 0.0 then 0.0 - y else y
+absNormal2 = draw y = Normal * 2.0 in if y < 0.0 then 0.0 - y else y
 
 mixture3 p1 p2 mu1 mu2 mu3 =
   if Uniform < p1
@@ -37,9 +37,9 @@ bucket x =
   else 9.0
 
 main sym =
-  let a = absNormal in
-  let b = absNormal2 in
-  let m = mixture3 0.2 0.5 (0.0 - 3.0) 0.0 3.0 in
-  let d = dice 8.0 in
-  let bk = bucket Uniform in
+  draw a = absNormal in
+  draw b = absNormal2 in
+  draw m = mixture3 0.2 0.5 (0.0 - 3.0) 0.0 3.0 in
+  draw d = dice 8.0 in
+  draw bk = bucket Uniform in
   a + b + m + d + bk

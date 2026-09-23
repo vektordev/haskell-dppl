@@ -1,2 +1,2 @@
 neural nn :: (Symbol -> Bool) of _
-main sym = let s = nn sym in if s then (if Uniform < 0.5 then 2 else 1) else 0
+main sym = draw s = nn sym in if s then (if Uniform < 0.5 then 2 else 1) else 0

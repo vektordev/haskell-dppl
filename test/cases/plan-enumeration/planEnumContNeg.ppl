@@ -4,4 +4,4 @@
 -- with N(0,1), p(1) = Phi(0.3) = 0.617911.
 neural readObj :: (Symbol -> (Bool, Float))
 
-main sym = let o = readObj sym in if 0.5 - (snd o) > 0.2 then 1 else 0
+main sym = draw o = readObj sym in if 0.5 - (snd o) > 0.2 then 1 else 0

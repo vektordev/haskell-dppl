@@ -23,6 +23,8 @@ module SPLL.Lang.Lang (
 , setSubExprs
 , containedVars
 , varsOfExpr
+, freeVarsExpr
+, substituteVar
 , containsRandomSource
 , predicateExpr
 , predicateFlat
@@ -98,6 +100,57 @@ predicateProg f (Program decls _ _ _) = and (map (predicateExpr f . snd) decls)
 
 predicateExpr :: (Expr -> Bool) -> Expr -> Bool
 predicateExpr f e = f e && and (map (predicateExpr f) (getSubExprs e))
+
+-- | The variables occurring free in an expression. 'Lambda' is the only binder
+-- in 'ExprF' -- a surface @draw@ is already an 'Apply' of a 'Lambda' by the
+-- time anything sees it -- so this is the whole scoping story.
+freeVarsExpr :: Expr -> Set.Set String
+freeVarsExpr (Expr _ (Var v)) = Set.singleton v
+freeVarsExpr (Expr _ (Lambda x b)) = Set.delete x (freeVarsExpr b)
+freeVarsExpr (Expr _ f) = foldr (Set.union . freeVarsExpr) Set.empty f
+
+-- | Every name an expression mentions, free or bound.
+allNamesExpr :: Expr -> Set.Set String
+allNamesExpr (Expr _ (Var v)) = Set.singleton v
+allNamesExpr (Expr _ (Lambda x b)) = Set.insert x (allNamesExpr b)
+allNamesExpr (Expr _ f) = foldr (Set.union . allNamesExpr) Set.empty f
+
+-- | @substituteVar x r e@ is @e[x := r]@: every free occurrence of @x@ in @e@
+-- replaced by its own copy of @r@. Capture-avoiding: a 'Lambda' in @e@ whose
+-- binder is free in @r@, and under which @x@ occurs, has its binder renamed to
+-- a name mentioned nowhere in @r@ or in its body before the substitution
+-- descends. Renaming is pure (the fresh name is picked by scanning, not drawn
+-- from a supply), so the result is a function of the inputs alone.
+--
+-- Each occurrence gets @r@ verbatim, annotations and source spans included, so
+-- a diagnostic on a substituted copy points at the definition the user wrote.
+-- This is what the lazy @define@ binding desugars to: every use of the name is
+-- the defining expression written out again, and so an independent draw.
+substituteVar :: String -> Expr -> Expr -> Expr
+substituteVar x r = go
+  where
+    fvR = freeVarsExpr r
+    go e@(Expr _ (Var v))
+      | v == x = r
+      | otherwise = e
+    go e@(Expr t (Lambda y b))
+      | y == x = e
+      | not (x `Set.member` freeVarsExpr b) = e
+      | y `Set.member` fvR =
+          let avoid = Set.unions [fvR, allNamesExpr b, Set.singleton x]
+              y' = head [n | i <- [0 :: Int ..], let n = y ++ "_s" ++ show i, not (n `Set.member` avoid)]
+          in Expr t (Lambda y' (go (renameFree y y' b)))
+      | otherwise = Expr t (Lambda y (go b))
+    go (Expr t f) = Expr t (fmap go f)
+    -- Rename free occurrences only; each keeps its own annotation. The new name
+    -- is mentioned nowhere in the body, so no binder there can capture it.
+    renameFree old new e@(Expr t (Var v))
+      | v == old = Expr t (Var new)
+      | otherwise = e
+    renameFree old new e@(Expr t (Lambda z b))
+      | z == old = e
+      | otherwise = Expr t (Lambda z (renameFree old new b))
+    renameFree old new (Expr t f) = Expr t (fmap (renameFree old new) f)
 
 varsOfExpr :: Expr -> Set.Set String
 varsOfExpr expr = case node expr of

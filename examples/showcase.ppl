@@ -129,13 +129,19 @@ dice sides =
 
 
 -- ============================================================
--- LET-IN BINDINGS
+-- BINDINGS: draw and define
 -- ============================================================
--- let <pattern> = <expr> in <body>
+-- draw <pattern> = <expr> in <body>    one sample, shared by every use
+-- define <pattern> = <expr> in <body>  every use is a fresh draw
+--
+-- The two agree for a deterministic <expr>. For a random one they don't:
+-- `draw c = Uniform < 0.5 in (c, c)` is one coin read twice, while
+-- `define c = Uniform < 0.5 in (c, c)` is two independent coins.
+-- The notes below are about `draw`.
 --
 -- Stochastic bindings must be used *exactly once* in
 -- probability/integrate modes (linearity constraint).
--- Using a stochastic let-binding twice causes a forward-
+-- Using a stochastic draw-binding twice causes a forward-
 -- chaining failure at compile time.
 --
 -- Destructuring patterns (tuple, list-cons, Either branch)
@@ -144,20 +150,20 @@ dice sides =
 -- (A stochastic RHS there triggers a forward-chaining error.)
 
 -- Single-use stochastic binding (safe)
-shiftedSample = let u = Uniform in u + 1.0
+shiftedSample = draw u = Uniform in u + 1.0
 
 -- Deterministic binding reused twice (fine -- no randomness)
-reuseConst = let c = 2.0 in (Uniform * c) + c
+reuseConst = draw c = 2.0 in (Uniform * c) + c
 
 -- Tuple destructuring with deterministic RHS
-pairSum = let (a, b) = (1.0, 2.0) in (Uniform + a) + b
+pairSum = draw (a, b) = (1.0, 2.0) in (Uniform + a) + b
 
 -- List-cons destructuring with deterministic RHS
-listExample = let x : xs = [1.0, 0.5, 0.25] in x + head xs
+listExample = draw x : xs = [1.0, 0.5, 0.25] in x + head xs
 
 -- Either destructuring: asserts the constructor before binding
-fromLeftBound  = let left  a = left  2.5 in Uniform + a
-fromRightBound = let right b = right 1.5 in Normal  + b
+fromLeftBound  = draw left  a = left  2.5 in Uniform + a
+fromRightBound = draw right b = right 1.5 in Normal  + b
 
 
 -- ============================================================
@@ -168,7 +174,7 @@ fromRightBound = let right b = right 1.5 in Normal  + b
 -- Immediate application: (\x -> body)(arg)
 
 shifted     = (\x -> x + 1.0)(Uniform)
-applyStored = let f = \x -> x * 2.0 in f Uniform
+applyStored = draw f = \x -> x * 2.0 in f Uniform
 multiParam  = (\x y -> x + y) Normal Uniform
 
 
@@ -210,7 +216,7 @@ shiftEither e = mapEither (\x -> x + 1.0) (\y -> y + (-1.0)) e
 -- `left ()` (Nothing) where it does not.  Both arguments are
 -- atoms, so a computed base or a lambda predicate needs parens.
 -- It is surface sugar -- `observe e (\v -> p)` is exactly
--- `let v = e in if p then right v else left ()`.
+-- `draw v = e in if p then right v else left ()`.
 -- The Maybe-valued result is already a proper distribution:
 --   p(Right v)   -- mass/density of a kept value
 --   p(Left ())   -- the rejected mass; the two sum to 1

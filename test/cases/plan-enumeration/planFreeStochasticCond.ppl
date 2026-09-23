@@ -10,5 +10,5 @@
 --   p(2) = 0.5
 neural readObj :: (Symbol -> (Bool, Float))
 
-main sym = let o = readObj sym in
+main sym = draw o = readObj sym in
   if Normal > 0.0 then (if fst o then 1 else 0) else 2

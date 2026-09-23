@@ -1,1 +1,1 @@
-main = let x = Normal in exp(x)
+main = draw x = Normal in exp(x)

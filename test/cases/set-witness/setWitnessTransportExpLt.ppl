@@ -2,4 +2,4 @@
 -- holds. The upper endpoint -1 clamps onto exp's image boundary 0, transports
 -- to -inf, and the True world (-inf, -inf) measures zero -- impossible, not
 -- NaN.
-main = let x = Normal in if exp x < (0.0 - 1.0) then 1.0 else 0.0
+main = draw x = Normal in if exp x < (0.0 - 1.0) then 1.0 else 0.0

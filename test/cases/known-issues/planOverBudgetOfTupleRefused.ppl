@@ -9,7 +9,7 @@
 -- explicitly rejected (the user's 2026-09-16 decision on
 -- of-annotation-forces-dense-enumeration), so the fix is plan-traversal
 -- coverage of the tuple, not re-opening dense enumeration. Nested spellings
--- (`let c = .. in let scene = .. in (numRed scene, c)`, or `numRed scene +
+-- (`draw c = .. in draw scene = .. in (numRed scene, c)`, or `numRed scene +
 -- (if c then 1.0 else 0.0)`, refused on `InjF plus`) fail the same way.
 -- Generate-only compiles (`--noProbability --noIntegrate`) still succeed.
 data Color = Red | Green | Blue
@@ -20,4 +20,4 @@ neural readScene :: (Symbol -> Scene) of 7x.{Empty | SCons {NoObj | Obj {Red|Gre
 
 numRed s = if isEmpty s then 0.0 else (if isObj (obj s) then (if isRed (color (obj s)) then 1.0 else 0.0) else 0.0) + numRed (rest s)
 
-main sym = let scene = readScene sym in (numRed scene, numRed scene)
+main sym = draw scene = readScene sym in (numRed scene, numRed scene)

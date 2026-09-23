@@ -10,4 +10,4 @@
 -- one-sided program's is a single tail -- the case that distinguishes
 -- "the wildcard drops the point constraint and keeps the interval" from
 -- "the wildcard marginalises everything".
-main = let v = Normal in if v > 0.0 then (if v < 1.0 then right v else left ()) else left ()
+main = draw v = Normal in if v > 0.0 then (if v < 1.0 then right v else left ()) else left ()
