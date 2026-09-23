@@ -26,6 +26,7 @@ module SPLL.IntermediateRepresentation (
 , SemiringFamily(..)
 , defaultCompilerConfig
 , defaultMaterializationCardinality
+, defaultMarginalSlots
 , irMap
 , irDescend
 , irDescendM
@@ -534,6 +535,14 @@ data CompilerConfig = CompilerConfig {
   --  Uses local probability of the branch,given that the execution arrives at that branching point
   topKThreshold :: Maybe Double,
   countBranches :: Bool,
+  -- The per-function budget on ENUMERATED observation slots (design
+  -- witnessed-per-query-capability; CLI --marginalSlots, default 4). A function
+  -- with k enumerated slots has 2^k masks over them, so the budget is what keeps
+  -- per-mask work bounded; over budget, the function gets no mask table and is
+  -- reported as over budget rather than analysed. Sits next to
+  -- materializationCardinality because it is the same kind of object: a
+  -- decidable cost ceiling the user may raise, not a correctness gate.
+  marginalSlots :: Int,
   verbose :: Int,
   optimizerLevel :: Int,
   pruneAnyChecks :: Bool,
@@ -738,8 +747,13 @@ data SemiringFamily = SRSumProduct
 defaultMaterializationCardinality :: Int
 defaultMaterializationCardinality = 10000
 
+-- | Default 'marginalSlots' budget: 16 masks per function, the largest the
+-- corpus needs and cheap to compile.
+defaultMarginalSlots :: Int
+defaultMarginalSlots = 4
+
 defaultCompilerConfig :: CompilerConfig
-defaultCompilerConfig = CompilerConfig {countBranches = False, topKThreshold = Nothing, optimizerLevel = 2, verbose = 0, pruneAnyChecks = False, noIntegrate=False, noProbability=False, noGenerate=False, showIntermediates=False, checkQueryType=True, batched=False, logSpace=False, optStats=False, materializationCardinality=defaultMaterializationCardinality, extraSemirings=[]}
+defaultCompilerConfig = CompilerConfig {countBranches = False, topKThreshold = Nothing, optimizerLevel = 2, verbose = 0, pruneAnyChecks = False, noIntegrate=False, noProbability=False, noGenerate=False, showIntermediates=False, checkQueryType=True, batched=False, logSpace=False, optStats=False, materializationCardinality=defaultMaterializationCardinality, marginalSlots=defaultMarginalSlots, extraSemirings=[]}
 --3: convert algortihm-and-type-annotated Exprs into abstract representation of explicit computation:
 --    Fold enum ranges, algorithms, etc. into a representation of computation that can be directly converted into code.
 

@@ -7,6 +7,7 @@ module SPLL.Typing.AlgebraicDataTypes (
   implicitFunctionsToEnv,
   lookupRType,
   fieldAccessorOwners,
+  findField,
   anyCtorTestMessage,
   accessorMismatchMessage,
   adtCdfMessage

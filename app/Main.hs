@@ -7,7 +7,8 @@ import SPLL.Parser
 import Data.Char (toLower)
 import Text.Megaparsec.Error (errorBundlePretty)
 import SPLL.Lang.Types (CompilerError)
-import SPLL.Prelude (runProb, runInteg, runGen, compile, batchedRefusal)
+import SPLL.Prelude (runProb, runInteg, runGen, compile, batchedRefusal, marginalReport, renderMarginalReport)
+import SPLL.Lang.Lang (adts)
 import Control.Monad.Random (evalRandIO)
 import qualified SPLL.CodeGenJulia
 import qualified SPLL.CodeGenPyTorch
@@ -36,6 +37,8 @@ data GlobalOpts = GlobalOpts {
   logSpaceMode :: Bool,
   optStatsMode :: Bool,
   extraSemiringsMode :: [SemiringFamily],
+  marginalSlotsBudget :: Int,
+  marginalsReport :: Bool,
   commandOpts :: CommandOpts
 }
 
@@ -167,6 +170,15 @@ parseGlobalOpts = GlobalOpts
             ( long "semiring"
             <> metavar "FAMILY,..."
             <> help "Compile extra probability-mode entry points alongside the ordinary one (task semiring-parametric-marginals), one per comma-separated family: 'map' adds \"<name>_map\", the probability of the single most likely derivation of the query value (MAP/Viterbi) instead of the total over every derivation. Lands in the SAME output file as the ordinary generate/probability/integrate functions. Probability-mode only (no generate/integrate/normal_params variant), and not composed with --topKCutoff."))
+        <*> option auto
+            ( long "marginalSlots"
+            <> metavar "N"
+            <> value defaultMarginalSlots
+            <> showDefault
+            <> help "Budget on how many ENUMERATED observation slots one function may have before the per-mask analysis declines it (design witnessed-per-query-capability). A function with k enumerated slots has 2^k masks, so this bounds per-mask work; over budget, the function is reported as over budget and compiles as it does today.")
+        <*> switch
+            ( long "marginals"
+            <> help "Print the observation-mask report before running the subcommand: per function, its leaf observation slots with their accessor paths, the correlation classes, which slots are enumerated and why, and the per-mask capability table (the projected pType of each masked program). Analysis only -- it changes nothing about what is compiled.")
         <*> hsubparser (
           command "compile" (info parseCompileOpts (progDesc "Compiles the program with inference interface into target language"))
           <> command "generate" (info parseGenerateOpts (progDesc "Runs the generate pass of the program"))
@@ -233,9 +245,10 @@ main = transpile =<< execParser opts
             <> header "Haskell DPPL" )
 
 transpile :: GlobalOpts -> IO ()
-transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl, pruneAnys=anyChecks, noInteg=nInteg, noProb=nProb, noGen=nGen, debugIntermediates=dbgInter, noTypeCheck=nTypeChk, batchedMode=batchedFlag, logSpaceMode=logSpaceFlag, optStatsMode=optStatsFlag, extraSemiringsMode=extraSR}) = do
+transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl, pruneAnys=anyChecks, noInteg=nInteg, noProb=nProb, noGen=nGen, debugIntermediates=dbgInter, noTypeCheck=nTypeChk, batchedMode=batchedFlag, logSpaceMode=logSpaceFlag, optStatsMode=optStatsFlag, extraSemiringsMode=extraSR, marginalSlotsBudget=mSlots, marginalsReport=wantMarginals}) = do
   prog <- parseProgram inFile
-  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen, showIntermediates=dbgInter, checkQueryType=not nTypeChk, batched=batchedFlag, logSpace=logSpaceFlag, optStats=optStatsFlag, materializationCardinality=defaultMaterializationCardinality, extraSemirings=extraSR})
+  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen, showIntermediates=dbgInter, checkQueryType=not nTypeChk, batched=batchedFlag, logSpace=logSpaceFlag, optStats=optStatsFlag, materializationCardinality=defaultMaterializationCardinality, marginalSlots=mSlots, extraSemirings=extraSR})
+  reportMarginals wantMarginals conf prog
   case options of
     CompileOpts{language=lang, outputFile=outFile, trunc=trnc} -> do
       case codeGenToLang lang trnc conf prog of
@@ -334,3 +347,15 @@ reportBatchedEligibility conf prog
     -- run until the message is demanded -- force it inside the 'try'.
     forceDiag m@(Just s) = length s `seq` m
     forceDiag m = m
+
+-- | The @--marginals@ report (task observation-mask-analysis): the observation
+-- tree's leaf slots, their correlation classes, which are enumerated and why,
+-- and the per-mask capability table. Printed before the subcommand runs, since
+-- it is a statement about the program rather than about what is compiled from
+-- it.
+reportMarginals :: Bool -> CompilerConfig -> Program -> IO ()
+reportMarginals False _ _ = return ()
+reportMarginals True conf prog =
+  case marginalReport conf prog of
+    Left err -> handleError err
+    Right rs -> putStr (renderMarginalReport (adts prog) rs)

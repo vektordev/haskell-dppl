@@ -12,6 +12,7 @@ parameterCount,
 hasAnyExcept,
 isHigherOrder,
 isFieldConstructor,
+isObsConstructor,
 getFunctionParamIdx,
 renameDecl
 ) where
@@ -475,12 +476,35 @@ renameDecl old new FDecl {contract=sig, inputVars=inVars, outputVars=outVars, bo
 -- handled correctly by the single-probabilistic-parameter InjF path.
 isFieldConstructor :: [ADTDecl] -> String -> Bool
 isFieldConstructor adtsDecl name =
+  isObsConstructor adtsDecl name && constructorArity adtsDecl name >= 2
+
+-- | True if a named InjF is a /constructor/: every input is independently
+-- recoverable from the single output via a deconstructing inverse. This is
+-- 'isFieldConstructor' without its arity-2 floor, so it also admits the
+-- single-field constructors @left@ and @right@ and one-field user ADT
+-- constructors.
+--
+-- The two differ because they answer different questions. 'isFieldConstructor'
+-- asks "does this need product inference?", which a single field does not.
+-- This one asks "is this a constructor application the observation tree should
+-- descend through?" (task @observation-mask-analysis@) — and it must, because
+-- a query @Left ANY@ against a @left (...)@ tree masks every leaf under the
+-- tag, exactly as the design requires.
+isObsConstructor :: [ADTDecl] -> String -> Bool
+isObsConstructor adtsDecl name =
   case lookup name (globalFEnv adtsDecl) of
     Just (FPair FDecl{inputVars=ins, outputVars=[_]} invs) ->
-         length ins >= 2
+         not (null ins)
       && length invs == length ins
       && all (\FDecl{inputVars=iv, deconstructing=d} -> length iv == 1 && d) invs
     _ -> False
+
+-- | The number of fields of a constructor InjF (0 for anything else).
+constructorArity :: [ADTDecl] -> String -> Int
+constructorArity adtsDecl name =
+  case lookup name (globalFEnv adtsDecl) of
+    Just (FPair FDecl{inputVars=ins} _) -> length ins
+    _                                   -> 0
 
 isHigherOrder :: [ADTDecl] -> String -> Bool
 isHigherOrder adtsDecl name =

@@ -19,6 +19,7 @@ import Control.Monad.Random.Lazy (evalRandIO)
 import SPLL.Parser
 import TestParser (parserTests)
 import TestInternals (internalsTests, slowInternalsTests)
+import TestObservationMask (observationMaskTests)
 import TestRejection (rejectionTests)
 import TestModality (modalityTests)
 import TestModalityInfer (modalityInferTests)
@@ -537,6 +538,7 @@ main = do
     [ specTests
     , parserTests
     , internalsTests
+    , observationMaskTests
     , shrinkerTests
     , neuralGeneratorTests
     , arrowGeneratorTests
