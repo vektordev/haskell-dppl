@@ -1,0 +1,11 @@
+-- Verified at commit 8bb0a44 on dev: a function that forwards its predicate
+-- parameter to `observe` is refused, although the same program with the
+-- predicate fixed inside the function (`obs b = observe b (\w -> w == 1)`)
+-- compiles, and so does `observe` with a named predicate at the call site
+-- (either-maybe/observeKeywordNamedPred). The desugared condition `p v` is an
+-- application of a parameter, which reaches setWitnessApply as a tagged
+-- invocation. This is what blocks a generic
+-- `observeAlso m p = if isRight m then observe (fromRightPartial m) p else left ()`
+-- (task observe-predicate-as-argument). Idealized, as observeKeyword:
+--   p(Right 1) = (0.3, 0.0), p(Left ()) = (0.7, 0.0)
+expect-failure: diagnostic "tagged invocation"

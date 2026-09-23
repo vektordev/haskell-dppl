@@ -1,0 +1,1 @@
+main = draw m = observe Normal (\u -> u > 0.0) in if isRight m then observe (fromRightPartial m) (\w -> w < 1.0) else left ()

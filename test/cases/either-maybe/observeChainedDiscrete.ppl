@@ -1,0 +1,8 @@
+-- A second observation chained onto the Maybe a first one produced -- the
+-- "observeAlso" of design observe-partials-umbrella's 2026-09-16 review note,
+-- spelled first-order: the predicate is fixed inside the function, not passed
+-- in. The inner observe keeps 1 (0.3) and 2 (0.7 * 0.5); the outer one keeps
+-- only 1, so its Nothing collects the inner Nothing (0.35) plus the rejected 2
+-- (0.35). The Maybe stays proper -- no renormalisation (umbrella N2b).
+observeIsOne m = if isRight m then observe (fromRightPartial m) (\w -> w == 1) else left ()
+main = observeIsOne (observe (if Uniform < 0.3 then 1 else if Uniform < 0.5 then 2 else 0) (\u -> u > 0))

@@ -1,0 +1,2 @@
+obs b p = observe b p
+main = obs (if Uniform < 0.3 then 1 else 0) (\w -> w == 1)
