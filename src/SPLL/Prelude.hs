@@ -57,6 +57,9 @@ module SPLL.Prelude
   , readNN
   , fix
   , compile
+  , compileRTyped
+  , rtypedProgram
+  , chainNamedProgram
   , batchedRefusal
   , runGen
   , runProb
@@ -75,15 +78,22 @@ module SPLL.Prelude
   , pPrintIfMoreVerbose
   , printStage
   , printStageIR
+  , FnMarginals(..)
+  , MaskTable(..)
+  , marginalReport
+  , maskTable
+  , renderMarginalReport
   ) where
 
 import SPLL.Lang.Lang
-import SPLL.Lang.Types (makeTypeInfo, GenericValue (..), CompilerError)
+import SPLL.Lang.Types (makeTypeInfo, GenericValue (..), CompilerError, TypeInfo(..), ADTDecl, FnDecl)
+import SPLL.Typing.PType (PType)
+import SPLL.ObservationMask
 import SPLL.AutoNeural (validateWriteLogitsGaussian)
 import SPLL.IntermediateRepresentation
 import SPLL.Analysis
 import SPLL.Typing.Infer (addModalityInfo)
-import SPLL.Typing.RInfer (addRTypeInfoAt)
+import SPLL.Typing.RInfer (addRTypeInfoAt, addRTypeInfo)
 import SPLL.Validator (validateProgram)
 import SPLL.CalleeNormalize (normalizeCallees)
 import IRInterpreter (generateRand, generateDet)
@@ -103,7 +113,7 @@ import Text.Pretty.Simple (pShow)
 import qualified Data.Text.Lazy as TL
 import Data.Char (toUpper)
 import Data.Maybe (isJust, fromMaybe)
-import Data.List (find)
+import Data.List (find, intercalate)
 
 -- | Build an AST node with a blank annotation. All the smart constructors
 -- below are annotation-free by construction; the inference passes fill them in.
@@ -369,6 +379,20 @@ compile conf p = do
   pPrintIfMoreVerbose conf rtyped
   printStage conf "After RType Inference" rtyped
 
+  compileRTyped conf rtyped
+
+-- | 'compile' from the post-RInfer seam onwards: enum annotation, chain naming,
+-- the modality pass, conditional annotation, IR compilation, the select pass and
+-- the optimizer.
+--
+-- Split out because a **pruned** program (design
+-- @witnessed-per-query-capability@; 'SPLL.ObservationMask.pruneObservation')
+-- enters the pipeline exactly here — it carries the RTypes its holes were built
+-- from, and it cannot re-enter at the top, since 'validateProgram' forbids the
+-- @Constant VAny@ the hole is spelled with. Everything below runs on it
+-- unchanged, which is the design's central claim.
+compileRTyped :: CompilerConfig -> Program -> Either CompilerError IREnv
+compileRTyped conf rtyped = do
   let preAnnotated = annotateEnumsProg rtyped
   printIfMoreVerbose conf "\n=== Annotated Program (1) ==="
   pPrintIfMoreVerbose conf preAnnotated
@@ -600,3 +624,136 @@ stageHeader label =
   , replicate (length decorated) '='
   ]
   where decorated = "=== " ++ label ++ " ==="
+-- ---------------------------------------------------------------------------
+-- The observation-mask report (task observation-mask-analysis)
+-- ---------------------------------------------------------------------------
+
+-- | The per-mask capability table of one function, or why there isn't one.
+data MaskTable
+  = NoEnumeratedSlots
+    -- ^ Every leaf slot is self-contained, so the existing per-field @anySafe@
+    -- guard is already exact and no variant is needed.
+  | OverBudget Int Int
+    -- ^ @OverBudget k budget@: the function has more enumerated slots than
+    -- @--marginalSlots@ allows, so it is not analysed per mask. It compiles as
+    -- today.
+  | MaskTable [(Mask, PType)]
+    -- ^ The projected 'PType' of each masked program, all-concrete mask first.
+  deriving (Eq, Show)
+
+-- | What the @--marginals@ report says about one function.
+data FnMarginals = FnMarginals
+  { fmName       :: String
+  , fmSlots      :: [(Slot, SlotVerdict)]
+  , fmClasses    :: [[Slot]]
+  , fmEnumerated :: [Slot]
+  , fmTable      :: MaskTable
+  } deriving Show
+
+-- | The program as the mask analysis reads it: validated, callee-normalised and
+-- RType-inferred, but not yet enum-annotated, chain-named or modality-typed.
+--
+-- This is the stage pruning runs at, per the design: a leaf's 'RType' is
+-- available to carry onto its hole, and everything after it — enum annotation,
+-- forward chaining, modality inference — then runs on the pruned program
+-- unchanged.
+rtypedProgram :: Program -> Either CompilerError Program
+rtypedProgram p = do
+  validateProgram p
+  addRTypeInfo (fromMaybe p (normalizeCallees p))
+
+-- | Enum annotation plus chain naming. The analysis needs chain names because
+-- latent identity is keyed by them.
+chainNamedProgram :: Program -> Program
+chainNamedProgram = annotateProg . annotateEnumsProg
+
+-- | The modality pass on an RType-inferred program, returning it typed.
+modalityTyped :: Program -> Either CompilerError Program
+modalityTyped rtyped = fst <$> addModalityInfo (chainNamedProgram rtyped)
+
+-- | The observation-mask analysis for every function of a program: its leaf
+-- slots and why each is enumerated or self-contained, its correlation classes,
+-- and its per-mask capability table.
+--
+-- The table is produced by typing the masked program — there is no separate
+-- mask-verdict computation that could disagree with it, which is the whole
+-- point of the pruning route (design @witnessed-per-query-capability@, "Why the
+-- previous cut of this design was wrong").
+marginalReport :: CompilerConfig -> Program -> Either CompilerError [FnMarginals]
+marginalReport conf p = do
+  rtyped <- rtypedProgram p
+  let named = chainNamedProgram rtyped
+      decls = adts named
+      fenv  = functions named
+  mapM (oneFunction conf rtyped decls fenv) (functions named)
+
+oneFunction :: CompilerConfig -> Program -> [ADTDecl] -> [FnDecl] -> FnDecl
+            -> Either CompilerError FnMarginals
+oneFunction conf rtyped decls fenv decl@(fname, _) = do
+  table <- case () of
+    _ | k == 0                    -> return NoEnumeratedSlots
+      | k > marginalSlots conf    -> return (OverBudget k (marginalSlots conf))
+      | otherwise                 -> MaskTable <$> mapM row (masksOver enums)
+  return FnMarginals { fmName = fname, fmSlots = verdicts, fmClasses = classes
+                     , fmEnumerated = enums, fmTable = table }
+  where
+    tree     = observationTree decls decl
+    verdicts = slotVerdicts decls fenv tree
+    classes  = correlationClasses (slotLatents decls fenv tree)
+    enums    = [ s | (s, v) <- verdicts, v /= SelfContained ]
+    k        = length enums
+    row m    = (,) m <$> maskedPType rtyped decls fname m
+
+-- | The projected 'PType' of one masked program: prune, then run the rest of
+-- the typing pipeline on it exactly as an unpruned program would be.
+maskedPType :: Program -> [ADTDecl] -> String -> Mask -> Either CompilerError PType
+maskedPType rtyped decls fname m = do
+  typed <- modalityTyped pruned
+  case find ((== fname) . fst) (functions typed) of
+    Just (_, body) -> return (pType (getTypeInfo body))
+    Nothing        -> Left ("maskedPType: function vanished: " ++ fname)
+  where
+    pruned = rtyped
+      { functions = [ if n == fname then pruneObservation decls m d else d
+                    | d@(n, _) <- functions rtyped ] }
+
+-- | The task's headline entry point: for every function with at least one
+-- enumerated slot and at most @marginalSlots@ of them, the projected 'PType' of
+-- each masked program.
+maskTable :: CompilerConfig -> Program -> Either CompilerError [(String, [(Mask, PType)])]
+maskTable conf p = do
+  report <- marginalReport conf p
+  return [ (fmName r, t) | r <- report, MaskTable t <- [fmTable r] ]
+
+-- | The @--marginals@ report, rendered.
+renderMarginalReport :: [ADTDecl] -> [FnMarginals] -> String
+renderMarginalReport decls = unlines . concatMap fn
+  where
+    fn r =
+      [ fmName r ]
+      ++ [ "  slots:" ]
+      ++ [ "    " ++ padTo 24 (prettySlot decls s) ++ " " ++ verdict v
+         | (s, v) <- fmSlots r ]
+      ++ [ "  correlation classes:" ]
+      ++ [ "    { " ++ intercalate ", " (map (prettySlot decls) c) ++ " }"
+         | c <- fmClasses r ]
+      ++ [ "  enumerated slots: "
+             ++ (if null (fmEnumerated r) then "none"
+                 else intercalate ", " (map (prettySlot decls) (fmEnumerated r))) ]
+      ++ tbl r
+      ++ [ "" ]
+
+    tbl r = case fmTable r of
+      NoEnumeratedSlots -> [ "  mask table: none needed (every slot self-contained)" ]
+      OverBudget k b    -> [ "  mask table: declined -- " ++ show k
+                             ++ " enumerated slots exceeds --marginalSlots " ++ show b ]
+      MaskTable rows    -> "  mask table:"
+                           : [ "    " ++ padTo 24 (prettyMask (fmEnumerated r) m)
+                                 ++ " -> " ++ show pt | (m, pt) <- rows ]
+
+    verdict SelfContained         = "self-contained"
+    verdict (SharesLatents ss)    = "enumerated: shares a latent with "
+                                      ++ intercalate ", " (map (prettySlot decls) ss)
+    verdict (ReadsOuterLatents _) = "enumerated: reads a latent drawn outside it"
+
+    padTo n str = str ++ replicate (n - length str) ' '

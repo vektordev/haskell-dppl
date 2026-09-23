@@ -109,6 +109,15 @@ discretesTags adtsParam funEnv visited env e = case e of
   _ -> [DiscreteValues mv | mv <- maybeToList values, not (multiValueContainsContinuous mv)]
   where
     values = case e of
+      -- A pruned observation's HOLE (design witnessed-per-query-capability,
+      -- task observation-mask-analysis): `Constant VAny` marks a slot the query
+      -- masked, which `SPLL.ObservationMask.pruneObservation` substituted for
+      -- the slot's sub-expression. Its domain is ABSENT, not the singleton
+      -- {ANY} -- tagging it would make the enumerated sum below range over a
+      -- wildcard and report a meaningless mass. Must precede the generic
+      -- Constant case. (`Constant VAny` cannot occur in a user program;
+      -- `SPLL.Validator` forbids it, so this only ever fires on a hole.)
+      (Expr _ (Constant VAny)) -> Nothing
       (Expr _ (Constant a)) -> Just $ MultiDiscretes [a]
       -- Comparisons (gt/lt) are Bool-valued, hence finitely enumerable regardless
       -- of whether their operands are, unlike the generic InjF case below (which
