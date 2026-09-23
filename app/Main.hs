@@ -6,7 +6,7 @@ import SPLL.IntermediateRepresentation
 import SPLL.Parser
 import Data.Char (toLower)
 import Text.Megaparsec.Error (errorBundlePretty)
-import SPLL.Lang.Types (CompilerError)
+import SPLL.Lang.Types (CompilerError, GenericValue (VError))
 import SPLL.Prelude (runProb, runInteg, runGen, compile, batchedRefusal, marginalReport, renderMarginalReport)
 import SPLL.Lang.Lang (adts)
 import Control.Monad.Random (evalRandIO)
@@ -265,7 +265,11 @@ transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, 
         Left err -> handleError err
         Right randVal -> do
           val <- evalRandIO randVal
-          print ("X=" ++ show val)
+          case val of
+            -- The sampled program failed at run time (e.g. @head@ of an empty
+            -- list); the interpreter answers that as a value, not a sample.
+            VError msg -> handleError msg
+            _ -> print ("X=" ++ show val)
     ProbabilityOpts{posP=x, paramsP=params} ->
       -- TODO: Nicer Output
       case runProb conf prog params x of

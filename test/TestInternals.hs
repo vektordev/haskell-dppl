@@ -34,12 +34,12 @@ import Control.Exception (try, evaluate, ErrorCall(..))
 import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure, (@?=))
-import IRInterpreter (generateDet)
+import IRInterpreter (generateDet, generateRand)
 import TestCaseParser (Backend(..), TestCase(..), ExpectFailure(..), expectationProb, defaultBackends,
                         parseTestCasesFromString, corpusPplPath, corpusTstPath)
 import Test.Tasty.QuickCheck (testProperties, testProperty)
-import System.Random (StdGen)
-import Control.Monad.Random (Rand)
+import System.Random (StdGen, mkStdGen)
+import Control.Monad.Random (Rand, evalRand)
 import Control.Monad (forM_)
 import Data.Number.Erf (erf)
 import Utils (splitByString)
@@ -3352,6 +3352,7 @@ internalsTests = testGroup "Internals"
   [ testProperties "properties" $(allProperties)
   , testGroup "tensor builtins" tensorBuiltinTests
   , splitByStringTests
+  , partialDestructorTests
   , classConstraintTests
   , forwardChainingCertTests
   , witnessedBindingTests
@@ -3445,6 +3446,53 @@ slowInternalsTests = testGroup "Internals (slow)"
 -- | Evaluate a closed IR expression with no neural networks or globals.
 evalClosedIR :: IRExpr -> Either String IRValue
 evalClosedIR = generateDet [] [] (IREnv [] [] []) []
+
+-- | Sample a closed IR expression with no neural networks or globals.
+sampleClosedIR :: IRExpr -> IRValue
+sampleClosedIR e = evalRand (generateRand [] [] (IREnv [] [] []) [] e) (mkStdGen 0)
+
+-- ===========================================================================
+-- Partial destructors out of their domain (fuzz-structured-type-bugs, item 1)
+-- ===========================================================================
+
+-- @head (tail [x])@ is well-typed -- @head@ is total in the type system -- so
+-- nothing upstream rejects it. At run time the sampling interpreter answers it
+-- with a 'VError' value; it used to kill the process with a Haskell 'error'.
+-- An ill-*shaped* operand (head of a float) is a different thing, a compiler
+-- inconsistency, and must keep failing loudly rather than pass for a program's
+-- own run-time failure.
+partialDestructorTests :: TestTree
+partialDestructorTests = testGroup "partial destructors out of their domain"
+  [ testCase "sampling head (tail [Uniform]) yields a VError, not an exception" $ do
+      p <- parseOrFail "main = head (tail [Uniform])"
+      env <- either (assertFailure . ("compile failed: " ++) . show) return (compile defaultCompilerConfig p)
+      r <- try (evaluate (forceSampleOf p env))
+      case r of
+        Left (ErrorCall msg) -> assertFailure ("sampling threw: " ++ msg)
+        Right v -> v @?= VError "head of an empty list"
+  , testCase "each partial destructor raises on its missing case" $ do
+      sampleClosedIR (IRDestruct AcHead emptyL) @?= VError "head of an empty list"
+      sampleClosedIR (IRDestruct AcTail emptyL) @?= VError "tail of an empty list"
+      sampleClosedIR (IRDestruct AcFromLeft (IRConstruct TgRight [one])) @?= VError "fromLeft of a Right"
+      sampleClosedIR (IRDestruct AcFromRight (IRConstruct TgLeft [one])) @?= VError "fromRight of a Left"
+  , testCase "the failure propagates through an enclosing expression" $
+      sampleClosedIR (IROp OpPlus one (IRDestruct AcHead emptyL)) @?= VError "head of an empty list"
+  , testCase "evaluation is strict: a failing tuple component fails the program even under fst" $
+      -- As the emitted backends do: the tuple is built before it is projected.
+      sampleClosedIR (IRDestruct AcFst (IRConstruct TgTuple [one, IRDestruct AcHead emptyL]))
+        @?= VError "head of an empty list"
+  , testCase "the deterministic interpreter reports the same failure as a Left" $
+      evalClosedIR (IRDestruct AcHead emptyL) @?= Left "head of an empty list"
+  , testCase "an ill-shaped operand still throws in the sampling interpreter" $ do
+      r <- try (evaluate (sampleClosedIR (IRDestruct AcHead one)))
+      case r of
+        Left (ErrorCall msg) -> assertBool msg ("head must be called on a list" `isInfixOf` msg)
+        Right v -> assertFailure ("expected an exception, got " ++ show v)
+  ]
+  where
+    emptyL = IRConst (VList EmptyList)
+    one = IRConst (VFloat 1.0)
+    forceSampleOf p env = let v = evalRand (runGenC p env []) (mkStdGen 0) in length (show v) `seq` v
 
 vfs :: [Double] -> [IRValue]
 vfs = map VFloat

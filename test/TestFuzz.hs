@@ -52,7 +52,7 @@ import Test.Tasty (TestTree, testGroup, localOption)
 import Test.Tasty.QuickCheck (testProperties, testProperty, QuickCheckMaxRatio(..))
 import Test.Tasty.HUnit (testCase, assertEqual, assertBool, assertFailure)
 import Control.Exception (try, evaluate, throwIO, fromException, SomeException, SomeAsyncException(..))
-import Control.Monad (replicateM)
+import Control.Monad (replicateM, unless, void)
 import Control.Monad.Random (evalRandIO)
 import System.Timeout (timeout)
 import System.Environment (lookupEnv)
@@ -157,6 +157,16 @@ mockSeed = foldl (\acc c -> (acc * 33 + fromEnum c) `mod` 100003) 7
 drawSample :: Program -> IREnv -> IO IRValue
 drawSample p compiled = evalRandIO (runGenC p compiled (fuzzArgs p))
 
+-- | A draw on which the sampled program itself failed at run time -- a
+-- partial destructor out of its domain, e.g. @head (tail [x])@, which is
+-- well-typed and so reachable from the typed generator. The interpreter
+-- answers it as a 'VError' value rather than a crash (item 1 of
+-- @fuzz-structured-type-bugs@). There is no point to query a probability at,
+-- so every property below has nothing to check on such a draw.
+isRuntimeFailure :: IRValue -> Bool
+isRuntimeFailure (VError _) = True
+isRuntimeFailure _ = False
+
 -- 'runProbC'/'runProbNamedC' irrefutably pattern-match on `probFun` being
 -- `Just` (SPLL.Prelude:401) -- calling them on a compiled-but-generate-only
 -- program (e.g. an If condition built from a non-invertible comparison
@@ -191,10 +201,10 @@ irProb p compiled sample
 -- under the budget. (The same reasoning is written out at
 -- 'prop_Fuzz_NeuralMaterializedTwinAgrees', which had it first.)
 --
--- *Discarding.* An exception raised while computing the probability -- today
--- that is @head@ on an empty list, item 1 of @fuzz-structured-type-bugs@ --
--- is discarded rather than failed, deliberately and consistently with the
--- twin oracle. Crash-freedom of the compile/sample/probability path is
+-- *Discarding.* A draw the program itself failed on ('isRuntimeFailure')
+-- has no point to query, and is discarded. So is an exception raised while
+-- computing the probability, deliberately and consistently with the twin
+-- oracle. Crash-freedom of the compile/sample/probability path is
 -- 'prop_Fuzz_TypedCompileNeverCrashes'' subject: it draws from the same
 -- generator at the same size and calls 'runProbC' on its own sample, so the
 -- bug is already reported, loudly and in one place. These four properties are
@@ -208,10 +218,12 @@ forcedProbAt :: Show a => Program -> IREnv -> (IRValue -> a) -> IO (Maybe (IRVal
 forcedProbAt p genEnv k = do
   drawn <- trySync $ do
     sample <- drawSample p genEnv
-    evaluate (forceShow (sample, k sample))
+    if isRuntimeFailure sample
+      then return Nothing
+      else Just <$> evaluate (forceShow (sample, k sample))
   return $ case drawn of
     Left _  -> Nothing
-    Right r -> Just r
+    Right r -> r
 
 hasIntegFun :: IREnv -> Bool
 hasIntegFun compiled = isJust (integFun (lookupIREnv "main" compiled))
@@ -514,7 +526,8 @@ prop_Fuzz_CompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAll (resize f
     Left _ -> return $ property True
     Right irEnv -> do
       sample <- drawSample p irEnv
-      _ <- evaluate (fmap forceShow (runProbC p irEnv (fuzzArgs p) sample))
+      unless (isRuntimeFailure sample) $
+        void (evaluate (fmap forceShow (runProbC p irEnv (fuzzArgs p) sample)))
       return $ property True
 
 -- | Well-typed scalar programs: a stronger, unguarded crash-freedom check
@@ -526,7 +539,8 @@ prop_Fuzz_TypedCompileNeverCrashes = withMaxSuccess (fuzzCases 40) $ forAllShrin
     Left _ -> return $ property True
     Right irEnv -> do
       sample <- drawSample p irEnv
-      _ <- evaluate (fmap forceShow (runProbC p irEnv (fuzzArgs p) sample))
+      unless (isRuntimeFailure sample) $
+        void (evaluate (fmap forceShow (runProbC p irEnv (fuzzArgs p) sample)))
       return $ property True
 
 -- | 'compile' never hands back an 'IREnv' whose probability/integrate/
@@ -817,21 +831,24 @@ prop_Fuzz_NeuralMaterializedTwinAgrees = withMaxSuccess (fuzzCases 20) $
         -- Sampling is guarded, and discards rather than fails, for the same
         -- reason 'compileSafe' swallows a compile crash: whether the IR
         -- interpreter survives a draw is not this property's subject. It is
-        -- 'prop_Fuzz_TypedCompileNeverCrashes'' subject, and the specific crash
-        -- that reaches here today -- @head@ on an empty list -- is already
-        -- filed as item 1 of @fuzz-structured-type-bugs@. Left unguarded, that
-        -- one bug masks the oracle entirely: the property died on it after
-        -- eight draws without ever comparing the two engines.
+        -- 'prop_Fuzz_TypedCompileNeverCrashes'' subject. Left unguarded, one
+        -- such crash masks the oracle entirely: the property once died after
+        -- eight draws on @head@ of an empty list (since answered as a
+        -- 'VError' draw, discarded below) without ever comparing the two
+        -- engines.
         drawn <- trySync $ do
           sample <- drawSample lazyP le
+          -- A draw the program itself failed on has nothing to compare.
+          if isRuntimeFailure sample then return Nothing else
           -- Forced here, inside the guard, and not left to the pure `case`
           -- below: 'irProb' only converts a `Left` into `Nothing`, so an
           -- *exception* raised while evaluating either side would otherwise
           -- escape the guard and fail the property from outside it.
-          evaluate (forceShow (sample, irProb lazyP le sample, irProb matP me sample))
+            Just <$> evaluate (forceShow (sample, irProb lazyP le sample, irProb matP me sample))
         return $ case drawn of
          Left _ -> discardVacuous
-         Right (sample, lazyR, matR) -> case (lazyR, matR) of
+         Right Nothing -> discardVacuous
+         Right (Just (sample, lazyR, matR)) -> case (lazyR, matR) of
           (Just lr, Just mr) -> case (probDim lr, probDim mr) of
             (Just (pl, dl), Just (pm, dm)) ->
               counterexample
@@ -884,7 +901,7 @@ data DrawOutcome
 -- every tabulated row gathered up to that point; a property whose entire
 -- purpose is to report a distribution cannot be the one that dies of a single
 -- draw. There is at least one such draw in the current generator's range (the
--- structured-shape compile blowup tracked as @fuzz-structured-type-bugs@), so
+-- structured-shape compile blowup tracked as @structured-accessor-compile-blowup@), so
 -- this is not a hypothetical.
 guardedBy :: Show a => a -> a -> IO a
 guardedBy fallback x = do
@@ -1531,10 +1548,11 @@ fuzzScalingTests = testGroup "Fuzz scaling"
 -- report by 'error', which walked straight past the 'Either' in
 -- 'PredefinedFunctions.propagateValues' and out of the compiler.
 --
--- Note what is *not* asserted: which of 'Left' or 'Right' comes back. What
--- @head []@/@tail []@ should mean is the open question owned by
--- 'fuzz-structured-type-bugs'; this test is only about the compiler surviving
--- long enough to have an opinion.
+-- Note what is *not* asserted: which of 'Left' or 'Right' comes back -- only
+-- that the compiler survives long enough to have an opinion. (What
+-- @head []@/@tail []@ mean at run time is settled in
+-- 'fuzz-structured-type-bugs': a raise, i.e. 'VError' from sampling and
+-- 'Left' from constant folding.)
 staticallyEmptyTailProgram :: Program
 staticallyEmptyTailProgram =
   Program [("main", ltail (ltail (cons (left (constI 0)) nul)))] [] [] []
@@ -1861,6 +1879,7 @@ drawQueryPoints p irEnv n = do
   return
     [ QueryPoint s eps p0
     | s <- samples
+    , not (isRuntimeFailure s)
     , Just result <- [irProb p irEnv s]
     , Just (pr, dim) <- [probDim result]
     , pr > 0

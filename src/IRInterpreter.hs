@@ -13,6 +13,7 @@ import MockNN
 import SPLL.AutoNeural
 
 import Control.Monad.Random
+import Control.Monad.Except (ExceptT, runExceptT, throwError)
 import Statistics.Distribution.Normal (normalDistr)
 import Data.Number.Erf
 import Data.Maybe (fromJust, fromMaybe, isJust, catMaybes)
@@ -45,32 +46,67 @@ asThetaTree v = error ("Type error: theta access on a non-theta-tree value: " ++
 -- compile-time constant folding ('PredefinedFunctions.propagateValues'), whose
 -- caller already handles a 'Left'; an 'error' there is an imprecise exception
 -- that walks straight past the 'Either' plumbing and out of the compiler
--- (task compiler-throws-instead-of-returning-left). Every program-level
--- failure in 'generate' therefore goes through this field rather than through
--- 'error'. 'generateRand' runs in @Rand g@, which has no failure channel, so
--- there it is still 'error' -- unchanged behaviour on the sampling path.
+-- (task compiler-throws-instead-of-returning-left). Every failure in
+-- 'generate' therefore goes through 'failWith' or 'raise' rather than through
+-- 'error'. In 'generateRand' 'failWith' is still 'error', and only 'raise' --
+-- a failure the program itself means -- becomes a 'VError' result; see there.
 --
 -- Rank-2 so the comparison helpers, which answer in @m Bool@ rather than
 -- @m IRValue@, can fail the same way.
 data RandomFunctions m a = RandomFunctions
   { uniformGen :: m IRValue
   , normalGen :: m IRValue
-  -- 'HasCallStack' so the failing destructor's own source location still
-  -- appears in a 'generateRand' crash; without it every runtime failure would
-  -- be reported at this record's definition site instead.
+  -- 'HasCallStack' so the failing site's own source location still appears
+  -- in a 'generateRand' crash; without it every such failure would be
+  -- reported at this record's definition site instead.
   , failWith :: forall b. HasCallStack => String -> m b
+  -- | A run-time failure of a *well-typed* program: a partial destructor
+  -- applied outside its domain (@head []@, @fromLeft (Right x)@). Distinct
+  -- from 'failWith', which reports a value of the wrong *shape* reaching an
+  -- operation -- that can only mean the compiler or interpreter is
+  -- inconsistent, and 'generateRand' keeps it a loud 'error'. 'raise' is the
+  -- program's own semantics: 'generateRand' answers it with a 'VError' result,
+  -- 'generateDet' with 'Left' like any other failure.
+  , raise :: forall b. String -> m b
   }
 
 -- Name, Body
 type ReducedIREnv = [(String, IRExpr)]
 
+-- | Draw one sample. A run-time failure of the sampled program -- @head@ or
+-- @tail@ of an empty list, @fromLeft@ of a @Right@: every 'raise' site in
+-- 'generate' -- is answered as a 'VError' carrying the message, rather than
+-- by a Haskell 'error' (task fuzz-structured-type-bugs, item 1; decision:
+-- "VError is fine"). A 'failWith' -- an ill-shaped value, i.e. an
+-- interpreter/compiler inconsistency rather than anything the program means --
+-- stays an 'error', so that it keeps failing loudly instead of passing for a
+-- legitimate run-time failure.
+--
+-- Such programs are well-typed: @head (tail [x])@ type-checks, because @head@
+-- is total in the type system, so nothing upstream rejects them. What they
+-- mean at run time is what the emitted backends do with them -- raise -- and
+-- a 'VError' is the interpreter's value for that raise. Returning it rather
+-- than throwing lets a caller (the CLI, the fuzz properties) observe the
+-- failure without catching an imprecise exception.
+--
+-- The failure short-circuits the rest of the draw, because @ExceptT@ sequences
+-- every sub-evaluation. That is deliberate and matches the strict backends: a
+-- failing sub-expression fails the program even if a projection would later
+-- have discarded it (@fst (1, head [])@), where the lazy @Rand g@ interpreter
+-- this replaces returned @1@ by never forcing the bad thunk.
+--
+-- 'IRError' is unchanged: it is a node the compiler emitted on purpose and
+-- 'generate' still throws on it (see there).
 generateRand :: (RandomGen g) => [NeuralDecl] -> [(RType, MultiValue)] -> IREnv -> [IRExpr]-> IRExpr -> Rand g IRValue
-generateRand neurals' registry env = generate f neurals' registry adts' startingEnv startingEnv
+generateRand neurals' registry env params e =
+  either VError id <$> runExceptT (generate f neurals' registry adts' startingEnv startingEnv params e)
   where
+    f :: RandomGen g => RandomFunctions (ExceptT String (Rand g)) a
     f = RandomFunctions {
-      uniformGen = irSample IRUniform,
-      normalGen = irSample IRNormal,
-      failWith = error}
+      uniformGen = lift (irSample IRUniform),
+      normalGen = lift (irSample IRNormal),
+      failWith = error,
+      raise = throwError}
     startingEnv = reduceIREnv env ++ standardEnv ++ map neuralRTypeToEnv neurals' ++ concatMap implicitFunctionsToEnv adts'
     (IREnv _ adts' _) = env
 
@@ -81,7 +117,8 @@ generateDet neurals' registry env = generate f neurals' registry adts' startingE
     f = RandomFunctions {
       uniformGen = Left "Uniform Gen is not det",
       normalGen = Left "Normal Gen is not det",
-      failWith = Left}
+      failWith = Left,
+      raise = Left}
     startingEnv = reduceIREnv env ++ standardEnv ++ map neuralRTypeToEnv neurals' ++ concatMap implicitFunctionsToEnv adts'
     (IREnv _ adts' _) = env
 
@@ -366,13 +403,15 @@ generate f neurals' registry adts' globalEnv env args (IRDestruct AcHead listExp
   listVal <- generate f neurals' registry adts' globalEnv env args listExpr
   case listVal of
     VList (ListCont a _) -> return a
-    _ -> failWith f "Type error: head must be called on a non-empty list"
+    VList EmptyList -> raise f "head of an empty list"
+    _ -> failWith f ("Type error: head must be called on a list: " ++ show listVal)
 generate f neurals' registry adts' globalEnv env args (IRDestruct AcTail listExpr) = do
   listVal <- generate f neurals' registry adts' globalEnv env args listExpr
   case listVal of
     VList (ListCont _ AnyList) -> return VAny
     VList (ListCont _ a) -> return $ VList a
-    _ -> failWith f "Type error: tail must be called on a non-empty list"
+    VList EmptyList -> raise f "tail of an empty list"
+    _ -> failWith f ("Type error: tail must be called on a list: " ++ show listVal)
 generate f neurals' registry adts' globalEnv env args (IRBuiltin BMapList [fExpr, listExpr]) = do
   listVal <- generate f neurals' registry adts' globalEnv env args listExpr
   case listVal of
@@ -384,12 +423,14 @@ generate f neurals' registry adts' globalEnv env [] (IRDestruct AcFromLeft expr)
   x <- generate f neurals' registry adts' globalEnv env [] expr
   case x of
     VEither (Left l) -> return l
-    _ -> failWith f $ "Type error: fromLeftrequires an either left: " ++ show x
+    VEither (Right _) -> raise f "fromLeft of a Right"
+    _ -> failWith f $ "Type error: fromLeft requires an Either: " ++ show x
 generate f neurals' registry adts' globalEnv env [] (IRDestruct AcFromRight expr) = do
   x <- generate f neurals' registry adts' globalEnv env [] expr
   case x of
     VEither (Right r) -> return r
-    _ -> failWith f $ "Type error: fromRight requires an either right: " ++ show x
+    VEither (Left _) -> raise f "fromRight of a Left"
+    _ -> failWith f $ "Type error: fromRight requires an Either: " ++ show x
 generate f neurals' registry adts' globalEnv env [] (IRDestruct AcIsLeft expr) = do
   x <- generate f neurals' registry adts' globalEnv env [] expr
   case x of
