@@ -1,0 +1,1 @@
+main = draw t = (Uniform < 0.5, Uniform < 0.3) in (if fst t then 1 else 2) + (if snd t then 10 else 20)

@@ -288,26 +288,45 @@ multiValueCardinality (MultiADT constrs)
   | null constrs = Nothing
   | otherwise = sum <$> mapM (fmap product . mapM multiValueCardinality . snd) constrs
 
+-- | The value set a list of values describes, as a 'MultiValue' shaped after
+-- the values themselves (tuples split into their components, and so on).
+--
+-- Every level is a /set/: the input is de-duplicated before it is split, and
+-- because the components recurse through this same function, so is each
+-- component list. Without that, a tuple's component lists carry one copy of a
+-- component per tuple it occurs in -- the four distinct values of
+-- @(Bool, Bool)@ split into @[T,T,F,F]@ and @[T,F,T,F]@ -- and since
+-- 'multiValueToValueList' enumerates a 'MultiTuple' as the product of its
+-- components, the enumeration then repeats each tuple once per copy (16 values
+-- for those 4). That is wrong twice over. Inference sums over the enumeration,
+-- so every duplicate is counted again: @draw t = (Uniform < 0.5, Uniform < 0.3)
+-- in if fst t then 1 else 2@ answered @p(1) = 2.0@. And the duplication
+-- compounds with nesting -- the tuple one level up re-splits an already
+-- inflated list -- so a right-nested tuple of @n@ Bools enumerated roughly
+-- @2^(n^2/2)@ values and 'SPLL.Analysis' spent seconds, then minutes,
+-- evaluating them (task structured-accessor-compile-blowup).
 valueListToMultiValue :: [Value] -> MultiValue
-valueListToMultiValue lst@((VEither _):_) | all isVEither lst = MultiEither lVals rVals
+valueListToMultiValue = byShape . nub
   where
-    lVals = valueListToMultiValue [l | VEither (Left l) <- lst]
-    rVals = valueListToMultiValue [r | VEither (Right r) <- lst]
-valueListToMultiValue ((VEither _):_) = error "Not all elements in the list are Eithers"
-valueListToMultiValue lst@((VTuple _ _):_) | all isVTuple lst = MultiTuple aVals bVals
-  where
-    aVals = valueListToMultiValue [a | VTuple a _ <- lst]
-    bVals = valueListToMultiValue [b | VTuple _ b <- lst]
-valueListToMultiValue ((VTuple _ _):_) = error "Not all elements in the list are Tuples"
-valueListToMultiValue lst@((VADT _ _):_) | all isVADT lst = MultiADT (map reconstructConstructor cns)
-  where
-    cns = nub [cn | VADT cn _ <- lst]
-    reconstructConstructor cn =
-      let field_lists = [fields | VADT cn' fields <- lst, cn' == cn]
-          transposed_fields = if null field_lists then [] else map nub (transpose field_lists)
-      in (cn, map valueListToMultiValue transposed_fields)
-valueListToMultiValue ((VADT _ _):_) = error "Not all elements in the list are ADTs"
-valueListToMultiValue lst = MultiDiscretes lst
+  byShape lst@((VEither _):_) | all isVEither lst = MultiEither lVals rVals
+    where
+      lVals = valueListToMultiValue [l | VEither (Left l) <- lst]
+      rVals = valueListToMultiValue [r | VEither (Right r) <- lst]
+  byShape ((VEither _):_) = error "Not all elements in the list are Eithers"
+  byShape lst@((VTuple _ _):_) | all isVTuple lst = MultiTuple aVals bVals
+    where
+      aVals = valueListToMultiValue [a | VTuple a _ <- lst]
+      bVals = valueListToMultiValue [b | VTuple _ b <- lst]
+  byShape ((VTuple _ _):_) = error "Not all elements in the list are Tuples"
+  byShape lst@((VADT _ _):_) | all isVADT lst = MultiADT (map reconstructConstructor cns)
+    where
+      cns = nub [cn | VADT cn _ <- lst]
+      reconstructConstructor cn =
+        let field_lists = [fields | VADT cn' fields <- lst, cn' == cn]
+            transposed_fields = if null field_lists then [] else transpose field_lists
+        in (cn, map valueListToMultiValue transposed_fields)
+  byShape ((VADT _ _):_) = error "Not all elements in the list are ADTs"
+  byShape lst = MultiDiscretes lst
 
 valueInMultiValue :: MultiValue -> Value -> Bool
 valueInMultiValue MultiContinuous (VFloat _) = True

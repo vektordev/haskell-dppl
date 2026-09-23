@@ -1,0 +1,1 @@
+main = snd (head [(right (Uniform < 0.79), ((Uniform < 0.84, Uniform < 0.65), [if False then 3 else if False then 2 else 1]))])

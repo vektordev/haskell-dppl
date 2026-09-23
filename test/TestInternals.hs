@@ -29,7 +29,7 @@ import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage)
 import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts, planFactorExternals, enumeratedCount)
 import SPLL.Typing.PType (PType(Integrate, Deterministic))
 import Data.Foldable (toList)
-import Data.List (isInfixOf, intercalate, isPrefixOf)
+import Data.List (isInfixOf, intercalate, isPrefixOf, sort)
 import Control.Exception (try, evaluate, ErrorCall(..))
 import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
@@ -3379,6 +3379,45 @@ letBinderTagTests = testGroup "let binder threads DiscreteValues into the body"
     isPlusI (Expr _ (InjF (Named n) _)) = n == "plusI"
     isPlusI _ = False
 
+-- | 'valueListToMultiValue' describes a value /set/: enumerating its result
+-- must give back each input value exactly once, however deeply the values
+-- nest (task structured-accessor-compile-blowup). Before, a tuple split its
+-- values into component lists that kept one copy per tuple, and the product
+-- enumeration repeated every tuple once per copy -- inference summed the
+-- repeats (@p(1) = 2.0@ for a let-bound Bool pair) and the repeats compounded
+-- with each level of nesting.
+valueSetTests :: TestTree
+valueSetTests = testGroup "valueListToMultiValue is a set at every level"
+  [ testCase "a Bool pair enumerates its four values once each" $
+      roundTrips (sequenceTuple [bools, bools])
+  , testCase "a right-nested tuple of four Bools enumerates 16 values, not their duplicated product" $
+      roundTrips (sequenceTuple (replicate 4 bools))
+  , testCase "duplicate input values collapse" $
+      map (length . multiValueToValueList . valueListToMultiValue)
+        [[VTuple (VBool True) (VInt 1), VTuple (VBool True) (VInt 1)], [VInt 3, VInt 3, VInt 3]]
+        @?= [1, 1]
+  , testCase "tuples under Either and ADT fields are de-duplicated too" $ do
+      let pairs = sequenceTuple [bools, bools]
+      roundTrips (map (VEither . Right) pairs ++ [VEither (Left (VInt 0))])
+      roundTrips [VADT "Box" [p, VInt 0] | p <- pairs]
+  , testCase "the analysis tags each tuple construction with its true domain" $ do
+      let parsed = either (\e -> error ("parse failed: " ++ show e)) id
+                     (tryParseProgram "test" "main = (Uniform < 0.5, (Uniform < 0.3, Uniform < 0.2))")
+          rtyped = either (\e -> error ("rtype inference failed: " ++ show e)) id
+                     (tryAddRTypeInfo parsed)
+      assertEqual "domain sizes of the two TCons nodes" [4, 8]
+        (sort (map (length . multiValueToValueList) (discretesAt isTCons (annotateEnumsProg rtyped))))
+  ]
+  where
+    bools = [VBool True, VBool False]
+    sequenceTuple = foldr1 (\xs ys -> [VTuple x y | x <- xs, y <- ys])
+    roundTrips vals = do
+      let back = multiValueToValueList (valueListToMultiValue vals)
+      assertEqual "enumeration length" (length vals) (length back)
+      assertBool ("enumeration misses a value: " ++ show back) (all (`elem` back) vals)
+    isTCons (Expr _ (InjF (Named n) _)) = n == "TCons"
+    isTCons _ = False
+
 internalsTests :: TestTree
 internalsTests = testGroup "Internals"
   [ testProperties "properties" $(allProperties)
@@ -3417,6 +3456,7 @@ internalsTests = testGroup "Internals"
   , autoNeuralDerivationTests
   , enumContinuousRefusalTests
   , letBinderTagTests
+  , valueSetTests
   , test_planEnumThreadedTopKAndBC
   , test_branchCountingDoesNotMultiplyIR
   , test_recursiveListMissedCSE
