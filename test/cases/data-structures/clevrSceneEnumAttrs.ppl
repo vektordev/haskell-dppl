@@ -1,0 +1,17 @@
+-- A CLEVR-shaped generative scene: every attribute an enumeration (all-nullary
+-- ADT, 3/2/8/2 values), a Gaussian position, and a geometric number of objects.
+-- One object has no structural variability at all, so under --batched a batch
+-- of scenes must bucket by object count alone (task
+-- batched-bucketing-splits-on-nullary-constructors; driven by End2EndTesting's
+-- 'batched enum bucketing' group, since the corpus batched differential does
+-- not route ADT-valued samples).
+data Shape = Cube | Sphere | Cylinder
+data Size = Small | Large
+data Color = Gray | Red | Blue | Green | Brown | Purple | Cyan | Yellow
+data Material = Rubber | Metal
+shape = if Uniform < 0.4 then Cube else (if Uniform < 0.5 then Sphere else Cylinder)
+size = if Uniform < 0.3 then Small else Large
+color = if Uniform < 0.5 then Gray else (if Uniform < 0.5 then Red else (if Uniform < 0.5 then Blue else (if Uniform < 0.5 then Green else (if Uniform < 0.5 then Brown else (if Uniform < 0.5 then Purple else (if Uniform < 0.5 then Cyan else Yellow))))))
+material = if Uniform < 0.6 then Rubber else Metal
+obj = (shape, (size, (color, (material, Normal))))
+main = if Uniform < 0.25 then [] else obj : main

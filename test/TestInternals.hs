@@ -24,7 +24,7 @@ import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan)
 import SPLL.IntermediateRepresentation
 import SPLL.Semiring (semiringSuffix)
 import SPLL.IROptimizer (postProcess, optimizeEnv, deterministicGens, distributeIf, headHash, OptEnv(..))
-import SPLL.CodeGenPyTorchBatched (adtEnv, batchedGuard, generateFunctionsBatched, structural)
+import SPLL.CodeGenPyTorchBatched (adtEnv, adtEnvWith, batchedGuard, enumAdtNames, generateFunctionsBatched, structural)
 import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage)
 import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts, planFactorExternals, enumeratedCount)
 import SPLL.Typing.PType (PType(Integrate, Deterministic))
@@ -2193,6 +2193,48 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
         Left msg -> assertFailure ("batched mode refused an applied constructor: " ++ msg)
         Right ls -> assertBool ("applied constructor mis-emitted: " ++ unlines ls)
                       (any ("Just1(sample)" `isInfixOf`) ls)
+  -- Task batched-bucketing-splits-on-nullary-constructors: an ADT whose
+  -- constructors are all nullary is an enumeration -- its tag is a value, not a
+  -- structure -- so it is emitted collapsed: one bucket for the whole ADT
+  -- (`_enum`), a per-element tag behind `is_ctor`. Mixed ADTs keep the per-tag
+  -- structural treatment.
+  , testCase "only all-nullary ADTs are enumerations" $
+      assertEqual "enumAdtNames"
+        ["Color"]
+        (enumAdtNames [ colorDecl
+                      , ADTDecl { dataName = "Opt"
+                                , constructors = [("Nada", []), ("Just1", [("v", TFloat)])]
+                                , adtDepth = Nothing } ])
+  , testCase "an all-nullary ADT's constructor test is not structural" $ do
+      let env = adtEnvWith ["Color"] [colorDecl]
+      assertBool "isRed(x) is still structural under enum collapse"
+        (not (structural env (IRApply (IRVar "isRed") (IRVar "x"))))
+      assertBool "isRed(x) must stay structural when Color is not collapsed"
+        (structural (adtEnv [colorDecl]) (IRApply (IRVar "isRed") (IRVar "x")))
+  , testCase "an all-nullary ADT is emitted collapsed, its tests per element" $
+      case generateFunctionsBatched False (enumEnv (IRIf (IRApply (IRVar "isRed") (IRVar "sample"))
+                                                       (IRConst (VFloat 1.0)) (IRConst (VFloat 0.0)))) of
+        Left msg -> assertFailure ("batched mode refused an enumeration test: " ++ msg)
+        Right ls -> do
+          assertBool ("enumeration constructor carries no _enum key: " ++ unlines ls)
+            (any ("_enum = \"Color\"" `isInfixOf`) ls)
+          assertBool ("enumeration test does not go through is_ctor: " ++ unlines ls)
+            (any ("return is_ctor(x, Red)" `isInfixOf`) ls)
+          assertBool ("enumeration test still emitted as a Python if: " ++ unlines ls)
+            (not (any ("if isRed(sample):" `isInfixOf`) ls))
+  , testCase "an enumeration test choosing between structures falls back to per-tag buckets" $
+      -- A value-dependent choice between two list shapes has no torch.where
+      -- form, so collapsing Color would be refused by the dichotomy guard; the
+      -- program is emitted exactly as before instead, tag in the signature.
+      case generateFunctionsBatched False (enumEnv (IRIf (IRApply (IRVar "isRed") (IRVar "sample"))
+                                                       (IRConst (VList EmptyList))
+                                                       (IRConstruct TgCons [IRConst (VFloat 1.0), IRConst (VList EmptyList)]))) of
+        Left msg -> assertFailure ("batched mode refused a tag-bucketable program: " ++ msg)
+        Right ls -> do
+          assertBool ("fallback still collapsed Color: " ++ unlines ls)
+            (not (any ("_enum" `isInfixOf`) ls))
+          assertBool ("fallback does not branch on the tag structurally: " ++ unlines ls)
+            (any ("if isRed(sample):" `isInfixOf`) ls)
   , testCase "a list-building recursive generate degrades to a stub, not a refusal" $
       -- The one narrow exception to the hard whole-program refusal rule: a
       -- generate whose recursion *builds a list* has per-element depth (design
@@ -2258,6 +2300,17 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
     -- tests the given constructor reference. The ADT itself is only *consumed*
     -- (the method answers a float), which is the one shape that reaches a
     -- constructor through the batched path -- an ADT-valued query is refused.
+    colorDecl = ADTDecl { dataName = "Color"
+                        , constructors = [("Red", []), ("Green", []), ("Blue", [])]
+                        , adtDepth = Nothing }
+    enumEnv body = IREnv
+      [IRFunGroup { groupName = "main"
+                  , probFun = Just (IRLambda "sample" body, "")
+                  , genFun = Nothing, integFun = Nothing
+                  , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
+                  , sampleDomain = Nothing }]
+      [colorDecl]
+      []
     nullaryCtorEnv ctorRef = IREnv
       [IRFunGroup { groupName = "main"
                   , probFun = Just (IRLambda "sample"

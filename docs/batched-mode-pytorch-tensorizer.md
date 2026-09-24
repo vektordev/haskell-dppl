@@ -16,6 +16,19 @@ calls the kernel once per bucket). `OpLog`/`OpDiv` route through
 select; a refused `IRError` arm emits as a NaN `poison()` constant the
 select masks away.
 
+An ADT whose constructors are all nullary (`data Color = Red | Green |
+Blue`) is an *enumeration*: its tag is a value, not a structure, so the
+signature keys the whole ADT as one bucket and `_pack` stacks the tags into
+an `EnumBatch` (a `[B]` tag tensor); `is<Ctor>` (`is_ctor`) and `==` then
+answer per-element masks through `torch.where`. The emitted constructor
+classes carry `_enum`/`_enum_tag` only when collapsed: the compiler emits
+collapsed first and, if any guard refuses (e.g. an enumeration test choosing
+between two list shapes, which has no `torch.where` form), re-emits the
+whole program with every tag keyed into the signature as before. So
+CLEVR-shaped scenes (enumerated attributes, Gaussian positions) bucket by
+object count alone — `End2EndTesting.batchedEnumBucketingTests`,
+`test/cases/data-structures/clevrSceneEnumAttrs`.
+
 A call-graph guard refuses value-dependent recursion (e.g. `dice`); other
 non-fragment constructs (marginal `VAny`, composite enumeration,
 mismatched-shape select arms) are refused with a diagnostic naming the

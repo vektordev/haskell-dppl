@@ -476,6 +476,52 @@ def fromRight(r):
     raise Exception("Item is not a Right: " + str(r))
   return r.val
 
+# --- enumerations: all-nullary ADTs (task batched-bucketing-splits-on-nullary-
+# constructors) ----------------------------------------------------------------
+# A constructor tag is structure only when the constructors differ in shape. For
+# an ADT whose constructors are *all* nullary (`data Color = Red | Green | Blue`)
+# they do not: no fields, nothing a shape-directed `if` could branch on
+# differently. Such an ADT is a value, like an int, so the compiler emits its
+# constructor classes with `_enum` (the ADT's name) and `_enum_tag` (the
+# constructor's index), `signature` gives every constructor of it the one key
+# ('E', adt), and `_pack` stacks a bucket's worth into an 'EnumBatch' -- a [B]
+# tag tensor. Constructor tests and equality against it are then [B] masks, which
+# the compiler routes through torch.where like any other value-dependent test.
+#
+# The compiler only does this when the program's constructor tests never need to
+# be bucket-uniform (it falls back to the per-tag classes otherwise, which carry
+# no `_enum`), so an 'EnumBatch' never reaches a Python `if`.
+
+class EnumBatch:
+  def __init__(self, enum, tags):
+    self._enum = enum
+    self.tags = tags
+
+  def __eq__(self, other):
+    # A tag mismatch in *kind* (another ADT, a non-enum value, the "ANY"
+    # sentinel isAny probes with) is a Python False; within one enumeration the
+    # comparison is elementwise.
+    if isinstance(other, EnumBatch):
+      if other._enum != self._enum:
+        return False
+      return self.tags == other.tags
+    if getattr(other, '_enum', None) != self._enum:
+      return False
+    return self.tags == other._enum_tag
+
+  __hash__ = None
+
+def is_ctor(x, cls):
+  # The emitted is<Ctor> of an enumeration constructor: a [B] mask against a
+  # packed batch, the plain isinstance test against a single instance (a domain
+  # constant, a compile-time value).
+  if isinstance(x, EnumBatch):
+    return x.tags == cls._enum_tag
+  return isinstance(x, cls)
+
+def _is_enum_value(v):
+  return (not isinstance(v, EnumBatch)) and getattr(type(v), '_enum', None) is not None
+
 # --- shape-signature bucketing (Component 1) ---------------------------------
 # `bucketed(fn, samples, *args)` is the host wrapper the design calls for:
 #
@@ -504,16 +550,16 @@ def signature(v):
     return ('L?', signature(v.val))
   if isinstance(v, Right):
     return ('R?', signature(v.val))
-  # An ADT value: the constructor tag *and* the field shapes. The tag must be
-  # part of the key -- two constructors of the same arity are different
-  # structures, and merging them into one bucket would run the wrong arm.
   # An ADT value (every emitted constructor class sets _fields, empty for a
   # nullary one): the constructor tag *and* the field shapes. The tag must be
   # part of the key -- two constructors of the same arity are different
   # structures, and merging them into one bucket would run the wrong arm.
-  # Unexercised by the corpus today: the .tst value parser has no ADT literal,
-  # so no corpus program can have an ADT-valued *sample*. It is here so that
-  # such a sample would bucket correctly rather than silently merge.
+  # The corpus differential (End2EndTesting) does not route ADT-valued samples;
+  # 'batched enum bucketing' in End2EndTesting exercises this directly.
+  # An enumeration constructor (all-nullary ADT, see 'EnumBatch'): its tag is a
+  # value, not structure, so the whole ADT is one key.
+  if _is_enum_value(v):
+    return ('E', type(v)._enum)
   if hasattr(v, '_fields'):
     return ('A', type(v).__name__) + tuple(signature(f) for f in v._fields)
   return 'x'
@@ -535,6 +581,8 @@ def _pack(vs):
     return toList([_pack([s[i] for s in vs]) for i in range(len(head))])
   if isinstance(head, T):
     return T(_pack([s.t1 for s in vs]), _pack([s.t2 for s in vs]))
+  if _is_enum_value(head):
+    return EnumBatch(type(head)._enum, torch.tensor([s._enum_tag for s in vs]))
   if hasattr(head, '_fields'):
     return type(head)(*[_pack([s._fields[i] for s in vs])
                         for i in range(len(head._fields))])

@@ -985,6 +985,100 @@ batchedAdtCdfNaNGuardTests = testGroup "batched ADT-cdf NaN guard" $
                     | otherwise -> property True
   ]
 
+-- ===========================================================================
+-- Enumeration bucketing (task batched-bucketing-splits-on-nullary-constructors)
+-- ===========================================================================
+--
+-- An ADT whose constructors are all nullary is an enumeration: its tag is a
+-- value, not a structure, so the bucketing wrapper keys the whole ADT as one
+-- signature and packs a bucket's tags into a [B] tensor. The acceptance
+-- criterion (design heterogeneous-batch-inference, 2026-09-18 review note):
+-- CLEVR-shaped scenes -- every attribute an enumeration, positions Gaussian --
+-- bucket by object count alone, not by attribute-value combination.
+--
+-- This drives @clevrSceneEnumAttrs@ directly rather than through the corpus
+-- batched differential, which does not route ADT-valued samples at all. Every
+-- bucketed answer is checked twice: against the same kernel called on each
+-- sample alone (so collapsing cannot change a number) and against the scene's
+-- closed-form density (so the per-sample path is not wrong in the same way).
+
+batchedEnumBucketingTests :: TestTree
+batchedEnumBucketingTests = testGroup "batched enum bucketing"
+  [ testProperty "CLEVR-shaped scenes bucket by object count, with unchanged values" $
+      once $ ioProperty $ do
+        mpy <- findTorchPython
+        case mpy of
+          Nothing -> do
+            hPutStrLn stderr "batched enum bucketing: runtime check skipped -- no torch-enabled python found (set NEST_TORCH_PYTHON)."
+            return (property True)
+          Just py -> do
+            prog <- corpusPplPath "clevrSceneEnumAttrs" >>= parseProgram
+            case compile defaultCompilerConfig{batched = True} prog >>= generateFunctionsBatched True of
+              Left err -> return (counterexample ("clevrSceneEnumAttrs is not batched-eligible: " ++ err) False)
+              Right srcLines -> do
+                cwd <- getCurrentDirectory
+                let script = "import sys\nsys.path.insert(0, " ++ show cwd ++ ")\n"
+                             ++ unlines srcLines ++ enumBucketingDriver
+                (code, out, err) <- withSystemTempFile "enum_bucketing.py" $ \tmpPath tmpHandle -> do
+                  hPutStr tmpHandle script
+                  hClose tmpHandle
+                  readProcessWithExitCode py [tmpPath] ""
+                return $ case code of
+                  ExitSuccess   -> counterexample (out ++ err) True
+                  ExitFailure _ -> counterexample ("enum bucketing check failed:\n" ++ out ++ err) False
+  ]
+
+-- | Appended to the emitted module (so the constructor classes are in scope).
+-- The probabilities mirror @clevrSceneEnumAttrs.ppl@.
+enumBucketingDriver :: String
+enumBucketingDriver = unlines
+  [ "import random, math"
+  , "from pythonLibBatched import _pack"
+  , "random.seed(7)"
+  , "PS = {Cube: .4, Sphere: .3, Cylinder: .3}"
+  , "PZ = {Small: .3, Large: .7}"
+  , "CN = [Gray, Red, Blue, Green, Brown, Purple, Cyan, Yellow]"
+  , "PC = {c: (0.5 ** (k + 1) if k < 7 else 0.5 ** 7) for k, c in enumerate(CN)}"
+  , "PM = {Rubber: .6, Metal: .4}"
+  , "def mk_obj():"
+  , "    return T(random.choice(list(PS))(), T(random.choice(list(PZ))(), T(random.choice(CN)(),"
+  , "             T(random.choice(list(PM))(), random.gauss(0.0, 1.0)))))"
+  , "def ref(scene):"
+  , "    e = 0.25"
+  , "    for o in scene:"
+  , "        x = o.t2.t2.t2.t2"
+  , "        e *= 0.75 * PS[type(o.t1)] * PZ[type(o.t2.t1)] * PC[type(o.t2.t2.t1)] * PM[type(o.t2.t2.t2.t1)] \\"
+  , "             * math.exp(-x * x / 2) / math.sqrt(2 * math.pi)"
+  , "    return e"
+  , "def leaf(x):"
+  , "    return float(x.reshape(-1)[0]) if torch.is_tensor(x) else float(x)"
+  , "fails = []"
+  , "# Same object count, every attribute varying: one bucket."
+  , "same = [toList([mk_obj() for _ in range(3)]) for _ in range(64)]"
+  , "if bucket_count(same) != 1:"
+  , "    fails.append('64 three-object scenes gave %d buckets, expected 1' % bucket_count(same))"
+  , "# Object counts 0..10: bounded by the number of distinct counts."
+  , "scenes = [toList([mk_obj() for _ in range(random.randint(0, 10))]) for _ in range(300)]"
+  , "want = len(set(len(sc) for sc in scenes))"
+  , "if bucket_count(scenes) != want:"
+  , "    fails.append('%d scenes gave %d buckets, expected %d (one per object count)' % (len(scenes), bucket_count(scenes), want))"
+  , "r = bucketed(main.forward, scenes)"
+  , "for i, sc in enumerate(scenes):"
+  , "    got = float(r[0][i])"
+  , "    alone = leaf(main.forward(_pack([sc]))[0])"
+  , "    e = ref(sc)"
+  , "    if abs(got - alone) > 1e-9 * max(1.0, abs(alone)):"
+  , "        fails.append('scene %d: bucketed %r != per-sample %r' % (i, got, alone))"
+  , "    if abs(got - e) > 1e-5 * e:"
+  , "        fails.append('scene %d: bucketed %r != closed form %r' % (i, got, e))"
+  , "    if float(r[1][0][i]) != float(len(sc)):"
+  , "        fails.append('scene %d: dim %r != %d' % (i, float(r[1][0][i]), len(sc)))"
+  , "if fails:"
+  , "    print('\\n'.join(fails[:20]))"
+  , "    sys.exit(1)"
+  , "print('enum bucketing OK: %d scenes in %d buckets' % (len(scenes), want))"
+  ]
+
 -- | One table row: the program must compile, and only then be refused by the
 -- batched backend with a diagnostic containing @needle@.
 refusalRow :: String -> String -> Property
@@ -1174,6 +1268,13 @@ shapeSig (VList l)            = "L(" ++ intercalate "," (map shapeSig (toList l)
 shapeSig (VTuple a b)         = "T(" ++ shapeSig a ++ "," ++ shapeSig b ++ ")"
 shapeSig (VEither (Left v))   = "L?(" ++ shapeSig v ++ ")"
 shapeSig (VEither (Right v))  = "R?(" ++ shapeSig v ++ ")"
+-- An ADT leaf is erased like a scalar. That is exact for an enumeration (an
+-- all-nullary ADT, which @signature@ keys as one bucket -- task
+-- batched-bucketing-splits-on-nullary-constructors) and under-counts for any
+-- other ADT, whose tag and fields @signature@ does key on; telling the two
+-- apart needs the program's declarations, which this does not see. No corpus
+-- sample carries a non-enumeration ADT today; one that does will fail the
+-- bucket-count assertion loudly rather than pass wrongly.
 shapeSig _                    = "x"
 
 -- | Build a structure-of-arrays batch tensor literal from a homogeneous list of
@@ -1305,9 +1406,14 @@ batchedDriver accArg eligible = unlines $
             -- the bucket count is asserted: the M1 acceptance criterion is that
             -- the wrapper makes exactly one kernel call per distinct shape, not
             -- merely that the numbers come out right.
+            --
+            -- The literal is evaluated inside the program's own namespace: a
+            -- sample may name the program's ADT constructors (@Cube()@), which
+            -- exist only there.
             Just (Bucketed xs n) ->
-              ( [ "    _bucket_count(" ++ show name ++ ", " ++ xs ++ ", " ++ show n ++ ")" ]
-              , "bucketed(_main." ++ method ++ ", " ++ xs ++ accStr ++ paramStr ++ ")" )
+              ( [ "    _samples = eval(" ++ show xs ++ ", _ns)"
+                , "    _bucket_count(" ++ show name ++ ", _samples, " ++ show n ++ ")" ]
+              , "bucketed(_main." ++ method ++ ", _samples" ++ accStr ++ paramStr ++ ")" )
             Nothing -> ([], "None")
       in bucketCheck
          ++ [ "    _cmp(" ++ show name ++ ", " ++ show method ++ ", " ++ call

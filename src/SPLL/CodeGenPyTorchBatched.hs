@@ -41,6 +41,8 @@ module SPLL.CodeGenPyTorchBatched
   , hoistStructural
   , SEnv(..)
   , adtEnv
+  , adtEnvWith
+  , enumAdtNames
   ) where
 
 import SPLL.IntermediateRepresentation
@@ -109,11 +111,25 @@ generateFunctionsBatched genBoil env0 = do
       -- (emitted as instantiations, the same rule and reason as
       -- 'SPLL.CodeGenPyTorch.generateFunctions'' callableNames) and the
       -- @is\<Ctor\>@ predicates ('structural' shape-directed conditions).
-      let env' = adtEnv adts
-      () <- checkCallGraph env' funcs
-      classes <- mapM (generateClass env' lut genArities genRaw) funcs
+      -- Enum collapse (task batched-bucketing-splits-on-nullary-constructors):
+      -- an ADT whose constructors are all nullary carries no structure, so its
+      -- values are packed into one bucket as a per-element tag tensor and its
+      -- @is\<Ctor\>@ tests become per-element masks. That is only sound where
+      -- no such test chooses between *structures* (the dichotomy guard) or
+      -- guards recursion; rather than predicting that, the program is emitted
+      -- collapsed first and, if any guard refuses, re-emitted with every
+      -- constructor tag keyed into the bucket signature exactly as before.
+      -- The fallback is therefore never worse than the uncollapsed backend.
+      let attempt enums = do
+            let env' = adtEnvWith enums adts
+            () <- checkCallGraph env' funcs
+            classes <- mapM (generateClass env' lut genArities genRaw) funcs
+            return (enums, classes)
+      (enums, classes) <- case enumAdtNames adts of
+        []    -> attempt []
+        enums -> either (const (attempt [])) Right (attempt enums)
       constLines <- mapM renderConst consts
-      let body = generateADTClassesBatched adts ++ constLines
+      let body = generateADTClassesBatched enums adts ++ constLines
              ++ (if null consts then [] else [""])
              ++ concat classes
              ++ ["", "# Example Initialization"]
@@ -180,11 +196,35 @@ generateFunctionsBatched genBoil env0 = do
 -- shared diagnostic is for, and NaN propagation through a @torch.where@ is
 -- the failure mode @batched-adt-cdf-refusal-becomes-nan@ had to add a runtime
 -- guard for.
-generateADTClassesBatched :: [ADTDecl] -> [String]
-generateADTClassesBatched decls =
-  concatMap one (concatMap constructors decls)
+generateADTClassesBatched :: [String] -> [ADTDecl] -> [String]
+generateADTClassesBatched enums decls =
+  concatMap oneDecl decls
   ++ concatMap (uncurry accessor) (fieldAccessorOwners decls)
   where
+    oneDecl d
+      | dataName d `elem` enums = concat (zipWith (enumCtor (dataName d)) [0 :: Int ..] (map fst (constructors d)))
+      | otherwise               = concatMap one (constructors d)
+    -- A constructor of a collapsed (all-nullary) ADT: it carries its ADT's
+    -- name and its tag index as class attributes, which is what
+    -- 'pythonLibBatched.signature' keys on (one bucket for the whole ADT) and
+    -- what '_pack' stacks into an 'EnumBatch' tag tensor. Its test and its
+    -- equality then answer a per-element [B] mask against a packed batch, and
+    -- a plain Python bool against another single instance.
+    enumCtor adtName i rawName =
+      let name = pyMangle rawName in
+      ["class " ++ name ++ ":"]
+      ++ indentOnce ( [ "_enum = " ++ show adtName
+                      , "_enum_tag = " ++ show i
+                      , ""
+                      , "def __init__(self):" ]
+                      ++ indentOnce ["self._fields = []"]
+                      ++ [ ""
+                         , "def __eq__(self, other):" ]
+                      ++ indentOnce [ "if isinstance(other, EnumBatch): return other == self"
+                                    , "return isinstance(other, " ++ name ++ ")" ])
+      ++ [""]
+      ++ ["def is" ++ name ++ "(x):"] ++ indentOnce ["return is_ctor(x, " ++ name ++ ")"]
+      ++ [""]
     accessor fieldName ctorName =
       ("def " ++ pyMangle fieldName ++ "(x):")
       : indentOnce [ "if not isinstance(x, " ++ pyMangle ctorName ++ "): throw("
@@ -690,12 +730,33 @@ data SEnv = SEnv
 -- 'SPLL.IntermediateRepresentation.adtIdentifierRenaming' (which renames IR
 -- references to it) -- the constructor is mangled first, then prefixed.
 adtEnv :: [ADTDecl] -> SEnv
-adtEnv decls = SEnv
+adtEnv = adtEnvWith []
+
+-- | 'adtEnv' with the named ADTs /collapsed/ ('enumAdtNames'): their
+-- constructor tests are left out of 'sCtorPreds', so 'structural' no longer
+-- treats them as bucket-uniform and they are emitted as per-element masks.
+-- Their constructors stay in 'sCtors': a value-dependent choice /between/ two
+-- such constructors still has no @torch.where@ form, and the dichotomy guard
+-- keeps refusing it (which is what sends 'generateFunctionsBatched' to its
+-- uncollapsed fallback).
+adtEnvWith :: [String] -> [ADTDecl] -> SEnv
+adtEnvWith enums decls = SEnv
   { sBound        = []
   , sCtors        = [ pyMangle cn        | d <- decls, (cn, _)  <- constructors d ]
   , sNullaryCtors = [ pyMangle cn        | d <- decls, (cn, []) <- constructors d ]
-  , sCtorPreds    = [ "is" ++ pyMangle cn | d <- decls, (cn, _)  <- constructors d ]
+  , sCtorPreds    = [ "is" ++ pyMangle cn | d <- decls, dataName d `notElem` enums
+                                          , (cn, _)  <- constructors d ]
   }
+
+-- | The ADTs whose constructors are all nullary (@data Color = Red | Green |
+-- Blue@): pure enumerations, whose constructor tag is a value rather than a
+-- structure. Product types and primitives are already one bucket per shape;
+-- these are the one kind of sum type that can be too (task
+-- batched-bucketing-splits-on-nullary-constructors). Keyed by the declared
+-- (unmangled) name, which is what 'generateADTClassesBatched' also sees.
+enumAdtNames :: [ADTDecl] -> [String]
+enumAdtNames decls =
+  [ dataName d | d <- decls, not (null (constructors d)), all (null . snd) (constructors d) ]
 
 -- | Is this expression's value fixed by the sample's /shape/ alone, hence a
 -- plain Python value that is constant across a bucket?
