@@ -22,9 +22,16 @@ signature keys the whole ADT as one bucket and `_pack` stacks the tags into
 an `EnumBatch` (a `[B]` tag tensor); `is<Ctor>` (`is_ctor`) and `==` then
 answer per-element masks through `torch.where`. The emitted constructor
 classes carry `_enum`/`_enum_tag` only when collapsed: the compiler emits
-collapsed first and, if any guard refuses (e.g. an enumeration test choosing
-between two list shapes, which has no `torch.where` form), re-emits the
-whole program with every tag keyed into the signature as before. So
+every enumeration collapsed first, and the fallback is per ADT. A refusal
+caused by a collapsed enumeration's test (e.g. one choosing between two list
+shapes, which has no `torch.where` form, or leaving a recursive call without
+a structural guard) carries the ADTs whose tests the offending condition
+reads, directly or through a `let` (`Refusal`'s `refusalBlame`, from
+`enumBlame`); those are keyed back into the signature and the program
+re-emitted, so the other enumerations stay collapsed. A refusal no collapsed
+enumeration is blamed for re-emits with none collapsed, so its outcome is
+exactly the uncollapsed backend's -- collapse never costs a program its
+batched eligibility, in at most k+1 attempts for k enumerations. So
 CLEVR-shaped scenes (enumerated attributes, Gaussian positions) bucket by
 object count alone — `End2EndTesting.batchedEnumBucketingTests`,
 `test/cases/data-structures/clevrSceneEnumAttrs`.

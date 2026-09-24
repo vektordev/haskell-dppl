@@ -56,8 +56,9 @@ import SPLL.Lang.Lang (multiValueToValueList)
 import SPLL.CodeGenPyTorch (envToLUT, replaceCalls, pyMangle, pyDouble)
 import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage, fieldAccessorOwners)
 import Data.Char (toUpper)
-import Data.List (intercalate, isSuffixOf, nub)
-import Data.Maybe (fromMaybe, isJust)
+import Data.Bifunctor (first)
+import Data.List (intercalate, intersect, isSuffixOf, nub, (\\))
+import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Control.Monad (foldM)
 import Control.Monad.State (State, evalState, get, put)
 
@@ -117,17 +118,26 @@ generateFunctionsBatched genBoil env0 = do
       -- @is\<Ctor\>@ tests become per-element masks. That is only sound where
       -- no such test chooses between *structures* (the dichotomy guard) or
       -- guards recursion; rather than predicting that, the program is emitted
-      -- collapsed first and, if any guard refuses, re-emitted with every
-      -- constructor tag keyed into the bucket signature exactly as before.
-      -- The fallback is therefore never worse than the uncollapsed backend.
+      -- with every enum collapsed first, and the fallback is per ADT: a
+      -- refusal caused by a collapsed enum's test names that ADT
+      -- ('refusalBlame'), which is dropped from the collapsed set (its tags
+      -- keyed into the bucket signature exactly as before) and the emission
+      -- retried. A refusal no collapsed enum is blamed for re-emits with
+      -- nothing collapsed, so its outcome -- refusal or not -- is exactly the
+      -- uncollapsed backend's. At most k+1 attempts for k enums, and the
+      -- fallback is never worse than the uncollapsed backend.
       let attempt enums = do
             let env' = adtEnvWith enums adts
             () <- checkCallGraph env' funcs
             classes <- mapM (generateClass env' lut genArities genRaw) funcs
             return (enums, classes)
-      (enums, classes) <- case enumAdtNames adts of
-        []    -> attempt []
-        enums -> either (const (attempt [])) Right (attempt enums)
+          settle enums = case attempt enums of
+            Right ok -> Right ok
+            Left r
+              | blamed@(_:_) <- refusalBlame r `intersect` enums -> settle (enums \\ blamed)
+              | null enums -> Left (refusalMessage r)
+              | otherwise  -> first refusalMessage (attempt [])
+      (enums, classes) <- settle (enumAdtNames adts)
       constLines <- mapM renderConst consts
       let body = generateADTClassesBatched enums adts ++ constLines
              ++ (if null consts then [] else [""])
@@ -140,6 +150,24 @@ generateFunctionsBatched genBoil env0 = do
              , "import math"
              , "from torch.nn import Module", "" ] ++ body
         else body
+
+-- | A refusal from the collapsed-enum emission path: the diagnostic, plus the
+-- collapsed enumerations ('enumAdtNames') whose @is\<Ctor\>@ tests the refused
+-- construct reads -- the ADTs that, keyed back into the bucket signature,
+-- could make that test structural and so lift the refusal. Empty when no
+-- collapsed enum is involved, which 'generateFunctionsBatched' treats as an
+-- ordinary refusal of the program. The blame may over-approximate (it is read
+-- off what a condition mentions, not what makes it fail); that costs only
+-- collapse, never correctness, since every retry is re-checked in full.
+data Refusal = Refusal { refusalBlame :: [String], refusalMessage :: CompilerError }
+
+unblamed :: CompilerError -> Refusal
+unblamed = Refusal []
+
+-- | The offender a guard reports: one no collapsed enum is blamed for, if any,
+-- since stripping enums cannot lift that refusal; otherwise the first.
+pickOffender :: [([String], a)] -> Maybe ([String], a)
+pickOffender offs = listToMaybe ([o | o@([], _) <- offs] ++ offs)
 
 -- | The batched twin of 'SPLL.CodeGenPyTorch.generateADTClasses': one Python
 -- class per constructor, plus its @is\<Ctor\>@ predicate and field accessors.
@@ -270,7 +298,7 @@ renderConst (n, v) = case batchedVal v of
 -- (task neural-generate-parity: generate's ineligibility used to degrade to a
 -- runtime-raising stub per class, M4; it is now a compile-time refusal like
 -- forward/integrate, see 'renderGen').
-generateClass :: SEnv -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> IRFunGroup -> Either CompilerError [String]
+generateClass :: SEnv -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> IRFunGroup -> Either Refusal [String]
 generateClass env lut genArities genMethods (IRFunGroup name gen prob integ _ _ doc dom) = do
   p <- maybe (Right []) (generateMethod env lut "forward" name) prob
   i <- maybe (Right []) (generateMethod env lut "integrate" name) integ
@@ -377,11 +405,11 @@ methodArgs env lut (expr0, _) = fst (unwrapLambdas (prepBatchedBody env (irMap (
 -- query-type guard and any @isAny@ marginal branches (batched v1 excludes
 -- @VAny@), check the residue lies in the tensor fragment, then render it as a
 -- let-spine ending in a @return@.
-generateMethod :: SEnv -> [(String, String)] -> String -> String -> IRFunDecl -> Either CompilerError [String]
+generateMethod :: SEnv -> [(String, String)] -> String -> String -> IRFunDecl -> Either Refusal [String]
 generateMethod env lut methodName groupNameStr (expr0, doc) = do
   let expr = irMap (replaceCalls lut) expr0
       (args, body) = unwrapLambdas (prepBatchedBody env expr)
-  () <- batchedGuard env groupNameStr methodName body
+  () <- batchedGuardBlamed env groupNameStr methodName body
   let l1 = "def " ++ methodName ++ "(self" ++ concatMap (", " ++) args ++ "):"
       docLines = map ("# " ++) (lines doc)
   return $ docLines ++ [l1] ++ indentOnce (batchedBlock (Just (groupNameStr ++ "." ++ methodName)) env body)
@@ -450,25 +478,28 @@ batchNVar = "_batchN"
 --      as forward/integrate): lists, ADTs, Either dispatch (including a
 --      neural read-logits network's own 'EitherPlan'/'ADTPlan' output shape -- see the
 --      header comment above), etc.
-renderGen :: SEnv -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> String -> IRFunDecl -> Either CompilerError [String]
+renderGen :: SEnv -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> String -> IRFunDecl -> Either Refusal [String]
 renderGen env lut genArities genRaw groupNameStr (expr0, doc)
   | hasGenCycle genRaw (groupNameStr ++ "_gen") =
       if producesList (lookup (groupNameStr ++ "_gen") genRaw)
         then Right (heterogeneousGenStub groupNameStr)
-        else Left $ "batched mode: " ++ groupNameStr ++ "'s generate function recurses (directly "
+        else Left $ unblamed $ "batched mode: " ++ groupNameStr ++ "'s generate function recurses (directly "
           ++ "or through a call chain); data-dependent recursion is outside the tensor fragment "
           ++ "(design pytorch-tensorizer) and both-arm-eager select semantics would not terminate."
   | otherwise =
       let expr = irMap (attachBatchCall genArities . replaceCalls lut) expr0
           (args, body) = unwrapLambdas (prepBatchedBody env expr)
-      in case batchedGuard env groupNameStr "generate" body of
+      in case batchedGuardBlamed env groupNameStr "generate" body of
            -- Drawing a *structurally heterogeneous* sample -- a value-dependent
            -- branch between two shapes -- is the same Component 4 situation as
            -- the recursive list case above: the shapes are the output, so there
            -- is nothing to bucket on. Stub it rather than refusing the whole
-           -- program, whose inference over such samples buckets fine.
-           Left why | structureBranch env body -> Right (heterogeneousGenStub groupNameStr)
-                    | otherwise                 -> Left why
+           -- program, whose inference over such samples buckets fine. A refusal
+           -- blamed on a collapsed enum is passed up instead: with that ADT
+           -- keyed back into the signature the body may emit for real, which
+           -- beats a stub.
+           Left r | null (refusalBlame r), structureBranch env body -> Right (heterogeneousGenStub groupNameStr)
+                  | otherwise -> Left r
            Right () ->
              let l1 = "def generate(self" ++ concatMap (", " ++) (args ++ [batchNVar]) ++ "):"
                  docLines = map ("# " ++) (lines doc)
@@ -705,8 +736,8 @@ projTuple False e                            = IRDestruct AcSnd e
 -- built per program by 'adtEnv' and threaded through analysis and emission
 -- alike, so the two can never disagree about whether a given node is structure.
 --
--- Only 'sBound' varies as a body is walked ('bindS'); the three ADT-derived
--- sets are fixed for the whole program.
+-- Only 'sBound' and 'sEnumDeps' vary as a body is walked ('bindS'); the
+-- ADT-derived sets are fixed for the whole program.
 data SEnv = SEnv
   { -- | Names @let@-bound to a structurally-determined (batch-independent,
     -- Python-bool) value.
@@ -720,6 +751,12 @@ data SEnv = SEnv
     -- | The @is\<Ctor\>@ predicate names, which 'structural' recognises as
     -- shape-directed conditions.
   , sCtorPreds    :: [String]
+    -- | The predicates left out of 'sCtorPreds' by enum collapse, each with
+    -- its ADT: what 'enumBlame' reads a refusal's blame off.
+  , sEnumPreds    :: [(String, String)]
+    -- | Names @let@-bound to a value reading collapsed predicates, with the
+    -- ADTs they read ('enumBlame' through a CSE'd condition).
+  , sEnumDeps     :: [(String, [String])]
   }
 
 -- | The environment for one program: nothing bound yet, and the three name sets
@@ -737,8 +774,9 @@ adtEnv = adtEnvWith []
 -- treats them as bucket-uniform and they are emitted as per-element masks.
 -- Their constructors stay in 'sCtors': a value-dependent choice /between/ two
 -- such constructors still has no @torch.where@ form, and the dichotomy guard
--- keeps refusing it (which is what sends 'generateFunctionsBatched' to its
--- uncollapsed fallback).
+-- keeps refusing it -- blaming the ADT whose test the condition reads
+-- ('enumBlame'), which is what sends 'generateFunctionsBatched' to retry with
+-- that ADT uncollapsed.
 adtEnvWith :: [String] -> [ADTDecl] -> SEnv
 adtEnvWith enums decls = SEnv
   { sBound        = []
@@ -746,7 +784,24 @@ adtEnvWith enums decls = SEnv
   , sNullaryCtors = [ pyMangle cn        | d <- decls, (cn, []) <- constructors d ]
   , sCtorPreds    = [ "is" ++ pyMangle cn | d <- decls, dataName d `notElem` enums
                                           , (cn, _)  <- constructors d ]
+  , sEnumPreds    = [ ("is" ++ pyMangle cn, dataName d) | d <- decls, dataName d `elem` enums
+                                                        , (cn, _) <- constructors d ]
+  , sEnumDeps     = []
   }
+
+-- | The collapsed enumerations whose @is\<Ctor\>@ tests this expression reads,
+-- directly or through a @let@-bound name ('sEnumDeps'). Collapse only ever
+-- changes a verdict by dropping those tests from 'sCtorPreds', so a condition
+-- reading none of them is judged exactly as it is uncollapsed; that is what
+-- lets an empty blame stand for "not caused by collapse".
+enumBlame :: SEnv -> IRExpr -> [String]
+enumBlame env0 = nub . go env0
+  where
+    go env e = case e of
+      IRVar n       -> [adt | Just adt <- [lookup n (sEnumPreds env)]]
+                    ++ fromMaybe [] (lookup n (sEnumDeps env))
+      IRLetIn n v b -> go env v ++ go (bindS env n v) b
+      _             -> concatMap (go env) (getIRSubExprs e)
 
 -- | The ADTs whose constructors are all nullary (@data Color = Red | Green |
 -- Blue@): pure enumerations, whose constructor tag is a value rather than a
@@ -819,8 +874,12 @@ structural env e = case e of
 -- | Extend the structural environment with a @let@ binding (shadowing a
 -- previously-structural name that is rebound to a per-element value).
 bindS :: SEnv -> String -> IRExpr -> SEnv
-bindS env n v | structural env v = env { sBound = nub (n : sBound env) }
-              | otherwise        = env { sBound = filter (/= n) (sBound env) }
+bindS env n v = bound { sEnumDeps = [(n, deps) | not (null deps)]
+                                 ++ filter ((/= n) . fst) (sEnumDeps env) }
+  where
+    deps = enumBlame env v
+    bound | structural env v = env { sBound = nub (n : sBound env) }
+          | otherwise        = env { sBound = filter (/= n) (sBound env) }
 
 isEmptyListConst :: IRExpr -> Bool
 isEmptyListConst (IRConst (VList EmptyList)) = True
@@ -943,7 +1002,7 @@ hasStructuralIf env e = case e of
 -- generate is now sometimes emitted, but it is checked and rendered
 -- independently (per class, best-effort) rather than through this hard,
 -- whole-program graph -- see 'hasGenCycle' for its own, separate cycle check.
-checkCallGraph :: SEnv -> [IRFunGroup] -> Either CompilerError ()
+checkCallGraph :: SEnv -> [IRFunGroup] -> Either Refusal ()
 checkCallGraph env funcs = do
     () <$ foldM (walk []) [] roots
     mapM_ checkRecursion [(n, prepBatchedBody env b) | (n, b) <- methods, isEmittedMethod n]
@@ -959,9 +1018,9 @@ checkCallGraph env funcs = do
             go seen (n:ns)
               | n `elem` seen = go seen ns
               | otherwise     = go (n : seen) (callees n ++ ns)
-    checkRecursion (n, body) = case recOffenders cyclic env False body of
-      []      -> Right ()
-      (why:_) -> Left $ "batched mode: " ++ n ++ " " ++ why
+    checkRecursion (n, body) = case pickOffender (recOffenders cyclic env (Just []) body) of
+      Nothing           -> Right ()
+      Just (blame, why) -> Left $ Refusal blame $ "batched mode: " ++ n ++ " " ++ why
                      ++ ". Structure-directed recursion is admitted (design "
                      ++ "heterogeneous-batch-inference, Component 1: within a "
                      ++ "shape bucket its depth is uniform, so it runs unchanged "
@@ -972,7 +1031,7 @@ checkCallGraph env funcs = do
       | name `elem` grey  = Right black   -- a cycle: admissibility is 'checkRecursion's call
       | name `elem` black = Right black
       | not (isEmittedMethod name) =
-          Left $ "batched mode: a prob/integ path calls " ++ name
+          Left $ unblamed $ "batched mode: a prob/integ path calls " ++ name
               ++ ", which is not a forward/integrate method (a prob/integ path may only "
               ++ "call other forward/integrate methods; generate and normal_params are "
               ++ "compiled separately -- see design pytorch-tensorizer)."
@@ -993,25 +1052,34 @@ checkCallGraph env funcs = do
 --      argument — the same one the sample's own finite length gives the scalar
 --      backend.
 --
--- @guarded@ tracks (1) down the traversal; @env@ tracks which names hold
--- structural values ('structural').
-recOffenders :: [String] -> SEnv -> Bool -> IRExpr -> [String]
-recOffenders cyc env guarded e = case e of
-  IRLetIn n v b -> recOffenders cyc env guarded v
-                ++ recOffenders cyc (bindS env n v) guarded b
-  IRIf c t f | structural env c ->
-       recOffenders cyc env guarded c
-    ++ recOffenders cyc env True t
-    ++ recOffenders cyc env True f
+-- @unguarded@ tracks (1) down the traversal: 'Nothing' under a structural
+-- @if@, otherwise the collapsed enums ('enumBlame') read by the enclosing
+-- non-structural @if@ conditions -- uncollapsing them could guard the call, so
+-- they are its offence's blame. The descent offence is never collapse's doing.
+-- @env@ tracks which names hold structural values ('structural').
+recOffenders :: [String] -> SEnv -> Maybe [String] -> IRExpr -> [([String], String)]
+recOffenders cyc env unguarded e = case e of
+  IRLetIn n v b -> recOffenders cyc env unguarded v
+                ++ recOffenders cyc (bindS env n v) unguarded b
+  IRIf c t f
+    | structural env c ->
+       recOffenders cyc env unguarded c
+    ++ recOffenders cyc env Nothing t
+    ++ recOffenders cyc env Nothing f
+    | otherwise ->
+       let arms = (++ enumBlame env c) <$> unguarded
+       in recOffenders cyc env unguarded c
+       ++ recOffenders cyc env arms t
+       ++ recOffenders cyc env arms f
   _ | (IRVar n, args) <- collectApplyChain e, n `elem` cyc ->
-       [ "calls " ++ n ++ " recursively from a position that is not guarded by a "
+       [ (nub blame, "calls " ++ n ++ " recursively from a position that is not guarded by a "
          ++ "structural (shape-directed) test, so both-arm-eager select semantics "
-         ++ "would not terminate" | not guarded ]
-    ++ [ "calls " ++ n ++ " recursively without descending into the tail of a list "
-         ++ "argument, so the recursion is not bounded by the sample's structure"
+         ++ "would not terminate") | Just blame <- [unguarded] ]
+    ++ [ ([], "calls " ++ n ++ " recursively without descending into the tail of a list "
+         ++ "argument, so the recursion is not bounded by the sample's structure")
        | not (any hasTailDescent args) ]
-    ++ concatMap (recOffenders cyc env guarded) args
-  _ -> concatMap (recOffenders cyc env guarded) (getIRSubExprs e)
+    ++ concatMap (recOffenders cyc env unguarded) args
+  _ -> concatMap (recOffenders cyc env unguarded) (getIRSubExprs e)
 
 -- | Does this argument expression take the tail of a list anywhere?
 hasTailDescent :: IRExpr -> Bool
@@ -1045,18 +1113,26 @@ allVarNames e = [n | IRVar n <- [e]] ++ concatMap allVarNames (getIRSubExprs e)
 -- body (guard/isAny stripped), so the only nodes it should see are the ones
 -- 'batchedExpr' knows how to emit.
 batchedGuard :: SEnv -> String -> String -> IRExpr -> Either CompilerError ()
-batchedGuard env0 groupNameStr methodName body =
-  case offenders env0 body of
-    []      -> Right ()
-    (why:_) -> Left $
+batchedGuard env groupNameStr methodName body =
+  first refusalMessage (batchedGuardBlamed env groupNameStr methodName body)
+
+-- | 'batchedGuard' with the refusal's blame ('Refusal'): only the dichotomy
+-- guard's structure-choosing @if@ can be collapse's doing, blamed on the
+-- enums its condition reads; 'emittable' and the select case do not consult
+-- the constructor predicates at all.
+batchedGuardBlamed :: SEnv -> String -> String -> IRExpr -> Either Refusal ()
+batchedGuardBlamed env0 groupNameStr methodName body =
+  case pickOffender (offenders env0 body) of
+    Nothing           -> Right ()
+    Just (blame, why) -> Left $ Refusal blame $
       "batched mode: " ++ groupNameStr ++ "'s " ++ methodName
       ++ " uses a construct outside the tensor fragment: " ++ why
       ++ ". The tensor fragment (design pytorch-tensorizer) admits only "
       ++ "float/int/bool leaves in fixed-shape tuples -- no lists, ADTs, "
       ++ "Either dispatch, recursion, or marginal (ANY) queries."
   where
-    offenders env e = [reason e | not (emittable e)]
-                   ++ [ structureSelectReason | structureSelect env e ]
+    offenders env e = [([], reason e) | not (emittable e)]
+                   ++ [ (selectBlame env e, structureSelectReason) | structureSelect env e ]
                    ++ case e of
                         IRLetIn n v b -> offenders env v ++ offenders (bindS env n v) b
                         -- A tensor map's binder is an IRLambda, which the
@@ -1079,6 +1155,8 @@ batchedGuard env0 groupNameStr methodName body =
     structureSelect env (IRIf c t f)     = not (structural env c)
                                         && (listValued env t || listValued env f)
     structureSelect _   _                = False
+    selectBlame env (IRIf c _ _) = enumBlame env c
+    selectBlame _   _            = []
     structureSelectReason =
       "a value-dependent branch (select) whose arms have different structure; "
       ++ "torch.where cannot select between structures -- only shape-directed "

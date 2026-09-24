@@ -2235,6 +2235,39 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
             (not (any ("_enum" `isInfixOf`) ls))
           assertBool ("fallback does not branch on the tag structurally: " ++ unlines ls)
             (any ("if isRed(sample):" `isInfixOf`) ls)
+  , testCase "the enum fallback is per ADT: a harmless enumeration stays collapsed" $
+      -- Color's test (reached through a CSE'd let, so the blame has to follow
+      -- the binding) chooses between list shapes and must fall back; Size's
+      -- only selects a float, so the refusal is not its doing and it keeps
+      -- its one-bucket collapse. A per-program fallback loses both.
+      case generateFunctionsBatched False (enumEnvWith [colorDecl, sizeDecl]
+             (IRConstruct TgTuple
+                [ IRLetIn "cse_0" (IRApply (IRVar "isRed") (IRDestruct AcFst (IRVar "sample")))
+                    (IRIf (IRVar "cse_0") (IRConst (VList EmptyList)) oneElemList)
+                , IRIf (IRApply (IRVar "isSmall") (IRDestruct AcSnd (IRVar "sample")))
+                    (IRConst (VFloat 1.0)) (IRConst (VFloat 0.0)) ])) of
+        Left msg -> assertFailure ("batched mode refused a tag-bucketable program: " ++ msg)
+        Right ls -> do
+          assertBool ("Size lost its collapse to Color's fallback: " ++ unlines ls)
+            (any ("_enum = \"Size\"" `isInfixOf`) ls)
+          assertBool ("Color is still collapsed: " ++ unlines ls)
+            (not (any ("_enum = \"Color\"" `isInfixOf`) ls))
+          assertBool ("Color's test does not branch structurally: " ++ unlines ls)
+            (any ("if cse_0:" `isInfixOf`) ls)
+          assertBool ("Size's test is still emitted as a Python if: " ++ unlines ls)
+            (not (any ("if isSmall(" `isInfixOf`) ls))
+  , testCase "a refusal no enumeration is blamed for is the uncollapsed backend's" $
+      -- A value-dependent choice between list shapes whose condition reads no
+      -- constructor test: uncollapsing cannot help, so the program is refused
+      -- exactly as it is with nothing collapsed -- even beside a blamable one.
+      let body = IRConstruct TgTuple
+                   [ IRIf (IRApply (IRVar "isRed") (IRVar "sample")) (IRConst (VList EmptyList)) oneElemList
+                   , IRIf (IRVar "sample") (IRConst (VList EmptyList)) oneElemList ]
+      in case generateFunctionsBatched False (enumEnv body) of
+           Right ls -> assertFailure ("batched mode accepted a structure-choosing select: " ++ unlines ls)
+           Left msg -> assertEqual "refusal differs from the uncollapsed backend's"
+                         (either id (const "") (batchedGuard (adtEnv [colorDecl]) "main" "forward" body))
+                         msg
   , testCase "a list-building recursive generate degrades to a stub, not a refusal" $
       -- The one narrow exception to the hard whole-program refusal rule: a
       -- generate whose recursion *builds a list* has per-element depth (design
@@ -2303,13 +2336,18 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
     colorDecl = ADTDecl { dataName = "Color"
                         , constructors = [("Red", []), ("Green", []), ("Blue", [])]
                         , adtDepth = Nothing }
-    enumEnv body = IREnv
+    sizeDecl = ADTDecl { dataName = "Size"
+                       , constructors = [("Small", []), ("Large", [])]
+                       , adtDepth = Nothing }
+    oneElemList = IRConstruct TgCons [IRConst (VFloat 1.0), IRConst (VList EmptyList)]
+    enumEnv = enumEnvWith [colorDecl]
+    enumEnvWith decls body = IREnv
       [IRFunGroup { groupName = "main"
                   , probFun = Just (IRLambda "sample" body, "")
                   , genFun = Nothing, integFun = Nothing
                   , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
                   , sampleDomain = Nothing }]
-      [colorDecl]
+      decls
       []
     nullaryCtorEnv ctorRef = IREnv
       [IRFunGroup { groupName = "main"
