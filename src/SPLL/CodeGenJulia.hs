@@ -284,6 +284,11 @@ generateExpression (IROp OpApprox left right) = do
     l <- generateExpression left
     r <- generateExpression right
     return $ "isclose(" ++ l ++ ", " ++ r ++ ")"
+-- 'OpMax' has no infix spelling; Julia's `max` is the prefix form.
+generateExpression (IROp OpMax left right) = do
+    l <- generateExpression left
+    r <- generateExpression right
+    return $ "max(" ++ l ++ ", " ++ r ++ ")"
 generateExpression (IROp op left right) = do
     l <- generateExpression left
     r <- generateExpression right

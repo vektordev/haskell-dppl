@@ -396,6 +396,11 @@ generateExpressionLifted (IROp OpApprox l r) = do
   (ls, le) <- generateExpressionLifted l
   (rs, re) <- generateExpressionLifted r
   return (ls ++ rs, str "isclose(" . le . str ", " . re . str ")")
+-- 'OpMax' has no infix spelling; Python's builtin `max` is the prefix form.
+generateExpressionLifted (IROp OpMax l r) = do
+  (ls, le) <- generateExpressionLifted l
+  (rs, re) <- generateExpressionLifted r
+  return (ls ++ rs, str "max(" . le . str ", " . re . str ")")
 generateExpressionLifted (IROp op l r) = do
   (ls, le) <- generateExpressionLifted l
   (rs, re) <- generateExpressionLifted r
@@ -567,6 +572,10 @@ generateExpression (IROp OpApprox left right) = do
   l <- generateExpression left
   r <- generateExpression right
   return ("isclose(" ++ l ++ ", " ++ r ++ ")")
+generateExpression (IROp OpMax left right) = do
+  l <- generateExpression left
+  r <- generateExpression right
+  return ("max(" ++ l ++ ", " ++ r ++ ")")
 generateExpression (IROp op left right) = do
   l <- generateExpression left
   r <- generateExpression right
