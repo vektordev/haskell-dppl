@@ -1,0 +1,14 @@
+-- Two independent categorical experts compared by a BARE `==` (Bool result).
+-- Semantically this is p(True) = Z = sum_k P_a(k) * P_b(k), the agreement
+-- evidence of test/cases/neural/categoricalProductFusion -- and spelling the
+-- same thing as `if v == w then True else False` compiles, takes the O(V)
+-- agreement fusion, and answers 0.29 below. The bare spelling instead throws
+-- "set-valued witness construction failed for the binding of 'v'".
+-- Task bare-equality-of-two-neural-reads-crashes (found by the
+-- lm-product-of-experts-decoding experiment).
+neural camNN   :: (Symbol -> Int) of [0, 1, 2]
+neural depthNN :: (Symbol -> Int) of [0, 1, 2]
+main img depth =
+  let v = camNN img in
+  let w = depthNN depth in
+  v == w

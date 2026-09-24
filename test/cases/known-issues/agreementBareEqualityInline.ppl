@@ -1,0 +1,7 @@
+-- The same bare-`==` agreement as agreementBareEqualityLetBound, with the two
+-- network reads inline instead of let-bound. Fails differently: "More than one
+-- probabilistic argument found" (IRCompiler, the binary-InjF arm).
+-- Task bare-equality-of-two-neural-reads-crashes.
+neural camNN   :: (Symbol -> Int) of [0, 1, 2]
+neural depthNN :: (Symbol -> Int) of [0, 1, 2]
+main img depth = camNN img == depthNN depth
