@@ -9,6 +9,6 @@
 neural camNN   :: (Symbol -> Int) of [0, 1, 2]
 neural depthNN :: (Symbol -> Int) of [0, 1, 2]
 main img depth =
-  let v = camNN img in
-  let w = depthNN depth in
+  draw v = camNN img in
+  draw w = depthNN depth in
   v == w

@@ -11,7 +11,7 @@
 -- `b` leaves an ordinary probability query over the selected arm. The proof
 -- that the information is available is that hoisting the fresh draw into its
 -- own enumerable binding answers correctly today:
---   main = let b = Uniform < 0.5 in let n = Uniform < 0.9 in
+--   main = draw b = Uniform < 0.5 in draw n = Uniform < 0.9 in
 --            (b, if b then n else (not n))
 --   -> p((True, True)) = 0.45   p((True, False)) = 0.05
 --      p((False, True)) = 0.05  p((False, False)) = 0.45
