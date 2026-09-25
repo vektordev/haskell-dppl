@@ -50,7 +50,10 @@ constructor's field accessor is never evaluated. Task
 branch-free evaluation cannot skip the residuals a nested `++` count chain's
 `is_member` guard rules out, so an n-slot chain does `n!`-ish work per call
 where the scalar backend prunes per row (6 slots: ~49s per call, whatever
-`B`) -- correct, but not yet practical past ~4 slots.
+`B`) -- correct, but not yet practical past ~4 slots. Tier-0 materialization
+would make it a convolution but declines the table, the leaf cell
+(`match (readAttrs s)`, a 97-value sum) exceeding `maxTabulatedLeafNodes`;
+docs-repo task `batched-count-chain-enumeration-factorial`.
 
 A call-graph guard refuses value-dependent recursion (e.g. `dice`); other
 non-fragment constructs (marginal `VAny`, composite enumeration,
