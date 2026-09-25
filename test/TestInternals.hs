@@ -30,6 +30,7 @@ import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts, planFactorE
 import SPLL.Typing.PType (PType(Integrate, Deterministic))
 import Data.Foldable (toList)
 import Data.List (isInfixOf, intercalate, isPrefixOf, isSuffixOf, sort, nub)
+import Data.Maybe (fromMaybe)
 import Control.Exception (try, evaluate, ErrorCall(..))
 import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
@@ -3306,6 +3307,86 @@ test_agreementFusesToElementwiseProduct = testCase "agreementFusesToElementwiseP
   assertBool "an agreement over a shared latent must not fuse to a product" $
     not (containsZipProduct shared)
 
+-- | The most loop-body evaluations one chain of nested enumerations costs: the
+-- largest product of domain sizes along any path of 'BMap's inside one
+-- another's bodies. A joint enumeration over @k@ stacked draws of a @V@-valued
+-- domain costs @V^k@; one shared latent around per-operand enumerations costs
+-- its own domain times the widest per-operand chain, however many operands
+-- there are. A domain that is not a (let-bound) 'BTensor' literal counts as
+-- one, which can only under-count.
+loopChainCost :: IRExpr -> Int
+loopChainCost = go []
+  where
+    go env (IRBuiltin BMap [IRLambda _ body, t]) =
+      max (domainSize env t * max 1 (go env body)) (go env t)
+    go env (IRLetIn x v b) = max (go env v) (go ((x, domainSize env v) : env) b)
+    go env e = maximum (0 : map (go env) (getIRSubExprs e))
+    -- A domain is a 'BTensor' literal, possibly let-bound (CSE shares one
+    -- literal across several loops).
+    domainSize _ (IRBuiltin (BTensor _) xs) = length xs
+    domainSize env (IRVar x) = fromMaybe 1 (lookup x env)
+    domainSize _ _ = 1
+
+-- | The CLEVR @exist@-count shape over a three-colour vocabulary at @n@
+-- slots, in three spellings: the predicate fixed ('Nothing': one compiled
+-- artifact per predicate, the cost reference), or read from @readQ@ and shared
+-- by @draw@ -- with every per-slot read hoisted into its own @draw@ (the probe
+-- @f3b_pred_read_hoisted@) or passed straight to the helper.
+sharedLatentSrc :: Maybe Bool -> Int -> String
+sharedLatentSrc spelling n = unlines $
+  [ "data Color = Red | Blue | Green"
+  , "neural readQ :: (Symbol -> Color) of {Red | Blue | Green}"
+  , "neural readC :: (Symbol -> Color) of {Red | Blue | Green}"
+  , "match c o = if o == c then 1 else 0" ]
+  ++ case spelling of
+       Nothing ->
+         [ "main " ++ slots ++ " = " ++ sumOf (\i -> "match Red (readC s" ++ show i ++ ")") ]
+       Just True ->
+         [ "main q " ++ slots ++ " =", "  draw c = readQ q in" ]
+         ++ [ "  draw o" ++ show i ++ " = readC s" ++ show i ++ " in" | i <- [1 .. n] ]
+         ++ [ "  " ++ sumOf (\i -> "match c o" ++ show i) ]
+       Just False ->
+         [ "main q " ++ slots ++ " =", "  draw c = readQ q in"
+         , "  " ++ sumOf (\i -> "match c (readC s" ++ show i ++ ")") ]
+  where
+    slots = unwords ["s" ++ show i | i <- [1 .. n]]
+    sumOf f = intercalate " ++ " [ "(" ++ f i ++ ")" | i <- [1 .. n] ]
+
+-- | Task shared-enumerated-latent-loses-per-slot-factorization: a predicate
+-- latent shared by @draw@ across independent per-slot reads must cost the
+-- latent's domain times the fixed-predicate program -- one loop over the
+-- latent with the per-slot form inside it -- not the joint over the latent and
+-- every slot (@8 * 97^n@ for the CLEVR program it was found in, which did not
+-- finish one call in 90 s at three slots).
+--
+-- Measured as 'loopChainCost' against the fixed-predicate program at the same
+-- slot count, at two slot counts so the bound cannot hold by coincidence of
+-- one size. The hoisted spelling meets it only because 'SPLL.DrawSinking' moves
+-- each per-slot draw into the summand that reads it; the curried-helper
+-- spelling, because 'enumerateCurriedArgument' enumerates the helper's last
+-- argument (before, it had no probability path at all). Values are pinned by
+-- the corpus programs @sharedLatentPerSlot@ and @sharedLatentPerSlotHoisted@.
+test_sharedLatentFactorizesPerSlot :: TestTree
+test_sharedLatentFactorizesPerSlot = testCase "sharedLatentFactorizesPerSlot" $
+  mapM_ (\n -> do
+          fixed <- cost Nothing n
+          hoisted <- cost (Just True) n
+          helper <- cost (Just False) n
+          let bound = 3 * fixed
+          assertBool (show n ++ " hoisted slots cost " ++ show hoisted ++ " on one loop chain;"
+                      ++ " the fixed-predicate program costs " ++ show fixed) (hoisted <= bound)
+          assertBool (show n ++ " curried-helper slots cost " ++ show helper ++ " on one loop chain;"
+                      ++ " the fixed-predicate program costs " ++ show fixed) (helper <= bound))
+        [3, 6]
+  where
+    cost spelling n = case tryParseProgram "sharedLatent" (sharedLatentSrc spelling n) of
+      Left err -> assertFailure ("parse error: " ++ show err)
+      Right prog -> case compile defaultCompilerConfig prog of
+        Left err -> assertFailure ("compile error at " ++ show n ++ " slots: " ++ show err)
+        Right irEnv -> case probFun (lookupIREnv "main" irEnv) of
+          Just (pf, _) -> return (loopChainCost pf)
+          Nothing -> assertFailure "no probability variant"
+
 -- | The largest dense enumeration domain a compiled body materializes: the
 -- element count of its widest 'BTensor' literal. A dense enumeration emits its
 -- whole domain as one such literal, so this is the size of what was enumerated.
@@ -3857,6 +3938,7 @@ internalsTests = testGroup "Internals"
       , test_nnHoistedOutOfEnumSum
       , test_agreementFusesToElementwiseProduct
       , test_nestedEnumerationHonoursBudget
+      , test_sharedLatentFactorizesPerSlot
       ]
   , test_missingMainFunction
   , test_farTailEitherDensityNotZeroed

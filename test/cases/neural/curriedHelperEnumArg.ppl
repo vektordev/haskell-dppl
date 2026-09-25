@@ -1,0 +1,6 @@
+data Color = Red | Blue | Green
+
+neural readC :: (Symbol -> Color) of {Red | Blue | Green}
+
+match c o = if o == c then 1 else 0
+main s = match Red (readC s)

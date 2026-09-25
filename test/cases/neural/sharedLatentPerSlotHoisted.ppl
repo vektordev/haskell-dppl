@@ -1,0 +1,12 @@
+data Color = Red | Blue | Green
+
+neural readQ :: (Symbol -> Color) of {Red | Blue | Green}
+neural readC :: (Symbol -> Color) of {Red | Blue | Green}
+
+match c o = if o == c then 1 else 0
+main q s1 s2 s3 =
+  draw c = readQ q in
+  draw o1 = readC s1 in
+  draw o2 = readC s2 in
+  draw o3 = readC s3 in
+  (match c o1) ++ (match c o2) ++ (match c o3)

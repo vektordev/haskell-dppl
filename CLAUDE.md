@@ -133,7 +133,8 @@ SPLL source (.spll/.ppl)
   → Parser.hs (megaparsec) → AST (Lang/Lang.hs, Lang/Types.hs)
   → Validator.hs → CalleeNormalize.hs (function values in callee position)
   → Typing/RInfer.hs (return types)
-  → Analysis.hs (DiscreteValues tags) → Typing/ForwardChaining.hs (chain names)
+  → Analysis.hs (DiscreteValues tags) → DrawSinking.hs (per-operand draws)
+  → Typing/ForwardChaining.hs (chain names)
   → Typing/ModalityInfer.hs (PTypes) → Analysis.hs (IsConditional tags)
   → IRCompiler.hs → IR (IntermediateRepresentation.hs)
      Three compilation branches: generate, probability, integrate
@@ -1175,6 +1176,7 @@ fully-annotated AST after each pipeline stage to stderr via
 | After Callee Normalization | printed **only** when a callee was rewritten — still unannotated (see Callee Normalization below) |
 | After RType Inference | `rType` populated; `pType` still `NotSetYet` |
 | After Enum Annotation | `DiscreteValues` tags appear |
+| After Draw Sinking | printed **only** when a `draw` was moved (see "Stacked draws are sunk into their operands") |
 | After Forward Chaining | `chainName` fields filled |
 | After Modality Inference | `pType` populated |
 | After Conditional Annotation | `IsConditional` tags appear on conditioned distributions |
@@ -1201,15 +1203,25 @@ to the parameter, and re-annotates the callee's body under that environment.
 The directly-applied-lambda (`let`) case likewise binds the parameter before
 annotating the body, so a `let`-bound enumerable is visible inside it.
 
-Three refusals, each answering "no tag" -- the status quo before this existed:
+A **curried spine** `f a b` is tagged the same way, binding every argument to
+its parameter (task `shared-enumerated-latent-loses-per-slot-factorization`).
+It used to be refused, because **this pass runs before ModalityInfer, so every
+`pType` still reads `NotSetYet` here** and it cannot tell which argument is
+random. IRCompiler decides that instead: a conditional top-level function
+applied to arguments that are all deterministic -- once the enclosing
+enumerated latents are fixed (`retypeDetGiven` over `recoveredVars`) -- except
+a random enumerable *last* one is compiled by `enumerateCurriedArgument`, which
+loops over that argument's domain exactly as `enumerateAppliedLambda` loops
+over a `let`'s. A random *leading* argument declines there and keeps its old
+path; and `enumerateAppliedLambda` measures its bound value with the enclosing
+latents fixed, which is what `draw v = contrib u 1` (u enumerated outside,
+`sharedLatentNestedLet`) needs once `contrib u 1` carries a tag. Before, even
+`match Red (readC s)` had no probability path ("set-valued witness
+construction failed"), while `match (readC s)` did. Corpus:
+`curriedHelperEnumArg`, `sharedLatentPerSlot`.
 
-- **Curried spines of two or more arguments.** In `f a b`, `a` sits where
-  IRCompiler's enumerate path cannot reach it: `enumerateAppliedLambda`
-  marginalises the argument of the single `Apply` node it is handed, and the
-  partial application `f a` is not even tagged `IsConditional` (only `Var` and
-  `Lambda` nodes are). Deciding it per argument position would need `pType`,
-  and **this pass runs before ModalityInfer, so every `pType` still reads
-  `NotSetYet` here** -- `rType` is available, `pType` is not.
+Two refusals remain, each answering "no tag":
+
 - **Recursion.** A function already being looked through is refused; unrolling
   has no termination story and the enclosing tag fixpoint would not converge.
 - **An empty propagated domain.** No values at all is an *absence* of a domain,
@@ -1234,6 +1246,45 @@ used to be rejected, but its emitted probability function is generate-backed
 and therefore not a probability function at all -- a pre-existing defect
 reachable at HEAD by `bump coin ++ 1`, tracked by the docs-repo investigation
 `generate-backed-inference-sweep`, not by the tag.
+
+### Stacked draws are sunk into their operands
+
+IRCompiler enumerates a `draw`-bound discrete variable over the whole body of
+its binding, so stacked draws enumerate as their **joint**, even where the body
+factorizes. The CLEVR "exist with a predicate input" shape --
+`draw c = readQ q in draw o1 = readAttrs s1 in ... in (match c o1) ++ ...` --
+nested loops over `c` and every `o_i`, `8 * 97^N` terms, and did not finish one
+call at three slots.
+
+`SPLL.DrawSinking` (between enum annotation and forward chaining, since it needs
+the `DiscreteValues` tags; a rewritten program is annotated again) moves each
+enumerable, possibly-random `draw` down to the one `InjF` operand that reads
+it: past directly nested bindings that don't read it, and into an operand when
+some *other* operand may be random. That leaves `draw c` around
+`(draw o1 = .. in match c o1) ++ ...`, which is the per-slot form. Sound for
+eager draws: the binding is still evaluated at most once and every use of the
+name stays under it; nothing is ever moved under a non-binding `Lambda`, into an
+`if` arm, or into a function argument. A binding that ends up as `draw x = e in
+x` is replaced by `e`.
+
+The per-slot chain is then tabulated by Tier 0 materialization *inside* the
+loop over `c`, which needed its decomposability gate to be retaken given the
+enclosing enumerated bindings (`sharesLatentGiven` over
+`materializationScopes`, fed by `CompilerMetadata.fixedLatents`): the summands
+share `c`, but not once `c` holds one value. Measured at ten CLEVR slots
+(97-value reads, 8 colours, 256 rows, scalar emitted Python with a
+feature-major oracle): an `exist` query costs 0.37s against the
+fixed-predicate program's 0.055s, i.e. 8 colours at ~0.8x the per-predicate
+cost each; the full count distribution 92s against 21s. Values agree with a
+Poisson-binomial reference to 2e-15. Corpus: `sharedLatentPerSlotHoisted`;
+structural test `Internals.sharedLatentFactorizesPerSlot` (loop-chain cost
+against the fixed-predicate program at 3 and 6 slots).
+
+The programs this moves in the corpus are `letTwoEnumerable`,
+`sharedLatent{PlusFresh,OneSideOnly,NestedChain,NestedLet}`,
+`enumLetGatesFreshDrawNested` and `listConsDeconstruction`; the
+decomposability canaries still keep a shared latent around the operands that
+share it, since a binding read by two operands never moves into either.
 
 ### Neural Declarations
 

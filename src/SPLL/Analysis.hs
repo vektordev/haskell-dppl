@@ -172,65 +172,75 @@ distinctUpTo cap results = case cap of
     (oks, failures) = span isRight results
     vals = nubValues [v | Right v <- oks]
 
--- | The 'DiscreteValues' tag of a one-argument application.
+-- | The 'DiscreteValues' tag of an application, one argument or a whole
+-- saturated curried spine.
 --
 -- An arrow-typed callee cannot carry one fixed tag in the 'TagEnv' -- what its
--- result enumerates over depends on what its argument enumerates over -- so the
+-- result enumerates over depends on what its arguments enumerate over -- so the
 -- tag has to be computed per call site. This resolves the application's head to
 -- a lambda (a literal one, or a top-level function looked up in the 'FunEnv'),
--- binds the argument's tags to the parameter, and re-annotates the body under
--- that environment: the body's own 'InjF'/'IfThenElse' cases then fire exactly
--- as they do when the helper is inlined by hand.
+-- binds each argument's tags to the matching parameter, and re-annotates the
+-- body under that environment: the body's own 'InjF'/'IfThenElse' cases then
+-- fire exactly as they do when the helper is inlined by hand.
 --
 -- Without it, `f x ++ f y` has no tag on either operand, so IRCompiler's
 -- enumerate-both clauses never match and the enclosing 'InjF' falls off the end
 -- of 'toIRInference' (task enumerable-injf-operand-loses-tag-across-apply).
+--
+-- A curried spine `f a b` is tagged the same way (task
+-- shared-enumerated-latent-loses-per-slot-factorization). It used to be
+-- refused, because the enumerate path only marginalised the argument of the
+-- single 'Apply' node it was handed and a random @a@ sat out of its reach. That
+-- is decided in IRCompiler now, where 'pType' is known: a spine whose leading
+-- arguments are deterministic -- once the enclosing enumerated latents are
+-- fixed -- enumerates its last argument ('enumerateCurriedArgument'), and an
+-- enumerated binding measures its argument with those latents fixed, which is
+-- what the spine needs when its random argument is a leading one
+-- (test/cases/let-bindings/sharedLatentNestedLet is the canary for that).
 --
 -- Everything it cannot resolve answers @[]@ -- the status quo before this
 -- existed -- rather than a guess:
 --
 --   * a head that is neither a lambda nor a known top-level function
 --     (a higher-order parameter, a projection out of a tuple),
---   * a curried spine of two or more arguments. In `f a b`, `a` sits where
---     IRCompiler's enumerate path cannot reach it: 'enumerateAppliedLambda'
---     marginalises the argument of the single 'Apply' node it is handed, and the
---     partial application `f a` is not even tagged 'IsConditional' (only 'Var'
---     and 'Lambda' nodes are). Tagging the spine would advertise a marginal the
---     compiler then cannot compute -- it takes an enumerate clause and dies
---     inverting the partial application (testCases/sharedLatentNestedLet is the
---     canary). Deciding it per argument position would need 'pType', which this
---     pass runs too early to see (ModalityInfer comes after it).
 --   * a partial application: the result is still arrow-typed, so it enumerates
 --     over nothing. This needs no case of its own -- the callee's body is then
 --     another 'Lambda', which has no 'DiscreteValues' of its own.
+--   * an over-application (more arguments than the callee has parameters),
 --   * recursion: a function already being looked through. Unrolling it has no
 --     termination story, and the enclosing fixpoint would not converge, so the
 --     recursive call site is left untagged. This is why @visited@ is threaded
 --     through 'annotateIn' rather than being local here.
 applyTags :: [ADTDecl] -> FunEnv -> [String] -> TagEnv -> Expr -> [Tag]
 applyTags adtsParam funEnv visited env e = case appSpine e of
-  (Expr _ (Var n), [arg])
+  (Expr _ (Var n), args@(_:_))
     | n `notElem` visited
-    , Just calleeBody <- lookup n funEnv -> tagOf (n:visited) calleeBody arg
-  -- A literal lambda head: 'annotateIn' reaches here only through its
-  -- @Apply (Lambda ..) v@ case, which has just annotated this very body under
-  -- the environment 'tagOf' would build (the parameter bound to the annotated
-  -- argument's tags, same @visited@). Its tags are already the answer.
-  -- Re-annotating it was a second full walk of the body per `let`, which is
-  -- 2^K for K nested lets (task chained-gaussian-trajectory-compile-exponential).
+    , Just calleeBody <- lookup n funEnv -> tagOf (n:visited) calleeBody args
+  -- A literal lambda head applied to one argument: 'annotateIn' reaches here
+  -- only through its @Apply (Lambda ..) v@ case, which has just annotated this
+  -- very body under the environment 'tagOf' would build (the parameter bound to
+  -- the annotated argument's tags, same @visited@). Its tags are already the
+  -- answer. Re-annotating it was a second full walk of the body per `let`,
+  -- which is 2^K for K nested lets (task
+  -- chained-gaussian-trajectory-compile-exponential). A longer curried spine
+  -- has no such case, so it is re-annotated.
   (Expr _ (Lambda _ lamBody), [_]) ->
     [DiscreteValues mv | DiscreteValues mv <- tags (getTypeInfo lamBody)]
+  (l@(Expr _ (Lambda _ _)), args@(_:_)) -> tagOf visited l args
   _ -> []
   where
-    -- The argument sits at the call site, so it is already annotated in the right
-    -- environment; only the callee's body needs re-annotating, with the
-    -- argument's tags bound to the parameter.
-    tagOf vis (Expr _ (Lambda param lamBody)) a =
-      let bodyEnv = (param, tags (getTypeInfo a)) : env
-      in [DiscreteValues mv | DiscreteValues mv <- tags (getTypeInfo (annotateIn adtsParam funEnv vis bodyEnv lamBody))]
-    -- A named callee whose body is not a lambda at all: it takes no argument, so
-    -- this application is over-applied and has no result to enumerate.
-    tagOf _ _ _ = []
+    -- The arguments sit at the call site, so they are already annotated in the
+    -- right environment; only the callee's body needs re-annotating, with each
+    -- argument's tags bound to its parameter (a later parameter shadowing an
+    -- earlier one of the same name, as it does in the body).
+    tagOf vis callee as = case bindParams callee as env of
+      Just (calleeBody, bodyEnv) ->
+        [DiscreteValues mv | DiscreteValues mv <- tags (getTypeInfo (annotateIn adtsParam funEnv vis bodyEnv calleeBody))]
+      Nothing -> []
+    bindParams b [] en = Just (b, en)
+    bindParams (Expr _ (Lambda param lamBody)) (a:as) en = bindParams lamBody as ((param, tags (getTypeInfo a)) : en)
+    -- More arguments than parameters: over-applied, no result to enumerate.
+    bindParams _ _ _ = Nothing
 
 -- | An application split into its head and its arguments, outermost-last:
 -- @f a b@ is @(f, [a, b])@.

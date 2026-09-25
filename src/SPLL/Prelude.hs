@@ -96,6 +96,7 @@ import SPLL.Typing.Infer (addModalityInfo)
 import SPLL.Typing.RInfer (addRTypeInfoAt, addRTypeInfo)
 import SPLL.Validator (validateProgram)
 import SPLL.CalleeNormalize (normalizeCallees)
+import SPLL.DrawSinking (sinkEnumerableDraws)
 import IRInterpreter (generateRand, generateDet)
 import Control.Monad.Random (Rand, RandomGen)
 import SPLL.IRCompiler
@@ -393,10 +394,23 @@ compile conf p = do
 -- unchanged, which is the design's central claim.
 compileRTyped :: CompilerConfig -> Program -> Either CompilerError IREnv
 compileRTyped conf rtyped = do
-  let preAnnotated = annotateEnumsProg rtyped
+  let enumAnnotated = annotateEnumsProg rtyped
   printIfMoreVerbose conf "\n=== Annotated Program (1) ==="
-  pPrintIfMoreVerbose conf preAnnotated
-  printStage conf "After Enum Annotation" preAnnotated
+  pPrintIfMoreVerbose conf enumAnnotated
+  printStage conf "After Enum Annotation" enumAnnotated
+
+  -- Draw sinking (task shared-enumerated-latent-loses-per-slot-factorization):
+  -- move each enumerable `draw` down into the one InjF operand that reads it,
+  -- so stacked draws that only a shared latent ties together are enumerated
+  -- per operand rather than jointly. It needs the DiscreteValues tags just
+  -- computed to know which bindings are enumerable, and the moved bindings'
+  -- new nodes carry none, so a rewritten program is annotated again.
+  preAnnotated <- case sinkEnumerableDraws enumAnnotated of
+    Nothing -> return enumAnnotated
+    Just sunk -> do
+      let reannotated = annotateEnumsProg sunk
+      printStage conf "After Draw Sinking" reannotated
+      return reannotated
 
   let forwardChained = annotateProg preAnnotated
   printIfMoreVerbose conf "\n=== Chain named Program ==="

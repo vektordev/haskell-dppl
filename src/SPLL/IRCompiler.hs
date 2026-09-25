@@ -82,6 +82,15 @@ data CompilerMetadata = CompilerMetadata {
   -- verdict depends on the 'let'-scope lexically enclosing the node, which a
   -- 'toIRInference' case looking at a node in isolation cannot reconstruct.
   latentVerdicts :: Map.Map ChainName Bool,
+  -- | What 'latentVerdicts' is computed from, per binary InjF node
+  -- ('materializationScopes'), for the one consumer that retakes the verdict
+  -- given the latents an enclosing enumeration has fixed.
+  latentScopes :: Map.Map ChainName ([LatentBinder], Expr, Expr),
+  -- | The latent identities (the chain names of their draws, as
+  -- 'bindLatent' keys them) that enclosing enumeration loops have fixed:
+  -- inside @enumerateAppliedLambda@'s loop over @let x = v@, @v@ holds one
+  -- value. The latent counterpart of 'recoveredVars'.
+  fixedLatents :: Set.Set ChainName,
   -- | The @_gen@ function names whose evaluation draws no randomness, from
   -- 'SPLL.Typing.Determinism.functionSummaries'. Consumed by
   -- 'requireDeterministicUnderEnum' (and only there) as the deterministic-generator
@@ -496,9 +505,10 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
     -- probability mass under logSpace, since every branch's accumulated weight
     -- was then a linear 1.0 multiplied against log (negative) per-branch terms
     -- (task topk-logspace-unsound).
-    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) [] verdicts detGens cyclicGens SRSumProduct []
+    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) [] verdicts sharedSets Set.empty detGens cyclicGens SRSumProduct []
     -- One walk of the whole program, shared by every 'meta' built below.
     verdicts = materializationVerdicts p
+    sharedSets = materializationScopes p
     -- Likewise one call-graph fixpoint, shared: which generate functions are
     -- deterministic when applied to deterministic arguments.
     detGens = Set.fromList [n ++ "_gen" | (n, True) <- Map.toList (functionSummaries p)]
@@ -622,10 +632,11 @@ isEnumerable = any isDiscrete
 --   * the application is saturated -- its result is a value, not another
 --     function. Enumerating a *partial* application would generate a closure and
 --     compare it against the sample, which is not a comparison at all (the
---     interpreter rejects it: "Equals can only evaluate on two values"). No
---     program reaches this today, because Analysis declines to tag a curried
---     spine at all ('SPLL.Analysis.applyTags'); it is stated here because it is
---     a precondition of enumerating, not a consequence of that refusal.
+--     interpreter rejects it: "Equals can only evaluate on two values").
+--     Analysis tags only saturated applications ('SPLL.Analysis.applyTags'),
+--     but this is stated here because it is a precondition of enumerating, not
+--     a consequence of that. A saturated curried spine whose random argument
+--     is the last one is 'curriedEnumerableCallee''s case, not this one.
 -- | Peel a curried application spine (@Apply (Apply (Apply f a) b) c@) down to
 -- its head and the left-to-right list of arguments applied to it
 -- (@(f, [a, b, c])@). Used to build a whole saturated call to a top-level
@@ -835,6 +846,43 @@ materializationVerdicts :: Program -> Map.Map ChainName Bool
 materializationVerdicts p =
   Map.fromList (concatMap (latentVerdictWalk True . snd) (functions p))
 
+-- | A binder enclosing a binary InjF node, outermost first: what
+-- 'latentVerdictWalk' folds into the node's 'LatentScope'.
+data LatentBinder = LetBinder String Expr | ParamBinder ChainName String
+
+-- | Every binary InjF node of the program with the binders enclosing it and its
+-- two operands, keyed by chain name: 'materializationVerdicts' before the
+-- verdict is taken, so that it can be retaken /given/ some enumerated
+-- bindings ('sharesLatentGiven').
+materializationScopes :: Program -> Map.Map ChainName ([LatentBinder], Expr, Expr)
+materializationScopes p = Map.fromList (concatMap (go [] . snd) (functions p))
+  where
+    go binders e = case node e of
+      InjF _ [l, r] ->
+        (chainName (getTypeInfo e), (reverse binders, l, r)) : go binders l ++ go binders r
+      Apply (Expr _ (Lambda x lambdaBody)) v -> go (LetBinder x v : binders) lambdaBody ++ go binders v
+      Lambda x lambdaBody -> go (ParamBinder (chainName (getTypeInfo e)) x : binders) lambdaBody
+      _ -> concatMap (go binders) (getSubExprs e)
+
+-- | The decomposability verdict of 'materializationVerdicts', retaken with the
+-- enumerated bindings whose draws (by chain name) are in @fixed@ each holding
+-- one value, as they do inside their enumeration loops: such a binding
+-- contributes no latent, so two operands that read it and share nothing else
+-- are independent given it. Consumed by Tier 0 materialization, whose tables
+-- are built inside those loops; this is what lets
+-- @draw c = readQ q in match c (readC s1) ++ match c (readC s2) ++ ..@
+-- tabulate its per-slot chain inside the loop over @c@ (task
+-- shared-enumerated-latent-loses-per-slot-factorization). A variable bound
+-- from @c@ inside the loop is fixed along with it, since the scope is rebuilt
+-- binder by binder rather than patched afterwards.
+sharesLatentGiven :: Set.Set ChainName -> ([LatentBinder], Expr, Expr) -> Bool
+sharesLatentGiven fixed (binders, l, r) = sharesEnumeratedLatent (foldl bind Map.empty binders) l r
+  where
+    bind scope (LetBinder x v)
+      | chainName (getTypeInfo v) `Set.member` fixed = Map.insert x (Just Set.empty) scope
+      | otherwise = bindLatent scope x v
+    bind scope (ParamBinder cn x) = bindLambdaParam scope cn x
+
 -- | Shared implementation of the two walks above. @bindParams@ selects
 -- whether a bare 'Lambda' binds its parameter ('bindLambdaParam') or is
 -- descended into with the parameter left unbound (the historical behaviour
@@ -1012,8 +1060,12 @@ materializeConvolution meta e dom = case node e of
     bound = materializationCardinality (compilerConfig meta)
     -- Missing verdict (a node the whole-program walk did not reach) is
     -- conservative "may share", like every other unknown in this analysis.
+    -- Latents fixed by an enclosing enumeration loop do not count: given
+    -- them, operands that share nothing else are independent.
     mayShareLatent =
       Map.findWithDefault True (chainName (getTypeInfo e)) (latentVerdicts meta)
+      && maybe True (sharesLatentGiven (fixedLatents meta))
+           (Map.lookup (chainName (getTypeInfo e)) (latentScopes meta))
     domKeys = Set.fromList (map valueKey dom)
     -- Evaluate the InjF's forward function on every operand-value pair at
     -- compile time, and bucket the pairs by the output value they produce.
@@ -2332,6 +2384,19 @@ toIRInference meta cumulative (Expr TypeInfo {rType=_} (Apply l v)) sample
   case agreementShape meta l v of
     Just ag -> enumerateAgreement meta cumulative ag sample
     Nothing -> enumerateAppliedLambda meta cumulative l v sample
+-- A conditional top-level function applied, through a curried spine, to
+-- deterministic leading arguments and a probabilistic enumerable last one:
+-- @match c (readAttrs s)@ with @c@ fixed. Marginalise the last argument
+-- exactly as the one-argument equation above does ('enumerateCurriedArgument').
+-- The leading arguments are read with the enclosing enumerated latents fixed,
+-- which is what makes the shared-latent spelling
+-- @draw c = readQ q in match c (readAttrs s1) ++ match c (readAttrs s2)@
+-- compile per slot inside the loop over @c@ (task
+-- shared-enumerated-latent-loses-per-slot-factorization).
+toIRInference meta cumulative (Expr ti (Apply l v)) sample
+  | Just l' <- curriedEnumerableCallee meta l v
+  , enumerationWithinMaterializationBudget meta (tags (getTypeInfo v)) =
+  enumerateCurriedArgument meta cumulative ti l' v sample
 -- Deterministic curried call spine rooted at a known top-level function: build
 -- the WHOLE application (the query sample, plus every source-level argument)
 -- as one contiguous 'IRApply' chain and let-bind it exactly once, instead of
@@ -3485,20 +3550,79 @@ enumerateAppliedLambda meta cumulative l v sample = do
   let newTypeEnv = (boundVar, (rType (getTypeInfo v), False)):typeEnv meta
   let sr = semiringOf meta
   irTuple <- lift (runWriterT (do
-    pBranch <- (unP . rProb) <$> toIRInference meta False v (IRVar boundVar)
+    -- The argument is measured with the enclosing enumerated latents fixed:
+    -- inside their loops each holds one value, and a curried helper call such
+    -- as @contrib u 1@ (u enumerated outside) is only measurable as a call
+    -- with deterministic arguments once @u@ reads as one.
+    pBranch <- (unP . rProb) <$> toIRInference meta False (retypeDetGiven (recoveredVars meta) v) (IRVar boundVar)
     -- Inside the loop the bound variable holds one fixed domain value, so it is
     -- recorded as recovered, exactly as 'residueFactor' records a variable fixed
     -- at its witness. Only a body that leaves the enumeration for 'toIRInference'
     -- reads this (the over-budget nested application in 'toIREnumerate'); there
     -- the plan traversal must see the loop variable as fixed, not as an enclosing
     -- random binding shared across factors ('planFactorExternals').
-    let bodyMeta = meta{typeEnv=newTypeEnv, recoveredVars = boundVar : recoveredVars meta}
+    let bodyMeta = meta{ typeEnv=newTypeEnv, recoveredVars = boundVar : recoveredVars meta
+                       , fixedLatents = Set.insert (chainName (getTypeInfo v)) (fixedLatents meta) }
     bodyRes <- toIREnumerate bodyMeta cumulative lBodyExpr sample
     return (onProb (\p -> srTimes sr p pBranch) bodyRes))) <&> generateLetInBlock meta
   let discreteVVals = head [x | DiscreteValues x <- tags (getTypeInfo v)]
   let (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
   setVariables outerBinds
   enumSumP (semiringOf meta) (countBranches (compilerConfig meta)) id boundVar discreteVVals innerTuple
+
+
+-- | The partial application @f a1 .. ak@ (k >= 1) of 'Apply' @l v@, retyped
+-- with the enclosing enumerated latents fixed, when the application should be
+-- compiled by enumerating @v@: @f@ is a conditional top-level function, every
+-- @ai@ is deterministic given the enclosing latents, the application is
+-- saturated, and @v@ is a probabilistic enumerable draw. The one-argument case
+-- is 'isEnumerableApplication''s; this is its curried generalisation, which
+-- 'SPLL.Analysis.applyTags' tags since the same task.
+--
+-- A random /leading/ argument is not handled here -- 'enumerateCurriedArgument'
+-- marginalises the last argument only -- and declines, leaving the node to the
+-- equations that follow, exactly as before.
+curriedEnumerableCallee :: CompilerMetadata -> Expr -> Expr -> Maybe Expr
+curriedEnumerableCallee meta l v
+  | (Expr headTi (Var f), args@(_:_)) <- flattenApplySpine l'
+  , IsConditional `elem` tags headTi
+  , Just (TArrow _ _, True) <- lookup f (typeEnv meta)
+  , all ((== Deterministic) . pType . getTypeInfo) args
+  , isEnumerable (tags (getTypeInfo v))
+  , pType (getTypeInfo v) /= Deterministic
+  , not (returnsFunction (rType (getTypeInfo l)))
+  = Just l'
+  | otherwise = Nothing
+  where
+    l' = retypeDetGiven (recoveredVars meta) l
+    returnsFunction (TArrow _ (TArrow _ _)) = True
+    returnsFunction _ = False
+
+-- | @sum_x P(v = x) * P(l x = sample)@ over @v@'s domain, for the curried spine
+-- 'curriedEnumerableCallee' accepted. The counterpart of
+-- 'enumerateAppliedLambda', which marginalises a 'let'-bound argument through
+-- its lambda body; a partial application has no lambda body of its own to
+-- resolve, so the loop body is the application itself with a fresh loop
+-- variable in the argument position. Inside the loop every argument is fixed,
+-- so 'toIREnumerate' compiles it forward and compares (or, for a helper that
+-- draws fresh randomness, hands it to the ordinary inference rules).
+enumerateCurriedArgument :: CompilerMetadata -> Bool -> TypeInfo -> Expr -> Expr -> IRExpr -> CompilerMonad PResult
+enumerateCurriedArgument meta cumulative appTi l v sample = do
+  boundVar <- mkVariable "enum_arg"
+  let vTi = getTypeInfo v
+      loopVar = Expr (vTi {pType = Deterministic, tags = []}) (Var boundVar)
+      loopBody = Expr appTi (Apply l loopVar)
+      bodyMeta = meta { typeEnv = (boundVar, (rType vTi, False)) : typeEnv meta
+                      , recoveredVars = boundVar : recoveredVars meta }
+      sr = semiringOf meta
+  irTuple <- lift (runWriterT (do
+    pBranch <- (unP . rProb) <$> toIRInference meta False (retypeDetGiven (recoveredVars meta) v) (IRVar boundVar)
+    bodyRes <- toIREnumerate bodyMeta cumulative loopBody sample
+    return (onProb (\p -> srTimes sr p pBranch) bodyRes))) <&> generateLetInBlock meta
+  let discreteVVals = head [x | DiscreteValues x <- tags vTi]
+  let (outerBinds, innerTuple) = hoistInvariantBindings boundVar irTuple
+  setVariables outerBinds
+  enumSumP sr (countBranches (compilerConfig meta)) id boundVar discreteVVals innerTuple
 
 
 -- ===== Agreement fusion (task categorical-product-ov-fusion) =====
