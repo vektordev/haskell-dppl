@@ -1,3 +1,4 @@
+backends: interpreter, julia, python, batched
 p(Right 1.0)=(0.5, 1.0, False)
 p(Right 0.6)=(0.5, 1.0, False)
 p(Right 0.2) is impossible
