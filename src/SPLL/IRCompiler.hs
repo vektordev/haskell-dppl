@@ -3627,9 +3627,12 @@ agreementShape meta l v = do
       | (x, y) == (vOuter, vInner) || (x, y) == (vInner, vOuter) -> Just ()
     _ -> Nothing
   -- Neither arm may read the inner variable: the off-diagonal sum only
-  -- factors because the arms are constant in it.
-  require (Set.notMember vInner (varsOfExpr thenE))
-  require (Set.notMember vInner (varsOfExpr elseE))
+  -- factors because the arms are constant in it. Anywhere in the arm, not
+  -- just at its root -- 'varsOfExpr' alone sees only the root node, so
+  -- @left (b + 10)@ used to pass and the fused body read an unbound @b@
+  -- (test/cases/neural/agreementArmReadsInnerNested).
+  require (Set.notMember vInner (containedVars varsOfExpr thenE))
+  require (Set.notMember vInner (containedVars varsOfExpr elseE))
   -- Independence, from the decomposability analysis keyed by this very node.
   require (Map.lookup (chainName (getTypeInfo cond)) (latentVerdicts meta) == Just False)
   domA <- enumeratedDomain v
