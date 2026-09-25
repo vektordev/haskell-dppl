@@ -23,7 +23,7 @@ import qualified Data.Map.Strict as Map
 import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan)
 import SPLL.IntermediateRepresentation
 import SPLL.Semiring (semiringSuffix)
-import SPLL.IROptimizer (postProcess, optimizeEnv, deterministicGens, distributeIf, headHash, OptEnv(..))
+import SPLL.IROptimizer (postProcess, optimizeEnv, deterministicGens, distributeIf, headHash, OptEnv(..), emptyOptEnv, optEnvFromADTs, simplify, propagateCondition)
 import SPLL.CodeGenPyTorchBatched (adtEnv, adtEnvWith, batchedGuard, enumAdtNames, generateFunctionsBatched, structural)
 import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage)
 import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts, planFactorExternals, enumeratedCount)
@@ -1936,7 +1936,7 @@ stochasticCallTests = testGroup "stochastic calls (stochastic-call-cse-unsound)"
       let cond = IROp OpLessThan (IRApply (IRVar "c_gen") (IRVar "t")) (IRConst (VFloat 0.5))
           arm x y = IRIf cond (IRConst (VInt x)) (IRConst (VInt y))
           tup = IRConstruct TgTuple [arm 0 1, arm 2 3]
-          envWith b = OptEnv (deterministicGens [genGroup "c" b]) Set.empty
+          envWith b = emptyOptEnv { optDetGens = deterministicGens [genGroup "c" b] }
       assertEqual "a stochastic callee blocks the hoist" tup
         (distributeIf (envWith (IRSample IRUniform)) False tup)
       assertBool "a deterministic callee does not"
@@ -1957,7 +1957,7 @@ stochasticCallTests = testGroup "stochastic calls (stochastic-call-cse-unsound)"
         (not (any hoistedGenPrefix (irLetBindings opt)))
   ]
   where
-    noDetGens = OptEnv Set.empty Set.empty
+    noDetGens = emptyOptEnv
     genGroup n body = IRFunGroup { groupName = n, genFun = Just (body, "")
                                  , probFun = Nothing, integFun = Nothing
                                  , writeLogitsFun = Nothing, normalFun = Nothing
@@ -1976,6 +1976,147 @@ stochasticCallTests = testGroup "stochastic calls (stochastic-call-cse-unsound)"
     -- necessarily the partial application repro 1 crashed on.
     hoistedGenPrefix (IRApply (IRVar n) _) = isEffectfulVar n
     hoistedGenPrefix _                     = False
+
+-- | Task iroptimizer-o2-leaves-unfolded-constant-tests: -O2's substituting
+-- rewrites push constructor literals and known Booleans into branch bodies,
+-- producing tests whose value is fixed at compile time. These pin that
+-- 'simplify' and 'propagateCondition' decide them -- and, as importantly, that
+-- they leave alone what is not decided (a wrong-arm projection, a
+-- same-constructor comparison with fields, an effectful or shadowed condition).
+constantTestFoldingTests :: TestTree
+constantTestFoldingTests = testGroup "constant tests (iroptimizer-o2-leaves-unfolded-constant-tests)"
+  [ testCase "if c then False else True is not c" $
+      simp (IRIf x false true) @?= IRUnaryOp OpNot x
+  , testCase "a double negation is the identity" $
+      simp (IRUnaryOp OpNot (IRUnaryOp OpNot x)) @?= x
+  , testCase "Either arm tests over a literal arm fold" $ do
+      simp (IRDestruct AcIsLeft (irLeft x)) @?= true
+      simp (IRDestruct AcIsLeft (irRight x)) @?= false
+      simp (IRDestruct AcIsRight (irRight x)) @?= true
+      simp (IRDestruct AcIsRight (IRConst (VEither (Left (VFloat 1))))) @?= false
+  , testCase "Either payload projections over the matching arm fold" $ do
+      simp (IRDestruct AcFromLeft (irLeft x)) @?= x
+      simp (IRDestruct AcFromRight (IRConst (VEither (Right (VFloat 1))))) @?= IRConst (VFloat 1)
+  , testCase "a wrong-arm projection is irLeft to throw" $ do
+      let e = IRDestruct AcFromLeft (irRight x)
+      simp e @?= e
+  , testCase "literal Either values of different arms are unequal" $
+      simp (IROp OpEq (irLeft x) (irRight y)) @?= false
+  , testCase "constructor tests over a literal constructor fold" $ do
+      simpA (IRApply (IRVar "isB") ctorA) @?= false
+      simpA (IRApply (IRVar "isA") ctorA) @?= true
+      simpA (IRApply (IRVar "isB") (ctorB x)) @?= true
+      simpA (IRApply (IRVar "isB") (IRConst (VADT "A" []))) @?= false
+  , testCase "a partial constructor application is not a value" $ do
+      let e = IRApply (IRVar "isB") (IRVar "B")
+      simpA e @?= e
+  , testCase "a field accessor over its owning constructor projects" $
+      simpA (IRApply (IRVar "v") (ctorB x)) @?= x
+  , testCase "a field accessor over another constructor is irLeft to throw" $ do
+      let e = IRApply (IRVar "v") ctorA
+      simpA e @?= e
+  , testCase "equality of literal constructors" $ do
+      simpA (IROp OpEq ctorA ctorA) @?= true
+      simpA (IROp OpEq ctorA (ctorB x)) @?= false
+      let sameWithFields = IROp OpEq (ctorB x) (ctorB y)
+      simpA sameWithFields @?= sameWithFields
+  , testCase "a literal constructor is never ANY" $ do
+      simpA (IRUnaryOp OpIsAny ctorA) @?= false
+      simpA (IRUnaryOp OpIsAny (ctorB (IRConst VAny))) @?= false
+  , testCase "without the ADT declarations nothing about constructors folds" $ do
+      let e = IRApply (IRVar "isB") ctorA
+      simp e @?= e
+  -- Repro 4: the condition re-tested as the first thing in its own branch.
+  , testCase "an arm test is decided inside its own branches" $ do
+      let c = IRDestruct AcIsLeft x
+      postProcess defaultCompilerConfig
+        (IRIf c (IRIf c (IRVar "a") (IRVar "b")) (IRIf c (IRVar "d") (IRVar "e")))
+        @?= IRIf c (IRVar "a") (IRVar "e")
+  , testCase "a constructor test is decided inside its own branches" $ do
+      let c = IRApply (IRVar "isB") x
+          e = IRIf c (IRIf c (IRVar "a") (IRVar "b")) (IRVar "e")
+      propagateCondition flagEnv e
+        @?= IRIf c (IRIf true (IRVar "a") (IRVar "b")) (IRVar "e")
+  -- Repro 3: @if s: if not(not(s)) ...@ and @0.3 if not(s) else 0.0@ in the
+  -- else arm.
+  , testCase "a Bool variable is decided as a nested condition, through negations" $
+      postProcess defaultCompilerConfig
+        (IRIf s (IRIf (IRUnaryOp OpNot (IRUnaryOp OpNot s)) (IRVar "a") (IRVar "b"))
+                (IRIf (IRUnaryOp OpNot s) (IRVar "d") (IRVar "e")))
+        @?= IRIf s (IRVar "a") (IRVar "d")
+  -- The Python backend's ANY sentinel is truthy, so inside @if s@ the variable
+  -- is only known to be truthy -- it may not be replaced by True as a value.
+  , testCase "a Bool variable is not replaced in value position" $ do
+      let e = IRIf s (IRApply (IRVar "f") s) (IRVar "e")
+      propagateCondition emptyOptEnv e @?= e
+  , testCase "an effectful condition is not propagated" $ do
+      let c = IRVar "coin_gen"
+          e = IRIf c (IRIf c (IRVar "a") (IRVar "b")) (IRVar "e")
+      propagateCondition emptyOptEnv e @?= e
+  , testCase "a shadowing binder stops the propagation" $ do
+      let c = IRDestruct AcIsLeft x
+          inner = IRLetIn "x" y (IRIf c (IRVar "a") (IRVar "b"))
+          e = IRIf c inner (IRVar "e")
+      propagateCondition emptyOptEnv e @?= e
+  -- The seed observation, end to end at the default level: no test, accessor,
+  -- equality or ANY check over a literal constructor survives.
+  , testCase "-O2 leaves no constant constructor test in Repro 1" $
+      assertNoConstantTests
+        "data Flag = A | B v::Float\nmain = if isA (if Uniform < 0.3 then A else B Uniform) then 1 else 0\n"
+  , testCase "-O2 leaves no constant Either test in Repro 2" $
+      assertNoConstantTests
+        "main = isLeft (if Uniform < 0.4 then left Uniform else right 1.0)\n"
+  , testCase "-O2 leaves no inverted Bool branch or double negation in Repro 3" $
+      assertNoConstantTests
+        "main = (if Uniform < 0.3 then 1 else 0) == 1\n"
+  ]
+  where
+    x = IRVar "x"
+    y = IRVar "y"
+    s = IRVar "s"
+    true = IRConst (VBool True)
+    false = IRConst (VBool False)
+    irLeft a = IRConstruct TgLeft [a]
+    irRight a = IRConstruct TgRight [a]
+    ctorA = IRVar "A"
+    ctorB = IRApply (IRVar "B")
+    flagDecl = ADTDecl "Flag" [("A", []), ("B", [("v", TFloat)])] Nothing
+    flagEnv = optEnvFromADTs [flagDecl]
+    simp = simplify emptyOptEnv
+    simpA = simplify flagEnv
+    assertNoConstantTests src =
+      case tryParseProgram "constantTests.ppl" src of
+        Left err -> assertFailure ("Parse error: " ++ show err)
+        Right prog -> case compile defaultCompilerConfig prog of
+          Left err -> assertFailure ("Compile error: " ++ show err)
+          Right (IREnv groups decls _) -> do
+            let ctors = [(c, length fs) | d <- decls, (c, fs) <- constructors d]
+                derived = ["is" ++ c | (c, _) <- ctors] ++ [f | d <- decls, (_, fs) <- constructors d, (f, _) <- fs]
+                bodies = [ b | g <- groups
+                             , Just (b, _) <- [genFun g, probFun g, integFun g, writeLogitsFun g, normalFun g] ]
+                offending = [ e | b <- bodies, e <- flat b, constantTest ctors derived e ]
+            assertBool ("constant tests survived -O2:\n" ++ unlines (map show (take 5 offending)))
+              (null offending)
+    flat e = e : concatMap flat (getIRSubExprs e)
+    literal ctors e = isEitherLit e || isCtorLit ctors e
+    isEitherLit (IRConstruct TgLeft _)  = True
+    isEitherLit (IRConstruct TgRight _) = True
+    isEitherLit _ = False
+    isCtorLit ctors e = case spine e [] of
+      Just (c, n) -> lookup c ctors == Just n
+      Nothing -> False
+    spine :: IRExpr -> [IRExpr] -> Maybe (String, Int)
+    spine (IRApply f _) _ = fmap (fmap (+ 1)) (spine f [])
+    spine (IRVar c) _ = Just (c, 0)
+    spine _ _ = Nothing
+    constantTest ctors derived e = case e of
+      IRDestruct _ a | isEitherLit a -> True
+      IRApply (IRVar f) a | f `elem` derived, isCtorLit ctors a -> True
+      IRUnaryOp OpIsAny a | literal ctors a -> True
+      IROp OpEq a b | literal ctors a && literal ctors b -> True
+      IRUnaryOp OpNot (IRUnaryOp OpNot _) -> True
+      IRIf _ (IRConst (VBool False)) (IRConst (VBool True)) -> True
+      _ -> False
 
 -- ---------------------------------------------------------------------------
 -- Batched-mode refusals with no corpus trigger (design pytorch-tensorizer)
@@ -3561,6 +3702,7 @@ internalsTests = testGroup "Internals"
   , test_tstExpectFailureHeader
   , optimizerPurityTests
   , stochasticCallTests
+  , constantTestFoldingTests
   , batchedRefusalUnitTests
   , decomposabilityGateTests
   , materializationGuardTests

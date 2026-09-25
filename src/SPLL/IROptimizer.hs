@@ -5,6 +5,10 @@ module SPLL.IROptimizer (
 , failConversion
 , OptStats(..)
 , OptEnv(..)
+, emptyOptEnv
+, optEnvFromADTs
+, simplify
+, propagateCondition
 , optimizeStats
 , deterministicGens
 , distributeIf
@@ -13,8 +17,10 @@ module SPLL.IROptimizer (
 
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types
+import SPLL.Typing.AlgebraicDataTypes (fieldAccessorOwners)
 import Data.Number.Erf (erf)
 import Data.Bits (xor)
+import Data.Either (isLeft)
 import Data.List (maximumBy, foldl', findIndex, partition, intercalate)
 import Data.Ord (comparing)
 import Data.Foldable (toList)
@@ -31,8 +37,7 @@ optimizeEnv conf (IREnv funcs adtsDecl consts) = reportStats conf report (IREnv 
     optGroup :: IRFunGroup -> State [(String, OptStats)] IRFunGroup
     (funcs', report) = runState (mapM optGroup funcs) []
     -- Bound once for the whole environment, not per function.
-    det = OptEnv (deterministicGens funcs)
-                 (Set.fromList ["is" ++ cn | d <- adtsDecl, (cn, _) <- constructors d])
+    det = (optEnvFromADTs adtsDecl) { optDetGens = deterministicGens funcs }
     optGroup fg = do
       g <- onFun (groupName fg ++ "_gen")   (genFun fg)
       pr <- onFun (groupName fg ++ "_prob")  (probFun fg)
@@ -49,7 +54,7 @@ optimizeEnv conf (IREnv funcs adtsDecl consts) = reportStats conf report (IREnv 
 
 postProcess :: CompilerConfig -> IRExpr -> IRExpr
 --postProcess = id
-postProcess conf = fst . postProcessStats conf (OptEnv Set.empty Set.empty)
+postProcess conf = fst . postProcessStats conf emptyOptEnv
 
 -- | 'postProcess' told which generate functions are deterministic, so the
 -- duplicating and sharing rewrites can treat calls to them as pure, plus the
@@ -60,7 +65,7 @@ postProcess conf = fst . postProcessStats conf (OptEnv Set.empty Set.empty)
 -- Telemetry (@--optStats@) over the whole corpus shows a sharp split in how much
 -- work each rule finds after the first pass. Five rules essentially never find
 -- more -- @applyToLetIn@ 2589 firings in pass 1 against 17 in all later passes
--- combined, @applyConstant@ 772 against 1, @propagateAnyGuard@ 517 against 3,
+-- combined, @applyConstant@ 772 against 1, @propagateAnyGuard@ (now @propagateCondition@) 517 against 3,
 -- @associativity@ 9 against 4, @indexMagic@ 51 against 0 -- while the rest keep
 -- finding work in proportion (@simplify@ 67147 against 10211, @letIn@ 53196
 -- against 2246, @cse@ 3911 against 2025). Running the first group on every
@@ -151,7 +156,34 @@ data OptEnv = OptEnv
     -- 'IRApply' cannot be told on its own, since a user function may well
     -- return the ANY sentinel.
   , optCtorTests :: Set.Set Varname
+    -- | Every declared ADT constructor with its arity. A literal application
+    -- of one ('ctorLiteral') is a value whose constructor is known statically,
+    -- so a constructor test, field accessor, equality or @isAny@ over it folds.
+  , optCtors :: Map.Map Varname Int
+    -- | Every generated field accessor: the one constructor it accepts and the
+    -- field's position in it. The owner is the one 'fieldAccessorOwners'
+    -- picks, which is the constructor every backend's accessor tests for.
+  , optFieldOwners :: Map.Map Varname (Varname, Int)
   }
+
+-- | Knows nothing: every rewrite that consults the environment falls back to
+-- its conservative behaviour.
+emptyOptEnv :: OptEnv
+emptyOptEnv = OptEnv Set.empty Set.empty Map.empty Map.empty
+
+-- | The ADT facts of an 'OptEnv' (no generate function is assumed
+-- deterministic).
+optEnvFromADTs :: [ADTDecl] -> OptEnv
+optEnvFromADTs decls = emptyOptEnv
+  { optCtorTests = Set.fromList ["is" ++ cn | (cn, _) <- ctors]
+  , optCtors = Map.fromList [(cn, length fs) | (cn, fs) <- ctors]
+  , optFieldOwners = Map.fromList
+      [ (f, (owner, i))
+      | (f, owner) <- fieldAccessorOwners decls
+      , Just fs <- [lookup owner ctors]
+      , Just i <- [findIndex ((== f) . fst) fs] ]
+  }
+  where ctors = concatMap constructors decls
 
 -- | The @_gen@ functions whose evaluation draws no randomness, so that sharing
 -- or duplicating a reference to one cannot collapse or multiply a random draw.
@@ -241,7 +273,7 @@ optimizeStats' conf det stages e0 = runState (nodeWise e0 >>= commonSubexprStage
     applyConstStage = onceStage "applyConstant" (oLvl >= 2) applyConstant
     assiciativityStage = onceStage "associativity" (oLvl >= 2) optimizeAssociativity
     indexStage = onceStage "indexMagic" (oLvl >= 1) indexmagic
-    anyGuardStage = onceStage "propagateAnyGuard" (oLvl >= 1) propagateAnyGuard
+    anyGuardStage = onceStage "propagateCondition" (oLvl >= 1) (propagateCondition det)
     lambdaApplicationStage = onceStage "applyToLetIn" (oLvl >= 2) applyToLetIn
     letInStage = loopStage "letIn" (oLvl >= 2) (optimizeLetIns det)
     constantDistrStage = loopStage "constantDistr" (oLvl >= 2) evalConstantDistr
@@ -478,6 +510,16 @@ evalConstantDistr (IRCumulative IRUniform Log (IRConst (VFloat x))) = IRConst (V
 evalConstantDistr x = x
 
 simplify :: OptEnv -> IRExpr -> IRExpr
+-- Equality of two values whose constructors are statically known. Different
+-- constructors are never equal (every backend's ADT equality tests the class
+-- first); the same nullary constructor always is. Same-constructor values with
+-- fields are left alone: their equality is the fields' equality, which may
+-- involve ANY or float tolerance and is not this rule's business.
+simplify det (IROp OpEq l r)
+  | Just (cl, al) <- ctorLiteral det l, Just (cr, _) <- ctorLiteral det r
+  , cl /= cr || null al = IRConst (VBool (cl == cr))
+  | Just a <- eitherLiteral l, Just b <- eitherLiteral r
+  , isLeft a /= isLeft b = IRConst (VBool False)
 simplify _ (IROp op leftV rightV)
   | isValue leftV && isValue rightV
   , not (isNaNResult (forceOp op (unval leftV) (unval rightV))) = IRConst (forceOp op (unval leftV) (unval rightV))
@@ -498,6 +540,9 @@ simplify det (IROp op left right)
   | Just (c, z) <- semiringMask op left, isPureGiven (optDetGens det) right = IRIf c right z
   | Just (c, z) <- semiringMask op right, isPureGiven (optDetGens det) left = IRIf c left z
 simplify det (IRUnaryOp OpIsAny x) = forceAnyCheck det x
+-- Sound under the IR's own semantics even for ANY: 'forceUnaryOp' maps
+-- @not ANY@ to ANY, so a double negation is the identity on every value.
+simplify _ (IRUnaryOp OpNot (IRUnaryOp OpNot x)) = x
 simplify _ (IRUnaryOp op val)
   | isValue val, not (isNaNResult (forceUnaryOp op (unval val))) = IRConst $ forceUnaryOp op (unval val)
 simplify _ (IRIf _ left right) | left == right = left
@@ -508,6 +553,10 @@ simplify _ (IRIf _ left right) | left == right = left
 -- spelled `IRIf a True b`, and where b folds to a constant this is what is
 -- left of it.
 simplify _ (IRIf cond (IRConst (VBool True)) (IRConst (VBool False))) = cond
+-- ...and one answering them the other way round is its negation. Without this
+-- the dual of the rule above survives as a statement block per arm
+-- (@False if c else True@).
+simplify _ (IRIf cond (IRConst (VBool False)) (IRConst (VBool True))) = IRUnaryOp OpNot cond
 simplify _ x@(IRIf cond left right) =
   if isValue cond
     then if unval cond == VBool True
@@ -536,7 +585,45 @@ simplify _ (IRDestruct AcHead (IRConstruct TgCons [a, _])) = a
 simplify _ (IRDestruct AcTail (IRConstruct TgCons [_, b])) = b
 simplify _ (IRDestruct AcFst  (IRConstruct TgTuple [a, _])) = a
 simplify _ (IRDestruct AcSnd  (IRConstruct TgTuple [_, b])) = b
+-- Either arm tests and payload projections over a literal Left/Right. A
+-- projection of the *wrong* arm is left alone: it throws at runtime, and it is
+-- only ever reached behind an arm test that now folds to False, which removes
+-- it. Rewriting it into something that does not throw would hide that.
+simplify _ (IRDestruct AcIsLeft e)    | Just v <- eitherLiteral e = IRConst (VBool (isLeft v))
+simplify _ (IRDestruct AcIsRight e)   | Just v <- eitherLiteral e = IRConst (VBool (not (isLeft v)))
+simplify _ (IRDestruct AcFromLeft e)  | Just (Left a) <- eitherLiteral e = a
+simplify _ (IRDestruct AcFromRight e) | Just (Right b) <- eitherLiteral e = b
+-- The same for user ADTs, whose tests and accessors are calls to the generated
+-- @is\<Ctor\>@ and field functions. An accessor applied to a constructor that
+-- does not own the field throws at runtime; like the Either projection above it
+-- is left to be removed by the test guarding it.
+simplify det (IRApply (IRVar f) e)
+  | f `Set.member` optCtorTests det, Just (c, _) <- ctorLiteral det e
+  = IRConst (VBool (f == "is" ++ c))
+  | Just (owner, i) <- Map.lookup f (optFieldOwners det)
+  , Just (c, args) <- ctorLiteral det e, c == owner, i < length args
+  = args !! i
 simplify _ x = x
+
+-- | A value built by a statically known ADT constructor: a constant, a bare
+-- nullary constructor (codegen instantiates it), or a /saturated/ application
+-- spine -- a partial one is a function, not a value of the ADT.
+ctorLiteral :: OptEnv -> IRExpr -> Maybe (Varname, [IRExpr])
+ctorLiteral _ (IRConst (VADT c vs)) = Just (c, map IRConst vs)
+ctorLiteral env e = go e []
+  where
+    go (IRApply f a) args = go f (a : args)
+    go (IRVar c) args
+      | Map.lookup c (optCtors env) == Just (length args) = Just (c, args)
+    go _ _ = Nothing
+
+-- | A value built by a literal 'Either' constructor, with its payload.
+eitherLiteral :: IRExpr -> Maybe (Either IRExpr IRExpr)
+eitherLiteral (IRConstruct TgLeft [a])  = Just (Left a)
+eitherLiteral (IRConstruct TgRight [b]) = Just (Right b)
+eitherLiteral (IRConst (VEither (Left v)))  = Just (Left (IRConst v))
+eitherLiteral (IRConst (VEither (Right v))) = Just (Right (IRConst v))
+eitherLiteral _ = Nothing
 
 countUses :: String -> IRExpr -> Int
 countUses var (IRVar a) | a == var = 1
@@ -725,30 +812,68 @@ forceAnyCheck env (IRIf c t e)
 -- 'IRApply' may return the sentinel it was handed.
 forceAnyCheck env (IRApply (IRVar f) _)
   | f `Set.member` optCtorTests env = IRConst $ VBool False
+-- A freshly built ADT value is never the sentinel, whatever its fields hold.
+forceAnyCheck env x
+  | Just _ <- ctorLiteral env x = IRConst $ VBool False
 forceAnyCheck _ x = IRUnaryOp OpIsAny x
 -- Maybe more, I am not quite sure
 
--- | Inside @if isAny(v) then .. else ..@, another @isAny(v)@ is decided: True
--- in the then-arm, False in the else-arm. The compiler emits these guards at
--- every level ('anySafe' wraps each result, and each leaf adds its own), so a
--- nested one re-tests what the enclosing branch already established -- and the
--- dead arm it selects is often another copy of the value expression.
+-- | Inside @if c then t else e@, a re-test of @c@ is decided: True throughout
+-- @t@, False throughout @e@. The compiler emits these at every level --
+-- 'anySafe' wraps each result in an @isAny@ guard and each leaf adds its own,
+-- Either inference tests the arm before projecting it, and -O2's substituting
+-- rewrites stack a condition directly inside its own branch -- and the dead arm
+-- a nested re-test selects is often another copy of the value expression.
 --
--- Restricted to a check on a bare variable so the substitution is a cheap
--- structural match, and skipped under any binder that shadows that variable.
-propagateAnyGuard :: IRExpr -> IRExpr
-propagateAnyGuard (IRIf c@(IRUnaryOp OpIsAny (IRVar v)) t e) =
-  IRIf c (subst True t) (subst False e)
+-- Only cheap tests over a single bare variable are propagated, so the
+-- substitution is a structural match and a shadowing binder is easy to spot:
+-- @isAny v@, an Either arm test, a constructor test @is\<Ctor\> v@, and the
+-- bare Bool @v@ itself, each under any number of @not@s. The condition must be
+-- pure: re-testing a draw is a second, independent draw, not the same value.
+--
+-- The three tests yield a genuine Bool in every backend, so they are replaced
+-- wherever they occur. A bare @v@ is replaced only where it is itself the
+-- condition of a nested if: the Python backend treats the ANY sentinel as
+-- truthy, so inside @if v@ the variable is only known to be truthy, which is
+-- all an if-condition observes.
+propagateCondition :: OptEnv -> IRExpr -> IRExpr
+propagateCondition env (IRIf c t e)
+  | (atom, pol) <- stripNots c
+  , Just v <- conditionVar atom
+  , isPureGiven (optDetGens env) atom
+  = IRIf c (substCond v atom (boolTest atom) pol t)
+           (substCond v atom (boolTest atom) (not pol) e)
   where
-    subst b = go
-      where
-        go x | x == c = IRConst (VBool b)
-        go x | v `Set.member` binderOf x = x
-        go x = irDescend go x
-    binderOf (IRLetIn n _ _)      = Set.singleton n
-    binderOf (IRLambda n _)       = Set.singleton n
-    binderOf _                    = Set.empty
-propagateAnyGuard x = x
+    conditionVar (IRVar v) = Just v
+    conditionVar (IRUnaryOp OpIsAny (IRVar v)) = Just v
+    conditionVar (IRDestruct AcIsLeft (IRVar v)) = Just v
+    conditionVar (IRDestruct AcIsRight (IRVar v)) = Just v
+    conditionVar (IRApply (IRVar f) (IRVar v)) | f `Set.member` optCtorTests env = Just v
+    conditionVar _ = Nothing
+    boolTest (IRVar _) = False
+    boolTest _ = True
+propagateCondition _ x = x
+
+-- | A condition with its leading @not@s removed, and whether their number is
+-- even (True: the condition holds exactly when the stripped test does).
+stripNots :: IRExpr -> (IRExpr, Bool)
+stripNots (IRUnaryOp OpNot x) = not <$> stripNots x
+stripNots x = (x, True)
+
+-- | Replace @atom@ (a test over variable @v@) by its known value @b@ -- in every
+-- position when @everywhere@, otherwise only as (a negation of) a nested if's
+-- whole condition -- stopping at any binder that shadows @v@.
+substCond :: Varname -> IRExpr -> Bool -> Bool -> IRExpr -> IRExpr
+substCond v atom everywhere b = go
+  where
+    go x | everywhere, x == atom = IRConst (VBool b)
+    go x | v `Set.member` binderOf x = x
+    go (IRIf c t e)
+      | (a, pol) <- stripNots c, a == atom = IRIf (IRConst (VBool (b == pol))) (go t) (go e)
+    go x = irDescend go x
+    binderOf (IRLetIn n _ _) = Set.singleton n
+    binderOf (IRLambda n _)  = Set.singleton n
+    binderOf _               = Set.empty
 
 -- Common-subexpression elimination.
 --
