@@ -407,7 +407,9 @@ generateExpressionLifted (IROp op l r) = do
   return (ls ++ rs, str "(" . le . str " " . str (pyOps op) . str " " . re . str ")")
 generateExpressionLifted (IRUnaryOp op e) = do
   (ss, se) <- generateExpressionLifted e
-  return (ss, str (pyUnaryOps op) . str "(" . se . str ")")
+  return (ss, pyUnary op (str (pyUnaryOps op) . str "(" . se . str ")"))
+  where pyUnary OpNot s = str "(" . s . str ")"
+        pyUnary _ s = s
 generateExpressionLifted (IRDensity dist Linear x) = do
   (ss, sx) <- generateExpressionLifted x
   return (ss, str ("density_" ++ pyDistName dist) . str "(" . sx . str ")")
@@ -582,7 +584,12 @@ generateExpression (IROp op left right) = do
   return ("(" ++ l ++ " " ++ pyOps op ++ " " ++ r ++ ")")
 generateExpression (IRUnaryOp op expr) = do
   e <- generateExpression expr
-  return (pyUnaryOps op ++ "(" ++ e ++ ")")
+  -- Python's @not@ is an operator binding looser than @==@, so @x == not(b)@
+  -- is a SyntaxError; the call-like spelling needs its own parentheses. The
+  -- other unary ops are function calls and bind tightly already.
+  return (case op of
+            OpNot -> "(" ++ pyUnaryOps op ++ "(" ++ e ++ "))"
+            _     -> pyUnaryOps op ++ "(" ++ e ++ ")")
 generateExpression (IRConst v) =
   return (pyVal v)
 generateExpression (IRBuiltin BMapList [f, x]) = do

@@ -1,0 +1,1 @@
+main = draw b = Uniform < 0.5 in draw c = Uniform < 0.3 in (b, if c then (Uniform < 0.9) else b)

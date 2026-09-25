@@ -555,9 +555,35 @@ and retry on disagreement), which spliced `main_gen()` into `main_prob`.
 `dice.ppl`-style recursion is unaffected: it recurses on `x + (-1.0)`, which
 statically decreases.
 
-`requireDeterministicUnderEnum` now checks each generated operand and refuses at
+`requireDeterministicUnderEnum` checks each generated operand and refuses at
 compile time, naming the generator it would have called — matching the sibling
-witness-construction failures, which fail loudly. Solving the fixed point
+witness-construction failures, which fail loudly. Since task
+`enum-let-latent-gates-fresh-draw` it refuses **only a draw through a function
+on a call cycle** (`CompilerMetadata.cyclicGenNames`, over-approximated like
+`ModalityInfer.summaries`'s call graph, so any recursive callee counts, not just
+one reaching back into the function being compiled). Every other fresh draw
+under an enumeration — a primitive, a neural read, a call into a non-recursive
+helper — is handed by `forwardOrInfer` to `toIRInference` with the enclosing
+enumerated variables retyped `Deterministic` (`retypeDetGiven` over
+`recoveredVars`), the same step the over-budget nested application already
+took. That fixed the false refusal of the canonical noisy observation of a
+shared latent, `draw b = Uniform < 0.5 in (b, if b then Uniform < 0.9 else
+Uniform < 0.1)` (`test/cases/let-bindings/enumLetGatesFreshDraw*`), plus three
+fuzz-found known issues now in the corpus (`enumNeuralBoolGatesFreshDraw`,
+`enumNeuralDeadBranchFreshDraw`, `enumDeadLetFreshDrawTuple`).
+
+Delegation has one catch: every enumerated sum (`enumSumP`) reports a **mass**
+(dim 0), which was true while enumerated bodies were always forward-and-compare
+indicators, and a delegated body can be a density. Whether it is one is a
+*runtime* fact (`(x, Uniform)` is a mass exactly when the query puts `ANY` in
+the second slot; topK makes the dim a runtime choice too), so the delegated
+probability is guarded at run time — a possible result with a non-zero dim
+raises "met a continuous density" rather than being summed as a mass. The guard
+is omitted for a cumulative result and for a result type with no `Float` leaf
+(which is what keeps a helper call guard-free: its dim is a runtime projection),
+and folds away where the dim is a literal 0. A real density sum is the
+follow-up `enumerated-sum-over-density-body`, pinned by
+`known-issues/enumLetGatesFreshDensity`. Solving the fixed point
 algebraically (the marginal *is* closed-form for that program) was declined: it
 would make "does my program infer?" unpredictable from the source. The refusal
 is lazy and lives inside the prob/integ bodies, so `generate` and

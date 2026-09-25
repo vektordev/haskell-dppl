@@ -1,0 +1,1 @@
+main = draw b = Uniform < 0.5 in if b then Normal else Normal + 3.0

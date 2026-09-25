@@ -598,9 +598,33 @@ enumeratedConstantElseSrc = unlines
   , "       if a == b then a else A"
   ]
 
+-- The recursion reaches back through a helper rather than naming @main@
+-- directly, and the enumeration is a single latent rather than the agreement
+-- shape, so this reaches 'toIREnumerate''s own equations and not the agreement
+-- fusion's arm check. A fresh draw under an enumeration is otherwise handed to
+-- the ordinary inference rules (task enum-let-latent-gates-fresh-draw); a draw
+-- through a function on a call cycle must not be, since its probability call
+-- re-enters this same enumeration with an unchanged argument.
+recursiveHelperSrc :: String
+recursiveHelperSrc = unlines
+  [ "data Sym = A | B"
+  , "genA = if Uniform < 0.7 then A else B"
+  , "retry x = if x then main else main"
+  , "main = draw a = genA in"
+  , "       if a == A then a else retry True"
+  ]
+
 generateBackedTests :: TestTree
 generateBackedTests = testGroup "GenerateBackedInference"
-  [ testCase "unbounded self-recursion in an enumerated branch is refused" $
+  [ testCase "unbounded recursion through a helper is still refused, naming the helper" $
+      withParsed recursiveHelperSrc $ \prog -> do
+        res <- forced (runProb defaultCompilerConfig prog [] (VADT "A" []))
+        case res of
+          Left e  -> assertBool ("expected the generate-backed refusal naming retry_gen, got: " ++ show e)
+                                ("generate-backed fallback" `isInfixOf` show e && "retry_gen" `isInfixOf` show e)
+          Right _ -> assertFailure
+            "a probability function re-entering its own enumeration was accepted"
+  , testCase "unbounded self-recursion in an enumerated branch is refused" $
       withParsed selfRecursiveAgreeSrc $ \prog -> do
         res <- forced (runProb defaultCompilerConfig prog [] (VADT "A" []))
         case res of

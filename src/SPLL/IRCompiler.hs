@@ -48,6 +48,7 @@ import Control.Monad (foldM, forM, when, zipWithM)
 import Control.Monad.State.Strict (StateT, evalStateT, get, gets, put, modify)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import Data.Graph (SCC(..), stronglyConnComp)
 import GHC.Stack (HasCallStack)
 
 -- | 'PResult', its combinator vocabulary, and the 'Semiring' abstraction that
@@ -88,6 +89,14 @@ data CompilerMetadata = CompilerMetadata {
   -- @_gen@ reference random, and an enumerated inference body is written almost
   -- entirely in terms of deterministic helper calls.
   detGenNames :: Set.Set Varname,
+  -- | The @_gen@ names of the top-level functions that sit on a call-graph
+  -- cycle (self-recursion included). 'toIREnumerate' reads this to tell a
+  -- fresh draw it can hand to 'toIRInference' (a primitive, a neural read, a
+  -- call into a non-recursive helper) from one whose probability function
+  -- could re-enter the very enumeration being compiled with an unchanged
+  -- argument -- the unbounded @... else main@ shape, which stays refused
+  -- (task enum-let-latent-gates-fresh-draw).
+  cyclicGenNames :: Set.Set Varname,
   -- | Which 'SemiringFamily' 'semiringOf' builds this compile's 'Semiring'
   -- from (task semiring-parametric-marginals). 'SRSumProduct' for every
   -- ordinary compiled body; overridden to one of 'extraSemirings''s entries
@@ -487,12 +496,22 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
     -- probability mass under logSpace, since every branch's accumulated weight
     -- was then a linear 1.0 multiplied against log (negative) per-branch terms
     -- (task topk-logspace-unsound).
-    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) [] verdicts detGens SRSumProduct []
+    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) [] verdicts detGens cyclicGens SRSumProduct []
     -- One walk of the whole program, shared by every 'meta' built below.
     verdicts = materializationVerdicts p
     -- Likewise one call-graph fixpoint, shared: which generate functions are
     -- deterministic when applied to deterministic arguments.
     detGens = Set.fromList [n ++ "_gen" | (n, True) <- Map.toList (functionSummaries p)]
+    -- The call graph over-approximates exactly as 'ModalityInfer.summaries'
+    -- does (referenced names taken flat), which can only enlarge a cycle and
+    -- so only ever refuses more.
+    cyclicGens =
+      let decls = functions p
+          declNames = Set.fromList (map fst decls)
+          callees b = Set.toList (Set.intersection declNames (containedVars varsOfExpr b))
+      in Set.fromList [ n ++ "_gen"
+                      | CyclicSCC grp <- stronglyConnComp [ (n, n, callees b) | (n, b) <- decls ]
+                      , n <- grp ]
     extractParamNames (Expr _ (Lambda name lambdaBody)) = name : extractParamNames lambdaBody
     extractParamNames _ = []
     stripLambdas (Expr _ (Lambda _ lambdaBody)) = stripLambdas lambdaBody
@@ -668,7 +687,8 @@ enumerationWithinMaterializationBudget meta tgs = case [mv | DiscreteValues mv <
 -- 'multiValueIsFinite', which rejects an empty enumeration), and the gate then
 -- declined a two-value domain as if it were unbounded
 -- (task enumeration-budget-gate-misses-nested-application; the program is
--- test/cases/known-issues/fuzzLetWitnessGenerateBackedFallback). 'Nothing' is
+-- test/cases/let-bindings/enumDeadLetFreshDrawTuple, formerly the known issue
+-- fuzzLetWitnessGenerateBackedFallback). 'Nothing' is
 -- kept for the leaves with no enumerable list at all.
 enumeratedCount :: MultiValue -> Maybe Integer
 enumeratedCount mv = case mv of
@@ -3714,20 +3734,28 @@ enumerateAgreement meta cumulative ag sample = do
 -- @generate-backed-inference-sweep@.
 requireDeterministicUnderEnum :: CompilerMetadata -> String -> Expr -> IRExpr -> CompilerMonad ()
 requireDeterministicUnderEnum meta what src ir =
-  case nub (randomDrawSites (detGenNames meta) ir) of
+  case nub (recursiveDrawCalls (cyclicGenNames meta Set.\\ detGenNames meta) ir) of
     [] -> return ()
-    sites -> error $ unlines
+    gens -> error $ unlines
       [ "probability-mode compilation reached a generate-backed fallback."
-      , "The " ++ what ++ " of an enumerated conditional (chain name " ++ cn ++ ") is compiled"
-      , "forward, which only measures the query correctly when it is deterministic given the"
-      , "enumerated latents. It is not: it draws " ++ intercalate ", " sites ++ "."
-      , "Emitting it would produce a probability function that returns a different number on"
-      , "every call with the same query value. NeST does exact inference, so this is refused."
-      , "This is the shape of an unbounded self-recursive branch (`... else main`) with no"
-      , "decreasing argument. Rewrite the recursion so it has a decreasing argument, or use"
-      , "the program in generate mode only."
+      , "The " ++ what ++ " of an enumerated conditional (chain name " ++ cn ++ ") draws fresh"
+      , "randomness by calling " ++ intercalate ", " gens ++ ", which is on a recursive call cycle."
+      , "Measuring that call means re-entering the same enumeration with an unchanged argument,"
+      , "which does not terminate, and generating it forward instead would produce a probability"
+      , "function that returns a different number on every call with the same query value."
+      , "NeST does exact inference, so this is refused. This is the shape of an unbounded"
+      , "self-recursive branch (`... else main`) with no decreasing argument. Rewrite the"
+      , "recursion so it has a decreasing argument, or use the program in generate mode only."
       , "(task self-recursive-prob-nondeterministic-fallback)" ]
   where cn = chainName (getTypeInfo src)
+
+-- | The random calls in a generate-mode IR expression that go to a function on
+-- a call cycle -- the subset of 'randomDrawSites' 'requireDeterministicUnderEnum'
+-- still refuses.
+recursiveDrawCalls :: Set.Set Varname -> IRExpr -> [String]
+recursiveDrawCalls cyc ir = case ir of
+  IRVar n | Set.member n cyc -> [n]
+  _ -> concatMap (recursiveDrawCalls cyc) (getIRSubExprs ir)
 
 -- | The randomness sources in a generate-mode IR expression, named for a
 -- diagnostic; empty exactly when 'isPureGiven' would call the expression pure.
@@ -3767,40 +3795,128 @@ toIREnumerate meta cumulative (Expr TypeInfo{chainName=cn} (Var _)) sample = do
   let fs = map snd (functions (compilingProgram meta))
   let equivExpr = findExprWithCN fs equivCN
   toIREnumerate meta cumulative equivExpr sample
-toIREnumerate meta cumulative (Expr TypeInfo{rType=rt} (IfThenElse c t e)) sample = do
+toIREnumerate meta cumulative whole@(Expr TypeInfo{rType=rt} (IfThenElse c t e)) sample = do
   let sr = semiringOf meta
   cIR <- toIRGenerate meta c
   tIR <- toIRGenerate meta t
   eIR <- toIRGenerate meta e
-  requireDeterministicUnderEnum meta "condition" c cIR
-  requireDeterministicUnderEnum meta "then branch" t tIR
-  requireDeterministicUnderEnum meta "else branch" e eIR
-  --(pBranch, _, _) <- toIRInference meta False distr elem
-  -- Due to eager evaluation, we must make sure, that the wrong branch is not executed
-  let condSelector resultExpr = IRIf cIR resultExpr (srZero sr)
-  let notCondSelector resultExpr = IRIf (IRUnaryOp OpNot cIR) resultExpr (srZero sr)
-  let cmpOp = case rt of { TFloat -> OpApprox; TVarR _ -> OpApprox; _ -> OpEq }
-  let thenSelector = if cumulative then compareValueExpr sr rt tIR sample else maskSR sr (IROp cmpOp tIR sample)
-  let elseSelector = if cumulative then compareValueExpr sr rt eIR sample else maskSR sr (IROp cmpOp eIR sample)
-  let thenRes = condSelector thenSelector
-  let elseRes = notCondSelector elseSelector
-  -- The two selectors are mutually exclusive (exactly one is ever "live", the
-  -- other is the semiring zero), so this is a mixture-sum, not a plain add:
-  -- in log space 'srZero' is negative infinity, and OpPlus-ing that against a
-  -- finite log-probability would wrongly zero the whole result out.
-  let returnExpr = srPlus sr thenRes elseRes
-  return (mass returnExpr)
+  forwardOrInfer meta cumulative whole sample
+    [("condition", c, cIR), ("then branch", t, tIR), ("else branch", e, eIR)] $ do
+    --(pBranch, _, _) <- toIRInference meta False distr elem
+    -- Due to eager evaluation, we must make sure, that the wrong branch is not executed
+    let condSelector resultExpr = IRIf cIR resultExpr (srZero sr)
+    let notCondSelector resultExpr = IRIf (IRUnaryOp OpNot cIR) resultExpr (srZero sr)
+    let cmpOp = case rt of { TFloat -> OpApprox; TVarR _ -> OpApprox; _ -> OpEq }
+    let thenSelector = if cumulative then compareValueExpr sr rt tIR sample else maskSR sr (IROp cmpOp tIR sample)
+    let elseSelector = if cumulative then compareValueExpr sr rt eIR sample else maskSR sr (IROp cmpOp eIR sample)
+    let thenRes = condSelector thenSelector
+    let elseRes = notCondSelector elseSelector
+    -- The two selectors are mutually exclusive (exactly one is ever "live", the
+    -- other is the semiring zero), so this is a mixture-sum, not a plain add:
+    -- in log space 'srZero' is negative infinity, and OpPlus-ing that against a
+    -- finite log-probability would wrongly zero the whole result out.
+    let returnExpr = srPlus sr thenRes elseRes
+    return (mass returnExpr)
 -- Fallback: under enumeration the bound variable carries a concrete enumerated value,
 -- so the body is deterministic and can be generated forward and compared to the sample.
 -- This covers shapes whose root is not an if, e.g. an InjF sum of conditional terms.
 toIREnumerate meta cumulative e sample = do
   eIR <- toIRGenerate meta e
-  requireDeterministicUnderEnum meta "expression" e eIR
-  let rt = rType (getTypeInfo e)
-  let cmpOp = case rt of { TFloat -> OpApprox; TVarR _ -> OpApprox; _ -> OpEq }
-  if cumulative
-    then return (mass (compareValueExpr (semiringOf meta) rt eIR sample))
-    else return (indicatorP (semiringOf meta) (IROp cmpOp eIR sample))
+  forwardOrInfer meta cumulative e sample [("expression", e, eIR)] $ do
+    let rt = rType (getTypeInfo e)
+    let cmpOp = case rt of { TFloat -> OpApprox; TVarR _ -> OpApprox; _ -> OpEq }
+    if cumulative
+      then return (mass (compareValueExpr (semiringOf meta) rt eIR sample))
+      else return (indicatorP (semiringOf meta) (IROp cmpOp eIR sample))
+
+-- | The premise check of 'toIREnumerate's forward-and-compare equations, with
+-- the way out it used to lack (task enum-let-latent-gates-fresh-draw).
+--
+-- When every forward-compiled operand is deterministic given the enumerated
+-- latents, the forward-and-compare body (the last argument) is exact and is
+-- used. When one of them draws fresh randomness, the node is not refused but
+-- handed to 'toIRInference' -- with every enclosing enumerated variable retyped
+-- 'Deterministic' ('retypeDetGiven' over 'recoveredVars'), since inside the
+-- enumeration loop each holds one fixed domain value. That is the same step the
+-- over-budget nested application in this function already takes, and it is
+-- sound for the same reason: the enumerated variables are 'typeEnv' locals, so
+-- P(node = sample) under the ordinary rules is exactly the conditional the
+-- enumeration needs. A fresh draw then meets its usual machinery -- an @if@
+-- over a fixed latent selects an arm and measures it, an @if@ over a fresh
+-- Bernoulli is the ordinary mixture, a tuple factorizes -- instead of being
+-- generated and compared against the query. The canonical shape is the noisy
+-- observation of a shared latent,
+-- @draw b = Uniform < 0.5 in (b, if b then Uniform < 0.9 else Uniform < 0.1)@,
+-- which used to be refused although hoisting the noise into its own enumerable
+-- binding compiled.
+--
+-- The refusal stays for a draw through a function on a call cycle: handing
+-- that to 'toIRInference' turns @... else main@ into a @main_prob@ call with an
+-- unchanged argument, which re-enters this same enumeration and never returns.
+-- That is the shape 'requireDeterministicUnderEnum' was written for (task
+-- self-recursive-prob-nondeterministic-fallback). A call to any recursive
+-- function is refused, not only one reaching back into the function being
+-- compiled: 'CompilerMetadata' does not know which one that is, and refusing
+-- more keeps the old verdict rather than risking a non-terminating body.
+forwardOrInfer :: CompilerMetadata -> Bool -> Expr -> IRExpr
+               -> [(String, Expr, IRExpr)] -> CompilerMonad PResult -> CompilerMonad PResult
+forwardOrInfer meta cumulative whole sample operands forward
+  | all (null . randomDrawSites (detGenNames meta) . thd3) operands = forward
+  | otherwise = do
+      mapM_ (\(what, src, ir) -> requireDeterministicUnderEnum meta what src ir) operands
+      res <- toIRInference meta cumulative (retypeDetGiven (recoveredVars meta) whole) sample
+      -- Every enclosing enumerated sum ('enumSumP') reports its result as a
+      -- mass, dim 0, because until now its body always was one: a
+      -- forward-and-compare indicator. A delegated body can be a density
+      -- (@if b then Normal else Normal + 3.0@), and summing densities as if
+      -- they were masses would report the wrong dim -- and, where the dim
+      -- differs across enumerated values, the wrong mixture winner.
+      --
+      -- Whether it is one is in general a RUNTIME fact: @(x, Uniform)@ is a
+      -- mass exactly when the query marginalises the second slot with @ANY@
+      -- (the fuzz-found @enumDeadLetFreshDrawTuple@ reaches this through
+      -- @fst@), and topK pruning makes the dim a runtime choice even where it
+      -- would otherwise fold. So the probability is guarded at run time: a
+      -- possible result with a non-zero dim raises instead of being summed as
+      -- a mass. The guard is skipped where it is statically true -- a
+      -- cumulative result (a CDF value is a mass by construction), or a type
+      -- with no 'TFloat' leaf, which no density ever measures (this is what
+      -- keeps a helper call, whose dim is a runtime projection of the callee's
+      -- result, guard-free) -- and the optimizer folds it away where the dim
+      -- is a literal 0. Summing densities properly is follow-up task
+      -- enumerated-sum-over-density-body.
+      if cumulative || floatFree (adtDecls meta) (rType (getTypeInfo whole))
+        then return res
+        else do
+          let isMass = orIR (rImposs res) (IROp OpEq (rDim res) const0)
+              refusal = IRError $ "probability-mode inference of an enumerated conditional (chain name "
+                          ++ chainName (getTypeInfo whole) ++ ") met a continuous density: given the"
+                          ++ " enumerated latents the query measures a fresh continuous draw, and an"
+                          ++ " enumerated sum over density-valued terms is not implemented (task"
+                          ++ " enum-let-latent-gates-fresh-draw; follow-up enumerated-sum-over-density-body)"
+          return (onProb (\p -> IRIf isMass p refusal) res)
+  where thd3 (_, _, x) = x
+
+-- | True when no value of the type contains a 'TFloat' leaf, so a point
+-- probability of it is always a mass (dim 0). Conservative: anything it does
+-- not recognise (arrows, type variables, an unknown ADT) answers 'False'.
+floatFree :: [ADTDecl] -> RType -> Bool
+floatFree decls = go Set.empty
+  where
+    go seen t = case t of
+      TBool -> True
+      TInt -> True
+      TSymbol -> True
+      TUnit -> True
+      ListOf a -> go seen a
+      Tuple a b -> go seen a && go seen b
+      TEither a b -> go seen a && go seen b
+      TADT n
+        | Set.member n seen -> True
+        | otherwise -> case find ((== n) . dataName) decls of
+            Just d -> and [ go (Set.insert n seen) ft | (_, fs) <- constructors d, (_, ft) <- fs ]
+            Nothing -> False
+      _ -> False
 
 -- | Strip the branch-count field from all probability-mode functions in the environment.
 -- Applied after compilation and before optimisation when countBranches = False.
