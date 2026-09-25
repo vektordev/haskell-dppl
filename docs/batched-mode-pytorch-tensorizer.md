@@ -36,6 +36,22 @@ CLEVR-shaped scenes (enumerated attributes, Gaussian positions) bucket by
 object count alone — `End2EndTesting.batchedEnumBucketingTests`,
 `test/cases/data-structures/clevrSceneEnumAttrs`.
 
+Combining two neural ADT reads (`match (readAttrs s1) ++ match (readAttrs
+s2)`) makes the compiler enumerate each read's domain as ADT *constants*
+(`Nil()`, `Obj(Red())`, ...), the `BTensor` an enumerated sum maps over.
+`batchedVal` renders those as instantiations of the classes the backend
+emits itself; each is one compile-time value, not a batch. Inside that map
+body (a comprehension element, which `hoistStructural` cannot lift out of)
+a structural `if` — `isNil o` guarding `color o` — is emitted as Python's
+lazy `t if c else f` rather than a `torch.where`, so the sibling
+constructor's field accessor is never evaluated. Task
+`batched-backend-refuses-neural-adt-constants`; corpus
+`test/cases/neural/neuralAdtReadCount`, `neuralEnumReadCount`. Cost caveat:
+branch-free evaluation cannot skip the residuals a nested `++` count chain's
+`is_member` guard rules out, so an n-slot chain does `n!`-ish work per call
+where the scalar backend prunes per row (6 slots: ~49s per call, whatever
+`B`) -- correct, but not yet practical past ~4 slots.
+
 A call-graph guard refuses value-dependent recursion (e.g. `dice`); other
 non-fragment constructs (marginal `VAny`, composite enumeration,
 mismatched-shape select arms) are refused with a diagnostic naming the

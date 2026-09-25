@@ -2269,6 +2269,15 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       -- reader for it (task batched-bool-enum-index).
       assertRefusal "constant with no batched representation (VList"
         (IROp OpEq (IRVar "xs") (IRConst (VList (ListCont (VBool True) EmptyList))))
+  , testCase "an ADT constant is accepted, a value-dependent select between two is not" $ do
+      -- Task batched-backend-refuses-neural-adt-constants: its runtime
+      -- counterpart is a class the backend emits itself, so the constant is
+      -- in the fragment -- but it is structure, so torch.where still may not
+      -- choose between two of them.
+      assertAccepted (IROp OpEq (IRVar "x") (IRConst (VADT "Obj" [VADT "Red" [], VFloat 1.5])))
+      assertRefusal "arms have different structure"
+        (IRSelect (IROp OpGreaterThan (IRVar "x") (IRConst (VFloat 0.0)))
+                  (IRConst (VADT "Red" [])) (IRConst (VADT "Blue" [])))
   , testCase "a value-dependent select between two structures is refused" $
       assertRefusal "arms have different structure"
         (IRSelect (IROp OpGreaterThan (IRVar "x") (IRConst (VFloat 0.0)))
@@ -2381,6 +2390,23 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
         Left msg -> assertFailure ("batched mode refused an applied constructor: " ++ msg)
         Right ls -> assertBool ("applied constructor mis-emitted: " ++ unlines ls)
                       (any ("Just1(sample)" `isInfixOf`) ls)
+  -- Task batched-backend-refuses-neural-adt-constants: enumerating a neural
+  -- ADT read's domain puts ADT *constants* into the kernel (the 'BTensor' an
+  -- enumerated sum maps over), which 'batchedVal' had no case for, so every
+  -- program combining two such reads was refused. And inside that map's body
+  -- -- a comprehension element 'hoistStructural' cannot lift out of -- a
+  -- constructor-tested arm reading a field was emitted as a torch.where,
+  -- evaluating the accessor on the sibling constructor and raising.
+  , testCase "an ADT-constant enumeration is emitted, its constructor test lazy in the map body" $
+      case generateFunctionsBatched False adtDomainEnv of
+        Left msg -> assertFailure ("batched mode refused an ADT-constant enumeration: " ++ msg)
+        Right ls -> do
+          assertBool ("ADT constants not rendered as instantiations: " ++ unlines ls)
+            (any (\l -> "Nada()" `isInfixOf` l && "Just1(2.0)" `isInfixOf` l) ls)
+          assertBool ("constructor-tested arm in the map body is not a lazy conditional: " ++ unlines ls)
+            (any ("(v(o) if isJust1(o) else 0.0)" `isInfixOf`) ls)
+          assertBool ("accessor still evaluated eagerly under torch.where: " ++ unlines ls)
+            (not (any (\l -> "torch.where" `isInfixOf` l && "v(o)" `isInfixOf` l) ls))
   -- Task batched-bucketing-splits-on-nullary-constructors: an ADT whose
   -- constructors are all nullary is an enumeration -- its tag is a value, not a
   -- structure -- so it is emitted collapsed: one bucket for the whole ADT
@@ -2556,6 +2582,27 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                   , probFun = Just (IRLambda "sample"
                       (IRIf (IRApply (IRVar "isJust1") q)
                             (IRApply (IRVar "v") q) (IRConst (VFloat 0.0))), "")
+                  , genFun = Nothing, integFun = Nothing
+                  , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
+                  , sampleDomain = Nothing }]
+      [ADTDecl { dataName = "Opt"
+               , constructors = [("Nada", []), ("Just1", [("v", TFloat)])]
+               , adtDepth = Nothing }]
+      []
+    -- The same declaration, with a method summing over an enumerated domain of
+    -- ADT constants -- the shape a neural ADT read's enumeration compiles to --
+    -- whose body reads a field only under the constructor test.
+    adtDomainEnv = IREnv
+      [IRFunGroup { groupName = "main"
+                  , probFun = Just (IRLambda "sample"
+                      (IROp OpMult (IRVar "sample")
+                        (IRBuiltin (BReduce ROpAdd 0)
+                          [IRBuiltin BMap
+                            [ IRLambda "o" (IRIf (IRApply (IRVar "isJust1") (IRVar "o"))
+                                                 (IRApply (IRVar "v") (IRVar "o"))
+                                                 (IRConst (VFloat 0.0)))
+                            , IRBuiltin (BTensor [EFixed 2])
+                                [IRConst (VADT "Nada" []), IRConst (VADT "Just1" [VFloat 2.0])] ]])), "")
                   , genFun = Nothing, integFun = Nothing
                   , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
                   , sampleDomain = Nothing }]

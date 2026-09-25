@@ -1290,6 +1290,21 @@ batchedVal (VTuple a b) = do
 -- just an ANY-flavoured structural marker (the exclusion set matters to
 -- enumeration semantics elsewhere), so it stays refused, same as before.
 batchedVal VAny = Just "'ANY'"
+-- An ADT constant (task batched-backend-refuses-neural-adt-constants): unlike
+-- a list or an Either, its runtime counterpart is not a library name but a
+-- class this module emits itself ('generateADTClassesBatched'), under the
+-- same 'pyMangle'd spelling, so the instantiation always resolves. The
+-- compiler manufactures these while enumerating a neural ADT read's domain
+-- (the 'BTensor' an enumerated sum maps over), where each one is a single
+-- compile-time value, not a batch: an unrolled map term binds it, the
+-- emitted @is\<Ctor\>@ answers a plain bool on it (@is_ctor@'s single-instance
+-- case for a collapsed enumeration, @isinstance@ otherwise), and comparing a
+-- packed batch against it is the elementwise @__eq__@ both class shapes
+-- already define. A choice /between/ two such constants on a per-element
+-- condition stays refused -- 'listValued' calls an ADT constant structure --
+-- so admitting the constant cannot put one inside a @torch.where@.
+batchedVal (VADT cn fs) =
+  (\xs -> pyMangle cn ++ "(" ++ intercalate ", " xs ++ ")") <$> mapM batchedVal fs
 batchedVal _ = Nothing
 
 -- | 'batchedVal' for the emitters, which run only on a body 'batchedGuard' has
@@ -1458,7 +1473,20 @@ batchedExpr env (IRUnaryOp OpSign e) = "sign(" ++ batchedExpr env e ++ ")"
 -- run time, not a per-element mask -- 'isAny' in pythonLibBatched.py.
 batchedExpr env (IRUnaryOp OpIsAny e) = "isAny(" ++ batchedExpr env e ++ ")"
 batchedExpr env (IRSelect c t f) = torchWhere env c t f
-batchedExpr env (IRIf c t f)     = torchWhere env c t f
+-- A structural if left in expression position is Python's own lazy
+-- conditional expression, not a @torch.where@: its condition is a plain bool
+-- and the arm it rules out is often illegal to evaluate at all. 'hoistStructural'
+-- lifts every such if to a statement, except inside a 'BMap' body, which is a
+-- comprehension element with nowhere to put one. That is exactly where an
+-- enumerated neural ADT read lands (task
+-- batched-backend-refuses-neural-adt-constants): the map variable is one
+-- domain constant, @isNil o@ is structural, and the else arm reads @color o@
+-- -- which, through an eager @torch.where@, raised the accessor's mismatch
+-- diagnostic on the @Nil@ term.
+batchedExpr env (IRIf c t f)
+  | structural env c = "(" ++ batchedExpr env t ++ " if " ++ structuralCond env c
+                       ++ " else " ++ batchedExpr env f ++ ")"
+  | otherwise        = torchWhere env c t f
 -- A fresh random draw (M4): the whole batch's worth at once, shape [_batchN].
 -- Both arms of an enclosing select draw independently (see the M4 header
 -- comment above 'batchNVar'), so this is correct even under eager both-arm
