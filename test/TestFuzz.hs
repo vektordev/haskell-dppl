@@ -58,7 +58,7 @@ import System.Timeout (timeout)
 import System.Environment (lookupEnv)
 import System.IO (hPutStrLn, stderr)
 import System.IO.Unsafe (unsafePerformIO)
-import Data.IORef (IORef, newIORef, atomicModifyIORef')
+import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
 import Text.Read (readMaybe)
@@ -441,18 +441,44 @@ propertyBudgetMicros = scaleFuzz (max 1 fuzzScale) defaultPropertyBudgetMicros
 -- and every deadline is already in the past on the second pass, so every case
 -- of every fuzz property is discarded and the group reports a uniform "gave
 -- up" having executed nothing. Nothing in 'Spec.hs' does that today. Anything
--- that starts to must reset both 'IORef's between passes ('writeIORef' to
--- @[]@) and should key them by pass rather than by name alone if the passes
--- are meant to be independent.
+-- that starts to must reset both tables between passes (to @[]@) and should
+-- key them by pass rather than by name alone if the passes are meant to be
+-- independent.
+--
+-- Both tables are 'MVar's, updated only through 'claimBudget' and
+-- 'noteExhaustion', which evaluate the new table completely before releasing
+-- it. They used to be 'IORef's updated with 'atomicModifyIORef'', and that
+-- deadlocked the Slow Fuzz group in ~20-28% of runs (GHC 9.6.7 and 9.12.4
+-- alike). 'atomicModifyIORef'' installs the *unevaluated* application
+-- @f old@ and only then forces it, and every property makes its first update
+-- in the same ~100us on its own thread. The dozen updates chain into thunks,
+-- each built on the previous one and each comparing property-name strings,
+-- that several threads evaluate at once. Stack dumps of hung runs showed every
+-- test thread blocked on a black hole inside this bookkeeping, before any
+-- per-case 'timeout' could start (docs-repo task
+-- fuzz-tier-blackhole-deadlock-at-property-start). Under the lock only one
+-- thread ever evaluates a table, and no other thread sees one half-evaluated.
 {-# NOINLINE propertyDeadlines #-}
-propertyDeadlines :: IORef [(String, Word64)]
-propertyDeadlines = unsafePerformIO (newIORef [])
+propertyDeadlines :: MVar [(String, Word64)]
+propertyDeadlines = unsafePerformIO (newMVar [])
 
 -- | Names whose exhaustion has already been announced, so the note is printed
 -- once per property rather than once per drained draw.
 {-# NOINLINE exhaustionAnnounced #-}
-exhaustionAnnounced :: IORef [String]
-exhaustionAnnounced = unsafePerformIO (newIORef [])
+exhaustionAnnounced :: MVar [String]
+exhaustionAnnounced = unsafePerformIO (newMVar [])
+
+-- | Record this case against the property's deadline ('budgetStep') and say
+-- whether it may run. The new table is forced -- every name and deadline --
+-- while 'propertyDeadlines' is held; see that table for why.
+claimBudget :: Int -> String -> IO Bool
+claimBudget budget name = do
+  now <- nowMicros
+  modifyMVar propertyDeadlines $ \table -> do
+    let (table', ok) = budgetStep budget name now table
+    _ <- evaluate (foldr (\(n, d) acc -> length n `seq` d `seq` acc) () table')
+    ok' <- evaluate ok
+    return (table', ok')
 
 nowMicros :: IO Word64
 nowMicros = (`div` 1000) <$> getMonotonicTimeNSec
@@ -478,8 +504,10 @@ budgetStep budget name now table = case lookup name table of
 -- from a property that ran out of clock.
 noteExhaustion :: String -> Int -> IO ()
 noteExhaustion name budget = do
-  fresh <- atomicModifyIORef' exhaustionAnnounced $ \seen ->
-    if name `elem` seen then (seen, False) else (name : seen, True)
+  fresh <- modifyMVar exhaustionAnnounced $ \seen ->
+    if name `elem` seen
+      then return (seen, False)
+      else evaluate (length name) >> return (name : seen, True)
   if fresh
     then hPutStrLn stderr
            (name ++ ": property wall-clock budget of " ++ show budget
@@ -497,9 +525,7 @@ withinBudget name = withinBudgetScaled name 1
 -- is a compile error until it has said which budget it draws against.
 withinBudgetScaled :: String -> Int -> IO Property -> IO Property
 withinBudgetScaled name factor act = do
-  now <- nowMicros
-  hasBudget <- atomicModifyIORef' propertyDeadlines
-                 (budgetStep propertyBudgetMicros name now)
+  hasBudget <- claimBudget propertyBudgetMicros name
   if not hasBudget
     then noteExhaustion name propertyBudgetMicros >> return discardVacuous
     else do
@@ -1789,9 +1815,7 @@ superSlowPropertyBudgetMicros = scaleFuzz (max 1 fuzzScale) (600 * 1000 * 1000)
 
 withinSuperSlowBudget :: String -> IO Property -> IO Property
 withinSuperSlowBudget name act = do
-  now <- nowMicros
-  hasBudget <- atomicModifyIORef' propertyDeadlines
-                 (budgetStep superSlowPropertyBudgetMicros name now)
+  hasBudget <- claimBudget superSlowPropertyBudgetMicros name
   if not hasBudget
     then noteExhaustion name superSlowPropertyBudgetMicros >> return discardVacuous
     else do

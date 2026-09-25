@@ -423,6 +423,20 @@ rather than a second per-case one; `budgetStep` is split out pure and pinned by
 the `Fuzz scaling` group, since a bound that silently never fired would let the
 stall it exists to prevent come back unnoticed.
 
+The deadline table and the exhaustion-note table are process-global `MVar`s,
+and the new table is fully evaluated before the lock is released
+(`claimBudget`). They were `IORef`s updated with `atomicModifyIORef'`, and that
+deadlocked the group in about a quarter of runs, on GHC 9.6.7 and 9.12.4 alike.
+The process sat at 0% CPU forever, with no per-case timeout able to fire.
+`atomicModifyIORef'` installs `f old` unevaluated and forces it afterwards.
+Every property makes its first update within the same ~100µs on its own tasty
+thread, so a dozen updates chained into thunks that several threads evaluated
+at once. Stack dumps of hung runs showed every test thread blocked on a black
+hole inside `budgetStep`. With the `MVar`, 120 runs gave 0 hangs, against
+34/120 before. Keep shared mutable state in these properties behind a lock that
+is held while the new value is evaluated (docs-repo task
+`fuzz-tier-blackhole-deadlock-at-property-start`).
+
 It scales **down** as well as up, which is not what the design originally asked
 for but is the more useful direction today: the draws that hang are the large
 structured ones, so a reduced scale is how a verdict gets out of the
