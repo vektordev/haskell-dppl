@@ -1,0 +1,8 @@
+data Shape = Cube | Sphere
+data Color = Red | Blue
+data Attrs = Nil | Obj shape::Shape, color::Color
+
+neural readAttrs :: (Symbol -> Attrs) of {Nil | Obj {Cube | Sphere} {Red | Blue}}
+
+sel o = if isNil o then False else isCube (shape o)
+main s1 s2 = draw a = readAttrs s1 in draw b = readAttrs s2 in if sel a then color a else if sel b then color b else Blue

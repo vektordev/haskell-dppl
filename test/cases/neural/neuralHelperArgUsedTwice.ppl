@@ -1,0 +1,7 @@
+data Color = Red | Blue
+
+neural readC :: (Symbol -> Color) of {Red | Blue}
+
+m c = if isRed c then 1 else 0
+d c = (m c) ++ (m c) ++ (0 - (m c))
+main s1 = d (readC s1)

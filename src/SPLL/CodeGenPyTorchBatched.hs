@@ -57,10 +57,12 @@ import SPLL.CodeGenPyTorch (envToLUT, replaceCalls, pyMangle, pyDouble)
 import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage, fieldAccessorOwners)
 import Data.Char (toUpper)
 import Data.Bifunctor (first)
-import Data.List (intercalate, intersect, isSuffixOf, nub, (\\))
+import Data.List (intercalate, intersect, isSuffixOf, nub, partition, (\\))
 import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Control.Monad (foldM)
 import Control.Monad.State (State, evalState, get, put)
+import qualified Data.Set as Set
+import SPLL.IROptimizer (deterministicGens)
 
 -- | Entry point mirroring 'SPLL.CodeGenPyTorch.generateFunctions', but for the
 -- batched backend and fallible: it runs the fragment guard over every emitted
@@ -97,7 +99,7 @@ generateFunctionsBatched genBoil env0 = do
       -- reference to them is renamed to match. The declarations keep the
       -- user's names, so 'ctorNames' below -- which is analysis, matched
       -- against IR variable names rather than printed -- is mangled explicitly.
-      let env@(IREnv funcs adts consts) = renameADTIdentifiers pyMangle env0
+      let env@(IREnv funcs adts consts) = inlineDetGenCalls (renameADTIdentifiers pyMangle env0)
       let lut = envToLUT env
           -- Every group's generate method, raw (pre-rename) name and body: the
           -- self-contained recursion check ('hasGenCycle') walks these
@@ -993,7 +995,7 @@ hasStructuralIf env e = case e of
 -- Two constructs it must keep refusing (both were caught for free by the old
 -- blanket @IRApply@ refusal): a prob/integ call reaching a @generate@/@normal@
 -- method (a different compiled artifact entirely -- e.g. scalar
--- @factorial@/@flip@'s prob path), and recursion (unbounded, data-dependent
+-- @factorial@'s prob path), and recursion (unbounded, data-dependent
 -- depth is outside the tensor fragment and both-arm-eager evaluation would not
 -- terminate; e.g. scalar @dice@).
 --
@@ -1001,6 +1003,10 @@ hasStructuralIf env e = case e of
 -- generate is now sometimes emitted, but it is checked and rendered
 -- independently (per class, best-effort) rather than through this hard,
 -- whole-program graph -- see 'hasGenCycle' for its own, separate cycle check.
+--
+-- A call to a generator that draws nothing and does not recurse never reaches
+-- this check: 'inlineDetGenCalls' has already beta-reduced it into the caller
+-- (that is what admits @flip@, whose prob path evaluates @flip_gen@ forward).
 checkCallGraph :: SEnv -> [IRFunGroup] -> Either Refusal ()
 checkCallGraph env funcs = do
     () <$ foldM (walk []) [] roots
@@ -1037,6 +1043,80 @@ checkCallGraph env funcs = do
       | otherwise = do
           black' <- foldM (walk (name : grey)) black (callees name)
           Right (name : black')
+
+-- | Inline, into every prob/integ body, each call to a /deterministic,
+-- non-recursive/ generate method (task batched-prob-path-calls-helper-generate).
+--
+-- The IR compiler legitimately evaluates a deterministic helper through its
+-- @_gen@ method from a probability path: @d c = (m c) ++ (0 - (m c))@
+-- compiles @d@'s probability to a comparison against @m_gen(c) + -(m_gen(c))@,
+-- since @m@'s value is fixed once @c@ is. The scalar backends just emit that
+-- call. 'checkCallGraph' cannot: a batched @generate@ is a different artifact
+-- (it takes a trailing batch size and draws per element), so a prob/integ
+-- path may only call forward/integrate methods. For a generator that draws no
+-- randomness at all, though, the call is just a pure function of its
+-- arguments, and beta-reducing it into the caller is exact -- the inlined body
+-- is ordinary deterministic IR that the fragment guard judges like any other.
+--
+-- Deterministic is 'deterministicGens' (the same whole-program purity fixed
+-- point the IR compiler's generate-backed-inference check uses), and
+-- non-recursive is 'hasGenCycle' -- inlining a recursive helper would not
+-- terminate. Only a /complete/ application (or a bare reference to a nullary
+-- generator) is inlined; extra arguments are re-applied to the result, and a
+-- partial application is left alone, so it is refused exactly as before. So is
+-- any call to a random generator: this narrows no refusal it does not lift.
+--
+-- Every binder in the inlined body, parameters included, gets a fresh
+-- @_inlN_@-prefixed name, so an inlined copy can neither capture nor shadow a
+-- caller's name, nor collide with a second copy of itself in the same scope.
+inlineDetGenCalls :: IREnv -> IREnv
+inlineDetGenCalls (IREnv funcs adts consts) = IREnv (evalState (mapM goGroup funcs) 0) adts consts
+  where
+    genRaw = [ (n ++ "_gen", e) | IRFunGroup{groupName=n, genFun=Just (e, _)} <- funcs ]
+    det    = deterministicGens funcs
+    inlinable = [ (n, e) | (n, e) <- genRaw, n `Set.member` det, not (hasGenCycle genRaw n) ]
+    goGroup g = do
+      p <- traverse goDecl (probFun g)
+      i <- traverse goDecl (integFun g)
+      return g{probFun = p, integFun = i}
+    goDecl (e, doc) = (\e' -> (e', doc)) <$> inl e
+    -- Top-down: a call site is replaced by its (renamed) body, which is then
+    -- itself traversed, so a helper calling another deterministic helper is
+    -- inlined transitively. Terminates because every inlined name is acyclic.
+    inl :: IRExpr -> State Int IRExpr
+    inl e
+      | (IRVar n, args) <- collectApplyChain e
+      , Just body <- lookup n inlinable
+      , let (params, inner) = unwrapLambdas body
+      , length args >= length params = do
+          let (now, extra) = splitAt (length params) args
+          k <- get
+          put (k + 1)
+          let fresh v = "_inl" ++ show k ++ "_" ++ v
+              -- An atomic argument (a variable or a literal) is substituted
+              -- for its parameter; anything else is let-bound once, so it is
+              -- evaluated once however often the helper reads it. Substitution
+              -- is capture-free: every binder of the body was just renamed.
+              atomic a = case a of { IRVar _ -> True; IRConst _ -> True; _ -> False }
+              (subst, bind) = partition (atomic . snd) (zip params now)
+              body' = irMap (\x -> case x of
+                                IRVar v | Just a <- lookup v [(fresh p, a) | (p, a) <- subst] -> a
+                                _ -> x) (renameBound fresh params inner)
+              bound = foldr (\(v, a) b -> IRLetIn (fresh v) a b) body' bind
+          inl (foldl IRApply bound extra)
+      | otherwise = irDescendM inl e
+
+-- | Rename every binder of an expression (and its bound occurrences) with
+-- @fresh@, treating the given names as already bound. Free variables -- other
+-- functions, constructors, globals -- are left untouched.
+renameBound :: (String -> String) -> [String] -> IRExpr -> IRExpr
+renameBound fresh = go
+  where
+    go bound e = case e of
+      IRVar v | v `elem` bound -> IRVar (fresh v)
+      IRLetIn n v b -> IRLetIn (fresh n) (go bound v) (go (n : bound) b)
+      IRLambda n b  -> IRLambda (fresh n) (go (n : bound) b)
+      _             -> irDescend (go bound) e
 
 -- | Why a recursive call site is /not/ admissible, if it is not. Recursion is
 -- in the fragment exactly when it is structure-directed, which needs two things

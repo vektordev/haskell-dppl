@@ -55,6 +55,23 @@ would make it a convolution but declines the table, the leaf cell
 (`match (readAttrs s)`, a 97-value sum) exceeding `maxTabulatedLeafNodes`;
 docs-repo task `batched-count-chain-enumeration-factorial`.
 
+A prob/integ path may call only forward/integrate methods: a batched
+`generate` is a different artifact (trailing batch size, per-element draws).
+But the IR compiler evaluates a *deterministic* helper forward through its
+`_gen` method whenever the helper's value is fixed by what the path already
+knows — `d c = (m c) ++ (0 - (m c))` measures `d` against `m_gen(c)`, and
+every CLEVR comparison/`exist` program has that shape. `inlineDetGenCalls`
+therefore beta-reduces each complete call to a generator that
+`IROptimizer.deterministicGens` proves draws nothing and `hasGenCycle` proves
+non-recursive into the caller before the call-graph guard runs, renaming every
+binder of the inlined body; a call to a random or recursive generator (e.g.
+`factorial`) is still refused. Task `batched-prob-path-calls-helper-generate`;
+corpus `test/cases/neural/neuralHelperArgUsedTwice`, `neuralHelperDrawSelect`.
+It made 15 more corpus programs batched-eligible (`flip`, `adt`,
+`sharedLatent*`, `clevrEqualLargeMetalSphere*`, ...). The corpus differential
+also now routes ADT-valued query samples through the bucketing wrapper, which
+it previously refused as unbatchable.
+
 A call-graph guard refuses value-dependent recursion (e.g. `dice`); other
 non-fragment constructs (marginal `VAny`, composite enumeration,
 mismatched-shape select arms) are refused with a diagnostic naming the

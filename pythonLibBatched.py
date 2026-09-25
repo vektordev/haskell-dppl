@@ -571,8 +571,8 @@ def signature(v):
   # nullary one): the constructor tag *and* the field shapes. The tag must be
   # part of the key -- two constructors of the same arity are different
   # structures, and merging them into one bucket would run the wrong arm.
-  # The corpus differential (End2EndTesting) does not route ADT-valued samples;
-  # 'batched enum bucketing' in End2EndTesting exercises this directly.
+  # The corpus differential (End2EndTesting) routes ADT-valued samples here
+  # ('containsStructureV'); 'batched enum bucketing' there exercises it directly.
   # An enumeration constructor (all-nullary ADT, see 'EnumBatch'): its tag is a
   # value, not structure, so the whole ADT is one key.
   if _is_enum_value(v):

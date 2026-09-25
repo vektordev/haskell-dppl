@@ -860,12 +860,11 @@ batchedRefusalTable =
   -- ADT declarations: the bail at the top of 'generateFunctionsBatched'
   -- ADTs. The declarations themselves are emittable since heterogeneous M2
   -- (constructor tag = structure = part of the bucket signature), so `adtCoin`,
-  -- `recursiveAdt`, `planEnumInline`/`Wide` are eligible programs now. These two
-  -- are refused for an unrelated, pre-existing reason: their prob path evaluates
-  -- a deterministic argument by *generating* it, and generate is a separate
-  -- artifact batched mode does not call into.
-  , ("adt",                       "calls func_gen, which is not a forward/integrate method")
-  , ("adtNeuralCounting",         "calls countRed3_gen, which is not a forward/integrate method")
+  -- `recursiveAdt`, `planEnumInline`/`Wide` are eligible programs now. `adt`
+  -- and `adtNeuralCounting` used to be refused here for an unrelated reason --
+  -- their prob path evaluates a deterministic helper by calling its generate
+  -- method -- until task batched-prob-path-calls-helper-generate inlined such
+  -- calls ('inlineDetGenCalls'); both are eligible now, and so is `flip`.
   -- prob/integ recursion. Structure-directed recursion is admitted since M1
   -- (its depth is uniform within a shape bucket, so it runs unchanged over [B]
   -- leaves -- `gaussList` is an eligible program now, checked in
@@ -878,9 +877,9 @@ batchedRefusalTable =
   -- does not descend into the tail of a list argument, since dice's recursion
   -- is genuinely value-dependent (a coin flip), not structure-directed.
   , ("dice",                      "calls dice_prob recursively without descending into the tail of a list argument")
-  -- a prob/integ path reaching a method batched mode does not emit
+  -- a prob/integ path reaching a method batched mode does not emit: a
+  -- *recursive* generator, which 'inlineDetGenCalls' cannot beta-reduce away
   , ("factorial",                 "calls factorial_gen, which is not a forward/integrate method")
-  , ("flip",                      "calls flip_gen, which is not a forward/integrate method")
   -- an inner lambda that did not reduce, once in each of the three method
   -- bodies (twiceApplication's forward/integrate *do* reduce; only its
   -- generate body keeps the literal lambda -- the accepted cost of generate's
@@ -1329,6 +1328,12 @@ containsStructureV (VList _)    = True
 containsStructureV (VEither _)  = True
 containsStructureV (VTuple a b) = containsStructureV a || containsStructureV b
 containsStructureV VAny         = True
+-- An ADT value has no structure-of-arrays literal ('batchLiteral'), but the
+-- bucketing wrapper takes it as-is: @signature@ keys an enumeration as one
+-- bucket and any other ADT by constructor tag and field shape. Routing it
+-- there is what lets an ADT-valued program (e.g. a `Color` result) join the
+-- differential at all -- before, its whole group was refused as unbatchable.
+containsStructureV (VADT _ _)   = True
 containsStructureV _            = False
 
 -- | 'VAnyExcept' (a wildcard excluding specific values) is the one ANY-like
