@@ -358,6 +358,48 @@ guards). Adding a monotone step whose inverse is partial means adding its
 image there too. Details in the doc above; corpus
 `test/cases/set-witness/setWitnessTransport*`, `test/cases/plan-enumeration/planEnumContExp*`.
 
+### Affine Gaussian marginalisation of an unwitnessed `draw`
+
+A third answer to "no occurrence of the bound variable is point-invertible",
+tried before set-valued witnesses: if the binding is a Gaussian affine
+expression and **every** use of the variable flows affinely into **one**
+Gaussian density leaf, the variable needs no witness at all -- it is
+integrated out analytically inside that leaf (task
+`affine-gaussian-closure-lost-across-let-bindings`, the scalar M1 slice of
+docs design `affine-gaussian-forms`).
+
+`CompilerMetadata.affineEnv` maps such a variable to an `AffineForm`,
+`c + sum a_i * eps_i` over independent standard normals. Latents are keyed by
+the chain name of the env-free Gaussian leaf that introduced them, so two reads
+of one variable share them (`draw x = Normal in x + x` is `2 eps`, `N(0,2)`),
+while every other leaf is a fresh draw. `toIRNormalParams` collapses a form
+(`mu = c`, `sigma` the norm of the coefficient vector) **only** for expressions reading an `affineEnv`
+variable, so everything else emits exactly what it did before, and
+`hasOwnInferenceHandler`'s local-`Var` exclusion stops applying to a variable
+that has a form. The rules are `plus`, `mult` by a deterministic operand, `neg`
+and the env lookup; `-` is `plus`/`neg` by the time IRCompiler sees it.
+
+`affineMarginalisable` decides applicability. "One leaf" means: all
+occurrences sit in a single affine `PNormal` consumer, which is either the
+value of a directly nested `draw` (that binding's own treatment -- witnessed,
+marginalised in turn, or refused -- carries the latents on) or the let spine's
+terminal expression. That is what keeps the scalar collapse sound. The
+refusals, all falling through to `setWitnessApply` exactly as before:
+
+- uses spread over two consumers: `(x + Normal, x + Normal)` needs a joint
+  density (design M2), and so does `draw y = x + Normal in x + y`, since `y`
+  may be witnessed and then `x`'s latents would be counted twice;
+- a tagged or higher-order application, or one returning a function;
+- anything non-Gaussian or gated -- a chain gated on its own state is `Bottom`
+  in ModalityInfer and never reaches here.
+
+Witnessed variables mix in for free: after an inversion `retypeDetGiven` makes
+them `Deterministic`, which the algebra treats as constants. That is what
+answers a partial observation like `(s1, s3)` of a three-step chain, as
+`N(s1) * N(s3 | s1)` with `s2` integrated out. Corpus
+`let-bindings/affineChain*`, `affineSelfSum`, `unwitnessedGaussianLetChain`,
+`higher-order/arrowApplySelfSum`.
+
 ### Callee Normalization
 
 Probability mode compiles `Apply l v` by inverting the observation through
@@ -401,11 +443,11 @@ whose value mentions that name, so a lambda is never moved into a scope where
 one of its free variables means something else.
 
 Corpus: `arrowApply*` (the probe table of investigation
-`modality-function-space-test-coverage`, rows 1-6 and 8). Row 7,
-`(\x -> x + x) Normal`, is a *wontfix* precision gap -- the family layer is
-right that `2X` of a Gaussian is Gaussian, but the set-witness engine cannot
+`modality-function-space-test-coverage`, rows 1-8). Row 7,
+`(\x -> x + x) Normal`, was a refusal -- the set-witness engine cannot
 propagate an observation onto a variable occurring on both sides of its own
-sum -- and is pinned as a refusal by `TestRejection`'s `ArrowApplySelfSum`.
+sum -- until affine Gaussian marginalisation (below) answered it without a
+witness: `arrowApplySelfSum`, `N(0, 2)`.
 
 A second, independent half of the same task: the `PNormal`/`PLogNormal`
 catch-alls in `IRCompiler` now also decline a **local `Var`** and an

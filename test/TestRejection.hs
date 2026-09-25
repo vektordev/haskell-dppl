@@ -56,7 +56,6 @@ rejectionTests = testGroup "Rejection"
   , setWitnessSharedLatentTests
   , setWitnessTransportTests
   , gatedContinuousFeedsFreshDrawTests
-  , arrowApplySelfSumTests
   , typeErrorDiagnosticTests
   ]
 
@@ -976,8 +975,10 @@ noGenerateSuppressedGeneratorTests = testGroup "NoGenerateSuppressedGenerator"
 -- nested let (`Apply (Lambda y b) e`) in two stages -- body onto y, then the
 -- right-hand side onto x with each y-set as target. The corpus
 -- (test/cases/set-witness/setWitnessNestedLet*) pins the shapes that now compile; this
--- group pins the two shapes the case deliberately still refuses, and that they
--- refuse with the engine's existing diagnostic rather than a new crash.
+-- group pins the two shapes the case deliberately still refuses. The shared
+-- occurrence refuses with the engine's existing diagnostic rather than a new
+-- crash; the fresh-randomness one the engine still cannot invert, but its
+-- affine Gaussian fallback answers it exactly.
 -- ----------------------------------------------------------------------------
 
 -- x occurs in BOTH the inner right-hand side and the inner body: x-sets from
@@ -989,6 +990,9 @@ nestedLetSharedOccurrenceSrc =
 -- The inner right-hand side draws fresh randomness between the outer binding
 -- and the comparison: 'transportDirect' finds no seeded inverse through the
 -- second draw, exactly as it does not for the flattened `(x + Normal) > 0.0`.
+-- Since task affine-gaussian-closure-lost-across-let-bindings, x is then
+-- integrated out as an affine Gaussian form instead of refused: y ~ N(0, sqrt 2)
+-- and the engine measures `y > 0` against that, P = 1/2 either way.
 nestedLetFreshRandomnessSrc :: String
 nestedLetFreshRandomnessSrc =
   "main = draw x = Normal in draw y = x + Normal in if y > 0.0 then 1.0 else 0.0"
@@ -1008,10 +1012,15 @@ setWitnessNestedLetTests = testGroup "SetWitnessNestedLet"
       withParsed nestedLetSharedOccurrenceSrc $ \prog -> do
         res <- forcedProb prog (VFloat 1.0)
         assertSetWitnessRefusal "a shared occurrence across the inner let" res
-  , testCase "an inner binding drawing fresh randomness is still refused" $
+  , testCase "an inner binding drawing fresh randomness is marginalised, not refused" $
       withParsed nestedLetFreshRandomnessSrc $ \prog -> do
         res <- forcedProb prog (VFloat 1.0)
-        assertSetWitnessRefusal "fresh randomness in the inner binding" res
+        case res of
+          Left ex -> assertFailure ("the fresh-randomness nested let crashed: " ++ show ex)
+          Right (Left e) -> assertFailure ("the fresh-randomness nested let was refused: " ++ e)
+          Right (Right (VTuple (VFloat p) _)) ->
+            assertBool ("expected P(y > 0) = 0.5, got " ++ show p) (abs (p - 0.5) < 1e-12)
+          Right (Right v) -> assertFailure ("unexpected result shape: " ++ show v)
   , testCase "the plain shifted nested let compiles and matches Phi(1)" $
       withParsed nestedLetShiftSrc $ \prog -> do
         res <- forcedProb prog (VFloat 1.0)
@@ -1149,39 +1158,6 @@ setWitnessTransportTests = testGroup "SetWitnessTransport"
           Right (Left e) -> assertFailure
             (what ++ " was declined by a different stage instead of the set-witness engine: " ++ e)
           Right (Right v) -> assertFailure (what ++ " was accepted and answered " ++ show v)
-
--- ----------------------------------------------------------------------------
--- Task modality-arrow-apply-crashes, row 7 of investigation
--- modality-function-space-test-coverage's probe table: the one shape of the
--- eight that is a deliberate precision gap rather than a defect.
---
--- `(\x -> x + x) Normal` is family-correct -- 2X of a Gaussian is Gaussian, and
--- ModalityInfer says PNormal (pinned in TestModalityInfer) -- but the
--- set-valued witness engine cannot propagate the observation onto a variable
--- that occurs on both sides of its own sum, and refuses with the designed
--- diagnostic. Settled as a wontfix on 2026-09-14: telling `x + x` from the tame
--- `x * 2` in general is a rabbit hole with no closing move.
---
--- Pinned as a *refusal*, so that the day someone does close the gap this test
--- fails and is deleted deliberately, rather than the shape silently drifting
--- into a different crash.
--- ----------------------------------------------------------------------------
-
-arrowApplySelfSumTests :: TestTree
-arrowApplySelfSumTests = testGroup "ArrowApplySelfSum"
-  [ testCase "the affine-in-itself argument is refused, not silently measured" $
-      withParsed "main = (\\x -> x + x) Normal" $ \prog -> do
-        res <- forcedProb prog (VFloat 0.5)
-        case res of
-          Left ex -> assertBool
-            ("expected the set-witness diagnostic, got: " ++ show ex)
-            (setWitnessDiagnostic `isInfixOf` show ex)
-          Right (Left e) -> assertFailure
-            ("declined by a different stage than the set-witness engine: " ++ e)
-          Right (Right v) -> assertFailure
-            ("the self-sum shape was accepted and answered " ++ show v
-             ++ " -- if the precision gap has been closed, delete this pin")
-  ]
 
 -- ----------------------------------------------------------------------------
 -- Task continuous-recursive-gate-witness-failure: a continuous let-bound value

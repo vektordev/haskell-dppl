@@ -1,0 +1,5 @@
+main =
+  draw s1 = 1.0 + (Normal * 0.5) in
+  draw s2 = (s1 * 0.9) + (Normal * 0.5) in
+  draw s3 = (s2 * 0.9) + (Normal * 0.5) in
+  if s3 > 2.0 then 1 else 0

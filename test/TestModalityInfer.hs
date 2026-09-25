@@ -586,9 +586,9 @@ modalityInferTests = testGroup "ModalityInfer"
           assertEqual "" PNormal $
             mainPType "main = (if 0.1 < 0.5 then (\\x -> x + 1.0) else (\\x -> x * 2.0)) Normal"
       , testCase "row 7: the affine-in-itself argument is still PNormal" $
-          -- The family layer is right that 2X of a Gaussian is Gaussian; the
-          -- precision gap is in the witness engine, not here (see
-          -- TestRejection's ArrowApplySelfSum).
+          -- The family layer is right that 2X of a Gaussian is Gaussian, and
+          -- IRCompiler's affine marginalisation now realises it (corpus
+          -- higher-order/arrowApplySelfSum).
           assertEqual "" PNormal $
             mainPType "main = (\\x -> x + x) Normal"
       , testCase "row 8: a randomly selected function value is Integrate" $

@@ -98,8 +98,26 @@ data CompilerMetadata = CompilerMetadata {
   -- with every recursive call (all ~50 of which read 'semiringOf meta', not
   -- 'compilerConfig meta', for exactly this reason) automatically compiling
   -- under the overridden family with no change of its own.
-  semiringFamily :: SemiringFamily
+  semiringFamily :: SemiringFamily,
+  -- | Lambda-bound variables marginalised analytically as affine Gaussian
+  -- forms rather than witnessed (task
+  -- affine-gaussian-closure-lost-across-let-bindings; the M1 slice of design
+  -- affine-gaussian-forms). A variable here has no runtime value in the
+  -- emitted code: it is only ever read through 'affineFormOf', i.e. inside
+  -- the one Gaussian density leaf that consumes it. See 'affineMarginalisable'
+  -- for when a binding is put here.
+  affineEnv :: [(String, AffineForm)]
 }
+
+-- | A value's law as an affine combination of independent standard-normal
+-- latents, @c + Σᵢ aᵢ·εᵢ@. The latents are keyed by the chain name of the
+-- env-free Gaussian leaf that introduced them, so two reads of one
+-- 'affineEnv' variable share their latents (@x + x@ is @2ε@, not
+-- @ε₁ + ε₂@), while every other leaf is a fresh draw.
+data AffineForm = AffineForm
+  { afConst  :: IRExpr
+  , afCoeffs :: Map.Map ChainName IRExpr
+  } deriving (Show)
 
 semiringOf :: CompilerMetadata -> Semiring
 semiringOf meta = mkSemiring (semiringFamily meta) (logSpace (compilerConfig meta))
@@ -469,7 +487,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
     -- probability mass under logSpace, since every branch's accumulated weight
     -- was then a linear 1.0 multiplied against log (negative) per-branch terms
     -- (task topk-logspace-unsound).
-    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) [] verdicts detGens SRSumProduct
+    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) [] verdicts detGens SRSumProduct []
     -- One walk of the whole program, shared by every 'meta' built below.
     verdicts = materializationVerdicts p
     -- Likewise one call-graph fixpoint, shared: which generate functions are
@@ -1550,6 +1568,12 @@ irSqrt x = IRUnaryOp OpExp (IROp OpMult (IRConst (VFloat 0.5)) (IRUnaryOp OpLog 
 
 -- | Recursively extract (mu, sigma) as IRExprs from a PNormal-typed expression.
 toIRNormalParams :: CompilerMetadata -> Expr -> CompilerMonad (IRExpr, IRExpr)
+-- An expression reading an analytically marginalised binding is collapsed from
+-- its affine form. Tried first: the scalar equations below combine their
+-- operands as independent, which is exactly wrong for two operands sharing a
+-- latent through that binding. Expressions that read no such binding never
+-- take this equation, so their emitted code is unchanged.
+toIRNormalParams meta e | mentionsAffineVar meta e = collapseAffine <$> affineFormOf meta e
 toIRNormalParams _ (Expr _ (Var "Normal")) = return (IRConst (VFloat 0), IRConst (VFloat 1))
 toIRNormalParams meta (Expr _ (InjF (Named "plus") [e0, e1]))
   | pType (getTypeInfo e0) == PNormal, pType (getTypeInfo e1) == PNormal = do
@@ -1603,6 +1627,110 @@ toIRNormalParams meta (Expr _ (ReadNN name arg)) = do
   return (IRBuiltin BListIndex [IRVar var, IRConst (VInt 0)], IRBuiltin BListIndex [IRVar var, IRConst (VInt 1)])
 toIRNormalParams meta e | Just act <- normalParamsViaCall meta PNormal e = act
 toIRNormalParams _ e = error $ "toIRNormalParams: cannot extract Normal params from " ++ show (pType (getTypeInfo e)) ++ " | expr: " ++ show e
+
+-- | True if the expression reads a variable bound in 'affineEnv'.
+mentionsAffineVar :: CompilerMetadata -> Expr -> Bool
+mentionsAffineVar meta e =
+  not (null (affineEnv meta)) && any (`Set.member` freeVarsExpr e) (map fst (affineEnv meta))
+
+-- | The affine form of an expression 'isAffineOver' accepts. Subterms reading
+-- no 'affineEnv' variable are leaves: a Deterministic one is a constant, and a
+-- Gaussian one is compiled by the ordinary scalar extractor and enters as one
+-- fresh latent keyed by its own chain name. Only the four rules of design
+-- affine-gaussian-forms §3 look inside a node.
+affineFormOf :: CompilerMetadata -> Expr -> CompilerMonad AffineForm
+affineFormOf meta e@(Expr ti nd)
+  | not (mentionsAffineVar meta e) =
+      if pType ti == Deterministic
+        then do c <- toIRGenerate meta e
+                return (AffineForm c Map.empty)
+        else do (mu, s) <- toIRNormalParams meta e
+                return (AffineForm mu (Map.singleton (chainName ti) s))
+  | Var n <- nd, Just form <- lookup n (affineEnv meta) = return form
+  | InjF (Named "plus") [a, b] <- nd = do
+      fa <- affineFormOf meta a
+      fb <- affineFormOf meta b
+      return (AffineForm (IROp OpPlus (afConst fa) (afConst fb))
+                         (Map.unionWith (IROp OpPlus) (afCoeffs fa) (afCoeffs fb)))
+  | InjF (Named "mult") [a, b] <- nd, isAffineConstant meta a = scaleBy a b
+  | InjF (Named "mult") [a, b] <- nd, isAffineConstant meta b = scaleBy b a
+  | InjF (Named "neg") [a] <- nd = do
+      fa <- affineFormOf meta a
+      return (AffineForm (IRUnaryOp OpNeg (afConst fa)) (Map.map (IRUnaryOp OpNeg) (afCoeffs fa)))
+  | otherwise = error $ "affineFormOf: not an affine Gaussian form (guarded by isAffineOver): " ++ show e
+  where
+    scaleBy c f = do
+      cIR <- toIRGenerate meta c
+      ff <- affineFormOf meta f
+      return (AffineForm (IROp OpMult (afConst ff) cIR) (Map.map (\a -> IROp OpMult a cIR) (afCoeffs ff)))
+
+-- | A subterm the affine algebra treats as a constant: Deterministic, and
+-- reading no marginalised binding.
+isAffineConstant :: CompilerMetadata -> Expr -> Bool
+isAffineConstant meta e = pType (getTypeInfo e) == Deterministic && not (mentionsAffineVar meta e)
+
+-- | @isAffineOver meta names e@: 'affineFormOf' can build a form for @e@ once
+-- every name in @names@ is in 'affineEnv'. The static twin of that function;
+-- keep the two in step.
+isAffineOver :: CompilerMetadata -> Set.Set String -> Expr -> Bool
+isAffineOver meta names e@(Expr ti nd)
+  | Set.null (freeVarsExpr e `Set.intersection` names) =
+      pType ti == Deterministic || (pType ti == PNormal && not (hasOwnInferenceHandler meta e))
+  | otherwise = case nd of
+      Var n -> n `Set.member` names
+      InjF (Named "plus") [a, b] -> isAffineOver meta names a && isAffineOver meta names b
+      InjF (Named "mult") [a, b] -> (constant a && isAffineOver meta names b)
+                                 || (constant b && isAffineOver meta names a)
+      InjF (Named "neg") [a] -> isAffineOver meta names a
+      _ -> False
+  where
+    constant c = pType (getTypeInfo c) == Deterministic && Set.null (freeVarsExpr c `Set.intersection` names)
+
+-- | Collapse a form to a scalar Normal's @(mu, sigma)@: the constant, and the
+-- Euclidean norm of the coefficient vector (the latents are independent).
+collapseAffine :: AffineForm -> (IRExpr, IRExpr)
+collapseAffine (AffineForm c coeffs) = case Map.elems coeffs of
+  [a] -> (c, IRUnaryOp OpAbs a)
+  as  -> (c, irSqrt (foldr1 (IROp OpPlus) [IROp OpMult a a | a <- as]))
+
+-- | When the probabilistic Apply arm finds no inversion for a let-bound
+-- variable, it can still marginalise the variable analytically if its law is
+-- an affine Gaussian form and all of its uses flow into a single Gaussian
+-- density leaf. Answers the bound variable and the body to compile, with the
+-- variable to be put in 'affineEnv'.
+--
+-- "A single leaf" is what makes dropping the variable sound: its latents are
+-- then integrated exactly once, inside one scalar Normal. It holds when every
+-- occurrence sits in one affine, PNormal-typed consumer, which is either the
+-- value of a directly nested binding (whose own treatment -- witnessed,
+-- marginalised in turn, or refused -- then carries the latents on) or the
+-- terminal expression of the let spine. Uses spread over two consumers would
+-- need a joint (multivariate) density, which is design affine-gaussian-forms
+-- M2; those keep today's path. So does anything not literally a let (a tagged
+-- or higher-order application, or one returning a function).
+affineMarginalisable :: CompilerMetadata -> RType -> String -> Expr -> Expr -> Maybe (String, Expr)
+affineMarginalisable meta rt tag l v
+  | Expr _ (Lambda x lamBody) <- l
+  , null tag
+  , not (isTArrowType rt)
+  , pType (getTypeInfo v) == PNormal
+  , isAffineOver meta envNames v
+  , spineOK (Set.insert x envNames) x lamBody
+  = Just (x, lamBody)
+  | otherwise = Nothing
+  where
+    envNames = Set.fromList (map fst (affineEnv meta))
+    -- The form of @v@ is built here, in the binding's scope, and read at the
+    -- consumer; a binder in between that shadows one of @v@'s free variables
+    -- would change what that IR refers to, so it is refused.
+    vFree = freeVarsExpr v
+    spineOK names x (Expr _ (Apply lam@(Expr _ (Lambda y inner)) val))
+      | x `Set.member` freeVarsExpr val =
+          not (x `Set.member` freeVarsExpr lam) && consumer names val
+      | y == x || y `Set.member` vFree = False
+      | otherwise = spineOK names x inner
+    spineOK names x t = x `Set.member` freeVarsExpr t && consumer names t
+    consumer names c = pType (getTypeInfo c) == PNormal && isAffineOver meta names c
 
 -- | A *saturated* call to a top-level function whose result is Normal-derived.
 -- Reuse the callee's own compiled @<name>_normal@ (which returns its (mu, sigma)
@@ -1730,8 +1858,11 @@ hasOwnInferenceHandler _    (Expr _ (Apply _ _))            = True
 -- `Just (_, False)` is exactly the local-variable case the Var equation itself
 -- dispatches on: a top-level function carries True, and Normal/Uniform are not
 -- in the environment at all.
+-- A local bound in 'affineEnv' is the exception: it *has* a law to read, its
+-- affine form, which 'toIRNormalParams' collapses.
 hasOwnInferenceHandler meta (Expr _ (Var n))
-  | Just (_, False) <- lookup n (typeEnv meta)              = True
+  | Just (_, False) <- lookup n (typeEnv meta)
+  , isNothing (lookup n (affineEnv meta))                   = True
 -- A conditional is a *mixture*, and a mixture of two Gaussians is not a
 -- Gaussian -- there is no (mu, sigma) to extract even when both arms have one,
 -- and toIRNormalParams has no equation for it at all, so the catch-all could
@@ -2261,7 +2392,20 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
      -- variable (intervals from comparisons, case splits from ifs,
      -- intersections across occurrences) and measure them against the bound
      -- distribution (design set-valued-witnesses).
+     -- Where the set-witness engine finds no inversion either, a Gaussian
+     -- binding all of whose uses flow affinely into one density leaf needs
+     -- no witness at all: it is integrated out analytically inside that leaf
+     -- (task affine-gaussian-closure-lost-across-let-bindings). Offered as
+     -- the engine's fallback rather than tried first, so every binding the
+     -- engine already answered keeps its emitted code.
      Nothing -> setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag planDiag v sample
+                  (affineMarginalise <$> affineMarginalisable meta rt tag l v)
+      where
+        affineMarginalise (x, lamBody) = do
+          form <- affineFormOf meta v
+          let bodyMeta = (extendMetaForLambda meta (getTypeInfo l) x)
+                           { affineEnv = (x, form) : affineEnv meta }
+          toIRInference bodyMeta cumulative lamBody sample
      Just (InvChain invExprP0 invExprCoV0 invExprGuard0 invExprReadsAny0) -> do
       invExprP        <- pruneDeadLetIns <$> materializeAnchors meta invExprP0
       invExprCoV      <- pruneDeadLetIns <$> materializeAnchors meta invExprCoV0
@@ -3882,8 +4026,11 @@ subtreeHasOcc occs e = let cns = subtreeCNs e in any (`elem` cns) occs
 -- | Entry point of the fallback, called from the probabilistic Apply arm after
 -- 'toInvExprMaybe' failed. Builds the constraint worlds for the observation and
 -- measures them against the bound distribution @v@.
-setWitnessApply :: CompilerMetadata -> Bool -> RType -> Expr -> ChainName -> ChainName -> String -> Maybe String -> Expr -> IRExpr -> CompilerMonad PResult
-setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag planDiag v sample = do
+-- | The last argument is what to do instead of refusing when the observation
+-- has no set-valued inverse ('invertToWorlds' answers 'Nothing'); the affine
+-- Gaussian marginalisation is the one caller that supplies one.
+setWitnessApply :: CompilerMetadata -> Bool -> RType -> Expr -> ChainName -> ChainName -> String -> Maybe String -> Expr -> IRExpr -> Maybe (CompilerMonad PResult) -> CompilerMonad PResult
+setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag planDiag v sample fallback = do
   let userVar = case l of Expr _ (Lambda n _) -> n; _ -> "<bound variable>"
   let refuse why = error $ unlines $
         [ "set-valued witness construction failed for the binding of '" ++ userVar ++ "' (lambda at " ++ lResolvedCN ++ "):"
@@ -3906,8 +4053,13 @@ setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag planDiag v sam
   let target = if cumulative
         then WInterval WNegInf (WFinite sample)
         else WPoint sample const1
-  worldsM <- invertToWorlds meta occs bodyExpr target
+  -- Attempted in its own writer scope: a failed inversion's bindings are
+  -- dropped rather than leaking into the fallback's code, and a successful
+  -- one's are re-emitted unchanged, in order.
+  (worldsM, worldBinds) <- lift (runWriterT (invertToWorlds meta occs bodyExpr target))
+  when (isJust worldsM) (setVariables worldBinds)
   case worldsM of
+    Nothing | Just alt <- fallback -> alt
     -- A cumulative query the engine cannot invert (e.g. the multivariate CDF of
     -- a correlated tuple) is refused at runtime: the probability variant of the
     -- same program may be perfectly fine, and a compile-time error here would

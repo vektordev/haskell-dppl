@@ -276,6 +276,10 @@ logSpaceUncoveredPrograms =
   -- world sum; its p(0.0) row (atom vs density, dim 0 wins) is where the
   -- mismatch shows.
   , "gatedContinuousTruncated"
+  -- task affine-gaussian-closure-lost-across-let-bindings: s1 and s2 are
+  -- integrated out as affine Gaussian forms, but the threshold on s3 is still
+  -- measured by the linear-pinned set-witness world sum.
+  , "affineChainThreshold"
   ]
 
 checkLogSpaceMatchesLinear :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
