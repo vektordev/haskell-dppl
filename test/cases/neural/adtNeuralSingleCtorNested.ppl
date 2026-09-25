@@ -1,0 +1,9 @@
+-- Plan-guided inference through nested single-constructor ADTs (task
+-- plan-emits-vacuous-single-constructor-flags): the constructor tests and the
+-- field accessors land on ADT regions with no flag slot, so they must neither
+-- constrain a flag region nor alias the first field's region at the same
+-- offset.
+data Pair = Pair fstB::Bool, sndB::Bool
+data Wrap = Wrap pair::Pair
+neural readWrap :: (Symbol -> Wrap)
+main sym = draw w = readWrap sym in if isWrap w && isPair (pair w) then fstB (pair w) && not (sndB (pair w)) else False

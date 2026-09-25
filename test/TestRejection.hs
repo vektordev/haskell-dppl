@@ -343,7 +343,7 @@ anyCtorTestTests = testGroup "AnyConstructorTest"
   [ testCase "interpreter refuses a constructor test on an ANY slot" $
       withParsed anyCtorProgSrc $ \prog -> do
         let conf = defaultCompilerConfig { noIntegrate = True }
-            args = [VTuple (VInt 2) (constructVList [ VFloat v | v <- [1.0, 0.5, 0.3, 0.2, 0.4, 0.6] ])]
+            args = [VTuple (VInt 2) (constructVList [ VFloat v | v <- [0.5, 0.3, 0.2, 0.4, 0.6] ])]
         res <- forced (runProb conf prog args (VTuple (VInt 0) (VBool True)))
         case res of
           Left e  -> assertBool ("expected the ANY constructor-test refusal, got: " ++ show e)

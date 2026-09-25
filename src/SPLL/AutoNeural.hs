@@ -7,6 +7,7 @@ module SPLL.AutoNeural(
 , PartitionPlan (..)
 , makeProb
 , getSize
+, adtFlagSlots
 , planIndexOf
 , validateWriteLogitsGaussian
 , makeTopLevelWriteLogitsFun
@@ -147,14 +148,15 @@ planLayoutString plan =
       ([ (show ix,       "free", sub path "Gaussian mu")
        , (show (ix + 1), "> 0",  sub path "Gaussian sigma") ], ix + 2)
     planRows ix path (ADTPlan name constrs) =
-      let nFlags  = length constrs
-          flagRow = (rangeStr ix nFlags, "softmax",
-                     sub path (name ++ " ctor flags: " ++ intercalate "|" (map fst constrs)))
+      let nFlags   = adtFlagSlots constrs
+          flagRows = [ (rangeStr ix nFlags, "softmax",
+                        sub path (name ++ " ctor flags: " ++ intercalate "|" (map fst constrs)))
+                     | nFlags > 0 ]
           renderConstr (acc, cix) (cName, fields) =
             let (frs, cix') = renderFields cix (sub path cName) fields
             in (acc ++ frs, cix')
           (constrRows, ixEnd) = foldl renderConstr ([], ix + nFlags) constrs
-      in (flagRow : constrRows, ixEnd)
+      in (flagRows ++ constrRows, ixEnd)
 
     -- a constructor's fields are laid out sequentially, each its own breadcrumb segment.
     renderFields ix _    [] = ([], ix)
@@ -196,7 +198,7 @@ discretesTagError fn ty tag = error
 data PartitionPlan = TuplePlan PartitionPlan PartitionPlan -- Logit layout: first, then second.
                    | EitherPlan PartitionPlan PartitionPlan -- Logit layout: flag, then left, then right
                    | Discretes RType MultiValue -- Logit layout: Enumerated values in order of "tagToValues"
-                   | ADTPlan String [(String, [PartitionPlan])] -- Logit layout: Flag for each constructor, then each field of each constructor
+                   | ADTPlan String [(String, [PartitionPlan])] -- Logit layout: Flag for each constructor (none for a single one, see 'adtFlagSlots'), then each field of each constructor
                    | Continuous -- Logit layout: Mu, Sigma
                    deriving (Show, Eq)
 
@@ -273,14 +275,17 @@ makeProbRec adtDecls (ADTPlan adtName plans) ix sample = (noAny sample p, noAny0
     constrsWithPlan = mapToTup (fromJust . (`lookup` plans) . fst) constrsInPlan
     constrsWithPlanAndIx = mapAppendTup constrsWithPlan constrIx
     constrsWithPlanAndIxAndFlag = mapAppendTup3 constrsWithPlanAndIx flagProbs
-    constrIx = scanl (+) (ix + length plans) (map totalSize plans)
-    constrGuard constr constrFlag v = IRIf (IRApply (IRVar ("is" ++ fst constr)) sample) (IROp OpMult constrFlag v) (IRConst $ VFloat 0)
+    constrIx = scanl (+) (ix + adtFlagSlots plans) (map totalSize plans)
+    -- A lone constructor has no flag slot: its flag is statically 1, so the
+    -- factor is dropped rather than multiplied in (see 'adtFlagSlots').
+    constrGuard constr constrFlag v = IRIf (IRApply (IRVar ("is" ++ fst constr)) sample) (maybe v (\f -> IROp OpMult f v) constrFlag) (IRConst $ VFloat 0)
     constrProbFields constr cPlan cIx constrFlag = mapTup3 (constrGuard constr constrFlag) (makeProbADTConstr adtDecls cPlan constr cIx sample)
     constrProbsFields = map (uncurry4 constrProbFields) constrsWithPlanAndIxAndFlag
     opPlus3 (a1, b1, c1) (a2, b2, c2) = (IROp OpPlus a1 a2, IROp OpPlus b1 b2, IROp OpPlus c1 c2)
     (p, dim, bc) = foldr opPlus3 (IRConst $ VFloat 0, IRConst $ VFloat 0, IRConst $ VFloat 0) constrProbsFields
-    flagIx = [ix .. ix + length plans]
-    flagProbs = map (\fIx -> IRBuiltin BListIndex [IRVar vector, IRConst (VInt fIx)]) flagIx
+    flagProbs
+      | adtFlagSlots plans == 0 = repeat Nothing
+      | otherwise = map (\fIx -> Just (IRBuiltin BListIndex [IRVar vector, IRConst (VInt fIx)])) [ix ..]
 
 
 makeProbADTConstr :: [ADTDecl] -> [PartitionPlan] -> ADTConstructorDecl -> Int -> IRExpr -> (IRExpr, IRExpr, IRExpr)
@@ -305,11 +310,14 @@ makeGenRec _adtDecls (Discretes _rty (MultiDiscretes vals)) ix = lottery (map va
 makeGenRec _adtDecls Continuous ix = IROp OpPlus
   (IROp OpMult (IRSample IRNormal) (IRBuiltin BListIndex [IRVar vector, IRConst (VInt $ ix + 1)]))
   (IRBuiltin BListIndex [IRVar vector, IRConst (VInt ix)])
--- Flags occupy one slot per constructor *present in the plan* (length plans), then the
+-- Flags occupy one slot per constructor *present in the plan* ('adtFlagSlots'), then the
 -- fields follow -- matching getSize and makeProbRec.  A depth-limited recursive ADT prunes
--- constructors at its deepest level, so `length plans` can be smaller than the full
--- `constructors adt`; the value region must start right after the flags that actually exist.
-makeGenRec adtDecls (ADTPlan _ plans) ix = constructorLottery adtDecls plans ix (ix + length plans)
+-- constructors at its deepest level, so the plan's constructor count can be smaller than the
+-- full `constructors adt`; the value region must start right after the flags that actually
+-- exist.  A lone constructor has no flag at all: there is no lottery to draw, it is built
+-- directly from its fields.
+makeGenRec adtDecls (ADTPlan _ [(cName, cPlans)]) ix = makeGenADTConstr adtDecls cPlans cName ix
+makeGenRec adtDecls (ADTPlan _ plans) ix = constructorLottery adtDecls plans ix (ix + adtFlagSlots plans)
 makeGenRec _adtDecls (Discretes ty tag) _ = discretesTagError "makeGenRec" ty tag
 
 makeGenADTConstr :: [ADTDecl] -> [PartitionPlan] -> String -> Int -> IRExpr
@@ -354,8 +362,24 @@ getSize (TuplePlan a b) = getSize a + getSize b
 getSize (EitherPlan a b) = getSize a + getSize b + 1
 getSize (Discretes _ (MultiDiscretes vals)) = length vals
 getSize (Discretes ty tag) = discretesTagError "getSize" ty tag
-getSize (ADTPlan _ plans) = sum (map (sum . map getSize . snd) plans) + length plans
+getSize (ADTPlan _ plans) = sum (map (sum . map getSize . snd) plans) + adtFlagSlots plans
 getSize Continuous = 2
+
+-- | Constructor-flag slots an 'ADTPlan' region carries ahead of its field blocks: one
+-- softmax slot per constructor present in the plan -- except a lone constructor, which
+-- carries none. A width-1 softmax is identically 1.0 whatever the network outputs, so the
+-- slot would hold no information, receive no gradient, and leave the readers multiplying
+-- by a value that is only correct because it is guaranteed to be 1 (task
+-- plan-emits-vacuous-single-constructor-flags). The constructor test is then statically
+-- true and every reader drops the flag factor. Every consumer of plan offsets -- here, in
+-- 'SPLL.IRCompiler''s plan traversal, and in "MockNN" -- goes through this one function.
+--
+-- Only the n = 1 case is special. Laying every n-constructor region out with n-1 flags,
+-- the way 'EitherPlan' already does, is the consistent endpoint but would re-lay-out every
+-- existing plan; it is a separate decision.
+adtFlagSlots :: [(String, [PartitionPlan])] -> Int
+adtFlagSlots [_]   = 0
+adtFlagSlots ctors = length ctors
 
 isDiscrete :: RType -> Bool
 isDiscrete TBool = True
@@ -417,7 +441,8 @@ makePartitionPlan _adtDecls x y = error ("erroneous combination of type and tag 
 --   agree on it.
 --
 -- Slot counts per case match 'getSize' exactly (an EitherPlan contributes ONE flag slot,
--- P(Left), since P(Right) is its complement; an ADTPlan contributes one per constructor).
+-- P(Left), since P(Right) is its complement; an ADTPlan contributes one per constructor,
+-- or none for a lone constructor -- 'adtFlagSlots').
 --
 -- outerArgs: IRExprs for the outer lambda parameters already in scope (e.g. [IRVar "sym"]
 -- for `main sym = ...`; [] for `main = expr`).  These are forwarded as trailing arguments
@@ -464,8 +489,9 @@ makeWriteLogitsPlan wrap probFnName normalFnName norm plan outerArgs = case plan
          , rec (wrap . VEither . Right) (normalFnName ++ "_right") (Just pRightAny) b
          ]
 
-  -- One flag slot per constructor, then each constructor's field block.  Field slots are
-  -- conditional on their constructor (see EitherPlan above).  The normal-function names
+  -- One flag slot per constructor ('adtFlagSlots': none for a lone constructor), then each
+  -- constructor's field block.  Field slots are conditional on their constructor (see
+  -- EitherPlan above).  The normal-function names
   -- mirror 'requiredNormalFns' so its refusal check and this emission cannot disagree.
   ADTPlan _ ctors ->
     let ctorAnyVal (cName, fps) = wrap (VADT cName (replicate (length fps) VAny))
@@ -477,7 +503,9 @@ makeWriteLogitsPlan wrap probFnName normalFnName norm plan outerArgs = case plan
                 (normalFnName ++ "_" ++ cName ++ "_" ++ show j)
                 (Just (pCtorAny cp)) fp
           | (j, fp) <- zip [0 :: Int ..] fps ]
-    in concatLists (irList [ slot (pCtorAny cp) | cp <- ctors ] : map ctorFields ctors)
+        flagSlots = if adtFlagSlots ctors == 0 then emptyList
+                    else irList [ slot (pCtorAny cp) | cp <- ctors ]
+    in concatLists (flagSlots : map ctorFields ctors)
 
   Discretes ty tag -> discretesTagError "makeWriteLogitsPlan" ty tag
   where

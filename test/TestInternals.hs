@@ -1275,15 +1275,16 @@ planEnumStructuralADTTests = testGroup "planEnumStructuralADT"
       ]
     -- Verbatim mock logits (mode 2), so both paths read one fixed distribution.
     sym = VTuple (VInt 2) (constructVList (map VFloat logits))
-    -- 13 slots, exactly the plan the compiler prints as the read-logits network's required
-    -- output layout; every softmax group sums to 1.
+    -- 12 slots, exactly the plan the compiler prints as the read-logits network's required
+    -- output layout; every softmax group sums to 1. The depth-pruned innermost Scene keeps
+    -- only Empty, a lone constructor, so it has no flag slot (task
+    -- plan-emits-vacuous-single-constructor-flags).
     logits = [ 0.6, 0.4          -- 0..1   Scene ctor flags: List|Empty
              , 0.3, 0.7          -- 2..3   List/f0 Object ctor flags: Nil|Obj
              , 0.25, 0.75        -- 4..5   List/f0/Obj/f0 Color: Red|Green
              , 0.55, 0.45        -- 6..7   List/f1 Scene ctor flags: List|Empty
              , 0.2, 0.8          -- 8..9   List/f1/List/f0 Object: Nil|Obj
-             , 0.35, 0.65        -- 10..11 List/f1/List/f0/Obj/f0 Color: Red|Green
-             , 1.0 ]             -- 12     List/f1/List/f1 Scene: Empty (depth-pruned)
+             , 0.35, 0.65 ]      -- 10..11 List/f1/List/f0/Obj/f0 Color: Red|Green
     nil    = VADT "Nil" []
     obj c  = VADT "Obj" [VADT c []]
     empty  = VADT "Empty" []
@@ -1338,7 +1339,7 @@ planEnumStructuralPartialTests = testGroup "planEnumStructuralPartial"
       , "            else List Nil (filterGreen (tl old))"
       ]
     sym = VTuple (VInt 2) (constructVList (map VFloat
-            [ 0.6, 0.4, 0.3, 0.7, 0.25, 0.75, 0.55, 0.45, 0.2, 0.8, 0.35, 0.65, 1.0 ]))
+            [ 0.6, 0.4, 0.3, 0.7, 0.25, 0.75, 0.55, 0.45, 0.2, 0.8, 0.35, 0.65 ]))
     nil   = VADT "Nil" []
     green = VADT "Obj" [VADT "Green" []]
     empty = VADT "Empty" []

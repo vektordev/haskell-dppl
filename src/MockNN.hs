@@ -68,7 +68,7 @@ randomMockNN Continuous = do
   sigmaRaw <- getRandom
   return $ constructVList [VFloat mu, VFloat (abs sigmaRaw + 0.1)]
 randomMockNN (ADTPlan _ constrs) = do
-  let cntConstrs = length constrs
+  let cntConstrs = adtFlagSlots constrs
   selectors <- randomList cntConstrs
   let selectorsNorm = map (/ sum selectors) selectors
   mockedFieldLists <- concatMapM (mapM randomMockNN . snd) constrs
@@ -120,10 +120,12 @@ spikingMockNN (ADTPlan _ constrs) (VList lst) = do
                      ++ "constructor index, got: " ++ show other)
 
   let cntConstrs = length constrs
-  selectors <- randomList cntConstrs
-  let spikingSelectors = replaceAt (map (* 0.2) selectors) constrSelect 1.0
-  let selectorsNorm = map (/ sum spikingSelectors) spikingSelectors
-  let selectorsLst = map VFloat selectorsNorm
+  -- a lone constructor has no flag slot ('adtFlagSlots'), so nothing to spike
+  selectorsLst <- if adtFlagSlots constrs == 0 then return [] else do
+    selectors <- randomList cntConstrs
+    let spikingSelectors = replaceAt (map (* 0.2) selectors) constrSelect 1.0
+    let selectorsNorm = map (/ sum spikingSelectors) spikingSelectors
+    return (map VFloat selectorsNorm)
 
   let constrFactory (cPlans, cIdx) = if cIdx == constrSelect then zipWithM spikingMockNN cPlans fieldSpikes else mapM randomMockNN cPlans
   mockedFieldLists <- concatMapM constrFactory (zip (map snd constrs) [0..(cntConstrs - 1)])

@@ -4631,7 +4631,20 @@ planNodeName e                    = head (words (show e))
 -- (in plan order), the flat offset where its field block starts. Mirrors the
 -- constrIx arithmetic of AutoNeural.makeProbRec exactly.
 adtCtorBases :: Int -> [(String, [PartitionPlan])] -> [Int]
-adtCtorBases off ctorPlans = scanl (+) (off + length ctorPlans) (map (sum . map getSize . snd) ctorPlans)
+adtCtorBases off ctorPlans = scanl (+) (off + adtFlagSlots ctorPlans) (map (sum . map getSize . snd) ctorPlans)
+
+-- | Worlds constraining an ADT region's constructor flags to the allowed
+-- (constructor index, guard) slots, on top of @cons@: the 'PLeafCon' of its
+-- flag region. A lone constructor has no flag region ('adtFlagSlots'): its
+-- flag is statically 1, so an allowed slot becomes a plain world guard, and
+-- no allowed slot means no world (mass 0). Emitting a 'PLeafCon' at @off@
+-- there would be wrong, not merely wasteful -- @off@ is then the first
+-- field's region, and 'insertLeafCon' keys regions by their base offset.
+adtFlagWorlds :: Int -> [(String, [PartitionPlan])] -> [(Int, IRExpr)] -> [PLeafCon] -> [PlanWorld]
+adtFlagWorlds off ctorPlans slots cons
+  | adtFlagSlots ctorPlans == 0 =
+      [ if g == constTrueIR then pw1 cons else planAddGuard g (pw1 cons) | (0, g) <- slots ]
+  | otherwise = [pw1 (insertLeafCon (PLeafCon off slots) cons)]
 
 -- | Look up an ADT field accessor name across the declared ADTs: yields the
 -- owning constructor's name and the field's index within it.
@@ -4738,8 +4751,10 @@ planEvalRef meta env = go
               | Just ci <- elemIndex cName (map fst ctorPlans) ->
                   let fieldPlans = snd (ctorPlans !! ci)
                       fBase = (adtCtorBases off ctorPlans !! ci) + sum (map getSize (take fj fieldPlans))
-                      flagCon = PLeafCon off [(ci, constTrueIR)]
-                  in Right (PlanRef (fieldPlans !! fj) fBase, insertLeafCon flagCon cons)
+                      -- a lone constructor has no flag region to pin ('adtFlagSlots')
+                      cons' | adtFlagSlots ctorPlans == 0 = cons
+                            | otherwise = insertLeafCon (PLeafCon off [(ci, constTrueIR)]) cons
+                  in Right (PlanRef (fieldPlans !! fj) fBase, cons')
               | otherwise -> Left ("accessor " ++ nm ++ ": constructor " ++ cName ++ " is not present in the plan (depth-pruned)")
             _ -> Left ("accessor " ++ nm ++ " applied to a non-ADT plan slice")
     go _ = Nothing
@@ -4769,9 +4784,7 @@ planRefWorlds adtDecls' (PlanRef (TuplePlan a b) off) cons (PTPoint s) = do
   return [ intersectPlanW x y | x <- wa, y <- wb ]
 planRefWorlds _ (PlanRef (ADTPlan _ ctorPlans) off) cons (PTPoint s)
   | all (null . snd) ctorPlans =
-      Right [pw1 (insertLeafCon
-              (PLeafCon off [ (i, planIsCtor cn s) | (i, (cn, _)) <- zip [0..] ctorPlans ])
-              cons)]
+      Right (adtFlagWorlds off ctorPlans [ (i, planIsCtor cn s) | (i, (cn, _)) <- zip [0..] ctorPlans ] cons)
 planRefWorlds adtDecls' (PlanRef (ADTPlan adtName ctorPlans) off) cons (PTPoint s) =
   concat <$> mapM ctorWorlds (zip3 [0 ..] ctorPlans (adtCtorBases off ctorPlans))
   where
@@ -4780,9 +4793,9 @@ planRefWorlds adtDecls' (PlanRef (ADTPlan adtName ctorPlans) off) cons (PTPoint 
       -- The flag slot carries the guard, so a world for the wrong constructor
       -- measures zero; the field reads below are individually safe anyway
       -- ('planSafeField'), since floated bindings escape the guard.
-      let flagWorld = pw1 (insertLeafCon (PLeafCon off [(ci, planIsCtor cn s)]) cons)
+      let flagWorlds = adtFlagWorlds off ctorPlans [(ci, planIsCtor cn s)] cons
       fieldWorlds <- mapM (fieldW cn cbase fps) (zip3 [0 ..] fps fields)
-      return (foldl (\acc ws -> [ intersectPlanW x y | x <- acc, y <- ws ]) [flagWorld] fieldWorlds)
+      return (foldl (\acc ws -> [ intersectPlanW x y | x <- acc, y <- ws ]) flagWorlds fieldWorlds)
     fieldW cn cbase fps (j, fp, (fname, fty)) = do
       sub <- planSafeField adtDecls' cn fname fty s
       planRefWorlds adtDecls' (PlanRef fp (cbase + sum (map getSize (take j fps)))) [] (PTPoint sub)
@@ -5101,8 +5114,8 @@ planInvert meta env planBody target = case planBody of
           -- a constructor pruned from the plan (depth limit) simply has mass 0
           let inSet  = maybe [] (\i -> [(i, constTrueIR)]) ci
           let outSet = [ (i, constTrueIR) | i <- [0 .. n-1], Just i /= ci ]
-          let tw = [pw1 (insertLeafCon (PLeafCon off inSet)  cons)]
-          let fw = [pw1 (insertLeafCon (PLeafCon off outSet) cons)]
+          let tw = adtFlagWorlds off ctorPlans inSet  cons
+          let fw = adtFlagWorlds off ctorPlans outSet cons
           return (Right (planBoolWorlds target tw fw))
         Just (Left why) -> return (Left why)
         _ -> return (Left (nm ++ " applied to something that is not a plan slice"))
@@ -5156,8 +5169,8 @@ planInvert meta env planBody target = case planBody of
         Just (Right (PlanRef (ADTPlan _ ctorPlans) off, cons)) | all (null . snd) ctorPlans -> do
           dv <- bindDetSide "eq_rhs" de
           let isG cn = IRApply (IRVar ("is" ++ cn)) (IRVar dv)
-          let tw = [pw1 (insertLeafCon (PLeafCon off [ (i, isG cn)                    | (i, (cn, _)) <- zip [0..] ctorPlans ]) cons)]
-          let fw = [pw1 (insertLeafCon (PLeafCon off [ (i, IRUnaryOp OpNot (isG cn)) | (i, (cn, _)) <- zip [0..] ctorPlans ]) cons)]
+          let tw = adtFlagWorlds off ctorPlans [ (i, isG cn)                    | (i, (cn, _)) <- zip [0..] ctorPlans ] cons
+          let fw = adtFlagWorlds off ctorPlans [ (i, IRUnaryOp OpNot (isG cn)) | (i, (cn, _)) <- zip [0..] ctorPlans ] cons
           return (Right (planBoolWorlds target tw fw))
         -- Continuous leaf pinned to a deterministic value (milestone 3): the
         -- True outcome is a point constraint (dim-1 density); the False

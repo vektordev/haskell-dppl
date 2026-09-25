@@ -36,7 +36,7 @@ import Data.Maybe (isJust)
 import SPLL.Prelude (runWriteLogits, compile, runWriteLogitsC, runProbNamedC, runGenNamedC)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Lang.Types
-import SPLL.AutoNeural (makeAutoNeural, makePartitionPlan, makeProb, getSize, PartitionPlan(..))
+import SPLL.AutoNeural (makeAutoNeural, makePartitionPlan, makeProb, getSize, planLayoutString, PartitionPlan(..))
 import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType (RType(..))
 import IRInterpreter (generateDet)
@@ -205,7 +205,7 @@ writeLogitsProps_eitherIfMixtureFlag = testCase "eitherIfMixtureFlag" $ do
              (head slotsF < 0.5)
 
 ------------------------------------------------------------------------
--- § 1.2  ADT: constructor flags sum to 1; single-constructor flag is 1.
+-- § 1.2  ADT: constructor flags sum to 1; a single constructor has no flag slot.
 
 adtSrc :: String
 adtSrc = unlines
@@ -214,15 +214,56 @@ adtSrc = unlines
   , "main sym = adtNN sym"
   ]
 
--- With one constructor the flag for A must always be 1.0.
-writeLogitsProps_adtSingleConstrFlagIsOne :: TestTree
-writeLogitsProps_adtSingleConstrFlagIsOne = testCase "adtSingleConstrFlagIsOne" $ do
+-- With one constructor there is no flag slot at all (task
+-- plan-emits-vacuous-single-constructor-flags): a width-1 softmax is identically 1.0,
+-- so the layout is just the two field enums, [P(i1=0..2) | P(i2=3..5)], each a
+-- distribution of its own. The old layout led with a flag slot pinned at 1.0.
+writeLogitsProps_adtSingleConstrHasNoFlagSlot :: TestTree
+writeLogitsProps_adtSingleConstrHasNoFlagSlot = testCase "adtSingleConstrHasNoFlagSlot" $ do
   prog <- parseOrFail adtSrc
   forM_ [0, 1, 42, 999 :: Int] $ \seed -> do
     slots <- writeLogitsSlots prog [mockSeeded seed]
-    assertBool ("ADT 1-constructor flag must be 1.0 (seed=" ++ show seed
-                ++ "), got " ++ show (head slots))
-               (abs (head slots - 1.0) < 0.01)
+    assertEqual ("ADT 1-constructor layout is the two 3-value field enums (seed="
+                 ++ show seed ++ ")") 6 (length slots)
+    forM_ [("i1", take 3 slots), ("i2", drop 3 slots)] $ \(field, group) ->
+      assertBool ("field " ++ field ++ " slots must sum to 1 (seed=" ++ show seed
+                  ++ "), got " ++ show group)
+                 (abs (sum group - 1.0) < 1e-6)
+
+-- The ticket's repro: nested single-constructor products over Floats. Two vacuous flags
+-- (Wrapper's, Position's) used to lead a 6-logit layout.
+singleCtorNestedSrc :: String
+singleCtorNestedSrc = unlines
+  [ "data Position = Position x::Float, y::Float"
+  , "data Wrapper = Wrapper pos::Position"
+  , "neural extract :: (Symbol -> Wrapper)"
+  , "main symbol = extract symbol"
+  ]
+
+-- The plan carries no flag slot for either lone constructor: 4 logits, two Gaussians.
+readLogitsProps_singleCtorNestedPlan :: TestTree
+readLogitsProps_singleCtorNestedPlan = testCase "singleCtorNestedPlanHasNoFlags" $ do
+  prog <- parseOrFail singleCtorNestedSrc
+  let plan = readLogitsPlan prog
+  assertEqual "getSize of nested single-constructor plan" 4 (getSize plan)
+  assertBool ("layout must have no constructor-flag row:\n" ++ planLayoutString plan)
+             (not ("ctor flags" `isInfixOf` planLayoutString plan))
+
+-- The prob reader must not multiply anything by a bare logit read. In a plan of Gaussian
+-- leaves the only reads are mu (subtracted) and sigma (divided by); a bare-read factor
+-- is a flag being multiplied in -- which, in the dim channel, multiplied a dimension
+-- count by a network output (correct only because the vacuous flag was always 1.0).
+readLogitsProps_singleCtorNestedNoFlagFactor :: TestTree
+readLogitsProps_singleCtorNestedNoFlagFactor = testCase "singleCtorNestedNoFlagFactor" $ do
+  prog <- parseOrFail singleCtorNestedSrc
+  case probFun (readLogitsGroup prog) of
+    Nothing         -> assertFailure "read-logits network has no prob function"
+    Just (probE, _) ->
+      assertEqual "multiplications by a bare logit read in the prob reader" []
+        [ op | op@(IROp OpMult a b) <- irUniverse probE, isVecRead a || isVecRead b ]
+  where
+    isVecRead (IRBuiltin BListIndex (IRVar v : _)) = v == vectorOut
+    isVecRead _                                    = False
 
 ------------------------------------------------------------------------
 -- Cross-program invariants
@@ -442,6 +483,9 @@ readLogitsPrograms =
               , "neural adtNN :: (Symbol -> MyADT) of {A [0, 1, 2] [3, 4, 5]}"
               , "main sym = adtNN sym" ]
     , 1 )
+  , ( "single_ctor_nested"  -- nested lone constructors: no flag slots, fields start at the region base
+    , singleCtorNestedSrc
+    , 1 )
   , ( "clevr_reduced"  -- reduced from the CLEVR scene read-logits network; field-carrying + nested ADTs
     , unlines [ "data Object = NoObj | Object shape :: Shape, color :: Color"
               , "data Shape = Cube | Sphere"
@@ -497,7 +541,9 @@ writeLogitsTests = testGroup "WriteLogits"
       , writeLogitsProps_eitherFlagSignMatchesSide
       , writeLogitsProps_eitherIfMixtureFlag
       ]
-  , writeLogitsProps_adtSingleConstrFlagIsOne
+  , writeLogitsProps_adtSingleConstrHasNoFlagSlot
+  , readLogitsProps_singleCtorNestedPlan
+  , readLogitsProps_singleCtorNestedNoFlagFactor
   , writeLogitsInvariant_sigmaPositive
   , writeLogitsInvariant_discreteNonNegative
   , writeLogitsInvariant_discreteSumsToOne

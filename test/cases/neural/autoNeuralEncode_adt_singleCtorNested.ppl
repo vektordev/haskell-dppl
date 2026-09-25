@@ -1,0 +1,11 @@
+-- Encode/read of nested single-constructor ADTs (task
+-- plan-emits-vacuous-single-constructor-flags). A lone constructor carries no
+-- flag slot -- a width-1 softmax is identically 1.0 -- so neither Wrap nor
+-- Pair contributes one, and the layout is just Pair's two Bool fields:
+-- [P(a=True), P(a=False), P(b=True), P(b=False)]. It was 6 with the two
+-- vacuous flags. Being a read-logits passthrough (`main sym = nn sym`) it is
+-- picked up by WriteLogitsRoundtrip's LogitIdentity and DensityAgreement.
+data Pair = Pair a::Bool, b::Bool
+data Wrap = Wrap p::Pair
+neural readWrap :: (Symbol -> Wrap)
+main sym = readWrap sym
