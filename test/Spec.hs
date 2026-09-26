@@ -29,6 +29,7 @@ import TestShowcase (showcaseTests)
 import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, batchedPythonTests, slowBatchedPythonTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, batchedEnumBucketingTests, branchCountBackendTests)
 import TestKnownIssues (knownIssuesTests)
 import TestPythonPrelude (pythonPreludeTests)
+import TestCLI (cliTests)
 import TestFuzz (fuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
                  neuralGeneratorTests, arrowGeneratorTests, fuzzScalingTests,
                  injFCatalogTests)
@@ -561,6 +562,7 @@ main = do
     , batchedAdtCdfNaNGuardTests
     , wideNeuralDomainTests
     , pythonPreludeTests
+    , cliTests
     , batchedEnumBucketingTests
     , branchCountBackends
     , slow

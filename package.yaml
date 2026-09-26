@@ -88,6 +88,10 @@ tests:
     - -Wincomplete-record-updates
     - -Wredundant-constraints
     - -Werror
+    # TestCLI drives the nest executable as a subprocess; this builds it
+    # first and puts it on the test's PATH.
+    build-tools:
+    - haskell-dppl:haskell-dppl-exe
     dependencies:
     - haskell-dppl
     - tasty

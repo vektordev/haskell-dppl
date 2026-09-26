@@ -41,7 +41,8 @@ Global flags (before the subcommand): `-v` verbosity, `-O LEVEL`
 optimization (0-2), `-k CUTOFF` top-K threshold, `-c` count branches, `-d`
 debug intermediates (see below), and the long-form `--pruneAnyChecks`,
 `--noIntegrate`/`--noProbability`/`--noGenerate`, `--noTypeCheck`,
-`--batched`, `--logSpace`, `--marginals`, `--marginalSlots N`.
+`--batched`, `--logSpace`, `--marginals`, `--marginalSlots N`,
+`--materializationBudget N` (see Marginal Materialization).
 Per-subcommand flags: `--help`.
 
 To prevent having to run `stack test` repeatedly, e.g. to grep for specific
@@ -783,7 +784,10 @@ Two preconditions gate it, and both refuse rather than analyse:
   affordable" are one question, not two, and a change to either has to be
   made on both. Per-node, deliberately not cumulative across nesting
   levels. Set it to 0 to disable materialization entirely (the
-  differential tests' off-switch).
+  differential tests' off-switch). The CLI flag `--materializationBudget N`
+  sets it per invocation -- the explicit opt-in to dense enumeration of an
+  over-budget `of` domain; there is no automatic dense fallback. Pinned
+  through the real binary by `test/TestCLI.hs`.
 
 A leaf cell holds a whole compiled sub-inference rather than a few
 references, so it is the one place materialization multiplies IR instead

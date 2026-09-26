@@ -38,6 +38,7 @@ data GlobalOpts = GlobalOpts {
   optStatsMode :: Bool,
   extraSemiringsMode :: [SemiringFamily],
   marginalSlotsBudget :: Int,
+  materializationBudget :: Int,
   marginalsReport :: Bool,
   commandOpts :: CommandOpts
 }
@@ -176,6 +177,12 @@ parseGlobalOpts = GlobalOpts
             <> value defaultMarginalSlots
             <> showDefault
             <> help "Budget on how many ENUMERATED observation slots one function may have before the per-mask analysis declines it (design witnessed-per-query-capability). A function with k enumerated slots has 2^k masks, so this bounds per-mask work; over budget, the function is reported as over budget and compiles as it does today.")
+        <*> option auto
+            ( long "materializationBudget"
+            <> metavar "N"
+            <> value defaultMaterializationCardinality
+            <> showDefault
+            <> help "Cardinality budget for dense enumeration and marginal materialization (CompilerConfig.materializationCardinality). A discrete domain larger than N is never enumerated densely or tabulated: such a program goes through plan-guided enumeration, or is refused if that path does not cover it. Raising N is an explicit, per-invocation opt-in to the dense path for a program whose domain you know is affordable -- the emitted module grows with the domain, and can reach megabytes. 0 disables materialization (and dense enumeration of any non-empty domain) entirely.")
         <*> switch
             ( long "marginals"
             <> help "Print the observation-mask report before running the subcommand: per function, its leaf observation slots with their accessor paths, the correlation classes, which slots are enumerated and why, and the per-mask capability table (the projected pType of each masked program). Analysis only -- it changes nothing about what is compiled.")
@@ -245,9 +252,9 @@ main = transpile =<< execParser opts
             <> header "Haskell DPPL" )
 
 transpile :: GlobalOpts -> IO ()
-transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl, pruneAnys=anyChecks, noInteg=nInteg, noProb=nProb, noGen=nGen, debugIntermediates=dbgInter, noTypeCheck=nTypeChk, batchedMode=batchedFlag, logSpaceMode=logSpaceFlag, optStatsMode=optStatsFlag, extraSemiringsMode=extraSR, marginalSlotsBudget=mSlots, marginalsReport=wantMarginals}) = do
+transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, topKCutoff=tkc, commandOpts=options, optimiziationLevel=oLvl, pruneAnys=anyChecks, noInteg=nInteg, noProb=nProb, noGen=nGen, debugIntermediates=dbgInter, noTypeCheck=nTypeChk, batchedMode=batchedFlag, logSpaceMode=logSpaceFlag, optStatsMode=optStatsFlag, extraSemiringsMode=extraSR, marginalSlotsBudget=mSlots, materializationBudget=matBudget, marginalsReport=wantMarginals}) = do
   prog <- parseProgram inFile
-  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen, showIntermediates=dbgInter, checkQueryType=not nTypeChk, batched=batchedFlag, logSpace=logSpaceFlag, optStats=optStatsFlag, materializationCardinality=defaultMaterializationCardinality, marginalSlots=mSlots, extraSemirings=extraSR})
+  let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen, showIntermediates=dbgInter, checkQueryType=not nTypeChk, batched=batchedFlag, logSpace=logSpaceFlag, optStats=optStatsFlag, materializationCardinality=matBudget, marginalSlots=mSlots, extraSemirings=extraSR})
   reportMarginals wantMarginals conf prog
   case options of
     CompileOpts{language=lang, outputFile=outFile, trunc=trnc} -> do
