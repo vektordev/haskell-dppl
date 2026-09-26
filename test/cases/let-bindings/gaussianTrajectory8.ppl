@@ -1,0 +1,10 @@
+main thetas =
+  draw s1 = (3.0 - (theta thetas @ 0)) + (Normal * (theta thetas @ 1)) in
+  draw s2 = (s1 - (theta thetas @ 0)) + (Normal * (theta thetas @ 1)) in
+  draw s3 = (s2 - (theta thetas @ 0)) + (Normal * (theta thetas @ 1)) in
+  draw s4 = (s3 - (theta thetas @ 0)) + (Normal * (theta thetas @ 1)) in
+  draw s5 = (s4 - (theta thetas @ 0)) + (Normal * (theta thetas @ 1)) in
+  draw s6 = (s5 - (theta thetas @ 0)) + (Normal * (theta thetas @ 1)) in
+  draw s7 = (s6 - (theta thetas @ 0)) + (Normal * (theta thetas @ 1)) in
+  draw s8 = (s7 - (theta thetas @ 0)) + (Normal * (theta thetas @ 1)) in
+  (s1, (s2, (s3, (s4, (s5, (s6, (s7, s8)))))))

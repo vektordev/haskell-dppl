@@ -189,9 +189,16 @@ detApply phi env whole f arg =
       base      = Map.unionWith (&&) ma mf
       record b m = (b, Map.insertWith (&&) cn b m)
   in case node f of
+       -- The body's /map/ under @x := da@ is not merged in: 'mf' already walked
+       -- the same body with @x := False@, and 'detExpr' is monotone in its
+       -- environment and visits the same nodes whatever the environment says,
+       -- so the meet of the two maps is exactly 'mf'. Merging it anyway walked
+       -- every let body twice, which is 2^K for a chain of K nested lets (task
+       -- chained-gaussian-trajectory-compile-exponential). Only the body's
+       -- /value/ under @x := da@ is read, and 'fst' of a lazy walk forces no map.
        Lambda x body ->
-         let (db, mb) = detExpr phi (Map.insert x da env) body
-         in record db (Map.unionWith (&&) base mb)
+         let db = fst (detExpr phi (Map.insert x da env) body)
+         in record db base
        _ -> case appSpine whole of
               Just (g, args) | g `Map.member` phi ->
                 let argsDet = and [ fst (detExpr phi env a) | a <- args ]

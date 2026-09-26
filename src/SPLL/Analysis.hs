@@ -212,7 +212,14 @@ applyTags adtsParam funEnv visited env e = case appSpine e of
   (Expr _ (Var n), [arg])
     | n `notElem` visited
     , Just calleeBody <- lookup n funEnv -> tagOf (n:visited) calleeBody arg
-  (l@(Expr _ (Lambda _ _)), [arg]) -> tagOf visited l arg
+  -- A literal lambda head: 'annotateIn' reaches here only through its
+  -- @Apply (Lambda ..) v@ case, which has just annotated this very body under
+  -- the environment 'tagOf' would build (the parameter bound to the annotated
+  -- argument's tags, same @visited@). Its tags are already the answer.
+  -- Re-annotating it was a second full walk of the body per `let`, which is
+  -- 2^K for K nested lets (task chained-gaussian-trajectory-compile-exponential).
+  (Expr _ (Lambda _ lamBody), [_]) ->
+    [DiscreteValues mv | DiscreteValues mv <- tags (getTypeInfo lamBody)]
   _ -> []
   where
     -- The argument sits at the call site, so it is already annotated in the right

@@ -1566,6 +1566,31 @@ toIRNormal meta e
 irSqrt :: IRExpr -> IRExpr
 irSqrt x = IRUnaryOp OpExp (IROp OpMult (IRConst (VFloat 0.5)) (IRUnaryOp OpLog x))
 
+-- | @sqrt(a*a + b*b)@, the scale of a sum of two independent Gaussians.
+--
+-- Each operand is read twice, so an operand that is itself a sum's scale is
+-- let-bound first rather than copied: written inline, a K-term nested sum's
+-- scale is a tree of 2^K nodes (linear only through Haskell's sharing, which
+-- every IR pass ignores), and the optimizer spends exponential time folding it
+-- back together (task chained-gaussian-trajectory-compile-exponential). Only a
+-- nested 'irSqrt' is bound: every other scale (a constant, or a product with a
+-- deterministic factor) is a bounded expression whose duplication costs a
+-- constant, and binding it would only move emitted code around.
+irHypot :: IRExpr -> IRExpr -> CompilerMonad IRExpr
+irHypot a b = do
+  a' <- shareScale a
+  b' <- shareScale b
+  return (irSqrt (IROp OpPlus (IROp OpMult a' a') (IROp OpMult b' b')))
+  where
+    shareScale s
+      | containsSqrt s = do
+          v <- mkVariable "sigma"
+          setVariables [(v, s)]
+          return (IRVar v)
+      | otherwise = return s
+    containsSqrt (IRUnaryOp OpExp (IROp OpMult (IRConst (VFloat 0.5)) (IRUnaryOp OpLog _))) = True
+    containsSqrt x = any containsSqrt (getIRSubExprs x)
+
 -- | Recursively extract (mu, sigma) as IRExprs from a PNormal-typed expression.
 toIRNormalParams :: CompilerMetadata -> Expr -> CompilerMonad (IRExpr, IRExpr)
 -- An expression reading an analytically marginalised binding is collapsed from
@@ -1579,7 +1604,8 @@ toIRNormalParams meta (Expr _ (InjF (Named "plus") [e0, e1]))
   | pType (getTypeInfo e0) == PNormal, pType (getTypeInfo e1) == PNormal = do
       (mu0, s0) <- toIRNormalParams meta e0
       (mu1, s1) <- toIRNormalParams meta e1
-      return (IROp OpPlus mu0 mu1, irSqrt (IROp OpPlus (IROp OpMult s0 s0) (IROp OpMult s1 s1)))
+      sigma <- irHypot s0 s1
+      return (IROp OpPlus mu0 mu1, sigma)
 toIRNormalParams meta (Expr _ (InjF (Named "plus") [e0, e1]))
   | pType (getTypeInfo e0) == PNormal = do
       (mu0, s0) <- toIRNormalParams meta e0
@@ -1775,8 +1801,8 @@ normalDiffCdfAtZero :: CompilerMetadata -> Expr -> Expr -> CompilerMonad IRExpr
 normalDiffCdfAtZero meta left right = do
   (muL, sL) <- toIRNormalParams meta left
   (muR, sR) <- toIRNormalParams meta right
+  sigma <- irHypot sL sR
   let mu = IROp OpSub muL muR
-      sigma = irSqrt (IROp OpPlus (IROp OpMult sL sL) (IROp OpMult sR sR))
   return (distCumulative (semiringOf meta) IRNormal (IROp OpDiv (IROp OpSub (IRConst (VFloat 0)) mu) sigma))
 
 -- | Recursively extract (mu_log, sigma) as IRExprs from a PLogNormal-typed expression.
@@ -1787,7 +1813,8 @@ toIRLogNormalParams meta (Expr _ (InjF (Named "mult") [e0, e1]))
   | pType (getTypeInfo e0) == PLogNormal, pType (getTypeInfo e1) == PLogNormal = do
       (mu0, s0) <- toIRLogNormalParams meta e0
       (mu1, s1) <- toIRLogNormalParams meta e1
-      return (IROp OpPlus mu0 mu1, irSqrt (IROp OpPlus (IROp OpMult s0 s0) (IROp OpMult s1 s1)))
+      sigma <- irHypot s0 s1
+      return (IROp OpPlus mu0 mu1, sigma)
 toIRLogNormalParams meta (Expr _ (InjF (Named "mult") [e0, e1]))
   | pType (getTypeInfo e0) == PLogNormal = do
       (mu0, s0) <- toIRLogNormalParams meta e0
@@ -2463,21 +2490,6 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
           -- The body references the bound variable, so it must be in scope in the type
           -- environment (mirrors how the Lambda arm descends into a lambda body).
           let bodyMeta = (extendMetaForLambda meta (getTypeInfo l) toInvCN) { recoveredVars = recovered }
-          -- Compile the body factor in its own let-in block: any bindings the recursion
-          -- floats (e.g. the shared `l_*_call` triple of an inner Apply) must stay under
-          -- the recovered-variable binding below -- evaluation is strict, so a floated
-          -- binding that mentions the bound variable would otherwise be evaluated before
-          -- the recovered value is in scope.
-          bodyBlock <- lift (runWriterT (toIRInference bodyMeta cumulative bodyExpr sample)) <&> generateLetInBlock bodyMeta
-          -- Bind the recovered value of the bound variable in scope so free occurrences in
-          -- the body factor resolve (and redundant comparisons collapse to true). Kept
-          -- inline (not hoisted through setVariables): stripBranchCount's genVar heuristic
-          -- would shift projections from a hoisted binding as if it were a called-function
-          -- pair, while the local triple value stays unshifted. CSE recovers the sharing.
-          let bodyTriple = IRLetIn (toInvCN ++ tag) appliedSample bodyBlock
-          let bodyRes = unpackResult bodyTriple
-          -- Independent factors: probabilities multiply, dims add, branch counts add.
-          let combined = prodP sr scaled bodyRes
           -- ANY in the witnessing slot (design modality-witnessed-inference, §ANY):
           -- appliedSample is VAny at runtime iff the slot FC recovers this binding
           -- from was queried marginally. If the binding is a "sink" — a single
@@ -2511,6 +2523,48 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
           -- programs up to 6x (the duplication 'shareResult' documents).
           let readsAnyW = IRApply (IRLambda (boundVar ++ tag) invExprReadsAny) sample
           let anyW = IRIf readsAnyW (IRConst (VBool True)) (IRUnaryOp OpIsAny appliedSample)
+          -- Compile the body factor in its own writer scope: any bindings the
+          -- recursion floats (e.g. the shared `l_*_call` triple of an inner Apply)
+          -- must stay under the recovered-variable binding -- evaluation is
+          -- strict, so a floated binding that mentions the bound variable would
+          -- otherwise be evaluated before the recovered value is in scope.
+          (bodyRes0, bodyBinds) <- lift (runWriterT (toIRInference bodyMeta cumulative bodyExpr sample))
+          -- The recovered value of the bound variable heads that block, so free
+          -- occurrences in the body factor resolve (and redundant comparisons
+          -- collapse to true), and the whole block is bound ONCE ('shareResult'),
+          -- with the fields below projected off it.
+          --
+          -- It used to be kept inline and unpacked field by field, i.e. one copy
+          -- of the block per field that reads it, and the block of a nested
+          -- witnessed let holds the enclosing copies of every inner one: the
+          -- -O0 IR of a K-step observed chain grew ~6x per step, and the optimizer
+          -- spent exponential time folding it back (task
+          -- chained-gaussian-trajectory-compile-exponential). Inline was a
+          -- workaround for 'stripBranchCount' mis-shifting projections off a
+          -- hoisted local result, which it no longer does.
+          --
+          -- Being bound, the block is evaluated wherever its binding lands, not
+          -- where a field reads it, so it carries its own guards: the inverse's
+          -- domain guard (outside it the inverse crashes), and the condition
+          -- under which the body is read at all below -- a sink's body absorbs a
+          -- wildcard-valued witness but not an unevaluable one, and any other
+          -- body is read only when the witness is not a wildcard.
+          --
+          -- Only a body that itself holds a probabilistic let is bound. The
+          -- duplication compounds only through such nesting, and a leaf body
+          -- factor is typically an indicator whose dim and flag fold to
+          -- constants inline but not through a tuple ('shareResult' records
+          -- the -O2 cost of routing constants through one), so the innermost
+          -- level keeps the inline form -- and single-let programs their
+          -- emitted code.
+          let bodyReadable = if bindingIsSink then notIR readsAnyW else notIR anyW
+          let bodyBlock = (toInvCN ++ tag, appliedSample) : bodyBinds
+          bodyRes <- if holdsProbabilisticLet bodyExpr
+            then shareResult sr "body_factor" [guard, bodyReadable] bodyBlock bodyRes0
+            else return (unpackResult (IRLetIn (toInvCN ++ tag) appliedSample
+                                         (generateLetInBlock bodyMeta (bodyRes0, bodyBinds))))
+          -- Independent factors: probabilities multiply, dims add, branch counts add.
+          let combined = prodP sr scaled bodyRes
           -- A sink's body factor absorbs a wildcard-VALUED witness, which is
           -- why it may answer with the body alone. It cannot absorb an
           -- unevaluable one: there is no witness to bind, and letting the body
@@ -3129,6 +3183,15 @@ toIRInference meta cumulative (Expr TypeInfo {rType=rt} (InjF (Named name) [left
     else return summedTyped
 toIRInference _ _ (Expr _ (Subtree _ _)) _ = error "Cannot infer prob on subtree expression. Please check your syntax"
 toIRInference _ _ x _ = error ("found no way to convert to IR: " ++ show x)
+
+-- | Does this expression contain a @let@ (an applied literal lambda) whose
+-- bound value is still random? That is the shape the witnessed-let fold in
+-- 'toIRInference' nests through, one body factor inside another, and so the
+-- shape whose body factor it binds once rather than inlines per field.
+holdsProbabilisticLet :: Expr -> Bool
+holdsProbabilisticLet e = case e of
+  Expr _ (Apply (Expr _ (Lambda _ _)) v) | pType (getTypeInfo v) /= Deterministic -> True
+  _ -> any holdsProbabilisticLet (getSubExprs e)
 
 -- Bind the forward-chaining anchors a generated inverse lands on. An anchor
 -- chain name that appears free in the inverse (e.g. a ThetaI/Subtree operand FC

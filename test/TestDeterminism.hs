@@ -14,7 +14,9 @@ module TestDeterminism (determinismTests) where
 
 import qualified Data.Map.Strict as Map
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (testCase, assertBool, (@?=))
+import Test.Tasty.HUnit (testCase, assertBool, assertFailure, (@?=))
+import Control.Exception (evaluate)
+import System.Timeout (timeout)
 
 import SPLL.Lang.Types
 import SPLL.Lang.Lang (getTypeInfo, getSubExprs)
@@ -142,6 +144,27 @@ unitTests = testGroup "unit rules"
       let p = prep "c = 1.0\nmain = draw a = c in a"
       Map.lookup "c" (functionSummaries p) @?= Just True
       rootDet "main" p (determinismMap p) @?= True
+
+  -- Task chained-gaussian-trajectory-compile-exponential. Both this pass and
+  -- 'annotateEnumsProg' (which 'prep' runs first) used to walk every let body
+  -- twice -- once as the bare lambda, once under the bound value -- which is
+  -- 2^K for K nested lets. Forty levels is instant when linear and ~10^12
+  -- walks when not, so the timeout cannot misfire either way.
+  , testCase "a 40-deep let chain analyses in linear time" $ do
+      let k = 40 :: Int
+          src = "main =\n" ++ concat
+                  [ "  draw s" ++ show i ++ " = " ++ prev i ++ " + Normal in\n" | i <- [1 .. k] ]
+                ++ "  s" ++ show k
+          prev i = if i == 1 then "0.0" else "s" ++ show (i - 1)
+      r <- timeout (10 * 1000000) $ do
+        let p  = prep src
+            dm = determinismMap p
+        _ <- evaluate (length (show p))
+        _ <- evaluate (Map.size dm)
+        return (rootDet "main" p dm)
+      case r of
+        Nothing -> assertFailure "determinism/enumerability analysis of a 40-deep let chain did not finish in 10s"
+        Just d  -> d @?= False
   ]
 
 -- ---------------------------------------------------------------------------

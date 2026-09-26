@@ -1450,6 +1450,51 @@ test_branchCountingDoesNotMultiplyIR = testCase "branchCountingDoesNotMultiplyIR
                 ++ show plain ++ " -> " ++ show counted ++ " (" ++ show ratio ++ "x)")
       (counted < 2 * plain)
 
+-- | Task chained-gaussian-trajectory-compile-exponential: two shapes whose
+-- likelihood is a product (or a sum) of K Gaussians emitted -O0 IR that grew
+-- by a constant factor per step, and the optimizer then spent exponential
+-- time folding it back into a linear module.
+--
+--   * An observed trajectory, @draw s1 = .. in draw s2 = s1 + .. in (s1, (s2, ..))@:
+--     each witnessed let's body factor was re-inlined into every field of the
+--     result that read it, and each copy held the copies of every level below
+--     (~6x per step; K=8 did not compile in three minutes).
+--   * A flat sum of K Normals: the scale of @a + b@ is @sqrt(sa*sa + sb*sb)@,
+--     which reads each operand's scale twice (2x per step).
+--
+-- Pinned as the growth of @length (show ir)@ when K doubles, at -O0 so that
+-- it measures what the compiler emits rather than what the optimizer claws
+-- back. After the fix the trajectory grows about quadratically (its
+-- marginal-query checks re-test the observed slots at every level) and the
+-- sum linearly; the bound of 8x per doubling admits cubic growth and fails on
+-- any per-step multiplier above ~1.3.
+test_gaussianChainIRNotExponential :: TestTree
+test_gaussianChainIRNotExponential = testGroup "gaussianChainIRNotExponential"
+  [ testCase "observed trajectory" $ assertDoublingBounded trajectory 3
+  , testCase "flat sum of Normals" $ assertDoublingBounded flatSum 5
+  ]
+  where
+    trajectory k = unlines $
+      ["main thetas ="]
+      ++ [ "  draw s" ++ show i ++ " = (" ++ prev i ++ " - (theta thetas @ 0)) + (Normal * (theta thetas @ 1)) in"
+         | i <- [1 .. k] ]
+      ++ ["  " ++ foldr1 (\a b -> "(" ++ a ++ ", " ++ b ++ ")") [ "s" ++ show i | i <- [1 .. k] ]]
+    prev i = if i == 1 then "3.0" else "s" ++ show (i - 1 :: Int)
+    flatSum k = "main thetas = " ++ foldr1 (\a b -> "(" ++ a ++ " + " ++ b ++ ")")
+                  (replicate k "(Normal * (theta thetas @ 1))")
+    sizeOf src = case tryParseProgram "gaussianChain" src of
+      Left err -> assertFailure ("parse error: " ++ show err) >> return 0
+      Right prog -> case compile defaultCompilerConfig{optimizerLevel = 0} prog of
+        Left e   -> assertFailure ("compile error: " ++ show e) >> return 0
+        Right ir -> return (length (show ir))
+    assertDoublingBounded gen k = do
+      small <- sizeOf (gen k)
+      large <- sizeOf (gen (2 * k))
+      let ratio = fromIntegral large / fromIntegral small :: Double
+      assertBool ("-O0 IR grew " ++ show ratio ++ "x from K=" ++ show k ++ " to K=" ++ show (2 * k)
+                  ++ " (" ++ show small ++ " -> " ++ show large ++ ")")
+        (ratio < 8)
+
 -- | Task recursive-list-prob-missed-cse: probability-mode compilation of a
 -- self-recursive list (@main = if Uniform > p then [] else X : main@, the
 -- README's own "Recursive lists" example) must cost work LINEAR in the query
@@ -3749,6 +3794,7 @@ internalsTests = testGroup "Internals"
   , domainScaleTests
   , test_planEnumThreadedTopKAndBC
   , test_branchCountingDoesNotMultiplyIR
+  , test_gaussianChainIRNotExponential
   , test_recursiveListMissedCSE
   , test_recursiveListBranchPruning
   , test_mixtureNegativeLogNormalScaleCompiles
