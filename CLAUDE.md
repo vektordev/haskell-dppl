@@ -359,6 +359,19 @@ guards). Adding a monotone step whose inverse is partial means adding its
 image there too. Details in the doc above; corpus
 `test/cases/set-witness/setWitnessTransport*`, `test/cases/plan-enumeration/planEnumContExp*`.
 
+An `==` whose bound-variable operand is not the bare occurrence (`exp x ==
+1.0`, `x * 2.0 + 1.0 == c`) is split by `equalityWorlds` before the point
+transport sees it. Seeding forward chaining at the `==` node hands its
+False-polarity inverse, the `VAnyExcept` sentinel, to every inverse step
+below it (`log`, `b > 0`, `b - 1.0`), which crashed optimizer and interpreter
+alike. Instead the True outcome is inverted as the point `side = c`, and the
+False outcome is the *complement of that witness on the bound variable*
+(`VAnyExcept [x_c]`, measured by `toIRInference`'s marginal-minus-point split)
+where the inverse's applicability guard holds, and `WFull` where it fails.
+Only a single plain point world is complemented; anything else is refused.
+The bare `x == c` shape keeps its old path. Corpus
+`test/cases/set-witness/setWitnessEqualityThrough*`.
+
 ### Affine Gaussian marginalisation of an unwitnessed `draw`
 
 A third answer to "no occurrence of the bound variable is point-invertible",

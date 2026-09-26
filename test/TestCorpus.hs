@@ -280,6 +280,12 @@ logSpaceUncoveredPrograms =
   -- integrated out as affine Gaussian forms, but the threshold on s3 is still
   -- measured by the linear-pinned set-witness world sum.
   , "affineChainThreshold"
+  -- task set-witness-exp-equality-guard-vanyexcept-crash: the constant lies
+  -- outside exp's image, so the False outcome is the certain WFull world,
+  -- whose linear-pinned 'measureSet' mass is the value queried. (Its siblings
+  -- setWitnessEqualityThroughExp/Affine measure only the complement world,
+  -- which goes through the ordinary semiring-aware VAnyExcept split, and pass.)
+  , "setWitnessEqualityThroughExpOffImage"
   ]
 
 checkLogSpaceMatchesLinear :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property

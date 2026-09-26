@@ -1,0 +1,1 @@
+main = draw x = Normal in if 1.0 == (x * 2.0 + 1.0) then 1.0 else 0.0

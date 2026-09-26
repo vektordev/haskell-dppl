@@ -4471,6 +4471,27 @@ invertToWorlds meta occs exprBody target
           bIR <- toIRGenerate meta exprBody
           return (Just [WWorld [memberGuard (rType (getTypeInfo exprBody)) bIR target] WFull []])
         else return Nothing
+-- A continuous or discrete @==@ whose bound-variable operand is not the bare
+-- occurrence itself (@exp x == 1.0@, @x + 1.0 == 1.0@) is split here, before
+-- 'transportDirect' can see it. The point transport would seed forward
+-- chaining at the @==@ node, whose inverse on the False polarity is the
+-- 'VAnyExcept' sentinel ("any value other than c") -- and every further
+-- inverse step on the way down to the bound variable then applies its own
+-- arithmetic and applicability guard to that sentinel (@log@, @b > 0@,
+-- @b - 1.0@), which is undefined on a set and crashed both the optimizer and
+-- the interpreter (task set-witness-exp-equality-guard-vanyexcept-crash).
+-- The bare @x == c@ shape needs no inverse step below the sentinel, so it is
+-- left on the path it already answers correctly.
+invertToWorlds meta occs (Expr _ (InjF (Named "eq") [lop, rop])) target@(WPoint _ _)
+  | Just (side, other) <- eqOperands
+  , not (isBareOcc side) = equalityWorlds meta occs side other target
+  where
+    eqOperands
+      | subtreeHasOcc occs lop && not (subtreeHasOcc occs rop) && pType (getTypeInfo rop) == Deterministic = Just (lop, rop)
+      | subtreeHasOcc occs rop && not (subtreeHasOcc occs lop) && pType (getTypeInfo lop) == Deterministic = Just (rop, lop)
+      | otherwise = Nothing
+    isBareOcc (Expr ti (Var _)) = chainName ti `elem` occs
+    isBareOcc _ = False
 invertToWorlds meta occs exprBody target = do
   direct <- transportDirect meta occs exprBody target
   case direct of
@@ -4777,6 +4798,39 @@ comparisonWorlds meta occs isGT lop rop target
       wsT <- invertToWorlds meta occs side setT
       wsF <- invertToWorlds meta occs side setF
       return (boolWorlds target <$> wsT <*> wsF)
+
+-- | Worlds of an @==@ node against a deterministic operand @other@ (value
+-- @b@), the bound variable reaching @side@ through at least one inverse step.
+-- The True outcome is @side@ observed at the point @b@, inverted onto the
+-- bound variable like any point target -- the witness @x_b@, its
+-- applicability guard @g@ (is @b@ in @side@'s image at all?) and its
+-- change-of-variables factor. The False outcome is the complement of that
+-- point, transported as a complement rather than as a point: where @g@ holds
+-- it is "any value but @x_b@" -- the 'VAnyExcept' sentinel placed on the bound
+-- variable itself, where 'toIRInference' already measures it as the marginal
+-- minus the excepted point (so a continuous variable answers mass 1, a
+-- discrete one @1 - p(x_b)@) -- and where @g@ fails no value of the bound
+-- variable produces @b@, so the False outcome is certain ('WFull'). The
+-- sentinel therefore never meets a forward function's inverse. Mirrors the
+-- plan engine's 'contEqWorlds', whose False outcome is likewise the full
+-- world minus the point.
+--
+-- The complement is only taken of a single plain point world: a residue
+-- factor or a split into several worlds would need the complement of a
+-- product or a union, which this does not attempt (answering Nothing, the
+-- engine's refusal, rather than a wrong number).
+equalityWorlds :: CompilerMetadata -> [ChainName] -> Expr -> Expr -> WSet -> CompilerMonad (Maybe [WWorld])
+equalityWorlds meta occs side other target = do
+  b <- toIRGenerate meta other
+  wsT <- invertToWorlds meta occs side (WPoint b const1)
+  return $ case wsT of
+    Just ts@[WWorld gs (WPoint xb _) []] ->
+      -- nested 'IRIf', not 'OpAnd': a guard protects the ones after it
+      let g = foldr (\gd acc -> IRIf gd acc constFalseIR) constTrueIR gs
+          fs = [ WWorld [g] (WPoint (IRConst (VAnyExcept [xb])) const1) []
+               , WWorld [notIR g] WFull [] ]
+      in Just (boolWorlds target ts fs)
+    _ -> Nothing
 
 -- ===== Plan-guided lazy enumeration (design plan-guided-lazy-enumeration, M1) =====
 --
