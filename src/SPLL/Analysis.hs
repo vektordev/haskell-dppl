@@ -9,7 +9,8 @@ module SPLL.Analysis (
 import SPLL.Lang.Types
 import SPLL.Lang.Lang
 import Data.Maybe (maybeToList)
-import Data.List (nub)
+import Data.Either (isRight)
+import Data.List (genericLength, genericTake)
 import Data.Bifunctor
 import SPLL.Typing.Typing (setTags)
 import PredefinedFunctions
@@ -133,7 +134,7 @@ discretesTags adtsParam funEnv visited env e = case e of
         -- accessor) no operand value is in its domain. Tagging that as an empty
         -- enumeration would make downstream inference sum over nothing and
         -- report probability zero, so decline the tag instead.
-        case nub (propagateValues adtsParam name unpackedMultiVals) of
+        case distinctUpTo resultCap (propagateValuesLazily adtsParam name unpackedMultiVals) of
           [] -> Nothing
           vals -> return (valueListToMultiValue vals)
       (Expr _ (IfThenElse _ left right)) -> do
@@ -141,6 +142,35 @@ discretesTags adtsParam funEnv visited env e = case e of
         valuesRight <- getValuesFromExpr right
         return $ unionMultiValues valuesLeft valuesRight
       _ -> Nothing
+    -- How many distinct values the node's result type has at most, when that is
+    -- finite and known: once that many have turned up, the rest of the operand
+    -- cross product cannot add one, so 'distinctUpTo' stops there. This is what
+    -- keeps `a == b` over two V-value operands at O(V) rather than evaluating
+    -- all V^2 pairs to find {True, False} (task
+    -- agreement-compile-time-quadratic-in-domain).
+    resultCap = case autoDeriveMultiValue adtsParam (rType (getTypeInfo e)) of
+      Right mv | not (multiValueContainsContinuous mv) -> multiValueCardinality mv
+      _ -> Nothing
+
+-- | The distinct values of a lazily produced result list, in order of first
+-- occurrence (what 'nub' gives), or @[]@ if an evaluation fails -- the absence
+-- of a domain, as for 'propagateValues'.
+--
+-- Given a cap, it stops as soon as that many distinct values are in hand, and
+-- then answers them even if a later evaluation would have failed: the cap is
+-- the size of the whole result type, so what it has is already every value the
+-- node can take, and a failure among the unevaluated rest could not make that
+-- set any smaller or any less sound.
+distinctUpTo :: Maybe Integer -> [Either String Value] -> [Value]
+distinctUpTo cap results = case cap of
+  Just c | let saturated = genericTake c vals, genericLength saturated == c -> saturated
+  _ | null failures -> vals
+    | otherwise -> []
+  where
+    -- Both lazy: 'nubValues' yields each value at its first occurrence, so
+    -- taking the cap's worth of them evaluates only as far as the last one.
+    (oks, failures) = span isRight results
+    vals = nubValues [v | Right v <- oks]
 
 -- | The 'DiscreteValues' tag of a one-argument application.
 --

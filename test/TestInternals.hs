@@ -29,7 +29,7 @@ import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage)
 import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts, planFactorExternals, enumeratedCount)
 import SPLL.Typing.PType (PType(Integrate, Deterministic))
 import Data.Foldable (toList)
-import Data.List (isInfixOf, intercalate, isPrefixOf, sort)
+import Data.List (isInfixOf, intercalate, isPrefixOf, sort, nub)
 import Control.Exception (try, evaluate, ErrorCall(..))
 import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
@@ -3651,6 +3651,62 @@ valueSetTests = testGroup "valueListToMultiValue is a set at every level"
     isTCons (Expr _ (InjF (Named n) _)) = n == "TCons"
     isTCons _ = False
 
+-- | Value-domain analysis at vocabulary scale (task
+-- agreement-compile-time-quadratic-in-domain). Tagging @a == b@ over two
+-- V-value operands used to evaluate all V^2 operand pairs, and every
+-- de-duplication of a V-value domain was a V^2 'nub'; V = 10^4 did not compile
+-- in 6 GB. The analysis now stops once the result type's whole domain has
+-- turned up, and 'nubValues' de-duplicates in O(V log V).
+domainScaleTests :: TestTree
+domainScaleTests = testGroup "value-domain analysis scales linearly in the operand domains"
+  [ testCase "a == b over two 5000-value operands is tagged {True, False}, promptly" $ do
+      -- 25M pair evaluations before the fix (tens of seconds, GBs resident);
+      -- a handful after. The limit leaves two orders of magnitude of slack.
+      result <- timeout (10 * 1000000) (evaluate (forceTags (boolInjFTags (agreement 5000))))
+      case result of
+        Nothing -> assertFailure "tagging a == b over 5000-value operands took over 10 s"
+        Just tgs -> tgs @?= [MultiDiscretes [VBool True, VBool False]]
+  , testCase "an unbounded result type still enumerates every distinct value, in first-occurrence order" $ do
+      let prog = parseRTyped "neural f :: (Symbol -> Int) of [0, 1, 2]\nneural g :: (Symbol -> Int) of [0, 10]\nmain x y =\n  draw a = f x in\n  draw b = g y in\n  a + b\n"
+      [mv | e <- allNodes (annotateEnumsProg prog), isInjF e, rType (getTypeInfo e) == TInt
+          , DiscreteValues mv <- tags (getTypeInfo e)]
+        @?= [MultiDiscretes (map VInt [0, 10, 1, 11, 2, 12])]
+  , testCase "nubValues agrees with nub, NaN and markers included" $
+      -- Compared by 'show': a list holding NaN is not '==' to itself.
+      forM_ nubCases $ \vs -> show (nubValues vs) @?= show (nub vs)
+  , testProperty "nubValues agrees with nub on first-order values" $ \xs ->
+      let vs = [ if b then VTuple (VInt i) (VEither (Left (VBool c))) else VADT "K" [VInt (i `mod` 3)]
+               | (i, b, c) <- (xs :: [(Int, Bool, Bool)]) ] :: [Value]
+      in nubValues vs === nub vs
+  ]
+  where
+    agreement v = parseRTyped $ unlines
+      [ "neural lmA :: (Symbol -> Int) of [" ++ intercalate ", " (map show [0 .. v - 1 :: Int]) ++ "]"
+      , "neural lmB :: (Symbol -> Int) of [" ++ intercalate ", " (map show [0 .. v - 1 :: Int]) ++ "]"
+      , "main x y ="
+      , "  draw a = lmA x in"
+      , "  draw b = lmB y in"
+      , "  if a == b then right a else left ()" ]
+    parseRTyped src =
+      let parsed = either (\e -> error ("parse failed: " ++ show e)) id (tryParseProgram "test" src)
+      in either (\e -> error ("rtype inference failed: " ++ show e)) id (tryAddRTypeInfo parsed)
+    boolInjFTags prog =
+      [mv | e <- allNodes (annotateEnumsProg prog), isInjF e, rType (getTypeInfo e) == TBool
+          , DiscreteValues mv <- tags (getTypeInfo e)]
+    forceTags tgs = length (show tgs) `seq` tgs
+    isInjF (Expr _ (InjF _ _)) = True
+    isInjF _ = False
+    nan = 0 / 0 :: Double
+    nubCases =
+      [ [VInt 3, VInt 1, VInt 3, VInt 2, VInt 1]
+      , [VFloat nan, VFloat 1, VFloat nan, VFloat 1]
+      , [VFloat 0, VFloat (-0)]
+      , [VAny, VInt 0, VAny, VUnit, VUnit]
+      , [VList AnyList, VList EmptyList, VList AnyList, VList (ListCont (VInt 1) EmptyList), VList (ListCont (VInt 1) EmptyList)]
+      , [VTuple (VFloat nan) (VInt 0), VTuple (VInt 0) (VInt 0), VTuple (VInt 0) (VInt 0)]
+      , [VADT "A" [VSymbol "s"], VADT "A" [VSymbol "t"], VADT "A" [VSymbol "s"], VADT "B" []]
+      ] :: [[Value]]
+
 internalsTests :: TestTree
 internalsTests = testGroup "Internals"
   [ testProperties "properties" $(allProperties)
@@ -3690,6 +3746,7 @@ internalsTests = testGroup "Internals"
   , enumContinuousRefusalTests
   , letBinderTagTests
   , valueSetTests
+  , domainScaleTests
   , test_planEnumThreadedTopKAndBC
   , test_branchCountingDoesNotMultiplyIR
   , test_recursiveListMissedCSE

@@ -17,6 +17,19 @@
 -- chain in the `generate` function. That is unrelated to this task and
 -- dominates both the compile time and the file at large V -- strip or ignore
 -- `generate` when timing the probability function.
+--
+-- The compiler's own analysis of `v == w` is O(V) as well (task
+-- agreement-compile-time-quadratic-in-domain). Before, it evaluated all V^2
+-- operand pairs to learn the comparison is Bool-valued. Measured on this
+-- program widened to V classes, with the helper `generate` suppressed, `-G -I`:
+--
+--   V       before                     after
+--   1000    1.4 s, 363 MB RSS          0.04 s user,  86 MB
+--   3000    12.0 s                     0.10 s user,  96 MB
+--   10000   killed at 6 GB after 59 s  0.40 s user, 163 MB
+--
+-- Past V = 10000 the fusion is declined by the materialization budget
+-- (defaultMaterializationCardinality), which is a separate limit.
 neural camNN   :: (Symbol -> Int) of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99]
 neural depthNN :: (Symbol -> Int) of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99]
 main img depth =

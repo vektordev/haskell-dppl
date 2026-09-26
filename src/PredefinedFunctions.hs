@@ -8,6 +8,7 @@ FDecl(..),
 FEnv,
 instantiate,
 propagateValues,
+propagateValuesLazily,
 parameterCount,
 hasAnyExcept,
 isHigherOrder,
@@ -531,11 +532,24 @@ getFunctionParamIdx adtsDecl name =
         _ -> []
 
 propagateValues :: [ADTDecl] -> String -> [[Value]] -> [Value]
-propagateValues adtsDecl name values = case results of
+propagateValues adtsDecl name values = case sequence (propagateValuesLazily adtsDecl name values) of
   Left _ -> []
-  Right l -> map (fmap failConversionRev) l
+  Right l -> l
+
+-- | 'propagateValues' one operand tuple at a time: the forward function's
+-- result on each tuple of the operands' cross product, in cross-product order,
+-- produced lazily.
+--
+-- 'propagateValues' has to see every tuple before it can answer (one failed
+-- evaluation voids the whole list), so its cost is the size of the cross
+-- product even when the distinct results are few -- @a == b@ over two V-value
+-- operands evaluates V^2 tuples to learn that the answer is @{True, False}@.
+-- A caller that knows when it has seen enough ('SPLL.Analysis', which stops
+-- once the result type's whole domain has turned up) consumes this instead and
+-- stops early (task agreement-compile-time-quadratic-in-domain).
+propagateValuesLazily :: [ADTDecl] -> String -> [[Value]] -> [Either String Value]
+propagateValuesLazily adtsDecl name values = map (fmap (fmap failConversionRev) . generateDet [] [] (IREnv [] adtsDecl []) []) letInBlocks
   where
-    results = mapM (generateDet [] [] (IREnv [] adtsDecl []) []) letInBlocks
     letInBlocks = map (foldr (\(n, p) e -> IRLetIn n (IRConst (fmap failConversionFwd p)) e) fwdExpr) namedParams
     namedParams = map (zip paramNames) applicableProd
     -- An ADT field accessor / constructor test is partial: it is undefined on a

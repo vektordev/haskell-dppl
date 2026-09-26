@@ -36,6 +36,7 @@ module SPLL.Lang.Lang (
 , multiValueIsFinite
 , multiValueCardinality
 , valueListToMultiValue
+, nubValues
 , valueInMultiValue
 , unionMultiValues
 , autoDeriveMultiValue
@@ -306,7 +307,7 @@ multiValueCardinality (MultiADT constrs)
 -- @2^(n^2/2)@ values and 'SPLL.Analysis' spent seconds, then minutes,
 -- evaluating them (task structured-accessor-compile-blowup).
 valueListToMultiValue :: [Value] -> MultiValue
-valueListToMultiValue = byShape . nub
+valueListToMultiValue = byShape . nubValues
   where
   byShape lst@((VEither _):_) | all isVEither lst = MultiEither lVals rVals
     where
@@ -328,6 +329,58 @@ valueListToMultiValue = byShape . nub
   byShape ((VADT _ _):_) = error "Not all elements in the list are ADTs"
   byShape lst = MultiDiscretes lst
 
+-- | 'nub' for values, in O(n log n) rather than O(n^2).
+--
+-- A value domain is routinely a vocabulary-sized list of @Int@s, and every
+-- enumeration that builds or unions one de-duplicates it; with 'nub' that is
+-- V^2 comparisons, which at V = 10^4 was most of the compile time of a
+-- two-operand agreement (task agreement-compile-time-quadratic-in-domain).
+--
+-- 'GenericValue' has no 'Ord' (a closure holds an expression), so the values
+-- that have a first-order shape are de-duplicated through an ordered
+-- 'ValueKey', and the rest -- closures, tensors, theta trees, @ANY@ markers,
+-- NaN -- through 'elem' as before. The two groups never compare equal to each
+-- other (a key covers the whole value, and what has no key differs from every
+-- keyed value in some constructor, or is a NaN, which equals nothing), so the
+-- result is exactly 'nub''s: the same values, in order of first occurrence.
+nubValues :: Eq a => [GenericValue a] -> [GenericValue a]
+nubValues = go Set.empty []
+  where
+    go _ _ [] = []
+    go keyed unkeyed (v:vs) = case valueKey v of
+      Just k
+        | k `Set.member` keyed -> go keyed unkeyed vs
+        | otherwise -> v : go (Set.insert k keyed) unkeyed vs
+      Nothing
+        | v `elem` unkeyed -> go keyed unkeyed vs
+        | otherwise -> v : go keyed (v : unkeyed) vs
+
+-- | An ordered stand-in for a first-order value, for 'nubValues'. Two values
+-- with keys are '==' exactly when their keys are.
+data ValueKey = KBool Bool | KInt Int | KSymbol String | KFloat Double | KUnit
+              | KList [ValueKey] | KTuple ValueKey ValueKey
+              | KLeft ValueKey | KRight ValueKey | KADT String [ValueKey]
+              deriving (Eq, Ord)
+
+valueKey :: GenericValue a -> Maybe ValueKey
+valueKey (VBool b) = Just (KBool b)
+valueKey (VInt i) = Just (KInt i)
+valueKey (VSymbol s) = Just (KSymbol s)
+-- NaN is unequal to itself, which an ordered key cannot express.
+valueKey (VFloat d) | isNaN d = Nothing
+                    | otherwise = Just (KFloat d)
+valueKey VUnit = Just KUnit
+valueKey (VList l) = KList <$> listKeys l
+  where
+    listKeys EmptyList = Just []
+    listKeys (ListCont x xs) = (:) <$> valueKey x <*> listKeys xs
+    listKeys AnyList = Nothing
+valueKey (VTuple a b) = KTuple <$> valueKey a <*> valueKey b
+valueKey (VEither (Left l)) = KLeft <$> valueKey l
+valueKey (VEither (Right r)) = KRight <$> valueKey r
+valueKey (VADT c fs) = KADT c <$> mapM valueKey fs
+valueKey _ = Nothing
+
 valueInMultiValue :: MultiValue -> Value -> Bool
 valueInMultiValue MultiContinuous (VFloat _) = True
 valueInMultiValue (MultiDiscretes d) x = x `elem` d
@@ -345,7 +398,7 @@ valueInMultiValue _ _ = False
 
 unionMultiValues :: MultiValue -> MultiValue -> MultiValue
 unionMultiValues MultiContinuous MultiContinuous = MultiContinuous
-unionMultiValues (MultiDiscretes as) (MultiDiscretes bs) = MultiDiscretes (nub (as ++ bs))
+unionMultiValues (MultiDiscretes as) (MultiDiscretes bs) = MultiDiscretes (nubValues (as ++ bs))
 unionMultiValues (MultiEither ls1 rs1) (MultiEither ls2 rs2) = MultiEither (unionMultiValues ls1 ls2) (unionMultiValues rs1 rs2)
 unionMultiValues (MultiTuple ls1 rs1) (MultiTuple ls2 rs2) = MultiTuple (unionMultiValues ls1 ls2) (unionMultiValues rs1 rs2)
 unionMultiValues (MultiADT constrs1) (MultiADT constrs2) = MultiADT (map (\cn -> (cn, unionConstr cn)) cNames)
