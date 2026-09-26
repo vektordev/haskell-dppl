@@ -43,7 +43,13 @@ implicitFunctionNames decls = map fst (concatMap implicitFunctionRTypes decls)
 -- | Every field accessor paired with the constructor whose field it reads,
 -- with the *first* declaration of a name winning.
 --
--- That tie-break is not a choice: 'findField' already resolves a duplicated
+-- No valid program has a duplicated field name any more:
+-- 'SPLL.Validator.validateNoNameCollisions' rejects a field name declared by
+-- two constructors, of one ADT or of two (task
+-- adt-sibling-shared-field-accessor-unreachable -- with one accessor per name,
+-- guarded on one owner, the other constructor's values could never be read
+-- back). The tie-break below is therefore only a defensive identity for
+-- callers that bypass validation. It was never a choice: 'findField' already resolves a duplicated
 -- field name to the first constructor declaring it, and 'lookupRType' picks the
 -- first entry too, so first-wins is what the type environment and the
 -- interpreter both mean. The text backends used to emit one accessor per

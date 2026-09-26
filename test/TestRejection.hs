@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 module TestRejection (rejectionTests) where
 
 -- Exercises the compiler's *unhappy* paths: programs that must be rejected, and
@@ -20,7 +21,7 @@ import SPLL.Typing.RType (RType(..))
 import SPLL.Examples
 import SPLL.Validator (validateProgram)
 import SPLL.Prelude (compile, runProb, runInteg, uniform, constB, constF, (#+#), (#<#))
-import SPLL.IntermediateRepresentation (CompilerConfig, defaultCompilerConfig, checkQueryType, noIntegrate, noGenerate, firstAnyExceptIR, anyExceptCodegenRefusal, IRValue)
+import SPLL.IntermediateRepresentation (CompilerConfig, defaultCompilerConfig, checkQueryType, noIntegrate, noGenerate, firstAnyExceptIR, anyExceptCodegenRefusal, IRValue, pattern VProbDim)
 import SPLL.Typing.Infer (addTypeInfo)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, adtCdfMessage, accessorMismatchMessage)
@@ -39,7 +40,7 @@ import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure)
 rejectionTests :: TestTree
 rejectionTests = testGroup "Rejection"
   [ validatorTests
-  , nameCollisionPositiveControlTests
+  , sharedFieldNameTests
   , compileRejectsTests
   , queryTypeGuardTests
   , typeInferenceTests
@@ -93,9 +94,9 @@ adtCtorCollidesWithPredefinedProg =
   Program [("main", constB True)] []
     [ADTDecl "X" [("Null", []), ("Other", [("v", TFloat)])] Nothing] []
 
--- Two different ADTs declaring the same constructor name. Unlike a shared
--- *field* name (see accessorDuplicateFieldSrc below), nothing resolves this
--- on purpose: the second ADT's own constructor of that name is unreachable.
+-- Two different ADTs declaring the same constructor name: the second ADT's own
+-- constructor of that name would be unreachable. (A shared *field* name is
+-- rejected for the same reason -- see 'sharedFieldNameTests' below.)
 adtCtorNameSharedAcrossAdtsProg :: Program
 adtCtorNameSharedAcrossAdtsProg =
   Program [("main", constB True)] []
@@ -158,31 +159,83 @@ validatorTests = testGroup "Validator"
         (needle `isInfixOf` err)
   | (name, prog, needle) <- validatorCases ]
 
--- A field name shared between two constructors is an intentional,
--- already-tested feature (findField/fieldAccessorOwners resolve it to the
--- first declaration -- see accessorDuplicateFieldSrc below), not a collision.
--- The new name-collision check must not flag it, whether the two
--- constructors sharing the field belong to the same 'ADTDecl' or to two
--- different ones.
-fieldSharedWithinAdtProg, fieldSharedAcrossAdtsProg :: Program
+-- A field name declared by two constructors is rejected (task
+-- adt-sibling-shared-field-accessor-unreachable). The runtimes emit exactly
+-- one accessor per field name, guarded on a single owning constructor, so the
+-- other constructor's values could be sampled but never scored: probability
+-- mode threw on every one of them. The shape used to be accepted here, as a
+-- positive control; the decision was to prohibit it instead of making the
+-- accessor dispatch over several owners. The check is per *name*: whether the
+-- two constructors belong to one ADT or two, and whether they share every
+-- field or just one.
+fieldSharedWithinAdtProg, fieldSharedAcrossAdtsProg, fieldPartlySharedProg :: Program
 fieldSharedWithinAdtProg =
   Program [("main", constB True)] []
     [ADTDecl "T" [("A", [("v", TFloat)]), ("B", [("v", TFloat)])] Nothing] []
 fieldSharedAcrossAdtsProg =
   Program [("main", constB True)] []
     [ADTDecl "A" [("MkA", [("v", TFloat)])] Nothing, ADTDecl "B" [("MkB", [("v", TFloat)])] Nothing] []
+-- `A` and `B` share `w` but not `u`/`x`: only `w` may be named.
+fieldPartlySharedProg =
+  Program [("main", constB True)] []
+    [ADTDecl "T" [("A", [("u", TFloat), ("w", TFloat)]), ("B", [("x", TFloat), ("w", TFloat)])] Nothing] []
 
-nameCollisionPositiveControlTests :: TestTree
-nameCollisionPositiveControlTests = testGroup "NameCollisionPositiveControl"
-  [ testCase "a field name shared between two constructors of the same ADT validates" $
-      case validateProgram fieldSharedWithinAdtProg of
-        Right () -> return ()
-        Left err -> assertFailure ("wrongly rejected an intentional shared field name: " ++ err)
-  , testCase "a field name shared between two different ADTs validates" $
-      case validateProgram fieldSharedAcrossAdtsProg of
-        Right () -> return ()
-        Left err -> assertFailure ("wrongly rejected an intentional shared field name: " ++ err)
+-- The natural binary expression tree, exactly as the task's repro spelled it:
+-- `B`'s fields used to be unreadable, so p(B L L) threw at query time. Its
+-- renamed twin must still compile and score both operators.
+siblingFieldsTreeSrc, siblingFieldsTreeRenamedSrc :: String
+siblingFieldsTreeSrc = unlines
+  [ "data T = L | A l::T, r::T | B l::T, r::T"
+  , "genT = if Uniform < 0.6 then L else if Uniform < 0.5 then A genT genT else B genT genT"
+  , "main = genT"
   ]
+siblingFieldsTreeRenamedSrc = unlines
+  [ "data T = L | A al::T, ar::T | B bl::T, br::T"
+  , "genT = if Uniform < 0.6 then L else if Uniform < 0.5 then A genT genT else B genT genT"
+  , "main = genT"
+  ]
+
+sharedFieldNameTests :: TestTree
+sharedFieldNameTests = testGroup "SharedFieldName"
+  [ testCase "a field name shared by two constructors of one ADT is rejected, naming both" $
+      expectCollision fieldSharedWithinAdtProg "v" ["'A'", "'B'"]
+  , testCase "a field name shared by constructors of two different ADTs is rejected, naming both" $
+      expectCollision fieldSharedAcrossAdtsProg "v" ["'MkA' of data A", "'MkB' of data B"]
+  , testCase "a partial overlap is rejected, naming only the shared field" $
+      case validateProgram fieldPartlySharedProg of
+        Right () -> assertFailure "a partially shared field name validated"
+        Left err -> do
+          assertBool ("does not name the shared field: " ++ err) ("the name 'w'" `isInfixOf` err)
+          assertBool ("names an unshared field: " ++ err)
+            (not (any (`isInfixOf` err) ["'u'", "'x'"]))
+  , testCase "compile refuses the binary-tree repro rather than crashing at query time" $
+      withParsed siblingFieldsTreeSrc $ \prog ->
+        case compile defaultCompilerConfig prog of
+          Right _  -> assertFailure "the shared-field tree ADT compiled"
+          Left err -> assertBool ("rejected, but not for the shared field: " ++ show err)
+                                 ("claimed by more than one declaration" `isInfixOf` show err)
+  , testCase "per-constructor field names score every constructor (the required spelling)" $
+      withParsed siblingFieldsTreeRenamedSrc $ \prog ->
+        forM_ ["A", "B"] $ \c -> do
+          let q = VADT c [VADT "L" [], VADT "L" []]
+          res <- forced (runProb defaultCompilerConfig prog [] q)
+          case (res, runProb defaultCompilerConfig prog [] q) of
+            (Left e, _) -> assertFailure ("p(" ++ c ++ " L L) failed: " ++ show e)
+            (_, Right (VProbDim p d)) -> do
+              -- 0.4 (not L) * 0.5 (this operator) * 0.6 * 0.6 (two L leaves)
+              assertBool ("p(" ++ c ++ " L L) = " ++ show p ++ ", expected 0.072")
+                         (abs (p - 0.072) < 1e-9)
+              assertEqual "dim" 0 d
+            (_, other) -> assertFailure ("unexpected result: " ++ show other)
+  ]
+  where
+    expectCollision prog name owners = case validateProgram prog of
+      Right () -> assertFailure "a shared field name validated"
+      Left err -> do
+        assertBool ("not the name-collision refusal: " ++ err)
+                   (("the name '" ++ name ++ "' is claimed by more than one declaration") `isInfixOf` err)
+        forM_ owners $ \o ->
+          assertBool ("the diagnostic does not name " ++ o ++ ": " ++ err) (o `isInfixOf` err)
 
 -- ----------------------------------------------------------------------------
 -- Compile stage: the public entry point must propagate the rejection as a Left.
@@ -477,16 +530,6 @@ accessorMismatchProgSrc = unlines
   , "main = color Nil"
   ]
 
--- Two constructors declaring the same field name. `findField` resolves `v` to
--- `A` (first wins), so every backend must emit one `v` that accepts an `A`.
--- Emitting an accessor per constructor made Python last-wins and Julia
--- accept-both.
-accessorDuplicateFieldSrc :: String
-accessorDuplicateFieldSrc = unlines
-  [ "data T = A v::Float | B v::Float"
-  , "main = v (A 0.5)"
-  ]
-
 accessorMismatchTests :: TestTree
 accessorMismatchTests = testGroup "AccessorMismatch"
   [ testCase "the interpreter names the accessor and its owning constructor" $
@@ -521,22 +564,6 @@ accessorMismatchTests = testGroup "AccessorMismatch"
                        ("if !(x isa Obj) throw(" `isInfixOf` src)
             assertBool "emitted color() carries no accessor-mismatch diagnostic"
                        (accessorMismatchMessage "color" "Obj" `isInfixOf` src)
-  , testCase "a field name shared by two constructors resolves to the first, in every backend" $
-      withParsed accessorDuplicateFieldSrc $ \prog ->
-        case compile defaultCompilerConfig prog of
-          Left err -> assertFailure ("compile failed: " ++ show err)
-          Right env -> do
-            let py = lines (unlines (SPLL.CodeGenPyTorch.generateFunctions True env))
-                jl = lines (unlines (SPLL.CodeGenJulia.generateFunctions env))
-            assertEqual "Python emitted more than one accessor for the shared field name"
-                        1 (length (filter ("def v(x):" `isInfixOf`) py))
-            assertEqual "Julia emitted more than one accessor for the shared field name"
-                        1 (length (filter ("function v(x)" `isInfixOf`) jl))
-            -- `findField` answers A, so the guards must too.
-            assertBool "the Python accessor is owned by the wrong constructor"
-                       (accessorMismatchMessage "v" "A" `isInfixOf` unlines py)
-            assertBool "the Julia accessor is owned by the wrong constructor"
-                       (accessorMismatchMessage "v" "A" `isInfixOf` unlines jl)
   ]
 
 adtCumulativeTests :: TestTree

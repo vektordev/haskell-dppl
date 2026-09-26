@@ -6,7 +6,6 @@ import SPLL.Lang.Lang (Expr(..), ExprF(..), getSubExprs, getFunctionNames, InjFN
 import SPLL.Typing.RType (RType(..))
 import Data.Maybe (isJust, isNothing)
 import PredefinedFunctions (globalFEnv, parameterCount)
-import SPLL.Typing.AlgebraicDataTypes (fieldAccessorOwners)
 import Data.List (intersect, groupBy, sortOn, nub, intercalate)
 import Data.Function (on)
 
@@ -65,14 +64,19 @@ validateMainExists fn
 
 -- | Every name a @data@ declaration puts into the global function
 -- environment (a constructor, its @is\<Ctor\>@ predicate, or a field
--- accessor), labeled with where it came from. Field accessor names are
--- pre-deduplicated via 'fieldAccessorOwners' (first constructor declaring a
--- field wins): two constructors sharing a field name is an intentional,
--- already-tested feature (task adt-accessor-type-too-permissive), not a
--- collision this check should flag. A constructor name or an is\<Ctor\>
--- predicate carries no such tie-break -- nothing resolves a shared one on
--- purpose -- so those keep every occurrence, including duplicates within a
--- single 'ADTDecl'.
+-- accessor), labeled with where it came from. Every occurrence is kept,
+-- including duplicates within a single 'ADTDecl', so any name declared twice
+-- is flagged.
+--
+-- That includes a field name declared by two constructors, of one ADT or of
+-- two. The runtimes emit exactly one accessor per field name, guarded on a
+-- single owning constructor, so the other declaration's values could be built
+-- but never read back: probability mode, which reads fields to score a
+-- sample, threw on every value built by the non-owning constructor (task
+-- adt-sibling-shared-field-accessor-unreachable). The decision there was to
+-- prohibit the shape rather than make the accessor polymorphic: a field name
+-- names one field of one constructor. A tree ADT gives each constructor its
+-- own field names (@Add al,ar | Mul ml,mr@).
 adtGeneratedNameSources :: [ADTDecl] -> [(String, String)]
 adtGeneratedNameSources decls =
   [ (cName, "constructor '" ++ cName ++ "' of data " ++ dName)
@@ -82,8 +86,8 @@ adtGeneratedNameSources decls =
                     ++ cName ++ "' of data " ++ dName)
   | ADTDecl {dataName = dName, constructors = cs} <- decls, (cName, _) <- cs ]
   ++
-  [ (fName, "field accessor '" ++ fName ++ "' (of constructor '" ++ cName ++ "')")
-  | (fName, cName) <- fieldAccessorOwners decls ]
+  [ (fName, "field accessor '" ++ fName ++ "' of constructor '" ++ cName ++ "' of data " ++ dName)
+  | ADTDecl {dataName = dName, constructors = cs} <- decls, (cName, fields) <- cs, (fName, _) <- fields ]
 
 -- | Names entering the environment from outside any @data@ declaration:
 -- 'PredefinedFunctions.globalFEnv' called with no ADTs gives exactly the

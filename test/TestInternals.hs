@@ -2360,9 +2360,10 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
   -- 'fieldAccessorOwners' first-wins, which is what the interpreter's
   -- 'findField' and the type environment's 'lookupRType' already mean and
   -- what the scalar backends already emit; batched was the odd one out being
-  -- accidentally more capable than the reference semantics. Making the shape
-  -- genuinely work everywhere is known-issue
-  -- adtSiblingSharedFieldAccessorUnreachable, not this task.
+  -- accidentally more capable than the reference semantics. The shape is now
+  -- rejected at validation (task adt-sibling-shared-field-accessor-unreachable,
+  -- 'TestRejection.sharedFieldNameTests'), so this hand-built IREnv, which
+  -- bypasses validation, pins only the defensive identity that remains.
   , testCase "a field name declared twice emits one accessor, owned first-wins" $
       case generateFunctionsBatched False dupFieldEnv of
         Left msg -> assertFailure ("batched mode refused a duplicated field name: " ++ msg)

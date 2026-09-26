@@ -214,11 +214,11 @@ pickOffender offs = listToMaybe ([o | o@([], _) <- offs] ++ offs)
 -- So batched loses a leniency the reference semantics never had: the
 -- interpreter *errors* on that read, with this very message. Being
 -- accidentally more capable than the reference is the divergence this task
--- exists to remove, not a capability worth keeping. Making the shared-field
--- case actually *work* -- in every runtime at once -- is a live, separately
--- owned bug: known-issue @adtSiblingSharedFieldAccessorUnreachable@
--- (@test/cases/known-issues/@), which batched now shares with the scalar
--- backends instead of sidestepping.
+-- exists to remove, not a capability worth keeping. The shape itself is now
+-- rejected at validation (task adt-sibling-shared-field-accessor-unreachable:
+-- a field name may be declared by one constructor only), so no valid program
+-- reaches the first-wins resolution any more; it stays as a defensive
+-- identity.
 --
 -- 'throw' is a new name in pythonLibBatched.py, added for this and
 -- deliberately raising rather than poisoning: a poison would convert a
