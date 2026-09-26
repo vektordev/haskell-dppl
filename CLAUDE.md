@@ -27,7 +27,7 @@ stack run -- -i file.ppl cumulative -x 0.5                # CDF query P(X<=0.5)
 # a bare `stack test --ta PATTERN` applies PATTERN to both processes, and a
 # pattern that matches nothing in one of them just reports "All 0 tests
 # passed" there, not an error. Target one binary explicitly to skip the other
-# process entirely, e.g. `stack test haskell-dppl-test-corpus --ta '-p ...'`.
+# process entirely, e.g. `stack test haskell-dppl:haskell-dppl-test-corpus --ta '-p ...'`. (the `haskell-dppl:` package prefix is required; a bare suite name is "Unknown package").
 stack test --ta '-p Spec'                # run one group
 stack test --ta '-p "!/End2End/"'        # everything except a group
 stack test --ta '-p TopK'                # any test whose name matches a substring
@@ -1377,7 +1377,7 @@ executable/OS process: `haskell-dppl-test` (`test/Spec.hs`, everything below
 except Corpus) and `haskell-dppl-test-corpus` (`test-corpus/SpecCorpus.hs`,
 just the `Corpus` group, module `TestCorpus`). `stack test` builds and runs
 both automatically; `--ta` patterns only reach whichever one you invoke
-directly (`stack test haskell-dppl-test-corpus --ta '-p ...'`), since each
+directly (`stack test haskell-dppl:haskell-dppl-test-corpus --ta '-p ...'`), since each
 process gets its own tasty CLI. This split exists because `Corpus` compiles
 the whole `test/cases/` corpus 8 times over (once per config it needs to
 cross-check), and tasty holds its whole `TestTree` — including those

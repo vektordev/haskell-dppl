@@ -45,6 +45,8 @@ import Control.Monad (forM_)
 import Data.Number.Erf (erf)
 import Utils (splitByString)
 import Data.Maybe (isJust)
+import Data.Functor.Identity (runIdentity)
+import qualified PredefinedFunctions as PF
 
 
 -- | The (prob, dim) pair a probability query must return; a different shape
@@ -3919,6 +3921,7 @@ internalsTests = testGroup "Internals"
   , categoricalIndexTests
   , splitByStringTests
   , partialDestructorTests
+  , fdeclNamespaceTests
   , classConstraintTests
   , forwardChainingCertTests
   , witnessedBindingTests
@@ -4105,6 +4108,88 @@ partialDestructorTests = testGroup "partial destructors out of their domain"
     emptyL = IRConst (VList EmptyList)
     one = IRConst (VFloat 1.0)
     forceSampleOf p env = let v = evalRand (runGenC p env []) (mkStdGen 0) in length (show v) `seq` v
+
+-- | An InjF declaration's own variables and the global functions its body
+-- calls live in disjoint namespaces (task
+-- adt-field-name-collides-with-fdecl-var). The ADT-derived declarations call
+-- the user's accessor/constructor functions through 'IRVar' under the user's
+-- spelling, and used to name their sample variable @"a"@/@"b"@: a field called
+-- @a@ or @b@ was renamed along with the sample, and the compiled program
+-- applied the sample to itself.
+fdeclNamespaceTests :: TestTree
+fdeclNamespaceTests = testGroup "FDecl namespaces (adt-field-name-collides-with-fdecl-var)"
+  [ testCase "every InjF declaration's locals are template-local names" $ do
+      decls <- allDecls
+      assertEqual "declarations with a local outside the template namespace" []
+        [ (n, v) | (n, d) <- decls, v <- locals d, not (PF.isTemplateLocal v) ]
+  , testCase "instantiation renames every local and leaves every global reference alone" $ do
+      decls <- allDecls
+      let freshen v = return ("fresh_" ++ v)
+      forM_ [ (n, fp) | (n, fp) <- PF.globalFEnv collidingAdts' ] $ \(n, PF.FPair fwd invs) -> do
+        let PF.FPair fwd' invs' = runIdentity (PF.instantiate freshen collidingAdts' n)
+        forM_ (zip (fwd : invs) (fwd' : invs')) $ \(d, d') -> do
+          assertEqual ("global references of an instance of " ++ n) (globalRefs d) (globalRefs d')
+          assertEqual ("template-local names left in an instance of " ++ n) []
+            (filter PF.isTemplateLocal (locals d' ++ Set.toList (declVars d')))
+      assertBool "the colliding ADT contributes declarations" (any ((== "a") . fst) decls)
+  , testCase "renameDecl refuses to rename a name outside the template namespace" $ do
+      decls <- allDecls
+      d <- maybe (assertFailure "no accessor declaration for field a") return (lookup "a" decls)
+      r <- try (evaluate (length (show (PF.renameDecl "a" "x" d))))
+      case r of
+        Left (ErrorCall msg) -> assertBool msg ("not an FDecl-local name" `isInfixOf` msg)
+        Right _ -> assertFailure "renaming the global accessor name was accepted"
+  , testCase "a constructor with fields a and b answers like its p/q twin" $ do
+      let src ab = unlines [ "data Shape = Dot v::Float | Pair " ++ fst ab ++ "::Float, " ++ snd ab ++ "::Float"
+                           , "main = if Uniform < 0.3 then Dot Uniform else Pair Uniform Uniform" ]
+          pair = VADT "Pair" [VFloat 0.5, VFloat 0.25]
+      agree (src ("a", "b")) (src ("p", "q")) [] [pair, VADT "Pair" [VAny, VFloat 0.25], VADT "Dot" [VFloat 0.5]]
+  , testCase "compile-time enumeration through accessors a and b matches the p/q twin" $ do
+      -- 'propagateValues' let-binds the accessor's own input variable, which
+      -- captured the accessor too: the enumerated domain was lost and
+      -- probability compilation found no inference rule for the sum.
+      let src (x, y) = unlines [ "data P = P " ++ x ++ "::Int, " ++ y ++ "::Int"
+                               , "neural readP :: (Symbol -> P) of {P [0, 1] [2, 3]}"
+                               , "main s = " ++ y ++ " (readP s) + " ++ x ++ " (readP s)" ]
+      agree (src ("a", "b")) (src ("p", "q")) [VTuple (VInt 0) (VInt 3)] (map VInt [2, 3, 4, 5])
+  , testCase "sampling a neural ADT through a field named a never errors" $ do
+      p <- parseOrFail $ unlines
+        [ "data Pair = Pair a::Bool, sndB::Bool | NoPair"
+        , "neural readPair :: (Symbol -> Pair)"
+        , "main sym = draw w = readPair sym in if isPair w then a w else False" ]
+      env <- either (assertFailure . ("compile failed: " ++) . show) return (compile defaultCompilerConfig p)
+      forM_ [0 .. 49 :: Int] $ \seed -> do
+        r <- try (evaluate (let v = evalRand (runGenC p env [VTuple (VInt 0) (VInt 3)]) (mkStdGen seed) in length (show v) `seq` v))
+        case r of
+          Left (ErrorCall msg) -> assertFailure ("seed " ++ show seed ++ ": sampling threw: " ++ msg)
+          Right (VBool _) -> return ()
+          Right v -> assertFailure ("seed " ++ show seed ++ ": expected a Bool, got " ++ show v)
+  ]
+  where
+    collidingSrc = unlines
+      [ "data Shape = Dot v::Float | Pair a::Float, b::Float"
+      , "data Odd = Odd f_a::Float, c::Float, f::Float"
+      , "main = Pair 1.0 2.0" ]
+    collidingAdts' = either (error . show) adts (tryParseProgram "<test>" collidingSrc)
+    allDecls = return [ (n, d) | (n, PF.FPair fwd invs) <- PF.globalFEnv collidingAdts', d <- fwd : invs ]
+    locals d = PF.inputVars d ++ PF.outputVars d
+    -- Every name a declaration mentions through 'IRVar', in body, applicability
+    -- and derivatives.
+    declVars d = Set.fromList (concatMap irVarNames (PF.body d : PF.applicability d : map snd (PF.derivatives d)))
+    -- The names that are not the declaration's own: a local's @^-1@/@^-1'@
+    -- forms belong to it too.
+    globalRefs d = Set.filter (\v -> v `notElem` [ l ++ sfx | l <- locals d, sfx <- ["", "^-1", "^-1'"] ]) (declVars d)
+    irVarNames e = [ v | IRVar v <- [e] ] ++ concatMap irVarNames (getIRSubExprs e)
+    agree srcAB srcPQ params queries = do
+      pAB <- parseOrFail srcAB
+      pPQ <- parseOrFail srcPQ
+      envAB <- either (assertFailure . ("a/b compile failed: " ++) . show) return (compile defaultCompilerConfig pAB)
+      envPQ <- either (assertFailure . ("p/q compile failed: " ++) . show) return (compile defaultCompilerConfig pPQ)
+      forM_ queries $ \q -> do
+        r <- try (evaluate (let v = runProbC pAB envAB params q in length (show v) `seq` v))
+        case r of
+          Left (ErrorCall msg) -> assertFailure ("a/b program threw at " ++ show q ++ ": " ++ msg)
+          Right v -> assertEqual ("p" ++ show q) (runProbC pPQ envPQ params q) v
 
 vfs :: [Double] -> [IRValue]
 vfs = map VFloat

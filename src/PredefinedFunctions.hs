@@ -15,7 +15,9 @@ isHigherOrder,
 isFieldConstructor,
 isObsConstructor,
 getFunctionParamIdx,
-renameDecl
+renameDecl,
+templateLocal,
+isTemplateLocal
 ) where
 
 import SPLL.Typing.RType (RType(..), Scheme(..), TVarR(..), ClassConstraint(..))
@@ -52,7 +54,28 @@ anyOfType :: RType -> GenericValue a
 anyOfType (ListOf _) = VList AnyList
 anyOfType _          = VAny
 
--- InputVars, OutputVars, fwd, grad
+-- | One direction of an InjF: a /template/ whose variables are placeholders.
+--
+-- An FDecl's body is an 'IRExpr' mentioning two kinds of name through 'IRVar':
+-- its own __locals__ ('inputVars' and 'outputVars'), which every consumer
+-- substitutes before use ('instantiate' gives them fresh 'mkVariable' names,
+-- forward chaining gives them chain names, 'propagateValues' let-binds them),
+-- and __global__ function references, which must survive that substitution
+-- untouched -- today exactly the functions a @data@ declaration generates: its
+-- constructors, @is\<Ctor\>@ tests and field accessors, all under the user's
+-- own spelling.
+--
+-- The two therefore live in disjoint namespaces: every local is a
+-- 'templateLocal' name, spelled with a sigil that no SPLL identifier -- and so
+-- no global function name -- can contain, and 'renameDecl' refuses to rename
+-- anything else. A field named @b@ used to share the string @"b"@ with the
+-- constructor inverse's sample variable, so renaming the sample rewrote the
+-- accessor reference as well and the compiled program applied the sample to
+-- itself (task adt-field-name-collides-with-fdecl-var).
+--
+-- The sigil never reaches emitted code: 'instantiate' hands the generator the
+-- bare name ('stripTemplateLocal'), so the fresh variable is still
+-- @l_\<n\>_b@.
 data FDecl = FDecl {contract :: Scheme, inputVars :: [String], outputVars :: [String], body :: IRExpr, applicability :: IRExpr, deconstructing :: Bool, derivatives :: [(String, IRExpr)]} deriving (Show, Eq)
 -- Forward, inverse
 data FPair = FPair {forwardDecl :: FDecl, inverseDecl :: [FDecl]} deriving (Show, Eq)
@@ -435,7 +458,38 @@ globalFenv' = [("double", FPair doubleFwd [doubleInv]),
               ("isNull", FPair isNullFwd [isNullInv])]
 
 globalFEnv :: [ADTDecl] -> FEnv
-globalFEnv adtsDecl = globalFenv' ++ concatMap fPairsFromADT adtsDecl
+globalFEnv adtsDecl = map (fmap localizePair) globalFenv' ++ concatMap fPairsFromADT adtsDecl
+
+-- | The sigil marking an FDecl-local name (see 'FDecl'). Deliberately outside
+-- the identifier alphabet of SPLL, Python and Julia alike, so no user-chosen
+-- name can coincide with a local; 'stripTemplateLocal' removes it before a
+-- name could be emitted.
+templateSigil :: Char
+templateSigil = '%'
+
+-- | Move a name into the FDecl-local namespace.
+templateLocal :: String -> String
+templateLocal = (templateSigil :)
+
+isTemplateLocal :: String -> Bool
+isTemplateLocal (c:_) = c == templateSigil
+isTemplateLocal []    = False
+
+stripTemplateLocal :: String -> String
+stripTemplateLocal n = if isTemplateLocal n then tail n else n
+
+-- | The built-in declarations are written with plain local names, for
+-- readability of the table above, and moved into the local namespace here.
+-- Renaming by string is safe for them -- unlike for the ADT-generated
+-- declarations, which are therefore built with 'templateLocal' names directly
+-- -- because a built-in body references no global function: every 'IRVar' in
+-- it is one of its own locals (or a local's @^-1@/@^-1'@ derivative).
+-- @Internals/FDecl namespaces@ pins that, together with the invariant
+-- 'renameDecl' enforces.
+localizePair :: FPair -> FPair
+localizePair (FPair fwd invs) = FPair (localize fwd) (map localize invs)
+  where
+    localize d = foldr (\n -> renameDeclUnchecked n (templateLocal n)) d (inputVars d ++ outputVars d)
 
 -- Creates a instance of a FPair, that has identifier names given by a monadic function. m should be a supply monad
 -- Works by having each identifier renamed using this function
@@ -446,7 +500,8 @@ instantiate gen adtsDecl n = do
                              Nothing -> error ("InjF " ++ n ++ " not found!")
   let FDecl {inputVars=v1, outputVars=v2} = fwd
   let allVarNames = v1 ++ v2  -- All indentifier names in the InjF
-  newVarNames <- mapM gen allVarNames -- These are the new names given by the gen function
+  -- The generator sees the bare name, so the sigil never reaches emitted code.
+  newVarNames <- mapM (gen . stripTemplateLocal) allVarNames -- These are the new names given by the gen function
   let instantiateDecl d = foldr (\(old, new) decl -> renameDecl old new decl) d (zip allVarNames newVarNames) -- Rename all identifiers with the new names
   return (FPair (instantiateDecl fwd) (map instantiateDecl inv))
 
@@ -460,8 +515,19 @@ rename _ _ expr = expr
 renameAll :: String -> String -> IRExpr -> IRExpr
 renameAll old new = irMap (rename old new)
 
+-- | Substitute @new@ for the FDecl-local @old@ (and its @^-1@/@^-1'@ forms)
+-- throughout the declaration. Only a 'templateLocal' name may be renamed: a
+-- global function reference in the body is spelled without the sigil, so
+-- insisting on it here is what makes capturing one impossible rather than
+-- merely unlikely (see 'FDecl').
 renameDecl :: String -> String -> FDecl -> FDecl
-renameDecl old new FDecl {contract=sig, inputVars=inVars, outputVars=outVars, body=expr, applicability=app, deconstructing=decons, derivatives=derivs} =
+renameDecl old new d
+  | isTemplateLocal old = renameDeclUnchecked old new d
+  | otherwise = error ("renameDecl: '" ++ old ++ "' is not an FDecl-local name; "
+                       ++ "renaming it could capture a global function reference")
+
+renameDeclUnchecked :: String -> String -> FDecl -> FDecl
+renameDeclUnchecked old new FDecl {contract=sig, inputVars=inVars, outputVars=outVars, body=expr, applicability=app, deconstructing=decons, derivatives=derivs} =
   FDecl {contract=sig, inputVars=map renS inVars, outputVars=map renS outVars, body=ren expr, applicability=ren app, deconstructing=decons, derivatives=map (Data.Bifunctor.bimap renS ren) derivs}
   where
     ren = renameAll old new-- A function that renames old to new
@@ -595,13 +661,15 @@ fPairsFromADTConstructor adtName constr@(constrName, fields) = constrFPair:isFun
     fieldFPairs = map (fPairFromADTField adtRT constr) fields
     adtRT = TADT adtName
     fieldNames = map fst fields
-    -- Rename fields so that they don' clash with the accessor functions
-    fieldNames' = map ("f_" ++) fieldNames
+    -- The constructor's field parameters are FDecl locals, like its sample
+    -- variable: 'templateLocal' keeps them apart from the accessor functions,
+    -- which the inverses below reference under the very same field names.
+    fieldNames' = map (templateLocal . ("f_" ++)) fieldNames
     fieldRTs = map snd fields
     constrRT = foldr TArrow (TADT adtName) fieldRTs
     applicationExpr = foldl (\e n -> IRApply e (IRVar n)) (IRVar constrName) fieldNames'
     derivs = map (\n -> (n, IRConst $ VFloat 1)) fieldNames'
-    fwdConstr = FDecl (Forall [] [] constrRT) fieldNames' ["b"] applicationExpr (IRConst $ VBool True) False derivs
+    fwdConstr = FDecl (Forall [] [] constrRT) fieldNames' [smp] applicationExpr (IRConst $ VBool True) False derivs
     rtOfField f = fromJust $ lookup f fields
     -- The inverse deconstructs the sample with a field accessor, which is only
     -- defined when the sample actually carries this constructor. Without the
@@ -609,24 +677,31 @@ fPairsFromADTConstructor adtName constr@(constrName, fields) = constrFPair:isFun
     -- constructor's contribution unconditionally and the accessor throws on a
     -- sample built by a sibling constructor. Any-tolerant, since a marginal
     -- wildcard stands for a value of every constructor.
-    invConstr f = FDecl (Forall [] [] (adtRT `TArrow` rtOfField f)) ["b"] ["f_" ++ f] (IRApply (IRVar f) (IRVar "b")) (isConstrGuard constrName (IRVar "b")) True [("b", IRConst $ VFloat 1)]
+    invConstr f = FDecl (Forall [] [] (adtRT `TArrow` rtOfField f)) [smp] [templateLocal ("f_" ++ f)] (IRApply (IRVar f) (IRVar smp)) (isConstrGuard constrName (IRVar smp)) True [(smp, IRConst $ VFloat 1)]
+    smp = templateLocal "b"
 
 fPaisOfADTIsFunction :: String -> ADTConstructorDecl -> (String, FPair)
 fPaisOfADTIsFunction adtName (constrName, rTypes) = (isFName, fPair)
   where
     isFName = "is" ++ constrName 
     fPair = FPair fwdIs [invIs]
-    fwdIs = FDecl (Forall [] [] (TADT adtName `TArrow` TBool)) ["a"] ["b"] (IRApply (IRVar isFName) (IRVar "a")) (IRConst $ VBool True) False [("a", IRConst $ VFloat 1)]
+    fwdIs = FDecl (Forall [] [] (TADT adtName `TArrow` TBool)) [a] [b] (IRApply (IRVar isFName) (IRVar a)) (IRConst $ VBool True) False [(a, IRConst $ VFloat 1)]
     constrWithAnys = foldl (\e (_, fieldRT) -> IRApply e (IRConst (anyOfType fieldRT))) (IRVar constrName) rTypes  -- One position-correct Any for each parameter
-    invIs = FDecl (Forall [] [] (TBool `TArrow` TADT adtName)) ["b"] ["a"] (IRIf (IRVar "b") constrWithAnys (IRConst $ VAnyExcept [constrWithAnys])) (IRConst $ VBool True) False [("b", IRConst $ VFloat 1)]
+    invIs = FDecl (Forall [] [] (TBool `TArrow` TADT adtName)) [b] [a] (IRIf (IRVar b) constrWithAnys (IRConst $ VAnyExcept [constrWithAnys])) (IRConst $ VBool True) False [(b, IRConst $ VFloat 1)]
+    a = templateLocal "a"
+    b = templateLocal "b"
 
 fPairFromADTField :: RType -> ADTConstructorDecl -> (String, RType) -> (String, FPair)
 fPairFromADTField adtRT constr@(ownerName, _) (fieldName, fieldRT) = (fieldName, FPair fwd [inv])
   where
     -- Reading a field is only applicable to a sample carrying the constructor
     -- that declares it; see 'invConstr'.
-    fwd = FDecl (Forall [] [] (adtRT `TArrow` fieldRT)) ["a"] ["b"] (IRApply (IRVar fieldName) (IRVar "a")) (isConstrGuard ownerName (IRVar "a")) True [("a", IRConst $ VFloat 1)]
-    inv = FDecl (Forall [] [] (fieldRT `TArrow` adtRT)) ["b"] ["a"] (allAnyFieldsExcept constr fieldName (IRVar "b")) (IRConst $ VBool True) False [("b", IRConst $ VFloat 1)]
+    fwd = FDecl (Forall [] [] (adtRT `TArrow` fieldRT)) [a] [b] (IRApply (IRVar fieldName) (IRVar a)) (isConstrGuard ownerName (IRVar a)) True [(a, IRConst $ VFloat 1)]
+    inv = FDecl (Forall [] [] (fieldRT `TArrow` adtRT)) [b] [a] (allAnyFieldsExcept constr fieldName (IRVar b)) (IRConst $ VBool True) False [(b, IRConst $ VFloat 1)]
+    -- FDecl locals, disjoint from the accessor reference @IRVar fieldName@
+    -- even when the field is itself called @a@ or @b@ (see 'FDecl').
+    a = templateLocal "a"
+    b = templateLocal "b"
 
 -- | Runtime test that @v@ carries constructor @cName@, used as the
 -- applicability guard of every inverse that deconstructs an ADT sample. A
