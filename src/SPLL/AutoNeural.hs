@@ -74,7 +74,11 @@ neuralReadLogitsSuffix = "_auto"
 makeReadLogitsFunGroup :: [ADTDecl] -> CompilerConfig -> String -> RType -> Maybe MultiValue -> String -> IRFunGroup
 makeReadLogitsFunGroup adtDecls conf name target tag fwdDecl =
   IRFunGroup (name ++ neuralReadLogitsSuffix)
-    (Just (IRLambda symbol $ makeGen adtDecls plan name, "Wrapper for the neural network function"))
+    -- Under --noGenerate no generate function is emitted at all: Main.generate is gone, so
+    -- nothing could reach this sampler, and at vocabulary scale it is dead weight
+    -- (task nogenerate-keeps-neural-sampler).
+    (if noGenerate conf then Nothing
+     else Just (IRLambda symbol $ makeGen adtDecls plan name, "Wrapper for the neural network function"))
     (Just (makeProb adtDecls conf plan, "Inference function for neural network function"))
     Nothing
     Nothing

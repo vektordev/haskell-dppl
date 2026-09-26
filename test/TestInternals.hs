@@ -29,7 +29,7 @@ import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage)
 import SPLL.IRCompiler (injFLatentVerdicts, materializationVerdicts, planFactorExternals, enumeratedCount)
 import SPLL.Typing.PType (PType(Integrate, Deterministic))
 import Data.Foldable (toList)
-import Data.List (isInfixOf, intercalate, isPrefixOf, sort, nub)
+import Data.List (isInfixOf, intercalate, isPrefixOf, isSuffixOf, sort, nub)
 import Control.Exception (try, evaluate, ErrorCall(..))
 import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
@@ -43,6 +43,7 @@ import Control.Monad.Random (Rand, evalRand)
 import Control.Monad (forM_)
 import Data.Number.Erf (erf)
 import Utils (splitByString)
+import Data.Maybe (isJust)
 
 
 -- | The (prob, dim) pair a probability query must return; a different shape
@@ -3696,6 +3697,37 @@ valueSetTests = testGroup "valueListToMultiValue is a set at every level"
     isTCons (Expr _ (InjF (Named n) _)) = n == "TCons"
     isTCons _ = False
 
+-- Task nogenerate-keeps-neural-sampler: --noGenerate promises no generate
+-- code at all, but every neural declaration's <net>_auto group still carried a
+-- sampler. With Main.generate gone nothing can reach it, and at vocabulary
+-- scale it dominated the emitted file. Under the flag every group, the
+-- read-logits helpers included, has no genFun; without it the helper keeps one.
+noGenerateNeuralSamplerTests :: TestTree
+noGenerateNeuralSamplerTests = testGroup "--noGenerate drops the neural read-logits sampler"
+  [ testCase "under --noGenerate no group, _auto helpers included, has a genFun" $ do
+      IREnv groups _ _ <- compiled defaultCompilerConfig { noGenerate = True }
+      let autos = autoGroups groups
+      assertBool "expected a camNN_auto and a depthNN_auto group" (sort (map groupName autos) == ["camNN_auto", "depthNN_auto"])
+      assertEqual "groups still carrying a genFun" [] [groupName g | g <- groups, isJust (genFun g)]
+      assertBool "the helper's probability reader must survive" (all (isJust . probFun) autos)
+  , testCase "without --noGenerate the _auto helper keeps its sampler" $ do
+      IREnv groups _ _ <- compiled defaultCompilerConfig
+      assertBool "an _auto group lost its genFun" (all (isJust . genFun) (autoGroups groups))
+  ]
+  where
+    autoGroups = filter (("_auto" `isSuffixOf`) . groupName)
+    src = unlines
+      [ "neural camNN   :: (Symbol -> Int) of [0, 1, 2]"
+      , "neural depthNN :: (Symbol -> Int) of [0, 1, 2]"
+      , "main img depth ="
+      , "  draw v = camNN img in"
+      , "  draw w = depthNN depth in"
+      , "  if v == w then right v else left ()"
+      ]
+    compiled conf = case tryParseProgram "<test>" src of
+      Left err -> assertFailure ("Parse failed: " ++ show err)
+      Right prog -> either (\e -> assertFailure ("compile refused: " ++ show e)) return (compile conf prog)
+
 -- | Value-domain analysis at vocabulary scale (task
 -- agreement-compile-time-quadratic-in-domain). Tagging @a == b@ over two
 -- V-value operands used to evaluate all V^2 operand pairs, and every
@@ -3793,6 +3825,7 @@ internalsTests = testGroup "Internals"
   , letBinderTagTests
   , valueSetTests
   , domainScaleTests
+  , noGenerateNeuralSamplerTests
   , test_planEnumThreadedTopKAndBC
   , test_branchCountingDoesNotMultiplyIR
   , test_gaussianChainIRNotExponential
