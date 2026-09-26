@@ -1,0 +1,5 @@
+data Object = NoObj | Obj position::Float
+data Scene = Scene o1::Object, o2::Object
+neural readScene :: (Symbol -> Scene)
+g o = if isNoObj o then 0.0 else (if position o > 0.5 then 1.0 else 0.0)
+main s = draw sc = readScene s in g (o1 sc) + g (o2 sc)

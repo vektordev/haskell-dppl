@@ -1,0 +1,13 @@
+-- Counting over a fixed-width product scene (the layout of the CLEVR
+-- experiments' scene_ae.ppl: ten `Object` fields, not a cons list). The
+-- recursive cons-list spelling of the same count compiles and is exact
+-- (plan-enumeration/planEnumRecCount, and with Gaussian positions a
+-- `numRight s = ... + numRight (rest s)` scan), but a flat `+` of two
+-- plan-dependent summands is refused by the plan traversal ("unsupported
+-- node in plan traversal: InjF plus"), eagerly. Idealized value for slot
+-- existence (0.8, 0.9), positions N(0,1), N(1,2):
+-- q1 = 0.8 * (1 - Phi(0.5)) = 0.246830, q2 = 0.9 * (1 - Phi(-0.25)) = 0.538836,
+-- p(1.0) = q1 (1 - q2) + (1 - q1) q2 = 0.519664.
+-- Task plan-flat-sum-of-plan-dependent-summands; found by design
+-- clevr-position-experiments' arm-A readiness probe.
+expect-failure: diagnostic "unsupported node in plan traversal"

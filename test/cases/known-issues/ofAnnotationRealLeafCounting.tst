@@ -1,0 +1,14 @@
+-- Exact per-object counting (`++` over one read per object) when the object
+-- type also carries a continuous position. Without `px` this compiles and is
+-- exact (the CLEVR translator's shape); adding a `Real` leaf anywhere in the
+-- `of` annotation declines the whole annotation (Analysis: enumerating only
+-- the discrete residue would silently drop continuous mass), the
+-- DiscreteValues tag is lost, and `++` falls into set-valued witness
+-- construction, which refuses the tagged helper invocation eagerly. The count
+-- never reads `px`, so the continuous leaf is a free marginal and the
+-- idealized answer is the discrete one: with P(Obj)=0.8, P(Green|Obj)=0.5 per
+-- slot, q = 0.4 and p(1) = 2 q (1 - q) = 0.48.
+-- Task of-annotation-continuous-leaf-disables-enumeration; found by design
+-- clevr-position-experiments' arm-A readiness probe (also the "single biggest
+-- scope limit" of task exp-clevr-question-supervision-zeroshot).
+expect-failure: diagnostic "set-valued witness construction failed"

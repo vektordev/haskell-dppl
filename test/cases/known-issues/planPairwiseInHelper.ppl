@@ -1,0 +1,3 @@
+neural readPair :: (Symbol -> (Float, Float))
+before p = fst p < snd p
+main s = draw p = readPair s in before p

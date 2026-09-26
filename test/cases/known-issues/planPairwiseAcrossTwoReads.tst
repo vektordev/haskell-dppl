@@ -1,0 +1,11 @@
+-- A single pairwise relation between two continuous leaves read by two
+-- SEPARATE neural calls (one read per object -- the layout the CLEVR
+-- experiments use to keep plans linear in the object count). The same
+-- comparison inside ONE read (plan-enumeration/planEnumContPair) is measured
+-- exactly by the difference Gaussian; here the plan traversal meets the
+-- nested `draw b` as a Lambda callee, declines it, and the refusal is eager,
+-- so the whole compile dies (generate included). Idealized value for
+-- a ~ N(0,1), b ~ N(1,2): P(a < b) = Phi(1/sqrt(5)) = 0.672640.
+-- Task plan-pairwise-across-separate-neural-reads; found by design
+-- clevr-position-experiments' arm-A readiness probe.
+expect-failure: diagnostic "unsupported callee in plan traversal"

@@ -1,0 +1,2 @@
+neural readX :: (Symbol -> Float)
+main s1 s2 = draw a = readX s1 in draw b = readX s2 in a < b
