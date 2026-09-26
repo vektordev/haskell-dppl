@@ -448,9 +448,13 @@ irUniverse e = e : concatMap irUniverse (getIRSubExprs e)
 -- The literal logit indices an expression reads from the neural output vector.  `generate`
 -- uses constant indices throughout; `forward` adds a constant base offset to a dynamic
 -- indexOf(...) for discrete leaves, so we also take the constant operand of a `+`.
+-- A categorical leaf's draw is one 'BCategoricalIndex' over its whole slot window
+-- (task neural-categorical-sampler-nests-v-deep), which reads every slot in it.
 vectorIndices :: IRExpr -> [Int]
 vectorIndices root =
-  [ i | IRBuiltin BListIndex [IRVar v, idx] <- irUniverse root, v == vectorOut, i <- idxConsts idx ]
+  [ i | IRBuiltin BListIndex [IRVar v, idx] <- irUniverse root, v == vectorOut, i <- idxConsts idx ] ++
+  [ i | IRBuiltin (BCategoricalIndex start n) [_, IRVar v] <- irUniverse root, v == vectorOut
+      , i <- [start .. start + n - 1] ]
   where
     idxConsts (IRConst (VInt i)) = [i]
     idxConsts (IROp OpPlus a b)  = constOperand a ++ constOperand b

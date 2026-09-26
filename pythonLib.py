@@ -85,6 +85,31 @@ def rand():
 def randn():
   return gauss(0, 1)
 
+def categorical_index(u, w, start, n):
+  # Inverse-CDF categorical draw backing IR's BCategoricalIndex (task
+  # neural-categorical-sampler-nests-v-deep): the smallest k in [0, n) with
+  # u * S < w[start] + ... + w[start + k], S the sum of the n weights, clamped
+  # to n - 1 (rounding at the top of the CDF, or all-zero weights). The
+  # weights are unnormalised, so k is drawn with probability w[start + k] / S.
+  #
+  # w is a network's output: anything iterable (a list, or an InferenceList,
+  # read in one walk rather than a cons walk per slot), or anything with a
+  # cumsum (a torch tensor, a numpy array), which takes the vectorised path --
+  # at vocabulary scale, one kernel instead of tens of thousands of scalar
+  # reads.
+  if hasattr(w, "cumsum"):
+    c = w[start:start + n].cumsum(0)
+    below = int((c <= u * c[-1]).sum())
+    return min(below, n - 1)
+  seg = list(itertools.islice(w, start, start + n))
+  target = u * sum(seg)
+  acc = 0.0
+  for k, x in enumerate(seg):
+    acc += x
+    if target < acc:
+      return k
+  return n - 1
+
 def isAny(x):
   if x == "ANY":
     return True

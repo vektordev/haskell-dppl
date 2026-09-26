@@ -3756,6 +3756,7 @@ internalsTests :: TestTree
 internalsTests = testGroup "Internals"
   [ testProperties "properties" $(allProperties)
   , testGroup "tensor builtins" tensorBuiltinTests
+  , categoricalIndexTests
   , splitByStringTests
   , partialDestructorTests
   , classConstraintTests
@@ -3860,6 +3861,45 @@ evalClosedIR = generateDet [] [] (IREnv [] [] []) []
 -- | Sample a closed IR expression with no neural networks or globals.
 sampleClosedIR :: IRExpr -> IRValue
 sampleClosedIR e = evalRand (generateRand [] [] (IREnv [] [] []) [] e) (mkStdGen 0)
+
+-- ===========================================================================
+-- Inverse-CDF categorical index (neural-categorical-sampler-nests-v-deep)
+-- ===========================================================================
+
+-- | The interpreter is the reference semantics for 'BCategoricalIndex', which
+-- the three runtimes ('pythonLib', 'pythonLibBatched', 'juliaLib') each
+-- reimplement. These pin the contract stated on the constructor at the exact
+-- CDF boundaries, where an off-by-one (@<@ against @<=@) or a wrong offset
+-- would show, rather than statistically.
+--
+-- The fixture's weights sit at slots 1..4 of a six-slot vector whose outer
+-- slots are large, so reading the wrong window changes every answer. Its
+-- unnormalised weights are [1, 0, 3, 4], total 8, so the CDF steps are at
+-- u = 1/8, 1/8 (the empty slot), 4/8 and 1 -- all exact in binary.
+categoricalIndexTests :: TestTree
+categoricalIndexTests = testGroup "categorical index (neural-categorical-sampler-nests-v-deep)"
+  [ testCase "the draw lands on the slot whose CDF step first exceeds u times the total" $
+      forM_ [ (0.0, 0), (0.124, 0)          -- inside slot 0's [0, 1/8)
+            , (0.125, 2)                     -- the step itself belongs to the next non-empty slot
+            , (0.49, 2), (0.5, 3), (0.99, 3) ] $ \(u, k) ->
+        assertEqual ("u = " ++ show u) (Right (VInt k)) (idx u (weightList weights))
+  , testCase "a zero-weight slot is never drawn, even at its own CDF step" $
+      forM_ [0.0, 0.05, 0.125, 0.3, 0.6, 0.999] $ \u ->
+        assertBool ("u = " ++ show u ++ " drew the empty slot")
+                   (idx u (weightList weights) /= Right (VInt 1))
+  , testCase "u at the very top of the CDF clamps to the last slot" $
+      idx 1.0 (weightList weights) @?= Right (VInt 3)
+  , testCase "all-zero weights fall to the last slot, as the if-chain lottery did" $
+      idx 0.3 (weightList [0, 0, 0, 0, 0, 0]) @?= Right (VInt 3)
+  , testCase "a rank-1 tensor of weights reads the same window as a list" $
+      forM_ [0.0, 0.2, 0.5, 0.9] $ \u ->
+        idx u (IRBuiltin (BTensor [EFixed 6]) (map (IRConst . VFloat) weights)) @?= idx u (weightList weights)
+  ]
+  where
+    weights = [100, 1, 0, 3, 4, 100] :: [Double]
+    weightList ws = IRConst (VList (foldr (ListCont . VFloat) EmptyList ws))
+    idx :: Double -> IRExpr -> Either String IRValue
+    idx u w = evalClosedIR (IRBuiltin (BCategoricalIndex 1 4) [IRConst (VFloat u), w])
 
 -- ===========================================================================
 -- Partial destructors out of their domain (fuzz-structured-type-bugs, item 1)

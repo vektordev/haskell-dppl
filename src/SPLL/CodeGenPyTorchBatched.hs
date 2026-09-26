@@ -437,16 +437,15 @@ onHead _ []     = []
 -- untaken arm.
 --
 -- A neural read-logits network's own generate body ('SPLL.AutoNeural.makeGenRec') draws
--- from its output distribution: a sequential weighted lottery for a
--- discrete/categorical leaf (nested 'IRIf'/'IRSample' 'IRUniform' comparisons
--- against running normalised weight -- mathematically a categorical draw, the
--- same shape 'lottery' already builds for the *scalar* backend, not a fresh
--- policy invented here) and a Gaussian reparameterisation
+-- from its output distribution: an inverse-CDF categorical draw for a
+-- discrete/categorical leaf ('BCategoricalIndex' over one 'IRSample'
+-- 'IRUniform', lowered to one cumsum by 'categorical_index' -- it was a chain of
+-- nested 'IRIf's, one per value, until task neural-categorical-sampler-nests-v-deep)
+-- and a Gaussian reparameterisation
 -- (@mu + sample*sigma@, 'IRSample' 'IRNormal') for a continuous leaf, composed
--- over @IRConstruct TgTuple@ for tuples. None of that needed new IR nodes or
--- new 'pythonLibBatched.py' primitives: every node 'makeGenRec' emits was
--- already in the tensor fragment ('emittable' below), so removing the blanket
--- @isNeuralReadLogitsGroup@ exclusion this milestone had is sufficient. What
+-- over @IRConstruct TgTuple@ for tuples. Every node 'makeGenRec' emits is in
+-- the tensor fragment ('emittable' below), so removing the blanket
+-- @isNeuralReadLogitsGroup@ exclusion this milestone had was sufficient. What
 -- remains excluded -- 'EitherPlan' (@IRConstruct TgLeft@/@TgRight@
 -- construction has no tensor representation) and 'ADTPlan' (ADTs are refused
 -- for the whole batched compile already, see 'generateFunctionsBatched') --
@@ -1535,6 +1534,11 @@ batchedExpr env (IRBuiltin (BZip op) [a, b])
   | otherwise = error ("batched PyTorch codegen: BZip " ++ show op ++ " is not supported; "
                        ++ "only the arithmetic operands (OpPlus, OpMult, OpSub) have a "
                        ++ "gradient-safe elementwise lowering.")
+-- Inverse-CDF categorical draw (task neural-categorical-sampler-nests-v-deep):
+-- a [B] index tensor from one cumsum over the logit slice.
+batchedExpr env (IRBuiltin (BCategoricalIndex start n) [u, w]) =
+  "categorical_index(" ++ batchedExpr env u ++ ", " ++ batchedExpr env w ++ ", "
+    ++ show start ++ ", " ++ show n ++ ")"
 batchedExpr _ (IRBuiltin (BReduce _ ax) _) = error (batchedAxisUnsupported "BReduce" ax)
 batchedExpr _ (IRBuiltin (BIndex ax) _) = error (batchedAxisUnsupported "BIndex" ax)
 batchedExpr _ e@(IRBuiltin b args) =

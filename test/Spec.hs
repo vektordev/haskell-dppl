@@ -26,7 +26,7 @@ import TestModalityInfer (modalityInferTests)
 import TestDeterminism (determinismTests)
 import TestWriteLogitsProperties (writeLogitsTests, writeLogitsRoundtripTests)
 import TestShowcase (showcaseTests)
-import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, batchedPythonTests, slowBatchedPythonTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, batchedEnumBucketingTests, branchCountBackendTests)
+import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, batchedPythonTests, slowBatchedPythonTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, batchedEnumBucketingTests, branchCountBackendTests)
 import TestKnownIssues (knownIssuesTests)
 import TestFuzz (fuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
                  neuralGeneratorTests, arrowGeneratorTests, fuzzScalingTests,
@@ -558,6 +558,7 @@ main = do
     , batchedPy
     , batchedRefusalTests
     , batchedAdtCdfNaNGuardTests
+    , wideNeuralDomainTests
     , batchedEnumBucketingTests
     , branchCountBackends
     , slow

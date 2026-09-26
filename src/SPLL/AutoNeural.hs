@@ -338,16 +338,36 @@ totalSize ps = sum (map getSize (snd ps))
 vecAt :: Int -> IRExpr
 vecAt ix = IRBuiltin BListIndex [IRVar vector, IRConst (VInt ix)]
 
--- could probably be simplified by memoizing the total weights, or assuming normalization.
+-- | Draw one of @values@ with probability proportional to its weight, the
+-- logit slots @startIx .. startIx + length values - 1@.
+--
+-- One 'BCategoricalIndex' over one 'IRUniform' picks the slot, and the slot is
+-- mapped back to its value (task neural-categorical-sampler-nests-v-deep). This
+-- used to be a chain of nested 'IRIf's, one per value, each re-summing the
+-- remaining weights to condition on not having stopped yet: the same
+-- distribution, but O(V^2) emitted text and V levels of nesting, which CPython
+-- refuses to import past 98 values ("too many levels of indentation").
+--
+-- A contiguous ascending 'VInt' domain -- @[0, .., V-1]@, the vocabulary and
+-- class-index shape -- maps slot to value arithmetically, and a Bool domain by a
+-- comparison; any other domain reads the value out of a constant table, which is
+-- O(V) text but no nesting.
 lottery :: [IRValue] -> Int -> IRExpr
 lottery [value] _ = IRConst value
-lottery values startIx = IRIf
-  (IROp OpLessThan (IRSample IRUniform) (wtfirst))
-  (IRConst (head values))
-  (lottery (tail values) (startIx + 1))
-    where
-      nValues = length values
-      wtfirst = IROp OpDiv (vecAt startIx) (totalWeight nValues startIx)
+lottery values startIx = slotToValue values
+  (IRBuiltin (BCategoricalIndex startIx (length values)) [IRSample IRUniform, IRVar vector])
+
+slotToValue :: [IRValue] -> IRExpr -> IRExpr
+slotToValue values@(VInt k0 : _) slot
+  | values == map VInt [k0 .. k0 + length values - 1] =
+      if k0 == 0 then slot else IROp OpPlus slot (IRConst (VInt k0))
+-- A Bool domain is a comparison rather than a table, so the result is a boolean
+-- in every backend -- the batched runtime's table read ('tensor_index') would
+-- widen a constant table's entries to floats.
+slotToValue [VBool a, VBool b] slot | a /= b =
+  IROp OpEq slot (IRConst (VInt (if b then 1 else 0)))
+slotToValue values slot =
+  IRBuiltin (BIndex 0) [IRBuiltin (BTensor [EFixed (length values)]) (map IRConst values), slot]
 
 constructorLottery :: [ADTDecl] -> [(String, [PartitionPlan])] -> Int -> Int -> IRExpr
 constructorLottery _adtDecls [] _flagIx _valueIx = IRError "No element was sampled. There was an error calculating weights!"

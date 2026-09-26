@@ -986,6 +986,93 @@ batchedAdtCdfNaNGuardTests = testGroup "batched ADT-cdf NaN guard" $
   ]
 
 -- ===========================================================================
+-- Wide neural domains (task neural-categorical-sampler-nests-v-deep)
+-- ===========================================================================
+
+-- | A read-logits network's categorical sampler used to be emitted as one
+-- nested @if@/@else@ per domain value, re-summing the remaining weights at
+-- each level. CPython refuses a module past 100 indentation levels, so any
+-- @neural@ declaration with 99 or more values produced a Python module that
+-- failed at /import/ -- 'forward' included, since the helper is emitted with
+-- or without @-G@. The known-issues corpus cannot pin this: it runs programs
+-- through the interpreter, which has no indentation limit.
+--
+-- So these compile a 150-value declaration to Python and run it. 150 is past
+-- the old 98-value ceiling with room to spare, and short of 200, where
+-- @main@'s writeLogits (a separate V-deep emission, filed as its own ticket)
+-- trips CPython's parenthesis limit. The network is a mock returning a
+-- one-hot weight vector, so the draw is deterministic whatever the random
+-- stream does, and a wrong slot or a wrong slot-to-value mapping fails
+-- outright rather than statistically.
+--
+-- Two domains, one per slot-to-value mapping in 'SPLL.AutoNeural.lottery':
+-- a contiguous 0-based range (the slot is the value) and an even-number one
+-- (read out of a constant table).
+wideNeuralDomainTests :: TestTree
+wideNeuralDomainTests = testGroup "wide neural domain (neural-categorical-sampler-nests-v-deep)"
+  [ testGroup "Python" [ testProperty name (once (scalarCase domain)) | (name, domain) <- domains ]
+  , testGroup "BatchedPython" [ testProperty name (once (batchedCase domain)) | (name, domain) <- domains ]
+  ]
+  where
+    width = 150 :: Int
+    hot = 137 :: Int
+    domains = [ ("contiguous 0..149", [0 .. width - 1])
+              , ("table 0,2..298", [0, 2 .. 2 * (width - 1)]) ]
+    src domain = unlines
+      [ "neural readDigit :: (Symbol -> Int) of [" ++ intercalate ", " (map show domain) ++ "]"
+      , "main img = readDigit img" ]
+    compiled batchedMode domain = do
+      p <- either (Left . ("fixture failed to parse: " ++) . show) Right (tryParseProgram "" (src domain))
+      either (Left . ("fixture failed to compile: " ++)) Right
+             (compile defaultCompilerConfig{batched = batchedMode} p)
+    oneHot = "[" ++ intercalate ", " [ if i == hot then "1.0" else "0.0" | i <- [0 .. width - 1] ] ++ "]"
+    runScript py name script = do
+      (code, out, err) <- withSystemTempFile name $ \tmpPath tmpHandle -> do
+        hPutStr tmpHandle script
+        hClose tmpHandle
+        readProcessWithExitCode py [tmpPath] ""
+      return $ case code of
+        ExitSuccess -> property True
+        ExitFailure _ -> counterexample ("the emitted module failed:\n" ++ out ++ err) False
+    scalarCase domain = ioProperty $ case compiled False domain of
+      Left err -> return (counterexample err False)
+      Right env -> do
+        cwd <- getCurrentDirectory
+        let code = unpack (replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n")
+                                   (pack (intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True env))))
+        runScript "python3" "wide_neural_domain.py" $ unlines
+          [ "import sys", "sys.path.insert(0, " ++ show cwd ++ ")", code
+          , "def readDigit(s):", "    return s"
+          , "w = " ++ oneHot
+          , "for _ in range(20):"
+          , "    r = main.generate(w)"
+          , "    if r != " ++ show (domain !! hot) ++ ":"
+          , "        raise ValueError('generate drew ' + repr(r) + ', expected " ++ show (domain !! hot) ++ "')"
+          , "if abs(main.forward(" ++ show (domain !! hot) ++ ", w)[0] - 1.0) > 1e-9:"
+          , "    raise ValueError('forward disagrees with the one-hot network')"
+          ]
+    batchedCase domain = ioProperty $ do
+      mpy <- findTorchPython
+      case mpy of
+        Nothing -> do
+          hPutStrLn stderr "wide neural domain: batched case skipped -- no torch-enabled python found (set NEST_TORCH_PYTHON)."
+          return (property True)
+        Just py -> case compiled True domain >>= generateFunctionsBatched True of
+          Left err -> return (counterexample err False)
+          Right srcLines -> do
+            cwd <- getCurrentDirectory
+            runScript py "wide_neural_domain_batched.py" $ unlines
+              [ "import sys", "sys.path.insert(0, " ++ show cwd ++ ")", unlines srcLines
+              , "import torch"
+              , "def readDigit(s):", "    return s"
+              , "B = 64"
+              , "w = torch.tensor(" ++ oneHot ++ ").expand(B, -1)"
+              , "r = main.generate(w, B)"
+              , "if not bool((torch.as_tensor(r) == " ++ show (domain !! hot) ++ ").all()):"
+              , "    raise ValueError('batched generate drew ' + repr(r) + ', expected all " ++ show (domain !! hot) ++ "')"
+              ]
+
+-- ===========================================================================
 -- Enumeration bucketing (task batched-bucketing-splits-on-nullary-constructors)
 -- ===========================================================================
 --

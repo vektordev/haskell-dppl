@@ -12,11 +12,12 @@
 --   stack run -- -i benchmarks/stressAgreementProduct.ppl compile -l python -o /tmp/fused.py
 --   stack run -- -c -i benchmarks/stressAgreementProduct.ppl compile -l python -o /tmp/joint.py
 --
--- Note when scaling V up: emitted *size* is O(V^2) whichever path inference
--- takes, because AutoNeural's categorical SAMPLER unrolls a normalization
--- chain in the `generate` function. That is unrelated to this task and
--- dominates both the compile time and the file at large V -- strip or ignore
--- `generate` when timing the probability function.
+-- Emitted size used to be O(V^2) whichever path inference took, because
+-- AutoNeural's categorical sampler unrolled a normalization chain in each
+-- network's `generate` -- one nesting level per class, so at V = 100 this very
+-- file compiled to a module Python refused to import. It is one
+-- `categorical_index` call now (task neural-categorical-sampler-nests-v-deep),
+-- and the module is about 7 KB.
 --
 -- The compiler's own analysis of `v == w` is O(V) as well (task
 -- agreement-compile-time-quadratic-in-domain). Before, it evaluated all V^2

@@ -222,6 +222,19 @@ def nn_gather(out, idx):
     return out[..., idx_t]
   return out[torch.arange(out.shape[0]), idx_t]
 
+def categorical_index(u, out, start, n):
+  # Inverse-CDF categorical draw backing IR's BCategoricalIndex (task
+  # neural-categorical-sampler-nests-v-deep), one per batch position: u is a
+  # [B] uniform draw, out the [B, N] logit tensor, and the result the [B]
+  # integer index k of the smallest cumulative weight of out[..., start:start+n]
+  # exceeding u times the row's total, clamped to n - 1. One cumsum over the
+  # slice, instead of the n-arm torch.where cascade the if-chain lowered to.
+  seg = out[..., start:start + n]
+  c = seg.cumsum(-1)
+  target = astensor(u) * c[..., -1]
+  below = (c <= target.unsqueeze(-1)).sum(-1)
+  return below.clamp(max=n - 1)
+
 # --- enumeration membership -------------------------------------------------
 # `x in {vals}` as an elementwise [B] bool mask (e.g. "is the residual c - a a
 # valid digit?" in MNIST addition). x is evaluated once by the caller and passed
@@ -286,7 +299,11 @@ def tensor_index(xs, idx):
   stacked = _tensor_stack(xs)
   idx_t = idx.long() if torch.is_tensor(idx) else torch.tensor(int(idx))
   idx_t = idx_t.clamp(0, stacked.shape[0] - 1)
-  if idx_t.dim() == 0:
+  # A 1-D stack is an axis of batch-independent constants (every element was a
+  # Python scalar, e.g. the value table a categorical draw's slot is mapped
+  # through, task neural-categorical-sampler-nests-v-deep): there is no batch
+  # axis to gather along, and a [B] index is a plain lookup into it.
+  if idx_t.dim() == 0 or stacked.dim() == 1:
     return stacked[idx_t]
   return stacked.gather(0, idx_t.unsqueeze(0).expand(1, stacked.shape[1])).squeeze(0)
 

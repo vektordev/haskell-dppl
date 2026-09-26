@@ -318,6 +318,28 @@ data Builtin
   -- are let-bound scalars rather than a table (design ir-reengineering, slice
   -- S2).
   | BListIndex
+  -- | @BCategoricalIndex start n [u, w]@ -- the inverse-CDF index of the
+  -- uniform @u@ (in @[0, 1)@) in the categorical whose /unnormalised/ weights
+  -- are @w[start] .. w[start + n - 1]@: the smallest @k@ in @[0, n)@ with
+  -- @u * S < w[start] + .. + w[start + k]@, @S@ the sum of all @n@ weights,
+  -- clamped to @n - 1@ when no @k@ qualifies (rounding at the top of the CDF,
+  -- or an all-zero @w@). Index @k@ is therefore drawn with probability
+  -- @w[start + k] / S@ when @u@ is uniform (task
+  -- neural-categorical-sampler-nests-v-deep).
+  --
+  -- It is /pure/: the randomness is the @u@ argument, an ordinary
+  -- 'IRSample' 'IRUniform', so every pass that decides purity or
+  -- effectfulness by looking for an 'IRSample' in the subtree (CSE,
+  -- 'isPureGiven') needs no case for it. @w@ is anything 'BListIndex' can read
+  -- a weight out of (a network's logit vector); @start@ and @n@ are static,
+  -- like 'BReduce'\'s axis, because a read-logits plan's slot offsets are.
+  --
+  -- It exists because the only other way to write a categorical draw in this
+  -- IR is a chain of @n@ nested 'IRIf's, which every text backend renders
+  -- @n@ levels deep -- CPython rejects a module past 100 indentation levels --
+  -- and which re-sums a suffix of the weights at each level, so O(n^2) text.
+  -- This node is O(n) work and O(1) text and nesting in every backend.
+  | BCategoricalIndex Int Int
   deriving (Show, Eq)
 
 -- | The argument count each 'Builtin' takes, or 'Nothing' for the variadic
@@ -333,6 +355,7 @@ builtinArity (BIndex _)    = Just 2
 builtinArity (BZip _)      = Just 2
 builtinArity BMapList      = Just 2
 builtinArity BListIndex    = Just 2
+builtinArity (BCategoricalIndex _ _) = Just 2
 
 -- | Check an 'IRBuiltin'\'s argument list against 'builtinArity' -- and, for
 -- 'BTensor', against its shape -- failing loudly with the offending node.

@@ -428,6 +428,13 @@ generateExpression (IRBuiltin (BZip op) [a, b]) = do
     aa <- generateExpression a
     bb <- generateExpression b
     return $ "((" ++ aa ++ ") ." ++ juliaOps op ++ " (" ++ bb ++ "))"
+-- Inverse-CDF categorical draw (task neural-categorical-sampler-nests-v-deep).
+-- 'start' is passed 0-based and converted inside juliaLib's categorical_index,
+-- which also returns the 0-based index the IR means.
+generateExpression (IRBuiltin (BCategoricalIndex start n) [u, w]) = do
+    uu <- generateExpression u
+    ww <- generateExpression w
+    return $ "categorical_index(" ++ uu ++ ", " ++ ww ++ ", " ++ show start ++ ", " ++ show n ++ ")"
 generateExpression (IRError e) =
     return $ "throw(\"" ++ escapeStr e ++ "\")"
 generateExpression (IRConformsTo t x) = do

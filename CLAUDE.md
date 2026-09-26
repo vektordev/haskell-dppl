@@ -1242,6 +1242,30 @@ declaration (`data T = … depth N`) — otherwise give a depth-bounded
 override (`3x.{...}`) or compilation errors. Only *direct* self-recursion
 is auto-detected.
 
+### A read-logits network's categorical sampler is one call
+
+A discrete leaf of a read-logits network's own `generate`
+(`AutoNeural.lottery`) is `IRBuiltin (BCategoricalIndex start n) [u, vec]`:
+the inverse-CDF slot index of one uniform `u` over the leaf's `n` unnormalised
+logit slots, mapped back to its value arithmetically (a contiguous `Int`
+range), by a comparison (`Bool`), or through a constant `BTensor` table
+(anything else). It is **pure** -- the randomness is the `IRSample IRUniform`
+argument -- so no purity or CSE rule needed a case for it. Each runtime has a
+`categorical_index` (`pythonLib.py`, `pythonLibBatched.py` as one cumsum,
+`juliaLib.jl`); the interpreter is the reference, pinned at the CDF boundaries
+by `Internals/categorical index`.
+
+It replaced a chain of nested `IRIf`s, one per value, each re-summing the
+remaining weights: O(V^2) text, and one indentation level per value, so CPython
+refused to import any module with a 99+-value `neural` domain (`forward`
+included). `End2End`'s `wide neural domain` group compiles a 150-value
+declaration and runs it. Two things are still V-deep: `main`'s own
+`writeLogits`, a nested `ConsInferenceList` chain that trips CPython's
+200-parenthesis limit at V = 200 (docs-repo task
+`writelogits-cons-chain-nests-v-deep`); and `constructorLottery`, the same
+if-chain over an ADT's constructors, which only bites an ADT with ~100
+constructors and is left as it is.
+
 ### AutoNeural naming: `readLogits` / `writeLogits`
 
 Two independent directions live in `SPLL.AutoNeural`, and both are named for

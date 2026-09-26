@@ -582,8 +582,32 @@ generate f neurals' registry adts' globalEnv env args (IRBuiltin (BZip op) [aExp
                             ++ show shA ++ " against " ++ show shB)
     (VTensor _ _, b) -> failWith f ("BZip: right operand is not a tensor: " ++ show b)
     (a, _) -> failWith f ("BZip: left operand is not a tensor: " ++ show a)
+-- Inverse-CDF categorical index (task neural-categorical-sampler-nests-v-deep);
+-- the contract is on 'BCategoricalIndex'. The weight vector is whatever
+-- 'BListIndex' reads a logit slot out of -- a cons list here -- or a rank-1
+-- tensor.
+generate f neurals' registry adts' globalEnv env args (IRBuiltin (BCategoricalIndex start n) [uExpr, wExpr]) = do
+  uVal <- generate f neurals' registry adts' globalEnv env args uExpr
+  wVal <- generate f neurals' registry adts' globalEnv env args wExpr
+  u <- case uVal of
+    VFloat x -> return x
+    other -> failWith f ("BCategoricalIndex: uniform draw is not a float: " ++ show other)
+  elems <- case wVal of
+    VList l -> return (map (l `elementAt`) [start .. start + n - 1])
+    VTensor [_] xs -> return (take n (drop start xs))
+    other -> failWith f ("BCategoricalIndex: weights are not a list or rank-1 tensor: " ++ show other)
+  ws <- mapM (\w -> case w of
+                 VFloat x -> return x
+                 other -> failWith f ("BCategoricalIndex: weight is not a float: " ++ show other)) elems
+  if length ws /= n || n < 1
+    then failWith f ("BCategoricalIndex " ++ show start ++ " " ++ show n
+                ++ ": weight vector too short, got " ++ show (length ws) ++ " weights")
+    else do
+      let target = u * sum ws
+          below = length (takeWhile (<= target) (scanl1 (+) ws))
+      return (VInt (min (n - 1) below))
 generate f _ _ _ _ _ _ e@(IRBuiltin b args) =
-  failWith f ("Malformed tensor builtin " ++ show b ++ " with " ++ show (length args)
+  failWith f ("Malformed tensor builtin" ++ show b ++ " with " ++ show (length args)
          ++ " arguments: " ++ show e)
 -- 'IRError' is deliberately left throwing. It is not a compiler-internal
 -- failure that escaped a channel -- it is a node the compiler *emitted on

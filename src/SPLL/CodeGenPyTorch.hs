@@ -724,6 +724,13 @@ generateExpression (IRBuiltin (BZip op) [a, b]) = do
   let (x, y) = ("_z" ++ show n ++ "a", "_z" ++ show n ++ "b")
   return ("[((" ++ x ++ ") " ++ pyOps op ++ " (" ++ y ++ ")) for "
           ++ x ++ ", " ++ y ++ " in zip(" ++ aa ++ ", " ++ bb ++ ")]")
+-- Inverse-CDF categorical draw (task neural-categorical-sampler-nests-v-deep):
+-- one runtime call, so the emitted text is O(1) in the domain size and adds no
+-- nesting, where the if-chain it replaces was one indentation level per value.
+generateExpression (IRBuiltin (BCategoricalIndex start n) [u, w]) = do
+  uu <- generateExpression u
+  ww <- generateExpression w
+  return ("categorical_index(" ++ uu ++ ", " ++ ww ++ ", " ++ show start ++ ", " ++ show n ++ ")")
 generateExpression (IRError e) =
   return ("throw(\"" ++ escapeStr e ++ "\")")
 generateExpression (IRConformsTo t x) = do

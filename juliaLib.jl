@@ -1,6 +1,6 @@
 module JuliaSPPLLib
 
-export safe_log, density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, log_density_IRUniform, log_density_IRNormal, log_cumulative_IRUniform, log_cumulative_IRNormal, logsumexp, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, mapList, eq, isPossible, isclose, indexOf, listProd, T, Either, Left, Right, fromLeft, fromRight,==
+export safe_log, categorical_index, density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, log_density_IRUniform, log_density_IRNormal, log_cumulative_IRUniform, log_cumulative_IRNormal, logsumexp, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, mapList, eq, isPossible, isclose, indexOf, listProd, T, Either, Left, Right, fromLeft, fromRight,==
 
 
 function isAny(x)
@@ -99,6 +99,26 @@ function logsumexp(xs)
         return -Inf
     end
     return m + log(sum(exp(x - m) for x in xs))
+end
+
+# Inverse-CDF categorical draw backing IR's BCategoricalIndex (task
+# neural-categorical-sampler-nests-v-deep): the smallest k in [0, n) with
+# u * S < w[start] + ... + w[start + k], S the sum of the n weights, clamped to
+# n - 1. `start` and the result are 0-based, as in the IR; `w` is 1-based.
+function categorical_index(u, w, start, n)
+    total = 0.0
+    for k in 1:n
+        total += w[start + k]
+    end
+    target = u * total
+    acc = 0.0
+    for k in 1:n
+        acc += w[start + k]
+        if target < acc
+            return k - 1
+        end
+    end
+    return n - 1
 end
 
 function eq(a, b)
