@@ -14,6 +14,25 @@
 import math
 import torch
 
+# --- the runtime's float dtype (task python-codegen-silent-precision-traps) ---
+# Every python number this runtime turns into a tensor -- a folded constant arm
+# of a select, a packed query sample, an empty reduction's identity, a poison,
+# a generate draw -- is made in DTYPE, never in torch's global default dtype.
+# That default is float32, and before this every such site silently used it: a
+# program whose whole answer the compiler had folded into one constant (an
+# exact tail probability, say) came back truncated to ~7 digits while the
+# emitted source showed all 16, with no warning anywhere.
+#
+# float64 is the safe choice (the scalar backends and the interpreter compute
+# in double); the price is speed, which a caller who wants float32 can buy back
+# by editing this one line. It is deliberately a runtime-local anchor rather
+# than torch.set_default_dtype: importing a compiled module must not change the
+# dtype of the caller's own networks, and a tensor the caller passes in keeps
+# its dtype -- a 0-d constant never promotes a [B] tensor, so a float32
+# network's outputs stay float32 wherever they flow. Pinned by
+# test/TestPythonPrelude.hs (test/prelude_numerics_probe.py, batched-dtype).
+DTYPE = torch.float64
+
 # --- distribution densities / cumulatives (tensor formulas) -----------------
 # These are the exact vectorisations of pythonLib's hand-rolled scalar formulas.
 
@@ -43,10 +62,10 @@ def sign(x):
 # wasteful) elementwise mixture.
 
 def rand(n):
-  return torch.rand(n)
+  return torch.rand(n, dtype=DTYPE)
 
 def randn(n):
-  return torch.randn(n)
+  return torch.randn(n, dtype=DTYPE)
 
 # --- gradient-safe unsafe ops (double-where masking) -------------------------
 # In batched mode both arms of a torch.where run over the whole batch, so an
@@ -81,7 +100,7 @@ def safe_div(a, b):
 # differential (design pytorch-tensorizer, M3).
 
 def poison():
-  return torch.tensor(float('nan'))
+  return torch.tensor(float('nan'), dtype=DTYPE)
 
 # --- throw (task batched-adt-accessor-unguarded) ----------------------------
 # The scalar pythonLib.py's `throw`, defined here for the same reason and with
@@ -187,7 +206,7 @@ def isclose(a, b):
 # tensor before torch.where.
 
 def astensor(x):
-  return x if torch.is_tensor(x) else torch.tensor(float(x))
+  return x if torch.is_tensor(x) else torch.tensor(float(x), dtype=DTYPE)
 
 def asmask(x):
   # Coerce a torch.where condition to a bool tensor. Tensor comparison results
@@ -196,7 +215,28 @@ def asmask(x):
   return x if torch.is_tensor(x) else torch.tensor(bool(x))
 
 def _dtype(x):
-  return x.dtype if torch.is_tensor(x) else torch.get_default_dtype()
+  return x.dtype if torch.is_tensor(x) else DTYPE
+
+def _anchor(x):
+  # A select arm as a tensor of its own kind: a python float in DTYPE, a bool
+  # as bool and an int as int64 (so a boolean or integer select stays one), a
+  # tensor untouched.
+  if torch.is_tensor(x) or x is None:
+    return x
+  if isinstance(x, bool):
+    return torch.tensor(x)
+  if isinstance(x, int):
+    return torch.tensor(x, dtype=torch.int64)
+  if isinstance(x, float):
+    return torch.tensor(x, dtype=DTYPE)
+  return x
+
+def where_anchored(c, t, f):
+  # The emitted form of every value-dependent select (CodeGenPyTorchBatched's
+  # torchWhere). torch.where on two python-float arms has no dtype anchor and
+  # builds its result in torch's global default dtype -- float32 -- which is
+  # how a folded tail constant lost half its digits.
+  return torch.where(asmask(c), _anchor(t), _anchor(f))
 
 # --- neural: gather a per-element logit slot ---------------------------------
 # A neural read-logits network reads `logits[sample]`: for each batch element, the logit
@@ -268,19 +308,22 @@ def _tensor_stack(xs):
   if not ts:
     return torch.stack([astensor(x) for x in xs])
   ref = ts[0]
-  return torch.stack([x if torch.is_tensor(x) else torch.full_like(ref, float(x))
+  dt = ref.dtype
+  for t in ts[1:]:
+    dt = torch.promote_types(dt, t.dtype)
+  return torch.stack([x.to(dt) if torch.is_tensor(x) else torch.full(ref.shape, float(x), dtype=dt, device=ref.device)
                       for x in xs])
 
 def tensor_sum(xs):
   if not xs:
-    return torch.tensor(0.0)
+    return torch.tensor(0.0, dtype=DTYPE)
   if len(xs) == 1:
     return xs[0]
   return _tensor_stack(xs).sum(0)
 
 def tensor_logsumexp(xs):
   if not xs:
-    return torch.tensor(-math.inf)
+    return torch.tensor(-math.inf, dtype=DTYPE)
   if len(xs) == 1:
     return xs[0]
   return torch.logsumexp(_tensor_stack(xs), 0)
@@ -620,7 +663,7 @@ def _pack(vs):
     return torch.tensor([bool(v) for v in vs])
   if isinstance(head, int):
     return torch.tensor([int(v) for v in vs])
-  return torch.tensor([float(v) for v in vs])
+  return torch.tensor([float(v) for v in vs], dtype=DTYPE)
 
 def _slice_arg(a, idx, total):
   # A per-point extra argument (e.g. a [B, n] neural symbol batch) is sliced to
@@ -759,7 +802,10 @@ def _scalar_domain_index(domain, samp):
   # Index lookup for a scalar domain against an already-packed [B] tensor: one
   # O(B*V) torch comparison, no per-sample Python. Returns (idx, all_present);
   # a sample matching no domain slot must not be answered from the vector.
-  dom = torch.tensor([float(v) for v in domain], dtype=torch.get_default_dtype())
+  # Compared in the samples' own float dtype, so a caller's float32 query
+  # still matches its domain slot exactly.
+  dom = torch.tensor([float(v) for v in domain],
+                     dtype=samp.dtype if samp.is_floating_point() else DTYPE)
   eq = (samp.to(dom.dtype).unsqueeze(-1) == dom.unsqueeze(0))
   return eq.to(torch.int64).argmax(-1), bool(eq.any(-1).all())
 

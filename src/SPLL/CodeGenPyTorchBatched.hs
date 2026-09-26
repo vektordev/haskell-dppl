@@ -1689,12 +1689,17 @@ batchedExpr env (IRDestruct (AcSubtree i) e) = "(" ++ batchedExpr env e ++ ")[1]
 batchedExpr _env (IRError _) = "poison()"
 batchedExpr _ e = error ("batched PyTorch codegen: unexpected node " ++ irPrintFlat e)
 
--- | @torch.where@: the condition is coerced to a bool tensor ('asmask') so a
--- batch-independent (Python-bool) mask -- e.g. a comparison of two folded
--- constants -- still broadcasts against the tensor arms.
+-- | @torch.where@, via the runtime's @where_anchored@: the condition is
+-- coerced to a bool tensor ('asmask') so a batch-independent (Python-bool)
+-- mask -- e.g. a comparison of two folded constants -- still broadcasts against
+-- the tensor arms, and each Python-number arm is made a tensor in the
+-- runtime's float64 @DTYPE@ first. A bare @torch.where@ between two Python
+-- floats has no dtype anchor and answers in torch's global default, float32,
+-- which silently truncated a folded constant carrying the whole answer (task
+-- python-codegen-silent-precision-traps).
 torchWhere :: SEnv -> IRExpr -> IRExpr -> IRExpr -> String
 torchWhere env c t f =
-  "torch.where(asmask(" ++ batchedExpr env c ++ "), "
+  "where_anchored(" ++ batchedExpr env c ++ ", "
   ++ batchedExpr env t ++ ", " ++ batchedExpr env f ++ ")"
 
 -- | The batched runtime function reducing a tensor axis with each operator.

@@ -3,6 +3,7 @@ from typing import Iterable
 from math import *
 from random import random, gauss
 import itertools
+import sys
 
 def sign(x):
   return -1 if x < 0 else 0 if x == 0 else 1
@@ -27,13 +28,43 @@ def sign(x):
 # cannot reintroduce the same class of bug. (The batched backend already did
 # this: `safe_log` in `pythonLibBatched.py` is the torch-side twin.)
 
+# --- torch-transparent math -------------------------------------------------
+#
+# The scalar backend is also the one a user trains through when a program has
+# neural leaves: its arguments are then torch tensors, not floats. `math.erf`,
+# `math.exp` and `math.log` do not raise on a tensor -- they convert it through
+# `__float__` and return a plain float, with nothing but a UserWarning -- so a
+# function calling them severs the autograd graph and a model trains through a
+# dead gradient while still drawing a believable loss curve (task
+# python-codegen-silent-precision-traps; the classification of every function
+# here is investigation scalar-pythonlib-autograd-severing-inventory).
+#
+# Every function below with a real derivative that would otherwise pass through
+# `math` therefore dispatches on `torch.is_tensor` first. torch is looked up in
+# `sys.modules` rather than imported: a caller that passes a tensor has
+# necessarily imported torch already, and a caller that has not keeps a
+# torch-free runtime. The tensor arm computes the same formula as the float
+# arm, so the two agree in value. `test/TestPythonPrelude.hs` (driving
+# `test/prelude_numerics_probe.py`) pins value and gradient for each, and fails
+# on any new public function nobody has classified -- add a new function there.
+
+def _torch_for(x):
+  t = sys.modules.get("torch")
+  return t if t is not None and t.is_tensor(x) else None
+
 def safe_exp(x):
+  t = _torch_for(x)
+  if t is not None:
+    return t.exp(x)          # saturates to inf, as the float arm does
   try:
     return math.exp(x)
   except OverflowError:
     return math.inf
 
 def safe_log(x):
+  t = _torch_for(x)
+  if t is not None:
+    return t.log(x)          # -inf at 0, nan below, as the float arm does
   if x > 0:
     return math.log(x)
   return -math.inf if x == 0 else math.nan
@@ -48,6 +79,9 @@ def density_normal(x):
   return 1 / sqrt(2 * pi) * e**(-(x**2)/2)
 
 def cumulative_normal(x):
+  t = _torch_for(x)
+  if t is not None:
+    return (1.0 + t.erf(x / sqrt(2.0))) / 2.0
   return (1.0 + erf(x / sqrt(2.0))) / 2.0
 
 # Native log-pdf/log-cdf (task log-space-probability-computation), computed
@@ -58,22 +92,38 @@ def log_density_uniform(x):
   return 0.0 if 0 <= x <= 1 else -math.inf
 
 def log_cumulative_uniform(x):
-  c = cumulative_uniform(x)
-  return -math.inf if c <= 0 else math.log(c)
+  # Inside [0, 1] the CDF is x itself -- a tensor when x is -- and outside it a
+  # python constant whose (zero) derivative is correctly dropped.
+  return _log_cdf(cumulative_uniform(x))
 
 def log_density_normal(x):
   return -(x**2) / 2 - 0.5 * math.log(2 * pi)
 
 def log_cumulative_normal(x):
-  c = cumulative_normal(x)
+  return _log_cdf(cumulative_normal(x))
+
+def _log_cdf(c):
+  t = _torch_for(c)
+  if t is not None:
+    return t.log(c)          # -inf where the CDF is 0, as below
   return -math.inf if c <= 0 else math.log(c)
 
-# Log-sum-exp reduction backing IRLogEnumSum's emitted code: the log-space
-# sibling of a plain sum() over enumerated per-value log-probabilities.
+# Log-sum-exp reduction backing the log-space enumerated sum (BReduce
+# ROpLogSumExp): the log-space sibling of a plain sum() over enumerated
+# per-value log-probabilities. With tensor terms it must be torch's own: the
+# float arm's math.exp/math.log would leave only the max term's constant
+# derivative of 1 instead of each term's softmax weight. Python-float terms
+# among tensor ones (a folded constant arm) are lifted to the tensors' dtype.
 def logsumexp(xs):
   xs = list(xs)
   if not xs:
     return -math.inf
+  ts = [x for x in xs if _torch_for(x) is not None]
+  if ts:
+    t = _torch_for(ts[0])
+    ref = ts[0]
+    return t.logsumexp(t.stack([x if t.is_tensor(x) else t.tensor(float(x), dtype=ref.dtype)
+                                for x in xs]), 0)
   m = max(xs)
   if m == -math.inf:
     return -math.inf

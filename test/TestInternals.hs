@@ -2334,7 +2334,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
           assertBool ("constructor test not emitted as an if statement: " ++ unlines ls)
             (any ("if isJust1(sample):" `isInfixOf`) ls)
           assertBool ("accessor still evaluated eagerly under torch.where: " ++ unlines ls)
-            (not (any (\l -> "torch.where" `isInfixOf` l && "v(sample)" `isInfixOf` l) ls))
+            (not (any (\l -> "where_anchored(" `isInfixOf` l && "v(sample)" `isInfixOf` l) ls))
   -- Task batched-adt-accessor-unguarded: the batched backend's field accessors
   -- used to be a bare `return x.v`, so a read off a sibling constructor was
   -- whatever AttributeError torch-land raised, while the interpreter and the
@@ -2409,7 +2409,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
           assertBool ("constructor-tested arm in the map body is not a lazy conditional: " ++ unlines ls)
             (any ("(v(o) if isJust1(o) else 0.0)" `isInfixOf`) ls)
           assertBool ("accessor still evaluated eagerly under torch.where: " ++ unlines ls)
-            (not (any (\l -> "torch.where" `isInfixOf` l && "v(o)" `isInfixOf` l) ls))
+            (not (any (\l -> "where_anchored(" `isInfixOf` l && "v(o)" `isInfixOf` l) ls))
   -- Task batched-bucketing-splits-on-nullary-constructors: an ADT whose
   -- constructors are all nullary is an enumeration -- its tag is a value, not a
   -- structure -- so it is emitted collapsed: one bucket for the whole ADT
@@ -2523,7 +2523,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
           assertBool ("structural alias not emitted as an if statement: " ++ unlines ls)
             (any ("if cse_0:" `isInfixOf`) ls)
           assertBool ("accessor still evaluated eagerly under torch.where: " ++ unlines ls)
-            (not (any (\l -> "torch.where" `isInfixOf` l && "fromLeft(sample)" `isInfixOf` l) ls))
+            (not (any (\l -> "where_anchored(" `isInfixOf` l && "fromLeft(sample)" `isInfixOf` l) ls))
   -- IRConstruct/IRDestruct (design ir-reengineering, slice S1a): dead code
   -- today, but 'emittable' admits every tag/accessor unconditionally, mirroring
   -- every one of their old-shape counterparts above (all of which are already

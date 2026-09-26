@@ -1740,3 +1740,33 @@ Generated Python code depends on `pythonLib.py` (scalar) or
 `pythonLibBatched.py` (batched mode, see above); generated Julia code
 depends on `juliaLib.jl`. These provide runtime helpers for the transpiled
 inference functions.
+
+### The Python runtimes under torch: gradients and dtype
+
+Both Python runtimes are hand-written code the emitted modules call into, and a
+model trained through them passes torch tensors where the value tests pass
+floats. Two silent failure classes lived there, each found by an experiment
+rather than by this suite (task `python-codegen-silent-precision-traps`):
+
+- **`pythonLib` severed autograd.** `math.erf`/`exp`/`log` convert a tensor
+  through `__float__` and return a float with only a `UserWarning`, so
+  `cumulative_normal`, `log_cumulative_normal`, `log_cumulative_uniform`,
+  `safe_exp`, `safe_log` and `logsumexp` (the log-space enumerated sum) trained
+  through a dead gradient. Each now dispatches on `torch.is_tensor` (via
+  `_torch_for`, which reads `sys.modules` so the library stays torch-free for
+  float callers). Experiments' `torch_math_patch.py` monkey-patches are inert
+  now and no longer needed.
+- **`pythonLibBatched` built python numbers in torch's global default dtype**
+  (float32): a folded constant selected by `torch.where` between two python
+  floats lost half its digits while the emitted source showed all of them.
+  Every such site now uses the runtime-local `DTYPE = torch.float64`, and the
+  emitted select is `where_anchored(c, t, f)` rather than a bare `torch.where`.
+  This is deliberately **not** `torch.set_default_dtype`: importing a compiled
+  module must not change the dtype of the caller's own networks, and a tensor
+  the caller passes keeps its dtype.
+
+`test/TestPythonPrelude.hs` (probes in `test/prelude_numerics_probe.py`) pins
+value, gradient and dtype for both runtimes, and **fails on any new public
+`pythonLib` function** that is not classified in the probe's tables — adding
+one means deciding whether a tensor can reach it. All but that classification
+check need a torch-enabled python and skip without one, like `BatchedPython`.

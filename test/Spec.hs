@@ -28,6 +28,7 @@ import TestWriteLogitsProperties (writeLogitsTests, writeLogitsRoundtripTests)
 import TestShowcase (showcaseTests)
 import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, batchedPythonTests, slowBatchedPythonTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, batchedEnumBucketingTests, branchCountBackendTests)
 import TestKnownIssues (knownIssuesTests)
+import TestPythonPrelude (pythonPreludeTests)
 import TestFuzz (fuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
                  neuralGeneratorTests, arrowGeneratorTests, fuzzScalingTests,
                  injFCatalogTests)
@@ -559,6 +560,7 @@ main = do
     , batchedRefusalTests
     , batchedAdtCdfNaNGuardTests
     , wideNeuralDomainTests
+    , pythonPreludeTests
     , batchedEnumBucketingTests
     , branchCountBackends
     , slow
