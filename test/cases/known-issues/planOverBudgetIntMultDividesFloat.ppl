@@ -1,0 +1,5 @@
+data DigitList = DEnd | DCons dig::Int, rest::DigitList depth 4
+
+neural readDigits :: (Symbol -> DigitList) of 4x.{DEnd | DCons [0,1,2,3,4,5,6,7,8,9] x}
+
+main sym = draw ds = readDigits sym in if isDCons ds then (if dig ds * 3 == 21 then 1 else 0) else 0

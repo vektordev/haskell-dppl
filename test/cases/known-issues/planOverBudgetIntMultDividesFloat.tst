@@ -1,0 +1,11 @@
+-- An observation through an Int multiplication (`dig ds * 3 == 21`) on the
+-- plan-guided route. The 11111-value `of` domain is over the default
+-- materialization budget, so dense enumeration declines and the plan traversal
+-- peels the `mult`; its inverse divides the Int target by a Float `1.0 / 3`
+-- that the optimizer's constant folder cannot evaluate, and the whole compile
+-- dies. The dense route (`--materializationBudget 100000`) compiles it, and so
+-- did int-mult-inversion-divides-and-crashes's fix for the point-inversion
+-- route: that fix moved `multIInv*` to OpIntDiv, but the plan peel does not
+-- use it. Idealized: p(1) = P(ds is a DCons whose head digit is 7).
+-- Task: plan-peel-int-mult-divides-float.
+expect-failure: diagnostic "OpDiv VFloat 1.0 VInt 3"
