@@ -1664,6 +1664,32 @@ against the **interpreter**, which never renders a literal.
 log-space compile through a text backend, and each asserts both halves — no
 bare `Infinity`, *and* the mapped literal present — so neither can go vacuous.
 
+### Python lines deeper than 200 brackets are spilled
+
+CPython's tokenizer refuses to open a 201st bracket level in one line
+(`MAXLEVEL`, "too many nested parentheses") -- a constant, not a limit a caller
+can raise -- and the scalar Python backend parenthesises every `IROp`, so a
+right-nested world sum over ~190 plan worlds (`isbn_checksum` at depth 6, the
+`planOverBudget*` programs at up to 3296 levels) compiled to a module that
+could not be imported. `CodeGenPyTorch.liftedLine` renders each line as
+before, measures it (`pythonNestingDepth`, string-literal aware), and only
+past `pythonMaxNesting` regenerates it with its deep subterms let-bound into
+`_sN` temporaries first (`spillDeep`, cutting at an estimated depth of 64).
+Every module that parsed before is byte-identical (checked across the whole
+corpus when this landed).
+
+A subterm moves only if it sits in a **strict** position (operator operands,
+an `if`-expression's condition, constructor/accessor/builtin/call arguments --
+never an arm, the right operand of `and`/`or`, or anything under a binder) and
+is **pure arithmetic** (`spillable`: no draw, no generator reference, no call,
+no lambda). A whole conditional expression may move, intact with its guard.
+The no-call rule is the approved scope, and it is why `writeLogits`'s V-deep
+`ConsInferenceList(main.forward(..)[0], ...)` chain is still refused at V = 200
+(docs-repo task `writelogits-cons-chain-nests-v-deep`). The Julia and batched
+Python emitters have no such pass and were not checked. Pinned by `End2End`'s
+`deep expression spill` group (hand-built IR: a 300-term sum, with a
+divide-by-zero arm as the laziness canary).
+
 ### Unary math must not raise where the interpreter answers
 
 The interpreter is the reference semantics, so a backend's unary math has to be

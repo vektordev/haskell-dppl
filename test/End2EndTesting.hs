@@ -1072,6 +1072,58 @@ wideNeuralDomainTests = testGroup "wide neural domain (neural-categorical-sample
               ]
 
 -- ===========================================================================
+-- Deep expressions are spilled (task python-codegen-exceeds-parser-nesting-limit)
+-- ===========================================================================
+--
+-- CPython refuses a line nested more than 200 brackets deep, and the IR builds
+-- long sums right-nested with every level parenthesised, so a plan route with
+-- ~190 top-level worlds compiled to a module that could not be imported. The
+-- scalar backend now let-binds deep pure subterms of such a line into
+-- temporaries, and leaves every line that already parsed alone.
+--
+-- The fixture is hand-built IR rather than a program, since the smallest
+-- program known to reach the limit (isbn_checksum at depth 6) takes minutes to
+-- compile. One summand is a laziness canary: its arm divides by zero and its
+-- guard is never true, so hoisting the arm out of the conditional (rather than
+-- the whole conditional) raises at import-and-call time.
+deepExpressionSpillTests :: TestTree
+deepExpressionSpillTests = testGroup "deep expression spill (python-codegen-exceeds-parser-nesting-limit)"
+  [ testProperty "a 300-term sum imports and evaluates" (once deepCase)
+  , testProperty "a 60-term sum is emitted without spilling" (once shallowCase)
+  ]
+  where
+    x = IRVar "x"
+    lit = IRConst . VFloat
+    term i = IRIf (IROp OpGreaterThan x (lit i)) (lit 1.0) (lit 0.0)
+    canary = IRIf (IROp OpGreaterThan x (lit 1.0e9)) (IROp OpDiv (lit 1.0) (lit 0.0)) (lit 0.0)
+    sumOf n = foldr1 (IROp OpPlus) (canary : map (term . fromIntegral) [1 .. n :: Int])
+    envOf n = IREnv [IRFunGroup { groupName = "main", genFun = Nothing
+                                , probFun = Just (IRLambda "x" (sumOf n), "")
+                                , integFun = Nothing, writeLogitsFun = Nothing
+                                , normalFun = Nothing, groupDoc = "", sampleDomain = Nothing }] [] []
+    source n = unpack (replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n")
+                               (pack (intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True (envOf n)))))
+    spillLines = filter (isPrefixOf "_s" . dropWhile (== ' ')) . lines
+    deepCase = ioProperty $ do
+      cwd <- getCurrentDirectory
+      let src = source 300
+      (code, out, err) <- withSystemTempFile "deep_expression_spill.py" $ \tmpPath tmpHandle -> do
+        hPutStr tmpHandle $ unlines
+          [ "import sys", "sys.path.insert(0, " ++ show cwd ++ ")", src
+          , "for q, want in [(150.5, 150.0), (-1.0, 0.0), (1000.0, 300.0)]:"
+          , "    got = main.forward(q)"
+          , "    if got != want:"
+          , "        raise ValueError('forward(%r) = %r, expected %r' % (q, got, want))"
+          ]
+        hClose tmpHandle
+        readProcessWithExitCode "python3" [tmpPath] ""
+      return $ counterexample ("the emitted module failed:\n" ++ out ++ err)
+                 (code == ExitSuccess)
+          .&&. counterexample "no spill temporaries were emitted" (not (null (spillLines src)))
+    shallowCase = let src = source 60
+                  in counterexample src (null (spillLines src))
+
+-- ===========================================================================
 -- Enumeration bucketing (task batched-bucketing-splits-on-nullary-constructors)
 -- ===========================================================================
 --

@@ -14,10 +14,11 @@
 -- twice after substitution, so the value grouping must stay off (the two
 -- copies share every leaf); counting syntactic occurrences alone enabled it and
 -- answered 0.1202 at (1.0, 1.0). The oracle is numRed's own law on the
--- diagonal. Two readers means one world per scene path, a module too deep for
--- CPython's parser and Julia's (python-codegen-exceeds-parser-nesting-limit),
--- so this runs on the interpreter only, under `slow`; planMultiReaderInnerDraw
--- is its fast depth-3 twin on every backend.
+-- diagonal. Two readers means one world per scene path, a module that was too
+-- deep for CPython's parser and Julia's. Python accepts it since
+-- python-codegen-exceeds-parser-nesting-limit; Julia is still excluded
+-- (unchecked). Under `slow`, which runs the interpreter only;
+-- planMultiReaderInnerDraw is its fast depth-3 twin on every backend.
 data Color = Red | Green | Blue
 data Object = NoObj | Obj color::Color
 data Scene = Empty | SCons obj::Object, rest::Scene depth 7

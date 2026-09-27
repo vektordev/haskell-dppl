@@ -16,8 +16,9 @@
 -- it enumerates one world per scene path and emits 8,213,998 bytes of Python
 -- -- more than the dense module's ~6MB. The size is follow-up task
 -- plan-multi-reader-value-grouping. `slow` because the interpreter takes ~30s
--- per row; interpreter only, because the module is too deep for CPython's and
--- Julia's parsers (python-codegen-exceeds-parser-nesting-limit). Fast depth-3
+-- per row. Routed to Python too since python-codegen-exceeds-parser-nesting-limit
+-- spills the module's too-deep lines; not to Julia, whose parser also refused
+-- it (unchecked since). The slow tree runs the interpreter only. Fast depth-3
 -- twin on every backend: planMultiReaderTuplePair.
 data Color = Red | Green | Blue
 data Object = NoObj | Obj color::Color

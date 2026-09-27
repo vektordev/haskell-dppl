@@ -11,8 +11,10 @@
 -- P(>= 2) = 0.0394187876, planEnumRecCountOfLazy).
 --
 -- Part 2 with two readers of the scene: same psMerge limitation as
--- planOverBudgetTuplePair (2,971,640 bytes of Python), so `slow`, interpreter only (parser nesting limits). Fast depth-3 twin:
--- planMultiReaderPlusIf.
+-- planOverBudgetTuplePair (2,971,640 bytes of Python), so `slow`. Python
+-- since python-codegen-exceeds-parser-nesting-limit spills its once-3296-deep
+-- lines; not Julia (unchecked). The slow tree runs the interpreter only.
+-- Fast depth-3 twin: planMultiReaderPlusIf.
 data Color = Red | Green | Blue
 data Object = NoObj | Obj color::Color
 data Scene = Empty | SCons obj::Object, rest::Scene depth 7

@@ -16,7 +16,7 @@ import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..), shapeRank)
 import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, accessorMismatchMessage, fieldAccessorOwners)
-import Data.List (intercalate, intersperse, isPrefixOf, dropWhileEnd)
+import Data.List (intercalate, intersperse, isPrefixOf, isSuffixOf, dropWhileEnd)
 import Data.Char (toUpper)
 import Data.Maybe (fromMaybe)
 import Control.Monad.State (StateT (runStateT), MonadState (get, put), MonadTrans (lift))
@@ -525,10 +525,10 @@ generateStatementBlock (IRLetIn name x body) = do
   s2 <- generateStatementBlock body
   return (s1 ++ s2)
 generateStatementBlock (IRIf cond left right) = do
-  (condStmts, cCond) <- generateExpressionLifted cond
+  (condStmts, cCond) <- liftedLine cond
   cLeft  <- generateStatementBlock left
   cRight <- generateStatementBlock right
-  let l1 = "if " ++ renderLifted cCond ++ ":"
+  let l1 = "if " ++ cCond ++ ":"
   return $ condStmts ++ [l1] ++ indentOnce cLeft ++ mergeElif cRight
 generateStatementBlock (IRConstruct TgTuple [IRConstruct TgTuple [f, s], bc]) = do
   fStmts  <- generateLetInStatement "_r0" f
@@ -540,18 +540,18 @@ generateStatementBlock (IRConstruct TgTuple [f, s]) = do
   sStmts <- generateLetInStatement "_r1" s
   return (fStmts ++ sStmts ++ ["return T(_r0, _r1)"])
 generateStatementBlock expr = do
-  (stmts, e) <- generateExpressionLifted expr
-  return (stmts ++ ["return " ++ renderLifted e])
+  (stmts, e) <- liftedLine expr
+  return (stmts ++ ["return " ++ e])
 
 
 generateLetInStatement :: String -> IRExpr -> GlobalVariableSupply [String]
 generateLetInStatement name lmd@(IRLambda _ _) =
   generateFunction False (name, (lmd, "Inner function: " ++ name))
 generateLetInStatement name (IRIf cond left right) = do
-  (condStmts, c) <- generateExpressionLifted cond
+  (condStmts, c) <- liftedLine cond
   leftStmts  <- generateLetInStatement name left
   rightStmts <- generateLetInStatement name right
-  return $ condStmts ++ ["if " ++ renderLifted c ++ ":"] ++ indentOnce leftStmts ++ mergeElif rightStmts
+  return $ condStmts ++ ["if " ++ c ++ ":"] ++ indentOnce leftStmts ++ mergeElif rightStmts
 generateLetInStatement name (IRConstruct TgTuple [f, s]) = do
   fStmts <- generateLetInStatement (name ++ "_0") f
   sStmts <- generateLetInStatement (name ++ "_1") s
@@ -561,8 +561,199 @@ generateLetInStatement name (IRLetIn innerName innerVal body) = do
   bodyStmts  <- generateLetInStatement name body
   return (innerStmts ++ bodyStmts)
 generateLetInStatement name x = do
-  (stmts, expr) <- generateExpressionLifted x
-  return (stmts ++ [name ++ " = " ++ renderLifted expr])
+  (stmts, expr) <- liftedLine x
+  return (stmts ++ [name ++ " = " ++ expr])
+
+-- ---------------------------------------------------------------------------
+-- Spilling deep expressions (task python-codegen-exceeds-parser-nesting-limit)
+-- ---------------------------------------------------------------------------
+--
+-- CPython's tokenizer refuses to open a 201st bracket level in one logical
+-- line (@MAXLEVEL@, "too many nested parentheses"). That is a constant of the
+-- interpreter, not a recursion limit a caller can raise, so a module whose
+-- deepest line goes past it can never be imported -- @forward@ and @generate@
+-- go down with it. The IR builds long sums right-nested (a plan route's world
+-- sum, 'SPLL.Semiring.mixP' folded over hundreds of worlds), and every level
+-- of an 'IROp' is parenthesised, so ~190 worlds are enough.
+--
+-- The fix is local to this backend, because the limit is: each emitted line
+-- is rendered as before and measured ('pythonNestingDepth'); only a line past
+-- 'pythonMaxNesting' is regenerated with its deep subterms let-bound into
+-- temporaries first ('spillDeep'). Every module that parsed before is
+-- therefore byte-identical.
+--
+-- Hoisting a subterm into a preceding statement evaluates it earlier and
+-- unconditionally, so only two kinds of subterm move:
+--
+-- * one in a /strict/ position -- a position Python evaluates whenever the
+--   line runs: an operand of an arithmetic/comparison operator, the condition
+--   of a conditional expression, a constructor or accessor argument, ...
+--   Never an arm of a conditional expression, the right operand of the
+--   short-circuiting @and@/@or@, or anything under a binder (a lambda or a
+--   comprehension body), since the guard is what protects it and the binder
+--   is not in scope before the line;
+-- * one that is /pure arithmetic/ ('spillable'): no random draw, no call.
+--   A call may be a generator or may not terminate, and moving it ahead of a
+--   sibling could change which draw or which failure is observed. A spilled
+--   subterm may itself contain a whole conditional expression -- it is moved
+--   intact, with its guard.
+--
+-- Every free name of a spilled subterm is already bound before the line,
+-- because the only binders the walk crosses are 'IRLetIn's, which it turns
+-- into statements ahead of the spills they scope over (the same thing
+-- 'generateExpressionLifted' does to them anyway).
+--
+-- The Julia and batched Python backends are separate emitters and are not
+-- covered by this; neither has been checked against a deep line.
+
+-- | CPython's @MAXLEVEL@: the deepest bracket nesting one line may reach.
+pythonMaxNesting :: Int
+pythonMaxNesting = 200
+
+-- | The estimated nesting at which 'spillDeep' cuts a subterm out. Well below
+-- 'pythonMaxNesting', since the estimate is structural and the line keeps
+-- whatever cannot be spilled.
+spillNestingThreshold :: Int
+spillNestingThreshold = 64
+
+-- | Render one line's expression, spilling it first if the plain rendering
+-- would be deeper than Python accepts. Returns the prefix statements and the
+-- rendered expression.
+liftedLine :: IRExpr -> GlobalVariableSupply ([String], String)
+liftedLine e = do
+  (stmts, se) <- generateExpressionLifted e
+  let rendered = renderLifted se
+  if pythonNestingDepth rendered <= pythonMaxNesting
+    then return (stmts, rendered)
+    else do
+      (_, callables) <- get
+      (binds, e') <- lift (spillDeep callables e)
+      if null binds
+        -- Nothing strict and pure to cut out; emit as before rather than loop.
+        then return (stmts, rendered)
+        else do
+          -- Each binding is a strictly smaller subterm, and goes through
+          -- 'generateLetInStatement' (hence through here) on its own.
+          bindStmts <- concat <$> mapM (uncurry generateLetInStatement) binds
+          (stmts', se') <- generateExpressionLifted e'
+          return (bindStmts ++ stmts', renderLifted se')
+
+-- | The deepest bracket nesting (@(@, @[@, @{@) of a rendered Python line,
+-- ignoring brackets inside string literals.
+pythonNestingDepth :: String -> Int
+pythonNestingDepth = go 0 0
+  where
+    go _ m [] = m
+    go d m (c:cs)
+      | c == '"' || c == '\'' = go d m (skipString c cs)
+      | c `elem` "([{"       = let d' = d + 1 in go d' (max m d') cs
+      | c `elem` ")]}"       = go (d - 1) m cs
+      | otherwise            = go d m cs
+    skipString _ [] = []
+    skipString q ('\\':_:cs) = skipString q cs
+    skipString q (c:cs)
+      | c == q    = cs
+      | otherwise = skipString q cs
+
+-- | A subterm that may be evaluated ahead of its line: pure arithmetic over
+-- names -- no random draw, no generator reference, no call, no binder. (Tensor
+-- and list builtins such as an index are pure; one carrying a lambda is ruled
+-- out by the binder.)
+spillable :: [String] -> IRExpr -> Bool
+spillable callables = go
+  where
+    go (IRSample _)   = False
+    go (IRApply _ _)  = False
+    go (IRLambda _ _) = False
+    go (IRLetIn {})   = False
+    go (IRVar n)      = not (n `elem` callables || isEffectfulVar n
+                             || ".generate" `isSuffixOf` n)
+    go e              = all go (getIRSubExprs e)
+
+-- | The children of a node Python evaluates whenever the node is evaluated,
+-- with a function rebuilding the node from replacements for them. 'Nothing'
+-- for a leaf, a binder, or a node whose operands are not all strict in a way
+-- this can express.
+strictChildren :: IRExpr -> Maybe ([IRExpr], [IRExpr] -> IRExpr)
+strictChildren expr = case expr of
+  IRIf c l r -> Just ([c], \cs -> IRIf (one cs) l r)
+  IROp OpAnd l r -> Just ([l], \cs -> IROp OpAnd (one cs) r)
+  IROp OpOr l r -> Just ([l], \cs -> IROp OpOr (one cs) r)
+  IROp op l r -> Just ([l, r], \cs -> case cs of
+                                        [l', r'] -> IROp op l' r'
+                                        _ -> arityError)
+  IRUnaryOp op x -> Just ([x], IRUnaryOp op . one)
+  IRDensity d ls x -> Just ([x], IRDensity d ls . one)
+  IRCumulative d ls x -> Just ([x], IRCumulative d ls . one)
+  IRDestruct a x -> Just ([x], IRDestruct a . one)
+  IRConstruct t xs -> Just (xs, IRConstruct t)
+  IRConformsTo t x -> Just ([x], IRConformsTo t . one)
+  IRIsPossible mv x -> Just ([x], IRIsPossible mv . one)
+  -- A lambda argument (a 'BMap' body) is a leaf to the walk and never
+  -- spillable, so only the builtin's value operands can move.
+  IRBuiltin b xs -> Just (xs, IRBuiltin b)
+  -- Python evaluates the callee and every argument before the call. The spine
+  -- is taken whole, since this backend uncurries it into one call.
+  IRApply _ _ -> let (f, args) = collectApplyChain expr
+                 in Just (f : args, \cs -> case cs of
+                                             (f' : args') -> foldl IRApply f' args'
+                                             [] -> arityError)
+  _ -> Nothing
+  where
+    one [x] = x
+    one _ = arityError
+    arityError = error "strictChildren: rebuilt with the wrong number of children"
+
+-- | The structural nesting estimate of a subterm: one level per node. An
+-- over-estimate of the rendered bracket depth is harmless (it only spills a
+-- little early, on a line that has to change anyway).
+nestingEstimate :: IRExpr -> Int
+nestingEstimate e = case getIRSubExprs e of
+  [] -> 0
+  cs -> 1 + maximum (map nestingEstimate cs)
+
+-- | Cut the deep strict subterms of a line into let-bindings, returning the
+-- bindings in evaluation order and the residual expression. The walk is
+-- bottom-up: at a node whose estimated nesting passes
+-- 'spillNestingThreshold', every compound, 'spillable' strict child is
+-- replaced by a fresh variable, so the node's depth starts over from one.
+spillDeep :: [String] -> IRExpr -> VariableSupply ([(String, IRExpr)], IRExpr)
+spillDeep callables e0 = do
+  (binds, e', _) <- go e0
+  return (binds, e')
+  where
+    go (IRLetIn n v b) = do
+      (bb, b', d) <- go b
+      return ((n, v) : bb, b', d)
+    go expr = case strictChildren expr of
+      Nothing -> return ([], expr, nestingEstimate expr)
+      Just (kids, rebuild) -> do
+        results <- mapM go kids
+        let lazyDepth = maximum (0 : map nestingEstimate (lazyChildren expr))
+            depth = 1 + maximum (lazyDepth : [d | (_, _, d) <- results])
+        if depth <= spillNestingThreshold
+          then return (concat [b | (b, _, _) <- results], rebuild [k | (_, k, _) <- results], depth)
+          else do
+            cut <- mapM spillOne results
+            let binds = concat [b | (b, _, _) <- cut]
+                kids' = [k | (_, k, _) <- cut]
+            return (binds, rebuild kids', 1 + maximum (lazyDepth : [d | (_, _, d) <- cut]))
+    spillOne (b, k, d)
+      | compound k && spillable callables k = do
+          n <- demandUniqueNumber
+          let tmp = "_s" ++ show n
+          return (b ++ [(tmp, k)], IRVar tmp, 0)
+      | otherwise = return (b, k, d)
+    compound (IRVar _) = False
+    compound (IRConst _) = False
+    compound _ = True
+    -- The children 'strictChildren' leaves in place: they still count towards
+    -- the node's depth.
+    lazyChildren expr = case expr of
+      IRIf _ l r -> [l, r]
+      IROp OpAnd _ r -> [r]
+      IROp OpOr _ r -> [r]
+      _ -> []
 
 generateExpression :: IRExpr -> GlobalVariableSupply String
 generateExpression (IRIf cond left right) = do
