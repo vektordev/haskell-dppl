@@ -1,0 +1,4 @@
+add x y = x + y
+add3 x y z = add (add x y) z
+coin = if Uniform < 0.3 then 0 else 10
+main = (add3 1.0 2.0 0.5 + Uniform, add3 1 2 3 + coin)

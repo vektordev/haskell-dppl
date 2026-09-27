@@ -31,8 +31,10 @@ import SPLL.InferenceRule
 import PredefinedFunctions (globalFEnv, FPair(..), FDecl(..))
 import SPLL.Lang.Types (FnDecl, ADTDecl, CompilerError, GenericValue(..), SourceSpan(..), spanPretty)
 import SPLL.Typing.AlgebraicDataTypes
+import SPLL.Typing.Monomorphize (monomorphize)
 import Data.Bifunctor
-import Control.Monad (replicateM)
+import Data.Graph (stronglyConnComp, flattenSCC)
+import Control.Monad (replicateM, foldM, forM_, unless)
 
 -- changes: in infer and inferProg; also changed TypeSigs to remove RType of main expression.
 
@@ -252,7 +254,15 @@ addRTypeInfo = addRTypeInfoAt 0
 -- meaningful to a user. It is a real debugging aid for someone working on this
 -- module, so it is kept and moved behind @-v@ rather than deleted.
 addRTypeInfoAt :: Int -> Program -> Either CompilerError Program
-addRTypeInfoAt verbosity p =
+addRTypeInfoAt verbosity p = case addRTypeInfoMono verbosity p of
+  Right typed -> Right typed
+  Left err -> retryMonomorphized err (addRTypeInfoMono verbosity) p
+
+-- | The monomorphic inference: every top-level declaration has one type,
+-- shared by all of its uses. Tried first, so every program it accepts is typed
+-- exactly as it always was.
+addRTypeInfoMono :: Int -> Program -> Either CompilerError Program
+addRTypeInfoMono verbosity p =
   case runInfer (basicTEnv (adts p)) (inferProg p) of
     Left err -> Left (renderRTypeError err)
     Right (cs, classCs, p2) -> case runSolve cs of
@@ -271,11 +281,78 @@ addRTypeInfoAt verbosity p =
         Right () -> Right (apply subst p2)
 
 tryAddRTypeInfo :: Program -> Either RTypeError Program
-tryAddRTypeInfo p@(Program _ _ adtsDecl _) = do
+tryAddRTypeInfo p = case tryAddRTypeInfoMono p of
+  Right typed -> Right typed
+  Left err -> retryMonomorphized err tryAddRTypeInfoMono p
+
+tryAddRTypeInfoMono :: Program -> Either RTypeError Program
+tryAddRTypeInfoMono p@(Program _ _ adtsDecl _) = do
   (cs, classCs, prog) <- runInfer (basicTEnv adtsDecl) (inferProg p)
   subst <- runSolve cs
   checkClassConstraints subst classCs
   return $ apply subst prog
+
+-- | The fallback when monomorphic inference rejects a program (design
+-- @polymorphic-monomorphization@): infer it again with let-generalisation of
+-- top-level declarations, clone every polymorphic declaration once per type it
+-- is used at ('monomorphize'), and type the clones monomorphically. Anything
+-- going wrong on this path -- the program is ill-typed under generalisation
+-- too, or (never expected) the clones do not type -- reports the original,
+-- monomorphic error, so every diagnostic a program got before is unchanged.
+--
+-- Trying monomorphic inference first is what keeps every previously accepted
+-- program typed exactly as before: this path only ever turns a rejection into
+-- an acceptance.
+retryMonomorphized :: e -> (Program -> Either e Program) -> Program -> Either e Program
+retryMonomorphized err mono p = case monomorphizing p of
+  Right p' -> either (const (Left err)) Right (mono p')
+  Left _ -> Left err
+
+-- | Generalise, then clone. 'Left' carries a reason for debugging only.
+monomorphizing :: Program -> Either String Program
+monomorphizing p = do
+  typed <- first show (runExcept (evalStateT (runReaderT (inferGeneralized p) (basicTEnv (adts p))) initInfer))
+  monomorphize p (Map.fromList typed)
+
+-- | Hindley-Milner inference with let-generalisation of top-level
+-- declarations. Declarations are processed in dependency order, one strongly
+-- connected component of the call graph at a time: within a component every
+-- member is monomorphic (so mutual recursion is at one type, as HM has it),
+-- and after solving the component each member's type is generalised over all
+-- of its free variables -- the environment of earlier components is closed,
+-- so there is nothing to exclude. Class constraints on a generalised variable
+-- become part of the scheme and are re-emitted, renamed, at each use by
+-- 'instantiate'; the rest are checked against the component's substitution.
+--
+-- Answers each declaration's scheme and its typed body, in which a reference
+-- to a polymorphic declaration carries the type of that one use.
+inferGeneralized :: Program -> Infer [(String, (Scheme, Expr))]
+inferGeneralized p = do
+  Program decls _ adtsDecl _ <- addTVarsEverywhere p
+  let declNames = Set.fromList (map fst decls)
+      neuralEnv = map (\(a, b, _) -> (a, Forall [] [] b)) (neurals p)
+      components = stronglyConnComp
+        [ (d, n, Set.toList (Set.intersection declNames (freeVarsExpr e))) | d@(n, e) <- decls ]
+      component done members = do
+        tvs <- mapM (const fresh) members
+        modify (\s -> s { collectedClassConstraints = [] })
+        let polyEnv = [ (n, sc) | (n, (sc, _)) <- done ]
+            monoEnv = zip (map fst members) (map (Forall [] []) tvs)
+        cts <- mapM ((inTEnvF (polyEnv ++ monoEnv ++ neuralEnv) . infer adtsDecl) . snd) members
+        let equalities = zipWith (\t1 t2 -> Constraint t1 t2 Nothing) tvs (map fst3cts cts)
+        subst <- either throwError return (runSolve (equalities ++ concatMap snd3cts cts))
+        classCs <- gets collectedClassConstraints
+        let resolved = [ (applyCC subst cc, apply subst (TVarR (constraintTV cc))) | cc <- classCs ]
+        forM_ resolved $ \(cc, t) -> case t of
+          TVarR _ -> return ()
+          _ -> unless (satisfiesClass cc t) (throwError (ClassConstraintViolation cc t))
+        let generalise ty =
+              let vs = Set.toList (ftv ty)
+              in Forall vs [ cc | (cc, TVarR v) <- resolved, v `elem` vs ] ty
+            typedMembers = [ (n, (generalise (apply subst tv), apply subst (trd3cts ct)))
+                           | ((n, _), tv, ct) <- zip3 members tvs cts ]
+        return (done ++ typedMembers)
+  foldM (\done scc -> component done (flattenSCC scc)) [] components
 
 rtFromScheme :: Scheme -> RType
 rtFromScheme (Forall _ _ rt) = rt

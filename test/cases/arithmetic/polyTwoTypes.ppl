@@ -1,0 +1,2 @@
+add x y = x + y
+main = (add Uniform 2.0, add (if Uniform < 0.3 then 1 else 5) 10)

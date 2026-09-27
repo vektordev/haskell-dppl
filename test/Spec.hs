@@ -20,6 +20,7 @@ import SPLL.Parser
 import TestParser (parserTests)
 import TestInternals (internalsTests, slowInternalsTests)
 import TestObservationMask (observationMaskTests)
+import TestMonomorphize (monomorphizeTests)
 import TestRejection (rejectionTests)
 import TestModality (modalityTests)
 import TestModalityInfer (modalityInferTests)
@@ -548,6 +549,7 @@ main = do
     , fuzzScalingTests
     , injFCatalogTests
     , rejectionTests
+    , monomorphizeTests
     , modalityTests
     , modalityInferTests
     , detTests
