@@ -5137,6 +5137,7 @@ planNodeName :: Expr -> String
 planNodeName (Expr _ (InjF (Named n) _)) = "InjF " ++ n
 planNodeName (Expr _ (Var n))            = "Var " ++ n
 planNodeName (Expr _ (Apply _ _))        = "Apply"
+planNodeName (Expr _ (ReadNN n _))       = "ReadNN " ++ n
 planNodeName e                    = head (words (show e))
 
 -- | Field bases of an ADTPlan region at offset @off@: for each constructor
@@ -5636,7 +5637,41 @@ planInvert meta env planBody target = case planBody of
     | planDep b, isDetSide a -> planLeafEq b a
   Expr _ (InjF (Named "lt") [a, b]) -> planCmp False a b
   Expr _ (InjF (Named "gt") [a, b]) -> planCmp True  a b
+  -- A directly applied literal lambda -- an inner @draw@, or a local function
+  -- applied in place -- is beta-reduced away when its argument is
+  -- deterministic given the plan ('planBetaReduce'); the reduced body is then
+  -- traversed like any other.
+  Expr _ (Apply (Expr _ (Lambda x b)) a) -> case planBetaReduce meta env x b a of
+    Left why -> return (Left why)
+    Right b' -> planInvert meta env b' target
   Expr _ (Apply {}) -> planApplyTarget meta env planBody target
+  -- Arithmetic over plan-dependent operands at the observed position
+  -- (@numRed scene + 1.0@): enumerate the node's values exactly as value
+  -- enumeration already does under a comparison, and guard each against the
+  -- target -- the same thing 'planApplyTarget' does for a value-returning call.
+  Expr ti (InjF (Named nm) args)
+    | isJust (planArithOp nm (length args)) -> do
+        vsE <- planEnumValues meta env planBody
+        return ((\pairs -> [ planAddGuard (planDetGuard (rType ti) v target) w | (v, w) <- pairs ]) <$> vsE)
+  -- Structural inversion of a built-in constructor: a tuple, a list cons, or an
+  -- 'Either' injection. The user-ADT case below, spelled for the built-in
+  -- accessors: the observation must have this shape, and each field's
+  -- observation is pushed onto the corresponding argument.
+  Expr _ (InjF (Named "TCons") [a, b]) ->
+    planInvertFields "tuple" Nothing [(a, IRDestruct AcFst), (b, IRDestruct AcSnd)]
+  Expr _ (InjF (Named "Cons") [h, t]) ->
+    let nonEmpty y = notIR (IROp OpEq y (IRConst (VList EmptyList)))
+    in case planCanonicalValue (adtDecls meta) [] (rType (getTypeInfo h)) of
+         Nothing -> return (Left ("no canonical value for list element type " ++ show (rType (getTypeInfo h))))
+         Just dummy -> planInvertFields "list cons" (Just nonEmpty)
+           [ (h, \y -> IRIf (nonEmpty y) (IRDestruct AcHead y) (IRConst dummy))
+           , (t, \y -> IRIf (nonEmpty y) (IRDestruct AcTail y) (IRConst (VList EmptyList))) ]
+  Expr _ (InjF (Named inj) [a])
+    | Just (test, proj) <- lookup inj [("left", (AcIsLeft, AcFromLeft)), ("right", (AcIsRight, AcFromRight))] ->
+        case planCanonicalValue (adtDecls meta) [] (rType (getTypeInfo a)) of
+          Nothing -> return (Left ("no canonical value for the payload type " ++ show (rType (getTypeInfo a)) ++ " of " ++ inj))
+          Just dummy -> planInvertFields inj (Just (IRDestruct test))
+            [ (a, \y -> IRIf (IRDestruct test y) (IRDestruct proj y) (IRConst dummy)) ]
   -- Structural inversion of a *constructed* ADT value. The observation must
   -- carry this constructor, and each field's observation is pushed onto the
   -- corresponding argument, the field worlds intersecting. This is what keeps a
@@ -5660,6 +5695,21 @@ planInvert meta env planBody target = case planBody of
   _ -> return (Left ("unsupported node in plan traversal: " ++ planNodeName planBody))
   where
     occs = planEnvOccs env
+    -- Push a point observation through a built-in constructor: @guardY@ is
+    -- the runtime shape test on the observation (none for a tuple), each
+    -- component's sub-observation is read off it by a total projection (the
+    -- guard only protects the world's mass, not the let-bindings leaf
+    -- constraints float out -- see 'planSafeField'), and the component worlds
+    -- intersect. A component whose sub-observation is a wildcard at run time
+    -- is unconstrained: 'planAnySplit' partitions on that.
+    planInvertFields what guardY comps = case target of
+      PTUpTo _ -> return (Left ("cumulative target on the constructed " ++ what ++ " value"))
+      PTPoint y -> do
+        fieldsE <- mapM (\(e, sub) -> fmap (planAnySplit (sub y)) <$> planInvert meta env e (PTPoint (sub y))) comps
+        return $ do
+          wss <- sequence fieldsE
+          let ws = foldl liveIntersects [pw1 []] wss
+          return (maybe ws (\g -> map (planAddGuard (g y)) ws) guardY)
     planDep = subtreeHasOcc occs
     isDetSide  x = not (subtreeHasOcc occs x) && pType (getTypeInfo x) == Deterministic
     ctorTestName nm
@@ -5800,6 +5850,104 @@ planInvert meta env planBody target = case planBody of
       (Just (Left why), _) -> return (Left why)
       (_, Just (Left why)) -> return (Left why)
       _ -> return (Left "a comparison with both sides plan-dependent is only supported between two continuous plan leaves (single pairwise coupling)")
+
+-- | Worlds of one constructor component whose sub-observation @s@ may be a
+-- wildcard at run time (a partial-@ANY@ query such as @(ANY, 1.0)@): a world
+-- leaving the component unconstrained when @s@ is @ANY@, and the component's
+-- own worlds, each guarded on @s@ not being @ANY@, otherwise. The two guards
+-- partition, and the not-@ANY@ test is the outermost guard of each world, so
+-- nothing below it ever compares against the wildcard.
+planAnySplit :: IRExpr -> [PlanWorld] -> [PlanWorld]
+planAnySplit s ws =
+  planAddGuard (IRUnaryOp OpIsAny s) (pw1 [])
+    : map (planAddGuard (notIR (IRUnaryOp OpIsAny s))) ws
+
+-- | Arithmetic InjFs that value enumeration ('planEnumValuesRaw') combines
+-- pointwise, by name and arity: the IR of the forward function applied to
+-- the operands' enumerated values. Every entry is total, so no applicability
+-- guard is needed on an enumerated value.
+planArithOp :: String -> Int -> Maybe ([IRExpr] -> IRExpr)
+planArithOp nm 2
+  | Just op <- lookup nm [("plus", OpPlus), ("plusI", OpPlus), ("mult", OpMult), ("multI", OpMult), ("max", OpMax)] =
+      Just (\vs -> case vs of
+                     [a, b] -> IROp op a b
+                     _      -> error ("planArithOp: binary " ++ nm ++ " applied to " ++ show (length vs) ++ " values"))
+planArithOp nm 1
+  | nm `elem` ["neg", "negI"] = Just (unary (IRUnaryOp OpNeg))
+  | nm == "double"            = Just (unary (\a -> IROp OpMult a (IRConst (VFloat 2))))
+  where unary f vs = case vs of
+          [a] -> f a
+          _   -> error ("planArithOp: unary " ++ nm ++ " applied to " ++ show (length vs) ++ " values")
+planArithOp _ _ = Nothing
+
+-- | Is @e@ deterministic once the plan-bound variables are fixed? That is: it
+-- draws no randomness of its own, so every copy of it denotes the same value
+-- -- the one property that makes substituting it for a bound variable sound
+-- under SPLL's eager @draw@ (a copy of a fresh draw would be a second,
+-- independent draw). Plan-free subtrees answer from their 'pType'; a plan-bound
+-- or specialized-parameter occurrence is deterministic by construction; an
+-- InjF or @if@ is deterministic when its operands are; a call to a top-level
+-- function is when the function draws nothing given deterministic arguments
+-- ('detGenNames', from the call-graph fixpoint of 'SPLL.Typing.Determinism')
+-- and its arguments are; a nested directly applied lambda is when its argument
+-- is and its reduced body is. Anything else -- a neural read, a bare lambda
+-- over the plan -- answers False, which only costs coverage.
+planDetGivenPlan :: CompilerMetadata -> PlanEnv -> Expr -> Bool
+planDetGivenPlan meta env = go
+  where
+    occs = planEnvOccs env
+    go e
+      | isJust (planEnvLookup env (chainName (getTypeInfo e))) = True
+      | not (subtreeHasOcc occs e) = pType (getTypeInfo e) == Deterministic
+    go (Expr _ (InjF _ args)) = all go args
+    go (Expr _ (IfThenElse c t f)) = go c && go t && go f
+    go (Expr _ (Apply (Expr _ (Lambda x b)) a)) = go a && go (substituteVar x a b)
+    go e@(Expr _ (Apply _ _))
+      | (Expr _ (Var n), args@(_:_)) <- flattenApplySpine e
+      , isJust (lookup n (functions (compilingProgram meta)))
+      , (n ++ "_gen") `Set.member` detGenNames meta = all go args
+    go _ = False
+
+-- | How many times the plan traversal reads the plan-bound variable in @e@
+-- (whose occurrences are @occs@): its syntactic occurrences, except that an
+-- occurrence inside the argument of a directly applied literal lambda counts
+-- once per occurrence of that lambda's parameter, since 'planBetaReduce'
+-- substitutes the argument there. Without that, @draw n = numRed scene in (n,
+-- n)@ would look like a single reader, enable the value grouping
+-- ('psMerge'), and double-count the leaves the two copies share. Equal to
+-- @length occs@ on a body without such lambdas.
+planReaderCount :: [ChainName] -> Expr -> Int
+planReaderCount occs = go
+  where
+    go e | chainName (getTypeInfo e) `elem` occs = 1
+    go (Expr _ (Apply (Expr _ (Lambda x b)) a)) = go b + freeOccs x b * go a
+    go e = sum (map go (getSubExprs e))
+    freeOccs x (Expr _ (Var v)) = if v == x then 1 else 0
+    freeOccs x (Expr _ (Lambda y b)) | y == x = 0
+                                     | otherwise = freeOccs x b
+    freeOccs x e = sum (map (freeOccs x) (getSubExprs e))
+
+-- | Beta-reduce a directly applied literal lambda met by the plan traversal:
+-- an inner @draw x = a in b@, or a local function applied in place,
+-- @(\\s -> p s) a@. The result is @b[x := a]@, traversed in its place.
+--
+-- Sound exactly when @a@ is deterministic given the plan ('planDetGivenPlan'):
+-- then every copy of @a@ reads the same plan leaves and computes the same
+-- value, so the eager binding and its substitution agree. A random @a@ is
+-- refused -- two copies of it would be two independent draws.
+--
+-- This descends into a @draw@, which the traversal otherwise never does, and
+-- 'planFactorExternals' relies on that: a factor is refused if it reads a
+-- random local of the ambient scope, because the traversal cannot see where
+-- else that local's single draw is used. Substitution keeps the guard
+-- correct rather than weakening it: @x@ does not survive into the reduced
+-- body, so no new local enters the scope any factor could read, and the only
+-- bindings reduced are those whose value is not a draw at all.
+planBetaReduce :: CompilerMetadata -> PlanEnv -> String -> Expr -> Expr -> Either String Expr
+planBetaReduce meta env x b a
+  | planDetGivenPlan meta env a = Right (substituteVar x a b)
+  | otherwise = Left ("a binding inside the plan traversal is not deterministic given the plan-bound variables "
+                      ++ "(substituting it would duplicate its draw): " ++ x ++ " = " ++ planNodeName a)
 
 -- | Canonical (outcome-True, outcome-False) worlds of a Bool-valued node.
 planInvertBool :: CompilerMetadata -> PlanEnv -> Expr -> PlanM (Either String ([PlanWorld], [PlanWorld]))
@@ -6002,6 +6150,15 @@ planEnumValuesRaw meta env bodyExpr
         vsA <- planEnumValues meta env a
         vsB <- planEnumValues meta env b
         return ((\as bs -> livePairs [ (IROp op va vb, intersectPlanW wa wb) | (va, wa) <- as, (vb, wb) <- bs ]) <$> vsA <*> vsB)
+      -- The remaining arithmetic ('planArithOp'), combined the same way: the
+      -- cross product of the operands' value worlds.
+      Expr _ (InjF (Named nm) args) | Just f <- planArithOp nm (length args) -> do
+        vssE <- mapM (planEnumValues meta env) args
+        return (map (\combo -> (f (map fst combo), foldl1 intersectPlanW (map snd combo)))
+                  . filter (not . pwUnsat . foldl1 intersectPlanW . map snd) . sequence <$> sequence vssE)
+      Expr _ (Apply (Expr _ (Lambda x b)) a) -> case planBetaReduce meta env x b a of
+        Left why -> return (Left why)
+        Right b' -> planEnumValues meta env b'
       Expr _ (Apply {}) -> do
         specE <- planResolveApply meta env bodyExpr
         case specE of
@@ -6366,7 +6523,10 @@ planWitnessApply meta cumulative rt lResolvedCN lambdaBodyCN tag v sample
       -- the fold is the scene's sole reader: with a single occurrence its leaves
       -- are private, so baking them into a summed mass cannot clash with a
       -- sibling predicate re-constraining the shared structural flags.
-      let mayMerge = length occs <= 1
+      -- Readers are counted AFTER the beta-reduction the traversal performs
+      -- ('planBetaReduce'): @draw n = numRed scene in (n, n)@ mentions the
+      -- scene once but reads it twice once @n@ is substituted.
+      let mayMerge = planReaderCount occs bodyExpr <= 1
       worldsE <- evalStateT (planInvert meta env bodyExpr target) (emptyPlanState nnRaw mayMerge)
       case worldsE of
         Left why -> return (Left (Just why))

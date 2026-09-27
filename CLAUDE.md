@@ -27,7 +27,7 @@ stack run -- -i file.ppl cumulative -x 0.5                # CDF query P(X<=0.5)
 # a bare `stack test --ta PATTERN` applies PATTERN to both processes, and a
 # pattern that matches nothing in one of them just reports "All 0 tests
 # passed" there, not an error. Target one binary explicitly to skip the other
-# process entirely, e.g. `stack test haskell-dppl:haskell-dppl-test-corpus --ta '-p ...'`. (the `haskell-dppl:` package prefix is required; a bare suite name is "Unknown package").
+# process entirely, e.g. `stack test haskell-dppl:test:haskell-dppl-test-corpus --ta '-p ...'` (or `haskell-dppl:test:haskell-dppl-test` for the main suite; the full `package:test:suite` form is required, a bare suite name is "Unknown package").
 stack test --ta '-p Spec'                # run one group
 stack test --ta '-p "!/End2End/"'        # everything except a group
 stack test --ta '-p TopK'                # any test whose name matches a substring
@@ -827,12 +827,20 @@ over-budget inner application whose body reads the outer variable was refused
 by the plan traversal as reading "an enclosing random binding".
 
 **Known cost**: over budget, the plan traversal is the only route, so a body
-it does not cover (a tuple constructor, `plus` of a plan leaf and something
-else) is refused -- eagerly, taking `generate` down with the default compile --
-where dense enumeration used to compile it. Dense fallback was explicitly
-rejected; the fix is plan coverage. Pinned by
-`test/cases/known-issues/planOverBudgetOfTupleRefused`. Corpus:
-`planEnumRecCountOfLazy*`; structural test
+it does not cover is refused -- eagerly, taking `generate` down with the default
+compile -- where dense enumeration used to compile it. Dense fallback was
+explicitly rejected; the fix is plan coverage, and `--materializationBudget N`
+is the explicit per-invocation opt-in to dense enumeration. Task
+`plan-path-coverage-for-over-budget-bodies` closed the gaps first found here:
+built-in constructors (`TCons`/`Cons`/`left`/`right`) and arithmetic at the
+observed position, and inner deterministic `draw`s / local lambdas, which the
+traversal beta-reduces when the argument is deterministic given the plan
+(`planBetaReduce`; `psMerge` then counts readers *after* substitution,
+`planReaderCount`, since `draw n = numRed scene in (n, n)` reads the scene twice).
+A body with two readers of the scene compiles but keeps value grouping off, so
+it enumerates one world per scene path and is as large as the dense module
+(`planOverBudgetTuplePair`, 8.2MB; follow-up `plan-multi-reader-value-grouping`).
+Corpus: `planEnumRecCountOfLazy*`, `planOverBudget*`; structural test
 `Internals.nestedEnumerationHonoursBudget`.
 
 ### Agreement fusion: two categoricals multiply in O(V)
@@ -1394,7 +1402,7 @@ executable/OS process: `haskell-dppl-test` (`test/Spec.hs`, everything below
 except Corpus) and `haskell-dppl-test-corpus` (`test-corpus/SpecCorpus.hs`,
 just the `Corpus` group, module `TestCorpus`). `stack test` builds and runs
 both automatically; `--ta` patterns only reach whichever one you invoke
-directly (`stack test haskell-dppl:haskell-dppl-test-corpus --ta '-p ...'`), since each
+directly (`stack test haskell-dppl:test:haskell-dppl-test-corpus --ta '-p ...'`), since each
 process gets its own tasty CLI. This split exists because `Corpus` compiles
 the whole `test/cases/` corpus 8 times over (once per config it needs to
 cross-check), and tasty holds its whole `TestTree` — including those

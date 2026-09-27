@@ -1,0 +1,24 @@
+-- An over-budget `of` enumeration (21845 scene values, over the 10000 of
+-- `defaultMaterializationCardinality`), so the materialization gate declines
+-- dense enumeration and the plan-guided path must compile the body (task
+-- plan-path-coverage-for-over-budget-bodies). Before that task the plan
+-- traversal refused this body and the whole compile died.
+--
+-- ORACLE: the same program compiled densely with `--materializationBudget
+-- 100000`, which agreed with every row below to a few ulps (summation order)
+-- unless noted. numRed's own law at these logits: P(0) = 0.6704985969,
+-- P(1) = 0.2900826155, P(2) = 0.0344722817, P(3) = 0.0044528186 (and
+-- P(>= 2) = 0.0394187876, planEnumRecCountOfLazy).
+--
+-- Part 1 (built-in constructors): a tuple with one plan-dependent component and
+-- one deterministic one, incl. partial-ANY queries (a wildcard component is
+-- unconstrained). Emits ~56KB of Python; dense emits 5,971,053 bytes.
+data Color = Red | Green | Blue
+data Object = NoObj | Obj color::Color
+data Scene = Empty | SCons obj::Object, rest::Scene depth 7
+
+neural readScene :: (Symbol -> Scene) of 7x.{Empty | SCons {NoObj | Obj {Red|Green|Blue}} x}
+
+numRed s = if isEmpty s then 0.0 else (if isObj (obj s) then (if isRed (color (obj s)) then 1.0 else 0.0) else 0.0) + numRed (rest s)
+
+main sym = draw scene = readScene sym in (numRed scene, 0.0)

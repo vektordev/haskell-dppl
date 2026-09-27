@@ -1,0 +1,8 @@
+-- planFlatSumOfSlots with both summands reading the SAME slot: they share
+-- plan leaves, so the sum is 2 g(o1) -- p(2.0) = q1 = 0.246830, p(1.0) impossible --
+-- not the convolution of two independent copies.
+data Object = NoObj | Obj position::Float
+data Scene = Scene o1::Object, o2::Object
+neural readScene :: (Symbol -> Scene)
+g o = if isNoObj o then 0.0 else (if position o > 0.5 then 1.0 else 0.0)
+main s = draw sc = readScene s in g (o1 sc) + g (o1 sc)

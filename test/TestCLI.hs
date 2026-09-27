@@ -20,11 +20,10 @@ cliTests = testGroup "CLI"
   [ testGroup "--materializationBudget (task materialization-budget-cli-flag)"
       [ testCase "default budget does not enumerate the 21845-value scene densely" $
           withCompile [] $ \code _ size ->
-            -- Today this is a refusal (the plan traversal has no tuple case,
-            -- known issue planOverBudgetOfTupleRefused). Once task
-            -- plan-path-coverage-for-over-budget-bodies lands it compiles on
-            -- the plan path instead, to a module of tens of KB. Either way it
-            -- must not be the multi-MB dense module.
+            -- The plan path compiles this to a module of tens of KB (task
+            -- plan-path-coverage-for-over-budget-bodies; a refusal before
+            -- it). A refusal would also pass: what must not happen is the
+            -- multi-MB dense module.
             case (code, size) of
               (ExitFailure _, _) -> return ()
               (ExitSuccess, Just n) ->
@@ -57,10 +56,16 @@ withCompile flags k = withSystemTempDirectory "nest-cli" $ \dir -> do
   size <- if exists then Just <$> getFileSize out else return Nothing
   k code err size
 
--- | The shift-2 repro of plan-path-coverage-for-over-budget-bodies: an @of@
--- enumeration of 21845 scene values (over the default budget of 10000) whose
--- body builds a tuple. Kept inline rather than read from
--- @test/cases/known-issues/@, which that task will move it out of.
+-- | A repro of plan-path-coverage-for-over-budget-bodies: an @of@ enumeration
+-- of 21845 scene values (over the default budget of 10000) whose body builds a
+-- tuple. Kept inline so this group does not depend on the corpus layout.
+--
+-- The scene has ONE reader here on purpose. The task's headline repro,
+-- @(numRed scene, numRed scene)@, reads it twice, which turns off the plan
+-- path's value grouping (see 'psMerge' in IRCompiler) and so emits a module
+-- the size of the dense one (~8MB) on either path; it is in the corpus as
+-- plan-enumeration/planOverBudgetTuplePair, and its size is the follow-up
+-- task plan-multi-reader-value-grouping.
 overBudgetTuple :: String
 overBudgetTuple = unlines
   [ "data Color = Red | Green | Blue"
@@ -68,5 +73,5 @@ overBudgetTuple = unlines
   , "data Scene = Empty | SCons obj::Object, rest::Scene depth 7"
   , "neural readScene :: (Symbol -> Scene) of 7x.{Empty | SCons {NoObj | Obj {Red|Green|Blue}} x}"
   , "numRed s = if isEmpty s then 0.0 else (if isObj (obj s) then (if isRed (color (obj s)) then 1.0 else 0.0) else 0.0) + numRed (rest s)"
-  , "main sym = draw scene = readScene sym in (numRed scene, numRed scene)"
+  , "main sym = draw scene = readScene sym in (numRed scene, 0.0)"
   ]

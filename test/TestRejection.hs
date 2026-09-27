@@ -356,12 +356,19 @@ queryTypeGuardTests = testGroup "QueryTypeGuard"
 -- A neural ADT latent observed through a non-point-invertible test (isRed), so
 -- the reconstruction carries a hole in the colour slot and the compiled code
 -- reaches isRed(ANY).
+--
+-- The second slot is an affine image of a continuous leaf because that is what
+-- keeps this program on the point-inversion path the test is about. With a
+-- discrete second slot (@f :: Bool@, observed as @f o@) the plan-guided engine
+-- answers the whole tuple exactly since task
+-- plan-path-coverage-for-over-budget-bodies, and never tests a hole; it still
+-- declines arithmetic over a continuous leaf at the observed position.
 anyCtorProgSrc :: String
 anyCtorProgSrc = unlines
   [ "data Color = Red | Green | Blue"
-  , "data Obj = Mk c :: Color, f :: Bool"
+  , "data Obj = Mk c :: Color, f :: Float"
   , "neural readObj :: (Symbol -> Obj)"
-  , "main sym = draw o = readObj sym in (if isRed (c o) then 0 else 1, f o)"
+  , "main sym = draw o = readObj sym in (if isRed (c o) then 0 else 1, f o + 1.0)"
   ]
 
 -- A constructor named after a Python keyword. Emitting it verbatim produced
@@ -396,7 +403,7 @@ anyCtorTestTests = testGroup "AnyConstructorTest"
       withParsed anyCtorProgSrc $ \prog -> do
         let conf = defaultCompilerConfig { noIntegrate = True }
             args = [VTuple (VInt 2) (constructVList [ VFloat v | v <- [0.5, 0.3, 0.2, 0.4, 0.6] ])]
-        res <- forced (runProb conf prog args (VTuple (VInt 0) (VBool True)))
+        res <- forced (runProb conf prog args (VTuple (VInt 0) (VFloat 1.5)))
         case res of
           Left e  -> assertBool ("expected the ANY constructor-test refusal, got: " ++ show e)
                                 (anyCtorTestMessage "Red" `isInfixOf` show e)
