@@ -450,9 +450,23 @@ binders) for programs built without the parser, and is the only place the
 neural `n`, `f_map`/`f_count` beside `f`) -- checked as collisions rather than
 blanket suffix bans, since `word_count` alone is an ordinary name. Adding a
 generated name anywhere means adding it to the registry and a representative
-to `TestInternals`' `reserved names` group. Target-language keywords are the
-exception: those are mangled at emission, never rejected (see
-`renameADTIdentifiers`).
+to `TestInternals`' `reserved names` group.
+
+Target-language names are the exception: those are **mangled** at emission,
+never rejected, so a program's legality never depends on its backend.
+`renameADTIdentifiers` covers ADT names and `mangleUserIdentifiers` everything
+else (definition names, and every parameter/`draw` binder by scope-aware
+alpha-renaming, so free names such as runtime functions are never touched),
+both with the backend's `pyMangle`/`juliaMangle`. Python's escaped set is
+`pythonReservedIdentifiers`: the keywords, `self` (every method's receiver), and
+`pythonRuntimeClassNames` -- the classes the runtime defines (`T`, `Left`,
+`InferenceList`, ..., kept in sync with `pythonLib*.py` by a test). A function
+group's class is its capitalised name made unique by `groupClassName` against
+all of those and the ADT classes: capitalising landed `t` on the runtime's
+tuple class `T` (every tuple broke) and `foo` on constructor `Foo`'s class (a
+silently wrong `p(Foo) = 0`). Still open: a user name shadowing a runtime
+*function* or a Python builtin (`randn`, `float`) or Julia `Base` name --
+docs task `python-runtime-name-shadowing`.
 
 ### Callee Normalization
 

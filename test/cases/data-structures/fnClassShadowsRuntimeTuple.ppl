@@ -1,0 +1,5 @@
+-- Design reserved-name-registry: a definition `t` emitted `class T(Module)`
+-- over the Python runtime's tuple class `T`, and every tuple then failed with
+-- "T() takes no arguments".
+t = if Uniform < 0.5 then 1.0 else 2.0
+main = (t, 3.0)

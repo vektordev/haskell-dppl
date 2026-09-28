@@ -65,6 +65,8 @@ module SPLL.ReservedNames
   , groupNameCollisions
     -- * Target-language keywords
   , pythonKeywords
+  , pythonRuntimeClassNames
+  , pythonReservedIdentifiers
   , juliaKeywords
   ) where
 
@@ -277,6 +279,32 @@ pythonKeywords =
   , "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal"
   , "not", "or", "pass", "raise", "return", "try", "while", "with", "yield"
   ]
+
+-- | The classes the emitted Python module has in scope before any of its own
+-- definitions: @torch.nn.Module@, which every function group subclasses, and
+-- every class @pythonLib@ / @pythonLibBatched@ define (and @typing.Iterable@,
+-- which @pythonLib@'s star import re-exports). A function group's class, or an
+-- ADT constructor's, spelled like one of these replaced it for the whole
+-- module: a definition @t@ emitted @class T(Module)@ over the runtime's tuple
+-- class, and every tuple in the program then failed with "T() takes no
+-- arguments". @TestInternals@ checks this list against the class definitions
+-- in both runtime files, so a new runtime class cannot be missed here.
+pythonRuntimeClassNames :: [String]
+pythonRuntimeClassNames =
+  [ "Module", "Iterable", "T", "Left", "Right", "InferenceList"
+  , "EmptyInferenceList", "AnyInferenceList", "ConsInferenceList", "EnumBatch" ]
+
+-- | Every name 'SPLL.CodeGenPyTorch.pyMangle' escapes: the keywords, the
+-- runtime classes above, and @self@, which every emitted method binds as its
+-- first parameter -- a user parameter called @self@ emitted
+-- @def forward(self, self, sample)@, a duplicate-argument @SyntaxError@.
+--
+-- Names merely /exported by/ the runtime as functions (@randn@, @isAny@, ...),
+-- @math@'s star import, and Python's builtins are deliberately absent: a user
+-- name shadowing one of those is a real hazard, but the list is open-ended and
+-- tracked separately (docs task @python-runtime-name-shadowing@).
+pythonReservedIdentifiers :: [String]
+pythonReservedIdentifiers = pythonKeywords ++ ["self"] ++ pythonRuntimeClassNames
 
 -- | Julia's reserved words. Mangled by 'SPLL.CodeGenJulia.juliaMangle'.
 --

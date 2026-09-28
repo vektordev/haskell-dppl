@@ -53,9 +53,8 @@ import SPLL.Lang.Lang (multiValueToValueList)
 -- 'pyMangle' is: it renders a *Python language* literal, not a call into
 -- pythonLib.py. The ban below is on 'pyVal', whose hazard is naming runtime
 -- constructors that pythonLibBatched.py does not define.
-import SPLL.CodeGenPyTorch (envToLUT, replaceCalls, pyMangle, pyDouble)
+import SPLL.CodeGenPyTorch (envToLUT, replaceCalls, pyMangle, pyDouble, groupClassName)
 import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage, fieldAccessorOwners)
-import Data.Char (toUpper)
 import Data.Bifunctor (first)
 import Data.List (intercalate, intersect, isSuffixOf, nub, partition, (\\))
 import Data.Maybe (fromMaybe, isJust, listToMaybe)
@@ -99,7 +98,7 @@ generateFunctionsBatched genBoil env0 = do
       -- reference to them is renamed to match. The declarations keep the
       -- user's names, so 'ctorNames' below -- which is analysis, matched
       -- against IR variable names rather than printed -- is mangled explicitly.
-      let env@(IREnv funcs adts consts) = inlineDetGenCalls (renameADTIdentifiers pyMangle env0)
+      let env@(IREnv funcs adts consts) = inlineDetGenCalls (mangleUserIdentifiers pyMangle (renameADTIdentifiers pyMangle env0))
       let lut = envToLUT env
           -- Every group's generate method, raw (pre-rename) name and body: the
           -- self-contained recursion check ('hasGenCycle') walks these
@@ -131,7 +130,7 @@ generateFunctionsBatched genBoil env0 = do
       let attempt enums = do
             let env' = adtEnvWith enums adts
             () <- checkCallGraph env' funcs
-            classes <- mapM (generateClass env' lut genArities genRaw) funcs
+            classes <- mapM (generateClass (groupClassName env) env' lut genArities genRaw) funcs
             return (enums, classes)
           settle enums = case attempt enums of
             Right ok -> Right ok
@@ -145,7 +144,7 @@ generateFunctionsBatched genBoil env0 = do
              ++ (if null consts then [] else [""])
              ++ concat classes
              ++ ["", "# Example Initialization"]
-             ++ map (\IRFunGroup{groupName=n} -> n ++ " = " ++ onHead toUpper n ++ "()") funcs
+             ++ map (\IRFunGroup{groupName=n} -> n ++ " = " ++ groupClassName env n ++ "()") funcs
       return $ if genBoil
         then [ "from pythonLibBatched import *"
              , "import torch"
@@ -300,13 +299,13 @@ renderConst (n, v) = case batchedVal v of
 -- (task neural-generate-parity: generate's ineligibility used to degrade to a
 -- runtime-raising stub per class, M4; it is now a compile-time refusal like
 -- forward/integrate, see 'renderGen').
-generateClass :: SEnv -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> IRFunGroup -> Either Refusal [String]
-generateClass env lut genArities genMethods (IRFunGroup name gen prob integ _ _ doc dom) = do
+generateClass :: (String -> String) -> SEnv -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> IRFunGroup -> Either Refusal [String]
+generateClass clsName env lut genArities genMethods (IRFunGroup name gen prob integ _ _ doc dom) = do
   p <- maybe (Right []) (generateMethod env lut "forward" name) prob
   i <- maybe (Right []) (generateMethod env lut "integrate" name) integ
   g <- maybe (Right []) (renderGen env lut genArities genMethods name) gen
   let commentLines = map ("# " ++) (lines doc)
-      initLine = "class " ++ onHead toUpper name ++ "(Module):"
+      initLine = "class " ++ clsName name ++ "(Module):"
       -- Dense enumeration (M3): rendered domain, and the two extra methods per
       -- inference method whose signature it fits. Purely additive -- `forward`,
       -- `integrate` and `generate` above are byte-identical either way.
@@ -424,9 +423,6 @@ unwrapLambdas anyNode = ([], anyNode)
 indentOnce :: [String] -> [String]
 indentOnce = map ("    " ++)
 
-onHead :: (a -> a) -> [a] -> [a]
-onHead f (x:xs) = f x : xs
-onHead _ []     = []
 
 -- ---------------------------------------------------------------------------
 -- Generate (milestone M4, extended by task neural-generate-parity):

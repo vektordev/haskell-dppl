@@ -1,0 +1,6 @@
+-- Design reserved-name-registry: a definition `foo` beside a constructor `Foo`
+-- emitted a Python module class `Foo` over the constructor's class, so foo's
+-- own `Foo()` built the wrong object and p(Foo) came out 0.
+data Sym = Foo | Bar
+foo = if Uniform < 0.3 then Foo else Bar
+main = foo

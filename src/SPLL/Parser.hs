@@ -23,6 +23,7 @@ import qualified Data.Set as Set
 
 import Control.Monad.Combinators.Expr
 import Data.List.NonEmpty (NonEmpty (..))
+import Data.List (intercalate)
 
 import SPLL.Lang.Types
 import SPLL.Lang.Lang
@@ -878,7 +879,16 @@ normalize prog =
     then do
       --mapExprInProgram (normalizeExpr (builderMap, functionMap, Set.empty)) prog
       evalState (mapExprInProgram (normalizeExpr (paramMap, functionMap, Set.empty)) prog) 0
-    else Left $ "Found identifiers that are in multiple scopes."
+    else Left $ "Found identifiers that are in multiple scopes: "
+                ++ intercalate ", " (overlaps [ ("a constructor", invMap), ("a neural declaration", neuralMap)
+                                              , ("a definition", globalFunctionMap) ])
+  where
+    -- Name each clash and what claims it: a neural declaration and a
+    -- definition sharing a name used to be reported with no name at all.
+    overlaps scopes =
+      [ "'" ++ n ++ "' (" ++ a ++ " and " ++ b ++ ")"
+      | ((a, m1), i) <- zip scopes [(0 :: Int) ..], ((b, m2), j) <- zip scopes [0 ..], i < j
+      , n <- Map.keys (Map.intersection m1 m2) ]
 
 -- Build maps from identifiers to expression builders
 buildNeuralMap :: MonadState Int m => [NeuralDecl] -> BuilderMap m

@@ -48,7 +48,7 @@ import Data.Maybe (isJust)
 import Data.Functor.Identity (runIdentity)
 import qualified PredefinedFunctions as PF
 import SPLL.Validator (validateProgram)
-import SPLL.ReservedNames (distributionPrimitiveNames, languageKeywords, reservedIdentifierReason, internalNameReason)
+import SPLL.ReservedNames (distributionPrimitiveNames, languageKeywords, reservedIdentifierReason, internalNameReason, pythonRuntimeClassNames)
 
 
 -- | The (prob, dim) pair a probability query must return; a different shape
@@ -4384,9 +4384,24 @@ reservedNameTests = testGroup "reserved names"
   , testCase "a definition landing on another definition's semiring group is refused" $ do
       collides "f_map" (unlines [ "f x = x + 1.0", "f_map = 2.0", "main = f f_map" ])
       collides "f_count" (unlines [ "f x = x + 1.0", "f_count = 2.0", "main = f f_count" ])
+  , testCase "a definition sharing a neural declaration's name is refused, naming it" $
+      case tryParseProgram "<test>" (unlines [ "neural n :: (Symbol -> Int) of [0,1,2]", "n s = 7", "main s = n s" ]) of
+        Left e -> assertBool ("refused without naming the clash: " ++ show e)
+                             ("'n' (a neural declaration and a definition)" `isInfixOf` show e)
+        Right _ -> assertFailure "a definition and a neural declaration named 'n' were both accepted"
   , testCase "the distribution primitives are keywords" $
       assertBool "a distribution primitive is not a parser keyword"
                  (all (`elem` languageKeywords) distributionPrimitiveNames)
+  , testCase "every class the Python runtimes define is escaped by the Python backend" $ do
+      -- A group or constructor class spelled like a runtime class replaced it
+      -- for the whole module (a definition `t` broke every tuple).
+      forM_ ["pythonLib.py", "pythonLibBatched.py"] $ \lib -> do
+        src <- readFile lib
+        let defined = [ takeWhile (`notElem` "(: ") rest | l <- lines src, Just rest <- [stripPrefix' "class " l] ]
+        assertBool ("no classes found in " ++ lib) (not (null defined))
+        forM_ defined $ \c ->
+          assertBool (lib ++ " defines class " ++ c ++ ", missing from pythonRuntimeClassNames")
+                     (c `elem` pythonRuntimeClassNames)
   , testCase "every surface-reserved name but the parser's binders is reserved in the AST too" $
       forM_ reservedExamples $ \name ->
         assertEqual name (isJust (reservedIdentifierReason name) && not ("p_" `isPrefixOf` name))
@@ -4403,6 +4418,7 @@ reservedNameTests = testGroup "reserved names"
       Left e -> assertBool ("refused for another reason: " ++ show e)
                            (("reserved identifier '" ++ name ++ "'") `isInfixOf` show e)
       Right _ -> assertFailure ("'" ++ name ++ "' was accepted")
+    stripPrefix' pre str = if pre `isPrefixOf` str then Just (drop (length pre) str) else Nothing
     collides name src = case tryParseProgram "<test>" src of
       Left e -> assertFailure ("parse failed: " ++ show e)
       Right prog -> case validateProgram prog of

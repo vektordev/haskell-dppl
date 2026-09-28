@@ -191,7 +191,7 @@ generateFunctions :: IREnv -> [String]
 generateFunctions env0 = do
   -- Scalar backend: lower any IRSelect back to IRIf up front (pytorch-tensorizer
   -- M1, strategy B), so the rest of codegen never encounters it.
-  let IREnv funcs adtDecls consts = renameADTIdentifiers juliaMangle (desugarSelectEnv env0)
+  let IREnv funcs adtDecls consts = mangleUserIdentifiers juliaMangle (renameADTIdentifiers juliaMangle (desugarSelectEnv env0))
   let adtClasses = generateADTClasses adtDecls
   let constsStr = map (\(name, val) -> name ++ " = " ++ juliaVal val) consts
   let callableNames = [ n ++ "_gen"

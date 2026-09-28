@@ -43,6 +43,7 @@ module SPLL.IntermediateRepresentation (
 , resultImpossible
 , adtIdentifierRenaming
 , renameADTIdentifiers
+, mangleUserIdentifiers
 , firstAnyExceptIR
 , anyExceptCodegenRefusal
 ) where
@@ -53,9 +54,10 @@ import SPLL.Typing.PType()
 import SPLL.Typing.Typing()
 import Data.Data()
 import Data.List (isSuffixOf, sort, group)
-import Data.Maybe (mapMaybe, listToMaybe)
+import Data.Maybe (mapMaybe, listToMaybe, fromMaybe)
+import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import SPLL.ReservedNames (genSuffix)
+import SPLL.ReservedNames (genSuffix, functionVariantSuffixes)
 
 -- | The probability-mode result layout, as produced by 'SPLL.IRCompiler.packResult':
 --
@@ -987,6 +989,56 @@ irPrintFlat (IRBuiltin b _) = "IRBuiltin " ++ show b
 irPrintFlat (IRError _) = "IRError"
 irPrintFlat (IRConformsTo _ _) = "IRConformsTo"
 
+
+-- ----------------------------------------------------------------------------
+-- Target-language identifier hygiene for every other user name
+--
+-- 'renameADTIdentifiers' (below) covers the names a @data@ declaration
+-- contributes. The user's other names reach the emitted code too: a
+-- definition's name becomes a Python instance and class (and part of every
+-- Julia function name), and a parameter or @draw@ binder becomes a Python or
+-- Julia local. @f lambda = ...@ emitted @def forward(self, lambda, sample)@
+-- and @f end = ...@ a Julia function Julia could not parse (design
+-- reserved-name-registry).
+--
+-- This pass renames those with the same backend @mangle@. Binders are renamed
+-- by scope-aware alpha-renaming -- the binder and exactly the references it
+-- captures -- so a free name (a runtime-library function, a predefined
+-- operation such as @in@) is never touched. A group whose name the mangle
+-- changes is renamed together with every derived reference to it
+-- (@<name>_gen@, @<name>_prob@, ...), which are free names in the other
+-- groups' bodies.
+--
+-- The pass is sound because the two namespaces it could confuse are disjoint:
+-- a binder is never an ADT-derived name nor a definition name
+-- ('SPLL.Validator' rejects both), so no name is renamed by both this pass and
+-- 'renameADTIdentifiers', and compiler-generated binders (@l_...@, @sample@,
+-- @cse_<n>@, ...) are never in a mangled family. A program with no such name
+-- is returned unchanged, so its emitted code is byte-identical.
+-- ----------------------------------------------------------------------------
+
+mangleUserIdentifiers :: (String -> String) -> IREnv -> IREnv
+mangleUserIdentifiers mangle (IREnv groups decls consts) =
+  IREnv (map onGroup groups) decls consts
+  where
+    renamedGroups = [ (n, n') | g <- groups, let n = groupName g, let n' = mangle n, n' /= n ]
+    derivedRenames = Map.fromList
+      [ (n ++ s, n' ++ s) | (n, n') <- renamedGroups, s <- functionVariantSuffixes ]
+    onGroup g = g
+      { groupName      = fromMaybe (groupName g) (lookup (groupName g) renamedGroups)
+      , genFun         = fmap onBody (genFun g)
+      , probFun        = fmap onBody (probFun g)
+      , integFun       = fmap onBody (integFun g)
+      , writeLogitsFun = fmap onBody (writeLogitsFun g)
+      , normalFun      = fmap onBody (normalFun g)
+      }
+    onBody (body, doc) = (alpha derivedRenames body, doc)
+    alpha env (IRVar n) = IRVar (Map.findWithDefault n n env)
+    alpha env (IRLambda b body) =
+      let b' = mangle b in IRLambda b' (alpha (Map.insert b b' env) body)
+    alpha env (IRLetIn b rhs body) =
+      let b' = mangle b in IRLetIn b' (alpha env rhs) (alpha (Map.insert b b' env) body)
+    alpha env e = irDescend (alpha env) e
 
 -- ----------------------------------------------------------------------------
 -- Target-language identifier hygiene for ADT names

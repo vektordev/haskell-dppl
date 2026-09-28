@@ -1,0 +1,6 @@
+-- Design reserved-name-registry: user names that are keywords (or `self`) in a
+-- target language. `lambda`/`none`/`self` broke the emitted Python, `end` the
+-- emitted Julia; each is mangled at emission now.
+lambda end = end + Normal
+none self = self * 2.0
+main = (lambda 1.0, none 3.0)

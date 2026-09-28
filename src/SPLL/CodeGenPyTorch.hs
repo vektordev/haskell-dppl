@@ -7,12 +7,13 @@ module SPLL.CodeGenPyTorch (
   envToLUT,
   replaceCalls,
   pyMangle,
+  groupClassName,
   pyDouble,
   pythonKeywords
 ) where
 
 import SPLL.IntermediateRepresentation
-import SPLL.ReservedNames (pythonKeywords)
+import SPLL.ReservedNames (pythonKeywords, pythonReservedIdentifiers)
 import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..), shapeRank)
@@ -140,7 +141,11 @@ pyMultiVal x = error ("unresolved MultiValue in codegen: " ++ show x)
 -- 'SPLL.ReservedNames', the registry of every name the pipeline claims.
 
 -- | Make a name safe to emit as a Python identifier, by appending the
--- conventional trailing underscore.
+-- conventional trailing underscore. The escaped set is
+-- 'SPLL.ReservedNames.pythonReservedIdentifiers': the keywords, the classes the
+-- runtime already defines, and @self@. Applied to ADT names by
+-- 'renameADTIdentifiers' and to every other user name (function groups,
+-- parameters, binders) by 'mangleUserIdentifiers'.
 --
 -- The rule fires not only on a keyword but on a keyword followed by any run of
 -- underscores, and that is what makes it injective. Mangling only exact
@@ -161,8 +166,8 @@ pyMultiVal x = error ("unresolved MultiValue in codegen: " ++ show x)
 -- check instead, where the whole declaration set is in scope.
 pyMangle :: String -> String
 pyMangle name
-  | dropWhileEnd (== '_') name `elem` pythonKeywords = name ++ "_"
-  | otherwise                                        = name
+  | dropWhileEnd (== '_') name `elem` pythonReservedIdentifiers = name ++ "_"
+  | otherwise                                                   = name
 
 -- | 'pyMangle' for a constructor reference in a rendered value, which the test
 -- harness may have qualified with a module path. Only the final segment is an
@@ -183,7 +188,8 @@ generateFunctions genBoil env0 =
     -- Scalar backend: lower any IRSelect (from batched mode's select pass) back
     -- to IRIf up front, so the rest of codegen never sees it (pytorch-tensorizer
     -- M1, strategy B).
-    let env@(IREnv funcs adtsEnv consts) = renameADTIdentifiers pyMangle (desugarSelectEnv env0)
+    let env@(IREnv funcs adtsEnv consts) = mangleUserIdentifiers pyMangle (renameADTIdentifiers pyMangle (desugarSelectEnv env0))
+        clsName = groupClassName env
         lut = envToLUT env ++ stdLib
         callableNames = [ fromMaybe (n ++ "_gen") (lookup (n ++ "_gen") lut)
                         | IRFunGroup{groupName=n, genFun=Just (e, _)} <- funcs
@@ -199,12 +205,12 @@ generateFunctions genBoil env0 =
       generateADTClasses adtsEnv ++
       map (\(name, val) -> name ++ " = " ++ pyVal val) consts ++
       (if null consts then [] else [""]) ++
-      concatMap (generateClass lut callableNames) funcs ++
+      concatMap (generateClass clsName lut callableNames) funcs ++
       ["", "# Example Initialization"] ++
       generateInitializations env
     else
       map (\(name, val) -> name ++ " = " ++ pyVal val) consts ++
-      concatMap (generateClass lut callableNames) funcs
+      concatMap (generateClass clsName lut callableNames) funcs
 
 
 stdLib :: [(String, String)]
@@ -218,7 +224,32 @@ replaceCalls lut (IRVar name) = IRVar (fromMaybe name $ lookup name lut)
 replaceCalls _ other = other
 
 generateInitializations :: IREnv -> [String]
-generateInitializations (IREnv funcs _ _) = map (\IRFunGroup {groupName=n} -> n ++ " = " ++ onHead toUpper n ++ "()") funcs
+generateInitializations env@(IREnv funcs _ _) = map (\IRFunGroup {groupName=n} -> n ++ " = " ++ groupClassName env n ++ "()") funcs
+
+-- | The Python class a function group is emitted as: its (already mangled)
+-- name capitalised -- @main@ is @class Main@ -- unless that spelling is already
+-- taken, in which case underscores are appended until it is free.
+--
+-- Capitalising is what makes this necessary: it can land a group's class on a
+-- name the module already defines, and a Python class definition silently
+-- replaces the earlier one. @none@ capitalises to the keyword @None@ (a
+-- @SyntaxError@), @t@ to the runtime's tuple class @T@ (every tuple then fails
+-- to construct), and a definition @foo@ beside a constructor @Foo@ replaced the
+-- constructor's class, so @foo@'s own @Foo()@ built an instance of its module
+-- class instead -- a silently wrong value. Taken: every name 'pyMangle'
+-- escapes, every name the ADT declarations emit, and the classes assigned to
+-- earlier groups. The class name is internal (callers use the instance, named
+-- after the group), so renaming it changes no interface; a program with no
+-- clash is emitted exactly as before.
+groupClassName :: IREnv -> String -> String
+groupClassName (IREnv funcs adtDecls _) n = fromMaybe (onHead toUpper n) (lookup n table)
+  where
+    table = reverse (snd (foldl assign (taken0, []) (map groupName funcs)))
+    assign (taken, acc) g =
+      let c = until (`notElem` taken) (++ "_") (onHead toUpper g) in (c : taken, (g, c) : acc)
+    taken0 = pythonReservedIdentifiers
+          ++ concat [ pyMangle c : ("is" ++ pyMangle c) : [ pyMangle f | (f, _) <- fields ]
+                    | d <- adtDecls, (c, fields) <- constructors d ]
 
 generateADTClasses :: [ADTDecl] -> [String]
 generateADTClasses decls =
@@ -278,8 +309,8 @@ generateADTAccessor fieldName ctorName =
                  ++ " + \" Got: \" + type(x).__name__)"
              , "return x." ++ pyMangle fieldName ]
 
-generateClass :: [(String, String)] -> [String] -> IRFunGroup -> [String]
-generateClass lut callableNames (IRFunGroup name gen prob integ writeLogits normal doc _) = let
+generateClass :: (String -> String) -> [(String, String)] -> [String] -> IRFunGroup -> [String]
+generateClass clsName lut callableNames (IRFunGroup name gen prob integ writeLogits normal doc _) = let
   funcStringFromMaybe fname func = case func of
     Just a -> generateFunction True (fname, replaceCallsDecl a)
     Nothing -> return []
@@ -291,7 +322,7 @@ generateClass lut callableNames (IRFunGroup name gen prob integ writeLogits norm
     n' <- funcStringFromMaybe "normal_params" normal
     return (i', p', g', e', n')) ([], callableNames)
   commentLines = map ("# " ++) (lines doc)
-  initLine = "class " ++ onHead toUpper name ++ "(Module):"
+  initLine = "class " ++ clsName name ++ "(Module):"
   globalVarDecls = map (\(mv, varName)-> varName ++ " = " ++ pyMultiVal mv) globalVars
   funcs = i ++ [""] ++ p ++ [""] ++ g ++ [""] ++ e ++ [""] ++ n
   replaceCallsDecl (expr, d) = (irMap (replaceCalls lut) expr, d)
