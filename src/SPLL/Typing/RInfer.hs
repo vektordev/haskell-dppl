@@ -26,6 +26,7 @@ import qualified Data.Map as Map
 import SPLL.Lang.Lang
 import SPLL.Typing.Typing
 import SPLL.Typing.RType
+import SPLL.ReservedNames (distributionPrimitiveNames)
 --import SPLL.Typing.PType( PType(..) )
 import SPLL.InferenceRule
 import PredefinedFunctions (globalFEnv, FPair(..), FDecl(..))
@@ -219,7 +220,7 @@ basicTEnv adtsDecl = Map.fromList $ (adtRTs ++ injFRTs ++ distRTs)
     adtRTs = map (Data.Bifunctor.second toScheme) (concatMap implicitFunctionRTypes adtsDecl)
     injFRTs = map (\(name, FPair FDecl {contract=ty} _) -> (name, ty)) (globalFEnv adtsDecl)
     -- Distribution primitives are reserved-name Vars bound in the prelude; both draw a Float.
-    distRTs = map (Data.Bifunctor.second toScheme) [("Uniform", TFloat), ("Normal", TFloat)]
+    distRTs = map (Data.Bifunctor.second toScheme) [ (n, TFloat) | n <- distributionPrimitiveNames ]
     -- plain RTypes as they exist in globalFEnv are implicitly forall'd. Make it explicit.
     toScheme :: RType -> Scheme
     toScheme rty = Forall freeVars [] rty

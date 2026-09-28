@@ -6,6 +6,7 @@ module SPLL.CodeGenJulia (
 ) where
 
 import SPLL.IntermediateRepresentation
+import SPLL.ReservedNames (juliaKeywords)
 import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.Lang.Lang
 import Data.List (intercalate, dropWhileEnd)
@@ -114,24 +115,10 @@ juliaMultiVal (MultiADT constrs) = "(\"A\", [" ++ intercalate ", " (map (\(cName
   ) constrs) ++ "] )"
 juliaMultiVal x = error ("unknown juliaMultiVal for " ++ show x)
 
--- | Julia's reserved words. Unlike Python's, every one of them is lowercase,
--- so a constructor name (which SPLL capitalises) can never collide -- but a
--- *field* name can, and does so far more destructively than in Python: a field
--- named @end@ emits @struct Mk / end / end@, which closes the struct two lines
--- early and is mis-parsed rather than rejected at the offending token.
---
--- Contextual keywords that are legal identifiers elsewhere (@new@, @outer@,
--- @var@, and the @abstract@/@mutable@/@primitive@ modifiers) are included:
--- mangling a name that would have worked costs nothing, while missing one that
--- would not costs a silently mis-parsed module.
-juliaKeywords :: [String]
-juliaKeywords =
-  [ "abstract", "baremodule", "begin", "break", "catch", "const", "continue"
-  , "do", "else", "elseif", "end", "export", "false", "for", "function"
-  , "global", "if", "import", "in", "isa", "let", "local", "macro", "module"
-  , "mutable", "new", "outer", "primitive", "quote", "return", "struct", "true"
-  , "try", "type", "using", "var", "where", "while"
-  ]
+-- 'juliaKeywords' (the words 'juliaMangle' escapes) lives in
+-- 'SPLL.ReservedNames', the registry of every name the pipeline claims. Every
+-- one of them is lowercase, so a constructor name (which SPLL capitalises)
+-- can never collide -- but a field name can.
 
 -- | Make a name safe to emit as a Julia identifier. Same rule as
 -- 'SPLL.CodeGenPyTorch.pyMangle', including the escape of a keyword followed by

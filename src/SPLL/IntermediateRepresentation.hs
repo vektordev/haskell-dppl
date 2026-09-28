@@ -55,6 +55,7 @@ import Data.Data()
 import Data.List (isSuffixOf, sort, group)
 import Data.Maybe (mapMaybe, listToMaybe)
 import qualified Data.Set as Set
+import SPLL.ReservedNames (genSuffix)
 
 -- | The probability-mode result layout, as produced by 'SPLL.IRCompiler.packResult':
 --
@@ -874,7 +875,7 @@ getIRSubExprs (IRConformsTo _ a) = [a]
 -- it never changes semantics -- so this predicate does not try to tell them
 -- apart.
 isEffectfulVar :: String -> Bool
-isEffectfulVar name = "_gen" `isSuffixOf` name
+isEffectfulVar name = genSuffix `isSuffixOf` name
 
 -- | True if evaluating the expression has no observable side effect, so it is
 -- safe both to duplicate (inline into several uses) and to collapse repeated

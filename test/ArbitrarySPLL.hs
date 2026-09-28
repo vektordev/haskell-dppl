@@ -54,12 +54,13 @@ module ArbitrarySPLL (
 
 import Test.QuickCheck
 import Data.List (nub, find)
-import Data.Maybe (fromMaybe, listToMaybe)
+import Data.Maybe (fromMaybe, listToMaybe, isJust)
 
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
 import SPLL.Typing.RType
 import SPLL.Parser (reserved)
+import SPLL.ReservedNames (reservedIdentifierReason)
 import PredefinedFunctions (globalFEnv, parameterCount, FPair(..), FDecl, contract, applicability)
 import SPLL.IntermediateRepresentation (IRExpr(..))
 import SPLL.Prelude
@@ -108,11 +109,12 @@ genIdentifier = do
   rest <- listOf (elements $ ['a'..'z'] ++ ['0'..'9'])
   return (first:rest)
 
--- Generator for valid identifiers (not reserved, not a builtin InjF name)
+-- Generator for valid identifiers (not a keyword, not a builtin InjF name, not
+-- a name the compiler claims -- 'SPLL.ReservedNames'; e.g. "sample" or "ast1")
 genValidIdentifier :: Gen String
 genValidIdentifier = do
   ident <- genIdentifier
-  if ident `elem` reserved || ident `elem` map fst (globalFEnv [])
+  if ident `elem` reserved || ident `elem` map fst (globalFEnv []) || isJust (reservedIdentifierReason ident)
     then genValidIdentifier  -- try again
     else return ident
 

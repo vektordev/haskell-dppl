@@ -8,15 +8,12 @@ import Data.Maybe (isJust, isNothing)
 import PredefinedFunctions (globalFEnv, parameterCount)
 import Data.List (intersect, groupBy, sortOn, nub, intercalate)
 import Data.Function (on)
-
--- Reserved Var names bound to prelude-primitive distributions; not user declarations.
-distributionPrimitiveNames :: [String]
-distributionPrimitiveNames = ["Uniform", "Normal"]
+import SPLL.ReservedNames (distributionPrimitiveNames, internalNameReason, groupNameCollisions)
 
 -- This function returns nothing if the program is valid and an error else
 validateProgram :: Program -> Either String ()
 -- We sequence the either monads so we either have a list of errors(Lefts) or discard the Rights
-validateProgram p@Program{functions=fn, neurals=nrls, writeLogitsDecls=enc, adts=adtsDecl} = sequence_ (validateMainExists fn : validateNoNameCollisions adtsDecl fn : validateWriteLogitsDecls enc : map validateNeuralShape nrls ++ exprValidations)
+validateProgram p@Program{functions=fn, neurals=nrls, writeLogitsDecls=enc, adts=adtsDecl} = sequence_ (validateMainExists fn : validateReservedNames p : validateNoNameCollisions adtsDecl fn : validateWriteLogitsDecls enc : map validateNeuralShape nrls ++ exprValidations)
   where
     -- Validate all expressions potentially unsing the context of their top level declaration and their program
     exprValidations = concatMap (\(_, expr) -> validateAllSubexpressions p expr expr) fn
@@ -61,6 +58,37 @@ validateMainExists :: [FnDecl] -> Either String ()
 validateMainExists fn
   | "main" `elem` map fst fn = Right ()
   | otherwise = Left "Compiler Error: Program has no 'main' function defined."
+
+-- | Reject a program that uses a name the compiler claims for itself (design
+-- reserved-name-registry; the registry is 'SPLL.ReservedNames'). The parser
+-- already refuses such a name as it reads it; this is the check for an AST
+-- built any other way, and the only place the /derived group/ collisions can
+-- be seen, since they need every declaration at once: a function @n_auto@
+-- beside a neural declaration @n@, or @f_map@ beside @f@, lands on a group name
+-- the compiler generates, and the second definition silently replaced the
+-- first in the emitted Python.
+--
+-- Checked: every top-level definition, every binder (parameter or @draw@),
+-- every neural declaration, and every constructor and field a @data@
+-- declaration introduces.
+validateReservedNames :: Program -> Either String ()
+validateReservedNames Program{functions=fn, neurals=nrls, adts=adtsDecl} =
+  case [ (n, what, why) | (n, what) <- introduced, Just why <- [internalNameReason n] ] of
+    ((n, what, why) : _) ->
+      Left ("Compiler Error: " ++ what ++ " '" ++ n ++ "' uses a reserved name: " ++ why ++ ". Rename it.")
+    [] -> case groupNameCollisions (map fst fn) neuralNames of
+      ((derived, owner) : _) ->
+        Left ("Compiler Error: the definition '" ++ derived ++ "' collides with the name the compiler generates for "
+              ++ owner ++ ". Rename one of them.")
+      [] -> Right ()
+  where
+    neuralNames = [ n | (n, _, _) <- nrls ]
+    introduced =
+      [ (n, "the definition") | (n, _) <- fn ]
+      ++ [ (n, "the neural declaration") | n <- neuralNames ]
+      ++ [ (b, "the binder") | (_, body) <- fn, b <- declaredVariables body ]
+      ++ [ (c, "the constructor") | ADTDecl{constructors = cs} <- adtsDecl, (c, _) <- cs ]
+      ++ [ (f, "the field") | ADTDecl{constructors = cs} <- adtsDecl, (_, fields) <- cs, (f, _) <- fields ]
 
 -- | Every name a @data@ declaration puts into the global function
 -- environment (a constructor, its @is\<Ctor\>@ predicate, or a field

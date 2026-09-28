@@ -43,6 +43,7 @@ module SPLL.Typing.ModalityInfer
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import qualified Data.Set as Set
+import SPLL.ReservedNames (uniformName, normalName)
 import Data.Graph (SCC(..), stronglyConnComp)
 import Data.List (find)
 
@@ -351,8 +352,8 @@ inferE ctx env expr = case expr of
     let m = case Map.lookup name env of
               Just im            -> im
               Nothing
-                | name == "Normal"  -> IG gNormal
-                | name == "Uniform" -> IG gIntegrate
+                | name == normalName  -> IG gNormal
+                | name == uniformName -> IG gIntegrate
                 | otherwise         -> IG gExact   -- unbound ⇒ Deterministic (PInfer2 default)
     in done m (Expr (setPType ti (projectNode (rType ti) m)) (Var name)) []
 

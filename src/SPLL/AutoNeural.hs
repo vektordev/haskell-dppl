@@ -18,6 +18,7 @@ import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType
 import SPLL.Lang.Lang
+import SPLL.ReservedNames (neuralReadLogitsSuffix, queryParamName)
 import StandardLibrary
 
 import Data.List (find, elemIndex, isPrefixOf, intercalate)
@@ -60,12 +61,10 @@ makeAutoNeural adtDecls conf registry decl@(name, declType, tag) =
 resolvePartitionAnnotation :: [(RType, MultiValue)] -> RType -> Maybe MultiValue -> Maybe MultiValue
 resolvePartitionAnnotation registry ty tag = lookup ty registry <|> tag
 
--- | The naming convention 'makeReadLogitsFunGroup' uses to mark a read-logits network's own
--- 'IRFunGroup' (as opposed to the value-producing SPLL function that reads
--- it): its group name is the network's declared name with this suffix
--- appended.
-neuralReadLogitsSuffix :: String
-neuralReadLogitsSuffix = "_auto"
+-- 'neuralReadLogitsSuffix' (re-exported above) is the naming convention
+-- 'makeReadLogitsFunGroup' uses to mark a read-logits network's own
+-- 'IRFunGroup': the network's declared name with that suffix appended. It is
+-- owned by 'SPLL.ReservedNames', which rejects a user definition landing on it.
 
 -- Read-logits: Symbol -> target. Generates sampling and probability reader functions for NN1.
 -- It hosts no writeLogits function (that lives on the value-producing SPLL function).
@@ -222,11 +221,11 @@ symbol = "l_x_neural_in"
 -- the value only on the dim-0 side. Both dim and the probability are let-bound
 -- (dim is a constant for every non-mixed plan and folds away).
 makeProb :: [ADTDecl] -> CompilerConfig -> PartitionPlan -> IRExpr
-makeProb adtDecls _conf plan = IRLambda vector (IRLambda "sample"
+makeProb adtDecls _conf plan = IRLambda vector (IRLambda queryParamName
   (IRLetIn probVar m (IRLetIn dimVar dim
     (IRConstruct TgTuple [IRVar probVar, IRConstruct TgTuple [IRVar dimVar, IRConstruct TgTuple [bc, imposs]]]))))
   where
-    (m, dim, bc) = makeProbRec adtDecls plan 0 (IRVar "sample")
+    (m, dim, bc) = makeProbRec adtDecls plan 0 (IRVar queryParamName)
     probVar = "l_dec_p"
     dimVar  = "l_dec_dim"
     imposs  = IRIf (IROp OpEq (IRVar dimVar) (IRConst (VFloat 0)))

@@ -24,6 +24,7 @@ module SPLL.IRCompiler (
   enumeratedCount
 )where
 
+import SPLL.ReservedNames (queryParamName, accProbParamName, topKCutoffName, accProbInitName)
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
@@ -386,7 +387,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
             guardUnderLambdas (IRLambda n b) = IRLambda n (guardUnderLambdas b)
             guardUnderLambdas bodyExpr
               | checkQueryType conf =
-                  IRIf (IRConformsTo returnRType (IRVar "sample"))
+                  IRIf (IRConformsTo returnRType (IRVar queryParamName))
                        bodyExpr
                        (IRError (kind ++ "(" ++ name ++ "): query value does not conform to return type " ++ show returnRType))
               | otherwise = bodyExpr
@@ -414,15 +415,15 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
         baseFunGroup = IRFunGroup {groupName=name, writeLogitsFun=writeLogitsF, sampleDomain=sampleDom,
          integFun =
           if not noInteg && (pt == Deterministic || pt == Integrate || pt == PNormal || pt == PLogNormal) then
-            Just (appendDoc guardNote (toIntegDecl name (IRLambda "sample" (guardQuery "cdf" (runCompile (meta progTypeEnv) (toIRInferenceSave (meta progTypeEnv) True binding (IRVar "sample")))))))
+            Just (appendDoc guardNote (toIntegDecl name (IRLambda queryParamName (guardQuery "cdf" (runCompile (meta progTypeEnv) (toIRInferenceSave (meta progTypeEnv) True binding (IRVar queryParamName)))))))
           else Nothing,
           probFun =
             if not noProb && (pt == Deterministic || pt == Integrate || pt == PNormal || pt == PLogNormal) then
               let metaBase = meta progTypeEnv
-                  compileBody m = runCompile m (toIRInferenceSave m False binding (IRVar "sample"))
+                  compileBody m = runCompile m (toIRInferenceSave m False binding (IRVar queryParamName))
               in Just (appendDoc guardNote $ toProbDecl name $ case topKThreshold conf of
-                   Just _ -> IRLambda "sample" $ IRLambda "acc_prob" $ guardQuery "p" $ compileBody (metaBase { accProb = IRVar "acc_prob" })
-                   Nothing -> IRLambda "sample" $ guardQuery "p" $ compileBody metaBase)
+                   Just _ -> IRLambda queryParamName $ IRLambda accProbParamName $ guardQuery "p" $ compileBody (metaBase { accProb = IRVar accProbParamName })
+                   Nothing -> IRLambda queryParamName $ guardQuery "p" $ compileBody metaBase)
             else Nothing,
           genFun =
             if not noGen then
@@ -472,8 +473,8 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
                         , probFun =
                             if not noProb && (pt == Deterministic || pt == Integrate || pt == PNormal || pt == PLogNormal) then
                               let metaExtra = (meta progTypeEnv) { semiringFamily = fam }
-                                  compileBody m = runCompile m (toIRInferenceSave m False binding (IRVar "sample"))
-                              in Just (appendDoc guardNote $ toProbDecl name $ IRLambda "sample" $ guardQuery "p" $ compileBody metaExtra)
+                                  compileBody m = runCompile m (toIRInferenceSave m False binding (IRVar queryParamName))
+                              in Just (appendDoc guardNote $ toProbDecl name $ IRLambda queryParamName $ guardQuery "p" $ compileBody metaExtra)
                             else Nothing
                         , genFun = Nothing
                         , normalFun = Nothing
@@ -490,8 +491,8 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
   -- caller must seed the extra acc_prob parameter with at the query root
   -- (linear 1.0, or log-space 0.0). It's read back by 'SPLL.Prelude.runProbNamedC'.
   (case topKThreshold conf of
-    Just thresh -> [("TOP_K_CUTOFF", VFloat (if logSpace conf then log thresh else thresh)),
-                     ("ACC_PROB_INIT", VFloat (if logSpace conf then 0.0 else 1.0))]
+    Just thresh -> [(topKCutoffName, VFloat (if logSpace conf then log thresh else thresh)),
+                     (accProbInitName, VFloat (if logSpace conf then 0.0 else 1.0))]
     Nothing     -> [])
 
   where
@@ -1149,7 +1150,7 @@ convolveTables meta dom buckets = do
     -- written once per cell rather than once per pair.
     term lc rc = case topKThreshold (compilerConfig meta) of
       Nothing -> srTimes sr lc rc
-      Just _  -> IRIf (IROp OpGreaterThan (srTimes sr (accProb meta) lc) (IRVar "TOP_K_CUTOFF"))
+      Just _  -> IRIf (IROp OpGreaterThan (srTimes sr (accProb meta) lc) (IRVar topKCutoffName))
                       (srTimes sr lc rc)
                       (srZero sr)
 
@@ -2243,9 +2244,9 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
           setVariables [(accFalseV, srTimes sr (accProb meta) (IRVar var_condF_p))]
           prunedV <- mkVariable "pruned"
           let prunedExpr = IRIf
-                (IROp OpLessThan (IRVar accTrueV) (IRVar "TOP_K_CUTOFF"))
+                (IROp OpLessThan (IRVar accTrueV) (IRVar topKCutoffName))
                 (packResult mul2Zeroed)
-                (IRIf (IROp OpLessThan (IRVar accFalseV) (IRVar "TOP_K_CUTOFF"))
+                (IRIf (IROp OpLessThan (IRVar accFalseV) (IRVar topKCutoffName))
                   (packResult mul1Zeroed)
                   (packResult addRes))
           setVariables [(prunedV, prunedExpr)]
@@ -3074,7 +3075,7 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
           Just _  -> IROp OpAnd possible
                        (IROp OpGreaterThan
                           (srTimes sr (accProb meta) pLeft)
-                          (IRVar "TOP_K_CUTOFF"))
+                          (IRVar topKCutoffName))
     let returnExpr   = IRIf cutoffOk (wrapR (srTimes sr pLeft pRight)) (srZero sr)
     let branchesExpr = IRIf cutoffOk (IRConst (VFloat 1)) (IRConst (VFloat 0))
     return (mkPResult (sealP returnExpr) const0 branchesExpr (notIR cutoffOk))

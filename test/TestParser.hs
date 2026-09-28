@@ -499,13 +499,20 @@ prop_observeLambdaDesugarsToLetIdiom =
        (_, Left err) -> counterexample ("src2 failed: " ++ errorBundlePretty err) False
 
 -- A predicate that is not a literal lambda (a named function, say) keeps the
--- application, and the binder gets a generated name instead.
+-- application, and the binder gets a generated name instead. That name,
+-- @p_ob0@, is reserved (SPLL.ReservedNames) precisely so that no user binder
+-- can meet it, so the expected program is written with an ordinary name and
+-- renamed afterwards.
 prop_observeNamedPredicateDesugarsToApply :: Property
 prop_observeNamedPredicateDesugarsToApply =
   let src1 = "isPos v = v > 0.0\nmain = observe Normal isPos"
-      src2 = "isPos v = v > 0.0\nmain = draw p_ob0 = Normal in if isPos p_ob0 then right p_ob0 else left ()"
+      src2 = "isPos v = v > 0.0\nmain = draw q = Normal in if isPos q then right q else left ()"
+      renameQ (Expr ti (Var "q")) = Expr ti (Var "p_ob0")
+      renameQ (Expr ti (Lambda "q" b)) = Expr ti (Lambda "p_ob0" (renameQ b))
+      renameQ (Expr ti e) = Expr ti (fmap renameQ e)
+      renamed p = p { functions = [ (n, renameQ e) | (n, e) <- functions p ] }
   in case (tryParseProgram "" src1, tryParseProgram "" src2) of
-       (Right p1, Right p2) -> p1 =~= p2
+       (Right p1, Right p2) -> p1 =~= renamed p2
        (Left err, _) -> counterexample ("src1 failed: " ++ errorBundlePretty err) False
        (_, Left err) -> counterexample ("src2 failed: " ++ errorBundlePretty err) False
 

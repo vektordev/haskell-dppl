@@ -85,6 +85,7 @@ module SPLL.Prelude
   , renderMarginalReport
   ) where
 
+import SPLL.ReservedNames (topKCutoffName, accProbInitName)
 import SPLL.Lang.Lang
 import SPLL.Lang.Types (makeTypeInfo, GenericValue (..), CompilerError, TypeInfo(..), ADTDecl, FnDecl)
 import SPLL.Typing.PType (PType)
@@ -560,13 +561,13 @@ runProbNamedC p compiled name args x =
 -- The IRCompiler emits the TOP_K_CUTOFF constant iff topKThreshold was set,
 -- so a compiled IREnv carries its own marker for the extra acc_prob parameter.
 compiledWithTopK :: IREnv -> Bool
-compiledWithTopK (IREnv _ _ consts) = isJust (lookup "TOP_K_CUTOFF" consts)
+compiledWithTopK (IREnv _ _ consts) = isJust (lookup topKCutoffName consts)
 
 -- The IRCompiler emits ACC_PROB_INIT alongside TOP_K_CUTOFF, in the same
 -- space (linear 1.0 / log-space 0.0), so the caller never has to know
 -- separately whether the compilation was log-space.
 accProbInit :: IREnv -> IRValue
-accProbInit (IREnv _ _ consts) = fromMaybe (VFloat 1.0) (lookup "ACC_PROB_INIT" consts)
+accProbInit (IREnv _ _ consts) = fromMaybe (VFloat 1.0) (lookup accProbInitName consts)
 
 runIntegC :: Program -> IREnv -> [IRValue] -> IRValue -> Either CompilerError IRValue
 runIntegC p compiled = runIntegNamedC p compiled "main"

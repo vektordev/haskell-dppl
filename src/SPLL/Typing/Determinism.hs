@@ -42,6 +42,7 @@ import Data.Set (Set)
 
 import SPLL.Lang.Types (Expr(..), ExprF(..), Program(..), TypeInfo(..), ChainName)
 import SPLL.Lang.Lang (getTypeInfo)
+import SPLL.ReservedNames (distributionPrimitiveNames)
 
 -- | Per-node determinism, keyed by the chain name assigned by
 -- @ForwardChaining.annotateProg@ (so this pass must run after it).
@@ -60,7 +61,7 @@ type FnSummary = Map String Bool
 -- primitives, mirroring @PInfer2.distributionPrimitives@). Everything else
 -- propagates determinism forward.
 randomPrimitives :: Set String
-randomPrimitives = Set.fromList ["Uniform", "Normal"]
+randomPrimitives = Set.fromList distributionPrimitiveNames
 
 -- ---------------------------------------------------------------------------
 -- Public entry points

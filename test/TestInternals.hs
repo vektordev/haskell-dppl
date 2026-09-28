@@ -47,6 +47,8 @@ import Utils (splitByString)
 import Data.Maybe (isJust)
 import Data.Functor.Identity (runIdentity)
 import qualified PredefinedFunctions as PF
+import SPLL.Validator (validateProgram)
+import SPLL.ReservedNames (distributionPrimitiveNames, languageKeywords, reservedIdentifierReason, internalNameReason)
 
 
 -- | The (prob, dim) pair a probability query must return; a different shape
@@ -3987,6 +3989,7 @@ internalsTests = testGroup "Internals"
   , test_headHashDistinguishesConTagsAndAccessors
   , test_irConstructDestructInterpreterDispatch
   , test_hasTailDescentRecognisesNewShape
+  , reservedNameTests
   ]
 
 -- | Tests heavy enough (multiple full compiles of a depth-3/depth-10+ plan
@@ -4326,3 +4329,83 @@ test_recursiveListBranchPruning = testCase "recursiveListBranchPruning" $ do
   where
     probDimOfBP (Left e)  = error ("prob query error: " ++ show e)
     probDimOfBP (Right v) = let (p, d) = probDimOf v in p `seq` d `seq` (p, d)
+
+-- ---------------------------------------------------------------------------
+-- Reserved-name registry (design reserved-name-registry)
+
+-- | One name per entry of 'SPLL.ReservedNames': an exact name, a member of
+-- each reserved prefix, numbered prefix and suffix. Adding an entry to the
+-- registry means adding a representative here.
+reservedExamples :: [String]
+reservedExamples =
+  [ "sample", "acc_prob", "TOP_K_CUTOFF", "ACC_PROB_INIT"
+  , "l_tmp", "cse_0", "_r0", "ast12", "p_d0", "p_ob3"
+  , "x_gen", "x_prob", "x_integ", "x_writeLogits", "x_normal", "x_prob_deriv"
+  ]
+
+-- | Names that share a stem with a reserved one and must stay legal: the
+-- checks are exact names, prefixes and suffixes, not substrings.
+nearMissExamples :: [String]
+nearMissExamples =
+  [ "samples", "resample", "gen", "x_generic", "prob_x", "ast", "astro"
+  , "p_data", "lx", "cse", "x_auto", "word_count", "id_map" ]
+
+reservedNameTests :: TestTree
+reservedNameTests = testGroup "reserved names"
+  [ testGroup "the parser refuses every reserved name, naming the reason"
+      [ testCase (pos ++ " " ++ name) $ refused name (mk name)
+      | name <- reservedExamples
+      , (pos, mk) <- positions ]
+  , testCase "a name sharing a stem with a reserved one is accepted" $
+      forM_ nearMissExamples $ \name ->
+        forM_ positions $ \(pos, mk) ->
+          case tryParseProgram "<test>" (mk name) of
+            Left e -> assertFailure (pos ++ " " ++ name ++ " was refused: " ++ show e)
+            Right prog -> assertEqual (pos ++ " " ++ name ++ " fails validation")
+                                      (Right ()) (validateProgram prog)
+  , testCase "the validator refuses a reserved binder in an AST built without the parser" $ do
+      let prog = Program [("main", letIn "sample" uniform (var "sample"))] [] [] []
+      case validateProgram prog of
+        Left e -> assertBool ("unexpected refusal: " ++ e) ("'sample' uses a reserved name" `isInfixOf` e)
+        Right () -> assertFailure "a binder named 'sample' passed validation"
+  , testCase "the parser's own desugaring binders pass validation" $ do
+      -- `h : t` binds p_d<n>, observe with a non-literal predicate binds
+      -- p_ob<n>: the AST-level check must not refuse what the parser built.
+      let src = unlines [ "isPos v = v > 0.0"
+                        , "main = draw h : t = [1.0, 2.0] in observe (h + Normal) isPos" ]
+      prog <- either (\e -> assertFailure (show e) >> undefined) return (tryParseProgram "<test>" src)
+      assertEqual "validation" (Right ()) (validateProgram prog)
+      -- Probability mode cannot invert through a named predicate (see
+      -- SPLL.Parser.pObserve), so only the generate variant is compiled.
+      let conf = defaultCompilerConfig { noProbability = True, noIntegrate = True }
+      assertBool "the program does not compile" (either (const False) (const True) (compile conf prog))
+  , testCase "a definition landing on a neural declaration's read-logits group is refused" $
+      collides "n_auto" (unlines [ "neural n :: (Symbol -> Int) of [0,1,2]", "n_auto s = 7", "main s = n s" ])
+  , testCase "a definition landing on another definition's semiring group is refused" $ do
+      collides "f_map" (unlines [ "f x = x + 1.0", "f_map = 2.0", "main = f f_map" ])
+      collides "f_count" (unlines [ "f x = x + 1.0", "f_count = 2.0", "main = f f_count" ])
+  , testCase "the distribution primitives are keywords" $
+      assertBool "a distribution primitive is not a parser keyword"
+                 (all (`elem` languageKeywords) distributionPrimitiveNames)
+  , testCase "every surface-reserved name but the parser's binders is reserved in the AST too" $
+      forM_ reservedExamples $ \name ->
+        assertEqual name (isJust (reservedIdentifierReason name) && not ("p_" `isPrefixOf` name))
+                         (isJust (internalNameReason name))
+  ]
+  where
+    positions =
+      [ ("parameter",  \n -> unlines [ "f " ++ n ++ " = " ++ n ++ " + 1.0", "main = f 2.0" ])
+      , ("definition", \n -> unlines [ n ++ " = 1.0", "main = " ++ n ++ " + 1.0" ])
+      , ("draw",       \n -> unlines [ "main = draw " ++ n ++ " = Uniform in " ++ n ])
+      , ("field",      \n -> unlines [ "data R = Mk " ++ n ++ "::Float", "main = Mk 1.0" ])
+      ]
+    refused name src = case tryParseProgram "<test>" src of
+      Left e -> assertBool ("refused for another reason: " ++ show e)
+                           (("reserved identifier '" ++ name ++ "'") `isInfixOf` show e)
+      Right _ -> assertFailure ("'" ++ name ++ "' was accepted")
+    collides name src = case tryParseProgram "<test>" src of
+      Left e -> assertFailure ("parse failed: " ++ show e)
+      Right prog -> case validateProgram prog of
+        Left e -> assertBool ("refused for another reason: " ++ e)
+                             (("the definition '" ++ name ++ "' collides") `isInfixOf` e)
+        Right () -> assertFailure ("'" ++ name ++ "' passed validation")

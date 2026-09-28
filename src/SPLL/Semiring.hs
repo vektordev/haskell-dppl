@@ -56,6 +56,7 @@ module SPLL.Semiring (
 ) where
 
 import SPLL.IntermediateRepresentation
+import SPLL.ReservedNames (sumProductGroupTag, maxProductGroupTag, countingGroupTag)
 import SPLL.Lang.Types
 import SPLL.Lang.Lang (multiValueToValueList)
 import Utils
@@ -276,9 +277,9 @@ mapHasNoExcept = error $ "Semiring: this program compiles a marginal-except quer
 -- 'extraSemirings' entry's compiled group (e.g. "main" + 'SRMaxProduct' ->
 -- "main_map"), and what the CLI's @--semiring=@ list parses back from.
 semiringSuffix :: SemiringFamily -> String
-semiringSuffix SRSumProduct = "sumprod" -- unused today (never an *extra* entry), named for completeness
-semiringSuffix SRMaxProduct = "map"
-semiringSuffix SRCounting   = "count"
+semiringSuffix SRSumProduct = sumProductGroupTag -- unused today (never an *extra* entry), named for completeness
+semiringSuffix SRMaxProduct = maxProductGroupTag
+semiringSuffix SRCounting   = countingGroupTag
 
 -- | The group-name infix a compile under @fam@ must insert when referencing
 -- ANOTHER top-level function's compiled inference function: @""@ for the

@@ -27,6 +27,7 @@ import Data.List.NonEmpty (NonEmpty (..))
 import SPLL.Lang.Types
 import SPLL.Lang.Lang
 import SPLL.Typing.RType
+import SPLL.ReservedNames (languageKeywords, reservedIdentifierReason, destructBinderPrefix, observeBinderPrefix)
 import PredefinedFunctions (globalFEnv, parameterCount)
 import SPLL.Prelude
 import Data.Functor ((<&>))
@@ -76,21 +77,54 @@ lexeme = L.lexeme sc
 symbol :: MonadParser m => String -> m String
 symbol = L.symbol sc
 
+-- | The surface keywords, owned by the reserved-name registry.
 reserved :: [String]
-reserved = ["data", "if", "then", "else", "let", "draw", "define", "in", "theta", "subtree", "error", "observe", "ThetaTree", "Left", "Right", "Real", "Uniform", "Normal"]
+reserved = languageKeywords
 
 keyword :: MonadParser m => String -> m String
 keyword kw = lexeme $ try (string kw <* notFollowedBy (alphaNumChar <|> char '\'' <|> char '_'))
 
---Note: Won't parse capitalized constructors, if ever we add those.
+-- | An identifier in the value namespace: a definition, parameter, binder,
+-- variable reference, neural declaration, constructor or field name. Besides
+-- the keywords, it refuses every name the compiler claims for itself
+-- ('SPLL.ReservedNames.reservedIdentifierReason'), so a user name can never
+-- land on a generated one -- a parameter called @sample@ used to be captured by
+-- every probability function's query parameter.
+--
+-- Type-level names (a @data@ declaration's own name, a type reference, a
+-- depth-bounded recursion binder) never enter the value namespace and are read
+-- by 'pTypeIdentifier' instead.
+--
+-- A reserved identifier is reported with 'registerParseError' rather than
+-- 'fail': the parse carries on and the error is raised at the end, at the
+-- identifier's own position. A plain 'fail' here is swallowed by the
+-- backtracking around a top-level declaration, which then reports only
+-- "unexpected 'f'" at column 1 of the definition and loses the reason.
 pIdentifier :: MonadParser m => m String
 pIdentifier = lexeme $ do
-  x <- letterChar <|> char '_'
-  xs <- many (alphaNumChar <|> char '\'' <|> char '_')
-  let ident = (x:xs)
+  off <- getOffset
+  ident <- identifierChars
+  case () of
+    _ | ident `elem` reserved -> fail $ "reserved word: " ++ ident
+      | Just why <- reservedIdentifierReason ident -> do
+          registerParseError (FancyError off (Set.singleton (ErrorFail
+            ("reserved identifier '" ++ ident ++ "': " ++ why ++ ". Rename it."))))
+          return ident
+      | otherwise -> return ident
+
+-- | An identifier in the type namespace; only the keywords are refused.
+pTypeIdentifier :: MonadParser m => m String
+pTypeIdentifier = lexeme $ do
+  ident <- identifierChars
   if ident `elem` reserved
     then fail $ "reserved word: " ++ ident
     else return ident
+
+identifierChars :: MonadParser m => m String
+identifierChars = do
+  x <- letterChar <|> char '_'
+  xs <- many (alphaNumChar <|> char '\'' <|> char '_')
+  return (x:xs)
 
 pUniform :: MonadParser m => m Expr
 pUniform = do
@@ -250,7 +284,7 @@ letInDestructor bind (Expr _ (InjF (Named "Cons") [x, xs])) = do
   x' <- letInDestructor bind x
   xs' <- letInDestructor bind xs
   id_ <- demandUniqueNumber
-  let varName = "p_d" ++ show id_
+  let varName = destructBinderPrefix ++ show id_
   return $ \v body -> bind varName v (x' (lhead (var varName)) (xs' (ltail (var varName)) body))
 letInDestructor _ _ = fail "the left-hand side of a binding should be an identifier or a pattern of identifiers"
 
@@ -284,7 +318,7 @@ pObserve adts_ = do
     Expr _ (Lambda param body) -> return $ observeBound param base body
     _ -> do
       binderId <- demandUniqueNumber
-      return $ observe ("p_ob" ++ show binderId) base predicate
+      return $ observe (observeBinderPrefix ++ show binderId) base predicate
 
 pError :: MonadParser m => m Expr
 pError = do
@@ -497,7 +531,7 @@ pCompoundType = dbg "CompoundType" $ parens $ do
 
 pSimpleType :: MonadParser m => m RType
 pSimpleType = dbg "SimpleType" $
-  choice [try pUnitType, try $ parseFromList rTypes, pIdentifier <&> TADT]
+  choice [try pUnitType, try $ parseFromList rTypes, pTypeIdentifier <&> TADT]
 
 pUnitType :: MonadParser m => m RType
 pUnitType = do
@@ -560,13 +594,13 @@ pMultiContinuous = dbg "multiContinuous" $ do
 pMultiTypeDef :: MonadParser m => m MultiValue
 pMultiTypeDef = do
   depth <- pInt
-  name <- pIdentifier
+  name <- pTypeIdentifier
   _ <- symbol "."
   inner <- pNeuralMultiValue
   return (resolveMultiValueTypeDecl depth inner (name, inner))
 
 pMultiTypeRef :: MonadParser m => m MultiValue
-pMultiTypeRef = pIdentifier <&> MultiTypeRef
+pMultiTypeRef = pTypeIdentifier <&> MultiTypeRef
 
 pMultiDiscretes :: MonadParser m => m MultiValue
 pMultiDiscretes = dbg "multiDisc" $ do
@@ -613,7 +647,7 @@ pFunction adts_ = dbg "function" $ do
 pADT :: MonadParser m => m ADTDecl
 pADT = dbg "ADT" $ do
   _ <- keyword "data"
-  name <- pIdentifier
+  name <- pTypeIdentifier
   _ <- symbol "="
   constrs <- pADTConstructor `sepBy` symbol "|"
   -- Optional trailing `depth N`: the default unroll depth used when a neural net
@@ -631,7 +665,7 @@ pADTField :: MonadParser m => m (String, RType)
 pADTField = do
     fieldName <- pIdentifier
     _ <- symbol "::"
-    fieldType <- choice [SPLL.Parser.pType <&> Left, pIdentifier <&> Right]
+    fieldType <- choice [SPLL.Parser.pType <&> Left, pTypeIdentifier <&> Right]
     let fieldRT = case fieldType of
                     Left rt -> rt
                     Right adt -> TADT adt

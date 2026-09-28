@@ -12,6 +12,7 @@ module SPLL.CodeGenPyTorch (
 ) where
 
 import SPLL.IntermediateRepresentation
+import SPLL.ReservedNames (pythonKeywords)
 import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..), shapeRank)
@@ -135,24 +136,8 @@ pyMultiVal (MultiADT constrs) = "(\"A\", [" ++ intercalate ", " (map (\(cName, f
 -- depth-bounded recursion. Reaching codegen means that pass was skipped.
 pyMultiVal x = error ("unresolved MultiValue in codegen: " ++ show x)
 
--- | Python's reserved words. A name in this set cannot be an identifier at all,
--- so emitting one produces a file that does not parse -- @class None:@ is a
--- @SyntaxError@, not a shadowing hazard. Kept here, beside the code that prints
--- identifiers, rather than in a shared module: Julia's list is different and
--- the two must be free to diverge.
---
--- Soft keywords (@match@, @case@, @type@, @_@) are deliberately absent: they
--- are contextually valid as ordinary identifiers, so mangling them would rename
--- names that work. Names merely *exported by* @pythonLib@ (@eq@, @T@, @isAny@,
--- ...) are also absent -- shadowing one is a real hazard but a different one,
--- and it needs the library's whole surface rather than a fixed keyword list.
-pythonKeywords :: [String]
-pythonKeywords =
-  [ "False", "None", "True", "and", "as", "assert", "async", "await", "break"
-  , "class", "continue", "def", "del", "elif", "else", "except", "finally"
-  , "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal"
-  , "not", "or", "pass", "raise", "return", "try", "while", "with", "yield"
-  ]
+-- 'pythonKeywords' (the words 'pyMangle' escapes) lives in
+-- 'SPLL.ReservedNames', the registry of every name the pipeline claims.
 
 -- | Make a name safe to emit as a Python identifier, by appending the
 -- conventional trailing underscore.
