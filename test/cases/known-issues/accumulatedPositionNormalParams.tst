@@ -1,0 +1,12 @@
+-- Task let-alias-of-random-binding-crashes-toirnormalparams, the accumulator
+-- shape. Verified at f4ea495 on dev: a witnessed running sum (`p2 = s1 + s2`,
+-- pinned by observing s1 and s2) that feeds a further Normal crashes
+-- toIRNormalParams on `Var "p2"`, exactly like the alias repro. This is how a
+-- physics simulation accumulates position from speed (`draw p3 = p2 + s3`),
+-- and every such program crashes, alias or not. Inlining the sum,
+-- `(s1, (s2, (s1 + s2) + Normal))`, compiles and is right. Found by
+-- experiments_nest linear-dynamics-trajectory-mle
+-- (exp-continuous-hybrid-simulation-retest).
+-- Idealized: phi(0.5) * phi(1.1) * phi(0.2 - 1.6) =
+--   p((0.5, (1.1, 0.2))) = (0.011483826789389478, 3.0)
+expect-failure: diagnostic "cannot extract Normal params"

@@ -1,0 +1,1 @@
+main = draw s1 = Normal in draw p1 = s1 in draw s2 = s1 + Normal in (p1, p1 + s2)
