@@ -4198,10 +4198,20 @@ substIRVar n val = irMap (\e -> case e of { IRVar n' | n' == n -> val; _ -> e })
 -- probability results multiplied into the world's measure ('prodP': dims
 -- and branch counts add) -- each one the residue of a subtree that
 -- 'transportDirect' inverted through a field constructor, compiled with the
--- bound variable fixed at its witness (see 'residueFactor'). They are
--- self-contained IR (their bindings are folded in at construction) and are
+-- bound variable fixed at its witness (see 'residueFactor'), or an x-free
+-- subtree drawing fresh randomness (see 'worldFactorFree'). They are
 -- evaluated under the world's guards, never before them.
-data WWorld = WWorld [IRExpr] WSet [PResult]
+data WWorld = WWorld [IRExpr] WSet [WFactor]
+
+-- | A world factor: a result, plus bindings its fields read. A residue factor
+-- carries none (its block is folded into each field, 'unpackResult'). An
+-- x-free factor's block is a whole sub-inference, often itself a set-witness
+-- world sum, so it is bound ONCE and its fields project that variable:
+-- folding it into each of the four fields copied it four times per nesting
+-- level, which made a nested fresh draw's unoptimized IR grow 4^depth (23MB
+-- for a two-level fuzz program) and its optimized compile 6x slower.
+-- 'measureWorld' emits the bindings under the world's guards.
+data WFactor = WFactor [(Varname, IRExpr)] PResult
 
 addGuard :: IRExpr -> WWorld -> WWorld
 addGuard g (WWorld gs s fs) = WWorld (g:gs) s fs
@@ -4406,9 +4416,18 @@ measureWorld meta v (WWorld guards set factors) = do
   let wrap = generateLetInExpr binds
   -- The set's measure and the residue factors are independent: the product
   -- rule, exactly as the point-witness path's body-factor fold applies it.
-  let combined = foldl (prodP linearSemiring) (mapResult wrap res) factors
+  let factorBinds = concat [bs | WFactor bs _ <- factors]
+  let factorResults = [r | WFactor _ r <- factors]
+  let combined = foldl (prodP linearSemiring) (mapResult wrap res) factorResults
   -- A world whose guards fail is not part of the observation at all.
-  return (guardP linearSemiring guards combined)
+  if null factorBinds
+    then return (guardP linearSemiring guards combined)
+    -- Factor bindings are read by several fields, so the world's result is
+    -- packed and bound once, under the guards ('shareResult'), rather than
+    -- copying the bindings into each field. The set measure's own bindings
+    -- join them in that one block instead of being wrapped per field.
+    else shareResult linearSemiring "world" guards (binds ++ factorBinds)
+           (foldl (prodP linearSemiring) res factorResults)
 
 measureSet :: CompilerMetadata -> Expr -> WSet -> CompilerMonad PResult
 measureSet meta v (WPoint p cov) = do
@@ -4700,7 +4719,7 @@ transportDirect meta occs exprBody target = case filter (`elem` subtreeCNs exprB
             | any (isFieldCtorNode meta) (init spine)
             , Expr occTI (Var boundName) <- last spine -> do
                 f <- residueFactor meta exprBody boundName (rType occTI) value s
-                return [f]
+                return [WFactor [] f]
           _ -> return []
         return (Just [WWorld [applyTo guard s] (WPoint value (IROp OpMult c0 (applyTo cov s))) factors])
     WInterval lo hi -> case toSeededMonotoneInvExpr (fcData meta) (adtDecls meta) bodyCN occ of
@@ -4791,7 +4810,8 @@ worldFactorFree meta sub target
   | hasInterval target && not (isScalar (rType (getTypeInfo sub))) = return Nothing
   | otherwise = do
       block <- lift (runWriterT (measureSet meta sub target)) <&> generateLetInBlock meta
-      return (Just [WWorld [] WFull [unpackResult block]])
+      fv <- mkVariable "xfree_factor"
+      return (Just [WWorld [] WFull [WFactor [(fv, block)] (unpackResult (IRVar fv))]])
   where
     hasInterval (WInterval _ _) = True
     hasInterval (WChoice _ a b) = hasInterval a || hasInterval b

@@ -184,8 +184,12 @@ distribution's role: a point target is its density or mass there (times the
 target's change-of-variables factor, which matters when the target is a
 nested `let`'s transported y-point), an interval its CDF difference, a
 `WChoice` either side at runtime. The factor is compiled in its own writer
-scope and folded into a self-contained block, so `measureWorld` evaluates it
-under the world's guards. That answers the program above as
+scope into a self-contained block that is let-bound **once** (`WFactor` carries
+the binding), and `measureWorld` emits it under the world's guards through
+`shareResult`. Folding the block into each of the four `PResult` fields instead
+(as `residueFactor` does) copied it four times per nesting level: a fuzz
+program with a fresh `draw` nested in an x-free field grew to 23MB of `-O0`
+IR and compiled 6x slower, enough to trip the fuzz per-case deadline. That answers the program above as
 `0.5·φ(y) + [0.5 ≤ y ≤ 1]` (dim 1), and cumulatively as
 `0.5·Φ(y) + clamp(y − 0.5, 0, 0.5)`.
 
