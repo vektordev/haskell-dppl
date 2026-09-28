@@ -1061,6 +1061,16 @@ nestedLetShiftSrc :: String
 nestedLetShiftSrc =
   "main = draw x = Normal in draw y = x + 1.0 in if y > 0.0 then 1.0 else 0.0"
 
+-- | Task world-residual-factor-delegation (and cps-list-witness-construction-
+-- failure's G1 soundness caveat): an x-free random condition is weighted by
+-- its own polarity masses, which is only sound if its randomness is
+-- independent of the bound value's. Here both read the enclosing draw @z@, so
+-- the true density is 1 on (1, 1.5) and (11.5, 12), where the independent
+-- weighting would answer 0.5 on (1, 2) and (11, 12).
+sharedSourceConditionSrc :: String
+sharedSourceConditionSrc =
+  "main = draw z = Uniform in draw x = z + 1.0 in if z < 0.5 then x else x + 10.0"
+
 setWitnessDiagnostic :: String
 setWitnessDiagnostic = "set-valued witness construction failed for the binding of 'x'"
 
@@ -1078,6 +1088,17 @@ setWitnessNestedLetTests = testGroup "SetWitnessNestedLet"
           Right (Left e) -> assertFailure ("the fresh-randomness nested let was refused: " ++ e)
           Right (Right (VTuple (VFloat p) _)) ->
             assertBool ("expected P(y > 0) = 0.5, got " ++ show p) (abs (p - 0.5) < 1e-12)
+          Right (Right v) -> assertFailure ("unexpected result shape: " ++ show v)
+  , testCase "a random condition sharing an enclosing draw with the bound value is never weighted as independent" $
+      withParsed sharedSourceConditionSrc $ \prog -> forM_ [(1.2, 1.0), (11.7, 1.0), (1.7, 0.0)] $ \(y, truth) -> do
+        res <- forcedProb prog (VFloat y)
+        case res of
+          -- a refusal (either channel) is sound; today the outer binding refuses
+          Left _ -> return ()
+          Right (Left _) -> return ()
+          Right (Right (VTuple (VFloat p) _)) ->
+            assertBool ("p(" ++ show y ++ ") answered " ++ show p ++ ", true density " ++ show truth)
+              (abs (p - truth) < 1e-9)
           Right (Right v) -> assertFailure ("unexpected result shape: " ++ show v)
   , testCase "the plain shifted nested let compiles and matches Phi(1)" $
       withParsed nestedLetShiftSrc $ \prog -> do
