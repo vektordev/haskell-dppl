@@ -1,0 +1,11 @@
+main = fst ((\v1 -> if v1 > 1.9259387643561787
+               then ([-3.4677722571286225], left 0)
+               else ([Normal], right False))
+     Normal)
+-- Found by the let/set-witness fuzz generator: the else-arm draws a fresh
+-- Normal while the then-arm is deterministic given the bound variable. Was a
+-- known issue (the set-witness engine refused the fresh draw with an uncaught
+-- "set-valued witness construction failed"); answered since task
+-- world-residual-factor-delegation measures the x-free fresh field as a world
+-- factor.
+-- p([c]) = 1 - Phi(1.9259...) (dim 0); p([y]) = Phi(1.9259...) * phi(y) (dim 1).

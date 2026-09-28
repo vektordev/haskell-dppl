@@ -1,0 +1,5 @@
+main = draw x = Uniform in draw y = if x < 0.5 then Normal else x in y + 1.0
+-- Task world-residual-factor-delegation: the inner binding's right-hand side
+-- draws fresh randomness on one arm. The nested-let stage transports the
+-- y-point onto that right-hand side, where the x-free arm becomes a world
+-- factor measured at the transported point: letProbFreshBranch shifted by 1.

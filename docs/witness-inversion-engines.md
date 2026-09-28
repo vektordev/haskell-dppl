@@ -88,10 +88,12 @@ intersections across multiple occurrences) — e.g.
 let x = Normal in if x < 0.0 then 0.0 - x else x
 ```
 
-yields the `|Normal|` density `2φ(y)` (`test/cases/distributions/letProbAbsNormal`). Bodies
-drawing fresh randomness alongside such constraints are refused with a
-diagnostic, except inside a transported field constructor (see "Residue
-factors" below).
+yields the `|Normal|` density `2φ(y)` (`test/cases/distributions/letProbAbsNormal`). Fresh
+randomness alongside such constraints becomes a factor of the world it sits
+in, either as a transported field constructor's residue or as an x-free
+subtree (see "Residue factors" and "Fresh x-free subtrees" below); what is
+still refused is fresh randomness *combined arithmetically* with the bound
+variable (`x + Normal > 0.0`), which is a convolution, not a product.
 
 A nested `let` between the source and the constraint — `let x = Normal in
 let y = x + 1.0 in if y > 0.0 then 1.0 else 0.0`, which the parser desugars
@@ -110,7 +112,7 @@ exclusive guard groups, with the choice condition ordered after the y-guards
 and before the x-guards. Two shapes keep the existing refusal: `x` occurring
 in the inner *body* at all (its worlds would reference the inner binding's
 value, which is not in scope where worlds are measured), and an inner
-right-hand side drawing fresh randomness (`let y = x + Normal in …`), which
+right-hand side convolving the bound variable with fresh randomness (`let y = x + Normal in …`), which
 `transportDirect` cannot seed through — exactly where the flattened
 `(x + Normal) > 0.0` refuses. Corpus: `test/cases/set-witness/setWitnessNestedLet*`
 (seven programs, incl. the two-sided, chained, `observe` and
@@ -163,6 +165,50 @@ point is a projection of the query sample and a marginal wildcard can sit
 in it at any depth: the static guard errored on a float slot and silently
 answered `False` (zero mass) on a discrete one. Corpus:
 `test/cases/set-witness/setWitnessSibling*`.
+
+### Fresh x-free subtrees
+
+A subtree that mentions no occurrence of the bound variable and is not
+`Deterministic` draws fresh randomness of its own, independent of the bound
+draw. `invertToWorlds`' first clause used to refuse it, so
+
+```
+let x = Uniform in if x < 0.5 then Normal else x
+```
+
+had no probability function although `Normal` alone is the simplest thing the
+compiler compiles (task `world-residual-factor-delegation`, design finding F8).
+`worldFactorFree` now measures it as the factor of one unconstrained world
+(`WWorld [] WFull [f]`), reusing `measureSet` with the subtree in the bound
+distribution's role: a point target is its density or mass there (times the
+target's change-of-variables factor, which matters when the target is a
+nested `let`'s transported y-point), an interval its CDF difference, a
+`WChoice` either side at runtime. The factor is compiled in its own writer
+scope and folded into a self-contained block, so `measureWorld` evaluates it
+under the world's guards. That answers the program above as
+`0.5·φ(y) + [0.5 ≤ y ≤ 1]` (dim 1), and cumulatively as
+`0.5·Φ(y) + clamp(y − 0.5, 0, 0.5)`.
+
+An x-free *condition* that draws fresh randomness takes the same case split
+as an x-dependent one: each polarity inverts through the x-free clause into a
+factor world carrying `P(c = polarity)`, so the arms are weighted by the
+condition's two masses (`if Uniform < 0.3 then … x … else 1.0`) -- the
+set-witness twin of the plan engine's `planFactorBool`.
+
+Two refusals remain. An interval target on a non-scalar subtree would need a
+multivariate CDF, which nothing provides (the cumulative query then gets the
+engine's usual runtime `IRError`). And, as on the plan side, independence is
+**checked**, not assumed: a subtree reading a random local of the ambient
+scope -- an enclosing eager `draw`, one draw shared by every use -- is refused
+by the same `planFactorExternals` test, since it would not be independent of
+the bound draw's other readers. That shape has no end-to-end spelling today
+(the outer binding is refused first), exactly as on the plan side.
+
+Corpus: `test/cases/let-bindings/letProbFresh{Branch,BranchAtom,Condition}`,
+`test/cases/set-witness/setWitnessNestedLetFreshBranch` (the fresh arm one
+binding down, measured at the transported y-point), and the control
+`letProbFreshBranchTuple`, which the residue factor already answered. The
+emitted Python of every pre-existing corpus program is byte-identical.
 
 ### Interval transport through monotone `InjF` steps
 

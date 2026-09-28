@@ -1,0 +1,8 @@
+main = draw x = Uniform in if x < 0.5 then (Normal, x) else (x, Uniform)
+-- Task world-residual-factor-delegation, a control: the fresh draw sits in a
+-- tuple field next to the bound variable, which 'transportDirect's residue
+-- factor already answered before this task (its emitted code is unchanged);
+-- pinned beside the new x-free shapes so the two factor producers agree.
+-- p((a, b)) = [b < 0.5] * phi(a) + [a >= 0.5] * [0 <= b <= 1]   (dim 2)
+-- p((0.7, ANY)) = 0.5 * phi(0.7) + 1                              (dim 1)
+-- p((ANY, 0.3)) = 1 + 0.5 * 1                                     (dim 1)

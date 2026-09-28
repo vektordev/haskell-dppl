@@ -286,6 +286,12 @@ logSpaceUncoveredPrograms =
   -- setWitnessEqualityThroughExp/Affine measure only the complement world,
   -- which goes through the ordinary semiring-aware VAnyExcept split, and pass.)
   , "setWitnessEqualityThroughExpOffImage"
+  -- task world-residual-factor-delegation: an x-free subtree drawing fresh
+  -- randomness is a world factor, measured by the same linear-pinned
+  -- measureWorld.
+  , "letProbFreshBranch", "letProbFreshBranchAtom", "letProbFreshCondition"
+  , "letProbFreshBranchTuple", "setWitnessNestedLetFreshBranch"
+  , "fuzzLetWitnessSetValuedFst", "letBoundIfConditionFreshDraw"
   ]
 
 checkLogSpaceMatchesLinear :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property

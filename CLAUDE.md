@@ -348,6 +348,15 @@ deterministic sibling, the sibling's own density for a fresh draw. Without
 it `if x > 0.5 then (x, 1.0) else (x, 0.0)` answered `1.0` at `(0.7, 0.0)`.
 Corpus `test/cases/set-witness/setWitnessSibling*`.
 
+A subtree that mentions no occurrence of the bound variable but draws fresh
+randomness (`let x = Uniform in if x < 0.5 then Normal else x`) is likewise a
+world factor (`worldFactorFree`, task `world-residual-factor-delegation`): it
+is measured against the world's target by `measureSet` with the subtree in the
+bound distribution's role, and an x-free random `if`-condition splits the
+worlds by its two polarity masses. Independence is checked with the plan
+engine's `planFactorExternals`. Corpus `test/cases/let-bindings/letProbFresh*`,
+`setWitnessNestedLetFreshBranch`.
+
 An interval constraint reaching the bound variable through a chain of
 monotone `InjF` steps is transported by `toSeededMonotoneInvExpr` (direction
 table `stepMonotonicity`), with each step's input first clamped into that

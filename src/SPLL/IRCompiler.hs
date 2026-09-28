@@ -4462,15 +4462,15 @@ cdfAtBound meta v (WFinite e) = do
 invertToWorlds :: CompilerMetadata -> [ChainName] -> Expr -> WSet -> CompilerMonad (Maybe [WWorld])
 invertToWorlds meta occs exprBody target
   -- x-free subtree: deterministic given scope reduces to a membership test of
-  -- its value against the target; anything else draws fresh randomness, and
-  -- folding that in alongside set constraints is not supported (the
-  -- point-witness path's body-factor folding handles the point case).
+  -- its value against the target; anything else draws fresh randomness, which
+  -- is independent of the bound draw and so becomes a factor of the world
+  -- ('worldFactorFree', task world-residual-factor-delegation).
   | not (subtreeHasOcc occs exprBody) =
       if pType (getTypeInfo exprBody) == Deterministic
         then do
           bIR <- toIRGenerate meta exprBody
           return (Just [WWorld [memberGuard (rType (getTypeInfo exprBody)) bIR target] WFull []])
-        else return Nothing
+        else worldFactorFree meta exprBody target
 -- A continuous or discrete @==@ whose bound-variable operand is not the bare
 -- occurrence itself (@exp x == 1.0@, @x + 1.0 == 1.0@) is split here, before
 -- 'transportDirect' can see it. The point transport would seed forward
@@ -4505,8 +4505,13 @@ invertToWorlds meta occs exprBody target = do
             case (wsT, wsE) of
               (Just ts, Just es) -> return (Just (map (addGuard g) ts ++ map (addGuard (IRUnaryOp OpNot g)) es))
               _ -> return Nothing
-        | subtreeHasOcc occs c -> do
-            -- the condition constrains the same draw: case split and intersect
+        | otherwise -> do
+            -- the condition constrains the same draw: case split and intersect.
+            -- An x-free condition that draws fresh randomness takes the same
+            -- split: each polarity inverts through the x-free clause into one
+            -- unconstrained world carrying P(c = polarity) as its factor
+            -- ('worldFactorFree'), so the arms are weighted by the condition's
+            -- two masses -- the set-witness twin of 'planFactorBool'.
             cT <- invertToWorlds meta occs c (WPoint constTrueIR const1)
             cF <- invertToWorlds meta occs c (WPoint (IRConst (VBool False)) const1)
             wsT <- invertToWorlds meta occs t target
@@ -4516,7 +4521,6 @@ invertToWorlds meta occs exprBody target = do
                 return (Just ([intersectW cw tw | cw <- cts, tw <- ts]
                            ++ [intersectW cw ew | cw <- cfs, ew <- es]))
               _ -> return Nothing
-        | otherwise -> return Nothing
       Expr _ (InjF (Named "lt") [lop, rop]) -> comparisonWorlds meta occs False lop rop target
       Expr _ (InjF (Named "gt") [lop, rop]) -> comparisonWorlds meta occs True lop rop target
       -- Boolean connectives: invert each leaf at both canonical polarities
@@ -4754,6 +4758,47 @@ residueFactor meta subtree boundName boundRT value target = do
                    , recoveredVars = recovered }
   block <- lift (runWriterT (toIRInference fMeta False retyped target)) <&> generateLetInBlock fMeta
   return (unpackResult (IRLetIn boundName value block))
+
+-- | An x-free subtree that draws fresh randomness, measured as a factor of an
+-- otherwise unconstrained world (task world-residual-factor-delegation). It
+-- mentions no occurrence of the bound variable, and every random draw in SPLL
+-- is a syntactic leaf, so it is independent of the bound draw: inside a world
+-- it contributes an independent factor, the product rule the point-witness
+-- body-factor fold and 'residueFactor' already apply ('measureWorld' folds it
+-- in with 'prodP'; dims and branch counts add).
+--
+-- "Measure the subtree against the target set" is exactly what 'measureSet'
+-- does for the bound distribution, so it is reused with the subtree in that
+-- role: a point is the subtree's density or mass there (with the target's
+-- change-of-variables factor, which is not 1 when the target is a nested
+-- let's transported y-point), an interval its CDF difference (both bounds
+-- unpruned), 'WFull' certainty and a 'WChoice' either side at runtime. It
+-- runs in its own writer scope folded into a self-contained block, so the
+-- factor is evaluated under the world's guards and never hoisted past them.
+--
+-- Two refusals, both answering Nothing (the caller's refusal, or the runtime
+-- 'IRError' of a cumulative query):
+--
+-- * An interval target on a non-scalar subtree: its CDF would be a
+--   multivariate one, which nothing provides.
+-- * A subtree reading a random local of the ambient scope -- an enclosing
+--   eager @draw@ is ONE draw shared by every use, so the subtree would not be
+--   independent of the bound draw's other readers. The same local,
+--   conservative check the plan engine's factors make ('planFactorExternals').
+worldFactorFree :: CompilerMetadata -> Expr -> WSet -> CompilerMonad (Maybe [WWorld])
+worldFactorFree meta sub target
+  | not (null (planFactorExternals (typeEnv meta) (recoveredVars meta) sub)) = return Nothing
+  | hasInterval target && not (isScalar (rType (getTypeInfo sub))) = return Nothing
+  | otherwise = do
+      block <- lift (runWriterT (measureSet meta sub target)) <&> generateLetInBlock meta
+      return (Just [WWorld [] WFull [unpackResult block]])
+  where
+    hasInterval (WInterval _ _) = True
+    hasInterval (WChoice _ a b) = hasInterval a || hasInterval b
+    hasInterval _ = False
+    isScalar TFloat = True
+    isScalar TInt = True
+    isScalar _ = False
 
 -- | Combine the canonical (outcome-True, outcome-False) worlds of a
 -- Bool-valued node against the actual target: True-worlds apply when the

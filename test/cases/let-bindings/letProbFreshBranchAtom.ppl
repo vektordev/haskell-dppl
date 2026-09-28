@@ -1,0 +1,5 @@
+main = draw x = Uniform in if x < 0.5 then Normal else 1.0
+-- Task world-residual-factor-delegation, the mass-point sibling of
+-- letProbFreshBranch: the else-arm is an atom, so p(1.0) is its mass 0.5 at
+-- dim 0 (the lower dim wins the mixture), while elsewhere the fresh factor's
+-- density 0.5 * phi(y) answers at dim 1.

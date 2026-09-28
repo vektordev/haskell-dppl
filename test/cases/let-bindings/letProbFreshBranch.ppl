@@ -1,0 +1,6 @@
+main = draw x = Uniform in if x < 0.5 then Normal else x
+-- Task world-residual-factor-delegation: the then-arm is x-free and draws
+-- fresh randomness, so it is measured as a factor of the x < 0.5 world rather
+-- than refusing the whole binding.
+-- p(y) = 0.5 * phi(y) + [0.5 <= y <= 1], both arms densities (dim 1).
+-- cdf(y) = 0.5 * Phi(y) + clamp(y - 0.5, 0, 0.5).

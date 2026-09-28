@@ -1,0 +1,8 @@
+main = draw x = Uniform in if Uniform < 0.5 then x else x + 1.0
+-- An `if` condition that draws fresh randomness independent of the bound
+-- variable: an even mixture of Uniform and Uniform + 1, a flat density of 0.5
+-- on (0, 2). Was a known issue (the set-witness engine refused the fresh
+-- condition); answered since task world-residual-factor-delegation splits
+-- the worlds by the condition's two polarity masses. The point 1.0 itself is
+-- avoided: both closed supports contain it, so it reads 1.0 there, a
+-- measure-zero boundary artifact.
