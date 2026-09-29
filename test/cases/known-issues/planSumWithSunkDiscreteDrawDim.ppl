@@ -1,6 +1,0 @@
-data Color = Red | Green | Blue
-data Object = NoObj | Obj color::Color
-data Scene = Empty | SCons obj::Object, rest::Scene depth 7
-neural readScene :: (Symbol -> Scene) of 7x.{Empty | SCons {NoObj | Obj {Red|Green|Blue}} x}
-numRed s = if isEmpty s then 0.0 else (if isObj (obj s) then (if isRed (color (obj s)) then 1.0 else 0.0) else 0.0) + numRed (rest s)
-main sym = draw c = Uniform < 0.5 in draw scene = readScene sym in numRed scene + (if c then 1.0 else 0.0)

@@ -1,0 +1,17 @@
+-- An enumerable operand plus an untagged Float operand that is a mixture of a
+-- point mass and a density. The untagged side is not continuous just because
+-- it is a Float: at 3.0 and 4.0 one enumerated term lands on its atom at 3.0,
+-- and the atom outvotes the other term's density, as in any mixture. The
+-- mixed enumerate-and-shift/scale rule used to sum both terms and stamp dim 1
+-- (p(4.0) = (0.2500335, 1.0), p(3.0) = (0.2634977, 1.0)); it now combines the
+-- terms with enumMixP (task plan-sum-with-sunk-discrete-draw-reports-density).
+--
+-- ORACLE (by hand, phi/Phi the standard normal pdf/cdf, X the left operand,
+-- e the right): p(y) = sum_e 0.5 * p_X(y - e).
+--   p(4.0): e=1 hits X's atom at 3.0: 0.5 * 0.5 = 0.25, dim 0 (e=0 is a density, outvoted)
+--   p(3.0): e=0 hits the atom: 0.25, dim 0
+--   p(0.5): 0.25 * (phi(0.5) + phi(-0.5)), dim 1
+--   p(2.5): 0.25 * (phi(2.5) + phi(1.5)), dim 1
+--   cdf(3.0) = 0.5 * (0.5 Phi(3) + 0.5) + 0.5 * (0.5 Phi(2))
+--   cdf(0.0) = 0.5 * (0.5 Phi(0))       + 0.5 * (0.5 Phi(-1))
+main = (if Uniform < 0.5 then Normal else 3.0) + (if Uniform < 0.5 then 1.0 else 0.0)

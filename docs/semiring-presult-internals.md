@@ -14,6 +14,20 @@ nesting deepens; the zero-probability guard must still sit on the bound
 value rather than each projection, or a recursive call the guard exists to
 skip can run anyway (`dice` stops terminating).
 
+`enumSumP` reports a **mass**: dim 0, flag derived from the summed value.
+That is only right when every enumerated term is one. `enumMixP` is the
+enumerated *mixture* of a scalar real value: each term keeps its own dim and
+flag, and the fold follows `mixWith`'s rule (impossible terms dropped, a
+possible atom outvotes any density, equal dims sum). It decides "lowest dim"
+by an `ROpAdd` count of possible dim-0 terms rather than a max/min reduction,
+because the batched backend refuses `ROpMax`; that is sufficient only because
+a scalar's dim is 0 or 1. Its one caller is the mixed enumerate-and-shift/scale
+rule, whose "continuous" operand is known only to be a `Float` -- it may be a
+plan-answered discrete count or an atom/density mixture (task
+plan-sum-with-sunk-discrete-draw-reports-density; corpus
+`plan-enumeration/planSumWithSunkDiscreteDraw`,
+`arithmetic/plusEnumMixedAtomDensity`).
+
 `rProb` is a newtype `P` that only `SPLL.Semiring` can construct, so
 `IRCompiler.hs` must route probabilities through a Semiring-aware
 combinator or one of two escape hatches: `unsafeLinearP` (linear-only

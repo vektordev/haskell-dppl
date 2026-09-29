@@ -48,7 +48,7 @@ module SPLL.Semiring (
   -- * PResult combinators
   density, mass, detP, impossibleP, indicatorP, impossibleWhen,
   prodP, onProb, onDim, onBranches, mapResult, guardP, zipResult,
-  scaleCoV, anySafe, anySafeShared, enumSumP, enumSumNode, tensorDomainSR, opaqueMass, shareResult,
+  scaleCoV, anySafe, anySafeShared, enumSumP, enumMixP, enumSumNode, tensorDomainSR, opaqueMass, shareResult,
   packResult, unpackResult, mixP, mixSubP, mixWith,
   -- * Compiler monad plumbing (generic; not Semiring-specific, but shared by
   -- combinators that bind fresh variables)
@@ -705,6 +705,69 @@ enumSumP sr withBranchCount wrap v vals packed
                                      (IRConstruct TgTuple [ IRBuiltin (BReduce (srReduceOp sr) 0) [probs]
                                                           , IRBuiltin (BReduce ROpAdd 0) [bcs] ])))]
       opaqueMass sr (IRDestruct AcFst (IRVar paired)) (IRDestruct AcSnd (IRVar paired))
+
+-- | 'enumSumP' for an enumerated MIXTURE of a scalar real value whose terms
+-- need not share a dimension: each term keeps its own dim and impossibility
+-- flag, and the fold follows 'mixWith''s rule -- impossible terms are
+-- dropped, the lower dimension wins, and only terms of the winning dimension
+-- are summed. 'enumSumP' instead reports a mass (dim 0) and derives the flag
+-- from the summed value, which is only right when every term is one.
+--
+-- The value is a real scalar, so a term's dim is 0 (an atom) or 1 (a
+-- density) and "lowest wins" is "any possible atom wins": the decision is a
+-- plain count of possible dim-0 terms, reduced with 'ROpAdd'. A max/min
+-- reduction over the dims would say the same thing, but 'ROpMax' is refused
+-- by the batched backend, and this must not narrow what compiles there.
+--
+-- With no possible atom, the result reports @densityDim@ -- the caller's
+-- statement of a density term's dim (the continuous path passes
+-- 'anyGuardedDim' of its sample) -- rather than reading one back off the
+-- terms. The flag is structural where it can be: impossible when no term is
+-- possible, and, for an atom sum (a discrete MASS), when that mass is exactly
+-- zero -- sound there for the reason 'opaqueMass' gives. A density sum never
+-- derives impossibility from its value.
+--
+-- Like 'enumSumP' it takes the per-iteration result packed ('packResult')
+-- and binds it once inside the loop; the mapped axis is let-bound and read by
+-- up to four reductions (atom count, possible count, probability, branch
+-- count), so the body is evaluated once per value, not once per reduction.
+enumMixP :: Semiring -> Bool -> (IRExpr -> IRExpr) -> IRExpr -> Varname -> MultiValue -> IRExpr -> CompilerMonad PResult
+enumMixP sr withBranchCount wrap densityDim v vals packed = do
+  n <- mkVariable "mix_axis"
+  body <- mkVariable "mix_body"
+  t <- mkVariable "mix_term"
+  hasAtom <- mkVariable "mix_has_atom"
+  paired <- mkVariable "mix_paired"
+  let r = unpackResult (IRVar body)
+      mapped = IRBuiltin BMap [ IRLambda v (IRLetIn body packed
+                                  (packMany [unP (rProb r), rDim r, rImposs r, rBranches r]))
+                              , tensorDomainSR vals ]
+      field k = projMany k 4 (IRVar t)
+      possible = notIR (field 2)
+      atom = andIR possible (IROp OpEq (field 1) const0)
+      overTerms f = IRBuiltin BMap [IRLambda t f, IRVar n]
+      countWhere cond = IRBuiltin (BReduce ROpAdd 0) [overTerms (IRIf cond const1 const0)]
+      -- A possible term counts when it has the winning dimension: an atom if
+      -- any atom is possible, otherwise any possible (density) term.
+      counted = IRIf possible
+                  (IRIf (IRVar hasAtom)
+                     (IRIf (IROp OpEq (field 1) const0) (field 0) (srZero sr))
+                     (field 0))
+                  (srZero sr)
+      probSum = IRBuiltin (BReduce (srReduceOp sr) 0) [overTerms counted]
+      bcSum   = if withBranchCount
+                  then IRBuiltin (BReduce ROpAdd 0) [overTerms (field 3)]
+                  else const0
+  setVariables [(paired, wrap (IRLetIn n mapped
+                                (IRLetIn hasAtom (IROp OpGreaterThan (countWhere atom) const0)
+                                  (packMany [ probSum, IRVar hasAtom
+                                            , IROp OpEq (countWhere possible) const0, bcSum ]))))]
+  let out k = projMany k 4 (IRVar paired)
+      atomWon = out 1
+  return (PResult (P (out 0))
+                  (IRIf atomWon const0 densityDim)
+                  (out 3)
+                  (orIR (out 2) (andIR atomWon (IROp OpEq (out 0) (srZero sr)))))
 
 -- | The IR node an enumerated sum/max of probabilities is built from: a
 -- 'BMap' of the body over the domain, reduced along that one axis with the

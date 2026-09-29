@@ -38,10 +38,11 @@ expect-failure: broken                             -- mechanism unpinned; the p(
 
 `crash`/`diagnostic` are checked against an *uncaught exception* thrown while
 forcing `compile`'s result -- a graceful `Left` (an intended, working refusal)
-does not count; that's what `TestRejection` is for. `wrong-result` needs no
-special assertion machinery: the ordinary `p(...)`/`cdf(...)` rows below the
-header already pin the value the bug produces, and the corpus's usual tuple
-comparison already fails loudly the day a fix changes the computed number.
+does not count; that's what `TestRejection` is for. `wrong-result` rows are
+meant to pin the value the bug produces, but **nothing evaluates them yet**:
+the harness treats the shape as documentation, and this folder is excluded
+from the corpus sweeps, so a fix (or any edit to the rows) leaves the pin
+green. See docs task `known-issues-wrong-result-rows-unchecked`.
 
 `broken` is the loose fallback for a repro nobody has characterized yet -- no
 exact crash message, no wrong value pinned by hand. The rows below the header

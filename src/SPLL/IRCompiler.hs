@@ -3269,19 +3269,40 @@ toIRInference meta cumulative (Expr TypeInfo {rType=rt} (InjF (Named name) [left
   mTblEnum <- materializeOperandTable meta enumE
   irTuple <- lift (runWriterT (do
     setVariables [(xSample, sample)]
-    pEnum <- operandProb meta mTblEnum enumE (IRVar xEnum)
+    pEnumRaw <- operandProb meta mTblEnum enumE (IRVar xEnum)
+    pEnumVar <- mkVariable "p_enum"
+    setVariables [(pEnumVar, pEnumRaw)]
+    let pEnum = IRVar pEnumVar
     contRes <- guardedSubInference metaOp [appTest]
                  (probF metaOp cumulative contE invExpr)
     let scaled = guardP sr [appTest] (scaleCoV sr cumulative invDeriv contRes)
-    return (prodP sr (mass pEnum) scaled)
+    -- A value of the enumerated operand's domain with no mass is an
+    -- impossible term, not a possible zero: 'enumMixP' below lets the
+    -- lowest-dim possible term decide the result's dim, and a zero-weight
+    -- atom must not outvote a real density. The tag over-approximates the
+    -- support, so such values are ordinary. Exact zero is sound here for the
+    -- reason 'opaqueMass' gives: this is a discrete mass.
+    return (prodP sr (impossibleWhen (IROp OpEq pEnum (srZero sr)) (mass pEnum)) scaled)
     )) <&> generateLetInBlock meta
   uniquePrefix <- mkVariable ""
   let applyUnique = irMap (uniqueify [xEnum, xSample] uniquePrefix)
   let (outerBinds, innerTuple) = hoistInvariantBindings xEnum irTuple
   let renameHoisted (n, v) = (if n `elem` [xEnum, xSample] then uniquePrefix ++ n else n, applyUnique v)
   setVariables (map renameHoisted outerBinds)
-  summed <- enumSumP sr (countBranches (compilerConfig meta)) applyUnique xEnum enumList innerTuple
-  let summedTyped = onDim (const (if cumulative then const0 else anyGuardedDim sample)) summed
+  -- The "continuous" operand is only known to be a real scalar (its rType),
+  -- not to have a density: an operand no tag reaches -- a fold through a
+  -- recursive helper, which Analysis refuses to look through -- may be a
+  -- discrete count the plan path answers as a mass, or a mixture of atoms and
+  -- a density. So in probability mode each term keeps the dim its own
+  -- inference reports, and 'enumMixP' combines them as a mixture (possible
+  -- atoms outvote densities), instead of stamping dim 1 on the sum (task
+  -- plan-sum-with-sunk-discrete-draw-reports-density). A term that is a true
+  -- density reports 'anyGuardedDim', so a genuinely continuous operand gets
+  -- exactly the result it did before. Cumulative mode is a CDF, dim 0,
+  -- whatever the terms are.
+  summedTyped <- if cumulative
+    then enumSumP sr (countBranches (compilerConfig meta)) applyUnique xEnum enumList innerTuple
+    else enumMixP sr (countBranches (compilerConfig meta)) applyUnique (anyGuardedDim sample) xEnum enumList innerTuple
   -- mult(0, y) = 0 for every y (task mult-inversion-unguarded-at-zero, symptom
   -- 3): 'appTest' above already keeps the guarded scaling from dividing by
   -- e=0, but that just drops the term -- the true contribution of that

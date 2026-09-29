@@ -1116,6 +1116,13 @@ continuous variables); under mixture, the **smaller dimension wins** among
 possible alternatives. Base cases: `Normal`/`Uniform` emit `dim = 1`;
 discrete/deterministic expressions emit `dim = 0`.
 
+An operand's `rType` being `Float` says nothing about its dim. The mixed
+enumerate-and-shift/scale rule (one binary-`InjF` operand enumerable, the
+other an untagged `Float`) used to stamp dim 1 on its sum, so a plan-answered
+count plus a coin came out as a density. It now sums its terms with
+`Semiring.enumMixP`, the enumerated form of the mixture rule above; see
+`docs/semiring-presult-internals.md`.
+
 ### Probability internals (`PResult` / `Semiring`)
 
 `PResult` is built from a combinator vocabulary in `SPLL.Semiring`
@@ -1654,10 +1661,15 @@ expect-failure: broken                         -- mechanism unpinned; the p()/cd
 
 `crash`/`diagnostic` are checked against an exception thrown while *forcing*
 `compile`'s result — a graceful `Left` (an intended, working refusal) does not
-satisfy either; that is what `TestRejection.hs` is for. `wrong-result` needs
-no new assertion machinery: the ordinary `p(...)`/`cdf(...)` rows below the
-header already pin the value the bug produces, and the corpus's usual tuple
-comparison already fails loudly the day a fix changes the computed number.
+satisfy either; that is what `TestRejection.hs` is for. **`wrong-result` rows
+are currently not evaluated by anything**: `checkExpectFailure` treats the
+shape as documentation (`return ()`), and this folder is excluded from the
+corpus sweeps that would otherwise compare them. So a `wrong-result` pin does
+*not* fail the day its bug is fixed -- editing its rows to any value still
+passes (found while fixing `planSumWithSunkDiscreteDrawDim`, task
+plan-sum-with-sunk-discrete-draw-reports-density; follow-up docs task
+`known-issues-wrong-result-rows-unchecked`). Until that lands, verify a fix to
+a `wrong-result` pin by moving the program into the ordinary corpus.
 
 `broken` is the loose fallback for a repro that was migrated without
 characterizing exactly how it currently fails (no exact crash message or
