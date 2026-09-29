@@ -1812,6 +1812,84 @@ test_planHelperOnFoldResultMatchesDense = testCase "planHelperOnFoldResultMatche
       return plan
     assertBool (name ++ ": p(0) + p(1) = " ++ show (sum ps) ++ ", not 1") (abs (sum ps - 1) < 1.0e-9)
 
+-- | Task plan-fold-disjunction-of-comparisons-blowup: a fold result spelled
+-- (or substituted) more than once under one node is enumerated once and the
+-- node traversed per value ('planShareSplit'). Plan path (cardinality 0) vs
+-- dense, over: the inline disjunction and its bound-once spelling (the ticket's
+-- two repros); the doubled fold under a comparison (the split in value
+-- enumeration, not in inversion); the shared value both passed to a helper and
+-- compared directly; and a shared value beside another reader of the digit
+-- leaves, which clashes and must still be answered exactly by the ungrouped
+-- rerun.
+test_planSharedFoldValueMatchesDense :: TestTree
+test_planSharedFoldValueMatchesDense = testCase "planSharedFoldValueMatchesDense" $ do
+  let header d =
+        [ "data DigitList = DEnd | DCons dig::Int, rest::DigitList depth " ++ show d
+        , "neural readDigits :: (Symbol -> DigitList) of " ++ show d ++ "x.{DEnd | DCons [0,1,2,3,4,5,6,7,8,9] x}"
+        , "checksumSum w ds = if isDEnd ds then 0 else w*(dig ds) + checksumSum (w + 1) (rest ds)"
+        , "digitSum ds = if isDEnd ds then 0 else dig ds + digitSum (rest ds)"
+        , "isValidB s = (s == 0) || (s == 10)"
+        ]
+      shapes :: [(String, Int, String)]
+      shapes =
+        [ ("inlineOr",  3, "main sym = draw ds = readDigits sym in if ((checksumSum 1 ds) == 0) || ((checksumSum 1 ds) == 10) then 1 else 0")
+        , ("boundOnce", 3, "main sym = draw ds = readDigits sym in draw s = checksumSum 1 ds in if (s == 0) || (s == 10) then 1 else 0")
+        , ("doubled",   3, "main sym = draw ds = readDigits sym in if (checksumSum 1 ds) + (checksumSum 1 ds) > 20 then 1 else 0")
+        , ("viaHelper", 3, "main sym = draw ds = readDigits sym in if isValidB (digitSum ds) || ((digitSum ds) > 12) then 1 else 0")
+        , ("clashing",  2, "headOr ds = if isDCons ds then dig ds else 0\nmain sym = draw ds = readDigits sym in if ((checksumSum 1 ds) == 0) || ((checksumSum 1 ds) == headOr ds) then 1 else 0")
+        ]
+      logits = [ 0.1818, 0.8182, 0.1356, 0.1525, 0.0678, 0.0508, 0.1525, 0.1356, 0.0508, 0.0339, 0.1356, 0.0849
+               , 0.1429, 0.8571, 0.2143, 0.0238, 0.1667, 0.1905, 0.0714, 0.0238, 0.2143, 0.0476, 0.0238, 0.0238
+               , 0.125, 0.875, 0.0185, 0.1481, 0.1111, 0.1481, 0.0741, 0.1667, 0.0741, 0.0926, 0.1481, 0.0186 ]
+      nn d = VTuple (VInt 2) (constructVList (map VFloat (take (12 * d) logits)))
+  forM_ shapes $ \(name, depth, body) -> do
+    prog <- case tryParseProgram name (unlines (header depth ++ [body])) of
+      Left e  -> assertFailure ("parse error in " ++ name ++ ": " ++ show e)
+      Right p -> return p
+    case (compile defaultCompilerConfig prog, compile noMaterializationConfig prog) of
+      (Right denseIR, Right planIR) ->
+        assertBool (name ++ ": the cardinality-0 compile must take a different (plan) path")
+          (show denseIR /= show planIR)
+      (d, p) -> assertFailure (name ++ ": compile failed: dense " ++ either show (const "ok") d
+                               ++ ", plan " ++ either show (const "ok") p)
+    ps <- forM [0, 1] $ \q -> do
+      dense <- probUnder defaultCompilerConfig prog [nn depth] (VInt q)
+      plan  <- probUnder noMaterializationConfig prog [nn depth] (VInt q)
+      assertBool (name ++ " p(" ++ show q ++ "): plan " ++ show plan ++ " /= dense " ++ show dense)
+        (abs (plan - dense) < 1.0e-9)
+      return plan
+    assertBool (name ++ ": p(0) + p(1) = " ++ show (sum ps) ++ ", not 1") (abs (sum ps - 1) < 1.0e-9)
+
+-- | Growth check for the shared fold value (task
+-- plan-fold-disjunction-of-comparisons-blowup): a disjunction of two
+-- comparisons of the same accumulator fold must stay on the grouped DP. With
+-- each comparison enumerating the fold separately the two copies clash on the
+-- baked leaves and the traversal reruns ungrouped, growing at the per-path
+-- rate: the emitted module grew ~3x per level before the fix (depth 3 -> 5:
+-- 40 KB -> 268 KB, 6 s; depth 6 took 45 s) and ~1.25x after it. Depths are
+-- kept small so a regression fails in seconds rather than hanging the suite.
+test_planFoldDisjunctionPolynomial :: TestTree
+test_planFoldDisjunctionPolynomial = testCase "planFoldDisjunctionPolynomial" $ do
+  let prog d = unlines
+        [ "data Color = Red | Green | Blue"
+        , "data Object = NoObj | Obj color::Color"
+        , "data Scene = Empty | SCons obj::Object, rest::Scene depth " ++ show d
+        , "neural readScene :: (Symbol -> Scene)"
+        , "weightedRed w s = if isEmpty s then 0.0 else (if isObj (obj s) then (if isRed (color (obj s)) then w else 0.0) else 0.0) + weightedRed (w + 1.0) (rest s)"
+        , "main sym = draw scene = readScene sym in if ((weightedRed 1.0 scene) == 0.0) || ((weightedRed 1.0 scene) == 3.0) then 1 else 0"
+        ]
+  let sizeAt :: Int -> IO Int
+      sizeAt d = case tryParseProgram "foldor" (prog d) of
+        Left e  -> assertFailure ("parse error at depth " ++ show d ++ ": " ++ show e)
+        Right p -> case compile defaultCompilerConfig p of
+          Left e   -> assertFailure ("compile error at depth " ++ show d ++ ": " ++ show e)
+          Right ir -> return (length (show ir))
+  s3 <- sizeAt 3
+  s5 <- sizeAt 5
+  assertBool ("depth-5 fold-disjunction IR is growing at the ungrouped rate: s3="
+              ++ show s3 ++ " s5=" ++ show s5 ++ " ratio=" ++ show (fromIntegral s5 / fromIntegral s3 :: Double))
+    (s5 < 3 * s3)
+
 -- | The accumulator-fold growth check again, with the accumulator updated by
 -- SUBTRACTION (task plan-fold-subtraction-accumulator-blowup): @4.0 - w@
 -- alternates 1,3,1,3 (the EAN weight pattern). Source @a - b@ desugars to
@@ -4148,6 +4226,8 @@ internalsTests = testGroup "Internals"
   , test_planEnumAccumulatorFoldPolynomial
   , test_planEnumSubtractionAccumulatorFoldPolynomial
   , test_planHelperOnFoldResultMatchesDense
+  , test_planSharedFoldValueMatchesDense
+  , test_planFoldDisjunctionPolynomial
   , planOverCouplingRefusalTests
   , planFactorExternalsTests
   , test_tstBackendsHeader
