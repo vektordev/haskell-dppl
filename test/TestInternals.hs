@@ -41,7 +41,7 @@ import TestCaseParser (Backend(..), TestCase(..), ExpectFailure(..), expectation
 import Test.Tasty.QuickCheck (testProperties, testProperty)
 import System.Random (StdGen, mkStdGen)
 import Control.Monad.Random (Rand, evalRand)
-import Control.Monad (forM_, when)
+import Control.Monad (forM, forM_, when)
 import Data.Number.Erf (erf)
 import Utils (splitByString)
 import Data.Maybe (isJust)
@@ -1722,6 +1722,66 @@ test_planEnumAccumulatorFoldPolynomial = testCase "planEnumAccumulatorFoldPolyno
   assertBool ("depth-8 accumulator-fold IR is growing at the ungrouped rate (ungrouped ~14x, grouped ~3x): s4="
               ++ show s4 ++ " s8=" ++ show s8 ++ " ratio=" ++ show (fromIntegral s8 / fromIntegral s4 :: Double))
     (s8 < 6 * s4)
+
+-- | A deterministic helper applied to a plan-path fold result (task
+-- plan-fold-result-through-helper-crashes): the plan traversal case-splits the
+-- call on the argument's enumerated values. Differential against the dense
+-- path at depth 3 (1111 lists) or 2 -- within the default budget, so the
+-- default config enumerates densely while cardinality 0 forces the plan path.
+-- The depth-4 corpus programs @planHelperOnFoldResult*@ pin oracle values for
+-- the single-reader shapes; the two below that read the scene twice are here
+-- because two readers switch value grouping off, and at depth 4 the plan path
+-- then enumerates one world per list (as large as the dense module -- the
+-- known multi-reader limit, plan-multi-reader-value-grouping):
+--
+-- * @shared@: the helper ALSO reads the scene through a plan slice, so the
+--   split's value worlds and the helper's own worlds constrain the same
+--   leaves -- the intersection must dedup them rather than multiply masses.
+-- * @twoSplits@: two plan-dependent arguments, split jointly (cross product).
+--
+-- Both run at depth 2: ungrouped, their depth-3 plan compiles take 72 s
+-- (shared) and 443 s (twoSplits, whose cross product is quadratic in the
+-- ~1111 worlds per argument), against ~1 s at depth 2.
+test_planHelperOnFoldResultMatchesDense :: TestTree
+test_planHelperOnFoldResultMatchesDense = testCase "planHelperOnFoldResultMatchesDense" $ do
+  let header d =
+        [ "data DigitList = DEnd | DCons dig::Int, rest::DigitList depth " ++ show d
+        , "neural readDigits :: (Symbol -> DigitList) of " ++ show d ++ "x.{DEnd | DCons [0,1,2,3,4,5,6,7,8,9] x}"
+        , "checksumSum w ds = if isDEnd ds then 0 else w*(dig ds) + checksumSum (w + 1) (rest ds)"
+        , "digitSum ds = if isDEnd ds then 0 else dig ds + digitSum (rest ds)"
+        , "isValid s = if (s == 0) || (s == 10) then 1 else 0"
+        , "isValidB s = (s == 0) || (s == 10)"
+        ]
+      shapes :: [(String, Int, String)]
+      shapes =
+        [ ("value",     3, "main sym = draw ds = readDigits sym in isValid (checksumSum 1 ds)")
+        , ("bool",      3, "main sym = draw ds = readDigits sym in if isValidB (checksumSum 1 ds) then 1 else 0")
+        , ("cmp",       3, "main sym = draw ds = readDigits sym in if isValid (checksumSum 1 ds) > 0 then 1 else 0")
+        , ("shared",    2, "agree ds s = if isDCons ds then (if dig ds == s then 1 else 0) else 0\nmain sym = draw ds = readDigits sym in agree ds (checksumSum 1 ds)")
+        , ("twoSplits", 2, "same a b = if a == b then 1 else 0\nmain sym = draw ds = readDigits sym in same (checksumSum 1 ds) (digitSum ds + 5)")
+        ]
+      -- per level: DEnd/DCons flags, then the ten digit slots
+      logits = [ 0.1818, 0.8182, 0.1356, 0.1525, 0.0678, 0.0508, 0.1525, 0.1356, 0.0508, 0.0339, 0.1356, 0.0849
+               , 0.1429, 0.8571, 0.2143, 0.0238, 0.1667, 0.1905, 0.0714, 0.0238, 0.2143, 0.0476, 0.0238, 0.0238
+               , 0.125, 0.875, 0.0185, 0.1481, 0.1111, 0.1481, 0.0741, 0.1667, 0.0741, 0.0926, 0.1481, 0.0186 ]
+      nn d = VTuple (VInt 2) (constructVList (map VFloat (take (12 * d) logits)))
+  forM_ shapes $ \(name, depth, body) -> do
+    prog <- case tryParseProgram name (unlines (header depth ++ [body])) of
+      Left e  -> assertFailure ("parse error in " ++ name ++ ": " ++ show e)
+      Right p -> return p
+    case (compile defaultCompilerConfig prog, compile noMaterializationConfig prog) of
+      (Right denseIR, Right planIR) ->
+        assertBool (name ++ ": the cardinality-0 compile must take a different (plan) path")
+          (show denseIR /= show planIR)
+      (d, p) -> assertFailure (name ++ ": compile failed: dense " ++ either show (const "ok") d
+                               ++ ", plan " ++ either show (const "ok") p)
+    ps <- forM [0, 1] $ \q -> do
+      dense <- probUnder defaultCompilerConfig prog [nn depth] (VInt q)
+      plan  <- probUnder noMaterializationConfig prog [nn depth] (VInt q)
+      assertBool (name ++ " p(" ++ show q ++ "): plan " ++ show plan ++ " /= dense " ++ show dense)
+        (abs (plan - dense) < 1.0e-9)
+      return plan
+    assertBool (name ++ ": p(0) + p(1) = " ++ show (sum ps) ++ ", not 1") (abs (sum ps - 1) < 1.0e-9)
 
 -- | Fused joint-state DP acceptance. Two predicates over one scene are
 -- exponential (two readers turn 'psMerge' off); folding them into ONE
@@ -4027,6 +4087,7 @@ internalsTests = testGroup "Internals"
   , test_mixtureNegativeLogNormalScaleCompiles
   , test_planEnumBoolCtorPolynomial
   , test_planEnumAccumulatorFoldPolynomial
+  , test_planHelperOnFoldResultMatchesDense
   , planOverCouplingRefusalTests
   , planFactorExternalsTests
   , test_tstBackendsHeader
