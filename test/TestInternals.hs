@@ -432,8 +432,13 @@ irAnyLoop e = isLoop e || any irAnyLoop (getIRSubExprs e)
     isLoop (IRBuiltin BMap _) = True
     isLoop _ = False
 
+-- The argument must be searched too: the network call sits in argument
+-- position of its own reader (@name_auto_prob (name sym) x@), so stopping at
+-- the first @IRApply (IRVar _)@ answered False for exactly the nested shape it
+-- was meant to catch -- which is how the second operand's unhoisted call went
+-- unnoticed (task plusi-second-operand-oracle-not-hoisted).
 containsDirectNNApply :: String -> IRExpr -> Bool
-containsDirectNNApply name (IRApply (IRVar v) _) = v == name
+containsDirectNNApply name (IRApply (IRVar v) arg) = v == name || containsDirectNNApply name arg
 containsDirectNNApply name expr = any (containsDirectNNApply name) (getIRSubExprs expr)
 
 -- | mNistAdd: readMNist(a) ++ readMNist(b) — the NN forward pass is loop-invariant
@@ -460,6 +465,32 @@ test_nnHoistedOutOfEnumSum = testCase "nnHoistedOutOfEnumSum" $ do
             irAnyLoop probExpr
           assertBool "readMNist forward call should be hoisted outside the enumeration loop" $
             not (nnCallInsideEnumSum "readMNist" probExpr)
+
+-- | The same property one enumeration deeper, on the program task
+-- plusi-second-operand-oracle-not-hoisted was filed from: the sum feeds a
+-- helper, and the helper's result a continuous mixture, so the plusI loop sits
+-- inside two further loops. Before the fix the second operand's network call
+-- ran once per cell of all three -- 1900 calls for one query at the MNIST
+-- domain, against 1 for the first operand.
+test_nnHoistedOutOfNestedEnumSum :: TestTree
+test_nnHoistedOutOfNestedEnumSum = testCase "nnHoistedOutOfNestedEnumSum" $ do
+  let src = unlines
+        [ "neural n :: (Symbol -> Int) of [0, 1]"
+        , "toF d = if d == 0 then 0.0 else if d == 1 then 1.0 else 2.0"
+        , "main a b = (toF (n(a) ++ n(b))) + Normal * 0.5" ]
+  case tryParseProgram "<test>" src of
+    Left err -> assertFailure ("Parse error: " ++ show err)
+    Right prog ->
+      case compile defaultCompilerConfig prog of
+        Left err -> assertFailure ("Compile error: " ++ show err)
+        Right irEnv -> do
+          (probExpr, _) <- case probFun (lookupIREnv "main" irEnv) of
+            Just pf -> return pf
+            Nothing -> assertFailure "compiled main has no probability variant"
+          assertBool "the probability body should still contain an enumeration loop" $
+            irAnyLoop probExpr
+          assertBool "neither operand's network call may sit inside an enumeration loop" $
+            not (nnCallInsideEnumSum "n" probExpr)
 
 -- A program with no "main" function must be rejected with a descriptive
 -- CompilerError early on, instead of crashing deep in the IR lookup
@@ -4257,6 +4288,7 @@ internalsTests = testGroup "Internals"
       , test_writeLogitsRoundtripNoop
       , test_writeLogitsBoolExactProbs
       , test_nnHoistedOutOfEnumSum
+      , test_nnHoistedOutOfNestedEnumSum
       , test_agreementFusesToElementwiseProduct
       , test_nestedEnumerationHonoursBudget
       , test_sharedLatentFactorizesPerSlot

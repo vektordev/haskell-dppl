@@ -1509,6 +1509,28 @@ hoistInvariantBindings loopVar expr =
           let (inv, var) = partition' lv rest (n : varNames)
           in (inv, (n, v) : var)
 
+-- | Split a guarded scope's bindings into those that may be evaluated outside
+-- the guard and those that must stay under it. A binding may leave when it is
+-- pure ('isPure': no draw, no generator reference) and mentions none of the
+-- @blocked@ names -- the loop variables and every name bound per iteration --
+-- nor any binding that stays behind. Both sublists keep their relative order,
+-- so the leaving prefix is well-scoped on its own.
+--
+-- This is 'hoistInvariantBindings' for bindings a guard has already wrapped,
+-- where the free-variable test alone is not enough: leaving the guard moves
+-- evaluation from "only in cells that pass" to "unconditionally", which is
+-- sound for a pure expression that cannot observe the guard's variables, and
+-- would re-order or fuse draws for an impure one.
+splitHoistable :: [String] -> [(String, IRExpr)] -> ([(String, IRExpr)], [(String, IRExpr)])
+splitHoistable = go
+  where
+    go _ [] = ([], [])
+    go blocked ((n, v) : rest)
+      | isPure v && not (any (`freeInIR` v) blocked) =
+          let (out, stay) = go blocked rest in ((n, v) : out, stay)
+      | otherwise =
+          let (out, stay) = go (n : blocked) rest in (out, (n, v) : stay)
+
 -- | True when `sample` is VAny or contains VAny one level inside a Left/Right wrapper.
 -- Used to detect samples like (Left ANY) that would crash arithmetic inverses.
 -- Only the Either tag test and payload accessors are used here; these are already VAny-safe.
@@ -3077,7 +3099,7 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
   irTuple <- lift (runWriterT (do
     -- the subexpr in the loop must compute p(enumVar| left) * p(inverse | right)
     setVariables [(x3, sample)]
-    pLeft <- operandProb meta mTblL left (IRVar x2)
+    (pLeft, leftBinds) <- listen (operandProb meta mTblL left (IRVar x2))
     -- pRight is computed in a nested writer so its bindings can be guarded by the topK check,
     -- avoiding the inner right-side inference work whenever acc_prob * pLeft is already below cutoff.
     -- The right-hand key is the INVERTED value, an expression rather than an
@@ -3090,7 +3112,19 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, rig
             return (mass (lookupMarginal meta tbl (IRVar keyName)))
           Nothing -> toIRInference meta False right invExpr
     let pRight = unP (rProb pRightRes)
-    let wrapR e = generateLetInExpr pRightBinds e
+    -- The guard below keeps pRight's per-cell work out of cells that fail it,
+    -- but it also used to trap pRight's loop-invariant bindings -- a neural
+    -- operand's raw network call, @nn_raw = n(b)@ -- inside the loop body,
+    -- where 'hoistInvariantBindings' below never sees them. pLeft's matching
+    -- call is in this writer and so was hoisted: @n(a) ++ n(b)@ ran the
+    -- network once for @a@ and once per enumerated cell for @b@ (task
+    -- plusi-second-operand-oracle-not-hoisted: 1 vs 1900 on the two-digit
+    -- MNIST sum). Pure bindings that read no loop variable and nothing bound
+    -- per iteration are released into this writer instead, so they are
+    -- hoisted exactly like pLeft's; everything else stays guarded.
+    let (rFree, rGuarded) = splitHoistable (x2 : x3 : map fst leftBinds) pRightBinds
+    setVariables rFree
+    let wrapR e = generateLetInExpr rGuarded e
     -- The inversion's own applicability (task mult-enumerable-zero-divisor-crash):
     -- 'invExpr' (e.g. mult's c/e) is undefined at some enumerated values (e.g.
     -- e=0), and it sits as an argument to 'IRIsPossible', so it must be
