@@ -1,0 +1,7 @@
+-- Design let-binding-semantics: a destructuring `draw` binds one sample of the
+-- definition, and every name the pattern binds reads from that one sample.
+-- The definition is a perfectly correlated pair, so `a` and `b` always agree.
+-- Sibling of defineDestructured, which gets independent coins for the same RHS.
+-- Task draw-tuple-destructuring-evaluates-rhs-twice: the tuple pattern used to
+-- project `fst e` and `snd e` from two separate evaluations of `e`.
+main = draw (a, b) = (if Uniform < 0.5 then (True, True) else (False, False)) in (a, b)

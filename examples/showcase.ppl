@@ -145,9 +145,8 @@ dice sides =
 -- chaining failure at compile time.
 --
 -- Destructuring patterns (tuple, list-cons, Either branch)
--- internally double-use the bound expression, so they only
--- work safely with *deterministic* RHS values.
--- (A stochastic RHS there triggers a forward-chaining error.)
+-- bind one sample of the RHS and read every name from it:
+-- `draw (a, b) = e` takes `a` and `b` from the same draw of `e`.
 
 -- Single-use stochastic binding (safe)
 shiftedSample = draw u = Uniform in u + 1.0

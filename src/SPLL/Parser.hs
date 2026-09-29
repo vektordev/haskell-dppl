@@ -273,7 +273,12 @@ letInDestructor bind (Expr _ (Var name)) = return $ bind name
 letInDestructor bind (Expr _ (InjF (Named "TCons") [a, b])) = do
   a' <- letInDestructor bind a
   b' <- letInDestructor bind b
-  return $ \v body -> a' (tfst v) (b' (tsnd v) body)
+  -- Bind @v@ to a generated name first and project from that, as 'Cons'
+  -- does: projecting from @v@ itself would put @v@ into the tree twice, and
+  -- under @draw@ the two components would then come from different draws.
+  id_ <- demandUniqueNumber
+  let varName = destructBinderPrefix ++ show id_
+  return $ \v body -> bind varName v (a' (tfst (var varName)) (b' (tsnd (var varName)) body))
 letInDestructor bind (Expr _ (InjF (Named "left") [x])) = do
   x' <- letInDestructor bind x
   return $ \v -> x' (sfromLeftPartial v)
