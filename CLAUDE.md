@@ -201,7 +201,9 @@ they give different distributions, so the author has to pick:
   substitution (`SPLL.Lang.Lang.substituteVar`); no later pass ever sees it.
 
 Both accept the destructuring patterns (`(a, b)`, `h : t`, `Left x`, `[]`), and a
-destructuring `define` is lazy per name. `let` stays reserved and is refused
+destructuring `define` is lazy per name. A destructuring `draw` is one sample:
+the tuple and cons patterns bind the RHS to a generated `p_d<n>` and project
+every name from it (`test/cases/let-bindings/drawDestructured*`). `let` stays reserved and is refused
 with a diagnostic naming both forms. Prose elsewhere in this file (and in
 `docs/`) says "`let`" for the eager binding; read it as `draw`.
 
