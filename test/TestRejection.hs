@@ -28,6 +28,7 @@ import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, adtCdfMessage, access
 import qualified SPLL.CodeGenPyTorch
 import SPLL.CodeGenPyTorch (pyMangle, pythonKeywords)
 import SPLL.CodeGenJulia (juliaMangle, juliaKeywords)
+import SPLL.ReservedNames (pythonReservedIdentifiers, juliaReservedIdentifiers)
 import qualified SPLL.CodeGenJulia
 
 import Control.Exception (try, evaluate, SomeException)
@@ -475,6 +476,21 @@ anyCtorTestTests = testGroup "AnyConstructorTest"
                  (not (any ((`elem` pythonKeywords) . pyMangle) pythonKeywords))
       assertBool "a mangled name is still a Julia keyword"
                  (not (any ((`elem` juliaKeywords) . juliaMangle) juliaKeywords))
+  , testCase "a runtime-library or builtin name is mangled, and injectively" $ do
+      -- Task python-runtime-name-shadowing: the escaped set grew from the
+      -- keywords to every name the emitted module already has in scope.
+      assertEqual "Python: runtime function" "randn_" (pyMangle "randn")
+      assertEqual "Python: math re-export" "pi_" (pyMangle "pi")
+      assertEqual "Python: builtin" "len_" (pyMangle "len")
+      assertEqual "Julia: Base function emitted code calls" "randn_" (juliaMangle "randn")
+      assertEqual "Julia: juliaLib export" "head_" (juliaMangle "head")
+      assertEqual "Python: family shifts along" ["randn_", "randn__", "randn___"]
+                  (map pyMangle ["randn", "randn_", "randn__"])
+      -- No image of a reserved name is itself reserved.
+      assertBool "a mangled Python name is still reserved"
+                 (not (any ((`elem` pythonReservedIdentifiers) . pyMangle) pythonReservedIdentifiers))
+      assertBool "a mangled Julia name is still reserved"
+                 (not (any ((`elem` juliaReservedIdentifiers) . juliaMangle) juliaReservedIdentifiers))
   , testCase "a collision mangling cannot see is refused, not silently emitted" $
       -- Residue of the name-local design: pyMangle sees one name at a time, so
       -- a field named isNone_ colliding with constructor None's derived

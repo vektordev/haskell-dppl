@@ -6,7 +6,7 @@ module SPLL.CodeGenJulia (
 ) where
 
 import SPLL.IntermediateRepresentation
-import SPLL.ReservedNames (juliaKeywords)
+import SPLL.ReservedNames (juliaKeywords, isJuliaReserved)
 import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.Lang.Lang
 import Data.List (intercalate, dropWhileEnd)
@@ -115,20 +115,22 @@ juliaMultiVal (MultiADT constrs) = "(\"A\", [" ++ intercalate ", " (map (\(cName
   ) constrs) ++ "] )"
 juliaMultiVal x = error ("unknown juliaMultiVal for " ++ show x)
 
--- 'juliaKeywords' (the words 'juliaMangle' escapes) lives in
--- 'SPLL.ReservedNames', the registry of every name the pipeline claims. Every
--- one of them is lowercase, so a constructor name (which SPLL capitalises)
--- can never collide -- but a field name can.
+-- The names 'juliaMangle' escapes ('SPLL.ReservedNames.juliaReservedIdentifiers':
+-- the keywords, @juliaLib@'s exports, and the @Base@ names emitted code uses)
+-- live in 'SPLL.ReservedNames', the registry of every name the pipeline claims.
 
--- | Make a name safe to emit as a Julia identifier. Same rule as
--- 'SPLL.CodeGenPyTorch.pyMangle', including the escape of a keyword followed by
+-- | Make a name safe to emit as a Julia identifier: one the target cannot
+-- spell (a keyword), or one a local binder would shadow for the code emitted
+-- inside its scope (@f randn = randn + Normal@ made the @Normal@ draw,
+-- @randn()@, call the parameter). Same rule as
+-- 'SPLL.CodeGenPyTorch.pyMangle', including the escape of a reserved name followed by
 -- a run of underscores -- without it the distinct fields @end@ and @end_@ would
 -- both emit @end_@, and Julia rejects the resulting struct for a duplicate
 -- field name. See that function for why injectivity stops at this family.
 juliaMangle :: String -> String
 juliaMangle name
-  | dropWhileEnd (== '_') name `elem` juliaKeywords = name ++ "_"
-  | otherwise                                       = name
+  | isJuliaReserved (dropWhileEnd (== '_') name) = name ++ "_"
+  | otherwise                                    = name
 
 -- | 'juliaMangle' for a constructor reference in a rendered value. The test
 -- harness qualifies query-point constructors with the generated module name

@@ -19,6 +19,8 @@ import SPLL.Lang.Lang
 import SPLL.Lang.Types
 import SPLL.Prelude
 import SPLL.CodeGenJulia
+import SPLL.ReservedNames (juliaReservedIdentifiers)
+import Data.Char (isAlphaNum, isAlpha)
 import SPLL.CodeGenPyTorch
 import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
 import SPLL.Parser (tryParseProgram)
@@ -454,6 +456,80 @@ testJuliaAll programCases = ioProperty $ do
       return $ case code of
         ExitSuccess -> True === True
         ExitFailure _ -> counterexample "Julia batch test failed. See Julia error message above." False
+
+-- | Every name emitted Julia refers to without defining it -- a call
+-- @name(@ or a type test @isa Name@ -- must be one 'juliaMangle' escapes
+-- (task python-runtime-name-shadowing). A user binder spelled like such a name
+-- would shadow it for the code emitted inside its scope: a parameter @randn@
+-- turned the body's @Normal@ draw, @randn()@, into a call of the parameter.
+--
+-- 'SPLL.ReservedNames.juliaBaseNames' is a curated subset of @Base@ (the whole
+-- of it is far too large to list), so this is what keeps it in step with
+-- codegen: a new @Base@ call in 'SPLL.CodeGenJulia' fails here, naming it.
+-- The scan is sound because codegen never prints a user binder directly
+-- before an argument list: applications and callables are emitted
+-- parenthesised (@(f)(x)@, @(name)()@), so an identifier immediately followed
+-- by @(@ is one of the module's own definitions or a name codegen spelled out.
+-- String literals and comments (diagnostics quoting @p(main)@, doc lines) are
+-- stripped first. Programs whose Julia codegen refuses are skipped: that
+-- refusal is the Julia group's business, not this one's.
+testJuliaFreeNamesEscaped :: [(String, IREnv, [String])] -> Property
+testJuliaFreeNamesEscaped programs = ioProperty $ do
+  results <- forM programs $ \(n, c, nets) -> do
+    r <- try (evaluate (forceList (SPLL.CodeGenJulia.generateFunctions c))) :: IO (Either SomeException [String])
+    return $ case r of
+      Left _    -> Nothing
+      Right src -> Just (n, [ x | x <- juliaFreeReferences (unlines src)
+                                , x `notElem` juliaReservedIdentifiers, x `notElem` nets ])
+  let checked = catMaybes results
+      bad = [ (n, nub xs) | (n, xs) <- checked, not (null xs) ]
+  return $ counterexample
+    ("emitted Julia refers to names juliaMangle does not escape (add them to \
+     \SPLL.ReservedNames.juliaBaseNames): " ++ show bad)
+    (length checked > 100 && null bad)
+  where
+    forceList xs = length (concat xs) `seq` xs
+
+-- | Names a Julia source calls (@name(@) or type-tests (@isa Name@) that it
+-- does not itself define (@function name(@, @struct Name@, or @name(...) =@ /
+-- @name = @ at the start of a line). String literals and @#@ comments are
+-- removed first.
+juliaFreeReferences :: String -> [String]
+juliaFreeReferences src = nub [ x | x <- used, x `notElem` defined ]
+  where
+    code = stripJulia src
+    ls = lines code
+    defined = concatMap definedOn ls
+    definedOn l = case words l of
+      ("function" : rest : _) -> [takeWhile isIdentChar rest]
+      ("struct" : rest : _)   -> [takeWhile isIdentChar rest]
+      ("mutable" : "struct" : rest : _) -> [takeWhile isIdentChar rest]
+      (w : _) | not (null (takeWhile isIdentChar w)), isAlpha (head w) || head w == '_'
+              -> [takeWhile isIdentChar w]
+      _ -> []
+    used = scan ' ' code
+    scan _ [] = []
+    scan prev s@(c:_)
+      | (isAlpha c || c == '_') && not (isIdentChar prev) && prev /= '.' =
+          let (ident, rest) = span isIdentChar s
+          in if ident == "isa"
+               then let (t, r) = span isIdentChar (dropWhile (== ' ') rest) in t : scan ' ' r
+               else [ ident | take 1 rest == "(" ] ++ scan (last ident) rest
+    scan _ (c:rest) = scan c rest
+    isIdentChar ch = isAlphaNum ch || ch == '_' || ch == '!'
+
+-- | Blank out Julia string literals (with backslash escapes) and @#@ comments.
+stripJulia :: String -> String
+stripJulia = go
+  where
+    go [] = []
+    go ('"':rest) = '"' : inStr rest
+    go ('#':rest) = go (dropWhile (/= '\n') rest)
+    go (c:rest) = c : go rest
+    inStr [] = []
+    inStr ('\\':_:rest) = inStr rest
+    inStr ('"':rest) = '"' : go rest
+    inStr (_:rest) = inStr rest
 
 -- The program goes to a temp file rather than @python3 -c@, matching
 -- 'testJuliaAll'. An emitted program is not argv-sized: several -O0 compiles
@@ -2577,6 +2653,9 @@ buildEnd2EndTree treeName includeBackends compiledCases = testGroup treeName $
              [ testProperty n (once $ discreteProbsNormalized p c) | (n, p, c) <- neuralP ]
          -- All Julia programs share one batch file (and one julia process) to amortize startup.
          , testProperty "Julia" (once $ testJuliaAll [(c, tcs, nets) | (_, c, tcs, nets) <- routedQueries Julia])
+         -- Runs without julia installed: it only reads the emitted text.
+         , testProperty "Julia free names are escaped"
+             (once $ testJuliaFreeNamesEscaped [ (n, c, networkNames p) | (n, p, Right c, bs, _) <- compiledCases, Julia `elem` bs ])
          , testGroup "Python"
              [ testProperty n (once $ testPython nets c tcs) | (n, c, tcs, nets) <- routedQueries Python ]
          -- The same corpus through the text backends at -O0. See

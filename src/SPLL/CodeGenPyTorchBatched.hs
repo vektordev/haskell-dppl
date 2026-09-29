@@ -92,7 +92,13 @@ import SPLL.IROptimizer (deterministicGens)
 -- Accepted per Viktor (2026-07-22) as the honest cost of a hard, uniform
 -- contract, rather than special-casing the stub back in for this one shape.
 generateFunctionsBatched :: Bool -> IREnv -> Either CompilerError [String]
-generateFunctionsBatched genBoil env0 = do
+generateFunctionsBatched genBoil env0 =
+  -- A refusal is worded from the mangled environment below; report it in the
+  -- names the user wrote ('unmangleDiagnostic').
+  first (unmangleDiagnostic pyMangle env0) (emitBatched genBoil env0)
+
+emitBatched :: Bool -> IREnv -> Either CompilerError [String]
+emitBatched genBoil env0 = do
       -- Same identifier hygiene as the scalar backend: ADT names that are
       -- Python keywords are mangled in the emitted code, and every IR
       -- reference to them is renamed to match. The declarations keep the

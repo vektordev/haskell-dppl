@@ -23,8 +23,10 @@
 --   independently of the target, because the collision is in the compiler's
 --   own namespace.
 --
--- * __Target-language keywords__ ('pythonKeywords', 'juliaKeywords'): a name
---   legal in SPLL that the target cannot spell. These are /mangled/ at
+-- * __Target-language names__ ('pythonReservedIdentifiers',
+--   'juliaReservedIdentifiers'): a name legal in SPLL that the target cannot
+--   spell (a keyword), or that the emitted code already uses for something
+--   else (a runtime-library function, a builtin). These are /mangled/ at
 --   emission rather than rejected (task
 --   @codegen-adt-name-collides-with-target-keyword@): whether a program is
 --   legal must not depend on which backend it is aimed at.
@@ -66,12 +68,20 @@ module SPLL.ReservedNames
     -- * Target-language keywords
   , pythonKeywords
   , pythonRuntimeClassNames
+  , pythonRuntimeValueNames
+  , pythonBuiltinNames
   , pythonReservedIdentifiers
+  , isPythonReserved
   , juliaKeywords
+  , juliaRuntimeNames
+  , juliaBaseNames
+  , juliaReservedIdentifiers
+  , isJuliaReserved
   ) where
 
 import Data.Char (isDigit)
 import Data.List (isPrefixOf, isSuffixOf, find)
+import qualified Data.Set as Set
 
 -- ---------------------------------------------------------------------------
 -- Surface-language keywords
@@ -268,10 +278,9 @@ groupNameCollisions functionNames neuralNames =
 -- identifier. Mangled by 'SPLL.CodeGenPyTorch.pyMangle'.
 --
 -- Soft keywords (@match@, @case@, @type@, @_@) are deliberately absent: they
--- are contextually valid as ordinary identifiers, so mangling them would rename
--- names that work. Names merely /exported by/ @pythonLib@ (@eq@, @T@, @isAny@,
--- ...) are also absent -- shadowing one is a real hazard but a different one,
--- and it needs the library's whole surface rather than a fixed keyword list.
+-- are contextually valid as ordinary identifiers, so they are no hazard as
+-- keywords (@type@ is escaped anyway, as a builtin -- see 'pythonBuiltinNames').
+-- Names the runtime or Python itself binds are the other lists below.
 pythonKeywords :: [String]
 pythonKeywords =
   [ "False", "None", "True", "and", "as", "assert", "async", "await", "break"
@@ -294,17 +303,112 @@ pythonRuntimeClassNames =
   [ "Module", "Iterable", "T", "Left", "Right", "InferenceList"
   , "EmptyInferenceList", "AnyInferenceList", "ConsInferenceList", "EnumBatch" ]
 
--- | Every name 'SPLL.CodeGenPyTorch.pyMangle' escapes: the keywords, the
--- runtime classes above, and @self@, which every emitted method binds as its
--- first parameter -- a user parameter called @self@ emitted
--- @def forward(self, self, sample)@, a duplicate-argument @SyntaxError@.
+-- | The non-class values the emitted Python module has in scope before any of
+-- its own definitions: everything @from pythonLib import *@ and
+-- @from pythonLibBatched import *@ bring in -- the runtimes' own functions and
+-- constants, the modules they import, and everything @pythonLib@'s own
+-- @from math import *@ re-exports -- plus the modules the emitted header
+-- imports itself (@functools@, @math@, @torch@).
 --
--- Names merely /exported by/ the runtime as functions (@randn@, @isAny@, ...),
--- @math@'s star import, and Python's builtins are deliberately absent: a user
--- name shadowing one of those is a real hazard, but the list is open-ended and
--- tracked separately (docs task @python-runtime-name-shadowing@).
+-- A user name spelled like one of these shadowed it: a parameter @randn@ made
+-- the body's @Normal@ draw call the parameter ("'float' object is not
+-- callable"), and a definition @randn@ emitted @randn = Randn()@ over the
+-- library function at module scope (task @python-runtime-name-shadowing@).
+--
+-- Hand-maintained rather than derived at build time, so that the emitted code
+-- does not depend on which Python the compiler was built beside. The @math@
+-- entries are the union over the Pythons it was checked against (3.9, 3.13, 3.14:
+-- @cbrt@, @exp2@, @fma@, @sumprod@ are newer than 3.9); listing a name a given
+-- Python lacks costs only a harmless rename. @TestInternals@ asks @python3@ for
+-- the runtimes' actual surface and fails on any name missing here.
+pythonRuntimeValueNames :: [String]
+pythonRuntimeValueNames =
+  [ "DENSE_MIN_BATCH", "DTYPE", "acos", "acosh", "asin", "asinh", "asmask"
+  , "astensor", "atan", "atan2", "atanh", "bucket_count", "bucketed"
+  , "categorical_index", "cbrt", "ceil", "check_result", "comb", "copysign"
+  , "cos", "cosh", "cumulative_normal", "cumulative_uniform", "degrees"
+  , "dense_positions", "dense_query", "density_normal", "density_uniform"
+  , "denskey", "dist", "e", "eq", "erf", "erfc", "exp", "exp2", "expm1"
+  , "fabs", "factorial", "floor", "fma", "fmod", "frexp", "fromLeft"
+  , "fromRight", "fsum", "functools", "gamma", "gather_dense", "gauss"
+  , "gcd", "hypot", "indexOf", "inf", "isAny", "isPossible", "is_ctor"
+  , "is_member", "isclose", "isfinite", "isinf", "isnan", "isqrt"
+  , "itertools", "lcm", "ldexp", "lgamma", "listProd", "log", "log10"
+  , "log1p", "log2", "log_cumulative_normal", "log_cumulative_uniform"
+  , "log_density_normal", "log_density_uniform", "logsumexp", "mapList"
+  , "math", "modf", "nan", "nextafter", "nn_gather", "perm", "pi", "poison"
+  , "pow", "prod", "radians", "rand", "randn", "random", "remainder"
+  , "safe_div", "safe_exp", "safe_log", "sign", "signature", "sin", "sinh"
+  , "sqrt", "sumprod", "sys", "tan", "tanh", "tau", "tensor_index"
+  , "tensor_logsumexp", "tensor_sum", "throw", "toList", "torch", "trunc"
+  , "ulp", "where_anchored"
+  ]
+
+-- | Python's builtins (@dir(builtins)@ without the dunders), union over the
+-- same Python versions as 'pythonRuntimeValueNames' and test-synced the same
+-- way.
+--
+-- All of them rather than only the ones the emitted code happens to call
+-- today: which builtins codegen emits is not tracked anywhere and changes with
+-- it, while mangling a name that would have worked costs nothing but a
+-- trailing underscore. Includes the exception classes, which a group class
+-- (@groupClassName@ capitalises) or a constructor could otherwise replace.
+pythonBuiltinNames :: [String]
+pythonBuiltinNames =
+  [ "ArithmeticError", "AssertionError", "AttributeError", "BaseException"
+  , "BaseExceptionGroup", "BlockingIOError", "BrokenPipeError"
+  , "BufferError", "BytesWarning", "ChildProcessError"
+  , "ConnectionAbortedError", "ConnectionError", "ConnectionRefusedError"
+  , "ConnectionResetError", "DeprecationWarning", "EOFError", "Ellipsis"
+  , "EncodingWarning", "EnvironmentError", "Exception", "ExceptionGroup"
+  , "False", "FileExistsError", "FileNotFoundError", "FloatingPointError"
+  , "FutureWarning", "GeneratorExit", "IOError", "ImportError"
+  , "ImportWarning", "IndentationError", "IndexError", "InterruptedError"
+  , "IsADirectoryError", "KeyError", "KeyboardInterrupt", "LookupError"
+  , "MemoryError", "ModuleNotFoundError", "NameError", "None"
+  , "NotADirectoryError", "NotImplemented", "NotImplementedError", "OSError"
+  , "OverflowError", "PendingDeprecationWarning", "PermissionError"
+  , "ProcessLookupError", "PythonFinalizationError", "RecursionError"
+  , "ReferenceError", "ResourceWarning", "RuntimeError", "RuntimeWarning"
+  , "StopAsyncIteration", "StopIteration", "SyntaxError", "SyntaxWarning"
+  , "SystemError", "SystemExit", "TabError", "TimeoutError", "True"
+  , "TypeError", "UnboundLocalError", "UnicodeDecodeError"
+  , "UnicodeEncodeError", "UnicodeError", "UnicodeTranslateError"
+  , "UnicodeWarning", "UserWarning", "ValueError", "Warning"
+  , "ZeroDivisionError", "abs", "aiter", "all", "anext", "any", "ascii"
+  , "bin", "bool", "breakpoint", "bytearray", "bytes", "callable", "chr"
+  , "classmethod", "compile", "complex", "copyright", "credits", "delattr"
+  , "dict", "dir", "divmod", "enumerate", "eval", "exec", "exit", "filter"
+  , "float", "format", "frozenset", "getattr", "globals", "hasattr", "hash"
+  , "help", "hex", "id", "input", "int", "isinstance", "issubclass", "iter"
+  , "len", "license", "list", "locals", "map", "max", "memoryview", "min"
+  , "next", "object", "oct", "open", "ord", "pow", "print", "property"
+  , "quit", "range", "repr", "reversed", "round", "set", "setattr", "slice"
+  , "sorted", "staticmethod", "str", "sum", "super", "tuple", "type", "vars"
+  , "zip"
+  ]
+
+-- | Every name 'SPLL.CodeGenPyTorch.pyMangle' escapes: the keywords, @self@
+-- (every emitted method binds it as its first parameter -- a user parameter
+-- called @self@ emitted @def forward(self, self, sample)@, a duplicate-argument
+-- @SyntaxError@), the runtime classes, the runtime's other values, and the
+-- builtins.
+--
+-- None of these ends in an underscore, and 'pyMangle''s injectivity argument
+-- relies on that (@TestInternals@ checks it): a reserved @x_@ would be the
+-- image of a user's @x@.
 pythonReservedIdentifiers :: [String]
-pythonReservedIdentifiers = pythonKeywords ++ ["self"] ++ pythonRuntimeClassNames
+pythonReservedIdentifiers =
+  pythonKeywords ++ ["self"] ++ pythonRuntimeClassNames
+  ++ pythonRuntimeValueNames ++ pythonBuiltinNames
+
+pythonReservedSet :: Set.Set String
+pythonReservedSet = Set.fromList pythonReservedIdentifiers
+
+-- | Membership in 'pythonReservedIdentifiers', as a set lookup: the mangler
+-- asks it of every identifier it prints.
+isPythonReserved :: String -> Bool
+isPythonReserved n = Set.member n pythonReservedSet
 
 -- | Julia's reserved words. Mangled by 'SPLL.CodeGenJulia.juliaMangle'.
 --
@@ -322,3 +426,50 @@ juliaKeywords =
   , "mutable", "new", "outer", "primitive", "quote", "return", "struct", "true"
   , "try", "type", "using", "var", "where", "while"
   ]
+
+-- | Every name @juliaLib@ exports into the emitted module (its @export@ line,
+-- which @TestInternals@ checks this against). @==@ is exported too but is no
+-- identifier.
+juliaRuntimeNames :: [String]
+juliaRuntimeNames =
+  [ "safe_log", "categorical_index", "density_IRUniform", "density_IRNormal"
+  , "cumulative_IRUniform", "cumulative_IRNormal", "log_density_IRUniform"
+  , "log_density_IRNormal", "log_cumulative_IRUniform"
+  , "log_cumulative_IRNormal", "logsumexp", "isAny", "InferenceList"
+  , "EmptyInferenceList", "AnyInferenceList", "ConsInferenceList", "length"
+  , "getindex", "head", "tail", "prepend", "mapList", "eq", "isPossible"
+  , "isclose", "indexOf", "listProd", "T", "Either", "Left", "Right"
+  , "fromLeft", "fromRight"
+  ]
+
+-- | The names from Julia's @Base@ (and @Core@) that emitted code refers to:
+-- the calls and literals 'SPLL.CodeGenJulia' prints and the types its
+-- query-conformance guard tests with @isa@.
+--
+-- Julia has no star-import to shadow at module scope -- a definition @f@ is
+-- emitted as @f_gen@, @f_prob@, ... -- so the hazard is a /local/: a parameter
+-- @randn@ made the body's @Normal@ draw call the parameter ("objects of type
+-- Float64 are not callable", task @python-runtime-name-shadowing@). @Base@
+-- exports far too many names to list, so unlike 'pythonBuiltinNames' this is
+-- the used subset. @End2EndTesting@ compiles the corpus to Julia and fails on
+-- any name emitted code calls that the module neither defines nor finds here
+-- or in 'juliaRuntimeNames' -- so a new call in codegen cannot be missed.
+juliaBaseNames :: [String]
+juliaBaseNames =
+  [ "exp", "abs", "sign", "sum", "maximum", "max", "map", "all", "rand"
+  , "randn", "throw", "string", "typeof", "Inf", "NaN", "nothing"
+  , "AbstractFloat", "Bool", "Integer"
+  ]
+
+-- | Every name 'SPLL.CodeGenJulia.juliaMangle' escapes: the keywords, the
+-- runtime's exports and the @Base@ names emitted code uses. As for Python, none
+-- ends in an underscore.
+juliaReservedIdentifiers :: [String]
+juliaReservedIdentifiers = juliaKeywords ++ juliaRuntimeNames ++ juliaBaseNames
+
+juliaReservedSet :: Set.Set String
+juliaReservedSet = Set.fromList juliaReservedIdentifiers
+
+-- | Membership in 'juliaReservedIdentifiers', as a set lookup.
+isJuliaReserved :: String -> Bool
+isJuliaReserved n = Set.member n juliaReservedSet

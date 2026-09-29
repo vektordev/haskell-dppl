@@ -44,6 +44,7 @@ module SPLL.IntermediateRepresentation (
 , adtIdentifierRenaming
 , renameADTIdentifiers
 , mangleUserIdentifiers
+, unmangleDiagnostic
 , firstAnyExceptIR
 , anyExceptCodegenRefusal
 ) where
@@ -54,6 +55,8 @@ import SPLL.Typing.PType()
 import SPLL.Typing.Typing()
 import Data.Data()
 import Data.List (isSuffixOf, sort, group)
+import Data.Char (isAlpha, isAlphaNum)
+import Control.Monad.State.Strict (State, execState, modify)
 import Data.Maybe (mapMaybe, listToMaybe, fromMaybe)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -1039,6 +1042,51 @@ mangleUserIdentifiers mangle (IREnv groups decls consts) =
     alpha env (IRLetIn b rhs body) =
       let b' = mangle b in IRLetIn b' (alpha env rhs) (alpha (Map.insert b b' env) body)
     alpha env e = irDescend (alpha env) e
+
+-- | Put a diagnostic produced /after/ mangling back into the user's spelling.
+--
+-- A backend that refuses a program part-way through emission words its
+-- refusal from the environment it is emitting, which 'renameADTIdentifiers' and
+-- 'mangleUserIdentifiers' have already renamed. Since the escaped set grew to
+-- every runtime and builtin name (task python-runtime-name-shadowing), that is
+-- no rare keyword any more: the corpus's own definition @factorial@ was
+-- reported as @factorial__gen@. This maps each whole identifier token that is
+-- the image of a renamed name -- a definition and its derived variants
+-- (@<name>_gen@, ...), a binder, an ADT identifier -- back to its source. Taking
+-- @env@ /before/ mangling, it recomputes the same renaming the backend applied.
+--
+-- The inverse is well defined because the manglers are injective, and it
+-- cannot misfire on an unrelated token: every image has the shape
+-- @reserved_+@, and a /source/ name of that shape is itself mangled (one
+-- underscore further), so no identifier in the mangled environment spells an
+-- image without being one.
+unmangleDiagnostic :: (String -> String) -> IREnv -> String -> String
+unmangleDiagnostic mangle (IREnv groups decls _) = retoken
+  where
+    inverse = Map.fromList
+      ( [ (to, from) | (from, to) <- adtIdentifierRenaming mangle decls ]
+     ++ [ (n' ++ sfx, n ++ sfx)
+        | g <- groups, let n = groupName g, let n' = mangle n, n' /= n
+        , sfx <- "" : functionVariantSuffixes ]
+     ++ [ (b', b) | b <- Set.toList binders, let b' = mangle b, b' /= b ] )
+    binders = Set.fromList (concatMap groupBinders groups)
+    groupBinders g = concat [ execState (collect body) []
+                            | Just (body, _) <- [genFun g, probFun g, integFun g, writeLogitsFun g, normalFun g] ]
+    collect :: IRExpr -> State [String] IRExpr
+    collect e = do
+      case e of
+        IRLambda b _  -> modify (b :)
+        IRLetIn b _ _ -> modify (b :)
+        _             -> return ()
+      irDescendM collect e
+    retoken [] = []
+    retoken str@(c:_)
+      | isAlpha c || c == '_' =
+          let (w, rest) = span (\x -> isAlphaNum x || x == '_') str
+          in Map.findWithDefault w w inverse ++ retoken rest
+    retoken (c:rest)
+      | isAlphaNum c = let (w, rest') = span isAlphaNum (c:rest) in w ++ retoken rest'
+      | otherwise    = c : retoken rest
 
 -- ----------------------------------------------------------------------------
 -- Target-language identifier hygiene for ADT names

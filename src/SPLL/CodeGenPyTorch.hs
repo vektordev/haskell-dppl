@@ -13,7 +13,7 @@ module SPLL.CodeGenPyTorch (
 ) where
 
 import SPLL.IntermediateRepresentation
-import SPLL.ReservedNames (pythonKeywords, pythonReservedIdentifiers)
+import SPLL.ReservedNames (pythonKeywords, pythonReservedIdentifiers, isPythonReserved)
 import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..), shapeRank)
@@ -142,8 +142,11 @@ pyMultiVal x = error ("unresolved MultiValue in codegen: " ++ show x)
 
 -- | Make a name safe to emit as a Python identifier, by appending the
 -- conventional trailing underscore. The escaped set is
--- 'SPLL.ReservedNames.pythonReservedIdentifiers': the keywords, the classes the
--- runtime already defines, and @self@. Applied to ADT names by
+-- 'SPLL.ReservedNames.pythonReservedIdentifiers': the keywords, @self@, and
+-- every name the module already has in scope -- the runtime's classes, its
+-- other star-imported values (@randn@, @exp@, @pi@, ...) and Python's builtins,
+-- any of which a user definition or binder of the same spelling would shadow.
+-- Applied to ADT names by
 -- 'renameADTIdentifiers' and to every other user name (function groups,
 -- parameters, binders) by 'mangleUserIdentifiers'.
 --
@@ -166,8 +169,8 @@ pyMultiVal x = error ("unresolved MultiValue in codegen: " ++ show x)
 -- check instead, where the whole declaration set is in scope.
 pyMangle :: String -> String
 pyMangle name
-  | dropWhileEnd (== '_') name `elem` pythonReservedIdentifiers = name ++ "_"
-  | otherwise                                                   = name
+  | isPythonReserved (dropWhileEnd (== '_') name) = name ++ "_"
+  | otherwise                                     = name
 
 -- | 'pyMangle' for a constructor reference in a rendered value, which the test
 -- harness may have qualified with a module path. Only the final segment is an

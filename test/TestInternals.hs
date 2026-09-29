@@ -48,7 +48,9 @@ import Data.Maybe (isJust)
 import Data.Functor.Identity (runIdentity)
 import qualified PredefinedFunctions as PF
 import SPLL.Validator (validateProgram)
-import SPLL.ReservedNames (distributionPrimitiveNames, languageKeywords, reservedIdentifierReason, internalNameReason, pythonRuntimeClassNames)
+import SPLL.ReservedNames (distributionPrimitiveNames, languageKeywords, reservedIdentifierReason, internalNameReason, pythonRuntimeClassNames, pythonReservedIdentifiers, juliaRuntimeNames, juliaReservedIdentifiers)
+import System.Process (readProcessWithExitCode)
+import System.Exit (ExitCode(..))
 
 
 -- | The (prob, dim) pair a probability query must return; a different shape
@@ -4754,6 +4756,44 @@ reservedNameTests = testGroup "reserved names"
         forM_ defined $ \c ->
           assertBool (lib ++ " defines class " ++ c ++ ", missing from pythonRuntimeClassNames")
                      (c `elem` pythonRuntimeClassNames)
+  , testCase "every name the Python runtimes star-import, and every builtin, is escaped by the Python backend" $ do
+      -- Task python-runtime-name-shadowing: a user parameter `randn` shadowed
+      -- the runtime's draw; a definition `randn` replaced it at module scope.
+      -- The escaped set is hand-maintained (emitted code must not depend on
+      -- the build machine's Python), so this asks the Python at hand for the
+      -- real surface. pythonLibBatched imports torch, so its top-level names
+      -- are read with `ast` instead of importing it; it has no star imports.
+      (code, out, err) <- readProcessWithExitCode "python3" ["-c", pythonSurfaceScript] ""
+      case code of
+        ExitFailure _ -> assertFailure ("could not list the Python runtime surface:\n" ++ err)
+        ExitSuccess -> do
+          let surface = lines out
+          assertBool "the Python surface listing is implausibly short" (length surface > 100)
+          let missing = [ n | n <- surface, n `notElem` pythonReservedIdentifiers ]
+          assertBool ("in scope in every emitted Python module but not escaped by pyMangle \
+                      \(add to SPLL.ReservedNames.pythonRuntimeValueNames or pythonBuiltinNames): "
+                      ++ unwords missing)
+                     (null missing)
+      -- The names the emitted header imports itself.
+      forM_ ["functools", "math", "torch", "Module"] $ \n ->
+        assertBool (n ++ " is imported by the emitted header but not escaped") (n `elem` pythonReservedIdentifiers)
+  , testCase "the Julia backend escapes exactly juliaLib's exports" $ do
+      src <- readFile "juliaLib.jl"
+      let exportLines = [ rest | l <- lines src, Just rest <- [stripPrefix' "export " l] ]
+          trimmed = [ n | l <- exportLines, n <- words (map (\c -> if c == ',' then ' ' else c) l), isIdent n ]
+          isIdent n = not (null n) && all (\c -> c == '_' || c `elem` ['a'..'z'] || c `elem` ['A'..'Z'] || c `elem` ['0'..'9']) n
+      assertBool "no exports found in juliaLib.jl" (not (null trimmed))
+      assertEqual "juliaLib.jl's export list and SPLL.ReservedNames.juliaRuntimeNames differ"
+                  (sort (nub trimmed)) (sort (nub juliaRuntimeNames))
+  , testCase "no escaped target name begins or ends with an underscore" $
+      -- pyMangle/juliaMangle escape a reserved name followed by any run of
+      -- underscores; their injectivity argument needs the images (`x_`, `x__`,
+      -- ...) to be outside the reserved set, and a leading underscore is
+      -- already refused in SPLL source, so such an entry would be dead or
+      -- wrong.
+      forM_ (pythonReservedIdentifiers ++ juliaReservedIdentifiers) $ \n ->
+        assertBool (show n ++ " begins or ends with an underscore")
+                   (not (null n) && head n /= '_' && last n /= '_')
   , testCase "every surface-reserved name but the parser's binders is reserved in the AST too" $
       forM_ reservedExamples $ \name ->
         assertEqual name (isJust (reservedIdentifierReason name) && not ("p_" `isPrefixOf` name))
@@ -4771,6 +4811,27 @@ reservedNameTests = testGroup "reserved names"
                            (("reserved identifier '" ++ name ++ "'") `isInfixOf` show e)
       Right _ -> assertFailure ("'" ++ name ++ "' was accepted")
     stripPrefix' pre str = if pre `isPrefixOf` str then Just (drop (length pre) str) else Nothing
+    -- Prints, one per line, every non-underscore name `from pythonLib import *`
+    -- and `from pythonLibBatched import *` bring into the emitted module, and
+    -- every builtin. Run from the project root, where the test suite runs.
+    pythonSurfaceScript = unlines
+      [ "import ast, builtins, sys"
+      , "sys.path.insert(0, '.')"
+      , "import pythonLib"
+      , "names = set(getattr(pythonLib, '__all__', None) or dir(pythonLib))"
+      , "tree = ast.parse(open('pythonLibBatched.py').read())"
+      , "for node in tree.body:"
+      , "    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):"
+      , "        names.add(node.name)"
+      , "    elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):"
+      , "        for target in (node.targets if isinstance(node, ast.Assign) else [node.target]):"
+      , "            names.update(n.id for n in ast.walk(target) if isinstance(n, ast.Name))"
+      , "    elif isinstance(node, (ast.Import, ast.ImportFrom)):"
+      , "        assert not any(a.name == '*' for a in node.names), 'pythonLibBatched grew a star import'"
+      , "        names.update((a.asname or a.name).split('.')[0] for a in node.names)"
+      , "names.update(dir(builtins))"
+      , "print('\\n'.join(sorted(n for n in names if not n.startswith('_'))))"
+      ]
     collides name src = case tryParseProgram "<test>" src of
       Left e -> assertFailure ("parse failed: " ++ show e)
       Right prog -> case validateProgram prog of

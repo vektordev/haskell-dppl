@@ -1,0 +1,9 @@
+-- Task python-runtime-name-shadowing: definitions spelled like a name the
+-- emitted Python module already has in scope. `randn = Normal` emitted
+-- `randn = Randn()` over the runtime's `randn`, so the draw inside it called
+-- the instance ("'Randn' object is not callable"); `len` does the same to a
+-- builtin. Both are mangled at emission now (the Python instances are
+-- `randn_`/`len_`).
+randn = Normal
+len = Uniform * 2.0
+main = (randn + 1.0, len)

@@ -1,0 +1,9 @@
+-- Task python-runtime-name-shadowing: parameters spelled like a name the
+-- emitted code calls. `randn` shadowed the runtime's normal draw inside `f`
+-- ("'float' object is not callable" in Python, "objects of type Float64 are
+-- not callable" in Julia), and `rand` the uniform draw in both. `pi` is a
+-- star-imported Python constant that emitted code never reads: harmless, but
+-- mangled like the rest, since the escaped set is the runtime's whole surface.
+f randn = randn + Normal
+g rand pi = rand * Uniform + pi
+main = (f 1.0, g 3.0 5.0)

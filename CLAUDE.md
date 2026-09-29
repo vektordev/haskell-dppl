@@ -492,16 +492,34 @@ never rejected, so a program's legality never depends on its backend.
 `renameADTIdentifiers` covers ADT names and `mangleUserIdentifiers` everything
 else (definition names, and every parameter/`draw` binder by scope-aware
 alpha-renaming, so free names such as runtime functions are never touched),
-both with the backend's `pyMangle`/`juliaMangle`. Python's escaped set is
-`pythonReservedIdentifiers`: the keywords, `self` (every method's receiver), and
-`pythonRuntimeClassNames` -- the classes the runtime defines (`T`, `Left`,
-`InferenceList`, ..., kept in sync with `pythonLib*.py` by a test). A function
-group's class is its capitalised name made unique by `groupClassName` against
-all of those and the ADT classes: capitalising landed `t` on the runtime's
-tuple class `T` (every tuple broke) and `foo` on constructor `Foo`'s class (a
-silently wrong `p(Foo) = 0`). Still open: a user name shadowing a runtime
-*function* or a Python builtin (`randn`, `float`) or Julia `Base` name --
-docs task `python-runtime-name-shadowing`.
+both with the backend's `pyMangle`/`juliaMangle`. The escaped set is every
+name the emitted code already uses. For Python (`pythonReservedIdentifiers`)
+that is the keywords, `self` (every method's receiver), the runtime's classes
+(`pythonRuntimeClassNames`: `T`, `Left`, `InferenceList`, ...), everything else
+`from pythonLib* import *` brings in (`pythonRuntimeValueNames`: `randn`, `eq`,
+and `math`'s re-exports `exp`, `pi`, `e`, `factorial`, ...), and **all** of
+Python's builtins (`pythonBuiltinNames`). For Julia (`juliaReservedIdentifiers`)
+it is the keywords, `juliaLib`'s export list, and the `Base` names codegen
+emits (`juliaBaseNames`: `randn`, `rand`, `sum`, `string`, ...; a curated
+subset, since all of `Base` is too big). A parameter `randn` used to capture the
+body's `Normal` draw in both backends, and a definition `randn` replaced the
+Python runtime's at module scope (task `python-runtime-name-shadowing`).
+
+The lists are hand-maintained, so emitted code never depends on the build
+machine's Python, and three tests keep them honest. `TestInternals` asks
+`python3` for the runtimes' real star-import surface plus `dir(builtins)`, and
+checks `juliaLib.jl`'s `export` line. The End2End property `Julia free names
+are escaped` scans the corpus's emitted Julia for any called name the module
+does not define. **Adding a runtime function or a new `Base` call in
+CodeGenJulia means adding it to the list**, and the tests name what is
+missing. Consequences worth knowing: a definition named like a builtin changes
+its Python API name (`factorial` is `module.factorial_`), and a Julia
+definition so named gets `name__gen`.
+
+A function group's class is its capitalised name made unique by
+`groupClassName` against all of those and the ADT classes: capitalising landed
+`t` on the runtime's tuple class `T` (every tuple broke) and `foo` on
+constructor `Foo`'s class (a silently wrong `p(Foo) = 0`).
 
 ### Callee Normalization
 
