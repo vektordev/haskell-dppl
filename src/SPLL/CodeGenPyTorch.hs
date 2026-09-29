@@ -607,7 +607,8 @@ generateLetInStatement name x = do
 --   Never an arm of a conditional expression, the right operand of the
 --   short-circuiting @and@/@or@, or anything under a binder (a lambda or a
 --   comprehension body), since the guard is what protects it and the binder
---   is not in scope before the line;
+--   is not in scope before the line. (A pure comprehension can still move
+--   /whole/, becoming a statement-level loop: 'loopable'.);
 -- * one that is /pure arithmetic/ ('spillable'): no random draw, no call.
 --   A call may be a generator or may not terminate, and moving it ahead of a
 --   sibling could change which draw or which failure is observed. A spilled
@@ -650,7 +651,7 @@ liftedLine e = do
         else do
           -- Each binding is a strictly smaller subterm, and goes through
           -- 'generateLetInStatement' (hence through here) on its own.
-          bindStmts <- concat <$> mapM (uncurry generateLetInStatement) binds
+          bindStmts <- concat <$> mapM (uncurry generateSpillStatement) binds
           (stmts', se') <- generateExpressionLifted e'
           return (bindStmts ++ stmts', renderLifted se')
 
@@ -695,6 +696,65 @@ spillable callables = go
     go (IRVar n)      = not (n `elem` callables || isEffectfulVar n
                              || ".generate" `isSuffixOf` n)
     go e              = all go (getIRSubExprs e)
+
+-- | A comprehension that may be spilled as a whole, as a statement-level loop
+-- ('generateSpillStatement'): a 'BMap' over a lambda whose body and list are
+-- both pure arithmetic. 'spillable' refuses it for its lambda, which is right
+-- for a lambda that stays a value, but a 'BMap' applies its lambda on the spot
+-- to every element, so hoisting the whole comprehension ahead of its line is
+-- the same move as hoisting any other pure subterm.
+--
+-- This is what reaches a line whose depth is /inside/ a comprehension body
+-- (task python-emitted-expression-exceeds-parser-nesting): an enumerated
+-- 'draw' sums @[body for b in xs]@, and the body -- a chain of CSE lets and
+-- conditionals rendered as walrus tuples -- was ~10 levels per nested @if@,
+-- with nothing on the strict spine outside it to cut.
+loopable :: [String] -> IRExpr -> Bool
+loopable callables (IRBuiltin BMap [IRLambda _ body, t]) =
+  spillable callables body && spillable callables t
+loopable _ _ = False
+
+-- | Emit one spill binding. A 'loopable' comprehension becomes
+--
+-- > name = []
+-- > for _vN in <list>:
+-- >     <body as statements, into _eN>
+-- >     name.append(_eN)
+--
+-- which evaluates the list once and the body once per element, in order,
+-- exactly as the comprehension did, and builds the same list -- so a
+-- surrounding @sum(name)@ adds the same floats in the same order. The body
+-- goes through 'generateLetInStatement', so its lets become statements, its
+-- conditionals @if@/@else@ blocks with the lets inside their arms (still
+-- guarded), and each resulting line is measured and spilled on its own.
+--
+-- The loop variable is renamed to a fresh @_vN@: a @for@ target, unlike a
+-- comprehension's, is bound in the enclosing function, and would otherwise
+-- clobber an outer variable of the same name. (The body's own lets already
+-- bound function-level names as walruses, so they are unaffected.)
+--
+-- Anything else is an ordinary let-binding.
+generateSpillStatement :: String -> IRExpr -> GlobalVariableSupply [String]
+generateSpillStatement name (IRBuiltin BMap [IRLambda v body, t]) = do
+  (tStmts, tt) <- liftedLine t
+  n <- lift demandUniqueNumber
+  let loopVar = "_v" ++ show n
+      elemVar = "_e" ++ show n
+  bodyStmts <- generateLetInStatement elemVar (renameFree v loopVar body)
+  return (tStmts ++ [name ++ " = []", "for " ++ loopVar ++ " in " ++ tt ++ ":"]
+          ++ indentOnce (bodyStmts ++ [name ++ ".append(" ++ elemVar ++ ")"]))
+generateSpillStatement name e = generateLetInStatement name e
+
+-- | Rename the free occurrences of one variable, stopping under a binder that
+-- shadows it.
+renameFree :: String -> String -> IRExpr -> IRExpr
+renameFree old new = go
+  where
+    go e = case e of
+      IRVar v | v == old -> IRVar new
+      IRLetIn n val b | n == old -> IRLetIn n (go val) b
+      IRLambda n _ | n == old -> e
+      _ -> irDescend go e
 
 -- | The children of a node Python evaluates whenever the node is evaluated,
 -- with a function rebuilding the node from replacements for them. 'Nothing'
@@ -765,7 +825,7 @@ spillDeep callables e0 = do
                 kids' = [k | (_, k, _) <- cut]
             return (binds, rebuild kids', 1 + maximum (lazyDepth : [d | (_, _, d) <- cut]))
     spillOne (b, k, d)
-      | compound k && spillable callables k = do
+      | compound k && (spillable callables k || loopable callables k) = do
           n <- demandUniqueNumber
           let tmp = "_s" ++ show n
           return (b ++ [(tmp, k)], IRVar tmp, 0)

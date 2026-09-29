@@ -1100,6 +1100,9 @@ deepExpressionSpillTests = testGroup "deep expression spill (python-codegen-exce
   [ testProperty "a 300-term sum imports and evaluates" (once deepCase)
   , testProperty "a 60-term sum is emitted without spilling" (once shallowCase)
   , testProperty "a 300-term sum whose guarded arms bind a let imports and evaluates" (once letArmCase)
+  , testProperty "a comprehension whose body is too deep becomes a loop, imports and evaluates" (once deepComprehensionCase)
+  , testProperty "a shallow comprehension stays a comprehension" (once shallowComprehensionCase)
+  , testProperty "24 nested noisy ifs over an enumerated draw import and match the idealized value" (once enumIfChainCase)
   ]
   where
     x = IRVar "x"
@@ -1122,6 +1125,30 @@ deepExpressionSpillTests = testGroup "deep expression spill (python-codegen-exce
                      (IRLetIn "l_canary" (IROp OpDiv (lit 1.0) (lit 0.0)) (IRVar "l_canary"))
                      (lit 0.0)
     letSumOf n = foldr1 (IROp OpPlus) (letCanary : map letTerm [1 .. n :: Int])
+    -- Task python-emitted-expression-exceeds-parser-nesting: an enumerated
+    -- draw sums a comprehension, @sum([body for b in xs])@, and the depth is
+    -- inside the body, where nothing can be cut out of the line. The body here
+    -- is a chain of lets and guarded conditionals, as the optimizer emits for
+    -- nested ifs over the latent: level k is
+    -- @let c_k = x * 1 in (if c_k > 0 then c_k + level (k-1) else 1/0)@, so
+    -- over x in [1, 2] it sums to 3k. The never-taken arm is a laziness
+    -- canary. The comprehension's variable is also named @x@, like the
+    -- function's parameter, and the line adds the outer @x@ after the sum: a
+    -- loop that bound @x@ itself would clobber the parameter.
+    compLevel :: Int -> IRExpr
+    compLevel 0 = lit 0.0
+    compLevel k = let c = IRVar ("c_" ++ show k)
+                  in IRLetIn ("c_" ++ show k) (IROp OpMult x (lit 1.0))
+                       (IRIf (IROp OpGreaterThan c (lit 0.0))
+                             (IROp OpPlus c (compLevel (k - 1)))
+                             (IROp OpDiv (lit 1.0) (lit 0.0)))
+    comprehensionSum k =
+      IROp OpPlus
+        (IRBuiltin (BReduce ROpAdd 0)
+          [IRBuiltin BMap [ IRLambda "x" (compLevel k)
+                          , IRBuiltin (BTensor [EFixed 2]) [lit 1.0, lit 2.0] ]])
+        x
+    comprehensionSource k = sourceOf (envWith (comprehensionSum k))
     envOf n = envWith (sumOf n)
     envWith body = IREnv [IRFunGroup { groupName = "main", genFun = Nothing
                                 , probFun = Just (IRLambda "x" body, "")
@@ -1150,6 +1177,57 @@ deepExpressionSpillTests = testGroup "deep expression spill (python-codegen-exce
           .&&. counterexample "no spill temporaries were emitted" (not (null (spillLines src)))
     shallowCase = let src = source 60
                   in counterexample src (null (spillLines src))
+    deepComprehensionCase = ioProperty $ do
+      let depth = 80
+          src = comprehensionSource depth
+      cwd <- getCurrentDirectory
+      (code, out, err) <- withSystemTempFile "deep_comprehension_spill.py" $ \tmpPath tmpHandle -> do
+        hPutStr tmpHandle $ unlines
+          [ "import sys", "sys.path.insert(0, " ++ show cwd ++ ")", src
+          , "for q in [10.0, 0.5]:"
+          , "    got = main.forward(q)"
+          , "    want = " ++ show (3 * fromIntegral depth :: Double) ++ " + q"
+          , "    if got != want:"
+          , "        raise ValueError('forward(%r) = %r, expected %r' % (q, got, want))"
+          ]
+        hClose tmpHandle
+        readProcessWithExitCode "python3" [tmpPath] ""
+      return $ counterexample ("the emitted module failed:\n" ++ out ++ err ++ "\n" ++ src)
+                 (code == ExitSuccess)
+          .&&. counterexample ("the comprehension was not turned into a loop:\n" ++ src)
+                 (any (isPrefixOf "for _v" . dropWhile (== ' ')) (lines src))
+    -- The ticket's own repro (formerly the known-issues pin
+    -- enumLetFreshIfChainPythonParenDepth), through the real pipeline: 24
+    -- nested ifs whose conditions are noisy reads of one enumerated latent.
+    -- It stays out of the corpus because batched codegen does not finish on
+    -- it, and every corpus program goes through the batched-eligibility sweep.
+    -- Before the fix its enum-mass line was 200+ brackets deep.
+    enumIfChainCase = ioProperty $ do
+      let levels = 24 :: Int
+          cond = "(if Uniform < 0.1 then (not b) else b)"
+          chain = iterate (\e -> "(if " ++ cond ++ " then " ++ e ++ " else False)") "True" !! levels
+          progSrc = "main = draw b = Uniform < 0.5 in " ++ chain
+          pTrue = 0.5 * 0.9 ^ levels + 0.5 * 0.1 ^ levels :: Double
+      case either (Left . show) Right (tryParseProgram "" progSrc) >>= compile defaultCompilerConfig of
+        Left err -> return (counterexample ("fixture failed to compile: " ++ err) False)
+        Right env -> do
+          let src = sourceOf env
+          cwd <- getCurrentDirectory
+          (code, out, err) <- withSystemTempFile "enum_if_chain.py" $ \tmpPath tmpHandle -> do
+            hPutStr tmpHandle $ unlines
+              [ "import sys", "sys.path.insert(0, " ++ show cwd ++ ")", src
+              , "for q, want in [(True, " ++ show pTrue ++ "), (False, " ++ show (1 - pTrue) ++ ")]:"
+              , "    got = main.forward(q)[0]"
+              , "    if abs(got - want) > " ++ show probTolerance ++ ":"
+              , "        raise ValueError('forward(%r) = %r, expected %r' % (q, got, want))"
+              ]
+            hClose tmpHandle
+            readProcessWithExitCode "python3" [tmpPath] ""
+          return $ counterexample ("the emitted module failed:\n" ++ out ++ err)
+                     (code == ExitSuccess)
+    shallowComprehensionCase =
+      let src = comprehensionSource 5
+      in counterexample src (" for x in " `isInfixOf` src && null (spillLines src))
 
 -- ===========================================================================
 -- Enumeration bucketing (task batched-bucketing-splits-on-nullary-constructors)

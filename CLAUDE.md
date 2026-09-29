@@ -1828,6 +1828,23 @@ Python emitters have no such pass and were not checked. Pinned by `End2End`'s
 `deep expression spill` group (hand-built IR: a 300-term sum, with a
 divide-by-zero arm as the laziness canary).
 
+A line whose depth is *inside* a comprehension body -- an enumerated `draw`'s
+`sum([body for b in xs])`, where nested ifs over the latent render as a
+walrus/tuple let chain ~10 brackets per `if` -- has nothing strict outside the
+body to cut. There, a `BMap` over a lambda whose body and list are both pure
+(`loopable`) is spilled whole as a loop (`generateSpillStatement`):
+`_sN = []`, `for _vM in xs:`, the body as statements into `_eM`,
+`_sN.append(_eM)`. Same list, same order, so `sum(_sN)` adds the same floats.
+The loop variable is renamed to a fresh `_vM` because a `for` target, unlike a
+comprehension's, lands in the function scope. Docs-repo task
+`python-emitted-expression-exceeds-parser-nesting`.
+
+The statement form trades bracket depth for **indentation** depth, one level
+per nested conditional, and CPython also caps that at 100 (`IndentationError:
+too many levels of indentation`). That ceiling is backend-wide rather than
+spill-specific: ~95 nested ifs load and 100 do not, with or without an
+enumerated `draw` around them.
+
 ### Unary math must not raise where the interpreter answers
 
 The interpreter is the reference semantics, so a backend's unary math has to be
