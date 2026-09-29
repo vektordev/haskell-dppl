@@ -98,9 +98,10 @@ keyword kw = lexeme $ try (string kw <* notFollowedBy (alphaNumChar <|> char '\'
 --
 -- A reserved identifier is reported with 'registerParseError' rather than
 -- 'fail': the parse carries on and the error is raised at the end, at the
--- identifier's own position. A plain 'fail' here is swallowed by the
--- backtracking around a top-level declaration, which then reports only
--- "unexpected 'f'" at column 1 of the definition and loses the reason.
+-- identifier's own position, and every such identifier in the file is
+-- reported, not only the first. (A plain 'fail' was once swallowed by a 'try'
+-- around each top-level declaration; those are gone -- see 'pProg' -- but a
+-- registered error is still the better report.)
 --
 -- A keyword is refused *before* anything is consumed ('notKeyword'), so a
 -- parser that tries an identifier at @then@\/@else@\/@in@ -- an application
@@ -203,12 +204,11 @@ pBinding adts_ = do
 -- It stays reserved so that old source is refused with the choice spelled out.
 --
 -- The refusal is *registered* (a delayed error) rather than thrown, and parsing
--- carries on reading the binding as a @draw@. A thrown failure would not reach
--- the user: declarations are parsed under 'try', so it is backtracked over and
--- replaced by an unhelpful "unexpected 'm'" at the start of the declaration.
--- A registered error survives, is reported at the @let@ itself, and fails the
--- parse all the same -- and every @let@ in the file is reported, not only the
--- first.
+-- carries on reading the binding as a @draw@. The registered error is
+-- reported at the @let@ itself and fails the parse all the same, and every
+-- @let@ in the file is reported, not only the first. (It was originally chosen
+-- because a thrown failure was backtracked over by a 'try' around each
+-- declaration; see 'pProg'.)
 retiredLet :: MonadParser m => m BindingKind
 retiredLet = do
   off <- getOffset
@@ -845,13 +845,13 @@ application adts_ = dbg "application" $ do
 -- either (@partialOk@).
 --
 -- An arity mismatch is reported with 'registerParseError' at the head's
--- position, and the parse then carries on with a well-formed stand-in. A plain
--- 'fail' here is unconditionally discarded by the backtracking around it --
--- 'term''s @try (application ...)@ reparses the head as a bare atom, and
--- 'pProg''s @try@ around each definition drops the rest -- so the author saw
--- a generic "unexpected ... / expecting end of input" at whatever position the
--- leftover arguments next failed to fit (sometimes a later line), with no
--- mention of the arity (task parser-injf-overapplication-error).
+-- position, and the parse then carries on with a well-formed stand-in, so
+-- every mismatch in the file is reported. When this was written, a plain
+-- 'fail' here was discarded by the backtracking around it -- 'term''s
+-- @try (application ...)@ and 'pProg''s @try@ around each definition, both
+-- since removed -- and the author saw a generic "unexpected ... / expecting
+-- end of input" somewhere unrelated, with no mention of the arity (task
+-- parser-injf-overapplication-error).
 knownHead :: MonadParser m => Int -> Expr -> String -> Int -> Bool -> [Expr] -> ([Expr] -> Expr) -> m Expr
 knownHead off func name arity partialOk args constructor
   | given == arity = return (constructor args)
