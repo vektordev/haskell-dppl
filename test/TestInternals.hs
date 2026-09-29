@@ -1649,6 +1649,42 @@ test_mixtureNegativeLogNormalScaleCompiles = testCase "mixtureNegativeLogNormalS
       \bug task mixture-combination-rules-compile-hang fixed"
     Just n -> assertBool ("unexpectedly empty compiled IR (" ++ show n ++ " chars)") (n > 0)
 
+-- | A right-nested tuple of @n@ independent coin flips compiles and answers
+-- in milliseconds (docs-repo task tuple-probability-exponential-in-arity).
+-- At a33f351 the six-slot tuple was OOM-killed at 3GB after 48s while the
+-- same slots as a list compiled in 45ms; the cause was
+-- 'valueListToMultiValue' keeping one copy of each component per tuple, so
+-- every nesting level multiplied the enumerated domain by its duplicates
+-- (fixed in 88a5e99). 'valueSetTests' pins that mechanism directly; this
+-- pins the symptom end to end, so any other per-level compounding that
+-- brings the wall back fails here too. Eight slots is two past the old wall
+-- and still milliseconds today, so the budget is generous without being
+-- vacuous; the timeout also keeps a regression from turning into an
+-- unbounded memory hog in the suite.
+test_wideTupleCompilesFast :: TestTree
+test_wideTupleCompilesFast = testCase "wideTupleCompilesFast" $ do
+  let n = 8 :: Int
+      src = "main = " ++ foldr1 (\a b -> "(" ++ a ++ ", " ++ b ++ ")") (replicate n "Uniform < 0.5")
+      query = foldr1 VTuple (replicate n (VBool True))
+      expected = 0.5 ^^ n
+  prog <- case tryParseProgram "wideTupleCompilesFast" src of
+    Left err -> assertFailure ("parse error: " ++ show err)
+    Right p  -> return p
+  let compiled = either (\e -> error ("compile error: " ++ show e)) id (compile defaultCompilerConfig prog)
+  result <- timeout (10 * 1000000) (evaluate (probDimOf' (runProbC prog compiled [] query)))
+  case result of
+    Nothing -> assertFailure
+      ("compiling and querying a " ++ show n ++ "-slot tuple of coin flips did not finish \
+       \within 10s -- the exponential-in-arity wall of task \
+       \tuple-probability-exponential-in-arity is back")
+    Just (p, d) -> do
+      assertBool ("probability " ++ show p ++ " does not match " ++ show expected)
+        (abs (p - expected) < 1e-12)
+      assertEqual "dimension" 0 d
+  where
+    probDimOf' (Left e)  = error ("prob query error: " ++ show e)
+    probDimOf' (Right v) = let (p, d) = probDimOf v in p `seq` d `seq` (p, d)
+
 -- | Milestone-4 value-grouped DP acceptance: a counting fold compared against
 -- a deterministic bound compiles to polynomially-sized IR. At milestone 2 the
 -- fold enumerated 2^depth (value, world) pairs, so the IR grew exponentially;
@@ -4316,6 +4352,7 @@ internalsTests = testGroup "Internals"
   , test_recursiveListMissedCSE
   , test_recursiveListBranchPruning
   , test_mixtureNegativeLogNormalScaleCompiles
+  , test_wideTupleCompilesFast
   , test_planEnumBoolCtorPolynomial
   , test_planFlatSumOverProductPolynomial
   , test_planEnumAccumulatorFoldPolynomial
