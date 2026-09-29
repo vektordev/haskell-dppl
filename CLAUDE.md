@@ -330,12 +330,28 @@ shared source reachable from the traversal is a variable bound by an enclosing
 substituted away in the parser, so every binding that reaches this pass is a
 `draw`, and its uses of a defined name are fresh draws by construction. The
 traversal cannot descend into a `let` (`collectApply` declines a Lambda callee,
-`classifyArg` declines a non-deterministic argument), but an *enclosing* one
+`classifyArg` declines a plan-free non-deterministic argument), but an *enclosing* one
 puts its variable in scope, so `planFactorExternals` refuses any factor reading
 a non-`Deterministic` local of the ambient scope. That shape has no end-to-end
 spelling today — the outer engine refuses every such binding first — so the
 guard is pinned white-box in `TestInternals`
 (`plan factorization independence guard`) rather than by a corpus program.
+
+A call argument that *is* plan-dependent but not an accessor chain -- a fold's
+result handed to a helper, `isValid (checksumSum 1 ds)` -- is **case-split on
+its value** (`planResolveApply`, task `plan-fold-result-through-helper-crashes`):
+the argument's (value, world) pairs come from `planEnumValues`, the callee is
+specialized once per value (bound as a deterministic `PBDet` constant, so the
+memo keys on it), and each specialization's worlds are intersected with its
+value's world. Both sides are partitions, so the result is one too; the
+intersection (not a product of masses) is what keeps it right when the callee
+also reads the scene through a slice. It used to die with an uncaught `error`
+("neither a plan slice ... nor deterministic given scope: Apply"). A call that
+needs no split takes the old code path and emits identical IR. Cost: with two
+readers value grouping is off, so each split argument carries one world per
+scene path, and two split arguments cross-multiply (443 s at 1111 paths).
+Corpus `plan-enumeration/planHelperOnFoldResult*`; differential
+`Internals.planHelperOnFoldResultMatchesDense`.
 
 A set-witness world can carry **residue factors** (`WWorld [guard] WSet
 [PResult]`): when `transportDirect` inverts a single-occurrence subtree
