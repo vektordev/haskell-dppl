@@ -1783,6 +1783,35 @@ test_planHelperOnFoldResultMatchesDense = testCase "planHelperOnFoldResultMatche
       return plan
     assertBool (name ++ ": p(0) + p(1) = " ++ show (sum ps) ++ ", not 1") (abs (sum ps - 1) < 1.0e-9)
 
+-- | The accumulator-fold growth check again, with the accumulator updated by
+-- SUBTRACTION (task plan-fold-subtraction-accumulator-blowup): @4.0 - w@
+-- alternates 1,3,1,3 (the EAN weight pattern). Source @a - b@ desugars to
+-- @plus a (neg b)@, so the spec_arg only folds to its known constant when
+-- 'foldConstIn' covers 'OpNeg'; without that no level below the first groups
+-- and the fold is exponential (the Int version at depth 4 exhausted 2 GB).
+-- Ratio thresholds as for 'test_planEnumAccumulatorFoldPolynomial'.
+test_planEnumSubtractionAccumulatorFoldPolynomial :: TestTree
+test_planEnumSubtractionAccumulatorFoldPolynomial = testCase "planEnumSubtractionAccumulatorFoldPolynomial" $ do
+  let prog d = unlines
+        [ "data Color = Red | Green | Blue"
+        , "data Object = NoObj | Obj color::Color"
+        , "data Scene = Empty | SCons obj::Object, rest::Scene depth " ++ show d
+        , "neural readScene :: (Symbol -> Scene)"
+        , "weightedRed w s = if isEmpty s then 0.0 else (if isObj (obj s) then (if isRed (color (obj s)) then w else 0.0) else 0.0) + weightedRed (4.0 - w) (rest s)"
+        , "main sym = draw scene = readScene sym in if weightedRed 1.0 scene > 2.5 then 1 else 0"
+        ]
+  let sizeAt :: Int -> IO Int
+      sizeAt d = case tryParseProgram "subaccfold" (prog d) of
+        Left e  -> assertFailure ("parse error at depth " ++ show d ++ ": " ++ show e)
+        Right p -> case compile defaultCompilerConfig p of
+          Left e   -> assertFailure ("compile error at depth " ++ show d ++ ": " ++ show e)
+          Right ir -> return (length (show ir))
+  s4 <- sizeAt 4
+  s8 <- sizeAt 8
+  assertBool ("depth-8 subtraction-accumulator-fold IR is growing at the ungrouped rate: s4="
+              ++ show s4 ++ " s8=" ++ show s8 ++ " ratio=" ++ show (fromIntegral s8 / fromIntegral s4 :: Double))
+    (s8 < 6 * s4)
+
 -- | Fused joint-state DP acceptance. Two predicates over one scene are
 -- exponential (two readers turn 'psMerge' off); folding them into ONE
 -- traversal that threads a joint automaton state through deterministic
@@ -4087,6 +4116,7 @@ internalsTests = testGroup "Internals"
   , test_mixtureNegativeLogNormalScaleCompiles
   , test_planEnumBoolCtorPolynomial
   , test_planEnumAccumulatorFoldPolynomial
+  , test_planEnumSubtractionAccumulatorFoldPolynomial
   , test_planHelperOnFoldResultMatchesDense
   , planOverCouplingRefusalTests
   , planFactorExternalsTests

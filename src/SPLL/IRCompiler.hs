@@ -6121,6 +6121,7 @@ foldConstIn env (IROp op a b) = do
   vb <- foldConstIn env b
   case op of
     OpPlus -> num (+) va vb
+    OpSub  -> num (-) va vb
     OpMult -> num (*) va vb
     OpEq   -> Just (VBool (va == vb))
     _      -> Nothing
@@ -6128,6 +6129,16 @@ foldConstIn env (IROp op a b) = do
     num f (VFloat x) (VFloat y) = Just (VFloat (f x y))
     num f (VInt  x)  (VInt  y)  = Just (VInt (round (f (fromIntegral x :: Double) (fromIntegral y))))
     num _ _ _                   = Nothing
+-- Source subtraction @a - b@ desugars to @plus a (neg b)@, i.e. IR
+-- @OpPlus a (OpNeg b)@, so without this case an accumulator updated by
+-- subtraction (@checksumSum (4 - w)@) never folds and the M4 grouping merges
+-- nothing below the first level (task plan-fold-subtraction-accumulator-blowup).
+foldConstIn env (IRUnaryOp OpNeg a) = do
+  va <- foldConstIn env a
+  case va of
+    VFloat x -> Just (VFloat (negate x))
+    VInt x   -> Just (VInt (negate x))
+    _        -> Nothing
 foldConstIn _ _ = Nothing
 
 -- | 'staticBool' under the same environment, so a condition spelled as a
