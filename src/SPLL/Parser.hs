@@ -101,13 +101,19 @@ keyword kw = lexeme $ try (string kw <* notFollowedBy (alphaNumChar <|> char '\'
 -- identifier's own position. A plain 'fail' here is swallowed by the
 -- backtracking around a top-level declaration, which then reports only
 -- "unexpected 'f'" at column 1 of the definition and loses the reason.
+--
+-- A keyword is refused *before* anything is consumed ('notKeyword'), so a
+-- parser that tries an identifier at @then@\/@else@\/@in@ -- an application
+-- looking for one more argument, say -- fails without consuming and can simply
+-- stop. That is what lets the expression grammar do without the 'try's that
+-- used to rewind a half-parsed construct and lose its error (see 'pProg').
 pIdentifier :: MonadParser m => m String
 pIdentifier = lexeme $ do
   off <- getOffset
+  notKeyword
   ident <- identifierChars
   case () of
-    _ | ident `elem` reserved -> fail $ "reserved word: " ++ ident
-      | Just why <- reservedIdentifierReason ident -> do
+    _ | Just why <- reservedIdentifierReason ident -> do
           registerParseError (FancyError off (Set.singleton (ErrorFail
             ("reserved identifier '" ++ ident ++ "': " ++ why ++ ". Rename it."))))
           return ident
@@ -115,11 +121,16 @@ pIdentifier = lexeme $ do
 
 -- | An identifier in the type namespace; only the keywords are refused.
 pTypeIdentifier :: MonadParser m => m String
-pTypeIdentifier = lexeme $ do
-  ident <- identifierChars
-  if ident `elem` reserved
-    then fail $ "reserved word: " ++ ident
-    else return ident
+pTypeIdentifier = lexeme $ notKeyword *> identifierChars
+
+-- | Fails, without consuming anything, if the input starts with a keyword.
+notKeyword :: MonadParser m => m ()
+notKeyword = do
+  ahead <- optional (lookAhead identifierChars)
+  case ahead of
+    Just ident | ident `elem` reserved ->
+      unexpected (Label ('k' :| ("eyword '" ++ ident ++ "'")))
+    _ -> return ()
 
 identifierChars :: MonadParser m => m String
 identifierChars = do
@@ -139,11 +150,12 @@ pNormal = do
 
 pIfThenElse :: MonadParser m => [ADTDecl] -> m Expr
 pIfThenElse adts_ = do
+  open <- getSourcePos
   _ <- keyword "if"
   a <- pExpr adts_
-  _ <- keyword "then"
+  _ <- closer "'then'" "'if'" open (keyword "then")
   b <- pExpr adts_
-  _ <- keyword "else"
+  _ <- closer "'else'" "'if'" open (keyword "else")
   c <- pExpr adts_
   return (ifThenElse a b c)
 
@@ -173,15 +185,16 @@ bindWith DefineBinding = substituteVar
 
 pBinding :: MonadParser m => [ADTDecl] -> m Expr
 pBinding adts_ = do
-  kind <- choice
-    [ DrawBinding <$ keyword "draw"
-    , DefineBinding <$ keyword "define"
-    , retiredLet
+  open <- getSourcePos
+  (kind, spelled) <- choice
+    [ (DrawBinding, "'draw'") <$ keyword "draw"
+    , (DefineBinding, "'define'") <$ keyword "define"
+    , (\k -> (k, "'let'")) <$> retiredLet
     ]
   lhs <- pExpr adts_
-  _ <- symbol "="
+  _ <- closer "'='" spelled open (symbol "=")
   definition <- pExpr adts_
-  _ <- keyword "in"
+  _ <- closer "'in'" spelled open (keyword "in")
   scope <- pExpr adts_
   destr <- letInDestructor (bindWith kind) lhs
   return $ stampSynthesized lhs (destr definition scope)
@@ -554,9 +567,10 @@ pList = do
 
 pListExpr :: MonadParser m => [ADTDecl] -> m Expr
 pListExpr adts_ = do
+  open <- getSourcePos
   _ <- (symbol "[")
   exprs <- expr adts_ `sepBy` (symbol ",")
-  _ <- (symbol "]")
+  _ <- closer "']'" "'['" open (symbol "]")
   return (foldr cons nul exprs)
 
 valueParser :: MonadParser m => m Value
@@ -664,24 +678,37 @@ pADT = dbg "ADT" $ do
 pADTConstructor :: MonadParser m => m ADTConstructorDecl
 pADTConstructor = dbg "ADT Constr" $ do
   name <- pIdentifier
-  fields <- try pADTField `sepBy` symbol ","
+  fields <- pADTField `sepBy` symbol ","
   return (name, fields)
 
 pADTField :: MonadParser m => m (String, RType)
 pADTField = do
-    fieldName <- pIdentifier
-    _ <- symbol "::"
+    -- Only "name ::" is tentative: it is what tells a field from a trailing
+    -- @depth N@. Once it is there the field is committed, so a broken type is
+    -- reported where it breaks instead of being rewound.
+    fieldName <- try (pIdentifier <* symbol "::")
     fieldType <- choice [SPLL.Parser.pType <&> Left, pTypeIdentifier <&> Right]
     let fieldRT = case fieldType of
                     Left rt -> rt
                     Right adt -> TADT adt
     return (fieldName, fieldRT)
 
+-- | A whole program: @data@ declarations, then definitions, then end of input.
+--
+-- Neither list is parsed under 'try'. Each declaration starts with a token that
+-- identifies it (@data@, @neural@, or the defined name) and fails without
+-- consuming when that is absent, which is what ends each 'many'. A declaration
+-- that has begun and then breaks must report *its* error. Under 'try' it was
+-- rewound instead, 'many' stopped there as if the program had ended, and 'eof'
+-- blamed column 1 of the broken declaration with "expecting end of input" --
+-- often on a line nothing was wrong with, the mistake being an unclosed
+-- parenthesis further down the same definition (task
+-- parser-paren-error-misleading-location).
 pProg :: MonadParser m => m Program
 pProg = do
-  adtsDecls <- dbg "trying ADTs" (many (try (scTop *> pADT)))
-  defs <- dbg "trying definition" (many (try (scTop *> pDefinition adtsDecls)))
   scTop
+  adtsDecls <- dbg "trying ADTs" (many (pADT <* scTop))
+  defs <- dbg "trying definition" (many (pDefinition adtsDecls <* scTop))
   _ <- eof
   return (aggregateDefinitions adtsDecls defs)
 
@@ -732,22 +759,29 @@ pNull = do
 -- doubling, a chain of N nested parenthesized subexpressions (e.g. a
 -- right-nested if/accessor chain) cost O(2^N) instead of O(N) -- 12 levels of
 -- nesting alone measured at 160+ seconds to parse (testCases/planEnumInlineWide).
+--
+-- It also reads @()@: the unit literal used to be reached only by letting this
+-- parser fail on it and backtracking into 'pConst', and the 'try' that took
+-- was the same one that rewound a genuinely unclosed parenthesis.
 pTuple :: MonadParser m => [ADTDecl] -> m Expr
 pTuple adts_ = parens $ do
-  x <- expr adts_
-  rest <- optional (symbol "," *> expr adts_)
-  return $ maybe x (tuple x) rest
+  first <- optional (expr adts_)
+  case first of
+    Nothing -> return (Expr makeTypeInfo (Constant VUnit))
+    Just x -> do
+      rest <- optional (symbol "," *> expr adts_)
+      return $ maybe x (tuple x) rest
 
 
 -- | Parse atomic expressions (no recursion)
 atom :: MonadParser m => [ADTDecl] -> m Expr
 atom adts_ = choice [
     pNull,
-    try (pListExpr adts_),
-    try (pTuple adts_),  -- "(expr)" and "(expr, expr)" -- see pTuple
+    pListExpr adts_,
+    pTuple adts_,  -- "()", "(expr)" and "(expr, expr)" -- see pTuple
     pUniform,     -- Built-in distributions
     pNormal,
-    pConst,       -- Constants (numbers)
+    try pConst,   -- Constants (numbers); a literal is small and self-contained
     var <$> pIdentifier  -- Variables last
   ] <* sc
 
@@ -766,9 +800,10 @@ keywordExpr adts_ = dbg "keywordExpr" $ choice [
 -- | Lambda expressions
 pLambda :: MonadParser m => [ADTDecl] -> m Expr
 pLambda adts_ = do
+    open <- getSourcePos
     _ <- symbol "\\"
     params <- some pIdentifier
-    _ <- symbol "->"
+    _ <- closer "'->'" "lambda '\\'" open (symbol "->")
     body <- expr adts_
     return $ foldr (#->#) body params
 
@@ -781,11 +816,16 @@ application adts_ = dbg "application" $ do
     -- would otherwise reach the solver with no position of its own, and a type
     -- error blamed on an argument would have nowhere to point.
     headOff <- getOffset
-    func <- try (withSpan (atom adts_))
+    func <- withSpan (atom adts_)
     -- atom already covers "(expr)"/"(expr, expr)" via pTuple; a separate
     -- parens(expr) fallback here would re-parse the same paren contents a
     -- second time on every atom-alternative failure (see pTuple's comment).
-    args <- try $ many (try (withSpan (atom adts_)))
+    --
+    -- No 'try' around an argument: an atom that is not there fails without
+    -- consuming and ends the list, while one that was begun and is broken --
+    -- a parenthesis never closed -- must fail here, where it is broken. A
+    -- 'try' ended the argument list silently at the open parenthesis instead.
+    args <- many (withSpan (atom adts_))
     case func of
         Expr _ (Var name) -> case lookup name binaryFs of
             Just constructor -> knownHead headOff func name 2 False args (construct2 constructor)
@@ -837,10 +877,16 @@ expr adts_ = dbg "expr" $ withSpan (makeExprParser term opTable)
     -- Both levels are stamped: 'term' gives each operand its own span, and the
     -- outer 'withSpan' covers the node 'makeExprParser' builds for an infix
     -- operator, which no operand's span would reach.
+    --
+    -- Neither alternative is under 'try'. An application starts with an atom
+    -- and a keyword expression with a keyword, and each fails without
+    -- consuming when its start is absent. Once one has begun, its failure is
+    -- the error to report: rewinding it made 'pProg' blame column 1 of the
+    -- definition with "expecting end of input" (task
+    -- parser-paren-error-misleading-location).
     term = withSpan $ choice [
-        try (application adts_),
-        try (keywordExpr adts_),
-        atom adts_
+        application adts_,
+        keywordExpr adts_
       ]
 
 -- | Top level entry point
@@ -849,7 +895,44 @@ parseExpr = sc *> expr [] <* eof
 
 -- | Parse a parenthesized expression
 parens :: MonadParser m => m a -> m a
-parens = between (char '(' *> sc) (char ')' *> sc)
+parens p = do
+  open <- getSourcePos
+  _ <- char '(' *> sc
+  x <- p
+  _ <- closer "')'" "'('" open (char ')' *> sc)
+  return x
+
+-- | The token that finishes a construct: a closing bracket, or the next
+-- keyword of a multi-keyword form (@then@\/@else@ of an @if@, @in@ of a
+-- binding, @->@ of a lambda). When it is missing, say which token was expected,
+-- what was found instead, and where the construct it belongs to was opened:
+--
+-- > expected ')' to match the '(' at line 4, column 8, but found 'else'
+--
+-- The position of the error is where the token was expected, which is the
+-- first place the mistake is detectable; the opener's position is what lets
+-- the author find the other end. Megaparsec's own message here was an
+-- "expecting" list of every operator and atom that could have continued the
+-- expression, with the one token that mattered somewhere in the middle. The
+-- error is fancy, so that list is not merged back into it.
+closer :: MonadParser m => String -> String -> SourcePos -> m a -> m a
+closer expected opener open p = p <|> do
+  off <- getOffset
+  found <- describeNext
+  parseError $ FancyError off $ Set.singleton $ ErrorFail $
+    "expected " ++ expected ++ " to match the " ++ opener ++ " at line "
+      ++ show (unPos (sourceLine open)) ++ ", column " ++ show (unPos (sourceColumn open))
+      ++ ", but found " ++ found
+
+-- | A short description of the input ahead, for a diagnostic. Consumes nothing.
+describeNext :: MonadParser m => m String
+describeNext = lookAhead $ choice
+  [ "the end of the input" <$ eof
+  , "the end of the input" <$ try (space1 *> eof)
+  , "the end of the definition (the next line is not indented)" <$ eol
+  , (\w -> "'" ++ w ++ "'") <$> identifierChars
+  , (\c -> "'" ++ [c] ++ "'") <$> anySingle
+  ]
 
 multLikeOpList :: [([Char], Expr -> Expr -> Expr)]
 multLikeOpList = [("**", (#<*>#)), ("*", (#*#)), ("/", (#/#)), ("&&", (#&&#))]

@@ -60,6 +60,7 @@ rejectionTests = testGroup "Rejection"
   , gatedContinuousFeedsFreshDrawTests
   , typeErrorDiagnosticTests
   , knownHeadArityTests
+  , parseErrorLocationTests
   ]
 
 -- ----------------------------------------------------------------------------
@@ -1469,5 +1470,94 @@ knownHeadArityTests = testGroup "KnownHeadArity"
             , "main = multF 2.0 (negate 1.0)\n" ] $ \src ->
         case tryParseProgram "prog.spll" src of
           Left e -> assertFailure ("rejected: " ++ errorBundlePretty e)
+          Right _ -> return ()
+  ]
+
+-- ----------------------------------------------------------------------------
+-- Parser: an error inside a definition is reported inside that definition
+-- ----------------------------------------------------------------------------
+
+-- A definition that begins and then breaks -- an unclosed parenthesis, an 'if'
+-- with no 'else', a binding with no 'in' -- used to be rewound by the 'try'
+-- around each top-level declaration. The parse then stopped as if the program
+-- had ended there, and the author was shown "expecting end of input" at
+-- column 1 of the broken definition, a line with nothing wrong on it (task
+-- parser-paren-error-misleading-location). The error must be reported where
+-- the mistake is detectable, and a missing closing token must name the
+-- construct it belongs to and where that was opened.
+
+-- | Programs whose mistake is on a line after the definition's first, as in
+-- the original report. Each: name, source, the expected error position, and
+-- the fragments the message must contain.
+brokenDefinitions :: [(String, String, String, [String])]
+brokenDefinitions =
+  [ ( "an unclosed parenthesis on a continuation line"
+    , unlines [ "isEmpty xs = xs == []", ""
+              , "exactlyOne b scene = if isEmpty (tl scene)"
+              , "  then (b && (not (hd scene))"
+              , "  else False", ""
+              , "main = exactlyOne True [True]" ]
+    , "prog.spll:5:3:", ["')'", "'('", "line 4, column 8", "'else'"] )
+  , ( "a surplus closing parenthesis"
+    , unlines [ "isEmpty xs = xs == []", ""
+              , "exactlyOne b scene = if isEmpty (tl scene))"
+              , "  then b", "  else False", ""
+              , "main = exactlyOne True [True]" ]
+    , "prog.spll:3:43:", ["'then'", "'if'", "line 3, column 22", "')'"] )
+  , ( "an 'if' with no 'else'"
+    , unlines [ "f b = if b", "  then 1.0", "", "main = f True" ]
+    , "prog.spll:2:11:", ["'else'", "'if'", "line 1, column 7"] )
+  , ( "a 'draw' with no 'in'"
+    , unlines [ "f x = draw y = Uniform", "  y + x", "", "main = f 1.0" ]
+    , "prog.spll:2:8:", ["'in'", "'draw'", "line 1, column 7"] )
+  , ( "an unclosed parenthesis in an argument"
+    , unlines [ "f x y = x + y", "", "main = f (1.0 + 2.0", "  3.0" ]
+    , "prog.spll:4:6:", ["')'", "'('", "line 3, column 10"] )
+  , ( "an unclosed list"
+    , unlines [ "f = [1, 2", "main = f" ]
+    , "prog.spll:1:10:", ["']'", "'['", "line 1, column 5"] )
+  , ( "a lambda with no arrow"
+    , unlines [ "f = \\x y x + y", "main = f 1 2" ]
+    , "prog.spll:1:12:", ["'->'", "line 1, column 5", "'+'"] )
+  ]
+
+parseErrorLocationTests :: TestTree
+parseErrorLocationTests = testGroup "ParseErrorLocation" $
+  [ testCase name $ do
+      msg <- parseErrorFor src
+      assertBool ("expected the error at " ++ pos ++ " in: " ++ msg) (pos `isInfixOf` msg)
+      assertBool ("the error degraded to end-of-input: " ++ msg)
+        (not ("expecting end of input" `isInfixOf` msg))
+      forM_ fragments $ \fragment ->
+        assertBool ("expected " ++ show fragment ++ " in: " ++ msg) (fragment `isInfixOf` msg)
+  | (name, src, pos, fragments) <- brokenDefinitions ]
+  ++
+  [ testCase "a broken definition is not blamed on its first column" $ do
+      -- The report's exact symptom: the caret under column 1 of the definition.
+      msg <- parseErrorFor (unlines [ "f x = if x", "  then (1.0", "  else 2.0", "main = f True" ])
+      assertBool ("column 1 of the definition was blamed: " ++ msg)
+        (not ("prog.spll:1:1:" `isInfixOf` msg))
+      assertBool ("expected the continuation line in: " ++ msg) ("prog.spll:3:" `isInfixOf` msg)
+
+  , testCase "an error inside a data declaration is reported there" $ do
+      msg <- parseErrorFor (unlines [ "data Color = Red | Blue", "data Box = Box c::(Color", "main = Red" ])
+      assertBool ("the error degraded to end-of-input: " ++ msg)
+        (not ("expecting end of input" `isInfixOf` msg))
+      assertBool ("expected line 2 in: " ++ msg) ("prog.spll:2:" `isInfixOf` msg)
+
+  , testCase "constructs that relied on backtracking still parse" $
+      -- '()' used to reach the unit literal only by a failed parenthesised
+      -- expression; a keyword used to end an argument list only by a failed
+      -- identifier; 'Left 1' is a literal that shares its start with nothing.
+      forM_ [ "main = ()\n"
+            , "f x = x\nmain = f ( )\n"
+            , "main = Left 1\n"
+            , "f x y = x\nmain = if f True False then f 1 2 else f 3 4\n"
+            , "main = draw x = Uniform in x + 1.0\n"
+            , "g x = x\nmain = (g 1.0, g 2.0)\n"
+            , "main = [ ]\n"
+            , "main = (\\x -> x) 1.0\n" ] $ \src ->
+        case tryParseProgram "prog.spll" src of
+          Left e -> assertFailure ("rejected " ++ show src ++ ": " ++ errorBundlePretty e)
           Right _ -> return ()
   ]
