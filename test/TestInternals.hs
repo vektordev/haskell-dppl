@@ -1647,6 +1647,35 @@ test_planEnumM4Polynomial = testCase "planEnumM4Polynomial" $ do
               ++ show s10 ++ " s30=" ++ show s30 ++ " ratio=" ++ show (fromIntegral s30 / fromIntegral s10 :: Double))
     (s30 < 30 * s10)
 
+-- | A flat `+` chain counting over the fields of a PRODUCT scene (task
+-- plan-flat-sum-over-product-exponential). Each summand reads a disjoint field,
+-- so the value grouping stays on for all of them and the count is a
+-- Poisson-binomial DP. It used to be turned off by the mere presence of a
+-- second reader of the scene, and the traversal enumerated one world per joint
+-- outcome -- 3^N: 70 KB of Python at N = 4, 8.7 GB of compiler RSS at N = 8.
+-- The pair (4, 7) is chosen to fail in seconds (~27x) rather than OOM if that
+-- regresses; grouped, the growth is well under 2x.
+test_planFlatSumOverProductPolynomial :: TestTree
+test_planFlatSumOverProductPolynomial = testCase "planFlatSumOverProductPolynomial" $ do
+  let prog n = unlines
+        [ "data Object = NoObj | Obj x::Float"
+        , "data Scene = Scene " ++ intercalate ", " [ "o" ++ show i ++ "::Object" | i <- [1 .. n :: Int] ]
+        , "neural readScene :: (Symbol -> Scene)"
+        , "g o = if isNoObj o then 0 else (if x o > 0.5 then 1 else 0)"
+        , "main s = draw sc = readScene s in " ++ intercalate " + " [ "g (o" ++ show i ++ " sc)" | i <- [1 .. n] ]
+        ]
+  let sizeAt :: Int -> IO Int
+      sizeAt n = case tryParseProgram "flatsum" (prog n) of
+        Left e  -> assertFailure ("parse error at N = " ++ show n ++ ": " ++ show e)
+        Right p -> case compile defaultCompilerConfig p of
+          Left e   -> assertFailure ("compile error at N = " ++ show n ++ ": " ++ show e)
+          Right ir -> return (length (show ir))
+  s4 <- sizeAt 4
+  s7 <- sizeAt 7
+  assertBool ("N=7 flat-sum IR is growing at the ungrouped (3^N) rate: s4="
+              ++ show s4 ++ " s7=" ++ show s7 ++ " ratio=" ++ show (fromIntegral s7 / fromIntegral s4 :: Double))
+    (s7 < 3 * s4)
+
 -- | The same value-grouped DP acceptance, on the BOOL path ('planGroupBool').
 -- A recursive Bool predicate reaches its recursive call through one disjoint
 -- world per @Object@ constructor (here: @obj@ is @NoObj@, or it is @Obj@ with a
@@ -4115,6 +4144,7 @@ internalsTests = testGroup "Internals"
   , test_recursiveListBranchPruning
   , test_mixtureNegativeLogNormalScaleCompiles
   , test_planEnumBoolCtorPolynomial
+  , test_planFlatSumOverProductPolynomial
   , test_planEnumAccumulatorFoldPolynomial
   , test_planEnumSubtractionAccumulatorFoldPolynomial
   , test_planHelperOnFoldResultMatchesDense

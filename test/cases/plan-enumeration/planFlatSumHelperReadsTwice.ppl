@@ -1,0 +1,19 @@
+-- Soundness guard for the value grouping over disjoint readers (task
+-- plan-flat-sum-over-product-exponential). The two summands read disjoint
+-- fields, but h reads ITS field twice (the condition and the branch both call
+-- g). Grouping h's condition bakes o1's leaves into a mass, and the branch
+-- constrains them again; the grouping has to notice that clash and redo the
+-- traversal ungrouped, or the o1 mass is counted twice (p(3) would come out as
+-- q1^2 q2). A reader count over the scene cannot see this: it sees one read of
+-- o1, inside the call h (o1 sc).
+--
+-- h o is 2 when slot 1 is an object with x > 0.5, else 0; g (o2 sc) is 0/1.
+-- Slot existence (0.8, 0.9), positions N(0,1), N(1,2):
+-- q1 = 0.2468300310, q2 = 0.5388356931 (as in planFlatSumOfSlots), so
+-- p(0) = (1-q1)(1-q2), p(1) = (1-q1) q2, p(2) = q1 (1-q2), p(3) = q1 q2.
+data Object = NoObj | Obj x::Float
+data Scene = Scene o1::Object, o2::Object
+neural readScene :: (Symbol -> Scene)
+g o = if isNoObj o then 0 else (if x o > 0.5 then 1 else 0)
+h o = if g o > 0 then g o + 1 else 0
+main s = draw sc = readScene s in h (o1 sc) + g (o2 sc)

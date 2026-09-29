@@ -5018,15 +5018,22 @@ plcBase (PLeafPt b _ _ _) = b
 -- the subtree can be measured by the ordinary probability compiler and
 -- multiplied in ('prodP': dims and branch counts add). Unlike 'pwFactor'
 -- these are full 'PResult's, so a factor may carry its own dimension.
-data PlanWorld = PlanWorld { pwGuards :: [IRExpr], pwCons :: [PLeafCon], pwPairs :: [(Int, Int)], pwFactor :: IRExpr, pwFactors :: [PResult] }
+-- 'pwBaked' (task plan-flat-sum-over-product-exponential) lists the leaf
+-- regions (by base offset) whose mass a value group has folded into
+-- 'pwFactor': they are no longer visible as constraints, so the world must
+-- never meet another constraint on them -- that would count their mass twice.
+-- 'pwClash' records that it did ('intersectPlanW', 'addSpecCons'); a clashing
+-- world's mass is wrong, and 'planWitnessApply' then redoes the traversal
+-- without grouping.
+data PlanWorld = PlanWorld { pwGuards :: [IRExpr], pwCons :: [PLeafCon], pwPairs :: [(Int, Int)], pwFactor :: IRExpr, pwFactors :: [PResult], pwBaked :: [Int], pwClash :: Bool }
 
 -- | An unguarded world from leaf constraints alone.
 pw1 :: [PLeafCon] -> PlanWorld
-pw1 cs = PlanWorld [] cs [] const1 []
+pw1 cs = PlanWorld [] cs [] const1 [] [] False
 
 -- | The unconstrained world @pw1 []@: no guards, constraints or factors.
 planWorldTrivial :: PlanWorld -> Bool
-planWorldTrivial (PlanWorld g c p f rs) = null g && null c && null p && f == const1 && null rs
+planWorldTrivial (PlanWorld g c p f rs b _) = null g && null c && null p && f == const1 && null rs && null b
 
 -- | The observation target: the plan-leaf analogue of the point/interval
 -- split in 'WSet'. PTUpTo is the cumulative target (body <= sample).
@@ -5083,7 +5090,7 @@ staticBool _ = Nothing
 -- die, and the branch body -- containing the recursive call -- is never
 -- traversed. This is the recursion base of the milestone-2 specialization.
 pwUnsat :: PlanWorld -> Bool
-pwUnsat (PlanWorld gs cons pairs _ _) = any conUnsat cons
+pwUnsat (PlanWorld gs cons pairs _ _ _ _) = any conUnsat cons
                                  || any ((== Just False) . staticBool) gs
                                  || any (\(a, b) -> (b, a) `elem` pairs || a == b) pairs
   where
@@ -5099,7 +5106,7 @@ pwUnsat (PlanWorld gs cons pairs _ _) = any conUnsat cons
 -- excludes by design (see "Hard residual" in the design doc). Returns a
 -- diagnostic for the first offending world.
 pwOverCoupled :: PlanWorld -> Maybe String
-pwOverCoupled (PlanWorld _ cons pairs _ _)
+pwOverCoupled (PlanWorld _ cons pairs _ _ _ _)
   | (base:_) <- overCoupled = Just
       ("a world couples the continuous leaf at logit offset " ++ show base
        ++ " to other random leaves more than once (or couples it and also"
@@ -5138,12 +5145,12 @@ data PlanState = PlanState
     -- bound before the traversal rather than only at measurement time.
   , psNnRaw    :: String
     -- | Whether the milestone-4 value grouping ('planGroupValues') may collapse
-    -- same-value worlds into a single measured mass. Sound only when the
-    -- counting fold is the SOLE reader of the neural scene: merging bakes the
-    -- fold's leaf constraints (including the shared structural SCons/Obj flags)
-    -- into one mass, so any sibling predicate re-constraining those same leaves
-    -- would double-count them. Enabled iff the plan-bound variable occurs once
-    -- in the observation (see 'planWitnessApply').
+    -- same-value worlds into a single measured mass. Merging bakes a group's
+    -- residual leaf constraints into one mass, so anything else constraining
+    -- those leaves would double-count them. The traversal is first run with
+    -- this on; merged worlds record what they baked ('pwBaked'), meeting a
+    -- baked leaf again marks a clash ('pwClash'), and on a clash
+    -- 'planWitnessApply' reruns with it off.
   , psMerge    :: Bool
     -- | Statically known values of the specialization argument variables
     -- ('planResolveApply' binds a non-trivial deterministic call-site argument
@@ -5207,8 +5214,20 @@ insertLeafCon c (c':cs) | plcBase c == plcBase c' = intersectLeafCon c' c : cs
                         | otherwise               = c' : insertLeafCon c cs
 
 intersectPlanW :: PlanWorld -> PlanWorld -> PlanWorld
-intersectPlanW (PlanWorld g1 c1 p1 f1 rs1) (PlanWorld g2 c2 p2 f2 rs2) =
+intersectPlanW w1@(PlanWorld g1 c1 p1 f1 rs1 b1 x1) w2@(PlanWorld g2 c2 p2 f2 rs2 b2 x2) =
   PlanWorld (g1 ++ g2) (foldl (flip insertLeafCon) c1 c2) (nub (p1 ++ p2)) (mulFactor f1 f2) (rs1 ++ rs2)
+            (b1 ++ b2) (x1 || x2 || touchesBaked b1 w2 || touchesBaked b2 w1)
+
+-- | The leaf regions a world reads: its constrained leaves, its pairwise
+-- couplings, and the leaves already folded into its factor.
+pwLeaves :: PlanWorld -> [Int]
+pwLeaves w = map plcBase (pwCons w) ++ concat [[a, b] | (a, b) <- pwPairs w] ++ pwBaked w
+
+-- | Does the world read any of these baked leaf regions? Meeting a baked leaf
+-- again is a double count (see 'pwBaked').
+touchesBaked :: [Int] -> PlanWorld -> Bool
+touchesBaked [] _ = False
+touchesBaked bs w = any (`elem` bs) (pwLeaves w)
 
 -- | Cross-intersect two world sets, dropping statically unsatisfiable
 -- results. This is what keeps the world count of an if-chain over several
@@ -5669,7 +5688,7 @@ planInvert meta env planBody target
       if pType (getTypeInfo planBody) == Deterministic
         then do
           bIR <- planGenDet meta env planBody
-          return (Right [PlanWorld [planDetGuard (rType (getTypeInfo planBody)) bIR target] [] [] const1 []])
+          return (Right [planAddGuard (planDetGuard (rType (getTypeInfo planBody)) bIR target) (pw1 [])])
         else planFactorFree meta env planBody target
 planInvert meta env planBody target
   | Just refE <- planEvalRef meta env planBody =
@@ -6019,25 +6038,6 @@ planDetGivenPlan meta env = go
       , (n ++ "_gen") `Set.member` detGenNames meta = all go args
     go _ = False
 
--- | How many times the plan traversal reads the plan-bound variable in @e@
--- (whose occurrences are @occs@): its syntactic occurrences, except that an
--- occurrence inside the argument of a directly applied literal lambda counts
--- once per occurrence of that lambda's parameter, since 'planBetaReduce'
--- substitutes the argument there. Without that, @draw n = numRed scene in (n,
--- n)@ would look like a single reader, enable the value grouping
--- ('psMerge'), and double-count the leaves the two copies share. Equal to
--- @length occs@ on a body without such lambdas.
-planReaderCount :: [ChainName] -> Expr -> Int
-planReaderCount occs = go
-  where
-    go e | chainName (getTypeInfo e) `elem` occs = 1
-    go (Expr _ (Apply (Expr _ (Lambda x b)) a)) = go b + freeOccs x b * go a
-    go e = sum (map go (getSubExprs e))
-    freeOccs x (Expr _ (Var v)) = if v == x then 1 else 0
-    freeOccs x (Expr _ (Lambda y b)) | y == x = 0
-                                     | otherwise = freeOccs x b
-    freeOccs x e = sum (map (freeOccs x) (getSubExprs e))
-
 -- | Beta-reduce a directly applied literal lambda met by the plan traversal:
 -- an inner @draw x = a in b@, or a local function applied in place,
 -- @(\\s -> p s) a@. The result is @b[x := a]@, traversed in its place.
@@ -6157,10 +6157,11 @@ staticBoolIn env e = case foldConstIn env e of
 -- Soundness rests on three things: the (value, world) pairs are a partition, so
 -- summing a same-value subset is exactly P(value = v); constraints shared
 -- identically by every world of a group stay LIVE ('commonDiscreteCons') so an
--- outer re-constraint still dedups; and merging fires at all only when the fold
--- is the scene's sole reader ('psMerge'), so no sibling predicate re-constrains
--- a baked leaf. Only all-dim-0, uncoupled worlds with a foldable value are
--- merged; multi-world groups collapse (a singleton keeps its constraints, so no
+-- outer re-constraint still dedups; and the residual leaves baked into the
+-- mass are recorded ('pwBaked'), so anything re-constraining one of them is
+-- caught as a clash and the traversal reruns with merging off ('psMerge',
+-- 'planWitnessApply'). Only all-dim-0, uncoupled worlds with a foldable value
+-- are merged; multi-world groups collapse (a singleton keeps its constraints, so no
 -- premature commitment), and anything non-foldable or carrying a point/pair
 -- constraint passes through untouched.
 planGroupValues :: [(IRExpr, PlanWorld)] -> PlanM [(IRExpr, PlanWorld)]
@@ -6207,7 +6208,11 @@ planGroupValues pairs = do
       let groupMass = foldr1 (IROp OpPlus) (map (planWorldMass nnRaw . residual) ws)
       mv <- lift (mkVariable "cnt_mass")
       lift (setVariables [(mv, groupMass)])
-      return (IRConst v, PlanWorld [] common [] (IRVar mv) [])
+      -- the residual leaves are now hidden inside the mass: record them, with
+      -- whatever the members had already baked, so a later constraint on one
+      -- of them is caught as a double count ('pwBaked')
+      let baked = nub (concatMap (\w -> map plcBase (pwCons (residual w)) ++ pwBaked w) ws)
+      return (IRConst v, PlanWorld [] common [] (IRVar mv) [] baked (any pwClash ws))
     -- discrete leaf constraints present (identically) in every world's cons
     commonDiscreteCons (w:ws') =
       [ c | c@(PLeafCon _ _) <- pwCons w, all (\w' -> any (conEq c) (pwCons w')) ws' ]
@@ -6324,7 +6329,8 @@ data PlanSpec = PlanSpec
 -- | Fold the call-site accessor constraints (e.g. the SCons flag implied by
 -- @f (rest s)@) into a world produced by the callee.
 addSpecCons :: PlanSpec -> PlanWorld -> PlanWorld
-addSpecCons spec w = w { pwCons = foldr insertLeafCon (pwCons w) (spCons spec) }
+addSpecCons spec w = w { pwCons = foldr insertLeafCon (pwCons w) (spCons spec)
+                       , pwClash = pwClash w || any ((`elem` pwBaked w) . plcBase) (spCons spec) }
 
 -- | Resolve a user-function application into a specialization: the callee
 -- must be a directly-applied (saturated) top-level function, and each
@@ -6708,20 +6714,34 @@ planWitnessApply meta cumulative rt lResolvedCN lambdaBodyCN tag v sample
       nnRaw <- mkVariable "nn_raw"
       sym <- toIRGenerate meta symArg
       setVariables [(nnRaw, IRApply (IRVar nnName) sym)]
-      -- The milestone-4 value grouping may collapse same-count worlds only when
-      -- the fold is the scene's sole reader: with a single occurrence its leaves
-      -- are private, so baking them into a summed mass cannot clash with a
-      -- sibling predicate re-constraining the shared structural flags.
-      -- Readers are counted AFTER the beta-reduction the traversal performs
-      -- ('planBetaReduce'): @draw n = numRed scene in (n, n)@ mentions the
-      -- scene once but reads it twice once @n@ is substituted.
-      let mayMerge = planReaderCount occs bodyExpr <= 1
-      worldsE <- evalStateT (planInvert meta env bodyExpr target) (emptyPlanState nnRaw mayMerge)
+      -- The milestone-4 value grouping ('planGroupValues') bakes a value
+      -- group's leaves into one summed mass. That is sound exactly when no
+      -- other part of the body constrains those leaves again, which is what
+      -- 'pwBaked' / 'pwClash' track: grouping is tried first, and only if some
+      -- surviving world met a baked leaf again (two readers asking about the
+      -- same slice: @(numRed scene, numRed scene)@, a helper reading its
+      -- parameter twice, @draw n = numRed scene in (n, n)@) is the traversal
+      -- redone without grouping -- the world-per-path enumeration the old
+      -- reader-count gate gave every multi-reader body. Readers of DISJOINT slices -- a flat sum over the fields
+      -- of a product scene -- never clash, so each keeps its grouping and the
+      -- compile stays linear in the field count (task
+      -- plan-flat-sum-over-product-exponential). A clash in a world that is
+      -- statically unsatisfiable is harmless: it measures 0.
+      -- The abandoned grouped attempt leaves no trace: its variable bindings
+      -- are dropped ('pass') and the name supply is rewound, so a body that
+      -- clashes emits exactly what the ungrouped traversal alone would.
+      let runPlan merge = do
+            ws <- evalStateT (planInvert meta env bodyExpr target) (emptyPlanState nnRaw merge)
+            return (filter (not . pwUnsat) <$> ws)
+      supply0 <- get
+      (grouped, clashed) <- pass $ do
+        r <- runPlan True
+        let c = either (const False) (any pwClash) r
+        return ((r, c), if c then const [] else id)
+      worldsE <- if clashed then put supply0 >> runPlan False else return grouped
       case worldsE of
         Left why -> return (Left (Just why))
-        Right worlds0 -> do
-          -- statically unsatisfiable worlds measure 0; drop them
-          let worlds = filter (not . pwUnsat) worlds0
+        Right worlds -> do
           case mapMaybe pwOverCoupled worlds of
            (why:_) -> return (Left (Just why))
            [] -> do

@@ -349,9 +349,9 @@ value's world. Both sides are partitions, so the result is one too; the
 intersection (not a product of masses) is what keeps it right when the callee
 also reads the scene through a slice. It used to die with an uncaught `error`
 ("neither a plan slice ... nor deterministic given scope: Apply"). A call that
-needs no split takes the old code path and emits identical IR. Cost: with two
-readers value grouping is off, so each split argument carries one world per
-scene path, and two split arguments cross-multiply (443 s at 1111 paths).
+needs no split takes the old code path and emits identical IR. Cost: when two
+readers constrain the same leaves value grouping is off (see the grouping
+clash rule below), so each split argument carries one world per scene path, and two split arguments cross-multiply (443 s at 1111 paths).
 Corpus `plan-enumeration/planHelperOnFoldResult*`; differential
 `Internals.planHelperOnFoldResultMatchesDense`.
 
@@ -906,11 +906,27 @@ is the explicit per-invocation opt-in to dense enumeration. Task
 built-in constructors (`TCons`/`Cons`/`left`/`right`) and arithmetic at the
 observed position, and inner deterministic `draw`s / local lambdas, which the
 traversal beta-reduces when the argument is deterministic given the plan
-(`planBetaReduce`; `psMerge` then counts readers *after* substitution,
-`planReaderCount`, since `draw n = numRed scene in (n, n)` reads the scene twice).
-A body with two readers of the scene compiles but keeps value grouping off, so
-it enumerates one world per scene path and is as large as the dense module
-(`planOverBudgetTuplePair`, 8.2MB; follow-up `plan-multi-reader-value-grouping`).
+(`planBetaReduce`).
+
+**Value-grouping clash rule** (task `plan-flat-sum-over-product-exponential`).
+The milestone-4 grouping (`planGroupValues`) bakes a value group's residual
+leaf constraints into one summed mass, which double-counts if anything else
+constrains those leaves again. The gate used to be a syntactic reader count
+(`planReaderCount <= 1`): too strict for readers of *disjoint* slices (a flat
+`g (o1 sc) + ... + g (oN sc)` over a product scene enumerated 3^N worlds and
+OOM-ed at N = 8) and too lax for a helper reading its parameter twice
+(`planHelperReadsPlanParamTwice`, a silent wrong number). Now a merged world
+records the leaves it baked (`pwBaked`); `intersectPlanW`/`addSpecCons` set
+`pwClash` when a baked leaf meets any other constraint or baked set;
+`planWitnessApply` traverses with grouping on and, if a surviving world
+clashed, discards that attempt (bindings via `pass`, name supply rewound) and
+reruns with grouping off -- for a body the reader count already kept
+ungrouped, byte-identical to what it emitted before.
+So readers of the same leaves (`(numRed scene, numRed scene)`,
+`draw n = numRed scene in (n, n)`) still enumerate one world per scene path and
+are as large as the dense module (`planOverBudgetTuplePair`, 8.2MB; follow-up
+`plan-multi-reader-value-grouping`), while disjoint readers group
+(`planFlatSumOfTenSlots`, ~50KB; `Internals.planFlatSumOverProductPolynomial`).
 Corpus: `planEnumRecCountOfLazy*`, `planOverBudget*`; structural test
 `Internals.nestedEnumerationHonoursBudget`.
 

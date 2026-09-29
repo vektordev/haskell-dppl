@@ -1,0 +1,17 @@
+-- Counting over a TEN-field product scene (the width of the CLEVR experiments'
+-- scene_ae.ppl) by a flat `+` chain. Each summand reads a disjoint field, so
+-- the plan path's value grouping stays on for every summand and the count is
+-- compiled as a Poisson-binomial DP -- one value group per (prefix, count),
+-- O(N^2) masses -- instead of one world per joint outcome (3^10 here). Before task
+-- plan-flat-sum-over-product-exponential, two or more readers of the scene
+-- turned grouping off wholesale, and this program OOM-ed at 2 GB (N = 8 already
+-- took 8.7 GB and emitted 7.6 MB of Python; now N = 10 is ~50 KB).
+--
+-- ORACLE: an independent Poisson-binomial DP (Python, math.erf) over
+-- q_i = pObj_i * (1 - Phi((0.5 - mu_i) / sigma_i)), one slot per 4 logits
+-- [pNoObj, pObj, mu, sigma]; the ten masses sum to 1.
+data Object = NoObj | Obj x::Float
+data Scene = Scene o1::Object, o2::Object, o3::Object, o4::Object, o5::Object, o6::Object, o7::Object, o8::Object, o9::Object, o10::Object
+neural readScene :: (Symbol -> Scene)
+g o = if isNoObj o then 0 else (if x o > 0.5 then 1 else 0)
+main s = draw sc = readScene s in g (o1 sc) + g (o2 sc) + g (o3 sc) + g (o4 sc) + g (o5 sc) + g (o6 sc) + g (o7 sc) + g (o8 sc) + g (o9 sc) + g (o10 sc)

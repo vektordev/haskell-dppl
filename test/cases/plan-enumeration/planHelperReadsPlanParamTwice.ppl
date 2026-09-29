@@ -1,0 +1,18 @@
+-- A helper that reads its plan parameter twice: h's condition and its branch
+-- each run a full numRed fold over the same scene. Formerly a SILENT wrong
+-- number (0.1365466126, known-issues pin, task
+-- plan-value-grouping-double-counts-helper-reads): the value grouping was
+-- gated on counting the scene's occurrences, which cannot see inside h, so both
+-- folds baked the scene's leaves into grouped masses and intersecting them
+-- multiplied the masses. Since task plan-flat-sum-over-product-exponential the
+-- grouping records the leaves it bakes and detects meeting one again; the
+-- traversal then reruns ungrouped (the path the inlined two-occurrence twin
+-- always took), so the answer is exact -- and the module is the large
+-- ungrouped one, hence `slow`.
+data Color = Red | Green | Blue
+data Object = NoObj | Obj color::Color
+data Scene = Empty | SCons obj::Object, rest::Scene depth 7
+neural readScene :: (Symbol -> Scene) of 7x.{Empty | SCons {NoObj | Obj {Red|Green|Blue}} x}
+numRed s = if isEmpty s then 0.0 else (if isObj (obj s) then (if isRed (color (obj s)) then 1.0 else 0.0) else 0.0) + numRed (rest s)
+h s = if numRed s > 0.5 then numRed s else 0.0
+main sym = draw scene = readScene sym in h scene
