@@ -41,7 +41,7 @@ import TestCaseParser (Backend(..), TestCase(..), ExpectFailure(..), expectation
 import Test.Tasty.QuickCheck (testProperties, testProperty)
 import System.Random (StdGen, mkStdGen)
 import Control.Monad.Random (Rand, evalRand)
-import Control.Monad (forM_)
+import Control.Monad (forM_, when)
 import Data.Number.Erf (erf)
 import Utils (splitByString)
 import Data.Maybe (isJust)
@@ -2872,7 +2872,65 @@ materializationTests = testGroup "Tier 0 marginal materialization"
             assertEqual ("p(" ++ show q ++ ") under -c") rp mp
             assertEqual ("branch count at " ++ show q) rbc mbc
           other -> assertFailure ("expected branch-counted tuples, got: " ++ show other)
+  , testGroup "leaves judged on their folded size (task and-chain-exponential-over-random-operands)"
+      -- A left-nested chain of Q forward-only Bool ops re-descends its left
+      -- operand once per value of the right, 2^Q per call, unless the operands
+      -- are tabulated. Every leaf here is ~180-230 IR nodes raw -- over
+      -- 'maxTabulatedLeafNodes' -- but 1-50 once its constant key is folded,
+      -- which is what decides whether it is a leaf worth copying.
+      [ testCase "an && chain over a shared enumerated latent is tabulated" $ do
+          prog <- parseOrFail (boolChainSrc "&&" 6 sharedLeaf)
+          cells <- compilesWithCells defaultCompilerConfig prog
+          assertBool "the chain's nested operands must be materialized" cells
+      , testCase "an && chain over independent if-spelled Bernoullis is tabulated" $ do
+          prog <- parseOrFail (boolChainSrc "&&" 6 "(if Uniform < 0.1 then False else True)")
+          cells <- compilesWithCells defaultCompilerConfig prog
+          assertBool "the chain's nested operands must be materialized" cells
+      , testCase "an || chain is tabulated the same way" $ do
+          prog <- parseOrFail (boolChainSrc "||" 6 sharedLeaf)
+          cells <- compilesWithCells defaultCompilerConfig prog
+          assertBool "the chain's nested operands must be materialized" cells
+      , testCase "an ADT-field leaf under a shared enumerated ADT latent is tabulated" $ do
+          prog <- parseOrFail $ "data Person = P a0::Bool, a1::Bool\n"
+            ++ "main = draw p = P (Uniform < 0.5) (Uniform < 0.3) in (p, "
+            ++ intercalate " && " (replicate 6 "(if Uniform < 0.1 then (not (a0 p)) else (a1 p))") ++ ")"
+          cells <- compilesWithCells defaultCompilerConfig prog
+          assertBool "the chain's nested operands must be materialized" cells
+      , testCase "materialized == re-descended at every query value, and == hand value" $
+          forM_ ["&&", "||"] $ \op -> do
+            prog <- parseOrFail (boolChainSrc op 6 sharedLeaf)
+            forM_ [(b, v) | b <- [True, False], v <- [True, False]] $ \(b, v) -> do
+              let q = VTuple (VBool b) (VBool v)
+              matP <- probUnder defaultCompilerConfig   prog [] q
+              refP <- probUnder noMaterializationConfig prog [] q
+              -- Not exact equality, unlike the mNistAdd cases above: on an
+              -- if-spelled Bool leaf the tabulated and re-descended sums
+              -- differ in the last ulp or two. That is a property of
+              -- materializing this shape at all, not of the folded-size
+              -- gate -- it reproduces on the unmodified compiler with the
+              -- leaf cap raised so the old path tabulates the same leaves.
+              assertBool (op ++ ": p" ++ show (b, v) ++ " must not move: "
+                            ++ show refP ++ " re-descended vs " ++ show matP ++ " tabulated")
+                (abs (matP - refP) <= 1e-12 * max 1 (abs refP))
+            -- Given b, each leaf equals b w.p. 0.9, independently; so the
+            -- conjunction is b-valued w.p. 0.9^6 when b = True.
+            when (op == "&&") $ do
+              pTT <- probUnder defaultCompilerConfig prog [] (VTuple (VBool True) (VBool True))
+              assertBool ("p(True, True) = 0.5 * 0.9^6, got " ++ show pTT)
+                (abs (pTT - 0.5 * 0.9 ^ (6 :: Int)) < 1e-12)
+      , testCase "the total unrolling is still judged on the raw size" $ do
+          -- Two cells of a ~190-node leaf is ~380 raw nodes: over a budget of
+          -- 300 the leaf must decline even though each copy folds small,
+          -- because the global optimizer receives the copies raw.
+          prog <- parseOrFail (boolChainSrc "&&" 6 sharedLeaf)
+          cells <- compilesWithCells (defaultCompilerConfig { materializationCardinality = 300 }) prog
+          assertBool "a raw total over the budget must not be tabulated" (not cells)
+      ]
   ]
+  where
+    sharedLeaf = "(if Uniform < 0.1 then (not b) else b)"
+    boolChainSrc op n leaf =
+      "main = draw b = Uniform < 0.5 in (b, " ++ intercalate (" " ++ op ++ " ") (replicate n leaf) ++ ")"
 
 -- | p(main = sample) under the given family's extra probability-mode group
 -- ("main_map" for 'SRMaxProduct'), as a Double. Mirrors 'probUnder', but reads

@@ -971,7 +971,11 @@ bindLambdaParam scope lambdaCn x =
 --     inverting. So forward-only ops need no special case, and the terms of each
 --     cell land in the same order today's loop accumulates them in, which is why
 --     materialization is numerically IDENTICAL to the path it replaces rather
---     than merely equal within tolerance.
+--     than merely equal within tolerance. (Observed exception: a chain of
+--     if-spelled Bool leaves, @if Uniform < 0.1 then False else True@, differs
+--     in the last ulp or two -- chains of @Uniform < p@ leaves and the mNistAdd
+--     sums do not. Not diagnosed further; see task
+--     and-chain-exponential-over-random-operands.)
 --
 -- TOPK. The cutoff is `accProb * pLeft > TOP_K_CUTOFF`, where accProb is the
 -- globally accumulated path probability. A context-free table could not see it
@@ -1180,24 +1184,53 @@ convolveTables meta dom buckets = do
 -- different failure modes: the total must fit the cardinality budget (the same
 -- "how much unrolling is affordable" question the guard asks of domains and
 -- grids), and the individual copy must be small enough to be worth copying at
--- all ('maxTabulatedLeafNodes').
+-- all ('maxTabulatedLeafNodes') -- judged on the copy's size once its constant
+-- key has been folded in, when its raw size is over (see the fallback below).
 pointQueryTable :: CompilerMetadata -> Expr -> [Value] -> CompilerMonad (Maybe MarginalTable)
 pointQueryTable _ _ [] = return Nothing
 pointQueryTable meta e dom@(v0 : vs) = do
-  (probeRes, probeBinds) <- lift $ runWriterT $ inferAt v0
-  let probeSize = irNodeCount (unP (rProb probeRes)) + sum (map (irNodeCount . snd) probeBinds)
+  probe@(probeRes, probeBinds) <- lift $ runWriterT $ inferAt v0
+  let probeSize = compiledSize probe
       bound = materializationCardinality (compilerConfig meta)
-      affordable = probeSize <= maxTabulatedLeafNodes
-                && withinMaterializationBudget bound (length dom * probeSize)
-  if not affordable
-    then return Nothing
-    else do
+      withinTotal = withinMaterializationBudget bound (length dom * probeSize)
+  if withinTotal && probeSize <= maxTabulatedLeafNodes
+    then do
       setVariables probeBinds
       cell0 <- bindCell (unP (rProb probeRes))
       cells <- forM vs (\v -> inferAt v >>= bindCell . unP . rProb)
       return (Just (zip dom (cell0 : cells)))
+    else if not withinTotal
+      then return Nothing
+      else do
+        -- Over the per-copy bound as emitted, but maybe not as it will run:
+        -- each copy is compiled at a CONSTANT key, and the key-dependent
+        -- tests that dominate a small leaf's raw IR (ANY checks on the key,
+        -- equality against it, the arms it makes impossible) fold away once
+        -- the key is known. A Bernoulli spelled @if Uniform < 0.1 then False
+        -- else True@ is 181 nodes raw and 1 folded; the same leaf reading an
+        -- enumerated latent is 193 and 38 -- a leaf by any reading of
+        -- 'maxTabulatedLeafNodes', and exactly the operand of an @&&@ chain
+        -- that costs 2^Q per call untabulated (task
+        -- and-chain-exponential-over-random-operands). So judge "is this a
+        -- leaf" on the folded size, per copy: folding is key-dependent, so
+        -- every value is compiled (in its own scope, so a decline leaks no
+        -- bindings) and every one must fit. The copies are still EMITTED
+        -- raw, in the order the branch above emits them, so the table is the
+        -- same IR either way and the global optimizer does the folding it
+        -- was going to do anyway; and the total above is still judged on the
+        -- raw size, so the unrolled volume the optimizer receives stays
+        -- inside the cardinality budget.
+        rest <- mapM (lift . runWriterT . inferAt) vs
+        let copies = probe : rest
+        if all ((<= maxTabulatedLeafNodes) . foldedSize) copies
+          then do
+            cells <- forM copies (\(res, binds) -> setVariables binds >> bindCell (unP (rProb res)))
+            return (Just (zip dom cells))
+          else return Nothing
   where
     inferAt v = toIRInference meta False e (IRConst (valueToIR v))
+    compiledSize (res, binds) = irNodeCount (unP (rProb res)) + sum (map (irNodeCount . snd) binds)
+    foldedSize (res, binds) = irNodeCount (postProcess (compilerConfig meta) (buildLetIns binds (unP (rProb res))))
     bindCell p = do
       cellName <- mkVariable "mat_leaf"
       setVariables [(cellName, p)]
