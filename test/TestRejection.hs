@@ -34,6 +34,7 @@ import Control.Exception (try, evaluate, SomeException)
 import Control.Monad (forM_)
 import Data.List (isInfixOf, nub)
 import Data.Either (isLeft)
+import Text.Megaparsec (errorBundlePretty)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure)
 
@@ -58,6 +59,7 @@ rejectionTests = testGroup "Rejection"
   , setWitnessTransportTests
   , gatedContinuousFeedsFreshDrawTests
   , typeErrorDiagnosticTests
+  , knownHeadArityTests
   ]
 
 -- ----------------------------------------------------------------------------
@@ -1382,4 +1384,90 @@ typeErrorDiagnosticTests = testGroup "TypeErrorDiagnostic"
       assertBool ("expected a file:line:col position in: " ++ msg)
         ("prog.spll:2:" `isInfixOf` msg)
       assertBool ("expected a context chain in: " ++ msg) ("In " `isInfixOf` msg)
+  ]
+
+-- ----------------------------------------------------------------------------
+-- Parser: arity of heads the parser treats specially
+-- ----------------------------------------------------------------------------
+
+-- A head that names a built-in operator function (multF, negate, ...), an InjF,
+-- or an ADT-derived constructor/projector is not first-class: the parser
+-- builds its node from exactly its arity's arguments. A mismatch used to be
+-- reported by a 'fail' that the surrounding backtracking discarded, so the
+-- author got "unexpected ... / expecting end of input" at an unrelated position
+-- (or, for the operator functions, an uncaught `error` crashing the compiler).
+-- It must be reported at the head, naming the arity (task
+-- parser-injf-overapplication-error).
+
+sceneADTs :: String
+sceneADTs = unlines
+  [ "data Color  = Red | Blue"
+  , "data Object = Null | Object color::Color"
+  , "data Scene  = List hd::Object, tl::Scene | Empty depth 10"
+  , ""
+  ]
+
+-- | The rendered parse error for a program that must be rejected by the parser.
+-- Forcing the rendering catches a crash hidden in a lazily built message.
+parseErrorFor :: String -> IO String
+parseErrorFor src = case tryParseProgram "prog.spll" src of
+  Right _ -> assertFailure "program was accepted by the parser" >> return ""
+  Left e -> do
+    r <- try (evaluate (let m = errorBundlePretty e in length m `seq` m))
+    case r of
+      Left ex -> assertFailure ("rendering the parse error crashed: " ++ show (ex :: SomeException)) >> return ""
+      Right m -> return m
+
+knownHeadArityTests :: TestTree
+knownHeadArityTests = testGroup "KnownHeadArity"
+  [ testCase "an over-applied projector is blamed at its own position, naming the arity" $ do
+      msg <- parseErrorFor (sceneADTs ++ unlines
+        [ "existsRed scene = color hd scene"
+        , "main scene = existsRed scene" ])
+      assertBool ("expected the position of 'color' in: " ++ msg) ("prog.spll:5:19:" `isInfixOf` msg)
+      assertBool ("expected the arity mismatch in: " ++ msg)
+        ("'color' takes 1 argument, but is applied to 2" `isInfixOf` msg)
+
+  , testCase "the same over-application nested under a keyword expression" $ do
+      -- Previously blamed column 1 with a bare "expecting end of input": the
+      -- failed application was reparsed as the bare name 'color'.
+      msg <- parseErrorFor (sceneADTs ++ unlines
+        [ "existsRed scene = if True then color hd scene else Red"
+        , "main scene = existsRed scene" ])
+      assertBool ("expected the position of 'color' in: " ++ msg) ("prog.spll:5:32:" `isInfixOf` msg)
+      assertBool ("expected the arity mismatch in: " ++ msg)
+        ("'color' takes 1 argument, but is applied to 2" `isInfixOf` msg)
+      assertBool ("the error degraded to end-of-input: " ++ msg)
+        (not ("expecting end of input" `isInfixOf` msg))
+
+  , testCase "an over-application followed by further definitions does not blame a later line" $ do
+      msg <- parseErrorFor (sceneADTs ++ unlines
+        [ "existsRed scene = if True then color hd scene else Red"
+        , "other scene = existsRed scene"
+        , "main scene = other scene" ])
+      assertBool ("expected line 5 in: " ++ msg) ("prog.spll:5:" `isInfixOf` msg)
+      assertBool ("a later line was blamed: " ++ msg)
+        (not ("prog.spll:6:" `isInfixOf` msg) && not ("prog.spll:7:" `isInfixOf` msg))
+
+  , testCase "an over-applied built-in InjF is reported, not swallowed" $ do
+      msg <- parseErrorFor "main = if True then plusI 1 2 3 else 0\n"
+      assertBool ("expected the arity mismatch in: " ++ msg)
+        ("'plusI' takes 2 arguments, but is applied to 3" `isInfixOf` msg)
+
+  , testCase "a built-in operator function with the wrong argument count is a diagnostic, not a crash" $ do
+      over <- parseErrorFor "main = negate 1.0 2.0\n"
+      assertBool ("expected the arity mismatch in: " ++ over)
+        ("'negate' takes 1 argument, but is applied to 2" `isInfixOf` over)
+      under <- parseErrorFor "main = multF 1.0\n"
+      assertBool ("expected the arity mismatch in: " ++ under)
+        ("'multF' takes 2 arguments, but is applied to 1" `isInfixOf` under)
+      assertBool ("expected the position of 'multF' in: " ++ under) ("prog.spll:1:8:" `isInfixOf` under)
+
+  , testCase "exact and partial application of a known head still parse" $
+      forM_ [ sceneADTs ++ "main scene = color (hd scene)\n"
+            , sceneADTs ++ "f = color\nmain scene = f (hd scene)\n"
+            , "main = multF 2.0 (negate 1.0)\n" ] $ \src ->
+        case tryParseProgram "prog.spll" src of
+          Left e -> assertFailure ("rejected: " ++ errorBundlePretty e)
+          Right _ -> return ()
   ]

@@ -780,6 +780,7 @@ application adts_ = dbg "application" $ do
     -- 'expr'/'term': those wrap the application as a whole, so an argument atom
     -- would otherwise reach the solver with no position of its own, and a type
     -- error blamed on an argument would have nowhere to point.
+    headOff <- getOffset
     func <- try (withSpan (atom adts_))
     -- atom already covers "(expr)"/"(expr, expr)" via pTuple; a separate
     -- parens(expr) fallback here would re-parse the same paren contents a
@@ -787,19 +788,46 @@ application adts_ = dbg "application" $ do
     args <- try $ many (try (withSpan (atom adts_)))
     case func of
         Expr _ (Var name) -> case lookup name binaryFs of
-            Just constructor -> return (construct2 constructor args)
+            Just constructor -> knownHead headOff func name 2 False args (construct2 constructor)
             Nothing -> case lookup name unaryFs of
-                Just constructor -> return (construct1 constructor args)
+                Just constructor -> knownHead headOff func name 1 False args (construct1 constructor)
                 Nothing -> case lookup name (globalFEnv adts_) of
-                  Just _ ->
-                    if length args == (parameterCount adts_ name) then
-                      return (constructN (parameterCount adts_ name) (injF name) args)
-                    else if length args < (parameterCount adts_ name) then
-                      constructNPartial (parameterCount adts_ name) (injF name) args
-                    else
-                      fail $ "Function " ++ name ++ " expects " ++ show (parameterCount [] name) ++ " parameters, but got " ++ show (length args)
+                  Just _ -> knownHead headOff func name (parameterCount adts_ name) True args
+                              (constructN (parameterCount adts_ name) (injF name))
                   Nothing -> return $ foldl apply func args
         _ -> return $ foldl apply func args
+
+-- | Builds the application of a head the parser gives special treatment (a
+-- built-in binary/unary operator function, an InjF, or an ADT-derived
+-- constructor/projector/discriminator) once its arguments are known, checking
+-- them against the head's arity. Those heads are not first-class: they cannot
+-- be over-applied, and the operator functions cannot be partially applied
+-- either (@partialOk@).
+--
+-- An arity mismatch is reported with 'registerParseError' at the head's
+-- position, and the parse then carries on with a well-formed stand-in. A plain
+-- 'fail' here is unconditionally discarded by the backtracking around it --
+-- 'term''s @try (application ...)@ reparses the head as a bare atom, and
+-- 'pProg''s @try@ around each definition drops the rest -- so the author saw
+-- a generic "unexpected ... / expecting end of input" at whatever position the
+-- leftover arguments next failed to fit (sometimes a later line), with no
+-- mention of the arity (task parser-injf-overapplication-error).
+knownHead :: MonadParser m => Int -> Expr -> String -> Int -> Bool -> [Expr] -> ([Expr] -> Expr) -> m Expr
+knownHead off func name arity partialOk args constructor
+  | given == arity = return (constructor args)
+  | given < arity && partialOk = constructNPartial arity constructor args
+  | otherwise = do
+      registerParseError (FancyError off (Set.singleton (ErrorFail msg)))
+      -- Stand-in only: the registered error fails the parse as a whole.
+      return (foldl apply func args)
+  where
+    given = length args
+    plural n = show n ++ (if n == 1 then " argument" else " arguments")
+    msg = "'" ++ name ++ "' takes " ++ plural arity ++ ", but is applied to " ++ show given ++ "."
+       ++ (if given > arity
+             then "\n  A built-in or data-derived function cannot be applied to more arguments than it takes."
+               ++ "\n  If a later argument is itself an application, parenthesise it: '" ++ name ++ " (f x)'."
+             else "\n  '" ++ name ++ "' cannot be partially applied; supply all of its arguments.")
 
 
 -- | Main expression parser using makeExprParser
