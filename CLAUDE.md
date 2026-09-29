@@ -1357,6 +1357,20 @@ Two refusals remain, each answering "no tag":
   not an empty one; tagging it would make downstream inference sum over nothing
   and report probability zero.
 
+The recursion refusal is decided **from shape before any value is forced**
+(`definitelyUntagged`, task `plan-fold-mutual-recursion-blowup`). Knowing
+whether an `InjF` is tagged otherwise costs its whole propagation, and a fold
+written as mutual recursion (`evenSum`/`oddSum`) only meets its refused call
+one look-through deeper, after `evenSum`'s body has propagated `rest` over the
+entire `of` domain. That cost 2.5x the allocation and OOM-ed at barcode depth 7
+for a verdict of "untagged". `InjF`/`IfThenElse` now check whether any operand
+provably gets no tag, mirroring `discretesTags`/`applyTags` without reading
+tags, and short-circuit to `Nothing`. The computed tags are unchanged, and all
+425 corpus programs emit byte-identical Python. Pinned by `Internals`'
+`enum annotation refutes a recursive fold without forcing its argument` (the
+order, with a poisoned argument, plus corpus-wide soundness of the shape
+check).
+
 Enumerating an ADT domain through a **field accessor or constructor test** is
 partial -- `b1` has nothing to say about an `A`, and `implicitFunctionImpl`
 answers that with an `error`, not a `Left`. `propagateValues` asks

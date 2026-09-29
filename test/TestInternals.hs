@@ -15,7 +15,7 @@ import SPLL.Typing.RInfer (tryAddRTypeInfo, RTypeError(..))
 import SPLL.Typing.RType (RType(..))
 import SPLL.Prelude
 import SPLL.Parser (tryParseProgram)
-import SPLL.Analysis (annotateEnumsProg, materializationDomain, withinMaterializationBudget)
+import SPLL.Analysis (annotate, annotateEnumsProg, definitelyUntagged, materializationDomain, withinMaterializationBudget)
 import SPLL.Typing.Infer (addTypeInfo)
 import SPLL.Typing.ForwardChaining (FCData, annotateProg, progToFCData, isInvertibleLambda, isWitnessedLambda, untag, getTag)
 import qualified Data.Set as Set
@@ -37,7 +37,7 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertBool, assertEqual, assertFailure, (@?=))
 import IRInterpreter (generateDet, generateRand)
 import TestCaseParser (Backend(..), TestCase(..), ExpectFailure(..), expectationProb, defaultBackends,
-                        parseTestCasesFromString, corpusPplPath, corpusTstPath)
+                        parseTestCasesFromString, corpusPplPath, corpusTstPath, listCorpusPplFiles)
 import Test.Tasty.QuickCheck (testProperties, testProperty)
 import System.Random (StdGen, mkStdGen)
 import Control.Monad.Random (Rand, evalRand)
@@ -4045,6 +4045,66 @@ letBinderTagTests = testGroup "let binder threads DiscreteValues into the body"
     isPlusI (Expr _ (InjF (Named n) _)) = n == "plusI"
     isPlusI _ = False
 
+-- | 'definitelyUntagged' lets the enum annotation refute a node from its shape
+-- before forcing any operand's value set (task
+-- plan-fold-mutual-recursion-blowup). The case that needs it is recursion
+-- through two functions: at @oddSum ds@, the look-through continues into
+-- @evenSum (rest ds)@ and only there meets the refused recursive call, so
+-- before the fix it had already propagated @dig@ and @rest@ over the whole of
+-- @ds@'s domain -- for an @of@ annotation, every enumerated list -- to reach a
+-- verdict of "untagged". At barcode depth 6 that was 36 GB of allocation.
+--
+-- The first test pins the order: @ds@'s value set throws if forced, so it
+-- passes only if the verdict is reached without it. The second pins
+-- soundness across the corpus: wherever the shape check says "untagged", the
+-- real pass must agree, or the short circuit would be dropping tags.
+untaggedShortCircuitTests :: TestTree
+untaggedShortCircuitTests = testGroup "enum annotation refutes a recursive fold without forcing its argument"
+  [ testCase "mutually recursive fold: untagged, argument's value set never forced" $ do
+      let rtyped = either (\e -> error ("rtype inference failed: " ++ show e)) id
+                     (tryAddRTypeInfo (either (\e -> error ("parse failed: " ++ show e)) id
+                                         (tryParseProgram "test" mutualFoldSrc)))
+          funEnv = functions rtyped
+          call = case lookup "main" funEnv of
+            Just (Expr _ (Lambda _ (Expr _ (InjF _ (c : _))))) -> c
+            other -> error ("unexpected main shape: " ++ show other)
+          poisoned = [("ds", [DiscreteValues (error "the argument's value set was forced")])]
+          annotated = annotate (adts rtyped) funEnv poisoned call
+      r <- try (evaluate (length [mv | DiscreteValues mv <- tags (getTypeInfo annotated)]))
+      case r of
+        Left (ErrorCall msg) -> assertFailure ("annotating oddSum ds forced its argument: " ++ msg)
+        Right n -> assertEqual "DiscreteValues tags on oddSum ds" 0 n
+  , testCase "every corpus node judged untagged by shape carries no DiscreteValues" $ do
+      paths <- listCorpusPplFiles
+      judged <- forM paths $ \path -> do
+        src <- readFile path
+        case either (Left . show) Right (tryParseProgram path src) >>= tryAddRTypeInfo' of
+          Left _ -> return 0
+          Right rtyped -> do
+            let funEnv = functions rtyped
+                annotated = annotateEnumsProg rtyped
+                refuted = [e | e <- allNodes annotated, definitelyUntagged funEnv [] e]
+                wrong = [e | e <- refuted, not (null [() | DiscreteValues _ <- tags (getTypeInfo e)])]
+            case wrong of
+              [] -> return (length refuted)
+              (e : _) -> assertFailure (path ++ ": judged untagged but tagged: " ++ show e) >> return 0
+      -- Non-vacuity: the check has to say "untagged" somewhere for the
+      -- implication to mean anything.
+      assertBool "definitelyUntagged never answered True over the corpus" (sum judged > 0)
+  ]
+  where
+    tryAddRTypeInfo' p = either (Left . show) Right (tryAddRTypeInfo p)
+
+-- | The repro of plan-fold-mutual-recursion-blowup, minus the neural read:
+-- @main@'s parameter stands in for the enumerated scene.
+mutualFoldSrc :: String
+mutualFoldSrc = unlines
+  [ "data DigitList = DEnd | DCons dig::Int, rest::DigitList"
+  , "evenSum ds = if isDEnd ds then 0 else 3*(dig ds) + oddSum (rest ds)"
+  , "oddSum ds = if isDEnd ds then 0 else (dig ds) + evenSum (rest ds)"
+  , "main ds = oddSum ds == 0"
+  ]
+
 -- | 'valueListToMultiValue' describes a value /set/: enumerating its result
 -- must give back each input value exactly once, however deeply the values
 -- nest (task structured-accessor-compile-blowup). Before, a tuple split its
@@ -4176,6 +4236,7 @@ internalsTests = testGroup "Internals"
   [ testProperties "properties" $(allProperties)
   , testGroup "tensor builtins" tensorBuiltinTests
   , categoricalIndexTests
+  , untaggedShortCircuitTests
   , splitByStringTests
   , partialDestructorTests
   , fdeclNamespaceTests

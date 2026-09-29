@@ -1,6 +1,7 @@
 module SPLL.Analysis (
   annotate,
   annotateEnumsProg,
+  definitelyUntagged,
   annotateConditionalProg,
   materializationDomain,
   withinMaterializationBudget
@@ -12,6 +13,7 @@ import Data.Maybe (maybeToList)
 import Data.Either (isRight)
 import Data.List (genericLength, genericTake)
 import Data.Bifunctor
+import Control.Monad (guard)
 import SPLL.Typing.Typing (setTags)
 import PredefinedFunctions
 import Utils
@@ -127,6 +129,10 @@ discretesTags adtsParam funEnv visited env e = case e of
       -- discrete-enumeration path. Must come before the generic InjF case.
       (Expr _ (InjF (Named name) [_, _])) | name `elem` ["gt", "lt"] -> Just $ MultiDiscretes [VBool True, VBool False]
       (Expr _ (InjF (Named name) params)) -> do
+        -- Decided from shape first, so an operand that can never be tagged
+        -- refutes the node before a sibling's value set is forced (see
+        -- 'definitelyUntagged').
+        guard (not (any untagged params))
         paramValues <- mapM getValuesFromExpr params
         let unpackedMultiVals = map multiValueToValueList paramValues
         -- No values at all is an *absence* of a domain, not an empty one: either
@@ -138,10 +144,12 @@ discretesTags adtsParam funEnv visited env e = case e of
           [] -> Nothing
           vals -> return (valueListToMultiValue vals)
       (Expr _ (IfThenElse _ left right)) -> do
+        guard (not (untagged left || untagged right))
         valuesLeft <- getValuesFromExpr left
         valuesRight <- getValuesFromExpr right
         return $ unionMultiValues valuesLeft valuesRight
       _ -> Nothing
+    untagged = definitelyUntagged funEnv visited
     -- How many distinct values the node's result type has at most, when that is
     -- finite and known: once that many have turned up, the rest of the operand
     -- cross product cannot add one, so 'distinctUpTo' stops there. This is what
@@ -247,6 +255,58 @@ applyTags adtsParam funEnv visited env e = case appSpine e of
 appSpine :: Expr -> (Expr, [Expr])
 appSpine (Expr _ (Apply l v)) = let (h, as) = appSpine l in (h, as ++ [v])
 appSpine e = (e, [])
+
+-- | 'True' only if 'annotateIn' is certain to give the node no
+-- 'DiscreteValues' tag, judged from the program's shape alone. No value set is
+-- read, so answering forces no propagation.
+--
+-- Knowing whether a node is tagged normally costs its whole value set: an
+-- 'InjF' tag is 'Nothing' when its propagation comes back empty, so even
+-- @isJust@ has to run it. That is the wrong order when a sibling can never be
+-- tagged. The case that makes it matter is recursion through more than one
+-- function. At @main@'s call @oddSum ds@, with @ds@ bound to an @of@
+-- annotation's dense enumeration, 'applyTags' looks through @oddSum@ and then,
+-- since @evenSum@ is not yet visited, through @evenSum (rest ds)@ as well.
+-- @evenSum@'s body reads its parameter, which propagates @rest@ over every
+-- enumerated list, and only afterwards reaches @oddSum (rest ..)@, which is
+-- refused as visited. So the @plus@ above it is untagged and all of that work
+-- is thrown away. A self-recursive fold never pays this, because its recursive
+-- call is refused before its argument is looked at (task
+-- plan-fold-mutual-recursion-blowup: 36 GB of wasted allocation and 3x the
+-- residency at depth 6).
+--
+-- This mirrors 'discretesTags' and 'applyTags' case for case, and every
+-- 'False' is a "maybe". A 'Var' or 'ReadNN' takes its tags from the
+-- environment, which may be an expensive thunk, so it answers 'False' rather
+-- than look. Wherever the real pass answers 'Nothing' or @[]@ from shape
+-- (a visited or unknown head, an over- or partial application, an
+-- unhandled node, the @VAny@ hole), this answers 'True'. Because a 'True'
+-- only ever short-circuits a result that was already 'Nothing', the tags the
+-- pass computes are exactly what they were before this existed.
+definitelyUntagged :: FunEnv -> [String] -> Expr -> Bool
+definitelyUntagged funEnv visited e = case e of
+  Expr _ (Apply _ _) -> case appSpine e of
+    (Expr _ (Var n), args@(_:_))
+      | n `notElem` visited
+      , Just calleeBody <- lookup n funEnv -> bodyUntagged (n:visited) calleeBody (length args)
+    (Expr _ (Lambda _ lamBody), [_]) -> definitelyUntagged funEnv visited lamBody
+    (l@(Expr _ (Lambda _ _)), args@(_:_)) -> bodyUntagged visited l (length args)
+    _ -> True
+  Expr _ (Var _) -> False
+  Expr _ (ReadNN _ _) -> False
+  Expr _ (Constant VAny) -> True
+  Expr _ (Constant _) -> False
+  Expr _ (InjF (Named name) [_, _]) | name `elem` ["gt", "lt"] -> False
+  Expr _ (InjF _ params) -> any (definitelyUntagged funEnv visited) params
+  Expr _ (IfThenElse _ l r) -> definitelyUntagged funEnv visited l || definitelyUntagged funEnv visited r
+  _ -> True
+  where
+    -- 'applyTags'' @bindParams@: strip one lambda per argument. Running out of
+    -- lambdas first is an over-application; what is left after a partial
+    -- application is a 'Lambda', which falls to the catch-all above.
+    bodyUntagged vis b 0 = definitelyUntagged funEnv vis b
+    bodyUntagged vis (Expr _ (Lambda _ b)) k = bodyUntagged vis b (k - 1)
+    bodyUntagged _ _ _ = True
 
 getValuesFromExpr :: Expr -> Maybe MultiValue
 getValuesFromExpr e = case [mv | DiscreteValues mv <- tags $ getTypeInfo e] of
