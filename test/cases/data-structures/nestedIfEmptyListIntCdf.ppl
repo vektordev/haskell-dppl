@@ -1,0 +1,2 @@
+rec = if Uniform < 0.5 then [] else (if Uniform < 0.5 then 1 : rec else 2 : rec)
+main = rec

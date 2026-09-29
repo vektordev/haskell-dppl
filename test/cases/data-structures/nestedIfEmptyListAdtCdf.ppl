@@ -1,0 +1,3 @@
+data Sym = A | B
+rec = if Uniform < 0.5 then [] else (if Uniform < 0.5 then A : rec else B : rec)
+main = rec

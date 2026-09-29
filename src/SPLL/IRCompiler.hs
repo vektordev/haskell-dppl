@@ -3423,6 +3423,14 @@ compareValueExpr sr (TVarR _) v sample = IRIf (IROp OpLessThan sample v) (srZero
 -- Cons chain yields the semiring one, the multiplicative identity, so a list
 -- CDF reduces to the product of its element CDFs).
 compareValueExpr sr (ListOf _) v sample = maskSR sr (IROp OpEq sample v)
+-- A literal @[]@ can keep its own 'NullList' annotation through typing:
+-- 'SPLL.Typing.RInfer.unifies' accepts @ListOf _ ~ NullList@ without binding
+-- anything, so whether the literal's type variable ends up 'ListOf' or
+-- 'NullList' depends on constraint order (a @[]@ in a nested-if branch of a
+-- recursive list), and a bare @main = []@ has no element type to learn at
+-- all. Either way the only inhabitant is the empty list, so it takes the same
+-- equality indicator as 'ListOf' (task comparevalueexpr-nulllist-cdf-gap).
+compareValueExpr sr NullList v sample = maskSR sr (IROp OpEq sample v)
 -- An ADT carries no order, so there is nothing for a CDF to integrate along.
 -- This is the only 'compareValueExpr' case that is not merely unimplemented:
 -- every call site is on the @cumulative = True@ path, so reaching it means a
