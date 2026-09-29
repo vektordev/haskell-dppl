@@ -1,0 +1,16 @@
+-- M4 value-grouped DP on a fold whose deterministic ACCUMULATOR is updated by
+-- SUBTRACTION (4.0 - w alternates 1,3,1,3,...: the EAN checksum weight
+-- pattern; task plan-fold-subtraction-accumulator-blowup). Source a - b
+-- desugars to plus a (neg b), so the grouping only sees through the spec_arg
+-- variable when constant folding covers negation. Expected values from an
+-- independent exact (rational) oracle over the factorized per-level
+-- distribution: P(sum of the weights of the Red objects > 2.5) at depth 5.
+data Color = Red | Green | Blue
+data Object = NoObj | Obj color::Color
+data Scene = Empty | SCons obj::Object, rest::Scene depth 5
+
+neural readScene :: (Symbol -> Scene)
+
+weightedRed w s = if isEmpty s then 0.0 else (if isObj (obj s) then (if isRed (color (obj s)) then w else 0.0) else 0.0) + weightedRed (4.0 - w) (rest s)
+
+main sym = draw scene = readScene sym in if weightedRed 1.0 scene > 2.5 then 1 else 0
