@@ -136,7 +136,8 @@ corpusTests probPool cdfPool = localOption (QuickCheckMaxRatio 20) $ testGroup "
   , testProperty "SamplingMatchesPDF" $ once $ conjoin
       [ counterexample ("corpus case: " ++ n) (testSamplingProb defaultEnvs n (samplingEps outDim) 1000 5 tc)
       | (n, tc@(_, inp, _, (_, outDim))) <- probPool
-      , sampleable inp, outDim == VFloat 0 || outDim == VFloat 1 ]
+      , sampleable inp, outDim == VFloat 0 || outDim == VFloat 1
+      , densityLivesOnSamples inp outDim ]
   , testProperty "TopKInterprets" (forAllNamed (checkTopKInterprets topK005Envs))
   , testProperty "ProbWithBranchCounting" (forAllNamed (checkProbTestCasesWithBC bcEnvs))
   , testProperty "MarginalAnyIsOne" (forAllNamed (checkProbAny defaultEnvs))
@@ -292,6 +293,14 @@ logSpaceUncoveredPrograms =
   , "letProbFreshBranch", "letProbFreshBranchAtom", "letProbFreshCondition"
   , "letProbFreshBranchTuple", "setWitnessNestedLetFreshBranch"
   , "fuzzLetWitnessSetValuedFst", "letBoundIfConditionFreshDraw"
+  -- task sampling-matches-pdf-continuous-equality-density: the False outcome
+  -- of a continuous `==` meeting an interval is a 'WExcept' over that
+  -- interval, whose mass is the interval's linear-pinned CDF difference.
+  -- (The bare complement 'WExcept WFull' keeps the semiring-aware split, so
+  -- observeContinuousEqualsLetBound and the complement-of-a-complement
+  -- setWitnessContinuousEquals{Chain,Twice} pass.)
+  , "setWitnessContinuousEqualsThenInterval", "setWitnessIntervalThenContinuousEquals"
+  , "setWitnessNestedLetContinuousEquals"
   ]
 
 checkLogSpaceMatchesLinear :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
@@ -464,6 +473,21 @@ subsetsOfSize :: Int -> [a] -> [[a]]
 subsetsOfSize 0 _ = [[]]
 subsetsOfSize _ [] = []
 subsetsOfSize k (x:xs) = map (x:) (subsetsOfSize (k - 1) xs) ++ subsetsOfSize k xs
+
+-- | Can a window over drawn samples estimate this result at all? Only if the
+-- reported dim does not exceed the query value's continuous coordinates. A
+-- density needs as many continuous coordinates as it has dimensions to be a
+-- density OVER the sample space; with fewer, it is the density of a
+-- null-probability event of a continuous latent -- a point comparison like
+-- @x == 0.0@ observed True, whose output is a discrete value (task
+-- sampling-matches-pdf-continuous-equality-density: @draw x = Normal in if
+-- x == 0.0 then 0 else 2@ answers @p(0) = (N(0), dim 1)@ by design). Almost no
+-- sample lands on such an event, so the empirical estimate is 0 whatever the
+-- density is: the comparison is a category error, not a weak check. A general
+-- rule on the result's shape, not a list of programs.
+densityLivesOnSamples :: IRValue -> IRValue -> Bool
+densityLivesOnSamples inp (VFloat d) = round d <= floatCoordCount inp
+densityLivesOnSamples _ _ = True
 
 -- Shapes testSamplingProb can estimate a PDF for; everything else is discarded.
 sampleable :: IRValue -> Bool

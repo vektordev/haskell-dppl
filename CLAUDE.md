@@ -404,18 +404,43 @@ guards). Adding a monotone step whose inverse is partial means adding its
 image there too. Details in the doc above; corpus
 `test/cases/set-witness/setWitnessTransport*`, `test/cases/plan-enumeration/planEnumContExp*`.
 
+The False outcome of an `==` (or of an ADT constructor test) says the bound
+variable is *anything but* a point, and that has its own `WSet` constructor,
+`WExcept s p` ("`s` minus the point `p`"; task
+`sampling-matches-pdf-continuous-equality-density`). It used to travel as a
+`WPoint` holding the `VAnyExcept` sentinel, a point that was really a set, so
+every consumer that reads a point as a value crashed on it: a second
+comparison's membership guards (`VAnyExcept < 1.0`), a point-point
+intersection's `OpEq`, a nested let's inverse (`VAnyExcept - 1.0`), all in
+`forceOp` or the interpreter. Now `transportDirect` (`witnessSet`) and
+`equalityWorlds` emit `WExcept WFull x_c`, and `intersectSet` pushes the
+removal through (`(s \ p) ∩ t = (s ∩ t) \ p`, with `exceptPoint` turning
+point-minus-point into a disequality guard). `measureSet` measures it as the
+set's measure minus the point's **in the semiring's sense** (`mixSubP`):
+a continuous point is a density, and a mass minus a density is the mass, so
+removing a point from a continuous set costs nothing; a discrete point's mass
+is subtracted. `WExcept WFull p` is measured exactly as the sentinel was
+(marginal minus point, in the ambient semiring); a proper subset minus a
+point is linear-pinned like the rest of the engine.
+
 An `==` whose bound-variable operand is not the bare occurrence (`exp x ==
 1.0`, `x * 2.0 + 1.0 == c`) is split by `equalityWorlds` before the point
-transport sees it. Seeding forward chaining at the `==` node hands its
-False-polarity inverse, the `VAnyExcept` sentinel, to every inverse step
-below it (`log`, `b > 0`, `b - 1.0`), which crashed optimizer and interpreter
-alike. Instead the True outcome is inverted as the point `side = c`, and the
-False outcome is the *complement of that witness on the bound variable*
-(`VAnyExcept [x_c]`, measured by `toIRInference`'s marginal-minus-point split)
-where the inverse's applicability guard holds, and `WFull` where it fails.
-Only a single plain point world is complemented; anything else is refused.
-The bare `x == c` shape keeps its old path. Corpus
-`test/cases/set-witness/setWitnessEqualityThrough*`.
+transport sees it, so the complement is placed on the bound variable itself
+rather than handed to every inverse step below the `==` (`log`, `b > 0`,
+`b - 1.0`). The True outcome is inverted as the point `side = c`, and the
+False outcome is `WExcept WFull x_c` where the inverse's applicability guard
+holds and `WFull` where it fails. Only a single plain point world is
+complemented; anything else is refused. Corpus
+`test/cases/set-witness/setWitnessEqualityThrough*`,
+`setWitnessContinuousEquals*`, `setWitnessIntervalThenContinuousEquals`,
+`setWitnessNestedLetContinuousEquals`.
+
+The same rule decides the letfree `IfThenElse`: its False weight is
+"certain minus `p(cond = True)`" through `mixWith`, not a bare
+`srComplement`, so a condition whose True outcome is a density (a continuous
+`Normal == 0.5`) leaves its False branch the whole unit mass at dim 0, where
+it used to answer `1 - density`. At dim 0 the two agree exactly, and the
+combine is still `srComplement` (max-product refuses `srMinus`).
 
 ### Affine Gaussian marginalisation of an unwitnessed `draw`
 

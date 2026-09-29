@@ -6,6 +6,11 @@
 -- the convention is actually for, and a non-sampleable return shape, which is
 -- what keeps the row out of Corpus.SamplingMatchesPDF's pool (a density at a
 -- null-probability point is inaccessible to Monte Carlo by construction).
+-- The False branch is the certain mass minus that density, which is the mass:
+-- `Left ()` is 1.0 (it used to be `1 - density` = 0.6479..., a number with no
+-- probabilistic meaning, from a bare complement in the IfThenElse rule).
 -- Letfree, so inference runs through the InjF `hasAnyExcept` combinator;
--- observeContinuousEqualsLetBound is the set-witness engine's sibling.
+-- observeContinuousEqualsLetBound is the set-witness engine's sibling and now
+-- agrees with it. The `Right` rows' dim of 0 is task
+-- enumerated-sum-over-density-body, as there.
 main = observe (if Normal == 0.5 then 1 else 2) (\v -> v < 2)

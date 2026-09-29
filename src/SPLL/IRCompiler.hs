@@ -2037,11 +2037,12 @@ toIRInference :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PRe
 -- A witnessed sample can itself be the 'VAnyExcept' placeholder an '==' (or ADT
 -- constructor-test) inverse produces on its False branch ("any value other
 -- than this one") -- either bare, or still wrapped in the 'IRIf' that selects
--- it. 'transportDirect' produces exactly this shape when it probes the
--- True/False polarity of a comparison the witnessed variable occurs in (the
--- set-valued-witnesses engine's handling of an 'IfThenElse' whose condition
--- mentions the bound variable) and hands the result straight to the bound
--- distribution's own inference, rather than through the InjF-probability
+-- it. 'transportDirect' used to produce exactly this shape when it probed the
+-- True/False polarity of a comparison the witnessed variable occurs in, and
+-- handed it on as a point; it now turns it into a 'WExcept' set instead
+-- ('witnessSet'), whose bare-complement measure is this same split. The
+-- clause stays for any other producer of a sentinel-valued sample reaching
+-- the bound distribution's own inference, rather than through the InjF-probability
 -- 'hasAnyExcept' combinator below (which only fires when the comparison
 -- itself, not some downstream consumer of its witness, is the thing being
 -- queried). Arithmetic on the sentinel -- a density's '(sample - mu)/sigma',
@@ -2160,8 +2161,23 @@ toIRInference meta cumulative (Expr _ (IfThenElse cond left right)) sample = do
   -- value is an upper bound -- see 'unpruned'. The arms below keep pruning.
   condTrue <- toIRInference (unpruned meta) False cond (IRConst (VBool True))
   let condTrueExpr  = unP (rProb condTrue)
-  let condFalseExpr = srComplement sr condTrueExpr
-  let condFalse = mkPResult (sealP condFalseExpr) (rDim condTrue) const0
+  -- The False weight is "certain minus p(cond=True)" in the semiring's sense
+  -- ('mixSubP'), not a bare 1 - p: when the True outcome is itself a density
+  -- -- a continuous @x == c@, a null event reported at dim > 0 -- a mass minus
+  -- a density is the mass, so the False branch carries the whole unit mass at
+  -- dim 0. A bare complement answered @1 - density@ at the density's dim there,
+  -- a number with no probabilistic meaning (task
+  -- sampling-matches-pdf-continuous-equality-density), and disagreed with the
+  -- set-witness engine's answer for the let-bound spelling of the same program.
+  -- For a dim-0 condition the two coincide: 'mixWith' only subtracts at equal
+  -- dims, which is 'srComplement' exactly. The combine is spelled
+  -- 'srComplement' of the subtrahend rather than 'srMinus' (the minuend is
+  -- always the semiring one, so the two agree): max-product defines a
+  -- complement but refuses 'srMinus' outright ('mapHasNoExcept'), and every
+  -- if-then-else would otherwise stop compiling under it.
+  condFalseMix <- mixWith (\_ p -> srComplement sr p) const0 (mass (srOne sr)) condTrue
+  let condFalseExpr = unP (rProb condFalseMix)
+  let condFalse = mkPResult (sealP condFalseExpr) (rDim condFalseMix) const0
                           (IROp OpEq condFalseExpr (srZero sr))
   setVariables [(var_condT_p, condTrueExpr), (var_condF_p, condFalseExpr)]
 
@@ -4256,6 +4272,24 @@ data WSet = WPoint IRExpr IRExpr     -- witness value, |d inverse / d observatio
           -- template), this one has no static trace at all, so it cannot be
           -- resolved into a single 'WSet' at compile time.
           | WChoice IRExpr WSet WSet
+          -- | A set with one point removed: every value of the first set
+          -- other than the given one. What the False polarity of an @==@ (or
+          -- of an ADT constructor test) says about its operand. It used to
+          -- travel as a 'WPoint' holding the 'VAnyExcept' sentinel -- a point
+          -- that was really a set -- and every consumer that treats a point's
+          -- value as a value (a second comparison's membership guards, a
+          -- point-point intersection's 'OpEq') applied raw arithmetic to the
+          -- sentinel and crashed (task
+          -- sampling-matches-pdf-continuous-equality-density). The excepted
+          -- point may itself carry nested 'VAny' fields (a constructor test's
+          -- @Foo ANY@): it then removes that whole constructor's values.
+          --
+          -- Measured as the set's measure minus the point's in the semiring's
+          -- sense ('mixSubP'): a continuous point is a density and a mass
+          -- minus a density is the mass, so removing one point from a
+          -- continuous set leaves its measure unchanged; a discrete point's
+          -- mass is subtracted. See 'measureSet'.
+          | WExcept WSet IRExpr
 
 -- | Mirrors an inverse-witness expression's structure to build a runtime Bool
 -- expression that evaluates to True iff the value that expression produces
@@ -4335,12 +4369,37 @@ intersectSet WEmpty _ = ([], WEmpty)
 intersectSet _ WEmpty = ([], WEmpty)
 intersectSet (WChoice c a b) s = distributeChoice c (intersectSet a s) (intersectSet b s)
 intersectSet s (WChoice c a b) = distributeChoice c (intersectSet s a) (intersectSet s b)
+-- (s minus p) meet t is (s meet t) minus p: intersect first, then remove the
+-- point from whatever came out ('exceptPoint').
+intersectSet (WExcept s p) t = let (g1, st) = intersectSet s t
+                                   (g2, r)  = exceptPoint p st
+                               in (g1 ++ g2, r)
+intersectSet t (WExcept s p) = let (g1, ts) = intersectSet t s
+                                   (g2, r)  = exceptPoint p ts
+                               in (g1 ++ g2, r)
 intersectSet (WPoint p1 c1) (WPoint p2 c2) =
   ([IROp OpEq p1 p2], WPoint (mergeWitnessValue p1 p2) (IROp OpMult c1 c2))
 intersectSet (WPoint p c) (WInterval lo hi) = pointInInterval p c lo hi
 intersectSet (WInterval lo hi) (WPoint p c) = pointInInterval p c lo hi
 intersectSet (WInterval lo1 hi1) (WInterval lo2 hi2) =
   ([], WInterval (maxWBound lo1 lo2) (minWBound hi1 hi2))
+
+-- | Remove the point @p@ from a set, simplifying where the result is again a
+-- plain set. Removing a point from a point is a disequality guard on the
+-- remaining one -- the same undecomposed 'OpEq' 'intersectSet' uses for two
+-- points, and wildcard-aware for the same reason: a nested 'VAny' in @p@ (a
+-- constructor test's @Foo ANY@) matches every value of that constructor, which
+-- is exactly the set being removed. A marginal-wildcard remaining point
+-- constrains nothing, so there the result is the point's full set minus @p@,
+-- decided at runtime as in 'pointInInterval'. Everything else keeps the
+-- 'WExcept' and leaves the subtraction to 'measureSet'.
+exceptPoint :: IRExpr -> WSet -> ([IRExpr], WSet)
+exceptPoint _ WEmpty = ([], WEmpty)
+exceptPoint p (WPoint q c) =
+  ( [tolerateAny q (notIR (IROp OpEq q p))]
+  , WChoice (IRUnaryOp OpIsAny q) (WExcept (WPoint q c) p) (WPoint q c) )
+exceptPoint p (WChoice c a b) = distributeChoice c (exceptPoint p a) (exceptPoint p b)
+exceptPoint p s = ([], WExcept s p)
 
 -- | A point constraint meeting an interval one. The point normally wins (it is
 -- the strictly smaller set), guarded by membership -- but when the point is the
@@ -4429,6 +4488,13 @@ memberGuard _ val (WInterval lo hi) = case boundGuards val lo hi of
 memberGuard _ _ WFull  = constTrueIR
 memberGuard _ _ WEmpty = IRConst (VBool False)
 memberGuard rt val (WChoice c a b) = IRIf c (memberGuard rt val a) (memberGuard rt val b)
+-- Nested 'IRIf', not 'OpAnd', so the disequality is only reached once
+-- membership of the underlying set has held; a wildcard @val@ constrains
+-- nothing and is a member, as in the other cases.
+memberGuard rt val (WExcept s p) =
+  IRIf (memberGuard rt val s)
+       (tolerateAny val (notIR (equalityGuard rt p val)))
+       (IRConst (VBool False))
 
 subtreeCNs :: Expr -> [ChainName]
 subtreeCNs e = chainName (getTypeInfo e) : concatMap subtreeCNs (getSubExprs e)
@@ -4550,6 +4616,39 @@ measureSet meta v (WInterval lo hi) = do
             (mkPResult (unsafeLinearP clamped) const0 bc constFalseIR))
 measureSet _ _ WFull  = return (mass const1)
 measureSet _ _ WEmpty = return (impossibleP linearSemiring)
+-- The set's measure minus the removed point's, where the point lies in the
+-- set at all (otherwise nothing was removed: the subtrahend is impossible and
+-- 'mixWith' drops it). The subtraction is 'mixSubP''s, so dimensions decide
+-- it: a continuous set is a mass and the point a density, and the mass wins
+-- untouched -- a single point of a continuous variable has measure zero; a
+-- discrete point is a mass at the same dim and is subtracted. This is the one
+-- rule the InjF 'hasAnyExcept' combinator and the 'IfThenElse' complement also
+-- follow, so the letfree and let-bound spellings of a program agree. The
+-- point is measured with no change-of-variables factor: when it matters (a
+-- density), 'mixWith' discards it anyway. Both operands are compiled in their
+-- own writer scope, the point's under its membership guard, which is what
+-- keeps a density at a point outside an interval from being evaluated.
+--
+-- Both operands of the subtraction are compiled 'unpruned' (see there: a
+-- pruned subtrahend inflates the difference). The complement of a point in the
+-- whole domain -- the only shape the 'VAnyExcept' sentinel used to express --
+-- is measured exactly as that sentinel was ('toIRInference''s
+-- marginal-minus-point split), in the ambient semiring: it is the one
+-- set-witness measure that was already log-space-aware, and stays so. A
+-- proper subset minus a point is new, and is measured linear-pinned like the
+-- rest of this engine (see 'setWitnessApply').
+measureSet meta v (WExcept WFull p) = do
+  let metaSub = unpruned meta
+  anyRes    <- toIRInferenceSave metaSub False v (IRConst VAny)
+  exceptRes <- toIRInferenceSave metaSub False v p
+  mixSubP (semiringOf meta) (rBranches exceptRes) anyRes exceptRes
+measureSet meta v (WExcept s p) = do
+  let metaSub = unpruned meta
+  sRes <- scopedMeasureSet metaSub v s
+  let rt = rType (getTypeInfo v)
+  (ptRes0, ptBinds) <- lift (runWriterT (measureSet metaSub v (WPoint p const1)))
+  let ptRes = guardP linearSemiring [memberGuard rt p s] (mapResult (generateLetInExpr ptBinds) ptRes0)
+  mixSubP linearSemiring (rBranches sRes) sRes ptRes
 -- Each side is measured in its own writer scope and keeps its own bindings, so
 -- the untaken side's work sits under the selecting 'IRIf' rather than being
 -- hoisted in front of it -- the same reason 'measureWorld' scopes a world's
@@ -4560,9 +4659,13 @@ measureSet meta v (WChoice c a b) = do
   ra <- scopedMeasure a
   rb <- scopedMeasure b
   return (zipResult (IRIf c) ra rb)
-  where scopedMeasure s = do
-          (r, binds) <- lift (runWriterT (measureSet meta v s))
-          return (mapResult (generateLetInExpr binds) r)
+  where scopedMeasure = scopedMeasureSet meta v
+
+-- | 'measureSet' in its own writer scope, its bindings folded into the result.
+scopedMeasureSet :: CompilerMetadata -> Expr -> WSet -> CompilerMonad PResult
+scopedMeasureSet meta v s = do
+  (r, binds) <- lift (runWriterT (measureSet meta v s))
+  return (mapResult (generateLetInExpr binds) r)
 
 cdfAtBound :: CompilerMetadata -> Expr -> WBound -> CompilerMonad (IRExpr, IRExpr)
 cdfAtBound _ _ WNegInf = return (const0, const1)
@@ -4818,7 +4921,7 @@ transportDirect meta occs exprBody target = case filter (`elem` subtreeCNs exprB
                 f <- residueFactor meta exprBody boundName (rType occTI) value s
                 return [WFactor [] f]
           _ -> return []
-        return (Just [WWorld [applyTo guard s] (WPoint value (IROp OpMult c0 (applyTo cov s))) factors])
+        return (Just [WWorld [applyTo guard s] (witnessSet value (IROp OpMult c0 (applyTo cov s))) factors])
     WInterval lo hi -> case toSeededMonotoneInvExpr (fcData meta) (adtDecls meta) bodyCN occ of
       Nothing -> return Nothing
       Just (g0, dir) -> do
@@ -4912,6 +5015,7 @@ worldFactorFree meta sub target
   where
     hasInterval (WInterval _ _) = True
     hasInterval (WChoice _ a b) = hasInterval a || hasInterval b
+    hasInterval (WExcept s _) = hasInterval s
     hasInterval _ = False
     isScalar TFloat = True
     isScalar TInt = True
@@ -4961,6 +5065,29 @@ comparisonWorlds meta occs isGT lop rop target
       wsF <- invertToWorlds meta occs side setF
       return (boolWorlds target <$> wsT <*> wsF)
 
+-- | The constraint set a transported witness value stands for. Normally the
+-- point itself; but a seeded @==@ or constructor-test inverse observed on its
+-- False polarity yields the 'VAnyExcept' sentinel -- bare, or still inside the
+-- 'IRIf' on the observed Bool that selects it ('anyExceptSampleShape') -- and
+-- that is the complement of a point, not a point, so it becomes a 'WExcept'
+-- (a runtime 'WChoice' where the polarity is still an 'IRIf'). Its peeled
+-- bindings are re-wrapped around every piece that may read them.
+witnessSet :: IRExpr -> IRExpr -> WSet
+witnessSet value cov = case anyExceptSampleShape value of
+  Nothing -> WPoint value cov
+  Just (binds, shape) ->
+    let wrap = generateLetInExpr binds
+    in case shape of
+      Left ex -> WExcept WFull (wrap ex)
+      Right (IRConst (VBool b), isPosAny, non, ex)
+        | b == isPosAny -> WExcept WFull (wrap ex)
+        | otherwise     -> WPoint (wrap non) cov
+      Right (cond, isPosAny, non, ex) ->
+        let exceptSide = WExcept WFull (wrap ex)
+            pointSide  = WPoint (wrap non) cov
+        in if isPosAny then WChoice (wrap cond) exceptSide pointSide
+                       else WChoice (wrap cond) pointSide exceptSide
+
 -- | Worlds of an @==@ node against a deterministic operand @other@ (value
 -- @b@), the bound variable reaching @side@ through at least one inverse step.
 -- The True outcome is @side@ observed at the point @b@, inverted onto the
@@ -4968,12 +5095,12 @@ comparisonWorlds meta occs isGT lop rop target
 -- applicability guard @g@ (is @b@ in @side@'s image at all?) and its
 -- change-of-variables factor. The False outcome is the complement of that
 -- point, transported as a complement rather than as a point: where @g@ holds
--- it is "any value but @x_b@" -- the 'VAnyExcept' sentinel placed on the bound
--- variable itself, where 'toIRInference' already measures it as the marginal
--- minus the excepted point (so a continuous variable answers mass 1, a
--- discrete one @1 - p(x_b)@) -- and where @g@ fails no value of the bound
--- variable produces @b@, so the False outcome is certain ('WFull'). The
--- sentinel therefore never meets a forward function's inverse. Mirrors the
+-- it is "any value but @x_b@" -- @'WExcept' 'WFull' x_b@ on the bound variable
+-- itself, measured as the marginal minus the excepted point (so a continuous
+-- variable answers mass 1, a discrete one @1 - p(x_b)@) -- and where @g@
+-- fails no value of the bound variable produces @b@, so the False outcome is
+-- certain ('WFull'). The complement therefore never meets a forward
+-- function's inverse. Mirrors the
 -- plan engine's 'contEqWorlds', whose False outcome is likewise the full
 -- world minus the point.
 --
@@ -4989,7 +5116,7 @@ equalityWorlds meta occs side other target = do
     Just ts@[WWorld gs (WPoint xb _) []] ->
       -- nested 'IRIf', not 'OpAnd': a guard protects the ones after it
       let g = foldr (\gd acc -> IRIf gd acc constFalseIR) constTrueIR gs
-          fs = [ WWorld [g] (WPoint (IRConst (VAnyExcept [xb])) const1) []
+          fs = [ WWorld [g] (WExcept WFull xb) []
                , WWorld [notIR g] WFull [] ]
       in Just (boolWorlds target ts fs)
     _ -> Nothing

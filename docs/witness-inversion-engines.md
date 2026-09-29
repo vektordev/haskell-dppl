@@ -95,6 +95,18 @@ subtree (see "Residue factors" and "Fresh x-free subtrees" below); what is
 still refused is fresh randomness *combined arithmetically* with the bound
 variable (`x + Normal > 0.0`), which is a convolution, not a product.
 
+The False outcome of an `==` is a *complement*, not a point: `x == 0.0`
+observed False confines `x` to `WExcept WFull 0.0`, every value but that one.
+Intersecting it with another constraint keeps the removal (`(s \ p) ∩ t =
+(s ∩ t) \ p`), and it is measured as the set's mass minus the point's in the
+semiring's sense (`mixSubP`): for a continuous `x` the point is a density and
+the set keeps its whole mass. So `draw x = Normal in if x == 0.0 then 0 else
+if x == 1.0 then 1 else 2` answers `p(0) = φ(0)`, `p(1) = φ(1)` (densities,
+dim 1) and `p(2) = 1` (dim 0) — the letfree `if Normal == 0.5 ...` agrees,
+through the same subtraction in the `IfThenElse` rule. Corpus
+`test/cases/set-witness/setWitnessContinuousEquals*` (task
+`sampling-matches-pdf-continuous-equality-density`).
+
 A nested `let` between the source and the constraint — `let x = Normal in
 let y = x + 1.0 in if y > 0.0 then 1.0 else 0.0`, which the parser desugars
 to `Apply (Lambda y b) e` — is inverted *through* the inner binding in two
