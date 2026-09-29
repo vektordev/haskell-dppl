@@ -672,16 +672,26 @@ pythonNestingDepth = go 0 0
       | otherwise = skipString q cs
 
 -- | A subterm that may be evaluated ahead of its line: pure arithmetic over
--- names -- no random draw, no generator reference, no call, no binder. (Tensor
+-- names -- no random draw, no generator reference, no call, no lambda. (Tensor
 -- and list builtins such as an index are pure; one carrying a lambda is ruled
--- out by the binder.)
+-- out by the lambda.)
+--
+-- An 'IRLetIn' is admitted when its value and body are: its binder scopes
+-- only over its own body, which moves with it, so every free name of the
+-- subterm is still bound before the line. The let stays where it was inside
+-- the subterm -- one under a conditional's arm is still guarded by it, since
+-- the conditional moves whole ('generateLetInStatement' emits it as an
+-- @if@/@else@ statement with the let inside the arm). Refusing lets made a
+-- sum's spine unspillable above any summand that carries a CSE let in an arm,
+-- which is what a plan-path fold's enumerated mass looks like (task
+-- plan-fold-enum-mass-sum-exceeds-parser-nesting): the summands were cut out
+-- one by one and the ~200-deep chain of @+@ over them stayed on the line.
 spillable :: [String] -> IRExpr -> Bool
 spillable callables = go
   where
     go (IRSample _)   = False
     go (IRApply _ _)  = False
     go (IRLambda _ _) = False
-    go (IRLetIn {})   = False
     go (IRVar n)      = not (n `elem` callables || isEffectfulVar n
                              || ".generate" `isSuffixOf` n)
     go e              = all go (getIRSubExprs e)

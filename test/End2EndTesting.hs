@@ -1090,6 +1090,7 @@ deepExpressionSpillTests :: TestTree
 deepExpressionSpillTests = testGroup "deep expression spill (python-codegen-exceeds-parser-nesting-limit)"
   [ testProperty "a 300-term sum imports and evaluates" (once deepCase)
   , testProperty "a 60-term sum is emitted without spilling" (once shallowCase)
+  , testProperty "a 300-term sum whose guarded arms bind a let imports and evaluates" (once letArmCase)
   ]
   where
     x = IRVar "x"
@@ -1097,16 +1098,34 @@ deepExpressionSpillTests = testGroup "deep expression spill (python-codegen-exce
     term i = IRIf (IROp OpGreaterThan x (lit i)) (lit 1.0) (lit 0.0)
     canary = IRIf (IROp OpGreaterThan x (lit 1.0e9)) (IROp OpDiv (lit 1.0) (lit 0.0)) (lit 0.0)
     sumOf n = foldr1 (IROp OpPlus) (canary : map (term . fromIntegral) [1 .. n :: Int])
-    envOf n = IREnv [IRFunGroup { groupName = "main", genFun = Nothing
-                                , probFun = Just (IRLambda "x" (sumOf n), "")
+    -- Task plan-fold-enum-mass-sum-exceeds-parser-nesting: a plan-path fold's
+    -- enumerated mass is a right-nested sum of guarded summands whose arms
+    -- carry CSE lets. The let is scoped inside its summand, so the summand is
+    -- still pure arithmetic and the spine above it must stay spillable. The
+    -- canary's let value divides by zero, so hoisting the let out of its arm
+    -- (rather than moving the whole conditional) raises.
+    letName i = "l_" ++ show i
+    letTerm i = IRIf (IROp OpGreaterThan x (lit (fromIntegral i)))
+                     (IRLetIn (letName i) (IROp OpMult x (lit 0.0))
+                              (IROp OpPlus (IRVar (letName i)) (lit 1.0)))
+                     (lit 0.0)
+    letCanary = IRIf (IROp OpGreaterThan x (lit 1.0e9))
+                     (IRLetIn "l_canary" (IROp OpDiv (lit 1.0) (lit 0.0)) (IRVar "l_canary"))
+                     (lit 0.0)
+    letSumOf n = foldr1 (IROp OpPlus) (letCanary : map letTerm [1 .. n :: Int])
+    envOf n = envWith (sumOf n)
+    envWith body = IREnv [IRFunGroup { groupName = "main", genFun = Nothing
+                                , probFun = Just (IRLambda "x" body, "")
                                 , integFun = Nothing, writeLogitsFun = Nothing
                                 , normalFun = Nothing, groupDoc = "", sampleDomain = Nothing }] [] []
-    source n = unpack (replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n")
-                               (pack (intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True (envOf n)))))
+    source n = sourceOf (envOf n)
+    sourceOf env = unpack (replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n")
+                               (pack (intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True env))))
     spillLines = filter (isPrefixOf "_s" . dropWhile (== ' ')) . lines
-    deepCase = ioProperty $ do
+    deepCase = runsTo (source 300)
+    letArmCase = runsTo (sourceOf (envWith (letSumOf 300)))
+    runsTo src = ioProperty $ do
       cwd <- getCurrentDirectory
-      let src = source 300
       (code, out, err) <- withSystemTempFile "deep_expression_spill.py" $ \tmpPath tmpHandle -> do
         hPutStr tmpHandle $ unlines
           [ "import sys", "sys.path.insert(0, " ++ show cwd ++ ")", src
