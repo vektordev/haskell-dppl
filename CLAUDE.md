@@ -1632,11 +1632,19 @@ comparison already fails loudly the day a fix changes the computed number.
 characterizing exactly how it currently fails (no exact crash message or
 wrong value pinned down by hand). The rows below the header instead state the
 *idealized* value -- what the fixed compiler should produce -- and
-`TestKnownIssues.hs` runs each row through the interpreter and asserts the
-compiled program does **not yet** match it, within the ordinary
-`probTolerance`; a runtime crash, a refused compile, a missing variant, or a
+`TestKnownIssues.hs` runs each row on every backend the `backends:` header
+declares (read as everywhere else: no header means interpreter, julia,
+python) that it can evaluate -- the interpreter in-process, and Python through
+End2End's own emitted-module script -- and asserts the compiled program does
+**not yet** match it on any of them, within the ordinary `probTolerance`; a runtime crash, a refused compile, a missing variant, or a
 merely different number are all "still broken" and pass, while an exact match
-fails loudly ("may be fixed now"). This trades away the free "which exact
+fails loudly ("may be fixed now"), naming the backend. The header says where
+the bug is pinned: a Python-only bug (e.g. the emitted module failing to load)
+is spelled `backends: python`, so the interpreter already giving the right
+answer is not misreported as a fix. Julia, batched and dense are not evaluated
+here (a missing `julia` binary would read as "still broken", a silently green
+pin), and a `broken` pin declaring *only* those fails loudly rather than
+passing vacuously. This trades away the free "which exact
 mechanism regressed" signal `diagnostic`/`wrong-result` give for robustness
 against unrelated code churn shifting a pinned message or number -- appropriate
 when nobody has run the repro yet to observe its actual failure mode.

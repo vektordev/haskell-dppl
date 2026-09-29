@@ -468,20 +468,29 @@ testPython netNames compiledE tc = ioProperty $ do
   case compiledE of
     Left err -> return $ counterexample err False
     Right compiled -> do
-      let src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True compiled)
-          mockDefs = concatMap (\nm -> "def " ++ nm ++ "(s):\n    return s\n") netNames
-      -- Run as a file, so sys.path[0] is the temp dir rather than the project;
-      -- pythonLib has to be put back on the path explicitly.
       projectDir <- getCurrentDirectory
       code <- withSystemTempFile "spll_test.py" $ \tmpPath tmpHandle -> do
-        hPutStr tmpHandle ("import sys\nsys.path.insert(0, " ++ show projectDir ++ ")\n"
-                           ++ mockDefs ++ pythonTestCode src tc)
+        hPutStr tmpHandle (pythonTestScript projectDir netNames compiled tc)
         hClose tmpHandle
         (_, _, _, handle) <- createProcess (proc "python3" [tmpPath])
         waitForProcess handle
       case code of
         ExitSuccess -> return $ True === True
         ExitFailure _ -> return $ counterexample ("Python test " ++ testCaseName (head tc) ++ " failed. See Python error message") False
+
+-- | The complete, self-contained script 'testPython' runs: the emitted module
+-- for @compiled@, one identity mock per network name, and the row checks from
+-- 'pythonTestCode' (each raising on a mismatch, so exit 0 means every row
+-- matched). Shared with "TestKnownIssues", whose @broken@ check asks the same
+-- question in reverse. The script is meant to run as a file, so sys.path[0]
+-- is its temp dir rather than the project; pythonLib has to be put back on
+-- the path explicitly, which is what @projectDir@ is for.
+pythonTestScript :: FilePath -> [String] -> IREnv -> [TestCase] -> String
+pythonTestScript projectDir netNames compiled tc =
+  "import sys\nsys.path.insert(0, " ++ show projectDir ++ ")\n" ++ mockDefs ++ pythonTestCode src tc
+  where
+    src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True compiled)
+    mockDefs = concatMap (\nm -> "def " ++ nm ++ "(s):\n    return s\n") netNames
 
 juliaBatchTestCode :: FilePath -> [(String, [TestCase], [String])] -> String
 juliaBatchTestCode projectDir allCases =

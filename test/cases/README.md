@@ -53,6 +53,15 @@ fixed now"). It trades the "which exact mechanism regressed" signal that
 `diagnostic`/`wrong-result` give for robustness against unrelated churn
 shifting a pinned message or number.
 
+The rows are checked on every backend the `backends:` header declares (no
+header means interpreter, julia, python, as everywhere else) that the harness
+can evaluate: the interpreter, and Python via the emitted module. A failure
+names the backend that now matches. So declare where the bug actually lives: a
+Python-only bug (say, the emitted module does not load) is `backends: python`,
+otherwise the interpreter's correct answer reads as "may be fixed". Julia,
+batched and dense are not evaluated here, and a `broken` pin that declares only
+those fails outright instead of passing vacuously.
+
 **Prefer `broken` over not filing at all.** If you have a program that
 misbehaves but you have not worked out precisely how, `broken` is the header
 for it -- writing down the idealized value is enough. A repro that exists is

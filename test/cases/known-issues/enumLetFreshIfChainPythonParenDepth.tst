@@ -10,3 +10,6 @@ p(False)=(0.9601167784615637, 0.0)
 -- `draw b` the same chain loads at depth 40. Idealized value:
 -- 0.5*0.9^24 + 0.5*0.1^24. Found by experiments_nest
 -- exact-eig-question-asking (noisy oracle). Task python-emitted-expression-exceeds-parser-nesting.
+-- `backends: python` is load-bearing: the interpreter already returns the
+-- idealized value, so the known-issues `broken` check runs these rows through
+-- the emitted Python module only (it honours the header).

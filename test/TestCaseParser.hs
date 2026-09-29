@@ -347,7 +347,9 @@ pSlowHeader = do
 --   once-fixed) value instead of the currently-wrong one, and the check is
 --   inverted: the case passes as long as the compiled program does *not yet*
 --   produce that value (a crash, a refusal, a missing variant, or simply a
---   different number all count as "still broken"). Reaches for this when a
+--   different number all count as "still broken") on any backend the file's
+--   @backends:@ header declares that "TestKnownIssues" can evaluate
+--   (interpreter, python). Reaches for this when a
 --   repro is migrated without characterizing exactly how it currently fails
 --   -- it still trips the moment a fix makes the idealized value correct,
 --   without committing to a crash message or a specific wrong number that a
