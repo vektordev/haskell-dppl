@@ -5024,6 +5024,10 @@ data PlanWorld = PlanWorld { pwGuards :: [IRExpr], pwCons :: [PLeafCon], pwPairs
 pw1 :: [PLeafCon] -> PlanWorld
 pw1 cs = PlanWorld [] cs [] const1 []
 
+-- | The unconstrained world @pw1 []@: no guards, constraints or factors.
+planWorldTrivial :: PlanWorld -> Bool
+planWorldTrivial (PlanWorld g c p f rs) = null g && null c && null p && f == const1 && null rs
+
 -- | The observation target: the plan-leaf analogue of the point/interval
 -- split in 'WSet'. PTUpTo is the cumulative target (body <= sample).
 data PTarget = PTPoint IRExpr | PTUpTo IRExpr
@@ -6267,22 +6271,31 @@ planEnumValuesRaw meta env bodyExpr
         Left why -> return (Left why)
         Right b' -> planEnumValues meta env b'
       Expr _ (Apply {}) -> do
-        specE <- planResolveApply meta env bodyExpr
-        case specE of
+        specsE <- planResolveApply meta env bodyExpr
+        case specsE of
           Left why -> return (Left why)
-          Right spec
-            | rType (getTypeInfo bodyExpr) == TBool -> do
-                r <- planSpecializeBool spec
-                return ((\(tw, fw) -> [ (constTrueIR, addSpecCons spec w)          | w <- tw ]
-                                   ++ [ (IRConst (VBool False), addSpecCons spec w) | w <- fw ]) <$> r)
-            | otherwise -> do
-                r <- planSpecializeEnum spec
-                return ((\pairs -> [ (v, addSpecCons spec w) | (v, w) <- pairs ]) <$> r)
+          Right specs -> fmap concat . sequence <$> mapM enumSpec specs
       _ -> return (Left ("unsupported node in plan value enumeration: " ++ planNodeName bodyExpr))
   where
     occs = planEnvOccs env
     arithOp n = lookup n [("plus", OpPlus), ("mult", OpMult)]
     livePairs = filter (not . pwUnsat . snd)
+    -- one case of the call's argument value split ('planResolveApply'): the
+    -- callee's (value, world) pairs, each intersected with the case's world
+    enumSpec (spec, splitW)
+      | rType (getTypeInfo bodyExpr) == TBool = do
+          r <- planSpecializeBool spec
+          return ((\(tw, fw) -> live ([ (constTrueIR, inCase w)          | w <- tw ]
+                                   ++ [ (IRConst (VBool False), inCase w) | w <- fw ])) <$> r)
+      | otherwise = do
+          r <- planSpecializeEnum spec
+          return ((\pairs -> live [ (v, inCase w) | (v, w) <- pairs ]) <$> r)
+      where
+        -- an unsplit call is left exactly as before (no intersection, no
+        -- filtering), so its IR does not change
+        split = not (planWorldTrivial splitW)
+        inCase w = if split then intersectPlanW splitW (addSpecCons spec w) else addSpecCons spec w
+        live = if split then livePairs else id
 
 -- | A resolved user-function application, ready to specialize: the callee's
 -- parameter frame, its body, the memo key, the plan-descent measure, the
@@ -6306,18 +6319,66 @@ addSpecCons spec w = w { pwCons = foldr insertLeafCon (pwCons w) (spCons spec) }
 -- must be a directly-applied (saturated) top-level function, and each
 -- argument either an accessor chain into the plan (bound 'PBPlan') or
 -- deterministic given scope (generated at the call site, bound 'PBDet').
-planResolveApply :: CompilerMetadata -> PlanEnv -> Expr -> PlanM (Either String PlanSpec)
-planResolveApply meta env planBodyExpr = case collectApply planBodyExpr [] of
+--
+-- A third kind of argument -- plan-dependent but not an accessor chain, such
+-- as a fold's result passed to a helper (@isValid (checksumSum 1 ds)@) -- is
+-- handled by a case split on its value (task
+-- plan-fold-result-through-helper-crashes): the argument's (value, world)
+-- pairs are enumerated ('planEnumValues'), and the callee is specialized once
+-- per value combination with the argument bound as that deterministic value.
+-- The value worlds partition the argument's outcomes and, given the value, the
+-- callee's worlds partition its own, so pairing each specialization with its
+-- value world (by intersection) is again a partition. The consumer intersects
+-- the returned world into every world of the matching specialization. A call
+-- whose arguments need no split returns one specialization under the
+-- unconstrained world, so its IR is unchanged.
+planResolveApply :: CompilerMetadata -> PlanEnv -> Expr -> PlanM (Either String [(PlanSpec, PlanWorld)])
+planResolveApply meta env planBodyExpr = do
+  r0 <- planResolveApplyWith meta env [] planBodyExpr
+  case r0 of
+    Left why -> return (Left why)
+    Right (Right spec) -> return (Right [(spec, pw1 [])])
+    Right (Left splits) -> do
+      vssE <- mapM enumArg splits
+      case sequence vssE of
+        Left why -> return (Left why)
+        Right vss -> do
+          let combos = [ (map fst c, foldl intersectPlanW (pw1 []) (map snd c)) | c <- sequence vss ]
+          rs <- mapM specAt (filter (not . pwUnsat . snd) combos)
+          return (sequence rs)
+  where
+    enumArg (i, argE) = do
+      vs <- planEnumValues meta env argE
+      return $ case vs of
+        Left why -> Left ("call argument is neither a plan slice (accessor chain) nor deterministic given scope: "
+                          ++ planNodeName argE ++ ", and its values could not be enumerated: " ++ why)
+        Right pairs -> Right [ ((i, v), w) | (v, w) <- pairs ]
+    specAt (overrides, w) = do
+      r <- planResolveApplyWith meta env overrides planBodyExpr
+      return $ case r of
+        Left why         -> Left why
+        Right (Right sp) -> Right (sp, w)
+        -- every split argument has an override, so none can be left over
+        Right (Left _)   -> Left "internal: a call argument still needs a value split after splitting"
+
+-- | 'planResolveApply' for one fixed assignment of the value-split arguments:
+-- @overrides@ binds an argument position to the deterministic value it takes
+-- in this case of the split. Returns @Left positions@ (without generating
+-- anything) when some argument not in @overrides@ needs a split.
+planResolveApplyWith :: CompilerMetadata -> PlanEnv -> [(Int, IRExpr)] -> Expr
+                     -> PlanM (Either String (Either [(Int, Expr)] PlanSpec))
+planResolveApplyWith meta env overrides planBodyExpr = case collectApply planBodyExpr [] of
   Nothing -> return (Left ("unsupported callee in plan traversal (only directly-applied top-level functions can be specialized): " ++ planNodeName planBodyExpr))
   Just (fname, args) -> case lookup fname (functions (compilingProgram meta)) of
     Nothing -> return (Left ("call to '" ++ fname ++ "': not a top-level function (higher-order callees are not specializable)"))
     Just decl -> do
       let (params, calleeBody) = unwrapCalleeLambdas decl
+      let splits = [ (i, a) | (i, a) <- zip [0..] args, isNothing (lookup i overrides), needsSplit a ]
       if length params /= length args
         then return (Left ("call to '" ++ fname ++ "': partial application is not specializable (expected "
                            ++ show (length params) ++ " arguments, got " ++ show (length args) ++ ")"))
-        else do
-          classesE <- mapM classifyArg args
+        else if not (null splits) then return (Right (Left splits)) else do
+          classesE <- mapM classifyArg (zip [0..] args)
           case sequence classesE of
             Left why -> return (Left why)
             Right classes -> do
@@ -6327,7 +6388,7 @@ planResolveApply meta env planBodyExpr = case collectApply planBodyExpr [] of
               let key = (chainName (getTypeInfo calleeBody), planOffs, detKeys)
               let callCons = concat [ cons | ArgPlan _ cons <- classes ]
               let meta' = foldl (\m (pname, pti, _) -> extendMetaForLambda m pti pname) meta params
-              return (Right (PlanSpec frame calleeBody key (sum planOffs) callCons meta'))
+              return (Right (Right (PlanSpec frame calleeBody key (sum planOffs) callCons meta')))
   where
     collectApply (Expr _ (Apply f a)) acc = collectApply f (a : acc)
     collectApply v@(Expr _ (Var n)) acc
@@ -6339,7 +6400,10 @@ planResolveApply meta env planBodyExpr = case collectApply planBodyExpr [] of
     unwrapCalleeLambdas (Expr ti (Lambda n sub)) =
       let (ps, b) = unwrapCalleeLambdas sub in ((n, ti, chainName ti) : ps, b)
     unwrapCalleeLambdas e = ([], e)
-    classifyArg argE
+    -- plan-dependent, but not an accessor chain: split on its value
+    needsSplit argE = isNothing (planEvalRef meta env argE) && subtreeHasOcc (planEnvOccs env) argE
+    classifyArg (i, argE)
+      | Just v <- lookup i overrides = return (Right (ArgDet v))
       | Just refE <- planEvalRef meta env argE = return (fmap (uncurry ArgPlan) refE)
       | not (subtreeHasOcc (planEnvOccs env) argE) && pType (getTypeInfo argE) == Deterministic =
           Right . ArgDet <$> planGenDet meta env argE
@@ -6453,10 +6517,17 @@ planSpecializeTarget spec target = planEnterSpec spec $ do
 -- enumeration.
 planApplyTarget :: CompilerMetadata -> PlanEnv -> Expr -> PTarget -> PlanM (Either String [PlanWorld])
 planApplyTarget meta env planBodyExpr target = do
-  specE <- planResolveApply meta env planBodyExpr
-  case specE of
+  specsE <- planResolveApply meta env planBodyExpr
+  case specsE of
     Left why -> return (Left why)
-    Right spec -> case rType (getTypeInfo planBodyExpr) of
+    Right [(spec, splitW)] | planWorldTrivial splitW -> applySpec spec
+    -- a value split of a call argument ('planResolveApply'): each case's
+    -- worlds are intersected with that case's argument world
+    Right specs -> do
+      rs <- mapM (\(spec, splitW) -> fmap (filter (not . pwUnsat) . map (intersectPlanW splitW)) <$> applySpec spec) specs
+      return (concat <$> sequence rs)
+  where
+   applySpec spec = case rType (getTypeInfo planBodyExpr) of
       TBool -> do
         r <- planSpecializeBool spec
         return ((\(tw, fw) -> map (addSpecCons spec) (planBoolWorlds target tw fw)) <$> r)
