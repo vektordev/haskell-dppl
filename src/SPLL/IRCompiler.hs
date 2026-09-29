@@ -5693,7 +5693,29 @@ planInvert meta env planBody target
 planInvert meta env planBody target
   | Just refE <- planEvalRef meta env planBody =
       return (refE >>= \(ref, cons) -> planRefWorlds (adtDecls meta) ref cons target)
-planInvert meta env planBody target = case planBody of
+-- A plan-dependent value shared by several children of this node is
+-- enumerated once and the node traversed per value ('planShareSplit').
+--
+-- Only at a scalar node. After the split a case's body may be plan-free and is
+-- then compared against the target whole ('planDetGuard'), which deliberately
+-- has no wildcard checks below the top ('equalityGuardStatic'). A scalar
+-- target is a value or a whole @ANY@ (short-circuited by 'planWitnessApply'),
+-- but a structured one can be a partial wildcard, @(ANY, 1.0)@, that only the
+-- field-by-field inversion ('planAnySplit') handles. A structured node is
+-- therefore not a split point; a value shared inside one of its fields is
+-- still split there, and value enumeration (no target) splits anywhere.
+planInvert meta env planBody target = do
+  shared <- if planScalarType (rType (getTypeInfo planBody))
+    then planShareSplit meta env planBody (\m' env' b' -> fmap (map ((,) ())) <$> planInvert m' env' b' target)
+    else return Nothing
+  case shared of
+    Just r  -> return (map snd <$> r)
+    Nothing -> planInvertNode meta env planBody target
+
+-- | 'planInvert' at a plan-dependent node that is neither a plan slice nor
+-- split on a shared value: dispatch on the node.
+planInvertNode :: CompilerMetadata -> PlanEnv -> Expr -> PTarget -> PlanM (Either String [PlanWorld])
+planInvertNode meta env planBody target = case planBody of
   Expr _ (IfThenElse c t e)
     | not (subtreeHasOcc occs c) && pType (getTypeInfo c) == Deterministic -> do
         g <- planGenDet meta env c
@@ -6060,6 +6082,112 @@ planBetaReduce meta env x b a
   | otherwise = Left ("a binding inside the plan traversal is not deterministic given the plan-bound variables "
                       ++ "(substituting it would duplicate its draw): " ++ x ++ " = " ++ planNodeName a)
 
+-- | Share one plan-dependent value among the children of a node (task
+-- plan-fold-disjunction-of-comparisons-blowup).
+--
+-- A sub-expression that is deterministic given the plan but is not itself a
+-- plan slice -- a fold's result, @checksumSum 1 ds@ -- denotes one value
+-- however many times it is spelled. Traversed once per spelling, as
+-- @(f ds == 0) || (f ds == 10)@ or the copies 'planBetaReduce' makes of
+-- @draw s = f ds in (s == 0) || (s == 10)@ would be, each copy enumerates the
+-- value separately, and the value grouping bakes the same leaves into both
+-- copies' worlds. Intersecting them is then a clash, and the traversal reruns
+-- with grouping off -- one world per scene path, exponential in the fold's
+-- depth.
+--
+-- Instead, when such a sub-expression occurs in two or more children of this
+-- node (it is shared HERE, not merely inside one child, which splits it at a
+-- lower node and keeps the split local), its (value, world) pairs are
+-- enumerated once ('planEnumValues'), every occurrence is replaced by a fresh
+-- variable (the nodes it frees of the plan re-typed 'Deterministic'), and the node is
+-- traversed once per value with that variable bound 'PBDet' to it. This is the
+-- value split 'planResolveApply' performs for a helper applied to a fold result
+-- (@isValid (checksumSum 1 ds)@), applied to an implicit binding instead of a
+-- call argument; soundness is the same. The value worlds partition the
+-- outcomes, every occurrence evaluates to that value within a world (it is
+-- deterministic given the plan), and given the value the node's worlds
+-- partition its own, so intersecting each case's worlds with its value world is
+-- again a partition. A node that also reads the value's leaves some other way
+-- clashes as before and reruns ungrouped; nothing new is unsound.
+--
+-- Occurrences are searched and replaced outside lambdas only, so every one
+-- sees the same bindings. Candidates are tried outermost first; if the first
+-- shared one cannot be enumerated the node is traversed as before (Nothing),
+-- so this only ever adds coverage (at worst leaving the failed enumeration's
+-- bindings dead in the emitted code).
+planShareSplit :: CompilerMetadata -> PlanEnv -> Expr
+               -> (CompilerMetadata -> PlanEnv -> Expr -> PlanM (Either String [(a, PlanWorld)]))
+               -> PlanM (Maybe (Either String [(a, PlanWorld)]))
+planShareSplit meta env e k = case sharedCand of
+  Nothing -> return Nothing
+  Just s -> do
+    vsE <- planEnumValues meta env s
+    case vsE of
+      Left _ -> return Nothing
+      Right pairs -> do
+        x <- lift (mkVariable "shared")
+        let rty = rType (getTypeInfo s)
+        let meta' = meta { typeEnv = (x, (rty, False)) : typeEnv meta }
+        let e' = replaceOcc s x e
+        rs <- forM pairs $ \(v, w) -> do
+          vb <- case v of
+            IRConst _ -> return v
+            IRVar _   -> return v
+            _ -> do
+              nm <- lift (mkVariable "shared_val")
+              lift (setVariables [(nm, v)])
+              return (IRVar nm)
+          r <- k meta' (([], PBDet x vb) : env) e'
+          return (inCase w <$> r)
+        return (Just (concat <$> sequence rs))
+  where
+    occs = planEnvOccs env
+    kids = case e of
+      Expr _ (Lambda _ _) -> []
+      _ -> getSubExprs e
+    -- sub-expressions outside lambdas, outermost first
+    subterms (Expr _ (Lambda _ _)) = []
+    subterms t = t : concatMap subterms (getSubExprs t)
+    isCand t = case t of
+      Expr _ (Var _) -> False
+      _ -> subtreeHasOcc occs t
+           && isNothing (planEvalRef meta env t)
+           && not (isArrowT (rType (getTypeInfo t)))
+           && planDetGivenPlan meta env t
+    isArrowT (TArrow _ _) = True
+    isArrowT _            = False
+    inKid t kid = any (sameTerm t) (subterms kid)
+    sharedCand = listToMaybe
+      [ t | (i, kid) <- zip [0 :: Int ..] kids, t <- subterms kid, isCand t
+          , any (\(j, kid') -> j /= i && inKid t kid') (zip [0 ..] kids) ]
+    -- Replace the occurrences by the variable. A node the replacement leaves
+    -- free of plan occurrences was deterministic given the plan before it
+    -- ('planDetGivenPlan': det InjF/if, a det-generating call, ...), so it is
+    -- now deterministic outright and is re-typed as such -- 'retypeDetGiven'
+    -- would stop at a call (@isValidB x@), leaving it to dispatch as random.
+    replaceOcc s x t
+      | sameTerm s t = Expr ((getTypeInfo t) { pType = Deterministic }) (Var x)
+      | Expr _ (Lambda _ _) <- t = t
+      | otherwise =
+          let t'@(Expr ti' n') = setSubExprs t (map (replaceOcc s x) (getSubExprs t))
+          in if not (subtreeHasOcc occs t') && planDetGivenPlan meta env t
+               then Expr (ti' { pType = Deterministic }) n'
+               else t'
+    inCase w ps
+      | planWorldTrivial w = ps
+      | otherwise = filter (not . pwUnsat . snd) [ (a, intersectPlanW w bw) | (a, bw) <- ps ]
+
+-- | A type whose observation cannot be a partial wildcard: the node types at
+-- which 'planInvert' may split on a shared value ('planShareSplit').
+planScalarType :: RType -> Bool
+planScalarType rt = rt `elem` [TBool, TInt, TFloat]
+
+-- | Structural equality of two expressions, ignoring every annotation.
+sameTerm :: Expr -> Expr -> Bool
+sameTerm (Expr _ n1) (Expr _ n2) =
+  fmap (const ()) n1 == fmap (const ()) n2
+    && and (zipWith sameTerm (foldr (:) [] n1) (foldr (:) [] n2))
+
 -- | Canonical (outcome-True, outcome-False) worlds of a Bool-valued node.
 planInvertBool :: CompilerMetadata -> PlanEnv -> Expr -> PlanM (Either String ([PlanWorld], [PlanWorld]))
 planInvertBool meta env e = do
@@ -6249,7 +6377,16 @@ planEnumValuesRaw meta env bodyExpr
         Right [ (IRConst (valueToIR v), pw1 (insertLeafCon (PLeafCon off [(i, constTrueIR)]) cons))
               | (i, v) <- zip [0..] vals ]
       Right _ -> Left "value enumeration is only supported for enum plan leaves"
-  | otherwise = case bodyExpr of
+  | otherwise = do
+      shared <- planShareSplit meta env bodyExpr planEnumValuesRaw
+      maybe (planEnumValuesNode meta env bodyExpr) return shared
+  where
+    occs = planEnvOccs env
+
+-- | 'planEnumValuesRaw' at a plan-dependent node that is neither a plan slice
+-- nor split on a shared value: dispatch on the node.
+planEnumValuesNode :: CompilerMetadata -> PlanEnv -> Expr -> PlanM (Either String [(IRExpr, PlanWorld)])
+planEnumValuesNode meta env bodyExpr = case bodyExpr of
       Expr _ (IfThenElse c t e)
         | not (subtreeHasOcc occs c) && pType (getTypeInfo c) == Deterministic -> do
             g <- planGenDet meta env c

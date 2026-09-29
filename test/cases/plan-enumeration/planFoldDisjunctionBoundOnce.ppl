@@ -1,0 +1,6 @@
+data DigitList = DEnd | DCons dig::Int, rest::DigitList depth 4
+
+checksumSum w ds = if isDEnd ds then 0 else w*(dig ds) + checksumSum (w + 1) (rest ds)
+neural readDigits :: (Symbol -> DigitList) of 4x.{DEnd | DCons [0,1,2,3,4,5,6,7,8,9] x}
+
+main sym = draw ds = readDigits sym in draw s = checksumSum 1 ds in if (s == 0) || (s == 10) then 1 else 0

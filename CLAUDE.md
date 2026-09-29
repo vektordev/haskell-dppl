@@ -355,6 +355,23 @@ clash rule below), so each split argument carries one world per scene path, and 
 Corpus `plan-enumeration/planHelperOnFoldResult*`; differential
 `Internals.planHelperOnFoldResultMatchesDense`.
 
+The same split applies to a value **shared by several children of one node**
+without any call (`planShareSplit`, task
+`plan-fold-disjunction-of-comparisons-blowup`): in `(f ds == 0) || (f ds == 10)`,
+or `draw s = f ds in (s == 0) || (s == 10)` after `planBetaReduce` copies `f ds`
+into both comparisons, the copies used to be enumerated separately, bake the
+same leaves, clash, and rerun ungrouped (exponential; 2 GB OOM at barcode
+depth 4). Now the shared sub-expression (plan-dependent, not a slice,
+`planDetGivenPlan`; matched annotation-blind by `sameTerm`, outside lambdas) is
+enumerated once and replaced by a fresh `PBDet` variable per value. It is tried
+at every plan-dependent node of `planEnumValuesRaw` and at every *scalar*
+(Bool/Int/Float) one of `planInvert`. A structured observed node is not split,
+because a partial-`ANY` target like `(ANY, 1.0)` needs the field-wise
+`planAnySplit` and `planDetGuard` is deliberately wildcard-blind below the top.
+It falls back to the old dispatch if the value cannot be enumerated. Corpus
+`plan-enumeration/planFoldDisjunction*`; tests
+`Internals.planSharedFoldValueMatchesDense`, `planFoldDisjunctionPolynomial`.
+
 A set-witness world can carry **residue factors** (`WWorld [guard] WSet
 [PResult]`): when `transportDirect` inverts a single-occurrence subtree
 through a field constructor (`(x, e)`, `x : e`, a user ADT constructor, also
