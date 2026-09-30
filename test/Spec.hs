@@ -29,6 +29,7 @@ import TestWriteLogitsProperties (writeLogitsTests, writeLogitsRoundtripTests)
 import TestShowcase (showcaseTests)
 import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, batchedPythonTests, slowBatchedPythonTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, deepExpressionSpillTests, batchedEnumBucketingTests, branchCountBackendTests)
 import TestKnownIssues (knownIssuesTests)
+import TestRewrites (rewriteTests, rewriteCorpusTests)
 import TestPythonPrelude (pythonPreludeTests)
 import TestCLI (cliTests)
 import TestFuzz (fuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
@@ -517,6 +518,7 @@ main = do
   showcase <- showcaseTests
   writeLogitsRoundtrip <- writeLogitsRoundtripTests
   knownIssues <- knownIssuesTests
+  rewriteCorpus <- rewriteCorpusTests
   -- A handful of tests (deep plan enumeration, mainly) are expensive enough
   -- to noticeably slow day-to-day `stack test` while rarely catching
   -- regressions outside the code they pin. They're skipped unless
@@ -557,6 +559,8 @@ main = do
     , writeLogitsRoundtrip
     , showcase
     , knownIssues
+    , rewriteTests
+    , rewriteCorpus
     , e2e
     , selectDiff
     , batchedPy

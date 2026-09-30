@@ -1,0 +1,2 @@
+h q = fst q
+main = draw e = (Normal, Uniform) in (h e, snd e)

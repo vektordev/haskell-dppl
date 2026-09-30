@@ -1,0 +1,1 @@
+main = draw x = Uniform in draw y = x * 2.0 in (x, y + Normal)

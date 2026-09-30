@@ -1,0 +1,1 @@
+main = draw t = (Uniform < 0.5, Uniform < 0.5) in draw s = t in (fst s, snd s)

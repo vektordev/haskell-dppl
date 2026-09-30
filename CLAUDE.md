@@ -1613,6 +1613,9 @@ current list for whichever binary you run):
   `README.md` as a doctest
 - `test/End2EndTesting.hs` — `.ppl`/`.tst` integration against interpreter,
   Julia and Python, plus the batched groups (see Batched Mode below)
+- `test/Rewrites.hs` / `test/TestRewrites.hs` — the rewrite-invariance net
+  (groups `RewriteInvariance` and `RewriteInvarianceCorpus`; see "Rewrite
+  invariance" below)
 - `test/TestKnownIssues.hs` — drives `test/cases/known-issues/`: pinned
   repros of open compiler bugs, each declaring which of four failure shapes
   it demonstrates (see "Known-issues corpus" below)
@@ -1743,6 +1746,36 @@ existing `TestRejection.hs` groups onto it is out of scope. Seeded with
 `correlatedGaussianLetSharesLatent` (task
 correlated-gaussian-let-shares-latent), the `diagnostic` shape, whose fuller
 multi-assertion sibling is `TestRejection.SetWitnessSharedLatent`.
+
+### Rewrite invariance
+
+`test/Rewrites.hs` holds four semantics-preserving source rewrites (task
+`rewrite-invariance-net-draw-apply-helper-alias`, law-carrying-modality M0):
+draw introduction (`C[e]` → `draw z = e in C[z]`, only where `C` evaluates `e`
+once and unconditionally -- never out of an `if` arm or a function body),
+linear inlining (its inverse, when the variable occurs once and not under a
+function body), helper extraction (a subterm becomes a call of a new top-level
+function over its free locals) and alias introduction (`draw y = x in
+b[x := y]`). The task's "`draw x = e in b` ⇄ `(\x -> b) e`" is not one of them:
+the two spellings parse to the same AST, which a unit test pins.
+
+`TestRewrites` applies every family at every site of every interpreter-routed,
+non-neural, non-slow corpus program (one test per program, ~4000 variants,
+~22s) and to the ten probe pairs of law-carrying-modality's evidence table,
+judging each pair with the three-outcome oracle: both answer → probability and
+dim must agree (hard); original answers, rewrite does not → logged, unless
+`refusalIsHard` has promoted that family (each flips in the commit of the
+law-carrying milestone that claims it); original does not, rewrite does → the
+rewrite is checked against its own forward sampler. Known disagreements are
+listed in `knownDivergences` with their tracking task and a
+`known-issues/` pin; an entry that stops diverging fails, so the list cannot
+rot. The logged frontier is visible with `TASTY_HIDE_SUCCESSES=false`.
+
+Helper extraction names a helper's parameters after the caller's variables,
+which is how it found `enumerateAppliedLambda`'s capture: the loop bound the
+callee's parameter around the argument's own measure, so `h b` called under an
+enumerated `draw b` measured `b == b` and lost the draw's weight (29 corpus
+programs; `let-bindings/helperParamShadowsEnumeratedDraw`).
 
 ### Slow tests
 

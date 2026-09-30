@@ -1,0 +1,2 @@
+f x = if x < 0.5 then x else x * 3.0
+main = f Uniform

@@ -1,0 +1,2 @@
+pair a b = (a, a + b)
+main = pair Uniform Uniform

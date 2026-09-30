@@ -1,0 +1,2 @@
+h a = a + 0.2
+main a = h a
