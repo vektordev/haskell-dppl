@@ -25,6 +25,7 @@ module SPLL.Lang.Lang (
 , varsOfExpr
 , freeVarsExpr
 , substituteVar
+, renameFreeVar
 , containsRandomSource
 , predicateExpr
 , predicateFlat
@@ -140,18 +141,22 @@ substituteVar x r = go
       | y `Set.member` fvR =
           let avoid = Set.unions [fvR, allNamesExpr b, Set.singleton x]
               y' = head [n | i <- [0 :: Int ..], let n = y ++ "_s" ++ show i, not (n `Set.member` avoid)]
-          in Expr t (Lambda y' (go (renameFree y y' b)))
+          in Expr t (Lambda y' (go (renameFreeVar y y' b)))
       | otherwise = Expr t (Lambda y (go b))
     go (Expr t f) = Expr t (fmap go f)
-    -- Rename free occurrences only; each keeps its own annotation. The new name
-    -- is mentioned nowhere in the body, so no binder there can capture it.
-    renameFree old new e@(Expr t (Var v))
-      | v == old = Expr t (Var new)
-      | otherwise = e
-    renameFree old new e@(Expr t (Lambda z b))
-      | z == old = e
-      | otherwise = Expr t (Lambda z (renameFree old new b))
-    renameFree old new (Expr t f) = Expr t (fmap (renameFree old new) f)
+
+-- | @renameFreeVar old new e@ renames the free occurrences of @old@ in @e@ to
+-- @new@; each keeps its own annotation, so chain names are untouched. The
+-- caller guarantees @new@ is mentioned nowhere in @e@, so no binder there can
+-- capture it.
+renameFreeVar :: String -> String -> Expr -> Expr
+renameFreeVar old new e@(Expr t (Var v))
+  | v == old = Expr t (Var new)
+  | otherwise = e
+renameFreeVar old new e@(Expr t (Lambda z b))
+  | z == old = e
+  | otherwise = Expr t (Lambda z (renameFreeVar old new b))
+renameFreeVar old new (Expr t f) = Expr t (fmap (renameFreeVar old new) f)
 
 varsOfExpr :: Expr -> Set.Set String
 varsOfExpr expr = case node expr of

@@ -3657,9 +3657,21 @@ packParamsIntoLetinsGen meta (v:vars) (p:params) expr = do
 enumerateAppliedLambda :: CompilerMetadata -> Bool -> Expr -> Expr -> IRExpr -> CompilerMonad PResult
 enumerateAppliedLambda meta cumulative l v sample = do
   let lCn = chainName (getTypeInfo l)
-  let (_, boundVar, bodyCn, _) = equivalentLambda "enumerateAppliedLambda" (fcData meta) lCn
+  let (_, paramVar, bodyCn, _) = equivalentLambda "enumerateAppliedLambda" (fcData meta) lCn
   let fExprs = map snd (functions (compilingProgram meta))
-  let lBodyExpr = findExprWithCN fExprs bodyCn
+  -- The loop binds the lambda's parameter around both the body and the
+  -- argument's own measure, so an argument mentioning a variable of the same
+  -- name -- @h b = ..@ called as @h b@ from inside an enclosing @draw b@ --
+  -- would read the loop variable instead: its measure became @b == b@, always
+  -- true, and the draw's weight vanished from the sum. Such a parameter is
+  -- renamed to a fresh name first (task
+  -- rewrite-invariance-net-draw-apply-helper-alias).
+  (boundVar, lBodyExpr) <-
+    if paramVar `Set.member` freeVarsExpr v
+      then do
+        fresh <- mkVariable paramVar
+        return (fresh, renameFreeVar paramVar fresh (findExprWithCN fExprs bodyCn))
+      else return (paramVar, findExprWithCN fExprs bodyCn)
   let newTypeEnv = (boundVar, (rType (getTypeInfo v), False)):typeEnv meta
   let sr = semiringOf meta
   irTuple <- lift (runWriterT (do
