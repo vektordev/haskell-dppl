@@ -1,0 +1,13 @@
+-- Non-identity writeLogits of a sum type (design 00_bidirectional-autoNeural,
+-- "Tests Required": autoNeuralEncode_adt non-identity semantic). The remap moves
+-- mass between constructors (Nil -> Obj Red, Obj Red -> Nil), so a passthrough
+-- or a zero-stubbed field block would disagree with main's own prob function.
+-- `writeLogits_len` enrols it in WriteLogitsRoundtrip's DensityAgreement, which
+-- reads the written vector back through the plan reader and compares it with
+-- main_prob at sampled points; exact hand-derived slot values are pinned in
+-- TestWriteLogitsProperties (adtRemapThroughNetwork).
+-- Layout: [P(Nil), P(Obj), P(Red|Obj), P(Green|Obj), P(Blue|Obj)].
+data Color = Red | Green | Blue
+data Object = Nil | Obj color::Color
+neural readObj :: (Symbol -> Object) of _
+main sym = draw o = readObj sym in if isNil o then Obj Red else (if isRed (color o) then Nil else o)

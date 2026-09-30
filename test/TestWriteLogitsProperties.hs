@@ -14,6 +14,8 @@
 --   § 2.2  Gaussian linear ops: +c, *c, -(c), x+y      (writeLogitsProps_gaussian*)
 --   § 2.3  Discrete finite-domain maps                  (discrete_manytoonemap test case files)
 --   § 2.4  Discrete if-mixture (flag tracks P(Left))    (writeLogitsProps_eitherFlag*)
+--   § 2.5  Either/ADT non-identity: exact flag + conditional field slots, incl. composite
+--          (nested enum ADT) arms                      (sumTypeNonIdentity group)
 --   § 2.6  Tuple = concatenation                        (writeLogitsInvariant_outputDimMatchesPlan)
 --   § 3.3  Sample freely allowed                        (implicit in Gaussian programs)
 --   § 3.7  Cross-slot correlations silently marginalised (no test — not observable)
@@ -36,6 +38,7 @@ import Data.Maybe (isJust)
 import SPLL.Prelude (runWriteLogits, compile, runWriteLogitsC, runProbNamedC, runGenNamedC)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Lang.Types
+import SPLL.Lang.Lang (constructVList)
 import SPLL.AutoNeural (makeAutoNeural, makePartitionPlan, makeProb, getSize, planLayoutString, PartitionPlan(..))
 import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType (RType(..))
@@ -264,6 +267,102 @@ readLogitsProps_singleCtorNestedNoFlagFactor = testCase "singleCtorNestedNoFlagF
   where
     isVecRead (IRBuiltin BListIndex (IRVar v : _)) = v == vectorOut
     isVecRead _                                    = False
+
+------------------------------------------------------------------------
+-- § 2.5  Sum types, non-identity: exact slot values
+-- (design 00_bidirectional-autoNeural, "Sum types" / "Design Note: Encode Function
+-- Signature").
+--
+-- The corpus passthroughs (`main sym = nn sym`) pin the Either/ADT layout through
+-- LogitIdentity, but an identity program cannot tell a correct conditional encoding from
+-- one that merely copies the mock's vector. These programs transform the distribution, and
+-- every expected vector below is derived by hand from the program alone, using the design's
+-- contract for an Either/ADT region: one flag slot per constructor holding P(ctor) (a single
+-- P(Left) for an Either), then each constructor's field slots holding the field's marginal
+-- *conditional on that constructor*, P(field = v | ctor) -- the categorical-times-conditional
+-- factorisation the plan's readers multiply back out. Nested enum ADTs lay out the same way
+-- recursively; Bool enumerates [True, False].
+
+-- Check a whole written vector, slot by slot, against a hand-derived one.
+checkVector :: String -> [Double] -> [Double] -> IO ()
+checkVector label expected slots = do
+  assertEqual (label ++ ": vector length") (length expected) (length slots)
+  forM_ (zip [0 ..] expected) $ \(i, e) -> checkSlot label slots i e 1e-9
+
+-- Mock sym: literal mode -- the read-logits network returns exactly this vector.
+mockLiteral :: [Double] -> IRValue
+mockLiteral xs = VTuple (VInt 2) (constructVList (map VFloat xs))
+
+-- Nested enum ADT field, closed form.
+--   P(Nil) = 0.2, P(Obj) = 0.8; given Obj: Red 0.25, Green 0, Blue 0.75.
+-- Layout: [P(Nil), P(Obj), P(Red|Obj), P(Green|Obj), P(Blue|Obj)].
+writeLogitsProps_adtNestedFieldClosed :: TestTree
+writeLogitsProps_adtNestedFieldClosed = testCase "adtNestedFieldClosed" $ do
+  slots <- closedWriteLogits $ unlines
+    [ "data Color = Red | Green | Blue"
+    , "data Object = Nil | Obj color::Color"
+    , "main = if Uniform < 0.2 then Nil else (if Uniform < 0.25 then Obj Red else Obj Blue)"
+    ]
+  checkVector "adtNestedFieldClosed" [0.2, 0.8, 0.25, 0.0, 0.75] slots
+
+-- Nested enum ADT field, through a read-logits network and a remapping that moves mass
+-- *between constructors* (Nil -> Obj Red, Obj Red -> Nil) -- the non-identity case the
+-- design's Risks section asks for. The network is fed the literal vector
+--   [P(Nil)=0.3, P(Obj)=0.7, P(Red|Obj)=0.5, P(Green|Obj)=0.2, P(Blue|Obj)=0.3],
+-- so the input joint is Nil 0.3, Obj Red 0.35, Obj Green 0.14, Obj Blue 0.21, and main's
+-- output joint is Obj Red 0.3, Nil 0.35, Obj Green 0.14, Obj Blue 0.21:
+--   P(Nil) = 0.35, P(Obj) = 0.65, and given Obj: Red 0.3/0.65, Green 0.14/0.65, Blue 0.21/0.65.
+adtRemapSrc :: String
+adtRemapSrc = unlines
+  [ "data Color = Red | Green | Blue"
+  , "data Object = Nil | Obj color::Color"
+  , "neural readObj :: (Symbol -> Object) of _"
+  , "main sym = draw o = readObj sym in if isNil o then Obj Red else (if isRed (color o) then Nil else o)"
+  ]
+
+writeLogitsProps_adtRemapThroughNetwork :: TestTree
+writeLogitsProps_adtRemapThroughNetwork = testCase "adtRemapThroughNetwork" $ do
+  prog  <- parseOrFail adtRemapSrc
+  slots <- writeLogitsSlots prog [mockLiteral [0.3, 0.7, 0.5, 0.2, 0.3]]
+  checkVector "adtRemapThroughNetwork"
+    [0.35, 0.65, 0.3 / 0.65, 0.14 / 0.65, 0.21 / 0.65] slots
+
+-- Two fields under one constructor, correlated with each other within it: the field slots
+-- are each field's own conditional marginal (the plan cannot represent the within-ctor
+-- correlation; design "Independence is non-representable" -- product of marginals).
+--   P(None) = 0.5, P(P) = 0.5. Given P: 0.4 -> (True, False), 0.6 -> (Bernoulli 0.25, True),
+--   so P(a=True | P) = 0.4 + 0.6*0.25 = 0.55 and P(b=True | P) = 0.6.
+-- Layout: [P(None), P(P), P(a=T|P), P(a=F|P), P(b=T|P), P(b=F|P)].
+writeLogitsProps_adtTwoFieldConditionalMarginals :: TestTree
+writeLogitsProps_adtTwoFieldConditionalMarginals = testCase "adtTwoFieldConditionalMarginals" $ do
+  slots <- closedWriteLogits $ unlines
+    [ "data Pt = None | P a::Bool, b::Bool"
+    , "main = if Uniform < 0.5 then None else (if Uniform < 0.4 then P True False else P (Uniform < 0.25) True)"
+    ]
+  checkVector "adtTwoFieldConditionalMarginals" [0.5, 0.5, 0.55, 0.45, 0.6, 0.4] slots
+
+-- An Either whose Left arm is a composite (enum ADT) plan, through a read-logits network and
+-- a remapping that moves mass across the Either (Right True -> Left Red). The network is fed
+--   [P(Left)=0.4, P(Red|Left)=0.25, P(Green|Left)=0.75, P(True|Right)=0.5, P(False|Right)=0.5],
+-- so the input joint is Left Red 0.1, Left Green 0.3, Right True 0.3, Right False 0.3, and the
+-- output joint is Left Red 0.4, Left Green 0.3, Right False 0.3:
+--   P(Left) = 0.7; given Left: Red 4/7, Green 3/7; given Right: True 0, False 1.
+-- Layout: [P(Left), P(Red|Left), P(Green|Left), P(True|Right), P(False|Right)].
+-- (Spelled so both `if` arms carry the network's full Either tag: an arm that is a bare
+-- `left <ADT literal>` against a `right ..` arm crashes enum annotation in
+-- `unionMultiValues`, docs task fuzz-neural-plan-bugs item 2, independent of writeLogits.)
+eitherRemapSrc :: String
+eitherRemapSrc = unlines
+  [ "data Color = Red | Green"
+  , "neural readE :: (Symbol -> Either Color Bool) of _"
+  , "main sym = draw e = readE sym in if e == right True then left Red else e"
+  ]
+
+writeLogitsProps_eitherCompositeArmRemap :: TestTree
+writeLogitsProps_eitherCompositeArmRemap = testCase "eitherCompositeArmRemap" $ do
+  prog  <- parseOrFail eitherRemapSrc
+  slots <- writeLogitsSlots prog [mockLiteral [0.4, 0.25, 0.75, 0.5, 0.5]]
+  checkVector "eitherCompositeArmRemap" [0.7, 4 / 7, 3 / 7, 0.0, 1.0] slots
 
 ------------------------------------------------------------------------
 -- Cross-program invariants
@@ -544,6 +643,12 @@ writeLogitsTests = testGroup "WriteLogits"
       [ writeLogitsProps_eitherFlagInUnitInterval
       , writeLogitsProps_eitherFlagSignMatchesSide
       , writeLogitsProps_eitherIfMixtureFlag
+      ]
+  , testGroup "sumTypeNonIdentity"
+      [ writeLogitsProps_adtNestedFieldClosed
+      , writeLogitsProps_adtRemapThroughNetwork
+      , writeLogitsProps_adtTwoFieldConditionalMarginals
+      , writeLogitsProps_eitherCompositeArmRemap
       ]
   , writeLogitsProps_adtSingleConstrHasNoFlagSlot
   , readLogitsProps_singleCtorNestedPlan
