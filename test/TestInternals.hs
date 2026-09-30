@@ -1085,6 +1085,15 @@ anyRefusalTests = testGroup "witnessed-inference ANY refusal"
       expectMarginalRefusal
         "main = draw x = Uniform in left (x, x + Uniform)"
         (VEither (Left VAny)) "x"
+  , testCase "ANY in a slot reached through an alias refuses, naming x" $
+      -- One syntactic occurrence of x, but through the alias y it reaches both
+      -- slots. Re-inference (task reinfer-body-under-recovered-bindings) types
+      -- y Deterministic once x is recovered, so the body has no random source
+      -- left; the sink test must count x's uses through the binder, or the
+      -- ANY-valued witness flows into `y + 1.0` (`Plus ... (VAny, VFloat 1.0)`).
+      expectMarginalRefusal
+        "main = draw x = Uniform in draw y = x in (y, y + 1.0)"
+        (VTuple VAny (VFloat 1.5)) "x"
   ]
 
 expectMarginalRefusal :: String -> IRValue -> String -> IO ()

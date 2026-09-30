@@ -431,7 +431,7 @@ modalityInferTests = testGroup "ModalityInfer"
   -- Milestone 3 (the conditional-probability fold @p_D(x*)·|J|·p(body|x=x*)@)
   -- landed via the ExpressiveNeurals merge: the IRCompiler's body-factor
   -- folding in the Apply arm is exactly that fold, and the body is re-typed
-  -- deterministic-given-the-recovered-variable for dispatch (retypeDetGiven).
+  -- deterministic-given-the-recovered-variable for dispatch (reinferRecovered).
   -- Milestone 4's end-to-end pinning lives in @test/cases/@:
   -- letWitnessedSharedLatent(Mult), letTwoUniformIndirect. The same-latent
   -- shape @(x, x+x)@ compiles (to p_x·indicator, dim 1, at parity with

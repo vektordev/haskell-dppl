@@ -42,6 +42,7 @@ import Control.Monad.Writer.Lazy
 import SPLL.AutoNeural
 import SPLL.Typing.ForwardChaining
 import SPLL.Typing.Determinism (functionSummaries)
+import SPLL.Typing.ModalityInfer (ReinferCtx, reinferCtx, reinferGiven)
 import SPLL.Typing.AlgebraicDataTypes
 import SPLL.Semiring
 import Utils
@@ -125,7 +126,10 @@ data CompilerMetadata = CompilerMetadata {
   -- emitted code: it is only ever read through 'affineFormOf', i.e. inside
   -- the one Gaussian density leaf that consumes it. See 'affineMarginalisable'
   -- for when a binding is put here.
-  affineEnv :: [(String, AffineForm)]
+  affineEnv :: [(String, AffineForm)],
+  -- | What 'reinferRecovered' needs to re-run modality inference on a body
+  -- under the recovered variables; built once per compile.
+  reinferContext :: ReinferCtx
 }
 
 -- | A value's law as an affine combination of independent standard-normal
@@ -506,7 +510,8 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
     -- probability mass under logSpace, since every branch's accumulated weight
     -- was then a linear 1.0 multiplied against log (negative) per-branch terms
     -- (task topk-logspace-unsound).
-    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) [] verdicts sharedSets Set.empty detGens cyclicGens SRSumProduct []
+    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) [] verdicts sharedSets Set.empty detGens cyclicGens SRSumProduct [] reinferC
+    reinferC = reinferCtx fcDat p
     -- One walk of the whole program, shared by every 'meta' built below.
     verdicts = materializationVerdicts p
     sharedSets = materializationScopes p
@@ -1408,35 +1413,38 @@ isLambdaExpr :: Expr -> Bool
 isLambdaExpr (Expr _ (Lambda {})) = True
 isLambdaExpr _ = False
 
--- | Re-type a body factor for dispatch, given that the named variables have
--- been recovered by enclosing folds (design @modality-witnessed-inference@,
--- codegen level: the body sub-inference must see a recovered variable as
--- Deterministic so e.g. an inner @plus[y, z]@ with both operands recovered
--- routes to generate-and-compare instead of an inversion arm that needs a
--- random operand). Occurrences of the recovered variables become
--- 'Deterministic'; pure 'InjF' nodes whose operands are all deterministic
--- follow. Shadowing lambdas stop the substitution for their own name. Other
--- node kinds keep their annotations — their arms dispatch on operand types.
-retypeDetGiven :: [String] -> Expr -> Expr
-retypeDetGiven [] e = e
-retypeDetGiven names e = go names e
+-- | Re-annotate an expression for dispatch, given that the named variables
+-- have been recovered by enclosing constructs -- a witness fold, an
+-- enumeration loop, a residue factor (design law-carrying-modality §D,
+-- @modality-witnessed-inference@ at the codegen level): the sub-inference
+-- must see a recovered variable as Deterministic so e.g. an inner
+-- @plus[y, z]@ with both operands recovered routes to generate-and-compare
+-- instead of an inversion arm that needs a random operand.
+--
+-- This is 'SPLL.Typing.ModalityInfer.reinferGiven', the modality engine
+-- itself, run under an environment binding those variables 'Exact'; it used
+-- to be a syntactic re-typing (@retypeDetGiven@) of the names and the pure
+-- 'InjF'/@if@ nodes over them, which did not follow a binder: after
+-- @draw y = x * 2.0@ with @x@ recovered, @y@ kept its standalone 'PNormal'
+-- and the catch-all handed @Var y@ to 'toIRNormalParams'.
+reinferRecovered :: CompilerMetadata -> [String] -> Expr -> Expr
+reinferRecovered _ [] e = e
+reinferRecovered meta names e = reinferGiven (reinferContext meta) names e
+
+-- | How many places the value of variable @x@ reaches in @e@: its free
+-- occurrences, where an occurrence inside the value of a @draw y = ..@ counts
+-- once for each use of @y@ in turn (at least once, so a dead binding reading
+-- @x@ still counts as a use). The witness fold's sink test asks this rather
+-- than the syntactic occurrence count, which an alias hides.
+usesThroughBinders :: String -> Expr -> Int
+usesThroughBinders x = go
   where
-    go ns (Expr ti (Var n)) | n `elem` ns = Expr (ti {pType = Deterministic}) (Var n)
-    go ns (Expr ti (Lambda n lambdaBody)) = Expr ti (Lambda n (go (filter (/= n) ns) lambdaBody))
-    go ns ex =
-      let ex' = setSubExprs ex (map (go ns) (getSubExprs ex))
-      in case ex' of
-           Expr ti (InjF f params)
-             | all ((== Deterministic) . pType . getTypeInfo) params ->
-                 Expr (ti {pType = Deterministic}) (InjF f params)
-           -- A selection among deterministic values by a deterministic
-           -- condition is deterministic (task
-           -- enumeration-budget-gate-misses-nested-application: a plan body
-           -- comparing against @if c then .. else ..@ with @c@ fixed).
-           Expr ti (IfThenElse ec et ee)
-             | all ((== Deterministic) . pType . getTypeInfo) [ec, et, ee] ->
-                 Expr (ti {pType = Deterministic}) (IfThenElse ec et ee)
-           _ -> ex'
+    go (Expr _ (Var n)) = if n == x then 1 else 0
+    go (Expr _ (Lambda y b)) = if y == x then 0 else go b
+    go (Expr _ (Apply (Expr _ (Lambda y b)) arg))
+      | y == x = go arg
+      | otherwise = go arg * max 1 (usesThroughBinders y b) + go b
+    go e = sum (map go (getSubExprs e))
 
 -- | Drop dead let-bindings from a forward-chaining inverse expression.
 -- 'toValueExpr' deliberately over-emits: its letin chain can bind clause
@@ -2422,7 +2430,18 @@ toIRInference meta False (Expr TypeInfo{rType=rt} (Apply l v)) sample | pType (g
       -- branch like they do ('indicatorP', not 'detP' -- which is reserved for
       -- results that produce no value at all, i.e. closures). See the leaf-anchor
       -- note on the 'Var'-is-a-local-variable case below.
-      return (indicatorP (semiringOf meta) (IROp OpEq (IRApply lIR vIR) sample))
+      --
+      -- Compared by 'equalityGuard', as every other deterministic leaf is: a
+      -- bare 'OpEq' compared a float leaf bit-exactly and read a nested ANY
+      -- (@(3.0, (ANY, 2.0))@ against @draw z = (1.0, 2.0) in (3.0, z)@) as a
+      -- mismatch. Rare while a @draw@ over a recovered variable kept its
+      -- stale random type; common once re-inference types it Deterministic
+      -- (task reinfer-body-under-recovered-bindings). Bound once, since the
+      -- guard reads the value per field.
+      do
+        applied <- mkVariable "det_app"
+        return (indicatorP (semiringOf meta)
+                  (IRLetIn applied (IRApply lIR vIR) (equalityGuard rt (IRVar applied) sample)))
 -- Deterministic lambda and bound expression CDF
 toIRInference meta True (Expr TypeInfo{rType=rt} (Apply l v)) sample | pType (getTypeInfo l) == Deterministic && pType (getTypeInfo v) == Deterministic = do
   vIR <- toIRGenerate meta v
@@ -2643,7 +2662,7 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
           -- Deterministic for the body's dispatch; re-typing happens after the
           -- fetch because the fetch always returns original annotations.
           let recovered = toInvCN : recoveredVars meta
-          let bodyExpr = retypeDetGiven recovered (findExprWithCN (map snd fs) lambdaBodyCN)
+          let bodyExpr = reinferRecovered meta recovered (findExprWithCN (map snd fs) lambdaBodyCN)
           -- The body references the bound variable, so it must be in scope in the type
           -- environment (mirrors how the Lambda arm descends into a lambda body).
           let bodyMeta = (extendMetaForLambda meta (getTypeInfo l) toInvCN) { recoveredVars = recovered }
@@ -2657,8 +2676,17 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
           -- genuine convolution (or the ANY value would flow into inverse
           -- arithmetic / observed-slot comparisons), so refuse at runtime rather
           -- than crash or return a silently wrong density.
+          --
+          -- The occurrence count is forward chaining's, syntactic, and does not
+          -- see through a @draw@: in @draw y = x in (y, y + 1.0)@ the one
+          -- occurrence of @x@ reaches two slots through @y@. Re-inference types
+          -- @y@ Deterministic there, so 'containsRandomSource' no longer
+          -- vetoes it, and the uses are counted through binders as well
+          -- ('usesThroughBinders').
           let occurrences = fromMaybe [] (lookup lResolvedCN (lambdaVarOccurrences (fcData meta)))
-          let bindingIsSink = length occurrences == 1 && not (containsRandomSource bodyExpr)
+          let bindingIsSink = length occurrences == 1
+                && usesThroughBinders toInvCN (findExprWithCN (map snd fs) lambdaBodyCN) <= 1
+                && not (containsRandomSource bodyExpr)
           let userVar = case l of Expr _ (Lambda n _) -> n; _ -> boundVar
           let refuse = IRError ("cannot compute marginal: binding '" ++ userVar
                 ++ "' is unobserved (ANY in its witnessing slot), but its value feeds"
@@ -3679,7 +3707,7 @@ enumerateAppliedLambda meta cumulative l v sample = do
     -- inside their loops each holds one value, and a curried helper call such
     -- as @contrib u 1@ (u enumerated outside) is only measurable as a call
     -- with deterministic arguments once @u@ reads as one.
-    pBranch <- (unP . rProb) <$> toIRInference meta False (retypeDetGiven (recoveredVars meta) v) (IRVar boundVar)
+    pBranch <- (unP . rProb) <$> toIRInference meta False (reinferRecovered meta (recoveredVars meta) v) (IRVar boundVar)
     -- Inside the loop the bound variable holds one fixed domain value, so it is
     -- recorded as recovered, exactly as 'residueFactor' records a variable fixed
     -- at its witness. Only a body that leaves the enumeration for 'toIRInference'
@@ -3719,7 +3747,7 @@ curriedEnumerableCallee meta l v
   = Just l'
   | otherwise = Nothing
   where
-    l' = retypeDetGiven (recoveredVars meta) l
+    l' = reinferRecovered meta (recoveredVars meta) l
     returnsFunction (TArrow _ (TArrow _ _)) = True
     returnsFunction _ = False
 
@@ -3741,7 +3769,7 @@ enumerateCurriedArgument meta cumulative appTi l v sample = do
                       , recoveredVars = boundVar : recoveredVars meta }
       sr = semiringOf meta
   irTuple <- lift (runWriterT (do
-    pBranch <- (unP . rProb) <$> toIRInference meta False (retypeDetGiven (recoveredVars meta) v) (IRVar boundVar)
+    pBranch <- (unP . rProb) <$> toIRInference meta False (reinferRecovered meta (recoveredVars meta) v) (IRVar boundVar)
     bodyRes <- toIREnumerate bodyMeta cumulative loopBody sample
     return (onProb (\p -> srTimes sr p pBranch) bodyRes))) <&> generateLetInBlock meta
   let discreteVVals = head [x | DiscreteValues x <- tags vTi]
@@ -4038,7 +4066,7 @@ toIREnumerate :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PRe
 toIREnumerate meta cumulative e@(Expr _ (Apply l v)) sample
   | isEnumerableApplication l v =
   if not (enumerationWithinMaterializationBudget meta (tags (getTypeInfo v)))
-    then toIRInference meta cumulative (retypeDetGiven (recoveredVars meta) e) sample
+    then toIRInference meta cumulative (reinferRecovered meta (recoveredVars meta) e) sample
     else case agreementShape meta l v of
       Just ag -> enumerateAgreement meta cumulative ag sample
       Nothing -> enumerateAppliedLambda meta cumulative l v sample
@@ -4088,7 +4116,7 @@ toIREnumerate meta cumulative e sample = do
 -- latents, the forward-and-compare body (the last argument) is exact and is
 -- used. When one of them draws fresh randomness, the node is not refused but
 -- handed to 'toIRInference' -- with every enclosing enumerated variable retyped
--- 'Deterministic' ('retypeDetGiven' over 'recoveredVars'), since inside the
+-- 'Deterministic' ('reinferRecovered' over 'recoveredVars'), since inside the
 -- enumeration loop each holds one fixed domain value. That is the same step the
 -- over-budget nested application in this function already takes, and it is
 -- sound for the same reason: the enumerated variables are 'typeEnv' locals, so
@@ -4116,7 +4144,7 @@ forwardOrInfer meta cumulative whole sample operands forward
   | all (null . randomDrawSites (detGenNames meta) . thd3) operands = forward
   | otherwise = do
       mapM_ (\(what, src, ir) -> requireDeterministicUnderEnum meta what src ir) operands
-      res <- toIRInference meta cumulative (retypeDetGiven (recoveredVars meta) whole) sample
+      res <- toIRInference meta cumulative (reinferRecovered meta (recoveredVars meta) whole) sample
       -- Every enclosing enumerated sum ('enumSumP') reports its result as a
       -- mass, dim 0, because until now its body always was one: a
       -- forward-and-compare indicator. A delegated body can be a density
@@ -4973,7 +5001,7 @@ isFieldCtorNode _ _ = False
 -- | The residue factor of a transported subtree: @subtree@ compiled as an
 -- ordinary point observation against @target@, with the bound variable
 -- @boundName@ fixed at its transported witness @value@. The variable is
--- re-typed 'Deterministic' for dispatch ('retypeDetGiven', as the
+-- re-typed 'Deterministic' for dispatch ('reinferRecovered', as the
 -- point-witness fold does for the recovered variable) and bound by an
 -- 'IRLetIn' around the compiled block, so the block is self-contained: its
 -- floated bindings stay under that binding (they may read it, and evaluation
@@ -4984,7 +5012,7 @@ isFieldCtorNode _ _ = False
 residueFactor :: CompilerMetadata -> Expr -> String -> RType -> IRExpr -> IRExpr -> CompilerMonad PResult
 residueFactor meta subtree boundName boundRT value target = do
   let recovered = boundName : recoveredVars meta
-  let retyped = retypeDetGiven recovered subtree
+  let retyped = reinferRecovered meta recovered subtree
   let fMeta = meta { typeEnv = (boundName, (boundRT, False)) : typeEnv meta
                    , recoveredVars = recovered }
   block <- lift (runWriterT (toIRInference fMeta False retyped target)) <&> generateLetInBlock fMeta
@@ -5774,7 +5802,7 @@ bindPeelInput s b
 -- scope. Variables bound INSIDE the subtree are not in the ambient scope and
 -- so are not flagged -- correctly, since the sub-compile is one
 -- 'toIRInference' call that models their sharing itself. A recovered witness
--- variable is deterministic by 'retypeDetGiven' and excluded twice over.
+-- variable is deterministic by 'reinferRecovered' and excluded twice over.
 --
 -- The check is deliberately LOCAL and conservative: it refuses any factor
 -- carrying such a variable, rather than tracking which factors end up
@@ -6357,8 +6385,9 @@ planShareSplit meta env e k = case sharedCand of
     -- Replace the occurrences by the variable. A node the replacement leaves
     -- free of plan occurrences was deterministic given the plan before it
     -- ('planDetGivenPlan': det InjF/if, a det-generating call, ...), so it is
-    -- now deterministic outright and is re-typed as such -- 'retypeDetGiven'
-    -- would stop at a call (@isValidB x@), leaving it to dispatch as random.
+    -- now deterministic outright and is re-typed as such here, directly, on
+    -- 'planDetGivenPlan''s verdict (the syntactic re-typing this module used
+    -- to have stopped at a call such as @isValidB x@).
     replaceOcc s x t
       | sameTerm s t = Expr ((getTypeInfo t) { pType = Deterministic }) (Var x)
       | Expr _ (Lambda _ _) <- t = t
@@ -7036,7 +7065,7 @@ planWitnessApply meta cumulative rt lResolvedCN lambdaBodyCN tag v sample
       -- construct (a recovered witness, or an enumeration's loop variable when
       -- this is reached from an over-budget nested application) is
       -- Deterministic here and must dispatch as such.
-      let bodyExpr = retypeDetGiven (recoveredVars meta) (findExprWithCN (map snd fs) lambdaBodyCN)
+      let bodyExpr = reinferRecovered meta (recoveredVars meta) (findExprWithCN (map snd fs) lambdaBodyCN)
       let occs = fromMaybe [] (lookup lResolvedCN (lambdaVarOccurrences (fcData meta)))
       let env = [(occs, PBPlan (PlanRef plan 0))]
       let target = if cumulative then PTUpTo sample else PTPoint sample

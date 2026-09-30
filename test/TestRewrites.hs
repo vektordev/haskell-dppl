@@ -54,7 +54,15 @@ import Rewrites
 -- law-carrying milestone that claims it, so no milestone can claim a family it
 -- does not deliver:
 --
--- * 'AliasIntro': M1, reinfer-body-under-recovered-bindings;
+-- * 'AliasIntro': was assigned to M1, reinfer-body-under-recovered-bindings,
+--   which cut its logged frontier from 75 to 50 but did not close it. What is
+--   left is not re-inference's class (a variable's stale type after it is
+--   recovered): an alias between a curried function's parameters
+--   (@constructEquivalenceClauses@, ~21), tagged or higher-order invocations
+--   (~15), an alias of a function parameter handed to the Gaussian catch-all
+--   with nothing recovered (2), and a witness seeded through an aliased chain
+--   refusing an ANY marginal. Those belong to M2 and M6, so the family stays
+--   log-only until the later of the two lands;
 -- * 'HelperExtract': M2, binding-resolver-one-application-rule;
 -- * 'DrawIntro', 'LinearInline': M6, dispatch-on-law-certificates.
 refusalIsHard :: Family -> Bool
@@ -87,21 +95,13 @@ knownDivergences =
   , Known "drawDestructuredShared" DrawIntro "" structuredReread
   , Known "drawDestructuredShared" AliasIntro "" structuredReread
   , Known "drawDestructuredShared" HelperExtract "" structuredReread
-  , Known "tupleRoundtrip" DrawIntro "" structuredReread
-  , Known "tupleRoundtrip" AliasIntro "" structuredReread
-  , Known "tupleRoundtrip" HelperExtract "" structuredReread
   , Known "setWitnessTupleDisjointFields" HelperExtract "" structuredReread
   , Known "letBoundEitherDestructure" HelperExtract "isLeft" structuredReread
-  -- A deterministic sum compared with the query is float-tolerant inline and
-  -- exact once it moves behind a call or an alias.
-  , Known "floatEquality" HelperExtract "" floatTolerance
-  , Known "floatEquality" AliasIntro "" floatTolerance
   ]
   where
     zeroLetBound = "let-bound-zero-factor-loses-dirac-mass"
     zeroRandomBound = "draw-bound-random-factor-times-literal-zero-loses-dirac-mass"
     structuredReread = "structured-draw-reread-through-binder-drops-field"
-    floatTolerance = "float-equality-tolerance-lost-behind-call-or-alias"
 
 knownDivergence :: String -> Family -> String -> Maybe Known
 knownDivergence prog fam site =

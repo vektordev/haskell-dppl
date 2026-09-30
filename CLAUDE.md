@@ -477,7 +477,7 @@ refusals, all falling through to `setWitnessApply` exactly as before:
 - anything non-Gaussian or gated -- a chain gated on its own state is `Bottom`
   in ModalityInfer and never reaches here.
 
-Witnessed variables mix in for free: after an inversion `retypeDetGiven` makes
+Witnessed variables mix in for free: after an inversion `reinferRecovered` makes
 them `Deterministic`, which the algebra treats as constants. That is what
 answers a partial observation like `(s1, s3)` of a three-step chain, as
 `N(s1) * N(s3 | s1)` with `s2` integrated out. Corpus
@@ -545,6 +545,45 @@ A function group's class is its capitalised name made unique by
 `groupClassName` against all of those and the ADT classes: capitalising landed
 `t` on the runtime's tuple class `T` (every tuple broke) and `foo` on
 constructor `Foo`'s class (a silently wrong `p(Foo) = 0`).
+
+### Recovered variables are re-inferred, not re-typed
+
+Once an engine fixes a variable's value -- the point-witness fold recovering it
+from the observation, an enumeration loop binding it, a residue factor fixing
+it at its witness -- the rest of the compile must see it as `Deterministic`.
+`IRCompiler.reinferRecovered` does that by re-running the modality engine
+(`ModalityInfer.reinferGiven`) on the body, with the recovered names bound
+`Exact` (task `reinfer-body-under-recovered-bindings`, design
+`law-carrying-modality` M1). It replaced `retypeDetGiven`, a syntactic
+re-typing of the names and the pure `InjF`/`if` nodes over them that did not
+follow a binder: after `draw y = x * 2.0` with `x` recovered, `y` kept its
+standalone `PNormal`, and the Gaussian catch-all handed `Var y` to
+`toIRNormalParams` (rows 7-9 of the design's evidence table, and
+`let-bindings/letAliasRandomBinding`/`accumulatedPosition`).
+
+The environment is the one `inferE` had at the target's position, rebuilt by
+`envAt` from its declaration's root with the same binding helpers
+(`letBoundMod`, `lambdaParamMod`, `conditionEnv`), so enclosing binders that
+were not recovered keep their laws. A pin binds `Exact` at every binder of its
+name on the way down and is also bound outright, which covers a loop variable
+with no source binder (`enumerateCurriedArgument`'s, or a parameter
+`enumerateAppliedLambda` renamed). The top-level summaries are computed once
+per compile (`CompilerMetadata.reinferContext`).
+
+Two things moved with it:
+
+- **The sink test counts uses through binders.** The witness fold treats a
+  binding as a sink (an ANY-valued witness is absorbed) only if its value
+  reaches one place. Forward chaining's occurrence count is syntactic, and the
+  stale type used to veto an alias anyway. Now `draw y = x in (y, y + 1.0)`
+  has no random source left once `x` is recovered, so `usesThroughBinders`
+  counts `x`'s uses through `y`; without it `(ANY, 1.5)` evaluated
+  `VAny + 1.0` instead of refusing (`TestInternals`, ANY refusal group).
+- **The deterministic-application arm compares with `equalityGuard`.** It
+  used a bare `OpEq`, exact on floats and blind to a nested `ANY`, while every
+  other deterministic leaf is compared float-tolerantly and field by field.
+  More `let`s reach that arm now (`let-bindings/drawConstNestedAny`,
+  `distributions/floatEqualityBehindHelperCall`).
 
 ### Callee Normalization
 
@@ -710,7 +749,7 @@ on a call cycle** (`CompilerMetadata.cyclicGenNames`, over-approximated like
 one reaching back into the function being compiled). Every other fresh draw
 under an enumeration — a primitive, a neural read, a call into a non-recursive
 helper — is handed by `forwardOrInfer` to `toIRInference` with the enclosing
-enumerated variables retyped `Deterministic` (`retypeDetGiven` over
+enumerated variables retyped `Deterministic` (`reinferRecovered` over
 `recoveredVars`), the same step the over-budget nested application already
 took. That fixed the false refusal of the canonical noisy observation of a
 shared latent, `draw b = Uniform < 0.5 in (b, if b then Uniform < 0.9 else
@@ -952,8 +991,8 @@ an empty enumeration, which made the gate decline and reroute a two-value
 
 Inside an enumeration loop the bound variable holds one fixed value, so
 `enumerateAppliedLambda` records it in `recoveredVars`, and `planWitnessApply`
-re-types its re-fetched body with `retypeDetGiven` (which now also lifts an
-`if` whose condition and arms are all `Deterministic`). Without that, an
+re-types its re-fetched body with `reinferRecovered` (see "Recovered variables
+are re-inferred" below). Without that, an
 over-budget inner application whose body reads the outer variable was refused
 by the plan traversal as reading "an enclosing random binding".
 
@@ -1388,7 +1427,7 @@ It used to be refused, because **this pass runs before ModalityInfer, so every
 `pType` still reads `NotSetYet` here** and it cannot tell which argument is
 random. IRCompiler decides that instead: a conditional top-level function
 applied to arguments that are all deterministic -- once the enclosing
-enumerated latents are fixed (`retypeDetGiven` over `recoveredVars`) -- except
+enumerated latents are fixed (`reinferRecovered` over `recoveredVars`) -- except
 a random enumerable *last* one is compiled by `enumerateCurriedArgument`, which
 loops over that argument's domain exactly as `enumerateAppliedLambda` loops
 over a `let`'s. A random *leading* argument declines there and keeps its old

@@ -38,6 +38,9 @@ module SPLL.Typing.ModalityInfer
   , IMod(..)
   , inferProgram
   , toMod
+  , ReinferCtx
+  , reinferCtx
+  , reinferGiven
   ) where
 
 import qualified Data.Map.Strict as Map
@@ -51,7 +54,7 @@ import SPLL.Lang.Types
   ( Expr(..), ExprF(..), Program(..), TypeInfo(..), InjFName(..), ChainName, ADTDecl, CompilerError, FnDecl
   , Tag(..), GenericValue(..)
   , dataName, constructors )
-import SPLL.Lang.Lang (getTypeInfo, containedVars, varsOfExpr, multiValueContainsContinuous)
+import SPLL.Lang.Lang (getTypeInfo, getSubExprs, containedVars, varsOfExpr, multiValueContainsContinuous)
 import SPLL.Typing.Typing (setPType)
 import SPLL.Typing.PType (PType(..))
 import SPLL.Typing.RType (RType(..))
@@ -421,9 +424,9 @@ inferE ctx env expr = case expr of
     in done m (Expr (setPType ti (projectI m)) (IfThenElse c' t' f')) (ca ++ ta ++ fa)
 
   Expr ti (Lambda x body) ->
-    let (argTy, bodyTy) = case rType ti of TArrow a b -> (a, b); _ -> (TFloat, TFloat)
+    let bodyTy = case rType ti of TArrow _ b -> b; _ -> TFloat
         arr   = IArr gExact (\m -> let (im,_,_) = inferE ctx (Map.insert x m env) body in im)
-        (bodyRepMod, body', ba) = inferE ctx (Map.insert x (repIMod argTy) env) body
+        (bodyRepMod, body', ba) = inferE ctx (Map.insert x (lambdaParamMod ti) env) body
     -- The internal modality is the closure 'arr' (so application β-reduces), but
     -- the flat annotation @IRCompiler@ reads is the /body's/ pType, not the outer
     -- closure 'Deterministic' — IRCompiler selects prob/integrate codegen from the
@@ -454,9 +457,7 @@ inferE ctx env expr = case expr of
          -- own slot) is untouched. The capability gate (@gCap /= Exact@) skips
          -- the FC query for deterministic and function-valued bindings.
          Expr lti (Lambda x body) ->
-           let witnessed = gCap (outerI argMod) /= Exact
-                        && isWitnessedLambda (icFC ctx) (icADTs ctx) (icObs ctx) (chainName lti)
-               boundMod = if witnessed then iwit argMod else argMod
+           let boundMod = letBoundMod ctx lti argMod
                (bodyMod, body', ba) = inferE ctx (Map.insert x boundMod env) body
                -- The applied lambda node carries the body's pType (its result),
                -- matching @PInfer2@ and what @IRCompiler@ reads, not the outer
@@ -482,6 +483,21 @@ inferE ctx env expr = case expr of
                                (enumerableOperand a) (enumerableOperand b)
                                (outerI ma) (outerI mb))
       in done (IG g) (Expr (setPType ti (projectGround g)) (InjF (Named fname) [a', b'])) (aacc ++ bacc)
+
+-- | The law a directly-applied lambda (a @let@) binds its parameter to, given
+-- the argument's law: witnessed when the binding is random and forward
+-- chaining certifies it recoverable from the observation (see the 'Apply' rule
+-- of 'inferE'). Shared with 'envAt', which must bind exactly as 'inferE' does.
+letBoundMod :: ICtx -> TypeInfo -> IMod -> IMod
+letBoundMod ctx lti argMod
+  | gCap (outerI argMod) /= Exact
+  , isWitnessedLambda (icFC ctx) (icADTs ctx) (icObs ctx) (chainName lti) = iwit argMod
+  | otherwise = argMod
+
+-- | The law a free-standing lambda binds its parameter to: the representative
+-- of the parameter's type. Shared with 'envAt'.
+lambdaParamMod :: TypeInfo -> IMod
+lambdaParamMod ti = repIMod (case rType ti of TArrow a _ -> a; _ -> TFloat)
 
 -- | Does this declaration body contain a neural read anywhere?
 --
@@ -823,3 +839,91 @@ inferProgram fcData (Program decls nns adtDecls enc) =
 -- | The per-node outer 'GroundMod', keyed by chain name (diff harness §6).
 perNodeOuterGrounds :: FCData -> Program -> [(ChainName, GroundMod)]
 perNodeOuterGrounds fcData = snd . inferProgram fcData
+
+-- ---------------------------------------------------------------------------
+-- Re-inference under recovered bindings (law-carrying-modality M1, §D)
+-- ---------------------------------------------------------------------------
+
+-- | What re-inferring a sub-expression needs from the whole program, computed
+-- once per compile: the declarations to locate it in, and the top-level
+-- summaries its calls are resolved against.
+data ReinferCtx = ReinferCtx
+  { rcADTs      :: [ADTDecl]
+  , rcFC        :: FCData
+  , rcDecls     :: [FnDecl]
+  , rcSummaries :: Env
+  }
+
+reinferCtx :: FCData -> Program -> ReinferCtx
+reinferCtx fcData (Program decls _ adtDecls _) =
+  ReinferCtx adtDecls fcData decls (summaries adtDecls fcData decls)
+
+-- | Re-annotate @target@ as 'inferE' would, given that each of @pins@ names a
+-- variable whose value is known -- recovered from the observation by an
+-- enclosing inversion, or fixed by an enclosing enumeration loop -- and so is
+-- 'Exact'. This is how a recovered variable's determinism reaches every node
+-- that depends on it, through @draw@ binders included: after
+-- @draw y = x * 2.0@ with @x@ pinned, @y@ is 'Exact' too, because the engine's
+-- own let rule binds it.
+--
+-- The environment is the one 'inferE' had at the node carrying @target@'s
+-- chain name, rebuilt by 'envAt' from its declaration's root, so enclosing
+-- binders that were /not/ recovered keep their laws. A pin is honoured at
+-- every binder of that name on the way down (an intermediate binding computed
+-- from a pinned variable then gets the right law) and also bound outright, so
+-- a variable with no source binder -- 'enumerateCurriedArgument''s loop
+-- variable, or a parameter an enumeration renamed -- is 'Exact' too. Inside
+-- @target@ an inner binder of a pinned name shadows the pin as usual.
+--
+-- @target@ may differ from the program's node under that chain name (a
+-- renamed body, a synthesized application around a loop variable); only its
+-- position is looked up. A chain name found in no declaration leaves the
+-- non-pinned free variables at the law their existing annotation projects.
+reinferGiven :: ReinferCtx -> [String] -> Expr -> Expr
+reinferGiven rc pins target = e'
+  where
+    pinSet = Set.fromList pins
+    pinMap = Map.fromList [ (n, IG gExact) | n <- pins ]
+    located = [ (b, env) | (_, b) <- rcDecls rc
+                         , Just env <- [envAt (declCtx b) pinSet (rcSummaries rc) (cnOf target) b] ]
+    (ctx, env0) = case located of
+      (b, env) : _ -> (declCtx b, env)
+      [] -> (declCtx target, Map.union (annotatedFreeLaws target) (rcSummaries rc))
+    (_, e', _) = inferE ctx (Map.union pinMap env0) target
+    declCtx b = ICtx (rcADTs rc) (rcFC rc) (cnOf b) (hasReadNN b)
+
+-- | The free variables of an expression at the law their current annotation
+-- projects: the fallback environment of 'reinferGiven' for a node it cannot
+-- locate in the program.
+annotatedFreeLaws :: Expr -> Env
+annotatedFreeLaws = go Set.empty
+  where
+    go bound (Expr ti (Var n))
+      | n `Set.member` bound = Map.empty
+      | otherwise = Map.singleton n (IG (fromClosurePType (pType ti)))
+    go bound (Expr _ (Lambda x b)) = go (Set.insert x bound) b
+    go bound e = Map.unions (map (go bound) (getSubExprs e))
+
+-- | The environment 'inferE' extends to on its way from @e@ down to the node
+-- with chain name @cn@, or 'Nothing' if @e@ does not contain it. It binds
+-- exactly as 'inferE' does -- 'letBoundMod', 'lambdaParamMod', 'conditionEnv'
+-- -- except that a binder of a pinned name binds 'Exact'.
+envAt :: ICtx -> Set.Set String -> Env -> ChainName -> Expr -> Maybe Env
+envAt ctx pins env cn e
+  | cnOf e == cn = Just env
+  | otherwise = case e of
+      Expr _ (Apply f@(Expr lti (Lambda x body)) arg) ->
+        firstJust
+          [ envAt ctx pins env cn arg
+          , if cnOf f == cn then Just env else Nothing
+          , envAt ctx pins (Map.insert x (bind x (letBoundMod ctx lti (argLaw arg))) env) cn body ]
+      Expr ti (Lambda x body) ->
+        envAt ctx pins (Map.insert x (bind x (lambdaParamMod ti)) env) cn body
+      Expr _ (IfThenElse c t f) ->
+        let armEnv = conditionEnv env c
+        in firstJust [envAt ctx pins env cn c, envAt ctx pins armEnv cn t, envAt ctx pins armEnv cn f]
+      _ -> firstJust (map (envAt ctx pins env cn) (getSubExprs e))
+  where
+    bind x m = if x `Set.member` pins then IG gExact else m
+    argLaw arg = let (m, _, _) = inferE ctx env arg in m
+    firstJust = foldr (\m r -> maybe r Just m) Nothing

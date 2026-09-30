@@ -85,8 +85,8 @@ predicateFlat f e = f e && all (predicateFlat f) (getSubExprs e)
 -- non-deterministic variable (the builtin distributions @Uniform@/@Normal@ are
 -- 'Var' nodes, as are references to probabilistic top-level functions) or a
 -- neural-network read. Run this on a body already passed through
--- 'SPLL.IRCompiler.retypeDetGiven', so recovered variables are 'Deterministic'
--- and don't count.
+-- 'SPLL.IRCompiler.reinferRecovered', so recovered variables (and whatever is
+-- computed from them) are 'Deterministic' and don't count.
 containsRandomSource :: Expr -> Bool
 containsRandomSource e = isSource e || any containsRandomSource (getSubExprs e)
   where
