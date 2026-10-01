@@ -1,17 +1,20 @@
+{-# LANGUAGE LambdaCase #-}
 module SPLL.Analysis (
   annotate,
   annotateEnumsProg,
   definitelyUntagged,
   annotateConditionalProg,
   materializationDomain,
-  withinMaterializationBudget
+  withinMaterializationBudget,
+  structuralTag,
+  listedTag
 ) where
 
 import SPLL.Lang.Types
 import SPLL.Lang.Lang
 import Data.Maybe (maybeToList)
 import Data.Either (isRight)
-import Data.List (genericLength, genericTake)
+import Data.List (genericLength, genericTake, nub)
 import Data.Bifunctor
 import Control.Monad (guard)
 import SPLL.Typing.Typing (setTags)
@@ -28,21 +31,23 @@ type TagEnv = [(String, [Tag])]
 type FunEnv = [(String, Expr)]
 
 annotateEnumsProg :: Program -> Program
-annotateEnumsProg p@Program {functions=f, neurals=n, adts=adtsDecls} = p{functions = finalExprEnv}
+annotateEnumsProg p@Program {functions=f, neurals=n, adts=adtsDecls, writeLogitsDecls=registry} = p{functions = finalExprEnv}
   --TODO this is really unclean. It does the the job of initializing the environment with correct tags, and also prevents infinite recursion, by only evaluating twice, but annotates the program twice
   where
     finalExprEnv = fixpoint iterateExprEnv []
     iterateExprEnv eEnv = map (second (annotate adtsDecls f (neuralEnv ++ map (second $ tags . getTypeInfo) eEnv))) f
-    -- Resolve "_" (MultiAuto) placeholders against the declared output/input type before
-    -- this MultiValue is used for discrete-value propagation.
-    -- A MultiValue with a continuous (Real) leaf has no finite enumeration; tagging it
-    -- would make the enumeration machinery sum over only its discrete residue, silently
-    -- dropping the continuous probability mass. Decline to tag instead, the same as a
-    -- neural with no `of` annotation at all.
-    neuralEnv = [(name, [DiscreteValues mv]) | (name, declType, Just rawMv) <- n,
-                 let mv = resolveTag declType rawMv,
-                 not (multiValueContainsContinuous mv)]
-    resolveTag declType mv = maybe mv (\ty -> resolveMultiAuto adtsDecls ty mv) (neuralValueType declType)
+    -- Every read is tagged with its declaration's resolved annotation, whether
+    -- or not an `of` was written: no clause means `of _`, so the two cannot
+    -- route differently (task of-annotation-and-auto-derived-enumeration-divergence).
+    -- A continuous leaf stays in the tag rather than voiding it -- an explicit
+    -- clause is never discarded. A node is enumerable only if its OWN domain
+    -- is wholly discrete ('IRCompiler.isEnumerable' and the other consumers
+    -- check), so `fst s` off a `([0,1,2], Real)` read enumerates while `s` and
+    -- `snd s` do not. A declaration whose annotation does not resolve gets no
+    -- tag here; 'SPLL.Prelude.compile' has already refused it with that
+    -- diagnostic ('resolveNeuralDecls').
+    neuralEnv = [(name, [DiscreteValues mv]) | decl@(name, _, _) <- n,
+                 Right mv <- [resolveNeuralAnnotation adtsDecls registry decl]]
 
 annotate :: [ADTDecl] -> FunEnv -> TagEnv -> Expr -> Expr
 annotate adtsParam funEnv = annotateIn adtsParam funEnv []
@@ -105,11 +110,14 @@ annotateIn adtsParam funEnv visited env e = withNewTypeInfo
     withNewTypeInfo = setTypeInfo withNewSubExpr (setTags (getTypeInfo withNewSubExpr) newTags)
 
 discretesTags :: [ADTDecl] -> FunEnv -> [String] -> TagEnv -> Expr -> [Tag]
--- The continuous-leaf filter mirrors neuralEnv above: never emit a DiscreteValues
--- tag whose enumeration would be a discrete residue of a partly-continuous set.
+-- A tag may carry continuous leaves (see neuralEnv above): it is then the
+-- node's value *shape*, which the structural accessors below read through, but
+-- not an enumeration -- every consumer that loops over a tag refuses one with
+-- a continuous leaf. The generic InjF case below finds no values in such a
+-- domain ('multiValueToValueList') and leaves the node untagged.
 discretesTags adtsParam funEnv visited env e = case e of
   (Expr _ (Apply _ _)) -> applyTags adtsParam funEnv visited env e
-  _ -> [DiscreteValues mv | mv <- maybeToList values, not (multiValueContainsContinuous mv)]
+  _ -> [DiscreteValues mv | mv <- maybeToList values]
   where
     values = case e of
       -- A pruned observation's HOLE (design witnessed-per-query-capability,
@@ -128,21 +136,22 @@ discretesTags adtsParam funEnv visited env e = case e of
       -- them lets and/or (and any boolean InjF above them) take the
       -- discrete-enumeration path. Must come before the generic InjF case.
       (Expr _ (InjF (Named name) [_, _])) | name `elem` ["gt", "lt"] -> Just $ MultiDiscretes [VBool True, VBool False]
+      -- Structural InjFs (tuple/Either/ADT accessors, constructor tests and
+      -- constructors) act on the operand's value set itself rather than on
+      -- its listed elements ('structuralTag'), so the cross product a
+      -- structured domain stands for is never enumerated just to take it
+      -- apart again. Must precede the generic InjF case.
+      (Expr _ (InjF (Named name) params))
+        | Just rule <- structuralTag adtsParam name
+        , Just operands <- mapM getValuesFromExpr params
+        , Just answer <- rule operands -> answer
       (Expr _ (InjF (Named name) params)) -> do
         -- Decided from shape first, so an operand that can never be tagged
         -- refutes the node before a sibling's value set is forced (see
         -- 'definitelyUntagged').
         guard (not (any untagged params))
         paramValues <- mapM getValuesFromExpr params
-        let unpackedMultiVals = map multiValueToValueList paramValues
-        -- No values at all is an *absence* of a domain, not an empty one: either
-        -- the forward function could not be evaluated, or (for a partial ADT
-        -- accessor) no operand value is in its domain. Tagging that as an empty
-        -- enumeration would make downstream inference sum over nothing and
-        -- report probability zero, so decline the tag instead.
-        case distinctUpTo resultCap (propagateValuesLazily adtsParam name unpackedMultiVals) of
-          [] -> Nothing
-          vals -> return (valueListToMultiValue vals)
+        listedTag adtsParam resultCap name paramValues
       (Expr _ (IfThenElse _ left right)) -> do
         guard (not (untagged left || untagged right))
         valuesLeft <- getValuesFromExpr left
@@ -159,6 +168,122 @@ discretesTags adtsParam funEnv visited env e = case e of
     resultCap = case autoDeriveMultiValue adtsParam (rType (getTypeInfo e)) of
       Right mv | not (multiValueContainsContinuous mv) -> multiValueCardinality mv
       _ -> Nothing
+
+-- | The value set of an InjF application, by listing: the forward function is
+-- evaluated over the cross product of its operands' listed values, capped at
+-- the result type's size ('distinctUpTo').
+--
+-- No values at all is an *absence* of a domain, not an empty one: either the
+-- forward function could not be evaluated, or (for a partial ADT accessor) no
+-- operand value is in its domain. Tagging that as an empty enumeration would
+-- make downstream inference sum over nothing and report probability zero, so
+-- it answers 'Nothing' instead.
+listedTag :: [ADTDecl] -> Maybe Integer -> String -> [MultiValue] -> Maybe MultiValue
+listedTag adtsParam cap name operands =
+  case distinctUpTo cap (propagateValuesLazily adtsParam name (map multiValueToValueList operands)) of
+    [] -> Nothing
+    vals -> Just (valueListToMultiValue vals)
+
+-- | The value set of a structural InjF, computed from its operands' value
+-- sets without listing them (task
+-- of-annotation-and-auto-derived-enumeration-divergence). 'Nothing' for any
+-- other InjF, which keeps the generic, listing path. The rule's own 'Nothing'
+-- is the absent domain the listing path gives when no value comes out.
+--
+-- Each rule is the listing path's answer, in its canonical form
+-- ('valueListToMultiValue' of the listed results, in their order): @fst@ of
+-- @A x B@ is @A@ when @B@ has a value, and so on. That is pinned per corpus
+-- node by @Internals@' structural-propagation differential. A wholly
+-- discrete operand of a non-canonical shape -- a tuple constant is the flat
+-- @MultiDiscretes [VTuple ..]@ -- falls back to listing, so the answer is
+-- never a guess.
+--
+-- Where listing voids a tag because one evaluation failed -- @fromRightPartial@
+-- over a set that also holds a @Left@ -- the rule answers the values that do
+-- exist, the filtering listing already applies to an ADT field accessor
+-- (@implicitFunctionApplicable@). That is a refinement of listing's answer,
+-- never a different set.
+--
+-- What the listing path cannot do is see through a continuous leaf, since
+-- such a set has no listed values at all: @fst@ of a @([0,1,2], Real)@ read
+-- has no tag on that path. Here it is @[0,1,2]@, an ordinary enumerable
+-- domain, which is what makes a written @Real@ beside a discrete slot cost
+-- that slot nothing.
+structuralTag :: [ADTDecl] -> String -> Maybe ([MultiValue] -> Maybe (Maybe MultiValue))
+structuralTag adtDecls name = fmap (\rule operands -> if all canonical operands then rule operands else Nothing) $ case name of
+  "fst"              -> Just $ unary $ \case MultiTuple a b -> Just (keepIf (inhabited b) a); _ -> Nothing
+  "snd"              -> Just $ unary $ \case MultiTuple a b -> Just (keepIf (inhabited a) b); _ -> Nothing
+  "fromLeftPartial"  -> Just $ unary $ \case MultiEither l _ -> Just (keepIf True l); _ -> Nothing
+  "fromRightPartial" -> Just $ unary $ \case MultiEither _ r -> Just (keepIf True r); _ -> Nothing
+  "isLeft"           -> Just $ unary $ \case MultiEither l r -> Just (bools [(inhabited l, True), (inhabited r, False)]); _ -> Nothing
+  "isRight"          -> Just $ unary $ \case MultiEither l r -> Just (bools [(inhabited l, False), (inhabited r, True)]); _ -> Nothing
+  -- The Maybe-valued extractors: @fromLeft (left a) = right a@, and a Right
+  -- operand gives @left ()@.
+  "fromLeft"         -> Just $ unary $ \case MultiEither l r -> Just (maybeOf (inhabited r) l); _ -> Nothing
+  "fromRight"        -> Just $ unary $ \case MultiEither l r -> Just (maybeOf (inhabited l) r); _ -> Nothing
+  "TCons"            -> Just $ \case [a, b] -> Just (keepIf (inhabited a && inhabited b) (MultiTuple a b)); _ -> Nothing
+  "left"             -> Just $ \case [a] -> Just (keepIf (inhabited a) (MultiEither a (MultiDiscretes []))); _ -> Nothing
+  "right"            -> Just $ \case [b] -> Just (keepIf (inhabited b) (MultiEither (MultiDiscretes []) b)); _ -> Nothing
+  _ | name `elem` constructorNames ->
+        Just $ \fields -> Just (keepIf (all inhabited fields) (MultiADT [(name, fields)]))
+    | Just ctor <- lookup name ctorTests ->
+        Just $ unary $ \case
+          MultiADT cs -> Just (bools [(all inhabited fs, cn == ctor) | (cn, fs) <- cs])
+          _ -> Nothing
+    | Just (owner, idx) <- lookup name accessors ->
+        Just $ unary $ \case
+          MultiADT cs -> Just $ case lookup owner cs of
+            Just fs | all inhabited fs, idx < length fs -> Just (fs !! idx)
+            _ -> Nothing
+          _ -> Nothing
+    | otherwise -> Nothing
+  where
+    -- A rule that does not recognise its operand's shape -- or is handed a
+    -- non-canonical one -- answers the outer 'Nothing', which falls back to
+    -- listing.
+    unary f [mv] = f mv
+    unary _ _ = Nothing
+    keepIf ok mv = if ok then Just mv else Nothing
+    bools cases = case nubValues [VBool b | (True, b) <- cases] of
+      [] -> Nothing
+      vs -> Just (MultiDiscretes vs)
+    maybeOf otherSide payload
+      | not (inhabited payload) && not otherSide = Nothing
+      | otherwise = Just (MultiEither (MultiDiscretes [VUnit | otherSide])
+                                      (if inhabited payload then payload else MultiDiscretes []))
+    constructorNames = [cn | adt <- adtDecls, (cn, _) <- constructors adt]
+    ctorTests = [("is" ++ cn, cn) | adt <- adtDecls, (cn, _) <- constructors adt]
+    accessors = [(fName, (cn, idx)) | adt <- adtDecls, (cn, fs) <- constructors adt, (idx, (fName, _)) <- zip [0..] fs]
+
+-- | Does a value set have at least one value? A continuous leaf does; an
+-- empty enumeration, and any product with an empty factor, does not.
+inhabited :: MultiValue -> Bool
+inhabited mv = case mv of
+  MultiDiscretes vs -> not (null vs)
+  MultiTuple a b    -> inhabited a && inhabited b
+  MultiEither l r   -> inhabited l || inhabited r
+  MultiADT cs       -> any (all inhabited . snd) cs
+  _                 -> True
+
+-- | Is this set already in the shape 'valueListToMultiValue' would give its
+-- listed values? Only then can a constructor rule build its result
+-- structurally and still agree with the listing path: a flat
+-- @MultiDiscretes [VTuple ..]@ (a tuple constant) is re-factored by listing.
+-- Continuous leaves count as canonical; listing could not see them anyway.
+canonical :: MultiValue -> Bool
+canonical mv = case mv of
+  MultiDiscretes vs -> all scalar vs && length (nubValues vs) == length vs
+  MultiTuple a b    -> canonical a && canonical b
+  MultiEither l r   -> canonical l && canonical r
+  MultiADT cs       -> all (all canonical . snd) cs && all (all inhabited . snd) cs
+                         && length (nub (map fst cs)) == length cs
+  _                 -> True
+  where
+    scalar v = case v of
+      VTuple _ _ -> False
+      VEither _  -> False
+      VADT _ _   -> False
+      _          -> True
 
 -- | The distinct values of a lazily produced result list, in order of first
 -- occurrence (what 'nub' gives), or @[]@ if an evaluation fails -- the absence

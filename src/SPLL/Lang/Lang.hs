@@ -42,6 +42,8 @@ module SPLL.Lang.Lang (
 , unionMultiValues
 , autoDeriveMultiValue
 , resolveMultiAuto
+, resolveMultiAutoE
+, resolveNeuralAnnotation
 , resolveMultiValueTypeDecl
 , containsMultiValueTypeRef
 , neuralValueType
@@ -59,7 +61,8 @@ import SPLL.Typing.AlgebraicDataTypes
 
 import qualified Data.Set as Set
 import Data.Maybe
-import Data.List (nub, transpose, find)
+import Data.List (nub, transpose, find, intercalate)
+import Control.Monad (zipWithM)
 import Data.Traversable (mapAccumL)
 import qualified Data.Bifunctor as Bifunctor
 
@@ -403,6 +406,12 @@ valueInMultiValue _ _ = False
 
 unionMultiValues :: MultiValue -> MultiValue -> MultiValue
 unionMultiValues MultiContinuous MultiContinuous = MultiContinuous
+-- A Float-typed conditional with a continuous arm and an enumerated one (`if c
+-- then fst s else 1.0` off a `(Real, ..)` read) has continuous support: the
+-- union is the continuous set. Tags carry continuous leaves since task
+-- of-annotation-and-auto-derived-enumeration-divergence.
+unionMultiValues MultiContinuous (MultiDiscretes _) = MultiContinuous
+unionMultiValues (MultiDiscretes _) MultiContinuous = MultiContinuous
 unionMultiValues (MultiDiscretes as) (MultiDiscretes bs) = MultiDiscretes (nubValues (as ++ bs))
 unionMultiValues (MultiEither ls1 rs1) (MultiEither ls2 rs2) = MultiEither (unionMultiValues ls1 ls2) (unionMultiValues rs1 rs2)
 unionMultiValues (MultiTuple ls1 rs1) (MultiTuple ls2 rs2) = MultiTuple (unionMultiValues ls1 ls2) (unionMultiValues rs1 rs2)
@@ -452,17 +461,61 @@ autoDeriveMultiValue _ ty = Left ("cannot auto-derive a MultiValue for type " ++
 
 -- | Resolve "_" (MultiAuto) placeholders within a (possibly partial) MultiValue annotation,
 -- recursing alongside the corresponding RType. Leaves everything else untouched.
+-- Partial: a placeholder auto-derivation refuses is an 'error' here. Callers
+-- that can report a diagnostic use 'resolveMultiAutoE'.
 resolveMultiAuto :: [ADTDecl] -> RType -> MultiValue -> MultiValue
-resolveMultiAuto adtDecls ty MultiAuto = either error id (autoDeriveMultiValue adtDecls ty)
-resolveMultiAuto adtDecls (Tuple a b) (MultiTuple l r) = MultiTuple (resolveMultiAuto adtDecls a l) (resolveMultiAuto adtDecls b r)
-resolveMultiAuto adtDecls (TEither a b) (MultiEither l r) = MultiEither (resolveMultiAuto adtDecls a l) (resolveMultiAuto adtDecls b r)
-resolveMultiAuto adtDecls (TADT name) (MultiADT cs) = MultiADT (map resolveConstr cs)
+resolveMultiAuto adtDecls ty mv = either error id (resolveMultiAutoE adtDecls ty mv)
+
+-- | 'resolveMultiAuto' with its refusal as a value. The message names the slot
+-- the refused placeholder sits in (@fst@, @snd.fromRight@, a field name), so
+-- @of ([0,1], _)@ over @(Int, Int)@ points at the @_@, not at the whole clause.
+-- Only placeholders are filled: every part the annotation writes out is kept
+-- exactly as written.
+resolveMultiAutoE :: [ADTDecl] -> RType -> MultiValue -> Either String MultiValue
+resolveMultiAutoE adtDecls = go [] []
   where
-    fieldTypes = case find ((== name) . dataName) adtDecls of
-      Just adt -> [(cn, map snd fs) | (cn, fs) <- constructors adt]
-      Nothing -> []
-    resolveConstr (cn, mvs) = (cn, zipWith (resolveMultiAuto adtDecls) (fromMaybe [] (lookup cn fieldTypes)) mvs)
-resolveMultiAuto _ _ mv = mv
+    -- @seen@: the ADTs whose placeholder is being expanded on the way down. A
+    -- placeholder over a product or sum is the product or sum of placeholders,
+    -- so a refusal deeper down still names its own slot; meeting one of those
+    -- ADTs again is mutual recursion, which has no depth to unroll to. A
+    -- directly recursive ADT is derived whole: its unrolling (to the `depth N`
+    -- of its declaration) is 'autoDeriveMultiValue''s.
+    go seen path (Tuple a b) MultiAuto = go seen path (Tuple a b) (MultiTuple MultiAuto MultiAuto)
+    go seen path (TEither a b) MultiAuto = go seen path (TEither a b) (MultiEither MultiAuto MultiAuto)
+    go seen path ty@(TADT name) MultiAuto
+      | name `elem` seen = refuse path ("cannot auto-derive '" ++ name ++ "', which is mutually recursive with "
+                                        ++ intercalate ", " (map show (filter (/= name) seen)) ++ " - give its MultiValue explicitly")
+      | Just adt <- find ((== name) . dataName) adtDecls
+      , not (any (any ((== ty) . snd) . snd) (constructors adt))
+      = go (name : seen) path ty (MultiADT [(cn, map (const MultiAuto) fs) | (cn, fs) <- constructors adt])
+    go _ path ty MultiAuto = either (refuse path) Right (autoDeriveMultiValue adtDecls ty)
+    go seen path (Tuple a b) (MultiTuple l r) = MultiTuple <$> go seen ("fst" : path) a l <*> go seen ("snd" : path) b r
+    go seen path (TEither a b) (MultiEither l r) = MultiEither <$> go seen ("fromLeft" : path) a l <*> go seen ("fromRight" : path) b r
+    go seen path (TADT name) (MultiADT cs) = MultiADT <$> mapM resolveConstr cs
+      where
+        fieldsOf cn = case find ((== name) . dataName) adtDecls of
+          Just adt -> fromMaybe [] (lookup cn (constructors adt))
+          Nothing -> []
+        resolveConstr (cn, mvs) = (,) cn <$> zipWithM (\(fn, ft) mv -> go seen (fn : path) ft mv) (fieldsOf cn) mvs
+    go _ _ _ mv = Right mv
+    refuse path err = Left (if null path then err else err ++ " (at slot " ++ intercalate "." (reverse path) ++ ")")
+
+-- | The one 'MultiValue' a read-logits neural declaration's output is annotated
+-- with, as every consumer must read it (task
+-- of-annotation-and-auto-derived-enumeration-divergence): the declaration's own
+-- clause, else a registry entry for the target type (@neural writeLogits :: T
+-- of M@; the order of 'SPLL.AutoNeural.resolvePartitionAnnotation'), else @of
+-- _@; and every @_@ is auto-derived in place. The plan
+-- engine's layout and Analysis's enumeration tag both come from here, which is
+-- what makes "no @of@", "@of _@" and the equivalent explicit clause compile to
+-- the same program.
+resolveNeuralAnnotation :: [ADTDecl] -> [(RType, MultiValue)] -> NeuralDecl -> Either String MultiValue
+resolveNeuralAnnotation adtDecls registry (name, declTy, tag) = case neuralValueType declTy of
+  Nothing -> Left ("neural declaration '" ++ name ++ "' is not of the form (Symbol -> T)")
+  Just target ->
+    let written = fromMaybe MultiAuto (maybe (lookup target registry) Just tag)
+    in either (\err -> Left ("neural declaration '" ++ name ++ "': " ++ err)) Right
+         (resolveMultiAutoE adtDecls target written)
 
 -- | Unroll a recursive MultiValue to a finite depth. The @(String, MultiValue)@
 -- pair is the recursion binder: every 'MultiTypeRef' whose name matches is

@@ -3,6 +3,11 @@
 -- constructor-flag constraint: `color (obj s)` presupposes Obj, and NoObj
 -- objects fall through to the recursion). Expected values hand-computed:
 -- P(exists red) = .7*(.8*.5 + (.8*.5+.2)*(.6*(.07+.93*(.5*.6*.25)))) = 0.315217.
+-- Since task of-annotation-and-auto-derived-enumeration-divergence every read
+-- is tagged with its resolved annotation, so this program (under the dense
+-- budget) enumerates densely by default, exactly as its `of` spelling does.
+-- The plan engine is checked on it at budget 0 by End2End's
+-- PlanEngineMatchesDense.
 data Color = Red | Green | Blue
 data Object = NoObj | Obj color::Color
 data Scene = Empty | SCons obj::Object, rest::Scene depth 3

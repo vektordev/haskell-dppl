@@ -53,13 +53,17 @@ makeAutoNeural adtDecls conf registry decl@(name, declType, tag) =
       makeReadLogitsFunGroup adtDecls conf name target (resolvePartitionAnnotation registry target tag) (makeForwardDecl adtDecls registry decl)
     _ -> error $ "Invalid neural declaration for " ++ name ++ ": Neural networks must have Symbol on the left of the arrow (Symbol -> target)"
 
--- | Resolve the MultiValue annotation for a PartitionPlan target/source type: an
--- explicit registry entry (SPLL.Lang.Types.writeLogitsDecls, populated from "neural
--- writeLogits :: T of M" declarations and from every NeuralDecl's own "of" clause as sugar)
--- wins over the tag passed in directly. 'makePartitionPlan' falls back to
--- 'autoDeriveMultiValue' when this resolves to 'Nothing'.
+-- | Resolve the MultiValue annotation for a PartitionPlan target/source type: the tag
+-- passed in directly (a declaration's own "of" clause) if there is one, else the
+-- registry entry for the type (SPLL.Lang.Types.writeLogitsDecls, populated from "neural
+-- writeLogits :: T of M" declarations and from every NeuralDecl's own "of" clause as
+-- sugar). On a validated program the order is immaterial -- a declaration's clause is
+-- registered under its type and the registry admits one annotation per type -- and it
+-- is the order 'SPLL.Lang.Lang.resolveNeuralAnnotation' uses, so the two agree on any
+-- program. 'makePartitionPlan' falls back to 'autoDeriveMultiValue' when this resolves
+-- to 'Nothing'.
 resolvePartitionAnnotation :: [(RType, MultiValue)] -> RType -> Maybe MultiValue -> Maybe MultiValue
-resolvePartitionAnnotation registry ty tag = lookup ty registry <|> tag
+resolvePartitionAnnotation registry ty tag = tag <|> lookup ty registry
 
 -- 'neuralReadLogitsSuffix' (re-exported above) is the naming convention
 -- 'makeReadLogitsFunGroup' uses to mark a read-logits network's own

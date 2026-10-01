@@ -15,6 +15,11 @@
 -- let-bound constants: the `==` InjF emits `let a = 0 in let b = 1 in a == b`,
 -- which the old constant-only fold could not decide, so every (value, world)
 -- pair was classified unmergeable and the DP never fired.
+-- Since task of-annotation-and-auto-derived-enumeration-divergence every read
+-- is tagged with its resolved annotation, so this program (under the dense
+-- budget) enumerates densely by default, exactly as its `of` spelling does.
+-- It is `slow`, so End2End's PlanEngineMatchesDense (default suite) does not
+-- reach it; its twin planEnumRecJointStateSeparate is checked there.
 data Color = Red | Green | Blue
 data Size = Small | Large
 data Object = Nil | Obj color::Color, size::Size

@@ -3,7 +3,11 @@
 -- a lone constructor, so its region has no flag slot and the descent adds no
 -- flag constraint (task plan-emits-vacuous-single-constructor-flags); the
 -- multi-constructor case, where it does, is planEnumRecScan's.
--- No `of` clause -- lazy path only.
+-- Since task of-annotation-and-auto-derived-enumeration-divergence every read
+-- is tagged with its resolved annotation, so this program (under the dense
+-- budget) enumerates densely by default, exactly as its `of` spelling does.
+-- The plan engine is checked on it at budget 0 by End2End's
+-- PlanEngineMatchesDense.
 data Color = Red | Green | Blue
 data Obj = Mk c :: Color, f :: Bool
 neural readObj :: (Symbol -> Obj)

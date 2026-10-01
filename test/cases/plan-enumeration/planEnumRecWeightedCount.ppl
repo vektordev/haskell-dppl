@@ -6,6 +6,13 @@
 -- known constant. Expected values from an independent exact (rational) oracle
 -- over the factorized per-level distribution: P(sum of the weights of the Red
 -- objects > 2.5) at depth 5.
+-- Since task of-annotation-and-auto-derived-enumeration-divergence every read
+-- is tagged with its resolved annotation, so this program (under the dense
+-- budget) enumerates densely by default, exactly as its `of` spelling does.
+-- Densely its module is ~7x the plan engine's (44 KB -> 300 KB) and ~13 s
+-- under the -O0 interpreter, so it is `slow` (docs task
+-- dense-enumeration-cost-on-accumulator-folds), and End2End's
+-- PlanEngineMatchesDense (default suite) does not reach it.
 data Color = Red | Green | Blue
 data Object = NoObj | Obj color::Color
 data Scene = Empty | SCons obj::Object, rest::Scene depth 5

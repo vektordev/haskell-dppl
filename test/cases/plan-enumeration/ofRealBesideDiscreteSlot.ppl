@@ -1,0 +1,13 @@
+-- A discrete slot beside a written `Real` slot (task
+-- of-annotation-and-auto-derived-enumeration-divergence). The read's tag is
+-- the whole annotation, continuous leaf included, so the read itself is not
+-- enumerated; `fst p` is an ordinary enumerable {0, 1, 2}. Before, a `Real`
+-- anywhere in the clause dropped the tag for every slot.
+--
+-- `fst p` is read twice off ONE draw, so the two operands of `+` share a
+-- latent: the sum is 2 * fst p (values 0, 2, 4), not a convolution of two
+-- independent copies. Plan: [P(0), P(1), P(2), mu, sigma] = [0.2, 0.3, 0.5,
+-- 0.0, 1.0]; snd p is never read, so its Gaussian marginalises to 1.
+neural readPair :: (Symbol -> (Int, Float)) of ([0, 1, 2], Real)
+
+main sym = draw p = readPair sym in (fst p) + (fst p)

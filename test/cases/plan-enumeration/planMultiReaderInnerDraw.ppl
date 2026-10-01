@@ -1,8 +1,12 @@
--- Depth-3 twin of planOverBudgetInnerDrawShared (see there), without the `of` clause, so it always
--- takes the plan path (no DiscreteValues tag) and its module stays small
+-- Depth-3 twin of planOverBudgetInnerDrawShared (see there), without the `of` clause, so that its module stays small
 -- enough to run on every backend. Two readers of the scene: value grouping must
 -- stay off. ORACLE: the same program WITH `of 3x.{...}` (under budget, so
 -- dense enumeration), which agrees with every row to a few ulps.
+-- Since task of-annotation-and-auto-derived-enumeration-divergence every read
+-- is tagged with its resolved annotation, so this program (under the dense
+-- budget) enumerates densely by default, exactly as its `of` spelling does.
+-- The plan engine is checked on it at budget 0 by End2End's
+-- PlanEngineMatchesDense.
 data Color = Red | Green | Blue
 data Object = NoObj | Obj color::Color
 data Scene = Empty | SCons obj::Object, rest::Scene depth 3

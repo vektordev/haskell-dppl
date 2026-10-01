@@ -1,13 +1,16 @@
 -- Plan-guided lazy enumeration (design plan-guided-lazy-enumeration, M2):
 -- the fully-discrete driving-program shape -- recursive user predicates
 -- folding over a neural net's recursive ADT output, WITHOUT an `of` clause.
--- No DiscreteValues tag exists, so the materializing enumeration path cannot
--- fire; the if-chain compiles via recursive user-function specialization on
--- the plan (simple scan, threaded-bool scan, and a counting fold compared
--- against a bound). planEnumRecChainMaterialized.ppl is the same program
--- with `of _` (IREnumSum over the 259-scene support) and identical expected
--- values -- a differential oracle between the two paths. Expected values
+-- On the plan path the if-chain compiles via recursive user-function
+-- specialization on the plan (simple scan, threaded-bool scan, and a counting
+-- fold compared against a bound). planEnumRecChainMaterialized.ppl is the same
+-- program with `of _` and identical expected values. Expected values
 -- independently computed by a DP over the factorized per-level distribution.
+-- Since task of-annotation-and-auto-derived-enumeration-divergence every read
+-- is tagged with its resolved annotation, so this program (under the dense
+-- budget) enumerates densely by default, exactly as its `of` spelling does.
+-- The plan engine is checked on it at budget 0 by End2End's
+-- PlanEngineMatchesDense.
 data Color = Red | Green | Blue
 data Size = Small | Large
 data Object = Obj color::Color, size::Size

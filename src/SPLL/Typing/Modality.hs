@@ -68,6 +68,7 @@ import Data.Map.Strict (Map)
 import SPLL.Typing.PType (PType(..))
 import SPLL.Typing.RType (RType(..))
 import SPLL.Lang.Types (Tag(..))
+import SPLL.Lang.Lang (multiValueContainsContinuous)
 
 -- * The capability lattice -----------------------------------------------------
 
@@ -146,8 +147,10 @@ joinFin _      _      = Infinite
 -- enumerated values). A present @DiscreteValues@ tag ⇒ 'Finite'.
 finFromTags :: [Tag] -> Fin
 finFromTags ts = if any isDiscrete ts then Finite else Infinite
-  where isDiscrete (DiscreteValues _) = True
-        isDiscrete _                  = False
+  -- A tag with a continuous leaf is a value shape, not a finite support
+  -- (task of-annotation-and-auto-derived-enumeration-divergence).
+  where isDiscrete (DiscreteValues mv) = not (multiValueContainsContinuous mv)
+        isDiscrete _                   = False
 
 -- * Distribution family (design §6) --------------------------------------------
 

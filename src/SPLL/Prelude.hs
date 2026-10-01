@@ -343,9 +343,27 @@ fix = "f" #->#
     ("v" #-># apply (var "f") ("n" #-># apply (apply (var "v") (var "v")) (var "n")))
 
 
+-- | Settle every neural declaration's output annotation into the one resolved
+-- 'MultiValue' its consumers read ('resolveNeuralAnnotation'): no @of@ is
+-- @of _@, and each @_@ is auto-derived in place. Done once, before anything
+-- reads an annotation, so the plan engine's layout and Analysis's enumeration
+-- tag cannot disagree, and a placeholder auto-derivation refuses (an @Int@ or
+-- @Symbol@ slot, a recursive type with no depth) is a diagnostic here rather
+-- than an uncaught 'error' wherever the plan happens to be forced first (task
+-- of-annotation-and-auto-derived-enumeration-divergence).
+resolveNeuralDecls :: Program -> Either CompilerError Program
+resolveNeuralDecls p = do
+  resolved <- mapM resolveOne (neurals p)
+  return p{neurals = resolved}
+  where
+    resolveOne decl@(name, ty, _) = case resolveNeuralAnnotation (adts p) (writeLogitsDecls p) decl of
+      Right mv -> Right (name, ty, Just mv)
+      Left err -> Left ("Compiler Error: " ++ err)
+
 compile :: CompilerConfig -> Program -> Either CompilerError IREnv
-compile conf p = do
-  validateProgram p
+compile conf p0 = do
+  validateProgram p0
+  p <- resolveNeuralDecls p0
   printIfVerbose conf "=== Parsed Program ==="
   pPrintIfMoreVerbose conf p
   printIfVerbose conf (pPrintProg p)
@@ -673,8 +691,9 @@ data FnMarginals = FnMarginals
 -- forward chaining, modality inference — then runs on the pruned program
 -- unchanged.
 rtypedProgram :: Program -> Either CompilerError Program
-rtypedProgram p = do
-  validateProgram p
+rtypedProgram p0 = do
+  validateProgram p0
+  p <- resolveNeuralDecls p0
   addRTypeInfo (fromMaybe p (normalizeCallees p))
 
 -- | Enum annotation plus chain naming. The analysis needs chain names because

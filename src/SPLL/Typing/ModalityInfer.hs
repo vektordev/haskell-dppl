@@ -245,11 +245,12 @@ toMod (IWit m)    = toMod m   -- the serialisable form carries only the standalo
 --
 -- A node whose /type/ is structurally finite (Bool, enum-like ADTs, and
 -- tuples/Eithers of such) has finite support even without a @DiscreteValues@
--- tag — the tag only exists when an @of@ enumeration was declared, but
--- finiteness is a property of the type itself. This is what admits the
--- plan-guided lazy-enumeration shapes (design plan-guided-lazy-enumeration):
--- an un-@of@'d neural ADT output is a finite mixture whose density exists,
--- even though nobody intends to materialize its support.
+-- tag — finiteness is a property of the type itself, and not every finite
+-- node is tagged (a tag carrying a continuous leaf is a value shape, not a
+-- finite support). This is what admits the plan-guided lazy-enumeration shapes
+-- (design plan-guided-lazy-enumeration): a neural ADT output is a finite
+-- mixture whose density exists, even when nobody intends to materialize its
+-- support.
 tagFin :: [ADTDecl] -> TypeInfo -> GroundMod -> GroundMod
 tagFin adtsDecl ti g
   | finFromTags (tags ti) == Finite = g { gFin = Finite }

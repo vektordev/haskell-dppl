@@ -53,7 +53,7 @@ module SPLL.DrawSinking
 
 import qualified Data.Set as Set
 
-import SPLL.Lang.Lang (freeVarsExpr, getSubExprs, getTypeInfo, setSubExprs)
+import SPLL.Lang.Lang (freeVarsExpr, getSubExprs, getTypeInfo, multiValueContainsContinuous, setSubExprs)
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType (TArrow))
 
@@ -81,7 +81,7 @@ sinkIn e = case e of
 -- they test. Anything that reads a variable or a network may be random.
 isEnumerableValue :: Expr -> Bool
 isEnumerableValue v =
-     not (null [() | DiscreteValues _ <- tags (getTypeInfo v)])
+     not (null [() | DiscreteValues mv <- tags (getTypeInfo v), not (multiValueContainsContinuous mv)])
   && mayBeRandom v
 
 -- | Syntactically, may this expression be random? Anything reading a variable

@@ -1,10 +1,14 @@
 -- Plan-guided lazy enumeration (design plan-guided-lazy-enumeration, M1):
--- inline predicate body over a neural ADT output WITHOUT an `of` clause.
--- No DiscreteValues tag exists, so the materializing enumeration path cannot
--- fire; probability inference goes through the plan-backed lazy path, reading
--- softmax slices of the raw logit vector instead of enumerating the support.
--- planEnumInlineMaterialized.ppl is the same program with an `of` clause
--- (materialized path) and identical expected values -- a differential oracle.
+-- inline predicate body over a neural ADT output WITHOUT an `of` clause. On
+-- the plan-backed lazy path, probability inference reads softmax slices of the
+-- raw logit vector instead of enumerating the support.
+-- planEnumInlineMaterialized.ppl is the same program with an `of` clause and
+-- identical expected values.
+-- Since task of-annotation-and-auto-derived-enumeration-divergence every read
+-- is tagged with its resolved annotation, so this program (under the dense
+-- budget) enumerates densely by default, exactly as its `of` spelling does.
+-- The plan engine is checked on it at budget 0 by End2End's
+-- PlanEngineMatchesDense.
 data Color = Red | Green | Blue
 neural readColor :: (Symbol -> (Color, Color))
 main sym = draw s = readColor sym in if isRed (fst s) then (if isRed (snd s) then 2 else 1) else (if isRed (snd s) then 1 else 0)

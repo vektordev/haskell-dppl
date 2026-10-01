@@ -15,7 +15,8 @@ import SPLL.Typing.RInfer (tryAddRTypeInfo, RTypeError(..))
 import SPLL.Typing.RType (RType(..))
 import SPLL.Prelude
 import SPLL.Parser (tryParseProgram)
-import SPLL.Analysis (annotate, annotateEnumsProg, definitelyUntagged, materializationDomain, withinMaterializationBudget)
+import SPLL.Analysis (annotate, annotateEnumsProg, definitelyUntagged, materializationDomain, withinMaterializationBudget, structuralTag, listedTag)
+import qualified SPLL.CodeGenPyTorch
 import SPLL.Typing.Infer (addTypeInfo)
 import SPLL.Typing.ForwardChaining (FCData, annotateProg, progToFCData, isInvertibleLambda, isWitnessedLambda, untag, getTag)
 import qualified Data.Set as Set
@@ -1114,26 +1115,40 @@ expectMarginalRefusal src sample varName = do
 -- | Enum annotation must not offer enumeration for a MultiValue containing a
 -- continuous (Real) leaf: enumerating it would walk only the discrete residue
 -- (e.g. just the Left values of ([0,1] | Real)) and silently drop the
--- continuous probability mass. annotateEnumsProg declines to tag such neurals,
--- the same treatment as a neural with no `of` annotation at all.
+-- continuous probability mass. Since task
+-- of-annotation-and-auto-derived-enumeration-divergence the read is still
+-- tagged with the whole annotation -- a written clause is never discarded --
+-- but a tag with a continuous leaf is a value shape, which nothing enumerates
+-- (the 'enumerable' test below is IRCompiler's own 'isEnumerable'). An
+-- accessor reaching a wholly discrete slot of it is enumerable as usual.
 enumTagsOf :: String -> [MultiValue]
 enumTagsOf src =
   let prog = either (\e -> error ("parse failed: " ++ show e)) id (tryParseProgram "test" src)
   in [mv | e <- allNodes (annotateEnumsProg prog), DiscreteValues mv <- tags (getTypeInfo e)]
 
+-- | A node's tags, split into those with a continuous leaf and those
+-- IRCompiler would enumerate.
+enumerableSplit :: [MultiValue] -> ([MultiValue], [MultiValue])
+enumerableSplit mvs = (filter multiValueContainsContinuous mvs, filter (not . multiValueContainsContinuous) mvs)
+
 enumContinuousRefusalTests :: TestTree
 enumContinuousRefusalTests = testGroup "enum annotation refuses continuous leaves"
-  [ testCase "mixed Either ([0,1] | Real) gets no DiscreteValues tag" $
-      assertEqual "expected no tags" []
-        (enumTagsOf "neural f :: (Symbol -> Either Int Float) of ([0, 1] | Real)\nmain sym = f sym\n")
-  , testCase "pure Real gets no DiscreteValues tag" $
-      assertEqual "expected no tags" []
-        (enumTagsOf "neural f :: (Symbol -> Float) of Real\nmain sym = f sym\n")
-  , testCase "tuple with an auto-derived Float slot gets no DiscreteValues tag" $
-      -- '_' resolves to MultiContinuous for a Float slot, so the whole tuple
-      -- annotation must be declined, not enumerated as a residue.
-      assertEqual "expected no tags" []
-        (enumTagsOf "neural f :: (Symbol -> (Int, Float)) of ([0, 1], _)\nmain sym = f sym\n")
+  [ testCase "mixed Either ([0,1] | Real) is tagged whole, and not enumerable" $
+      assertEqual "expected the whole annotation, nothing enumerable"
+        ([MultiEither (MultiDiscretes [VInt 0, VInt 1]) MultiContinuous], [])
+        (enumerableSplit (enumTagsOf "neural f :: (Symbol -> Either Int Float) of ([0, 1] | Real)\nmain sym = f sym\n"))
+  , testCase "pure Real is tagged whole, and not enumerable" $
+      assertEqual "expected the whole annotation, nothing enumerable" ([MultiContinuous], [])
+        (enumerableSplit (enumTagsOf "neural f :: (Symbol -> Float) of Real\nmain sym = f sym\n"))
+  , testCase "tuple with an auto-derived Float slot is tagged whole, and not enumerable" $
+      -- '_' resolves to MultiContinuous for a Float slot: the tuple is not
+      -- enumerated as its discrete residue.
+      assertEqual "expected the whole annotation, nothing enumerable"
+        ([MultiTuple (MultiDiscretes [VInt 0, VInt 1]) MultiContinuous], [])
+        (enumerableSplit (enumTagsOf "neural f :: (Symbol -> (Int, Float)) of ([0, 1], _)\nmain sym = f sym\n"))
+  , testCase "the discrete slot beside an auto-derived Float slot enumerates" $
+      assertEqual "expected fst's slot to be the one enumerable tag" [MultiDiscretes [VInt 0, VInt 1]]
+        (snd (enumerableSplit (enumTagsOf "neural f :: (Symbol -> (Int, Float)) of ([0, 1], _)\nmain sym = fst (f sym)\n")))
   , testCase "pure discrete enumeration is still tagged" $
       assertBool "expected DiscreteValues tags" (not (null
         (enumTagsOf "neural f :: (Symbol -> Int) of [0, 1, 2]\nmain sym = f sym\n")))
@@ -1355,11 +1370,18 @@ planEnumStructuralADTTests = testGroup "planEnumStructuralADT"
 -- is pinned instead is that the mass it does assign is exactly the probability
 -- of the inputs on which it *is* defined -- i.e. the partiality costs the empty
 -- input's mass and nothing else.
+--
+-- Compiled with budget 0, because this is the plan engine's partiality
+-- semantics. The scene (13 values) is under the dense budget, and since every
+-- read is tagged (task of-annotation-and-auto-derived-enumeration-divergence)
+-- the default compile enumerates it densely, which evaluates the filter on
+-- @Empty@ and crashes at run time -- as the explicit-`of` spelling already did.
+-- Follow-up: docs task dense-enumeration-crashes-on-partial-body.
 planEnumStructuralPartialTests :: TestTree
 planEnumStructuralPartialTests = testGroup "planEnumStructuralPartial"
   [ testCase "partial filter's outputs carry exactly the defined inputs' mass" $ do
       prog <- parseOrFailSrc src
-      let c = either (error . show) id (compile defaultCompilerConfig prog)
+      let c = either (error . show) id (compile noMaterializationConfig prog)
       let ps = [ fst (probDimOf (either (error . show) id (runProbC prog c [sym] q))) | q <- queries ]
       -- pSceneIsList is logit slot 0: every defined input has a List at the root.
       assertBool ("outputs sum to " ++ show (sum ps) ++ ", expected " ++ show pSceneIsList)
@@ -1716,7 +1738,8 @@ test_planEnumM4Polynomial = testCase "planEnumM4Polynomial" $ do
   let sizeAt :: Int -> IO Int
       sizeAt d = case tryParseProgram "m4" (prog d) of
         Left e  -> assertFailure ("parse error at depth " ++ show d ++ ": " ++ show e)
-        Right p -> case compile defaultCompilerConfig p of
+        -- Budget 0: the plan engine's growth is what is pinned (see test_planFoldDisjunctionPolynomial).
+        Right p -> case compile noMaterializationConfig p of
           Left e   -> assertFailure ("compile error at depth " ++ show d ++ ": " ++ show e)
           Right ir -> return (length (show ir))
   s10 <- sizeAt 10
@@ -1745,7 +1768,8 @@ test_planFlatSumOverProductPolynomial = testCase "planFlatSumOverProductPolynomi
   let sizeAt :: Int -> IO Int
       sizeAt n = case tryParseProgram "flatsum" (prog n) of
         Left e  -> assertFailure ("parse error at N = " ++ show n ++ ": " ++ show e)
-        Right p -> case compile defaultCompilerConfig p of
+        -- Budget 0: the plan engine's growth is what is pinned (see test_planFoldDisjunctionPolynomial).
+        Right p -> case compile noMaterializationConfig p of
           Left e   -> assertFailure ("compile error at N = " ++ show n ++ ": " ++ show e)
           Right ir -> return (length (show ir))
   s4 <- sizeAt 4
@@ -1789,7 +1813,8 @@ test_planEnumBoolCtorPolynomial = testCase "planEnumBoolCtorPolynomial" $ do
   let sizeAt :: Int -> IO Int
       sizeAt d = case tryParseProgram "boolctor" (prog d) of
         Left e  -> assertFailure ("parse error at depth " ++ show d ++ ": " ++ show e)
-        Right p -> case compile defaultCompilerConfig p of
+        -- Budget 0: the plan engine's growth is what is pinned (see test_planFoldDisjunctionPolynomial).
+        Right p -> case compile noMaterializationConfig p of
           Left e   -> assertFailure ("compile error at depth " ++ show d ++ ": " ++ show e)
           Right ir -> return (length (show ir))
   s8  <- sizeAt 8
@@ -1821,7 +1846,8 @@ test_planEnumAccumulatorFoldPolynomial = testCase "planEnumAccumulatorFoldPolyno
   let sizeAt :: Int -> IO Int
       sizeAt d = case tryParseProgram "accfold" (prog d) of
         Left e  -> assertFailure ("parse error at depth " ++ show d ++ ": " ++ show e)
-        Right p -> case compile defaultCompilerConfig p of
+        -- Budget 0: the plan engine's growth is what is pinned (see test_planFoldDisjunctionPolynomial).
+        Right p -> case compile noMaterializationConfig p of
           Left e   -> assertFailure ("compile error at depth " ++ show d ++ ": " ++ show e)
           Right ir -> return (length (show ir))
   s4 <- sizeAt 4
@@ -1959,7 +1985,11 @@ test_planFoldDisjunctionPolynomial = testCase "planFoldDisjunctionPolynomial" $ 
   let sizeAt :: Int -> IO Int
       sizeAt d = case tryParseProgram "foldor" (prog d) of
         Left e  -> assertFailure ("parse error at depth " ++ show d ++ ": " ++ show e)
-        Right p -> case compile defaultCompilerConfig p of
+        -- Budget 0: what is pinned is the plan engine's growth, and these
+        -- scenes (85 and 1365 values) are under the dense-enumeration budget,
+        -- which every read reaches since it is always tagged (task
+        -- of-annotation-and-auto-derived-enumeration-divergence).
+        Right p -> case compile noMaterializationConfig p of
           Left e   -> assertFailure ("compile error at depth " ++ show d ++ ": " ++ show e)
           Right ir -> return (length (show ir))
   s3 <- sizeAt 3
@@ -1988,7 +2018,8 @@ test_planEnumSubtractionAccumulatorFoldPolynomial = testCase "planEnumSubtractio
   let sizeAt :: Int -> IO Int
       sizeAt d = case tryParseProgram "subaccfold" (prog d) of
         Left e  -> assertFailure ("parse error at depth " ++ show d ++ ": " ++ show e)
-        Right p -> case compile defaultCompilerConfig p of
+        -- Budget 0: the plan engine's growth is what is pinned (see test_planFoldDisjunctionPolynomial).
+        Right p -> case compile noMaterializationConfig p of
           Left e   -> assertFailure ("compile error at depth " ++ show d ++ ": " ++ show e)
           Right ir -> return (length (show ir))
   s4 <- sizeAt 4
@@ -2032,7 +2063,8 @@ test_planEnumFusedJointStatePolynomial = testCase "planEnumFusedJointStatePolyno
   let sizeAt :: Int -> IO Int
       sizeAt d = case tryParseProgram "joint" (prog d) of
         Left e  -> assertFailure ("parse error at depth " ++ show d ++ ": " ++ show e)
-        Right p -> case compile defaultCompilerConfig p of
+        -- Budget 0: the plan engine's growth is what is pinned (see test_planFoldDisjunctionPolynomial).
+        Right p -> case compile noMaterializationConfig p of
           Left e   -> assertFailure ("compile error at depth " ++ show d ++ ": " ++ show e)
           Right ir -> return (length (show ir))
   s4 <- sizeAt 4
@@ -4173,6 +4205,95 @@ untaggedShortCircuitTests = testGroup "enum annotation refutes a recursive fold 
   where
     tryAddRTypeInfo' p = either (Left . show) Right (tryAddRTypeInfo p)
 
+-- | No `of`, `of _`, a partly written clause and the fully written clause
+-- denote one resolved annotation, so they must compile to the same module,
+-- byte for byte (task of-annotation-and-auto-derived-enumeration-divergence).
+-- Each group's programs differ only in the declaration line. Before, a written
+-- clause alone tagged the read, which routed an under-budget domain to dense
+-- enumeration and the rest to the plan engine; and listing a wide domain
+-- through its accessors never finished compiling.
+annotationSpellingTests :: TestTree
+annotationSpellingTests = testGroup "neural annotation spellings compile identically"
+  [ spelling "a Bool pair (dense, under budget)"
+      ["(Bool, Bool))", "(Bool, Bool)) of _", "(Bool, Bool)) of ([True, False], _)", "(Bool, Bool)) of ([True, False], [True, False])"]
+      (\decl -> [ "neural n :: (Symbol -> " ++ decl
+                , "main s = draw x = n s in if fst x then 1 else (if snd x then 2 else 0)" ])
+  , spelling "a depth-3 recursive ADT"
+      ["Scene)", "Scene) of _", "Scene) of 3x.{Empty | SCons {NoObj | Obj {Red|Green|Blue}} x}", "Scene) of 3x.{Empty | SCons _ x}"]
+      (\decl -> [ "data Color = Red | Green | Blue"
+                , "data Object = NoObj | Obj color::Color"
+                , "data Scene = Empty | SCons obj::Object, rest::Scene depth 3"
+                , "neural readScene :: (Symbol -> " ++ decl
+                , "numRed s = if isEmpty s then 0.0 else (if isObj (obj s) then (if isRed (color (obj s)) then 1.0 else 0.0) else 0.0) + numRed (rest s)"
+                , "main sym = draw scene = readScene sym in if numRed scene > 1.5 then 1 else 0" ])
+  , spelling "a continuous leaf beside a discrete one"
+      ["Either Bool Float)", "Either Bool Float) of _", "Either Bool Float) of ([True, False] | Real)", "Either Bool Float) of (_ | Real)", "Either Bool Float) of ([True, False] | _)"]
+      (\decl -> [ "neural nn :: (Symbol -> " ++ decl
+                , "main s = draw x = nn s in if isLeft x then (if fromLeftPartial x then 1 else 2) else 0" ])
+  , spelling "a 3^12-value tuple (over budget, through twelve accessors)"
+      [wide, wide ++ " of _"]
+      (\decl -> [ "data Color = Red | Green | Blue"
+                , "neural readColor :: (Symbol -> " ++ decl
+                , "main sym = draw s = readColor sym in if isRed (fst s) then 1 else (if isRed (fst (snd (snd (snd (snd (snd (snd (snd (snd (snd (snd s))))))))))) then 1 else (if isRed (snd (snd (snd (snd (snd (snd (snd (snd (snd (snd (snd s))))))))))) then 1 else 0))" ])
+  ]
+  where
+    wide = foldr (\_ t -> "(Color, " ++ t ++ ")") "Color" [1 .. 11 :: Int] ++ ")"
+    spelling name decls mkSrc = testCase name $ do
+      modules <- forM decls $ \decl -> do
+        let src = unlines (mkSrc decl)
+        r <- timeout 20000000 (evaluate (forceString (compiledPython src)))
+        case r of
+          Nothing -> assertFailure ("did not compile within 20s: " ++ decl) >> return ""
+          Just m -> return m
+      forM_ (zip decls modules) $ \(decl, m) ->
+        assertEqual ("module for `" ++ decl ++ "` against `" ++ head decls ++ "`") (head modules) m
+    forceString s = length s `seq` s
+    compiledPython src = case either (Left . show) Right (tryParseProgram "test" src) >>= compile defaultCompilerConfig of
+      Left e -> error ("compile failed: " ++ e)
+      Right env -> unlines (SPLL.CodeGenPyTorch.generateFunctions True env)
+
+-- | Analysis's structural rules ('structuralTag') act on a value set without
+-- listing it; listing ('listedTag') is the reference they replace. At every
+-- corpus node a rule answers with wholly discrete, listable operands and
+-- listing answers too, the two must give the same set in the same canonical
+-- form -- which is what keeps every corpus program's emitted module unchanged
+-- by the rules.
+--
+-- Where listing answers nothing the rule may still answer: listing voids a
+-- tag on any failed evaluation, so @fromRightPartial@ of a value set holding a
+-- @Left@ has none, while the rule gives the Right arm's values -- the same
+-- filtering listing already applies to an ADT field accessor. That is a
+-- refinement, not a disagreement, and is not compared.
+structuralPropagationTests :: TestTree
+structuralPropagationTests = testGroup "structural enum propagation agrees with listing"
+  [ testCase "every corpus node a structural rule answers" $ do
+      paths <- listCorpusPplFiles
+      compared <- forM paths $ \path -> do
+        src <- readFile path
+        case either (Left . show) Right (tryParseProgram path src) >>= rtypedProgram of
+          Left _ -> return 0
+          Right rtyped -> do
+            let annotated = annotateEnumsProg rtyped
+                ds = adts rtyped
+                cases = [ (name, operands, structural', listed)
+                        | Expr _ (InjF (Named name) params) <- allNodes annotated
+                        , Just rule <- [structuralTag ds name]
+                        , Just operands <- [mapM tagOf params]
+                        , all listable operands
+                        , Just structural' <- [rule operands]
+                        , Just listed <- [listedTag ds Nothing name operands] ]
+            forM_ cases $ \(name, operands, s, l) ->
+              assertEqual (path ++ ": " ++ name ++ " " ++ show operands) (Just l) s
+            return (length cases)
+      -- Non-vacuity: the corpus must exercise the rules.
+      assertBool ("structural rules answered only " ++ show (sum compared) ++ " corpus nodes") (sum compared > 100)
+  ]
+  where
+    tagOf e = case [mv | DiscreteValues mv <- tags (getTypeInfo e)] of
+      [mv] -> Just mv
+      _ -> Nothing
+    listable mv = not (multiValueContainsContinuous mv) && maybe False (<= 5000) (enumeratedCount mv)
+
 -- | The repro of plan-fold-mutual-recursion-blowup, minus the neural read:
 -- @main@'s parameter stands in for the enumerated scene.
 mutualFoldSrc :: String
@@ -4315,6 +4436,8 @@ internalsTests = testGroup "Internals"
   , testGroup "tensor builtins" tensorBuiltinTests
   , categoricalIndexTests
   , untaggedShortCircuitTests
+  , annotationSpellingTests
+  , structuralPropagationTests
   , splitByStringTests
   , partialDestructorTests
   , fdeclNamespaceTests

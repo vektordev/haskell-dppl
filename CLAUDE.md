@@ -985,8 +985,9 @@ compile into 16s.
 ### The dense-enumeration budget gate
 
 An enumerable application (`let x = <discrete draw> in body`, with a
-`DiscreteValues` tag on the draw -- which an `of` annotation always supplies)
-is enumerated densely by `enumerateAppliedLambda`: the whole domain becomes one
+`DiscreteValues` tag on the draw -- which every neural read with a wholly
+discrete annotation carries, written or auto-derived) is enumerated densely by
+`enumerateAppliedLambda`: the whole domain becomes one
 `BTensor` literal. `enumerationWithinMaterializationBudget` refuses that above
 `materializationCardinality`, at **both** sites that enumerate:
 `toIRInference`'s enumerable-`Apply` equation (it declines and dispatch falls
@@ -1009,6 +1010,26 @@ re-types its re-fetched body with `reinferRecovered` (see "Recovered variables
 are re-inferred" below). Without that, an
 over-budget inner application whose body reads the outer variable was refused
 by the plan traversal as reading "an enclosing random binding".
+
+**Dense first, everywhere.** Since every read is tagged, a neural domain
+under the budget is enumerated densely whether or not an `of` was written,
+and the plan engine is reached by default only above it. Measured on the 16
+corpus programs this moved: 13 emit larger modules (up to 6.8x,
+`planEnumRecWeightedCount` 44 KB -> 300 KB) and the 3 `planMultiReader*` smaller
+(93 KB -> 35 KB); every value agrees. Accepted as a cost question, not a
+correctness one. The plan engine keeps its small-domain coverage through
+End2End's `PlanEngineMatchesDense` (budget 0 against the default compile at
+every query point of every neural corpus program; `planEngineCorpus` lists the
+programs that must answer there) and through the `*Polynomial` growth tests in
+`TestInternals`, which compile at budget 0. Two of the moved programs,
+`planEnumRecWeightedCount`/`planEnumRecAlternatingWeightCount`, cost ~13 s each
+densely under the `-O0` interpreter and are `slow` for it (docs task
+`dense-enumeration-cost-on-accumulator-folds`). Known gap: dense enumeration
+evaluates the body at *every* domain value, so a helper that is partial on part
+of the domain (reads `tl s` before testing `isEmpty s`) crashes at run time
+where the plan engine drops that value's mass (`Internals`'
+`planEnumStructuralPartial`, pinned at budget 0; docs task
+`dense-enumeration-crashes-on-partial-body`).
 
 **Known cost**: over budget, the plan traversal is the only route, so a body
 it does not cover is refused -- eagerly, taking `generate` down with the default
@@ -1537,12 +1558,43 @@ share it, since a binding read by two operands never moves into either.
 Neural networks are declared separately as
 `NeuralDecl = (String, RType, Maybe MultiValue)` and enter the global type
 environment before inference; `ReadNN name param` calls the named network
-at runtime. A `MultiValue` annotation on the declaration becomes a
-`DiscreteValues` tag (`Analysis.hs`), which is what lets `IRCompiler` pick
-enum-aware algorithms for downstream comparisons — except that an
-annotation containing a continuous leaf anywhere (`Real`, incl. `_` on a
-`Float` slot) is declined entirely, since enumerating only the discrete
-residue would silently drop continuous mass.
+at runtime.
+
+**No `of` is `of _`, and every read is tagged** (task
+`of-annotation-and-auto-derived-enumeration-divergence`). `Prelude.compile`
+first resolves each declaration's annotation once (`resolveNeuralDecls` over
+`Lang.resolveNeuralAnnotation`): the declaration's own clause, else the
+registry's entry for its type, else `_`, with every `_` auto-derived in place
+and every written part kept as written. A `_` auto-derivation refuses (an
+`Int`/`Symbol` slot, a recursive type with no depth, mutual recursion) is a
+`CompilerError` naming the declaration and the slot (`at slot snd.fromLeft`).
+The plan engine's layout and Analysis's `DiscreteValues` tag on the `ReadNN`
+both come from that one value, so no `of`, `of _` and the equivalent written
+clause compile to the same bytes (`Internals`' `neural annotation spellings
+compile identically`). Before, only a *written* clause tagged the read, so the
+two spellings took different engines.
+
+A tag may carry a **continuous leaf**: it is then the node's value *shape*,
+not an enumeration. Every consumer that loops over a tag refuses one
+(`IRCompiler.isEnumerable`, `Modality.finFromTags`, DrawSinking, the budget
+gate's `enumeratedCount`), and listing finds no values in it. Accessors read
+through it, so `fst p` off an `(Int, Float) of ([0,1,2], Real)` read is an
+ordinary enumerable `[0,1,2]` (`plan-enumeration/ofRealBesideDiscreteSlot*`).
+It used to drop the whole tag. The read itself still has no dense path while
+its domain is mixed (`known-issues/ofAnnotationRealLeafCounting`, task
+`of-annotation-continuous-leaf-disables-enumeration`).
+
+**Structural propagation.** Analysis computes the tags of `fst`/`snd`,
+`fromLeft[Partial]`/`fromRight[Partial]`, `isLeft`/`isRight`, ADT field
+accessors, constructor tests and constructors (`TCons`, `left`/`right`, ADT
+constructors) on the operand's `MultiValue` itself (`Analysis.structuralTag`),
+never listing the cross product it stands for. Listing (`listedTag`) is the
+reference: wherever both answer they agree exactly, in canonical form
+(`Internals`' `structural enum propagation agrees with listing`, over every
+corpus node). A non-canonical operand (a tuple constant is a flat
+`MultiDiscretes [VTuple ..]`) falls back to listing. Listing had made a 3^12
+tuple read with an `of` uncompilable: `fst s` needed 2·3^11 cross-product
+elements to see all three colours.
 
 The `of ...` clause mirrors the output `RType`:
 

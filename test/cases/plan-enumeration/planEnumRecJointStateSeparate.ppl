@@ -3,6 +3,11 @@
 -- observation, so `psMerge` is off and this compiles via the milestone-2
 -- world-per-path enumeration. Expected values are identical to the fused
 -- twin's -- together they pin that joint-state fusion preserves semantics.
+-- Since task of-annotation-and-auto-derived-enumeration-divergence every read
+-- is tagged with its resolved annotation, so this program (under the dense
+-- budget) enumerates densely by default, exactly as its `of` spelling does.
+-- The plan engine is checked on it at budget 0 by End2End's
+-- PlanEngineMatchesDense.
 data Color = Red | Green | Blue
 data Size = Small | Large
 data Object = Nil | Obj color::Color, size::Size

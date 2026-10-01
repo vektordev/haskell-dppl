@@ -1,0 +1,8 @@
+-- The discrete slot of a `([0, 1, 2], Real)` read combined with a comparison
+-- on its continuous slot, off the same draw (task
+-- of-annotation-and-auto-derived-enumeration-divergence). Plan: [0.2, 0.3,
+-- 0.5, mu = 0.0, sigma = 1.0], so P(snd p > 0) = 0.5 independently of fst p:
+-- p(k) = P(fst = k) * 0.5 + P(fst = k - 1) * 0.5.
+neural readPair :: (Symbol -> (Int, Float)) of ([0, 1, 2], Real)
+
+main sym = draw p = readPair sym in (fst p) + (if snd p > 0.0 then 1 else 0)

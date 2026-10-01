@@ -2466,6 +2466,9 @@ toIRInference meta True (Expr TypeInfo{rType=rt} (Apply l v)) sample | pType (ge
 -- factorizes over the 'PartitionPlan' slots without ever materializing the support.
 -- Under budget nothing changes: every program the suite already routes here still
 -- routes here, so this is strictly a refusal to blow up, not a reordering.
+-- Since every read is tagged with its resolved annotation, written or not (task
+-- of-annotation-and-auto-derived-enumeration-divergence), this order -- dense
+-- first, plan above the budget -- holds for every neural read alike.
 toIRInference meta cumulative (Expr TypeInfo {rType=_} (Apply l v)) sample
   | isEnumerableApplication l v
   , enumerationWithinMaterializationBudget meta (tags (getTypeInfo v)) =

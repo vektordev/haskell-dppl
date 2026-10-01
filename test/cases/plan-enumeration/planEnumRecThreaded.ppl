@@ -3,6 +3,11 @@
 -- (function, plan offset, det args) and the two flag states share memo
 -- entries per level. Expected value hand-computed (exactly one green object
 -- among up to 3, greens g=[.24,.42,.30], lengths s=[.7,.6,.5]): 0.2586192.
+-- Since task of-annotation-and-auto-derived-enumeration-divergence every read
+-- is tagged with its resolved annotation, so this program (under the dense
+-- budget) enumerates densely by default, exactly as its `of` spelling does.
+-- The plan engine is checked on it at budget 0 by End2End's
+-- PlanEngineMatchesDense.
 data Color = Red | Green | Blue
 data Object = NoObj | Obj color::Color
 data Scene = Empty | SCons obj::Object, rest::Scene depth 3

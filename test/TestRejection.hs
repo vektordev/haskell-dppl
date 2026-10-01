@@ -1,3 +1,4 @@
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE PatternSynonyms #-}
 module TestRejection (rejectionTests) where
 
@@ -62,6 +63,7 @@ rejectionTests = testGroup "Rejection"
   , typeErrorDiagnosticTests
   , knownHeadArityTests
   , parseErrorLocationTests
+  , neuralAnnotationTests
   ]
 
 -- ----------------------------------------------------------------------------
@@ -1576,4 +1578,64 @@ parseErrorLocationTests = testGroup "ParseErrorLocation" $
         case tryParseProgram "prog.spll" src of
           Left e -> assertFailure ("rejected " ++ show src ++ ": " ++ errorBundlePretty e)
           Right _ -> return ()
+  ]
+
+-- ----------------------------------------------------------------------------
+-- A neural declaration's annotation is resolved once, up front, and a `_` (or
+-- a missing `of`, which means `of _`) that auto-derivation refuses is a
+-- graceful diagnostic naming the declaration and the slot -- not an uncaught
+-- 'error' from wherever the plan happens to be forced first (task
+-- of-annotation-and-auto-derived-enumeration-divergence).
+-- ----------------------------------------------------------------------------
+
+-- | The compile refusal for @src@, forced in full so a refusal thrown as an
+-- exception rather than returned as a 'Left' fails the test.
+annotationRefusal :: String -> IO String
+annotationRefusal src = case tryParseProgram "prog.spll" src of
+  Left err -> assertFailure ("test program failed to parse: " ++ errorBundlePretty err)
+  Right p -> do
+    r <- try (evaluate (either (\e -> length e `seq` Left e) (const (Right ())) (compile defaultCompilerConfig p)))
+    case r of
+      Left (ex :: SomeException) -> assertFailure ("refusal escaped as an exception: " ++ show ex)
+      Right (Right ()) -> assertFailure "program with an unresolvable annotation compiled"
+      Right (Left e) -> return e
+
+neuralAnnotationTests :: TestTree
+neuralAnnotationTests = testGroup "NeuralAnnotation"
+  [ testCase "`of _` over an Int names the declaration" $ do
+      msg <- annotationRefusal (unlines
+        [ "neural digit :: (Symbol -> Int) of _"
+        , "main s = digit s" ])
+      assertBool ("expected the declaration and Int in: " ++ msg)
+        ("'digit'" `isInfixOf` msg && "Int" `isInfixOf` msg)
+  , testCase "a missing `of` over an Int is the same refusal" $ do
+      msg <- annotationRefusal (unlines
+        [ "neural digit :: (Symbol -> Int)"
+        , "main s = digit s" ])
+      assertBool ("expected the declaration and Int in: " ++ msg)
+        ("'digit'" `isInfixOf` msg && "Int" `isInfixOf` msg)
+  , testCase "a `_` inside a written clause names its slot" $ do
+      msg <- annotationRefusal (unlines
+        [ "neural pair :: (Symbol -> (Bool, Int)) of ([True, False], _)"
+        , "main s = pair s" ])
+      assertBool ("expected slot snd in: " ++ msg) ("at slot snd" `isInfixOf` msg)
+  , testCase "a `_` over an ADT names the field" $ do
+      msg <- annotationRefusal (unlines
+        [ "data Obj = Obj n::Int, b::Bool"
+        , "neural o :: (Symbol -> Obj)"
+        , "main s = o s" ])
+      assertBool ("expected slot n in: " ++ msg) ("at slot n" `isInfixOf` msg)
+  , testCase "a recursive ADT with no depth asks for one" $ do
+      msg <- annotationRefusal (unlines
+        [ "data L = E | C h::Bool, t::L"
+        , "neural l :: (Symbol -> L)"
+        , "main s = l s" ])
+      assertBool ("expected the depth hint in: " ++ msg) ("depth" `isInfixOf` msg)
+  , testCase "mutually recursive ADTs are refused rather than looping" $ do
+      msg <- annotationRefusal (unlines
+        [ "data A = A1 | A2 b::B"
+        , "data B = B1 | B2 a::A"
+        , "neural n :: (Symbol -> A)"
+        , "main s = isA1 (n s)" ])
+      assertBool ("expected mutual recursion named in: " ++ msg) ("mutually recursive" `isInfixOf` msg)
   ]

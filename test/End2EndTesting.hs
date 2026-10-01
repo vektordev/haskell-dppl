@@ -76,6 +76,70 @@ selectPassDifferentialTests = do
     , let scalarEnv  = compile defaultCompilerConfig p
     , let batchedEnv = compile defaultCompilerConfig{batched = True} p ]
 
+-- | The plan engine against dense enumeration, at every interpreter-routed,
+-- non-slow query point of a neural corpus program (task
+-- of-annotation-and-auto-derived-enumeration-divergence). Every neural read is
+-- tagged with its resolved annotation, so dense enumeration takes every
+-- under-budget domain first and the plan engine is reached by default only
+-- above the budget. Budget 0 sends the same programs to the plan engine;
+-- wherever both answer, they must agree.
+--
+-- A program with no engine at budget 0 -- the compile refuses, or, as most
+-- refusals surface, its probability body refuses when run -- is not compared:
+-- dense enumeration is its only engine, and its own .tst rows check it.
+-- Except for 'planEngineCorpus', the programs that reached the plan engine by
+-- default before, which must still answer here.
+--
+-- Non-neural programs are left out: budget 0 reaches no plan engine there, and
+-- it answers some of them wrongly for a reason of its own (`p(Right ANY)` of
+-- `observe` programs is 0 at budget 0; docs task
+-- materialization-budget-zero-observe-any-wrong).
+planEngineDifferentialTests :: IO TestTree
+planEngineDifferentialTests = do
+  files <- getAllTestFiles
+  cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
+  let entries = [ (takeBaseName pplPath, p, tcs)
+                | ((pplPath, _), (p, (bs, slow, _ef, tcs))) <- zip files cases
+                , not slow, Interpreter `elem` bs, not (null (neurals p)) ]
+      missing = filter (`notElem` [n | (n, _, _) <- entries]) planEngineCorpus
+  return $ testGroup "PlanEngineMatchesDense" $
+    [ testProperty "the programs that must reach the plan engine are in the corpus" $
+        counterexample ("not found: " ++ show missing) (null missing) ]
+    ++
+    [ testProperty n (once $ conjoin (map (planMatchesDense n p planEnv denseEnv) tcs))
+    | (n, p, tcs) <- entries
+    , let planEnv  = compile defaultCompilerConfig{materializationCardinality = 0} p
+    , let denseEnv = compile defaultCompilerConfig p ]
+
+-- | The corpus programs whose default compile took the plan engine until every
+-- read was tagged, and which now enumerate densely by default. They were
+-- written to exercise the plan engine, so at budget 0 they must answer. Three
+-- more moved but are `slow` and so outside this group's pool:
+-- planEnumRecJointState, planEnumRecWeightedCount and
+-- planEnumRecAlternatingWeightCount.
+planEngineCorpus :: [String]
+planEngineCorpus =
+  [ "adtNeuralSingleCtorNested", "planEnumInline", "planEnumInlineADT", "planEnumInlineBool"
+  , "planEnumRecChain", "planEnumRecCount"
+  , "planEnumRecJointStateSeparate", "planEnumRecNilCtor"
+  , "planEnumRecScan", "planEnumRecThreaded"
+  , "planMultiReaderInnerDraw", "planMultiReaderPlusIf", "planMultiReaderTuplePair" ]
+
+planMatchesDense :: String -> Program -> Either CompilerError IREnv -> Either CompilerError IREnv -> TestCase -> Property
+planMatchesDense n p planEnv denseEnv tc = case tc of
+  ProbTestCase  name sample params _ -> cmp (name ++ " p" ++ show (sample, params)) (\c -> runProbC  p c params sample)
+  CumulTestCase name sample params _ -> cmp (name ++ " cdf" ++ show (sample, params)) (\c -> runIntegC p c params sample)
+  _ -> property True
+  where
+    cmp name run = ioProperty $ do
+      plan  <- forceResult (planEnv >>= run)
+      dense <- forceResult (denseEnv >>= run)
+      return $ case plan of
+        Left err | n `notElem` planEngineCorpus -> property True
+                 | otherwise -> counterexample (name ++ ": the plan engine did not answer: " ++ err) False
+        Right _ -> counterexample (name ++ ": plan " ++ show plan ++ " /= dense " ++ show dense)
+                     (resultsAgree plan dense)
+
 -- | Assert one corpus query point is unchanged by the select pass. Non-query
 -- cases (writeLogits/argmax) are skipped: the pass only touches prob/integ bodies.
 -- Takes the program's scalar/batched compiles already done, shared across

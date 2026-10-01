@@ -27,7 +27,7 @@ import TestModalityInfer (modalityInferTests)
 import TestDeterminism (determinismTests)
 import TestWriteLogitsProperties (writeLogitsTests, writeLogitsRoundtripTests)
 import TestShowcase (showcaseTests)
-import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, batchedPythonTests, slowBatchedPythonTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, deepExpressionSpillTests, batchedEnumBucketingTests, branchCountBackendTests)
+import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, planEngineDifferentialTests, batchedPythonTests, slowBatchedPythonTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, deepExpressionSpillTests, batchedEnumBucketingTests, branchCountBackendTests)
 import TestKnownIssues (knownIssuesTests)
 import TestRewrites (rewriteTests, rewriteCorpusTests)
 import TestPythonPrelude (pythonPreludeTests)
@@ -512,6 +512,7 @@ main = do
   if isNothing hideSuccesses then setEnv "TASTY_HIDE_SUCCESSES" "true" else return ()
   e2e <- end2endTests
   selectDiff <- selectPassDifferentialTests
+  planDiff <- planEngineDifferentialTests
   batchedPy <- batchedPythonTests
   branchCountBackends <- branchCountBackendTests
   detTests <- determinismTests
@@ -572,6 +573,7 @@ main = do
     , rewriteTests
     , e2e
     , selectDiff
+    , planDiff
     , batchedPy
     , batchedRefusalTests
     , batchedAdtCdfNaNGuardTests
