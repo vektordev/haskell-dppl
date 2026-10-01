@@ -1,0 +1,7 @@
+data DigitList = DEnd | DCons dig::Int, rest::DigitList depth 4
+
+neural readDigits :: (Symbol -> DigitList) of 4x.{DEnd | DCons [0,1,2,3,4,5,6,7,8,9] x}
+
+sevens ds = if isDEnd ds then 0 else (if dig ds == 7 then 1 else 0) + sevens (rest ds)
+
+main sym = sevens (readDigits sym)
