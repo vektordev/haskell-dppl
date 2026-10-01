@@ -1,6 +1,6 @@
 module JuliaSPPLLib
 
-export safe_log, categorical_index, density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, log_density_IRUniform, log_density_IRNormal, log_cumulative_IRUniform, log_cumulative_IRNormal, logsumexp, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, mapList, eq, isPossible, isclose, indexOf, listProd, T, Either, Left, Right, fromLeft, fromRight,==
+export safe_log, categorical_index, density_IRUniform, density_IRNormal, cumulative_IRUniform, cumulative_IRNormal, log_density_IRUniform, log_density_IRNormal, log_cumulative_IRUniform, log_cumulative_IRNormal, logsumexp, isAny, InferenceList, EmptyInferenceList, AnyInferenceList, ConsInferenceList, length, getindex, head, tail, prepend, mapList, eq, isPossible, isclose, indexOf, listProd, listConcat, T, Either, Left, Right, fromLeft, fromRight,==
 
 
 function isAny(x)
@@ -358,6 +358,10 @@ end
 function listProd(lst::InferenceList)
     prod(lst)
 end
+
+listConcat(lst1::EmptyInferenceList, lst2::InferenceList) = lst2
+listConcat(lst1::ConsInferenceList, lst2::InferenceList) =
+    ConsInferenceList(head(lst1), listConcat(tail(lst1), lst2))
 
 function isclose(a::Float64, b::Float64)
     return abs(a - b) <= 10e-10

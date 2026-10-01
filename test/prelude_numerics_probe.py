@@ -68,6 +68,7 @@ LIST_FLOAT_PATH = {"logsumexp"}
 NOT_FLOAT_PATH = {
   "rand", "randn", "categorical_index", "isAny", "eq", "isclose", "throw",
   "fromLeft", "fromRight", "toList", "mapList", "indexOf", "listProd",
+  "listConcat",
   "isPossible",
 }
 

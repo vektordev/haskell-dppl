@@ -357,6 +357,17 @@ def listProd(lst):
   elif isinstance(lst, ConsInferenceList):
     return lst.value * listProd(lst.next)
     
+def listConcat(lst1, lst2):
+  # Iterative rather than recursive like its interpreter twin
+  # (StandardLibrary.stdListConcat): a writeLogits vector can be longer than
+  # Python's recursion limit.
+  if isinstance(lst1, AnyInferenceList):
+    raise ValueError("Cannot concatenate an AnyList")
+  back = lst2
+  for x in reversed(list(lst1)):
+    back = ConsInferenceList(x, back)
+  return back
+
 def isPossible(multiVal, expr):
   if multiVal[0] == "C":
     return True

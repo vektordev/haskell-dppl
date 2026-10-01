@@ -490,8 +490,10 @@ testJuliaFreeNamesEscaped programs = ioProperty $ do
   where
     forceList xs = length (concat xs) `seq` xs
 
--- | Names a Julia source calls (@name(@) or type-tests (@isa Name@) that it
--- does not itself define (@function name(@, @struct Name@, or @name(...) =@ /
+-- | Names a Julia source calls (@name(@, or parenthesised as @(name)(@, which
+-- is how codegen spells every application -- the shape @(listConcat)(..)@
+-- slipped through as, task writelogits-text-backends-broken) or type-tests
+-- (@isa Name@) that it does not itself define (@function name(@, @struct Name@, or @name(...) =@ /
 -- @name = @ at the start of a line). String literals and @#@ comments are
 -- removed first.
 juliaFreeReferences :: String -> [String]
@@ -499,14 +501,29 @@ juliaFreeReferences src = nub [ x | x <- used, x `notElem` defined ]
   where
     code = stripJulia src
     ls = lines code
-    defined = concatMap definedOn ls
+    defined = concatMap definedOn ls ++ letBound code
+    -- an inline @let name = ...;@, which codegen emits for an IR let mid-expression
+    letBound str = case str of
+      [] -> []
+      ('l':'e':'t':' ':more) -> takeWhile isIdentChar more : letBound more
+      (_:more) -> letBound more
     definedOn l = case words l of
-      ("function" : rest : _) -> [takeWhile isIdentChar rest]
+      -- the function and its parameters: a higher-order parameter is called
+      -- as @(f)(x)@, which the parenthesised-callee rule below reads as a use
+      ("function" : _) -> functionNames (drop (length "function") (dropWhile (== ' ') l))
       ("struct" : rest : _)   -> [takeWhile isIdentChar rest]
       ("mutable" : "struct" : rest : _) -> [takeWhile isIdentChar rest]
       (w : _) | not (null (takeWhile isIdentChar w)), isAlpha (head w) || head w == '_'
               -> [takeWhile isIdentChar w]
       _ -> []
+    -- @name(a, b)@ -> the name and every parameter (each up to a @::@ or @=@)
+    functionNames sig =
+      let (fname, rest) = span isIdentChar (dropWhile (== ' ') sig)
+          params = takeWhile (/= ')') (drop 1 rest)
+      in fname : [ takeWhile isIdentChar (dropWhile (== ' ') prm) | prm <- splitOn ',' params ]
+    splitOn ch str = case break (== ch) str of
+      (x, [])       -> [x]
+      (x, _ : more) -> x : splitOn ch more
     used = scan ' ' code
     scan _ [] = []
     scan prev s@(c:_)
@@ -514,7 +531,7 @@ juliaFreeReferences src = nub [ x | x <- used, x `notElem` defined ]
           let (ident, rest) = span isIdentChar s
           in if ident == "isa"
                then let (t, r) = span isIdentChar (dropWhile (== ' ') rest) in t : scan ' ' r
-               else [ ident | take 1 rest == "(" ] ++ scan (last ident) rest
+               else [ ident | take 1 rest == "(" || (prev == '(' && take 2 rest == ")(") ] ++ scan (last ident) rest
     scan _ (c:rest) = scan c rest
     isIdentChar ch = isAlphaNum ch || ch == '_' || ch == '!'
 
@@ -567,6 +584,91 @@ pythonTestScript projectDir netNames compiled tc =
   where
     src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True compiled)
     mockDefs = concatMap (\nm -> "def " ++ nm ++ "(s):\n    return s\n") netNames
+
+-- | One writeLogits row as the text backends check it: the endpoint, its
+-- arguments as the emitted function takes them, and what to assert about the
+-- returned vector. The arguments are 'writeLogitsArgsFor''s, with a mock-NN
+-- envelope resolved to the raw vector the identity mock passes through, as
+-- 'resolveNeuralTestCase' does for a query row (only @main@'s parameters feed
+-- a network, so only @main@'s are resolved).
+data WriteLogitsRow = WriteLogitsRow
+  { wlName   :: String
+  , wlTarget :: String
+  , wlArgs   :: [IRValue]
+  , wlCheck  :: WriteLogitsCheck }
+
+-- | The vector's length, or (0-based) slot index and expected value.
+data WriteLogitsCheck = WLLength Int | WLSlot Int Double
+
+writeLogitsRow :: Program -> TestCase -> WriteLogitsRow
+writeLogitsRow p tc = case tc of
+  WriteLogitsLengthTestCase n t ex len -> WriteLogitsRow n t (argsFor t ex) (WLLength len)
+  WriteLogitsSlotTestCase n t ex v e   -> WriteLogitsRow n t (argsFor t ex) (WLSlot (planIndexOf (endpointPlan p t) v) e)
+  _ -> error ("writeLogitsRow: not a writeLogits row: " ++ testCaseName tc)
+  where
+    argsFor t ex = (if t == "main" then resolveNeuralParams p else id) (writeLogitsArgsFor p ex)
+
+-- | Each row calls the endpoint's emitted @writeLogits@ method and raises on a
+-- wrong length or slot, so exit 0 means every row matched.
+testPythonWriteLogits :: [String] -> Either CompilerError IREnv -> [WriteLogitsRow] -> Property
+testPythonWriteLogits netNames compiledE rows = ioProperty $ case compiledE of
+  Left err -> return $ counterexample err False
+  Right compiled -> do
+    projectDir <- getCurrentDirectory
+    let src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True compiled)
+        script = "import sys\nsys.path.insert(0, " ++ show projectDir ++ ")\n"
+          ++ concatMap (\nm -> "def " ++ nm ++ "(s):\n    return s\n") netNames
+          ++ unpack (replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n") (pack src))
+          ++ "\n" ++ concatMap row rows
+        row r =
+          "_wl = list(" ++ wlTarget r ++ ".writeLogits(" ++ intercalate ", " (map pyVal (wlArgs r)) ++ "))\n"
+          ++ case wlCheck r of
+               WLLength n ->
+                 "if len(_wl) != " ++ show n ++ ":\n\
+                 \  raise ValueError(\"writeLogits length \" + str(len(_wl)) + \" != " ++ show n ++ " in test case " ++ wlName r ++ "\")\n"
+               WLSlot i e ->
+                 "if not (" ++ show i ++ " < len(_wl) and abs(_wl[" ++ show i ++ "] - " ++ pyVal (VFloat e) ++ ") < " ++ show writeLogitsSlotTolerance ++ "):\n\
+                 \  raise ValueError(\"writeLogits slot " ++ show i ++ " wrong: \" + str(_wl) + \" in test case " ++ wlName r ++ "\")\n"
+    code <- withSystemTempFile "spll_writelogits.py" $ \tmpPath tmpHandle -> do
+      hPutStr tmpHandle script
+      hClose tmpHandle
+      (_, _, _, handle) <- createProcess (proc "python3" [tmpPath])
+      waitForProcess handle
+    return $ case code of
+      ExitSuccess -> property True
+      ExitFailure _ -> counterexample ("Python writeLogits test " ++ wlName (head rows) ++ " failed. See Python error message") False
+
+-- | The Julia twin of 'testPythonWriteLogits', every program in one julia
+-- process (one module each), like 'testJuliaAll'.
+testJuliaWriteLogitsAll :: [(Either CompilerError IREnv, [WriteLogitsRow], [String])] -> Property
+testJuliaWriteLogitsAll programs = ioProperty $ case [err | (Left err, _, _) <- programs] of
+  (err:_) -> return $ counterexample err False
+  [] -> do
+    projectDir <- getCurrentDirectory
+    let body = concatMap (\(idx, (c, rows, nets)) ->
+          let m = "WLProg" ++ show (idx :: Int)
+          in "module " ++ m ++ "\nusing ..JuliaSPPLLib\n"
+             ++ concatMap (\nm -> nm ++ "(s) = s\n") nets
+             ++ intercalate "\n" (SPLL.CodeGenJulia.generateFunctions c) ++ "\nend\n"
+             ++ concatMap (row m) rows) (zip [0 ..] [ (c, rows, nets) | (Right c, rows, nets) <- programs ])
+        row m r =
+          "_wl = collect(" ++ m ++ "." ++ wlTarget r ++ "_writeLogits(" ++ intercalate ", " (map (juliaVal . qualifyConstructors m) (wlArgs r)) ++ "))\n"
+          ++ case wlCheck r of
+               WLLength n ->
+                 "if length(_wl) != " ++ show n ++ "\n\
+                 \  error(\"writeLogits length \" * string(length(_wl)) * \" != " ++ show n ++ " in test case " ++ wlName r ++ "\")\nend\n"
+               WLSlot i e ->
+                 "if !(" ++ show i ++ " < length(_wl) && abs(_wl[" ++ show (i + 1) ++ "] - " ++ juliaVal (VFloat e) ++ ") < " ++ show writeLogitsSlotTolerance ++ ")\n\
+                 \  error(\"writeLogits slot " ++ show i ++ " wrong: \" * string(_wl) * \" in test case " ++ wlName r ++ "\")\nend\n"
+        script = "include(\"" ++ projectDir ++ "/juliaLib.jl\")\nusing .JuliaSPPLLib\n" ++ body
+    code <- withSystemTempFile "julia_writelogits.jl" $ \tmpPath tmpHandle -> do
+      hPutStr tmpHandle script
+      hClose tmpHandle
+      (_, _, _, handle) <- createProcess (proc "julia" [tmpPath])
+      waitForProcess handle
+    return $ case code of
+      ExitSuccess -> property True
+      ExitFailure _ -> counterexample "Julia writeLogits batch failed. See Julia error message above." False
 
 juliaBatchTestCode :: FilePath -> [(String, [TestCase], [String])] -> String
 juliaBatchTestCode projectDir allCases =
@@ -2644,6 +2746,11 @@ buildEnd2EndTree treeName includeBackends compiledCases = testGroup treeName $
           routedQueries b =
             [ (n, c, if null (neurals p) then tcs else map (resolveNeuralTestCase p) tcs, networkNames p)
             | (n, p, c, bs, tcs) <- queryTestCases, b `elem` bs, not (null tcs) ]
+          routedWriteLogits b =
+            [ (n, c, map (writeLogitsRow p) wls, networkNames p)
+            | (n, p, c, bs, tcs) <- compiledCases, b `elem` bs
+            , let wls = filter (\x -> isWriteLogitsLengthTestCase x || isWriteLogitsSlotTestCase x) tcs
+            , not (null wls) ]
           unoptQueries b = [(n, c, tcs') | (n, p, c, bs, tcs) <- unoptCases, b `elem` bs, null (neurals p)
                            , n `elem` unoptimizedCodegenSmoke
                            , n `notElem` unoptimizedCodegenExempt
@@ -2658,6 +2765,13 @@ buildEnd2EndTree treeName includeBackends compiledCases = testGroup treeName $
              (once $ testJuliaFreeNamesEscaped [ (n, c, networkNames p) | (n, p, Right c, bs, _) <- compiledCases, Julia `elem` bs ])
          , testGroup "Python"
              [ testProperty n (once $ testPython nets c tcs) | (n, c, tcs, nets) <- routedQueries Python ]
+         -- writeLogits rows used to run on the interpreter only, which is how
+         -- every text-backend writeLogits but a flat discrete one shipped
+         -- crashing (task writelogits-text-backends-broken).
+         , testGroup "Python WriteLogits"
+             [ testProperty n (once $ testPythonWriteLogits nets c rows) | (n, c, rows, nets) <- routedWriteLogits Python ]
+         , testProperty "Julia WriteLogits"
+             (once $ testJuliaWriteLogitsAll [ (c, rows, nets) | (_, c, rows, nets) <- routedWriteLogits Julia ])
          -- The same corpus through the text backends at -O0. See
          -- \'unoptCases\' for why this is not merely a duplicate of the
          -- optimized groups. None of 'unoptimizedCodegenSmoke' is neural, so

@@ -1597,6 +1597,16 @@ the data flow rather than for "encode"/"decode" — those words used to collide
 - The registry keyword is `neural writeLogits :: T of M`
   (`SPLL.Lang.Types.writeLogitsDecls`), and the `.tst` probes are
   `writeLogits_len`/`writeLogits_at` (`TestCaseParser`).
+- The text backends run the `.tst` `writeLogits_len`/`writeLogits_at` rows too
+  (End2End's `Python WriteLogits` group and `Julia WriteLogits` batch). Until
+  task `writelogits-text-backends-broken` only the interpreter did, and every
+  emitted writeLogits but a flat discrete one crashed: the IR standard library's
+  `listConcat` existed only in the interpreter (it is now mirrored in
+  `pythonLib.py`/`juliaLib.jl` like `indexOf`/`listProd`), a nullary normal
+  function was referenced but never called (the backends' `callableNames` now
+  include nullary normal functions), and a tuple component's normal function was
+  defined under its group's name rather than the one the IR calls it by
+  (`ReservedNames.componentNormalName` is the one spelling of that rule).
 - A third, historical direction (`source -> Symbol`, once called "Encoder")
   named an external network with no SPLL call site; it has been removed and
   is rejected at validation (`SPLL.Validator.validateNeuralShape`).

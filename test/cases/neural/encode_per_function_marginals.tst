@@ -1,4 +1,4 @@
-backends: interpreter
+backends: interpreter, julia, python
 writeLogits_len[isRed](0.3)=2
 writeLogits_at[isRed](0.3, indexOf(True))~=0.3
 writeLogits_len[isBig](0.3)=2

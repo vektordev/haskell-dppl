@@ -17,7 +17,8 @@ import Control.Monad.Except (ExceptT, runExceptT, throwError)
 import Statistics.Distribution.Normal (normalDistr)
 import Data.Number.Erf
 import Data.Maybe (fromJust, fromMaybe, isJust, catMaybes)
-import Data.List (isSuffixOf, isPrefixOf)
+import Data.List (isSuffixOf)
+import SPLL.ReservedNames (componentNormalName)
 import SPLL.Lang.Types
 import SPLL.Typing.RType
 import Data.Functor ((<&>))
@@ -671,12 +672,11 @@ reduceIREnv :: IREnv -> ReducedIREnv
 reduceIREnv (IREnv funcs _ consts) =
   map (\(name, val) -> (name, IRConst val)) consts ++
   concatMap (\(IRFunGroup name gen prob integ writeLogits normal _ _) ->
-    -- Special handling for per-component normal functions (created with "_component_" prefix)
-    if "_component_" `isPrefixOf` name then
-      -- Extract the actual component name and register without suffix
-      let componentName = drop 11 name  -- Remove "_component_" prefix
-      in catMaybes [normal <&> \(expr, _) -> (componentName, expr)]
-    else
+    -- A per-component normal group registers its normal function under the bare
+    -- component name, with no suffix (SPLL.ReservedNames.componentNormalName).
+    case componentNormalName name of
+     Just componentName -> catMaybes [normal <&> \(expr, _) -> (componentName, expr)]
+     Nothing ->
       catMaybes [gen <&> red name "_gen", prob <&> red name "_prob", integ <&> red name "_integ", writeLogits <&> red name "_writeLogits", normal <&> red name "_normal"]) funcs
   where red name suffix (expr, _) = (name ++ suffix, expr)
 

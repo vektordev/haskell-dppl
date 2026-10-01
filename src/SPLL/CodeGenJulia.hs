@@ -6,7 +6,7 @@ module SPLL.CodeGenJulia (
 ) where
 
 import SPLL.IntermediateRepresentation
-import SPLL.ReservedNames (juliaKeywords, isJuliaReserved)
+import SPLL.ReservedNames (juliaKeywords, isJuliaReserved, componentNormalName)
 import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.Lang.Lang
 import Data.List (intercalate, dropWhileEnd)
@@ -203,6 +203,11 @@ generateFunctions env0 = do
                       -- otherwise the bare struct type never compares equal to an
                       -- instance (same rule as CodeGenPyTorch's callableNames).
                       ++ [ juliaMangle cName | decl <- adtDecls, (cName, fields) <- constructors decl, null fields ]
+                      -- a nullary normal function is referenced by a bare name
+                      -- too, and writeLogits indexes its (mu, sigma) result
+                      ++ [ normalFnName n
+                         | IRFunGroup{groupName=n, normalFun=Just (e, _)} <- funcs
+                         , null (fst (unwrapLambdas e)) ]
   let funcGroupsMonadic = concatMapM generateFunctionGroup funcs
   let (funcStrs, (globalVars, _)) = evalSupply $ runStateT funcGroupsMonadic ([], callableNames)
   let varsStr = map (\(mv, name)-> name ++ " = " ++ juliaMultiVal mv) globalVars
@@ -215,9 +220,16 @@ generateFunctionGroup IRFunGroup {groupName=n, genFun=g, probFun=p, integFun=i, 
   prob <- fromMaybe (return []) (p <&> genF n "_prob")
   integ <- fromMaybe (return []) (i <&> genF n "_integ")
   enc <- fromMaybe (return []) (e <&> genF n "_writeLogits")
-  norm <- fromMaybe (return []) (nrm <&> genF n "_normal")
+  norm <- fromMaybe (return []) (nrm <&> \(fnBody, d) -> generateFunction (normalFnName n) d fnBody)
   return $ preemble ++ gen ++ prob ++ integ ++ enc ++ norm
   where genF name suffix (fnBody, d) = generateFunction (name ++ suffix) d fnBody
+
+-- | The name a group's normal function is defined under, which has to be the
+-- name the IR calls it by: @f_normal@, or for a tuple component's own group the
+-- bare component name ('SPLL.ReservedNames.componentNormalName'). It used to be
+-- @_component_f_normal_fst_normal@ while writeLogits called @f_normal_fst@.
+normalFnName :: String -> String
+normalFnName n = fromMaybe (n ++ "_normal") (componentNormalName n)
 
 generateFunction :: String -> String -> IRExpr -> GlobalVariableSupply [String]
 generateFunction name doc expr = do

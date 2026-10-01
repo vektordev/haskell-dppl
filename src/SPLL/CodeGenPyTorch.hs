@@ -13,7 +13,7 @@ module SPLL.CodeGenPyTorch (
 ) where
 
 import SPLL.IntermediateRepresentation
-import SPLL.ReservedNames (pythonKeywords, pythonReservedIdentifiers, isPythonReserved)
+import SPLL.ReservedNames (pythonKeywords, pythonReservedIdentifiers, isPythonReserved, componentNormalName)
 import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.Lang.Types
 import SPLL.Typing.RType (RType(..), shapeRank)
@@ -194,9 +194,18 @@ generateFunctions genBoil env0 =
     let env@(IREnv funcs adtsEnv consts) = mangleUserIdentifiers pyMangle (renameADTIdentifiers pyMangle (desugarSelectEnv env0))
         clsName = groupClassName env
         lut = envToLUT env ++ stdLib
+        -- A nullary function is referenced in the IR by a bare 'IRVar' (there is
+        -- no nullary 'IRApply'), which the interpreter reads as its value; here
+        -- the reference has to become a call. That holds for a nullary normal
+        -- function as much as a generator: writeLogits of @main = Normal * 3.0@
+        -- reads @main_normal@'s (mu, sigma) and indexed the method object.
         callableNames = [ fromMaybe (n ++ "_gen") (lookup (n ++ "_gen") lut)
                         | IRFunGroup{groupName=n, genFun=Just (e, _)} <- funcs
                         , null (fst (unwrapLambdas e)) ]
+                        ++ [ fromMaybe ref (lookup ref lut)
+                           | IRFunGroup{groupName=n, normalFun=Just (e, _)} <- funcs
+                           , null (fst (unwrapLambdas e))
+                           , let ref = normalRefName n ]
                         -- nullary ADT constructors must be emitted as instantiations,
                         -- otherwise the bare class never compares equal to enumerated instances
                         ++ [ pyMangle cName | decl <- adtsEnv, (cName, fields) <- constructors decl, null fields ]
@@ -220,7 +229,15 @@ stdLib :: [(String, String)]
 stdLib = [("in", "contains")]
 
 envToLUT :: IREnv -> [(String, String)]
-envToLUT (IREnv funcs _ _) = concatMap (\IRFunGroup {groupName=n} -> [(n ++ "_gen", n ++ ".generate"), (n ++ "_prob", n ++ ".forward"), (n ++ "_integ", n ++ ".integrate"), (n ++ "_normal", n ++ ".normal_params")]) funcs
+envToLUT (IREnv funcs _ _) = concatMap (\IRFunGroup {groupName=n} -> [(n ++ "_gen", n ++ ".generate"), (n ++ "_prob", n ++ ".forward"), (n ++ "_integ", n ++ ".integrate"), (normalRefName n, n ++ ".normal_params")]) funcs
+
+-- | The name the IR references a group's normal function by: @f_normal@, or the
+-- bare component name for a tuple component's own group
+-- ('SPLL.ReservedNames.componentNormalName'). The component group is emitted as
+-- an instance @_component_f_normal_fst@ whose method is @normal_params@, so
+-- without this a reference to @f_normal_fst@ named nothing.
+normalRefName :: String -> String
+normalRefName n = fromMaybe (n ++ "_normal") (componentNormalName n)
 
 replaceCalls :: [(String, String)] -> IRExpr -> IRExpr
 replaceCalls lut (IRVar name) = IRVar (fromMaybe name $ lookup name lut)

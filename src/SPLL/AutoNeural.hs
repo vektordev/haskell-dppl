@@ -18,10 +18,10 @@ import SPLL.Lang.Types
 import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType
 import SPLL.Lang.Lang
-import SPLL.ReservedNames (neuralReadLogitsSuffix, queryParamName)
+import SPLL.ReservedNames (neuralReadLogitsSuffix, queryParamName, componentNormalName)
 import StandardLibrary
 
-import Data.List (find, elemIndex, isPrefixOf, intercalate)
+import Data.List (find, elemIndex, intercalate)
 import Utils
 import Data.Maybe (fromJust, fromMaybe, isJust, listToMaybe, maybeToList)
 import Control.Applicative ((<|>))
@@ -645,11 +645,8 @@ requiredNormalFns _  (Discretes _ _)   = []
 -- every other group's normal function registers under `<groupName>_normal`.
 availableNormalFns :: IREnv -> [String]
 availableNormalFns (IREnv groups _ _) =
-  [ normalName g | g <- groups, isJust (normalFun g) ]
-  where
-    normalName g
-      | "_component_" `isPrefixOf` groupName g = drop (length "_component_") (groupName g)
-      | otherwise                              = groupName g ++ "_normal"
+  [ fromMaybe (groupName g ++ "_normal") (componentNormalName (groupName g))
+  | g <- groups, isJust (normalFun g) ]
 
 -- MAR semantics for EitherPlan writing are implemented in makeWriteLogitsPlan.
 

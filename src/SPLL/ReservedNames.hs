@@ -54,6 +54,8 @@ module SPLL.ReservedNames
   , writeLogitsSuffix
   , normalSuffix
   , functionVariantSuffixes
+  , componentNormalGroupPrefix
+  , componentNormalName
     -- * Group-name suffixes
   , neuralReadLogitsSuffix
   , maxProductGroupTag
@@ -80,7 +82,7 @@ module SPLL.ReservedNames
   ) where
 
 import Data.Char (isDigit)
-import Data.List (isPrefixOf, isSuffixOf, find)
+import Data.List (isPrefixOf, isSuffixOf, find, stripPrefix)
 import qualified Data.Set as Set
 
 -- ---------------------------------------------------------------------------
@@ -194,6 +196,23 @@ normalSuffix      = "_normal"
 
 functionVariantSuffixes :: [String]
 functionVariantSuffixes = [genSuffix, probSuffix, integSuffix, writeLogitsSuffix, normalSuffix]
+
+-- | A tuple-shaped Gaussian function @f@ also gets one normal-parameter
+-- function per component (@f_normal_fst@, @f_normal_snd@, ...), each hosted by
+-- a group of its own named with this prefix (@_component_f_normal_fst@). The
+-- group has no variant suffix: its normal function is referenced by the bare
+-- component name, which every consumer recovers with 'componentNormalName' --
+-- the interpreter's environment, AutoNeural's availability check, and the
+-- Python/Julia emitters, which have to /define/ the function under the name
+-- the IR calls it by (task writelogits-text-backends-broken). A leading @_@
+-- is already reserved, so no user group can carry the prefix.
+componentNormalGroupPrefix :: String
+componentNormalGroupPrefix = "_component_"
+
+-- | The name a component group's normal function is referenced by, or
+-- 'Nothing' for an ordinary group (whose is @groupName ++ normalSuffix@).
+componentNormalName :: String -> Maybe String
+componentNormalName = stripPrefix componentNormalGroupPrefix
 
 -- | Suffixes beyond the variants: the inverse-derivative binder an inverted
 -- user function gets (@f_prob_deriv@, IRCompiler's higher-order inverse).
@@ -333,7 +352,7 @@ pythonRuntimeValueNames =
   , "fromRight", "fsum", "functools", "gamma", "gather_dense", "gauss"
   , "gcd", "hypot", "indexOf", "inf", "isAny", "isPossible", "is_ctor"
   , "is_member", "isclose", "isfinite", "isinf", "isnan", "isqrt"
-  , "itertools", "lcm", "ldexp", "lgamma", "listProd", "log", "log10"
+  , "itertools", "lcm", "ldexp", "lgamma", "listConcat", "listProd", "log", "log10"
   , "log1p", "log2", "log_cumulative_normal", "log_cumulative_uniform"
   , "log_density_normal", "log_density_uniform", "logsumexp", "mapList"
   , "math", "modf", "nan", "nextafter", "nn_gather", "perm", "pi", "poison"
@@ -438,7 +457,7 @@ juliaRuntimeNames =
   , "log_cumulative_IRNormal", "logsumexp", "isAny", "InferenceList"
   , "EmptyInferenceList", "AnyInferenceList", "ConsInferenceList", "length"
   , "getindex", "head", "tail", "prepend", "mapList", "eq", "isPossible"
-  , "isclose", "indexOf", "listProd", "T", "Either", "Left", "Right"
+  , "isclose", "indexOf", "listProd", "listConcat", "T", "Either", "Left", "Right"
   , "fromLeft", "fromRight"
   ]
 

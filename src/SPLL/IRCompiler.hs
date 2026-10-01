@@ -24,7 +24,7 @@ module SPLL.IRCompiler (
   enumeratedCount
 )where
 
-import SPLL.ReservedNames (queryParamName, accProbParamName, topKCutoffName, accProbInitName)
+import SPLL.ReservedNames (queryParamName, accProbParamName, topKCutoffName, accProbInitName, componentNormalGroupPrefix)
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
@@ -598,7 +598,7 @@ generateComponentNormalFunction :: CompilerMetadata -> String -> Expr -> TypeInf
 generateComponentNormalFunction meta fullName expr ti
   | (pType ti == PNormal || pType ti == PLogNormal) && isNormalExtractable expr =
       let compiled = compileNormalExpr meta expr
-      in Just $ IRFunGroup ("_component_" ++ fullName)
+      in Just $ IRFunGroup (componentNormalGroupPrefix ++ fullName)
            Nothing
            Nothing
            Nothing
