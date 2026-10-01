@@ -1668,7 +1668,7 @@ current list for whichever binary you run):
 - `test/TestKnownIssues.hs` — drives `test/cases/known-issues/`: pinned
   repros of open compiler bugs, each declaring which of four failure shapes
   it demonstrates (see "Known-issues corpus" below)
-- `test/TestFuzz.hs` — `Fuzz`, inside the opt-in `Slow`/`SuperSlow` groups,
+- `test/TestFuzz.hs` — `Fuzz`, inside the opt-in `Slow`/`Aspirational`/`SuperSlow` groups,
   plus `Shrinker` (the typed generator's shrink contract), which is in the
   default suite
 - `test/TestCaseParser.hs` / `ArbitrarySPLL.hs` / `TestTolerances.hs` — the
@@ -1810,7 +1810,8 @@ the two spellings parse to the same AST, which a unit test pins.
 
 `TestRewrites` applies every family at every site of every interpreter-routed,
 non-neural, non-slow corpus program (one test per program, ~4000 variants,
-~22s) and to the ten probe pairs of law-carrying-modality's evidence table,
+~50 CPU-s; group `RewriteInvarianceCorpus`, which lives in the opt-in `Slow`
+group) and to the ten probe pairs (group `RewriteInvariance`, default suite) of law-carrying-modality's evidence table,
 judging each pair with the three-outcome oracle: both answer → probability and
 dim must agree (hard); original answers, rewrite does not → logged, unless
 `refusalIsHard` has promoted that family (each flips in the commit of the
@@ -1826,26 +1827,85 @@ callee's parameter around the argument's own measure, so `h b` called under an
 enumerated `draw b` measured `b == b` and lost the draw's weight (29 corpus
 programs; `let-bindings/helperParamShadowsEnumeratedDraw`).
 
-### Slow tests
+### Slow and Aspirational tests
 
-**The `Slow` group is currently known-broken** — it is not green, and
-failures there are pre-existing rather than caused by whatever change you
-are making. Do not treat a red `NEST_SLOW_TESTS=1` run as a regression
-without first confirming the same failure on an untouched checkout. The
-default (non-slow) suite is the gate.
+Three tiers, each opt-in by environment variable:
 
-It does, however, **complete**. Each `Fuzz` property carries a whole-property
-wall-clock deadline (120s, `NEST_FUZZ_SCALE`-scalable) on top of its per-case
-one, so a property that would otherwise multiply a high discard rate by a
-5s-per-draw hang now drains its remaining draws as discards and reports "Gave
-up" instead of having to be abandoned. A one-line note on stderr names any
-property that hit it. See `docs/fuzz-testing.md`, "Two budgets".
+| tier | how to run | expected | run it |
+|---|---|---|---|
+| default | `stack test` | **green** | after every step; the gate |
+| `Slow` | `NEST_SLOW_TESTS=1 stack test` | **green** | before a merge or a push |
+| `Aspirational` | `NEST_ASPIRATIONAL_TESTS=1 stack test` | red/flaky, by definition | when working on what it pins |
 
-Tests expensive enough to noticeably slow `stack test` but unlikely to
-catch regressions elsewhere are skipped by default, run via
-`NEST_SLOW_TESTS=1 stack test`: a `.tst` file's `slow` header, a
-`TestInternals.hs` case placed in `slowInternalsTests`, and the whole
-`Fuzz` group.
+(`SuperSlow`, `NEST_SUPERSLOW_TESTS=1`, is the sampling-vs-PDF fuzz tier; see
+`docs/fuzz-testing.md`.)
+
+**`Slow` is expected green.** A red `Slow` run is a regression like a red
+default run, unless it is a `Fuzz` property hitting a new seed-dependent
+failure (see below). It holds tests that are expensive and unlikely to catch
+regressions outside the code they pin: a `.tst` file's `slow` header (honoured
+by `known-issues/` pins too), a `TestInternals.hs` case placed in
+`slowInternalsTests`, the corpus-wide rewrite-invariance sweep, and the `Fuzz`
+properties not listed as aspirational. The depth-4 plan-enumeration stress
+programs (`planHelperOnFoldResult*`, `planFoldDisjunction*`, ~10 s per compile)
+and `planEnumRecJointState` are `slow`; their correctness is pinned at small
+depth by the default suite's polynomial-growth tests. A full `Slow` run takes
+about 4 minutes on 4 cores.
+
+**`Aspirational` holds what we want to guarantee but cannot yet**: tests that
+fail or flake at HEAD. Today that is five `Fuzz` properties
+(`TestFuzz.aspirationalFuzzNames`, each entry with the evidence that put it
+there). Measured 2026-10-01 over three seeds, `TypedCompileNeverCrashes` and
+`ProbNeverGenerateBacked` failed every time. The other three
+(`TopKZeroMatchesExact`, `TopKNeverInflates`,
+`BranchCountingDoesNotChangeProbability`) failed once, on one shared program.
+Rules:
+
+- Moving a test **into** `Aspirational` is how a known-red test stops making
+  `Slow` red. It is not a way to make a change look green. A test your change
+  broke is a regression; it does not go here.
+- Moving a test **out** is part of fixing what it finds: a fix that makes an
+  aspirational property pass moves it back into `Slow` in the same commit.
+- A `Fuzz` property is seed-dependent, so a `Slow` property can still fail on
+  a seed nobody has tried. Treat that as a new finding: reproduce it with its
+  `--quickcheck-replay` seed and file it. Move the property to
+  `Aspirational` only once it is shown to fail repeatably.
+- An `aspirationalFuzzNames` entry naming no property fails the tree build, so
+  the list cannot rot past a rename.
+
+Each `Fuzz` property carries a whole-property wall-clock deadline (120s,
+`NEST_FUZZ_SCALE`-scalable) on top of its per-case one, so a property that
+would otherwise multiply a high discard rate by a 5s-per-draw hang drains its
+remaining draws as discards and reports "Gave up" instead of having to be
+abandoned. A one-line note on stderr names any property that hit it. See
+`docs/fuzz-testing.md`, "Two budgets".
+
+### Test suite time
+
+**Every commit message that reports a test result also reports the default
+suite's wall time against the base it was measured from**: not just
+`1484/1484 green` but `1484/1484 green (45s -> 50s)`. Measure both numbers the
+same way, on the same machine, with a warm build: `stack test` end to end, or
+both test binaries run directly and their times added. Say which. A change
+that moves tests between tiers reports the tier times it affected too. The
+log this produces is how a slowdown gets traced to the commit that caused it.
+The suite has had to be trimmed back repeatedly because nobody saw it grow.
+There is no hard gate yet; the delta is for the audit.
+
+The default suite runs in about a minute on 4 cores (main ~50 s, corpus
+~17 s). What keeps it there, so a regression is recognisable: the test
+binaries run with `-A64m -n4m` (`package.yaml`; the default nursery cost
+~15 s of parallel GC); the Julia End2End batch is split into 4 parallel
+shards run under `julia --compile=min` (one LLVM-compiled batch was a 60 s
+single test); and the batched-eligibility compiles run in parallel while the
+tree is built (`parMapIO`). They are deliberately not deferred into the tests
+that read them: shared lazy results forced by many tasty threads at once is
+the shape that deadlocked the fuzz tier (docs-repo task
+`fuzz-tier-blackhole-deadlock-at-property-start`). Don't introduce
+`unsafeInterleaveIO`/`unsafePerformIO` values that several tests force. When
+the suite slows down, time it per group
+(`--ta '-p "$2==\"End2End\""'`) and look for a single test on the
+critical path before cutting coverage.
 
 ### Benchmarks
 
@@ -1868,7 +1928,7 @@ program (needs a torch-enabled Python, same lookup as `BatchedPython`).
 
 ### Fuzz tests
 
-`test/TestFuzz.hs` (group `Fuzz`, lives inside `Slow`) runs randomly
+`test/TestFuzz.hs` (group `Fuzz`, split between `Slow` and `Aspirational`) runs randomly
 generated SPLL programs (`test/ArbitrarySPLL.hs` — scalars, tuples,
 `Either`, lists and `let`-bindings, the last of which is what reaches the
 set-valued-witness engine) against the same

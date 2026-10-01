@@ -1,3 +1,4 @@
+slow
 backends: python
 expect-failure: broken
 p(True)=(0.3660323412732292, 0.0)

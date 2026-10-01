@@ -24,7 +24,10 @@
 -- program's own @.tst@ query points.
 module TestRewrites (rewriteTests, rewriteCorpusTests) where
 
-import Control.Exception (SomeException, evaluate, try)
+import Control.Concurrent (forkIO, getNumCapabilities)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent.QSem (newQSem, signalQSem, waitQSem)
+import Control.Exception (SomeException, bracket_, evaluate, throwIO, try)
 import Control.Monad (forM, replicateM)
 import Control.Monad.Random.Lazy (evalRandIO)
 import Data.List (intercalate, isInfixOf, nub)
@@ -245,9 +248,23 @@ within _ _ _ = False
 sweep :: String -> Program -> [Query] -> IO [(Family, Verdict)]
 sweep prog p qs = do
   origOut <- runQueries p qs
-  forM [v | fam <- allFamilies, v <- variants fam p] $ \v -> do
-    verdict <- judge prog (variantFamily v) (variantSite v) origOut (variantProgram v) qs
-    return (variantFamily v, verdict)
+  concurrently [ (,) (variantFamily v) <$> judge prog (variantFamily v) (variantSite v) origOut (variantProgram v) qs
+               | fam <- allFamilies, v <- variants fam p ]
+
+-- | Run the actions concurrently, at most one per capability, and return
+-- their results in order (rethrowing the first exception). A program's
+-- variants are independent compiles; run one after another, a program with
+-- many sites (gaussianTrajectory8: 136 variants) was a single ~35 s test on
+-- one core, the longest in the suite. The cap keeps 'runQueries'' timeout
+-- measuring a variant's own work rather than oversubscription.
+concurrently :: [IO a] -> IO [a]
+concurrently acts = do
+  sem <- newQSem =<< getNumCapabilities
+  vars <- forM acts $ \act -> do
+    v <- newEmptyMVar
+    _ <- forkIO (bracket_ (waitQSem sem) (signalQSem sem) (try act) >>= putMVar v)
+    return v
+  forM vars $ \v -> takeMVar v >>= either (\e -> throwIO (e :: SomeException)) return
 
 -- | Turn one program's verdicts into a test: hard verdicts fail it, and so
 -- does a 'knownDivergences' entry for it that nothing matched any more. The

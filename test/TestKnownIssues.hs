@@ -22,9 +22,11 @@
 module TestKnownIssues (knownIssuesTests) where
 
 import Control.Exception (SomeException, evaluate, try)
+import Control.Monad (filterM)
 import Data.List (intercalate, isInfixOf)
 import Data.Maybe (isNothing)
 import System.Directory (doesDirectoryExist, getCurrentDirectory, listDirectory)
+import System.Environment (lookupEnv)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>), isExtensionOf, takeBaseName)
 import System.IO (hClose, hPutStr)
@@ -63,7 +65,18 @@ knownIssueBaseNames = do
 knownIssuesTests :: IO TestTree
 knownIssuesTests = do
   names <- knownIssueBaseNames
-  return $ testGroup "KnownIssues" (map knownIssueTest names)
+  -- A `slow`-headered pin runs only under NEST_SLOW_TESTS, like the slow
+  -- programs of the ordinary corpus. The header is read here, while the tree
+  -- is built, so a skipped pin is absent rather than a passing no-op.
+  runSlow <- maybe False (const True) <$> lookupEnv "NEST_SLOW_TESTS"
+  kept <- filterM (\n -> (runSlow ||) . not <$> isSlow n) names
+  return $ testGroup "KnownIssues" (map knownIssueTest kept)
+  where
+    isSlow n = do
+      let tstPath = knownIssuesDir </> (n ++ ".tst")
+      src <- readFile tstPath
+      (_, slow, _, _) <- either error return (parseTestCasesFromString tstPath src)
+      length src `seq` return slow
 
 knownIssueTest :: String -> TestTree
 knownIssueTest baseName = testCase baseName $ do

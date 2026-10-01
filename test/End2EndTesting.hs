@@ -36,8 +36,9 @@ import Data.Foldable (toList)
 import Test.QuickCheck hiding (sample, verbose)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.QuickCheck (testProperty)
-import Control.Exception (try, evaluate, throwIO, SomeException)
-import Control.Concurrent (forkIO)
+import Control.Exception (try, evaluate, throwIO, SomeException, bracket_)
+import Control.Concurrent (forkIO, getNumCapabilities)
+import Control.Concurrent.QSem (newQSem, waitQSem, signalQSem)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import IRInterpreter (generateRand, generateDet)
 import MockNN (evaluateMockNN)
@@ -255,8 +256,21 @@ parEval xs = do
     return v) xs
   mapM (\v -> takeMVar v >>= either (\e -> throwIO (e :: SomeException)) return) vars
 
+-- | 'mapM' with at most one action per capability running at a time, results
+-- in order (rethrowing the first exception). For setup work done before the
+-- test tree is built: each action's result is whatever the action returns, so
+-- an action must force its own result if the work is to happen on the worker.
+parMapIO :: (a -> IO b) -> [a] -> IO [b]
+parMapIO f xs = do
+  sem <- newQSem =<< getNumCapabilities
+  vars <- mapM (\x -> do
+    v <- newEmptyMVar
+    _ <- forkIO (bracket_ (waitQSem sem) (signalQSem sem) (try (f x)) >>= putMVar v)
+    return v) xs
+  mapM (\v -> takeMVar v >>= either (\e -> throwIO (e :: SomeException)) return) vars
+
 -- Samples are drawn with replacement from a small discrete support, so the same
--- value tends to come up many times in 1000 draws. generateDet's cost depends on
+-- value tends to come up many times in 500 draws. generateDet's cost depends on
 -- the size of that support (it enumerates it), not on sampleCnt, so evaluating it
 -- once per *distinct* sampled value (weighted by how often it occurred) gives the
 -- exact same sum but skips the redundant repeat evaluations.
@@ -283,8 +297,11 @@ discreteProbsNormalized p compiledE = case compiledE of
       return $ case sequence probResults of
           Left err -> counterexample err False
           Right t
-            | all ((== VInt 0) . dim) t ->
-                -- Discrete (dim 0): with 1000 draws from a small support, every distinct
+            -- 'dim' answers a VFloat: this compared against VInt 0, so no result
+            -- ever counted as discrete and all 96 discrete programs got only the
+            -- (trivially passing) continuous check below instead of this one.
+            | all ((== VFloat 0) . dim) t ->
+                -- Discrete (dim 0): with 500 draws from a small support, every distinct
                 -- value is observed, so the probabilities of the distinct observed values
                 -- should sum to (approximately) exactly 1. Checking both bounds catches
                 -- both missing mass (e.g. wrong probabilities) and double-counted /
@@ -302,7 +319,12 @@ discreteProbsNormalized p compiledE = case compiledE of
     paramCnt = progParameterCount p
     seedList = [0 .. (paramCnt - 1)]
     params = map (VTuple (VInt 0) . VInt) seedList
-    sampleCnt = 1000
+    -- 500 covers every corpus support: the worst total is 0.99916, the same
+    -- as with 1000 draws, against a 0.01 tolerance;
+    -- at 300 the 26- and 32-value supports (mNistAdd4,
+    -- clevrEqualLargeMetalSphereSplit) start losing mass. The draws are
+    -- seeded, so this is deterministic.
+    sampleCnt = 500
     sufficientlyNormal = 0.99
     prob :: IRValue -> Double
     prob (VProbDim pr _) = pr
@@ -435,6 +457,17 @@ resolveNeuralTestCase _ tc                       = tc
 networkNames :: Program -> [String]
 networkNames p = [ nm | (nm, _, _) <- neurals p ]
 
+-- | How many julia processes the corpus is split across ('testJuliaAll').
+juliaShards :: Int
+juliaShards = 4
+
+-- | Flags for every julia process the tests start. Each emitted module is run
+-- on a handful of points, so JIT-compiling it through LLVM costs far more than
+-- it saves: @--compile=min@ interprets most of it instead and halves the
+-- Julia groups' wall time. The arithmetic is the same Float64 either way.
+juliaTestFlags :: [String]
+juliaTestFlags = ["--compile=min"]
+
 -- | The network names attached to each program feed a per-module identity
 -- mock (@net(sym) = sym@, task route-neural-programs-to-julia-python-backends):
 -- the .tst rows' mock-NN parameters are already resolved to raw logit vectors
@@ -451,7 +484,7 @@ testJuliaAll programCases = ioProperty $ do
       code <- withSystemTempFile "julia_batch.jl" $ \tmpPath tmpHandle -> do
         hPutStr tmpHandle (juliaBatchTestCode projectDir srcs)
         hClose tmpHandle
-        (_, _, _, handle) <- createProcess (proc "julia" [tmpPath])
+        (_, _, _, handle) <- createProcess (proc "julia" (juliaTestFlags ++ [tmpPath]))
         waitForProcess handle
       return $ case code of
         ExitSuccess -> True === True
@@ -854,10 +887,21 @@ batchedPythonFixtures = do
       -- eligibility condition of its own.
       batchedDeclared = [ (n, p, tcs) | (n, p, bs, tcs) <- entries, Batched `elem` bs ]
       denseNames = [ n | (n, _, bs, _) <- entries, Dense `elem` bs ]
-  declared <- mapM (\(n, p, _, tcs) -> (,) n <$> batchedEligibility p tcs)
-                   [ e | e@(_, _, bs, _) <- entries, Batched `elem` bs ]
-  undeclared <- mapM (\(n, p, _, tcs) -> (,) n <$> batchedEligibility p tcs)
-                     [ e | e@(_, _, bs, _) <- entries, Batched `notElem` bs ]
+  -- Each eligibility check is a whole batched compile, and there is one per
+  -- corpus program. They run here, before the tree exists, spread over the
+  -- capabilities ('parMapIO'); serially they cost ~10 s of startup.
+  --
+  -- They are deliberately *not* deferred into the tests that read them. Several
+  -- BatchedPython tests start together and walk these lists from the head, so
+  -- deferred results are expensive shared thunks forced by many tasty threads
+  -- at once -- the shape that deadlocked the Slow Fuzz group on a 12-core
+  -- machine (docs-repo task fuzz-tier-blackhole-deadlock-at-property-start).
+  -- And 'batchedEligibility' catches every exception, so a tasty timeout or a
+  -- ^C landing in whichever test happened to force one would have recorded
+  -- that program as "crashed" for every other test too.
+  let eligibility (n, p, _, tcs) = (,) n <$> batchedEligibility p tcs
+  declared <- parMapIO eligibility [ e | e@(_, _, bs, _) <- entries, Batched `elem` bs ]
+  undeclared <- parMapIO eligibility [ e | e@(_, _, bs, _) <- entries, Batched `notElem` bs ]
   let eligible = [ (n, src, gs, nets) | (n, Right (src, gs, nets)) <- declared ]
       gained   = [ n | (n, Right _) <- undeclared ]
       topkEligible = topKEntries batchedDeclared
@@ -2580,7 +2624,7 @@ branchCountJulia loaded = ioProperty $ do
   code <- withSystemTempFile "julia_bc.jl" $ \tmpPath tmpHandle -> do
     hPutStr tmpHandle (prelude ++ body)
     hClose tmpHandle
-    (_, _, _, h) <- createProcess (proc "julia" [tmpPath])
+    (_, _, _, h) <- createProcess (proc "julia" (juliaTestFlags ++ [tmpPath]))
     waitForProcess h
   return $ case code of
     ExitSuccess   -> property True
@@ -2758,8 +2802,17 @@ buildEnd2EndTree treeName includeBackends compiledCases = testGroup treeName $
           neuralP = [(n, p, c) | (n, p, c, bs, _) <- compiledCases, Interpreter `elem` bs, not (null (neurals p))]
       in [ testGroup "Normalization"
              [ testProperty n (once $ discreteProbsNormalized p c) | (n, p, c) <- neuralP ]
-         -- All Julia programs share one batch file (and one julia process) to amortize startup.
-         , testProperty "Julia" (once $ testJuliaAll [(c, tcs, nets) | (_, c, tcs, nets) <- routedQueries Julia])
+         -- The Julia programs share a batch file (and a julia process) per
+         -- shard to amortize startup. One shard for the whole corpus was a
+         -- single ~60 s test -- the suite's critical path, on one core --
+         -- since the batch is dominated by JIT-compiling each module.
+         -- Round-robin shards run as parallel tests instead.
+         , testGroup "Julia"
+             [ testProperty ("shard " ++ show (i + 1) ++ "/" ++ show juliaShards)
+                 (once $ testJuliaAll [ (c, tcs, nets)
+                                      | (k, (_, c, tcs, nets)) <- zip [0 :: Int ..] (routedQueries Julia)
+                                      , k `mod` juliaShards == i ])
+             | i <- [0 .. juliaShards - 1] ]
          -- Runs without julia installed: it only reads the emitted text.
          , testProperty "Julia free names are escaped"
              (once $ testJuliaFreeNamesEscaped [ (n, c, networkNames p) | (n, p, Right c, bs, _) <- compiledCases, Julia `elem` bs ])

@@ -43,7 +43,7 @@
 -- cross-checks different CompilerConfigs against each other on the *same*
 -- prob function), but doing so needs many forward samples per case, chosen
 -- dynamically from the density at the query point (see its docs).
-module TestFuzz (fuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
+module TestFuzz (fuzzTests, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
                  neuralGeneratorTests, arrowGeneratorTests, fuzzScalingTests,
                  injFCatalogTests) where
 
@@ -1180,8 +1180,58 @@ prop_Fuzz_GeneratorCoverage = withMaxSuccess (fuzzCases 200) $
 
 return []
 
+-- | Every @prop_@ property above, as @$(allProperties)@ names it
+-- (@"prop_X from test/TestFuzz.hs:NNN"@).
+fuzzProperties :: [(String, Property)]
+fuzzProperties = $(allProperties)
+
+-- | The properties that currently fail (or give up) at HEAD: the part of the
+-- fuzz tier we want to guarantee but cannot yet. They run in the
+-- @Aspirational@ group ('aspirationalFuzzTests', @NEST_ASPIRATIONAL_TESTS=1@)
+-- rather than in @Slow@, so that @Slow@ can be expected green. Moving a
+-- property back is part of fixing what it finds. Each entry says why it is
+-- here; an entry naming no property fails the tree build, so the list cannot
+-- rot past a rename.
+aspirationalFuzzNames :: [(String, String)]
+aspirationalFuzzNames =
+  -- Measured 2026-10-01 on faster-tests (off dev ba19bac), three Slow runs at
+  -- seeds 7919/15838/23757; nothing outside these failed in any of them.
+  [ ("prop_Fuzz_TypedCompileNeverCrashes",
+     "3/3 runs, a different compiler crash each time (getProbIndex's \"More \
+     \than one probabilistic argument\", \"found no way to convert to IR\", an \
+     \enumerated conditional meeting a density)")
+  , ("prop_Fuzz_ProbNeverGenerateBacked",
+     "3/3 runs: gives up on its discard rate within the wall-clock budget, \
+     \or is falsified")
+  , ("prop_Fuzz_TopKZeroMatchesExact",
+     "1/3 runs, falsified by a head-of-list program (same shape as the next two)")
+  , ("prop_Fuzz_TopKNeverInflates",
+     "1/3 runs, same program as prop_Fuzz_TopKZeroMatchesExact")
+  , ("prop_Fuzz_BranchCountingDoesNotChangeProbability",
+     "1/3 runs, same program as prop_Fuzz_TopKZeroMatchesExact")
+  ]
+
+isAspirationalFuzz :: String -> Bool
+isAspirationalFuzz name = propName name `elem` map fst aspirationalFuzzNames
+
+-- | The bare binding name of an 'allProperties' label.
+propName :: String -> String
+propName = takeWhile (/= ' ')
+
 fuzzTests :: TestTree
-fuzzTests = testGroup "Fuzz" [testProperties "properties" $(allProperties)]
+fuzzTests = testGroup "Fuzz"
+  [testProperties "properties" [ p | p@(n, _) <- checkedFuzzProperties, not (isAspirationalFuzz n) ]]
+
+aspirationalFuzzTests :: TestTree
+aspirationalFuzzTests = testGroup "Fuzz"
+  [testProperties "properties" [ p | p@(n, _) <- checkedFuzzProperties, isAspirationalFuzz n ]]
+
+-- | 'fuzzProperties', after checking that every 'aspirationalFuzzNames' entry
+-- names one of them.
+checkedFuzzProperties :: [(String, Property)]
+checkedFuzzProperties = case [ n | (n, _) <- aspirationalFuzzNames, n `notElem` map (propName . fst) fuzzProperties ] of
+  []    -> fuzzProperties
+  stale -> error ("aspirationalFuzzNames lists properties that do not exist: " ++ show stale)
 
 -- ---------------------------------------------------------------------------
 -- Shrinker contract (design typed-program-generator-expansion, milestone M-S).

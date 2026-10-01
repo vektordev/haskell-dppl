@@ -4366,8 +4366,6 @@ internalsTests = testGroup "Internals"
   , test_planFlatSumOverProductPolynomial
   , test_planEnumAccumulatorFoldPolynomial
   , test_planEnumSubtractionAccumulatorFoldPolynomial
-  , test_planHelperOnFoldResultMatchesDense
-  , test_planSharedFoldValueMatchesDense
   , test_planFoldDisjunctionPolynomial
   , planOverCouplingRefusalTests
   , planFactorExternalsTests
@@ -4411,6 +4409,8 @@ slowInternalsTests = testGroup "Internals (slow)"
   , test_planEnumM4Polynomial
   , test_planEnumFusedJointStatePolynomial
   , test_planEnumStructuralGrouped
+  , test_planHelperOnFoldResultMatchesDense
+  , test_planSharedFoldValueMatchesDense
   ]
 
 -- ===========================================================================

@@ -82,7 +82,10 @@ tests:
     ghc-options:
     - -threaded
     - -rtsopts
-    - -with-rtsopts=-N
+    # -A64m -n4m: a 64 MB allocation area (in 4 MB chunks) per capability.
+    # The suite allocates heavily across 4+ parallel tests; the default
+    # nursery spent ~30 s of wall time in parallel GC (measured: 82 s -> 67 s).
+    - '"-with-rtsopts=-N -A64m -n4m"'
     - -Wall
     - -Wcompat
     - -Wincomplete-record-updates
@@ -122,7 +125,7 @@ tests:
     ghc-options:
     - -threaded
     - -rtsopts
-    - -with-rtsopts=-N
+    - '"-with-rtsopts=-N -A64m -n4m"'
     - -Wall
     - -Wcompat
     - -Wincomplete-record-updates

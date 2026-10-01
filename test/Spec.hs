@@ -32,7 +32,7 @@ import TestKnownIssues (knownIssuesTests)
 import TestRewrites (rewriteTests, rewriteCorpusTests)
 import TestPythonPrelude (pythonPreludeTests)
 import TestCLI (cliTests)
-import TestFuzz (fuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
+import TestFuzz (fuzzTests, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
                  neuralGeneratorTests, arrowGeneratorTests, fuzzScalingTests,
                  injFCatalogTests)
 import TestCaseParser (parseProgram, corpusPplPath)
@@ -518,7 +518,6 @@ main = do
   showcase <- showcaseTests
   writeLogitsRoundtrip <- writeLogitsRoundtripTests
   knownIssues <- knownIssuesTests
-  rewriteCorpus <- rewriteCorpusTests
   -- A handful of tests (deep plan enumeration, mainly) are expensive enough
   -- to noticeably slow day-to-day `stack test` while rarely catching
   -- regressions outside the code they pin. They're skipped unless
@@ -527,7 +526,18 @@ main = do
   slow <- if isNothing runSlow then return (testGroup "Slow" []) else do
     slowE2e <- slowEnd2EndTests
     slowBatchedPy <- slowBatchedPythonTests
-    return $ testGroup "Slow" [slowInternalsTests, slowE2e, slowBatchedPy, fuzzTests]
+    -- The rewrite-invariance sweep over the whole corpus (~4000 rewritten
+    -- programs, each compiled and queried) was a quarter of the default run's
+    -- CPU. Its probe pairs and units ('rewriteTests') stay in the default run.
+    rewriteCorpus <- rewriteCorpusTests
+    return $ testGroup "Slow" [slowInternalsTests, slowE2e, slowBatchedPy, rewriteCorpus, fuzzTests]
+  -- Tests we want to guarantee but that currently fail or flake: the
+  -- known-red part of what used to be Slow. Slow itself is expected green and
+  -- is run before a merge or push; this group is run when working on what it
+  -- pins. See CLAUDE.md, "Slow and Aspirational tests".
+  runAspirational <- lookupEnv "NEST_ASPIRATIONAL_TESTS"
+  let aspirational = testGroup "Aspirational" $
+        if isNothing runAspirational then [] else [aspirationalFuzzTests]
   -- 'prop_Fuzz_SamplingMatchesPDF' (the sampling-vs-PDF cross-check between
   -- `generate` and `probability`) draws up to tens of thousands of forward
   -- samples per case, dwarfing every other Slow test's runtime, so it gets
@@ -560,7 +570,6 @@ main = do
     , showcase
     , knownIssues
     , rewriteTests
-    , rewriteCorpus
     , e2e
     , selectDiff
     , batchedPy
@@ -573,5 +582,6 @@ main = do
     , batchedEnumBucketingTests
     , branchCountBackends
     , slow
+    , aspirational
     , superSlow
     ]

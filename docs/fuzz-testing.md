@@ -252,7 +252,10 @@ deliberately *not* wrapped in `checkCoverage`, so a miss prints
 observe first, enforce once the distribution has been characterized over
 larger runs.
 
-The `Fuzz` group lives inside `Slow`. One property,
+The `Fuzz` group lives inside `Slow`, except for the properties listed in
+`TestFuzz.aspirationalFuzzNames`. Those fail or flake at HEAD and run in the
+`Aspirational` group instead (`NEST_ASPIRATIONAL_TESTS=1`), so that `Slow` can
+be expected green; see CLAUDE.md, "Slow and Aspirational tests". One property,
 `prop_Fuzz_SamplingMatchesPDF`, cross-checks `generate` against
 `probability` independently (every other property only cross-checks
 different `CompilerConfig`s against each other) and, since sampling is
@@ -527,7 +530,8 @@ reaching a probability function is 20–26% against a 31% pre-axis baseline, the
 compile-crash rate is 52–54% against 51.5%, and a third of draws still carry a
 function value.
 
-**`Slow` was red before this and is red after it.** Three full runs: 8 of the
+**`Slow` was red before this and is red after it** (at the time; the failing
+properties have since moved to `Aspirational`). Three full runs: 8 of the
 25 `Fuzz` properties fail without the axis, then 9 and 7 with it. Read that as
 "the same eight-ish properties, all of them falsifications of the already-filed
 `fuzz-structured-type-bugs` / `fuzz-let-witness-bugs` / `fuzz-neural-plan-bugs`
