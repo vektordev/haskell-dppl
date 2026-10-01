@@ -265,7 +265,15 @@ optimizeStats' conf det stages e0 = runState (nodeWise e0 >>= commonSubexprStage
     -- A rule believed to reach its fixed point in the first pass. Runs in the
     -- first pass and in the check, never in the loop.
     onceStage name enabled = mkStage name (enabled && stages /= LoopStages)
-    mkStage name enabled f = if enabled then counted name f else return
+    -- Tallying a rule means comparing each node with its rewrite, and on the
+    -- usual unchanged node that comparison walks the node's whole subtree:
+    -- every pass then costs nodes x depth, quadratic on a deep tree (a
+    -- 100-deep if-chain spent 5 of its 7.7 s compile here). The tally is only
+    -- ever read by --optStats, so without it the rule just runs.
+    mkStage name enabled f
+      | not enabled    = return
+      | optStats conf  = counted name f
+      | otherwise      = return . f
     commonSubexprStage =
       if oLvl >= 2 && stages /= OnceStagesOnly
         then countedBy "cse" (optimizeCommonSubexprCounted det)

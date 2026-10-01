@@ -458,7 +458,14 @@ globalFenv' = [("double", FPair doubleFwd [doubleInv]),
               ("isNull", FPair isNullFwd [isNullInv])]
 
 globalFEnv :: [ADTDecl] -> FEnv
-globalFEnv adtsDecl = map (fmap localizePair) globalFenv' ++ concatMap fPairsFromADT adtsDecl
+globalFEnv adtsDecl = localizedBuiltins ++ concatMap fPairsFromADT adtsDecl
+
+-- | The builtins with their variables moved into the local namespace. A
+-- constant, so it is localized once per process: every name lookup goes
+-- through 'globalFEnv', and redoing the renaming on each one was over half
+-- of ModalityInfer's time on an ADT-heavy program (planEnumRecJointState).
+localizedBuiltins :: FEnv
+localizedBuiltins = map (fmap localizePair) globalFenv'
 
 -- | The sigil marking an FDecl-local name (see 'FDecl'). Deliberately outside
 -- the identifier alphabet of SPLL, Python and Julia alike, so no user-chosen

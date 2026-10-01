@@ -6379,9 +6379,20 @@ planShareSplit meta env e k = case sharedCand of
     isArrowT (TArrow _ _) = True
     isArrowT _            = False
     inKid t kid = any (sameTerm t) (subterms kid)
+    -- Two children whose worlds are intersected. An if's two arms are not:
+    -- they are alternatives in disjoint worlds, so copies in both arms never
+    -- meet and cannot clash, and splitting there only re-traverses the node
+    -- once per value. In a recursive fold that branches into the same
+    -- recursive call from both arms (planEnumRecJointState's go) that was
+    -- the whole recursion's value set enumerated at every level: 2 s -> 36 s.
+    meet i j = i /= j && not (isIf && i > 0 && j > 0)
+    isIf = case e of
+      Expr _ IfThenElse{} -> True
+      _ -> False
     sharedCand = listToMaybe
-      [ t | (i, kid) <- zip [0 :: Int ..] kids, t <- subterms kid, isCand t
-          , any (\(j, kid') -> j /= i && inKid t kid') (zip [0 ..] kids) ]
+      [ t | (i, kid) <- zip [0 :: Int ..] kids, t <- subterms kid
+          , any (\(j, kid') -> meet i j && inKid t kid') (zip [0 ..] kids)
+          , isCand t ]
     -- Replace the occurrences by the variable. A node the replacement leaves
     -- free of plan occurrences was deterministic given the plan before it
     -- ('planDetGivenPlan': det InjF/if, a det-generating call, ...), so it is

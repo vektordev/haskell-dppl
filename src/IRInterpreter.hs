@@ -18,6 +18,7 @@ import Statistics.Distribution.Normal (normalDistr)
 import Data.Number.Erf
 import Data.Maybe (fromJust, fromMaybe, isJust, catMaybes)
 import Data.List (isSuffixOf)
+import qualified Data.Map.Strict as Map
 import SPLL.ReservedNames (componentNormalName)
 import SPLL.Lang.Types
 import SPLL.Typing.RType
@@ -74,6 +75,23 @@ data RandomFunctions m a = RandomFunctions
 -- Name, Body
 type ReducedIREnv = [(String, IRExpr)]
 
+-- | The program's top-level names (its functions, the standard library, the
+-- neural stubs and every ADT's implicit functions), consulted when a name is
+-- not bound locally. They used to sit at the tail of the local environment, so
+-- every reference to a global was a linear walk past all of them -- the
+-- interpreter's single largest cost in the test suite. A name defined twice
+-- keeps its first definition, as 'lookup' on the list did.
+type GlobalEnv = Map.Map String IRExpr
+
+globalEnvFrom :: ReducedIREnv -> GlobalEnv
+globalEnvFrom = Map.fromListWith (\_new old -> old)
+
+-- | A name's binding: the innermost local one, else the global one.
+lookupVar :: String -> GlobalEnv -> ReducedIREnv -> Maybe IRExpr
+lookupVar name globals env = case lookup name env of
+  Just e  -> Just e
+  Nothing -> Map.lookup name globals
+
 -- | Draw one sample. A run-time failure of the sampled program -- @head@ or
 -- @tail@ of an empty list, @fromLeft@ of a @Right@: every 'raise' site in
 -- 'generate' -- is answered as a 'VError' carrying the message, rather than
@@ -100,7 +118,7 @@ type ReducedIREnv = [(String, IRExpr)]
 -- 'generate' still throws on it (see there).
 generateRand :: (RandomGen g) => [NeuralDecl] -> [(RType, MultiValue)] -> IREnv -> [IRExpr]-> IRExpr -> Rand g IRValue
 generateRand neurals' registry env params e =
-  either VError id <$> runExceptT (generate f neurals' registry adts' startingEnv startingEnv params e)
+  either VError id <$> runExceptT (generate f neurals' registry adts' (globalEnvFrom startingEnv) [] params e)
   where
     f :: RandomGen g => RandomFunctions (ExceptT String (Rand g)) a
     f = RandomFunctions {
@@ -113,7 +131,7 @@ generateRand neurals' registry env params e =
 
 generateDet :: (HasCallStack) => [NeuralDecl] -> [(RType, MultiValue)] -> IREnv -> [IRExpr]-> IRExpr -> Either String IRValue
 --generateDet neurals' registry env params e | traceShow e False = undefined
-generateDet neurals' registry env = generate f neurals' registry adts' startingEnv startingEnv
+generateDet neurals' registry env = generate f neurals' registry adts' (globalEnvFrom startingEnv) []
   where
     f = RandomFunctions {
       uniformGen = Left "Uniform Gen is not det",
@@ -123,7 +141,7 @@ generateDet neurals' registry env = generate f neurals' registry adts' startingE
     startingEnv = reduceIREnv env ++ standardEnv ++ map neuralRTypeToEnv neurals' ++ concatMap implicitFunctionsToEnv adts'
     (IREnv _ adts' _) = env
 
-generate :: (Monad m, HasCallStack) => RandomFunctions m a -> [NeuralDecl] -> [(RType, MultiValue)] -> [ADTDecl ] -> ReducedIREnv -> ReducedIREnv -> [IRExpr]-> IRExpr -> m IRValue
+generate :: (Monad m, HasCallStack) => RandomFunctions m a -> [NeuralDecl] -> [(RType, MultiValue)] -> [ADTDecl ] -> GlobalEnv -> ReducedIREnv -> [IRExpr]-> IRExpr -> m IRValue
 --generate f neurals' registry adts' globalEnv env args expr | trace ((show expr) {-++ " " ++ show env-}) False = undefined
 generate f neurals' registry adts' globalEnv env args expr | args /= [] = do
   let reverseArgs = reverse args
@@ -478,7 +496,7 @@ generate f neurals' registry adts' globalEnv env args (IRLetIn name decl body) =
 generate f neurals' registry adts' globalEnv env args (IRVar name) | "_mock" `isSuffixOf` name && isJust (lookupNeural (iterate init name !! 5) neurals') = do
   let (rt, tags') = fromJust (lookupNeural (iterate init name !! 5) neurals')
   let partPlan = makePartitionPlan adts' (neuralOutputType name rt) tags'
-  case lookup symbolEnvName env of
+  case lookupVar symbolEnvName globalEnv env of
     Nothing -> failWith f "No symbol found in the environment"
     Just sym -> do
       symVal <- generate f neurals' registry adts' globalEnv env args sym
@@ -490,7 +508,7 @@ generate f neurals' registry adts' globalEnv env args (IRVar name) | "_mock" `is
 generate f neurals' registry adts' globalEnv env args (IRVar name) | "_adt" `isSuffixOf` name && (iterate init name !! 4) `elem` implicitFunctionNames adts' = do
   let realName = iterate init name !! 4
   let rt = lookupRType realName adts'
-  let lookupParams = sequence [lookup ("x" ++ show x) env | x <- [0 :: Int .. arity rt - 1]]
+  let lookupParams = sequence [lookupVar ("x" ++ show x) globalEnv env | x <- [0 :: Int .. arity rt - 1]]
   case lookupParams of
     Nothing -> failWith f ("No parameter found for " ++ name ++ " in environment")
     Just val -> do
@@ -500,7 +518,7 @@ generate f neurals' registry adts' globalEnv env args (IRVar name) | "_adt" `isS
     arity (_ `TArrow` rt) = arity rt + 1
     arity _ = 0
 generate f neurals' registry adts' globalEnv env args (IRVar name) =
-  case lookup name env of
+  case lookupVar name globalEnv env of
     Just expr -> generate f neurals' registry adts' globalEnv env args expr
     Nothing -> failWith f ("Variable " ++ name ++ " not declared")
 generate f neurals' registry adts' globalEnv env [] (IRIsPossible multiVal expr) = do
