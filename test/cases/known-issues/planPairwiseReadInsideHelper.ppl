@@ -1,0 +1,3 @@
+neural readX :: (Symbol -> Float)
+cmp a s = draw b = readX s in a < b
+main s1 s2 = draw a = readX s1 in cmp a s2

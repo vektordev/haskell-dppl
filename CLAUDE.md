@@ -308,6 +308,20 @@ no occurrence of the bound variable is point-invertible at all. Full
 mechanism, examples, and the `test/cases/plan-enumeration/planEnum*` pointers:
 `docs/witness-inversion-engines.md`.
 
+One traversal can hold **several neural reads** (`planOpenBinding`, task
+`plan-pairwise-across-separate-neural-reads`). Plan leaves are keyed by a flat
+logit offset, so a nested `draw b = readX s2` met inside the body gets its own
+disjoint offset range (`psNextOff`) and its own raw-vector binding
+(`psRaws`, read through `planRawRead`); two independent reads' joint is the
+concatenated plan, and a comparison across them is the same `pwPairs`
+difference Gaussian as inside one read. That is the one-read-per-object CLEVR
+layout (`plan-enumeration/planPairwise*`). A single read is `[(0, nn_raw)]`
+and emits what it always did. Refused inside a specialized function (its
+memoized specializations would share one range between two calls, merging
+independent reads) and for a symbol argument that is not plan-free and
+deterministic; pinned in `known-issues/planPairwise*`, together with the
+helper shapes ModalityInfer types `Bottom` first.
+
 A plan world can carry **independent factors** (`PlanWorld`'s `pwFactors`):
 a body subtree mentioning no plan-bound variable is independent of the plan,
 so the joint factorizes — the subtree is compiled by the ordinary probability

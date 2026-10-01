@@ -1,0 +1,5 @@
+data Position = Pos x::Float, y::Float
+data Object = NoObj | Obj position::Position
+neural readObj :: (Symbol -> Object)
+leftOf a b = if isNoObj a then False else if isNoObj b then False else x (position a) < x (position b)
+main s1 s2 = leftOf (readObj s1) (readObj s2)

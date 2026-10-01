@@ -1,0 +1,11 @@
+-- plan-enumeration/planPairwiseObjectsAcrossTwoReads with the two neural reads
+-- passed straight to a two-argument helper instead of draw-bound in main.
+-- Compiles, but main has no probability function. Two things stand in the
+-- way: the helper's comparison types Bottom for the reason pinned by
+-- planPairwiseInHelper / planPairwiseObjectsHelperOverDraws (no ReadNN in the
+-- helper's declaration), and the reads are call arguments rather than draw
+-- bindings, which is not a shape the plan engine is entered from at all.
+-- Idealized value, as planPairwiseObjectsAcrossTwoReads:
+-- P(True) = P(Obj a) * P(Obj b) * Phi((mu_b - mu_a) / sqrt(s_a^2 + s_b^2)).
+-- Residue of task plan-pairwise-across-separate-neural-reads.
+expect-failure: no-code

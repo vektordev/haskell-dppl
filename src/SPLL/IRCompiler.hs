@@ -47,7 +47,7 @@ import SPLL.Typing.AlgebraicDataTypes
 import SPLL.Semiring
 import Utils
 import Control.Monad (foldM, forM, when, zipWithM)
-import Control.Monad.State.Strict (StateT, evalStateT, get, gets, put, modify)
+import Control.Monad.State.Strict (StateT, runStateT, get, gets, put, modify)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Graph (SCC(..), stronglyConnComp)
@@ -5362,10 +5362,15 @@ data PlanState = PlanState
     -- specialization: re-entering a body already on the stack without
     -- strictly descending the plan cannot terminate and is declined.
   , psStack    :: [(ChainName, Int)]
-    -- | The variable the raw logit vector is bound to (milestone 4): the value
-    -- grouping measures collapsed worlds against it in-flight, so it must be
-    -- bound before the traversal rather than only at measurement time.
-  , psNnRaw    :: String
+    -- | Where the raw logit vectors live in the traversal's flat offset space
+    -- ('PlanRaws'): the plan-bound read first, then one entry per nested
+    -- neural read the traversal opened ('planOpenBinding'). The value grouping
+    -- measures collapsed worlds against them in-flight (milestone 4), so each
+    -- is bound before any world reading it is built.
+  , psRaws     :: PlanRaws
+    -- | The first offset not yet claimed by any read: where the next nested
+    -- read's plan is placed.
+  , psNextOff  :: Int
     -- | Whether the milestone-4 value grouping ('planGroupValues') may collapse
     -- same-value worlds into a single measured mass. Merging bakes a group's
     -- residual leaf constraints into one mass, so anything else constraining
@@ -5387,8 +5392,25 @@ data PlanState = PlanState
   , psDetConsts :: [(String, IRValue)]
   }
 
-emptyPlanState :: String -> Bool -> PlanState
-emptyPlanState nnRaw merge = PlanState Map.empty Map.empty [] nnRaw merge []
+-- | The state a traversal starts from: one read, bound at @nnRaw@, whose plan
+-- occupies the first @size@ offsets.
+emptyPlanState :: String -> Int -> Bool -> PlanState
+emptyPlanState nnRaw size merge = PlanState Map.empty Map.empty [] [(0, nnRaw)] size merge []
+
+-- | The raw logit vectors a traversal reads, as (first flat offset, variable)
+-- per neural read, ascending. Plan leaves are keyed by a flat offset
+-- ('plcBase'), so several independent reads share one offset space by giving
+-- each its own disjoint range; their joint is then the product of their
+-- leaves' masses, which is exactly what a world's product already computes.
+-- A single read is @[(0, nn_raw)]@, and reads exactly what it always did.
+type PlanRaws = [(Int, String)]
+
+-- | The logit at flat offset @k@: slot @k - start@ of the read whose range
+-- holds it.
+planRawRead :: PlanRaws -> Int -> IRExpr
+planRawRead raws k = case [ r | r@(start, _) <- raws, start <= k ] of
+  [] -> error ("planRawRead: offset " ++ show k ++ " precedes every neural read's range " ++ show raws)
+  rs -> let (start, v) = last rs in IRBuiltin BListIndex [IRVar v, IRConst (VInt (k - start))]
 
 -- (CompilerMonad spelled out: it is an unsaturated synonym application otherwise)
 type PlanM a = StateT PlanState (WriterT [(String, IRExpr)] Supply) a
@@ -6015,9 +6037,11 @@ planInvertNode meta env planBody target = case planBody of
   -- applied in place -- is beta-reduced away when its argument is
   -- deterministic given the plan ('planBetaReduce'); the reduced body is then
   -- traversed like any other.
-  Expr _ (Apply (Expr _ (Lambda x b)) a) -> case planBetaReduce meta env x b a of
-    Left why -> return (Left why)
-    Right b' -> planInvert meta env b' target
+  Expr _ (Apply lam@(Expr _ (Lambda x b)) a) -> do
+    opened <- planOpenBinding meta env lam x b a
+    case opened of
+      Left why -> return (Left why)
+      Right (env', b') -> planInvert meta env' b' target
   Expr _ (Apply {}) -> planApplyTarget meta env planBody target
   -- Arithmetic over plan-dependent operands at the observed position
   -- (@numRed scene + 1.0@): enumerate the node's values exactly as value
@@ -6304,6 +6328,65 @@ planBetaReduce meta env x b a
   | otherwise = Left ("a binding inside the plan traversal is not deterministic given the plan-bound variables "
                       ++ "(substituting it would duplicate its draw): " ++ x ++ " = " ++ planNodeName a)
 
+-- | Open a directly applied literal lambda met by the plan traversal: either
+-- beta-reduce it ('planBetaReduce', its argument deterministic given the plan)
+-- or, when its argument is a fresh neural read, make that read a second plan
+-- of the same traversal (task plan-pairwise-across-separate-neural-reads).
+--
+-- @draw a = readX s1 in draw b = readX s2 in a < b@ is the shape: one read per
+-- object, compared pairwise. Two reads are independent draws, so their joint
+-- plan is the concatenation of the two plans and a world's mass is the
+-- product over the leaves it constrains, whichever read they belong to. The
+-- inner read therefore gets its own disjoint range of flat offsets (from
+-- 'psNextOff'), its raw logit vector a binding of its own ('psRaws', read by
+-- 'planRawRead'), and its bound variable a 'PBPlan' entry in the environment;
+-- the body is then traversed as usual. A comparison of a leaf of each read is
+-- the same 'pwPairs' difference Gaussian as one inside a single read, and a
+-- world that leaves the inner read unconstrained measures its free marginal of
+-- 1.
+--
+-- Each traversal of the binding opens a fresh range. That matches evaluation:
+-- the traversal visits a binding once per world family it builds, and two
+-- visits of the same syntax (two arms of an @if@, two values of a split) are
+-- alternatives, whose worlds are summed and never intersected.
+--
+-- Refused, with a diagnostic, and so falling back exactly as before:
+--
+-- * inside a specialized function (a non-empty 'psStack'): specializations
+--   are memoized by plan offsets and deterministic arguments, so two calls of
+--   one helper would share one range and their reads be counted as one draw;
+-- * a symbol argument that is not plan-free and deterministic, since the read
+--   is bound once, ahead of every world.
+planOpenBinding :: CompilerMetadata -> PlanEnv -> Expr -> String -> Expr -> Expr -> PlanM (Either String (PlanEnv, Expr))
+planOpenBinding meta env lam x b a = case planBetaReduce meta env x b a of
+  Right b' -> return (Right (env, b'))
+  Left why
+    | Just (nnName, plan, symArg) <- planReadOf meta a -> do
+        stack <- gets psStack
+        let symFree = not (subtreeHasOcc (planEnvOccs env ++ planEnvDetOccs env) symArg)
+                      && pType (getTypeInfo symArg) == Deterministic
+        if not (null stack)
+          then return (Left ("a neural read inside a specialized function is not supported by the plan traversal "
+                             ++ "(its specializations are shared between calls, which would merge independent reads): "
+                             ++ x ++ " = " ++ planNodeName a))
+          else if not symFree
+            then return (Left ("a nested neural read's argument is not deterministic and free of the plan-bound variables: "
+                               ++ x ++ " = " ++ planNodeName a))
+            else do
+              sym <- planGenDet meta env symArg
+              raw <- lift (mkVariable "nn_raw")
+              lift (setVariables [(raw, IRApply (IRVar nnName) sym)])
+              off <- gets psNextOff
+              modify (\st -> st { psRaws = psRaws st ++ [(off, raw)], psNextOff = off + getSize plan })
+              let fcd = fcData meta
+                  lamCN = chainName (getTypeInfo lam)
+                  resolvedCN = case findEquivalentExpression fcd lamCN of
+                    Just (rCN, LambdaInfo _ _, _) -> rCN
+                    _ -> lamCN
+                  occs = fromMaybe [] (lookup resolvedCN (lambdaVarOccurrences fcd))
+              return (Right ((occs, PBPlan (PlanRef plan off)) : env, b))
+    | otherwise -> return (Left why)
+
 -- | Share one plan-dependent value among the children of a node (task
 -- plan-fold-disjunction-of-comparisons-blowup).
 --
@@ -6529,7 +6612,7 @@ staticBoolIn env e = case foldConstIn env e of
 planGroupValues :: [(IRExpr, PlanWorld)] -> PlanM [(IRExpr, PlanWorld)]
 planGroupValues pairs = do
   merge <- gets psMerge
-  nnRaw <- gets psNnRaw
+  raws <- gets psRaws
   consts <- gets psDetConsts
   let (mergeable, keep) = partitionEithers (map (classify consts) pairs)
       -- group same-value worlds, keeping ascending value-key order for
@@ -6540,7 +6623,7 @@ planGroupValues pairs = do
     -- keep the milestone-2 world-per-path enumeration unchanged
     then return pairs
     else do
-      merged <- mapM (mergeGroup nnRaw) grouped
+      merged <- mapM (mergeGroup raws) grouped
       return (merged ++ keep)
   where
     -- the value may read specialization argument variables of known value
@@ -6564,10 +6647,10 @@ planGroupValues pairs = do
     -- dedups via 'intersectLeafCon' instead of double-counting it. Only the
     -- residual (the internal randomness that varies across the group, disjoint
     -- from anything constrained outside) is baked into the summed mass factor.
-    mergeGroup nnRaw (v, ws) = do
+    mergeGroup raws (v, ws) = do
       let common = commonDiscreteCons ws
           residual w = w { pwCons = filter (\c -> not (any (conEq c) common)) (pwCons w) }
-      let groupMass = foldr1 (IROp OpPlus) (map (planWorldMass nnRaw . residual) ws)
+      let groupMass = foldr1 (IROp OpPlus) (map (planWorldMass raws . residual) ws)
       mv <- lift (mkVariable "cnt_mass")
       lift (setVariables [(mv, groupMass)])
       -- the residual leaves are now hidden inside the mass: record them, with
@@ -6654,9 +6737,11 @@ planEnumValuesNode meta env bodyExpr = case bodyExpr of
         vssE <- mapM (planEnumValues meta env) args
         return (map (\combo -> (f (map fst combo), foldl1 intersectPlanW (map snd combo)))
                   . filter (not . pwUnsat . foldl1 intersectPlanW . map snd) . sequence <$> sequence vssE)
-      Expr _ (Apply (Expr _ (Lambda x b)) a) -> case planBetaReduce meta env x b a of
-        Left why -> return (Left why)
-        Right b' -> planEnumValues meta env b'
+      Expr _ (Apply lam@(Expr _ (Lambda x b)) a) -> do
+        opened <- planOpenBinding meta env lam x b a
+        case opened of
+          Left why -> return (Left why)
+          Right (env', b') -> planEnumValues meta env' b'
       Expr _ (Apply {}) -> do
         specsE <- planResolveApply meta env bodyExpr
         case specsE of
@@ -6955,8 +7040,8 @@ planApplyTarget meta env planBodyExpr target = do
 -- log-space scope (task log-space-probability-computation's written
 -- invasiveness verdict), like the set-witness continuous machinery above --
 -- stays pinned to 'linearSemiring' regardless of the 'logSpace' config flag.
-measurePlanWorlds :: String -> [PlanWorld] -> CompilerMonad PResult
-measurePlanWorlds nnRaw worlds
+measurePlanWorlds :: PlanRaws -> [PlanWorld] -> CompilerMonad PResult
+measurePlanWorlds raws worlds
   -- The all-dim-0 fast path sums raw masses, which has no place to put a
   -- factor's own dimension or impossibility flag, so a factored world always
   -- takes the general 'mixP' path below.
@@ -6992,7 +7077,7 @@ measurePlanWorlds nnRaw worlds
     dimC d = IRConst (VFloat (fromIntegral d))
     sumUp [] = const0
     sumUp xs = foldr1 (IROp OpPlus) xs
-    worldMass = planWorldMass nnRaw
+    worldMass = planWorldMass raws
     branchSum = sumUp (map branch worlds)
     branch w = foldr (\g acc -> IRIf g acc const0) const1 (pwGuards w)
     guardsFail w = case pwGuards w ++ concat [ gs | PLeafPt _ _ _ gs <- pwCons w ] of
@@ -7008,16 +7093,16 @@ planWorldDim :: PlanWorld -> Int
 planWorldDim w = length [ () | PLeafPt {} <- pwCons w ]
 
 -- | The mass a world contributes: (guards -> the carried factor times the
--- product of constrained leaf masses), read from the raw logit vector bound at
--- @nnRaw@. A discrete leaf's mass is the sum of its allowed slots' logits (each
+-- product of constrained leaf masses), read from the raw logit vectors in
+-- @raws@ ('planRawRead'). A discrete leaf's mass is the sum of its allowed slots' logits (each
 -- under its own guard), an interval-constrained continuous leaf's is a Gaussian
 -- CDF difference over its (mu, sigma) slice, a pairwise coupling's is the
 -- closed-form difference Gaussian, and a point-constrained continuous leaf's is
 -- its density times |change-of-variables| (the only dim-1 measure). Shared
 -- between 'measurePlanWorlds' and the milestone-4 value grouping so a collapsed
 -- group's factor measures exactly as the worlds it replaced.
-planWorldMass :: String -> PlanWorld -> IRExpr
-planWorldMass nnRaw w =
+planWorldMass :: PlanRaws -> PlanWorld -> IRExpr
+planWorldMass raws w =
     foldr (\g acc -> IRIf g acc const0)
           (mulFactor (pwFactor w) (prodMass (pwCons w) (pwPairs w)))
           (pwGuards w)
@@ -7052,7 +7137,7 @@ planWorldMass nnRaw w =
     slotRead base (i, g)
       | g == constTrueIR = vecRead (base + i)
       | otherwise        = IRIf g (vecRead (base + i)) const0
-    vecRead k = IRBuiltin BListIndex [IRVar nnRaw, IRConst (VInt k)]
+    vecRead = planRawRead raws
 
 -- | Entry point of the plan-guided dispatch, tried from the probabilistic
 -- Apply arm after point inversion failed and before the set-witness fallback.
@@ -7064,12 +7149,8 @@ planWitnessApply :: CompilerMetadata -> Bool -> RType -> ChainName -> ChainName 
 planWitnessApply meta cumulative rt lResolvedCN lambdaBodyCN tag v sample
   | tag == ""
   , not (isArrow rt)
-  , Expr _ (ReadNN nnName symArg) <- v
-  , Just (_, TArrow TSymbol targetTy, declTag) <- find (\(n, _, _) -> n == nnName) (neurals (compilingProgram meta))
-  , let resolved = resolvePartitionAnnotation (writeLogitsDecls (compilingProgram meta)) targetTy declTag
-  , isJust resolved || isRight (autoDeriveMultiValue (adtDecls meta) targetTy)
+  , Just (nnName, plan, symArg) <- planReadOf meta v
   = do
-      let plan = makePartitionPlan (adtDecls meta) targetTy resolved
       let Program{functions=fs} = compilingProgram meta
       -- Re-typed after the fetch, as the point-witness fold does: the fetch
       -- returns original annotations, but a variable fixed by an enclosing
@@ -7101,22 +7182,24 @@ planWitnessApply meta cumulative rt lResolvedCN lambdaBodyCN tag v sample
       -- The abandoned grouped attempt leaves no trace: its variable bindings
       -- are dropped ('pass') and the name supply is rewound, so a body that
       -- clashes emits exactly what the ungrouped traversal alone would.
+      -- The traversal may open further neural reads ('planOpenBinding'); the
+      -- final state says where each one's logits live.
       let runPlan merge = do
-            ws <- evalStateT (planInvert meta env bodyExpr target) (emptyPlanState nnRaw merge)
-            return (filter (not . pwUnsat) <$> ws)
+            (ws, st) <- runStateT (planInvert meta env bodyExpr target) (emptyPlanState nnRaw (getSize plan) merge)
+            return (filter (not . pwUnsat) <$> ws, psRaws st)
       supply0 <- get
       (grouped, clashed) <- pass $ do
         r <- runPlan True
-        let c = either (const False) (any pwClash) r
+        let c = either (const False) (any pwClash) (fst r)
         return ((r, c), if c then const [] else id)
-      worldsE <- if clashed then put supply0 >> runPlan False else return grouped
+      (worldsE, raws) <- if clashed then put supply0 >> runPlan False else return grouped
       case worldsE of
         Left why -> return (Left (Just why))
         Right worlds -> do
           case mapMaybe pwOverCoupled worlds of
            (why:_) -> return (Left (Just why))
            [] -> do
-            measured <- measurePlanWorlds nnRaw worlds
+            measured <- measurePlanWorlds raws worlds
             -- Full-ANY marginal short-circuit, mirroring setWitnessApply.
             if cumulative
               then return (Right measured)
@@ -7126,6 +7209,19 @@ planWitnessApply meta cumulative rt lResolvedCN lambdaBodyCN tag v sample
   where
     isArrow (TArrow _ _) = True
     isArrow _            = False
+
+-- | The neural read an expression is, when the plan engine can traverse it:
+-- the network's name, the 'PartitionPlan' of its output (from its @of@
+-- annotation, else auto-derived from its type -- no annotation is required)
+-- and the symbol argument.
+planReadOf :: CompilerMetadata -> Expr -> Maybe (String, PartitionPlan, Expr)
+planReadOf meta v
+  | Expr _ (ReadNN nnName symArg) <- v
+  , Just (_, TArrow TSymbol targetTy, declTag) <- find (\(n, _, _) -> n == nnName) (neurals (compilingProgram meta))
+  , let resolved = resolvePartitionAnnotation (writeLogitsDecls (compilingProgram meta)) targetTy declTag
+  , isJust resolved || isRight (autoDeriveMultiValue (adtDecls meta) targetTy)
+  = Just (nnName, makePartitionPlan (adtDecls meta) targetTy resolved, symArg)
+  | otherwise = Nothing
 
 -- | The compiled inference function a call to top-level function @n@ must
 -- reference, given the semiring the CALLER is being compiled under.

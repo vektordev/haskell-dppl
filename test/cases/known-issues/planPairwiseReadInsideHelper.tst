@@ -1,0 +1,11 @@
+-- plan-enumeration/planPairwiseAcrossTwoReads with the second read moved into
+-- a helper that receives the first read's value. Inline, the plan traversal
+-- opens the inner `draw b` as a second plan (planOpenBinding); inside a
+-- specialized function it refuses, because specializations are memoized by
+-- plan offsets and deterministic arguments, so two calls of the helper would
+-- share one offset range and their independent reads would be counted as one
+-- draw. The refusal is eager, so generate is lost too (that half belongs to
+-- task static-refusals-become-absent-variants). Idealized value at
+-- a ~ N(0,1), b ~ N(1,2): P(True) = Phi(1/sqrt(5)) = 0.672640.
+-- Residue of task plan-pairwise-across-separate-neural-reads.
+expect-failure: diagnostic "a neural read inside a specialized function is not supported by the plan traversal"
