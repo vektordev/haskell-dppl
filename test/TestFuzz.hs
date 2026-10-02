@@ -45,7 +45,7 @@
 -- dynamically from the density at the query point (see its docs).
 module TestFuzz (fuzzTests, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
                  neuralGeneratorTests, arrowGeneratorTests, fuzzScalingTests,
-                 injFCatalogTests) where
+                 injFCatalogTests, adtRecursionGeneratorTests) where
 
 import Test.QuickCheck hiding (sample)
 import Test.Tasty (TestTree, testGroup, localOption)
@@ -63,10 +63,11 @@ import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
 import Text.Read (readMaybe)
 import Data.Maybe (isJust)
-import Data.List (sort, nub, intersect)
+import Data.List (sort, nub, intersect, find)
 import Data.Number.Erf (erf)
 
 import SPLL.Lang.Types
+import SPLL.Typing.RType (RType(..))
 import SPLL.IntermediateRepresentation
 import SPLL.IRCompiler (generateBackedSites)
 import SPLL.Prelude
@@ -86,7 +87,10 @@ import ArbitrarySPLL (genRawFuzzProgram, genTypedProgram, genTypedExpr, Ty(..),
                       ArrowShape(..), arrowShapeOf, arrowShapeOfProgram,
                       genHelperProgram, typedLeaves,
                       genNeuralProgram, genNeuralTwinProgram, neuralTwin,
-                      typedMainCoreExpr, typedMainCoreTy, hasNeural)
+                      typedMainCoreExpr, typedMainCoreTy, hasNeural,
+                      RecShape(..), recShapeOfProgram, genRecursiveProgram,
+                      withADTs, adtPool, adtPoolNames, mentionsVar, recursionSafe,
+                      unguardedProjections)
 
 -- | `show`ing a value forces every field, catching lazily-hidden crashes
 -- (partial functions/undefined) that a bare WHNF `seq` would miss.
@@ -738,9 +742,11 @@ prop_Fuzz_MixtureFollowsCombinationRules =
   -- module's convention; observed failures here have been budget overruns, not
   -- rule violations, so read the counterexample before believing the latter.
   withMaxSuccess (fuzzCases 25) $ forAll genMixturePair $ \(exprA, exprB, q) -> ioProperty $ withinBudgetScaled "prop_Fuzz_MixtureFollowsCombinationRules" 10 $ do
-    let progA = Program [("main", exprA)] [] [] []
-        progB = Program [("main", exprB)] [] [] []
-        progM = Program [("main", ifThenElse (bernoulli q) exprA exprB)] [] [] []
+    -- 'withADTs': since milestone M4 an arm of any type may build or take
+    -- apart a pool ADT internally, and has to declare it.
+    let progA = withADTs $ Program [("main", exprA)] [] [] []
+        progB = withADTs $ Program [("main", exprB)] [] [] []
+        progM = withADTs $ Program [("main", ifThenElse (bernoulli q) exprA exprB)] [] [] []
     envs <- mapM (compileSafe defaultCompilerConfig) [progA, progB, progM]
     case envs of
       [Just envA, Just envB, Just envM]
@@ -993,6 +999,8 @@ data DrawSummary = DrawSummary
   , dsLetShape       :: LetShape
   , dsArrowShape     :: ArrowShape
   , dsNeuralLabel    :: String
+  , dsADTLabel       :: String
+  , dsRecShape       :: RecShape
   } deriving (Show, Eq)
 
 summarizeDraw :: Program -> IO DrawSummary
@@ -1013,6 +1021,8 @@ summarizeDraw p = do
     -- sits inside a wrapper this axis has no reason to exclude.
     <*> guardAxis NoArrow (arrowShapeOfProgram p)
     <*> guardAxis crashedAxis (neuralLabel p)
+    <*> guardAxis crashedAxis (adtLabel p)
+    <*> guardAxis NoRec (recShapeOfProgram p)
 
 -- | The modality pass's verdict on @main@, as a label. This is the axis that
 -- catches a collapse into a single inference regime, which the outcome split
@@ -1064,6 +1074,7 @@ showTy (TyTuple a b)   = "(" ++ showTy a ++ ", " ++ showTy b ++ ")"
 showTy (TyEither a b)  = "Either " ++ showTy a ++ " " ++ showTy b
 showTy (TyList a)      = "[" ++ showTy a ++ "]"
 showTy (TyArrow a b)   = showTy a ++ " -> " ++ showTy b
+showTy (TyADT n)       = n
 
 -- | Coarser than 'showTy': just which outer shape the draw landed on, so the
 -- scalar/structured split is one readable row rather than a long tail.
@@ -1073,6 +1084,7 @@ tyShapeLabel p = case typedMainCoreTy p of
   Just TyTuple{}      -> "tuple"
   Just TyEither{}     -> "either"
   Just TyList{}       -> "list"
+  Just TyADT{}        -> "adt"
   -- Never drawn as a program's target type ('genTy' cannot emit an arrow);
   -- here so that a future one is reported rather than counted as a scalar.
   Just TyArrow{}      -> "arrow"
@@ -1094,7 +1106,16 @@ neuralLabel p = case neurals p of
   _                               -> "other"
 
 isStructured :: Program -> Bool
-isStructured p = tyShapeLabel p `elem` ["tuple", "either", "list"]
+isStructured p = tyShapeLabel p `elem` ["tuple", "either", "list", "adt"]
+
+-- | Which pool ADTs the draw declares, as one label (milestone M4). A draw
+-- declares an ADT whenever any of its nodes builds, tests or projects one,
+-- whatever its own target type -- so this row, not "target shape", is the one
+-- that says how much of the run reached ADT code at all.
+adtLabel :: Program -> String
+adtLabel p = case [ dataName d | d <- adts p ] of
+  [] -> "none"
+  ns -> unwords ns
 
 prop_Fuzz_GeneratorCoverage :: Property
 prop_Fuzz_GeneratorCoverage = withMaxSuccess (fuzzCases 200) $
@@ -1121,6 +1142,8 @@ prop_Fuzz_GeneratorCoverage = withMaxSuccess (fuzzCases 200) $
       $ tabulate "let shape"        [show (dsLetShape s)]
       $ tabulate "arrow shape"      [show (dsArrowShape s)]
       $ tabulate "neural"           [dsNeuralLabel s]
+      $ tabulate "adt"              [dsADTLabel s]
+      $ tabulate "recursion"        [show (dsRecShape s)]
       -- Cross-tabulated, and only over the neural draws. At one draw in five
       -- the neural surface's own outcome split is invisible in the aggregate
       -- "outcome" row above, and that split is the thing M3 is actually about:
@@ -1176,6 +1199,12 @@ prop_Fuzz_GeneratorCoverage = withMaxSuccess (fuzzCases 200) $
       $ cover 3  (dsNeuralLabel s == "materialized (of _)"
                   || dsNeuralLabel s == "explicit (of [..])")
                  "neural draw that materializes its support"
+      -- M4's acceptance criterion, same observe-first shape. One draw in six
+      -- is a 'genRecursiveProgram', most of whose steps do recurse; ADT nodes
+      -- reach far more draws than ADT *targets* do, through the field
+      -- projections and constructor tests open at scalar targets.
+      $ cover 10 (dsADTLabel s /= "none")       "declares an ADT"
+      $ cover 5  (dsRecShape s /= NoRec)        "contains a recursive declaration"
       $ property True
 
 return []
@@ -1322,6 +1351,12 @@ shrinkPreservesTy e =
 coreSize :: Program -> Int
 coreSize = maybe 0 typedExprSize . typedMainCoreExpr
 
+-- | 'coreSize' plus every other declaration's node count: the measure the
+-- shrinker reduces since milestone M4, when declarations started shrinking
+-- too (a helper's or a recursive function's body is part of the draw).
+generatedSize :: Program -> Int
+generatedSize p = coreSize p + sum [ typedExprSize e | (nm, e) <- functions p, nm /= "main" ]
+
 neuralGeneratorTests :: TestTree
 neuralGeneratorTests = testGroup "Neural generator"
   [ testProperty "a neural draw validates" $
@@ -1408,6 +1443,114 @@ arrowGeneratorTests = testGroup "Arrow generator"
         | p' <- shrinkTypedProgram p ]
   ]
   where incLam = "x" #-># (var "x" #+# constF 1.0)
+
+-- ---------------------------------------------------------------------------
+-- Milestone M4's contract: ADTs and recursion (design
+-- typed-program-generator-expansion).
+--
+-- Default suite, like the two groups above. Two of these are safety rules
+-- rather than shape checks, and each guards a way the generator could start
+-- manufacturing false counterexamples without anything going red: an
+-- unguarded field projection on a multi-constructor type (the ADT twin of
+-- @head []@), and a recursive function that may not return -- which the
+-- shrinker, left to it, would actively walk toward, a timeout reading as
+-- "still failing".
+adtRecursionGeneratorTests :: TestTree
+adtRecursionGeneratorTests = testGroup "ADT and recursion generator"
+  [ testCase "withADTs declares exactly the pool types a program uses" $ do
+      let declared p = map dataName (adts (withADTs p))
+      assertEqual "unused" [] (declared (Program [("main", constF 1.0)] [] [] []))
+      assertEqual "test on a constructor" ["Hue"]
+        (declared (Program [("main", injF "isRed" [injF "Red" []])] [] [] []))
+      assertEqual "recursive" ["Chain"]
+        (declared (Program [("main", injF "Link" [constF 1.0, injF "Stop" []])] [] [] []))
+      assertEqual "a neural target counts although nothing reads it" ["Pt"]
+        (declared (Program [("main", constB True)] [("nn", TArrow TSymbol (TADT "Pt"), Nothing)] [] []))
+  , testCase "the whole pool validates as declarations" $
+      assertEqual "" (Right ()) (validateProgram (Program [("main", constB True)] [] adtPool []))
+  , testCase "every pool type's smallest leaf recovers to it" $
+      mapM_ (\n -> case typedLeaves (TyADT n) of
+               (l : _) -> assertEqual n (Just (TyADT n)) (tyOfTypedExpr l)
+               []      -> assertFailure ("no leaf for " ++ n)) adtPoolNames
+  , testCase "a constructor applied to a wrong-typed field does not recover" $
+      -- The shrinker's per-node re-typing would otherwise accept a field
+      -- replaced by a value of another type: a constructor node's own type
+      -- says nothing about its arguments.
+      assertEqual "" Nothing (tyOfTypedExpr (injF "MkPt" [constB True, constB True]))
+  , testProperty "an ADT draw validates and its core type is recoverable" $
+      forAll (resize fuzzSize genTypedProgram) $ \p ->
+        not (null (adts p)) ==>
+          counterexample (show p)
+            (validateProgram p === Right () .&&. property (isJust (typedMainCoreTy p)))
+  , testProperty "a multi-constructor field is projected only under its constructor test" $
+      forAll (resize fuzzSize genTypedProgram) $ \p ->
+        let bad = unguardedProjections p
+        in counterexample (show bad ++ "\n" ++ show p) (null bad)
+  , testProperty "no shrink makes a projection unguarded" $
+      forAll (resize fuzzSize genTypedProgram) $ \p -> conjoin
+        [ counterexample (show p') (unguardedProjections p' === [])
+        | p' <- shrinkTypedProgram p ]
+  , testCase "a guarded projection is not collapsed onto its then-arm" $ do
+      -- The minimized shape the first M4 Aspirational run produced: the
+      -- shrinker had reduced a crashing draw to @lv Stop@, the accessor's own
+      -- error, by taking the then-arm of the guard.
+      let guardedLv = letIn "v0" (injF "Stop" [])
+                        (ifThenElse (injF "isLink" [var "v0"]) (injF "lv" [var "v0"]) (constF 1.0))
+          prog = withADTs (Program [("main", guardedLv)] [] [] [])
+      assertEqual "the original is guarded" [] (unguardedProjections prog)
+      mapM_ (\p' -> assertEqual (show p') [] (unguardedProjections p')) (shrinkTypedProgram prog)
+  , testProperty "a recursive draw validates and its main type is recoverable" $
+      forAll (resize fuzzSize genRecursiveProgram) $ \p ->
+        counterexample (show p)
+          (validateProgram p === Right () .&&. property (isJust (typedMainCoreTy p)))
+  , testProperty "a recursive step makes at most one call per invocation" $
+      forAll (resize fuzzSize genRecursiveProgram) $ \p ->
+        conjoin [ counterexample (show e) (callsOnce nm (underParam e) <= 1)
+                | (nm, e) <- functions p, nm /= "main" ]
+  , testProperty "every generated recursive declaration is termination-safe" $
+      forAll (resize fuzzSize genRecursiveProgram) $ \p ->
+        conjoin [ counterexample (show e) (recursionSafe nm e e) | (nm, e) <- decls p ]
+  , testCase "a shrink may not unwrap a productive call" $ do
+      let orig = ifThenElse (bernoulli 0.5) (injF "Stop" []) (injF "Link" [constF 1.0, var "loop"])
+      assertBool "the original" (recursionSafe "loop" orig orig)
+      assertBool "Link x loop -> loop"
+        (not (recursionSafe "loop" orig (ifThenElse (bernoulli 0.5) (injF "Stop" []) (var "loop"))))
+  , testCase "a shrink may not change a counted call's argument" $ do
+      let body a = "k" #-># ifThenElse (var "k" #<# constI 1) (constI 0) (apply (var "loop") a)
+          orig = body (var "k" #<-># constI 1)
+      assertBool "the original" (recursionSafe "loop" orig orig)
+      assertBool "k - 1 -> k" (not (recursionSafe "loop" orig (body (var "k"))))
+      assertBool "the call removed" (recursionSafe "loop" orig ("k" #-># constI 0))
+  , testProperty "shrinking a recursive draw keeps its stopping condition and validates" $
+      forAll (resize fuzzSize genRecursiveProgram) $ \p -> conjoin
+        [ counterexample (show p')
+            -- A shrink may remove the recursive call (the step shrinking to a
+            -- leaf), which ends the obligation; what it may never do is keep
+            -- the call and change the condition guarding it.
+            (conjoin [ fmap (stopCond . snd) (find ((== nm) . fst) (decls p)) === Just (stopCond e')
+                     | (nm, e') <- decls p' ]
+             .&&. validateProgram p' === Right ())
+        | p' <- shrinkTypedProgram p ]
+  ]
+  where
+    decls p = [ d | d@(nm, e) <- functions p, nm /= "main", mentionsVar nm e ]
+    stopCond e = case node e of
+      Lambda _ b       -> stopCond b
+      IfThenElse c _ _ -> Just (toStub c)
+      _                -> Nothing
+    -- Occurrences of @nm@ evaluated at most once per evaluation: not under a
+    -- lambda other than a @let@'s (whose body runs once).
+    callsOnce nm e = case node e of
+      Var x -> if x == nm then 1 else 0 :: Int
+      Apply l v | Lambda _ b <- node l -> callsOnce nm b + callsOnce nm v
+      IfThenElse c t f -> callsOnce nm c + callsOnce nm t + callsOnce nm f
+      InjF _ as -> sum (map (callsOnce nm) as)
+      Apply a b -> callsOnce nm a + callsOnce nm b
+      _ -> 0
+    -- A counted declaration's own parameter lambda runs once per call.
+    underParam e = case node e of
+      Lambda _ b -> b
+      _          -> e
 
 -- ---------------------------------------------------------------------------
 -- The depth knob's contract (design typed-program-generator-expansion, Axis 4).
@@ -1511,7 +1654,9 @@ injFCatalogTests = testGroup "InjF catalog"
   , testProperty "the generator only ever emits names the compiler defines" $
       withMaxSuccess (fuzzCases 50) $
       forAll (resize fuzzSize genTypedProgram) $ \prog ->
-        let defined = map fst (globalFEnv [])
+        -- The program's own ADT declarations count: their constructors,
+        -- accessors and tests enter 'globalFEnv' per declaration (M4).
+        let defined = map fst (globalFEnv (adts prog))
             used    = nub (concatMap injFNamesOf (map snd (functions prog)))
         in counterexample (show (filter (`notElem` defined) used))
              (all (`elem` defined) used)
@@ -1723,7 +1868,7 @@ shrinkerTests = testGroup "Shrinker"
         | p' <- shrinkTypedProgram p ]
   , testProperty "every shrink is strictly smaller" $
       forAll (resize fuzzSize genTypedProgram) $ \p -> conjoin
-        [ counterexample (show p') (coreSize p' < coreSize p)
+        [ counterexample (show p') (generatedSize p' < generatedSize p)
         | p' <- shrinkTypedProgram p ]
   , testProperty "every shrunk program still validates" $
       forAll (resize fuzzSize genTypedProgram) $ \p ->
@@ -1740,7 +1885,7 @@ shrinkerTests = testGroup "Shrinker"
       -- Every candidate must still be a *valid program*: that is the property
       -- an unbound v0 would break, and validation is what would catch it.
       conjoin [ counterexample (show e')
-                  (validateProgram (Program [("main", e')] [] [] []) === Right ())
+                  (validateProgram (withADTs (Program [("main", e')] [] [] [])) === Right ())
               | e' <- shrinkTypedExpr liveLet ]
   , testProperty "a constructor stack is not stripped a layer" $ once $
       -- @left (right 0)@ recovers as @Either (Either ? Int) ?@ and its argument

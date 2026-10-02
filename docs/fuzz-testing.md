@@ -504,8 +504,8 @@ discrete-only lattice for that reason.
 
 Target types are narrower than `Ty`: `Float`, `Bool`, and tuples/`Either`s of
 those (what `autoDeriveMultiValue` can produce a plan for), plus `Int` with an
-explicit `of [0..k-1]` -- which without ADTs is the only way to get a plan slot
-wider than two. ADT targets and recursion are milestone M4.
+explicit `of [0..k-1]` -- and, since milestone M4, the pool ADTs `Hue` (a
+three-way enumeration) and `Pt` (a record of a `Float` and a `Bool`).
 
 The `Neural generator` group (default suite, beside `Shrinker`) pins the
 machinery the properties depend on being right about: that a neural draw
@@ -566,3 +566,52 @@ that a helper draw validates and applies its helper, and the one soundness
 rule the shrinker has to respect here: a function value reduces to the
 constant function as a whole and is never minimized from within, because
 nothing at a bare lambda says what its parameter was bound at.
+
+## ADTs and recursion (milestone M4)
+
+Mechanism: `api/test/ArbitrarySPLL.md` in the internal-docs repo. In short,
+`Ty` gained `TyADT`, drawn from a fixed **pool** of four declarations covering
+the corpus' ADT shapes (`Hue` an enumeration, `Pt` a single-constructor record,
+`Mix` mixed arity, `Chain` recursive with `depth 3`), and `withADTs` declares
+on each program exactly the ones it uses. Constructors are generated at an ADT
+target; field projections and constructor tests are eliminators open at any
+target of a field's type, so ADT nodes reach far more draws than ADT targets
+do -- about half of all draws declare one. A fourth program shape,
+`genRecursiveProgram`, declares a recursive top-level function `loop`, in one
+draw in six.
+
+Three rules keep the new surface from manufacturing **false counterexamples**,
+each pinned by the default-suite `ADT and recursion generator` group:
+
+- **A field of a multi-constructor type is only projected under its own
+  constructor test** (`let v = e in if isLink v then lv v else ...`).
+  Unguarded, an accessor is partial exactly like `head []`. The shrinker is
+  held to the same rule (`unguardedProjections`): on the first Aspirational
+  run it had collapsed such an `if` onto its then-arm and minimized a crash
+  down to `lv Stop` -- the accessor's own error, not the bug it started from.
+- **Recursion terminates by construction**: a counted shape, `loop k = if k < 1
+  then b else <step calling loop (k - 1) at most once>`, and a geometric one
+  whose every recursive call is the recursive field of a constructor
+  (`Link x loop`, `cons x loop`), so each call consumes one constructor of the
+  observation. The scalar geometric shape, `loop = if Uniform < p then 0 else
+  loop`, is **deliberately not generated**: it samples fine but its probability
+  function calls itself at the same point and never returns -- the open bug
+  `unbounded-recursion-admitted-then-diverges` in the internal-docs repo, which
+  the first Slow run of M4 re-found and minimized to exactly that program in
+  seven draws. Re-finding a filed bug every run only spends the probability
+  properties' budgets on timeouts.
+- **The shrinker never touches a recursive declaration's skeleton**
+  (`declShrinks`, `recursionSafe`): only its base and step shrink, and a step
+  candidate is refused if it moves a call out of its productive position or
+  changes the counted call's `k - 1`. Rewarded for keeping a timeout alive, the
+  shrinker would otherwise walk straight into non-termination.
+
+Since M4 the non-`main` declarations shrink too (a helper's body, a recursive
+function's base and step), which is why the `Shrinker` group's size measure is
+now the whole generated program rather than `main`'s core.
+
+Measured over 200 draws at `fuzzSize = 12`: 46.5% of draws declare an ADT, 10.5%
+have an ADT target, 16% contain a recursive declaration (9% counted, 7%
+geometric). The default and `Slow` tiers stayed green over six `Slow` `Fuzz`
+runs. Twelve `TypedCompileNeverCrashes` runs found no ADT- or
+recursion-specific crash; every message was one of the already-filed families.

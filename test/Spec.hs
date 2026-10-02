@@ -34,7 +34,7 @@ import TestPythonPrelude (pythonPreludeTests)
 import TestCLI (cliTests)
 import TestFuzz (fuzzTests, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
                  neuralGeneratorTests, arrowGeneratorTests, fuzzScalingTests,
-                 injFCatalogTests)
+                 injFCatalogTests, adtRecursionGeneratorTests)
 import TestCaseParser (parseProgram, corpusPplPath)
 import TestSupport (topKConf, topKBCConf, bcConf, irDensity, reasonablyClose, expectCompiled)
 import SPLL.Prelude
@@ -558,6 +558,7 @@ main = do
     , shrinkerTests
     , neuralGeneratorTests
     , arrowGeneratorTests
+    , adtRecursionGeneratorTests
     , errorChannelTests
     , fuzzScalingTests
     , injFCatalogTests

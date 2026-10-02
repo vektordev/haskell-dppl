@@ -2016,8 +2016,9 @@ program (needs a torch-enabled Python, same lookup as `BatchedPython`).
 
 `test/TestFuzz.hs` (group `Fuzz`, split between `Slow` and `Aspirational`) runs randomly
 generated SPLL programs (`test/ArbitrarySPLL.hs` — scalars, tuples,
-`Either`, lists and `let`-bindings, the last of which is what reaches the
-set-valued-witness engine) against the same
+`Either`, lists, `let`-bindings (the shape that reaches the
+set-valued-witness engine), function values, neural reads, a fixed pool of
+ADTs and terminating recursive functions) against the same
 metamorphic invariants the hand-written corpus checks — P(ANY)=1, topK
 never inflates probability, branch counting doesn't change the
 probability value, probability is never negative, mixtures follow the
