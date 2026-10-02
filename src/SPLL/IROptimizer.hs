@@ -758,6 +758,11 @@ forceOp OpGreaterThan (VFloat x) (VFloat y) = VBool (x > y)
 forceOp OpLessThan (VInt x) (VInt y) = VBool (x < y)
 forceOp OpLessThan (VFloat x) (VFloat y) = VBool (x < y)
 forceOp OpAnd (VBool x) (VBool y) = VBool (x && y)
+-- Missing until the admission-totality fuzz oracle found @main = max 5.0
+-- (-9.0)@ crashing every variant, generate included: two constant operands are
+-- folded here, and the interpreter's own 'OpMax' already had both cases.
+forceOp OpMax (VInt x) (VInt y) = VInt (max x y)
+forceOp OpMax (VFloat x) (VFloat y) = VFloat (max x y)
 -- Operations on ANYs should not happen. This is simplifying unreachable code paths, that should be optimized away later
 forceOp _ VAny _ = VAny
 forceOp _ _ VAny = VAny

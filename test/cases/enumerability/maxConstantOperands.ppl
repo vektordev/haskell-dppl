@@ -1,0 +1,4 @@
+-- Both operands of max are constants, so the optimizer folds the operation
+-- itself (IROptimizer.forceOp). That fold had no OpMax case and crashed every
+-- variant, generate included -- found by the admission-totality fuzz oracle.
+main = max 5.0 (-9.0)
