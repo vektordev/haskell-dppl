@@ -1,0 +1,1 @@
+main = snd (draw h = Uniform in (exp h, True))

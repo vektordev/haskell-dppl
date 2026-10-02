@@ -1,0 +1,2 @@
+data Mix = Zero | Two ma::Int, mb::Bool
+main = draw v0 = (if Uniform < 0.5 then Zero else Two 1 False) in (if isTwo v0 then mb v0 else False)

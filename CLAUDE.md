@@ -1755,8 +1755,11 @@ current list for whichever binary you run):
   repros of open compiler bugs, each declaring which of four failure shapes
   it demonstrates (see "Known-issues corpus" below)
 - `test/TestFuzz.hs` — `Fuzz`, inside the opt-in `Slow`/`Aspirational`/`SuperSlow` groups,
-  plus `Shrinker` (the typed generator's shrink contract), which is in the
-  default suite
+  plus `Shrinker` (the typed generator's shrink contract) and `Admission
+  oracle`, which are in the default suite
+- `test/AdmissionOracle.hs` — the ModalityInfer ↔ IRCompiler admission
+  contract (see "The admission contract" below), driven by the `Slow` property
+  `prop_Fuzz_AdmissionTotality`
 - `test/TestCaseParser.hs` / `ArbitrarySPLL.hs` / `TestTolerances.hs` — the
   `.tst` parser, QuickCheck generators, shared numeric tolerances
 
@@ -2030,6 +2033,33 @@ produced each run so a silent collapse to one shape can't pass green. The
 shrinker's own contract is the `Shrinker` group, which is pure and fast and so
 lives in the **default** suite rather than in `Slow`. Details, the raw-vs-typed
 split, and the `SuperSlow` sampling-vs-PDF tier: `docs/fuzz-testing.md`.
+
+### The admission contract
+
+The modality engine and IRCompiler answer "can this be inferred?"
+independently (design `pipeline-coherence`, F2). The contract between them:
+**a top-level function whose own `pType` is admitted (`Deterministic`,
+`PNormal`, `PLogNormal`, `Integrate`) compiles probability and integrate
+functions that evaluate, at a point from its own `generate`, to a value or a
+refusal; a `Bottom` one still generates.** `test/AdmissionOracle.hs` checks it
+per function (helpers at canonical arguments), reading the verdicts from
+`Prelude.admissionTyped` -- the program exactly as the variant gate reads it,
+so the verdict is known even when the compile crashes. Three buckets: value,
+refusal (a `Left`, a `VError`, or an `IRError` the interpreter raises -- the
+one exception that is not a crash, recognised by its `Error during
+interpretation:` prefix), crash. A crash is the violation.
+
+`prop_Fuzz_AdmissionTotality` (Slow) runs it over the typed generator, with
+`knownAdmissionCrashes` excepting filed crash families by message, each
+naming its doc. Most entries are the refusal sites
+`static-refusals-become-absent-variants` (P1) turns into absent variants --
+when that lands, prune them, and decide whether an admitted-but-absent variant
+(a violation here today) becomes the refusal bucket. The catch-all is one of
+them, so a *new* lattice over-promise is currently invisible to the property;
+the default-suite `Admission oracle` group pins the oracle itself, including
+on the historical mixture-Fin repro. There is no corpus twin: over all 443
+corpus programs the oracle finds nothing, and none of them is `Bottom`, so the
+corpus cannot exercise half the contract (measured when the task landed).
 
 ### Batched Mode (PyTorch tensorizer)
 

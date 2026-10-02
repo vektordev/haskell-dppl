@@ -1,0 +1,1 @@
+main = draw f = snd (Normal, \x -> Uniform) in f (Uniform < 0.5)

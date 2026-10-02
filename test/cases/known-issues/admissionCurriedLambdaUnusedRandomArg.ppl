@@ -1,0 +1,1 @@
+main = (\a -> \b -> a) 0.0 (if Uniform < 0.5 then 2 else 1)

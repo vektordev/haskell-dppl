@@ -1,0 +1,1 @@
+main = snd (draw v0 = Uniform in (v0, 2.0))

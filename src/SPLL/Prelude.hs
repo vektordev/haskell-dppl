@@ -58,6 +58,7 @@ module SPLL.Prelude
   , fix
   , compile
   , compileRTyped
+  , admissionTyped
   , rtypedProgram
   , chainNamedProgram
   , batchedRefusal
@@ -106,7 +107,7 @@ import SPLL.IRSelectPass (selectPassEnv)
 import SPLL.CodeGenPyTorchBatched (generateFunctionsBatched)
 import Debug.Trace
 import Data.Either
-import SPLL.Typing.ForwardChaining (annotateProg)
+import SPLL.Typing.ForwardChaining (annotateProg, FCData)
 import SPLL.Typing.Determinism (knownAnchors)
 import qualified Data.Set as Set
 import Text.PrettyPrint.Annotated.HughesPJClass()
@@ -361,7 +362,12 @@ resolveNeuralDecls p = do
       Left err -> Left ("Compiler Error: " ++ err)
 
 compile :: CompilerConfig -> Program -> Either CompilerError IREnv
-compile conf p0 = do
+compile conf p0 = frontEnd conf p0 >>= compileRTyped conf
+
+-- | 'compile' up to and including RType inference: validation, neural
+-- annotation resolution, callee normalisation, RInfer.
+frontEnd :: CompilerConfig -> Program -> Either CompilerError Program
+frontEnd conf p0 = do
   validateProgram p0
   p <- resolveNeuralDecls p0
   printIfVerbose conf "=== Parsed Program ==="
@@ -398,8 +404,7 @@ compile conf p0 = do
   printIfMoreVerbose conf "\n=== RType-inferred Program ==="
   pPrintIfMoreVerbose conf rtyped
   printStage conf "After RType Inference" rtyped
-
-  compileRTyped conf rtyped
+  return rtyped
 
 -- | 'compile' from the post-RInfer seam onwards: enum annotation, chain naming,
 -- the modality pass, conditional annotation, IR compilation, the select pass and
@@ -413,6 +418,37 @@ compile conf p0 = do
 -- unchanged, which is the design's central claim.
 compileRTyped :: CompilerConfig -> Program -> Either CompilerError IREnv
 compileRTyped conf rtyped = do
+  (annotated, fcData) <- typedStages conf rtyped
+  unoptimized <- envToIRUnoptimized conf fcData annotated
+  printStageIR conf "After IR Compilation (pre-optimization)" unoptimized
+  let stripped = if countBranches conf then unoptimized else stripBranchCount unoptimized
+
+  -- Batched mode (design pytorch-tensorizer): retag elementwise-eligible ifs to
+  -- selects before the optimizer, which would otherwise fold the conditionals
+  -- away and obscure the transformation. Runs only under --batched; in M1 it is
+  -- a scalar no-op, so the default pipeline is byte-identical.
+  --
+  -- A separate tensor-lowering stage used to sit here, rewriting the enum-sum
+  -- family into 'BReduce'/'BMap'/'BTensor' (design ir-tensor-values). Task
+  -- retire-irenumsum deleted the family, and 'SPLL.Semiring' now builds that
+  -- form directly, so there is nothing left to lower and the stage is gone.
+  let selected = if batched conf then selectPassEnv stripped else stripped
+  printStageIR conf "After Select Pass" selected
+
+  let compiled = optimizeEnv conf selected
+  printIfVerbose conf "\n=== Compiled Program ==="
+  pPrintIfMoreVerbose conf compiled
+  printIfVerbose conf (pPrintIREnv compiled)
+  printStageIR conf "After Optimization" compiled
+  return compiled
+
+-- | The program exactly as 'envToIRUnoptimized' receives it: every annotation
+-- IRCompiler dispatches on, @pType@ included, plus the forward-chaining
+-- certificate. The admission-totality oracle reads its verdicts here
+-- ('admissionTyped'), so it can never read a different program from the one
+-- the variant gate reads.
+typedStages :: CompilerConfig -> Program -> Either CompilerError (Program, FCData)
+typedStages conf rtyped = do
   let enumAnnotated = annotateEnumsProg rtyped
   printIfMoreVerbose conf "\n=== Annotated Program (1) ==="
   pPrintIfMoreVerbose conf enumAnnotated
@@ -460,29 +496,17 @@ compileRTyped conf rtyped = do
   printIfMoreVerbose conf "\n=== Annotated Program (2) ==="
   pPrintIfMoreVerbose conf annotated
   printStage conf "After Conditional Annotation (IsConditional tags)" annotated
+  return (annotated, fcData)
 
-  unoptimized <- envToIRUnoptimized conf fcData annotated
-  printStageIR conf "After IR Compilation (pre-optimization)" unoptimized
-  let stripped = if countBranches conf then unoptimized else stripBranchCount unoptimized
-
-  -- Batched mode (design pytorch-tensorizer): retag elementwise-eligible ifs to
-  -- selects before the optimizer, which would otherwise fold the conditionals
-  -- away and obscure the transformation. Runs only under --batched; in M1 it is
-  -- a scalar no-op, so the default pipeline is byte-identical.
-  --
-  -- A separate tensor-lowering stage used to sit here, rewriting the enum-sum
-  -- family into 'BReduce'/'BMap'/'BTensor' (design ir-tensor-values). Task
-  -- retire-irenumsum deleted the family, and 'SPLL.Semiring' now builds that
-  -- form directly, so there is nothing left to lower and the stage is gone.
-  let selected = if batched conf then selectPassEnv stripped else stripped
-  printStageIR conf "After Select Pass" selected
-
-  let compiled = optimizeEnv conf selected
-  printIfVerbose conf "\n=== Compiled Program ==="
-  pPrintIfMoreVerbose conf compiled
-  printIfVerbose conf (pPrintIREnv compiled)
-  printStageIR conf "After Optimization" compiled
-  return compiled
+-- | The fully annotated program 'compile' hands to IR compilation, without
+-- compiling it: the modality engine's verdicts, read where IRCompiler reads
+-- them. A top-level binding whose own @pType@ is one of the four admitted
+-- rungs gets a probability and an integrate function, and a 'Bottom' one gets
+-- only @generate@ (see 'envToIRUnoptimized'). Used by the admission-totality
+-- fuzz oracle (task @admission-totality-property@), which has to know what was
+-- admitted even when the compile it is checking crashes.
+admissionTyped :: CompilerConfig -> Program -> Either CompilerError Program
+admissionTyped conf p = frontEnd conf p >>= fmap fst . typedStages conf
 
 -- | Would batched mode (@--batched@) take this program? 'Nothing' if it would,
 -- @Just diag@ otherwise, carrying the same diagnostic the batched backend would

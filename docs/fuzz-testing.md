@@ -615,3 +615,27 @@ have an ADT target, 16% contain a recursive declaration (9% counted, 7%
 geometric). The default and `Slow` tiers stayed green over six `Slow` `Fuzz`
 runs. Twelve `TypedCompileNeverCrashes` runs found no ADT- or
 recursion-specific crash; every message was one of the already-filed families.
+
+## The admission contract (`prop_Fuzz_AdmissionTotality`)
+
+Task `admission-totality-property` (phase P0 of design `pipeline-coherence`).
+Every top-level function the modality engine admits must compile probability
+and integrate functions that evaluate to a value or a refusal; every function
+it refuses must still generate. The oracle is `test/AdmissionOracle.hs`; the
+contract and the bucket rules are in `CLAUDE.md`, "The admission contract".
+
+What its first runs measured (2026-10-02, at `295003c` + this task): ~12% of
+typed draws violate the contract, every one a compile- or run-time `error` in an
+admitted function. Eleven families were already filed and are excepted by
+message in `knownAdmissionCrashes`; nine more were not, and are filed as
+`fuzz-admission-oracle-bugs` with known-issues pins
+(`test/cases/known-issues/admission*`), plus one fixed outright (`OpMax`
+constant folding, `enumerability/maxConstantOperands`). With those filed, about
+one random-seed run in eight at the default 200 draws (~10s) still finds a new
+family. The property lives in `Slow` regardless: by the tier rules a fuzz
+failure on a fresh seed is a finding to file, not a regression, and this one
+only ever fails on a family nobody has written down yet.
+
+The integrate variant is evaluated too, which no other fuzz property does, and
+one of the new families is only visible there (a `cdf` through a
+projected-away draw, item 5).

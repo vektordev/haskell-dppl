@@ -45,7 +45,7 @@
 -- dynamically from the density at the query point (see its docs).
 module TestFuzz (fuzzTests, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
                  neuralGeneratorTests, arrowGeneratorTests, fuzzScalingTests,
-                 injFCatalogTests, adtRecursionGeneratorTests) where
+                 injFCatalogTests, adtRecursionGeneratorTests, admissionOracleTests) where
 
 import Test.QuickCheck hiding (sample)
 import Test.Tasty (TestTree, testGroup, localOption)
@@ -63,7 +63,11 @@ import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
 import Text.Read (readMaybe)
 import Data.Maybe (isJust)
-import Data.List (sort, nub, intersect, find)
+import Data.List (sort, nub, intersect, find, isInfixOf)
+import PrettyPrint (pPrintProg)
+import SPLL.Parser (tryParseProgram)
+import SPLL.Typing.PType (PType(Bottom))
+import AdmissionOracle (Outcome(..), admissionCheck, AdmissionReport(..), Check(..), Mode(..), admitted, violations, outcomeBucket, renderViolation)
 import Data.Number.Erf (erf)
 
 import SPLL.Lang.Types
@@ -604,6 +608,125 @@ prop_Fuzz_ProbNeverGenerateBacked = withMaxSuccess (fuzzCases 3000) $
         []  -> property True
         bad -> counterexample ("GENERATE-BACKED: " ++ show bad ++ "\nPROGRAM: " ++ show p) False
       _ -> property True
+
+-- | The admission contract (task @admission-totality-property@): every
+-- top-level function the modality engine admits compiles to probability and
+-- integrate functions that evaluate, at a point drawn from its own @generate@,
+-- to a value or a refusal through the error channel -- never a crash; every
+-- function it refuses still generates. See "AdmissionOracle".
+--
+-- This differs from 'prop_Fuzz_TypedCompileNeverCrashes' in what it reaches
+-- and what it tells you. It exercises every top-level function rather than
+-- only @main@ (a helper's parameters are filled with canonical values), the
+-- integrate variant as well as the probability one, and the existence of each
+-- admitted variant; and a failure names the function, its @pType@ and the mode,
+-- which is what says which authority -- lattice or IR compiler -- has to move.
+--
+-- A crash in a family already filed is not a new finding, so
+-- 'knownAdmissionCrashes' lists them by message, each with its tracking doc;
+-- a draw whose every violation is one of those passes, labelled. Anything
+-- else fails. The tabulation is the three-bucket count the task asks for, over
+-- the admitted functions' inference evaluations: the "refusal" share is the
+-- precision metric @static-refusals-become-absent-variants@ will turn into a
+-- gate.
+--
+-- Measured at its introduction (2026-10-02): about 12% of draws violate the
+-- contract. Nine of the crash families were unfiled and are now
+-- (fuzz-admission-oracle-bugs); with them filed, about one random-seed run in
+-- eight at the default 200 draws (~10s) still turns up a new one, which is
+-- what a failure of this property means: a family to file. The exception list
+-- costs something real: the catch-all ("found no way to convert to IR") is
+-- excepted as a whole, and it is exactly where a new lattice over-promise
+-- lands (the re-seeded mixture-Fin bug does), so until P1 empties that entry this
+-- property guards the *other* failure modes, and the oracle's default-suite
+-- case for the mixture-Fin repro ('admissionOracleTests') is what pins that
+-- one.
+prop_Fuzz_AdmissionTotality :: Property
+prop_Fuzz_AdmissionTotality = withMaxSuccess (fuzzCases 200) $
+  forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudgetScaled "prop_Fuzz_AdmissionTotality" 4 $ do
+    -- Forced inside the timeout so the whole check runs under the budget (see
+    -- 'forcedProbAt' for why an unforced result would escape it).
+    checked <- timeout (2 * perCaseBudgetMicros) $ do
+      r <- admissionCheck defaultCompilerConfig p (fuzzArgs p)
+      _ <- evaluate (length (show r))
+      return r
+    case checked of
+      Just report -> return (judge p report)
+      Nothing -> do
+        -- A draw whose plain compile does not finish either is the filed
+        -- compile-time blowup on structured programs, not this contract's
+        -- subject (a non-terminating *admitted variant* would be, and still
+        -- fails). Asking costs a second budget, but only on the rare timeout.
+        compiles <- timeout perCaseBudgetMicros (trySync (evaluate (forceShow (compile defaultCompilerConfig p))))
+        return $ case compiles of
+          Nothing -> label "compile did not terminate (structured-accessor-compile-blowup)" True
+          Just _  -> counterexample ("admission check did not terminate within " ++ show (2 * perCaseBudgetMicros)
+                                     ++ "us, though the program compiles in time\nPROGRAM:\n" ++ pPrintProg p) False
+  where
+   judge p report =
+    let (known, new) = partitionKnownAdmission (violations report)
+        evals = case report of
+          NotTyped _ -> []
+          Checked _ cs -> [ outcomeBucket (ckOutcome c) | c <- cs, admitted (ckPType c)
+                                                        , ckMode c `elem` [ModeProbability, ModeIntegrate] ]
+        verdict = case report of
+          NotTyped _ -> "not typed"
+          Checked vs _
+            | any (admitted . snd) vs -> "some function admitted"
+            | otherwise               -> "every function refused"
+    in tabulate "admitted inference evaluations" evals
+     $ tabulate "known violation family" [ fam | (_, fam) <- known ]
+     $ label verdict
+     $ counterexample (unlines ("ADMISSION CONTRACT VIOLATED:" : map renderViolation new
+                                ++ ["PROGRAM:", pPrintProg p]))
+     $ null new
+
+-- | Crash families already filed, matched by a substring of the violation's
+-- message, each with the open doc tracking it. Every entry names a doc; one
+-- that stops matching anything is harmless but should be pruned when its doc
+-- closes, since a fixed family that regresses would then hide behind it.
+--
+-- Most entries are the probability-mode refusal sites that
+-- @static-refusals-become-absent-variants@ (phase P1 of @pipeline-coherence@)
+-- converts from a compile-killing @error@ into an absent variant. That task
+-- empties this part of the list by construction: after it, those sites are no
+-- longer exceptions at all. Note what that does to the oracle, though: an
+-- *admitted* function with an absent variant is a violation here (the
+-- contract says an admitted function compiles), so P1 has to decide whether
+-- that becomes the graceful-refusal bucket instead -- see 'violations'.
+knownAdmissionCrashes :: [(String, String)]
+knownAdmissionCrashes =
+  [ ("found no way to convert to IR",            p1)
+  , ("set-valued witness construction failed",   p1)
+  , ("Cannot compile an application in",         p1)
+  , ("must declare exactly one inversion",       p1)
+  , ("Form of InjF is not supported",            p1)
+  , ("AnyExcept in InjF must be the first",      p1)
+  , ("Cannot infer prob on subtree",             p1)
+  , ("inversions solving for",                   "fuzz-let-witness-bugs (item 4)")
+  , ("reached a generate-backed fallback",       "fuzz-let-witness-bugs (item 3), fuzz-neural-plan-bugs (item 1)")
+  , ("toIRNormalParams: cannot extract Normal",  "fuzz-neural-plan-bugs (item 3)")
+  , ("More than one probabilistic argument",     "bare-equality-of-two-neural-reads-crashes")
+  , ("Prelude.!!: index too large",                                fa "1")
+  , ("should resolve to a lambda",                     fa "2")
+  , ("Comparison not implemented for type: TArrow",    fa "3")
+  , ("toIRLogNormalParams: cannot extract LogNormal",  fa "4")
+  , ("Expression must be the CDF of a valid distribution", fa "5")
+  , ("divide by zero",                                 fa "6")
+  , ("Could not find name in TypeEnv",                 fa "7")
+  , ("Error during forceUnaryOp optimizer",            fa "8")
+  , ("Error during forceOp optimizer: OpDiv VFloat",   fa "9")
+  ]
+  where p1 = "static-refusals-become-absent-variants"
+        -- Found by this property's first runs and filed together.
+        fa item = "fuzz-admission-oracle-bugs (item " ++ item ++ ")"
+
+partitionKnownAdmission :: [Check] -> ([(Check, String)], [Check])
+partitionKnownAdmission = foldr step ([], [])
+  where
+    step c (ks, ns) = case [ doc | (needle, doc) <- knownAdmissionCrashes, needle `isInfixOf` show (ckOutcome c) ] of
+      (doc : _) -> ((c, doc) : ks, ns)
+      []        -> (ks, c : ns)
 
 -- ---------------------------------------------------------------------------
 -- Well-typed scalar fuzzing: the inference invariants.
@@ -2219,3 +2342,73 @@ fuzzSamplingMatchesPDF = withMaxSuccess (fuzzCases 20) $ forAllShrink (resize fu
 
 superSlowFuzzTests :: TestTree
 superSlowFuzzTests = testGroup "Fuzz" [testProperty "prop_Fuzz_SamplingMatchesPDF" fuzzSamplingMatchesPDF]
+
+
+-- ---------------------------------------------------------------------------
+-- The admission oracle itself (task admission-totality-property).
+--
+-- 'prop_Fuzz_AdmissionTotality' is opt-in (Slow), so the oracle it rests on is
+-- pinned here, in the default suite, on hand-written programs: one per
+-- classification it makes. The violation case is the non-vacuity check -- a
+-- program the lattice admits and the IR compiler crashes on (a filed
+-- known-issues pin) must come out as a crash attributed to the function and
+-- the inference mode, or the property could pass by never seeing one. All of
+-- these compile in well under a second.
+
+admissionOracleTests :: TestTree
+admissionOracleTests = testGroup "Admission oracle"
+  [ testCase "an admitted program evaluates in every mode" $ do
+      rep <- oracleOn "main = if Uniform < 0.3 then 1.0 else Normal"
+      assertNoViolation rep
+      assertEqual "outcomes" [(ModeGenerate, "value"), (ModeProbability, "value"), (ModeIntegrate, "value")]
+        (outcomesOf "main" rep)
+  , testCase "a refused program still generates, and nothing else is asked of it" $ do
+      rep <- oracleOn "main = Uniform + Normal"
+      assertNoViolation rep
+      assertEqual "verdict" (Just Bottom) (verdictOf "main" rep)
+      assertEqual "outcomes" [(ModeGenerate, "value")] (outcomesOf "main" rep)
+  , testCase "an IRError raised by the interpreter is a refusal, not a crash" $ do
+      -- cdf over an ADT: the compiler emits an IRError on purpose, and the
+      -- interpreter raises it rather than answering Left.
+      rep <- oracleOn "data Hue = Red | Green\nmain = if Uniform < 0.5 then Red else Green"
+      assertNoViolation rep
+      assertEqual "integrate" [(ModeIntegrate, "refusal")]
+        [ o | o@(m, _) <- outcomesOf "main" rep, m == ModeIntegrate ]
+  , testCase "a helper is evaluated at canonical arguments" $ do
+      rep <- oracleOn "shift x = x + Normal\nmain = shift 1.0"
+      assertNoViolation rep
+      assertEqual "helper outcomes" [(ModeGenerate, "value"), (ModeProbability, "value"), (ModeIntegrate, "value")]
+        (outcomesOf "shift" rep)
+  , testCase "an admitted function the IR compiler crashes on is a violation naming it" $ do
+      -- test/cases/known-issues/admissionNegatedLogNormal (docs task
+      -- fuzz-admission-oracle-bugs, item 4): typed PLogNormal, and the
+      -- closed-form parameter extraction crashes the compile. (The
+      -- log-normal shortcut function is compiled even generate-only, so
+      -- generate goes down with it, which the oracle reports as such.)
+      rep <- oracleOn "main = neg (exp Normal)"
+      case violations rep of
+        [Check "main" pt _ (Crash msg)] -> do
+          assertBool ("admitted: " ++ show pt) (admitted pt)
+          assertBool msg ("toIRLogNormalParams" `isInfixOf` msg)
+        other -> assertFailure ("expected one crash on main, got " ++ show other)
+  , testCase "the mixture-Fin repro (a historical F2 instance) honours the contract" $ do
+      -- Task modality-mixture-fin-joins-not-meets (haskell-dppl d0ab543): the
+      -- lattice used to type this finite-support, admit it, and crash the IR
+      -- compiler's catch-all. Re-seeding that bug (meetGroundMixture = meetGround)
+      -- makes this case fail with the crash attributed to main's probability
+      -- variant -- the check that the oracle reaches the class it is for.
+      rep <- oracleOn "main = (if Uniform < 0.5 then 1.0 else Uniform) + Normal"
+      assertNoViolation rep
+      assertEqual "outcomes" [(ModeGenerate, "value")] (outcomesOf "main" rep)
+  , testCase "every known violation family names a doc" $
+      assertEqual "entries without a doc" [] [ n | (n, d) <- knownAdmissionCrashes, null d ]
+  ]
+  where
+    oracleOn src = case tryParseProgram "<admission>" src of
+      Left err -> assertFailure (show err) >> error "unreachable"
+      Right p  -> admissionCheck defaultCompilerConfig p []
+    assertNoViolation rep = assertEqual "violations" [] (map renderViolation (violations rep))
+    outcomesOf f (Checked _ cs) = [ (ckMode c, outcomeBucket (ckOutcome c)) | c <- cs, ckFunction c == f ]
+    outcomesOf _ (NotTyped why) = [(ModeCompile, "not typed: " ++ why)]
+    verdictOf f (Checked vs _) = lookup f vs
+    verdictOf _ _ = Nothing
