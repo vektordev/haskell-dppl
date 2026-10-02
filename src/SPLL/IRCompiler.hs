@@ -2588,7 +2588,7 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
    -- crashes at runtime on ADT accessors — an M0-style silent-failure path —
    -- so interception strictly improves them; bodies the traversal declines
    -- keep their current path untouched.
-   planRes <- planWitnessApply meta cumulative rt lResolvedCN lambdaBodyCN tag v sample
+   planRes <- planWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag v sample
    case planRes of
     Right result -> return result
     Left planDiag -> case toInvExprMaybe clauses localAdts lChainName of
@@ -7148,19 +7148,47 @@ planWorldMass raws w =
 -- not a plan-backed ReadNN, or the application shape is out of scope). Left
 -- (Just why): applicable, but the body traversal hit an unsupported node --
 -- the diagnostic is appended to the set-witness refusal.
-planWitnessApply :: CompilerMetadata -> Bool -> RType -> ChainName -> ChainName -> String -> Expr -> IRExpr -> CompilerMonad (Either (Maybe String) PResult)
-planWitnessApply meta cumulative rt lResolvedCN lambdaBodyCN tag v sample
-  | tag == ""
+--
+-- Entered from an untagged application (a @draw@ / @let@, whose lambda sits
+-- lexically in the caller) and from a /tagged invocation of a closed callee/:
+-- a top-level function applied straight to the read, @sevens (readDigits s)@ or
+-- @match (readAttrs s1) ++ match (readAttrs s2)@ (tasks
+-- plan-engine-not-entered-for-inline-neural-read,
+-- of-annotation-continuous-leaf-disables-enumeration). The invocation tag only
+-- names forward chaining's per-call-site inversion variables, which this
+-- AST-level traversal never reads; what the tagged case does need is that the
+-- callee's body is meaningful in the caller's scope, and a top-level
+-- function's own outermost lambda has no free local variables. An inner lambda
+-- of a curried callee, @match c (readAttrs s)@, does: @c@ is the outer lambda's
+-- parameter, unbound at the call site. That shape is taken when the call spine
+-- supplies every outer parameter with an argument deterministic given the
+-- enclosing recovered variables ('calleeLeadingArgs'): each parameter is
+-- renamed to a fresh variable let-bound to its argument, and recorded as
+-- recovered, exactly as 'enumerateAppliedLambda' binds its loop variable. A
+-- let-bound lambda called from a scope other than its own stays declined.
+planWitnessApply :: CompilerMetadata -> Bool -> RType -> Expr -> ChainName -> ChainName -> String -> Expr -> IRExpr -> CompilerMonad (Either (Maybe String) PResult)
+planWitnessApply meta0 cumulative rt l lResolvedCN lambdaBodyCN tag v sample
+  | Just leading <- if null tag then Just [] else calleeLeadingArgs meta0 l lResolvedCN
   , not (isArrow rt)
-  , Just (nnName, plan, symArg) <- planReadOf meta v
+  , Just (nnName, plan, symArg) <- planReadOf meta0 v
   = do
-      let Program{functions=fs} = compilingProgram meta
+      let Program{functions=fs} = compilingProgram meta0
+      -- Bind the curried callee's leading parameters (empty for a draw or a
+      -- one-parameter callee) under fresh names, in the caller's scope.
+      renames <- forM leading $ \(param, arg) -> do
+        fresh <- mkVariable param
+        argIR <- toIRGenerate meta0 arg
+        setVariables [(fresh, argIR)]
+        return (param, fresh, rType (getTypeInfo arg))
+      let meta = meta0 { typeEnv = [(fresh, (rty, False)) | (_, fresh, rty) <- renames] ++ typeEnv meta0
+                       , recoveredVars = [fresh | (_, fresh, _) <- renames] ++ recoveredVars meta0 }
+      let renameLeading e = foldr (\(param, fresh, _) -> renameFreeVar param fresh) e renames
       -- Re-typed after the fetch, as the point-witness fold does: the fetch
       -- returns original annotations, but a variable fixed by an enclosing
       -- construct (a recovered witness, or an enumeration's loop variable when
       -- this is reached from an over-budget nested application) is
       -- Deterministic here and must dispatch as such.
-      let bodyExpr = reinferRecovered meta (recoveredVars meta) (findExprWithCN (map snd fs) lambdaBodyCN)
+      let bodyExpr = reinferRecovered meta (recoveredVars meta) (renameLeading (findExprWithCN (map snd fs) lambdaBodyCN))
       let occs = fromMaybe [] (lookup lResolvedCN (lambdaVarOccurrences (fcData meta)))
       let env = [(occs, PBPlan (PlanRef plan 0))]
       let target = if cumulative then PTUpTo sample else PTPoint sample
@@ -7212,6 +7240,31 @@ planWitnessApply meta cumulative rt lResolvedCN lambdaBodyCN tag v sample
   where
     isArrow (TArrow _ _) = True
     isArrow _            = False
+
+-- | For a tagged invocation (a call of a named function), the callee's
+-- parameters enclosing the applied lambda @lResolvedCN@, each paired with the
+-- argument the call spine @l@ supplies for it: @Just []@ when the applied lambda
+-- is a top-level function's outermost one (@f (read s)@), @Just [(c, e)]@ for
+-- @f e (read s)@, and so on. 'Nothing' when the lambda is not a top-level
+-- function's, when @l@ is not a spine of exactly those arguments headed by that
+-- function, or when an argument is not deterministic given the enclosing
+-- recovered variables -- the plan traversal then declines, as it always did
+-- for a tagged invocation. See 'planWitnessApply'.
+calleeLeadingArgs :: CompilerMetadata -> Expr -> ChainName -> Maybe [(String, Expr)]
+calleeLeadingArgs meta l lResolvedCN = do
+  (f, params) <- listToMaybe [ (f, ps) | (f, e) <- functions (compilingProgram meta)
+                                       , Just ps <- [outerParams [] e] ]
+  if null params then Just [] else do
+    (Expr _ (Var g), args) <- Just (flattenApplySpine (reinferRecovered meta (recoveredVars meta) l))
+    if g == f && length args == length params
+         && all ((== Deterministic) . pType . getTypeInfo) args
+      then Just (zip params args)
+      else Nothing
+  where
+    outerParams acc e@(Expr _ (Lambda p b))
+      | chainName (getTypeInfo e) == lResolvedCN = Just (reverse acc)
+      | otherwise = outerParams (p : acc) b
+    outerParams _ _ = Nothing
 
 -- | The neural read an expression is, when the plan engine can traverse it:
 -- the network's name, the 'PartitionPlan' of its output (from its @of@

@@ -1,0 +1,7 @@
+data Color = Red | Green
+data Attrs = Nil | Obj color::Color, px::Float
+
+neural readAttrs :: (Symbol -> Attrs) of {Nil | Obj {Red | Green} Real}
+
+match t o = if isNil o then 0 else (if isGreen (color o) && (px o > t) then 1 else 0)
+main t s2 = (match 0.5 (readAttrs t)) ++ (match 0.0 (readAttrs s2))

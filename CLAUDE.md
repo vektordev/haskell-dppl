@@ -308,6 +308,25 @@ no occurrence of the bound variable is point-invertible at all. Full
 mechanism, examples, and the `test/cases/plan-enumeration/planEnum*` pointers:
 `docs/witness-inversion-engines.md`.
 
+The plan engine is entered from a `draw` of a neural read **and from a call of
+a top-level function straight on one** (`planWitnessApply`, tasks
+`plan-engine-not-entered-for-inline-neural-read`,
+`of-annotation-continuous-leaf-disables-enumeration`): `sevens (readDigits s)`,
+`match (readAttrs s1) ++ match (readAttrs s2)`. Such a call is a *tagged
+invocation* in forward chaining's sense, which the traversal used to decline
+outright; the tag only names FC's per-call-site inversion variables, which
+this AST traversal never reads. What it does need is a callee body meaningful
+in the caller's scope: a top-level function's outermost lambda has no free
+locals, and for a curried callee (`match c (readAttrs s)`, the CLEVR
+exist-with-predicate shape) `calleeLeadingArgs` binds each outer parameter to
+its call-site argument under a fresh name, provided the argument is
+deterministic given the enclosing recovered variables. A random leading
+argument, or a let-bound lambda called from another scope, is still declined.
+Before, an `of` domain over the dense budget, or one with a `Real` leaf, made
+these spellings fail in set-valued witnesses where the `draw`-bound twin
+compiled. Corpus `plan-enumeration/ofRealLeafCounting*`,
+`planRecursiveHelperOn{Inline,Drawn}Read`.
+
 One traversal can hold **several neural reads** (`planOpenBinding`, task
 `plan-pairwise-across-separate-neural-reads`). Plan leaves are keyed by a flat
 logit offset, so a nested `draw b = readX s2` met inside the body gets its own
@@ -1580,9 +1599,10 @@ not an enumeration. Every consumer that loops over a tag refuses one
 gate's `enumeratedCount`), and listing finds no values in it. Accessors read
 through it, so `fst p` off an `(Int, Float) of ([0,1,2], Real)` read is an
 ordinary enumerable `[0,1,2]` (`plan-enumeration/ofRealBesideDiscreteSlot*`).
-It used to drop the whole tag. The read itself still has no dense path while
-its domain is mixed (`known-issues/ofAnnotationRealLeafCounting`, task
-`of-annotation-continuous-leaf-disables-enumeration`).
+It used to drop the whole tag. The read itself has no dense path while its
+domain is mixed; it is the plan engine that answers it, continuous leaf and all
+(a leaf the body never reads integrates out, one it compares is a Gaussian
+tail), including when the read is passed straight to a helper (below).
 
 **Structural propagation.** Analysis computes the tags of `fst`/`snd`,
 `fromLeft[Partial]`/`fromRight[Partial]`, `isLeft`/`isRight`, ADT field

@@ -1,0 +1,8 @@
+data Color = Red | Green
+data Attrs = Nil | Obj color::Color, px::Float
+
+neural readQ :: (Symbol -> Color)
+neural readAttrs :: (Symbol -> Attrs) of {Nil | Obj {Red | Green} Real}
+
+match c o = if isNil o then 0 else (if color o == c then 1 else 0)
+main q s1 s2 = draw c = readQ q in (match c (readAttrs s1)) ++ (match c (readAttrs s2))

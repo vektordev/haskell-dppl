@@ -4,7 +4,10 @@
 -- way: the helper's comparison types Bottom for the reason pinned by
 -- planPairwiseInHelper / planPairwiseObjectsHelperOverDraws (no ReadNN in the
 -- helper's declaration), and the reads are call arguments rather than draw
--- bindings, which is not a shape the plan engine is entered from at all.
+-- bindings. The plan engine is now entered from a call of a top-level
+-- function straight on a read (task plan-engine-not-entered-for-inline-neural-read),
+-- but only when every argument before the read is deterministic; here the
+-- leading argument is itself the other read, so that entry does not apply.
 -- Idealized value, as planPairwiseObjectsAcrossTwoReads:
 -- P(True) = P(Obj a) * P(Obj b) * Phi((mu_b - mu_a) / sqrt(s_a^2 + s_b^2)).
 -- Residue of task plan-pairwise-across-separate-neural-reads.
