@@ -15,6 +15,7 @@ import SPLL.Typing.RInfer (tryAddRTypeInfo, RTypeError(..))
 import SPLL.Typing.RType (RType(..))
 import SPLL.Prelude
 import SPLL.Parser (tryParseProgram)
+import SPLL.DrawSinking (sinkEnumerableDraws)
 import SPLL.Analysis (annotate, annotateEnumsProg, definitelyUntagged, materializationDomain, withinMaterializationBudget, structuralTag, listedTag)
 import qualified SPLL.CodeGenPyTorch
 import SPLL.Typing.Infer (addTypeInfo)
@@ -3756,6 +3757,119 @@ test_sharedLatentFactorizesPerSlot = testCase "sharedLatentFactorizesPerSlot" $
           Just (pf, _) -> return (loopChainCost pf)
           Nothing -> assertFailure "no probability variant"
 
+-- | The Guess-Who perception model at @j@ Bool attributes: one neural read of
+-- a single-constructor @Face@, each field feeding one slot of the result
+-- through a noisy channel. 'True' spells the read with @draw@, 'False' with
+-- @define@ (the per-field reference: each field is its own read).
+productReadSrc :: Bool -> Int -> String
+productReadSrc drawn j = unlines $
+  [ "data Face = Face " ++ intercalate ", " [ "x" ++ show i ++ "::Bool" | i <- [0 .. j - 1] ]
+  , "neural see :: (Symbol -> Face)"
+  , "tells yes no truth = if truth then Uniform < yes else Uniform < no"
+  , "main img ="
+  , "  " ++ (if drawn then "draw" else "define") ++ " truth = see img in"
+  , "  Face " ++ unwords [ "(tells 0.9 0.2 (x" ++ show i ++ " truth))" | i <- [0 .. j - 1] ] ]
+
+-- | Task draw-product-read-enumerated-jointly: a @draw@ of a product neural
+-- read whose fields each feed one operand must cost what the per-field
+-- (@define@) spelling costs -- one two-valued loop per field -- not the joint
+-- over every field (@2^j@ cells, refused past the dense budget at @j = 14@).
+--
+-- Measured as 'loopChainCost', at three attribute counts so a bound linear in
+-- the count cannot hold by coincidence of one size, including two the joint
+-- enumeration could not compile at all. 'SPLL.DrawSinking' splits the read
+-- into per-field draws and sinks each into its operand. Values are pinned by
+-- the corpus programs @drawProductReadPerField@ and
+-- @drawProductReadPerField20@; the negative shapes (a field read by two
+-- operands, a multi-constructor read) by @drawProductReadFieldReadTwice@ and
+-- @drawMultiConstructorReadStaysJoint@.
+test_drawProductReadFactorizesPerField :: TestTree
+test_drawProductReadFactorizesPerField = testCase "drawProductReadFactorizesPerField" $
+  mapM_ (\j -> do
+          drawn <- cost True j
+          defined <- cost False j
+          assertBool (show j ++ " fields: the draw spelling costs " ++ show drawn ++ " on one loop chain;"
+                      ++ " the define spelling costs " ++ show defined) (drawn <= max 2 defined)
+          assertBool (show j ++ " fields: the draw spelling costs " ++ show drawn
+                      ++ ", not bounded by a per-field loop") (drawn <= 4))
+        [6, 14, 20]
+  where
+    cost drawn j = case tryParseProgram "productRead" (productReadSrc drawn j) of
+      Left err -> assertFailure ("parse error: " ++ show err)
+      Right prog -> case compile defaultCompilerConfig prog of
+        Left err -> assertFailure ("compile error at " ++ show j ++ " fields: " ++ show err)
+        Right irEnv -> case probFun (lookupIREnv "main" irEnv) of
+          Just (pf, _) -> return (loopChainCost pf)
+          Nothing -> assertFailure "no probability variant"
+
+-- | The conditions under which 'SPLL.DrawSinking' splits a draw of a neural
+-- read into per-field draws (task draw-product-read-enumerated-jointly),
+-- checked on the sunk program by counting the neural reads in @main@: one per
+-- field drawn after a split, one in all when the draw was left whole.
+--
+-- * a single-constructor read whose fields feed separate operands is split;
+-- * a field read by two operands is drawn once, above both, while the other
+--   field is split out and sunk into its own operand;
+-- * a multi-constructor read is not a product, so it is never split, even when
+--   the body reads it through field accessors alone;
+-- * a body that uses the value whole (@isFace t@) is not split;
+-- * a body whose fields all meet in one @if@ gains nothing and is not split
+--   (the plan engine's accessor descent handles it, cf. @planEnumInlineADT@);
+-- * a read whose argument is not a variable is bound once, not re-read per
+--   field (one shared argument binding, still one read per field);
+-- * the constructor may be the value of a further binding (the Guess-Who
+--   model's @draw heard = Face ..@): the per-field draws move into that value.
+test_productReadSplitConditions :: TestTree
+test_productReadSplitConditions = testGroup "productReadSplitConditions"
+  [ testCase "single constructor, disjoint operands: split" $
+      readsIn (face ["x0", "x1", "x2"] ++ body "Face (tells (x0 t)) (tells (x1 t)) (tells (x2 t))") @?= 3
+  , testCase "field read by two operands: drawn once, above both" $ do
+      let sunk = sinkSrc (face ["x0", "x1", "x2"] ++ body "Face (tells (x0 t)) (tells (x0 t)) (tells (x1 t))")
+      readCount sunk @?= 2
+      -- the x0 draw still binds the constructor application, not one operand
+      assertBool "the twice-read field's draw was moved into one operand" $
+        case snd (head [ f | f@("main", _) <- functions sunk ]) of
+          Expr _ (Lambda _ (Expr _ (Apply (Expr _ (Lambda _ (Expr _ (InjF (Named "Face") _)))) _))) -> True
+          _ -> False
+  , testCase "constructor in a nested binding's value: split and sunk into it" $ do
+      let sunk = sinkSrc (face ["x0", "x1"] ++ unlines
+                   [ "neural see :: (Symbol -> Face)"
+                   , "tells truth = if truth then Uniform < 0.9 else Uniform < 0.2"
+                   , "main img = draw t = see img in draw h = Face (tells (x0 t)) (tells (x1 t)) in (1, h)" ])
+      readCount sunk @?= 2
+      assertBool "the per-field draws did not reach the binding's value" $
+        case snd (head [ f | f@("main", _) <- functions sunk ]) of
+          Expr _ (Lambda _ (Expr _ (Apply (Expr _ (Lambda "h" _)) (Expr _ (InjF (Named "Face") _))))) -> True
+          _ -> False
+  , testCase "multi-constructor read: not split" $
+      readsIn ("data Face = Face x0::Bool, x1::Bool | Blank\n" ++ body "Face (tells (x0 t)) (tells (x1 t))") @?= 1
+  , testCase "whole-value use: not split" $
+      readsIn (face ["x0", "x1"] ++ body "if isFace t then Face (tells (x0 t)) (tells (x1 t)) else Face False False") @?= 1
+  , testCase "fields meet in one if: not split" $
+      readsIn (face ["x0", "x1"] ++ body "if x0 t then tells (x1 t) else False") @?= 1
+  , testCase "non-variable argument: bound once" $ do
+      let sunk = sinkSrc (face ["x0", "x1"] ++ unlines
+                   [ "neural see :: (Symbol -> Face)"
+                   , "tells truth = if truth then Uniform < 0.9 else Uniform < 0.2"
+                   , "main imgs = draw t = see (head imgs) in Face (tells (x0 t)) (tells (x1 t))" ])
+      readCount sunk @?= 2
+      length [ () | Expr _ (InjF (Named "head") _) <- allNodes sunk ] @?= 1
+  ]
+  where
+    face fs = "data Face = Face " ++ intercalate ", " [ f ++ "::Bool" | f <- fs ] ++ "\n"
+    body b = unlines
+      [ "neural see :: (Symbol -> Face)"
+      , "tells truth = if truth then Uniform < 0.9 else Uniform < 0.2"
+      , "main img = draw t = see img in " ++ b ]
+    readsIn src = readCount (sinkSrc src)
+    readCount prog = length [ () | e <- universeE (snd (head [ f | f@("main", _) <- functions prog ]))
+                                 , Expr _ (ReadNN _ _) <- [e] ]
+    sinkSrc src =
+      let parsed = either (\e -> error ("parse failed: " ++ show e)) id (tryParseProgram "split" src)
+          rtyped = either (\e -> error ("rtype inference failed: " ++ show e)) id (tryAddRTypeInfo parsed)
+          annotated = annotateEnumsProg rtyped
+      in fromMaybe annotated (sinkEnumerableDraws annotated)
+
 -- | The largest dense enumeration domain a compiled body materializes: the
 -- element count of its widest 'BTensor' literal. A dense enumeration emits its
 -- whole domain as one such literal, so this is the size of what was enumerated.
@@ -4462,6 +4576,8 @@ internalsTests = testGroup "Internals"
       , test_agreementFusesToElementwiseProduct
       , test_nestedEnumerationHonoursBudget
       , test_sharedLatentFactorizesPerSlot
+      , test_drawProductReadFactorizesPerField
+      , test_productReadSplitConditions
       ]
   , test_missingMainFunction
   , test_farTailEitherDensityNotZeroed

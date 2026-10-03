@@ -1,12 +1,14 @@
 -- One draw of a product-distributed neural read, each field of which feeds
 -- exactly one slot of the result through a noisy channel. Given the read the
--- slots are independent, so the exact cost is linear in the field count. The
--- compiler instead enumerates `truth` jointly: 2^J values per call. At J=13
--- that emits a 1.5 MB module with a loop over 8192 Faces; at J=14 the joint
--- domain (16384) exceeds the dense-enumeration budget and the plan engine
--- refuses the body. `define truth = see img` (same distribution here, since
--- every field is read once) compiles to a per-field form at any J.
+-- slots are independent, so the exact cost is linear in the field count.
+-- DrawSinking splits the draw into one draw per field and sinks each into the
+-- slot that reads it. It used to be enumerated jointly over all 2^14 Faces,
+-- past the dense budget, and refused (it was the known-issues pin
+-- drawProductReadEnumeratedJointly; TestInternals.drawProductReadFactorizesPerField
+-- pins the per-field cost). Found by experiments_nest exact-eig-question-asking.
 -- Task draw-product-read-enumerated-jointly.
+-- Python-only: End2End's Normalization sweep samples the output and cannot
+-- cover a 2^14 support; drawProductReadPerField4 runs on every backend.
 data Face = Face x0::Bool, x1::Bool, x2::Bool, x3::Bool, x4::Bool, x5::Bool, x6::Bool, x7::Bool, x8::Bool, x9::Bool, x10::Bool, x11::Bool, x12::Bool, x13::Bool
 neural see :: (Symbol -> Face)
 tells yes no truth = if truth then Uniform < yes else Uniform < no

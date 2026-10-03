@@ -1,0 +1,12 @@
+-- The exact-EIG Guess-Who shape: the constructor that reads the product read's
+-- fields is not the read's body but the value of a further binding, whose body
+-- (the output tuple) does not read the read. DrawSinking moves each per-field
+-- draw into that binding's value and from there into its operand, so the
+-- fields are enumerated one at a time. Task draw-product-read-enumerated-jointly.
+data Face = Face x0::Bool, x1::Bool, x2::Bool
+neural see :: (Symbol -> Face)
+tells yes no truth = if truth then Uniform < yes else Uniform < no
+main img =
+  draw truth = see img in
+  draw heard = Face (tells 0.9 0.2 (x0 truth)) (tells 0.9 0.2 (x1 truth)) (tells 0.9 0.2 (x2 truth)) in
+  (True, heard)

@@ -1,0 +1,12 @@
+-- A negative case for splitting a product read per field: x0 is read by two
+-- slots, so their channels are correlated through the one draw of x0, and must
+-- stay under one shared binding (reading x0 twice from two separate draws gives
+-- a different number). Only x1, read once, may be split out. The first rows
+-- differ between the shared and the independent answer.
+-- Task draw-product-read-enumerated-jointly.
+data Face = Face x0::Bool, x1::Bool, x2::Bool
+neural see :: (Symbol -> Face)
+tells yes no truth = if truth then Uniform < yes else Uniform < no
+main img =
+  draw truth = see img in
+  Face (tells 0.9 0.2 (x0 truth)) (tells 0.7 0.4 (x0 truth)) (tells 0.9 0.2 (x1 truth))
