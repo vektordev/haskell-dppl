@@ -1,0 +1,6 @@
+-- `a && b` over two draw-bound coins, as an element of a list, is refused.
+-- The same `a && b` as the whole body compiles, and so does the `if`
+-- spelling inside the list (`[if a then b else False]`). `||` fails the same
+-- way, and so does a helper `both h = (l h) && (r h)` applied to a draw-bound
+-- record. Task and-inside-list-or-helper-over-draws-refused.
+main = draw a = Uniform < 0.3 in draw b = Uniform < 0.6 in [a && b]

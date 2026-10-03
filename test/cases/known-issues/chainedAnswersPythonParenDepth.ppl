@@ -1,0 +1,21 @@
+-- An enumerated coin s, twelve noisy readings gated on it, and the answers to
+-- a chain of 11 two-field questions (alternating or/and over h_i, h_{i+1}).
+-- Compiles with exit 0, but the scalar Python module fails to import:
+-- "SyntaxError: too many nested parentheses" (CPython's 200-bracket limit).
+-- 10 questions load; 11 do not. The deep-line spill does not reach this
+-- shape. Task chained-answers-exceed-python-paren-depth.
+main =
+  draw s = Uniform < 0.5 in
+  draw h0 = (if s then Uniform < 0.9 else Uniform < 0.2) in
+  draw h1 = (if s then Uniform < 0.9 else Uniform < 0.2) in
+  draw h2 = (if s then Uniform < 0.9 else Uniform < 0.2) in
+  draw h3 = (if s then Uniform < 0.9 else Uniform < 0.2) in
+  draw h4 = (if s then Uniform < 0.9 else Uniform < 0.2) in
+  draw h5 = (if s then Uniform < 0.9 else Uniform < 0.2) in
+  draw h6 = (if s then Uniform < 0.9 else Uniform < 0.2) in
+  draw h7 = (if s then Uniform < 0.9 else Uniform < 0.2) in
+  draw h8 = (if s then Uniform < 0.9 else Uniform < 0.2) in
+  draw h9 = (if s then Uniform < 0.9 else Uniform < 0.2) in
+  draw h10 = (if s then Uniform < 0.9 else Uniform < 0.2) in
+  draw h11 = (if s then Uniform < 0.9 else Uniform < 0.2) in
+  (s, [(if h0 then True else h1), (if h1 then h2 else False), (if h2 then True else h3), (if h3 then h4 else False), (if h4 then True else h5), (if h5 then h6 else False), (if h6 then True else h7), (if h7 then h8 else False), (if h8 then True else h9), (if h9 then h10 else False), (if h10 then True else h11)])
