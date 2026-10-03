@@ -1,0 +1,12 @@
+-- A tuple whose components are a constructor test of a draw-bound ADT and the
+-- ADT itself answers 1.0 at every point, e.g. (True, Face True False), where
+-- the value is P(x0 = True) * P(x1 = False) = 0.7 * 0.8 = 0.56: the second
+-- component is not constrained at all, as if it were ANY. The
+-- same tuple off a neural read of Face answers 0.56 correctly, and so does
+-- (True, heard). Found while writing corpus cases for task
+-- draw-product-read-enumerated-jointly; docs task
+-- tuple-ctor-test-of-shared-draw-wrong-result.
+data Face = Face x0::Bool, x1::Bool
+main =
+  draw heard = Face (Uniform < 0.7) (Uniform < 0.2) in
+  (isFace heard, heard)
