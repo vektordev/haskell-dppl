@@ -1783,6 +1783,18 @@ the data flow rather than for "encode"/"decode" — those words used to collide
   include nullary normal functions), and a tuple component's normal function was
   defined under its group's name rather than the one the IR calls it by
   (`ReservedNames.componentNormalName` is the one spelling of that rule).
+- **Dead arms** (task `writelogits-dead-arm-nan`): an Either/ADT arm whose
+  probability is *exactly* zero has no conditional, so its slots are filled with
+  iid N(0, 1) noise pushed through each slot's link (softmax for a discrete/ADT
+  flag group, sigmoid for an Either flag, `exp` for sigma) -- on-manifold, per the
+  design's "Per-slot validity". writeLogits is therefore stochastic in dead slots
+  only: `runWriteLogitsC` draws that noise from a fixed seed (stays a pure
+  function), `runWriteLogitsRandC` from the caller's generator. Compare vectors
+  zero-weight-aware (`TestWriteLogitsProperties.liveSlotMask`): slots under a
+  zero-probability arm are not compared. The noise is the only randomness the
+  central generate-backed guard admits in a writeLogits body -- it sees the body
+  through `AutoNeural.stripDeadSlotFills`, which recognises the `l_wlarm_*`
+  guards and nothing else. A near-zero arm (1e-300) is live and written.
 - A third, historical direction (`source -> Symbol`, once called "Encoder")
   named an external network with no SPLL call site; it has been removed and
   is rejected at validation (`SPLL.Validator.validateNeuralShape`).
