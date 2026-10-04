@@ -73,6 +73,7 @@ module SPLL.Prelude
   , runProbNamedC
   , runIntegNamedC
   , runWriteLogitsC
+  , runWriteLogitsRandC
   , printIfVerbose
   , printIfMoreVerbose
   , pPrintIfVerbose
@@ -99,8 +100,9 @@ import SPLL.Typing.RInfer (addRTypeInfoAt, addRTypeInfo)
 import SPLL.Validator (validateProgram)
 import SPLL.CalleeNormalize (normalizeCallees)
 import SPLL.DrawSinking (sinkEnumerableDraws)
-import IRInterpreter (generateRand, generateDet)
-import Control.Monad.Random (Rand, RandomGen)
+import IRInterpreter (generateRand, generateDet, generateRandE)
+import Control.Monad.Random (Rand, RandomGen, evalRand)
+import System.Random (mkStdGen)
 import SPLL.IRCompiler
 import SPLL.IROptimizer (optimizeEnv)
 import SPLL.IRSelectPass (selectPassEnv)
@@ -644,15 +646,28 @@ missingVariant variant lbl grp = case lookup lbl (refusedVariants grp) of
 -- is independently scoped to that declaration's own target type, so the target name
 -- selects which read-logits network's writeLogits to run (rather than relying on
 -- declaration order).
+--
+-- A writeLogits vector is exact except in the slots of a dead arm (a constructor of
+-- probability exactly zero), which hold iid noise (task writelogits-dead-arm-nan).  This
+-- runner draws that noise from a fixed seed, so it is a pure function of its arguments;
+-- 'runWriteLogitsRandC' draws it from the caller's generator.
 runWriteLogitsC :: Program -> IREnv -> String -> [IRValue] -> Either CompilerError IRValue
-runWriteLogitsC p compiled target outerArgs = do
-  validateWriteLogitsGaussian (adts p) (writeLogitsDecls p) (neurals p) compiled
-  let IREnv groups _ _ = compiled
-  case find ((== target) . groupName) groups of
-    Nothing  -> Left ("No function group named " ++ show target ++ " in compiled program")
-    Just grp -> case writeLogitsFun grp of
-      Nothing       -> Left ("Function group " ++ show target ++ " has no writeLogits function")
-      Just (enc, _) -> generateDet (neurals p) (writeLogitsDecls p) compiled (map IRConst outerArgs) enc
+runWriteLogitsC p compiled target outerArgs =
+  evalRand (runWriteLogitsRandC p compiled target outerArgs) (mkStdGen 0)
+
+-- | 'runWriteLogitsC' with the dead-arm noise drawn from the caller's generator.
+runWriteLogitsRandC :: (RandomGen g) => Program -> IREnv -> String -> [IRValue] -> Rand g (Either CompilerError IRValue)
+runWriteLogitsRandC p compiled target outerArgs =
+  case validateWriteLogitsGaussian (adts p) (writeLogitsDecls p) (neurals p) compiled >> findEnc of
+    Left err  -> return (Left err)
+    Right enc -> generateRandE (neurals p) (writeLogitsDecls p) compiled (map IRConst outerArgs) enc
+  where
+    IREnv groups _ _ = compiled
+    findEnc = case find ((== target) . groupName) groups of
+      Nothing  -> Left ("No function group named " ++ show target ++ " in compiled program")
+      Just grp -> case writeLogitsFun grp of
+        Nothing       -> Left ("Function group " ++ show target ++ " has no writeLogits function")
+        Just (enc, _) -> Right enc
 
 printIfVerbose :: (Monad m) => CompilerConfig -> String -> m ()
 printIfVerbose CompilerConfig {verbose=v} s | v >= 1 = trace s (return ())

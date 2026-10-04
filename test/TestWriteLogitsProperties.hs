@@ -4,7 +4,6 @@
 --   § 3.1  collapse operator itself (moment-matching) for non-Gaussian closures (task 07).
 --          The *error path* — rejecting a non-Gaussian continuous slot that lacks a
 --          collapse — IS covered (writeLogitsError_continuousMixtureRequiresCollapse).
---   § 3.4  noised void fill on constructor change
 --   § 3.5  sigma=0 / sigma=epsilon floor for hardened / observed values
 --
 -- Everything else in the design is covered:
@@ -18,6 +17,8 @@
 --          (nested enum ADT) arms                      (sumTypeNonIdentity group)
 --   § 2.6  Tuple = concatenation                        (writeLogitsInvariant_outputDimMatchesPlan)
 --   § 3.3  Sample freely allowed                        (implicit in Gaussian programs)
+--   § 3.4  Noised void fill on constructor change: dead-arm slots are finite, on-manifold
+--          noise; live slots exact; tiny-probability arms stay live    (deadArm group)
 --   § 3.7  Cross-slot correlations silently marginalised (no test — not observable)
 
 module TestWriteLogitsProperties
@@ -35,11 +36,11 @@ import Data.Foldable (toList)
 import Data.List (find, isInfixOf, nub, sort)
 import Data.Maybe (isJust)
 
-import SPLL.Prelude (runWriteLogits, compile, runWriteLogitsC, runProbNamedC, runGenNamedC)
+import SPLL.Prelude (runWriteLogits, compile, runWriteLogitsC, runWriteLogitsRandC, runProbNamedC, runGenNamedC)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Lang.Types
 import SPLL.Lang.Lang (constructVList)
-import SPLL.AutoNeural (makeAutoNeural, makePartitionPlan, makeProb, getSize, planLayoutString, PartitionPlan(..))
+import SPLL.AutoNeural (makeAutoNeural, makePartitionPlan, makeProb, getSize, planLayoutString, PartitionPlan(..), adtFlagSlots, stripDeadSlotFills)
 import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType (RType(..))
 import IRInterpreter (generateDet)
@@ -629,6 +630,188 @@ writeLogitsInvariant_probIndicesInBounds = testGroup "probIndicesInBounds"
   | (name, src, _) <- readLogitsPrograms
   ]
 
+
+------------------------------------------------------------------------
+-- § 3.4  Dead arms (task writelogits-dead-arm-nan)
+--
+-- A constructor of probability exactly zero has no conditional to write: its slots used
+-- to be 0/0 (NaN in the interpreter, ZeroDivisionError in Python).  They now hold noise
+-- that is on-manifold for each slot (design "Per-slot validity").  Because that noise is
+-- random, vectors are compared with *zero-weight-aware* equality: a slot under an arm
+-- whose probability is exactly zero in the expected vector is not compared -- inference
+-- never reads it, so it carries no information either way (review decision on the task).
+
+-- | Which slots of a plan-shaped vector are live, judged from the vector's own flags:
+-- a slot is dead when some enclosing arm has probability exactly zero.
+liveSlotMask :: PartitionPlan -> [Double] -> [Bool]
+liveSlotMask plan0 v0 = fst (go True plan0 v0)
+  where
+    go live p xs = case p of
+      Discretes _ (MultiDiscretes vals) -> leaf (length vals)
+      Discretes _ _                     -> error "liveSlotMask: Discretes without an enumeration"
+      Continuous                        -> leaf 2
+      TuplePlan a b ->
+        let (ma, r1) = go live a xs; (mb, r2) = go live b r1 in (ma ++ mb, r2)
+      EitherPlan a b ->
+        let pLeft = head xs
+            (ma, r1) = go (live && pLeft /= 0) a (tail xs)
+            (mb, r2) = go (live && pLeft /= 1) b r1
+        in (live : ma ++ mb, r2)
+      ADTPlan _ ctors ->
+        let nf = adtFlagSlots ctors
+            ps = if nf == 0 then [1] else take nf xs
+            step (acc, rest) ((_, fps), pc) =
+              let (m, r) = goMany (live && pc /= 0) fps rest in (acc ++ m, r)
+            (fieldMask, r') = foldl step ([], drop nf xs) (zip ctors ps)
+        in (replicate nf live ++ fieldMask, r')
+      where leaf n = (replicate n live, drop n xs)
+    goMany live fps xs = foldl (\(acc, r) fp -> let (m, r') = go live fp r in (acc ++ m, r')) ([], xs) fps
+
+-- | Per-slot validity violations of a whole vector (design "Formal Constraints"): finite
+-- everywhere, softmax groups nonnegative and summing to 1, Either flags in [0, 1], sigma > 0.
+planViolations :: PartitionPlan -> [Double] -> [String]
+planViolations plan0 v0 =
+  [ "slot " ++ show i ++ " is not finite: " ++ show x | (i, x) <- zip [0 :: Int ..] v0, isNaN x || isInfinite x ]
+  ++ fst (go plan0 (zip [0 :: Int ..] v0))
+  where
+    softmax what ys =
+      [ what ++ " slots " ++ show (map fst ys) ++ " are not a distribution: " ++ show (map snd ys)
+      | any ((< 0) . snd) ys || abs (sum (map snd ys) - 1) > 1e-9 ]
+    go p xs = case p of
+      Discretes _ (MultiDiscretes vals) -> let (h, t) = splitAt (length vals) xs in (softmax "discrete" h, t)
+      Discretes _ _ -> error "planViolations: Discretes without an enumeration"
+      Continuous -> case xs of
+        (_ : (i, sigma) : t) -> ([ "sigma slot " ++ show i ++ " is not positive: " ++ show sigma | not (sigma > 0) ], t)
+        _ -> (["vector too short for a Continuous slot"], [])
+      TuplePlan a b -> let (ea, r1) = go a xs; (eb, r2) = go b r1 in (ea ++ eb, r2)
+      EitherPlan a b -> case xs of
+        ((i, f) : t) ->
+          let (ea, r1) = go a t; (eb, r2) = go b r1
+          in ([ "Either flag slot " ++ show i ++ " is outside [0, 1]: " ++ show f | f < 0 || f > 1 ] ++ ea ++ eb, r2)
+        [] -> (["vector too short for an Either flag"], [])
+      ADTPlan _ ctors ->
+        let nf = adtFlagSlots ctors
+            (flags, t) = splitAt nf xs
+            (ef, r') = foldl (\(acc, r) fp -> let (e, r2) = go fp r in (acc ++ e, r2)) ([], t) (concatMap snd ctors)
+        in ((if nf == 0 then [] else softmax "ADT flag" flags) ++ ef, r')
+
+-- | Zero-weight-aware vector equality: every live slot of @expected@ (see 'liveSlotMask')
+-- matches; dead slots are skipped.
+checkVectorLive :: String -> PartitionPlan -> [Double] -> [Double] -> IO ()
+checkVectorLive label plan expected slots = do
+  assertEqual (label ++ ": vector length") (length expected) (length slots)
+  forM_ [ i | (i, True) <- zip [0 ..] (liveSlotMask plan expected) ] $ \i ->
+    checkSlot label slots i (expected !! i) 1e-9
+
+-- | Write a closed-form program's main vector and check it end to end: live slots against
+-- @expected@ (NaN marks a dead slot, which is what the vector used to hold), the whole vector
+-- against the per-slot validity constraints, and the dead slots against the mask.
+checkDeadArmProgram :: String -> [String] -> [IRValue] -> [Double] -> IO ()
+checkDeadArmProgram label src args expected = do
+  prog  <- parseOrFail (unlines src)
+  slots <- writeLogitsSlots prog args
+  let plan = endpointPlan prog mainTarget
+      expectedDead = [ i | (i, x) <- zip [0 :: Int ..] expected, isNaN x ]
+      maskDead     = [ i | (i, False) <- zip [0 ..] (liveSlotMask plan slots) ]
+  assertEqual (label ++ ": dead slots (by the vector's own flags)") expectedDead maskDead
+  checkVectorLive label plan expected slots
+  assertEqual (label ++ ": per-slot validity violations in " ++ show slots) [] (planViolations plan slots)
+
+nan :: Double
+nan = 0 / 0
+
+colorObject :: [String]
+colorObject = [ "data Color = Red | Green | Blue", "data Object = Nil | Obj color::Color" ]
+
+nestedOuter :: [String]
+nestedOuter = [ "data Color = Red | Green | Blue", "data Inner = A | B color::Color", "data Outer = N | O inner::Inner" ]
+
+-- The ticket's repro.  Layout: [P(Nil), P(Obj), P(Red|Obj), P(Green|Obj), P(Blue|Obj)].
+deadArm_adtField :: TestTree
+deadArm_adtField = testCase "adtField" $
+  checkDeadArmProgram "adtField" (colorObject ++ ["main = Nil"]) [] [1, 0, nan, nan, nan]
+
+-- An Either arm through a read-logits network fed P(Left) = 1: the Right arm is dead.
+-- Layout: [P(Left), P(Red|Left), P(Green|Left), P(True|Right), P(False|Right)].
+deadArm_eitherArm :: TestTree
+deadArm_eitherArm = testCase "eitherArm" $
+  checkDeadArmProgram "eitherArm"
+    [ "data Color = Red | Green", "neural readE :: (Symbol -> Either Color Bool) of _", "main sym = readE sym" ]
+    [mockLiteral [1.0, 0.25, 0.75, 0.5, 0.5]] [1, 0.25, 0.75, nan, nan]
+
+-- A dead inner constructor inside a live outer one.
+-- Layout: [P(N), P(O), P(A|O), P(B|O), P(Red|B,O), P(Green|B,O), P(Blue|B,O)].
+deadArm_nestedInner :: TestTree
+deadArm_nestedInner = testCase "nestedInnerDead" $
+  checkDeadArmProgram "nestedInnerDead" (nestedOuter ++ ["main = O A"]) [] [0, 1, 1, 0, nan, nan, nan]
+
+-- A dead outer constructor: the whole nested region is filled, inner flags included, and
+-- those flags must themselves be a valid softmax.
+deadArm_nestedOuter :: TestTree
+deadArm_nestedOuter = testCase "nestedOuterDead" $
+  checkDeadArmProgram "nestedOuterDead" (nestedOuter ++ ["main = N"]) [] [1, 0, nan, nan, nan, nan, nan]
+
+-- Per-function endpoint over a real value (the ticket's "common realistic case").
+deadArm_perFunctionEndpoint :: TestTree
+deadArm_perFunctionEndpoint = testCase "perFunctionEndpoint" $ do
+  let src = colorObject ++ ["main b = if b then Nil else Obj Red"]
+  checkDeadArmProgram "perFunctionEndpoint True"  src [VBool True]  [1, 0, nan, nan, nan]
+  checkDeadArmProgram "perFunctionEndpoint False" src [VBool False] [0, 1, 1, 0, 0]
+
+-- Only an exactly-zero arm is dead.  An arm of probability 1e-300 is reachable and has
+-- conditionals of its own, which are written, not filled (review decision on the task).
+-- The 1e-300 comes in through a read-logits network: a closed-form `Uniform < 1e-300` arm
+-- would not test this, because the compiled prob function itself already folds any branch
+-- mass below ~1e-10 to an exact, impossible 0 (a separate defect, filed from this task).
+deadArm_tinyArmIsLive :: TestTree
+deadArm_tinyArmIsLive = testCase "tinyArmIsLive" $
+  checkDeadArmProgram "tinyArmIsLive"
+    (colorObject ++ ["neural readO :: (Symbol -> Object) of _", "main sym = readO sym"])
+    [mockLiteral [1.0, 1.0e-300, 0.25, 0.5, 0.25]] [1.0, 1.0e-300, 0.25, 0.5, 0.25]
+
+-- The fill is noise, not a constant: different generators give different dead slots and
+-- identical live ones.
+deadArm_fillIsFreshNoise :: TestTree
+deadArm_fillIsFreshNoise = testCase "fillIsFreshNoise" $ do
+  prog <- parseOrFail (unlines (colorObject ++ ["main = Nil"]))
+  compiled <- compileOrFail prog
+  let run seed = evalRand (runWriteLogitsRandC prog compiled mainTarget []) (mkStdGen seed)
+      floats (Right (VList l)) = return [x | VFloat x <- toList l]
+      floats other = assertFailure ("writeLogits failed: " ++ show other) >> return []
+  vs <- mapM (floats . run) [1, 2]
+  case vs of
+    [a, b] -> do
+      assertEqual "live slots do not depend on the generator" (take 2 a) (take 2 b)
+      assertBool ("dead slots should be fresh noise, got " ++ show (drop 2 a) ++ " twice") (drop 2 a /= drop 2 b)
+    _ -> assertFailure "expected two vectors"
+
+-- The compile-time purity guard sees a writeLogits body through 'stripDeadSlotFills', which
+-- must remove a dead-arm fill and nothing else: randomness on the live side of the guard,
+-- or under any other `if`, stays visible.
+deadArm_stripOnlyFills :: TestTree
+deadArm_stripOnlyFills = testCase "stripDeadSlotFillsOnlyStripsFills" $ do
+  let zero = IRConst (VFloat 0)
+      guardOn v fill live = IRIf (IROp OpEq (IRVar v) zero) fill live
+      samples e = length [ () | IRSample _ <- irUniverse e ]
+  assertEqual "the fill of a dead-arm guard is stripped" 0
+    (samples (stripDeadSlotFills (guardOn "l_wlarm_main_normal_Obj" (IRSample IRNormal) (IRConst (VFloat 1)))))
+  assertEqual "the live side of a dead-arm guard is kept" 1
+    (samples (stripDeadSlotFills (guardOn "l_wlarm_main_normal_Obj" (IRConst (VFloat 1)) (IRSample IRNormal))))
+  assertEqual "an ordinary `if` on a user variable is untouched" 1
+    (samples (stripDeadSlotFills (guardOn "x" (IRSample IRNormal) (IRConst (VFloat 1)))))
+
+deadArmTests :: TestTree
+deadArmTests = testGroup "deadArm"
+  [ deadArm_adtField
+  , deadArm_eitherArm
+  , deadArm_nestedInner
+  , deadArm_nestedOuter
+  , deadArm_perFunctionEndpoint
+  , deadArm_tinyArmIsLive
+  , deadArm_fillIsFreshNoise
+  , deadArm_stripOnlyFills
+  ]
+
 ------------------------------------------------------------------------
 
 writeLogitsTests :: TestTree
@@ -660,6 +843,7 @@ writeLogitsTests = testGroup "WriteLogits"
   , writeLogitsError_continuousMixtureRequiresCollapse
   , writeLogitsInvariant_generateCoversAllSlots
   , writeLogitsInvariant_probIndicesInBounds
+  , deadArmTests
   ]
 
 ------------------------------------------------------------------------
@@ -754,7 +938,10 @@ logitIdentityCase name p = testCase (name ++ ".logitIdentity") $ do
       Left err -> assertFailure (name ++ ": writeLogits failed: " ++ show err)
       Right (VList out) -> do
         assertEqual (name ++ ": roundtripped vector length") (length (toList slots)) (length (toList out))
-        forM_ (zip3 [0 :: Int ..] (toList slots) (toList out)) $ \(i, sIn, sOut) ->
+        -- Zero-weight-aware: a slot under an arm the input gives probability exactly zero is
+        -- dead noise on the way out (task writelogits-dead-arm-nan), so it is not compared.
+        let live = liveSlotMask plan [ x | VFloat x <- toList slots ]
+        forM_ [ t | (t, True) <- zip (zip3 [0 :: Int ..] (toList slots) (toList out)) live ] $ \(i, sIn, sOut) ->
           case (sIn, sOut) of
             (VFloat vIn, VFloat vOut) ->
               assertBool (name ++ ": logit slot " ++ show i ++ " fed " ++ show vIn

@@ -2,7 +2,8 @@
 
 module IRInterpreter (
 generateDet,
-generateRand
+generateRand,
+generateRandE
 ) where
 
 import Statistics.Distribution (quantile)
@@ -125,6 +126,24 @@ generateRand neurals' registry env params e =
       uniformGen = lift (irSample IRUniform),
       normalGen = lift (irSample IRNormal),
       failWith = error,
+      raise = throwError}
+    startingEnv = reduceIREnv env ++ standardEnv ++ map neuralRTypeToEnv neurals' ++ concatMap implicitFunctionsToEnv adts'
+    (IREnv _ adts' _) = env
+
+-- | Like 'generateDet', failures included (every failure is a 'Left'), but with real
+-- randomness for 'IRSample'. For a body that is exact apart from deliberate noise -- a
+-- writeLogits vector's dead-arm slots (task writelogits-dead-arm-nan) -- where
+-- 'generateDet' would refuse the draw and 'generateRand' would throw on a compiler-level
+-- failure instead of reporting it.
+generateRandE :: (RandomGen g) => [NeuralDecl] -> [(RType, MultiValue)] -> IREnv -> [IRExpr] -> IRExpr -> Rand g (Either String IRValue)
+generateRandE neurals' registry env params e =
+  runExceptT (generate f neurals' registry adts' (globalEnvFrom startingEnv) [] params e)
+  where
+    f :: RandomGen g => RandomFunctions (ExceptT String (Rand g)) a
+    f = RandomFunctions {
+      uniformGen = lift (irSample IRUniform),
+      normalGen = lift (irSample IRNormal),
+      failWith = throwError,
       raise = throwError}
     startingEnv = reduceIREnv env ++ standardEnv ++ map neuralRTypeToEnv neurals' ++ concatMap implicitFunctionsToEnv adts'
     (IREnv _ adts' _) = env

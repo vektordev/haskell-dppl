@@ -412,10 +412,14 @@ generateBackedSites (IREnv groups _ _) =
   [ (nm, ws) | (nm, ws) <- concatMap chk groups, not (null ws) ]
   where
     det = deterministicGens groups
+    -- A writeLogits body's dead-arm fill is deliberate noise, not a generate-backed slot
+    -- (task writelogits-dead-arm-nan): it is stripped before the check, so every live slot
+    -- must still be exact.
     chk g =
       [ (groupName g ++ "." ++ lbl, nub (randomDrawSites det b))
       | (lbl, Just (b, _)) <- [ ("prob", probFun g), ("integ", integFun g)
-                              , ("normal", normalFun g), ("writeLogits", writeLogitsFun g) ]
+                              , ("normal", normalFun g)
+                              , ("writeLogits", (\(b, ps) -> (stripDeadSlotFills b, ps)) <$> writeLogitsFun g) ]
       ]
 
 envToIRUnoptimized' :: CompilerConfig -> FCData -> Program -> IREnv

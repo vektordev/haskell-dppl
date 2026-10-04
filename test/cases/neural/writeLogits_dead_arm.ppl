@@ -1,0 +1,9 @@
+-- Dead arms (task writelogits-dead-arm-nan): with b = True, Obj (in main) and Right (in side)
+-- have probability exactly zero, so their conditional slots used to be 0/0 -- NaN in the
+-- interpreter, ZeroDivisionError in Python.  They now hold on-manifold noise; the .tst pins
+-- only the live slots (the noise itself is checked in TestWriteLogitsProperties' deadArm group).
+-- side's layout: [P(Left), P(True|Left), P(False|Left), P(True|Right), P(False|Right)].
+data Color = Red | Green | Blue
+data Object = Nil | Obj color::Color
+main b = if b then Nil else Obj Red
+side b = if b then left True else right False

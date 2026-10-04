@@ -12,6 +12,8 @@ module SPLL.AutoNeural(
 , validateWriteLogitsGaussian
 , makeTopLevelWriteLogitsFun
 , neuralReadLogitsSuffix
+, deadSlotFill
+, stripDeadSlotFills
 ) where
 
 import SPLL.Lang.Types
@@ -21,7 +23,7 @@ import SPLL.Lang.Lang
 import SPLL.ReservedNames (neuralReadLogitsSuffix, queryParamName, componentNormalName)
 import StandardLibrary
 
-import Data.List (find, elemIndex, intercalate)
+import Data.List (find, elemIndex, intercalate, isPrefixOf)
 import Utils
 import Data.Maybe (fromJust, fromMaybe, isJust, listToMaybe, maybeToList)
 import Control.Applicative ((<|>))
@@ -508,49 +510,151 @@ makeWriteLogitsPlan wrap probFnName normalFnName norm plan outerArgs = case plan
 
   -- One flag slot, P(Left); each arm's own slots are conditional on that arm, so they
   -- normalise by the arm probability rather than by the enclosing 'norm'.
+  --
+  -- Each arm probability is let-bound once and shared by the flag slot, the dead-arm guard
+  -- and every conditional slot below it ('guardArm').
   EitherPlan a b ->
-    let pLeftAny  = marginal (wrap (VEither (Left  VAny)))
-        pRightAny = marginal (wrap (VEither (Right VAny)))
-    in concatLists
-         [ irList [slot pLeftAny]
-         , rec (wrap . VEither . Left)  (normalFnName ++ "_left")  (Just pLeftAny)  a
-         , rec (wrap . VEither . Right) (normalFnName ++ "_right") (Just pRightAny) b
+    let leftName  = normalFnName ++ "_left"
+        rightName = normalFnName ++ "_right"
+        pL = armProbName leftName
+        pR = armProbName rightName
+    in IRLetIn pL (marginal (wrap (VEither (Left  VAny)))) $
+       IRLetIn pR (marginal (wrap (VEither (Right VAny)))) $
+       concatLists
+         [ irList [slot (IRVar pL)]
+         , guardArm pL (deadSlotFill pL a) (rec (wrap . VEither . Left)  leftName  (Just (IRVar pL)) a)
+         , guardArm pR (deadSlotFill pR b) (rec (wrap . VEither . Right) rightName (Just (IRVar pR)) b)
          ]
 
   -- One flag slot per constructor ('adtFlagSlots': none for a lone constructor), then each
   -- constructor's field block.  Field slots are conditional on their constructor (see
   -- EitherPlan above).  The normal-function names
   -- mirror 'requiredNormalFns' so its refusal check and this emission cannot disagree.
+  --
+  -- A constructor's probability is bound only where something reads it: its flag slot
+  -- (absent for a lone constructor) or its fields' normaliser and guard (absent for a
+  -- fieldless one).
   ADTPlan _ ctors ->
     let ctorAnyVal (cName, fps) = wrap (VADT cName (replicate (length fps) VAny))
-        pCtorAny = marginal . ctorAnyVal
+        pName (cName, _) = armProbName (normalFnName ++ "_" ++ cName)
         replaceAtLocal j v args = take j args ++ [v] ++ drop (j + 1) args
         fieldWrap cName n j v = wrap (VADT cName (replaceAtLocal j v (replicate n VAny)))
-        ctorFields cp@(cName, fps) = concatLists
+        ctorFields cp@(cName, fps) = guardArm (pName cp) (fillPlans (pName cp) fps) $ concatLists
           [ rec (fieldWrap cName (length fps) j)
                 (normalFnName ++ "_" ++ cName ++ "_" ++ show j)
-                (Just (pCtorAny cp)) fp
+                (Just (IRVar (pName cp))) fp
           | (j, fp) <- zip [0 :: Int ..] fps ]
         flagSlots = if adtFlagSlots ctors == 0 then emptyList
-                    else irList [ slot (pCtorAny cp) | cp <- ctors ]
-    in concatLists (flagSlots : map ctorFields ctors)
+                    else irList [ slot (IRVar (pName cp)) | cp <- ctors ]
+        used (_, fps) = adtFlagSlots ctors > 0 || not (null fps)
+        bindAll body = foldr (\cp -> IRLetIn (pName cp) (marginal (ctorAnyVal cp))) body (filter used ctors)
+    in bindAll (concatLists (flagSlots : map ctorFields ctors))
 
   Discretes ty tag -> discretesTagError "makeWriteLogitsPlan" ty tag
   where
     rec w nf n p = makeWriteLogitsPlan w probFnName nf n p outerArgs
-    irList       = foldr (\x acc -> IRConstruct TgCons [x, acc]) emptyList
+    irList       = irListE
     emptyList    = IRConst (VList EmptyList)
     marginal s   = IRDestruct AcFst (foldl IRApply (IRApply (IRVar probFnName) (IRConst s)) outerArgs)
     slot p       = maybe p (IROp OpDiv p) norm
 
+    -- An arm whose probability is exactly zero is dead: its conditional slots would be
+    -- 0/0.  Its slots get 'deadSlotFill' instead (task writelogits-dead-arm-nan).  Only
+    -- exact zero counts -- an arm of probability 1e-300 is reachable and its conditionals,
+    -- though rounding-noisy, are its own.  A statically empty arm has nothing to guard.
+    guardArm pVar fill live
+      | isEmptyList live = live
+      | otherwise        = IRIf (IROp OpEq (IRVar pVar) (IRConst (VFloat 0))) fill live
+
     -- Statically-empty segments are dropped before folding rather than concatenated
     -- with: a fieldless constructor contributes one, and every nesting level would
     -- otherwise add an identity `listConcat(x, [])` to the emitted vector expression.
-    concatLists xs = case filter (not . isEmptyList) xs of
-      []  -> emptyList
-      ys  -> foldr1 (\x acc -> invokeStandardFunction stdListConcat [x, acc]) ys
+    concatLists  = concatIR
     isEmptyList (IRConst (VList EmptyList)) = True
     isEmptyList _                           = False
+
+-- | Name of the let-bound probability of the arm at a plan position.  The position path
+-- reuses the normal-function name threading ('requiredNormalFns'), which is already unique
+-- per position; the reserved IR-temporary prefix @l_@ keeps it out of the user namespace,
+-- and 'deadArmPrefix' is what 'stripDeadSlotFills' recognises a dead-arm guard by.
+armProbName :: String -> String
+armProbName pos = deadArmPrefix ++ pos
+
+deadArmPrefix :: String
+deadArmPrefix = "l_wlarm_"
+
+-- | Fill for a dead region made of several sibling plans (an ADT constructor's fields).
+fillPlans :: String -> [PartitionPlan] -> IRExpr
+fillPlans pre fps = concatIR [ deadSlotFill (pre ++ "_" ++ show j) fp | (j, fp) <- zip [0 :: Int ..] fps ]
+
+-- | The slots of a dead arm (task writelogits-dead-arm-nan; design 00_bidirectional-autoNeural,
+-- "Constructor changes and voided slots").  The design fills them with iid N(0, 1) noise so
+-- the decoder learns to gate on the constructor flag; its "Per-slot validity" constraint
+-- additionally requires every slot to stay on-manifold.  Both hold here: each slot gets an
+-- iid N(0, 1) draw in its *unconstrained* parameterisation, pushed through the slot's link:
+--
+-- * Continuous: mu = z, sigma = exp z'  (sigma > 0)
+-- * Discretes / ADT constructor flags: softmax of k draws  (nonnegative, sum to 1)
+-- * Either flag: sigmoid z  (in [0, 1])
+--
+-- A dead region is dead throughout, so nested Either/ADT regions inside it are filled
+-- whole (flags and every arm), with no further guards.  The fill is the only randomness a
+-- writeLogits body may hold; 'stripDeadSlotFills' is how the compile-time purity guard
+-- tells it apart from a generate-backed live slot.  @pre@ is a unique name prefix for the
+-- let-bound draws.
+deadSlotFill :: String -> PartitionPlan -> IRExpr
+deadSlotFill pre plan = case plan of
+  Continuous -> irListE [IRSample IRNormal, IRUnaryOp OpExp (IRSample IRNormal)]
+  Discretes _ (MultiDiscretes vals) -> softmaxNoise (pre ++ "_d") (length vals)
+  Discretes ty tag -> discretesTagError "deadSlotFill" ty tag
+  TuplePlan a b -> concatIR [deadSlotFill (pre ++ "_fst") a, deadSlotFill (pre ++ "_snd") b]
+  EitherPlan a b -> concatIR
+    [ irListE [sigmoid (IRSample IRNormal)]
+    , deadSlotFill (pre ++ "_left") a
+    , deadSlotFill (pre ++ "_right") b ]
+  ADTPlan _ ctors -> concatIR $
+    (if adtFlagSlots ctors == 0 then irListE [] else softmaxNoise (pre ++ "_flags") (length ctors))
+    : [ fillPlans (pre ++ "_" ++ cName) fps | (cName, fps) <- ctors ]
+  where
+    one = IRConst (VFloat 1)
+    sigmoid z = IROp OpDiv one (IROp OpPlus one (IRUnaryOp OpExp (IRUnaryOp OpNeg z)))
+
+-- | k slots of softmax(z_1..z_k), z_i iid N(0, 1).  Each exp z_i is let-bound: it is read
+-- twice (numerator and the shared sum), and a sample must not be re-drawn per read.
+softmaxNoise :: String -> Int -> IRExpr
+softmaxNoise _ 0 = irListE []
+softmaxNoise _ 1 = irListE [IRConst (VFloat 1)]
+softmaxNoise pre k =
+  foldr (\n -> IRLetIn n (IRUnaryOp OpExp (IRSample IRNormal))) body es
+  where
+    es = [ pre ++ "_e" ++ show i | i <- [0 .. k - 1] ]
+    total = pre ++ "_sum"
+    body = IRLetIn total (foldr1 (IROp OpPlus) (map IRVar es)) $
+           irListE [ IROp OpDiv (IRVar e) (IRVar total) | e <- es ]
+
+-- | Replace every dead-arm fill in a writeLogits body by an empty list, leaving the live
+-- slots and the guards' conditions in place.  For the compile-time purity guard
+-- ('IRCompiler.requireNoGenerateBacked') only: the dead-slot noise is the one randomness a
+-- writeLogits body is allowed, and every live slot must still be exact.  Recognises exactly
+-- the guard 'makeWriteLogitsPlan' emits -- an @if l_wlarm_* == 0@ -- which no user program
+-- can spell, the @l_@ prefix being reserved.
+stripDeadSlotFills :: IRExpr -> IRExpr
+stripDeadSlotFills e = case e of
+  IRIf c@(IROp OpEq (IRVar v) (IRConst (VFloat 0))) _ live
+    | deadArmPrefix `isPrefixOf` v -> IRIf c (irListE []) (stripDeadSlotFills live)
+  _ -> irDescend stripDeadSlotFills e
+
+irListE :: [IRExpr] -> IRExpr
+irListE = foldr (\x acc -> IRConstruct TgCons [x, acc]) (IRConst (VList EmptyList))
+
+-- | 'stdListConcat' over segments, dropping statically empty ones (see 'makeWriteLogitsPlan').
+concatIR :: [IRExpr] -> IRExpr
+concatIR xs = case filter (not . isEmptyIR) xs of
+  []  -> IRConst (VList EmptyList)
+  ys  -> foldr1 (\x acc -> invokeStandardFunction stdListConcat [x, acc]) ys
+  where
+    isEmptyIR (IRConst (VList EmptyList)) = True
+    isEmptyIR _                           = False
 
 -- Build the writeLogits function body, wrapped in one lambda per outer parameter of main.
 -- writeLogits(p1)(p2)... derives the logit vector from compiled SPLL inference functions
