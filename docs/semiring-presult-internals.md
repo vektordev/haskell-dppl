@@ -30,10 +30,10 @@ plan-sum-with-sunk-discrete-draw-reports-density; corpus
 
 `rProb` is a newtype `P` that only `SPLL.Semiring` can construct, so
 `IRCompiler.hs` must route probabilities through a Semiring-aware
-combinator or one of two escape hatches: `unsafeLinearP` (linear-only
-subsystems — set-witness/plan-enum measurement, AutoNeural read-logits reads)
-or `sealP` (bespoke `PResult`s assembled from already-trusted values).
-Grepping `unsafeLinearP` is the "which subsystems ignore `logSpace`" audit.
+combinator or one of two escape hatches: `unsafeLinearP` (a deliberately
+linear-only subsystem — no call site uses it today) or `sealP` (bespoke
+`PResult`s assembled from already-trusted values). Grepping `unsafeLinearP`
+is the "which subsystems ignore `logSpace`" audit.
 
 ## Log-space probabilities
 
@@ -52,9 +52,19 @@ semiring-aware too. Two consequences worth internalising before touching
   `srZero sr`, not the literal `0.0`, and log space compares against
   `-inf` with exact `OpEq` rather than `OpApprox`, because
   `(-inf) - (-inf)` is `NaN`.
-- **Not everything is semiring-aware.** The `ReadNN`/AutoNeural read-logits network and
-  the set-witness/plan-enum continuous measurement machinery build bespoke
-  `IRExpr` formulas and stay linear-only under `logSpace`. `Spec.hs`'s
-  `logSpaceUncoveredPrograms` lists the corpus programs that reach them and
-  so are excluded from the `LogSpaceMatchesLinear` property. Branch
-  *counts* stay linear everywhere.
+- **Not everything is semiring-aware.** The `ReadNN`/AutoNeural read-logits
+  network's inference function (`<nn>_auto`) stays linear-only under
+  `logSpace`. Neural programs are outside `Corpus.LogSpaceMatchesLinear`'s pool
+  altogether; End2End's `PlanEngineLogSpaceMatchesLinear` checks the neural
+  corpus at budget 0 (the plan engine) and skips the programs that still reach
+  `_auto` (`End2EndTesting.readLogitsLinearOnly`). Branch *counts* stay linear
+  everywhere.
+- **A linear quantity with no native log leaf** — a sum of softmax slot
+  probabilities, a `|change-of-variables|` factor — enters the semiring
+  through `fromLinearSR`. A CDF difference is `measureDiffSR`, not `srMinus`:
+  `srMinus` is the AnyExcept operator, undefined under max-product, while an
+  interval's mass is an integral in every family. Log space's difference is
+  only defined for a non-empty interval, so test emptiness on the operands
+  (the CDF is increasing), never on the difference. A sum of many
+  alternatives outside `mixP` is `sumAllSR`, which let-binds operands and
+  partial sums wherever `srPlus` reads its operands twice.

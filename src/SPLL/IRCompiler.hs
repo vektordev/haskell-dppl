@@ -4671,7 +4671,15 @@ data WWorld = WWorld [IRExpr] WSet [WFactor]
 -- level, which made a nested fresh draw's unoptimized IR grow 4^depth (23MB
 -- for a two-level fuzz program) and its optimized compile 6x slower.
 -- 'measureWorld' emits the bindings under the world's guards.
+--
+-- 'WMass' is the other kind of factor: a pre-measured dim-0 mass, already in
+-- the ambient semiring, multiplied into the world's constraint mass with no
+-- bookkeeping of its own (no dimension, no branch count, never impossible by
+-- itself). It is what the plan engine's value grouping collapses a group of
+-- same-value worlds into (see 'planGroupValues'); the set-witness engine
+-- builds none.
 data WFactor = WFactor [(Varname, IRExpr)] PResult
+             | WMass IRExpr
 
 addGuard :: IRExpr -> WWorld -> WWorld
 addGuard g (WWorld gs s fs) = WWorld (g:gs) s fs
@@ -4881,6 +4889,7 @@ subtreeHasOcc occs e = let cns = subtreeCNs e in any (`elem` cns) occs
 -- Gaussian marginalisation is the one caller that supplies one.
 setWitnessApply :: CompilerMetadata -> Bool -> RType -> Expr -> ChainName -> ChainName -> String -> Maybe String -> Expr -> IRExpr -> Maybe (CompilerMonad PResult) -> CompilerMonad PResult
 setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag planDiag v sample fallback = do
+  let sr = semiringOf meta
   let userVar = case l of Expr _ (Lambda n _) -> n; _ -> "<bound variable>"
   let refuseSW why = refuse lResolvedCN $ init $ unlines $
         [ "set-valued witness construction failed for the binding of '" ++ userVar ++ "' (lambda at " ++ lResolvedCN ++ "):"
@@ -4944,68 +4953,80 @@ setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag planDiag v sam
       measured <- mapM (measureWorld meta v) worlds
       -- The worlds partition the observation, so they mix; here (unlike the
       -- IfThenElse mixture) each world really was traversed, so counts sum.
-      -- Set-witness continuous measurement (this function and its
-      -- helpers below: measureWorld/measureSet/cdfAtBound) is explicitly
-      -- OUT of log-space scope (task log-space-probability-computation's
-      -- written invasiveness verdict): it stays pinned to 'linearSemiring'
-      -- regardless of the 'logSpace' config flag.
       summed <- case measured of
         -- no worlds can only mean an impossible observation
-        []     -> return (impossibleP linearSemiring)
-        (m:ms) -> foldM (\a b -> mixP linearSemiring (IROp OpPlus (rBranches a) (rBranches b)) a b) m ms
+        []     -> return (impossibleP sr)
+        (m:ms) -> foldM (\a b -> mixP sr (IROp OpPlus (rBranches a) (rBranches b)) a b) m ms
       -- Full-ANY marginal short-circuit: guards and transported bounds are not
       -- ANY-aware, but the marginal of the whole observation is simply 1.
       if cumulative
         then return summed
         else return (zipResult (\anyVal e -> IRIf (IRUnaryOp OpIsAny sample) anyVal e)
-                       (mass const1) summed)
+                       (mass (srOne sr)) summed)
 
 -- | Measure one world against the bound distribution. The measure is compiled
 -- in its own writer scope and kept under the world's guards, so bindings whose
 -- evaluation is only valid when the guards hold are not hoisted past them.
 measureWorld :: CompilerMetadata -> Expr -> WWorld -> CompilerMonad PResult
 measureWorld meta v (WWorld guards set factors) = do
+  let sr = semiringOf meta
   (res, binds) <- lift (runWriterT (measureSet meta v set))
   let wrap = generateLetInExpr binds
   -- The set's measure and the residue factors are independent: the product
   -- rule, exactly as the point-witness path's body-factor fold applies it.
   let factorBinds = concat [bs | WFactor bs _ <- factors]
   let factorResults = [r | WFactor _ r <- factors]
-  let combined = foldl (prodP linearSemiring) (mapResult wrap res) factorResults
+  let combined = foldl (prodP sr) (mapResult wrap res) factorResults
   -- A world whose guards fail is not part of the observation at all.
   if null factorBinds
-    then return (guardP linearSemiring guards combined)
+    then return (guardP sr guards combined)
     -- Factor bindings are read by several fields, so the world's result is
     -- packed and bound once, under the guards ('shareResult'), rather than
     -- copying the bindings into each field. The set measure's own bindings
     -- join them in that one block instead of being wrapped per field.
-    else shareResult linearSemiring "world" guards (binds ++ factorBinds)
-           (foldl (prodP linearSemiring) res factorResults)
+    else shareResult sr "world" guards (binds ++ factorBinds)
+           (foldl (prodP sr) res factorResults)
 
 measureSet :: CompilerMetadata -> Expr -> WSet -> CompilerMonad PResult
 measureSet meta v (WPoint p cov) = do
   -- change-of-variables correction only for continuous results, mirroring the
   -- point-witness path
-  scaleCoV linearSemiring False cov <$> toIRInference meta False v p
+  scaleCoV (semiringOf meta) False cov <$> toIRInference meta False v p
 measureSet meta v (WInterval lo hi) = do
+  let sr = semiringOf meta
   (cdfHi, bcHi) <- cdfAtBound meta v hi
   (cdfLo, bcLo) <- cdfAtBound meta v lo
-  -- Let-bound because both the measure and its impossibility flag read it, and
-  -- a CDF difference is two full inference compiles.
+  -- The CDF difference, let-bound because both the measure and its
+  -- impossibility flag read it, and it is two full inference compiles. An
+  -- empty runtime intersection shows up as a non-positive linear difference.
+  -- In log space the difference ('measureDiffSR') is only defined for a
+  -- non-empty interval -- the log of a negative number is not a probability,
+  -- and Python's math.log raises on it -- so there the emptiness test reads
+  -- the two (let-bound) CDF values instead, and the difference is taken only
+  -- under it.
   diffVar <- mkVariable "ivl_mass"
-  setVariables [(diffVar, IROp OpSub cdfHi cdfLo)]
+  nonEmpty <- if srLogSpace sr
+    then do
+      hiVar <- mkVariable "cdf_hi"
+      loVar <- mkVariable "cdf_lo"
+      let nonEmpty = IROp OpGreaterThan (IRVar hiVar) (IRVar loVar)
+      setVariables [ (hiVar, cdfHi), (loVar, cdfLo)
+                   , (diffVar, IRIf nonEmpty (measureDiffSR sr (IRVar hiVar) (IRVar loVar)) (srZero sr)) ]
+      return nonEmpty
+    else do
+      setVariables [(diffVar, measureDiffSR sr cdfHi cdfLo)]
+      return (IROp OpGreaterThan (IRVar diffVar) (srZero sr))
   let diff = IRVar diffVar
-  -- an empty runtime intersection shows up as a non-positive difference
-  let clamped = IRIf (IROp OpGreaterThan diff const0) diff const0
+  let clamped = IRIf nonEmpty diff (srZero sr)
   let bc = case (hi, lo) of
         (WFinite _, _) -> bcHi
         (_, WFinite _) -> bcLo
         _              -> const1
   -- An interval that came out empty at runtime carries no possibility.
-  return (impossibleWhen (notIR (IROp OpGreaterThan diff const0))
-            (mkPResult (unsafeLinearP clamped) const0 bc constFalseIR))
-measureSet _ _ WFull  = return (mass const1)
-measureSet _ _ WEmpty = return (impossibleP linearSemiring)
+  return (impossibleWhen (notIR nonEmpty)
+            (mkPResult (sealP clamped) const0 bc constFalseIR))
+measureSet meta _ WFull  = return (mass (srOne (semiringOf meta)))
+measureSet meta _ WEmpty = return (impossibleP (semiringOf meta))
 -- The set's measure minus the removed point's, where the point lies in the
 -- set at all (otherwise nothing was removed: the subtrahend is impossible and
 -- 'mixWith' drops it). The subtraction is 'mixSubP''s, so dimensions decide
@@ -5023,10 +5044,9 @@ measureSet _ _ WEmpty = return (impossibleP linearSemiring)
 -- pruned subtrahend inflates the difference). The complement of a point in the
 -- whole domain -- the only shape the 'VAnyExcept' sentinel used to express --
 -- is measured exactly as that sentinel was ('toIRInference''s
--- marginal-minus-point split), in the ambient semiring: it is the one
--- set-witness measure that was already log-space-aware, and stays so. A
--- proper subset minus a point is new, and is measured linear-pinned like the
--- rest of this engine (see 'setWitnessApply').
+-- marginal-minus-point split). A proper subset minus a point subtracts the
+-- point's measure from the set's, both in the ambient semiring like every
+-- other world measure.
 measureSet meta v (WExcept WFull p) = do
   let metaSub = unpruned meta
   anyRes    <- toIRInferenceSave metaSub False v (IRConst VAny)
@@ -5037,8 +5057,8 @@ measureSet meta v (WExcept s p) = do
   sRes <- scopedMeasureSet metaSub v s
   let rt = rType (getTypeInfo v)
   (ptRes0, ptBinds) <- lift (runWriterT (measureSet metaSub v (WPoint p const1)))
-  let ptRes = guardP linearSemiring [memberGuard rt p s] (mapResult (generateLetInExpr ptBinds) ptRes0)
-  mixSubP linearSemiring (rBranches sRes) sRes ptRes
+  let ptRes = guardP (semiringOf meta) [memberGuard rt p s] (mapResult (generateLetInExpr ptBinds) ptRes0)
+  mixSubP (semiringOf meta) (rBranches sRes) sRes ptRes
 -- Each side is measured in its own writer scope and keeps its own bindings, so
 -- the untaken side's work sits under the selecting 'IRIf' rather than being
 -- hoisted in front of it -- the same reason 'measureWorld' scopes a world's
@@ -5058,8 +5078,8 @@ scopedMeasureSet meta v s = do
   return (mapResult (generateLetInExpr binds) r)
 
 cdfAtBound :: CompilerMetadata -> Expr -> WBound -> CompilerMonad (IRExpr, IRExpr)
-cdfAtBound _ _ WNegInf = return (const0, const1)
-cdfAtBound _ _ WPosInf = return (const1, const1)
+cdfAtBound meta _ WNegInf = return (srZero (semiringOf meta), const1)
+cdfAtBound meta _ WPosInf = return (srOne (semiringOf meta), const1)
 cdfAtBound meta v (WFinite e) = do
   -- An interval's mass is a CDF difference, so both bounds are 'unpruned'.
   res <- toIRInference (unpruned meta) True v e
@@ -5577,35 +5597,40 @@ plcBase (PLeafPt b _ _ _) = b
 -- at most once, and a coupled leaf may carry no other constraint -- anything
 -- beyond that is an orthant probability, which the language excludes
 -- (checked in 'pwOverCoupled'; design plan-guided-lazy-enumeration M3).
--- 'pwFactor' (milestone 4) is a pre-measured multiplicative mass contribution
--- carried by the world -- const1 for every ordinary world, and the summed
--- mass of a collapsed value group for the DP path-counting worlds (see
--- 'planGroupValues'): a group of same-value worlds is merged into one world
--- with empty constraints and this factor, so counting folds stay O(depth)
--- instead of 2^depth.
--- 'pwFactors' (task plan-free-stochastic-subtree-not-factorized) carries
--- whole independent sub-inferences, the plan analogue of 'WWorld's residue
--- factor list: a subtree of the body that mentions no plan-bound variable is
--- independent of everything the plan constrains, so the joint factorizes and
--- the subtree can be measured by the ordinary probability compiler and
--- multiplied in ('prodP': dims and branch counts add). Unlike 'pwFactor'
--- these are full 'PResult's, so a factor may carry its own dimension.
+-- 'pwFactors' holds the world's factors, of the same 'WFactor' type as
+-- 'WWorld''s and of two kinds. A 'WMass' (milestone 4) is a pre-measured
+-- multiplicative mass contribution: the summed mass of a collapsed value
+-- group for the DP path-counting worlds (see 'planGroupValues') -- a group of
+-- same-value worlds is merged into one world with empty constraints and this
+-- factor, so counting folds stay O(depth) instead of 2^depth. A 'WFactor'
+-- (task plan-free-stochastic-subtree-not-factorized) carries a whole
+-- independent sub-inference, the plan analogue of 'WWorld''s residue factors:
+-- a subtree of the body that mentions no plan-bound variable is independent
+-- of everything the plan constrains, so the joint factorizes and the subtree
+-- can be measured by the ordinary probability compiler and multiplied in
+-- ('prodP': dims and branch counts add) -- a full 'PResult', so it may carry
+-- its own dimension.
 -- 'pwBaked' (task plan-flat-sum-over-product-exponential) lists the leaf
--- regions (by base offset) whose mass a value group has folded into
--- 'pwFactor': they are no longer visible as constraints, so the world must
+-- regions (by base offset) whose mass a value group has folded into a
+-- 'WMass': they are no longer visible as constraints, so the world must
 -- never meet another constraint on them -- that would count their mass twice.
 -- 'pwClash' records that it did ('intersectPlanW', 'addSpecCons'); a clashing
 -- world's mass is wrong, and 'planWitnessApply' then redoes the traversal
 -- without grouping.
-data PlanWorld = PlanWorld { pwGuards :: [IRExpr], pwCons :: [PLeafCon], pwPairs :: [(Int, Int)], pwFactor :: IRExpr, pwFactors :: [PResult], pwBaked :: [Int], pwClash :: Bool }
+data PlanWorld = PlanWorld { pwGuards :: [IRExpr], pwCons :: [PLeafCon], pwPairs :: [(Int, Int)], pwFactors :: [WFactor], pwBaked :: [Int], pwClash :: Bool }
 
 -- | An unguarded world from leaf constraints alone.
 pw1 :: [PLeafCon] -> PlanWorld
-pw1 cs = PlanWorld [] cs [] const1 [] [] False
+pw1 cs = PlanWorld [] cs [] [] [] False
 
 -- | The unconstrained world @pw1 []@: no guards, constraints or factors.
 planWorldTrivial :: PlanWorld -> Bool
-planWorldTrivial (PlanWorld g c p f rs b _) = null g && null c && null p && f == const1 && null rs && null b
+planWorldTrivial (PlanWorld g c p rs b _) = null g && null c && null p && null rs && null b
+
+-- | A world's independent sub-inference factors (the plan engine's are
+-- always self-contained blocks, so they carry no bindings).
+pwSubFactors :: PlanWorld -> [PResult]
+pwSubFactors w = [ r | WFactor _ r <- pwFactors w ]
 
 -- | The observation target: the plan-leaf analogue of the point/interval
 -- split in 'WSet'. PTUpTo is the cumulative target (body <= sample).
@@ -5662,7 +5687,7 @@ staticBool _ = Nothing
 -- die, and the branch body -- containing the recursive call -- is never
 -- traversed. This is the recursion base of the milestone-2 specialization.
 pwUnsat :: PlanWorld -> Bool
-pwUnsat (PlanWorld gs cons pairs _ _ _ _) = any conUnsat cons
+pwUnsat (PlanWorld gs cons pairs _ _ _) = any conUnsat cons
                                  || any ((== Just False) . staticBool) gs
                                  || any (\(a, b) -> (b, a) `elem` pairs || a == b) pairs
   where
@@ -5678,7 +5703,7 @@ pwUnsat (PlanWorld gs cons pairs _ _ _ _) = any conUnsat cons
 -- excludes by design (see "Hard residual" in the design doc). Returns a
 -- diagnostic for the first offending world.
 pwOverCoupled :: PlanWorld -> Maybe String
-pwOverCoupled (PlanWorld _ cons pairs _ _ _ _)
+pwOverCoupled (PlanWorld _ cons pairs _ _ _)
   | (base:_) <- overCoupled = Just
       ("a world couples the continuous leaf at logit offset " ++ show base
        ++ " to other random leaves more than once (or couples it and also"
@@ -5740,12 +5765,15 @@ data PlanState = PlanState
     -- argument bindings; the variables themselves are still emitted, so the
     -- generated IR is unchanged wherever grouping was already firing.
   , psDetConsts :: [(String, IRValue)]
+    -- | The semiring the worlds are measured in ('semiringOf' the compile):
+    -- the value grouping measures collapsed groups mid-traversal.
+  , psSemiring :: Semiring
   }
 
 -- | The state a traversal starts from: one read, bound at @nnRaw@, whose plan
 -- occupies the first @size@ offsets.
-emptyPlanState :: String -> Int -> Bool -> PlanState
-emptyPlanState nnRaw size merge = PlanState Map.empty Map.empty [] [(0, nnRaw)] size merge []
+emptyPlanState :: Semiring -> String -> Int -> Bool -> PlanState
+emptyPlanState sr nnRaw size merge = PlanState Map.empty Map.empty [] [(0, nnRaw)] size merge [] sr
 
 -- | The raw logit vectors a traversal reads, as (first flat offset, variable)
 -- per neural read, ascending. Plan leaves are keyed by a flat offset
@@ -5775,11 +5803,6 @@ andGuard a b | a == constTrueIR = b
              | b == constTrueIR = a
              | otherwise        = IROp OpAnd a b
 
--- | Multiply two world mass factors, dropping identity const1 factors.
-mulFactor :: IRExpr -> IRExpr -> IRExpr
-mulFactor a b | a == const1 = b
-              | b == const1 = a
-              | otherwise   = IROp OpMult a b
 
 -- | Intersect two constraints on the same region. Discrete regions keep the
 -- slots allowed by both, conjoining their guards. Continuous leaves follow
@@ -5811,8 +5834,8 @@ insertLeafCon c (c':cs) | plcBase c == plcBase c' = intersectLeafCon c' c : cs
                         | otherwise               = c' : insertLeafCon c cs
 
 intersectPlanW :: PlanWorld -> PlanWorld -> PlanWorld
-intersectPlanW w1@(PlanWorld g1 c1 p1 f1 rs1 b1 x1) w2@(PlanWorld g2 c2 p2 f2 rs2 b2 x2) =
-  PlanWorld (g1 ++ g2) (foldl (flip insertLeafCon) c1 c2) (nub (p1 ++ p2)) (mulFactor f1 f2) (rs1 ++ rs2)
+intersectPlanW w1@(PlanWorld g1 c1 p1 rs1 b1 x1) w2@(PlanWorld g2 c2 p2 rs2 b2 x2) =
+  PlanWorld (g1 ++ g2) (foldl (flip insertLeafCon) c1 c2) (nub (p1 ++ p2)) (rs1 ++ rs2)
             (b1 ++ b2) (x1 || x2 || touchesBaked b1 w2 || touchesBaked b2 w1)
 
 -- | The leaf regions a world reads: its constrained leaves, its pairwise
@@ -6245,7 +6268,7 @@ planFactorFree meta env sub target
             PTUpTo  s -> (True,  s)
       block <- lift (lift (runWriterT (toIRInference meta cumulative sub sample)))
                  <&> generateLetInBlock meta
-      return (Right [(pw1 []) { pwFactors = [unpackResult block] }])
+      return (Right [(pw1 []) { pwFactors = [WFactor [] (unpackResult block)] }])
 
 -- | The two polarity factors of a plan-free condition that draws fresh
 -- randomness: @(P(c = True), P(c = False))@, each a self-contained compiled
@@ -6271,7 +6294,7 @@ planFactorBool meta env c
 
 -- | Attach an independent factor to a world.
 planAddFactor :: PResult -> PlanWorld -> PlanWorld
-planAddFactor r w = w { pwFactors = r : pwFactors w }
+planAddFactor r w = w { pwFactors = WFactor [] r : pwFactors w }
 
 -- | Invert the observation @body ∈ target@ into plan-leaf constraint worlds.
 -- The plan-backed analogue of 'invertToWorlds'. Left carries a diagnostic
@@ -6969,6 +6992,7 @@ planGroupValues pairs = do
   merge <- gets psMerge
   raws <- gets psRaws
   consts <- gets psDetConsts
+  sr <- gets psSemiring
   let (mergeable, keep) = partitionEithers (map (classify consts) pairs)
       -- group same-value worlds, keeping ascending value-key order for
       -- reproducible IR
@@ -6978,7 +7002,7 @@ planGroupValues pairs = do
     -- keep the milestone-2 world-per-path enumeration unchanged
     then return pairs
     else do
-      merged <- mapM (mergeGroup raws) grouped
+      merged <- mapM (mergeGroup sr raws) grouped
       return (merged ++ keep)
   where
     -- the value may read specialization argument variables of known value
@@ -6990,11 +7014,11 @@ planGroupValues pairs = do
     -- 'planWorldMass' (which is what a group's collapsed mass is built from)
     -- measures the plan leaves only, so baking a group would silently drop
     -- the factor. Such worlds pass through ungrouped.
-    canMerge w = null (pwPairs w) && null (pwFactors w) && not (any isPt (pwCons w))
+    canMerge w = null (pwPairs w) && null (pwSubFactors w) && not (any isPt (pwCons w))
     isPt PLeafPt{} = True
     isPt _         = False
     comb (v, ws1) (_, ws2) = (v, ws1 ++ ws2)
-    mergeGroup _ (v, [w]) = return (IRConst v, w)
+    mergeGroup _ _ (v, [w]) = return (IRConst v, w)
     -- Merge same-value worlds. Constraints shared identically by every world
     -- in the group (a discrete leaf region with the same slots+guards -- in
     -- practice the recursion's accessor/constructor flags) are kept LIVE on the
@@ -7002,17 +7026,17 @@ planGroupValues pairs = do
     -- dedups via 'intersectLeafCon' instead of double-counting it. Only the
     -- residual (the internal randomness that varies across the group, disjoint
     -- from anything constrained outside) is baked into the summed mass factor.
-    mergeGroup raws (v, ws) = do
+    mergeGroup sr raws (v, ws) = do
       let common = commonDiscreteCons ws
           residual w = w { pwCons = filter (\c -> not (any (conEq c) common)) (pwCons w) }
-      let groupMass = foldr1 (IROp OpPlus) (map (planWorldMass raws . residual) ws)
+      groupMass <- lift (sumAllSR sr (map (planWorldMass sr raws . residual) ws))
       mv <- lift (mkVariable "cnt_mass")
       lift (setVariables [(mv, groupMass)])
       -- the residual leaves are now hidden inside the mass: record them, with
       -- whatever the members had already baked, so a later constraint on one
       -- of them is caught as a double count ('pwBaked')
       let baked = nub (concatMap (\w -> map plcBase (pwCons (residual w)) ++ pwBaked w) ws)
-      return (IRConst v, PlanWorld [] common [] (IRVar mv) [] baked (any pwClash ws))
+      return (IRConst v, PlanWorld [] common [] [WMass (IRVar mv)] baked (any pwClash ws))
     -- discrete leaf constraints present (identically) in every world's cons
     commonDiscreteCons (w:ws') =
       [ c | c@(PLeafCon _ _) <- pwCons w, all (\w' -> any (conEq c) (pwCons w')) ws' ]
@@ -7391,17 +7415,15 @@ planApplyTarget meta env planBodyExpr target = do
 -- world set) the worlds sum directly; with point constraints present the
 -- worlds combine via 'mixP' (mixture addition, smaller dimension wins). Each
 -- world whose guards hold counts as one branch.
--- Plan-guided lazy enumeration measurement (this function): explicitly OUT of
--- log-space scope (task log-space-probability-computation's written
--- invasiveness verdict), like the set-witness continuous machinery above --
--- stays pinned to 'linearSemiring' regardless of the 'logSpace' config flag.
-measurePlanWorlds :: PlanRaws -> [PlanWorld] -> CompilerMonad PResult
-measurePlanWorlds raws worlds
+measurePlanWorlds :: Semiring -> PlanRaws -> [PlanWorld] -> CompilerMonad PResult
+measurePlanWorlds sr raws worlds
   -- The all-dim-0 fast path sums raw masses, which has no place to put a
-  -- factor's own dimension or impossibility flag, so a factored world always
-  -- takes the general 'mixP' path below.
-  | all (null . pwFactors) worlds
-  , all ((== 0) . planWorldDim) worlds = opaqueMass linearSemiring (sumUp (map worldMass worlds)) branchSum
+  -- factor's own dimension or impossibility flag, so a world with a
+  -- sub-inference factor always takes the general 'mixP' path below.
+  | all (null . pwSubFactors) worlds
+  , all ((== 0) . planWorldDim) worlds = do
+      total <- sumAllSR sr (map worldMass worlds)
+      opaqueMass sr total branchSum
   | otherwise = do
       -- A dim-0 world's mass vanishing means its slots were not selected, i.e.
       -- the world is impossible; a dim-1 (point-constrained continuous) world's
@@ -7412,27 +7434,27 @@ measurePlanWorlds raws worlds
       -- peeled step's image, `exp leaf == -1.0`).
       ws <- forM worlds $ \w -> do
               base <- if planWorldDim w == 0
-                        then onBranches (const branchSum) <$> opaqueMass linearSemiring (worldMass w) branchSum
-                        else return (mkPResult (unsafeLinearP (worldMass w)) (dimC (planWorldDim w)) branchSum (guardsFail w))
+                        then onBranches (const branchSum) <$> opaqueMass sr (worldMass w) branchSum
+                        else return (mkPResult (sealP (worldMass w)) (dimC (planWorldDim w)) branchSum (guardsFail w))
               -- Independent sub-inference factors multiply in. The world's
               -- guards are already baked into 'worldMass', but a factor is a
               -- whole compiled block that must not be evaluated when they
               -- fail, so the product is re-guarded (a no-op on the numbers,
               -- which 'worldMass' has already zeroed).
-              return $ if null (pwFactors w)
+              return $ if null (pwSubFactors w)
                 then base
-                else guardP linearSemiring (pwGuards w)
-                       (foldl (prodP linearSemiring) base (pwFactors w))
+                else guardP sr (pwGuards w)
+                       (foldl (prodP sr) base (pwSubFactors w))
       case ws of
-        []     -> return (impossibleP linearSemiring)
+        []     -> return (impossibleP sr)
         -- Every world whose guards hold was traversed, so the branch count is the
         -- sum over all of them regardless of which one carries the mixture's mass.
-        (m:ms) -> foldM (mixP linearSemiring branchSum) m ms
+        (m:ms) -> foldM (mixP sr branchSum) m ms
   where
     dimC d = IRConst (VFloat (fromIntegral d))
     sumUp [] = const0
     sumUp xs = foldr1 (IROp OpPlus) xs
-    worldMass = planWorldMass raws
+    worldMass = planWorldMass sr raws
     branchSum = sumUp (map branch worlds)
     branch w = foldr (\g acc -> IRIf g acc const0) const1 (pwGuards w)
     guardsFail w = case pwGuards w ++ concat [ gs | PLeafPt _ _ _ gs <- pwCons w ] of
@@ -7442,7 +7464,7 @@ measurePlanWorlds raws worlds
 -- | Dimensionality of a world's PLAN-LEAF mass: one per point constraint (a
 -- univariate density); discrete slots, CDF intervals, pairwise couplings and
 -- the carried scalar mass factor are all dim 0. Independent sub-inference
--- factors ('pwFactors') are NOT counted here -- their dimension is a runtime
+-- factors are NOT counted here -- their dimension is a runtime
 -- 'IRExpr' and is added by 'prodP' in 'measurePlanWorlds'.
 planWorldDim :: PlanWorld -> Int
 planWorldDim w = length [ () | PLeafPt {} <- pwCons w ]
@@ -7456,27 +7478,42 @@ planWorldDim w = length [ () | PLeafPt {} <- pwCons w ]
 -- its density times |change-of-variables| (the only dim-1 measure). Shared
 -- between 'measurePlanWorlds' and the milestone-4 value grouping so a collapsed
 -- group's factor measures exactly as the worlds it replaced.
-planWorldMass :: PlanRaws -> PlanWorld -> IRExpr
-planWorldMass raws w =
-    foldr (\g acc -> IRIf g acc const0)
-          (mulFactor (pwFactor w) (prodMass (pwCons w) (pwPairs w)))
+planWorldMass :: Semiring -> PlanRaws -> PlanWorld -> IRExpr
+planWorldMass sr raws w =
+    foldr (\g acc -> IRIf g acc (srZero sr))
+          (withMasses [ m | WMass m <- pwFactors w ] (prodMass (pwCons w) (pwPairs w)))
           (pwGuards w)
   where
-    prodMass []  []  = const1
-    prodMass cs prs = foldr1 (IROp OpMult) (map leafMass cs ++ map pairMass prs)
-    leafMass (PLeafCon _ [])       = const0
-    leafMass (PLeafCon base slots) = foldr1 (IROp OpPlus) (map (slotRead base) slots)
-    leafMass (PLeafIvl base lo hi) =
-      let diff = IROp OpSub (cdfAt base hi) (cdfAt base lo)
-      in case (lo, hi) of
-           -- one-sided intervals cannot go negative; only a runtime-empty
-           -- two-sided intersection needs the clamp (mirrors measureSet)
-           (WFinite _, WFinite _) -> IRIf (IROp OpGreaterThan diff const0) diff const0
-           _                      -> diff
+    -- carried group masses first, left-nested, then the constraint product;
+    -- identities dropped
+    withMasses [] p = p
+    withMasses ms p = let f = foldl1 (srTimes sr) ms in if p == srOne sr then f else srTimes sr f p
+    prodMass []  []  = srOne sr
+    prodMass cs prs = foldr1 (srTimes sr) (map leafMass cs ++ map pairMass prs)
+    -- A slot's logit is a softmax probability, i.e. a linear quantity with no
+    -- native log form: summed linearly, then carried into the semiring.
+    leafMass (PLeafCon _ [])       = srZero sr
+    leafMass (PLeafCon base slots) = fromLinearSR sr (foldr1 (IROp OpPlus) (map (slotRead base) slots))
+    leafMass (PLeafIvl base lo hi) = case (lo, hi) of
+      -- one-sided intervals cannot go negative; only a runtime-empty
+      -- two-sided intersection needs the clamp (mirrors measureSet). The log
+      -- difference is only defined for a non-empty interval, so there the
+      -- test reads the bounds themselves (the CDF is increasing).
+      (WFinite l, WFinite h)
+        | srLogSpace sr ->
+            IRIf (IROp OpGreaterThan h l) (measureDiffSR sr (cdfAt base hi) (cdfAt base lo)) (srZero sr)
+        | otherwise ->
+            let diff = measureDiffSR sr (cdfAt base hi) (cdfAt base lo)
+            in IRIf (IROp OpGreaterThan diff const0) diff const0
+      -- P(leaf > l) is Phi(-z): the upper tail read directly rather than as a
+      -- complement, which in log space would lose the tail to 1 - exp(x)
+      (WFinite l, WPosInf) | srLogSpace sr ->
+        distCumulative sr IRNormal (IROp OpSub const0 (zScore base l))
+      _ -> measureDiffSR sr (cdfAt base hi) (cdfAt base lo)
     leafMass (PLeafPt base v cov gs) =
-      let dens = IROp OpDiv (IRDensity IRNormal Linear (zScore base v)) (vecRead (base + 1))
-          scaled = if cov == const1 then dens else IROp OpMult dens (IRUnaryOp OpAbs cov)
-      in foldr (\g acc -> IRIf g acc const0) scaled gs
+      let dens = scaledNormalDensity sr (zScore base v) [vecRead (base + 1)]
+          scaled = if cov == const1 then dens else srTimes sr dens (fromLinearSR sr (IRUnaryOp OpAbs cov))
+      in foldr (\g acc -> IRIf g acc (srZero sr)) scaled gs
     -- P(leaf@a > leaf@b) for independent Gaussians: Phi((mu_a - mu_b) / sqrt(s_a^2 + s_b^2))
     pairMass (a, b) =
       let num = IROp OpSub (vecRead a) (vecRead b)
@@ -7484,10 +7521,10 @@ planWorldMass raws w =
           var = IROp OpPlus (sq (vecRead (a + 1))) (sq (vecRead (b + 1)))
           -- sqrt spelled as exp(log/2): the IR has no sqrt primitive
           sd = IRUnaryOp OpExp (IROp OpMult (IRConst (VFloat 0.5)) (IRUnaryOp OpLog var))
-      in IRCumulative IRNormal Linear (IROp OpDiv num sd)
-    cdfAt _ WNegInf = const0
-    cdfAt _ WPosInf = const1
-    cdfAt base (WFinite e) = IRCumulative IRNormal Linear (zScore base e)
+      in distCumulative sr IRNormal (IROp OpDiv num sd)
+    cdfAt _ WNegInf = srZero sr
+    cdfAt _ WPosInf = srOne sr
+    cdfAt base (WFinite e) = distCumulative sr IRNormal (zScore base e)
     zScore base e = IROp OpDiv (IROp OpSub e (vecRead base)) (vecRead (base + 1))
     slotRead base (i, g)
       | g == constTrueIR = vecRead (base + i)
@@ -7568,7 +7605,7 @@ planWitnessApply meta0 cumulative rt l lResolvedCN lambdaBodyCN tag v sample
       -- The traversal may open further neural reads ('planOpenBinding'); the
       -- final state says where each one's logits live.
       let runPlan merge = do
-            (ws, st) <- runStateT (planInvert meta env bodyExpr target) (emptyPlanState nnRaw (getSize plan) merge)
+            (ws, st) <- runStateT (planInvert meta env bodyExpr target) (emptyPlanState (semiringOf meta) nnRaw (getSize plan) merge)
             return (filter (not . pwUnsat) <$> ws, psRaws st)
       supply0 <- get
       (grouped, clashed) <- pass $ do
@@ -7582,12 +7619,12 @@ planWitnessApply meta0 cumulative rt l lResolvedCN lambdaBodyCN tag v sample
           case mapMaybe pwOverCoupled worlds of
            (why:_) -> return (Left (Just why))
            [] -> do
-            measured <- measurePlanWorlds raws worlds
+            measured <- measurePlanWorlds (semiringOf meta) raws worlds
             -- Full-ANY marginal short-circuit, mirroring setWitnessApply.
             if cumulative
               then return (Right measured)
               else return (Right (zipResult (\anyVal e -> IRIf (IRUnaryOp OpIsAny sample) anyVal e)
-                                    (mass const1) measured))
+                                    (mass (srOne (semiringOf meta))) measured))
   | otherwise = return (Left Nothing)
   where
     isArrow (TArrow _ _) = True

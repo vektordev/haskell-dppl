@@ -111,6 +111,60 @@ planEngineDifferentialTests = do
     , let planEnv  = compile defaultCompilerConfig{materializationCardinality = 0} p
     , let denseEnv = compile defaultCompilerConfig p ]
 
+-- | The plan engine's world measure under 'logSpace' (task
+-- worlds-measure-unification): at budget 0, wherever the linear compile of a
+-- neural corpus program answers, the log-space compile must answer exp(log p)
+-- = p at the same dimension. The plan engine reads raw logits, so it is
+-- log-space-correct on its own; the dense neural path is not (its read-logits
+-- reads stay linear), which is why this compares budget-0 compiles only and
+-- why 'Corpus.LogSpaceMatchesLinear' (which runs the default budget) leaves
+-- neural programs out. A program the plan engine does not answer at budget 0
+-- is skipped, as in 'planEngineDifferentialTests', and so are the programs
+-- listed in 'readLogitsLinearOnly'.
+planEngineLogSpaceTests :: IO TestTree
+planEngineLogSpaceTests = do
+  files <- getAllTestFiles
+  cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
+  let entries = [ (takeBaseName pplPath, p, tcs)
+                | ((pplPath, _), (p, (bs, slow, _ef, tcs))) <- zip files cases
+                , not slow, Interpreter `elem` bs, not (null (neurals p))
+                , takeBaseName pplPath `notElem` readLogitsLinearOnly ]
+  return $ testGroup "PlanEngineLogSpaceMatchesLinear"
+    [ testProperty n (once $ conjoin (map (logMatchesLinear p linEnv logEnv) tcs))
+    | (n, p, tcs) <- entries
+    , let linEnv = compile defaultCompilerConfig{materializationCardinality = 0} p
+    , let logEnv = compile defaultCompilerConfig{materializationCardinality = 0, logSpace = True} p ]
+  where
+    logMatchesLinear p linEnv logEnv tc = case tc of
+      ProbTestCase  name sample params _ -> cmp (name ++ " p" ++ show (sample, params)) (\c -> runProbC  p c params sample)
+      CumulTestCase name sample params _ -> cmp (name ++ " cdf" ++ show (sample, params)) (\c -> runIntegC p c params sample)
+      _ -> property True
+      where
+        cmp name run = ioProperty $ do
+          lin <- forceResult (linEnv >>= run)
+          lg  <- forceResult (logEnv >>= run)
+          return $ case (lin, lg) of
+            (Left _, _) -> property True
+            (Right (VProbDim p1 d1), Right (VProbDim lp2 d2)) ->
+              counterexample (name ++ ": linear " ++ show (p1, d1) ++ " /= exp of log-space " ++ show (exp lp2, d2))
+                (abs (p1 - exp lp2) < probTolerance && (p1 == 0 || d1 == d2))
+            _ -> counterexample (name ++ ": linear " ++ show lin ++ " vs log-space " ++ show lg) False
+
+-- | Neural corpus programs whose budget-0 probability still reads the network
+-- through its generated read-logits inference function (@<nn>_auto.forward@,
+-- 'SPLL.AutoNeural'), which answers a linear probability under 'logSpace' too:
+-- the one subsystem the log-space task's invasiveness verdict left linear-only
+-- that task worlds-measure-unification did not cover. Every entry was checked
+-- to call @_auto.forward@ in its emitted probability function. Determined by
+-- running the property over every neural program (63 programs that failed it
+-- before that task pass now; these 13 fail for this reason alone).
+readLogitsLinearOnly :: [String]
+readLogitsLinearOnly =
+  [ "observeDiscretePoE", "eitherMarginalNeural", "planOverBudgetIntMult"
+  , "showcase_either_fromLeft", "showcase_either_marginal_discrete", "showcase_either_neural"
+  , "autoNeuralProbDiscreteSparse", "autoNeuralProbDiscrete", "autoNeuralProbMnistAdd"
+  , "agreementBareEqualityLetBound", "agreementBareEqualityInline", "mNistAdd3", "mNistAdd4" ]
+
 -- | The corpus programs whose default compile took the plan engine until every
 -- read was tagged, and which now enumerate densely by default. They were
 -- written to exercise the plan engine, so at budget 0 they must answer. Three

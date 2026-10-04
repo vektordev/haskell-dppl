@@ -17,10 +17,9 @@
 --
 --   * a combinator below that already routes the value through a 'Semiring'
 --     operator (density/mass/detP/prodP/mixP/...), or
---   * 'unsafeLinearP', the one sanctioned escape hatch for the handful of
---     subsystems that are deliberately linear-only regardless of 'logSpace'
---     (set-witness continuous measurement, plan-guided lazy enumeration,
---     AutoNeural's read-logits logit reads -- see each call site's comment), or
+--   * 'unsafeLinearP', the one sanctioned escape hatch for a subsystem that
+--     is deliberately linear-only regardless of 'logSpace' (none uses it
+--     today -- see its own comment), or
 --   * 'sealP', for the smaller number of call sites in IRCompiler.hs that
 --     build a bespoke 'PResult' shape none of the combinators fit, out of
 --     values that already went through a Semiring operator or a trusted
@@ -40,7 +39,7 @@ module SPLL.Semiring (
   Semiring(..), mkSemiring, linearSemiring, logSemiring, semiringGroupInfix,
   maxLinearSemiring, maxLogSemiring,
   semiringSuffix,
-  negInfIR, logSumExpIR, logSubExpIR, maskSR,
+  negInfIR, logSumExpIR, logSubExpIR, maskSR, fromLinearSR, measureDiffSR, sumAllSR,
   distDensity, distCumulative, scaledNormalDensity,
   -- * IR boolean/constant helpers
   const0, const1, constTrueIR, constFalseIR, notIR, orIR, andIR,
@@ -61,6 +60,7 @@ import SPLL.Lang.Types
 import SPLL.Lang.Lang (multiValueToValueList)
 import Utils
 import Control.Monad.Writer.Lazy
+import Control.Monad (foldM)
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
 import qualified Data.Set as Set
 
@@ -101,9 +101,10 @@ setVariables = tell
 newtype P = P { unP :: IRExpr }
 
 -- | Escape hatch for subsystems that are deliberately linear-only regardless
--- of 'logSpace' (set-witness continuous measurement, plan-guided lazy
--- enumeration, AutoNeural's read-logits reads). Named distinctly from 'sealP' so
--- a grep for this name alone is the "which subsystems ignore logSpace" audit.
+-- of 'logSpace'. Named distinctly from 'sealP' so a grep for this name alone
+-- is the "which subsystems ignore logSpace" audit -- which currently comes up
+-- empty: its last users, the set-witness and plan-guided world measures,
+-- became semiring-generic in task worlds-measure-unification.
 unsafeLinearP :: IRExpr -> P
 unsafeLinearP = P
 
@@ -197,12 +198,13 @@ anyGuardedDim sample = IRIf (IRUnaryOp OpIsAny sample) const0 const1
 -- hard-coding the linear ones, so the log-space toggle is a swap of this one
 -- value rather than a second code path threaded through every case.
 --
--- NOT semiring-aware (see the task's written invasiveness verdict): the
--- ReadNN/AutoNeural neural read-logits network's own logit-read construction, and the
--- set-witness/plan-enum continuous measurement machinery in IRCompiler.hs
--- (both build PResult leaves from their own bespoke IRExpr formulas, routed
--- through 'unsafeLinearP', not through this vocabulary). Those remain
--- linear-only under 'logSpace'.
+-- NOT semiring-aware (see the log-space task's written invasiveness
+-- verdict): the ReadNN/AutoNeural read-logits network's own inference
+-- function (@<nn>_auto@), which answers a linear probability under 'logSpace'
+-- too. The set-witness and plan-guided world measures in IRCompiler.hs were
+-- the other linear-only subsystem until task worlds-measure-unification,
+-- which moved them onto this vocabulary ('fromLinearSR', 'measureDiffSR',
+-- 'sumAllSR' are the pieces they needed).
 data Semiring = Semiring
   { srLogSpace :: Bool                        -- ^ picks the 'LogSpace' field on nodes like 'IRDensity' (@Log@ vs @Linear@), where the operator alone isn't enough
   , srReduceOp :: ReduceOp                    -- ^ picks the IR *reduction* 'enumSumP' folds an enumerated support with -- see 'srPlus' below for why this can't just read off that function
@@ -350,6 +352,39 @@ logSubExpIR a b =
 -- @IRIf cond const1 const0@ linear 1/0 mask to either semiring.
 maskSR :: Semiring -> IRExpr -> IRExpr
 maskSR sr cond = IRIf cond (srOne sr) (srZero sr)
+
+-- | A plain linear quantity -- a |change-of-variables| factor, a sum of
+-- softmax slot probabilities -- carried into the semiring's representation:
+-- itself in linear space, its log in log space. For values the semiring has
+-- no native leaf for; where one exists ('distDensity', 'distCumulative',
+-- 'scaledNormalDensity') prefer it, since it keeps a deep tail's precision.
+fromLinearSR :: Semiring -> IRExpr -> IRExpr
+fromLinearSR sr x = if srLogSpace sr then IRUnaryOp OpLog x else x
+
+-- | The measure of a set difference @a \ b@ with @b@ inside @a@ -- a CDF
+-- difference @F(hi) - F(lo)@. Deliberately not 'srMinus': that is the
+-- semiring's AnyExcept operator, which the max-product families leave
+-- undefined (max has no inverse), whereas an interval's mass is an integral
+-- in every family. So this reads only the arithmetic domain. In log space
+-- the operands are read more than once: pass cheap (let-bound) expressions.
+measureDiffSR :: Semiring -> IRExpr -> IRExpr -> IRExpr
+measureDiffSR sr a b = if srLogSpace sr then logSubExpIR a b else IROp OpSub a b
+
+-- | The semiring sum ('srPlus') of a list of alternatives, for a world set
+-- summed outside 'mixP' (whose dim/flag bookkeeping it does not need). Linear
+-- sum-product spells it as a right-nested 'OpPlus' chain reading each operand
+-- once. Every other family's 'srPlus' (log-sum-exp, max) reads its operands
+-- more than once, so there the operands and each partial sum are let-bound,
+-- keeping the emitted size linear in the number of alternatives.
+sumAllSR :: Semiring -> [IRExpr] -> CompilerMonad IRExpr
+sumAllSR sr [] = return (srZero sr)
+sumAllSR sr xs | srReduceOp sr == ROpAdd = return (foldr1 (IROp OpPlus) xs)
+sumAllSR sr (x:xs) = do
+    x' <- bind x
+    foldM (\acc y -> bind y >>= bind . srPlus sr acc) x' xs
+  where
+    bind e@(IRVar _) = return e
+    bind e = do v <- mkVariable "world_mass"; setVariables [(v, e)]; return (IRVar v)
 
 -- | The native log-pdf/log-cdf leaf for a builtin distribution when @sr@ is
 -- log-space, or the ordinary linear leaf otherwise. Distinct from

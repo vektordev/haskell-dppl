@@ -139,8 +139,7 @@ right-hand side convolving the bound variable with fresh randomness (`let y = x 
 `(x + Normal) > 0.0` refuses. Corpus: `test/cases/set-witness/setWitnessNestedLet*`
 (seven programs, incl. the two-sided, chained, `observe` and
 point-valued-arm shapes); refusals pinned in `TestRejection`'s
-`SetWitnessNestedLet` group. The engine stays linear-only, so these programs
-are on `Spec.logSpaceUncoveredPrograms` like their single-`let` siblings.
+`SetWitnessNestedLet` group.
 
 ### Residue factors of a transported subtree
 

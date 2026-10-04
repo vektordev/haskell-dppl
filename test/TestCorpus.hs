@@ -146,16 +146,14 @@ corpusTests probPool cdfPool = localOption (QuickCheckMaxRatio 20) $ testGroup "
   , testProperty "TopKNeverInflatesCdf" (forAllNamedIn cdfPool (checkTopKNeverInflatesCdf topK01Envs defaultEnvs))
   -- task log-space-probability-computation: compiling with logSpace=True makes
   -- p()/cdf() return a log-probability instead of a linear one, so exp(actual)
-  -- must reproduce the same corpus expectation as the linear compile. Excludes
-  -- the programs whose inference routes through a subsystem the task
-  -- deliberately left linear-only (set-valued witnesses / plan-guided lazy
-  -- enumeration -- see the Semiring doc comment in IRCompiler.hs): those
-  -- subsystems ignore the logSpace flag and keep returning a linear value, so
-  -- exp(already-linear) would not match by construction. This is itself the
-  -- task's invasiveness evidence, not a bug -- see the task doc/design update.
+  -- must reproduce the same corpus expectation as the linear compile. Over the
+  -- whole pool: the set-valued-witness programs that used to be excluded here
+  -- (their worlds were measured linear-pinned) are measured in the ambient
+  -- semiring since task worlds-measure-unification. (The pool holds no neural
+  -- program, so the plan engine's worlds are checked by End2End's
+  -- PlanEngineLogSpaceMatchesLinear instead.)
   , testProperty "LogSpaceMatchesLinear"
-      (forAllNamedIn (filter ((`notElem` logSpaceUncoveredPrograms) . fst) probPool)
-        (checkLogSpaceMatchesLinear logEnvs))
+      (forAllNamed (checkLogSpaceMatchesLinear logEnvs))
   -- task topk-logspace-unsound: logSpace combined with topK used to discard all
   -- probability mass (accProb/TOP_K_CUTOFF arithmetic was hardcoded linear, so
   -- every branch compared a log-probability against a linear threshold and was
@@ -163,11 +161,8 @@ corpusTests probPool cdfPool = localOption (QuickCheckMaxRatio 20) $ testGroup "
   -- against the corresponding LINEAR topK compile at the same threshold, not
   -- against the (topK-off) .tst expectations, since topK is a real pruning
   -- optimisation whose own linear-mode result is the correct oracle here.
-  -- Reuses logSpaceUncoveredPrograms: the set-witness/plan-enum subsystems it
-  -- excludes stay linear-only regardless of topK.
   , testProperty "TopKLogSpaceMatchesLinear"
-      (forAllNamedIn (filter ((`notElem` logSpaceUncoveredPrograms) . fst) probPool)
-        (checkTopKLogSpaceMatchesLinear topK005LogEnvs topK005Envs))
+      (forAllNamed (checkTopKLogSpaceMatchesLinear topK005LogEnvs topK005Envs))
   -- task multi-path-recovery-unmaterialized-crash: the IROptimizer must not be
   -- load-bearing for whether a compiled probability function is even runnable.
   -- That ticket's second witness (`let x = Uniform in (x, x+x)`) crashed with
@@ -222,86 +217,6 @@ checkProbTestCasesWithBC envs n (p, inp, params, expected) = ioProperty $ do
       counterexample (show a ++ "/=" ++ show out) (property $ abs (a - out) < probTolerance)
       .&&. (a === 0 .||. d === outDim)
     _ -> return $ counterexample "Return type was no tuple" False
-
--- | Corpus programs whose inference reaches a subsystem the log-space task
--- deliberately left linear-only (set-valued witnesses, i.e. 'invertToWorlds'/
--- 'measureWorld'/'measureSet'/'cdfAtBound' -- programs whose observation
--- cannot be point-inverted onto the bound variable): those always compute a
--- linear value regardless of the 'logSpace' config flag (see the Semiring doc
--- comment and the 'linearSemiring'-pinned call sites in IRCompiler.hs), so
--- 'checkLogSpaceMatchesLinear' fails on them by construction --
--- exp(already-linear-not-log) is not the corpus expectation. This list was
--- determined empirically (not guessed) by running the property against the
--- WHOLE interpreter-routed non-neural corpus pool with a throwaway diagnostic
--- harness and recording every mismatch; it IS the invasiveness evidence the
--- task's acceptance criteria ask for, and every mismatch was a value
--- disagreement, never a crash. No plan-guided-lazy-enumeration
--- ("planEnum*"/shared-latent) corpus program appears here -- every one of
--- those already routes through the log-aware core combinators and passes.
-logSpaceUncoveredPrograms :: [String]
-logSpaceUncoveredPrograms =
-  [ "letProbIntervalPair", "letProbIf", "letProbCmp", "letProbAbsNormal"
-  , "setWitnessTupleDisjointFields", "letBoundEitherDestructure"
-  , "eitherIfDeconstructObserve", "observeKeywordTruncated", "showcase_observe_inequality"
-  , "observeTwoSidedInterval", "observeTwoSidedIntervalAnd", "observeDisjointTails"
-  -- task set-witness-nested-let-classifier: the nested-let family inverts
-  -- through an inner binding but is measured by the same linear-pinned
-  -- measureWorld/measureSet, so it is uncovered for the same reason.
-  , "setWitnessNestedLetShift", "setWitnessNestedLetDecreasing", "setWitnessNestedLetRename"
-  , "setWitnessNestedLetTwoSided", "setWitnessNestedLetChain", "setWitnessNestedLetObserve"
-  , "setWitnessNestedLetPointArm"
-  -- task set-witness-interval-partial-inverse: interval transport through
-  -- monotone InjF steps (and its image clamp), measured by the same linear
-  -- measureSet.
-  , "setWitnessTransportExpNegBound"
-  , "setWitnessTransportExpLt"
-  , "setWitnessTransportExpTwoSided"
-  , "setWitnessTransportExpNested"
-  , "setWitnessTransportExpOfNeg"
-  , "setWitnessTransportPlus"
-  , "setWitnessTransportPlusTwoSided"
-  , "setWitnessTransportMultNeg"
-  , "setWitnessTransportMultPos"
-  , "setWitnessTransportDouble"
-  , "setWitnessTransportNeg"
-  , "setWitnessTransportLog"
-  -- task set-witness-transport-drops-sibling-field-constraint: a point
-  -- transport through a field constructor now carries the subtree's residue
-  -- as a world factor, measured by the same linear-pinned measureWorld.
-  , "setWitnessSiblingConst", "setWitnessSiblingMirror", "setWitnessSiblingFresh"
-  , "setWitnessSiblingEither", "setWitnessSiblingCons", "setWitnessSiblingNested"
-  , "setWitnessSiblingTwoOcc", "setWitnessSiblingNestedLet", "setWitnessSiblingBoolAny"
-  , "setWitnessSiblingAdt"
-  -- task continuous-recursive-gate-witness-failure: the gated value returned
-  -- as itself is letProbAbsNormal's shape, measured by the same linear-pinned
-  -- world sum; its p(0.0) row (atom vs density, dim 0 wins) is where the
-  -- mismatch shows.
-  , "gatedContinuousTruncated"
-  -- task affine-gaussian-closure-lost-across-let-bindings: s1 and s2 are
-  -- integrated out as affine Gaussian forms, but the threshold on s3 is still
-  -- measured by the linear-pinned set-witness world sum.
-  , "affineChainThreshold"
-  -- task set-witness-exp-equality-guard-vanyexcept-crash: the constant lies
-  -- outside exp's image, so the False outcome is the certain WFull world,
-  -- whose linear-pinned 'measureSet' mass is the value queried. (Its siblings
-  -- setWitnessEqualityThroughExp/Affine measure only the complement world,
-  -- which goes through the ordinary semiring-aware VAnyExcept split, and pass.)
-  , "setWitnessEqualityThroughExpOffImage"
-  -- task world-residual-factor-delegation: an x-free subtree drawing fresh
-  -- randomness is a world factor, measured by the same linear-pinned
-  -- measureWorld.
-  , "letProbFreshBranch", "letProbFreshBranchAtom", "letProbFreshCondition"
-  , "letProbFreshBranchTuple", "setWitnessNestedLetFreshBranch"
-  , "fuzzLetWitnessSetValuedFst", "letBoundIfConditionFreshDraw"
-  -- task sampling-matches-pdf-continuous-equality-density: the False outcome
-  -- of a continuous `==` meeting an interval is a 'WExcept' over that
-  -- interval, whose mass is the interval's linear-pinned CDF difference.
-  -- (The bare complement 'WExcept WFull' keeps the semiring-aware split, so
-  -- observeContinuousEqualsLetBound and the complement-of-a-complement
-  -- setWitnessContinuousEquals{Chain,Twice} pass.)
-  , "setWitnessContinuousEqualsThenInterval", "setWitnessIntervalThenContinuousEquals"
-  , "setWitnessNestedLetContinuousEquals"
-  ]
 
 checkLogSpaceMatchesLinear :: CompiledPrograms -> String -> (Program, IRValue, [IRValue], (IRValue, IRValue)) -> Property
 checkLogSpaceMatchesLinear envs n (p, inp, params, expected) = ioProperty $ do

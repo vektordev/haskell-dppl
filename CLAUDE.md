@@ -488,7 +488,7 @@ a continuous point is a density, and a mass minus a density is the mass, so
 removing a point from a continuous set costs nothing; a discrete point's mass
 is subtracted. `WExcept WFull p` is measured exactly as the sentinel was
 (marginal minus point, in the ambient semiring); a proper subset minus a
-point is linear-pinned like the rest of the engine.
+point likewise, like every world measure since task worlds-measure-unification.
 
 An `==` whose bound-variable operand is not the bare occurrence (`exp x ==
 1.0`, `x * 2.0 + 1.0 == c`) is split by `equalityWorlds` before the point
