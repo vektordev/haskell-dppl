@@ -3140,8 +3140,14 @@ toIRInference meta True e@(Expr TypeInfo {tags=_, rType=rt} (InjF (Named _) para
   -- Check whether the value of the function is less than the sample
   expr <- toIRGenerate meta e
   return (mass (compareValueExpr (semiringOf meta) rt expr sample))
+-- Exactly one probabilistic operand, as 'theProbIndex' presumes: a
+-- comparison of two random operands, or of a deterministic one against an
+-- unmeasurable (Bottom) one -- @False == (Uniform > Uniform)@ -- is left to
+-- the arms below, and was an uncaught 'error' here (task
+-- single-prob-param-injf-with-no-probabilistic-operand).
 toIRInference meta cumulative (Expr TypeInfo {tags=_, chainName=cnAE} (InjF (Named name) params)) sample
-  | hasAnyExcept (adtDecls meta) name = do
+  | hasAnyExcept (adtDecls meta) name
+  , countProbParams params == 1 = do
   -- FPair of the InjF with unique names
   FPair fwd inversions <- instantiate mkVariable (adtDecls meta) name
   let inVars = inputVars fwd
@@ -3317,8 +3323,17 @@ toIRInference meta cumulative (Expr TypeInfo {tags=_, rType=rt} (InjF (Named nam
 -- Enumerate-both discrete path for forward-only binary InjFs (and/or). No point
 -- inverse exists, so loop the |L|x|R| grid and keep cells where forward(l,r) == sample,
 -- accumulating pLeft(l) * pRight(r). Mirrors the cumulative double-enum path below.
+--
+-- Also for @==@ of two random enumerable operands (@camNN img == depthNN
+-- depth@): its inverse on the False polarity is the 'VAnyExcept' set, which
+-- the invertible grid below would hand to 'IRIsPossible' and the text
+-- backends cannot render, so it is compared forward here instead. Before the
+-- 'hasAnyExcept' arm above required one probabilistic operand, this shape died
+-- there ("More than one probabilistic argument", task
+-- bare-equality-of-two-neural-reads-crashes, whose O(V) agreement fusion this
+-- O(V^2) grid is not).
 toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named name) [left, right])) sample
-  | isForwardOnly (adtDecls meta) (resolveInjF rt name)
+  | (isForwardOnly (adtDecls meta) (resolveInjF rt name) || hasAnyExcept (adtDecls meta) name)
     && isEnumerable (tags (getTypeInfo left)) && isEnumerable (tags (getTypeInfo right))
     && pType (getTypeInfo left) /= Deterministic && pType (getTypeInfo right) /= Deterministic = do
   let resolvedName = resolveInjF rt name
@@ -4891,7 +4906,21 @@ setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag planDiag v sam
   -- inversion as a whole: the fallback, when there is one, still gets its turn
   -- (before refusals were a channel, such a sub-compile's lazy 'error' was
   -- dropped with the failed attempt's bindings).
-  (worldsM, worldBinds) <- lift (runWriterT (invertToWorlds meta occs bodyExpr target))
+  -- An interval is a set of SCALARS: a cumulative query of a structured value
+  -- (a list, an Either, an ADT) has no interval to transport, and the
+  -- membership guards compared structured values with @<@ -- @head (draw v0 =
+  -- Normal in if v0 < -0.575 then [-2] else [4]) < -5@ reached here through
+  -- @head@'s inverse as the interval @(-inf, -5 : ANY]@ on the list, and the
+  -- constant folder crashed on @[-2] > -5 : ANY@ (task
+  -- optimizer-folds-comparison-on-lists). Such a query takes the
+  -- no-inverse path below: the fallback, else the cumulative refusal.
+  let intervalTarget = case rt of
+        TFloat -> True
+        TInt   -> True
+        TBool  -> True
+        _      -> False
+  (worldsM, worldBinds) <- if cumulative && not intervalTarget then return (Nothing, []) else
+    lift (runWriterT (invertToWorlds meta occs bodyExpr target))
     `catchError` (\r -> if isJust fallback then return (Nothing, []) else throwError r)
   when (isJust worldsM) (setVariables worldBinds)
   case worldsM of

@@ -702,18 +702,17 @@ knownAdmissionCrashes =
   -- form checks, the generate-backed enumeration guard, the Normal/LogNormal
   -- parameter extractors) are gone from this list: they are absent variants
   -- with a recorded reason now, which the oracle buckets as refusals.
-  [ ("More than one probabilistic argument",     "bare-equality-of-two-neural-reads-crashes")
-  -- Found once fuzz-admission-oracle-bugs' item 2 and 3 exceptions were lifted
-  -- (they had been hiding these under the same messages), and filed rather
-  -- than fixed in that task.
-  , ("Comparison not implemented for type: TArrow", "function-value-compared-in-probability-mode")
-  , ("was selected for single-probabilistic-parameter inference, but no parameter is probabilistic",
-                                                 "single-prob-param-injf-with-no-probabilistic-operand")
+  -- Found once fuzz-admission-oracle-bugs' item 3 exception was lifted (it had
+  -- been hiding this under the same message), and filed rather than fixed in
+  -- that task.
+  [ ("Comparison not implemented for type: TArrow", "function-value-compared-in-probability-mode")
   ]
+  -- bare-equality-of-two-neural-reads-crashes ("More than one probabilistic
+  -- argument") and single-prob-param-injf-with-no-probabilistic-operand left
+  -- with the AnyExcept arm's one-probabilistic-operand guard.
   -- The nine families of fuzz-admission-oracle-bugs and fuzz-let-witness-bugs
   -- item 4 ("inversions solving for") left this list when they were fixed;
-  -- their repros are in the ordinary corpus (or, for item 8a, a known-issues
-  -- pin answering a refusal).
+  -- their repros are in the ordinary corpus.
 
 partitionKnownAdmission :: [Check] -> ([(Check, String)], [Check])
 partitionKnownAdmission = foldr step ([], [])
@@ -2374,20 +2373,16 @@ admissionOracleTests = testGroup "Admission oracle"
       assertEqual "helper outcomes" [(ModeGenerate, "value"), (ModeProbability, "value"), (ModeIntegrate, "value")]
         (outcomesOf "shift" rep)
   , testCase "an admitted function the IR compiler crashes on is a violation naming it" $ do
-      -- test/cases/known-issues/agreementBareEqualityInline (docs task
-      -- bare-equality-of-two-neural-reads-crashes): admitted, and the IR
-      -- compiler dies on an internal invariant (two probabilistic operands
-      -- where its dispatch counted one) rather than refusing. Until
-      -- fuzz-admission-oracle-bugs this case used item 7's curried lambda,
-      -- which compiles now.
-      rep <- oracleOn (unlines
-        [ "neural camNN   :: (Symbol -> Int) of [0, 1, 2]"
-        , "neural depthNN :: (Symbol -> Int) of [0, 1, 2]"
-        , "main img depth = camNN img == depthNN depth" ])
+      -- Docs task function-value-compared-in-probability-mode: admitted, and
+      -- the IR compiler dies on an internal invariant (a CDF comparison built
+      -- for an arrow type) rather than refusing. Earlier versions of this case
+      -- used fuzz-admission-oracle-bugs item 7's curried lambda and then the
+      -- bare equality of two neural reads, both of which compile now.
+      rep <- oracleOn "main = \\v0 -> v0 0 (if False then (if Uniform < 0.894 then \\v1 -> Uniform else \\v2 -> 0.0) else head ((\\v3 -> [\\v4 -> Uniform]) 1.0))"
       case [ v | v@(Check "main" _ _ (Crash _)) <- violations rep ] of
         (Check _ pt _ (Crash msg) : _) -> do
           assertBool ("admitted: " ++ show pt) (admitted pt)
-          assertBool msg ("More than one probabilistic argument" `isInfixOf` msg)
+          assertBool msg ("Comparison not implemented for type: TArrow" `isInfixOf` msg)
         _ -> assertFailure ("expected a crash on main, got " ++ show (violations rep))
   , testCase "an admitted function the IR compiler refuses is a refusal, and generate survives" $ do
       -- test/cases/known-issues/correlatedGaussianLetSharesLatent: admitted,

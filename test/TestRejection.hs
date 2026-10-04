@@ -869,6 +869,17 @@ refusedVariantTests = testGroup "RefusedVariant"
             case runProb defaultCompilerConfig prog [VSymbol "a"] (VFloat 0.5) of
               Left e -> assertBool ("the probability refusal gives no reason: " ++ e) ("no compiled probability function" `isInfixOf` e)
               Right v -> assertFailure ("expected no probability function, got " ++ show v)
+  , testCase "a cumulative query of a list-valued draw is refused, not folded as a list comparison" $
+      -- Task optimizer-folds-comparison-on-lists (found by the admission
+      -- oracle): `head`'s inverse handed the set-witness engine the interval
+      -- (-inf, -5 : ANY] on the list, and the constant folder crashed
+      -- comparing [-2] against it. An interval is a set of scalars; the
+      -- structured CDF is refused, and generate survives.
+      withParsed "main = (head ((\\v0 -> if v0 < -0.575 then [-2] else [4]) Normal)) < -5" $ \prog -> do
+        let compiled = compile defaultCompilerConfig prog
+        expectVariantRefused "main" "integ" "set-valued witness construction failed for the binding of 'v0'" compiled
+        assertBool "generate went down with the refused variants"
+          (either (const False) (isJust . genFun . lookupIREnv "main") compiled)
   ]
   where setWitnessDiagnostic' = "set-valued witness construction failed for the binding of 'x'"
 

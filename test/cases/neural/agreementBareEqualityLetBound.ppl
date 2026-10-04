@@ -1,0 +1,12 @@
+neural camNN   :: (Symbol -> Int) of [0, 1, 2]
+neural depthNN :: (Symbol -> Int) of [0, 1, 2]
+main img depth =
+  draw v = camNN img in
+  draw w = depthNN depth in
+  v == w
+-- Task bare-equality-of-two-neural-reads-crashes (found by the
+-- lm-product-of-experts-decoding experiment). The bare spelling used to crash
+-- the compiler; since fuzz-admission-oracle-bugs it compiles through the
+-- O(V^2) forward grid over both domains (not yet the O(V) agreement fusion the
+-- `if v == w then True else False` spelling takes -- that part of the task is
+-- still open).
