@@ -1,0 +1,1 @@
+main = draw x = Uniform in left (x, x + Uniform)

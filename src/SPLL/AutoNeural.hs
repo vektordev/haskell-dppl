@@ -95,6 +95,7 @@ makeReadLogitsFunGroup adtDecls conf name target tag fwdDecl =
     -- keeps dense mode off them for now; recording it here is the truthful
     -- answer rather than a placeholder.
     (listToMaybe $ filter multiValueIsFinite (maybeToList tag ++ [mv | Right mv <- [autoDeriveMultiValue adtDecls target]]))
+    Nothing
     where plan = makePartitionPlan adtDecls target tag
 
 -- | Forward declaration of a neural network (NN1): a human-readable description of the

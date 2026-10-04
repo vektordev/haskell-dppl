@@ -1,3 +1,4 @@
+{-# LANGUAGE ScopedTypeVariables #-}
 -- | The observation tree, leaf slots, correlation classes, and the masked
 -- program (task @observation-mask-analysis@, design
 -- @witnessed-per-query-capability@).
@@ -6,6 +7,8 @@
 -- the slot verdicts and correlation classes on the design's W\/O\/N\/I\/C\/B\/S
 -- programs, the self-containment of every slot of the neural corpus programs,
 -- the per-mask lattice verdicts, and pruning followed by the existing pipeline.
+-- The last group is task @per-mask-variants-by-pruning@'s: the variants, the
+-- dispatcher, and the corpus-wide properties they must keep.
 module TestObservationMask (observationMaskTests) where
 
 import SPLL.Lang.Lang
@@ -16,11 +19,18 @@ import SPLL.Parser (tryParseProgram)
 import SPLL.IntermediateRepresentation
 import SPLL.Typing.PType (PType(..))
 import SPLL.Typing.RType (RType(..))
-import TestCaseParser (corpusPplPath)
+import TestCaseParser (corpusPplPath, listCorpusPplFiles)
+import SPLL.MaskVariants (variantGroupName)
+import qualified SPLL.CodeGenPyTorch
 
-import Control.Monad (forM_)
-import Data.List (find, sort)
+import Control.Exception (try, evaluate, SomeException, ErrorCall(..), fromException)
+import Control.Monad (forM, forM_, when)
+import Control.Monad.Random (evalRand)
+import Data.List (find, sort, isInfixOf, isPrefixOf, intercalate)
+import Data.Maybe (isJust, isNothing)
 import qualified Data.Set as Set
+import System.FilePath (takeBaseName, replaceExtension)
+import System.Random (mkStdGen)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, assertFailure, assertEqual, assertBool)
 
@@ -320,6 +330,291 @@ assertProbDim what res expP expD = case res of
 flatten :: Expr -> [Expr]
 flatten e = e : concatMap flatten (getSubExprs e)
 
+
+-- ---------------------------------------------------------------------------
+-- 6. Variants and the dispatcher (task per-mask-variants-by-pruning)
+-- ---------------------------------------------------------------------------
+
+-- | A corpus program that compiles to at least one per-mask variant, with the
+-- functions that have one.
+data VariantProgram = VariantProgram
+  { vpName  :: String
+  , vpProg  :: Program
+  , vpEnv   :: IREnv
+  , vpFns   :: [(String, [Slot])]   -- ^ dispatching functions and their enumerated slots
+  }
+
+-- | Every ordinary corpus program (no @slow@ header) whose compile has a mask
+-- dispatcher. The sweeps below are over exactly these.
+corpusWithVariants :: IO [VariantProgram]
+corpusWithVariants = do
+  paths <- listCorpusPplFiles
+  fmap concat $ forM paths $ \path -> do
+    tst <- readFile (replaceExtension path "tst")
+    if "slow" `elem` map (filter (/= '\r')) (lines tst) then return [] else do
+      src <- readFile path
+      case tryParseProgram path src of
+        Left _ -> return []
+        Right prog -> case (compile defaultCompilerConfig prog, marginalReport defaultCompilerConfig prog) of
+          (Right env@(IREnv groups _ _), Right report) ->
+            let bases = Set.fromList [ b | g <- groups, Just b <- [maskVariantOf g] ]
+                fns = [ (fmName r, fmEnumerated r) | r <- report, fmName r `Set.member` bases ]
+            in return [ VariantProgram (takeBaseName path) prog env fns | not (null fns) ]
+          _ -> return []
+
+-- | A query value with the slot at this accessor path replaced. 'Nothing' when
+-- the value does not have the path's shape (a different Either arm, an empty
+-- list, another constructor) -- that slot is then not there to mask.
+setSlot :: Slot -> IRValue -> IRValue -> Maybe IRValue
+setSlot [] new _ = Just new
+setSlot (Accessor c i : rest) new v = case (c, i, v) of
+  ("TCons", 0, VTuple a b) -> (\a' -> VTuple a' b) <$> setSlot rest new a
+  ("TCons", _, VTuple a b) -> VTuple a <$> setSlot rest new b
+  ("left", _, VEither (Left a)) -> VEither . Left <$> setSlot rest new a
+  ("right", _, VEither (Right a)) -> VEither . Right <$> setSlot rest new a
+  ("Cons", 0, VList (ListCont h t)) -> (\h' -> VList (ListCont h' t)) <$> setSlot rest new h
+  ("Cons", _, VList (ListCont h t)) -> setSlot rest new (VList t) >>= \tv -> case tv of
+      VList t' -> Just (VList (ListCont h t'))
+      _        -> Nothing
+  (_, _, VADT ctor fields) | ctor == c, i < length fields ->
+      (\f' -> VADT ctor (take i fields ++ [f'] ++ drop (i + 1) fields)) <$> setSlot rest new (fields !! i)
+  _ -> Nothing
+
+applyMask :: Mask -> IRValue -> Maybe IRValue
+applyMask m v = foldr (\s acc -> acc >>= setSlot s VAny) (Just v) (Set.toList m)
+
+-- | A few forward samples of a zero-parameter function, from fixed seeds.
+forwardSamples :: VariantProgram -> String -> IO [IRValue]
+forwardSamples vp fname = fmap concat $ forM [1 .. 3 :: Int] $ \seed -> do
+  r <- try (evaluate (forceValue (evalRand (runGenNamedC (vpProg vp) (vpEnv vp) fname []) (mkStdGen seed))))
+  return $ case r of
+    Right v | not (isError v) -> [v]
+    Right _ -> []
+    Left (_ :: SomeException) -> []
+  where
+    isError (VError _) = True
+    isError _ = False
+
+forceValue :: IRValue -> IRValue
+forceValue v = length (show v) `seq` v
+
+-- | Zero-parameter functions only: a forward sample needs no arguments.
+nullary :: Program -> String -> Bool
+nullary prog fname = case lookup fname (functions prog) of
+  Just (Expr _ (Lambda _ _)) -> False
+  Just _ -> True
+  Nothing -> False
+
+-- | A probability query, evaluated: 'Right' a value, 'Left' a refusal message
+-- (an 'IRError' the interpreter raised, or a compile-level 'Left'). Any other
+-- exception propagates: that is a crash.
+probQuery :: VariantProgram -> String -> IRValue -> IO (Either String IRValue)
+probQuery vp fname q = do
+  r <- try (case runProbNamedC (vpProg vp) (vpEnv vp) fname [] q of
+              Left err -> return (Left err)
+              Right v  -> Right <$> evaluate (forceValue v))
+  case r of
+    Right x -> return x
+    Left ex -> case fromException ex of
+      Just (ErrorCall msg)
+        | "Error during interpretation" `isPrefixOf` msg -> return (Left msg)
+        | Just ticket <- knownCrash msg -> return (Left (knownPrefix ++ ticket ++ ": " ++ msg))
+      _ -> ioError (userError ("crash: " ++ show (ex :: SomeException)))
+  where
+    knownCrash msg = case [ t | (needle, t) <- knownMaskCrashes, needle `isInfixOf` msg ] of
+      (t : _) -> Just t
+      []      -> Nothing
+
+-- | Crashes a masked query reaches that are filed defects of the engines, not
+-- of the dispatcher, each with its tracking docs task. A masked program is an
+-- ordinary program, so a variant can expose an engine crash its unmasked
+-- function never reached. The entry goes in the commit that fixes it.
+knownMaskCrashes :: [(String, String)]
+knownMaskCrashes =
+  [ -- `draw heard = Face .. in isFace heard` at p(False): the constructor-test
+    -- inverse's False witness reaches `isFace` as a value. Reached here by
+    -- tupleCtorTestOfSharedDraw at (False, ANY).
+    ("Parameter is not an ADT: VAnyExcept", "single-ctor-test-false-witness-crashes") ]
+
+knownPrefix :: String
+knownPrefix = "KNOWN CRASH "
+
+variantTests :: TestTree
+variantTests = testGroup "per-mask variants and the dispatcher"
+  [ testCase "W's Python has the dispatcher and the two admitted variants" $ do
+      prog <- corpusPplPath "letWitnessedSharedLatent" >>= readFile >>= parseOrFail
+      py <- pythonOf defaultCompilerConfig prog
+      -- (_, ANY) and (ANY, ANY) are admitted; (ANY, _) is the convolution.
+      assertBool "class Main__m01" ("class Main__m01(" `isInfixOf` py)
+      assertBool "class Main__m11" ("class Main__m11(" `isInfixOf` py)
+      assertBool "no class for the refused (ANY, _)" (not ("class Main__m10(" `isInfixOf` py))
+      assertBool "the dispatcher reads the mask" ("isAny(sample[0])" `isInfixOf` py)
+      assertBool "the dispatcher calls a variant" ("main__m01.forward(sample)" `isInfixOf` py)
+
+  , testCase "encode_per_function_marginals' Python is unchanged" $ do
+      -- Every slot self-contained: no variant, no dispatcher, byte-identical
+      -- to a compile that offers no variants at all.
+      prog <- corpusPplPath "encode_per_function_marginals" >>= readFile >>= parseOrFail
+      withVariants <- pythonOf defaultCompilerConfig prog
+      without <- pythonOf defaultCompilerConfig { marginalSlots = 0 } prog
+      assertEqual "emitted Python" without withVariants
+
+  , testCase "the over-budget function gets no variants and one warning" $ do
+      prog <- parseOrFail progC
+      let tight = defaultCompilerConfig { marginalSlots = 2 }
+      case compile tight prog of
+        Left err -> assertFailure err
+        Right (IREnv groups _ _) ->
+          assertEqual "variant groups" [] [ groupName g | g <- groups, isJust (maskVariantOf g) ]
+      case marginalBudgetWarnings tight prog of
+        [w] -> do
+          assertBool ("names the function: " ++ w) ("'main'" `isInfixOf` w)
+          assertBool ("names the flag: " ++ w) ("--marginalSlots" `isInfixOf` w)
+        ws -> assertFailure ("expected one warning, got " ++ show ws)
+
+  , testCase "--pruneAnyChecks collapses the dispatcher to the all-concrete body" $ do
+      prog <- parseOrFail progW
+      case compile defaultCompilerConfig { pruneAnyChecks = True } prog of
+        Left err -> assertFailure err
+        Right (IREnv groups _ _) ->
+          assertEqual "groups" ["main"] (map groupName groups)
+
+  , testCase "a variant name a user function already holds: no variants, no clash" $ do
+      let slotsW = [[Accessor "TCons" 0], [Accessor "TCons" 1]]
+          clash = variantGroupName "main" slotsW (Set.fromList [[Accessor "TCons" 1]])
+      prog <- parseOrFail (progW ++ "\n" ++ clash ++ " = 1.0")
+      case compile defaultCompilerConfig prog of
+        Left err -> assertFailure err
+        Right (IREnv groups _ _) -> do
+          assertEqual ("one group named " ++ clash) 1 (length [ () | g <- groups, groupName g == clash ])
+          assertEqual "no variant groups" [] [ groupName g | g <- groups, isJust (maskVariantOf g) ]
+
+  , testCase "writeLogits of a correlated tuple marginalises each slot through the dispatcher" $ do
+      -- makeWriteLogitsPlan queries each slot with ANY in the others, which is
+      -- exactly a masked query. (b, not b) shares b between its slots, so the
+      -- let-fold fallback refuses the per-slot marginal (b unobserved, but
+      -- read by the other slot); the variant answers it. The task's own
+      -- examples, N and B, are continuous Uniform tuples, which writeLogits
+      -- does not represent at all.
+      prog <- parseOrFail "main = draw b = Uniform < 0.5 in (b, not b)"
+      let written c = do
+            r <- try (evaluate (either (Left . id) (Right . forceValue) (runWriteLogits c prog "main" [])))
+            return (either (\(e :: SomeException) -> Left (show e)) id r)
+      fallback <- written defaultCompilerConfig { marginalSlots = 0 }
+      case fallback of
+        Left e -> assertBool ("the fallback refuses: " ++ e) ("cannot compute marginal" `isInfixOf` e)
+        Right v -> assertFailure ("the let-fold fallback was expected to refuse, got " ++ show v)
+      dispatched <- written defaultCompilerConfig
+      case dispatched of
+        Right (VList l) -> do
+          let xs = [ x | VFloat x <- foldr (:) [] l ]
+          assertEqual "four Bool logit slots" 4 (length xs)
+          forM_ xs $ \x -> assertBool ("every slot marginal is 0.5, got " ++ show xs) (abs (x - 0.5) < 1e-12)
+        other -> assertFailure ("writeLogits through the dispatcher: " ++ show other)
+
+  , testCase "the all-concrete body is the unmasked compile, byte for byte" $ do
+      -- Before the optimizer: the dispatcher's else-arm, under the parameter
+      -- lambdas and the query-type guard, is the body a compile without
+      -- variants produces; every other group, and every other variant of a
+      -- dispatching group, is identical outright.
+      vps <- corpusWithVariants
+      assertBool "the corpus has programs with variants" (length vps >= 30)
+      forM_ vps $ \vp -> do
+        let unopt c = either (\e -> error (vpName vp ++ ": " ++ e)) id (compileUnoptimized c (vpProg vp))
+            IREnv withGs _ _ = unopt defaultCompilerConfig
+            IREnv withoutGs _ _ = unopt defaultCompilerConfig { marginalSlots = 0 }
+        assertEqual (vpName vp ++ ": base groups")
+          (map groupName withoutGs) [ groupName g | g <- withGs, isNothing (maskVariantOf g) ]
+        forM_ (zip withoutGs [ g | g <- withGs, isNothing (maskVariantOf g) ]) $ \(g0, g) -> do
+          let same lbl f = assertEqual (vpName vp ++ "." ++ groupName g ++ " " ++ lbl)
+                             (fmap (show . fst) (f g0)) (fmap (show . fst) (f g))
+          same "gen" genFun
+          same "normal" normalFun
+          same "writeLogits" writeLogitsFun
+          let undispatched f = fmap (show . allConcreteArm . fst) (f g)
+          assertEqual (vpName vp ++ "." ++ groupName g ++ " prob") (fmap (show . fst) (probFun g0)) (undispatched probFun)
+          assertEqual (vpName vp ++ "." ++ groupName g ++ " integ") (fmap (show . fst) (integFun g0)) (undispatched integFun)
+
+  , testCase "totality per mask: every masked forward sample answers or refuses" $ do
+      vps <- corpusWithVariants
+      checked <- fmap sum $ forM vps $ \vp ->
+        fmap sum $ forM [ f | f@(n, _) <- vpFns vp, nullary (vpProg vp) n ] $ \(fname, slots) -> do
+          samples <- forwardSamples vp fname
+          fmap sum $ forM samples $ \x ->
+            fmap sum $ forM (masksOver slots) $ \m -> case applyMask m x of
+              Nothing -> return (0 :: Int)
+              Just q -> do
+                r <- try (probQuery vp fname q)
+                case r of
+                  Left (ex :: SomeException) ->
+                    assertFailure (vpName vp ++ "." ++ fname ++ " at " ++ show q ++ ": " ++ show ex)
+                  Right _ -> return 1
+      assertBool ("too few masked queries checked: " ++ show checked) (checked >= 300)
+
+  , testCase "marginalisation consistency: a finite slot summed over its domain is its ANY" $ do
+      vps <- corpusWithVariants
+      checked <- fmap sum $ forM vps $ \vp ->
+        fmap sum $ forM [ f | f@(n, _) <- vpFns vp, nullary (vpProg vp) n ] $ \(fname, slots) -> do
+          domains <- slotDomains vp fname slots
+          samples <- forwardSamples vp fname
+          fmap sum $ forM [ (x, s, dom) | x <- take 1 samples, (s, dom) <- domains ] $ \(x, s, dom) ->
+            fmap sum $ forM (masksOver (filter (/= s) slots)) $ \m ->
+              case applyMask (Set.insert s m) x of
+                Nothing -> return (0 :: Int)
+                Just qAny -> do
+                  anyR <- probQuery vp fname qAny
+                  case anyR of
+                    Right (VProbDim pAny dAny) -> do
+                      terms <- forM dom $ \v -> case applyMask m x >>= setSlot s v of
+                        Nothing -> return Nothing
+                        Just q -> probQuery vp fname q >>= \r -> return (Just r)
+                      let probs = [ p | Just (Right (VProbDim p d)) <- terms, p /= 0, d == dAny ]
+                          stray = [ t | Just t@(Right (VProbDim p d)) <- terms, p /= 0, d /= dAny ]
+                          known = [ e | Just (Left e) <- terms, knownPrefix `isPrefixOf` e ]
+                          refused = [ e | Just (Left e) <- terms, not (knownPrefix `isPrefixOf` e) ]
+                      if not (null known) then return 0 else do
+                        when (not (null refused)) $
+                          assertFailure (vpName vp ++ ": the ANY query answers but a point refuses: " ++ head refused)
+                        assertEqual (vpName vp ++ ": no point at another dim") [] (map show stray)
+                        assertBool (vpName vp ++ "." ++ fname ++ " at " ++ show qAny ++ ": "
+                                    ++ show (sum probs) ++ " summed vs " ++ show pAny)
+                          (abs (sum probs - pAny) <= 1e-9 * max 1 (abs pAny))
+                        return 1
+                    _ -> return 0
+      assertBool ("too few slot marginals checked: " ++ show checked) (checked >= 30)
+  ]
+  where
+    pythonOf conf prog = case compile conf prog of
+      Left err -> assertFailure err
+      Right env -> return (intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True env))
+
+-- | The enumerated slots of a function whose leaf has a finite domain, and the
+-- domain, read off the leaf's 'RType'.
+slotDomains :: VariantProgram -> String -> [Slot] -> IO [(Slot, [IRValue])]
+slotDomains vp fname slots = case rtypedProgram (vpProg vp) of
+  Left _ -> return []
+  Right rtyped -> case find ((== fname) . fst) (functions rtyped) of
+    Nothing -> return []
+    Just decl -> do
+      let decls = adts rtyped
+          leaves = obsLeaves (observationTree decls decl)
+      return [ (s, map valueToIRV vals)
+             | (s, e, _) <- leaves, s `elem` slots
+             , Right mv <- [autoDeriveMultiValue decls (rType (getTypeInfo e))]
+             , multiValueIsFinite mv
+             , let vals = multiValueToValueList mv
+             , not (null vals), length vals <= 64 ]
+  where valueToIRV = fmap (error "slotDomains: a closure in a finite domain")
+
+-- | The all-concrete arm of a dispatched body: under the parameter lambdas and
+-- the query-type guard, the else-arm of the dispatch. An undispatched body is
+-- returned as it is.
+allConcreteArm :: IRExpr -> IRExpr
+allConcreteArm (IRLambda n b) = IRLambda n (allConcreteArm b)
+allConcreteArm (IRIf c@(IRConformsTo _ _) b err) = IRIf c (allConcreteArm b) err
+allConcreteArm (IRIf (IRIf (IRUnaryOp OpIsAny (IRVar _)) (IRConst (VBool False)) _) _ inner) = inner
+allConcreteArm other = other
+
 -- ---------------------------------------------------------------------------
 
 observationMaskTests :: TestTree
@@ -329,4 +624,5 @@ observationMaskTests = testGroup "ObservationMask"
   , corpusSelfContainedTests
   , maskTableTests
   , pruneTests
+  , variantTests
   ]

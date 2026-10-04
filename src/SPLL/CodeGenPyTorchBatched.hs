@@ -306,7 +306,7 @@ renderConst (n, v) = case batchedVal v of
 -- runtime-raising stub per class, M4; it is now a compile-time refusal like
 -- forward/integrate, see 'renderGen').
 generateClass :: (String -> String) -> SEnv -> [(String, String)] -> [(String, Int)] -> [(String, IRExpr)] -> IRFunGroup -> Either Refusal [String]
-generateClass clsName env lut genArities genMethods (IRFunGroup name gen prob integ _ _ doc _ dom) = do
+generateClass clsName env lut genArities genMethods (IRFunGroup name gen prob integ _ _ doc _ dom _) = do
   p <- maybe (Right []) (generateMethod env lut "forward" name) prob
   i <- maybe (Right []) (generateMethod env lut "integrate" name) integ
   g <- maybe (Right []) (renderGen env lut genArities genMethods name) gen
@@ -1168,7 +1168,7 @@ hasTailDescent (IRDestruct AcTail _) = True
 hasTailDescent e                     = any hasTailDescent (getIRSubExprs e)
 
 groupMethods :: IRFunGroup -> [(String, IRExpr)]
-groupMethods (IRFunGroup n gen prob integ enc normal _ _ _) =
+groupMethods (IRFunGroup n gen prob integ enc normal _ _ _ _) =
      [(n ++ "_gen",    b) | Just (b, _) <- [gen]]
   ++ [(n ++ "_prob",   b) | Just (b, _) <- [prob]]
   ++ [(n ++ "_integ",  b) | Just (b, _) <- [integ]]

@@ -1043,86 +1043,155 @@ witnessedBindingTests = testGroup "ForwardChaining witnessed-binding query"
 -- .tst cases. Otherwise the marginal is a convolution the engine cannot
 -- compute, and the compiled probability code must refuse with a diagnostic —
 -- never crash on VAny arithmetic, never return a silent 1.0.
+--
+-- Since task per-mask-variants-by-pruning these shapes are first met by the
+-- per-mask dispatcher, which hands a masked query to the variant compiled from
+-- the masked program, or refuses it naming the mask. The let-fold guard is
+-- then the fallback for a function with no variants: one over the
+-- @--marginalSlots@ budget, a non-constructor root, a list tail. The first
+-- group pins that fallback, on the same programs, at budget 0 (no function has
+-- variants); the second pins what the dispatcher does with them by default.
 anyRefusalTests :: TestTree
 anyRefusalTests = testGroup "witnessed-inference ANY refusal"
-  [ testCase "ANY in the witnessing slot of the additive witness refuses, naming x" $
-      expectMarginalRefusal
-        "main = draw x = Uniform in draw y = x + Uniform in (x, y)"
-        (VTuple VAny (VFloat 1.0)) "x"
-  , testCase "ANY in the witnessing slot of the multiplicative witness refuses, naming x" $
-      expectMarginalRefusal
-        "main = draw x = Uniform in draw y = x * Uniform in (x, y)"
-        (VTuple VAny (VFloat 0.25)) "x"
-  , testCase "mid-chain ANY with an observed dependent slot refuses, naming y" $
-      -- z = y + u3 is observed, so recovering u3 needs y's value: a genuine
-      -- convolution. The guard must fire at the y-binding, not crash at the
-      -- z-binding's inverse arithmetic.
-      expectMarginalRefusal
-        "main = draw x = Uniform in draw y = x + Uniform in draw z = y + Uniform in (x, (y, z))"
-        (VTuple (VFloat 0.5) (VTuple VAny (VFloat 1.5))) "y"
-  -- The four below are the cases where the wildcard is not the recovered
-  -- witness itself but an OPERAND the inverse chain reads on its way to one.
-  -- Testing "is the witness ANY" evaluates that chain, so each of these used to
-  -- die in the interpreter's arithmetic or deconstruction with a raw type error
-  -- (`Minus ... (VAny, VFloat 3.0)`, `Fst is not a tuple: VAny`) instead of the
-  -- refusal -- task fc-inverse-refuses-on-any-input. 'readsAnyChain' is what
-  -- makes them reach it.
-  , testCase "ANY read by an over-determined slot's inverse arithmetic refuses, naming y" $
-      -- Both inner slots recover y (and hence x); the merged path takes the
-      -- first, whose Minus reads the wildcard slot.
-      expectMarginalRefusal
-        "main = draw x = Uniform in draw y = Uniform in (x, (x+y+3.0, x+y+2.0))"
-        (VTuple (VFloat 0.3) (VTuple VAny (VFloat 2.7))) "y"
-  , testCase "ANY in the summed slot refuses, naming x" $
-      expectMarginalRefusal
-        "main = draw x = Uniform in draw y = Uniform in (x+y, (x, y))"
-        (VTuple VAny (VTuple (VFloat 0.4) (VFloat 0.5))) "x"
-  , testCase "ANY over a shifted let's single-use binding is the marginal, not a refusal" $
-      -- Refused (naming x) until fuzz-admission-oracle-bugs: x's one use is
-      -- z's, and z's one use sits in the wildcard slot, so neither is
-      -- constrained; the answer is the Uniform's density at 0.5 (dim 1). The
-      -- wildcard witness of a single-use binding is answered by the body with
-      -- the binding left random.
-      case runProb defaultCompilerConfig
-             (either (\e -> error ("parse failed: " ++ show e)) id
-                (tryParseProgram "test" "main = draw x = Uniform in draw z = x + 1.0 in (z, Uniform)"))
-             [] (VTuple VAny (VFloat 0.5)) of
-        Right (VTuple (VFloat p) (VTuple (VFloat d) _)) -> do
-          assertBool ("probability " ++ show p) (abs (p - 1.0) < 1e-9)
-          assertEqual "dim" 1.0 d
-        other -> assertFailure ("expected the marginal density, got " ++ show other)
-  , testCase "ANY reached through an Either arm's deconstruction refuses, naming x" $
-      -- Here the wildcard is read by `fst`, not by arithmetic: fromLeft of
-      -- `Left ANY` is ANY, and the tuple deconstruction that follows has no
-      -- tuple to take apart.
-      expectMarginalRefusal
-        "main = draw x = Uniform in left (x, x + Uniform)"
-        (VEither (Left VAny)) "x"
-  , testCase "ANY in a slot reached through an alias refuses, naming x" $
-      -- One syntactic occurrence of x, but through the alias y it reaches both
-      -- slots. Re-inference (task reinfer-body-under-recovered-bindings) types
-      -- y Deterministic once x is recovered, so the body has no random source
-      -- left; the sink test must count x's uses through the binder, or the
-      -- ANY-valued witness flows into `y + 1.0` (`Plus ... (VAny, VFloat 1.0)`).
-      expectMarginalRefusal
-        "main = draw x = Uniform in draw y = x in (y, y + 1.0)"
-        (VTuple VAny (VFloat 1.5)) "x"
+  [ testGroup "the let-fold fallback (no variants: --marginalSlots 0)"
+    [ testCase "ANY in the witnessing slot of the additive witness refuses, naming x" $
+        expectMarginalRefusal noVariants
+          "main = draw x = Uniform in draw y = x + Uniform in (x, y)"
+          (VTuple VAny (VFloat 1.0)) "x"
+    , testCase "ANY in the witnessing slot of the multiplicative witness refuses, naming x" $
+        expectMarginalRefusal noVariants
+          "main = draw x = Uniform in draw y = x * Uniform in (x, y)"
+          (VTuple VAny (VFloat 0.25)) "x"
+    , testCase "mid-chain ANY with an observed dependent slot refuses, naming y" $
+        -- z = y + u3 is observed, so recovering u3 needs y's value: a genuine
+        -- convolution. The guard must fire at the y-binding, not crash at the
+        -- z-binding's inverse arithmetic.
+        expectMarginalRefusal noVariants
+          "main = draw x = Uniform in draw y = x + Uniform in draw z = y + Uniform in (x, (y, z))"
+          (VTuple (VFloat 0.5) (VTuple VAny (VFloat 1.5))) "y"
+    -- The four below are the cases where the wildcard is not the recovered
+    -- witness itself but an OPERAND the inverse chain reads on its way to one.
+    -- Testing "is the witness ANY" evaluates that chain, so each of these used to
+    -- die in the interpreter's arithmetic or deconstruction with a raw type error
+    -- (`Minus ... (VAny, VFloat 3.0)`, `Fst is not a tuple: VAny`) instead of the
+    -- refusal -- task fc-inverse-refuses-on-any-input. 'readsAnyChain' is what
+    -- makes them reach it.
+    , testCase "ANY read by an over-determined slot's inverse arithmetic refuses, naming y" $
+        -- Both inner slots recover y (and hence x); the merged path takes the
+        -- first, whose Minus reads the wildcard slot.
+        expectMarginalRefusal noVariants
+          "main = draw x = Uniform in draw y = Uniform in (x, (x+y+3.0, x+y+2.0))"
+          (VTuple (VFloat 0.3) (VTuple VAny (VFloat 2.7))) "y"
+    , testCase "ANY in the summed slot refuses, naming x" $
+        expectMarginalRefusal noVariants
+          "main = draw x = Uniform in draw y = Uniform in (x+y, (x, y))"
+          (VTuple VAny (VTuple (VFloat 0.4) (VFloat 0.5))) "x"
+    , testCase "ANY over a shifted let's single-use binding is the marginal, not a refusal" $
+        -- Refused (naming x) until fuzz-admission-oracle-bugs: x's one use is
+        -- z's, and z's one use sits in the wildcard slot, so neither is
+        -- constrained; the answer is the Uniform's density at 0.5 (dim 1). The
+        -- wildcard witness of a single-use binding is answered by the body with
+        -- the binding left random.
+        expectMarginalAnswer noVariants
+          "main = draw x = Uniform in draw z = x + 1.0 in (z, Uniform)"
+          (VTuple VAny (VFloat 0.5)) 1.0 1.0
+    , testCase "ANY reached through an Either arm's deconstruction refuses, naming x" $
+        -- Here the wildcard is read by `fst`, not by arithmetic: fromLeft of
+        -- `Left ANY` is ANY, and the tuple deconstruction that follows has no
+        -- tuple to take apart.
+        expectMarginalRefusal noVariants
+          "main = draw x = Uniform in left (x, x + Uniform)"
+          (VEither (Left VAny)) "x"
+    , testCase "ANY in a slot reached through an alias refuses, naming x" $
+        -- One syntactic occurrence of x, but through the alias y it reaches both
+        -- slots. Re-inference (task reinfer-body-under-recovered-bindings) types
+        -- y Deterministic once x is recovered, so the body has no random source
+        -- left; the sink test must count x's uses through the binder, or the
+        -- ANY-valued witness flows into `y + 1.0` (`Plus ... (VAny, VFloat 1.0)`).
+        expectMarginalRefusal noVariants
+          "main = draw x = Uniform in draw y = x in (y, y + 1.0)"
+          (VTuple VAny (VFloat 1.5)) "x"
+    ]
+  , testGroup "the per-mask dispatcher (default budget)"
+    [ testCase "W (ANY, 1.0): a convolution, refused naming the mask and the viable masks" $
+        expectMaskRefusal
+          "main = draw x = Uniform in draw y = x + Uniform in (x, y)"
+          (VTuple VAny (VFloat 1.0)) "(ANY, _)" ["(_, _)", "(_, ANY)", "(ANY, ANY)"]
+    , testCase "W's multiplicative twin (ANY, 0.25): refused naming the mask" $
+        expectMaskRefusal
+          "main = draw x = Uniform in draw y = x * Uniform in (x, y)"
+          (VTuple VAny (VFloat 0.25)) "(ANY, _)" ["(_, _)", "(_, ANY)", "(ANY, ANY)"]
+    , testCase "C (0.5, (ANY, 1.5)): a convolution, refused naming the mask" $
+        expectMaskRefusal
+          "main = draw x = Uniform in draw y = x + Uniform in draw z = y + Uniform in (x, (y, z))"
+          (VTuple (VFloat 0.5) (VTuple VAny (VFloat 1.5))) "(_, ANY, _)" ["(_, _, _)", "(_, _, ANY)", "(_, ANY, ANY)", "(ANY, ANY, ANY)"]
+    , testCase "O (ANY, (3.7, 2.7)): x+y is a convolution, refused naming the mask" $
+        expectMaskRefusal
+          "main = draw x = Uniform in draw y = Uniform in (x, (x+y+3.0, x+y+2.0))"
+          (VTuple VAny (VTuple (VFloat 3.7) (VFloat 2.7))) "(ANY, _, _)" ["(_, _, _)", "(_, ANY, _)", "(_, _, ANY)", "(_, ANY, ANY)", "(ANY, ANY, ANY)"]
+    , testCase "O (0.3, (ANY, 2.7)): y is re-witnessed from the last slot" $
+        expectMarginalAnswer defaultCompilerConfig
+          "main = draw x = Uniform in draw y = Uniform in (x, (x+y+3.0, x+y+2.0))"
+          (VTuple (VFloat 0.3) (VTuple VAny (VFloat 2.7))) 1.0 2.0
+    , testCase "N (ANY, (0.4, 0.5)): both latents witnessed by the remaining slots" $
+        expectMarginalAnswer defaultCompilerConfig
+          "main = draw x = Uniform in draw y = Uniform in (x+y, (x, y))"
+          (VTuple VAny (VTuple (VFloat 0.4) (VFloat 0.5))) 1.0 2.0
+    , testCase "S Left ANY: the payload's latents integrate out" $
+        expectMarginalAnswer defaultCompilerConfig
+          "main = draw x = Uniform in left (x, x + Uniform)"
+          (VEither (Left VAny)) 1.0 0.0
+    , testCase "the alias (ANY, 1.5): x is re-witnessed through y + 1.0" $
+        expectMarginalAnswer defaultCompilerConfig
+          "main = draw x = Uniform in draw y = x in (y, y + 1.0)"
+          (VTuple VAny (VFloat 1.5)) 1.0 1.0
+    ]
   ]
+  where
+    noVariants = defaultCompilerConfig { marginalSlots = 0 }
 
-expectMarginalRefusal :: String -> IRValue -> String -> IO ()
-expectMarginalRefusal src sample varName = do
+expectMarginalRefusal :: CompilerConfig -> String -> IRValue -> String -> IO ()
+expectMarginalRefusal conf src sample varName = do
+  msg <- expectRuntimeRefusal conf src sample
+  assertBool ("expected the marginal-refusal diagnostic, got: " ++ msg)
+    ("cannot compute marginal" `isInfixOf` msg)
+  assertBool ("diagnostic should name the binding '" ++ varName ++ "', got: " ++ msg)
+    (("'" ++ varName ++ "'") `isInfixOf` msg)
+
+-- | The dispatcher's refusal: names the function, the query's mask, and every
+-- mask the function does answer.
+expectMaskRefusal :: String -> IRValue -> String -> [String] -> IO ()
+expectMaskRefusal src sample mask viable = do
+  msg <- expectRuntimeRefusal defaultCompilerConfig src sample
+  assertBool ("expected the marginal-refusal diagnostic, got: " ++ msg)
+    ("cannot compute marginal of 'main'" `isInfixOf` msg)
+  assertBool ("diagnostic should name the mask " ++ mask ++ ", got: " ++ msg)
+    (("at query mask " ++ mask ++ ":") `isInfixOf` msg)
+  let answered = drop 1 (dropWhile (/= ':') (snd (breakOn "answers are" msg)))
+  assertEqual "the viable masks named" (intercalate ", " viable ++ ".") (dropWhile (== ' ') answered)
+  where
+    breakOn pat str = case [ i | i <- [0 .. length str - length pat], pat `isPrefixOf` drop i str ] of
+      (i : _) -> splitAt i str
+      []      -> (str, "")
+
+expectRuntimeRefusal :: CompilerConfig -> String -> IRValue -> IO String
+expectRuntimeRefusal conf src sample = do
   let prog = either (\e -> error ("parse failed: " ++ show e)) id (tryParseProgram "test" src)
-  r <- try (case runProb defaultCompilerConfig prog [] sample of
+  r <- try (case runProb conf prog [] sample of
               Left cerr -> return (Left cerr)
               Right v   -> evaluate (length (show v)) >> return (Right v))
   case r of
-    Left (ErrorCall msg) -> do
-      assertBool ("expected the marginal-refusal diagnostic, got: " ++ msg)
-        ("cannot compute marginal" `isInfixOf` msg)
-      assertBool ("diagnostic should name the binding '" ++ varName ++ "', got: " ++ msg)
-        (("'" ++ varName ++ "'") `isInfixOf` msg)
+    Left (ErrorCall msg) -> return msg
     Right (Left cerr) -> assertFailure ("expected runtime refusal, got compile error: " ++ show cerr)
     Right (Right v) -> assertFailure ("expected runtime refusal, got value: " ++ show v)
+
+expectMarginalAnswer :: CompilerConfig -> String -> IRValue -> Double -> Double -> IO ()
+expectMarginalAnswer conf src sample p0 d0 =
+  case runProb conf (either (\e -> error ("parse failed: " ++ show e)) id (tryParseProgram "test" src)) [] sample of
+    Right (VTuple (VFloat p) (VTuple (VFloat d) _)) -> do
+      assertBool ("probability " ++ show p ++ ", expected " ++ show p0) (abs (p - p0) < 1e-9)
+      assertEqual "dim" d0 d
+    other -> assertFailure ("expected the marginal, got " ++ show other)
 
 -- | Enum annotation must not offer enumeration for a MultiValue containing a
 -- continuous (Real) leaf: enumerating it would walk only the discrete residue
@@ -2328,7 +2397,7 @@ stochasticCallTests = testGroup "stochastic calls (stochastic-call-cse-unsound)"
     genGroup n body = IRFunGroup { groupName = n, refusedVariants = [], genFun = Just (body, "")
                                  , probFun = Nothing, integFun = Nothing
                                  , writeLogitsFun = Nothing, normalFun = Nothing
-                                 , groupDoc = "", sampleDomain = Nothing }
+                                 , groupDoc = "", sampleDomain = Nothing, maskVariantOf = Nothing }
     -- Optimize a whole environment (so 'deterministicGens' sees the call graph)
     -- and hand back the named group's generate body.
     optimizedGen n groups =
@@ -2881,7 +2950,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                   , probFun = Just (IRLambda "sample" body, "")
                   , genFun = Nothing, integFun = Nothing
                   , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
-                  , sampleDomain = Nothing }]
+                  , sampleDomain = Nothing, maskVariantOf = Nothing }]
       decls
       []
     nullaryCtorEnv ctorRef = IREnv
@@ -2891,7 +2960,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                             (IRConst (VFloat 1.0)) (IRConst (VFloat 0.0))), "")
                   , genFun = Nothing, integFun = Nothing
                   , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
-                  , sampleDomain = Nothing }]
+                  , sampleDomain = Nothing, maskVariantOf = Nothing }]
       [ADTDecl { dataName = "Opt"
                , constructors = [("Nada", []), ("Just1", [("v", TFloat)])]
                , adtDepth = Nothing }]
@@ -2905,7 +2974,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                             (IRApply (IRVar "v") q) (IRConst (VFloat 0.0))), "")
                   , genFun = Nothing, integFun = Nothing
                   , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
-                  , sampleDomain = Nothing }]
+                  , sampleDomain = Nothing, maskVariantOf = Nothing }]
       [ADTDecl { dataName = "Opt"
                , constructors = [("Nada", []), ("Just1", [("v", TFloat)])]
                , adtDepth = Nothing }]
@@ -2926,7 +2995,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                                 [IRConst (VADT "Nada" []), IRConst (VADT "Just1" [VFloat 2.0])] ]])), "")
                   , genFun = Nothing, integFun = Nothing
                   , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
-                  , sampleDomain = Nothing }]
+                  , sampleDomain = Nothing, maskVariantOf = Nothing }]
       [ADTDecl { dataName = "Opt"
                , constructors = [("Nada", []), ("Just1", [("v", TFloat)])]
                , adtDepth = Nothing }]
@@ -2941,7 +3010,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                             (IRApply (IRVar "f") (IRVar "sample")) (IRConst (VFloat 0.0))), "")
                   , genFun = Nothing, integFun = Nothing
                   , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
-                  , sampleDomain = Nothing }]
+                  , sampleDomain = Nothing, maskVariantOf = Nothing }]
       [ADTDecl { dataName = "Dup"
                , constructors = [("A1", [("f", TFloat)]), ("B1", [("f", TFloat)])]
                , adtDepth = Nothing }]
@@ -2958,7 +3027,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
                           (IRIf (IRVar "cse_0") (IRDestruct AcFromLeft q) (IRConst (VFloat 0.0)))), "")
                   , genFun = Nothing, integFun = Nothing
                   , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
-                  , sampleDomain = Nothing }]
+                  , sampleDomain = Nothing, maskVariantOf = Nothing }]
       [] []
     -- A one-group environment whose only method is generate, with the given
     -- body (either self-referential or not).
@@ -2966,7 +3035,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       [IRFunGroup { groupName = "rec", refusedVariants = [], genFun = Just (body, "")
                   , probFun = Nothing, integFun = Nothing
                   , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
-                  , sampleDomain = Nothing }]
+                  , sampleDomain = Nothing, maskVariantOf = Nothing }]
       [] []
     -- 'batchedGuard' is called on the raw term, *not* through 'prepBatchedBody':
     -- these rows check the guard itself, and prepping (e.g. 'stripRootGuard',
@@ -4129,7 +4198,7 @@ test_hasTailDescentRecognisesNewShape = testCase
                             (IRApply (IRVar "main_prob") tailArg)), "")
                   , genFun = Nothing, integFun = Nothing
                   , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
-                  , sampleDomain = Nothing }]
+                  , sampleDomain = Nothing, maskVariantOf = Nothing }]
       [] []
 
 -- ======== Utils.splitByString ========

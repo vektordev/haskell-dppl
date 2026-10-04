@@ -191,7 +191,7 @@ generateFunctions genBoil env0 =
     -- Scalar backend: lower any IRSelect (from batched mode's select pass) back
     -- to IRIf up front, so the rest of codegen never sees it (pytorch-tensorizer
     -- M1, strategy B).
-    let env@(IREnv funcs adtsEnv consts) = mangleUserIdentifiers pyMangle (renameADTIdentifiers pyMangle (desugarSelectEnv env0))
+    let env@(IREnv funcs adtsEnv consts) = mangleUserIdentifiers pyMangle (renameADTIdentifiers pyMangle (desugarSelectEnv (retireUnrenderableVariants "Python" env0)))
         clsName = groupClassName env
         lut = envToLUT env ++ stdLib
         -- A nullary function is referenced in the IR by a bare 'IRVar' (there is
@@ -330,7 +330,7 @@ generateADTAccessor fieldName ctorName =
              , "return x." ++ pyMangle fieldName ]
 
 generateClass :: (String -> String) -> [(String, String)] -> [String] -> IRFunGroup -> [String]
-generateClass clsName lut callableNames (IRFunGroup name gen prob integ writeLogits normal doc _ _) = let
+generateClass clsName lut callableNames (IRFunGroup name gen prob integ writeLogits normal doc _ _ _) = let
   funcStringFromMaybe fname func = case func of
     Just a -> generateFunction True (fname, replaceCallsDecl a)
     Nothing -> return []

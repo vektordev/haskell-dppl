@@ -517,7 +517,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
               Just (toNormalDecl name <$> compileNormalExpr (meta progTypeEnv) binding)
             else
               Nothing
-        baseFunGroup = IRFunGroup {groupName=name, writeLogitsFun=writeLogitsF, sampleDomain=sampleDom,
+        baseFunGroup = IRFunGroup {groupName=name, writeLogitsFun=writeLogitsF, sampleDomain=sampleDom, maskVariantOf=Nothing,
           integFun = presentVariant integE,
           probFun = presentVariant probE,
           genFun = presentVariant genE,
@@ -550,7 +550,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
         -- 'acc_prob' extra parameter/'TOP_K_CUTOFF' plumbing 'baseFunGroup's
         -- own 'probFun' has under 'topKThreshold' is not replicated here).
         extraFunGroups =
-          [ IRFunGroup { groupName = name ++ "_" ++ semiringSuffix fam, writeLogitsFun = Nothing, sampleDomain = Nothing
+          [ IRFunGroup { groupName = name ++ "_" ++ semiringSuffix fam, writeLogitsFun = Nothing, sampleDomain = Nothing, maskVariantOf = Nothing
                         , integFun = Nothing
                         , probFun = presentVariant extraProbE
                         , refusedVariants = refusedVariant "prob" extraProbE
@@ -695,6 +695,7 @@ generateComponentNormalFunction meta fullName expr ti
            ""
            [ ("normal", r) | Left r <- [compiled] ]
            -- No prob function, so no query domain to enumerate (M3).
+           Nothing
            Nothing
   | otherwise = Nothing
 
@@ -2172,6 +2173,16 @@ toIRInference :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PRe
 -- Splitting here, generically over whichever leaf is being inferred (Normal,
 -- Uniform, a user function, ...), mirrors the split the direct InjF case
 -- performs: the ANY-branch mass minus the excepted point's own mass/density.
+-- A hole: the masked leaf of a pruned observation (design
+-- witnessed-per-query-capability, task per-mask-variants-by-pruning;
+-- 'SPLL.ObservationMask.pruneObservation'). It is the unit factor -- mass one,
+-- dim 0, possible, no branch -- and it never reads the sample: the slot it
+-- replaced is the one the query masked, so whatever value the dispatcher handed
+-- this variant there is not an observation. First, so no clause below (the
+-- equality guard of an ordinary 'Constant', the Boolean CDF split) gets to
+-- compare against it. 'Constant VAny' cannot occur in a user program
+-- ('SPLL.Validator' forbids it), so this fires on holes only.
+toIRInference meta _ (Expr _ (Constant VAny)) _ = return (detP (srOne (semiringOf meta)))
 toIRInference meta cumulative e sample
   | Just (binds, shape) <- anyExceptSampleShape sample = do
   let sr = semiringOf meta

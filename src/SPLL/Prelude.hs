@@ -58,6 +58,7 @@ module SPLL.Prelude
   , fix
   , compile
   , compileRTyped
+  , compileUnoptimized
   , admissionTyped
   , rtypedProgram
   , chainNamedProgram
@@ -85,13 +86,15 @@ module SPLL.Prelude
   , marginalReport
   , maskTable
   , renderMarginalReport
+  , marginalBudgetWarnings
   ) where
 
 import SPLL.ReservedNames (topKCutoffName, accProbInitName)
 import SPLL.Lang.Lang
 import SPLL.Lang.Types (makeTypeInfo, GenericValue (..), CompilerError, TypeInfo(..), ADTDecl, FnDecl)
-import SPLL.Typing.PType (PType)
+import SPLL.Typing.PType (PType(..))
 import SPLL.ObservationMask
+import SPLL.MaskVariants
 import SPLL.AutoNeural (validateWriteLogitsGaussian)
 import SPLL.IntermediateRepresentation
 import SPLL.Analysis
@@ -420,8 +423,7 @@ frontEnd conf p0 = do
 -- unchanged, which is the design's central claim.
 compileRTyped :: CompilerConfig -> Program -> Either CompilerError IREnv
 compileRTyped conf rtyped = do
-  (annotated, fcData) <- typedStages conf rtyped
-  unoptimized <- envToIRUnoptimized conf fcData annotated
+  unoptimized <- irUnoptimized conf rtyped
   printStageIR conf "After IR Compilation (pre-optimization)" unoptimized
   let stripped = if countBranches conf then unoptimized else stripBranchCount unoptimized
 
@@ -443,6 +445,23 @@ compileRTyped conf rtyped = do
   printIfVerbose conf (pPrintIREnv compiled)
   printStageIR conf "After Optimization" compiled
   return compiled
+
+-- | IR compilation of an RType-inferred program, before the optimizer: the
+-- typed stages, 'envToIRUnoptimized', and the per-mask inference variants
+-- with their dispatchers (task per-mask-variants-by-pruning), spliced in here
+-- so they go through every later pass like any other group.
+irUnoptimized :: CompilerConfig -> Program -> Either CompilerError IREnv
+irUnoptimized conf rtyped = do
+  (annotated, fcData) <- typedStages conf rtyped
+  baseIR <- envToIRUnoptimized conf fcData annotated
+  return (withMaskVariants conf rtyped baseIR)
+
+-- | 'compile' stopped before the select pass and the optimizer: the IR exactly
+-- as IR compilation produced it. For tests that pin the compiled IR itself
+-- (the all-concrete body under a mask dispatcher is today's body, byte for
+-- byte), which the optimizer would otherwise rewrite.
+compileUnoptimized :: CompilerConfig -> Program -> Either CompilerError IREnv
+compileUnoptimized conf p = frontEnd conf p >>= irUnoptimized conf
 
 -- | The program exactly as 'envToIRUnoptimized' receives it: every annotation
 -- IRCompiler dispatches on, @pType@ included, plus the forward-chaining
@@ -838,3 +857,144 @@ renderMarginalReport decls = unlines . concatMap fn
     verdict (ReadsOuterLatents _) = "enumerated: reads a latent drawn outside it"
 
     padTo n str = str ++ replicate (n - length str) ' '
+
+-- ---------------------------------------------------------------------------
+-- Per-mask inference variants (task per-mask-variants-by-pruning)
+-- ---------------------------------------------------------------------------
+
+-- | What the mask analysis decides for one function, as compilation reads it.
+data MaskPlan
+  = NoMasks
+    -- ^ The observation is not a constructor tree, or every slot is
+    -- self-contained: nothing to dispatch on.
+  | MasksOverBudget Int
+    -- ^ @k@ enumerated slots, over @--marginalSlots@.
+  | Masks [Slot]
+    -- ^ The enumerated slots, in tree order.
+
+-- | The mask plan of every function of an RType-inferred program.
+--
+-- Chain naming is what latent identity is keyed by, so the analysis reads the
+-- chain-named program, exactly as the @--marginals@ report does. That costs one
+-- extra enum annotation and forward-chaining pass, so it is skipped outright
+-- when no function's observation is a constructor tree at all (a root that is
+-- a single leaf has nothing to mask: an @ANY@ there is the root unit factor).
+maskPlans :: CompilerConfig -> Program -> [(String, MaskPlan)]
+maskPlans conf rtyped
+  | not (any (isTree . observationTree (adts rtyped)) (functions rtyped)) =
+      [ (n, NoMasks) | (n, _) <- functions rtyped ]
+  | otherwise = map plan (functions named)
+  where
+    named = chainNamedProgram rtyped
+    decls = adts named
+    fenv  = functions named
+    isTree ObsCon{} = True
+    isTree _        = False
+    plan decl@(n, _)
+      | not (isTree tree) = (n, NoMasks)
+      | null enums        = (n, NoMasks)
+      | k > marginalSlots conf = (n, MasksOverBudget k)
+      | otherwise         = (n, Masks enums)
+      where
+        tree  = observationTree decls decl
+        enums = enumeratedSlots decls fenv tree
+        k     = length enums
+
+-- | One compile-time warning per function over the @--marginalSlots@ budget,
+-- naming the function and the flag. Empty when the program does not type (the
+-- compile itself reports that).
+marginalBudgetWarnings :: CompilerConfig -> Program -> [String]
+marginalBudgetWarnings conf p = case rtypedProgram p of
+  Left _ -> []
+  Right rtyped ->
+    [ "Warning: " ++ overBudgetNote n k (marginalSlots conf)
+    | (n, MasksOverBudget k) <- maskPlans conf rtyped ]
+
+-- | Compile every function's per-mask variants and turn its probability and
+-- integrate functions into dispatchers over them.
+--
+-- For each function with @1..marginalSlots@ enumerated slots, and each mask
+-- over them other than all-concrete, the masked program
+-- ('pruneObservation') goes through the ordinary pipeline from the post-RInfer
+-- seam, and the function's probability and integrate bodies from that compile
+-- become the variant @f__m\<bits\>@ ('withDispatcher'). Which masks have a
+-- variant is the masked program's own modality verdict -- the same gate
+-- 'envToIRUnoptimized' applies to a whole function -- so the lattice decides,
+-- and a mask it declines is a runtime refusal in the dispatcher. A mask it
+-- admits but an engine then refuses compiles to a variant whose body is that
+-- refusal. Nothing here can fail the base compile.
+--
+-- The variant bodies are not forced here (see 'MaskVariant'): only the typing
+-- of each masked program is.
+--
+-- Skipped wholesale under @--pruneAnyChecks@ (the dispatcher would collapse to
+-- the all-concrete body anyway, and the variants would be dead code), and when
+-- both probability and integrate are suppressed.
+withMaskVariants :: CompilerConfig -> Program -> IREnv -> IREnv
+withMaskVariants conf rtyped env@(IREnv groups decls consts)
+  | pruneAnyChecks conf || (noProbability conf && noIntegrate conf) = env
+  | null work && null overBudget = env
+  | otherwise = IREnv (concatMap expand groups) decls consts
+  where
+    plans = maskPlans conf rtyped
+    existing = Set.fromList (map groupName groups)
+    work = [ (n, slots) | (n, Masks slots) <- plans
+                        , not (any (`Set.member` existing)
+                                   [ variantGroupName n slots m | m <- drop 1 (masksOver slots) ]) ]
+    overBudget = [ (n, k) | (n, MasksOverBudget k) <- plans ]
+
+    expand g
+      | Just slots <- lookup (groupName g) work =
+          withDispatcher decls slots [ variantFor (groupName g) m | m <- drop 1 (masksOver slots) ] g
+      | Just k <- lookup (groupName g) overBudget =
+          [ g { groupDoc = groupDoc g ++ "\n" ++ overBudgetNote (groupName g) k (marginalSlots conf) } ]
+      | otherwise = [g]
+
+    -- Masked compiles are silent and single-semiring: they must not dump every
+    -- stage a second time under -d/-v, and an extra-semiring group is a base
+    -- function's endpoint, not a variant's.
+    quiet = conf { verbose = 0, showIntermediates = False, optStats = False, extraSemirings = [] }
+
+    variantFor fname m = case typedStages quiet pruned of
+      -- The masked program does not even type: no mode is admitted.
+      Left _ -> MaskVariant m Nothing Nothing
+      Right (typedPruned, fc) ->
+        let admitted = maybe False (admittedPType . pType . getTypeInfo . snd)
+                         (find ((== fname) . fst) (functions typedPruned))
+            -- Lazy: forced only when a variant body is read.
+            compiled = envToIRUnoptimized quiet fc typedPruned
+            body lbl field = case compiled of
+              Left err -> Left err
+              Right menv -> case find ((== fname) . groupName) (irGroups menv) of
+                Nothing -> Left ("the masked compile has no group " ++ fname)
+                Just mg -> case field mg of
+                  Just d -> Right d
+                  Nothing -> Left (maybe "the variant is absent" showRefusal (lookup lbl (refusedVariants mg)))
+        in MaskVariant m
+             (if admitted && not (noProbability conf) then Just (body "prob" probFun) else Nothing)
+             (if admitted && not (noIntegrate conf) then Just (body "integ" integFun) else Nothing)
+      where
+        pruned = restrictToCallees fname rtyped
+          { functions = [ if n == fname then pruneObservation (adts rtyped) m d else d
+                        | d@(n, _) <- functions rtyped ] }
+
+    irGroups (IREnv gs _ _) = gs
+
+    -- The four rungs a probability and an integrate function are compiled for
+    -- (IRCompiler's 'admittedPT', the variant gate).
+    admittedPType pt = pt `elem` [Deterministic, Integrate, PNormal, PLogNormal]
+
+-- | The program cut down to one function and everything it (transitively)
+-- references, so a masked compile does not recompile the rest of the program.
+restrictToCallees :: String -> Program -> Program
+restrictToCallees root p = p { functions = [ d | d@(n, _) <- functions p, n `Set.member` reach ] }
+  where
+    names = Set.fromList (map fst (functions p))
+    callees n = case lookup n (functions p) of
+      Just b  -> Set.toList (Set.intersection names (containedVars varsOfExpr b))
+      Nothing -> []
+    reach = go Set.empty [root]
+    go seen [] = seen
+    go seen (n : ns)
+      | n `Set.member` seen = go seen ns
+      | otherwise = go (Set.insert n seen) (callees n ++ ns)

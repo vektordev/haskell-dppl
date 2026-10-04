@@ -49,6 +49,7 @@ module SPLL.IntermediateRepresentation (
 , unmangleDiagnostic
 , firstAnyExceptIR
 , anyExceptCodegenRefusal
+, retireUnrenderableVariants
 ) where
 
 import SPLL.Lang.Types
@@ -59,7 +60,7 @@ import Data.Data()
 import Data.List (isSuffixOf, sort, group)
 import Data.Char (isAlpha, isAlphaNum)
 import Control.Monad.State.Strict (State, execState, modify)
-import Data.Maybe (mapMaybe, listToMaybe, fromMaybe)
+import Data.Maybe (mapMaybe, listToMaybe, fromMaybe, isNothing)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import SPLL.ReservedNames (genSuffix, functionVariantSuffixes)
@@ -577,7 +578,13 @@ data IRFunGroup = IRFunGroup {groupName::String, genFun::Maybe IRFunDecl, probFu
   -- heterogeneous-batch-inference M3), which evaluates the ordinary batched
   -- kernel once with this domain /as the batch/ to get the whole probability
   -- vector. Purely additive: every other backend ignores it.
-  sampleDomain::Maybe MultiValue} deriving (Show)
+  sampleDomain::Maybe MultiValue,
+  -- | @Just f@ when this group is a per-mask inference variant of function
+  -- @f@ (@f__m\<bits\>@; task per-mask-variants-by-pruning), reached only
+  -- through @f@'s mask dispatcher. A variant is never a whole function of its
+  -- own, so what is allowed to fail in it is narrower: see
+  -- 'retireUnrenderableVariants'.
+  maskVariantOf::Maybe String} deriving (Show)
 
 -- Name, Documentation, Body
 type IRFunDecl = (IRExpr, String)
@@ -830,11 +837,16 @@ lookupIREnv name (IREnv env _ _) =
 -- a set has no runtime representation to lower to, so there is no correct
 -- string to emit -- only a refusal (task
 -- @vanyexcept-unrenderable-in-text-backends@).
+--
+-- A per-mask variant group ('maskVariantOf') is not searched: the text
+-- backends retire such a variant's offending body first
+-- ('retireUnrenderableVariants'), since a mask the backend cannot render must
+-- not take the whole function down with it.
 firstAnyExceptIR :: IREnv -> Maybe IRExpr
 firstAnyExceptIR (IREnv groups _ _) =
   listToMaybe (filter isAnyExceptConst (concatMap allSubExprsOf funBodies))
   where
-    funBodies = concatMap groupBodies groups
+    funBodies = concatMap groupBodies [ g | g <- groups, isNothing (maskVariantOf g) ]
     groupBodies IRFunGroup{genFun=g, probFun=p, integFun=i, writeLogitsFun=e, normalFun=n} =
       map fst (mapMaybe id [g, p, i, e, n])
     allSubExprsOf ir = ir : concatMap allSubExprsOf (getIRSubExprs ir)
@@ -865,6 +877,40 @@ anyExceptCodegenRefusal lang env = case firstAnyExceptIR env of
     , "than crash inside codegen."
     , "The interpreter answers this program directly; this backend does not."
     , "(task vanyexcept-unrenderable-in-text-backends)" ]
+
+-- | Replace the probability or integrate body of every per-mask variant group
+-- that still carries a @VAnyExcept@ placeholder with a runtime refusal, for a
+-- scalar text backend (task per-mask-variants-by-pruning).
+--
+-- The same placeholder in an ordinary group refuses the whole compile
+-- ('anyExceptCodegenRefusal'). A variant is narrower than a function: it answers
+-- one query mask through the function's dispatcher, and a masked program can
+-- leave a constructor-test witness where the full observation had a whole
+-- value (@(isFace heard, heard)@ masked at its second slot). Refusing the
+-- compile there would let an optional mask take every other query down, so
+-- only that mask refuses, at run time, saying why and pointing at the
+-- interpreter, which answers it. The body's parameter lambdas are kept, so
+-- the dispatcher's call still has a function of the right arity to call.
+retireUnrenderableVariants :: String -> IREnv -> IREnv
+retireUnrenderableVariants lang (IREnv groups decls consts) = IREnv (map retire groups) decls consts
+  where
+    retire g = case maskVariantOf g of
+      Nothing -> g
+      Just base -> g { probFun = fmap (retireBody base (groupName g)) (probFun g)
+                     , integFun = fmap (retireBody base (groupName g)) (integFun g) }
+    retireBody base vname d@(body, doc)
+      | any isAnyExceptConst (allSubExprsOf body) = (keepSpine body, doc)
+      | otherwise = d
+      where
+        keepSpine (IRLambda n b) = IRLambda n (keepSpine b)
+        keepSpine _ = IRError
+          ( "cannot compute marginal of '" ++ base ++ "' at this query mask in " ++ lang
+          ++ ": the variant compiled for it (" ++ vname ++ ") carries a VAnyExcept placeholder "
+          ++ "(\"any value other than this one\"), which has no " ++ lang ++ " representation. "
+          ++ "The interpreter answers this query. (task vanyexcept-unrenderable-in-text-backends)" )
+    allSubExprsOf ir = ir : concatMap allSubExprsOf (getIRSubExprs ir)
+    isAnyExceptConst (IRConst (VAnyExcept _)) = True
+    isAnyExceptConst _ = False
 
 getIRSubExprs :: IRExpr -> [IRExpr]
 getIRSubExprs (IRIf a b c) = [a, b, c]

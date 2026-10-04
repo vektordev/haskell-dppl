@@ -708,7 +708,7 @@ reduceStep op a b =
 reduceIREnv :: IREnv -> ReducedIREnv
 reduceIREnv (IREnv funcs _ consts) =
   map (\(name, val) -> (name, IRConst val)) consts ++
-  concatMap (\(IRFunGroup name gen prob integ writeLogits normal _ _ _) ->
+  concatMap (\(IRFunGroup name gen prob integ writeLogits normal _ _ _ _) ->
     -- A per-component normal group registers its normal function under the bare
     -- component name, with no suffix (SPLL.ReservedNames.componentNormalName).
     case componentNormalName name of

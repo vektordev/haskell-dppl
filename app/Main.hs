@@ -7,7 +7,7 @@ import SPLL.Parser
 import Data.Char (toLower)
 import Text.Megaparsec.Error (errorBundlePretty)
 import SPLL.Lang.Types (CompilerError, GenericValue (VError))
-import SPLL.Prelude (runProb, runInteg, runGen, compile, batchedRefusal, marginalReport, renderMarginalReport)
+import SPLL.Prelude (runProb, runInteg, runGen, compile, batchedRefusal, marginalReport, renderMarginalReport, marginalBudgetWarnings)
 import SPLL.Lang.Lang (adts)
 import Control.Monad.Random (evalRandIO)
 import qualified SPLL.CodeGenJulia
@@ -256,6 +256,9 @@ transpile (GlobalOpts {inputFile=inFile, verbosity=verb, Main.countBranches=cb, 
   prog <- parseProgram inFile
   let conf = (CompilerConfig {SPLL.IntermediateRepresentation.countBranches = cb, topKThreshold = tkc, verbose=verb, optimizerLevel=oLvl, pruneAnyChecks=anyChecks, noIntegrate=nInteg, noProbability=nProb,noGenerate=nGen, showIntermediates=dbgInter, checkQueryType=not nTypeChk, batched=batchedFlag, logSpace=logSpaceFlag, optStats=optStatsFlag, materializationCardinality=matBudget, marginalSlots=mSlots, extraSemirings=extraSR})
   reportMarginals wantMarginals conf prog
+  -- One warning per function whose correlated observation slots exceed
+  -- --marginalSlots: it gets no per-mask variants (task per-mask-variants-by-pruning).
+  mapM_ (hPutStrLn stderr) (marginalBudgetWarnings conf prog)
   case options of
     CompileOpts{language=lang, outputFile=outFile, trunc=trnc} -> do
       case codeGenToLang lang trnc conf prog of

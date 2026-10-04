@@ -1439,8 +1439,8 @@ A query with `ANY` holes is not a point query with a wildcard value — it is an
 observation of a **different shape**, so a different density is the answer.
 `SPLL.ObservationMask` is the analysis that says what those shapes are, and the
 rewrite that turns one into an ordinary program (design
-`witnessed-per-query-capability`, task 2; task 3 compiles the variants and the
-dispatcher, and is not landed).
+`witnessed-per-query-capability`, task 2), and the per-mask inference variants
+compiled from those programs with a runtime dispatcher (task 3, below).
 
 The **observation tree** of a declaration strips parameter lambdas, descends
 `let` bodies, follows a root `Var` to its bound value *when that variable has
@@ -1504,6 +1504,64 @@ reproduce the design's hand-verified rows — W `(ANY, _) -> Bottom` (a
 convolution) with `(_, _)` and `(_, ANY)` `Integrate`; C `(_, (ANY, concrete))`
 `Bottom` while `(_, (ANY, ANY))` is admitted. Tests:
 `test/TestObservationMask.hs`.
+
+**Variants and the dispatcher** (task `per-mask-variants-by-pruning`,
+`SPLL.MaskVariants`, driven from `Prelude.withMaskVariants`). For a function
+with `1..marginalSlots` enumerated slots, every mask other than all-concrete
+whose masked program the lattice admits gets a group `f__m<bits>` (bits over
+the enumerated slots in tree order, `1` = masked), holding only `probFun` and
+`integFun`, compiled from the pruned program by the ordinary pipeline (cut
+down to `f` and its callees). `f`'s own probability and integrate functions
+become a **dispatcher**: under the parameter lambdas and the query-type guard,
+per-slot flags test each enumerated slot's `isAny` outer node first (with a
+tag test before every `fromLeft`/`head`/field accessor, so no accessor meets
+`ANY` or the wrong constructor), and when the root is not `ANY` and some flag
+is set, a decision tree calls the mask's variant with the dispatcher's own
+arguments, or raises an `IRError` naming the function, the mask and the masks
+it does answer ("cannot compute marginal of 'main' at query mask (ANY, _):
+..."). Otherwise the query reaches the unchanged all-concrete body, which keeps
+its own root unit factor. A hole compiles to the unit factor in
+`toIRInference` (mass one, dim 0, no branch) without reading the sample.
+
+Things worth knowing:
+
+- **Variant bodies are lazy.** Which masks have a variant is the masked
+  program's *modality verdict* (`typedStages` only); the IR compile of the
+  variant is a thunk forced only when something reads it (codegen, the
+  optimizer pass over that group, a query reaching it). A masked program can
+  cost far more than its unmasked one -- a latent the full observation
+  recovers is enumerated once its slot is masked -- and
+  `TestInternals`' materialization differential compiles a 6-term and-chain at
+  budget 0 whose `(ANY, _)` variant takes ~110 s; eagerly, every query of that
+  program paid it. An admitted mask whose compile an engine then refuses is a
+  variant whose body is that refusal.
+- **The flags are inline, not let-bound**, on purpose: an inline `isAny`/tag
+  test is what `IRSelectPass` and the batched backend's `structural` recognise
+  as bucket-uniform, so under `--batched` the dispatch stays a real Python
+  branch. Let-bound, the dispatch became a select, which evaluated every
+  variant eagerly and indexed a `poison()` placeholder.
+- **Skipped** under `--pruneAnyChecks` (the dispatcher collapses anyway), when
+  probability and integrate are both suppressed, for a root that is a single
+  leaf, and when a user function already holds a variant's name. Over budget, the function compiles
+  as before, `groupDoc` says why, and the CLI prints one warning naming the
+  function and `--marginalSlots` (`Prelude.marginalBudgetWarnings`).
+- **The let-fold `ANY` guard is now the fallback**: over-budget functions,
+  non-constructor roots, list tails. `TestInternals`' "witnessed-inference ANY
+  refusal" group pins it at `marginalSlots = 0` and the dispatcher at default.
+- **Text backends retire a variant they cannot render.** A masked program can
+  leave a `VAnyExcept` witness its full observation never did
+  (`tupleCtorTestOfSharedDraw` at `(_, ANY)`). In an ordinary group that still
+  refuses the compile (`anyExceptCodegenRefusal`); in a variant
+  (`IRFunGroup.maskVariantOf`) `retireUnrenderableVariants` replaces just that
+  body with a runtime refusal pointing at the interpreter, which answers it.
+- Corpus sweeps in `TestObservationMask` ("per-mask variants and the
+  dispatcher"), over the 38 corpus programs with variants: the all-concrete
+  arm is byte-identical to a `marginalSlots = 0` compile before the optimizer
+  (`Prelude.compileUnoptimized`); every mask of a forward sample answers or
+  refuses (totality); and a finite slot summed over its domain equals its
+  `ANY` query at every mask of the others (marginalisation consistency).
+  Engine crashes a masked query exposes are excepted by message in
+  `knownMaskCrashes`, each naming its docs task.
 
 ### Debug: Intermediate Stage Dump (`-d`)
 

@@ -1493,7 +1493,7 @@ deepExpressionSpillTests = testGroup "deep expression spill (python-codegen-exce
     envWith body = IREnv [IRFunGroup { groupName = "main", refusedVariants = [], genFun = Nothing
                                 , probFun = Just (IRLambda "x" body, "")
                                 , integFun = Nothing, writeLogitsFun = Nothing
-                                , normalFun = Nothing, groupDoc = "", sampleDomain = Nothing }] [] []
+                                , normalFun = Nothing, groupDoc = "", sampleDomain = Nothing, maskVariantOf = Nothing }] [] []
     source n = sourceOf (envOf n)
     sourceOf env = unpack (replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n")
                                (pack (intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True env))))

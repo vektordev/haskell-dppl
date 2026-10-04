@@ -1,0 +1,1 @@
+main = draw x = Uniform in draw z = x + 1.0 in (z, Uniform)
