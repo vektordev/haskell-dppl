@@ -53,7 +53,7 @@ module SPLL.CalleeNormalize
   ( normalizeCallees
   ) where
 
-import Data.Maybe (listToMaybe)
+import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Set as Set
 
 import SPLL.Lang.Lang
@@ -81,6 +81,17 @@ rewrite :: [ADTDecl] -> Env -> Expr -> Expr
 rewrite decls env e = case node e of
   Apply l v            -> rewriteApply decls env (ann e) l v
   Lambda x lambdaBody  -> Expr (ann e) (Lambda x (rewrite decls (dropBinder x env) lambdaBody))
+  -- An @if@ arm that projects a lambda literal out of a literal constructor
+  -- is that lambda: the pointwise-lifted arrow mixture IRCompiler compiles
+  -- for a randomly selected function value needs lambda arms, and an
+  -- accessor on an arrow-typed tuple there compared closures and crashed
+  -- (@draw f = (if Uniform < 0.5 then (\x -> 1.0) else snd (2.0, \y -> 3.0))
+  -- in f True@, fuzz-admission-oracle-bugs item 3). The discarded components
+  -- are unread, so dropping them changes no distribution. Only arms: a bare
+  -- @draw f = snd (..)@ keeps its projection, which the callee rule below
+  -- substitutes at the call instead.
+  IfThenElse c t f -> Expr (ann e) (IfThenElse (rewrite decls env c) (arm t) (arm f))
+    where arm a = rewrite decls env (fromMaybe a (reduceLiteralProjection decls a))
   other                -> Expr (ann e) (fmap (rewrite decls env) other)
 
 -- | The application cases. @ti@ is the application node's own annotation, which
@@ -100,13 +111,38 @@ rewriteApply decls env ti l v = case node l of
   -- else h) x`) collapses in the same pass.
   IfThenElse c t f ->
     rewrite decls env (Expr ti (IfThenElse c (Expr ti (Apply t v)) (Expr ti (Apply f v))))
+  -- A redex in callee position -- a @draw@, or a literal beta-redex -- has the
+  -- outer application pushed into its body, the way an @if@ is pushed into its
+  -- arms: @((\x -> body) a) v@ becomes @(\x -> body v) a@. The binder stays
+  -- bound (a @draw@ is a sampling site and is not moved or duplicated), it is
+  -- renamed first if @v@ reads a variable of the same name, and the body's
+  -- application is then re-dispatched with @x@ in the environment, so a
+  -- projection or an @if@ the body selects reaches the cases above. Left as it
+  -- was, forward chaining met a callee that is neither a lambda nor a name
+  -- (task callee-normalize-misses-redex-in-callee-position), and IRCompiler
+  -- compiled the lambda the redex returns outside the scope binding its free
+  -- variables (fuzz-admission-oracle-bugs item 7,
+  -- @(\a -> \b -> a) 0.0 (if Uniform < 0.5 then 2 else 1)@).
+  Apply (Expr lamTi (Lambda x0 body0)) a ->
+    let (x, body) = freshBinder x0 body0
+    in rewrite decls env (Expr ti (Apply (Expr lamTi (Lambda x (Expr ti (Apply body v)))) a))
   -- A *named* callee is left alone: forward chaining resolves a variable to the
   -- lambda it stands for by itself (that is what its equivalence classes are
   -- for), so this is the one selection the existing engines already see
   -- through. Substituting it anyway would rewrite working programs onto a
   -- different path -- `testCases/hoProbValueLambda` and `twiceApplication`
   -- both changed answer when an earlier draft did.
-  Var _ -> Expr ti (Apply l (rewrite decls env v))
+  -- A bare name is left alone (forward chaining resolves it), except when it
+  -- stands for a lambda only through a projection -- @draw f = snd (Normal,
+  -- \x -> Uniform) in f c@. Forward chaining cannot see through @snd@ of a
+  -- tuple with a random sibling, and the compile died resolving @f@
+  -- (fuzz-admission-oracle-bugs item 2). The lambda literal the projection
+  -- selects is a value, so substituting it duplicates no draw.
+  Var n
+    | Just bound <- lookup n env
+    , not (isLambdaLiteral bound)
+    , Just lam <- reduceCallee decls env l -> Expr ti (Apply (rewrite decls env lam) (rewrite decls env v))
+    | otherwise -> Expr ti (Apply l (rewrite decls env v))
   -- A callee that denotes a lambda literal: use the lambda. Only taken when the
   -- reduction really bottoms out at a `Lambda`, so a callee that stays a
   -- projection or a selection is left exactly as it was.
@@ -136,6 +172,23 @@ rewriteApply decls env ti l v = case node l of
 --
 -- 'Nothing' for everything else — including a name bound to a randomly selected
 -- function, whose selection must stay at its binding site.
+  where
+    freshBinder x0 body0
+      | x0 `Set.member` freeVarsExpr v =
+          let taken = Set.unions [freeVarsExpr v, varsOfExpr body0]
+              x = head [ c | k <- [(1 :: Int) ..], let c = x0 ++ "_" ++ show k, not (Set.member c taken) ]
+          in (x, renameFreeVar x0 x body0)
+      | otherwise = (x0, body0)
+
+-- | 'reduceCallee' without the environment: only literal constructor
+-- applications are looked through, so no binding is ever copied.
+reduceLiteralProjection :: [ADTDecl] -> Expr -> Maybe Expr
+reduceLiteralProjection decls = reduceCallee decls []
+
+isLambdaLiteral :: Expr -> Bool
+isLambdaLiteral (Expr _ Lambda{}) = True
+isLambdaLiteral _                 = False
+
 reduceCallee :: [ADTDecl] -> Env -> Expr -> Maybe Expr
 reduceCallee decls env l = case reduce [] l of
   lam@(Expr _ Lambda{}) -> Just lam

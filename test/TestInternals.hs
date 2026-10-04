@@ -1077,10 +1077,20 @@ anyRefusalTests = testGroup "witnessed-inference ANY refusal"
       expectMarginalRefusal
         "main = draw x = Uniform in draw y = Uniform in (x+y, (x, y))"
         (VTuple VAny (VTuple (VFloat 0.4) (VFloat 0.5))) "x"
-  , testCase "ANY read by a shifted let's inverse refuses, naming x" $
-      expectMarginalRefusal
-        "main = draw x = Uniform in draw z = x + 1.0 in (z, Uniform)"
-        (VTuple VAny (VFloat 0.5)) "x"
+  , testCase "ANY over a shifted let's single-use binding is the marginal, not a refusal" $
+      -- Refused (naming x) until fuzz-admission-oracle-bugs: x's one use is
+      -- z's, and z's one use sits in the wildcard slot, so neither is
+      -- constrained; the answer is the Uniform's density at 0.5 (dim 1). The
+      -- wildcard witness of a single-use binding is answered by the body with
+      -- the binding left random.
+      case runProb defaultCompilerConfig
+             (either (\e -> error ("parse failed: " ++ show e)) id
+                (tryParseProgram "test" "main = draw x = Uniform in draw z = x + 1.0 in (z, Uniform)"))
+             [] (VTuple VAny (VFloat 0.5)) of
+        Right (VTuple (VFloat p) (VTuple (VFloat d) _)) -> do
+          assertBool ("probability " ++ show p) (abs (p - 1.0) < 1e-9)
+          assertEqual "dim" 1.0 d
+        other -> assertFailure ("expected the marginal density, got " ++ show other)
   , testCase "ANY reached through an Either arm's deconstruction refuses, naming x" $
       -- Here the wildcard is read by `fst`, not by arithmetic: fromLeft of
       -- `Left ANY` is ANY, and the tuple deconstruction that follows has no

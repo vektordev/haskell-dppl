@@ -1,0 +1,8 @@
+main = snd (draw h = Uniform in (exp h, True))
+-- Found while minimizing item 8 of docs task fuzz-admission-oracle-bugs: a
+-- silent wrong result. `snd`'s inverse leaves ANY in the slot holding
+-- `exp h`, and `exp`'s applicability guard read it: the interpreter raised a
+-- type error, and the optimizer folded the guard into "impossible", p = 0.
+-- The unevaluable witness of a single-use binding is now answered by
+-- compiling the body with the binding unrecovered. `snd (exp h, True)` is True
+-- on every draw.

@@ -38,6 +38,7 @@ import qualified Data.Set as Set
 import Data.Maybe
 import SPLL.Typing.Typing (setChainName)
 import Data.Foldable
+import Data.Char (isUpper)
 import Utils
 import SPLL.Typing.RType
 
@@ -524,6 +525,10 @@ stepMonotonicity fcData c@(ExprHornClause pres _ (InjFInfo name) inv) | inv > 0 
             | f < 0 -> Just MonDec
           _ -> Nothing
         _ -> Nothing
+    -- The Int variants of the same steps (see 'resolveInjF'). Not @multI@:
+    -- its inverse is exact division, which no interval endpoint survives.
+    "plusI"  -> Just MonInc
+    "negI"   -> Just MonDec
     _ -> Nothing
 stepMonotonicity _ _ = Nothing
 
@@ -606,9 +611,45 @@ mergeExpr2 bindings c1@InvChain{invValue = IRLetIn n v bodyExpr1} c2 = mergeExpr
 mergeExpr2 bindings c1 c2@InvChain{invValue = IRLetIn n v bodyExpr2} = mergeExpr2 (bindings . IRLetIn n v) c1 c2{invValue = bodyExpr2}
 mergeExpr2 bindings (InvChain (IRConstruct TgTuple [IRConst VAny, b]) cov1 g1 ra1) (InvChain (IRConstruct TgTuple [a, IRConst VAny]) cov2 g2 ra2) = InvChain (bindings $ IRConstruct TgTuple [a, b]) (IROp OpMult cov1 cov2) (IROp OpAnd g1 g2) (IROp OpOr ra1 ra2)
 mergeExpr2 bindings (InvChain (IRConstruct TgTuple [a, IRConst VAny]) cov1 g1 ra1) (InvChain (IRConstruct TgTuple [IRConst VAny, b]) cov2 g2 ra2) = InvChain (bindings $ IRConstruct TgTuple [a, b]) (IROp OpMult cov1 cov2) (IROp OpAnd g1 g2) (IROp OpOr ra1 ra2)
--- Expressions are not compatible. Assume they are semantically equal. Then just take the first
--- TODO: Maybe one of the two is compatible with a third expression, then we would want to take this one
-mergeExpr2 bindings c1 _ = c1{invValue = bindings (invValue c1)}
+-- The same, field by field, for a user-ADT constructor: one path knows the
+-- constructor only (@isDCons ds@ inverts to @DCons ANY ANY@), another a field
+-- of it (@dig ds * 3 == 21@ to @DCons 7 ANY@). Taking the first, as below,
+-- dropped the field: the observation was answered as P(DCons), with the
+-- digit never constrained (a silent wrong result once that inverse compiled,
+-- fuzz-admission-oracle-bugs item 9). Fields a path leaves ANY carry no
+-- coordinate, so the Jacobian is the product as for the tuple slots.
+mergeExpr2 bindings (InvChain e1 cov1 g1 ra1) (InvChain e2 cov2 g2 ra2)
+  | Just (c1, fs1) <- ctorSpine e1, Just (c2, fs2) <- ctorSpine e2
+  , c1 == c2, length fs1 == length fs2
+  , and (zipWith (\a b -> isAnyConst a || isAnyConst b) fs1 fs2)
+  , any (not . isAnyConst) fs2
+  = InvChain (bindings $ foldl IRApply (IRVar c1) (zipWith (\a b -> if isAnyConst a then b else a) fs1 fs2))
+             (IROp OpMult cov1 cov2) (IROp OpAnd g1 g2) (IROp OpOr ra1 ra2)
+  where
+    isAnyConst (IRConst VAny) = True
+    isAnyConst _ = False
+    ctorSpine e = go e []
+      where go (IRApply f x) acc = go f (x : acc)
+            go (IRVar c@(h:_)) acc@(_:_) | isUpper h = Just (c, acc)
+            go _ _ = Nothing
+-- Expressions are not compatible. Assume they are semantically equal. Then just
+-- take the first -- unless only the second is a whole value. A constructor
+-- test's inverse knows the constructor and nothing else (@Face ANY ANY@, or
+-- the @VAnyExcept@ "anything but" on False); in @(isFace h, h)@ it came first,
+-- the slot holding @h@ itself was dropped, and every field went unconstrained:
+-- 1.0 at every point (task tuple-ctor-test-of-shared-draw-wrong-result), with
+-- @isFace@ of the sentinel crashing at a False first slot. Taking the whole
+-- value loses nothing: the consistency of every slot with the witness is
+-- checked for the query as a whole.
+mergeExpr2 bindings c1 c2
+  | holdsWildcard (invValue c1), not (holdsWildcard (invValue c2)) = c2{invValue = bindings (invValue c2)}
+  | otherwise = c1{invValue = bindings (invValue c1)}
+  where
+    holdsWildcard e = any isWildcard (universeIR e)
+    isWildcard (IRConst VAny) = True
+    isWildcard (IRConst (VAnyExcept _)) = True
+    isWildcard _ = False
+    universeIR e = e : concatMap universeIR (getIRSubExprs e)
 
 getAllOriginatingEquivalenceHornClauses :: [[HornClause]] -> ChainName -> [HornClause]
 getAllOriginatingEquivalenceHornClauses clauses cn = concatMap (filter (\hc -> isEquivalenceHornClause hc && conclusion hc == cn)) clauses
@@ -761,8 +802,10 @@ exprToHornClauses adtsDecls e = case e of
 injFtoHornClause :: [ADTDecl] -> Expr -> [HornClause]
 injFtoHornClause adtsDecls e = case e of
   -- Forward Horn clause: Inverse Horn clauses with corresponding inversion number
-  Expr _ (InjF (Named name) _) -> (constructInjFHornClause subst eCN name eFwd 0): zipWith (constructInjFHornClause subst eCN name) eInv [1..]
+  Expr TypeInfo{rType=rt} (InjF (Named name0) _) -> (constructInjFHornClause subst eCN name eFwd 0): zipWith (constructInjFHornClause subst eCN name) eInv [1..]
     where
+      -- The Int variant where the node is Int-typed, as IRCompiler dispatches it.
+      name = resolveInjF rt name0
       -- Create a substitution, that maps the variables in the declaration of the InjF
       -- to the ChainNames in the instantiation
       subst = (outV, eCN):zip inV (getInputChainNames e)

@@ -52,6 +52,7 @@ module SPLL.Lang.Lang (
 , lookupNeural
 , printFlat
 , InjFName(..)
+, isStaticZero
 ) where
 
 import SPLL.Lang.Types
@@ -418,7 +419,16 @@ unionMultiValues (MultiTuple ls1 rs1) (MultiTuple ls2 rs2) = MultiTuple (unionMu
 unionMultiValues (MultiADT constrs1) (MultiADT constrs2) = MultiADT (map (\cn -> (cn, unionConstr cn)) cNames)
   where
     cNames = nub $ map fst constrs1 ++ map fst constrs2
-    unionConstr cn = zipWith unionMultiValues (fromMaybe [] (lookup cn constrs1)) (fromMaybe [] (lookup cn constrs2))
+    -- A constructor only one side lists keeps that side's fields. Zipping
+    -- against the absent side's empty list dropped them: the arms of
+    -- @if c then Zero else Two 1 False@ unioned to a field-less @Two@, the
+    -- enumerated domain held the malformed value @Two@, and the field
+    -- accessor died on it (fuzz-admission-oracle-bugs item 1).
+    unionConstr cn = case (lookup cn constrs1, lookup cn constrs2) of
+      (Just fs1, Just fs2) -> zipWith unionMultiValues fs1 fs2
+      (Just fs1, Nothing)  -> fs1
+      (Nothing, Just fs2)  -> fs2
+      (Nothing, Nothing)   -> []
 -- Both operands describe the same RType (they are the two arms of one
 -- conditional), so a shape mismatch here is an upstream inconsistency, not a
 -- union this function is entitled to widen.
@@ -685,4 +695,19 @@ printFlat expr = case node expr of
   Apply {} -> "Apply"
   ReadNN name _ -> "ReadNN " ++ name
 
+-- | 'mult'/'multI''s absorbing element, known statically: a literal zero, or
+-- an expression whose whole value set (its 'DiscreteValues' tag) is the single
+-- value zero -- @4 * 0@ (fuzz-admission-oracle-bugs item 6). Shared by
+-- 'SPLL.Typing.ModalityInfer' (which types the product a point mass) and
+-- 'SPLL.IRCompiler' (which compiles it as one, instead of inverting a product
+-- through a division by zero, which found every value impossible).
+isStaticZero :: Expr -> Bool
+isStaticZero (Expr _ (Constant v)) = isZeroValue v
+isStaticZero (Expr ti _) = case [ mv | DiscreteValues mv <- tags ti ] of
+  (MultiDiscretes [v] : _) -> isZeroValue v
+  _ -> False
 
+isZeroValue :: Value -> Bool
+isZeroValue (VFloat 0) = True
+isZeroValue (VInt 0) = True
+isZeroValue _ = False

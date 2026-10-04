@@ -47,7 +47,7 @@ module SPLL.Semiring (
   outsideUnitInterval, anyGuardedDim,
   -- * PResult combinators
   density, mass, detP, impossibleP, indicatorP, impossibleWhen,
-  prodP, onProb, onDim, onBranches, mapResult, guardP, zipResult,
+  prodP, onProb, onDim, onBranches, mapResult, guardP, zipResult, zip3Result,
   scaleCoV, anySafe, anySafeShared, enumSumP, enumMixP, enumSumNode, tensorDomainSR, opaqueMass, shareResult,
   packResult, unpackResult, mixP, mixSubP, mixWith,
   -- * Compiler monad plumbing (generic; not Semiring-specific, but shared by
@@ -511,6 +511,12 @@ zipResult :: (IRExpr -> IRExpr -> IRExpr) -> PResult -> PResult -> PResult
 zipResult f (PResult aP aDim aBC aImp) (PResult bP bDim bBC bImp) =
   PResult (P (f (unP aP) (unP bP))) (f aDim bDim) (f aBC bBC)
           (if aImp == bImp then aImp else f aImp bImp)
+
+-- | 'zipResult' over three results, e.g. a two-way runtime test selecting one.
+zip3Result :: (IRExpr -> IRExpr -> IRExpr -> IRExpr) -> PResult -> PResult -> PResult -> PResult
+zip3Result f (PResult aP aDim aBC aImp) (PResult bP bDim bBC bImp) (PResult cP cDim cBC cImp) =
+  PResult (P (f (unP aP) (unP bP) (unP cP))) (f aDim bDim cDim) (f aBC bBC cBC)
+          (if aImp == bImp && bImp == cImp then aImp else f aImp bImp cImp)
 
 -- | The change-of-variables correction shared by every inverse-based case: in
 -- probability mode multiply by |d(inverse)/d(observation)| unless the result is

@@ -1,0 +1,7 @@
+data Mix = Zero | Two ma::Int, mb::Bool
+main = draw v0 = (if Uniform < 0.5 then Zero else Two 1 False) in (if isTwo v0 then mb v0 else False)
+-- Found by the admission-totality fuzz oracle (docs task
+-- fuzz-admission-oracle-bugs, item 1). The enumerated domain of the `if`
+-- dropped `Two`'s fields (the union of a constructor listed on one arm only),
+-- so the draw ranged over a malformed field-less `Two` and the accessor `mb`
+-- died on it at run time, under its own `isTwo` test. Both outcomes give False.

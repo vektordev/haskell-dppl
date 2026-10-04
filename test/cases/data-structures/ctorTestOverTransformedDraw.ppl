@@ -1,0 +1,9 @@
+data Pt = MkPt px::Float, pflag::Bool
+main = isMkPt (draw h = Uniform in MkPt (exp h) (Uniform < 0.5))
+-- Found by the admission-totality fuzz oracle (docs task
+-- fuzz-admission-oracle-bugs, item 8a). The constructor test's inverse leaves
+-- ANY in the field holding `exp h`, and the optimizer crashed folding `log ANY`
+-- (`forceUnaryOp`). The unevaluable witness of a single-use binding is now
+-- answered by the body's own inference with `h` left random (its slot is a
+-- wildcard, so it is never read), fresh sibling draw and all. The test always
+-- holds.

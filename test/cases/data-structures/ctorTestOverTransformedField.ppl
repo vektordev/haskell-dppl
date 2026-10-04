@@ -1,0 +1,6 @@
+data Pt = MkPt px::Float, pflag::Bool
+main = isMkPt (draw h = Uniform in MkPt (exp h) True)
+-- The third spelling of fuzz-admission-oracle-bugs item 8: the constructor
+-- test's inverse leaves ANY in the field holding `exp h`, and `exp`'s
+-- applicability guard compared it ("greater than can only compare two
+-- numbers"). The test always holds.

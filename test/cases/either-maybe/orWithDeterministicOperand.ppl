@@ -1,0 +1,8 @@
+main = snd (if False || isLeft (left Uniform)
+              then (False, left 0)
+              else (False, left 0))
+-- Found by the typed fuzz generator (docs task fuzz-let-witness-bugs, item
+-- 4). An `or` with one deterministic operand and one random operand without an
+-- enumerable tag asked the forward-only connective for an inverse (an uncaught
+-- error). `d || b` is now `b` where `d` is False and True elsewhere. snd of
+-- either arm is `left 0`.

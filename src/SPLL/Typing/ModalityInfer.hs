@@ -52,9 +52,9 @@ import Data.List (find)
 
 import SPLL.Lang.Types
   ( Expr(..), ExprF(..), Program(..), TypeInfo(..), InjFName(..), ChainName, ADTDecl, CompilerError, FnDecl
-  , Tag(..), GenericValue(..)
+  , Tag(..)
   , dataName, constructors )
-import SPLL.Lang.Lang (getTypeInfo, getSubExprs, containedVars, varsOfExpr, multiValueContainsContinuous)
+import SPLL.Lang.Lang (getTypeInfo, getSubExprs, containedVars, varsOfExpr, multiValueContainsContinuous, isStaticZero)
 import SPLL.Typing.Typing (setPType)
 import SPLL.Typing.PType (PType(..))
 import SPLL.Typing.RType (RType(..))
@@ -337,9 +337,7 @@ cnOf = chainName . getTypeInfo
 -- | A literal zero, in either numeric type -- 'mult'/'multI's absorbing
 -- element. See the InjF "mult" clause in 'inferE'.
 isZeroConstant :: Expr -> Bool
-isZeroConstant (Expr _ (Constant (VFloat 0))) = True
-isZeroConstant (Expr _ (Constant (VInt 0))) = True
-isZeroConstant _ = False
+isZeroConstant = isStaticZero
 
 -- | Infer the modality of an expression, returning the modality, the
 -- pType-annotated expression, and the per-node outer-ground accumulation.
@@ -683,7 +681,7 @@ injFMod adtsDecl name mods =
       | isFieldConstructor adtsDecl name, (m0:rest) <- mods -> foldl IProd m0 rest
       | name == "fst", [m] <- mods -> projFst m
       | name == "snd", [m] <- mods -> projSnd m
-      | otherwise -> floorCombine
+      | otherwise -> keepFamilyIf familyPreserved floorCombine
   where projFst (IWit m)    = iwit (projFst m)   -- a witnessed pair's field is witnessed
         projFst (IProd a _) = a
         projFst m           = m
@@ -731,6 +729,25 @@ injFMod adtsDecl name mods =
 
         plainFold []     = IG gExact
         plainFold (g:gs) = IG (foldl marginalize g gs)
+
+        -- A unary map the closure table does not list passes its operand's
+        -- ground through, family and all -- right for a map that leaves the
+        -- value alone (an accessor) or maps the family onto itself, wrong for
+        -- arithmetic that does not: @neg@ of a log-normal is supported on the
+        -- negatives and has no (mu, sigma), yet stayed 'PLogNormal' and every
+        -- variant, generate included, died extracting them
+        -- (fuzz-admission-oracle-bugs item 4). An arithmetic map keeps the
+        -- family only where 'IRCompiler.toIRLogNormalParams' has a rule for it.
+        familyPreserved = name `notElem` arithmeticMaps
+                       || (name, gFam (outerI floorCombine)) `elem`
+                            [ ("sqrt", FamLogNormal), ("sq", FamLogNormal), ("recip", FamLogNormal) ]
+        arithmeticMaps = ["exp", "log", "neg", "negI", "recip", "sqrt", "sq", "double",
+                          "plus", "plusI", "mult", "multI", "max"]
+        keepFamilyIf True  m = m
+        keepFamilyIf False m = dropFamily m
+        dropFamily (IG g)   = IG g { gFam = FamNone }
+        dropFamily (IWit m) = IWit (dropFamily m)
+        dropFamily m        = m
 
 -- ---------------------------------------------------------------------------
 -- tryNormalClosure (ported verbatim from PInfer2 — the family precision layer)

@@ -1,0 +1,7 @@
+main = draw f = (if Uniform < 0.5 then (\x -> 1.0) else snd (2.0, \y -> 3.0)) in f True
+-- Found by the admission-totality fuzz oracle (docs task
+-- fuzz-admission-oracle-bugs, item 3). The else-arm's lambda is selected by
+-- `snd` of a literal tuple; the mixture compared closures and crashed
+-- ("Comparison not implemented for type: TArrow"). The projection now reduces
+-- to the lambda literal, and the two-literal mixture is lifted pointwise
+-- (arrowApplyLetBoundRandomFunction).

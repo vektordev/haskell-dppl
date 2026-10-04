@@ -1,0 +1,10 @@
+data Face = Face x0::Bool, x1::Bool
+main =
+  draw heard = Face (Uniform < 0.7) (Uniform < 0.2) in
+  (isFace heard, heard)
+-- Task tuple-ctor-test-of-shared-draw-wrong-result. Forward chaining merged
+-- the two witnesses of `heard` by taking the first, the constructor test's
+-- `Face ANY ANY`, so neither field was ever constrained: 1.0 at every point,
+-- and `isFace` of the "anything but" sentinel crashed at a False first slot.
+-- A whole value now wins over a constructor-test witness. isFace is always
+-- True, so a True first slot leaves the fields' product.

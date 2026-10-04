@@ -530,6 +530,7 @@ simplify det (IROp OpEq l r)
   , isLeft a /= isLeft b = IRConst (VBool False)
 simplify _ (IROp op leftV rightV)
   | isValue leftV && isValue rightV
+  , not (intDivByZero op (unval rightV))
   , not (isNaNResult (forceOp op (unval leftV) (unval rightV))) = IRConst (forceOp op (unval leftV) (unval rightV))
   | isValue leftV || isValue rightV = softForceLogic op leftV rightV
 -- Mask fusion: a semiring indicator times a value becomes a branch on the
@@ -565,12 +566,17 @@ simplify _ (IRIf cond (IRConst (VBool True)) (IRConst (VBool False))) = cond
 -- the dual of the rule above survives as a statement block per arm
 -- (@False if c else True@).
 simplify _ (IRIf cond (IRConst (VBool False)) (IRConst (VBool True))) = IRUnaryOp OpNot cond
+-- Only a Bool constant picks an arm. 'forceOp' folds an operation on the ANY
+-- sentinel to ANY, and an IRIf on that used to take the else arm -- where the
+-- runtime raises a type error, the optimized program answered silently
+-- (fuzz-admission-oracle-bugs item 8: an applicability guard @VAny > 0.0@
+-- folded into "impossible"). Left alone, it fails at run time as it would at
+-- -O0.
 simplify _ x@(IRIf cond left right) =
-  if isValue cond
-    then if unval cond == VBool True
-      then left
-      else right
-    else x
+  case cond of
+    IRConst (VBool True)  -> left
+    IRConst (VBool False) -> right
+    _ -> x
 -- The same two foldings are sound for a select (pytorch-tensorizer M1): equal
 -- arms collapse to that value, and a constant mask picks one arm -- both hold
 -- whether one arm is taken (scalar) or both are computed and masked (batched),
@@ -578,11 +584,10 @@ simplify _ x@(IRIf cond left right) =
 -- code from bloating when the select pass converts constant-conditioned ifs.
 simplify _ (IRSelect _ left right) | left == right = left
 simplify _ x@(IRSelect cond left right) =
-  if isValue cond
-    then if unval cond == VBool True
-      then left
-      else right
-    else x
+  case cond of
+    IRConst (VBool True)  -> left
+    IRConst (VBool False) -> right
+    _ -> x
 -- A non-list tail is ill-typed rather than merely unsimplifiable, but the
 -- optimizer is not the place to reject it: leave the cons alone.
 simplify _ x@(IRConstruct TgCons [left, right]) =
@@ -725,6 +730,15 @@ isNumOne _ = False
 -- the runtime's own IEEE-conforming semantics, or a backend's @safe_log@)
 -- but never becomes a literal the fixpoint check can get stuck comparing to
 -- itself.
+-- | An integer quotient or remainder by a literal zero. 'multI''s inverse is
+-- only ever evaluated behind its own @divisor /= 0@ guard, but the folder sees
+-- both arms: @c `div` (4 * 0)@ folded to a Haskell 'divide by zero' that took
+-- the whole compile down (fuzz-admission-oracle-bugs item 6). Left symbolic,
+-- it sits in the arm the guard never takes.
+intDivByZero :: Operand -> IRValue -> Bool
+intDivByZero op (VInt 0) = op `elem` [OpIntDiv, OpMod]
+intDivByZero _ _ = False
+
 isNaNResult :: IRValue -> Bool
 isNaNResult (VFloat x) = isNaN x
 isNaNResult _ = False
@@ -781,6 +795,11 @@ forceUnaryOp OpNot (VBool x) = VBool (not x)
 forceUnaryOp OpNot VAny = VAny
 forceUnaryOp OpExp (VFloat x) = VFloat (exp x)
 forceUnaryOp OpLog (VFloat x) = VFloat (log x)
+-- Every other operation on the sentinel too: the inverse of @exp@ applied to a
+-- wildcard field is folded here on a path that only the runtime's
+-- unevaluable-witness refusal guards (fuzz-admission-oracle-bugs item 8a). An
+-- IRIf never picks an arm on the resulting ANY (see 'simplify').
+forceUnaryOp _ VAny = VAny
 forceUnaryOp _ _ = error "Error during forceUnaryOp optimizer"
 
 

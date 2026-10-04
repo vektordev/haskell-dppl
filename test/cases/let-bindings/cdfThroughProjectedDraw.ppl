@@ -1,0 +1,6 @@
+main = snd (draw v0 = Uniform in (v0, 2.0))
+-- Found by the admission-totality fuzz oracle (docs task
+-- fuzz-admission-oracle-bugs, item 5). `snd`'s inverse puts ANY in the slot
+-- it discards, and the integrate fold handed that wildcard to the Uniform's
+-- CDF (`irCDF` crashed on VAny). The wildcard witness of a sink binding is now
+-- answered by the body factor, as in probability mode: main is always 2.0.

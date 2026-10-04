@@ -1,1 +1,0 @@
-main = draw f = (if Uniform < 0.5 then (\x -> 1.0) else snd (2.0, \y -> 3.0)) in f True

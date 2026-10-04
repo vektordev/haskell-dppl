@@ -1,0 +1,7 @@
+main = (\a -> \b -> a) 0.0 (if Uniform < 0.5 then 2 else 1)
+-- Found by the admission-totality fuzz oracle (docs task
+-- fuzz-admission-oracle-bugs, item 7). The callee is the redex
+-- `(\a -> \b -> a) 0.0`, whose lambda body reads `a` from a scope the
+-- compile never entered ("Could not find name in TypeEnv"). CalleeNormalize
+-- now pushes the application into the redex (task
+-- callee-normalize-misses-redex-in-callee-position).

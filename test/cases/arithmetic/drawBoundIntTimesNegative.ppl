@@ -1,0 +1,8 @@
+main = draw v = (if Uniform < 0.5 then 2 else 1) in v * (-6)
+-- Found by the admission-totality fuzz oracle (docs task
+-- fuzz-admission-oracle-bugs, item 9). Forward chaining inverted the Int
+-- product with the Float `mult` inverse (`OpDiv 1.0 (-6)` crashed the
+-- optimizer); it now resolves `mult` to `multI` by the node's type, as
+-- IRCompiler does. No cdf rows: the CDF through an integer product is wrong on
+-- every spelling, inline included (docs task
+-- cdf-through-discrete-product-inverse-wrong).

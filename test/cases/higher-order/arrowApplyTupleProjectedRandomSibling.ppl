@@ -1,0 +1,6 @@
+main = draw f = snd (Normal, \x -> Uniform) in f (Uniform < 0.5)
+-- Found by the admission-totality fuzz oracle (docs task
+-- fuzz-admission-oracle-bugs, item 2). `f` is a lambda only through `snd` of a
+-- tuple with a random sibling, which forward chaining cannot see through; the
+-- compile died resolving it. CalleeNormalize now substitutes the projected
+-- lambda literal, and the binding is dead. main is the Uniform.

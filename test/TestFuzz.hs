@@ -702,19 +702,12 @@ knownAdmissionCrashes =
   -- form checks, the generate-backed enumeration guard, the Normal/LogNormal
   -- parameter extractors) are gone from this list: they are absent variants
   -- with a recorded reason now, which the oracle buckets as refusals.
-  [ ("inversions solving for",                   "fuzz-let-witness-bugs (item 4)")
-  , ("More than one probabilistic argument",     "bare-equality-of-two-neural-reads-crashes")
-  , ("Prelude.!!: index too large",                                fa "1")
-  , ("should resolve to a lambda",                     fa "2")
-  , ("Comparison not implemented for type: TArrow",    fa "3")
-  , ("Expression must be the CDF of a valid distribution", fa "5")
-  , ("divide by zero",                                 fa "6")
-  , ("Could not find name in TypeEnv",                 fa "7")
-  , ("Error during forceUnaryOp optimizer",            fa "8")
-  , ("Error during forceOp optimizer: OpDiv VFloat",   fa "9")
+  [ ("More than one probabilistic argument",     "bare-equality-of-two-neural-reads-crashes")
   ]
-  where -- Found by this property's first runs and filed together.
-        fa item = "fuzz-admission-oracle-bugs (item " ++ item ++ ")"
+  -- The nine families of fuzz-admission-oracle-bugs and fuzz-let-witness-bugs
+  -- item 4 ("inversions solving for") left this list when they were fixed;
+  -- their repros are in the ordinary corpus (or, for item 8a, a known-issues
+  -- pin answering a refusal).
 
 partitionKnownAdmission :: [Check] -> ([(Check, String)], [Check])
 partitionKnownAdmission = foldr step ([], [])
@@ -2375,23 +2368,29 @@ admissionOracleTests = testGroup "Admission oracle"
       assertEqual "helper outcomes" [(ModeGenerate, "value"), (ModeProbability, "value"), (ModeIntegrate, "value")]
         (outcomesOf "shift" rep)
   , testCase "an admitted function the IR compiler crashes on is a violation naming it" $ do
-      -- test/cases/known-issues/admissionCurriedLambdaUnusedRandomArg (docs
-      -- task fuzz-admission-oracle-bugs, item 7): admitted, and the IR
-      -- compiler dies on an internal invariant (a name missing from its type
-      -- environment) rather than refusing.
-      rep <- oracleOn "main = (\\a -> \\b -> a) 0.0 (if Uniform < 0.5 then 2 else 1)"
-      case violations rep of
-        (Check "main" pt _ (Crash msg) : _) -> do
+      -- test/cases/known-issues/agreementBareEqualityInline (docs task
+      -- bare-equality-of-two-neural-reads-crashes): admitted, and the IR
+      -- compiler dies on an internal invariant (two probabilistic operands
+      -- where its dispatch counted one) rather than refusing. Until
+      -- fuzz-admission-oracle-bugs this case used item 7's curried lambda,
+      -- which compiles now.
+      rep <- oracleOn (unlines
+        [ "neural camNN   :: (Symbol -> Int) of [0, 1, 2]"
+        , "neural depthNN :: (Symbol -> Int) of [0, 1, 2]"
+        , "main img depth = camNN img == depthNN depth" ])
+      case [ v | v@(Check "main" _ _ (Crash _)) <- violations rep ] of
+        (Check _ pt _ (Crash msg) : _) -> do
           assertBool ("admitted: " ++ show pt) (admitted pt)
-          assertBool msg ("Could not find name in TypeEnv" `isInfixOf` msg)
-        other -> assertFailure ("expected a crash on main, got " ++ show other)
+          assertBool msg ("More than one probabilistic argument" `isInfixOf` msg)
+        _ -> assertFailure ("expected a crash on main, got " ++ show (violations rep))
   , testCase "an admitted function the IR compiler refuses is a refusal, and generate survives" $ do
-      -- test/cases/known-issues/admissionNegatedLogNormal (item 4): typed
-      -- PLogNormal, and the closed-form parameter extraction has no case. That
+      -- test/cases/known-issues/correlatedGaussianLetSharesLatent: admitted,
+      -- and the set-valued witness engine refuses the shared latent. That
       -- crashed the whole compile, generate included, until
       -- static-refusals-become-absent-variants made it an absent variant with
-      -- a recorded reason.
-      rep <- oracleOn "main = neg (exp Normal)"
+      -- a recorded reason. (This case used item 4's negated log-normal of
+      -- fuzz-admission-oracle-bugs until that compiled.)
+      rep <- oracleOn "main = draw x = Normal in draw a = x + Normal in draw b = x + Normal in (a, b)"
       assertNoViolation rep
       assertEqual "outcomes" [(ModeGenerate, "value"), (ModeProbability, "refusal"), (ModeIntegrate, "refusal")]
         (outcomesOf "main" rep)

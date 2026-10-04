@@ -1,0 +1,16 @@
+data DigitList = DEnd | DCons dig::Int, rest::DigitList depth 4
+
+neural readDigits :: (Symbol -> DigitList) of 4x.{DEnd | DCons [0,1,2,3,4,5,6,7,8,9] x}
+
+main sym = draw ds = readDigits sym in if isDCons ds then (if dig ds * 3 == 21 then 1 else 0) else 0
+-- An observation through an Int multiplication (`dig ds * 3 == 21`) over an
+-- 11111-value `of` domain, above the default materialization budget, so not
+-- densely enumerated. Forward chaining used the Float `mult` inverse (the
+-- compile died folding `1.0 / 3` over an Int, task
+-- plan-peel-int-mult-divides-float); with `multI`, two further losses showed:
+-- the witness merge kept the constructor test's `DCons ANY ANY` over the
+-- digit's `DCons 7 ANY` (p(1) answered P(DCons)), and the False world of the
+-- comparison was dropped as "equal" to its `DCons ANY ANY` (p(0) lost the
+-- other digits). Both fixed with fuzz-admission-oracle-bugs item 9; the
+-- values agree with --materializationBudget 100000 (dense):
+-- p(1) = 0.8182 * 0.0339.

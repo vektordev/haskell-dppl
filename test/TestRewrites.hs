@@ -85,13 +85,11 @@ data Known = Known { kProg :: String, kFam :: Family, kSite :: String, kDoc :: S
 -- the list cannot rot. Each tracking document carries the minimal pair.
 knownDivergences :: [Known]
 knownDivergences =
-  -- `draw z = 0.0 in z * Normal`: the zero factor is only recognised as a
-  -- literal (design law-carrying-modality, probe row 10).
-  [ Known "probe10" DrawIntro "hand-written" zeroLetBound
-  , Known "probe10" DrawIntro "draw-intro 0.0" zeroLetBound
-  , Known "multDeterministicZero" DrawIntro "draw-intro 0.0" zeroLetBound
-  -- `draw z = Normal in 0.0 * z`: the random factor bound instead.
-  , Known "probe10" DrawIntro "draw-intro Normal" zeroRandomBound
+  -- `draw z = Normal in 0.0 * z`: the random factor bound instead of the
+  -- zero. (The zero bound, `draw z = 0.0 in z * Normal`, agrees since
+  -- fuzz-admission-oracle-bugs item 6: a factor whose value set is {0} is the
+  -- absorbing element.)
+  [ Known "probe10" DrawIntro "draw-intro Normal" zeroRandomBound
   , Known "multDeterministicZero" DrawIntro "draw-intro Normal" zeroRandomBound
   -- A structured random value read through a second binder -- an alias, or
   -- a helper's parameter -- loses a field's constraint.
@@ -102,7 +100,6 @@ knownDivergences =
   , Known "letBoundEitherDestructure" HelperExtract "isLeft" structuredReread
   ]
   where
-    zeroLetBound = "let-bound-zero-factor-loses-dirac-mass"
     zeroRandomBound = "draw-bound-random-factor-times-literal-zero-loses-dirac-mass"
     structuredReread = "structured-draw-reread-through-binder-drops-field"
 

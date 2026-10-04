@@ -1,2 +1,0 @@
-data Pt = MkPt px::Float, pflag::Bool
-main = isMkPt (draw h = Uniform in MkPt (exp h) (Uniform < 0.5))

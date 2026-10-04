@@ -1,0 +1,7 @@
+main = ((if Uniform < 0.5 then 2 else 1) + (4 * 0) * (if Uniform < 0.5 then 2 else 1)) < (if Uniform < 0.5 then 2 else 1)
+-- Found by the admission-totality fuzz oracle (docs task
+-- fuzz-admission-oracle-bugs, item 6). `(4 * 0) * d` inverted through a
+-- division by the folded zero (the optimizer's integer `div`/`mod` by zero
+-- crashed the compile; at -O0 every value came out impossible). A factor whose
+-- whole value set is {0} is now the absorbing element, like a literal zero.
+-- p(True) = P(d1 < d3) = 1/4.

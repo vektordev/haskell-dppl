@@ -1,6 +1,7 @@
 module PredefinedFunctions (
 globalFEnv,
 lookupFPair,
+resolveInjF,
 soleOutputVar,
 inversionFor,
 FPair(..),
@@ -85,6 +86,19 @@ type FEnv = [(String, FPair)]
 -- annotated AST was resolved against this same environment by the parser, which
 -- rejects the unknown ones, so a miss downstream is an internal inconsistency
 -- rather than anything an SPLL program can express.
+-- | Map the polymorphic InjF name to the concrete integer variant when the
+-- resolved return type is TInt.  For all other types the name is unchanged.
+-- Safe to pattern-match only on TInt: the CNum class constraint check upstream
+-- has already rejected non-numeric types, so only TFloat and TInt reach here.
+-- Shared by IRCompiler's own InjF dispatch and forward chaining's clauses
+-- (an Int @mult@'s inverse is integer division, not @c / a@ with a Float
+-- derivative -- fuzz-admission-oracle-bugs item 9).
+resolveInjF :: RType -> String -> String
+resolveInjF TInt "plus" = "plusI"
+resolveInjF TInt "mult" = "multI"
+resolveInjF TInt "neg"  = "negI"
+resolveInjF _    n      = n
+
 lookupFPair :: [ADTDecl] -> String -> FPair
 lookupFPair adtsDecl name = fromMaybe (error ("Unknown InjF: " ++ name)) (lookup name (globalFEnv adtsDecl))
 

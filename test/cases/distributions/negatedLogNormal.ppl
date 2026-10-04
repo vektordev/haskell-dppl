@@ -1,0 +1,6 @@
+main = neg (exp Normal)
+-- Found by the admission-totality fuzz oracle (docs task
+-- fuzz-admission-oracle-bugs, item 4). `neg` passed the log-normal family
+-- through (a unary map outside the closure table keeps its operand's ground),
+-- so the node was PLogNormal with no (mu, sigma) to extract. Now Integrate:
+-- the density of -X, X ~ LogNormal(0, 1), at -1 is phi(0) = 0.39894.

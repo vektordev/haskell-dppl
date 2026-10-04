@@ -1,0 +1,6 @@
+main = draw z = 0.0 in z * Normal
+-- Probe row 10 of design law-carrying-modality's evidence table, the
+-- rewritten half of `0.0 * Normal`: it answered (NaN, dim 1). A draw-bound
+-- zero carries the tag {0.0}, so it is now the absorbing element like the
+-- literal (task let-bound-zero-factor-loses-dirac-mass; fixed with
+-- fuzz-admission-oracle-bugs item 6).
