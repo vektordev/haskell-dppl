@@ -98,6 +98,11 @@ knownDivergences =
   , Known "drawDestructuredShared" HelperExtract "" structuredReread
   , Known "setWitnessTupleDisjointFields" HelperExtract "" structuredReread
   , Known "letBoundEitherDestructure" HelperExtract "isLeft" structuredReread
+  -- `h z = z * Normal; main = h 0.0`: inside the helper the zero is a
+  -- parameter, not statically zero, and the product inverts through a
+  -- division by it (NaN at dim 1). Exposed when drawBoundZeroTimesNormal
+  -- joined the corpus.
+  , Known "drawBoundZeroTimesNormal" HelperExtract "mult z Normal" "helper-parameter-zero-factor-answers-nan"
   ]
   where
     zeroRandomBound = "draw-bound-random-factor-times-literal-zero-loses-dirac-mass"

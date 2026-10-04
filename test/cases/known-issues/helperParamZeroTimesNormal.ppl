@@ -1,0 +1,8 @@
+h z = z * Normal
+main = h 0.0
+-- The helper-extraction rewrite of arithmetic/drawBoundZeroTimesNormal. A zero
+-- factor is the absorbing element only when it is statically zero at the
+-- product (`isStaticZero`: a literal, or a {0} value-set tag); inside `h` it
+-- is a parameter, so the product is inverted through a division by it: the
+-- answer is NaN at dim 1 at every point (verified on branch
+-- fuzz-admission-oracle-bugs, and identically at dev 9ca6755). Task helper-parameter-zero-factor-answers-nan.

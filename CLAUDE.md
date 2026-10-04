@@ -2147,13 +2147,17 @@ interpretation:` prefix), crash. A crash is the violation.
 `prop_Fuzz_AdmissionTotality` (Slow) runs it over the typed generator, with
 `knownAdmissionCrashes` excepting filed crash families by message, each
 naming its doc. Task `fuzz-admission-oracle-bugs` fixed the nine families it
-was seeded with and emptied the list down to three open docs
-(`bare-equality-of-two-neural-reads-crashes`,
-`function-value-compared-in-probability-mode`,
-`single-prob-param-injf-with-no-probabilistic-operand`); an entry is removed in
-the commit that fixes its family, and a family that resurfaces under a removed
+was seeded with and emptied the list down to one open doc,
+`function-value-compared-in-probability-mode`; an entry is removed in the
+commit that fixes its family, and a family that resurfaces under a removed
 needle is a new finding, not noise -- lifting item 2's needle exposed the
-commonest arrow-generator crash, which had been hiding under it. An admitted variant the IR compiler *refused* (absent, with a
+commonest arrow-generator crash, which had been hiding under it. Two
+mechanisms behind the families that went with it: the set-witness engine
+builds an interval target only for a scalar result (a cumulative query of a
+list compared lists with `<`), and the `hasAnyExcept` (`==`/constructor-test)
+InjF arm requires exactly one probabilistic operand, with `==` of two random
+enumerables compared on the forward grid instead. An admitted variant the IR
+compiler *refused* (absent, with a
 recorded reason) is in the **refusal** bucket, not a violation: it is the
 lattice over-promising in its graceful form, and the property tabulates that
 share as the lattice's precision metric. Only an admitted variant absent with
