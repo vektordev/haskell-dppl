@@ -1,0 +1,4 @@
+data Face = Face x0::Bool, x1::Bool
+main =
+  draw heard = Face (Uniform < 0.7) (Uniform < 0.2) in
+  isFace heard
