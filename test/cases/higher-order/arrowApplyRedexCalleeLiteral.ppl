@@ -1,0 +1,4 @@
+main = (\v0 -> fst (\x -> x + 1.0, 2.0)) 0.0 Normal
+-- Task callee-normalize-misses-redex-in-callee-position, row 2: a literal
+-- beta-redex in callee position, its body a projected lambda. Same answer as
+-- arrowApplyRedexCallee: N(1, 1).

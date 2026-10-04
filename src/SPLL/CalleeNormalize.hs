@@ -126,6 +126,23 @@ rewriteApply decls env ti l v = case node l of
   Apply (Expr lamTi (Lambda x0 body0)) a ->
     let (x, body) = freshBinder x0 body0
     in rewrite decls env (Expr ti (Apply (Expr lamTi (Lambda x (Expr ti (Apply body v)))) a))
+  -- A projection (or a chain of them) of a redex's result, or of an @if@,
+  -- likewise: @fst ((\x -> (f, ..)) a) v@ becomes @(\x -> (fst (f, ..)) v)
+  -- a@, and @fst (if c then p else q) v@ becomes @if c then fst p v else fst q
+  -- v@, whose callees the other cases then reduce. Found by the admission
+  -- oracle once its item-2 exception was lifted: forward chaining met an
+  -- accessor it cannot resolve to a lambda, the commonest crash the arrow
+  -- generator draws. Projections are pure, so moving one into a binder's body
+  -- or into both arms changes nothing but where it is evaluated.
+  InjF _ [_]
+    | Just (rebuild, inner) <- accessorChain decls l ->
+        case node inner of
+          Apply (Expr lamTi (Lambda x0 body0)) a ->
+            let (x, body) = freshBinder x0 body0
+            in rewrite decls env (Expr ti (Apply (Expr lamTi (Lambda x (Expr ti (Apply (rebuild body) v)))) a))
+          IfThenElse c t f ->
+            rewrite decls env (Expr ti (IfThenElse c (Expr ti (Apply (rebuild t) v)) (Expr ti (Apply (rebuild f) v))))
+          _ -> Expr ti (Apply (rewrite decls env l) (rewrite decls env v))
   -- A *named* callee is left alone: forward chaining resolves a variable to the
   -- lambda it stands for by itself (that is what its equivalence classes are
   -- for), so this is the one selection the existing engines already see
@@ -164,14 +181,14 @@ rewriteApply decls env ti l v = case node l of
     let l' = rewrite decls env l
     in case node l' of
          IfThenElse{} -> rewriteApply decls env ti l' v
+         -- A rewritten curried spine can also expose a redex, or a
+         -- projection of one: @fst (redex) 0@ becomes @(\x -> fst .. 0) a@,
+         -- which leaves the outer application's callee a redex. Each of
+         -- these pushes the application one binder or projection inward.
+         Apply (Expr _ Lambda{}) _ -> rewriteApply decls env ti l' v
+         InjF _ [_] | Just _ <- accessorChain decls l' -> rewriteApply decls env ti l' v
          _            -> Expr ti (Apply l' (rewrite decls env v))
 
--- | The lambda literal a callee expression denotes, if that is statically
--- decidable: a literal lambda, a field of a tuple literal, an element of a list
--- literal, or a @let@-bound name standing for one of those, in any combination.
---
--- 'Nothing' for everything else — including a name bound to a randomly selected
--- function, whose selection must stay at its binding site.
   where
     freshBinder x0 body0
       | x0 `Set.member` freeVarsExpr v =
@@ -179,6 +196,23 @@ rewriteApply decls env ti l v = case node l of
               x = head [ c | k <- [(1 :: Int) ..], let c = x0 ++ "_" ++ show k, not (Set.member c taken) ]
           in (x, renameFreeVar x0 x body0)
       | otherwise = (x0, body0)
+
+-- | A chain of one or more projections ('accessorField' knows them) over an
+-- expression that is a redex or an @if@: the function that rebuilds the chain
+-- around a replacement, and that innermost expression.
+accessorChain :: [ADTDecl] -> Expr -> Maybe (Expr -> Expr, Expr)
+accessorChain decls = go
+  where
+    go e@(Expr t (InjF (Named acc) [p]))
+      | isAccessor acc = case node p of
+          Apply (Expr _ Lambda{}) _ -> Just (\x -> Expr t (InjF (Named acc) [x]), p)
+          IfThenElse{}              -> Just (\x -> Expr t (InjF (Named acc) [x]), p)
+          _ -> do (rebuild, inner) <- go p
+                  return (\x -> Expr t (InjF (Named acc) [rebuild x]), inner)
+      | otherwise = const Nothing e
+    go _ = Nothing
+    isAccessor acc = acc `elem` ["fst", "snd", "head", "tail", "fromLeft", "fromRight", "fromLeftPartial", "fromRightPartial"]
+                  || any (\(_, fs) -> acc `elem` map fst fs) (concatMap constructors decls)
 
 -- | 'reduceCallee' without the environment: only literal constructor
 -- applications are looked through, so no binding is ever copied.
@@ -189,6 +223,12 @@ isLambdaLiteral :: Expr -> Bool
 isLambdaLiteral (Expr _ Lambda{}) = True
 isLambdaLiteral _                 = False
 
+-- | The lambda literal a callee expression denotes, if that is statically
+-- decidable: a literal lambda, a field of a tuple literal, an element of a list
+-- literal, or a @let@-bound name standing for one of those, in any combination.
+--
+-- 'Nothing' for everything else — including a name bound to a randomly selected
+-- function, whose selection must stay at its binding site.
 reduceCallee :: [ADTDecl] -> Env -> Expr -> Maybe Expr
 reduceCallee decls env l = case reduce [] l of
   lam@(Expr _ Lambda{}) -> Just lam

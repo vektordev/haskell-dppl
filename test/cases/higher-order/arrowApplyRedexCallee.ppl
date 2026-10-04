@@ -1,0 +1,7 @@
+main = (draw p = (\x -> x + 1.0, 2.0) in fst p) Normal
+-- Task callee-normalize-misses-redex-in-callee-position, row 1: the callee is
+-- a `draw` (a beta-redex) whose body projects a lambda out of a tuple. Forward
+-- chaining met a callee that is neither a lambda nor a name and crashed
+-- ("expected chain name ... to be a Lambda"). CalleeNormalize now pushes the
+-- application into the redex, `draw p = .. in (fst p) Normal`, which is
+-- arrowApplyTupleProjected: N(1, 1).

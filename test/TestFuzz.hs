@@ -703,6 +703,12 @@ knownAdmissionCrashes =
   -- parameter extractors) are gone from this list: they are absent variants
   -- with a recorded reason now, which the oracle buckets as refusals.
   [ ("More than one probabilistic argument",     "bare-equality-of-two-neural-reads-crashes")
+  -- Found once fuzz-admission-oracle-bugs' item 2 and 3 exceptions were lifted
+  -- (they had been hiding these under the same messages), and filed rather
+  -- than fixed in that task.
+  , ("Comparison not implemented for type: TArrow", "function-value-compared-in-probability-mode")
+  , ("was selected for single-probabilistic-parameter inference, but no parameter is probabilistic",
+                                                 "single-prob-param-injf-with-no-probabilistic-operand")
   ]
   -- The nine families of fuzz-admission-oracle-bugs and fuzz-let-witness-bugs
   -- item 4 ("inversions solving for") left this list when they were fixed;

@@ -2685,6 +2685,15 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
   let lChainName = chainName (getTypeInfo l)
 
   -- This logic is here to wrap the expression back into lambdas if the lambda we look at returns a lambda
+  -- A callee forward chaining cannot resolve to a lambda is a shape this arm
+  -- does not support, not a broken invariant: CalleeNormalize reduces the
+  -- selections it knows (projections, an @if@, a redex), and anything it does
+  -- not reach is refused rather than crashing the compile.
+  case findEquivalentExpression (fcData meta) lChainName of
+    Just (_, LambdaInfo{}, _) -> return ()
+    other -> refuse lChainName ("the callee of this application does not resolve to a lambda the compiler can see"
+                                ++ " (it resolved to " ++ show other ++ "); a function value selected some other way"
+                                ++ " than by a projection, an if, or a redex is not supported here")
   let (lResolvedCN, toInvCN, lambdaBodyCN, tag) = equivalentLambda "toIRInference/Apply" (fcData meta) lChainName
   let (boundVar, lambdaVars) = unwrapLambdas (fcData meta) lambdaBodyCN
   let wrapInLambdas ex = foldr IRLambda ex lambdaVars
