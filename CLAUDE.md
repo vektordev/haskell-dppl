@@ -652,6 +652,17 @@ Two things moved with it:
   More `let`s reach that arm now (`let-bindings/drawConstNestedAny`,
   `distributions/floatEqualityBehindHelperCall`).
 
+A **single-use** binding whose witness is a wildcard -- the recovered value is
+ANY, or a step of the inverse chain read one (`invReadsAny`) -- is no longer
+refused: its one occurrence lies under an ANY slot of the observation, so the
+witness fold answers with the body's own inference with the binding left
+random, never evaluating the occurrence (task `fuzz-admission-oracle-bugs`
+item 8: `snd (draw h = Uniform in (exp h, True))` used to answer p(True) = 0,
+the optimizer having folded `exp`'s applicability guard on the sentinel into
+"impossible"). The inverse's domain guard is not asked of an unevaluable
+witness, and the optimizer now picks an `IRIf` arm only on a Bool constant. A
+multi-use binding keeps the refusal.
+
 ### Callee Normalization
 
 Probability mode compiles `Apply l v` by inverting the observation through
@@ -683,8 +694,32 @@ own):
   for either, reduced until a `Lambda` falls out. Only a reduction that bottoms
   out at a lambda is taken, so nothing else is ever moved.
 
+Three more rewrites came with task `fuzz-admission-oracle-bugs`, all found by
+the admission oracle:
+
+- **A redex in callee position has the application pushed into its body**:
+  `((\x -> b) a) v` becomes `(\x -> b v) a` (binder renamed on capture), and
+  likewise a projection chain of a redex or of an `if`: `fst ((\x -> (f, ..))
+  a) v` becomes `(\x -> fst (f, ..) v) a`. A `draw` stays where it is. Left
+  alone, FC met a callee that is neither a lambda nor a name, and IRCompiler
+  compiled the returned lambda's body outside the scope binding its free
+  variables (`curriedLambdaUnusedRandomArg`, `arrowApplyRedexCallee*`).
+- **An `if` arm projecting a lambda literal out of a literal constructor is
+  that lambda**, so the pointwise-lifted arrow mixture sees lambda arms
+  (`arrowApplyIfSelectedProjected`).
+- **A bare name standing for a lambda only through a projection** (`draw f =
+  snd (Normal, \x -> Uniform) in f c`) is substituted at the call: FC cannot
+  see through `snd` of a tuple with a random sibling. The binding is then
+  dead, and a dead function-valued binding is compiled as its body
+  (`arrowApplyTupleProjectedRandomSibling`).
+
+Whatever the pass does not reach is refused by IRCompiler's point-inversion
+`Apply` arm ("does not resolve to a lambda the compiler can see"), an absent
+variant rather than the `error` it used to be.
+
 The one selection it deliberately leaves alone is a **bare name** in callee
-position, precisely because that is the one FC already resolves. An earlier
+position (other than the projected one above), precisely because that is the
+one FC already resolves. An earlier
 draft substituted those too and moved two working programs onto a different
 path: `hoProbValueLambda` (`(\x -> x 1.0) (\y -> Uniform + y)`) became a dead
 binding whose arrow-typed probabilistic argument arm generates rather than
@@ -2111,7 +2146,14 @@ interpretation:` prefix), crash. A crash is the violation.
 
 `prop_Fuzz_AdmissionTotality` (Slow) runs it over the typed generator, with
 `knownAdmissionCrashes` excepting filed crash families by message, each
-naming its doc. An admitted variant the IR compiler *refused* (absent, with a
+naming its doc. Task `fuzz-admission-oracle-bugs` fixed the nine families it
+was seeded with and emptied the list down to three open docs
+(`bare-equality-of-two-neural-reads-crashes`,
+`function-value-compared-in-probability-mode`,
+`single-prob-param-injf-with-no-probabilistic-operand`); an entry is removed in
+the commit that fixes its family, and a family that resurfaces under a removed
+needle is a new finding, not noise -- lifting item 2's needle exposed the
+commonest arrow-generator crash, which had been hiding under it. An admitted variant the IR compiler *refused* (absent, with a
 recorded reason) is in the **refusal** bucket, not a violation: it is the
 lattice over-promising in its graceful form, and the property tabulates that
 share as the lattice's precision metric. Only an admitted variant absent with
