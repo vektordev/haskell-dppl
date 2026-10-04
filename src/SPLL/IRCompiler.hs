@@ -7029,7 +7029,7 @@ planGroupValues pairs = do
     mergeGroup sr raws (v, ws) = do
       let common = commonDiscreteCons ws
           residual w = w { pwCons = filter (\c -> not (any (conEq c) common)) (pwCons w) }
-      groupMass <- lift (sumAllSR sr (map (planWorldMass sr raws . residual) ws))
+      let groupMass = sumAllSR sr (map (planWorldMass sr raws . residual) ws)
       mv <- lift (mkVariable "cnt_mass")
       lift (setVariables [(mv, groupMass)])
       -- the residual leaves are now hidden inside the mass: record them, with
@@ -7422,8 +7422,7 @@ measurePlanWorlds sr raws worlds
   -- sub-inference factor always takes the general 'mixP' path below.
   | all (null . pwSubFactors) worlds
   , all ((== 0) . planWorldDim) worlds = do
-      total <- sumAllSR sr (map worldMass worlds)
-      opaqueMass sr total branchSum
+      opaqueMass sr (sumAllSR sr (map worldMass worlds)) branchSum
   | otherwise = do
       -- A dim-0 world's mass vanishing means its slots were not selected, i.e.
       -- the world is impossible; a dim-1 (point-constrained continuous) world's

@@ -60,7 +60,6 @@ import SPLL.Lang.Types
 import SPLL.Lang.Lang (multiValueToValueList)
 import Utils
 import Control.Monad.Writer.Lazy
-import Control.Monad (foldM)
 import Control.Monad.Except (ExceptT, runExceptT, throwError)
 import qualified Data.Set as Set
 
@@ -372,19 +371,19 @@ measureDiffSR sr a b = if srLogSpace sr then logSubExpIR a b else IROp OpSub a b
 
 -- | The semiring sum ('srPlus') of a list of alternatives, for a world set
 -- summed outside 'mixP' (whose dim/flag bookkeeping it does not need). Linear
--- sum-product spells it as a right-nested 'OpPlus' chain reading each operand
--- once. Every other family's 'srPlus' (log-sum-exp, max) reads its operands
--- more than once, so there the operands and each partial sum are let-bound,
--- keeping the emitted size linear in the number of alternatives.
-sumAllSR :: Semiring -> [IRExpr] -> CompilerMonad IRExpr
-sumAllSR sr [] = return (srZero sr)
-sumAllSR sr xs | srReduceOp sr == ROpAdd = return (foldr1 (IROp OpPlus) xs)
-sumAllSR sr (x:xs) = do
-    x' <- bind x
-    foldM (\acc y -> bind y >>= bind . srPlus sr acc) x' xs
-  where
-    bind e@(IRVar _) = return e
-    bind e = do v <- mkVariable "world_mass"; setVariables [(v, e)]; return (IRVar v)
+-- sum-product spells it as a right-nested 'OpPlus' chain. Every other
+-- family's pairwise 'srPlus' (log-sum-exp, max) reads its operands more than
+-- once, and a group of a few thousand worlds folded pairwise is a few thousand
+-- nested IRIf chains (measured: compiling a depth-7 counting fold took
+-- minutes instead of 30 seconds), so there the sum is one n-ary reduction over a
+-- tensor of the operands -- the same node 'enumSumNode' folds an enumerated
+-- support with.
+sumAllSR :: Semiring -> [IRExpr] -> IRExpr
+sumAllSR sr []  = srZero sr
+sumAllSR _  [x] = x
+sumAllSR sr xs
+  | srReduceOp sr == ROpAdd = foldr1 (IROp OpPlus) xs
+  | otherwise = IRBuiltin (BReduce (srReduceOp sr) 0) [IRBuiltin (BTensor [EFixed (length xs)]) xs]
 
 -- | The native log-pdf/log-cdf leaf for a builtin distribution when @sr@ is
 -- log-space, or the ordinary linear leaf otherwise. Distinct from
