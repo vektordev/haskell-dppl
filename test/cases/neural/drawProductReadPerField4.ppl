@@ -1,0 +1,11 @@
+-- drawProductReadPerField at 4 fields, small enough for every backend and for
+-- End2End's Normalization sweep (which samples the output and needs to see its
+-- whole support; the 14- and 20-field versions are Python-only for that
+-- reason). DrawSinking splits the one draw of the product read into a draw
+-- per field. Task draw-product-read-enumerated-jointly.
+data Face = Face x0::Bool, x1::Bool, x2::Bool, x3::Bool
+neural see :: (Symbol -> Face)
+tells yes no truth = if truth then Uniform < yes else Uniform < no
+main img =
+  draw truth = see img in
+  Face (tells 0.9 0.2 (x0 truth)) (tells 0.9 0.2 (x1 truth)) (tells 0.9 0.2 (x2 truth)) (tells 0.9 0.2 (x3 truth))

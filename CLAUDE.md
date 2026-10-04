@@ -1585,7 +1585,28 @@ some *other* operand may be random. That leaves `draw c` around
 eager draws: the binding is still evaluated at most once and every use of the
 name stays under it; nothing is ever moved under a non-binding `Lambda`, into an
 `if` arm, or into a function argument. A binding that ends up as `draw x = e in
-x` is replaced by `e`.
+x` is replaced by `e`. A binding read only by the *value* of a directly nested
+binding (`draw x = e in draw y = v2 in b`, `b` not reading `x`) moves into `v2`.
+
+**Product reads are split per field first** (task
+`draw-product-read-enumerated-jointly`). `draw t = see img in Face (tells ..
+(x0 t)) .. (tells .. (xJ t))` with `see` a neural read of a single-constructor
+ADT is a product over its fields (AutoNeural's `ADTPlan`, one logit block per
+field, no flag), so when the body reads `t` only through field accessors of
+discrete fields, `splitProductDraw` rewrites it to `draw t_x0 = x0 (see img) in
+.. draw t_xJ = xJ (see img) in ..` (a non-variable read argument is bound once
+first) and the per-field draws then sink: `2J` terms instead of `2^J`, which
+was refused past the dense budget at `J = 14`. A field read by several
+operands keeps one shared draw above them. Not split: multi-constructor reads
+(the constructor couples the fields), bodies using `t` whole (`isFace t`), and
+reads none of whose per-field draws would then reach an operand of its own
+(nothing to gain, and the plan engine's accessor descent handles the single
+draw: `planEnumInlineADT` at budget 0). Each field's read calls the network
+again, as the `define` spelling always has: `J` calls per evaluation instead of
+one (follow-up `repeated-neural-read-not-shared`). Pinned by
+`Internals.drawProductReadFactorizesPerField` (cost),
+`Internals.productReadSplitConditions` (each condition) and the
+`neural/drawProductRead*` / `drawMultiConstructorReadStaysJoint` corpus pairs.
 
 The per-slot chain is then tabulated by Tier 0 materialization *inside* the
 loop over `c`, which needed its decomposability gate to be retaken given the

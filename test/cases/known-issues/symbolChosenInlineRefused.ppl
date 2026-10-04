@@ -1,0 +1,6 @@
+-- A neural read of a Symbol chosen by an inline coin is refused as a
+-- generate-backed body. Binding the coin first compiles and answers:
+-- `draw s = Uniform < 0.25 in see (if s then a else b)`. Same distribution.
+-- Task symbol-chosen-by-inline-coin-refused.
+neural see :: (Symbol -> Bool)
+main a b = see (if Uniform < 0.25 then a else b)

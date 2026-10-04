@@ -1,0 +1,9 @@
+-- `map` over a lambda that reads a draw-bound random value. The explicit
+-- recursive helper (`answers h qs = if isNull qs then [] else
+-- (pickField (head qs) h) : answers h (tail qs)`) compiles and is exact;
+-- the `map` spelling is refused. In the full experiment model the refusal
+-- surfaced as the generate-backed prob-body guard instead ("main.prob: by
+-- calling tells_gen"). Task map-lambda-over-shared-draw-refused.
+data Pair = Pair l::Bool, r::Bool
+pickField i f = if i == 0 then l f else r f
+main qs = draw h = Pair (Uniform < 0.3) (Uniform < 0.6) in map (\q -> pickField q h) qs

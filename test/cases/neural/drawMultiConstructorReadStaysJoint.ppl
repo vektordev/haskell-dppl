@@ -1,0 +1,14 @@
+-- A negative case for splitting a neural read per field: a read of a
+-- multi-constructor ADT is not a product over its fields (the constructor
+-- choice couples them), and this body also tests the constructor of the whole
+-- value, so DrawSinking leaves the one draw alone and the read is enumerated
+-- jointly, as before. (A body reading a multi-constructor value through field
+-- accessors alone is partial, so it has no corpus values; the constructor
+-- condition on its own is pinned by TestInternals.productReadSplitConditions.)
+-- Task draw-product-read-enumerated-jointly.
+data Face = Face x0::Bool, x1::Bool | Blank
+neural see :: (Symbol -> Face)
+tells yes no truth = if truth then Uniform < yes else Uniform < no
+main img =
+  draw truth = see img in
+  if isFace truth then Face (tells 0.9 0.2 (x0 truth)) (tells 0.9 0.2 (x1 truth)) else Blank

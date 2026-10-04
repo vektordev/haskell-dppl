@@ -1,0 +1,31 @@
+-- One draw of a product-distributed neural read, each field of which feeds
+-- exactly one slot of the result through a noisy channel. Given the read the
+-- slots are independent, so the exact cost is linear in the field count.
+-- DrawSinking splits the draw into one draw per field and sinks each into the
+-- slot that reads it. It used to be enumerated jointly over all 2^14 Faces,
+-- past the dense budget, and refused (it was the known-issues pin
+-- drawProductReadEnumeratedJointly; TestInternals.drawProductReadFactorizesPerField
+-- pins the per-field cost). Found by experiments_nest exact-eig-question-asking.
+-- Task draw-product-read-enumerated-jointly.
+-- Python-only: End2End's Normalization sweep samples the output and cannot
+-- cover a 2^14 support; drawProductReadPerField4 runs on every backend.
+data Face = Face x0::Bool, x1::Bool, x2::Bool, x3::Bool, x4::Bool, x5::Bool, x6::Bool, x7::Bool, x8::Bool, x9::Bool, x10::Bool, x11::Bool, x12::Bool, x13::Bool
+neural see :: (Symbol -> Face)
+tells yes no truth = if truth then Uniform < yes else Uniform < no
+main img =
+  draw truth = see img in
+  Face
+       (tells 0.9 0.2 (x0 truth))
+       (tells 0.9 0.2 (x1 truth))
+       (tells 0.9 0.2 (x2 truth))
+       (tells 0.9 0.2 (x3 truth))
+       (tells 0.9 0.2 (x4 truth))
+       (tells 0.9 0.2 (x5 truth))
+       (tells 0.9 0.2 (x6 truth))
+       (tells 0.9 0.2 (x7 truth))
+       (tells 0.9 0.2 (x8 truth))
+       (tells 0.9 0.2 (x9 truth))
+       (tells 0.9 0.2 (x10 truth))
+       (tells 0.9 0.2 (x11 truth))
+       (tells 0.9 0.2 (x12 truth))
+       (tells 0.9 0.2 (x13 truth))
