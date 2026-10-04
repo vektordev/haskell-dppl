@@ -8,4 +8,4 @@
 -- `observeAlso m p = if isRight m then observe (fromRightPartial m) p else left ()`
 -- (task observe-predicate-as-argument). Idealized, as observeKeyword:
 --   p(Right 1) = (0.3, 0.0), p(Left ()) = (0.7, 0.0)
-expect-failure: diagnostic "tagged invocation"
+expect-failure: refused "tagged invocation"

@@ -52,7 +52,7 @@ module SPLL.Semiring (
   packResult, unpackResult, mixP, mixSubP, mixWith,
   -- * Compiler monad plumbing (generic; not Semiring-specific, but shared by
   -- combinators that bind fresh variables)
-  CompilerMonad, mkVariable, setVariables, generateLetInExpr, wrapBlockIfRead
+  CompilerMonad, CompilerM, refuse, runCompilerMonad, mkVariable, setVariables, generateLetInExpr, wrapBlockIfRead
 ) where
 
 import SPLL.IntermediateRepresentation
@@ -61,9 +61,31 @@ import SPLL.Lang.Types
 import SPLL.Lang.Lang (multiValueToValueList)
 import Utils
 import Control.Monad.Writer.Lazy
+import Control.Monad.Except (ExceptT, runExceptT, throwError)
 import qualified Data.Set as Set
 
-type CompilerMonad a = WriterT [(String, IRExpr)] Supply a
+-- | The compiler monad: fresh names ('Supply'), emitted let-bindings (the
+-- writer), and one refusal channel (task static-refusals-become-absent-variants).
+--
+-- The 'ExceptT' sits /under/ the writer on purpose. @runWriterT@ of a
+-- 'CompilerMonad' action is then an @ExceptT VariantRefusal Supply@ action, so the
+-- module's many "compile this in its own writer scope" sites
+-- (@lift (runWriterT ...)@) keep their shape and a refusal inside such a scope
+-- propagates through them untouched; and the name supply, beneath both, is
+-- never rewound by a refusal.
+type CompilerM = WriterT [(String, IRExpr)] (ExceptT VariantRefusal Supply)
+type CompilerMonad a = CompilerM a
+
+-- | Decline to compile the current variant: an unsupported shape, not an
+-- internal invariant (those stay 'error'). The whole variant becomes absent
+-- with this reason recorded on its 'IRFunGroup'; see 'VariantRefusal'. The first
+-- argument is the chain name of the refusing node ("" when there is none).
+refuse :: String -> String -> CompilerMonad a
+refuse cn why = lift (throwError (VariantRefusal why cn))
+
+-- | Run a compilation from a fresh name supply.
+runCompilerMonad :: CompilerMonad a -> Either VariantRefusal (a, [(String, IRExpr)])
+runCompilerMonad m = evalSupply (runExceptT (runWriterT m))
 
 mkVariable :: String -> CompilerMonad Varname
 mkVariable suffix = do

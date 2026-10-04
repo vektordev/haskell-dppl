@@ -308,6 +308,40 @@ no occurrence of the bound variable is point-invertible at all. Full
 mechanism, examples, and the `test/cases/plan-enumeration/planEnum*` pointers:
 `docs/witness-inversion-engines.md`.
 
+### A static refusal is an absent variant, never a compile-killing error
+
+When an engine declines a shape -- the set-witness diagnostic, a plan
+traversal's decline carried in it, the `toIRInference` catch-all ("found no
+way to convert to IR"), the Bottom-argument `Apply` arm, the InjF form checks,
+the generate-backed enumeration guard, the Normal/LogNormal parameter
+extractors, a CDF call under an extra semiring -- it calls `Semiring.refuse`
+rather than `error` (task `static-refusals-become-absent-variants`, design
+`pipeline-coherence` P1). `CompilerMonad` is
+`WriterT [...] (ExceptT VariantRefusal Supply)`: the `ExceptT` sits *under*
+the writer so the many `lift (runWriterT ...)` sub-scopes keep their shape and
+a refusal passes through them. `runCompile` answers `Either`, and
+`envToIRUnoptimized'` turns a `Left` into an absent variant whose reason is
+kept in `IRFunGroup.refusedVariants` (keyed `gen`/`prob`/`integ`/`normal`/
+`writeLogits`) -- the same observable as a `Bottom` verdict, so `generate`
+survives a refused `probability`. `Prelude.missingVariant` prints the recorded
+reason. `propagateRefusals` then refuses, to a fixed point, every variant that
+calls a refused one (`main_prob` calling a refused `f_prob`), naming the callee
+and its reason, so no backend emits a call to a function that was never
+written (`Rejection.RefusedVariant`).
+
+One site *catches* a refusal instead of propagating it, because it used to
+discard a failed attempt's lazy `error` along with its bindings: the
+set-witness inversion (`invertToWorlds`) when it has a fallback (the affine
+marginalisation), so the fallback still gets its turn. Refusals are otherwise
+eager where the old `error`s were lazy, so a refusing sub-compile whose result
+an engine then discards now refuses the variant; the corpus showed no such
+case. Query-dependent
+refusals stay runtime `IRError`s: the ANY-marginal refusal in the body-factor
+fold has no static answer. What is left as `error` in `IRCompiler` is an
+internal invariant, each commented as such; three of those are reachable and
+filed (`Could not find name in TypeEnv`, `Comparison not implemented for type:
+TArrow`, `More than one probabilistic argument`).
+
 The plan engine is entered from a `draw` of a neural read **and from a call of
 a top-level function straight on one** (`planWitnessApply`, tasks
 `plan-engine-not-entered-for-inline-neural-read`,
@@ -804,8 +838,8 @@ follow-up `enumerated-sum-over-density-body`, pinned by
 `known-issues/enumLetGatesFreshDensity`. Solving the fixed point
 algebraically (the marginal *is* closed-form for that program) was declined: it
 would make "does my program infer?" unpredictable from the source. The refusal
-is lazy and lives inside the prob/integ bodies, so `generate` and
-`--noProbability --noIntegrate` compiles of such a program still work.
+is an absent probability/integrate variant with a recorded reason (see "A
+static refusal is an absent variant"), so `generate` still works.
 
 The purity verdict is the optimizer's own `isPureGiven` (an `IRSample`, or a
 `_gen` reference not proven deterministic), told which generators are
@@ -1051,8 +1085,8 @@ where the plan engine drops that value's mass (`Internals`'
 `dense-enumeration-crashes-on-partial-body`).
 
 **Known cost**: over budget, the plan traversal is the only route, so a body
-it does not cover is refused -- eagerly, taking `generate` down with the default
-compile -- where dense enumeration used to compile it. Dense fallback was
+it does not cover is refused (an absent probability variant; `generate`
+survives) where dense enumeration used to compile it. Dense fallback was
 explicitly rejected; the fix is plan coverage, and `--materializationBudget N`
 is the explicit per-invocation opt-in to dense enumeration. Task
 `plan-path-coverage-for-over-budget-bodies` closed the gaps first found here:
@@ -1752,7 +1786,7 @@ current list for whichever binary you run):
   (groups `RewriteInvariance` and `RewriteInvarianceCorpus`; see "Rewrite
   invariance" below)
 - `test/TestKnownIssues.hs` — drives `test/cases/known-issues/`: pinned
-  repros of open compiler bugs, each declaring which of four failure shapes
+  repros of open compiler bugs, each declaring which failure shape
   it demonstrates (see "Known-issues corpus" below)
 - `test/TestFuzz.hs` — `Fuzz`, inside the opt-in `Slow`/`Aspirational`/`SuperSlow` groups,
   plus `Shrinker` (the typed generator's shrink contract) and `Admission
@@ -1838,6 +1872,7 @@ checks each pair's `.tst` against its `expect-failure:` header instead:
 ```
 expect-failure: crash                          -- an uncaught exception, message unpinned
 expect-failure: diagnostic "some substring"    -- an uncaught exception whose message contains this
+expect-failure: refused "some substring"       -- compiles; some variant is absent with a recorded refusal reason containing this
 expect-failure: no-code                        -- compiles, but generate/probability/integrate is silently absent
 expect-failure: wrong-result                   -- compiles and runs; the p()/cdf() rows below pin the known-wrong value
 expect-failure: broken                         -- mechanism unpinned; the p()/cdf() rows below state the idealized value instead
@@ -1845,7 +1880,11 @@ expect-failure: broken                         -- mechanism unpinned; the p()/cd
 
 `crash`/`diagnostic` are checked against an exception thrown while *forcing*
 `compile`'s result — a graceful `Left` (an intended, working refusal) does not
-satisfy either; that is what `TestRejection.hs` is for. **`wrong-result` rows
+satisfy either; that is what `TestRejection.hs` is for. `refused` is the
+graceful form of an open capability gap: the compile succeeds and some
+function's variant is absent with a recorded reason (`refusedVariants`)
+containing the substring. Fourteen `diagnostic`/`crash` pins moved there when
+static refusals stopped crashing the compile. **`wrong-result` rows
 are currently not evaluated by anything**: `checkExpectFailure` treats the
 shape as documentation (`return ()`), and this folder is excluded from the
 corpus sweeps that would otherwise compare them. So a `wrong-result` pin does
@@ -2051,13 +2090,13 @@ interpretation:` prefix), crash. A crash is the violation.
 
 `prop_Fuzz_AdmissionTotality` (Slow) runs it over the typed generator, with
 `knownAdmissionCrashes` excepting filed crash families by message, each
-naming its doc. Most entries are the refusal sites
-`static-refusals-become-absent-variants` (P1) turns into absent variants --
-when that lands, prune them, and decide whether an admitted-but-absent variant
-(a violation here today) becomes the refusal bucket. The catch-all is one of
-them, so a *new* lattice over-promise is currently invisible to the property;
-the default-suite `Admission oracle` group pins the oracle itself, including
-on the historical mixture-Fin repro. There is no corpus twin: over all 443
+naming its doc. An admitted variant the IR compiler *refused* (absent, with a
+recorded reason) is in the **refusal** bucket, not a violation: it is the
+lattice over-promising in its graceful form, and the property tabulates that
+share as the lattice's precision metric. Only an admitted variant absent with
+*no* recorded reason is still a violation (the variant gate disagreeing with
+the verdict). The default-suite `Admission oracle` group pins the oracle
+itself, including on the historical mixture-Fin repro. There is no corpus twin: over all 443
 corpus programs the oracle finds nothing, and none of them is `Bottom`, so the
 corpus cannot exercise half the contract (measured when the task landed).
 

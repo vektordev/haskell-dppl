@@ -585,12 +585,12 @@ runGenNamedC p compiled name args =
     Just (gen, _) -> generateRand (neurals p) (writeLogitsDecls p) compiled (map IRConst args) gen
     -- Unlike the prob/integ runners there is no error channel in the return
     -- type to report this through.
-    Nothing -> error (missingVariant "generate" name)
+    Nothing -> error (missingVariant "generate" "gen" (lookupIREnv name compiled))
 
 runProbNamedC :: Program -> IREnv -> String -> [IRValue] -> IRValue -> Either CompilerError IRValue
 runProbNamedC p compiled name args x =
   case probFun (lookupIREnv name compiled) of
-    Nothing -> Left (missingVariant "probability" name)
+    Nothing -> Left (missingVariant "probability" "prob" (lookupIREnv name compiled))
     Just (prob, _) -> generateDet (neurals p) (writeLogitsDecls p) compiled (map IRConst args') prob
       -- topK-compiled prob functions take an accumulated-probability parameter
       -- right after the sample; seed it with the semiring's multiplicative
@@ -618,17 +618,25 @@ runIntegNamedC :: Program -> IREnv -> String -> [IRValue] -> IRValue -> Either C
 runIntegNamedC p compiled name args sample =
   case integFun (lookupIREnv name compiled) of
     Just (integ, _) -> generateDet (neurals p) (writeLogitsDecls p) compiled (map IRConst (sample:args)) integ
-    Nothing -> Left (missingVariant "integrate" name)
+    Nothing -> Left (missingVariant "integrate" "integ" (lookupIREnv name compiled))
 
 -- | Modality inference decides per definition which of the three variants are
 -- tractable, and the --noGenerate/--noProbability/--noIntegrate flags suppress
 -- them outright, so asking a compiled group for a variant it does not have is a
--- normal outcome rather than an internal inconsistency.
-missingVariant :: String -> String -> CompilerError
-missingVariant variant name =
-  "'" ++ name ++ "' has no compiled " ++ variant ++ " function: it is either "
-  ++ "intractable for that mode or was suppressed by the --no" ++ capitalise variant ++ " flag"
-  where capitalise (c:cs) = toUpper c : cs
+-- normal outcome rather than an internal inconsistency. When the compiler
+-- itself refused the variant (an unsupported shape, recorded on the group by
+-- 'IRCompiler.envToIRUnoptimized'; task static-refusals-become-absent-variants),
+-- the message says why.
+missingVariant :: String -> String -> IRFunGroup -> CompilerError
+missingVariant variant lbl grp = case lookup lbl (refusedVariants grp) of
+  Just r ->
+    "'" ++ name ++ "' has no compiled " ++ variant ++ " function: NeST refused to compile it:\n"
+    ++ showRefusal r
+  Nothing ->
+    "'" ++ name ++ "' has no compiled " ++ variant ++ " function: it is either "
+    ++ "intractable for that mode or was suppressed by the --no" ++ capitalise variant ++ " flag"
+  where name = groupName grp
+        capitalise (c:cs) = toUpper c : cs
         capitalise []     = []
 
 -- | Run the writeLogits function of the function group named `target`. Each read-logits

@@ -4,4 +4,4 @@
 -- Verified at 2d50350 on dev. Pinned by task
 -- rewrite-invariance-net-draw-apply-helper-alias, whose Probes group judges
 -- the pair. Idealized (the twin's answer): p((0.3, 1.3)) = (0.3814, 1.0)
-expect-failure: diagnostic "tagged invocation"
+expect-failure: refused "tagged invocation"

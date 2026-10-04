@@ -627,20 +627,21 @@ prop_Fuzz_ProbNeverGenerateBacked = withMaxSuccess (fuzzCases 3000) $
 -- a draw whose every violation is one of those passes, labelled. Anything
 -- else fails. The tabulation is the three-bucket count the task asks for, over
 -- the admitted functions' inference evaluations: the "refusal" share is the
--- precision metric @static-refusals-become-absent-variants@ will turn into a
--- gate.
+-- precision metric of the lattice (an admitted function the IR compiler then
+-- refuses is an over-promise in its graceful form).
 --
 -- Measured at its introduction (2026-10-02): about 12% of draws violate the
 -- contract. Nine of the crash families were unfiled and are now
 -- (fuzz-admission-oracle-bugs); with them filed, about one random-seed run in
 -- eight at the default 200 draws (~10s) still turns up a new one, which is
--- what a failure of this property means: a family to file. The exception list
--- costs something real: the catch-all ("found no way to convert to IR") is
--- excepted as a whole, and it is exactly where a new lattice over-promise
--- lands (the re-seeded mixture-Fin bug does), so until P1 empties that entry this
--- property guards the *other* failure modes, and the oracle's default-suite
--- case for the mixture-Fin repro ('admissionOracleTests') is what pins that
--- one.
+-- what a failure of this property means: a family to file. Since
+-- static-refusals-become-absent-variants the IR compiler's shape refusals
+-- (the catch-all "found no way to convert to IR" among them) are absent
+-- variants with a recorded reason and land in the refusal bucket, so the
+-- exception list holds only genuine crash families; a new lattice
+-- over-promise shows up as a refusal share, not as a failure, and the
+-- oracle's default-suite case for the mixture-Fin repro
+-- ('admissionOracleTests') still pins that one to a clean Bottom.
 prop_Fuzz_AdmissionTotality :: Property
 prop_Fuzz_AdmissionTotality = withMaxSuccess (fuzzCases 200) $
   forAllShrink (resize fuzzSize genTypedProgram) shrinkTypedProgram $ \p -> ioProperty $ withinBudgetScaled "prop_Fuzz_AdmissionTotality" 4 $ do
@@ -696,29 +697,23 @@ prop_Fuzz_AdmissionTotality = withMaxSuccess (fuzzCases 200) $
 -- that becomes the graceful-refusal bucket instead -- see 'violations'.
 knownAdmissionCrashes :: [(String, String)]
 knownAdmissionCrashes =
-  [ ("found no way to convert to IR",            p1)
-  , ("set-valued witness construction failed",   p1)
-  , ("Cannot compile an application in",         p1)
-  , ("must declare exactly one inversion",       p1)
-  , ("Form of InjF is not supported",            p1)
-  , ("AnyExcept in InjF must be the first",      p1)
-  , ("Cannot infer prob on subtree",             p1)
-  , ("inversions solving for",                   "fuzz-let-witness-bugs (item 4)")
-  , ("reached a generate-backed fallback",       "fuzz-let-witness-bugs (item 3), fuzz-neural-plan-bugs (item 1)")
-  , ("toIRNormalParams: cannot extract Normal",  "fuzz-neural-plan-bugs (item 3)")
+  -- The refusal sites of static-refusals-become-absent-variants (the IR
+  -- catch-all, set-valued witnesses, the Bottom-argument Apply arm, the InjF
+  -- form checks, the generate-backed enumeration guard, the Normal/LogNormal
+  -- parameter extractors) are gone from this list: they are absent variants
+  -- with a recorded reason now, which the oracle buckets as refusals.
+  [ ("inversions solving for",                   "fuzz-let-witness-bugs (item 4)")
   , ("More than one probabilistic argument",     "bare-equality-of-two-neural-reads-crashes")
   , ("Prelude.!!: index too large",                                fa "1")
   , ("should resolve to a lambda",                     fa "2")
   , ("Comparison not implemented for type: TArrow",    fa "3")
-  , ("toIRLogNormalParams: cannot extract LogNormal",  fa "4")
   , ("Expression must be the CDF of a valid distribution", fa "5")
   , ("divide by zero",                                 fa "6")
   , ("Could not find name in TypeEnv",                 fa "7")
   , ("Error during forceUnaryOp optimizer",            fa "8")
   , ("Error during forceOp optimizer: OpDiv VFloat",   fa "9")
   ]
-  where p1 = "static-refusals-become-absent-variants"
-        -- Found by this property's first runs and filed together.
+  where -- Found by this property's first runs and filed together.
         fa item = "fuzz-admission-oracle-bugs (item " ++ item ++ ")"
 
 partitionKnownAdmission :: [Check] -> ([(Check, String)], [Check])
@@ -2380,17 +2375,26 @@ admissionOracleTests = testGroup "Admission oracle"
       assertEqual "helper outcomes" [(ModeGenerate, "value"), (ModeProbability, "value"), (ModeIntegrate, "value")]
         (outcomesOf "shift" rep)
   , testCase "an admitted function the IR compiler crashes on is a violation naming it" $ do
-      -- test/cases/known-issues/admissionNegatedLogNormal (docs task
-      -- fuzz-admission-oracle-bugs, item 4): typed PLogNormal, and the
-      -- closed-form parameter extraction crashes the compile. (The
-      -- log-normal shortcut function is compiled even generate-only, so
-      -- generate goes down with it, which the oracle reports as such.)
-      rep <- oracleOn "main = neg (exp Normal)"
+      -- test/cases/known-issues/admissionCurriedLambdaUnusedRandomArg (docs
+      -- task fuzz-admission-oracle-bugs, item 7): admitted, and the IR
+      -- compiler dies on an internal invariant (a name missing from its type
+      -- environment) rather than refusing.
+      rep <- oracleOn "main = (\\a -> \\b -> a) 0.0 (if Uniform < 0.5 then 2 else 1)"
       case violations rep of
-        [Check "main" pt _ (Crash msg)] -> do
+        (Check "main" pt _ (Crash msg) : _) -> do
           assertBool ("admitted: " ++ show pt) (admitted pt)
-          assertBool msg ("toIRLogNormalParams" `isInfixOf` msg)
-        other -> assertFailure ("expected one crash on main, got " ++ show other)
+          assertBool msg ("Could not find name in TypeEnv" `isInfixOf` msg)
+        other -> assertFailure ("expected a crash on main, got " ++ show other)
+  , testCase "an admitted function the IR compiler refuses is a refusal, and generate survives" $ do
+      -- test/cases/known-issues/admissionNegatedLogNormal (item 4): typed
+      -- PLogNormal, and the closed-form parameter extraction has no case. That
+      -- crashed the whole compile, generate included, until
+      -- static-refusals-become-absent-variants made it an absent variant with
+      -- a recorded reason.
+      rep <- oracleOn "main = neg (exp Normal)"
+      assertNoViolation rep
+      assertEqual "outcomes" [(ModeGenerate, "value"), (ModeProbability, "refusal"), (ModeIntegrate, "refusal")]
+        (outcomesOf "main" rep)
   , testCase "the mixture-Fin repro (a historical F2 instance) honours the contract" $ do
       -- Task modality-mixture-fin-joins-not-meets (haskell-dppl d0ab543): the
       -- lattice used to type this finite-support, admit it, and crash the IR

@@ -5,6 +5,8 @@ module SPLL.IntermediateRepresentation (
 , IREnv(..)
 , IRFunDecl
 , IRFunGroup (..)
+, VariantRefusal(..)
+, showRefusal
 , Tag(..)
 , Operand(..)
 , UnaryOperand(..)
@@ -543,7 +545,28 @@ type IRValue = GenericValue IRExpr
 data IREnv = IREnv [IRFunGroup] [ADTDecl] [(String, IRValue)] deriving (Show)
 
 
+-- | Why the compiler declined to build one variant of a function group (task
+-- static-refusals-become-absent-variants): an unsupported shape met while
+-- compiling a probability/integrate (or, through a closure, generate/normal)
+-- body. The variant is then absent -- exactly as a 'Bottom'-typed one is --
+-- and the reason travels with the group, so 'Prelude.runProbNamedC' can say
+-- /why/ instead of only that it is missing. The chain name is the node that
+-- refused, or, for a refusal propagated along the call graph, empty.
+data VariantRefusal = VariantRefusal { refusalReason :: String, refusalChainName :: String }
+  deriving (Show, Eq)
+
+-- | One-line-per-fact rendering of a 'Refusal' for diagnostics.
+showRefusal :: VariantRefusal -> String
+showRefusal (VariantRefusal why "") = why
+showRefusal (VariantRefusal why cn) = why ++ "\n(refused at chain name " ++ cn ++ ")"
+
 data IRFunGroup = IRFunGroup {groupName::String, genFun::Maybe IRFunDecl, probFun::Maybe IRFunDecl, integFun::Maybe IRFunDecl, writeLogitsFun::Maybe IRFunDecl, normalFun::Maybe IRFunDecl, groupDoc::String,
+  -- | The variants the compiler refused to build, keyed by the same label
+  -- the generate-backed guard uses (@"gen"@, @"prob"@, @"integ"@,
+  -- @"normal"@, @"writeLogits"@). A label here always has its field
+  -- 'Nothing'; the converse does not hold (a variant can also be absent
+  -- because modality inference typed it intractable, or by a @--noX@ flag).
+  refusedVariants :: [(String, VariantRefusal)],
   -- | The finite enumeration of values a query against this group's prob/integ
   -- function can take, when the sample domain is statically finite -- the
   -- function's own return type, /not/ the domain of anything it enumerates

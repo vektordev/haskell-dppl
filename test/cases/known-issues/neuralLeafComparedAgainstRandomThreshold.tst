@@ -6,4 +6,4 @@
 -- accurate diagnostic. The refusal is correct; that it is raised as an
 -- exception rather than returned on the `Left` channel is the separate defect
 -- tracked by tasks/unwitnessed-gaussian-let-chain-admitted-but-crashes.
-expect-failure: diagnostic "comparison: some side is neither plan-dependent nor deterministic"
+expect-failure: refused "comparison: some side is neither plan-dependent nor deterministic"

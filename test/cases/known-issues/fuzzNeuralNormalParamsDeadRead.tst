@@ -3,8 +3,9 @@
 -- `PNormal` expression reached through nested tuple/Either projections, even
 -- though the (unused) neural read `s` is dead. `snd (snd (right False,
 -- (False, Normal)))` structurally reduces to `Normal`. Idealized: the
--- standard normal density, p(0.0) = (0.3989422804014327, 1.0). Pinned as
--- `crash` rather than `broken` since a correct row would need the mock-NN
--- logit-envelope parameter shape rather than a bare Symbol literal, which is
--- not confirmed here.
-expect-failure: crash
+-- standard normal density, p(0.0) = (0.3989422804014327, 1.0). Pinned by
+-- the refusal reason rather than as `broken` since a correct row would need
+-- the mock-NN logit-envelope parameter shape rather than a bare Symbol
+-- literal, which is not confirmed here. (It crashed the compile until task
+-- static-refusals-become-absent-variants made it an absent variant.)
+expect-failure: refused "toIRNormalParams"

@@ -37,8 +37,9 @@ import Test.Tasty.HUnit (testCase, assertBool, assertFailure)
 
 import SPLL.Lang.Types (CompilerError, Program, GenericValue(..))
 import SPLL.IntermediateRepresentation
-  ( IREnv, IRValue, defaultCompilerConfig, lookupIREnv
-  , genFun, probFun, integFun, resultImpossible, pattern VProbDim
+  ( IREnv(..), IRValue, defaultCompilerConfig, lookupIREnv
+  , IRFunGroup(..), showRefusal
+  , resultImpossible, pattern VProbDim
   )
 import SPLL.Prelude (compile, runProbC, runIntegC)
 import TestCaseParser
@@ -96,6 +97,23 @@ checkExpectFailure name prog _ ExpectCrash _ =
   assertCrashes name (compile defaultCompilerConfig prog) Nothing
 checkExpectFailure name prog _ (ExpectDiagnostic needle) _ =
   assertCrashes name (compile defaultCompilerConfig prog) (Just needle)
+checkExpectFailure name prog _ (ExpectRefused needle) _ = do
+  result <- forced (compile defaultCompilerConfig prog)
+  case result of
+    Left ex -> assertFailure (name ++ ": expected a refused variant, but compile crashed: " ++ show ex)
+    Right _ -> case compile defaultCompilerConfig prog of
+      Left err -> assertFailure (name ++ ": expected a refused variant, but the compile was \
+                                 \refused outright: " ++ err)
+      Right env ->
+        let reasons = [ groupName g ++ "." ++ lbl ++ ": " ++ showRefusal r
+                      | g <- envGroups env, (lbl, r) <- refusedVariants g ]
+        in assertBool (name ++ ": expected a variant refused with a reason containing \""
+                       ++ needle ++ "\", but the recorded refusals are: "
+                       ++ (if null reasons then "(none) -- the bug it pins may be fixed; if so, \
+                                                \move or retire this known-issues case"
+                           else intercalate "\n" reasons))
+             (any (needle `isInfixOf`) reasons)
+  where envGroups (IREnv gs _ _) = gs
 checkExpectFailure name prog _ ExpectNoCode _ = do
   result <- forced (compile defaultCompilerConfig prog)
   case result of

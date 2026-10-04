@@ -4,4 +4,4 @@
 -- Found while writing polyNestedTwoTypes (design polymorphic-monomorphization);
 -- reproduces with no polymorphism involved. Idealized: Uniform + 3.0,
 --   p(3.5) = (1.0, 1.0)
-expect-failure: diagnostic "tagged invocation"
+expect-failure: refused "tagged invocation"

@@ -24,7 +24,7 @@ module SPLL.IRCompiler (
   enumeratedCount
 )where
 
-import SPLL.ReservedNames (queryParamName, accProbParamName, topKCutoffName, accProbInitName, componentNormalGroupPrefix)
+import SPLL.ReservedNames (queryParamName, accProbParamName, topKCutoffName, accProbInitName, componentNormalGroupPrefix, componentNormalName)
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
@@ -45,9 +45,9 @@ import SPLL.Typing.Determinism (functionSummaries)
 import SPLL.Typing.ModalityInfer (ReinferCtx, reinferCtx, reinferGiven)
 import SPLL.Typing.AlgebraicDataTypes
 import SPLL.Semiring
-import Utils
 import Control.Monad (foldM, forM, when, zipWithM)
 import Control.Monad.State.Strict (StateT, runStateT, get, gets, put, modify)
+import Control.Monad.Except (catchError, throwError)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Graph (SCC(..), stronglyConnComp)
@@ -240,7 +240,68 @@ envToIR conf fcDat p
 -- 'normalFun'/'writeLogitsFun' are assembled, so the check sees every site
 -- regardless of which combinator produced it and needs no per-site edits.
 envToIRUnoptimized :: CompilerConfig -> FCData -> Program -> Either CompilerError IREnv
-envToIRUnoptimized conf fcDat p = requireNoGenerateBacked conf (envToIRUnoptimized' conf fcDat p)
+envToIRUnoptimized conf fcDat p = requireNoGenerateBacked conf (propagateRefusals (envToIRUnoptimized' conf fcDat p))
+
+-- | Refuse every compiled variant that calls a refused one, to a fixed point
+-- (task static-refusals-become-absent-variants). A refused variant is absent,
+-- so a caller that still referenced it -- @main_prob@ calling @f_prob@ -- would
+-- emit a call to a function that is never written. The caller is refused too,
+-- naming the callee and the callee's own reason; the shape mirrors
+-- 'requireNoGenerateBacked''s treatment of a @--noGenerate@-suppressed
+-- generator, except that the unit refused is the one variant, not the compile.
+--
+-- Only /refused/ variants propagate. A variant absent because its pType is
+-- intractable is never referenced by a compiled caller (the caller would be
+-- intractable too), and a --noX flag's absences are the generate-backed
+-- guard's business.
+propagateRefusals :: IREnv -> IREnv
+propagateRefusals (IREnv groups0 adts' consts) = IREnv (go groups0) adts' consts
+  where
+    go gs =
+      let refused = Map.fromList [ (variantRefName g lbl, (lbl, groupName g, r))
+                                 | g <- gs, (lbl, r) <- refusedVariants g ]
+          gs' = map (dropDangling refused) gs
+      in if sum (map (length . refusedVariants) gs') == sum (map (length . refusedVariants) gs)
+           then gs else go gs'
+    dropDangling refused g = foldl (dropOne refused) g variantLabels
+    dropOne refused g lbl = case variantOf lbl g of
+      Just (vBody, _)
+        | (callee, (calleeLbl, calleeGroup, r)) : _ <-
+            [ (n, hit) | n <- nub (irVarNames vBody), Just hit <- [Map.lookup n refused] ] ->
+            let why = "this " ++ variantWord lbl ++ " function calls " ++ callee ++ ", the "
+                      ++ variantWord calleeLbl ++ " function of '" ++ calleeGroup
+                      ++ "', which NeST refused to compile:\n" ++ showRefusal r
+            in (clearVariant lbl g) { refusedVariants = refusedVariants g ++ [(lbl, VariantRefusal why "")] }
+      _ -> g
+    variantLabels = ["gen", "prob", "integ", "normal", "writeLogits"]
+    variantOf lbl g = case lbl of
+      "gen" -> genFun g
+      "prob" -> probFun g
+      "integ" -> integFun g
+      "normal" -> normalFun g
+      _ -> writeLogitsFun g
+    clearVariant lbl g = case lbl of
+      "gen" -> g { genFun = Nothing }
+      "prob" -> g { probFun = Nothing }
+      "integ" -> g { integFun = Nothing }
+      "normal" -> g { normalFun = Nothing }
+      _ -> g { writeLogitsFun = Nothing }
+    variantWord lbl = case lbl of
+      "gen" -> "generate"
+      "prob" -> "probability"
+      "integ" -> "integrate"
+      other -> other
+    -- The name the IR references a group's variant by (cf. the backends'
+    -- lookup tables and 'IRInterpreter.reduceIREnv').
+    variantRefName g lbl = case lbl of
+      "normal" -> fromMaybe (groupName g ++ "_normal") (componentNormalName (groupName g))
+      "gen" -> groupName g ++ "_gen"
+      "prob" -> groupName g ++ "_prob"
+      "integ" -> groupName g ++ "_integ"
+      _ -> groupName g ++ "_writeLogits"
+    irVarNames e = case e of
+      IRVar n -> [n]
+      _ -> concatMap irVarNames (getIRSubExprs e)
 
 -- | Refuse at compile time rather than hand back an 'IREnv' containing a
 -- generate-backed probability/integrate/normal/writeLogits body -- see
@@ -416,25 +477,30 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
         sampleDom = listToMaybe $ filter multiValueIsFinite $
           [mv | DiscreteValues mv <- tags (getTypeInfo (stripLambdas binding))]
           ++ [mv | Right mv <- [autoDeriveMultiValue progADTs returnRType]]
-        baseFunGroup = IRFunGroup {groupName=name, writeLogitsFun=writeLogitsF, sampleDomain=sampleDom,
-         integFun =
-          if not noInteg && (pt == Deterministic || pt == Integrate || pt == PNormal || pt == PLogNormal) then
-            Just (appendDoc guardNote (toIntegDecl name (IRLambda queryParamName (guardQuery "cdf" (runCompile (meta progTypeEnv) (toIRInferenceSave (meta progTypeEnv) True binding (IRVar queryParamName)))))))
-          else Nothing,
-          probFun =
-            if not noProb && (pt == Deterministic || pt == Integrate || pt == PNormal || pt == PLogNormal) then
+        -- Each variant is attempted ('Just') or not ('Nothing': intractable by
+        -- its pType, or suppressed by a --noX flag); an attempt answers 'Left'
+        -- when the compiler refuses the shape (see 'refuse'). A refused variant
+        -- is absent exactly like an intractable one, and its reason is kept in
+        -- 'refusedVariants' (task static-refusals-become-absent-variants).
+        integE =
+          if not noInteg && admittedPT pt then
+            Just (appendDoc guardNote . toIntegDecl name . IRLambda queryParamName . guardQuery "cdf"
+                    <$> runCompile (meta progTypeEnv) (toIRInferenceSave (meta progTypeEnv) True binding (IRVar queryParamName)))
+          else Nothing
+        probE =
+            if not noProb && admittedPT pt then
               let metaBase = meta progTypeEnv
                   compileBody m = runCompile m (toIRInferenceSave m False binding (IRVar queryParamName))
-              in Just (appendDoc guardNote $ toProbDecl name $ case topKThreshold conf of
-                   Just _ -> IRLambda queryParamName $ IRLambda accProbParamName $ guardQuery "p" $ compileBody (metaBase { accProb = IRVar accProbParamName })
-                   Nothing -> IRLambda queryParamName $ guardQuery "p" $ compileBody metaBase)
-            else Nothing,
-          genFun =
+              in Just (appendDoc guardNote . toProbDecl name <$> case topKThreshold conf of
+                   Just _ -> IRLambda queryParamName . IRLambda accProbParamName . guardQuery "p" <$> compileBody (metaBase { accProb = IRVar accProbParamName })
+                   Nothing -> IRLambda queryParamName . guardQuery "p" <$> compileBody metaBase)
+            else Nothing
+        genE =
             if not noGen then
-              Just (toGenDecl name (fst $ evalSupply $ runWriterT $ toIRGenerate (meta progTypeEnv) binding))
+              Just (toGenDecl name . fst <$> runCompilerMonad (toIRGenerate (meta progTypeEnv) binding))
             else
-              Nothing,
-          normalFun =
+              Nothing
+        normalE =
             -- The modality read under the parameter lambdas, not on the binding
             -- itself: a curried function's outer Lambda is Deterministic (its
             -- result is a closure), so `pt` only reports PNormal for a
@@ -443,9 +509,16 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
             -- Normal shortcut as a one-argument one
             -- (task normal-shortcut-crashes-through-function-call).
             if (ptUnderLambdas == PNormal || ptUnderLambdas == PLogNormal) && isNormalExtractable binding then
-              Just (toNormalDecl name (compileNormalExpr (meta progTypeEnv) binding))
+              Just (toNormalDecl name <$> compileNormalExpr (meta progTypeEnv) binding)
             else
-              Nothing,
+              Nothing
+        baseFunGroup = IRFunGroup {groupName=name, writeLogitsFun=writeLogitsF, sampleDomain=sampleDom,
+          integFun = presentVariant integE,
+          probFun = presentVariant probE,
+          genFun = presentVariant genE,
+          normalFun = presentVariant normalE,
+          refusedVariants = refusedVariant "gen" genE ++ refusedVariant "prob" probE
+                            ++ refusedVariant "integ" integE ++ refusedVariant "normal" normalE,
           groupDoc="Function group " ++ name}
         -- Generate per-component normal functions for tuple outputs
         tupleNormalFuns = generateTupleComponentNormalFunctions (meta progTypeEnv) name binding
@@ -474,16 +547,18 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
         extraFunGroups =
           [ IRFunGroup { groupName = name ++ "_" ++ semiringSuffix fam, writeLogitsFun = Nothing, sampleDomain = Nothing
                         , integFun = Nothing
-                        , probFun =
-                            if not noProb && (pt == Deterministic || pt == Integrate || pt == PNormal || pt == PLogNormal) then
-                              let metaExtra = (meta progTypeEnv) { semiringFamily = fam }
-                                  compileBody m = runCompile m (toIRInferenceSave m False binding (IRVar queryParamName))
-                              in Just (appendDoc guardNote $ toProbDecl name $ IRLambda queryParamName $ guardQuery "p" $ compileBody metaExtra)
-                            else Nothing
+                        , probFun = presentVariant extraProbE
+                        , refusedVariants = refusedVariant "prob" extraProbE
                         , genFun = Nothing
                         , normalFun = Nothing
                         , groupDoc = "Function group " ++ name ++ " under the " ++ show fam ++ " semiring" }
-          | fam <- extraSemirings conf ]
+          | fam <- extraSemirings conf
+          , let extraProbE =
+                  if not noProb && admittedPT pt then
+                    let metaExtra = (meta progTypeEnv) { semiringFamily = fam }
+                        compileBody m = runCompile m (toIRInferenceSave m False binding (IRVar queryParamName))
+                    in Just (appendDoc guardNote . toProbDecl name . IRLambda queryParamName . guardQuery "p" <$> compileBody metaExtra)
+                  else Nothing ]
     in [baseFunGroup] ++ tupleNormalFuns ++ extraFunGroups) (functions p))
   progADTs
   -- The cutoff must live in the same space as the accumulated probability it's
@@ -500,6 +575,12 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
     Nothing     -> [])
 
   where
+    -- The four rungs a probability and an integrate function are compiled for.
+    admittedPT pt' = pt' == Deterministic || pt' == Integrate || pt' == PNormal || pt' == PLogNormal
+    presentVariant :: Maybe (Either VariantRefusal IRFunDecl) -> Maybe IRFunDecl
+    presentVariant e = e >>= either (const Nothing) Just
+    refusedVariant :: String -> Maybe (Either VariantRefusal IRFunDecl) -> [(String, VariantRefusal)]
+    refusedVariant lbl e = [ (lbl, r) | Just (Left r) <- [e] ]
     toGenDecl name expr = (expr, "Generates a random sample of the " ++ name ++ " function")
     toProbDecl name expr =
       (expr, "Calculates the probability of the sample parameter being returned from the " ++ name ++ "function")
@@ -534,8 +615,10 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
     stripLambdas e = e
 
 
-runCompile :: CompilerMetadata -> CompilerMonad PResult -> IRExpr
-runCompile meta codeGen = generateLetInBlock meta (evalSupply $ runWriterT $ do
+-- | Run one variant's compilation. A 'Left' is a static refusal (see
+-- 'refuse'): the variant is then absent, with that reason recorded on its group.
+runCompile :: CompilerMetadata -> CompilerMonad PResult -> Either VariantRefusal IRExpr
+runCompile meta codeGen = generateLetInBlock meta <$> (runCompilerMonad $ do
   res <- codeGen
   case unP (rProb res) of
     IRLambda _ _ -> return res
@@ -556,13 +639,13 @@ generateLetInBlock _ codeGen =
 -- an @IRConstruct TgTuple@ pair.  Lambda wrappers are preserved so the result has
 -- the same arity as the original binding; parameter types are added to the type
 -- environment so that inner Var references resolve correctly.
-compileNormalExpr :: CompilerMetadata -> Expr -> IRExpr
+compileNormalExpr :: CompilerMetadata -> Expr -> Either VariantRefusal IRExpr
 compileNormalExpr meta (Expr _ (Lambda name subExpr)) =
   let newMeta = meta { typeEnv = (name, (rType (getTypeInfo subExpr), False)) : typeEnv meta }
-  in IRLambda name (compileNormalExpr newMeta subExpr)
-compileNormalExpr meta expr =
-  let ((mu, sigma), binds) = evalSupply $ runWriterT $ toIRNormal meta expr
-  in generateLetInExpr binds (IRConstruct TgTuple [mu, sigma])
+  in IRLambda name <$> compileNormalExpr newMeta subExpr
+compileNormalExpr meta expr = do
+  ((mu, sigma), binds) <- runCompilerMonad (toIRNormal meta expr)
+  return (generateLetInExpr binds (IRConstruct TgTuple [mu, sigma]))
 
 -- | True when the expression (with lambdas stripped) has its own toIRInference
 -- handler and cannot be processed by toIRNormalParams.  Mirrors the
@@ -603,8 +686,9 @@ generateComponentNormalFunction meta fullName expr ti
            Nothing
            Nothing
            Nothing
-           (Just (compiled, "Per-component normal extraction for tuple element: " ++ fullName))
+           (either (const Nothing) (\c -> Just (c, "Per-component normal extraction for tuple element: " ++ fullName)) compiled)
            ""
+           [ ("normal", r) | Left r <- [compiled] ]
            -- No prob function, so no query domain to enumerate (M3).
            Nothing
   | otherwise = Nothing
@@ -1697,6 +1781,7 @@ toIRNormal :: CompilerMetadata -> Expr -> CompilerMonad (IRExpr, IRExpr)
 toIRNormal meta e
   | pType (getTypeInfo e) == PNormal    = toIRNormalParams meta e
   | pType (getTypeInfo e) == PLogNormal = toIRLogNormalParams meta e
+  -- Invariant, not a refusal (task static-refusals-become-absent-variants): callers check the pType first.
   | otherwise = error $ "toIRNormal: expression is neither PNormal nor PLogNormal: " ++ show (pType (getTypeInfo e))
 
 irSqrt :: IRExpr -> IRExpr
@@ -1788,7 +1873,7 @@ toIRNormalParams meta (Expr _ (ReadNN name arg)) = do
   setVariables [(var, IRApply (IRVar name) sym)]
   return (IRBuiltin BListIndex [IRVar var, IRConst (VInt 0)], IRBuiltin BListIndex [IRVar var, IRConst (VInt 1)])
 toIRNormalParams meta e | Just act <- normalParamsViaCall meta PNormal e = act
-toIRNormalParams _ e = error $ "toIRNormalParams: cannot extract Normal params from " ++ show (pType (getTypeInfo e)) ++ " | expr: " ++ show e
+toIRNormalParams _ e = refuse (chainName (getTypeInfo e)) $ "toIRNormalParams: cannot extract Normal params from " ++ show (pType (getTypeInfo e)) ++ " | expr: " ++ show e
 
 -- | True if the expression reads a variable bound in 'affineEnv'.
 mentionsAffineVar :: CompilerMetadata -> Expr -> Bool
@@ -1819,6 +1904,7 @@ affineFormOf meta e@(Expr ti nd)
   | InjF (Named "neg") [a] <- nd = do
       fa <- affineFormOf meta a
       return (AffineForm (IRUnaryOp OpNeg (afConst fa)) (Map.map (IRUnaryOp OpNeg) (afCoeffs fa)))
+  -- Invariant, not a refusal (task static-refusals-become-absent-variants): 'isAffineOver' gates every call.
   | otherwise = error $ "affineFormOf: not an affine Gaussian form (guarded by isAffineOver): " ++ show e
   where
     scaleBy c f = do
@@ -1988,7 +2074,7 @@ toIRLogNormalParams meta (Expr ti (InjF f@(Named n) [Expr _ (Var name)]))
 toIRLogNormalParams meta (Expr _ (Var name))
   | Just expr <- lookup name (functions (compilingProgram meta)) = toIRLogNormalParams meta expr
 toIRLogNormalParams meta e | Just act <- normalParamsViaCall meta PLogNormal e = act
-toIRLogNormalParams _ e = error $ "toIRLogNormalParams: cannot extract LogNormal params from " ++ show (pType (getTypeInfo e))
+toIRLogNormalParams _ e = refuse (chainName (getTypeInfo e)) $ "toIRLogNormalParams: cannot extract LogNormal params from " ++ show (pType (getTypeInfo e))
 
 -- | True for a function type, i.e. an expression that evaluates to a callable
 -- rather than to a value a density can be taken of.
@@ -2524,7 +2610,7 @@ toIRInference meta cumulative expr@(Expr TypeInfo{rType=rt} (Apply _ _)) sample
   , all ((== Deterministic) . pType . getTypeInfo) args
   , Just (TArrow _ _, hasInference) <- lookup n (typeEnv meta) = do
       argIRs <- mapM (toIRGenerate meta) args
-      let name = if hasInference then calleeInferenceName meta cumulative n else n
+      name <- if hasInference then calleeInferenceName meta cumulative n else return n
       let base = if hasInference
             then inferenceCall meta cumulative (IRVar name) sample
             else IRApply (IRVar name) sample
@@ -2691,7 +2777,9 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
                 && usesThroughBinders toInvCN (findExprWithCN (map snd fs) lambdaBodyCN) <= 1
                 && not (containsRandomSource bodyExpr)
           let userVar = case l of Expr _ (Lambda n _) -> n; _ -> boundVar
-          let refuse = IRError ("cannot compute marginal: binding '" ++ userVar
+          -- Query-dependent (the wildcard is in the query value), so a runtime
+          -- IRError rather than a static 'refuse'.
+          let anyRefusal = IRError ("cannot compute marginal: binding '" ++ userVar
                 ++ "' is unobserved (ANY in its witnessing slot), but its value feeds"
                 ++ " observed slots or further randomness; integrating it out is beyond"
                 ++ " this engine (design modality-witnessed-inference)")
@@ -2759,8 +2847,8 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
           -- proceed with a wildcard in its place is exactly the silent p = 1.0
           -- this refusal exists to prevent. So a sink refuses here too.
           let whenAny whenAnySink
-                | bindingIsSink = IRIf readsAnyW refuse whenAnySink
-                | otherwise     = refuse
+                | bindingIsSink = IRIf readsAnyW anyRefusal whenAnySink
+                | otherwise     = anyRefusal
           let guardAny ok whenAnySink = IRIf anyW (whenAny whenAnySink) ok
           return (mapResult wrapInLambdas (guardedZero (zipResult guardAny combined bodyRes)))
 
@@ -2786,8 +2874,8 @@ toIRInference meta cumulative (Expr TypeInfo{rType=_} (Apply l _)) sample
 -- application, Bottom too, and ModalityInfer then emits no probability function
 -- at all -- so this is a diagnostic for a modality/codegen disagreement rather
 -- than a user-facing refusal.
-toIRInference _ cumulative (Expr TypeInfo{rType=rt} (Apply l v)) _ =
-  error ("Cannot compile an application in " ++ (if cumulative then "cumulative" else "probability")
+toIRInference _ cumulative (Expr TypeInfo{rType=rt, chainName=cnApp} (Apply l v)) _ =
+  refuse cnApp ("Cannot compile an application in " ++ (if cumulative then "cumulative" else "probability")
     ++ " mode: the argument has pType " ++ show (pType (getTypeInfo v))
     ++ " (no measurable distribution) and the callee (pType "
     ++ show (pType (getTypeInfo l)) ++ ", chain name '" ++ chainName (getTypeInfo l)
@@ -2880,15 +2968,15 @@ toIRInference meta cumulative (Expr ti (InjF (Named name) params)) sample | isHi
   -- FPair of the InjF with unique names
   fPair <- instantiate mkVariable localAdts resolvedName
   -- Unary InjF has a single inversion
-  let inv = case fPair of
-        FPair _ [i] -> i
-        FPair _ is -> error ("Higher-order InjF '" ++ resolvedName ++ "' must declare exactly one inversion, but declares " ++ show (length is))
+  inv <- case fPair of
+        FPair _ [i] -> return i
+        FPair _ is -> refuse (chainName ti) ("Higher-order InjF '" ++ resolvedName ++ "' must declare exactly one inversion, but declares " ++ show (length is))
   let FDecl {inputVars=inVars, body=invExpr, applicability=appTest, deconstructing=decons, derivatives=derivs} = inv
   --Handle the function being in different positions of the signature
   let aPoss = [0 .. (length params - 1)] \\ getFunctionParamIdx localAdts name
-  let aPos = case aPoss of
-        [n] -> n
-        x -> error $ "Expected exectly one non-ho parameter, but got " ++ show (length x)
+  aPos <- case aPoss of
+        [n] -> return n
+        x -> refuse (chainName ti) ("Higher-order InjF '" ++ resolvedName ++ "' expects exactly one non-function parameter, but got " ++ show (length x))
   let a = params !! aPos
   let aVar = inVars !! aPos
   let fs = map (params !!) (getFunctionParamIdx localAdts name)
@@ -2933,7 +3021,7 @@ toIRInference meta True e@(Expr TypeInfo {tags=_, rType=rt} (InjF (Named _) para
   -- Check whether the value of the function is less than the sample
   expr <- toIRGenerate meta e
   return (mass (compareValueExpr (semiringOf meta) rt expr sample))
-toIRInference meta cumulative (Expr TypeInfo {tags=_} (InjF (Named name) params)) sample
+toIRInference meta cumulative (Expr TypeInfo {tags=_, chainName=cnAE} (InjF (Named name) params)) sample
   | hasAnyExcept (adtDecls meta) name = do
   -- FPair of the InjF with unique names
   FPair fwd inversions <- instantiate mkVariable (adtDecls meta) name
@@ -2949,15 +3037,15 @@ toIRInference meta cumulative (Expr TypeInfo {tags=_} (InjF (Named name) params)
   let detVars = filter (v1 /=) invVars
   let detEs = map (params !!) detIdxs
 
-  let (v1', invPosExpr, invNegExpr) = case invExpr of
-        IRIf (IRVar v) pos neg -> (v, pos, neg)
-        _ -> error ("Form of InjF is not supported, its inverse must be an if on the sample: " ++ name)
-  when (v1 /= v1') $ error $ "Form of InjF is not supported, sample has to be the condition: " ++ name
-  let (isPosAny, nonAnyExpr, exceptExpr) =
+  (v1', invPosExpr, invNegExpr) <- case invExpr of
+        IRIf (IRVar v) pos neg -> return (v, pos, neg)
+        _ -> refuse cnAE ("Form of InjF is not supported, its inverse must be an if on the sample: " ++ name)
+  when (v1 /= v1') $ refuse cnAE ("Form of InjF is not supported, sample has to be the condition: " ++ name)
+  (isPosAny, nonAnyExpr, exceptExpr) <-
         case (invPosExpr, invNegExpr) of
-          (IRConst (VAnyExcept [expt]), non) -> (True, non, expt)
-          (non, IRConst (VAnyExcept [expt])) -> (False, non, expt)
-          _ -> error "AnyExcept in InjF must be the first expression inside the if"
+          (IRConst (VAnyExcept [expt]), non) -> return (True, non, expt)
+          (non, IRConst (VAnyExcept [expt])) -> return (False, non, expt)
+          _ -> refuse cnAE ("AnyExcept in InjF must be the first expression inside the if: " ++ name)
 
   -- Find the relevant derivative of the inversion
   let invDeriv = inverseDerivative name v1 invDerivs
@@ -3256,7 +3344,7 @@ toIRInference meta cumulative (Expr TypeInfo {rType=rt} (Var n)) sample = do
     -- Var is a function
     Just(TArrow _ _, hasInference) -> do
       var <- mkVariable "call"
-      let name = if hasInference then calleeInferenceName meta cumulative n else n
+      name <- if hasInference then calleeInferenceName meta cumulative n else return n
       let callExpr = if hasInference
             then inferenceCall meta cumulative (IRVar name) sample
             else IRApply (IRVar name) sample
@@ -3266,7 +3354,7 @@ toIRInference meta cumulative (Expr TypeInfo {rType=rt} (Var n)) sample = do
     -- Var is a top level declaration (an therefor has a _prob function)
     Just (_, True) -> do
       var <- mkVariable "call"
-      let calleeName = calleeInferenceName meta cumulative n
+      calleeName <- calleeInferenceName meta cumulative n
       let callExpr = inferenceCall meta cumulative (IRVar calleeName) sample
       setVariables [(var, callExpr)]
       return (unpackResult (IRVar var))
@@ -3286,6 +3374,7 @@ toIRInference meta cumulative (Expr TypeInfo {rType=rt} (Var n)) sample = do
         return (mass (compareValueExpr (semiringOf meta) rt (IRVar n) sample))
       else
         return (indicatorP (semiringOf meta) (equalityGuard rt (IRVar n) sample))
+    -- Invariant, not a refusal (task static-refusals-become-absent-variants): every bound name is in the type env (a miss is filed: fuzz-admission-oracle-bugs item 7).
     Nothing -> error ("Could not find name in TypeEnv: " ++ n)
 -- Mixed enumerate-and-shift/scale convolution: exactly ONE operand is a
 -- finite-discrete enumerable (a `DiscreteValues`-tagged mixture of point
@@ -3402,8 +3491,13 @@ toIRInference meta cumulative (Expr TypeInfo {rType=rt} (InjF (Named name) [left
       let zeroAtom = prodP sr (mass pEnumZero) zeroIndicator
       mixP sr (IROp OpPlus (rBranches summedTyped) (rBranches zeroAtom)) zeroAtom summedTyped
     else return summedTyped
-toIRInference _ _ (Expr _ (Subtree _ _)) _ = error "Cannot infer prob on subtree expression. Please check your syntax"
-toIRInference _ _ x _ = error ("found no way to convert to IR: " ++ show x)
+toIRInference _ _ (Expr ti (Subtree _ _)) _ = refuse (chainName ti) "Cannot infer prob on subtree expression. Please check your syntax"
+-- The catch-all: no inference equation covers this node. Reached only when
+-- the modality engine admitted a shape no IR equation builds (an over-promise,
+-- design pipeline-coherence F2); it is a refusal of the variant, not a crash.
+toIRInference _ cumulative x _ = refuse (chainName (getTypeInfo x))
+  ("found no way to convert to IR in " ++ (if cumulative then "cumulative" else "probability")
+   ++ " mode (pType " ++ show (pType (getTypeInfo x)) ++ "): " ++ show x)
 
 -- | Does this expression contain a @let@ (an applied literal lambda) whose
 -- bound value is still random? That is the shape the witnessed-let fold in
@@ -3483,6 +3577,7 @@ getProbIndex es =
   case filter (\(p, _) -> p == Integrate || p == PNormal || p == PLogNormal) zipped of
     [(_, i)] -> Just i
     [] -> Nothing
+    -- Invariant, not a refusal (task static-refusals-become-absent-variants): guards count probabilistic parameters first (a miss is filed: bare-equality-of-two-neural-reads-crashes).
     _ -> error "More than one probabilistic argument found"
   where
     pt x = pType (getTypeInfo x)
@@ -3538,6 +3633,7 @@ compareValueExpr sr NullList v sample = maskSR sr (IROp OpEq sample v)
 -- every call site is on the @cumulative = True@ path, so reaching it means a
 -- cdf() query was asked of an ADT-valued program. See 'adtCdfMessage'.
 compareValueExpr _ (TADT n) _ _ = IRError (adtCdfMessage n)
+-- Invariant, not a refusal (task static-refusals-become-absent-variants): a CDF comparison is only built for first-order result types (an arrow reaching it is filed: fuzz-admission-oracle-bugs item 3).
 compareValueExpr _ rt _ _ = error $ "Comparison not implemented for type: " ++ show rt
 
 -- | Bool-valued IR: is deterministic value @v@ equal to @sample@? This is the
@@ -3658,6 +3754,7 @@ toIRGenerate meta (Expr _ (Var name)) = do
     -- Var is a local variable
     Just (_, False) -> do
       return $ IRVar name
+    -- Invariant, not a refusal (task static-refusals-become-absent-variants): every bound name is in the type env.
     Nothing -> error ("Could not find name in TypeEnv: " ++ name)
 toIRGenerate meta (Expr t (Lambda name subExpr)) =
   IRLambda name <$> toIRGenerate (extendMetaForLambda meta t name) subExpr
@@ -3672,6 +3769,7 @@ toIRGenerate meta (Expr _ (ReadNN name subexpr)) = do
 
 packParamsIntoLetinsGen :: CompilerMetadata -> [String] -> [Expr] -> IRExpr -> CompilerMonad  IRExpr
 packParamsIntoLetinsGen _ [] [] expr = return $ expr
+-- Invariant, not a refusal (task static-refusals-become-absent-variants): an InjF's declared input variables match its arity.
 packParamsIntoLetinsGen _ [] _ _ = error "More parameters than variables"
 packParamsIntoLetinsGen _ _ [] _ = error "More variables than parameters"
 packParamsIntoLetinsGen meta (v:vars) (p:params) expr = do
@@ -4019,7 +4117,7 @@ requireDeterministicUnderEnum :: CompilerMetadata -> String -> Expr -> IRExpr ->
 requireDeterministicUnderEnum meta what src ir =
   case nub (recursiveDrawCalls (cyclicGenNames meta Set.\\ detGenNames meta) ir) of
     [] -> return ()
-    gens -> error $ unlines
+    gens -> refuse cn $ init $ unlines
       [ "probability-mode compilation reached a generate-backed fallback."
       , "The " ++ what ++ " of an enumerated conditional (chain name " ++ cn ++ ") draws fresh"
       , "randomness by calling " ++ intercalate ", " gens ++ ", which is on a recursive call cycle."
@@ -4554,7 +4652,7 @@ subtreeHasOcc occs e = let cns = subtreeCNs e in any (`elem` cns) occs
 setWitnessApply :: CompilerMetadata -> Bool -> RType -> Expr -> ChainName -> ChainName -> String -> Maybe String -> Expr -> IRExpr -> Maybe (CompilerMonad PResult) -> CompilerMonad PResult
 setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag planDiag v sample fallback = do
   let userVar = case l of Expr _ (Lambda n _) -> n; _ -> "<bound variable>"
-  let refuse why = error $ unlines $
+  let refuseSW why = refuse lResolvedCN $ init $ unlines $
         [ "set-valued witness construction failed for the binding of '" ++ userVar ++ "' (lambda at " ++ lResolvedCN ++ "):"
         , why
         , "No occurrence of the bound variable is point-invertible either (forward"
@@ -4564,10 +4662,10 @@ setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag planDiag v sam
              , d
              , "(design plan-guided-lazy-enumeration)" ]) planDiag
   if tag /= ""
-    then refuse "the lambda is applied through higher-order machinery (tagged invocation), which the set-witness fallback does not support."
+    then refuseSW "the lambda is applied through higher-order machinery (tagged invocation), which the set-witness fallback does not support."
     else return ()
   case rt of
-    TArrow _ _ -> refuse "the body returns a function."
+    TArrow _ _ -> refuseSW "the body returns a function."
     _ -> return ()
   let Program{functions=fs} = compilingProgram meta
   let bodyExpr = findExprWithCN (map snd fs) lambdaBodyCN
@@ -4578,18 +4676,23 @@ setWitnessApply meta cumulative rt l lResolvedCN lambdaBodyCN tag planDiag v sam
   -- Attempted in its own writer scope: a failed inversion's bindings are
   -- dropped rather than leaking into the fallback's code, and a successful
   -- one's are re-emitted unchanged, in order.
+  -- A sub-compile inside the inversion that refuses is a refusal of the
+  -- inversion as a whole: the fallback, when there is one, still gets its turn
+  -- (before refusals were a channel, such a sub-compile's lazy 'error' was
+  -- dropped with the failed attempt's bindings).
   (worldsM, worldBinds) <- lift (runWriterT (invertToWorlds meta occs bodyExpr target))
+    `catchError` (\r -> if isJust fallback then return (Nothing, []) else throwError r)
   when (isJust worldsM) (setVariables worldBinds)
   case worldsM of
     Nothing | Just alt <- fallback -> alt
     -- A cumulative query the engine cannot invert (e.g. the multivariate CDF of
-    -- a correlated tuple) is refused at runtime: the probability variant of the
-    -- same program may be perfectly fine, and a compile-time error here would
-    -- take it down too (all variants are compiled up front).
-    Nothing | cumulative -> return
-      (mass (IRError ("cannot compute this cumulative: the observation on binding '" ++ userVar
-          ++ "' has no set-valued inverse in cumulative mode (design set-valued-witnesses)")))
-    Nothing -> refuse ("the observation cannot be propagated onto the bound variable: the body"
+    -- a correlated tuple) is refused like any other shape: only the integrate
+    -- variant goes, so the probability variant of the same program is
+    -- unaffected (it used to be a runtime IRError for exactly that reason,
+    -- before a static refusal was an absent variant rather than a crash).
+    Nothing | cumulative -> refuseSW ("the observation has no set-valued inverse in cumulative mode"
+          ++ " (e.g. the multivariate CDF of a correlated tuple).")
+    Nothing -> refuseSW ("the observation cannot be propagated onto the bound variable: the body"
       ++ " contains a node that is neither point-invertible, a comparison against a"
       ++ " deterministic bound, an if-then-else case split, a tuple of such parts, nor"
       ++ " deterministic given scope (e.g. it draws fresh randomness).")
@@ -5412,11 +5515,13 @@ type PlanRaws = [(Int, String)]
 -- holds it.
 planRawRead :: PlanRaws -> Int -> IRExpr
 planRawRead raws k = case [ r | r@(start, _) <- raws, start <= k ] of
+  -- Invariant, not a refusal (task static-refusals-become-absent-variants): every plan offset lies in some opened read's range.
   [] -> error ("planRawRead: offset " ++ show k ++ " precedes every neural read's range " ++ show raws)
   rs -> let (start, v) = last rs in IRBuiltin BListIndex [IRVar v, IRConst (VInt (k - start))]
 
--- (CompilerMonad spelled out: it is an unsaturated synonym application otherwise)
-type PlanM a = StateT PlanState (WriterT [(String, IRExpr)] Supply) a
+-- ('CompilerM', the unapplied form: 'CompilerMonad' would be an unsaturated
+-- synonym application here.)
+type PlanM a = StateT PlanState CompilerM a
 
 planAddGuard :: IRExpr -> PlanWorld -> PlanWorld
 planAddGuard g w = w { pwGuards = g : pwGuards w }
@@ -5449,6 +5554,7 @@ intersectLeafCon (PLeafPt b v cov gs) (PLeafIvl _ lo hi) =
 intersectLeafCon (PLeafIvl _ lo hi) (PLeafPt b v cov gs) =
   PLeafPt b v cov (gs ++ boundGuards v lo hi)
 intersectLeafCon p@(PLeafPt {}) (PLeafPt {}) = p
+-- Invariant, not a refusal (task static-refusals-become-absent-variants): a leaf region is either discrete or continuous.
 intersectLeafCon c c' = error ("plan leaf region at offset " ++ show (plcBase c)
   ++ " is constrained as both discrete and continuous (plan invariant violation): "
   ++ show (isDisc c) ++ " vs " ++ show (isDisc c'))
@@ -6268,6 +6374,8 @@ planAnySplit s ws =
 -- the operands' enumerated values. Every entry is total, so no applicability
 -- guard is needed on an enumerated value.
 planArithOp :: String -> Int -> Maybe ([IRExpr] -> IRExpr)
+-- The arity errors below are invariants: the closures are only ever applied
+-- to as many values as the arity they were selected for.
 planArithOp nm 2
   | Just op <- lookup nm [("plus", OpPlus), ("plusI", OpPlus), ("mult", OpMult), ("multI", OpMult), ("max", OpMax)] =
       Just (\vs -> case vs of
@@ -7295,14 +7403,14 @@ planReadOf meta v
 -- there is no @n ++ "_map_integ"@ to call. Failing loudly here is the same
 -- choice 'mapHasNoExcept' already makes for AnyExcept under MAP; the
 -- alternative is emitting a reference to a function that was never generated.
-calleeInferenceName :: CompilerMetadata -> Bool -> String -> String
+calleeInferenceName :: CompilerMetadata -> Bool -> String -> CompilerMonad String
 calleeInferenceName meta cumulative n = case semiringFamily meta of
-  SRSumProduct -> n ++ (if cumulative then "_integ" else "_prob")
+  SRSumProduct -> return (n ++ (if cumulative then "_integ" else "_prob"))
   fam
-    | cumulative -> error ("IRCompiler: this program takes a cumulative (CDF) "
+    | cumulative -> refuse "" ("IRCompiler: this program takes a cumulative (CDF) "
         ++ "query through a call to the top-level function " ++ show n ++ ", which has "
         ++ "no defined meaning under the " ++ show fam ++ " semiring: an extra-semiring "
         ++ "function group is compiled in probability mode only, so there is no "
         ++ show (n ++ semiringGroupInfix fam ++ "_integ") ++ " to call. Compile this "
         ++ "program without requesting that semiring, or inline the call.")
-    | otherwise -> n ++ semiringGroupInfix fam ++ "_prob"
+    | otherwise -> return (n ++ semiringGroupInfix fam ++ "_prob")

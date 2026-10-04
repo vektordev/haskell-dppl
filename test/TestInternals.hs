@@ -46,6 +46,7 @@ import Control.Monad (forM, forM_, when)
 import Data.Number.Erf (erf)
 import Utils (splitByString)
 import Data.Maybe (isJust)
+import TestSupport (expectVariantRefused)
 import Data.Functor.Identity (runIdentity)
 import qualified PredefinedFunctions as PF
 import SPLL.Validator (validateProgram)
@@ -2142,15 +2143,12 @@ planFactorExternalsTests = testGroup "plan factorization independence guard"
     -- the shape the guard actually sees: a comparison, not a bare Var
     cmp e = ti Integrate `wrap` InjF (Named "gt") [e, ti Deterministic `wrap` Constant (VFloat 0)]
 
+-- | The refusal is recorded on main's absent probability variant (task
+-- static-refusals-become-absent-variants), no longer thrown.
 expectOrthantRefusal :: String -> IO ()
 expectOrthantRefusal src = do
   let prog = either (\e -> error ("parse failed: " ++ show e)) id (tryParseProgram "test" src)
-  r <- try (evaluate (either (error . show) (length . show) (compile defaultCompilerConfig prog)))
-  case r of
-    Left (ErrorCall msg) -> assertBool
-      ("expected the orthant-probability diagnostic, got: " ++ msg)
-      ("orthant" `isInfixOf` msg)
-    Right _ -> assertFailure "expected a compile-time refusal, but compilation succeeded"
+  expectVariantRefused "main" "prob" "orthant" (compile defaultCompilerConfig prog)
 
 -- | Count occurrences of @IRVar name@ in an expression.
 countIRVar :: String -> IRExpr -> Int
@@ -2316,7 +2314,7 @@ stochasticCallTests = testGroup "stochastic calls (stochastic-call-cse-unsound)"
   ]
   where
     noDetGens = emptyOptEnv
-    genGroup n body = IRFunGroup { groupName = n, genFun = Just (body, "")
+    genGroup n body = IRFunGroup { groupName = n, refusedVariants = [], genFun = Just (body, "")
                                  , probFun = Nothing, integFun = Nothing
                                  , writeLogitsFun = Nothing, normalFun = Nothing
                                  , groupDoc = "", sampleDomain = Nothing }
@@ -2868,7 +2866,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
     oneElemList = IRConstruct TgCons [IRConst (VFloat 1.0), IRConst (VList EmptyList)]
     enumEnv = enumEnvWith [colorDecl]
     enumEnvWith decls body = IREnv
-      [IRFunGroup { groupName = "main"
+      [IRFunGroup { groupName = "main", refusedVariants = []
                   , probFun = Just (IRLambda "sample" body, "")
                   , genFun = Nothing, integFun = Nothing
                   , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
@@ -2876,7 +2874,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
       decls
       []
     nullaryCtorEnv ctorRef = IREnv
-      [IRFunGroup { groupName = "main"
+      [IRFunGroup { groupName = "main", refusedVariants = []
                   , probFun = Just (IRLambda "sample"
                       (IRIf (IRApply (IRVar "isNada") ctorRef)
                             (IRConst (VFloat 1.0)) (IRConst (VFloat 0.0))), "")
@@ -2890,7 +2888,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
     -- The same declaration, with a method whose accessor is legal only in the
     -- constructor-tested arm.
     nullaryCtorEnv' q = IREnv
-      [IRFunGroup { groupName = "main"
+      [IRFunGroup { groupName = "main", refusedVariants = []
                   , probFun = Just (IRLambda "sample"
                       (IRIf (IRApply (IRVar "isJust1") q)
                             (IRApply (IRVar "v") q) (IRConst (VFloat 0.0))), "")
@@ -2905,7 +2903,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
     -- ADT constants -- the shape a neural ADT read's enumeration compiles to --
     -- whose body reads a field only under the constructor test.
     adtDomainEnv = IREnv
-      [IRFunGroup { groupName = "main"
+      [IRFunGroup { groupName = "main", refusedVariants = []
                   , probFun = Just (IRLambda "sample"
                       (IROp OpMult (IRVar "sample")
                         (IRBuiltin (BReduce ROpAdd 0)
@@ -2926,7 +2924,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
     -- resolves it to the first, @A1@, which is what the interpreter's
     -- 'findField' and the type environment's 'lookupRType' already mean.
     dupFieldEnv = IREnv
-      [IRFunGroup { groupName = "main"
+      [IRFunGroup { groupName = "main", refusedVariants = []
                   , probFun = Just (IRLambda "sample"
                       (IRIf (IRApply (IRVar "isA1") (IRVar "sample"))
                             (IRApply (IRVar "f") (IRVar "sample")) (IRConst (VFloat 0.0))), "")
@@ -2942,7 +2940,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
     -- exact shape 'IROptimizer's CSE produces (`let cse_0 = (if isLeft(sample)
     -- then True else False) in ...`).
     structuralAliasEnv q = IREnv
-      [IRFunGroup { groupName = "main"
+      [IRFunGroup { groupName = "main", refusedVariants = []
                   , probFun = Just (IRLambda "sample"
                       (IRLetIn "cse_0"
                           (IRIf (IRDestruct AcIsLeft q) (IRConst (VBool True)) (IRConst (VBool False)))
@@ -2954,7 +2952,7 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
     -- A one-group environment whose only method is generate, with the given
     -- body (either self-referential or not).
     recGenEnv body = IREnv
-      [IRFunGroup { groupName = "rec", genFun = Just (body, "")
+      [IRFunGroup { groupName = "rec", refusedVariants = [], genFun = Just (body, "")
                   , probFun = Nothing, integFun = Nothing
                   , writeLogitsFun = Nothing, normalFun = Nothing, groupDoc = ""
                   , sampleDomain = Nothing }]
@@ -3462,13 +3460,12 @@ semiringMapTests = testGroup "Semiring: max-product (MAP)"
         [ "h = Uniform"
         , "main = if h > 0.5 then 1.0 else 2.0"
         ])
-      r <- try (evaluate (either (error . show) (length . show)
-                  (compile defaultCompilerConfig { extraSemirings = [SRMaxProduct] } prog)))
-      case r of
-        Left (ErrorCall msg) -> assertBool
-          ("expected the cumulative-under-extra-semiring diagnostic, got: " ++ msg)
-          ("no defined meaning under the SRMaxProduct semiring" `isInfixOf` msg)
-        Right _ -> assertFailure "expected a compile-time refusal, but compilation succeeded"
+      -- Only the MAP group's probability function goes; the ordinary
+      -- sum-product group is untouched.
+      let compiled = compile defaultCompilerConfig { extraSemirings = [SRMaxProduct] } prog
+      expectVariantRefused "main_map" "prob" "no defined meaning under the SRMaxProduct semiring" compiled
+      assertBool "the sum-product main still has its probability function"
+        (either (const False) (isJust . probFun . lookupIREnv "main") compiled)
   ]
 
 -- | The consumer-grade decomposability walk. Unlike 'injFLatentVerdicts' it
@@ -4001,7 +3998,7 @@ test_hasTailDescentRecognisesNewShape = testCase
       Right _  -> assertFailure "batched mode accepted a non-descending recursive call"
   where
     recEnv tailArg = IREnv
-      [IRFunGroup { groupName = "main"
+      [IRFunGroup { groupName = "main", refusedVariants = []
                   , probFun = Just (IRLambda "sample"
                       (IRIf (IROp OpEq (IRVar "sample") (IRConst (VList EmptyList)))
                             (IRConst (VFloat 1.0))

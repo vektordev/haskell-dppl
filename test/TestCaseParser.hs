@@ -334,6 +334,12 @@ pSlowHeader = do
 --   (an ordinary, intended refusal) does not satisfy either of these two --
 --   that is what "TestRejection" already covers; a known issue is a *bug*,
 --   not a deliberate rejection.
+-- * 'ExpectRefused' -- 'compile' succeeds, but some variant of some
+--   function is absent because the IR compiler refused its shape, with a
+--   recorded reason ('refusedVariants') containing the given substring. The
+--   graceful form of what used to be an 'ExpectDiagnostic' crash (task
+--   static-refusals-become-absent-variants): the missing capability is the
+--   open bug, and the recorded reason pins which mechanism declines it.
 -- * 'ExpectNoCode' -- 'compile' succeeds, but the queried variant
 --   (generate/probability/integrate) is silently absent rather than compiled.
 -- * 'ExpectWrongResult' -- compiles and runs, and the ordinary @p(...)@/
@@ -358,6 +364,7 @@ pSlowHeader = do
 data ExpectFailure
   = ExpectCrash
   | ExpectDiagnostic String
+  | ExpectRefused String
   | ExpectNoCode
   | ExpectWrongResult
   | ExpectBroken
@@ -376,6 +383,7 @@ pExpectFailureHeader = do
   symbol "expect-failure:"
   ef <- choice
     [ ExpectDiagnostic <$> (symbol "diagnostic" >> pQuotedString)
+    , ExpectRefused <$> (symbol "refused" >> pQuotedString)
     , ExpectCrash <$ symbol "crash"
     , ExpectNoCode <$ symbol "no-code"
     , ExpectWrongResult <$ symbol "wrong-result"

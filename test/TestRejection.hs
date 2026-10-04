@@ -22,7 +22,9 @@ import SPLL.Typing.RType (RType(..))
 import SPLL.Examples
 import SPLL.Validator (validateProgram)
 import SPLL.Prelude (compile, runProb, runInteg, uniform, constB, constF, (#+#), (#<#))
-import SPLL.IntermediateRepresentation (CompilerConfig, defaultCompilerConfig, checkQueryType, noIntegrate, noGenerate, firstAnyExceptIR, anyExceptCodegenRefusal, IRValue, pattern VProbDim)
+import SPLL.IntermediateRepresentation (CompilerConfig, defaultCompilerConfig, checkQueryType, noIntegrate, noGenerate, firstAnyExceptIR, anyExceptCodegenRefusal, IRValue, pattern VProbDim, genFun, lookupIREnv)
+import TestSupport (expectVariantRefused)
+import Data.Maybe (isJust)
 import SPLL.Typing.Infer (addTypeInfo)
 import SPLL.Parser (tryParseProgram)
 import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, adtCdfMessage, accessorMismatchMessage)
@@ -53,6 +55,7 @@ rejectionTests = testGroup "Rejection"
   , generateBackedTests
   , generateBackedReadNNSymbolTests
   , generateBackedProjectionTests
+  , refusedVariantTests
   , vAnyExceptCodegenTests
   , intractableComparisonTests
   , noGenerateSuppressedGeneratorTests
@@ -671,27 +674,36 @@ recursiveHelperSrc = unlines
 
 generateBackedTests :: TestTree
 generateBackedTests = testGroup "GenerateBackedInference"
+  -- The refusal is an absent probability variant with a recorded reason
+  -- (task static-refusals-become-absent-variants): the query answers 'Left'
+  -- naming it, and generate still compiles.
   [ testCase "unbounded recursion through a helper is still refused, naming the helper" $
       withParsed recursiveHelperSrc $ \prog -> do
-        res <- forced (runProb defaultCompilerConfig prog [] (VADT "A" []))
+        res <- forcedProb prog (VADT "A" [])
         case res of
-          Left e  -> assertBool ("expected the generate-backed refusal naming retry_gen, got: " ++ show e)
-                                ("generate-backed fallback" `isInfixOf` show e && "retry_gen" `isInfixOf` show e)
-          Right _ -> assertFailure
+          Right (Left e) -> assertBool ("expected the generate-backed refusal naming retry_gen, got: " ++ e)
+                                ("generate-backed fallback" `isInfixOf` e && "retry_gen" `isInfixOf` e)
+          Left ex -> assertFailure ("the refusal crashed instead of being recorded: " ++ show ex)
+          Right (Right _) -> assertFailure
             "a probability function re-entering its own enumeration was accepted"
   , testCase "unbounded self-recursion in an enumerated branch is refused" $
       withParsed selfRecursiveAgreeSrc $ \prog -> do
-        res <- forced (runProb defaultCompilerConfig prog [] (VADT "A" []))
+        res <- forcedProb prog (VADT "A" [])
         case res of
-          Left e  -> assertBool ("expected the generate-backed refusal, got: " ++ show e)
-                                ("generate-backed fallback" `isInfixOf` show e)
-          Right _ -> assertFailure
+          Right (Left e) -> assertBool ("expected the generate-backed refusal, got: " ++ e)
+                                ("generate-backed fallback" `isInfixOf` e)
+          Left ex -> assertFailure ("the refusal crashed instead of being recorded: " ++ show ex)
+          Right (Right _) -> assertFailure
             "a probability function that draws fresh randomness on every call was accepted"
   , testCase "the refusal names the generator it would have called" $
       withParsed selfRecursiveAgreeSrc $ \prog -> do
-        res <- forced (runProb defaultCompilerConfig prog [] (VADT "A" []))
+        res <- forcedProb prog (VADT "A" [])
         assertBool "the refusal does not name main_gen, so it does not say what is wrong"
-                   (either (\e -> "main_gen" `isInfixOf` show e) (const False) res)
+                   (either (const False) (either ("main_gen" `isInfixOf`) (const False)) res)
+  , testCase "the refused shape keeps its generate function" $
+      withParsed selfRecursiveAgreeSrc $ \prog ->
+        assertBool "generate was taken down with the refused probability variant"
+          (either (const False) (isJust . genFun . lookupIREnv "main") (compile defaultCompilerConfig prog))
   , testCase "a deterministic else branch under the same enumeration still compiles" $
       withParsed enumeratedConstantElseSrc $ \prog -> do
         res <- forced (runProb defaultCompilerConfig prog [] (VADT "A" []))
@@ -801,24 +813,85 @@ fstNormalSiblingSrc = "main = fst (Uniform, Normal)"
 fstProjectedBottomSrc :: String
 fstProjectedBottomSrc = "main = fst (Uniform * Uniform, Uniform)"
 
+-- ----------------------------------------------------------------------------
+-- Task static-refusals-become-absent-variants: an unsupported shape is an
+-- absent variant with a recorded reason, never a compile-killing error, and a
+-- caller of a refused variant is refused too rather than left calling a
+-- function that is never written.
+-- ----------------------------------------------------------------------------
+
+-- 'f' is refused by the set-witness engine (sqrt is outside the monotone
+-- transport table); 'main' is perfectly tractable apart from calling it.
+refusedHelperSrc :: String
+refusedHelperSrc = unlines
+  [ "f u = draw x = Normal in if sqrt x > u then 1.0 else 0.0"
+  , "main = if Uniform < 0.5 then f 0.5 else 3.0"
+  ]
+
+refusedVariantTests :: TestTree
+refusedVariantTests = testGroup "RefusedVariant"
+  [ testCase "a refused helper refuses its caller, naming the helper and its reason" $
+      withParsed refusedHelperSrc $ \prog -> do
+        let compiled = compile defaultCompilerConfig prog
+        expectVariantRefused "f" "prob" setWitnessDiagnostic' compiled
+        expectVariantRefused "main" "prob" "calls f_prob, the probability function of 'f'" compiled
+        expectVariantRefused "main" "prob" setWitnessDiagnostic' compiled
+  , testCase "the query reports the recorded reason" $
+      withParsed refusedHelperSrc $ \prog -> do
+        res <- forcedProb prog (VFloat 3.0)
+        case res of
+          Right (Left e) -> assertBool ("expected main's refusal naming f_prob, got: " ++ e)
+                              ("NeST refused to compile it" `isInfixOf` e && "f_prob" `isInfixOf` e)
+          Left ex -> assertFailure ("crashed: " ++ show ex)
+          Right (Right v) -> assertFailure ("main answered " ++ show v ++ " through a refused helper")
+  , testCase "generate survives on both the helper and its caller" $
+      withParsed refusedHelperSrc $ \prog -> do
+        let compiled = compile defaultCompilerConfig prog
+        assertBool "generate went down with the refused variants"
+          (either (const False) (\env -> all (isJust . genFun . (`lookupIREnv` env)) ["f", "main"]) compiled)
+  , testCase "neither text backend references the refused f_prob" $
+      withParsed refusedHelperSrc $ \prog -> case compile defaultCompilerConfig prog of
+        Left e -> assertFailure ("compile refused outright: " ++ e)
+        Right env -> do
+          let py = unlines (SPLL.CodeGenPyTorch.generateFunctions True env)
+              jl = unlines (SPLL.CodeGenJulia.generateFunctions env)
+          assertBool "the Python module calls f's forward" (not ("f.forward" `isInfixOf` py || "f_prob" `isInfixOf` py))
+          assertBool "the Julia module calls f_prob" (not ("f_prob" `isInfixOf` jl))
+  , testCase "a neural pair read plus a Normal keeps generate (pipeline-coherence regression)" $
+      -- The program that sank comparison-closed-form-verdict-for-plan-leaves'
+      -- option 1: an eager refusal there took generate down with it.
+      withParsed (unlines [ "neural readPair :: (Symbol -> (Float, Float))"
+                          , "main sym = draw p = readPair sym in Normal + fst p" ]) $ \prog ->
+        case compile defaultCompilerConfig prog of
+          Left e -> assertFailure ("compile refused outright: " ++ e)
+          Right env -> do
+            assertBool "generate is missing" (isJust (genFun (lookupIREnv "main" env)))
+            case runProb defaultCompilerConfig prog [VSymbol "a"] (VFloat 0.5) of
+              Left e -> assertBool ("the probability refusal gives no reason: " ++ e) ("no compiled probability function" `isInfixOf` e)
+              Right v -> assertFailure ("expected no probability function, got " ++ show v)
+  ]
+  where setWitnessDiagnostic' = "set-valued witness construction failed for the binding of 'x'"
+
 generateBackedProjectionTests :: TestTree
 generateBackedProjectionTests = testGroup "GenerateBackedProjection"
   [ testCase "fst discarding a Bottom sibling is refused, not generate-backed" $
       withParsed fstBottomSiblingSrc $ \prog -> do
-        res <- forced (runProb defaultCompilerConfig prog [] (VFloat 0.5))
+        res <- forcedProb prog (VFloat 0.5)
         case res of
-          Left e  -> assertBool ("expected the no-clause-matches refusal, got: " ++ show e)
-                                ("found no way to convert to IR" `isInfixOf` show e)
-          Right _ -> assertFailure
+          Right (Left e) -> assertBool ("expected the no-clause-matches refusal, got: " ++ e)
+                                ("found no way to convert to IR" `isInfixOf` e)
+          Left ex -> assertFailure ("the refusal crashed instead of being recorded: " ++ show ex)
+          Right (Right _) -> assertFailure
             "fst (Uniform, Uniform * Uniform) compiled to a probability function -- \
             \it must be refused, not silently generate-backed"
   , testCase "snd discarding a Bottom sibling is refused, not generate-backed" $
       withParsed sndBottomSiblingSrc $ \prog -> do
-        res <- forced (runProb defaultCompilerConfig prog [] (VFloat 0.5))
+        res <- forcedProb prog (VFloat 0.5)
         case res of
-          Left e  -> assertBool ("expected the no-clause-matches refusal, got: " ++ show e)
-                                ("found no way to convert to IR" `isInfixOf` show e)
-          Right _ -> assertFailure
+          Right (Left e) -> assertBool ("expected the no-clause-matches refusal, got: " ++ e)
+                                ("found no way to convert to IR" `isInfixOf` e)
+          Left ex -> assertFailure ("the refusal crashed instead of being recorded: " ++ show ex)
+          Right (Right _) -> assertFailure
             "snd (Uniform * Uniform, Uniform) compiled to a probability function -- \
             \it must be refused, not silently generate-backed"
   , testCase "fst over a tractable (Normal) sibling still compiles" $
@@ -1132,13 +1205,16 @@ setWitnessNestedLetTests = testGroup "SetWitnessNestedLet"
           Right (Right v) -> assertFailure ("unexpected result shape: " ++ show v)
   ]
   where
+    -- The refusal is recorded on the absent probability variant and read back
+    -- through the query's 'Left' (task static-refusals-become-absent-variants);
+    -- a thrown exception would be a crash.
     assertSetWitnessRefusal what res = case res of
-      Left ex -> assertBool
-        ("expected the set-witness diagnostic for " ++ what ++ ", got: " ++ show ex)
-        (setWitnessDiagnostic `isInfixOf` show ex
-          && "neither point-invertible" `isInfixOf` show ex)
-      Right (Left e) -> assertFailure
-        (what ++ " was declined by a different stage instead of the set-witness engine: " ++ e)
+      Right (Left e) -> assertBool
+        ("expected the set-witness diagnostic for " ++ what ++ ", got: " ++ e)
+        (setWitnessDiagnostic `isInfixOf` e
+          && "neither point-invertible" `isInfixOf` e)
+      Left ex -> assertFailure
+        (what ++ " crashed instead of recording a refusal: " ++ show ex)
       Right (Right _) -> assertFailure (what ++ " was accepted")
 
 -- ----------------------------------------------------------------------------
@@ -1205,16 +1281,14 @@ setWitnessSharedLatentTests = testGroup "SetWitnessSharedLatent"
       withParsed sharedLatentTwoUsesSrc $ \prog -> do
         res <- forcedProb prog (VTuple (VFloat 0.0) (VFloat 0.0))
         assertSharedLatentRefusal "two uses of one sum" res
-  , testCase "the refusal is eager: it takes the whole compile down, generate with it" $
+  , testCase "the refusal is not eager: generate survives the refused probability variant" $
+      -- Inverted by static-refusals-become-absent-variants: the refusal used to
+      -- be a compile-time 'error' that took 'generate' down with it.
       withParsed sharedLatentTwoSumsSrc $ \prog -> do
-        res <- forced (compile defaultCompilerConfig prog)
-        case res of
-          Left ex -> assertBool
-            ("expected the set-witness diagnostic from compile itself, got: " ++ show ex)
-            (setWitnessDiagnostic `isInfixOf` show ex)
-          Right _ -> assertFailure
-            "compile survived -- if static-refusals-become-absent-variants landed, \
-            \invert this case and move the two above to the declined branch"
+        let compiled = compile defaultCompilerConfig prog
+        expectVariantRefused "main" "prob" setWitnessDiagnostic compiled
+        assertBool "generate was taken down with the refused probability variant"
+          (either (const False) (isJust . genFun . lookupIREnv "main") compiled)
   ]
   where
     -- Deliberately not 'setWitnessNestedLetTests's assertion: that one also
@@ -1222,11 +1296,11 @@ setWitnessSharedLatentTests = testGroup "SetWitnessSharedLatent"
     -- nested-let path. Here the only claim is that the set-witness engine is
     -- the stage that declines, and that no number comes back.
     assertSharedLatentRefusal what res = case res of
-      Left ex -> assertBool
-        ("expected the set-witness diagnostic for " ++ what ++ ", got: " ++ show ex)
-        (setWitnessDiagnostic `isInfixOf` show ex)
-      Right (Left e) -> assertFailure
-        (what ++ " was declined by a different stage instead of the set-witness engine: " ++ e)
+      Right (Left e) -> assertBool
+        ("expected the set-witness diagnostic for " ++ what ++ ", got: " ++ e)
+        (setWitnessDiagnostic `isInfixOf` e)
+      Left ex -> assertFailure
+        (what ++ " crashed instead of recording a refusal: " ++ show ex)
       Right (Right v) -> assertFailure
         (what ++ " was ACCEPTED, returning " ++ show v ++ " -- a shared latent has a \
          \bivariate density no engine implements, so a number here is the \
@@ -1252,11 +1326,11 @@ setWitnessTransportTests = testGroup "SetWitnessTransport"
       withParsed src $ \prog -> do
         res <- forcedProb prog (VFloat 1.0)
         case res of
-          Left ex -> assertBool
-            ("expected the set-witness diagnostic for " ++ what ++ ", got: " ++ show ex)
-            (setWitnessDiagnostic `isInfixOf` show ex)
-          Right (Left e) -> assertFailure
-            (what ++ " was declined by a different stage instead of the set-witness engine: " ++ e)
+          Right (Left e) -> assertBool
+            ("expected the set-witness diagnostic for " ++ what ++ ", got: " ++ e)
+            (setWitnessDiagnostic `isInfixOf` e)
+          Left ex -> assertFailure
+            (what ++ " crashed instead of recording a refusal: " ++ show ex)
           Right (Right v) -> assertFailure (what ++ " was accepted and answered " ++ show v)
 
 -- ----------------------------------------------------------------------------

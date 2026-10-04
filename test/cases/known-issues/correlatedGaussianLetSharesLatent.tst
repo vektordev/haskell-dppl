@@ -6,4 +6,4 @@
 -- TestRejection.SetWitnessSharedLatent for the fuller, multi-assertion
 -- regression on the same defect (it additionally checks a differently-shaped
 -- sibling program and that the refusal is eager enough to kill `generate`).
-expect-failure: diagnostic "set-valued witness construction failed"
+expect-failure: refused "set-valued witness construction failed"

@@ -1436,7 +1436,7 @@ deepExpressionSpillTests = testGroup "deep expression spill (python-codegen-exce
         x
     comprehensionSource k = sourceOf (envWith (comprehensionSum k))
     envOf n = envWith (sumOf n)
-    envWith body = IREnv [IRFunGroup { groupName = "main", genFun = Nothing
+    envWith body = IREnv [IRFunGroup { groupName = "main", refusedVariants = [], genFun = Nothing
                                 , probFun = Just (IRLambda "x" body, "")
                                 , integFun = Nothing, writeLogitsFun = Nothing
                                 , normalFun = Nothing, groupDoc = "", sampleDomain = Nothing }] [] []

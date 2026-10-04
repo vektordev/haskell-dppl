@@ -330,7 +330,7 @@ generateADTAccessor fieldName ctorName =
              , "return x." ++ pyMangle fieldName ]
 
 generateClass :: (String -> String) -> [(String, String)] -> [String] -> IRFunGroup -> [String]
-generateClass clsName lut callableNames (IRFunGroup name gen prob integ writeLogits normal doc _) = let
+generateClass clsName lut callableNames (IRFunGroup name gen prob integ writeLogits normal doc _ _) = let
   funcStringFromMaybe fname func = case func of
     Just a -> generateFunction True (fname, replaceCallsDecl a)
     Nothing -> return []

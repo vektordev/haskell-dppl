@@ -5,4 +5,4 @@
 -- compiles and gives the idealized values this program should also produce:
 -- p(0.0) = (0.79788456, 1), p(0.5) = (0.70413065, 1), p(1.0) = (0.48394145, 1),
 -- p(-0.5) is impossible.
-expect-failure: diagnostic "the lambda is applied through higher-order machinery"
+expect-failure: refused "the lambda is applied through higher-order machinery"

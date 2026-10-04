@@ -95,6 +95,16 @@ subtree (see "Residue factors" and "Fresh x-free subtrees" below); what is
 still refused is fresh randomness *combined arithmetically* with the bound
 variable (`x + Normal > 0.0`), which is a convolution, not a product.
 
+**Where a refusal lands.** Every refusal in this document -- the set-witness
+diagnostic, a plan traversal's decline carried inside it, the orthant
+over-coupling message -- is a refusal of one *variant*, not of the compile
+(task `static-refusals-become-absent-variants`). The probability (or
+integrate) function is absent, exactly as for a `Bottom`-typed program, and
+its reason is recorded on the function group (`IRFunGroup.refusedVariants`):
+`runProb`/`runInteg` and the CLI's `probability`/`cumulative` commands answer
+with it, `generate` still compiles, and any function whose variant calls the
+refused one is refused too, naming it.
+
 The False outcome of an `==` is a *complement*, not a point: `x == 0.0`
 observed False confines `x` to `WExcept WFull 0.0`, every value but that one.
 Intersecting it with another constraint keeps the removal (`(s \ p) ∩ t =

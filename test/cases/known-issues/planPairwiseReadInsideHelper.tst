@@ -8,4 +8,4 @@
 -- task static-refusals-become-absent-variants). Idealized value at
 -- a ~ N(0,1), b ~ N(1,2): P(True) = Phi(1/sqrt(5)) = 0.672640.
 -- Residue of task plan-pairwise-across-separate-neural-reads.
-expect-failure: diagnostic "a neural read inside a specialized function is not supported by the plan traversal"
+expect-failure: refused "a neural read inside a specialized function is not supported by the plan traversal"

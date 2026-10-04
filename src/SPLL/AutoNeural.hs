@@ -87,6 +87,7 @@ makeReadLogitsFunGroup adtDecls conf name target tag fwdDecl =
     Nothing
     Nothing
     fwdDecl
+    []
     -- The read-logits network's own query domain is its target type's (M3). Every such
     -- group's prob also takes the symbol, so the batched backend's arity rule
     -- keeps dense mode off them for now; recording it here is the truthful

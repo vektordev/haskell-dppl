@@ -7,4 +7,4 @@
 -- Idealized: p(Right 0.5) = (phi(0.5), 1) = (0.35206533, 1.0),
 --   p(Right 1.5) = 0, p(Left ()) = 1 - (Phi(1) - Phi(0)) = (0.65865525, 0.0),
 --   p(Right ANY) = (0.34134475, 0.0).
-expect-failure: diagnostic "neither point-invertible"
+expect-failure: refused "neither point-invertible"

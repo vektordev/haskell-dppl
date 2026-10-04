@@ -20,10 +20,12 @@
 -- three buckets ('Outcome'): a value, a refusal through the error channel (a
 -- @Left@, or an 'IRError' surfacing as a 'VError'), or a crash -- a Haskell
 -- exception of any other kind. Crash is the contract violation. A refusal is
--- not, today: it is the precision metric @static-refusals-become-absent-variants@
--- turns into one (an admitted node refusing at run time means the lattice
--- over-promised, the F2 class in its graceful form), so the fuzz property
--- tabulates it rather than failing on it.
+-- not: since @static-refusals-become-absent-variants@ an IR-compiler refusal is
+-- an absent variant with a recorded reason, and an admitted function refusing
+-- means the lattice over-promised -- the F2 class in its graceful form. The
+-- fuzz property tabulates that share (the precision metric) rather than
+-- failing on it; only an admitted variant absent with no recorded reason
+-- stays a violation.
 --
 -- Not in scope, deliberately: whether any value is *right*. The @.tst@ files
 -- and @SamplingMatchesPDF@ own correctness; this is crash-freedom and
@@ -45,7 +47,7 @@ module AdmissionOracle
 import Control.Exception (try, evaluate, throwIO, fromException, SomeException, SomeAsyncException(..))
 import Control.Monad.Random (evalRandIO)
 import Data.List (find, isPrefixOf)
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, isNothing)
 
 import SPLL.Lang.Types
 import SPLL.Lang.Lang (getTypeInfo)
@@ -63,8 +65,10 @@ data Outcome
   = Value
     -- ^ Evaluated to a result.
   | Refusal String
-    -- ^ Answered through the error channel: a @Left@ from a runner, a 'VError'
-    -- result, or an admitted variant that is absent outright.
+    -- ^ Answered through the error channel: a @Left@ from a runner (including
+    -- an admitted variant the IR compiler refused, with its recorded reason),
+    -- a 'VError' result, or an admitted variant that is absent outright with
+    -- no reason (the one refusal that is a violation, see 'violations').
   | Crash String
     -- ^ A Haskell exception (@error@, a failed pattern match, ...). The
     -- violation this oracle exists for.
@@ -186,8 +190,13 @@ admissionCheck conf p mainArgs = do
     checkFunction tp env (nm, pt) = case find ((== nm) . groupName) (groups env) of
       Nothing -> return [Check nm pt ModeCompile (Refusal "no compiled group")]
       Just grp
-        | admitted pt, not (isJust (probFun grp)) -> return [Check nm pt ModeProbability (Refusal absentNote)]
-        | admitted pt, not (isJust (integFun grp)) -> return [Check nm pt ModeIntegrate (Refusal absentNote)]
+        -- An admitted variant absent WITH a recorded reason is the IR compiler
+        -- refusing the shape (task static-refusals-become-absent-variants): the
+        -- graceful form of a lattice over-promise, so the refusal bucket -- the
+        -- query below answers 'Left' naming the reason. Absent with no reason
+        -- would be the variant gate disagreeing with the verdict: a violation.
+        | admitted pt, not (isJust (probFun grp)), unexplained "prob" grp -> return [Check nm pt ModeProbability (Refusal absentNote)]
+        | admitted pt, not (isJust (integFun grp)), unexplained "integ" grp -> return [Check nm pt ModeIntegrate (Refusal absentNote)]
         | not (isJust (genFun grp)) -> return [Check nm pt ModeGenerate (Refusal "refused, and generate is absent too")]
         | otherwise -> case argsFor tp nm of
             Nothing -> return [Check nm pt ModeGenerate (Skipped "no argument value for a parameter")]
@@ -220,6 +229,8 @@ admissionCheck conf p mainArgs = do
         Right (Right _)           -> return Value
 
     groups (IREnv gs _ _) = gs
+
+    unexplained lbl grp = isNothing (lookup lbl (refusedVariants grp))
 
     argsFor tp nm
       | nm == "main" = Just mainArgs
