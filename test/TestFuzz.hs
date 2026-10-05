@@ -43,7 +43,7 @@
 -- cross-checks different CompilerConfigs against each other on the *same*
 -- prob function), but doing so needs many forward samples per case, chosen
 -- dynamically from the density at the query point (see its docs).
-module TestFuzz (fuzzTests, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
+module TestFuzz (fuzzTests, prepareAgreementCase, genAgreementProgram, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
                  neuralGeneratorTests, arrowGeneratorTests, fuzzScalingTests,
                  injFCatalogTests, adtRecursionGeneratorTests, admissionOracleTests) where
 
@@ -62,7 +62,14 @@ import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
 import Text.Read (readMaybe)
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, fromMaybe)
+import Data.Either (rights)
+import Control.Monad.Random (evalRand)
+import System.Random (mkStdGen)
+import BackendAgreement (AgreementCase(..), Query(..), interpreterAnswer, anyHoles, offSupport,
+                         runPythonBatch, runJuliaBatch, findJulia, renderDisagreement,
+                         irEnvConstructs, inferenceBodies)
+import End2EndTesting (resolveNeuralParams, networkNames)
 import Data.List (sort, nub, intersect, find, isInfixOf)
 import PrettyPrint (pPrintProg)
 import SPLL.Parser (tryParseProgram)
@@ -1322,6 +1329,161 @@ prop_Fuzz_GeneratorCoverage = withMaxSuccess (fuzzCases 200) $
       $ cover 10 (dsADTLabel s /= "none")       "declares an ADT"
       $ cover 5  (dsRecShape s /= NoRec)        "contains a recursive declaration"
       $ property True
+
+-- ---------------------------------------------------------------------------
+-- Backend agreement (docs-repo task backend-agreement-fuzzing).
+--
+-- The interpreter is the reference semantics; the scalar Python and Julia
+-- backends must give the same @(prob, dim, imposs)@ at every point the
+-- interpreter answers. Checked per batch of programs, one backend process per
+-- batch (see "BackendAgreement" for the drivers and the comparison). This is
+-- the property that lets emitted-code-test-impact-analysis M2 drop the
+-- runtimes from its per-program key -- but only for the IR constructs it
+-- actually exercises, which is why each run tabulates them.
+
+-- | Programs per batch, and batches per run: 4 x 60 = 240 drawn programs.
+-- Only the ones with a probability function the interpreter answers at reach
+-- the backends; the "programs compared" row says how many that was.
+agreementBatchSize, agreementBatches :: Int
+agreementBatchSize = 60
+agreementBatches = 4
+
+-- | Wall clock for preparing one program: compile, three forward samples and
+-- every interpreter query. A program that does not finish is dropped, not
+-- failed: non-termination is 'prop_Fuzz_TypedCompileNeverCrashes'' business
+-- (the structured-accessor blowup), and with 60 programs a batch a 5s
+-- per-program budget would let a few hangs eat the whole property budget.
+agreementPerProgramMicros :: Int
+agreementPerProgramMicros = 2 * 1000 * 1000
+
+-- | The plain typed generator, with the neural and named-helper productions
+-- weighted up: those are the shapes with the most backend-specific lowering
+-- (identity-mocked network calls, cross-function calls).
+genAgreementProgram :: Gen Program
+genAgreementProgram = frequency
+  [ (4, genTypedProgram)
+  , (1, genNeuralProgram)
+  , (1, genHelperProgram)
+  ]
+
+-- | One batch element: a program and the seed its query points are drawn
+-- with, so a shrink candidate is queried reproducibly.
+genAgreementBatch :: Gen [(Program, Int)]
+genAgreementBatch = vectorOf agreementBatchSize ((,) <$> resize fuzzSize genAgreementProgram <*> arbitrary)
+
+-- | A failing batch is first cut to each program alone -- one of them is the
+-- culprit, and QuickCheck stops at the first singleton that still fails --
+-- and only a singleton is shrunk structurally. Cutting before shrinking is
+-- what the task asks for: a batch shrinks badly, because every candidate
+-- re-runs every other program's backend check too.
+shrinkAgreementBatch :: [(Program, Int)] -> [[(Program, Int)]]
+shrinkAgreementBatch [(p, s)] = [ [(p', s)] | p' <- shrinkTypedProgram p ]
+shrinkAgreementBatch xs = map (: []) xs
+
+-- | Compile a program, draw its query points from its own generator, and keep
+-- the points the interpreter answers at, with its answers. 'Left' says why a
+-- program has nothing to compare (no compile, no probability function, a
+-- timeout, or no point the interpreter answers).
+--
+-- Points: three forward samples, their @ANY@-holed variants and their
+-- off-support neighbours ('anyHoles', 'offSupport'), at most 'maxAgreementPoints'
+-- of them, at @main@'s probability function -- and at its integrate function
+-- for the ones without a wildcard, where it has one.
+prepareAgreementCase :: (Program, Int) -> IO (Either String AgreementCase)
+prepareAgreementCase (p, seed) = fmap (fromMaybe (Left "timed out")) $ timeout agreementPerProgramMicros $ do
+  compiled <- compileSafe defaultCompilerConfig p
+  case compiled of
+    Nothing -> return (Left "no compile")
+    Just env | not (hasProbFun env) -> return (Left "no probability function")
+    Just env -> do
+      let args = fuzzArgs p
+      drawn <- trySync (evaluate (forceShow (evalRand (replicateM 3 (runGenC p env args)) (mkStdGen seed))))
+      let samples = [ s | Right ss <- [drawn], s <- ss, queryable s ]
+          points = take maxAgreementPoints (nub (samples ++ concatMap anyHoles samples ++ concatMap offSupport samples))
+          queries = map QProb points
+                    ++ (if hasIntegFun env then [ QInteg v | v <- points, not (hasWildcard v) ] else [])
+      answered <- fmap concat $ mapM (\q -> do
+                    r <- trySync (evaluate (forceShow (interpreterAnswer p env args q)))
+                    return [ (q, a) | Right (Just a) <- [r] ]) queries
+      return $ if null answered then Left "interpreter answered no point" else Right AgreementCase
+        { acProgram = p, acEnv = env
+        , acBackendArgs = resolveNeuralParams p args
+        , acNets = networkNames p
+        , acQueries = answered }
+  where
+    queryable v = not (isRuntimeFailure v) && renderable v
+    -- A sample is rendered into both backends' source; a closure or a symbol
+    -- has no literal there (and a typed draw's result never is one).
+    renderable v = case v of
+      VClosure {} -> False
+      VSymbol _ -> False
+      VAnyExcept _ -> False
+      VTuple a b -> renderable a && renderable b
+      VEither (Left a) -> renderable a
+      VEither (Right b) -> renderable b
+      VADT _ fs -> all renderable fs
+      VList l -> renderableList l
+      _ -> True
+    renderableList (ListCont x xs) = renderable x && renderableList xs
+    renderableList _ = True
+    hasWildcard v = case v of
+      VAny -> True
+      VTuple a b -> hasWildcard a || hasWildcard b
+      VEither (Left a) -> hasWildcard a
+      VEither (Right b) -> hasWildcard b
+      VADT _ fs -> any hasWildcard fs
+      VList AnyList -> True
+      VList l -> anyList l
+      _ -> False
+    anyList (ListCont x xs) = hasWildcard x || anyList xs
+    anyList AnyList = True
+    anyList EmptyList = False
+
+maxAgreementPoints :: Int
+maxAgreementPoints = 12
+
+-- | Printed once per process: the Julia arm skips, visibly, where there is no
+-- @julia@ -- the same convention 'BatchedPython' follows for a missing torch.
+{-# NOINLINE notesAnnounced #-}
+notesAnnounced :: MVar [String]
+notesAnnounced = unsafePerformIO (newMVar [])
+
+noteOnce :: String -> IO ()
+noteOnce msg = do
+  fresh <- modifyMVar notesAnnounced $ \seen ->
+    if msg `elem` seen then return (seen, False) else evaluate (length msg) >> return (msg : seen, True)
+  if fresh then hPutStrLn stderr msg else return ()
+
+prop_Fuzz_BackendsAgree :: Property
+prop_Fuzz_BackendsAgree = withMaxSuccess (fuzzCases agreementBatches) $
+  forAllShrink genAgreementBatch shrinkAgreementBatch $ \batch -> ioProperty $
+    withinBudgetScaled "prop_Fuzz_BackendsAgree" 20 $ do
+      prepared <- mapM prepareAgreementCase batch
+      let cases = rights prepared
+      if null cases then return discardVacuous else do
+        pyD <- runPythonBatch cases
+        julia <- findJulia
+        jlD <- case julia of
+          Just j -> runJuliaBatch j cases
+          Nothing -> do
+            noteOnce "prop_Fuzz_BackendsAgree: no julia on the PATH; the Julia arm is skipped (interpreter vs Python only)."
+            return []
+        let ds = pyD ++ jlD
+            nQueries = sum (map (length . acQueries) cases)
+        return
+          $ tabulate "julia arm" [maybe "skipped (no julia)" (const "ran") julia]
+          $ tabulate "drawn program" [ either id (const "compared") r | r <- prepared ]
+          $ tabulate "query kind" [ kind q | c <- cases, (q, _) <- acQueries c ]
+          $ tabulate "IR construct in a compared body" (concatMap (irEnvConstructs inferenceBodies . acEnv) cases)
+          $ counterexample (show (length ds) ++ " disagreement(s) over " ++ show (length cases)
+                            ++ " programs / " ++ show nQueries ++ " interpreter-answered queries; first:\n"
+                            ++ concatMap renderDisagreement (take 2 ds))
+          $ null ds
+  where
+    kind (QProb v) = "prob" ++ wildcardTag v
+    kind (QInteg _) = "integ"
+    wildcardTag :: IRValue -> String
+    wildcardTag v = if v == VAny then " ANY" else if "VAny" `isInfixOf` show v then " partial ANY" else ""
 
 return []
 
