@@ -1,0 +1,7 @@
+-- head's inverse rebuilds the list as [sample] ++ ANY and the emitted code
+-- compares that against the literal list with `==`, so an ANY tail has to
+-- match a longer list. pythonLib's InferenceList equality used to answer
+-- p(1) = (0.0, 0.0, True) here (task python-list-eq-any-tail-not-wildcard,
+-- found by prop_Fuzz_BackendsAgree). The dead random arm keeps the list from
+-- being folded at compile time.
+main = head (if True then [1, 0] else [if Uniform < 0.5 then 2 else 1])

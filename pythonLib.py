@@ -275,6 +275,12 @@ class InferenceList:
   def __eq__(self, other):
     if not isinstance(other, InferenceList):
       return False
+    # An ANY list matches any list, as in the interpreter (task
+    # python-list-eq-any-tail-not-wildcard): head's inverse queries
+    # Cons(x, AnyInferenceList()), whose tail must match the rest of the list.
+    # After the guard above, since isAny itself compares against "ANY".
+    if isAny(self) or isAny(other):
+      return True
     return eq(self.value, other.value) and self.next == other.next
   
   def __lt__(self, other):
