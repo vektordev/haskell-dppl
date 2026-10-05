@@ -32,6 +32,7 @@ import TestKnownIssues (knownIssuesTests)
 import TestRewrites (rewriteTests, rewriteCorpusTests)
 import TestPythonPrelude (pythonPreludeTests)
 import TestCLI (cliTests)
+import BackendCoverage (backendCoverageTests)
 import TestFuzz (fuzzTests, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
                  neuralGeneratorTests, arrowGeneratorTests, fuzzScalingTests,
                  injFCatalogTests, adtRecursionGeneratorTests, admissionOracleTests)
@@ -532,7 +533,7 @@ main = do
     -- programs, each compiled and queried) was a quarter of the default run's
     -- CPU. Its probe pairs and units ('rewriteTests') stay in the default run.
     rewriteCorpus <- rewriteCorpusTests
-    return $ testGroup "Slow" [slowInternalsTests, slowE2e, slowBatchedPy, rewriteCorpus, fuzzTests]
+    return $ testGroup "Slow" [slowInternalsTests, slowE2e, slowBatchedPy, rewriteCorpus, fuzzTests, backendCoverageTests]
   -- Tests we want to guarantee but that currently fail or flake: the
   -- known-red part of what used to be Slow. Slow itself is expected green and
   -- is run before a merge or push; this group is run when working on what it

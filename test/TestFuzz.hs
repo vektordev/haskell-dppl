@@ -43,7 +43,7 @@
 -- cross-checks different CompilerConfigs against each other on the *same*
 -- prob function), but doing so needs many forward samples per case, chosen
 -- dynamically from the density at the query point (see its docs).
-module TestFuzz (fuzzTests, prepareAgreementCase, genAgreementProgram, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
+module TestFuzz (fuzzTests, prepareAgreementCase, genAgreementProgram, agreementFuzzSize, aspirationalFuzzTests, shrinkerTests, superSlowFuzzTests, errorChannelTests,
                  neuralGeneratorTests, arrowGeneratorTests, fuzzScalingTests,
                  injFCatalogTests, adtRecursionGeneratorTests, admissionOracleTests) where
 
@@ -1355,6 +1355,12 @@ agreementBatches = 4
 -- per-program budget would let a few hangs eat the whole property budget.
 agreementPerProgramMicros :: Int
 agreementPerProgramMicros = 2 * 1000 * 1000
+
+-- | The structural size 'BackendCoverage''s fixed-seed sample draws at: the
+-- unscaled default, so the sample (and the exception list it is checked
+-- against) does not move with @NEST_FUZZ_SCALE@.
+agreementFuzzSize :: Int
+agreementFuzzSize = defaultFuzzSize
 
 -- | The plain typed generator, with the neural and named-helper productions
 -- weighted up: those are the shapes with the most backend-specific lowering
