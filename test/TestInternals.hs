@@ -3879,6 +3879,34 @@ test_drawProductReadFactorizesPerField = testCase "drawProductReadFactorizesPerF
           Just (pf, _) -> return (loopChainCost pf)
           Nothing -> assertFailure "no probability variant"
 
+-- | Task compositional-answers-enumerate-heard-jointly: a field shared by the
+-- first and the last answer of a transcript, with @k@ answers on disjoint
+-- fields in between. Masking the first slot leaves a literal sibling in front
+-- of the list, past which 'SPLL.DrawSinking' did not sink, so every per-mask
+-- variant enumerated the read jointly: the module grew ~7x per answer in
+-- between (6 random pairs at J=20: 239 s, 259 MB). Pinned as the growth of the
+-- -O0 IR, mask variants included, from k=1 to k=3; it was 44x and is ~2x.
+test_sharedFieldAcrossListIRNotExponential :: TestTree
+test_sharedFieldAcrossListIRNotExponential = testCase "sharedFieldAcrossListIRNotExponential" $ do
+  small <- sizeOf 1
+  large <- sizeOf 3
+  let ratio = fromIntegral large / fromIntegral small :: Double
+  assertBool ("-O0 IR grew " ++ show ratio ++ "x from 1 to 3 answers in between ("
+              ++ show small ++ " -> " ++ show large ++ ")") (ratio < 4)
+  where
+    src k = unlines
+      [ "data Face = Face " ++ intercalate ", " [ "x" ++ show i ++ "::Bool" | i <- [0 .. 2 * k + 2] ]
+      , "neural see :: (Symbol -> Face)"
+      , "main img ="
+      , "  draw truth = see img in"
+      , "  [" ++ intercalate ", " (map pair ((0, 1) : [ (2 * i, 2 * i + 1) | i <- [1 .. k] ] ++ [(0, 2 * k + 2)])) ++ "]" ]
+    pair (a, b) = "(if x" ++ show (a :: Int) ++ " truth then x" ++ show b ++ " truth else False)"
+    sizeOf k = case tryParseProgram "sharedFieldAcrossList" (src k) of
+      Left err -> assertFailure ("parse error: " ++ show err) >> return (0 :: Int)
+      Right prog -> case compile defaultCompilerConfig{optimizerLevel = 0} prog of
+        Left e   -> assertFailure ("compile error: " ++ show e) >> return 0
+        Right ir -> return (length (show ir))
+
 -- | The conditions under which 'SPLL.DrawSinking' splits a draw of a neural
 -- read into per-field draws (task draw-product-read-enumerated-jointly),
 -- checked on the sunk program by counting the neural reads in @main@: one per
@@ -3918,6 +3946,10 @@ test_productReadSplitConditions = testGroup "productReadSplitConditions"
         case snd (head [ f | f@("main", _) <- functions sunk ]) of
           Expr _ (Lambda _ (Expr _ (Apply (Expr _ (Lambda "h" _)) (Expr _ (InjF (Named "Face") _))))) -> True
           _ -> False
+  , testCase "literal sibling: split and sunk past it" $
+      -- a masked slot leaves exactly this behind (task
+      -- compositional-answers-enumerate-heard-jointly)
+      readsIn (face ["x0", "x1"] ++ body "[True, tells (x0 t), tells (x1 t)]") @?= 2
   , testCase "multi-constructor read: not split" $
       readsIn ("data Face = Face x0::Bool, x1::Bool | Blank\n" ++ body "Face (tells (x0 t)) (tells (x1 t))") @?= 1
   , testCase "whole-value use: not split" $
@@ -4656,6 +4688,7 @@ internalsTests = testGroup "Internals"
       , test_sharedLatentFactorizesPerSlot
       , test_drawProductReadFactorizesPerField
       , test_productReadSplitConditions
+      , test_sharedFieldAcrossListIRNotExponential
       ]
   , test_missingMainFunction
   , test_farTailEitherDensityNotZeroed

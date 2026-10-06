@@ -54,7 +54,7 @@ module SPLL.DrawSinking
   ( sinkEnumerableDraws
   ) where
 
-import Data.Maybe (isJust)
+import Data.Maybe (fromMaybe, isJust)
 import qualified Data.Set as Set
 
 import SPLL.Lang.Lang (freeVarsExpr, getSubExprs, getTypeInfo, multiValueContainsContinuous, setSubExprs)
@@ -119,12 +119,16 @@ sinkDraw x v letTi b = case b of
         return (Expr ti (Apply (Expr lti (Lambda y inner)) v2'))
   Expr ti (InjF f ps)
     | length ps >= 2
-    , [i] <- [i | (i, p) <- zip [0 :: Int ..] ps, x `Set.member` freeVarsExpr p]
-    , any mayBeRandom [p | (j, p) <- zip [0 ..] ps, j /= i] ->
-        let place p = case sinkDraw x v letTi p of
-              Just moved -> moved
-              Nothing -> bindAt p
-        in Just (Expr ti (InjF f [if j == i then place p else p | (j, p) <- zip [0 ..] ps]))
+    , [i] <- [i | (i, p) <- zip [0 :: Int ..] ps, x `Set.member` freeVarsExpr p] ->
+        let reader = ps !! i
+            rebuild p' = Expr ti (InjF f [if j == i then p' else p | (j, p) <- zip [0 ..] ps])
+        in if any mayBeRandom [p | (j, p) <- zip [0 ..] ps, j /= i]
+             then Just (rebuild (fromMaybe (bindAt reader) (sinkDraw x v letTi reader)))
+             -- Literal siblings only: stopping here buys nothing, but the
+             -- binding may still reach an operand further down that does pay
+             -- (@[True, (draw .. in ..), ..]@, which is also what a masked
+             -- slot leaves behind).
+             else rebuild <$> sinkDraw x v letTi reader
   _ -> Nothing
   where
     bindAt (Expr _ (Var y)) | y == x = v

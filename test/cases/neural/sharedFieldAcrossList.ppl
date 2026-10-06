@@ -1,0 +1,14 @@
+-- One field (x0) read by the first and the last answer, with two answers on
+-- disjoint fields in between: the Guess-Who transcript shape, written into the
+-- program. The split per-field draws must still sink into their own elements
+-- in the per-mask variants, where a masked slot leaves a literal sibling
+-- behind. Before that, each variant enumerated the read jointly and the module
+-- grew ~7x per element in between. Task compositional-answers-enumerate-heard-jointly.
+data Face = Face x0::Bool, x1::Bool, x2::Bool, x3::Bool, x4::Bool, x5::Bool, x6::Bool
+neural see :: (Symbol -> Face)
+main img =
+  draw truth = see img in
+  [(if x0 truth then x1 truth else False),
+   (if x2 truth then True else x3 truth),
+   (if x4 truth then x5 truth else False),
+   (if x0 truth then x6 truth else False)]
