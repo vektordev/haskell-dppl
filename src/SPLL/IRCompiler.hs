@@ -3962,8 +3962,8 @@ equalityGuardStatic :: RType -> IRExpr -> IRExpr -> IRExpr
 equalityGuardStatic = equalityGuardBody equalityGuardStatic
 
 equalityGuardBody :: (RType -> IRExpr -> IRExpr -> IRExpr) -> RType -> IRExpr -> IRExpr -> IRExpr
-equalityGuardBody _    TFloat    v sample = IROp OpApprox sample v
-equalityGuardBody _    (TVarR _) v sample = IROp OpApprox sample v
+equalityGuardBody _    TFloat    v sample = leafEqIR TFloat sample v
+equalityGuardBody _    rt@(TVarR _) v sample = leafEqIR rt sample v
 equalityGuardBody _    TUnit _ _ = constTrueIR
 equalityGuardBody self (Tuple ft st) v sample =
   IROp OpAnd (self ft (IRDestruct AcFst v) (IRDestruct AcFst sample)) (self st (IRDestruct AcSnd v) (IRDestruct AcSnd sample))
@@ -3972,6 +3972,25 @@ equalityGuardBody self (TEither lr rr) v sample =
     (IRIf (IRDestruct AcIsLeft sample) (self lr (IRDestruct AcFromLeft v) (IRDestruct AcFromLeft sample)) (IRConst $ VBool False))
     (IRIf (IRDestruct AcIsLeft sample) (IRConst $ VBool False) (self rr (IRDestruct AcFromRight v) (IRDestruct AcFromRight sample)))
 equalityGuardBody _    _ v sample = IROp OpEq sample v
+
+-- | Bool-valued IR comparing two leaves of type @rt@ (callers pass the query
+-- sample first). A float is compared with 'OpApprox' (see 'equalityGuard' for
+-- why), anything with an exact representation with 'OpEq'.
+--
+-- A type variable is neither: nothing in the function constrained it, so the
+-- value may be a float at one call and a Bool, Int, tuple or ADT at another.
+-- 'OpApprox' is defined on floats only (the interpreter refuses anything
+-- else), and 'OpEq' alone would lose the tolerance for a float the caller
+-- computed, so it dispatches on the run-time tag of @a@ (task
+-- polymorphic-parameter-compared-as-float). 'IRConformsTo' accepts a wildcard
+-- as a float, so an ANY operand reaches 'OpApprox' exactly as it did before
+-- this dispatch existed; callers keep owning the ANY guard. The batched
+-- backend emits the tag test as a bucket-uniform dtype check
+-- ('SPLL.CodeGenPyTorchBatched.structural').
+leafEqIR :: RType -> IRExpr -> IRExpr -> IRExpr
+leafEqIR TFloat    a b = IROp OpApprox a b
+leafEqIR (TVarR _) a b = IRIf (IRConformsTo TFloat a) (IROp OpApprox a b) (IROp OpEq a b)
+leafEqIR _         a b = IROp OpEq a b
 
 
 -- Must be used in conjunction with irMap, as it does not recurse
@@ -4334,7 +4353,6 @@ enumerateAgreement meta cumulative ag sample = do
       v     = agVar ag
       dom   = agDomain ag
       rt    = agRType ag
-      cmpOp = case rt of { TFloat -> OpApprox; TVarR _ -> OpApprox; _ -> OpEq }
       -- Both bound variables enter the type environment exactly as the nested
       -- enumeration would have bound them, so the arms and the operands are
       -- compiled in the scope they were written in.
@@ -4365,7 +4383,7 @@ enumerateAgreement meta cumulative ag sample = do
         eIR <- toIRGenerate metaV e
         requireDeterministicUnderEnum metaV "agreement arm" e eIR
         return (if cumulative then compareValueExpr sr rt eIR sample
-                              else maskSR sr (IROp cmpOp eIR sample))
+                              else maskSR sr (leafEqIR rt sample eIR))
   thenBody <- closeOver (lift (runWriterT (armMass (agThen ag))))
   elseBody <- closeOver (lift (runWriterT (armMass (agElse ag))))
   let mkMap b = IRBuiltin BMap [IRLambda v b, tensorDomainSR dom]
@@ -4484,9 +4502,8 @@ toIREnumerate meta cumulative whole@(Expr TypeInfo{rType=rt} (IfThenElse c t e))
     -- Due to eager evaluation, we must make sure, that the wrong branch is not executed
     let condSelector resultExpr = IRIf cIR resultExpr (srZero sr)
     let notCondSelector resultExpr = IRIf (IRUnaryOp OpNot cIR) resultExpr (srZero sr)
-    let cmpOp = case rt of { TFloat -> OpApprox; TVarR _ -> OpApprox; _ -> OpEq }
-    let thenSelector = if cumulative then compareValueExpr sr rt tIR sample else maskSR sr (IROp cmpOp tIR sample)
-    let elseSelector = if cumulative then compareValueExpr sr rt eIR sample else maskSR sr (IROp cmpOp eIR sample)
+    let thenSelector = if cumulative then compareValueExpr sr rt tIR sample else maskSR sr (leafEqIR rt sample tIR)
+    let elseSelector = if cumulative then compareValueExpr sr rt eIR sample else maskSR sr (leafEqIR rt sample eIR)
     let thenRes = condSelector thenSelector
     let elseRes = notCondSelector elseSelector
     -- The two selectors are mutually exclusive (exactly one is ever "live", the
@@ -4502,10 +4519,9 @@ toIREnumerate meta cumulative e sample = do
   eIR <- toIRGenerate meta e
   forwardOrInfer meta cumulative e sample [("expression", e, eIR)] $ do
     let rt = rType (getTypeInfo e)
-    let cmpOp = case rt of { TFloat -> OpApprox; TVarR _ -> OpApprox; _ -> OpEq }
     if cumulative
       then return (mass (compareValueExpr (semiringOf meta) rt eIR sample))
-      else return (indicatorP (semiringOf meta) (IROp cmpOp eIR sample))
+      else return (indicatorP (semiringOf meta) (leafEqIR rt sample eIR))
 
 -- | The premise check of 'toIREnumerate's forward-and-compare equations, with
 -- the way out it used to lack (task enum-let-latent-gates-fresh-draw).

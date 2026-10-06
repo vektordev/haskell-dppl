@@ -2689,9 +2689,18 @@ batchedRefusalUnitTests = testGroup "batched refusal (synthetic IR)" $
         (IROp OpEq (IRVar "sample") (IRConst (VAnyExcept [IRConst (VInt 0)])))
   , testCase "a residual IRConformsTo (not at the root) is refused" $
       -- prepBatchedBody strips only a *root* query-type guard; one nested
-      -- anywhere else would reach the emitter, which has no case for it.
+      -- anywhere else would reach the emitter, which has a case only for the
+      -- float test below.
       assertRefusal "type-conformance check (IRConformsTo)"
-        (IROp OpAnd (IRVar "b") (IRConformsTo TFloat (IRVar "sample")))
+        (IROp OpAnd (IRVar "b") (IRConformsTo TBool (IRVar "sample")))
+  , testCase "a type-variable leaf's float test IRConformsTo TFloat is accepted" $
+      -- IRCompiler.leafEqIR dispatches a type-variable leaf's comparison on
+      -- it; a slot's dtype is bucket-uniform, so it is a structural check
+      -- (task polymorphic-parameter-compared-as-float).
+      assertAccepted
+        (IRIf (IRConformsTo TFloat (IRVar "sample"))
+              (IROp OpApprox (IRVar "sample") (IRVar "s"))
+              (IROp OpEq (IRVar "sample") (IRVar "s")))
   , testCase "isAny is accepted (M4: ANY-ness is part of the bucket signature)" $
       -- Design heterogeneous-batch-inference, Component 3/M4: whether a slot is
       -- an ANY wildcard is structural, exactly like a list length or an Either

@@ -46,7 +46,7 @@ module SPLL.CodeGenPyTorchBatched
   ) where
 
 import SPLL.IntermediateRepresentation
-import SPLL.Typing.RType (shapeRank)
+import SPLL.Typing.RType (RType(TFloat), shapeRank)
 import SPLL.Lang.Types (CompilerError, GenericValue(..), GenericList(..), MultiValue(..), ADTDecl(..), Value)
 import SPLL.Lang.Lang (multiValueToValueList)
 -- 'pyDouble' is shared with the scalar backend for the same reason
@@ -848,6 +848,11 @@ structural env e = case e of
   -- argument, because every position ANY can occupy is already keyed into the
   -- bucket signature by construction.
   IRUnaryOp OpIsAny _ -> True
+  -- The float test of a type-variable leaf's comparison
+  -- ('SPLL.IRCompiler.leafEqIR'): a slot's dtype is part of its tensor, so
+  -- uniform across the call, and the arm it rules out ('isclose' on a bool
+  -- tensor) is illegal to evaluate eagerly.
+  IRConformsTo TFloat _ -> True
   IROp OpEq a b     -> isEmptyListConst a || isEmptyListConst b
   IROp OpAnd a b    -> structural env a && structural env b
   IROp OpOr  a b    -> structural env a && structural env b
@@ -1250,6 +1255,10 @@ emittable e = case e of
   IRSelect{}     -> True
   IROp{}         -> True
   IRUnaryOp{}    -> True   -- includes OpIsAny (M4: compiles to a structural check)
+  -- Only the float test 'structural' admits; the root query-type guard is
+  -- stripped before this check ('stripRootGuard'), and any other shape test
+  -- stays refused.
+  IRConformsTo TFloat _ -> True
   IRConst v      -> isJust (batchedVal v)   -- scalar/tuple leaves only; see 'batchedVal'
   IRVar{}        -> True
   IRLetIn{}      -> True
@@ -1554,6 +1563,10 @@ batchedExpr env (IRUnaryOp OpSign e) = "sign(" ++ batchedExpr env e ++ ")"
 -- M4: bucket-uniform (see 'structural'), so this is a plain Python bool at
 -- run time, not a per-element mask -- 'isAny' in pythonLibBatched.py.
 batchedExpr env (IRUnaryOp OpIsAny e) = "isAny(" ++ batchedExpr env e ++ ")"
+-- A plain Python bool, like 'isAny': see the 'IRConformsTo' row of 'structural'.
+batchedExpr env (IRConformsTo TFloat e) =
+  let x = batchedExpr env e
+  in "(isinstance(" ++ x ++ ", float) or (torch.is_tensor(" ++ x ++ ") and " ++ x ++ ".is_floating_point()))"
 batchedExpr env (IRSelect c t f) = torchWhere env c t f
 -- A structural if left in expression position is Python's own lazy
 -- conditional expression, not a @torch.where@: its condition is a plain bool

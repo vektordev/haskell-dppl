@@ -63,7 +63,9 @@ selectPassExpr = irMap convert
 -- @isinstance@ branch), an ANY-wildcard check (design heterogeneous-batch-
 -- inference, Component 3/M4 -- a structural marker of exactly the same kind),
 -- function application / lambdas (data-dependent recursion depth), 'IRError'
--- refusal arms (poison-masking is M3), and the root-only query-type guard. A
+-- refusal arms (poison-masking is M3), and the 'IRConformsTo' tag tests (the
+-- root query-type guard, and a type-variable leaf's float test, which the
+-- batched backend keeps as a real @if@ for the same reason as ANY-ness). A
 -- conditional is convertible only when its whole condition and both arms lie
 -- in this fragment.
 --
