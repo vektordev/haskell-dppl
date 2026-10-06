@@ -1853,8 +1853,14 @@ validationRefusal src = case tryParseProgram "prog.spll" src of
     Right () -> assertFailure "program validated although it should be rejected"
     Left e -> return e
 
+-- | The repro of neural-output-tensor-check-misses-adt-fields, with the given
+-- (possibly empty) @of@ clause on the neural declaration.
+tensorAdtSrc :: String -> String
+tensorAdtSrc ofClause =
+  "data Img = Img pix::Tensor[3] Float\nneural n :: (Symbol -> Img)" ++ ofClause ++ "\nmain s = n s\n"
+
 tensorTypeTests :: TestTree
-tensorTypeTests = testGroup "TensorTypes"
+tensorTypeTests =testGroup "TensorTypes"
   [ testCase "Tensor[e1, ..., en] t parses to a shaped type" $ do
       ty <- neuralDeclType "neural n :: (Tensor[28, 28] Float -> Int) of [0, 1]\nmain x = n x\n"
       assertEqual "" (TArrow (TTensor [EFixed 28, EFixed 28] TFloat) TInt) ty
@@ -1922,6 +1928,28 @@ tensorTypeTests = testGroup "TensorTypes"
       msg <- validationRefusal "neural n :: (Symbol -> Tensor[3] Float)\nmain s = n s\n"
       assertBool ("expected the tensor-output refusal in: " ++ msg)
         ("tensor-typed neural outputs are not supported" `isInfixOf` msg)
+
+  -- neural-output-tensor-check-misses-adt-fields: the output check looked
+  -- through tuples and lists but not ADT fields, so a tensor field crashed
+  -- AutoNeural.makePartitionPlan instead of being refused here.
+  , testGroup "a tensor reached through an ADT field of a neural output is refused (tensors S2)"
+      [ testCase "with an of clause" $ do
+          msg <- validationRefusal (tensorAdtSrc " of {Img Real}")
+          assertBool ("expected the tensor-output refusal in: " ++ msg)
+            ("tensor-typed neural outputs are not supported" `isInfixOf` msg)
+      , testCase "without an of clause" $ do
+          msg <- validationRefusal (tensorAdtSrc "")
+          assertBool ("expected the tensor-output refusal in: " ++ msg)
+            ("tensor-typed neural outputs are not supported" `isInfixOf` msg)
+      , testCase "through mutually recursive ADTs" $ do
+          msg <- validationRefusal
+            "data A = A0 | A1 b::B\ndata B = B0 | B1 a::A, t::Tensor[2] Float\nneural n :: (Symbol -> A)\nmain s = n s\n"
+          assertBool ("expected the tensor-output refusal in: " ++ msg)
+            ("tensor-typed neural outputs are not supported" `isInfixOf` msg)
+      , testCase "a recursive ADT without a tensor field is still accepted" $
+          withParsed "data Chain = End | Link hd::Float, tl::Chain\nneural n :: (Symbol -> Chain)\nmain s = n s\n" $ \prog ->
+            assertEqual "" (Right ()) (validateProgram prog)
+      ]
 
   , testCase "an input that is not Symbol, Float, a tensor or a tuple of those is refused" $ do
       msg <- validationRefusal "neural n :: (Int -> Float)\nmain s = n s\n"

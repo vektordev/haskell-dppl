@@ -13,7 +13,7 @@ import SPLL.ReservedNames (distributionPrimitiveNames, internalNameReason, group
 -- This function returns nothing if the program is valid and an error else
 validateProgram :: Program -> Either String ()
 -- We sequence the either monads so we either have a list of errors(Lefts) or discard the Rights
-validateProgram p@Program{functions=fn, neurals=nrls, writeLogitsDecls=enc, adts=adtsDecl} = sequence_ (validateMainExists fn : validateReservedNames p : validateNoNameCollisions adtsDecl fn : validateWriteLogitsDecls enc : map validateNeuralShape nrls ++ exprValidations)
+validateProgram p@Program{functions=fn, neurals=nrls, writeLogitsDecls=enc, adts=adtsDecl} = sequence_ (validateMainExists fn : validateReservedNames p : validateNoNameCollisions adtsDecl fn : validateWriteLogitsDecls enc : map (validateNeuralShape adtsDecl) nrls ++ exprValidations)
   where
     -- Validate all expressions potentially unsing the context of their top level declaration and their program
     exprValidations = concatMap (\(_, expr) -> validateAllSubexpressions p expr expr) fn
@@ -44,26 +44,28 @@ validateWriteLogitsDecls decls = mapM_ checkGroup grouped
 -- instead. Reject the reverse shape with a pointer at the registry syntax that covers the
 -- only job it still had (registering a type's logit layout). A tensor-typed /output/ is
 -- slice S2 of tensors-in-core-language (tensor Gaussian heads) and refused until then.
-validateNeuralShape :: NeuralDecl -> Either String ()
-validateNeuralShape (name, TArrow TSymbol target, _) = validateNeuralTarget name target
-validateNeuralShape (name, TArrow _ TSymbol, _) =
+validateNeuralShape :: [ADTDecl] -> NeuralDecl -> Either String ()
+validateNeuralShape decls (name, TArrow TSymbol target, _) = validateNeuralTarget decls name target
+validateNeuralShape _ (name, TArrow _ TSymbol, _) =
   Left ("Compiler Error: neural declaration '" ++ name ++ "' has the form (source -> Symbol), "
         ++ "which is no longer supported. To register a logit layout "
         ++ "for a type, write `neural writeLogits :: <type> of <multivalue>`; the logit vector for a "
         ++ "value is generated on the SPLL function that produces it.")
-validateNeuralShape (name, TArrow inp target, _)
-  | isNeuralInputType inp = validateNeuralTarget name target
+validateNeuralShape decls (name, TArrow inp target, _)
+  | isNeuralInputType inp = validateNeuralTarget decls name target
   | otherwise =
       Left ("Compiler Error: neural declaration '" ++ name ++ "' takes an input of type "
             ++ prettyRType inp ++ ", but a network's input must be Symbol, Float, a "
             ++ "Tensor[...] of a scalar, or a tuple of those.")
-validateNeuralShape (name, ty, _) =
+validateNeuralShape _ (name, ty, _) =
   Left ("Compiler Error: neural declaration '" ++ name ++ "' has type " ++ show ty
         ++ ", but neural declarations must have the form (input -> target).")
 
-validateNeuralTarget :: String -> RType -> Either String ()
-validateNeuralTarget name target
-  | containsTensor target =
+-- | A tensor reached through an ADT field counts too, so the field types are
+-- resolved against the program's @data@ declarations.
+validateNeuralTarget :: [ADTDecl] -> String -> RType -> Either String ()
+validateNeuralTarget decls name target
+  | containsTensor decls target =
       Left ("Compiler Error: neural declaration '" ++ name ++ "' has the output type "
             ++ prettyRType target ++ "; tensor-typed neural outputs are not supported yet "
             ++ "(a tensor may only be a network's input).")

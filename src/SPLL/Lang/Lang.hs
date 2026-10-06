@@ -597,13 +597,25 @@ isNeuralInputType _             = False
 
 -- | Does a type mention a tensor anywhere? Tensor-typed neural /outputs/ are
 -- slice S2 of tensors-in-core-language and refused until then.
-containsTensor :: RType -> Bool
-containsTensor (TTensor _ _)  = True
-containsTensor (Tuple a b)    = containsTensor a || containsTensor b
-containsTensor (TEither a b)  = containsTensor a || containsTensor b
-containsTensor (ListOf a)     = containsTensor a
-containsTensor (TArrow a b)   = containsTensor a || containsTensor b
-containsTensor _              = False
+--
+-- A 'TADT' is looked through to its constructors' field types in the given
+-- declarations (task neural-output-tensor-check-misses-adt-fields); each ADT
+-- is visited once, so recursive and mutually recursive types terminate. An
+-- ADT with no declaration contributes no tensor.
+containsTensor :: [ADTDecl] -> RType -> Bool
+containsTensor decls = go Set.empty
+  where
+    go _    (TTensor _ _) = True
+    go seen (Tuple a b)   = go seen a || go seen b
+    go seen (TEither a b) = go seen a || go seen b
+    go seen (ListOf a)    = go seen a
+    go seen (TArrow a b)  = go seen a || go seen b
+    go seen (TADT n)
+      | n `Set.member` seen = False
+      | otherwise = any (go (Set.insert n seen))
+          [ ty | ADTDecl{dataName = d, constructors = cs} <- decls, d == n
+               , (_, fields) <- cs, (_, ty) <- fields ]
+    go _    _             = False
 
 
 elementAt :: ValueList a -> Int -> GenericValue a
