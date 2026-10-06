@@ -32,7 +32,8 @@ chain can only go as deep as the plan's own structure, so distinct incomparable
 paths cannot name one leaf.
 
 A slot is **self-contained** when it shares no latent with another slot *and*
-every draw it depends on happens inside its own sub-expression; a deterministic
+every draw it depends on happens inside its own sub-expression (its own `draw`
+chain counts, although the tree peels it off the observed core); a deterministic
 slot is self-contained trivially. For those the existing per-field `anySafe`
 guard is already exact. Every other slot is **enumerated**, and masks range over
 those. Slots partition into **correlation classes** (connected components under

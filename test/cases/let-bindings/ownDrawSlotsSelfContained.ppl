@@ -1,0 +1,9 @@
+-- The middle elements draw their own latents, so they are self-contained slots
+-- and need no per-mask variants; only the first and last share a. They used to
+-- be classed as reading latents drawn outside them, doubling the variants per
+-- element. Task compositional-answers-enumerate-heard-jointly.
+main =
+  draw a = Uniform < 0.3 in
+  [(draw b = Uniform < 0.4 in if a then b else False),
+   (draw c = Uniform < 0.5 in draw d = Uniform < 0.6 in if c then d else False),
+   (draw e = Uniform < 0.7 in if a then e else False)]

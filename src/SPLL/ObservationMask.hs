@@ -142,19 +142,22 @@ data ObsTree
   = ObsCon Slot String [ObsTree]
     -- ^ A constructor application: its own accessor path, the constructor name,
     -- and its fields in declaration order.
-  | ObsLeaf Slot Expr LetEnv
+  | ObsLeaf Slot Expr LetEnv Int
     -- ^ A leaf slot: its accessor path from the root, the sub-expression
-    -- observed there, and the @let@ environment in scope at it.
+    -- observed there, the @let@ environment in scope at it, and how many of
+    -- that environment's bindings (the outermost ones) were already in scope
+    -- where the slot's own sub-expression begins. The rest are the slot's own
+    -- @let@ chain, peeled off by 'focus', and are inside the slot.
   deriving Show
 
 -- | The path of a node.
 obsPath :: ObsTree -> Slot
 obsPath (ObsCon p _ _)  = p
-obsPath (ObsLeaf p _ _) = p
+obsPath (ObsLeaf p _ _ _) = p
 
 -- | Every leaf, in tree order.
 obsLeaves :: ObsTree -> [(Slot, Expr, LetEnv)]
-obsLeaves (ObsLeaf p e env) = [(p, e, env)]
+obsLeaves (ObsLeaf p e env _) = [(p, e, env)]
 obsLeaves (ObsCon _ _ fs)   = concatMap obsLeaves fs
 
 -- | Every leaf slot, in tree order. The order is the one masks and reports are
@@ -183,7 +186,7 @@ buildObs decls env path e =
       | isObsConstructor decls c ->
           ObsCon path c
             [ buildObs decls env' (path ++ [Accessor c i]) a | (i, a) <- zip [0 ..] args ]
-    _ -> ObsLeaf path core env'
+    _ -> ObsLeaf path core env' (length env)
   where
     (env', core, _) = focus env e
 
@@ -311,9 +314,26 @@ slotLatents decls fenv t =
 --
 -- This is the syntactic half of 'selfContained': a slot whose draws all happen
 -- inside it is one nothing else can be reading.
+--
+-- The slot's own @let@ chain is part of its sub-expression even though 'focus'
+-- has peeled it off the observed core, so its bindings are followed; the ones
+-- bound around the slot are not. Without that, an element that draws its own
+-- latents (@[draw c = Uniform < 0.5 in c, ..]@) read as depending on latents
+-- drawn outside it, was enumerated, and doubled the mask variants for nothing
+-- (task compositional-answers-enumerate-heard-jointly).
 localSlotLatents :: [ADTDecl] -> [FnDecl] -> ObsTree -> [(Slot, Set Latent)]
 localSlotLatents decls fenv t =
-  [ (s, latentsOf decls fenv [] [] e) | (s, e, _) <- obsLeaves t ]
+  [ (s, latentsOf decls fenv (ownEnv inherited env) [] e) | (s, e, env, inherited) <- leaves t ]
+  where
+    leaves (ObsLeaf p e env k) = [(p, e, env, k)]
+    leaves (ObsCon _ _ fs)     = concatMap leaves fs
+
+-- | The bindings of an environment that were not among the @inherited@
+-- outermost ones, each cut the same way, so following a binding's value can
+-- never reach past the slot into the scope around it.
+ownEnv :: Int -> LetEnv -> LetEnv
+ownEnv inherited env =
+  [ b { bndEnv = ownEnv inherited (bndEnv b) } | b <- take (length env - inherited) env ]
 
 latentsOf :: [ADTDecl] -> [FnDecl] -> LetEnv -> [String] -> Expr -> Set Latent
 latentsOf decls fenv env seen e = case node e of

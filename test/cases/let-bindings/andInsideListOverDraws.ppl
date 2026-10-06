@@ -1,0 +1,7 @@
+-- `a && b` over two draw-bound coins, as an element of a list. It used to be
+-- refused (set-valued witness construction failed for 'a'): the draws could
+-- not sink past the list's literal tail into the operands of `&&`. They do
+-- since task compositional-answers-enumerate-heard-jointly. The helper over a
+-- draw-bound record is still refused: known-issues/andInsideHelperOverRecordDraw.
+-- Task and-inside-list-or-helper-over-draws-refused.
+main = draw a = Uniform < 0.3 in draw b = Uniform < 0.6 in [a && b]

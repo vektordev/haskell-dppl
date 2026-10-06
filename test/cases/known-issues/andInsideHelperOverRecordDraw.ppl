@@ -1,0 +1,7 @@
+-- `&&` inside a helper applied to a draw-bound record is refused, while the
+-- `if` spelling compiles. The list-element shape over separate draws
+-- (let-bindings/andInsideListOverDraws) was fixed by draw sinking past a
+-- literal sibling; this one remains. Task and-inside-list-or-helper-over-draws-refused.
+data R = R l::Bool, r::Bool
+both h = (l h) && (r h)
+main = draw h = R (Uniform < 0.3) (Uniform < 0.6) in [both h]

@@ -45,6 +45,10 @@ TASTY_HIDE_SUCCESSES=false stack test                     # show every test + ti
 
 ## Rules
 
+- **Never rebase; integrate with `git merge`.** Commit hashes are cited in
+  the docs-repo tickets and in commit messages, and a rebase rewrites them.
+  `pull.rebase` is `false` and a local `pre-rebase` hook refuses rebases
+  (override: `NEST_ALLOW_REBASE=1`, only when the user asks).
 - **Zero warnings.** `src/`, `app/` and `test/` build with `-Wall -Wcompat
   -Wincomplete-record-updates -Wredundant-constraints -Werror`. Don't add
   `-Wno-*` flags to `package.yaml`. Fix the code. For a real false positive,

@@ -110,6 +110,20 @@ progN  = "main = draw x = Uniform in draw y = Uniform in (x+y, (x, y))"
 progI  = "main = draw x = Uniform in draw y = Uniform in (x, y)"
 progC  = "main = draw x = Uniform in draw y = x + Uniform in draw z = y + Uniform in (x, (y, z))"
 progB  = "main = draw x = Uniform in (x, 1.0 - x)"
+-- | The middle element draws its own latents; the outer two share @a@.
+progOwnDraws :: String
+progOwnDraws = unlines
+  [ "main ="
+  , "  draw a = Uniform < 0.3 in"
+  , "  [(draw b = Uniform < 0.4 in if a then b else False),"
+  , "   (draw c = Uniform < 0.5 in draw d = Uniform < 0.6 in if c then d else False),"
+  , "   (draw e = Uniform < 0.7 in if a then e else False)]" ]
+
+-- | The first slot's own binding is of the outer draw @a@, which nothing else
+-- reads: still enumerated, since its density lives outside the slot.
+progOwnBindingOfOuter :: String
+progOwnBindingOfOuter = "main = draw a = Uniform < 0.3 in ((draw c = a in c), Uniform < 0.5)"
+
 progS1 = "main = draw x = Uniform in (x, Uniform)"
 
 -- ---------------------------------------------------------------------------
@@ -166,6 +180,17 @@ classTests = testGroup "leaf slots and correlation classes"
   , testCase "draw x = Uniform in (x, Uniform): two classes, slot 1 enumerated" $ do
       classesOf "main" progS1 >>= assertEqual "classes" [["fst"], ["snd"]]
       verdictsOf "main" progS1
+        >>= assertEqual "verdicts" [("fst", False), ("snd", True)]
+
+  , testCase "a slot drawing its own latents is self-contained" $
+      -- Its own draw chain is peeled off the observed core, but it is still
+      -- inside the slot (task compositional-answers-enumerate-heard-jointly).
+      verdictsOf "main" progOwnDraws
+        >>= assertEqual "verdicts" [ ("head", False), ("tail.head", True)
+                                   , ("tail.tail.head", False), ("tail.tail.tail", True) ]
+
+  , testCase "a slot's own binding of an outer draw still reads it from outside" $
+      verdictsOf "main" progOwnBindingOfOuter
         >>= assertEqual "verdicts" [("fst", False), ("snd", True)]
 
   , testCase "I's slots are both enumerated although independent" $
