@@ -55,6 +55,7 @@ import SPLL.Validator (validateProgram)
 import SPLL.ReservedNames (queryParamName, distributionPrimitiveNames, languageKeywords, reservedIdentifierReason, internalNameReason, pythonRuntimeClassNames, pythonReservedIdentifiers, juliaRuntimeNames, juliaReservedIdentifiers)
 import System.Process (readProcessWithExitCode)
 import System.Exit (ExitCode(..))
+import BackendAgreement (Answer(..), AgreementCase(..), Query(..), interpreterAnswer, answersAgree, runPythonBatch, runJuliaBatch, findJulia, renderDisagreement)
 
 
 -- | The (prob, dim) pair a probability query must return; a different shape
@@ -3274,6 +3275,86 @@ materializationGuardTests = testGroup "Cardinality guard for marginal materializ
 noMaterializationConfig :: CompilerConfig
 noMaterializationConfig = defaultCompilerConfig { materializationCardinality = 0 }
 
+-- ---------------------------------------------------------------------------
+-- Strict comparisons on an Int in the set-witness engine (task
+-- set-witness-int-comparison-boundary-non-strict)
+-- ---------------------------------------------------------------------------
+
+-- | At budget 0 a discrete let is not densely enumerated, so a comparison on
+-- it reaches the set-witness engine's intervals. @v < 2@ on an Int used to be
+-- measured as @v <= 2@, its negation as @v > 2@.
+setWitnessIntBoundaryTests :: TestTree
+setWitnessIntBoundaryTests = testGroup "set-witness Int comparison boundaries (budget 0)"
+  [ testCase "every comparison shape counts the atom on the bound on the right side" $ do
+      -- P(v=1) = 0.3, P(v=2) = 0.35, P(v=3) = 0.35.
+      let mix = "(if Uniform < 0.3 then 1 else (if Uniform < 0.5 then 2 else 3))"
+          cases = [ ("v < 2", 0.3), ("v > 2", 0.35), ("2 > v", 0.3), ("2 < v", 0.35)
+                  , ("v + 1 < 3", 0.3)            -- plusI transport
+                  , ("-v < -2", 0.35)             -- negI: decreasing, ends swap
+                  , ("(v > 1) && (v < 3)", 0.35)  -- intersection [2, 2]
+                  , ("(v < 3) && (1 < v)", 0.35) ]
+      forM_ cases $ \(cond, expected) -> do
+        prog <- parseOrFail ("main = draw v = " ++ mix ++ " in if " ++ cond ++ " then 1 else 0")
+        forM_ [ ("default", defaultCompilerConfig), ("budget 0", noMaterializationConfig) ] $ \(nm, conf) -> do
+          p1 <- probUnder conf prog [] (VInt 1)
+          p0 <- probUnder conf prog [] (VInt 0)
+          assertBool (cond ++ ", " ++ nm ++ ": p(1) = " ++ show expected ++ ", got " ++ show p1)
+            (abs (p1 - expected) < 1e-9)
+          assertBool (cond ++ ", " ++ nm ++ ": p(0) = " ++ show (1 - expected) ++ ", got " ++ show p0)
+            (abs (p0 - (1 - expected)) < 1e-9)
+        lp <- probUnder (noMaterializationConfig { logSpace = True }) prog [] (VInt 1)
+        assertBool (cond ++ ", budget 0 log space: exp(log p(1)) = " ++ show expected ++ ", got " ++ show (exp lp))
+          (abs (exp lp - expected) < 1e-9)
+  , testCase "an empty Int interval is impossible" $ do
+      prog <- parseOrFail "main = draw v = (if Uniform < 0.3 then 1 else 2) in if v < 1 then 1 else 0"
+      case runProb noMaterializationConfig prog [] (VInt 1) of
+        Right r -> assertEqual "p(1) of v < 1 over {1, 2}" (Just True) (resultImpossible r)
+        other   -> assertFailure ("expected a probability tuple, got: " ++ show other)
+  , testCase "the observeContinuousEquals pair answers the correct column on every scalar backend" $ do
+      -- An Int whose atom is a density-weighted point (`Normal == c`), so the
+      -- interval measure must subtract whole results: [2, inf] is the mass 1
+      -- minus a density, which is the mass. The letfree `Right ANY` row is
+      -- left out: the letfree CDF at 1 answers a possible zero mass at dim 0
+      -- rather than the density, a convention of the InjF engine's cumulative
+      -- `IfThenElse` (task letfree-cdf-density-atom-reports-zero-mass).
+      let impossibleA = Answered 0.0 0.0 True
+          rightI k = VEither (Right (VInt k))
+          leftU = VEither (Left VUnit)
+          rows = [ ("observeContinuousEqualsLetfree",
+                     [ (rightI 1, Answered 0.3520653267642995 1.0 False)
+                     , (rightI 2, impossibleA)
+                     , (leftU,    Answered 1.0 0.0 False) ])
+                 , ("observeContinuousEqualsLetBound",
+                     [ (rightI 0, Answered 0.3989422804014327 1.0 False)
+                     , (rightI 2, impossibleA)
+                     , (leftU,    Answered 1.0 0.0 False)
+                     , (VEither (Right VAny), Answered 0.3989422804014327 1.0 False) ]) ]
+      acs <- forM rows $ \(name, qs) -> do
+        prog <- loadCorpusProgram name
+        env <- either (\e -> assertFailure (name ++ ": " ++ show e)) return (compile noMaterializationConfig prog)
+        logEnv <- either (\e -> assertFailure (name ++ ": " ++ show e)) return
+                    (compile noMaterializationConfig { logSpace = True } prog)
+        forM_ qs $ \(s, want) -> do
+          let got = interpreterAnswer prog env [] (QProb s)
+          assertBool (name ++ " interpreter at " ++ show s ++ ": want " ++ show want ++ ", got " ++ show got)
+            (maybe False (answersAgree want) got)
+          let gotLog = interpreterAnswer prog logEnv [] (QProb s)
+              wantLog = case want of
+                Answered p d i -> Answered (log p) d i
+                other          -> other
+          assertBool (name ++ " interpreter (log space) at " ++ show s ++ ": want " ++ show wantLog ++ ", got " ++ show gotLog)
+            (maybe False (answersAgree wantLog) gotLog)
+        return (AgreementCase prog env [] [] [(QProb s, want) | (s, want) <- qs])
+      pyD <- runPythonBatch acs
+      assertBool (concatMap renderDisagreement pyD) (null pyD)
+      julia <- findJulia
+      case julia of
+        Nothing -> return ()
+        Just jl -> do
+          jlD <- runJuliaBatch jl acs
+          assertBool (concatMap renderDisagreement jlD) (null jlD)
+  ]
+
 -- | A literal mock-NN parameter: the digit distribution, padded to the ten
 -- logits @readMNist@'s partition plan expects (see MockNN's @(2, [..])@ form).
 mockDigits :: [Double] -> IRValue
@@ -4886,6 +4967,7 @@ internalsTests = testGroup "Internals"
   , decomposabilityGateTests
   , materializationGuardTests
   , materializationTests
+  , setWitnessIntBoundaryTests
   , semiringMapTests
   , semiringSatisfiabilityTests
   , materializationVerdictTests

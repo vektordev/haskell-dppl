@@ -5167,10 +5167,12 @@ ctorSpineIR e = go e []
         go (IRVar c@(h:_)) acc@(_:_) | isUpper h = Just (c, acc)
         go _ _ = Nothing
 
--- Membership guards of a point against interval bounds. Strictness is
--- irrelevant for the continuous measures this engine emits (a boundary point
--- has measure zero); the non-strict form gives boundary queries like p(0) for
--- |Normal| the density instead of an arbitrary 0.
+-- Membership guards of a point against interval bounds. Every interval is
+-- closed, @[lo, hi]@: for a continuous variable strictness has measure zero,
+-- and the closed form gives boundary queries like p(0) for |Normal| the
+-- density instead of an arbitrary 0; a strict comparison on an Int is closed
+-- by moving its bound one step inward ('comparisonWorlds'), and 'measureSet'
+-- counts the atom at a closed lower end.
 boundGuards :: IRExpr -> WBound -> WBound -> [IRExpr]
 boundGuards p lo hi =
      [IRUnaryOp OpNot (IROp OpLessThan p e) | WFinite e <- [lo]]
@@ -5333,6 +5335,11 @@ measureSet meta v (WPoint p cov) = do
   -- change-of-variables correction only for continuous results, mirroring the
   -- point-witness path
   scaleCoV (semiringOf meta) False cov <$> toIRInference meta False v p
+-- The interval is closed, @[lo, hi]@, as 'boundGuards' tests membership. For a
+-- continuous variable that is @CDF(hi) - CDF(lo)@, below. An Int variable has
+-- an atom at @lo@ that belongs to the set: 'measureIntInterval'.
+measureSet meta v (WInterval lo hi)
+  | rType (getTypeInfo v) == TInt = measureIntInterval meta v lo hi
 measureSet meta v (WInterval lo hi) = do
   let sr = semiringOf meta
   (cdfHi, bcHi) <- cdfAtBound meta v hi
@@ -5425,6 +5432,53 @@ cdfAtBound meta v (WFinite e) = do
   -- An interval's mass is a CDF difference, so both bounds are 'unpruned'.
   res <- toIRInference (unpruned meta) True v e
   return (unP (rProb res), rBranches res)
+
+-- | The measure of the closed interval @[lo, hi]@ of an Int variable: @P(v <=
+-- hi)@ minus @P(v <= lo - 1)@, the endpoints being integers
+-- ('comparisonWorlds'). Measuring @CDF(hi) - CDF(lo)@ as the continuous case
+-- does is @(lo, hi]@ and drops the atom at @lo@ (task
+-- set-witness-int-comparison-boundary-non-strict).
+--
+-- The two CDFs are whole results, subtracted by 'mixSubP', not raw numbers.
+-- An Int variable can hold an atom whose weight is a density: @if x == 0.0
+-- then 0 else 2@ with @x@ a Normal, where @x == 0.0@ answers the density at
+-- 0 at dim 1. Its CDF at 1 is that density, at dim 1, and @[2, inf]@ is
+-- the mass 1 minus a density, which is the mass. The raw difference read the
+-- density as a mass and answered 0.601 there. An unbounded end contributes
+-- the certain mass (above) or nothing (below; 'mixWith' drops an impossible
+-- subtrahend).
+--
+-- As in the continuous case, an empty interval is impossible: statically for
+-- an infinite end on the wrong side, by a bounds test when both ends are
+-- finite (the CDFs are evaluated only under it, so log space never takes the
+-- log of a negative difference), and when the measure comes out a zero mass.
+measureIntInterval :: CompilerMetadata -> Expr -> WBound -> WBound -> CompilerMonad PResult
+measureIntInterval meta _ WPosInf _ = return (impossibleP (semiringOf meta))
+measureIntInterval meta _ _ WNegInf = return (impossibleP (semiringOf meta))
+measureIntInterval meta v lo hi = do
+  let sr = semiringOf meta
+  let cdfAt e = toIRInference (unpruned meta) True v e
+  (r, binds) <- lift $ runWriterT $ do
+    hiRes <- case hi of
+      WFinite e -> cdfAt e
+      _         -> return (mass (srOne sr))
+    loRes <- case lo of
+      WFinite e -> cdfAt (IROp OpSub e (IRConst (VInt 1)))
+      _         -> return (impossibleP sr)
+    let bc = case (hi, lo) of
+          (WFinite _, _) -> rBranches hiRes
+          (_, WFinite _) -> rBranches loRes
+          _              -> const1
+    diff <- mixSubP sr bc hiRes loRes
+    pVar <- mkVariable "ivl_mass"
+    dVar <- mkVariable "ivl_dim"
+    setVariables [(pVar, unP (rProb diff)), (dVar, rDim diff)]
+    let zeroMass = IRIf (IROp OpEq (IRVar dVar) const0)
+                        (notIR (IROp OpGreaterThan (IRVar pVar) (srZero sr)))
+                        constFalseIR
+    return (impossibleWhen zeroMass diff { rProb = sealP (IRVar pVar), rDim = IRVar dVar })
+  let nonEmpty = [notIR (IROp OpGreaterThan l h) | WFinite l <- [lo], WFinite h <- [hi]]
+  shareResult sr "int_ivl" nonEmpty binds r
 
 -- | Invert the observation @body ∈ target@ into constraint worlds on the bound
 -- variable (occurrences @occs@). Nothing when some node on the way is not
@@ -5820,10 +5874,26 @@ comparisonWorlds meta occs isGT lop rop target
   where
     -- With the bound-variable side on the LEFT of `<`, True means side < bound;
     -- each of `>` and the side being on the right flips the direction.
+    --
+    -- Every interval is closed, @[lo, hi]@ (see 'boundGuards' and
+    -- 'measureSet'), so a strict comparison on an Int side moves its bound one
+    -- step inward: @side < b@ True is @[-inf, b - 1]@ and False @[b, inf]@,
+    -- @side > b@ True is @[b + 1, inf]@ and False @[-inf, b]@. The bound has
+    -- the side's type (@lt@/@gt@ are @a -> a -> Bool@), and the monotone
+    -- transport onto the bound variable keeps an Int side Int with integer
+    -- endpoints (its Int steps are @plusI@/@negI@ only). A continuous side
+    -- keeps @b@ on both halves: the boundary point has measure zero, and the
+    -- non-strict guards answer a boundary query with the density (task
+    -- set-witness-int-comparison-boundary-non-strict).
     splitOn side b flipped = do
-      let lower = WInterval WNegInf (WFinite b)
-          upper = WInterval (WFinite b) WPosInf
-      let (setT, setF) = if isGT /= flipped then (upper, lower) else (lower, upper)
+      let discrete = rType (getTypeInfo side) == TInt
+          step op = if discrete then IROp op b (IRConst (VInt 1)) else b
+          -- (side below b, side at or above b) and (side at or below b, side above b)
+          ltT = WInterval WNegInf (WFinite (step OpSub))
+          ltF = WInterval (WFinite b) WPosInf
+          gtT = WInterval (WFinite (step OpPlus)) WPosInf
+          gtF = WInterval WNegInf (WFinite b)
+      let (setT, setF) = if isGT /= flipped then (gtT, gtF) else (ltT, ltF)
       wsT <- invertToWorlds meta occs side setT
       wsF <- invertToWorlds meta occs side setF
       return (boolWorlds target <$> wsT <*> wsF)

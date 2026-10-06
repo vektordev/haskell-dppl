@@ -117,15 +117,20 @@ planEngineDifferentialTests = do
 -- set-witness engine. Wherever budget 0 answers, it must agree with the default
 -- compile at every interpreter-routed, non-slow query point. A program budget 0
 -- does not answer is skipped, as there. 'budgetZeroKnownDivergent' lists the
--- programs where the two disagree for a tracked reason.
+-- programs where the two disagree for a tracked reason, and
+-- 'budgetZeroKnownDivergentRows' the single query rows.
 budgetZeroDifferentialTests :: IO TestTree
 budgetZeroDifferentialTests = do
   files <- getAllTestFiles
   cases <- mapM loadCorpusPair files
-  let entries = [ (takeBaseName pplPath, p, tcs)
+  let entries = [ (n, p, filter (not . knownDivergentRow n) tcs)
                 | ((pplPath, _), (p, (bs, slow, _ef, tcs))) <- zip files cases
+                , let n = takeBaseName pplPath
                 , not slow, Interpreter `elem` bs, null (neurals p)
-                , takeBaseName pplPath `notElem` budgetZeroKnownDivergent ]
+                , n `notElem` budgetZeroKnownDivergent ]
+      knownDivergentRow n tc = case tc of
+        ProbTestCase _ sample _ _ -> (n, sample) `elem` budgetZeroKnownDivergentRows
+        _                         -> False
   return $ testGroup "BudgetZeroMatchesDefault"
     [ testProperty n (once $ conjoin (map (planMatchesDense n p zeroEnv defEnv) tcs))
     | (n, p, tcs) <- entries
@@ -135,14 +140,24 @@ budgetZeroDifferentialTests = do
 -- | Non-neural corpus programs whose budget-0 answer differs from the default
 -- compile's, each for a reason tracked elsewhere.
 budgetZeroKnownDivergent :: [String]
-budgetZeroKnownDivergent =
-  -- Two reasons each. The default compile's `Right` rows report the density
-  -- at dim 0 where budget 0 says dim 1 (task enumerated-sum-over-density-body:
-  -- the default's enumerated sum reports a mass). And at budget 0 the
-  -- set-witness engine reads `v < 2` on the Int `v` as `v <= 2`: `Right 2`
-  -- answers 1.0, `Left ()` impossible, `Right ANY` 1.0 (task
-  -- set-witness-int-comparison-boundary-non-strict).
-  [ "observeContinuousEqualsLetfree", "observeContinuousEqualsLetBound" ]
+budgetZeroKnownDivergent = []
+
+-- | Single query rows (program, probability sample) where the budget-0 answer
+-- differs from the default compile's, for a reason tracked elsewhere. The
+-- program's other rows are still compared. Their budget-0 answers are pinned
+-- in 'TestInternals.setWitnessIntBoundaryTests'.
+budgetZeroKnownDivergentRows :: [(String, IRValue)]
+budgetZeroKnownDivergentRows =
+  -- The default compile reports the `Right` rows' density at dim 0 where
+  -- budget 0 says dim 1 (task enumerated-sum-over-density-body: the default's
+  -- enumerated sum reports a mass). The letfree `Right ANY` also differs in
+  -- value: budget 0 answers impossible, because the letfree CDF of
+  -- `if Normal == 0.5 then 1 else 2` at 1 is a possible zero mass at dim 0
+  -- rather than the density (task letfree-cdf-density-atom-reports-zero-mass).
+  [ ("observeContinuousEqualsLetfree",  VEither (Right (VInt 1)))
+  , ("observeContinuousEqualsLetfree",  VEither (Right VAny))
+  , ("observeContinuousEqualsLetBound", VEither (Right (VInt 0)))
+  , ("observeContinuousEqualsLetBound", VEither (Right VAny)) ]
 
 -- | The plan engine's world measure under 'logSpace' (task
 -- worlds-measure-unification): at budget 0, wherever the linear compile of a
