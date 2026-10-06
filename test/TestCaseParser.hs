@@ -75,7 +75,7 @@ defaultBackends = [Interpreter, Julia, Python]
 
 -- | The expected result of a prob/cumulative query. Two shapes, spelled
 -- distinctly in a .tst file rather than folded into one tuple (see
--- CLAUDE.md's ".tst dim expectations" note, task
+-- docs/testing.md, "`.tst` expectations", task
 -- tst-dim-unasserted-at-zero-probability):
 --
 -- * @Possible prob dim mImp@ -- an ordinary point: @(prob, dim)@ or

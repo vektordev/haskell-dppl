@@ -95,3 +95,14 @@ torch-independent coverage.
 `benchmarks/batched_vs_scalar.py` times the emitted code: a scalar
 per-point loop against one batched call for the same `ReadNN` program
 (needs a torch-enabled Python, same lookup as `BatchedPython`).
+
+## Eligibility advisory at `-v`
+
+A *scalar* `compile` run at `-v` closes with a batched-eligibility advisory
+(`SPLL.Prelude.batchedRefusal`, reported by `app/Main.hs`), so you can see
+whether `--batched` would take a program without flipping the flag and
+reading a refusal. It re-runs the pipeline in batched mode, which is why it
+is behind `-v` rather than on by default, and it names the **first**
+offending construct only — fixing that one may reveal more behind it. Its
+verdict is pinned against the backend's own refusals by the
+`BatchedRefusal` test group.

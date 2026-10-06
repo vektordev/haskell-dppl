@@ -271,3 +271,187 @@ so `exp leaf == -1.0` is impossible rather than a NaN density. Corpus:
 `test/cases/set-witness/setWitnessTransport*` (one program per table entry plus the
 nested, two-sided and always-false `exp` shapes) and
 `test/cases/plan-enumeration/planEnumContExp*`.
+
+## Plan engine: entry points, several reads, case splits
+
+The plan engine is entered from a `draw` of a neural read **and from a call of
+a top-level function straight on one** (`planWitnessApply`, tasks
+`plan-engine-not-entered-for-inline-neural-read`,
+`of-annotation-continuous-leaf-disables-enumeration`): `sevens (readDigits s)`,
+`match (readAttrs s1) ++ match (readAttrs s2)`. Such a call is a *tagged
+invocation* in forward chaining's sense, which the traversal used to decline
+outright; the tag only names FC's per-call-site inversion variables, which
+this AST traversal never reads. What it does need is a callee body meaningful
+in the caller's scope: a top-level function's outermost lambda has no free
+locals, and for a curried callee (`match c (readAttrs s)`, the CLEVR
+exist-with-predicate shape) `calleeLeadingArgs` binds each outer parameter to
+its call-site argument under a fresh name, provided the argument is
+deterministic given the enclosing recovered variables. A random leading
+argument, or a let-bound lambda called from another scope, is still declined.
+Before, an `of` domain over the dense budget, or one with a `Real` leaf, made
+these spellings fail in set-valued witnesses where the `draw`-bound twin
+compiled. Corpus `plan-enumeration/ofRealLeafCounting*`,
+`planRecursiveHelperOn{Inline,Drawn}Read`.
+
+One traversal can hold **several neural reads** (`planOpenBinding`, task
+`plan-pairwise-across-separate-neural-reads`). Plan leaves are keyed by a flat
+logit offset, so a nested `draw b = readX s2` met inside the body gets its own
+disjoint offset range (`psNextOff`) and its own raw-vector binding
+(`psRaws`, read through `planRawRead`); two independent reads' joint is the
+concatenated plan, and a comparison across them is the same `pwPairs`
+difference Gaussian as inside one read. That is the one-read-per-object CLEVR
+layout (`plan-enumeration/planPairwise*`). A single read is `[(0, nn_raw)]`
+and emits what it always did. Refused inside a specialized function (its
+memoized specializations would share one range between two calls, merging
+independent reads) and for a symbol argument that is not plan-free and
+deterministic; pinned in `known-issues/planPairwise*`, together with the
+helper shapes ModalityInfer types `Bottom` first.
+
+A call argument that *is* plan-dependent but not an accessor chain -- a fold's
+result handed to a helper, `isValid (checksumSum 1 ds)` -- is **case-split on
+its value** (`planResolveApply`, task `plan-fold-result-through-helper-crashes`):
+the argument's (value, world) pairs come from `planEnumValues`, the callee is
+specialized once per value (bound as a deterministic `PBDet` constant, so the
+memo keys on it), and each specialization's worlds are intersected with its
+value's world. Both sides are partitions, so the result is one too; the
+intersection (not a product of masses) is what keeps it right when the callee
+also reads the scene through a slice. It used to die with an uncaught `error`
+("neither a plan slice ... nor deterministic given scope: Apply"). A call that
+needs no split takes the old code path and emits identical IR. Cost: when two
+readers constrain the same leaves value grouping is off (see the grouping
+clash rule below), so each split argument carries one world per scene path, and two split arguments cross-multiply (443 s at 1111 paths).
+Corpus `plan-enumeration/planHelperOnFoldResult*`; differential
+`Internals.planHelperOnFoldResultMatchesDense`.
+
+The same split applies to a value **shared by several children of one node**
+without any call (`planShareSplit`, task
+`plan-fold-disjunction-of-comparisons-blowup`): in `(f ds == 0) || (f ds == 10)`,
+or `draw s = f ds in (s == 0) || (s == 10)` after `planBetaReduce` copies `f ds`
+into both comparisons, the copies used to be enumerated separately, bake the
+same leaves, clash, and rerun ungrouped (exponential; 2 GB OOM at barcode
+depth 4). Now the shared sub-expression (plan-dependent, not a slice,
+`planDetGivenPlan`; matched annotation-blind by `sameTerm`, outside lambdas) is
+enumerated once and replaced by a fresh `PBDet` variable per value. It is tried
+at every plan-dependent node of `planEnumValuesRaw` and at every *scalar*
+(Bool/Int/Float) one of `planInvert`. A structured observed node is not split,
+because a partial-`ANY` target like `(ANY, 1.0)` needs the field-wise
+`planAnySplit` and `planDetGuard` is deliberately wildcard-blind below the top.
+It falls back to the old dispatch if the value cannot be enumerated. Corpus
+`plan-enumeration/planFoldDisjunction*`; tests
+`Internals.planSharedFoldValueMatchesDense`, `planFoldDisjunctionPolynomial`.
+
+## Set witnesses: equality through a transform
+
+An `==` whose bound-variable operand is not the bare occurrence (`exp x ==
+1.0`, `x * 2.0 + 1.0 == c`) is split by `equalityWorlds` before the point
+transport sees it, so the complement is placed on the bound variable itself
+rather than handed to every inverse step below the `==` (`log`, `b > 0`,
+`b - 1.0`). The True outcome is inverted as the point `side = c`, and the
+False outcome is `WExcept WFull x_c` where the inverse's applicability guard
+holds and `WFull` where it fails. Only a single plain point world is
+complemented; anything else is refused. Corpus
+`test/cases/set-witness/setWitnessEqualityThrough*`,
+`setWitnessContinuousEquals*`, `setWitnessIntervalThenContinuousEquals`,
+`setWitnessNestedLetContinuousEquals`.
+
+The same rule decides the letfree `IfThenElse`: its False weight is
+"certain minus `p(cond = True)`" through `mixWith`, not a bare
+`srComplement`, so a condition whose True outcome is a density (a continuous
+`Normal == 0.5`) leaves its False branch the whole unit mass at dim 0, where
+it used to answer `1 - density`. At dim 0 the two agree exactly, and the
+combine is still `srComplement` (max-product refuses `srMinus`).
+
+## Affine Gaussian marginalisation of an unwitnessed `draw`
+
+A third answer to "no occurrence of the bound variable is point-invertible",
+tried before set-valued witnesses: if the binding is a Gaussian affine
+expression and **every** use of the variable flows affinely into **one**
+Gaussian density leaf, the variable needs no witness at all -- it is
+integrated out analytically inside that leaf (task
+`affine-gaussian-closure-lost-across-let-bindings`, the scalar M1 slice of
+docs design `affine-gaussian-forms`).
+
+`CompilerMetadata.affineEnv` maps such a variable to an `AffineForm`,
+`c + sum a_i * eps_i` over independent standard normals. Latents are keyed by
+the chain name of the env-free Gaussian leaf that introduced them, so two reads
+of one variable share them (`draw x = Normal in x + x` is `2 eps`, `N(0,2)`),
+while every other leaf is a fresh draw. `toIRNormalParams` collapses a form
+(`mu = c`, `sigma` the norm of the coefficient vector) **only** for expressions reading an `affineEnv`
+variable, so everything else emits exactly what it did before, and
+`hasOwnInferenceHandler`'s local-`Var` exclusion stops applying to a variable
+that has a form. The rules are `plus`, `mult` by a deterministic operand, `neg`
+and the env lookup; `-` is `plus`/`neg` by the time IRCompiler sees it.
+
+`affineMarginalisable` decides applicability. "One leaf" means: all
+occurrences sit in a single affine `PNormal` consumer, which is either the
+value of a directly nested `draw` (that binding's own treatment -- witnessed,
+marginalised in turn, or refused -- carries the latents on) or the let spine's
+terminal expression. That is what keeps the scalar collapse sound. The
+refusals, all falling through to `setWitnessApply` exactly as before:
+
+- uses spread over two consumers: `(x + Normal, x + Normal)` needs a joint
+  density (design M2), and so does `draw y = x + Normal in x + y`, since `y`
+  may be witnessed and then `x`'s latents would be counted twice;
+- a tagged or higher-order application, or one returning a function;
+- anything non-Gaussian or gated -- a chain gated on its own state is `Bottom`
+  in ModalityInfer and never reaches here.
+
+Witnessed variables mix in for free: after an inversion `reinferRecovered` makes
+them `Deterministic`, which the algebra treats as constants. That is what
+answers a partial observation like `(s1, s3)` of a three-step chain, as
+`N(s1) * N(s3 | s1)` with `s2` integrated out. Corpus
+`let-bindings/affineChain*`, `affineSelfSum`, `unwitnessedGaussianLetChain`,
+`higher-order/arrowApplySelfSum`.
+
+## A named function's parameter is witnessed through its own probability function
+
+Forward chaining inverts through a call `f v` by a per-invocation *tagged* copy
+of f's body (`constructEquivalenceClauses`, `getDependentGroups`). That copy
+used to stop at a field constructor (its clause group has no forward clause),
+so a parameter returned as a list head or tuple field (`f x = x : [x + Normal]`)
+had no point inverse and reached the set-witness engine, which refuses tagged
+invocations. `getDependentGroups` now follows inverse-only groups into their
+fields. Two consumers then had to stop dropping the sibling fields that
+inverse never reads (task `named-function-list-head-witness-not-recovered`):
+
+- `toIRInference`'s probabilistic `Apply` arm folds the body back in for a
+  saturated call of a top-level function with deterministic leading arguments
+  (`namedCall`): the body factor is the callee's own `_prob` called at the
+  recovered witness (inside the closure when the call returns a function). Any
+  other tagged application whose variable sits under a field constructor is
+  denied point inversion (`fieldWitnessUnfolded`), which is what it got before.
+- The set-witness `transportDirect` adds its residue factor when the spine
+  crosses a call (`isNamedCallNode`), not only a syntactic constructor
+  (`higher-order/namedFunctionTupleUnderIf`).
+
+Corpus `higher-order/namedFunction*`, `rewriteProbeHelperTuple*`. Still open:
+`known-issues/ouChainRecursive` (an `if` over list arms, in any spelling) and
+`namedFunctionTwoRandomArgs`; and ModalityInfer gives a top-level parameter no
+`IWit`, so a helper feeding its parameter to a neural net stays `Bottom`.
+
+## Forward chaining never re-derives a chain name it already has
+
+`ForwardChaining.solveHCSet` fulfils, per clause group, the first clause whose
+premises are all known **and whose conclusion is not already derived**. The
+second half of that test is what keeps the fulfilled clause set acyclic, and it
+is a correctness requirement, not an optimisation.
+
+A chain name reachable by two routes makes it bite. In an over-determined
+observation — `let x = Uniform in let y = Uniform in (x, (x+y+3, x+y+2))`, where
+both inner slots recover `y` and hence `x` — each occurrence of `x` sits in its
+own bidirectional equivalence group with the binding. Chaining reaches the
+binding through slot 1, walks all the way round through the second slot's
+occurrence, and (without the test) fulfils a *second* clause concluding the same
+binding, closing a cycle. `topSortDAG` has no defined behaviour on a cycle and
+`cutList` then truncates, so codegen emitted a shadowing `let ast18 = ast14`
+over an `ast14` no earlier clause binds — `Variable ast14 not declared` at run
+time, on every backend, with the query having type-checked and compiled
+cleanly.
+
+Dropping the second derivation loses nothing: forward chaining's premise
+throughout (`mergeExpr`'s candidate merge says so explicitly) is that two routes
+to a name are semantically equal. The redundancy is still *paid for* — the
+observation's manifold constraint is carried by the deterministic-slot
+consistency check IRCompiler emits for the query as a whole, a dim-0 indicator
+factor, so `p((a,(b,c)))` above is `p(a)·p(b−a−3)·[c−b == −1]` at dim 2.
+Corpus: `overDeterminedSharedLatent`, `degenerateSameLatentSum`.

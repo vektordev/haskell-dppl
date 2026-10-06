@@ -233,7 +233,7 @@ forceResult res = do
 -- one (the optional third expectation component). The flag is read through
 -- 'resultImpossible' rather than by matching the result tuple's shape here --
 -- that accessor is the emitted layout's only definition outside the compiler
--- (see CLAUDE.md, design inference-result-side-channels).
+-- (see docs/semiring-presult-internals.md, "Impossibility flag", and design inference-result-side-channels).
 checkImposs :: String -> Maybe Bool -> IRValue -> Property
 checkImposs _ Nothing _ = property True
 checkImposs name (Just expected) v = case resultImpossible v of
@@ -254,7 +254,7 @@ harnessRoutingError backend tc =
 -- | Check an actual (prob, dim) result against a query's 'Expectation'. Dim
 -- is checked unconditionally for a 'Possible' expectation -- there is no more
 -- "skip the dim check because the actual probability happened to be zero"
--- special case (see CLAUDE.md's ".tst dim expectations" note, task
+-- special case (see docs/testing.md, "`.tst` expectations", task
 -- tst-dim-unasserted-at-zero-probability) -- and not checked at all for
 -- 'Impossible', which asserts prob=0 and imposs=True instead of a dim.
 checkExpectation :: String -> String -> Expectation -> Double -> Double -> IRValue -> Property
@@ -980,7 +980,7 @@ juliaBatchTestCode projectDir allCases =
 -- dim check line is emitted only when the .tst row's 'Expectation' actually
 -- states a dim ('Possible') -- unconditionally, not gated on the runtime
 -- probability any more -- and omitted entirely for 'Impossible' rows, which
--- have none to check (see CLAUDE.md's ".tst dim expectations" note).
+-- have none to check (see docs/testing.md, "`.tst` expectations").
 juliaModuleTestCases :: String -> [TestCase] -> String
 juliaModuleTestCases modName tcs =
   modName ++ ".main_gen(" ++ intercalate ", " (map jVal exampleParams) ++ ")\n" ++
@@ -1054,7 +1054,7 @@ pythonTestCode src tcs =
     -- Dim check line emitted only when the .tst row's 'Expectation' states a
     -- dim ('Possible') -- unconditionally, not gated on the runtime
     -- probability any more -- and omitted for 'Impossible' rows, which have
-    -- none to check (see CLAUDE.md's ".tst dim expectations" note).
+    -- none to check (see docs/testing.md, "`.tst` expectations").
     pyCase tc =
       let (name, sample, params, expct) = unpackTestCase tc
           outProb = VFloat (expectationProb expct)

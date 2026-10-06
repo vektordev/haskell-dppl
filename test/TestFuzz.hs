@@ -2401,7 +2401,7 @@ data QueryPoint = QueryPoint
 -- the approximation only if no integrate function is available at all
 -- (shouldn't happen for the continuous shapes 'genTypedProgram' produces,
 -- since PNormal/PLogNormal/Integrate all guarantee a closed-form CDF -- see
--- CLAUDE.md's PType section -- but 'drawQueryPoints' filters query points
+-- docs/pipeline-and-types.md's PType section -- but 'drawQueryPoints' filters query points
 -- via 'irProb', not 'irInteg', so this stays defensive rather than partial).
 windowP0 :: Program -> IREnv -> IRValue -> Double -> Double -> Double -> Double
 windowP0 p irEnv (VFloat center) pr dim eps =

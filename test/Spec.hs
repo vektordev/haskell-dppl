@@ -336,7 +336,7 @@ prop_BCNamedConditionalEqualsInline = once $ ioProperty $ do
 -- a named non-conditional wrapper function applied to an enumerable argument
 -- must give the same (prob, dim, bc) as inlining the wrapper's body at the
 -- call site, for the callee's own contribution -- "a call forwards the
--- callee's own count unmodified" (CLAUDE.md, Branch Counting).
+-- callee's own count unmodified" (docs/semiring-presult-internals.md, Branch Counting).
 prop_BCNamedWrapperEqualsInline :: Property
 prop_BCNamedWrapperEqualsInline = once $ ioProperty $ do
   let coin = ifThenElse (bernoulli 0.5) (constF 2.0) (constF 1.0)
@@ -537,7 +537,7 @@ main = do
   -- Tests we want to guarantee but that currently fail or flake: the
   -- known-red part of what used to be Slow. Slow itself is expected green and
   -- is run before a merge or push; this group is run when working on what it
-  -- pins. See CLAUDE.md, "Slow and Aspirational tests".
+  -- pins. See docs/testing.md, "Slow and Aspirational tests".
   runAspirational <- lookupEnv "NEST_ASPIRATIONAL_TESTS"
   let aspirational = testGroup "Aspirational" $
         if isNothing runAspirational then [] else [aspirationalFuzzTests]

@@ -255,7 +255,7 @@ larger runs.
 The `Fuzz` group lives inside `Slow`, except for the properties listed in
 `TestFuzz.aspirationalFuzzNames`. Those fail or flake at HEAD and run in the
 `Aspirational` group instead (`NEST_ASPIRATIONAL_TESTS=1`), so that `Slow` can
-be expected green; see CLAUDE.md, "Slow and Aspirational tests". One property,
+be expected green; see `docs/testing.md`, "Slow and Aspirational tests". One property,
 `prop_Fuzz_SamplingMatchesPDF`, cross-checks `generate` against
 `probability` independently (every other property only cross-checks
 different `CompilerConfig`s against each other) and, since sampling is
@@ -622,7 +622,7 @@ Task `admission-totality-property` (phase P0 of design `pipeline-coherence`).
 Every top-level function the modality engine admits must compile probability
 and integrate functions that evaluate to a value or a refusal; every function
 it refuses must still generate. The oracle is `test/AdmissionOracle.hs`; the
-contract and the bucket rules are in `CLAUDE.md`, "The admission contract".
+contract and the bucket rules are in `docs/modality-and-admission.md`, "The admission contract".
 
 What its first runs measured (2026-10-02, at `295003c` + this task): ~12% of
 typed draws violate the contract, every one a compile- or run-time `error` in an
