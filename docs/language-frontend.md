@@ -84,7 +84,8 @@ Every name the pipeline claims for itself lives in `SPLL.ReservedNames`: the
 surface keywords, the distribution primitives, the binders generated code
 declares (`sample`, `acc_prob`, `TOP_K_CUTOFF`, `ACC_PROB_INIT`), the temporary
 prefixes (`l_`, `cse_`, a leading `_`), chain names (`ast<n>`), the parser's
-own desugaring binders (`p_d<n>`, `p_ob<n>`), the per-function variant
+own desugaring binders (`p_d<n>`, `p_ob<n>`, and CalleeNormalize's
+`p_eta<n>` for an eta-expanded alias), the per-function variant
 suffixes (`_gen`, `_prob`, ...), the group suffixes (`_auto`, and the semiring
 tags `map`/`count`/`sumprod`), and the target-language keyword lists. A user
 identifier landing on a compiler name used to be accepted and misbehave: a
@@ -98,7 +99,7 @@ Two checks consume it. `Parser.pIdentifier` refuses a reserved name in the
 value namespace, reported through `registerParseError` at the name's own
 position (a plain `fail` is swallowed by the top-level backtracking and
 reports only column 1). `Validator.validateReservedNames` repeats the check on
-the AST (`internalNameReason`, which exempts the parser's `p_d`/`p_ob`
+the AST (`internalNameReason`, which exempts the frontend's `p_d`/`p_ob`/`p_eta`
 binders) for programs built without the parser, and is the only place the
 *derived-group* collisions are visible (`groupNameCollisions`: `n_auto` beside
 neural `n`, `f_map`/`f_count` beside `f`) -- checked as collisions rather than

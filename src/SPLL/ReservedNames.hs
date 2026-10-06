@@ -69,6 +69,7 @@ module SPLL.ReservedNames
     -- * The user-identifier checks
   , destructBinderPrefix
   , observeBinderPrefix
+  , etaBinderPrefix
   , reservedIdentifierReason
   , internalNameReason
   , groupNameCollisions
@@ -168,19 +169,23 @@ reservedNumberedPrefixes :: [(String, String)]
 reservedNumberedPrefixes =
   [ ("ast", "names 'ast<number>' are the compiler's chain names, which it binds in generated code") ]
 
--- | The binders the /parser/ generates while desugaring: @p_d<n>@ for a
--- destructuring @h : t@ pattern, @p_ob<n>@ for @observe@'s bound base.
-destructBinderPrefix, observeBinderPrefix :: String
+-- | The binders the /frontend/ generates while desugaring: @p_d<n>@ for a
+-- destructuring @h : t@ pattern, @p_ob<n>@ for @observe@'s bound base (both
+-- the parser), @p_eta<n>@ for the parameters of an eta-expanded point-free
+-- alias (@alias = coin@, 'SPLL.CalleeNormalize').
+destructBinderPrefix, observeBinderPrefix, etaBinderPrefix :: String
 destructBinderPrefix = "p_d"
 observeBinderPrefix  = "p_ob"
+etaBinderPrefix      = "p_eta"
 
--- | Unlike every other entry these legitimately occur in an AST -- the parser
--- put them there -- so only the surface check ('reservedIdentifierReason')
+-- | Unlike every other entry these legitimately occur in an AST -- the
+-- frontend put them there -- so only the surface check ('reservedIdentifierReason')
 -- refuses them, and the AST-level one ('internalNameReason') does not.
 parserBinderPrefixes :: [(String, String)]
 parserBinderPrefixes =
   [ (destructBinderPrefix, "names 'p_d<number>' are the binders the parser generates for destructuring patterns")
   , (observeBinderPrefix,  "names 'p_ob<number>' are the binders the parser generates for observe")
+  , (etaBinderPrefix,      "names 'p_eta<number>' are the parameters the compiler generates when eta-expanding a point-free alias")
   ]
 
 -- ---------------------------------------------------------------------------

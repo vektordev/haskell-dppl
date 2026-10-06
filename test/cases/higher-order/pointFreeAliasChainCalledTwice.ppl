@@ -1,0 +1,4 @@
+coin p = Uniform < p
+alias = coin
+alias2 = alias
+main x = alias2 x && (alias 0.5 && coin 0.8)

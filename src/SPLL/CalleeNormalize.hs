@@ -46,6 +46,18 @@
 -- itself randomly selected (@let p = if Uniform < 0.5 then f else g@), where
 -- copying the selection to two use sites would turn one draw into two.
 --
+-- One declaration-level rewrite runs first, 'etaExpandAliases': a point-free
+-- alias of a top-level function (@alias = coin@) is eta-expanded to
+-- @alias = \p_eta0 -> coin p_eta0@. Every engine compiles a function
+-- declaration from its parameters, and an alias has none: called with an
+-- argument it crashed forward chaining (no lambda to bind the call to), and
+-- past that, its probability variant compiled the closure @coin@ as a value
+-- that the call site then applied to its argument (task
+-- @point-free-alias-called-with-argument-crashes-forward-chaining@). This
+-- leaves every call site alone, a call through an alias included: it is the
+-- declaration that changes, into the shape @alias x = coin x@ that already
+-- worked.
+--
 -- The pass runs on the freshly parsed program, before RType inference, so the
 -- rewritten nodes need no annotations: every 'TypeInfo' is still @NotSetYet@
 -- and the whole pipeline annotates the rewritten tree from scratch.
@@ -58,6 +70,7 @@ import qualified Data.Set as Set
 
 import SPLL.Lang.Lang
 import SPLL.Lang.Types
+import SPLL.ReservedNames (etaBinderPrefix)
 
 -- | The @let@-bound values in scope, innermost first. Only bindings introduced
 -- by a directly-applied lambda go in here: a lambda parameter's value is not
@@ -74,7 +87,35 @@ normalizeCallees prog
   | rewritten == prog = Nothing
   | otherwise         = Just rewritten
   where
-    rewritten = prog { functions = [ (n, rewrite (adts prog) [] body) | (n, body) <- functions prog ] }
+    rewritten = prog { functions = [ (n, rewrite (adts prog) [] body) | (n, body) <- etaExpandAliases (functions prog) ] }
+
+-- | Eta-expand every point-free alias of a top-level function: a declaration
+-- whose whole body is a 'Var' naming another declaration that, through any
+-- further aliases, is a function with @k > 0@ leading lambdas becomes @k@
+-- lambdas applying that name to their parameters. The arity is the
+-- target's syntactic one (no types exist yet), which is the shape a
+-- hand-written @alias x = coin x@ has, even where @coin@ returns a function
+-- in turn. A top-level body is closed apart from other declarations' names,
+-- so the generated binders capture nothing; they are reserved
+-- ('etaBinderPrefix') so no user name can clash with them either. A cycle of
+-- aliases, a name that is not a declaration (a neural declaration, a
+-- distribution primitive) and an alias of a non-function stay as they are.
+etaExpandAliases :: [FnDecl] -> [FnDecl]
+etaExpandAliases decls = [ (n, expand body) | (n, body) <- decls ]
+  where
+    expand body = case node body of
+      Var m | Just k <- arity [] m, k > 0 ->
+        let ps = [ etaBinderPrefix ++ show i | i <- [0 .. k - 1] ]
+            at = Expr (ann body)
+        in foldr (\p b -> at (Lambda p b)) (foldl (\f p -> at (Apply f (at (Var p)))) body ps) ps
+      _ -> body
+    arity seen m = case node <$> lookup m decls of
+      Just (Lambda _ b) -> Just (1 + leadingLambdas b)
+      Just (Var m') | m' `notElem` seen -> arity (m : seen) m'
+      _ -> Nothing
+    leadingLambdas e = case node e of
+      Lambda _ b -> 1 + leadingLambdas b
+      _          -> 0 :: Int
 
 -- | Rewrite one expression under the @let@-bindings enclosing it.
 rewrite :: [ADTDecl] -> Env -> Expr -> Expr

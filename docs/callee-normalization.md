@@ -68,6 +68,21 @@ One more, from task `symbol-chosen-by-inline-coin-refused`:
   random in any other way (`see h` for a drawn `h`, a continuous input) is
   untouched and stays sample-only.
 
+One declaration-level rewrite runs before all of these, from task
+`point-free-alias-called-with-argument-crashes-forward-chaining`:
+
+- **A point-free alias of a top-level function is eta-expanded**: `alias =
+  coin` becomes `alias = \p_eta0 -> coin p_eta0`, one reserved binder
+  (`p_eta<n>`) per leading lambda of the target (`etaExpandAliases`, resolving
+  aliases of aliases, with a cycle guard; no types exist yet, so the arity is
+  syntactic). Every engine compiles a declaration from its parameters, and an
+  alias has none: called with an argument it crashed forward chaining
+  (`constructTopLevelEquivalenceClauses'` found no lambda to bind the call
+  to), and past that, its probability variant compiled `coin` as a closure
+  value that the call site then applied. The declaration changes, never a call
+  site, into the `alias x = coin x` shape that already worked
+  (`test/cases/higher-order/pointFreeAlias*`).
+
 Whatever the pass does not reach is refused by IRCompiler's point-inversion
 `Apply` arm ("does not resolve to a lambda the compiler can see"), an absent
 variant rather than the `error` it used to be.
