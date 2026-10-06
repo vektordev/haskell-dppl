@@ -103,10 +103,18 @@ knownDivergences =
   -- division by it (NaN at dim 1). Exposed when drawBoundZeroTimesNormal
   -- joined the corpus.
   , Known "drawBoundZeroTimesNormal" HelperExtract "mult z Normal" "helper-parameter-zero-factor-answers-nan"
+  -- The swapped wrapper re-read through a second binder: before per-mask
+  -- variants the concrete query refused ("binding 'x' is unobserved"); f's
+  -- variants now answer the split sub-queries, so p((0.7, 0.6)) is 1.0
+  -- instead of impossible.
+  , Known "maskSwappedWrapper" DrawIntro "" variantsSilenceReread
+  , Known "maskSwappedWrapper" AliasIntro "" variantsSilenceReread
+  , Known "maskSwappedWrapper" HelperExtract "" variantsSilenceReread
   ]
   where
     zeroRandomBound = "draw-bound-random-factor-times-literal-zero-loses-dirac-mass"
     structuredReread = "structured-draw-reread-through-binder-drops-field"
+    variantsSilenceReread = "mask-variants-silence-reread-refusal-into-wrong-result"
 
 knownDivergence :: String -> Family -> String -> Maybe Known
 knownDivergence prog fam site =

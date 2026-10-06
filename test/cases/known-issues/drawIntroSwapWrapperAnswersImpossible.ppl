@@ -1,0 +1,2 @@
+f = draw x = Uniform in (x, 1.0 - x)
+main = draw z = f in (draw (a, b) = z in (b, a))
