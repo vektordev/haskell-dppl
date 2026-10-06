@@ -133,7 +133,11 @@ data CompilerMetadata = CompilerMetadata {
   affineEnv :: [(String, AffineForm)],
   -- | What 'reinferRecovered' needs to re-run modality inference on a body
   -- under the recovered variables; built once per compile.
-  reinferContext :: ReinferCtx
+  reinferContext :: ReinferCtx,
+  -- | The 'mult'/'multI' nodes (by chain name) whose deterministic factor is
+  -- already branched on at run time ('runtimeZeroFactor'), so the recursive
+  -- compile of the nonzero arm takes the ordinary inversion.
+  zeroGuardedProducts :: Set.Set ChainName
 }
 
 -- | A value's law as an affine combination of independent standard-normal
@@ -633,7 +637,7 @@ envToIRUnoptimized' conf@CompilerConfig{noIntegrate=noInteg, noProbability=noPro
     -- probability mass under logSpace, since every branch's accumulated weight
     -- was then a linear 1.0 multiplied against log (negative) per-branch terms
     -- (task topk-logspace-unsound).
-    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) [] verdicts sharedSets Set.empty detGens cyclicGens SRSumProduct [] reinferC
+    meta te = CompilerMetadata conf fcDat te progADTs p (srOne (mkSemiring SRSumProduct (logSpace conf))) [] verdicts sharedSets Set.empty detGens cyclicGens SRSumProduct [] reinferC Set.empty
     reinferC = reinferCtx fcDat p
     -- One walk of the whole program, shared by every 'meta' built below.
     verdicts = materializationVerdicts p
@@ -2202,6 +2206,45 @@ hasOwnInferenceHandler _    (Expr _ (IfThenElse _ _ _))     = True
 hasOwnInferenceHandler meta (Expr _ (InjF (Named name) _)) = isFieldConstructor (adtDecls meta) name
 hasOwnInferenceHandler _    _                        = False
 
+-- | A Gaussian (or lognormal) leaf whose scale can be zero at run time is a
+-- point mass there, not a density: @z * Normal@ with @z = 0@ is the Dirac at
+-- 0, and dividing by the zero scale answered NaN at dim 1 (task
+-- helper-parameter-zero-factor-answers-nan; the static-zero twin is the
+-- 'isZeroConstant' clause of 'mult'). @build sigma@ is the ordinary leaf;
+-- when the scale may vanish ('scaleMayVanish') it is let-bound and the leaf
+-- selects, at run time, between that and the point mass at @point@ (an
+-- equality indicator, or a step for a cdf). A scale that is a nonzero
+-- constant by construction keeps its ordinary leaf and emits no guard.
+degenerateScaleGuard :: CompilerMetadata -> Bool -> RType -> IRExpr -> IRExpr -> IRExpr
+                     -> (IRExpr -> PResult) -> CompilerMonad PResult
+degenerateScaleGuard meta cumulative rt point sigma sample build
+  | not (scaleMayVanish sigma) = return (build sigma)
+  | otherwise = do
+      v <- mkVariable "sigma"
+      setVariables [(v, sigma)]
+      let sr = semiringOf meta
+          dirac | cumulative = mass (compareValueExpr sr rt point sample)
+                | otherwise  = indicatorP sr (equalityGuard rt point sample)
+          isZero = IROp OpEq (IRVar v) (IRConst (VFloat 0))
+      return (zipResult (IRIf isZero) dirac (build (IRVar v)))
+
+-- | False only for a scale that is nonzero whatever the program's inputs: a
+-- nonzero literal, and products, absolute values, negations and Gaussian-sum
+-- scales ('irSqrt' of a sum of squares, 'irHypot') built from such. Anything
+-- reading a runtime value -- a parameter, a network output, a let-bound
+-- scale -- may vanish.
+scaleMayVanish :: IRExpr -> Bool
+scaleMayVanish = not . nonzero
+  where
+    nonzero (IRConst (VFloat s)) = s /= 0 && not (isNaN s)
+    nonzero (IROp OpMult a b) = nonzero a && nonzero b
+    nonzero (IROp OpDiv a b) = nonzero a && nonzero b
+    nonzero (IRUnaryOp OpAbs a) = nonzero a
+    nonzero (IRUnaryOp OpNeg a) = nonzero a
+    nonzero (IRUnaryOp OpExp (IROp OpMult (IRConst (VFloat 0.5)) (IRUnaryOp OpLog (IROp OpPlus (IROp OpMult a _) (IROp OpMult b _))))) =
+      nonzero a || nonzero b
+    nonzero _ = False
+
 toIRInference :: CompilerMetadata -> Bool -> Expr -> IRExpr -> CompilerMonad PResult
 --toIRInference meta cumulative expr sample | trace (show expr) False = undefined
 -- A witnessed sample can itself be the 'VAnyExcept' placeholder an '==' (or ADT
@@ -2268,30 +2311,35 @@ toIRInference meta True expr sample | rType (getTypeInfo expr) == TBool = do
   return (mkPResult (sealP (IRIf sample (srOne (semiringOf meta)) (unP (rProb false)))) const0 (rBranches false)
                   (IRIf sample constFalseIR (rImposs false)))
 toIRInference meta False e sample | pType (getTypeInfo e) == PNormal, not (hasOwnInferenceHandler meta e) = do
-  (mu, sigma) <- toIRNormalParams meta e
-  let p = scaledNormalDensity (semiringOf meta) (IROp OpDiv (IROp OpSub sample mu) sigma) [sigma]
-  return (density p sample)
+  (mu, sigma0) <- toIRNormalParams meta e
+  degenerateScaleGuard meta False TFloat mu sigma0 sample $ \sigma ->
+    density (scaledNormalDensity (semiringOf meta) (IROp OpDiv (IROp OpSub sample mu) sigma) [sigma]) sample
 toIRInference meta True e sample | pType (getTypeInfo e) == PNormal, not (hasOwnInferenceHandler meta e) = do
-  (mu, sigma) <- toIRNormalParams meta e
-  return (mass (distCumulative (semiringOf meta) IRNormal (IROp OpDiv (IROp OpSub sample mu) sigma)))
+  (mu, sigma0) <- toIRNormalParams meta e
+  degenerateScaleGuard meta True TFloat mu sigma0 sample $ \sigma ->
+    mass (distCumulative (semiringOf meta) IRNormal (IROp OpDiv (IROp OpSub sample mu) sigma))
 toIRInference meta False e sample | pType (getTypeInfo e) == PLogNormal, not (hasOwnInferenceHandler meta e) = do
-  (mu, sigma) <- toIRLogNormalParams meta e
+  (mu, sigma0) <- toIRLogNormalParams meta e
   let sr = semiringOf meta
-  let correctedSample = IROp OpDiv (IROp OpSub (IRUnaryOp OpLog sample) mu) sigma
-  let p = scaledNormalDensity sr correctedSample [sigma, sample]
   let positive = IROp OpGreaterThan sample const0
   let negativeGuard x = IRIf positive x (srZero sr)
+  -- A degenerate scale is a point mass at exp(mu), which is positive, so the
+  -- support guard below stays right around it.
+  r <- degenerateScaleGuard meta False TFloat (IRUnaryOp OpExp mu) sigma0 sample $ \sigma ->
+    let correctedSample = IROp OpDiv (IROp OpSub (IRUnaryOp OpLog sample) mu) sigma
+    in density (scaledNormalDensity sr correctedSample [sigma, sample]) sample
   -- A non-positive sample is outside the lognormal's support: impossible, not
   -- merely unlikely. Support boundaries are the one way a *density* leaf can be
   -- a structural zero, and they are known statically here.
-  return (impossibleWhen (notIR positive) (onProb negativeGuard (density p sample)))
+  return (impossibleWhen (notIR positive) (onProb negativeGuard r))
 toIRInference meta True e sample | pType (getTypeInfo e) == PLogNormal, not (hasOwnInferenceHandler meta e) = do
-  (mu, sigma) <- toIRLogNormalParams meta e
+  (mu, sigma0) <- toIRLogNormalParams meta e
   let sr = semiringOf meta
-  let correctedSample = IROp OpDiv (IROp OpSub (IRUnaryOp OpLog sample) mu) sigma
   let positive = IROp OpGreaterThan sample const0
   let negativeGuard x = IRIf positive x (srZero sr)
-  return (impossibleWhen (notIR positive) (mass (negativeGuard (distCumulative sr IRNormal correctedSample))))
+  r <- degenerateScaleGuard meta True TFloat (IRUnaryOp OpExp mu) sigma0 sample $ \sigma ->
+    mass (distCumulative sr IRNormal (IROp OpDiv (IROp OpSub (IRUnaryOp OpLog sample) mu) sigma))
+  return (impossibleWhen (notIR positive) (onProb negativeGuard r))
 -- Distribution primitives (reserved-name Vars). Normal usually reaches the PNormal
 -- catch-all above; these equations are the direct density/CDF leaves for Uniform and
 -- the defensive Normal fallback.
@@ -2578,6 +2626,30 @@ toIRInference meta False (Expr TypeInfo {rType=rt} (InjF (Named "mult") [left, r
 toIRInference meta True (Expr TypeInfo {rType=rt} (InjF (Named "mult") [left, right])) sample
   | isZeroConstant left || isZeroConstant right =
       return (mass (compareValueExpr (semiringOf meta) rt (IRConst (valueToIR (zeroValueOf rt))) sample))
+-- The run-time twin of the two clauses above (task
+-- helper-parameter-zero-factor-answers-nan): a deterministic factor that is
+-- not statically known nonzero -- a helper's parameter, say -- can still be
+-- zero when the product runs, and then the product is the same point mass,
+-- while the inversion below divides by it (its applicability guard found every
+-- value impossible). Branch on it: the point mass when it is zero, and the
+-- ordinary compile, recorded in 'zeroGuardedProducts' so it does not branch
+-- again, otherwise. A Gaussian product never gets here: the PNormal clause
+-- above compiles it, and 'degenerateScaleGuard' handles its zero scale.
+toIRInference meta cumulative e@(Expr TypeInfo {rType=rt, chainName=cn} (InjF (Named name) [left, right])) sample
+  | name `elem` ["mult", "multI"]
+  , Just factor <- runtimeZeroFactor left right
+  , not (cn `Set.member` zeroGuardedProducts meta) = do
+      f <- toIRGenerate meta factor
+      v <- mkVariable "factor"
+      setVariables [(v, f)]
+      let sr = semiringOf meta
+          zero = IRConst (valueToIR (zeroValueOf rt))
+          isZero = IROp OpEq (IRVar v) zero
+          dirac | cumulative = mass (compareValueExpr sr rt zero sample)
+                | otherwise  = indicatorP sr (equalityGuard rt zero sample)
+          meta' = meta { zeroGuardedProducts = Set.insert cn (zeroGuardedProducts meta) }
+      rest <- guardedSubInference meta [notIR isZero] (toIRInference meta' cumulative e sample)
+      return (zipResult (IRIf isZero) dirac rest)
 toIRInference meta _ (Expr _ (ReadNN name symbol)) sample = do
   nnRaw <- mkVariable "nn_raw"
   var <- mkVariable "callNN"
@@ -3898,6 +3970,27 @@ getProbIndex es =
 zeroValueOf :: RType -> Value
 zeroValueOf TInt = VInt 0
 zeroValueOf _    = VFloat 0
+
+-- | The factor of a product that is deterministic, may be zero at run time,
+-- and multiplies a random operand -- the one 'mult' must branch on (see the
+-- run-time zero-factor clause). Not a factor that is statically zero (the
+-- static clauses take it) or statically nonzero (a nonzero literal, or a
+-- 'DiscreteValues' set without zero), nor a product of two random operands.
+runtimeZeroFactor :: Expr -> Expr -> Maybe Expr
+runtimeZeroFactor a b = case (det a, det b) of
+  (True, False) | mayBeZero a -> Just a
+  (False, True) | mayBeZero b -> Just b
+  _ -> Nothing
+  where
+    det x = pType (getTypeInfo x) == Deterministic
+    mayBeZero x@(Expr ti nd)
+      | isStaticZero x = False
+      | Constant _ <- nd = False
+      | (MultiDiscretes vs : _) <- [ mv | DiscreteValues mv <- tags ti ] = any isZeroLit vs
+      | otherwise = True
+    isZeroLit (VFloat 0) = True
+    isZeroLit (VInt 0) = True
+    isZeroLit _ = False
 
 -- | A literal zero operand, in either numeric type. See the 'mult'
 -- zero-multiplier InjF clause above.

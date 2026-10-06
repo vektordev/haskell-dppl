@@ -1,0 +1,2 @@
+h z = z * Uniform
+main = h 0.0

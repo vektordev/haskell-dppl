@@ -103,11 +103,6 @@ knownDivergences =
   -- 0.5 at the base compiler); exposed when observeMaybePayloadRightAny left
   -- known-issues for the corpus.
   , Known "observeMaybePayloadRightAny" HelperExtract "isRight" structuredReread
-  -- `h z = z * Normal; main = h 0.0`: inside the helper the zero is a
-  -- parameter, not statically zero, and the product inverts through a
-  -- division by it (NaN at dim 1). Exposed when drawBoundZeroTimesNormal
-  -- joined the corpus.
-  , Known "drawBoundZeroTimesNormal" HelperExtract "mult z Normal" "helper-parameter-zero-factor-answers-nan"
   -- The swapped wrapper re-read through a second binder: before per-mask
   -- variants the concrete query refused ("binding 'x' is unobserved"); f's
   -- variants now answer the split sub-queries, so p((0.7, 0.6)) is 1.0
