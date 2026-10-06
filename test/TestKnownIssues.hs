@@ -127,10 +127,28 @@ checkExpectFailure name prog _ ExpectNoCode _ = do
         in assertBool (name ++ ": expected at least one of generate/probability/integrate \
                        \to be silently absent, but main compiled all three")
              (isNothing (genFun m) || isNothing (probFun m) || isNothing (integFun m))
--- Documentation only: the ordinary p()/cdf() rows below the header already
--- pin the (known-wrong) value, and the corpus's usual tuple comparison
--- already fails loudly the day a fix changes the computed number.
-checkExpectFailure _ _ _ ExpectWrongResult _ = return ()
+-- The rows below the header pin the (known-wrong) value the compiled program
+-- produces today, on every backend the @backends:@ header declares that this
+-- harness can evaluate (see 'checkableBackends'). Each row must still match:
+-- a fix changes the number and fails the pin, and so does the wrong value
+-- drifting. A compile that crashes or is refused, a query that crashes or is
+-- refused, and a non-prob/dim result all fail too -- the pin documents a
+-- program that compiles and answers, just wrongly.
+checkExpectFailure name prog backends ExpectWrongResult tcs = do
+  checked <- requireCheckable "wrong-result" name backends
+  let rows = queryRows tcs
+  if null rows
+    then assertFailure (name ++ ": an `expect-failure: wrong-result` pin has no p()/cdf() rows, \
+                        \so nothing pins the wrong value")
+    else do
+      result <- forced (compile defaultCompilerConfig prog)
+      case result of
+        Left ex -> assertFailure (name ++ ": expected a wrong-result pin to compile, but the \
+                                  \compile crashed: " ++ show ex)
+        Right _ -> case compile defaultCompilerConfig prog of
+          Left err -> assertFailure (name ++ ": expected a wrong-result pin to compile, but it \
+                                     \was refused outright: " ++ err)
+          Right env -> mapM_ (\b -> mapM_ (assertStillWrong b name prog env) rows) checked
 -- The mechanism is unpinned: the rows below state the *idealized* value, and
 -- the case passes as long as the compiled program does not yet produce it
 -- on any backend the @backends:@ header declares (read exactly as the rest
@@ -139,33 +157,38 @@ checkExpectFailure _ _ _ ExpectWrongResult _ = return ()
 -- @backends: python@ and is not reported "may be fixed" merely because the
 -- interpreter already gets it right.
 checkExpectFailure name prog backends ExpectBroken tcs = do
-  let checked = filter (`elem` brokenCheckableBackends) backends
+  checked <- requireCheckable "broken" name backends
+  result <- forced (compile defaultCompilerConfig prog)
+  case result of
+    Left _ -> return ()      -- crashed at compile time: still broken everywhere
+    Right _ -> case compile defaultCompilerConfig prog of
+      Left _ -> return ()    -- refused outright: still broken everywhere
+      Right env -> mapM_ (\b -> mapM_ (assertStillBroken b name prog env) (queryRows tcs)) checked
+
+-- | The backends a @broken@ or @wrong-result@ pin's rows can be run against
+-- here: the interpreter in-process, and the Python backend through the same
+-- emitted script End2End runs. Julia is not (it is not installed everywhere
+-- the suite runs, and a missing binary would read as "still broken", i.e. a
+-- silently green pin), nor are batched/dense. A pin declaring only those
+-- fails loudly instead of passing vacuously.
+checkableBackends :: [Backend]
+checkableBackends = [Interpreter, Python]
+
+-- | The declared backends this harness can evaluate, failing the pin when
+-- there are none (it would otherwise pass without checking anything).
+requireCheckable :: String -> String -> [Backend] -> IO [Backend]
+requireCheckable shape name backends = do
+  let checked = filter (`elem` checkableBackends) backends
   if null checked
-    then assertFailure (name ++ ": an `expect-failure: broken` pin must declare at least one \
-                        \backend the known-issues harness can evaluate (" ++
-                        intercalate ", " (map show brokenCheckableBackends) ++
+    then assertFailure (name ++ ": an `expect-failure: " ++ shape ++ "` pin must declare at \
+                        \least one backend the known-issues harness can evaluate (" ++
+                        intercalate ", " (map show checkableBackends) ++
                         "); declared only " ++ intercalate ", " (map show backends) ++
-                        ", so nothing would ever report it fixed")
-    else do
-      result <- forced (compile defaultCompilerConfig prog)
-      case result of
-        Left _ -> return ()      -- crashed at compile time: still broken everywhere
-        Right _ -> case compile defaultCompilerConfig prog of
-          Left _ -> return ()    -- refused outright: still broken everywhere
-          Right env -> mapM_ (\b -> mapM_ (assertStillBroken b name prog env) (queryRows tcs)) checked
+                        ", so its rows would never be checked")
+    else return checked
 
--- | The backends a @broken@ pin's rows can be run against here: the
--- interpreter in-process, and the Python backend through the same emitted
--- script End2End runs. Julia is not (it is not installed everywhere the suite
--- runs, and a missing binary would read as "still broken", i.e. a silently
--- green pin), nor are batched/dense. A pin declaring only those fails
--- loudly instead of passing vacuously.
-brokenCheckableBackends :: [Backend]
-brokenCheckableBackends = [Interpreter, Python]
-
--- | The p()/cdf() rows: the anti-pin check only covers the two ordinary
--- probability query shapes, so anything else (argmax_p, writeLogits) is not
--- itself a candidate for "may be fixed" and is left unchecked.
+-- | The p()/cdf() rows: both checks only cover the two ordinary probability
+-- query shapes, so anything else (argmax_p, writeLogits) is left unchecked.
 queryRows :: [TestCase] -> [TestCase]
 queryRows = filter isQuery
   where
@@ -191,6 +214,41 @@ assertStillBroken Python name prog env tc = do
              \case out of known-issues")
     (not matched)
 assertStillBroken _ _ _ _ _ = return ()
+
+-- | One pinned (wrong) row on one backend: assert the result still matches
+-- it. Anything else -- a different value, a crash, a refused query, a
+-- non-prob/dim result -- means the bug moved or was fixed.
+assertStillWrong :: Backend -> String -> Program -> IREnv -> TestCase -> IO ()
+assertStillWrong Interpreter name prog env (ProbTestCase caseName sample params expct) =
+  checkStillWrong name caseName expct (runProbC prog env params sample)
+assertStillWrong Interpreter name prog env (CumulTestCase caseName sample params expct) =
+  checkStillWrong name caseName expct (runIntegC prog env params sample)
+assertStillWrong Python name prog env tc = do
+  matched <- pythonRowMatches prog env tc
+  assertBool
+    (name ++ "/" ++ rowName tc ++ " [python]: no longer produces the pinned wrong value \
+             \(or failed to load/run) -- the bug may be fixed or may have moved; triage \
+             \this known-issues case (move it to the corpus if fixed, re-pin if the wrong \
+             \value changed)")
+    matched
+assertStillWrong _ _ _ _ _ = return ()
+
+checkStillWrong :: String -> String -> Expectation -> Either CompilerError IRValue -> IO ()
+checkStillWrong name caseName expct er = do
+  r <- try (evaluate (length (show er)) >> return er)
+         :: IO (Either SomeException (Either CompilerError IRValue))
+  let here = name ++ "/" ++ caseName ++ " [interpreter]: "
+      triage = " -- the bug may be fixed or may have moved; triage this known-issues case \
+               \(move it to the corpus if fixed, re-pin if the wrong value changed)"
+  case r of
+    Left ex -> assertFailure (here ++ "the query crashed instead of producing the pinned \
+                                      \wrong value: " ++ show ex ++ triage)
+    Right (Left err) -> assertFailure (here ++ "the query was refused instead of producing \
+                                               \the pinned wrong value: " ++ err ++ triage)
+    Right (Right res@(VProbDim outProb outDim)) ->
+      assertBool (here ++ "got " ++ show res ++ ", not the pinned wrong value " ++ show expct ++ triage)
+        (matchesExpectation expct outProb outDim res)
+    Right (Right res) -> assertFailure (here ++ "got a non-prob/dim result " ++ show res ++ triage)
 
 rowName :: TestCase -> String
 rowName (ProbTestCase n _ _ _)  = n

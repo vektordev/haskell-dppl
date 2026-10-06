@@ -162,15 +162,17 @@ satisfy either; that is what `TestRejection.hs` is for. `refused` is the
 graceful form of an open capability gap: the compile succeeds and some
 function's variant is absent with a recorded reason (`refusedVariants`)
 containing the substring. Fourteen `diagnostic`/`crash` pins moved there when
-static refusals stopped crashing the compile. **`wrong-result` rows
-are currently not evaluated by anything**: `checkExpectFailure` treats the
-shape as documentation (`return ()`), and this folder is excluded from the
-corpus sweeps that would otherwise compare them. So a `wrong-result` pin does
-*not* fail the day its bug is fixed -- editing its rows to any value still
-passes (found while fixing `planSumWithSunkDiscreteDrawDim`, task
-plan-sum-with-sunk-discrete-draw-reports-density; follow-up docs task
-`known-issues-wrong-result-rows-unchecked`). Until that lands, verify a fix to
-a `wrong-result` pin by moving the program into the ordinary corpus.
+static refusals stopped crashing the compile. `wrong-result` rows pin the
+value the bug produces today: the program must compile, and each p()/cdf()
+row must still match its pinned (wrong) value, within `probTolerance`, on
+every backend the `backends:` header declares that the harness can evaluate
+(the same interpreter and Python checks `broken` uses, described next). A
+different number, a crash, a refused compile or query, or a pin with no
+p()/cdf() rows all fail. So a pin fails both the day its bug is fixed (move
+the program into the ordinary corpus with the idealized rows) and the day the
+wrong value drifts (re-pin it). Before task
+`known-issues-wrong-result-rows-unchecked` these rows were not evaluated at
+all, and three of the four pins they held turned out to be fixed already.
 
 `broken` is the loose fallback for a repro that was migrated without
 characterizing exactly how it currently fails (no exact crash message or
@@ -187,8 +189,8 @@ the bug is pinned: a Python-only bug (e.g. the emitted module failing to load)
 is spelled `backends: python`, so the interpreter already giving the right
 answer is not misreported as a fix. Julia, batched and dense are not evaluated
 here (a missing `julia` binary would read as "still broken", a silently green
-pin), and a `broken` pin declaring *only* those fails loudly rather than
-passing vacuously. This trades away the free "which exact
+pin), and a `broken` or `wrong-result` pin declaring *only* those fails
+loudly rather than passing vacuously. This trades away the free "which exact
 mechanism regressed" signal `diagnostic`/`wrong-result` give for robustness
 against unrelated code churn shifting a pinned message or number -- appropriate
 when nobody has run the repro yet to observe its actual failure mode.
