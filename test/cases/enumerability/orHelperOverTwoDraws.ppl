@@ -1,0 +1,6 @@
+-- `||` in a two-argument helper over two separate draw-bound coins, both as
+-- the whole body and as a list element. Refused (set-valued witness for 'a')
+-- until `and`/`or` counted as conditional for enumeration.
+-- Task and-inside-list-or-helper-over-draws-refused.
+either2 a b = a || b
+main = draw a = Uniform < 0.3 in draw b = Uniform < 0.6 in (either2 a b, [either2 b a])

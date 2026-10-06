@@ -1,0 +1,6 @@
+-- `&&` and `||` written inline in list elements over one draw-bound record.
+-- Refused (set-valued witness for 'h') until `and`/`or` counted as
+-- conditional for enumeration; the `if` spelling always compiled.
+-- Task and-inside-list-or-helper-over-draws-refused.
+data R = R l::Bool, r::Bool
+main = draw h = R (Uniform < 0.3) (Uniform < 0.6) in [(l h) && (r h), (l h) || (r h)]

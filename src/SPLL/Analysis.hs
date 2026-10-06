@@ -454,6 +454,12 @@ tagConditional _ _ x = getTypeInfo x
 isConditional :: FCData -> Program -> [ChainName] -> Expr -> Bool
 isConditional _ _ visited e | chainName (getTypeInfo e) `elem` visited = False
 isConditional _ _ _ (Expr _ (IfThenElse _ _ _)) = True
+-- `a && b` is `if a then b else False` and `a || b` is `if a then True else b`:
+-- the same many-to-one case split, just spelled as an InjF. Without this a body
+-- (or helper) using the connective was not enumerated where its `if` spelling
+-- was, and fell to the set-witness engine, which has no arm for a list
+-- element or a named call (task and-inside-list-or-helper-over-draws-refused).
+isConditional _ _ _ (Expr _ (InjF (Named n) _)) | n `elem` ["and", "or"] = True
 isConditional _ _ _ (Expr _ (Lambda _ _)) = False
 -- An application is conditional if the applied function or any argument is:
 -- the enumeration fallback in toIREnumerate evaluates the whole application

@@ -1,0 +1,10 @@
+-- `&&` inside a helper applied to a draw-bound record, as a list element. It
+-- used to be refused (set-valued witness construction failed for 'h') while
+-- the `if` spelling compiled: Analysis.isConditional counted only
+-- IfThenElse, so the binding of h was not enumerated and fell to the
+-- set-witness engine, which has no arm for a list element or a named call.
+-- `and`/`or` now count as the case split they are.
+-- Task and-inside-list-or-helper-over-draws-refused.
+data R = R l::Bool, r::Bool
+both h = (l h) && (r h)
+main = draw h = R (Uniform < 0.3) (Uniform < 0.6) in [both h]
