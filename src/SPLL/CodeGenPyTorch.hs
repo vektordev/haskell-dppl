@@ -634,9 +634,10 @@ generateLetInStatement name x = do
 --   comprehension body), since the guard is what protects it and the binder
 --   is not in scope before the line. (A pure comprehension can still move
 --   /whole/, becoming a statement-level loop: 'loopable'.);
--- * one that is /pure arithmetic/ ('spillable'): no random draw, no call.
---   A call may be a generator or may not terminate, and moving it ahead of a
---   sibling could change which draw or which failure is observed. A spilled
+-- * one that is /pure arithmetic/ ('spillable'): no random draw, no call
+--   other than of an inference method ('inferenceMethodCall'). Any other call
+--   may be a generator or may not terminate, and moving it ahead of a sibling
+--   could change which draw or which failure is observed. A spilled
 --   subterm may itself contain a whole conditional expression -- it is moved
 --   intact, with its guard.
 --
@@ -712,15 +713,37 @@ pythonNestingDepth = go 0 0
 -- which is what a plan-path fold's enumerated mass looks like (task
 -- plan-fold-enum-mass-sum-exceeds-parser-nesting): the summands were cut out
 -- one by one and the ~200-deep chain of @+@ over them stayed on the line.
+--
+-- One kind of call is admitted: a call of a function group's own inference
+-- method ('inferenceMethodCall'), with spillable arguments. That is what a
+-- function's writeLogits is made of -- one @main.forward(v, x)[0]@ cell per
+-- slot of its output plan, consed right-nested, so a V-valued @main@ is a
+-- V-deep line (task writelogits-cons-chain-nests-v-deep). The objection to
+-- hoisting a call does not apply to these: a probability or cumulative method
+-- draws nothing a generator would (it may read a network, which is the same
+-- read wherever it happens), and it only ever moves out of a strict position,
+-- so the line evaluated it unconditionally anyway. The one thing a reorder can
+-- change is which of several failing cells raises first -- the line fails
+-- either way.
 spillable :: [String] -> IRExpr -> Bool
 spillable callables = go
   where
     go (IRSample _)   = False
-    go (IRApply _ _)  = False
+    go e@(IRApply _ _) =
+      let (f, args) = collectApplyChain e
+      in inferenceMethodCall f && all go args
     go (IRLambda _ _) = False
     go (IRVar n)      = not (n `elem` callables || isEffectfulVar n
                              || ".generate" `isSuffixOf` n)
     go e              = all go (getIRSubExprs e)
+
+-- | The callee of a call 'spillable' admits: a function group's probability
+-- or cumulative method, as 'envToLUT' renamed it (@n.forward@ for @n_prob@,
+-- @n.integrate@ for @n_integ@). A generator (@n.generate@), a normal-params
+-- method and a bare network or lambda are not admitted.
+inferenceMethodCall :: IRExpr -> Bool
+inferenceMethodCall (IRVar n) = ".forward" `isSuffixOf` n || ".integrate" `isSuffixOf` n
+inferenceMethodCall _ = False
 
 -- | A comprehension that may be spilled as a whole, as a statement-level loop
 -- ('generateSpillStatement'): a 'BMap' over a lambda whose body and list are
