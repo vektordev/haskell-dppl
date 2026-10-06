@@ -751,6 +751,13 @@ deadArm_nestedOuter :: TestTree
 deadArm_nestedOuter = testCase "nestedOuterDead" $
   checkDeadArmProgram "nestedOuterDead" (nestedOuter ++ ["main = N"]) [] [1, 0, nan, nan, nan, nan, nan]
 
+-- A dead arm holding a nested Either: its flag is filled through the sigmoid link, its arms
+-- through softmax.  Layout: [P(None), P(Some), P(Left|Some), Bool|Left (2), Bool|Right (2)].
+deadArm_nestedEitherFlag :: TestTree
+deadArm_nestedEitherFlag = testCase "nestedEitherFlag" $
+  checkDeadArmProgram "nestedEitherFlag"
+    [ "data W = None | Some e::Either Bool Bool", "main = None" ] [] [1, 0, nan, nan, nan, nan, nan]
+
 -- Per-function endpoint over a real value (the ticket's "common realistic case").
 deadArm_perFunctionEndpoint :: TestTree
 deadArm_perFunctionEndpoint = testCase "perFunctionEndpoint" $ do
@@ -806,6 +813,7 @@ deadArmTests = testGroup "deadArm"
   , deadArm_eitherArm
   , deadArm_nestedInner
   , deadArm_nestedOuter
+  , deadArm_nestedEitherFlag
   , deadArm_perFunctionEndpoint
   , deadArm_tinyArmIsLive
   , deadArm_fillIsFreshNoise

@@ -1,0 +1,1 @@
+main = if Uniform < 0.5 then Left True else Right False
