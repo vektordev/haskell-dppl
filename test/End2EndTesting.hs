@@ -164,7 +164,10 @@ readLogitsLinearOnly =
   [ "observeDiscretePoE", "eitherMarginalNeural", "planOverBudgetIntMult"
   , "showcase_either_fromLeft", "showcase_either_marginal_discrete", "showcase_either_neural"
   , "autoNeuralProbDiscreteSparse", "autoNeuralProbDiscrete", "autoNeuralProbMnistAdd"
-  , "agreementBareEqualityLetBound", "agreementBareEqualityInline", "mNistAdd3", "mNistAdd4" ]
+  , "agreementBareEqualityLetBound", "agreementBareEqualityInline", "mNistAdd3", "mNistAdd4"
+  -- task symbol-chosen-by-inline-coin-refused: a mixture of reads of selected
+  -- Symbols, each read through see_auto.forward.
+  , "symbolChosenByInlineCoin", "symbolChosenByDrawBoundCoin", "symbolChosenInsideReadArgument" ]
 
 -- | The corpus programs whose default compile took the plan engine until every
 -- read was tagged, and which now enumerate densely by default. They were
@@ -556,12 +559,22 @@ mainBinding fs = fromMaybe (error "mainParamNames: program has no 'main'") (look
 -- the envelope resolution below simply leaves such a parameter's .tst value
 -- untouched, which is fine for the corpus this routes (task
 -- route-neural-programs-to-julia-python-backends): every neural .tst reads
--- its mock straight off a lambda parameter.
+-- its mock straight off a lambda parameter. A read of a /selected/ parameter
+-- (@see (if c then a else b)@, or a selection under a @let@/@draw@) pairs every
+-- parameter the selection can yield, the same arms and bodies
+-- 'SPLL.CalleeNormalize' distributes the read into (task
+-- symbol-chosen-by-inline-coin-refused).
 readNNOfVar :: Expr -> [(String, String)]
 readNNOfVar (Expr _ e) = case e of
-  ReadNN name (Expr _ (Var v)) -> (v, name) : rest
-  _                             -> rest
-  where rest = concatMap readNNOfVar (toList e)
+  ReadNN name s -> [ (v, name) | v <- selectedVars s ] ++ rest
+  _             -> rest
+  where
+    rest = concatMap readNNOfVar (toList e)
+    selectedVars (Expr _ x) = case x of
+      Var v                           -> [v]
+      IfThenElse _ t f                -> selectedVars t ++ selectedVars f
+      Apply (Expr _ (Lambda y b)) _   -> filter (/= y) (selectedVars b)
+      _                               -> []
 
 -- | The 'PartitionPlan' governing a declared network's mock output -- the
 -- same construction 'IRInterpreter' builds at the special-cased

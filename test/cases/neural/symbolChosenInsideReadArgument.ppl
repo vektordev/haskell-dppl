@@ -1,0 +1,5 @@
+-- The choice is made inside the read's argument: a draw-bound coin under the
+-- read, and a nested if. The read is pushed into the redex body and then into
+-- every arm. Task symbol-chosen-by-inline-coin-refused.
+neural see :: (Symbol -> Bool)
+main a b c = see (draw s = Uniform < 0.5 in if s then a else (if Uniform < 0.5 then b else c))

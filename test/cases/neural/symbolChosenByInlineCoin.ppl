@@ -1,0 +1,6 @@
+-- A neural read of a Symbol chosen by an inline coin. CalleeNormalize
+-- distributes the read into the if's arms (see a / see b), so each read gets a
+-- point input; before that the read's input was a mixture and the read was
+-- sample-only. Task symbol-chosen-by-inline-coin-refused.
+neural see :: (Symbol -> Bool)
+main a b = see (if Uniform < 0.25 then a else b)

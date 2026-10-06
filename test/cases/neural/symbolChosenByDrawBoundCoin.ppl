@@ -1,0 +1,6 @@
+-- The draw-bound twin of symbolChosenByInlineCoin: same distribution. It
+-- compiled until the tensor-input ReadNN rule made a read of a non-point input
+-- sample-only, then lost its probability variant silently. Task
+-- symbol-chosen-by-inline-coin-refused.
+neural see :: (Symbol -> Bool)
+main a b = draw s = Uniform < 0.25 in see (if s then a else b)
