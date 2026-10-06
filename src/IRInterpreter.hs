@@ -318,12 +318,13 @@ generate f neurals' registry adts' globalEnv env [] (IROp OpEq a b) = do
         (VList (ListCont _ as), VList (ListCont VAny bs)) -> cmp (VList as) (VList bs)
         (VList (ListCont aElem aTail), VList (ListCont bElem bTail)) -> (&&) <$> cmp aElem bElem <*> cmp (VList aTail) (VList bTail)
         (VList _, VList _) -> return False
+        -- A field recurses through 'cmp' so an ANY nested inside it (an inner
+        -- tuple slot, a list element) still matches; a top-level VAny field is
+        -- a wildcard here, as for ADT fields, because 'cmp' itself says
+        -- VAny equals nothing.
         (VTuple af1 af2, VTuple bf1 bf2) ->
-          let eqAny xVal yVal = case (xVal, yVal) of
-                (VAny, _) -> True
-                (_, VAny) -> True
-                (xEq, yEq) -> xEq == yEq in
-                return (eqAny af1 bf1 && eqAny af2 bf2)
+          let field x y = if x == VAny || y == VAny then return True else cmp x y
+          in (&&) <$> field af1 bf1 <*> field af2 bf2
         (VEither (Left _), VEither (Right _)) -> return False
         (VEither (Right _), VEither (Left _)) -> return False
         (VEither (Left VAny), VEither (Left _)) -> return True
