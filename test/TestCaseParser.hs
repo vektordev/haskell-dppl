@@ -11,6 +11,12 @@ module TestCaseParser (
   allBackends,
   defaultBackends,
   ExpectFailure(..),
+  GrowthSpec(..),
+  GrowthMetric(..),
+  PointCap(..),
+  CompileFlag(..),
+  defaultPointCap,
+  applyCompileFlags,
   isProbTestCase,
   isCumulTestCase,
   isArgmaxPTestCase,
@@ -325,7 +331,7 @@ pSlowHeader = do
 -- | The kind of compile-time failure a @test/cases/known-issues/@ program is
 -- pinned to keep reproducing (design testcases-corpus-restructure). A
 -- 'known-issues' repro carries an @expect-failure:@ header naming which of
--- these five shapes it demonstrates:
+-- these shapes it demonstrates:
 --
 -- * 'ExpectCrash' -- forcing @compile@'s result throws an uncaught
 --   exception/panic, with no particular message pinned.
@@ -368,7 +374,71 @@ data ExpectFailure
   | ExpectNoCode
   | ExpectWrongResult
   | ExpectBroken
+  -- | A performance wall (task known-issues-performance-scaling-checks): over
+  -- the program family the @.ppl@ template spans, the measured resource still
+  -- grows faster than the stated polynomial degree. See 'GrowthSpec'.
+  | ExpectGrowthAbove GrowthSpec
+  -- | The emitted Python module is still larger than this many bytes when
+  -- compiled under these flags, within this per-compile cap.
+  | ExpectCodeSizeAbove Integer [CompileFlag] PointCap
   deriving (Show, Eq)
+
+-- | One CLI compile flag, spelled exactly as on the command line, that a
+-- performance pin compiles under (a @flags:@ line). Only the flags that change
+-- what is compiled are accepted; a typo is a parse error, not a silently
+-- ignored flag.
+data CompileFlag
+  = FlagOptimizer Int                -- ^ @-O N@
+  | FlagNoIntegrate                  -- ^ @--noIntegrate@
+  | FlagNoProbability                -- ^ @--noProbability@
+  | FlagNoGenerate                   -- ^ @--noGenerate@
+  | FlagPruneAnyChecks               -- ^ @--pruneAnyChecks@
+  | FlagMaterializationBudget Int    -- ^ @--materializationBudget N@
+  deriving (Show, Eq)
+
+-- | The configuration a pin's flags select, on top of the given base (the
+-- CLI's defaults are 'defaultCompilerConfig').
+applyCompileFlags :: [CompileFlag] -> CompilerConfig -> CompilerConfig
+applyCompileFlags fs c0 = foldl apply c0 fs
+  where
+    apply c (FlagOptimizer n)             = c { optimizerLevel = n }
+    apply c FlagNoIntegrate               = c { noIntegrate = True }
+    apply c FlagNoProbability             = c { noProbability = True }
+    apply c FlagNoGenerate                = c { noGenerate = True }
+    apply c FlagPruneAnyChecks            = c { pruneAnyChecks = True }
+    apply c (FlagMaterializationBudget n) = c { materializationCardinality = n }
+
+-- | What a growth pin measures at each point of its family.
+data GrowthMetric
+  = MetricCodeSize   -- ^ bytes of emitted Python (the default; deterministic)
+  | MetricIRSize     -- ^ characters of the shown IR environment (deterministic)
+  | MetricAlloc      -- ^ bytes the compile allocates (this thread's counter; near-deterministic)
+  | MetricWallTime   -- ^ seconds of wall time (noisy; the fallback)
+  deriving (Show, Eq)
+
+-- | The hard per-compile limit of a performance pin: a compile that runs past
+-- either is killed and recorded as "exceeded" rather than waited for.
+data PointCap = PointCap
+  { capSeconds    :: Double
+  , capAllocBytes :: Integer
+  } deriving (Show, Eq)
+
+defaultPointCap :: PointCap
+defaultPointCap = PointCap { capSeconds = 10, capAllocBytes = 8000000000 }
+
+-- | A growth pin: the @.ppl@ is a template over one integer knob (see
+-- "ScalingCheck"), compiled at each knob value in turn. The pin holds while
+-- the metric's log-log slope between consecutive points exceeds 'growthDegree'
+-- somewhere (or a point hits the cap); it fails, "may be fixed", once every
+-- consecutive pair stays within it.
+data GrowthSpec = GrowthSpec
+  { growthDegree :: Int
+  , growthKnob   :: String
+  , growthValues :: [Int]
+  , growthMetric :: GrowthMetric
+  , growthFlags  :: [CompileFlag]
+  , growthCap    :: PointCap
+  } deriving (Show, Eq)
 
 -- | A double-quoted diagnostic substring, e.g. @"set-valued witness
 -- construction failed"@. No escape handling -- a diagnostic is prose, never
@@ -377,20 +447,126 @@ pQuotedString :: MonadParser m => m String
 pQuotedString = L.lexeme sc (char '"' *> manyTill (satisfy (/= '"')) (char '"'))
 
 -- An optional standalone `expect-failure: ...` header line, order-independent
--- with `backends:`/`slow`. See 'ExpectFailure' for the five shapes.
+-- with `backends:`/`slow`. See 'ExpectFailure' for the shapes.
 pExpectFailureHeader :: MonadParser m => m ExpectFailure
 pExpectFailureHeader = do
   symbol "expect-failure:"
-  ef <- choice
-    [ ExpectDiagnostic <$> (symbol "diagnostic" >> pQuotedString)
-    , ExpectRefused <$> (symbol "refused" >> pQuotedString)
-    , ExpectCrash <$ symbol "crash"
-    , ExpectNoCode <$ symbol "no-code"
-    , ExpectWrongResult <$ symbol "wrong-result"
-    , ExpectBroken <$ symbol "broken"
+  choice
+    [ ExpectDiagnostic <$> (symbol "diagnostic" >> pQuotedString) <* pNewline
+    , ExpectRefused <$> (symbol "refused" >> pQuotedString) <* pNewline
+    , ExpectCrash <$ symbol "crash" <* pNewline
+    , ExpectNoCode <$ symbol "no-code" <* pNewline
+    , ExpectWrongResult <$ symbol "wrong-result" <* pNewline
+    , ExpectBroken <$ symbol "broken" <* pNewline
+    , pGrowthPin
+    , pCodeSizePin
     ]
+
+-- | A follow-on line of a performance pin, read straight after its
+-- @expect-failure:@ line (in any order among themselves).
+data PerfLine
+  = PerfKnob String [Int]
+  | PerfMetric GrowthMetric
+  | PerfFlags [CompileFlag]
+  | PerfCap PointCap
+
+-- | @expect-failure: growth above linear@ / @growth above polynomial K@,
+-- followed by a required @knob:@ line and optional @metric:@, @flags:@, @cap:@.
+pGrowthPin :: MonadParser m => m ExpectFailure
+pGrowthPin = do
+  symbol "growth"
+  symbol "above"
+  degree <- choice [1 <$ symbol "linear", symbol "polynomial" >> L.lexeme sc L.decimal]
   pNewline
-  return ef
+  perf <- many (try pPerfLine)
+  knobs <- return [ (k, vs) | PerfKnob k vs <- perf ]
+  (knob, vals) <- case knobs of
+    [kv] -> return kv
+    [] -> fail "a `growth above` pin needs a `knob: NAME = v1, v2, ...` line"
+    _ -> fail "a `growth above` pin takes exactly one `knob:` line"
+  metric <- atMostOne "metric:" MetricCodeSize [ m | PerfMetric m <- perf ]
+  flags <- atMostOne "flags:" [] [ f | PerfFlags f <- perf ]
+  cap <- atMostOne "cap:" defaultPointCap [ c | PerfCap c <- perf ]
+  if degree < 1 then fail "a growth pin's polynomial degree must be at least 1" else return ()
+  if length vals < 2 || or (zipWith (>=) vals (drop 1 vals)) || any (< 1) vals
+    then fail "a growth pin's knob values must be at least two positive, strictly increasing integers"
+    else return ()
+  return (ExpectGrowthAbove (GrowthSpec degree knob vals metric flags cap))
+
+-- | @expect-failure: code-size above 40 KB@, followed by optional @flags:@
+-- and @cap:@ lines. Units are decimal: B, KB (1000 B), MB (10^6 B).
+pCodeSizePin :: MonadParser m => m ExpectFailure
+pCodeSizePin = do
+  symbol "code-size"
+  symbol "above"
+  bytes <- pByteSize
+  pNewline
+  perf <- many (try pPerfLine)
+  if not (null [ () | PerfKnob _ _ <- perf ] && null [ () | PerfMetric _ <- perf ])
+    then fail "a `code-size above` pin takes no `knob:` or `metric:` line (it measures one program's emitted Python)"
+    else return ()
+  flags <- atMostOne "flags:" [] [ f | PerfFlags f <- perf ]
+  cap <- atMostOne "cap:" defaultPointCap [ c | PerfCap c <- perf ]
+  return (ExpectCodeSizeAbove bytes flags cap)
+
+atMostOne :: MonadParser m => String -> a -> [a] -> m a
+atMostOne _ dflt [] = return dflt
+atMostOne _ _ [x] = return x
+atMostOne what _ _ = fail ("a performance pin takes at most one `" ++ what ++ "` line")
+
+pByteSize :: MonadParser m => m Integer
+pByteSize = do
+  n <- L.lexeme sc L.decimal
+  unit <- choice [1000000 <$ symbol "MB", 1000 <$ symbol "KB", 1 <$ symbol "B"]
+  return (n * unit)
+
+-- | A non-negative number of seconds, with or without a fractional part.
+pSeconds :: MonadParser m => m Double
+pSeconds = L.lexeme sc (try L.float <|> (fromInteger <$> L.decimal))
+
+pPerfLine :: MonadParser m => m PerfLine
+pPerfLine = choice [pKnobLine, pMetricLine, pFlagsLine, pCapLine] <* pNewline
+  where
+    pKnobLine = do
+      symbol "knob:"
+      name <- L.lexeme sc ((:) <$> letterChar <*> many (alphaNumChar <|> char '_'))
+      symbol "="
+      PerfKnob name <$> (L.lexeme sc L.decimal `sepBy1` symbol ",")
+    pMetricLine = do
+      symbol "metric:"
+      PerfMetric <$> choice
+        [ MetricCodeSize <$ symbol "code-size"
+        , MetricIRSize <$ symbol "ir-size"
+        , MetricAlloc <$ symbol "alloc"
+        , MetricWallTime <$ symbol "wall-time"
+        ]
+    -- Not 'symbol'/'sc': those skip `--` as a line comment, which would eat
+    -- every long flag. Flags are separated by horizontal space only.
+    pFlagsLine = do
+      _ <- string "flags:"
+      hspace
+      PerfFlags <$> some (pFlag <* hspace)
+    pFlag = choice
+      [ FlagOptimizer <$> (string "-O" *> hspace *> L.decimal)
+      , FlagNoIntegrate <$ try (string "--noIntegrate")
+      , FlagNoProbability <$ try (string "--noProbability")
+      , FlagNoGenerate <$ try (string "--noGenerate")
+      , FlagPruneAnyChecks <$ try (string "--pruneAnyChecks")
+      , FlagMaterializationBudget <$> (try (string "--materializationBudget") *> hspace1 *> L.decimal)
+      ]
+    pCapLine = do
+      symbol "cap:"
+      parts <- pCapPart `sepBy1` symbol ","
+      let secs = [ x | Left x <- parts ]
+          allocs = [ b | Right b <- parts ]
+      if length secs > 1 || length allocs > 1
+        then fail "a `cap:` line names at most one time and one allocation limit"
+        else return ()
+      return (PerfCap (PointCap (headOr (capSeconds defaultPointCap) secs)
+                                (headOr (capAllocBytes defaultPointCap) allocs)))
+    pCapPart = try (Left <$> (pSeconds <* symbol "s"))
+               <|> (Right <$> pByteSize)
+    headOr d xs = case xs of { (x:_) -> x; [] -> d }
 
 -- All three headers are optional and may appear in any order. A missing
 -- `backends:` header means 'defaultBackends' (the three scalar backends),

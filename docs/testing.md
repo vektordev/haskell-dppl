@@ -59,6 +59,8 @@ current list for whichever binary you run):
 - `test/TestKnownIssues.hs` — drives `test/cases/known-issues/`: pinned
   repros of open compiler bugs, each declaring which failure shape
   it demonstrates (see "Known-issues corpus" below)
+- `test/ScalingCheck.hs` — the pure half of the known-issues performance pins:
+  program-family templates and the growth verdict (see "Performance pins")
 - `test/TestFuzz.hs` — `Fuzz`, inside the opt-in `Slow`/`Aspirational`/`SuperSlow` groups,
   plus `Shrinker` (the typed generator's shrink contract) and `Admission
   oracle`, which are in the default suite
@@ -154,6 +156,8 @@ expect-failure: refused "some substring"       -- compiles; some variant is abse
 expect-failure: no-code                        -- compiles, but generate/probability/integrate is silently absent
 expect-failure: wrong-result                   -- compiles and runs; the p()/cdf() rows below pin the known-wrong value
 expect-failure: broken                         -- mechanism unpinned; the p()/cdf() rows below state the idealized value instead
+expect-failure: growth above polynomial 2      -- a performance wall: a templated family still grows faster than this
+expect-failure: code-size above 60 KB          -- the emitted Python is still larger than this
 ```
 
 `crash`/`diagnostic` are checked against an exception thrown while *forcing*
@@ -194,6 +198,76 @@ loudly rather than passing vacuously. This trades away the free "which exact
 mechanism regressed" signal `diagnostic`/`wrong-result` give for robustness
 against unrelated code churn shifting a pinned message or number -- appropriate
 when nobody has run the repro yet to observe its actual failure mode.
+
+### Performance pins: growth and code size
+
+Two further `expect-failure:` shapes pin a *performance wall* rather than a
+wrong answer (task known-issues-performance-scaling-checks). Both are checked
+in `TestKnownIssues.hs`, with the pure half (templates, the verdict) in
+`test/ScalingCheck.hs`:
+
+```
+expect-failure: growth above polynomial 2      -- or: growth above linear
+knob: N = 2, 4, 6, 8, 10                       -- required; >= 2 increasing positive values
+metric: code-size                              -- optional: code-size (default) | ir-size | alloc | wall-time
+flags: -O 0 --noIntegrate                      -- optional, CLI spelling
+cap: 10 s, 8000 MB                             -- optional per-compile cap (these are the defaults)
+
+expect-failure: code-size above 60 KB          -- B, KB = 1000 B, MB = 10^6 B
+flags: --pruneAnyChecks                        -- optional, as above; cap: too
+```
+
+The follow-on lines come straight after the `expect-failure:` line, in any
+order among themselves. `flags:` accepts `-O N`, `--noIntegrate`,
+`--noProbability`, `--noGenerate`, `--pruneAnyChecks` and
+`--materializationBudget N`, applied over `defaultCompilerConfig`. Any other
+flag is a parse error, not ignored.
+
+**Growth.** The `.ppl` is a template over the knob: `{{N}}`, `{{N-1}}`,
+`{{i+2}}` stand for integers, and `{{for i in 1..N sep ", "}}...{{end}}`
+repeats its body (inclusive bounds, an optional separator, nestable). Text
+outside `{{ }}` is copied verbatim, so `of 4x.{...}` is fine. A template
+beats a directory of pre-generated variants because the knob is explicit.
+The harness compiles each knob value in turn and takes the local log-log
+slope `log(f2/f1) / log(n2/n1)` between consecutive points. That slope is the
+apparent polynomial degree: exactly k for `n^k`, and rising with n for an
+exponential. The pin holds once some pair's slope exceeds the degree plus
+a margin (0.25 for code-size and ir-size, 0.5 for alloc, 1.0 for wall-time),
+or once a point hits the cap. The climb stops there, so the expensive points
+are only paid for after a fix. If every pair stays within the bound, the pin
+fails with "may be fixed" and prints the table. A first point that already
+hits the cap means the knob values are too large, and fails. Choose knob
+values so that a family growing within the bound would stay far below the
+cap: a capped point counts as evidence of superpolynomial growth.
+
+The metrics, deterministic first: `code-size` counts the bytes of emitted
+Python, `ir-size` the characters of the shown `IREnv`, `alloc` the bytes this
+thread allocated during compile and codegen (GHC's per-thread allocation
+counter, which parallel tests do not disturb), and `wall-time` seconds. A
+wall the optimizer folds away (the module comes out linear, but the
+unoptimized IR does not) is still visible at `-O 0`, or as `alloc` at the
+default `-O2`.
+
+**Code size.** The program compiles and its emitted Python must still exceed
+the bound. A fix that shrinks it below the bound fails the pin.
+
+**The cap.** Every compile runs under a `timeout` and a per-thread allocation
+limit (`enableAllocationLimit`), so a runaway compile is killed and recorded
+as "exceeded" instead of hanging the suite or exhausting memory. Bounding
+allocation also bounds what the compile can retain. A growth pin's family
+point that is refused, crashes or fails to parse fails the pin, as does a
+code-size pin that hits its cap: these pins describe programs that compile,
+only too expensively. Positive-polarity guards ("stays polynomial") for walls
+that are already fixed stay `TestInternals` growth tests, as before. The
+known-issues folder holds only open bugs.
+
+The pins today, together about 1.2 s of the default suite:
+`wideConstructorPruneGuardGrowth` (code-size at `-O 0`, 2^N),
+`nestedEqualityChainGrowth` (alloc at `-O2`, about 8x per level),
+`gaussianTrajectoryUnprunedModuleSize` and
+`shortGaussianTrajectoryModuleSize` (code size). The harness's own tests are
+`KnownIssuesScaling` (templates, slopes, the climb) and `KnownIssuesHarness`
+(both caps, header parsing).
 
 This coexists with `TestRejection.hs` rather than replacing it: a genuinely
 bespoke, multi-assertion regression (e.g. one that additionally checks a

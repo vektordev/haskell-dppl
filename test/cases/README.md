@@ -26,7 +26,7 @@ rather than testing a working feature. See the next section.
 Filing a mechanical repro for a bug that must *keep failing* until it's fixed
 doesn't need a hand-written Haskell test group -- drop a `.ppl`/`.tst` pair
 into `known-issues/` whose `.tst` carries an `expect-failure:` header (in the
-same style as `backends:`/`slow`) naming one of five shapes:
+same style as `backends:`/`slow`) naming one of these shapes:
 
 ```
 expect-failure: crash                              -- an uncaught exception, message unpinned
@@ -34,6 +34,9 @@ expect-failure: diagnostic "some substring"        -- an uncaught exception whos
 expect-failure: no-code                            -- compiles, but generate/probability/integrate is silently absent
 expect-failure: wrong-result                       -- compiles and runs; the p()/cdf() rows below pin the known-wrong value
 expect-failure: broken                             -- mechanism unpinned; the p()/cdf() rows below state the idealized value instead
+expect-failure: refused "some substring"           -- compiles; some variant is absent with a refusal reason containing this
+expect-failure: growth above polynomial 2          -- performance wall over a templated family (see below)
+expect-failure: code-size above 60 KB              -- the emitted Python is still larger than this
 ```
 
 `crash`/`diagnostic` are checked against an *uncaught exception* thrown while
@@ -69,6 +72,48 @@ that declares only those fails outright instead of passing vacuously.
 misbehaves but you have not worked out precisely how, `broken` is the header
 for it -- writing down the idealized value is enough. A repro that exists is
 worth far more than a precisely-characterized one that never got committed.
+
+### Pinning a performance wall
+
+A compile that is correct but blows up (time, memory, or module size) has its
+own two shapes. **Growth**: write the `.ppl` as a template over one integer
+knob and list the knob values. The pin holds while the measured resource still
+grows faster than the stated polynomial degree:
+
+```
+-- wideConstructorPruneGuardGrowth.ppl
+data R = R {{for i in 1..N sep ", "}}f{{i}}::Int{{end}}, g::Int
+
+main = R{{for i in 1..N}} {{i}}{{end}} (if Uniform < 0.5 then 1 else 2)
+
+-- wideConstructorPruneGuardGrowth.tst
+expect-failure: growth above polynomial 2
+knob: N = 2, 4, 6, 8, 10
+metric: code-size
+flags: -O 0 --noIntegrate
+```
+
+`{{N}}`, `{{N-1}}` and `{{i+2}}` are integers, and `{{for i in A..B sep "..."}}BODY{{end}}`
+repeats `BODY` (inclusive bounds, an optional separator, nestable). Metrics
+are `code-size` (the default, emitted Python bytes), `ir-size`, `alloc`
+(bytes allocated by the compile) and `wall-time`. Prefer the deterministic
+ones. `flags:` takes the CLI spellings `-O N`, `--noIntegrate`,
+`--noProbability`, `--noGenerate`, `--pruneAnyChecks` and
+`--materializationBudget N`. The harness climbs the knob values in order and
+stops at the first consecutive pair whose log-log slope exceeds the degree
+(plus a small margin), or at the first point that hits the per-compile cap
+(`cap: 10 s, 8000 MB` by default). So pick small values: the first one must
+compile well inside the cap, and a family growing within the bound must stay
+far below it at the last. When every pair stays within the bound, the pin
+fails with "may be fixed" and prints its table.
+
+**Code size**: `expect-failure: code-size above 60 KB` (optionally with
+`flags:` and `cap:` lines) asserts the program's emitted Python is still
+larger than the bound.
+
+Every compile in these pins is capped (a timeout and a per-thread allocation
+limit), so a runaway program cannot hang or exhaust the suite. Full details
+are in `docs/testing.md`, "Performance pins".
 
 `TestKnownIssues.hs` discovers every pair here and checks it against its
 header. This coexists with `TestRejection.hs` rather than replacing it: a
