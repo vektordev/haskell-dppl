@@ -4382,13 +4382,66 @@ enumerateAgreement meta cumulative ag sample = do
   let armMass e = do
         eIR <- toIRGenerate metaV e
         requireDeterministicUnderEnum metaV "agreement arm" e eIR
-        return (if cumulative then compareValueExpr sr rt eIR sample
-                              else maskSR sr (leafEqIR rt sample eIR))
-  thenBody <- closeOver (lift (runWriterT (armMass (agThen ag))))
-  elseBody <- closeOver (lift (runWriterT (armMass (agElse ag))))
+        return (eIR, if cumulative then compareValueExpr sr rt eIR sample
+                                   else maskSR sr (leafEqIR rt sample eIR))
+      -- 'closeOver' for an arm, also handing back the arm's generated value so
+      -- 'armSum' can recognise a constructor of the loop variable.
+      closeOverArm m = do
+        ((eIR, armM), binds) <- m
+        let (invariant, inner) = hoistInvariantBindings v (generateLetInExpr binds armM)
+        setVariables invariant
+        return (eIR, inner)
+  (thenIR, thenBody) <- closeOverArm (lift (runWriterT (armMass (agThen ag))))
+  (elseIR, elseBody) <- closeOverArm (lift (runWriterT (armMass (agElse ag))))
   let mkMap b = IRBuiltin BMap [IRLambda v b, tensorDomainSR dom]
       zipSR a b  = IRBuiltin (BZip (srTimesOp sr)) [a, b]
       reduceSR t = IRBuiltin (BReduce (srReduceOp sr) 0) [t]
+      -- @sum_j w(j) * M(j)@ for a weight vector @w@ and an arm's mass @M@
+      -- against the query (task agreement-enumeration-point-collapse). Three
+      -- forms, cheapest first; each is exactly the generic scan's value.
+      --
+      --   * __the arm is a constructor of the loop variable__ (@right a@) over a
+      --     contiguous Int domain, for a point query: @M(j)@ is the indicator
+      --     @[sample == Tag j]@, which is nonzero for at most one @j@ -- the
+      --     sample's payload. So the sum is a tag test on the sample and one
+      --     'BIndex' at the payload's position, O(1) after the vectors exist,
+      --     where the scan built a second @[V]@ indicator vector against the
+      --     query. A payload of ANY matches every @j@ (it is the plain sum of
+      --     @w@), as does a top-level ANY sample; a payload outside the domain
+      --     matches none. Contiguity is what makes the position arithmetic
+      --     (@k - lo@) rather than a lookup; a non-contiguous domain keeps the
+      --     scan, since finding the position there is itself the O(V) search.
+      --   * __the arm does not read the loop variable__ (@left ()@): @M@ is a
+      --     constant of the loop, so it factors out of the sum as one
+      --     indicator times @sum_j w(j)@.
+      --   * otherwise, the scan.
+      armSum w eIR armBody
+        | not cumulative
+        , Just (isTag, fromTag) <- constructorOfLoopVar eIR
+        , Just (lo, n) <- contiguousIntDomain dom = do
+            wV <- mkVariable "agree_arm_weights"
+            kV <- mkVariable "agree_key"
+            setVariables [(wV, w)]
+            let k = IRVar kV
+                inDomain = IROp OpAnd (notIR (IROp OpLessThan k (IRConst (VInt lo))))
+                                      (IROp OpLessThan k (IRConst (VInt (lo + n))))
+                position = IRBuiltin (BIndex 0) [IRVar wV, IROp OpSub k (IRConst (VInt lo))]
+            return $
+              IRIf (IRUnaryOp OpIsAny sample) (reduceSR (IRVar wV)) $
+              IRIf (IRDestruct isTag sample)
+                (IRLetIn kV (IRDestruct fromTag sample)
+                  (IRIf (IRUnaryOp OpIsAny k) (reduceSR (IRVar wV))
+                    (IRIf inDomain position (srZero sr))))
+                (srZero sr)
+        | not (v `freeInIR` armBody) = return (srTimes sr armBody (reduceSR w))
+        | otherwise = return (reduceSR (zipSR w (mkMap armBody)))
+      -- @Tag v@, seen through the let-aliases the arm's generate compilation
+      -- wraps a variable read in (@let a' = v in Right a'@).
+      constructorOfLoopVar = conOf [v]
+      conOf vs (IRLetIn x (IRVar y) b) | y `elem` vs = conOf (x : vs) b
+      conOf vs (IRConstruct TgRight [IRVar x]) | x `elem` vs = Just (AcIsRight, AcFromRight)
+      conOf vs (IRConstruct TgLeft  [IRVar x]) | x `elem` vs = Just (AcIsLeft,  AcFromLeft)
+      conOf _ _ = Nothing
   -- The two marginal vectors are each read twice (the diagonal and the
   -- off-diagonal line), so they are bound once rather than rebuilt.
   paV <- mkVariable "agree_pa"
@@ -4400,12 +4453,21 @@ enumerateAgreement meta cumulative ag sample = do
                , (sbV, reduceSR (IRVar pbV)) ]
   let -- the elementwise product of the two [V] marginals: the whole point
       product' = zipSR (IRVar paV) (IRVar pbV)
-      diagonal = reduceSR (zipSR product' (mkMap thenBody))
       -- (Sb - pb(j)) per element. A BMap rather than a second BZip because
       -- 'srMinus' is 'logSubExpIR' under log space, which is not an Operand.
       complement = IRBuiltin BMap [IRLambda cV (srMinus sr (IRVar sbV) (IRVar cV)), IRVar pbV]
-      offDiagonal = reduceSR (zipSR (zipSR (IRVar paV) complement) (mkMap elseBody))
+  diagonal    <- armSum product' thenIR thenBody
+  offDiagonal <- armSum (zipSR (IRVar paV) complement) elseIR elseBody
   opaqueMass sr (srPlus sr diagonal offDiagonal) const0
+
+-- | A domain whose enumeration order ('multiValueToValueList', the order
+-- 'tensorDomainSR' lays a @[V]@ vector out in) is @lo, lo+1, .., lo+n-1@, as
+-- @(lo, n)@ -- so a value's position in the vector is plain subtraction.
+contiguousIntDomain :: MultiValue -> Maybe (Int, Int)
+contiguousIntDomain mv = case multiValueToValueList mv of
+  vals@(VInt lo : _)
+    | vals == map VInt [lo .. lo + length vals - 1] -> Just (lo, length vals)
+  _ -> Nothing
 
 -- | Refuse a generate-backed probability. 'toIREnumerate' compiles its operands
 -- /forward/ on the premise stated at its fallback equation: with the enclosing

@@ -57,9 +57,10 @@ fuzzCoverageExceptions :: [(String, String)]
 fuzzCoverageExceptions =
   -- Measured 2026-10-06 (sample of 1000 draws, ~550 compared, against 476
   -- non-slow corpus programs; the corpus uses 59 constructs, the sample
-  -- covers 54).
+  -- covers 54). BIndex joined 2026-10-06 (60 constructs).
   [ ("Accessor:AcSubtree", "theta trees: the generator emits no ThetaI/Subtree (thetaTree, subtree)")
   , ("Accessor:AcTheta",   "theta trees: the generator emits no ThetaI (lambdaThetaInverse, affineChainEndpoint)")
+  , ("Builtin:BIndex",     "agreement point query: needs the agreement fusion's `right v` arm over a contiguous Int domain (categoricalProductFusion)")
   , ("Builtin:BMapList",   "list map: the generator has no higher-order map over a list (map, mapMultList)")
   , ("Builtin:BZip OpMult", "agreement fusion: needs two independent categoricals compared with == (categoricalProductFusion)")
   , ("Operand:OpMax",      "max is forward-only and reaches an inference body only with enumerable operands (maxEnumerateBoth)")

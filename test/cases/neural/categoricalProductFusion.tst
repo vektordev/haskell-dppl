@@ -20,6 +20,12 @@
 -- accident. The final block is a one-hot expert against a spread one: agreement
 -- can only land on class 1, so the whole kept mass is that single product, the
 -- two dead classes are structurally impossible, and the complement is exact.
+--
+-- Task agreement-enumeration-point-collapse: a concrete Right query reads the
+-- product vector at the payload's position instead of scanning the domain, so
+-- the guard cases around that read are pinned in the last three rows. A payload outside the
+-- domain (either side) has no position and no mass; a top-level ANY is the
+-- whole mass, diagonal plus off-diagonal.
 p(Right 0,(2, [0.5, 0.3, 0.2]),(2, [0.1, 0.6, 0.3]))=(0.05, 0.0)
 p(Right 1,(2, [0.5, 0.3, 0.2]),(2, [0.1, 0.6, 0.3]))=(0.18, 0.0)
 p(Right 2,(2, [0.5, 0.3, 0.2]),(2, [0.1, 0.6, 0.3]))=(0.06, 0.0)
@@ -34,3 +40,6 @@ p(Right 1,(2, [0.0, 1.0, 0.0]),(2, [0.25, 0.5, 0.25]))=(0.5, 0.0)
 p(Right 2,(2, [0.0, 1.0, 0.0]),(2, [0.25, 0.5, 0.25])) is impossible
 p(Right ANY,(2, [0.0, 1.0, 0.0]),(2, [0.25, 0.5, 0.25]))=(0.5, 0.0)
 p(Left (),(2, [0.0, 1.0, 0.0]),(2, [0.25, 0.5, 0.25]))=(0.5, 0.0)
+p(Right 7,(2, [0.5, 0.3, 0.2]),(2, [0.1, 0.6, 0.3])) is impossible
+p(Right -1,(2, [0.5, 0.3, 0.2]),(2, [0.1, 0.6, 0.3])) is impossible
+p(ANY,(2, [0.5, 0.3, 0.2]),(2, [0.1, 0.6, 0.3]))=(1.0, 0.0)

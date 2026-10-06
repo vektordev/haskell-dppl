@@ -52,7 +52,7 @@ import TestSupport (expectVariantRefused)
 import Data.Functor.Identity (runIdentity)
 import qualified PredefinedFunctions as PF
 import SPLL.Validator (validateProgram)
-import SPLL.ReservedNames (distributionPrimitiveNames, languageKeywords, reservedIdentifierReason, internalNameReason, pythonRuntimeClassNames, pythonReservedIdentifiers, juliaRuntimeNames, juliaReservedIdentifiers)
+import SPLL.ReservedNames (queryParamName, distributionPrimitiveNames, languageKeywords, reservedIdentifierReason, internalNameReason, pythonRuntimeClassNames, pythonReservedIdentifiers, juliaRuntimeNames, juliaReservedIdentifiers)
 import System.Process (readProcessWithExitCode)
 import System.Exit (ExitCode(..))
 
@@ -3838,6 +3838,45 @@ test_agreementFusesToElementwiseProduct = testCase "agreementFusesToElementwiseP
   assertBool "an agreement over a shared latent must not fuse to a product" $
     not (containsZipProduct shared)
 
+-- | Task agreement-enumeration-point-collapse: past the fusion, a concrete
+-- query against the agreement must not scan the domain a second time. The
+-- diagonal arm (@right v@) is the indicator @[sample == Right j]@, nonzero at
+-- one @j@ at most, so it compiles to a guarded 'BIndex' into the product
+-- vector at the payload's position; the off-diagonal arm (@left ()@) does not
+-- read the loop variable, so its indicator factors out of the sum. Either
+-- way, no loop body compares against the query any more -- which is the
+-- O(V)-per-query cost the task removes, stated as IR shape rather than wall
+-- clock.
+--
+-- The cumulative variant is the control: a CDF over the payload is a real
+-- range, not a point, so its diagonal keeps the scan, and the same assertion
+-- over it must fail.
+test_agreementPointQueryIndexes :: TestTree
+test_agreementPointQueryIndexes = testCase "agreementPointQueryIndexes" $ do
+  prob <- corpusProbBody defaultCompilerConfig "categoricalProductFusion"
+  assertBool "the agreement should still fuse to an elementwise product" $
+    containsZipProduct prob
+  assertBool "a point query should read the product vector with a BIndex" $
+    containsIndex prob
+  assertBool "no loop body should compare against the query (no per-query domain scan)" $
+    not (loopBodyReadsQuery prob)
+  prog <- loadCorpusProgram "categoricalProductFusion"
+  case compile defaultCompilerConfig prog of
+    Left err -> assertFailure ("Compile error: " ++ show err)
+    Right irEnv -> case integFun (lookupIREnv "main" irEnv) of
+      Nothing -> assertFailure "categoricalProductFusion has no cumulative variant"
+      Just (cdf, _) -> assertBool "the cumulative control should still scan the query inside a loop" $
+        loopBodyReadsQuery cdf
+  where
+    containsIndex e = isIndex e || any containsIndex (getIRSubExprs e)
+    isIndex (IRBuiltin (BIndex _) _) = True
+    isIndex _ = False
+    loopBodyReadsQuery (IRBuiltin BMap [IRLambda _ body, t]) =
+      mentionsQuery body || loopBodyReadsQuery t
+    loopBodyReadsQuery e = any loopBodyReadsQuery (getIRSubExprs e)
+    mentionsQuery (IRVar n) = n == queryParamName
+    mentionsQuery e = any mentionsQuery (getIRSubExprs e)
+
 -- | The most loop-body evaluations one chain of nested enumerations costs: the
 -- largest product of domain sizes along any path of 'BMap's inside one
 -- another's bodies. A joint enumeration over @k@ stacked draws of a @V@-valued
@@ -4768,6 +4807,7 @@ internalsTests = testGroup "Internals"
       , test_nnHoistedOutOfEnumSum
       , test_nnHoistedOutOfNestedEnumSum
       , test_agreementFusesToElementwiseProduct
+      , test_agreementPointQueryIndexes
       , test_nestedEnumerationHonoursBudget
       , test_sharedLatentFactorizesPerSlot
       , test_drawProductReadFactorizesPerField
