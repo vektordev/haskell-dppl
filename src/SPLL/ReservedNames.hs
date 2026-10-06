@@ -391,7 +391,7 @@ pythonRuntimeValueNames =
   , "math", "modf", "nan", "nextafter", "nn_gather", "perm", "pi", "poison"
   , "pow", "prod", "radians", "rand", "randn", "random", "remainder"
   , "safe_div", "safe_exp", "safe_log", "sign", "signature", "sin", "sinh"
-  , "sqrt", "sumprod", "sys", "tan", "tanh", "tau", "tensor_index"
+  , "sqrt", "sumprod", "sys", "table_select", "tan", "tanh", "tau", "tensor_index"
   , "tensor_logsumexp", "tensor_sum", "throw", "toList", "torch", "trunc"
   , "ulp", "where_anchored"
   ]

@@ -203,6 +203,14 @@ def batched_dtype():
     # ... and a live tensor arm is never promoted: the net's dtype is its own.
     if B.where_anchored(True, torch.tensor([1.0], dtype=torch.float32), 0.5).dtype != torch.float32:
       fail("pythonLibBatched.where_anchored promoted a float32 tensor arm")
+  if hasattr(B, "table_select"):
+    # The flat form of a constant select chain answers in the kind of its
+    # values exactly as the chain's where_anchored would.
+    if B.table_select(torch.tensor([2, 5]), [0, 2], [0, 1], 2).dtype != torch.int64:
+      fail("pythonLibBatched.table_select on int values is not int64")
+    t = B.table_select(torch.tensor([2, 5]), [0, 2], [0.5, x], 0.25)
+    if t.dtype != torch.float64 or t.tolist() != [x, 0.25]:
+      fail("pythonLibBatched.table_select on float values gave " + repr(t))
 
   # The tensor twins of the scalar library's float-path functions agree with
   # it in value, not merely to float32 precision.

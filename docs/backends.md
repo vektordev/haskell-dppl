@@ -86,6 +86,16 @@ Python emitters have no such pass and were not checked. Pinned by `End2End`'s
 `deep expression spill` group (hand-built IR: a 300-term sum, with a
 divide-by-zero arm as the laziness canary).
 
+The batched emitter has no spill, but its one known V-deep line no longer
+arises: a select chain `x == k0 ? v0 : x == k1 ? v1 : .. : d` with scalar
+constant keys and arms and a pure scrutinee -- what `indexOfChain` makes of a
+read-logits network's value-to-slot lookup for a non-contiguous domain -- is
+emitted as one `table_select(x, keys, vals, d)` (`tableSelect`, from two keys
+up), a broadcast compare plus first-match argmax that answers in the arms'
+kind as `where_anchored` did. Pinned by `End2End`'s `wide neural domain`
+group, batched at 250 values. Docs-repo task
+`batched-table-domain-lookup-nests-v-deep`.
+
 A line whose depth is *inside* a comprehension body -- an enumerated `draw`'s
 `sum([body for b in xs])`, where nested ifs over the latent render as a
 walrus/tuple let chain ~10 brackets per `if` -- has nothing strict outside the

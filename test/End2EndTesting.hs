@@ -1551,10 +1551,11 @@ batchedAdtCdfNaNGuardTests = testGroup "batched ADT-cdf NaN guard" $
 -- trip CPython's parenthesis limit and fail the import the same way (task
 -- writelogits-cons-chain-nests-v-deep; the scalar backend now spills that
 -- chain, see 'SPLL.CodeGenPyTorch.spillable'). The scalar case also reads the
--- writeLogits vector back. The batched case stays at 150: its table domain's
--- sample-to-slot lookup is a nested @where_anchored@ chain that is V deep in
--- the same way (task batched-table-domain-lookup-nests-v-deep). The network
--- is a mock returning a
+-- writeLogits vector back. The batched case runs at 250 too, and reads the
+-- probability back as well as drawing: its table domain's value-to-slot
+-- lookup used to be a nested @where_anchored@ chain V deep in the same way,
+-- and is now one flat @table_select@ (task
+-- batched-table-domain-lookup-nests-v-deep). The network is a mock returning a
 -- one-hot weight vector, so the draw is deterministic whatever the random
 -- stream does, and a wrong slot or a wrong slot-to-value mapping fails
 -- outright rather than statistically.
@@ -1565,7 +1566,7 @@ batchedAdtCdfNaNGuardTests = testGroup "batched ADT-cdf NaN guard" $
 wideNeuralDomainTests :: TestTree
 wideNeuralDomainTests = testGroup "wide neural domain (neural-categorical-sampler-nests-v-deep)"
   [ testGroup "Python" [ testProperty name (once (scalarCase domain)) | (name, domain) <- domains 250 ]
-  , testGroup "BatchedPython" [ testProperty name (once (batchedCase domain)) | (name, domain) <- domains 150 ]
+  , testGroup "BatchedPython" [ testProperty name (once (batchedCase domain)) | (name, domain) <- domains 250 ]
   ]
   where
     hot = 137 :: Int
@@ -1630,6 +1631,10 @@ wideNeuralDomainTests = testGroup "wide neural domain (neural-categorical-sample
               , "r = main.generate(w, B)"
               , "if not bool((torch.as_tensor(r) == " ++ show (domain !! hot) ++ ").all()):"
               , "    raise ValueError('batched generate drew ' + repr(r) + ', expected all " ++ show (domain !! hot) ++ "')"
+              , "q = torch.tensor([" ++ show (domain !! hot) ++ ", " ++ show (domain !! (hot + 1)) ++ "]).repeat(B // 2)"
+              , "p = torch.as_tensor(main.forward(q, w)[0])"
+              , "if not bool((p == torch.tensor([1.0, 0.0], dtype=p.dtype).repeat(B // 2)).all()):"
+              , "    raise ValueError('batched forward disagrees with the one-hot network: ' + repr(p))"
               ]
 
 -- ===========================================================================

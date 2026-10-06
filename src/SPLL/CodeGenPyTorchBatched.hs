@@ -1554,6 +1554,17 @@ batchedExpr env (IRUnaryOp OpSign e) = "sign(" ++ batchedExpr env e ++ ")"
 -- M4: bucket-uniform (see 'structural'), so this is a plain Python bool at
 -- run time, not a per-element mask -- 'isAny' in pythonLibBatched.py.
 batchedExpr env (IRUnaryOp OpIsAny e) = "isAny(" ++ batchedExpr env e ++ ")"
+-- A value-to-constant lookup -- @x == k0 ? v0 : x == k1 ? v1 : .. : d@ with
+-- constant keys and arms, which is what 'SPLL.IROptimizer.indexOfChain' folds a
+-- read-logits network's value-to-slot lookup into for a non-contiguous domain
+-- -- is one flat runtime call instead of a select per key: the chain was V
+-- @where_anchored@s deep on one line, and CPython refuses a module nested over
+-- 200 brackets (task batched-table-domain-lookup-nests-v-deep).
+batchedExpr env e
+  | isSelectLike e, Just (x, rows, d) <- tableSelect env e = tableSelectCall env x rows d
+  where isSelectLike IRSelect{} = True
+        isSelectLike IRIf{}     = True
+        isSelectLike _          = False
 batchedExpr env (IRSelect c t f) = torchWhere env c t f
 -- A structural if left in expression position is Python's own lazy
 -- conditional expression, not a @torch.where@: its condition is a plain bool
@@ -1690,6 +1701,61 @@ batchedExpr env (IRDestruct (AcSubtree i) e) = "(" ++ batchedExpr env e ++ ")[1]
 -- unmasked into a raised diagnostic instead of a silent NaN.
 batchedExpr _env (IRError _) = "poison()"
 batchedExpr _ e = error ("batched PyTorch codegen: unexpected node " ++ irPrintFlat e)
+
+-- | Recognise a select chain that maps one pure scrutinee through a constant
+-- table: at least 'tableSelectMinKeys' guards @x == k_i@ against the same @x@,
+-- each picking a constant arm @v_i@, falling through to a constant default.
+-- Each level is an 'IRSelect' or an 'IRIf' whose guard is not 'structural' --
+-- the two forms 'torchWhere' renders (a read-logits body never goes through
+-- the select pass, so its chain is still 'IRIf').
+-- Keys must be scalar constants of one kind, and arms plus default scalar
+-- constants of one kind, so the runtime can build each as one tensor. The
+-- scrutinee must be pure: the chain evaluated it once per key, the table call
+-- evaluates it once. Shorter chains (a Bool domain, a two-value table) keep
+-- their 'where_anchored' form.
+tableSelect :: SEnv -> IRExpr -> Maybe (IRExpr, [(IRValue, IRValue)], IRValue)
+tableSelect env e0 = do
+  (x, rows, d) <- go Nothing e0
+  if length rows >= tableSelectMinKeys && isPure x
+       && sameKind (map fst rows) && sameKind (d : map snd rows)
+    then Just (x, rows, d) else Nothing
+  where
+    go mx e
+      | Just (IROp OpEq a b, IRConst v, rest) <- level e
+      , Just (x, k) <- scrutinee a b, maybe True (== x) mx, scalar k, scalar v = do
+          (_, rows, d) <- go (Just x) rest
+          return (x, (k, v) : rows, d)
+    go (Just x) (IRConst d) | scalar d = Just (x, [], d)
+    go _ _ = Nothing
+    level (IRSelect c t f) = Just (c, t, f)
+    level (IRIf c t f) | not (structural env c) = Just (c, t, f)
+    level _ = Nothing
+    scrutinee a (IRConst k) = Just (a, k)
+    scrutinee (IRConst k) b = Just (b, k)
+    scrutinee _ _ = Nothing
+    scalar (VInt _) = True
+    scalar (VBool _) = True
+    scalar (VFloat _) = True
+    scalar _ = False
+    kind (VInt _) = 0 :: Int
+    kind (VBool _) = 1
+    kind _ = 2
+    sameKind vs = all ((== kind (head vs)) . kind) vs
+
+-- | The shortest guard chain 'tableSelect' flattens.
+tableSelectMinKeys :: Int
+tableSelectMinKeys = 2
+
+-- | @table_select(x, keys, vals, default)@ in pythonLibBatched.py: the first
+-- key equal to @x@ picks its value, no match picks the default -- the chain's
+-- own semantics, as one broadcast comparison and an argmax.
+tableSelectCall :: SEnv -> IRExpr -> [(IRValue, IRValue)] -> IRValue -> String
+tableSelectCall env x rows d =
+  "table_select(" ++ batchedExpr env x ++ ", " ++ list (map fst rows) ++ ", "
+  ++ list (map snd rows) ++ ", " ++ val d ++ ")"
+  where
+    list vs = "[" ++ intercalate ", " (map val vs) ++ "]"
+    val v = fromMaybe (error ("tableSelectCall: no batched form for " ++ show v)) (batchedVal v)
 
 -- | @torch.where@, via the runtime's @where_anchored@: the condition is
 -- coerced to a bool tensor ('asmask') so a batch-independent (Python-bool)

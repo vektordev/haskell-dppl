@@ -238,6 +238,28 @@ def where_anchored(c, t, f):
   # how a folded tail constant lost half its digits.
   return torch.where(asmask(c), _anchor(t), _anchor(f))
 
+def table_select(x, keys, vals, default):
+  # A constant lookup table, the emitted form of a select chain
+  # `x == keys[0] ? vals[0] : x == keys[1] ? vals[1] : .. : default`
+  # (CodeGenPyTorchBatched's tableSelect; task
+  # batched-table-domain-lookup-nests-v-deep). The first matching key wins, as
+  # in the chain, and no match gives the default. One broadcast comparison
+  # against a [n] key tensor instead of n nested torch.wheres, which put one
+  # bracket per key on the line and failed import past ~200 keys. The result
+  # has the kind of `default`, as where_anchored's _anchor would give it.
+  xt = torch.as_tensor(x)
+  kt = torch.tensor(keys, device=xt.device)
+  if isinstance(default, bool):
+    dt = torch.bool
+  elif isinstance(default, int):
+    dt = torch.int64
+  else:
+    dt = DTYPE
+  vt = torch.tensor(list(vals) + [default], dtype=dt, device=xt.device)
+  hit = xt.unsqueeze(-1) == kt
+  idx = torch.where(hit.any(-1), hit.long().argmax(-1), len(keys))
+  return vt[idx]
+
 # --- neural: gather a per-element logit slot ---------------------------------
 # A neural read-logits network reads `logits[sample]`: for each batch element, the logit
 # slot selected by that element's (integer) sample. `out` is the [B, n] logit
