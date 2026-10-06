@@ -166,7 +166,8 @@ deterministic).
   `IRSample`, etc., plus `IRBuiltin Builtin [IRExpr]` for the tensor
   operations (see Tensors in the IR below).
 - **TypeInfo**: `rType` (return type: `TFloat`, `TBool`, `TInt`, `TSymbol`,
-  `ListOf`, `Tuple`, `TEither`, `TADT`, `TArrow`, etc.), `pType`
+  `ListOf`, `Tuple`, `TEither`, `TADT`, `TArrow`, `TTensor Shape RType`
+  (see "Shaped neural inputs" below), etc.), `pType`
   (probabilistic: `Deterministic`, `PNormal`, `PLogNormal`, `Integrate`,
   `Bottom`, and `NotSetYet` before inference runs), `chainName`, and `tags`
   (`DiscreteValues`, `IsConditional`). `PType`'s `PArr`/`TVar` are dead code.
@@ -1726,6 +1727,60 @@ Neural networks are declared separately as
 `NeuralDecl = (String, RType, Maybe MultiValue)` and enter the global type
 environment before inference; `ReadNN name param` calls the named network
 at runtime.
+
+**A network's input is `Symbol`, `Float`, `Tensor[s] t`, or a tuple of those**
+(task `tensor-type-shaped-neural-inputs`, slice S1 of the docs-repo design
+`tensors-in-core-language`). `Lang.isNeuralInputType` is the gate,
+`neuralInputType`/`neuralValueType` read a declaration's two sides, and
+`Validator.validateNeuralShape` refuses any other input, the reverse
+`(source -> Symbol)` shape, and a tensor anywhere in the *output* (tensor
+heads are slice S2). `Symbol` stays a first-class opaque handle beside
+`Tensor` permanently.
+
+- **The type.** `TTensor Shape RType` over `RType.hs`'s `Shape`/`Extent` (the
+  IR tensor's). The element is a scalar (`isTensorElemType`: Float, Int, Bool,
+  Symbol). Surface syntax `Tensor[e1, ..., en] t` (`Parser.pTensorType`; a type
+  keyword only when `[` follows, so `Tensor` stays usable as an ADT name).
+  Rank 0, a non-positive extent, a non-scalar element, and the nested spelling
+  `Tensor[2] (Tensor[3] Float)` are registered parse errors (nesting is
+  rejected, not normalized). `Tensor[1] Float` is not `Float`. Unification
+  (`RInfer.unifies`) is monomorphic: equal shapes unify their elements,
+  anything else is a `UnificationFail` naming both tensor types. No shape
+  variables, no broadcasting. `matches _ _ = False` degrades silently on a new
+  constructor, so a new `RType` constructor means grepping for every match.
+- **Input layout.** `AutoNeural.inputSlots` is the flat packing order:
+  element-major, tuple fields left to right, tensor elements row-major.
+  `makeForwardDecl` prints it (`inputLayoutString`) above the output layout in
+  every read-logits group's doc comment.
+- **The `ReadNN` modality rule reads its input.** A read keeps its Gaussian /
+  enumerable verdict only when its input is a point (`ModalityInfer.inputIsPoint`:
+  `Exact`, or `IWit` witnessed, field by field through a product); otherwise it
+  is `SampleOnly` (`Bottom`): generate compiles, probability is a missing
+  variant. `neural mu :: (Float -> Float); main = mu Normal` used to be typed
+  `PNormal` and answered a silently wrong density. This also moved
+  `readMNist(if Uniform < 0.5 then s else t)` from the central generate-backed
+  guard's refusal to a missing variant; that guard's message is now pinned
+  white-box (`Rejection.CentralGenerateBackedGuard`). A finite random input
+  (an enumerable `Bool` choosing the input) is `Bottom` too: marginalising over
+  it was declined (option (c) of design `diffusion-models-wishlist`).
+- **A tensor's modality** is `IRec topGround elem` (`ModalityInfer.topI`): the
+  compact form of a homogeneous n-ary product with a static spine.
+- **Mocks.** `MockNN.evaluateMockNNFor` dispatches on the input type: a
+  `Symbol` input keeps the envelope protocol (`(0, seed)` random,
+  `(1, (spike, seed))` spiking, `(2, [logits])` verbatim); any shaped input is real
+  data, and the mock is a fixed projection of it (`shapedMockLogits`: the input
+  flattened in layout order, truncated or padded with `1.0` to the plan's
+  logit count -- so a `Float -> Float` mock is `N(x, 1)`, and a
+  `(Float, Float) -> Float` one reads `(mu, sigma)` off its input). The
+  End2End harness shapes a `.tst` envelope given to a shaped network's
+  parameter into a real input carrying those logits (`shapeNeuralParams`,
+  applied once in `loadCorpusPair`, via `MockNN.mockInputFor`), and installs the
+  same projection as each text backend's mock (`NetMock`: `pyMockDef`,
+  `juliaMockDefs`, `batchedMockExpr`), so `neural/tensorInput*` runs the
+  `autoNeuralProb*` rows unchanged through a real 784-element tensor. Text
+  backends render only rank-1 tensor values (`pyVal`/`juliaVal`); a rank-2
+  input program is interpreter-only in the corpus
+  (`neural/tensorInputRank2Discrete`).
 
 **No `of` is `of _`, and every read is tagged** (task
 `of-annotation-and-auto-derived-enumeration-divergence`). `Prelude.compile`

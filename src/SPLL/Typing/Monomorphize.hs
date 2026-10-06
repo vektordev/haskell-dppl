@@ -36,7 +36,7 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 
 import SPLL.Lang.Types (Expr(..), ExprF(..), Program(..), TypeInfo(..))
-import SPLL.Typing.RType (RType(..), TVarR(..), Scheme(..))
+import SPLL.Typing.RType (RType(..), TVarR(..), Scheme(..), extentSize)
 
 -- | An instance: a declaration name and the (canonicalised) types its scheme
 -- variables are instantiated at. A monomorphic declaration has no arguments.
@@ -202,6 +202,9 @@ mangleRType t = case t of
   ListOf a -> "list_" ++ mangleRType a
   Tuple a b -> "tuple_" ++ mangleRType a ++ "_" ++ mangleRType b
   TEither a b -> "either_" ++ mangleRType a ++ "_" ++ mangleRType b
+  -- the shape is one segment (@3x4@, no underscore), so the prefix encoding stays
+  -- fixed-arity: @tensor3x4_float@
+  TTensor sh e -> "tensor" ++ intercalate "x" (map (show . extentSize) sh) ++ "_" ++ mangleRType e
   TADT name -> name
   NullList -> "nulllist"
   BottomTuple -> "bottomtuple"
@@ -225,6 +228,7 @@ tvarsOf t = case t of
   ListOf a -> tvarsOf a
   Tuple a b -> tvarsOf a ++ tvarsOf b
   TEither a b -> tvarsOf a ++ tvarsOf b
+  TTensor _ e -> tvarsOf e
   TArrow a b -> tvarsOf a ++ tvarsOf b
   GreaterType a b -> tvarsOf a ++ tvarsOf b
   _ -> []
@@ -235,6 +239,7 @@ substRType s t = case t of
   ListOf a -> ListOf (substRType s a)
   Tuple a b -> Tuple (substRType s a) (substRType s b)
   TEither a b -> TEither (substRType s a) (substRType s b)
+  TTensor sh e -> TTensor sh (substRType s e)
   TArrow a b -> TArrow (substRType s a) (substRType s b)
   GreaterType a b -> GreaterType (substRType s a) (substRType s b)
   _ -> t
@@ -250,6 +255,7 @@ matchRType pat target m = case (pat, target) of
   (ListOf a, ListOf b) -> matchRType a b m
   (Tuple a1 a2, Tuple b1 b2) -> pair a1 a2 b1 b2
   (TEither a1 a2, TEither b1 b2) -> pair a1 a2 b1 b2
+  (TTensor s1 e1, TTensor s2 e2) | s1 == s2 -> matchRType e1 e2 m
   (TArrow a1 a2, TArrow b1 b2) -> pair a1 a2 b1 b2
   (GreaterType a1 a2, GreaterType b1 b2) -> pair a1 a2 b1 b2
   _ | pat == target -> Just m

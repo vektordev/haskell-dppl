@@ -77,6 +77,16 @@ neural readMNist :: (Symbol -> Int) of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 main a b = readMNist(a) ++ readMNist(b)
 ```
 
+A network's input is an opaque `Symbol` handle, a `Float`, a shaped `Tensor[e1, ..., en] t` of a scalar, or a tuple of those. A shaped input is real data the program can compute, and its shape is checked where the network is called:
+
+```spll
+neural readImage :: (Tensor[28, 28] Float -> Int) of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+neural denoise :: ((Float, Float) -> Float)
+main img t = (readImage img, denoise (t * 0.5, t))
+```
+
+The network receives its input packed flat (tuple fields left to right, tensor elements row-major); the emitted code documents that layout next to the output layout. A read whose input is random and not recovered from the observation (`denoise (Normal, 1.0)`) is a continuous mixture with no closed form, so it can be sampled but not scored.
+
 The `of ...` clause enumerates the possible outputs of a neural network. When a network outputs an *unbounded recursive* ADT, the enumeration has to be bounded to a finite depth. Give the `data` type a default unroll depth with a trailing `depth N`, and auto-derivation (`of _`) uses it:
 
 ```spll

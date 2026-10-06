@@ -11,7 +11,7 @@ import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.Lang.Lang
 import Data.List (intercalate, dropWhileEnd)
 import SPLL.Lang.Types
-import SPLL.Typing.RType (RType(..), shapeRank)
+import SPLL.Typing.RType (RType(..), shapeRank, shapeNumel)
 import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, accessorMismatchMessage, fieldAccessorOwners)
 import Data.Maybe (fromMaybe)
 import Data.Functor ((<&>))
@@ -90,6 +90,10 @@ juliaVal (VThetaTree tt) = juliaValTree tt
   where juliaValTree (ThetaTree val trees) = "([" ++ intercalate ", " (map juliaDouble val) ++ "], [" ++ intercalate ", " (map juliaValTree trees) ++ "])"
 juliaVal VUnit = "nothing"
 juliaVal (VADT cName params) = juliaCtorRef cName ++ "(" ++ intercalate ", " (map juliaVal params) ++ ")"
+-- A rank-1 tensor is a Julia Vector, as 'BTensor' renders one.
+juliaVal (VTensor sh xs)
+  | shapeRank sh == 1 = "[" ++ intercalate ", " (map juliaVal xs) ++ "]"
+  | otherwise = error (juliaRankUnsupported "a tensor value" (shapeRank sh))
 juliaVal VAny = "\"ANY\""
 juliaVal (VError e) = "throw(\"" ++ e ++ "\")"
 -- See 'SPLL.CodeGenPyTorch.pyVal's matching case: 'VAnyExcept' has no runtime
@@ -477,6 +481,11 @@ jlConformsShape d (ListOf t) e =
   in "((" ++ e ++ " isa InferenceList) && all(" ++ v ++ " -> " ++ jlConformsAt (d + 1) t v ++ ", " ++ e ++ "))"
 jlConformsShape d (TEither a b) e =
   "(((" ++ e ++ " isa Left) && " ++ jlConformsAt d a (e ++ ".val") ++ ") || ((" ++ e ++ " isa Right) && " ++ jlConformsAt d b (e ++ ".val") ++ "))"
+jlConformsShape d (TTensor sh t) e
+  | shapeRank sh == 1 =
+      let v = "_ce" ++ show d
+      in "((" ++ e ++ " isa AbstractVector) && length(" ++ e ++ ") == " ++ show (shapeNumel sh)
+         ++ " && all(" ++ v ++ " -> " ++ jlConformsAt (d + 1) t v ++ ", " ++ e ++ "))"
 jlConformsShape _ _ _ = "true"
 
 collectApplyChain :: IRExpr -> (IRExpr, [IRExpr])

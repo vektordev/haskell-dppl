@@ -1,5 +1,9 @@
 module MockNN
   ( evaluateMockNN
+  , evaluateMockNNFor
+  , shapedMockLogits
+  , flattenMockInput
+  , mockInputFor
   , symbolEnvName
   , neuralRTypeToEnv
   ) where
@@ -8,6 +12,7 @@ import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types
 import SPLL.Lang.Lang
 import SPLL.AutoNeural
+import SPLL.Typing.RType
 
 import System.Random
 import Data.List (elemIndex)
@@ -36,6 +41,70 @@ evaluateMockNN part (VTuple a lst@(VList vals)) | a == VInt 2 =
 evaluateMockNN _ v = error $ "Mock NN parameter " ++ show v ++ " is not one of the three\n"
                           ++ "supported forms: (0, seed) random, (1, (spikeAt, seed)) spiking,\n"
                           ++ "or (2, [logit0, ...]) literal."
+
+-- | The mock network for a declaration whose input has type @inputTy@ (task
+-- tensor-type-shaped-neural-inputs).
+--
+-- A @Symbol@ input is an opaque handle, so the handle itself carries the mock's
+-- mode: the envelope protocol of 'evaluateMockNN'. Every other input (a @Float@,
+-- a @Tensor[s] t@, a tuple of those) is real data the program may have
+-- computed, so the mock is a fixed function of it instead -- 'shapedMockLogits'.
+evaluateMockNNFor :: RType -> PartitionPlan -> IRValue -> IRValue
+evaluateMockNNFor TSymbol plan v = evaluateMockNN plan v
+evaluateMockNNFor inputTy plan v =
+  constructVList (map VFloat (shapedMockLogits inputTy (getSize plan) v))
+
+-- | The shaped-input mock: the input flattened in its packing order
+-- ('SPLL.AutoNeural.inputSlots': element-major, tuple fields left to right,
+-- tensor elements row-major), then truncated to the plan's @n@ logits, or padded
+-- with @1.0@ when the input is shorter. It is a fixed affine map (a projection
+-- plus a constant), so an exact density can be pinned against it: a
+-- @Float -> Float@ network reads @x@ as its mean and @1.0@ as its sigma, and a
+-- @(Float, Float) -> Float@ one reads @(mu, sigma)@ off its input in layout order.
+shapedMockLogits :: RType -> Int -> IRValue -> [Double]
+shapedMockLogits inputTy n v = take n (flattenMockInput inputTy v ++ repeat 1.0)
+
+-- | Flatten a shaped input value in 'inputSlots' order. A value of the wrong
+-- shape is an error naming the expected type: the mock is the interpreter's only
+-- network, so a malformed input here is a program or harness bug.
+flattenMockInput :: RType -> IRValue -> [Double]
+flattenMockInput ty v = case (ty, v) of
+  (Tuple a b, VTuple x y) -> flattenMockInput a x ++ flattenMockInput b y
+  (TTensor sh e, VTensor sh' xs)
+    | sh == sh' -> concatMap (scalar e) xs
+  (_, _) | ty `elem` [TFloat, TInt, TBool] -> scalar ty v
+  _ -> mismatch
+  where
+    scalar TFloat (VFloat x) = [x]
+    scalar TInt   (VInt i)   = [fromIntegral i]
+    scalar TBool  (VBool b)  = [if b then 1 else 0]
+    scalar TSymbol _         = error ("Mock NN: a shaped input of type " ++ prettyRType ty
+                                      ++ " holds a Symbol, which the mock cannot read as a number")
+    scalar _ _               = mismatch
+    mismatch = error ("Mock NN: input " ++ show v ++ " does not have the declared input type "
+                      ++ prettyRType ty)
+
+-- | A correctly shaped mock input that makes 'shapedMockLogits' return the given
+-- logits: the logits packed in 'inputSlots' order, the rest of the input zero.
+-- This is how a test written against a @Symbol@ network's verbatim-logit
+-- envelope runs unchanged against the same network retyped to take a tensor.
+-- Refused when the input has fewer slots than there are logits, or when a slot a
+-- logit lands in is not a @Float@.
+mockInputFor :: RType -> [Double] -> IRValue
+mockInputFor inputTy logits
+  | inputWidth inputTy < length logits =
+      error ("Mock NN: an input of type " ++ prettyRType inputTy ++ " has " ++ show (inputWidth inputTy)
+             ++ " slots, too few to carry " ++ show (length logits) ++ " logits")
+  | otherwise = fst (go inputTy (logits ++ repeat 0))
+  where
+    go (Tuple a b) xs = let (va, xs1) = go a xs
+                            (vb, xs2) = go b xs1
+                        in (VTuple va vb, xs2)
+    go (TTensor sh TFloat) xs = let (here, rest) = splitAt (shapeNumel sh) xs
+                                in (VTensor sh (map VFloat here), rest)
+    go TFloat (x : rest) = (VFloat x, rest)
+    go t _ = error ("Mock NN: cannot synthesize a mock input slot of type " ++ prettyRType t
+                    ++ " (only Float slots can carry logits)")
 
 -- | Every mock-NN result is the flat logit vector its partition plan sizes.
 -- Naming the invariant reports a violation here, with the offending value,

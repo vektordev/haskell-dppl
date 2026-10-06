@@ -96,6 +96,16 @@ isWitI :: IMod -> Bool
 isWitI (IWit _) = True
 isWitI _        = False
 
+-- | Is a value a /point/ given the observation: Deterministic, or witnessed
+-- ('IWit'), field by field? A tuple input @(x_t, t)@ with @x_t@ witnessed and
+-- @t@ deterministic is a point although its 'outerI' meet is not 'Exact', so a
+-- product is decided per field. Any other structure must be 'Exact' outright.
+-- Used by the 'ReadNN' rule of 'inferE'.
+inputIsPoint :: IMod -> Bool
+inputIsPoint (IWit _)    = True
+inputIsPoint (IProd a b) = inputIsPoint a && inputIsPoint b
+inputIsPoint m           = gCap (outerI m) == Exact
+
 -- | The value-level ground summary of any 'IMod' (mirrors 'outerGround').
 --
 -- A scalar distribution family ('Family') is meaningful only on a bare scalar
@@ -193,6 +203,14 @@ topI (Tuple a b)   = IProd (topI a) (topI b)
 topI (TEither a b) = ISum topGround (topI a) (topI b)
 topI (TArrow _ b)  = IArr topGround (const (topI b))
 topI (ListOf a)    = IRec topGround (topI a)
+-- A tensor is a fixed-arity /homogeneous/ product (design tensors-in-core-language
+-- §4.1: an n-ary 'IProd'). Folding 'IProd' at numel 784 is the cost the design's
+-- implementation hint warns about; 'IRec' over the one element modality is the
+-- compact homogeneous form it suggests as the fallback. Its spine ground is
+-- 'topGround' because a tensor's shape is static, and its 'outerI' is the
+-- element's own law without a family -- a tensor of Normals is not a Normal --
+-- which is exactly the homogeneous n-ary product's projection.
+topI (TTensor _ a) = IRec topGround (topI a)
 topI _             = IG topGround
 
 -- | A representative modality for an /unknown/ binder of a given type: ground
@@ -204,6 +222,7 @@ repIMod (Tuple a b)   = IProd (repIMod a) (repIMod b)
 repIMod (TEither a b) = ISum topGround (repIMod a) (repIMod b)
 repIMod (TArrow _ b)  = IArr topGround (\arg -> applyOuterI (outerI arg) (repIMod b))
 repIMod (ListOf a)    = IRec topGround (repIMod a)
+repIMod (TTensor _ a) = IRec topGround (repIMod a)   -- see 'topI'
 repIMod _             = IG topGround
 
 -- | Subtyping over 'IMod' (transfers compared pointwise over the finite ground
@@ -359,9 +378,21 @@ inferE ctx env expr = case expr of
                 | otherwise         -> IG gExact   -- unbound ⇒ Deterministic (PInfer2 default)
     in done m (Expr (setPType ti (projectNode (rType ti) m)) (Var name)) []
 
+  -- A neural read is a Gaussian head (Float) or an enumerable/integrable read
+  -- /given its input/. That verdict is the read's own law only when the input
+  -- is a point: Deterministic, or witnessed on the path ('inputIsPoint'). A
+  -- random, unwitnessed input -- possible since inputs became program-computed
+  -- (task tensor-type-shaped-neural-inputs) -- makes the read a continuous
+  -- mixture over the input, @∫ N(y; mu(x), sigma(x)) p(x) dx@, which has no
+  -- closed form: the read is sample-only ('Bottom'). This is the restrictive
+  -- verdict (a) decided in diffusion-models-wishlist on 2026-10-01. Before it,
+  -- the input's modality was discarded, which was sound only while every input
+  -- was an opaque Symbol, and @mu Normal@ answered a silently wrong density.
   Expr ti (ReadNN name s) ->
-    let (_, s', sa) = inferE ctx env s
-        g = tagFin (icADTs ctx) ti (if rType ti == TFloat then gNormal else gIntegrate)
+    let (sm, s', sa) = inferE ctx env s
+        given = tagFin (icADTs ctx) ti (if rType ti == TFloat then gNormal else gIntegrate)
+        g | inputIsPoint sm = given
+          | otherwise       = groundMod SampleOnly Infinite FamNone
     in done (IG g) (Expr (setPType ti (projectGround g)) (ReadNN name s')) sa
 
   -- gt/lt are forward-only InjFs (PredefinedFunctions), but their modality is

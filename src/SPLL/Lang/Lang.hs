@@ -47,6 +47,9 @@ module SPLL.Lang.Lang (
 , resolveMultiValueTypeDecl
 , containsMultiValueTypeRef
 , neuralValueType
+, neuralInputType
+, isNeuralInputType
+, containsTensor
 , elementAt
 , getFunctionNames
 , lookupNeural
@@ -521,7 +524,7 @@ resolveMultiAutoE adtDecls = go [] []
 -- the same program.
 resolveNeuralAnnotation :: [ADTDecl] -> [(RType, MultiValue)] -> NeuralDecl -> Either String MultiValue
 resolveNeuralAnnotation adtDecls registry (name, declTy, tag) = case neuralValueType declTy of
-  Nothing -> Left ("neural declaration '" ++ name ++ "' is not of the form (Symbol -> T)")
+  Nothing -> Left ("neural declaration '" ++ name ++ "' is not of the form (input -> T)")
   Just target ->
     let written = fromMaybe MultiAuto (maybe (lookup target registry) Just tag)
     in either (\err -> Left ("neural declaration '" ++ name ++ "': " ++ err)) Right
@@ -567,13 +570,40 @@ containsMultiValueTypeRef n (MultiEither l r) = containsMultiValueTypeRef n l ||
 containsMultiValueTypeRef n (MultiTuple l r) = containsMultiValueTypeRef n l || containsMultiValueTypeRef n r
 containsMultiValueTypeRef n (MultiADT constrs) = any (\(_, args) -> any (containsMultiValueTypeRef n) args) constrs
 
--- | The output (target) RType of a read-logits neural declaration's "Symbol -> target"
--- arrow type - i.e. the type a NeuralDecl's MultiValue annotation describes.  The reverse
--- (source -> Symbol) shape has been removed (rejected at validation), so only the
--- read-logits shape resolves to a value type.
+-- | The output (target) RType of a read-logits neural declaration's "input -> target"
+-- arrow type - i.e. the type a NeuralDecl's MultiValue annotation describes. The input
+-- must be admissible ('isNeuralInputType'); the reverse (source -> Symbol) shape has been
+-- removed (rejected at validation by 'SPLL.Validator.validateNeuralShape').
 neuralValueType :: RType -> Maybe RType
-neuralValueType (TArrow TSymbol target) = Just target
+neuralValueType (TArrow inp target) | isNeuralInputType inp = Just target
 neuralValueType _ = Nothing
+
+-- | The input RType of a read-logits neural declaration, when it is admissible.
+neuralInputType :: RType -> Maybe RType
+neuralInputType (TArrow inp _) | isNeuralInputType inp = Just inp
+neuralInputType _ = Nothing
+
+-- | The types a neural network may consume (task tensor-type-shaped-neural-inputs;
+-- design tensors-in-core-language §3): an opaque @Symbol@ handle, a @Float@, a
+-- shaped @Tensor[s] τ@, and tuples of those. @Symbol@ stays a first-class input
+-- beside @Tensor@ permanently (decision D7). Every shaped input packs into a flat
+-- vector in the order 'SPLL.AutoNeural.inputLayoutString' prints.
+isNeuralInputType :: RType -> Bool
+isNeuralInputType TSymbol       = True
+isNeuralInputType TFloat        = True
+isNeuralInputType (TTensor _ e) = isTensorElemType e
+isNeuralInputType (Tuple a b)   = isNeuralInputType a && isNeuralInputType b
+isNeuralInputType _             = False
+
+-- | Does a type mention a tensor anywhere? Tensor-typed neural /outputs/ are
+-- slice S2 of tensors-in-core-language and refused until then.
+containsTensor :: RType -> Bool
+containsTensor (TTensor _ _)  = True
+containsTensor (Tuple a b)    = containsTensor a || containsTensor b
+containsTensor (TEither a b)  = containsTensor a || containsTensor b
+containsTensor (ListOf a)     = containsTensor a
+containsTensor (TArrow a b)   = containsTensor a || containsTensor b
+containsTensor _              = False
 
 
 elementAt :: ValueList a -> Int -> GenericValue a
@@ -602,11 +632,11 @@ getRType v@(VClosure {}) = error ("getRType: no return type for " ++ show v)
 getRType VAny = error "getRType: ANY is a marginal-query wildcard, not a typed value"
 getRType (VAnyExcept _) = error "getRType: ANY-except is a marginal-query wildcard, not a typed value"
 getRType (VError e) = error ("getRType: on an error value: " ++ e)
--- A tensor has no surface RType yet: it is an IR-internal value produced by
--- the tensor builtins and never appears in a program's return type. The typed
--- @TTensor Shape RType@ that would answer this is slice S2 of
--- tensors-in-core-language, out of scope for ir-tensor-values.
-getRType (VTensor _ _) = error "getRType: a tensor is IR-internal and has no surface RType"
+-- A tensor is homogeneous, so its first element names the element type. An
+-- empty tensor has no element to read it from (a well-formed shape is never
+-- empty: rank 0 and zero extents are refused by the parser).
+getRType (VTensor sh (x : _)) = TTensor sh (getRType x)
+getRType (VTensor sh []) = error ("getRType: an empty tensor of shape " ++ prettyShape sh ++ " has no element type")
 
 lookupNeural :: String -> [NeuralDecl] -> Maybe (RType, Maybe MultiValue)
 lookupNeural name decls = foldr (\(n, r, t) ret -> if n == name then Just (r, t) else ret) Nothing decls
@@ -663,6 +693,7 @@ prettyRType TThetaTree = "ThetaTree"
 prettyRType (ListOf t) = "[" ++ prettyRType t ++ "]"
 prettyRType (Tuple a b) = "(" ++ prettyRType a ++ ", " ++ prettyRType b ++ ")"
 prettyRType (TEither a b) = "Either " ++ prettyRType a ++ " " ++ prettyRType b
+prettyRType (TTensor sh e) = "Tensor" ++ prettyShape sh ++ " " ++ prettyRType e
 -- An ADT is named by its `data` declaration, so the name is the whole story.
 prettyRType (TADT name) = name
 prettyRType NullList = "[]"

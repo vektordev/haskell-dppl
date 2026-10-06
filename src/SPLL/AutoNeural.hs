@@ -2,6 +2,10 @@ module SPLL.AutoNeural(
   makeAutoNeural
 , makeForwardDecl
 , planLayoutString
+, InputSlot (..)
+, inputSlots
+, inputWidth
+, inputLayoutString
 , makePartitionPlan
 , resolvePartitionAnnotation
 , PartitionPlan (..)
@@ -48,12 +52,14 @@ import Control.Applicative ((<|>))
 -- "of" clause -- see 'resolvePartitionAnnotation'.
 makeAutoNeural :: [ADTDecl] -> CompilerConfig -> [(RType, MultiValue)] -> NeuralDecl -> IRFunGroup
 makeAutoNeural adtDecls conf registry decl@(name, declType, tag) =
-  case declType of
-    TArrow TSymbol target ->
-      -- Read-logits case: Symbol -> target. The forward-decl string (NN1's required output
-      -- layout) rides along as the group's doc so codegen emits it beside the readers.
+  case neuralValueType declType of
+    Just target ->
+      -- Read-logits case: input -> target, the input any admissible type
+      -- ('isNeuralInputType'). The forward-decl string (NN1's input and required output
+      -- layouts) rides along as the group's doc so codegen emits it beside the readers.
       makeReadLogitsFunGroup adtDecls conf name target (resolvePartitionAnnotation registry target tag) (makeForwardDecl adtDecls registry decl)
-    _ -> error $ "Invalid neural declaration for " ++ name ++ ": Neural networks must have Symbol on the left of the arrow (Symbol -> target)"
+    Nothing -> error $ "Invalid neural declaration for " ++ name ++ ": a neural network must have the form (input -> target), "
+                    ++ "its input Symbol, Float, a Tensor[...] of a scalar, or a tuple of those"
 
 -- | Resolve the MultiValue annotation for a PartitionPlan target/source type: the tag
 -- passed in directly (a declaration's own "of" clause) if there is one, else the
@@ -99,16 +105,79 @@ makeReadLogitsFunGroup adtDecls conf name target tag fwdDecl =
     where plan = makePartitionPlan adtDecls target tag
 
 -- | Forward declaration of a neural network (NN1): a human-readable description of the
--- read-logits network's required logit-vector output layout.  Emitted by codegen via the
--- group's doc (see 'makeReadLogitsFunGroup').  The reverse (source -> Symbol) shape has been
--- removed, so only the read-logits shape is rendered.
+-- read-logits network's input layout ('inputLayoutString') and required logit-vector
+-- output layout ('planLayoutString').  Emitted by codegen via the group's doc (see
+-- 'makeReadLogitsFunGroup').  The reverse (source -> Symbol) shape has been removed, so
+-- only the read-logits shape is rendered.
 makeForwardDecl :: [ADTDecl] -> [(RType, MultiValue)] -> NeuralDecl -> String
 makeForwardDecl adtDecls registry (name, declType, tag) =
-  case declType of
-    TArrow TSymbol target ->
-      "neural ReadLogits " ++ name ++ " :: (Symbol -> " ++ show target ++ "); NN1 required output "
+  case (neuralInputType declType, neuralValueType declType) of
+    (Just input, Just target) ->
+      "neural ReadLogits " ++ name ++ " :: (" ++ prettyRType input ++ " -> " ++ prettyRType target ++ ")\n"
+        ++ "NN1 input " ++ inputLayoutString input ++ "\n"
+        ++ "NN1 required output "
         ++ planLayoutString (makePartitionPlan adtDecls target (resolvePartitionAnnotation registry target tag))
-    _ -> "neural Declaration " ++ name ++ " :: " ++ show declType ++ " (invalid: a neural network must be Symbol -> target)"
+    _ -> "neural Declaration " ++ name ++ " :: " ++ show declType ++ " (invalid: a neural network must be input -> target)"
+
+-- | One leaf of a network input's flat packing (task tensor-type-shaped-neural-inputs):
+-- the slots @[slotStart, slotStart + slotWidth)@ hold a scalar of type 'slotElem'. A
+-- @Float@ or @Symbol@ leaf is one slot; a tensor leaf is 'shapeNumel' slots of its
+-- element type, row-major ('slotShape' is its shape).
+data InputSlot = InputSlot
+  { slotStart :: Int
+  , slotWidth :: Int
+  , slotElem  :: RType
+  , slotShape :: Maybe Shape
+  , slotPath  :: String   -- ^ @fst / snd@ breadcrumb from the input's root, @""@ at the root
+  } deriving (Show, Eq)
+
+-- | The flat packing order of a network input: element-major, tuple fields left to
+-- right, tensor elements row-major (outermost axis first). The same order
+-- 'MockNN' packs and unpacks a mock input in, and the one a real network's input
+-- tensor is expected to follow. Only admissible input types ('isNeuralInputType')
+-- have a layout.
+inputSlots :: RType -> [InputSlot]
+inputSlots = fst . go 0 ""
+  where
+    sub p seg = if null p then seg else p ++ " / " ++ seg
+    go ix path ty = case ty of
+      Tuple a b ->
+        let (sa, ix1) = go ix (sub path "fst") a
+            (sb, ix2) = go ix1 (sub path "snd") b
+        in (sa ++ sb, ix2)
+      TTensor sh e -> ([InputSlot ix (shapeNumel sh) e (Just sh) path], ix + shapeNumel sh)
+      _ | isNeuralInputType ty -> ([InputSlot ix 1 ty Nothing path], ix + 1)
+        | otherwise -> error ("inputSlots: " ++ prettyRType ty ++ " is not a neural input type")
+
+-- | The number of flat slots an input packs into.
+inputWidth :: RType -> Int
+inputWidth = sum . map slotWidth . inputSlots
+
+-- | The input-layout table 'makeForwardDecl' prints beside the output layout. A bare
+-- @Symbol@ input is an opaque handle the network receives unchanged, so it has no
+-- table.
+inputLayoutString :: RType -> String
+inputLayoutString TSymbol = "Symbol (an opaque handle, passed to the network unchanged)"
+inputLayoutString ty =
+  intercalate "\n" (heading : map tableLine (headerRow : sepRow : rows))
+  where
+    heading = "layout (" ++ show (inputWidth ty) ++ " values; element-major: tuple fields left to right, tensor elements row-major)"
+    rows = [ (rangeStr (slotStart sl) (slotWidth sl), prettyRType (slotElem sl), meaning sl) | sl <- inputSlots ty ]
+    meaning sl =
+      let what = case slotShape sl of
+            Just sh -> "Tensor" ++ prettyShape sh ++ " elements, row-major"
+            Nothing | slotElem sl == TSymbol -> "opaque handle"
+                    | otherwise -> "scalar"
+      in if null (slotPath sl) then what else slotPath sl ++ ": " ++ what
+    headerRow = ("idx", "type", "meaning")
+    sepRow = (replicate w1 '-', replicate w2 '-', replicate (length "meaning") '-')
+    fst3 (a, _, _) = a
+    snd3 (_, b, _) = b
+    w1 = maximum (map (length . fst3) (headerRow : rows))
+    w2 = maximum (map (length . snd3) (headerRow : rows))
+    pad w x = x ++ replicate (max 0 (w - length x)) ' '
+    tableLine (a, b, c) = pad w1 a ++ "  " ++ pad w2 b ++ "  " ++ c
+    rangeStr ix n = if n <= 1 then show ix else show ix ++ ".." ++ show (ix + n - 1)
 
 -- | A human-readable, multi-line *table* describing a PartitionPlan's flat logit-vector
 -- layout.  One row per leaf slot, with columns: index-range / constraint / semantic note.
@@ -708,8 +777,8 @@ noAny0 sample = IRIf (IRUnaryOp OpIsAny sample) (IRConst $ VFloat 0)
 validateWriteLogitsGaussian :: [ADTDecl] -> [(RType, MultiValue)] -> [NeuralDecl] -> IREnv -> Either CompilerError ()
 validateWriteLogitsGaussian adtDecls registry neuralDecls env = mapM_ checkDecl readLogitsDecls
   where
-    -- Only read-logits declarations (Symbol -> target) build a query-based writeLogits function.
-    readLogitsDecls = [ (name, target, tag) | (name, TArrow TSymbol target, tag) <- neuralDecls ]
+    -- Only read-logits declarations (input -> target) build a query-based writeLogits function.
+    readLogitsDecls = [ (name, target, tag) | (name, declTy, tag) <- neuralDecls, Just target <- [neuralValueType declTy] ]
     available = availableNormalFns env
     checkDecl (name, target, tag) =
       let plan     = makePartitionPlan adtDecls target (resolvePartitionAnnotation registry target tag)

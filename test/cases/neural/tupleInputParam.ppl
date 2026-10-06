@@ -1,0 +1,2 @@
+neural g :: ((Float, Float) -> Float)
+main p = g p

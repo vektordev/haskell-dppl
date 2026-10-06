@@ -22,7 +22,8 @@ import SPLL.Typing.Infer (addTypeInfo)
 import SPLL.Typing.ForwardChaining (FCData, annotateProg, progToFCData, isInvertibleLambda, isWitnessedLambda, untag, getTag)
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
-import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan)
+import SPLL.AutoNeural (PartitionPlan(..), makePartitionPlan, InputSlot(..), inputSlots, inputWidth, inputLayoutString)
+import MockNN (flattenMockInput, mockInputFor, shapedMockLogits)
 import SPLL.IntermediateRepresentation
 import SPLL.Semiring (semiringSuffix)
 import SPLL.IROptimizer (postProcess, optimizeEnv, deterministicGens, distributeIf, headHash, OptEnv(..), emptyOptEnv, optEnvFromADTs, simplify, propagateCondition)
@@ -4624,6 +4625,7 @@ internalsTests :: TestTree
 internalsTests = testGroup "Internals"
   [ testProperties "properties" $(allProperties)
   , testGroup "tensor builtins" tensorBuiltinTests
+  , shapedNeuralInputTests
   , categoricalIndexTests
   , untaggedShortCircuitTests
   , annotationSpellingTests
@@ -5199,3 +5201,46 @@ reservedNameTests = testGroup "reserved names"
         Left e -> assertBool ("refused for another reason: " ++ e)
                              (("the definition '" ++ name ++ "' collides") `isInfixOf` e)
         Right () -> assertFailure ("'" ++ name ++ "' passed validation")
+
+-- | Task tensor-type-shaped-neural-inputs: the flat packing order of a neural
+-- input (element-major, tuple fields left to right, tensor elements row-major),
+-- as the forward declaration prints it and as the mock packs and reads it, and
+-- the query-type guard's shape check.
+shapedNeuralInputTests :: TestTree
+shapedNeuralInputTests = testGroup "shaped neural inputs"
+  [ testCase "a (Float, Float) input is laid out fst then snd" $ do
+      inputSlots (Tuple TFloat TFloat) @?=
+        [ InputSlot 0 1 TFloat Nothing "fst", InputSlot 1 1 TFloat Nothing "snd" ]
+      let layout = inputLayoutString (Tuple TFloat TFloat)
+      assertBool ("expected slot 0 to be fst in:\n" ++ layout) (any (\l -> "0 " `isPrefixOf` l && "fst" `isInfixOf` l) (lines layout))
+      assertBool ("expected slot 1 to be snd in:\n" ++ layout) (any (\l -> "1 " `isPrefixOf` l && "snd" `isInfixOf` l) (lines layout))
+  , testCase "a (Float, Float) input round-trips its printed layout through the mock" $ do
+      -- the mock packs logits in layout order and reads them back in it: slot 0
+      -- of the layout is the network's mu, slot 1 its sigma
+      let ty = Tuple TFloat TFloat
+          packed = mockInputFor ty [2.0, 0.5]
+      packed @?= VTuple (VFloat 2.0) (VFloat 0.5)
+      flattenMockInput ty packed @?= [2.0, 0.5]
+      shapedMockLogits ty 2 (VTuple (VFloat 2.0) (VFloat 0.5)) @?= [2.0, 0.5]
+  , testCase "a tensor is one row-major block, nested in a tuple by position" $ do
+      let ty = Tuple (TTensor [EFixed 2, EFixed 3] TFloat) TFloat
+      inputWidth ty @?= 7
+      inputSlots ty @?=
+        [ InputSlot 0 6 TFloat (Just [EFixed 2, EFixed 3]) "fst", InputSlot 6 1 TFloat Nothing "snd" ]
+      let layout = inputLayoutString ty
+      assertBool ("expected the 0..5 tensor row in:\n" ++ layout) (any ("0..5" `isPrefixOf`) (lines layout))
+      flattenMockInput ty (mockInputFor ty [1, 2, 3, 4, 5, 6, 7]) @?= [1, 2, 3, 4, 5, 6, 7]
+  , testCase "the shaped mock truncates a wide input and pads a narrow one with 1.0" $ do
+      shapedMockLogits (TTensor [EFixed 4] TFloat) 2 (VTensor [EFixed 4] (map VFloat [9, 8, 7, 6])) @?= [9, 8]
+      shapedMockLogits TFloat 2 (VFloat 3.0) @?= [3.0, 1.0]
+  , testCase "a Symbol input prints as an opaque handle" $
+      assertBool "" ("opaque handle" `isInfixOf` inputLayoutString TSymbol)
+  , testCase "the query-type guard checks a tensor's shape and elements" $ do
+      let conforms ty v = evalClosedIR (IRConformsTo ty (IRConst v))
+          t3 = TTensor [EFixed 3] TFloat
+      conforms t3 (VTensor [EFixed 3] (map VFloat [1, 2, 3])) @?= Right (VBool True)
+      conforms t3 (VTensor [EFixed 2] (map VFloat [1, 2])) @?= Right (VBool False)
+      conforms t3 (VTensor [EFixed 3] (map VInt [1, 2, 3])) @?= Right (VBool False)
+      conforms (TTensor [EFixed 3, EFixed 1] TFloat) (VTensor [EFixed 3] (map VFloat [1, 2, 3])) @?= Right (VBool False)
+      conforms t3 (VFloat 1) @?= Right (VBool False)
+  ]

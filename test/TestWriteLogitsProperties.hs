@@ -47,7 +47,7 @@ import IRInterpreter (generateDet)
 import MockNN (evaluateMockNN)
 import TestCaseParser (parseTestCases, parseProgram, TestCase(..), Backend(..))
 import TestTolerances (probTolerance)
-import End2EndTesting (getAllTestFiles, writeLogitsArgsFor, endpointPlan)
+import End2EndTesting (getAllTestFiles, writeLogitsArgsFor, endpointPlan, shapeNeuralParams, envelopesShapeable)
 
 ------------------------------------------------------------------------
 -- Internal helpers
@@ -909,7 +909,7 @@ writeLogitsRoundtripTests = do
   pool <- loadRoundtripPool
   return $ testGroup "WriteLogitsRoundtrip"
     [ testGroup "LogitIdentity"
-        [ logitIdentityCase n p | (n, p, _) <- pool, isReadLogitsPassthrough p, writeLogitsGenerated p "main" ]
+        [ logitIdentityCase n p | (n, p, _) <- pool, isReadLogitsPassthrough p, envelopesShapeable p, writeLogitsGenerated p "main" ]
     , testGroup "DensityAgreement"
         [ densityAgreementCase n p target args
         | (n, p, tcs) <- pool
@@ -934,7 +934,7 @@ logitIdentityCase name p = testCase (name ++ ".logitIdentity") $ do
     slots <- case vec of
       VList l -> return l
       other   -> assertFailure (name ++ ": mock NN returned a non-vector: " ++ show other)
-    case runWriteLogitsC p compiled "main" [VTuple (VInt 2) vec] of
+    case runWriteLogitsC p compiled "main" (shapeNeuralParams p [VTuple (VInt 2) vec]) of
       Left err -> assertFailure (name ++ ": writeLogits failed: " ++ show err)
       Right (VList out) -> do
         assertEqual (name ++ ": roundtripped vector length") (length (toList slots)) (length (toList out))

@@ -399,6 +399,9 @@ bottomModality (Tuple a b)   = MProd (bottomModality a) (bottomModality b)
 bottomModality (TEither a b) = MSum bottomGround (bottomModality a) (bottomModality b)
 bottomModality (TArrow _ b)  = MArr bottomGround (mkTransfer (const (bottomModality b)))
 bottomModality (ListOf a)    = MRec bottomGround (bottomModality a)
+-- A tensor is a fixed-arity homogeneous product; 'MRec' over its element is the
+-- compact form (see 'SPLL.Typing.ModalityInfer.topI').
+bottomModality (TTensor _ a) = MRec bottomGround (bottomModality a)
 bottomModality _             = MGround bottomGround   -- ground scalars / ADTs / vars
 
 -- * Subtyping ------------------------------------------------------------------

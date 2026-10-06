@@ -8,7 +8,7 @@ generateRandE
 
 import Statistics.Distribution (quantile)
 import SPLL.IntermediateRepresentation
-import SPLL.Lang.Lang (elementAt, lookupNeural, floatApproxEqThresh, valueInMultiValue, neuralValueType)
+import SPLL.Lang.Lang (elementAt, lookupNeural, floatApproxEqThresh, valueInMultiValue, neuralValueType, neuralInputType)
 import StandardLibrary
 import MockNN
 import SPLL.AutoNeural
@@ -27,14 +27,22 @@ import Data.Functor ((<&>))
 import SPLL.Typing.AlgebraicDataTypes
 import Data.Vector.Internal.Check (HasCallStack)
 
--- | A neural declaration's type is @Symbol -> target@; the partition plan is
--- built from the target. Validation rejects any other shape, so a mismatch here
--- is a declaration that bypassed it.
+-- | A neural declaration's type is @input -> target@; the partition plan is built
+-- from the target. Validation rejects any other shape, so a mismatch here is a
+-- declaration that bypassed it.
 neuralOutputType :: String -> RType -> RType
 neuralOutputType name rt = fromMaybe
   (error ("Neural network '" ++ name ++ "' is declared as " ++ show rt
-          ++ "; a read-logits declaration must have type Symbol -> <output type>"))
+          ++ "; a read-logits declaration must have type input -> <output type>"))
   (neuralValueType rt)
+
+-- | The input type of a neural declaration, which picks its mock
+-- ('MockNN.evaluateMockNNFor'). Same validation premise as 'neuralOutputType'.
+neuralInputTypeOf :: String -> RType -> RType
+neuralInputTypeOf name rt = fromMaybe
+  (error ("Neural network '" ++ name ++ "' is declared as " ++ show rt
+          ++ "; a read-logits declaration must have type input -> <output type>"))
+  (neuralInputType rt)
 
 -- | 'AcTheta'/'AcSubtree' index into the theta tree their argument evaluates to.
 asThetaTree :: IRValue -> ThetaTree
@@ -173,7 +181,7 @@ generate f neurals' registry adts' globalEnv env [] (IRApply (IRVar name) sym)
     let realRT = neuralOutputType name rt
     let partPlan = makePartitionPlan adts' realRT (resolvePartitionAnnotation registry realRT tags')
     symVal <- generate f neurals' registry adts' globalEnv env [] sym
-    return $ evaluateMockNN partPlan symVal
+    return $ evaluateMockNNFor (neuralInputTypeOf name rt) partPlan symVal
 generate f neurals' registry adts' globalEnv env [] (IRApply expr val) = do
   exprVal <- generate f neurals' registry adts' globalEnv env [] expr
   valVal <- generate f neurals' registry adts' globalEnv env [] val
@@ -519,7 +527,7 @@ generate f neurals' registry adts' globalEnv env args (IRVar name) | "_mock" `is
     Nothing -> failWith f "No symbol found in the environment"
     Just sym -> do
       symVal <- generate f neurals' registry adts' globalEnv env args sym
-      return $ evaluateMockNN partPlan symVal
+      return $ evaluateMockNNFor (neuralInputTypeOf name rt) partPlan symVal
 -- To jump out of the interpreter into the implicit functions implemented in haskell we need to acuire the values of the parameter.
 -- This is not possible in normal program flow, because the parameters are applied to the functions before the IRVar call.
 -- To solve this we have created an artificial entry in the env table with the original name (E.g. Test) that points to a fresh name (E.g. Test_adt)
@@ -772,6 +780,10 @@ valueConformsTo (ListOf t)   (VList xs)        = all (valueConformsTo t) (listTo
 valueConformsTo (Tuple a b)  (VTuple x y)      = valueConformsTo a x && valueConformsTo b y
 valueConformsTo (TEither a _) (VEither (Left x))  = valueConformsTo a x
 valueConformsTo (TEither _ b) (VEither (Right y)) = valueConformsTo b y
+-- A tensor conforms only at its exact shape, element by element: a wrongly
+-- shaped query is refused rather than answered (design tensors-in-core-language
+-- §2.2, item 2).
+valueConformsTo (TTensor sh t) (VTensor sh' xs) = sh == sh' && length xs == shapeNumel sh && all (valueConformsTo t) xs
 valueConformsTo (TADT _)     (VADT _ _)        = True
 -- Types with no checkable runtime tag: never reject.
 valueConformsTo (TVarR _)       _ = True

@@ -17,12 +17,14 @@ module TestRejection (rejectionTests) where
 -- that changes which rule fires is pinpointed to the offending program.
 
 import SPLL.Lang.Lang
-import SPLL.Lang.Types (makeTypeInfo, GenericValue(..), MultiValue(..), CompilerError, ADTDecl(..))
-import SPLL.Typing.RType (RType(..))
+import SPLL.Lang.Types (makeTypeInfo, GenericValue(..), MultiValue(..), CompilerError, ADTDecl(..), TypeInfo(..))
+import SPLL.Typing.RType (RType(..), Extent(..))
+import Control.Monad.Random (evalRand, mkStdGen)
 import SPLL.Examples
 import SPLL.Validator (validateProgram)
-import SPLL.Prelude (compile, runProb, runInteg, uniform, constB, constF, (#+#), (#<#))
-import SPLL.IntermediateRepresentation (CompilerConfig, defaultCompilerConfig, checkQueryType, noIntegrate, noGenerate, firstAnyExceptIR, anyExceptCodegenRefusal, IRValue, pattern VProbDim, genFun, lookupIREnv)
+import SPLL.Prelude (compile, runProb, runInteg, runGen, uniform, constB, constF, (#+#), (#<#))
+import SPLL.IntermediateRepresentation (CompilerConfig, defaultCompilerConfig, checkQueryType, noIntegrate, noGenerate, firstAnyExceptIR, anyExceptCodegenRefusal, IRValue, pattern VProbDim, genFun, lookupIREnv, IREnv(..), IRFunGroup(..), IRExpr(..), Distribution(..))
+import SPLL.IRCompiler (requireNoGenerateBacked)
 import TestSupport (expectVariantRefused)
 import Data.Maybe (isJust)
 import SPLL.Typing.Infer (addTypeInfo)
@@ -54,6 +56,7 @@ rejectionTests = testGroup "Rejection"
   , adtCumulativeTests
   , generateBackedTests
   , generateBackedReadNNSymbolTests
+  , centralGenerateBackedGuardTests
   , generateBackedProjectionTests
   , refusedVariantTests
   , vAnyExceptCodegenTests
@@ -67,6 +70,7 @@ rejectionTests = testGroup "Rejection"
   , knownHeadArityTests
   , parseErrorLocationTests
   , neuralAnnotationTests
+  , tensorTypeTests
   ]
 
 -- ----------------------------------------------------------------------------
@@ -152,7 +156,7 @@ validatorCases =
   , ("anyInProgram",     anyInProgramProg,       "ANY may not be used")
   , ("writeLogitsCollision", writeLogitsCollisionProg, "conflicting PartitionPlan annotations")
   , ("reversedNeuralShapeDecl", reversedNeuralShapeProg, "neural writeLogits")
-  , ("malformedNeuralDecl", malformedNeuralDeclProg, "must have the form (Symbol -> target)")
+  , ("malformedNeuralDecl", malformedNeuralDeclProg, "must have the form (input -> target)")
   , ("adtCtorCollidesWithPredefined", adtCtorCollidesWithPredefinedProg, "claimed by more than one declaration")
   , ("adtCtorNameSharedAcrossAdts", adtCtorNameSharedAcrossAdtsProg, "claimed by more than one declaration")
   , ("adtCtorCollidesWithUserFunction", adtCtorCollidesWithUserFunctionProg, "claimed by more than one declaration")
@@ -719,12 +723,15 @@ generateBackedTests = testGroup "GenerateBackedInference"
 -- else t)' used to compile a probability function that drew the coin *inside*
 -- the compiled body -- a different network input, and hence a different
 -- number, on every call with the same query (task
--- readnn-random-symbol-generate-backed). This is a special case of the same
--- generate-backed-inference defect as 'GenerateBackedInference' above, so it
--- is caught by the same central guard (task
--- central-generate-backed-prob-body-guard, 'requireNoGenerateBacked') that
--- landed after this task was filed -- Phase 1b of the task's own workflow: no
--- code change needed, this group is the regression test that pins it.
+-- readnn-random-symbol-generate-backed). That was first caught by the central
+-- generate-backed guard (task central-generate-backed-prob-body-guard).
+--
+-- Since task tensor-type-shaped-neural-inputs it is caught one stage earlier:
+-- 'ModalityInfer' types a read of a random, unwitnessed input sample-only
+-- ('Bottom'), so no probability or integrate function is compiled at all and
+-- generate survives. This group pins that verdict; the central guard's own
+-- message, which this program used to be the only route to, is pinned
+-- white-box by 'centralGenerateBackedGuardTests'.
 -- ----------------------------------------------------------------------------
 
 -- The symbol argument to readMNist is itself the result of a coin flip
@@ -743,35 +750,73 @@ readNNDeterministicSymbolSrc = unlines
   , "main s = readMNist(s) ++ 1"
   ]
 
--- These exercise 'compile' directly rather than 'runProb'/'runInteg':  the
--- refusal fires while assembling the 'IREnv' (which bundles the prob and
--- integ bodies together), before any query value or MockNN-formatted
--- argument would be needed, and using 'compile' keeps that pinned regardless
--- of MockNN's own input-shape requirements.
+-- | Whether @main@ got a probability, an integrate and a generate function.
+mainVariants :: Either CompilerError IREnv -> IO (Bool, Bool, Bool)
+mainVariants (Left e) = assertFailure ("compile refused: " ++ e) >> return (False, False, False)
+mainVariants (Right (IREnv groups _ _)) = case filter ((== "main") . groupName) groups of
+  (g : _) -> return (isJust (probFun g), isJust (integFun g), isJust (genFun g))
+  [] -> assertFailure "no main group" >> return (False, False, False)
+
+-- These exercise 'compile' directly rather than 'runProb'/'runInteg': the
+-- verdict is in which variants the 'IREnv' has, before any query value or
+-- MockNN-formatted argument would be needed.
 generateBackedReadNNSymbolTests :: TestTree
 generateBackedReadNNSymbolTests = testGroup "GenerateBackedReadNNSymbol"
-  [ testCase "a randomly-chosen Symbol argument to ReadNN is refused" $
+  [ testCase "a randomly-chosen Symbol argument to ReadNN gets no probability or integrate function" $
       withParsed readNNRandomSymbolSrc $ \prog -> do
-        res <- refusal (compile defaultCompilerConfig prog)
+        res <- forced (compile defaultCompilerConfig prog)
         case res of
-          Just e  -> assertBool ("expected the central generate-backed refusal, got: " ++ e)
-                                ("central-generate-backed-prob-body-guard" `isInfixOf` e)
-          Nothing -> assertFailure
-            "a probability/integrate function that samples which network input to read was accepted"
-  , testCase "the refusal names the offending functions and their randomness source" $
-      withParsed readNNRandomSymbolSrc $ \prog -> do
-        res <- refusal (compile defaultCompilerConfig prog)
-        assertBool "the refusal does not name main.prob, main.integ and IRUniform, so it does not say what is wrong"
-                   (maybe False (\e -> "main.prob" `isInfixOf` e
-                                    && "main.integ" `isInfixOf` e
-                                    && "IRUniform" `isInfixOf` e)
-                          res)
+          Left ex -> assertFailure ("compile crashed: " ++ show ex)
+          Right _ -> return ()
+        (hasProb, hasInteg, hasGen) <- mainVariants (compile defaultCompilerConfig prog)
+        assertBool "a probability function that samples which network input to read was compiled" (not hasProb)
+        assertBool "an integrate function that samples which network input to read was compiled" (not hasInteg)
+        assertBool "generate was lost along with the inference variants" hasGen
   , testCase "a deterministic Symbol argument to ReadNN still compiles" $
       withParsed readNNDeterministicSymbolSrc $ \prog -> do
         res <- forced (compile defaultCompilerConfig prog)
         case res of
           Left e  -> assertFailure ("a bound, non-random Symbol argument was refused: " ++ show e)
           Right _ -> return ()
+        (hasProb, _, _) <- mainVariants (compile defaultCompilerConfig prog)
+        assertBool "a deterministic Symbol argument lost its probability function" hasProb
+  ]
+
+-- | A compiled environment whose @main@ probability and integrate bodies draw
+-- a fresh 'IRUniform': what the central guard exists to refuse. Built by hand
+-- because no source program is known to reach it any more (the last one, a
+-- random 'ReadNN' input, is now typed sample-only -- see above).
+generateBackedEnv :: IREnv
+generateBackedEnv = IREnv
+  [ IRFunGroup { groupName = "main"
+               , genFun = Just (IRSample IRUniform, "")
+               , probFun = Just (IRLambda "sample" (IRSample IRUniform), "")
+               , integFun = Just (IRLambda "sample" (IRSample IRUniform), "")
+               , writeLogitsFun = Nothing, normalFun = Nothing
+               , groupDoc = "", sampleDomain = Nothing
+               , refusedVariants = [], maskVariantOf = Nothing } ]
+  [] []
+
+centralGenerateBackedGuardTests :: TestTree
+centralGenerateBackedGuardTests = testGroup "CentralGenerateBackedGuard"
+  [ testCase "a probability body that draws randomness is refused" $
+      case requireNoGenerateBacked defaultCompilerConfig generateBackedEnv of
+        Left e -> assertBool ("expected the central generate-backed refusal, got: " ++ e)
+                             ("central-generate-backed-prob-body-guard" `isInfixOf` e)
+        Right _ -> assertFailure "a generate-backed probability body was accepted"
+  , testCase "the refusal names the offending functions and their randomness source" $
+      assertBool "the refusal does not name main.prob, main.integ and IRUniform, so it does not say what is wrong"
+        (either (\e -> "main.prob" `isInfixOf` e && "main.integ" `isInfixOf` e && "IRUniform" `isInfixOf` e)
+                (const False)
+                (requireNoGenerateBacked defaultCompilerConfig generateBackedEnv))
+  , testCase "genuine randomness under --noGenerate keeps the generic message, not the flag-specific one" $
+      case requireNoGenerateBacked noGenerateConf generateBackedEnv of
+        Left e -> do
+          assertBool ("expected the generic generate-backed refusal, got: " ++ e)
+                     ("central-generate-backed-prob-body-guard" `isInfixOf` e)
+          assertBool ("the --noGenerate-specific message fired for genuine randomness: " ++ e)
+                     (not ("nogenerate-dangling-cross-function-generate-call" `isInfixOf` e))
+        Right _ -> assertFailure "a generate-backed probability body was accepted under --noGenerate"
   ]
 
 -- ----------------------------------------------------------------------------
@@ -1120,17 +1165,6 @@ noGenerateSuppressedGeneratorTests = testGroup "NoGenerateSuppressedGenerator"
         case compile noGenerateConf prog of
           Left err -> assertFailure ("unaffected program was refused under --noGenerate: " ++ show err)
           Right _  -> return ()
-  , testCase "genuine randomness under --noGenerate keeps the generic message, not the flag-specific one" $
-      withParsed readNNRandomSymbolSrc $ \prog -> do
-        res <- refusal (compile noGenerateConf prog)
-        case res of
-          Just e -> do
-            assertBool ("expected the generic generate-backed refusal, got: " ++ e)
-                       ("central-generate-backed-prob-body-guard" `isInfixOf` e)
-            assertBool ("the --noGenerate-specific message fired for genuine randomness: " ++ e)
-                       (not ("nogenerate-dangling-cross-function-generate-call" `isInfixOf` e))
-          Nothing -> assertFailure
-            "a probability/integrate function that samples which network input to read was accepted"
   ]
 
 -- ----------------------------------------------------------------------------
@@ -1724,3 +1758,126 @@ neuralAnnotationTests = testGroup "NeuralAnnotation"
         , "main s = isA1 (n s)" ])
       assertBool ("expected mutual recursion named in: " ++ msg) ("mutually recursive" `isInfixOf` msg)
   ]
+
+-- ----------------------------------------------------------------------------
+-- Task tensor-type-shaped-neural-inputs (tensors S1): the `Tensor[...] t` type,
+-- its monomorphic shape unification, the widened neural input gate, and the
+-- sample-only verdict for a neural read of a random, unwitnessed input.
+-- ----------------------------------------------------------------------------
+
+-- | The parsed declaration type of the first neural declaration in @src@.
+neuralDeclType :: String -> IO RType
+neuralDeclType src = case tryParseProgram "prog.spll" src of
+  Left err -> assertFailure ("test program failed to parse: " ++ errorBundlePretty err)
+  Right p -> case neurals p of
+    ((_, ty, _) : _) -> return ty
+    [] -> assertFailure "no neural declaration parsed"
+
+-- | The validation refusal for @src@.
+validationRefusal :: String -> IO String
+validationRefusal src = case tryParseProgram "prog.spll" src of
+  Left err -> assertFailure ("test program failed to parse: " ++ errorBundlePretty err)
+  Right p -> case validateProgram p of
+    Right () -> assertFailure "program validated although it should be rejected"
+    Left e -> return e
+
+tensorTypeTests :: TestTree
+tensorTypeTests = testGroup "TensorTypes"
+  [ testCase "Tensor[e1, ..., en] t parses to a shaped type" $ do
+      ty <- neuralDeclType "neural n :: (Tensor[28, 28] Float -> Int) of [0, 1]\nmain x = n x\n"
+      assertEqual "" (TArrow (TTensor [EFixed 28, EFixed 28] TFloat) TInt) ty
+
+  , testCase "a Tensor[783] argument at a Tensor[784] call site names both shapes" $ do
+      msg <- typeErrorFor (unlines
+        [ "neural a :: (Tensor[784] Float -> Int) of [0, 1]"
+        , "neural b :: (Tensor[783] Float -> Int) of [0, 1]"
+        , "main x = a x ++ b x" ])
+      assertBool ("expected both shapes in: " ++ msg)
+        ("Tensor[784] Float" `isInfixOf` msg && "Tensor[783] Float" `isInfixOf` msg)
+      assertBool ("expected a position in: " ++ msg) ("prog.spll:3:" `isInfixOf` msg)
+
+  , testCase "a Tensor[783] field passed to a Tensor[784] network names both shapes" $ do
+      msg <- typeErrorFor (unlines
+        [ "data Img = Img pix::Tensor[783] Float"
+        , "neural a :: (Tensor[784] Float -> Int) of [0, 1]"
+        , "main i = a (pix i)" ])
+      assertBool ("expected both shapes in: " ++ msg)
+        ("Tensor[784] Float" `isInfixOf` msg && "Tensor[783] Float" `isInfixOf` msg)
+
+  , testCase "equal shapes with different element types do not unify" $ do
+      msg <- typeErrorFor (unlines
+        [ "neural a :: (Tensor[3] Float -> Int) of [0, 1]"
+        , "neural b :: (Tensor[3] Int -> Int) of [0, 1]"
+        , "main x = a x ++ b x" ])
+      assertBool ("expected both tensor types in: " ++ msg)
+        ("Tensor[3] Float" `isInfixOf` msg && "Tensor[3] Int" `isInfixOf` msg)
+
+  , testCase "a nested tensor spelling is rejected, not normalized" $
+      forM_ [ "neural n :: (Tensor[2] (Tensor[3] Float) -> Int) of [0, 1]\nmain x = n x\n"
+            , "neural n :: (Tensor[2] Tensor[3] Float -> Int) of [0, 1]\nmain x = n x\n" ] $ \src -> do
+        msg <- parseErrorFor src
+        assertBool ("expected the nested-tensor diagnostic in: " ++ msg)
+          ("nested tensor type" `isInfixOf` msg && "Tensor[2,3] Float" `isInfixOf` msg)
+
+  , testCase "rank 0 is not a shape" $ do
+      msg <- parseErrorFor "neural n :: (Tensor[] Float -> Int) of [0, 1]\nmain x = n x\n"
+      assertBool ("expected the rank-0 diagnostic in: " ++ msg) ("rank 0" `isInfixOf` msg)
+
+  , testCase "an extent must be positive" $ do
+      msg <- parseErrorFor "neural n :: (Tensor[3, 0] Float -> Int) of [0, 1]\nmain x = n x\n"
+      assertBool ("expected the extent diagnostic in: " ++ msg) ("must be positive" `isInfixOf` msg)
+
+  , testCase "a tensor of tuples is rejected" $ do
+      msg <- parseErrorFor "neural n :: (Tensor[3] (Float, Float) -> Int) of [0, 1]\nmain x = n x\n"
+      assertBool ("expected the element-type diagnostic in: " ++ msg)
+        ("element type must be a scalar" `isInfixOf` msg)
+
+  , testCase "Tensor[3] Symbol parses and type-checks as a payload" $
+      withParsed "neural n :: (Tensor[3] Symbol -> Int) of [0, 1]\nmain x = n x\n" $ \prog -> do
+        assertEqual "declared type" [TArrow (TTensor [EFixed 3] TSymbol) TInt] [ty | (_, ty, _) <- neurals prog]
+        case addTypeInfo prog of
+          Left e -> assertFailure ("Tensor[3] Symbol failed to type-check: " ++ e)
+          Right (typed, _) -> case lookup "main" (functions typed) of
+            Just body -> assertEqual "main's type"
+                           (TArrow (TTensor [EFixed 3] TSymbol) TInt) (rType (getTypeInfo body))
+            Nothing -> assertFailure "no main"
+        res <- forced (compile defaultCompilerConfig prog)
+        case res of
+          Left ex -> assertFailure ("compile crashed: " ++ show ex)
+          Right _ -> assertBool "compile refused" (not (isLeft (compile defaultCompilerConfig prog)))
+
+  , testCase "a tensor-typed neural output is refused (tensors S2)" $ do
+      msg <- validationRefusal "neural n :: (Symbol -> Tensor[3] Float)\nmain s = n s\n"
+      assertBool ("expected the tensor-output refusal in: " ++ msg)
+        ("tensor-typed neural outputs are not supported" `isInfixOf` msg)
+
+  , testCase "an input that is not Symbol, Float, a tensor or a tuple of those is refused" $ do
+      msg <- validationRefusal "neural n :: (Int -> Float)\nmain s = n s\n"
+      assertBool ("expected the input-type refusal in: " ++ msg)
+        ("a network's input must be Symbol, Float" `isInfixOf` msg)
+
+  , testCase "a tuple of admissible inputs is admitted" $
+      withParsed "neural n :: ((Tensor[4] Float, (Float, Symbol)) -> Float)\nmain x = n x\n" $ \prog ->
+        assertEqual "" (Right ()) (validateProgram prog)
+
+  , testGroup "a neural read of a random, unwitnessed input is sample-only"
+      [ testCase "probability is a missing variant, not a wrong density" $
+          withParsed sampleOnlyReadSrc $ \prog -> do
+            res <- forcedProb prog (VFloat 0.5)
+            case res of
+              Left ex -> assertFailure ("crashed the compiler: " ++ show ex)
+              Right (Left e) -> assertBool
+                ("expected the missing-variant answer, got: " ++ e)
+                ("has no compiled probability function" `isInfixOf` e)
+              Right (Right v) -> assertFailure ("compiled to a probability function (" ++ show v ++ ")")
+      , testCase "generate still works" $
+          withParsed sampleOnlyReadSrc $ \prog ->
+            case runGen defaultCompilerConfig prog [] of
+              Left e -> assertFailure ("generate refused: " ++ e)
+              Right r -> case evalRand r (mkStdGen 1) of
+                VFloat _ -> return ()
+                v -> assertFailure ("generate returned a non-float: " ++ show v)
+      ]
+  ]
+  where
+    sampleOnlyReadSrc = "neural mu :: (Float -> Float)\nmain = mu Normal\n"

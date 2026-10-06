@@ -11,6 +11,7 @@ module SPLL.IRCompiler (
   envToIR,
   envToIRUnoptimized,
   generateBackedSites,
+  requireNoGenerateBacked,
   stripBranchCount,
   toIRNormal,
   sharesEnumeratedLatent,
@@ -1724,6 +1725,7 @@ dimZeroByType decls = go []
       TUnit        -> True
       NullList     -> True
       ListOf t     -> go seen t
+      TTensor _ t  -> go seen t
       Tuple a b    -> go seen a && go seen b
       TEither a b  -> go seen a && go seen b
       -- A recursive ADT is dimension-0 as long as no reachable field is
@@ -4489,6 +4491,7 @@ floatFree decls = go Set.empty
       TSymbol -> True
       TUnit -> True
       ListOf a -> go seen a
+      TTensor _ a -> go seen a
       Tuple a b -> go seen a && go seen b
       TEither a b -> go seen a && go seen b
       TADT n
@@ -5974,6 +5977,7 @@ planCanonicalValue adtDecls' seen ty = case ty of
   TUnit       -> Just VUnit
   TSymbol     -> Just (VSymbol "")
   ListOf _    -> Just (VList EmptyList)
+  TTensor sh e -> VTensor sh . replicate (shapeNumel sh) <$> rec e
   Tuple a b   -> VTuple <$> rec a <*> rec b
   TEither l _ -> (VEither . Left) <$> rec l
   TADT n | n `notElem` seen -> do
@@ -7672,7 +7676,8 @@ calleeLeadingArgs meta l lResolvedCN = do
 planReadOf :: CompilerMetadata -> Expr -> Maybe (String, PartitionPlan, Expr)
 planReadOf meta v
   | Expr _ (ReadNN nnName symArg) <- v
-  , Just (_, TArrow TSymbol targetTy, declTag) <- find (\(n, _, _) -> n == nnName) (neurals (compilingProgram meta))
+  , Just (_, declTy, declTag) <- find (\(n, _, _) -> n == nnName) (neurals (compilingProgram meta))
+  , Just targetTy <- neuralValueType declTy
   , let resolved = resolvePartitionAnnotation (writeLogitsDecls (compilingProgram meta)) targetTy declTag
   , isJust resolved || isRight (autoDeriveMultiValue (adtDecls meta) targetTy)
   = Just (nnName, makePartitionPlan (adtDecls meta) targetTy resolved, symArg)

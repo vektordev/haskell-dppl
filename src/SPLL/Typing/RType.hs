@@ -8,6 +8,8 @@ module SPLL.Typing.RType
   , shapeNumel
   , shapeRank
   , dropAxis
+  , isTensorElemType
+  , prettyShape
   , ClassConstraint(..)
   , Scheme(..)
   , matches
@@ -16,22 +18,24 @@ module SPLL.Typing.RType
   , constraintTV
   ) where
 
+import Data.List (intercalate)
+
 newtype TVarR = TV String
   deriving (Show, Eq, Ord)
 
 -- | The shape of a tensor: the extent of each axis, outermost first. The rank
--- is the length. Lives beside 'RType' rather than in the IR because the typed
--- surface tensor of design tensors-in-core-language (§2.2) is
--- @TTensor Shape RType@ over this same type -- so when that lands, the surface
--- type lowers onto the IR value already carrying the shape, with nothing to
--- re-represent.
+-- is the length. Shared by the IR tensor value ('VTensor') and the surface
+-- type @TTensor Shape RType@ (design tensors-in-core-language §2.2), so the
+-- surface type lowers onto the IR value already carrying the shape, with
+-- nothing to re-represent. Rank 0 is not a shape: the parser refuses
+-- @Tensor[] τ@.
 type Shape = [Extent]
 
 -- | The extent of one axis.
 --
 -- A sum type with a single constructor on purpose (design
--- tensors-in-core-language §9.4, hedge 1): shape /variables/ are deliberately
--- out of v1, and spelling this @type Shape = [Int]@ would make admitting an
+-- tensors-in-core-language §2.2, and §7 on why restrictive choices are the
+-- cheap ones to lift): shape /variables/ are deliberately out (decision B), and spelling this @type Shape = [Int]@ would make admitting an
 -- @EVar@ later a change to the arity of every shape pattern in the compiler
 -- rather than one new constructor.
 newtype Extent = EFixed Int
@@ -55,6 +59,17 @@ dropAxis :: Int -> Shape -> Maybe Shape
 dropAxis i sh
   | i >= 0 && i < length sh = Just (take i sh ++ drop (i + 1) sh)
   | otherwise = Nothing
+
+-- | The element types a 'TTensor' may carry: a scalar base type only
+-- (design tensors-in-core-language §2.3). Tensor-of-tuple/ADT raises a layout
+-- question neither goal needs, and a nested tensor is rejected rather than
+-- normalized, so @TTensor _ (TTensor _ _)@ is never constructed.
+isTensorElemType :: RType -> Bool
+isTensorElemType t = t `elem` [TFloat, TInt, TBool, TSymbol]
+
+-- | A shape as the user writes it: @[3,4]@.
+prettyShape :: Shape -> String
+prettyShape sh = "[" ++ intercalate "," (map (show . extentSize) sh) ++ "]"
   
 data RType = TBool
            | TInt
@@ -69,6 +84,13 @@ data RType = TBool
            | NullList
            | BottomTuple
            | TArrow RType RType
+           -- | A statically shaped, homogeneous block of scalars (design
+           -- tensors-in-core-language §2): @Tensor[3,4] Float@. The element
+           -- type is a scalar base type ('isTensorElemType'), the shape is
+           -- never rank 0, and @Tensor[1] Float@ is not @Float@ -- no squeeze,
+           -- no coercion. Shapes unify only when equal (no shape variables, no
+           -- broadcasting).
+           | TTensor Shape RType
            | TVarR TVarR
            | GreaterType RType RType
            | NotSetYet
@@ -94,6 +116,7 @@ matches (GreaterType t1 t2) (GreaterType t3 t4) = case (greaterType t1 t2, great
     (_, _) -> False
 matches (Tuple t11 t12) (Tuple t21 t22) = t11 `matches` t21 && t12 `matches` t22
 matches (TEither t11 t12) (TEither t21 t22) = t11 `matches` t21 && t12 `matches` t22
+matches (TTensor s1 e1) (TTensor s2 e2) = s1 == s2 && e1 `matches` e2
 matches _ _ = False -- TODO: This might be too aggressive, or it might not break when RType changes.
   
 data ClassConstraint = CNum TVarR

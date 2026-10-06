@@ -1,0 +1,2 @@
+neural discreteNN :: (Tensor[2,3] Float -> Int) of [0, 1, 2]
+main img = discreteNN img

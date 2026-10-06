@@ -57,7 +57,7 @@ readmePath = "README.md"
 -- asserted so that dropping the language tag (which would silently exclude a
 -- block from the drift check) fails the suite instead of passing quietly.
 expectedReadmeBlocks :: Int
-expectedReadmeBlocks = 5
+expectedReadmeBlocks = 6
 
 showcaseTests :: IO TestTree
 showcaseTests = do

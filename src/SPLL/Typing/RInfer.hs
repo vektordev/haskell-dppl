@@ -139,6 +139,7 @@ instance Substitutable RType where
   apply s (ListOf t) = ListOf $ apply s t
   apply s (Tuple t1 t2) = Tuple (apply s t1) (apply s t2)
   apply s (TEither t1 t2) = TEither (apply s t1) (apply s t2)
+  apply s (TTensor sh t) = TTensor sh (apply s t)
   apply s (TArrow t1 t2) = apply s t1 `TArrow` apply s t2
   apply (Subst s) t@(TVarR a) = Map.findWithDefault t a s
   apply s (GreaterType t1 t2) = apply s t1 `GreaterType` apply s t2
@@ -147,6 +148,7 @@ instance Substitutable RType where
   ftv (ListOf t) = ftv t
   ftv (Tuple t1 t2) = Set.union (ftv t1) (ftv t2)
   ftv (TEither t1 t2) = Set.union (ftv t1) (ftv t2)
+  ftv (TTensor _ t) = ftv t
   ftv (TVarR a)       = Set.singleton a
   ftv (t1 `TArrow` t2) = ftv t1 `Set.union` ftv t2
   ftv (t1 `GreaterType` t2) = ftv t1 `Set.union` ftv t2
@@ -644,6 +646,13 @@ unifies _ t (TVarR v) = v `bind` t
 unifies p (TArrow t1 t2) (TArrow t3 t4) = unifyMany p [t1, t2] [t3, t4]
 unifies p (Tuple t1 t2) (Tuple t3 t4) = unifyMany p [t1, t2] [t3, t4]
 unifies p (TEither t1 t2) (TEither t3 t4) = unifyMany p [t1, t2] [t3, t4]
+-- Monomorphic shapes (design tensors-in-core-language §2.4): equal shapes unify
+-- their element types; anything else -- a different extent, a different rank --
+-- is a failure naming both whole tensor types, so the diagnostic shows both
+-- shapes. No shape variables, no rank polymorphism, no broadcasting.
+unifies p t1@(TTensor s1 e1) t2@(TTensor s2 e2)
+  | s1 == s2  = unifies p e1 e2 `catchError` \_ -> throwError (UnificationFail t1 t2 p)
+  | otherwise = throwError (UnificationFail t1 t2 p)
 unifies p t1 t2 = throwError $ UnificationFail t1 t2 p
 
 unifyMany :: Maybe Provenance -> [RType] -> [RType] -> Solve Subst

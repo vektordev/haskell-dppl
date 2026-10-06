@@ -28,7 +28,7 @@ import TestCaseParser
 import TestTolerances (probTolerance, writeLogitsSlotTolerance, normalizationTolerance, samplingTolerance)
 import SPLL.IntermediateRepresentation
 import SPLL.Typing.RType
-import SPLL.AutoNeural (makePartitionPlan, planIndexOf, resolvePartitionAnnotation, PartitionPlan)
+import SPLL.AutoNeural (makePartitionPlan, planIndexOf, resolvePartitionAnnotation, PartitionPlan, getSize, InputSlot(..), inputSlots, inputWidth)
 import SPLL.Typing.Infer (addTypeInfo)
 import SPLL.Typing.ForwardChaining (annotateProg)
 import SPLL.Analysis (annotateEnumsProg)
@@ -41,7 +41,7 @@ import Control.Concurrent (forkIO, getNumCapabilities)
 import Control.Concurrent.QSem (newQSem, waitQSem, signalQSem)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import IRInterpreter (generateRand, generateDet)
-import MockNN (evaluateMockNN)
+import MockNN (evaluateMockNN, mockInputFor)
 
 getAllTestFiles :: IO [(FilePath, FilePath)]
 getAllTestFiles = do
@@ -66,7 +66,7 @@ getAllTestFiles = do
 selectPassDifferentialTests :: IO TestTree
 selectPassDifferentialTests = do
   files <- getAllTestFiles
-  cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
+  cases <- mapM loadCorpusPair files
   let entries = [ (takeBaseName pplPath, p, tcs)
                 | ((pplPath, _), (p, (bs, slow, _ef, tcs))) <- zip files cases
                 , not slow, Interpreter `elem` bs ]
@@ -97,7 +97,7 @@ selectPassDifferentialTests = do
 planEngineDifferentialTests :: IO TestTree
 planEngineDifferentialTests = do
   files <- getAllTestFiles
-  cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
+  cases <- mapM loadCorpusPair files
   let entries = [ (takeBaseName pplPath, p, tcs)
                 | ((pplPath, _), (p, (bs, slow, _ef, tcs))) <- zip files cases
                 , not slow, Interpreter `elem` bs, not (null (neurals p)) ]
@@ -318,7 +318,7 @@ testInterpreter p compiledE (WriteLogitsSlotTestCase name target explicitArgs id
 -- p(res), and the test can stop -- often immediately, since p(res) > 0.5
 -- alone proves it's the mode.
 testInterpreter p compiledE (ArgmaxPTestCase name params res) = ioProperty $ do
-  let mockedParams = [VTuple (VInt 1) (VTuple par (VInt seed)) | (par, seed) <- zip params [0..]]
+  let mockedParams = shapeNeuralParams p [VTuple (VInt 1) (VTuple par (VInt seed)) | (par, seed) <- zip params [0..]]
   case compiledE of
     Left err -> return $ counterexample ("Test case " ++ name ++ " raised an exception: " ++ show err) False
     Right compiled -> case runProbC p compiled mockedParams res of
@@ -404,7 +404,7 @@ discreteProbsNormalized p compiledE = case compiledE of
     -- neural outputs, which currently yields Bottom and emits no main_prob.
     (Just (genExpr, _), Just (probExpr, _)) -> ioProperty $ do
       let randomParams :: RandomGen g => Rand g [IRValue]
-          randomParams = replicateM paramCnt (fmap (\x -> VTuple (VInt 0) (VInt x)) (getRandomR (1, 100000)))
+          randomParams = normalizationParams p <$> replicateM paramCnt (fmap (\x -> VTuple (VInt 0) (VInt x)) (getRandomR (1, 100000)))
           randomParamsForSamples = evalRand (replicateM sampleCnt randomParams) (mkStdGen 42)
           gens = map (\args -> generateRand (neurals p) (writeLogitsDecls p) compiled (map IRConst args) genExpr) randomParamsForSamples
           pSamples = evalRand (sequence gens) (mkStdGen 42)
@@ -436,7 +436,7 @@ discreteProbsNormalized p compiledE = case compiledE of
   where
     paramCnt = progParameterCount p
     seedList = [0 .. (paramCnt - 1)]
-    params = map (VTuple (VInt 0) . VInt) seedList
+    params = normalizationParams p (map (VTuple (VInt 0) . VInt) seedList)
     -- 500 covers every corpus support: the worst total is 0.99916, the same
     -- as with 1000 draws, against a 0.01 tolerance;
     -- at 300 the 26- and 32-value supports (mNistAdd4,
@@ -450,6 +450,31 @@ discreteProbsNormalized p compiledE = case compiledE of
     dim :: IRValue -> IRValue
     dim (VProbDim _ d) = VFloat d
     dim v = error ("not a probability result: " ++ show v)
+
+-- | The random-envelope parameters 'discreteProbsNormalized' draws, made to fit
+-- a program whose parameters are not all @Symbol@ handles (task
+-- tensor-type-shaped-neural-inputs): a parameter feeding a shaped network
+-- directly is shaped from its envelope ('shapeNeuralParams'), and any other
+-- parameter of an admissible all-@Float@ neural input type (a @Float@ fed to a
+-- network through arithmetic, say) is the all-ones value of that type -- ones
+-- rather than zeros, since the shaped mock may read a slot as a sigma.
+normalizationParams :: Program -> [IRValue] -> [IRValue]
+normalizationParams p vs = zipWith fill (mainParamTypes p ++ repeat TSymbol) (shapeNeuralParams p vs)
+  where
+    fill ty v
+      | isMockEnvelope v, ty /= TSymbol, isNeuralInputType ty, all isFloatSlot (inputSlots ty) =
+          mockInputFor ty (replicate (inputWidth ty) 1.0)
+      | otherwise = v
+    isFloatSlot sl = slotElem sl == TFloat
+
+-- | The types of @main@'s parameters, in order, after type inference.
+mainParamTypes :: Program -> [RType]
+mainParamTypes p = case addTypeInfo (annotateProg (annotateEnumsProg p)) of
+  Right (tp, _) | Just body <- lookup "main" (functions tp) -> args (rType (getTypeInfo body))
+  _ -> []
+  where
+    args (TArrow a b) = a : args b
+    args _            = []
 
 progParameterCount :: Program -> Int
 progParameterCount Program{functions=f} =
@@ -468,9 +493,9 @@ progParameterCount Program{functions=f} =
 --     mock sym per outer parameter of main.
 writeLogitsArgsFor :: Program -> [IRValue] -> [IRValue]
 writeLogitsArgsFor p explicitArgs
-  | not (null explicitArgs) = if null (neurals p) then explicitArgs else map spike explicitArgs
+  | not (null explicitArgs) = if null (neurals p) then explicitArgs else shapeNeuralParams p (map spike explicitArgs)
   | null (neurals p)        = []
-  | otherwise               = replicate (progParameterCount p) (VTuple (VInt 0) (VInt 42))
+  | otherwise               = shapeNeuralParams p (replicate (progParameterCount p) (VTuple (VInt 0) (VInt 42)))
   where spike v = VTuple (VInt 1) (VTuple v (VInt 0))
 
 -- | The logit layout for an endpoint function's own output type, resolved exactly as the
@@ -537,12 +562,72 @@ networkPlan p name = case lookupNeural name (neurals p) of
           (neuralValueType rt)
     in makePartitionPlan (adts p) realRT (resolvePartitionAnnotation (writeLogitsDecls p) realRT tag)
 
--- | Per parameter position of 'main', the plan of the network it feeds
--- directly (as @net(paramVar)@), or 'Nothing' for a position that feeds no
+-- | Per parameter position of 'main', the input type and plan of the network it
+-- feeds directly (as @net(paramVar)@), or 'Nothing' for a position that feeds no
 -- network.
-paramNetworkPlans :: Program -> [Maybe PartitionPlan]
-paramNetworkPlans p = [ networkPlan p <$> lookup v varToNet | v <- mainParamNames p ]
+paramNetworks :: Program -> [Maybe (RType, PartitionPlan)]
+paramNetworks p = [ (\nm -> (networkInput p nm, networkPlan p nm)) <$> lookup v varToNet | v <- mainParamNames p ]
   where varToNet = readNNOfVar (mainBinding (functions p))
+
+-- | A declared network's input type ('TSymbol' for the classic opaque handle).
+networkInput :: Program -> String -> RType
+networkInput p name = case lookupNeural name (neurals p) of
+  Just (rt, _) | Just inp <- neuralInputType rt -> inp
+  _ -> error ("networkInput: no valid neural declaration named " ++ name)
+
+-- | Is a value one of the three mock-NN envelopes ('evaluateMockNN')?
+isMockEnvelope :: IRValue -> Bool
+isMockEnvelope (VTuple (VInt k) _) = k `elem` [0, 1, 2]
+isMockEnvelope _                   = False
+
+-- | Replace every mock-NN envelope given for a parameter that feeds a /shaped/
+-- network (task tensor-type-shaped-neural-inputs: a @Float@, @Tensor@ or tuple
+-- input) by a correctly shaped input that makes the shaped mock answer the
+-- logits the envelope stands for ('MockNN.mockInputFor'). So a @.tst@ written
+-- against a @Symbol@ network runs unchanged against the same network retyped to
+-- take a @Tensor[784] Float@, with a real 784-element tensor passed through the
+-- compiled program on every backend. A parameter that is already a value of the
+-- input type is passed as it is.
+shapeNeuralParams :: Program -> [IRValue] -> [IRValue]
+shapeNeuralParams p ps
+  | null (neurals p) = ps
+  | otherwise = zipWith shape (paramNetworks p ++ repeat Nothing) ps
+  where
+    shape (Just (inTy, plan)) v
+      | inTy /= TSymbol, isMockEnvelope v, inputWidth inTy >= SPLL.AutoNeural.getSize plan =
+          mockInputFor inTy (map asDouble (logitsOf (evaluateMockNN plan v)))
+    shape _ v = v
+    logitsOf (VList l) = toList l
+    logitsOf v = error ("shapeNeuralParams: mock NN returned a non-vector: " ++ show v)
+    asDouble (VFloat x) = x
+    asDouble (VInt i)   = fromIntegral i
+    asDouble v          = error ("shapeNeuralParams: non-numeric logit " ++ show v)
+
+-- | Can every mock envelope @main@ takes be passed to its network: a @Symbol@
+-- network takes the envelope itself, a shaped one needs an input wide enough to
+-- carry the logits ('shapeNeuralParams'). A @Float -> Float@ network cannot
+-- carry its two Gaussian logits in one slot, so a property that drives @main@
+-- with arbitrary logit vectors does not apply to it.
+envelopesShapeable :: Program -> Bool
+envelopesShapeable p = and [ inTy == TSymbol || inputWidth inTy >= SPLL.AutoNeural.getSize plan
+                           | Just (inTy, plan) <- paramNetworks p ]
+
+-- | 'shapeNeuralParams' over a test case's parameters. Applied once, where the
+-- corpus is loaded ('loadCorpusPair'), so every backend sees the same shaped
+-- inputs.
+shapeNeuralTestCase :: Program -> TestCase -> TestCase
+shapeNeuralTestCase p tc = case tc of
+  ProbTestCase n s ps e  -> ProbTestCase n s (shapeNeuralParams p ps) e
+  CumulTestCase n s ps e -> CumulTestCase n s (shapeNeuralParams p ps) e
+  _                      -> tc
+
+-- | Parse a corpus @.ppl@/@.tst@ pair, with the test cases' neural inputs shaped
+-- ('shapeNeuralTestCase').
+loadCorpusPair :: (FilePath, FilePath) -> IO (Program, ([Backend], Bool, Maybe ExpectFailure, [TestCase]))
+loadCorpusPair (pplPath, tstPath) = do
+  prog <- parseProgram pplPath
+  (bs, slow, ef, tcs) <- parseTestCases tstPath
+  return (prog, (bs, slow, ef, map (shapeNeuralTestCase prog) tcs))
 
 -- | Replace every parameter that is a mock-NN envelope (@(0, seed)@ random,
 -- @(1, (spike, seed))@ spiking, or @(2, [logits])@ literal) with the raw logit
@@ -556,11 +641,15 @@ paramNetworkPlans p = [ networkPlan p <$> lookup v varToNet | v <- mainParamName
 -- either target language -- only mode-2's plain vector-passthrough would work
 -- for those two identically, which is why this resolves *all three* modes to
 -- one shape uniformly rather than special-casing mode-2 as already-done.
+--
+-- Only a @Symbol@ network's parameter is resolved. A shaped network's parameter
+-- is real data ('shapeNeuralParams'), and its harness mock is the same
+-- projection the interpreter uses ('NetMock').
 resolveNeuralParams :: Program -> [IRValue] -> [IRValue]
-resolveNeuralParams p params = zipWith resolve (paramNetworkPlans p) params
+resolveNeuralParams p params = zipWith resolve (paramNetworks p ++ repeat Nothing) params
   where
-    resolve (Just plan) v = evaluateMockNN plan v
-    resolve Nothing     v = v
+    resolve (Just (TSymbol, plan)) v = evaluateMockNN plan v
+    resolve _                      v = v
 
 -- | 'resolveNeuralParams' applied to a query test case's own parameter list.
 -- A no-op on a non-neural program (every parameter position resolves to
@@ -570,10 +659,62 @@ resolveNeuralTestCase p (ProbTestCase n s ps e)  = ProbTestCase  n s (resolveNeu
 resolveNeuralTestCase p (CumulTestCase n s ps e) = CumulTestCase n s (resolveNeuralParams p ps) e
 resolveNeuralTestCase _ tc                       = tc
 
--- | A program's declared network names, in declaration order -- what the
--- Julia/Python harnesses install identity mocks for.
+-- | The network a text-backend harness installs in place of a declared one. A
+-- @Symbol@ network is the identity: its parameter arrives pre-resolved to raw
+-- logits ('resolveNeuralParams'). A shaped network gets the projection mock
+-- 'MockNN.shapedMockLogits' implements for the interpreter: the input flattened
+-- in layout order, truncated or padded with @1.0@ to the plan's width.
+data NetMock = NetMock
+  { netMockName  :: String
+  , netMockInput :: RType
+  , netMockWidth :: Int
+  }
+
+-- | A program's declared networks, in declaration order -- what the
+-- Julia/Python harnesses install mocks for.
+networkMocks :: Program -> [NetMock]
+networkMocks p = [ NetMock nm (networkInput p nm) (SPLL.AutoNeural.getSize (networkPlan p nm)) | (nm, _, _) <- neurals p ]
+
+-- | Just the declared network names, for harnesses that install identity mocks
+-- (BackendAgreement).
 networkNames :: Program -> [String]
 networkNames p = [ nm | (nm, _, _) <- neurals p ]
+
+-- | The Python definition of a mock network.
+pyMockDef :: NetMock -> String
+pyMockDef (NetMock nm TSymbol _) = "def " ++ nm ++ "(s):\n    return s\n"
+pyMockDef (NetMock nm _ n) = unlines
+  [ "def " ++ nm ++ "(s):"
+  , "    def _flat(v):"
+  , "        if isinstance(v, T): return _flat(v.t1) + _flat(v.t2)"
+  , "        if isinstance(v, list): return [float(x) for x in v]"
+  , "        return [float(v)]"
+  , "    return (_flat(s) + [1.0] * " ++ show n ++ ")[:" ++ show n ++ "]" ]
+
+-- | The Julia definitions of a module's mock networks (inside the module, after
+-- @using ..JuliaSPPLLib@, so the runtime's tuple 'T' is in scope).
+juliaMockDefs :: [NetMock] -> String
+juliaMockDefs nets =
+  (if any ((/= TSymbol) . netMockInput) nets
+     then "_nest_flat(v::Number) = [Float64(v)]\n\
+          \_nest_flat(v::AbstractVector) = Float64[Float64(x) for x in v]\n\
+          \_nest_flat(v::T) = vcat(_nest_flat(v.t1), _nest_flat(v.t2))\n"
+     else "")
+  ++ concatMap def nets
+  where
+    def (NetMock nm TSymbol _) = nm ++ "(s) = s\n"
+    def (NetMock nm _ n) = nm ++ "(s) = vcat(_nest_flat(s), fill(1.0, " ++ show n ++ "))[1:" ++ show n ++ "]\n"
+
+-- | The batched-Python mock: a column of @[B, ...]@ inputs in, @[B, n]@ logits
+-- out. Only a tensor input has a batched mock (its trailing axes flattened,
+-- row-major); any other shaped input raises, so a @batched@ declaration on
+-- such a program fails loudly rather than passing on the identity.
+batchedMockExpr :: NetMock -> String
+batchedMockExpr (NetMock _ TSymbol _) = "(lambda s: s)"
+batchedMockExpr (NetMock _ (TTensor sh _) n) =
+  "(lambda s: s.flatten(" ++ show (negate (shapeRank sh)) ++ ")[..., :" ++ show n ++ "])"
+batchedMockExpr (NetMock nm ty _) =
+  "(lambda s: (_ for _ in ()).throw(NotImplementedError(" ++ show ("no batched mock for network " ++ nm ++ " with input " ++ prettyRType ty) ++ ")))"
 
 -- | How many julia processes the corpus is split across ('testJuliaAll').
 juliaShards :: Int
@@ -591,7 +732,7 @@ juliaTestFlags = ["--compile=min"]
 -- the .tst rows' mock-NN parameters are already resolved to raw logit vectors
 -- by 'resolveNeuralTestCase' before they reach here, so the network itself
 -- only has to be pass-through. Empty for a non-neural program.
-testJuliaAll :: [(Either CompilerError IREnv, [TestCase], [String])] -> Property
+testJuliaAll :: [(Either CompilerError IREnv, [TestCase], [NetMock])] -> Property
 testJuliaAll programCases = ioProperty $ do
   let results = [(c, tcs, nets) | (c, tcs, nets) <- programCases, not (null tcs)]
   case [err | (Left err, _, _) <- results] of
@@ -624,14 +765,14 @@ testJuliaAll programCases = ioProperty $ do
 -- String literals and comments (diagnostics quoting @p(main)@, doc lines) are
 -- stripped first. Programs whose Julia codegen refuses are skipped: that
 -- refusal is the Julia group's business, not this one's.
-testJuliaFreeNamesEscaped :: [(String, IREnv, [String])] -> Property
+testJuliaFreeNamesEscaped :: [(String, IREnv, [NetMock])] -> Property
 testJuliaFreeNamesEscaped programs = ioProperty $ do
   results <- forM programs $ \(n, c, nets) -> do
     r <- try (evaluate (forceList (SPLL.CodeGenJulia.generateFunctions c))) :: IO (Either SomeException [String])
     return $ case r of
       Left _    -> Nothing
       Right src -> Just (n, [ x | x <- juliaFreeReferences (unlines src)
-                                , x `notElem` juliaReservedIdentifiers, x `notElem` nets ])
+                                , x `notElem` juliaReservedIdentifiers, x `notElem` map netMockName nets ])
   let checked = catMaybes results
       bad = [ (n, nub xs) | (n, xs) <- checked, not (null xs) ]
   return $ counterexample
@@ -707,7 +848,7 @@ stripJulia = go
 --
 -- @netNames@ (empty for a non-neural program) gets one identity-mock
 -- definition apiece -- see 'testJuliaAll'\'s note.
-testPython :: [String] -> Either CompilerError IREnv -> [TestCase] -> Property
+testPython :: [NetMock] -> Either CompilerError IREnv -> [TestCase] -> Property
 testPython netNames compiledE tc = ioProperty $ do
   case compiledE of
     Left err -> return $ counterexample err False
@@ -729,12 +870,12 @@ testPython netNames compiledE tc = ioProperty $ do
 -- question in reverse. The script is meant to run as a file, so sys.path[0]
 -- is its temp dir rather than the project; pythonLib has to be put back on
 -- the path explicitly, which is what @projectDir@ is for.
-pythonTestScript :: FilePath -> [String] -> IREnv -> [TestCase] -> String
+pythonTestScript :: FilePath -> [NetMock] -> IREnv -> [TestCase] -> String
 pythonTestScript projectDir netNames compiled tc =
   "import sys\nsys.path.insert(0, " ++ show projectDir ++ ")\n" ++ mockDefs ++ pythonTestCode src tc
   where
     src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True compiled)
-    mockDefs = concatMap (\nm -> "def " ++ nm ++ "(s):\n    return s\n") netNames
+    mockDefs = concatMap pyMockDef netNames
 
 -- | One writeLogits row as the text backends check it: the endpoint, its
 -- arguments as the emitted function takes them, and what to assert about the
@@ -761,14 +902,14 @@ writeLogitsRow p tc = case tc of
 
 -- | Each row calls the endpoint's emitted @writeLogits@ method and raises on a
 -- wrong length or slot, so exit 0 means every row matched.
-testPythonWriteLogits :: [String] -> Either CompilerError IREnv -> [WriteLogitsRow] -> Property
+testPythonWriteLogits :: [NetMock] -> Either CompilerError IREnv -> [WriteLogitsRow] -> Property
 testPythonWriteLogits netNames compiledE rows = ioProperty $ case compiledE of
   Left err -> return $ counterexample err False
   Right compiled -> do
     projectDir <- getCurrentDirectory
     let src = intercalate "\n" (SPLL.CodeGenPyTorch.generateFunctions True compiled)
         script = "import sys\nsys.path.insert(0, " ++ show projectDir ++ ")\n"
-          ++ concatMap (\nm -> "def " ++ nm ++ "(s):\n    return s\n") netNames
+          ++ concatMap pyMockDef netNames
           ++ unpack (replace (pack "from torch.nn import Module") (pack "\nclass Module:\n  pass\n") (pack src))
           ++ "\n" ++ concatMap row rows
         row r =
@@ -791,7 +932,7 @@ testPythonWriteLogits netNames compiledE rows = ioProperty $ case compiledE of
 
 -- | The Julia twin of 'testPythonWriteLogits', every program in one julia
 -- process (one module each), like 'testJuliaAll'.
-testJuliaWriteLogitsAll :: [(Either CompilerError IREnv, [WriteLogitsRow], [String])] -> Property
+testJuliaWriteLogitsAll :: [(Either CompilerError IREnv, [WriteLogitsRow], [NetMock])] -> Property
 testJuliaWriteLogitsAll programs = ioProperty $ case [err | (Left err, _, _) <- programs] of
   (err:_) -> return $ counterexample err False
   [] -> do
@@ -799,7 +940,7 @@ testJuliaWriteLogitsAll programs = ioProperty $ case [err | (Left err, _, _) <- 
     let body = concatMap (\(idx, (c, rows, nets)) ->
           let m = "WLProg" ++ show (idx :: Int)
           in "module " ++ m ++ "\nusing ..JuliaSPPLLib\n"
-             ++ concatMap (\nm -> nm ++ "(s) = s\n") nets
+             ++ juliaMockDefs nets
              ++ intercalate "\n" (SPLL.CodeGenJulia.generateFunctions c) ++ "\nend\n"
              ++ concatMap (row m) rows) (zip [0 ..] [ (c, rows, nets) | (Right c, rows, nets) <- programs ])
         row m r =
@@ -821,14 +962,14 @@ testJuliaWriteLogitsAll programs = ioProperty $ case [err | (Left err, _, _) <- 
       ExitSuccess -> property True
       ExitFailure _ -> counterexample "Julia writeLogits batch failed. See Julia error message above." False
 
-juliaBatchTestCode :: FilePath -> [(String, [TestCase], [String])] -> String
+juliaBatchTestCode :: FilePath -> [(String, [TestCase], [NetMock])] -> String
 juliaBatchTestCode projectDir allCases =
   "include(\"" ++ projectDir ++ "/juliaLib.jl\")\n\
   \using .JuliaSPPLLib\n" ++
   concatMap (\(idx, (src, tcs, nets)) ->
     let modName = "Prog" ++ show (idx :: Int)
     in "module " ++ modName ++ "\nusing ..JuliaSPPLLib\n" ++
-       concatMap (\nm -> nm ++ "(s) = s\n") nets ++
+       juliaMockDefs nets ++
        src ++ "\nend\n" ++
        juliaModuleTestCases modName tcs
   ) (zip [0..] allCases)
@@ -985,16 +1126,16 @@ pyImpossCheck name (Just expected) =
 -- programs are eligible, at the cost of loading the corpus twice when both
 -- run (only NEST_SLOW_TESTS=1 does that, and corpus loading itself is cheap --
 -- the expense here is the torch subprocess, not the Haskell side).
-batchedPythonFixtures :: IO ( [(String, Either String (String, [BatchGroup], [String]))]
+batchedPythonFixtures :: IO ( [(String, Either String (String, [BatchGroup], [NetMock]))]
                              , [String]
-                             , [(String, String, [BatchGroup], [String])]
-                             , [(String, String, [BatchGroup], [String])]
-                             , ([(String, String, [BatchGroup], [String])], [String])
-                             , [(String, String, [BatchGroup], [String])]
+                             , [(String, String, [BatchGroup], [NetMock])]
+                             , [(String, String, [BatchGroup], [NetMock])]
+                             , ([(String, String, [BatchGroup], [NetMock])], [String])
+                             , [(String, String, [BatchGroup], [NetMock])]
                              , Maybe FilePath )
 batchedPythonFixtures = do
   files <- getAllTestFiles
-  cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
+  cases <- mapM loadCorpusPair files
   -- `slow`-headered programs stay out of batched coverage by construction, the
   -- same way they stay out of the Interpreter groups.
   let entries = [ (takeBaseName pplPath, p, bs, tcs)
@@ -1097,9 +1238,9 @@ slowBatchedPythonTests = do
 -- batchable query samples) plus the precondition that the @.tst@ file has
 -- prob/cumulative points at all. Runs in IO so that a compiler @error@ (rather
 -- than a @Left@) becomes a named diagnostic instead of derailing the group.
-batchedEligibility :: Program -> [TestCase] -> IO (Either String (String, [BatchGroup], [String]))
+batchedEligibility :: Program -> [TestCase] -> IO (Either String (String, [BatchGroup], [NetMock]))
 batchedEligibility p tcs = do
-  r <- try (evaluate (force (go p tcs))) :: IO (Either SomeException (Either String (String, [BatchGroup], [String])))
+  r <- try (evaluate (force (go p tcs))) :: IO (Either SomeException (Either String (String, [BatchGroup], [NetMock])))
   return $ either (\e -> Left ("crashed while compiling for batched mode: " ++ show e)) id r
   where
     force res = case res of
@@ -1107,7 +1248,7 @@ batchedEligibility p tcs = do
       Right (src, gs, nets) -> length src `seq` length gs `seq` length nets `seq` res
     go prog cs = do
       let qtcs = filter (\t -> isProbTestCase t || isCumulTestCase t) cs
-          netNames = [nm | (nm, _, _) <- neurals prog]
+          netNames = networkMocks prog
       if null qtcs
         then Left "the .tst file declares no p()/cdf() query points to batch"
         else Right ()
@@ -1754,7 +1895,8 @@ batchGroups isNeural tcs = mapM build grouped
 
 -- | Batch the positional symbol arguments of a neural program across points.
 -- Each row is one point's argument list; every argument is a mode-2 verbatim
--- symbol envelope @(2, [logit0, ...])@ (what the neural .tst files pass). We
+-- symbol envelope @(2, [logit0, ...])@ (what the neural .tst files pass), or a
+-- rank-1 tensor input (a shaped network's, after 'shapeNeuralParams'). We
 -- transpose to columns (one per argument position) and stack each column's
 -- logit vectors into a @[B, n]@ tensor literal — fed to the identity mock the
 -- driver installs for every declared network. 'Nothing' if the rows are ragged
@@ -1771,6 +1913,9 @@ batchSymColumn vs = do
   return ("torch.tensor([" ++ intercalate ", " (map renderRow logitRows) ++ "])")
   where
     logitsOf (VTuple (VInt 2) (VList ls)) = Just (toList ls)
+    -- a shaped tensor input ('shapeNeuralParams'): one row of the [B, numel]
+    -- column, fed to that network's batched projection mock ('batchedMockExpr')
+    logitsOf (VTensor [_] xs)             = Just xs
     logitsOf _                            = Nothing
     renderRow ls = "[" ++ intercalate ", " (map num ls) ++ "]"
     num (VFloat f) = show f
@@ -1911,7 +2056,7 @@ findTorchPython = do
 
 -- | Run every eligible program's batched code in one shared torch process and
 -- assert every batched query point matches its expected value.
-runBatchedPython :: FilePath -> [(String, String, [BatchGroup], [String])] -> Property
+runBatchedPython :: FilePath -> [(String, String, [BatchGroup], [NetMock])] -> Property
 runBatchedPython _ [] = counterexample "BatchedPython: no eligible corpus programs found" False
 runBatchedPython py eligible = ioProperty $ do
   hPutStrLn stderr ("BatchedPython: " ++ show (length eligible) ++ " eligible corpus programs, "
@@ -1935,7 +2080,7 @@ runBatchedPython py eligible = ioProperty $ do
 -- (torch imported once), run every batched group, and exit non-zero listing any
 -- element whose prob (or dim, where prob is non-zero) disagrees with the corpus
 -- expectation beyond 'probTolerance'.
-batchedDriver :: Bool -> [(String, String, [BatchGroup], [String])] -> String
+batchedDriver :: Bool -> [(String, String, [BatchGroup], [NetMock])] -> String
 batchedDriver accArg eligible = unlines $
   [ "import torch, sys, traceback"
   -- T for structure-of-arrays tuple sample batches; the list constructors and
@@ -1976,7 +2121,7 @@ batchedDriver accArg eligible = unlines $
       -- are mode-2 verbatim-logit envelopes, batched into a [B, n] logit
       -- tensor, so net(sym) = sym returns those logits directly.
       ] ++
-      [ "    _ns[" ++ show nm ++ "] = (lambda s: s)" | nm <- netNames ] ++
+      [ "    _ns[" ++ show (netMockName nm) ++ "] = " ++ batchedMockExpr nm | nm <- netNames ] ++
       [ "    _main = _ns['main']" ] ++
       concatMap (groupCall name) groups ++
       [ "except Exception as _e:"
@@ -2060,7 +2205,7 @@ denseGainNoteProp gained = ioProperty $ do
 -- these rows pin the *reasons* it sits there.
 --
 -- Torch-free: it reads the emitted source, like the eligibility assertions.
-denseBoundaryProp :: [(String, String, [BatchGroup], [String])] -> Property
+denseBoundaryProp :: [(String, String, [BatchGroup], [NetMock])] -> Property
 denseBoundaryProp eligible = counterexample (unlines wrong) (null wrong)
   where
     rows =
@@ -2105,7 +2250,7 @@ denseBoundaryProp eligible = counterexample (unlines wrong) (null wrong)
 -- value* and the vector is identical to querying those values one at a time.
 -- That is the whole answer to the design's open question about topK in dense
 -- mode, and this property is what pins it.
-runBatchedDense :: Bool -> FilePath -> [(String, String, [BatchGroup], [String])] -> Property
+runBatchedDense :: Bool -> FilePath -> [(String, String, [BatchGroup], [NetMock])] -> Property
 runBatchedDense accArg _ [] = counterexample
   ("BatchedPython dense: no dense-declaring corpus programs found"
    ++ (if accArg then " at a topK threshold" else "")) False
@@ -2124,7 +2269,7 @@ runBatchedDense accArg py entries = ioProperty $ do
     ExitSuccess -> counterexample (out ++ err) True
     ExitFailure _ -> counterexample ("Batched PyTorch dense differential failed:\n" ++ out ++ err) False
 
-denseDriver :: Bool -> [(String, String, [BatchGroup], [String])] -> String
+denseDriver :: Bool -> [(String, String, [BatchGroup], [NetMock])] -> String
 denseDriver accArg entries = unlines $
   [ "import torch, sys, traceback"
   , "from pythonLibBatched import T, ConsInferenceList, EmptyInferenceList, AnyInferenceList, Left, Right"
@@ -2178,7 +2323,7 @@ denseDriver accArg entries = unlines $
       , "    _ns = {}"
       , "    exec(" ++ show src ++ ", _ns)"
       ] ++
-      [ "    _ns[" ++ show nm ++ "] = (lambda s: s)" | nm <- netNames ] ++
+      [ "    _ns[" ++ show (netMockName nm) ++ "] = " ++ batchedMockExpr nm | nm <- netNames ] ++
       [ "    _main = _ns['main']" ] ++
       concatMap (groupCall name src) groups ++
       [ "except Exception as _e:"
@@ -2235,7 +2380,7 @@ topKDiffThresholds = [0.3, 0.6]
 -- actually bites (some point's pruned value differs from its topK-off value) —
 -- the property asserts that is non-zero, so the differential can never quietly
 -- degenerate into "topK changed nothing anywhere".
-topKEntries :: [(String, Program, [TestCase])] -> ([(String, String, [BatchGroup], [String])], [String])
+topKEntries :: [(String, Program, [TestCase])] -> ([(String, String, [BatchGroup], [NetMock])], [String])
 topKEntries entries = (map fst built, nub [n | ((n, _, _, _), True) <- built])
   where
     -- env0 (the plain default compile, used only to retarget expectations) does
@@ -2246,7 +2391,7 @@ topKEntries entries = (map fst built, nub [n | ((n, _, _, _), True) <- built])
       | (n, p, tcs) <- entries
       , let qtcs = filter isProbTestCase tcs
       , not (null qtcs)
-      , let netNames = [nm | (nm, _, _) <- neurals p]
+      , let netNames = networkMocks p
       , Right env0 <- [compile defaultCompilerConfig p]
       , thresh <- topKDiffThresholds
       , let confK = defaultCompilerConfig{topKThreshold = Just thresh}
@@ -2275,7 +2420,7 @@ topKBites withK withoutK =
   or [ abs (a - b) > probTolerance
      | (gk, g0) <- zip withK withoutK, (a, b) <- zip (bgExpProb gk) (bgExpProb g0) ]
 
-runBatchedTopK :: FilePath -> ([(String, String, [BatchGroup], [String])], [String]) -> Property
+runBatchedTopK :: FilePath -> ([(String, String, [BatchGroup], [NetMock])], [String]) -> Property
 runBatchedTopK py (topkEligible, biting)
   | null topkEligible = counterexample "BatchedPython topK: no eligible programs" False
   | null biting = counterexample
@@ -2312,7 +2457,7 @@ runBatchedTopK py (topkEligible, biting)
 -- Restricted to non-neural programs with a plain-float sample batch (a
 -- differentiable leaf); the log-domain programs (@logNormal@ and friends) are the
 -- ones that actually exhibit the bug.
-runBatchedGradients :: FilePath -> [(String, String, [BatchGroup], [String])] -> Property
+runBatchedGradients :: FilePath -> [(String, String, [BatchGroup], [NetMock])] -> Property
 runBatchedGradients py eligible
   | null probes = ioProperty $ do
       hPutStrLn stderr "BatchedPython gradients: no safe_log/safe_div programs found (skipped)."
@@ -2421,7 +2566,7 @@ gradientDriver probes = unlines $
 -- skipped dynamically in the driver (arity-checked via
 -- @inspect.signature@), since Haskell-side arity bookkeeping would only
 -- duplicate what the emitted signature already says.
-runBatchedGenerate :: FilePath -> [(String, String, [BatchGroup], [String])] -> Property
+runBatchedGenerate :: FilePath -> [(String, String, [BatchGroup], [NetMock])] -> Property
 runBatchedGenerate _ [] = counterexample "BatchedPython generate: no eligible corpus programs found" False
 runBatchedGenerate py eligible
   | null nonNeuralProbes && null neuralProbes = ioProperty $ do
@@ -2470,7 +2615,7 @@ isScalarSample v = isNum v || isBoolV v
 -- that point alone. Single-shot rather than retried -- the batch size is
 -- fixed large enough, and the seed is pinned, to keep this non-flaky.
 generateDriver :: [(String, String, [(String, Double, Double)])]
-               -> [(String, String, [String], [String], [(String, Double, Double, Int)])]
+               -> [(String, String, [NetMock], [String], [(String, Double, Double, Int)])]
                -> String
 generateDriver nonNeuralProbes neuralProbes = unlines $
   [ "import torch, sys, traceback, inspect"
@@ -2524,7 +2669,7 @@ generateDriver nonNeuralProbes neuralProbes = unlines $
       , "    _ns = {}"
       , "    exec(" ++ show src ++ ", _ns)"
       ] ++
-      [ "    _ns[" ++ show nm ++ "] = (lambda s: s)" | nm <- netNames ] ++
+      [ "    _ns[" ++ show (netMockName nm) ++ "] = " ++ batchedMockExpr nm | nm <- netNames ] ++
       [ "    _main = _ns['main']"
       , "    _sig = inspect.signature(_main.generate)"
       , "    if len(_sig.parameters) != " ++ show (length paramExprs + 1) ++ ":"
@@ -2662,7 +2807,8 @@ type BranchCountCase = (String, Program, IREnv, [(TestCase, Double, Double, Doub
 loadBranchCountCase :: String -> IO BranchCountCase
 loadBranchCountCase name = do
   prog <- corpusPplPath name >>= parseProgram
-  (_, _, _, tcs) <- corpusTstPath name >>= parseTestCases
+  (_, _, _, tcs0) <- corpusTstPath name >>= parseTestCases
+  let tcs = map (shapeNeuralTestCase prog) tcs0
   let env = either (error . ((name ++ ": ") ++) . show) id
               (compile defaultCompilerConfig{countBranches = True} prog)
       queries = filter (\t -> isProbTestCase t || isCumulTestCase t) tcs
@@ -2797,7 +2943,7 @@ loadEnd2EndCases :: (Bool -> Bool)
                   -> IO [(String, Program, Either CompilerError IREnv, [Backend], [TestCase])]
 loadEnd2EndCases keep = do
   files <- getAllTestFiles
-  cases <- mapM (\(p, tc) -> parseProgram p >>= \t1 -> parseTestCases tc >>= \t2 -> return (t1, t2)) files
+  cases <- mapM loadCorpusPair files
   return [ (takeBaseName pplPath, p, compile defaultCompilerConfig p, bs, tcs)
          | ((pplPath, _), (p, (bs, slow, _ef, tcs))) <- zip files cases, keep slow ]
 
@@ -2906,10 +3052,10 @@ buildEnd2EndTree treeName includeBackends compiledCases = testGroup treeName $
           -- it is scoped to 'unoptimizedCodegenSmoke', none of which is
           -- neural.
           routedQueries b =
-            [ (n, c, if null (neurals p) then tcs else map (resolveNeuralTestCase p) tcs, networkNames p)
+            [ (n, c, if null (neurals p) then tcs else map (resolveNeuralTestCase p) tcs, networkMocks p)
             | (n, p, c, bs, tcs) <- queryTestCases, b `elem` bs, not (null tcs) ]
           routedWriteLogits b =
-            [ (n, c, map (writeLogitsRow p) wls, networkNames p)
+            [ (n, c, map (writeLogitsRow p) wls, networkMocks p)
             | (n, p, c, bs, tcs) <- compiledCases, b `elem` bs
             , let wls = filter (\x -> isWriteLogitsLengthTestCase x || isWriteLogitsSlotTestCase x) tcs
             , not (null wls) ]
@@ -2933,7 +3079,7 @@ buildEnd2EndTree treeName includeBackends compiledCases = testGroup treeName $
              | i <- [0 .. juliaShards - 1] ]
          -- Runs without julia installed: it only reads the emitted text.
          , testProperty "Julia free names are escaped"
-             (once $ testJuliaFreeNamesEscaped [ (n, c, networkNames p) | (n, p, Right c, bs, _) <- compiledCases, Julia `elem` bs ])
+             (once $ testJuliaFreeNamesEscaped [ (n, c, networkMocks p) | (n, p, Right c, bs, _) <- compiledCases, Julia `elem` bs ])
          , testGroup "Python"
              [ testProperty n (once $ testPython nets c tcs) | (n, c, tcs, nets) <- routedQueries Python ]
          -- writeLogits rows used to run on the interpreter only, which is how

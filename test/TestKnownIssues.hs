@@ -47,7 +47,7 @@ import TestCaseParser
   , parseProgram, parseTestCasesFromString
   )
 import TestTolerances (probTolerance)
-import End2EndTesting (networkNames, pythonTestScript, resolveNeuralTestCase)
+import End2EndTesting (networkMocks, pythonTestScript, resolveNeuralTestCase, shapeNeuralTestCase)
 
 knownIssuesDir :: FilePath
 knownIssuesDir = corpusRoot </> "known-issues"
@@ -206,7 +206,7 @@ rowName _                       = "?"
 pythonRowMatches :: Program -> IREnv -> TestCase -> IO Bool
 pythonRowMatches prog env tc = do
   projectDir <- getCurrentDirectory
-  let script = pythonTestScript projectDir (networkNames prog) env [resolveNeuralTestCase prog tc]
+  let script = pythonTestScript projectDir (networkMocks prog) env [resolveNeuralTestCase prog (shapeNeuralTestCase prog tc)]
   forcedScript <- try (evaluate (length script)) :: IO (Either SomeException Int)
   case forcedScript of
     Left _ -> return False

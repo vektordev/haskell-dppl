@@ -602,6 +602,45 @@ modalityInferTests = testGroup "ModalityInfer"
           assertEqual "" PNormal $
             mainPType "main = draw x = Normal in draw y = x + 1.0 in y"
       ]
+  -- Task tensor-type-shaped-neural-inputs: a neural read keeps its
+  -- Gaussian/enumerable verdict only when its input is a point -- Deterministic
+  -- or witnessed on the path -- and is sample-only otherwise (verdict (a) of
+  -- diffusion-models-wishlist, 2026-10-01). Before, the input's modality was
+  -- discarded and `mu Normal` was typed PNormal: a silently wrong density.
+  , testGroup "a neural read's verdict depends on its input being a point"
+      [ testCase "a random, unwitnessed input makes the read Bottom" $
+          assertEqual "" Bottom $
+            mainPType "neural mu :: (Float -> Float)\nmain = mu Normal"
+      , testCase "a draw the observation never recovers is not a point" $
+          assertEqual "" Bottom $
+            mainPType "neural mu :: (Float -> Float)\nmain = draw x = Normal in mu x"
+      , testCase "a discrete read of a random input is Bottom too" $
+          assertEqual "" Bottom $
+            mainPType "neural c :: (Float -> Int) of [0, 1]\nmain = c Uniform"
+      , testCase "a deterministic parameter keeps the Gaussian head" $
+          assertEqual "" PNormal $
+            mainPType "neural mu :: (Float -> Float)\nmain x = mu x"
+      , testCase "a deterministic computed input keeps the Gaussian head" $
+          assertEqual "" PNormal $
+            mainPType "neural mu :: (Float -> Float)\nmain x = mu (x * 2.0 + 1.0)"
+      , testCase "a tensor parameter keeps the Gaussian head" $
+          assertEqual "" PNormal $
+            mainPType "neural mu :: (Tensor[784] Float -> Float)\nmain img = mu img"
+      , testCase "a witnessed input keeps the Gaussian head" $
+          assertEqual "" PNormal $
+            pTypeAt "main" [0, 0, 1] "neural mu :: (Float -> Float)\nmain = draw x = Normal in (x, mu x)"
+      , testCase "a deterministic image of a witnessed input keeps the Gaussian head" $
+          assertEqual "" PNormal $
+            pTypeAt "main" [0, 0, 1] "neural mu :: (Float -> Float)\nmain = draw x = Normal in (x, mu (x * 2.0))"
+      , testCase "a tuple of a witnessed and a deterministic input is a point" $
+          -- the diffusion step's (x_t, t): its outer meet is not Exact, so the
+          -- product is decided field by field
+          assertEqual "" PNormal $
+            pTypeAt "main" [0, 0, 1] "neural mu :: ((Float, Float) -> Float)\nmain = draw x = Normal in (x, mu (x, 1.0))"
+      , testCase "a tuple with a random, unwitnessed field is not" $
+          assertEqual "" Bottom $
+            mainPType "neural mu :: ((Float, Float) -> Float)\nmain = mu (Normal, 1.0)"
+      ]
   ]
 
 -- | Corpus programs that legitimately reach a partial capability set (see the

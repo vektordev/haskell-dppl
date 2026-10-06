@@ -1,0 +1,2 @@
+neural mu :: ((Float, Float) -> Float)
+main = draw x = Normal in (x, mu (x, 1.0))

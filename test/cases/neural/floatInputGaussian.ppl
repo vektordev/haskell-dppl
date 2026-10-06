@@ -1,0 +1,2 @@
+neural mu :: (Float -> Float)
+main x = mu x

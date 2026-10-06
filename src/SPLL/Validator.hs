@@ -2,7 +2,7 @@ module SPLL.Validator (
   validateProgram
 ) where
 import SPLL.Lang.Types (Program(..), GenericValue(..), FnDecl, NeuralDecl, MultiValue, ADTDecl(..))
-import SPLL.Lang.Lang (Expr(..), ExprF(..), getSubExprs, getFunctionNames, InjFName(..))
+import SPLL.Lang.Lang (Expr(..), ExprF(..), getSubExprs, getFunctionNames, InjFName(..), isNeuralInputType, containsTensor, prettyRType)
 import SPLL.Typing.RType (RType(..))
 import Data.Maybe (isJust, isNothing)
 import PredefinedFunctions (globalFEnv, parameterCount)
@@ -35,22 +35,39 @@ validateWriteLogitsDecls decls = mapM_ checkGroup grouped
                         ++ show (fst (head g)) ++ ": " ++ show (map snd g))
       _ -> Right ()
 
--- | A neural declaration forward-declares the read-logits network (Symbol -> target): NN1,
--- whose logits SPLL reads. The reverse (source -> Symbol) shape used to name a second,
--- external network (NN2) with no SPLL call site; that role has been removed, and the
--- logit-vector bridge it tried to host now lives on the value-producing SPLL function
+-- | A neural declaration forward-declares the read-logits network (input -> target): NN1,
+-- whose logits SPLL reads. The input is an opaque @Symbol@ handle, a @Float@, a shaped
+-- @Tensor[s] t@, or a tuple of those ('isNeuralInputType'; task
+-- tensor-type-shaped-neural-inputs). The reverse (source -> Symbol) shape used to name a
+-- second, external network (NN2) with no SPLL call site; that role has been removed, and
+-- the logit-vector bridge it tried to host now lives on the value-producing SPLL function
 -- instead. Reject the reverse shape with a pointer at the registry syntax that covers the
--- only job it still had (registering a type's logit layout).
+-- only job it still had (registering a type's logit layout). A tensor-typed /output/ is
+-- slice S2 of tensors-in-core-language (tensor Gaussian heads) and refused until then.
 validateNeuralShape :: NeuralDecl -> Either String ()
-validateNeuralShape (_, TArrow TSymbol _, _) = Right ()
+validateNeuralShape (name, TArrow TSymbol target, _) = validateNeuralTarget name target
 validateNeuralShape (name, TArrow _ TSymbol, _) =
   Left ("Compiler Error: neural declaration '" ++ name ++ "' has the form (source -> Symbol), "
         ++ "which is no longer supported. To register a logit layout "
         ++ "for a type, write `neural writeLogits :: <type> of <multivalue>`; the logit vector for a "
         ++ "value is generated on the SPLL function that produces it.")
+validateNeuralShape (name, TArrow inp target, _)
+  | isNeuralInputType inp = validateNeuralTarget name target
+  | otherwise =
+      Left ("Compiler Error: neural declaration '" ++ name ++ "' takes an input of type "
+            ++ prettyRType inp ++ ", but a network's input must be Symbol, Float, a "
+            ++ "Tensor[...] of a scalar, or a tuple of those.")
 validateNeuralShape (name, ty, _) =
   Left ("Compiler Error: neural declaration '" ++ name ++ "' has type " ++ show ty
-        ++ ", but neural declarations must have the form (Symbol -> target).")
+        ++ ", but neural declarations must have the form (input -> target).")
+
+validateNeuralTarget :: String -> RType -> Either String ()
+validateNeuralTarget name target
+  | containsTensor target =
+      Left ("Compiler Error: neural declaration '" ++ name ++ "' has the output type "
+            ++ prettyRType target ++ "; tensor-typed neural outputs are not supported yet "
+            ++ "(a tensor may only be a network's input).")
+  | otherwise = Right ()
 
 -- A program must declare a "main" function, as it is the entry point compiled
 -- to the generate/probability/integrate functions invoked by runGen/runProb/runInteg.

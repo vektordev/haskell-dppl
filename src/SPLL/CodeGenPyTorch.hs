@@ -16,7 +16,7 @@ import SPLL.IntermediateRepresentation
 import SPLL.ReservedNames (pythonKeywords, pythonReservedIdentifiers, isPythonReserved, componentNormalName)
 import SPLL.IRSelectPass (desugarSelectEnv)
 import SPLL.Lang.Types
-import SPLL.Typing.RType (RType(..), shapeRank)
+import SPLL.Typing.RType (RType(..), shapeRank, shapeNumel)
 import SPLL.Typing.AlgebraicDataTypes (anyCtorTestMessage, accessorMismatchMessage, fieldAccessorOwners)
 import Data.List (intercalate, intersperse, isPrefixOf, isSuffixOf, dropWhileEnd)
 import Data.Char (toUpper)
@@ -106,6 +106,11 @@ pyVal VUnit = "None"
 pyVal (VThetaTree tt) = pyValTree tt
   where pyValTree (ThetaTree val trees) = "([" ++ intercalate ", " (map pyDouble val) ++ "], [" ++ intercalate ", " (map pyValTree trees) ++ "])"
 pyVal (VADT cName params) = pyCtorRef cName ++ "(" ++ intercalate ", " (map pyVal params) ++ ")"
+-- A rank-1 tensor is a Python list, as 'BTensor' renders one. Higher rank has
+-- no runtime representation yet (see the 'BTensor' case of 'generateExpression').
+pyVal (VTensor sh xs)
+  | shapeRank sh == 1 = "[" ++ intercalate ", " (map pyVal xs) ++ "]"
+  | otherwise = error (rankUnsupported "a tensor value" (shapeRank sh))
 pyVal (VAny) = "'ANY'"
 pyVal (VError e) = "throw(\"" ++ e ++ "\")"
 -- 'VAnyExcept' has no runtime representation in the Python runtime library
@@ -1076,6 +1081,11 @@ pyConformsShape d (ListOf t) e =
   in "(isinstance(" ++ e ++ ", InferenceList) and all(" ++ pyConformsAt (d + 1) t v ++ " for " ++ v ++ " in " ++ e ++ "))"
 pyConformsShape d (TEither a b) e =
   "((isinstance(" ++ e ++ ", Left) and " ++ pyConformsAt d a (e ++ ".val") ++ ") or (isinstance(" ++ e ++ ", Right) and " ++ pyConformsAt d b (e ++ ".val") ++ "))"
+pyConformsShape d (TTensor sh t) e
+  | shapeRank sh == 1 =
+      let v = "_ce" ++ show d
+      in "(isinstance(" ++ e ++ ", list) and len(" ++ e ++ ") == " ++ show (shapeNumel sh)
+         ++ " and all(" ++ pyConformsAt (d + 1) t v ++ " for " ++ v ++ " in " ++ e ++ "))"
 pyConformsShape _ _ _ = "True"
 
 collectApplyChain :: IRExpr -> (IRExpr, [IRExpr])

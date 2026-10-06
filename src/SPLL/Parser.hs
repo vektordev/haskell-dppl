@@ -529,7 +529,50 @@ rTypes = [("Int", TInt), ("Float", TFloat), ("Bool", TBool), ("Symbol", TSymbol)
 -- this function needs to handle compound types such as "Int -> Float" as well 
 -- first, we want to try parsing a compound type, and if that fails assume that a simple type is there instead.
 pType :: MonadParser m => m RType
-pType = dbg "type" $ choice [pEitherType, try pCompoundType, pSimpleType]
+pType = dbg "type" $ choice [pEitherType, pTensorType, try pCompoundType, pSimpleType]
+
+-- | @Tensor[e1, ..., en] τ@ (design tensors-in-core-language §2.5): a statically
+-- shaped tensor of a scalar element type. @Tensor@ is a type keyword only when a
+-- @[@ follows it, so the word stays usable as an ADT name.
+--
+-- Every malformed spelling is a /registered/ error at its own position (like
+-- 'retiredLet'), not a 'fail': this parser runs under the 'try' of
+-- 'pCompoundType' when it is one side of an arrow, and a thrown failure there
+-- would be rewound and blamed on the opening parenthesis. Refused:
+--
+--   * rank 0 (@Tensor[] Float@) and a non-positive extent;
+--   * a nested spelling (@Tensor[2] (Tensor[3] Float)@ or @Tensor[2] Tensor[3]
+--     Float@), rejected rather than normalized to @Tensor[2,3] Float@ (§2.3:
+--     normalizing would make that a law that can never be removed);
+--   * any element type that is not a scalar base type ('isTensorElemType').
+pTensorType :: MonadParser m => m RType
+pTensorType = dbg "TensorType" $ do
+  _ <- try (keyword "Tensor" <* lookAhead (char '['))
+  shapeOff <- getOffset
+  _ <- symbol "["
+  extents <- lexeme L.decimal `sepBy` symbol ","
+  _ <- symbol "]"
+  when (null extents) $
+    registerParseError $ FancyError shapeOff $ Set.singleton $ ErrorFail
+      "a tensor needs at least one axis: `Tensor[] t` has rank 0, which is not a shape; write a scalar type instead"
+  when (any (<= (0 :: Int)) extents) $
+    registerParseError $ FancyError shapeOff $ Set.singleton $ ErrorFail
+      ("every tensor extent must be positive, got " ++ show extents)
+  elemOff <- getOffset
+  -- A parenthesized element is read too, so that the nested spelling
+  -- @Tensor[2] (Tensor[3] Float)@ reaches the diagnostic below rather than
+  -- failing as an unreadable type.
+  elemTy <- try (parens SPLL.Parser.pType) <|> SPLL.Parser.pType
+  let shape = map EFixed extents
+  case elemTy of
+    TTensor inner innerElem -> registerParseError $ FancyError elemOff $ Set.singleton $ ErrorFail
+      ("nested tensor type: a tensor's element must be a scalar (Float, Int, Bool or Symbol). "
+       ++ "Nested tensors are not normalized; write one shape, e.g. Tensor"
+       ++ prettyShape (shape ++ inner) ++ " " ++ prettyRType innerElem ++ " instead")
+    _ | not (isTensorElemType elemTy) -> registerParseError $ FancyError elemOff $ Set.singleton $ ErrorFail
+      ("a tensor's element type must be a scalar (Float, Int, Bool or Symbol), got " ++ prettyRType elemTy)
+    _ -> return ()
+  return (TTensor shape elemTy)
 
 pEitherType :: MonadParser m => m RType
 pEitherType = dbg "EitherType" $ do
