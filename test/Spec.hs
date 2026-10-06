@@ -29,7 +29,8 @@ import TestDeterminism (determinismTests)
 import TestWriteLogitsProperties (writeLogitsTests, writeLogitsRoundtripTests)
 import TestShowcase (showcaseTests)
 import End2EndTesting (end2endTests, slowEnd2EndTests, selectPassDifferentialTests, planEngineDifferentialTests, budgetZeroDifferentialTests, planEngineLogSpaceTests, batchedPythonTests, slowBatchedPythonTests, batchedRefusalTests, batchedAdtCdfNaNGuardTests, wideNeuralDomainTests, deepExpressionSpillTests, batchedNestedSelectTests, normalTailPrecisionTests, batchedEnumBucketingTests, branchCountBackendTests)
-import TestKnownIssues (knownIssuesTests)
+import TestKnownIssues (knownIssuesTests, performancePinHarnessTests)
+import ScalingCheck (scalingCheckTests)
 import TestRewrites (rewriteTests, rewriteCorpusTests)
 import TestPythonPrelude (pythonPreludeTests)
 import TestCLI (cliTests)
@@ -586,6 +587,8 @@ main = do
     , writeLogitsRoundtrip
     , showcase
     , knownIssues
+    , scalingCheckTests
+    , performancePinHarnessTests
     , rewriteTests
     , impactManifestTests
     , e2e

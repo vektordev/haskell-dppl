@@ -1,0 +1,1 @@
+main = {{for i in 1..D}}({{end}}(Uniform < 0.5){{for i in 1..D}} == True){{end}}
