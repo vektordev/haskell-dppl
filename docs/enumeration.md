@@ -395,6 +395,27 @@ V=100 0.229ms vs 25.5ms, V=1000 2.20ms vs 2551ms — fused time grows 78x
 across a 100x domain, the joint path 8366x. Bit-identical on the diagonal,
 within 9e-16 on the complement.
 
+Each arm's sum `Σ_j w(j)·M(j)` (weights `w` = the product or `pa·(Sb−pb)`,
+`M` the arm's mass against the query) takes the cheapest of three forms
+(task `agreement-enumeration-point-collapse`):
+
+- **the arm is a constructor of the loop variable** (`right a`), over a
+  contiguous Int domain, for a point query: `M(j) = [sample == Right j]` is
+  nonzero at one `j` at most, so the sum is a tag test on the sample and one
+  `BIndex` at `payload − lo`. A payload outside the domain is zero, and a
+  payload of ANY (or a top-level ANY) is `Σ w`. This takes a `Right k` query
+  from O(V) after the network calls to O(1). A non-contiguous domain keeps
+  the scan, because finding the position there is itself the O(V) search.
+  The cumulative variant keeps it too, since a CDF over the payload is a
+  range and not a point.
+- **the arm does not read the loop variable** (`left ()`): its indicator
+  factors out as `M · Σ w`.
+- otherwise the scan, `BReduce (BZip w (BMap M dom))`.
+
+Pinned by `TestInternals.agreementPointQueryIndexes`, which checks that no
+loop body reads the query, and by the out-of-domain and top-level-ANY rows
+of `categoricalProductFusion.tst`.
+
 The off-diagonal subtraction is **forced, not chosen**: any O(V) form of
 "sum over everything but the diagonal" is the total minus the diagonal,
 because summing those terms directly is the O(V²) being removed. It is
