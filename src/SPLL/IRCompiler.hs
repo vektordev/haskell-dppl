@@ -3004,9 +3004,9 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
       -- vetoes it, and the uses are counted through binders as well
       -- ('usesThroughBinders').
       let occurrences = fromMaybe [] (lookup lResolvedCN (lambdaVarOccurrences (fcData meta)))
-      let bindingIsSink = length occurrences == 1
+      let singleUse = length occurrences == 1
             && usesThroughBinders toInvCN (findExprWithCN (map snd fs) lambdaBodyCN) <= 1
-            && not (containsRandomSource bodyExpr)
+      let bindingIsSink = singleUse && not (containsRandomSource bodyExpr)
       let anyW = IRIf readsAnyW (IRConst (VBool True)) (IRUnaryOp OpIsAny appliedSample)
       let constResult e = mapResult (const e) (detP (srZero sr))
       case rt of
@@ -3055,36 +3055,35 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
                   return (withBody bodyRes)
         TArrow _ _ -> return (detP (IRIf readsAnyW anyRefusal
                                      (guarded (wrapInLambdas (packResult scaled)) (wrapInLambdas (packResult (detP (srZero sr)))))))
-        _ | cumulative && isLambdaExpr l && null tag && bindingIsSink -> do
-              -- Integrate mode keeps the single-witness CDF below, except at a
-              -- wildcard witness: P(x <= ANY) is the whole mass, so the CDF of
-              -- the bound value would answer 1 whatever the rest of the body
-              -- says, and the sentinel used to reach 'irCDF' and crash
-              -- (fuzz-admission-oracle-bugs item 5, @snd (draw v = Uniform in
-              -- (v, 2.0))@ at @cdf(1.0)@ is 0, not 1). A sink's value lands only
-              -- in the wildcard slot, so its body factor -- the body's own
-              -- integrate inference with the wildcard bound -- is the marginal,
-              -- exactly as in probability mode below. An unevaluable witness is
-              -- refused as there. If the body factor cannot be compiled, the
-              -- wildcard witness is refused instead of the whole variant.
-              bodyCompiled <- lift ((Just <$> runWriterT (toIRInference bodyMeta cumulative bodyExpr sample))
-                                      `catchError` (\_ -> return Nothing))
-              let whenAnyRes = case bodyCompiled of
-                    Just (bodyRes0, bodyBinds) -> zipResult (IRIf readsAnyW) (constResult anyRefusal)
-                      (unpackResult (IRLetIn (toInvCN ++ tag) appliedSample
-                                       (generateLetInBlock bodyMeta (bodyRes0, bodyBinds))))
-                    Nothing -> constResult anyRefusal
-              return (mapResult wrapInLambdas (guardedZero (zipResult (IRIf anyW) whenAnyRes scaled)))
-        _ | cumulative || not (isLambdaExpr l) || not (null tag) ->
-              -- Keep the original single-witness behaviour when: (a) integrate mode, where
-              -- tuple/multi-latent CDFs are ill-defined; (b) the callable is not a literal
+        -- Integrate mode, a plain value let-binding read more than once: the
+        -- point inversion recovers it from ONE slot, but its other uses
+        -- correlate that slot with the rest of the body, and a joint CDF of
+        -- correlated slots is no product of per-slot factors -- @draw v =
+        -- Uniform in (v, v + 1.0)@ at @cdf((0.5, 1.2))@ is P(v <= min(0.5,
+        -- 0.2)) = 0.2, where the single witness answered 0.5 and the body
+        -- factor (v fixed at its witness, 1.5 <= 1.2 fails) answers 0. No
+        -- engine here measures that region, so the variant is refused rather
+        -- than answered wrong (task tuple-cdf-through-draw-ignores-other-slots).
+        -- A binding read ONCE reaches only the slot it is recovered from, so
+        -- the body's other slots are independent of it and the generic arm
+        -- below folds them in as a body factor, exactly as probability mode
+        -- does: @draw v = Uniform in (v, 2.0)@ at @(0.5, 1.0)@ is 0.5 * [2.0
+        -- <= 1.0] = 0, where the single witness alone answered 0.5.
+        _ | cumulative && isLambdaExpr l && null tag && not singleUse ->
+              refuse lChainName ("cannot compute a cumulative distribution through binding '" ++ userVar
+                ++ "': it is read more than once, so the slots it reaches are correlated and"
+                ++ " their joint CDF is not a product of per-slot factors"
+                ++ " (task tuple-cdf-through-draw-ignores-other-slots)")
+        _ | not (isLambdaExpr l) || not (null tag) ->
+              -- Keep the original single-witness behaviour when: (a) the callable is not a literal
               -- lambda, i.e. it is a function reached through the higher-order equivalence
               -- machinery (applied top-level fn / returned closure), whose body references
-              -- tagged variables this folding would mis-bind; or (c) the lambda is applied
+              -- tagged variables this folding would mis-bind; or (b) the lambda is applied
               -- under a tag (HO duplication). Body-factor folding is only sound for a plain
               -- value let-binding `Apply (Lambda x body) v`. A wildcard witness has no
-              -- answer here (integrate: see the sink arm above; it used to crash in 'irCDF'),
-              -- and an unevaluable one none anywhere.
+              -- answer here (in integrate mode it used to crash in 'irCDF'), and an
+              -- unevaluable one none anywhere. A tuple-valued CDF through such a callee
+              -- still measures only the witnessed slot.
               let anyHere = if cumulative then anyW else readsAnyW in
               return (mapResult wrapInLambdas (guardedZero (mapResult (IRIf anyHere anyRefusal) scaled)))
         _ -> do
@@ -3169,8 +3168,6 @@ toIRInference meta cumulative (Expr TypeInfo{rType=rt, chainName=_} (Apply l v))
           -- in (z, Uniform)@ at @(ANY, 0.5)@ refused). A sink keeps its cheaper
           -- answer for a wildcard-valued witness, and a body that cannot be
           -- compiled this way keeps the refusal.
-          let singleUse = length occurrences == 1
-                && usesThroughBinders toInvCN (findExprWithCN (map snd fs) lambdaBodyCN) <= 1
           unevaluable <- if not singleUse then return (constResult anyRefusal) else do
             let openBody = findExprWithCN (map snd fs) lambdaBodyCN
             let openMeta = extendMetaForLambda meta (getTypeInfo l) toInvCN

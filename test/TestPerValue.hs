@@ -463,7 +463,11 @@ structureTests = testGroup "compiled structure"
       assertBool "calls the point query" (callsVar "pv__point_prob" body)
       assertBool "no fast-path helpers" (isNothing (groupNamed env "pv__given"))
   , testCase "a per-value function has no integrate and no writeLogits; the slot probe is not compiled" $ do
-      p <- parseOrFail "pv :: (Enumerated Bool, Bool)\npv = draw c = Uniform < 0.3 in (c, c)\nmain = 1"
+      -- The second slot is independent of c: a draw read twice, @(c, c)@,
+      -- has no integrate of its own (its slots' joint CDF is no product,
+      -- task tuple-cdf-through-draw-ignores-other-slots), so it could not
+      -- show the point function keeping one.
+      p <- parseOrFail "pv :: (Enumerated Bool, Bool)\npv = draw c = Uniform < 0.3 in (c, Uniform < 0.5)\nmain = 1"
       env <- compileOrFail defaultCompilerConfig p
       g <- maybe (assertFailure "no group" >> error "unreachable") return (groupNamed env "pv")
       assertBool "integrate" (isNothing (integFun g))

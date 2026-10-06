@@ -1,0 +1,4 @@
+main = draw v = Uniform in (v, Uniform)
+-- docs task tuple-cdf-through-draw-ignores-other-slots: the integrate fold
+-- answered P(v <= 0.5) = 0.5 at (0.5, 0.5), ignoring the second, independent
+-- Uniform. The joint CDF of independent slots is the product, 0.25.

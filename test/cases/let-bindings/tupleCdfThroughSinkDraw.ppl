@@ -1,0 +1,6 @@
+main = draw v = Uniform in (v, 2.0)
+-- docs task tuple-cdf-through-draw-ignores-other-slots: the integrate fold
+-- recovered v from the first slot and answered P(v <= 0.5) = 0.5 at
+-- (0.5, 1.0), never measuring the constant second slot (2.0 <= 1.0 fails).
+-- A binding read once reaches only its witnessing slot, so the rest of the
+-- body is an independent factor, folded in as probability mode does.

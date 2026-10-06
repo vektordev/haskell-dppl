@@ -2443,6 +2443,28 @@ expectOrthantRefusal src = do
   let prog = either (\e -> error ("parse failed: " ++ show e)) id (tryParseProgram "test" src)
   expectVariantRefused "main" "prob" "orthant" (compile defaultCompilerConfig prog)
 
+-- | Task tuple-cdf-through-draw-ignores-other-slots: integrate mode recovers a
+-- draw-bound value from one slot, and a binding read more than once correlates
+-- that slot with the others, so their joint CDF is no product of per-slot
+-- factors. The single witness answered @cdf((0.5, 1.2))@ of @(v, v + 1.0)@ as
+-- 0.5 (correct: 0.2); the integrate variant is now refused instead, while the
+-- probability variant keeps working. The independent (read-once) shapes are
+-- answered, pinned by @let-bindings/tupleCdfThrough*@ in the corpus.
+tupleCdfCorrelatedRefusedTests :: TestTree
+tupleCdfCorrelatedRefusedTests = testGroup "tuple cdf through a draw read more than once is refused"
+  [ testCase src $ do
+      let prog = either (\e -> error ("parse failed: " ++ show e)) id (tryParseProgram "test" src)
+      let compiled = compile defaultCompilerConfig prog
+      expectVariantRefused "main" "integ" "read more than once" compiled
+      case compiled of
+        Right (IREnv gs _ _) ->
+          assertBool "the probability variant is not refused"
+            (null [ () | g <- gs, groupName g == "main", Just _ <- [lookup "prob" (refusedVariants g)] ])
+        Left _ -> return ()
+  | src <- [ "main = draw v = Uniform in (v, v + 1.0)"
+           , "main = draw v = Uniform in (v, v)" ]
+  ]
+
 -- | Count occurrences of @IRVar name@ in an expression.
 countIRVar :: String -> IRExpr -> Int
 countIRVar name (IRVar n) | n == name = 1
@@ -5074,6 +5096,7 @@ internalsTests = testGroup "Internals"
   , materializationGuardTests
   , materializationTests
   , setWitnessIntBoundaryTests
+  , tupleCdfCorrelatedRefusedTests
   , semiringMapTests
   , semiringSatisfiabilityTests
   , materializationVerdictTests
