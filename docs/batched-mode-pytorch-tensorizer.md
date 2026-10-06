@@ -16,6 +16,19 @@ calls the kernel once per bucket). `OpLog`/`OpDiv` route through
 select; a refused `IRError` arm emits as a NaN `poison()` constant the
 select masks away.
 
+`torch.where` selects tensors, not Python tuples, so a tuple-valued select
+is split into one select per component (`distributeSelects`). The split
+copies the condition, and an arm's `let`-spine, into every component. That
+is harmless while they are pure, but a copied random draw is a second,
+independent draw: `draw (a, b) = if Uniform < 0.5 then (True, True) else
+(False, False)` drew its coin once per component in `generate` and agreed
+only half the time (task `batched-generate-destructured-draw-double-sample`).
+An impure condition or arm (`batchPure`: an `IRSample`, or a generator
+reference under its raw or post-rename name) is therefore bound once above
+the split, its binders renamed fresh; pure parts are copied as before, so
+prob/integ bodies emit unchanged. Corpus
+`let-bindings/drawDestructuredAgreement*`.
+
 An ADT whose constructors are all nullary (`data Color = Red | Green |
 Blue`) is an *enumeration*: its tag is a value, not a structure, so the
 signature keys the whole ADT as one bucket and `_pack` stacks the tags into

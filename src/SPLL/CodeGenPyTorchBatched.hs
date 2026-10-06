@@ -53,7 +53,7 @@ import SPLL.Lang.Lang (multiValueToValueList)
 -- 'pyMangle' is: it renders a *Python language* literal, not a call into
 -- pythonLib.py. The ban below is on 'pyVal', whose hazard is naming runtime
 -- constructors that pythonLibBatched.py does not define.
-import SPLL.CodeGenPyTorch (envToLUT, replaceCalls, pyMangle, pyDouble, groupClassName)
+import SPLL.CodeGenPyTorch (envToLUT, renameFree, replaceCalls, pyMangle, pyDouble, groupClassName)
 import SPLL.Typing.AlgebraicDataTypes (accessorMismatchMessage, fieldAccessorOwners)
 import Data.Bifunctor (first)
 import Data.List (intercalate, intersect, isSuffixOf, nub, partition, (\\))
@@ -134,7 +134,7 @@ emitBatched genBoil env0 = do
       -- uncollapsed backend's. At most k+1 attempts for k enums, and the
       -- fallback is never worse than the uncollapsed backend.
       let attempt enums = do
-            let env' = adtEnvWith enums adts
+            let env' = (adtEnvWith enums adts) { sGenNames = map fst genArities }
             () <- checkCallGraph env' funcs
             classes <- mapM (generateClass (groupClassName env) env' lut genArities genRaw) funcs
             return (enums, classes)
@@ -672,19 +672,71 @@ foldConst = irMap f
 -- exclusion, since a value-dependent 'IRIf' still needs the same treatment an
 -- 'IRSelect' does.
 distributeSelects :: SEnv -> IRExpr -> IRExpr
-distributeSelects env0 = go env0
+distributeSelects env0 e0 = evalState (go env0 e0) (0 :: Int)
   where
-    go env (IRLambda n b)  = IRLambda n (go env b)
-    go env (IRLetIn n v b) = IRLetIn n (go env v) (go (bindS env n v) b)
-    go env (IRSelect c t f) | tupleValued t || tupleValued f =
-      IRConstruct TgTuple
-        [ go env (IRSelect c (projTuple True t)  (projTuple True f))
-        , go env (IRSelect c (projTuple False t) (projTuple False f)) ]
+    go env (IRLambda n b)  = IRLambda n <$> go env b
+    go env (IRLetIn n v b) = IRLetIn n <$> go env v <*> go (bindS env n v) b
+    go env (IRSelect c t f) | tupleValued t || tupleValued f = split env IRSelect c t f
     go env (IRIf c t f) | not (structural env c), tupleValued t || tupleValued f =
-      IRConstruct TgTuple
-        [ go env (IRIf c (projTuple True t)  (projTuple True f))
-        , go env (IRIf c (projTuple False t) (projTuple False f)) ]
-    go env e = irDescend (go env) e
+      split env IRIf c t f
+    go env e = irDescendM (go env) e
+
+    -- Splitting copies the condition into both component selects, and an
+    -- arm's let-spine (or a non-literal tuple arm) into both projections. That
+    -- is only a duplicated computation while what is copied is pure; a copied
+    -- random draw is a second, independent draw, so the two components of one
+    -- sampled tuple would disagree (task
+    -- batched-generate-destructured-draw-double-sample: @draw (a, b) = if
+    -- Uniform < 0.5 then (True, True) else (False, False)@ drew the coin once
+    -- per component). An impure condition or arm is therefore bound once,
+    -- above the split, and the copies read the binding. Hoisting an arm's
+    -- bindings above the select is sound here because both arms of a value
+    -- select are evaluated anyway (@torch.where@ is eager); its binders are
+    -- renamed fresh so the sibling arm cannot capture them. Pure parts are
+    -- copied exactly as before, so prob/integ bodies emit unchanged.
+    split env mk c t f = do
+      (bc, c') <- shareExpr c
+      (bt, t') <- shareArm t
+      (bf, f') <- shareArm f
+      let parts = IRConstruct TgTuple
+            [ mk c' (projTuple True t')  (projTuple True f')
+            , mk c' (projTuple False t') (projTuple False f') ]
+      go env (foldr (uncurry IRLetIn) parts (bc ++ bt ++ bf))
+
+    fresh = do
+      k <- get
+      put (k + 1)
+      return ("_ds" ++ show k)
+
+    shareExpr e
+      | atomicIR e || batchPure env0 e = return ([], e)
+      | otherwise = do
+          n <- fresh
+          return ([(n, e)], IRVar n)
+
+    shareArm a
+      | batchPure env0 a = return ([], a)
+      | otherwise = hoist a
+    hoist (IRLetIn n v b) = do
+      n' <- fresh
+      (bs, b') <- hoist (renameFree n n' b)
+      return ((n', v) : bs, b')
+    hoist a@(IRConstruct TgTuple _) = return ([], a)
+    hoist a = shareExpr a
+
+    atomicIR (IRVar _)   = True
+    atomicIR (IRConst _) = True
+    atomicIR _           = False
+
+-- | Does evaluating this expression draw randomness? An 'IRSample', or a
+-- reference to a generator: by its raw @_gen@ name ('isEffectfulVar') or by
+-- the post-rename name a batched generate body calls it by ('sGenNames').
+-- The batched counterpart of 'isPure', which only knows the raw names.
+batchPure :: SEnv -> IRExpr -> Bool
+batchPure env e = case e of
+  IRSample _ -> False
+  IRVar n    -> not (isEffectfulVar n) && n `notElem` sGenNames env
+  _          -> all (batchPure env) (getIRSubExprs e)
 
 -- | Does this expression evaluate to a tuple (an @IRConstruct TgTuple@, under
 -- its let-spine)?
@@ -760,6 +812,9 @@ data SEnv = SEnv
     -- | Names @let@-bound to a value reading collapsed predicates, with the
     -- ADTs they read ('enumBlame' through a CSE'd condition).
   , sEnumDeps     :: [(String, [String])]
+    -- | The post-rename names generate bodies call other groups' generate
+    -- methods by: references to them draw randomness ('batchPure').
+  , sGenNames     :: [String]
   }
 
 -- | The environment for one program: nothing bound yet, and the three name sets
@@ -790,6 +845,7 @@ adtEnvWith enums decls = SEnv
   , sEnumPreds    = [ ("is" ++ pyMangle cn, dataName d) | d <- decls, dataName d `elem` enums
                                                         , (cn, _) <- constructors d ]
   , sEnumDeps     = []
+  , sGenNames     = []
   }
 
 -- | The collapsed enumerations whose @is\<Ctor\>@ tests this expression reads,

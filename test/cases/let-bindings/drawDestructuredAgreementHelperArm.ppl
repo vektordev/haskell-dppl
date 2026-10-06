@@ -1,0 +1,5 @@
+-- Task batched-generate-destructured-draw-double-sample: one arm of the
+-- destructured choice is a call to a random tuple-valued helper, which the
+-- batched per-component split used to call once per component.
+pair = if Uniform < 0.3 then (True, True) else (False, False)
+main = draw (a, b) = (if Uniform < 0.5 then pair else (False, False)) in if a == b then True else False
