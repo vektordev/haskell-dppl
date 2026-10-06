@@ -1,0 +1,3 @@
+coin p = Uniform < p
+alias = coin
+main x = alias x

@@ -103,6 +103,7 @@ import SPLL.Typing.RInfer (addRTypeInfoAt, addRTypeInfo)
 import SPLL.Validator (validateProgram)
 import SPLL.CalleeNormalize (normalizeCallees)
 import SPLL.DrawSinking (sinkEnumerableDraws)
+import SPLL.PerValue (validateSignatures, expandPerValue, perValuePlans, checkSignatureTypes, dropSlotProbes, installPerValue)
 import IRInterpreter (generateRand, generateDet, generateRandE)
 import Control.Monad.Random (Rand, RandomGen, evalRand)
 import System.Random (mkStdGen)
@@ -120,7 +121,7 @@ import PrettyPrint (pPrintProg, pPrintIREnv)
 import Text.Pretty.Simple (pShow)
 import qualified Data.Text.Lazy as TL
 import Data.Char (toUpper)
-import Data.Maybe (isJust, fromMaybe)
+import Data.Maybe (isJust, isNothing, fromMaybe)
 import Data.List (find, intercalate)
 
 -- | Build an AST node with a blank annotation. All the smart constructors
@@ -374,7 +375,12 @@ compile conf p0 = frontEnd conf p0 >>= compileRTyped conf
 frontEnd :: CompilerConfig -> Program -> Either CompilerError Program
 frontEnd conf p0 = do
   validateProgram p0
-  p <- resolveNeuralDecls p0
+  validateSignatures p0
+  -- Per-value queries (task per-value-query-over-enumerated-slot): a function
+  -- whose signature marks a result slot Enumerated gets its helper
+  -- definitions here, before anything is inferred, so they are typed and
+  -- compiled like any other definition. See "SPLL.PerValue".
+  p <- expandPerValue (isNothing (topKThreshold conf)) <$> resolveNeuralDecls p0
   printIfVerbose conf "=== Parsed Program ==="
   pPrintIfMoreVerbose conf p
   printIfVerbose conf (pPrintProg p)
@@ -422,10 +428,20 @@ frontEnd conf p0 = do
 -- @Constant VAny@ the hole is spelled with. Everything below runs on it
 -- unchanged, which is the design's central claim.
 compileRTyped :: CompilerConfig -> Program -> Either CompilerError IREnv
-compileRTyped conf rtyped = do
+compileRTyped conf rtypedWithSigs = do
+  -- Signatures are consumed here: checked against the inferred types, and
+  -- each per-value function planned. Cleared before compiling, so the
+  -- per-mask variants, which re-enter this function with a pruned program,
+  -- never plan a per-value function again.
+  checkSignatureTypes rtypedWithSigs
+  let perValue = perValuePlans conf rtypedWithSigs
+      rtyped = (dropSlotProbes rtypedWithSigs) { signatures = [] }
   unoptimized <- irUnoptimized conf rtyped
   printStageIR conf "After IR Compilation (pre-optimization)" unoptimized
-  let stripped = if countBranches conf then unoptimized else stripBranchCount unoptimized
+  -- The per-value bodies are installed after branch-count stripping, because
+  -- they are built for the result encoding the point queries end up with.
+  let stripped = installPerValue conf perValue
+                   (if countBranches conf then unoptimized else stripBranchCount unoptimized)
 
   -- Batched mode (design pytorch-tensorizer): retag elementwise-eligible ifs to
   -- selects before the optimizer, which would otherwise fold the conditionals
@@ -451,7 +467,8 @@ compileRTyped conf rtyped = do
 -- with their dispatchers (task per-mask-variants-by-pruning), spliced in here
 -- so they go through every later pass like any other group.
 irUnoptimized :: CompilerConfig -> Program -> Either CompilerError IREnv
-irUnoptimized conf rtyped = do
+irUnoptimized conf rtypedWithProbes = do
+  let rtyped = dropSlotProbes rtypedWithProbes
   (annotated, fcData) <- typedStages conf rtyped
   baseIR <- envToIRUnoptimized conf fcData annotated
   return (withMaskVariants conf rtyped baseIR)

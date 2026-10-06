@@ -94,9 +94,10 @@ NEST_FULL_TESTS=1 stack test                              # execute every corpus
 ## Pipeline
 
 ```
-source → Parser → Validator → CalleeNormalize → RInfer (+ Monomorphize on failure)
-  → Analysis (DiscreteValues) → DrawSinking → ForwardChaining → ModalityInfer
-  → Analysis (IsConditional) → IRCompiler (generate / probability / integrate)
+source → Parser → Validator → PerValue (helper expansion) → CalleeNormalize
+  → RInfer (+ Monomorphize on failure) → Analysis (DiscreteValues) → DrawSinking
+  → ForwardChaining → ModalityInfer → Analysis (IsConditional)
+  → IRCompiler (generate / probability / integrate) → PerValue (install)
   → IRSelectPass (batched only) → IROptimizer → CodeGen{PyTorch,PyTorchBatched,Julia}
 ```
 
@@ -122,6 +123,7 @@ source → Parser → Validator → CalleeNormalize → RInfer (+ Monomorphize o
 - `Analysis` — `DiscreteValues`/`IsConditional` tags, enumeration domains and decomposability verdicts.
 - `DrawSinking` — moves enumerable `draw`s into the operand that reads them.
 - `ObservationMask`, `MaskVariants` — which `ANY` query shapes a function answers, plus their per-mask variants and runtime dispatcher.
+- `PerValue` — per-value queries: a signature's `Enumerated` slot answered as one vector over its domain.
 - `IRCompiler` — AST to IR for all three variants, holding all the inference engines.
 - `Semiring` — `PResult` combinators over the linear/log/max-product semirings.
 - `IntermediateRepresentation` — `IRExpr` and `IRFunGroup`.
@@ -144,13 +146,14 @@ stdlib), `MockNN` (mock networks for tests), `PrettyPrint`, `Utils`.
 | doc | covers |
 |---|---|
 | `pipeline-and-types.md` | stage order, `Expr`/`TypeInfo`/`Value`/`MultiValue`/`CompilerConfig`, the `PType` order, the `-d` dump |
-| `language-frontend.md` | `draw` vs `define`, `observe`, reserved names and mangling, type-error provenance, monomorphization |
+| `language-frontend.md` | `draw` vs `define`, `observe`, type signatures, reserved names and mangling, type-error provenance, monomorphization |
 | `modality-and-admission.md` | the Modality layer, conditioning inside `if` arms, re-inferring recovered variables, refusals as absent variants, the admission contract |
 | `witness-inversion-engines.md` | plan-guided enumeration, set-valued witnesses, affine Gaussian marginalisation, witnessing a named function's parameter, forward-chaining acyclicity |
 | `callee-normalization.md` | callee rewrites, pointwise lifting of arrow-typed `if` mixtures |
 | `enumeration.md` | enumerated branches, enumerability across calls, draw sinking, marginal materialization, the dense budget gate, agreement fusion, tensors in the IR |
 | `semiring-presult-internals.md` | `PResult` combinators, log space, dims, the impossibility flag, branch counting, `anySafeShared`, topK and lower bounds, the query-type guard |
 | `observation-masks.md` | `ANY` query shapes, correlation classes, per-mask variants |
+| `per-value-queries.md` | `Enumerated` signatures, the per-value result layout, fast path vs fallback, refusals |
 | `neural.md` | neural declarations, input types (`Tensor`), `of` annotations, the categorical sampler, readLogits/writeLogits |
 | `batched-mode-pytorch-tensorizer.md` | batched backend, dense mode, refusals |
 | `backends.md` | runtime libraries under torch, float literals, Python nesting spill, safe unary math |

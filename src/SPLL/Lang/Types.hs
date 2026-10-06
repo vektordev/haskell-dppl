@@ -18,6 +18,8 @@ module SPLL.Lang.Types
   , Name
   , Program(..)
   , FnDecl
+  , FnSignature(..)
+  , SigStep(..)
   , NeuralDecl
   , ADTDecl(..)
   , ADTConstructorDecl
@@ -169,6 +171,7 @@ instance Equiv Program where
       && neurals p1 == neurals p2
       && adts p1 == adts p2
       && writeLogitsDecls p1 == writeLogitsDecls p2
+      && signatures p1 == signatures p2
 
 instance Equiv a => Equiv [a] where
   xs ~= ys = length xs == length ys && and (zipWith (~=) xs ys)
@@ -193,10 +196,37 @@ data Program = Program {
                     -- | Standalone PartitionPlan annotations, keyed by RType: either
                     -- explicit @neural writeLogits :: T of M@ declarations, or sugar registered
                     -- from a NeuralDecl's @of@ clause for its target/source type.
-                    writeLogitsDecls :: [(RType, MultiValue)]
+                    writeLogitsDecls :: [(RType, MultiValue)],
+                    -- | Top-level type signatures (@f :: T@). Optional: a definition
+                    -- without one is typed by inference alone. A signature is checked
+                    -- against the inferred type, and is where a per-value query is
+                    -- requested: an @Enumerated@ component in the codomain (task
+                    -- per-value-query-over-enumerated-slot, see 'FnSignature').
+                    signatures :: [FnSignature]
                     } deriving (Show, Eq)
 
 type FnDecl = (String, Expr)
+
+-- | One step of an accessor path into a tuple-typed codomain.
+data SigStep = SigFst | SigSnd deriving (Show, Eq, Ord)
+
+-- | A top-level type signature @name :: T@ (task
+-- per-value-query-over-enumerated-slot).
+--
+-- 'sigType' is the declared type with every @Enumerated@ marker erased, so it
+-- compares directly against the inferred 'RType'. 'sigEnumerated' lists the
+-- marked slots as accessor paths into the codomain, i.e. the type under all of
+-- the parameter arrows: @f :: Symbol -> (Enumerated Int, Bool)@ has the path
+-- @[SigFst]@, @g :: Enumerated Int@ the empty path (the whole result).
+--
+-- A marked function answers a probability query with one result per value of
+-- the marked slot's finite domain instead of one number -- the vector
+-- @[P(slot = v, rest) | v <- domain]@. See 'SPLL.PerValue'.
+data FnSignature = FnSignature
+  { sigName       :: String
+  , sigType       :: RType
+  , sigEnumerated :: [[SigStep]]
+  } deriving (Show, Eq)
 
 type NeuralDecl = (String, RType, Maybe MultiValue)
 

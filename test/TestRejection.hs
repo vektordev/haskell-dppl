@@ -80,11 +80,11 @@ rejectionTests = testGroup "Rejection"
 -- A program with no 'main' entry point: not reachable via the invalid* family
 -- (those all declare main), so it is constructed locally here.
 noMainProg :: Program
-noMainProg = Program [("notMain", uniform)] [] [] []
+noMainProg = Program [("notMain", uniform)] [] [] [] []
 
 -- ANY is a marginal-query sentinel and must never appear in a source program.
 anyInProgramProg :: Program
-anyInProgramProg = Program [("main", Expr makeTypeInfo (Constant VAny))] [] [] []
+anyInProgramProg = Program [("main", Expr makeTypeInfo (Constant VAny))] [] [] [] []
 
 -- Two PartitionPlan annotations for the same RType (Int) that disagree must be
 -- rejected as a conflicting registration -- not reachable via the invalid* family,
@@ -93,7 +93,7 @@ writeLogitsCollisionProg :: Program
 writeLogitsCollisionProg = Program [("main", constF 1.0)] [] []
   [ (TInt, MultiDiscretes [VInt 0, VInt 1])
   , (TInt, MultiDiscretes [VInt 0, VInt 1, VInt 2])
-  ]
+  ] []
 
 -- An ADT constructor's auto-generated `is<Ctor>` predicate can spell the name
 -- of an existing predefined function: `data X = Null | ...` generates
@@ -105,7 +105,7 @@ writeLogitsCollisionProg = Program [("main", constF 1.0)] [] []
 adtCtorCollidesWithPredefinedProg :: Program
 adtCtorCollidesWithPredefinedProg =
   Program [("main", constB True)] []
-    [ADTDecl "X" [("Null", []), ("Other", [("v", TFloat)])] Nothing] []
+    [ADTDecl "X" [("Null", []), ("Other", [("v", TFloat)])] Nothing] [] []
 
 -- Two different ADTs declaring the same constructor name: the second ADT's own
 -- constructor of that name would be unreachable. (A shared *field* name is
@@ -113,21 +113,21 @@ adtCtorCollidesWithPredefinedProg =
 adtCtorNameSharedAcrossAdtsProg :: Program
 adtCtorNameSharedAcrossAdtsProg =
   Program [("main", constB True)] []
-    [ADTDecl "A" [("Shared", [])] Nothing, ADTDecl "B" [("Shared", [])] Nothing] []
+    [ADTDecl "A" [("Shared", [])] Nothing, ADTDecl "B" [("Shared", [])] Nothing] [] []
 
 -- An ADT constructor whose generated name matches a user-defined top-level
 -- function.
 adtCtorCollidesWithUserFunctionProg :: Program
 adtCtorCollidesWithUserFunctionProg =
   Program [("main", constB True), ("Foo", constB True)] []
-    [ADTDecl "X" [("Foo", [])] Nothing] []
+    [ADTDecl "X" [("Foo", [])] Nothing] [] []
 
 -- The reverse (source -> Symbol) neural declaration shape has been removed: it used to
 -- name an external network (NN2) with no SPLL call site. Such a declaration must be
 -- rejected at validation, pointing the user at the registry syntax ("neural writeLogits ::
 -- T of M").
 reversedNeuralShapeProg :: Program
-reversedNeuralShapeProg = Program [("main", constB True)] [("ren", TArrow TBool TSymbol, Nothing)] [] []
+reversedNeuralShapeProg = Program [("main", constB True)] [("ren", TArrow TBool TSymbol, Nothing)] [] [] []
 
 -- A neural declaration whose type is not an arrow at all (nor the reversed-shape
 -- arrow above): must be rejected at validation for the same reason -- neural
@@ -135,7 +135,7 @@ reversedNeuralShapeProg = Program [("main", constB True)] [("ren", TArrow TBool 
 -- validateNeuralShape's catch-all (Right ()) and crashed later, deep in AutoNeural's
 -- makeAutoNeural, instead of being rejected here.
 malformedNeuralDeclProg :: Program
-malformedNeuralDeclProg = Program [("main", constB True)] [("ren", TBool, Nothing)] [] []
+malformedNeuralDeclProg = Program [("main", constB True)] [("ren", TBool, Nothing)] [] [] []
 
 -- Each entry: (case name, program, distinctive substring of the expected error).
 -- The substring identifies *which* validation rule should fire, so we catch both
@@ -184,14 +184,14 @@ validatorTests = testGroup "Validator"
 fieldSharedWithinAdtProg, fieldSharedAcrossAdtsProg, fieldPartlySharedProg :: Program
 fieldSharedWithinAdtProg =
   Program [("main", constB True)] []
-    [ADTDecl "T" [("A", [("v", TFloat)]), ("B", [("v", TFloat)])] Nothing] []
+    [ADTDecl "T" [("A", [("v", TFloat)]), ("B", [("v", TFloat)])] Nothing] [] []
 fieldSharedAcrossAdtsProg =
   Program [("main", constB True)] []
-    [ADTDecl "A" [("MkA", [("v", TFloat)])] Nothing, ADTDecl "B" [("MkB", [("v", TFloat)])] Nothing] []
+    [ADTDecl "A" [("MkA", [("v", TFloat)])] Nothing, ADTDecl "B" [("MkB", [("v", TFloat)])] Nothing] [] []
 -- `A` and `B` share `w` but not `u`/`x`: only `w` may be named.
 fieldPartlySharedProg =
   Program [("main", constB True)] []
-    [ADTDecl "T" [("A", [("u", TFloat), ("w", TFloat)]), ("B", [("x", TFloat), ("w", TFloat)])] Nothing] []
+    [ADTDecl "T" [("A", [("u", TFloat), ("w", TFloat)]), ("B", [("x", TFloat), ("w", TFloat)])] Nothing] [] []
 
 -- The natural binary expression tree, exactly as the task's repro spelled it:
 -- `B`'s fields used to be unreadable, so p(B L L) threw at query time. Its
@@ -268,7 +268,7 @@ compileRejectsTests = testGroup "CompileRejects"
 -- plus on two Bools: structurally fine (plus is a known 2-ary InjF) so the
 -- validator accepts it, but RType inference rejects the class-constraint.
 boolPlusBoolProg :: Program
-boolPlusBoolProg = Program [("main", constB True #+# constB False)] [] [] []
+boolPlusBoolProg = Program [("main", constB True #+# constB False)] [] [] [] []
 
 typeInferenceCases :: [(String, Program)]
 typeInferenceCases =
@@ -295,7 +295,7 @@ typeInferenceTests = testGroup "TypeInference"
 -- without the guard, the optimizer would fold the sample check away and return a
 -- plausible-but-meaningless 0.5 -- the silent case the guard is meant to catch.
 boolProg :: Program
-boolProg = Program [("main", uniform #<# constF 0.5)] [] [] []
+boolProg = Program [("main", uniform #<# constF 0.5)] [] [] [] []
 
 -- Fully forces the query result, propagating any error thrown by the guard.
 forced :: (Show e, Show a) => Either e a -> IO (Either SomeException Int)

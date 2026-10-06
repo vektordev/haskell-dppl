@@ -116,13 +116,13 @@ prop_noGreaterTypeAfterRInfer prog = case tryAddRTypeInfo prog of
 test_plusFloat :: TestTree
 test_plusFloat = testCase "plusFloat" $
   assertBool "plus TFloat TFloat should typecheck" $
-    typechecks (Program [("main", constF 1.0 #+# constF 2.0)] [] [] [])
+    typechecks (Program [("main", constF 1.0 #+# constF 2.0)] [] [] [] [])
 
 -- plus on two int constants should succeed
 test_plusInt :: TestTree
 test_plusInt = testCase "plusInt" $
   assertBool "plusI TInt TInt should typecheck" $
-    typechecks (Program [("main", constI 1 #<+># constI 2)] [] [] [])
+    typechecks (Program [("main", constI 1 #<+># constI 2)] [] [] [] [])
 
 -- Bool + Bool should be rejected with a ClassConstraintViolation
 test_plusBoolReject :: TestTree
@@ -504,7 +504,7 @@ test_nnHoistedOutOfNestedEnumSum = testCase "nnHoistedOutOfNestedEnumSum" $ do
 -- runGen/runProb/runInteg.
 test_missingMainFunction :: TestTree
 test_missingMainFunction = testCase "missingMainFunction" $ do
-  let prog = Program [("notMain", constF 1.0)] [] [] []
+  let prog = Program [("notMain", constF 1.0)] [] [] [] []
   let assertMissingMain label result = case result of
         Left err -> assertBool (label ++ ": error should mention 'main', got: " ++ err)
                                 ("main" `isInfixOf` err)
@@ -526,7 +526,7 @@ test_missingMainFunction = testCase "missingMainFunction" $ do
 -- non-zero-ness and dimensionality directly instead.
 test_farTailEitherDensityNotZeroed :: TestTree
 test_farTailEitherDensityNotZeroed = testCase "farTailEitherDensityNotZeroed" $ do
-  let prog = Program [("main", ifThenElse (normal #>#  constF 0.0) (left normal) (right unit))] [] [] []
+  let prog = Program [("main", ifThenElse (normal #>#  constF 0.0) (left normal) (right unit))] [] [] [] []
   case runProb defaultCompilerConfig prog [] (VEither (Left (VFloat 7.0))) of
     Right (VProbDim p d) -> do
       assertBool ("expected a nonzero far-tail density, got exactly " ++ show p) (p > 0)
@@ -543,7 +543,7 @@ test_farTailEitherDensityNotZeroed = testCase "farTailEitherDensityNotZeroed" $ 
 -- must report the Left arm's dimension. Before the flag, this returned dim 0.
 test_underflowedTailKeepsDimension :: TestTree
 test_underflowedTailKeepsDimension = testCase "underflowedTailKeepsDimension" $ do
-  let prog = Program [("main", ifThenElse (normal #>#  constF 0.0) (left normal) (right unit))] [] [] []
+  let prog = Program [("main", ifThenElse (normal #>#  constF 0.0) (left normal) (right unit))] [] [] [] []
   case runProb defaultCompilerConfig prog [] (VEither (Left (VFloat 39.0))) of
     Right res@(VProbDim p d) -> do
       assertEqual "the density underflows to a true float zero at this depth" 0.0 p
@@ -592,7 +592,7 @@ test_observeRenormalizesViaJustAny = testCase "observeRenormalizesViaJustAny" $ 
 -- density, it is an event the program cannot produce.
 test_structurallyImpossibleSampleIsFlagged :: TestTree
 test_structurallyImpossibleSampleIsFlagged = testCase "structurallyImpossibleSampleIsFlagged" $ do
-  let prog = Program [("main", left uniform)] [] [] []
+  let prog = Program [("main", left uniform)] [] [] [] []
   case runProb defaultCompilerConfig prog [] (VEither (Right (VFloat 0.5))) of
     Right res -> do
       assertEqual "wrong Either arm is impossible" (Just True) (resultImpossible res)
@@ -609,7 +609,7 @@ test_structurallyImpossibleSampleIsFlagged = testCase "structurallyImpossibleSam
 -- event is possible).
 test_uniformOffSupportIsImpossible :: TestTree
 test_uniformOffSupportIsImpossible = testCase "uniformOffSupportIsImpossible" $ do
-  let prog = Program [("main", uniform)] [] [] []
+  let prog = Program [("main", uniform)] [] [] [] []
   case runProb defaultCompilerConfig prog [] (VFloat 2.0) of
     Right res -> assertEqual "2.0 is outside [0,1]" (Just True) (resultImpossible res)
     other -> assertFailure ("expected a probability tuple, got: " ++ show other)
@@ -631,15 +631,15 @@ test_uniformOffSupportIsImpossible = testCase "uniformOffSupportIsImpossible" $ 
 test_injFImageIsImpossible :: TestTree
 test_injFImageIsImpossible = testGroup "InjF image constraints"
   [ testCase "sqrt: a negative observation is impossible, not X's density at its square" $ do
-      let prog = Program [("main", sqrtF uniform)] [] [] []
+      let prog = Program [("main", sqrtF uniform)] [] [] [] []
       assertImpossible prog (VFloat (-0.5))
       assertPossible   prog (VFloat 0.9) 1.8
   , testCase "recip: a zero observation is impossible, not NaN" $ do
-      let prog = Program [("main", recipF uniform)] [] [] []
+      let prog = Program [("main", recipF uniform)] [] [] [] []
       assertImpossible prog (VFloat 0.0)
       assertPossible   prog (VFloat 2.0) 0.25
   , testCase "exp: an observation off (0, inf) is impossible (via the declared applicability test)" $ do
-      let prog = Program [("main", expF normal)] [] [] []
+      let prog = Program [("main", expF normal)] [] [] [] []
       assertImpossible prog (VFloat (-1.0))
       assertPossible   prog (VFloat 2.0) 0.1568740192789811
   ]
@@ -680,7 +680,7 @@ test_letBoundEitherDestructureUsesSample :: TestTree
 test_letBoundEitherDestructureUsesSample = testCase "letBoundEitherDestructureUsesSample" $ do
   let boundE = ifThenElse (uniform #<# constF 0.5) (left normal) (right (constF 0.0))
   let body = ifThenElse (sisLeft (var "e")) (sfromLeft (var "e")) (sfromRight (var "e"))
-  let prog = Program [("main", letIn "e" boundE body)] [] [] []
+  let prog = Program [("main", letIn "e" boundE body)] [] [] [] []
   let phi x = (1 / sqrt (2 * pi)) * exp (-0.5 * x * x)
   case runProb defaultCompilerConfig prog [] (VEither (Right (VFloat 0.3))) of
     Right (VProbDim p d) -> do
@@ -722,7 +722,7 @@ test_setWitnessMergesComplementaryTupleFields = testCase "setWitnessMergesComple
   let body = ifThenElse (constF 1.0 #># constF 0.0)
                (tuple (tfst (var "e")) (tsnd (var "e")))
                (tuple (constF 0.0) (constF 0.0))
-  let prog = Program [("main", letIn "e" boundE body)] [] [] []
+  let prog = Program [("main", letIn "e" boundE body)] [] [] [] []
   let phi x = (1 / sqrt (2 * pi)) * exp (-0.5 * x * x)
   case runProb defaultCompilerConfig prog [] (VTuple (VFloat 0.3) (VFloat 0.7)) of
     Right (VProbDim p d) -> do
@@ -1589,7 +1589,7 @@ test_branchCountingDoesNotMultiplyIR = testCase "branchCountingDoesNotMultiplyIR
       nest 0 = dice 3
       nest d = negIF (dice 5)
                  #<+># ifThenElse (bernoulli 0.4 #||# bernoulli 0.6) (dice 3) (nest (d - 1))
-      prog d = Program [("main", nest d)] [] [] []
+      prog d = Program [("main", nest d)] [] [] [] []
       sizeAt cb d =
         case compile defaultCompilerConfig{countBranches = cb, optimizerLevel = 0} (prog d) of
           Left e   -> assertFailure ("compile error at depth " ++ show d ++ ": " ++ show e)
@@ -1753,7 +1753,7 @@ test_mixtureNegativeLogNormalScaleCompiles = testCase "mixtureNegativeLogNormalS
                          #+# negF (constF 5.950341749659227 #*# constF 7.837027585890002)
       logNormalArm = expF (negF (normal #*# constF 9.011136056794598))
       expr = negativeScale #*# logNormalArm
-      prog = Program [("main", expr)] [] [] []
+      prog = Program [("main", expr)] [] [] [] []
   result <- timeout (10 * 1000000) (evaluate (length (show (compile defaultCompilerConfig prog))))
   case result of
     Nothing -> assertFailure
@@ -5114,7 +5114,7 @@ reservedNameTests = testGroup "reserved names"
             Right prog -> assertEqual (pos ++ " " ++ name ++ " fails validation")
                                       (Right ()) (validateProgram prog)
   , testCase "the validator refuses a reserved binder in an AST built without the parser" $ do
-      let prog = Program [("main", letIn "sample" uniform (var "sample"))] [] [] []
+      let prog = Program [("main", letIn "sample" uniform (var "sample"))] [] [] [] []
       case validateProgram prog of
         Left e -> assertBool ("unexpected refusal: " ++ e) ("'sample' uses a reserved name" `isInfixOf` e)
         Right () -> assertFailure "a binder named 'sample' passed validation"

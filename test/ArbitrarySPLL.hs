@@ -200,7 +200,7 @@ instance Arbitrary Program where
     numNeurals <- choose (0, 5)
     funcs <- vectorOf numFuncs genFunctionDecl
     neuralDecls <- vectorOf numNeurals genNeuralDecl
-    return $ Program funcs neuralDecls [] []
+    return $ Program funcs neuralDecls [] [] []
 
 genFunctionDecl :: Gen FnDecl
 genFunctionDecl = do
@@ -227,7 +227,7 @@ genRawFuzzProgram = do
   let mainDecl = ("main", foldr (\x acc -> Expr makeTypeInfo (Lambda x acc)) mainBody mainArgs)
   extraFuncs <- vectorOf numExtraFuncs genRawFuzzFunctionDecl
   neuralDecls <- vectorOf numNeurals genNeuralDecl
-  return $ Program (mainDecl : extraFuncs) neuralDecls [] []
+  return $ Program (mainDecl : extraFuncs) neuralDecls [] [] []
 
 genRawFuzzFunctionDecl :: Gen FnDecl
 genRawFuzzFunctionDecl = do
@@ -361,7 +361,7 @@ genPlainProgram :: Gen Program
 genPlainProgram = do
   ty <- genTy tyDepth
   body <- sized (genTypedExpr ty)
-  return $ withADTs $ Program [("main", body)] [] [] []
+  return $ withADTs $ Program [("main", body)] [] [] [] []
 
 -- | @helper x = \<expr\>; main = helper \<expr\>@ -- the named top-level
 -- function with a probabilistic argument, which is the *low bar* of the arrow
@@ -389,7 +389,7 @@ genHelperProgram = sized $ \n -> do
   arg   <- genTypedExprIn [(helperName, TyArrow aty rty)] aty (n `div` 2)
   let helper = uniquifyBindersFrom (declBinderPrefix helperName) (helperParam #-># hbody)
       body   = uniquifyBinders (apply (varE helperName) arg)
-  return $ withADTs $ Program [(helperName, helper), ("main", body)] [] [] []
+  return $ withADTs $ Program [(helperName, helper), ("main", body)] [] [] [] []
 
 -- | The generated top-level function's name and parameter. Neither may
 -- collide with a predefined function or a distribution leaf; both are
@@ -506,7 +506,7 @@ genCountedRec ty n = do
   return $ withADTs $ Program
     [ (loopName, uniquifyBindersFrom (declBinderPrefix loopName) body)
     , ("main", apply (varE loopName) arg)
-    ] [] [] []
+    ] [] [] [] []
 
 -- | @loop = if \<bernoulli p\> then \<base\> else \<step\>; main = \<expr using loop\>@,
 -- at a type with a recursive constructor ('productiveStep').
@@ -528,7 +528,7 @@ genGeometricRec ty n = do
   return $ withADTs $ Program
     [ (loopName, uniquifyBindersFrom (declBinderPrefix loopName) body)
     , ("main", uniquifyBinders mainBody)
-    ] [] [] []
+    ] [] [] [] []
 
 -- | One constructor around a recursive call, its other field generated in the
 -- empty scope (so it cannot call @loop@ itself, unproductively). Sometimes
@@ -1465,7 +1465,7 @@ genNeuralProgram = do
   (decl, nty) <- genTypedNeuralDecl
   ty <- genTy tyDepth
   body <- sized (genNeuralMain nty ty)
-  return $ withADTs $ Program [("main", body)] [decl] [] []
+  return $ withADTs $ Program [("main", body)] [decl] [] [] []
 
 -- | The body of a neural @main@, at a given network target type and program
 -- result type.
@@ -1671,7 +1671,7 @@ genNeuralTwinProgram = do
   ty  <- genTy tyDepth
   body <- sized (genNeuralMain nty ty)
   let decl = (neuralName, TArrow TSymbol (tyToRType nty), Nothing)
-      lazyP = withADTs $ Program [("main", body)] [decl] [] []
+      lazyP = withADTs $ Program [("main", body)] [decl] [] [] []
   case neuralTwin lazyP of
     Just materialized -> return (lazyP, materialized)
     -- Unreachable: the target came from 'genDiscreteNeuralTy'. Fall back to

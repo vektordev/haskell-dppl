@@ -30,7 +30,7 @@ import SPLL.ReservedNames (distributionPrimitiveNames)
 --import SPLL.Typing.PType( PType(..) )
 import SPLL.InferenceRule
 import PredefinedFunctions (globalFEnv, FPair(..), FDecl(..))
-import SPLL.Lang.Types (FnDecl, ADTDecl, CompilerError, GenericValue(..), SourceSpan(..), spanPretty)
+import SPLL.Lang.Types (FnDecl, FnSignature(..), ADTDecl, CompilerError, GenericValue(..), SourceSpan(..), spanPretty)
 import SPLL.Typing.AlgebraicDataTypes
 import SPLL.Typing.Monomorphize (monomorphize)
 import Data.Bifunctor
@@ -115,7 +115,7 @@ class Substitutable a where
   ftv   :: a -> Set.Set TVarR
 
 instance Substitutable Program where
-  apply s (Program decls nns adtsDecl enc) = Program (zip (map fst decls) (map (apply s . snd) decls)) nns adtsDecl enc
+  apply s (Program decls nns adtsDecl enc sigs) = Program (zip (map fst decls) (map (apply s . snd) decls)) nns adtsDecl enc sigs
   ftv _ = Set.empty
 
 instance Substitutable Expr where
@@ -289,7 +289,7 @@ tryAddRTypeInfo p = case tryAddRTypeInfoMono p of
   Left err -> retryMonomorphized err tryAddRTypeInfoMono p
 
 tryAddRTypeInfoMono :: Program -> Either RTypeError Program
-tryAddRTypeInfoMono p@(Program _ _ adtsDecl _) = do
+tryAddRTypeInfoMono p@(Program _ _ adtsDecl _ _) = do
   (cs, classCs, prog) <- runInfer (basicTEnv adtsDecl) (inferProg p)
   subst <- runSolve cs
   checkClassConstraints subst classCs
@@ -331,7 +331,7 @@ monomorphizing p = do
 -- to a polymorphic declaration carries the type of that one use.
 inferGeneralized :: Program -> Infer [(String, (Scheme, Expr))]
 inferGeneralized p = do
-  Program decls _ adtsDecl _ <- addTVarsEverywhere p
+  Program decls _ adtsDecl _ _ <- addTVarsEverywhere p
   let declNames = Set.fromList (map fst decls)
       neuralEnv = map (\(a, b, _) -> (a, Forall [] [] b)) (neurals p)
       components = stronglyConnComp
@@ -343,7 +343,8 @@ inferGeneralized p = do
             monoEnv = zip (map fst members) (map (Forall [] []) tvs)
         cts <- mapM ((inTEnvF (polyEnv ++ monoEnv ++ neuralEnv) . infer adtsDecl) . snd) members
         let equalities = zipWith (\t1 t2 -> Constraint t1 t2 Nothing) tvs (map fst3cts cts)
-        subst <- either throwError return (runSolve (equalities ++ concatMap snd3cts cts))
+        sigCs <- signatureConstraints (signatures p) (zip (map fst members) tvs)
+        subst <- either throwError return (runSolve (equalities ++ concatMap snd3cts cts ++ sigCs))
         classCs <- gets collectedClassConstraints
         let resolved = [ (applyCC subst cc, apply subst (TVarR (constraintTV cc))) | cc <- classCs ]
         forM_ resolved $ \(cc, t) -> case t of
@@ -363,7 +364,7 @@ rtFromScheme (Forall _ _ rt) = rt
 --TODO: Simply give everything a fresh var as a unified first pass.
 inferProg :: Program -> Infer ([Constraint], Program)
 inferProg p = do
-  Program decls nns adtsDecl enc <- addTVarsEverywhere p
+  Program decls nns adtsDecl enc sigs <- addTVarsEverywhere p
 
   -- init type variable for all function decls beforehand so we can build constraints for
   -- calls between these functions
@@ -379,13 +380,36 @@ inferProg p = do
   -- building the constraints that the built type variables of the functions equal
   -- the inferred function type
   let tcs = zipWith (\t1 t2 -> Constraint t1 t2 Nothing) (map (rtFromScheme . snd) func_tvs) (map fst3cts cts)
+  sigCs <- signatureConstraints sigs [ (n, rtFromScheme sc) | (n, sc) <- func_tvs ]
   -- combine all constraints
-  return (tcs ++ concatMap snd3cts cts, Program (zip (map fst decls) (map trd3cts cts)) nns adtsDecl enc)
+  return (tcs ++ concatMap snd3cts cts ++ sigCs, Program (zip (map fst decls) (map trd3cts cts)) nns adtsDecl enc sigs)
+
+-- | A type signature constrains its definition's type to the declared one
+-- (task per-value-query-over-enumerated-slot). A 'NotSetYet' in a signature
+-- is a hole, a fresh variable: the compiler gives the helper definitions it
+-- derives for a per-value function signatures that pin only what it knows.
+-- A user-written signature has no holes (the parser cannot produce one).
+-- These constraints go last, so a definition that disagrees with its
+-- signature is reported at the signature rather than at whichever literal
+-- happened to be solved second.
+signatureConstraints :: [FnSignature] -> [(String, RType)] -> Infer [Constraint]
+signatureConstraints sigs declTypes = sequence
+  [ do declared <- fillHoles (sigType sig)
+       return (Constraint t declared (Just (Provenance Nothing ["the type signature of '" ++ sigName sig ++ "'"])))
+  | sig <- sigs, Just t <- [lookup (sigName sig) declTypes] ]
+  where
+    fillHoles ty = case ty of
+      NotSetYet -> fresh
+      TArrow a b -> TArrow <$> fillHoles a <*> fillHoles b
+      Tuple a b -> Tuple <$> fillHoles a <*> fillHoles b
+      TEither a b -> TEither <$> fillHoles a <*> fillHoles b
+      ListOf a -> ListOf <$> fillHoles a
+      other -> return other
 
 addTVarsEverywhere :: Program -> Infer Program
-addTVarsEverywhere (Program decls nns adtsDecl enc) = do
+addTVarsEverywhere (Program decls nns adtsDecl enc sigs) = do
     newdecls <- mapM addTVarsToDecl decls
-    return (Program newdecls nns adtsDecl enc)
+    return (Program newdecls nns adtsDecl enc sigs)
   where
     addTVarsToDecl :: FnDecl -> Infer FnDecl
     addTVarsToDecl (name, expr) = do

@@ -876,8 +876,8 @@ addModalityPTypeInfo fcData prog = Right (fst (inferProgram fcData prog))
 -- | The annotated program plus the per-node outer-ground list (for the diff
 -- harness's partial-set invariant check).
 inferProgram :: FCData -> Program -> (Program, [(ChainName, GroundMod)])
-inferProgram fcData (Program decls nns adtDecls enc) =
-  (Program decls' nns adtDecls enc, concat accs)
+inferProgram fcData (Program decls nns adtDecls enc sigs) =
+  (Program decls' nns adtDecls enc sigs, concat accs)
   where
     env = summaries adtDecls fcData decls
     results = [ (n, inferE (ICtx adtDecls fcData (cnOf b) (hasReadNN b)) env b)
@@ -904,7 +904,7 @@ data ReinferCtx = ReinferCtx
   }
 
 reinferCtx :: FCData -> Program -> ReinferCtx
-reinferCtx fcData (Program decls _ adtDecls _) =
+reinferCtx fcData (Program decls _ adtDecls _ _) =
   ReinferCtx adtDecls fcData decls (summaries adtDecls fcData decls)
 
 -- | Re-annotate @target@ as 'inferE' would, given that each of @pins@ names a

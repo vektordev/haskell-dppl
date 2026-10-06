@@ -622,10 +622,99 @@ valueParser = pValue
 pCSV :: MonadParser m => m [Value]
 pCSV = valueParser `sepBy` (symbol ",")
 
-pDefinition :: MonadParser m => [ADTDecl] -> m (Either FnDecl NeuralDecl)
-pDefinition adts_ = do
-  x <- choice [fmap Right pNeural, fmap Left (pFunction adts_)]
-  return x
+-- | One top-level declaration after the @data@ block.
+data TopDecl = TopFunction FnDecl | TopNeural NeuralDecl | TopSignature FnSignature
+
+pDefinition :: MonadParser m => [ADTDecl] -> m TopDecl
+pDefinition adts_ = choice [TopNeural <$> pNeural, TopSignature <$> pSignature, TopFunction <$> pFunction adts_]
+
+-- | A top-level type signature, @name :: T@ (task
+-- per-value-query-over-enumerated-slot). Only @name ::@ is tentative: it is
+-- what tells a signature from a definition, and once it has been read the
+-- signature is committed, so a broken type is reported where it breaks.
+--
+-- The type is 'pSigType''s grammar: the ordinary types, arrows without
+-- parentheses at the top (@Symbol -> (Int, Bool)@), tuples of any width, and
+-- the per-value marker @Enumerated t@ on the result or on a tuple component
+-- of it. Where the marker may stand is checked here, not later, so a misplaced
+-- one is reported at its own position.
+pSignature :: MonadParser m => m FnSignature
+pSignature = dbg "signature" $ do
+  name <- try (pIdentifier <* symbol "::")
+  st <- pSigType
+  marks <- sigMarks st
+  return (FnSignature name (eraseSig st) marks)
+
+-- | A signature type before its @Enumerated@ markers are erased. The offset
+-- of each marker is kept for its diagnostic.
+data SigType = SigPlain RType
+             | SigEnum Int SigType
+             | SigTuple [SigType]
+             | SigList SigType
+             | SigArrow SigType SigType
+
+eraseSig :: SigType -> RType
+eraseSig (SigPlain t) = t
+eraseSig (SigEnum _ t) = eraseSig t
+eraseSig (SigTuple ts) = foldr1 Tuple (map eraseSig ts)
+eraseSig (SigList t) = ListOf (eraseSig t)
+eraseSig (SigArrow a b) = TArrow (eraseSig a) (eraseSig b)
+
+pSigType :: MonadParser m => m SigType
+pSigType = do
+  lhs <- pSigTerm
+  rhs <- optional (symbol "->" *> pSigType)
+  return (maybe lhs (SigArrow lhs) rhs)
+
+pSigTerm :: MonadParser m => m SigType
+pSigTerm = do
+  off <- getOffset
+  marked <- optional (keyword "Enumerated")
+  sigAtom <- pSigAtom
+  return (maybe sigAtom (const (SigEnum off sigAtom)) marked)
+
+-- | A list type @[t]@, a parenthesized group (unit, a parenthesized type, or a tuple of any
+-- width), else any type 'pType' reads that does not start with a parenthesis.
+pSigAtom :: MonadParser m => m SigType
+pSigAtom = choice
+  [ SigList <$> (symbol "[" *> pSigType <* symbol "]")
+  , do _ <- symbol "("
+       inner <- pSigType `sepBy` symbol ","
+       _ <- symbol ")"
+       return $ case inner of
+         []  -> SigPlain TUnit
+         [t] -> t
+         ts  -> SigTuple ts
+  , SigPlain <$> SPLL.Parser.pType ]
+
+-- | The marked slots of a signature, as accessor paths into its codomain.
+-- A marker is allowed on the codomain itself or on a component of a tuple
+-- in it, at any tuple depth; one inside a parameter type, inside another
+-- marker, or on a function-typed component is a registered error at its
+-- position.
+sigMarks :: MonadParser m => SigType -> m [[SigStep]]
+sigMarks = codomain
+  where
+    codomain (SigArrow a b) = refuseIn "a parameter type" a >> codomain b
+    codomain t = slots [] t
+    slots path t = case t of
+      SigPlain _ -> return []
+      SigEnum _ inner -> refuseIn "another Enumerated" inner >> return [path]
+      SigTuple ts -> concat <$> sequence
+        [ slots (path ++ replicate i SigSnd ++ [SigFst | i < length ts - 1]) c | (i, c) <- zip [0 ..] ts ]
+      SigArrow a b -> refuseIn "a function-typed result component" a >> refuseIn "a function-typed result component" b >> return []
+      SigList inner -> refuseIn "a list element type (a slot inside a list is not supported yet)" inner >> return []
+    refuseIn what t = case t of
+      SigPlain _ -> return ()
+      SigEnum off inner -> do
+        registerParseError $ FancyError off $ Set.singleton $ ErrorFail
+          ("'Enumerated' marks a slot of the function's result for a per-value query, and cannot stand inside "
+           ++ what ++ ". Write it on the result type or on one of the result's tuple components, e.g. "
+           ++ "f :: Symbol -> (Enumerated Int, Bool)")
+        refuseIn what inner
+      SigTuple ts -> mapM_ (refuseIn what) ts
+      SigList inner -> refuseIn what inner
+      SigArrow a b -> refuseIn what a >> refuseIn what b
 
 --TODO: Add validation via AutoNeural.
 pNeural :: MonadParser m => m NeuralDecl
@@ -760,19 +849,20 @@ pProg = do
 -- callable neural network -- 'writeLogits' is therefore a reserved network name. Every other
 -- NeuralDecl's "of" clause is sugar that also registers into this registry, keyed by
 -- the declaration's target/source type (see 'neuralValueType').
-aggregateDefinitions :: [ADTDecl] -> [Either FnDecl NeuralDecl] -> Program
-aggregateDefinitions adts_ (Left fn : tail_) = Program (fn:fns) neurals_ adtz enc
+aggregateDefinitions :: [ADTDecl] -> [TopDecl] -> Program
+aggregateDefinitions adts_ (TopFunction fn : tail_) = rest { functions = fn : functions rest }
+  where rest = aggregateDefinitions adts_ tail_
+aggregateDefinitions adts_ (TopSignature sig : tail_) = rest { signatures = sig : signatures rest }
+  where rest = aggregateDefinitions adts_ tail_
+aggregateDefinitions adts_ (TopNeural nr@(name, ty, mtag) : tail_)
+  | name == "writeLogits" = rest { writeLogitsDecls = (ty, fromMaybe MultiAuto mtag) : writeLogitsDecls rest }
+  | otherwise = rest { neurals = nr : neurals rest, writeLogitsDecls = sugar ++ writeLogitsDecls rest }
   where
-    Program fns neurals_ adtz enc = aggregateDefinitions adts_ tail_
-aggregateDefinitions adts_ (Right nr@(name, ty, mtag) : tail_)
-  | name == "writeLogits" = Program fns neurals_ adtz ((ty, fromMaybe MultiAuto mtag) : enc)
-  | otherwise = Program fns (nr:neurals_) adtz (sugar ++ enc)
-  where
-    Program fns neurals_ adtz enc = aggregateDefinitions adts_ tail_
+    rest = aggregateDefinitions adts_ tail_
     sugar = case (mtag, neuralValueType ty) of
       (Just mv, Just target) -> [(target, mv)]
       _ -> []
-aggregateDefinitions adts_ [] = Program [] [] adts_ []
+aggregateDefinitions adts_ [] = Program [] [] adts_ [] []
 
 tryParseExpr :: FilePath -> String -> Either (ParseErrorBundle String Void) Expr
 tryParseExpr filename src = do

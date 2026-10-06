@@ -105,7 +105,7 @@ containedVars :: (Expr -> Set.Set String) -> Expr -> Set.Set String
 containedVars f e = Set.union (f e) (foldl Set.union Set.empty (map (containedVars f) (getSubExprs e)))
 
 predicateProg :: (Expr -> Bool) -> Program -> Bool
-predicateProg f (Program decls _ _ _) = and (map (predicateExpr f . snd) decls)
+predicateProg f (Program decls _ _ _ _) = and (map (predicateExpr f . snd) decls)
 
 predicateExpr :: (Expr -> Bool) -> Expr -> Bool
 predicateExpr f e = f e && and (map (predicateExpr f) (getSubExprs e))
@@ -185,7 +185,7 @@ tMap :: (Expr -> TypeInfo) -> Expr -> Expr
 tMap f expr = Expr (f expr) (fmap (tMap f) (node expr))
 
 makeMain :: Expr -> Program
-makeMain expr = Program [("main", expr)] [] [] []
+makeMain expr = Program [("main", expr)] [] [] [] []
 
 -- | Monadic 'tMap'. The annotation effect runs before the children's.
 tMapM :: Monad m => (Expr -> m TypeInfo) -> Expr -> m Expr
@@ -655,7 +655,7 @@ prettyPrintProgRTyOnly :: Program -> [String]
 prettyPrintProgRTyOnly = prettyPrintProgCustomTI prettyRTypeOnly
 
 prettyPrintProgCustomTI :: (TypeInfo -> String) -> Program -> [String]
-prettyPrintProgCustomTI fn (Program decls neuralsDecl adtsDecl _) = concatMap prettyPrintADTs adtsDecl ++  concatMap (prettyPrintDecl fn) decls ++ concatMap prettyPrintNeural neuralsDecl
+prettyPrintProgCustomTI fn (Program decls neuralsDecl adtsDecl _ _) = concatMap prettyPrintADTs adtsDecl ++  concatMap (prettyPrintDecl fn) decls ++ concatMap prettyPrintNeural neuralsDecl
 
 prettyPrintADTs :: ADTDecl  -> [String]
 prettyPrintADTs ADTDecl{dataName=name, constructors=constr, adtDepth=d} = ("data " ++ name ++ "::" ++ maybe "" (\n -> " depth " ++ show n) d):map (\rts -> "\n|"++ show rts) constr
