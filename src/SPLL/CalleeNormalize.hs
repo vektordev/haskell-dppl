@@ -92,7 +92,26 @@ rewrite decls env e = case node e of
   -- substitutes at the call instead.
   IfThenElse c t f -> Expr (ann e) (IfThenElse (rewrite decls env c) (arm t) (arm f))
     where arm a = rewrite decls env (fromMaybe a (reduceLiteralProjection decls a))
+  ReadNN n s           -> liftRead (ann e) n (rewrite decls env s)
   other                -> Expr (ann e) (fmap (rewrite decls env) other)
+
+-- | A neural read of a selected input is distributed into the selection, the
+-- way an application of a selected callee is: @see (if c then a else b)@
+-- becomes @if c then see a else see b@, and a read of a redex is pushed into
+-- its body, @see ((\x -> body) v)@ becoming @(\x -> see body) v@, which is what
+-- a @draw@-bound choice inside the argument is. Only one arm is ever realised
+-- and a read names no variable, so nothing is duplicated or captured and the
+-- distribution is unchanged. Left as it was, the read's input is not a point,
+-- which ModalityInfer's 'ReadNN' rule must treat as a mixture over the input
+-- with no closed form (sample-only); in arms, each read sees the point input
+-- it actually gets, and the selection is the ordinary mixture the
+-- 'IfThenElse' rules compile (task symbol-chosen-by-inline-coin-refused).
+-- @s@ is already rewritten, so its arms and bodies are too.
+liftRead :: TypeInfo -> String -> Expr -> Expr
+liftRead ti n s = case node s of
+  IfThenElse c t f                  -> Expr ti (IfThenElse c (liftRead ti n t) (liftRead ti n f))
+  Apply (Expr lamTi (Lambda x b)) a -> Expr ti (Apply (Expr lamTi (Lambda x (liftRead ti n b))) a)
+  _                                 -> Expr ti (ReadNN n s)
 
 -- | The application cases. @ti@ is the application node's own annotation, which
 -- every node this builds inherits: they all stand for the same value, and at

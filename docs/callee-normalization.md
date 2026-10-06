@@ -52,6 +52,22 @@ the admission oracle:
   dead, and a dead function-valued binding is compiled as its body
   (`arrowApplyTupleProjectedRandomSibling`).
 
+One more, from task `symbol-chosen-by-inline-coin-refused`:
+
+- **A neural read of a selected input is distributed the same way**:
+  `see (if c then a else b)` becomes `if c then see a else see b`, and a read
+  of a redex is pushed into its body, so `see (draw s = .. in if s then a else
+  b)` reaches the arms too. A read names no variable, so nothing is captured.
+  Left alone, the read's input is not a point, and ModalityInfer's `ReadNN`
+  rule must type a read of a non-point input sample-only, since a continuous
+  input would make it a mixture with no closed form. In the arms, each read
+  gets the point input it really receives, and the selection is the ordinary
+  `IfThenElse` mixture. This covers both the inline coin and the `draw`-bound
+  one, which had silently lost its probability variant when that rule was
+  introduced (`test/cases/neural/symbolChosen*`). A read whose input is
+  random in any other way (`see h` for a drawn `h`, a continuous input) is
+  untouched and stays sample-only.
+
 Whatever the pass does not reach is refused by IRCompiler's point-inversion
 `Apply` arm ("does not resolve to a lambda the compiler can see"), an absent
 variant rather than the `error` it used to be.

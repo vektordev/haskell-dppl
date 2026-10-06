@@ -762,16 +762,24 @@ mainVariants (Right (IREnv groups _ _)) = case filter ((== "main") . groupName) 
 -- MockNN-formatted argument would be needed.
 generateBackedReadNNSymbolTests :: TestTree
 generateBackedReadNNSymbolTests = testGroup "GenerateBackedReadNNSymbol"
-  [ testCase "a randomly-chosen Symbol argument to ReadNN gets no probability or integrate function" $
+  -- This used to pin the variants' /absence/, the safe stand-in for "never
+  -- sample which input to read" while no exact path existed. CalleeNormalize
+  -- now distributes the read into the if's arms (task
+  -- symbol-chosen-by-inline-coin-refused), so the variants exist and are the
+  -- exact mixture; what is still pinned is that no inference body samples.
+  [ testCase "a randomly-chosen Symbol argument to ReadNN gets an exact, non-sampling probability and integrate function" $
       withParsed readNNRandomSymbolSrc $ \prog -> do
         res <- forced (compile defaultCompilerConfig prog)
         case res of
           Left ex -> assertFailure ("compile crashed: " ++ show ex)
           Right _ -> return ()
         (hasProb, hasInteg, hasGen) <- mainVariants (compile defaultCompilerConfig prog)
-        assertBool "a probability function that samples which network input to read was compiled" (not hasProb)
-        assertBool "an integrate function that samples which network input to read was compiled" (not hasInteg)
-        assertBool "generate was lost along with the inference variants" hasGen
+        assertBool "a randomly-chosen Symbol argument lost its probability function" hasProb
+        assertBool "a randomly-chosen Symbol argument lost its integrate function" hasInteg
+        assertBool "generate was lost" hasGen
+        case compile defaultCompilerConfig prog >>= requireNoGenerateBacked defaultCompilerConfig of
+          Left e  -> assertFailure ("an inference body samples which network input to read: " ++ e)
+          Right _ -> return ()
   , testCase "a deterministic Symbol argument to ReadNN still compiles" $
       withParsed readNNDeterministicSymbolSrc $ \prog -> do
         res <- forced (compile defaultCompilerConfig prog)
@@ -785,7 +793,8 @@ generateBackedReadNNSymbolTests = testGroup "GenerateBackedReadNNSymbol"
 -- | A compiled environment whose @main@ probability and integrate bodies draw
 -- a fresh 'IRUniform': what the central guard exists to refuse. Built by hand
 -- because no source program is known to reach it any more (the last one, a
--- random 'ReadNN' input, is now typed sample-only -- see above).
+-- random 'ReadNN' input, is now distributed into exact per-arm reads -- see
+-- above).
 generateBackedEnv :: IREnv
 generateBackedEnv = IREnv
   [ IRFunGroup { groupName = "main"
