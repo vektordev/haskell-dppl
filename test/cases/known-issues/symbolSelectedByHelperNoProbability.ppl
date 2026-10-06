@@ -1,0 +1,13 @@
+-- A board of image Symbols, one picked by a random index through a helper.
+-- The default compile used to crash in nth's integrate variant ("Comparison
+-- not implemented for type: TSymbol"); that is fixed (task
+-- symbol-selected-by-helper-crashes-cdf-compile). What remains: main compiles
+-- generate only, and its probability and integrate variants are silently
+-- absent, with or without -I. The same gap holds for the inline spelling
+-- `see (if s == 0 then a else b)`; task symbol-chosen-by-inline-coin-refused
+-- fixes that one, but not this helper spelling. Follow-up task
+-- symbol-selected-by-helper-has-no-probability.
+neural see :: (Symbol -> Bool)
+neural pick :: (Symbol -> Int) of [0, 1]
+main p board = draw s = pick p in draw t = see (nth s board) in (s, t)
+nth k xs = if k == 0 then head xs else nth (k - 1) (tail xs)

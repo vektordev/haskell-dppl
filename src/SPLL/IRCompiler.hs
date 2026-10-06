@@ -22,7 +22,9 @@ module SPLL.IRCompiler (
   -- white-box: the plan factorization's independence guard (see its haddock)
   planFactorExternals,
   -- white-box: the dense-enumeration budget gate's count (see its haddock)
-  enumeratedCount
+  enumeratedCount,
+  -- the cdf() diagnostic for a Symbol-valued node (see 'compareValueExpr')
+  symbolCdfMessage
 )where
 
 import SPLL.ReservedNames (distributionPrimitiveNames, queryParamName, accProbParamName, topKCutoffName, accProbInitName, componentNormalGroupPrefix, componentNormalName)
@@ -3889,13 +3891,26 @@ compareValueExpr sr (ListOf _) v sample = maskSR sr (IROp OpEq sample v)
 -- equality indicator as 'ListOf' (task comparevalueexpr-nulllist-cdf-gap).
 compareValueExpr sr NullList v sample = maskSR sr (IROp OpEq sample v)
 -- An ADT carries no order, so there is nothing for a CDF to integrate along.
--- This is the only 'compareValueExpr' case that is not merely unimplemented:
--- every call site is on the @cumulative = True@ path, so reaching it means a
--- cdf() query was asked of an ADT-valued program. See 'adtCdfMessage'.
+-- This case and the TSymbol one below are refusals rather than gaps: every call
+-- site is on the @cumulative = True@ path, so reaching it means a cdf() query was
+-- asked of an ADT-valued program. See 'adtCdfMessage'.
 compareValueExpr _ (TADT n) _ _ = IRError (adtCdfMessage n)
+-- A Symbol is unordered too, so it gets the same treatment as an ADT. Here it is
+-- also routine to build the comparison: a helper that returns a Symbol (picking
+-- a board image by index, say) gets an integrate variant like every other
+-- function, so this has to compile to an IRError that only fires when it is
+-- called. The callers' own CDFs, over ordered types, don't call it (task
+-- symbol-selected-by-helper-crashes-cdf-compile).
+compareValueExpr _ TSymbol _ _ = IRError symbolCdfMessage
 
 -- Invariant, not a refusal (task static-refusals-become-absent-variants): a CDF comparison is only built for first-order result types (an arrow reaching it is filed: fuzz-admission-oracle-bugs item 3).
 compareValueExpr _ rt _ _ = error $ "Comparison not implemented for type: " ++ show rt
+
+-- | The runtime diagnostic for a cdf() query that reaches a Symbol-valued node.
+symbolCdfMessage :: String
+symbolCdfMessage =
+  "cdf(): no cumulative distribution is defined over a Symbol -- symbols carry "
+  ++ "no order to integrate along. Use p() for a point query on this value."
 
 -- | See 'compareValueExpr': a wildcard sample component is the whole mass.
 anyBoundsNothing :: Semiring -> IRExpr -> IRExpr -> IRExpr

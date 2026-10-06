@@ -17,14 +17,14 @@ module TestRejection (rejectionTests) where
 -- that changes which rule fires is pinpointed to the offending program.
 
 import SPLL.Lang.Lang
-import SPLL.Lang.Types (makeTypeInfo, GenericValue(..), MultiValue(..), CompilerError, ADTDecl(..), TypeInfo(..))
+import SPLL.Lang.Types (makeTypeInfo, GenericValue(..), GenericList(..), MultiValue(..), CompilerError, ADTDecl(..), TypeInfo(..))
 import SPLL.Typing.RType (RType(..), Extent(..))
 import Control.Monad.Random (evalRand, mkStdGen)
 import SPLL.Examples
 import SPLL.Validator (validateProgram)
 import SPLL.Prelude (compile, runProb, runInteg, runGen, uniform, constB, constF, (#+#), (#<#))
 import SPLL.IntermediateRepresentation (CompilerConfig, defaultCompilerConfig, checkQueryType, noIntegrate, noGenerate, firstAnyExceptIR, anyExceptCodegenRefusal, IRValue, pattern VProbDim, genFun, lookupIREnv, IREnv(..), IRFunGroup(..), IRExpr(..), Distribution(..))
-import SPLL.IRCompiler (requireNoGenerateBacked)
+import SPLL.IRCompiler (requireNoGenerateBacked, symbolCdfMessage)
 import TestSupport (expectVariantRefused)
 import Data.Maybe (isJust)
 import SPLL.Typing.Infer (addTypeInfo)
@@ -54,6 +54,7 @@ rejectionTests = testGroup "Rejection"
   , anyCtorTestTests
   , accessorMismatchTests
   , adtCumulativeTests
+  , symbolCumulativeTests
   , generateBackedTests
   , generateBackedReadNNSymbolTests
   , centralGenerateBackedGuardTests
@@ -548,6 +549,68 @@ adtValuedProgSrc = unlines
   [ "data DTree = Leaf | Node l::DTree, r::DTree"
   , "genT = if Uniform < 0.6 then Leaf else Node genT genT"
   , "main = genT"
+  ]
+
+-- ----------------------------------------------------------------------------
+-- cdf() over a Symbol (task symbol-selected-by-helper-crashes-cdf-compile)
+--
+-- A Symbol has no order, like an ADT. But a Symbol-valued node is routine
+-- where an ADT-valued program is not: a helper that picks a board image by
+-- index gets an integrate variant like every other function. Building that
+-- variant used to hit 'compareValueExpr''s catch-all 'error' and crash the
+-- whole compile, though main's own CDF is over an ordered type.
+-- ----------------------------------------------------------------------------
+
+symbolByHelperSrc :: String
+symbolByHelperSrc = unlines
+  [ "neural see :: (Symbol -> Bool)"
+  , "neural pick :: (Symbol -> Int) of [0, 1]"
+  , "main p board = draw s = pick p in draw t = see (nth s board) in (s, t)"
+  , "nth k xs = if k == 0 then head xs else nth (k - 1) (tail xs)"
+  ]
+
+-- There is no Symbol literal and no signature syntax, so a Symbol type is only
+-- ever learnt from a neural input: main returns pick's own input. (A bare
+-- @if Uniform < 0.25 then a else b@ stays polymorphic and never reaches the
+-- TSymbol case.)
+symbolValuedProgSrc :: String
+symbolValuedProgSrc = unlines
+  [ "neural pick :: (Symbol -> Int) of [0, 1]"
+  , "main p = if pick p == 0 then p else p"
+  ]
+
+-- A literal mock-network input (MockNN's @(2, [logits])@ form). It stands in
+-- for a Symbol handle, so the query-type guard, which would reject a tuple as
+-- a Symbol query, is off for these queries.
+symbolCfg :: CompilerConfig
+symbolCfg = defaultCompilerConfig { checkQueryType = False }
+
+symbolArg :: IRValue
+symbolArg = VTuple (VInt 2) (VList (ListCont (VFloat 0.25) (ListCont (VFloat 0.75) EmptyList)))
+
+symbolCumulativeTests :: TestTree
+symbolCumulativeTests = testGroup "SymbolCumulative"
+  [ testCase "a Symbol-returning helper does not crash the compile" $
+      withParsed symbolByHelperSrc $ \prog -> do
+        res <- forced (compile defaultCompilerConfig prog)
+        case res of
+          Left e  -> assertFailure ("compile crashed: " ++ show e)
+          Right _ -> assertBool "compile returned Left"
+                       (either (const False) (const True) (compile defaultCompilerConfig prog))
+  , testCase "cdf() on a Symbol-valued program refuses with a diagnostic" $
+      withParsed symbolValuedProgSrc $ \prog -> do
+        res <- forced (runInteg symbolCfg prog [symbolArg] symbolArg)
+        case res of
+          Left e  -> assertBool ("expected the Symbol-cdf refusal, got: " ++ show e)
+                                (symbolCdfMessage `isInfixOf` show e)
+          Right _ -> assertFailure
+            "cdf() on a Symbol-valued program produced a number; a Symbol has no order to integrate along"
+  , testCase "p() on the same program is unaffected" $
+      withParsed symbolValuedProgSrc $ \prog ->
+        case runProb symbolCfg prog [symbolArg] symbolArg of
+          Left e  -> assertFailure ("point query on a Symbol-valued program was rejected: " ++ show e)
+          Right (VProbDim pr _) -> assertBool ("expected P(main = p) = 1, got " ++ show pr) (abs (pr - 1) < 1e-9)
+          Right v -> assertFailure ("expected a (prob, dim) result, got " ++ show v)
   ]
 
 -- ----------------------------------------------------------------------------
