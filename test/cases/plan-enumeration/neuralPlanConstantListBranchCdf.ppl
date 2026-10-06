@@ -1,0 +1,15 @@
+-- A neural (plan-enumerated) program with a constant-list arm, asked for its
+-- cdf. The plan traversal tests a deterministic arm against a cumulative
+-- target with planDetGuard (IRCompiler.hs), which used to emit
+-- `not (val > sample)` for every non-Bool type: an OpGreaterThan on two lists,
+-- always False in the interpreter (the arm counted its full mass at every
+-- query) and a TypeError in Python. It now recurses structurally like
+-- compareValueExpr, so a list arm takes the equality indicator.
+-- x ~ N(0,1), so each arm has mass 0.5; [0.0] is not <= [q] for q < 0 under
+-- either the componentwise order or the equality indicator, so only [Normal]
+-- contributes 0.5 * Phi(q). At q = 0 both conventions give 0.5 + 0.25.
+-- Rows where the two conventions part (q > 0) are deliberately not pinned
+-- (head-cdf-uses-equality).
+-- Task plan-det-guard-compares-composite-values-with-greater-than.
+neural nn :: (Symbol -> Float)
+main s = draw x = nn s in if x < 0.0 then [0.0] else [Normal]

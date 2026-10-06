@@ -1,2 +1,0 @@
-neural nn :: (Symbol -> Float)
-main s = draw x = nn s in if x < 0.0 then [0.0] else [Normal]

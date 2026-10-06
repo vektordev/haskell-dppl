@@ -5992,11 +5992,40 @@ liveIntersects ws1 ws2 = filter (not . pwUnsat) [ intersectPlanW a b | a <- ws1,
 -- | Bool-valued IR: is the deterministic value @val@ inside the target?
 -- Mirrors the memberGuard / compareValueExpr conventions (approximate
 -- equality for floats; False < True for Bool cumulatives).
+--
+-- A cumulative target recurses structurally exactly as 'compareValueExpr'
+-- does: only an ordered scalar is tested with @not (val > s)@; a tuple is the
+-- conjunction of its components, an Either matches the arm and recurses into
+-- the payload, and a list takes the equality indicator. An ordering op on a
+-- composite value means something different in every runtime and @<=@ in
+-- none of them (task
+-- plan-det-guard-compares-composite-values-with-greater-than).
 planDetGuard :: RType -> IRExpr -> PTarget -> IRExpr
 planDetGuard rt val (PTPoint s) = equalityGuardStatic rt s val
-planDetGuard rt val (PTUpTo s) = case rt of
-  TBool -> IROp OpOr (IRUnaryOp OpNot val) s
-  _     -> IRUnaryOp OpNot (IROp OpGreaterThan val s)
+planDetGuard rt val (PTUpTo s) = planUpToGuard rt val s
+
+-- | 'planDetGuard' on a cumulative target: Bool IR for @val <= s@.
+planUpToGuard :: RType -> IRExpr -> IRExpr -> IRExpr
+planUpToGuard rt val s = case rt of
+  TBool       -> IROp OpOr (IRUnaryOp OpNot val) s
+  TFloat      -> scalar
+  TInt        -> scalar
+  TVarR _     -> scalar
+  TUnit       -> constTrueIR
+  Tuple ft st -> IROp OpAnd (planUpToGuard ft (IRDestruct AcFst val) (IRDestruct AcFst s))
+                            (planUpToGuard st (IRDestruct AcSnd val) (IRDestruct AcSnd s))
+  TEither lr rr ->
+    IRIf (IRDestruct AcIsLeft val)
+      (IRIf (IRDestruct AcIsLeft s) (planUpToGuard lr (IRDestruct AcFromLeft val) (IRDestruct AcFromLeft s)) (IRConst (VBool False)))
+      (IRIf (IRDestruct AcIsLeft s) (IRConst (VBool False)) (planUpToGuard rr (IRDestruct AcFromRight val) (IRDestruct AcFromRight s)))
+  ListOf _    -> equalityGuardStatic rt s val
+  NullList    -> equalityGuardStatic rt s val
+  TADT n      -> IRError (adtCdfMessage n)
+  TSymbol     -> IRError symbolCdfMessage
+  -- Invariant, mirroring 'compareValueExpr': a CDF comparison is only built
+  -- for first-order result types.
+  _           -> error $ "planDetGuard: cumulative comparison not implemented for type: " ++ show rt
+  where scalar = IRUnaryOp OpNot (IROp OpGreaterThan val s)
 
 -- | Combine the canonical (outcome-True, outcome-False) worlds of a
 -- Bool-valued node against the actual target, mirroring 'comparisonWorlds'.

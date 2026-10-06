@@ -1,0 +1,8 @@
+-- Both arms of a neural plan-enumerated if are constant lists. Before the
+-- planDetGuard fix the interpreter answered 1.0 at every cdf query (list `>`
+-- is never True there) and Python crashed whenever every head compared
+-- greater. [0.0] and [1.0] each have mass 0.5; both list-cdf conventions
+-- agree on the rows below.
+-- Task plan-det-guard-compares-composite-values-with-greater-than.
+neural nn :: (Symbol -> Float)
+main s = draw x = nn s in if x < 0.0 then [0.0] else [1.0]

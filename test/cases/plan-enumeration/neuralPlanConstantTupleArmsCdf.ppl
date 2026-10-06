@@ -1,0 +1,8 @@
+-- Tuple sibling of neuralPlanConstantListBranchCdf: planDetGuard used to test
+-- a constant tuple arm against a cdf target with `not (val > sample)`, the
+-- negation of "both components strictly greater", which is "some component
+-- <=" rather than "all components <=". Both backends agreed on the wrong 0.5
+-- at (0.5, -1.0). Each arm has mass 0.5.
+-- Task plan-det-guard-compares-composite-values-with-greater-than.
+neural nn :: (Symbol -> Float)
+main s = draw x = nn s in if x < 0.0 then (0.0, 0.0) else (1.0, 1.0)
