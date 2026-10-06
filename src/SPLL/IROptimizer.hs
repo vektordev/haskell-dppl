@@ -19,7 +19,7 @@ module SPLL.IROptimizer (
 import SPLL.IntermediateRepresentation
 import SPLL.Lang.Types
 import SPLL.Typing.AlgebraicDataTypes (fieldAccessorOwners)
-import Data.Number.Erf (erf)
+import Data.Number.Erf (erfc)
 import Data.Bits (xor)
 import Data.Either (isLeft)
 import Data.List (maximumBy, foldl', findIndex, partition, intercalate)
@@ -509,11 +509,11 @@ enumSumBoundVars expr = case loopBinder expr of
 
 evalConstantDistr :: IRExpr -> IRExpr
 evalConstantDistr (IRDensity IRNormal Linear (IRConst (VFloat x))) = IRConst (VFloat ((1 / sqrt (2 * pi)) * exp (-0.5 * x * x)))
-evalConstantDistr (IRCumulative IRNormal Linear (IRConst (VFloat x))) = IRConst (VFloat ((1/2) * (1 + erf (x/sqrt (2)))))
+evalConstantDistr (IRCumulative IRNormal Linear (IRConst (VFloat x))) = IRConst (VFloat (erfc (-x / sqrt 2) / 2))
 evalConstantDistr (IRDensity IRUniform Linear (IRConst (VFloat x))) = IRConst (VFloat (if x >= 0 && x <= 1 then 1 else 0))
 evalConstantDistr (IRCumulative IRUniform Linear (IRConst (VFloat x))) = IRConst (VFloat (if x < 0 then 0 else if x > 1 then 1 else x))
 evalConstantDistr (IRDensity IRNormal Log (IRConst (VFloat x))) = IRConst (VFloat ((-0.5) * x * x - 0.5 * log (2 * pi)))
-evalConstantDistr (IRCumulative IRNormal Log (IRConst (VFloat x))) = IRConst (VFloat (log ((1/2) * (1 + erf (x/sqrt (2))))))
+evalConstantDistr (IRCumulative IRNormal Log (IRConst (VFloat x))) = IRConst (VFloat (log (erfc (-x / sqrt 2) / 2)))
 evalConstantDistr (IRDensity IRUniform Log (IRConst (VFloat x))) = IRConst (VFloat (if x >= 0 && x <= 1 then 0 else (-1)/0))
 evalConstantDistr (IRCumulative IRUniform Log (IRConst (VFloat x))) = IRConst (VFloat (log (if x < 0 then 0 else if x > 1 then 1 else x)))
 evalConstantDistr x = x

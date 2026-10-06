@@ -46,8 +46,9 @@ def cumulative_uniform(x):
 def density_normal(x):
   return torch.exp(-(x * x) / 2.0) / math.sqrt(2.0 * math.pi)
 
+# erfc rather than 1 + erf: pythonLib.cumulative_normal says why.
 def cumulative_normal(x):
-  return (1.0 + torch.erf(astensor(x) / math.sqrt(2.0))) / 2.0
+  return torch.special.erfc(-astensor(x) / math.sqrt(2.0)) / 2.0
 
 def sign(x):
   return torch.sign(astensor(x))

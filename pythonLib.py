@@ -78,11 +78,16 @@ def cumulative_uniform(x):
 def density_normal(x):
   return 1 / sqrt(2 * pi) * e**(-(x**2)/2)
 
+# Phi(x) = erfc(-x / sqrt 2) / 2, not (1 + erf(x / sqrt 2)) / 2: the latter
+# cancels in the lower tail (Phi(-8) came out 6.1e-16 for 6.2e-16), and the
+# compiler spells an upper tail 1 - Phi(z) as Phi(-z) (Semiring.
+# upperTailComplement), so the lower tail is where every small normal
+# probability lands (task cumulative-normal-upper-tail-cancellation).
 def cumulative_normal(x):
   t = _torch_for(x)
   if t is not None:
-    return (1.0 + t.erf(x / sqrt(2.0))) / 2.0
-  return (1.0 + erf(x / sqrt(2.0))) / 2.0
+    return t.special.erfc(-x / sqrt(2.0)) / 2.0
+  return erfc(-x / sqrt(2.0)) / 2.0
 
 # Native log-pdf/log-cdf (task log-space-probability-computation), computed
 # directly from the formula rather than as log(density_...(x)): the latter

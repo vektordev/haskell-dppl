@@ -52,6 +52,21 @@ semiring-aware too. Two consequences worth internalising before touching
   `srZero sr`, not the literal `0.0`, and log space compares against
   `-inf` with exact `OpEq` rather than `OpApprox`, because
   `(-inf) - (-inf)` is `NaN`.
+- **A complement keeps a normal tail's precision only if it can see the
+  leaf.** Every instance's `srComplement` is `upperTailComplement`: the
+  complement of a standard-normal CDF leaf, looking through `IRIf` arms and
+  `IRLetIn` bodies, is the same leaf at `-z` (`1 - Phi(z) = Phi(-z)`, and
+  `log(1 - exp(log Phi(z))) = log Phi(-z)`), which the runtimes compute
+  through `erfc` without cancelling. Anything else, a let-bound `IRVar`
+  included, gets the plain `1 - x`, which keeps only about `1e-16 / P` of
+  relative precision on a tail of size `P`. So complement the expression
+  rather than a variable bound to it, and where a site picks between a CDF
+  and its complement on a runtime condition (the `gt`/`lt` comparisons), use
+  `complementWhen sr cond x`, which pushes the choice into the leaf's
+  argument rather than binding `x` (task
+  `cumulative-normal-upper-tail-cancellation`). End2End's
+  `normal upper-tail precision` group checks this to 1e-12 relative on
+  every backend, which the corpus's 1e-4 absolute tolerance cannot.
 - **Not everything is semiring-aware.** The `ReadNN`/AutoNeural read-logits
   network's inference function (`<nn>_auto`) stays linear-only under
   `logSpace`. Neural programs are outside `Corpus.LogSpaceMatchesLinear`'s pool
